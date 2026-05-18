@@ -129,17 +129,20 @@ void drawSettingsSlider(Adafruit_SSD1306* display, int y, int minVal, int maxVal
   display->print(currentVal);
 }
 
-// Get current value from setting entry
+// Get current value from setting entry — width-correct read. Reading 4 bytes
+// through a uint8_t pointer (the old `*((int*)valuePtr)` formulation) caused
+// the 2026-05-18 heap-corruption crash, see System_Settings.h's SettingType
+// enum comment.
 int getSettingCurrentValue(const SettingEntry* entry) {
   if (!entry || !entry->valuePtr) return 0;
-  
+
   switch (entry->type) {
-    case SETTING_INT:
-      return *((int*)entry->valuePtr);
-    case SETTING_BOOL:
-      return *((bool*)entry->valuePtr) ? 1 : 0;
-    default:
-      return 0;
+    case SETTING_INT:  return *((int*)entry->valuePtr);
+    case SETTING_U8:   return (int)*((uint8_t*)entry->valuePtr);
+    case SETTING_U16:  return (int)*((uint16_t*)entry->valuePtr);
+    case SETTING_U32:  return (int)*((uint32_t*)entry->valuePtr);
+    case SETTING_BOOL: return *((bool*)entry->valuePtr) ? 1 : 0;
+    default:           return 0;
   }
 }
 

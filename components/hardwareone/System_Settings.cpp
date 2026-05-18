@@ -1833,6 +1833,16 @@ void applyRegisteredDefaults() {
         case SETTING_INT:
           *((int*)e->valuePtr) = e->intDefault;
           break;
+        case SETTING_U8:
+          // 1-byte write — anything wider would clobber adjacent fields.
+          *((uint8_t*)e->valuePtr) = (uint8_t)e->intDefault;
+          break;
+        case SETTING_U16:
+          *((uint16_t*)e->valuePtr) = (uint16_t)e->intDefault;
+          break;
+        case SETTING_U32:
+          *((uint32_t*)e->valuePtr) = (uint32_t)e->intDefault;
+          break;
         case SETTING_FLOAT:
           *((float*)e->valuePtr) = e->floatDefault;
           break;
@@ -1869,6 +1879,21 @@ size_t readRegisteredSettings(JsonDocument& doc) {
       switch (e->type) {
         case SETTING_INT:
           *((int*)e->valuePtr) = val | e->intDefault;
+          count++;
+          break;
+        case SETTING_U8:
+          // Clamp to uint8 range to guard against on-disk garbage from older
+          // firmware that wrote 4 bytes into a 1-byte field; the clamp
+          // recovers a sane value rather than re-clobbering adjacent fields.
+          *((uint8_t*)e->valuePtr) = (uint8_t)((uint32_t)(val | e->intDefault) & 0xFFu);
+          count++;
+          break;
+        case SETTING_U16:
+          *((uint16_t*)e->valuePtr) = (uint16_t)((uint32_t)(val | e->intDefault) & 0xFFFFu);
+          count++;
+          break;
+        case SETTING_U32:
+          *((uint32_t*)e->valuePtr) = (uint32_t)(val | e->intDefault);
           count++;
           break;
         case SETTING_FLOAT:
@@ -1945,6 +1970,22 @@ size_t writeRegisteredSettings(JsonDocument& doc) {
           target[leaf] = *((int*)e->valuePtr);
           count++;
           break;
+        case SETTING_U8:
+          // Width-correct READ as well — historically read 4 bytes through
+          // a uint8_t pointer, which produced a 4-byte JSON value (the high
+          // 3 bytes being whatever happened to be in the adjacent fields).
+          // That's how the on-disk corruption persisted across reboots.
+          target[leaf] = (int)*((uint8_t*)e->valuePtr);
+          count++;
+          break;
+        case SETTING_U16:
+          target[leaf] = (int)*((uint16_t*)e->valuePtr);
+          count++;
+          break;
+        case SETTING_U32:
+          target[leaf] = (uint32_t)*((uint32_t*)e->valuePtr);
+          count++;
+          break;
         case SETTING_FLOAT:
           target[leaf] = *((float*)e->valuePtr);
           count++;
@@ -1985,6 +2026,15 @@ const char* handleSettingCommand(const SettingEntry* entry, const String& argsIn
       case SETTING_INT:
         snprintf(buf, sizeof(buf), "%s = %d", entry->jsonKey, *((int*)entry->valuePtr));
         break;
+      case SETTING_U8:
+        snprintf(buf, sizeof(buf), "%s = %u", entry->jsonKey, (unsigned)*((uint8_t*)entry->valuePtr));
+        break;
+      case SETTING_U16:
+        snprintf(buf, sizeof(buf), "%s = %u", entry->jsonKey, (unsigned)*((uint16_t*)entry->valuePtr));
+        break;
+      case SETTING_U32:
+        snprintf(buf, sizeof(buf), "%s = %lu", entry->jsonKey, (unsigned long)*((uint32_t*)entry->valuePtr));
+        break;
       case SETTING_FLOAT:
         snprintf(buf, sizeof(buf), "%s = %.3f", entry->jsonKey, *((float*)entry->valuePtr));
         break;
@@ -2006,7 +2056,10 @@ const char* handleSettingCommand(const SettingEntry* entry, const String& argsIn
   
   // Parse and validate based on type
   switch (entry->type) {
-    case SETTING_INT: {
+    case SETTING_INT:
+    case SETTING_U8:
+    case SETTING_U16:
+    case SETTING_U32: {
       int v = atoi(p);
       if (entry->minVal != 0 || entry->maxVal != 0) {
         if (v < entry->minVal || v > entry->maxVal) {
@@ -2015,7 +2068,16 @@ const char* handleSettingCommand(const SettingEntry* entry, const String& argsIn
           return errBuf;
         }
       }
-      *((int*)entry->valuePtr) = v;
+      // Width-correct write — otherwise a uint8_t/uint16_t field would
+      // overflow into adjacent struct members (the bug that caused the
+      // 2026-05-18 heap-corruption / WDT crash on passphrase set).
+      switch (entry->type) {
+        case SETTING_INT: *((int*)entry->valuePtr)      = v;                          break;
+        case SETTING_U8:  *((uint8_t*)entry->valuePtr)  = (uint8_t)(v & 0xFF);        break;
+        case SETTING_U16: *((uint16_t*)entry->valuePtr) = (uint16_t)(v & 0xFFFF);     break;
+        case SETTING_U32: *((uint32_t*)entry->valuePtr) = (uint32_t)v;                break;
+        default: break;  // unreachable — outer switch already filtered
+      }
       if (!gDeferWrites) writeSettingsJson();
       BROADCAST_PRINTF("%s set to %d", entry->jsonKey, v);
       { char vBuf[16]; snprintf(vBuf, sizeof(vBuf), "%d", v); notifySettingChanged(entry->label ? entry->label : entry->jsonKey, vBuf); }

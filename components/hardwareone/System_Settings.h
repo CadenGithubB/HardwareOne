@@ -1002,12 +1002,27 @@ const char* cmd_oledclihistorysize(const String& argsInput);
 // Modular Settings Registry System
 // ============================================================================
 
-// Setting data types
+// Setting data types.
+//
+// SETTING_INT means "the field is an int32_t / int". For fields with smaller
+// widths (uint8_t / uint16_t / uint32_t) use the explicit-width tags below.
+//
+// History: prior to the U8/U16/U32 tags being added (2026-05-18), every
+// integer field was tagged SETTING_INT and the dispatch code did
+// `*((int*)valuePtr) = v` — a 4-byte write through a void*. For a uint8_t
+// field that wrote 3 bytes past the intended field, corrupting whatever
+// followed it in the struct (typically the next setting field — or worse, a
+// String's internal buffer pointer, which crashed at destruct with "free()
+// target pointer is outside heap areas"). The fix is to dispatch on actual
+// width; the explicit-width tags make sure future entries can't regress.
 enum SettingType {
-  SETTING_INT,
-  SETTING_FLOAT,
-  SETTING_BOOL,
-  SETTING_STRING
+  SETTING_INT,      // int / int32_t (4 bytes, signed)
+  SETTING_FLOAT,    // float
+  SETTING_BOOL,     // bool (1 byte)
+  SETTING_STRING,   // Arduino String
+  SETTING_U8,       // uint8_t  (1 byte) — use for fields declared as uint8_t
+  SETTING_U16,      // uint16_t (2 bytes)
+  SETTING_U32       // uint32_t (4 bytes, unsigned)
 };
 
 // Individual setting entry - describes one setting field

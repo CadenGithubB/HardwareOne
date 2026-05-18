@@ -9831,9 +9831,13 @@ static const char* meshesCmd_enable(const String& label) {
       if (gSettings.meshes[i].enabled) {
         return "Mesh is already enabled.";
       }
-      if (gSettings.meshes[i].passphrase.length() == 0) {
-        return "Mesh has no passphrase set. Run 'espnowmeshes setpassphrase' first.";
-      }
+      // Phase 3.x: passphrase is no longer required to enable a mesh.
+      // Reason: the UI exposes "Set passphrase" only on ENABLED meshes, so
+      // requiring a passphrase before enable creates a chicken-and-egg
+      // (user can't reach the passphrase field). A mesh without a passphrase
+      // can still do per-peer encrypted sessions (KEY_EX + Ed25519 + X25519);
+      // it just can't do BROADCAST_AUTH (no group HMAC tag on heartbeats) or
+      // bootstrap KEY_EX-via-shared-secret. Set a passphrase later when ready.
       setSetting(gSettings.meshes[i].enabled, true);
       // Re-stamp fingerprint defensively in case the label was mutated
       // while disabled (rename doesn't refuse renaming disabled slots).
@@ -12017,7 +12021,11 @@ static const SettingEntry espnowSettingEntries[] = {
   { "friendlyName", SETTING_STRING, &gSettings.espnowFriendlyName, 0, 0, "", 0, 0, "Friendly Name", nullptr, false, "identity", "espnowfriendlyname" },
   { "stationary", SETTING_BOOL, &gSettings.espnowStationary, false, 0, nullptr, 0, 1, "Stationary", nullptr, false, "identity", "espnowstationary" },
   { "firstTimeSetup",             SETTING_BOOL,   &gSettings.espnowFirstTimeSetup,       false, 0, nullptr, 0, 1, "First Time Setup", nullptr, false, nullptr, "espnowfirsttimesetup" },
-  { "meshRole", SETTING_INT, &gSettings.meshRole, 0, 0, nullptr, 0, 2, "Mesh Role", nullptr, false, "mesh", "espnowmeshrole" },
+  // meshRole is uint8_t — must be SETTING_U8. Same for meshTTL/meshPeerMax/
+  // bondRole and the uint16_t buffer-size fields below. Untyped SETTING_INT
+  // would write 4 bytes through a uint8/uint16 pointer, corrupting the
+  // adjacent struct members (root cause of the 2026-05-18 crash).
+  { "meshRole", SETTING_U8, &gSettings.meshRole, 0, 0, nullptr, 0, 2, "Mesh Role", nullptr, false, "mesh", "espnowmeshrole" },
   { "masterMAC", SETTING_STRING, &gSettings.meshMasterMAC, 0, 0, "", 0, 0, "Master MAC", nullptr, false, "mesh", "espnowmeshmaster" },
   { "backupMAC", SETTING_STRING, &gSettings.meshBackupMAC, 0, 0, "", 0, 0, "Backup MAC", nullptr, false, "mesh", "espnowmeshbackup" },
   { "backupEnabled", SETTING_BOOL, &gSettings.meshBackupEnabled, false, 0, nullptr, 0, 1, "Backup Master Enabled", nullptr, false, "mesh", "espnowbackupenable" },
@@ -12027,13 +12035,13 @@ static const SettingEntry espnowSettingEntries[] = {
   { "topoDiscoveryInterval", SETTING_INT, &gSettings.meshTopoDiscoveryInterval, 0, 0, nullptr, 0, 300000, "Topo Discovery Interval (ms)", nullptr, false, "mesh", "espnowtopodiscoveryinterval" },
   { "topoAutoRefresh", SETTING_BOOL, &gSettings.meshTopoAutoRefresh, false, 0, nullptr, 0, 1, "Auto Refresh Topology", nullptr, false, "mesh", "espnowtopoautorefresh" },
   { "heartbeatBroadcast", SETTING_BOOL, &gSettings.meshHeartbeatBroadcast, true, 0, nullptr, 0, 1, "Heartbeat Broadcast", nullptr, false, "mesh", "espnowheartbeatbroadcast" },
-  { "meshTTL", SETTING_INT, &gSettings.meshTTL, 3, 0, nullptr, 1, 10, "TTL", nullptr, false, "mesh", "espnowmeshttl" },
+  { "meshTTL", SETTING_U8, &gSettings.meshTTL, 3, 0, nullptr, 1, 10, "TTL", nullptr, false, "mesh", "espnowmeshttl" },
   { "meshAdaptiveTTL", SETTING_BOOL, &gSettings.meshAdaptiveTTL, false, 0, nullptr, 0, 1, "Adaptive TTL", nullptr, false, "mesh", "espnowmeshadaptivettl" },
-  { "meshPeerMax", SETTING_INT, &gSettings.meshPeerMax, 8, 0, nullptr, 1, 16, "Max Peer Slots (reboot)", nullptr, false, "mesh", "espnowmeshpeermax" },
-  { "sensorBroadcastIntervalMs", SETTING_INT, &gSettings.sensorBroadcastIntervalMs, 1000, 0, nullptr, 100, 10000, "Sensor Broadcast Interval (ms)", nullptr, false, "mesh", "espnowsensorbroadcastinterval" },
+  { "meshPeerMax", SETTING_U8, &gSettings.meshPeerMax, 8, 0, nullptr, 1, 16, "Max Peer Slots (reboot)", nullptr, false, "mesh", "espnowmeshpeermax" },
+  { "sensorBroadcastIntervalMs", SETTING_U16, &gSettings.sensorBroadcastIntervalMs, 1000, 0, nullptr, 100, 10000, "Sensor Broadcast Interval (ms)", nullptr, false, "mesh", "espnowsensorbroadcastinterval" },
 #if ENABLE_BONDED_MODE
   { "bondModeEnabled", SETTING_BOOL, &gSettings.bondModeEnabled, false, 0, nullptr, 0, 1, "Bond Mode Enabled", nullptr, false, "bond", "espnowbondmodeenabled" },
-  { "bondRole", SETTING_INT, &gSettings.bondRole, 0, 0, nullptr, 0, 1, "Bond Role", nullptr, false, "bond", "bondrole" },
+  { "bondRole", SETTING_U8, &gSettings.bondRole, 0, 0, nullptr, 0, 1, "Bond Role", nullptr, false, "bond", "bondrole" },
   { "bondPeerMac", SETTING_STRING, &gSettings.bondPeerMac, 0, 0, "", 0, 0, "Bond Peer MAC", nullptr, false, "bond", "espnowbondpeermac" },
   { "bondStreamThermal", SETTING_BOOL, &gSettings.bondStreamThermal, false, 0, nullptr, 0, 1, "Auto-stream Thermal", nullptr, false, "bond", "bondstreamthermal" },
   { "bondStreamTof", SETTING_BOOL, &gSettings.bondStreamTof, false, 0, nullptr, 0, 1, "Auto-stream ToF", nullptr, false, "bond", "bondstreamtof" },
@@ -12044,11 +12052,14 @@ static const SettingEntry espnowSettingEntries[] = {
   { "bondStreamRtc", SETTING_BOOL, &gSettings.bondStreamRtc, false, 0, nullptr, 0, 1, "Auto-stream RTC", nullptr, false, "bond", "bondstreamrtc" },
   { "bondStreamPresence", SETTING_BOOL, &gSettings.bondStreamPresence, false, 0, nullptr, 0, 1, "Auto-stream Presence", nullptr, false, "bond", "bondstreampresence" },
 #endif
-  // Buffer size settings (requires reinit to take effect)
-  { "txQueueSize", SETTING_INT, (int*)&gSettings.espnowTxQueueSize, 8, 0, nullptr, 1, 16, "TX Queue Size", nullptr, false, "buffers", "espnowtxqueuesize" },
-  { "rxBufferSize", SETTING_INT, (int*)&gSettings.espnowRxBufferSize, 256, 0, nullptr, 64, 512, "RX Buffer Size", nullptr, false, "buffers", "espnowrxbuffersize" },
-  { "chunkSize", SETTING_INT, (int*)&gSettings.espnowChunkSize, 200, 0, nullptr, 100, 212, "Chunk Size", nullptr, false, "buffers", "espnowchunksize" },
-  { "fileChunkSize", SETTING_INT, (int*)&gSettings.espnowFileChunkSize, 216, 0, nullptr, 100, 216, "File Chunk Size", nullptr, false, "buffers", "espnowfilechunksize" }
+  // Buffer size settings (requires reinit to take effect). All four fields
+  // are uint16_t — drop the explicit (int*) casts and use SETTING_U16 so the
+  // dispatch writes the correct 2 bytes instead of overflowing into the
+  // adjacent uint16.
+  { "txQueueSize", SETTING_U16, &gSettings.espnowTxQueueSize, 8, 0, nullptr, 1, 16, "TX Queue Size", nullptr, false, "buffers", "espnowtxqueuesize" },
+  { "rxBufferSize", SETTING_U16, &gSettings.espnowRxBufferSize, 256, 0, nullptr, 64, 512, "RX Buffer Size", nullptr, false, "buffers", "espnowrxbuffersize" },
+  { "chunkSize", SETTING_U16, &gSettings.espnowChunkSize, 200, 0, nullptr, 100, 212, "Chunk Size", nullptr, false, "buffers", "espnowchunksize" },
+  { "fileChunkSize", SETTING_U16, &gSettings.espnowFileChunkSize, 216, 0, nullptr, 100, 216, "File Chunk Size", nullptr, false, "buffers", "espnowfilechunksize" }
 };
 
 // Helper: find an ESP-NOW setting entry by jsonKey
