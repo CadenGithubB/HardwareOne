@@ -8104,7 +8104,10 @@ const char* cmd_espnow_subs(const String& argsInput) {
   char* p   = getDebugBuffer();
   size_t cap = 1024;
   int written = snprintf(p, cap,
-                         "Peer Subscriptions (bitmap = events the peer wants FROM US):\n"
+                         "Peer Subscriptions (bitmap = what each peer wants FROM US):\n"
+                         "  Each peer's row shows the mask THEY asked us to send THEM.\n"
+                         "  Default 0xFFFFFFFF = all events. Narrowed via inbound SUBSCRIBE_UPDATE.\n"
+                         "  To change a peer's row, run 'espnowrequestevents' on that peer (not here).\n"
                          "  bits: HB=0x01 SENSOR=0x02 TOPO=0x04 BOND_HB=0x08 WORKER=0x10 META=0x20 TIME=0x40\n");
   if (written < 0) return p;
   uint8_t slots = peerIdentitySlotCount();
@@ -8126,22 +8129,31 @@ const char* cmd_espnow_subs(const String& argsInput) {
   return p;
 }
 
-// Phase 5 — tell a peer which event categories we want from them. Sends a
-// SUBSCRIBE_UPDATE through the encrypted dispatcher (session if available,
+// Phase 5 — request that a peer send us only events matching <mask>. Sends
+// a SUBSCRIBE_UPDATE through the encrypted dispatcher (session if available,
 // plaintext otherwise). Bitmap is parsed as a 32-bit value (decimal or 0x-hex).
-const char* cmd_espnow_setsubs(const String& argsInput) {
+//
+// Asymmetric semantic: this command mutates the PEER's outbound state, not
+// ours. The skip count appears in the peer's [V4_BROADCAST_GATED] logs, not
+// in ours. Our local PeerIdentity for that peer is unchanged; running
+// `espnowsubs` here will not show the new mask — that's correct.
+const char* cmd_espnow_requestevents(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gEspNow || !gEspNow->initialized) {
     return "Error: ESP-NOW not initialized. Run 'openespnow' first.";
   }
   CommandArgs a(argsInput);
   if (a.count() < 2) {
-    return "Usage: espnowsetsubs <name_or_mac> <bitmask>\n"
+    return "Usage: espnowrequestevents <name_or_mac> <bitmask>\n"
+           "  Request that <peer> send US only events matching <bitmask>.\n"
+           "  Direction: this command updates state ON THE PEER, not locally.\n"
            "  bits: HB=0x01 SENSOR=0x02 TOPO=0x04 BOND_HB=0x08 WORKER=0x10 META=0x20 TIME=0x40\n"
            "  Examples:\n"
-           "    espnowsetsubs deviceA 0x01       # only heartbeats\n"
-           "    espnowsetsubs deviceA 0xFFFFFFFF # everything (default)\n"
-           "    espnowsetsubs deviceA 0          # nothing — peer goes quiet";
+           "    espnowrequestevents deviceA 0x01       # only heartbeats from deviceA\n"
+           "    espnowrequestevents deviceA 0xFFFFFFFF # everything (default)\n"
+           "    espnowrequestevents deviceA 0          # nothing — deviceA goes quiet to us\n"
+           "  Verify: run 'espnowsubs' on the PEER; its row for our MAC should\n"
+           "  show the new mask. Skips appear in the PEER's heartbeat broadcast log.";
   }
   uint8_t mac[6];
   if (!resolveDeviceNameOrMac(a.arg(0), mac) && !parseMacAddress(a.arg(0), mac)) {
@@ -8173,11 +8185,13 @@ const char* cmd_espnow_setsubs(const String& argsInput) {
   }
   if (!ensureDebugBuffer()) return "OK: SUBSCRIBE_UPDATE sent.";
   snprintf(getDebugBuffer(), 1024,
-           "SUBSCRIBE_UPDATE sent to %02X:%02X:%02X:%02X:%02X:%02X (msgId=%lu, mask=0x%08lX). "
-           "Peer applies on receipt; verify with their 'espnowsubs' or watch our logs for "
-           "broadcast skip rates.",
+           "Asked %02X:%02X:%02X:%02X:%02X:%02X to send us only mask=0x%08lX "
+           "(msgId=%lu). State updates ON THE PEER, not here — run 'espnowsubs' on "
+           "the peer to verify (its row for our MAC should show the new mask). "
+           "Skip counts will appear in the PEER's [V4_BROADCAST_GATED] logs, "
+           "NOT in ours.",
            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
-           (unsigned long)msgId, (unsigned long)mask);
+           (unsigned long)mask, (unsigned long)msgId);
   return getDebugBuffer();
 }
 
@@ -11865,7 +11879,7 @@ extern const CommandEntry espNowCommands[] = {
   { "espnowsessionsend", "Send AEAD-wrapped TEXT through active session (Phase 3.5a demo).", true, cmd_espnow_sessionsend, "Usage: espnowsessionsend <mac> <message>" },
   { "espnowrekey", "Force immediate SESSION_REKEY for a peer (Phase 3.6 — manual trigger).", true, cmd_espnow_rekey, "Usage: espnowrekey <mac>" },
   { "espnowsubs", "Phase 5: list peers + their event-subscription bitmaps (what they want from us).", false, cmd_espnow_subs },
-  { "espnowsetsubs", "Phase 5: tell a peer which event categories we want (bitmask).", true, cmd_espnow_setsubs, "Usage: espnowsetsubs <mac> <bitmask>" },
+  { "espnowrequestevents", "Phase 5: ask a peer to send US only events in <bitmask>. Updates state ON THE PEER.", true, cmd_espnow_requestevents, "Usage: espnowrequestevents <mac> <bitmask>" },
 
   // ---- ESP-NOW Initialization & Pairing ----
   { "openespnow", "Initialize ESP-NOW communication.", true, cmd_espnow_init },
