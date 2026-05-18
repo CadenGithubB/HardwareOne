@@ -151,6 +151,7 @@ set(hardwareone_srcs
         System_Debug.cpp
         System_ESPNow.cpp
         System_ESPNow_Crypto.cpp
+        System_ESPNow_Files.cpp
         System_ESPNow_Handlers_Crypto.cpp
         System_ESPNow_Identity.cpp
         System_ESPNow_MeshKeys.cpp
