@@ -83,6 +83,15 @@ void espnowIdentityFormatPubHex(const uint8_t pub[32], char* out, size_t outLen)
 // successfully (3.3); cleared by espnowforget.
 // ============================================================================
 
+// Phase 5 — event subscription registry. subscribedEvents is a bitmask of
+// EspNowEventCategory bits (see below). When THIS device wants to broadcast
+// e.g. HEARTBEAT, it iterates paired peers and skips any whose bitmask omits
+// the HEARTBEAT bit. The peer told us their preferences via SUBSCRIBE_UPDATE
+// (ESPNOW_V4_TYPE_SUBSCRIBE_UPDATE = 70).
+//
+// Default for newly-paired peers OR peers loaded from a version-1 identity.json
+// (pre-Phase-5) is 0xFFFFFFFF — subscribe to everything. Phase 5 only matters
+// once a peer sends an explicit SUBSCRIBE_UPDATE narrowing the set.
 struct PeerIdentity {
   uint8_t  mac[6];
   uint8_t  meshId;            // mesh slot index (0..N_MESHES-1)
@@ -90,7 +99,24 @@ struct PeerIdentity {
   uint8_t  longTermPub[32];   // peer's Ed25519 public key
   uint32_t bondedAtSec;       // Unix epoch when first paired
   uint32_t lastSeenSec;       // updated by heartbeats / app frames (3.4+)
+  uint32_t subscribedEvents;  // Phase 5 — events this peer wants from US
   bool     valid;             // false = slot is empty
+};
+
+// Phase 5 — event category bitmask values. Stored in PeerIdentity.subscribedEvents
+// and carried on the wire in V4PayloadSubscribe.requestedEvents. New categories
+// must be added at the END to keep the bit assignment stable across firmware
+// versions (peers will exchange bitmaps blind, so reordering is breaking).
+enum EspNowEventCategory : uint32_t {
+  ESPNOW_EVT_HEARTBEAT       = 1u << 0,   // V4 heartbeat (type 20)
+  ESPNOW_EVT_SENSOR          = 1u << 1,   // sensor broadcast / data (80, 81)
+  ESPNOW_EVT_TOPOLOGY        = 1u << 2,   // topo req/start/peer (22-24)
+  ESPNOW_EVT_BOND_HEARTBEAT  = 1u << 3,   // bond heartbeat (90)
+  ESPNOW_EVT_WORKER_STATUS   = 1u << 4,   // worker status broadcast (83)
+  ESPNOW_EVT_METADATA_PUSH   = 1u << 5,   // metadata push (35)
+  ESPNOW_EVT_TIME_SYNC       = 1u << 6,   // time sync (25)
+  // Add new categories here; preserve existing bit values.
+  ESPNOW_EVT_ALL             = 0xFFFFFFFFu  // default for legacy / pre-Phase-5 peers
 };
 
 // Lookup by MAC. Returns nullptr if no match. Lifetime is global (slot pointer
@@ -107,6 +133,18 @@ bool peerIdentityPersist(const uint8_t mac[6], uint8_t meshId,
 // persist to disk on every call — caller controls when to flush (typically
 // on bond/disconnect, not per heartbeat).
 void peerIdentityNoteSeen(const uint8_t mac[6], uint32_t nowSec);
+
+// Phase 5 — record the peer's subscription bitmap and persist immediately.
+// Called from the SUBSCRIBE_UPDATE handler. Returns false if the peer isn't
+// known (no PeerIdentity slot — drop silently from the handler) or if
+// persistence fails.
+bool peerIdentitySetSubscriptions(const uint8_t mac[6], uint32_t subscribedEvents);
+
+// Phase 5 — gating helper for the broadcast paths. Returns true if `category`
+// is present in the peer's subscribedEvents bitmap. Unknown peers (no
+// PeerIdentity) get the all-1s default — backward compat: a peer that never
+// sent SUBSCRIBE_UPDATE receives everything.
+bool peerIdentityWantsEvent(const uint8_t mac[6], uint32_t category);
 
 // Forget a paired peer. Removes the on-disk file AND clears the in-memory
 // slot. Idempotent — calling on a non-existent peer just returns true.

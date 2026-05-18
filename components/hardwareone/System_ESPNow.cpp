@@ -224,6 +224,12 @@ bool v4_send_frame(const uint8_t* dst, uint8_t type, uint16_t flags, uint32_t ms
 
 // Forward declarations for V3 helper functions (non-static for external linkage)
 bool v4_broadcast(uint8_t type, uint16_t flags, uint32_t msgId, const uint8_t* payload, uint16_t payloadLen, uint8_t ttl);
+// Phase 5 — subscription-aware broadcast: skips peers whose subscribedEvents
+// bitmap doesn't include `category`. See System_ESPNow_Identity.h for the
+// EspNowEventCategory enum.
+bool v4_broadcast_category(uint8_t type, uint16_t flags, uint32_t msgId,
+                           const uint8_t* payload, uint16_t payloadLen, uint8_t ttl,
+                           uint32_t category);
 bool v4_send_chunked(const uint8_t* dst, uint8_t type, uint16_t flags, uint32_t msgId, const uint8_t* payload, uint16_t payloadLen, uint8_t ttl);
 // Phase 3.5 A1+A2 — encrypted-if-fits-else-plaintext-chunked dispatcher for
 // CMD_RESP and STREAM senders. Defined after v4_send_chunked (which it
@@ -1686,7 +1692,68 @@ bool v4_broadcast(uint8_t type, uint16_t flags, uint32_t msgId, const uint8_t* p
   
   DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_BROADCAST] Sent to %d peers (msgId=%lu type=%u tracked=%s)",
          sentCount, (unsigned long)msgId, type, tracker ? "YES" : "NO");
-  
+
+  return anySuccess;
+}
+
+// Phase 5 — broadcast variant that respects per-peer subscription bitmaps.
+// Functionally identical to v4_broadcast except a peer is skipped if its
+// PeerIdentity.subscribedEvents bitmap doesn't include `category`. Unknown
+// peers (no PeerIdentity slot) default to "subscribed to everything", so
+// pre-Phase-5 peers and freshly-paired peers continue to receive every
+// broadcast until they explicitly narrow via SUBSCRIBE_UPDATE.
+//
+// Designed as an additive wrapper so existing v4_broadcast callsites stay
+// untouched. As callers migrate to category-aware broadcasts, traffic to
+// uninterested peers drops out.
+bool v4_broadcast_category(uint8_t type, uint16_t flags, uint32_t msgId,
+                           const uint8_t* payload, uint16_t payloadLen, uint8_t ttl,
+                           uint32_t category) {
+  if (!gEspNow || !gEspNow->initialized) return false;
+
+  bool anySuccess = false;
+  int sentCount = 0;
+  int skippedCount = 0;
+  BroadcastTracker* tracker = nullptr;
+
+  if (flags & ESPNOW_V4_FLAG_ACK_REQ) {
+    tracker = broadcast_tracker_alloc();
+    if (tracker) {
+      tracker->msgId = msgId;
+      tracker->startMs = millis();
+      tracker->expectedCount = 0;
+      tracker->receivedCount = 0;
+      tracker->active = true;
+      tracker->reported = false;
+      gBroadcastsTracked++;
+    }
+  }
+
+  uint16_t flagsAuthed = (uint16_t)(flags | ESPNOW_V4_FLAG_BROADCAST_AUTH);
+
+  for (int i = 0; i < gMeshPeerSlots; i++) {
+    if (!gMeshPeers[i].isActive || isSelfMac(gMeshPeers[i].mac)) continue;
+    // Phase 5 gate: peer must want this category.
+    if (!peerIdentityWantsEvent(gMeshPeers[i].mac, category)) {
+      skippedCount++;
+      continue;
+    }
+    bool sent = v4_send_frame(gMeshPeers[i].mac, type, flagsAuthed, msgId,
+                              payload, payloadLen, ttl);
+    if (sent) {
+      anySuccess = true;
+      sentCount++;
+      if (tracker && tracker->expectedCount < BROADCAST_TRACKER_MAX_PEERS) {
+        memcpy(tracker->peerMacs[tracker->expectedCount], gMeshPeers[i].mac, 6);
+        tracker->ackReceived[tracker->expectedCount] = false;
+        tracker->expectedCount++;
+      }
+    }
+  }
+
+  DEBUGF(DEBUG_ESPNOW_ROUTER,
+         "[V4_BROADCAST_GATED] type=%u msgId=%lu category=0x%08lX sent=%d skipped=%d",
+         type, (unsigned long)msgId, (unsigned long)category, sentCount, skippedCount);
   return anySuccess;
 }
 
@@ -2238,7 +2305,10 @@ bool v4_broadcast_sensor_status(RemoteSensorType sensorType, bool enabled) {
   DEBUGF(DEBUG_ESPNOW_MESH, "[V3_BROADCAST_SENSOR_STATUS] Broadcasting msgId=%lu", (unsigned long)msgId);
   DEBUGF(DEBUG_ESPNOW_MESH, "[V3_BROADCAST_SENSOR_STATUS] sensor=%s enabled=%s",
          sensorTypeToString(sensorType), enabled ? "YES" : "NO");
-  bool result = v4_broadcast(ESPNOW_V4_TYPE_SENSOR_STATUS, 0, msgId, (const uint8_t*)&payload, sizeof(payload), 2);
+  // Phase 5: gate on per-peer SENSOR subscription.
+  bool result = v4_broadcast_category(ESPNOW_V4_TYPE_SENSOR_STATUS, 0, msgId,
+                                       (const uint8_t*)&payload, sizeof(payload), 2,
+                                       ESPNOW_EVT_SENSOR);
   DEBUGF(DEBUG_ESPNOW_MESH, "[V3_BROADCAST_SENSOR_STATUS] Result: %s", result ? "SUCCESS" : "FAILED");
   return result;
 }
@@ -2265,7 +2335,9 @@ bool v4_broadcast_sensor_data(RemoteSensorType sensorType, const char* jsonData,
   DEBUGF(DEBUG_ESPNOW_MESH, "[V3_BROADCAST_SENSOR_DATA] sensor=%s jsonLen=%u totalLen=%u",
          sensorTypeToString(sensorType), jsonLen, totalLen);
   DEBUGF(DEBUG_ESPNOW_MESH, "[V3_BROADCAST_SENSOR_DATA] JSON (first 80 chars): %.80s", jsonData);
-  bool result = v4_broadcast(ESPNOW_V4_TYPE_SENSOR_BROADCAST, 0, msgId, buffer, totalLen, 2);
+  // Phase 5: gate on per-peer SENSOR subscription.
+  bool result = v4_broadcast_category(ESPNOW_V4_TYPE_SENSOR_BROADCAST, 0, msgId,
+                                       buffer, totalLen, 2, ESPNOW_EVT_SENSOR);
   DEBUGF(DEBUG_ESPNOW_MESH, "[V3_BROADCAST_SENSOR_DATA] Result: %s", result ? "SUCCESS" : "FAILED");
   return result;
 }
@@ -3212,6 +3284,41 @@ static void v4h_manifest_req(const V4RxCtx& ctx) {
 #endif // ENABLE_BONDED_MODE
 
 // METADATA_REQ — peer asks for our metadata. Defer to task.
+// Phase 5 — SUBSCRIBE_UPDATE handler. Peer is telling us which event
+// categories they want to receive from US. We persist the bitmask into the
+// peer's PeerIdentity slot; broadcast paths gate on it.
+//
+// The opcode is REQ_PAIRED, so by the time we get here the sender has a
+// PeerIdentity (the dispatcher rejected the frame otherwise). We still
+// re-check peerIdentitySetSubscriptions's return value because race-y
+// concurrent espnowforget could remove the slot between dispatch and here.
+static void v4h_subscribe_update(const V4RxCtx& ctx) {
+  if (ctx.payloadLen < sizeof(V4PayloadSubscribe)) {
+    WARN_ESPNOWF("[SUBSCRIBE] payload too short (%u < %u) from %s — dropping",
+                 ctx.payloadLen, (unsigned)sizeof(V4PayloadSubscribe),
+                 MAC_STR(ctx.recv_info->src_addr));
+    return;
+  }
+  V4PayloadSubscribe p;
+  memcpy(&p, ctx.payload, sizeof(p));
+  // Reserved bytes must be zero — defends against future-flag pollution.
+  for (size_t i = 0; i < sizeof(p.reserved); i++) {
+    if (p.reserved[i] != 0) {
+      WARN_ESPNOWF("[SUBSCRIBE] reserved bytes nonzero from %s — dropping",
+                   MAC_STR(ctx.recv_info->src_addr));
+      return;
+    }
+  }
+  if (peerIdentitySetSubscriptions(ctx.recv_info->src_addr, p.requestedEvents)) {
+    INFO_ESPNOWF("[SUBSCRIBE] %s updated subs to 0x%08lX",
+                 MAC_STR(ctx.recv_info->src_addr),
+                 (unsigned long)p.requestedEvents);
+  }
+  // ACK if requested — flag is cleared on the headerCopy in v4_try_handle_incoming
+  // for SESSION_FRAME unwrap path, but plaintext SUBSCRIBE_UPDATE still
+  // triggers the downstream ACK send.
+}
+
 static void v4h_metadata_req(const V4RxCtx& ctx) {
   bool isEncrypted = false;
   if (gEspNow) {
@@ -3485,6 +3592,10 @@ static const V4OpcodeEntry kV4HandlerTable[] = {
   { ESPNOW_V4_TYPE_FILE_START,       V4_OPC_FLAG_REQ_PAIRED,                               v4h_file_start        },
   { ESPNOW_V4_TYPE_FILE_DATA,        V4_OPC_FLAG_REQ_PAIRED,                               v4h_file_data         },
   { ESPNOW_V4_TYPE_FILE_END,         V4_OPC_FLAG_REQ_PAIRED,                               v4h_file_end          },
+  // Phase 5: SUBSCRIBE_UPDATE — peer tells us which event categories they
+  // want from us. REQ_PAIRED so unknown peers can't pollute our broadcast
+  // gating (and to ensure peerIdentitySetSubscriptions finds the slot).
+  { ESPNOW_V4_TYPE_SUBSCRIBE_UPDATE, V4_OPC_FLAG_REQ_PAIRED,                               v4h_subscribe_update  },
 #if ENABLE_BONDED_MODE
   { ESPNOW_V4_TYPE_BOND_HEARTBEAT,   V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE,   v4h_bond_heartbeat    },
   { ESPNOW_V4_TYPE_STREAM_CTRL,      V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE,   v4h_stream_ctrl       },
@@ -6468,8 +6579,12 @@ void processMeshHeartbeats() {
       hb.uptimeSec = now / 1000;
       hb.freeHeap  = (uint32_t)ESP.getFreeHeap();
       strncpy(hb.deviceName, gSettings.espnowDeviceName.c_str(), sizeof(hb.deviceName) - 1);
-      v4_broadcast(ESPNOW_V4_TYPE_HEARTBEAT, ESPNOW_V4_FLAG_ACK_REQ, generateMessageId(),
-                   (const uint8_t*)&hb, (uint16_t)sizeof(hb), 1);
+      // Phase 5: gate on per-peer HEARTBEAT subscription. Peers default to
+      // subscribed-to-all, so this is invisible until a peer opts out.
+      v4_broadcast_category(ESPNOW_V4_TYPE_HEARTBEAT, ESPNOW_V4_FLAG_ACK_REQ,
+                            generateMessageId(),
+                            (const uint8_t*)&hb, (uint16_t)sizeof(hb), 1,
+                            ESPNOW_EVT_HEARTBEAT);
       gEspNow->heartbeatsSent++;
     }
   }
@@ -7977,6 +8092,92 @@ const char* cmd_espnow_rekey(const String& argsInput) {
            "REKEY sent to %02X:%02X:%02X:%02X:%02X:%02X. Symmetric exchange completes "
            "asynchronously — watch for 'SESSION rekeyed' log line.",
            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  return getDebugBuffer();
+}
+
+// Phase 5 — list every paired peer and the subscription bitmap they've told
+// us they want. Values reflect *what events this peer wants from us*, not
+// what we want from them. Read-only.
+const char* cmd_espnow_subs(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+  char* p   = getDebugBuffer();
+  size_t cap = 1024;
+  int written = snprintf(p, cap,
+                         "Peer Subscriptions (bitmap = events the peer wants FROM US):\n"
+                         "  bits: HB=0x01 SENSOR=0x02 TOPO=0x04 BOND_HB=0x08 WORKER=0x10 META=0x20 TIME=0x40\n");
+  if (written < 0) return p;
+  uint8_t slots = peerIdentitySlotCount();
+  bool any = false;
+  for (uint8_t i = 0; i < slots; i++) {
+    const PeerIdentity* pid = peerIdentityAt(i);
+    if (!pid) continue;
+    any = true;
+    int n = snprintf(p + written, cap - written,
+                     "  %02X:%02X:%02X:%02X:%02X:%02X meshId=%u subs=0x%08lX\n",
+                     pid->mac[0], pid->mac[1], pid->mac[2],
+                     pid->mac[3], pid->mac[4], pid->mac[5],
+                     (unsigned)pid->meshId,
+                     (unsigned long)pid->subscribedEvents);
+    if (n < 0 || (size_t)n >= cap - written) break;
+    written += n;
+  }
+  if (!any) snprintf(p + written, cap - written, "  (no paired peers)\n");
+  return p;
+}
+
+// Phase 5 — tell a peer which event categories we want from them. Sends a
+// SUBSCRIBE_UPDATE through the encrypted dispatcher (session if available,
+// plaintext otherwise). Bitmap is parsed as a 32-bit value (decimal or 0x-hex).
+const char* cmd_espnow_setsubs(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!gEspNow || !gEspNow->initialized) {
+    return "Error: ESP-NOW not initialized. Run 'openespnow' first.";
+  }
+  CommandArgs a(argsInput);
+  if (a.count() < 2) {
+    return "Usage: espnowsetsubs <name_or_mac> <bitmask>\n"
+           "  bits: HB=0x01 SENSOR=0x02 TOPO=0x04 BOND_HB=0x08 WORKER=0x10 META=0x20 TIME=0x40\n"
+           "  Examples:\n"
+           "    espnowsetsubs deviceA 0x01       # only heartbeats\n"
+           "    espnowsetsubs deviceA 0xFFFFFFFF # everything (default)\n"
+           "    espnowsetsubs deviceA 0          # nothing — peer goes quiet";
+  }
+  uint8_t mac[6];
+  if (!resolveDeviceNameOrMac(a.arg(0), mac) && !parseMacAddress(a.arg(0), mac)) {
+    return "Error: not a paired device name and not a valid MAC.";
+  }
+  uint32_t mask = 0;
+  String maskStr = a.arg(1);
+  maskStr.trim();
+  if (maskStr.startsWith("0x") || maskStr.startsWith("0X")) {
+    mask = (uint32_t)strtoul(maskStr.c_str() + 2, nullptr, 16);
+  } else {
+    mask = (uint32_t)strtoul(maskStr.c_str(), nullptr, 10);
+  }
+
+  V4PayloadSubscribe p{};
+  p.requestedEvents = mask;
+  // reserved[] zeroed by aggregate init
+
+  uint32_t msgId = generateMessageId();
+  if (!v4_send_payload_smart(mac, ESPNOW_V4_TYPE_SUBSCRIBE_UPDATE,
+                              ESPNOW_V4_FLAG_ACK_REQ, msgId,
+                              reinterpret_cast<const uint8_t*>(&p), sizeof(p), 1)) {
+    if (!ensureDebugBuffer()) return "Error: SUBSCRIBE_UPDATE send failed.";
+    snprintf(getDebugBuffer(), 1024,
+             "Error: SUBSCRIBE_UPDATE send failed for %02X:%02X:%02X:%02X:%02X:%02X "
+             "(peer may not be paired or session not ready).",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    return getDebugBuffer();
+  }
+  if (!ensureDebugBuffer()) return "OK: SUBSCRIBE_UPDATE sent.";
+  snprintf(getDebugBuffer(), 1024,
+           "SUBSCRIBE_UPDATE sent to %02X:%02X:%02X:%02X:%02X:%02X (msgId=%lu, mask=0x%08lX). "
+           "Peer applies on receipt; verify with their 'espnowsubs' or watch our logs for "
+           "broadcast skip rates.",
+           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+           (unsigned long)msgId, (unsigned long)mask);
   return getDebugBuffer();
 }
 
@@ -11663,6 +11864,8 @@ extern const CommandEntry espNowCommands[] = {
   { "espnowsessions", "Show in-RAM session state (peer, sessionId, dir, age, counters).", false, cmd_espnow_sessions },
   { "espnowsessionsend", "Send AEAD-wrapped TEXT through active session (Phase 3.5a demo).", true, cmd_espnow_sessionsend, "Usage: espnowsessionsend <mac> <message>" },
   { "espnowrekey", "Force immediate SESSION_REKEY for a peer (Phase 3.6 — manual trigger).", true, cmd_espnow_rekey, "Usage: espnowrekey <mac>" },
+  { "espnowsubs", "Phase 5: list peers + their event-subscription bitmaps (what they want from us).", false, cmd_espnow_subs },
+  { "espnowsetsubs", "Phase 5: tell a peer which event categories we want (bitmask).", true, cmd_espnow_setsubs, "Usage: espnowsetsubs <mac> <bitmask>" },
 
   // ---- ESP-NOW Initialization & Pairing ----
   { "openespnow", "Initialize ESP-NOW communication.", true, cmd_espnow_init },
