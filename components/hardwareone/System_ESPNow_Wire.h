@@ -104,8 +104,9 @@ enum EspNowV4Type : uint8_t {
   ESPNOW_V4_TYPE_FILE_END        = 62,
   // 63–65 reserved (FILE_ACK, FILE_PROGRESS, FILE_CANCEL — Phase 4)
 
-  // --- Events (70–79) — Phase 5 reserved ---
-  // 70=SUBSCRIBE, 71=UNSUBSCRIBE, 72=EVENT, 73=SUB_LIST_REQ, 74=SUB_LIST_REPLY
+  // --- Events (70–79) — Phase 5 ---
+  ESPNOW_V4_TYPE_SUBSCRIBE_UPDATE = 70,  // sender → receiver: "send me only these event categories"
+  // 71=UNSUBSCRIBE_ALL (future), 72=EVENT_PUSH (future), 73=SUB_LIST_REQ, 74=SUB_LIST_REPLY
 
   // --- Sensors (80–89) ---
   ESPNOW_V4_TYPE_SENSOR_BROADCAST= 80,
@@ -439,6 +440,25 @@ struct __attribute__((packed)) V4PayloadSessionRekey {
 static_assert(sizeof(V4PayloadSessionRekey) == 130, "V4PayloadSessionRekey layout");
 static_assert(sizeof(V4PayloadSessionRekey) <= ESPNOW_V4_MAX_PLAINTEXT,
               "REKEY must fit a SESSION_FRAME budget; rekey messages are sent inside the existing session");
+
+// ---- Phase 5 — event subscription registry (opcode 70) -------------------
+//
+// Sender tells receiver "these are the event categories I want from you".
+// Receiver stores the bitmap in its PeerIdentity-for-sender slot and gates
+// outbound broadcasts on it. Default (no SUBSCRIBE_UPDATE yet received) is
+// "send everything", so this opcode only ever narrows traffic — pre-Phase-5
+// peers stay fully functional.
+//
+// Sent as a SESSION_FRAME if the session is available (preferred — narrows
+// who can spoof subscription changes), otherwise plaintext. Receiver must
+// confirm sender has a known PeerIdentity before applying.
+struct __attribute__((packed)) V4PayloadSubscribe {
+  uint32_t requestedEvents;  // bitmask of EspNowEventCategory bits
+  uint8_t  reserved[12];     // reserved for future flags / scope hints; must be 0
+};
+static_assert(sizeof(V4PayloadSubscribe) == 16, "V4PayloadSubscribe layout");
+static_assert(sizeof(V4PayloadSubscribe) <= ESPNOW_V4_MAX_PLAINTEXT,
+              "SUBSCRIBE_UPDATE must fit a SESSION_FRAME budget");
 
 // File transfer payloads
 struct __attribute__((packed)) V4PayloadFileStart {

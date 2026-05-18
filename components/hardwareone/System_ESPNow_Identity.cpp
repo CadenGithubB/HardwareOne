@@ -292,7 +292,12 @@ constexpr uint8_t kPeerSlots = 16;
 PeerIdentity gPeerIdentities[kPeerSlots] = {};
 
 constexpr const char* kPeersDir = "/system/espnow/peers";
-constexpr uint8_t  kPeerFileVersion = 1;
+// File schema versions:
+//   1 — initial (Phase 3.2). No subscribedEvents field.
+//   2 — Phase 5: added subscribedEvents (uint32 bitmask). v1 files are
+//       upgraded on load (subscribedEvents defaults to ALL = 0xFFFFFFFF);
+//       the next write rewrites them as v2.
+constexpr uint8_t  kPeerFileVersion = 2;
 
 // Format MAC as 12-char uppercase hex without separators, matching the
 // existing directory convention at /system/espnow/peers/AABBCCDDEEFF/.
@@ -382,6 +387,7 @@ bool writePeerIdentityFile(const PeerIdentity& p) {
   doc["longTermPubEd25519_hex"]   = String(pubHex);
   doc["bondedAtSec"]              = p.bondedAtSec;
   doc["lastSeenSec"]              = p.lastSeenSec;
+  doc["subscribedEvents"]         = p.subscribedEvents;  // Phase 5
 
   FsLockGuard fsGuard("espnow.peer_identity_write");
   File f = VFS::openGuarded(tmp, "w",
@@ -417,8 +423,10 @@ bool readPeerIdentityFile(const char* path, PeerIdentity& out) {
   f.close();
   if (jerr) return false;
 
+  // Phase 5: accept v1 (no subscribedEvents) and v2 (with). Anything else
+  // is unknown / future — reject so we don't silently mis-parse.
   uint8_t ver = doc["version"] | (uint8_t)0;
-  if (ver != kPeerFileVersion) return false;
+  if (ver != 1 && ver != kPeerFileVersion) return false;
 
   const char* macStr = doc["mac"] | (const char*)nullptr;
   if (!macStr) return false;
@@ -434,6 +442,9 @@ bool readPeerIdentityFile(const char* path, PeerIdentity& out) {
   out.meshId      = doc["meshId"] | (uint8_t)0;
   out.bondedAtSec = doc["bondedAtSec"] | (uint32_t)0;
   out.lastSeenSec = doc["lastSeenSec"] | (uint32_t)0;
+  // Phase 5: v1 files don't carry subscribedEvents — default to ALL so they
+  // keep receiving every broadcast until they opt out via SUBSCRIBE_UPDATE.
+  out.subscribedEvents = doc["subscribedEvents"] | (uint32_t)ESPNOW_EVT_ALL;
 
   const char* pubHex = doc["longTermPubEd25519_hex"] | (const char*)nullptr;
   if (!pubHex || strlen(pubHex) != 64) return false;
@@ -459,6 +470,7 @@ bool peerIdentityPersist(const uint8_t mac[6], uint8_t meshId,
     return false;
   }
   PeerIdentity& p = gPeerIdentities[idx];
+  bool isNewPeer = !p.valid;
   memcpy(p.mac, mac, 6);
   p.meshId       = meshId;
   memcpy(p.longTermPub, pub, 32);
@@ -467,6 +479,10 @@ bool peerIdentityPersist(const uint8_t mac[6], uint8_t meshId,
   if (!p.valid || p.bondedAtSec == 0) p.bondedAtSec = bondedAtSec;
   time_t now = time(nullptr);
   p.lastSeenSec = (now > 0) ? (uint32_t)now : 0;
+  // Phase 5: new peers default to ALL events. Existing peers' subscription
+  // bitmap is preserved across re-pair (we don't want a KEY_EX redo to wipe
+  // an explicit subscribe-narrowed bitmap).
+  if (isNewPeer) p.subscribedEvents = ESPNOW_EVT_ALL;
   p.valid = true;
 
   if (!writePeerIdentityFile(p)) {
@@ -483,6 +499,45 @@ void peerIdentityNoteSeen(const uint8_t mac[6], uint32_t nowSec) {
   int idx = findSlotByMac(mac);
   if (idx < 0) return;
   gPeerIdentities[idx].lastSeenSec = nowSec;
+}
+
+bool peerIdentitySetSubscriptions(const uint8_t mac[6], uint32_t subscribedEvents) {
+  int idx = findSlotByMac(mac);
+  if (idx < 0) {
+    DEBUG_ESPNOWF("peer subscriptions: ignoring SUBSCRIBE_UPDATE from unknown peer "
+                  "%02X:%02X:%02X:%02X:%02X:%02X",
+                  mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    return false;
+  }
+  uint32_t prev = gPeerIdentities[idx].subscribedEvents;
+  if (prev == subscribedEvents) {
+    DEBUG_ESPNOWF("peer subscriptions: no change for %02X:%02X:%02X:%02X:%02X:%02X (0x%08lX)",
+                  mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+                  (unsigned long)subscribedEvents);
+    return true;  // no-op success
+  }
+  gPeerIdentities[idx].subscribedEvents = subscribedEvents;
+  if (!writePeerIdentityFile(gPeerIdentities[idx])) {
+    // Roll back in-memory state so persistence + cache stay consistent.
+    gPeerIdentities[idx].subscribedEvents = prev;
+    ERROR_ESPNOWF("peer subscriptions: persist failed for %02X:%02X:%02X:%02X:%02X:%02X",
+                  mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    return false;
+  }
+  INFO_ESPNOWF("peer subscriptions: %02X:%02X:%02X:%02X:%02X:%02X now 0x%08lX (was 0x%08lX)",
+               mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+               (unsigned long)subscribedEvents, (unsigned long)prev);
+  return true;
+}
+
+bool peerIdentityWantsEvent(const uint8_t mac[6], uint32_t category) {
+  int idx = findSlotByMac(mac);
+  if (idx < 0) {
+    // Unknown peer — fall back to legacy behaviour (deliver everything).
+    // Phase 5 only narrows for peers that have explicitly opted in.
+    return true;
+  }
+  return (gPeerIdentities[idx].subscribedEvents & category) != 0;
 }
 
 bool peerIdentityForget(const uint8_t mac[6]) {
