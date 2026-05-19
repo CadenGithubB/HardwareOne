@@ -1545,6 +1545,14 @@ static const SettingEntry debugSettingEntries[] = {
   { "pubsub",     SETTING_BOOL, &gSettings.debugMqttPubsub,     0, 0, nullptr, 0, 1, "Pub/Sub",    nullptr, false, "mqtt", "debugmqttpubsub" },
   { "discovery",  SETTING_BOOL, &gSettings.debugMqttDiscovery,  0, 0, nullptr, 0, 1, "Discovery",  nullptr, false, "mqtt", "debugmqttdiscovery" },
   { "commands",   SETTING_BOOL, &gSettings.debugMqttCommands,   0, 0, nullptr, 0, 1, "Commands",   nullptr, false, "mqtt", "debugmqttcommands" },
+  // --- page group: developer-facing toggles for the served web pages ---
+  // webConsole was previously in the output module's "channels" group, which
+  // mislabelled it as a fourth output destination. It's actually just a flag
+  // that controls whether the page's own JS console.log/warn/debug calls are
+  // suppressed via a <script> injection (WebServer_Utils.cpp:515). Default
+  // OFF = suppress; ON = allow normal JS console output. Does NOT route
+  // firmware broadcastOutput anywhere — that's plumbed via MSG_ROUTE_*.
+  { "webConsole", SETTING_BOOL, &gSettings.webConsoleDebug,     0, 0, nullptr, 0, 1, "Allow page console.log", nullptr, false, "page", "webconsole" },
   { "logLevel",         SETTING_INT,  &gSettings.logLevel,            3, 0, nullptr, 0, 3, "Log Level",            nullptr, false, nullptr, "loglevel" },
 };
 
@@ -1568,7 +1576,12 @@ static const SettingEntry outputSettingEntries[] = {
   { "serial",     SETTING_BOOL, &gSettings.outSerial,           1, 0, nullptr, 0, 1, "Serial Output",     nullptr, false, "channels", "outserial" },
   { "web",        SETTING_BOOL, &gSettings.outWeb,              1, 0, nullptr, 0, 1, "Web Output",        nullptr, false, "channels", "outweb" },
   { "display",    SETTING_BOOL, &gSettings.outDisplay,          0, 0, nullptr, 0, 1, "Display Output",    nullptr, false, "channels", "outdisplay" },
-  { "webConsole", SETTING_BOOL, &gSettings.webConsoleDebug,     0, 0, nullptr, 0, 1, "Browser Console",   nullptr, false, "channels", "webconsole" },
+  // NOTE: `webConsole` (gSettings.webConsoleDebug) used to live here. It was
+  // mis-categorized as a fourth output channel — but the flag only controls
+  // whether the served HTML page suppresses its own JS console.log calls
+  // (WebServer_Utils.cpp:515). It does NOT route firmware broadcastOutput
+  // anywhere. Moved to the debug module under group "page" with a more
+  // honest label. The CLI command `webconsole 0|1` is unchanged.
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
   { "g2",         SETTING_BOOL, &gSettings.outG2,               0, 0, nullptr, 0, 1, "G2 Glasses Output", nullptr, false, "channels", "outg2" },
 #endif
