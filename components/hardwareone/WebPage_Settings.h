@@ -1067,7 +1067,7 @@ window.sendSequential = function(cmds, onDone, onFail) {
 </div>
 <script>
 (function(){
-  var GL={authentication:'Authentication',http:'HTTP',sse:'SSE',wifi:'WiFi',storage:'Storage','esp-now':'ESP-NOW',bluetooth:'Bluetooth',g2:'G2 Glasses',system:'System',users:'Users',cli:'CLI',commands:'Commands',performance:'Performance',automations:'Automations',sensors:'Sensors',camera:'Camera',microphone:'Microphone',gps:'GPS',rtc:'RTC',presence:'Presence',fmradio:'FM Radio',thermal:'Thermal',imu:'IMU',gamepad:'Gamepad',tof:'ToF',apds:'APDS',maps:'Maps',datetime:'Date / Time',llm:'LLM',espsr:'ESP-SR Speech',memory:'Memory',mqtt:'MQTT',i2c:'i2c',display:'Display',oled:'OLED',logger:'Sensor Data Logger',channels:'Channels',auth:'Auth',boot:'Boot',broker:'Broker',topics:'Topics',publish:'Publish',image:'Image',tuning:'Tuning',storage:'Storage',autoCapture:'Auto Capture',timing:'Timing',orientation:'Orientation',filtering:'Filtering',interpolation:'Interpolation',scale:'Scale',mesh:'Mesh',bond:'Bond',identity:'Identity',buffers:'Buffers',capture:'Capture',lifecycle:'Lifecycle',polling:'Polling',values:'Values'};
+  var GL={authentication:'Authentication',http:'HTTP',sse:'SSE',wifi:'WiFi',storage:'Storage','esp-now':'ESP-NOW',bluetooth:'Bluetooth',g2:'G2 Glasses',system:'System',users:'Users',cli:'CLI',commands:'Commands',performance:'Performance',automations:'Automations',sensors:'Sensors',camera:'Camera',microphone:'Microphone',gps:'GPS',rtc:'RTC',presence:'Presence',fmradio:'FM Radio',thermal:'Thermal',imu:'IMU',gamepad:'Gamepad',tof:'ToF',apds:'APDS',maps:'Maps',datetime:'Date / Time',llm:'LLM',espsr:'ESP-SR Speech',memory:'Memory',mqtt:'MQTT',i2c:'i2c',display:'Display',oled:'OLED',logger:'Sensor Data Logger',channels:'Channels',auth:'Auth',boot:'Boot',broker:'Broker',topics:'Topics',publish:'Publish',image:'Image',tuning:'Tuning',storage:'Storage',autoCapture:'Auto Capture',timing:'Timing',orientation:'Orientation',filtering:'Filtering',interpolation:'Interpolation',scale:'Scale',mesh:'Mesh',bond:'Bond',identity:'Identity',buffers:'Buffers',capture:'Capture',lifecycle:'Lifecycle',polling:'Polling',values:'Values',page:'Page Console'};
   // Hover help for each debug flag. Keyed by the CLI cmdKey so it survives
   // label changes. Missing keys fall back to a generic group-level hint.
   var HELP={
@@ -1238,7 +1238,7 @@ window.sendSequential = function(cmds, onDone, onFail) {
     debugsrtuning:"Logs auto-tune sweeps, confidence threshold updates, and SNR snapshots.",
     debugi2c:"Logs low-level I2C bus transactions: start, address, ack/nack, clock changes.",
     debugmqtt:"Logs MQTT client connection, publish, subscribe, and message delivery.",
-    webconsole:"Adds a floating debug console overlay to the web UI itself. Distinct from the logs shown via this page.",
+    webconsole:"Allow the served web pages to emit normal JavaScript console.log/warn/debug to your browser DevTools. Default OFF mutes those calls (page-side noise only). Does NOT route firmware output to the browser console.",
     loglevel:"Minimum severity that gets printed: Error, Warn, Info, or Debug. Debug is most verbose.",
     memorysampleintervalsec:"How often (in seconds) the memory monitor records a snapshot. Lower = more detail, more CPU."
   };
