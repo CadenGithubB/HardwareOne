@@ -243,16 +243,26 @@ bool sessionWrapFrame(SessionState* s,
                  (unsigned)s->sessionId, sessionStateName(s->state));
     return false;
   }
-  if (!headerInOut || !plaintext || !outCipherWithTag) {
-    WARN_ESPNOWF("session: wrap reject (sessionId=%u) — null arg (hdr=%p pt=%p out=%p)",
+  // `plaintext` is allowed to be NULL when `plaintextLen == 0` — some opcodes
+  // (METADATA_REQ, app-ping HEARTBEAT) have an empty payload; the AEAD seal
+  // still produces a 16-byte authenticator over the AAD, which is what the
+  // receiver verifies. libsodium's chacha20poly1305 ietf_encrypt_detached
+  // explicitly accepts (NULL, 0) for the plaintext input.
+  if (!headerInOut || !outCipherWithTag ||
+      (plaintextLen > 0 && !plaintext)) {
+    WARN_ESPNOWF("session: wrap reject (sessionId=%u) — null arg (hdr=%p pt=%p len=%u out=%p)",
                  (unsigned)s->sessionId,
                  (const void*)headerInOut, (const void*)plaintext,
+                 (unsigned)plaintextLen,
                  (const void*)outCipherWithTag);
     return false;
   }
   if (s->txSeqNext == 0xFFFFFFFFu) {
-    // Refuse to wrap around — caller should rekey via Phase 3.6's REKEY path
-    // (not yet implemented; for now this is just a hard stop).
+    // Refuse to wrap the seq counter around. In practice the Phase 3.6
+    // auto-rekey threshold (txSeq >= 10k, see kRekeyTxFramesThreshold) rotates
+    // keys long before this — a fresh session after REKEY resets txSeqNext to
+    // 0. This is the last-resort hard stop if a session somehow reached seq
+    // exhaustion without rekeying.
     WARN_ESPNOWF("session: wrap reject (sessionId=%u) — txSeqNext exhausted (rekey needed)",
                  (unsigned)s->sessionId);
     return false;
