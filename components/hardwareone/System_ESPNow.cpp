@@ -1686,7 +1686,7 @@ bool v4_broadcast(uint8_t type, uint16_t flags, uint32_t msgId, const uint8_t* p
     }
   }
   
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_BROADCAST] Sent to %d peers (msgId=%lu type=%u tracked=%s)",
+  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_BROADCAST] Sent to %d peers (msgId=%lu type=%u tracked=%s)",
          sentCount, (unsigned long)msgId, type, tracker ? "YES" : "NO");
 
   return anySuccess;
@@ -1771,18 +1771,18 @@ bool v4_send_chunked(const uint8_t* dst, uint8_t type, uint16_t flags, uint32_t 
   uint16_t fragPayloadSize = V4_MAX_FRAGMENT_PAYLOAD;
   uint8_t fragCount = (payloadLen + fragPayloadSize - 1) / fragPayloadSize;
   if (fragCount > V4_FRAG_MAX) {
-    WARN_ESPNOWF("[V3_FRAG_TX] Payload too large: %u bytes requires %u frags (max %u)", 
+    WARN_ESPNOWF("[V4_FRAG_TX] Payload too large: %u bytes requires %u frags (max %u)", 
                  payloadLen, fragCount, V4_FRAG_MAX);
     return false;
   }
   
   char dstMac[18];
   formatMacAddressBuf(dst, dstMac, sizeof(dstMac));
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FRAG_TX] ==============================");
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FRAG_TX] Starting fragmented send to %s", dstMac);
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FRAG_TX] msgId=%lu type=%u payloadLen=%u",
+  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_TX] ==============================");
+  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_TX] Starting fragmented send to %s", dstMac);
+  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_TX] msgId=%lu type=%u payloadLen=%u",
          (unsigned long)msgId, type, payloadLen);
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FRAG_TX] fragCount=%u fragSize=%u", fragCount, fragPayloadSize);
+  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_TX] fragCount=%u fragSize=%u", fragCount, fragPayloadSize);
   
   uint8_t myMac[6];
   esp_wifi_get_mac(WIFI_IF_STA, myMac);
@@ -1795,8 +1795,8 @@ bool v4_send_chunked(const uint8_t* dst, uint8_t type, uint16_t flags, uint32_t 
   for (uint8_t fragIdx = 0; fragIdx < fragCount; fragIdx++) {
     uint16_t fragLen = (offset + fragPayloadSize <= payloadLen) ? fragPayloadSize : (payloadLen - offset);
     
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FRAG_TX] --- Fragment %u/%u ---", fragIdx + 1, fragCount);
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FRAG_TX] offset=%u len=%u", offset, fragLen);
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_TX] --- Fragment %u/%u ---", fragIdx + 1, fragCount);
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_TX] offset=%u len=%u", offset, fragLen);
     
     // Build fragment frame
     uint8_t frame[250];
@@ -1821,50 +1821,50 @@ bool v4_send_chunked(const uint8_t* dst, uint8_t type, uint16_t flags, uint32_t 
     bool fragSent = false;
     for (uint8_t retry = 0; retry < MAX_RETRIES; retry++) {
       if (retry > 0) {
-        DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FRAG_TX] Retry attempt %u/%u for fragment %u",
+        DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_TX] Retry attempt %u/%u for fragment %u",
                retry + 1, MAX_RETRIES, fragIdx + 1);
       }
       // Allocate ACK wait slot
       V4FragAckWait* ackWait = v4_frag_ack_alloc(dst, msgId, fragIdx);
       if (!ackWait) {
-        WARN_ESPNOWF("[V3_FRAG_TX] No ACK slot available for frag %u/%u", fragIdx + 1, fragCount);
-        DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FRAG_TX] Aborting: ACK tracking full");
+        WARN_ESPNOWF("[V4_FRAG_TX] No ACK slot available for frag %u/%u", fragIdx + 1, fragCount);
+        DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_TX] Aborting: ACK tracking full");
         return false;
       }
       
       ackWait->acked = false;
       ackWait->sentMs = millis();
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FRAG_TX] ACK waiter allocated for msgId=%lu fragIdx=%u",
+      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_TX] ACK waiter allocated for msgId=%lu fragIdx=%u",
              (unsigned long)msgId, fragIdx);
       
       // Send fragment
       uint16_t totalLen = sizeof(h) + fragLen;
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FRAG_TX] Calling esp_now_send: totalLen=%u", totalLen);
+      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_TX] Calling esp_now_send: totalLen=%u", totalLen);
       captureEspNowFrame("TX", dst, 0, frame, (int)totalLen);
       esp_err_t result = esp_now_send(dst, frame, totalLen);
       if (result != ESP_OK) {
-        WARN_ESPNOWF("[V3_FRAG_TX] Fragment %u/%u send failed (retry %u): esp_err=%d", 
+        WARN_ESPNOWF("[V4_FRAG_TX] Fragment %u/%u send failed (retry %u): esp_err=%d", 
                      fragIdx + 1, fragCount, retry, result);
         ackWait->active = false;
         uint32_t backoffMs = 50 * (retry + 1);
-        DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FRAG_TX] Backing off %lums before retry", (unsigned long)backoffMs);
+        DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_TX] Backing off %lums before retry", (unsigned long)backoffMs);
         vTaskDelay(pdMS_TO_TICKS(backoffMs));  // Exponential backoff
         continue;
       }
       
       if (gEspNow) { gEspNow->routerMetrics.v4FragTx++; }
       
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FRAG_TX] ✓ Fragment %u/%u sent: %u bytes (offset=%u, retry=%u)",
+      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_TX] ✓ Fragment %u/%u sent: %u bytes (offset=%u, retry=%u)",
              fragIdx + 1, fragCount, fragLen, offset, retry);
       
       // Wait for ACK
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FRAG_TX] Waiting for ACK (timeout=%lums)...",
+      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_TX] Waiting for ACK (timeout=%lums)...",
              (unsigned long)ACK_TIMEOUT_MS);
       uint32_t waitStart = millis();
       while ((millis() - waitStart) < ACK_TIMEOUT_MS) {
         if (ackWait->acked) {
           uint32_t elapsed = millis() - waitStart;
-          DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FRAG_TX] ✓ Fragment %u/%u ACK received after %lums",
+          DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_TX] ✓ Fragment %u/%u ACK received after %lums",
                  fragIdx + 1, fragCount, (unsigned long)elapsed);
           fragSent = true;
           break;
@@ -1879,24 +1879,24 @@ bool v4_send_chunked(const uint8_t* dst, uint8_t type, uint16_t flags, uint32_t 
       }
       
       uint32_t elapsed = millis() - waitStart;
-      WARN_ESPNOWF("[V3_FRAG_TX] ✗ Fragment %u/%u ACK timeout after %lums (retry %u)",
+      WARN_ESPNOWF("[V4_FRAG_TX] ✗ Fragment %u/%u ACK timeout after %lums (retry %u)",
                    fragIdx + 1, fragCount, (unsigned long)elapsed, retry);
     }
     
     if (!fragSent) {
-      WARN_ESPNOWF("[V3_FRAG_TX] FAILED: Fragment %u/%u did not ACK after %u retries",
+      WARN_ESPNOWF("[V4_FRAG_TX] FAILED: Fragment %u/%u did not ACK after %u retries",
                    fragIdx + 1, fragCount, MAX_RETRIES);
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FRAG_TX] Aborting: Only %u/%u fragments succeeded",
+      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_TX] Aborting: Only %u/%u fragments succeeded",
              fragIdx, fragCount);
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FRAG_TX] ==============================");
+      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_TX] ==============================");
       return false;
     }
     
     offset += fragLen;
   }
   
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FRAG_TX] ✓ SUCCESS: All %u fragments sent with ACKs!", fragCount);
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3_FRAG_TX] ==============================");
+  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_TX] ✓ SUCCESS: All %u fragments sent with ACKs!", fragCount);
+  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_TX] ==============================");
   return true;
 }
 
@@ -2124,9 +2124,9 @@ bool v4_send_payload_smart(const uint8_t* dst, uint8_t type, uint16_t flags,
 static bool v4_send_ack(const uint8_t* dst, uint32_t ackFor) {
   char dstMac[18];
   formatMacAddressBuf(dst, dstMac, sizeof(dstMac));
-  DEBUGF(DEBUG_ESPNOW_CORE, "[V3_ACK_TX] Sending ACK to %s for msgId=%lu", dstMac, (unsigned long)ackFor);
+  DEBUGF(DEBUG_ESPNOW_CORE, "[V4_ACK_TX] Sending ACK to %s for msgId=%lu", dstMac, (unsigned long)ackFor);
   bool result = v4_send_frame(dst, ESPNOW_V4_TYPE_ACK, 0, ackFor, nullptr, 0, 1);
-  DEBUGF(DEBUG_ESPNOW_CORE, "[V3_ACK_TX] Result: %s", result ? "SUCCESS" : "FAILED");
+  DEBUGF(DEBUG_ESPNOW_CORE, "[V4_ACK_TX] Result: %s", result ? "SUCCESS" : "FAILED");
   return result;
 }
 
@@ -2134,8 +2134,8 @@ static bool v4_send_ack(const uint8_t* dst, uint32_t ackFor) {
 static bool v4_send_frag_ack(const uint8_t* dst, uint32_t msgId, uint8_t fragIndex, uint8_t fragCount) {
   char dstMac[18];
   formatMacAddressBuf(dst, dstMac, sizeof(dstMac));
-  DEBUGF(DEBUG_ESPNOW_CORE, "[V3_FRAG_ACK_TX] Sending fragment ACK to %s", dstMac);
-  DEBUGF(DEBUG_ESPNOW_CORE, "[V3_FRAG_ACK_TX] msgId=%lu fragIdx=%u fragCnt=%u",
+  DEBUGF(DEBUG_ESPNOW_CORE, "[V4_FRAG_ACK_TX] Sending fragment ACK to %s", dstMac);
+  DEBUGF(DEBUG_ESPNOW_CORE, "[V4_FRAG_ACK_TX] msgId=%lu fragIdx=%u fragCnt=%u",
          (unsigned long)msgId, fragIndex, fragCount);
   
   // Build ACK frame with fragment info in header
@@ -2216,15 +2216,15 @@ static bool v4_send_topo_request(const uint8_t* dst, uint32_t reqId) {
   uint32_t msgId = generateMessageId();
   char dstMac[18];
   formatMacAddressBuf(dst, dstMac, sizeof(dstMac));
-  DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_TX_TOPO_REQ] Sending to %s msgId=%lu reqId=%lu",
+  DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_TX_TOPO_REQ] Sending to %s msgId=%lu reqId=%lu",
          dstMac, (unsigned long)msgId, (unsigned long)reqId);
   bool result = v4_send_frame(dst, ESPNOW_V4_TYPE_TOPO_REQ, 0, msgId, (const uint8_t*)&payload, sizeof(payload), 2);
-  DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_TX_TOPO_REQ] Result: %s", result ? "SUCCESS" : "FAILED");
+  DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_TX_TOPO_REQ] Result: %s", result ? "SUCCESS" : "FAILED");
   return result;
 }
 
 bool v4_broadcast_topo_request(uint32_t reqId) {
-  DEBUGF(DEBUG_ESPNOW_TOPO, "[V3_BROADCAST_TOPO_REQ] Broadcasting reqId=%lu", (unsigned long)reqId);
+  DEBUGF(DEBUG_ESPNOW_TOPO, "[V4_BROADCAST_TOPO_REQ] Broadcasting reqId=%lu", (unsigned long)reqId);
   uint8_t broadcastMac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
   return v4_send_topo_request(broadcastMac, reqId);
 }
@@ -2315,21 +2315,21 @@ bool v4_broadcast_sensor_status(RemoteSensorType sensorType, bool enabled) {
   
   uint32_t msgId = generateMessageId();
   extern const char* sensorTypeToString(RemoteSensorType type);
-  DEBUGF(DEBUG_ESPNOW_MESH, "[V3_BROADCAST_SENSOR_STATUS] Broadcasting msgId=%lu", (unsigned long)msgId);
-  DEBUGF(DEBUG_ESPNOW_MESH, "[V3_BROADCAST_SENSOR_STATUS] sensor=%s enabled=%s",
+  DEBUGF(DEBUG_ESPNOW_MESH, "[V4_BROADCAST_SENSOR_STATUS] Broadcasting msgId=%lu", (unsigned long)msgId);
+  DEBUGF(DEBUG_ESPNOW_MESH, "[V4_BROADCAST_SENSOR_STATUS] sensor=%s enabled=%s",
          sensorTypeToString(sensorType), enabled ? "YES" : "NO");
   // Phase 5: gate on per-peer SENSOR subscription.
   bool result = v4_broadcast_category(ESPNOW_V4_TYPE_SENSOR_STATUS, 0, msgId,
                                        (const uint8_t*)&payload, sizeof(payload), 2,
                                        ESPNOW_EVT_SENSOR);
-  DEBUGF(DEBUG_ESPNOW_MESH, "[V3_BROADCAST_SENSOR_STATUS] Result: %s", result ? "SUCCESS" : "FAILED");
+  DEBUGF(DEBUG_ESPNOW_MESH, "[V4_BROADCAST_SENSOR_STATUS] Result: %s", result ? "SUCCESS" : "FAILED");
   return result;
 }
 
 // Broadcast sensor data to all mesh peers
 bool v4_broadcast_sensor_data(RemoteSensorType sensorType, const char* jsonData, uint16_t jsonLen) {
   if (!jsonData || jsonLen == 0 || jsonLen > 200) {
-    DEBUGF(DEBUG_ESPNOW_MESH, "[V3_BROADCAST_SENSOR_DATA] ERROR: Invalid params (jsonData=%p len=%u)",
+    DEBUGF(DEBUG_ESPNOW_MESH, "[V4_BROADCAST_SENSOR_DATA] ERROR: Invalid params (jsonData=%p len=%u)",
            jsonData, jsonLen);
     return false;
   }
@@ -2344,14 +2344,14 @@ bool v4_broadcast_sensor_data(RemoteSensorType sensorType, const char* jsonData,
   uint16_t totalLen = sizeof(V4PayloadSensorBroadcast) + jsonLen;
   uint32_t msgId = generateMessageId();
   extern const char* sensorTypeToString(RemoteSensorType type);
-  DEBUGF(DEBUG_ESPNOW_MESH, "[V3_BROADCAST_SENSOR_DATA] Broadcasting msgId=%lu", (unsigned long)msgId);
-  DEBUGF(DEBUG_ESPNOW_MESH, "[V3_BROADCAST_SENSOR_DATA] sensor=%s jsonLen=%u totalLen=%u",
+  DEBUGF(DEBUG_ESPNOW_MESH, "[V4_BROADCAST_SENSOR_DATA] Broadcasting msgId=%lu", (unsigned long)msgId);
+  DEBUGF(DEBUG_ESPNOW_MESH, "[V4_BROADCAST_SENSOR_DATA] sensor=%s jsonLen=%u totalLen=%u",
          sensorTypeToString(sensorType), jsonLen, totalLen);
-  DEBUGF(DEBUG_ESPNOW_MESH, "[V3_BROADCAST_SENSOR_DATA] JSON (first 80 chars): %.80s", jsonData);
+  DEBUGF(DEBUG_ESPNOW_MESH, "[V4_BROADCAST_SENSOR_DATA] JSON (first 80 chars): %.80s", jsonData);
   // Phase 5: gate on per-peer SENSOR subscription.
   bool result = v4_broadcast_category(ESPNOW_V4_TYPE_SENSOR_BROADCAST, 0, msgId,
                                        buffer, totalLen, 2, ESPNOW_EVT_SENSOR);
-  DEBUGF(DEBUG_ESPNOW_MESH, "[V3_BROADCAST_SENSOR_DATA] Result: %s", result ? "SUCCESS" : "FAILED");
+  DEBUGF(DEBUG_ESPNOW_MESH, "[V4_BROADCAST_SENSOR_DATA] Result: %s", result ? "SUCCESS" : "FAILED");
   return result;
 }
 
@@ -2454,12 +2454,12 @@ static bool v4_send_file_response(const uint8_t* dst, uint32_t reqMsgId, bool su
   
   char dstMac[18];
   formatMacAddressBuf(dst, dstMac, sizeof(dstMac));
-  DEBUGF(DEBUG_ESPNOW_CORE, "[V3_TX_FILE_RESP] Sending to %s reqMsgId=%lu success=%d",
+  DEBUGF(DEBUG_ESPNOW_CORE, "[V4_TX_FILE_RESP] Sending to %s reqMsgId=%lu success=%d",
          dstMac, (unsigned long)reqMsgId, success);
   
   bool result = v4_send_frame(dst, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ, 
                               reqMsgId, buffer, totalLen, 1);
-  DEBUGF(DEBUG_ESPNOW_CORE, "[V3_TX_FILE_RESP] Result: %s", result ? "SUCCESS" : "FAILED");
+  DEBUGF(DEBUG_ESPNOW_CORE, "[V4_TX_FILE_RESP] Result: %s", result ? "SUCCESS" : "FAILED");
   return result;
 }
 
@@ -2467,10 +2467,10 @@ bool v4_broadcast_text(const char* text, uint16_t textLen) {
   if (!text || textLen == 0 || textLen > ESPNOW_V4_MAX_PAYLOAD) return false;
   
   uint32_t msgId = generateMessageId();
-  DEBUGF(DEBUG_ESPNOW_CORE, "[V3_BROADCAST_TEXT] Broadcasting msgId=%lu len=%u", (unsigned long)msgId, textLen);
+  DEBUGF(DEBUG_ESPNOW_CORE, "[V4_BROADCAST_TEXT] Broadcasting msgId=%lu len=%u", (unsigned long)msgId, textLen);
   
   bool result = v4_broadcast(ESPNOW_V4_TYPE_TEXT, 0, msgId, (const uint8_t*)text, textLen, 2);
-  DEBUGF(DEBUG_ESPNOW_CORE, "[V3_BROADCAST_TEXT] Result: %s", result ? "SUCCESS" : "FAILED");
+  DEBUGF(DEBUG_ESPNOW_CORE, "[V4_BROADCAST_TEXT] Result: %s", result ? "SUCCESS" : "FAILED");
   return result;
 }
 
@@ -4185,7 +4185,7 @@ static void v4CmdResultCallback(bool ok, const char* result, void* userData) {
   if (!ctx) return;
   
   size_t resultLen = result ? strlen(result) : 0;
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3] CMD result callback: ok=%d len=%zu to %s (msgId=%lu)", 
+  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4] CMD result callback: ok=%d len=%zu to %s (msgId=%lu)",
          ok, resultLen, ctx->deviceName, (unsigned long)ctx->cmdMsgId);
   
   // Clear the current stream session ID (stops any further streaming)
@@ -10395,7 +10395,7 @@ bool sendBondedSensorData(uint8_t sensorType, const uint8_t* data, uint16_t data
   // V4PayloadSensorData is 8 bytes header, max payload is 226, so max data is 218 bytes
   const uint16_t maxDataLen = ESPNOW_V4_MAX_PAYLOAD - sizeof(V4PayloadSensorData);
   if (dataLen > maxDataLen) {
-    DEBUGF(DEBUG_ESPNOW_MESH, "[V3_SENSOR_TX] Data too large: %u > %u", dataLen, maxDataLen);
+    DEBUGF(DEBUG_ESPNOW_MESH, "[V4_SENSOR_TX] Data too large: %u > %u", dataLen, maxDataLen);
     return false;
   }
   
@@ -11028,7 +11028,7 @@ const char* cmd_espnow_remote(const String& argsInput) {
   // The CMD_RESP will update this in-place to OK/FAIL when the result arrives
   notifyRemoteCommandReceived(target.c_str(), command.c_str());
 
-  snprintf(remoteBuffer, sizeof(remoteBuffer), "Remote command sent via V3 to %s: %s",
+  snprintf(remoteBuffer, sizeof(remoteBuffer), "Remote command sent via V4 to %s: %s",
            target.c_str(), command.c_str());
   return remoteBuffer;
 }
@@ -11238,7 +11238,7 @@ const char* cmd_espnow_send(const String& argsInput) {
     // works the same way for --plaintext as for the encrypted default.
     sendStatusRegister(msgId, mac);
     if (!ensureDebugBuffer()) return "Message sent";
-    snprintf(getDebugBuffer(), 1024, "Message sent via V3 (ID: %lu)", (unsigned long)msgId);
+    snprintf(getDebugBuffer(), 1024, "Message sent via V4 (ID: %lu)", (unsigned long)msgId);
     return getDebugBuffer();
   } else {
     return "Failed to send message";
