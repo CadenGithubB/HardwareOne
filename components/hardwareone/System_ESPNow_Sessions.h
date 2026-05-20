@@ -268,6 +268,13 @@ bool sessionMarkRekeyInitiated(SessionState* s,
                                const uint8_t ephPrivKey[32],
                                uint32_t txSeqAtSign);
 
+// Abort an in-flight rekey: REKEYING → ACTIVE without installing new keys
+// (discards the parked ephemeral priv, keeps the current AEAD keys). The
+// failure leg of the rekey lifecycle; runDeferredRekey calls it on ECDH/KDF
+// failure so a failed rekey can't strand the session in REKEYING. No-op if
+// the session isn't currently REKEYING.
+void sessionAbortRekey(SessionState* s);
+
 // Sweep prev-keys retention windows. Called from the espnow heartbeat tick.
 // Zeros expired aeadKeyRxPrev material.
 void sessionRekeyPrevKeysSweep(uint32_t nowMs);
