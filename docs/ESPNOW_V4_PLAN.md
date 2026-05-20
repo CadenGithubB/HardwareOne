@@ -6,17 +6,21 @@
 
 ---
 
-## Implementation status (2026-05-17 update)
+## Implementation status (2026-05-19 update)
 
 | Phase | Status | Notes |
 |---|---|---|
 | 0 — handler-table refactor | ✓ shipped | commit `6705ee3` |
 | 1 — V4 wire cutover | ✓ shipped | commit `c6157f2` |
 | 2 — multi-mesh data model | ✓ shipped | commits `2fdec6b` through `848a7de` |
-| **3 — per-peer crypto (this doc's main content)** | **✓ shipped** | see "Phase 3 retrospective" below; what actually landed differs from the plan in interesting ways |
-| 4 — file transfer concurrency | — not started | |
-| 5 — event subscription registry | — not started | |
-| 6 — UX (web + CLI) | partial | Phase 3 produced several UI improvements (CLI flag widening, "Delivered means delivered" web fix); the broader Phase 6 work is unstarted |
+| **3 — per-peer crypto (this doc's main content)** | **✓ shipped** | see "Phase 3 retrospective" below; what actually landed differs from the plan in interesting ways. 2026-05-19: FILE_START/DATA/END migrated to v4_send_payload_smart so file transfers now ride SESSION_FRAME when a session exists. |
+| 4 — file transfer concurrency | ✓ shipped | per-peer-pair slot table in `System_ESPNow_Files.cpp/.h`; FILE_START/DATA/END allocate, accumulate in PSRAM, and atomically commit at FILE_END. Encrypted as of 2026-05-19. |
+| 5 — event subscription registry | ✓ shipped | tasks #64–68: per-peer event category bitmap, SUBSCRIBE_UPDATE opcode, gated broadcast emit (`v4_broadcast_category`), CLI + persistence. |
+| 6 — UX (web + CLI) | partial | Phase 3 produced several UI improvements (CLI flag widening, "Delivered means delivered" web fix); broader Phase 6 scope (session-state badges in web UI, subscription management UI, encryption status indicators) is unscoped. |
+
+**Loose ends (2026-05-19):**
+- Bond mode token re-derivation (LMK ripout done; bond half deferred as its own auth/RCE channel — see Phase 3 retrospective).
+- Bounds-check mesh integer settings on load — partially mitigated by `SETTING_U8/U16` width clamps but no explicit range validation. Filed as task #71.
 
 The Phase 3 section below describes the original design. The "Phase 3 retrospective" subsection at the end of that section documents what actually shipped and where it diverged.
 
@@ -592,7 +596,6 @@ Phase 3 shipped across ~25 commits over a long evening of focused work. Field-ve
 
 ### What's deferred (intentionally not in scope)
 
-- **Encrypted fragmentation (#51).** Plaintext payloads > 202 B still go through `v4_send_chunked` plaintext fragmenter. Affects: FILE_DATA, large CMD_RESP output, large METADATA. Plan: per-fragment SESSION_FRAME wrap (Design X), drops plaintext-per-fragment 200→184 bytes.
 - **Bond mode token re-derivation.** Bond is the auth/RCE channel between paired devices; it has its own token that should be re-derived off the new Ed25519 identity. Separate workstream — bond's threat model differs from general messaging.
 - **Encrypted broadcasts.** Current BROADCAST_AUTH is auth-only (HMAC tag on plaintext payload). Broadcast confidentiality would require group-key AEAD + per-sender replay state on receivers. Locked decision to keep broadcasts plaintext: heartbeat / sensor data are inherently observable from a sniffer regardless of which AP the device is associated with.
 
