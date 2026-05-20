@@ -96,14 +96,13 @@ static void onEspNowRawRecv(const esp_now_recv_info* recv_info, const uint8_t* d
 // ============================================================================
 // V4 FRAGMENTATION CONSTANTS AND REASSEMBLY
 // ============================================================================
-// TODO (Phase 3.5 task #51 — encrypted fragmentation): this constant is the
-// PLAINTEXT-only fragment size. When task #6 flips fragmented opcodes
-// (CMD_RESP > 201 B, FILE_DATA >= 200 B, large METADATA) to SESSION_FRAME,
-// each fragment will be its own AEAD-sealed frame, dropping plaintext-
-// per-fragment by 16 bytes (200 → 184). v4_send_chunked + reassembly path
-// will need a parallel encrypted version that wraps/unwraps per fragment.
-// Until then, all fragmented sends remain plaintext.
-#define V4_MAX_FRAGMENT_PAYLOAD 200   // Max payload bytes per fragment (plaintext)
+// Per-fragment plaintext budget. Phase 3.5 task #51 (encrypted fragmentation)
+// is shipped: v4_send_encrypted_chunked uses this same 200-byte fragment
+// size and adds the 16-byte AEAD tag per fragment, giving 216 wire bytes per
+// fragment (still ≤ MAX_PAYLOAD = 218). Plaintext and encrypted fragments
+// interleave through the same reassembly buffer pool — the receiver decides
+// per frame whether the inner is wrapped (type=32 SESSION_FRAME) or raw.
+#define V4_MAX_FRAGMENT_PAYLOAD 200   // Max payload bytes per fragment
 #define V4_FRAG_MAX             32    // Max fragments per message (max msg = 6400 bytes)
                                        // Cost: ~12.6 KB PSRAM (2 reassembly slots × 32 × 200 B + overhead).
                                        // DRAM impact: zero — gV4Reasm is ps_alloc'd.
@@ -2162,34 +2161,51 @@ static bool v4_send_frag_ack(const uint8_t* dst, uint32_t msgId, uint8_t fragInd
   esp_err_t result = esp_now_send(dst, (uint8_t*)&h, sizeof(h));
   
   if (result == ESP_OK) {
-    DEBUGF(DEBUG_ESPNOW_CORE, "[V3_FRAG_ACK_TX] ✓ Fragment ACK sent successfully");
+    DEBUGF(DEBUG_ESPNOW_CORE, "[V4_FRAG_ACK_TX] ✓ Fragment ACK sent successfully");
   } else {
-    DEBUGF(DEBUG_ESPNOW_CORE, "[V3_FRAG_ACK_TX] ✗ Fragment ACK send failed: esp_err=%d", result);
+    DEBUGF(DEBUG_ESPNOW_CORE, "[V4_FRAG_ACK_TX] ✗ Fragment ACK send failed: esp_err=%d", result);
   }
   
   return (result == ESP_OK);
 }
 
 // V3 sender functions for mesh system messages
+// TIME_SYNC unicast — 2026-05-19: strict-encrypt (was plaintext v4_send_frame
+// which let any on-air attacker reset the clock). Handler now requires
+// REQ_AUTHENTICATED, so plaintext attempts get dropped server-side anyway;
+// we go through v4_send_encrypted_or_queue here so legitimate sync makes it.
+// Returns false if no peer identity (KEY_EX not done) — caller should just
+// retry on next sync tick; NTP / RTC will keep the clock from drifting.
 static bool v4_send_time_sync(const uint8_t* dst, uint32_t epochTime, int32_t timeOffset) {
   V4PayloadTimeSync payload;
   payload.epochTime = epochTime;
   payload.timeOffset = timeOffset;
-  
+
   uint32_t msgId = generateMessageId();
   char dstMac[18];
   formatMacAddressBuf(dst, dstMac, sizeof(dstMac));
-  DEBUGF(DEBUG_ESPNOW_MESH, "[V3_TX_TIME_SYNC] Sending to %s msgId=%lu", dstMac, (unsigned long)msgId);
-  DEBUGF(DEBUG_ESPNOW_MESH, "[V3_TX_TIME_SYNC] epochTime=%lu timeOffset=%ld",
+  DEBUGF(DEBUG_ESPNOW_MESH, "[V4_TX_TIME_SYNC] Sending (encrypted) to %s msgId=%lu", dstMac, (unsigned long)msgId);
+  DEBUGF(DEBUG_ESPNOW_MESH, "[V4_TX_TIME_SYNC] epochTime=%lu timeOffset=%ld",
          (unsigned long)epochTime, (long)timeOffset);
-  bool result = v4_send_frame(dst, ESPNOW_V4_TYPE_TIME_SYNC, 0, msgId, (const uint8_t*)&payload, sizeof(payload), 2);
-  DEBUGF(DEBUG_ESPNOW_MESH, "[V3_TX_TIME_SYNC] Result: %s", result ? "SUCCESS" : "FAILED");
+  bool result = v4_send_encrypted_or_queue(dst, ESPNOW_V4_TYPE_TIME_SYNC, 0, msgId,
+                                            (const uint8_t*)&payload, sizeof(payload), 2,
+                                            nullptr, 0);
+  DEBUGF(DEBUG_ESPNOW_MESH, "[V4_TX_TIME_SYNC] Result: %s", result ? "SUCCESS/QUEUED" : "FAILED");
   return result;
 }
 
+// TIME_SYNC broadcast — 2026-05-19: route through v4_broadcast so BROADCAST_AUTH
+// HMAC is appended; receiver verifies group-key knowledge before applying the
+// clock update. Previously this called v4_send_time_sync(FF:...) which just
+// sent plaintext to the broadcast address — completely spoofable.
 static bool v4_broadcast_time_sync(uint32_t epochTime, int32_t timeOffset) {
-  uint8_t broadcastMac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-  return v4_send_time_sync(broadcastMac, epochTime, timeOffset);
+  V4PayloadTimeSync payload;
+  payload.epochTime = epochTime;
+  payload.timeOffset = timeOffset;
+  uint32_t msgId = generateMessageId();
+  DEBUGF(DEBUG_ESPNOW_MESH, "[V4_TX_TIME_SYNC] Broadcasting (BROADCAST_AUTH) msgId=%lu", (unsigned long)msgId);
+  return v4_broadcast(ESPNOW_V4_TYPE_TIME_SYNC, 0, msgId,
+                      (const uint8_t*)&payload, sizeof(payload), 2);
 }
 
 static bool v4_send_topo_request(const uint8_t* dst, uint32_t reqId) {
@@ -2353,36 +2369,47 @@ bool v4_send_user_sync(const uint8_t* dst, const char* jsonPayload, uint16_t jso
            jsonPayload, jsonLen);
     return false;
   }
-  if (jsonLen > ESPNOW_V4_MAX_PLAINTEXT) {
-    DEBUGF(DEBUG_ESPNOW_MESH, "[V4_TX_USER_SYNC] ERROR: payload %u > MAX_PLAINTEXT %u; "
-           "encrypted fragmentation pending (task #51)", jsonLen, ESPNOW_V4_MAX_PLAINTEXT);
-    return false;
-  }
   uint32_t msgId = generateMessageId();
   char dstMac[18];
   formatMacAddressBuf(dst, dstMac, sizeof(dstMac));
   DEBUGF(DEBUG_ESPNOW_MESH, "[V4_TX_USER_SYNC] Sending (encrypted) to %s msgId=%lu len=%u", dstMac, (unsigned long)msgId, jsonLen);
-  bool result = v4_send_encrypted_or_queue(dst, ESPNOW_V4_TYPE_USER_SYNC, ESPNOW_V4_FLAG_ACK_REQ,
-                                            msgId, (const uint8_t*)jsonPayload, jsonLen, 3,
-                                            nullptr, 0);
+  // USER_SYNC carries user records (possibly hashed credentials) — STRICT
+  // encrypt-only, no plaintext fallback. Small payloads ride the single-frame
+  // queue (auto-kicks SESSION_OPEN); large payloads use encrypted-chunked
+  // which requires an ACTIVE session and refuses to fall back. If the peer
+  // hasn't done KEY_EX yet, this returns false rather than leak.
+  bool result;
+  if (jsonLen <= ESPNOW_V4_MAX_PLAINTEXT) {
+    result = v4_send_encrypted_or_queue(dst, ESPNOW_V4_TYPE_USER_SYNC, ESPNOW_V4_FLAG_ACK_REQ,
+                                         msgId, (const uint8_t*)jsonPayload, jsonLen, 3,
+                                         nullptr, 0);
+  } else {
+    result = v4_send_encrypted_chunked(dst, ESPNOW_V4_TYPE_USER_SYNC, ESPNOW_V4_FLAG_ACK_REQ,
+                                        msgId, (const uint8_t*)jsonPayload, jsonLen, 3);
+  }
   DEBUGF(DEBUG_ESPNOW_MESH, "[V4_TX_USER_SYNC] Result: %s", result ? "SUCCESS" : "FAILED");
   return result;
 }
 
 bool v4_send_text(const uint8_t* dst, const char* text, uint16_t textLen) {
   if (!text || textLen == 0) return false;
-  if (textLen > ESPNOW_V4_MAX_PLAINTEXT) {
-    DEBUGF(DEBUG_ESPNOW_CORE, "[V4_TX_TEXT] ERROR: payload %u > MAX_PLAINTEXT %u; "
-           "encrypted fragmentation pending (task #51)", textLen, ESPNOW_V4_MAX_PLAINTEXT);
-    return false;
-  }
   uint32_t msgId = generateMessageId();
   char dstMac[18];
   formatMacAddressBuf(dst, dstMac, sizeof(dstMac));
   DEBUGF(DEBUG_ESPNOW_CORE, "[V4_TX_TEXT] Sending (encrypted) to %s msgId=%lu len=%u", dstMac, (unsigned long)msgId, textLen);
-  bool result = v4_send_encrypted_or_queue(dst, ESPNOW_V4_TYPE_TEXT, ESPNOW_V4_FLAG_ACK_REQ,
-                                            msgId, (const uint8_t*)text, textLen, 1,
-                                            nullptr, 0);
+  // STRICT encrypt — preserves the original v4_send_text intent of refusing
+  // to send if encryption isn't possible. Small payloads ride single-frame
+  // SESSION_FRAME (with queue + auto-kick); larger ones use encrypted-chunked
+  // which requires an ACTIVE session and refuses to fall back to plaintext.
+  bool result;
+  if (textLen <= ESPNOW_V4_MAX_PLAINTEXT) {
+    result = v4_send_encrypted_or_queue(dst, ESPNOW_V4_TYPE_TEXT, ESPNOW_V4_FLAG_ACK_REQ,
+                                         msgId, (const uint8_t*)text, textLen, 1,
+                                         nullptr, 0);
+  } else {
+    result = v4_send_encrypted_chunked(dst, ESPNOW_V4_TYPE_TEXT, ESPNOW_V4_FLAG_ACK_REQ,
+                                        msgId, (const uint8_t*)text, textLen, 1);
+  }
   DEBUGF(DEBUG_ESPNOW_CORE, "[V4_TX_TEXT] Result: %s", result ? "SUCCESS" : "FAILED");
   return result;
 }
@@ -2395,29 +2422,22 @@ bool v4_send_command_response(const uint8_t* dst, uint32_t cmdMsgId, bool succes
   char dstMac[18];
   formatMacAddressBuf(dst, dstMac, sizeof(dstMac));
 
-  if (totalLen > ESPNOW_V4_MAX_PLAINTEXT) {
-    // Response too large for a single SESSION_FRAME — fall back to plaintext
-    // fragmented send. Task #51 (encrypted fragmentation) will let this go
-    // encrypted too. WARN here so the regression is visible.
-    uint8_t* buffer = (uint8_t*)malloc(totalLen);
-    if (!buffer) return false;
-    buffer[0] = success ? 1 : 0;
-    memcpy(buffer + 1, resultText, textLen);
-    DEBUGF(DEBUG_ESPNOW_CORE, "[V4_TX_CMD_RESP] Sending PLAINTEXT (large; task #51 pending) to %s cmdMsgId=%lu len=%u",
-           dstMac, (unsigned long)cmdMsgId, totalLen);
-    bool result = v4_send_chunked(dst, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
-                                   cmdMsgId, buffer, totalLen, 1);
-    free(buffer);
-    return result;
-  }
-  // Single-frame: encrypted via SESSION_FRAME.
-  uint8_t buffer[ESPNOW_V4_MAX_PLAINTEXT];
+  // BEST-EFFORT encrypt — CMD_RESP carries the command's output, which is
+  // typically less sensitive than the CMD request itself (which carries
+  // credentials). v4_send_payload_smart prefers encrypted (single-frame or
+  // encrypted-chunked) and falls back to plaintext if no session is up — so
+  // the response still gets to the requester even between un-handshaked
+  // peers. Buffer sized to the worst case (totalLen could exceed
+  // MAX_PLAINTEXT for large outputs; smart_send handles the fragmentation).
+  uint8_t* buffer = (uint8_t*)malloc(totalLen);
+  if (!buffer) return false;
   buffer[0] = success ? 1 : 0;
   memcpy(buffer + 1, resultText, textLen);
-  DEBUGF(DEBUG_ESPNOW_CORE, "[V4_TX_CMD_RESP] Sending (encrypted) to %s cmdMsgId=%lu len=%u",
+  DEBUGF(DEBUG_ESPNOW_CORE, "[V4_TX_CMD_RESP] Sending to %s cmdMsgId=%lu len=%u (encrypt-preferred)",
          dstMac, (unsigned long)cmdMsgId, totalLen);
-  bool result = v4_send_encrypted_or_queue(dst, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
-                                            cmdMsgId, buffer, totalLen, 1, nullptr, 0);
+  bool result = v4_send_payload_smart(dst, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
+                                       cmdMsgId, buffer, totalLen, 1);
+  free(buffer);
   DEBUGF(DEBUG_ESPNOW_CORE, "[V4_TX_CMD_RESP] Result: %s", result ? "SUCCESS" : "FAILED");
   return result;
 }
@@ -2528,14 +2548,26 @@ struct V4RxCtx {
   const uint8_t*           payload;
   uint16_t                 payloadLen;
   bool                     isPaired;
+  // 2026-05-19: `isAuthenticated` is true when this frame proves the sender
+  // holds either our session key (SESSION_FRAME unwrap succeeded) or the mesh
+  // group key (BROADCAST_AUTH HMAC verified). Plaintext unicast and plain-
+  // broadcast (no BROADCAST_AUTH tag) leave it false. Handlers that mutate
+  // device-level state from the frame (clock, master role, peer identity
+  // claims) MUST gate on this — otherwise anyone in radio range can spoof.
+  bool                     isAuthenticated;
   const char*              deviceName;
 };
 
 using V4OpcodeHandler = void (*)(const V4RxCtx& ctx);
 
 // Flags on handler-table entries
-static constexpr uint8_t V4_OPC_FLAG_REQ_PAIRED    = 0x01;  // require src to be a paired peer
-static constexpr uint8_t V4_OPC_FLAG_REQ_BOND_MODE = 0x02;  // require gSettings.bondModeEnabled
+static constexpr uint8_t V4_OPC_FLAG_REQ_PAIRED        = 0x01;  // require src to be a paired peer
+static constexpr uint8_t V4_OPC_FLAG_REQ_BOND_MODE     = 0x02;  // require gSettings.bondModeEnabled
+// Require the frame to be authenticated (came in via SESSION_FRAME unwrap or
+// BROADCAST_AUTH HMAC verify). Drops plaintext unicast and plain broadcasts
+// silently. Used by opcodes whose handler mutates device-level state from
+// payload contents (e.g., TIME_SYNC moves the clock).
+static constexpr uint8_t V4_OPC_FLAG_REQ_AUTHENTICATED = 0x04;
 
 struct V4OpcodeEntry {
   uint8_t          opcode;
@@ -2646,8 +2678,18 @@ static void v4h_heartbeat(const V4RxCtx& ctx) {
     noteMeshPeerRxActivity(ctx.recv_info->src_addr, EspNowMeshRxKind::MeshHeartbeat, hb->rssi);
     if (gEspNow) gEspNow->heartbeatsReceived++;
 
-    // Backup master failover: track heartbeats from the configured master MAC
-    if (meshEnabled() && gSettings.meshBackupEnabled &&
+    // Backup master failover: track heartbeats from the configured master MAC.
+    // 2026-05-19 — REQUIRE authentication on the frame before trusting that
+    // the source MAC really belongs to the master. Pre-fix, an attacker who
+    // knew the master's MAC could send plaintext unicast heartbeats and
+    // either (a) keep the backup from promoting (DoS) or (b) demote a
+    // legitimately-promoted backup. Now we accept the master-liveness signal
+    // only when the frame proves session-key knowledge (SESSION_FRAME unwrap
+    // from a per-peer session) OR mesh-group-key knowledge (BROADCAST_AUTH
+    // HMAC). Plain plaintext heartbeats from an attacker-spoofed MAC are
+    // silently ignored for the purposes of backup-master state.
+    if (ctx.isAuthenticated &&
+        meshEnabled() && gSettings.meshBackupEnabled &&
         gSettings.meshMasterMAC.length() > 0) {
       bool isBackupOrPromoted = (gSettings.meshRole == MESH_ROLE_BACKUP_MASTER) ||
                                  (gSettings.meshRole == MESH_ROLE_MASTER && gBackupPromoted);
@@ -3571,7 +3613,11 @@ static const V4OpcodeEntry kV4HandlerTable[] = {
   // REQ_PAIRED — handler verifies Ed25519 sig against the peer's stored
   // long-term pubkey (same trust path as SESSION_OPEN/CONFIRM).
   { ESPNOW_V4_TYPE_SESSION_REKEY,    0,                                                    v4hSessionRekey       },
-  { ESPNOW_V4_TYPE_TIME_SYNC,        0,                                                    v4h_time_sync         },
+  // TIME_SYNC moves the device clock — REQ_AUTHENTICATED to defend against
+  // on-air spoofing. Senders go through v4_send_encrypted_or_queue (unicast)
+  // or v4_broadcast (broadcast, BROADCAST_AUTH HMAC). Plaintext TIME_SYNC
+  // from any source is silently dropped here.
+  { ESPNOW_V4_TYPE_TIME_SYNC,        V4_OPC_FLAG_REQ_AUTHENTICATED,                        v4h_time_sync         },
   { ESPNOW_V4_TYPE_TEXT,             0,                                                    v4h_text              },
   { ESPNOW_V4_TYPE_CMD,              V4_OPC_FLAG_REQ_PAIRED,                               v4h_cmd               },
   { ESPNOW_V4_TYPE_CMD_RESP,         0,                                                    v4h_cmd_resp          },
@@ -3632,7 +3678,8 @@ static void v4_dispatch_post_cleanup(const esp_now_recv_info* recv_info, const E
 // to the legacy if-ladder for opcodes not yet migrated.
 static bool v4_dispatch_table_try(const esp_now_recv_info* recv_info, const EspNowV4Header* h,
                                   const uint8_t* payload, uint16_t payloadLen,
-                                  bool isPaired, const char* deviceName) {
+                                  bool isPaired, bool isAuthenticated,
+                                  const char* deviceName) {
   const V4OpcodeEntry* e = v4_dispatch_lookup(h->type);
   if (!e) return false;
   if ((e->flags & V4_OPC_FLAG_REQ_PAIRED) && !isPaired) {
@@ -3647,6 +3694,20 @@ static bool v4_dispatch_table_try(const esp_now_recv_info* recv_info, const EspN
     v4_dispatch_post_cleanup(recv_info, h);
     return true;
   }
+  if ((e->flags & V4_OPC_FLAG_REQ_AUTHENTICATED) && !isAuthenticated) {
+    // Opcode-handler insists on a cryptographically-authenticated frame
+    // (SESSION_FRAME unwrap OR BROADCAST_AUTH HMAC). Plain plaintext from
+    // any source — including paired peers pre-KEY_EX — is dropped to defend
+    // against on-air spoofing of state-mutating opcodes (TIME_SYNC, etc).
+    WARN_ESPNOWF("[V4_RX] type=%u from %02X:%02X:%02X:%02X:%02X:%02X dropped: "
+                 "REQ_AUTHENTICATED set but frame was plaintext (no SESSION_FRAME "
+                 "or BROADCAST_AUTH)",
+                 h->type,
+                 recv_info->src_addr[0], recv_info->src_addr[1], recv_info->src_addr[2],
+                 recv_info->src_addr[3], recv_info->src_addr[4], recv_info->src_addr[5]);
+    v4_dispatch_post_cleanup(recv_info, h);
+    return true;
+  }
 
   // Phase 3.5 task #51 — SESSION_FRAME unwrap was previously performed here,
   // gated on h->flags & SESSION_FRAME. It now lives upstream in
@@ -3654,7 +3715,7 @@ static bool v4_dispatch_table_try(const esp_now_recv_info* recv_info, const EspN
   // payloads can be unwrapped per-fragment before the reassembler. By the
   // time we reach this point, `payload` is already plaintext and the
   // SESSION_FRAME flag has been cleared in the local header copy.
-  V4RxCtx ctx{recv_info, h, payload, payloadLen, isPaired, deviceName};
+  V4RxCtx ctx{recv_info, h, payload, payloadLen, isPaired, isAuthenticated, deviceName};
   e->handler(ctx);
   v4_dispatch_post_cleanup(recv_info, h);
   return true;
@@ -3694,6 +3755,14 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
     // Silent drop. Frame is for a mesh we're not a member of.
     return true;
   }
+
+  // 2026-05-19: track whether the frame proves any cryptographic key
+  // possession. Set true below when either BROADCAST_AUTH HMAC verifies OR
+  // SESSION_FRAME AEAD unwrap succeeds. Plaintext frames leave it false.
+  // Plumbed into V4RxCtx so per-opcode handlers (and the dispatch-table
+  // REQ_AUTHENTICATED gate) can refuse state-mutating frames that weren't
+  // authenticated.
+  bool wasAuthenticated = false;
 
   // === Phase 3.5 task #32 — BROADCAST_AUTH HMAC verification ===
   // If the BROADCAST_AUTH flag is set, the last 32 bytes of the payload are
@@ -3741,6 +3810,7 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
     }
     // Tag verified — strip it so downstream handlers see only the real payload.
     payloadLen = corePayloadLen;
+    wasAuthenticated = true;
   }
 
   // === Phase 3.5 task #51 — SESSION_FRAME per-fragment early unwrap ===
@@ -3795,6 +3865,7 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
     h = &headerCopy;
     payload = plainBuf;
     payloadLen = plainLen;
+    wasAuthenticated = true;
     DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_RX] SESSION_FRAME unwrapped: type=%u msgId=%lu frag=%u/%u plainLen=%u",
            h->type, (unsigned long)h->msgId, h->fragIndex + 1, h->fragCount, plainLen);
   }
@@ -4057,42 +4128,24 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
 
   // === Handler-table dispatch (Phase 0 of docs/ESPNOW_V4_PLAN.md) ===
   // Opcodes registered in kV4HandlerTable are handled here; anything not
-  // in the table falls through to the legacy if-ladder below. Migration is
-  // incremental — opcodes move from the ladder into kV4HandlerTable one at
-  // a time. Today's migrated set: TEXT, CMD, CMD_RESP, TIME_SYNC.
-  if (v4_dispatch_table_try(recv_info, h, payload, payloadLen, isPaired, deviceName)) {
+  // in the table falls through to the legacy if-ladder below.
+  // `wasAuthenticated` proves the frame holds either our session key
+  // (SESSION_FRAME unwrap) or the mesh group key (BROADCAST_AUTH HMAC).
+  if (v4_dispatch_table_try(recv_info, h, payload, payloadLen,
+                            isPaired, wasAuthenticated, deviceName)) {
     return true;
   }
 
-  // TOPO_REQ migrated to handler table.
+  // All opcodes are now registered in kV4HandlerTable; nothing reaches the
+  // point below except genuinely-unknown types. Two wire-behavior notes worth
+  // keeping (they're not separate opcodes on the dispatch path):
+  //   - SETTINGS_RESP / SETTINGS_PUSH are unused on the wire — settings arrive
+  //     as a FILE_END for _settings_out.json (handled in v4h_file_end).
+  //   - MANIFEST_RESP travels as a FILE_END for _manifest_out.json — also
+  //     handled inside v4h_file_end.
 
-  // TOPO_START migrated to handler table.
-
-  // TOPO_PEER migrated to handler table.
-
-
-  // === USER SYNC (propagate user credentials to peer) ===
-  // USER_SYNC migrated to handler table.
-
-  // === SENSOR STATUS (mesh broadcast) ===
-  // SENSOR_STATUS, SENSOR_BROADCAST, HEARTBEAT migrated to handler table.
-
-  // BOND_HEARTBEAT migrated to handler table.
-
-  // BOND_CAP_REQ, BOND_CAP_RESP, SENSOR_DATA, STREAM_CTRL, SETTINGS_REQ,
-  // BOND_STATUS_REQ, BOND_STATUS_RESP all migrated to handler table.
-  // SETTINGS_RESP/PUSH unused on the wire — settings arrive as FILE_END for
-  // _settings_out.json (handled in FILE_END handler).
-
-  // METADATA_REQ, METADATA_RESP, METADATA_PUSH, STREAM all migrated to handler table.
-
-  // FILE_START and FILE_DATA migrated to handler table.
-
-  // FILE_END and MANIFEST_REQ migrated to handler table.
-  // (MANIFEST_RESP travels as a FILE_END for _manifest_out.json — handled inside v4h_file_end.)
-
-  // Unknown V3 type - log and ignore
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V3] Unknown type %d from %s", h->type, deviceName);
+  // Unknown V4 type - log and ignore
+  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_RX] Unknown type %d from %s", h->type, deviceName);
   
   // CRITICAL: Cleanup reassembly buffer for ALL fragmented messages (not just unknown types)
   // This was previously only cleaning up at the end of the function, causing memory leaks
@@ -5361,17 +5414,21 @@ void requestMetadata(const uint8_t* peerMac, bool force) {
   uint32_t msgId = generateMessageId();
   DEBUG_ESPNOW_METADATAF("[METADATA] Sending REQ (encrypted-or-queue) to %s msgId=%lu force=%d",
     MAC_STR(peerMac), (unsigned long)msgId, (int)force);
-  // Phase 3.5 task #6 — flip METADATA_REQ to encrypted send. Returns false
-  // if peer has no long-term identity yet; we just don't request from those.
+  // Phase 3.5 task #6 — METADATA_REQ rides SESSION_FRAME. Returns false if the
+  // peer has no long-term identity yet (KEY_EX not done), no active session
+  // and queue full, etc. — capture the real status so the WARN below isn't the
+  // misleading "peer not in hw table?" (the actual cause is almost always
+  // "no peer identity — run espnowkeyex").
+  char status[96] = {0};
   bool sent = v4_send_encrypted_or_queue(peerMac, ESPNOW_V4_TYPE_METADATA_REQ, 0, msgId,
-                                          nullptr, 0, 1, nullptr, 0);
-  
+                                          nullptr, 0, 1, status, sizeof(status));
+
   if (sent) {
-    DEBUG_ESPNOW_METADATAF("[METADATA] REQ sent OK to %s msgId=%lu",
-      MAC_STR(peerMac), (unsigned long)msgId);
+    DEBUG_ESPNOW_METADATAF("[METADATA] REQ sent OK to %s msgId=%lu (status=%s)",
+      MAC_STR(peerMac), (unsigned long)msgId, status[0] ? status : "sent");
   } else {
-    WARN_ESPNOWF("[METADATA] REQ FAILED to send to %s (peer not in hw table?)",
-      MAC_STR(peerMac));
+    WARN_ESPNOWF("[METADATA] REQ FAILED to send to %s: %s",
+      MAC_STR(peerMac), status[0] ? status : "encrypted send failed");
   }
 }
 
@@ -5396,18 +5453,30 @@ static void sendMetadata(const uint8_t* peerMac, bool isPush, bool force = false
   
   uint32_t msgId = generateMessageId();
   uint8_t type = isPush ? ESPNOW_V4_TYPE_METADATA_PUSH : ESPNOW_V4_TYPE_METADATA_RESP;
-  DEBUG_ESPNOW_METADATAF("[METADATA] Sending %s to %s msgId=%lu payloadLen=%u name='%s' room='%s' zone='%s' tags='%s' force=%d",
+  DEBUG_ESPNOW_METADATAF("[METADATA] Sending %s (encrypted-or-queue) to %s msgId=%lu payloadLen=%u name='%s' room='%s' zone='%s' tags='%s' force=%d",
     isPush ? "PUSH" : "RESP", MAC_STR(peerMac), (unsigned long)msgId,
     (unsigned)sizeof(payload), payload.deviceName, payload.room, payload.zone, payload.tags, (int)force);
-  
-  bool sent = v4_send_frame(peerMac, type, 0, msgId, (const uint8_t*)&payload, sizeof(payload), 1);
-  
+
+  // 2026-05-19 — flip to v4_send_encrypted_or_queue to mirror requestMetadata
+  // (REQ direction was already encrypted post-Phase-3.5 task #6). Asymmetric
+  // encryption let the response leak deviceName / room / zone / tags / etc.
+  // in clear even when the REQ was protected. Strict-encrypt: if the peer
+  // doesn't have an identity yet, the RESP/PUSH won't go out — but the only
+  // path that can reach this function via REQ→RESP already required the REQ
+  // to come encrypted, so the session already exists at the responder side.
+  char status[96] = {0};
+  bool sent = v4_send_encrypted_or_queue(peerMac, type, 0, msgId,
+                                          (const uint8_t*)&payload, sizeof(payload), 1,
+                                          status, sizeof(status));
+
   if (sent) {
-    DEBUG_ESPNOW_METADATAF("[METADATA] %s sent OK to %s msgId=%lu",
-      isPush ? "PUSH" : "RESP", MAC_STR(peerMac), (unsigned long)msgId);
+    DEBUG_ESPNOW_METADATAF("[METADATA] %s sent OK to %s msgId=%lu (status=%s)",
+      isPush ? "PUSH" : "RESP", MAC_STR(peerMac), (unsigned long)msgId,
+      status[0] ? status : "sent");
   } else {
-    WARN_ESPNOWF("[METADATA] %s FAILED to send to %s (peer not in hw table?)",
-      isPush ? "PUSH" : "RESP", MAC_STR(peerMac));
+    WARN_ESPNOWF("[METADATA] %s FAILED to send to %s: %s",
+      isPush ? "PUSH" : "RESP", MAC_STR(peerMac),
+      status[0] ? status : "encrypted send failed");
   }
 }
 
@@ -6605,8 +6674,13 @@ void processMeshHeartbeats() {
         wifi_ap_record_t ap = {};
         hb.rssi = (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) ? ap.rssi : (int8_t)-127;
         strncpy(hb.deviceName, gSettings.espnowDeviceName.c_str(), sizeof(hb.deviceName) - 1);
-        v4_send_frame(backupMac, ESPNOW_V4_TYPE_HEARTBEAT, ESPNOW_V4_FLAG_ACK_REQ,
-                      generateMessageId(), (const uint8_t*)&hb, (uint16_t)sizeof(hb), 1);
+        // 2026-05-19: route through smart-send so master→backup liveness rides
+        // SESSION_FRAME once KEY_EX has run. The receiver's backup-master
+        // tracking now requires ctx.isAuthenticated, so a plaintext fallback
+        // here is harmless (won't drive false failover state) but stays
+        // available for the pre-KEY_EX window.
+        v4_send_payload_smart(backupMac, ESPNOW_V4_TYPE_HEARTBEAT, ESPNOW_V4_FLAG_ACK_REQ,
+                              generateMessageId(), (const uint8_t*)&hb, (uint16_t)sizeof(hb), 1);
       }
     }
   }
@@ -7203,8 +7277,12 @@ bool espnowAppPingStart(const uint8_t* mac) {
   gEspNowAppPing.rttMs   = 0;
   gEspNowAppPing.state   = EspNowAppPingState::Pending;
 
-  bool ok = v4_send_frame(mac, ESPNOW_V4_TYPE_HEARTBEAT, ESPNOW_V4_FLAG_ACK_REQ,
-                          msgId, nullptr, 0, /*ttl=*/1);
+  // 2026-05-19: smart-send so the app-ping rides SESSION_FRAME when a session
+  // is up. Zero-length payload is fine — v4_send_encrypted_or_queue and
+  // v4_send_frame both accept (nullptr,0). Plaintext fallback for pre-KEY_EX
+  // pings preserves the liveness-probe usefulness.
+  bool ok = v4_send_payload_smart(mac, ESPNOW_V4_TYPE_HEARTBEAT, ESPNOW_V4_FLAG_ACK_REQ,
+                                  msgId, nullptr, 0, /*ttl=*/1);
   if (!ok) {
     // Send refused (queue full / radio off / no peer). Don't leave the slot
     // Pending — that would let a stale ACK from an unrelated send win.
@@ -8415,8 +8493,12 @@ const char* cmd_espnow_pair(const String& argsInput) {
     strncpy(hb.deviceName, gSettings.espnowDeviceName.c_str(), sizeof(hb.deviceName) - 1);
     wifi_ap_record_t ap = {};
     hb.rssi = (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) ? ap.rssi : (int8_t)-127;
-    v4_send_frame(mac, ESPNOW_V4_TYPE_HEARTBEAT, ESPNOW_V4_FLAG_ACK_REQ, generateMessageId(),
-                  (const uint8_t*)&hb, (uint16_t)sizeof(hb), 1);
+    // 2026-05-19: smart-send so the post-pair seed heartbeat rides
+    // SESSION_FRAME if a session is already up (rare — usually KEY_EX hasn't
+    // run yet at this point, so this falls through to plaintext, which is
+    // what we want for bootstrap liveness).
+    v4_send_payload_smart(mac, ESPNOW_V4_TYPE_HEARTBEAT, ESPNOW_V4_FLAG_ACK_REQ, generateMessageId(),
+                          (const uint8_t*)&hb, (uint16_t)sizeof(hb), 1);
   }
   bool peersOk   = saveMeshPeers();
   bool devicesOk = saveEspNowDevices();
@@ -10153,10 +10235,12 @@ bool sendFileToMac(const uint8_t* mac, const String& localPath) {
   // V4PayloadFileData.data[] declared size (200) matches what we put on the
   // wire. Old code used MAX_PAYLOAD - 2 = 216, which only "worked" because
   // the surrounding stack buffer was MAX_PAYLOAD-sized and we wrote past
-  // the struct's declared bounds (UB in C++). Smaller chunkSize also means
-  // FILE_DATA is ready to be flipped to SESSION_FRAME (task #6) — when that
-  // happens, each chunk's 200 plaintext + 16 tag = 216 still fits the
-  // 218-byte wire payload budget.
+  // the struct's declared bounds (UB in C++). The 200 + 2 (chunkIndex) =
+  // 202 bytes plaintext fits ESPNOW_V4_MAX_PLAINTEXT, so once wrapped in
+  // SESSION_FRAME each chunk's 202 + 16 (AEAD tag) = 218 hits the wire
+  // payload budget exactly. 2026-05-19: FILE_START/DATA/END now go through
+  // v4_send_payload_smart (encrypted single-frame when a session is up,
+  // plaintext fallback otherwise) — the task #51-era "ready to flip" plan.
   const uint16_t v4ChunkSize = ESPNOW_V4_MAX_PLAINTEXT - 2;  // 200 bytes
   uint32_t maxFileSize = 65535 * v4ChunkSize;  // 16-bit chunk count max
   if (fileSize > maxFileSize) {
@@ -10183,8 +10267,11 @@ bool sendFileToMac(const uint8_t* mac, const String& localPath) {
   startPayload.chunkSize = v4ChunkSize;
   strncpy(startPayload.filename, filename.c_str(), sizeof(startPayload.filename) - 1);
   
-  if (!v4_send_frame(mac, ESPNOW_V4_TYPE_FILE_START, ESPNOW_V4_FLAG_ACK_REQ, transferId,
-                     (const uint8_t*)&startPayload, sizeof(startPayload), 1)) {
+  // v4_send_payload_smart: wraps in SESSION_FRAME if a session is active with
+  // this peer, otherwise falls back to plaintext v4_send_frame. Auto-kicks a
+  // SESSION_OPEN if peer identity is known but no session exists yet.
+  if (!v4_send_payload_smart(mac, ESPNOW_V4_TYPE_FILE_START, ESPNOW_V4_FLAG_ACK_REQ, transferId,
+                             (const uint8_t*)&startPayload, sizeof(startPayload), 1)) {
     file.close();
     DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FILE_TX] Failed to send FILE_START");
     return false;
@@ -10210,8 +10297,11 @@ bool sendFileToMac(const uint8_t* mac, const String& localPath) {
     
     bool sent = false;
     for (int attempt = 0; attempt < 3 && !sent; attempt++) {
-      sent = v4_send_frame(mac, ESPNOW_V4_TYPE_FILE_DATA, 0, transferId,
-                           chunkPayload, payloadLen, 1);
+      // Each chunk: 200 data + 2 chunkIdx = 202 plaintext, fits SESSION_FRAME
+      // single-frame (202 + 16 tag = 218 = MAX_PAYLOAD). Falls back to
+      // plaintext if no session is established (see v4_send_payload_smart).
+      sent = v4_send_payload_smart(mac, ESPNOW_V4_TYPE_FILE_DATA, 0, transferId,
+                                   chunkPayload, payloadLen, 1);
       if (!sent) {
         DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FILE_TX] Chunk %u send failed, retry %d", chunkIdx, attempt + 1);
         vTaskDelay(pdMS_TO_TICKS(20));
@@ -10247,8 +10337,8 @@ bool sendFileToMac(const uint8_t* mac, const String& localPath) {
   
   bool endSent = false;
   for (int attempt = 0; attempt < 3 && !endSent; attempt++) {
-    endSent = v4_send_frame(mac, ESPNOW_V4_TYPE_FILE_END, ESPNOW_V4_FLAG_ACK_REQ, transferId,
-                            (const uint8_t*)&endPayload, sizeof(endPayload), 1);
+    endSent = v4_send_payload_smart(mac, ESPNOW_V4_TYPE_FILE_END, ESPNOW_V4_FLAG_ACK_REQ, transferId,
+                                    (const uint8_t*)&endPayload, sizeof(endPayload), 1);
     if (!endSent) {
       WARN_ESPNOWF("[V4_FILE_TX] FILE_END send failed, retry %d", attempt + 1);
       vTaskDelay(pdMS_TO_TICKS(50));
@@ -10649,11 +10739,34 @@ const char* cmd_espnow_pairsecure(const String& argsInput) {
     strncpy(hb.deviceName, gSettings.espnowDeviceName.c_str(), sizeof(hb.deviceName) - 1);
     wifi_ap_record_t ap = {};
     hb.rssi = (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) ? ap.rssi : (int8_t)-127;
-    v4_send_frame(mac, ESPNOW_V4_TYPE_HEARTBEAT, ESPNOW_V4_FLAG_ACK_REQ, generateMessageId(),
-                  (const uint8_t*)&hb, (uint16_t)sizeof(hb), 1);
+    // 2026-05-19: smart-send so the post-pair seed heartbeat rides
+    // SESSION_FRAME if a session is already up (rare — usually KEY_EX hasn't
+    // run yet at this point, so this falls through to plaintext, which is
+    // what we want for bootstrap liveness).
+    v4_send_payload_smart(mac, ESPNOW_V4_TYPE_HEARTBEAT, ESPNOW_V4_FLAG_ACK_REQ, generateMessageId(),
+                          (const uint8_t*)&hb, (uint16_t)sizeof(hb), 1);
   }
   bool peersOk   = saveMeshPeers();
   bool devicesOk = saveEspNowDevices();
+
+  // 2026-05-19 — auto-trigger KEY_EX so "pairsecure" actually delivers a
+  // working end-to-end secure pair in one command. Without this the legacy
+  // LMK (now unused post-Phase-3.5) is the only "security" installed, and
+  // any default-encrypted unicast (espnowsend, espnowsessionsend, …) fails
+  // with "no peer identity — run espnowkeyex first" because the Phase 3.3
+  // KEY_EX never ran. KEY_EX is async (~100ms over the air) — by the time
+  // the user's next command lands, the peer identity will be cached and
+  // the next encrypted send will auto-kick SESSION_OPEN.
+  const char* meshLabelArg = (meshId < Settings::N_MESHES &&
+                              gSettings.meshes[meshId].label.length() > 0)
+                                 ? gSettings.meshes[meshId].label.c_str()
+                                 : nullptr;
+  bool keyExKicked = espnowKeyExInitiate(mac, meshLabelArg);
+  if (!keyExKicked) {
+    WARN_ESPNOWF("[pairsecure] KEY_EX initiate failed for %s — encrypted "
+                 "unicast will fail until the user runs espnowkeyex manually",
+                 macStr.c_str());
+  }
 
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   if (!peersOk || !devicesOk) {
@@ -10662,9 +10775,15 @@ const char* cmd_espnow_pairsecure(const String& argsInput) {
       "Peer will not persist across reboot.", deviceName.c_str(), macStr.c_str());
   } else {
     snprintf(getDebugBuffer(), 1024,
-             "Encrypted device paired successfully: %s (%s)\nKey fingerprint: %02X%02X%02X%02X...",
+             "Encrypted device paired successfully: %s (%s)\n"
+             "Key fingerprint: %02X%02X%02X%02X...\n"
+             "%s",
              deviceName.c_str(), macStr.c_str(),
-             gEspNow->derivedKey[0], gEspNow->derivedKey[1], gEspNow->derivedKey[2], gEspNow->derivedKey[3]);
+             gEspNow->derivedKey[0], gEspNow->derivedKey[1], gEspNow->derivedKey[2], gEspNow->derivedKey[3],
+             keyExKicked
+                 ? "KEY_EX_HELLO sent; peer identity will land in ~100ms — "
+                   "encrypted unicast (espnowsend, espnowsessionsend) is now usable."
+                 : "WARN: KEY_EX kick failed; run 'espnowkeyex <mac>' manually before encrypted unicast.");
   }
   return getDebugBuffer();
 }
@@ -11062,9 +11181,12 @@ const char* cmd_espnow_send(const String& argsInput) {
   uint32_t msgId = generateMessageId();
 
   if (encrypt) {
-    // Plaintext + 16-byte Poly1305 tag must fit in ESPNOW_V4_MAX_PAYLOAD (218 B).
+    // This CLI sends a single encrypted SESSION_FRAME (plaintext + 16-byte
+    // Poly1305 tag must fit ESPNOW_V4_MAX_PAYLOAD = 218 B). Encrypted-chunked
+    // transport exists (v4_send_encrypted_chunked) and is used by the file /
+    // smart-send paths, but this interactive command is single-frame only.
     if (msgLen > (size_t)(ESPNOW_V4_MAX_PAYLOAD - 16)) {
-      return "Error: encrypted message too long (max 202 plaintext bytes; fragment support is Phase 3.5+).";
+      return "Error: encrypted message too long for a single frame (max 202 plaintext bytes).";
     }
     char status[96] = {0};
     if (!v4_send_encrypted_or_queue(mac, ESPNOW_V4_TYPE_TEXT, ESPNOW_V4_FLAG_ACK_REQ,

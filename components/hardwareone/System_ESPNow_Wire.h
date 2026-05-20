@@ -286,17 +286,17 @@ struct __attribute__((packed)) V4PayloadMetadata {
 };
 static_assert(sizeof(V4PayloadMetadata) <= ESPNOW_V4_MAX_PLAINTEXT,
               "V4PayloadMetadata must fit a SESSION_FRAME plaintext budget "
-              "(MAX_PAYLOAD - AEAD_TAG = 202 B). If you need more space, "
-              "either trim a field, fragment, or wait for encrypted "
-              "fragmentation (Phase 3.5 task #51).");
+              "(MAX_PAYLOAD - AEAD_TAG = 202 B). For larger payloads, route "
+              "through v4_send_payload_smart or v4_send_encrypted_chunked "
+              "(Phase 3.5 task #51 — shipped).");
 
 // Command response payload — V4 keeps the V3 semantics for Phase 1
 // (single buffer, truncated). Phase 1.5 / Phase 2 may refactor to streaming
 // for unlimited output; for now, the cap is whatever ESPNOW_V4_MAX_PLAINTEXT
 // allows minus the success byte (so the response fits even when wrapped in
-// SESSION_FRAME — single-frame encrypted CMD_RESP). Larger responses use the
-// fragmented path (v4_send_chunked); see Phase 3.5 task #51 for tag-aware
-// fragmentation that'll let encrypted fragmented CMD_RESP work.
+// SESSION_FRAME — single-frame encrypted CMD_RESP). Larger responses go
+// through v4_send_payload_smart which prefers encrypted-chunked (Phase 3.5
+// task #51, shipped) and falls back to plaintext fragmented if no session.
 struct __attribute__((packed)) V4PayloadCmdResp {
   uint8_t success;                            // 1=success, 0=failure
   char    result[ESPNOW_V4_MAX_PLAINTEXT - 1]; // Null-terminated, 201 bytes — fits a SESSION_FRAME
@@ -469,12 +469,12 @@ struct __attribute__((packed)) V4PayloadFileStart {
 };
 
 // Phase 3.5: chunk data sized for ESPNOW_V4_MAX_PLAINTEXT so encrypted
-// file transfers (when task #6 flips FILE_DATA to encrypted) don't silently
-// truncate every chunk by 16 bytes. Per-chunk payload drops 216→200; total
-// file transfer takes ⌈N/200⌉ chunks instead of ⌈N/216⌉ — small bandwidth
-// hit. Plaintext file transfers also use the new smaller size for a single
-// code path; old firmware reading the V4PayloadFileStart.chunkSize field
-// adapts automatically.
+// file transfers don't silently truncate every chunk by 16 bytes. Per-chunk
+// payload is 200 (was 216 in plaintext-only V3); 200 + 16 AEAD tag = 216
+// fits MAX_PAYLOAD (218). 2026-05-19: FILE_START/DATA/END now route through
+// v4_send_payload_smart, so each chunk is session-encrypted when a session
+// exists and plaintext otherwise. Old firmware reading
+// V4PayloadFileStart.chunkSize adapts automatically.
 struct __attribute__((packed)) V4PayloadFileData {
   uint16_t chunkIndex;    // Chunk index (0-based)
   uint8_t  data[ESPNOW_V4_MAX_PLAINTEXT - 2];  // 200 bytes — fits a SESSION_FRAME
