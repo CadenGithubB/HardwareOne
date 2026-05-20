@@ -1870,6 +1870,50 @@ void applyRegisteredDefaults() {
   }
 }
 
+// Task #71 — bounds-check integer settings on load.
+//
+// Write path (handleSettingCommand at the bottom of this file) rejects
+// out-of-range values with an error message. Load path historically did
+// not — so a manually-edited settings.json, an old-firmware-written value,
+// or an on-disk bit flip could leave a setting outside its declared
+// [minVal, maxVal] for the entire boot. CLI reads would then surface the
+// invalid value to the user and the firmware would consume it for code
+// paths that assumed validation.
+//
+// Strategy: clamp to the nearest boundary (don't reject — that would
+// orphan the field to default, throwing away user intent for a single
+// corrupt byte) and log loudly so the corruption is visible. A field
+// with min=0/max=0 means "no bounds declared" and is left alone.
+static int settingsLoadClampInt(int raw, const SettingEntry* e) {
+  if (e->minVal == 0 && e->maxVal == 0) return raw;  // no bounds declared
+  if (raw < e->minVal) {
+    WARN_STORAGEF("[Settings] %s on-disk value %d below min %d — clamping",
+                  e->jsonKey, raw, e->minVal);
+    return e->minVal;
+  }
+  if (raw > e->maxVal) {
+    WARN_STORAGEF("[Settings] %s on-disk value %d above max %d — clamping",
+                  e->jsonKey, raw, e->maxVal);
+    return e->maxVal;
+  }
+  return raw;
+}
+
+static float settingsLoadClampFloat(float raw, const SettingEntry* e) {
+  if (e->minVal == 0 && e->maxVal == 0) return raw;
+  if (raw < (float)e->minVal) {
+    WARN_STORAGEF("[Settings] %s on-disk value %.3f below min %d — clamping",
+                  e->jsonKey, raw, e->minVal);
+    return (float)e->minVal;
+  }
+  if (raw > (float)e->maxVal) {
+    WARN_STORAGEF("[Settings] %s on-disk value %.3f above max %d — clamping",
+                  e->jsonKey, raw, e->maxVal);
+    return (float)e->maxVal;
+  }
+  return raw;
+}
+
 size_t readRegisteredSettings(JsonDocument& doc) {
   size_t count = 0;
 
@@ -1890,29 +1934,49 @@ size_t readRegisteredSettings(JsonDocument& doc) {
       JsonVariantConst val = current[e->jsonKey];
       if (val.isNull()) continue;
       switch (e->type) {
-        case SETTING_INT:
-          *((int*)e->valuePtr) = val | e->intDefault;
+        case SETTING_INT: {
+          int raw = val | e->intDefault;
+          *((int*)e->valuePtr) = settingsLoadClampInt(raw, e);
           count++;
           break;
-        case SETTING_U8:
-          // Clamp to uint8 range to guard against on-disk garbage from older
-          // firmware that wrote 4 bytes into a 1-byte field; the clamp
-          // recovers a sane value rather than re-clobbering adjacent fields.
-          *((uint8_t*)e->valuePtr) = (uint8_t)((uint32_t)(val | e->intDefault) & 0xFFu);
+        }
+        case SETTING_U8: {
+          // Width-clamp first to guard against on-disk garbage from older
+          // firmware that wrote 4 bytes into a 1-byte field, then range-clamp
+          // via the shared helper (task #71). Both protections matter:
+          //  - width-clamp recovers from struct corruption
+          //  - range-clamp catches manual tampering / bit flips within range
+          int raw = (int)((uint32_t)(val | e->intDefault) & 0xFFu);
+          *((uint8_t*)e->valuePtr) = (uint8_t)settingsLoadClampInt(raw, e);
           count++;
           break;
-        case SETTING_U16:
-          *((uint16_t*)e->valuePtr) = (uint16_t)((uint32_t)(val | e->intDefault) & 0xFFFFu);
+        }
+        case SETTING_U16: {
+          int raw = (int)((uint32_t)(val | e->intDefault) & 0xFFFFu);
+          *((uint16_t*)e->valuePtr) = (uint16_t)settingsLoadClampInt(raw, e);
           count++;
           break;
-        case SETTING_U32:
-          *((uint32_t*)e->valuePtr) = (uint32_t)(val | e->intDefault);
+        }
+        case SETTING_U32: {
+          // SETTING_U32 values can exceed INT_MAX, so clamp via uint32 math.
+          // Most U32 settings have maxVal that fits in int range anyway.
+          uint32_t raw = (uint32_t)(val | e->intDefault);
+          if (e->minVal != 0 || e->maxVal != 0) {
+            // Use the signed-int helper when bounds fit; otherwise let raw
+            // pass through (uint32 fields with bounds > INT_MAX are rare).
+            int clamped = settingsLoadClampInt((int)raw, e);
+            raw = (uint32_t)clamped;
+          }
+          *((uint32_t*)e->valuePtr) = raw;
           count++;
           break;
-        case SETTING_FLOAT:
-          *((float*)e->valuePtr) = val | e->floatDefault;
+        }
+        case SETTING_FLOAT: {
+          float raw = val | e->floatDefault;
+          *((float*)e->valuePtr) = settingsLoadClampFloat(raw, e);
           count++;
           break;
+        }
         case SETTING_BOOL:
           *((bool*)e->valuePtr) = val | (e->intDefault != 0);
           count++;
