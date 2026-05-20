@@ -165,6 +165,11 @@ int verifyKeyExPayload(const V4RxCtx& ctx, uint16_t expectedFp,
 
 }  // namespace
 
+// KEY_EX retry/timeout (F6) — clear the in-flight retry record for a peer once
+// the handshake resolves. Forward-declared here so the REPLY/CONFIRM handlers
+// (above the table definition) can call it; defined alongside the table below.
+static void keyExClearInFlight(const uint8_t peerMac[6]);
+
 // Build + send a KEY_EX_CONFIRM to peerMac with the given status
 // (0=ok, 1=hmac-fail, 2=pub-conflict). CONFIRM carries no HMAC — the prior
 // REPLY's HMAC already authenticated the peer — so this needs no mesh key,
@@ -308,6 +313,9 @@ void v4hKeyExReply(const V4RxCtx& ctx) {
   }
   logMac("KEY_EX_REPLY accepted from", msg->responderMac);
 
+  // Handshake resolved for us (initiator) — stop the HELLO retry timer (F6).
+  keyExClearInFlight(msg->responderMac);
+
   if (!ensureUnencryptedPeer(msg->responderMac)) return;
 
   // Send CONFIRM (status=0) — KEY_EX complete from our (initiator) side.
@@ -334,6 +342,11 @@ void v4hKeyExConfirm(const V4RxCtx& ctx) {
     return;
   }
 
+  // Terminal message — whether status=0 (ok) or status=2 (peer rejected our
+  // pubkey), the handshake is resolved; stop any HELLO retry timer (F6). A
+  // rejected handshake will never succeed, so retrying would be pointless.
+  keyExClearInFlight(msg->confirmerMac);
+
   if (msg->status == 0) {
     INFO_ESPNOWF("KEY_EX with %02X:%02X:%02X:%02X:%02X:%02X complete "
                  "(remote pub fp: %02X%02X%02X%02X%02X%02X%02X%02X)",
@@ -355,29 +368,37 @@ void v4hKeyExConfirm(const V4RxCtx& ctx) {
 // Initiator
 // ============================================================================
 
-bool espnowKeyExInitiate(const uint8_t peerMac[6], const char* meshLabel) {
-  if (!gEspNow || !gEspNow->initialized) {
-    ERROR_ESPNOWF("KEY_EX initiate: ESPNOW not initialized");
-    return false;
-  }
-  int slot = resolveMeshSlot(meshLabel);
-  if (slot < 0) {
-    ERROR_ESPNOWF("KEY_EX initiate: no enabled mesh matches label '%s'",
-                  meshLabel ? meshLabel : "(default)");
-    return false;
-  }
+// ----------------------------------------------------------------------------
+// KEY_EX retry / timeout (F6)
+//
+// KEY_EX was previously fire-and-forget: espnowKeyExInitiate sent one HELLO and
+// gave up if the REPLY never arrived (radio loss, peer busy). Now more visible
+// since espnowpairsecure auto-kicks KEY_EX. We adopt the same shape as the
+// pending-frame ring: a tiny fixed table of in-flight initiations + a sweep
+// called from the periodic espnow tick that re-sends the HELLO on timeout and
+// gives up after a bounded number of tries.
+//
+// We only need to retry the HELLO, not all three handshake messages: the
+// responder persists the initiator's identity on HELLO receipt and is fully
+// idempotent (a re-sent HELLO just re-persists the same key and re-emits the
+// REPLY). If the final CONFIRM is lost the responder already stored the
+// identity, so a single HELLO-retry makes the whole exchange robust.
+// ----------------------------------------------------------------------------
+
+// Build + send a single KEY_EX_HELLO for an already-resolved mesh slot. Shared
+// by the initial initiation and the retry sweep so neither duplicates the
+// keygen/HMAC. Returns true on radio-send success.
+static bool keyExSendHello(const uint8_t peerMac[6], int slot) {
   const MeshDerivedKeys* mk = meshKeysGet((uint8_t)slot);
   if (!mk) {
-    ERROR_ESPNOWF("KEY_EX initiate: mesh slot %d has no derived keys (passphrase not set?)",
-                  slot);
+    ERROR_ESPNOWF("KEY_EX: mesh slot %d has no derived keys (passphrase not set?)", slot);
     return false;
   }
   const auto& self = espnowIdentityGet();
   if (!self.valid) {
-    ERROR_ESPNOWF("KEY_EX initiate: own identity not loaded");
+    ERROR_ESPNOWF("KEY_EX: own identity not loaded");
     return false;
   }
-
   if (!ensureUnencryptedPeer(peerMac)) return false;
 
   uint8_t selfMac[6];
@@ -389,7 +410,7 @@ bool espnowKeyExInitiate(const uint8_t peerMac[6], const char* meshLabel) {
   memcpy(hello.senderPubEd25519, self.pub, 32);
   if (!computeKeyExHmac(hello.meshFingerprint, selfMac, self.pub,
                         mk->bootstrapKey, hello.hmac)) {
-    ERROR_ESPNOWF("KEY_EX initiate: HMAC compute failed");
+    ERROR_ESPNOWF("KEY_EX: HMAC compute failed");
     return false;
   }
 
@@ -405,6 +426,89 @@ bool espnowKeyExInitiate(const uint8_t peerMac[6], const char* meshLabel) {
   } else {
     ERROR_ESPNOWF("KEY_EX_HELLO send failed");
   }
+  return ok;
+}
+
+namespace {
+
+constexpr uint8_t  kKeyExInFlightSlots = 4;     // matches pending-frame sizing
+constexpr uint8_t  kKeyExMaxRetries    = 2;     // re-sends after the initial HELLO
+constexpr uint32_t kKeyExRetryMs       = 1500;  // re-send if unresolved this long
+
+struct KeyExInFlight {
+  bool     inUse;
+  uint8_t  peerMac[6];
+  int8_t   meshSlot;     // resolved slot, to rebuild the HELLO on retry
+  uint8_t  retriesLeft;
+  uint32_t lastSentMs;
+};
+
+// Tiny table (4 × ~16 B). Registered on cmd_exec (espnowKeyExInitiate via the
+// CLI / pairsecure); swept + cleared on the espnow task (RX handlers + tick).
+// Lock-free per the codebase convention for these small tables: register fills
+// all fields before setting inUse=true, so a concurrent sweep never observes a
+// half-populated in-use slot; clear is a single-bool write.
+KeyExInFlight gKeyExInFlight[kKeyExInFlightSlots] = {};
+
+void keyExInFlightArm(const uint8_t peerMac[6], int slot) {
+  KeyExInFlight* e = nullptr;
+  for (auto& k : gKeyExInFlight)
+    if (k.inUse && memcmp(k.peerMac, peerMac, 6) == 0) { e = &k; break; }
+  if (!e)
+    for (auto& k : gKeyExInFlight)
+      if (!k.inUse) { e = &k; break; }
+  if (!e) {
+    WARN_ESPNOWF("KEY_EX: in-flight table full — no retry coverage for this request");
+    return;
+  }
+  memcpy(e->peerMac, peerMac, 6);
+  e->meshSlot     = (int8_t)slot;
+  e->retriesLeft  = kKeyExMaxRetries;
+  e->lastSentMs   = (uint32_t)millis();
+  e->inUse        = true;   // publish last
+}
+
+}  // namespace
+
+static void keyExClearInFlight(const uint8_t peerMac[6]) {
+  for (auto& k : gKeyExInFlight)
+    if (k.inUse && memcmp(k.peerMac, peerMac, 6) == 0) { k.inUse = false; return; }
+}
+
+void keyExRetrySweep(uint32_t nowMs) {
+  for (auto& k : gKeyExInFlight) {
+    if (!k.inUse) continue;
+    if ((uint32_t)(nowMs - k.lastSentMs) < kKeyExRetryMs) continue;
+    if (k.retriesLeft == 0) {
+      WARN_ESPNOWF("KEY_EX: no REPLY from %02X:%02X:%02X:%02X:%02X:%02X after %u attempts — "
+                   "giving up (run espnowkeyex to retry)",
+                   k.peerMac[0], k.peerMac[1], k.peerMac[2], k.peerMac[3], k.peerMac[4], k.peerMac[5],
+                   (unsigned)(kKeyExMaxRetries + 1));
+      k.inUse = false;
+      continue;
+    }
+    k.retriesLeft--;
+    INFO_ESPNOWF("KEY_EX: no REPLY from %02X:%02X:%02X:%02X:%02X:%02X yet — retrying HELLO (%u left)",
+                 k.peerMac[0], k.peerMac[1], k.peerMac[2], k.peerMac[3], k.peerMac[4], k.peerMac[5],
+                 (unsigned)k.retriesLeft);
+    keyExSendHello(k.peerMac, k.meshSlot);   // failure just retries next tick / eventually gives up
+    k.lastSentMs = nowMs;
+  }
+}
+
+bool espnowKeyExInitiate(const uint8_t peerMac[6], const char* meshLabel) {
+  if (!gEspNow || !gEspNow->initialized) {
+    ERROR_ESPNOWF("KEY_EX initiate: ESPNOW not initialized");
+    return false;
+  }
+  int slot = resolveMeshSlot(meshLabel);
+  if (slot < 0) {
+    ERROR_ESPNOWF("KEY_EX initiate: no enabled mesh matches label '%s'",
+                  meshLabel ? meshLabel : "(default)");
+    return false;
+  }
+  bool ok = keyExSendHello(peerMac, slot);
+  if (ok) keyExInFlightArm(peerMac, slot);  // arm retry/timeout
   return ok;
 }
 

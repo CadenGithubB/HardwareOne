@@ -6595,6 +6595,8 @@ void processMeshHeartbeats() {
   // 1d. Phase 3.6 — zero expired prev-keys (held briefly after a REKEY so
   // in-flight frames sent under the old keys still decrypt).
   sessionRekeyPrevKeysSweep((uint32_t)millis());
+  // 1d2. F6 — re-send unanswered KEY_EX_HELLOs / expire dead handshakes.
+  keyExRetrySweep((uint32_t)millis());
   // 1e. Phase 3.6 — auto-trigger REKEY on threshold (txSeq>=10k OR age>=1h).
   // Walks the SessionState table; uses the kRekeyMinIntervalMs guard inside
   // espnowRekeyInitiate to avoid re-firing while a rekey is in flight.
