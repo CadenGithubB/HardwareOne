@@ -165,6 +165,29 @@ int verifyKeyExPayload(const V4RxCtx& ctx, uint16_t expectedFp,
 
 }  // namespace
 
+// Build + send a KEY_EX_CONFIRM to peerMac with the given status
+// (0=ok, 1=hmac-fail, 2=pub-conflict). CONFIRM carries no HMAC — the prior
+// REPLY's HMAC already authenticated the peer — so this needs no mesh key,
+// just our own identity for the OOB pubkey fingerprint. Shared by the
+// responder (HELLO handler) and the initiator (REPLY handler) so the
+// conflict-rejection path is symmetric by construction rather than by
+// duplicated inline builds (was: HELLO sent status=2 on conflict, REPLY
+// silently dropped — fixed by routing both through here).
+static void sendKeyExConfirm(const uint8_t peerMac[6], uint16_t meshFingerprint,
+                             uint8_t status) {
+  V4PayloadKeyExConfirm conf = {};
+  conf.meshFingerprint = meshFingerprint;
+  uint8_t selfMac[6]; esp_wifi_get_mac(WIFI_IF_STA, selfMac);
+  memcpy(conf.confirmerMac, selfMac, 6);
+  conf.status = status;
+  const auto& self = espnowIdentityGet();
+  if (self.valid) memcpy(conf.pubFingerprint, self.pub, 8);
+  v4_send_frame(peerMac, ESPNOW_V4_TYPE_KEY_EX_CONFIRM,
+                ESPNOW_V4_FLAG_HANDSHAKE | ESPNOW_V4_FLAG_ACK_REQ,
+                generateMessageId(),
+                reinterpret_cast<const uint8_t*>(&conf), sizeof(conf), 1);
+}
+
 // ============================================================================
 // Receive handlers
 // ============================================================================
@@ -218,17 +241,7 @@ void v4hKeyExHello(const V4RxCtx& ctx) {
 
   // If status != 0 (conflict), emit a CONFIRM with the status instead of REPLY.
   if (confirmStatus != 0) {
-    V4PayloadKeyExConfirm conf = {};
-    conf.meshFingerprint = msg->meshFingerprint;
-    uint8_t selfMac[6]; esp_wifi_get_mac(WIFI_IF_STA, selfMac);
-    memcpy(conf.confirmerMac, selfMac, 6);
-    conf.status = confirmStatus;
-    const auto& self = espnowIdentityGet();
-    if (self.valid) memcpy(conf.pubFingerprint, self.pub, 8);
-    v4_send_frame(msg->senderMac, ESPNOW_V4_TYPE_KEY_EX_CONFIRM,
-                  ESPNOW_V4_FLAG_HANDSHAKE | ESPNOW_V4_FLAG_ACK_REQ,
-                  generateMessageId(),
-                  reinterpret_cast<const uint8_t*>(&conf), sizeof(conf), 1);
+    sendKeyExConfirm(msg->senderMac, msg->meshFingerprint, confirmStatus);
     return;
   }
 
@@ -275,7 +288,14 @@ void v4hKeyExReply(const V4RxCtx& ctx) {
 
   const PeerIdentity* existing = peerIdentityFindByMac(msg->responderMac);
   if (existing && memcmp(existing->longTermPub, msg->responderPubEd25519, 32) != 0) {
-    WARN_ESPNOWF("KEY_EX_REPLY: peer presented new pubkey, refusing overwrite");
+    WARN_ESPNOWF("KEY_EX_REPLY: peer presented new pubkey, refusing overwrite — "
+                 "signaling reject (status=2). Run 'espnowforget' to re-pair.");
+    // Tell the responder we rejected them — symmetric with the HELLO-side
+    // conflict path. The peer is already in our hw table (we sent the HELLO
+    // that triggered this REPLY), but ensure it before sending defensively.
+    if (ensureUnencryptedPeer(msg->responderMac)) {
+      sendKeyExConfirm(msg->responderMac, msg->meshFingerprint, 2);
+    }
     return;
   }
 
@@ -290,19 +310,8 @@ void v4hKeyExReply(const V4RxCtx& ctx) {
 
   if (!ensureUnencryptedPeer(msg->responderMac)) return;
 
-  // Send CONFIRM (status=0) with our pubkey fingerprint for OOB display.
-  const auto& self = espnowIdentityGet();
-  V4PayloadKeyExConfirm conf = {};
-  conf.meshFingerprint = msg->meshFingerprint;
-  uint8_t selfMac[6]; esp_wifi_get_mac(WIFI_IF_STA, selfMac);
-  memcpy(conf.confirmerMac, selfMac, 6);
-  conf.status = 0;
-  if (self.valid) memcpy(conf.pubFingerprint, self.pub, 8);
-
-  v4_send_frame(msg->responderMac, ESPNOW_V4_TYPE_KEY_EX_CONFIRM,
-                ESPNOW_V4_FLAG_HANDSHAKE | ESPNOW_V4_FLAG_ACK_REQ,
-                generateMessageId(),
-                reinterpret_cast<const uint8_t*>(&conf), sizeof(conf), 1);
+  // Send CONFIRM (status=0) — KEY_EX complete from our (initiator) side.
+  sendKeyExConfirm(msg->responderMac, msg->meshFingerprint, 0);
 }
 
 void v4hKeyExConfirm(const V4RxCtx& ctx) {
