@@ -973,6 +973,19 @@ void runDeferredRekey(void* arg) {
     return;
   }
 
+  // F16 — reject a malformed (all-zero) peer ephemeral pubkey BEFORE we change
+  // any session state or send our REKEY reply. crypto_scalarmult rejects
+  // low-order points on recent libsodium, but the all-zero point is the cheap
+  // explicit guard. Validating here (pre-state-change) also closes the F3
+  // desync window: a forged/garbage REKEY can no longer push us into REKEYING
+  // and then strand us when the ECDH on a bad point fails.
+  if (sodium_is_zero(msg->newEphX25519Pub, 32)) {
+    WARN_ESPNOWF("REKEY rx: peer ephemeral pubkey is all-zero — rejecting (sessionId=%u)",
+                 (unsigned)msg->sessionId);
+    free(w);
+    return;
+  }
+
   // If we don't already have an outstanding REKEY of our own, generate one
   // now and send it. This is the "responder" path. The sendRekey() call
   // parks our fresh eph priv in s->rekeyEphPrivKey.
@@ -989,7 +1002,11 @@ void runDeferredRekey(void* arg) {
   // AEAD keys, swap atomically.
   uint8_t shared[32];
   if (!espnowCryptoX25519Shared(shared, s->rekeyEphPrivKey, msg->newEphX25519Pub)) {
-    ERROR_ESPNOWF("REKEY rx: X25519 shared computation failed");
+    // F3 — we may have already sent our REKEY reply (responder) or initiated
+    // (initiator), so we're in REKEYING. Abort back to ACTIVE rather than
+    // stranding the session; current keys are untouched and stay valid.
+    ERROR_ESPNOWF("REKEY rx: X25519 shared computation failed — aborting rekey");
+    sessionAbortRekey(s);
     free(w);
     return;
   }
@@ -997,7 +1014,8 @@ void runDeferredRekey(void* arg) {
   bool kdfOk = deriveRekeyedKeysFromShared(s, shared, newKeyTx, newKeyRx);
   sodium_memzero(shared, sizeof(shared));
   if (!kdfOk) {
-    ERROR_ESPNOWF("REKEY rx: KDF failed");
+    ERROR_ESPNOWF("REKEY rx: KDF failed — aborting rekey");
+    sessionAbortRekey(s);
     free(w);
     return;
   }

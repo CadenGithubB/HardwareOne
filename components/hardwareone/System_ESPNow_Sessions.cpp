@@ -678,6 +678,26 @@ bool sessionMarkRekeyInitiated(SessionState* s,
   return true;
 }
 
+// Phase 3.6 — the third leg of the rekey lifecycle (mark → apply | abort).
+// Reverts REKEYING → ACTIVE *without* installing new keys, discarding the
+// parked ephemeral private key. runDeferredRekey calls this when the ECDH or
+// KDF fails after it has already entered REKEYING, so a failed rekey can no
+// longer strand the session in REKEYING forever (sessionWrapFrame rejects all
+// sends in that state — the prior silent `return` left the session unusable
+// until reboot). The current AEAD keys were never touched, so the session
+// keeps working on them. Mirrors sessionApplyRekeyedKeys' tail by draining the
+// pending-frame queue: frames parked while we were briefly REKEYING can now go
+// out under the still-current keys.
+void sessionAbortRekey(SessionState* s) {
+  if (!s || s->state != SESSION_REKEYING) return;
+  sodium_memzero(s->rekeyEphPrivKey, sizeof(s->rekeyEphPrivKey));
+  s->rekeyInitiatedAtMs = 0;
+  s->rekeyTxSeqAtInit   = 0;
+  s->state              = SESSION_ACTIVE;
+  s->lastUseMs          = (uint32_t)millis();
+  pendingFrameDrainForPeer(s->peerMac);
+}
+
 void sessionRekeyPrevKeysSweep(uint32_t nowMs) {
   if (!gSessions) return;
   for (uint8_t i = 0; i < kSessionSlots; i++) {
