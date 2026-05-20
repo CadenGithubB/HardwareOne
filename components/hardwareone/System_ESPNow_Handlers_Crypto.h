@@ -43,6 +43,11 @@ void v4hKeyExConfirm (const V4RxCtx& ctx);
 // /system/espnow/peers/<mac>/ to confirm.
 bool espnowKeyExInitiate(const uint8_t peerMac[6], const char* meshLabel);
 
+// F6 — re-send unanswered KEY_EX_HELLOs and expire dead ones. Mirrors the
+// pending-frame timeout sweep; call from the periodic espnow tick. Re-sends
+// up to a bounded number of times (kKeyExMaxRetries) then gives up + WARNs.
+void keyExRetrySweep(uint32_t nowMs);
+
 // ---- Phase 3.4 — SESSION handshake -----------------------------------------
 
 // Receive handlers for SESSION_OPEN / SESSION_CONFIRM. Both verify the
