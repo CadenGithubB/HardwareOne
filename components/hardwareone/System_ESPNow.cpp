@@ -9,6 +9,7 @@
 #if ENABLE_ESPNOW
 
 #include <time.h>
+#include <new>                       // placement new — construct EspNowState's C++ members
 #include <ArduinoJson.h>
 #include <esp_wifi.h>
 #include <esp_chip_info.h>
@@ -930,8 +931,21 @@ void sendEspNowStreamMessage(const String& message) {
   if (!gEspNow || !gEspNow->initialized) return;
   if (gEspNow->streamingSuspended) return;
 
-  // Check for session-based streaming first (V3 CMD output)
-  if (gCurrentStreamCmdId != 0) {
+  // Check for session-based streaming first (V3 CMD output).
+  //
+  // CRITICAL — task gate: gCurrentStreamCmdId is a global set for the whole
+  // duration of an async bonded-command execution, and broadcastOutput() is
+  // also global. Without restricting to the command's actual task, log lines
+  // emitted by *unrelated* tasks during that window get force-streamed via a
+  // synchronous AEAD-encrypt + esp_now_send on whatever stack they're running.
+  // That (a) pollutes the command response with garbage (heartbeat ACKs, bond
+  // status pushes) and (b) overflows small task stacks — e.g. an `opengamepad`
+  // bonded command kicks the Seesaw init on sensor_queue_task (11 KB), and a
+  // nested STREAM frame send from inside that deep init blew the stack. Stream
+  // only the output produced by cmd_exec_task (24 KB), which is where the
+  // streamed command actually runs and emits its real output.
+  extern TaskHandle_t gCmdExecTaskHandle;
+  if (gCurrentStreamCmdId != 0 && xTaskGetCurrentTaskHandle() == gCmdExecTaskHandle) {
     size_t msgLen = message.length();
     if (msgLen > ESPNOW_V4_MAX_PAYLOAD - 1) msgLen = ESPNOW_V4_MAX_PAYLOAD - 1;
     if (trySendToStreamSession(gCurrentStreamCmdId, message.c_str(), msgLen)) {
@@ -2521,7 +2535,7 @@ static void processBondModeManifestResp(const uint8_t* srcMac, const String& dev
 #endif // ENABLE_BONDED_MODE
 
 // Forward declaration for command execution
-static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_t msgId, const char* cmd);
+static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_t msgId, const char* cmd, bool wasSessionEncrypted);
 
 // ============================================================================
 // V3 RX dispatch table (Phase 0 of docs/ESPNOW_V4_PLAN.md).
@@ -2555,6 +2569,12 @@ struct V4RxCtx {
   // device-level state from the frame (clock, master role, peer identity
   // claims) MUST gate on this — otherwise anyone in radio range can spoof.
   bool                     isAuthenticated;
+  // `isSessionEncrypted` is the narrower signal: true ONLY when the frame
+  // arrived AEAD-wrapped in a SESSION_FRAME (confidential). A BROADCAST_AUTH
+  // frame is authenticated-but-plaintext, so it sets isAuthenticated=true but
+  // isSessionEncrypted=false. Use this (not the legacy, now-never-set
+  // ESPNOW_V4_FLAG_ENCRYPTED header bit) for any "was this encrypted?" report.
+  bool                     isSessionEncrypted;
   const char*              deviceName;
 };
 
@@ -2616,7 +2636,11 @@ static void v4h_text(const V4RxCtx& ctx) {
       memcpy(slot.srcMac, ctx.recv_info->src_addr, 6);
       strncpy(slot.deviceName, ctx.deviceName, sizeof(slot.deviceName) - 1);
       slot.deviceName[sizeof(slot.deviceName) - 1] = '\0';
-      slot.encrypted = (ctx.h->flags & ESPNOW_V4_FLAG_ENCRYPTED) != 0;
+      // Reflect real transit confidentiality: a SESSION_FRAME-unwrapped TEXT
+      // is encrypted; broadcast-auth / plaintext TEXT is not. (Was reading the
+      // legacy ESPNOW_V4_FLAG_ENCRYPTED header bit, never set anymore, so the
+      // web UI's message bubble always showed "not encrypted".)
+      slot.encrypted = ctx.isSessionEncrypted;
       slot.used = true;
       gEspNow->textQueueHead = nextHead;
       DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_RX] TEXT message enqueued slot=%d (encrypted=%s)",
@@ -2647,6 +2671,9 @@ static void v4h_cmd(const V4RxCtx& ctx) {
     strncpy(gEspNow->deferredCmdDeviceName, ctx.deviceName, sizeof(gEspNow->deferredCmdDeviceName) - 1);
     gEspNow->deferredCmdDeviceName[sizeof(gEspNow->deferredCmdDeviceName) - 1] = '\0';
     gEspNow->deferredCmdMsgId = ctx.h->msgId;
+    // Carry the confidentiality signal to v4_handle_cmd. Bond (@BOND token)
+    // commands are rejected unless this is true — a plaintext token = RCE.
+    gEspNow->deferredCmdWasEncrypted = ctx.isSessionEncrypted;
     gEspNow->deferredCmdPending = true;
   }
 }
@@ -3072,37 +3099,68 @@ static void v4h_topo_peer(const V4RxCtx& ctx) {
 // USER_SYNC — propagates user credentials between bonded peers; requires
 // ESPNOW_V4_FLAG_ENCRYPTED, admin authentication, and a setting opt-in.
 // All early-rejection paths send their own ACK or CMD_RESP back.
-static void v4h_user_sync(const V4RxCtx& ctx) {
-  DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_USER_SYNC] Received from %s msgId=%lu encrypted=%s",
-         ctx.deviceName, (unsigned long)ctx.h->msgId, (ctx.h->flags & ESPNOW_V4_FLAG_ENCRYPTED) ? "YES" : "NO");
+// Defined in System_Utils.cpp; queues a callback onto cmd_exec_task. Declared
+// here (same extern as System_ESPNow_Handlers_Crypto.cpp) so USER_SYNC can
+// defer its heavy body off espnow_task.
+extern bool submitDeferredToCmdExec(ExecReq::DeferredFn fn, void* arg);
 
-  // Security: must be encrypted
-  if (!(ctx.h->flags & ESPNOW_V4_FLAG_ENCRYPTED)) {
-    ERROR_ESPNOWF("[USER_SYNC] SECURITY: Rejected from %s — encryption required", ctx.deviceName);
+// USER_SYNC is heavy: JSON parse, admin auth (password verify), users.json
+// read/modify/write, target password hashing, per-user settings write. All of
+// that is CPU- and FS-bound and must NOT run inline on espnow_task (it stalls
+// the RX-ring drain and can starve session handshakes). We snapshot the frame
+// into PSRAM and defer the whole body to cmd_exec_task — same model as
+// runDeferredSessionConfirm. The deferred body also OWNS all the response
+// sends, so they run off the dispatcher.
+struct DeferredUserSyncWork {
+  uint8_t  srcAddr[6];
+  uint32_t msgId;
+  bool     isSessionEncrypted;
+  char     deviceName[33];
+  uint16_t payloadLen;
+  uint8_t  payload[];  // flexible array; alloc = sizeof(*this) + payloadLen
+};
+
+static void doUserSyncWork(const DeferredUserSyncWork* w) {
+  const uint8_t* srcAddr      = w->srcAddr;
+  const uint32_t msgId        = w->msgId;
+  const char*    deviceName   = w->deviceName;
+  const uint8_t* payload      = w->payload;
+  const uint16_t payloadLen   = w->payloadLen;
+
+  DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_USER_SYNC] Processing from %s msgId=%lu encrypted=%s",
+         deviceName, (unsigned long)msgId, w->isSessionEncrypted ? "YES" : "NO");
+
+  // Security: must have arrived AEAD-encrypted in a SESSION_FRAME. Pre-fix
+  // this checked the legacy ESPNOW_V4_FLAG_ENCRYPTED bit, which the LMK rip
+  // (task #47) stopped ever setting — so USER_SYNC was ALWAYS rejected here
+  // even for correctly session-encrypted frames (espnowusersync was broken
+  // end-to-end). isSessionEncrypted is the real signal.
+  if (!w->isSessionEncrypted) {
+    ERROR_ESPNOWF("[USER_SYNC] SECURITY: Rejected from %s — must be session-encrypted", deviceName);
     broadcastOutput("[ESP-NOW] SECURITY: User sync rejected - encryption required");
-    v4_send_ack(ctx.recv_info->src_addr, ctx.h->msgId);
+    v4_send_ack(srcAddr, msgId);
     return;
   }
 
   // User sync must be enabled
   if (!gSettings.espnowUserSyncEnabled) {
-    WARN_ESPNOWF("[USER_SYNC] Disabled — rejecting from %s", ctx.deviceName);
+    WARN_ESPNOWF("[USER_SYNC] Disabled — rejecting from %s", deviceName);
     broadcastOutput("[ESP-NOW] User sync DISABLED - enable with 'espnowusersync on'");
-    v4_send_ack(ctx.recv_info->src_addr, ctx.h->msgId);
+    v4_send_ack(srcAddr, msgId);
     return;
   }
 
-  if (ctx.payloadLen == 0) {
-    WARN_ESPNOWF("[USER_SYNC] Empty payload from %s", ctx.deviceName);
-    v4_send_command_response(ctx.recv_info->src_addr, ctx.h->msgId, false, "Empty payload", strlen("Empty payload"));
+  if (payloadLen == 0) {
+    WARN_ESPNOWF("[USER_SYNC] Empty payload from %s", deviceName);
+    v4_send_command_response(srcAddr, msgId, false, "Empty payload", strlen("Empty payload"));
     return;
   }
 
   PSRAM_JSON_DOC(doc);
-  String jsonStr((const char*)ctx.payload, ctx.payloadLen);
+  String jsonStr((const char*)payload, payloadLen);
   if (deserializeJson(doc, jsonStr) != DeserializationError::Ok) {
-    WARN_ESPNOWF("[USER_SYNC] Malformed JSON from %s", ctx.deviceName);
-    v4_send_command_response(ctx.recv_info->src_addr, ctx.h->msgId, false, "Malformed JSON", strlen("Malformed JSON"));
+    WARN_ESPNOWF("[USER_SYNC] Malformed JSON from %s", deviceName);
+    v4_send_command_response(srcAddr, msgId, false, "Malformed JSON", strlen("Malformed JSON"));
     return;
   }
 
@@ -3113,22 +3171,22 @@ static void v4h_user_sync(const V4RxCtx& ctx) {
   const char* role       = doc["role"]        | "user";
 
   if (!strlen(adminUser) || !strlen(adminPass) || !strlen(targetUser) || !strlen(targetPass)) {
-    WARN_ESPNOWF("[USER_SYNC] Missing required fields from %s", ctx.deviceName);
-    v4_send_command_response(ctx.recv_info->src_addr, ctx.h->msgId, false, "Missing required fields", strlen("Missing required fields"));
+    WARN_ESPNOWF("[USER_SYNC] Missing required fields from %s", deviceName);
+    v4_send_command_response(srcAddr, msgId, false, "Missing required fields", strlen("Missing required fields"));
     return;
   }
 
   if (!isValidUser(String(adminUser), String(adminPass))) {
-    ERROR_ESPNOWF("[USER_SYNC] Admin auth FAILED for '%s' from %s", adminUser, ctx.deviceName);
+    ERROR_ESPNOWF("[USER_SYNC] Admin auth FAILED for '%s' from %s", adminUser, deviceName);
     broadcastOutput("[ESP-NOW] User sync: Admin authentication FAILED");
-    v4_send_command_response(ctx.recv_info->src_addr, ctx.h->msgId, false, "Admin authentication failed", strlen("Admin authentication failed"));
+    v4_send_command_response(srcAddr, msgId, false, "Admin authentication failed", strlen("Admin authentication failed"));
     return;
   }
 
   if (!isAdminUser(String(adminUser))) {
-    ERROR_ESPNOWF("[USER_SYNC] '%s' is not admin — sync rejected from %s", adminUser, ctx.deviceName);
+    ERROR_ESPNOWF("[USER_SYNC] '%s' is not admin — sync rejected from %s", adminUser, deviceName);
     broadcastOutput("[ESP-NOW] User sync: Admin privileges required");
-    v4_send_command_response(ctx.recv_info->src_addr, ctx.h->msgId, false, "Admin privileges required", strlen("Admin privileges required"));
+    v4_send_command_response(srcAddr, msgId, false, "Admin privileges required", strlen("Admin privileges required"));
     return;
   }
 
@@ -3136,13 +3194,13 @@ static void v4h_user_sync(const V4RxCtx& ctx) {
   if (getUserIdByUsername(String(targetUser), existingId)) {
     WARN_ESPNOWF("[USER_SYNC] User '%s' already exists (id=%u) — skipping", targetUser, (unsigned)existingId);
     BROADCAST_PRINTF("[ESP-NOW] User sync: '%s' already exists", targetUser);
-    v4_send_command_response(ctx.recv_info->src_addr, ctx.h->msgId, true, "User already exists (skipped)", strlen("User already exists (skipped)"));
+    v4_send_command_response(srcAddr, msgId, true, "User already exists (skipped)", strlen("User already exists (skipped)"));
     return;
   }
 
   if (!filesystemReady) {
     ERROR_ESPNOWF("[USER_SYNC] Filesystem not ready");
-    v4_send_command_response(ctx.recv_info->src_addr, ctx.h->msgId, false, "Filesystem not ready", strlen("Filesystem not ready"));
+    v4_send_command_response(srcAddr, msgId, false, "Filesystem not ready", strlen("Filesystem not ready"));
     return;
   }
 
@@ -3156,14 +3214,14 @@ static void v4h_user_sync(const V4RxCtx& ctx) {
 
     if (!VFS::existsGuarded(USERS_JSON_FILE, userSyncCtx)) {
       ERROR_ESPNOWF("[USER_SYNC] users.json not found");
-      v4_send_command_response(ctx.recv_info->src_addr, ctx.h->msgId, false, "users.json not found", strlen("users.json not found"));
+      v4_send_command_response(srcAddr, msgId, false, "users.json not found", strlen("users.json not found"));
       return;
     }
 
     File f = VFS::openGuarded(USERS_JSON_FILE, "r", userSyncCtx);
     if (!f) {
       ERROR_ESPNOWF("[USER_SYNC] Could not open users.json");
-      v4_send_command_response(ctx.recv_info->src_addr, ctx.h->msgId, false, "Could not open users.json", strlen("Could not open users.json"));
+      v4_send_command_response(srcAddr, msgId, false, "Could not open users.json", strlen("Could not open users.json"));
       return;
     }
 
@@ -3173,7 +3231,7 @@ static void v4h_user_sync(const V4RxCtx& ctx) {
 
     if (err || !userDoc["users"]) {
       ERROR_ESPNOWF("[USER_SYNC] Malformed users.json");
-      v4_send_command_response(ctx.recv_info->src_addr, ctx.h->msgId, false, "Malformed users.json", strlen("Malformed users.json"));
+      v4_send_command_response(srcAddr, msgId, false, "Malformed users.json", strlen("Malformed users.json"));
       return;
     }
 
@@ -3186,7 +3244,7 @@ static void v4h_user_sync(const V4RxCtx& ctx) {
     newUser["role"]      = role;
     newUser["createdAt"] = (const char*)nullptr;
     char createdByBuf[48];
-    snprintf(createdByBuf, sizeof(createdByBuf), "espnow:%s", ctx.deviceName);
+    snprintf(createdByBuf, sizeof(createdByBuf), "espnow:%s", deviceName);
     newUser["createdBy"] = createdByBuf;
     newUser["createdMs"] = millis();
     extern uint32_t gNTPAnchorId;
@@ -3199,7 +3257,7 @@ static void v4h_user_sync(const V4RxCtx& ctx) {
     if (!f || serializeJson(userDoc, f) == 0) {
       if (f) f.close();
       ERROR_ESPNOWF("[USER_SYNC] Failed to write users.json");
-      v4_send_command_response(ctx.recv_info->src_addr, ctx.h->msgId, false, "Failed to write users.json", strlen("Failed to write users.json"));
+      v4_send_command_response(srcAddr, msgId, false, "Failed to write users.json", strlen("Failed to write users.json"));
       return;
     }
     f.close();
@@ -3211,13 +3269,40 @@ static void v4h_user_sync(const V4RxCtx& ctx) {
     saveUserSettings((uint32_t)nextId, defaults);
 
     INFO_ESPNOWF("[USER_SYNC] Created user '%s' (id=%d role=%s) from %s",
-                 targetUser, nextId, role, ctx.deviceName);
+                 targetUser, nextId, role, deviceName);
     BROADCAST_PRINTF("[ESP-NOW] User sync: Created '%s' (role=%s) from %s",
-                     targetUser, role, ctx.deviceName);
+                     targetUser, role, deviceName);
 
     char respBuf[128];
     snprintf(respBuf, sizeof(respBuf), "User '%s' created (id=%d)", targetUser, nextId);
-    v4_send_command_response(ctx.recv_info->src_addr, ctx.h->msgId, true, respBuf, strlen(respBuf));
+    v4_send_command_response(srcAddr, msgId, true, respBuf, strlen(respBuf));
+  }
+}
+
+static void runDeferredUserSync(void* arg) {
+  auto* w = static_cast<DeferredUserSyncWork*>(arg);
+  doUserSyncWork(w);
+  free(w);
+}
+
+// On-RX (espnow_task): snapshot frame into PSRAM and defer. Lightweight only.
+static void v4h_user_sync(const V4RxCtx& ctx) {
+  const size_t need = sizeof(DeferredUserSyncWork) + ctx.payloadLen;
+  auto* w = static_cast<DeferredUserSyncWork*>(
+      ps_alloc(need, AllocPref::PreferPSRAM, "espnow.usersync.defer"));
+  if (!w) {
+    ERROR_ESPNOWF("[USER_SYNC] PSRAM alloc failed (defer drop) from %s", ctx.deviceName);
+    return;
+  }
+  memcpy(w->srcAddr, ctx.recv_info->src_addr, 6);
+  w->msgId              = ctx.h->msgId;
+  w->isSessionEncrypted = ctx.isSessionEncrypted;
+  strlcpy(w->deviceName, ctx.deviceName ? ctx.deviceName : "", sizeof(w->deviceName));
+  w->payloadLen = ctx.payloadLen;
+  if (ctx.payloadLen) memcpy(w->payload, ctx.payload, ctx.payloadLen);
+  if (!submitDeferredToCmdExec(runDeferredUserSync, w)) {
+    ERROR_ESPNOWF("[USER_SYNC] cmd_exec queue full, dropping from %s", ctx.deviceName);
+    free(w);
   }
 }
 
@@ -3532,10 +3617,10 @@ static void v4h_file_end(const V4RxCtx& ctx) {
     } else
 #endif // ENABLE_BONDED_MODE
     {
-      String senderMacHex = macToHexString(sndMac);
-      senderMacHex.replace(":", "");
+      char senderToken[13];
+      macToPathToken(sndMac, senderToken);  // canonical PATH TOKEN form
       char deviceDir[64];
-      snprintf(deviceDir, sizeof(deviceDir), "/espnow/received/%s", senderMacHex.c_str());
+      snprintf(deviceDir, sizeof(deviceDir), "/espnow/received/%s", senderToken);
 
       FsLockGuard guard("v4file.write");
       VFS::mkdirGuarded("/espnow", VFS::systemAuth("espnow.v4_file_write_mkdir"));
@@ -3679,7 +3764,7 @@ static void v4_dispatch_post_cleanup(const esp_now_recv_info* recv_info, const E
 static bool v4_dispatch_table_try(const esp_now_recv_info* recv_info, const EspNowV4Header* h,
                                   const uint8_t* payload, uint16_t payloadLen,
                                   bool isPaired, bool isAuthenticated,
-                                  const char* deviceName) {
+                                  bool isSessionEncrypted, const char* deviceName) {
   const V4OpcodeEntry* e = v4_dispatch_lookup(h->type);
   if (!e) return false;
   if ((e->flags & V4_OPC_FLAG_REQ_PAIRED) && !isPaired) {
@@ -3715,7 +3800,7 @@ static bool v4_dispatch_table_try(const esp_now_recv_info* recv_info, const EspN
   // payloads can be unwrapped per-fragment before the reassembler. By the
   // time we reach this point, `payload` is already plaintext and the
   // SESSION_FRAME flag has been cleared in the local header copy.
-  V4RxCtx ctx{recv_info, h, payload, payloadLen, isPaired, isAuthenticated, deviceName};
+  V4RxCtx ctx{recv_info, h, payload, payloadLen, isPaired, isAuthenticated, isSessionEncrypted, deviceName};
   e->handler(ctx);
   v4_dispatch_post_cleanup(recv_info, h);
   return true;
@@ -3763,6 +3848,10 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
   // REQ_AUTHENTICATED gate) can refuse state-mutating frames that weren't
   // authenticated.
   bool wasAuthenticated = false;
+  // Narrower than wasAuthenticated: true only for an AEAD-decrypted
+  // SESSION_FRAME (confidential). BROADCAST_AUTH leaves this false (it's
+  // authenticated plaintext). Drives the honest "encrypted" reporting below.
+  bool wasSessionEncrypted = false;
 
   // === Phase 3.5 task #32 — BROADCAST_AUTH HMAC verification ===
   // If the BROADCAST_AUTH flag is set, the last 32 bytes of the payload are
@@ -3866,6 +3955,7 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
     payload = plainBuf;
     payloadLen = plainLen;
     wasAuthenticated = true;
+    wasSessionEncrypted = true;  // AEAD-decrypted — genuinely confidential
     DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_RX] SESSION_FRAME unwrapped: type=%u msgId=%lu frag=%u/%u plainLen=%u",
            h->type, (unsigned long)h->msgId, h->fragIndex + 1, h->fragCount, plainLen);
   }
@@ -4099,9 +4189,14 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
     deviceName = macStrBuf; 
   }
   
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_RX] Source: %s (paired=%s encrypted=%s)",
-         deviceName, isPaired ? "YES" : "NO", 
-         (h->flags & ESPNOW_V4_FLAG_ENCRYPTED) ? "YES" : "NO");
+  // enc = AEAD-decrypted SESSION_FRAME (confidential); auth = that OR a
+  // verified BROADCAST_AUTH HMAC (authenticated, maybe plaintext). The old
+  // log read ESPNOW_V4_FLAG_ENCRYPTED, a legacy LMK bit that's never set
+  // anymore, so it always printed "encrypted=NO" — even for AEAD frames.
+  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_RX] Source: %s (paired=%s enc=%s auth=%s)",
+         deviceName, isPaired ? "YES" : "NO",
+         wasSessionEncrypted ? "YES" : "NO",
+         wasAuthenticated ? "YES" : "NO");
 
 #if ENABLE_BONDED_MODE
   // Track when bond-type messages arrive but would be rejected due to isPaired=false
@@ -4132,7 +4227,7 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
   // `wasAuthenticated` proves the frame holds either our session key
   // (SESSION_FRAME unwrap) or the mesh group key (BROADCAST_AUTH HMAC).
   if (v4_dispatch_table_try(recv_info, h, payload, payloadLen,
-                            isPaired, wasAuthenticated, deviceName)) {
+                            isPaired, wasAuthenticated, wasSessionEncrypted, deviceName)) {
     return true;
   }
 
@@ -4241,7 +4336,7 @@ static void v4CmdResultCallback(bool ok, const char* result, void* userData) {
 //   1. "username:password:command" - Traditional auth with credentials
 //   2. "@BOND:<32-hex-token>:command" - Bond mode session token auth
 // Authenticates quickly, then queues to cmd_exec task for execution
-static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_t msgId, const char* cmdPayload) {
+static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_t msgId, const char* cmdPayload, bool wasSessionEncrypted) {
   const char* firstColon = strchr(cmdPayload, ':');
   if (!firstColon) {
     BROADCAST_PRINTF("[ESP-NOW] Invalid CMD format from %s (missing delimiter)", deviceName);
@@ -4259,6 +4354,27 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
   // Declare username outside the if/else blocks so it's accessible later
   char username[32] = "espnow";  // Default for token auth
   
+  // SECURITY (applies to BOTH auth methods below): every remote command carries
+  // a credential — a bond token OR a username:password — and runs a command on
+  // this device. Require the frame to have arrived AEAD-wrapped in a
+  // SESSION_FRAME. Plaintext means the credential is exposed on-air AND the
+  // command is forgeable/replayable (token-replay RCE, or password capture).
+  // Senders route commands through v4_send_encrypted_or_queue, so a legitimate
+  // command is always encrypted. One gate, both paths — reject plaintext loudly
+  // before we even look at the credential.
+  if (!wasSessionEncrypted) {
+    ERROR_ESPNOWF("[ESP-NOW] REJECTED plaintext remote command from %s — session "
+                  "encryption required (credential exposure / replay)", deviceName);
+    BROADCAST_PRINTF("[ESP-NOW] SECURITY: rejected unencrypted remote command from %s", deviceName);
+    uint8_t respPayload[64];
+    respPayload[0] = 0;
+    const char* errMsg = "Remote command must be session-encrypted";
+    memcpy(respPayload + 1, errMsg, strlen(errMsg) + 1);
+    v4_send_payload_smart(srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
+                          generateMessageId(), respPayload, 1 + strlen(errMsg) + 1, 1);
+    return;
+  }
+
   if (strncmp(cmdPayload, "@BOND:", 6) == 0) {
     DEBUG_ESPNOWF("[BOND_AUTH] Received bonded command from %s", deviceName);
     size_t tokenLen = secondColon - firstColon - 1;
@@ -4516,8 +4632,7 @@ static void captureEspNowFrame(const char* direction, const uint8_t* peerMac,
 
   char macStr[20];
   if (peerMac) {
-    snprintf(macStr, sizeof(macStr), "%02x:%02x:%02x:%02x:%02x:%02x",
-             peerMac[0], peerMac[1], peerMac[2], peerMac[3], peerMac[4], peerMac[5]);
+    macToDisplay(peerMac, macStr, sizeof(macStr));  // canonical DISPLAY form
   } else {
     strcpy(macStr, "??:??:??:??:??:??");
   }
@@ -4634,6 +4749,7 @@ static void buildLocalBondStatus(BondPeerStatus& status) {
   // Build sensor enabled mask from runtime booleans
   extern bool gThermalEnabled, gTofEnabled, gImuEnabled, gGamepadEnabled;
   extern bool gGpsEnabled, gPresenceEnabled;
+  extern bool gRtcEnabled, gApdsEnabled, gFmRadioEnabled;
   uint16_t enabled = 0;
 #if ENABLE_THERMAL_SENSOR
   if (gThermalEnabled)  enabled |= CAP_SENSOR_THERMAL;
@@ -4653,11 +4769,21 @@ static void buildLocalBondStatus(BondPeerStatus& status) {
 #if ENABLE_PRESENCE_SENSOR
   if (gPresenceEnabled) enabled |= CAP_SENSOR_PRESENCE;
 #endif
+#if ENABLE_RTC_SENSOR
+  if (gRtcEnabled)      enabled |= CAP_SENSOR_RTC;
+#endif
+#if ENABLE_APDS_SENSOR
+  if (gApdsEnabled)     enabled |= CAP_SENSOR_APDS;
+#endif
+#if ENABLE_FM_RADIO
+  if (gFmRadioEnabled)  enabled |= CAP_SENSOR_FMRADIO;
+#endif
   status.sensorEnabledMask = enabled;
-  
+
   // Build sensor connected mask
   extern bool gThermalConnected, gTofConnected, gImuConnected, gGamepadConnected;
   extern bool gGpsConnected, gPresenceConnected;
+  extern bool gRtcConnected, gApdsConnected, gFmRadioConnected;
   uint16_t connected = 0;
 #if ENABLE_THERMAL_SENSOR
   if (gThermalConnected)  connected |= CAP_SENSOR_THERMAL;
@@ -4676,6 +4802,15 @@ static void buildLocalBondStatus(BondPeerStatus& status) {
 #endif
 #if ENABLE_PRESENCE_SENSOR
   if (gPresenceConnected) connected |= CAP_SENSOR_PRESENCE;
+#endif
+#if ENABLE_RTC_SENSOR
+  if (gRtcConnected)      connected |= CAP_SENSOR_RTC;
+#endif
+#if ENABLE_APDS_SENSOR
+  if (gApdsConnected)     connected |= CAP_SENSOR_APDS;
+#endif
+#if ENABLE_FM_RADIO
+  if (gFmRadioConnected)  connected |= CAP_SENSOR_FMRADIO;
 #endif
   status.sensorConnectedMask = connected;
   
@@ -4800,7 +4935,10 @@ static void buildCapabilitySummary(CapabilitySummary& cap) {
 #if ENABLE_PRESENCE_SENSOR
   cap.sensorMask |= CAP_SENSOR_PRESENCE;
 #endif
-  
+#if ENABLE_FM_RADIO
+  cap.sensorMask |= CAP_SENSOR_FMRADIO;
+#endif
+
   // Hardware info
   esp_wifi_get_mac(WIFI_IF_STA, cap.mac);
   
@@ -4913,8 +5051,11 @@ static String generateDeviceManifest() {
   for (int c = 0; c < (int)(sizeof(cats)/sizeof(cats[0])); c++) {
     for (int i = 0; i < cats[c].count; i++) {
       JsonObject app = apps.add<JsonObject>();
-      app["name"] = cats[c].items[i].name;
-      app["icon"] = cats[c].items[i].iconName;
+      // ArduinoJson stores const char* by reference (no copy) and calls
+      // strlen() at serialize time — a null pointer => strlen(NULL) crash.
+      // Guard every raw const char* the same way `description` is below.
+      app["name"] = cats[c].items[i].name     ? cats[c].items[i].name     : "";
+      app["icon"] = cats[c].items[i].iconName ? cats[c].items[i].iconName : "";
       app["mode"] = (int)cats[c].items[i].targetMode;
     }
   }
@@ -4928,14 +5069,16 @@ static String generateDeviceManifest() {
   
   for (size_t m = 0; m < moduleCount; m++) {
     JsonObject module = cliModules.add<JsonObject>();
-    module["name"] = modules[m].name;
+    module["name"] = modules[m].name ? modules[m].name : "";
     module["description"] = modules[m].description ? modules[m].description : "";
-    
+
     JsonArray commands = module["commands"].to<JsonArray>();
     for (size_t c = 0; c < modules[m].count; c++) {
       JsonObject cmd = commands.add<JsonObject>();
-      cmd["name"] = modules[m].commands[c].name;
-      cmd["help"] = modules[m].commands[c].help;
+      // Guard each const char*: a null name/help => strlen(NULL) crash in
+      // ArduinoJson serialize (it stores the pointer, not a copy).
+      cmd["name"] = modules[m].commands[c].name ? modules[m].commands[c].name : "";
+      cmd["help"] = modules[m].commands[c].help ? modules[m].commands[c].help : "";
       cmd["admin"] = modules[m].commands[c].requiresAdmin;
     }
   }
@@ -5047,10 +5190,9 @@ static bool cacheSettingsToLittleFS(const uint8_t* peerMac, const String& settin
     return false;
   }
   
-  // Build path from MAC address
-  char macStr[18];
-  snprintf(macStr, sizeof(macStr), "%02X%02X%02X%02X%02X%02X",
-           peerMac[0], peerMac[1], peerMac[2], peerMac[3], peerMac[4], peerMac[5]);
+  // Build path from MAC address (canonical PATH TOKEN form, System_Utils.h)
+  char macStr[13];
+  macToPathToken(peerMac, macStr);
   
   char dirPath[48];
   snprintf(dirPath, sizeof(dirPath), "/system/espnow/peers/%s", macStr);
@@ -5093,10 +5235,9 @@ String loadSettingsFromCache(const uint8_t* peerMac) {
     return "";
   }
   
-  // Build path from MAC address
-  char macStr[18];
-  snprintf(macStr, sizeof(macStr), "%02X%02X%02X%02X%02X%02X",
-           peerMac[0], peerMac[1], peerMac[2], peerMac[3], peerMac[4], peerMac[5]);
+  // Build path from MAC address (canonical PATH TOKEN form, System_Utils.h)
+  char macStr[13];
+  macToPathToken(peerMac, macStr);
   
   char filePath[64];
   snprintf(filePath, sizeof(filePath), "/system/espnow/peers/%s/settings.json", macStr);
@@ -5970,15 +6111,12 @@ void formatMacAddressBuf(const uint8_t* mac, char* buf, size_t bufSize) {
     if (bufSize > 0) buf[0] = '\0';
     return;
   }
-  snprintf(buf, bufSize, "%02X:%02X:%02X:%02X:%02X:%02X",
-           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  macToDisplay(mac, buf, bufSize);  // canonical DISPLAY form (System_Utils.h)
 }
 
 // Helper: Format MAC address as string (convenience wrapper, allocates String)
 String formatMacAddress(const uint8_t* mac) {
-  char buf[18];
-  formatMacAddressBuf(mac, buf, sizeof(buf));
-  return String(buf);
+  return macToDisplayStr(mac);  // canonical DISPLAY form (System_Utils.h)
 }
 
 // Helper: Parse MAC address from string (flexible format)
@@ -6277,18 +6415,16 @@ static void loadEspNowDevices() {
 
 // Convert 6-byte MAC to colon-separated hex string ("AA:BB:CC:DD:EE:FF")
 String macToHexString(const uint8_t mac[6]) {
-  char buf[18];
-  snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X",
-           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-  return String(buf);
+  return macToDisplayStr(mac);  // canonical DISPLAY form (System_Utils.h)
 }
 
 // Parse MAC string ("AA:BB:CC:DD:EE:FF") into byte array (fills zeros on parse failure)
 void macFromHexString(const String& s, uint8_t out[6]) {
-  unsigned int b[6] = {0, 0, 0, 0, 0, 0};
-  sscanf(s.c_str(), "%02x:%02x:%02x:%02x:%02x:%02x",
-         &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]);
-  for (int i = 0; i < 6; i++) out[i] = (uint8_t)b[i];
+  // Canonical lenient parser (System_Utils.h). Preserve the historical
+  // contract: zero-fill the output on any parse failure.
+  if (!macParse(s.c_str(), out)) {
+    memset(out, 0, 6);
+  }
 }
 
 // Find (or optionally create) a MeshPeerHealth slot for a given MAC
@@ -6493,9 +6629,11 @@ void removeEspNowDevice(const uint8_t* mac) {
 // Initialize a JsonDocument as a V2-style JSON envelope with standard fields
 void v2_init_envelope(JsonDocument& doc, const char* type, uint32_t msgId,
                       const char* src, const char* dst, int ttl) {
-  doc["type"] = type;
+  // ArduinoJson stores const char* by reference and strlen()s it at serialize
+  // time — a null pointer => strlen(NULL) crash. Guard every raw pointer.
+  doc["type"] = type ? type : "";
   doc["id"]   = msgId;
-  doc["src"]  = src;
+  doc["src"]  = src ? src : "";
   if (dst && dst[0]) doc["dst"] = dst;
   if (ttl >= 0)      doc["ttl"] = ttl;
 }
@@ -6562,7 +6700,78 @@ void checkTopologyCollectionWindow() {
 
 static TaskHandle_t gEspNowHbTaskHandle = nullptr;
 
-// Main heartbeat task body: drain RX ring, send periodic HB, process queues
+// True if a file transfer FROM `mac` is currently mid-flight (RECEIVING).
+// Used by the bond-sync retry logic so we don't fire a duplicate MANIFEST_REQ
+// (or SETTINGS_REQ) while the answer is already streaming in chunk-by-chunk —
+// a manifest is ~220 chunks / several seconds, easily longer than the retry
+// window, which otherwise triggers a redundant full re-send.
+static bool espnowInboundFileActiveFrom(const uint8_t mac[6]) {
+  uint8_t n = fileSlotsSlotCount();
+  for (uint8_t i = 0; i < n; i++) {
+    FileTransferSlotInfo info;
+    if (!fileSlotsSnapshot(i, &info)) continue;
+    if (info.state == FILE_SLOT_RECEIVING && memcmp(info.peerMac, mac, 6) == 0)
+      return true;
+  }
+  return false;
+}
+
+#if ENABLE_BONDED_MODE
+// Event-driven gate for bond manifest/settings file sends. Returns true if the
+// send should proceed NOW — either an encrypted session to `mac` is ACTIVE, or
+// we've already waited past the deadline and should fall back to plaintext.
+// Returns false to DEFER: the caller leaves its pending flag set and retries on
+// a later tick.
+//
+// This MUST NOT block. It runs on espnow_task, which is also the RX-ring
+// drainer. Blocking to wait for the session would stall the very task that
+// processes the inbound SESSION_CONFIRM, so the session could never reach
+// ACTIVE — exactly the self-deadlock the old in-sendFileToMac poll loop hit.
+// By deferring instead, espnow_task keeps draining RX, the handshake completes
+// (SESSION_CONFIRM → cmd_exec sets the session ACTIVE), and a subsequent tick
+// observes SESSION_ACTIVE and sends encrypted.
+static bool bondSendReadyOrDeferred(const uint8_t* mac) {
+  if (!gEspNow) return true;
+  const PeerIdentity* pid = peerIdentityFindByMac(mac);
+  if (!pid) {                              // no identity → no session possible
+    gEspNow->bondSendWaitDeadlineMs = 0;
+    return true;                           // send now (plaintext)
+  }
+  SessionState* s = sessionFindByPeer(mac, pid->meshId);
+  if (s && s->state == SESSION_ACTIVE) {
+    gEspNow->bondSendWaitDeadlineMs = 0;
+    return true;                           // session up → send encrypted
+  }
+  uint32_t now = (uint32_t)millis();
+  if (gEspNow->bondSendWaitDeadlineMs == 0) {
+    // First miss: kick the handshake (no-op if already in flight) and arm the
+    // wait, then defer so RX keeps draining and the handshake can complete.
+    espnowSessionOpenInitiate(mac, nullptr);
+    gEspNow->bondSendWaitDeadlineMs = now + 4000;  // wait up to 4 s for session
+    return false;
+  }
+  if ((int32_t)(gEspNow->bondSendWaitDeadlineMs - now) <= 0) {
+    gEspNow->bondSendWaitDeadlineMs = 0;
+    return true;                           // deadline passed → plaintext fallback
+  }
+  return false;                            // still racing → defer to next tick
+}
+#endif // ENABLE_BONDED_MODE
+
+// Main heartbeat task body: drain RX ring, send periodic HB, process queues.
+//
+// ARCHITECTURE INVARIANT (espnow_task ownership) — read before adding work here:
+//   espnow_task is BOTH the RX-ring drainer (step 1 below) AND the bond/mesh
+//   orchestrator. Because it drains RX, it must stay responsive: it must never
+//   BLOCK waiting on something that itself depends on RX being processed. The
+//   canonical trap is waiting for a session to go ACTIVE — the SESSION_CONFIRM
+//   that completes it is delivered via RX and finished on cmd_exec, so blocking
+//   here (or on cmd_exec) deadlocks the handshake against itself. Use the
+//   event-driven, defer-and-retry pattern (see bondSendReadyOrDeferred) instead.
+//   Heavy/long inline work (FS writes, JSON parse, AEAD, multi-second file
+//   transfers) stalls RX for its whole duration; prefer submitDeferredToCmdExec
+//   for infrequent heavy handlers — but never defer a session-blocking wait to
+//   cmd_exec, which serializes against runDeferredSessionConfirm.
 void processMeshHeartbeats() {
   // 1. Drain the inbound RX ring buffer
   uint8_t ringSize = (uint8_t)(sizeof(gEspNowRxRing) / sizeof(gEspNowRxRing[0]));
@@ -6775,7 +6984,8 @@ void processMeshHeartbeats() {
   if (gEspNow->deferredCmdPending) {
     gEspNow->deferredCmdPending = false;
     v4_handle_cmd(gEspNow->deferredCmdSrcMac, gEspNow->deferredCmdDeviceName,
-                  gEspNow->deferredCmdMsgId, gEspNow->deferredCmdPayload);
+                  gEspNow->deferredCmdMsgId, gEspNow->deferredCmdPayload,
+                  gEspNow->deferredCmdWasEncrypted);
   }
   
   // 7b. Drain stream queue (remote command output received via V3 STREAM frames)
@@ -6895,7 +7105,13 @@ void processMeshHeartbeats() {
     // Retry logic for in-flight requests
     if (macOk && gEspNow->bondSyncInFlight != BOND_SYNC_NONE &&
         gEspNow->bondSyncLastAttemptMs > 0 &&
-        (now - gEspNow->bondSyncLastAttemptMs >= BOND_SYNC_RETRY_MS)) {
+        (now - gEspNow->bondSyncLastAttemptMs >= BOND_SYNC_RETRY_MS) &&
+        // Don't re-request while the response is already streaming in. The
+        // manifest (and settings) arrive as a multi-second chunked file; firing
+        // a fresh MANIFEST_REQ mid-transfer makes the peer regenerate and resend
+        // the whole thing, doubling airtime and starving heartbeat ACKs. Push
+        // the retry window forward and re-check next tick instead.
+        !espnowInboundFileActiveFrom(peerMac)) {
       if (gEspNow->bondSyncRetryCount < 3) {
         gEspNow->bondSyncLastAttemptMs = now;
         gEspNow->bondSyncRetryCount++;
@@ -6945,8 +7161,14 @@ void processMeshHeartbeats() {
     BROADCAST_PRINTF("[BOND] 9b: CAP_RESP sent=%d featureMask=0x%08lX", (int)sent, (unsigned long)cap.featureMask);
   }
 
-  // 9d. Bond: peer requested our manifest — generate and send via file transfer
-  if (gEspNow->bondNeedsManifestResponse) {
+  // 9d. Bond: peer requested our manifest — generate and send via file transfer.
+  // Gate on an encrypted session (event-driven, non-blocking): if it isn't up
+  // yet, bondSendReadyOrDeferred() kicks the handshake and returns false, the
+  // flag stays set, and we retry on a later tick once SESSION_ACTIVE — so the
+  // 44 KB manifest goes out encrypted exactly once instead of a plaintext blast
+  // followed by an encrypted re-send. Falls back to plaintext past the deadline.
+  if (gEspNow->bondNeedsManifestResponse &&
+      bondSendReadyOrDeferred(gEspNow->bondPendingResponseMac)) {
     gEspNow->bondNeedsManifestResponse = false;
     BROADCAST_PRINTF("[BOND] 9d: bondNeedsManifestResponse consumed | role=%d dest=%s",
                      (int)gSettings.bondRole,
@@ -6986,8 +7208,11 @@ void processMeshHeartbeats() {
     }
   }
 
-  // 9e. Bond: peer requested our settings — send settings via file transfer
-  if (gEspNow->bondNeedsSettingsResponse) {
+  // 9e. Bond: peer requested our settings — send settings via file transfer.
+  // Same event-driven session gate as the manifest (9d) so settings ride the
+  // encrypted session too, without blocking the RX-draining task.
+  if (gEspNow->bondNeedsSettingsResponse &&
+      bondSendReadyOrDeferred(gEspNow->bondPendingResponseMac)) {
     gEspNow->bondNeedsSettingsResponse = false;
     BROADCAST_PRINTF("[BOND] 9e: bondNeedsSettingsResponse consumed | role=%d dest=%s",
                      (int)gSettings.bondRole,
@@ -7383,7 +7608,20 @@ static bool initEspNow() {
       broadcastOutput("[ESP-NOW] ERROR: Failed to allocate state structure");
       return false;
     }
+    // EspNowState embeds C++ objects with non-trivial constructors — String
+    // members at struct level (passphrase, deviceName, ...) and 5 Strings in
+    // every devices[16] slot (name/friendlyName/room/zone/tags). ps_alloc() is
+    // raw malloc and does NOT run those constructors; a zeroed String reads as
+    // {isSSO=0, ptr.buff=NULL}, so String::c_str() returns NULL. Any field that
+    // is read before being assigned (e.g. a freshly-paired peer whose
+    // friendlyName/room/zone/tags metadata hasn't arrived yet) then feeds NULL
+    // into printf("%s", ...) / ArduinoJson and crashes in strlen(NULL)
+    // (LoadProhibited, EXCVADDR=0). Placement-new runs every constructor so all
+    // Strings are valid empty SSO strings. Value-initialization also zero-inits
+    // the POD members (replacing the old blanket memset) and honors any in-class
+    // member initializers.
     memset(gEspNow, 0, sizeof(EspNowState));
+    new (gEspNow) EspNowState();
 
     // Allocate small PSRAM buffers pulled out of the EspNowState struct
     gEspNow->listBuffer = (char*)ps_alloc(1024, AllocPref::PreferPSRAM, "espnow.listBuf");
@@ -10093,6 +10331,23 @@ const char* cmd_espnow_meshes(const String& argsInput) {
   return "Usage: espnowmeshes [list|add|remove|enable|setdefault|setpassphrase|rename] ...";
 }
 
+// Tear down the cryptographic relationship for a peer: close any live AEAD
+// session and delete the stored KEY_EX (Ed25519) identity at
+// /system/espnow/peers/<MAC>/identity.json. Returns true if a stored identity
+// was present (vs. just sweeping a stale file). Safe to call for an unknown
+// peer. Shared by espnowunpair (full teardown) and espnowforget.
+static bool espnowForgetPeerCrypto(const uint8_t mac[6]) {
+  const PeerIdentity* pid = peerIdentityFindByMac(mac);
+  bool had = (pid != nullptr);
+  if (pid) {
+    SessionState* s = sessionFindByPeer(mac, pid->meshId);
+    if (s) sessionClear(s);  // drop ephemeral AEAD keys for this peer
+  }
+  extern bool peerIdentityForget(const uint8_t mac[6]);
+  peerIdentityForget(mac);
+  return had;
+}
+
 const char* cmd_espnow_unpair(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gEspNow) return "Error: ESP-NOW not initialized";
@@ -10124,6 +10379,11 @@ const char* cmd_espnow_unpair(const String& argsInput) {
 
   removeEspNowDevice(mac);
 
+  // Full teardown: also drop the crypto identity + any live session so a later
+  // re-pair starts clean (no stale-key pub-conflict). De-bond story:
+  // bonddisconnect (bond) → espnowunpair (pairing + crypto identity).
+  espnowForgetPeerCrypto(mac);
+
   if (meshEnabled()) {
     for (int i = 0; i < gMeshPeerSlots; i++) {
       if (gMeshPeers[i].isActive && macEqual6(gMeshPeers[i].mac, mac)) {
@@ -10152,6 +10412,39 @@ const char* cmd_espnow_unpair(const String& argsInput) {
     snprintf(getDebugBuffer(), 1024, "Unpaired device: %s",
              formatMacAddress(mac).c_str());
   }
+  return getDebugBuffer();
+}
+
+// Forget a peer's crypto identity (KEY_EX Ed25519 pubkey) and close any live
+// session, WITHOUT touching the device-registry pairing. This is the command
+// the KEY_EX conflict warnings tell the operator to run ("presented new pubkey
+// — run 'espnowforget'"). Accepts a raw MAC even for an already-unpaired peer
+// (identities persist independently of the device registry).
+const char* cmd_espnow_forget(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  CommandArgs a(argsInput);
+  if (!a.hasMinArgs(1)) return "Usage: espnowforget <name_or_mac>";
+  String target = a.arg(0);
+
+  uint8_t mac[6];
+  // Try a raw MAC first (works even if the peer is no longer in the registry),
+  // then fall back to name resolution.
+  if (!parseMacAddress(target, mac) && !resolveDeviceNameOrMac(target, mac)) {
+    if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+    snprintf(getDebugBuffer(), 1024,
+             "Could not resolve '%s'. Pass a MAC (AA:BB:CC:DD:EE:FF) or a paired device name.",
+             target.c_str());
+    return getDebugBuffer();
+  }
+
+  bool had = espnowForgetPeerCrypto(mac);
+
+  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+  snprintf(getDebugBuffer(), 1024,
+           "%s %s. Re-pair with 'espnowpairsecure %s <name>' on BOTH devices.",
+           had ? "Forgot crypto identity + closed session for"
+               : "No stored identity (swept any stale file) for",
+           formatMacAddress(mac).c_str(), formatMacAddress(mac).c_str());
   return getDebugBuffer();
 }
 
@@ -10205,6 +10498,50 @@ bool sendFileToMac(const uint8_t* mac, const String& localPath) {
   if (!gEspNow || !gEspNow->initialized) {
     return false;
   }
+
+  // ── Pick encrypted vs plaintext from the CURRENT session state ────────────
+  // A file transfer is a multi-frame stream (100s of chunks). If a session is
+  // already ACTIVE every chunk takes the AEAD fast path; otherwise we send
+  // plaintext (bond manifest/settings/capability data is non-secret and the
+  // bond channel is token-authenticated).
+  //
+  // CRITICAL — this used to BLOCK here (poll up to 6 s) for the session to come
+  // up. That deadlocked against itself: sendFileToMac runs on espnow_task,
+  // which is also the task that drains the RX ring, so while it blocked here the
+  // incoming SESSION_CONFIRM could never be processed → the session never went
+  // ACTIVE → the wait always timed out → plaintext anyway (and meanwhile RX was
+  // starved). Callers that require the transfer encrypted (the bond manifest/
+  // settings path) now gate on session-active *event-driven* before calling
+  // (see bondSendReadyOrDeferred), so by the time we get here the session is up.
+  // Here we never block: kick a handshake for next time and send with whatever
+  // state exists right now.
+  bool fileSessionReady = false;
+  {
+    const PeerIdentity* pid = peerIdentityFindByMac(mac);
+    if (pid) {
+      SessionState* s = sessionFindByPeer(mac, pid->meshId);
+      if (s && s->state == SESSION_ACTIVE) {
+        fileSessionReady = true;
+      } else {
+        // No active session — kick the handshake (no-op if already in flight)
+        // so a session is available for the next send, but DO NOT block here.
+        espnowSessionOpenInitiate(mac, nullptr);
+      }
+    }
+    DEBUG_ESPNOWF("[V4_FILE_TX] session %s for %s — sending %s",
+                  fileSessionReady ? "ACTIVE" : "unavailable",
+                  formatMacAddress(mac).c_str(),
+                  fileSessionReady ? "encrypted" : "plaintext");
+  }
+
+  // Route a single file frame: encrypted fast-path when a session is up,
+  // plaintext chunked otherwise. Never the queue-and-evict path for streams.
+  auto fileSendFrame = [&](uint8_t type, uint16_t flags, uint32_t id,
+                           const uint8_t* p, uint16_t len) -> bool {
+    return fileSessionReady
+      ? v4_send_payload_smart(mac, type, flags, id, p, len, 1)
+      : v4_send_chunked(mac, type, flags, id, p, len, 1);
+  };
 
   // Security: Block sending sensitive files (credentials, passwords, keys).
   // Uses currentAuthContext() so CLI/web callers see the same allow/deny
@@ -10269,11 +10606,10 @@ bool sendFileToMac(const uint8_t* mac, const String& localPath) {
   startPayload.chunkSize = v4ChunkSize;
   strncpy(startPayload.filename, filename.c_str(), sizeof(startPayload.filename) - 1);
   
-  // v4_send_payload_smart: wraps in SESSION_FRAME if a session is active with
-  // this peer, otherwise falls back to plaintext v4_send_frame. Auto-kicks a
-  // SESSION_OPEN if peer identity is known but no session exists yet.
-  if (!v4_send_payload_smart(mac, ESPNOW_V4_TYPE_FILE_START, ESPNOW_V4_FLAG_ACK_REQ, transferId,
-                             (const uint8_t*)&startPayload, sizeof(startPayload), 1)) {
+  // Session was ensured up-front (see fileSessionReady); fileSendFrame picks
+  // encrypted fast-path vs plaintext chunked accordingly — no queue/evict.
+  if (!fileSendFrame(ESPNOW_V4_TYPE_FILE_START, ESPNOW_V4_FLAG_ACK_REQ, transferId,
+                     (const uint8_t*)&startPayload, sizeof(startPayload))) {
     file.close();
     DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FILE_TX] Failed to send FILE_START");
     return false;
@@ -10300,10 +10636,9 @@ bool sendFileToMac(const uint8_t* mac, const String& localPath) {
     bool sent = false;
     for (int attempt = 0; attempt < 3 && !sent; attempt++) {
       // Each chunk: 200 data + 2 chunkIdx = 202 plaintext, fits SESSION_FRAME
-      // single-frame (202 + 16 tag = 218 = MAX_PAYLOAD). Falls back to
-      // plaintext if no session is established (see v4_send_payload_smart).
-      sent = v4_send_payload_smart(mac, ESPNOW_V4_TYPE_FILE_DATA, 0, transferId,
-                                   chunkPayload, payloadLen, 1);
+      // single-frame (202 + 16 tag = 218 = MAX_PAYLOAD) when encrypted.
+      sent = fileSendFrame(ESPNOW_V4_TYPE_FILE_DATA, 0, transferId,
+                           chunkPayload, payloadLen);
       if (!sent) {
         DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FILE_TX] Chunk %u send failed, retry %d", chunkIdx, attempt + 1);
         vTaskDelay(pdMS_TO_TICKS(20));
@@ -10339,8 +10674,8 @@ bool sendFileToMac(const uint8_t* mac, const String& localPath) {
   
   bool endSent = false;
   for (int attempt = 0; attempt < 3 && !endSent; attempt++) {
-    endSent = v4_send_payload_smart(mac, ESPNOW_V4_TYPE_FILE_END, ESPNOW_V4_FLAG_ACK_REQ, transferId,
-                                    (const uint8_t*)&endPayload, sizeof(endPayload), 1);
+    endSent = fileSendFrame(ESPNOW_V4_TYPE_FILE_END, ESPNOW_V4_FLAG_ACK_REQ, transferId,
+                            (const uint8_t*)&endPayload, sizeof(endPayload));
     if (!endSent) {
       WARN_ESPNOWF("[V4_FILE_TX] FILE_END send failed, retry %d", attempt + 1);
       vTaskDelay(pdMS_TO_TICKS(50));
@@ -10660,6 +10995,40 @@ const char* cmd_espnow_encstatus(const String& argsInput) {
   return getDebugBuffer();
 }
 
+// ── Pairing window (re-key authorization) ───────────────────────────────────
+// A deliberate, local `espnowpairsecure` opens a short window during which the
+// KEY_EX conflict guard MAY replace an existing identity for one specific peer
+// MAC — this is how a peer whose key rotated (re-flash / re-pair) gets accepted
+// without manually running `espnowforget`. It is intentionally narrow:
+//   • one MAC at a time,           • ~15 s lifetime,
+//   • opened only by a LOCAL operator command,
+//   • single-use (consumed on the first matching KEY_EX),
+//   • the KEY_EX itself STILL must pass the mesh-passphrase HMAC.
+// Outside the window, an over-the-air KEY_EX presenting a *different* pubkey for
+// a known peer is refused (anti-key-substitution / trust-on-first-use). This
+// replaces the older unconditional peerIdentityForget(), which raced with and
+// destroyed valid identities the peer's own proactive KEY_EX had just stored.
+static uint8_t  gPairWindowMac[6]   = {0};
+static uint32_t gPairWindowExpiryMs = 0;
+
+void espnowOpenPairingWindow(const uint8_t mac[6]) {
+  if (!mac) return;
+  memcpy(gPairWindowMac, mac, 6);
+  gPairWindowExpiryMs = (uint32_t)millis() + 15000;  // 15 s
+}
+
+// True (single-use) iff a re-key is currently authorized for this peer.
+bool espnowConsumePairingWindow(const uint8_t mac[6]) {
+  if (gPairWindowExpiryMs == 0 || !mac) return false;
+  if ((int32_t)(gPairWindowExpiryMs - (uint32_t)millis()) <= 0) {
+    gPairWindowExpiryMs = 0;  // expired
+    return false;
+  }
+  if (memcmp(gPairWindowMac, mac, 6) != 0) return false;
+  gPairWindowExpiryMs = 0;  // consume — one re-key per pairsecure
+  return true;
+}
+
 // Secure pairing command
 const char* cmd_espnow_pairsecure(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
@@ -10703,29 +11072,37 @@ const char* cmd_espnow_pairsecure(const String& argsInput) {
     }
   }
 
+  // Is this peer already in the device registry? (e.g. it auto-appeared as an
+  // "unknown" device because the *other* end paired first and its proactive
+  // KEY_EX/heartbeats reached us.) If so, don't error with "unpair first" —
+  // just re-attach the name/mesh in place. Otherwise append a new entry.
+  int existingIdx = -1;
   for (int i = 0; i < gEspNow->deviceCount; i++) {
-    if (memcmp(gEspNow->devices[i].mac, mac, 6) == 0) {
-      if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-      snprintf(getDebugBuffer(), 1024,
-               "Device already paired. Use 'espnowunpair %s' first.", macStr.c_str());
-      return getDebugBuffer();
+    if (memcmp(gEspNow->devices[i].mac, mac, 6) == 0) { existingIdx = i; break; }
+  }
+  const bool wasUpdate = (existingIdx >= 0);
+
+  if (wasUpdate) {
+    // Rename / refresh in place. The radio peer already exists from the prior
+    // add, so we don't re-add it (would just return ESPNOW_EXIST).
+    gEspNow->devices[existingIdx].name = deviceName;
+    gEspNow->devices[existingIdx].encrypted = true;
+    memcpy(gEspNow->devices[existingIdx].key, gEspNow->derivedKey, 16);
+    gEspNow->devices[existingIdx].meshId = meshId;
+  } else {
+    if (gEspNow->deviceCount >= 16) {
+      return "Maximum number of devices (16) already paired.";
     }
+    if (!addEspNowPeerWithEncryption(mac, true, gEspNow->derivedKey)) {
+      return "Failed to add encrypted peer to ESP-NOW.";
+    }
+    memcpy(gEspNow->devices[gEspNow->deviceCount].mac, mac, 6);
+    gEspNow->devices[gEspNow->deviceCount].name = deviceName;
+    gEspNow->devices[gEspNow->deviceCount].encrypted = true;
+    memcpy(gEspNow->devices[gEspNow->deviceCount].key, gEspNow->derivedKey, 16);
+    gEspNow->devices[gEspNow->deviceCount].meshId = meshId;  // Phase 2.5
+    gEspNow->deviceCount++;
   }
-
-  if (gEspNow->deviceCount >= 16) {
-    return "Maximum number of devices (16) already paired.";
-  }
-
-  if (!addEspNowPeerWithEncryption(mac, true, gEspNow->derivedKey)) {
-    return "Failed to add encrypted peer to ESP-NOW.";
-  }
-
-  memcpy(gEspNow->devices[gEspNow->deviceCount].mac, mac, 6);
-  gEspNow->devices[gEspNow->deviceCount].name = deviceName;
-  gEspNow->devices[gEspNow->deviceCount].encrypted = true;
-  memcpy(gEspNow->devices[gEspNow->deviceCount].key, gEspNow->derivedKey, 16);
-  gEspNow->devices[gEspNow->deviceCount].meshId = meshId;  // Phase 2.5
-  gEspNow->deviceCount++;
 
   removeFromUnpairedList(mac);
 
@@ -10759,6 +11136,17 @@ const char* cmd_espnow_pairsecure(const String& argsInput) {
   // KEY_EX never ran. KEY_EX is async (~100ms over the air) — by the time
   // the user's next command lands, the peer identity will be cached and
   // the next encrypted send will auto-kick SESSION_OPEN.
+  // Re-pair is an explicit, local operator action — open a short re-key window
+  // for this peer (instead of blindly deleting its identity). If the peer's key
+  // rotated (re-flash / re-pair), the incoming KEY_EX may replace the stored
+  // identity ONCE within the window; otherwise the anti-key-substitution guard
+  // still refuses a changed key. This avoids racing/destroying a valid identity
+  // that the peer's own proactive KEY_EX may have just established (the cause of
+  // the half-open-session bug). For a clean re-pair after a key rotation, run
+  // this on BOTH devices (the secure-pair flow already does). The KEY_EX still
+  // requires the mesh-passphrase HMAC, so this opens nothing to outsiders.
+  espnowOpenPairingWindow(mac);
+
   const char* meshLabelArg = (meshId < Settings::N_MESHES &&
                               gSettings.meshes[meshId].label.length() > 0)
                                  ? gSettings.meshes[meshId].label.c_str()
@@ -10777,9 +11165,10 @@ const char* cmd_espnow_pairsecure(const String& argsInput) {
       "Peer will not persist across reboot.", deviceName.c_str(), macStr.c_str());
   } else {
     snprintf(getDebugBuffer(), 1024,
-             "Encrypted device paired successfully: %s (%s)\n"
+             "Encrypted device %s successfully: %s (%s)\n"
              "Key fingerprint: %02X%02X%02X%02X...\n"
              "%s",
+             wasUpdate ? "updated" : "paired",
              deviceName.c_str(), macStr.c_str(),
              gEspNow->derivedKey[0], gEspNow->derivedKey[1], gEspNow->derivedKey[2], gEspNow->derivedKey[3],
              keyExKicked
@@ -12021,7 +12410,8 @@ extern const CommandEntry espNowCommands[] = {
   { "openespnow", "Initialize ESP-NOW communication.", true, cmd_espnow_init },
   { "closeespnow", "Deinitialize ESP-NOW and free resources.", true, cmd_espnow_deinit },
   { "espnowpair", "Pair ESP-NOW device: 'espnowpair <mac> <name> [mesh]'.", true, cmd_espnow_pair, "Usage: espnowpair <mac> <name> [mesh]" },
-  { "espnowunpair", "Unpair ESP-NOW device: 'espnowunpair <name_or_mac>'.", true, cmd_espnow_unpair, "Usage: espnowunpair <name_or_mac>" },
+  { "espnowunpair", "Unpair ESP-NOW device (also clears its crypto identity): 'espnowunpair <name_or_mac>'.", true, cmd_espnow_unpair, "Usage: espnowunpair <name_or_mac>" },
+  { "espnowforget", "Forget a peer's crypto identity + close its session: 'espnowforget <name_or_mac>'.", true, cmd_espnow_forget, "Usage: espnowforget <name_or_mac>" },
   { "espnowlist", "List all paired ESP-NOW devices.", false, cmd_espnow_list },
   
   // ---- ESP-NOW Mesh Configuration ----

@@ -6220,6 +6220,12 @@ bool initG2Client() {
     broadcastOutput("[G2] State alloc failed");
     return false;
   }
+  // ps_calloc() zeroes the struct but does NOT run constructors. G2ClientState
+  // embeds String members (deviceName/deviceAddress); a zeroed String reads as
+  // {isSSO=0, ptr.buff=NULL} so c_str() returns NULL → strlen(NULL) crash if
+  // read before assignment. Placement-new runs the constructors (same fix as
+  // gEspNow / gSessions / gWifiNetworks).
+  new (gG2State) G2ClientState();
 
   BLEDevice::init("HardwareOne");
   BLEDevice::setMTU(MTU_TARGET);

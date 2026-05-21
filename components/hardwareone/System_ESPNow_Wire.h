@@ -128,7 +128,11 @@ enum EspNowV4Type : uint8_t {
 
 enum EspNowV4Flags : uint16_t {
   ESPNOW_V4_FLAG_ACK_REQ        = 0x0001,  // Request ACK from receiver
-  ESPNOW_V4_FLAG_ENCRYPTED      = 0x0002,  // Payload is encrypted (radio-layer LMK in Phase 1; AEAD in Phase 3)
+  ESPNOW_V4_FLAG_ENCRYPTED      = 0x0002,  // DEPRECATED/VESTIGIAL — legacy LMK-era bit, never set since
+                                           // the Phase 3.5 LMK rip (task #47). AEAD confidentiality is
+                                           // signalled by ESPNOW_V4_FLAG_SESSION_FRAME on the wire and by
+                                           // V4RxCtx::isSessionEncrypted on RX. DO NOT gate on this bit
+                                           // (doing so silently broke USER_SYNC — it always read 0).
   ESPNOW_V4_FLAG_COMPRESS       = 0x0004,  // Payload is compressed (future)
   ESPNOW_V4_FLAG_STREAM_BEGIN   = 0x0010,  // First chunk of stream
   ESPNOW_V4_FLAG_STREAM_END     = 0x0020,  // Last chunk of stream

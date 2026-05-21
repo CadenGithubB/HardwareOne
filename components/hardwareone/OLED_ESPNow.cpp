@@ -1428,11 +1428,7 @@ void oledEspNowRefreshMessages() {
 
 String oledEspNowFormatMac(const uint8_t* mac) {
   if (!mac) return "00:00:00:00:00:00";
-  
-  char buf[18];
-  snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X",
-           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-  return String(buf);
+  return macToDisplayStr(mac);  // canonical DISPLAY form (System_Utils.h)
 }
 
 void oledEspNowDrawStatusIcon(Adafruit_SSD1306* display, int x, int y, bool delivered) {

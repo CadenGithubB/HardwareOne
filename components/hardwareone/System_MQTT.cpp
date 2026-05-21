@@ -236,8 +236,7 @@ static String getDeviceId() {
   uint8_t mac[6];
   WiFi.macAddress(mac);
   char macStr[13];
-  snprintf(macStr, sizeof(macStr), "%02x%02x%02x%02x%02x%02x",
-           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  macToPathToken(mac, macStr);  // no-separator UPPER (System_Utils.h)
   char idBuf[26];
   snprintf(idBuf, sizeof(idBuf), "hardwareone_%s", macStr);
   return String(idBuf);
@@ -576,8 +575,7 @@ static void publishPeerDiscoveryConfig(const MeshPeerMeta& peer,
 
   // Build peer device ID from MAC
   char macCompact[13];
-  snprintf(macCompact, sizeof(macCompact), "%02x%02x%02x%02x%02x%02x",
-           peer.mac[0], peer.mac[1], peer.mac[2], peer.mac[3], peer.mac[4], peer.mac[5]);
+  macToPathToken(peer.mac, macCompact);  // no-separator UPPER
   char peerIdBuf[26];
   snprintf(peerIdBuf, sizeof(peerIdBuf), "hardwareone_%s", macCompact);
   String peerId = peerIdBuf;
@@ -677,8 +675,7 @@ static void publishMeshPeerDiscovery() {
 
     // Publish availability for this peer
     char macCompact[13];
-    snprintf(macCompact, sizeof(macCompact), "%02x%02x%02x%02x%02x%02x",
-             peer.mac[0], peer.mac[1], peer.mac[2], peer.mac[3], peer.mac[4], peer.mac[5]);
+    macToPathToken(peer.mac, macCompact);  // no-separator UPPER
     String peerAvailTopic = gSettings.mqttBaseTopic + "/devices/hardwareone_" + macCompact + "/availability";
     
     MeshPeerHealth* health = getMeshPeerHealth(peer.mac, false);
@@ -704,8 +701,7 @@ static void publishMeshPeerSensorData() {
 
     // Build peer device ID
     char macCompact[13];
-    snprintf(macCompact, sizeof(macCompact), "%02x%02x%02x%02x%02x%02x",
-             peer.mac[0], peer.mac[1], peer.mac[2], peer.mac[3], peer.mac[4], peer.mac[5]);
+    macToPathToken(peer.mac, macCompact);  // no-separator UPPER
 
     String peerStateTopic = gSettings.mqttBaseTopic + "/devices/hardwareone_" + macCompact + "/state";
 
@@ -859,8 +855,7 @@ bool startMQTT() {
     uint8_t mac[6];
     WiFi.macAddress(mac);
     char macStr[13];
-    snprintf(macStr, sizeof(macStr), "%02x%02x%02x%02x%02x%02x",
-             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    macToPathToken(mac, macStr);  // no-separator UPPER
     { char topicBuf[32]; snprintf(topicBuf, sizeof(topicBuf), "hardwareone/%s", macStr); setSetting(gSettings.mqttBaseTopic, String(topicBuf)); }
     INFO_MQTT_DISCOVERYF("Auto-generated base topic: %s", gSettings.mqttBaseTopic.c_str());
   }

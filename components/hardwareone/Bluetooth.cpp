@@ -226,8 +226,7 @@ static void bleSendAuthRequired(uint16_t connId) {
 
 // Convert MAC address to stack buffer (zero heap allocations)
 static void macToStackBuf(const uint8_t* mac, char* buf) {
-  snprintf(buf, 18, "%02X:%02X:%02X:%02X:%02X:%02X",
-           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  macToDisplay(mac, buf, 18);  // canonical DISPLAY form (System_Utils.h)
 }
 
 // Update MAC address cache from settings (call when settings change).

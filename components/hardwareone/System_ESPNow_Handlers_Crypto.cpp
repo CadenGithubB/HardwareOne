@@ -224,9 +224,22 @@ void v4hKeyExHello(const V4RxCtx& ctx) {
   // silently replace a paired peer's identity.
   const PeerIdentity* existing = peerIdentityFindByMac(msg->senderMac);
   uint8_t confirmStatus = 0;
-  if (existing && memcmp(existing->longTermPub, msg->senderPubEd25519, 32) != 0) {
+  bool conflict = existing && memcmp(existing->longTermPub, msg->senderPubEd25519, 32) != 0;
+  if (conflict) {
+    // A deliberate local `espnowpairsecure` opens a one-shot re-key window for
+    // this MAC — honor it (peer's key rotated). Otherwise refuse the overwrite.
+    extern bool espnowConsumePairingWindow(const uint8_t mac[6]);
+    if (espnowConsumePairingWindow(msg->senderMac)) {
+      WARN_ESPNOWF("KEY_EX_HELLO: peer %02X:%02X:%02X:%02X:%02X:%02X presented new pubkey; "
+                   "re-pair window open — replacing stored identity",
+                   msg->senderMac[0], msg->senderMac[1], msg->senderMac[2],
+                   msg->senderMac[3], msg->senderMac[4], msg->senderMac[5]);
+      conflict = false;  // operator-authorized re-key
+    }
+  }
+  if (conflict) {
     WARN_ESPNOWF("KEY_EX_HELLO: peer %02X:%02X:%02X:%02X:%02X:%02X presented new pubkey, "
-                 "refusing overwrite — run 'espnowforget' first",
+                 "refusing overwrite — run 'espnowforget' or re-run 'espnowpairsecure'",
                  msg->senderMac[0], msg->senderMac[1], msg->senderMac[2],
                  msg->senderMac[3], msg->senderMac[4], msg->senderMac[5]);
     confirmStatus = 2;
@@ -292,9 +305,20 @@ void v4hKeyExReply(const V4RxCtx& ctx) {
   }
 
   const PeerIdentity* existing = peerIdentityFindByMac(msg->responderMac);
-  if (existing && memcmp(existing->longTermPub, msg->responderPubEd25519, 32) != 0) {
+  bool conflict = existing && memcmp(existing->longTermPub, msg->responderPubEd25519, 32) != 0;
+  if (conflict) {
+    // Operator-initiated re-pair window authorizes a one-shot key replacement
+    // for this MAC; otherwise refuse (symmetric with the HELLO-side guard).
+    extern bool espnowConsumePairingWindow(const uint8_t mac[6]);
+    if (espnowConsumePairingWindow(msg->responderMac)) {
+      WARN_ESPNOWF("KEY_EX_REPLY: peer presented new pubkey; re-pair window open — "
+                   "replacing stored identity");
+      conflict = false;
+    }
+  }
+  if (conflict) {
     WARN_ESPNOWF("KEY_EX_REPLY: peer presented new pubkey, refusing overwrite — "
-                 "signaling reject (status=2). Run 'espnowforget' to re-pair.");
+                 "signaling reject (status=2). Run 'espnowforget' or re-run 'espnowpairsecure'.");
     // Tell the responder we rejected them — symmetric with the HELLO-side
     // conflict path. The peer is already in our hw table (we sent the HELLO
     // that triggered this REPLY), but ensure it before sending defensively.
