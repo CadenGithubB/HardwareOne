@@ -1295,13 +1295,19 @@ static esp_err_t handleBondPairedDevices(httpd_req_t* req) {
     if (!first) webBondSendChunk(req, ",");
     first = false;
 
+    // SAFETY: a freshly-paired device has `name` set but friendlyName/room/zone/
+    // tags never assigned. An unconstructed/zeroed Arduino String returns NULL
+    // from c_str(), and "%s" with NULL => strlen(NULL) => LoadProhibited crash
+    // (this is what crashes the device when the bond page lists paired devices
+    // right after a wipe+re-pair). Coerce any NULL c_str() to "".
+    auto sz = [](const String& s) -> const char* { const char* p = s.c_str(); return p ? p : ""; };
     webBondSendChunk(req, "{");
     webBondSendChunkf(req, "\"mac\":\"%s\",", macStr.c_str());
-    webBondSendChunkf(req, "\"name\":\"%s\",", dev.name.c_str());
-    webBondSendChunkf(req, "\"friendlyName\":\"%s\",", dev.friendlyName.c_str());
-    webBondSendChunkf(req, "\"room\":\"%s\",", dev.room.c_str());
-    webBondSendChunkf(req, "\"zone\":\"%s\",", dev.zone.c_str());
-    webBondSendChunkf(req, "\"tags\":\"%s\",", dev.tags.c_str());
+    webBondSendChunkf(req, "\"name\":\"%s\",", sz(dev.name));
+    webBondSendChunkf(req, "\"friendlyName\":\"%s\",", sz(dev.friendlyName));
+    webBondSendChunkf(req, "\"room\":\"%s\",", sz(dev.room));
+    webBondSendChunkf(req, "\"zone\":\"%s\",", sz(dev.zone));
+    webBondSendChunkf(req, "\"tags\":\"%s\",", sz(dev.tags));
     webBondSendChunkf(req, "\"stationary\":%s,", dev.stationary ? "true" : "false");
     webBondSendChunkf(req, "\"encrypted\":%s", dev.encrypted ? "true" : "false");
     webBondSendChunk(req, "}");

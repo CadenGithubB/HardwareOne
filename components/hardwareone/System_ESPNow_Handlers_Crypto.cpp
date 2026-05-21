@@ -30,6 +30,11 @@
 // of on espnow_task's tighter stack. Declared inline (no header) matching
 // the existing convention used by submitCommandAsync.
 extern bool submitDeferredToCmdExec(ExecReq::DeferredFn fn, void* arg);
+// Defined in System_ESPNow.cpp. Notifies bond logic the moment a session with
+// `peerMac` reaches ACTIVE so the bonded relationship can use the encrypted
+// session for discovery/sync (replaces plaintext-heartbeat discovery). No-op
+// when bond mode is off or the peer isn't our bonded peer.
+extern void bondNotifySessionEstablished(const uint8_t* peerMac);
 
 // V4RxCtx is defined in System_ESPNow.cpp as a private struct. To keep handlers
 // in a separate translation unit, we duplicate its declaration here — must
@@ -744,6 +749,10 @@ void runDeferredSessionOpen(void* arg) {
                 ESPNOW_V4_FLAG_HANDSHAKE | ESPNOW_V4_FLAG_ACK_REQ,
                 generateMessageId(),
                 reinterpret_cast<const uint8_t*>(&conf), sizeof(conf), 1);
+  // Session is ACTIVE on our side (responder) — tell bond logic so it can drive
+  // the bonded relationship over the encrypted session (discovery via session,
+  // not plaintext heartbeat).
+  bondNotifySessionEstablished(msg->initiatorMac);
   free(w);
 }
 
@@ -831,6 +840,9 @@ void runDeferredSessionConfirm(void* arg) {
   // Runs on cmd_exec_task (same task that handled the heavy crypto above), so
   // the drain's session-wrap + esp_now_send fits in this task's stack.
   pendingFrameDrainForPeer(msg->responderMac);
+  // Session ACTIVE on our side (initiator) — notify bond logic (discovery via
+  // the encrypted session; master kicks the capability sync from here).
+  bondNotifySessionEstablished(msg->responderMac);
   free(w);
 }
 
