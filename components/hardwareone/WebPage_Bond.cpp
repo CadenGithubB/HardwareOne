@@ -249,14 +249,19 @@ void streamBondInner(httpd_req_t* req) {
       const hasLive = sc.valid === true;
       
       // Sensor capability bit masks (must match System_ESPNow.h)
+      // mask values mirror CAP_SENSOR_* in System_ESPNow.h. streamable=false for
+      // sensors that have no bond streaming pipeline (APDS) — Enable still works,
+      // but the Stream toggle is shown disabled rather than dead.
       const sensors = [
-        {id: 'thermal', name: 'Thermal',  mask: 0x01, stream: data.streamThermal, on: sc.thermalOn},
-        {id: 'tof',     name: 'ToF',      mask: 0x02, stream: data.streamTof,     on: sc.tofOn},
-        {id: 'imu',     name: 'IMU',      mask: 0x04, stream: data.streamImu,     on: sc.imuOn},
-        {id: 'gamepad', name: 'Gamepad',  mask: 0x08, stream: data.streamGamepad, on: sc.gamepadOn},
-        {id: 'gps',     name: 'GPS',      mask: 0x20, stream: data.streamGps,     on: sc.gpsOn},
-        {id: 'rtc',     name: 'RTC',      mask: 0x40, stream: data.streamRtc,     on: sc.rtcOn},
-        {id: 'presence',name: 'Presence', mask: 0x80, stream: data.streamPresence, on: sc.presenceOn}
+        {id: 'thermal', name: 'Thermal',  mask: 0x01,  stream: data.streamThermal,  on: sc.thermalOn,  streamable: true},
+        {id: 'tof',     name: 'ToF',      mask: 0x02,  stream: data.streamTof,      on: sc.tofOn,      streamable: true},
+        {id: 'imu',     name: 'IMU',      mask: 0x04,  stream: data.streamImu,      on: sc.imuOn,      streamable: true},
+        {id: 'gamepad', name: 'Gamepad',  mask: 0x08,  stream: data.streamGamepad,  on: sc.gamepadOn,  streamable: true},
+        {id: 'apds',    name: 'APDS',     mask: 0x10,  stream: false,               on: sc.apdsOn,     streamable: false},
+        {id: 'gps',     name: 'GPS',      mask: 0x20,  stream: data.streamGps,      on: sc.gpsOn,      streamable: true},
+        {id: 'rtc',     name: 'RTC',      mask: 0x40,  stream: data.streamRtc,      on: sc.rtcOn,      streamable: true},
+        {id: 'presence',name: 'Presence', mask: 0x80,  stream: data.streamPresence, on: sc.presenceOn, streamable: true},
+        {id: 'fmradio', name: 'FM Radio', mask: 0x100, stream: data.streamFmradio,  on: sc.fmradioOn,  streamable: true}
       ];
       
       // Latch: if a sensor was ever connected or enabled, it's physically present
@@ -283,22 +288,37 @@ void streamBondInner(httpd_req_t* req) {
         html += '<div class="sensor-table-header"><span class="st-name">Sensor</span><span class="st-col">Enable</span><span class="st-col">Stream</span></div>';
         
         for (const s of visible) {
-          const isDetected = hasLive && sensorEverSeen[s.id] === true;
           const isOn = hasLive && s.on === true;
-          const nameClass = 'st-name' + (!isDetected ? ' disconnected' : '');
           const canControl = synced && isMaster;
-          
-          // Enable toggle: on if sensor is running, clickable if detected on device
+
+          // NOTE: the remote reports a sensor as "connected" (gXxxConnected)
+          // only AFTER its task has started — that flag flips true inside each
+          // sensor's start path on successful I2C init, not from a boot-time
+          // presence probe. So a compiled-but-idle sensor reads back as not
+          // connected. Gating the *Enable* toggle on that made it impossible to
+          // ever start a remote sensor from the master: the one control that
+          // would set it running was disabled until it was already running.
+          // Enable is therefore available whenever this is the synced master
+          // (the list is already filtered to sensors compiled on the remote).
+          // Its on/off state reflects the sensor's real running state once the
+          // peer reports back; if no hardware is actually present the start
+          // simply doesn't stick and the toggle returns to off.
+          const nameClass = 'st-name' + (isOn ? '' : ' off');
+
+          // Enable toggle: starts/stops the remote sensor's task.
           const enableOn = isOn ? ' on' : '';
-          const enableDisabled = (!canControl || !isDetected) ? ' disabled' : '';
-          const enableClick = (canControl && isDetected) ? 'onclick="window.toggleSensorEnable(\'' + s.id + '\',' + (isOn ? 'false' : 'true') + ')"' : '';
-          const enableTitle = !isDetected ? 'title="Sensor not detected on device"' : (!canControl ? 'title="Only master can control"' : '');
-          
-          // Stream toggle: on if streaming enabled, requires sensor to be running
+          const enableDisabled = !canControl ? ' disabled' : '';
+          const enableClick = canControl ? 'onclick="window.toggleSensorEnable(\'' + s.id + '\',' + (isOn ? 'false' : 'true') + ')"' : '';
+          const enableTitle = !canControl ? 'title="Only the master device can control sensors"' : '';
+
+          // Stream toggle: forwards the sensor's data over ESP-NOW. Requires the
+          // sensor to be running first (can't stream an off sensor) and a bond
+          // streaming pipeline to exist (streamable).
+          const streamSupported = s.streamable !== false;
           const streamOn = s.stream ? ' on' : '';
-          const streamDisabled = (!canControl || !isOn) ? ' disabled' : '';
-          const streamClick = (canControl && isOn) ? 'onclick="window.toggleSensor(\'' + s.id + '\')"' : '';
-          const streamTitle = !isOn ? 'title="Sensor must be enabled first"' : (!canControl ? 'title="Only master can control"' : '');
+          const streamDisabled = (!canControl || !isOn || !streamSupported) ? ' disabled' : '';
+          const streamClick = (canControl && isOn && streamSupported) ? 'onclick="window.toggleSensor(\'' + s.id + '\')"' : '';
+          const streamTitle = !streamSupported ? 'title="Streaming not supported for this sensor"' : (!canControl ? 'title="Only the master device can control sensors"' : (!isOn ? 'title="Enable the sensor first"' : ''));
           
           html += '<div class="sensor-row">';
           html += '<span class="' + nameClass + '">' + s.name + '</span>';
@@ -324,7 +344,7 @@ void streamBondInner(httpd_req_t* req) {
       const localSensorMask = data.localCapabilities.sensorMask || 0;
       if (localSensorMask) {
         const lConn = data.localCapabilities.sensorConnectedMask || 0;
-        const lDefs = [{m:0x01,n:'Thermal'},{m:0x02,n:'ToF'},{m:0x04,n:'IMU'},{m:0x08,n:'Gamepad'},{m:0x10,n:'APDS'},{m:0x20,n:'GPS'},{m:0x40,n:'RTC'},{m:0x80,n:'Presence'}];
+        const lDefs = [{m:0x01,n:'Thermal'},{m:0x02,n:'ToF'},{m:0x04,n:'IMU'},{m:0x08,n:'Gamepad'},{m:0x10,n:'APDS'},{m:0x20,n:'GPS'},{m:0x40,n:'RTC'},{m:0x80,n:'Presence'},{m:0x100,n:'FM Radio'}];
         const lRows = lDefs.filter(function(d){return localSensorMask & d.m;});
         if (lRows.length > 0) {
           html += '<div class="stat-row"><span class="stat-label">I2C Sensors</span></div>';
@@ -971,15 +991,20 @@ static esp_err_t handleBondStatus(httpd_req_t* req) {
     webBondSendChunkf(req, "\"imu\":%s,", (connectedMask & CAP_SENSOR_IMU) ? "true" : "false");
     webBondSendChunkf(req, "\"gps\":%s,", (connectedMask & CAP_SENSOR_GPS) ? "true" : "false");
     webBondSendChunkf(req, "\"gamepad\":%s,", (connectedMask & CAP_SENSOR_GAMEPAD) ? "true" : "false");
-    webBondSendChunkf(req, "\"fmradio\":%s,", false ? "true" : "false");
+    webBondSendChunkf(req, "\"apds\":%s,", (connectedMask & CAP_SENSOR_APDS) ? "true" : "false");
+    webBondSendChunkf(req, "\"fmradio\":%s,", (connectedMask & CAP_SENSOR_FMRADIO) ? "true" : "false");
     webBondSendChunkf(req, "\"presence\":%s,", (connectedMask & CAP_SENSOR_PRESENCE) ? "true" : "false");
+    webBondSendChunkf(req, "\"rtc\":%s,", (connectedMask & CAP_SENSOR_RTC) ? "true" : "false");
     // Per-sensor enabled (running) state from live status
     webBondSendChunkf(req, "\"thermalOn\":%s,", (enabledMask & CAP_SENSOR_THERMAL) ? "true" : "false");
     webBondSendChunkf(req, "\"tofOn\":%s,", (enabledMask & CAP_SENSOR_TOF) ? "true" : "false");
     webBondSendChunkf(req, "\"imuOn\":%s,", (enabledMask & CAP_SENSOR_IMU) ? "true" : "false");
     webBondSendChunkf(req, "\"gpsOn\":%s,", (enabledMask & CAP_SENSOR_GPS) ? "true" : "false");
     webBondSendChunkf(req, "\"gamepadOn\":%s,", (enabledMask & CAP_SENSOR_GAMEPAD) ? "true" : "false");
-    webBondSendChunkf(req, "\"presenceOn\":%s", (enabledMask & CAP_SENSOR_PRESENCE) ? "true" : "false");
+    webBondSendChunkf(req, "\"presenceOn\":%s,", (enabledMask & CAP_SENSOR_PRESENCE) ? "true" : "false");
+    webBondSendChunkf(req, "\"rtcOn\":%s,", (enabledMask & CAP_SENSOR_RTC) ? "true" : "false");
+    webBondSendChunkf(req, "\"apdsOn\":%s,", (enabledMask & CAP_SENSOR_APDS) ? "true" : "false");
+    webBondSendChunkf(req, "\"fmradioOn\":%s", (enabledMask & CAP_SENSOR_FMRADIO) ? "true" : "false");
     webBondSendChunk(req, "},");
     
     // Live peer status (from periodic ~30s poll)

@@ -391,6 +391,7 @@ struct __attribute__((packed)) BondPeerStatus {
 #define CAP_SENSOR_GPS          (1 << 5)
 #define CAP_SENSOR_RTC          (1 << 6)
 #define CAP_SENSOR_PRESENCE     (1 << 7)
+#define CAP_SENSOR_FMRADIO      (1 << 8)
 
 // Human-readable capability names (for UI display)
 struct CapabilityName {
@@ -433,6 +434,7 @@ static const CapabilityName SENSOR_NAMES[] = {
   { CAP_SENSOR_GPS,      "GPS",    "GPS" },
   { CAP_SENSOR_RTC,      "RTC",    "Real-Time Clock" },
   { CAP_SENSOR_PRESENCE, "Pres",   "Presence Sensor" },
+  { CAP_SENSOR_FMRADIO,  "FM",     "FM Radio" },
   { 0, nullptr, nullptr }
 };
 
@@ -747,6 +749,10 @@ struct EspNowState {
   bool bondNeedsStatusResponse;
   bool bondNeedsProactiveStatus;  // Push status to peer when local sensor state changes
   unsigned long bondLastStatusReqMs;
+  // Event-driven session gate for bond manifest/settings file sends: deadline
+  // (millis) after which we stop waiting for an encrypted session and send
+  // plaintext. 0 = no send currently waiting. See bondSendReadyOrDeferred().
+  uint32_t bondSendWaitDeadlineMs;
 #endif // ENABLE_BONDED_MODE
   
   bool bondNeedsMetadataResponse;   // flag to send metadata response (deferred from callback)
@@ -795,7 +801,9 @@ struct EspNowState {
   char deferredCmdDeviceName[32];
   char deferredCmdPayload[256];
   uint32_t deferredCmdMsgId;
-  
+  bool deferredCmdWasEncrypted;  // true if the CMD arrived AEAD-wrapped (SESSION_FRAME).
+                                 // Bond (@BOND token) commands REQUIRE this — see v4_handle_cmd.
+
   // Constructor
   EspNowState() : 
     initialized(false),
@@ -866,6 +874,7 @@ struct EspNowState {
     bondNeedsStatusResponse(false),
     bondNeedsProactiveStatus(false),
     bondLastStatusReqMs(0),
+    bondSendWaitDeadlineMs(0),
 #endif
     bondNeedsMetadataResponse(false),
     deferredMetadataPending(false),
@@ -877,7 +886,8 @@ struct EspNowState {
     streamQueueHead(0),
     streamQueueTail(0),
     deferredCmdPending(false),
-    deferredCmdMsgId(0)
+    deferredCmdMsgId(0),
+    deferredCmdWasEncrypted(false)
   {
     memset(derivedKey, 0, 16);
 #if ENABLE_BONDED_MODE

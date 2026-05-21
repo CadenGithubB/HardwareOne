@@ -145,12 +145,7 @@ bool loadRemoteSettingsModules() {
 
   // Build path to cached settings
   uint8_t peerMac[6];
-  String macHex = gSettings.bondPeerMac;
-  macHex.replace(":", "");
-  for (int i = 0; i < 6; i++) {
-    char byteStr[3] = {macHex[i*2], macHex[i*2+1], '\0'};
-    peerMac[i] = (uint8_t)strtol(byteStr, nullptr, 16);
-  }
+  macParse(gSettings.bondPeerMac.c_str(), peerMac);  // canonical parser (System_Utils.h)
 
   // Load settings from cache
   extern String loadSettingsFromCache(const uint8_t* peerMac);
@@ -282,17 +277,11 @@ bool hasRemoteSettings() {
   
   // Check if settings cache exists
   uint8_t peerMac[6];
-  String macHex = gSettings.bondPeerMac;
-  macHex.replace(":", "");
-  for (int i = 0; i < 6; i++) {
-    char byteStr[3] = {macHex[i*2], macHex[i*2+1], '\0'};
-    peerMac[i] = (uint8_t)strtol(byteStr, nullptr, 16);
-  }
+  macParse(gSettings.bondPeerMac.c_str(), peerMac);  // canonical parser (System_Utils.h)
   
-  char macStr[18];
-  snprintf(macStr, sizeof(macStr), "%02X%02X%02X%02X%02X%02X",
-           peerMac[0], peerMac[1], peerMac[2], peerMac[3], peerMac[4], peerMac[5]);
-  
+  char macStr[13];
+  macToPathToken(peerMac, macStr);  // canonical PATH TOKEN form (System_Utils.h)
+
   char filePathBuf[64];
   snprintf(filePathBuf, sizeof(filePathBuf), "/system/espnow/peers/%s/settings.json", macStr);
   String filePath = filePathBuf;

@@ -250,6 +250,7 @@ extern const size_t g2RingCommandsCount;
 #include "System_I2C.h"
 #if ENABLE_ESPNOW
   #include "System_ESPNow.h"
+  #include "System_ESPNow_Wire.h"   // ESPNOW_V4_TYPE_* / ESPNOW_V4_FLAG_* opcode + flag enums
 #endif
 #if ENABLE_BLUETOOTH
   #include "Bluetooth.h"
@@ -2990,6 +2991,14 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
     extern String buildBondedCommandPayload(const String& command);
     extern bool v4_send_frame(const uint8_t* dstMac, uint8_t type, uint16_t flags,
                               uint32_t msgId, const uint8_t* payload, uint16_t payloadLen, uint8_t ttl);
+    // Session-aware sender used by every other CMD send site (e.g. System_ESPNow.cpp
+    // lines 9175/11249). AEAD-wraps in a SESSION_FRAME when a session is active;
+    // otherwise queues the frame and kicks SESSION_OPEN (Phase 1 pending-frame path).
+    // Used here so the bonded command — which carries the static @BOND token — is
+    // never sent in cleartext on the air (a sniffed token = arbitrary RCE).
+    extern bool v4_send_encrypted_or_queue(const uint8_t dst[6], uint8_t type, uint16_t baseFlags,
+                                           uint32_t msgId, const uint8_t* plaintext, uint16_t plaintextLen,
+                                           uint8_t ttl, char* outStatus = nullptr, size_t outStatusLen = 0);
     extern uint32_t generateMessageId();
     extern bool parseMacAddress(const String& macStr, uint8_t mac[6]);
     extern Settings gSettings;
@@ -3018,8 +3027,22 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
     }
     
     uint32_t msgId = generateMessageId();
-    bool sent = v4_send_frame(peerMac, 5 /* ESPNOW_V4_TYPE_CMD */, 0x01 /* ACK_REQ */, 
-                              msgId, (const uint8_t*)payload.c_str(), payload.length(), 1);
+    // Opcode MUST be ESPNOW_V4_TYPE_CMD (30). This was hardcoded to a literal 5
+    // with a "/* ESPNOW_V4_TYPE_CMD */" comment that rotted when the opcode enum
+    // was renumbered (CMD: 5 → 30). The result: every remote/bond command went
+    // out as dead opcode 5, the peer logged "Unknown type 5" and dropped it, so
+    // bond sensor toggles and all remote: commands silently did nothing. Use the
+    // named constant so it can never drift from the handler registration again.
+    //
+    // SECURITY: send via v4_send_encrypted_or_queue (NOT raw v4_send_frame). The
+    // payload is "@BOND:<32-hex static token>:<command>"; sent in cleartext, a
+    // passive sniffer captures the token and can forge arbitrary commands (RCE on
+    // the bonded peer). The session-aware sender AEAD-wraps the frame when a
+    // session is active (synced bond mode always has one) and otherwise queues +
+    // kicks SESSION_OPEN — so the token is never on-air in plaintext. This is the
+    // same path every other CMD send already uses; bond was the lone exception.
+    bool sent = v4_send_encrypted_or_queue(peerMac, ESPNOW_V4_TYPE_CMD, ESPNOW_V4_FLAG_ACK_REQ,
+                                           msgId, (const uint8_t*)payload.c_str(), payload.length(), 1);
     
     if (sent) {
       snprintf(out, outSize, "Remote command sent: %s", actualCommand.c_str());

@@ -15,6 +15,7 @@
 #include "System_Mutex.h"        // FsLockGuard
 #include "System_Settings.h"     // encryptString / decryptString
 #include "System_VFS.h"          // openGuarded / mkdirGuarded / renameGuarded / systemAuth
+#include "System_Utils.h"        // macToPathToken / macToDisplay / macParse
 
 namespace {
 
@@ -302,8 +303,7 @@ constexpr uint8_t  kPeerFileVersion = 2;
 // Format MAC as 12-char uppercase hex without separators, matching the
 // existing directory convention at /system/espnow/peers/AABBCCDDEEFF/.
 void formatMacNoSep(const uint8_t mac[6], char* out13) {
-  snprintf(out13, 13, "%02X%02X%02X%02X%02X%02X",
-           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  macToPathToken(mac, out13);  // canonical PATH TOKEN form (System_Utils.h)
 }
 
 bool parseMacNoSep(const char* in, uint8_t mac[6]) {
@@ -375,8 +375,7 @@ bool writePeerIdentityFile(const PeerIdentity& p) {
   char macHex[13];
   formatMacNoSep(p.mac, macHex);
   char macColons[18];
-  snprintf(macColons, sizeof(macColons), "%02X:%02X:%02X:%02X:%02X:%02X",
-           p.mac[0], p.mac[1], p.mac[2], p.mac[3], p.mac[4], p.mac[5]);
+  macToDisplay(p.mac, macColons, sizeof(macColons));  // canonical DISPLAY form
   char pubHex[65];
   bytesToHex(p.longTermPub, 32, pubHex);
 

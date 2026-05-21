@@ -10,6 +10,7 @@
 #include "esp_log.h"
 #include "System_Command.h"
 #include "System_Debug.h"
+#include "System_Utils.h"   // macToDisplay
 
 static const char* TAG = "BLE_IDF";
 
@@ -80,8 +81,9 @@ static struct {
 // =============================================================================
 
 static void bleLogAddr(const char* prefix, const esp_bd_addr_t addr) {
-  ESP_LOGI(TAG, "%s %02x:%02x:%02x:%02x:%02x:%02x",
-    prefix, addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
+  char buf[18];
+  macToDisplay(addr, buf, sizeof(buf));
+  ESP_LOGI(TAG, "%s %s", prefix, buf);
 }
 
 static BLEConnection* bleFindConnection(uint16_t connId) {

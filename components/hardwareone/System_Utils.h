@@ -352,21 +352,88 @@ inline void normalizeCliArg(String& s) {
 }
 
 // ============================================================================
-// MAC Address Formatting  (always available, independent of ESP-NOW)
+// Unified MAC Address API  (always available, independent of ESP-NOW)
 // ============================================================================
+//
+// A 6-byte MAC renders to a string in exactly two forms across this codebase.
+// Both are UPPER-case; which one you want is driven by the separator the
+// destination needs — pick the function that names the destination:
+//
+//   DISPLAY     "AA:BB:CC:DD:EE:FF"  colon-separated, UPPER
+//               → logs, OLED/web UI, devices.json, settings, CLI output.
+//   PATH TOKEN  "AABBCCDDEEFF"       no separator,    UPPER
+//               → filesystem paths (/system/espnow/peers/<TOKEN>/) AND
+//                 MQTT client-id / topics / HomeAssistant entity ids.
+//                 (HA matches MACs case-insensitively; topics, client-id and
+//                  unique_id are arbitrary strings, so UPPER is fine there.)
+//
+// `macParse` is lenient (accepts ':' '-' ' ' separators or none, any case)
+// and is the canonical inbound parser.
+// ----------------------------------------------------------------------------
 
-// Write a 6-byte MAC address as "XX:XX:XX:XX:XX:XX" (uppercase) into buf.
-// buf must be at least 18 bytes.  Safe to call when ESP-NOW is disabled.
-inline void formatMacAddr(const uint8_t* mac, char* buf, size_t bufSize) {
+// DISPLAY form (colon-separated UPPER). buf must be >= 18 bytes.
+inline void macToDisplay(const uint8_t* mac, char* buf, size_t bufSize) {
   snprintf(buf, bufSize, "%02X:%02X:%02X:%02X:%02X:%02X",
            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 }
 
-// Same as formatMacAddr but returns a String (heap allocation; avoid in ISR).
-inline String formatMacAddrStr(const uint8_t* mac) {
+// DISPLAY form as String (heap allocation; avoid in ISR / hot paths).
+inline String macToDisplayStr(const uint8_t* mac) {
   char buf[18];
-  formatMacAddr(mac, buf, sizeof(buf));
+  macToDisplay(mac, buf, sizeof(buf));
   return String(buf);
+}
+
+// PATH TOKEN form (no separator UPPER). out must be >= 13 bytes.
+inline void macToPathToken(const uint8_t* mac, char* out13) {
+  snprintf(out13, 13, "%02X%02X%02X%02X%02X%02X",
+           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+}
+
+// PATH TOKEN form as String.
+inline String macToPathTokenStr(const uint8_t* mac) {
+  char buf[13];
+  macToPathToken(mac, buf);
+  return String(buf);
+}
+
+// Compare two 6-byte MAC addresses for equality.
+inline bool macEquals(const uint8_t* a, const uint8_t* b) {
+  return memcmp(a, b, 6) == 0;
+}
+
+// Lenient inbound parser. Accepts ':' '-' or ' ' separators or none; any
+// case. Requires exactly 12 hex nibbles (two per byte). Returns true and
+// fills mac[6] on success, false on any malformed input.
+inline bool macParse(const char* s, uint8_t mac[6]) {
+  if (!s) return false;
+  auto nyb = [](char c) -> int {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+  };
+  int byteIdx = 0;
+  int hi = -1;
+  for (const char* p = s; *p && byteIdx < 6; ++p) {
+    char c = *p;
+    if (c == ':' || c == '-' || c == ' ') continue;  // skip separators
+    int v = nyb(c);
+    if (v < 0) return false;
+    if (hi < 0) { hi = v; }
+    else { mac[byteIdx++] = (uint8_t)((hi << 4) | v); hi = -1; }
+  }
+  return (byteIdx == 6 && hi < 0);
+}
+
+// ----------------------------------------------------------------------------
+// Backward-compatible aliases for the historical names. Prefer the names
+// above in new code; these delegate so existing call sites keep working.
+inline void formatMacAddr(const uint8_t* mac, char* buf, size_t bufSize) {
+  macToDisplay(mac, buf, bufSize);
+}
+inline String formatMacAddrStr(const uint8_t* mac) {
+  return macToDisplayStr(mac);
 }
 
 #endif // SYSTEM_UTILS_H
