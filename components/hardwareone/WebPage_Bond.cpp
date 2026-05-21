@@ -219,27 +219,24 @@ void streamBondInner(httpd_req_t* req) {
     if (data.peerUptime !== undefined) {
       html += '<div class="stat-row"><span class="stat-label">Peer Uptime</span><span class="stat-value">' + formatUptime(data.peerUptime) + '</span></div>';
     }
-    
-    html += '</div>';
-    
-    // Link Quality Card
-    html += '<div class="remote-card">';
-    html += '<div class="remote-title">Link Quality</div>';
-    
+
+    // Link Quality — folded into the Bonded Device card. RSSI, heartbeat counts,
+    // packet loss and health are all telemetry about the link to THIS peer, so
+    // they belong here rather than in a separate panel.
     const health = data.heartbeatsTx > 0 ? Math.min(100, Math.round((data.heartbeatsRx / data.heartbeatsTx) * 100)) : 0;
+    html += '<div style="border-top:1px solid var(--panel-border);margin-top:8px;padding-top:8px">';
+    html += '<div class="stat-row"><span class="stat-label">Link Quality</span><span class="stat-value">' + health + '% Health</span></div>';
     html += '<div class="health-bar"><div class="health-fill ' + getHealthClass(health) + '" style="width:' + health + '%"></div></div>';
-    html += '<div style="text-align:center;font-size:0.9em;color:var(--panel-fg)">' + health + '% Health</div>';
-    
     html += '<div class="stat-row"><span class="stat-label">RSSI</span><span class="stat-value link-quality">' + renderSignalBars(data.rssi < 0 ? data.rssi : -90) + ' ' + (data.rssi < 0 ? data.rssi + ' dBm' : '—') + '</span></div>';
     html += '<div class="stat-row"><span class="stat-label">Heartbeats RX</span><span class="stat-value">' + (data.heartbeatsRx || 0) + '</span></div>';
     html += '<div class="stat-row"><span class="stat-label">Heartbeats TX</span><span class="stat-value">' + (data.heartbeatsTx || 0) + '</span></div>';
-    
     if (data.packetLoss !== undefined) {
       html += '<div class="stat-row"><span class="stat-label">Packet Loss</span><span class="stat-value">' + data.packetLoss.toFixed(1) + '%</span></div>';
     }
-    
     html += '</div>';
-    
+
+    html += '</div>';  // end Bonded Device card
+
     // Remote Sensors Card (master controls power + streaming on worker)
     {
       const synced = data._dbg_synced === true;
@@ -273,14 +270,15 @@ void streamBondInner(httpd_req_t* req) {
       
       // Filter to sensors compiled on the bonded device
       const visible = sensors.filter(function(s) { return data.capabilities && (remoteSensorMask & s.mask); });
-      
-      if (visible.length > 0) {
+
+      // Only the master controls the peer's sensors. On the worker this card is
+      // pure noise (every toggle disabled), and the peer's sensor state is already
+      // shown read-only in the "Bonded Device" card — so render it master-only.
+      if (isMaster && visible.length > 0) {
         html += '<div class="remote-card">';
         html += '<div class="remote-title">Remote Sensors</div>';
         if (!synced) {
           html += '<div class="remote-description" style="color:var(--muted)">Waiting for bond sync to complete...</div>';
-        } else if (!isMaster) {
-          html += '<div class="remote-description">Sensor control is managed by the master device</div>';
         } else {
           html += '<div class="remote-description">Control sensors on the bonded device</div>';
         }
@@ -928,29 +926,17 @@ static esp_err_t handleBondStatus(httpd_req_t* req) {
     uint32_t psramBytes = ESP.getPsramSize();
     webBondSendChunkf(req, "\"psramMB\":%lu,", (unsigned long)((psramBytes + 524288) / (1024 * 1024)));
     webBondSendChunkf(req, "\"psramKB\":%lu,", (unsigned long)(psramBytes / 1024));
-    // Local sensor connected status (runtime I2C probe results)
-    extern bool gThermalConnected, gTofConnected, gImuConnected, gGamepadConnected;
-    extern bool gGpsConnected, gPresenceConnected;
-    uint16_t localConnected = 0;
-#if ENABLE_THERMAL_SENSOR
-    if (gThermalConnected)  localConnected |= CAP_SENSOR_THERMAL;
-#endif
-#if ENABLE_TOF_SENSOR
-    if (gTofConnected)      localConnected |= CAP_SENSOR_TOF;
-#endif
-#if ENABLE_IMU_SENSOR
-    if (gImuConnected)      localConnected |= CAP_SENSOR_IMU;
-#endif
-#if ENABLE_GAMEPAD_SENSOR
-    if (gGamepadConnected)  localConnected |= CAP_SENSOR_GAMEPAD;
-#endif
-#if ENABLE_GPS_SENSOR
-    if (gGpsConnected)      localConnected |= CAP_SENSOR_GPS;
-#endif
-#if ENABLE_PRESENCE_SENSOR
-    if (gPresenceConnected) localConnected |= CAP_SENSOR_PRESENCE;
-#endif
-    webBondSendChunkf(req, "\"sensorConnectedMask\":%u", (unsigned)localConnected);
+    // Local sensor connected/enabled status. Reuse the SAME authoritative
+    // builder that produces the outgoing BOND_STATUS_RESP, so a device's own
+    // "This Device" view matches exactly how its bonded peer sees it. The old
+    // hand-rolled mask here omitted RTC/APDS/FM Radio, so locally-present
+    // sensors (notably RTC) wrongly showed OFF on this device even though the
+    // peer correctly reported them ON from the same physical state.
+    extern void buildLocalBondStatus(BondPeerStatus& status);
+    BondPeerStatus localStatus;
+    buildLocalBondStatus(localStatus);
+    webBondSendChunkf(req, "\"sensorConnectedMask\":%u,", (unsigned)localStatus.sensorConnectedMask);
+    webBondSendChunkf(req, "\"sensorEnabledMask\":%u", (unsigned)localStatus.sensorEnabledMask);
     webBondSendChunk(req, "},");
   }
   
@@ -1116,6 +1102,7 @@ static esp_err_t handleBondStream(httpd_req_t* req) {
     else if (strcmp(sensorParam, "gamepad")  == 0) current = gSettings.bondStreamGamepad;
     else if (strcmp(sensorParam, "fmradio")  == 0) current = gSettings.bondStreamFmradio;
     else if (strcmp(sensorParam, "presence") == 0) current = gSettings.bondStreamPresence;
+    else if (strcmp(sensorParam, "rtc")      == 0) current = gSettings.bondStreamRtc;
     else {
       httpd_resp_send(req, "{\"success\":false,\"error\":\"Unknown sensor\"}", HTTPD_RESP_USE_STRLEN);
       return ESP_OK;

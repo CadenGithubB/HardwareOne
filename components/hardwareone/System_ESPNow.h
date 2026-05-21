@@ -728,9 +728,12 @@ struct EspNowState {
   bool bondSettingsReceived;        // We received peer's settings (master)
   bool bondSettingsSent;            // We sent our settings to peer (worker)
   
-  // Session token (RAM only — computed after CAP exchange, cleared on offline)
+  // Bond auth token (RAM only). Derived from the encrypted session's X25519
+  // shared secret at handshake time (bondDeriveTokenFromSession); fresh per
+  // session, never transmitted, cleared on offline.
   uint8_t bondSessionToken[16];
   bool bondSessionTokenValid;
+  bool bondStatusReqSentOnce;       // One-shot: initial post-sync status exchange fired
   
   // RSSI tracking (updated from rx_ctrl on every received bond packet)
   int8_t bondRssiLast;
@@ -866,6 +869,7 @@ struct EspNowState {
     bondSettingsReceived(false),
     bondSettingsSent(false),
     bondSessionTokenValid(false),
+    bondStatusReqSentOnce(false),
     bondRssiLast(-100),
     bondRssiAvg(-100),
     bondLastRssiUpdateMs(0),
