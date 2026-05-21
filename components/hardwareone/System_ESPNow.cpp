@@ -2243,7 +2243,62 @@ bool v4_broadcast_topo_request(uint32_t reqId) {
   return v4_send_topo_request(broadcastMac, reqId);
 }
 
-bool v4_send_worker_status(const uint8_t* dst, const V4PayloadWorkerStatus& status, 
+// ===========================================================================
+// Bond confidentiality (2026-05-21): every bond unicast frame rides an AEAD
+// SESSION_FRAME. Two rules live in bondSendEncrypted():
+//   1) SINGLE INITIATOR — the higher-MAC device initiates SESSION_OPEN; the
+//      lower-MAC device only responds. This is anchored on the MAC comparison
+//      (sessionIsASide), NOT on the mutable bond master/worker role — so a
+//      misconfigured two-master or two-worker pair can never both initiate and
+//      trigger the broken simultaneous-open (which leaves two mismatched
+//      sessions that can't decrypt each other). Exactly one side ever initiates.
+//   2) ENCRYPT-OR-WAIT — session ACTIVE: send encrypted. No session + I am the
+//      initiator: kick SESSION_OPEN (single-frame queue path). No session + I am
+//      the responder: skip this send; the initiator will bring the session up.
+// Receivers enforce the matching rule via V4_OPC_FLAG_REQ_SESSION_ENC.
+static bool bondSendEncrypted(const uint8_t* mac, uint8_t type, uint16_t flags,
+                              uint32_t msgId, const uint8_t* payload, uint16_t len) {
+  if (!gEspNow || !mac) return false;
+  uint8_t selfMac[6];
+  esp_wifi_get_mac(WIFI_IF_STA, selfMac);
+  const bool iAmInitiator = !sessionIsASide(selfMac, mac);  // higher MAC initiates
+  const PeerIdentity* pid = peerIdentityFindByMac(mac);
+  SessionState* s = pid ? sessionFindByPeer(mac, pid->meshId) : nullptr;
+  const bool active = (s && s->state == SESSION_ACTIVE);
+  if (active || iAmInitiator) {
+    // Active → encrypt (smart picks single vs chunked, never kicks).
+    // Initiator + no session → smart's single-frame path queues + kicks SESSION_OPEN.
+    return v4_send_payload_smart(mac, type, flags, msgId, payload, len, 1);
+  }
+  // Responder with no session yet — stay silent so we never initiate (avoids the
+  // simultaneous-open race). The initiator's traffic establishes the session.
+  return false;
+}
+
+// Invoked from the session layer (cmd_exec_task) the moment a session with
+// `peerMac` reaches ACTIVE — whether we were initiator (got CONFIRM) or
+// responder (completed OPEN). Replaces the old "plaintext heartbeat == peer
+// online" discovery: the encrypted session itself is now the liveness signal.
+// The master kicks the capability exchange here. Filtered to the bonded peer so
+// sessions opened for non-bond reasons don't spuriously start a bond sync.
+void bondNotifySessionEstablished(const uint8_t* peerMac) {
+#if ENABLE_BONDED_MODE
+  if (!gEspNow || !gSettings.bondModeEnabled || !peerMac) return;
+  uint8_t bm[6];
+  if (!parseMacAddress(gSettings.bondPeerMac, bm) || memcmp(bm, peerMac, 6) != 0) return;
+  bool wasOffline = !gEspNow->bondPeerOnline;
+  gEspNow->bondPeerOnline = true;
+  gEspNow->lastBondHeartbeatReceivedMs = millis();  // session ACTIVE counts as liveness
+  if (wasOffline && isBondMaster()) {
+    gEspNow->bondNeedsCapabilityRequest = true;
+    INFO_ESPNOWF("[BOND] session ACTIVE with peer — master kicking capability sync");
+  }
+#else
+  (void)peerMac;
+#endif
+}
+
+bool v4_send_worker_status(const uint8_t* dst, const V4PayloadWorkerStatus& status,
                                    const char* jsonMetadata, uint16_t jsonLen) {
   uint32_t msgId = generateMessageId();
   
@@ -2588,6 +2643,13 @@ static constexpr uint8_t V4_OPC_FLAG_REQ_BOND_MODE     = 0x02;  // require gSett
 // silently. Used by opcodes whose handler mutates device-level state from
 // payload contents (e.g., TIME_SYNC moves the clock).
 static constexpr uint8_t V4_OPC_FLAG_REQ_AUTHENTICATED = 0x04;
+// Require the frame to have arrived AEAD-wrapped in a SESSION_FRAME (confidential
+// + per-peer authenticated). Stricter than REQ_AUTHENTICATED, which also accepts
+// BROADCAST_AUTH (authenticated-but-plaintext). Used by every bond opcode: bond
+// traffic carries the @BOND token, sensor data, and privileged state, so it must
+// be confidential AND unforgeable. Senders route through bondSendEncrypted, so a
+// legitimate bond frame is always encrypted; plaintext bond frames are dropped.
+static constexpr uint8_t V4_OPC_FLAG_REQ_SESSION_ENC   = 0x08;
 
 struct V4OpcodeEntry {
   uint8_t          opcode;
@@ -3725,15 +3787,15 @@ static const V4OpcodeEntry kV4HandlerTable[] = {
   // gating (and to ensure peerIdentitySetSubscriptions finds the slot).
   { ESPNOW_V4_TYPE_SUBSCRIBE_UPDATE, V4_OPC_FLAG_REQ_PAIRED,                               v4h_subscribe_update  },
 #if ENABLE_BONDED_MODE
-  { ESPNOW_V4_TYPE_BOND_HEARTBEAT,   V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE,   v4h_bond_heartbeat    },
-  { ESPNOW_V4_TYPE_STREAM_CTRL,      V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE,   v4h_stream_ctrl       },
-  { ESPNOW_V4_TYPE_BOND_CAP_REQ,     V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE,   v4h_bond_cap_req      },
-  { ESPNOW_V4_TYPE_BOND_CAP_RESP,    V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE,   v4h_bond_cap_resp     },
-  { ESPNOW_V4_TYPE_SENSOR_DATA,      V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE,   v4h_sensor_data       },
-  { ESPNOW_V4_TYPE_SETTINGS_REQ,     V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE,   v4h_settings_req      },
-  { ESPNOW_V4_TYPE_BOND_STATUS_REQ,  V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE,   v4h_bond_status_req   },
-  { ESPNOW_V4_TYPE_BOND_STATUS_RESP, V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE,   v4h_bond_status_resp  },
-  { ESPNOW_V4_TYPE_MANIFEST_REQ,     V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE,   v4h_manifest_req      },
+  { ESPNOW_V4_TYPE_BOND_HEARTBEAT,   V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_bond_heartbeat    },
+  { ESPNOW_V4_TYPE_STREAM_CTRL,      V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_stream_ctrl       },
+  { ESPNOW_V4_TYPE_BOND_CAP_REQ,     V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_bond_cap_req      },
+  { ESPNOW_V4_TYPE_BOND_CAP_RESP,    V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_bond_cap_resp     },
+  { ESPNOW_V4_TYPE_SENSOR_DATA,      V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_sensor_data       },
+  { ESPNOW_V4_TYPE_SETTINGS_REQ,     V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_settings_req      },
+  { ESPNOW_V4_TYPE_BOND_STATUS_REQ,  V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_bond_status_req   },
+  { ESPNOW_V4_TYPE_BOND_STATUS_RESP, V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_bond_status_resp  },
+  { ESPNOW_V4_TYPE_MANIFEST_REQ,     V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_manifest_req      },
 #endif
 };
 static constexpr size_t kV4HandlerTableSize = sizeof(kV4HandlerTable) / sizeof(kV4HandlerTable[0]);
@@ -3787,6 +3849,18 @@ static bool v4_dispatch_table_try(const esp_now_recv_info* recv_info, const EspN
     WARN_ESPNOWF("[V4_RX] type=%u from %02X:%02X:%02X:%02X:%02X:%02X dropped: "
                  "REQ_AUTHENTICATED set but frame was plaintext (no SESSION_FRAME "
                  "or BROADCAST_AUTH)",
+                 h->type,
+                 recv_info->src_addr[0], recv_info->src_addr[1], recv_info->src_addr[2],
+                 recv_info->src_addr[3], recv_info->src_addr[4], recv_info->src_addr[5]);
+    v4_dispatch_post_cleanup(recv_info, h);
+    return true;
+  }
+  if ((e->flags & V4_OPC_FLAG_REQ_SESSION_ENC) && !isSessionEncrypted) {
+    // Bond opcode that arrived plaintext (or only BROADCAST_AUTH). All bond
+    // traffic must ride a SESSION_FRAME — drop loudly. A legitimate sender uses
+    // bondSendEncrypted, so this only fires on spoofed/downgraded frames.
+    WARN_ESPNOWF("[V4_RX] type=%u from %02X:%02X:%02X:%02X:%02X:%02X dropped: "
+                 "REQ_SESSION_ENC set but frame was not session-encrypted",
                  h->type,
                  recv_info->src_addr[0], recv_info->src_addr[1], recv_info->src_addr[2],
                  recv_info->src_addr[3], recv_info->src_addr[4], recv_info->src_addr[5]);
@@ -5287,7 +5361,7 @@ static void requestBondSettings(const uint8_t* peerMac) {
   // NOTE: retry count is managed by the sync tick retry block — don't increment here
   
   uint32_t msgId = generateMessageId();
-  bool sent = v4_send_frame(peerMac, ESPNOW_V4_TYPE_SETTINGS_REQ, 0, msgId, nullptr, 0, 1);
+  bool sent = bondSendEncrypted(peerMac, ESPNOW_V4_TYPE_SETTINGS_REQ, 0, msgId, nullptr, 0);
   
   if (sent) {
     DEBUG_ESPNOWF("[SETTINGS_REQ] Sent (msgId=%lu retry=%d)", (unsigned long)msgId, (int)gEspNow->bondSyncRetryCount);
@@ -5459,7 +5533,7 @@ static void processBondSettings(const uint8_t* srcMac, const String& deviceName,
         if (parseMacAddress(gSettings.bondPeerMac, pMac)) {
           computeBondSessionToken(pMac);
           uint32_t statusReqId = generateMessageId();
-          v4_send_frame(pMac, ESPNOW_V4_TYPE_BOND_STATUS_REQ, 0, statusReqId, nullptr, 0, 1);
+          bondSendEncrypted(pMac, ESPNOW_V4_TYPE_BOND_STATUS_REQ, 0, statusReqId, nullptr, 0);
           gEspNow->bondLastStatusReqMs = millis();
         }
       }
@@ -6924,8 +6998,13 @@ void processMeshHeartbeats() {
         phb.settingsHash = gEspNow ? gEspNow->bondLocalSettingsHash : 0;
         wifi_ap_record_t ap2 = {};
         phb.rssi = (esp_wifi_sta_get_ap_info(&ap2) == ESP_OK) ? ap2.rssi : (int8_t)-127;
-        bool sent = v4_send_frame(bondMac, ESPNOW_V4_TYPE_BOND_HEARTBEAT, 0,
-                      generateMessageId(), (const uint8_t*)&phb, (uint16_t)sizeof(phb), 1);
+        // Encrypted + initiator-only: bondSendEncrypted kicks the session on the
+        // initiator (higher-MAC) side; the responder skips until the session is up.
+        // The session handshake is now what bootstraps the bond (see
+        // bondNotifySessionEstablished), so the heartbeat no longer needs to be
+        // the plaintext discovery beacon.
+        bool sent = bondSendEncrypted(bondMac, ESPNOW_V4_TYPE_BOND_HEARTBEAT, 0,
+                      generateMessageId(), (const uint8_t*)&phb, (uint16_t)sizeof(phb));
         gEspNow->bondHeartbeatsSent++;
         // Log every 6th heartbeat (every 30s) or first one, plus full state
         if (gBondHeartbeatSeqNum <= 2 || gBondHeartbeatSeqNum % 6 == 0) {
@@ -6954,6 +7033,20 @@ void processMeshHeartbeats() {
     gEspNow->bondPeerOnline = false;
     gEspNow->bondLastOfflineMs = now;
     resetBondSync();
+    // All-encrypted bond: tear down the (now-stale) session so the next send
+    // re-establishes a fresh one. Critical for peer-reboot recovery — if the
+    // peer rebooted it has no session, would silently drop our encrypted frames,
+    // and (since our slot is still ACTIVE) bondSendEncrypted would never re-kick
+    // a SESSION_OPEN. Clearing it makes the next initiator send rebuild the session.
+    uint8_t offMac[6];
+    if (parseMacAddress(gSettings.bondPeerMac, offMac)) {
+      const PeerIdentity* offPid = peerIdentityFindByMac(offMac);
+      SessionState* offS = offPid ? sessionFindByPeer(offMac, offPid->meshId) : nullptr;
+      if (offS) {
+        INFO_ESPNOWF("[BOND] peer offline — clearing stale session for re-establishment");
+        sessionClear(offS);
+      }
+    }
   }
 #endif // ENABLE_BONDED_MODE
 
@@ -7058,7 +7151,16 @@ void processMeshHeartbeats() {
                        (unsigned long)gEspNow->lastRemoteCap.featureMask);
     }
     
-    // Cooldown after retry exhaustion — don't re-request immediately
+    // Cooldown after retry exhaustion — don't re-request immediately.
+    // KNOWN ISSUE (2026-05-21, all-encrypted bond): now that CAP_REQ/MANIFEST_REQ
+    // ride a SESSION_FRAME, they need the session ACTIVE on BOTH ends. There is a
+    // ~1-2 s window after SESSION_CONFIRM where the master considers the session
+    // up but the worker hasn't finished its responder side, so the first 1-3
+    // encrypted CAP_REQs get dropped and burn the 3-retry budget — then this 15 s
+    // cooldown delays the next attempt, making the FIRST bond sync take ~25 s
+    // instead of ~5 s (HW-observed). It self-heals (the post-cooldown CAP_REQ
+    // succeeds). Tuning options if it annoys: shorten the cooldown, or don't count
+    // "no active session yet" send failures against bondSyncRetryCount.
     static const uint32_t BOND_SYNC_COOLDOWN_MS = 15000;
     bool inCooldown = (gEspNow->bondSyncLastAttemptMs > 0 &&
                        (now - gEspNow->bondSyncLastAttemptMs) < BOND_SYNC_COOLDOWN_MS);
@@ -7072,7 +7174,7 @@ void processMeshHeartbeats() {
       if (!haveCap) {
         // Need capabilities
         uint32_t reqId = generateMessageId();
-        v4_send_frame(peerMac, ESPNOW_V4_TYPE_BOND_CAP_REQ, ESPNOW_V4_FLAG_ACK_REQ, reqId, nullptr, 0, 1);
+        bondSendEncrypted(peerMac, ESPNOW_V4_TYPE_BOND_CAP_REQ, ESPNOW_V4_FLAG_ACK_REQ, reqId, nullptr, 0);
         gEspNow->bondSyncInFlight = BOND_SYNC_CAP;
         gEspNow->bondSyncLastAttemptMs = now;
         gEspNow->bondSyncRetryCount = 1;
@@ -7087,7 +7189,7 @@ void processMeshHeartbeats() {
           BROADCAST_PRINTF("[BOND_SYNC] Manifest found in cache, skipping request");
         } else {
           uint32_t msgId = generateMessageId();
-          v4_send_frame(peerMac, ESPNOW_V4_TYPE_MANIFEST_REQ, ESPNOW_V4_FLAG_ACK_REQ, msgId, nullptr, 0, 1);
+          bondSendEncrypted(peerMac, ESPNOW_V4_TYPE_MANIFEST_REQ, ESPNOW_V4_FLAG_ACK_REQ, msgId, nullptr, 0);
           gEspNow->bondSyncInFlight = BOND_SYNC_MANIFEST;
           gEspNow->bondSyncLastAttemptMs = now;
           gEspNow->bondSyncRetryCount = 1;
@@ -7116,10 +7218,10 @@ void processMeshHeartbeats() {
         gEspNow->bondSyncLastAttemptMs = now;
         gEspNow->bondSyncRetryCount++;
         if (gEspNow->bondSyncInFlight == BOND_SYNC_CAP) {
-          v4_send_frame(peerMac, ESPNOW_V4_TYPE_BOND_CAP_REQ, ESPNOW_V4_FLAG_ACK_REQ, generateMessageId(), nullptr, 0, 1);
+          bondSendEncrypted(peerMac, ESPNOW_V4_TYPE_BOND_CAP_REQ, ESPNOW_V4_FLAG_ACK_REQ, generateMessageId(), nullptr, 0);
           BROADCAST_PRINTF("[BOND_SYNC] Retry CAP_REQ (%d/3)", (int)gEspNow->bondSyncRetryCount);
         } else if (gEspNow->bondSyncInFlight == BOND_SYNC_MANIFEST) {
-          v4_send_frame(peerMac, ESPNOW_V4_TYPE_MANIFEST_REQ, ESPNOW_V4_FLAG_ACK_REQ, generateMessageId(), nullptr, 0, 1);
+          bondSendEncrypted(peerMac, ESPNOW_V4_TYPE_MANIFEST_REQ, ESPNOW_V4_FLAG_ACK_REQ, generateMessageId(), nullptr, 0);
           BROADCAST_PRINTF("[BOND_SYNC] Retry MANIFEST_REQ (%d/3)", (int)gEspNow->bondSyncRetryCount);
         } else if (gEspNow->bondSyncInFlight == BOND_SYNC_SETTINGS) {
           requestBondSettings(peerMac);
@@ -7154,9 +7256,9 @@ void processMeshHeartbeats() {
     CapabilitySummary cap;
     buildCapabilitySummary(cap);
     uint32_t respId = generateMessageId();
-    bool sent = v4_send_frame(gEspNow->bondPendingResponseMac, ESPNOW_V4_TYPE_BOND_CAP_RESP,
+    bool sent = bondSendEncrypted(gEspNow->bondPendingResponseMac, ESPNOW_V4_TYPE_BOND_CAP_RESP,
                   ESPNOW_V4_FLAG_ACK_REQ, respId,
-                  (const uint8_t*)&cap, (uint16_t)sizeof(cap), 1);
+                  (const uint8_t*)&cap, (uint16_t)sizeof(cap));
     gEspNow->bondCapSent = true;
     BROADCAST_PRINTF("[BOND] 9b: CAP_RESP sent=%d featureMask=0x%08lX", (int)sent, (unsigned long)cap.featureMask);
   }
@@ -7328,8 +7430,8 @@ void processMeshHeartbeats() {
     BondPeerStatus localStatus;
     buildLocalBondStatus(localStatus);
     uint32_t respId = generateMessageId();
-    v4_send_frame(gEspNow->bondPendingResponseMac, ESPNOW_V4_TYPE_BOND_STATUS_RESP,
-                  0, respId, (const uint8_t*)&localStatus, sizeof(localStatus), 1);
+    bondSendEncrypted(gEspNow->bondPendingResponseMac, ESPNOW_V4_TYPE_BOND_STATUS_RESP,
+                  0, respId, (const uint8_t*)&localStatus, sizeof(localStatus));
     BROADCAST_PRINTF("[BOND] 9j: Sent status response enabled=0x%04X connected=0x%04X heap=%lu",
            localStatus.sensorEnabledMask, localStatus.sensorConnectedMask,
            (unsigned long)localStatus.freeHeap);
@@ -7344,8 +7446,8 @@ void processMeshHeartbeats() {
         BondPeerStatus localStatus;
         buildLocalBondStatus(localStatus);
         uint32_t respId = generateMessageId();
-        v4_send_frame(peerMac, ESPNOW_V4_TYPE_BOND_STATUS_RESP,
-                      0, respId, (const uint8_t*)&localStatus, sizeof(localStatus), 1);
+        bondSendEncrypted(peerMac, ESPNOW_V4_TYPE_BOND_STATUS_RESP,
+                      0, respId, (const uint8_t*)&localStatus, sizeof(localStatus));
         BROADCAST_PRINTF("[BOND] 9j2: Proactive status push enabled=0x%04X connected=0x%04X",
                localStatus.sensorEnabledMask, localStatus.sensorConnectedMask);
       }
@@ -7361,7 +7463,7 @@ void processMeshHeartbeats() {
       uint8_t peerMac[6];
       if (parseMacAddress(gSettings.bondPeerMac, peerMac)) {
         uint32_t reqId = generateMessageId();
-        v4_send_frame(peerMac, ESPNOW_V4_TYPE_BOND_STATUS_REQ, 0, reqId, nullptr, 0, 1);
+        bondSendEncrypted(peerMac, ESPNOW_V4_TYPE_BOND_STATUS_REQ, 0, reqId, nullptr, 0);
         DEBUGF(DEBUG_ESPNOW_MESH, "[BOND] 9k: Sent status request to peer");
       }
     }
@@ -8717,6 +8819,16 @@ const char* cmd_espnow_pair(const String& argsInput) {
   gEspNow->devices[gEspNow->deviceCount].encrypted = false;
   memset(gEspNow->devices[gEspNow->deviceCount].key, 0, 16);
   gEspNow->devices[gEspNow->deviceCount].meshId = meshId;  // Phase 2.5
+  // Initialize the optional metadata Strings to "" (matching addEspNowDevice and
+  // the devices.json load path). gEspNow is ps_alloc'd without a constructor, so
+  // these String members start zeroed — c_str() returns NULL until assigned, and
+  // any %s consumer (e.g. /api/bond/paired-devices) would strlen(NULL)->crash.
+  // This is why a freshly-paired device crashed the bond page but a reboot (which
+  // reloads from devices.json, assigning "") did not.
+  gEspNow->devices[gEspNow->deviceCount].friendlyName = "";
+  gEspNow->devices[gEspNow->deviceCount].room = "";
+  gEspNow->devices[gEspNow->deviceCount].zone = "";
+  gEspNow->devices[gEspNow->deviceCount].tags = "";
   gEspNow->deviceCount++;
 
   removeFromUnpairedList(mac);
@@ -10751,7 +10863,7 @@ bool sendBondedSensorData(uint8_t sensorType, const uint8_t* data, uint16_t data
   uint16_t totalLen = sizeof(V4PayloadSensorData) + dataLen;
   uint32_t msgId = generateMessageId();
   
-  bool sent = v4_send_frame(peerMac, ESPNOW_V4_TYPE_SENSOR_DATA, 0, msgId, payloadBuf, totalLen, 1);
+  bool sent = bondSendEncrypted(peerMac, ESPNOW_V4_TYPE_SENSOR_DATA, 0, msgId, payloadBuf, totalLen);
   
   // Single concise debug line only on success/failure
   DEBUGF(DEBUG_ESPNOW_MESH, "[BOND] Sensor TX type=%u len=%u seq=%lu %s",
@@ -10775,8 +10887,8 @@ bool sendBondStreamCtrl(RemoteSensorType sensorType, bool enable) {
   ctrl.enable = enable ? 1 : 0;
   
   uint32_t msgId = generateMessageId();
-  bool sent = v4_send_frame(peerMac, ESPNOW_V4_TYPE_STREAM_CTRL, ESPNOW_V4_FLAG_ACK_REQ, 
-                            msgId, (const uint8_t*)&ctrl, sizeof(ctrl), 1);
+  bool sent = bondSendEncrypted(peerMac, ESPNOW_V4_TYPE_STREAM_CTRL, ESPNOW_V4_FLAG_ACK_REQ,
+                            msgId, (const uint8_t*)&ctrl, sizeof(ctrl));
   
   DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_STREAM_CTRL] TX %s %s -> %s",
          sensorTypeToString(sensorType), enable ? "ON" : "OFF", sent ? "OK" : "FAIL");
@@ -11721,7 +11833,7 @@ const char* cmd_bond_requestcap(const String& argsInput) {
   uint32_t reqId = generateMessageId();
   bool sent = false;
   for (int attempt = 0; attempt < 2; attempt++) {
-    sent = v4_send_frame(peerMac, ESPNOW_V4_TYPE_BOND_CAP_REQ, ESPNOW_V4_FLAG_ACK_REQ, reqId, nullptr, 0, 1);
+    sent = bondSendEncrypted(peerMac, ESPNOW_V4_TYPE_BOND_CAP_REQ, ESPNOW_V4_FLAG_ACK_REQ, reqId, nullptr, 0);
     if (sent) break;
   }
   return sent ? "Capability request sent. Check output for response." : "Failed to send capability request.";
@@ -11776,7 +11888,7 @@ const char* cmd_bond_requestmanifest(const String& argsInput) {
   
   // Send v3 manifest request
   uint32_t msgId = generateMessageId();
-  if (v4_send_frame(peerMac, ESPNOW_V4_TYPE_MANIFEST_REQ, ESPNOW_V4_FLAG_ACK_REQ, msgId, nullptr, 0, 1)) {
+  if (bondSendEncrypted(peerMac, ESPNOW_V4_TYPE_MANIFEST_REQ, ESPNOW_V4_FLAG_ACK_REQ, msgId, nullptr, 0)) {
     return "Manifest request sent (v3). Response will arrive via file transfer.";
   } else {
     return "Failed to send manifest request.";
