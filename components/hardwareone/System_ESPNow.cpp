@@ -714,56 +714,49 @@ static void setEspNowPassphrase(const String& passphrase) {
 // ============================================================================
 // BOND MODE SESSION TOKEN
 // ============================================================================
-// Session token = HMAC-SHA256(passphrase, peerMAC || ourMAC)
-// This proves knowledge of shared passphrase AND specific bond relationship
-// Token is stored in RAM only, never persisted - cleared on disconnect
+// The bond auth token proves the @BOND/RCE command channel is talking to the
+// genuine bonded peer. It used to be HMAC-SHA256(passphrase, sortedMACs) — a
+// value that NEVER changed for a given pair, so a single capture of it (back
+// when bond traffic was plaintext) granted permanent impersonation.
+//
+// As of task #33 it is instead derived from the live encrypted session's
+// X25519 shared secret: the SAME 32-byte secret that yields the AEAD keys, run
+// through one more Blake2b KDF subkey (id 3, context "esp-bond"). Properties:
+//   - Fresh per session: every SESSION_OPEN does a new ephemeral DH, so each
+//     session yields a brand-new token. A stolen token is useless next session.
+//   - Never transmitted: both ends compute it independently from the shared
+//     secret (which itself never crosses the wire). The token only ever appears
+//     INSIDE encrypted @BOND frames, never on its own.
+//   - No static secret: it no longer depends on the passphrase at all.
+// Stored in RAM only, never persisted, cleared on disconnect.
+//
+// NOTE on REKEY: we deliberately do NOT re-derive the token when the session
+// rekeys mid-life. The token already rides inside the rotating AEAD layer, so
+// its confidentiality is protected regardless; re-deriving on REKEY would open
+// a window where an in-flight @BOND command signed with the old token arrives
+// after the peer rotated and gets spuriously rejected. Per-session freshness is
+// what kills the "permanent secret" problem; intra-session rotation adds risk
+// without a confidentiality gain.
+//
+// `peerMac` must be our bonded peer; called from the session handshake (both
+// initiator and responder completion) while `shared` is still in scope.
+void bondDeriveTokenFromSession(const uint8_t* peerMac, const uint8_t shared[32]) {
+  if (!gEspNow || !peerMac || !shared) return;
+  if (!gSettings.bondModeEnabled) return;
+  // Only the bonded peer's session backs the bond token.
+  uint8_t bm[6];
+  if (!parseMacAddress(gSettings.bondPeerMac, bm) || memcmp(bm, peerMac, 6) != 0) return;
 
-static void computeBondSessionToken(const uint8_t* peerMac) {
-  if (!gEspNow) {
-    ERROR_ESPNOWF("[BOND_AUTH] computeToken: gEspNow null");
+  uint8_t token32[32];
+  if (!espnowCryptoKdfSubkey(token32, shared, 3, "esp-bond")) {
+    ERROR_ESPNOWF("[BOND_AUTH] session-token KDF failed");
     return;
   }
-  if (gEspNow->passphrase.length() == 0) {
-    gEspNow->bondSessionTokenValid = false;
-    memset(gEspNow->bondSessionToken, 0, 16);
-    DEBUG_ESPNOWF("[BOND_AUTH] No passphrase set - session token disabled");
-    return;
-  }
-
-  uint8_t ourMac[6];
-  esp_wifi_get_mac(WIFI_IF_STA, ourMac);
-
-  bool peerFirst = memcmp(peerMac, ourMac, 6) < 0;
-
-  DEBUG_ESPNOWF("[BOND_AUTH] Computing token: passLen=%d, peerFirst=%d",
-                gEspNow->passphrase.length(), peerFirst);
-  DEBUG_ESPNOWF("[BOND_AUTH]   ourMac=%02X:%02X:%02X:%02X:%02X:%02X",
-                ourMac[0], ourMac[1], ourMac[2], ourMac[3], ourMac[4], ourMac[5]);
-  DEBUG_ESPNOWF("[BOND_AUTH]   peerMac=%02X:%02X:%02X:%02X:%02X:%02X",
-                peerMac[0], peerMac[1], peerMac[2], peerMac[3], peerMac[4], peerMac[5]);
-
-  uint8_t input[128];
-  size_t inputLen = 0;
-
-  size_t passLen = gEspNow->passphrase.length();
-  if (passLen > 64) passLen = 64;
-  memcpy(input + inputLen, gEspNow->passphrase.c_str(), passLen);
-  inputLen += passLen;
-  
-  if (peerFirst) {
-    memcpy(input + inputLen, peerMac, 6); inputLen += 6;
-    memcpy(input + inputLen, ourMac, 6); inputLen += 6;
-  } else {
-    memcpy(input + inputLen, ourMac, 6); inputLen += 6;
-    memcpy(input + inputLen, peerMac, 6); inputLen += 6;
-  }
-  
-  uint8_t hash[32];
-  mbedtls_sha256(input, inputLen, hash, 0);
-  memcpy(gEspNow->bondSessionToken, hash, 16);
+  memcpy(gEspNow->bondSessionToken, token32, 16);
   gEspNow->bondSessionTokenValid = true;
-  
-  DEBUG_ESPNOWF("[BOND_AUTH] Token computed: %02X%02X%02X%02X%02X%02X%02X%02X...",
+  sodium_memzero(token32, sizeof(token32));
+
+  DEBUG_ESPNOWF("[BOND_AUTH] Token derived from session: %02X%02X%02X%02X%02X%02X%02X%02X...",
          gEspNow->bondSessionToken[0], gEspNow->bondSessionToken[1],
          gEspNow->bondSessionToken[2], gEspNow->bondSessionToken[3],
          gEspNow->bondSessionToken[4], gEspNow->bondSessionToken[5],
@@ -2275,6 +2268,21 @@ static bool bondSendEncrypted(const uint8_t* mac, uint8_t type, uint16_t flags,
   return false;
 }
 
+// True only when an encrypted session with `mac` is currently ACTIVE on THIS
+// device. Used to gate the master's bond-sync sequence: firing CAP/MANIFEST/
+// SETTINGS requests before our own session is ACTIVE just parks them in the
+// single-frame queue (initiator path), where they can be overwritten/swept
+// before the session opens — burning the retry budget for nothing. The master
+// is the session initiator (higher MAC), so by the time OUR session is ACTIVE
+// the worker (responder) has already been ACTIVE since slightly earlier and can
+// decrypt our first request. Gating here makes the first request land for real.
+static bool bondSessionActiveWith(const uint8_t* mac) {
+  if (!gEspNow || !mac) return false;
+  const PeerIdentity* pid = peerIdentityFindByMac(mac);
+  SessionState* s = pid ? sessionFindByPeer(mac, pid->meshId) : nullptr;
+  return (s && s->state == SESSION_ACTIVE);
+}
+
 // Invoked from the session layer (cmd_exec_task) the moment a session with
 // `peerMac` reaches ACTIVE — whether we were initiator (got CONFIRM) or
 // responder (completed OPEN). Replaces the old "plaintext heartbeat == peer
@@ -2924,10 +2932,9 @@ static void v4h_bond_heartbeat(const V4RxCtx& ctx) {
       !gEspNow->bondSettingsSent && capExchangedLongEnough) {
     gEspNow->bondSettingsSent = true;
     if (isBondSynced()) {
-      uint8_t pMac[6];
-      if (parseMacAddress(gSettings.bondPeerMac, pMac)) {
-        computeBondSessionToken(pMac);
-      }
+      // Bond token is derived from the encrypted session at handshake time
+      // (bondDeriveTokenFromSession), so it is already valid here — no
+      // passphrase-based recompute needed.
       BROADCAST_PRINTF("[BOND_SYNC] *** SYNC COMPLETE *** role=0 (worker, recovered)");
     }
   }
@@ -4813,7 +4820,7 @@ static bool shouldUseMesh(const uint8_t* mac) {
  * Build BondPeerStatus snapshot from local device state
  * Called in task context when responding to BOND_STATUS_REQ
  */
-static void buildLocalBondStatus(BondPeerStatus& status) {
+void buildLocalBondStatus(BondPeerStatus& status) {
   memset(&status, 0, sizeof(BondPeerStatus));
   
   status.uptimeSec = millis() / 1000;
@@ -5527,11 +5534,13 @@ static void processBondSettings(const uint8_t* srcMac, const String& deviceName,
     BROADCAST_PRINTF("[BOND_SYNC] Settings received, synced=%d role=%d", (int)synced, (int)gSettings.bondRole);
     
     if (synced) {
-      // Compute session token once on first sync
-      if (!gEspNow->bondSessionTokenValid) {
+      // Bond token is derived from the encrypted session at handshake time
+      // (bondDeriveTokenFromSession), so it is already valid by first sync.
+      // Kick the initial status exchange once.
+      if (!gEspNow->bondStatusReqSentOnce) {
         uint8_t pMac[6];
         if (parseMacAddress(gSettings.bondPeerMac, pMac)) {
-          computeBondSessionToken(pMac);
+          gEspNow->bondStatusReqSentOnce = true;
           uint32_t statusReqId = generateMessageId();
           bondSendEncrypted(pMac, ESPNOW_V4_TYPE_BOND_STATUS_REQ, 0, statusReqId, nullptr, 0);
           gEspNow->bondLastStatusReqMs = millis();
@@ -7152,20 +7161,25 @@ void processMeshHeartbeats() {
     }
     
     // Cooldown after retry exhaustion — don't re-request immediately.
-    // KNOWN ISSUE (2026-05-21, all-encrypted bond): now that CAP_REQ/MANIFEST_REQ
-    // ride a SESSION_FRAME, they need the session ACTIVE on BOTH ends. There is a
-    // ~1-2 s window after SESSION_CONFIRM where the master considers the session
-    // up but the worker hasn't finished its responder side, so the first 1-3
-    // encrypted CAP_REQs get dropped and burn the 3-retry budget — then this 15 s
-    // cooldown delays the next attempt, making the FIRST bond sync take ~25 s
-    // instead of ~5 s (HW-observed). It self-heals (the post-cooldown CAP_REQ
-    // succeeds). Tuning options if it annoys: shorten the cooldown, or don't count
-    // "no active session yet" send failures against bondSyncRetryCount.
-    static const uint32_t BOND_SYNC_COOLDOWN_MS = 15000;
+    // FIXED (2026-05-21, all-encrypted bond): CAP_REQ/MANIFEST_REQ now ride a
+    // SESSION_FRAME and need the session ACTIVE. Previously the master fired the
+    // first CAP_REQ as soon as bondPeerOnline was set, but its own session could
+    // still be ESTABLISHING — so the request was parked in the single-frame queue,
+    // got overwritten/swept before the session opened, and burned all 3 retries.
+    // Then this cooldown (formerly 15 s) delayed the next attempt, making the FIRST
+    // bond sync take ~25 s instead of ~5 s (HW-observed). Two changes fix it:
+    //   1) Gate the sync START on bondSessionActiveWith(peerMac) below, so the
+    //      first request only fires once OUR session is genuinely ACTIVE (by which
+    //      point the responding worker has been ACTIVE since slightly earlier).
+    //   2) Shorten the cooldown to 3 s. The retry interval is already 3 s and the
+    //      whole tick is gated on bondPeerOnline + an active session, so 3 s is
+    //      ample to avoid hammering a genuinely stuck peer without the long stall.
+    static const uint32_t BOND_SYNC_COOLDOWN_MS = 3000;
     bool inCooldown = (gEspNow->bondSyncLastAttemptMs > 0 &&
                        (now - gEspNow->bondSyncLastAttemptMs) < BOND_SYNC_COOLDOWN_MS);
-    
-    if (macOk && gEspNow->bondSyncInFlight == BOND_SYNC_NONE && !inCooldown) {
+
+    if (macOk && gEspNow->bondSyncInFlight == BOND_SYNC_NONE && !inCooldown &&
+        bondSessionActiveWith(peerMac)) {
       // Decide what's missing and request it (priority order: CAP > MANIFEST > SETTINGS)
       bool haveCap = gEspNow->lastRemoteCapValid;
       bool haveManifest = gEspNow->bondManifestReceived;
@@ -7230,7 +7244,7 @@ void processMeshHeartbeats() {
       } else {
         // Max retries exhausted — reset in-flight but enforce cooldown before re-requesting.
         // Leave bondSyncLastAttemptMs set so the cooldown check below prevents instant retry.
-        BROADCAST_PRINTF("[BOND_SYNC] %d exhausted %d retries, cooldown 15s before re-request",
+        BROADCAST_PRINTF("[BOND_SYNC] %d exhausted %d retries, cooldown 3s before re-request",
                          (int)gEspNow->bondSyncInFlight, (int)gEspNow->bondSyncRetryCount);
         gEspNow->bondSyncInFlight = BOND_SYNC_NONE;
         gEspNow->bondSyncRetryCount = 0;
@@ -7330,12 +7344,9 @@ void processMeshHeartbeats() {
     }
     gEspNow->bondSettingsSent = true;
     
-    // Worker sync-complete: capSent + settingsSent + capValid → isBondSynced() now true
-    if (isBondWorker() && isBondSynced() && !gEspNow->bondSessionTokenValid) {
-      uint8_t pMac[6];
-      if (parseMacAddress(gSettings.bondPeerMac, pMac)) {
-        computeBondSessionToken(pMac);
-      }
+    // Worker sync-complete. Bond token is derived from the encrypted session at
+    // handshake time (bondDeriveTokenFromSession), so no recompute here.
+    if (isBondWorker() && isBondSynced()) {
       BROADCAST_PRINTF("[BOND_SYNC] *** SYNC COMPLETE *** role=0 (worker)");
     }
   }
@@ -11808,6 +11819,7 @@ static void resetBondSync() {
   gEspNow->bondNeedsSettingsResponse = false;
   gEspNow->bondPeerStatusValid = false;
   gEspNow->bondNeedsProactiveStatus = false;
+  gEspNow->bondStatusReqSentOnce = false;
   clearBondSessionToken();
 }
 
@@ -12284,7 +12296,7 @@ const char* cmd_bond_stream(const String& argsInput) {
   // Validate sensor name
   RemoteSensorType sensorType = stringToSensorType(sensorName.c_str());
   if (strcmp(sensorTypeToString(sensorType), sensorName.c_str()) != 0) {
-    return "Unknown sensor. Valid: thermal, tof, imu, gps, gamepad, fmradio, presence";
+    return "Unknown sensor. Valid: thermal, tof, imu, gps, gamepad, fmradio, rtc, presence";
   }
   
   // Parse action
