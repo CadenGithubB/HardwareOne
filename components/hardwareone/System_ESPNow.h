@@ -727,12 +727,10 @@ struct EspNowState {
   bool bondManifestReceived;        // We received/cached peer's manifest (master)
   bool bondSettingsReceived;        // We received peer's settings (master)
   bool bondSettingsSent;            // We sent our settings to peer (worker)
-  
-  // Bond auth token (RAM only). Derived from the encrypted session's X25519
-  // shared secret at handshake time (bondDeriveTokenFromSession); fresh per
-  // session, never transmitted, cleared on offline.
-  uint8_t bondSessionToken[16];
-  bool bondSessionTokenValid;
+
+  // NOTE: the bond auth token is NOT stored here. It lives in the encrypted
+  // session (SessionState::bondToken), derived in sessionDeriveAeadKeys and
+  // looked up via bondPeerActiveSession(). There is no global mirror.
   bool bondStatusReqSentOnce;       // One-shot: initial post-sync status exchange fired
   
   // RSSI tracking (updated from rx_ctrl on every received bond packet)
@@ -868,7 +866,6 @@ struct EspNowState {
     bondManifestReceived(false),
     bondSettingsReceived(false),
     bondSettingsSent(false),
-    bondSessionTokenValid(false),
     bondStatusReqSentOnce(false),
     bondRssiLast(-100),
     bondRssiAvg(-100),
@@ -896,7 +893,6 @@ struct EspNowState {
     memset(derivedKey, 0, 16);
 #if ENABLE_BONDED_MODE
     memset(bondPendingResponseMac, 0, 6);
-    memset(bondSessionToken, 0, 16);
     memset(&bondPeerStatus, 0, sizeof(bondPeerStatus));
 #endif
     memset(metadataPendingResponseMac, 0, 6);

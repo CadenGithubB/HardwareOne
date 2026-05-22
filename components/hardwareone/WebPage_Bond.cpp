@@ -168,6 +168,13 @@ void streamBondInner(httpd_req_t* req) {
     }
     
     if (!data.bonded || !data.peerConfigured) {
+      // Bond configuration UI. The whole page auto-refreshes every 5s; do NOT let
+      // that rebuild the device list and wipe the user's selection. Once the config
+      // UI is on screen, leave it (and the dropdown) untouched until the user
+      // explicitly presses "Refresh List" (which calls refreshBondDevices()).
+      if (document.getElementById('bond-device-select')) {
+        return;
+      }
       // Show bond configuration UI
       let html = '<div class="remote-grid">';
       html += '<div class="remote-card" style="grid-column:1/-1">';
@@ -652,9 +659,10 @@ void streamBondInner(httpd_req_t* req) {
   window.refreshBondDevices = function() {
     const select = document.getElementById('bond-device-select');
     if (!select) return;
-    
+
+    const prevValue = select.value;  // preserve the user's selection across a manual refresh
     select.innerHTML = '<option value="">Loading devices...</option>';
-    
+
     fetch('/api/bond/paired-devices')
       .then(r => r.json())
       .then(data => {
@@ -662,17 +670,19 @@ void streamBondInner(httpd_req_t* req) {
           select.innerHTML = '<option value="">No paired devices available</option>';
           return;
         }
-        
+
         select.innerHTML = '<option value="">-- Select a device --</option>';
         data.devices.forEach(function(dev) {
-          const label = dev.name + ' (' + dev.mac + ')' + 
-                       (dev.room ? ' - ' + dev.room : '') + 
+          const label = dev.name + ' (' + dev.mac + ')' +
+                       (dev.room ? ' - ' + dev.room : '') +
                        (dev.zone ? '/' + dev.zone : '');
           const option = document.createElement('option');
           option.value = dev.mac;
           option.textContent = label;
           select.appendChild(option);
         });
+        // Restore the previous selection if that device is still in the list
+        if (prevValue) select.value = prevValue;
       })
       .catch(e => {
         console.error('[Bond] Failed to load devices:', e);

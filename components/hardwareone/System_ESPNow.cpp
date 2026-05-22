@@ -739,71 +739,62 @@ static void setEspNowPassphrase(const String& passphrase) {
 //
 // `peerMac` must be our bonded peer; called from the session handshake (both
 // initiator and responder completion) while `shared` is still in scope.
-void bondDeriveTokenFromSession(const uint8_t* peerMac, const uint8_t shared[32]) {
-  if (!gEspNow || !peerMac || !shared) return;
-  if (!gSettings.bondModeEnabled) return;
-  // Only the bonded peer's session backs the bond token.
-  uint8_t bm[6];
-  if (!parseMacAddress(gSettings.bondPeerMac, bm) || memcmp(bm, peerMac, 6) != 0) return;
-
-  uint8_t token32[32];
-  if (!espnowCryptoKdfSubkey(token32, shared, 3, "esp-bond")) {
-    ERROR_ESPNOWF("[BOND_AUTH] session-token KDF failed");
-    return;
-  }
-  memcpy(gEspNow->bondSessionToken, token32, 16);
-  gEspNow->bondSessionTokenValid = true;
-  sodium_memzero(token32, sizeof(token32));
-
-  DEBUG_ESPNOWF("[BOND_AUTH] Token derived from session: %02X%02X%02X%02X%02X%02X%02X%02X...",
-         gEspNow->bondSessionToken[0], gEspNow->bondSessionToken[1],
-         gEspNow->bondSessionToken[2], gEspNow->bondSessionToken[3],
-         gEspNow->bondSessionToken[4], gEspNow->bondSessionToken[5],
-         gEspNow->bondSessionToken[6], gEspNow->bondSessionToken[7]);
+// ===========================================================================
+// Bond auth token — the SESSION is the single source of truth.
+//
+// The token (KDF subkey id 3 "esp-bond") is derived from the X25519 shared
+// secret inside sessionDeriveAeadKeys, at every handshake, for every session,
+// and stored in SessionState::bondToken. There is deliberately NO global mirror
+// and no separate derive/clear lifecycle: the token exists exactly as long as
+// its session does, and dies with it (a fresh session re-derives it instantly).
+//
+// This is what makes it robust: it no longer matters whether you mesh-paired
+// before or after bondconnect, and the many resync events (peer reboot, HB
+// timeout, role swap, re-bondconnect) that used to wipe a global copy can't
+// touch it. To read/validate the token, just look up the ACTIVE session with
+// the configured bond peer.
+// ===========================================================================
+static SessionState* bondPeerActiveSession() {
+  if (!gEspNow || !gSettings.bondModeEnabled) return nullptr;
+  if (gSettings.bondPeerMac.length() == 0) return nullptr;
+  uint8_t pm[6];
+  if (!parseMacAddress(gSettings.bondPeerMac, pm)) return nullptr;
+  const PeerIdentity* pid = peerIdentityFindByMac(pm);
+  if (!pid) return nullptr;
+  SessionState* s = sessionFindByPeer(pm, pid->meshId);
+  if (!s || s->state != SESSION_ACTIVE || !s->bondTokenValid) return nullptr;
+  return s;
 }
 
 static bool validateBondSessionToken(const uint8_t* token, size_t tokenLen) {
-  if (!gEspNow) {
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[BOND_AUTH] Validate failed: gEspNow null");
-    return false;
-  }
-  if (!gEspNow->bondSessionTokenValid) {
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[BOND_AUTH] Validate failed: no valid local token (passphrase set?)");
-    return false;
-  }
   if (tokenLen != 16) {
     DEBUGF(DEBUG_ESPNOW_ROUTER, "[BOND_AUTH] Validate failed: wrong token length %zu", tokenLen);
     return false;
   }
-  bool match = memcmp(token, gEspNow->bondSessionToken, 16) == 0;
+  SessionState* s = bondPeerActiveSession();
+  if (!s) {
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[BOND_AUTH] Validate failed: no active bond-peer session token");
+    return false;
+  }
+  bool match = (memcmp(token, s->bondToken, 16) == 0);
   if (!match) {
     DEBUGF(DEBUG_ESPNOW_ROUTER, "[BOND_AUTH] Token mismatch: recv=%02X%02X%02X%02X... local=%02X%02X%02X%02X...",
            token[0], token[1], token[2], token[3],
-           gEspNow->bondSessionToken[0], gEspNow->bondSessionToken[1],
-           gEspNow->bondSessionToken[2], gEspNow->bondSessionToken[3]);
+           s->bondToken[0], s->bondToken[1], s->bondToken[2], s->bondToken[3]);
   } else {
     DEBUGF(DEBUG_ESPNOW_ROUTER, "[BOND_AUTH] Token validated OK");
   }
   return match;
 }
 
-// Clear session token (call when peer goes offline or bonding ends)
-static void clearBondSessionToken() {
-  if (!gEspNow) return;
-  memset(gEspNow->bondSessionToken, 0, 16);
-  gEspNow->bondSessionTokenValid = false;
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[BOND] Session token cleared");
-}
-
 // Format session token as hex string for sending in commands
 // Returns pointer to static buffer (not thread-safe, use immediately)
 static const char* formatSessionToken() {
   static char tokenStr[33];
-  if (!gEspNow || !gEspNow->bondSessionTokenValid) {
-    return "";
-  }
+  SessionState* s = bondPeerActiveSession();
+  if (!s) return "";
   for (int i = 0; i < 16; i++) {
-    sprintf(tokenStr + i*2, "%02X", gEspNow->bondSessionToken[i]);
+    sprintf(tokenStr + i*2, "%02X", s->bondToken[i]);
   }
   tokenStr[32] = '\0';
   return tokenStr;
@@ -822,9 +813,11 @@ static bool parseSessionToken(const char* tokenStr, uint8_t* tokenOut) {
   return true;
 }
 
-// Check if session token is valid (for external callers like OLED menu)
+// Check if session token is valid (for external callers like OLED menu).
+// True iff there's an ACTIVE encrypted session with the configured bond peer
+// and that session has a derived bond token.
 bool isBondSessionTokenValid() {
-  return gEspNow && gEspNow->bondSessionTokenValid;
+  return bondPeerActiveSession() != nullptr;
 }
 
 String buildBondedCommandPayload(const String& command) {
@@ -832,8 +825,8 @@ String buildBondedCommandPayload(const String& command) {
     ERROR_ESPNOWF("[BOND_AUTH] buildPayload: gEspNow null");
     return "";
   }
-  if (!gEspNow->bondSessionTokenValid) {
-    WARN_ESPNOWF("[BOND_AUTH] buildPayload: no valid token - passphrase set?");
+  if (!isBondSessionTokenValid()) {
+    WARN_ESPNOWF("[BOND_AUTH] buildPayload: no active bond-peer session token");
     return "";
   }
   String payload = "@BOND:";
@@ -2908,14 +2901,14 @@ static void v4h_bond_heartbeat(const V4RxCtx& ctx) {
   // during normal handshake when the master just hasn't asked for settings yet.
   bool capExchangedLongEnough = (gEspNow->lastRemoteCapTime > 0 &&
                                  (millis() - gEspNow->lastRemoteCapTime) > 30000);
-  if (isBondWorker() && !gEspNow->bondSessionTokenValid &&
+  if (isBondWorker() && !isBondSessionTokenValid() &&
       gEspNow->lastRemoteCapValid && gEspNow->bondCapSent &&
       !gEspNow->bondSettingsSent && capExchangedLongEnough) {
     gEspNow->bondSettingsSent = true;
     if (isBondSynced()) {
       // Bond token is derived from the encrypted session at handshake time
-      // (bondDeriveTokenFromSession), so it is already valid here — no
-      // passphrase-based recompute needed.
+      // (sessionDeriveAeadKeys → SessionState::bondToken), so it becomes valid
+      // automatically once the session is ACTIVE — no recompute needed here.
       BROADCAST_PRINTF("[BOND_SYNC] *** SYNC COMPLETE *** role=0 (worker, recovered)");
     }
   }
@@ -5537,8 +5530,8 @@ static void processBondSettings(const uint8_t* srcMac, const String& deviceName,
     
     if (synced) {
       // Bond token is derived from the encrypted session at handshake time
-      // (bondDeriveTokenFromSession), so it is already valid by first sync.
-      // Kick the initial status exchange once.
+      // (sessionDeriveAeadKeys → SessionState::bondToken), so it is already
+      // valid by first sync. Kick the initial status exchange once.
       if (!gEspNow->bondStatusReqSentOnce) {
         uint8_t pMac[6];
         if (parseMacAddress(gSettings.bondPeerMac, pMac)) {
@@ -7352,7 +7345,8 @@ void processMeshHeartbeats() {
     gEspNow->bondSettingsSent = true;
     
     // Worker sync-complete. Bond token is derived from the encrypted session at
-    // handshake time (bondDeriveTokenFromSession), so no recompute here.
+    // handshake time (sessionDeriveAeadKeys → SessionState::bondToken), so no
+    // recompute here.
     if (isBondWorker() && isBondSynced()) {
       BROADCAST_PRINTF("[BOND_SYNC] *** SYNC COMPLETE *** role=0 (worker)");
     }
@@ -11827,7 +11821,11 @@ static void resetBondSync() {
   gEspNow->bondPeerStatusValid = false;
   gEspNow->bondNeedsProactiveStatus = false;
   gEspNow->bondStatusReqSentOnce = false;
-  clearBondSessionToken();
+  // NOTE: do NOT touch the bond auth token here. It is a property of the
+  // encrypted session (SessionState::bondToken), not of this sync bookkeeping.
+  // Wiping it on every resync (peer reboot, HB timeout, role swap, re-bondconnect)
+  // is exactly the bug that left bonded-but-tokenless devices unable to swap
+  // roles. The token lives and dies with its session; leave it alone.
 }
 
 // ============================================================================
