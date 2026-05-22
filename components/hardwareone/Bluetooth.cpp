@@ -26,6 +26,7 @@
 #include "System_Debug.h"
 #include "System_MemUtil.h"
 #include "System_MemoryMonitor.h"
+#include "System_Mutex.h"   // SensorCacheGuard — used by the G2 sensor-stream paths below
 #include "System_Settings.h"
 
 #include <esp_gatts_api.h>

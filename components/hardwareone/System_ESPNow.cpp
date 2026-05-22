@@ -7886,6 +7886,13 @@ static bool initEspNow() {
 
   gEspNow->initialized = true;
 
+  // Create the local sensor-cache mutex now (single-threaded init) so sensor
+  // poll loops can keep the cache warm even before any streaming is enabled —
+  // see sendSensorDataUpdate(). Previously the mutex was created lazily only when
+  // streaming first started, which left the RTC poll logging spurious
+  // MUTEX_TIMEOUTs and never pre-warming the cache for the first enable.
+  initRemoteSensorSystem();
+
   // Apply persisted mesh/direct mode from settings (applySettings runs before gEspNow exists at boot)
   gEspNow->mode = gSettings.espnowmesh ? ESPNOW_MODE_MESH : ESPNOW_MODE_DIRECT;
 
