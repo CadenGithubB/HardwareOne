@@ -124,6 +124,23 @@ bool sessionDeriveAeadKeys(SessionState* s, const uint8_t shared[32]) {
   }
   sodium_memzero(keyAtoB, sizeof(keyAtoB));
   sodium_memzero(keyBtoA, sizeof(keyBtoA));
+
+  // Derive the bond auth token (subkey id 3) from the SAME shared secret, for
+  // EVERY session regardless of bond-mode state. This decouples bond-token
+  // existence from the order in which a session is established vs. bond mode is
+  // enabled: previously the token was only derived when bondModeEnabled was
+  // already true at handshake time, so bonding on top of an existing session
+  // (e.g. mesh-paired first, then bondconnect) left the token absent forever.
+  // Only the configured bond peer's token is ever consulted (see
+  // bondPeerActiveSession), so deriving it for all peers is cheap and harmless.
+  {
+    uint8_t bondTok[32];
+    if (espnowCryptoKdfSubkey(bondTok, shared, 3, "esp-bond")) {
+      memcpy(s->bondToken, bondTok, 16);
+      s->bondTokenValid = 1;
+    }
+    sodium_memzero(bondTok, sizeof(bondTok));
+  }
   return true;
 }
 

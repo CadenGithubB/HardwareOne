@@ -1612,6 +1612,162 @@ window.togglePane = function(paneId, btnId) {
       
       }); // end of .finally() from seqBefore fetch
     };
+    console.log('[ESP-NOW] Chunk 3O: browseRemoteFiles ready');
+    console.log('[ESP-NOW] Chunk 3P: parseRemoteFileListing start');
+    // Parse the human-readable text listing produced by the remote 'files'
+    // command (System_Filesystem.cpp buildFilesListing, asJson=false). Lines:
+    //   "Files (/path):"            header  -> skipped
+    //   "  name (123 bytes)"        file    -> {isDir:false}
+    //   "  name (3 items)"          folder  -> {isDir:true}
+    //   "  name (3 items) [mount]"  mount   -> {isDir:true}
+    //   "Total: N entries"          footer  -> skipped
+    //   "  No files found"          empty   -> skipped
+    window.parseRemoteFileListing = function(flatLines) {
+      var entries = [];
+      var seen = {};
+      if (!flatLines) return entries;
+      var re = /^\s+(.+?)\s+\((\d+)\s+(items|bytes)\)(\s+\[mount\])?\s*$/;
+      for (var i = 0; i < flatLines.length; i++) {
+        var line = String(flatLines[i] || '');
+        if (!line) continue;
+        if (line.indexOf('Files (') >= 0) continue;
+        if (line.indexOf('Total:') >= 0) continue;
+        if (line.indexOf('No files found') >= 0) continue;
+        var m = line.match(re);
+        if (!m) continue;
+        var name = m[1].trim();
+        if (!name || seen[name]) continue;
+        seen[name] = true;
+        var count = parseInt(m[2], 10);
+        var isDir = (m[3] === 'items') || !!m[4];
+        entries.push({
+          name: name,
+          isDir: isDir,
+          isMount: !!m[4],
+          size: count,
+          meta: isDir ? (count + ' items') : (count + ' bytes')
+        });
+      }
+      // Folders first, then files; alphabetical within each group.
+      entries.sort(function(a, b) {
+        if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+        return a.name < b.name ? -1 : (a.name > b.name ? 1 : 0);
+      });
+      return entries;
+    };
+    console.log('[ESP-NOW] Chunk 3P: parseRemoteFileListing ready');
+    console.log('[ESP-NOW] Chunk 3Q: renderRemoteFileExplorer start');
+    // Render the parsed entries into #remote-fexplorer-<mac> with a clickable
+    // breadcrumb. Folders re-issue browseRemoteFiles() to navigate; files
+    // populate #remote-fp-<mac> so Fetch File can pull them. DOM-built (no
+    // inline onclick) so arbitrary filenames can't break out of an attribute.
+    window.renderRemoteFileExplorer = function(mac, path, entries) {
+      var container = document.getElementById('remote-fexplorer-' + mac);
+      if (!container) return;
+      path = path || '/';
+      window.remoteCurrentPath = window.remoteCurrentPath || {};
+      window.remoteCurrentPath[mac] = path;
+
+      function joinRemotePath(base, name) {
+        if (base === '/' || base === '') return '/' + name;
+        return (base.charAt(base.length - 1) === '/' ? base : base + '/') + name;
+      }
+
+      var explorer = document.createElement('div');
+      explorer.className = 'remote-explorer';
+
+      // Breadcrumb: clickable path segments
+      var crumb = document.createElement('div');
+      crumb.className = 'remote-explorer-crumb';
+      var rootSpan = document.createElement('span');
+      rootSpan.textContent = '/';
+      rootSpan.addEventListener('click', function() { window.browseRemoteFiles(mac, '/'); });
+      crumb.appendChild(rootSpan);
+      var accum = '';
+      var segs = path.split('/');
+      for (var s = 0; s < segs.length; s++) {
+        if (!segs[s]) continue;
+        accum += '/' + segs[s];
+        var sep = document.createElement('span');
+        sep.textContent = '/';
+        sep.style.cursor = 'default';
+        crumb.appendChild(sep);
+        var segSpan = document.createElement('span');
+        segSpan.textContent = segs[s];
+        (function(p) {
+          segSpan.addEventListener('click', function() { window.browseRemoteFiles(mac, p); });
+        })(accum);
+        crumb.appendChild(segSpan);
+      }
+      explorer.appendChild(crumb);
+
+      // Scrollable body (matches .remote-explorer-body CSS the UI revamp added)
+      var body = document.createElement('div');
+      body.className = 'remote-explorer-body';
+
+      // Parent (..) navigation when not at root
+      if (path !== '/') {
+        var trimmed = path.replace(/\/+$/, '');
+        var idx = trimmed.lastIndexOf('/');
+        var parent = idx <= 0 ? '/' : trimmed.substring(0, idx);
+        var up = document.createElement('div');
+        up.className = 'remote-entry';
+        var upIcon = document.createElement('span');
+        upIcon.className = 'remote-entry-icon';
+        upIcon.textContent = '[..]';
+        var upLabel = document.createElement('span');
+        upLabel.className = 'remote-entry-label';
+        upLabel.textContent = '..';
+        up.appendChild(upIcon);
+        up.appendChild(upLabel);
+        up.addEventListener('click', function() { window.browseRemoteFiles(mac, parent); });
+        body.appendChild(up);
+      }
+
+      if (!entries || entries.length === 0) {
+        var empty = document.createElement('div');
+        empty.className = 'remote-entry remote-entry-empty';
+        empty.style.display = 'flex';
+        empty.textContent = 'Empty directory';
+        body.appendChild(empty);
+      } else {
+        for (var e = 0; e < entries.length; e++) {
+          (function(entry) {
+            var row = document.createElement('div');
+            row.className = 'remote-entry';
+            var icon = document.createElement('span');
+            icon.className = 'remote-entry-icon';
+            icon.textContent = entry.isDir ? (entry.isMount ? '[M]' : '[D]') : '[F]';
+            var label = document.createElement('span');
+            label.className = 'remote-entry-label';
+            label.textContent = entry.name;
+            var meta = document.createElement('span');
+            meta.className = 'remote-entry-meta';
+            meta.textContent = entry.meta;
+            row.appendChild(icon);
+            row.appendChild(label);
+            row.appendChild(meta);
+            var full = joinRemotePath(path, entry.name);
+            if (entry.isDir) {
+              row.addEventListener('click', function() { window.browseRemoteFiles(mac, full); });
+            } else {
+              row.addEventListener('click', function() {
+                var input = document.getElementById('remote-fp-' + mac);
+                if (input) input.value = full;
+                var statusDiv = document.getElementById('remote-fstat-' + mac);
+                if (statusDiv) statusDiv.textContent = 'Selected: ' + full + ' — click Fetch File to download';
+              });
+            }
+            body.appendChild(row);
+          })(entries[e]);
+        }
+      }
+      explorer.appendChild(body);
+
+      container.innerHTML = '';
+      container.appendChild(explorer);
+    };
+    console.log('[ESP-NOW] Chunk 3Q: renderRemoteFileExplorer ready');
     window.fetchRemoteFile = function(mac) {
       var u = (document.getElementById('remote-user-' + mac) || {}).value || '';
       var p = (document.getElementById('remote-pass-' + mac) || {}).value || '';

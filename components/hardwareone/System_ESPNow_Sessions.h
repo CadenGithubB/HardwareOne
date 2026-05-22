@@ -74,8 +74,19 @@ struct SessionState {
   uint8_t  rekeyEphPrivKey[32];    // X25519 priv key for our outstanding REKEY
   uint32_t rekeyInitiatedAtMs;     // 0 = no rekey outstanding; otherwise start time
   uint32_t rekeyTxSeqAtInit;       // txSeqNext snapshot at moment of REKEY signing
+
+  // ---- Bond auth token (derived at handshake, independent of bond-mode timing)
+  // KDF subkey id 3 ("esp-bond") off the same X25519 shared secret as the AEAD
+  // keys. Derived for EVERY session in sessionDeriveAeadKeys so it exists no
+  // matter when bond mode is enabled relative to session establishment (fixes
+  // the "bonded but no session token" trap where bondconnect happens on top of
+  // an already-ACTIVE mesh session and the old handshake-time derive was skipped).
+  // Only consulted for the configured bond peer; harmless on other sessions.
+  uint8_t  bondToken[16];
+  uint8_t  bondTokenValid;         // 1 once derived
+  uint8_t  _pad3[3];
 };
-static_assert(sizeof(SessionState) <= 192, "keep session record reasonably small");
+static_assert(sizeof(SessionState) <= 208, "keep session record reasonably small");
 
 // One-time allocation of the gSessions table in PSRAM. Idempotent; safe to
 // call multiple times. Returns false only on alloc failure.

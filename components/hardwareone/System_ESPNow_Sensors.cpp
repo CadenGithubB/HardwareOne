@@ -405,9 +405,23 @@ void sendSensorDataUpdate(RemoteSensorType sensorType, const char* jsonData, siz
     return;
   }
   if (!jsonData) return;
-  if (!gSensorStreamingEnabled[sensorType]) {
-    // Don't log - too spammy when streaming is disabled
-    return;
+
+  // Keep the local cache WARM even while streaming is OFF. Rationale:
+  // startSensorDataStreaming() sets forceSend=true on enable, but the broadcaster
+  // only transmits when jsonLen > 0 (see sensorBroadcasterTask PATH A). If the cache
+  // was never written (because we used to early-return here when streaming was off),
+  // the very first enable finds jsonLength=0, the forced send is silently dropped, and
+  // the peer sees nothing until this sensor's NEXT poll fires — up to 30s away for the
+  // RTC. That is exactly the "doesn't work the first time, works the second time" bug:
+  // by the 2nd enable the periodic poll has finally populated the cache.
+  // Fix: always keep jsonData fresh so the force-send has real data. Throttle the
+  // warm-write while idle so high-rate sensors don't pay a per-poll memcpy for nothing.
+  const bool streaming = gSensorStreamingEnabled[sensorType];
+  if (!streaming) {
+    static unsigned long sLastWarmMs[REMOTE_SENSOR_MAX] = {0};
+    unsigned long nowMs = millis();
+    if (nowMs - sLastWarmMs[sensorType] < 2000) return;  // at most once / 2s / sensor while idle
+    sLastWarmMs[sensorType] = nowMs;
   }
 
   // Quick cache update with mutex protection
@@ -421,7 +435,9 @@ void sendSensorDataUpdate(RemoteSensorType sensorType, const char* jsonData, siz
     memcpy(cache->jsonData, jsonData, len);
     cache->jsonData[len] = '\0';
     cache->jsonLength = len;
-    cache->dirty = true;
+    // Only mark dirty (which schedules a periodic broadcast) when actually streaming;
+    // idle warm-writes just keep jsonData ready for the next enable's force-send.
+    if (streaming) cache->dirty = true;
     cache->lastUpdate = millis();
     
     DEBUG_ESPNOW_METADATAF("[CACHE_UPDATE] %s len=%u wasDirty=%d age=%lums json=%.60s",

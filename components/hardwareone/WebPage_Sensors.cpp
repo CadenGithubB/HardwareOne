@@ -242,6 +242,7 @@ esp_err_t handleSensorData(httpd_req_t* req) {
         httpd_resp_send(req, gamepadBuf, jsonLen);
         return ESP_OK;
       } else if (sensorType == "fmradio") {
+#if ENABLE_FM_RADIO
         // FM radio data - use stack-allocated buffer
         if (!gFmRadioEnabled || !gRadioInitialized) {
           sendJsonResponse(req, "{\"v\":0, \"error\":\"not_enabled\"}");
@@ -251,7 +252,7 @@ esp_err_t handleSensorData(httpd_req_t* req) {
         // Use stack-allocated buffer for FM radio response
         char fmRadioResponseBuffer[512];
         int jsonLen = fmRadioBuildDataJSON(fmRadioResponseBuffer, sizeof(fmRadioResponseBuffer));
-        
+
         if (jsonLen > 0) {
           httpd_resp_set_type(req, "application/json");
           DEBUG_HTTPF("/api/sensors fmradio json_len=%d", jsonLen);
@@ -261,6 +262,10 @@ esp_err_t handleSensorData(httpd_req_t* req) {
           sendJsonResponse(req, "{\"v\":0, \"error\":\"data_unavailable\"}");
           return ESP_OK;
         }
+#else
+        sendJsonResponse(req, "{\"v\":0, \"error\":\"not_compiled\"}");
+        return ESP_OK;
+#endif
       } else if (sensorType == "camera") {
 #if ENABLE_CAMERA_SENSOR
         extern const char* buildCameraStatusJson();

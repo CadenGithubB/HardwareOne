@@ -35,9 +35,10 @@ extern bool submitDeferredToCmdExec(ExecReq::DeferredFn fn, void* arg);
 // session for discovery/sync (replaces plaintext-heartbeat discovery). No-op
 // when bond mode is off or the peer isn't our bonded peer.
 extern void bondNotifySessionEstablished(const uint8_t* peerMac);
-// Derive the bond auth token from this session's X25519 shared secret (task #33).
-// No-op unless peerMac is the bonded peer. Must be called while `shared` is live.
-extern void bondDeriveTokenFromSession(const uint8_t* peerMac, const uint8_t shared[32]);
+// NOTE: the bond auth token is derived inside sessionDeriveAeadKeys (for every
+// session, from the same X25519 shared secret) and stored in SessionState. The
+// handlers below no longer derive it explicitly — it's already in place by the
+// time sessionDeriveAeadKeys returns.
 
 // V4RxCtx is defined in System_ESPNow.cpp as a private struct. To keep handlers
 // in a separate translation unit, we duplicate its declaration here — must
@@ -716,9 +717,7 @@ void runDeferredSessionOpen(void* arg) {
     free(w);
     return;
   }
-  // Bond token (task #33): derive from the same shared secret while it is live.
-  // No-op unless this peer is our bonded peer.
-  bondDeriveTokenFromSession(msg->initiatorMac, shared);
+  // Bond token already derived inside sessionDeriveAeadKeys above (per-session).
   sodium_memzero(shared, sizeof(shared));
 
   V4PayloadSessionConfirm conf = {};
@@ -833,9 +832,7 @@ void runDeferredSessionConfirm(void* arg) {
     free(w);
     return;
   }
-  // Bond token (task #33): derive from the same shared secret while it is live.
-  // No-op unless this peer is our bonded peer.
-  bondDeriveTokenFromSession(msg->responderMac, shared);
+  // Bond token already derived inside sessionDeriveAeadKeys above (per-session).
   sodium_memzero(shared, sizeof(shared));
 
   s->state           = SESSION_ACTIVE;
