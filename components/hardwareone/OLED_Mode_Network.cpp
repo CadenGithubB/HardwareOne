@@ -1134,12 +1134,15 @@ void displayRemoteSensors() {
         }
         
         default: {
-          // Generic JSON display for unknown sensors
+          // Generic readable key:value rendering — covers RTC, APDS, Presence,
+          // Thermal, and any future sensor without a hard-coded per-type case.
+          // Walks the cached JSON via the shared formatter so it stays current
+          // with whatever the producer emits. (Gamepad/IMU/GPS/ToF/FM keep their
+          // bespoke layouts above.)
+          char lines[128];
+          formatRemoteSensorReadable(entry->jsonData, lines, sizeof(lines), 4);
           oledDisplay->setCursor(0, 24);
-          char truncated[64];
-          strncpy(truncated, entry->jsonData, 63);
-          truncated[63] = '\0';
-          oledDisplay->print(truncated);
+          oledDisplay->print(lines);  // newline-separated; GFX advances on '\n'
           break;
         }
       }

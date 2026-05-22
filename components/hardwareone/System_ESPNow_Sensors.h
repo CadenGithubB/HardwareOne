@@ -90,6 +90,14 @@ void forceSensorBroadcast(RemoteSensorType sensorType);
 // Get remote sensor data for web API
 String getRemoteSensorDataJSON(const uint8_t* deviceMac, RemoteSensorType sensorType);
 
+// Format-agnostic readable renderer for a cached sensor's JSON. Walks the
+// top-level key:value pairs and writes up to `maxLines` newline-separated
+// "key: value" lines into `out` (skipping bookkeeping keys like ts/seq/valid).
+// Shared by the OLED Remote-Sensors page (and later the G2 lens) so neither
+// hard-codes a per-sensor schema — new sensors / key changes render automatically.
+// Returns the number of lines written (>=1; writes a short placeholder on error).
+int formatRemoteSensorReadable(const char* json, char* out, size_t outSize, int maxLines);
+
 // Get list of all remote devices with sensors
 String getRemoteDevicesListJSON();
 

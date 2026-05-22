@@ -186,6 +186,13 @@ void pendingFrameDrainForPeer(const uint8_t peerMac[6]);
 // espnow heartbeat tick. Returns count expired (for diagnostics).
 uint8_t pendingFrameTimeoutSweep(uint32_t nowMs);
 
+// Reset sessions stuck in ESTABLISHING past a timeout (our SESSION_OPEN got no
+// CONFIRM — peer was offline/booting when we kicked it). Without this the slot
+// stays ESTABLISHING forever and v4_send_encrypted_or_queue only re-kicks from
+// FREE/CLOSED, so the bond can never re-establish. Called from the heartbeat
+// tick. Returns count reset.
+uint8_t sessionEstablishingTimeoutSweep(uint32_t nowMs);
+
 // Inspector for the espnowsessions CLI / debugging.
 uint8_t pendingFrameCount();
 

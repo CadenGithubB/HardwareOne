@@ -25,6 +25,7 @@
 
 #if ENABLE_ESPNOW
 #include "System_ESPNow.h"
+#include "System_ESPNow_Sensors.h"   // gRemoteSensorCache + formatRemoteSensorReadable (Bonded Device view)
 #endif
 
 // -----------------------------------------------------------------------------
@@ -39,6 +40,8 @@ enum ESPNowAppSub : uint8_t {
   ESPN_APP_SUB_STATS       = 4,  // counters + radio info
   ESPN_APP_SUB_INBOX       = 5,  // merged global inbox (chronological)
   ESPN_APP_SUB_PEER_INBOX  = 6,  // per-peer history (uses gSelectedPeer)
+  ESPN_APP_SUB_BOND_SENSORS = 7, // list of remote sensors across the bond/mesh
+  ESPN_APP_SUB_BOND_DETAIL  = 8, // one remote sensor's live data (gSelSensor*)
 };
 static ESPNowAppSub gSub = ESPN_APP_SUB_MAIN;
 
@@ -57,6 +60,14 @@ static inline void setSub(ESPNowAppSub s) {
 // -1 means "no peer selected" (peer-detail not reachable).
 static int gSelectedPeer = -1;
 
+#if ENABLE_ESPNOW
+// Bonded Device view — identity of the remote sensor the user drilled into.
+// Stored as MAC+type (not a cache index) so the detail view re-finds the live
+// entry even if the cache reshuffles or the entry expires between renders.
+static uint8_t          gSelSensorMac[6] = {0};
+static RemoteSensorType gSelSensorType   = REMOTE_SENSOR_THERMAL;
+#endif
+
 // Forward decls — handlers reference renderers across the file.
 static void showMainMenu();
 static void showPeersMenu();
@@ -65,6 +76,8 @@ static void showBroadcastMenu();
 static void showStatsMenu();
 static void showInboxMenu();
 static void showPeerInboxMenu();
+static void showBondSensorsMenu();
+static void showBondDetailMenu();
 
 // -----------------------------------------------------------------------------
 // Tri-state status helpers
@@ -303,6 +316,7 @@ static void showMainMenu() {
     inboxLine,        // 3 — merged chronological view of all peers' history
     "Broadcast >>",   // 4
     "Stats >>",       // 5
+    "Bonded Device >>", // 6 — remote sensors streamed across the bond/mesh
   };
   g2ShowListPage(items, sizeof(items) / sizeof(items[0]));
   DEBUG_G2F("[G2-ESP-NOW-APP] main menu shown (phase=%d, peers=%d, inbox=%d)",
@@ -508,6 +522,113 @@ static void showStatsMenu() {
 #endif
 
   g2ShowListPage(ptrs, n);
+#else
+  static const char* na[] = { "<- Back", "(ESP-NOW not compiled)" };
+  g2ShowListPage(na, 2);
+#endif
+}
+
+// -----------------------------------------------------------------------------
+// Bonded Device — remote sensors streamed across the bond/mesh
+// -----------------------------------------------------------------------------
+// Reads gRemoteSensorCache (populated by the espnow RX path whenever a worker
+// streams sensor data). The sensor list mirrors the OLED Remote-Sensors page;
+// the detail view reuses the shared formatRemoteSensorReadable() so any sensor
+// renders without per-type code on the lens.
+
+#if ENABLE_ESPNOW
+// Cap on rows the list widget shows without awkward scrolling on the lens.
+static constexpr size_t kBondSensorDisplayMax = 15;
+
+// Collect valid cache indices in a stable order shared by renderer + tap
+// handler, so row N maps to the same entry in both. Returns count collected.
+static size_t collectBondSensorIdx(int* out, size_t maxN) {
+  size_t n = 0;
+  for (int i = 0; i < MAX_REMOTE_DEVICES * MAX_SENSORS_PER_DEVICE && n < maxN; i++) {
+    if (gRemoteSensorCache[i].valid) out[n++] = i;
+  }
+  return n;
+}
+
+// Re-find a cached entry by MAC+type (the detail view's stored identity).
+static RemoteSensorData* findBondSensorEntry(const uint8_t* mac, RemoteSensorType type) {
+  for (int i = 0; i < MAX_REMOTE_DEVICES * MAX_SENSORS_PER_DEVICE; i++) {
+    RemoteSensorData& e = gRemoteSensorCache[i];
+    if (e.valid && e.sensorType == type && memcmp(e.deviceMac, mac, 6) == 0) return &e;
+  }
+  return nullptr;
+}
+#endif  // ENABLE_ESPNOW
+
+static void showBondSensorsMenu() {
+  setSub(ESPN_APP_SUB_BOND_SENSORS);
+
+#if ENABLE_ESPNOW
+  static char rows[1 + kBondSensorDisplayMax][40];
+  const char* ptrs[1 + kBondSensorDisplayMax];
+  strcpy(rows[0], "<- Back");
+  ptrs[0] = rows[0];
+  size_t n = 1;
+
+  int idx[MAX_REMOTE_DEVICES * MAX_SENSORS_PER_DEVICE];
+  size_t got = collectBondSensorIdx(idx, sizeof(idx) / sizeof(idx[0]));
+  for (size_t i = 0; i < got && (n - 1) < kBondSensorDisplayMax; i++) {
+    const RemoteSensorData& e = gRemoteSensorCache[idx[i]];
+    const char* dn = (e.deviceName[0]) ? e.deviceName : "?";
+    snprintf(rows[n], sizeof(rows[n]), "%s - %s", dn, sensorTypeToString(e.sensorType));
+    ptrs[n] = rows[n];
+    n++;
+  }
+
+  if (n == 1) {
+    static const char* empty[] = { "<- Back", "(no bonded sensors yet)" };
+    g2ShowListPage(empty, 2);
+  } else {
+    g2ShowListPage(ptrs, n);
+  }
+  DEBUG_G2F("[G2-ESP-NOW-APP] bonded sensors shown (%u)", (unsigned)(n - 1));
+#else
+  static const char* na[] = { "<- Back", "(ESP-NOW not compiled)" };
+  g2ShowListPage(na, 2);
+#endif
+}
+
+static void showBondDetailMenu() {
+  setSub(ESPN_APP_SUB_BOND_DETAIL);
+
+#if ENABLE_ESPNOW
+  RemoteSensorData* e = findBondSensorEntry(gSelSensorMac, gSelSensorType);
+  if (!e) {            // entry expired / peer gone — bounce back to the list
+    showBondSensorsMenu();
+    return;
+  }
+
+  static char hdr[40];
+  static char body[200];
+  const char* dn = (e->deviceName[0]) ? e->deviceName : "?";
+  snprintf(hdr, sizeof(hdr), "%s - %s", dn, sensorTypeToString(e->sensorType));
+
+  int nLines = formatRemoteSensorReadable(e->jsonData, body, sizeof(body), 8);
+
+  // Split `body` (newline-separated "key: value" lines) into row pointers in
+  // place — replace each '\n' with a NUL and point a row at each segment.
+  static constexpr size_t kMaxFieldRows = 8;
+  static char backRow[] = "<- Sensors";
+  const char* ptrs[2 + kMaxFieldRows];
+  ptrs[0] = backRow;
+  ptrs[1] = hdr;
+  size_t n = 2;
+  char* p = body;
+  while (*p && n < 2 + kMaxFieldRows) {
+    ptrs[n++] = p;
+    char* nl = strchr(p, '\n');
+    if (!nl) break;
+    *nl = '\0';
+    p = nl + 1;
+  }
+
+  g2ShowListPage(ptrs, n);
+  DEBUG_G2F("[G2-ESP-NOW-APP] bonded sensor detail: %s (%d field lines)", hdr, nLines);
 #else
   static const char* na[] = { "<- Back", "(ESP-NOW not compiled)" };
   g2ShowListPage(na, 2);
@@ -794,10 +915,11 @@ static void handleMainTap(uint32_t idx) {
 #endif
     return;
   }
-  if (idx == 2) { showPeersMenu();     return; }
-  if (idx == 3) { showInboxMenu();     return; }
-  if (idx == 4) { showBroadcastMenu(); return; }
-  if (idx == 5) { showStatsMenu();     return; }
+  if (idx == 2) { showPeersMenu();      return; }
+  if (idx == 3) { showInboxMenu();      return; }
+  if (idx == 4) { showBroadcastMenu();  return; }
+  if (idx == 5) { showStatsMenu();      return; }
+  if (idx == 6) { showBondSensorsMenu(); return; }
   DEBUG_G2F("[G2-ESP-NOW-APP] main: unknown idx=%u", (unsigned)idx);
 }
 
@@ -918,6 +1040,35 @@ static void handleStatsTap(uint32_t idx) {
   showMainMenu();
 }
 
+// Bonded Device sensor list — row 0 back to main; a sensor row drills into its
+// detail. Re-collects the same valid-entry order the renderer used so row N
+// resolves to the same cache entry (degrades gracefully if it expired since).
+static void handleBondSensorsTap(uint32_t idx) {
+  if (idx == 0) { showMainMenu(); return; }
+#if ENABLE_ESPNOW
+  int sel = (int)idx - 1;
+  int list[MAX_REMOTE_DEVICES * MAX_SENSORS_PER_DEVICE];
+  size_t got = collectBondSensorIdx(list, sizeof(list) / sizeof(list[0]));
+  if (sel < 0 || (size_t)sel >= got) {
+    DEBUG_G2F("[G2-ESP-NOW-APP] bond-sensors: idx=%u out of range (got=%u)",
+              (unsigned)idx, (unsigned)got);
+    return;
+  }
+  const RemoteSensorData& e = gRemoteSensorCache[list[sel]];
+  memcpy(gSelSensorMac, e.deviceMac, 6);
+  gSelSensorType = e.sensorType;
+  showBondDetailMenu();
+#else
+  (void)idx;
+#endif
+}
+
+// Bonded sensor detail — field rows are info-only; row 0 returns to the list.
+static void handleBondDetailTap(uint32_t idx) {
+  if (idx == 0) { showBondSensorsMenu(); return; }
+  DEBUG_G2F("[G2-ESP-NOW-APP] bond-detail: info row %u", (unsigned)idx);
+}
+
 // Merged inbox tap dispatch.
 // Row 0 returns to Main. Tapping a message row navigates to that sender's
 // Peer Detail — from there the user can reply via Send… or open the per-peer
@@ -979,6 +1130,8 @@ void g2ESPNowAppHandleTap(uint32_t idx) {
     case ESPN_APP_SUB_STATS:       handleStatsTap(idx);      break;
     case ESPN_APP_SUB_INBOX:       handleInboxTap(idx);      break;
     case ESPN_APP_SUB_PEER_INBOX:  handlePeerInboxTap(idx);  break;
+    case ESPN_APP_SUB_BOND_SENSORS: handleBondSensorsTap(idx); break;
+    case ESPN_APP_SUB_BOND_DETAIL:  handleBondDetailTap(idx);  break;
   }
 }
 
