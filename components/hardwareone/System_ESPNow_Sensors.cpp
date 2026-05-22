@@ -75,6 +75,16 @@ static unsigned long gLastBroadcastTime = 0;
 // ==========================
 
 void initRemoteSensorSystem() {
+  // Create the local-sensor cache mutex up front. It used to be created lazily
+  // inside startSensorBroadcaster() (i.e. only once streaming was first enabled),
+  // which left it nullptr from boot. After the warm-cache change in
+  // sendSensorDataUpdate(), the RTC's 30s poll then hit the null mutex every cycle
+  // and logged a spurious "[CACHE_UPDATE] rtc MUTEX_TIMEOUT" while never actually
+  // warming the cache — so the very first stream-enable per boot still found an
+  // empty cache. Creating it here (single-threaded ESP-NOW init) fixes both.
+  if (!gSensorCacheMutex) {
+    gSensorCacheMutex = xSemaphoreCreateMutex();
+  }
   // Initialize cache
   for (int i = 0; i < MAX_REMOTE_DEVICES * MAX_SENSORS_PER_DEVICE; i++) {
     memset(gRemoteSensorCache[i].deviceMac, 0, 6);
@@ -424,8 +434,14 @@ void sendSensorDataUpdate(RemoteSensorType sensorType, const char* jsonData, siz
     sLastWarmMs[sensorType] = nowMs;
   }
 
+  // Cache subsystem not up yet (ESP-NOW not initialized) — nothing to warm into.
+  // Skip silently: a null mutex is "not ready", not a contention timeout, so it
+  // must NOT be logged as MUTEX_TIMEOUT (that produced a spurious line every RTC
+  // poll on a worker that never enabled streaming).
+  if (!gSensorCacheMutex) return;
+
   // Quick cache update with mutex protection
-  if (gSensorCacheMutex && xSemaphoreTake(gSensorCacheMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+  if (xSemaphoreTake(gSensorCacheMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
     LocalSensorCache* cache = &gLocalSensorCache[sensorType];
     bool wasDirty = cache->dirty;
     unsigned long timeSinceLastUpdate = millis() - cache->lastUpdate;

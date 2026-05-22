@@ -14,6 +14,7 @@
 #include "WebServer_Server.h"
 #include "WebServer_Utils.h"
 #include "System_ESPNow.h"
+#include <esp_wifi.h>             // esp_wifi_get_mac — local STA MAC for bonded file pulls
 #include "System_ESPNow_Sensors.h"
 #include "System_Settings.h"
 #include "System_Filesystem.h"
@@ -207,29 +208,74 @@ void streamBondInner(httpd_req_t* req) {
     
     let html = '<div class="remote-grid">';
     
-    // Connection Status Card
+    // Bonded Device Card — ONE unified card: identity + connection status + the
+    // bonded device's hardware/capabilities + live status + link quality. This was
+    // previously split across two separate "Bonded Device" cards. The Remote
+    // Command Execution box is intentionally kept as its own separate card below.
     html += '<div class="remote-card" style="position:relative">';
     html += '<button class="btn refresh-btn" onclick="window.refreshBond()">Refresh</button>';
     html += '<div class="remote-title"><span class="status-dot ' + statusClass + '"></span>Bonded Device</div>';
     const localRole = data.role === 1 ? 'Master' : 'Worker';
     const remoteRole = data.role === 1 ? 'Worker' : 'Master';
     html += '<div class="remote-description">This device: ' + localRole + ' · Bonded device: ' + (data.peerName || 'Unknown') + ' (' + remoteRole + ')</div>';
-    html += '<div style="margin:8px 0"><button class="btn" onclick="window.swapRoles()" style="font-size:0.8em;padding:4px 12px">Swap Roles</button></div>';
-    
+    html += '<div style="margin:8px 0;display:flex;gap:8px;flex-wrap:wrap"><button class="btn" onclick="window.swapRoles()" style="font-size:0.8em;padding:4px 12px">Swap Roles</button><button class="btn" onclick="window.unbondDevice()" style="font-size:0.8em;padding:4px 12px;background:#c0392b;color:#fff;border-color:#c0392b">Unbond</button></div>';
+
+    // Identity + connection status
     html += '<div class="stat-row"><span class="stat-label">MAC Address</span><span class="stat-value">' + (data.peerMac || '—') + '</span></div>';
     html += '<div class="stat-row"><span class="stat-label">Status</span><span class="stat-value">' + statusText + '</span></div>';
-    
     if (online && data.lastHeartbeatAgeSec !== undefined) {
       html += '<div class="stat-row"><span class="stat-label">Last Seen</span><span class="stat-value">' + data.lastHeartbeatAgeSec + 's ago</span></div>';
     }
-    
     if (data.peerUptime !== undefined) {
       html += '<div class="stat-row"><span class="stat-label">Peer Uptime</span><span class="stat-value">' + formatUptime(data.peerUptime) + '</span></div>';
     }
 
-    // Link Quality — folded into the Bonded Device card. RSSI, heartbeat counts,
-    // packet loss and health are all telemetry about the link to THIS peer, so
-    // they belong here rather than in a separate panel.
+    // Hardware + capabilities of the bonded device (merged from the old 2nd card)
+    if (data.capabilities) {
+      html += '<div style="border-top:1px solid var(--panel-border);margin-top:8px;padding-top:8px">';
+      html += '<div class="stat-row"><span class="stat-label">Flash</span><span class="stat-value">' + (data.capabilities.flashMB || '?') + ' MB</span></div>';
+      html += '<div class="stat-row"><span class="stat-label">PSRAM</span><span class="stat-value">' + (data.capabilities.psramMB || '?') + ' MB</span></div>';
+      if (data.capabilities.features) {
+        html += '<div class="stat-row"><span class="stat-label">Features</span><span class="stat-value" style="font-size:0.8em;max-width:60%;text-align:right">' + data.capabilities.features + '</span></div>';
+      }
+      if (data.capabilities.services) {
+        html += '<div class="stat-row"><span class="stat-label">Services</span><span class="stat-value" style="font-size:0.8em;max-width:60%;text-align:right">' + data.capabilities.services + '</span></div>';
+      }
+      const capSensorMask = data.capabilities.sensorMask || 0;
+      const connected = data.sensorConnected || {};
+      const rDefs = [{m:0x01,n:'Thermal',k:'thermal'},{m:0x02,n:'ToF',k:'tof'},{m:0x04,n:'IMU',k:'imu'},{m:0x08,n:'Gamepad',k:'gamepad'},{m:0x10,n:'APDS',k:'apds'},{m:0x20,n:'GPS',k:'gps'},{m:0x40,n:'RTC',k:'rtc'},{m:0x80,n:'Presence',k:'presence'}];
+      const rRows = rDefs.filter(function(d){return capSensorMask & d.m;});
+      if (rRows.length > 0) {
+        html += '<div class="stat-row"><span class="stat-label">I2C Sensors</span></div>';
+        html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:2px 8px;margin:2px 0 6px 0">';
+        for (const d of rRows) {
+          const on = connected[d.k] === true;
+          const hasLiveR = connected.valid === true;
+          const badge = !hasLiveR ? '<span style="color:var(--muted);font-size:0.78em">—</span>' : '<span style="font-size:0.78em;font-weight:600;color:' + (on ? '#2ecc71' : '#e74c3c') + '">' + (on ? 'ON' : 'OFF') + '</span>';
+          html += '<span style="font-size:0.82em;color:var(--panel-fg);opacity:0.8">' + d.n + '</span>';
+          html += '<span style="text-align:right">' + badge + '</span>';
+        }
+        html += '</div>';
+      }
+      html += '</div>';
+    } else {
+      html += '<div style="border-top:1px solid var(--panel-border);margin-top:8px;padding-top:8px;text-align:center;font-size:0.85em;color:var(--panel-fg);opacity:0.6">Capabilities pending...</div>';
+    }
+
+    // Live status from the bonded device's periodic poll
+    if (data.peerStatus && data.peerStatus.valid) {
+      html += '<div style="border-top:1px solid var(--panel-border);margin-top:8px;padding-top:8px">';
+      html += '<div class="stat-row"><span class="stat-label">Free Heap</span><span class="stat-value">' + Math.round(data.peerStatus.freeHeap / 1024) + ' KB</span></div>';
+      html += '<div class="stat-row"><span class="stat-label">Min Free Heap</span><span class="stat-value">' + Math.round(data.peerStatus.minFreeHeap / 1024) + ' KB</span></div>';
+      html += '<div class="stat-row"><span class="stat-label">WiFi</span><span class="stat-value">' + (data.peerStatus.wifiConnected ? 'Connected' : 'Disconnected') + '</span></div>';
+      html += '<div class="stat-row"><span class="stat-label">Status Age</span><span class="stat-value">' + data.peerStatus.ageSec + 's ago</span></div>';
+      html += '</div>';
+    } else {
+      html += '<div style="border-top:1px solid var(--panel-border);margin-top:8px;padding-top:8px;text-align:center;font-size:0.85em;color:var(--panel-fg);opacity:0.6">Live status pending...</div>';
+    }
+
+    // Link Quality — RSSI, heartbeat counts, packet loss and health for the link
+    // to this peer.
     const health = data.heartbeatsTx > 0 ? Math.min(100, Math.round((data.heartbeatsRx / data.heartbeatsTx) * 100)) : 0;
     html += '<div style="border-top:1px solid var(--panel-border);margin-top:8px;padding-top:8px">';
     html += '<div class="stat-row"><span class="stat-label">Link Quality</span><span class="stat-value">' + health + '% Health</span></div>';
@@ -242,7 +288,7 @@ void streamBondInner(httpd_req_t* req) {
     }
     html += '</div>';
 
-    html += '</div>';  // end Bonded Device card
+    html += '</div>';  // end unified Bonded Device card
 
     // Remote Sensors Card (master controls power + streaming on worker)
     {
@@ -369,58 +415,9 @@ void streamBondInner(httpd_req_t* req) {
       html += '</div>';
     }
     
-    // Remote Capabilities Card (always show when bonded)
-    html += '<div class="remote-card">';
-    html += '<div class="remote-title">Bonded Device</div>';
-    if (data.capabilities) {
-      // Hardware
-      html += '<div class="stat-row"><span class="stat-label">Flash</span><span class="stat-value">' + (data.capabilities.flashMB || '?') + ' MB</span></div>';
-      html += '<div class="stat-row"><span class="stat-label">PSRAM</span><span class="stat-value">' + (data.capabilities.psramMB || '?') + ' MB</span></div>';
-      
-      // Features (compile-time)
-      if (data.capabilities.features) {
-        html += '<div class="stat-row"><span class="stat-label">Features</span><span class="stat-value" style="font-size:0.8em;max-width:60%;text-align:right">' + data.capabilities.features + '</span></div>';
-      }
-      
-      // Services (runtime)
-      if (data.capabilities.services) {
-        html += '<div class="stat-row"><span class="stat-label">Services</span><span class="stat-value" style="font-size:0.8em;max-width:60%;text-align:right">' + data.capabilities.services + '</span></div>';
-      }
-      
-      // Sensors - compact 2-column grid: name | ON/OFF badge
-      const capSensorMask = data.capabilities.sensorMask || 0;
-      const connected = data.sensorConnected || {};
-      const rDefs = [{m:0x01,n:'Thermal',k:'thermal'},{m:0x02,n:'ToF',k:'tof'},{m:0x04,n:'IMU',k:'imu'},{m:0x08,n:'Gamepad',k:'gamepad'},{m:0x10,n:'APDS',k:'apds'},{m:0x20,n:'GPS',k:'gps'},{m:0x40,n:'RTC',k:'rtc'},{m:0x80,n:'Presence',k:'presence'}];
-      const rRows = rDefs.filter(function(d){return capSensorMask & d.m;});
-      if (rRows.length > 0) {
-        html += '<div class="stat-row"><span class="stat-label">I2C Sensors</span></div>';
-        html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:2px 8px;margin:2px 0 6px 0">';
-        for (const d of rRows) {
-          const on = connected[d.k] === true;
-          const hasLiveR = connected.valid === true;
-          const badge = !hasLiveR ? '<span style="color:var(--muted);font-size:0.78em">—</span>' : '<span style="font-size:0.78em;font-weight:600;color:' + (on ? '#2ecc71' : '#e74c3c') + '">' + (on ? 'ON' : 'OFF') + '</span>';
-          html += '<span style="font-size:0.82em;color:var(--panel-fg);opacity:0.8">' + d.n + '</span>';
-          html += '<span style="text-align:right">' + badge + '</span>';
-        }
-        html += '</div>';
-      }
-    } else {
-      html += '<div style="text-align:center;font-size:0.85em;color:var(--panel-fg);opacity:0.6;padding:8px 0">Capabilities pending...</div>';
-    }
-    
-    // Live status from periodic poll (always show if available, regardless of cap exchange)
-    if (data.peerStatus && data.peerStatus.valid) {
-      html += '<div style="border-top:1px solid var(--panel-border);margin-top:8px;padding-top:8px">';
-      html += '<div class="stat-row"><span class="stat-label">Free Heap</span><span class="stat-value">' + Math.round(data.peerStatus.freeHeap / 1024) + ' KB</span></div>';
-      html += '<div class="stat-row"><span class="stat-label">Min Free Heap</span><span class="stat-value">' + Math.round(data.peerStatus.minFreeHeap / 1024) + ' KB</span></div>';
-      html += '<div class="stat-row"><span class="stat-label">WiFi</span><span class="stat-value">' + (data.peerStatus.wifiConnected ? 'Connected' : 'Disconnected') + '</span></div>';
-      html += '<div class="stat-row"><span class="stat-label">Status Age</span><span class="stat-value">' + data.peerStatus.ageSec + 's ago</span></div>';
-    } else {
-      html += '<div style="border-top:1px solid var(--panel-border);margin-top:8px;padding-top:8px;text-align:center;font-size:0.85em;color:var(--panel-fg);opacity:0.6">Live status pending...</div>';
-    }
-    
-    html += '</div>';
-    
+    // (The second "Bonded Device" card — remote hardware/capabilities + live
+    // status — was merged into the unified Bonded Device card above.)
+
     // Remote CLI Card
     html += '<div class="remote-card" style="grid-column: 1 / -1">';
     html += '<div class="remote-title">Remote Command Execution</div>';
@@ -523,7 +520,23 @@ void streamBondInner(httpd_req_t* req) {
       console.error('[Bond] Role swap error:', e);
     });
   };
-  
+
+  window.unbondDevice = function() {
+    if (!confirm('Unbond from this device? This ends the bond on THIS device. The peer will show offline until you unbond it there too.')) return;
+    fetch('/api/cli', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+      body: 'cmd=' + encodeURIComponent('bonddisconnect')
+    })
+    .then(function(r){ return r.text(); })
+    .then(function(){
+      // bonddisconnect clears bond mode locally; reload so the page returns to
+      // the device-selection view.
+      setTimeout(function(){ window.location.reload(); }, 600);
+    })
+    .catch(function(e){ alert('Unbond failed: ' + e.message); });
+  };
+
   // Track highest message sequence seen so we only show new messages
   var bondMsgSeq = 0;
   // Initialize bondMsgSeq on page load by fetching current max
@@ -798,7 +811,14 @@ static esp_err_t handleBondStatus(httpd_req_t* req) {
     peerConfigured = true;
     formatMacAddr(peerMac, macStr, sizeof(macStr));
   }
-  
+
+  // Local STA MAC — exposed so the Files page (master) can ask the bonded peer
+  // to send a file back to us: "espnow sendfile <localMac> <path>".
+  uint8_t localMacBytes[6] = {0};
+  esp_wifi_get_mac(WIFI_IF_STA, localMacBytes);
+  char localMacStr[18] = "00:00:00:00:00:00";
+  formatMacAddr(localMacBytes, localMacStr, sizeof(localMacStr));
+
   // Get peer name: prefer capability cache, fall back to device registry
   String peerNameStr;
   if (gEspNow && gEspNow->lastRemoteCapValid) {
@@ -842,6 +862,7 @@ static esp_err_t handleBondStatus(httpd_req_t* req) {
   webBondSendChunkf(req, "\"peerConfigured\":%s,", peerConfigured ? "true" : "false");
   webBondSendChunkf(req, "\"peerOnline\":%s,", peerOnline ? "true" : "false");
   webBondSendChunkf(req, "\"peerMac\":\"%s\",", macStr);
+  webBondSendChunkf(req, "\"localMac\":\"%s\",", localMacStr);
   webBondSendChunkf(req, "\"peerName\":\"%s\",", peerName);
   webBondSendChunkf(req, "\"role\":%d,", gSettings.bondRole);
   webBondSendChunkf(req, "\"lastHeartbeat\":%lu,", lastHb);
