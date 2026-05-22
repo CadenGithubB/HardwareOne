@@ -247,7 +247,6 @@ bool v4_send_encrypted_chunked(const uint8_t dst[6], uint8_t type, uint16_t base
                                const uint8_t* payload, uint16_t payloadLen,
                                uint8_t ttl);
 bool v4_broadcast_topo_request(uint32_t reqId);
-bool v4_send_worker_status(const uint8_t* dst, const V4PayloadWorkerStatus& status, const char* jsonMetadata, uint16_t jsonLen);
 bool v4_send_command_response(const uint8_t* dst, uint32_t cmdMsgId, bool success, const char* resultText, uint16_t textLen);
 bool v4_send_text(const uint8_t* dst, const char* text, uint16_t textLen);
 bool v4_broadcast_text(const char* text, uint16_t textLen);
@@ -1426,6 +1425,34 @@ static void broadcast_tracker_check_timeouts() {
   }
 }
 
+// ============================================================================
+// SEND-PATH MAP — "which send function do I call?"
+//
+// APPLICATION payloads (the common case):
+//   * Bond traffic (any BOND_/SENSOR_DATA/STREAM_CTRL/SETTINGS opcode)
+//        -> bondSendEncrypted()        MAC-anchored single-initiator + encrypt;
+//                                       the ONLY entry the bond layer should use.
+//   * General unicast app payload      -> v4_send_payload_smart()
+//                                       picks single-vs-chunked and encrypts when
+//                                       a session is ACTIVE. The default app entry.
+//   * Single frame that must WAIT for a session (queue + kick SESSION_OPEN, drain
+//     on CONFIRM)                       -> v4_send_encrypted_or_queue()
+//   * Mesh-wide fan-out                 -> v4_broadcast() / v4_broadcast_category()
+//
+// LOW-LEVEL / INTERNAL (do NOT call from app code — these intentionally bypass
+// the smart/encrypt path because the frame either establishes the session or is
+// unprotected by design):
+//   * v4_send_frame            raw single frame. Used for handshakes
+//                              (KEY_EX_*, SESSION_OPEN/CONFIRM/REKEY), ACKs,
+//                              TOPO_*, and as the primitive under everything else.
+//   * v4_send_chunked /        raw multi-frame; the encrypted variant is what
+//     v4_send_encrypted_chunked  v4_send_payload_smart calls under the hood.
+//   * v4_send_session_wrapped  AEAD-wrap one frame for an ACTIVE session.
+//
+// Rule of thumb: app code calls bondSendEncrypted (bond) or v4_send_payload_smart
+// (everything else). If you reach for v4_send_frame in app code, you are almost
+// certainly sending plaintext by mistake.
+// ============================================================================
 bool v4_send_frame(const uint8_t* dst, uint8_t type, uint16_t flags, uint32_t msgId,
                    const uint8_t* payload, uint16_t payloadLen, uint8_t ttl) {
   if (!dst || (payloadLen > 0 && !payload)) return false;
@@ -2306,55 +2333,9 @@ void bondNotifySessionEstablished(const uint8_t* peerMac) {
 #endif
 }
 
-bool v4_send_worker_status(const uint8_t* dst, const V4PayloadWorkerStatus& status,
-                                   const char* jsonMetadata, uint16_t jsonLen) {
-  uint32_t msgId = generateMessageId();
-  
-  char dstMac[18];
-  formatMacAddressBuf(dst, dstMac, sizeof(dstMac));
-  DEBUGF(DEBUG_ESPNOW_MESH, "[V4_TX_WORKER_STATUS] Sending to %s msgId=%lu", dstMac, (unsigned long)msgId);
-  DEBUGF(DEBUG_ESPNOW_MESH, "[V4_TX_WORKER_STATUS] Payload: freeHeap=%lu totalHeap=%lu rssi=%d thermal=%d imu=%d",
-         (unsigned long)status.freeHeap, (unsigned long)status.totalHeap, status.rssi, status.gThermalEnabled, status.gImuEnabled);
-  DEBUGF(DEBUG_ESPNOW_MESH, "[V4_TX_WORKER_STATUS] name='%s' metadata=%s (%u bytes)",
-         status.name, jsonMetadata ? "YES" : "NO", jsonLen);
-  
-  if (jsonMetadata && jsonLen > 0) {
-    // Has metadata - combine struct + JSON
-    uint16_t totalLen = sizeof(status) + jsonLen;
-    DEBUGF(DEBUG_ESPNOW_MESH, "[V4_TX_WORKER_STATUS] Total payload: %u bytes (struct=%u + json=%u)",
-           totalLen, (unsigned)sizeof(status), jsonLen);
-    if (totalLen > ESPNOW_V4_MAX_PAYLOAD) {
-      DEBUGF(DEBUG_ESPNOW_MESH, "[V4_TX_WORKER_STATUS] Payload exceeds max, using fragmented send");
-      // Use chunked send for large payloads
-      uint8_t* buffer = (uint8_t*)malloc(totalLen);
-      if (!buffer) return false;
-      memcpy(buffer, &status, sizeof(status));
-      memcpy(buffer + sizeof(status), jsonMetadata, jsonLen);
-      bool result = v4_send_chunked(dst, ESPNOW_V4_TYPE_WORKER_STATUS, ESPNOW_V4_FLAG_ACK_REQ, 
-                                     msgId, buffer, totalLen, 2);
-      free(buffer);
-      DEBUGF(DEBUG_ESPNOW_MESH, "[V4_TX_WORKER_STATUS] Fragmented send result: %s", result ? "SUCCESS" : "FAILED");
-      return result;
-    } else {
-      // Fits in one frame
-      DEBUGF(DEBUG_ESPNOW_MESH, "[V4_TX_WORKER_STATUS] Sending single frame");
-      uint8_t buffer[250];
-      memcpy(buffer, &status, sizeof(status));
-      memcpy(buffer + sizeof(status), jsonMetadata, jsonLen);
-      bool result = v4_send_frame(dst, ESPNOW_V4_TYPE_WORKER_STATUS, ESPNOW_V4_FLAG_ACK_REQ, 
-                          msgId, buffer, totalLen, 2);
-      DEBUGF(DEBUG_ESPNOW_MESH, "[V4_TX_WORKER_STATUS] Single frame result: %s", result ? "SUCCESS" : "FAILED");
-      return result;
-    }
-  } else {
-    // No metadata - just struct
-    DEBUGF(DEBUG_ESPNOW_MESH, "[V4_TX_WORKER_STATUS] No metadata, sending struct only (%u bytes)", (unsigned)sizeof(status));
-    bool result = v4_send_frame(dst, ESPNOW_V4_TYPE_WORKER_STATUS, ESPNOW_V4_FLAG_ACK_REQ, 
-                        msgId, (const uint8_t*)&status, sizeof(status), 2);
-    DEBUGF(DEBUG_ESPNOW_MESH, "[V4_TX_WORKER_STATUS] Result: %s", result ? "SUCCESS" : "FAILED");
-    return result;
-  }
-}
+// (v4_send_worker_status removed 2026-05-21: WORKER_STATUS opcode 83 has no
+// receive handler in kV4HandlerTable and the sender had zero callers — fully
+// dead path. Reintroduce a sender only alongside a real RX handler.)
 
 static bool v4_send_topo_start(const uint8_t* dst, uint32_t reqId, uint8_t peerCount) {
   V4PayloadTopoStart payload;
@@ -3752,6 +3733,27 @@ static void v4h_file_end(const V4RxCtx& ctx) {
 // ----- Handler table ------
 // Stable static table; lookup is linear over a small N. Adding a new opcode
 // is one row here plus its v4h_<name> function. No edits to the dispatcher.
+//
+// THREADING / DEFERRAL RULE (Seam 2 invariant):
+// Handlers run INLINE on espnow_task, whose sole job is to drain the RX ring
+// fast. A handler may run inline ONLY if it is (a) bounded-time, (b) allocation-
+// light, and (c) does NO filesystem I/O, NO deserializeJson of attacker-sized
+// input, and NO heavy crypto beyond a single HMAC verify. Anything heavier MUST
+// snapshot its inputs into PSRAM and hand off via submitDeferredToCmdExec(), so
+// the slow work runs on cmd_exec_task and never stalls RX.
+//
+// Handlers that DEFER today (heavy crypto / FS+JSON): USER_SYNC, SESSION_OPEN,
+// SESSION_CONFIRM, SESSION_REKEY. (v4h_cmd also "defers" by snapshotting into
+// gEspNow->deferredCmd* and letting the command run off-task.)
+//
+// KNOWN INLINE EXCEPTIONS to the rule (accepted, not oversights):
+//   * KEY_EX_HELLO/REPLY/CONFIRM call peerIdentityPersist() (small FS write).
+//     Bounded + once-per-pairing, so the RX-stall cost is negligible.
+//   * v4h_file_end runs processBondSettings/manifest caching + a deserializeJson
+//     of automations.json inline — the one genuine violation. Left inline
+//     deliberately: it is HW-validated and the bond SEND side still does the same
+//     heavy FS in processMeshHeartbeats (the super-loop), so deferring file_end
+//     alone buys no clean RX task. Revisit together with the super-loop split.
 static const V4OpcodeEntry kV4HandlerTable[] = {
   // Phase 3.3: KEY_EX handshake. NOT REQ_PAIRED — these *establish* pairing.
   // Handler verifies HMAC via mesh bootstrap key; loud-rejects bad frames.
@@ -6877,6 +6879,11 @@ void processMeshHeartbeats() {
   // 1b. Phase 3.5 — sweep expired pending encrypted frames (queued while
   // waiting for SESSION_OPEN that never completed). 5-second budget per slot.
   pendingFrameTimeoutSweep((uint32_t)millis());
+  // 1b-2. Reset sessions stuck in ESTABLISHING (our SESSION_OPEN got no CONFIRM
+  // because the peer was offline/booting when we kicked it). Clearing the slot
+  // lets the next bond/encrypted send re-initiate — without this the bond never
+  // reconnects after the peer reboots out from under an in-flight handshake.
+  sessionEstablishingTimeoutSweep((uint32_t)millis());
   // 1c. Phase 3.5 task #49 — age out tracked-send entries (PENDING → TIMEOUT
   // after 10s; resolved entries cleared after 30s so the polling window has
   // time to surface them to the web UI).

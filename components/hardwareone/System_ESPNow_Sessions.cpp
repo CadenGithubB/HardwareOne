@@ -493,6 +493,35 @@ uint8_t pendingFrameTimeoutSweep(uint32_t nowMs) {
   return expired;
 }
 
+// A session stuck in ESTABLISHING means our SESSION_OPEN never got a CONFIRM
+// (the peer was offline/booting when we kicked it). Left alone, the slot stays
+// ESTABLISHING forever and v4_send_encrypted_or_queue only re-kicks a fresh
+// SESSION_OPEN from FREE/CLOSED — so the bond silently never reconnects. Reset
+// stale ESTABLISHING slots to FREE so the next encrypted/bond send re-initiates.
+//   * lastUseMs is stamped when the slot enters ESTABLISHING and is NOT bumped
+//     again until the session goes ACTIVE, so it accurately ages the handshake.
+//   * Only ESTABLISHING is swept — REKEYING still holds valid current keys and
+//     has its own abort path; a healthy OPEN->CONFIRM completes in well under
+//     this window, so this never disturbs a live handshake.
+static constexpr uint32_t kSessionEstablishTimeoutMs = 6000;  // > pending-frame 5s
+
+uint8_t sessionEstablishingTimeoutSweep(uint32_t nowMs) {
+  if (!gSessions) return 0;
+  uint8_t reset = 0;
+  for (uint8_t i = 0; i < kSessionSlots; i++) {
+    SessionState& s = gSessions[i];
+    if (s.state != SESSION_ESTABLISHING) continue;
+    if ((nowMs - s.lastUseMs) < kSessionEstablishTimeoutMs) continue;
+    WARN_ESPNOWF("session: ESTABLISHING timeout for %02X:%02X:%02X:%02X:%02X:%02X "
+                 "(no SESSION_CONFIRM in %ums) — resetting so the next send re-kicks SESSION_OPEN",
+                 s.peerMac[0], s.peerMac[1], s.peerMac[2], s.peerMac[3], s.peerMac[4], s.peerMac[5],
+                 (unsigned)kSessionEstablishTimeoutMs);
+    sessionClear(&s);
+    reset++;
+  }
+  return reset;
+}
+
 uint8_t pendingFrameCount() {
   if (!gPending) return 0;
   uint8_t n = 0;

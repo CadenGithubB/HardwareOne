@@ -691,6 +691,53 @@ String getRemoteSensorDataJSON(const uint8_t* deviceMac, RemoteSensorType sensor
   return String(entry->jsonData);
 }
 
+int formatRemoteSensorReadable(const char* json, char* out, size_t outSize, int maxLines) {
+  if (!out || outSize == 0) return 0;
+  out[0] = '\0';
+  if (!json || !json[0]) { strncpy(out, "(no data)", outSize - 1); out[outSize - 1] = '\0'; return 1; }
+
+  PSRAM_JSON_DOC(doc);
+  if (deserializeJson(doc, json) != DeserializationError::Ok) {
+    strncpy(out, "(unreadable)", outSize - 1); out[outSize - 1] = '\0'; return 1;
+  }
+  JsonObjectConst root = doc.as<JsonObjectConst>();
+  if (root.isNull()) { strncpy(out, "(no fields)", outSize - 1); out[outSize - 1] = '\0'; return 1; }
+
+  size_t pos = 0;
+  int lines = 0;
+  for (JsonPairConst kv : root) {
+    if (lines >= maxLines) break;
+    const char* key = kv.key().c_str();
+    if (!key || !key[0]) continue;
+    // Skip bookkeeping/noise keys that aren't useful on a small screen.
+    if (!strcmp(key, "ts") || !strcmp(key, "seq") || !strcmp(key, "val") || !strcmp(key, "valid"))
+      continue;
+
+    char valbuf[20];
+    JsonVariantConst v = kv.value();
+    if (v.is<bool>()) {
+      snprintf(valbuf, sizeof(valbuf), "%s", v.as<bool>() ? "yes" : "no");
+    } else if (v.is<const char*>()) {
+      const char* s = v.as<const char*>();
+      snprintf(valbuf, sizeof(valbuf), "%s", s ? s : "");
+    } else if (v.is<float>()) {  // any JSON number (int or real)
+      double d = v.as<double>();
+      if (d == (double)(long long)d) snprintf(valbuf, sizeof(valbuf), "%lld", (long long)d);
+      else                           snprintf(valbuf, sizeof(valbuf), "%.2f", d);
+    } else {
+      continue;  // arrays / nested objects / null — skip on a small screen
+    }
+
+    int n = snprintf(out + pos, outSize - pos, "%s%s: %s", lines ? "\n" : "", key, valbuf);
+    if (n < 0) break;
+    if ((size_t)n >= outSize - pos) { out[outSize - 1] = '\0'; lines++; break; }
+    pos += (size_t)n;
+    lines++;
+  }
+  if (lines == 0) { strncpy(out, "(no fields)", outSize - 1); out[outSize - 1] = '\0'; return 1; }
+  return lines;
+}
+
 String getRemoteDevicesListJSON() {
   PSRAM_JSON_DOC(doc);
   JsonArray devices = doc["devices"].to<JsonArray>();
