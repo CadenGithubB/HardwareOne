@@ -14,6 +14,7 @@
 #include "System_Command.h"
 #include "System_Notifications.h"
 #include "System_ESPSR.h"  // srSyncDebugLevel() — derive legacy gSrDebugLevel from flags
+#include "System_SelfDevice.h"  // SelfDevice::firmwareVersion() — Stage 1 consolidation
 #include <LittleFS.h>
 #include "System_VFS.h"      // VFS::*Guarded + systemAuth (Phase 2 perm refactor)
 #include <esp_system.h>
@@ -883,7 +884,7 @@ void applySettings() {
 
 void buildSettingsJsonDoc(JsonDocument& doc, bool excludePasswords) {
   // Stamp firmware version so we know which build last wrote this file
-  doc["firmwareVersion"] = esp_app_get_description()->version;
+  doc["firmwareVersion"] = SelfDevice::firmwareVersion();
 
   // NOTE: All top-level settings are now owned by their respective modules.
   // NOTE: webCliHistorySize/oledCliHistorySize -> cli module
@@ -1144,7 +1145,7 @@ bool readSettingsJson() {
 
   // Check if settings were written by a different firmware version
   const char* savedVersion = doc["firmwareVersion"] | "";
-  const char* runningVersion = esp_app_get_description()->version;
+  const char* runningVersion = SelfDevice::firmwareVersion();
   if (savedVersion[0] == '\0') {
     INFO_STORAGEF("[Settings] No firmwareVersion in settings file (pre-versioning build)");
   } else if (strcmp(savedVersion, runningVersion) != 0) {
@@ -1623,8 +1624,11 @@ static const SettingsModule outputSettingsModule = {
 // ============================================================================
 
 static const SettingEntry crashSettingEntries[] = {
-  { "crashCount", SETTING_INT, &gSettings.crashCount, 0, 0, nullptr, 0, 0xFFFF, "Abnormal Reset Count", nullptr, false, nullptr, nullptr },
-  { "lastResetReason", SETTING_INT, &gSettings.lastResetReason, 0, 0, nullptr, 0, 0xFF, "Last Reset Reason", nullptr, false, nullptr, nullptr },
+  // crashCount + lastResetReason are populated by the boot path from RTC memory
+  // (HardwareOne.cpp:1044), never set by user input. readOnly=true so the schema
+  // marks them as display-only and the UI renders text instead of an editable input.
+  { "crashCount", SETTING_INT, &gSettings.crashCount, 0, 0, nullptr, 0, 0xFFFF, "Abnormal Reset Count", nullptr, false, nullptr, nullptr, true },
+  { "lastResetReason", SETTING_INT, &gSettings.lastResetReason, 0, 0, nullptr, 0, 0xFF, "Last Reset Reason", nullptr, false, nullptr, nullptr, true },
 };
 
 static const SettingsModule crashSettingsModule = {
@@ -2197,6 +2201,80 @@ const char* handleSettingCommand(const SettingEntry* entry, const String& argsIn
     }
   }
   return "Error: Unknown setting type";
+}
+
+// ============================================================================
+// Settings schema JSON — shared by the local /api/settings/schema web handler
+// and the worker's sendBondSchema() (which serializes this to a file for
+// transport across the bond). One source of truth means master and worker
+// emit identical JSON shapes by construction.
+// ============================================================================
+
+void buildSettingsSchemaJson(JsonDocument& doc) {
+  JsonArray modules = doc["modules"].to<JsonArray>();
+
+  size_t modCount = 0;
+  const SettingsModule** mods = getSettingsModules(modCount);
+
+  for (size_t m = 0; m < modCount; m++) {
+    const SettingsModule* mod = mods[m];
+    if (!mod) continue;
+
+    JsonObject modObj = modules.add<JsonObject>();
+    modObj["name"] = mod->name;
+    modObj["section"] = mod->jsonSection ? mod->jsonSection : mod->name;
+    modObj["description"] = mod->description ? mod->description : "";
+    if (mod->isConnected) {
+      modObj["connected"] = mod->isConnected();
+    }
+
+    JsonArray entries = modObj["entries"].to<JsonArray>();
+    for (size_t i = 0; i < mod->count; i++) {
+      const SettingEntry* e = &mod->entries[i];
+      if (!e || !e->jsonKey) continue;
+
+      JsonObject entry = entries.add<JsonObject>();
+      entry["key"] = e->jsonKey;
+      entry["label"] = e->label ? e->label : e->jsonKey;
+
+      switch (e->type) {
+        case SETTING_INT:
+        case SETTING_U8:
+        case SETTING_U16:
+        case SETTING_U32:    entry["type"] = "int"; break;
+        case SETTING_FLOAT:  entry["type"] = "float"; break;
+        case SETTING_BOOL:   entry["type"] = "bool"; break;
+        case SETTING_STRING: entry["type"] = "string"; break;
+      }
+
+      if (e->isSecret) entry["secret"] = true;
+      if (e->readOnly) entry["readOnly"] = true;
+      if (e->group)    entry["group"] = e->group;
+      if (e->cmdKey)   entry["cmdKey"] = e->cmdKey;
+
+      if (e->type == SETTING_INT || e->type == SETTING_U8 ||
+          e->type == SETTING_U16 || e->type == SETTING_U32 ||
+          e->type == SETTING_FLOAT) {
+        if (e->minVal != 0 || e->maxVal != 0) {
+          entry["min"] = e->minVal;
+          entry["max"] = e->maxVal;
+        }
+      }
+      if (e->options) entry["options"] = e->options;
+
+      switch (e->type) {
+        case SETTING_INT:
+        case SETTING_U8:
+        case SETTING_U16:
+        case SETTING_U32:    entry["default"] = e->intDefault; break;
+        case SETTING_FLOAT:  entry["default"] = e->floatDefault; break;
+        case SETTING_BOOL:   entry["default"] = (bool)e->intDefault; break;
+        case SETTING_STRING: entry["default"] = e->stringDefault ? e->stringDefault : ""; break;
+      }
+    }
+  }
+
+  doc["count"] = modCount;
 }
 
 // ============================================================================

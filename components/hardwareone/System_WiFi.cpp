@@ -1338,7 +1338,37 @@ static const SettingEntry wifiSettingsEntries[] = {
   { "password",           SETTING_STRING, &gSettings.wifiPassword,      0, 0, "", 0, 0, "WiFi Password", nullptr, true, nullptr, "wifipassword" },
   { "autoReconnect",      SETTING_BOOL,   &gSettings.wifiAutoReconnect, true, 0, nullptr, 0, 1, "Auto-reconnect", nullptr, false, nullptr, "wifiautoreconnect" },
   { "ntpServer",          SETTING_STRING, &gSettings.ntpServer,         0, 0, "pool.ntp.org", 0, 0, "NTP Server", nullptr, false, nullptr, "ntpserver" },
-  { "tzOffsetMinutes",    SETTING_INT,    &gSettings.tzOffsetMinutes,   0, 0, nullptr, -720, 840, "Timezone Offset (min)", nullptr, false, nullptr, "tzoffsetminutes" }
+  // Timezone offsets as "minutes|label" pairs — the schema renderer's enum
+  // widget reads this and produces a select dropdown. CLI verb stays "tz".
+  { "tzOffsetMinutes",    SETTING_INT,    &gSettings.tzOffsetMinutes,   0, 0, nullptr, -720, 840, "Timezone",
+    "-720|UTC-12 (Baker Island),"
+    "-660|UTC-11 (Samoa),"
+    "-600|UTC-10 (Hawaii/HST),"
+    "-540|UTC-9 (Alaska/AKST),"
+    "-480|UTC-8 (Pacific/PST),"
+    "-420|UTC-7 (Mountain/MST · Pacific/PDT),"
+    "-360|UTC-6 (Central/CST · Mountain/MDT),"
+    "-300|UTC-5 (Eastern/EST · Central/CDT),"
+    "-240|UTC-4 (Atlantic/AST · Eastern/EDT),"
+    "-180|UTC-3 (Argentina · Atlantic/ADT),"
+    "-120|UTC-2 (Mid-Atlantic),"
+    "-60|UTC-1 (Azores),"
+    "0|UTC+0 (London/GMT · Dublin),"
+    "60|UTC+1 (Berlin/Paris/CET · London/BST),"
+    "120|UTC+2 (Cairo/Athens/EET · Paris/CEST),"
+    "180|UTC+3 (Moscow/Baghdad),"
+    "240|UTC+4 (Dubai/Baku),"
+    "300|UTC+5 (Karachi/Tashkent),"
+    "330|UTC+5:30 (Mumbai/Delhi/IST),"
+    "360|UTC+6 (Dhaka/Almaty),"
+    "420|UTC+7 (Bangkok/Jakarta),"
+    "480|UTC+8 (Beijing/Singapore),"
+    "540|UTC+9 (Tokyo/Seoul/JST),"
+    "570|UTC+9:30 (Adelaide/ACST),"
+    "600|UTC+10 (Sydney/AEST),"
+    "660|UTC+11 (Solomon Islands),"
+    "720|UTC+12 (Fiji/Auckland/NZST)",
+    false, nullptr, "tzoffsetminutes" }
 };
 
 static bool isWifiConnected() { return WiFi.status() == WL_CONNECTED; }

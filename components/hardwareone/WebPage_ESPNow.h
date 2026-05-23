@@ -1541,8 +1541,21 @@ window.togglePane = function(paneId, btnId) {
           return;
         }
         if (statusDiv) statusDiv.textContent = 'Request sent, waiting for response...';
-        
-        // Poll peer messages for streamed file listing output
+
+        // Poll peer messages for streamed file listing output.
+        // Two notes about the polling design (mirror of the BondFs fix):
+        //  1. seqBefore is local to this browse session — no shared mutable
+        //     cursor across concurrent browses (would race the same way the
+        //     bonded file viewer did before the BondFs.exec rewrite).
+        //  2. doneMarker uses ' entries' (with leading space) rather than
+        //     'Total:' — the file listing terminates with "Total: N entries"
+        //     but other commands the peer may stream (fsusage emits
+        //     "Total: NNNN bytes") would falsely trigger completion if we
+        //     matched bare "Total:". This same collision broke the bonded
+        //     viewer; fixing it preemptively here too.
+        // We also advance seqBefore as we consume messages so each poll only
+        // fetches new ones — earlier this loop re-processed every message
+        // since the initial baseline on every tick.
         var pollCount = 0;
         var maxPolls = 15;
         var pollInterval = setInterval(function() {
@@ -1553,27 +1566,32 @@ window.togglePane = function(paneId, btnId) {
             if (statusDiv) statusDiv.textContent = 'Timed out';
             return;
           }
-          
+
           fetch('/api/espnow/messages?since=' + seqBefore)
             .then(function(r) { return r.json(); })
             .then(function(data) {
               var msgs = Array.isArray(data) ? data : (data.messages || []);
               var browseLines = [];
               var foundComplete = false;
-              
+
               for (var i = 0; i < msgs.length; i++) {
                 var m = msgs[i];
                 var mMac = String(m.mac || m.from || '').toUpperCase();
                 var mMsg = String(m.message || m.msg || m.text || '');
-                
+                var mSeq = m.seq || m.seqNum || 0;
+                if (mSeq > seqBefore) seqBefore = mSeq;
+
                 if (mMac !== targetMac) continue;
-                
-                // Match streamed file listing output from 'files' command
-                if (mMsg.indexOf('Files (') >= 0 || 
-                    mMsg.indexOf('items)') >= 0 || 
+
+                // Match streamed file listing output from 'files' command.
+                // Note: we INTENTIONALLY no longer include 'Total:' in the
+                // line-keep whitelist — the file listing's terminator
+                // "Total: N entries" is detected as the completion marker
+                // (see the ' entries' check below), not parsed as content.
+                if (mMsg.indexOf('Files (') >= 0 ||
+                    mMsg.indexOf('items)') >= 0 ||
                     mMsg.indexOf('bytes)') >= 0 ||
-                    mMsg.indexOf('Total:') >= 0 ||
-                    mMsg.indexOf('[DIR]') >= 0 || 
+                    mMsg.indexOf('[DIR]') >= 0 ||
                     mMsg.indexOf('[FILE]') >= 0 ||
                     mMsg.indexOf('File listing') >= 0 ||
                     mMsg.indexOf('File browse FAILED') >= 0 ||
@@ -1582,9 +1600,10 @@ window.togglePane = function(paneId, btnId) {
                     mMsg.indexOf('Error:') >= 0) {
                   browseLines.push(mMsg);
                 }
-                if (mMsg.indexOf('Total:') >= 0) foundComplete = true;
+                // doneMarker — see comment block above re: ' entries' vs 'Total:'
+                if (mMsg.indexOf(' entries') >= 0) foundComplete = true;
               }
-              
+
               if (foundComplete && browseLines.length > 0) {
                 clearInterval(pollInterval);
                 // Flatten multi-line messages into individual lines before parsing

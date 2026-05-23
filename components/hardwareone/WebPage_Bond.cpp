@@ -7,6 +7,8 @@
 
 #include <Arduino.h>
 #include <LittleFS.h>
+#include <memory>
+#include <vector>
 
 #include "System_User.h"
 #include "System_Utils.h"
@@ -18,6 +20,9 @@
 #include "System_ESPNow_Sensors.h"
 #include "System_Settings.h"
 #include "System_Filesystem.h"
+#include "System_MemUtil.h"       // ps_alloc / AllocPref for batch body buffer
+#include "System_BondedPeer.h"    // BondedPeer:: — unified accessor for the bonded worker (settings/schema sync, cache reads)
+#include "System_SelfDevice.h"    // SelfDevice:: — local MAC / name / uptime / heap accessors
 
 // Forward declarations
 extern void streamPageWithContent(httpd_req_t* req, const String& activePage, const String& username, void (*contentStreamer)(httpd_req_t*, const String&));
@@ -100,6 +105,26 @@ void streamBondInner(httpd_req_t* req) {
 .signal-bars { display: flex; align-items: flex-end; gap: 2px; height: 16px; }
 .signal-bar { width: 4px; background: var(--border); border-radius: 1px; }
 .signal-bar.active { background: #28a745; }
+.bond-progress-card { max-width: 520px; margin: 40px auto; padding: 30px; background: var(--panel-bg); border-radius: 15px; border: 1px solid var(--border); box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+.bond-progress-title { font-size: 1.4em; font-weight: bold; margin-bottom: 5px; color: var(--panel-fg); text-align: center; }
+.bond-progress-sub { color: var(--muted); text-align: center; margin-bottom: 20px; font-size: 0.9em; word-break: break-all; }
+.bond-progress-bar { height: 10px; background: var(--border); border-radius: 5px; overflow: hidden; margin: 20px 0 8px; }
+.bond-progress-fill { height: 100%; background: var(--accent); border-radius: 5px; transition: width 0.6s ease; }
+.bond-progress-pct { text-align: center; font-size: 0.8em; color: var(--muted); margin-bottom: 10px; }
+.bond-progress-steps { margin-top: 10px; }
+.bond-progress-step { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+.bond-progress-step:last-child { border-bottom: none; }
+.bond-step-icon { width: 22px; height: 22px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; font-size: 0.85em; font-weight: bold; box-sizing: border-box; }
+.bond-step-done .bond-step-icon { background: var(--accent); color: #fff; }
+.bond-step-current .bond-step-icon { background: transparent; border: 2px solid var(--border); border-top-color: var(--accent); animation: bondSpin 0.9s linear infinite; }
+.bond-step-pending .bond-step-icon { background: var(--border); color: var(--muted); }
+.bond-step-label { flex: 1; font-size: 0.95em; }
+.bond-step-done .bond-step-label { color: var(--panel-fg); }
+.bond-step-current .bond-step-label { color: var(--panel-fg); font-weight: 500; }
+.bond-step-pending .bond-step-label { color: var(--muted); }
+.bond-progress-hint { margin-top: 16px; padding: 10px 12px; background: var(--warning-bg); border-left: 3px solid var(--warning-accent); border-radius: 4px; font-size: 0.85em; color: var(--warning-fg); }
+.bond-progress-actions { margin-top: 20px; display: flex; justify-content: center; gap: 10px; }
+@keyframes bondSpin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 </style>
 )CSS", HTTPD_RESP_USE_STRLEN);
 
@@ -118,6 +143,10 @@ void streamBondInner(httpd_req_t* req) {
   let refreshInterval = null;
   let lastStatus = null;
   const sensorEverSeen = {};
+  // First time the page sees a not-yet-synced bond on this load. Used to time
+  // the "waiting for peer" hint in the progress overlay. Reset to null once
+  // sync completes so a future drop+reconnect starts a fresh timer.
+  let bondProgressStartMs = null;
   
   function formatUptime(seconds) {
     if (seconds < 60) return seconds + 's';
@@ -144,8 +173,72 @@ void streamBondInner(httpd_req_t* req) {
     html += '</div>';
     return html;
   }
-  
-  function renderDashboard(data) {
+
+  // Bond is "fully synced" once the peer is responding AND we have both its
+  // static capabilities and a live status snapshot. Until then we show a
+  // progress overlay in place of the dashboard so the user never sees the
+  // half-empty card with "pending..." placeholders.
+  function isBondSynced(data) {
+    return !!data.peerOnline
+        && !!data.capabilities
+        && !!(data.peerStatus && data.peerStatus.valid);
+  }
+
+  function renderBondProgress(data, container) {
+    const steps = [
+      { label: 'Bond configured',       done: !!(data.bonded && data.peerConfigured) },
+      { label: 'Peer responding',       done: !!data.peerOnline },
+      { label: 'Capabilities received', done: !!data.capabilities },
+      { label: 'Live status synced',    done: !!(data.peerStatus && data.peerStatus.valid) }
+    ];
+    const doneCount = steps.filter(function(s){return s.done;}).length;
+    const pct = Math.round((doneCount / steps.length) * 100);
+    let currentIdx = -1;
+    for (let i = 0; i < steps.length; i++) {
+      if (!steps[i].done) { currentIdx = i; break; }
+    }
+
+    if (bondProgressStartMs === null) bondProgressStartMs = Date.now();
+    const elapsedMs = Date.now() - bondProgressStartMs;
+    let hint = '';
+    if (elapsedMs > 8000 && !data.peerOnline) {
+      hint = 'Waiting for the bonded peer to respond. Make sure the other device is powered on and within range.';
+    } else if (elapsedMs > 15000 && data.peerOnline && !data.capabilities) {
+      hint = 'Connected, but the peer has not sent its capabilities yet. It may be busy or running older firmware.';
+    } else if (elapsedMs > 20000 && data.capabilities && !(data.peerStatus && data.peerStatus.valid)) {
+      hint = 'Capabilities received. Waiting for the first live status update...';
+    }
+
+    let html = '';
+    html += '<div class="bond-progress-card">';
+    html += '<div class="bond-progress-title">Establishing Bond</div>';
+    html += '<div class="bond-progress-sub">' + (data.peerName || 'Bonded device') + ' &middot; ' + (data.peerMac || '') + '</div>';
+    html += '<div class="bond-progress-bar"><div class="bond-progress-fill" style="width:' + pct + '%"></div></div>';
+    html += '<div class="bond-progress-pct">' + doneCount + ' of ' + steps.length + ' steps complete</div>';
+    html += '<div class="bond-progress-steps">';
+    for (let i = 0; i < steps.length; i++) {
+      const s = steps[i];
+      let cls = 'bond-step-pending';
+      let glyph = '';
+      if (s.done) { cls = 'bond-step-done'; glyph = '&#10003;'; }
+      else if (i === currentIdx) { cls = 'bond-step-current'; }
+      html += '<div class="bond-progress-step ' + cls + '">';
+      html += '<span class="bond-step-icon">' + glyph + '</span>';
+      html += '<span class="bond-step-label">' + s.label + '</span>';
+      html += '</div>';
+    }
+    html += '</div>';
+    if (hint) {
+      html += '<div class="bond-progress-hint">' + hint + '</div>';
+    }
+    html += '<div class="bond-progress-actions">';
+    html += '<button class="btn" onclick="window.unbondDevice()" style="font-size:0.85em;padding:6px 14px">Cancel / Unbond</button>';
+    html += '</div>';
+    html += '</div>';
+    container.innerHTML = html;
+  }
+
+  function renderBondDashboard(data) {
     const container = document.getElementById('remote-content');
     if (!container) return;
     
@@ -201,7 +294,24 @@ void streamBondInner(httpd_req_t* req) {
       window.refreshBondDevices();
       return;
     }
-    
+
+    // Bond is configured but the handshake/sync isn't fully through yet.
+    // Render the progress overlay and re-poll faster than the 5s baseline.
+    if (!isBondSynced(data)) {
+      renderBondProgress(data, container);
+      if (window.__bondProgressTimer) clearTimeout(window.__bondProgressTimer);
+      window.__bondProgressTimer = setTimeout(window.refreshBond, 1200);
+      return;
+    }
+
+    // Fully synced — clear any progress-only state so a future disconnect
+    // starts fresh, and fall through to the normal dashboard render.
+    if (window.__bondProgressTimer) {
+      clearTimeout(window.__bondProgressTimer);
+      window.__bondProgressTimer = null;
+    }
+    bondProgressStartMs = null;
+
     const online = data.peerOnline;
     const statusClass = online ? 'status-online' : 'status-offline';
     const statusText = online ? 'Online' : 'Offline';
@@ -218,10 +328,27 @@ void streamBondInner(httpd_req_t* req) {
     const localRole = data.role === 1 ? 'Master' : 'Worker';
     const remoteRole = data.role === 1 ? 'Worker' : 'Master';
     html += '<div class="remote-description">This device: ' + localRole + ' · Bonded device: ' + (data.peerName || 'Unknown') + ' (' + remoteRole + ')</div>';
-    html += '<div style="margin:8px 0;display:flex;gap:8px;flex-wrap:wrap"><button class="btn" onclick="window.swapRoles()" style="font-size:0.8em;padding:4px 12px">Swap Roles</button><button class="btn" onclick="window.unbondDevice()" style="font-size:0.8em;padding:4px 12px;background:#c0392b;color:#fff;border-color:#c0392b">Unbond</button></div>';
+    html += '<div style="margin:8px 0;display:flex;gap:8px;flex-wrap:wrap"><button class="btn" onclick="window.swapRoles()" style="font-size:0.8em;padding:4px 12px">Swap Roles</button><button class="btn" onclick="window.unbondDevice()" style="font-size:0.8em;padding:4px 12px">Unbond</button></div>';
 
-    // Identity + connection status
+    // Rows are grouped by concern, separated by a thin divider. Each group
+    // emits only the fields whose underlying data is available; if a whole
+    // group has no data it's omitted entirely. A consolidated "pending..."
+    // line appears at the bottom only when both data sources are missing.
+    const hasCaps = !!data.capabilities;
+    const hasPeerStatus = !!(data.peerStatus && data.peerStatus.valid);
+
+    // 1) Specs — identity and static hardware
     html += '<div class="stat-row"><span class="stat-label">MAC Address</span><span class="stat-value">' + (data.peerMac || '—') + '</span></div>';
+    if (hasCaps) {
+      html += '<div class="stat-row"><span class="stat-label">Flash</span><span class="stat-value">' + (data.capabilities.flashMB || '?') + ' MB</span></div>';
+      html += '<div class="stat-row"><span class="stat-label">PSRAM</span><span class="stat-value">' + (data.capabilities.psramMB || '?') + ' MB</span></div>';
+      if (data.capabilities.features) {
+        html += '<div class="stat-row"><span class="stat-label">Features</span><span class="stat-value" style="font-size:0.8em;max-width:60%;text-align:right">' + data.capabilities.features + '</span></div>';
+      }
+    }
+
+    // 2) Status & Time — liveness and uptime metrics
+    html += '<div style="border-top:1px solid var(--panel-border);margin-top:8px;padding-top:8px">';
     html += '<div class="stat-row"><span class="stat-label">Status</span><span class="stat-value">' + statusText + '</span></div>';
     if (online && data.lastHeartbeatAgeSec !== undefined) {
       html += '<div class="stat-row"><span class="stat-label">Last Seen</span><span class="stat-value">' + data.lastHeartbeatAgeSec + 's ago</span></div>';
@@ -229,23 +356,40 @@ void streamBondInner(httpd_req_t* req) {
     if (data.peerUptime !== undefined) {
       html += '<div class="stat-row"><span class="stat-label">Peer Uptime</span><span class="stat-value">' + formatUptime(data.peerUptime) + '</span></div>';
     }
+    if (hasPeerStatus) {
+      html += '<div class="stat-row"><span class="stat-label">Status Age</span><span class="stat-value">' + data.peerStatus.ageSec + 's ago</span></div>';
+    }
+    html += '</div>';
 
-    // Hardware + capabilities of the bonded device (merged from the old 2nd card)
-    if (data.capabilities) {
+    // 3) Network — WiFi state + active services
+    const hasNetwork = hasPeerStatus || (hasCaps && data.capabilities.services);
+    if (hasNetwork) {
       html += '<div style="border-top:1px solid var(--panel-border);margin-top:8px;padding-top:8px">';
-      html += '<div class="stat-row"><span class="stat-label">Flash</span><span class="stat-value">' + (data.capabilities.flashMB || '?') + ' MB</span></div>';
-      html += '<div class="stat-row"><span class="stat-label">PSRAM</span><span class="stat-value">' + (data.capabilities.psramMB || '?') + ' MB</span></div>';
-      if (data.capabilities.features) {
-        html += '<div class="stat-row"><span class="stat-label">Features</span><span class="stat-value" style="font-size:0.8em;max-width:60%;text-align:right">' + data.capabilities.features + '</span></div>';
+      if (hasPeerStatus) {
+        html += '<div class="stat-row"><span class="stat-label">WiFi</span><span class="stat-value">' + (data.peerStatus.wifiConnected ? 'Connected' : 'Disconnected') + '</span></div>';
       }
-      if (data.capabilities.services) {
+      if (hasCaps && data.capabilities.services) {
         html += '<div class="stat-row"><span class="stat-label">Services</span><span class="stat-value" style="font-size:0.8em;max-width:60%;text-align:right">' + data.capabilities.services + '</span></div>';
       }
+      html += '</div>';
+    }
+
+    // 4) Memory — runtime heap stats
+    if (hasPeerStatus) {
+      html += '<div style="border-top:1px solid var(--panel-border);margin-top:8px;padding-top:8px">';
+      html += '<div class="stat-row"><span class="stat-label">Free Heap</span><span class="stat-value">' + Math.round(data.peerStatus.freeHeap / 1024) + ' KB</span></div>';
+      html += '<div class="stat-row"><span class="stat-label">Min Free Heap</span><span class="stat-value">' + Math.round(data.peerStatus.minFreeHeap / 1024) + ' KB</span></div>';
+      html += '</div>';
+    }
+
+    // 5) I2C Sensors — capability-gated subgrid (kept inside capabilities check)
+    if (hasCaps) {
       const capSensorMask = data.capabilities.sensorMask || 0;
       const connected = data.sensorConnected || {};
       const rDefs = [{m:0x01,n:'Thermal',k:'thermal'},{m:0x02,n:'ToF',k:'tof'},{m:0x04,n:'IMU',k:'imu'},{m:0x08,n:'Gamepad',k:'gamepad'},{m:0x10,n:'APDS',k:'apds'},{m:0x20,n:'GPS',k:'gps'},{m:0x40,n:'RTC',k:'rtc'},{m:0x80,n:'Presence',k:'presence'}];
       const rRows = rDefs.filter(function(d){return capSensorMask & d.m;});
       if (rRows.length > 0) {
+        html += '<div style="border-top:1px solid var(--panel-border);margin-top:8px;padding-top:8px">';
         html += '<div class="stat-row"><span class="stat-label">I2C Sensors</span></div>';
         html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:2px 8px;margin:2px 0 6px 0">';
         for (const d of rRows) {
@@ -256,21 +400,17 @@ void streamBondInner(httpd_req_t* req) {
           html += '<span style="text-align:right">' + badge + '</span>';
         }
         html += '</div>';
+        html += '</div>';
       }
-      html += '</div>';
-    } else {
-      html += '<div style="border-top:1px solid var(--panel-border);margin-top:8px;padding-top:8px;text-align:center;font-size:0.85em;color:var(--panel-fg);opacity:0.6">Capabilities pending...</div>';
     }
 
-    // Live status from the bonded device's periodic poll
-    if (data.peerStatus && data.peerStatus.valid) {
-      html += '<div style="border-top:1px solid var(--panel-border);margin-top:8px;padding-top:8px">';
-      html += '<div class="stat-row"><span class="stat-label">Free Heap</span><span class="stat-value">' + Math.round(data.peerStatus.freeHeap / 1024) + ' KB</span></div>';
-      html += '<div class="stat-row"><span class="stat-label">Min Free Heap</span><span class="stat-value">' + Math.round(data.peerStatus.minFreeHeap / 1024) + ' KB</span></div>';
-      html += '<div class="stat-row"><span class="stat-label">WiFi</span><span class="stat-value">' + (data.peerStatus.wifiConnected ? 'Connected' : 'Disconnected') + '</span></div>';
-      html += '<div class="stat-row"><span class="stat-label">Status Age</span><span class="stat-value">' + data.peerStatus.ageSec + 's ago</span></div>';
-      html += '</div>';
-    } else {
+    // Pending hints (only when underlying data is genuinely missing — avoids
+    // empty/duplicate "pending" spam when one source is present and the other isn't)
+    if (!hasCaps && !hasPeerStatus) {
+      html += '<div style="border-top:1px solid var(--panel-border);margin-top:8px;padding-top:8px;text-align:center;font-size:0.85em;color:var(--panel-fg);opacity:0.6">Specs & live status pending...</div>';
+    } else if (!hasCaps) {
+      html += '<div style="border-top:1px solid var(--panel-border);margin-top:8px;padding-top:8px;text-align:center;font-size:0.85em;color:var(--panel-fg);opacity:0.6">Capabilities pending...</div>';
+    } else if (!hasPeerStatus) {
       html += '<div style="border-top:1px solid var(--panel-border);margin-top:8px;padding-top:8px;text-align:center;font-size:0.85em;color:var(--panel-fg);opacity:0.6">Live status pending...</div>';
     }
 
@@ -386,18 +526,27 @@ void streamBondInner(httpd_req_t* req) {
     if (data.localCapabilities) {
       html += '<div class="remote-card">';
       html += '<div class="remote-title">This Device</div>';
+      // Specs
       html += '<div class="stat-row"><span class="stat-label">Flash</span><span class="stat-value">' + (data.localCapabilities.flashMB || '?') + ' MB</span></div>';
       const localPsram = data.localCapabilities.psramKB ? (data.localCapabilities.psramKB / 1024).toFixed(1) : (data.localCapabilities.psramMB || '?');
       html += '<div class="stat-row"><span class="stat-label">PSRAM</span><span class="stat-value">' + localPsram + ' MB</span></div>';
       if (data.localCapabilities.features) {
         html += '<div class="stat-row"><span class="stat-label">Features</span><span class="stat-value" style="font-size:0.8em;max-width:60%;text-align:right">' + data.localCapabilities.features + '</span></div>';
       }
+      // Memory (placed above I2C sensors so heap stats pair naturally with the
+      // specs above; mirrors the Bonded Device card grouping).
+      html += '<div style="border-top:1px solid var(--panel-border);margin-top:8px;padding-top:8px">';
+      html += '<div class="stat-row"><span class="stat-label">Free Heap</span><span class="stat-value">' + Math.round(data.localCapabilities.freeHeap / 1024) + ' KB</span></div>';
+      html += '<div class="stat-row"><span class="stat-label">Min Free Heap</span><span class="stat-value">' + Math.round(data.localCapabilities.minFreeHeap / 1024) + ' KB</span></div>';
+      html += '</div>';
+      // I2C Sensors
       const localSensorMask = data.localCapabilities.sensorMask || 0;
       if (localSensorMask) {
         const lConn = data.localCapabilities.sensorConnectedMask || 0;
         const lDefs = [{m:0x01,n:'Thermal'},{m:0x02,n:'ToF'},{m:0x04,n:'IMU'},{m:0x08,n:'Gamepad'},{m:0x10,n:'APDS'},{m:0x20,n:'GPS'},{m:0x40,n:'RTC'},{m:0x80,n:'Presence'},{m:0x100,n:'FM Radio'}];
         const lRows = lDefs.filter(function(d){return localSensorMask & d.m;});
         if (lRows.length > 0) {
+          html += '<div style="border-top:1px solid var(--panel-border);margin-top:8px;padding-top:8px">';
           html += '<div class="stat-row"><span class="stat-label">I2C Sensors</span></div>';
           html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:2px 8px;margin:2px 0 6px 0">';
           for (const d of lRows) {
@@ -406,12 +555,9 @@ void streamBondInner(httpd_req_t* req) {
             html += '<span style="font-size:0.78em;font-weight:600;color:' + (on ? '#2ecc71' : '#e74c3c') + ';text-align:right">' + (on ? 'ON' : 'OFF') + '</span>';
           }
           html += '</div>';
+          html += '</div>';
         }
       }
-      html += '<div style="border-top:1px solid var(--panel-border);margin-top:8px;padding-top:8px">';
-      html += '<div class="stat-row"><span class="stat-label">Free Heap</span><span class="stat-value">' + Math.round(data.localCapabilities.freeHeap / 1024) + ' KB</span></div>';
-      html += '<div class="stat-row"><span class="stat-label">Min Free Heap</span><span class="stat-value">' + Math.round(data.localCapabilities.minFreeHeap / 1024) + ' KB</span></div>';
-      html += '</div>';
       html += '</div>';
     }
     
@@ -455,7 +601,7 @@ void streamBondInner(httpd_req_t* req) {
           _dbg: {synced: data._dbg_synced, capValid: data._dbg_capValid, capSent: data._dbg_capSent, statusValid: data._dbg_statusValid}
         }));
         lastStatus = data;
-        renderDashboard(data);
+        renderBondDashboard(data);
       })
       .catch(e => {
         console.error('[Bond] Status fetch error:', e);
@@ -766,6 +912,7 @@ void streamBondInner(httpd_req_t* req) {
   // Cleanup on page unload
   window.addEventListener('beforeunload', function() {
     if (refreshInterval) clearInterval(refreshInterval);
+    if (window.__bondProgressTimer) { clearTimeout(window.__bondProgressTimer); window.__bondProgressTimer = null; }
     if (window.__es) { window.__es.close(); window.__es = null; }
   });
 })();
@@ -782,9 +929,7 @@ static void streamBondContent(httpd_req_t* req, const String& username) {
 }
 
 static esp_err_t handleBondPage(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
-  
+  WEB_AUTH_OR_RETURN(req, ctx);
   streamPageWithContent(req, "bond", ctx.user, streamBondContent);
   return ESP_OK;
 }
@@ -794,30 +939,24 @@ static esp_err_t handleBondPage(httpd_req_t* req) {
 // =============================================================================
 
 static esp_err_t handleBondStatus(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  
-  if (!tgRequireAuth(ctx)) return ESP_OK;
-  
-  httpd_resp_set_type(req, "application/json");
-  
+  WEB_AUTH_JSON_OR_RETURN(req, ctx);
+
   // Check if ESP-NOW is initialized
   bool espnowEnabled = gEspNow && gEspNow->initialized;
   
   bool bonded = gSettings.bondModeEnabled;
-  bool peerConfigured = false;
   uint8_t peerMac[6] = {0};
   char macStr[18] = "00:00:00:00:00:00";
-  if (bonded && gSettings.bondPeerMac.length() > 0 && parseMacAddress(gSettings.bondPeerMac, peerMac)) {
-    peerConfigured = true;
+  // peerMacBytes() also enforces bondModeEnabled — same precondition as the
+  // old inline check, just routed through the facade.
+  bool peerConfigured = BondedPeer::peerMacBytes(peerMac);
+  if (peerConfigured) {
     formatMacAddr(peerMac, macStr, sizeof(macStr));
   }
 
   // Local STA MAC — exposed so the Files page (master) can ask the bonded peer
   // to send a file back to us: "espnow sendfile <localMac> <path>".
-  uint8_t localMacBytes[6] = {0};
-  esp_wifi_get_mac(WIFI_IF_STA, localMacBytes);
-  char localMacStr[18] = "00:00:00:00:00:00";
-  formatMacAddr(localMacBytes, localMacStr, sizeof(localMacStr));
+  String localMacStr = SelfDevice::macString();
 
   // Get peer name: prefer capability cache, fall back to device registry
   String peerNameStr;
@@ -862,7 +1001,7 @@ static esp_err_t handleBondStatus(httpd_req_t* req) {
   webBondSendChunkf(req, "\"peerConfigured\":%s,", peerConfigured ? "true" : "false");
   webBondSendChunkf(req, "\"peerOnline\":%s,", peerOnline ? "true" : "false");
   webBondSendChunkf(req, "\"peerMac\":\"%s\",", macStr);
-  webBondSendChunkf(req, "\"localMac\":\"%s\",", localMacStr);
+  webBondSendChunkf(req, "\"localMac\":\"%s\",", localMacStr.c_str());
   webBondSendChunkf(req, "\"peerName\":\"%s\",", peerName);
   webBondSendChunkf(req, "\"role\":%d,", gSettings.bondRole);
   webBondSendChunkf(req, "\"lastHeartbeat\":%lu,", lastHb);
@@ -872,7 +1011,15 @@ static esp_err_t handleBondStatus(httpd_req_t* req) {
   webBondSendChunkf(req, "\"rssi\":%d,", rssi);
   webBondSendChunkf(req, "\"rssiLast\":%d,", rssiLast);
   webBondSendChunkf(req, "\"peerUptime\":%lu,", (unsigned long)peerUptime);
-  
+
+  // peerSettingsHash = CRC32 the peer reported in its most recent heartbeat,
+  // matching CRC32(generateDeviceSettings()) on their side. The bonded
+  // settings panel captures this value at form-load time as formLoadedHash;
+  // subsequent polls compare against it to detect that the worker has
+  // changed settings since the user loaded the form.
+  uint32_t peerSettingsHash = gEspNow ? gEspNow->bondPeerSettingsHash : 0;
+  webBondSendChunkf(req, "\"peerSettingsHash\":%lu,", (unsigned long)peerSettingsHash);
+
   // Debug fields for diagnosing bond sync issues
   webBondSendChunkf(req, "\"_dbg_synced\":%s,", isBondSynced() ? "true" : "false");
   webBondSendChunkf(req, "\"_dbg_capValid\":%s,", (gEspNow && gEspNow->lastRemoteCapValid) ? "true" : "false");
@@ -1067,11 +1214,7 @@ static esp_err_t handleBondStatus(httpd_req_t* req) {
 extern bool executeUnifiedWebCommand(httpd_req_t* req, AuthContext& ctx, const String& cmd, String& out);
 
 static esp_err_t handleBondStream(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-
-  if (!tgRequireAuth(ctx)) return ESP_OK;
-
-  httpd_resp_set_type(req, "application/json");
+  WEB_AUTH_JSON_OR_RETURN(req, ctx);
 
   // Guard: only allow streaming control when fully synced
   if (!isBondSynced()) {
@@ -1165,11 +1308,7 @@ static esp_err_t handleBondStream(httpd_req_t* req) {
 extern bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize);
 
 static esp_err_t handleBondExec(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  
-  if (!tgRequireAuth(ctx)) return ESP_OK;
-  
-  httpd_resp_set_type(req, "application/json");
+  WEB_AUTH_JSON_OR_RETURN(req, ctx);
   
   // Parse POST body
   char buf[512];
@@ -1243,11 +1382,8 @@ static esp_err_t handleBondExec(httpd_req_t* req) {
 // =============================================================================
 
 static esp_err_t handleBondRole(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
-  
-  httpd_resp_set_type(req, "application/json");
-  
+  WEB_AUTH_JSON_OR_RETURN(req, ctx);
+
   if (!gSettings.bondModeEnabled) {
     httpd_resp_send(req, "{\"success\":false,\"error\":\"Bond mode not enabled\"}", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
@@ -1287,15 +1423,208 @@ static esp_err_t handleBondRole(httpd_req_t* req) {
 }
 
 // =============================================================================
+// API: Bond CLI Batch — run multiple commands on the bonded peer in sequence
+// =============================================================================
+//
+// Mirrors /api/cli/batch but routes each command through the bond session by
+// prefixing with "remote:" before handing it to executeUnifiedWebCommand. Body
+// is JSON: {"commands":["beginwrite","tz 480","savesettings"]}. Response is
+// {"ok":true,"count":N,"results":[...]} with one entry per command (same order)
+// so the client can surface per-command errors. Used by the bonded-device
+// settings panel to apply edits to the worker in a single round.
+
+static esp_err_t handleBondCliBatch(httpd_req_t* req) {
+  WEB_AUTH_JSON_OR_RETURN(req, ctx);
+
+  if (!gSettings.bondModeEnabled || !isBondMaster()) {
+    httpd_resp_send(req, "{\"ok\":false,\"error\":\"Bonded master required\"}", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
+  if (req->content_len == 0 || req->content_len > 32768) {
+    httpd_resp_send(req, "{\"ok\":false,\"error\":\"Invalid content length\"}", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
+
+  std::unique_ptr<char, void(*)(void*)> buf(
+    (char*)ps_alloc(req->content_len + 1, AllocPref::PreferPSRAM, "http.bond.batch"), free);
+  if (!buf) {
+    httpd_resp_send(req, "{\"ok\":false,\"error\":\"OOM\"}", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
+  int received = 0;
+  while (received < (int)req->content_len) {
+    int r = httpd_req_recv(req, buf.get() + received, req->content_len - received);
+    if (r <= 0) break;
+    received += r;
+  }
+  buf.get()[received] = '\0';
+
+  PSRAM_JSON_DOC(doc);
+  DeserializationError jerr = deserializeJson(doc, buf.get(), received);
+  if (jerr || !doc["commands"].is<JsonArray>()) {
+    httpd_resp_send(req, "{\"ok\":false,\"error\":\"Expected {\\\"commands\\\":[...]} JSON body\"}", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
+
+  std::vector<String> results;
+  int count = 0;
+  for (JsonVariant v : doc["commands"].as<JsonArray>()) {
+    String cmd = v.as<String>();
+    cmd.trim();
+    if (cmd.length() == 0) { results.push_back(""); continue; }
+
+    // Route through the bond session — same "remote:" prefix that
+    // executeUnifiedWebCommand uses in handleBondExec / handleBondRole.
+    String remoteCmd = "remote:";
+    remoteCmd += cmd;
+    String out;
+    bool ok = executeUnifiedWebCommand(req, ctx, remoteCmd, out);
+    if (!ok && out.length() == 0) out = "command failed";
+    results.push_back(out);
+    count++;
+
+    if (server == NULL) break;
+    vTaskDelay(pdMS_TO_TICKS(2));
+  }
+
+  if (server == NULL) return ESP_OK;
+
+  PSRAM_JSON_DOC(respDoc);
+  respDoc["ok"] = true;
+  respDoc["count"] = count;
+  JsonArray arr = respDoc["results"].to<JsonArray>();
+  for (const String& r : results) arr.add(r);
+  String respStr;
+  serializeJson(respDoc, respStr);
+  httpd_resp_sendstr(req, respStr.c_str());
+  return ESP_OK;
+}
+
+// =============================================================================
+// API: Bond Settings Sync — force a fresh resync from the worker
+// =============================================================================
+//
+// Resets bondSettingsReceived so the sync tick will re-request the worker's
+// settings.json. Polls bondSettingsReceived for up to ~6s (sync tick fires
+// roughly every 1s + the file transfer takes ~1s for a typical settings
+// payload). Returns {"ok":true,"elapsedMs":N} on success, or
+// {"ok":false,"error":"..."} on timeout / preconditions. The client should
+// call this before reading the cache so the editor never starts on stale data.
+
+static esp_err_t handleBondSettingsSync(httpd_req_t* req) {
+  WEB_AUTH_JSON_OR_RETURN(req, ctx);
+
+  uint32_t elapsedMs = 0;
+  if (!BondedPeer::requestSettingsSync(6000, &elapsedMs)) {
+    char body[160];
+    snprintf(body, sizeof(body), "{\"ok\":false,\"error\":\"%s\"}", BondedPeer::lastError());
+    httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
+
+  // Return the CRC32 of the bytes we just cached. The client uses this as
+  // formLoadedHash — subsequent polls of /api/bond/status compare the peer's
+  // live hash to this value to detect that the worker has changed settings
+  // since the form was populated.
+  char body[128];
+  snprintf(body, sizeof(body), "{\"ok\":true,\"elapsedMs\":%u,\"peerSettingsHash\":%lu}",
+           (unsigned)elapsedMs, (unsigned long)BondedPeer::cachedSettingsHash());
+  httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
+  return ESP_OK;
+}
+
+// =============================================================================
+// API: Bond Settings Schema — serve cached schema + trigger schema sync
+// =============================================================================
+//
+// Schema transport mirrors the settings transport (see handleBondSettings /
+// handleBondSettingsSync): the worker writes its schema JSON to a temp file
+// under /system/espnow/this_device/_schema_out.json, ships it via the V4
+// file pipeline, master receives in v4h_file_end → processBondSchema which
+// caches it at /system/espnow/peers/<MAC>/schema.json and sets
+// gEspNow->bondSchemaReceived.
+//
+// Why a file pipeline instead of a sync command response: the schema is
+// ~8 KB and the unified-command capture buffer caps at 4 KB. The file
+// pipeline chunks transparently. Same reason settings.json moves this way.
+
+// GET /api/bond/settings/schema — read the cached schema file from disk.
+// Returns the raw JSON the worker emitted, byte-for-byte. Callers should
+// hit /api/bond/settings/schema/sync first if the cache may be stale.
+static esp_err_t handleBondSettingsSchema(httpd_req_t* req) {
+  WEB_AUTH_JSON_OR_RETURN(req, ctx);
+
+  String cached = BondedPeer::readCachedSchemaJson();
+  if (cached.length() == 0) {
+    char body[160];
+    snprintf(body, sizeof(body), "{\"error\":\"%s\"}", BondedPeer::lastError());
+    httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
+  httpd_resp_send(req, cached.c_str(), cached.length());
+  return ESP_OK;
+}
+
+// POST /api/bond/settings/schema/sync — clear bondSchemaReceived, send
+// SCHEMA_REQ over bond, poll for completion. Mirrors handleBondSettingsSync
+// exactly, just with a different opcode + completion flag. ~6s timeout
+// covers the ~1–2s typical file transfer plus retry margin.
+static esp_err_t handleBondSettingsSchemaSync(httpd_req_t* req) {
+  WEB_AUTH_JSON_OR_RETURN(req, ctx);
+
+  uint32_t elapsedMs = 0;
+  if (!BondedPeer::requestSchemaSync(6000, &elapsedMs)) {
+    char body[160];
+    snprintf(body, sizeof(body), "{\"ok\":false,\"error\":\"%s\"}", BondedPeer::lastError());
+    httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
+
+  char body[96];
+  snprintf(body, sizeof(body), "{\"ok\":true,\"elapsedMs\":%u}", (unsigned)elapsedMs);
+  httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
+  return ESP_OK;
+}
+
+// =============================================================================
+// API: Bond Settings — serve the cached worker settings.json
+// =============================================================================
+//
+// processBondSettings() writes the worker's settings.json to
+// /system/espnow/peers/<MAC>/settings.json on every successful sync. This
+// endpoint hands it back wrapped in {settings:{...}} to match the local
+// /api/settings shape, so SchemaPanel can use the same response handling
+// for both targets. Callers should hit /api/bond/settings/sync first if
+// they want a freshly-pulled view; this endpoint is just the on-disk read.
+
+static esp_err_t handleBondSettings(httpd_req_t* req) {
+  WEB_AUTH_JSON_OR_RETURN(req, ctx);
+
+  String cached = BondedPeer::readCachedSettingsJson();
+  if (cached.length() == 0) {
+    char body[160];
+    snprintf(body, sizeof(body), "{\"error\":\"%s\"}", BondedPeer::lastError());
+    httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
+
+  // Wrap raw worker settings JSON in {"settings":{...}} so the response
+  // mirrors /api/settings. Chunked so we don't have to grow a big String
+  // just to prepend three characters.
+  webBondSendChunk(req, "{\"settings\":");
+  webBondSendChunk(req, cached.c_str());
+  webBondSendChunk(req, "}");
+  httpd_resp_send_chunk(req, NULL, 0);
+  return ESP_OK;
+}
+
+// =============================================================================
 // API: Get Paired Devices
 // =============================================================================
 
 static esp_err_t handleBondPairedDevices(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
-  
-  httpd_resp_set_type(req, "application/json");
-  
+  WEB_AUTH_JSON_OR_RETURN(req, ctx);
+
   if (!gEspNow || gEspNow->deviceCount == 0) {
     httpd_resp_send(req, "{\"devices\":[]}", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
@@ -1358,7 +1687,22 @@ void registerBondHandlers(httpd_handle_t server) {
   
   static httpd_uri_t bondRole = { .uri = "/api/bond/role", .method = HTTP_POST, .handler = handleBondRole, .user_ctx = NULL };
   httpd_register_uri_handler(server, &bondRole);
-  
+
+  static httpd_uri_t bondCliBatch = { .uri = "/api/bond/cli/batch", .method = HTTP_POST, .handler = handleBondCliBatch, .user_ctx = NULL };
+  httpd_register_uri_handler(server, &bondCliBatch);
+
+  static httpd_uri_t bondSettingsSync = { .uri = "/api/bond/settings/sync", .method = HTTP_POST, .handler = handleBondSettingsSync, .user_ctx = NULL };
+  httpd_register_uri_handler(server, &bondSettingsSync);
+
+  static httpd_uri_t bondSettingsSchema = { .uri = "/api/bond/settings/schema", .method = HTTP_GET, .handler = handleBondSettingsSchema, .user_ctx = NULL };
+  httpd_register_uri_handler(server, &bondSettingsSchema);
+
+  static httpd_uri_t bondSettingsSchemaSync = { .uri = "/api/bond/settings/schema/sync", .method = HTTP_POST, .handler = handleBondSettingsSchemaSync, .user_ctx = NULL };
+  httpd_register_uri_handler(server, &bondSettingsSchemaSync);
+
+  static httpd_uri_t bondSettings = { .uri = "/api/bond/settings", .method = HTTP_GET, .handler = handleBondSettings, .user_ctx = NULL };
+  httpd_register_uri_handler(server, &bondSettings);
+
   static httpd_uri_t bondPairedDevices = { .uri = "/api/bond/paired-devices", .method = HTTP_GET, .handler = handleBondPairedDevices, .user_ctx = NULL };
   httpd_register_uri_handler(server, &bondPairedDevices);
 #else

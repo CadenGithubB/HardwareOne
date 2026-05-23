@@ -1040,6 +1040,8 @@ struct SettingEntry {
   bool isSecret = false;      // If true: encrypt on disk, exclude from web API, blank input = unchanged
   const char* group = nullptr;  // Sub-section group for JSON nesting + UI grouping (nullptr = ungrouped)
   const char* cmdKey = nullptr; // CLI command name override (nullptr = use jsonKey as command)
+  bool readOnly = false;      // If true: UI renders as display-only text (no input). For system-managed
+                              // counters (crashCount, lastResetReason, etc.) that the user reads but never edits.
 };
 
 // Connection check callback - returns true if module is available/connected
@@ -1085,6 +1087,13 @@ void printSettingsModuleSummary();
 // Generic setting command handler - parses value and updates setting
 // Returns result message
 const char* handleSettingCommand(const SettingEntry* entry, const String& argsInput);
+
+// Build the settings schema JSON into a JsonDocument. Shared by the local
+// /api/settings/schema web handler (in WebServer_Server.cpp) and the worker's
+// sendBondSchema() which serializes this to a file for the bond transport
+// (in System_ESPNow.cpp). Two consumers, one source of truth — the master
+// and worker emit identical JSON shapes by construction.
+void buildSettingsSchemaJson(JsonDocument& doc);
 
 // Persist current settings to JSON file
 bool writeSettingsJson();

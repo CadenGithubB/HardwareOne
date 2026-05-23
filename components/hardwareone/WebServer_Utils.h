@@ -62,6 +62,15 @@ inline esp_err_t sendJsonResponse(httpd_req_t* req, const char* body, ssize_t le
   AuthContext ctx = makeWebAuthCtx(req); \
   if (!tgRequireAuth(ctx)) return ESP_OK
 
+// JSON-response variant: auth + set Content-Type: application/json in one
+// step. Equivalent to WEB_AUTH_OR_RETURN followed by httpd_resp_set_type,
+// which is the prologue ~30 JSON-returning handlers share. Use this when
+// the handler emits JSON (which is most /api/* endpoints).
+#define WEB_AUTH_JSON_OR_RETURN(req, ctx) \
+  AuthContext ctx = makeWebAuthCtx(req); \
+  if (!tgRequireAuth(ctx)) return ESP_OK; \
+  httpd_resp_set_type(req, "application/json")
+
 // ============================================================================
 // HTTP Request Utilities
 // ============================================================================
@@ -167,6 +176,165 @@ inline String getFileBrowserScript() {
 // Generic File Explorer Utility
 // Creates an interactive file explorer with folder navigation
 (function() {
+  // ==========================================================================
+  // window.FileBrowser — shared rendering helpers used by BOTH the local file
+  // explorer (window.createFileExplorer below) and the bonded-device file
+  // browser (window.BondFs.renderExplorer further down). Keep all icon-mapping,
+  // sizing, and per-file rendering helpers here so the two views stay in
+  // lockstep — adding a new file extension or tweaking icon styling here
+  // updates both renderers automatically.
+  // ==========================================================================
+  var iconLoadFailed = {};
+
+  window.FileBrowser = {
+    // Map a filename extension (or folder flag) to the icon name served by
+    // /api/icon. Unknown extensions fall back to the generic 'file' icon.
+    iconName: function(filename, isDir) {
+      if (isDir) return 'folder';
+      var ext = (filename || '').toLowerCase().split('.').pop();
+      var map = {
+        // code
+        'js':'file_code','ts':'file_code','jsx':'file_code','tsx':'file_code',
+        'cpp':'file_code','h':'file_code','hpp':'file_code','c':'file_code','ino':'file_code',
+        'py':'file_code','sh':'file_code',
+        // web documents
+        'html':'file_code','htm':'file_code','css':'file_code',
+        // structured data
+        'json':'file_json',
+        // text
+        'txt':'file_text','log':'file_text','md':'file_text',
+        // images
+        'jpg':'file_image','jpeg':'file_image','png':'file_image','gif':'file_image',
+        'bmp':'file_image','svg':'file_image','ico':'file_image',
+        // documents
+        'pdf':'file_pdf',
+        // archives
+        'zip':'file_zip','gz':'file_zip','tar':'file_zip','7z':'file_zip',
+        // binaries
+        'bin':'file_bin','dat':'file_bin'
+      };
+      return map[ext] || 'file';
+    },
+
+    // Fallback text used when /api/icon can't serve the image.
+    iconFallback: function(isDir) {
+      return isDir ? '[DIR]' : '[FILE]';
+    },
+
+    // 48×48 themed file/folder icon. iconLoadFailed caches per-name 404s so we
+    // don't keep refetching missing icons within the same page session.
+    renderIcon: function(iconName, fallbackText) {
+      function dbgIcons(){try{return !!(window.localStorage&&window.localStorage.getItem('hwDebugIcons')==='1')}catch(_){return false}}
+      function logIcons(){try{if(dbgIcons())console.log.apply(console,arguments)}catch(_){}}
+      if (iconLoadFailed[iconName]) {
+        logIcons('[icons] cached-fail icon=', iconName, 'fallback=', fallbackText);
+        return '<span style="display:inline-block;width:32px;font-family:monospace;color:var(--muted);font-size:0.85em;text-align:center;">' + fallbackText + '</span>';
+      }
+      var imgId = 'icon_' + iconName + '_' + Math.random().toString(36).substr(2, 9);
+      var iconUrl = '/api/icon?name=' + iconName;
+      logIcons('[icons] render icon=', iconName, 'url=', iconUrl);
+      var html = '<img id="' + imgId + '" src="' + iconUrl + '" width="48" height="48" style="vertical-align:middle;image-rendering:auto;display:inline-block;background:var(--icon-bg);border-radius:6px;padding:4px;box-sizing:border-box;filter:var(--icon-filter);" ';
+      html += 'onerror="this.style.display=\'none\';this.nextSibling.style.display=\'inline-block\';" />';
+      html += '<span style="display:none;width:48px;font-family:monospace;color:var(--muted);font-size:0.85em;text-align:center;">' + fallbackText + '</span>';
+      if (dbgIcons()) {
+        setTimeout(function(){
+          try {
+            var img = document.getElementById(imgId);
+            if (!img) { console.warn('[icons] element not found id=', imgId, 'icon=', iconName); return; }
+            img.addEventListener('load', function(){ console.log('[icons] load ok', iconName, 'id', imgId); });
+            img.addEventListener('error', function(){
+              console.warn('[icons] load fail', iconName, 'url', iconUrl);
+              iconLoadFailed[iconName] = true;
+            });
+          } catch (e) {
+            try { console.warn('[icons] attach listeners failed', e); } catch(_) {}
+          }
+        }, 0);
+      }
+      return html;
+    },
+
+    // 20×20 action-button icon (Download / Edit / Delete buttons).
+    renderActionIcon: function(iconName, fallbackText) {
+      return '<img src="/api/icon?name=' + iconName + '" width="20" height="20" style="vertical-align:middle;filter:var(--icon-filter);" onerror="this.style.display=\'none\';this.nextSibling.style.display=\'inline\'"><span style="display:none;font-size:0.8em;">' + fallbackText + '</span>';
+    },
+
+    // Convert a raw size string ("107 bytes") into a friendlier form
+    // ("107 B" / "1.50 KB" / "2.30 MB"). Folder meta strings ("10 items") and
+    // already-formatted sizes pass through unchanged.
+    formatSize: function(meta, isDir) {
+      var s = String(meta || '');
+      if (isDir) return s;
+      // Only reformat when the input is clearly a raw byte count — either the
+      // "<N> bytes" form the local API returns, or a bare integer.
+      if (s.indexOf('bytes') < 0 && !/^\d+$/.test(s)) return s;
+      var m = s.match(/(\d+)/);
+      if (!m) return s;
+      var bytes = parseInt(m[1], 10);
+      if (bytes >= 1048576) return (bytes / 1048576).toFixed(2) + ' MB';
+      if (bytes >= 1024) return (bytes / 1024).toFixed(2) + ' KB';
+      return bytes + ' B';
+    },
+
+    // Build the breadcrumb inner HTML ("[Root] / system / users") for either
+    // renderer. The caller decides which container wraps it. `navigateExpr`
+    // is a function(targetPath) → JS expression string (e.g. for the local
+    // explorer that's `fnId + "Navigate('" + p + "')"`; for BondFs it's
+    // `"window['" + navName + "']('" + p + "')"`). opts.lockToPath, when set,
+    // pins the displayed root to a sub-folder and disables navigation above it
+    // (used by file-pickers that lock to /system/automations etc.).
+    breadcrumbHtml: function(currentPath, navigateExpr, opts) {
+      opts = opts || {};
+      var parts = String(currentPath || '/').split('/').filter(function(p){ return p.length > 0; });
+      var html = '';
+      if (opts.lockToPath) {
+        var lockedParts = opts.lockToPath.split('/').filter(function(p){ return p.length > 0; });
+        var displayRoot = lockedParts.length > 0 ? lockedParts[lockedParts.length - 1] : 'Root';
+        html = '<span style="color:var(--muted);">[' + displayRoot + ']</span>';
+      } else {
+        html = '<span style="cursor:pointer;color:var(--link);" onclick="' + navigateExpr('/') + '">[Root]</span>';
+      }
+      var path = '';
+      var skipCount = opts.lockToPath
+        ? opts.lockToPath.split('/').filter(function(p){ return p.length > 0; }).length
+        : 0;
+      parts.forEach(function(part, idx){
+        if (idx < skipCount) return;
+        path += '/' + part;
+        html += ' <span style="color:var(--muted);">/</span> ';
+        html += '<span style="cursor:pointer;color:var(--link);" onclick="' + navigateExpr(path) + '">' + part + '</span>';
+      });
+      return html;
+    },
+
+    // Build one full file/folder row. Both renderers emitted the same outer
+    // <div> + name span + size span + optional action-buttons span — this
+    // collapses ~15 lines of duplicated layout into a single call. The caller
+    // pre-builds `actionsHtml` because the action set is renderer-specific
+    // (local uses perms + mode; bond uses a fileActions[] array).
+    //
+    // Required: name, isDir, sizeInfo, iconName, iconFallback
+    // Optional: clickExpr (empty = non-clickable name), hoverable (default true),
+    //           actionsHtml (default '')
+    rowHtml: function(o) {
+      var hoverable = (o.hoverable !== false);
+      var cursor = o.clickExpr ? 'pointer' : 'default';
+      var bg = 'var(--panel-bg)';
+      var hover = hoverable
+        ? ' onmouseover="this.style.background=\'var(--crumb-bg)\'" onmouseout="this.style.background=\'' + bg + '\'"'
+        : '';
+      var h = '';
+      h += '<div style="padding:8px 12px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;background:' + bg + ';"' + hover + '>';
+      h += '<span style="flex:1;color:var(--panel-fg);font-size:0.95em;cursor:' + cursor + ';display:flex;align-items:center;gap:8px;"';
+      if (o.clickExpr) h += ' onclick="' + o.clickExpr + '"';
+      h += '>' + this.renderIcon(o.iconName, o.iconFallback) + '<span>' + o.name + '</span></span>';
+      h += '<span style="color:var(--muted);font-size:0.85em;margin-left:12px;min-width:80px;text-align:right;">' + (o.sizeInfo || '') + '</span>';
+      if (o.actionsHtml) h += o.actionsHtml;
+      h += '</div>';
+      return h;
+    }
+  };
+
   // Global function to create a file explorer in a container
   window.createFileExplorer = function(config) {
     // Config: {
@@ -210,131 +378,15 @@ inline String getFileBrowserScript() {
     var listDiv = document.getElementById(listId);
     
     function renderBreadcrumb() {
-      var parts = currentPath.split('/').filter(function(p) { return p.length > 0; });
-      var html = '';
-      
-      // If locked to a path, show locked root instead of allowing navigation to /
-      if (lockToPath) {
-        var lockedParts = lockToPath.split('/').filter(function(p) { return p.length > 0; });
-        var displayRoot = lockedParts.length > 0 ? lockedParts[lockedParts.length - 1] : 'Root';
-        html = '<span style="color:var(--muted);">[' + displayRoot + ']</span>';
-      } else {
-        html = '<span style="cursor:pointer;color:var(--link);" onclick="' + explorerFnId + "Navigate('/')" + '">[Root]</span>';
-      }
-      
-      var path = '';
-      var skipCount = lockToPath ? lockToPath.split('/').filter(function(p) { return p.length > 0; }).length : 0;
-      parts.forEach(function(part, idx) {
-        // Skip breadcrumb parts that are part of the locked path
-        if (idx < skipCount) return;
-        path += '/' + part;
-        var finalPath = path;
-        html += ' <span style="color:var(--muted);">/</span> ';
-        html += '<span style="cursor:pointer;color:var(--link);" onclick="' + explorerFnId + 'Navigate(\'' + finalPath + '\')">' + part + '</span>';
-      });
-      
-      breadcrumbDiv.innerHTML = html;
+      breadcrumbDiv.innerHTML = window.FileBrowser.breadcrumbHtml(currentPath,
+        function(p) { return explorerFnId + "Navigate('" + p + "')"; },
+        { lockToPath: lockToPath });
     }
     
-    var iconCache = {};
-    var iconLoadFailed = {};
-    
-    function getFileTypeIconName(filename, isFolder) {
-      if (isFolder) return 'folder';
-      var ext = filename.toLowerCase().split('.').pop();
-      var iconMap = {
-        // code
-        'js': 'file_code',
-        'ts': 'file_code',
-        'jsx': 'file_code',
-        'tsx': 'file_code',
-        'cpp': 'file_code',
-        'h': 'file_code',
-        'hpp': 'file_code',
-        'c': 'file_code',
-        'ino': 'file_code',
-        'py': 'file_code',
-        'sh': 'file_code',
-        // structured data
-        'json': 'file_json',
-        // web documents
-        'html': 'file_code',
-        'htm': 'file_code',
-        'css': 'file_code',
-        // text
-        'txt': 'file_text',
-        'log': 'file_text',
-        'md': 'file_text',
-        // images
-        'jpg': 'file_image',
-        'jpeg': 'file_image',
-        'png': 'file_image',
-        'gif': 'file_image',
-        'bmp': 'file_image',
-        'svg': 'file_image',
-        'ico': 'file_image',
-        // documents
-        'pdf': 'file_pdf',
-        // archives
-        'zip': 'file_zip',
-        'gz': 'file_zip',
-        'tar': 'file_zip',
-        '7z': 'file_zip',
-        // binaries
-        'bin': 'file_bin',
-        'dat': 'file_bin'
-      };
-      return iconMap[ext] || 'file';
-    }
-    
-    function getFileTypeIconFallback(filename, isFolder) {
-      if (isFolder) return '[DIR]';
-      return '[FILE]';
-    }
-    
-    function renderFileIcon(iconName, fallbackText) {
-      function dbgIcons(){try{return !!(window.localStorage&&window.localStorage.getItem('hwDebugIcons')==='1')}catch(_){return false}}
-      function logIcons(){try{if(dbgIcons())console.log.apply(console,arguments)}catch(_){}}
-      if (iconLoadFailed[iconName]) {
-        logIcons('[icons] cached-fail icon=', iconName, 'fallback=', fallbackText);
-        return '<span style="display:inline-block;width:32px;font-family:monospace;color:var(--muted);font-size:0.85em;text-align:center;">' + fallbackText + '</span>';
-      }
-      
-      var imgId = 'icon_' + iconName + '_' + Math.random().toString(36).substr(2, 9);
-      var iconUrl = '/api/icon?name=' + iconName;
-      logIcons('[icons] render icon=', iconName, 'url=', iconUrl);
-      var html = '<img id="' + imgId + '" src="' + iconUrl + '" width="48" height="48" style="vertical-align:middle;image-rendering:auto;display:inline-block;background:var(--icon-bg);border-radius:6px;padding:4px;box-sizing:border-box;filter:var(--icon-filter);" ';
-      html += 'onerror="this.style.display=\'none\';this.nextSibling.style.display=\'inline-block\';" />';
-      html += '<span style="display:none;width:48px;font-family:monospace;color:var(--muted);font-size:0.85em;text-align:center;">' + fallbackText + '</span>';
+    // Icon-name lookup, theme-aware <img> rendering, and size formatting all
+    // live in window.FileBrowser so the bonded-device file browser uses the
+    // exact same helpers as this view. See definition at the top of the IIFE.
 
-      if (dbgIcons()) {
-        setTimeout(function(){
-          try {
-            var img = document.getElementById(imgId);
-            if (!img) {
-              console.warn('[icons] element not found id=', imgId, 'icon=', iconName);
-              return;
-            }
-            img.addEventListener('load', function(){
-              console.log('[icons] load ok', iconName, 'id', imgId);
-            });
-            img.addEventListener('error', function(){
-              console.warn('[icons] load fail', iconName, 'url', iconUrl);
-              iconLoadFailed[iconName] = true;
-            });
-          } catch (e) {
-            try { console.warn('[icons] attach listeners failed', e); } catch(_) {}
-          }
-        }, 0);
-      }
-
-      return html;
-    }
-    
-    function renderActionIcon(iconName, fallbackText) {
-      return '<img src="/api/icon?name=' + iconName + '" width="20" height="20" style="vertical-align:middle;filter:var(--icon-filter);" onerror="this.style.display=\'none\';this.nextSibling.style.display=\'inline\'"><span style="display:none;font-size:0.8em;">' + fallbackText + '</span>';
-    }
-    
     function loadDirectory(path) {
       listDiv.innerHTML = '<div style="padding:20px;text-align:center;color:var(--muted);">Loading...</div>';
       
@@ -384,22 +436,7 @@ inline String getFileBrowserScript() {
           files.forEach(function(file) {
             var isFolder = file.type === 'folder';
             var itemPath = (currentPath === '/' ? '/' : currentPath + '/') + file.name;
-            var sizeInfo = file.size || '';
-            
-            // Format size for files
-            if (!isFolder && sizeInfo.indexOf('bytes') >= 0) {
-              var match = sizeInfo.match(/(\d+)/);
-              if (match) {
-                var bytes = parseInt(match[1]);
-                if (bytes >= 1048576) {
-                  sizeInfo = (bytes / 1048576).toFixed(2) + ' MB';
-                } else if (bytes >= 1024) {
-                  sizeInfo = (bytes / 1024).toFixed(2) + ' KB';
-                } else {
-                  sizeInfo = bytes + ' B';
-                }
-              }
-            }
+            var sizeInfo = window.FileBrowser.formatSize(file.size || '', isFolder);
             
             // Determine interaction based on mode
             var canInteract = true;
@@ -428,64 +465,42 @@ inline String getFileBrowserScript() {
               }
             }
             
-            var bgColor = 'var(--panel-bg)';
-            var cursor = canInteract ? 'pointer' : 'default';
-            var hoverStyle = canInteract ? 'onmouseover="this.style.background=\'var(--crumb-bg)\'" onmouseout="this.style.background=\'' + bgColor + '\'"' : '';
-            
-            html += '<div style="padding:8px 12px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;background:' + bgColor + ';" ' + hoverStyle + '>';
-            
-            // File/folder name (clickable)
-            html += '<span style="flex:1;color:var(--panel-fg);font-size:0.95em;cursor:' + cursor + ';display:flex;align-items:center;gap:8px;"';
-            if (clickAction) {
-              html += ' onclick="' + clickAction + '"';
-            }
-            var iconName = getFileTypeIconName(file.name, isFolder);
-            var fallbackText = getFileTypeIconFallback(file.name, isFolder);
-            html += '>' + renderFileIcon(iconName, fallbackText) + '<span>' + file.name + '</span></span>';
-            
-            // Size info
-            html += '<span style="color:var(--muted);font-size:0.85em;margin-left:12px;min-width:80px;text-align:right;">' + sizeInfo + '</span>';
-            
-            // Action buttons (only in full mode, respecting per-file permissions from API)
+            // Action buttons (only in full mode, respecting per-file
+            // permissions from API). Built here as a pre-rendered string so
+            // FileBrowser.rowHtml can drop it in without knowing the rules.
+            var actionsHtml = '';
             if (mode === 'full') {
               var perms = file.perms || 0;
               var hasRead   = (perms & 0x01) !== 0;
               var hasWrite  = (perms & 0x02) !== 0;
               var hasDelete = (perms & 0x04) !== 0;
               var hasRename = (perms & 0x08) !== 0;
-              html += '<span style="display:inline-flex;gap:2px;margin-left:8px;align-items:center;">';
-              // Download button (files only, when read permission)
+              var btns = '';
               if (!isFolder && hasRead) {
-                html += '<button class="btn btn-small" onclick="' + explorerFnId + 'Download(\'' + itemPath + '\');event.stopPropagation();" ';
-                html += 'style="padding:4px 6px;" title="Download file">';
-                html += renderActionIcon('download', 'DL');
-                html += '</button>';
+                btns += '<button class="btn btn-small" onclick="' + explorerFnId + 'Download(\'' + itemPath + '\');event.stopPropagation();" style="padding:4px 6px;" title="Download file">' + window.FileBrowser.renderActionIcon('download', 'DL') + '</button>';
               }
-              // Edit button (files only, when onEdit callback provided and write permission)
               if (!isFolder && config.onEdit && hasWrite) {
-                html += '<button class="btn btn-small" onclick="' + explorerFnId + 'Edit(\'' + itemPath + '\');event.stopPropagation();" ';
-                html += 'style="padding:4px 6px;" title="Edit file">';
-                html += renderActionIcon('edit', 'Edit');
-                html += '</button>';
+                btns += '<button class="btn btn-small" onclick="' + explorerFnId + 'Edit(\'' + itemPath + '\');event.stopPropagation();" style="padding:4px 6px;" title="Edit file">' + window.FileBrowser.renderActionIcon('edit', 'Edit') + '</button>';
               }
-              // Rename button (only if rename permission)
               if (hasRename) {
-                html += '<button class="btn btn-small" onclick="' + explorerFnId + 'Rename(\'' + itemPath + '\');event.stopPropagation();" ';
-                html += 'style="padding:4px 8px;font-size:0.8em;" title="Rename">';
-                html += 'Rename';
-                html += '</button>';
+                btns += '<button class="btn btn-small" onclick="' + explorerFnId + 'Rename(\'' + itemPath + '\');event.stopPropagation();" style="padding:4px 8px;font-size:0.8em;" title="Rename">Rename</button>';
               }
-              // Delete button (only if delete permission)
               if (hasDelete) {
-                html += '<button class="btn btn-small" onclick="' + explorerFnId + 'Delete(\'' + itemPath + '\',' + (isFolder ? 'true' : 'false') + ');event.stopPropagation();" ';
-                html += 'style="padding:4px 6px;" title="Delete">';
-                html += renderActionIcon('trash', 'Del');
-                html += '</button>';
+                btns += '<button class="btn btn-small" onclick="' + explorerFnId + 'Delete(\'' + itemPath + '\',' + (isFolder ? 'true' : 'false') + ');event.stopPropagation();" style="padding:4px 6px;" title="Delete">' + window.FileBrowser.renderActionIcon('trash', 'Del') + '</button>';
               }
-              html += '</span>';
+              if (btns) actionsHtml = '<span style="display:inline-flex;gap:2px;margin-left:8px;align-items:center;">' + btns + '</span>';
             }
-            
-            html += '</div>';
+
+            html += window.FileBrowser.rowHtml({
+              name: file.name,
+              isDir: isFolder,
+              sizeInfo: sizeInfo,
+              iconName: window.FileBrowser.iconName(file.name, isFolder),
+              iconFallback: window.FileBrowser.iconFallback(isFolder),
+              clickExpr: canInteract ? clickAction : '',
+              hoverable: canInteract,
+              actionsHtml: actionsHtml
+            });
           });
           html += '</div>';
           
@@ -938,6 +953,205 @@ inline String getFileBrowserScript() {
   
   console.log('[FileExplorer] Utility loaded');
 })();
+</script>
+<script>
+// ===========================================================================
+// Shared bonded-device filesystem helper (window.BondFs)
+// Lets the bonded MASTER reach the peer's filesystem over the bond session
+// token (the 'remote:' command path) — no username/password. Used by the Files
+// page (browse + download) and the Logging page (peer log retrieval + control).
+// All requests are gated by /api/bond/status reporting bonded + role===master.
+// ===========================================================================
+window.BondFs = (function(){
+  var st = { ok:false, peerMac:'', peerName:'', localMac:'', seq:0 };
+  function token(mac){ return (mac||'').replace(/:/g,'').toUpperCase(); }
+  function join(base,name){ if(base==='/'||base===''){return '/'+name;} return (base.charAt(base.length-1)==='/'?base:base+'/')+name; }
+  function esc(s){ return String(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'"); }
+  function parseListing(lines){
+    var entries=[], seen={};
+    var re=/^\s+(.+?)\s+\((\d+)\s+(items|bytes)\)(\s+\[mount\])?\s*$/;
+    for(var i=0;i<lines.length;i++){
+      var line=String(lines[i]||'');
+      if(!line||line.indexOf('Files (')>=0||line.indexOf('Total:')>=0||line.indexOf('No files found')>=0) continue;
+      var m=line.match(re); if(!m) continue;
+      var name=m[1].trim(); if(!name||seen[name]) continue; seen[name]=true;
+      var isDir=(m[3]==='items')||!!m[4];
+      entries.push({name:name,isDir:isDir,meta:isDir?(m[2]+' items'):(m[2]+' bytes')});
+    }
+    entries.sort(function(a,b){ if(a.isDir!==b.isDir) return a.isDir?-1:1; return a.name<b.name?-1:(a.name>b.name?1:0); });
+    return entries;
+  }
+  // cb(available:bool, state). Reveals nothing on its own — caller decides.
+  function checkAvailable(cb){
+    fetch('/api/bond/status').then(function(r){return r.json();}).then(function(d){
+      if(d&&d.bonded===true&&d.role===1&&d.peerMac){ st.ok=true; st.peerMac=d.peerMac; st.peerName=d.peerName||'bonded device'; st.localMac=d.localMac||''; cb(true,st); }
+      else { st.ok=false; cb(false,st); }
+    }).catch(function(){ st.ok=false; cb(false,st); });
+  }
+  // Run a command on the peer over the bond token; collect streamed output lines.
+  // opts: { doneMarker, maxPolls, intervalMs, onResult:function(lines,err) }
+  //
+  // CONCURRENCY: each exec() tracks its OWN seq baseline in `mySeq`. Earlier
+  // versions used a shared st.seq, which caused brutal races when two execs
+  // ran concurrently (e.g., the file listing and the storage stats fire
+  // together when the user clicks "Bonded Device"). Whichever exec's polling
+  // fired first would advance st.seq past messages the other still needed,
+  // and the loser would either time out or fire its done callback on the
+  // WRONG command's output. Per-call seq is the only correct design — both
+  // execs read the same global message stream but each filters its own
+  // completion via doneMarker. The extra `since=0` baseline GET per exec is
+  // cheap (no messages returned past the head).
+  function exec(cmd, opts){
+    opts=opts||{}; var doneMarker=opts.doneMarker; var maxPolls=opts.maxPolls||20; var iv=opts.intervalMs||500;
+    var mySeq=0;
+    // Baseline: discover current head seq so polling only sees NEW responses.
+    fetch('/api/espnow/messages?since=0&mac='+encodeURIComponent(st.peerMac)).then(function(r){return r.json();}).then(function(d){
+      var m=(d&&d.messages)?d.messages:[]; for(var i=0;i<m.length;i++){ if((m[i].seq||0)>mySeq) mySeq=m[i].seq; }
+      return fetch('/api/bond/exec',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'cmd='+encodeURIComponent(cmd)});
+    }).then(function(r){return r.json();}).then(function(d){
+      if(!d||!d.success){ if(opts.onResult) opts.onResult(null,(d&&(d.result||d.error))||'command failed'); return; }
+      var lines=[], done=false, polls=0, lastNew=0, gotAny=false; var grace=opts.gracePolls||6;
+      var t=setInterval(function(){
+        polls++;
+        fetch('/api/espnow/messages?since='+mySeq+'&mac='+encodeURIComponent(st.peerMac)).then(function(r){return r.json();}).then(function(md){
+          var ms=(md&&md.messages)?md.messages:[]; var newCount=0;
+          for(var i=0;i<ms.length;i++){ var m=ms[i]; if(m.seq>mySeq) mySeq=m.seq; if(m.msg){ var ps=String(m.msg).split('\n'); for(var p=0;p<ps.length;p++) lines.push(ps[p]); newCount++; if(doneMarker&&String(m.msg).indexOf(doneMarker)>=0) done=true; } }
+          if(newCount>0){ lastNew=polls; gotAny=true; }
+          if(done){ clearInterval(t); if(opts.onResult) opts.onResult(lines,null); }
+          else if(!doneMarker && gotAny && (polls-lastNew)>=grace){ clearInterval(t); if(opts.onResult) opts.onResult(lines,null); }  // settled after last output
+          else if(polls>=maxPolls){ clearInterval(t); if(opts.onResult) opts.onResult(lines, lines.length?null:'timed out'); }
+        }).catch(function(){});
+      }, iv);
+    }).catch(function(e){ if(opts.onResult) opts.onResult(null,e.message); });
+  }
+  // List a directory on the peer. done(entries|null, err).
+  // doneMarker is ' entries' (leading space) — matches the listing's terminal
+  // "Total: 6 entries" line but NOT fsusage's "Total: 3256320 bytes" output,
+  // which runs concurrently when the Files page also refreshes storage stats.
+  // The previous 'Total:' marker collided and fired prematurely on the wrong
+  // command's output.
+  function list(path, done){ exec('files '+path,{doneMarker:' entries',onResult:function(lines,err){ if(lines===null) done(null,err); else done(parseListing(lines),null); }}); }
+  // Pull a file from the peer onto THIS device. done({localPath,localUrl,base}|null, err).
+  function pull(remotePath, done){
+    if(!st.localMac){ done(null,'local MAC unavailable'); return; }
+    var base=remotePath.split('/').pop(); var dir='/espnow/received/'+token(st.peerMac); var localPath=dir+'/'+base; var localUrl='/api/files/read?name='+encodeURIComponent(localPath);
+    // Pre-create the landing dir so the polling list() below doesn't spam
+    // [STORAGE] Cannot open directory until the first chunk lands and the
+    // V4_FILE_RX path mkdir's it lazily. Both mkdirs are idempotent; ignore errors.
+    function mk(p, next){ fetch('/api/cli',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'cmd='+encodeURIComponent('mkdir '+p)}).then(function(){next();}).catch(function(){next();}); }
+    mk('/espnow/received', function(){ mk(dir, function(){
+    fetch('/api/bond/exec',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'cmd='+encodeURIComponent('espnowsendfile '+st.localMac+' '+remotePath)})
+      .then(function(r){return r.json();}).then(function(d){
+        if(!d||!d.success){ done(null,(d&&(d.result||d.error))||'command failed'); return; }
+        var polls=0; var t=setInterval(function(){ polls++;
+          fetch('/api/files/list?path='+encodeURIComponent(dir)).then(function(r){return r.json();}).then(function(ld){
+            var items=(ld&&ld.files)?ld.files:[]; var found=false;
+            for(var i=0;i<items.length;i++){ var nm=items[i]&&items[i].name?items[i].name:items[i]; if(nm===base||String(nm).split('/').pop()===base){found=true;break;} }
+            if(found){ clearInterval(t); done({localPath:localPath,localUrl:localUrl,base:base},null); }
+            else if(polls>=30){ clearInterval(t); done(null,'timed out pulling '+base); }
+          }).catch(function(){ if(polls>=30) clearInterval(t); });
+        }, 600);
+      }).catch(function(e){ done(null,e.message); });
+    }); });
+  }
+  // Render a directory explorer into containerId.
+  // Visually matches createFileExplorer/createFileManager from the local file
+  // manager: bordered panel, toolbar w/ Back+Refresh, [Root]-style breadcrumb,
+  // icons from /api/icon, formatted sizes, hover rows, status bar.
+  // opts: { onNavigate:function(path), fileActions:[{label, fn:function(fullPath)}], status }
+  function renderExplorer(containerId, path, entries, opts){
+    opts=opts||{}; var c=document.getElementById(containerId); if(!c) return;
+    var key=containerId.replace(/[^A-Za-z0-9_]/g,'_');
+    var navName='__bondNav_'+key, actName='__bondAct_'+key;
+    window[navName]=opts.onNavigate||function(){};
+    window[actName]=opts.fileActions||[];
+
+    // Icon / size / fallback rendering is shared with the local file explorer
+    // via window.FileBrowser (defined at the top of the createFileExplorer
+    // IIFE). Adding a new file extension or tweaking icon styling there
+    // automatically updates this view too.
+
+    var peerLabel=(st.peerName||'Bonded device');
+    var h='';
+    // Outer bordered container (matches createFileManager)
+    h+='<div style="border:1px solid var(--border);border-radius:4px;background:var(--panel-bg);color:var(--panel-fg);overflow:hidden;">';
+
+    // Toolbar: Back (when not at root), Refresh, peer label right-aligned
+    h+='<div style="padding:8px;background:var(--crumb-bg);border-bottom:1px solid var(--border);display:flex;gap:8px;flex-wrap:wrap;align-items:center;">';
+    if(path!=='/'){
+      var trimmed=path.replace(/\/+$/,''); var idx=trimmed.lastIndexOf('/');
+      var parent=idx<=0?'/':trimmed.substring(0,idx);
+      h+='<button class="btn" onclick="window[\''+navName+'\'](\''+esc(parent)+'\')">← Back</button>';
+    }
+    h+='<button class="btn" onclick="window[\''+navName+'\'](\''+esc(path)+'\')">Refresh</button>';
+    h+='<span style="margin-left:auto;font-size:0.85em;color:var(--muted);">'+peerLabel+'</span>';
+    h+='</div>';
+
+    // Breadcrumb (shared with createFileExplorer via FileBrowser.breadcrumbHtml)
+    h+='<div style="padding:8px;background:var(--crumb-bg);border-bottom:1px solid var(--border);font-size:0.9em;color:var(--panel-fg);">';
+    h+=window.FileBrowser.breadcrumbHtml(path, function(p){ return "window['"+navName+"']('"+esc(p)+"')"; });
+    h+='</div>';
+
+    // List
+    h+='<div style="overflow-y:auto;">';
+    if(!entries||entries.length===0){
+      var emptyMsg=opts.status||'No files found';
+      h+='<div style="padding:20px;text-align:center;color:var(--muted);">'+emptyMsg+'</div>';
+    } else {
+      h+='<div style="padding:4px;">';
+      for(var e=0;e<entries.length;e++){
+        var en=entries[e]; var full=esc(join(path,en.name));
+        // Build per-file action buttons (only for files) from fileActions[].
+        // Each entry may carry an optional `title` for the tooltip — falls
+        // back to the visible label when omitted.
+        var actionsHtml='';
+        if(!en.isDir){
+          var acts=window[actName];
+          if(acts&&acts.length){
+            var btns='';
+            for(var a=0;a<acts.length;a++){
+              var ttl=acts[a].title || acts[a].label;
+              btns+='<button class="btn btn-small" onclick="window[\''+actName+'\']['+a+'].fn(\''+full+'\');event.stopPropagation();" style="padding:4px 8px;font-size:0.8em;" title="'+ttl+'">'+acts[a].label+'</button>';
+            }
+            if(btns) actionsHtml='<span style="display:inline-flex;gap:2px;margin-left:8px;align-items:center;">'+btns+'</span>';
+          }
+        }
+        // Make file rows click-to-trigger-first-action (typically View). The
+        // action buttons themselves stopPropagation so e.g. clicking Download
+        // doesn't also fire View. Folders keep navigate-into-dir click.
+        var rowClick = '';
+        if (en.isDir) {
+          rowClick = "window['"+navName+"']('"+full+"')";
+        } else {
+          var rcActs = window[actName];
+          if (rcActs && rcActs.length) {
+            rowClick = "window['"+actName+"'][0].fn('"+full+"')";
+          }
+        }
+        h+=window.FileBrowser.rowHtml({
+          name: en.name,
+          isDir: en.isDir,
+          sizeInfo: window.FileBrowser.formatSize(en.meta, en.isDir),
+          iconName: window.FileBrowser.iconName(en.name, en.isDir),
+          iconFallback: window.FileBrowser.iconFallback(en.isDir),
+          clickExpr: rowClick,
+          hoverable: true,
+          actionsHtml: actionsHtml
+        });
+      }
+      h+='</div>';
+    }
+    h+='</div>';
+
+    // Status bar at bottom — Path: ... (matches createFileManager)
+    h+='<div style="padding:6px 8px;background:var(--crumb-bg);border-top:1px solid var(--border);font-size:0.85em;color:var(--muted);min-height:24px;">Path: '+path+'</div>';
+
+    h+='</div>';
+    c.innerHTML=h;
+  }
+  return { state:st, token:token, join:join, esc:esc, parseListing:parseListing, checkAvailable:checkAvailable, exec:exec, list:list, pull:pull, renderExplorer:renderExplorer };
+})();
+console.log('[BondFs] shared helper loaded');
 </script>
 )FBSCRIPT";
 }

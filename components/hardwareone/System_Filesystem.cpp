@@ -109,6 +109,7 @@ bool initFilesystem() {
     VFS::mkdirGuarded("/espnow",                      sys);  // ESP-NOW related files
     VFS::mkdirGuarded("/system/espnow",               sys);  // ESP-NOW config (mesh peers, devices)
     VFS::mkdirGuarded("/system/espnow/peers",         sys);  // per-peer cached settings
+    VFS::mkdirGuarded("/system/espnow/this_device",   sys);  // this device's own bond-self files (temp _schema_out.json today; future: identity/devices/mesh)
 #endif
 #if ENABLE_MAPS
     VFS::mkdirGuarded("/maps",                        sys);  // GPS map files (.hwmap)

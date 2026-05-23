@@ -543,6 +543,32 @@ inline void streamLoggingInner(httpd_req_t* req) {
   </div>
 </div>
 
+<!-- Bonded Device Logs Section (master only; hidden unless bonded + master) -->
+<div class='settings-panel' id='bonded-logs-panel' style='display:none'>
+  <div style='display:flex;align-items:center;justify-content:space-between'>
+    <div>
+      <div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>Bonded Device Logs</div>
+      <div style='color:var(--panel-fg);font-size:0.9rem'>Control logging on the bonded device and retrieve its log files</div>
+    </div>
+    <button class='btn' id='btn-bondlog-section-toggle' onclick="toggleBondLogs()">Expand</button>
+  </div>
+  <div id='content-bondlog' style='display:none;margin-top:0.75rem'>
+    <div style='background:var(--panel-bg);border:1px solid var(--border);border-radius:8px;padding:1rem;margin-bottom:1rem'>
+      <div style='font-weight:bold;color:var(--panel-fg);margin-bottom:0.5rem'>Remote Logging Control</div>
+      <div style='display:flex;gap:8px;flex-wrap:wrap;margin-bottom:0.5rem'>
+        <button class='btn' onclick='bondLogCtl("sensorlog start")'>Start Sensor Logging</button>
+        <button class='btn' onclick='bondLogCtl("sensorlog stop")'>Stop Sensor Logging</button>
+        <button class='btn' onclick='bondLogCtl("log start")'>Start System Logging</button>
+        <button class='btn' onclick='bondLogCtl("log stop")'>Stop System Logging</button>
+        <button class='btn' onclick='bondLogStatus()'>Refresh Status</button>
+      </div>
+      <pre id='bondlog-status' style='background:var(--terminal-bg);color:var(--terminal-fg);border-radius:6px;padding:0.5rem;margin:0;max-height:180px;overflow:auto;font-size:0.8rem;white-space:pre-wrap'>Status not loaded</pre>
+    </div>
+    <label style='color:var(--panel-fg);font-weight:500'>Log Files on Bonded Device:</label>
+    <div id='bonded-log-explorer' style='margin-top:0.5rem'></div>
+  </div>
+</div>
+
 )HTML", HTTPD_RESP_USE_STRLEN);
 
   // JavaScript - Section 1: Initialization
@@ -556,6 +582,7 @@ window.onload = function() {
   try {
     console.log('[LOGGING] Section 2a: Window loaded, starting initialization...');
     populateLogViewerFileList();
+    initBondedLogs();
 
     // Show admin log toggle if user is admin (check via settings API which includes user.isAdmin)
     fetch('/api/settings')
@@ -1586,6 +1613,97 @@ function switchLogSource() {
 }
 
 console.log('[LOGGING] Section 14a: Log viewer functions defined');
+
+// ===========================================================================
+// Bonded Device Logs (master only). Retrieve + control the peer's logging over
+// the bond session token, via the shared window.BondFs helper. The whole panel
+// stays hidden unless this device is bonded AND is the master.
+// ===========================================================================
+var bondLogLoaded = false;
+var bondLogPath = '/logging_captures';
+
+function initBondedLogs(){
+  if (!window.BondFs) return;
+  window.BondFs.checkAvailable(function(ok){
+    if (!ok) return;
+    var p = document.getElementById('bonded-logs-panel');
+    if (p) p.style.display = '';
+  });
+}
+
+function toggleBondLogs(){
+  togglePane('content-bondlog','btn-bondlog-section-toggle');
+  if (!bondLogLoaded){
+    bondLogLoaded = true;
+    bondLogStatus();
+    bondLogBrowse(bondLogPath);
+  }
+}
+
+function bondLogStatus(){
+  var el = document.getElementById('bondlog-status');
+  if (!window.BondFs || !el) return;
+  el.textContent = 'Loading status…';
+  window.BondFs.exec('sensorlog status', { onResult: function(lines, err){
+    var sensor = lines ? lines.join('\n') : ('error: ' + (err || ''));
+    window.BondFs.exec('log status', { onResult: function(l2, e2){
+      var sys = l2 ? l2.join('\n') : ('error: ' + (e2 || ''));
+      el.textContent = '$ sensorlog status\n' + sensor + '\n\n$ log status\n' + sys;
+    }});
+  }});
+}
+
+function bondLogCtl(cmd){
+  var el = document.getElementById('bondlog-status');
+  if (!window.BondFs || !el) return;
+  el.textContent = 'Running: ' + cmd + ' …';
+  window.BondFs.exec(cmd, { onResult: function(lines, err){
+    el.textContent = '$ ' + cmd + '\n' + (lines ? lines.join('\n') : ('error: ' + (err || '')));
+    setTimeout(bondLogStatus, 900);  // refresh status after the change settles
+  }});
+}
+
+function bondLogBrowse(path){
+  path = path || '/logging_captures';
+  bondLogPath = path;
+  if (!window.BondFs) return;
+  window.BondFs.renderExplorer('bonded-log-explorer', path, [], { onNavigate: bondLogBrowse, fileActions: [], status: 'Loading…' });
+  window.BondFs.list(path, function(entries, err){
+    if (entries === null){
+      window.BondFs.renderExplorer('bonded-log-explorer', path, [], { onNavigate: bondLogBrowse, fileActions: [], status: 'Error: ' + (err || 'failed') });
+      return;
+    }
+    window.BondFs.renderExplorer('bonded-log-explorer', path, entries, {
+      onNavigate: bondLogBrowse,
+      fileActions: [
+        { label: 'View', fn: bondLogView },
+        { label: 'Download', fn: bondLogDownload }
+      ]
+    });
+  });
+}
+
+// View: pull the peer's log to THIS device, then load it into the existing Log
+// Viewer (reusing its Category/Level/Search filters and display).
+function bondLogView(remotePath){
+  if (!window.BondFs) return;
+  window.BondFs.pull(remotePath, function(res, err){
+    if (err || !res){ alert('Pull failed: ' + (err || 'unknown')); return; }
+    var content = document.getElementById('content-viewer');
+    if (content && content.style.display === 'none'){ togglePane('content-viewer','btn-viewer-section-toggle'); }
+    if (typeof loadLogFile === 'function') loadLogFile(res.localPath);
+    var disp = document.getElementById('viewer-display');
+    if (disp) disp.scrollIntoView({ behavior: 'smooth' });
+  });
+}
+
+function bondLogDownload(remotePath){
+  if (!window.BondFs) return;
+  window.BondFs.pull(remotePath, function(res, err){
+    if (err || !res){ alert('Pull failed: ' + (err || 'unknown')); return; }
+    window.location = res.localUrl;
+  });
+}
 </script>
 )JS", HTTPD_RESP_USE_STRLEN);
 

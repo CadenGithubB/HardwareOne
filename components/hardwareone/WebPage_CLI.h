@@ -1,6 +1,8 @@
 #ifndef WEBPAGE_CLI_H
 #define WEBPAGE_CLI_H
 
+#include "WebServer_Utils.h"
+
 // Streamed inner content for the CLI page
 inline void streamCLIInner(httpd_req_t* req, const String& username) {
   // CSS
@@ -86,6 +88,13 @@ inline void streamCLIInner(httpd_req_t* req, const String& username) {
 </style>
 )CSS", HTTPD_RESP_USE_STRLEN);
 
+  // Shared file-browser / BondFs helpers (defines window.BondFs for the
+  // bonded-device CLI toggle below).
+  {
+    String fbScript = getFileBrowserScript();
+    httpd_resp_send_chunk(req, fbScript.c_str(), fbScript.length());
+  }
+
   // HTML structure
   String usernameEscaped = username;
   usernameEscaped.replace("<", "&lt;");
@@ -94,6 +103,11 @@ inline void streamCLIInner(httpd_req_t* req, const String& username) {
   httpd_resp_send_chunk(req, R"HTML(
 <div class='cli-container'>
   <div class='cli-header'>HardwareOne Command Line Interface</div>
+  <div id='cli-target-toggle' style='display:none;justify-content:center;align-items:center;gap:8px;margin-bottom:6px'>
+    <span style='font-size:0.8rem;color:var(--muted)'>Target:</span>
+    <button id='cli-btn-local' class='btn' onclick='cliSetTarget(false)'>This Device</button>
+    <button id='cli-btn-bonded' class='btn' onclick='cliSetTarget(true)'>Bonded Device</button>
+  </div>
   <script>try{console.log('[CLI] Section Header ready');}catch(_){}</script>
   <div id='cli-output' class='cli-output'></div>
   <script>try{console.log('[CLI] Section Output ready');}catch(_){}</script>
@@ -119,6 +133,7 @@ var cliOutput = document.getElementById('cli-output');
 var cliExecBtn = document.getElementById('cli-exec');
 window.addEventListener('error', function(e){ try { if(cliOutput){ cliOutput.textContent += ('[JS Error] ' + e.message + '\n'); } } catch(_){} });
 var commandHistory = []; var historyIndex = -1; var currentCommand=''; var outputHistory=''; var inHelp=false; var outputBackup=''; var scrolledOnce=false;
+var cliBondMode = false;
 if(cliExecBtn){ cliExecBtn.addEventListener('click', function(){ if(window.executeCommand) executeCommand(); }); }
 if(cliInput){ cliInput.addEventListener('keydown', function(e){ if(e.key==='Enter' && window.executeCommand){ executeCommand(); } }); }
 try{console.log('[CLI] Core init ready');}catch(_){}
@@ -144,7 +159,7 @@ try {
   window.__cliPoller = setInterval(function(){
     fetch('/api/cli/logs', { credentials: 'same-origin', cache: 'no-store' })
       .then(function(r){ if(r.status===401){ if(window.__cliPoller){ clearInterval(window.__cliPoller); window.__cliPoller=null; } return ''; } return r.text(); })
-      .then(function(text){ if(text){ var t=__applyClear(text); t=__stripAnsi(t); if(cliOutput){ cliOutput.textContent = t; try{ localStorage.setItem('cliOutputHistory', cliOutput.textContent); }catch(_){} } } })
+      .then(function(text){ if(text && !cliBondMode){ var t=__applyClear(text); t=__stripAnsi(t); if(cliOutput){ cliOutput.textContent = t; try{ localStorage.setItem('cliOutputHistory', cliOutput.textContent); }catch(_){} } } })
       .catch(function(_){ });
   }, 500);
 } catch(e) { try{ console.debug('[CLI] polling init error: ' + e.message); }catch(_){} }
@@ -165,6 +180,7 @@ function executeCommand(){
   try { console.debug('[CLI] execute start'); } catch(_){}
   var command = (cliInput && cliInput.value ? cliInput.value : '').trim();
   if (!command) return;
+  if (cliBondMode) { runBondedCommand(command); return; }
   var lower = command.toLowerCase();
   var exitingHelp = false;
   if (!inHelp && (lower === 'help' || lower === 'menu' || lower === 'cli help')) {
@@ -181,7 +197,7 @@ function executeCommand(){
   historyIndex = -1; currentCommand = '';
   if (cliOutput) { cliOutput.textContent += ('$ ' + command + '\n'); }
   try { console.debug('[CLI] fetch start: ' + command); } catch(_){}
-  fetch('/api/cli', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, credentials: 'same-origin', body: 'cmd=' + encodeURIComponent(command) })
+  fetch('/api/cli', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, credentials: 'same-origin', body: 'cmd=' + encodeURIComponent(command) + '&capture=1' })
   .then(function(r){ try{ console.debug('[CLI] fetch status: ' + r.status); }catch(_){} return r.text(); })
   .then(function(result){ try { console.debug('[CLI] fetch ok, len=' + (result ? result.length : 0)); } catch(_){} var ESC=String.fromCharCode(27); var clearSeq = ESC+'[2J'+ESC+'[H'; if (result && result.indexOf(clearSeq) !== -1) { var cleanResult = result.split(clearSeq).join(''); if (exitingHelp && inHelp) { if (cliOutput) { cliOutput.textContent = outputBackup || ''; } inHelp = false; try{ localStorage.setItem('cliInHelp','false'); localStorage.removeItem('cliOutputHistoryBackup'); }catch(_){} if (cleanResult && cliOutput) { cliOutput.textContent += cleanResult; } try{ localStorage.setItem('cliOutputHistory', cliOutput ? cliOutput.textContent : ''); }catch(_){} } else { if (cliOutput) { cliOutput.textContent = cleanResult; try{ localStorage.setItem('cliOutputHistory', cliOutput.textContent); }catch(_){} } } } else { if (cliOutput) { cliOutput.textContent += result + '\n'; try{ localStorage.setItem('cliOutputHistory', cliOutput.textContent); }catch(_){} } } if (cliInput) { cliInput.value=''; cliInput.focus(); } })
   .catch(function(e){ try { console.debug('[CLI] fetch error: ' + e.message); } catch(_){} var errorMsg='Error: ' + e.message + '\n'; if (cliOutput) { cliOutput.textContent += errorMsg; try{ localStorage.setItem('cliOutputHistory', cliOutput.textContent); }catch(_){} } if (cliInput) { cliInput.value=''; cliInput.focus(); } });
@@ -194,6 +210,65 @@ function clearHistory() {
   cliOutput.textContent = '';
   historyIndex = -1;
 }
+
+// ===========================================================================
+// Bonded-device CLI toggle (master only). Routes typed commands to the peer's
+// CLI over the bond session token via the shared window.BondFs.exec helper.
+// The toggle is revealed ONLY when this device is bonded AND is the master.
+// ===========================================================================
+function cliInitBondToggle(){
+  if (!window.BondFs) return;
+  window.BondFs.checkAvailable(function(ok){
+    if (!ok) return;
+    var t = document.getElementById('cli-target-toggle');
+    if (t) t.style.display = 'flex';
+    cliSetTarget(false);
+  });
+}
+
+function cliSetTarget(bonded){
+  cliBondMode = !!bonded;
+  var bl = document.getElementById('cli-btn-local');
+  var bb = document.getElementById('cli-btn-bonded');
+  if (bl) bl.style.opacity = cliBondMode ? '0.55' : '1';
+  if (bb) bb.style.opacity = cliBondMode ? '1' : '0.55';
+  if (cliOutput) {
+    if (cliBondMode) {
+      cliOutput.textContent = '[Bonded device CLI] Commands run on the bonded peer.\n';
+    } else {
+      cliOutput.textContent = '';
+      try { localStorage.setItem('cliOutputHistory', ''); } catch(_){}
+    }
+  }
+  if (cliInput) cliInput.focus();
+}
+
+function runBondedCommand(command){
+  if (!window.BondFs) { if(cliOutput){ cliOutput.textContent += 'Error: bonded helper unavailable\n'; } return; }
+  if (commandHistory[commandHistory.length - 1] !== command) {
+    commandHistory.push(command); if (commandHistory.length > 50) commandHistory.shift();
+    try{ localStorage.setItem('cliHistory', JSON.stringify(commandHistory)); }catch(_){}
+  }
+  historyIndex = -1; currentCommand = '';
+  if (cliOutput) { cliOutput.textContent += ('[bonded]$ ' + command + '\n'); cliOutput.scrollTop = cliOutput.scrollHeight; }
+  if (cliInput) { cliInput.value=''; cliInput.disabled = true; }
+  window.BondFs.exec(command, {
+    onResult: function(lines, err){
+      if (cliOutput) {
+        if (err) {
+          cliOutput.textContent += ('[error: ' + err + ']\n');
+        } else if (lines && lines.length) {
+          cliOutput.textContent += (lines.join('\n') + '\n');
+        }
+        cliOutput.textContent += '\n';
+        cliOutput.scrollTop = cliOutput.scrollHeight;
+      }
+      if (cliInput){ cliInput.disabled = false; cliInput.focus(); }
+    }
+  });
+}
+
+try{ cliInitBondToggle(); }catch(e){ try{ console.debug('[CLI] bond toggle init error: ' + e.message); }catch(_){} }
 </script>
 )JS", HTTPD_RESP_USE_STRLEN);
 }

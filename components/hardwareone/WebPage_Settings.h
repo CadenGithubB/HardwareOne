@@ -37,9 +37,37 @@ window._snapshotContainer = function(root) {
 window._isChanged = function(id, val) {
   return !(id in window._settingsBaseline) || window._settingsBaseline[id] !== val;
 };
-// Single CLI command via POST /api/cli (same transport as Debug toggles, WiFi buttons, etc.).
-// Returns a Promise of the response body text. Callers check for "Error" in output or handle .catch.
+// Target awareness — set by showLocalSettings / showBondedSettings. Determines
+// whether postSettingsCli and sendSequential route to the local endpoints
+// (/api/cli, /api/cli/batch) or to the bond proxy endpoints (/api/bond/exec,
+// /api/bond/cli/batch). Defaults to 'local' so pages that don't have a
+// bonded view (everything except the Settings page) behave as before.
+window._settingsTarget = 'local';
+
+// Single CLI command. Target-aware: in local mode posts to /api/cli and
+// returns the plain-text response body. In bonded mode posts to
+// /api/bond/exec (which routes through the bond session to the worker) and
+// unwraps the JSON envelope to return the same plain-text shape — callers
+// don't need to know which path was taken.
 window.postSettingsCli = function(cmd) {
+  if (window._settingsTarget === 'bonded') {
+    return fetch('/api/bond/exec', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+      credentials: 'same-origin',
+      body: 'cmd=' + encodeURIComponent(cmd)
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(j) {
+      // /api/bond/exec returns {success, result}; collapse to a string so
+      // callers see the same plain-text contract as /api/cli.
+      if (!j || !j.success) {
+        var msg = (j && (j.result || j.error)) || 'bond command failed';
+        throw new Error(msg);
+      }
+      return j.result || '';
+    });
+  }
   return fetch('/api/cli', {
     method: 'POST',
     headers: {'Content-Type': 'application/x-www-form-urlencoded'},
@@ -85,7 +113,11 @@ window.ledLiveClear = function() {
 
 window.sendSequential = function(cmds, onDone, onFail) {
   var all = ['beginwrite'].concat(cmds).concat(['savesettings']);
-  fetch('/api/cli/batch', {
+  // Target-aware dispatch — bonded view sends the batch through the bond
+  // session via /api/bond/cli/batch (same request shape, same response shape).
+  var url = (window._settingsTarget === 'bonded') ? '/api/bond/cli/batch' : '/api/cli/batch';
+  console.log('[sendSequential] target=' + window._settingsTarget + ' url=' + url + ' cmds=' + all.length);
+  fetch(url, {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     credentials: 'same-origin',
@@ -127,6 +159,255 @@ window.sendSequential = function(cmds, onDone, onFail) {
   })
   .catch(function(err) { if (onFail) onFail(err); });
 };
+
+// ============================================================================
+// window.SchemaPanel — reusable schema-driven panel renderer.
+//
+// Each settings panel that was previously hand-rolled with bespoke HTML +
+// inline /api/cli handlers calls SchemaPanel.render({...}). The helper:
+//   1. Fetches /api/settings/schema and /api/settings (cached per page load).
+//   2. Looks up the named module and filters its entries by an optional keys
+//      whitelist (otherwise renders all entries in the module).
+//   3. Renders an input per entry, type-driven (bool→checkbox, int/float→
+//      number, string→text, secret string→password, anything with `options`→
+//      <select>).
+//   4. Wires a single Save button to sendSequential, which produces a
+//      [beginwrite, ...cmds, savesettings] batch through /api/cli/batch.
+//
+// Logs every step with the caller's logPrefix so DevTools shows exactly what
+// happened on flash without needing to add per-panel prints.
+//
+// Opts: {
+//   containerId:  string  - DOM id to render into (required)
+//   moduleName:   string  - schema module name (required, e.g. 'debug')
+//   sectionPath:  string  - dot-path into /api/settings for value lookup
+//                           (optional; defaults to the module's jsonSection)
+//   keys:         array   - optional whitelist of entry.key values
+//   excludeKeys:  array   - optional blacklist (applied after keys filter)
+//   saveLabel:    string  - text for the Save button (default 'Save')
+//   logPrefix:    string  - label used in console.log lines
+//   target:       string  - 'local' (default) or 'bonded'. Switches the
+//                           schema + values fetch to /api/bond/settings/schema
+//                           + /api/bond/settings so the panel renders the
+//                           worker's actual compiled-in schema instead of the
+//                           master's. Save still flows through sendSequential,
+//                           which is target-aware via window._settingsTarget.
+// }
+window.SchemaPanel = (function(){
+  // Cache the schema + settings fetch across panels on the same page so we
+  // don't refetch for every panel. Keyed by target ('local' vs 'bonded') so
+  // both panels can coexist without clobbering each other's cache.
+  var _cache = { local: null, bonded: null };
+  function loadOnce(target){
+    var key = target || 'local';
+    if (_cache[key]) return _cache[key];
+    var schemaUrl   = (key === 'bonded') ? '/api/bond/settings/schema' : '/api/settings/schema';
+    var settingsUrl = (key === 'bonded') ? '/api/bond/settings'        : '/api/settings';
+    _cache[key] = Promise.all([
+      fetch(schemaUrl,   {credentials:'same-origin'}).then(function(r){return r.json();}),
+      fetch(settingsUrl, {credentials:'same-origin'}).then(function(r){return r.json();})
+    ]);
+    return _cache[key];
+  }
+  // Force a fresh load on the next render (used after a save so the form
+  // reflects whatever the worker actually accepted). Optional target arg —
+  // omit to drop both caches.
+  window.SchemaPanelInvalidate = function(target){
+    if (!target) { _cache = { local: null, bonded: null }; return; }
+    _cache[target] = null;
+  };
+
+  function log(pfx, msg){ try { console.log('[SchemaPanel:' + pfx + '] ' + msg); } catch(_) {} }
+  function warn(pfx, msg){ try { console.warn('[SchemaPanel:' + pfx + '] ' + msg); } catch(_) {} }
+  function errp(pfx, msg){ try { console.error('[SchemaPanel:' + pfx + '] ' + msg); } catch(_) {} }
+
+  function getValueByPath(obj, path){
+    if (!obj) return undefined;
+    if (!path) return obj;
+    var parts = path.split('.');
+    var v = obj;
+    for (var i = 0; i < parts.length && v != null; i++) v = v[parts[i]];
+    return v;
+  }
+
+  function renderInput(entry, val, idPrefix){
+    var id = idPrefix + '-' + entry.key.replace(/\./g, '-');
+    var cmdAttr = entry.cmdKey ? ' data-cmd="' + entry.cmdKey + '"' : '';
+    // Read-only display — system-managed values the user reads but never edits
+    // (crashCount, lastResetReason, etc.). Render as plain text with the same
+    // label styling as other fields so layout stays consistent. No id is needed
+    // since the save handler only reads inputs with data-cmd attributes; this
+    // span has neither, so it's automatically skipped on Save.
+    if (entry.readOnly) {
+      var displayVal = (val === undefined || val === null) ? '—' : val;
+      return '<label style="display:flex;flex-direction:column;gap:0.25rem;font-size:0.9em;color:var(--panel-fg)">' + entry.label +
+             '<span style="padding:0.5rem;border:1px solid var(--border);border-radius:4px;background:rgba(255,255,255,0.04);color:var(--muted);min-width:140px;display:inline-block">' +
+             displayVal + '</span></label>';
+    }
+    // Enum picker — `options` is a CSV of "value|label" pairs (label-only OK).
+    if (entry.options) {
+      var html = '<label style="display:flex;flex-direction:column;gap:0.25rem;font-size:0.9em;color:var(--panel-fg)">' + entry.label + '<select id="' + id + '"' + cmdAttr + ' style="padding:0.5rem;border:1px solid var(--border);border-radius:4px;min-width:200px">';
+      var current = (val !== undefined && val !== null) ? String(val) : '';
+      entry.options.split(',').forEach(function(tok){
+        var bar = tok.indexOf('|');
+        var ov = bar >= 0 ? tok.substring(0, bar) : tok;
+        var ol = bar >= 0 ? tok.substring(bar + 1) : tok;
+        html += '<option value="' + ov + '"' + (ov === current ? ' selected' : '') + '>' + ol + '</option>';
+      });
+      return html + '</select></label>';
+    }
+    if (entry.type === 'bool') {
+      // Global CSS in WebServer_Utils.h declares `input { width:100%; padding:.5rem;
+      // border:1px solid #ddd; margin-bottom:.5rem; ... }` which applies to checkboxes
+      // and makes each one stretch to fill its grid cell — that's what was pushing the
+      // label text aside and producing the overlapping/wrapped mess. The inline overrides
+      // below restore the checkbox's natural ~13px size and remove the extraneous padding
+      // and margin so it lays out cleanly inside the flex label. Text wrapped in a
+      // nowrap span so labels like "Auto-start after boot" stay on one line.
+      return '<label style="display:flex;align-items:center;gap:0.5rem;font-size:0.9em;color:var(--panel-fg)">' +
+             '<input type="checkbox" id="' + id + '"' + (val ? ' checked' : '') + cmdAttr +
+             ' style="width:auto;flex:0 0 auto;margin:0;padding:0;border:none;background:transparent">' +
+             '<span style="white-space:nowrap">' + entry.label + '</span></label>';
+    }
+    if (entry.type === 'string' && entry.secret) {
+      var placeholder = (val !== undefined && val !== '') ? '(set - leave blank to keep)' : '(not set)';
+      return '<label style="display:flex;flex-direction:column;gap:0.25rem;font-size:0.9em;color:var(--panel-fg)">' + entry.label + '<input type="password" id="' + id + '" placeholder="' + placeholder + '"' + cmdAttr + ' style="padding:0.5rem;border:1px solid var(--border);border-radius:4px;width:240px"></label>';
+    }
+    if (entry.type === 'int' || entry.type === 'float' ||
+        entry.type === 'u8'  || entry.type === 'u16'   || entry.type === 'u32') {
+      var step = entry.type === 'float' ? '0.01' : '1';
+      var minAttr = entry.min !== undefined && entry.min !== null ? ' min="' + entry.min + '"' : '';
+      var maxAttr = entry.max !== undefined && entry.max !== null ? ' max="' + entry.max + '"' : '';
+      var current = (val !== undefined && val !== null) ? val : (entry['default'] || 0);
+      return '<label style="display:flex;flex-direction:column;gap:0.25rem;font-size:0.9em;color:var(--panel-fg)">' + entry.label + '<input type="number" id="' + id + '" value="' + current + '"' + minAttr + maxAttr + ' step="' + step + '"' + cmdAttr + ' style="padding:0.5rem;border:1px solid var(--border);border-radius:4px;width:140px"></label>';
+    }
+    // string fallback
+    return '<label style="display:flex;flex-direction:column;gap:0.25rem;font-size:0.9em;color:var(--panel-fg)">' + entry.label + '<input type="text" id="' + id + '" value="' + (val == null ? '' : val) + '"' + cmdAttr + ' style="padding:0.5rem;border:1px solid var(--border);border-radius:4px;width:240px"></label>';
+  }
+
+  function build(cont, opts, schema, settings){
+    var pfx = opts.logPrefix || opts.containerId;
+    var mod = (schema.modules || []).find(function(m){ return m.name === opts.moduleName; });
+    if (!mod) {
+      errp(pfx, 'Module "' + opts.moduleName + '" not found in schema');
+      cont.innerHTML = '<span style="color:var(--danger,#e74c3c)">Schema module &quot;' + opts.moduleName + '&quot; not found</span>';
+      return;
+    }
+    var entries = mod.entries || [];
+    if (opts.keys && opts.keys.length) {
+      entries = entries.filter(function(e){ return opts.keys.indexOf(e.key) >= 0; });
+    }
+    if (opts.excludeKeys && opts.excludeKeys.length) {
+      entries = entries.filter(function(e){ return opts.excludeKeys.indexOf(e.key) < 0; });
+    }
+    if (entries.length === 0) {
+      warn(pfx, 'No entries to render after filter (module=' + opts.moduleName + ' keys=' + (opts.keys||['*']).join(',') + ')');
+      cont.innerHTML = '<span style="opacity:0.7">No matching settings</span>';
+      return;
+    }
+    log(pfx, 'Rendering ' + entries.length + ' entries: ' + entries.map(function(e){return e.key;}).join(','));
+
+    var sectionPath = opts.sectionPath || mod.section || mod.name;
+    var section = getValueByPath(settings, sectionPath) || {};
+    log(pfx, 'Reading values from settings path "' + sectionPath + '" (got ' + Object.keys(section).length + ' keys)');
+
+    var idPrefix = 'sp-' + opts.containerId;
+    // Group bool toggles together, scalars together — keeps the layout tidy.
+    var bools = entries.filter(function(e){ return e.type === 'bool' && !e.options; });
+    var others = entries.filter(function(e){ return !(e.type === 'bool' && !e.options); });
+
+    var html = '';
+    if (others.length > 0) {
+      html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:0.75rem;margin-bottom:0.75rem">';
+      others.forEach(function(e){ html += renderInput(e, section[e.key], idPrefix); });
+      html += '</div>';
+    }
+    if (bools.length > 0) {
+      // Grid with auto-fill minmax so each toggle gets its own slot at consistent
+      // width — labels of varying length no longer wrap raggedly into the next
+      // toggle, and the layout stays readable even with the ~80 debug flags the
+      // worker exposes. 200px min keeps the longest realistic label on one line.
+      html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:0.4rem 1rem;margin-bottom:0.75rem">';
+      bools.forEach(function(e){ html += renderInput(e, section[e.key], idPrefix); });
+      html += '</div>';
+    }
+    var btnId = idPrefix + '-save';
+    var msgId = idPrefix + '-msg';
+    html += '<button class="btn" id="' + btnId + '">' + (opts.saveLabel || 'Save') + '</button>';
+    html += ' <span id="' + msgId + '" style="font-size:0.85em;color:var(--muted);margin-left:0.5rem"></span>';
+    cont.innerHTML = html;
+    window._snapshotContainer(cont);
+
+    document.getElementById(btnId).addEventListener('click', function(){
+      var msg = document.getElementById(msgId);
+      var cmds = [];
+      var skipped = [];
+      cont.querySelectorAll('input,select').forEach(function(el){
+        if (!el.id) return;
+        var verb = el.getAttribute('data-cmd');
+        if (!verb) return;  // no CLI verb mapped → skip
+        var val;
+        if (el.type === 'checkbox') val = el.checked ? 1 : 0;
+        else if (el.tagName === 'SELECT') val = el.value;
+        else if (el.type === 'number') val = (el.step && el.step.indexOf('.') !== -1) ? parseFloat(el.value) : parseInt(el.value, 10);
+        else if (el.type === 'password') { if (!el.value || el.value.trim() === '') return; val = el.value; }
+        else val = el.value;
+        if (el.type !== 'password' && !window._isChanged(el.id, val)) { skipped.push(el.id); return; }
+        cmds.push(verb + ' ' + val);
+      });
+      log(pfx, 'Save click — ' + cmds.length + ' change(s), ' + skipped.length + ' unchanged');
+      if (cmds.length === 0) { if (msg) msg.textContent = 'No changes to save.'; return; }
+      log(pfx, 'Dispatching batch: ' + cmds.join(' ; '));
+      if (msg) msg.textContent = 'Saving ' + cmds.length + ' change(s)…';
+      sendSequential(cmds,
+        function(){
+          log(pfx, 'Save OK');
+          if (msg) msg.textContent = 'Saved ' + cmds.length + ' change(s).';
+          window._snapshotContainer(cont);
+          // Bonded save: worker just wrote its settings.json, so the master's
+          // cache is stale. Force a fresh /api/bond/settings/sync + invalidate
+          // and re-render so this panel reflects ground truth. Whoever wired
+          // the bonded view (window._bondSyncHook) gets a chance to update its
+          // page-level state (formLoadedHash, dirty banner) at the same time.
+          if (opts.target === 'bonded') {
+            log(pfx, 'Bonded save → /api/bond/settings/sync + cache invalidate');
+            fetch('/api/bond/settings/sync', {method:'POST', credentials:'same-origin'})
+              .then(function(r){ return r.json(); })
+              .then(function(d){
+                window.SchemaPanelInvalidate('bonded');
+                if (typeof window._bondSyncHook === 'function') window._bondSyncHook(d);
+                window.SchemaPanel.render(opts);
+              })
+              .catch(function(e){ warn(pfx, 'Post-save bonded sync failed: ' + e.message); });
+          }
+          setTimeout(function(){ if (msg) msg.textContent = ''; }, 4000);
+        },
+        function(e){
+          errp(pfx, 'Save failed: ' + (e ? e.message : 'unknown'));
+          if (msg) msg.textContent = 'Save failed: ' + (e ? e.message : 'unknown');
+        }
+      );
+    });
+  }
+
+  return {
+    render: function(opts){
+      var pfx = opts.logPrefix || opts.containerId;
+      var cont = document.getElementById(opts.containerId);
+      if (!cont) { errp(pfx, 'Container #' + opts.containerId + ' not found in DOM'); return Promise.reject(new Error('container not found')); }
+      var target = opts.target || 'local';
+      log(pfx, 'render() called for module=' + opts.moduleName + ' target=' + target);
+      return loadOnce(target).then(function(results){
+        // /api/bond/settings returns {settings:{...}}, /api/settings returns
+        // {settings:{...},...} — same shape for our purposes.
+        build(cont, opts, results[0] || {}, (results[1] && results[1].settings) || {});
+      }).catch(function(e){
+        errp(pfx, 'Render failed: ' + e.message);
+        cont.innerHTML = '<span style="color:var(--danger,#e74c3c)">Failed to load schema: ' + e.message + '</span>';
+      });
+    }
+  };
+})();
 </script>
 )EARLYJS", HTTPD_RESP_USE_STRLEN);
 
@@ -136,6 +417,21 @@ window.sendSequential = function(cmds, onDone, onFail) {
 <p>Configure your HardwareOne device settings</p>
 )SETPART1", HTTPD_RESP_USE_STRLEN);
 
+  // Target toggle — same pattern as the CLI and Files pages. Hidden by default;
+  // revealed at the bottom of this function (after the bonded panel HTML is
+  // emitted) when /api/bond/status reports this device is the bonded master.
+  // Opens settings-local-container, which wraps ALL the existing settings
+  // panels emitted below. Closing div + bonded container are emitted in the
+  // tail chunk at the end of streamSettingsInner.
+  httpd_resp_send_chunk(req, R"SETTOGGLE(
+<div id='settings-source-toggle' style='display:none;margin:0.75rem 0 0.25rem 0;align-items:center;gap:8px'>
+  <span style='font-size:0.85rem;color:var(--muted)'>Target:</span>
+  <button id='settings-btn-local' class='btn' onclick='showLocalSettings()'>This Device</button>
+  <button id='settings-btn-bonded' class='btn' onclick='showBondedSettings()'>Bonded Device</button>
+</div>
+<div id='settings-local-container'>
+)SETTOGGLE", HTTPD_RESP_USE_STRLEN);
+
   // Part 2: System Time, Output Channels, CLI History sections
   httpd_resp_send_chunk(req, R"SETPART2(
 <div class='settings-panel'>
@@ -144,47 +440,24 @@ window.sendSequential = function(cmds, onDone, onFail) {
     <button class='btn' id='btn-time-toggle' onclick="togglePane('time-pane','btn-time-toggle')">Expand</button>
   </div>
   <div id='time-pane' style='display:none;margin-top:0.75rem'>
-  <div style='display:flex;align-items:center;gap:1rem;margin-bottom:1rem;flex-wrap:wrap'>
-    <span style='color:var(--panel-fg)' title='Current timezone'>Timezone: <span style='font-weight:bold;color:var(--accent)' id='tz-value'>-</span></span>
-    <select id='tz-select' class='form-input input-medium' title='Select timezone'>
-      <option value='' disabled selected>-- Select Timezone --</option>
-      <option value='-720'>UTC-12 (Baker Island)</option>
-      <option value='-660'>UTC-11 (Samoa)</option>
-      <option value='-600'>UTC-10 (Hawaii/HST)</option>
-      <option value='-540'>UTC-9 (Alaska/AKST)</option>
-      <option value='-480'>UTC-8 (Pacific/PST)</option>
-      <option value='-420'>UTC-7 (Mountain/MST · Pacific/PDT)</option>
-      <option value='-360'>UTC-6 (Central/CST · Mountain/MDT)</option>
-      <option value='-300'>UTC-5 (Eastern/EST · Central/CDT)</option>
-      <option value='-240'>UTC-4 (Atlantic/AST · Eastern/EDT)</option>
-      <option value='-180'>UTC-3 (Argentina · Atlantic/ADT)</option>
-      <option value='-120'>UTC-2 (Mid-Atlantic)</option>
-      <option value='-60'>UTC-1 (Azores)</option>
-      <option value='0'>UTC+0 (London/GMT · Dublin)</option>
-      <option value='60'>UTC+1 (Berlin/Paris/CET · London/BST)</option>
-      <option value='120'>UTC+2 (Cairo/Athens/EET · Paris/CEST)</option>
-      <option value='180'>UTC+3 (Moscow/Baghdad)</option>
-      <option value='240'>UTC+4 (Dubai/Baku)</option>
-      <option value='300'>UTC+5 (Karachi/Tashkent)</option>
-      <option value='330'>UTC+5:30 (Mumbai/Delhi/IST)</option>
-      <option value='360'>UTC+6 (Dhaka/Almaty)</option>
-      <option value='420'>UTC+7 (Bangkok/Jakarta)</option>
-      <option value='480'>UTC+8 (Beijing/Singapore)</option>
-      <option value='540'>UTC+9 (Tokyo/Seoul/JST)</option>
-      <option value='570'>UTC+9:30 (Adelaide/ACST)</option>
-      <option value='600'>UTC+10 (Sydney/AEST)</option>
-      <option value='660'>UTC+11 (Solomon Islands)</option>
-      <option value='720'>UTC+12 (Fiji/Auckland/NZST)</option>
-    </select>
-    <button class='btn' onclick='updateTimezone()' title='Save selected timezone'>Update</button>
-  </div>
-  <div style='display:flex;align-items:center;gap:1rem;flex-wrap:wrap'>
-    <span style='color:var(--panel-fg)' title='NTP server for time synchronization'>NTP Server: <span style='font-weight:bold;color:var(--accent)' id='ntp-value'>-</span></span>
-    <input type='text' id='ntp-input' placeholder='pool.ntp.org' class='form-input' style='width:200px' title='Set NTP server hostname'>
-    <button class='btn' onclick='updateNtpServer()' title='Save new NTP server'>Update</button>
-  </div>
+    <!-- Schema-driven: the IIFE below fills this container at page load from
+         the wifi module's tzOffsetMinutes + ntpServer schema entries. All
+         save dispatch flows through sendSequential (beginwrite/savesettings
+         batched) instead of the old per-field Update buttons. -->
+    <div id='system-time-container' style='color:var(--panel-fg)'>Loading…</div>
   </div>
 </div>
+<script>
+// System Time — schema-driven via the shared SchemaPanel helper.
+window.SchemaPanel.render({
+  containerId: 'system-time-container',
+  moduleName: 'wifi',
+  sectionPath: 'network.wifi',
+  keys: ['tzOffsetMinutes', 'ntpServer'],
+  saveLabel: 'Save System Time',
+  logPrefix: 'System Time'
+});
+</script>
 <!-- Output Channels settings now in schema-driven Sensors panel -->
 )SETPART2", HTTPD_RESP_USE_STRLEN);
 
@@ -218,13 +491,13 @@ window.sendSequential = function(cmds, onDone, onFail) {
         <div id='wifi-connect-panel' style='display:none;margin-top:0.75rem'>
           <div style='margin-bottom:0.5rem'>Selected SSID: <strong id='sel-ssid'>-</strong></div>
           <input type='password' id='sel-pass' placeholder='WiFi password (leave blank if open)' class='form-input input-medium'>
-          <button class='btn' onclick="(function(){ var ssid=(document.getElementById('sel-ssid')||{}).textContent||''; var pass=(document.getElementById('sel-pass')||{}).value||''; if(!ssid){ alert('No SSID selected'); return; } var cmd1='wifiadd '+ssid+' '+pass+' 1 0'; fetch('/api/cli',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},credentials:'same-origin',body:'cmd='+encodeURIComponent(cmd1)}).then(function(r){return r.text();}).then(function(t1){ return hwConfirm('Credentials saved for \"'+ssid+'\". Attempt to connect now? You may temporarily lose access while switching.').then(function(ok){ if(!ok){ alert('Saved. You can connect later from this page.'); if(typeof refreshSettings==='function') refreshSettings(); return null; } return fetch('/api/cli',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},credentials:'same-origin',body:'cmd='+encodeURIComponent('wificonnect')}); }); }).then(function(r){ if(!r) return ''; return r.text(); }).then(function(t2){ if(t2){ alert(t2||'Connect attempted'); } if(typeof refreshSettings==='function') refreshSettings(); }).catch(function(e){ alert('Action failed: '+e.message); }); })();">Connect</button>
+          <button class='btn' onclick="(function(){ var ssid=(document.getElementById('sel-ssid')||{}).textContent||''; var pass=(document.getElementById('sel-pass')||{}).value||''; if(!ssid){ alert('No SSID selected'); return; } var cmd1='wifiadd '+ssid+' '+pass+' 1 0'; postSettingsCli(cmd1).then(function(t1){ return hwConfirm('Credentials saved for \"'+ssid+'\". Attempt to connect now? You may temporarily lose access while switching.').then(function(ok){ if(!ok){ alert('Saved. You can connect later from this page.'); if(typeof refreshSettings==='function') refreshSettings(); return null; } return postSettingsCli('wificonnect'); }); }).then(function(t){ return t || ''; }).then(function(t2){ if(t2){ alert(t2||'Connect attempted'); } if(typeof refreshSettings==='function') refreshSettings(); }).catch(function(e){ alert('Action failed: '+e.message); }); })();">Connect</button>
         </div>
         <div id='wifi-manual-panel' style='display:none;margin-top:0.75rem'>
           <div style='margin-bottom:0.5rem'>Enter hidden network credentials</div>
           <input type='text' id='manual-ssid' placeholder='Hidden SSID' class='form-input input-medium' style='margin-right:6px'>
           <input type='password' id='manual-pass' placeholder='Password (leave blank if open)' class='form-input input-medium' style='margin-right:6px'>
-          <button class='btn' onclick="(function(){ var ssid=(document.getElementById('manual-ssid')||{}).value||''; var pass=(document.getElementById('manual-pass')||{}).value||''; if(!ssid){ alert('Enter SSID'); return; } var cmd1='wifiadd '+ssid+' '+pass+' 1 1'; fetch('/api/cli',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},credentials:'same-origin',body:'cmd='+encodeURIComponent(cmd1)}).then(function(r){return r.text();}).then(function(t1){ return hwConfirm('Credentials saved for hidden network \"'+ssid+'\". Attempt to connect now? You may temporarily lose access while switching.').then(function(ok){ if(!ok){ alert('Saved. You can connect later from this page.'); if(typeof refreshSettings==='function') refreshSettings(); return null; } return fetch('/api/cli',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},credentials:'same-origin',body:'cmd='+encodeURIComponent('wificonnect')}); }); }).then(function(r){ if(!r) return ''; return r.text(); }).then(function(t2){ if(t2){ alert(t2||'Connect attempted'); } if(typeof refreshSettings==='function') refreshSettings(); }).catch(function(e){ alert('Action failed: '+e.message); }); })();">Connect</button>
+          <button class='btn' onclick="(function(){ var ssid=(document.getElementById('manual-ssid')||{}).value||''; var pass=(document.getElementById('manual-pass')||{}).value||''; if(!ssid){ alert('Enter SSID'); return; } var cmd1='wifiadd '+ssid+' '+pass+' 1 1'; postSettingsCli(cmd1).then(function(t1){ return hwConfirm('Credentials saved for hidden network \"'+ssid+'\". Attempt to connect now? You may temporarily lose access while switching.').then(function(ok){ if(!ok){ alert('Saved. You can connect later from this page.'); if(typeof refreshSettings==='function') refreshSettings(); return null; } return postSettingsCli('wificonnect'); }); }).then(function(t){ return t || ''; }).then(function(t2){ if(t2){ alert(t2||'Connect attempted'); } if(typeof refreshSettings==='function') refreshSettings(); }).catch(function(e){ alert('Action failed: '+e.message); }); })();">Connect</button>
         </div>
       </div>
     </div>
@@ -276,6 +549,21 @@ window.sendSequential = function(cmds, onDone, onFail) {
     var disAttr = disabled ? ' disabled' : '';
     var grayStyle = disabled ? 'opacity:0.6;cursor:not-allowed;' : '';
     var cmdAttr = e.cmdKey ? ' data-cmd="' + e.cmdKey + '"' : '';
+    // Enum-style picker — schema entry's `options` field is a CSV of
+    // `value|label` pairs (label-only tokens accepted; value defaults to
+    // label). Renders a <select> regardless of underlying type (int / string).
+    if (e.options) {
+      var html = '<label style="' + grayStyle + '">' + e.label + '<br><select id="' + id + '"' + disAttr + cmdAttr + ' style="padding:0.5rem;border:1px solid #ddd;border-radius:4px;min-width:200px">';
+      var current = (val !== undefined && val !== null) ? String(val) : '';
+      e.options.split(',').forEach(function(tok){
+        var bar = tok.indexOf('|');
+        var ov = bar >= 0 ? tok.substring(0, bar) : tok;
+        var ol = bar >= 0 ? tok.substring(bar + 1) : tok;
+        html += '<option value="' + ov + '"' + (ov === current ? ' selected' : '') + '>' + ol + '</option>';
+      });
+      html += '</select></label>';
+      return html;
+    }
     if (e.type === 'bool') {
       return '<label style="' + grayStyle + '"><input type="checkbox" id="' + id + '"' + (val ? ' checked' : '') + disAttr + cmdAttr + ' style="margin-right:0.5rem">' + e.label + '</label>';
     } else if (e.type === 'string' && e.secret) {
@@ -1683,8 +1971,7 @@ window.sendSequential = function(cmds, onDone, onFail) {
     var status = document.getElementById('https-certgen-status');
     if(btn) btn.disabled = true;
     if(status){ status.textContent = 'Generating...'; status.style.color = '#a0aec0'; }
-    fetch('/api/cli',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'cmd=certgen'})
-      .then(function(r){ return r.text(); })
+    postSettingsCli('certgen')
       .then(function(output){
         if(btn) btn.disabled = false;
         if(output.indexOf('Error') >= 0 || output.indexOf('error') >= 0){
@@ -1705,7 +1992,7 @@ window.sendSequential = function(cmds, onDone, onFail) {
 
   window.rebootDevice = async function(){
     if(!await hwConfirm('Reboot the device now?')) return;
-    fetch('/api/cli',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'cmd=reboot'})
+    postSettingsCli('reboot')
       .then(function(){
         document.body.innerHTML = '<div style="text-align:center;padding:4rem;color:var(--panel-fg)"><h2>Rebooting...</h2><p>The device is restarting. Please wait and then reconnect.</p></div>';
       });
@@ -1785,28 +2072,10 @@ console.log('[SETTINGS] Part 1: Core init starting...');
                               : (s.wifiAutoReconnect || false)));
         $('wifi-value').textContent = wifiAutoReconnect ? 'Enabled' : 'Disabled';
         $('wifi-btn').textContent = wifiAutoReconnect ? 'Disable' : 'Enable';
-        // Timezone and NTP live directly under network.wifi (no sub-group).
-        var tzMin = (wifiSect.tzOffsetMinutes !== undefined) ? wifiSect.tzOffsetMinutes
-                  : (s.tzOffsetMinutes !== undefined ? s.tzOffsetMinutes : null);
-        if (tzMin !== null) {
-          var tzSel = $('tz-select');
-          if (tzSel) { tzSel.value = String(tzMin); }
-          var tzVal = $('tz-value');
-          if (tzVal) {
-            var h = Math.floor(Math.abs(tzMin) / 60);
-            var m = Math.abs(tzMin) % 60;
-            var sign = tzMin < 0 ? '-' : '+';
-            tzVal.textContent = 'UTC' + sign + h + (m ? ':' + (m < 10 ? '0' : '') + m : '') + ' (' + tzMin + ' min)';
-          }
-        }
-        var ntpSrv = wifiSect.ntpServer || wifiSect.wifiNtpServer || s.ntpServer || '';
-        if (ntpSrv) {
-          var ntpEl = $('ntp-value');
-          if (ntpEl) ntpEl.textContent = ntpSrv;
-          var ntpIn = $('ntp-input');
-          if (ntpIn && !ntpIn.value) ntpIn.placeholder = ntpSrv;
-        }
-        // ESP-NOW toggle states now handled by schema-driven Network Services panel
+        // Timezone + NTP are now schema-driven (System Time panel is rendered
+        // from /api/settings/schema by the IIFE near the top of the page).
+        // refreshSettings no longer pokes their DOM directly.
+        // ESP-NOW toggle states handled by schema-driven Network Services panel
         
         // Output and LED settings now rendered dynamically via schema in Sensors panel.
         // (Removed dead reads of s.thermal_mlx90640 / s.tof_vl53l4cx / s.imu_bno055 / s.i2c —
@@ -1938,13 +2207,7 @@ console.log('[SETTINGS] Part 2: API helpers starting...');
       var v = cur ? 0 : 1;
       console.log('[SETTINGS] toggleWifi - current:', cur, 'new:', v);
       var cmd = 'wifiautoreconnect ' + v;
-      fetch('/api/cli', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        credentials: 'same-origin',
-        body: 'cmd=' + encodeURIComponent(cmd)
-      })
-      .then(function(r) { return r.text(); })
+      postSettingsCli(cmd)
       .then(function(t) {
         console.log('[SETTINGS] toggleWifi result:', t);
         if (t.indexOf('Error') >= 0) {
@@ -1961,13 +2224,7 @@ console.log('[SETTINGS] Part 2: API helpers starting...');
     
     // Toggle bond mode
     window.toggleBondMode = function() {
-      fetch('/api/cli', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        credentials: 'same-origin',
-        body: 'cmd=' + encodeURIComponent('bondmodeenabled')
-      })
-      .then(function(r) { return r.text(); })
+      postSettingsCli('bondmodeenabled')
       .then(function(t) { refreshSettings(); })
       .catch(function(e) { alert('Error: ' + e.message); });
     };
@@ -1990,70 +2247,16 @@ console.log('[SETTINGS] Part 2: API helpers starting...');
         .catch(function(e) { alert('Error saving auth settings: ' + e.message); });
     };
 
-    // Update timezone
-    window.updateTimezone = function() {
-      const select = document.getElementById('tz-select');
-      if (!select) return;
-      const value = select.value;
-      if (!value) {
-        alert('Please select a timezone');
-        return;
-      }
-      const cmd = 'tzoffsetminutes ' + value;
-      fetch('/api/cli', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        credentials: 'same-origin',
-        body: 'cmd=' + encodeURIComponent(cmd)
-      })
-      .then(function(r) { return r.text(); })
-      .then(function(response) {
-        alert(response);
-        if (typeof refreshSettings === 'function') refreshSettings();
-      })
-      .catch(function(e) {
-        alert('Failed to update timezone: ' + e.message);
-      });
-    };
-    
-    // Update NTP server
-    window.updateNtpServer = function() {
-      var val = $('ntp-input').value.trim();
-      if (!val) {
-        alert('Enter NTP server');
-        return;
-      }
-      fetch('/api/cli', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        credentials: 'same-origin',
-        body: 'cmd=' + encodeURIComponent('ntpserver ' + val)
-      })
-      .then(function(r) { return r.text(); })
-      .then(function(t) {
-        if (t.indexOf('Error') >= 0) {
-          alert(t);
-        } else {
-          refreshSettings();
-        }
-      })
-      .catch(function(e) {
-        alert('Error: ' + e.message);
-      });
-    };
-    
+    // updateTimezone / updateNtpServer removed — System Time panel is now
+    // schema-driven (see IIFE near SETPART2). The schema-rendered Save button
+    // dispatches via sendSequential so saves batch through beginwrite/savesettings.
+
     // toggleOutput removed - Output settings now in schema-driven Sensors panel
 
     // Disconnect WiFi
     window.disconnectWifi = async function() {
       if (await hwConfirm('Are you sure you want to disconnect from WiFi? You may lose connection to this device.')) {
-        fetch('/api/cli', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-          credentials: 'same-origin',
-          body: 'cmd=' + encodeURIComponent('wifidisconnect')
-        })
-        .then(function(r) { return r.text(); })
+        postSettingsCli('wifidisconnect')
         .then(function(t) {
           alert(t || 'Disconnected');
         })
@@ -2119,18 +2322,9 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
       console.log('[SETTINGS] scanNetworks called');
       var container = $('wifi-scan-results');
       container.innerHTML = 'Scanning...';
-      fetch('/api/cli', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        credentials: 'same-origin',
-        body: 'cmd=' + encodeURIComponent('wifiscan json')
-      })
-      .then(function(r) {
-        console.log('[SETTINGS] WiFi scan response:', r.status);
-        return r.text();
-      })
+      postSettingsCli('wifiscan json')
       .then(function(txt) {
-        console.log('[SETTINGS] WiFi scan result length:', txt.length);
+        console.log('[SETTINGS] WiFi scan result length:', (txt||'').length);
         var data = [];
         try {
           data = JSON.parse(txt || '[]');
@@ -2238,15 +2432,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
     window.revokeUserSessions = async function(username) {
       if (!username || !await hwConfirm('Revoke all sessions for user: ' + username + '?')) return;
       var cmd = 'sessionrevoke user ' + username;
-      fetch('/api/cli', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        credentials: 'same-origin',
-        body: 'cmd=' + encodeURIComponent(cmd)
-      })
-      .then(function(r) {
-        return r.text();
-      })
+      postSettingsCli(cmd)
       .then(function(t) {
         alert(t || 'Sessions revoked');
         try {
@@ -2261,15 +2447,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
     window.banUserByName = async function(username) {
       if (!username || !await hwConfirm('Ban user "' + username + '"? They will lose all access immediately.')) return;
       var cmd = 'banuser ' + username;
-      fetch('/api/cli', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        credentials: 'same-origin',
-        body: 'cmd=' + encodeURIComponent(cmd)
-      })
-      .then(function(r) {
-        return r.text();
-      })
+      postSettingsCli(cmd)
       .then(function(t) {
         alert(t || 'User banned');
         try {
@@ -2284,15 +2462,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
     window.unbanUserByName = async function(username) {
       if (!username || !await hwConfirm('Remove ban for user "' + username + '"?')) return;
       var cmd = 'unbanuser ' + username;
-      fetch('/api/cli', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        credentials: 'same-origin',
-        body: 'cmd=' + encodeURIComponent(cmd)
-      })
-      .then(function(r) {
-        return r.text();
-      })
+      postSettingsCli(cmd)
       .then(function(t) {
         alert(t || 'User unbanned');
         try {
@@ -2398,30 +2568,9 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
       if (!container) return;
       container.innerHTML = 'Loading...';
       Promise.all([
-        fetch('/api/cli', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-          credentials: 'same-origin',
-          body: 'cmd=' + encodeURIComponent('userlist json')
-        }).then(function(r) {
-          return r.text();
-        }),
-        fetch('/api/cli', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-          credentials: 'same-origin',
-          body: 'cmd=' + encodeURIComponent('sessionlist json')
-        }).then(function(r) {
-          return r.text();
-        }),
-        fetch('/api/cli', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-          credentials: 'same-origin',
-          body: 'cmd=' + encodeURIComponent('pendinglist json')
-        }).then(function(r) {
-          return r.text();
-        })
+        postSettingsCli('userlist json'),
+        postSettingsCli('sessionlist json'),
+        postSettingsCli('pendinglist json')
       ])
       .then(function(results) {
         var users = [], sessions = [], pending = [];
@@ -2578,15 +2727,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
         return;
       }
       var cmd = 'userpromote ' + username;
-      fetch('/api/cli', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        credentials: 'same-origin',
-        body: 'cmd=' + encodeURIComponent(cmd)
-      })
-      .then(function(r) {
-        return r.text();
-      })
+      postSettingsCli(cmd)
       .then(function(t) {
         if (t.indexOf('Error') >= 0) {
           alert('Error: ' + t);
@@ -2611,15 +2752,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
         return;
       }
       var cmd = 'userapprove ' + username;
-      fetch('/api/cli', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        credentials: 'same-origin',
-        body: 'cmd=' + encodeURIComponent(cmd)
-      })
-      .then(function(r) {
-        return r.text();
-      })
+      postSettingsCli(cmd)
       .then(function(t) {
         if (t.indexOf('Error') >= 0) {
           alert('Error: ' + t);
@@ -2644,15 +2777,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
         return;
       }
       var cmd = 'userdeny ' + username;
-      fetch('/api/cli', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        credentials: 'same-origin',
-        body: 'cmd=' + encodeURIComponent(cmd)
-      })
-      .then(function(r) {
-        return r.text();
-      })
+      postSettingsCli(cmd)
       .then(function(t) {
         if (t.indexOf('Error') >= 0) {
           alert('Error: ' + t);
@@ -2677,15 +2802,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
         return;
       }
       var cmd = 'userdemote ' + username;
-      fetch('/api/cli', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        credentials: 'same-origin',
-        body: 'cmd=' + encodeURIComponent(cmd)
-      })
-      .then(function(r) {
-        return r.text();
-      })
+      postSettingsCli(cmd)
       .then(function(t) {
         if (t.indexOf('Error') >= 0) {
           alert('Error: ' + t);
@@ -2710,15 +2827,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
         return;
       }
       var cmd = 'userdelete ' + username;
-      fetch('/api/cli', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        credentials: 'same-origin',
-        body: 'cmd=' + encodeURIComponent(cmd)
-      })
-      .then(function(r) {
-        return r.text();
-      })
+      postSettingsCli(cmd)
       .then(function(t) {
         if (t.indexOf('Error') >= 0) {
           alert('Error: ' + t);
@@ -2739,12 +2848,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
     window.toggleUserSync = function() {
       var current = $('usersync-enabled-value') && $('usersync-enabled-value').textContent === 'Enabled';
       var cmd = current ? 'espnowusersync off' : 'espnowusersync on';
-      fetch('/api/cli', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        credentials: 'same-origin',
-        body: 'cmd=' + encodeURIComponent(cmd)
-      }).then(function(r) { return r.text(); })
+      postSettingsCli(cmd)
       .then(function() {
         var nowEnabled = !current;
         var el = $('usersync-enabled-value');
@@ -2758,12 +2862,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
     };
     
     window.refreshSyncUsers = function() {
-      fetch('/api/cli', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        credentials: 'same-origin',
-        body: 'cmd=' + encodeURIComponent('userlist json')
-      }).then(function(r) { return r.text(); })
+      postSettingsCli('userlist json')
       .then(function(t) {
         var users = [];
         try { users = JSON.parse(t); } catch(e) {}
@@ -2787,12 +2886,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
       var sel = $('usersync-device');
       if (!sel) return;
       sel.innerHTML = '<option value="">Loading...</option>';
-      fetch('/api/cli', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        credentials: 'same-origin',
-        body: 'cmd=' + encodeURIComponent('espnowdevices')
-      }).then(function(r) { return r.text(); })
+      postSettingsCli('espnowdevices')
       .then(function(t) {
         var peers = [];
         var lines = t.split('\n');
@@ -2827,12 +2921,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
         return;
       }
       var cmd = 'usersync ' + username + ' ' + device + ' ' + adminPass + ' ' + userPass;
-      fetch('/api/cli', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        credentials: 'same-origin',
-        body: 'cmd=' + encodeURIComponent(cmd)
-      }).then(function(r) { return r.text(); })
+      postSettingsCli(cmd)
       .then(function(t) {
         alert(t || 'Sync complete');
         if ($('usersync-admin-password')) $('usersync-admin-password').value = '';
@@ -2845,12 +2934,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
       var sel = $('sync-device-' + uid);
       if (!sel) return;
       sel.innerHTML = '<option value="">Loading...</option>';
-      fetch('/api/cli', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        credentials: 'same-origin',
-        body: 'cmd=' + encodeURIComponent('espnowdevices')
-      }).then(function(r) { return r.text(); })
+      postSettingsCli('espnowdevices')
       .then(function(t) {
         var peers = [];
         var lines = t.split('\n');
@@ -2884,12 +2968,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
         return;
       }
       var cmd = 'usersync ' + username + ' ' + device + ' ' + adminPass + ' ' + userPass;
-      fetch('/api/cli', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        credentials: 'same-origin',
-        body: 'cmd=' + encodeURIComponent(cmd)
-      }).then(function(r) { return r.text(); })
+      postSettingsCli(cmd)
       .then(function(t) {
         alert(t || 'Sync complete');
         if ($('sync-admin-pass-' + uid)) $('sync-admin-pass-' + uid).value = '';
@@ -2914,6 +2993,261 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
 console.log('[SETTINGS] Part 4: Complete');
 console.log('[SETTINGS] All parts loaded successfully');
 </script>)SETPART4", HTTPD_RESP_USE_STRLEN);
+
+  // Tail: close settings-local-container, emit settings-bonded-container with
+  // the bonded settings panel (curated tz/ntp/loglevel subset), and the toggle
+  // JS that swaps containers. The toggle bar at the top of the page stays
+  // hidden until /api/bond/status confirms this device is the bonded master.
+  //
+  // First </div> closes the unclosed text-align refresh wrapper that
+  // SETPART8B opens at line 1984 (`<div style='text-align:center...'>`) and
+  // never closes — the four trailing <script> blocks live inside it. Second
+  // </div> closes settings-local-container itself. Without the first close,
+  // settings-bonded-container would land INSIDE settings-local-container, so
+  // showBondedSettings() hiding the local container would also hide the
+  // bonded panel — invisible bonded view in the UI.
+  httpd_resp_send_chunk(req, R"BONDSETTAIL(
+</div><!-- /text-align refresh wrapper opened by SETPART8B -->
+</div><!-- /settings-local-container -->
+<div id='settings-bonded-container' style='display:none'>
+  <!-- Slim toolbar row — Re-sync button + status text, no card border. The
+       local view goes straight from the Target toggle to the panel list with
+       no enclosing "Bonded Device Settings" wrapper; matching that here keeps
+       both views structurally consistent and avoids the double-card look. -->
+  <div style='display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin:1rem 0 0.5rem 0'>
+    <span id='bond-settings-status' style='font-size:0.85em;color:var(--muted)'>Click Re-sync to pull fresh settings from the worker</span>
+    <button class='btn' id='btn-bond-settings-resync' title='Pull a fresh copy from the worker over ESP-NOW'>Re-sync</button>
+  </div>
+  <div id='bond-settings-dirty-banner' style='display:none;margin-bottom:0.75rem;padding:0.6rem 0.9rem;background:rgba(255,193,7,0.15);border-left:3px solid #ffc107;border-radius:4px;color:var(--panel-fg);font-size:0.88rem'>
+    <strong>Worker settings changed</strong> since you loaded these. Click <em>Re-sync</em> to refresh — saving now would overwrite the worker's new values with the older ones in your form.
+  </div>
+  <!-- Dynamic host: filled after Re-sync with one collapsible SchemaPanel per
+       worker module (renderBondedModules in the script below). The schema is
+       fetched from /api/bond/settings/schema and values from /api/bond/settings,
+       so panels render whatever the worker actually has compiled in — even
+       modules absent from the master's build show up here, and modules missing
+       from the worker silently disappear. Per-panel Save buttons route through
+       the target-aware sendSequential -> /api/bond/cli/batch. -->
+  <div id='bond-settings-content' style='display:none'>
+    <div id='bond-modules-host'></div>
+  </div>
+</div><!-- /settings-bonded-container -->
+<script>
+(function(){
+  // Toggle helpers — mirror the Files/CLI page pattern.
+  function setSettingsButtons(local){
+    var bl = document.getElementById('settings-btn-local');
+    var bb = document.getElementById('settings-btn-bonded');
+    if (bl) bl.style.opacity = local ? '1' : '0.55';
+    if (bb) bb.style.opacity = local ? '0.55' : '1';
+  }
+  window.showLocalSettings = function(){
+    var lc = document.getElementById('settings-local-container');
+    var bc = document.getElementById('settings-bonded-container');
+    if (lc) lc.style.display = '';
+    if (bc) bc.style.display = 'none';
+    setSettingsButtons(true);
+    stopDirtyPoll();  // no need to poll while the bonded view isn't visible
+    // postSettingsCli / sendSequential route based on this — local view
+    // dispatches via /api/cli (writes go to this device).
+    window._settingsTarget = 'local';
+    console.log('[Settings] target → local');
+  };
+  window.showBondedSettings = function(){
+    var lc = document.getElementById('settings-local-container');
+    var bc = document.getElementById('settings-bonded-container');
+    if (lc) lc.style.display = 'none';
+    if (bc) bc.style.display = '';
+    setSettingsButtons(false);
+    // From now on every postSettingsCli / sendSequential dispatch (from any
+    // panel inside settings-bonded-container, including SchemaPanel.render
+    // ones if we ever add them) routes through the bond session to the worker.
+    window._settingsTarget = 'bonded';
+    console.log('[Settings] target → bonded');
+    // Hide form fields every time the user enters the bonded view — the
+    // cached values may be stale (e.g. worker edited locally since last
+    // sync). User must click Re-sync to acknowledge they want fresh data.
+    var content = document.getElementById('bond-settings-content');
+    if (content) content.style.display = 'none';
+    statusSet('Click Re-sync to pull fresh settings from the worker');
+    saveStatusSet('');
+    // Reset dirty state — banner and poller restart only after a successful
+    // Re-sync repopulates the form (loadFromCache sets formLoadedHash).
+    setDirty(false);
+    formLoadedHash = null;
+    stopDirtyPoll();
+  };
+
+  function statusSet(msg){ var s=document.getElementById('bond-settings-status'); if(s) s.textContent=msg; }
+  // saveStatusSet kept as a no-op for legacy callers (the old global Save
+  // button is gone; each SchemaPanel now shows its own status next to its
+  // Save button).
+  function saveStatusSet(msg, isErr){ /* per-panel status replaces this */ }
+  var bondPeerMac = '';
+
+  // Dirty-detection state. The peer publishes a CRC32 of its settings.json
+  // payload in every bond heartbeat. We capture that value at loadFromCache
+  // time as formLoadedHash; if subsequent polls show a different value, the
+  // worker has changed settings since the form was populated and saving now
+  // would overwrite their changes.
+  var formLoadedHash = null;
+  var dirtyPollTimer = null;
+  var isDirty = false;
+  function setDirty(d){
+    isDirty = !!d;
+    var b = document.getElementById('bond-settings-dirty-banner');
+    if (b) b.style.display = isDirty ? '' : 'none';
+  }
+  function checkDirty(){
+    if (formLoadedHash === null) return;
+    fetch('/api/bond/status',{credentials:'same-origin'})
+      .then(function(r){return r.json();})
+      .then(function(d){
+        if (!d) return;
+        if (d.peerSettingsHash !== undefined && d.peerSettingsHash !== formLoadedHash) setDirty(true);
+        else setDirty(false);
+      })
+      .catch(function(){});
+  }
+  function startDirtyPoll(){ stopDirtyPoll(); dirtyPollTimer = setInterval(checkDirty, 5000); }
+  function stopDirtyPoll(){ if (dirtyPollTimer) { clearInterval(dirtyPollTimer); dirtyPollTimer = null; } }
+
+  // Probe /api/bond/status — only reveal the toggle bar for a bonded master.
+  fetch('/api/bond/status',{credentials:'same-origin'}).then(function(r){return r.json();}).then(function(d){
+    if(!d || d.role !== 1 || !d.bonded || !d.peerMac) return;
+    if(d.peerMac === '00:00:00:00:00:00') return;
+    bondPeerMac = d.peerMac;
+    var t = document.getElementById('settings-source-toggle');
+    if (t) t.style.display = 'flex';
+    setSettingsButtons(true);  // Default to "This Device" highlighted
+  }).catch(function(){});
+
+  // Modules we don't render in the bonded view. Auth/users have dedicated
+  // composite UI on the local page (multi-user lists, password resets) that
+  // doesn't map cleanly to SchemaPanel's flat field grid. Bond mode itself
+  // excluded because reconfiguring bond over its own session would
+  // self-destruct. If a future refactor splits credential-bearing entries
+  // out, we can re-add some of these.
+  var BONDED_MODULE_DENYLIST = ['users', 'bond'];
+
+  // Per-module key whitelist for the bonded view. Modules listed here render
+  // ONLY the keys named — used for partial exposure when a module has both
+  // safe-to-edit fields and risky ones. WiFi is the canonical case: tz/NTP
+  // are fine to push to the worker, but SSID/password/enabled would cut the
+  // network out from under the bond.
+  var BONDED_KEY_WHITELIST = {
+    wifi: ['ntpServer', 'tzOffsetMinutes']
+  };
+
+  // After a successful sync, fetch the worker's schema and render one
+  // SchemaPanel per module into bond-modules-host. Each panel renders the
+  // entries for its module and wires its own Save button — which routes
+  // through sendSequential → /api/bond/cli/batch because
+  // window._settingsTarget is 'bonded' while this view is active.
+  function renderBondedModules(){
+    var host = document.getElementById('bond-modules-host');
+    if(!host) return;
+    host.innerHTML = '<span style="opacity:0.7">Loading worker schema…</span>';
+    fetch('/api/bond/settings/schema',{credentials:'same-origin'})
+      .then(function(r){ return r.json(); })
+      .then(function(schema){
+        if(!schema || !Array.isArray(schema.modules)){
+          host.innerHTML = '<span style="color:var(--danger,#e74c3c)">Worker schema unavailable</span>';
+          return;
+        }
+        var visible = schema.modules.filter(function(m){
+          return m && m.name && BONDED_MODULE_DENYLIST.indexOf(m.name) < 0
+                                   && Array.isArray(m.entries) && m.entries.length > 0;
+        });
+        console.log('[Bonded] Worker exposed ' + schema.modules.length + ' modules, rendering ' + visible.length + ' (denylist: ' + BONDED_MODULE_DENYLIST.join(',') + ')');
+        host.innerHTML = '';
+        visible.forEach(function(m){
+          var panelId = 'bond-mod-' + m.name;
+          var paneId  = 'bond-pane-' + m.name;
+          var btnId   = 'btn-bond-' + m.name + '-toggle';
+          var wrap = document.createElement('div');
+          wrap.className = 'settings-panel';
+          wrap.style.marginBottom = '0.75rem';
+          var title = m.description && m.description.length > 0 ? m.description : m.name;
+          var connected = (m.connected === undefined) ? '' :
+            ' <span style="font-size:0.8em;opacity:0.7;margin-left:0.5rem">[' + (m.connected ? 'connected' : 'disconnected') + ']</span>';
+          // Collapsible header + hidden content pane — same pattern as the local
+          // settings page's panels (togglePane is defined in EARLYJS at the top
+          // of streamSettingsInner). Modules start collapsed so the page is
+          // compact by default; user expands the ones they want to edit.
+          wrap.innerHTML =
+            '<div style="display:flex;align-items:center;justify-content:space-between;gap:0.5rem">' +
+              '<div style="font-size:1.05rem;font-weight:bold;color:var(--panel-fg)">' +
+                title + connected +
+              '</div>' +
+              '<button class="btn" id="' + btnId + '" onclick="togglePane(\'' + paneId + '\',\'' + btnId + '\')">Expand</button>' +
+            '</div>' +
+            '<div id="' + paneId + '" style="display:none;margin-top:0.75rem">' +
+              '<div id="' + panelId + '"></div>' +
+            '</div>';
+          host.appendChild(wrap);
+          var panelOpts = {
+            containerId: panelId,
+            moduleName: m.name,
+            target: 'bonded',
+            saveLabel: 'Save to Worker',
+            logPrefix: 'Bonded:' + m.name
+          };
+          if (BONDED_KEY_WHITELIST[m.name]) panelOpts.keys = BONDED_KEY_WHITELIST[m.name];
+          window.SchemaPanel.render(panelOpts);
+        });
+        if (visible.length === 0) {
+          host.innerHTML = '<span style="opacity:0.7">No editable modules — worker may have non-default build flags.</span>';
+        }
+      })
+      .catch(function(e){ host.innerHTML = '<span style="color:var(--danger,#e74c3c)">Schema fetch failed: ' + e.message + '</span>'; });
+  }
+
+  // SchemaPanel calls this after a bonded save → /api/bond/settings/sync. It
+  // hands us the sync response so we can update the dirty-detection baseline
+  // alongside the cache invalidate. Without this, the form would re-render
+  // against fresh values but the dirty banner would think it's still drifted.
+  window._bondSyncHook = function(d){
+    if (d && d.ok && d.peerSettingsHash !== undefined) formLoadedHash = d.peerSettingsHash;
+    setDirty(false);
+  };
+
+  // Re-sync button: pull BOTH the worker's values (/api/bond/settings/sync)
+  // AND its schema (/api/bond/settings/schema/sync) in parallel, then render.
+  // Both endpoints trigger a SETTINGS_REQ / SCHEMA_REQ over bond and poll
+  // their respective `received` flags until the file transfer completes.
+  // Parallel because the two transfers are independent on the wire and the
+  // master/worker can pipeline them — typical wall time is max(2s, 2s)
+  // rather than sum.
+  var resyncBtn = document.getElementById('btn-bond-settings-resync');
+  if(resyncBtn){
+    resyncBtn.addEventListener('click', function(){
+      resyncBtn.disabled = true;
+      statusSet('Syncing values + schema from worker…');
+      Promise.all([
+        fetch('/api/bond/settings/sync',       {method:'POST',credentials:'same-origin'}).then(function(r){return r.json();}),
+        fetch('/api/bond/settings/schema/sync',{method:'POST',credentials:'same-origin'}).then(function(r){return r.json();})
+      ]).then(function(results){
+        var sd = results[0]; // settings sync result
+        var hd = results[1]; // schema sync result
+        resyncBtn.disabled = false;
+        if(!sd || !sd.ok){ statusSet('Settings sync failed: '+((sd&&sd.error)||'unknown')); return; }
+        if(!hd || !hd.ok){ statusSet('Schema sync failed: '+((hd&&hd.error)||'unknown')); return; }
+        if (sd.peerSettingsHash !== undefined) formLoadedHash = sd.peerSettingsHash;
+        statusSet('Synced (values '+sd.elapsedMs+'ms, schema '+hd.elapsedMs+'ms)');
+        // Both file caches are now fresh on disk; invalidate the browser
+        // SchemaPanel cache so the next render fetches the new bytes.
+        window.SchemaPanelInvalidate('bonded');
+        document.getElementById('bond-settings-content').style.display = '';
+        setDirty(false);
+        startDirtyPoll();
+        renderBondedModules();
+      }).catch(function(e){ resyncBtn.disabled=false; statusSet('Sync error: '+e.message); });
+    });
+  }
+})();
+</script>
+)BONDSETTAIL", HTTPD_RESP_USE_STRLEN);
 }
 
 // Legacy function removed - now using streamSettingsInner() for efficient streaming

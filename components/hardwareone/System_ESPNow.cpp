@@ -14,6 +14,7 @@
 #include <esp_wifi.h>
 #include <esp_chip_info.h>
 #include <esp_flash.h>
+#include <esp_crc.h>                 // esp_crc32_le for bond settings hash
 #include <LittleFS.h>
 #include <Preferences.h>
 #include "mbedtls/aes.h"
@@ -24,6 +25,7 @@
 #include "OLED_Display.h"
 #include "OLED_UI.h"
 #include "System_AuthIdentity.h"   // currentAuthContext (CLI handlers + ESP-NOW frame ctx)
+#include "System_ESPNow_Saturation.h"  // espnowSaturationTick / espnowSaturationNoteAckRtt
 #include "System_Command.h"
 #include "System_Notifications.h"
 #include "System_Debug.h"
@@ -1392,9 +1394,14 @@ static void broadcast_tracker_check_timeouts() {
         // Silent completion — no peers to report on
         gBroadcastsCompleted++;
       } else if (allReceived) {
+        uint32_t rttMs = (uint32_t)(now - t->startMs);
         BROADCAST_PRINTF("[Broadcast] msgId=%lu: %u/%u peers ACK'd (100%%) in %lums",
                         (unsigned long)t->msgId, t->receivedCount, t->expectedCount,
-                        (unsigned long)(now - t->startMs));
+                        (unsigned long)rttMs);
+        // Feed the saturation sampler: this is our cleanest source of ACK RTT
+        // observations (one per completed broadcast). Sensor-stream traffic is
+        // broadcast-shaped, so this directly tracks the stress-test workload.
+        espnowSaturationNoteAckRtt(rttMs);
         gBroadcastsCompleted++;
       } else {
         BROADCAST_PRINTF("[Broadcast] msgId=%lu: %u/%u peers ACK'd (%.1f%%) - timed out",
@@ -2537,6 +2544,7 @@ static bool            cacheManifestToLittleFS(const uint8_t fwHash[16], const S
 #endif
 #if ENABLE_BONDED_MODE
 static void            processBondSettings(const uint8_t* srcMac, const String& deviceName, const String& settingsStr);
+static void            processBondSchema(const uint8_t* srcMac, const String& deviceName, const String& schemaStr);
 static void            requestBondSettings(const uint8_t* peerMac);
 #endif
 #if ENABLE_BONDED_MODE
@@ -2992,28 +3000,15 @@ static void v4h_topo_req(const V4RxCtx& ctx) {
     if (gMeshPeers[i].isActive && !isSelfMac(gMeshPeers[i].mac) &&
         peerIsInRequesterMesh(gMeshPeers[i].mac)) {
       bool isLast = (peerIndex == peerCount - 1);
-      const char* peerNamePtr = nullptr;
-      char peerNameBuf[48];
-      if (gMeshPeerMeta) {
-        for (int _pni = 0; _pni < gMeshPeerSlots; _pni++) {
-          if (gMeshPeerMeta[_pni].isActive && memcmp(gMeshPeerMeta[_pni].mac, gMeshPeers[i].mac, 6) == 0 && gMeshPeerMeta[_pni].name[0]) {
-            peerNamePtr = gMeshPeerMeta[_pni].name; break;
-          }
-        }
-      }
-      if (!peerNamePtr && gEspNow) {
-        for (int _pni = 0; _pni < gEspNow->deviceCount; _pni++) {
-          if (memcmp(gEspNow->devices[_pni].mac, gMeshPeers[i].mac, 6) == 0 && gEspNow->devices[_pni].name.length()) {
-            strlcpy(peerNameBuf, gEspNow->devices[_pni].name.c_str(), sizeof(peerNameBuf));
-            peerNamePtr = peerNameBuf; break;
-          }
-        }
-      }
+      // String must outlive v4_send_topo_peer's read of c_str() — kept on
+      // stack for the duration of this scope, which the call below honors.
+      String resolvedName = getEspNowDeviceName(gMeshPeers[i].mac);
+      const char* peerNamePtr = resolvedName.length() ? resolvedName.c_str() : "Unknown";
       MeshPeerHealth* ph = getMeshPeerHealth(gMeshPeers[i].mac, false);
       int8_t rssi = ph ? ph->rssi : 0;
       v4_send_topo_peer(ctx.recv_info->src_addr, tr->reqId, (uint8_t)peerIndex,
                         isLast, gMeshPeers[i].mac, rssi,
-                        false, peerNamePtr ? peerNamePtr : "Unknown");
+                        false, peerNamePtr);
       peerIndex++;
     }
   }
@@ -3418,6 +3413,19 @@ static void v4h_settings_req(const V4RxCtx& ctx) {
   }
 }
 
+// SCHEMA_REQ — peer asks for our settings schema as a file. Mirrors
+// SETTINGS_REQ: handler is a small flag-flip, the actual JSON generation +
+// file transfer happens later in the tick (section 9f) where there's stack
+// headroom and we can gate on an encrypted session.
+static void v4h_schema_req(const V4RxCtx& ctx) {
+  DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_SCHEMA_REQ_RX] from %s isPaired=%d", ctx.deviceName, (int)ctx.isPaired);
+  if (gEspNow) {
+    memcpy(gEspNow->bondPendingResponseMac, ctx.recv_info->src_addr, 6);
+    gEspNow->bondNeedsSchemaResponse = true;
+    DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_SCHEMA_REQ_RX] set bondNeedsSchemaResponse=true");
+  }
+}
+
 // BOND_STATUS_REQ — peer asks for live status. Defer to task.
 static void v4h_bond_status_req(const V4RxCtx& ctx) {
   DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_STATUS_REQ_RX] from %s", ctx.deviceName);
@@ -3538,9 +3546,9 @@ static void v4h_metadata_resp_push(const V4RxCtx& ctx) {
 // STREAM — incoming stream output; ring-buffer enqueue to task. Bypasses
 // dedup (see special-cased dedup bypass in v4_try_handle_incoming).
 static void v4h_stream(const V4RxCtx& ctx) {
-  if (ctx.payloadLen == 0 || ctx.payloadLen > ESPNOW_V4_MAX_PAYLOAD || !gEspNow) return;
+  if (ctx.payloadLen == 0 || ctx.payloadLen > ESPNOW_V4_MAX_PAYLOAD || !gEspNow || !gEspNow->streamQueue) return;
   int head = gEspNow->streamQueueHead;
-  int nextHead = (head + 1) & (EspNowState::STREAM_QUEUE_SIZE - 1);
+  int nextHead = (head + 1) & gEspNow->streamQueueMask;
   if (nextHead != gEspNow->streamQueueTail) {
     auto& entry = gEspNow->streamQueue[head];
     size_t copyLen = (ctx.payloadLen < sizeof(entry.content) - 1) ? ctx.payloadLen : sizeof(entry.content) - 1;
@@ -3551,8 +3559,13 @@ static void v4h_stream(const V4RxCtx& ctx) {
     entry.deviceName[sizeof(entry.deviceName) - 1] = '\0';
     entry.used = true;
     gEspNow->streamQueueHead = nextHead;
+  } else {
+    // Queue full — drop this frame (better than overwriting). Counted into
+    // streamDroppedCount so espnowstats / espnowsaturation surface the overflow
+    // accurately; without this, drops were silent and the "Stream Dropped"
+    // counter stayed at 0 forever (latent observability bug).
+    gEspNow->streamDroppedCount++;
   }
-  // else: queue full, drop this frame (better than overwriting)
   gEspNow->streamReceivedCount++;
 }
 
@@ -3657,6 +3670,11 @@ static void v4h_file_end(const V4RxCtx& ctx) {
       DEBUG_ESPNOWF("[FILE_END] Calling processBondSettings (settingsStr len=%d)", settingsStr.length());
       processBondSettings((uint8_t*)sndMac, senderMacStr, settingsStr);
       BROADCAST_PRINTF("[V4_FILE] Settings processed: %lu bytes", (unsigned long)recvBytes);
+    } else if (strcmp(filename, "_schema_out.json") == 0) {
+      DEBUG_ESPNOWF("[FILE_END] Detected schema file: %s (%lu bytes)", filename, (unsigned long)recvBytes);
+      String schemaStr((char*)dataBuf, recvBytes);
+      processBondSchema((uint8_t*)sndMac, senderMacStr, schemaStr);
+      BROADCAST_PRINTF("[V4_FILE] Schema processed: %lu bytes", (unsigned long)recvBytes);
     } else
 #endif // ENABLE_BONDED_MODE
     {
@@ -3795,6 +3813,7 @@ static const V4OpcodeEntry kV4HandlerTable[] = {
   { ESPNOW_V4_TYPE_BOND_CAP_RESP,    V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_bond_cap_resp     },
   { ESPNOW_V4_TYPE_SENSOR_DATA,      V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_sensor_data       },
   { ESPNOW_V4_TYPE_SETTINGS_REQ,     V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_settings_req      },
+  { ESPNOW_V4_TYPE_SCHEMA_REQ,       V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_schema_req        },
   { ESPNOW_V4_TYPE_BOND_STATUS_REQ,  V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_bond_status_req   },
   { ESPNOW_V4_TYPE_BOND_STATUS_RESP, V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_bond_status_resp  },
   { ESPNOW_V4_TYPE_MANIFEST_REQ,     V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_manifest_req      },
@@ -4232,10 +4251,16 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
   }
   
   // Dedup check
-  // STREAM frames intentionally reuse msgId=cmdMsgId for correlation and are multi-frame.
-  // If we dedup STREAM by msgId, STREAM_BEGIN (payloadLen=0) will cause the sender to drop
-  // all subsequent stream data frames and even CMD_RESP with the same msgId.
+  // The streaming-response family (STREAM, STREAM_CTRL, CMD_RESP) intentionally
+  // reuses msgId=cmdMsgId for correlation and spans multiple frames. If we dedup
+  // any of them by (origin,msgId), the first frame inserts the id and every later
+  // frame with the same id — including the CMD_RESP that carries the actual command
+  // output (e.g. a bonded `files /` listing) — is dropped as a "duplicate". That
+  // silently empties the bonded-device file/CLI views on the master. FILE_* frames
+  // are likewise multi-frame under one msgId.
   if (h->type != ESPNOW_V4_TYPE_STREAM &&
+      h->type != ESPNOW_V4_TYPE_STREAM_CTRL &&
+      h->type != ESPNOW_V4_TYPE_CMD_RESP &&
       h->type != ESPNOW_V4_TYPE_FILE_START &&
       h->type != ESPNOW_V4_TYPE_FILE_DATA &&
       h->type != ESPNOW_V4_TYPE_FILE_END) {
@@ -4468,6 +4493,14 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
                       token[0], token[1], token[2], token[3]);
         if (validateBondSessionToken(token, 16)) {
           authOk = true;
+          // The bonded master is a trusted administrator for the life of the bond
+          // (bond is the auth/RCE channel). Run its commands under the reserved
+          // bond-admin identity so admin-gated commands (files, system logs, …)
+          // are authorized — isAdminUser(kBondAdminUser) is true only while this
+          // live session exists. Replaces the old non-admin "espnow" identity that
+          // silently failed admin commands.
+          strncpy(username, kBondAdminUser, sizeof(username) - 1);
+          username[sizeof(username) - 1] = '\0';
           BROADCAST_PRINTF("[ESP-NOW] Bonded command from %s (session token): %s", deviceName, actualCmd);
         } else {
           BROADCAST_PRINTF("[ESP-NOW] Invalid session token from %s", deviceName);
@@ -4694,17 +4727,8 @@ static void captureEspNowFrame(const char* direction, const uint8_t* peerMac,
   if (now <= 0) now = (time_t)(millis() / 1000);  // fallback if NTP not synced yet
   if (!ensureCaptureFile(now)) return;
 
-  // Look up peer name if we know them. devices[] is a contiguous list of
-  // paired peers of size gEspNow->deviceCount (no per-slot "active" flag).
-  String peerName;
-  if (gEspNow && peerMac) {
-    for (int i = 0; i < gEspNow->deviceCount; i++) {
-      if (memcmp(gEspNow->devices[i].mac, peerMac, 6) == 0) {
-        peerName = gEspNow->devices[i].name;
-        break;
-      }
-    }
-  }
+  // Resolve peer name (meta first, paired registry fallback).
+  String peerName = peerMac ? getEspNowDeviceName(peerMac) : String();
 
   char macStr[20];
   if (peerMac) {
@@ -4768,11 +4792,20 @@ static void onEspNowRawRecv(const esp_now_recv_info* recv_info, const uint8_t* i
  * @warning Do not call blocking functions or allocate memory
  */
 void onEspNowDataSent(const uint8_t* mac_addr, esp_now_send_status_t status) {
-  // Statistics are now tracked in routerSend() for better accuracy
-  // This callback is kept for flow control only
- 
+  // This callback fires once per esp_now_send() completion regardless of the
+  // call path (single-frame / fragmented / encrypted / ACK / …) and is the only
+  // single point where TX accounting can be done correctly without touching
+  // every send-site. Cumulative counters here feed both `espnowstats` and
+  // `espnowsaturation` (frames/sec, fail-rate). Without this the previous
+  // "Stream Sent" reading was stuck at the constructor's 0 (latent stats bug).
   (void)mac_addr;
   if (!gEspNow) return;
+
+  if (status == ESP_NOW_SEND_SUCCESS) {
+    gEspNow->routerMetrics.messagesSent++;
+  } else {
+    gEspNow->routerMetrics.messagesFailed++;
+  }
 
   gEspNow->lastStatus = status;
   gEspNow->txDone = true;
@@ -5209,30 +5242,31 @@ static bool cacheManifestToLittleFS(const uint8_t fwHash[16], const String& mani
 // Settings Sync for Bond Mode
 // ============================================================================
 
+// Forward declaration — generateDeviceSettings() is defined below but used by
+// computeBondLocalSettingsHash() to hash the exact wire payload.
+static String generateDeviceSettings();
+
 /**
- * Compute a lightweight FNV-1a hash of device settings (excluding passwords).
- * Stored in gEspNow->bondLocalSettingsHash and sent in bond heartbeats so the
- * peer can detect when our settings have changed without a full exchange.
+ * Compute a CRC32 over the exact bytes a bonded peer would receive from us
+ * via generateDeviceSettings(). Stored in gEspNow->bondLocalSettingsHash and
+ * sent in every bond heartbeat. The peer hashes the file content it receives
+ * during a settings sync the same way, so the two values match by
+ * construction — any user-visible setting change (any field, any subsection,
+ * including tz/ntp/loglevel which the old curated FNV missed) flips the hash.
+ *
+ * Cost: re-serializes settings on each call. Acceptable because the function
+ * fires only at init + after writeSettingsJson (uncommon), not per-heartbeat
+ * — heartbeats just read the cached uint32 value.
  */
 void computeBondLocalSettingsHash() {
   if (!gEspNow) return;
-  // FNV-1a 32-bit
-  uint32_t hash = 2166136261u;
-  // Hash a few key settings fields that the peer cares about
-  auto fnv = [&hash](const char* s) {
-    while (*s) { hash ^= (uint8_t)*s++; hash *= 16777619u; }
-  };
-  fnv(gSettings.espnowDeviceName.c_str());
-  fnv(gSettings.espnowFriendlyName.c_str());
-  fnv(gSettings.espnowRoom.c_str());
-  fnv(gSettings.espnowZone.c_str());
-  fnv(gSettings.espnowTags.c_str());
-  // Include bond role and some numeric settings
-  uint8_t role = gSettings.bondRole;
-  hash ^= role; hash *= 16777619u;
-  uint8_t stationary = gSettings.espnowStationary ? 1 : 0;
-  hash ^= stationary; hash *= 16777619u;
-  gEspNow->bondLocalSettingsHash = hash;
+  String payload = generateDeviceSettings();
+  if (payload.length() == 0) {
+    gEspNow->bondLocalSettingsHash = 0;
+    return;
+  }
+  gEspNow->bondLocalSettingsHash =
+    esp_crc32_le(0, (const uint8_t*)payload.c_str(), payload.length());
 }
 
 /**
@@ -5266,14 +5300,10 @@ static bool cacheSettingsToLittleFS(const uint8_t* peerMac, const String& settin
     return false;
   }
   
-  // Build path from MAC address (canonical PATH TOKEN form, System_Utils.h)
-  char macStr[13];
-  macToPathToken(peerMac, macStr);
-  
   char dirPath[48];
-  snprintf(dirPath, sizeof(dirPath), "/system/espnow/peers/%s", macStr);
+  peerCacheDir(peerMac, dirPath, sizeof(dirPath));
   char filePath[64];
-  snprintf(filePath, sizeof(filePath), "%s/settings.json", dirPath);
+  peerCachePath(peerMac, "settings.json", filePath, sizeof(filePath));
   DEBUG_ESPNOWF("[SETTINGS_CACHE] Target path: %s", filePath);
   
   // Ensure per-peer directory exists (parent dirs created at filesystem init)
@@ -5311,12 +5341,8 @@ String loadSettingsFromCache(const uint8_t* peerMac) {
     return "";
   }
   
-  // Build path from MAC address (canonical PATH TOKEN form, System_Utils.h)
-  char macStr[13];
-  macToPathToken(peerMac, macStr);
-  
   char filePath[64];
-  snprintf(filePath, sizeof(filePath), "/system/espnow/peers/%s/settings.json", macStr);
+  peerCachePath(peerMac, "settings.json", filePath, sizeof(filePath));
   DEBUG_ESPNOWF("[SETTINGS_LOAD] Checking path: %s", filePath);
   
   if (!VFS::existsGuarded(filePath, VFS::systemAuth("espnow.settings_cache_load"))) {
@@ -5482,6 +5508,173 @@ static void sendBondSettings(const uint8_t* peerMac) {
 #endif
 }
 
+// ============================================================================
+// Bond schema transfer (mirrors bond settings transfer above)
+// ============================================================================
+//
+// Architecture mirrors sendBondSettings exactly: worker writes JSON to a temp
+// file in /system/espnow/this_device/, hands it to sendFileToMac, deletes
+// the temp file after the chunked transfer is initiated. Receiver picks the
+// file up in v4h_file_end → processBondSchema, which caches it at
+// /system/espnow/peers/<MAC>/schema.json.
+//
+// Why a separate file (not folded into settings.json): schema is compile-time
+// metadata that only changes on reflash; settings.json changes on every save.
+// Coupling them would force every save to rewrite ~8 KB of unchanging schema
+// and every settings reader to step past it. Two files, same pipeline.
+
+static uint32_t sLastSchemaSendMs = 0;
+static volatile bool sSchemaTransferInProgress = false;
+static const uint32_t SCHEMA_DEBOUNCE_MS = 3000;  // 3s cooldown between schema sends
+static const uint32_t SCHEMA_MIN_HEAP    = 20000; // 20KB heap headroom for JSON build
+
+// Send schema to bonded peer (response to SCHEMA_REQ). The peer caches it
+// under peers/<MAC>/schema.json for the bonded settings panel to render
+// against. Worker-side temp file lives in /system/espnow/this_device/, the
+// folder we mkdir at FS init for this device's own bond-self files.
+static void sendBondSchema(const uint8_t* peerMac) {
+  DEBUG_ESPNOWF("[SCHEMA_SEND] sendBondSchema called");
+  if (!peerMac || !gEspNow) {
+    ERROR_ESPNOWF("[SCHEMA_SEND] EXIT: peerMac or gEspNow is NULL");
+    return;
+  }
+  if (!gEspNow->bondPeerOnline) {
+    DEBUG_ESPNOWF("[SCHEMA_SEND] SKIP: peer offline");
+    return;
+  }
+  if (sSchemaTransferInProgress) {
+    DEBUG_ESPNOWF("[SCHEMA_SEND] SKIP: transfer already in progress");
+    return;
+  }
+  uint32_t now = millis();
+  if (now - sLastSchemaSendMs < SCHEMA_DEBOUNCE_MS) {
+    DEBUG_ESPNOWF("[SCHEMA_SEND] SKIP: debounced (last=%lums ago)",
+                  (unsigned long)(now - sLastSchemaSendMs));
+    return;
+  }
+  size_t freeHeap = ESP.getFreeHeap();
+  if (freeHeap < SCHEMA_MIN_HEAP) {
+    WARN_ESPNOWF("[SCHEMA_SEND] SKIP: low heap (%u < %lu required)",
+                 freeHeap, (unsigned long)SCHEMA_MIN_HEAP);
+    return;
+  }
+
+  sSchemaTransferInProgress = true;
+  sLastSchemaSendMs = now;
+
+  vTaskDelay(pdMS_TO_TICKS(10));  // yield before heavy build
+
+  // Build schema JSON → write to temp → release String before transfer. The
+  // scoped braces ensure the String destructor runs (freeing its internal
+  // heap) before sendFileToMac fires — same pattern sendBondSettings uses.
+  String tempPath = "/system/espnow/this_device/_schema_out.json";
+  size_t schemaLen = 0;
+  {
+    PSRAM_JSON_DOC(doc);
+    buildSettingsSchemaJson(doc);
+    String schema;
+    serializeJson(doc, schema);
+    schemaLen = schema.length();
+    DEBUG_ESPNOWF("[SCHEMA_SEND] Generated schema JSON: %d bytes", schemaLen);
+
+    FsLockGuard guard("bond.schema.send");
+    File f = VFS::openGuarded(tempPath, "w", VFS::systemAuth("espnow.schema_send_temp"), true);
+    if (!f) {
+      ERROR_ESPNOWF("[SCHEMA_SEND] Cannot create %s", tempPath.c_str());
+      sSchemaTransferInProgress = false;
+      return;
+    }
+    f.print(schema);
+    f.close();
+    DEBUG_ESPNOWF("[SCHEMA_SEND] Wrote %d bytes to %s", schemaLen, tempPath.c_str());
+    // schema + doc destructors run here — memory freed before transfer
+  }
+
+  DEBUG_ESPNOWF("[SCHEMA_SEND] Calling sendFileToMac for %s", tempPath.c_str());
+  bool sent = sendFileToMac(peerMac, tempPath);
+  if (sent) {
+    DEBUG_ESPNOWF("[SCHEMA_SEND] SUCCESS: File transfer initiated (%d bytes)", schemaLen);
+  } else {
+    ERROR_ESPNOWF("[SCHEMA_SEND] sendFileToMac failed");
+  }
+
+  {
+    FsLockGuard guard("bond.schema.cleanup");
+    VFS::removeGuarded(tempPath, VFS::systemAuth("espnow.schema_send_cleanup"));
+    DEBUG_ESPNOWF("[SCHEMA_SEND] Cleaned up temp file");
+  }
+
+  sSchemaTransferInProgress = false;
+}
+
+// Master-side: ask the bonded peer to send its schema. Symmetric with
+// requestBondSettings — same encrypted sender, no payload. Public (declared
+// in System_ESPNow.h) so the WebPage_Bond.cpp endpoint can trigger schema
+// resync without going through the sync tick. Schema rarely changes, so a
+// direct trigger keeps it out of the sync state machine.
+bool requestBondSchema(const uint8_t* peerMac) {
+  if (!peerMac || !gEspNow || !gSettings.bondModeEnabled) return false;
+  if (!isBondMaster()) return false;
+
+  uint32_t msgId = generateMessageId();
+  bool sent = bondSendEncrypted(peerMac, ESPNOW_V4_TYPE_SCHEMA_REQ, 0, msgId, nullptr, 0);
+  if (sent) {
+    DEBUG_ESPNOWF("[SCHEMA_REQ] Sent (msgId=%lu)", (unsigned long)msgId);
+  } else {
+    ERROR_ESPNOWF("[SCHEMA_REQ] Failed to send");
+  }
+  return sent;
+}
+
+/**
+ * Process received schema from bonded peer (master-side).
+ * Validates JSON shape and caches under peers/<MAC>/schema.json. Sets
+ * bondSchemaReceived so polling endpoints (handleBondSettingsSchemaSync)
+ * see completion.
+ */
+static void processBondSchema(const uint8_t* srcMac, const String& deviceName, const String& schemaStr) {
+  DEBUG_ESPNOWF("[SCHEMA_PROC] processBondSchema: srcMac=%p len=%d", srcMac, schemaStr.length());
+  if (!srcMac) {
+    DEBUG_ESPNOWF("[SCHEMA_PROC] EXIT: srcMac is NULL");
+    return;
+  }
+  // Validate JSON envelope — reject truncated/corrupt transfers (mirrors
+  // processBondSettings's check).
+  if (schemaStr.length() < 2 || schemaStr[0] != '{' || schemaStr[schemaStr.length() - 1] != '}') {
+    BROADCAST_PRINTF("[BOND_SYNC] REJECTED corrupt schema (len=%d, not valid JSON object)", schemaStr.length());
+    return;
+  }
+
+  // Cache to peers/<MAC>/schema.json — same directory layout the settings
+  // cache uses (cacheSettingsToLittleFS), just a different filename.
+  char dirPath[48];
+  peerCacheDir(srcMac, dirPath, sizeof(dirPath));
+  char filePath[64];
+  peerCachePath(srcMac, "schema.json", filePath, sizeof(filePath));
+  DEBUG_ESPNOWF("[SCHEMA_PROC] Target path: %s", filePath);
+
+  {
+    FsLockGuard fsGuard("pair.schema.cache");
+    if (!VFS::existsGuarded(dirPath, VFS::systemAuth("espnow.schema_cache_mkdir"))) {
+      VFS::mkdirGuarded(dirPath, VFS::systemAuth("espnow.schema_cache_mkdir"));
+    }
+    File f = VFS::openGuarded(filePath, "w", VFS::systemAuth("espnow.schema_cache_write"), true);
+    if (!f) {
+      ERROR_ESPNOWF("[SCHEMA_PROC] Failed to open %s for writing", filePath);
+      return;
+    }
+    size_t written = f.print(schemaStr);
+    f.close();
+    if (written != schemaStr.length()) {
+      ERROR_ESPNOWF("[SCHEMA_PROC] Incomplete write (wrote %d of %d)", written, schemaStr.length());
+      return;
+    }
+  }
+
+  if (gEspNow) gEspNow->bondSchemaReceived = true;
+  BROADCAST_PRINTF("[BOND_SYNC] Schema cached: %d bytes from %s", schemaStr.length(), deviceName.c_str());
+}
+
 /**
  * Process received settings from bonded peer
  */
@@ -5505,25 +5698,36 @@ static void processBondSettings(const uint8_t* srcMac, const String& deviceName,
   
   // Cache the settings
   DEBUG_ESPNOWF("[SETTINGS_PROC] Calling cacheSettingsToLittleFS...");
-  if (cacheSettingsToLittleFS(srcMac, settingsStr)) {
+  bool cached = cacheSettingsToLittleFS(srcMac, settingsStr);
+  if (cached) {
     DEBUG_ESPNOWF("[SETTINGS_PROC] SUCCESS: Settings cached");
     broadcastOutput("[SETTINGS] Cached settings from " + deviceName);
   } else {
     ERROR_ESPNOWF("[SETTINGS_PROC] Failed to cache settings");
     broadcastOutput("[SETTINGS] WARNING: Failed to cache settings from " + deviceName);
   }
-  
+
   // Mark settings received and check if fully synced
   if (gEspNow) {
     if (!gEspNow->bondPeerOnline) {
       BROADCAST_PRINTF("[BOND_SYNC] REJECTED stale settings (peer offline)");
       return;
     }
-    
+
     gEspNow->bondSettingsReceived = true;
     gEspNow->bondSyncInFlight = BOND_SYNC_NONE;
     gEspNow->bondSyncRetryCount = 0;
     gEspNow->bondSyncLastAttemptMs = 0;
+
+    // Snapshot the CRC32 of the bytes we just cached. The peer's heartbeat
+    // carries CRC32(generateDeviceSettings()), so a later heartbeat-reported
+    // hash that differs from this snapshot means the worker has changed
+    // settings since this cache write — the basis for "dirty" detection in
+    // /api/bond/status and the bonded settings panel banner.
+    if (cached) {
+      gEspNow->bondCachedPeerSettingsHash =
+        esp_crc32_le(0, (const uint8_t*)settingsStr.c_str(), settingsStr.length());
+    }
     
     bool synced = isBondSynced();
     BROADCAST_PRINTF("[BOND_SYNC] Settings received, synced=%d role=%d", (int)synced, (int)gSettings.bondRole);
@@ -6524,6 +6728,43 @@ MeshPeerHealth* getMeshPeerHealth(const uint8_t mac[6], bool createIfMissing) {
   return nullptr;
 }
 
+// Find (or optionally create) a MeshPeerMeta slot for a given MAC. Mirrors
+// getMeshPeerHealth's shape so callers can reach for whichever side of the
+// peer state they need (health = liveness counters, meta = identity strings).
+// Previously declared in System_ESPNow.h but never implemented — callers
+// (OLED_ESPNow, WebPage_ESPNow_Metadata) worked around it by inlining the
+// search loop, which is exactly the duplication this consolidation removes.
+MeshPeerMeta* getMeshPeerMeta(const uint8_t mac[6], bool createIfMissing) {
+  if (!gMeshPeerMeta) return nullptr;
+  for (int i = 0; i < gMeshPeerSlots; i++) {
+    if (gMeshPeerMeta[i].isActive && memcmp(gMeshPeerMeta[i].mac, mac, 6) == 0)
+      return &gMeshPeerMeta[i];
+  }
+  if (!createIfMissing) return nullptr;
+  for (int i = 0; i < gMeshPeerSlots; i++) {
+    if (!gMeshPeerMeta[i].isActive) {
+      gMeshPeerMeta[i].clear();
+      memcpy(gMeshPeerMeta[i].mac, mac, 6);
+      gMeshPeerMeta[i].isActive = true;
+      return &gMeshPeerMeta[i];
+    }
+  }
+  return nullptr;
+}
+
+// Count active mesh peers whose room field matches `room` (case-sensitive,
+// exact match). Used by room-grouped UI views (OLED room menu, automation
+// scoping). NULL/empty `room` returns 0 — "no room" peers aren't aggregated.
+int countMeshPeerMetaByRoom(const char* room) {
+  if (!gMeshPeerMeta || !room || !room[0]) return 0;
+  int count = 0;
+  for (int i = 0; i < gMeshPeerSlots; i++) {
+    if (gMeshPeerMeta[i].isActive && strcmp(gMeshPeerMeta[i].room, room) == 0)
+      count++;
+  }
+  return count;
+}
+
 void noteMeshPeerRxActivity(const uint8_t* mac, EspNowMeshRxKind kind, int8_t hbRssi) {
   if (!mac || !gMeshPeers) return;
   MeshPeerHealth* peer = getMeshPeerHealth(mac, true);
@@ -6595,31 +6836,15 @@ static void fillMeshStatusPeerJsonObject(JsonObject peer, uint32_t now, const ui
   snprintf(macBuf, sizeof(macBuf), "%02X:%02X:%02X:%02X:%02X:%02X",
            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
   peer["mac"] = String(macBuf);
-  // Name lookup: check meta then paired registry. The resolved name may be
-  // a pointer into a global (gMeshPeerMeta entry, which outlives this fn) or
-  // a stack-local (nameBuf). Wrap the final assignment in String() so we
-  // never store a dangling stack pointer in the doc regardless of which
-  // branch resolved the name.
-  const char* resolvedName = (nameOpt && nameOpt[0]) ? nameOpt : nullptr;
-  char nameBuf[48] = "Unknown";
-  if (!resolvedName && gMeshPeerMeta) {
-    for (int _ni = 0; _ni < gMeshPeerSlots; _ni++) {
-      if (gMeshPeerMeta[_ni].isActive && memcmp(gMeshPeerMeta[_ni].mac, mac, 6) == 0 && gMeshPeerMeta[_ni].name[0]) {
-        resolvedName = gMeshPeerMeta[_ni].name;
-        break;
-      }
-    }
+  // Name lookup: caller's override wins; otherwise fall back to the shared
+  // meta-then-paired-registry resolver. Wrap in String() unconditionally so
+  // ArduinoJson deep-copies and we don't risk a dangling pointer.
+  if (nameOpt && nameOpt[0]) {
+    peer["name"] = String(nameOpt);
+  } else {
+    String resolved = getEspNowDeviceName(mac);
+    peer["name"] = resolved.length() ? resolved : String("Unknown");
   }
-  if (!resolvedName && gEspNow) {
-    for (int _ni = 0; _ni < gEspNow->deviceCount; _ni++) {
-      if (memcmp(gEspNow->devices[_ni].mac, mac, 6) == 0 && gEspNow->devices[_ni].name.length()) {
-        strlcpy(nameBuf, gEspNow->devices[_ni].name.c_str(), sizeof(nameBuf));
-        resolvedName = nameBuf;
-        break;
-      }
-    }
-  }
-  peer["name"] = String(resolvedName ? resolvedName : "Unknown");
   if (ph) {
     uint32_t elHb = now - ph->lastMeshHeartbeatMs;
     if (elHb > 0x80000000UL) elHb = 0;
@@ -7090,11 +7315,16 @@ void processMeshHeartbeats() {
                   gEspNow->deferredCmdWasEncrypted);
   }
   
+  // 7a. Saturation sampler — 1 Hz snapshot of derived link-pressure signals
+  // (frames/s, queue depths, drops, ACK RTT). Cheap; only commits a sample
+  // when ≥1s has elapsed since the last commit.
+  espnowSaturationTick();
+
   // 7b. Drain stream queue (remote command output received via V3 STREAM frames)
-  {
+  if (gEspNow->streamQueue) {
     int tail = gEspNow->streamQueueTail;
     int processed = 0;
-    while (tail != gEspNow->streamQueueHead && processed < 8) {
+    while (tail != gEspNow->streamQueueHead && processed < gEspNow->streamDrainMax) {
       auto& entry = gEspNow->streamQueue[tail];
       if (entry.used) {
         String devName = String(entry.deviceName);
@@ -7107,7 +7337,7 @@ void processMeshHeartbeats() {
         BROADCAST_PRINTF("[STREAM:%s] %s", devName.c_str(), entry.content);
         entry.used = false;
       }
-      tail = (tail + 1) & (EspNowState::STREAM_QUEUE_SIZE - 1);
+      tail = (tail + 1) & gEspNow->streamQueueMask;
       processed++;
     }
     gEspNow->streamQueueTail = tail;
@@ -7349,6 +7579,27 @@ void processMeshHeartbeats() {
     // recompute here.
     if (isBondWorker() && isBondSynced()) {
       BROADCAST_PRINTF("[BOND_SYNC] *** SYNC COMPLETE *** role=0 (worker)");
+    }
+  }
+
+  // 9e2. Bond: peer requested our settings schema — send via file transfer.
+  // Same encrypted-session gate the settings/manifest paths use (9d, 9e), so
+  // the ~8 KB schema rides the AEAD session rather than going out plaintext.
+  // The receiver picks the file up in v4h_file_end → processBondSchema.
+  if (gEspNow->bondNeedsSchemaResponse &&
+      bondSendReadyOrDeferred(gEspNow->bondPendingResponseMac)) {
+    gEspNow->bondNeedsSchemaResponse = false;
+    BROADCAST_PRINTF("[BOND] 9e2: bondNeedsSchemaResponse consumed | role=%d dest=%s",
+                     (int)gSettings.bondRole,
+                     MAC_STR(gEspNow->bondPendingResponseMac));
+    uint8_t destMac[6];
+    memcpy(destMac, gEspNow->bondPendingResponseMac, 6);
+    // sendBondSchema → sendFileToMac touches /system/espnow/this_device/_schema_out.json,
+    // so install system identity to pass canRead/canWrite (matches the
+    // SYSTEM_IDENTITY_SCOPE the settings path uses at 9e).
+    {
+      SYSTEM_IDENTITY_SCOPE("espnow.bond_schema_send");
+      sendBondSchema(destMac);
     }
   }
 
@@ -7749,6 +8000,42 @@ static bool initEspNow() {
       memset(gEspNow->deferredCmdRespResult, 0, 6144);
     } else {
       BROADCAST_PRINTF("[ESP-NOW] WARNING: Failed to allocate deferredCmdRespResult");
+    }
+
+    // STREAM ring for bonded/remote command output. A large burst (e.g. `help`,
+    // ~24 frames in ~150ms) overflows a small ring and silently truncates. Use
+    // 64 slots STRICTLY in PSRAM; if PSRAM is unavailable or the PSRAM alloc
+    // fails, fall back to the historical 16-slot ring (drain cap 8) in internal
+    // RAM so a PSRAM-less board pays no extra DRAM. (~295 B/slot.)
+    gEspNow->streamQueue = nullptr;
+    if (psramAvailableRuntime()) {
+      size_t sqBytes = sizeof(EspNowState::StreamQueueEntry) * EspNowState::STREAM_QUEUE_SIZE_PSRAM;
+      gEspNow->streamQueue = (EspNowState::StreamQueueEntry*)heap_caps_malloc(sqBytes, MALLOC_CAP_SPIRAM);
+      if (gEspNow->streamQueue) {
+        memset(gEspNow->streamQueue, 0, sqBytes);
+        gEspNow->streamQueueCap = EspNowState::STREAM_QUEUE_SIZE_PSRAM;
+        gEspNow->streamDrainMax = EspNowState::STREAM_QUEUE_SIZE_PSRAM;
+      }
+    }
+    if (!gEspNow->streamQueue) {
+      size_t sqBytes = sizeof(EspNowState::StreamQueueEntry) * EspNowState::STREAM_QUEUE_SIZE_FALLBACK;
+      gEspNow->streamQueue = (EspNowState::StreamQueueEntry*)ps_alloc(sqBytes, AllocPref::PreferInternal, "espnow.streamQueue");
+      if (gEspNow->streamQueue) memset(gEspNow->streamQueue, 0, sqBytes);
+      gEspNow->streamQueueCap = EspNowState::STREAM_QUEUE_SIZE_FALLBACK;
+      gEspNow->streamDrainMax = 8;
+    }
+    gEspNow->streamQueueMask = gEspNow->streamQueueCap - 1;
+    if (!gEspNow->streamQueue) {
+      // Both attempts failed — disable the ring (RX path + drain both no-op).
+      BROADCAST_PRINTF("[ESP-NOW] WARNING: Failed to allocate streamQueue");
+      gEspNow->streamQueueCap = 0;
+      gEspNow->streamQueueMask = 0;
+      gEspNow->streamDrainMax = 0;
+    } else {
+      DEBUG_ESPNOWF("[ESP-NOW] streamQueue: %d slots (%s), drainMax=%d",
+                    gEspNow->streamQueueCap,
+                    (gEspNow->streamQueueCap == EspNowState::STREAM_QUEUE_SIZE_PSRAM) ? "PSRAM" : "internal",
+                    gEspNow->streamDrainMax);
     }
 
     // Allocate per-device message history with dynamic growth
@@ -8223,20 +8510,23 @@ const char* cmd_espnow_stats(const String& argsInput) {
   // Read-only status: see comment in cmd_espnow_status above.
   if (!gEspNow) return "ESP-NOW not initialized (run 'openespnow' first)";
 
-  // Output each line separately to avoid DEBUG_MSG_SIZE (256 byte) truncation
+  // Output each line separately to avoid DEBUG_MSG_SIZE (256 byte) truncation.
+  // Audit (2026-05): pruned two orphan counters that were displayed but never
+  // incremented anywhere — `gEspNow->receiveErrors` and `gEspNow->meshForwards`
+  // both lived at 0 since refactors moved or removed their bump sites. They
+  // are NOT shown here; if/when those metrics are wanted again, wire the
+  // increments at the canonical paths first, then surface them.
   broadcastOutput("ESP-NOW Statistics:");
   BROADCAST_PRINTF("  Messages Sent: %lu", (unsigned long)gEspNow->routerMetrics.messagesSent);
   BROADCAST_PRINTF("  Messages Received: %lu", (unsigned long)gEspNow->routerMetrics.messagesReceived);
   BROADCAST_PRINTF("  Send Failures: %lu", (unsigned long)gEspNow->routerMetrics.messagesFailed);
-  BROADCAST_PRINTF("  Receive Errors: %lu", (unsigned long)gEspNow->receiveErrors);
   BROADCAST_PRINTF("  Stream Sent: %lu", (unsigned long)gEspNow->streamSentCount);
   BROADCAST_PRINTF("  Stream Received: %lu", (unsigned long)gEspNow->streamReceivedCount);
   BROADCAST_PRINTF("  Stream Dropped: %lu", (unsigned long)gEspNow->streamDroppedCount);
-  
+
   if (meshEnabled()) {
     BROADCAST_PRINTF("  Heartbeats Sent: %lu", (unsigned long)gEspNow->heartbeatsSent);
     BROADCAST_PRINTF("  Heartbeats Received: %lu", (unsigned long)gEspNow->heartbeatsReceived);
-    BROADCAST_PRINTF("  Mesh Forwards: %lu", (unsigned long)gEspNow->meshForwards);
   }
   
   BROADCAST_PRINTF("  Files Sent: %lu", (unsigned long)gEspNow->fileTransfersSent);
@@ -8287,8 +8577,28 @@ const char* cmd_espnow_broadcaststats(const String& argsInput) {
   if (activeCount == 0) {
     BROADCAST_PRINTF("  No active trackers");
   }
-  
+
   return "OK";
+}
+
+// ESP-NOW link saturation command — see System_ESPNow_Saturation.h.
+// Prints a rolling-window report of derived link-pressure signals (frames/sec,
+// stream-queue depth, dropped-frame deltas, pending-frame backlog, ACK RTT)
+// built on top of the existing cumulative counters. Intended for stress-test
+// observability — e.g. enable multiple sensor streams and watch the gauges
+// move. Honest about ceilings: queue depths are real percentages; frames/sec
+// is an absolute rate (ESP-NOW has no fixed bandwidth ceiling to compare to).
+const char* cmd_espnow_saturation(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!gEspNow) return "ESP-NOW not initialized (run 'openespnow' first)";
+  espnowSaturationReport();
+  return "OK";
+}
+
+const char* cmd_espnow_saturationreset(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  espnowSaturationReset();
+  return "Saturation window cleared — peaks/avgs will reflect post-reset traffic only";
 }
 
 // ESP-NOW router statistics command
@@ -8296,74 +8606,29 @@ const char* cmd_espnow_routerstats(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   // Read-only status: see comment in cmd_espnow_status above.
   if (!gEspNow) return "ESP-NOW not initialized (run 'openespnow' first)";
-  
+
+  // Audit (2026-05) — this command USED to print ~18 lines of counters that
+  // had no live increment site anywhere in the codebase (the V3 "Routing /
+  // Queue/Retry / Chunking / Performance" sections all read fields whose bump
+  // sites were removed in past V3→V4 / streaming refactors). They lied at 0
+  // forever. Pruned to ONLY counters that are actually live today (router
+  // top-line plus the V4 fragmentation family). If a removed section is wanted
+  // back, wire the increment at its canonical path first.
   broadcastOutput("=== ESP-NOW Router Statistics ===");
   BROADCAST_PRINTF("Messages Sent: %lu", (unsigned long)gEspNow->routerMetrics.messagesSent);
   BROADCAST_PRINTF("Messages Received: %lu", (unsigned long)gEspNow->routerMetrics.messagesReceived);
   BROADCAST_PRINTF("Messages Failed: %lu", (unsigned long)gEspNow->routerMetrics.messagesFailed);
-  BROADCAST_PRINTF("Messages Retried: %lu", (unsigned long)gEspNow->routerMetrics.messagesRetried);
-  BROADCAST_PRINTF("Messages Dropped: %lu", (unsigned long)gEspNow->routerMetrics.messagesDropped);
-  
-  broadcastOutput("\nRouting:");
-  uint32_t totalRoutes = gEspNow->routerMetrics.directRoutes + gEspNow->routerMetrics.meshRoutes;
-  if (totalRoutes > 0) {
-    uint32_t directPct = (gEspNow->routerMetrics.directRoutes * 100) / totalRoutes;
-    uint32_t meshPct = (gEspNow->routerMetrics.meshRoutes * 100) / totalRoutes;
-    BROADCAST_PRINTF("  Direct Routes: %lu (%lu%%)",
-                     (unsigned long)gEspNow->routerMetrics.directRoutes,
-                     (unsigned long)directPct);
-    BROADCAST_PRINTF("  Mesh Routes: %lu (%lu%%)",
-                     (unsigned long)gEspNow->routerMetrics.meshRoutes,
-                     (unsigned long)meshPct);
-  } else {
-    broadcastOutput("  No routes yet");
-  }
-  
-  broadcastOutput("\nQueue/Retry:");
-  BROADCAST_PRINTF("  Messages Queued: %lu", (unsigned long)gEspNow->routerMetrics.messagesQueued);
-  BROADCAST_PRINTF("  Messages Dequeued: %lu", (unsigned long)gEspNow->routerMetrics.messagesDequeued);
-  BROADCAST_PRINTF("  Retries Attempted: %lu", (unsigned long)gEspNow->routerMetrics.retriesAttempted);
-  BROADCAST_PRINTF("  Retries Succeeded: %lu", (unsigned long)gEspNow->routerMetrics.retriesSucceeded);
-  BROADCAST_PRINTF("  Queue Overflows: %lu", (unsigned long)gEspNow->routerMetrics.queueOverflows);
 
-  broadcastOutput("\nChunking (Send):");
-  BROADCAST_PRINTF("  Chunked Messages: %lu", (unsigned long)gEspNow->routerMetrics.chunkedMessages);
-  BROADCAST_PRINTF("  Chunks Sent: %lu", (unsigned long)gEspNow->routerMetrics.chunksSent);
-  BROADCAST_PRINTF("  Chunks Dropped: %lu", (unsigned long)gEspNow->routerMetrics.chunksDropped);
-  
-  broadcastOutput("\nChunking (Receive):");
-  BROADCAST_PRINTF("  Chunks Received: %lu", (unsigned long)gEspNow->routerMetrics.chunksReceived);
-  BROADCAST_PRINTF("  Messages Reassembled: %lu", (unsigned long)gEspNow->routerMetrics.chunksReassembled);
-  BROADCAST_PRINTF("  Chunks Timed Out: %lu", (unsigned long)gEspNow->routerMetrics.chunksTimedOut);
-  
-  
-  int activeBuffers = 0;
-  for (int i = 0; i < 4; i++) {
-    if (gEspNow->chunkBuffers[i].active) {
-      activeBuffers++;
-    }
-  }
-  if (activeBuffers > 0) {
-    BROADCAST_PRINTF("  Active Buffers: %d/4", activeBuffers);
-    for (int i = 0; i < 4; i++) {
-      if (gEspNow->chunkBuffers[i].active) {
-        BROADCAST_PRINTF("    Buffer %d: msgId=%lu, %lu/%lu chunks, age=%lus",
-                        i,
-                        (unsigned long)gEspNow->chunkBuffers[i].msgId,
-                        (unsigned long)gEspNow->chunkBuffers[i].receivedChunks,
-                        (unsigned long)gEspNow->chunkBuffers[i].totalChunks,
-                        (millis() - gEspNow->chunkBuffers[i].lastChunkTime) / 1000);
-      }
-    }
-  }
-  
-  broadcastOutput("\nPerformance:");
-  BROADCAST_PRINTF("  Avg Send Time: %lu µs", (unsigned long)gEspNow->routerMetrics.avgSendTimeUs);
-  BROADCAST_PRINTF("  Max Send Time: %lu µs", (unsigned long)gEspNow->routerMetrics.maxSendTimeUs);
-  
+  broadcastOutput("\nV4 Fragmentation:");
+  BROADCAST_PRINTF("  Fragments TX:        %lu", (unsigned long)gEspNow->routerMetrics.v4FragTx);
+  BROADCAST_PRINTF("  Fragments RX:        %lu", (unsigned long)gEspNow->routerMetrics.v4FragRx);
+  BROADCAST_PRINTF("  Reassembled:         %lu", (unsigned long)gEspNow->routerMetrics.v4FragRxCompleted);
+  BROADCAST_PRINTF("  Reassembly GC:       %lu", (unsigned long)gEspNow->routerMetrics.v4FragRxGc);
+  BROADCAST_PRINTF("  Reassembly Timeouts: %lu", (unsigned long)gEspNow->routerMetrics.chunksTimedOut);
+
   broadcastOutput("\nMessage IDs:");
   BROADCAST_PRINTF("  Next Message ID: %lu", (unsigned long)gEspNow->nextMessageId);
-  
+
   return "OK";
 }
 
@@ -8929,52 +9194,30 @@ const char* cmd_espnow_meshmetrics(const String& argsInput) {
   // Read-only status: see comment in cmd_espnow_status above.
   if (!gEspNow) return "ESP-NOW not initialized (run 'openespnow' first)";
   if (!ensureDebugBuffer()) return "Error: Buffer allocation failed";
-  
-  RouterMetrics& m = gEspNow->routerMetrics;
-  
+
+  // Audit (2026-05) — every mesh-routing COUNTER this command USED to print
+  // (meshRoutes / directRoutes / meshForwards / meshForwardsByType[8] /
+  // meshPathLength* / meshMaxPathLength / meshTTLExhausted / meshLoopDetected)
+  // has zero increment sites in the codebase: multi-hop forwarding is not
+  // currently being instrumented. Showing all-zeros every time was actively
+  // misleading. Reduced to just the live mesh configuration. If/when those
+  // forwarding paths gain real instrumentation, restore the counters here.
+
+  int peerCount = (int)gEspNow->deviceCount;
   int pos = 0;
   char* buf = getDebugBuffer();
-  pos += snprintf(buf + pos, 1024 - pos, "=== Mesh Routing Metrics ===\n\n");
-  
-  // Mesh routing overview
-  pos += snprintf(buf + pos, 1024 - pos, "Routing:\n");
-  pos += snprintf(buf + pos, 1024 - pos, "  Mesh routes: %lu\n", (unsigned long)m.meshRoutes);
-  pos += snprintf(buf + pos, 1024 - pos, "  Direct routes: %lu\n", (unsigned long)m.directRoutes);
-  pos += snprintf(buf + pos, 1024 - pos, "  Total forwards: %lu\n\n", (unsigned long)gEspNow->meshForwards);
-  
-  // Forwards by message type
-  pos += snprintf(buf + pos, 1024 - pos, "Forwards by type:\n");
-  const char* typeNames[] = {"HB", "ACK", "MESH_SYS", "FILE", "CMD", "TEXT", "RESPONSE", "STREAM"};
-  for (int i = 0; i < 8; i++) {
-    if (m.meshForwardsByType[i] > 0) {
-      pos += snprintf(buf + pos, 1024 - pos, "  %s: %lu\n", 
-                     typeNames[i], (unsigned long)m.meshForwardsByType[i]);
-    }
-  }
-  
-  // Path statistics
-  pos += snprintf(buf + pos, 1024 - pos, "\nPath statistics:\n");
-  if (m.meshPathLengthCount > 0) {
-    float avgPathLen = (float)m.meshPathLengthSum / (float)m.meshPathLengthCount;
-    pos += snprintf(buf + pos, 1024 - pos, "  Avg path length: %.1f\n", avgPathLen);
-    pos += snprintf(buf + pos, 1024 - pos, "  Max path length: %d\n", m.meshMaxPathLength);
-  } else {
-    pos += snprintf(buf + pos, 1024 - pos, "  No path data yet\n");
-  }
-  
-  // Drop statistics
-  pos += snprintf(buf + pos, 1024 - pos, "\nDrops:\n");
-  pos += snprintf(buf + pos, 1024 - pos, "  TTL exhausted: %lu\n", (unsigned long)m.meshTTLExhausted);
-  pos += snprintf(buf + pos, 1024 - pos, "  Loop detected: %lu\n", (unsigned long)m.meshLoopDetected);
-  
-  // Current configuration
-  int peerCount = (gEspNow ? (int)gEspNow->deviceCount : 0);
-  pos += snprintf(buf + pos, 1024 - pos, "Configuration:\n");
-  pos += snprintf(buf + pos, 1024 - pos, "  Active peers: %d\n", peerCount);
-  pos += snprintf(buf + pos, 1024 - pos, "  Adaptive TTL: %s\n", 
-                 gSettings.meshAdaptiveTTL ? "enabled" : "disabled");
-  pos += snprintf(buf + pos, 1024 - pos, "  Current TTL: %d\n", gSettings.meshTTL);
-  
+  pos += snprintf(buf + pos, 1024 - pos, "=== Mesh Routing Configuration ===\n\n");
+  pos += snprintf(buf + pos, 1024 - pos, "Mode:           %s\n",
+                  (gEspNow->mode == ESPNOW_MODE_MESH) ? "mesh" : "direct");
+  pos += snprintf(buf + pos, 1024 - pos, "Active peers:   %d\n", peerCount);
+  pos += snprintf(buf + pos, 1024 - pos, "Current TTL:    %d\n", gSettings.meshTTL);
+  pos += snprintf(buf + pos, 1024 - pos, "Adaptive TTL:   %s\n",
+                  gSettings.meshAdaptiveTTL ? "enabled" : "disabled");
+  pos += snprintf(buf + pos, 1024 - pos,
+                  "\n(Note: per-forward / per-path / drop counters are not currently\n"
+                  " instrumented — multi-hop mesh forwarding has no live bump sites.\n"
+                  " See espnowsaturation / espnowstats for traffic-level metrics.)\n");
+
   return getDebugBuffer();
 }
 
@@ -11816,6 +12059,7 @@ static void resetBondSync() {
   gEspNow->bondCapSent = false;
   gEspNow->bondManifestReceived = false;
   gEspNow->bondSettingsReceived = false;
+  gEspNow->bondSchemaReceived = false;
   gEspNow->bondSettingsSent = false;
   gEspNow->lastRemoteCapValid = false;
   // Clear all pending deferred flags — stale messages from the previous
@@ -11825,6 +12069,7 @@ static void resetBondSync() {
   gEspNow->bondReceivedCapability = false;
   gEspNow->bondNeedsManifestResponse = false;
   gEspNow->bondNeedsSettingsResponse = false;
+  gEspNow->bondNeedsSchemaResponse = false;
   gEspNow->bondPeerStatusValid = false;
   gEspNow->bondNeedsProactiveStatus = false;
   gEspNow->bondStatusReqSentOnce = false;
@@ -12530,6 +12775,8 @@ extern const CommandEntry espNowCommands[] = {
   { "espnowrouterstats", "Show message router statistics and metrics.", false, cmd_espnow_routerstats },
   { "espnowbroadcaststats", "Show broadcast ACK tracking statistics.", false, cmd_espnow_broadcaststats },
   { "espnowresetstats", "Reset ESP-NOW statistics counters.", true, cmd_espnow_resetstats },
+  { "espnowsaturation", "Show ESP-NOW link saturation: frames/sec, stream-queue depth, drops, ACK RTT (rolling 30s).", false, cmd_espnow_saturation },
+  { "espnowsaturationreset", "Clear the saturation rolling window (use before a stress test).", false, cmd_espnow_saturationreset },
 
   // ---- ESP-NOW Cryptographic Identity (Phase 3.0/3.3) ----
   { "espnowidentity", "Show long-term Ed25519 identity (MAC, pub key, createdAtSec, regenCount).", false, cmd_espnow_identity },
