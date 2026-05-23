@@ -25,9 +25,7 @@ static void streamEspNowContent(httpd_req_t* req, const String& username) {
 }
 
 static esp_err_t handleEspNowPage(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
-
+  WEB_AUTH_OR_RETURN(req, ctx);
   streamPageWithContent(req, "espnow", ctx.user, streamEspNowContent);
   return ESP_OK;
 }
@@ -137,11 +135,7 @@ static esp_err_t webEspnowSendJsonEscapedString(httpd_req_t* req, const char* s)
  * }
  */
 static esp_err_t handleEspNowMessages(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  
-  if (!tgRequireAuth(ctx)) {
-    return ESP_OK;
-  }
+  WEB_AUTH_OR_RETURN(req, ctx);
   
   httpd_resp_set_type(req, "application/json");
   
@@ -291,11 +285,7 @@ static esp_err_t handleEspNowMessages(httpd_req_t* req) {
  * @return JSON with remote capability info including human-readable names
  */
 static esp_err_t handleEspNowRemoteCap(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  
-  if (!tgRequireAuth(ctx)) {
-    return ESP_OK;
-  }
+  WEB_AUTH_OR_RETURN(req, ctx);
   
   httpd_resp_set_type(req, "application/json");
   
@@ -382,11 +372,7 @@ done:
  * Without params: returns list of available manifests
  */
 static esp_err_t handleEspNowRemoteManifest(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  
-  if (!tgRequireAuth(ctx)) {
-    return ESP_OK;
-  }
+  WEB_AUTH_OR_RETURN(req, ctx);
   
   httpd_resp_set_type(req, "application/json");
   

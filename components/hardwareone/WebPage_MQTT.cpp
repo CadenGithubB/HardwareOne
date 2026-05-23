@@ -439,8 +439,7 @@ setInterval(mqttRefresh, 5000);
 
 // Full page handler
 static esp_err_t handleMqttPage(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
+  WEB_AUTH_OR_RETURN(req, ctx);
 
   streamBeginHtml(req, "MQTT", false, ctx.user, "mqtt");
   httpd_resp_send_chunk(req, "<div class='card'>", HTTPD_RESP_USE_STRLEN);
@@ -452,8 +451,7 @@ static esp_err_t handleMqttPage(httpd_req_t* req) {
 
 // API endpoint for MQTT status
 static esp_err_t handleMqttStatus(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
+  WEB_AUTH_OR_RETURN(req, ctx);
 
   bool connected = isMqttConnected();
   
