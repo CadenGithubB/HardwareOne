@@ -1913,8 +1913,7 @@ void buildDetectionJson(const EIResults& results, String& output) {
 
 // Organize EI model files: move loose .tflite and .labels.txt into proper /EI Models/<name>/ folders
 static esp_err_t handleEIOrganize(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
+  WEB_AUTH_OR_RETURN(req, ctx);
 
   extern bool filesystemReady;
   if (!filesystemReady) {
@@ -2015,8 +2014,7 @@ static esp_err_t handleEIOrganize(httpd_req_t* req) {
 }
 
 esp_err_t handleEdgeImpulseDetect(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
+  WEB_AUTH_OR_RETURN(req, ctx);
   
   // Run inference
   EIResults results = runEdgeImpulseInference();

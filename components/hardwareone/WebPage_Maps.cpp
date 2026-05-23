@@ -56,11 +56,8 @@ extern SemaphoreHandle_t gJsonResponseMutex;
 // =============================================================================
 
 esp_err_t handleMapFeaturesAPI(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
-  
-  httpd_resp_set_type(req, "application/json");
-  
+  WEB_AUTH_JSON_OR_RETURN(req, ctx);
+
   if (!MapCore::hasValidMap()) {
     httpd_resp_sendstr(req, "{\"error\":\"No map loaded\"}");
     return ESP_OK;
@@ -109,8 +106,7 @@ esp_err_t handleMapFeaturesAPI(httpd_req_t* req) {
 // =============================================================================
 
 esp_err_t handleGPSTracksAPI(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
+  WEB_AUTH_OR_RETURN(req, ctx);
 
   char query[256];
   if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
@@ -287,8 +283,7 @@ esp_err_t handleGPSTracksAPI(httpd_req_t* req) {
 // =============================================================================
 
 esp_err_t handleWaypointsPage(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
+  WEB_AUTH_OR_RETURN(req, ctx);
   
   streamPageHeader(req, "Waypoints");
   
@@ -493,8 +488,7 @@ static void streamMapsContent(httpd_req_t* req, const String& username) {
 }
 
 static esp_err_t handleMapsPage(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
+  WEB_AUTH_OR_RETURN(req, ctx);
 
   streamPageWithContent(req, String("maps"), ctx.user, streamMapsContent);
   return ESP_OK;
@@ -524,8 +518,7 @@ void registerMapsHandlers(httpd_handle_t server) {
 
 esp_err_t handleWaypointsAPI(httpd_req_t* req) {
   extern bool executeUnifiedWebCommand(httpd_req_t* req, AuthContext& ctx, const String& cmd, String& out);
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
+  WEB_AUTH_OR_RETURN(req, ctx);
   
   // Thread-safe JSON response
   JsonBufferGuard jsonGuard("handleWaypointsAPI");

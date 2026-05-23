@@ -18,9 +18,7 @@ static void streamBluetoothContent(httpd_req_t* req, const String& username) {
 }
 
 esp_err_t handleBluetoothPage(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
-
+  WEB_AUTH_OR_RETURN(req, ctx);
   streamPageWithContent(req, "bluetooth", ctx.user, streamBluetoothContent);
   return ESP_OK;
 }

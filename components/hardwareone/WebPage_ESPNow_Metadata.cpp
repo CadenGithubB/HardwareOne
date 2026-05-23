@@ -35,11 +35,8 @@ extern int gMeshPeerSlots;
  * }
  */
 esp_err_t handleEspNowMetadata(httpd_req_t* req) {
-  AuthContext ctx = makeWebAuthCtx(req);
-  if (!tgRequireAuth(ctx)) return ESP_OK;
-  
-  httpd_resp_set_type(req, "application/json");
-  
+  WEB_AUTH_JSON_OR_RETURN(req, ctx);
+
   // Parse MAC parameter
   char queryBuf[128];
   if (httpd_req_get_url_query_str(req, queryBuf, sizeof(queryBuf)) != ESP_OK) {
