@@ -88,7 +88,7 @@
   #define CUSTOM_ENABLE_WEB_ESPNOW     1
   #define CUSTOM_ENABLE_WEB_BOND       1
   #define CUSTOM_ENABLE_WEB_MQTT       0
-  #define CUSTOM_ENABLE_WEB_GAMES      1
+  #define CUSTOM_ENABLE_WEB_GAMES      0
   #define CUSTOM_ENABLE_WEB_MAPS       0
 #endif
 
@@ -114,35 +114,38 @@
 //   2 = STANDALONE - OLED + Gamepad
 //   3 = FULL       - OLED + all sensors
 //   4 = CUSTOM     - Use individual CUSTOM_ENABLE_* flags below
-#define I2C_FEATURE_LEVEL       3
+// Set to DISABLED for the XIAO ESP32S3 Sense build (camera + mic only,
+// no breakout sensors, no OLED) — the Sense expansion has no I2C
+// breakouts wired and no on-board display.
+#define I2C_FEATURE_LEVEL       0
 
 #if I2C_FEATURE_LEVEL == 4
   // Memory hints (rough — full breakdown in "MEMORY SAVINGS REFERENCE" below).
-  #define CUSTOM_ENABLE_OLED        0   // SSD1306 OLED display
-  #define CUSTOM_ENABLE_GAMEPAD     0   // Adafruit Seesaw gamepad
-  #define CUSTOM_ENABLE_GPS         0   // PA1010D GPS module
-  #define CUSTOM_ENABLE_IMU         0   // BNO055 IMU (~1KB RAM)
-  #define CUSTOM_ENABLE_TOF         0   // VL53L4CX ToF sensor
-  #define CUSTOM_ENABLE_THERMAL     0   // MLX90640 thermal camera (~3KB RAM)
-  #define CUSTOM_ENABLE_APDS        0   // APDS9960 gesture/proximity
-  #define CUSTOM_ENABLE_FM_RADIO    0   // RDA5807 FM radio
-  #define CUSTOM_ENABLE_RTC         0   // DS3231 precision RTC
-  #define CUSTOM_ENABLE_PRESENCE    0   // STHS34PF80 IR presence/motion
-  #define CUSTOM_ENABLE_SERVO       0   // PCA9685 servo controller
+  #define CUSTOM_ENABLE_OLED        1   // SSD1306 OLED display
+  #define CUSTOM_ENABLE_GAMEPAD     1   // Adafruit Seesaw gamepad
+  #define CUSTOM_ENABLE_GPS         1   // PA1010D GPS module
+  #define CUSTOM_ENABLE_IMU         0   // BNO055 IMU — not installed
+  #define CUSTOM_ENABLE_TOF         0   // VL53L4CX ToF — not installed
+  #define CUSTOM_ENABLE_THERMAL     0   // MLX90640 thermal camera — not installed
+  #define CUSTOM_ENABLE_APDS        0   // APDS9960 gesture/proximity — not installed
+  #define CUSTOM_ENABLE_FM_RADIO    1   // RDA5807 FM radio
+  #define CUSTOM_ENABLE_RTC         1   // DS3231 precision RTC
+  #define CUSTOM_ENABLE_PRESENCE    1   // STHS34PF80 IR presence/motion
+  #define CUSTOM_ENABLE_SERVO       0   // PCA9685 servo controller — not installed
 #endif
 
 // Display: hardware display selection. 0 forces all OLED_*.cpp out of the
 // build via the CMakeLists DISPLAY_TYPE gate.
 //   0 = NONE, 1 = SSD1306 (OLED), 2 = ST7789 (TFT), 3 = ILI9341 (TFT)
-#define DISPLAY_TYPE            1
+#define DISPLAY_TYPE            0
 
-// Camera: ESP32-S3 DVP camera (OV2640/OV3660/OV5640).
+// Camera: ESP32-S3 DVP camera (OV2640/OV3660/OV5640). PICO board has none.
 #ifndef ENABLE_CAMERA_SENSOR
-#define ENABLE_CAMERA_SENSOR    0
+#define ENABLE_CAMERA_SENSOR    1
 #endif
 
-// Microphone: PDM microphone via I2S.
-#define ENABLE_MICROPHONE_SENSOR 0
+// Microphone: PDM microphone via I2S. PICO board has none.
+#define ENABLE_MICROPHONE_SENSOR 1
 
 // Battery monitor: ADC-based LiPo voltage. Disable when board has no
 // battery-monitoring hardware (shows "USB" on OLED/web instead).
@@ -212,7 +215,7 @@
 // its own web page and (where applicable) OLED mode.
 
 // Games: browser-based games web page.
-#define ENABLE_GAMES            1
+#define ENABLE_GAMES            0
 
 // Maps: offline maps and waypoints web page.
 #define ENABLE_MAPS             0
