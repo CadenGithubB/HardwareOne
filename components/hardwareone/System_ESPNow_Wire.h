@@ -122,6 +122,7 @@ enum EspNowV4Type : uint8_t {
   ESPNOW_V4_TYPE_SETTINGS_REQ    = 94,
   ESPNOW_V4_TYPE_BOND_STATUS_REQ = 95,
   ESPNOW_V4_TYPE_BOND_STATUS_RESP= 96,
+  ESPNOW_V4_TYPE_SCHEMA_REQ      = 97,  // Master → worker: send your settings schema (response arrives as file _schema_out.json)
 };
 
 // ---- Flag bits (16-bit in V4; was 8-bit in V3) -----------------------------

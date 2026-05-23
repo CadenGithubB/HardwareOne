@@ -89,27 +89,72 @@ function initFileManager() {
     }
   });
 }
+// Apply storage-bar styling for either local or bonded stats. Shared so the
+// bar reflects whichever device the user is currently looking at — switching
+// between This Device and Bonded Device repaints it.
+function applyStorageStats(used, total, free, percent, prefix) {
+  const usedMB = (used / 1024 / 1024).toFixed(2);
+  const totalMB = (total / 1024 / 1024).toFixed(2);
+  const freeMB = (free / 1024 / 1024).toFixed(2);
+  document.getElementById('storage-text').textContent = (prefix || '') + usedMB + ' MB / ' + totalMB + ' MB (' + freeMB + ' MB free)';
+  document.getElementById('storage-bar').style.width = percent + '%';
+  if (percent > 80) {
+    document.getElementById('storage-bar').style.background = 'linear-gradient(90deg,#dc3545,#c82333)';
+  } else if (percent > 45) {
+    document.getElementById('storage-bar').style.background = 'linear-gradient(90deg,#ffc107,#ff9800)';
+  } else {
+    document.getElementById('storage-bar').style.background = 'linear-gradient(90deg,#28a745,#20c997)';
+  }
+}
+
+function setStorageError(msg) {
+  document.getElementById('storage-text').textContent = msg || 'Storage unavailable';
+  document.getElementById('storage-bar').style.width = '0%';
+  document.getElementById('storage-bar').style.background = 'linear-gradient(90deg,#666,#444)';
+}
+
 function updateStorageStats(path) {
   fetch('/api/files/stats?path=' + encodeURIComponent(path || '/')).then(r => r.json()).then(d => {
     if (d.success) {
-      const usedMB = (d.used / 1024 / 1024).toFixed(2);
-      const totalMB = (d.total / 1024 / 1024).toFixed(2);
-      const freeMB = (d.free / 1024 / 1024).toFixed(2);
-      document.getElementById('storage-text').textContent = usedMB + ' MB / ' + totalMB + ' MB (' + freeMB + ' MB free)';
-      document.getElementById('storage-bar').style.width = d.usagePercent + '%';
-      if (d.usagePercent > 80) {
-        document.getElementById('storage-bar').style.background = 'linear-gradient(90deg,#dc3545,#c82333)';
-      } else if (d.usagePercent > 45) {
-        document.getElementById('storage-bar').style.background = 'linear-gradient(90deg,#ffc107,#ff9800)';
-      } else {
-        document.getElementById('storage-bar').style.background = 'linear-gradient(90deg,#28a745,#20c997)';
-      }
+      applyStorageStats(d.used, d.total, d.free, d.usagePercent, '');
     } else {
-      document.getElementById('storage-text').textContent = d.error || 'Storage unavailable';
-      document.getElementById('storage-bar').style.width = '0%';
-      document.getElementById('storage-bar').style.background = 'linear-gradient(90deg,#666,#444)';
+      setStorageError(d.error);
     }
   }).catch(e => console.error('Storage stats error:', e));
+}
+
+// Bonded storage stats — run `remote:fsusage` over the bond session and parse
+// the four lines it broadcasts (Total / Used / Free / Usage). Same prefix logic
+// the local stats use, but with a "Worker: " badge in the text so the user
+// knows which device's storage the bar represents.
+function updateBondedStorageStats() {
+  if (!window.BondFs) { setStorageError('BondFs unavailable'); return; }
+  setStorageError('Fetching worker storage…');
+  window.BondFs.exec('fsusage', {
+    // Trailing space is critical: the worker's output starts with the title
+    // "Filesystem Usage:" (no space after the colon) and ends with "  Usage: N%"
+    // (space after the colon). Without the trailing space the doneMarker would
+    // match the title line, fire onResult immediately with only the title in
+    // `lines`, and parsing would fail every time. (Ultrathink ftw.)
+    doneMarker: 'Usage: ',
+    onResult: function(lines, err) {
+      if (err) { setStorageError('Worker storage: ' + err); return; }
+      var total = 0, used = 0, free = 0, pct = 0;
+      var got = 0;
+      // Lines look like "  Total: 3258368 bytes" / "  Used:  178432 bytes" /
+      // "  Free:  3079936 bytes" / "  Usage: 5%". Parse with simple regex per
+      // line — the exact prefix whitespace is fragile, so don't anchor on it.
+      for (var i = 0; i < lines.length; i++) {
+        var m;
+        if ((m = lines[i].match(/Total:\s+(\d+)/)))  { total = parseInt(m[1], 10); got++; }
+        else if ((m = lines[i].match(/Used:\s+(\d+)/))) { used = parseInt(m[1], 10); got++; }
+        else if ((m = lines[i].match(/Free:\s+(\d+)/))) { free = parseInt(m[1], 10); got++; }
+        else if ((m = lines[i].match(/Usage:\s+(\d+)/))) { pct = parseInt(m[1], 10); got++; }
+      }
+      if (got < 4 || total === 0) { setStorageError('Worker storage: parse failed'); return; }
+      applyStorageStats(used, total, free, pct, 'Worker: ');
+    }
+  });
 }
 function editFile(filePath) {
   currentEditPath = filePath;
@@ -145,27 +190,21 @@ function prettyJSON(){ if(!isJsonEdit) return; const ta=document.getElementById(
 function rawJSON(){ if(!isJsonEdit) return; const ta=document.getElementById('editor-text'); try{ const obj=JSON.parse(ta.value); ta.value = JSON.stringify(obj); document.getElementById('editor-status').textContent='Minified JSON.'; } catch(e){ document.getElementById('editor-status').textContent='Invalid JSON: ' + e.message; } }
 
 // ===========================================================================
-// Bonded-device file browser (master only). Lists the bonded device's
-// filesystem and pulls files back to THIS device, all over the bond session
-// token (the 'remote:' command path) — no username/password. The toggle is
-// revealed ONLY when this device is bonded AND is the master; otherwise it stays
-// hidden (never shown as a dead/disabled control).
+// Bonded-device file browser (master only). Browse + download the peer's FS
+// over the bond session token. The heavy lifting lives in window.BondFs (shared,
+// defined in getFileBrowserScript). The toggle is revealed ONLY when this device
+// is bonded AND is the master; otherwise it stays hidden (never disabled).
 // ===========================================================================
-var bondFs = { peerMac: '', peerName: '', localMac: '', seq: 0, path: '/' };
-
-function fsToken(mac){ return (mac || '').replace(/:/g, '').toUpperCase(); }
+var bondCurPath = '/';
 
 function checkBondedFsAvailable(){
-  fetch('/api/bond/status').then(function(r){return r.json();}).then(function(d){
-    if (d && d.bonded === true && d.role === 1 && d.peerMac){
-      bondFs.peerMac = d.peerMac;
-      bondFs.peerName = d.peerName || 'bonded device';
-      bondFs.localMac = d.localMac || '';
-      var t = document.getElementById('fs-source-toggle');
-      if (t) t.style.display = 'flex';
-      showLocalFs();
-    }
-  }).catch(function(){ /* not bonded / endpoint absent — leave toggle hidden */ });
+  if (!window.BondFs) return;
+  window.BondFs.checkAvailable(function(ok){
+    if (!ok) return;
+    var t = document.getElementById('fs-source-toggle');
+    if (t) t.style.display = 'flex';
+    showLocalFs();
+  });
 }
 
 function setFsButtons(local){
@@ -190,123 +229,93 @@ function showBondedFs(){
   if (lc) lc.style.display = 'none';
   if (bc) bc.style.display = '';
   setFsButtons(false);
-  bondBrowse(bondFs.path || '/');
-}
-
-// Parse the remote 'files' text listing ("  name (N items)" / "  name (N bytes)").
-function bondParseListing(lines){
-  var entries = [], seen = {};
-  var re = /^\s+(.+?)\s+\((\d+)\s+(items|bytes)\)(\s+\[mount\])?\s*$/;
-  for (var i=0;i<lines.length;i++){
-    var line = String(lines[i] || '');
-    if (!line || line.indexOf('Files (') >= 0 || line.indexOf('Total:') >= 0 || line.indexOf('No files found') >= 0) continue;
-    var m = line.match(re);
-    if (!m) continue;
-    var name = m[1].trim();
-    if (!name || seen[name]) continue;
-    seen[name] = true;
-    var isDir = (m[3] === 'items') || !!m[4];
-    entries.push({ name: name, isDir: isDir, meta: isDir ? (m[2] + ' items') : (m[2] + ' bytes') });
-  }
-  entries.sort(function(a,b){ if (a.isDir !== b.isDir) return a.isDir ? -1 : 1; return a.name < b.name ? -1 : (a.name > b.name ? 1 : 0); });
-  return entries;
-}
-
-function bondJoin(base, name){ if (base === '/' || base === '') return '/' + name; return (base.charAt(base.length-1) === '/' ? base : base + '/') + name; }
-function bondEsc(s){ return String(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'"); }
-
-function bondRender(path, entries, statusMsg){
-  var c = document.getElementById('bonded-fs-container');
-  if (!c) return;
-  bondFs.path = path;
-  var h = '';
-  h += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap">';
-  h += '<strong>' + (bondFs.peerName || 'Bonded device') + '</strong>';
-  h += '<span style="font-size:0.8rem;color:var(--muted)">' + (statusMsg || ('Path: ' + path)) + '</span>';
-  h += '<button class="btn" style="margin-left:auto;font-size:0.8em;padding:3px 10px" onclick="bondBrowse(bondFs.path)">Refresh</button>';
-  h += '</div>';
-  h += '<div style="font-size:0.85rem;margin-bottom:6px"><span style="cursor:pointer;color:var(--link)" onclick="bondBrowse(\'/\')">/</span>';
-  var segs = path.split('/').filter(function(s){return s.length>0;}); var acc = '';
-  for (var s=0;s<segs.length;s++){ acc += '/' + segs[s]; h += '<span style="color:var(--muted)"> / </span><span style="cursor:pointer;color:var(--link)" onclick="bondBrowse(\'' + bondEsc(acc) + '\')">' + segs[s] + '</span>'; }
-  h += '</div>';
-  h += '<div style="border:1px solid var(--border);border-radius:6px;overflow:hidden">';
-  if (path !== '/'){
-    var trimmed = path.replace(/\/+$/,''); var idx = trimmed.lastIndexOf('/'); var parent = idx <= 0 ? '/' : trimmed.substring(0, idx);
-    h += '<div style="padding:7px 10px;border-bottom:1px solid var(--border);cursor:pointer;color:var(--link)" onclick="bondBrowse(\'' + bondEsc(parent) + '\')">[..]</div>';
-  }
-  if (!entries || entries.length === 0){
-    h += '<div style="padding:10px;color:var(--muted);text-align:center">Empty directory</div>';
-  } else {
-    for (var e=0;e<entries.length;e++){
-      var en = entries[e]; var full = bondEsc(bondJoin(path, en.name));
-      if (en.isDir){
-        h += '<div style="display:flex;gap:8px;align-items:center;padding:7px 10px;border-bottom:1px solid var(--border);cursor:pointer" onclick="bondBrowse(\'' + full + '\')">';
-        h += '<span style="color:var(--link);font-family:monospace">[D]</span><span>' + en.name + '</span><span style="margin-left:auto;font-size:0.78em;color:var(--muted)">' + en.meta + '</span></div>';
-      } else {
-        h += '<div style="display:flex;gap:8px;align-items:center;padding:7px 10px;border-bottom:1px solid var(--border)">';
-        h += '<span style="font-family:monospace">[F]</span><span>' + en.name + '</span><span style="margin-left:auto;font-size:0.78em;color:var(--muted)">' + en.meta + '</span>';
-        h += '<button class="btn" style="font-size:0.75em;padding:2px 8px" onclick="bondDownload(\'' + full + '\')">Download</button></div>';
-      }
-    }
-  }
-  h += '</div>';
-  c.innerHTML = h;
-}
-
-// Snapshot the peer's current max message seq, then run a command on the peer.
-function bondSeqBaseline(cb){
-  fetch('/api/espnow/messages?since=0&mac=' + encodeURIComponent(bondFs.peerMac))
-    .then(function(r){return r.json();}).then(function(d){
-      var msgs = (d && d.messages) ? d.messages : [];
-      for (var i=0;i<msgs.length;i++){ if ((msgs[i].seq||0) > bondFs.seq) bondFs.seq = msgs[i].seq; }
-    }).catch(function(){}).finally(cb);
+  // Do NOT also call updateBondedStorageStats() here. bondBrowse's onResult
+  // already calls it after the listing completes — serializing the two execs
+  // (files-listing first, fsusage second) is what makes the page reliable.
+  // Firing both in parallel triggered races that produced inconsistent
+  // "No files found" / "parse failed" / "timed out" outcomes (see commit
+  // notes for the three-way race diagnosis).
+  bondBrowse(bondCurPath || '/');
 }
 
 function bondBrowse(path){
   path = path || '/';
-  bondRender(path, [], 'Requesting directory…');
-  bondSeqBaseline(function(){
-    fetch('/api/bond/exec', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'cmd=' + encodeURIComponent('files ' + path) })
-      .then(function(r){return r.json();}).then(function(d){
-        if (!d || !d.success){ bondRender(path, [], 'Error: ' + ((d && (d.result||d.error)) || 'command failed')); return; }
-        var lines = [], done = false, polls = 0;
-        var timer = setInterval(function(){
-          polls++;
-          fetch('/api/espnow/messages?since=' + bondFs.seq + '&mac=' + encodeURIComponent(bondFs.peerMac))
-            .then(function(r){return r.json();}).then(function(md){
-              var ms = (md && md.messages) ? md.messages : [];
-              for (var i=0;i<ms.length;i++){ var m = ms[i]; if (m.seq > bondFs.seq) bondFs.seq = m.seq; if (m.msg){ var parts = String(m.msg).split('\n'); for (var p=0;p<parts.length;p++) lines.push(parts[p]); if (String(m.msg).indexOf('Total:') >= 0) done = true; } }
-              if (done){ clearInterval(timer); bondRender(path, bondParseListing(lines), null); }
-              else if (polls >= 20){ clearInterval(timer); bondRender(path, bondParseListing(lines), lines.length ? null : 'Timed out waiting for ' + (bondFs.peerName||'peer')); }
-            }).catch(function(){});
-        }, 500);
-      }).catch(function(e){ bondRender(path, [], 'Error: ' + e.message); });
+  bondCurPath = path;
+  if (!window.BondFs) return;
+  window.BondFs.renderExplorer('bonded-fs-container', path, [], { onNavigate: bondBrowse, fileActions: [], status: 'Requesting directory…' });
+  window.BondFs.list(path, function(entries, err){
+    if (entries === null){
+      window.BondFs.renderExplorer('bonded-fs-container', path, [], { onNavigate: bondBrowse, fileActions: [], status: 'Error: ' + (err || 'failed') });
+      return;
+    }
+    // Each successful directory listing also refreshes worker storage stats.
+    // Matches the local view's behavior of updating the bar on every nav, and
+    // catches storage shifts caused by remote downloads or peer-side edits.
+    updateBondedStorageStats();
+    window.BondFs.renderExplorer('bonded-fs-container', path, entries, {
+      onNavigate: bondBrowse,
+      // Both actions go through BondFs.pull which uses the existing bond
+      // file-transfer pipeline (master sends `remote:espnowsendfile`, worker
+      // chunks the file back, master caches at /espnow/received/<MAC>/).
+      // The same cached copy is reused for both Download and View — only the
+      // browser-side disposition differs (force-save vs. inline render).
+      fileActions: [
+        {
+          label: 'View',
+          title: 'Pull this file from the worker via bond, then open it in a new tab for inline viewing (text/JSON/images render natively; AVI opens in the player modal)',
+          fn: bondView
+        },
+        {
+          label: 'Download',
+          title: 'Pull this file from the worker via bond, then save it to your computer (also cached on master at /espnow/received/<MAC>/)',
+          fn: bondDownload
+        }
+      ]
+    });
   });
 }
 
-// Pull a file from the bonded device onto THIS device, then download it locally.
 function bondDownload(remotePath){
-  if (!bondFs.localMac){ alert('Local MAC unavailable — cannot pull file.'); return; }
-  var base = remotePath.split('/').pop();
-  var dir = '/espnow/received/' + fsToken(bondFs.peerMac);
-  var localUrl = '/api/files/read?name=' + encodeURIComponent(dir + '/' + base);
-  bondRender(bondFs.path, bondParseListing([]), 'Pulling ' + base + '…');
-  fetch('/api/bond/exec', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'cmd=' + encodeURIComponent('espnow sendfile ' + bondFs.localMac + ' ' + remotePath) })
-    .then(function(r){return r.json();}).then(function(d){
-      if (!d || !d.success){ alert('Pull failed: ' + ((d && (d.result||d.error)) || 'command failed')); bondBrowse(bondFs.path); return; }
-      // Poll the LOCAL filesystem until the received file appears, then download it.
-      var polls = 0;
-      var timer = setInterval(function(){
-        polls++;
-        fetch('/api/files/list?path=' + encodeURIComponent(dir)).then(function(r){return r.json();}).then(function(ld){
-          var items = (ld && ld.files) ? ld.files : (Array.isArray(ld) ? ld : []);
-          var found = false;
-          for (var i=0;i<items.length;i++){ var nm = items[i] && items[i].name ? items[i].name : items[i]; if (nm === base || String(nm).split('/').pop() === base){ found = true; break; } }
-          if (found){ clearInterval(timer); bondBrowse(bondFs.path); window.location = localUrl; }
-          else if (polls >= 30){ clearInterval(timer); bondBrowse(bondFs.path); alert('Timed out pulling ' + base + ' from ' + (bondFs.peerName||'peer')); }
-        }).catch(function(){ if (polls >= 30){ clearInterval(timer); } });
-      }, 600);
-    }).catch(function(e){ alert('Pull error: ' + e.message); bondBrowse(bondFs.path); });
+  if (!window.BondFs) return;
+  window.BondFs.pull(remotePath, function(res, err){
+    if (err || !res){ alert('Pull failed: ' + (err || 'unknown')); return; }
+    // window.location = url would NAVIGATE to the file, which for JSON/text/
+    // image types makes the browser display it inline instead of downloading
+    // it. Use a temporary <a download="..."> click so the browser saves the
+    // file to the user's Downloads folder — matches what the local file
+    // browser does for its Download button.
+    var a = document.createElement('a');
+    a.href = res.localUrl;
+    a.download = res.base || 'download';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  });
+}
+
+// View action — same pull, different open. Mirrors the local file browser's
+// ViewFile path (WebServer_Utils.h:914): AVI files open in the AVI player
+// modal if it's on the page; everything else opens via /api/files/view which
+// gives a Pretty/Raw text viewer with proper Content-Type for text/JSON and
+// inline image rendering. The cached file at /espnow/received/<MAC>/<name>
+// is served by the standard local file-view endpoint, so the worker's file
+// renders identically to one that lives on the master natively.
+function bondView(remotePath){
+  if (!window.BondFs) return;
+  window.BondFs.pull(remotePath, function(res, err){
+    if (err || !res){ alert('Pull failed: ' + (err || 'unknown')); return; }
+    var lower = (res.base || '').toLowerCase();
+    if (lower.endsWith('.avi') && typeof window.openAviPlayer === 'function') {
+      // openAviPlayer takes just the basename — it knows the camera dir. The
+      // cached AVI lives under /espnow/received/<MAC>/, not where the player
+      // expects, so for now bail out with a hint; future work could teach the
+      // player to accept a full path or move the cached AVI into the camera
+      // dir before play.
+      alert('AVI playback for bonded files is not yet wired up.\nFile cached at: ' + res.localPath);
+      return;
+    }
+    window.open('/api/files/view?name=' + encodeURIComponent(res.localPath), '_blank');
+  });
 }
 </script>
 )JS", HTTPD_RESP_USE_STRLEN);

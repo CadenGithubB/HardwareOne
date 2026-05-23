@@ -52,6 +52,18 @@ extern String gLocalDisplayUser;
 // Password hashing function (used by .ino for first-time setup and password verification)
 String hashUserPassword(const String& password);
 
+// Reserved synthetic identity for an authenticated bonded master. A device that
+// presents a valid bond session token — validated against the live, AEAD-encrypted
+// session (see v4_handle_cmd) — runs its remote commands under this username.
+// isAdminUser() grants it admin ONLY while a live bond session exists, so the
+// elevation tracks the bond's lifetime exactly: no persisted account, no
+// stale-admin window. It is in the reserved-name table (cannot be created) and
+// has no users.json entry (cannot be logged into with a password). The bond
+// session/token is X25519-ephemeral and re-derived every boot, which is why a
+// persisted credential would be pointless — there'd be nothing to authenticate
+// against it after a reboot.
+inline constexpr const char* kBondAdminUser = "bond-admin";
+
 // Transport-generic authentication functions
 bool tgRequireAuth(AuthContext& ctx);
 bool isAdminUser(const String& who);

@@ -702,6 +702,7 @@ struct EspNowState {
   uint32_t bondPeerBootCounter;     // Peer's boot counter (detect reboots)
   uint32_t bondPeerSettingsHash;    // Peer's settings hash (detect changes)
   uint32_t bondLocalSettingsHash;   // Our settings hash (sent in heartbeat)
+  uint32_t bondCachedPeerSettingsHash; // Peer's hash at the moment we last cached their settings file. dirty = (bondPeerSettingsHash != this) when bondSettingsReceived.
   uint32_t bondPeerUptime;          // Peer's uptime in seconds (from heartbeat)
   uint32_t bondLastOfflineMs;       // millis() when peer last went offline
   
@@ -719,13 +720,15 @@ struct EspNowState {
   bool bondNeedsCapabilityResponse; // Peer requested our capabilities
   bool bondNeedsManifestResponse;   // Peer requested our manifest
   bool bondNeedsSettingsResponse;   // Peer requested our settings
+  bool bondNeedsSchemaResponse;     // Peer requested our settings schema (mirrors settings)
   bool bondReceivedCapability;      // We received peer's CAP_RESP
-  uint8_t bondPendingResponseMac[6]; // MAC of peer requesting cap/manifest/settings
-  
+  uint8_t bondPendingResponseMac[6]; // MAC of peer requesting cap/manifest/settings/schema
+
   // Sync completion tracking (replaces linear handshake state machine)
   bool bondCapSent;                 // We sent our capabilities this session
   bool bondManifestReceived;        // We received/cached peer's manifest (master)
   bool bondSettingsReceived;        // We received peer's settings (master)
+  bool bondSchemaReceived;          // We received/cached peer's schema (master) — schema.json under peers/<MAC>/
   bool bondSettingsSent;            // We sent our settings to peer (worker)
 
   // NOTE: the bond auth token is NOT stored here. It lives in the encrypted
@@ -785,17 +788,26 @@ struct EspNowState {
   char* deferredCmdRespResult;  // PSRAM-allocated at init (6144 bytes — matches V4_FRAG_MAX × V4_MAX_FRAGMENT_PAYLOAD)
   bool deferredCmdRespSuccess;
   
-  // STREAM message ring buffer (replaces single-buffer to prevent overwrite loss)
-  static constexpr int STREAM_QUEUE_SIZE = 16;  // Must be power of 2
+  // STREAM message ring buffer (replaces single-buffer to prevent overwrite loss).
+  // Allocated separately in initEspNow(): STREAM_QUEUE_SIZE_PSRAM slots when PSRAM
+  // is available (the burst buffer a large bonded-command output like `help` —
+  // ~24 frames in ~150ms — needs), else STREAM_QUEUE_SIZE_FALLBACK slots in
+  // internal RAM (the historical size) so a PSRAM-less board pays no extra DRAM.
+  // Both sizes MUST be powers of 2 (index wrap uses streamQueueMask).
+  static constexpr int STREAM_QUEUE_SIZE_PSRAM    = 64;
+  static constexpr int STREAM_QUEUE_SIZE_FALLBACK = 16;
   struct StreamQueueEntry {
     uint8_t srcMac[6];
     char deviceName[32];
     char content[256];
     bool used;  // Slot contains valid data
   };
-  StreamQueueEntry streamQueue[STREAM_QUEUE_SIZE];
-  volatile int streamQueueHead;  // ISR writes here (producer)
-  volatile int streamQueueTail;  // Task reads here (consumer)
+  StreamQueueEntry* streamQueue;  // ps_alloc'd ring of streamQueueCap entries
+  int streamQueueCap;             // slot count (power of 2): 16 or 64
+  int streamQueueMask;            // streamQueueCap - 1 (index wrap mask)
+  int streamDrainMax;             // max entries drained per task tick (8 or 64)
+  volatile int streamQueueHead;  // producer (RX path)
+  volatile int streamQueueTail;  // consumer (task tick)
   // CMD request (deferred to task for auth + execution)
   bool deferredCmdPending;
   uint8_t deferredCmdSrcMac[6];
@@ -848,6 +860,7 @@ struct EspNowState {
     bondPeerBootCounter(0),
     bondPeerSettingsHash(0),
     bondLocalSettingsHash(0),
+    bondCachedPeerSettingsHash(0),
     bondPeerUptime(0),
     bondLastOfflineMs(0),
     bondSyncInFlight(BOND_SYNC_NONE),
@@ -861,10 +874,12 @@ struct EspNowState {
     bondNeedsCapabilityResponse(false),
     bondNeedsManifestResponse(false),
     bondNeedsSettingsResponse(false),
+    bondNeedsSchemaResponse(false),
     bondReceivedCapability(false),
     bondCapSent(false),
     bondManifestReceived(false),
     bondSettingsReceived(false),
+    bondSchemaReceived(false),
     bondSettingsSent(false),
     bondStatusReqSentOnce(false),
     bondRssiLast(-100),
@@ -884,6 +899,10 @@ struct EspNowState {
     deferredCmdRespPending(false),
     deferredCmdRespResult(nullptr),
     deferredCmdRespSuccess(false),
+    streamQueue(nullptr),
+    streamQueueCap(0),
+    streamQueueMask(0),
+    streamDrainMax(0),
     streamQueueHead(0),
     streamQueueTail(0),
     deferredCmdPending(false),
@@ -903,7 +922,7 @@ struct EspNowState {
     memset(deferredCmdRespSrcMac, 0, 6);
     memset(deferredCmdRespDeviceName, 0, sizeof(deferredCmdRespDeviceName));
     // deferredCmdRespResult is a pointer — zeroed after ps_alloc in initEspNow
-    memset(streamQueue, 0, sizeof(streamQueue));
+    // streamQueue is also a pointer — allocated + zeroed in initEspNow
     memset(deferredCmdSrcMac, 0, 6);
     memset(deferredCmdDeviceName, 0, sizeof(deferredCmdDeviceName));
     memset(deferredCmdPayload, 0, sizeof(deferredCmdPayload));
@@ -1012,6 +1031,13 @@ extern EspNowState* gEspNow;
 
 // Helper functions (exported for other modules)
 bool macEqual6(const uint8_t a[6], const uint8_t b[6]);
+
+// Bond schema sync — sends ESPNOW_V4_TYPE_SCHEMA_REQ to the bonded peer. The
+// worker responds with the schema as a file (_schema_out.json) which is
+// cached at /system/espnow/peers/<MAC>/schema.json by v4h_file_end →
+// processBondSchema. Returns true if the request was sent on-air. Callers
+// poll gEspNow->bondSchemaReceived for completion. Master-only.
+bool requestBondSchema(const uint8_t* peerMac);
 
 // Inline helpers
 inline const char* getEspNowModeString() {
