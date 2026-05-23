@@ -7,6 +7,7 @@
 #include "System_Settings.h"
 #include "System_BuildConfig.h"
 #include "System_ESPNow.h"
+#include "System_BondedPeer.h"
 #include "System_Utils.h"  // For AuthContext, executeCommand
 #include <ArduinoJson.h>
 #include "System_MemUtil.h"
@@ -341,11 +342,9 @@ static void buildUnifiedMenu() {
   count += buildLocalMenuItems(&gUnifiedMenuItems[count], maxItems - count);
   
   // Build remote items if bonded
-  if (gSettings.bondModeEnabled && gSettings.bondPeerMac.length() > 0) {
-    uint8_t peerMac[6];
-    if (parseMacAddress(gSettings.bondPeerMac, peerMac)) {
-      count += buildRemoteMenuItems(&gUnifiedMenuItems[count], maxItems - count, peerMac);
-    }
+  uint8_t peerMac[6];
+  if (BondedPeer::isPaired() && BondedPeer::peerMacBytes(peerMac)) {
+    count += buildRemoteMenuItems(&gUnifiedMenuItems[count], maxItems - count, peerMac);
   }
   
   gUnifiedMenuItemCount = count;
@@ -471,13 +470,7 @@ void displayUnifiedMenu() {
     return;
   }
   
-  uint8_t peerMac[6];
-  String peerName = gSettings.bondPeerMac;
-  if (parseMacAddress(gSettings.bondPeerMac, peerMac)) {
-    String name = getEspNowDeviceName(peerMac);
-    if (name.length() > 0) peerName = name;
-  }
-  
+  String peerName = BondedPeer::peerName();
   oledDisplay->print("Peer: ");
   oledDisplay->println(peerName.substring(0, 10));
   

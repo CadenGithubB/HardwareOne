@@ -31,6 +31,8 @@
 #include "System_I2C.h"
 #include "System_User.h"
 #include "System_AuthIdentity.h"  // ExecIdentityGuard (executeCommand + submitAndExecuteSync)
+#include "System_SelfDevice.h"   // SelfDevice:: — local identity/heap/uptime/firmware (Stage 1 consolidation)
+#include "System_Clock.h"        // Clock:: — epoch/sync/tz/format helpers (Stage 2)
 #include "System_Command.h"
 #include "System_SensorStubs.h"  // Stubs for disabled sensors/modules
 #include "System_MemoryMonitor.h"
@@ -728,13 +730,11 @@ void getTimestampPrefixMsCached(char* out, size_t outSize) {
 
   time_t sec = (time_t)(epochUs / 1000000LL);
   int ms = (int)((epochUs / 1000LL) % 1000LL);
+  // Sanity check: if RTC is unsynced, it may report 1970/1980 era time.
+  // Clock::isValidEpoch enforces the year >= 2020 threshold uniformly.
+  if (!Clock::isValidEpoch(sec)) return;
   struct tm tminfo;
   if (!localtime_r(&sec, &tminfo)) return;
-  // Sanity check: if RTC is unsynced, it may report 1970/1980 era time.
-  // Require a reasonable year (>=2020) before we emit a formatted timestamp.
-  if (tminfo.tm_year < 120) {  // tm_year is years since 1900
-    return;
-  }
   // Build prefix directly into caller's buffer
   char base[24];  // "[YYYY-MM-DD HH:MM:SS" (23 + NUL)
   if (strftime(base, sizeof(base), "[%Y-%m-%d %H:%M:%S", &tminfo) <= 0) return;
@@ -1328,7 +1328,7 @@ const char* cmd_lightsleep(const String& argsInput) {
 
 const char* cmd_status(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  BROADCAST_PRINTF("HardwareOne v%s (%s)", esp_app_get_description()->version, BOARD_NAME);
+  BROADCAST_PRINTF("HardwareOne v%s (%s)", SelfDevice::firmwareVersion(), BOARD_NAME);
   broadcastOutput("System Status:");
 #if ENABLE_WIFI
   BROADCAST_PRINTF("  WiFi: %s", WiFi.isConnected() ? "Connected" : "Disconnected");
@@ -1337,11 +1337,11 @@ const char* cmd_status(const String& argsInput) {
   BROADCAST_PRINTF("  WiFi: Disabled");
 #endif
   BROADCAST_PRINTF("  Filesystem: %s", filesystemReady ? "Ready" : "Error");
-  BROADCAST_PRINTF("  Free Heap: %lu bytes", (unsigned long)ESP.getFreeHeap());
+  BROADCAST_PRINTF("  Free Heap: %lu bytes", (unsigned long)SelfDevice::freeHeapBytes());
 
   size_t psTot = ESP.getPsramSize();
   if (psTot > 0) {
-    BROADCAST_PRINTF("  Free PSRAM: %lu bytes", (unsigned long)ESP.getFreePsram());
+    BROADCAST_PRINTF("  Free PSRAM: %lu bytes", (unsigned long)SelfDevice::psramFreeBytes());
     BROADCAST_PRINTF("  Total PSRAM: %lu bytes", (unsigned long)psTot);
   }
 
@@ -1360,11 +1360,11 @@ const char* cmd_status(const String& argsInput) {
 
 const char* cmd_uptime(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  unsigned long uptimeMs = millis();
-  unsigned long seconds = uptimeMs / 1000;
-  unsigned long minutes = seconds / 60;
-  unsigned long hours = minutes / 60;
-  BROADCAST_PRINTF("Uptime: %luh %lum %lus", hours, minutes % 60, seconds % 60);
+  uint32_t seconds = SelfDevice::uptimeSeconds();
+  uint32_t minutes = seconds / 60;
+  uint32_t hours = minutes / 60;
+  BROADCAST_PRINTF("Uptime: %luh %lum %lus",
+                   (unsigned long)hours, (unsigned long)(minutes % 60), (unsigned long)(seconds % 60));
   return "[System] Uptime displayed";
 }
 
@@ -1702,10 +1702,10 @@ extern void notifyAutomationScheduler();
 extern void logTimeSyncedMarkerIfReady();
 
 void setupNTP() {
-  long gmtOffset = (long)gSettings.tzOffsetMinutes * 60;  // seconds
+  long gmtOffset = (long)Clock::tzOffsetMinutes() * 60;  // seconds
   DEBUG_NTP_SETUPF("[NTP Setup] Starting NTP configuration");
   DEBUG_NTP_SETUPF("[NTP Setup] Primary server: %s", gSettings.ntpServer.c_str());
-  DEBUG_NTP_SETUPF("[NTP Setup] GMT offset: %ld seconds (%d minutes)", gmtOffset, gSettings.tzOffsetMinutes);
+  DEBUG_NTP_SETUPF("[NTP Setup] GMT offset: %ld seconds (%d minutes)", gmtOffset, Clock::tzOffsetMinutes());
   DEBUG_NTP_SETUPF("[NTP Setup] WiFi status: %s", WiFi.isConnected() ? "CONNECTED" : "DISCONNECTED");
   if (WiFi.isConnected()) {
     DEBUG_NTP_SETUPF("[NTP Setup] WiFi IP: %s", WiFi.localIP().toString().c_str());

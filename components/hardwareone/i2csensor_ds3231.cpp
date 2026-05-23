@@ -13,6 +13,7 @@
 
 #include "OLED_Display.h"
 #include "System_Command.h"
+#include "System_Clock.h"
 #include "System_Debug.h"
 #include "System_ESPNow.h"
 #include "System_ESPNow_Sensors.h"
@@ -312,7 +313,7 @@ static int rtcDayOfWeek(int y, int m, int d) {
 RTCDateTime rtcLocalTime(const RTCDateTime* utc) {
   RTCDateTime local = *utc;
 
-  int offsetMinutes = gSettings.tzOffsetMinutes;
+  int offsetMinutes = Clock::tzOffsetMinutes();
   if (offsetMinutes == 0) return local;  // UTC, nothing to do
 
   int totalMinutes = local.hour * 60 + local.minute + offsetMinutes;
@@ -385,12 +386,7 @@ void rtcTask(void* pvParameters) {
   DEBUG_RTC_LIFECYCLEF("[RTC] Task started");
   
   // Check if system time is already valid (from RTC early boot sync or NTP)
-  struct tm timeinfo;
-  bool systemTimeValid = false;
-  if (getLocalTime(&timeinfo, 0)) {
-    // System time is valid if year >= 2020 (tm_year is years since 1900)
-    systemTimeValid = (timeinfo.tm_year >= 120);
-  }
+  bool systemTimeValid = Clock::isSynced();
   
   if (systemTimeValid) {
     // System already has valid time - if RTC is already calibrated, just verify;
@@ -610,7 +606,7 @@ const char* cmd_rtc(const String& argsInput) {
     if (rtcReadDateTime(&utc)) {
       float temp = rtcReadTemperature();
       RTCDateTime local = rtcLocalTime(&utc);
-      int offsetMin = gSettings.tzOffsetMinutes;
+      int offsetMin = Clock::tzOffsetMinutes();
       char tzBuf[12];
       if (offsetMin == 0) {
         snprintf(tzBuf, sizeof(tzBuf), "UTC");

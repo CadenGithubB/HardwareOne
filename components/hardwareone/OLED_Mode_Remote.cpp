@@ -7,6 +7,7 @@
 #include "System_Settings.h"
 #include "System_BuildConfig.h"
 #include "System_ESPNow.h"
+#include "System_BondedPeer.h"
 #include "HAL_Input.h"
 
 #if ENABLE_OLED_DISPLAY && ENABLE_ESPNOW && ENABLE_BONDED_MODE
@@ -97,17 +98,12 @@ static void displayBondStatus() {
   if (!gEspNow) return;
   
   // Get peer name
-  uint8_t peerMac[6];
   char peerName[24];
-  strncpy(peerName, gSettings.bondPeerMac.c_str(), sizeof(peerName) - 1);
+  // BondedPeer::peerName() does the parse + name resolution and falls back
+  // to the raw MAC string when no friendly name is known. Truncate to fit.
+  String displayName = BondedPeer::peerName();
+  strncpy(peerName, displayName.c_str(), sizeof(peerName) - 1);
   peerName[sizeof(peerName) - 1] = '\0';
-  if (parseMacAddress(gSettings.bondPeerMac, peerMac)) {
-    String name = getEspNowDeviceName(peerMac);
-    if (name.length() > 0) {
-      strncpy(peerName, name.c_str(), sizeof(peerName) - 1);
-      peerName[sizeof(peerName) - 1] = '\0';
-    }
-  }
   
   char buf[32];
   oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
@@ -345,17 +341,12 @@ void displayRemoteMode() {
   
   // Show peer name and status on first line for context
   bool online = gEspNow->bondPeerOnline;
-  uint8_t peerMac[6];
   char peerName[24];
-  strncpy(peerName, gSettings.bondPeerMac.c_str(), sizeof(peerName) - 1);
+  // BondedPeer::peerName() does the parse + name resolution and falls back
+  // to the raw MAC string when no friendly name is known. Truncate to fit.
+  String displayName = BondedPeer::peerName();
+  strncpy(peerName, displayName.c_str(), sizeof(peerName) - 1);
   peerName[sizeof(peerName) - 1] = '\0';
-  if (parseMacAddress(gSettings.bondPeerMac, peerMac)) {
-    String name = getEspNowDeviceName(peerMac);
-    if (name.length() > 0) {
-      strncpy(peerName, name.c_str(), sizeof(peerName) - 1);
-      peerName[sizeof(peerName) - 1] = '\0';
-    }
-  }
   peerName[14] = '\0';  // Truncate for display
   oledDisplay->print(peerName);
   oledDisplay->println(online ? " [ON]" : " [OFF]");

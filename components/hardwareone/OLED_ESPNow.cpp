@@ -5,6 +5,7 @@
 #include "OLED_Display.h"
 #include "OLED_Utils.h"
 #include "System_ESPNow.h"
+#include "System_MeshPeers.h"
 #include "System_Utils.h"
 
 #if ENABLE_GAMEPAD_SENSOR
@@ -12,18 +13,10 @@
 #endif
 
 // Mesh health data for online/offline status display
-// gMeshPeers, gMeshPeerMeta, gMeshPeerSlots, isMeshPeerAlive, getMeshPeerHealth
-// are all declared in System_ESPNow.h (already included above)
-
-// Lookup MeshPeerMeta by MAC (returns nullptr if not found)
-static MeshPeerMeta* findPeerMeta(const uint8_t mac[6]) {
-  for (int i = 0; i < gMeshPeerSlots; i++) {
-    if (gMeshPeerMeta[i].isActive && memcmp(gMeshPeerMeta[i].mac, mac, 6) == 0) {
-      return &gMeshPeerMeta[i];
-    }
-  }
-  return nullptr;
-}
+// gMeshPeers, gMeshPeerMeta, gMeshPeerSlots, isMeshPeerAlive, getMeshPeerHealth,
+// getMeshPeerMeta are all declared in System_ESPNow.h (already included above).
+// Compound queries (MeshPeers::isHealthy / displayName / ...) live in
+// System_MeshPeers.h.
 
 // =============================================================================
 // OLED ESP-NOW Interface Implementation
@@ -219,18 +212,8 @@ void oledEspNowDisplayMainMenu(Adafruit_SSD1306* display) {
   // Status line in content area (header shows "ESP-NOW")
   display->setCursor(0, OLED_CONTENT_START_Y);
   if (gEspNow && gEspNow->initialized) {
-    // Count online devices
-    int onlineCount = 0;
-    for (int i = 0; i < gMeshPeerSlots; i++) {
-      if (gMeshPeerMeta[i].isActive) {
-        MeshPeerHealth* health = getMeshPeerHealth(gMeshPeerMeta[i].mac, false);
-        if (health && isMeshPeerAlive(health)) {
-          onlineCount++;
-        }
-      }
-    }
     display->print("Online: ");
-    display->println(onlineCount);
+    display->println(MeshPeers::countHealthy());
   } else {
     display->println("Status: OFF");
   }
@@ -312,17 +295,13 @@ void oledEspNowDisplayStatus(Adafruit_SSD1306* display) {
   display->print("Role: ");
   display->println(roleStr);
   
-  // Device count
-  int totalDevices = 0, onlineDevices = 0;
+  // Device count: total = known peers (active meta slots), online = healthy
+  int totalDevices = 0;
   for (int i = 0; i < gMeshPeerSlots; i++) {
-    if (gMeshPeerMeta[i].isActive) {
-      totalDevices++;
-      MeshPeerHealth* health = getMeshPeerHealth(gMeshPeerMeta[i].mac, false);
-      if (health && isMeshPeerAlive(health)) onlineDevices++;
-    }
+    if (gMeshPeerMeta[i].isActive) totalDevices++;
   }
   display->print("Devices: ");
-  display->print(onlineDevices);
+  display->print(MeshPeers::countHealthy());
   display->print("/");
   display->println(totalDevices);
   
@@ -423,13 +402,11 @@ static void rebuildRoomDeviceList(const char* room) {
     if (strcasecmp(gMeshPeerMeta[i].room, room) != 0) continue;
     if (sRoomDeviceCount >= ROOMS_DEVICES_MAX) break;
     
-    const char* name = gMeshPeerMeta[i].friendlyName[0] ? gMeshPeerMeta[i].friendlyName :
-                       gMeshPeerMeta[i].name[0] ? gMeshPeerMeta[i].name : "Unknown";
-    strncpy(sRoomDevices[sRoomDeviceCount].name, name, 23);
+    String displayName = MeshPeers::displayName(gMeshPeerMeta[i].mac);
+    strncpy(sRoomDevices[sRoomDeviceCount].name, displayName.c_str(), 23);
     sRoomDevices[sRoomDeviceCount].name[23] = '\0';
     memcpy(sRoomDevices[sRoomDeviceCount].mac, gMeshPeerMeta[i].mac, 6);
-    MeshPeerHealth* health = getMeshPeerHealth(gMeshPeerMeta[i].mac, false);
-    sRoomDevices[sRoomDeviceCount].alive = health ? isMeshPeerAlive(health) : false;
+    sRoomDevices[sRoomDeviceCount].alive = MeshPeers::isHealthy(gMeshPeerMeta[i].mac);
     sRoomDeviceCount++;
   }
 }
@@ -679,9 +656,9 @@ void oledEspNowDisplayDeviceDetail(Adafruit_SSD1306* display) {
   if (!display) return;
   
   // Look up mesh metadata and health for this device
-  MeshPeerMeta* meta = findPeerMeta(gOledEspNowState.selectedDeviceMac);
+  MeshPeerMeta* meta = getMeshPeerMeta(gOledEspNowState.selectedDeviceMac);
   MeshPeerHealth* health = getMeshPeerHealth(gOledEspNowState.selectedDeviceMac, false);
-  bool alive = health ? isMeshPeerAlive(health) : false;
+  bool alive = MeshPeers::isHealthy(gOledEspNowState.selectedDeviceMac);
   
   // Draw header with device name + online indicator
   display->setTextSize(1);
@@ -1291,10 +1268,11 @@ void oledEspNowRefreshDeviceList() {
       continue;
     }
     
-    // Look up mesh metadata and health for this device
-    MeshPeerMeta* meta = findPeerMeta(device->mac);
+    // Look up mesh metadata and health for this device. Health pointer is
+    // stored in entries[] for the sort + render passes below.
+    MeshPeerMeta* meta = getMeshPeerMeta(device->mac);
     MeshPeerHealth* health = getMeshPeerHealth(device->mac, false);
-    bool alive = health ? isMeshPeerAlive(health) : false;
+    bool alive = MeshPeers::isHealthy(device->mac);
     
     // Apply filter
     if (gOledEspNowState.filterMode == 1) {  // Filter by room

@@ -26,6 +26,8 @@
 
 #if ENABLE_ESPNOW
 #include "System_ESPNow.h"
+#include "System_MeshPeers.h"
+#include "System_SelfDevice.h"
 #include "System_ESPNow_Sensors.h"
 // Forward declarations for mesh bridge command routing
 extern const char* cmd_espnow_roomcmd(const String& argsInput);
@@ -678,8 +680,7 @@ static void publishMeshPeerDiscovery() {
     macToPathToken(peer.mac, macCompact);  // no-separator UPPER
     String peerAvailTopic = gSettings.mqttBaseTopic + "/devices/hardwareone_" + macCompact + "/availability";
     
-    MeshPeerHealth* health = getMeshPeerHealth(peer.mac, false);
-    const char* status = (health && isMeshPeerAlive(health)) ? "online" : "offline";
+    const char* status = MeshPeers::isHealthy(peer.mac) ? "online" : "offline";
     esp_mqtt_client_publish(mqttClient, peerAvailTopic.c_str(), status, 0, 1, true);
   }
 
@@ -740,10 +741,13 @@ static void publishMeshPeerSensorData() {
 
     if (!hasData) continue;
 
-    // Add system info
+    // Add system info — need the health pointer for last_seen field access,
+    // but the bool comes from the shared MeshPeers::isHealthy so the answer
+    // matches every other UI's notion of "online".
     MeshPeerHealth* health = getMeshPeerHealth(peer.mac, false);
+    bool alive = MeshPeers::isHealthy(peer.mac);
     JsonObject sys = doc["system"].to<JsonObject>();
-    sys["online"] = health ? isMeshPeerAlive(health) : false;
+    sys["online"] = alive;
     if (health) {
       uint32_t lastContact = health->lastMeshHeartbeatMs;
       if (health->lastRxActivityMs > lastContact) lastContact = health->lastRxActivityMs;
@@ -757,8 +761,7 @@ static void publishMeshPeerSensorData() {
 
     // Update availability
     String peerAvailTopic = gSettings.mqttBaseTopic + "/devices/hardwareone_" + macCompact + "/availability";
-    const char* status = (health && isMeshPeerAlive(health)) ? "online" : "offline";
-    esp_mqtt_client_publish(mqttClient, peerAvailTopic.c_str(), status, 0, 1, true);
+    esp_mqtt_client_publish(mqttClient, peerAvailTopic.c_str(), alive ? "online" : "offline", 0, 1, true);
   }
 }
 
@@ -981,9 +984,11 @@ void publishMQTTSensorData() {
   
   // Add system info (uptime, heap, etc.)
   if (gSettings.mqttPublishSystem) {
-    pos += snprintf(jsonBuf + pos, 16384 - pos, 
+    pos += snprintf(jsonBuf + pos, 16384 - pos,
       ",\"system\":{\"uptime\":%lu,\"heap_free\":%lu,\"heap_min\":%lu}",
-      millis() / 1000, (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getMinFreeHeap());
+      (unsigned long)SelfDevice::uptimeSeconds(),
+      (unsigned long)SelfDevice::freeHeapBytes(),
+      (unsigned long)SelfDevice::minFreeHeapBytes());
   }
   
   // Add WiFi info

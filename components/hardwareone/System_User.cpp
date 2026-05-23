@@ -13,6 +13,7 @@
 #include "System_SensorStubs.h" // Network stubs when disabled
 #include "System_Utils.h"  // For CommandEntry
 #include "System_Command.h"
+#include "System_Clock.h"  // Clock::isValidEpoch / isSynced — replaces tm_year>=120 magic
 #include "System_Mutex.h"  // For FsLockGuard
 #include "System_Debug.h"  // For DEBUG_AUTHF, DEBUG_USERF
 #include "System_Logging.h" // For log file paths and constants
@@ -165,6 +166,17 @@ bool tgRequireAuth(AuthContext& ctx) {
 
 // Determine if the given username is admin (any user with role == admin)
 bool isAdminUser(const String& who) {
+#if ENABLE_BONDED_MODE
+  // A bonded master that presented a valid bond session token runs commands under
+  // kBondAdminUser. Grant admin for the lifetime of the live bond session only.
+  // Checked before the filesystem/JSON path — this identity is never a real
+  // users.json account, and ctx.user is only ever set to it by the token-validated
+  // bonded-command path (v4_handle_cmd), so the session check is defense-in-depth.
+  if (who == kBondAdminUser) {
+    extern bool isBondSessionTokenValid();
+    return isBondSessionTokenValid();
+  }
+#endif
   if (!filesystemReady) return false;
   // Prefer JSON
   if (VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth("user.isAdmin"))) {
@@ -517,7 +529,7 @@ bool adminCreateUser(const String& username, const String& plainPassword, bool m
   // mistaken for system or anonymous-local activity in the audit trail.
   // Case-insensitive so "authbypass" / "AUTHBYPASS" don't sneak through.
   {
-    static const char* kReserved[] = { "system", "AuthBypass" };
+    static const char* kReserved[] = { "system", "AuthBypass", kBondAdminUser };
     for (const char* r : kReserved) {
       if (strcasecmp(u.c_str(), r) == 0) {
         errorOut = String("Username \"") + r + "\" is reserved";
@@ -772,12 +784,12 @@ static const char* setUserBanInternal(const String& username, bool ban, const St
 // Only writes if the system clock appears valid (epoch > Jan 1, 2021).
 void updateUserLastSeen(const String& username) {
   if (username.length() == 0 || !filesystemReady) return;
-  time_t now = time(nullptr);
-  if (now < 1609459200) return;  // Clock not set yet — skip write
+  time_t now = Clock::epochSeconds();
+  if (!Clock::isValidEpoch(now)) return;  // Clock not set yet — skip write
 
   char isoTimestamp[25];
   struct tm tminfo;
-  if (!gmtime_r(&now, &tminfo) || tminfo.tm_year < 120) return;
+  if (!gmtime_r(&now, &tminfo)) return;
   strftime(isoTimestamp, sizeof(isoTimestamp), "%Y-%m-%dT%H:%M:%SZ", &tminfo);
 
   FsLockGuard guard("users.last_seen");
@@ -2466,16 +2478,15 @@ static bool formatEpochAsISO8601(time_t epoch, char* buf, size_t bufSize) {
     strncpy(buf, "null", bufSize);
     return false;
   }
+  if (!Clock::isValidEpoch(epoch)) {
+    strncpy(buf, "null", bufSize);
+    return false;
+  }
   struct tm tminfo;
   if (!gmtime_r(&epoch, &tminfo)) {
     strncpy(buf, "null", bufSize);
     return false;
   }
-  if (tminfo.tm_year < 120) {
-    strncpy(buf, "null", bufSize);
-    return false;
-  }
-
   strftime(buf, bufSize, "%Y-%m-%dT%H:%M:%SZ", &tminfo);
   return true;
 }
