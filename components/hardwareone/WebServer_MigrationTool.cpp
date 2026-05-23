@@ -39,6 +39,7 @@
 #include "esp_https_server.h"
 #endif
 #include "System_Filesystem.h"
+#include "System_SelfDevice.h"
 #include "System_VFS.h"
 #include "System_MemUtil.h"
 #include "System_Settings.h"
@@ -270,10 +271,10 @@ static esp_err_t handleBackup(httpd_req_t* req) {
   // Device info
   JsonObject device = doc["device"].to<JsonObject>();
   device["hostname"] = WiFi.getHostname();
-  device["mac"] = WiFi.macAddress();
+  device["mac"] = SelfDevice::macString();
   device["fingerprint"] = getDeviceFingerprint();
   device["board"] = BOARD_NAME;
-  device["firmwareVersion"] = esp_app_get_description()->version;
+  device["firmwareVersion"] = SelfDevice::firmwareVersion();
 
   // Build system info for ip
   PSRAM_JSON_DOC(sysDoc);

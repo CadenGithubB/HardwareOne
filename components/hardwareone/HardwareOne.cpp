@@ -82,6 +82,8 @@ void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
 #include "System_User.h"
 #include "System_AuthIdentity.h"
 #include "System_Filesystem.h"
+#include "System_SelfDevice.h"
+#include "System_Clock.h"
 #include "System_CLI.h"
 #include "System_I2C.h"
 #include "System_Logging.h"
@@ -1139,7 +1141,7 @@ void hardwareone_setup() {
   {
     char bannerLine[96];
     broadcastOutput("");
-    snprintf(bannerLine, sizeof(bannerLine), "========== HARDWAREONE v%s BUILD CONFIGURATION ==========", esp_app_get_description()->version);
+    snprintf(bannerLine, sizeof(bannerLine), "========== HARDWAREONE v%s BUILD CONFIGURATION ==========", SelfDevice::firmwareVersion());
     broadcastOutput(bannerLine);
 #if ENABLE_THERMAL_SENSOR
     broadcastOutput("  [Y] THERMAL  | MLX90640 thermal camera");
@@ -1311,7 +1313,13 @@ void hardwareone_setup() {
   if (wifiConnected) {
     bool rtcProvidedTime = false;
 #if ENABLE_RTC_SENSOR
-    // Check if RTC already set valid system time during early boot
+    // Check if RTC already set valid system time during early boot.
+    // getLocalTime(&t, 10) blocks up to 10ms for the time to become valid
+    // and fills timeinfo on success. Validate against the same year>=2020
+    // threshold Clock::isSynced uses, but read the JUST-populated tm_year
+    // directly — calling Clock::isSynced here would do a fresh time()/
+    // localtime_r and could race against the 10ms-window state we just
+    // sampled.
     if (gSettings.rtcTimeHasBeenSet) {
       struct tm timeinfo;
       if (getLocalTime(&timeinfo, 10) && timeinfo.tm_year >= 120) {

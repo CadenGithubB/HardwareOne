@@ -27,6 +27,8 @@
 #include "System_MemUtil.h"
 #include "System_Mutex.h"
 #include "System_Settings.h"
+#include "System_SelfDevice.h"
+#include "System_Clock.h"
 #include "System_Filesystem.h"
 #include "System_User.h"
 #include "System_AuthIdentity.h"  // ExecIdentityGuard — install web ctx into TLS before calling userChangePasswordCore
@@ -1337,17 +1339,19 @@ String getLogoutReasonForAuthPage(httpd_req_t* req) {
 
 // Helper: Build system info JSON using ArduinoJson (eliminates String concatenation)
 void buildSystemInfoJson(JsonDocument& doc) {
-  // System time
-  {
-    time_t now = time(nullptr);
+  // System time. "" if not yet synced — UI uses empty as the sentinel.
+  // Format is "YYYY-MM-DD HH:MM:SS" (space separator, not 'T') to match
+  // the historical public-API shape; this is the only Clock-using site
+  // that emits this exact format so it stays inline.
+  if (Clock::isSynced()) {
+    time_t now = Clock::epochSeconds();
     struct tm tminfo;
-    if (now > 0 && localtime_r(&now, &tminfo) && tminfo.tm_year >= 120) {
-      char timeBuf[32];
-      strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%d %H:%M:%S", &tminfo);
-      doc["system_time"] = timeBuf;
-    } else {
-      doc["system_time"] = "";
-    }
+    localtime_r(&now, &tminfo);
+    char timeBuf[32];
+    strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%d %H:%M:%S", &tminfo);
+    doc["system_time"] = timeBuf;
+  } else {
+    doc["system_time"] = "";
   }
 
   // Uptime
@@ -1375,12 +1379,13 @@ void buildSystemInfoJson(JsonDocument& doc) {
     net["mac"] = WiFi.macAddress();
   }
   
-  // Memory info (nested object with KB values)
+  // Memory info (nested object with KB values). ESP.getHeapSize/getPsramSize
+  // remain inline — those are constants for the build, not duplicated state.
   JsonObject mem = doc["mem"].to<JsonObject>();
-  mem["heap_free_kb"] = (int)(ESP.getFreeHeap() / 1024);
+  mem["heap_free_kb"] = (int)(SelfDevice::freeHeapBytes() / 1024);
   mem["heap_total_kb"] = (int)(ESP.getHeapSize() / 1024);
   mem["psram_total_kb"] = (int)(ESP.getPsramSize() / 1024);
-  mem["psram_free_kb"] = (int)(ESP.getFreePsram() / 1024);
+  mem["psram_free_kb"] = (int)(SelfDevice::psramFreeBytes() / 1024);
   
   // Storage info (nested object with KB values)
   JsonObject storage = doc["storage"].to<JsonObject>();
@@ -2604,108 +2609,12 @@ esp_err_t handleSettingsSchema(httpd_req_t* req) {
     return ESP_FAIL;
   }
 
-  // Build schema from registered settings modules
+  // Build schema from registered settings modules via the shared helper that
+  // sendBondSchema (the worker-side bond schema transfer) also calls.
   PSRAM_JSON_DOC(doc);
-  JsonArray modules = doc["modules"].to<JsonArray>();
-  
-  size_t modCount = 0;
-  const SettingsModule** mods = getSettingsModules(modCount);
-  
-  DEBUG_HTTPF("[Schema] Building schema for %zu modules", modCount);
-  
-  for (size_t m = 0; m < modCount; m++) {
-    const SettingsModule* mod = mods[m];
-    if (!mod) {
-      WARN_WEBF("[Schema] Module %zu is null", m);
-      continue;
-    }
-    
-    DEBUG_HTTPF("[Schema] Processing module: %s (%zu entries)", mod->name, mod->count);
-    
-    JsonObject modObj = modules.add<JsonObject>();
-    modObj["name"] = mod->name;
-    modObj["section"] = mod->jsonSection ? mod->jsonSection : mod->name;
-    modObj["description"] = mod->description ? mod->description : "";
-    
-    // Connection status — only emit when the module actually defines a check.
-    // Modules without an isConnected callback (loggers, plain settings stores,
-    // network services without runtime probes) skip this so the UI doesn't
-    // show a misleading "Connected" badge for things that aren't really
-    // connectable.
-    if (mod->isConnected) {
-      modObj["connected"] = mod->isConnected();
-    }
-    
-    JsonArray entries = modObj["entries"].to<JsonArray>();
-    for (size_t i = 0; i < mod->count; i++) {
-      const SettingEntry* e = &mod->entries[i];
-      if (!e || !e->jsonKey) {
-        WARN_WEBF("[Schema] Module %s entry %zu has null jsonKey", mod->name, i);
-        continue;
-      }
-      JsonObject entry = entries.add<JsonObject>();
-      entry["key"] = e->jsonKey;
-      entry["label"] = e->label ? e->label : e->jsonKey;
-      
-      // Type as string. SETTING_U8/U16/U32 (added 2026-05-18) all report
-      // as "int" externally — the UI doesn't need to know the on-device
-      // storage width, and the validation min/max already constrains range.
-      switch (e->type) {
-        case SETTING_INT:
-        case SETTING_U8:
-        case SETTING_U16:
-        case SETTING_U32:    entry["type"] = "int"; break;
-        case SETTING_FLOAT:  entry["type"] = "float"; break;
-        case SETTING_BOOL:   entry["type"] = "bool"; break;
-        case SETTING_STRING: entry["type"] = "string"; break;
-      }
-      
-      // Mark secret fields (passwords, etc.)
-      if (e->isSecret) {
-        entry["secret"] = true;
-      }
-      
-      // Group for nested sub-sections + UI grouping
-      if (e->group) {
-        entry["group"] = e->group;
-      }
-      
-      // CLI command key override (when jsonKey differs from CLI command name)
-      if (e->cmdKey) {
-        entry["cmdKey"] = e->cmdKey;
-      }
-      
-      // Min/max for numeric types
-      if (e->type == SETTING_INT || e->type == SETTING_U8 ||
-          e->type == SETTING_U16 || e->type == SETTING_U32 ||
-          e->type == SETTING_FLOAT) {
-        if (e->minVal != 0 || e->maxVal != 0) {
-          entry["min"] = e->minVal;
-          entry["max"] = e->maxVal;
-        }
-      }
+  buildSettingsSchemaJson(doc);
 
-      // Options for select fields
-      if (e->options) {
-        entry["options"] = e->options;
-      }
-
-      // Default value
-      switch (e->type) {
-        case SETTING_INT:
-        case SETTING_U8:
-        case SETTING_U16:
-        case SETTING_U32:    entry["default"] = e->intDefault; break;
-        case SETTING_FLOAT:  entry["default"] = e->floatDefault; break;
-        case SETTING_BOOL:   entry["default"] = (bool)e->intDefault; break;
-        case SETTING_STRING: entry["default"] = e->stringDefault ? e->stringDefault : ""; break;
-      }
-    }
-  }
-  
-  doc["count"] = modCount;
-
-  DEBUG_HTTPF("[Schema] Serializing schema JSON...");
+  DEBUG_HTTPF("[Schema] Serializing schema JSON (%u modules)...", (unsigned)(doc["count"] | 0));
 
   // Serialize to buffer
   size_t len = serializeJson(doc, gJsonResponseBuffer, JSON_RESPONSE_SIZE);
@@ -3403,18 +3312,18 @@ esp_err_t handlePing(httpd_req_t* req) {
   snprintf(json, sizeof(json),
     "{\"ok\":true,\"hostname\":\"%s\",\"mac\":\"%s\",\"fingerprint\":\"%s\",\"firmwareVersion\":\"%s\",\"acceptingRestore\":%s,\"https\":%s}",
     WiFi.getHostname(),
-    WiFi.macAddress().c_str(),
+    SelfDevice::macString().c_str(),
     fp.c_str(),
-    esp_app_get_description()->version,
+    SelfDevice::firmwareVersion(),
     gAcceptingRestore ? "true" : "false",
     gSettings.httpsEnabled ? "true" : "false");
 #else
   snprintf(json, sizeof(json),
     "{\"ok\":true,\"hostname\":\"%s\",\"mac\":\"%s\",\"fingerprint\":\"%s\",\"firmwareVersion\":\"%s\",\"acceptingRestore\":%s}",
     WiFi.getHostname(),
-    WiFi.macAddress().c_str(),
+    SelfDevice::macString().c_str(),
     fp.c_str(),
-    esp_app_get_description()->version,
+    SelfDevice::firmwareVersion(),
     gAcceptingRestore ? "true" : "false");
 #endif
   httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);

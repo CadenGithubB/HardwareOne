@@ -53,6 +53,7 @@ extern "C" {
 #include "G2_Page_ESPNow.h"    // g2ShowESPNowAppMenu / g2ESPNowAppHandleTap
 #include "G2_HijackFsm.h"      // shadow FSM tracking page-swap / hijack lifecycle
 #include "System_Settings.h"
+#include "System_Clock.h"  // Clock::tzOffsetQuarterHours() — explicit-unit tz accessor (defeats minutes/quarter-hours swap footgun)
 #if ENABLE_WIFI
 #include <WiFi.h>
 #endif
@@ -5926,21 +5927,23 @@ static bool runSessionPrelude(G2Temple& t) {
 // hijack involved — straight SID 0x80 / cmd=128 to the native firmware.
 //
 // Footgun: G2 takes timezone as **quarter-hours** from UTC (PST = -32,
-// JST = +36). gSettings.tzOffsetMinutes is in minutes, so we divide by
-// 15. R1 takes raw minutes; do NOT use this helper for R1.
+// JST = +36). Clock::tzOffsetQuarterHours() does the minutes/15 conversion
+// in one place with an explicit unit name. R1 wants raw minutes — use
+// Clock::tzOffsetMinutes() there. The unit-named accessors make the swap
+// impossible at the type-system level.
 static void g2AutoTimeSyncIfReady(G2Temple& t) {
   if (t.side != 'R') return;          // builder targets right arm only
   if (!t.connected || t.pluginDead) return;
 
-  const time_t now = time(nullptr);
+  const time_t now = Clock::epochSeconds();
   // Sanity-check ESP has a real (post-2020) time. If NTP hasn't run yet
   // we'd push garbage — better to skip and let a later trigger retry.
-  if (now < 1577836800) {              // 2020-01-01 00:00:00 UTC
+  if (!Clock::isValidEpoch(now)) {
     DEBUG_G2F("[G2-R] Auto time-sync skipped: ESP RTC not yet NTP-synced (now=%ld)",
               (long)now);
     return;
   }
-  const int32_t tzQ = gSettings.tzOffsetMinutes / 15;
+  const int32_t tzQ = Clock::tzOffsetQuarterHours();
 
   uint8_t env[96];
   const size_t n = g2BuildDevCfgTimeSync(allocSeq(), G2_MAGIC_DEVCFG_TIME_SYNC,

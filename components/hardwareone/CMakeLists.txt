@@ -155,6 +155,7 @@ set(hardwareone_srcs
         System_ESPNow_Handlers_Crypto.cpp
         System_ESPNow_Identity.cpp
         System_ESPNow_MeshKeys.cpp
+        System_ESPNow_Saturation.cpp
         System_ESPNow_Sensors.cpp
         System_ESPNow_Sessions.cpp
         System_FileManager.cpp
@@ -194,6 +195,10 @@ set(hardwareone_srcs
         System_SensorRegistry.cpp
         System_Notifications.cpp
         System_AuthIdentity.cpp
+        System_BondedPeer.cpp
+        System_MeshPeers.cpp
+        System_SelfDevice.cpp
+        System_Clock.cpp
 )
 
 # ── Per-feature source lists (added below based on HW_CFG_* flags) ──

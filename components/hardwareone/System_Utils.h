@@ -402,6 +402,25 @@ inline bool macEquals(const uint8_t* a, const uint8_t* b) {
   return memcmp(a, b, 6) == 0;
 }
 
+// Per-peer cache namespace under /system/espnow/peers/<MAC>/. Two helpers:
+//   peerCacheDir(mac, buf, len)        -> "/system/espnow/peers/<MAC>"
+//   peerCachePath(mac, name, buf, len) -> "/system/espnow/peers/<MAC>/<name>"
+// Single source of truth for the cache layout — used by both the bond peer
+// cache (settings.json, schema.json) and any future per-peer cached file. MAC
+// uses PATH TOKEN form (no separators, uppercase) for filesystem-friendliness.
+// Returns the snprintf byte count (excluding NUL).
+inline int peerCacheDir(const uint8_t* mac, char* out, size_t outSize) {
+  char macStr[13];
+  macToPathToken(mac, macStr);
+  return snprintf(out, outSize, "/system/espnow/peers/%s", macStr);
+}
+
+inline int peerCachePath(const uint8_t* mac, const char* filename, char* out, size_t outSize) {
+  char macStr[13];
+  macToPathToken(mac, macStr);
+  return snprintf(out, outSize, "/system/espnow/peers/%s/%s", macStr, filename ? filename : "");
+}
+
 // Lenient inbound parser. Accepts ':' '-' or ' ' separators or none; any
 // case. Requires exactly 12 hex nibbles (two per byte). Returns true and
 // fills mac[6] on success, false on any malformed input.
