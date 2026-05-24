@@ -9706,21 +9706,19 @@ function drawWallDecorations() {
 // =============================================
 
 function controlSensor(sensor, action) {
-  return fetch('/api/cli', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'cmd=' + encodeURIComponent(sensor + action)})
-    .then(function(r) { return r.text(); }).catch(function(_) { return ''; });
+  return hw.postFormText('/api/cli', { cmd: sensor + action })
+    .catch(function(_) { return ''; });
 }
 
 async function checkSensorAvailability() {
   try {
-    var sysResp = await fetch('/api/system');
-    var sysData = await sysResp.json();
+    var sysData = await hw.fetchJSON('/api/system');
     i2cEnabled = (sysData.i2c_enabled === true);
     if (!i2cEnabled) {
       console.warn('[GAMES] I2C is disabled - sensors unavailable');
       return;
     }
-    var sensResp = await fetch('/api/sensors/status');
-    var sensData = await sensResp.json();
+    var sensData = await hw.fetchJSON('/api/sensors/status');
     imuCompiled = (sensData.imuCompiled === true);
     imuEnabled = (sensData.imuEnabled === true);
     gamepadCompiled = (sensData.gamepadCompiled === true);
@@ -9748,8 +9746,8 @@ function startCalibration() {
     var t0 = Date.now();
     if (calibTimer) { clearInterval(calibTimer); calibTimer = null; }
     calibTimer = setInterval(function() {
-      fetch('/api/sensors?sensor=imu&ts=' + Date.now(), {cache:'no-store'})
-        .then(function(r) { return r.json(); }).then(function(j) {
+      hw.fetchJSON('/api/sensors?sensor=imu&ts=' + Date.now())
+        .then(function(j) {
           if (j && j.valid && j.ori) calibSamples.push({p:j.ori.pitch || 0, r:j.ori.roll || 0});
         }).catch(function(_) {});
       if (Date.now() - t0 >= calibMs) {
@@ -9780,8 +9778,7 @@ function startGamepadPolling() {
   function tick() {
     var now = Date.now();
     if (now < gpBackoffUntil) return;
-    fetch('/api/sensors?sensor=gamepad&ts=' + now, {cache:'no-store', credentials:'include'})
-      .then(function(r) { return r.json(); })
+    hw.fetchJSON('/api/sensors?sensor=gamepad&ts=' + now)
       .then(function(j) {
         if (!running) return;
         if (j && j.v) {
@@ -9864,9 +9861,7 @@ function pollIMU() {
     return;
   }
   var ts = Date.now();
-  fetch('/api/sensors?sensor=imu&ts=' + ts, {cache:'no-store'}).then(function(r) {
-    return r.json();
-  }).then(function(j) {
+  hw.fetchJSON('/api/sensors?sensor=imu&ts=' + ts).then(function(j) {
     if (!running) return;
     if (!j || !j.valid || !j.ori) return;
 
@@ -22064,8 +22059,7 @@ function fwDebugOn() {
   FW_DEBUG = true;
   var cmds = ['debugsensorsgeneral 1', 'debugimudata 1'];
   Promise.all(cmds.map(function(c) {
-    return fetch('/api/cli', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'cmd=' + encodeURIComponent(c)})
-      .then(function(r) { return r.text(); }).catch(function(_) { return ''; });
+    return hw.postFormText('/api/cli', { cmd: c }).catch(function(_) { return ''; });
   })).then(function() { startLogPoller(); });
 }
 
@@ -22073,8 +22067,7 @@ function fwDebugOff() {
   FW_DEBUG = false;
   var cmds = ['debugsensorsgeneral 0', 'debugimudata 0'];
   Promise.all(cmds.map(function(c) {
-    return fetch('/api/cli', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'cmd=' + encodeURIComponent(c)})
-      .then(function(r) { return r.text(); }).catch(function(_) { return ''; });
+    return hw.postFormText('/api/cli', { cmd: c }).catch(function(_) { return ''; });
   })).then(function() { stopLogPoller(); });
 }
 
@@ -22083,7 +22076,7 @@ function startLogPoller() {
   __gamesLogLastLen = 0;
   __gamesLogPoll = setInterval(function() {
     if (!FW_DEBUG) return;
-    fetch('/api/cli/logs', {cache:'no-store'}).then(function(r) { return r.text(); }).then(function(t) {
+    hw.fetchText('/api/cli/logs').then(function(t) {
       if (typeof t !== 'string') return;
       var s = t;
       if (s.length > __gamesLogLastLen) {

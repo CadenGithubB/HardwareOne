@@ -585,8 +585,7 @@ window.onload = function() {
     initBondedLogs();
 
     // Show admin log toggle if user is admin (check via settings API which includes user.isAdmin)
-    fetch('/api/settings')
-      .then(function(r) { return r.json(); })
+    hw.fetchJSON('/api/settings')
       .then(function(data) {
         if (data && data.user && data.user.isAdmin === true) {
           document.getElementById('btn-switch-logs').style.display = '';
@@ -597,12 +596,7 @@ window.onload = function() {
       });
 
     // Batch-load all CLI data in a single HTTPS request (3 unique commands replace 5 separate fetches)
-    fetch('/api/cli/batch', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ commands: ['time', 'sensorlog status', 'log status'] })
-    })
-    .then(function(r) { return r.json(); })
+    hw.postJSON('/api/cli/batch', { commands: ['time', 'sensorlog status', 'log status'] })
     .then(function(data) {
       if (!data || !Array.isArray(data.results) || data.results.length < 3) {
         console.warn('[LOGGING] Batch response invalid, falling back to individual requests');
@@ -670,12 +664,7 @@ function generateDefaultFilename(preloadedTimeText) {
     applyTime(preloadedTimeText);
     return;
   }
-  fetch('/api/cli', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: 'cmd=' + encodeURIComponent('time')
-  })
-  .then(r => r.text())
+  hw.postFormText('/api/cli', { cmd: 'time' })
   .then(applyTime)
   .catch(e => {
     console.warn('[LOGGING] Section 3f: Failed to get time, using browser time:', e);
@@ -770,15 +759,7 @@ function refreshStatus(preloadedStatusText) {
     updateAutoStartStatus(preloadedStatusText);
     return;
   }
-  fetch('/api/cli', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: 'cmd=' + encodeURIComponent('sensorlog status')
-  })
-  .then(r => {
-    console.log('[LOGGING] Section 4b: Status fetch response:', r.status);
-    return r.text();
-  })
+  hw.postFormText('/api/cli', { cmd: 'sensorlog status' })
   .then(applyStatus)
   .catch(e => {
     console.error('[LOGGING] Section 4g: Status refresh error:', e);
@@ -806,23 +787,13 @@ function updateAutoStartStatus(preloadedText) {
     applyAutoStart(preloadedText);
     return;
   }
-  fetch('/api/cli', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: 'cmd=' + encodeURIComponent('sensorlog status')
-  })
-  .then(r => r.text())
+  hw.postFormText('/api/cli', { cmd: 'sensorlog status' })
   .then(applyAutoStart)
   .catch(e => console.error('[LOGGING] Auto-start status error:', e));
 }
 
 function toggleAutoStart() {
-  fetch('/api/cli', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: 'cmd=' + encodeURIComponent('sensorlog autostart')
-  })
-  .then(r => r.text())
+  hw.postFormText('/api/cli', { cmd: 'sensorlog autostart' })
   .then(text => {
     alert(text);
     updateAutoStartStatus();
@@ -851,16 +822,8 @@ async function startLogging() {
   
   const cmd = 'sensorlog start ' + path + ' ' + interval;
   console.log('[LOGGING] Section 6d: Executing command:', cmd);
-  
-  fetch('/api/cli', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: 'cmd=' + encodeURIComponent(cmd)
-  })
-  .then(r => {
-    console.log('[LOGGING] Section 6e: Start command response:', r.status);
-    return r.text();
-  })
+
+  hw.postFormText('/api/cli', { cmd: cmd })
   .then(text => {
     console.log('[LOGGING] Section 6f: Start command result:', text);
     if (text.includes('SUCCESS') || text.includes('started')) {
@@ -888,15 +851,7 @@ async function stopLogging() {
   }
   
   console.log('[LOGGING] Section 7c: Executing stop command');
-  fetch('/api/cli', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: 'cmd=' + encodeURIComponent('sensorlog stop')
-  })
-  .then(r => {
-    console.log('[LOGGING] Section 7d: Stop command response:', r.status);
-    return r.text();
-  })
+  hw.postFormText('/api/cli', { cmd: 'sensorlog stop' })
   .then(text => {
     console.log('[LOGGING] Section 7e: Stop command result:', text);
     alert(text);
@@ -954,13 +909,8 @@ function applyConfig() {
     }
     
     console.log('[LOGGING] Section 8f: Executing command', index + 1, 'of', commands.length, ':', commands[index]);
-    
-    fetch('/api/cli', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: 'cmd=' + encodeURIComponent(commands[index])
-    })
-    .then(r => r.text())
+
+    hw.postFormText('/api/cli', { cmd: commands[index] })
     .then(text => {
       console.log('[LOGGING] Section 8g: Command', index + 1, 'result:', text);
       results.push(text);
@@ -1042,12 +992,7 @@ function generateSystemFilename(preloadedTimeText) {
     applyTime(preloadedTimeText);
     return;
   }
-  fetch('/api/cli', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: 'cmd=' + encodeURIComponent('time')
-  })
-  .then(r => r.text())
+  hw.postFormText('/api/cli', { cmd: 'time' })
   .then(applyTime)
   .catch(e => {
     console.warn('[LOGGING] Failed to get time, using browser time:', e);
@@ -1112,12 +1057,7 @@ function refreshSystemStatus(preloadedStatusText) {
     updateSystemAutoStartStatus(preloadedStatusText);
     return;
   }
-  fetch('/api/cli', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: 'cmd=' + encodeURIComponent('log status')
-  })
-  .then(r => r.text())
+  hw.postFormText('/api/cli', { cmd: 'log status' })
   .then(applySystemStatus)
   .catch(e => {
     console.error('[LOGGING] System status refresh error:', e);
@@ -1159,13 +1099,8 @@ function startSystemLogging() {
   cmd += ' tags=' + categoryTags;
   
   console.log('[LOGGING] Executing:', cmd);
-  
-  fetch('/api/cli', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: 'cmd=' + encodeURIComponent(cmd)
-  })
-  .then(r => r.text())
+
+  hw.postFormText('/api/cli', { cmd: cmd })
   .then(text => {
     console.log('[LOGGING] Start response:', text);
     if (text.includes('started')) {
@@ -1184,13 +1119,8 @@ function startSystemLogging() {
 async function stopSystemLogging() {
   console.log('[LOGGING] stopSystemLogging called');
   if (!await hwConfirm('Stop system logging?')) return;
-  
-  fetch('/api/cli', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: 'cmd=' + encodeURIComponent('log stop')
-  })
-  .then(r => r.text())
+
+  hw.postFormText('/api/cli', { cmd: 'log stop' })
   .then(text => {
     console.log('[LOGGING] Stop response:', text);
     alert(text);
@@ -1254,23 +1184,13 @@ function updateSystemAutoStartStatus(preloadedText) {
     applySysAutoStart(preloadedText);
     return;
   }
-  fetch('/api/cli', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: 'cmd=' + encodeURIComponent('log status')
-  })
-  .then(r => r.text())
+  hw.postFormText('/api/cli', { cmd: 'log status' })
   .then(applySysAutoStart)
   .catch(e => console.error('[LOGGING] System auto-start status error:', e));
 }
 
 function toggleSystemAutoStart() {
-  fetch('/api/cli', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: 'cmd=' + encodeURIComponent('log autostart')
-  })
-  .then(r => r.text())
+  hw.postFormText('/api/cli', { cmd: 'log autostart' })
   .then(text => {
     alert(text);
     updateSystemAutoStartStatus();
@@ -1297,11 +1217,7 @@ function loadLogFile(filepath) {
   console.log('[LOGGING] Loading log file:', filepath);
   
   // Use streaming fetch with mode=raw to get plain text
-  fetch('/api/files/view?name=' + encodeURIComponent(filepath) + '&mode=raw')
-    .then(r => {
-      if (!r.ok) throw new Error('HTTP ' + r.status + ': ' + r.statusText);
-      return r.text();
-    })
+  hw.fetchText('/api/files/view?name=' + encodeURIComponent(filepath) + '&mode=raw')
     .then(text => {
       parseLogFile(text);
       document.getElementById('viewer-filters').style.display = 'block';

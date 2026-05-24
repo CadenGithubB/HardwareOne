@@ -259,12 +259,7 @@ static void streamAutomationsInner(httpd_req_t* req) {
   httpd_resp_send_chunk(req, R"AUTOPART2B(<script>
 console.log('[AUTOMATIONS] System status check starting...');
 window.refreshAutomationSystemStatus = function() {
-  fetch('/api/cli', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: 'cmd=' + encodeURIComponent('automation system status')
-  })
-  .then(response => response.text())
+  hw.postFormText('/api/cli', { cmd: 'automation system status' })
   .then(output => {
     console.log('[AUTOMATIONS] System status response:', output);
     const statusDot = document.getElementById('auto-status-dot');
@@ -311,12 +306,7 @@ window.disableAutomationSystem = async function() {
     return;
   }
   
-  fetch('/api/cli', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: 'cmd=' + encodeURIComponent('automation system disable')
-  })
-  .then(response => response.text())
+  hw.postFormText('/api/cli', { cmd: 'automation system disable' })
   .then(output => {
     console.log('[AUTOMATIONS] Disable response:', output);
     // Immediately reflect disabled state in UI
@@ -350,12 +340,7 @@ window.enableAutomationSystem = async function() {
   if (!await hwConfirm('Enable automation system? This will:\n\n• Start the automation scheduler immediately\n• Enable all scheduled automations\n\nContinue?')) {
     return;
   }
-  fetch('/api/cli', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: 'cmd=' + encodeURIComponent('automation system enable')
-  })
-  .then(response => response.text())
+  hw.postFormText('/api/cli', { cmd: 'automation system enable' })
   .then(output => {
     console.log('[AUTOMATIONS] Enable response:', output);
     // Immediately reflect enabled state in UI (expand panels like ESP-NOW)
@@ -913,11 +898,7 @@ function renderAutos(json) {
 function loadAutos(){
   console.log('[AUTOMATIONS] loadAutos called');
   gAutosFetchInFlight = true;
-  fetch('/api/automations').then(r => {
-    console.log('[AUTOMATIONS] Automations fetch response:',r.status);
-    if(r.ok) return r.text();
-    else throw new Error('HTTP '+r.status);
-  }).then(txt => {
+  hw.fetchText('/api/automations').then(txt => {
     console.log('[AUTOMATIONS] Automations data length:',txt.length);
     renderAutos(txt);
   }).catch(e => {
@@ -932,19 +913,11 @@ console.log('[AUTOMATIONS] Part 1: Complete');
 
   // Part 7: CLI helper and createAutomation function (large, split into sub-parts)
   httpd_resp_send_chunk(req, R"AUTOPART7(<script>
-function postCLI(cmd){ 
-  return fetch('/api/cli',{
-    method:'POST',
-    headers:{'Content-Type':'application/x-www-form-urlencoded'},
-    body:'cmd='+encodeURIComponent(cmd)
-  }).then(r=>r.text()); 
+function postCLI(cmd){
+  return hw.postFormText('/api/cli', { cmd: cmd });
 }
-function postCLIValidate(cmd){ 
-  return fetch('/api/cli',{
-    method:'POST',
-    headers:{'Content-Type':'application/x-www-form-urlencoded'},
-    body:'cmd='+encodeURIComponent(cmd)+'&validate=1'
-  }).then(r=>r.text()); 
+function postCLIValidate(cmd){
+  return hw.postFormText('/api/cli', { cmd: cmd, validate: '1' });
 }
 // ============================================================================
 // Secondary trigger row management
@@ -1329,7 +1302,7 @@ function autoTrigger(id){
   });
 }
 function autoEdit(id){
-  fetch('/api/automations').then(r=>r.json()).then(data=>{
+  hw.fetchJSON('/api/automations').then(data=>{
     if(!data||!data.automations) return;
     const a=normalizeAutomation(data.automations.find(x=>String(x.id)===String(id)));
     if(!a){alert('Automation not found');return;}
@@ -1556,8 +1529,8 @@ function exportAllAutomations(){
   const status=document.getElementById('export_status'); 
   const separateFiles=document.getElementById('export_separate').checked; 
   status.innerHTML='<span style="color:var(--accent)">Preparing export...</span>'; 
-  if(separateFiles){ 
-    fetch('/api/automations').then(r=>r.json()).then(data=>{ 
+  if(separateFiles){
+    hw.fetchJSON('/api/automations').then(data=>{
       if(data && data.automations && data.automations.length>0){ 
         let downloadCount = 0; 
         const downloadNext = (index) => { 
@@ -1643,7 +1616,7 @@ function exportAllAutomations(){
   }, 3000); 
 }
 function exportSingleAutomation(id){
-  fetch('/api/automations').then(r=>r.json()).then(data=>{
+  hw.fetchJSON('/api/automations').then(data=>{
     if(!data||!data.automations) throw new Error('No automations data');
     const auto=normalizeAutomation(data.automations.find(a=>String(a.id)===String(id)));
     if(!auto) throw new Error('Automation '+id+' not found');

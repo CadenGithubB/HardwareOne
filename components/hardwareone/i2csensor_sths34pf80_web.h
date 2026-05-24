@@ -107,11 +107,7 @@ function updatePresenceCard(data) {
 
 function togglePresence() {
   const cmd = document.getElementById('presence-toggle').textContent === 'Open' ? 'openpresence' : 'closepresence';
-  fetch('/api/command', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({command: cmd})
-  }).then(r => r.json()).then(d => console.log('Presence:', d));
+  hw.postFormText('/api/cli', { cmd: cmd }).then(t => console.log('Presence:', t)).catch(e => console.warn('Presence toggle failed:', e));
 }
 )JS";
 }
@@ -159,8 +155,7 @@ inline void streamSTHS34PF80PresenceSensorJs(httpd_req_t* req) {
     "  var presEl = document.getElementById('presence-presence');\n"
     "  var motEl = document.getElementById('presence-motion');\n"
     "  if (!ambEl && !presEl && !motEl) return Promise.resolve();\n"
-    "  return fetch('/api/sensors?sensor=presence&ts=' + Date.now(), {cache: 'no-store', credentials: 'include'})\n"
-    "    .then(function(r) { return r.json(); })\n"
+    "  return hw.fetchJSON('/api/sensors?sensor=presence&ts=' + Date.now())\n"
     "    .then(function(data) {\n"
     "      if (!data || data.error) {\n"
     "        if (ambEl) ambEl.textContent = '--';\n"

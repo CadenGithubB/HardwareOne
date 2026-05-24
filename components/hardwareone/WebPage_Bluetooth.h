@@ -457,14 +457,8 @@ inline void streamBluetoothInner(httpd_req_t* req) {
     _cliBusy = true;
     _cliLastDispatchedAt = now;
     var job = _cliQueue.shift();
-    fetch('/api/cli',{method:'POST',
-      headers:{'Content-Type':'application/x-www-form-urlencoded'},
-      credentials:'same-origin',
-      body:'cmd='+encodeURIComponent(job.cmd)
-    }).then(function(r){
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      return r.text();
-    }).then(function(text){
+    hw.postFormText('/api/cli', { cmd: job.cmd })
+    .then(function(text){
       job.resolve(text);
     }).catch(function(err){
       job.reject(err);

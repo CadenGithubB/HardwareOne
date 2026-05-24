@@ -232,6 +232,7 @@ void streamBondInner(httpd_req_t* req) {
       html += '<div class="bond-progress-hint">' + hint + '</div>';
     }
     html += '<div class="bond-progress-actions">';
+    html += '<button class="btn" onclick="window.forceBondResync()" style="font-size:0.85em;padding:6px 14px;margin-right:8px">Force Re-sync</button>';
     html += '<button class="btn" onclick="window.unbondDevice()" style="font-size:0.85em;padding:6px 14px">Cancel / Unbond</button>';
     html += '</div>';
     html += '</div>';
@@ -323,7 +324,7 @@ void streamBondInner(httpd_req_t* req) {
     // previously split across two separate "Bonded Device" cards. The Remote
     // Command Execution box is intentionally kept as its own separate card below.
     html += '<div class="remote-card" style="position:relative">';
-    html += '<button class="btn refresh-btn" onclick="window.refreshBond()">Refresh</button>';
+    html += '<button class="btn refresh-btn" onclick="window.forceBondResync()" title="Force the device to re-fetch capabilities/manifest/settings/schema from the bonded peer">Refresh</button>';
     html += '<div class="remote-title"><span class="status-dot ' + statusClass + '"></span>Bonded Device</div>';
     const localRole = data.role === 1 ? 'Master' : 'Worker';
     const remoteRole = data.role === 1 ? 'Worker' : 'Master';
@@ -589,9 +590,40 @@ void streamBondInner(httpd_req_t* req) {
     }
   }
   
+  // Force the device to re-fetch capabilities/manifest/settings/schema from the
+  // bonded peer via the bondresync CLI verb, then refresh the UI. Used by the
+  // "Refresh" button on the bonded device card AND the "Force Re-sync" button
+  // on the "Establishing Bond" modal — both kick a real re-sync rather than
+  // just re-rendering with stale data.
+  //
+  // Safe to call anytime: idempotent on the device side. If bond isn't even
+  // configured the CLI returns an error string which we just log + ignore.
+  window.forceBondResync = function() {
+    // Use hw.postForm so we get the project's standard credentials:'include'
+    // + cache:'no-store' + 401-redirect-to-login behavior. Raw fetch worked
+    // most of the time but silently failed if the auth cookie was missing
+    // or if the user's session had expired since page load.
+    hw.postForm('/api/cli', {cmd: 'bondresync --all'})
+      .then(function(r){ return r.text(); })
+      .then(function(txt){
+        console.log('[Bond] bondresync result:', txt);
+        // Brief delay so the device has a moment to fire the request chain
+        // before we re-fetch status. The full sync (cap+manifest+settings
+        // file transfers) takes ~1-2 seconds, but with the new hybrid fix
+        // most role-swap cases skip the transfers entirely (cached data is
+        // preserved) so the modal often clears on the FIRST refresh. The
+        // regular 5s auto-refresh interval handles the rest.
+        setTimeout(window.refreshBond, 400);
+      })
+      .catch(function(e){
+        console.error('[Bond] bondresync error:', e);
+        // Still refresh display so the user sees current state
+        window.refreshBond();
+      });
+  };
+
   window.refreshBond = function() {
-    fetch('/api/bond/status')
-      .then(r => r.json())
+    hw.fetchJSON('/api/bond/status')
       .then(data => {
         console.log('[Bond] API response:', JSON.stringify({
           role: data.role, bonded: data.bonded, peerOnline: data.peerOnline,
@@ -609,12 +641,8 @@ void streamBondInner(httpd_req_t* req) {
   };
   
   window.toggleSensor = function(sensorId) {
-    fetch('/api/bond/stream', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-      body: 'sensor=' + encodeURIComponent(sensorId) + '&action=toggle'
-    })
-    .then(r => r.json())
+    hw.postForm('/api/bond/stream', {sensor: sensorId, action: 'toggle'})
+    .then(function(r){ return r.json(); })
     .then(data => {
       if (data.success) {
         window.refreshBond();
@@ -629,12 +657,8 @@ void streamBondInner(httpd_req_t* req) {
   
   window.toggleSensorEnable = function(sensorId, enable) {
     var cmd = (enable ? 'open' : 'close') + sensorId;
-    fetch('/api/bond/exec', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-      body: 'cmd=' + encodeURIComponent(cmd)
-    })
-    .then(r => r.json())
+    hw.postForm('/api/bond/exec', {cmd: cmd})
+    .then(function(r){ return r.json(); })
     .then(data => {
       if (data.success) {
         setTimeout(window.refreshBond, 1500);
@@ -649,12 +673,8 @@ void streamBondInner(httpd_req_t* req) {
   
   window.swapRoles = function() {
     if (!confirm('Swap master/worker roles on both devices?')) return;
-    fetch('/api/bond/role', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-      body: 'action=swap'
-    })
-    .then(r => r.json())
+    hw.postForm('/api/bond/role', {action: 'swap'})
+    .then(function(r){ return r.json(); })
     .then(data => {
       if (data.success) {
         setTimeout(window.refreshBond, 1000);
@@ -669,11 +689,7 @@ void streamBondInner(httpd_req_t* req) {
 
   window.unbondDevice = function() {
     if (!confirm('Unbond from this device? This ends the bond on THIS device. The peer will show offline until you unbond it there too.')) return;
-    fetch('/api/cli', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-      body: 'cmd=' + encodeURIComponent('bonddisconnect')
-    })
+    hw.postForm('/api/cli', {cmd: 'bonddisconnect'})
     .then(function(r){ return r.text(); })
     .then(function(){
       // bonddisconnect clears bond mode locally; reload so the page returns to
@@ -689,7 +705,7 @@ void streamBondInner(httpd_req_t* req) {
   (function() {
     var mac = lastStatus ? (lastStatus.peerMac || '') : '';
     var url = '/api/espnow/messages?since=0' + (mac ? '&mac=' + encodeURIComponent(mac) : '');
-    fetch(url).then(function(r){return r.json()}).then(function(data) {
+    hw.fetchJSON(url).then(function(data) {
       if (data.messages && data.messages.length > 0) {
         for (var i = 0; i < data.messages.length; i++) {
           if (data.messages[i].seq > bondMsgSeq) bondMsgSeq = data.messages[i].seq;
@@ -751,8 +767,7 @@ void streamBondInner(httpd_req_t* req) {
     function pollMessages() {
       var url = '/api/espnow/messages?since=' + bondMsgSeq;
       if (bondPeerMac) url += '&mac=' + encodeURIComponent(bondPeerMac);
-      fetch(url)
-        .then(function(r) { return r.json(); })
+      hw.fetchJSON(url)
         .then(function(data) {
           if (data.messages && data.messages.length > 0) {
             for (var i = 0; i < data.messages.length; i++) {
@@ -790,12 +805,8 @@ void streamBondInner(httpd_req_t* req) {
     }
     
     // Send the command
-    fetch('/api/bond/exec', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-      body: 'cmd=' + encodeURIComponent(cmd)
-    })
-    .then(r => r.json())
+    hw.postForm('/api/bond/exec', {cmd: cmd})
+    .then(function(r){ return r.json(); })
     .then(data => {
       if (!data.success) {
         setOutputText('> ' + cmd + '\n\nError: ' + (data.result || data.error || 'Command failed'));
@@ -822,8 +833,7 @@ void streamBondInner(httpd_req_t* req) {
     const prevValue = select.value;  // preserve the user's selection across a manual refresh
     select.innerHTML = '<option value="">Loading devices...</option>';
 
-    fetch('/api/bond/paired-devices')
-      .then(r => r.json())
+    hw.fetchJSON('/api/bond/paired-devices')
       .then(data => {
         if (!data.devices || data.devices.length === 0) {
           select.innerHTML = '<option value="">No paired devices available</option>';
@@ -873,12 +883,8 @@ void streamBondInner(httpd_req_t* req) {
     statusDiv.style.color = 'var(--panel-fg)';
     statusDiv.textContent = 'Sending bond connect command...';
     
-    fetch('/api/cli', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-      body: 'cmd=' + encodeURIComponent('bondconnect ' + mac)
-    })
-    .then(r => r.text())
+    hw.postForm('/api/cli', {cmd: 'bondconnect ' + mac})
+    .then(function(r){ return r.text(); })
     .then(result => {
       var isError = result.toLowerCase().indexOf('error') !== -1 || result.toLowerCase().indexOf('failed') !== -1;
       if (!isError) {

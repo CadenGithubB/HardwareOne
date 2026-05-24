@@ -267,12 +267,7 @@ inline void streamSpeechInner(httpd_req_t* req) {
   var pollInterval = null;
   
   function postCli(cmd){
-    return fetch('/api/cli',{
-      method:'POST',
-      headers:{'Content-Type':'application/x-www-form-urlencoded'},
-      credentials:'same-origin',
-      body:'cmd='+encodeURIComponent(cmd)
-    }).then(function(r){return r.text();});
+    return hw.postFormText('/api/cli', { cmd: cmd });
   }
   
   function setStatus(text){

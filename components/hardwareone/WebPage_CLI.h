@@ -197,8 +197,7 @@ function executeCommand(){
   historyIndex = -1; currentCommand = '';
   if (cliOutput) { cliOutput.textContent += ('$ ' + command + '\n'); }
   try { console.debug('[CLI] fetch start: ' + command); } catch(_){}
-  fetch('/api/cli', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, credentials: 'same-origin', body: 'cmd=' + encodeURIComponent(command) + '&capture=1' })
-  .then(function(r){ try{ console.debug('[CLI] fetch status: ' + r.status); }catch(_){} return r.text(); })
+  hw.postFormText('/api/cli', { cmd: command, capture: '1' })
   .then(function(result){ try { console.debug('[CLI] fetch ok, len=' + (result ? result.length : 0)); } catch(_){} var ESC=String.fromCharCode(27); var clearSeq = ESC+'[2J'+ESC+'[H'; if (result && result.indexOf(clearSeq) !== -1) { var cleanResult = result.split(clearSeq).join(''); if (exitingHelp && inHelp) { if (cliOutput) { cliOutput.textContent = outputBackup || ''; } inHelp = false; try{ localStorage.setItem('cliInHelp','false'); localStorage.removeItem('cliOutputHistoryBackup'); }catch(_){} if (cleanResult && cliOutput) { cliOutput.textContent += cleanResult; } try{ localStorage.setItem('cliOutputHistory', cliOutput ? cliOutput.textContent : ''); }catch(_){} } else { if (cliOutput) { cliOutput.textContent = cleanResult; try{ localStorage.setItem('cliOutputHistory', cliOutput.textContent); }catch(_){} } } } else { if (cliOutput) { cliOutput.textContent += result + '\n'; try{ localStorage.setItem('cliOutputHistory', cliOutput.textContent); }catch(_){} } } if (cliInput) { cliInput.value=''; cliInput.focus(); } })
   .catch(function(e){ try { console.debug('[CLI] fetch error: ' + e.message); } catch(_){} var errorMsg='Error: ' + e.message + '\n'; if (cliOutput) { cliOutput.textContent += errorMsg; try{ localStorage.setItem('cliOutputHistory', cliOutput.textContent); }catch(_){} } if (cliInput) { cliInput.value=''; cliInput.focus(); } });
 }
