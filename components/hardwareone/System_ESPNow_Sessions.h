@@ -207,6 +207,11 @@ uint8_t sessionEstablishingTimeoutSweep(uint32_t nowMs);
 // Inspector for the espnowsessions CLI / debugging.
 uint8_t pendingFrameCount();
 
+// True iff at least one pending frame is parked waiting for `peerMac`'s session.
+// Called from KEY_EX_REPLY's handler (initiator side, post-peerIdentityPersist)
+// to decide whether to auto-kick SESSION_OPEN — the "encrypt-or-wait" foundation.
+bool pendingFrameHasForPeer(const uint8_t peerMac[6]);
+
 // ---- Phase 3.5 task #49 — tracked-send status (web-UI delivery confirmation)
 //
 // When the CLI accepts a user-initiated send, it registers the msgId+peerMac

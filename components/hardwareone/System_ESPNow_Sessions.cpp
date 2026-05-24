@@ -548,6 +548,14 @@ uint8_t pendingFrameCount() {
   return n;
 }
 
+bool pendingFrameHasForPeer(const uint8_t peerMac[6]) {
+  if (!gPending || !peerMac) return false;
+  for (uint8_t i = 0; i < kPendingFrameSlots; i++) {
+    if (gPending[i].inUse && memcmp(gPending[i].peerMac, peerMac, 6) == 0) return true;
+  }
+  return false;
+}
+
 // ============================================================================
 // Phase 3.5 task #49 — tracked-send status (web-UI delivery confirmation)
 // ============================================================================

@@ -353,6 +353,20 @@ void v4hKeyExReply(const V4RxCtx& ctx) {
 
   // Send CONFIRM (status=0) — KEY_EX complete from our (initiator) side.
   sendKeyExConfirm(msg->responderMac, msg->meshFingerprint, 0);
+
+  // Encrypt-or-wait foundation (2026-05): if v4_send_encrypted_or_queue parked
+  // any frames for this peer while we were handshaking (because there was no
+  // peer identity at send time), kick SESSION_OPEN now. The pending frames
+  // will drain via the existing pendingFrameDrainForPeer hook in the
+  // SESSION_CONFIRM handler. No-op when there's nothing pending.
+  if (pendingFrameHasForPeer(msg->responderMac)) {
+    if (!espnowSessionOpenInitiate(msg->responderMac, nullptr)) {
+      WARN_ESPNOWF("KEY_EX_REPLY: pending frames exist but SESSION_OPEN kick failed "
+                   "— frames will time out in pending-frame sweep");
+    } else {
+      INFO_ESPNOWF("KEY_EX_REPLY: pending frames for peer — kicked SESSION_OPEN to drain");
+    }
+  }
 }
 
 void v4hKeyExConfirm(const V4RxCtx& ctx) {
@@ -506,6 +520,14 @@ void keyExInFlightArm(const uint8_t peerMac[6], int slot) {
 static void keyExClearInFlight(const uint8_t peerMac[6]) {
   for (auto& k : gKeyExInFlight)
     if (k.inUse && memcmp(k.peerMac, peerMac, 6) == 0) { k.inUse = false; return; }
+}
+
+// Public accessor — see header for contract.
+bool keyExIsInFlight(const uint8_t peerMac[6]) {
+  if (!peerMac) return false;
+  for (auto& k : gKeyExInFlight)
+    if (k.inUse && memcmp(k.peerMac, peerMac, 6) == 0) return true;
+  return false;
 }
 
 void keyExRetrySweep(uint32_t nowMs) {
