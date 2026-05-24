@@ -232,10 +232,13 @@ bool v4_broadcast(uint8_t type, uint16_t flags, uint32_t msgId, const uint8_t* p
 bool v4_broadcast_category(uint8_t type, uint16_t flags, uint32_t msgId,
                            const uint8_t* payload, uint16_t payloadLen, uint8_t ttl,
                            uint32_t category);
-bool v4_send_chunked(const uint8_t* dst, uint8_t type, uint16_t flags, uint32_t msgId, const uint8_t* payload, uint16_t payloadLen, uint8_t ttl);
-// Phase 3.5 A1+A2 — encrypted-if-fits-else-plaintext-chunked dispatcher for
-// CMD_RESP and STREAM senders. Defined after v4_send_chunked (which it
-// falls back to).
+// (v4_send_chunked removed 2026-05 — plaintext multi-frame is unreachable now
+// that smart is strict encrypt-or-fail. RX-side plaintext reassembly remains
+// for one release window to tolerate old-firmware peers, then can be removed.)
+//
+// Encrypted dispatcher — STRICT encrypt-or-fail. Single-frame fits → smart goes
+// through v4_send_encrypted_or_queue (auto-handshake). Multi-frame requires an
+// ACTIVE session — caller retries if not up.
 bool v4_send_payload_smart(const uint8_t* dst, uint8_t type, uint16_t flags,
                            uint32_t msgId,
                            const uint8_t* payload, uint16_t payloadLen,
@@ -1426,32 +1429,48 @@ static void broadcast_tracker_check_timeouts() {
 }
 
 // ============================================================================
-// SEND-PATH MAP — "which send function do I call?"
+// SEND-PATH MAP — "which send function do I call?"  (Updated 2026-05; smart
+// is now strict encrypt-or-fail, plaintext fallback removed everywhere.)
 //
 // APPLICATION payloads (the common case):
 //   * Bond traffic (any BOND_/SENSOR_DATA/STREAM_CTRL/SETTINGS opcode)
 //        -> bondSendEncrypted()        MAC-anchored single-initiator + encrypt;
 //                                       the ONLY entry the bond layer should use.
 //   * General unicast app payload      -> v4_send_payload_smart()
-//                                       picks single-vs-chunked and encrypts when
-//                                       a session is ACTIVE. The default app entry.
+//                                       strict encrypt-or-fail (no plaintext
+//                                       fallback). Auto-handshakes peers it has
+//                                       never KEY_EX'd with (queues frame + kicks
+//                                       KEY_EX → SESSION_OPEN → drains on CONFIRM).
+//                                       The default app entry.
 //   * Single frame that must WAIT for a session (queue + kick SESSION_OPEN, drain
 //     on CONFIRM)                       -> v4_send_encrypted_or_queue()
+//                                       Now also kicks KEY_EX when no peer identity.
 //   * Mesh-wide fan-out                 -> v4_broadcast() / v4_broadcast_category()
+//                                       Per-peer plaintext with BROADCAST_AUTH HMAC
+//                                       (no per-peer session exists for FF:FF:...).
+//                                       Authentication, not confidentiality.
+//   * Reachability probe                -> espnowprobe CLI verb (KEY_EX as probe).
 //
-// LOW-LEVEL / INTERNAL (do NOT call from app code — these intentionally bypass
-// the smart/encrypt path because the frame either establishes the session or is
-// unprotected by design):
+// LOW-LEVEL / INTERNAL (do NOT call from app code — these are the primitives
+// that bootstrap the encryption, so they cannot themselves be encrypted):
 //   * v4_send_frame            raw single frame. Used for handshakes
 //                              (KEY_EX_*, SESSION_OPEN/CONFIRM/REKEY), ACKs,
 //                              TOPO_*, and as the primitive under everything else.
-//   * v4_send_chunked /        raw multi-frame; the encrypted variant is what
-//     v4_send_encrypted_chunked  v4_send_payload_smart calls under the hood.
+//   * v4_send_encrypted_chunked  multi-frame AEAD-sealed; smart calls this for
+//                              payloads > MAX_PLAINTEXT when a session is ACTIVE.
 //   * v4_send_session_wrapped  AEAD-wrap one frame for an ACTIVE session.
+//
+// (v4_send_chunked — plaintext multi-frame — was REMOVED 2026-05. No callers
+// remain; the RX-side plaintext reassembler stays for one release in case an
+// old-firmware peer sends one.)
 //
 // Rule of thumb: app code calls bondSendEncrypted (bond) or v4_send_payload_smart
 // (everything else). If you reach for v4_send_frame in app code, you are almost
-// certainly sending plaintext by mistake.
+// certainly sending plaintext by mistake. Mesh membership gates encryption
+// (KEY_EX HMAC); per-peer sessions provide confidentiality. Cross-mesh peers
+// can never establish a session, so cross-mesh sends fail silently after the
+// pending-frame ring's timeout sweep — which is correct (different mesh =
+// locked out by design).
 // ============================================================================
 bool v4_send_frame(const uint8_t* dst, uint8_t type, uint16_t flags, uint32_t msgId,
                    const uint8_t* payload, uint16_t payloadLen, uint8_t ttl) {
@@ -1590,15 +1609,29 @@ bool v4_send_session_wrapped(const uint8_t dst[6], uint8_t type, uint16_t baseFl
 //   - If a peer identity exists but no ACTIVE session, queue the frame and
 //     kick a SESSION_OPEN (unless one is already ESTABLISHING for this peer,
 //     in which case just queue). The frame will drain on SESSION_CONFIRM.
-//   - If no peer identity exists, hard-fail — we can't encrypt to a peer
-//     whose long-term pubkey we don't know.
+//   - If NO peer identity exists, queue the frame and kick a KEY_EX with the
+//     default mesh's bootstrap key (the "encrypt-or-wait" foundation, late
+//     2026-05). KEY_EX_REPLY's handler will auto-kick SESSION_OPEN when it
+//     sees pending frames for the peer, which then drains via the existing
+//     SESSION_CONFIRM → pendingFrameDrainForPeer chain.
 //
-// Returns true on either path (sent immediately OR queued for later). Returns
-// false only on hard errors (no peer identity, payload too large, queue full).
+// Single-mesh assumption: we use the configured default mesh (espnowKeyExInitiate
+// with nullptr meshLabel) for the bootstrap-key choice. Multi-mesh selection
+// (try-all-meshes, topology-cache fingerprint hint) is a TODO — most devices
+// are single-mesh today, so this gets the common case right without the
+// complexity. A multi-mesh device today still works for any peer it has
+// previously seen (existing identity flow), and explicit espnowkeyex / espnowprobe
+// with a --mesh arg covers manual fan-out for new peers.
+//
+// Returns true on the happy paths (sent immediately, queued, OR queued+KEY_EX-kicked).
+// Returns false only on hard errors: invalid args, payload too large, queue full,
+// or no enabled mesh at all (espnowKeyExInitiate returns false).
+//
 // `outStatus` (if non-null) is filled with a short status string:
-//   "sent"     — immediately wrapped & sent
-//   "queued"   — parked for drain after SESSION_OPEN completes
-//   "<error>"  — failure reason on false return
+//   "sent"              — immediately wrapped & sent
+//   "queued"            — parked for drain after SESSION_OPEN completes
+//   "queued; KEY_EX"    — parked + KEY_EX initiated (no peer identity yet)
+//   "<error>"           — failure reason on false return
 bool v4_send_encrypted_or_queue(const uint8_t dst[6], uint8_t type, uint16_t baseFlags,
                                 uint32_t msgId,
                                 const uint8_t* plaintext, uint16_t plaintextLen,
@@ -1617,8 +1650,35 @@ bool v4_send_encrypted_or_queue(const uint8_t dst[6], uint8_t type, uint16_t bas
   }
   const PeerIdentity* pid = peerIdentityFindByMac(dst);
   if (!pid) {
-    setStatus("no peer identity — run espnowkeyex first");
-    return false;
+    // Foundation behavior (encrypt-or-wait): no peer identity → queue + kick KEY_EX.
+    // KEY_EX_REPLY's handler will see pending frames and kick SESSION_OPEN;
+    // SESSION_CONFIRM will then drain via pendingFrameDrainForPeer.
+    if (!pendingFrameQueue(dst, type, baseFlags, msgId, ttl, plaintext, plaintextLen)) {
+      setStatus("pending queue full");
+      return false;
+    }
+    if (!keyExIsInFlight(dst)) {
+      if (!espnowKeyExInitiate(dst, nullptr)) {
+        // KEY_EX kick failed (no enabled mesh at all). The frame stays in the
+        // pending ring; the timeout sweep (kPendingFrameTimeoutMs) will eat it
+        // eventually. Status reflects what happened.
+        setStatus("queued; KEY_EX kick failed (no enabled mesh?)");
+        return true;
+      }
+      INFO_ESPNOWF("encrypted send: no peer identity for %02X:%02X:%02X:%02X:%02X:%02X — "
+                   "queued msgId=%lu, kicked KEY_EX",
+                   dst[0], dst[1], dst[2], dst[3], dst[4], dst[5],
+                   (unsigned long)msgId);
+    } else {
+      // KEY_EX already in flight for this peer (e.g., a sibling caller just
+      // kicked it, or the retry sweep is mid-attempt). Just queue.
+      INFO_ESPNOWF("encrypted send: KEY_EX already in flight to %02X:%02X:%02X:%02X:%02X:%02X — "
+                   "queued msgId=%lu",
+                   dst[0], dst[1], dst[2], dst[3], dst[4], dst[5],
+                   (unsigned long)msgId);
+    }
+    setStatus("queued; KEY_EX");
+    return true;
   }
   SessionState* s = sessionFindByPeer(dst, pid->meshId);
   if (s && s->state == SESSION_ACTIVE) {
@@ -1787,15 +1847,16 @@ bool v4_broadcast_category(uint8_t type, uint16_t flags, uint32_t msgId,
   return anySuccess;
 }
 
-/**
- * Send large payload with V3 fragmentation
- * Splits payload into multiple fragments if needed
- * Returns true if all fragments sent successfully
- */
+// (v4_send_chunked deleted 2026-05 — plaintext multi-frame had its last caller
+// removed when v4_send_payload_smart became strict encrypt-or-fail. Encrypted
+// multi-frame lives in v4_send_encrypted_chunked below. Receive-side plaintext
+// reassembly is kept untouched for one release window in case an older-firmware
+// peer sends one; can be removed in a follow-up.)
+#if 0  // ARCHIVE — kept inside #if 0 for one release as a reference. Delete after.
 bool v4_send_chunked(const uint8_t* dst, uint8_t type, uint16_t flags, uint32_t msgId,
                             const uint8_t* payload, uint16_t payloadLen, uint8_t ttl) {
   if (!dst || (payloadLen > 0 && !payload)) return false;
-  
+
   // If payload fits in single frame, use regular send
   if (payloadLen <= ESPNOW_V4_MAX_PAYLOAD) {
     return v4_send_frame(dst, type, flags, msgId, payload, payloadLen, ttl);
@@ -1933,6 +1994,7 @@ bool v4_send_chunked(const uint8_t* dst, uint8_t type, uint16_t flags, uint32_t 
   DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_TX] ==============================");
   return true;
 }
+#endif  // ARCHIVE v4_send_chunked
 
 // Phase 3.5 task #51 — encrypted multi-frame send.
 //
@@ -2104,17 +2166,33 @@ bool v4_send_encrypted_chunked(const uint8_t dst[6], uint8_t type, uint16_t base
   return true;
 }
 
-// Phase 3.5 follow-on (A1+A2) — encrypted-or-plaintext-chunked dispatcher.
-// Used by CMD_RESP and STREAM senders that previously called v4_send_chunked
-// directly (bypassing the helper-level encryption flip in task #6). Logic:
-//   - Single-frame (≤ MAX_PLAINTEXT): try v4_send_encrypted_or_queue (handles
-//     session-not-ready by queueing + auto-kicking SESSION_OPEN). On hard
-//     failure, fall back to plaintext v4_send_chunked.
-//   - Multi-frame (> MAX_PLAINTEXT): Phase 3.5 task #51 — if an ACTIVE session
-//     exists, use v4_send_encrypted_chunked. If no session OR encrypted-
-//     chunked fails, fall back to plaintext v4_send_chunked. We don't queue
-//     multi-frame payloads (the pendingFrame queue is single-frame), so a
-//     missing session degrades to plaintext rather than blocking the caller.
+// Encrypted dispatcher — STRICT encrypt-or-fail (2026-05, encrypt-or-wait
+// foundation complete). No plaintext fallback exists anywhere in this path.
+// Mesh membership gates encryption (KEY_EX HMAC requires the mesh's bootstrap
+// key); per-peer sessions provide confidentiality. If neither is achievable,
+// the send fails — callers retry, log, or surface to the user.
+//
+// Routing:
+//   - Single-frame (≤ MAX_PLAINTEXT) → v4_send_encrypted_or_queue. That helper
+//     auto-handles every "no session / no peer identity" case: queue + kick
+//     KEY_EX (if no identity) or SESSION_OPEN (if no session), drain on
+//     SESSION_CONFIRM. So single-frame sends to same-mesh peers always succeed
+//     eventually (queue + handshake + drain) and fail fast for cross-mesh
+//     peers (KEY_EX HMAC mismatch → no REPLY → timeout sweep eats the frame).
+//   - Multi-frame (> MAX_PLAINTEXT) → v4_send_encrypted_chunked. Requires an
+//     ACTIVE session up-front (the chunked path doesn't queue across handshake
+//     completion). Caller is responsible for ensuring a session exists or
+//     retrying after one establishes — typical pattern is to do a single-frame
+//     send first (which auto-handshakes) and then issue the multi-frame.
+//
+// Failure modes that return false:
+//   - invalid args (null dst, missing payload)
+//   - payload > MAX_PLAINTEXT with no peer identity or no active session
+//   - encryption hard error (queue full, AEAD seal failed)
+//
+// Cross-mesh peers: KEY_EX HMAC fails on the receiver, no REPLY comes back,
+// the pending frame ages out. From the sender's API perspective it returns true
+// (queued) but never delivers. That's correct — different mesh = locked out.
 bool v4_send_payload_smart(const uint8_t* dst, uint8_t type, uint16_t flags,
                            uint32_t msgId,
                            const uint8_t* payload, uint16_t payloadLen,
@@ -2123,18 +2201,17 @@ bool v4_send_payload_smart(const uint8_t* dst, uint8_t type, uint16_t flags,
 
   if (payloadLen <= ESPNOW_V4_MAX_PLAINTEXT) {
     char status[64] = {0};
-    if (v4_send_encrypted_or_queue(dst, type, flags, msgId, payload, payloadLen,
-                                    ttl, status, sizeof(status))) {
-      return true;
+    bool ok = v4_send_encrypted_or_queue(dst, type, flags, msgId, payload, payloadLen,
+                                          ttl, status, sizeof(status));
+    if (!ok) {
+      DEBUGF(DEBUG_ESPNOW_CORE,
+             "[V4_TX] smart-send: encrypted-or-queue HARD-FAILED (%s) for type=%u msgId=%lu",
+             status[0] ? status : "no detail", type, (unsigned long)msgId);
     }
-    DEBUGF(DEBUG_ESPNOW_CORE,
-           "[V4_TX] smart-send: encrypt failed (%s) for type=%u msgId=%lu — "
-           "falling back to plaintext chunked",
-           status[0] ? status : "no detail", type, (unsigned long)msgId);
-    return v4_send_chunked(dst, type, flags, msgId, payload, payloadLen, ttl);
+    return ok;
   }
 
-  // Multi-frame: prefer encrypted-chunked if a session is ready.
+  // Multi-frame: requires ACTIVE session — no queueing for multi-frame today.
   const PeerIdentity* pid = peerIdentityFindByMac(dst);
   if (pid) {
     SessionState* s = sessionFindByPeer(dst, pid->meshId);
@@ -2143,16 +2220,26 @@ bool v4_send_payload_smart(const uint8_t* dst, uint8_t type, uint16_t flags,
         return true;
       }
       DEBUGF(DEBUG_ESPNOW_CORE,
-             "[V4_TX] smart-send: encrypted-chunked failed for type=%u msgId=%lu "
-             "(%u bytes) — falling back to plaintext chunked",
+             "[V4_TX] smart-send: encrypted-chunked FAILED for type=%u msgId=%lu (%u bytes)",
              type, (unsigned long)msgId, payloadLen);
-      return v4_send_chunked(dst, type, flags, msgId, payload, payloadLen, ttl);
+      return false;
     }
   }
+  // No identity, or identity but no ACTIVE session. Kick whichever level is
+  // missing so the next attempt has a chance, then fail this send so the caller
+  // knows to retry.
+  if (!pid) {
+    (void)espnowKeyExInitiate(dst, nullptr);
+  } else {
+    (void)espnowSessionOpenInitiate(dst, nullptr);
+  }
   DEBUGF(DEBUG_ESPNOW_CORE,
-         "[V4_TX] smart-send: no session for type=%u msgId=%lu (%u bytes) — plaintext chunked",
-         type, (unsigned long)msgId, payloadLen);
-  return v4_send_chunked(dst, type, flags, msgId, payload, payloadLen, ttl);
+         "[V4_TX] smart-send: multi-frame send to %02X:%02X:%02X:%02X:%02X:%02X requires "
+         "ACTIVE session (type=%u msgId=%lu, %u bytes) — kicked %s, dropping. Caller should retry.",
+         dst[0], dst[1], dst[2], dst[3], dst[4], dst[5],
+         type, (unsigned long)msgId, payloadLen,
+         pid ? "SESSION_OPEN" : "KEY_EX");
+  return false;
 }
 
 static bool v4_send_ack(const uint8_t* dst, uint32_t ackFor) {
@@ -2431,20 +2518,12 @@ bool v4_send_user_sync(const uint8_t* dst, const char* jsonPayload, uint16_t jso
   char dstMac[18];
   formatMacAddressBuf(dst, dstMac, sizeof(dstMac));
   DEBUGF(DEBUG_ESPNOW_MESH, "[V4_TX_USER_SYNC] Sending (encrypted) to %s msgId=%lu len=%u", dstMac, (unsigned long)msgId, jsonLen);
-  // USER_SYNC carries user records (possibly hashed credentials) — STRICT
-  // encrypt-only, no plaintext fallback. Small payloads ride the single-frame
-  // queue (auto-kicks SESSION_OPEN); large payloads use encrypted-chunked
-  // which requires an ACTIVE session and refuses to fall back. If the peer
-  // hasn't done KEY_EX yet, this returns false rather than leak.
-  bool result;
-  if (jsonLen <= ESPNOW_V4_MAX_PLAINTEXT) {
-    result = v4_send_encrypted_or_queue(dst, ESPNOW_V4_TYPE_USER_SYNC, ESPNOW_V4_FLAG_ACK_REQ,
-                                         msgId, (const uint8_t*)jsonPayload, jsonLen, 3,
-                                         nullptr, 0);
-  } else {
-    result = v4_send_encrypted_chunked(dst, ESPNOW_V4_TYPE_USER_SYNC, ESPNOW_V4_FLAG_ACK_REQ,
-                                        msgId, (const uint8_t*)jsonPayload, jsonLen, 3);
-  }
+  // USER_SYNC carries user records (possibly hashed credentials). Smart is
+  // now strict encrypt-or-fail (2026-05 cleanup) — no plaintext fallback — so
+  // routing through it gets the right semantics for free. Smart also auto-kicks
+  // KEY_EX/SESSION_OPEN if needed (encrypt-or-wait foundation).
+  bool result = v4_send_payload_smart(dst, ESPNOW_V4_TYPE_USER_SYNC, ESPNOW_V4_FLAG_ACK_REQ,
+                                       msgId, (const uint8_t*)jsonPayload, jsonLen, 3);
   DEBUGF(DEBUG_ESPNOW_MESH, "[V4_TX_USER_SYNC] Result: %s", result ? "SUCCESS" : "FAILED");
   return result;
 }
@@ -2455,19 +2534,11 @@ bool v4_send_text(const uint8_t* dst, const char* text, uint16_t textLen) {
   char dstMac[18];
   formatMacAddressBuf(dst, dstMac, sizeof(dstMac));
   DEBUGF(DEBUG_ESPNOW_CORE, "[V4_TX_TEXT] Sending (encrypted) to %s msgId=%lu len=%u", dstMac, (unsigned long)msgId, textLen);
-  // STRICT encrypt — preserves the original v4_send_text intent of refusing
-  // to send if encryption isn't possible. Small payloads ride single-frame
-  // SESSION_FRAME (with queue + auto-kick); larger ones use encrypted-chunked
-  // which requires an ACTIVE session and refuses to fall back to plaintext.
-  bool result;
-  if (textLen <= ESPNOW_V4_MAX_PLAINTEXT) {
-    result = v4_send_encrypted_or_queue(dst, ESPNOW_V4_TYPE_TEXT, ESPNOW_V4_FLAG_ACK_REQ,
-                                         msgId, (const uint8_t*)text, textLen, 1,
-                                         nullptr, 0);
-  } else {
-    result = v4_send_encrypted_chunked(dst, ESPNOW_V4_TYPE_TEXT, ESPNOW_V4_FLAG_ACK_REQ,
-                                        msgId, (const uint8_t*)text, textLen, 1);
-  }
+  // Smart is now strict encrypt-or-fail (2026-05 cleanup) — no plaintext
+  // fallback anywhere. v4_send_text's original "refuse if not encryptable"
+  // contract holds for free now. Smart also auto-handshakes for unknown peers.
+  bool result = v4_send_payload_smart(dst, ESPNOW_V4_TYPE_TEXT, ESPNOW_V4_FLAG_ACK_REQ,
+                                       msgId, (const uint8_t*)text, textLen, 1);
   DEBUGF(DEBUG_ESPNOW_CORE, "[V4_TX_TEXT] Result: %s", result ? "SUCCESS" : "FAILED");
   return result;
 }
@@ -5676,6 +5747,50 @@ static void processBondSchema(const uint8_t* srcMac, const String& deviceName, c
 }
 
 /**
+ * Fire the one-shot post-sync side effects: send the initial STATUS_REQ so the
+ * peer's bondPeerStatusValid can populate, and (on master) queue STREAM_CTRL
+ * replay so the worker mirrors the master's saved streaming prefs.
+ *
+ * Called from three places, all guarded by bondStatusReqSentOnce so it's
+ * a no-op after the first successful fire per sync session:
+ *   1) processBondSettings() — original site, on fresh settings file arrival
+ *   2) cmd_bond_role()        — direct fire after role swap snapshot/restore
+ *                              (processBondSettings won't run because we have
+ *                              everything cached, so the side effects would
+ *                              otherwise never trigger and the UI would hang
+ *                              on "Establishing Bond" step 4 of 4 forever)
+ *   3) Bond tick guard        — fallback for cases (1) and (2) where the
+ *                              encrypted send failed because the session
+ *                              wasn't yet ACTIVE; retries on next tick.
+ *
+ * If bondSendEncrypted fails (typically because the session isn't yet up),
+ * we leave bondStatusReqSentOnce=false so a retry path can fire. On success
+ * we set it true to prevent duplicate STATUS_REQs from the other call sites.
+ */
+static void firePostSyncSideEffects(const uint8_t peerMac[6]) {
+  if (!gEspNow || !gSettings.bondModeEnabled) return;
+  if (gEspNow->bondStatusReqSentOnce) return;  // already fired this sync session
+
+  uint32_t statusReqId = generateMessageId();
+  bool sent = bondSendEncrypted(peerMac, ESPNOW_V4_TYPE_BOND_STATUS_REQ, 0,
+                                statusReqId, nullptr, 0);
+  if (!sent) {
+    // Session likely not ACTIVE yet. Leave bondStatusReqSentOnce false so the
+    // tick guard or next caller retries. No log spam — it's expected to retry.
+    return;
+  }
+  gEspNow->bondStatusReqSentOnce = true;
+  gEspNow->bondLastStatusReqMs = millis();
+
+  // Master: push saved streaming prefs to worker now that sync is done.
+  // Idempotent on worker side — STREAM_CTRL OFF on an off sensor is a no-op.
+  if (isBondMaster()) {
+    gEspNow->bondNeedsStreamingSetup = true;
+  }
+  BROADCAST_PRINTF("[BOND_SYNC] *** SYNC COMPLETE *** role=%d", (int)gSettings.bondRole);
+}
+
+/**
  * Process received settings from bonded peer
  */
 static void processBondSettings(const uint8_t* srcMac, const String& deviceName, const String& settingsStr) {
@@ -5735,21 +5850,13 @@ static void processBondSettings(const uint8_t* srcMac, const String& deviceName,
     if (synced) {
       // Bond token is derived from the encrypted session at handshake time
       // (sessionDeriveAeadKeys → SessionState::bondToken), so it is already
-      // valid by first sync. Kick the initial status exchange once.
-      if (!gEspNow->bondStatusReqSentOnce) {
-        uint8_t pMac[6];
-        if (parseMacAddress(gSettings.bondPeerMac, pMac)) {
-          gEspNow->bondStatusReqSentOnce = true;
-          uint32_t statusReqId = generateMessageId();
-          bondSendEncrypted(pMac, ESPNOW_V4_TYPE_BOND_STATUS_REQ, 0, statusReqId, nullptr, 0);
-          gEspNow->bondLastStatusReqMs = millis();
-        }
+      // valid by first sync. Delegate the STATUS_REQ kick + streaming setup
+      // to the shared helper so cmd_bond_role and the tick guard can fire
+      // the same side effects after a snapshot/restore role swap.
+      uint8_t pMac[6];
+      if (parseMacAddress(gSettings.bondPeerMac, pMac)) {
+        firePostSyncSideEffects(pMac);
       }
-      // Master: push saved streaming prefs to worker now that sync is done
-      if (isBondMaster()) {
-        gEspNow->bondNeedsStreamingSetup = true;
-      }
-      BROADCAST_PRINTF("[BOND_SYNC] *** SYNC COMPLETE *** role=%d", (int)gSettings.bondRole);
     }
   }
   
@@ -6941,7 +7048,14 @@ void v2_init_envelope(JsonDocument& doc, const char* type, uint32_t msgId,
   if (ttl >= 0)      doc["ttl"] = ttl;
 }
 
-// Send a serialized JSON string to all active mesh peers via V3 TEXT frames
+// Send a serialized JSON string to all active mesh peers via V4 TEXT frames.
+// 2026-05: now routes through v4_send_payload_smart (strict encrypt-or-fail),
+// not v4_send_chunked (deleted). Peers without an active session get the
+// auto-handshake treatment from smart's _or_queue path — first envelope to a
+// new peer queues + kicks KEY_EX/SESSION_OPEN, drains when the session is up.
+// Cross-mesh peers can't be in gMeshPeers (no shared bootstrap key, so KEY_EX
+// would never have established their identity), so this is exclusively
+// same-mesh fan-out — encryption always works once the handshake settles.
 void meshSendEnvelopeToPeers(const String& envelope) {
   if (!gEspNow || !gEspNow->initialized || !gMeshPeers) return;
   const uint8_t* data = (const uint8_t*)envelope.c_str();
@@ -6949,7 +7063,7 @@ void meshSendEnvelopeToPeers(const String& envelope) {
   uint32_t msgId = generateMessageId();
   for (int i = 0; i < gMeshPeerSlots; i++) {
     if (gMeshPeers[i].isActive && !isSelfMac(gMeshPeers[i].mac))
-      v4_send_chunked(gMeshPeers[i].mac, ESPNOW_V4_TYPE_TEXT, 0, msgId, data, len, 3);
+      v4_send_payload_smart(gMeshPeers[i].mac, ESPNOW_V4_TYPE_TEXT, 0, msgId, data, len, 3);
   }
 }
 
@@ -7488,6 +7602,24 @@ void processMeshHeartbeats() {
     }
     if (gEspNow->bondReceivedCapability) {
       gEspNow->bondReceivedCapability = false;
+    }
+  }
+
+  // POST-SYNC FALLBACK GUARD (both roles): if we've landed in isBondSynced()
+  // == true without having fired the post-sync side effects yet, fire them.
+  // Belt + suspenders for the cmd_bond_role direct call, which can fail if
+  // the encrypted session wasn't yet ACTIVE at the moment of role swap. This
+  // also generalizes — any future code path that lands in synced state via
+  // a shortcut (peer reconnect with cached state, manual flag manipulation,
+  // etc.) gets the STATUS_REQ kick for free. Idempotent via the
+  // bondStatusReqSentOnce gate inside firePostSyncSideEffects.
+  if (gSettings.bondModeEnabled && gEspNow->bondPeerOnline &&
+      !gEspNow->bondStatusReqSentOnce && isBondSynced()) {
+    uint8_t pMac[6];
+    if (gSettings.bondPeerMac.length() > 0 &&
+        parseMacAddress(gSettings.bondPeerMac, pMac) &&
+        bondSessionActiveWith(pMac)) {
+      firePostSyncSideEffects(pMac);
     }
   }
 
@@ -8173,11 +8305,9 @@ static bool initEspNow() {
 
   gEspNow->initialized = true;
 
-  // Create the local sensor-cache mutex now (single-threaded init) so sensor
-  // poll loops can keep the cache warm even before any streaming is enabled —
-  // see sendSensorDataUpdate(). Previously the mutex was created lazily only when
-  // streaming first started, which left the RTC poll logging spurious
-  // MUTEX_TIMEOUTs and never pre-warming the cache for the first enable.
+  // Initialize the master-side remote-sensor cache (the cache of OTHER devices'
+  // data we've received). Worker-side wire cache no longer exists — sensors are
+  // read on demand by the broadcaster from their native caches.
   initRemoteSensorSystem();
 
   // Apply persisted mesh/direct mode from settings (applySettings runs before gEspNow exists at boot)
@@ -8767,6 +8897,120 @@ const char* cmd_espnow_sessionopen(const String& argsInput) {
            "Run 'espnowsessions' to inspect.",
            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
   return getDebugBuffer();
+}
+
+// Reachability probe via KEY_EX. Kicks a single KEY_EX_HELLO and polls the
+// in-flight slot until it resolves (REPLY arrived → identity present) or the
+// caller's timeout expires (no response). Information-rich vs a plaintext PING:
+// success tells you the peer is (1) alive, (2) on a mesh you share, and
+// (3) running compatible firmware — all in one shot. KEY_EX is HMAC-authed by
+// the mesh bootstrap key, so off-mesh sniffers learn nothing useful.
+//
+// Outcomes:
+//   "alive on mesh '<label>' (<rtt>ms)"      — REPLY received within timeout
+//   "no response within <N>ms"               — silent timeout (out of range,
+//                                              powered off, OR different mesh —
+//                                              indistinguishable from sender's
+//                                              side, since wrong-mesh peers
+//                                              silently drop our HELLO at the
+//                                              HMAC check)
+//   "rejected: <reason>"                     — in-flight cleared without
+//                                              creating identity (e.g., peer
+//                                              sent CONFIRM with status=2)
+const char* cmd_espnow_probe(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!gEspNow || !gEspNow->initialized) {
+    return "Error: ESP-NOW not initialized. Run 'openespnow' first.";
+  }
+  CommandArgs a(argsInput);
+  if (a.count() < 1) {
+    return "Usage: espnowprobe <name_or_mac> [<timeoutMs (50-5000, default 500)>] [<mesh>]\n"
+           "  Probes a peer via a single KEY_EX handshake. Reports whether the\n"
+           "  peer is alive, on a mesh we share, and running compatible firmware.\n"
+           "  No plaintext on the wire — mesh-gated by construction.";
+  }
+
+  uint8_t mac[6];
+  if (!resolveDeviceNameOrMac(a.arg(0), mac) && !parseMacAddress(a.arg(0), mac)) {
+    return "Error: not a paired device name and not a valid MAC.";
+  }
+
+  uint32_t timeoutMs = 500;
+  if (a.count() >= 2) {
+    long parsed = a.arg(1).toInt();
+    if (parsed >= 50 && parsed <= 5000) {
+      timeoutMs = (uint32_t)parsed;
+    } else {
+      return "Error: timeoutMs out of range (50-5000).";
+    }
+  }
+  String meshLabel = (a.count() >= 3) ? a.arg(2) : String("");
+
+  // Snapshot pre-probe state so we can distinguish "newly resolved" from
+  // "was already paired before this probe."
+  const PeerIdentity* preProbe = peerIdentityFindByMac(mac);
+  bool hadIdentityBefore = (preProbe != nullptr);
+
+  uint32_t kickMs = (uint32_t)millis();
+  bool ok = espnowKeyExInitiate(mac, meshLabel.length() > 0 ? meshLabel.c_str() : nullptr);
+  if (!ok) {
+    return "Error: KEY_EX initiate failed (no enabled mesh? see [ERROR][ESP-NOW] log).";
+  }
+
+  // Poll until the in-flight slot clears (REPLY landed OR rejected) or timeout.
+  // 10ms tick is fine — KEY_EX RTT in a healthy mesh is typically 50-200ms.
+  uint32_t elapsedMs = 0;
+  while (elapsedMs < timeoutMs && keyExIsInFlight(mac)) {
+    vTaskDelay(pdMS_TO_TICKS(10));
+    elapsedMs = (uint32_t)millis() - kickMs;
+  }
+
+  bool stillInFlight = keyExIsInFlight(mac);
+  const PeerIdentity* postProbe = peerIdentityFindByMac(mac);
+
+  if (!ensureDebugBuffer()) {
+    if (stillInFlight) return "no response (timeout)";
+    if (postProbe) return "alive";
+    return "rejected";
+  }
+  char* buf = getDebugBuffer();
+
+  if (stillInFlight) {
+    snprintf(buf, 1024,
+             "no response within %ums from %02X:%02X:%02X:%02X:%02X:%02X — "
+             "peer offline, out of range, or on a different mesh "
+             "(indistinguishable from this side). KEY_EX will keep retrying in "
+             "background; run 'espnowprobe' again later or check the log.",
+             (unsigned)timeoutMs,
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    return buf;
+  }
+
+  if (postProbe) {
+    // Look up the mesh label from the resolved identity.
+    const char* mlabel = "?";
+    if (postProbe->meshId < Settings::N_MESHES) {
+      mlabel = gSettings.meshes[postProbe->meshId].label.c_str();
+      if (!mlabel || !mlabel[0]) mlabel = "(unnamed)";
+    }
+    snprintf(buf, 1024,
+             "alive on mesh '%s' (%ums RTT) — %02X:%02X:%02X:%02X:%02X:%02X "
+             "[%s]. Compatible firmware confirmed (KEY_EX REPLY parsed cleanly).",
+             mlabel, (unsigned)elapsedMs,
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+             hadIdentityBefore ? "identity refreshed" : "new identity persisted");
+    return buf;
+  }
+
+  // In-flight cleared but no identity → CONFIRM came back with status != 0
+  // (e.g., pubkey conflict on responder side). Caller likely needs espnowforget
+  // or espnowpairsecure to break the deadlock.
+  snprintf(buf, 1024,
+           "rejected by %02X:%02X:%02X:%02X:%02X:%02X — peer refused our pubkey "
+           "(typically a stale identity from a prior pairing). Try 'espnowforget' "
+           "on both sides + re-pair.",
+           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  return buf;
 }
 
 // Phase 3.6: force an immediate SESSION_REKEY for a peer. Useful for manual
@@ -10873,48 +11117,33 @@ bool sendFileToMac(const uint8_t* mac, const String& localPath) {
     return false;
   }
 
-  // ── Pick encrypted vs plaintext from the CURRENT session state ────────────
-  // A file transfer is a multi-frame stream (100s of chunks). If a session is
-  // already ACTIVE every chunk takes the AEAD fast path; otherwise we send
-  // plaintext (bond manifest/settings/capability data is non-secret and the
-  // bond channel is token-authenticated).
+  // ── Per-chunk routing through smart ───────────────────────────────────────
+  // 2026-05 (encrypt-or-wait foundation): each FILE_DATA chunk is small enough
+  // for a single SESSION_FRAME (200 data + 2 chunkIdx + 16 AEAD tag = 218 =
+  // MAX_PAYLOAD). Smart's single-frame path goes through v4_send_encrypted_or_queue
+  // which now auto-handles every "no session / no identity" case (queue-and-kick
+  // KEY_EX/SESSION_OPEN, drain via SESSION_CONFIRM). So we just call smart per
+  // chunk and let it figure out encryption + session state per frame. Replaces
+  // the old "fileSessionReady snapshot at start of transfer" wart, which got
+  // the choice wrong if the session came up partway through.
   //
-  // CRITICAL — this used to BLOCK here (poll up to 6 s) for the session to come
-  // up. That deadlocked against itself: sendFileToMac runs on espnow_task,
-  // which is also the task that drains the RX ring, so while it blocked here the
-  // incoming SESSION_CONFIRM could never be processed → the session never went
-  // ACTIVE → the wait always timed out → plaintext anyway (and meanwhile RX was
-  // starved). Callers that require the transfer encrypted (the bond manifest/
-  // settings path) now gate on session-active *event-driven* before calling
-  // (see bondSendReadyOrDeferred), so by the time we get here the session is up.
-  // Here we never block: kick a handshake for next time and send with whatever
-  // state exists right now.
-  bool fileSessionReady = false;
+  // Hint: kick session establishment up-front (no-op if already in flight) so
+  // the first FILE_START doesn't pay the full handshake RTT in its own queue
+  // wait. Cheap.
   {
     const PeerIdentity* pid = peerIdentityFindByMac(mac);
     if (pid) {
       SessionState* s = sessionFindByPeer(mac, pid->meshId);
-      if (s && s->state == SESSION_ACTIVE) {
-        fileSessionReady = true;
-      } else {
-        // No active session — kick the handshake (no-op if already in flight)
-        // so a session is available for the next send, but DO NOT block here.
+      if (!s || s->state != SESSION_ACTIVE) {
         espnowSessionOpenInitiate(mac, nullptr);
       }
     }
-    DEBUG_ESPNOWF("[V4_FILE_TX] session %s for %s — sending %s",
-                  fileSessionReady ? "ACTIVE" : "unavailable",
-                  formatMacAddress(mac).c_str(),
-                  fileSessionReady ? "encrypted" : "plaintext");
+    // If !pid, smart's _or_queue will auto-kick KEY_EX on the first frame.
   }
 
-  // Route a single file frame: encrypted fast-path when a session is up,
-  // plaintext chunked otherwise. Never the queue-and-evict path for streams.
   auto fileSendFrame = [&](uint8_t type, uint16_t flags, uint32_t id,
                            const uint8_t* p, uint16_t len) -> bool {
-    return fileSessionReady
-      ? v4_send_payload_smart(mac, type, flags, id, p, len, 1)
-      : v4_send_chunked(mac, type, flags, id, p, len, 1);
+    return v4_send_payload_smart(mac, type, flags, id, p, len, 1);
   };
 
   // Security: Block sending sensitive files (credentials, passwords, keys).
@@ -12040,10 +12269,13 @@ const char* cmd_espnow_bigsend(const String& argsInput) {
   esp_wifi_get_mac(WIFI_IF_STA, myMac);
   String payload = textContent;
 
-  // Send via V3
+  // Send via V4 smart (strict encrypt-or-fail post-2026-05). Test-only bigsend
+  // requires the peer to be on our mesh + reachable; otherwise the send fails
+  // (which is the desired test signal — we're stress-testing the encrypted
+  // path, not the plaintext one).
   uint32_t msgId = generateMessageId();
-  bool ok = v4_send_chunked(mac, ESPNOW_V4_TYPE_TEXT, ESPNOW_V4_FLAG_ACK_REQ, msgId,
-                            (const uint8_t*)payload.c_str(), payload.length(), 1);
+  bool ok = v4_send_payload_smart(mac, ESPNOW_V4_TYPE_TEXT, ESPNOW_V4_FLAG_ACK_REQ, msgId,
+                                  (const uint8_t*)payload.c_str(), payload.length(), 1);
   if (!ensureDebugBuffer()) return ok ? "OK" : "Failed";
   snprintf(getDebugBuffer(), 1024, "bigsend: %s (id=%lu, bytes=%ld)", ok ? "OK" : "FAILED", (unsigned long)msgId, size);
   return getDebugBuffer();
@@ -12162,6 +12394,183 @@ const char* cmd_bond_requestmanifest(const String& argsInput) {
   } else {
     return "Failed to send manifest request.";
   }
+}
+
+/**
+ * Request settings file from bonded peer (response arrives as _settings_out.json
+ * via the file-transfer chain). Sibling to bondrequestcap / bondrequestmanifest;
+ * added 2026-05 to round out the per-stage bond request primitives that the new
+ * `bondresync` wrapper composes from.
+ */
+const char* cmd_bond_requestsettings(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+
+  if (!gSettings.bondModeEnabled || gSettings.bondPeerMac.length() == 0) {
+    return "Not connected in bond mode. Use 'bondconnect <device>' first.";
+  }
+
+  uint8_t peerMac[6];
+  if (!parseMacAddress(gSettings.bondPeerMac, peerMac)) {
+    return "Invalid peer MAC address in settings.";
+  }
+
+  uint32_t msgId = generateMessageId();
+  bool sent = false;
+  for (int attempt = 0; attempt < 2; attempt++) {
+    sent = bondSendEncrypted(peerMac, ESPNOW_V4_TYPE_SETTINGS_REQ, ESPNOW_V4_FLAG_ACK_REQ, msgId, nullptr, 0);
+    if (sent) break;
+  }
+  return sent ? "Settings request sent. Response will arrive via file transfer."
+              : "Failed to send settings request.";
+}
+
+/**
+ * Request settings schema from bonded peer (response arrives as _schema_out.json
+ * via the file-transfer chain). Added 2026-05 alongside bondrequestsettings.
+ */
+const char* cmd_bond_requestschema(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+
+  if (!gSettings.bondModeEnabled || gSettings.bondPeerMac.length() == 0) {
+    return "Not connected in bond mode. Use 'bondconnect <device>' first.";
+  }
+
+  uint8_t peerMac[6];
+  if (!parseMacAddress(gSettings.bondPeerMac, peerMac)) {
+    return "Invalid peer MAC address in settings.";
+  }
+
+  uint32_t msgId = generateMessageId();
+  bool sent = false;
+  for (int attempt = 0; attempt < 2; attempt++) {
+    sent = bondSendEncrypted(peerMac, ESPNOW_V4_TYPE_SCHEMA_REQ, ESPNOW_V4_FLAG_ACK_REQ, msgId, nullptr, 0);
+    if (sent) break;
+  }
+  return sent ? "Schema request sent. Response will arrive via file transfer."
+              : "Failed to send schema request.";
+}
+
+/**
+ * Force a re-sync of bond state with the peer (capabilities + manifest +
+ * settings + schema). User-facing safety hatch for stuck-state recovery.
+ *
+ * USE CASES:
+ *  - Worker's UI stuck on "Establishing Bond" (Cap/Status flags didn't flip after a transient race)
+ *  - Peer enabled/disabled a sensor at runtime — capabilities went stale (no heartbeat
+ *    auto-detection for cap changes; only bootCounter + settingsHash are heartbeat-tracked)
+ *  - Suspected mid-sync packet loss left one side with stale data
+ *  - General "this looks weird, force refresh" reflex (analogous to wpa_cli reconnect
+ *    or DHCP renew — every robust protocol has a force-refresh primitive)
+ *
+ * BEHAVIOR by role:
+ *  - MASTER: resetBondSync() + flag bondNeedsCapabilityRequest=true. The super-loop
+ *    sync tick consumes the flag and kicks the existing CAP_REQ → MANIFEST_REQ →
+ *    SETTINGS_REQ → SCHEMA_REQ chain.
+ *  - WORKER: resetBondSync() + send CAP_REQ, MANIFEST_REQ, SETTINGS_REQ, SCHEMA_REQ
+ *    directly to the master. The master responds to each (CAP_RESP + reciprocal CAP_RESP
+ *    on the receive side, plus the three file transfers). The worker's *Received flags
+ *    re-flip to true as the responses arrive.
+ *
+ * NEVER:
+ *  - Tears down the AEAD session — sync-state refresh, not connection refresh
+ *  - Clears the bond auth token — preserved per existing resetBondSync semantics
+ *  - Clears peer identity (espnowforget territory)
+ *  - Unbonds (bonddisconnect territory)
+ *  - Touches sensor streaming state — orthogonal
+ *
+ * Idempotent — running twice converges; the responses just re-flip the flags again.
+ */
+const char* cmd_bond_resync(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+
+  if (!gEspNow || !gEspNow->initialized) {
+    return "ESP-NOW not initialized.";
+  }
+  if (!gSettings.bondModeEnabled || gSettings.bondPeerMac.length() == 0) {
+    return "Not in bond mode. Use 'bondconnect <peer>' first.";
+  }
+
+  // Parse optional stage filter — default is --all.
+  enum { STAGE_ALL, STAGE_CAP, STAGE_MANIFEST, STAGE_SETTINGS, STAGE_SCHEMA } stage = STAGE_ALL;
+  String args = argsInput;
+  args.trim();
+  if (args.length() > 0) {
+    if      (args == "--all")        stage = STAGE_ALL;
+    else if (args == "--cap")        stage = STAGE_CAP;
+    else if (args == "--manifest")   stage = STAGE_MANIFEST;
+    else if (args == "--settings")   stage = STAGE_SETTINGS;
+    else if (args == "--schema")     stage = STAGE_SCHEMA;
+    else {
+      return "Usage: bondresync [--cap|--manifest|--settings|--schema|--all]";
+    }
+  }
+
+  // Per-stage shortcut — just delegate to the existing request verb.
+  // String("") is what each verb expects when no positional args follow.
+  if (stage == STAGE_CAP)      return cmd_bond_requestcap(String(""));
+  if (stage == STAGE_MANIFEST) return cmd_bond_requestmanifest(String(""));
+  if (stage == STAGE_SETTINGS) return cmd_bond_requestsettings(String(""));
+  if (stage == STAGE_SCHEMA)   return cmd_bond_requestschema(String(""));
+
+  // --all path: clear bookkeeping flags and kick the role-appropriate chain.
+  uint8_t peerMac[6];
+  if (!parseMacAddress(gSettings.bondPeerMac, peerMac)) {
+    return "Invalid peer MAC address in settings.";
+  }
+
+  // Reset the local sync state. We deliberately accept the wipe of
+  // lastRemoteCapValid / *Received flags here — unlike the bondrole-change site
+  // (where the peer's state hasn't actually changed), here the whole POINT is
+  // to declare the local view stale and re-fetch. The auth token and session
+  // state are preserved by resetBondSync (see comment in that function).
+  resetBondSync();
+
+  const bool master = isBondMaster();
+  const bool peerOnline = gEspNow->bondPeerOnline;
+
+  if (master) {
+    // Master drives sync via the tick. Setting bondNeedsCapabilityRequest=true
+    // kicks the existing chain on the next super-loop iteration.
+    gEspNow->bondNeedsCapabilityRequest = true;
+    if (!ensureDebugBuffer()) return peerOnline
+                                ? "Bond resync initiated (master): full sync chain queued."
+                                : "Bond resync queued (master); peer offline, will fire when peer returns.";
+    snprintf(getDebugBuffer(), 1024,
+             "Bond resync initiated (master role) — full chain queued "
+             "(CAP → MANIFEST → SETTINGS → SCHEMA). Peer %s.",
+             peerOnline ? "online; sync will start on next tick"
+                        : "offline; sync will start when peer returns");
+    return getDebugBuffer();
+  }
+
+  // Worker side: fire each request directly. Master will respond to each.
+  // We do CAP_REQ first so the reciprocal CAP_RESP path on the master's
+  // receiver re-populates our lastRemoteCapValid; the other three are file-
+  // transfer responses that re-flip the matching *Received flags.
+  uint32_t msgIdCap   = generateMessageId();
+  uint32_t msgIdMan   = generateMessageId();
+  uint32_t msgIdSet   = generateMessageId();
+  uint32_t msgIdSch   = generateMessageId();
+  bool capOk  = bondSendEncrypted(peerMac, ESPNOW_V4_TYPE_BOND_CAP_REQ,  ESPNOW_V4_FLAG_ACK_REQ, msgIdCap, nullptr, 0);
+  bool manOk  = bondSendEncrypted(peerMac, ESPNOW_V4_TYPE_MANIFEST_REQ,  ESPNOW_V4_FLAG_ACK_REQ, msgIdMan, nullptr, 0);
+  bool setOk  = bondSendEncrypted(peerMac, ESPNOW_V4_TYPE_SETTINGS_REQ,  ESPNOW_V4_FLAG_ACK_REQ, msgIdSet, nullptr, 0);
+  bool schOk  = bondSendEncrypted(peerMac, ESPNOW_V4_TYPE_SCHEMA_REQ,    ESPNOW_V4_FLAG_ACK_REQ, msgIdSch, nullptr, 0);
+
+  if (!ensureDebugBuffer()) {
+    return (capOk && manOk && setOk && schOk)
+        ? "Bond resync initiated (worker): CAP+MANIFEST+SETTINGS+SCHEMA requests sent."
+        : "Bond resync (worker): some requests failed to send — see log.";
+  }
+  snprintf(getDebugBuffer(), 1024,
+           "Bond resync initiated (worker role) — requests sent: "
+           "cap=%s, manifest=%s, settings=%s, schema=%s. "
+           "Master will respond to each; bond flags will re-populate as data arrives.%s",
+           capOk ? "ok" : "FAIL",
+           manOk ? "ok" : "FAIL",
+           setOk ? "ok" : "FAIL",
+           schOk ? "ok" : "FAIL",
+           peerOnline ? "" : " (peer offline — queued)");
+  return getDebugBuffer();
 }
 
 /**
@@ -12459,13 +12868,59 @@ const char* cmd_bond_role(const String& argsInput) {
   // (worker=initiator, master=responder). Without reset, both sides
   // could end up waiting or both initiating simultaneously.
   if (changed && gEspNow && gEspNow->initialized) {
+    // Snapshot the "what we know about the peer / what we've sent the peer"
+    // fields BEFORE resetBondSync. None of these change just because OUR
+    // local role flipped — the peer's cap data is hardware-derived (role-
+    // independent), the manifest is the peer's firmware hash, settings are
+    // the peer's user config, schema is the peer's command schema. Likewise
+    // bondCapSent/bondSettingsSent ("I've already sent my cap/settings to
+    // peer") remain semantically true because cap+settings are role-independent
+    // and the peer still has them cached from the pre-swap exchange.
+    //
+    // resetBondSync correctly wipes the role-dependent state machine flags
+    // (bondSyncInFlight, bondNeedsCapability*, etc.) which DO need to reset
+    // because sync sequencing is role-dependent — but it also clobbers all
+    // the peer-state and obligation flags. Previously this left the new
+    // worker's UI stuck on "Establishing Bond" because:
+    //   - master: *Received flags went false → sync tick re-pulled → OK
+    //   - worker: bondCapSent/bondSettingsSent went false →
+    //             isBondSynced() returned false on worker → UI stuck
+    //   - both: side effects of "becoming synced" (STATUS_REQ, streaming
+    //             setup) live INSIDE processBondSettings which only runs
+    //             on settings file arrival, so the role-swap-restored-to-
+    //             synced path never fired them → bondPeerStatusValid stayed
+    //             false → UI step 4 of 4 unchecked forever
+    //
+    // 2026-05 fix: snapshot + restore all six peer-state/obligation flags,
+    // then fire the post-sync side effects directly via the shared helper
+    // (firePostSyncSideEffects) below.
+    bool wasCapValid   = gEspNow->lastRemoteCapValid;
+    bool hadManifest   = gEspNow->bondManifestReceived;
+    bool hadSettings   = gEspNow->bondSettingsReceived;
+    bool hadSchema     = gEspNow->bondSchemaReceived;
+    bool hadCapSent    = gEspNow->bondCapSent;
+    bool hadSettSent   = gEspNow->bondSettingsSent;
+
     resetBondSync();
-    // NOTE: lastRemoteCapValid is intentionally NOT cleared here — the peer's
-    // capabilities (name, sensors, features) haven't changed because our local
-    // role changed. Keeping it valid means peerName stays correct in the UI
-    // while the new handshake negotiates. It will be updated when CAP_RESP arrives.
+
+    // Restore the still-valid peer state. The peer hasn't changed, so the
+    // UI doesn't need to re-show "Establishing Bond" — just relabel master/worker.
+    gEspNow->lastRemoteCapValid     = wasCapValid;
+    gEspNow->bondManifestReceived   = hadManifest;
+    gEspNow->bondSettingsReceived   = hadSettings;
+    gEspNow->bondSchemaReceived     = hadSchema;
+    gEspNow->bondCapSent            = hadCapSent;
+    gEspNow->bondSettingsSent       = hadSettSent;
+
+    // bondPeerStatusValid is left cleared (resetBondSync wiped it) — status
+    // payload may legitimately differ now that roles flipped (e.g. master
+    // exposes different fields than worker), so let the next BOND_STATUS_RESP
+    // re-populate it cleanly. This is the one peer-state field we DO want to
+    // re-fetch after a role swap. bondStatusReqSentOnce is also left cleared
+    // by resetBondSync, which is required so firePostSyncSideEffects below
+    // will actually fire the STATUS_REQ that re-populates bondPeerStatusValid.
     gEspNow->bondPeerStatusValid = false;
-    
+
     // Disable all sensor streaming — don't carry old master's prefs into new role
     setSetting(gSettings.bondStreamThermal, false);
     setSetting(gSettings.bondStreamTof, false);
@@ -12479,11 +12934,31 @@ const char* cmd_bond_role(const String& argsInput) {
     for (int i = 0; i < REMOTE_SENSOR_MAX; i++) {
       stopSensorDataStreaming((RemoteSensorType)i);
     }
-    
-    // If peer is already online and we're now master, trigger sync tick
-    if (gEspNow->bondPeerOnline && newRole == 1) {
-      gEspNow->bondNeedsCapabilityRequest = true;  // Consumed by sync tick
-      BROADCAST_PRINTF("[BOND] Role changed to master — sync tick will drive handshake");
+
+    // If peer is already online and the restored flags say we're synced, fire
+    // the post-sync side effects directly (STATUS_REQ + streaming setup). This
+    // is the hybrid Option A/B fix: cmd_bond_role uses the same helper as
+    // processBondSettings does on cold sync. If the encrypted send fails
+    // here because the session isn't yet ACTIVE, the helper leaves
+    // bondStatusReqSentOnce=false and the bond tick guard retries.
+    //
+    // If we're NOT fully synced post-restore (e.g. a role swap that happened
+    // mid-handshake before all the peer flags got set), fall back to the old
+    // "let the sync tick drive it" path via bondNeedsCapabilityRequest.
+    if (gEspNow->bondPeerOnline) {
+      uint8_t peerMac[6];
+      bool macOk = (gSettings.bondPeerMac.length() > 0 &&
+                    parseMacAddress(gSettings.bondPeerMac, peerMac));
+      if (macOk && isBondSynced()) {
+        firePostSyncSideEffects(peerMac);
+        BROADCAST_PRINTF("[BOND] Role changed to %s — post-sync side effects fired",
+                         newRole == 1 ? "master" : "worker");
+      } else if (newRole == 1) {
+        gEspNow->bondNeedsCapabilityRequest = true;  // Consumed by sync tick
+        BROADCAST_PRINTF("[BOND] Role changed to master — sync tick will drive handshake");
+      } else {
+        BROADCAST_PRINTF("[BOND] Role changed to worker — awaiting master CAP_REQ");
+      }
     } else {
       BROADCAST_PRINTF("[BOND] Role changed to %s — handshake reset, will re-negotiate when peer online",
                        newRole == 1 ? "master" : "worker");
@@ -12782,6 +13257,7 @@ extern const CommandEntry espNowCommands[] = {
   { "espnowidentity", "Show long-term Ed25519 identity (MAC, pub key, createdAtSec, regenCount).", false, cmd_espnow_identity },
   { "espnowregenidentity", "Regenerate Ed25519 identity. Requires '--confirm-wipe-all-bonds'.", true, cmd_espnow_regenidentity, "Usage: espnowregenidentity --confirm-wipe-all-bonds" },
   { "espnowkeyex", "Initiate KEY_EX handshake with a peer (Phase 3.3 — runs alongside legacy pairing).", true, cmd_espnow_keyex, "Usage: espnowkeyex <mac> [<mesh>]" },
+  { "espnowprobe", "Reachability probe via KEY_EX. Synchronous, bounded timeout. Reports alive+mesh+firmware in one shot (no plaintext on the wire).", true, cmd_espnow_probe, "Usage: espnowprobe <name_or_mac> [<timeoutMs (50-5000, default 500)>] [<mesh>]" },
   { "espnowsessionopen", "Initiate SESSION handshake (Phase 3.4 — requires prior espnowkeyex).", true, cmd_espnow_sessionopen, "Usage: espnowsessionopen <mac> [<mesh>]" },
   { "espnowsessions", "Show in-RAM session state (peer, sessionId, dir, age, counters).", false, cmd_espnow_sessions },
   { "espnowsessionsend", "Send AEAD-wrapped TEXT through active session (Phase 3.5a demo).", true, cmd_espnow_sessionsend, "Usage: espnowsessionsend <mac> <message>" },
@@ -12856,6 +13332,9 @@ extern const CommandEntry espNowCommands[] = {
   { "bondrequestcap", "Request capability summary from bonded peer.", false, cmd_bond_requestcap },
   { "bondshowmanifest", "Show local device manifest (UI apps + CLI commands).", false, cmd_bond_showmanifest },
   { "bondrequestmanifest", "Request full manifest from bonded peer.", false, cmd_bond_requestmanifest },
+  { "bondrequestsettings", "Request settings file from bonded peer.", false, cmd_bond_requestsettings },
+  { "bondrequestschema", "Request settings schema from bonded peer.", false, cmd_bond_requestschema },
+  { "bondresync", "Force re-sync of bond state (cap+manifest+settings+schema). Use when UI is stuck on 'Establishing Bond' or peer state looks stale.", false, cmd_bond_resync, "Usage: bondresync [--cap|--manifest|--settings|--schema|--all]" },
   { "bondshowremotemanifest", "Show cached remote manifest(s): 'bondshowremotemanifest [fwHash]'.", false, cmd_bond_showremotemanifest },
   { "bondstream", "Stream sensor data to bonded master (worker only): 'bondstream <sensor> <on|off>'.", false, cmd_bond_stream, "Usage: bondstream <sensor> <on|off>\n       bondstream (show status)" },
   { "bondtestsensor", "Test v3 sensor data transmission: 'bondtestsensor [sensor_type]'.", false, cmd_bond_testsensor, "Usage: bondtestsensor [thermal|tof|imu|gps|gamepad|fmradio]" },

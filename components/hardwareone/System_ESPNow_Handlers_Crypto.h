@@ -48,6 +48,11 @@ bool espnowKeyExInitiate(const uint8_t peerMac[6], const char* meshLabel);
 // up to a bounded number of times (kKeyExMaxRetries) then gives up + WARNs.
 void keyExRetrySweep(uint32_t nowMs);
 
+// True iff a KEY_EX is currently in-flight for `peerMac` (HELLO sent but no
+// REPLY/CONFIRM has resolved it yet). Used by espnowprobe to detect when the
+// handshake has resolved (succeed → identity present; fail → identity absent).
+bool keyExIsInFlight(const uint8_t peerMac[6]);
+
 // ---- Phase 3.4 — SESSION handshake -----------------------------------------
 
 // Receive handlers for SESSION_OPEN / SESSION_CONFIRM. Both verify the
