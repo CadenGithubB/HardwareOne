@@ -742,17 +742,7 @@ void tofTask(void* parameter) {
           DEBUG_TOF_POLLINGF("ToF readObjects: %s", ok ? "ok" : "fail");
         }
         
-        // Stream data to ESP-NOW master if enabled (worker devices only)
-#if ENABLE_ESPNOW
-        if (ok && shouldStreamSensorToRemote()) {
-          // Build ToF JSON from cache
-          char tofJson[1024];
-          int jsonLen = tofBuildDataJSON(tofJson, sizeof(tofJson));
-          if (jsonLen > 0) {
-            sendSensorDataUpdate(REMOTE_SENSOR_TOF, tofJson, jsonLen);
-          }
-        }
-#endif
+        // ESP-NOW broadcaster reads tofBuildDataJSON() on demand from gTofCache.
       }
       vTaskDelay(pdMS_TO_TICKS(10));
     }

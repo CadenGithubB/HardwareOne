@@ -1425,17 +1425,7 @@ void thermalTask(void* parameter) {
           DEBUG_THERMAL_LIFECYCLEF("Thermal first frame captured");
         }
         
-        // Stream data to ESP-NOW master if enabled (worker devices only)
-#if ENABLE_ESPNOW
-        if (ok && shouldStreamSensorToRemote()) {
-          // Use integer-optimized thermal data for remote streaming
-          char thermalJson[4096];  // Large buffer for thermal data
-          int jsonLen = buildThermalDataJSONInteger(thermalJson, sizeof(thermalJson));
-          if (jsonLen > 0) {
-            sendSensorDataUpdate(REMOTE_SENSOR_THERMAL, thermalJson, jsonLen);
-          }
-        }
-#endif
+        // ESP-NOW broadcaster reads buildThermalDataJSONInteger() on demand from gThermalCache.
       }
       vTaskDelay(pdMS_TO_TICKS(10));
     }

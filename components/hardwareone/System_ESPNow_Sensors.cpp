@@ -31,6 +31,12 @@
 #if ENABLE_FM_RADIO
   #include "i2csensor_rda5807.h"
 #endif
+#if ENABLE_RTC_SENSOR
+#include "i2csensor_ds3231.h"
+#endif
+#if ENABLE_PRESENCE_SENSOR
+#include "i2csensor_sths34pf80.h"
+#endif
 #if ENABLE_CAMERA_SENSOR
 #include "System_Camera_DVP.h"
 #endif
@@ -55,37 +61,98 @@ static bool gSensorBroadcastEnabled = false;
 // Sensor streaming state (worker devices only)
 static bool gSensorStreamingEnabled[REMOTE_SENSOR_MAX] = {false};
 
-// Local sensor data cache (sensors write here, broadcaster reads)
-struct LocalSensorCache {
-  char jsonData[256];  // Cached JSON string
-  uint16_t jsonLength;
-  bool dirty;          // True if data changed since last broadcast
-  bool forceSend;      // True to force immediate send (event-driven)
-  unsigned long lastUpdate;  // When cache was last written
-};
-EXT_RAM_BSS_ATTR static LocalSensorCache gLocalSensorCache[REMOTE_SENSOR_MAX];
-
 // Broadcaster task state
 static TaskHandle_t gSensorBroadcasterTask = nullptr;
-static SemaphoreHandle_t gSensorCacheMutex = nullptr;
-static unsigned long gLastBroadcastTime = 0;
+
+// Per-sensor "last transmit" timestamps so each sensor paces independently.
+// Reset to 0 in startSensorDataStreaming() so the first tick after enable
+// always satisfies the interval check (no separate force-send flag needed).
+static unsigned long gLastTxMs[REMOTE_SENSOR_MAX] = {0};
+
+// ==========================
+// Sensor JSON builder dispatch
+// ==========================
+//
+// Each sensor exports a builder of the shape `int build(char*, size_t)` that
+// reads from its own native cache (under the sensor's mutex) and writes JSON
+// into the supplied buffer. The broadcaster calls these on demand — there is
+// no intermediate "wire cache" to keep in sync, which makes the entire class
+// of "first toggle ON shows nothing" bugs structurally impossible.
+//
+// minIntervalMs controls per-sensor pacing. Gamepad wants ~10 Hz so button
+// presses feel responsive; everything else is happy at 1 Hz.
+//
+// bufBytes is the size required for this sensor's largest possible JSON
+// output. The broadcaster allocates ONE shared PSRAM buffer sized to the
+// max across all sensors and reuses it forever — no per-tick allocations.
+
+typedef int (*SensorJSONBuilder)(char* buf, size_t bufSize);
+
+struct SensorBroadcastSpec {
+  SensorJSONBuilder builder;
+  uint16_t minIntervalMs;
+  uint16_t bufBytes;
+};
+
+static const SensorBroadcastSpec gSensorSpecs[REMOTE_SENSOR_MAX] = {
+#if ENABLE_THERMAL_SENSOR
+  [REMOTE_SENSOR_THERMAL]    = { buildThermalDataJSONInteger, 1000, 4096 },
+#else
+  [REMOTE_SENSOR_THERMAL]    = { nullptr, 0, 0 },
+#endif
+#if ENABLE_TOF_SENSOR
+  [REMOTE_SENSOR_TOF]        = { tofBuildDataJSON,            500,  1024 },
+#else
+  [REMOTE_SENSOR_TOF]        = { nullptr, 0, 0 },
+#endif
+#if ENABLE_IMU_SENSOR
+  [REMOTE_SENSOR_IMU]        = { imuBuildDataJSON,            500,  512  },
+#else
+  [REMOTE_SENSOR_IMU]        = { nullptr, 0, 0 },
+#endif
+#if ENABLE_GPS_SENSOR
+  [REMOTE_SENSOR_GPS]        = { gpsBuildDataJSON,            1000, 256  },
+#else
+  [REMOTE_SENSOR_GPS]        = { nullptr, 0, 0 },
+#endif
+#if ENABLE_GAMEPAD_SENSOR
+  [REMOTE_SENSOR_GAMEPAD]    = { gamepadBuildDataJSON,        100,  128  },
+#else
+  [REMOTE_SENSOR_GAMEPAD]    = { nullptr, 0, 0 },
+#endif
+#if ENABLE_FM_RADIO
+  [REMOTE_SENSOR_FMRADIO]    = { fmRadioBuildDataJSON,        1000, 512  },
+#else
+  [REMOTE_SENSOR_FMRADIO]    = { nullptr, 0, 0 },
+#endif
+  [REMOTE_SENSOR_CAMERA]     = { nullptr, 0, 0 },
+  [REMOTE_SENSOR_MICROPHONE] = { nullptr, 0, 0 },
+#if ENABLE_RTC_SENSOR
+  [REMOTE_SENSOR_RTC]        = { rtcBuildDataJSON,            1000, 256  },
+#else
+  [REMOTE_SENSOR_RTC]        = { nullptr, 0, 0 },
+#endif
+#if ENABLE_PRESENCE_SENSOR
+  [REMOTE_SENSOR_PRESENCE]   = { presenceBuildDataJSON,       500,  256  },
+#else
+  [REMOTE_SENSOR_PRESENCE]   = { nullptr, 0, 0 },
+#endif
+  [REMOTE_SENSOR_APDS]       = { nullptr, 0, 0 },
+};
+
+// Shared broadcaster buffer (PSRAM). Allocated once on first broadcaster start,
+// sized to the largest sensor's bufBytes. Reused across all sensors and all ticks.
+static char* gBroadcasterBuf = nullptr;
+static size_t gBroadcasterBufSize = 0;
 
 // ==========================
 // Initialization
 // ==========================
 
 void initRemoteSensorSystem() {
-  // Create the local-sensor cache mutex up front. It used to be created lazily
-  // inside startSensorBroadcaster() (i.e. only once streaming was first enabled),
-  // which left it nullptr from boot. After the warm-cache change in
-  // sendSensorDataUpdate(), the RTC's 30s poll then hit the null mutex every cycle
-  // and logged a spurious "[CACHE_UPDATE] rtc MUTEX_TIMEOUT" while never actually
-  // warming the cache — so the very first stream-enable per boot still found an
-  // empty cache. Creating it here (single-threaded ESP-NOW init) fixes both.
-  if (!gSensorCacheMutex) {
-    gSensorCacheMutex = xSemaphoreCreateMutex();
-  }
-  // Initialize cache
+  // Initialize master-side remote-sensor cache (the cache of OTHER devices' data
+  // we've received). The worker-side wire cache is gone — sensors are read on
+  // demand by the broadcaster, so there's no chalkboard to keep in sync.
   for (int i = 0; i < MAX_REMOTE_DEVICES * MAX_SENSORS_PER_DEVICE; i++) {
     memset(gRemoteSensorCache[i].deviceMac, 0, 6);
     gRemoteSensorCache[i].deviceName[0] = '\0';
@@ -278,13 +345,11 @@ void startSensorDataStreaming(RemoteSensorType sensorType) {
   }
   
   gSensorStreamingEnabled[sensorType] = true;
-  
-  // Force immediate send of this sensor
-  if (gSensorCacheMutex && xSemaphoreTake(gSensorCacheMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-    gLocalSensorCache[sensorType].forceSend = true;
-    xSemaphoreGive(gSensorCacheMutex);
-  }
-  
+
+  // Reset lastTxMs so the broadcaster's next tick (within ~50ms) fires immediately
+  // for this sensor. No separate force-send flag needed.
+  gLastTxMs[sensorType] = 0;
+
   DEBUG_ESPNOW_STREAMF("[SENSOR_STREAM] Streaming enabled: %s (flag=%d)",
          sensorTypeToString(sensorType), gSensorStreamingEnabled[sensorType]);
   
@@ -358,139 +423,6 @@ bool isSensorBroadcastEnabled() {
   return gSensorBroadcastEnabled;
 }
 
-void espnowSensorStatusPeriodicTick() {
-  if (!gSensorBroadcastEnabled) return;
-
-  if (!meshEnabled()) return;
-  if (gSettings.meshRole == MESH_ROLE_MASTER) return;
-
-  unsigned long now = millis();
-
-#if ENABLE_CAMERA_SENSOR
-  static unsigned long lastCameraMs = 0;
-  if ((now - lastCameraMs) >= 1000UL) {
-    lastCameraMs = now;
-
-    PSRAM_JSON_DOC(doc);
-    doc["enabled"] = gCameraEnabled;
-    doc["connected"] = cameraConnected;
-    doc["streaming"] = cameraStreaming;
-    doc["model"] = cameraModel;
-    doc["width"] = cameraWidth;
-    doc["height"] = cameraHeight;
-    doc["psram"] = psramFound();
-
-    char camBuf[256];
-    size_t camLen = serializeJson(doc, camBuf, sizeof(camBuf));
-    sendSensorDataUpdate(REMOTE_SENSOR_CAMERA, camBuf, camLen);
-  }
-#endif
-
-#if ENABLE_MICROPHONE_SENSOR
-  static unsigned long lastMicMs = 0;
-  if ((now - lastMicMs) >= 1000UL) {
-    lastMicMs = now;
-
-    PSRAM_JSON_DOC(doc);
-    doc["enabled"] = gMicEnabled;
-    doc["connected"] = micConnected;
-    doc["recording"] = micRecording;
-    doc["sampleRate"] = micSampleRate;
-    doc["bitDepth"] = micBitDepth;
-    doc["channels"] = micChannels;
-    doc["level"] = (gMicEnabled && !micRecording) ? getAudioLevel() : 0;
-
-    char micBuf[256];
-    size_t micLen = serializeJson(doc, micBuf, sizeof(micBuf));
-    sendSensorDataUpdate(REMOTE_SENSOR_MICROPHONE, micBuf, micLen);
-  }
-#endif
-}
-
-// Update local sensor cache (called by sensor polling loops)
-// This is a fast, non-blocking write - no ESP-NOW transmission here
-void sendSensorDataUpdate(RemoteSensorType sensorType, const char* jsonData, size_t jsonLen) {
-  if (sensorType >= REMOTE_SENSOR_MAX) {
-    DEBUG_ESPNOW_METADATAF("[CACHE_UPDATE] REJECT: Invalid sensor type %d", sensorType);
-    return;
-  }
-  if (!jsonData) return;
-
-  // Keep the local cache WARM even while streaming is OFF. Rationale:
-  // startSensorDataStreaming() sets forceSend=true on enable, but the broadcaster
-  // only transmits when jsonLen > 0 (see sensorBroadcasterTask PATH A). If the cache
-  // was never written (because we used to early-return here when streaming was off),
-  // the very first enable finds jsonLength=0, the forced send is silently dropped, and
-  // the peer sees nothing until this sensor's NEXT poll fires — up to 30s away for the
-  // RTC. That is exactly the "doesn't work the first time, works the second time" bug:
-  // by the 2nd enable the periodic poll has finally populated the cache.
-  // Fix: always keep jsonData fresh so the force-send has real data. Throttle the
-  // warm-write while idle so high-rate sensors don't pay a per-poll memcpy for nothing.
-  const bool streaming = gSensorStreamingEnabled[sensorType];
-  if (!streaming) {
-    static unsigned long sLastWarmMs[REMOTE_SENSOR_MAX] = {0};
-    unsigned long nowMs = millis();
-    if (nowMs - sLastWarmMs[sensorType] < 2000) return;  // at most once / 2s / sensor while idle
-    sLastWarmMs[sensorType] = nowMs;
-  }
-
-  // Cache subsystem not up yet (ESP-NOW not initialized) — nothing to warm into.
-  // Skip silently: a null mutex is "not ready", not a contention timeout, so it
-  // must NOT be logged as MUTEX_TIMEOUT (that produced a spurious line every RTC
-  // poll on a worker that never enabled streaming).
-  if (!gSensorCacheMutex) return;
-
-  // Quick cache update with mutex protection
-  if (xSemaphoreTake(gSensorCacheMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-    LocalSensorCache* cache = &gLocalSensorCache[sensorType];
-    bool wasDirty = cache->dirty;
-    unsigned long timeSinceLastUpdate = millis() - cache->lastUpdate;
-
-    size_t len = jsonLen ? jsonLen : strlen(jsonData);
-    if (len >= sizeof(cache->jsonData)) len = sizeof(cache->jsonData) - 1;
-    memcpy(cache->jsonData, jsonData, len);
-    cache->jsonData[len] = '\0';
-    cache->jsonLength = len;
-    // Only mark dirty (which schedules a periodic broadcast) when actually streaming;
-    // idle warm-writes just keep jsonData ready for the next enable's force-send.
-    if (streaming) cache->dirty = true;
-    cache->lastUpdate = millis();
-    
-    DEBUG_ESPNOW_METADATAF("[CACHE_UPDATE] %s len=%u wasDirty=%d age=%lums json=%.60s",
-                   sensorTypeToString(sensorType), (unsigned)len, wasDirty, 
-                   timeSinceLastUpdate, cache->jsonData);
-    
-    xSemaphoreGive(gSensorCacheMutex);
-  } else {
-    DEBUG_ESPNOW_METADATAF("[CACHE_UPDATE] %s MUTEX_TIMEOUT", sensorTypeToString(sensorType));
-  }
-}
-
-// Force immediate broadcast of a sensor (event-driven API)
-void forceSensorBroadcast(RemoteSensorType sensorType) {
-  if (sensorType >= REMOTE_SENSOR_MAX) {
-    DEBUG_ESPNOW_STREAMF("[FORCE_SEND] REJECT: Invalid sensor type %d", sensorType);
-    return;
-  }
-  if (!gSensorStreamingEnabled[sensorType]) {
-    DEBUG_ESPNOW_STREAMF("[FORCE_SEND] REJECT: %s streaming not enabled", sensorTypeToString(sensorType));
-    return;
-  }
-  
-  if (gSensorCacheMutex && xSemaphoreTake(gSensorCacheMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-    bool wasDirty = gLocalSensorCache[sensorType].dirty;
-    unsigned long cacheAge = millis() - gLocalSensorCache[sensorType].lastUpdate;
-    gLocalSensorCache[sensorType].forceSend = true;
-    
-    DEBUG_ESPNOW_STREAMF("[FORCE_SEND] %s SET (wasDirty=%d age=%lums)", 
-                   sensorTypeToString(sensorType), wasDirty, cacheAge);
-    
-    xSemaphoreGive(gSensorCacheMutex);
-  } else {
-    DEBUG_ESPNOW_STREAMF("[FORCE_SEND] %s MUTEX_TIMEOUT", sensorTypeToString(sensorType));
-  }
-}
-
 // Internal: Actually transmit sensor data via ESP-NOW (called by broadcaster task)
 static void transmitSensorData(RemoteSensorType sensorType, const char* jsonData, uint16_t jsonLen) {
   DEBUG_ESPNOW_STREAMF("[SENSOR_TX] type=%s len=%u", sensorTypeToString(sensorType), jsonLen);
@@ -556,104 +488,44 @@ static void transmitSensorData(RemoteSensorType sensorType, const char* jsonData
   }
 }
 
-// Broadcaster task - runs periodically and sends dirty/forced sensor data
+// Broadcaster task — wakes every 50ms; for each streaming-enabled sensor whose
+// per-sensor interval has elapsed, calls its builder on demand and transmits.
+// No intermediate "wire cache": the builder reads the sensor's own native cache
+// under that sensor's mutex, so there is no propagation step that could be
+// skipped or gated incorrectly.
 static void sensorBroadcasterTask(void* param) {
   (void)param;
-  
-  unsigned long loopCount = 0;
-  
+
   DEBUGF(DEBUG_ESPNOW_CORE, "[SENSOR_BCAST_TASK] Started on core %d", xPortGetCoreID());
-  
+
   for (;;) {
-    unsigned long now = millis();
-    unsigned long interval = gSettings.sensorBroadcastIntervalMs;
-    if (interval < 100) interval = 100;
-    if (interval > 10000) interval = 10000;
-    
-    unsigned long timeSinceLastBroadcast = now - gLastBroadcastTime;
-    bool shouldBroadcast = timeSinceLastBroadcast >= interval;
-    
-    // Log interval check every 20 loops (~1 second)
-    if ((loopCount % 20) == 0) {
-      DEBUG_ESPNOW_STREAMF("[BCAST_TICK] loop=%lu interval=%lums elapsed=%lums shouldBcast=%d",
-                     loopCount, interval, timeSinceLastBroadcast, shouldBroadcast);
-    }
-    
-    // Check each sensor type
+    const unsigned long now = millis();
+
     for (int i = 0; i < REMOTE_SENSOR_MAX; i++) {
       if (!gSensorStreamingEnabled[i]) continue;
-      
-      bool needsSend = false;
-      char jsonCopy[256];
-      uint16_t jsonLen = 0;
-      bool wasDirty = false;
-      bool wasForced = false;
-      unsigned long cacheAge = 0;
-      
-      // Check if this sensor needs to be sent
-      if (gSensorCacheMutex && xSemaphoreTake(gSensorCacheMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-        LocalSensorCache* cache = &gLocalSensorCache[i];
-        
-        wasDirty = cache->dirty;
-        wasForced = cache->forceSend;
-        cacheAge = now - cache->lastUpdate;
-        
-        // Decision logic with detailed path tracking
-        if (cache->forceSend) {
-          // PATH A: Force-send (event-driven, immediate)
-          DEBUG_ESPNOW_STREAMF("[BCAST_PATH_A] %s FORCE_SEND (age=%lums len=%u)",
-                         sensorTypeToString((RemoteSensorType)i), cacheAge, cache->jsonLength);
-          memcpy(jsonCopy, cache->jsonData, cache->jsonLength);
-          jsonCopy[cache->jsonLength] = '\0';
-          jsonLen = cache->jsonLength;
-          cache->dirty = false;
-          cache->forceSend = false;
-          needsSend = true;
-        } else if (cache->dirty && shouldBroadcast) {
-          // PATH B: Dirty cache + interval elapsed (periodic)
-          DEBUG_ESPNOW_STREAMF("[BCAST_PATH_B] %s DIRTY+INTERVAL (age=%lums len=%u elapsed=%lums)",
-                         sensorTypeToString((RemoteSensorType)i), cacheAge, cache->jsonLength, timeSinceLastBroadcast);
-          memcpy(jsonCopy, cache->jsonData, cache->jsonLength);
-          jsonCopy[cache->jsonLength] = '\0';
-          jsonLen = cache->jsonLength;
-          cache->dirty = false;
-          cache->forceSend = false;
-          needsSend = true;
-        } else if (cache->dirty && !shouldBroadcast) {
-          // PATH C: Dirty but waiting for interval (rate-limited)
-          if ((loopCount % 20) == 0) {  // Log every ~1 second
-            DEBUG_ESPNOW_STREAMF("[BCAST_PATH_C] %s DIRTY_WAITING (age=%lums wait=%lums)",
-                           sensorTypeToString((RemoteSensorType)i), cacheAge, interval - timeSinceLastBroadcast);
-          }
-        } else if (!cache->dirty && shouldBroadcast) {
-          // PATH D: Interval elapsed but cache is clean (no new data)
-          if ((loopCount % 20) == 0) {  // Log every ~1 second
-            DEBUG_ESPNOW_STREAMF("[BCAST_PATH_D] %s CLEAN_SKIP (age=%lums)",
-                           sensorTypeToString((RemoteSensorType)i), cacheAge);
-          }
-        } else {
-          // PATH E: Clean cache, waiting for interval (idle)
-          // Don't log this - too spammy
-        }
-        
-        xSemaphoreGive(gSensorCacheMutex);
+      const SensorBroadcastSpec& spec = gSensorSpecs[i];
+      if (!spec.builder) continue;  // sensor not compiled in
+
+      // Honor BOTH the per-sensor minimum and the user-tunable global setting,
+      // taking whichever is slower so the user can throttle but never speed up
+      // past a sensor's native cadence.
+      unsigned long interval = spec.minIntervalMs;
+      if (gSettings.sensorBroadcastIntervalMs > interval) {
+        interval = gSettings.sensorBroadcastIntervalMs;
       }
-      
-      // Transmit outside of mutex to avoid blocking sensor updates
-      if (needsSend && jsonLen > 0) {
-        DEBUG_ESPNOW_STREAMF("[BCAST_TX] %s len=%u forced=%d dirty=%d",
-                       sensorTypeToString((RemoteSensorType)i), jsonLen, wasForced, wasDirty);
-        transmitSensorData((RemoteSensorType)i, jsonCopy, jsonLen);
-      }
+      if (now - gLastTxMs[i] < interval) continue;
+
+      // Buffer is shared across all sensors and was sized at task start to fit
+      // the largest spec.bufBytes. Builder returns bytes written or 0 on failure.
+      if (!gBroadcasterBuf || gBroadcasterBufSize < spec.bufBytes) continue;
+      int len = spec.builder(gBroadcasterBuf, gBroadcasterBufSize);
+      if (len <= 0) continue;
+
+      DEBUG_ESPNOW_STREAMF("[BCAST_TX] %s len=%d", sensorTypeToString((RemoteSensorType)i), len);
+      transmitSensorData((RemoteSensorType)i, gBroadcasterBuf, (uint16_t)len);
+      gLastTxMs[i] = now;
     }
-    
-    if (shouldBroadcast) {
-      DEBUG_ESPNOW_STREAMF("[BCAST_INTERVAL_RESET] Next broadcast in %lums", interval);
-      gLastBroadcastTime = now;
-    }
-    
-    loopCount++;
-    // Sleep for 50ms (responsive to force-send events)
+
     vTaskDelay(pdMS_TO_TICKS(50));
   }
 }
@@ -661,19 +533,23 @@ static void sensorBroadcasterTask(void* param) {
 // Start the broadcaster task
 static bool startSensorBroadcaster() {
   if (gSensorBroadcasterTask) return true;
-  
-  // Create mutex if needed
-  if (!gSensorCacheMutex) {
-    gSensorCacheMutex = xSemaphoreCreateMutex();
-    if (!gSensorCacheMutex) {
-      DEBUGF(DEBUG_ESPNOW_CORE, "[SENSOR_BROADCASTER] Failed to create mutex");
+
+  // Allocate the shared broadcaster buffer in PSRAM, sized to the largest
+  // sensor's bufBytes. One allocation, reused forever — no per-tick churn.
+  if (!gBroadcasterBuf) {
+    size_t maxBuf = 0;
+    for (int i = 0; i < REMOTE_SENSOR_MAX; i++) {
+      if (gSensorSpecs[i].bufBytes > maxBuf) maxBuf = gSensorSpecs[i].bufBytes;
+    }
+    if (maxBuf == 0) maxBuf = 256;  // defensive; should not happen if any sensor is enabled
+    gBroadcasterBuf = (char*)ps_malloc(maxBuf);
+    if (!gBroadcasterBuf) {
+      DEBUGF(DEBUG_ESPNOW_CORE, "[SENSOR_BROADCASTER] Failed to alloc %u-byte PSRAM buffer", (unsigned)maxBuf);
       return false;
     }
+    gBroadcasterBufSize = maxBuf;
   }
-  
-  // Initialize cache
-  memset(gLocalSensorCache, 0, sizeof(gLocalSensorCache));
-  
+
   BaseType_t ret = xTaskCreatePinnedToCore(
     sensorBroadcasterTask,
     "sensor_bcast",
@@ -683,7 +559,7 @@ static bool startSensorBroadcaster() {
     &gSensorBroadcasterTask,
     1      // Core 1 (opposite of ESP-NOW callback which is core 0)
   );
-  
+
   if (ret == pdPASS) {
     DEBUGF(DEBUG_ESPNOW_CORE, "[SENSOR_BROADCASTER] Task started");
     return true;

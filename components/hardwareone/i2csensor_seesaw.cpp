@@ -421,6 +421,20 @@ const size_t gamepadCommandsCount = sizeof(gamepadCommands) / sizeof(gamepadComm
 //   4. Release mutex and delete task
 // ============================================================================
 
+// Build gamepad JSON directly into buffer from cache. Safe to call from any task —
+// only reads gGamepadCache under its own mutex. Returns bytes written or 0.
+int gamepadBuildDataJSON(char* buf, size_t bufSize) {
+  if (!buf || bufSize == 0) return 0;
+
+  SensorCacheGuard g(gGamepadCache.mutex, pdMS_TO_TICKS(50), "gamepad.buildJSON");
+  if (!g.held) return 0;
+
+  return snprintf(buf, bufSize,
+                  "{\"val\":1,\"x\":%d,\"y\":%d,\"buttons\":%lu}",
+                  gGamepadCache.gamepadX, gGamepadCache.gamepadY,
+                  (unsigned long)gGamepadCache.gamepadButtons);
+}
+
 void gamepadTask(void* parameter) {
   INFO_GAMEPAD_LIFECYCLEF("Task started (handle=%p, stack=%u words)", 
                 (void*)xTaskGetCurrentTaskHandle(), 
@@ -520,11 +534,8 @@ void gamepadTask(void* parameter) {
           // Note: I2CDevice::recordSuccess() called automatically by transaction
           // which resets consecutiveErrors - no local counter needed
           
-          // Track previous state for change detection
+          // Track previous buttons for debounce / edge detection
           static uint32_t lastButtons = 0xFFFFFFFF;
-          static int lastFiltX = -1;
-          static int lastFiltY = -1;
-          static unsigned long lastESPNowSend = 0;
           
           // Button debounce: require 2 consecutive identical reads before accepting a change.
           // This eliminates ghost presses from single I2C bit flips (~58ms added latency).
@@ -615,52 +626,10 @@ void gamepadTask(void* parameter) {
             gGamepadCache.gamepadDataValid = true;
             if (changed) gGamepadCache.gamepadSeq++;
             }
-          }  // gamepad guard releases here, before the ESP-NOW streaming below
+          }  // gamepad guard releases here
 
-          // Stream data to ESP-NOW master if enabled (worker devices only)
-#if ENABLE_ESPNOW
-          if (meshEnabled() && gSettings.meshRole != MESH_ROLE_MASTER) {
-            // Detect if ANY input changed (buttons or joystick)
-            bool buttonsChanged = (buttons != lastButtons);
-            bool joystickMoved = (abs(filtX - lastFiltX) > 10 || abs(filtY - lastFiltY) > 10);
-            bool inputChanged = buttonsChanged || joystickMoved;
-            
-            // Rate limit: minimum 100ms between sends to prevent network spam
-            const unsigned long minSendInterval = 100;
-            unsigned long timeSinceLastSend = nowMs - lastESPNowSend;
-            bool canSend = (timeSinceLastSend >= minSendInterval);
-            
-            // Send if: (input changed AND rate limit allows) OR (been >1s since last send)
-            // Only send if sensor broadcasting is enabled
-            extern bool isSensorBroadcastEnabled();
-            if (isSensorBroadcastEnabled() && ((inputChanged && canSend) || (timeSinceLastSend >= 1000))) {
-              char gamepadJson[128];
-              int jsonLen = snprintf(gamepadJson, sizeof(gamepadJson),
-                                     "{\"val\":1,\"x\":%d,\"y\":%d,\"buttons\":%lu}",
-                                     filtX, filtY, (unsigned long)buttons);
-              if (jsonLen > 0 && jsonLen < 128) {
-                size_t heapBefore = ESP.getFreeHeap();
-                size_t largestBefore = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
-                {
-                  // Send gamepad data via bond or mesh (sendSensorDataUpdate handles routing)
-                  extern void sendSensorDataUpdate(RemoteSensorType sensorType, const char* jsonData, size_t jsonLen);
-                  sendSensorDataUpdate(REMOTE_SENSOR_GAMEPAD, gamepadJson, jsonLen);
-                }
-                if (isDebugFlagSet(DEBUG_MEMORY)) {
-                  size_t heapAfter = ESP.getFreeHeap();
-                  size_t largestAfter = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
-                  long heapDelta = (long)heapBefore - (long)heapAfter;
-                  long largestDelta = (long)largestBefore - (long)largestAfter;
-                  DEBUG_MEMORYF("[GAMEPAD_MEM] espnow_send heap_delta=%ld largest_delta=%ld", heapDelta, largestDelta);
-                }
-                
-                lastESPNowSend = nowMs;
-                lastFiltX = filtX;
-                lastFiltY = filtY;
-              }
-            }
-          }
-#endif
+          // ESP-NOW broadcaster reads gamepadBuildDataJSON() on demand from gGamepadCache
+          // (paced per-sensor in gSensorSpecs — 100ms for snappy button-press response).
         } else if (!readSuccess) {
           // Actual I2C transaction failure
           // Note: I2CDevice::recordError() called automatically by transaction

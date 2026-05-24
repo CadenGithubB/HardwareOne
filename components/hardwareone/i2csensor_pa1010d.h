@@ -42,6 +42,10 @@ extern TaskHandle_t gGpsTaskHandle;
 
 extern GPSCache gGpsCache;
 
+// Build GPS JSON snapshot from gGpsCache. Safe to call from any task —
+// acquires gGpsCache.mutex. Returns bytes written or 0 on failure.
+int gpsBuildDataJSON(char* buf, size_t bufSize);
+
 // GPS initialization (called by sensor queue processor)
 bool gpsStartInternal();
 

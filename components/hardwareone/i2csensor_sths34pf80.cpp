@@ -516,15 +516,7 @@ void presenceTask(void* parameter) {
         });
         
         if (ok) {
-#if ENABLE_ESPNOW
-          {
-            char presJson[256];
-            int jsonLen = presenceBuildDataJSON(presJson, sizeof(presJson));
-            if (jsonLen > 0) {
-              sendSensorDataUpdate(REMOTE_SENSOR_PRESENCE, presJson, jsonLen);
-            }
-          }
-#endif
+          // ESP-NOW broadcaster reads presenceBuildDataJSON() on demand from gPresenceCache.
         } else {
           if (i2cShouldAutoDisable(I2C_ADDR_PRESENCE)) {
             uint8_t errors = i2cGetConsecutiveErrors(I2C_ADDR_PRESENCE);
