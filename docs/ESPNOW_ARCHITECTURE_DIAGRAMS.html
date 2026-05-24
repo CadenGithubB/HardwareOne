@@ -1,0 +1,887 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ESP-NOW Architecture — Diagrams</title>
+<style>
+  :root { --bg:#0d1117; --panel:#161b22; --border:#30363d; --fg:#e6edf3; --muted:#8b949e; --accent:#58a6ff; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  header {
+    padding: 28px 32px 18px; border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; background: var(--bg); z-index: 10;
+  }
+  header h1 { margin: 0 0 4px; font-size: 22px; }
+  header p { margin: 0; color: var(--muted); font-size: 13px; }
+  nav { padding: 14px 32px; border-bottom: 1px solid var(--border); }
+  nav a {
+    color: var(--accent); text-decoration: none; margin-right: 18px; font-size: 13px; white-space: nowrap;
+  }
+  nav a:hover { text-decoration: underline; }
+  main { padding: 8px 32px 80px; max-width: 1200px; margin: 0 auto; }
+  section { margin: 36px 0; }
+  section h2 { font-size: 18px; border-bottom: 1px solid var(--border); padding-bottom: 8px; }
+  section p.desc { color: var(--muted); font-size: 13px; margin-top: 6px; }
+  .diagram {
+    position: relative;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 18px; margin-top: 14px;
+    overflow: hidden;            /* zoom transforms are clipped to the container */
+    max-height: 80vh;            /* don't let a wide diagram push everything else away */
+  }
+  .diagram.fullscreen {
+    position: fixed; inset: 0;
+    width: 100vw; height: 100vh;
+    max-height: none; max-width: none;
+    margin: 0; border-radius: 0;
+    z-index: 9999;
+    padding: 8px;
+  }
+  body.has-fullscreen-diagram { overflow: hidden; }
+  .mermaid {
+    display: flex; justify-content: center;
+    user-select: none;           /* dragging shouldn't text-select the labels */
+  }
+  .mermaid svg {
+    transform-origin: 0 0;       /* zoom/translate from the top-left so math is sane */
+    cursor: grab;
+    transition: none;
+  }
+  .mermaid svg.dragging { cursor: grabbing; }
+  .zoom-controls {
+    position: absolute; top: 10px; right: 10px; z-index: 5;
+    display: flex; gap: 4px;
+    background: rgba(13,17,23,0.85);
+    border: 1px solid var(--border);
+    border-radius: 6px; padding: 3px;
+    backdrop-filter: blur(6px);
+  }
+  .zoom-controls button {
+    background: #21262d; color: var(--fg);
+    border: 1px solid var(--border); border-radius: 4px;
+    width: 28px; height: 28px;
+    font-size: 14px; line-height: 1; cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  .zoom-controls button:hover { background: #2d333b; }
+  .zoom-controls .zoom-label {
+    color: var(--muted); font-size: 11px; align-self: center;
+    padding: 0 6px; min-width: 38px; text-align: center;
+  }
+  .zoom-hint {
+    color: var(--muted); font-size: 11px;
+    position: absolute; bottom: 8px; left: 12px; pointer-events: none;
+    opacity: 0.7;
+  }
+  footer { padding: 24px 32px; color: var(--muted); font-size: 12px; border-top: 1px solid var(--border); }
+  code { background: #21262d; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+  .err { color: #ff7b72; font-family: monospace; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<header>
+  <h1>ESP-NOW System Architecture — Diagrams</h1>
+  <p>Rendered companion to <code>ESPNOW_ARCHITECTURE.md</code> and <code>ESPNOW_SEAM_UNIFICATION.md</code> · as-built 2026-05-21 · open this file in any browser</p>
+</header>
+<nav>
+  <a href="#topology">1 · Task topology</a>
+  <a href="#rx">2 · Receive pipeline</a>
+  <a href="#session">3 · Session lifecycle</a>
+  <a href="#send">4 · Send-path call graph</a>
+  <a href="#bond">5 · Bond FSM (reverse-engineered)</a>
+  <a href="#seq">6 · Seam-unification sequencing</a>
+  <a href="#orgchart">7 · Code organization (org chart)</a>
+</nav>
+<main>
+
+<section id="topology">
+  <h2>1 · Task / thread topology</h2>
+  <p class="desc">A lightweight Wi-Fi-context callback copies frames into a ring. <code>espnow_task</code> does almost everything (drain + dispatch + sweeps + heartbeats + bond orchestration) in a 10&nbsp;ms polled super-loop. Only a few heavy handlers are deferred to the <code>cmd_exec_task</code> serial worker.</p>
+  <div class="diagram"><pre class="mermaid">
+flowchart TD
+    subgraph WIFI["Wi-Fi stack context"]
+        RADIO["ESP-NOW radio RX"] --> CB["onEspNowDataReceived()<br/>copy frame to ring, return<br/>(lightweight, no parsing)"]
+    end
+
+    CB -->|"write"| RING[("gEspNowRxRing<br/>fixed-size ring")]
+
+    subgraph ESPNOW_TASK["espnow_task — prio 5, core 0, ~22 KB, 10 ms loop"]
+        LOOP["processMeshHeartbeats()<br/>655-line super-loop"]
+        LOOP -->|"step 1: drain"| DRAIN["onEspNowRawRecv()<br/>then v4_try_handle_incoming()"]
+        DRAIN --> DISPATCH["kV4HandlerTable dispatch"]
+        DISPATCH -->|"most opcodes"| INLINE["handler runs INLINE<br/>on espnow_task"]
+        LOOP --> SWEEPS["~6 periodic sweeps<br/>(pending-frame, send-status,<br/>file-slot, rekey, key-ex)"]
+        LOOP --> HB["heartbeat broadcasts +<br/>backup-master failover"]
+        LOOP --> BOND["bond orchestration<br/>(steps 9b-9k, flag-driven)"]
+    end
+
+    RING -->|"read"| DRAIN
+
+    DISPATCH -.->|"SESSION_OPEN / CONFIRM / REKEY,<br/>USER_SYNC"| DEFERQ[("gCmdExecQ<br/>queue")]
+    INLINE -.->|"submitDeferredToCmdExec()"| DEFERQ
+
+    subgraph CMD_EXEC["cmd_exec_task — ~24 KB serial worker"]
+        CE["xQueueReceive loop"]
+        CE -->|"r-&gt;deferredFn"| DEF["deferred crypto / user_sync<br/>(deep stack, owns its arg)"]
+        CE -->|"else"| CLI["CLI command execution<br/>(auth ctx, capture buffer)"]
+    end
+
+    DEFERQ --> CE
+
+    subgraph SENSOR["sensor_queue_task — ~11 KB"]
+        SQ["sensor init / I2C bring-up"]
+    end
+  </pre></div>
+</section>
+
+<section id="rx">
+  <h2>2 · Receive pipeline (v4_try_handle_incoming)</h2>
+  <p class="desc">Every inbound frame passes these stages in order: header sanity, CRC (skipped for encrypted frames), mesh-fingerprint scope, BROADCAST_AUTH HMAC, SESSION_FRAME AEAD unwrap, reassembly, dedup, then table dispatch with REQ_* gating.</p>
+  <div class="diagram"><pre class="mermaid">
+flowchart TD
+    A["frame from RX ring"] --> B{"magic + ver +<br/>headerLen ok?"}
+    B -->|no| DROP1["drop"]
+    B -->|yes| C{"SESSION_FRAME?"}
+    C -->|no| D{"CRC16 matches?"}
+    C -->|yes| E["skip CRC<br/>(AEAD tag is integrity)"]
+    D -->|no| DROP2["drop"]
+    D -->|yes| F
+    E --> F{"meshFingerprint known?<br/>(0 = no scope, allowed)"}
+    F -->|unknown mesh| DROP3["silent drop"]
+    F -->|ok| G{"BROADCAST_AUTH flag?"}
+    G -->|yes| H["verify HMAC-SHA256 vs<br/>mesh group key, strip 32B tag<br/>then wasAuthenticated=true"]
+    G -->|no| I
+    H --> I{"SESSION_FRAME flag?"}
+    I -->|yes| J["find ACTIVE session by sessionId+src<br/>sessionUnwrapFrame() AEAD-decrypt<br/>+ replay-window check<br/>then plaintext, wasSessionEncrypted=true<br/>+ auto-ACK if requested"]
+    I -->|no| K
+    J --> K{"fragCount &gt; 1?"}
+    K -->|yes| L["reassemble into PSRAM slot<br/>(return until complete)"]
+    K -->|no| M
+    L --> M["dedup check"]
+    M --> N["v4_dispatch_table_try()"]
+    N --> O{"opcode in kV4HandlerTable?"}
+    O -->|no| DROP4["log 'Unknown type', cleanup reasm"]
+    O -->|yes| P{"REQ_PAIRED / REQ_BOND_MODE /<br/>REQ_AUTHENTICATED satisfied?"}
+    P -->|no| DROP5["drop (silent or warn)"]
+    P -->|yes| Q["build V4RxCtx, call handler"]
+  </pre></div>
+</section>
+
+<section id="session">
+  <h2>3 · Session lifecycle</h2>
+  <p class="desc">KEY_EX (opcodes 10-12) is the prerequisite that stores the peer's Ed25519 long-term key. Sessions then negotiate forward-secret AEAD keys via signed ephemeral X25519. REKEY auto-fires on volume or age.</p>
+  <div class="diagram"><pre class="mermaid">
+stateDiagram-v2
+    [*] --> NONE
+    NONE --> ESTABLISHING: SESSION_OPEN sent/received<br/>(requires peer KEY_EX done)
+    ESTABLISHING --> ACTIVE: SESSION_CONFIRM<br/>(Ed25519 verify + X25519 ECDH + KDF)
+    ACTIVE --> REKEYING: REKEY (txSeq>=10k OR age>=1h)
+    REKEYING --> ACTIVE: fresh keys staged,<br/>old accepted briefly
+    ACTIVE --> CLOSED: explicit teardown
+    CLOSED --> [*]
+  </pre></div>
+</section>
+
+<section id="send">
+  <h2>4 · Send-path call graph</h2>
+  <p class="desc">Top-to-bottom flow: an outbound send request (sensor poll · user CMD · timer tick · sync event · bond heartbeat · …) enters at ①, gets dispatched at ②, framed at ③, AEAD-sealed at ④, and finally written to the radio at ⑤. <strong>Late 2026-05 update:</strong> the encrypt-or-wait foundation is complete. <code>v4_send_payload_smart</code> is now strictly encrypt-or-fail (no plaintext fallback). The strict-encrypt typed wrappers (text / user_sync / time_sync) now route through smart instead of bypassing it. <code>v4_send_encrypted_or_queue</code> auto-kicks KEY_EX when no peer identity exists (was previously hard-fail) and auto-kicks SESSION_OPEN when no session — so first contact with any same-mesh peer just works (frame queues + handshake auto-completes + frame drains, all from a single send call). Cross-mesh peers can't establish KEY_EX (bootstrap HMAC mismatch), so cross-mesh sends silently fail at the pending-frame timeout sweep — correct: different mesh = locked out. Broadcasts still fan out per-peer with BROADCAST_AUTH HMAC (no per-peer session for FF:FF:...). Raw <code>v4_send_frame</code> remains reserved for ACKs and handshake frames (can't be encrypted by the layer they implement).</p>
+  <div class="diagram"><pre class="mermaid">
+%%{init: {"flowchart": {"curve": "linear", "htmlLabels": true, "nodeSpacing": 35, "rankSpacing": 55}}}%%
+flowchart TB
+
+    %% Strict top-to-bottom narrative: data starts at APP_CODE, every layer
+    %% is one rank lower than the previous, and everything ends at RADIO.
+    %% "Bypass" edges (T_RAW → FRAME, strict-encrypt skipping SMART) are the
+    %% exceptions, labeled and drawn as short cross-layer jumps.
+
+    APP_CODE(["📤  Outbound send request"]):::origin
+
+    %% ══════════════════════════════════════════════════════════════
+    %% LAYER ① — CALLERS (everything app code can invoke directly)
+    %% ══════════════════════════════════════════════════════════════
+    subgraph L1 ["① CALLER LAYER — app code picks one of these"]
+        direction LR
+        T_BE["TYPED · best-effort<br/>v4_send_command_response<br/>heartbeat / metadata / mesh CMD"]
+        T_STRICT["TYPED · strict-encrypt unicast<br/>v4_send_text · v4_send_user_sync<br/>v4_send_time_sync (unicast)"]
+        BOND["APP · bondSendEncrypted()<br/>bond traffic"]
+        FILE["APP · sendFileToMac()<br/>file streaming, per-chunk"]
+        BCAST["APP · broadcasts<br/>v4_broadcast_text · _sensor_data<br/>_sensor_status · _time_sync · _topo_request"]
+        T_RAW["TYPED · raw frames<br/>ACK · KEY_EX_* · SESSION_OPEN/CONFIRM<br/>REKEY · TOPO_START/PEER"]
+    end
+
+    APP_CODE --> L1
+
+    %% ══════════════════════════════════════════════════════════════
+    %% LAYER ② — UNICAST DISPATCHER (only some callers route through here)
+    %% ══════════════════════════════════════════════════════════════
+    SMART["② <b>v4_send_payload_smart()</b><br/>UNICAST DISPATCHER · size + session-aware"]:::appEntry
+
+    T_BE --> SMART
+    BOND --> SMART
+    FILE -.->|"per chunk"| SMART
+
+    %% ══════════════════════════════════════════════════════════════
+    %% LAYER ③ — MID FRAME BUILDERS (encrypted unicast + broadcast HMAC)
+    %% ══════════════════════════════════════════════════════════════
+    subgraph L3 ["③ MID-LEVEL FRAME BUILDERS"]
+        direction LR
+        ENCQ["v4_send_encrypted_or_queue<br/>single-frame ≤202 B<br/>auto-kicks KEY_EX/SESSION_OPEN"]
+        ENCCHUNK["v4_send_encrypted_chunked<br/>multi-frame AEAD<br/>(requires ACTIVE session)"]
+        BCAT["v4_broadcast_category<br/>per-peer fan-out + subscription"]
+        BC["v4_broadcast<br/>per-peer fan-out (mesh-wide)"]
+    end
+
+    %% SMART (layer 2) → MID — strict encrypt-or-fail (post-2026-05).
+    SMART -->|"fits single"| ENCQ
+    SMART -->|"too big"| ENCCHUNK
+
+    %% T_STRICT now flows through SMART (was bypass, removed 2026-05).
+    T_STRICT --> SMART
+
+    BCAST --> BCAT
+    BCAST --> BC
+
+    %% ══════════════════════════════════════════════════════════════
+    %% LAYER ④ — AEAD wrap + queue sidecar (encrypted single-frame only)
+    %% ══════════════════════════════════════════════════════════════
+    subgraph L4 ["④ AEAD wrap + queue (encrypted single-frame only)"]
+        direction LR
+        WRAP["v4_send_session_wrapped<br/>AEAD-seal one frame"]
+        PENDQ[("pending-frame ring<br/>auto-kick SESSION_OPEN")]
+    end
+
+    ENCQ -->|"session ACTIVE"| WRAP
+    ENCQ -.->|"no session yet<br/>(kicks KEY_EX or SESSION_OPEN<br/>auto-drains on CONFIRM)"| PENDQ
+
+    %% ══════════════════════════════════════════════════════════════
+    %% LAYER ⑤ — FINAL SINK (the one bottom node)
+    %% ══════════════════════════════════════════════════════════════
+    FRAME["⑤ <b>v4_send_frame()</b><br/>build header + CRC + (optional BROADCAST_AUTH HMAC)"]:::sink
+
+    WRAP     --> FRAME
+    ENCCHUNK --> FRAME
+    BCAT     --> FRAME
+    BC       --> FRAME
+    T_RAW    --> FRAME
+
+    %% ══════════════════════════════════════════════════════════════
+    %% LAYER ⑥ — RADIO (terminal node)
+    %% ══════════════════════════════════════════════════════════════
+    RADIO(["📡  esp_now_send → 2.4 GHz radio"]):::origin
+
+    FRAME --> RADIO
+
+    %% ── Styling ────────────────────────────────────────────────
+    classDef origin   fill:#0d47a1,stroke:#64b5f6,stroke-width:2.5px,color:#fff
+    classDef appEntry fill:#e6f4ff,stroke:#1e88e5,stroke-width:2.5px,color:#000
+    classDef strict   fill:#fff3e0,stroke:#f57c00,stroke-width:1.5px,color:#000
+    classDef bcast    fill:#f3e5f5,stroke:#8e24aa,stroke-width:1.5px,color:#000
+    classDef raw      fill:#eceff1,stroke:#546e7a,stroke-width:1.5px,color:#000
+    classDef sink     fill:#fff9c4,stroke:#f9a825,stroke-width:2.5px,color:#000
+    class BOND,FILE appEntry
+    class T_STRICT strict
+    class BCAST,BCAT,BC bcast
+    class T_RAW raw
+  </pre></div>
+  <p class="desc" style="margin-top:0.8em">
+    <strong>Why all unicast callers now flow through <code>v4_send_payload_smart</code>:</strong> smart used to have a plaintext fallback ("encrypt if session available, else send cleartext"). That was load-bearing for "best-effort" callers but unacceptable for strict-encrypt callers (user_sync carries hashed credentials, text/time_sync had documented "refuse rather than leak" contracts). So strict-encrypt callers used to bypass smart and call the encrypted layer directly. <strong>Late 2026-05:</strong> smart's plaintext fallback was deleted. Smart is now strictly encrypt-or-fail, which is exactly what the strict-encrypt callers want — so they now route through smart too. The diagram collapses to a clean tree: <code>BOND</code>, <code>T_BE</code>, <code>T_STRICT</code>, <code>FILE</code> → <code>SMART</code> → <code>ENCQ</code>/<code>ENCCHUNK</code> → <code>WRAP</code> → <code>FRAME</code> → <code>RADIO</code>. One spine, no bypasses except the unavoidable ones (broadcasts use a different crypto primitive; raw frames ARE the layer underneath).<br/><br/>
+    <strong>Encrypt-or-wait foundation:</strong> if a caller sends to a peer it has never handshaked with, <code>v4_send_encrypted_or_queue</code> queues the frame, kicks <code>KEY_EX</code>, and the chain auto-completes: KEY_EX_REPLY → peer identity persisted → SESSION_OPEN kicked → SESSION_CONFIRM → pending-frame ring drains the original frame AEAD-encrypted. From the caller's perspective, the first send takes ~300ms; all subsequent sends use the live session and are instant. Cross-mesh peers can't pass the KEY_EX HMAC check, so cross-mesh sends silently fail at the pending-frame timeout sweep — correct: different mesh = locked out by design.<br/><br/>
+    <strong>Broadcasts</strong> bypass smart because there's no per-peer session for FF:FF:FF:FF:FF:FF — AEAD isn't applicable. They use BROADCAST_AUTH HMAC (group-key tag over header + payload), proving mesh membership without per-peer state.<br/>
+    <strong>Raw frames</strong> (ACKs, KEY_EX_*, SESSION_OPEN/CONFIRM/REKEY, TOPO_*) skip every middle layer because they <em>are</em> the layer underneath — they bootstrap the encryption + ACK semantics that everything else depends on.
+  </p>
+  <p class="desc" style="margin-top:0.8em">
+    <strong>Change history:</strong>
+    <br/>• <em>2026-05-23 audit:</em> Removed ghost wrapper <code>v4_send_worker_status</code> (deleted 2026-05-21). Added <code>bondSendEncrypted</code>, <code>sendFileToMac</code>, the broadcast tree. Merged the strict-encrypt typed wrappers into one node.
+    <br/>• <em>2026-05 encrypt-or-wait foundation:</em> Added <code>espnowprobe</code> CLI (KEY_EX-as-reachability-probe). Made <code>_or_queue</code> auto-kick KEY_EX when no peer identity exists; KEY_EX_REPLY handler now auto-kicks SESSION_OPEN when pending frames are waiting. <code>sendFileToMac</code>'s "session-ready snapshot" wart removed.
+    <br/>• <em>2026-05 plaintext fallback removal:</em> Deleted the three <code>return v4_send_chunked(...)</code> fallbacks from <code>v4_send_payload_smart</code>. <code>v4_send_text</code> / <code>_user_sync</code> / <code>_time_sync</code> now call smart instead of branching themselves. <code>meshSendEnvelopeToPeers</code> and <code>bigsend</code> CLI migrated to smart. <code>v4_send_chunked</code> deleted (zero callers remained). Saved ~4 KB binary.
+  </p>
+</section>
+
+<section id="bond">
+  <h2>5 · Bond mode — implicit state machine (reverse-engineered)</h2>
+  <p class="desc"><strong>This diagram does not exist as code.</strong> Bond state lives in ~20 boolean flags on <code>EspNowState</code>, set by RX handlers and polled/cleared by super-loop steps 9b-9k. This is the behavior reconstructed as the FSM it implicitly is — the target shape for a possible future explicit-FSM refactor.</p>
+  <div class="diagram"><pre class="mermaid">
+stateDiagram-v2
+    [*] --> IDLE
+    IDLE --> CAP_EXCHANGE: peer online (master kicks)<br/>bondNeedsCapabilityRequest
+    CAP_EXCHANGE --> AWAIT_SESSION: BOND_CAP_RESP received<br/>bondReceivedCapability
+    AWAIT_SESSION --> MANIFEST: session ACTIVE +<br/>bondNeedsManifestResponse
+    AWAIT_SESSION --> SETTINGS: session ACTIVE +<br/>bondNeedsSettingsResponse
+    MANIFEST --> SYNCED: manifest file sent
+    SETTINGS --> SYNCED: settings file sent
+    SYNCED --> STATUS_POLL: periodic (~30s)<br/>bondNeedsStatusResponse
+    STATUS_POLL --> SYNCED
+    SYNCED --> STREAMING: bondNeedsStreamingSetup
+    STREAMING --> SYNCED
+  </pre></div>
+</section>
+
+<section id="seq">
+  <h2>6 · Seam-unification sequencing (proposal, paused)</h2>
+  <p class="desc">From <code>ESPNOW_SEAM_UNIFICATION.md</code>. The hard gate: hardware-validate Phase 1/2a before touching the session-readiness seam. Seam 2 (deferral rule) is independent and can go early. Structural rewrites (Seam 4) are a separate, later decision.</p>
+  <div class="diagram"><pre class="mermaid">
+flowchart LR
+    P1["Phase 1/2a<br/>HW validation<br/>(PAUSED gate)"] --> S1["Seam 1<br/>unify readiness gate"]
+    S2["Seam 2<br/>deferral rule + audit"] -.->|"independent, do early"| S1
+    S1 --> S3["Seam 3<br/>single send entry point"]
+    S3 --> S4["Seam 4 (later, separate decision)<br/>super-loop split / bond FSM"]
+  </pre></div>
+</section>
+
+<section id="orgchart">
+  <h2>7 · Code organization (org chart)</h2>
+  <p class="desc">Module map of the firmware grouped by domain. Boxes are source-file clusters (one or a small group of related <code>.cpp</code>/<code>.h</code> files). <strong>Bold-bordered boxes are the consolidation facades</strong> — they sit between the domain implementations and their consumers, and are the natural place to add cross-UI accessors when (for example) the OLED screens and G2 pages need the same data the web UI already shows.</p>
+
+  <div class="diagram"><pre class="mermaid">
+flowchart TD
+    ROOT(["HardwareOne firmware"])
+
+    ROOT --> CORE["System core"]
+    ROOT --> FAC["Consolidation facades"]
+    ROOT --> NET["ESP-NOW &amp; networking"]
+    ROOT --> WEB["Web UI"]
+    ROOT --> SENS["Sensors"]
+    ROOT --> OUT["Output / UI overlays"]
+    ROOT --> SVC["Application services"]
+
+    %% =========================================================
+    %% System core — settings, FS, auth, infra
+    %% =========================================================
+    CORE --> C_SET["Settings &amp; storage<br/>System_Settings · System_Filesystem · System_VFS"]
+    CORE --> C_AUTH["Identity &amp; auth<br/>System_User · System_AuthIdentity"]
+    CORE --> C_CMD["Command dispatch<br/>System_Command · System_CLI"]
+    CORE --> C_INFRA["Infrastructure<br/>System_Debug · System_Mutex · System_MemUtil · System_Utils"]
+    CORE --> C_BUILD["Build config<br/>System_BuildConfig.h · CMakeLists.txt"]
+
+    %% =========================================================
+    %% Facades (the "this session's work" highlights)
+    %% =========================================================
+    FAC --> F_SELF["SelfDevice::<br/>MAC, heap, uptime,<br/>firmware ver, device name"]
+    FAC --> F_CLK["Clock::<br/>epoch, isSynced, tz<br/>minutes vs quarter-hours,<br/>age, ISO format"]
+    FAC --> F_BOND["BondedPeer::<br/>paired peer state,<br/>sync triggers,<br/>cached settings/schema"]
+    FAC --> F_MESH["MeshPeers::<br/>compound queries<br/>(isHealthy, displayName,<br/>countByRoom)"]
+    FAC --> F_HELP["Path / name helpers<br/>peerCachePath · peerCacheDir<br/>getEspNowDeviceName"]
+
+    %% =========================================================
+    %% ESP-NOW + networking
+    %% =========================================================
+    NET --> N_ESPNOW["ESP-NOW core<br/>System_ESPNow{.h,.cpp}<br/>+ _Wire.h (opcodes)"]
+    NET --> N_CRYPTO["Session crypto<br/>System_ESPNow_Crypto<br/>+ Handlers_Crypto"]
+    NET --> N_SENS["Sensor streaming<br/>System_ESPNow_Sensors<br/>(cache + broadcaster)"]
+    NET --> N_WIFI["WiFi<br/>System_WiFi"]
+    NET --> N_MQTT["MQTT<br/>System_MQTT"]
+
+    %% =========================================================
+    %% Web UI
+    %% =========================================================
+    WEB --> W_HTTP["HTTP plumbing<br/>WebServer_Server · _Utils<br/>(WEB_AUTH macros, BondFs JS)<br/>· _Events (SSE) · _MigrationTool"]
+    WEB --> W_BOND["/bond<br/>WebPage_Bond.cpp"]
+    WEB --> W_SET["/settings<br/>WebPage_Settings.h<br/>(SchemaPanel, local+bonded)"]
+    WEB --> W_FILES["/files<br/>WebPage_Files.h<br/>(local + bonded view)"]
+    WEB --> W_ESPN["/espnow<br/>WebPage_ESPNow{.cpp,.h}<br/>+ _Metadata"]
+    WEB --> W_OTHER["Other pages<br/>Sensors · Logging · CLI<br/>MQTT · BT · Speech · Games<br/>Maps · LLM"]
+
+    %% =========================================================
+    %% Sensors
+    %% =========================================================
+    SENS --> S_RTC["DS3231 RTC<br/>i2csensor_ds3231"]
+    SENS --> S_IMU["IMU / Thermal / ToF / GPS<br/>BNO055 · MLX90640<br/>VL53L4CX · PA1010D"]
+    SENS --> S_INPUT["Input / FM / presence<br/>seesaw gamepad<br/>RDA5807 · STHS34PF80<br/>APDS9960 · PCA9685"]
+    SENS --> S_CAM["Camera (DVP)<br/>System_Camera*"]
+    SENS --> S_MIC["Microphone (PDM)<br/>System_Microphone*"]
+
+    %% =========================================================
+    %% Output / UI overlays
+    %% =========================================================
+    OUT --> O_OLED["OLED<br/>OLED_Display · OLED_Utils<br/>OLED_Mode_* · OLED_ESPNow<br/>OLED_FirstTimeSetup<br/>OLED_SettingsEditor"]
+    OUT --> O_G2["G2 Glasses (BLE)<br/>G2_Glasses · G2_Protocol<br/>G2_Page_*"]
+    OUT --> O_BT["Bluetooth<br/>Bluetooth.cpp"]
+    OUT --> O_LED["NeoPixel<br/>System_NeoPixel"]
+
+    %% =========================================================
+    %% Application services
+    %% =========================================================
+    SVC --> SV_LOG["Sensor logging<br/>System_SensorLogging"]
+    SVC --> SV_AUTO["Automation<br/>System_Automation"]
+    SVC --> SV_LLM["LLM (on-device)<br/>System_LLM"]
+    SVC --> SV_EI["Edge Impulse<br/>System_EdgeImpulse"]
+    SVC --> SV_NOTIF["Notifications<br/>System_Notifications"]
+
+    %% =========================================================
+    %% Styling: highlight the consolidation facades
+    %% =========================================================
+    classDef facade stroke:#58a6ff,stroke-width:3px,color:#e6edf3,fill:#1f2937;
+    classDef root fill:#1f6feb,stroke:#1f6feb,color:#fff,stroke-width:2px;
+    class ROOT root;
+    class F_SELF,F_CLK,F_BOND,F_MESH,F_HELP facade;
+  </pre></div>
+
+  <p class="desc">The facade layer is the answer to the question "which file do I touch when the OLED status screen needs the same data the web UI shows?" — touch the facade, not the underlying module. Adding a new accessor in <code>SelfDevice::</code> or <code>MeshPeers::</code> automatically makes it available to <em>all</em> UI surfaces (web, OLED, G2, MQTT, CLI) at once.</p>
+
+  <p class="desc">Notable absences from this chart by design: the <code>build/</code> tree (auto-generated), the <code>managed_components/</code> tree (vendored third-party), <code>sdkconfig*</code> files (build-target switches), and the various <code>.md</code> reports under <code>docs/</code> (commentary, not code). Anything else missing is probably worth adding if you notice it.</p>
+
+  <!-- ============================================================== -->
+  <!-- 7b · COMPLETE FILE INVENTORY                                   -->
+  <!-- ============================================================== -->
+  <h3 style="margin-top:36px;font-size:16px;color:var(--accent)">7b · Complete source file inventory</h3>
+  <p class="desc">Every <code>.cpp</code> / <code>.h</code> file under <code>components/hardwareone/</code> (277 total), grouped by domain. Use the zoom controls — this is dense by design. Per-sensor files follow a four-file triplet pattern (<code>i2csensor_&lt;chip&gt;.cpp</code> + <code>.h</code> + <code>_oled.h</code> + <code>_web.h</code>); they're shown collapsed here, with the pattern explained in 7d below.</p>
+  <div class="diagram"><pre class="mermaid">
+flowchart TD
+  ROOT(["components/hardwareone/<br/>277 source files"])
+
+  ROOT --> ENTRY
+  ROOT --> CORE
+  ROOT --> FACADES
+  ROOT --> ESPNOW
+  ROOT --> WEB
+  ROOT --> SENS
+  ROOT --> OLED
+  ROOT --> G2X
+  ROOT --> BT
+  ROOT --> SVC
+  ROOT --> HAL
+
+  subgraph ENTRY["🚀 Entry / build glue"]
+    direction TB
+    E1["HardwareOne.cpp<br/>(setup() / loop() / boot orchestration)"]
+    E2["CMakeLists.txt<br/>System_BuildConfig.h"]
+    E3["icons_embedded.cpp<br/>System_Icons.{h,cpp}"]
+  end
+
+  subgraph CORE["⚙️ System core"]
+    direction TB
+    C1["Settings &amp; storage<br/>System_Settings.{h,cpp}<br/>System_UserSettings.h<br/>System_FeatureRegistry.{h,cpp}<br/>System_SetupWizard.{h,cpp}<br/>System_SetupWizardMode.{h,cpp}<br/>System_FirstTimeSetup.{h,cpp}"]
+    C2["Filesystem<br/>System_Filesystem.{h,cpp}<br/>System_VFS.{h,cpp}<br/>System_FileManager.{h,cpp}<br/>System_ImageManager.{h,cpp}"]
+    C3["Identity / auth / users<br/>System_AuthIdentity.{h,cpp}<br/>System_User.{h,cpp}"]
+    C4["Command dispatch<br/>System_Command.{h,cpp}<br/>System_CommandTypes.h<br/>System_CLI.{h,cpp}<br/>System_CLIConfirm.{h,cpp}<br/>System_CLIMode.{h,cpp}"]
+    C5["Debug / logging<br/>System_Debug.{h,cpp}<br/>System_Debug_Manager.h<br/>System_Logging.h<br/>System_SensorLogging.{h,cpp}"]
+    C6["Tasks / concurrency<br/>System_TaskUtils.{h,cpp}<br/>System_Mutex.{h,cpp}<br/>System_MemoryMonitor.{h,cpp}<br/>System_MemUtil.h"]
+    C7["Utils / hardware misc<br/>System_Utils.{h,cpp}<br/>System_Hardware.cpp<br/>System_Power.{h,cpp}<br/>System_Battery.{h,cpp}<br/>System_Notifications.{h,cpp}"]
+  end
+
+  subgraph FACADES["🎯 Consolidation facades"]
+    direction TB
+    F1["SelfDevice::<br/>System_SelfDevice.{h,cpp}<br/><i>MAC / heap / uptime / fw / name</i>"]
+    F2["Clock::<br/>System_Clock.{h,cpp}<br/><i>epoch / sync / tz / age / format</i>"]
+    F3["BondedPeer::<br/>System_BondedPeer.{h,cpp}<br/><i>bond state + settings/schema sync</i>"]
+    F4["MeshPeers::<br/>System_MeshPeers.{h,cpp}<br/><i>isHealthy / displayName / counts</i>"]
+  end
+
+  subgraph ESPNOW["📡 ESP-NOW"]
+    direction TB
+    EN1["Core / dispatch<br/>System_ESPNow.{h,cpp}<br/>System_ESPNow_Wire.h<br/>(V4 opcodes)"]
+    EN2["Session crypto<br/>System_ESPNow_Crypto.{h,cpp}<br/>System_ESPNow_Handlers_Crypto.{h,cpp}<br/>System_ESPNow_Sessions.{h,cpp}<br/>System_ESPNow_MeshKeys.{h,cpp}<br/>System_ESPNow_Identity.{h,cpp}"]
+    EN3["File transfer<br/>System_ESPNow_Files.{h,cpp}"]
+    EN4["Sensor streaming<br/>System_ESPNow_Sensors.{h,cpp}<br/>(cache + broadcaster task)"]
+    EN5["Backpressure<br/>System_ESPNow_Saturation.{h,cpp}"]
+  end
+
+  subgraph WEB["🌐 Web UI"]
+    direction TB
+    W1["HTTP plumbing<br/>WebServer_Server.{h,cpp}<br/>WebServer_Utils.{h,cpp}<br/>WebServer_Events.cpp (SSE)<br/>WebServer_MigrationTool.{h,cpp}"]
+    W2["Auth / login pages<br/>WebPage_Login.h<br/>WebPage_LoginRequired.h<br/>WebPage_LoginSuccess.h<br/>WebPage_Register.h"]
+    W3["Dashboard / overview<br/>WebPage_Dashboard.h"]
+    W4["Settings / bonded<br/>WebPage_Settings.h<br/>(SchemaPanel: local + bonded)"]
+    W5["Bond<br/>WebPage_Bond.{cpp,h}"]
+    W6["Files<br/>WebPage_Files.h<br/>(local + bonded view)<br/>WebPage_AviPlayer.h"]
+    W7["ESP-NOW page<br/>WebPage_ESPNow.{cpp,h}<br/>WebPage_ESPNow_Metadata.cpp"]
+    W8["Sensors<br/>WebPage_Sensors.{cpp,h}"]
+    W9["Logging / CLI<br/>WebPage_Logging.h<br/>WebPage_CLI.h"]
+    W10["Other pages<br/>WebPage_MQTT.{cpp,h}<br/>WebPage_Bluetooth.{cpp,h}<br/>WebPage_Speech.{cpp,h}<br/>WebPage_Games.{cpp,h}<br/>WebPage_Maps.{cpp,h}<br/>WebPage_LLM.{cpp,h}<br/>WebPage_Automations.h"]
+  end
+
+  subgraph SENS["🔬 Sensors"]
+    direction TB
+    SE1["I2C bus<br/>System_I2C.{h,cpp}<br/>System_I2C_Manager.{h,cpp}<br/>System_SensorRegistry.{h,cpp}<br/>System_SensorStubs.{h,cpp}"]
+    SE2["RTC<br/>i2csensor_ds3231.{cpp,h,_oled.h,_web.h}"]
+    SE3["IMU / thermal / ToF / GPS<br/>i2csensor_bno055.* (IMU)<br/>i2csensor_mlx90640.* (thermal)<br/>i2csensor_vl53l4cx.* (ToF)<br/>i2csensor_pa1010d.* (GPS)"]
+    SE4["Input / FM / presence / PWM<br/>i2csensor_seesaw.* (gamepad)<br/>i2csensor_rda5807.* (FM)<br/>i2csensor_sths34pf80.* (presence)<br/>i2csensor_apds9960.* (gesture)<br/>i2csensor_pca9685.* (PWM/servo)"]
+    SE5["Camera (DVP)<br/>System_Camera_DVP.{cpp,h}<br/>System_Camera_DVP_Web.h<br/>System_Camera_Video.{cpp,h}"]
+    SE6["Microphone (PDM)<br/>System_Microphone.{cpp,h}<br/>System_Microphone_OLED.h<br/>System_Microphone_Web.h"]
+  end
+
+  subgraph OLED["📺 OLED UI"]
+    direction TB
+    O1["Display / chrome<br/>OLED_Display.h<br/>OLED_UI.{h,cpp}<br/>OLED_Utils.{h,cpp}<br/>OLED_ConsoleBuffer.h<br/>OLED_Footer.h<br/>OLED_Settings.cpp<br/>OLED_SettingsEditor.{h,cpp}<br/>OLED_RemoteSettings.{h,cpp}"]
+    O2["Mode screens<br/>OLED_Mode_Menu / UnifiedMenu<br/>OLED_Mode_System / Network<br/>OLED_Mode_Sensors / Power<br/>OLED_Mode_Animations / SetPattern<br/>OLED_Mode_Auth / ChangePassword<br/>OLED_Mode_CLI / CLIInput<br/>OLED_Mode_FileBrowser<br/>OLED_Mode_Map / LLM<br/>OLED_Mode_Automations / Speech<br/>OLED_Mode_Logging<br/>OLED_Mode_Remote / RemoteSettings<br/>OLED_ESPNow.{cpp,h}"]
+    O3["Boot / setup<br/>OLED_FirstTimeSetup.{cpp,h}<br/>OLED_SetupWizard.{cpp,h}"]
+  end
+
+  subgraph G2X["👓 G2 glasses (BLE display)"]
+    direction TB
+    G1["Core / driver<br/>G2_Glasses.{cpp,h}<br/>G2_Ring.{cpp,h}<br/>System_G2_Protocol.{cpp,h}"]
+    G2["Hijack FSM<br/>G2_HijackCmd.{cpp,h}<br/>G2_HijackFsm.{cpp,h}"]
+    G3["Pages<br/>G2_Page_Common.h<br/>G2_Page_Settings.{cpp,h}<br/>G2_Page_Network.{cpp,h}<br/>G2_Page_Files.{cpp,h}<br/>G2_Page_ESPNow.{cpp,h}<br/>G2_Page_Sensors.{cpp,h}<br/>G2_Page_CameraSettings.{cpp,h}<br/>G2_Page_Power.{cpp,h}<br/>G2_Page_TextEntry.{cpp,h}<br/>G2_Page_TestSuite.{cpp,h}"]
+  end
+
+  subgraph BT["📶 Bluetooth"]
+    direction TB
+    BT1["BLE stack<br/>BLE_IDF.{cpp,h}<br/>BLE_Events.{cpp,h}<br/>BLE_Peers.{cpp,h}<br/>BLE_Types.h"]
+    BT2["Classic / mixed<br/>Bluetooth.{cpp,h}"]
+  end
+
+  subgraph SVC["🎛️ Application services"]
+    direction TB
+    SV1["Network<br/>System_WiFi.{h,cpp}<br/>System_MQTT.{h,cpp}"]
+    SV2["Display extras<br/>System_NeoPixel.{h,cpp}<br/>HAL_Display.{h,cpp}"]
+    SV3["ML / inference<br/>System_LLM.{h,cpp}<br/>System_ESPSR.{h,cpp}<br/>System_EdgeImpulse.{h,cpp}<br/>System_EdgeImpulse_Web.h"]
+    SV4["Maps / automation<br/>System_Maps.{h,cpp}<br/>System_Automation.{h,cpp}"]
+    SV5["Protocols (peer)<br/>System_R1_Protocol.{cpp,h}"]
+  end
+
+  subgraph HAL["🔌 HAL"]
+    direction TB
+    H1["HAL_Display.{cpp,h}<br/>HAL_Input.{cpp,h}"]
+  end
+
+  classDef root fill:#1f6feb,stroke:#1f6feb,color:#fff,stroke-width:2px;
+  classDef facade stroke:#58a6ff,stroke-width:3px,color:#e6edf3;
+  class ROOT root;
+  class F1,F2,F3,F4 facade;
+  </pre></div>
+
+  <!-- ============================================================== -->
+  <!-- 7c · CROSS-CUTTING CONSUMERS                                   -->
+  <!-- ============================================================== -->
+  <h3 style="margin-top:36px;font-size:16px;color:var(--accent)">7c · Cross-cutting consumers (who uses what)</h3>
+  <p class="desc">Arrows go from a <em>consumer file</em> (left side) into the <em>service / facade / shared utility</em> it depends on (right side). This is the "if I change <code>X</code>, what breaks?" view. The four blue-outlined boxes are the consolidation facades — they're deliberately small surfaces that many files depend on, which makes them high-leverage to evolve.</p>
+  <div class="diagram"><pre class="mermaid">
+flowchart LR
+  %% =========================
+  %% Consumer files (LEFT)
+  %% =========================
+  subgraph CONSUMERS["Consumer files"]
+    direction TB
+    c_HW["HardwareOne.cpp"]
+    c_WP_Bond["WebPage_Bond.cpp"]
+    c_WP_Sett["WebPage_Settings.h"]
+    c_WP_Files["WebPage_Files.h"]
+    c_WP_ESPN["WebPage_ESPNow.{cpp,h}"]
+    c_WP_ESPN_M["WebPage_ESPNow_Metadata.cpp"]
+    c_WP_Sens["WebPage_Sensors.cpp"]
+    c_WP_MQTT["WebPage_MQTT.cpp"]
+    c_WP_BT["WebPage_Bluetooth.cpp"]
+    c_WP_Speech["WebPage_Speech.cpp"]
+    c_WP_Games["WebPage_Games.cpp"]
+    c_WP_Maps["WebPage_Maps.cpp"]
+    c_WP_LLM["WebPage_LLM.cpp"]
+    c_WS_Server["WebServer_Server.cpp"]
+    c_WS_Migration["WebServer_MigrationTool.cpp"]
+    c_OLED_ESPN["OLED_ESPNow.cpp"]
+    c_OLED_Remote["OLED_Mode_Remote.cpp"]
+    c_OLED_Unif["OLED_Mode_UnifiedMenu.cpp"]
+    c_G2["G2_Glasses.cpp"]
+    c_MQTT["System_MQTT.cpp"]
+    c_Utils["System_Utils.cpp"]
+    c_Settings_Impl["System_Settings.cpp"]
+    c_User_Impl["System_User.cpp"]
+    c_DS3231["i2csensor_ds3231.cpp"]
+    c_AllI2C["all i2csensor_*.cpp<br/>(7 files)"]
+    c_Camera["System_Camera_Video.cpp"]
+    c_EI["System_EdgeImpulse.cpp"]
+    c_ESPNow_Core["System_ESPNow.cpp"]
+  end
+
+  %% =========================
+  %% Services + facades (RIGHT)
+  %% =========================
+  subgraph FACADES["Consolidation facades<br/>(highlighted)"]
+    direction TB
+    s_BP["BondedPeer::<br/>bond peer state +<br/>settings/schema sync"]
+    s_MP["MeshPeers::<br/>isHealthy / displayName /<br/>countByRoom"]
+    s_SD["SelfDevice::<br/>MAC / heap / uptime /<br/>fw version / device name"]
+    s_CK["Clock::<br/>epoch / sync / tz /<br/>age / format"]
+  end
+
+  subgraph MACROS["Cross-cutting macros / helpers"]
+    direction TB
+    s_WA["WEB_AUTH_OR_RETURN<br/>WEB_AUTH_JSON_OR_RETURN<br/>(auth prologue in WebServer_Utils.h)"]
+    s_PCP["peerCachePath() / peerCacheDir()<br/>(System_Utils.h)"]
+    s_DNFM["getEspNowDeviceName(mac)<br/>(System_ESPNow.cpp)"]
+  end
+
+  subgraph SERVICES["Shared services"]
+    direction TB
+    s_VFS["VFS::*Guarded<br/>(System_VFS.h)<br/><i>25+ consumers — file IO</i>"]
+    s_AUTH["ExecIdentityGuard<br/>currentExecUser/IsAdmin<br/>(System_AuthIdentity.h)"]
+    s_SCACHE["sendSensorDataUpdate()<br/>local sensor cache<br/>(System_ESPNow_Sensors)"]
+    s_BCAST["BROADCAST_PRINTF /<br/>debug + log output<br/>(System_Debug.h)"]
+  end
+
+  %% =========================
+  %% Arrows: BondedPeer
+  %% =========================
+  c_WP_Bond     --> s_BP
+  c_OLED_Remote --> s_BP
+  c_OLED_Unif   --> s_BP
+
+  %% =========================
+  %% Arrows: MeshPeers
+  %% =========================
+  c_OLED_ESPN --> s_MP
+  c_MQTT      --> s_MP
+
+  %% =========================
+  %% Arrows: SelfDevice
+  %% =========================
+  c_HW             --> s_SD
+  c_MQTT           --> s_SD
+  c_Settings_Impl  --> s_SD
+  c_Utils          --> s_SD
+  c_WP_Bond        --> s_SD
+  c_WS_Migration   --> s_SD
+  c_WS_Server      --> s_SD
+
+  %% =========================
+  %% Arrows: Clock
+  %% =========================
+  c_G2          --> s_CK
+  c_HW          --> s_CK
+  c_User_Impl   --> s_CK
+  c_Utils       --> s_CK
+  c_WS_Server   --> s_CK
+  c_DS3231      --> s_CK
+
+  %% =========================
+  %% Arrows: WEB_AUTH macros
+  %% =========================
+  c_WP_Bond     --> s_WA
+  c_WP_Sett     --> s_WA
+  c_WP_Files    --> s_WA
+  c_WP_ESPN     --> s_WA
+  c_WP_ESPN_M   --> s_WA
+  c_WP_Sens     --> s_WA
+  c_WP_MQTT     --> s_WA
+  c_WP_BT       --> s_WA
+  c_WP_Speech   --> s_WA
+  c_WP_Games    --> s_WA
+  c_WP_Maps     --> s_WA
+  c_WP_LLM      --> s_WA
+  c_WS_Server   --> s_WA
+  c_Camera      --> s_WA
+  c_EI          --> s_WA
+
+  %% =========================
+  %% Arrows: peerCachePath
+  %% =========================
+  c_ESPNow_Core --> s_PCP
+
+  %% =========================
+  %% Arrows: sensor cache (sendSensorDataUpdate)
+  %% =========================
+  c_AllI2C --> s_SCACHE
+  c_DS3231 --> s_SCACHE
+  c_Camera --> s_SCACHE
+
+  classDef facade stroke:#58a6ff,stroke-width:3px,color:#e6edf3,fill:#1f2937;
+  class s_BP,s_MP,s_SD,s_CK facade;
+  </pre></div>
+
+  <!-- ============================================================== -->
+  <!-- 7d · Sensor triplet pattern                                    -->
+  <!-- ============================================================== -->
+  <h3 style="margin-top:36px;font-size:16px;color:var(--accent)">7d · Sensor file pattern (per-chip triplet)</h3>
+  <p class="desc">Each I2C sensor follows a consistent <strong>four-file pattern</strong>: the driver, the public header, an OLED rendering helper, and a web rendering helper. This keeps the per-chip UI integration close to the driver. Once you understand one sensor's layout, the others read the same way.</p>
+  <div class="diagram"><pre class="mermaid">
+flowchart LR
+  subgraph PATTERN["Example — DS3231 RTC (same shape for all 9 I2C sensors)"]
+    direction TB
+    DRV["i2csensor_ds3231.cpp<br/>📄 driver task<br/>polls chip, writes gRtcCache,<br/>calls sendSensorDataUpdate()"]
+    HDR["i2csensor_ds3231.h<br/>📋 public API<br/>rtcReadDateTime, rtcSetDateTime,<br/>rtcBuildDataJSON, gRtcCache extern"]
+    OLED_H["i2csensor_ds3231_oled.h<br/>📺 OLED renderer<br/>drawRtcScreen() called from<br/>OLED_Mode_Sensors / OLED_RTC_DATA"]
+    WEB_H["i2csensor_ds3231_web.h<br/>🌐 Web renderer<br/>HTML/JS chunks streamed by<br/>WebPage_Sensors → /sensors page"]
+
+    DRV -.->|"exposes via"| HDR
+    HDR -.->|"consumed by"| OLED_H
+    HDR -.->|"consumed by"| WEB_H
+    DRV -->|"feeds"| CACHE[("System_ESPNow_Sensors<br/>local sensor cache")]
+  end
+
+  CACHE -->|"broadcaster task<br/>transmits over ESP-NOW"| MASTER[("Master device<br/>gRemoteSensorCache")]
+  MASTER -->|"polled by"| UIs["Web /sensors page<br/>OLED status<br/>MQTT publish"]
+
+  subgraph LIST["Same triplet applies to:"]
+    direction LR
+    S1["bno055 (IMU)"]
+    S2["mlx90640 (thermal)"]
+    S3["vl53l4cx (ToF)"]
+    S4["pa1010d (GPS)"]
+    S5["seesaw (gamepad)"]
+    S6["rda5807 (FM)"]
+    S7["sths34pf80 (presence)"]
+    S8["apds9960 (gesture)"]
+    S9["pca9685 (PWM/servo)"]
+  end
+  </pre></div>
+
+  <p class="desc">Notable exceptions to the triplet: <code>apds9960</code> doesn't have a <code>_web.h</code> (no web UI built yet), <code>pca9685</code> doesn't have an <code>_oled.h</code> (servo control is web-only by design). Camera and microphone follow a similar four-file split but live under <code>System_Camera_*</code> / <code>System_Microphone_*</code> instead of the <code>i2csensor_</code> prefix because they don't use I2C.</p>
+</section>
+
+</main>
+<footer>
+  Generated 2026-05-21. Diagrams rendered client-side by <code>mermaid.min.js</code> (vendored beside this file). If a panel shows a syntax error, the source lives in the matching markdown doc.
+</footer>
+
+<script src="./mermaid.min.js"></script>
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: "dark",
+    securityLevel: "loose",
+    flowchart: { useMaxWidth: true, htmlLabels: true },
+    themeVariables: { fontSize: "14px" }
+  });
+
+  // ---------------------------------------------------------------
+  // Zoom + pan for each .diagram. Attaches AFTER mermaid renders the
+  // SVG. Controls are buttons (+ / − / fit) plus:
+  //   - mouse wheel with Ctrl/Cmd held → zoom centered on cursor
+  //   - click-drag on the SVG → pan
+  // State is stored per-diagram (no global zoom).
+  // ---------------------------------------------------------------
+  function attachZoomTo(diagram) {
+    const svg = diagram.querySelector(".mermaid svg");
+    if (!svg) return false;
+
+    // Avoid double-attaching if mermaid re-renders later.
+    if (diagram.dataset.zoomAttached === "1") return true;
+    diagram.dataset.zoomAttached = "1";
+
+    let scale = 1, tx = 0, ty = 0;
+
+    function apply() {
+      svg.style.transform = "translate(" + tx + "px," + ty + "px) scale(" + scale + ")";
+      label.textContent = Math.round(scale * 100) + "%";
+    }
+
+    // Ceiling raised to 25× so dense diagrams (like the complete file
+    // inventory) can be read comfortably; mermaid's useMaxWidth shrinks
+    // the SVG to fit the container, so the user's scale is multiplied on
+    // top of an already-downscaled render. 25× is plenty.
+    function clampScale(s) { return Math.max(0.2, Math.min(25, s)); }
+
+    // Build the controls bar.
+    const controls = document.createElement("div");
+    controls.className = "zoom-controls";
+    controls.innerHTML =
+      '<button title="Zoom out (wheel down)">−</button>' +
+      '<span class="zoom-label">100%</span>' +
+      '<button title="Zoom in (wheel up)">+</button>' +
+      '<button title="Reset to fit">⟲</button>' +
+      '<button class="fs" title="Toggle fullscreen (Esc to exit)">⛶</button>';
+    diagram.appendChild(controls);
+    const [btnOut, label, btnIn, btnReset, btnFs] = controls.children;
+
+    btnIn.addEventListener("click", function() {
+      scale = clampScale(scale * 1.25); apply();
+    });
+    btnOut.addEventListener("click", function() {
+      scale = clampScale(scale * 0.8); apply();
+    });
+    btnReset.addEventListener("click", function() {
+      scale = 1; tx = 0; ty = 0; apply();
+    });
+    btnFs.addEventListener("click", function() {
+      const entering = !diagram.classList.contains("fullscreen");
+      // Close any other fullscreen first — single fullscreen at a time.
+      document.querySelectorAll(".diagram.fullscreen").forEach(function(d) {
+        if (d !== diagram) d.classList.remove("fullscreen");
+      });
+      diagram.classList.toggle("fullscreen", entering);
+      document.body.classList.toggle("has-fullscreen-diagram", entering);
+      // Reset transform when entering/leaving so the diagram fits the new bounds.
+      scale = 1; tx = 0; ty = 0; apply();
+    });
+
+    // Hint overlay — fades after first interaction.
+    const hint = document.createElement("div");
+    hint.className = "zoom-hint";
+    hint.textContent = "Wheel to zoom · drag to pan · ⛶ fullscreen (Esc to exit) · Shift+wheel to scroll past";
+    diagram.appendChild(hint);
+
+    // Wheel = zoom (centered on cursor inside the diagram).
+    //   - Plain wheel  → zoom (the common case the user asked for)
+    //   - Ctrl/Cmd+wheel → zoom (kept for the classic gesture)
+    //   - Shift+wheel  → escape hatch: let the page scroll past the diagram
+    //                    so the user isn't trapped if they want to move on.
+    diagram.addEventListener("wheel", function(e) {
+      if (e.shiftKey) return;  // let the page scroll
+      e.preventDefault();
+      hint.style.opacity = "0";
+      const rect = diagram.getBoundingClientRect();
+      const cx = e.clientX - rect.left;
+      const cy = e.clientY - rect.top;
+      const factor = e.deltaY < 0 ? 1.12 : 0.89;
+      const newScale = clampScale(scale * factor);
+      // keep cursor's data-point fixed by adjusting translation
+      tx = cx - (cx - tx) * (newScale / scale);
+      ty = cy - (cy - ty) * (newScale / scale);
+      scale = newScale;
+      apply();
+    }, { passive: false });
+
+    // Click-drag to pan.
+    let dragging = false, lastX = 0, lastY = 0;
+    svg.addEventListener("mousedown", function(e) {
+      // Don't hijack clicks on actual nodes (links/etc.). Only pan when
+      // pressing on the SVG background.
+      if (e.button !== 0) return;
+      dragging = true; lastX = e.clientX; lastY = e.clientY;
+      svg.classList.add("dragging");
+      hint.style.opacity = "0";
+      e.preventDefault();
+    });
+    window.addEventListener("mousemove", function(e) {
+      if (!dragging) return;
+      tx += e.clientX - lastX;
+      ty += e.clientY - lastY;
+      lastX = e.clientX; lastY = e.clientY;
+      apply();
+    });
+    window.addEventListener("mouseup", function() {
+      if (!dragging) return;
+      dragging = false;
+      svg.classList.remove("dragging");
+    });
+
+    apply();
+    return true;
+  }
+
+  function attachAllZoom() {
+    document.querySelectorAll(".diagram").forEach(attachZoomTo);
+  }
+
+  // Global Escape key to exit fullscreen on any diagram.
+  window.addEventListener("keydown", function(e) {
+    if (e.key !== "Escape") return;
+    const open = document.querySelectorAll(".diagram.fullscreen");
+    if (open.length === 0) return;
+    open.forEach(function(d) { d.classList.remove("fullscreen"); });
+    document.body.classList.remove("has-fullscreen-diagram");
+  });
+
+  // Mermaid 10+ renders async with startOnLoad — we don't get a single
+  // "rendered" event, so poll briefly until every diagram has an <svg>,
+  // then attach. Cheap and reliable.
+  window.addEventListener("load", function() {
+    let tries = 0;
+    const t = setInterval(function() {
+      const diagrams = document.querySelectorAll(".diagram");
+      let allReady = true;
+      diagrams.forEach(function(d) {
+        if (!d.querySelector(".mermaid svg")) allReady = false;
+      });
+      if (allReady || ++tries > 40) {
+        clearInterval(t);
+        attachAllZoom();
+      }
+    }, 100);
+  });
+</script>
+</body>
+</html>
