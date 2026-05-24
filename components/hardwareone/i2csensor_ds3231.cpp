@@ -380,6 +380,32 @@ int rtcBuildDataJSON(char* buf, size_t bufSize) {
 // RTC Task
 // ============================================================================
 
+// Read DS3231 + write to gRtcCache. Factored out so the task can perform a
+// cold-start poll before entering its 30s periodic loop — keeps the cache
+// fresh for local readers (OLED, web UI) without waiting up to 30s.
+static void rtcReadAndCacheOnce(unsigned long now) {
+  RTCDateTime dt;
+  float temp = rtcReadTemperature();
+  if (!rtcReadDateTime(&dt)) return;
+
+  {
+    SensorCacheGuard g(gRtcCache.mutex, pdMS_TO_TICKS(50), "rtc.pollWrite");
+    if (g.held) {
+      gRtcCache.dateTime = dt;
+      gRtcCache.temperature = temp;
+      gRtcCache.dataValid = true;
+      gRtcCache.lastUpdate = now;
+    }
+  }
+#if ENABLE_OLED_DISPLAY
+  if (currentOLEDMode == OLED_RTC_DATA) {
+    oledMarkDirty();
+  }
+#endif
+  // ESP-NOW broadcaster reads rtcBuildDataJSON() on demand from the native cache;
+  // no propagation step needed here.
+}
+
 void rtcTask(void* pvParameters) {
   (void)pvParameters;
   
@@ -406,19 +432,22 @@ void rtcTask(void* pvParameters) {
     }
   }
   
-  unsigned long lastCacheUpdate = 0;
   const unsigned long CACHE_UPDATE_FAST = 1000;   // 1s when OLED is showing RTC
   const unsigned long CACHE_UPDATE_SLOW = 30000;  // 30s otherwise (web UI ticks locally)
-  
+
+  // Cold-start poll so the cache is fresh before the first 30s tick.
+  unsigned long lastCacheUpdate = millis();
+  rtcReadAndCacheOnce(lastCacheUpdate);
+
   while (gRtcEnabled) {
     unsigned long now = millis();
-    
+
     // Respect global polling pause (I2C bus recovery, scans, file I/O, etc.)
     if (gSensorPollingPaused) {
       vTaskDelay(pdMS_TO_TICKS(100));
       continue;
     }
-    
+
     // Poll fast when OLED is displaying RTC, slow otherwise
 #if ENABLE_OLED_DISPLAY
     unsigned long interval = (currentOLEDMode == OLED_RTC_DATA) ? CACHE_UPDATE_FAST : CACHE_UPDATE_SLOW;
@@ -426,36 +455,7 @@ void rtcTask(void* pvParameters) {
     unsigned long interval = CACHE_UPDATE_SLOW;
 #endif
     if (now - lastCacheUpdate >= interval) {
-      RTCDateTime dt;
-      float temp = rtcReadTemperature();
-
-      if (rtcReadDateTime(&dt)) {
-        {
-          SensorCacheGuard g(gRtcCache.mutex, pdMS_TO_TICKS(50), "rtc.pollWrite");
-          if (g.held) {
-            gRtcCache.dateTime = dt;
-            gRtcCache.temperature = temp;
-            gRtcCache.dataValid = true;
-            gRtcCache.lastUpdate = now;
-          }
-        }
-        // Mark OLED dirty if RTC page is active (enables real-time display updates)
-#if ENABLE_OLED_DISPLAY
-        if (currentOLEDMode == OLED_RTC_DATA) {
-          oledMarkDirty();
-        }
-#endif
-#if ENABLE_ESPNOW
-        {
-          char rtcJson[256];
-          int jsonLen = rtcBuildDataJSON(rtcJson, sizeof(rtcJson));
-          if (jsonLen > 0) {
-            sendSensorDataUpdate(REMOTE_SENSOR_RTC, rtcJson, jsonLen);
-          }
-        }
-#endif
-      }
-      
+      rtcReadAndCacheOnce(now);
       lastCacheUpdate = now;
     }
     

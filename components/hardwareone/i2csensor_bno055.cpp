@@ -1119,17 +1119,7 @@ void imuTask(void* parameter) {
           }
         }
         
-        // Stream data to ESP-NOW master if enabled (worker devices only)
-#if ENABLE_ESPNOW
-        if (result && shouldStreamSensorToRemote()) {
-          // Build IMU JSON from cache
-          char imuJson[512];
-          int jsonLen = imuBuildDataJSON(imuJson, sizeof(imuJson));
-          if (jsonLen > 0) {
-            sendSensorDataUpdate(REMOTE_SENSOR_IMU, imuJson, jsonLen);
-          }
-        }
-#endif
+        // ESP-NOW broadcaster reads imuBuildDataJSON() on demand from gImuCache.
       }
       vTaskDelay(pdMS_TO_TICKS(10));
     } else {

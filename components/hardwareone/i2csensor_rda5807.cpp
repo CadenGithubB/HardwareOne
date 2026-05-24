@@ -274,17 +274,8 @@ void fmRadioTask(void* parameter) {
       DEBUG_FMRADIO_POLLINGF("[FM_RADIO_TASK] Updating radio data (loop %lu)", loopCount);
     }
     updateFMRadio();
-    
-    // Stream data to ESP-NOW master if enabled (worker devices only)
-#if ENABLE_ESPNOW
-    if (shouldStreamSensorToRemote()) {
-      char fmJson[512];
-      int jsonLen = fmRadioBuildDataJSON(fmJson, sizeof(fmJson));
-      if (jsonLen > 0) {
-        sendSensorDataUpdate(REMOTE_SENSOR_FMRADIO, fmJson, jsonLen);
-      }
-    }
-#endif
+
+    // ESP-NOW broadcaster reads fmRadioBuildDataJSON() on demand from gFmRadioCache.
     
     // Log stack usage every 30 seconds (for debugging stack overflow issues)
     unsigned long now = millis();

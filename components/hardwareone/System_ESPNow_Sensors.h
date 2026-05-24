@@ -79,14 +79,6 @@ void stopSensorDataStreaming(RemoteSensorType sensorType);
 
 bool isSensorDataStreamingEnabled(RemoteSensorType sensorType);
 
-// Update local sensor cache (called by sensor polling loops)
-// This is a fast, non-blocking write - no ESP-NOW transmission here
-void sendSensorDataUpdate(RemoteSensorType sensorType, const char* jsonData, size_t jsonLen = 0);
-
-// Force immediate broadcast of a sensor (event-driven API)
-// Use this for critical events that need instant transmission (e.g., button press, alarm)
-void forceSensorBroadcast(RemoteSensorType sensorType);
-
 // Get remote sensor data for web API
 String getRemoteSensorDataJSON(const uint8_t* deviceMac, RemoteSensorType sensorType);
 
@@ -120,7 +112,6 @@ RemoteSensorData* findOrCreateCacheEntry(const uint8_t* deviceMac, const char* d
 // Enable/disable all sensor ESP-NOW communication (status + data)
 void setSensorBroadcastEnabled(bool enabled);
 bool isSensorBroadcastEnabled();
-void espnowSensorStatusPeriodicTick();
 
 // ==========================
 // Thermal Data Optimization

@@ -289,6 +289,29 @@ const char* cmd_gps(const String& argsInput) {
 //   4. Release mutex and delete task
 // ============================================================================
 
+// Build GPS JSON directly into buffer from cache. Safe to call from any task —
+// only reads gGpsCache under its own mutex. Returns bytes written (excluding \0)
+// or 0 on cache-lock timeout / invalid buffer.
+int gpsBuildDataJSON(char* buf, size_t bufSize) {
+  if (!buf || bufSize == 0) return 0;
+
+  SensorCacheGuard g(gGpsCache.mutex, pdMS_TO_TICKS(50), "gps.buildJSON");
+  if (!g.held) return 0;
+
+  if (gGpsCache.hasFix) {
+    return snprintf(buf, bufSize,
+                    "{\"val\":1,\"fix\":1,\"quality\":%d,\"sats\":%d,"
+                    "\"lat\":%.6f,\"lon\":%.6f,\"alt\":%.2f,\"speed\":%.2f}",
+                    (int)gGpsCache.fixQuality, (int)gGpsCache.satellites,
+                    gGpsCache.latitude, gGpsCache.longitude,
+                    gGpsCache.altitude, gGpsCache.speed);
+  }
+  return snprintf(buf, bufSize,
+                  "{\"val\":1,\"fix\":0,\"quality\":0,\"sats\":%d,"
+                  "\"lat\":0,\"lon\":0,\"alt\":0,\"speed\":0}",
+                  (int)gGpsCache.satellites);
+}
+
 void gpsTask(void* parameter) {
   INFO_GPS_LIFECYCLEF("Task started (handle=%p, stack=%u words)",
                 (void*)xTaskGetCurrentTaskHandle(),
@@ -401,27 +424,7 @@ void gpsTask(void* parameter) {
 #endif
         }
 
-        // Stream data to ESP-NOW master if enabled (worker devices only)
-#if ENABLE_ESPNOW
-        if (shouldStreamSensorToRemote()) {
-          char gpsJson[256];
-          int jsonLen;
-          if (gPA1010D->fix) {
-            jsonLen = snprintf(gpsJson, sizeof(gpsJson),
-                               "{\"val\":1,\"fix\":%d,\"quality\":%d,\"sats\":%d,\"lat\":%.6f,\"lon\":%.6f,\"alt\":%.2f,\"speed\":%.2f}",
-                               1, (int)gPA1010D->fixquality, (int)gPA1010D->satellites,
-                               gPA1010D->latitudeDegrees, gPA1010D->longitudeDegrees,
-                               gPA1010D->altitude, gPA1010D->speed);
-          } else {
-            jsonLen = snprintf(gpsJson, sizeof(gpsJson),
-                               "{\"val\":1,\"fix\":0,\"quality\":0,\"sats\":%d,\"lat\":0,\"lon\":0,\"alt\":0,\"speed\":0}",
-                               (int)gPA1010D->satellites);
-          }
-          if (jsonLen > 0 && jsonLen < 256) {
-            sendSensorDataUpdate(REMOTE_SENSOR_GPS, gpsJson, jsonLen);
-          }
-        }
-#endif
+        // ESP-NOW broadcaster reads gpsBuildDataJSON() on demand from gGpsCache.
 
         // Mark OLED dirty if GPS page is active (enables real-time display updates)
 #if ENABLE_OLED_DISPLAY
