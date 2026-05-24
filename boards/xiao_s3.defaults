@@ -1,0 +1,22 @@
+# Board overrides — Seeed XIAO ESP32-S3 family (base / Sense / Plus)
+#
+# This file is layered on top of sdkconfig.defaults + sdkconfig.defaults.esp32s3
+# by the HW_BOARD selection logic in CMakeLists.txt. It contains ONLY the
+# settings that distinguish this board from other ESP32-S3 boards.
+#
+# Activated by: HW_BOARD=xiao_s3 (also the default if HW_BOARD is unset)
+
+# Arduino variant — picks the BSP pins_arduino.h and the ARDUINO_<NAME>_DEV
+# macro that System_BuildConfig.h's #elif chain matches on for pin mapping.
+CONFIG_ARDUINO_VARIANT="XIAO_ESP32S3"
+
+# PSRAM mode — XIAO ESP32-S3 family uses Octal PSRAM at 80 MHz.
+# Wrong mode boots fine but reports 0 KB PSRAM (silent failure — LLM,
+# big web responses, ESP-NOW buffers will OOM at runtime).
+CONFIG_SPIRAM_MODE_OCT=y
+
+# Flash size — XIAO ESP32-S3 base/Sense have 8 MB. (XIAO Plus has 16 MB —
+# if you ever switch this file to target Plus, change to 16MB and the
+# partition picker in CMakeLists.txt will pick partitions_*_16mb.csv.)
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="8MB"

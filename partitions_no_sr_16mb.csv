@@ -1,0 +1,12 @@
+# Partition table for 16MB-flash boards WITHOUT ESP-SR (no speech recognition)
+# Used by 16MB-flash boards (e.g. FeatherS3[D]) selected via HW_BOARD.
+# No "model" partition — all the extra 8MB (vs the 8MB layout) goes to LittleFS.
+# Factory:  4948K (0x4D5000)  — same size as the 8MB layout so an app binary
+#                                built for either fits in either partition map.
+# LittleFS: 11628K (0xB1B000) — ~11.3 MB, +8.4 MB vs the 8MB layout.
+# Total:    ~16384K
+# Name,   Type, SubType, Offset,   Size,    Flags
+nvs,      data, nvs,     0x9000,   0x6000,
+phy_init, data, phy,     0xf000,   0x1000,
+factory,  app,  factory, 0x10000,  0x4D5000,
+littlefs, data, littlefs, 0x4E5000, 0xB1B000,

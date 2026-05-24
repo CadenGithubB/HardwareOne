@@ -1,27 +1,18 @@
-# ESP32-S3-specific build configuration — REQUIRED for correct compilation
-# Loaded automatically by ESP-IDF when target is esp32s3 (idf.py set-target esp32s3)
-# Do not delete. Controls PSRAM mode (Octal), flash mode, and Bluetooth stack.
-# This file should be used for ESP32-S3-class boards only.
+# ESP32-S3 family build configuration — common to ALL ESP32-S3 boards.
+# Loaded automatically by ESP-IDF when target is esp32s3 (idf.py set-target esp32s3).
+# Do not delete. Controls PSRAM presence/speed, flash mode, Bluetooth, USB.
 #
-# To select a board correctly:
-#   1. Run `idf.py set-target esp32s3`
-#   2. Set the matching Arduino board in `CONFIG_ARDUINO_VARIANT`
-#
-# In this project, `CONFIG_ARDUINO_VARIANT` is what lets HardwareOne map the
-# build to the proper board block in `System_BuildConfig.h`, which then selects
-# the correct pins, PSRAM mode expectations, USB behavior, and board-specific
-# feature flags.
+# BOARD-SPECIFIC settings (CONFIG_ARDUINO_VARIANT, CONFIG_SPIRAM_MODE_*) are
+# NOT here — they live in boards/<name>.defaults and get layered on top via
+# the HW_BOARD selection logic in CMakeLists.txt. To switch boards:
+#   HW_BOARD=feathers3 idf.py fullclean && HW_BOARD=feathers3 idf.py build
+# (default HW_BOARD is xiao_s3.) See docs/BOARD_SWITCHING.md for the full guide.
 #
 # If you are switching from ESP32 back to ESP32-S3, run `idf.py fullclean`
 # before building so the proper esp32s3 defaults are re-applied cleanly.
-# See docs/BOARD_SWITCHING.md for full reference.
 
-# Arduino variant
-CONFIG_ARDUINO_VARIANT="XIAO_ESP32S3"
-
-# PSRAM - Octal SPI mode for ESP32-S3
+# PSRAM presence + speed (mode is board-specific — see boards/<name>.defaults).
 CONFIG_SPIRAM=y
-CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_TYPE_AUTO=y
 CONFIG_SPIRAM_SPEED_80M=y
 
