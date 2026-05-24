@@ -11,6 +11,7 @@ This document explains how to switch between different ESP32 board configuration
 | Seeed XIAO ESP32S3 | ESP32-S3 | `XIAO_ESP32S3` | Base board |
 | Seeed XIAO ESP32S3 Sense | ESP32-S3 | `XIAO_ESP32S3` + `XIAO_ESP32S3_SENSE_ENABLED` | Camera, mic, SD slot |
 | Seeed XIAO ESP32S3 Plus | ESP32-S3 | `XIAO_ESP32S3_Plus` | 16MB flash, battery ADC, extra UART/SPI |
+| Unexpected Maker FeatherS3[D] | ESP32-S3 | `um_feathers3` | 2× STEMMA QT, MAX17048G fuel gauge, **Quad** PSRAM |
 | Generic ESP32 | ESP32 | `esp32` | Fallback — verify pins manually |
 
 ---
@@ -34,40 +35,70 @@ idf.py menuconfig
 
 ---
 
-## Switching Between XIAO ESP32S3 Variants (no fullclean needed)
+## Switching Between ESP32-S3 Boards — the `HW_BOARD` env var
 
-The base XIAO, Sense, and Plus are all ESP32-S3 — same chip, same `set-target`. You only need to change the Arduino variant. There are two ways:
+The XIAO ESP32-S3 family and the Unexpected Maker FeatherS3[D] are all ESP32-S3,
+but they differ in pin map AND **PSRAM mode** (XIAO=Octal, FeatherS3=Quad), so
+swapping just the `CONFIG_ARDUINO_VARIANT` isn't enough — the bootloader gets
+baked with the PSRAM mode and has to be rebuilt.
 
-### Option A — Edit `sdkconfig.defaults.esp32s3` (recommended for persistent config)
+To make this painless, the project has one file per board under `boards/`:
 
-Open `sdkconfig.defaults.esp32s3` and change the `CONFIG_ARDUINO_VARIANT` line:
-
-```ini
-# Base XIAO ESP32S3
-CONFIG_ARDUINO_VARIANT="XIAO_ESP32S3"
-
-# --- or ---
-
-# XIAO ESP32S3 Plus (16MB flash, battery ADC, extra UART/SPI)
-CONFIG_ARDUINO_VARIANT="XIAO_ESP32S3_Plus"
-
-# --- or ---
-
-# XIAO ESP32S3 Sense (camera, mic, SD) — also define XIAO_ESP32S3_SENSE_ENABLED
-CONFIG_ARDUINO_VARIANT="XIAO_ESP32S3"
+```
+boards/xiao_s3.defaults     # CONFIG_ARDUINO_VARIANT="XIAO_ESP32S3"  +  PSRAM Octal
+boards/feathers3.defaults   # CONFIG_ARDUINO_VARIANT="um_feathers3"  +  PSRAM Quad
 ```
 
-After editing, run `idf.py build`. The new variant will be picked up automatically.
+`CMakeLists.txt` reads the `HW_BOARD` env var at configure time and layers the
+matching board file on top of `sdkconfig.defaults.esp32s3` (which holds only
+the settings common to all S3 boards). When `HW_BOARD` is unset, it defaults
+to `xiao_s3` so existing builds keep working unchanged.
 
-> For the Sense board you also need `XIAO_ESP32S3_SENSE_ENABLED` defined. See the Sense-specific section below.
+### Switching boards
 
-### Option B — Use menuconfig
+```bash
+# Build for FeatherS3[D]
+HW_BOARD=feathers3 idf.py fullclean
+HW_BOARD=feathers3 idf.py build
+HW_BOARD=feathers3 idf.py -p /dev/cu.usbmodem* flash monitor
+
+# Back to XIAO ESP32-S3 (HW_BOARD can be unset since xiao_s3 is the default)
+idf.py fullclean && idf.py build
+
+# Confirm which board the build picked up
+HW_BOARD=feathers3 idf.py reconfigure 2>&1 | grep HW_BOARD
+# → -- HW_BOARD=feathers3 → layering .../boards/feathers3.defaults
+```
+
+`fullclean` is required between boards because PSRAM mode (Octal vs Quad) lives
+in the bootloader, not just the app — without it you get a board that boots but
+reports 0 KB PSRAM.
+
+### Adding a new ESP32-S3 board
+
+1. Add a new `#elif defined(ARDUINO_<NAME>_DEV)` block to
+   `components/hardwareone/System_BuildConfig.h` (pin map + features).
+2. Drop a `boards/<short_name>.defaults` containing **only** the lines that
+   differ from `sdkconfig.defaults.esp32s3` (typically `CONFIG_ARDUINO_VARIANT`
+   and `CONFIG_SPIRAM_MODE_*`).
+3. Build with `HW_BOARD=<short_name>`.
+
+> ESP32 boards (QT Py, Feather V2) currently still set `CONFIG_ARDUINO_VARIANT`
+> directly in `sdkconfig.defaults.esp32` — they haven't been migrated to the
+> `boards/` pattern yet. The `HW_BOARD` hook automatically no-ops when the
+> target is ESP32 so the old flow keeps working untouched.
+
+### Alternative: menuconfig (one-off changes)
 
 ```bash
 idf.py menuconfig
 # → Component config → Arduino → Board
 # Select your variant, save and exit, then build
 ```
+
+This overrides the board-file setting for the current `sdkconfig` only — useful
+for one-off experiments, but the next `fullclean` reverts to whatever
+`HW_BOARD` picks.
 
 ---
 
@@ -127,6 +158,21 @@ idf.py menuconfig
 | **Bluetooth** | Component config → Bluetooth | `Bluedroid` (BLE 5.0 only) |
 | **USB Mode** | Component config → USB-OTG | Enable for native USB |
 | **Sense Define** | Compiler options → Extra C/C++ flags | `-DXIAO_ESP32S3_SENSE_ENABLED` |
+
+### Unexpected Maker FeatherS3[D] (ESP32-S3)
+
+| Category | Setting | Value |
+|----------|---------|-------|
+| **Target** | `idf.py set-target` | `esp32s3` |
+| **Arduino** | Arduino board | `um_feathers3` |
+| **PSRAM Mode** | ESP PSRAM → SPI RAM config → Mode | **`Quad`** ← differs from XIAO |
+| **PSRAM Speed** | ESP PSRAM → SPI RAM config → Speed | `80 MHz` |
+| **Flash Size** | Serial flasher config → Flash size | `8 MB` |
+| **Flash Mode** | Serial flasher config → Flash mode | `QIO` |
+| **Bluetooth** | Component config → Bluetooth | `Bluedroid` (BLE 5.0 only) |
+| **USB Mode** | Component config → USB-OTG | Enable for native USB |
+
+> **PSRAM mode is the gotcha:** FeatherS3 uses Quad PSRAM, all the XIAO S3 variants use Octal. After switching `CONFIG_ARDUINO_VARIANT` to `um_feathers3`, flip `CONFIG_SPIRAM_MODE_OCT=y` to `CONFIG_SPIRAM_MODE_QUAD=y` in `sdkconfig.defaults.esp32s3`, then `idf.py fullclean && idf.py build`. Wrong mode = board boots but reports 0 KB PSRAM.
 
 ---
 
@@ -193,17 +239,29 @@ When `XIAO_ESP32S3_SENSE_ENABLED` is defined:
 - **Built-in NeoPixel**: GPIO5, power on GPIO8
 - **Stemma QT I2C**: SDA=GPIO22, SCL=GPIO19
 
+### Unexpected Maker FeatherS3[D]
+- **STEMMA QT I2C (primary)**: SDA=GPIO8, SCL=GPIO9 (I2C1, always-on LDO; shared with MAX17048G fuel gauge @ 0x36)
+- **STEMMA QT I2C (secondary)**: SDA=GPIO15, SCL=GPIO16 (I2C2, LDO2 — powers off in deep sleep). Not currently used by the codebase; would require a second `Wire1` bus instance.
+- **Built-in RGB LED**: data on GPIO40, powered via LDO2 (enable on GPIO39)
+- **Battery monitoring**: MAX17048G fuel gauge on I2C1 @ 0x36 — *no ADC fallback on the [D]*. Currently disabled in the codebase (ADC-based `battery_monitor` can't talk to the fuel gauge). Adding a small `i2csensor_max17048` driver would re-enable it with better accuracy than the old ADC method.
+- **No on-board camera, microphone, or display** — pair with an OLED via STEMMA QT if a display is needed.
+
 ---
 
 ## sdkconfig.defaults Files
 
 ```
-sdkconfig.defaults            # Common config (IRAM, stack sizes, log level)
-sdkconfig.defaults.esp32      # ESP32-specific (Quad PSRAM, DIO flash, Classic BT)
-sdkconfig.defaults.esp32s3    # ESP32-S3-specific (Octal PSRAM, QIO flash, BLE only)
+sdkconfig.defaults              # Common config (IRAM, stack sizes, log level)
+sdkconfig.defaults.esp32        # ESP32-family (Quad PSRAM, DIO flash, Classic BT, variant=qtpy_esp32)
+sdkconfig.defaults.esp32s3      # ESP32-S3-family commons (PSRAM presence/speed, QIO flash, BLE only)
+boards/xiao_s3.defaults         # XIAO ESP32-S3: variant + Octal PSRAM mode  (default if HW_BOARD unset)
+boards/feathers3.defaults       # FeatherS3[D]: variant + Quad PSRAM mode    (activate with HW_BOARD=feathers3)
 ```
 
-ESP-IDF loads them in order — the target-specific file overrides the base. The variant set in `sdkconfig.defaults.esp32s3` is `XIAO_ESP32S3` by default. Change it to `XIAO_ESP32S3_Plus` if you are using the Plus board.
+ESP-IDF loads them in order — later files override earlier. For S3 builds the
+chain is: `sdkconfig.defaults` → `sdkconfig.defaults.esp32s3` → `boards/<HW_BOARD>.defaults`
+(layered by the `HW_BOARD` hook in `CMakeLists.txt`). For ESP32 builds the
+chain stops at `sdkconfig.defaults.esp32` and the board file is skipped.
 
 ---
 
@@ -213,7 +271,10 @@ ESP-IDF loads them in order — the target-specific file overrides the base. The
 Run `idf.py fullclean && idf.py set-target <target>` — required any time you switch between ESP32 and ESP32-S3.
 
 ### Board not detected / wrong pin mapping
-Verify `CONFIG_ARDUINO_VARIANT` in `sdkconfig` matches your board exactly (case-sensitive). The valid values are: `adafruit_qtpy_esp32`, `adafruit_feather_esp32_v2`, `XIAO_ESP32S3`, `XIAO_ESP32S3_Plus`.
+Verify `CONFIG_ARDUINO_VARIANT` in `sdkconfig` matches your board exactly (case-sensitive). The valid values are: `adafruit_qtpy_esp32`, `adafruit_feather_esp32_v2`, `XIAO_ESP32S3`, `XIAO_ESP32S3_Plus`, `um_feathers3`.
+
+### FeatherS3 reports 0 KB PSRAM
+You forgot to flip PSRAM mode after switching from XIAO. Edit `sdkconfig.defaults.esp32s3`, change `CONFIG_SPIRAM_MODE_OCT=y` to `CONFIG_SPIRAM_MODE_QUAD=y`, then `idf.py fullclean && idf.py build`.
 
 ### SD card not appearing on Sense
 Ensure `XIAO_ESP32S3_SENSE_ENABLED` is defined so the SD pins are configured correctly.
@@ -229,13 +290,20 @@ Set `CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y` in sdkconfig or via menuconfig (Serial f
 ## Quick Reference
 
 ```bash
-# Switch from base XIAO to XIAO Plus (same chip family — no fullclean needed)
-# Edit sdkconfig.defaults.esp32s3, change:
-#   CONFIG_ARDUINO_VARIANT="XIAO_ESP32S3"
-# to:
-#   CONFIG_ARDUINO_VARIANT="XIAO_ESP32S3_Plus"
-idf.py build
+# Switch between ESP32-S3 boards via HW_BOARD (fullclean required — PSRAM mode
+# changes affect the bootloader, which has to be rebuilt).
+HW_BOARD=feathers3 idf.py fullclean
+HW_BOARD=feathers3 idf.py build
+HW_BOARD=feathers3 idf.py -p /dev/cu.usbmodem* flash monitor
+
+# Back to XIAO (HW_BOARD optional — xiao_s3 is the default)
+idf.py fullclean && idf.py build
 idf.py -p /dev/cu.usbmodem* flash monitor
+
+# Within the XIAO family (base ↔ Plus ↔ Sense): edit boards/xiao_s3.defaults to
+# change CONFIG_ARDUINO_VARIANT, then `idf.py build`. PSRAM mode doesn't change
+# so fullclean isn't strictly required, but flash size differs on the Plus
+# (16 MB) — see Plus section below.
 
 # Switch from ESP32 to ESP32-S3 (different chip family — fullclean required)
 idf.py fullclean

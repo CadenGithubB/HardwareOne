@@ -1,0 +1,27 @@
+# Board overrides — Unexpected Maker FeatherS3 / FeatherS3[D]
+#
+# This file is layered on top of sdkconfig.defaults + sdkconfig.defaults.esp32s3
+# by the HW_BOARD selection logic in CMakeLists.txt. It contains ONLY the
+# settings that distinguish this board from other ESP32-S3 boards.
+#
+# Activated by: HW_BOARD=feathers3
+#
+# Arduino-ESP32 does not (yet) ship a separate variant for the Series[D] —
+# `um_feathers3` is electrically correct for both the original FeatherS3 and
+# the [D]. The FeatherS3[D] additions (second I2C bus, software RF switch,
+# fuel gauge replacing VBAT ADC) are handled in System_BuildConfig.h.
+
+# Arduino variant — picks the BSP pins_arduino.h and the ARDUINO_<NAME>_DEV
+# macro that System_BuildConfig.h's #elif chain matches on for pin mapping.
+CONFIG_ARDUINO_VARIANT="um_feathers3"
+
+# PSRAM mode — FeatherS3 uses Quad PSRAM (the XIAO uses Octal).
+# Wrong mode boots fine but reports 0 KB PSRAM (silent failure — LLM,
+# big web responses, ESP-NOW buffers will OOM at runtime).
+CONFIG_SPIRAM_MODE_QUAD=y
+
+# Flash size — FeatherS3 / FeatherS3[D] have 16 MB QSPI flash. The partition
+# picker in CMakeLists.txt sees this flag and selects partitions_*_16mb.csv,
+# which gives LittleFS ~11.3 MB (vs 3.1 MB on 8 MB boards).
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"

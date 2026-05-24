@@ -117,7 +117,7 @@
 // Set to DISABLED for the XIAO ESP32S3 Sense build (camera + mic only,
 // no breakout sensors, no OLED) — the Sense expansion has no I2C
 // breakouts wired and no on-board display.
-#define I2C_FEATURE_LEVEL       0
+#define I2C_FEATURE_LEVEL       4
 
 #if I2C_FEATURE_LEVEL == 4
   // Memory hints (rough — full breakdown in "MEMORY SAVINGS REFERENCE" below).
@@ -137,15 +137,15 @@
 // Display: hardware display selection. 0 forces all OLED_*.cpp out of the
 // build via the CMakeLists DISPLAY_TYPE gate.
 //   0 = NONE, 1 = SSD1306 (OLED), 2 = ST7789 (TFT), 3 = ILI9341 (TFT)
-#define DISPLAY_TYPE            0
+#define DISPLAY_TYPE            1
 
 // Camera: ESP32-S3 DVP camera (OV2640/OV3660/OV5640). PICO board has none.
 #ifndef ENABLE_CAMERA_SENSOR
-#define ENABLE_CAMERA_SENSOR    1
+#define ENABLE_CAMERA_SENSOR    0
 #endif
 
 // Microphone: PDM microphone via I2S. PICO board has none.
-#define ENABLE_MICROPHONE_SENSOR 1
+#define ENABLE_MICROPHONE_SENSOR 0
 
 // Battery monitor: ADC-based LiPo voltage. Disable when board has no
 // battery-monitoring hardware (shows "USB" on OLED/web instead).
@@ -731,6 +731,46 @@
   #define MOSI1_PIN             11  // GPIO11
   #define MISO1_PIN             12  // GPIO12
   #define SCK1_PIN              13  // GPIO13
+
+// --- Unexpected Maker FeatherS3 / FeatherS3[D] ---
+// Set CONFIG_ARDUINO_VARIANT="um_feathers3" in menuconfig.
+// Same variant macro covers the original FeatherS3 and the newer Series[D]
+// variant (FeatherS3[D]); the pin map below targets the [D] specifically —
+// see notes on VBAT/fuel-gauge below.
+//
+// IMPORTANT — PSRAM mode differs from the XIAO ESP32-S3:
+//   FeatherS3 uses QUAD PSRAM, not Octal. Flip
+//     CONFIG_SPIRAM_MODE_OCT=y  →  CONFIG_SPIRAM_MODE_QUAD=y
+//   in sdkconfig.defaults.esp32s3, then `idf.py fullclean && idf.py build`.
+//   Building with the wrong PSRAM mode produces a board that boots fine but
+//   has no PSRAM (LLM, large web buffers will OOM).
+#elif defined(ARDUINO_UM_FEATHERS3_DEV)
+  #define BOARD_SUPPORTED       1
+  #define BOARD_NAME            "Unexpected Maker FeatherS3[D]"
+
+  // I2C Bus Configuration — I2C1 (horizontal STEMMA QT, always-on LDO).
+  // This is the same bus as the on-board MAX17048G fuel gauge at 0x36.
+  // The board also has a second I2C bus (I2C2 on GPIO15/16, vertical
+  // STEMMA QT, powered by LDO2) that the current codebase does not use.
+  #define I2C_SDA_PIN_DEFAULT   8
+  #define I2C_SCL_PIN_DEFAULT   9
+
+  // NeoPixel Configuration — single on-board RGB LED on GPIO40.
+  // GPIO39 enables LDO2, which powers the RGB LED (and I2C2). Driving
+  // it HIGH (matching System_NeoPixel.cpp behavior) turns the LED on.
+  #define NEOPIXEL_PIN_DEFAULT  40
+  #define NEOPIXEL_POWER_PIN    39
+  #define NEOPIXEL_COUNT_DEFAULT 1
+
+  // Battery Monitoring — the FeatherS3[D] REMOVED the VBAT/2 ADC divider
+  // present on the original FeatherS3 and replaced it with the MAX17048G
+  // fuel gauge on I2C1 @ 0x36. The current battery_monitor code is
+  // ADC-based and doesn't speak the fuel gauge protocol, so leave this
+  // off until a dedicated i2csensor_max17048 driver is added.
+  // (For the original FeatherS3 with VBAT_SENSE on GPIO2, set
+  //  BATTERY_ADC_PIN=2 and BATTERY_MONITOR_AVAILABLE=1 instead.)
+  #define BATTERY_ADC_PIN       -1
+  #define BATTERY_MONITOR_AVAILABLE 0
 
 // --- Generic ESP32 (fallback with warning) ---
 #elif defined(ARDUINO_ESP32_DEV)

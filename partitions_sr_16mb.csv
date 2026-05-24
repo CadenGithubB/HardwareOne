@@ -1,0 +1,12 @@
+# Partition table for 16MB-flash boards WITH ESP-SR (speech recognition)
+# Used by 16MB-flash boards (e.g. FeatherS3[D]) selected via HW_BOARD.
+# Factory:  4992K (0x4E0000)  — same as 8MB SR layout for binary compatibility.
+# Model:    3008K (0x2F0000)  — same as 8MB SR layout (WN9_HIESP + MN7_EN_QUANT + fst).
+# LittleFS: 8320K (0x820000)  — ~8.1 MB, +8.2 MB vs the 8MB SR layout's 128K.
+# Total:    ~16384K
+# Name,   Type, SubType, Offset,   Size,    Flags
+nvs,      data, nvs,     0x9000,   0x6000,
+phy_init, data, phy,     0xf000,   0x1000,
+factory,  app,  factory, 0x10000,  0x4E0000,
+model,    data, spiffs,  0x4F0000, 0x2F0000,
+littlefs, data, littlefs, 0x7E0000, 0x820000,
