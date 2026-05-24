@@ -51,12 +51,7 @@ window._settingsTarget = 'local';
 // don't need to know which path was taken.
 window.postSettingsCli = function(cmd) {
   if (window._settingsTarget === 'bonded') {
-    return fetch('/api/bond/exec', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-      credentials: 'same-origin',
-      body: 'cmd=' + encodeURIComponent(cmd)
-    })
+    return hw.postForm('/api/bond/exec', { cmd: cmd })
     .then(function(r) { return r.json(); })
     .then(function(j) {
       // /api/bond/exec returns {success, result}; collapse to a string so
@@ -68,12 +63,7 @@ window.postSettingsCli = function(cmd) {
       return j.result || '';
     });
   }
-  return fetch('/api/cli', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-    credentials: 'same-origin',
-    body: 'cmd=' + encodeURIComponent(cmd)
-  }).then(function(r) { return r.text(); });
+  return hw.postFormText('/api/cli', { cmd: cmd });
 };
 
 // LED live control — fire-and-forget commands (no settings save flow)
@@ -117,16 +107,7 @@ window.sendSequential = function(cmds, onDone, onFail) {
   // session via /api/bond/cli/batch (same request shape, same response shape).
   var url = (window._settingsTarget === 'bonded') ? '/api/bond/cli/batch' : '/api/cli/batch';
   console.log('[sendSequential] target=' + window._settingsTarget + ' url=' + url + ' cmds=' + all.length);
-  fetch(url, {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    credentials: 'same-origin',
-    body: JSON.stringify({commands: all})
-  })
-  .then(function(r) {
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    return r.json();
-  })
+  hw.postJSON(url, {commands: all})
   .then(function(j) {
     if (!(j && j.ok)) {
       if (onFail) onFail(new Error(j && j.error ? j.error : 'batch failed'));
@@ -204,8 +185,8 @@ window.SchemaPanel = (function(){
     var schemaUrl   = (key === 'bonded') ? '/api/bond/settings/schema' : '/api/settings/schema';
     var settingsUrl = (key === 'bonded') ? '/api/bond/settings'        : '/api/settings';
     _cache[key] = Promise.all([
-      fetch(schemaUrl,   {credentials:'same-origin'}).then(function(r){return r.json();}),
-      fetch(settingsUrl, {credentials:'same-origin'}).then(function(r){return r.json();})
+      hw.fetchJSON(schemaUrl),
+      hw.fetchJSON(settingsUrl)
     ]);
     return _cache[key];
   }
@@ -371,8 +352,7 @@ window.SchemaPanel = (function(){
           // page-level state (formLoadedHash, dirty banner) at the same time.
           if (opts.target === 'bonded') {
             log(pfx, 'Bonded save → /api/bond/settings/sync + cache invalidate');
-            fetch('/api/bond/settings/sync', {method:'POST', credentials:'same-origin'})
-              .then(function(r){ return r.json(); })
+            hw.postJSON('/api/bond/settings/sync', {})
               .then(function(d){
                 window.SchemaPanelInvalidate('bonded');
                 if (typeof window._bondSyncHook === 'function') window._bondSyncHook(d);
@@ -649,8 +629,8 @@ window.SchemaPanel.render({
   }
   
   Promise.all([
-    fetch('/api/settings/schema', {credentials:'include'}).then(function(r){return r.json();}),
-    fetch('/api/settings', {credentials:'include'}).then(function(r){return r.json();})
+    hw.fetchJSON('/api/settings/schema'),
+    hw.fetchJSON('/api/settings')
   ]).then(function(results) {
     var schema = results[0];
     var settingsResp = results[1];
@@ -1047,8 +1027,8 @@ window.SchemaPanel.render({
   }
   
   Promise.all([
-    fetch('/api/settings/schema', {credentials:'include'}).then(function(r){return r.json();}),
-    fetch('/api/settings', {credentials:'include'}).then(function(r){return r.json();})
+    hw.fetchJSON('/api/settings/schema'),
+    hw.fetchJSON('/api/settings')
   ]).then(function(results) {
     var schema = results[0];
     var settingsResp = results[1];
@@ -1544,8 +1524,8 @@ window.SchemaPanel.render({
     return '<label class="dbg-sw"'+tAttr+'><input type="checkbox" class="dbg-cb" data-cmd="'+cmd+'"'+(grp?' data-group="'+grp+'"':'')+(isAll?' data-all="1"':'')+(on?' checked':'')+'><span class="sl"></span></label>';
   }
   Promise.all([
-    fetch('/api/settings/schema',{credentials:'include'}).then(function(r){return r.json();}),
-    fetch('/api/settings',{credentials:'include'}).then(function(r){return r.json();})
+    hw.fetchJSON('/api/settings/schema'),
+    hw.fetchJSON('/api/settings')
   ]).then(function(res){
     var schema=res[0],settings=(res[1].settings||{}),c=document.getElementById('debug-dynamic-container');
     if(!c)return;
@@ -1833,8 +1813,7 @@ window.SchemaPanel.render({
                                    keyEl  && keyEl.textContent  === 'Present');
   }
   function checkCertFile(path, statusId) {
-    fetch('/api/files/list?path=' + encodeURIComponent('/system/certs'), {credentials:'same-origin'})
-      .then(function(r){return r.json()})
+    hw.fetchJSON('/api/files/list?path=' + encodeURIComponent('/system/certs'))
       .then(function(j){
         var el = document.getElementById(statusId);
         if (!el) return;
@@ -1861,8 +1840,7 @@ window.SchemaPanel.render({
   }
 
   window._httpsCertsPresent = false;
-  fetch('/api/files/list?path=' + encodeURIComponent('/system/certs'), {credentials:'same-origin'})
-    .then(function(r){return r.json()})
+  hw.fetchJSON('/api/files/list?path=' + encodeURIComponent('/system/certs'))
     .then(function(j){
       var checks = [
         {path:'/system/certs/https_server.crt', id:'https-cert-status'},
@@ -1895,8 +1873,7 @@ window.SchemaPanel.render({
 
   window._httpsCurrentValue = false;
   function refreshHttpsStatus() {
-    fetch('/api/settings',{credentials:'same-origin'})
-      .then(function(r){return r.json()})
+    hw.fetchJSON('/api/settings')
       .then(function(j){
         var val = j && j.settings && j.settings.network && j.settings.network.http && j.settings.network.http.httpsEnabled;
         window._httpsCurrentValue = !!val;
@@ -1929,12 +1906,7 @@ window.SchemaPanel.render({
     var reader = new FileReader();
     reader.onload = function(evt) {
       var content = evt.target.result;
-      fetch('/api/files/upload', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        body: 'path=' + encodeURIComponent(destPath) + '&binary=0&content=' + encodeURIComponent(content)
-      })
+      hw.postForm('/api/files/upload', { path: destPath, binary: '0', content: content })
       .then(function(r){ return r.json(); })
       .then(function(j){
         if (j.success) {
@@ -2144,8 +2116,7 @@ console.log('[SETTINGS] Part 2: API helpers starting...');
     
     // Fetch build configuration
     window.fetchBuildConfig = function() {
-      return fetch('/api/buildconfig', {credentials: 'same-origin'})
-        .then(function(r) { return r.json(); })
+      return hw.fetchJSON('/api/buildconfig')
         .then(function(config) {
           window.__buildConfig = config;
           console.log('[SETTINGS] Build config loaded:', config);
@@ -2159,21 +2130,8 @@ console.log('[SETTINGS] Part 2: API helpers starting...');
     // Refresh settings from device
     window.refreshSettings = function() {
       console.log('[SETTINGS] refreshSettings called');
-      fetch('/api/settings', {credentials: 'same-origin'})
-        .then(function(r) {
-          console.log('[SETTINGS] Settings fetch response:', r.status);
-          return r.text();
-        })
-        .then(function(t) {
-          console.log('[SETTINGS] Settings response text length:', t.length);
-          var d = null;
-          try {
-            d = JSON.parse(t || '{}');
-          } catch(e) {
-            console.error('[SETTINGS] JSON parse error:', e);
-            alert('Error fetching settings');
-            return;
-          }
+      hw.fetchJSON('/api/settings')
+        .then(function(d) {
           console.log('[SETTINGS] Parsed settings data:', d);
           if (d && d.success) {
             try {
@@ -2823,24 +2781,22 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
         alert('Username required');
         return;
       }
-      if (!await hwConfirm('Delete user "' + username + '"? This action cannot be undone.')) {
-        return;
-      }
-      var cmd = 'userdelete ' + username;
-      postSettingsCli(cmd)
-      .then(function(t) {
-        if (t.indexOf('Error') >= 0) {
-          alert('Error: ' + t);
-        } else {
-          alert(t);
-          try {
-            refreshUsers();
-          } catch(_) {}
-        }
-      })
-      .catch(function(e) {
+      // userdelete uses the two-step CLIMode confirm framework (same as
+      // filedelete / factoryreset — see System_User.cpp:1720). hw.cliConfirm
+      // shows the themed dialog and, on accept, sends [userdelete X, yes] as
+      // a batch so the worker's confirm-mode state resolves on the same web
+      // session. Target follows the This/Bonded toggle.
+      var prompt = 'Delete user "' + username + '"? This action cannot be undone.';
+      var target = (window._settingsTarget === 'bonded') ? 'bond' : 'local';
+      try {
+        var r = await hw.cliConfirm('userdelete ' + username, prompt, { target: target });
+        if (r.cancelled) return;
+        if (!r.ok) { alert('Error: ' + (r.result || 'no response')); return; }
+        alert(r.result);
+        try { refreshUsers(); } catch(_) {}
+      } catch (e) {
         alert('Error: ' + e.message);
-      });
+      }
     };
     
     // toggleSerialAuth, toggleBleAuth, toggleDisplayAuth removed - auth settings now in respective module panels
@@ -3100,8 +3056,7 @@ console.log('[SETTINGS] All parts loaded successfully');
   }
   function checkDirty(){
     if (formLoadedHash === null) return;
-    fetch('/api/bond/status',{credentials:'same-origin'})
-      .then(function(r){return r.json();})
+    hw.fetchJSON('/api/bond/status')
       .then(function(d){
         if (!d) return;
         if (d.peerSettingsHash !== undefined && d.peerSettingsHash !== formLoadedHash) setDirty(true);
@@ -3113,7 +3068,7 @@ console.log('[SETTINGS] All parts loaded successfully');
   function stopDirtyPoll(){ if (dirtyPollTimer) { clearInterval(dirtyPollTimer); dirtyPollTimer = null; } }
 
   // Probe /api/bond/status — only reveal the toggle bar for a bonded master.
-  fetch('/api/bond/status',{credentials:'same-origin'}).then(function(r){return r.json();}).then(function(d){
+  hw.fetchJSON('/api/bond/status').then(function(d){
     if(!d || d.role !== 1 || !d.bonded || !d.peerMac) return;
     if(d.peerMac === '00:00:00:00:00:00') return;
     bondPeerMac = d.peerMac;
@@ -3148,8 +3103,7 @@ console.log('[SETTINGS] All parts loaded successfully');
     var host = document.getElementById('bond-modules-host');
     if(!host) return;
     host.innerHTML = '<span style="opacity:0.7">Loading worker schema…</span>';
-    fetch('/api/bond/settings/schema',{credentials:'same-origin'})
-      .then(function(r){ return r.json(); })
+    hw.fetchJSON('/api/bond/settings/schema')
       .then(function(schema){
         if(!schema || !Array.isArray(schema.modules)){
           host.innerHTML = '<span style="color:var(--danger,#e74c3c)">Worker schema unavailable</span>';
@@ -3225,8 +3179,8 @@ console.log('[SETTINGS] All parts loaded successfully');
       resyncBtn.disabled = true;
       statusSet('Syncing values + schema from worker…');
       Promise.all([
-        fetch('/api/bond/settings/sync',       {method:'POST',credentials:'same-origin'}).then(function(r){return r.json();}),
-        fetch('/api/bond/settings/schema/sync',{method:'POST',credentials:'same-origin'}).then(function(r){return r.json();})
+        hw.postJSON('/api/bond/settings/sync', {}),
+        hw.postJSON('/api/bond/settings/schema/sync', {})
       ]).then(function(results){
         var sd = results[0]; // settings sync result
         var hd = results[1]; // schema sync result

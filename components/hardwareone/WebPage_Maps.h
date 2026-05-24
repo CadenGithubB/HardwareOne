@@ -582,7 +582,7 @@ function uploadMapFile(input) {
 // Free device-side map (PSRAM tile cache + file handle). Browser still holds parsed map until you reload or clear.
 async function unloadDeviceMap() {
   try {
-    const resp = await fetch('/api/cli', {method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},credentials:'include',body:'cmd=mapunload'});
+    const resp = await hw.postForm('/api/cli', { cmd: 'mapunload' });
     const msg = await resp.text();
     if (!resp.ok || (msg && msg.startsWith('Error'))) {
       alert(msg || 'Unload failed');
@@ -614,7 +614,7 @@ async function loadMap(path) {
     
     if (currentMap) {
       try {
-        const selResp = await fetch('/api/cli', {method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},credentials:'include',body:'cmd=' + encodeURIComponent('mapload ' + path)});
+        const selResp = await hw.postForm('/api/cli', { cmd: 'mapload ' + path });
         const selText = await selResp.text();
         if (!selResp.ok || (selText && selText.startsWith('Error'))) {
           console.warn('[MAP] Device map load failed:', selText);
@@ -1861,14 +1861,12 @@ let gpsPollingInterval = null;
 // Check system status to see if I2C/GPS are available
 async function checkSystemStatus() {
   try {
-    const resp = await fetch('/api/system');
-    const data = await resp.json();
+    const data = await hw.fetchJSON('/api/system');
     i2cEnabled = data.i2c_enabled === true;
-    
+
     // Also check if GPS sensor is specifically enabled
     if (i2cEnabled) {
-      const sensorsResp = await fetch('/api/sensors/status');
-      const sensorsData = await sensorsResp.json();
+      const sensorsData = await hw.fetchJSON('/api/sensors/status');
       gpsEnabled = sensorsData.gps && sensorsData.gps.enabled;
     } else {
       gpsEnabled = false;
@@ -1913,11 +1911,10 @@ function updateGPSStatusDisplay() {
 // Fetch GPS position (only called if GPS is enabled)
 async function updateGPS() {
   if (!i2cEnabled || !gpsEnabled) return;
-  
+
   try {
-    const resp = await fetch('/api/sensors/status');
-    const data = await resp.json();
-    
+    const data = await hw.fetchJSON('/api/sensors/status');
+
     if (!data.gps) {
       document.getElementById('gps-info').textContent = 'GPS: Not available';
       document.getElementById('gps-info').style.color = '#868e96';
@@ -1993,9 +1990,7 @@ async function loadWaypoints() {
   
   try {
     wpLog('GET /api/waypoints');
-    const resp = await fetch('/api/waypoints');
-    wpLog('GET /api/waypoints →', resp.status, resp.statusText);
-    const data = await resp.json();
+    const data = await hw.fetchJSON('/api/waypoints');
     wpLog('GET /api/waypoints response:', JSON.stringify(data));
     
     if (data.success) {
@@ -2103,18 +2098,10 @@ async function addWaypoint() {
 }
 
 async function addWaypointViaAPI(name, lat, lon, notes) {
-  const body = new URLSearchParams();
-  body.set('action', 'add');
-  body.set('name', name);
-  body.set('lat', String(lat));
-  body.set('lon', String(lon));
-  if (notes) body.set('notes', notes);
-  wpLog('addWaypointViaAPI() POST body:', body.toString());
-  const resp = await fetch('/api/waypoints', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body
-  });
+  const form = { action: 'add', name, lat: String(lat), lon: String(lon) };
+  if (notes) form.notes = notes;
+  wpLog('addWaypointViaAPI() POST form:', form);
+  const resp = await hw.postForm('/api/waypoints', form);
   wpLog('addWaypointViaAPI() POST →', resp.status, resp.statusText);
   let data;
   try {
@@ -2144,15 +2131,7 @@ async function renameWaypoint(idx) {
   if (newName === null) return;
   const name = newName.trim().substring(0, 11);
   if (!name) return;
-  const body = new URLSearchParams();
-  body.set('action', 'rename');
-  body.set('index', String(idx));
-  body.set('name', name);
-  const resp = await fetch('/api/waypoints', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body
-  });
+  const resp = await hw.postForm('/api/waypoints', { action: 'rename', index: String(idx), name });
   const data = await resp.json();
   if (!data.success) await hwAlert('Error: ' + (data.error || 'Failed'));
   await loadWaypoints();
@@ -2165,15 +2144,7 @@ async function editWaypointNotes(idx) {
   const newNotes = await hwPrompt('Enter notes (optional, max 255 chars):', existing);
   if (newNotes === null) return;
   const notes = newNotes.substring(0, 255);
-  const body = new URLSearchParams();
-  body.set('action', 'set_notes');
-  body.set('index', String(idx));
-  body.set('notes', notes);
-  const resp = await fetch('/api/waypoints', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body
-  });
+  const resp = await hw.postForm('/api/waypoints', { action: 'set_notes', index: String(idx), notes });
   const data = await resp.json();
   if (!data.success) alert('Error: ' + (data.error || 'Failed'));
   await loadWaypoints();
@@ -2239,13 +2210,7 @@ function importWaypoints() {
 
 async function clearAllWaypoints() {
   if (!await hwConfirm('Delete all waypoints for this map?')) return;
-  const body = new URLSearchParams();
-  body.set('action', 'clear_all');
-  const resp = await fetch('/api/waypoints', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body
-  });
+  const resp = await hw.postForm('/api/waypoints', { action: 'clear_all' });
   const data = await resp.json();
   if (!data.success) alert('Error: ' + (data.error || 'Failed'));
   await loadWaypoints();
@@ -2253,17 +2218,9 @@ async function clearAllWaypoints() {
 
 async function deleteWaypoint(idx) {
   if (!await hwConfirm('Delete this waypoint?')) return;
-  
-  const body = new URLSearchParams();
-  body.set('action', 'delete');
-  body.set('index', String(idx));
-  
+
   try {
-    const resp = await fetch('/api/waypoints', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body
-    });
+    const resp = await hw.postForm('/api/waypoints', { action: 'delete', index: String(idx) });
     const data = await resp.json();
     if (data.success) await loadWaypoints();
     else alert('Error: ' + (data.error || 'Failed'));
@@ -2273,16 +2230,8 @@ async function deleteWaypoint(idx) {
 }
 
 async function gotoWaypoint(idx) {
-  const body = new URLSearchParams();
-  body.set('action', 'goto');
-  body.set('index', String(idx));
-  
   try {
-    const resp = await fetch('/api/waypoints', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body
-    });
+    const resp = await hw.postForm('/api/waypoints', { action: 'goto', index: String(idx) });
     const data = await resp.json();
     if (data.success) {
       await loadWaypoints();
@@ -2295,15 +2244,8 @@ async function gotoWaypoint(idx) {
 }
 
 async function clearTarget() {
-  const body = new URLSearchParams();
-  body.set('action', 'clear');
-  
   try {
-    const resp = await fetch('/api/waypoints', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body
-    });
+    const resp = await hw.postForm('/api/waypoints', { action: 'clear' });
     const data = await resp.json();
     if (data.success) await loadWaypoints();
     else alert('Error: ' + (data.error || 'Failed'));
@@ -2603,11 +2545,10 @@ function clearSelectedFeature() {
 async function loadMapFeatures() {
   const panel = document.getElementById('map-features');
   const list = document.getElementById('features-list');
-  
+
   try {
-    const resp = await fetch('/api/maps/features');
-    const data = await resp.json();
-    
+    const data = await hw.fetchJSON('/api/maps/features');
+
     if (data.error || !data.hasMetadata || data.metadataCount === 0) {
       panel.style.display = 'none';
       return;
@@ -2662,9 +2603,8 @@ async function loadMapFeatures() {
 // GPS Track Functions
 async function loadGPSTrackFiles() {
   try {
-    const resp = await fetch('/api/gps/tracks');
-    const data = await resp.json();
-    
+    const data = await hw.fetchJSON('/api/gps/tracks');
+
     const select = document.getElementById('track-file');
     select.innerHTML = '<option value="">Select GPS log file...</option>';
     
@@ -2689,9 +2629,8 @@ async function loadGPSTrack() {
   }
   
   try {
-    const resp = await fetch('/api/gps/tracks?file=' + encodeURIComponent(filepath));
-    const data = await resp.json();
-    
+    const data = await hw.fetchJSON('/api/gps/tracks?file=' + encodeURIComponent(filepath));
+
     if (data.error) {
       alert('Error: ' + data.error);
       return;
@@ -2769,9 +2708,8 @@ let lastLiveUpdate = 0;
 
 async function pollLiveTrack() {
   try {
-    const resp = await fetch('/api/gps/tracks?live=1');
-    const data = await resp.json();
-    
+    const data = await hw.fetchJSON('/api/gps/tracks?live=1');
+
     if (data.live && data.points && data.points.length > 0) {
       // Only update if track changed
       if (data.lastUpdate !== lastLiveUpdate) {
@@ -2804,10 +2742,10 @@ async function toggleLiveTrack() {
   if (liveTrackInterval) {
     clearInterval(liveTrackInterval);
     liveTrackInterval = null;
-    await fetch('/api/gps/tracks?live=stop');
+    await hw.fetchJSON('/api/gps/tracks?live=stop').catch(()=>{});
     document.getElementById('track-info').textContent = 'Live tracking stopped';
   } else {
-    await fetch('/api/gps/tracks?live=start');
+    await hw.fetchJSON('/api/gps/tracks?live=start').catch(()=>{});
     lastLiveUpdate = 0;
     liveTrackInterval = setInterval(pollLiveTrack, 1000);
     pollLiveTrack();

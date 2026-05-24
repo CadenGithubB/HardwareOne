@@ -537,33 +537,43 @@ inline String getFileBrowserScript() {
       }
     };
     
-    // Global delete function
+    // Global delete function.
+    // Folders use rmdir which is one-shot (single /api/cli call). Files use
+    // filedelete which is two-step (Phase 3+4+5 CLIMode confirm framework):
+    // hw.cliConfirm gates with the themed dialog, then sends
+    // [filedelete /path, yes] atomically via /api/cli/batch so the worker's
+    // confirm-mode state resolves on the same web session. Without the
+    // paired 'yes' the file would NOT actually delete (the first call only
+    // arms the prompt). See System_Filesystem.cpp:596 for the CLI contract.
     window[explorerFnId + 'Delete'] = function(filePath, isFolder) {
       var itemType = isFolder ? 'folder' : 'file';
       var confirmMsg = 'Delete ' + itemType + ' "' + filePath + '"?';
       if (isFolder) {
         confirmMsg += '\n\nNote: Folder must be empty to delete.';
       }
-      
-      if (!confirm(confirmMsg)) return;
-      
-      var cmd = isFolder ? 'rmdir ' + filePath : 'filedelete ' + filePath;
-      
-      fetch('/api/cli', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        body: 'cmd=' + encodeURIComponent(cmd)
-      })
-      .then(function(r) { return r.text(); })
-      .then(function(txt) {
-        if (txt.indexOf('Error') >= 0 || txt.indexOf('Failed') >= 0) {
-          alert('Delete failed: ' + txt);
-        } else {
-          // Reload directory on success
-          loadDirectory(currentPath);
-        }
-      })
-      .catch(function(e) {
+
+      if (isFolder) {
+        if (!confirm(confirmMsg)) return;
+        hw.postFormText('/api/cli', { cmd: 'rmdir ' + filePath })
+        .then(function(txt) {
+          if (txt.indexOf('Error') >= 0 || txt.indexOf('Failed') >= 0) {
+            alert('Delete failed: ' + txt);
+          } else {
+            loadDirectory(currentPath);
+          }
+        })
+        .catch(function(e) {
+          alert('Delete error: ' + e.message);
+        });
+        return;
+      }
+
+      // File path: two-step confirm flow.
+      hw.cliConfirm('filedelete ' + filePath, confirmMsg).then(function(r) {
+        if (r.cancelled) return;
+        if (!r.ok) { alert('Delete failed: ' + (r.result || 'no response')); return; }
+        loadDirectory(currentPath);
+      }).catch(function(e) {
         alert('Delete error: ' + e.message);
       });
     };
@@ -592,12 +602,7 @@ inline String getFileBrowserScript() {
       var newName = await hwPrompt('Rename "' + oldName + '" to:', oldName);
       if (!newName || newName === oldName) return;
       
-      fetch('/api/cli', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        body: 'cmd=' + encodeURIComponent('filerename ' + filePath + ' ' + newName)
-      })
-      .then(function(r) { return r.text(); })
+      hw.postFormText('/api/cli', { cmd: 'filerename ' + filePath + ' ' + newName })
       .then(function(t) {
         if (!t || t.startsWith('Error')) {
           hwAlert('Rename failed: ' + (t || 'Unknown error'));
@@ -827,12 +832,7 @@ inline String getFileBrowserScript() {
         if (!name) return;
         var fullPath = currentPath === '/' ? '/' + name : currentPath + '/' + name;
         setStatus('Creating folder...', false);
-        fetch('/api/cli', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-          body: 'cmd=' + encodeURIComponent('mkdir ' + fullPath)
-        })
-        .then(function(r) { return r.text(); })
+        hw.postFormText('/api/cli', { cmd: 'mkdir ' + fullPath })
         .then(function(txt) {
           setStatus(txt, txt.indexOf('Error') >= 0);
           loadExplorer();
@@ -848,12 +848,7 @@ inline String getFileBrowserScript() {
         if (!name) return;
         var fullPath = currentPath === '/' ? '/' + name : currentPath + '/' + name;
         setStatus('Creating file...', false);
-        fetch('/api/cli', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-          body: 'cmd=' + encodeURIComponent('filecreate ' + fullPath)
-        })
-        .then(function(r) { return r.text(); })
+        hw.postFormText('/api/cli', { cmd: 'filecreate ' + fullPath })
         .then(function(txt) {
           setStatus(txt, txt.indexOf('Error') >= 0);
           loadExplorer();
@@ -871,7 +866,7 @@ inline String getFileBrowserScript() {
         if (!file) return;
         
         setStatus('Checking storage...', false);
-        fetch('/api/files/stats?path=' + encodeURIComponent(currentPath)).then(function(r){return r.json();}).then(function(d) {
+        hw.fetchJSON('/api/files/stats?path=' + encodeURIComponent(currentPath)).then(function(d) {
           if (!d.success) { setStatus('Upload failed: ' + (d.error || 'Cannot check storage'), true); input.value=''; return; }
           var maxUpload = Math.floor(d.free * 0.9);
           if (file.size > maxUpload) {
@@ -983,7 +978,7 @@ window.BondFs = (function(){
   }
   // cb(available:bool, state). Reveals nothing on its own — caller decides.
   function checkAvailable(cb){
-    fetch('/api/bond/status').then(function(r){return r.json();}).then(function(d){
+    hw.fetchJSON('/api/bond/status').then(function(d){
       if(d&&d.bonded===true&&d.role===1&&d.peerMac){ st.ok=true; st.peerMac=d.peerMac; st.peerName=d.peerName||'bonded device'; st.localMac=d.localMac||''; cb(true,st); }
       else { st.ok=false; cb(false,st); }
     }).catch(function(){ st.ok=false; cb(false,st); });
@@ -1005,15 +1000,15 @@ window.BondFs = (function(){
     opts=opts||{}; var doneMarker=opts.doneMarker; var maxPolls=opts.maxPolls||20; var iv=opts.intervalMs||500;
     var mySeq=0;
     // Baseline: discover current head seq so polling only sees NEW responses.
-    fetch('/api/espnow/messages?since=0&mac='+encodeURIComponent(st.peerMac)).then(function(r){return r.json();}).then(function(d){
+    hw.fetchJSON('/api/espnow/messages?since=0&mac='+encodeURIComponent(st.peerMac)).then(function(d){
       var m=(d&&d.messages)?d.messages:[]; for(var i=0;i<m.length;i++){ if((m[i].seq||0)>mySeq) mySeq=m[i].seq; }
-      return fetch('/api/bond/exec',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'cmd='+encodeURIComponent(cmd)});
+      return hw.postForm('/api/bond/exec', { cmd: cmd });
     }).then(function(r){return r.json();}).then(function(d){
       if(!d||!d.success){ if(opts.onResult) opts.onResult(null,(d&&(d.result||d.error))||'command failed'); return; }
       var lines=[], done=false, polls=0, lastNew=0, gotAny=false; var grace=opts.gracePolls||6;
       var t=setInterval(function(){
         polls++;
-        fetch('/api/espnow/messages?since='+mySeq+'&mac='+encodeURIComponent(st.peerMac)).then(function(r){return r.json();}).then(function(md){
+        hw.fetchJSON('/api/espnow/messages?since='+mySeq+'&mac='+encodeURIComponent(st.peerMac)).then(function(md){
           var ms=(md&&md.messages)?md.messages:[]; var newCount=0;
           for(var i=0;i<ms.length;i++){ var m=ms[i]; if(m.seq>mySeq) mySeq=m.seq; if(m.msg){ var ps=String(m.msg).split('\n'); for(var p=0;p<ps.length;p++) lines.push(ps[p]); newCount++; if(doneMarker&&String(m.msg).indexOf(doneMarker)>=0) done=true; } }
           if(newCount>0){ lastNew=polls; gotAny=true; }
@@ -1038,13 +1033,13 @@ window.BondFs = (function(){
     // Pre-create the landing dir so the polling list() below doesn't spam
     // [STORAGE] Cannot open directory until the first chunk lands and the
     // V4_FILE_RX path mkdir's it lazily. Both mkdirs are idempotent; ignore errors.
-    function mk(p, next){ fetch('/api/cli',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'cmd='+encodeURIComponent('mkdir '+p)}).then(function(){next();}).catch(function(){next();}); }
+    function mk(p, next){ hw.postFormText('/api/cli', { cmd: 'mkdir '+p }).then(function(){next();}).catch(function(){next();}); }
     mk('/espnow/received', function(){ mk(dir, function(){
-    fetch('/api/bond/exec',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'cmd='+encodeURIComponent('espnowsendfile '+st.localMac+' '+remotePath)})
+    hw.postForm('/api/bond/exec', { cmd: 'espnowsendfile '+st.localMac+' '+remotePath })
       .then(function(r){return r.json();}).then(function(d){
         if(!d||!d.success){ done(null,(d&&(d.result||d.error))||'command failed'); return; }
         var polls=0; var t=setInterval(function(){ polls++;
-          fetch('/api/files/list?path='+encodeURIComponent(dir)).then(function(r){return r.json();}).then(function(ld){
+          hw.fetchJSON('/api/files/list?path='+encodeURIComponent(dir)).then(function(ld){
             var items=(ld&&ld.files)?ld.files:[]; var found=false;
             for(var i=0;i<items.length;i++){ var nm=items[i]&&items[i].name?items[i].name:items[i]; if(nm===base||String(nm).split('/').pop()===base){found=true;break;} }
             if(found){ clearInterval(t); done({localPath:localPath,localUrl:localUrl,base:base},null); }

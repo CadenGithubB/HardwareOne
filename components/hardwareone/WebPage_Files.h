@@ -114,7 +114,7 @@ function setStorageError(msg) {
 }
 
 function updateStorageStats(path) {
-  fetch('/api/files/stats?path=' + encodeURIComponent(path || '/')).then(r => r.json()).then(d => {
+  hw.fetchJSON('/api/files/stats?path=' + encodeURIComponent(path || '/')).then(d => {
     if (d.success) {
       applyStorageStats(d.used, d.total, d.free, d.usagePercent, '');
     } else {
@@ -166,7 +166,7 @@ function editFile(filePath) {
   isJsonEdit = currentEditPath.toLowerCase().endsWith('.json');
   document.getElementById('btn-pretty').style.display = isJsonEdit ? 'inline-block' : 'none';
   document.getElementById('btn-raw').style.display = isJsonEdit ? 'inline-block' : 'none';
-  fetch('/api/files/read?name=' + encodeURIComponent(currentEditPath)).then(r=>r.text()).then(txt=>{ document.getElementById('editor-text').value = txt; document.getElementById('editor-status').textContent=''; }).catch(e=>{ document.getElementById('editor-status').textContent = 'Error: ' + e.message; });
+  hw.fetchText('/api/files/read?name=' + encodeURIComponent(currentEditPath)).then(txt=>{ document.getElementById('editor-text').value = txt; document.getElementById('editor-status').textContent=''; }).catch(e=>{ document.getElementById('editor-status').textContent = 'Error: ' + e.message; });
 }
 function closeEditor(){ document.getElementById('editor-modal').style.display = 'none'; }
 function saveEditor(){
@@ -175,8 +175,8 @@ function saveEditor(){
     try { JSON.parse(content); } catch (e) { document.getElementById('editor-status').textContent = 'Invalid JSON: ' + e.message; return; }
   }
   document.getElementById('editor-status').textContent = 'Saving...';
-  fetch('/api/files/write', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body: 'name=' + encodeURIComponent(currentEditPath) + '&content=' + encodeURIComponent(content) })
-    .then(r=>r.json()).then(j=>{ 
+  hw.postForm('/api/files/write', { name: currentEditPath, content: content })
+    .then(r=>r.json()).then(j=>{
       if(j && j.success){ 
         document.getElementById('editor-status').textContent='Saved.'; 
         if(fileManager) fileManager.refresh(); 

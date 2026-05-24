@@ -233,8 +233,7 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
 
   // ── status poll ──
   function fetchStatus(afterGen, metaEl2) {
-    fetch('/api/llm/status', {credentials:'same-origin'})
-      .then(function(r){ return r.json(); })
+    hw.fetchJSON('/api/llm/status')
       .then(function(j){
         if (j.state === 'READY') {
           var modelName = (j.model||'').split('/').pop().replace(/\.bin$/i,'') || 'model';
@@ -308,8 +307,7 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
   }
 
   function fetchModels() {
-    fetch('/api/llm/models', {credentials:'same-origin'})
-      .then(function(r){ return r.json(); })
+    hw.fetchJSON('/api/llm/models')
       .then(function(arr){
         modelSel.innerHTML = '';
         if (!arr.length) {
@@ -364,12 +362,7 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
     // Fake AbortController so qaStop() can set stopped = true
     abortCtrl = { abort: function() { ctx.stopped = true; } };
 
-    fetch('/api/llm/generate', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      credentials: 'same-origin',
-      body: JSON.stringify(body)
-    }).then(function(r) { return r.json(); })
+    hw.postJSON('/api/llm/generate', body)
       .then(function(j) {
         if (!j.ok) {
           var err = document.createElement('div');
@@ -400,9 +393,7 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
 
   function pollResult(ctx) {
     if (ctx.stopped) { finishGen(ctx); return; }
-    fetch('/api/llm/result?session=' + ctx.pollSession + '&offset=' + ctx.pollOffset, {
-      credentials: 'same-origin'
-    }).then(function(r) { return r.json(); })
+    hw.fetchJSON('/api/llm/result?session=' + ctx.pollSession + '&offset=' + ctx.pollOffset)
       .then(function(j) {
         if (j.stale) { finishGen(ctx); return; }
         if (j.text && j.text.length > 0) {
@@ -537,12 +528,7 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
     }
     resultDiv.style.display = '';
     resultDiv.textContent = 'Running...';
-    fetch('/api/cli', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-      credentials: 'same-origin',
-      body: 'cmd=' + encodeURIComponent(cmd) + '&capture=1'
-    }).then(function(r) { return r.text(); })
+    hw.postFormText('/api/cli', { cmd: cmd, capture: '1' })
       .then(function(t) {
         resultDiv.textContent = t || '(no output)';
         if (runBtn) runBtn.textContent = 'Ran \u2713';
@@ -617,7 +603,7 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
   };
 
   window.qaStop = function() {
-    fetch('/api/llm/stop', {method:'POST', credentials:'same-origin'});
+    hw.postJSON('/api/llm/stop', {}).catch(function(){});
     if (abortCtrl) abortCtrl.abort();
   };
 
@@ -629,11 +615,7 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
     stateEl.textContent = 'Loading...';
     setReady(false);
     addSys('Loading ' + name + '...');
-    fetch('/api/llm/load', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      credentials:'same-origin',
-      body: JSON.stringify({model: path, max_ctx: 64})
-    }).then(function(r){ return r.json(); })
+    hw.postJSON('/api/llm/load', {model: path, max_ctx: 64})
       .then(function(j){
         if (j.ok) { fetchStatus(false, null); }
         else { fetchStatus(false, null); }
@@ -642,8 +624,9 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
   };
 
   window.qaUnloadModel = function() {
-    fetch('/api/llm/unload', {method:'POST', credentials:'same-origin'})
-      .then(function(){ fetchStatus(false, null); });
+    hw.postJSON('/api/llm/unload', {})
+      .then(function(){ fetchStatus(false, null); })
+      .catch(function(){ fetchStatus(false, null); });
   };
 
   inputEl.addEventListener('keydown', function(e){
