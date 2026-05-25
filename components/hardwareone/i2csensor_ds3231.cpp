@@ -28,6 +28,22 @@ extern TwoWire Wire1;
 // RTC Cache
 RTCCache gRtcCache = {nullptr, {0}, 0.0f, false, 0};
 
+// Resolve which I2C bus + TwoWire* the DS3231 is on, from settings. Returns
+// false (with outputs unchanged) if the requested bus isn't initialized —
+// e.g., user set rtcBus=1 but i2c2BusEnabled=false. Each I2C function below
+// calls this and bails on failure rather than silently using Wire1, so a
+// misconfigured rtcBus surfaces as "RTC not connected" instead of writing
+// to the wrong bus. Reading gSettings.rtcBus on every call is fine — it's a
+// single load, no atomicity concerns (reboot-required = no runtime updates).
+static bool rtcResolveBus(uint8_t* outBus, TwoWire** outWire) {
+  const uint8_t bus = (uint8_t)gSettings.rtcBus;
+  TwoWire* w = i2c() ? i2c()->getWire(bus) : nullptr;
+  if (!w) return false;
+  *outBus = bus;
+  *outWire = w;
+  return true;
+}
+
 // Sensor state
 bool gRtcEnabled = false;
 bool gRtcConnected = false;
@@ -55,23 +71,27 @@ static uint8_t decToBcd(uint8_t dec) {
 // ============================================================================
 
 static bool rtcWriteRegister(uint8_t reg, uint8_t value) {
-  return i2cDeviceTransaction(I2C_ADDR_DS3231, 100000, 100, [&]() -> bool {
-    Wire1.beginTransmission(I2C_ADDR_DS3231);
-    Wire1.write(reg);
-    Wire1.write(value);
-    return Wire1.endTransmission() == 0;
+  uint8_t bus; TwoWire* w;
+  if (!rtcResolveBus(&bus, &w)) return false;
+  return i2cDeviceTransaction(bus, I2C_ADDR_DS3231, 100000, 100, [&]() -> bool {
+    w->beginTransmission(I2C_ADDR_DS3231);
+    w->write(reg);
+    w->write(value);
+    return w->endTransmission() == 0;
   });
 }
 
 static bool rtcReadRegisters(uint8_t startReg, uint8_t* buffer, uint8_t count) {
-  return i2cDeviceTransaction(I2C_ADDR_DS3231, 100000, 100, [&]() -> bool {
-    Wire1.beginTransmission(I2C_ADDR_DS3231);
-    Wire1.write(startReg);
-    if (Wire1.endTransmission() != 0) return false;
-    
-    Wire1.requestFrom((uint8_t)I2C_ADDR_DS3231, count);
-    for (uint8_t i = 0; i < count && Wire1.available(); i++) {
-      buffer[i] = Wire1.read();
+  uint8_t bus; TwoWire* w;
+  if (!rtcResolveBus(&bus, &w)) return false;
+  return i2cDeviceTransaction(bus, I2C_ADDR_DS3231, 100000, 100, [&]() -> bool {
+    w->beginTransmission(I2C_ADDR_DS3231);
+    w->write(startReg);
+    if (w->endTransmission() != 0) return false;
+
+    w->requestFrom((uint8_t)I2C_ADDR_DS3231, count);
+    for (uint8_t i = 0; i < count && w->available(); i++) {
+      buffer[i] = w->read();
     }
     return true;
   });
@@ -102,18 +122,20 @@ bool rtcReadDateTime(RTCDateTime* dt) {
 
 bool rtcWriteDateTime(const RTCDateTime* dt) {
   if (!dt) return false;
-  
-  return i2cDeviceTransaction(I2C_ADDR_DS3231, 100000, 100, [&]() -> bool {
-    Wire1.beginTransmission(I2C_ADDR_DS3231);
-    Wire1.write(DS3231_REG_SECONDS);
-    Wire1.write(decToBcd(dt->second));
-    Wire1.write(decToBcd(dt->minute));
-    Wire1.write(decToBcd(dt->hour));  // 24-hour mode
-    Wire1.write(dt->dayOfWeek);
-    Wire1.write(decToBcd(dt->day));
-    Wire1.write(decToBcd(dt->month));
-    Wire1.write(decToBcd(dt->year - 2000));
-    return Wire1.endTransmission() == 0;
+  uint8_t bus; TwoWire* w;
+  if (!rtcResolveBus(&bus, &w)) return false;
+
+  return i2cDeviceTransaction(bus, I2C_ADDR_DS3231, 100000, 100, [&]() -> bool {
+    w->beginTransmission(I2C_ADDR_DS3231);
+    w->write(DS3231_REG_SECONDS);
+    w->write(decToBcd(dt->second));
+    w->write(decToBcd(dt->minute));
+    w->write(decToBcd(dt->hour));  // 24-hour mode
+    w->write(dt->dayOfWeek);
+    w->write(decToBcd(dt->day));
+    w->write(decToBcd(dt->month));
+    w->write(decToBcd(dt->year - 2000));
+    return w->endTransmission() == 0;
   });
 }
 
@@ -140,9 +162,13 @@ bool rtcEarlyBootSync() {
   // This works even if the RTC sensor task isn't running yet
   // Just needs I2C to be initialized
   
-  // Quick probe to check if RTC is present (mutex-protected)
-  if (!i2cPingAddress(I2C_ADDR_DS3231, 100000, 200)) {
-    DEBUG_RTC_LIFECYCLEF("[RTC] Early boot sync: RTC not detected at 0x%02X", I2C_ADDR_DS3231);
+  // Quick probe on the RTC's configured bus (mutex-protected). Reads
+  // gSettings.rtcBus rather than defaulting to bus 0 so an RTC on the
+  // secondary STEMMA QT gets found during early-boot system-time sync.
+  const uint8_t rtcBus = (uint8_t)gSettings.rtcBus;
+  if (!i2cPingAddress(I2C_ADDR_DS3231, 100000, 200, rtcBus)) {
+    DEBUG_RTC_LIFECYCLEF("[RTC] Early boot sync: RTC not detected at 0x%02X on bus %u",
+                         I2C_ADDR_DS3231, rtcBus);
     return false;
   }
   
@@ -486,12 +512,13 @@ void rtcTask(void* pvParameters) {
 // ============================================================================
 
 bool rtcInit() {
-  DEBUG_RTC_LIFECYCLEF("[RTC] Initializing DS3231...");
-  
-  // Check if device responds
-  bool found = i2cPingAddress(I2C_ADDR_DS3231, 100000, 50);
+  const uint8_t rtcBus = (uint8_t)gSettings.rtcBus;
+  DEBUG_RTC_LIFECYCLEF("[RTC] Initializing DS3231 on bus %u...", rtcBus);
+
+  // Check if device responds on the configured bus
+  bool found = i2cPingAddress(I2C_ADDR_DS3231, 100000, 50, rtcBus);
   if (!found) {
-    DEBUG_RTC_LIFECYCLEF("[RTC] DS3231 not found at 0x%02X", I2C_ADDR_DS3231);
+    DEBUG_RTC_LIFECYCLEF("[RTC] DS3231 not found at 0x%02X on bus %u", I2C_ADDR_DS3231, rtcBus);
     return false;
   }
   

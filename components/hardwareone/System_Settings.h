@@ -230,6 +230,12 @@ struct Settings {
       automationsEnabled(true),
 #endif
       i2cBusEnabled(true),
+      i2c2BusEnabled(false),
+      // Per-device bus assignments — all default to bus 0 (primary), so an
+      // existing single-bus config is unchanged. Bumped to bus 1 only when
+      // the user explicitly moves a device to the secondary STEMMA QT port.
+      oledBus(0), gamepadBus(0), gpsBus(0), rtcBus(0), fmRadioBus(0),
+      presenceBus(0), imuBus(0), thermalBus(0), tofBus(0), apdsBus(0), servoBus(0),
       ledBrightness(100),
       ledStartupEnabled(true),
       ledStartupEffect("rainbow"),
@@ -702,9 +708,39 @@ struct Settings {
   bool automationsEnabled;  // Enable/disable automation scheduler (runs from main loop)
 #endif
   // I2C Hardware system
-  bool i2cBusEnabled;       // Enable/disable I2C bus hardware (Wire/Wire1 init and transactions)
-  int i2cSdaPin = I2C_SDA_PIN_DEFAULT;  // I2C SDA pin (board-specific, see System_BuildConfig.h)
-  int i2cSclPin = I2C_SCL_PIN_DEFAULT;  // I2C SCL pin (board-specific, see System_BuildConfig.h)
+  // bus 0 = primary STEMMA QT — Wire1 internally, "I2C1" in the UI.
+  bool i2cBusEnabled;       // Enable/disable bus 0 hardware (Wire1 init and transactions)
+  int i2cSdaPin = I2C_SDA_PIN_DEFAULT;  // bus 0 SDA pin (board-specific, see System_BuildConfig.h)
+  int i2cSclPin = I2C_SCL_PIN_DEFAULT;  // bus 0 SCL pin (board-specific, see System_BuildConfig.h)
+  // bus 1 = secondary STEMMA QT — Wire internally, "I2C2" in the UI. Only the
+  // FeatherS3[D] currently has a second port wired. On boards without one,
+  // I2C2_*_PIN_DEFAULT is -1, i2c2BusEnabled stays false, and the dual-bus
+  // system in System_I2C_Manager.cpp skips bus 1 init / scans / transactions.
+  bool i2c2BusEnabled;      // Enable/disable bus 1 hardware (Wire init and transactions)
+  int i2c2SdaPin = I2C2_SDA_PIN_DEFAULT;  // bus 1 SDA pin (-1 = unavailable on this board)
+  int i2c2SclPin = I2C2_SCL_PIN_DEFAULT;  // bus 1 SCL pin (-1 = unavailable on this board)
+  // Per-device bus assignment (0 = I2C1 / Wire1 / primary STEMMA QT;
+  //                            1 = I2C2 / Wire / secondary STEMMA QT).
+  // All default to 0 so existing single-bus configurations work unchanged.
+  // Setting any of these to 1 requires (a) i2c2BusEnabled = true and (b) the
+  // board to have valid I2C2 pins. Reboot required after change — sensor
+  // tasks cache their bus assignment at init time and the underlying
+  // TwoWire / library object is bound at construction.
+  //
+  // Stored as `int` (not uint8_t) to match the existing SETTING_INT registry
+  // type — the registry writes through a void* assuming 4-byte storage, so
+  // a uint8_t field would corrupt adjacent bytes.
+  int oledBus;              // SSD1306 display (HAL_Display / OLED_Utils)
+  int gamepadBus;           // Adafruit Seesaw I2C gamepad
+  int gpsBus;               // PA1010D mini GPS
+  int rtcBus;               // DS3231 precision RTC
+  int fmRadioBus;           // RDA5807 FM radio
+  int presenceBus;          // STHS34PF80 IR presence/motion
+  int imuBus;               // BNO055 9-axis IMU (compiled out by default)
+  int thermalBus;           // MLX90640 thermal camera (compiled out)
+  int tofBus;               // VL53L4CX time-of-flight (compiled out)
+  int apdsBus;              // APDS9960 gesture/proximity (compiled out)
+  int servoBus;             // PCA9685 16-channel servo (compiled out)
   // Hardware settings (LED)
   int ledBrightness;        // 0-100%
   bool ledStartupEnabled;   // Enable startup effect

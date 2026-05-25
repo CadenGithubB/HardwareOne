@@ -36,8 +36,23 @@
 #include "System_ESPNow_Sensors.h"
 #endif
 
-// The RDA5807 is on Wire1 (STEMMA QT bus)
+// The RDA5807 used to be hardcoded to Wire1; with dual-bus it lives on
+// whatever gSettings.fmRadioBus selects (default bus 0 = Wire1). The
+// mathertel Radio library binds the TwoWire at initWire(port&), so we
+// pass *myWire at fmRadioInit. All transactions also pass fmRadioBus so
+// the bus-aware helpers acquire the right mutex/clock.
 extern TwoWire Wire1;
+
+// Resolve which bus the FM radio is on. Returns false if unavailable
+// (e.g., fmRadioBus=1 but i2c2BusEnabled=false).
+static bool fmRadioResolveBus(uint8_t* outBus, TwoWire** outWire) {
+  const uint8_t bus = (uint8_t)gSettings.fmRadioBus;
+  TwoWire* w = i2c() ? i2c()->getWire(bus) : nullptr;
+  if (!w) return false;
+  *outBus = bus;
+  *outWire = w;
+  return true;
+}
 
 // Forward declarations
 extern bool createFMRadioTask();
@@ -121,15 +136,25 @@ bool fmRadioInit() {
   
   bool success = false;
   INFO_FMRADIO_LIFECYCLEF("Starting FM Radio I2C initialization");
-  
-  i2cDeviceTransactionVoid(I2C_ADDR_FM_RADIO, FM_RADIO_I2C_CLOCK, 1000, [&]() {
-    DEBUG_FMRADIO_LIFECYCLEF("I2C transaction started, calling radio.initWire(Wire1)");
-    // Initialize the radio with Wire1 (STEMMA QT bus)
-    if (!radio.initWire(Wire1)) {
+
+  // Resolve which bus the FM radio is on. The radio library binds the
+  // TwoWire at initWire(), so we must pass *myWire here. Bail closed if
+  // the bus isn't initialized.
+  uint8_t fmBus; TwoWire* fmWire;
+  if (!fmRadioResolveBus(&fmBus, &fmWire)) {
+    ERROR_FMRADIOF("FM Radio: bus %d not initialized", gSettings.fmRadioBus);
+    return false;
+  }
+
+  i2cDeviceTransactionVoid(fmBus, I2C_ADDR_FM_RADIO, FM_RADIO_I2C_CLOCK, 1000, [&]() {
+    DEBUG_FMRADIO_LIFECYCLEF("I2C transaction started, calling radio.initWire on bus %u", fmBus);
+    // Initialize the radio with the resolved TwoWire reference for the
+    // configured bus (dereferenced — initWire takes TwoWire&).
+    if (!radio.initWire(*fmWire)) {
       ERROR_FMRADIOF("FM Radio initWire() failed - check I2C connections");
       return;  // Init failed
     }
-    INFO_FMRADIO_LIFECYCLEF("FM Radio initWire() success - RDA5807M chip detected");
+    INFO_FMRADIO_LIFECYCLEF("FM Radio initWire() success - RDA5807M chip detected on bus %u", fmBus);
     radio.debugEnable(false);
     
     // Set band and initial frequency
@@ -172,7 +197,7 @@ void fmRadioDeinit() {
   
   if (gRadioInitialized) {
     DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] Starting I2C transaction for deinitialization");
-    i2cDeviceTransactionVoid(I2C_ADDR_FM_RADIO, FM_RADIO_I2C_CLOCK, 500, [&]() {
+    i2cDeviceTransactionVoid((uint8_t)gSettings.fmRadioBus, I2C_ADDR_FM_RADIO, FM_RADIO_I2C_CLOCK, 500, [&]() {
       DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] Muting radio before termination");
       radio.setMute(true);
       DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] Calling radio.term() to power down chip");
@@ -225,7 +250,7 @@ void fmRadioTask(void* parameter) {
 
       // Unmute now that init succeeded
       DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO_TASK] Unmuting radio for audio output");
-      i2cDeviceTransactionVoid(I2C_ADDR_FM_RADIO, FM_RADIO_I2C_CLOCK, 200, [&]() {
+      i2cDeviceTransactionVoid((uint8_t)gSettings.fmRadioBus, I2C_ADDR_FM_RADIO, FM_RADIO_I2C_CLOCK, 200, [&]() {
         radio.setMute(false);
         gFmRadioCache.muted = false;
         DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO_TASK] Radio unmuted successfully");
@@ -386,9 +411,9 @@ void updateFMRadio() {
   
   // Use task timeout wrapper to catch FM radio performance issues
   // Note: Still NACK-tolerant since RDA5807M legitimately NACKs when no RDS data available
-  auto result = i2cTaskWithTimeout(I2C_ADDR_FM_RADIO, FM_RADIO_I2C_CLOCK, 1000, [&]() -> bool {
+  auto result = i2cTaskWithTimeout((uint8_t)gSettings.fmRadioBus, I2C_ADDR_FM_RADIO, FM_RADIO_I2C_CLOCK, 1000, [&]() -> bool {
     // Wrap the NACK-tolerant transaction within timeout monitoring
-    i2cTransactionNACKTolerant(I2C_ADDR_FM_RADIO, FM_RADIO_I2C_CLOCK, 100, [&]() {
+    i2cTransactionNACKTolerant((uint8_t)gSettings.fmRadioBus, I2C_ADDR_FM_RADIO, FM_RADIO_I2C_CLOCK, 100, [&]() {
       // Check for RDS data (this triggers callbacks)
       radio.checkRDS();
       
@@ -471,7 +496,7 @@ const char* cmd_fmradio_start(const String& argsInput) {
     return "FM Radio already queued";
   }
 
-  if (!i2cPingAddress(I2C_ADDR_FM_RADIO, 100000, 50)) {
+  if (!i2cPingAddress(I2C_ADDR_FM_RADIO, 100000, 50, (uint8_t)gSettings.fmRadioBus)) {
     return "[FM Radio] Not detected on I2C bus";
   }
 
@@ -528,7 +553,7 @@ const char* cmd_fmradio_tune(const String& argsInput) {
     }
   }
   
-  i2cDeviceTransactionVoid(I2C_ADDR_FM_RADIO, FM_RADIO_I2C_CLOCK, 500, [&]() {
+  i2cDeviceTransactionVoid((uint8_t)gSettings.fmRadioBus, I2C_ADDR_FM_RADIO, FM_RADIO_I2C_CLOCK, 500, [&]() {
     radio.setFrequency(freqInt);
     gFmRadioCache.frequency = freqInt;
     
@@ -557,7 +582,7 @@ const char* cmd_fmradio_seek(const String& argsInput) {
     seekUp = false;
   }
   
-  i2cDeviceTransactionVoid(I2C_ADDR_FM_RADIO, FM_RADIO_I2C_CLOCK, 6000, [&]() {
+  i2cDeviceTransactionVoid((uint8_t)gSettings.fmRadioBus, I2C_ADDR_FM_RADIO, FM_RADIO_I2C_CLOCK, 6000, [&]() {
     // mathertel library seek methods
     if (seekUp) {
       radio.seekUp(false);  // false = don't wrap
@@ -608,7 +633,7 @@ const char* cmd_fmradio_volume(const String& argsInput) {
     return "OK";
   }
   
-  i2cDeviceTransactionVoid(I2C_ADDR_FM_RADIO, FM_RADIO_I2C_CLOCK, 200, [&]() {
+  i2cDeviceTransactionVoid((uint8_t)gSettings.fmRadioBus, I2C_ADDR_FM_RADIO, FM_RADIO_I2C_CLOCK, 200, [&]() {
     radio.setVolume(vol);
     gFmRadioCache.volume = vol;
   });
@@ -634,7 +659,7 @@ const char* cmd_fmradio_mute(const String& argsInput) {
   bool shouldMute = (arg != "off" && arg != "unmute");  // Default to mute unless explicitly unmute
   gFmRadioCache.muted = shouldMute;
   
-  i2cDeviceTransactionVoid(I2C_ADDR_FM_RADIO, FM_RADIO_I2C_CLOCK, 200, [&]() {
+  i2cDeviceTransactionVoid((uint8_t)gSettings.fmRadioBus, I2C_ADDR_FM_RADIO, FM_RADIO_I2C_CLOCK, 200, [&]() {
     radio.setMute(gFmRadioCache.muted);
   });
   
@@ -656,7 +681,7 @@ const char* cmd_fmradio_status(const String& argsInput) {
   } else {
     // Update signal info
     if (gRadioInitialized) {
-      i2cDeviceTransactionVoid(I2C_ADDR_FM_RADIO, FM_RADIO_I2C_CLOCK, 200, [&]() {
+      i2cDeviceTransactionVoid((uint8_t)gSettings.fmRadioBus, I2C_ADDR_FM_RADIO, FM_RADIO_I2C_CLOCK, 200, [&]() {
         RADIO_INFO ri;
         radio.getRadioInfo(&ri);
         gFmRadioCache.rssi = ri.rssi;

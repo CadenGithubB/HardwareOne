@@ -23,7 +23,12 @@ struct GamepadCache {
 class String;
 class Adafruit_seesaw;
 
-extern Adafruit_seesaw gGamepadSeesaw;
+// Heap-allocated at sensor init with the right TwoWire* for the gamepad's
+// configured bus (gSettings.gamepadBus). nullptr until init runs (or after a
+// failed init). Was a stack global `Adafruit_seesaw gGamepadSeesaw(&Wire1)`
+// pre-dual-bus, but the library binds the TwoWire pointer at construction
+// time so we need to defer construction until we know which bus to use.
+extern Adafruit_seesaw* gGamepadSeesaw;
 extern GamepadCache gGamepadCache;
 
 // Build gamepad JSON snapshot from gGamepadCache. Safe to call from any task —

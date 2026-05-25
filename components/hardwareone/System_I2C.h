@@ -33,23 +33,41 @@
 // who includes this header.
 
 // ============================================================================
-// Legacy Wrapper Functions - Delegate to Manager
+// Transaction Helpers — single-bus (legacy) + dual-bus (new) variants
 // ============================================================================
+// Two flavors of every transaction helper exist:
+//
+//   * Legacy 4-arg: `i2cDeviceTransactionVoid(addr, clk, timeout, lambda)`
+//     The lambda takes no arguments and references Wire1 directly. Defaults
+//     to bus 0 (Wire1). Existing sensor drivers compile unchanged.
+//
+//   * Dual-bus 5-arg: `i2cDeviceTransactionVoid(bus, addr, clk, timeout, lambda)`
+//     The lambda CAN take a `TwoWire&` argument and use that for the
+//     transmission, letting one driver work on either bus. The lambda can
+//     also still be nullary — `executeTransaction` detects the arity at
+//     compile time via `if constexpr` and dispatches accordingly. So a
+//     migrated driver that always uses `w.foo()` works on either bus, and
+//     an unmigrated driver that uses `Wire1.foo()` works ONLY when its
+//     configured bus is 0 (the bus 0 wire IS Wire1).
+//
+// Both flavors share the underlying mgr->executeTransaction() machinery.
 
-// Transaction wrappers
+// Legacy single-bus helper — implicit bus 0 (Wire1). Lambda gets no args.
 template<typename Func>
-auto i2cDeviceTransaction(uint8_t address, uint32_t clockHz, uint32_t timeoutMs, Func&& operation) 
+auto i2cDeviceTransaction(uint8_t address, uint32_t clockHz, uint32_t timeoutMs, Func&& operation)
     -> decltype(operation()) {
   extern bool gI2CBusEnabled;
   if (!gI2CBusEnabled) return decltype(operation())();
-  
+
   I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
   if (!mgr) return decltype(operation())();
-  
+
+  // getDevice / registerDevice default busIdx=0 — legacy lookups still hit
+  // the primary bus's device table slot, unchanged from before.
   I2CDevice* dev = mgr->getDevice(address);
   if (!dev) dev = mgr->registerDevice(address, "Auto", clockHz, timeoutMs);
   if (!dev) return decltype(operation())();
-  
+
   return dev->transaction(std::forward<Func>(operation), I2CDevice::Mode::STANDARD);
 }
 
@@ -57,27 +75,81 @@ template<typename Func>
 void i2cDeviceTransactionVoid(uint8_t address, uint32_t clockHz, uint32_t timeoutMs, Func&& operation) {
   extern bool gI2CBusEnabled;
   if (!gI2CBusEnabled) return;
-  
+
   I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
   if (!mgr) return;
-  
+
   I2CDevice* dev = mgr->getDevice(address);
   if (!dev) dev = mgr->registerDevice(address, "Auto", clockHz, timeoutMs);
   if (!dev) return;
-  
+
+  dev->transaction(std::forward<Func>(operation), I2CDevice::Mode::STANDARD);
+}
+
+// New dual-bus helpers — explicit `bus` (0 or 1). Lambda is nullary, exactly
+// like the legacy helpers. Sensors that need to talk to a specific TwoWire
+// (e.g., one routed to bus 1) capture the TwoWire* externally at init time
+// via `i2c()->getWire(myBus)` and reference it through the capture instead
+// of using Wire1 directly. The manager routes mutex/clock/recovery to the
+// device's bus internally so the rest of the transaction shape is unchanged.
+template<typename Func>
+auto i2cDeviceTransaction(uint8_t bus, uint8_t address, uint32_t clockHz,
+                          uint32_t timeoutMs, Func&& operation)
+    -> decltype(operation()) {
+  extern bool gI2CBusEnabled;
+  if (!gI2CBusEnabled) return decltype(operation())();
+
+  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  if (!mgr) return decltype(operation())();
+
+  I2CDevice* dev = mgr->getDevice(address, bus);
+  if (!dev) dev = mgr->registerDevice(address, "Auto", clockHz, timeoutMs, bus);
+  if (!dev) return decltype(operation())();
+
+  return dev->transaction(std::forward<Func>(operation), I2CDevice::Mode::STANDARD);
+}
+
+template<typename Func>
+void i2cDeviceTransactionVoid(uint8_t bus, uint8_t address, uint32_t clockHz,
+                              uint32_t timeoutMs, Func&& operation) {
+  extern bool gI2CBusEnabled;
+  if (!gI2CBusEnabled) return;
+
+  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  if (!mgr) return;
+
+  I2CDevice* dev = mgr->getDevice(address, bus);
+  if (!dev) dev = mgr->registerDevice(address, "Auto", clockHz, timeoutMs, bus);
+  if (!dev) return;
+
   dev->transaction(std::forward<Func>(operation), I2CDevice::Mode::STANDARD);
 }
 
 template<typename Func>
-auto i2cTaskWithStandardTimeout(uint8_t address, uint32_t clockHz, Func&& operation) 
+auto i2cTaskWithStandardTimeout(uint8_t address, uint32_t clockHz, Func&& operation)
     -> decltype(operation()) {
   return i2cDeviceTransaction(address, clockHz, 1000, std::forward<Func>(operation));
 }
 
 template<typename Func>
-auto i2cTaskWithTimeout(uint8_t address, uint32_t clockHz, uint32_t maxMs, Func&& operation) 
+auto i2cTaskWithTimeout(uint8_t address, uint32_t clockHz, uint32_t maxMs, Func&& operation)
     -> decltype(operation()) {
   return i2cDeviceTransaction(address, clockHz, maxMs, std::forward<Func>(operation));
+}
+
+// Bus-aware overloads — same semantics, leading `bus` arg routes the
+// transaction through the bus-aware i2cDeviceTransaction (per-bus mutex/
+// clock). Used by sensors migrated to dual-bus.
+template<typename Func>
+auto i2cTaskWithStandardTimeout(uint8_t bus, uint8_t address, uint32_t clockHz, Func&& operation)
+    -> decltype(operation()) {
+  return i2cDeviceTransaction(bus, address, clockHz, 1000, std::forward<Func>(operation));
+}
+
+template<typename Func>
+auto i2cTaskWithTimeout(uint8_t bus, uint8_t address, uint32_t clockHz, uint32_t maxMs, Func&& operation)
+    -> decltype(operation()) {
+  return i2cDeviceTransaction(bus, address, clockHz, maxMs, std::forward<Func>(operation));
 }
 
 // Defined here (before the template helpers that need it) rather than in the
@@ -99,14 +171,32 @@ template<typename Func>
 void i2cTransactionNACKTolerant(uint8_t address, uint32_t clockHz, uint32_t timeoutMs, Func&& operation) {
   extern bool gI2CBusEnabled;
   if (!gI2CBusEnabled) return;
-  
+
   I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
   if (!mgr) return;
-  
+
   I2CDevice* dev = mgr->getDevice(address);
   if (!dev) dev = mgr->registerDevice(address, "Auto", clockHz, timeoutMs);
   if (!dev) return;
-  
+
+  dev->transaction(std::forward<Func>(operation), I2CDevice::Mode::NACK_TOLERANT);
+}
+
+// Dual-bus NACK-tolerant variant (FM radio path uses NACK-tolerant for
+// register polling; same shape extended with a bus selector).
+template<typename Func>
+void i2cTransactionNACKTolerant(uint8_t bus, uint8_t address, uint32_t clockHz,
+                                uint32_t timeoutMs, Func&& operation) {
+  extern bool gI2CBusEnabled;
+  if (!gI2CBusEnabled) return;
+
+  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  if (!mgr) return;
+
+  I2CDevice* dev = mgr->getDevice(address, bus);
+  if (!dev) dev = mgr->registerDevice(address, "Auto", clockHz, timeoutMs, bus);
+  if (!dev) return;
+
   dev->transaction(std::forward<Func>(operation), I2CDevice::Mode::NACK_TOLERANT);
 }
 
@@ -140,29 +230,34 @@ inline bool checkTaskStackSafety(const char* sensorName, uint32_t totalStackWord
 
 // Ping/probe helpers - DO NOT auto-register devices during probe!
 // These are used by i2cscan to check if devices exist, not to set them up
-inline uint8_t i2cProbeAddress(uint8_t address, uint32_t clockHz, uint32_t timeoutMs) {
-  extern TwoWire Wire1;
+// Probe a single address on a specific bus. Does NOT auto-register the device
+// (probes are used by the scanner / wizards to check existence, not to set
+// devices up for ongoing use). `bus` defaults to 0 so legacy callers work.
+inline uint8_t i2cProbeAddress(uint8_t address, uint32_t clockHz, uint32_t timeoutMs, uint8_t bus = 0) {
   extern bool gI2CBusEnabled;
-  
   if (!gI2CBusEnabled) return 4;
-  
+
   I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
   if (!mgr) return 4;
-  
-  SemaphoreHandle_t mutex = mgr->getBusMutex();
+  if (!mgr->isBusInitialized(bus)) return 4;
+
+  SemaphoreHandle_t mutex = mgr->getBusMutex(bus);
+  TwoWire*          wire  = mgr->getWire(bus);
+  if (!mutex || !wire) return 4;
+
   uint8_t err = 4;
-  if (mutex && xSemaphoreTake(mutex, pdMS_TO_TICKS(timeoutMs)) == pdTRUE) {
-    Wire1.setClock(clockHz);
-    Wire1.beginTransmission(address);
-    err = Wire1.endTransmission();
-    Wire1.setClock(100000);
+  if (xSemaphoreTake(mutex, pdMS_TO_TICKS(timeoutMs)) == pdTRUE) {
+    wire->setClock(clockHz);
+    wire->beginTransmission(address);
+    err = wire->endTransmission();
+    wire->setClock(100000);
     xSemaphoreGive(mutex);
   }
   return err;
 }
 
-inline bool i2cPingAddress(uint8_t address, uint32_t clockHz, uint32_t timeoutMs) {
-  return (i2cProbeAddress(address, clockHz, timeoutMs) == 0);
+inline bool i2cPingAddress(uint8_t address, uint32_t clockHz, uint32_t timeoutMs, uint8_t bus = 0) {
+  return (i2cProbeAddress(address, clockHz, timeoutMs, bus) == 0);
 }
 
 // Centralized device stop handler: ESP-NOW broadcast + notification

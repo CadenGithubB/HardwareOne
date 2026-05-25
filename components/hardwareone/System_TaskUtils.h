@@ -10,7 +10,17 @@
 // ============================================================================
 
 constexpr uint32_t CMD_EXEC_STACK_WORDS = 6144;      // ~24KB (automation run + debug vsnprintf frames need deep stack)
-constexpr uint32_t SENSOR_QUEUE_STACK_WORDS = 2765;  // ~11KB - reduced 10%
+constexpr uint32_t SENSOR_QUEUE_STACK_WORDS = 3072;  // ~12KB (bumped back from
+                                                     // the 2765 "reduced 10%" value.
+                                                     // gamepadInit (seesaw.begin →
+                                                     // SWReset → ~10-deep Wire1 calls)
+                                                     // was overflowing the 11KB budget
+                                                     // when the dual-bus refactor's
+                                                     // per-bus locals in executeTransaction
+                                                     // (uint8_t bus + SemaphoreHandle_t
+                                                     // mutex) pushed the peak by ~8 B.
+                                                     // 12KB gives a comfortable margin
+                                                     // for future per-sensor I2C work.
 constexpr uint32_t ESPNOW_HB_STACK_WORDS = 5530;     // ~22KB. Phase 3.4+ Ed25519/X25519 work is NOT done here:
                                                      // SESSION_OPEN/CONFIRM RX handlers PSRAM-copy the payload and
                                                      // submitDeferredToCmdExec() the verify→keygen→ECDH→KDF→sign chain

@@ -1,6 +1,9 @@
 /**
  * I2C Device Manager Implementation
- * Unified I2C subsystem controller
+ * Unified I2C subsystem controller — supports up to NUM_BUSES (currently 2)
+ * independent I2C buses, each with its own mutex / Wire instance / clock
+ * stack / metrics. Bus 0 = Wire1 (primary STEMMA QT / "I2C1"), bus 1 = Wire
+ * (secondary STEMMA QT / "I2C2", only used on boards like the FeatherS3[D]).
  */
 
 #include <Wire.h>
@@ -14,6 +17,12 @@
 // I2C bus configuration (defaults, overridden by settings at runtime)
 #define I2C_WIRE1_DEFAULT_FREQ 100000
 
+// Bus → ESP-IDF I2C port mapping. Arduino's Wire1 sits on I2C_NUM_1, Wire on
+// I2C_NUM_0. Used for i2c_filter_enable() during bus init / recovery.
+static inline i2c_port_t i2cPortForBus(uint8_t bus) {
+  return (bus == 0) ? I2C_NUM_1 : I2C_NUM_0;
+}
+
 // Singleton instance
 I2CDeviceManager* I2CDeviceManager::instance = nullptr;
 
@@ -21,35 +30,54 @@ I2CDeviceManager* I2CDeviceManager::instance = nullptr;
 // Singleton Management
 // ============================================================================
 
-I2CDeviceManager::I2CDeviceManager() 
-  : deviceCount(0), busMutex(nullptr), managerMutex(nullptr),
-    currentClockHz(0), defaultClockHz(100000), clockStackDepth(0),
+I2CDeviceManager::I2CDeviceManager()
+  : deviceCount(0), managerMutex(nullptr),
     queueHead(0), queueTail(0), queueMutex(nullptr), pollingPaused(false) {
-  memset(&busMetrics, 0, sizeof(busMetrics));
-  memset(clockStack, 0, sizeof(clockStack));
+  // Per-bus arrays — zero everything, wire up Arduino TwoWire pointers.
+  // wires[] are set here at construction (compile-time addresses) so the
+  // table is always valid even before initBus() runs; busInitialized[] is
+  // the gate that prevents transactions on an un-begun bus.
+  for (uint8_t b = 0; b < NUM_BUSES; b++) {
+    busMutexes[b]         = nullptr;
+    currentClockHz[b]     = 0;
+    defaultClockHz[b]     = I2C_WIRE1_DEFAULT_FREQ;
+    busInitialized[b]     = false;
+    clockStackDepths[b]   = 0;
+    memset(&busMetrics[b], 0, sizeof(busMetrics[b]));
+    memset(clockStacks[b], 0, sizeof(clockStacks[b]));
+  }
+  wires[0] = &Wire1;  // bus 0 = primary  → Wire1 → ESP I2C_NUM_1
+  wires[1] = &Wire;   // bus 1 = secondary → Wire  → ESP I2C_NUM_0
   memset(deviceQueue, 0, sizeof(deviceQueue));
 }
 
 void I2CDeviceManager::initialize() {
   if (instance) return;
-  
+
   instance = new I2CDeviceManager();
   if (!instance) {
     Serial.println("[I2C_MGR] FATAL: Failed to allocate manager");
     while(1) delay(1000);
   }
-  
-  // Create mutexes
-  instance->busMutex = xSemaphoreCreateMutex();
+
+  // Create per-bus mutexes (cheap — single FreeRTOS mutex each, ~80 B).
+  // Even if bus 1 is never used, the mutex sits idle costing little.
+  for (uint8_t b = 0; b < NUM_BUSES; b++) {
+    instance->busMutexes[b] = xSemaphoreCreateMutex();
+    if (!instance->busMutexes[b]) {
+      Serial.printf("[I2C_MGR] FATAL: Failed to create bus %u mutex\n", b);
+      while(1) delay(1000);
+    }
+  }
   instance->managerMutex = xSemaphoreCreateMutex();
-  instance->queueMutex = xSemaphoreCreateMutex();
-  
-  if (!instance->busMutex || !instance->managerMutex || !instance->queueMutex) {
-    Serial.println("[I2C_MGR] FATAL: Failed to create mutexes");
+  instance->queueMutex   = xSemaphoreCreateMutex();
+
+  if (!instance->managerMutex || !instance->queueMutex) {
+    Serial.println("[I2C_MGR] FATAL: Failed to create manager/queue mutexes");
     while(1) delay(1000);
   }
-  
-  INFO_I2CF("Manager initialized successfully");
+
+  INFO_I2CF("Manager initialized successfully (NUM_BUSES=%u)", NUM_BUSES);
 }
 
 I2CDeviceManager* I2CDeviceManager::getInstance() {
@@ -63,49 +91,54 @@ I2CDeviceManager* I2CDeviceManager::getInstance() {
 // Device Registration
 // ============================================================================
 
-I2CDevice* I2CDeviceManager::registerDevice(uint8_t addr, const char* name, 
-                                             uint32_t clockHz, uint32_t timeoutMs) {
+I2CDevice* I2CDeviceManager::registerDevice(uint8_t addr, const char* name,
+                                             uint32_t clockHz, uint32_t timeoutMs,
+                                             uint8_t busIdx) {
   if (!managerMutex) return nullptr;
-  
+  if (busIdx >= NUM_BUSES) busIdx = 0;  // clamp invalid bus to primary
+
   if (xSemaphoreTake(managerMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-    // Check if already registered
+    // Devices are now keyed on (address, bus). Same physical address can
+    // legitimately live on both buses (e.g., two DS3231 RTCs, one per bus)
+    // and each gets its own I2CDevice slot with independent health tracking.
     for (int i = 0; i < deviceCount; i++) {
-      if (devices[i].address == addr) {
+      if (devices[i].address == addr && devices[i].bus == busIdx) {
         // Update name if upgrading from "Auto" to a real name
         if (strcmp(devices[i].name, "Auto") == 0 && strcmp(name, "Auto") != 0) {
           devices[i].name = name;
           devices[i].clockHz = clockHz;
           devices[i].adaptiveTimeoutMs = timeoutMs;
-          INFO_I2CF("Updated device 0x%02X: Auto -> %s clock=%luHz timeout=%lums",
-                    addr, name, (unsigned long)clockHz, (unsigned long)timeoutMs);
+          INFO_I2CF("Updated device 0x%02X bus=%u: Auto -> %s clock=%luHz timeout=%lums",
+                    addr, busIdx, name, (unsigned long)clockHz, (unsigned long)timeoutMs);
         }
         xSemaphoreGive(managerMutex);
         return &devices[i];
       }
     }
-    
+
     if (deviceCount >= MAX_DEVICES) {
-      ERROR_I2CF("Cannot register 0x%02X - max devices reached", addr);
+      ERROR_I2CF("Cannot register 0x%02X bus=%u - max devices reached", addr, busIdx);
       xSemaphoreGive(managerMutex);
       return nullptr;
     }
-    
+
     I2CDevice* dev = &devices[deviceCount++];
-    dev->init(addr, name, clockHz, timeoutMs);
-    
-    INFO_I2CF("Registered device 0x%02X (%s) clock=%luHz timeout=%lums",
-              addr, name, (unsigned long)clockHz, (unsigned long)timeoutMs);
-    
+    dev->init(addr, name, clockHz, timeoutMs, busIdx);
+
+    INFO_I2CF("Registered device 0x%02X (%s) bus=%u clock=%luHz timeout=%lums",
+              addr, name, busIdx, (unsigned long)clockHz, (unsigned long)timeoutMs);
+
     xSemaphoreGive(managerMutex);
     return dev;
   }
-  
+
   return nullptr;
 }
 
-I2CDevice* I2CDeviceManager::getDevice(uint8_t addr) {
+I2CDevice* I2CDeviceManager::getDevice(uint8_t addr, uint8_t busIdx) {
+  if (busIdx >= NUM_BUSES) busIdx = 0;
   for (int i = 0; i < deviceCount; i++) {
-    if (devices[i].address == addr) {
+    if (devices[i].address == addr && devices[i].bus == busIdx) {
       return &devices[i];
     }
   }
@@ -127,87 +160,158 @@ I2CDevice* I2CDeviceManager::getDeviceByName(const char* name) {
 // Bus Operations
 // ============================================================================
 
-void I2CDeviceManager::initBuses() {
-  // Use configurable pins from settings (defaults: SDA=22, SCL=19 for original, SDA=22, SCL=20 for Feather V2)
-  Wire1.begin(gSettings.i2cSdaPin, gSettings.i2cSclPin);
-  Wire1.setClock(I2C_WIRE1_DEFAULT_FREQ);
-  Wire1.setTimeOut(100);  // Abort hung transactions after 100ms; must be well under CONFIG_ESP_INT_WDT_TIMEOUT_MS (1500ms)
-  currentClockHz = I2C_WIRE1_DEFAULT_FREQ;
-  // Glitch filter: ignore pulses < 7 APB cycles (~88ns at 80MHz).
-  // Prevents spurious bus errors from EMI/noise that trigger i2c_hw_disable
-  // -> I2C_ENTER_CRITICAL -> periph_spinlock deadlock -> interrupt WDT crash.
-  i2c_filter_enable(I2C_NUM_1, 7);
-  
-  delay(100);
-  
-  INFO_I2CF("Buses initialized: Wire1 (SDA=%d, SCL=%d, %lu Hz)",
-            gSettings.i2cSdaPin, gSettings.i2cSclPin, (unsigned long)defaultClockHz);
+// Resolve the SDA/SCL pin pair for a given bus from settings. Bus 0 uses the
+// primary I2C pins (gSettings.i2cSdaPin/SclPin); bus 1 uses the secondary
+// (gSettings.i2c2SdaPin/SclPin). Returns false if the pins are unavailable
+// (e.g., -1 on a board without a second port).
+static bool busPinsFromSettings(uint8_t bus, int* sda, int* scl) {
+  if (bus == 0) {
+    *sda = gSettings.i2cSdaPin;
+    *scl = gSettings.i2cSclPin;
+  } else {
+    *sda = gSettings.i2c2SdaPin;
+    *scl = gSettings.i2c2SclPin;
+  }
+  return (*sda >= 0 && *scl >= 0);
 }
 
-void I2CDeviceManager::performBusRecovery() {
-  WARN_I2CF("Performing bus recovery");
-  
-  // Pause all polling and acquire bus mutex
-  bool prevPaused = pollingPaused;
-  pausePolling();  // This syncs gSensorPollingPaused
-  
-  bool locked = (busMutex && xSemaphoreTake(busMutex, pdMS_TO_TICKS(2000)) == pdTRUE);
-  if (!locked) {
-    pollingPaused = prevPaused;
-    ERROR_I2CF("Bus recovery failed - couldn't acquire mutex");
+void I2CDeviceManager::initBus(uint8_t busIdx, int sdaPin, int sclPin, uint32_t hz) {
+  if (busIdx >= NUM_BUSES) return;
+  if (sdaPin < 0 || sclPin < 0) {
+    INFO_I2CF("initBus skipped: bus %u pins invalid (sda=%d scl=%d)", busIdx, sdaPin, sclPin);
     return;
   }
-  
-  // 1. End Wire1 session
-  Wire1.end();
+  TwoWire* wire = wires[busIdx];
+  if (!wire) return;
+
+  wire->begin(sdaPin, sclPin);
+  wire->setClock(hz);
+  // 100ms TwoWire-level timeout — well under CONFIG_ESP_INT_WDT_TIMEOUT_MS
+  // (1500ms) so a hung transaction won't trigger the interrupt watchdog.
+  wire->setTimeOut(100);
+  currentClockHz[busIdx] = hz;
+  defaultClockHz[busIdx] = hz;
+  busInitialized[busIdx] = true;
+
+  // Glitch filter: ignore pulses < 7 APB cycles (~88ns at 80MHz). Prevents
+  // spurious bus errors from EMI/noise that trigger i2c_hw_disable ->
+  // I2C_ENTER_CRITICAL -> periph_spinlock deadlock -> interrupt WDT crash.
+  i2c_filter_enable(i2cPortForBus(busIdx), 7);
+
+  INFO_I2CF("Bus %u initialized: %s (SDA=%d, SCL=%d, %lu Hz)",
+            busIdx, (busIdx == 0) ? "Wire1/I2C1" : "Wire/I2C2",
+            sdaPin, sclPin, (unsigned long)hz);
+}
+
+void I2CDeviceManager::initBuses() {
+  // Bus 0 (primary) — always initialized when I2C is enabled. The caller
+  // (initI2CBuses in System_I2C.cpp) already gated on gI2CBusEnabled.
+  int sda0, scl0;
+  if (busPinsFromSettings(0, &sda0, &scl0)) {
+    initBus(0, sda0, scl0, I2C_WIRE1_DEFAULT_FREQ);
+  } else {
+    WARN_I2CF("Bus 0 pins not configured (sda=%d scl=%d) — primary I2C unavailable",
+              sda0, scl0);
+  }
+
+  // Bus 1 (secondary) — only when the user explicitly enabled it AND the
+  // board defines valid pins. Skips silently otherwise (no error spam).
+  if (gSettings.i2c2BusEnabled) {
+    int sda1, scl1;
+    if (busPinsFromSettings(1, &sda1, &scl1)) {
+      initBus(1, sda1, scl1, I2C_WIRE1_DEFAULT_FREQ);
+    } else {
+      WARN_I2CF("i2c2BusEnabled but pins invalid (sda=%d scl=%d) — bus 1 NOT initialized; "
+                "check I2C2 settings or use a board with a second port (e.g., FeatherS3[D])",
+                sda1, scl1);
+    }
+  }
+
+  delay(100);
+}
+
+void I2CDeviceManager::performBusRecovery(uint8_t busIdx) {
+  if (busIdx >= NUM_BUSES) busIdx = 0;
+  if (!busInitialized[busIdx]) {
+    WARN_I2CF("Bus recovery skipped: bus %u not initialized", busIdx);
+    return;
+  }
+  TwoWire* wire = wires[busIdx];
+  SemaphoreHandle_t mutex = busMutexes[busIdx];
+  int sdaPin, sclPin;
+  if (!busPinsFromSettings(busIdx, &sdaPin, &sclPin)) {
+    ERROR_I2CF("Bus recovery skipped: bus %u pins invalid", busIdx);
+    return;
+  }
+
+  WARN_I2CF("Performing bus %u recovery (SDA=%d SCL=%d)", busIdx, sdaPin, sclPin);
+
+  // Pause polling globally (pollingPaused is a single shared flag — pausing
+  // for ANY bus recovery stops every sensor task, since we don't track
+  // pause-per-bus and it's safest to halt everything during the manual
+  // clock toggle that follows).
+  bool prevPaused = pollingPaused;
+  pausePolling();
+
+  bool locked = (mutex && xSemaphoreTake(mutex, pdMS_TO_TICKS(2000)) == pdTRUE);
+  if (!locked) {
+    pollingPaused = prevPaused;
+    ERROR_I2CF("Bus %u recovery failed - couldn't acquire mutex", busIdx);
+    return;
+  }
+
+  // 1. End the bus session
+  wire->end();
   delay(10);
-  
-  // 2. Manual clock toggle to release stuck devices
-  pinMode(gSettings.i2cSclPin, OUTPUT);
-  pinMode(gSettings.i2cSdaPin, INPUT_PULLUP);
-  
+
+  // 2. Manual clock toggle to release any device stuck mid-byte
+  pinMode(sclPin, OUTPUT);
+  pinMode(sdaPin, INPUT_PULLUP);
+
   for (int i = 0; i < 9; i++) {
-    digitalWrite(gSettings.i2cSclPin, LOW);
+    digitalWrite(sclPin, LOW);
     delayMicroseconds(5);
-    digitalWrite(gSettings.i2cSclPin, HIGH);
+    digitalWrite(sclPin, HIGH);
     delayMicroseconds(5);
-    
-    if (digitalRead(gSettings.i2cSdaPin)) {
-      INFO_I2CF("SDA released after %d clock pulses", i + 1);
+
+    if (digitalRead(sdaPin)) {
+      INFO_I2CF("Bus %u SDA released after %d clock pulses", busIdx, i + 1);
       break;
     }
   }
-  
+
   // 3. Generate STOP condition
-  pinMode(gSettings.i2cSdaPin, OUTPUT);
-  digitalWrite(gSettings.i2cSdaPin, LOW);
+  pinMode(sdaPin, OUTPUT);
+  digitalWrite(sdaPin, LOW);
   delayMicroseconds(5);
-  digitalWrite(gSettings.i2cSclPin, HIGH);
+  digitalWrite(sclPin, HIGH);
   delayMicroseconds(5);
-  digitalWrite(gSettings.i2cSdaPin, HIGH);
+  digitalWrite(sdaPin, HIGH);
   delayMicroseconds(5);
-  
-  // 4. Reinitialize Wire1 with configured pins
-  Wire1.begin(gSettings.i2cSdaPin, gSettings.i2cSclPin);
-  Wire1.setClock(defaultClockHz);
-  currentClockHz = defaultClockHz;
-  i2c_filter_enable(I2C_NUM_1, 7);
+
+  // 4. Reinitialize this bus
+  wire->begin(sdaPin, sclPin);
+  wire->setClock(defaultClockHz[busIdx]);
+  currentClockHz[busIdx] = defaultClockHz[busIdx];
+  i2c_filter_enable(i2cPortForBus(busIdx), 7);
   delay(50);
-  
-  // 5. Reset all device health
+
+  // 5. Reset health for devices on THIS bus only — devices on the other bus
+  //    are unaffected by recovery here.
   for (int i = 0; i < deviceCount; i++) {
-    devices[i].health.consecutiveErrors = 0;
-    devices[i].health.degraded = false;
+    if (devices[i].bus == busIdx) {
+      devices[i].health.consecutiveErrors = 0;
+      devices[i].health.degraded = false;
+    }
   }
-  
-  if (busMutex) xSemaphoreGive(busMutex);
-  
-  // Restore previous pause state
+
+  xSemaphoreGive(mutex);
+
   if (!prevPaused) {
-    resumePolling();  // Only resume if it wasn't paused before
+    resumePolling();
   }
-  
-  INFO_I2CF("Bus recovery complete");
+
+  INFO_I2CF("Bus %u recovery complete", busIdx);
 }
 
 void I2CDeviceManager::checkBusRecoveryNeeded() {
@@ -238,29 +342,42 @@ void I2CDeviceManager::checkBusRecoveryNeeded() {
 // Clock Management
 // ============================================================================
 
-bool I2CDeviceManager::clockStackPush(uint32_t hz) {
-  if (clockStackDepth >= CLOCK_STACK_MAX) {
+bool I2CDeviceManager::clockStackPush(uint8_t bus, uint32_t hz) {
+  if (bus >= NUM_BUSES) return false;
+  if (clockStackDepths[bus] >= CLOCK_STACK_MAX) {
+    // IMPORTANT: do NOT use snprintf+char buffer here. clockStackPush is on
+    // the hot path (every I2C transaction); GCC eagerly reserves the full
+    // function frame at entry, so any local char[N] adds N bytes to EVERY
+    // call, even when this overflow branch isn't taken. An 80-byte buffer
+    // was enough to push sensor_queue_task (11 KB stack) over during
+    // seesaw.begin() — which goes ~10 transactions deep. Surrounding log
+    // lines already identify the bus, so the literal string is fine here.
     broadcastOutput("[I2C_MGR] CRITICAL: clock stack overflow - operation aborted");
     return false;
   }
-  clockStack[clockStackDepth++] = hz;
+  clockStacks[bus][clockStackDepths[bus]++] = hz;
   return true;
 }
 
-void I2CDeviceManager::clockStackPop() {
-  if (clockStackDepth > 0) {
-    clockStackDepth--;
+void I2CDeviceManager::clockStackPop(uint8_t bus) {
+  if (bus >= NUM_BUSES) return;
+  if (clockStackDepths[bus] > 0) {
+    clockStackDepths[bus]--;
   }
 }
 
-uint32_t I2CDeviceManager::clockStackTopOrDefault() {
-  return (clockStackDepth > 0) ? clockStack[clockStackDepth - 1] : defaultClockHz;
+uint32_t I2CDeviceManager::clockStackTopOrDefault(uint8_t bus) {
+  if (bus >= NUM_BUSES) return I2C_WIRE1_DEFAULT_FREQ;
+  return (clockStackDepths[bus] > 0)
+           ? clockStacks[bus][clockStackDepths[bus] - 1]
+           : defaultClockHz[bus];
 }
 
-void I2CDeviceManager::setWire1Clock(uint32_t hz) {
-  if (currentClockHz != hz) {
-    Wire1.setClock(hz);
-    currentClockHz = hz;
+void I2CDeviceManager::setBusClock(uint8_t bus, uint32_t hz) {
+  if (bus >= NUM_BUSES || !wires[bus]) return;
+  if (currentClockHz[bus] != hz) {
+    wires[bus]->setClock(hz);
+    currentClockHz[bus] = hz;
     delayMicroseconds(50);
   }
 }
@@ -269,37 +386,41 @@ void I2CDeviceManager::setWire1Clock(uint32_t hz) {
 // Metrics Tracking
 // ============================================================================
 
-void I2CDeviceManager::updateMetrics(uint32_t waitUs, uint32_t txDurationUs, uint32_t clockHz) {
+void I2CDeviceManager::updateMetrics(uint8_t bus, uint32_t waitUs, uint32_t txDurationUs, uint32_t clockHz) {
+  if (bus >= NUM_BUSES) return;
+  I2CBusMetrics& m = busMetrics[bus];
+
   // Mutex wait metrics
-  if (waitUs > 0) busMetrics.mutexContentions++;
-  if (waitUs > busMetrics.maxWaitTimeUs) busMetrics.maxWaitTimeUs = waitUs;
-  busMetrics.avgWaitTimeUs = (busMetrics.avgWaitTimeUs * 7 + waitUs) / 8;
-  
+  if (waitUs > 0) m.mutexContentions++;
+  if (waitUs > m.maxWaitTimeUs) m.maxWaitTimeUs = waitUs;
+  m.avgWaitTimeUs = (m.avgWaitTimeUs * 7 + waitUs) / 8;
+
   // Transaction duration metrics
-  if (txDurationUs > busMetrics.maxTransactionDurationUs) {
-    busMetrics.maxTransactionDurationUs = txDurationUs;
+  if (txDurationUs > m.maxTransactionDurationUs) {
+    m.maxTransactionDurationUs = txDurationUs;
   }
-  busMetrics.avgTransactionDurationUs = 
-    (busMetrics.avgTransactionDurationUs * 7 + txDurationUs) / 8;
-  
-  // Estimate bytes transferred
+  m.avgTransactionDurationUs = (m.avgTransactionDurationUs * 7 + txDurationUs) / 8;
+
+  // Estimate bytes transferred (rough; assumes 8 bit/byte + 1 ACK bit)
   uint32_t estimatedBytes = (txDurationUs * clockHz) / (8 * 1000000);
   if (estimatedBytes > 0) {
-    busMetrics.totalBytesTransferred += estimatedBytes;
+    m.totalBytesTransferred += estimatedBytes;
   }
-  
-  updateHistogram(txDurationUs);
+
+  updateHistogram(bus, txDurationUs);
 }
 
-void I2CDeviceManager::updateHistogram(uint32_t txDurationUs) {
+void I2CDeviceManager::updateHistogram(uint8_t bus, uint32_t txDurationUs) {
+  if (bus >= NUM_BUSES) return;
+  I2CBusMetrics& m = busMetrics[bus];
   if (txDurationUs < 100) {
-    busMetrics.txDuration_0_100us++;
+    m.txDuration_0_100us++;
   } else if (txDurationUs < 500) {
-    busMetrics.txDuration_100_500us++;
+    m.txDuration_100_500us++;
   } else if (txDurationUs < 2000) {
-    busMetrics.txDuration_500_2000us++;
+    m.txDuration_500_2000us++;
   } else {
-    busMetrics.txDuration_2000plus_us++;
+    m.txDuration_2000plus_us++;
   }
 }
 
@@ -448,14 +569,15 @@ I2CErrorType classifyI2CError(uint8_t espError) {
   }
 }
 
-I2CDevice::I2CDevice() 
-  : address(0), name(nullptr), clockHz(100000), 
+I2CDevice::I2CDevice()
+  : address(0), bus(0), name(nullptr), clockHz(100000),
     baseTimeoutMs(200), adaptiveTimeoutMs(200) {
   memset(&health, 0, sizeof(health));
 }
 
-void I2CDevice::init(uint8_t addr, const char* deviceName, uint32_t clock, uint32_t timeout) {
+void I2CDevice::init(uint8_t addr, const char* deviceName, uint32_t clock, uint32_t timeout, uint8_t busIdx) {
   address = addr;
+  bus = (busIdx < I2CDeviceManager::NUM_BUSES) ? busIdx : 0;
   name = deviceName;
   clockHz = clock > 0 ? clock : 100000;
   baseTimeoutMs = timeout > 0 ? timeout : 200;
@@ -504,7 +626,11 @@ void I2CDevice::recordError(I2CErrorType errorType, uint8_t espError) {
                    address, name, health.nackCount);
         logI2CError(address, name, health.consecutiveErrors, health.totalErrors, true);
         
-        // Check if bus recovery is needed (decentralized check)
+        // Check if bus recovery is needed (decentralized check).
+        // Note: checkBusRecoveryNeeded currently evaluates the WHOLE device
+        // table; with dual-bus it may decide to recover, defaulting to
+        // bus 0. If only this device's bus is sick, the BUS_ERROR branch
+        // below routes recovery to the right bus directly.
         I2CDeviceManager::getInstance()->checkBusRecoveryNeeded();
       }
       break;
@@ -529,20 +655,26 @@ void I2CDevice::recordError(I2CErrorType errorType, uint8_t espError) {
                    address, name, health.timeoutCount);
         logI2CError(address, name, health.consecutiveErrors, health.totalErrors, true);
         
-        // Check if bus recovery is needed (decentralized check)
+        // Check if bus recovery is needed (decentralized check).
+        // Note: checkBusRecoveryNeeded currently evaluates the WHOLE device
+        // table; with dual-bus it may decide to recover, defaulting to
+        // bus 0. If only this device's bus is sick, the BUS_ERROR branch
+        // below routes recovery to the right bus directly.
         I2CDeviceManager::getInstance()->checkBusRecoveryNeeded();
       }
       break;
       
     case I2CErrorType::BUS_ERROR:
       health.busErrorCount++;
-      ERROR_I2CF("Device 0x%02X (%s) BUS_ERROR (count=%d, espErr=0x%02X)",
-                 address, name, health.busErrorCount, espError);
-      
+      ERROR_I2CF("Device 0x%02X (%s) bus=%u BUS_ERROR (count=%d, espErr=0x%02X)",
+                 address, name, bus, health.busErrorCount, espError);
+
       logI2CError(address, name, health.consecutiveErrors, health.totalErrors, false);
-      
-      // Trigger immediate bus recovery via manager
-      I2CDeviceManager::getInstance()->performBusRecovery();
+
+      // Trigger immediate bus recovery on THIS device's bus (was hardcoded
+      // to bus 0 before dual-bus). A bus 1 device with a BUS_ERROR now
+      // recovers bus 1 only; bus 0 devices keep running uninterrupted.
+      I2CDeviceManager::getInstance()->performBusRecovery(bus);
       break;
       
     case I2CErrorType::BUFFER_OVERFLOW:
