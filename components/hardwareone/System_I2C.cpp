@@ -2347,17 +2347,19 @@ static const SettingEntry i2cSettingEntries[] = {
   { "i2c2SclPin", SETTING_INT, &gSettings.i2c2SclPin, I2C2_SCL_PIN_DEFAULT,
     0, nullptr, -1, 48, "I2C2 SCL Pin (reboot required, -1=unavailable)", nullptr, false, nullptr, "i2c2sclpin" },
   // Per-device bus assignment (0=I2C1/Wire1, 1=I2C2/Wire). Reboot required.
-  { "oledBus",     SETTING_INT, &gSettings.oledBus,     0, 0, nullptr, 0, 1, "OLED bus (0=I2C1, 1=I2C2, reboot required)",            nullptr, false, nullptr, "oledbus" },
-  { "gamepadBus",  SETTING_INT, &gSettings.gamepadBus,  0, 0, nullptr, 0, 1, "Gamepad bus (0=I2C1, 1=I2C2, reboot required)",         nullptr, false, nullptr, "gamepadbus" },
-  { "gpsBus",      SETTING_INT, &gSettings.gpsBus,      0, 0, nullptr, 0, 1, "GPS bus (0=I2C1, 1=I2C2, reboot required)",             nullptr, false, nullptr, "gpsbus" },
-  { "rtcBus",      SETTING_INT, &gSettings.rtcBus,      0, 0, nullptr, 0, 1, "RTC bus (0=I2C1, 1=I2C2, reboot required)",             nullptr, false, nullptr, "rtcbus" },
-  { "fmRadioBus",  SETTING_INT, &gSettings.fmRadioBus,  0, 0, nullptr, 0, 1, "FM radio bus (0=I2C1, 1=I2C2, reboot required)",        nullptr, false, nullptr, "fmradiobus" },
-  { "presenceBus", SETTING_INT, &gSettings.presenceBus, 0, 0, nullptr, 0, 1, "Presence bus (0=I2C1, 1=I2C2, reboot required)",        nullptr, false, nullptr, "presencebus" },
-  { "imuBus",      SETTING_INT, &gSettings.imuBus,      0, 0, nullptr, 0, 1, "IMU bus (0=I2C1, 1=I2C2, reboot required)",             nullptr, false, nullptr, "imubus" },
-  { "thermalBus",  SETTING_INT, &gSettings.thermalBus,  0, 0, nullptr, 0, 1, "Thermal bus (0=I2C1, 1=I2C2, reboot required)",         nullptr, false, nullptr, "thermalbus" },
-  { "tofBus",      SETTING_INT, &gSettings.tofBus,      0, 0, nullptr, 0, 1, "ToF bus (0=I2C1, 1=I2C2, reboot required)",             nullptr, false, nullptr, "tofbus" },
-  { "apdsBus",     SETTING_INT, &gSettings.apdsBus,     0, 0, nullptr, 0, 1, "APDS bus (0=I2C1, 1=I2C2, reboot required)",            nullptr, false, nullptr, "apdsbus" },
-  { "servoBus",    SETTING_INT, &gSettings.servoBus,    0, 0, nullptr, 0, 1, "Servo bus (0=I2C1, 1=I2C2, reboot required)",           nullptr, false, nullptr, "servobus" }
+  // `options = "0|I2C1,1|I2C2"` makes the Settings page render each as a
+  // labeled <select> dropdown instead of a 0..1 number input.
+  { "oledBus",     SETTING_INT, &gSettings.oledBus,     0, 0, nullptr, 0, 1, "OLED bus (reboot required)",            "0|I2C1,1|I2C2", false, nullptr, "oledbus" },
+  { "gamepadBus",  SETTING_INT, &gSettings.gamepadBus,  0, 0, nullptr, 0, 1, "Gamepad bus (reboot required)",         "0|I2C1,1|I2C2", false, nullptr, "gamepadbus" },
+  { "gpsBus",      SETTING_INT, &gSettings.gpsBus,      0, 0, nullptr, 0, 1, "GPS bus (reboot required)",             "0|I2C1,1|I2C2", false, nullptr, "gpsbus" },
+  { "rtcBus",      SETTING_INT, &gSettings.rtcBus,      0, 0, nullptr, 0, 1, "RTC bus (reboot required)",             "0|I2C1,1|I2C2", false, nullptr, "rtcbus" },
+  { "fmRadioBus",  SETTING_INT, &gSettings.fmRadioBus,  0, 0, nullptr, 0, 1, "FM radio bus (reboot required)",        "0|I2C1,1|I2C2", false, nullptr, "fmradiobus" },
+  { "presenceBus", SETTING_INT, &gSettings.presenceBus, 0, 0, nullptr, 0, 1, "Presence bus (reboot required)",        "0|I2C1,1|I2C2", false, nullptr, "presencebus" },
+  { "imuBus",      SETTING_INT, &gSettings.imuBus,      0, 0, nullptr, 0, 1, "IMU bus (reboot required)",             "0|I2C1,1|I2C2", false, nullptr, "imubus" },
+  { "thermalBus",  SETTING_INT, &gSettings.thermalBus,  0, 0, nullptr, 0, 1, "Thermal bus (reboot required)",         "0|I2C1,1|I2C2", false, nullptr, "thermalbus" },
+  { "tofBus",      SETTING_INT, &gSettings.tofBus,      0, 0, nullptr, 0, 1, "ToF bus (reboot required)",             "0|I2C1,1|I2C2", false, nullptr, "tofbus" },
+  { "apdsBus",     SETTING_INT, &gSettings.apdsBus,     0, 0, nullptr, 0, 1, "APDS bus (reboot required)",            "0|I2C1,1|I2C2", false, nullptr, "apdsbus" },
+  { "servoBus",    SETTING_INT, &gSettings.servoBus,    0, 0, nullptr, 0, 1, "Servo bus (reboot required)",           "0|I2C1,1|I2C2", false, nullptr, "servobus" }
 };
 
 // Columns: name, jsonSection, entries, count, isConnected, description
