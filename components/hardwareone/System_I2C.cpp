@@ -377,16 +377,21 @@ void initI2CBuses() {
     mgr->initBuses();
   }
 
-  // Bus warm-up: perform a dummy probe to exercise the ESP32 I2C hardware.
-  // Without OLED or RTC, zero I2C activity occurs between init and discovery,
-  // which can leave the bus in an unreliable state for the first real transaction.
-  // Probe address 0x00 (general call) — no device will ACK, but the bus is exercised.
-  {
-    extern TwoWire Wire1;
-    Wire1.beginTransmission(0x00);
-    Wire1.endTransmission();
-    delayMicroseconds(100);
+  // Bus warm-up: perform a dummy probe on each initialized bus to exercise
+  // the ESP32 I2C hardware. Without OLED or RTC active, zero I2C activity
+  // occurs between init and discovery, which can leave the bus in an
+  // unreliable state for the first real transaction. Probe address 0x00
+  // (general call) — no device will ACK, but the bus is exercised.
+  for (uint8_t b = 0; b < I2CDeviceManager::NUM_BUSES; b++) {
+    if (mgr && mgr->isBusInitialized(b)) {
+      TwoWire* wire = mgr->getWire(b);
+      if (wire) {
+        wire->beginTransmission(0x00);
+        wire->endTransmission();
+      }
+    }
   }
+  delayMicroseconds(100);
 }
 
 // ========== End I2C Bus Initialization ==========
@@ -594,6 +599,93 @@ const char* cmd_i2csclpin(const String& argsInput) {
   return getDebugBuffer();
 }
 
+// ---- Bus 1 (I2C2) variants ----
+// Same shape as the bus 0 commands above, plus:
+//   * Pin range is -1..48 — -1 means "unavailable on this board" (sentinel
+//     used on XIAO / QT Py / Feather V2 where there is no second I2C port).
+//     Settings page surfaces this as the "(-1=unavailable)" hint.
+//   * Upper bound 48 matches ESP32-S3's GPIO range (vs the bus-0 commands'
+//     legacy 0..39 cap which predates the S3 port).
+const char* cmd_i2c2busenabled(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String valStr = argsInput;
+  valStr.trim();
+  if (valStr.length() == 0) return "Usage: i2c2BusEnabled <0|1> (reboot required)";
+  bool v = (valStr.toInt() != 0);
+  setSetting(gSettings.i2c2BusEnabled, v);
+  snprintf(getDebugBuffer(), 1024, "i2c2BusEnabled set to %d (reboot required)", (int)v);
+  return getDebugBuffer();
+}
+
+const char* cmd_i2c2sdapin(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String valStr = argsInput;
+  valStr.trim();
+  if (valStr.length() == 0) return "Usage: i2c2SdaPin <-1..48> (-1=unavailable, reboot required)";
+  int v = valStr.toInt();
+  if (v < -1) v = -1;
+  if (v > 48) v = 48;
+  setSetting(gSettings.i2c2SdaPin, v);
+  snprintf(getDebugBuffer(), 1024, "i2c2SdaPin set to %d (reboot required)", v);
+  return getDebugBuffer();
+}
+
+const char* cmd_i2c2sclpin(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String valStr = argsInput;
+  valStr.trim();
+  if (valStr.length() == 0) return "Usage: i2c2SclPin <-1..48> (-1=unavailable, reboot required)";
+  int v = valStr.toInt();
+  if (v < -1) v = -1;
+  if (v > 48) v = 48;
+  setSetting(gSettings.i2c2SclPin, v);
+  snprintf(getDebugBuffer(), 1024, "i2c2SclPin set to %d (reboot required)", v);
+  return getDebugBuffer();
+}
+
+// ---- Per-device bus assignment commands ----
+// Each lets the user route a specific sensor to bus 0 (Wire1 / I2C1) or
+// bus 1 (Wire / I2C2). All clamp to 0..NUM_BUSES-1 and require a reboot
+// for the sensor's task to pick up the new value (drivers cache the bus
+// at init time + the library object is constructed with the chosen Wire).
+// One helper handles validate + parse + clamp + setSetting + report so the
+// per-command stub is one line. The helper does NOT include the
+// RETURN_VALID_IF_VALIDATE_CSTR macro because that returns from its caller
+// — must stay at each cmd_* entry point.
+static const char* setDeviceBusAndReport(int& target, const String& argsInput, const char* settingName) {
+  String valStr = argsInput;
+  valStr.trim();
+  if (valStr.length() == 0) {
+    if (ensureDebugBuffer()) {
+      snprintf(getDebugBuffer(), 1024, "Usage: %s <0..%d> (reboot required)",
+               settingName, (int)(I2CDeviceManager::NUM_BUSES - 1));
+      return getDebugBuffer();
+    }
+    return "Usage: <bus> (reboot required)";
+  }
+  int v = valStr.toInt();
+  if (v < 0) v = 0;
+  if (v >= (int)I2CDeviceManager::NUM_BUSES) v = I2CDeviceManager::NUM_BUSES - 1;
+  setSetting(target, v);
+  if (ensureDebugBuffer()) {
+    snprintf(getDebugBuffer(), 1024, "%s set to %d (reboot required)", settingName, v);
+    return getDebugBuffer();
+  }
+  return "set (reboot required)";
+}
+
+const char* cmd_oledbus(const String& a)     { RETURN_VALID_IF_VALIDATE_CSTR(); return setDeviceBusAndReport(gSettings.oledBus,     a, "oledBus"); }
+const char* cmd_gamepadbus(const String& a)  { RETURN_VALID_IF_VALIDATE_CSTR(); return setDeviceBusAndReport(gSettings.gamepadBus,  a, "gamepadBus"); }
+const char* cmd_gpsbus(const String& a)      { RETURN_VALID_IF_VALIDATE_CSTR(); return setDeviceBusAndReport(gSettings.gpsBus,      a, "gpsBus"); }
+const char* cmd_rtcbus(const String& a)      { RETURN_VALID_IF_VALIDATE_CSTR(); return setDeviceBusAndReport(gSettings.rtcBus,      a, "rtcBus"); }
+const char* cmd_fmradiobus(const String& a)  { RETURN_VALID_IF_VALIDATE_CSTR(); return setDeviceBusAndReport(gSettings.fmRadioBus,  a, "fmRadioBus"); }
+const char* cmd_presencebus(const String& a) { RETURN_VALID_IF_VALIDATE_CSTR(); return setDeviceBusAndReport(gSettings.presenceBus, a, "presenceBus"); }
+const char* cmd_imubus(const String& a)      { RETURN_VALID_IF_VALIDATE_CSTR(); return setDeviceBusAndReport(gSettings.imuBus,      a, "imuBus"); }
+const char* cmd_thermalbus(const String& a)  { RETURN_VALID_IF_VALIDATE_CSTR(); return setDeviceBusAndReport(gSettings.thermalBus,  a, "thermalBus"); }
+const char* cmd_tofbus(const String& a)      { RETURN_VALID_IF_VALIDATE_CSTR(); return setDeviceBusAndReport(gSettings.tofBus,      a, "tofBus"); }
+const char* cmd_apdsbus(const String& a)     { RETURN_VALID_IF_VALIDATE_CSTR(); return setDeviceBusAndReport(gSettings.apdsBus,     a, "apdsBus"); }
+const char* cmd_servobus(const String& a)    { RETURN_VALID_IF_VALIDATE_CSTR(); return setDeviceBusAndReport(gSettings.servoBus,    a, "servoBus"); }
+
 // Sensor-specific I2C clock commands moved to their respective sensor modules:
 // - thermalI2cClockHz -> i2csensor_mlx90640.cpp (thermal module)
 // - tofI2cClockHz -> i2csensor_vl53l4cx.cpp (ToF module)
@@ -601,55 +693,73 @@ const char* cmd_i2csclpin(const String& argsInput) {
 const char* cmd_i2cscan(const String& originalCmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
-  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+  // Stream line-by-line via broadcastOutput / BROADCAST_PRINTF instead of
+  // accumulating into the 1024-byte debug buffer. With dual-bus scans the
+  // accumulated output (header + per-bus header + up to ~10 lines per device
+  // x 2 buses + summary) easily exceeds 1024 B and truncates mid-line. This
+  // matches the pattern cmd_i2cstats / streamDeviceRegistryOutput use.
+  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
 
-  char* p = getDebugBuffer();
-  size_t remaining = 1024;
+  broadcastOutput("I2C Bus Scan with Device Identification:");
+  broadcastOutput("========================================");
 
-  int n = snprintf(p, remaining, "I2C Bus Scan with Device Identification:\n");
-  p += n;
-  remaining -= n;
+  int totalCount = 0;
 
-  n = snprintf(p, remaining, "========================================\n");
-  p += n;
-  remaining -= n;
-
-  // Scan Wire1 (sensor bus) with configurable pins
-  n = snprintf(p, remaining, "Wire1 (SDA=%d, SCL=%d):\n", gSettings.i2cSdaPin, gSettings.i2cSclPin);
-  p += n;
-  remaining -= n;
-
-  // Wire1 already initialized in setup() via initI2CBuses()
-  int count1 = 0;
-  for (uint8_t addr = 1; addr < 127; addr++) {
-    if (i2cPingAddress(addr, 100000, 50)) {
-      String identification = identifySensor(addr);
-      n = snprintf(p, remaining, "  0x%02X (%d) - %s\n", addr, addr, identification.c_str());
-      p += n;
-      remaining -= n;
-      count1++;
-      if (remaining < 100) break;  // Safety check
+  // Bus 0 (I2C1, Wire1) — always scanned when initialized.
+  if (mgr && mgr->isBusInitialized(0)) {
+    BROADCAST_PRINTF("I2C1 / Wire1 (bus 0, SDA=%d SCL=%d):",
+                     gSettings.i2cSdaPin, gSettings.i2cSclPin);
+    int count = 0;
+    for (uint8_t addr = 1; addr < 127; addr++) {
+      if (i2cPingAddress(addr, 100000, 50, 0)) {
+        String identification = identifySensor(addr);
+        BROADCAST_PRINTF("  0x%02X (%d) - %s", addr, addr, identification.c_str());
+        count++;
+      }
     }
+    if (count == 0) {
+      broadcastOutput("  No devices found");
+    }
+    totalCount += count;
   }
-  if (count1 == 0) {
-    n = snprintf(p, remaining, "  No devices found\n");
-    p += n;
-    remaining -= n;
+
+  // Bus 1 (I2C2, Wire) — only when enabled + initialized. Boards without a
+  // second port (XIAO, QT Py, Feather V2) skip this block entirely.
+  if (mgr && mgr->isBusInitialized(1)) {
+    broadcastOutput("");
+    BROADCAST_PRINTF("I2C2 / Wire (bus 1, SDA=%d SCL=%d):",
+                     gSettings.i2c2SdaPin, gSettings.i2c2SclPin);
+    int count = 0;
+    for (uint8_t addr = 1; addr < 127; addr++) {
+      if (i2cPingAddress(addr, 100000, 50, 1)) {
+        // identifySensor() looks up by address only — same name on either bus.
+        String identification = identifySensor(addr);
+        BROADCAST_PRINTF("  0x%02X (%d) - %s", addr, addr, identification.c_str());
+        count++;
+      }
+    }
+    if (count == 0) {
+      broadcastOutput("  No devices found");
+    }
+    totalCount += count;
+  } else if (gSettings.i2c2BusEnabled) {
+    // User asked for bus 1 but it didn't initialize (probably bad pins).
+    broadcastOutput("");
+    broadcastOutput("I2C2 / Wire (bus 1): NOT INITIALIZED — check i2c2SdaPin/i2c2SclPin settings");
   }
 
-  n = snprintf(p, remaining, "\nTotal devices found: %d\n", count1);
-  p += n;
-  remaining -= n;
+  broadcastOutput("");
+  BROADCAST_PRINTF("Total devices found: %d", totalCount);
+  broadcastOutput("Use 'sensors' to see full sensor database");
+  broadcastOutput("Use 'sensorinfo <name>' for detailed sensor information");
 
-  n = snprintf(p, remaining, "Use 'sensors' to see full sensor database\n");
-  p += n;
-  remaining -= n;
-
-  n = snprintf(p, remaining, "Use 'sensorinfo <name>' for detailed sensor information");
-  p += n;
-  remaining -= n;
-
-  return getDebugBuffer();
+  // Return value is the short result string the CLI prints after the
+  // streamed output. Doesn't need to repeat what we already broadcast.
+  if (ensureDebugBuffer()) {
+    snprintf(getDebugBuffer(), 1024, "[i2cscan] %d device(s) found", totalCount);
+    return getDebugBuffer();
+  }
+  return "[i2cscan] done";
 }
 
 const char* cmd_i2cstats(const String& originalCmd) {
@@ -805,16 +915,32 @@ static void addDiscoveredDevice(uint8_t address, uint8_t bus) {
   }
 }
 
+// Bus convention (post-dual-bus refactor):
+//   bus 0 → Wire1 → primary "I2C1" (horizontal STEMMA QT on FeatherS3[D])
+//   bus 1 → Wire  → secondary "I2C2" (vertical STEMMA QT on FeatherS3[D])
+// This flips the inverted mapping that the original single-bus stub had
+// (`(busNumber == 0) ? &Wire : &Wire1`) and matches what users expect:
+// bus 0 is the primary, bus 1 is the secondary. ConnectedDevice.bus is
+// rendered as "I2C1" / "I2C2" in the registry output below.
+static inline TwoWire* wireForBus(uint8_t busNumber) {
+  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  return mgr ? mgr->getWire(busNumber) : nullptr;
+}
+
 static void scanBusForDevices(uint8_t busNumber) {
-  TwoWire* wire = (busNumber == 0) ? &Wire : &Wire1;
+  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  if (!mgr || !mgr->isBusInitialized(busNumber)) return;
+  TwoWire* wire = mgr->getWire(busNumber);
+  if (!wire) return;
 
   // Prevent concurrent I2C usage (e.g. gamepad/OLED tasks) while reinitializing/scanning
   extern volatile bool gSensorPollingPaused;
-  SemaphoreHandle_t busMutex = I2CDeviceManager::getInstance() ? I2CDeviceManager::getInstance()->getBusMutex() : nullptr;
+  SemaphoreHandle_t busMutex = mgr->getBusMutex(busNumber);
   bool prevPaused = gSensorPollingPaused;
   gSensorPollingPaused = true;
 
-  // Phase 1: Bus re-init under mutex (brief hold)
+  // Phase 1: Bus re-init under mutex (brief hold). Re-initializes from
+  // the bus's settings pins (bus 0 = i2cSdaPin/SclPin; bus 1 = i2c2*).
   {
     bool locked = (busMutex && xSemaphoreTake(busMutex, pdMS_TO_TICKS(2000)) == pdTRUE);
     if (!locked) {
@@ -822,10 +948,11 @@ static void scanBusForDevices(uint8_t busNumber) {
       return;
     }
 
-    // Re-initialize Arduino I2C buses before scanning (safeguards against driver teardown)
-    if (busNumber == 1) {
-      Wire1.begin(gSettings.i2cSdaPin, gSettings.i2cSclPin);
-      Wire1.setClock(I2C_WIRE1_DEFAULT_FREQ);
+    const int sda = (busNumber == 0) ? gSettings.i2cSdaPin  : gSettings.i2c2SdaPin;
+    const int scl = (busNumber == 0) ? gSettings.i2cSclPin  : gSettings.i2c2SclPin;
+    if (sda >= 0 && scl >= 0) {
+      wire->begin(sda, scl);
+      wire->setClock(I2C_WIRE1_DEFAULT_FREQ);
     }
 
     xSemaphoreGive(busMutex);
@@ -852,11 +979,14 @@ static void scanBusForDevices(uint8_t busNumber) {
 
 // Smart scan function - only checks specific addresses (used by discoverI2CDevices)
 static void scanBusForDevicesSmart(uint8_t busNumber, const uint8_t* addresses, int addressCount) {
-  TwoWire* wire = (busNumber == 0) ? &Wire : &Wire1;
+  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  if (!mgr || !mgr->isBusInitialized(busNumber)) return;
+  TwoWire* wire = mgr->getWire(busNumber);
+  if (!wire) return;
 
   // Prevent concurrent I2C usage (e.g. gamepad/OLED tasks) while reinitializing/scanning
   extern volatile bool gSensorPollingPaused;
-  SemaphoreHandle_t busMutex = I2CDeviceManager::getInstance() ? I2CDeviceManager::getInstance()->getBusMutex() : nullptr;
+  SemaphoreHandle_t busMutex = mgr->getBusMutex(busNumber);
   bool prevPaused = gSensorPollingPaused;
   gSensorPollingPaused = true;
 
@@ -868,10 +998,11 @@ static void scanBusForDevicesSmart(uint8_t busNumber, const uint8_t* addresses, 
       return;
     }
 
-    // Re-initialize Arduino I2C buses before scanning (safeguards against driver teardown)
-    if (busNumber == 1) {
-      Wire1.begin(gSettings.i2cSdaPin, gSettings.i2cSclPin);
-      Wire1.setClock(I2C_WIRE1_DEFAULT_FREQ);
+    const int sda = (busNumber == 0) ? gSettings.i2cSdaPin  : gSettings.i2c2SdaPin;
+    const int scl = (busNumber == 0) ? gSettings.i2cSclPin  : gSettings.i2c2SclPin;
+    if (sda >= 0 && scl >= 0) {
+      wire->begin(sda, scl);
+      wire->setClock(I2C_WIRE1_DEFAULT_FREQ);
     }
 
     xSemaphoreGive(busMutex);
@@ -963,11 +1094,23 @@ void discoverI2CDevices() {
     }
   }
   
-  INFO_I2C_DISCOVERYF("[Discovery] Smart scan: %d addresses on Wire1 (SDA=%d, SCL=%d)",
+  INFO_I2C_DISCOVERYF("[Discovery] Smart scan: %d addresses on I2C1 (bus 0, SDA=%d SCL=%d)",
             scanCount, gSettings.i2cSdaPin, gSettings.i2cSclPin);
 
-  // Scan Wire1 (sensor bus) - use smart scan list
-  scanBusForDevicesSmart(1, scanAddresses, scanCount);  // Wire1 - smart scan
+  // Bus 0 (I2C1, Wire1) — always scanned when the primary bus is up. Note
+  // the convention flip from the pre-dual-bus stub: bus 0 is now the
+  // primary, not the empty secondary slot. See wireForBus()'s header.
+  scanBusForDevicesSmart(0, scanAddresses, scanCount);
+
+  // Bus 1 (I2C2, Wire) — scan only when the user has enabled the secondary
+  // bus AND its pins are configured. Boards without a second port (XIAO,
+  // QT Py, Feather V2) keep i2c2BusEnabled=false by default and skip this.
+  I2CDeviceManager* mgrForScan = I2CDeviceManager::getInstance();
+  if (gSettings.i2c2BusEnabled && mgrForScan && mgrForScan->isBusInitialized(1)) {
+    INFO_I2C_DISCOVERYF("[Discovery] Smart scan: %d addresses on I2C2 (bus 1, SDA=%d SCL=%d)",
+              scanCount, gSettings.i2c2SdaPin, gSettings.i2c2SclPin);
+    scanBusForDevicesSmart(1, scanAddresses, scanCount);
+  }
 
   {
     char devLine[240];
@@ -1002,7 +1145,10 @@ static void streamDeviceRegistryOutput() {
   for (int i = 0; i < connectedDeviceCount; i++) {
     ConnectedDevice& device = connectedDevices[i];
 
-    const char* busStr = (device.bus == 0) ? "W0" : "W1";
+    // Bus labels in dual-bus convention: I2C1 = primary STEMMA QT (Wire1),
+    // I2C2 = secondary STEMMA QT (Wire). Matches the on-board silkscreen
+    // on the FeatherS3[D] and what users see in the web UI.
+    const char* busStr = (device.bus == 0) ? "I2C1" : "I2C2";
     char hexAddr[5];
     snprintf(hexAddr, sizeof(hexAddr), "%02X", device.address);
 
@@ -1523,9 +1669,24 @@ extern const char* cmd_apdsstart_queued(const String& argsInput);
 // Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry i2cCommands[] = {
   // Bus Configuration
-  { "i2cbusenabled", "Enable/disable I2C bus: <0|1> (reboot required)", true, cmd_i2cbusenabled, "Usage: i2cBusEnabled <0|1>" },
-  { "i2csdapin", "Set I2C SDA pin: <0..39>", true, cmd_i2csdapin, "Usage: i2cSdaPin <0..39>" },
-  { "i2csclpin", "Set I2C SCL pin: <0..39>", true, cmd_i2csclpin, "Usage: i2cSclPin <0..39>" },
+  { "i2cbusenabled", "Enable/disable I2C1 bus: <0|1> (reboot required)", true, cmd_i2cbusenabled, "Usage: i2cBusEnabled <0|1>" },
+  { "i2csdapin", "Set I2C1 SDA pin: <0..39>", true, cmd_i2csdapin, "Usage: i2cSdaPin <0..39>" },
+  { "i2csclpin", "Set I2C1 SCL pin: <0..39>", true, cmd_i2csclpin, "Usage: i2cSclPin <0..39>" },
+  { "i2c2busenabled", "Enable/disable I2C2 bus: <0|1> (reboot required)", true, cmd_i2c2busenabled, "Usage: i2c2BusEnabled <0|1>" },
+  { "i2c2sdapin", "Set I2C2 SDA pin: <-1..48> (-1=unavailable)", true, cmd_i2c2sdapin, "Usage: i2c2SdaPin <-1..48>" },
+  { "i2c2sclpin", "Set I2C2 SCL pin: <-1..48> (-1=unavailable)", true, cmd_i2c2sclpin, "Usage: i2c2SclPin <-1..48>" },
+  // Per-device bus assignment — route a sensor to bus 0 (I2C1) or bus 1 (I2C2).
+  { "oledbus",     "Route OLED to bus: <0|1> (reboot required)",         true, cmd_oledbus,     "Usage: oledBus <0|1>" },
+  { "gamepadbus",  "Route Seesaw gamepad to bus: <0|1> (reboot required)", true, cmd_gamepadbus, "Usage: gamepadBus <0|1>" },
+  { "gpsbus",      "Route PA1010D GPS to bus: <0|1> (reboot required)",  true, cmd_gpsbus,      "Usage: gpsBus <0|1>" },
+  { "rtcbus",      "Route DS3231 RTC to bus: <0|1> (reboot required)",   true, cmd_rtcbus,      "Usage: rtcBus <0|1>" },
+  { "fmradiobus",  "Route RDA5807 FM radio to bus: <0|1> (reboot required)", true, cmd_fmradiobus, "Usage: fmRadioBus <0|1>" },
+  { "presencebus", "Route STHS34PF80 presence to bus: <0|1> (reboot required)", true, cmd_presencebus, "Usage: presenceBus <0|1>" },
+  { "imubus",      "Route BNO055 IMU to bus: <0|1> (reboot required)",   true, cmd_imubus,      "Usage: imuBus <0|1>" },
+  { "thermalbus",  "Route MLX90640 thermal to bus: <0|1> (reboot required)", true, cmd_thermalbus, "Usage: thermalBus <0|1>" },
+  { "tofbus",      "Route VL53L4CX ToF to bus: <0|1> (reboot required)", true, cmd_tofbus,      "Usage: tofBus <0|1>" },
+  { "apdsbus",     "Route APDS9960 gesture to bus: <0|1> (reboot required)", true, cmd_apdsbus, "Usage: apdsBus <0|1>" },
+  { "servobus",    "Route PCA9685 servo to bus: <0|1> (reboot required)", true, cmd_servobus,  "Usage: servoBus <0|1>" },
   // Note: Sensor-specific I2C clock commands (thermalI2cClockHz, tofI2cClockHz) are in their respective sensor modules
   
   // Bus Management
@@ -2165,12 +2326,38 @@ void sensorQueueProcessorTask(void* param) {
 // I2C settings are always available but only apply when enabled
 // This allows runtime toggling without recompiling (reboot required)
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
+//
+// Bus 0 = "I2C1" = primary STEMMA QT (Wire1 internally). Always available.
+// Bus 1 = "I2C2" = secondary STEMMA QT (Wire internally). Only meaningful on
+//                  boards with a second I2C port wired (FeatherS3[D]'s
+//                  vertical STEMMA QT). On other boards I2C2_*_PIN_DEFAULT
+//                  is -1 so the pin range below clamps to the default and
+//                  the bus stays disabled regardless of what the user toggles.
+// The min/max of -1..48 on the SDA/SCL pin entries (vs 0..48 on bus 0)
+// allows the "unavailable" sentinel -1 to round-trip through settings save.
 static const SettingEntry i2cSettingEntries[] = {
-  { "i2cBusEnabled", SETTING_BOOL, &gSettings.i2cBusEnabled, 1, 0, nullptr, 0, 1, "I2C Bus Enabled (reboot required)", nullptr, false, nullptr, "i2cbusenabled" },
+  { "i2cBusEnabled", SETTING_BOOL, &gSettings.i2cBusEnabled, 1, 0, nullptr, 0, 1, "I2C1 Bus Enabled (reboot required)", nullptr, false, nullptr, "i2cbusenabled" },
   { "i2cSdaPin", SETTING_INT, &gSettings.i2cSdaPin, I2C_SDA_PIN_DEFAULT,
-    0, nullptr, 0, 48, "I2C SDA Pin (reboot required)", nullptr, false, nullptr, "i2csdapin" },
+    0, nullptr, 0, 48, "I2C1 SDA Pin (reboot required)", nullptr, false, nullptr, "i2csdapin" },
   { "i2cSclPin", SETTING_INT, &gSettings.i2cSclPin, I2C_SCL_PIN_DEFAULT,
-    0, nullptr, 0, 48, "I2C SCL Pin (reboot required)", nullptr, false, nullptr, "i2csclpin" }
+    0, nullptr, 0, 48, "I2C1 SCL Pin (reboot required)", nullptr, false, nullptr, "i2csclpin" },
+  { "i2c2BusEnabled", SETTING_BOOL, &gSettings.i2c2BusEnabled, 0, 0, nullptr, 0, 1, "I2C2 Bus Enabled (reboot required)", nullptr, false, nullptr, "i2c2busenabled" },
+  { "i2c2SdaPin", SETTING_INT, &gSettings.i2c2SdaPin, I2C2_SDA_PIN_DEFAULT,
+    0, nullptr, -1, 48, "I2C2 SDA Pin (reboot required, -1=unavailable)", nullptr, false, nullptr, "i2c2sdapin" },
+  { "i2c2SclPin", SETTING_INT, &gSettings.i2c2SclPin, I2C2_SCL_PIN_DEFAULT,
+    0, nullptr, -1, 48, "I2C2 SCL Pin (reboot required, -1=unavailable)", nullptr, false, nullptr, "i2c2sclpin" },
+  // Per-device bus assignment (0=I2C1/Wire1, 1=I2C2/Wire). Reboot required.
+  { "oledBus",     SETTING_INT, &gSettings.oledBus,     0, 0, nullptr, 0, 1, "OLED bus (0=I2C1, 1=I2C2, reboot required)",            nullptr, false, nullptr, "oledbus" },
+  { "gamepadBus",  SETTING_INT, &gSettings.gamepadBus,  0, 0, nullptr, 0, 1, "Gamepad bus (0=I2C1, 1=I2C2, reboot required)",         nullptr, false, nullptr, "gamepadbus" },
+  { "gpsBus",      SETTING_INT, &gSettings.gpsBus,      0, 0, nullptr, 0, 1, "GPS bus (0=I2C1, 1=I2C2, reboot required)",             nullptr, false, nullptr, "gpsbus" },
+  { "rtcBus",      SETTING_INT, &gSettings.rtcBus,      0, 0, nullptr, 0, 1, "RTC bus (0=I2C1, 1=I2C2, reboot required)",             nullptr, false, nullptr, "rtcbus" },
+  { "fmRadioBus",  SETTING_INT, &gSettings.fmRadioBus,  0, 0, nullptr, 0, 1, "FM radio bus (0=I2C1, 1=I2C2, reboot required)",        nullptr, false, nullptr, "fmradiobus" },
+  { "presenceBus", SETTING_INT, &gSettings.presenceBus, 0, 0, nullptr, 0, 1, "Presence bus (0=I2C1, 1=I2C2, reboot required)",        nullptr, false, nullptr, "presencebus" },
+  { "imuBus",      SETTING_INT, &gSettings.imuBus,      0, 0, nullptr, 0, 1, "IMU bus (0=I2C1, 1=I2C2, reboot required)",             nullptr, false, nullptr, "imubus" },
+  { "thermalBus",  SETTING_INT, &gSettings.thermalBus,  0, 0, nullptr, 0, 1, "Thermal bus (0=I2C1, 1=I2C2, reboot required)",         nullptr, false, nullptr, "thermalbus" },
+  { "tofBus",      SETTING_INT, &gSettings.tofBus,      0, 0, nullptr, 0, 1, "ToF bus (0=I2C1, 1=I2C2, reboot required)",             nullptr, false, nullptr, "tofbus" },
+  { "apdsBus",     SETTING_INT, &gSettings.apdsBus,     0, 0, nullptr, 0, 1, "APDS bus (0=I2C1, 1=I2C2, reboot required)",            nullptr, false, nullptr, "apdsbus" },
+  { "servoBus",    SETTING_INT, &gSettings.servoBus,    0, 0, nullptr, 0, 1, "Servo bus (0=I2C1, 1=I2C2, reboot required)",           nullptr, false, nullptr, "servobus" }
 };
 
 // Columns: name, jsonSection, entries, count, isConnected, description

@@ -772,6 +772,21 @@
   #define BATTERY_ADC_PIN       -1
   #define BATTERY_MONITOR_AVAILABLE 0
 
+  // Second I2C bus — the FeatherS3[D] exposes the vertical STEMMA QT
+  // connector on its own GPIO pair, powered via LDO2. Used by the dual-bus
+  // I2C system (see System_I2C_Manager.h) when gSettings.i2c2BusEnabled
+  // is set. LDO2 enable pin is GPIO39 (same as NEOPIXEL_POWER_PIN above —
+  // driving GPIO39 HIGH powers both the RGB LED and I2C2).
+  //
+  // PIN MAPPING IS COUNTER-INTUITIVE: SDA = GPIO16, SCL = GPIO15. The
+  // pinout image lists IO15/IO16 next to the I2C2 connector but doesn't
+  // label which is which; empirical testing on the FeatherS3[D] shows the
+  // connector wires SDA → IO16 and SCL → IO15 (opposite of how I2C1 maps
+  // numerically). Verified by detecting an Adafruit OLED at 0x3D on the
+  // vertical STEMMA QT only after swapping from the obvious 15/16 default.
+  #define I2C2_SDA_PIN_DEFAULT  16
+  #define I2C2_SCL_PIN_DEFAULT  15
+
 // --- Generic ESP32 (fallback with warning) ---
 #elif defined(ARDUINO_ESP32_DEV)
   #define BOARD_SUPPORTED       1
@@ -806,6 +821,20 @@
   #define BATTERY_ADC_PIN       -1
   #define BATTERY_MONITOR_AVAILABLE 0
 
+#endif
+
+// =============================================================================
+// I2C2 (second I2C bus) — board-agnostic fallback
+// =============================================================================
+// Boards that have a second I2C bus (e.g., FeatherS3[D]'s vertical STEMMA QT)
+// define I2C2_SDA_PIN_DEFAULT / I2C2_SCL_PIN_DEFAULT in their block above.
+// For everyone else, default to -1 so the dual-bus system treats it as
+// "unavailable" and skips bus 1 initialization.
+#ifndef I2C2_SDA_PIN_DEFAULT
+  #define I2C2_SDA_PIN_DEFAULT  -1
+#endif
+#ifndef I2C2_SCL_PIN_DEFAULT
+  #define I2C2_SCL_PIN_DEFAULT  -1
 #endif
 
 // =============================================================================

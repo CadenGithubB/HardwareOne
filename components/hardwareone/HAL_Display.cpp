@@ -12,6 +12,7 @@
 
 #if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
   #include "System_I2C.h"
+  #include "System_Settings.h"  // gSettings.oledBus for dual-bus routing
   #include "OLED_Display.h"
   #include <Wire.h>
 #endif
@@ -30,34 +31,48 @@ bool displayInit() {
   
 #if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
   // ============================================================================
-  // I2C OLED (SSD1306) Initialization
+  // I2C OLED (SSD1306) Initialization — bus-aware
   // ============================================================================
-  extern TwoWire Wire1;  // System uses Wire1 for all I2C sensors
-  
-  // Probe both common SSD1306 addresses (0x3D first, then 0x3C)
+  // Resolve the OLED's bus from settings (defaults to 0 = I2C1 = Wire1).
+  // i2c()->getWire(bus) returns the right TwoWire* pointer or nullptr when
+  // the bus isn't initialized — we hard-fail in the nullptr case rather than
+  // silently falling back to Wire1, so a misconfigured oledBus is visible.
+  const uint8_t oledBus = (uint8_t)gSettings.oledBus;
+  TwoWire* oledWire = i2c() ? i2c()->getWire(oledBus) : nullptr;
+  if (!oledWire) {
+    // bus not initialized (e.g. user set oledBus=1 but i2c2BusEnabled=false)
+    return false;
+  }
+
+  // Probe both common SSD1306 addresses (0x3D first, then 0x3C) on the OLED's bus.
   uint8_t oledAddresses[] = {DISPLAY_I2C_ADDR_ALT, DISPLAY_I2C_ADDR};
   uint8_t detectedAddr = 0;
   for (uint8_t addr : oledAddresses) {
-    uint8_t probeResult = i2cProbeAddress(addr, 100000, 200);
+    uint8_t probeResult = i2cProbeAddress(addr, 100000, 200, oledBus);
     if (probeResult == 0) {
       detectedAddr = addr;
       break;
     }
   }
   if (detectedAddr == 0) {
-    return false;  // No OLED found at either address
+    return false;  // No OLED found at either address on this bus
   }
-  
-  gDisplay = new Adafruit_SSD1306(DISPLAY_WIDTH, DISPLAY_HEIGHT, &Wire1, DISPLAY_RESET_PIN);
+
+  // Construct Adafruit_SSD1306 with the resolved TwoWire pointer; all the
+  // library's later display() / clearDisplay() / etc. calls go through this
+  // wire automatically.
+  gDisplay = new Adafruit_SSD1306(DISPLAY_WIDTH, DISPLAY_HEIGHT, oledWire, DISPLAY_RESET_PIN);
   if (!gDisplay) {
     return false;
   }
-  
-  // Use I2C transaction wrapper for thread-safe initialization with detected address
-  bool success = i2cDeviceTransaction(detectedAddr, 100000, 100, [&]() -> bool {
+
+  // Use bus-aware transaction wrapper for thread-safe initialization. Routes
+  // mutex acquisition + clock change to the OLED's bus so other devices on
+  // the OTHER bus stay live during the init handshake.
+  bool success = i2cDeviceTransaction(oledBus, detectedAddr, 100000, 100, [&]() -> bool {
     return gDisplay->begin(SSD1306_SWITCHCAPVCC, detectedAddr);
   });
-  
+
   if (!success) {
     delete gDisplay;
     gDisplay = nullptr;
@@ -149,12 +164,13 @@ void displayUpdate() {
   extern volatile bool gSensorPollingPaused;
   if (gSensorPollingPaused) return;
   
-  // Use device-aware transaction for proper clock management.
-  // Run at 400kHz to reduce bus hold time (~20ms vs ~80ms at 100kHz).
-  // SSD1306 supports up to 400kHz I2C.
-  // Short timeout (15ms) so OLED yields to higher-priority I2C devices (gamepad, sensors).
-  // If bus is busy, we skip this frame and retry next cycle - no visible flicker.
-  i2cDeviceTransactionVoid(OLED_I2C_ADDRESS, 400000, 15, [&]() {
+  // Use bus-aware device transaction. Routes mutex/clock to the OLED's
+  // configured bus (gSettings.oledBus). Run at 400kHz to reduce bus hold
+  // time (~20ms vs ~80ms at 100kHz); SSD1306 supports up to 400kHz I2C.
+  // Short timeout (15ms) so OLED yields to higher-priority devices on the
+  // SAME bus. If the bus is busy, this frame is skipped and retried next
+  // cycle — no visible flicker.
+  i2cDeviceTransactionVoid((uint8_t)gSettings.oledBus, OLED_I2C_ADDRESS, 400000, 15, [&]() {
     gDisplay->display();  // Push framebuffer to OLED (~20ms at 400kHz)
   });
 #elif DISPLAY_TYPE == DISPLAY_TYPE_ST7789 || DISPLAY_TYPE == DISPLAY_TYPE_ILI9341

@@ -103,37 +103,56 @@ extern const SettingsModule presenceSettingsModule = {
 // ============================================================================
 // Low-level I2C Helper Functions
 // ============================================================================
+// Resolves the STHS34PF80's bus + TwoWire* from settings (gSettings.presenceBus).
+// Returns false (outputs unchanged) when the bus isn't initialized — every
+// register helper below fails closed in that case rather than silently
+// targeting Wire1 with the wrong bus mutex. Same pattern as the OLED + RTC
+// migrations.
+static bool presenceResolveBus(uint8_t* outBus, TwoWire** outWire) {
+  const uint8_t bus = (uint8_t)gSettings.presenceBus;
+  TwoWire* w = i2c() ? i2c()->getWire(bus) : nullptr;
+  if (!w) return false;
+  *outBus = bus;
+  *outWire = w;
+  return true;
+}
 
 static bool writeRegister(uint8_t reg, uint8_t value) {
-  return i2cDeviceTransaction(I2C_ADDR_PRESENCE, 100000, 200, [&]() -> bool {
-    Wire1.beginTransmission(I2C_ADDR_PRESENCE);
-    Wire1.write(reg);
-    Wire1.write(value);
-    return (Wire1.endTransmission() == 0);
+  uint8_t bus; TwoWire* w;
+  if (!presenceResolveBus(&bus, &w)) return false;
+  return i2cDeviceTransaction(bus, I2C_ADDR_PRESENCE, 100000, 200, [&]() -> bool {
+    w->beginTransmission(I2C_ADDR_PRESENCE);
+    w->write(reg);
+    w->write(value);
+    return (w->endTransmission() == 0);
   });
 }
 
 static bool readRegister(uint8_t reg, uint8_t* value) {
-  return i2cDeviceTransaction(I2C_ADDR_PRESENCE, 100000, 200, [&]() -> bool {
-    Wire1.beginTransmission(I2C_ADDR_PRESENCE);
-    Wire1.write(reg);
-    if (Wire1.endTransmission(false) != 0) return false;
-    
-    if (Wire1.requestFrom(I2C_ADDR_PRESENCE, (uint8_t)1) != 1) return false;
-    *value = Wire1.read();
+  uint8_t bus; TwoWire* w;
+  if (!presenceResolveBus(&bus, &w)) return false;
+  return i2cDeviceTransaction(bus, I2C_ADDR_PRESENCE, 100000, 200, [&]() -> bool {
+    w->beginTransmission(I2C_ADDR_PRESENCE);
+    w->write(reg);
+    if (w->endTransmission(false) != 0) return false;
+
+    if (w->requestFrom(I2C_ADDR_PRESENCE, (uint8_t)1) != 1) return false;
+    *value = w->read();
     return true;
   });
 }
 
 static bool readRegisters(uint8_t reg, uint8_t* buffer, uint8_t len) {
-  return i2cDeviceTransaction(I2C_ADDR_PRESENCE, 100000, 200, [&]() -> bool {
-    Wire1.beginTransmission(I2C_ADDR_PRESENCE);
-    Wire1.write(reg);
-    if (Wire1.endTransmission(false) != 0) return false;
-    
-    if (Wire1.requestFrom(I2C_ADDR_PRESENCE, len) != len) return false;
+  uint8_t bus; TwoWire* w;
+  if (!presenceResolveBus(&bus, &w)) return false;
+  return i2cDeviceTransaction(bus, I2C_ADDR_PRESENCE, 100000, 200, [&]() -> bool {
+    w->beginTransmission(I2C_ADDR_PRESENCE);
+    w->write(reg);
+    if (w->endTransmission(false) != 0) return false;
+
+    if (w->requestFrom(I2C_ADDR_PRESENCE, len) != len) return false;
     for (uint8_t i = 0; i < len; i++) {
-      buffer[i] = Wire1.read();
+      buffer[i] = w->read();
     }
     return true;
   });
@@ -163,7 +182,7 @@ const char* cmd_presencestart(const String& argsInput) {
     return getDebugBuffer();
   }
 
-  if (!i2cPingAddress(I2C_ADDR_PRESENCE, 100000, 50)) {
+  if (!i2cPingAddress(I2C_ADDR_PRESENCE, 100000, 50, (uint8_t)gSettings.presenceBus)) {
     return "[Presence] Not detected on I2C bus";
   }
 

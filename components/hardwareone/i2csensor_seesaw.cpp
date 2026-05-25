@@ -24,8 +24,23 @@
 // Task handle (owned by this module)
 TaskHandle_t gGamepadTaskHandle = nullptr;
 
-// Seesaw gamepad object (owned by this module)
-Adafruit_seesaw gGamepadSeesaw(&Wire1);
+// Seesaw gamepad object — heap-allocated at gamepadInit with the TwoWire*
+// for the gamepad's configured bus. Was a stack global with hardcoded
+// `&Wire1` pre-dual-bus; the library binds the TwoWire at construction so
+// we defer until gamepadBus is resolved. All callsites use `->` and check
+// for nullptr.
+Adafruit_seesaw* gGamepadSeesaw = nullptr;
+
+// Resolve the gamepad's bus + TwoWire* from settings. Returns false if the
+// bus isn't initialized (e.g., gamepadBus=1 but i2c2BusEnabled=false).
+static bool gamepadResolveBus(uint8_t* outBus, TwoWire** outWire) {
+  const uint8_t bus = (uint8_t)gSettings.gamepadBus;
+  TwoWire* w = i2c() ? i2c()->getWire(bus) : nullptr;
+  if (!w) return false;
+  *outBus = bus;
+  *outWire = w;
+  return true;
+}
 
 // Debug system provides DEBUG_GAMEPADF / INFO_GAMEPADF and gDebugFlags via System_Debug.h
 
@@ -196,36 +211,59 @@ bool gamepadStartInternal() {
 // ============================================================================
 
 bool gamepadInit() {
-  // If we've already got a connection, consider it initialized
-  if (gGamepadConnected) {
+  // If we've already got a connection AND the seesaw object exists, done.
+  if (gGamepadConnected && gGamepadSeesaw) {
     DEBUG_GAMEPAD_LIFECYCLEF("[GAMEPAD] gamepadInit: already connected, returning true");
     return true;
   }
 
   INFO_GAMEPAD_LIFECYCLEF("gamepadInit: starting initialization...");
 
-  // Use device-aware transaction wrapper for safe mutex + clock management + health tracking
-  bool initSuccess = i2cDeviceTransaction(I2C_ADDR_GAMEPAD, 100000, 3000, [&]() -> bool {
-    // Wire1 already initialized in setup() - no need to call begin() again
+  // Resolve which bus the gamepad lives on (gSettings.gamepadBus). The
+  // Adafruit_seesaw library binds the TwoWire at construction, so we must
+  // allocate the object here with the right pointer — there's no setBus()
+  // after the fact. Bail closed if the bus isn't initialized.
+  uint8_t gpBus; TwoWire* gpWire;
+  if (!gamepadResolveBus(&gpBus, &gpWire)) {
+    ERROR_GAMEPADF("gamepad bus %d not initialized — check i2c2BusEnabled if gamepadBus=1",
+                   gSettings.gamepadBus);
+    return false;
+  }
 
-    if (!gGamepadSeesaw.begin(I2C_ADDR_GAMEPAD)) {
-      ERROR_GAMEPADF("Seesaw (Gamepad) not found at 0x%02X on Wire1", I2C_ADDR_GAMEPAD);
+  // Allocate the seesaw library object on the heap if we haven't yet.
+  // Kept across re-init attempts so the library's internal state survives.
+  if (!gGamepadSeesaw) {
+    gGamepadSeesaw = new Adafruit_seesaw(gpWire);
+    if (!gGamepadSeesaw) {
+      ERROR_GAMEPADF("Failed to allocate Adafruit_seesaw");
+      return false;
+    }
+    DEBUG_GAMEPAD_LIFECYCLEF("[GAMEPAD] Allocated Adafruit_seesaw at %p on bus %u",
+                             (void*)gGamepadSeesaw, gpBus);
+  }
+
+  // Use bus-aware device transaction wrapper for safe mutex + clock + health tracking
+  bool initSuccess = i2cDeviceTransaction(gpBus, I2C_ADDR_GAMEPAD, 100000, 3000, [&]() -> bool {
+    // Library's wire is already bound from construction above
+
+    if (!gGamepadSeesaw->begin(I2C_ADDR_GAMEPAD)) {
+      ERROR_GAMEPADF("Seesaw (Gamepad) not found at 0x%02X on bus %u", I2C_ADDR_GAMEPAD, gpBus);
       return false;
     }
 
     // Soft reset to ensure clean state - fixes stuck button reads
     DEBUG_GAMEPAD_LIFECYCLEF("[GAMEPAD] Performing soft reset...");
-    gGamepadSeesaw.SWReset();
+    gGamepadSeesaw->SWReset();
     delay(10);  // Allow reset to complete
-    
+
     // Re-begin after reset
-    if (!gGamepadSeesaw.begin(I2C_ADDR_GAMEPAD)) {
+    if (!gGamepadSeesaw->begin(I2C_ADDR_GAMEPAD)) {
       ERROR_GAMEPADF("Seesaw not responding after soft reset");
       return false;
     }
 
     // Verify product ID (upper 16 bits of getVersion()) should be 5743
-    uint32_t version = ((gGamepadSeesaw.getVersion() >> 16) & 0xFFFF);
+    uint32_t version = ((gGamepadSeesaw->getVersion() >> 16) & 0xFFFF);
     INFO_GAMEPAD_LIFECYCLEF("Seesaw version: %lu (expected 5743)", (unsigned long)version);
     if (version != 5743) {
       WARN_GAMEPADF("Seesaw product mismatch: got %lu, expected 5743 (Mini I2C Gamepad)", (unsigned long)version);
@@ -234,8 +272,8 @@ bool gamepadInit() {
 
     // Configure gamepad button inputs with pullups and enable GPIO interrupts
     // Use GAMEPAD_BUTTON_MASK from header for consistency
-    gGamepadSeesaw.pinModeBulk(GAMEPAD_BUTTON_MASK, INPUT_PULLUP);
-    gGamepadSeesaw.setGPIOInterrupts(GAMEPAD_BUTTON_MASK, 1);
+    gGamepadSeesaw->pinModeBulk(GAMEPAD_BUTTON_MASK, INPUT_PULLUP);
+    gGamepadSeesaw->setGPIOInterrupts(GAMEPAD_BUTTON_MASK, 1);
 
     DEBUG_GAMEPAD_LIFECYCLEF("[GAMEPAD] Seesaw hardware init complete inside lambda");
     return true;
@@ -256,14 +294,16 @@ bool gamepadInit() {
   return initSuccess;
 }
 
-// Helper function for I2C ping
-static bool i2cPing(TwoWire* bus, uint8_t addr) {
-  (void)bus;
-  return i2cPingAddress(addr, 100000, 200);
+// Helper function for I2C ping — bus-aware.
+// The pre-dual-bus signature took TwoWire* which it then ignored (always
+// pinged via Wire1). Now takes a bus index and routes through the bus-aware
+// i2cPingAddress, so the ping uses the right mutex + Wire.
+static bool i2cPing(uint8_t bus, uint8_t addr) {
+  return i2cPingAddress(addr, 100000, 200, bus);
 }
 
 bool gamepadInitConnection() {
-  if (gGamepadConnected) return true;
+  if (gGamepadConnected && gGamepadSeesaw) return true;
   unsigned long now = millis();
   if (now - gLastGamepadInitMs < kGamepadInitMinIntervalMs) {
     broadcastOutput("Gamepad: skipping re-init (backoff window)");
@@ -272,17 +312,31 @@ bool gamepadInitConnection() {
   gLastGamepadInitMs = now;
   broadcastOutput("Gamepad: attempting re-init");
 
+  // Resolve bus + allocate library object if not done yet.
+  uint8_t gpBus; TwoWire* gpWire;
+  if (!gamepadResolveBus(&gpBus, &gpWire)) {
+    WARN_GAMEPADF("Gamepad: bus %d not initialized", gSettings.gamepadBus);
+    return false;
+  }
+  if (!gGamepadSeesaw) {
+    gGamepadSeesaw = new Adafruit_seesaw(gpWire);
+    if (!gGamepadSeesaw) {
+      WARN_GAMEPADF("Gamepad: failed to alloc Adafruit_seesaw");
+      return false;
+    }
+  }
+
   // Quick ping first to avoid costly begin() if device not present
   bool seen = false;
   for (int p = 0; p < 2; ++p) {
-    if (i2cPing(&Wire1, I2C_ADDR_GAMEPAD)) {
+    if (i2cPing(gpBus, I2C_ADDR_GAMEPAD)) {
       seen = true;
       break;
     }
     delay(5);
   }
   if (!seen) {
-    WARN_GAMEPADF("Gamepad: no ACK at 0x%02X", I2C_ADDR_GAMEPAD);
+    WARN_GAMEPADF("Gamepad: no ACK at 0x%02X on bus %u", I2C_ADDR_GAMEPAD, gpBus);
     broadcastOutput("Gamepad: no ACK at 0x50");
     return false;
   }
@@ -292,21 +346,21 @@ bool gamepadInitConnection() {
     char msg[48];
     snprintf(msg, sizeof(msg), "Gamepad: re-init attempt %d", attempt);
     broadcastOutput(msg);
-    bool began = i2cDeviceTransaction(I2C_ADDR_GAMEPAD, 100000, 500, [&]() -> bool {
-      return gGamepadSeesaw.begin(I2C_ADDR_GAMEPAD);
+    bool began = i2cDeviceTransaction(gpBus, I2C_ADDR_GAMEPAD, 100000, 500, [&]() -> bool {
+      return gGamepadSeesaw->begin(I2C_ADDR_GAMEPAD);
     });
     if (began) {
       // Soft reset for clean state, then reconfigure
-      i2cDeviceTransactionVoid(I2C_ADDR_GAMEPAD, 100000, 500, [&]() {
-        gGamepadSeesaw.SWReset();
+      i2cDeviceTransactionVoid(gpBus, I2C_ADDR_GAMEPAD, 100000, 500, [&]() {
+        gGamepadSeesaw->SWReset();
       });
       delay(10);
-      
+
       // Re-begin and configure pins after reset
-      bool reinit = i2cDeviceTransaction(I2C_ADDR_GAMEPAD, 100000, 500, [&]() -> bool {
-        if (!gGamepadSeesaw.begin(I2C_ADDR_GAMEPAD)) return false;
-        gGamepadSeesaw.pinModeBulk(GAMEPAD_BUTTON_MASK, INPUT_PULLUP);
-        gGamepadSeesaw.setGPIOInterrupts(GAMEPAD_BUTTON_MASK, 1);
+      bool reinit = i2cDeviceTransaction(gpBus, I2C_ADDR_GAMEPAD, 100000, 500, [&]() -> bool {
+        if (!gGamepadSeesaw->begin(I2C_ADDR_GAMEPAD)) return false;
+        gGamepadSeesaw->pinModeBulk(GAMEPAD_BUTTON_MASK, INPUT_PULLUP);
+        gGamepadSeesaw->setGPIOInterrupts(GAMEPAD_BUTTON_MASK, 1);
         return true;
       });
       if (!reinit) {
@@ -315,10 +369,10 @@ bool gamepadInitConnection() {
       }
 
       // Validate by reading a couple of registers/values
-      i2cDeviceTransactionVoid(I2C_ADDR_GAMEPAD, 100000, 500, [&]() {
-        (void)gGamepadSeesaw.getVersion();
-        (void)gGamepadSeesaw.analogRead(14);
-        (void)gGamepadSeesaw.analogRead(15);
+      i2cDeviceTransactionVoid(gpBus, I2C_ADDR_GAMEPAD, 100000, 500, [&]() {
+        (void)gGamepadSeesaw->getVersion();
+        (void)gGamepadSeesaw->analogRead(14);
+        (void)gGamepadSeesaw->analogRead(15);
       });
 
       gGamepadEnabled = true;
@@ -340,19 +394,21 @@ bool gamepadInitConnection() {
 }
 
 void gamepadPoll() {
-  if (!gGamepadConnected) {
+  if (!gGamepadConnected || !gGamepadSeesaw) {
     broadcastOutput("Gamepad not connected. Check wiring.");
     return;
   }
 
   uint32_t buttons = 0;
   int16_t x = 0, y = 0;
-  
-  // Must use I2C transaction wrapper to prevent bus contention
-  i2cDeviceTransactionVoid(I2C_ADDR_GAMEPAD, 100000, 200, [&]() {
-    buttons = gGamepadSeesaw.digitalReadBulk(GAMEPAD_BUTTON_MASK);
-    x = gGamepadSeesaw.analogRead(14);
-    y = gGamepadSeesaw.analogRead(15);
+
+  // Bus-aware transaction wrapper to prevent bus contention. The gamepad's
+  // bus is fixed at gamepadInit time and stored in gSettings.gamepadBus.
+  const uint8_t gpBus = (uint8_t)gSettings.gamepadBus;
+  i2cDeviceTransactionVoid(gpBus, I2C_ADDR_GAMEPAD, 100000, 200, [&]() {
+    buttons = gGamepadSeesaw->digitalReadBulk(GAMEPAD_BUTTON_MASK);
+    x = gGamepadSeesaw->analogRead(14);
+    y = gGamepadSeesaw->analogRead(15);
   });
 
   BROADCAST_PRINTF("Buttons: 0x%lX, X: %d, Y: %d", (unsigned long)buttons, x, y);
@@ -497,18 +553,21 @@ void gamepadTask(void* parameter) {
         int rawX = 0, rawY = 0;
 
         // Seesaw ATSAMD09 supports 400kHz I2C - faster transactions reduce bus hold time.
-        // 80ms timeout: must be < Wire1.setTimeOut(100ms) so Wire aborts cleanly first.
-        // 3 reads × 80ms = 240ms worst case, well under CONFIG_ESP_INT_WDT_TIMEOUT_MS (1500ms).
-        auto result = i2cTaskWithTimeout(I2C_ADDR_GAMEPAD, 400000, 80, [&]() -> bool {
+        // 80ms timeout: must be < the gamepad bus's setTimeOut(100ms) so Wire aborts
+        // cleanly first. 3 reads × 80ms = 240ms worst case, well under
+        // CONFIG_ESP_INT_WDT_TIMEOUT_MS (1500ms).
+        // Bus-aware: routes mutex + clock to whichever bus the gamepad lives on.
+        const uint8_t gpBus = (uint8_t)gSettings.gamepadBus;
+        auto result = gGamepadSeesaw && i2cDeviceTransaction(gpBus, I2C_ADDR_GAMEPAD, 400000, 80, [&]() -> bool {
           // Exceptions are disabled (-fno-exceptions), so rely on return value only.
           // Read ONLY button pins, not all 32 GPIO pins - prevents garbage from unconfigured pins
-          buttons = gGamepadSeesaw.digitalReadBulk(GAMEPAD_BUTTON_MASK);
+          buttons = gGamepadSeesaw->digitalReadBulk(GAMEPAD_BUTTON_MASK);
           // Read and clear the hardware interrupt flag register. The ATSAMD09 latches every
           // edge event between polls (read-to-clear), so a press+release inside one 90ms window
           // still shows up here even though BULK already shows the button as released.
-          intflags = gGamepadSeesaw.digitalReadBulkIntFlag(GAMEPAD_BUTTON_MASK);
-          rawX = 1023 - gGamepadSeesaw.analogRead(14);
-          rawY = 1023 - gGamepadSeesaw.analogRead(15);
+          intflags = gGamepadSeesaw->digitalReadBulkIntFlag(GAMEPAD_BUTTON_MASK);
+          rawX = 1023 - gGamepadSeesaw->analogRead(14);
+          rawY = 1023 - gGamepadSeesaw->analogRead(15);
           return true;
         });
 

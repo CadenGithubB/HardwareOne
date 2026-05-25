@@ -3907,8 +3907,17 @@ bool earlyOLEDInit() {
     }
   }
   
-  extern TwoWire Wire1;
-  
+  // Resolve OLED's bus from settings (default 0 = I2C1 = Wire1). Same
+  // hard-fail-on-unavailable contract as HAL_Display.cpp's displayInit.
+  const uint8_t oledBus = (uint8_t)gSettings.oledBus;
+  TwoWire* oledWire = i2c() ? i2c()->getWire(oledBus) : nullptr;
+  if (!oledWire) {
+    DEBUG_DISPLAYF("OLED bus %u not initialized — skip boot-anim OLED init", oledBus);
+    return false;
+  }
+  const int oledSda = (oledBus == 0) ? gSettings.i2cSdaPin  : gSettings.i2c2SdaPin;
+  const int oledScl = (oledBus == 0) ? gSettings.i2cSclPin  : gSettings.i2c2SclPin;
+
   // Try both common OLED addresses: 0x3D (default) and 0x3C (alternate).
   // Retry a few times — cold boot / shared I2C bus can NACK the first probe intermittently.
   uint8_t oledAddresses[] = {0x3D, 0x3C};
@@ -3920,8 +3929,9 @@ bool earlyOLEDInit() {
       DEBUG_DISPLAYF("OLED probe retry %d/%d", attempt + 1, kOledProbeAttempts);
     }
     for (uint8_t addr : oledAddresses) {
-      DEBUG_DISPLAYF("Probing for OLED at 0x%02X on Wire1 (SDA=%d, SCL=%d)", addr, gSettings.i2cSdaPin, gSettings.i2cSclPin);
-      uint8_t probeResult = i2cProbeAddress(addr, 100000, 200);
+      DEBUG_DISPLAYF("Probing for OLED at 0x%02X on bus %u (SDA=%d, SCL=%d)",
+                     addr, oledBus, oledSda, oledScl);
+      uint8_t probeResult = i2cProbeAddress(addr, 100000, 200, oledBus);
       DEBUG_DISPLAYF("OLED probe at 0x%02X result: %d (0=found, 2=NACK)", addr, probeResult);
       if (probeResult == 0) {
         detectedAddr = addr;
@@ -3931,15 +3941,18 @@ bool earlyOLEDInit() {
   }
 
   if (detectedAddr != 0) {
-    DEBUG_DISPLAYF("OLED detected at 0x%02X - initializing for boot animation", detectedAddr);
+    DEBUG_DISPLAYF("OLED detected at 0x%02X on bus %u - initializing for boot animation",
+                   detectedAddr, oledBus);
 
-    // Use Display HAL's gDisplay (oledDisplay is a macro alias for gDisplay in Display_HAL.h)
+    // Use Display HAL's gDisplay (oledDisplay is a macro alias for gDisplay in Display_HAL.h).
+    // Construct with the OLED's resolved Wire pointer; all later library
+    // calls (clearDisplay, display, etc.) route through it automatically.
     extern DisplayDriver* gDisplay;
     if (!gDisplay) {
-      gDisplay = new Adafruit_SSD1306(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire1, OLED_RESET);
+      gDisplay = new Adafruit_SSD1306(SCREEN_WIDTH, SCREEN_HEIGHT, oledWire, OLED_RESET);
     }
-    
-    bool beginOk = gDisplay && i2cDeviceTransaction(detectedAddr, 100000, 500, [&]() -> bool {
+
+    bool beginOk = gDisplay && i2cDeviceTransaction(oledBus, detectedAddr, 100000, 500, [&]() -> bool {
       return gDisplay->begin(SSD1306_SWITCHCAPVCC, detectedAddr);
     });
     if (beginOk) {
@@ -6086,7 +6099,7 @@ void applyOLEDBrightness() {
 #if ENABLE_OLED_DISPLAY
   if (oledConnected && gOledEnabled) {
     if (gSettings.oledBrightness >= 0 && gSettings.oledBrightness <= 255) {
-      i2cDeviceTransactionVoid(I2C_ADDR_OLED, 400000, 200, [&]() {
+      i2cDeviceTransactionVoid((uint8_t)gSettings.oledBus, I2C_ADDR_OLED, 400000, 200, [&]() {
         oledDisplay->ssd1306_command(SSD1306_SETCONTRAST);
         oledDisplay->ssd1306_command(gSettings.oledBrightness);
       });
@@ -6142,7 +6155,7 @@ void oledNotifyLocalDisplayAuthChanged() {
 void oledDisplayOff() {
 #if ENABLE_OLED_DISPLAY
   if (oledDisplay && oledConnected) {
-    i2cDeviceTransactionVoid(I2C_ADDR_OLED, 400000, 500, [&]() {
+    i2cDeviceTransactionVoid((uint8_t)gSettings.oledBus, I2C_ADDR_OLED, 400000, 500, [&]() {
       oledDisplay->ssd1306_command(SSD1306_DISPLAYOFF);
     });
   }
@@ -6152,7 +6165,7 @@ void oledDisplayOff() {
 void oledDisplayOn() {
 #if ENABLE_OLED_DISPLAY
   if (oledDisplay && oledConnected) {
-    i2cDeviceTransactionVoid(I2C_ADDR_OLED, 400000, 500, [&]() {
+    i2cDeviceTransactionVoid((uint8_t)gSettings.oledBus, I2C_ADDR_OLED, 400000, 500, [&]() {
       oledDisplay->ssd1306_command(SSD1306_DISPLAYON);
     });
   }
@@ -6162,7 +6175,7 @@ void oledDisplayOn() {
 void oledShowSleepScreen(int seconds) {
 #if ENABLE_OLED_DISPLAY
   if (oledDisplay && oledConnected) {
-    i2cDeviceTransactionVoid(I2C_ADDR_OLED, 400000, 500, [&]() {
+    i2cDeviceTransactionVoid((uint8_t)gSettings.oledBus, I2C_ADDR_OLED, 400000, 500, [&]() {
       oledDisplay->clearDisplay();
       oledDisplay->setTextSize(1);
       oledDisplay->setCursor(0, 16);

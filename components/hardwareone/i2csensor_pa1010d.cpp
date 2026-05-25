@@ -99,16 +99,28 @@ bool gpsStartInternal() {
   
   // Initialize GPS module if not already done
   if (!gGpsConnected || gPA1010D == nullptr) {
-    DEBUG_GPS_LIFECYCLEF("[GPS_INIT] Allocating Adafruit_GPS object on Wire1...");
-    gPA1010D = new Adafruit_GPS(&Wire1);
+    // Resolve which bus the GPS lives on (default 0). The Adafruit_GPS
+    // library binds the TwoWire* at construction, so we must pass the
+    // right pointer here — there's no setBus() after the fact. Bail
+    // closed if the bus isn't initialized, rather than constructing
+    // with &Wire1 and silently using the wrong port.
+    const uint8_t gpsBus = (uint8_t)gSettings.gpsBus;
+    TwoWire* gpsWire = i2c() ? i2c()->getWire(gpsBus) : nullptr;
+    if (!gpsWire) {
+      ERROR_GPSF("[GPS_INIT] bus %u not initialized — check i2c2BusEnabled if gpsBus=1", gpsBus);
+      return false;
+    }
+
+    DEBUG_GPS_LIFECYCLEF("[GPS_INIT] Allocating Adafruit_GPS object on bus %u...", gpsBus);
+    gPA1010D = new Adafruit_GPS(gpsWire);
     if (!gPA1010D) {
       ERROR_GPSF("Failed to allocate GPS module");
       return false;
     }
     DEBUG_GPS_LIFECYCLEF("[GPS_INIT] GPS object allocated at %p", gPA1010D);
-    
+
     DEBUG_GPS_LIFECYCLEF("[GPS_INIT] Calling gPA1010D->begin(0x%02X)...", I2C_ADDR_GPS);
-    
+
     // Retry GPS initialization with delays (GPS needs time after power-on)
     bool initSuccess = false;
     for (int retry = 0; retry < 3; retry++) {
@@ -116,7 +128,7 @@ bool gpsStartInternal() {
         DEBUG_GPS_LIFECYCLEF("[GPS_INIT] Retry %d/3 after 200ms delay...", retry);
         delay(200);
       }
-      bool began = i2cDeviceTransaction(I2C_ADDR_GPS, 100000, 500, [&]() -> bool {
+      bool began = i2cDeviceTransaction(gpsBus, I2C_ADDR_GPS, 100000, 500, [&]() -> bool {
         return gPA1010D->begin(I2C_ADDR_GPS);
       });
       if (began) {
@@ -124,28 +136,30 @@ bool gpsStartInternal() {
         break;
       }
     }
-    
+
     if (!initSuccess) {
       delete gPA1010D;
       gPA1010D = nullptr;
       gGpsConnected = false;
-      ERROR_GPSF("Failed to initialize GPS module at 0x%02X after 3 attempts", I2C_ADDR_GPS);
+      ERROR_GPSF("Failed to initialize GPS module at 0x%02X on bus %u after 3 attempts",
+                 I2C_ADDR_GPS, gpsBus);
       return false;
     }
-    INFO_GPS_LIFECYCLEF("GPS module initialized successfully at I2C address 0x%02X", I2C_ADDR_GPS);
-    
+    INFO_GPS_LIFECYCLEF("GPS module initialized successfully at 0x%02X on bus %u",
+                        I2C_ADDR_GPS, gpsBus);
+
     // Configure GPS module (wrapped for mutex/clock management)
     DEBUG_GPS_LIFECYCLEF("[GPS_INIT] Configuring GPS: RMC+GGA sentences, 1Hz update rate");
-    i2cDeviceTransactionVoid(I2C_ADDR_GPS, 100000, 500, [&]() {
+    i2cDeviceTransactionVoid(gpsBus, I2C_ADDR_GPS, 100000, 500, [&]() {
       gPA1010D->sendCommand(PMTK_SET_NMEA_OUTPUT_RMCGGA);  // RMC + GGA sentences
       gPA1010D->sendCommand(PMTK_SET_NMEA_UPDATE_1HZ);     // 1 Hz update rate
       gPA1010D->sendCommand(PGCMD_ANTENNA);                // Enable antenna status info
     });
     DEBUG_GPS_LIFECYCLEF("[GPS_INIT] GPS configuration commands sent");
-    
+
     gGpsConnected = true;
     DEBUG_GPS_LIFECYCLEF("[GPS_INIT] gGpsConnected set to true");
-    
+
   }
   
   gGpsEnabled = true;
@@ -189,7 +203,7 @@ const char* cmd_gpsstart(const String& argsInput) {
     return getDebugBuffer();
   }
 
-  if (!i2cPingAddress(I2C_ADDR_GPS, 100000, 50)) {
+  if (!i2cPingAddress(I2C_ADDR_GPS, 100000, 50, (uint8_t)gSettings.gpsBus)) {
     return "[GPS] Not detected on I2C bus";
   }
 
@@ -367,11 +381,14 @@ void gpsTask(void* parameter) {
 
       // ── I2C health probe (rate-limited) ──────────────────────────────────
       // Separate from reading so the health/auto-disable system still works.
+      // Bus-aware: probe whichever bus the GPS lives on (gpsBus setting).
       if ((nowMs - lastGPSRead) >= gpsPollMs) {
         lastGPSRead = nowMs;
-        auto probeResult = i2cTaskWithTimeout(I2C_ADDR_GPS, 100000, 100, [&]() -> bool {
-          Wire1.beginTransmission(I2C_ADDR_GPS);
-          return Wire1.endTransmission() == 0;
+        const uint8_t probeBus = (uint8_t)gSettings.gpsBus;
+        TwoWire* probeWire = i2c() ? i2c()->getWire(probeBus) : nullptr;
+        auto probeResult = probeWire && i2cDeviceTransaction(probeBus, I2C_ADDR_GPS, 100000, 100, [&]() -> bool {
+          probeWire->beginTransmission(I2C_ADDR_GPS);
+          return probeWire->endTransmission() == 0;
         });
         if (!probeResult) {
           if (i2cShouldAutoDisable(I2C_ADDR_GPS)) {
