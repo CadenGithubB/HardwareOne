@@ -733,7 +733,7 @@ static void publishMeshPeerSensorData() {
           case REMOTE_SENSOR_TOF:     key = "tof"; break;
           case REMOTE_SENSOR_IMU:     key = "imu"; break;
           case REMOTE_SENSOR_GPS:     key = "gps"; break;
-          case REMOTE_SENSOR_INPUT: key = "gamepad"; break;
+          case REMOTE_SENSOR_INPUT: key = "input"; break;
           case REMOTE_SENSOR_FMRADIO: key = "fmradio"; break;
           default: break;
         }

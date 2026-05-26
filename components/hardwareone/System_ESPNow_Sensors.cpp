@@ -176,7 +176,7 @@ const char* sensorTypeToString(RemoteSensorType type) {
     case REMOTE_SENSOR_TOF: return "tof";
     case REMOTE_SENSOR_IMU: return "imu";
     case REMOTE_SENSOR_GPS: return "gps";
-    case REMOTE_SENSOR_INPUT: return "gamepad";
+    case REMOTE_SENSOR_INPUT: return "input";
     case REMOTE_SENSOR_FMRADIO: return "fmradio";
     case REMOTE_SENSOR_CAMERA: return "camera";
     case REMOTE_SENSOR_MICROPHONE: return "microphone";
@@ -192,7 +192,7 @@ RemoteSensorType stringToSensorType(const char* str) {
   if (strcmp(str, "tof") == 0) return REMOTE_SENSOR_TOF;
   if (strcmp(str, "imu") == 0) return REMOTE_SENSOR_IMU;
   if (strcmp(str, "gps") == 0) return REMOTE_SENSOR_GPS;
-  if (strcmp(str, "gamepad") == 0) return REMOTE_SENSOR_INPUT;
+  if (strcmp(str, "input") == 0) return REMOTE_SENSOR_INPUT;
   if (strcmp(str, "fmradio") == 0) return REMOTE_SENSOR_FMRADIO;
   if (strcmp(str, "camera") == 0) return REMOTE_SENSOR_CAMERA;
   if (strcmp(str, "microphone") == 0) return REMOTE_SENSOR_MICROPHONE;
@@ -863,7 +863,7 @@ const char* cmd_espnow_sensorstatus(const String& argsInput) {
     // Worker: show streaming status
     broadcastOutput("[ESP-NOW] Sensor streaming status:");
     
-    const char* sensors[] = {"thermal", "tof", "imu", "gps", "gamepad", "fmradio", "camera", "microphone"};
+    const char* sensors[] = {"thermal", "tof", "imu", "gps", "input", "fmradio", "camera", "microphone"};
     for (int i = 0; i < 8; i++) {
       RemoteSensorType type = stringToSensorType(sensors[i]);
       bool enabled = isSensorDataStreamingEnabled(type);

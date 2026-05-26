@@ -945,7 +945,7 @@ const char* cmd_sensorlog(const String& argsInput) {
       if (sensor == "thermal") gSensorLogMask |= LOG_THERMAL;
       else if (sensor == "tof") gSensorLogMask |= LOG_TOF;
       else if (sensor == "imu") gSensorLogMask |= LOG_IMU;
-      else if (sensor == "gamepad") gSensorLogMask |= LOG_GAMEPAD;
+      else if (sensor == "input") gSensorLogMask |= LOG_GAMEPAD;
       else if (sensor == "apds") gSensorLogMask |= LOG_APDS;
       else if (sensor == "gps") gSensorLogMask |= LOG_GPS;
       else if (sensor == "presence") gSensorLogMask |= LOG_PRESENCE;

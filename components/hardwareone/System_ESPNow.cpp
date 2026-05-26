@@ -5042,7 +5042,12 @@ static void buildCapabilitySummary(CapabilitySummary& cap) {
   }
   
   cap.role = gSettings.bondRole;
-  
+  // Tell the peer which input device we have compiled in (gamepad vs ANO
+  // encoder vs none). Mirrors INPUT_DEVICE_TYPE from System_BuildConfig.h
+  // so the bonded device's UI can render the correct label ("Gamepad" or
+  // "ANO Encoder") for our Remote Sensors row instead of a generic "Input".
+  cap.inputDeviceType = INPUT_DEVICE_TYPE;
+
   // Build feature mask (using CAP_FEATURE_* constants from header)
   cap.featureMask = 0;
 #if ENABLE_WIFI
@@ -5178,27 +5183,33 @@ static String generateDeviceManifest() {
   // connectedDevices[] and connectedDeviceCount are extern'd at file scope
   // Check which sensors are actually connected
   bool thermalConnected = false, tofConnected = false, imuConnected = false;
-  bool gamepadConnected = false, apdsConnected = false, gpsConnected = false;
+  bool inputConnected = false, apdsConnected = false, gpsConnected = false;
   bool rtcConnected = false, presenceConnected = false;
-  
+
   for (int i = 0; i < connectedDeviceCount; i++) {
     if (!connectedDevices[i].isConnected) continue;
     switch (connectedDevices[i].address) {
       case 0x33: thermalConnected = true; break;  // MLX90640
       case 0x29: tofConnected = true; break;      // VL53L0X
       case 0x28: imuConnected = true; break;      // BNO055
-      case 0x50: gamepadConnected = true; break;  // Seesaw
+      // Input device: either the Seesaw gamepad (0x50) OR the ANO rotary
+      // encoder (0x49) — they're mutually exclusive at compile time but the
+      // local I2C scanner doesn't know which one is compiled in, so it
+      // accepts either address. Previously only 0x50 was matched, which
+      // made the input-connected flag always read false on ANO builds.
+      case 0x49: inputConnected = true; break;    // ANO Rotary Encoder
+      case 0x50: inputConnected = true; break;    // Seesaw Gamepad
       case 0x39: apdsConnected = true; break;     // APDS9960
       case 0x10: gpsConnected = true; break;      // PA1010D
       case 0x68: rtcConnected = true; break;      // DS3231
       case 0x61: presenceConnected = true; break; // LD2410
     }
   }
-  
+
   sensorStatus["thermal"] = thermalConnected;
   sensorStatus["tof"] = tofConnected;
   sensorStatus["imu"] = imuConnected;
-  sensorStatus["gamepad"] = gamepadConnected;
+  sensorStatus["input"] = inputConnected;
   sensorStatus["apds"] = apdsConnected;
   sensorStatus["gps"] = gpsConnected;
   sensorStatus["rtc"] = rtcConnected;
@@ -6816,7 +6827,25 @@ void macFromHexString(const String& s, uint8_t out[6]) {
   }
 }
 
-// Find (or optionally create) a MeshPeerHealth slot for a given MAC
+// Find (or optionally create) a MeshPeerHealth slot for a given MAC.
+//
+// INVARIANT: when this function creates a new health slot, it ALSO ensures
+// a matching meta slot exists (empty meta is fine — name/room get filled in
+// later when the identity/topology message arrives, and displayName() falls
+// back to "Unknown" until then). Without this guarantee, the two arrays
+// drift: heartbeats and ACKs from an unknown peer go through this path
+// (via noteMeshPeerRxActivity) on EVERY frame and create health slots,
+// but meta is only created on a separate identity-message path that fires
+// much less often and only after the peer has been topologically learned.
+// The drift surfaced as the "1/0 devices" status display — countHealthy
+// from gMeshPeers vs count of active gMeshPeerMeta slots could disagree
+// because they were populated by different code paths.
+//
+// One-directional only (health→meta): meta-side creation does NOT call
+// back here, so no recursion. In practice meta is rarely created without
+// an associated activity event, but if a code path ever does create meta
+// solo, we'd then also need the inverse — left as a future cleanup if it
+// becomes a problem; current call sites don't exercise it.
 MeshPeerHealth* getMeshPeerHealth(const uint8_t mac[6], bool createIfMissing) {
   if (!gMeshPeers) return nullptr;
   for (int i = 0; i < gMeshPeerSlots; i++) {
@@ -6829,6 +6858,10 @@ MeshPeerHealth* getMeshPeerHealth(const uint8_t mac[6], bool createIfMissing) {
       memset(&gMeshPeers[i], 0, sizeof(MeshPeerHealth));
       memcpy(gMeshPeers[i].mac, mac, 6);
       gMeshPeers[i].isActive = true;
+      // Enforce the health⇒meta invariant. Ignore return value: if meta
+      // allocation fails (table full) we still return the health slot —
+      // counts will be off by one but that's the worst case, not a crash.
+      (void)getMeshPeerMeta(mac, true);
       return &gMeshPeers[i];
     }
   }
@@ -7749,7 +7782,7 @@ void processMeshHeartbeats() {
         { "tof",      gSettings.bondStreamTof,      REMOTE_SENSOR_TOF },
         { "imu",      gSettings.bondStreamImu,      REMOTE_SENSOR_IMU },
         { "gps",      gSettings.bondStreamGps,      REMOTE_SENSOR_GPS },
-        { "gamepad",  gSettings.bondStreamInput,   REMOTE_SENSOR_INPUT },
+        { "input",    gSettings.bondStreamInput,    REMOTE_SENSOR_INPUT },
         { "fmradio",  gSettings.bondStreamFmradio,   REMOTE_SENSOR_FMRADIO },
         { "rtc",      gSettings.bondStreamRtc,       REMOTE_SENSOR_RTC },
         { "presence", gSettings.bondStreamPresence,  REMOTE_SENSOR_PRESENCE },
@@ -13001,7 +13034,7 @@ const char* cmd_bond_stream(const String& argsInput) {
     bool savedFlags[] = {gSettings.bondStreamThermal, gSettings.bondStreamTof, gSettings.bondStreamImu, 
                          gSettings.bondStreamGps, gSettings.bondStreamInput, gSettings.bondStreamFmradio,
                          gSettings.bondStreamRtc, gSettings.bondStreamPresence};
-    const char* sensors[] = {"thermal", "tof", "imu", "gps", "gamepad", "fmradio", "rtc", "presence"};
+    const char* sensors[] = {"thermal", "tof", "imu", "gps", "input", "fmradio", "rtc", "presence"};
     for (int i = 0; i < 8; i++) {
       RemoteSensorType type = stringToSensorType(sensors[i]);
       bool runtime = isSensorDataStreamingEnabled(type);
