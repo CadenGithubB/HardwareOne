@@ -208,7 +208,7 @@ esp_err_t handleSensorData(httpd_req_t* req) {
         httpd_resp_send(req, imuResponseBuffer, jsonLen);
 
         return ESP_OK;
-      } else if (sensorType == "gamepad" || sensorType == "input") {
+      } else if (sensorType == "input") {
 #if !ENABLE_OLED_INPUT
         sendJsonResponse(req, "{\"val\":0, \"error\":\"not_compiled\"}");
         return ESP_OK;

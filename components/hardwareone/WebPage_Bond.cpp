@@ -439,15 +439,26 @@ void streamBondInner(httpd_req_t* req) {
       const sc = data.sensorConnected || {};
       const hasLive = sc.valid === true;
       
+      // Resolve a specific name for the remote's input device from the type
+      // byte the worker stamps into its capability summary. Falls back to
+      // generic "Input" for pre-v0.94 peers that don't send the field (0).
+      //   0 = unknown/legacy  → "Input"
+      //   1 = Seesaw gamepad  → "Gamepad"
+      //   2 = ANO encoder     → "ANO Encoder"
+      const remoteInputType = (data.capabilities && data.capabilities.inputDeviceType) || 0;
+      const remoteInputName = (remoteInputType === 2) ? 'ANO Encoder'
+                            : (remoteInputType === 1) ? 'Gamepad'
+                            : 'Input';
+
       // Sensor capability bit masks (must match System_ESPNow.h)
       // mask values mirror CAP_SENSOR_* in System_ESPNow.h. streamable=false for
       // sensors that have no bond streaming pipeline (APDS) — Enable still works,
       // but the Stream toggle is shown disabled rather than dead.
       const sensors = [
-        {id: 'thermal', name: 'Thermal',  mask: 0x01,  stream: data.streamThermal,  on: sc.thermalOn,  streamable: true},
-        {id: 'tof',     name: 'ToF',      mask: 0x02,  stream: data.streamTof,      on: sc.tofOn,      streamable: true},
-        {id: 'imu',     name: 'IMU',      mask: 0x04,  stream: data.streamImu,      on: sc.imuOn,      streamable: true},
-        {id: 'input',   name: 'Input',    mask: 0x08,  stream: data.streamInput,    on: sc.inputOn,    streamable: true},
+        {id: 'thermal', name: 'Thermal',        mask: 0x01,  stream: data.streamThermal,  on: sc.thermalOn,  streamable: true},
+        {id: 'tof',     name: 'ToF',            mask: 0x02,  stream: data.streamTof,      on: sc.tofOn,      streamable: true},
+        {id: 'imu',     name: 'IMU',            mask: 0x04,  stream: data.streamImu,      on: sc.imuOn,      streamable: true},
+        {id: 'input',   name: remoteInputName,  mask: 0x08,  stream: data.streamInput,    on: sc.inputOn,    streamable: true},
         {id: 'apds',    name: 'APDS',     mask: 0x10,  stream: false,               on: sc.apdsOn,     streamable: false},
         {id: 'gps',     name: 'GPS',      mask: 0x20,  stream: data.streamGps,      on: sc.gpsOn,      streamable: true},
         {id: 'rtc',     name: 'RTC',      mask: 0x40,  stream: data.streamRtc,      on: sc.rtcOn,      streamable: true},
@@ -544,7 +555,14 @@ void streamBondInner(httpd_req_t* req) {
       const localSensorMask = data.localCapabilities.sensorMask || 0;
       if (localSensorMask) {
         const lConn = data.localCapabilities.sensorConnectedMask || 0;
-        const lDefs = [{m:0x01,n:'Thermal'},{m:0x02,n:'ToF'},{m:0x04,n:'IMU'},{m:0x08,n:'Gamepad'},{m:0x10,n:'APDS'},{m:0x20,n:'GPS'},{m:0x40,n:'RTC'},{m:0x80,n:'Presence'},{m:0x100,n:'FM Radio'}];
+        // Local input row label derives from THIS device's compile-time input
+        // type (sent in localCapabilities.inputDeviceType). Was hardcoded
+        // "Gamepad" which read wrong on ANO builds.
+        const localInputType = (data.localCapabilities && data.localCapabilities.inputDeviceType) || 0;
+        const localInputName = (localInputType === 2) ? 'ANO Encoder'
+                             : (localInputType === 1) ? 'Gamepad'
+                             : 'Input';
+        const lDefs = [{m:0x01,n:'Thermal'},{m:0x02,n:'ToF'},{m:0x04,n:'IMU'},{m:0x08,n:localInputName},{m:0x10,n:'APDS'},{m:0x20,n:'GPS'},{m:0x40,n:'RTC'},{m:0x80,n:'Presence'},{m:0x100,n:'FM Radio'}];
         const lRows = lDefs.filter(function(d){return localSensorMask & d.m;});
         if (lRows.length > 0) {
           html += '<div style="border-top:1px solid var(--panel-border);margin-top:8px;padding-top:8px">';
@@ -1037,7 +1055,7 @@ static esp_err_t handleBondStatus(httpd_req_t* req) {
   webBondSendChunkf(req, "\"streamTof\":%s,", gSettings.bondStreamTof ? "true" : "false");
   webBondSendChunkf(req, "\"streamImu\":%s,", gSettings.bondStreamImu ? "true" : "false");
   webBondSendChunkf(req, "\"streamGps\":%s,", gSettings.bondStreamGps ? "true" : "false");
-  webBondSendChunkf(req, "\"streamGamepad\":%s,", gSettings.bondStreamInput ? "true" : "false");
+  webBondSendChunkf(req, "\"streamInput\":%s,", gSettings.bondStreamInput ? "true" : "false");
   webBondSendChunkf(req, "\"streamFmradio\":%s,", gSettings.bondStreamFmradio ? "true" : "false");
   webBondSendChunkf(req, "\"streamRtc\":%s,", gSettings.bondStreamRtc ? "true" : "false");
   webBondSendChunkf(req, "\"streamPresence\":%s,", gSettings.bondStreamPresence ? "true" : "false");
@@ -1120,7 +1138,11 @@ static esp_err_t handleBondStatus(httpd_req_t* req) {
     BondPeerStatus localStatus;
     buildLocalBondStatus(localStatus);
     webBondSendChunkf(req, "\"sensorConnectedMask\":%u,", (unsigned)localStatus.sensorConnectedMask);
-    webBondSendChunkf(req, "\"sensorEnabledMask\":%u", (unsigned)localStatus.sensorEnabledMask);
+    webBondSendChunkf(req, "\"sensorEnabledMask\":%u,", (unsigned)localStatus.sensorEnabledMask);
+    // Local input device type (compile-time): 0=none, 1=Gamepad, 2=ANO Encoder.
+    // Drives the I2C-sensor row label and the Remote Sensors row label on the
+    // bonded peer (so they show "Gamepad"/"ANO" instead of generic "Input").
+    webBondSendChunkf(req, "\"inputDeviceType\":%d", (int)INPUT_DEVICE_TYPE);
     webBondSendChunk(req, "},");
   }
   
@@ -1141,7 +1163,12 @@ static esp_err_t handleBondStatus(httpd_req_t* req) {
     // Add individual sensor/feature masks for UI logic
     webBondSendChunkf(req, "\"featureMask\":%lu,", (unsigned long)cap.featureMask);
     webBondSendChunkf(req, "\"sensorMask\":%lu,", (unsigned long)cap.sensorMask);
-    webBondSendChunkf(req, "\"serviceMask\":%lu", (unsigned long)cap.serviceMask);
+    webBondSendChunkf(req, "\"serviceMask\":%lu,", (unsigned long)cap.serviceMask);
+    // Peer's input device type: 0=none/legacy, 1=Gamepad, 2=ANO Encoder.
+    // Came across in CapabilitySummary.inputDeviceType (was the reserved1
+    // byte pre-v0.94). Lets the Remote Sensors row label specifically what
+    // the bonded device is running, even if local and remote differ.
+    webBondSendChunkf(req, "\"inputDeviceType\":%d", (int)cap.inputDeviceType);
     webBondSendChunk(req, "},");
     
     // Sensor connectivity from live BondPeerStatus cache (updated every ~30s)
@@ -1160,7 +1187,7 @@ static esp_err_t handleBondStatus(httpd_req_t* req) {
     webBondSendChunkf(req, "\"tof\":%s,", (connectedMask & CAP_SENSOR_TOF) ? "true" : "false");
     webBondSendChunkf(req, "\"imu\":%s,", (connectedMask & CAP_SENSOR_IMU) ? "true" : "false");
     webBondSendChunkf(req, "\"gps\":%s,", (connectedMask & CAP_SENSOR_GPS) ? "true" : "false");
-    webBondSendChunkf(req, "\"gamepad\":%s,", (connectedMask & CAP_SENSOR_INPUT) ? "true" : "false");
+    webBondSendChunkf(req, "\"input\":%s,", (connectedMask & CAP_SENSOR_INPUT) ? "true" : "false");
     webBondSendChunkf(req, "\"apds\":%s,", (connectedMask & CAP_SENSOR_APDS) ? "true" : "false");
     webBondSendChunkf(req, "\"fmradio\":%s,", (connectedMask & CAP_SENSOR_FMRADIO) ? "true" : "false");
     webBondSendChunkf(req, "\"presence\":%s,", (connectedMask & CAP_SENSOR_PRESENCE) ? "true" : "false");
@@ -1170,7 +1197,7 @@ static esp_err_t handleBondStatus(httpd_req_t* req) {
     webBondSendChunkf(req, "\"tofOn\":%s,", (enabledMask & CAP_SENSOR_TOF) ? "true" : "false");
     webBondSendChunkf(req, "\"imuOn\":%s,", (enabledMask & CAP_SENSOR_IMU) ? "true" : "false");
     webBondSendChunkf(req, "\"gpsOn\":%s,", (enabledMask & CAP_SENSOR_GPS) ? "true" : "false");
-    webBondSendChunkf(req, "\"gamepadOn\":%s,", (enabledMask & CAP_SENSOR_INPUT) ? "true" : "false");
+    webBondSendChunkf(req, "\"inputOn\":%s,", (enabledMask & CAP_SENSOR_INPUT) ? "true" : "false");
     webBondSendChunkf(req, "\"presenceOn\":%s,", (enabledMask & CAP_SENSOR_PRESENCE) ? "true" : "false");
     webBondSendChunkf(req, "\"rtcOn\":%s,", (enabledMask & CAP_SENSOR_RTC) ? "true" : "false");
     webBondSendChunkf(req, "\"apdsOn\":%s,", (enabledMask & CAP_SENSOR_APDS) ? "true" : "false");

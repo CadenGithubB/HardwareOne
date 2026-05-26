@@ -1414,27 +1414,48 @@ void oledEspNowRefreshMessages() {
     oledScrollAddItem(&gOledEspNowState.messageList, line1, line2, true, (void*)msg);
   }
 
-  // Restore scroll position. If new messages arrived (itemCount grew), the
-  // user's previous index still points at the same message they were on.
-  // If old messages aged out of the ring buffer (itemCount shrank), clamp
-  // both index and offset so they stay valid — at worst the user gets
-  // bumped to the new top, but never further than necessary.
+  // Restore scroll position with auto-follow-tail behavior:
+  //
+  //   1. If the user WAS at the bottom (most recent message visible as the
+  //      last row) AND a new message just arrived (count grew), snap to the
+  //      new bottom — standard chat UX where reading the latest messages
+  //      keeps following live updates.
+  //
+  //   2. Otherwise (user scrolled up reading history, or count unchanged,
+  //      or count shrank from ring-buffer aging), restore the saved
+  //      position clamped to the new range. Reading older messages stays
+  //      sticky — incoming traffic won't yank you away.
+  //
+  // "At bottom" is defined as: the saved scroll window's bottom edge
+  // (scrollOffset + visibleLines) had reached or passed the previous last
+  // index. This intentionally matches the moment the most-recent message
+  // is on screen, not just a strict equality, so it works whether the list
+  // fits entirely on screen or only the tail does.
   int newCount = gOledEspNowState.messageList.itemCount;
   if (newCount > 0) {
-    int idx = savedSelectedIndex;
-    int off = savedScrollOffset;
-    // Common case: same set of messages — restore as-is.
-    // Append case: count grew; keep the user's exact position.
-    // Drop case: count shrank; clamp to the new range.
-    if (idx >= newCount) idx = newCount - 1;
-    if (idx < 0)         idx = 0;
-    int maxOff = max(0, newCount - gOledEspNowState.messageList.visibleLines);
-    if (off > maxOff) off = maxOff;
-    if (off < 0)      off = 0;
+    int vis = gOledEspNowState.messageList.visibleLines;
+    bool wasAtBottom = (prevItemCount > 0 &&
+                        (savedScrollOffset + vis) >= prevItemCount);
+    bool messageArrived = (newCount > prevItemCount);
+
+    int idx, off;
+    if (wasAtBottom && messageArrived) {
+      // Follow the tail: jump to the newest message.
+      idx = newCount - 1;
+      off = max(0, newCount - vis);
+    } else {
+      // Sticky restore + clamp.
+      idx = savedSelectedIndex;
+      off = savedScrollOffset;
+      if (idx >= newCount) idx = newCount - 1;
+      if (idx < 0)         idx = 0;
+      int maxOff = max(0, newCount - vis);
+      if (off > maxOff) off = maxOff;
+      if (off < 0)      off = 0;
+    }
     gOledEspNowState.messageList.selectedIndex = idx;
     gOledEspNowState.messageList.scrollOffset  = off;
   }
-  (void)prevItemCount;  // Reserved for future "auto-follow-tail" UX option
 }
 
 String oledEspNowFormatMac(const uint8_t* mac) {

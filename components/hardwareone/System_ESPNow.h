@@ -315,13 +315,29 @@ struct UnpairedDevice {
 // Bond Mode Structures
 // ==========================
 
-// Capability summary - small binary report exchanged on bonding
-// Total size: 64 bytes (fits in single ESP-NOW packet)
+// Capability summary - small binary report exchanged on bonding.
+// Actual size: 76 bytes (verified by static_assert below). Well under the
+// 250-byte ESP-NOW payload ceiling so there's headroom to grow, but BOTH
+// peers must agree on sizeof — the receiver rejects packets whose length
+// doesn't match (System_ESPNow.cpp ~L3434). To extend without a flag day:
+// reuse the in-place reserve bytes (offset 19 implicit pad, reserved2 at
+// offset 39, reserved3[3] at offset 49 — 5 bytes total), or bump
+// protoVersion and accept both lengths.
 struct CapabilitySummary {
   uint8_t protoVersion;        // Protocol version (1)
   uint8_t fwHash[16];          // Firmware hash (first 16 bytes of SHA256)
   uint8_t role;                // 0=worker, 1=master
-  uint8_t reserved1;
+  // Reclaimed from `reserved1`: which physical input device the peer has
+  // compiled in. Mirrors INPUT_DEVICE_TYPE in System_BuildConfig.h:
+  //   0 = none / unknown (also what pre-v0.94 firmware sends — zero-init)
+  //   1 = Seesaw gamepad (0x50)
+  //   2 = ANO rotary encoder (0x49)
+  // Backwards-compatible: the old `reserved1` byte was always memset(0),
+  // so legacy peers report 0 and the UI falls back to a generic "Input"
+  // label. New peers report 1/2 and the UI shows "Gamepad" or "ANO" so
+  // you can tell at a glance what's bonded — important on mixed setups
+  // where the master might be a gamepad and the worker an encoder.
+  uint8_t inputDeviceType;
   
   // Feature masks (32 bits each)
   uint32_t featureMask;        // Compile-time features (WiFi, BT, MQTT, etc.)
@@ -341,6 +357,15 @@ struct CapabilitySummary {
   char deviceName[20];         // Device name (null-terminated)
   uint32_t uptimeSeconds;      // Uptime in seconds
 };
+
+// Compile-time guard: if anyone adds/removes a field without thinking about
+// wire compatibility, this fires and they have to consciously update the
+// expected size AND coordinate a firmware flag day (or use one of the
+// reserved bytes instead). Keeps the header comment honest.
+static_assert(sizeof(CapabilitySummary) == 76,
+              "CapabilitySummary size changed — wire format is incompatible "
+              "with peers on the old size. Use reserved bytes or bump "
+              "protoVersion + accept both lengths in the RX path.");
 
 #if ENABLE_BONDED_MODE
 
