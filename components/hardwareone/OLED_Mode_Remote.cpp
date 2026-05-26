@@ -28,8 +28,11 @@ extern bool isBondSessionTokenValid();
 static int bondMenuSelection = 0;
 static bool bondShowingStatus = false;
 static bool bondShowingSensors = false;
-static int bondSensorSelection = 0;  // Which sensor row is selected
-static int bondSensorColumn = 0;     // 0=Enable, 1=Stream
+// Flat list selection: each visible sensor contributes 2 rows (Enable + Stream).
+// Row index N → sensor visible-index (N/2), field (N%2: 0=Enable, 1=Stream).
+// This replaces the old 2D grid with bondSensorColumn — see comment near the
+// display function for the UX rationale.
+static int bondSensorSelection = 0;
 
 // Device picker (shown when not yet bonded)
 static int bondPickerSelection = 0;
@@ -58,7 +61,11 @@ static const BondSensorDef bondSensorDefs[] = {
   { "Thermal",  "thermal",  0x01, &gSettings.bondStreamThermal },
   { "ToF",      "tof",      0x02, &gSettings.bondStreamTof },
   { "IMU",      "imu",      0x04, &gSettings.bondStreamImu },
-  { "Gamepad",  "gamepad",  0x08, &gSettings.bondStreamGamepad },
+#if ENABLE_ANO_ENCODER
+  { "ANO Enc",  "input",    0x08, &gSettings.bondStreamInput },
+#else
+  { "Gamepad",  "input",    0x08, &gSettings.bondStreamInput },
+#endif
   { "GPS",      "gps",      0x20, &gSettings.bondStreamGps },
   { "RTC",      "rtc",      0x40, &gSettings.bondStreamRtc },
   { "Presence", "presence", 0x80, &gSettings.bondStreamPresence },
@@ -167,78 +174,76 @@ static void displayBondStatus() {
 // Sensors Submenu Display
 // =============================================================================
 
+// Flat list, one row per (sensor, field) tuple. Was a 2D grid where LEFT/
+// RIGHT switched between Enable and Stream columns — but that horizontal
+// nav conflicted with the ANO encoder's LEFT-as-back convention used
+// everywhere else in the firmware, and it was the only page that broke
+// the "scroll = up/down, action = A, back = LEFT" pattern. Flattening
+// halves screen density (5 sensors fit becomes 2.5 sensors fit) but the
+// rotary wheel handles long lists fine and the UI now obeys the same
+// rules as every other settings list.
 static void displayBondSensors() {
   oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
-  
+
   bool isMaster = (isBondMaster());
   if (!isMaster) {
     oledDisplay->println("Sensor control is");
     oledDisplay->println("managed by master.");
     return;
   }
-  
+
   if (!isBondSynced()) {
     oledDisplay->println("Waiting for sync...");
     return;
   }
-  
+
   int indices[BOND_SENSOR_DEF_COUNT];
   int visCount = getVisibleSensors(indices, BOND_SENSOR_DEF_COUNT);
-  
+
   if (visCount == 0) {
     oledDisplay->println("No remote sensors");
     oledDisplay->println("available.");
     return;
   }
-  
-  // Clamp selection
-  if (bondSensorSelection >= visCount) bondSensorSelection = visCount - 1;
+
+  // Each visible sensor contributes 2 rows: row 2k = Enable, 2k+1 = Stream.
+  int rowCount = visCount * 2;
+
+  // Clamp selection to the flattened range.
+  if (bondSensorSelection >= rowCount) bondSensorSelection = rowCount - 1;
   if (bondSensorSelection < 0) bondSensorSelection = 0;
-  
-  // Header row
-  //          "Sensor     Enbl Strm"
-  oledDisplay->println("Sensor     Enbl Strm");
-  
-  // Calculate visible window (up to 5 rows fit below header)
-  const int maxVisible = 5;
+
+  // Visible window — up to 6 rows fit in the content area (no column header
+  // needed anymore, the field name is on every row).
+  const int maxVisible = 6;
   int scrollOffset = 0;
-  if (visCount > maxVisible) {
+  if (rowCount > maxVisible) {
     scrollOffset = bondSensorSelection - maxVisible / 2;
     if (scrollOffset < 0) scrollOffset = 0;
-    if (scrollOffset > visCount - maxVisible) scrollOffset = visCount - maxVisible;
+    if (scrollOffset > rowCount - maxVisible) scrollOffset = rowCount - maxVisible;
   }
-  
-  for (int v = scrollOffset; v < visCount && v < scrollOffset + maxVisible; v++) {
-    int si = indices[v];
-    const BondSensorDef& sd = bondSensorDefs[si];
+
+  for (int r = scrollOffset; r < rowCount && r < scrollOffset + maxVisible; r++) {
+    int sensorIdx = indices[r / 2];
+    bool isStreamField = (r & 1) != 0;
+    const BondSensorDef& sd = bondSensorDefs[sensorIdx];
     bool connected = isRemoteSensorConnected(sd.mask);
     bool enabled = isRemoteSensorEnabled(sd.mask);
     bool streaming = *(sd.streamSetting);
-    
-    bool isSelected = (v == bondSensorSelection);
+
+    bool isSelected = (r == bondSensorSelection);
+    const char* cursor = isSelected ? ">" : " ";
+    const char* fieldLabel = isStreamField ? "Strm" : "Enbl";
+    bool value = isStreamField ? streaming : enabled;
+
     char line[22];
-    
-    // Build: "  Name      [x] [x]" or "> Name      [x] [x]"
-    // Column highlight: underline or bracket the active column
-    const char* enblMark = enabled ? "ON " : "OFF";
-    const char* strmMark = streaming ? "ON " : "OFF";
-    
     if (!connected) {
-      // Disconnected sensor: show dashes
-      snprintf(line, sizeof(line), "%s%-10s --  --",
-               isSelected ? ">" : " ", sd.name);
-    } else if (isSelected) {
-      // Selected row: show cursor and highlight active column
-      if (bondSensorColumn == 0) {
-        snprintf(line, sizeof(line), ">%-10s[%s] %s",
-                 sd.name, enblMark, strmMark);
-      } else {
-        snprintf(line, sizeof(line), ">%-10s %s [%s]",
-                 sd.name, enblMark, strmMark);
-      }
+      // Disconnected: both rows show "--" instead of a value.
+      snprintf(line, sizeof(line), "%s%-9s%s --",
+               cursor, sd.name, fieldLabel);
     } else {
-      snprintf(line, sizeof(line), " %-10s %s  %s",
-               sd.name, enblMark, strmMark);
+      snprintf(line, sizeof(line), "%s%-9s%s [%s]",
+               cursor, sd.name, fieldLabel, value ? "ON " : "OFF");
     }
     oledDisplay->println(line);
   }
@@ -401,15 +406,16 @@ static void handlePickerInput(uint32_t newlyPressed) {
 
 static void bondMenuUp() {
   if (bondShowingStatus) return;
-  
+
   if (bondShowingSensors) {
     bondSensorSelection--;
     int indices[BOND_SENSOR_DEF_COUNT];
     int visCount = getVisibleSensors(indices, BOND_SENSOR_DEF_COUNT);
-    if (bondSensorSelection < 0) bondSensorSelection = visCount - 1;
+    int rowCount = visCount * 2;  // 2 rows per visible sensor (Enable, Stream)
+    if (bondSensorSelection < 0) bondSensorSelection = rowCount - 1;
     return;
   }
-  
+
   bool isMaster = (isBondMaster());
   int startIdx = bondMenuSelection;
   do {
@@ -420,29 +426,22 @@ static void bondMenuUp() {
 
 static void bondMenuDown() {
   if (bondShowingStatus) return;
-  
+
   if (bondShowingSensors) {
     bondSensorSelection++;
     int indices[BOND_SENSOR_DEF_COUNT];
     int visCount = getVisibleSensors(indices, BOND_SENSOR_DEF_COUNT);
-    if (bondSensorSelection >= visCount) bondSensorSelection = 0;
+    int rowCount = visCount * 2;
+    if (bondSensorSelection >= rowCount) bondSensorSelection = 0;
     return;
   }
-  
+
   bool isMaster = (isBondMaster());
   int startIdx = bondMenuSelection;
   do {
     bondMenuSelection++;
     if (bondMenuSelection >= BOND_MENU_ITEMS) bondMenuSelection = 0;
   } while (bondMenuSelection != startIdx && (bondMenuSelection == 1 && !isMaster));
-}
-
-static void bondSensorLeft() {
-  if (bondSensorColumn > 0) bondSensorColumn--;
-}
-
-static void bondSensorRight() {
-  if (bondSensorColumn < 1) bondSensorColumn++;
 }
 
 // Confirm callback for swap roles — must change remote first, then local
@@ -466,17 +465,19 @@ static void executeBondAction() {
   }
   
   if (bondShowingSensors) {
-    // Toggle the selected sensor's enable or stream setting
+    // Flat list: row N/2 = sensor visible-index, N%2 = field (0 Enable, 1 Stream).
     int indices[BOND_SENSOR_DEF_COUNT];
     int visCount = getVisibleSensors(indices, BOND_SENSOR_DEF_COUNT);
-    if (bondSensorSelection < 0 || bondSensorSelection >= visCount) return;
-    
-    int si = indices[bondSensorSelection];
-    const BondSensorDef& sd = bondSensorDefs[si];
-    
+    int rowCount = visCount * 2;
+    if (bondSensorSelection < 0 || bondSensorSelection >= rowCount) return;
+
+    int sensorIdx = indices[bondSensorSelection / 2];
+    bool isStreamField = (bondSensorSelection & 1) != 0;
+    const BondSensorDef& sd = bondSensorDefs[sensorIdx];
+
     if (!isRemoteSensorConnected(sd.mask)) return;  // Can't toggle disconnected
-    
-    if (bondSensorColumn == 0) {
+
+    if (!isStreamField) {
       // Toggle enable: send open/close command to bonded device
       bool currentlyOn = isRemoteSensorEnabled(sd.mask);
       char cmd[32];
@@ -500,7 +501,6 @@ static void executeBondAction() {
     case 1: // Sensors
       bondShowingSensors = true;
       bondSensorSelection = 0;
-      bondSensorColumn = 0;
       break;
     case 2: // Swap Roles
       oledConfirmRequest("Swap roles?", "Both devices", swapRolesConfirmed, nullptr);
@@ -528,16 +528,19 @@ bool bondModeInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
     return (gEspNow && pickerFilteredCount > 0);
   }
   
-  // Sensors submenu: left/right moves between Enable/Stream columns
+  // Sensors submenu: flat list, UP/DOWN scrolls across (sensor,field) rows.
+  // LEFT/RIGHT used to switch between Enable and Stream columns in the old
+  // 2D grid — removed when the page was flattened so LEFT stays consistent
+  // with B-back everywhere else in the firmware. A toggles the current row.
   if (bondShowingSensors) {
-    if (gNavEvents.left) { bondSensorLeft(); return true; }
-    if (gNavEvents.right) { bondSensorRight(); return true; }
     if (gNavEvents.up) { bondMenuUp(); return true; }
     if (gNavEvents.down) { bondMenuDown(); return true; }
   } else if (!bondShowingStatus) {
-    // Main menu: up/down navigation
-    if (gNavEvents.up || gNavEvents.left) { bondMenuUp(); return true; }
-    if (gNavEvents.down || gNavEvents.right) { bondMenuDown(); return true; }
+    // Main menu: up/down only. LEFT/RIGHT are reserved for B-back on ANO
+    // encoder — conflating them here swallowed the back press and got the
+    // user stuck. Canonical pattern matching other migrated handlers.
+    if (gNavEvents.up) { bondMenuUp(); return true; }
+    if (gNavEvents.down) { bondMenuDown(); return true; }
   }
   
   // A/X button: Execute action

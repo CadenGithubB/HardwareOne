@@ -177,7 +177,7 @@ void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
 #include <functional>
 #include "System_MemUtil.h"
 
-bool createGamepadTask();
+bool createInputTask();
 bool isSensorConnected(const char* moduleName);
 bool gamepadInit();
 
@@ -347,7 +347,7 @@ void sensorStatusBump() {
   gSensorStatusSeq = s;
   DEBUG_ESPNOW_METADATAF("[STATUS_BUMP] seq=%lu cause='%s' | thermal=%d tof=%d imu=%d gamepad=%d",
                  (unsigned long)gSensorStatusSeq, gLastStatusCause,
-                 gThermalEnabled ? 1 : 0, gTofEnabled ? 1 : 0, gImuEnabled ? 1 : 0, gGamepadEnabled ? 1 : 0);
+                 gThermalEnabled ? 1 : 0, gTofEnabled ? 1 : 0, gImuEnabled ? 1 : 0, gInputEnabled ? 1 : 0);
   DEBUG_SSEF("sensorStatusBump: seq now %lu | cause=%s (debounced)", (unsigned long)gSensorStatusSeq, gLastStatusCause);
   // Mark dirty and schedule debounced broadcast
   gSensorStatusDirty = true;
@@ -1249,13 +1249,14 @@ void hardwareone_setup() {
   } else {
     oledUpdate();  // Force OLED to show first-time setup prompt before blocking
     
-#if ENABLE_OLED_DISPLAY && ENABLE_GAMEPAD_SENSOR
-    // Start gamepad sensor before first-time setup so OLED keyboard can receive input
+#if ENABLE_OLED_DISPLAY && ENABLE_OLED_INPUT
+    // Start the input device (gamepad or ANO encoder) before first-time setup
+    // so the OLED keyboard can receive input.
     if (oledConnected && gOledEnabled) {
-      DEBUG_SYSTEMF("[Boot] Starting gamepad sensor for OLED first-time setup");
-      bool ok = gamepadStartInternal();  // Properly initializes hardware and creates task
-      DEBUG_GAMEPADF("[Boot] Gamepad init result: %s", ok ? "SUCCESS" : "FAILED");
-      delay(100);  // Give gamepad task time to start polling
+      DEBUG_SYSTEMF("[Boot] Starting input device for OLED first-time setup");
+      bool ok = inputStartInternal();  // Properly initializes hardware and creates task
+      DEBUG_INPUTF("[Boot] Input device init result: %s", ok ? "SUCCESS" : "FAILED");
+      delay(100);  // Give input task time to start polling
     }
 #endif
   }
@@ -1724,7 +1725,7 @@ void hardwareone_loop() {
     if (gNextSensorStatusBroadcastDue != 0 && (long)(nowMs - gNextSensorStatusBroadcastDue) >= 0) {
       DEBUG_SSEF("[SSE_BROADCAST] SENDING | seq=%lu thermal=%d tof=%d imu=%d gamepad=%d apdsColor=%d apdsProx=%d apdsGest=%d",
                      (unsigned long)gSensorStatusSeq,
-                     gThermalEnabled ? 1 : 0, gTofEnabled ? 1 : 0, gImuEnabled ? 1 : 0, gGamepadEnabled ? 1 : 0,
+                     gThermalEnabled ? 1 : 0, gTofEnabled ? 1 : 0, gImuEnabled ? 1 : 0, gInputEnabled ? 1 : 0,
                      gApdsColorEnabled ? 1 : 0, gApdsProximityEnabled ? 1 : 0, gApdsGestureEnabled ? 1 : 0);
       broadcastSensorStatusToAllSessions();
       DEBUG_SSEF("[SSE_BROADCAST] SENT successfully");

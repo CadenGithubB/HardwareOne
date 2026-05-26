@@ -19,6 +19,7 @@ static const SettingEntry oledSettingEntries[] = {
   { "oledBootDuration", SETTING_INT, &gSettings.oledBootDuration, 2000, 0, nullptr, 500, 10000, "Boot Duration (ms)", nullptr, false, "boot", nullptr },
   { "oledUpdateInterval", SETTING_INT, &gSettings.oledUpdateInterval, 125, 0, nullptr, 10, 1000, "Update Interval (ms)", nullptr, false, "display", nullptr },
   { "oledBrightness", SETTING_INT, &gSettings.oledBrightness, 255, 0, nullptr, 0, 255, "Brightness", nullptr, false, "display", nullptr },
+  { "oledFlipped", SETTING_BOOL, &gSettings.oledFlipped, true, 0, nullptr, 0, 1, "Flip display 180°", nullptr, false, "display", "oledflip" },
   { "oledThermalScale", SETTING_FLOAT, &gSettings.oledThermalScale, 0, 2.5f, nullptr, 1, 10, "Thermal Scale", nullptr, false, "thermal", nullptr },
   { "oledThermalColorMode", SETTING_STRING, &gSettings.oledThermalColorMode, 0, 0, "3level", 0, 0, "Thermal Color Mode", "3level,grayscale,binary", false, "thermal", nullptr }
 };

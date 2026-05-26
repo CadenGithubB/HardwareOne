@@ -33,8 +33,8 @@
 #if ENABLE_TOF_SENSOR
   #include "i2csensor_vl53l4cx.h"
 #endif
-#if ENABLE_GAMEPAD_SENSOR
-  #include "i2csensor_seesaw.h"
+#if ENABLE_OLED_INPUT
+  #include "HAL_Input.h"   // gInputCache, gInputEnabled/Connected — populated by either driver
 #endif
 #if ENABLE_APDS_SENSOR
   #include "i2csensor_apds9960.h"
@@ -142,10 +142,12 @@ void sensorLogTick() {
       remaining -= written;
     }
 
-    // Gamepad (only if enabled in mask)
-    if ((gSensorLogMask & LOG_GAMEPAD) && s.gGamepadEnabled && s.gGamepadConnected && s.gamepadValid && remaining > 0) {
-      written = snprintf(pos, remaining, "gamepad: x=%d y=%d btns=0x%lX | ",
-                         s.gamepadX, s.gamepadY, (unsigned long)s.gamepadButtons);
+    // Input device (only if enabled in mask). The "input:" prefix is generic
+    // because the source could be either a gamepad joystick or the ANO encoder's
+    // synthesized state — the format is the same shape either way.
+    if ((gSensorLogMask & LOG_GAMEPAD) && s.gInputEnabled && s.gInputConnected && s.inputValid && remaining > 0) {
+      written = snprintf(pos, remaining, "input: x=%d y=%d btns=0x%lX | ",
+                         s.joyX, s.joyY, (unsigned long)s.buttons);
       pos += written;
       remaining -= written;
     }
@@ -233,9 +235,9 @@ void sensorLogTick() {
       remaining -= written;
     }
 
-    if ((gSensorLogMask & LOG_GAMEPAD) && s.gamepadValid && remaining > 0) {
+    if ((gSensorLogMask & LOG_GAMEPAD) && s.inputValid && remaining > 0) {
       written = snprintf(pos, remaining, ",%d,%d,%lu",
-                         s.gamepadX, s.gamepadY, (unsigned long)s.gamepadButtons);
+                         s.joyX, s.joyY, (unsigned long)s.buttons);
       pos += written;
       remaining -= written;
     }
@@ -374,16 +376,19 @@ void sensorLogTick() {
     }
 #endif
 
-#if ENABLE_GAMEPAD_SENSOR
+#if ENABLE_OLED_INPUT  // gInputCache populated by either gamepad or ANO driver
     if (mask & LOG_GAMEPAD) {
-      SensorCacheGuard g(gGamepadCache.mutex, pdMS_TO_TICKS(10), "sensorLog.gamepadSnapshot");
+      SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(10), "sensorLog.inputSnapshot");
       if (g.held) {
-        snap.gGamepadEnabled = gGamepadEnabled;
-        snap.gGamepadConnected = gGamepadConnected;
-        snap.gamepadValid = gGamepadCache.gamepadDataValid;
-        snap.gamepadButtons = gGamepadCache.gamepadButtons;
-        snap.gamepadX = gGamepadCache.gamepadX;
-        snap.gamepadY = gGamepadCache.gamepadY;
+        snap.gInputEnabled = gInputEnabled;
+        snap.gInputConnected = gInputConnected;
+        snap.inputValid = gInputCache.dataValid;
+        // Stored in the cache's native bit layout (per-device, active-low).
+        // Replay code that crosses devices should pass this through
+        // inputButtonsToLogical() — buttons field is the device-native form.
+        snap.buttons = gInputCache.buttons;
+        snap.joyX = gInputCache.joyX;
+        snap.joyY = gInputCache.joyY;
       }
     }
 #endif
@@ -453,7 +458,7 @@ void sensorLogTick() {
     if ((gSensorLogMask & LOG_THERMAL) && snap.gThermalEnabled && snap.gThermalConnected) hasSelectedData = true;
     if ((gSensorLogMask & LOG_TOF) && snap.gTofEnabled && snap.gTofConnected) hasSelectedData = true;
     if ((gSensorLogMask & LOG_IMU) && snap.gImuEnabled && snap.gImuConnected) hasSelectedData = true;
-    if ((gSensorLogMask & LOG_GAMEPAD) && snap.gGamepadEnabled && snap.gGamepadConnected) hasSelectedData = true;
+    if ((gSensorLogMask & LOG_GAMEPAD) && snap.gInputEnabled && snap.gInputConnected) hasSelectedData = true;
     if ((gSensorLogMask & LOG_APDS) && snap.gApdsConnected) hasSelectedData = true;
     if ((gSensorLogMask & LOG_GPS) && snap.gGpsEnabled && snap.gGpsConnected) hasSelectedData = true;
     if ((gSensorLogMask & LOG_PRESENCE) && snap.gPresenceEnabled && snap.gPresenceConnected) hasSelectedData = true;

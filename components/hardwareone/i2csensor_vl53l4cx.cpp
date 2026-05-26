@@ -677,7 +677,7 @@ void tofTask(void* parameter) {
   INFO_TOF_LIFECYCLEF("Task started (handle=%p, stack=%u words)", 
                 (void*)xTaskGetCurrentTaskHandle(), 
                 (unsigned)uxTaskGetStackHighWaterMark(nullptr));
-  INFO_TOF_LIFECYCLEF("[MODULAR] tofTask() running from Sensor_ToF_VL53L4CX.cpp");
+  INFO_TOF_LIFECYCLEF("[MODULAR] tofTask() running from i2csensor_vl53l4cx.cpp");
   unsigned long lastToFRead = 0;
   unsigned long lastStackLog = 0;
   while (true) {

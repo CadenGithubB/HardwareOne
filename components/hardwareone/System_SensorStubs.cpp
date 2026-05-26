@@ -59,12 +59,17 @@ void imuUpdateActions() {
 #endif
 
 #if !ENABLE_GAMEPAD_SENSOR
-// Gamepad stub variables (global definitions)
-GamepadCache gGamepadCache;
-bool gGamepadEnabled = false;
-bool gGamepadConnected = false;
+// Gamepad stub variables. Only the symbols NOT supplied by the ANO encoder
+// driver get stubbed here — gInputEnabled/gInputConnected/gInputCache
+// are populated live by the ANO task when ENABLE_ANO_ENCODER is on, so the
+// OLED input pipeline sees real state instead of zeros.
+#if !ENABLE_ANO_ENCODER
+InputCache gInputCache;
+bool gInputEnabled = false;
+bool gInputConnected = false;
+#endif
 unsigned long gGamepadLastStopTime = 0;
-TaskHandle_t gGamepadTaskHandle = nullptr;
+TaskHandle_t gInputTaskHandle = nullptr;
 volatile UBaseType_t gGamepadWatermarkMin = 0;
 volatile UBaseType_t gGamepadWatermarkNow = 0;
 const struct CommandEntry gamepadCommands[] = {};

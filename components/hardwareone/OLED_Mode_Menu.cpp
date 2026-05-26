@@ -455,12 +455,19 @@ void displaySensorMenu() {
 
 static bool sensorMenuInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   int visibleCount = getSensorMenuVisibleCount();
-  
+
   extern NavEvents gNavEvents;
-  if (gNavEvents.right || gNavEvents.down) {
+  // Canonical nav: up/down scroll, left/right fall through to B-back. The
+  // old `|| gNavEvents.left` / `|| gNavEvents.right` conflation here caused
+  // LEFT (which the ANO encoder maps to INPUT_BUTTON_B for "back") to scroll
+  // the selection up and consume the event before the B-button handler at
+  // the bottom of this function could fire — user got stuck on the sensors
+  // page unable to back out. Other migrated handlers (Network mode etc.)
+  // never conflate horizontal+vertical axes; this one was a holdover.
+  if (gNavEvents.down) {
     oledSensorMenuSelectedIndex = (oledSensorMenuSelectedIndex + 1) % visibleCount;
     return true;
-  } else if (gNavEvents.left || gNavEvents.up) {
+  } else if (gNavEvents.up) {
     oledSensorMenuSelectedIndex = (oledSensorMenuSelectedIndex - 1 + visibleCount) % visibleCount;
     return true;
   }

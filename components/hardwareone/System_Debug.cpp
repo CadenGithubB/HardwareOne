@@ -1103,8 +1103,12 @@ const char* cmd_debugtof(const String& a) {
   return cmd_debugsubflag_impl(a, &gSettings.debugTof, DEBUG_TOF, "debugTof");
 }
 
-const char* cmd_debuggamepad(const String& a) {
-  return cmd_debugsubflag_impl(a, &gSettings.debugGamepad, DEBUG_GAMEPAD, "debugGamepad");
+const char* cmd_debuginput(const String& a) {
+  return cmd_debugsubflag_impl(a, &gSettings.debugInput, DEBUG_INPUT, "debugInput");
+}
+
+const char* cmd_debuganoencoder(const String& a) {
+  return cmd_debugsubflag_impl(a, &gSettings.debugAnoEncoder, DEBUG_ANO_ENCODER, "debugAnoEncoder");
 }
 
 const char* cmd_debugapds(const String& a) {
@@ -1123,9 +1127,12 @@ const char* cmd_debugthermalvalues(const String& a)     { return cmd_debugsubfla
 const char* cmd_debugtoflifecycle(const String& a)      { return cmd_debugsubflag_impl(a, &gSettings.debugTofLifecycle,      DEBUG_TOF_LIFECYCLE,      "debugTofLifecycle"); }
 const char* cmd_debugtofpolling(const String& a)        { return cmd_debugsubflag_impl(a, &gSettings.debugTofPolling,        DEBUG_TOF_POLLING,        "debugTofPolling"); }
 const char* cmd_debugtofvalues(const String& a)         { return cmd_debugsubflag_impl(a, &gSettings.debugTofValues,         DEBUG_TOF_VALUES,         "debugTofValues"); }
-const char* cmd_debuggamepadlifecycle(const String& a)  { return cmd_debugsubflag_impl(a, &gSettings.debugGamepadLifecycle,  DEBUG_GAMEPAD_LIFECYCLE,  "debugGamepadLifecycle"); }
-const char* cmd_debuggamepadpolling(const String& a)    { return cmd_debugsubflag_impl(a, &gSettings.debugGamepadPolling,    DEBUG_GAMEPAD_POLLING,    "debugGamepadPolling"); }
-const char* cmd_debuggamepadvalues(const String& a)     { return cmd_debugsubflag_impl(a, &gSettings.debugGamepadValues,     DEBUG_GAMEPAD_VALUES,     "debugGamepadValues"); }
+const char* cmd_debuginputlifecycle(const String& a)  { return cmd_debugsubflag_impl(a, &gSettings.debugInputLifecycle,  DEBUG_INPUT_LIFECYCLE,  "debugInputLifecycle"); }
+const char* cmd_debuginputpolling(const String& a)    { return cmd_debugsubflag_impl(a, &gSettings.debugInputPolling,    DEBUG_INPUT_POLLING,    "debugInputPolling"); }
+const char* cmd_debuginputvalues(const String& a)     { return cmd_debugsubflag_impl(a, &gSettings.debugInputValues,     DEBUG_INPUT_VALUES,     "debugInputValues"); }
+const char* cmd_debuganoencoderlifecycle(const String& a) { return cmd_debugsubflag_impl(a, &gSettings.debugAnoEncoderLifecycle, DEBUG_ANO_ENCODER_LIFECYCLE, "debugAnoEncoderLifecycle"); }
+const char* cmd_debuganoencoderpolling(const String& a)   { return cmd_debugsubflag_impl(a, &gSettings.debugAnoEncoderPolling,   DEBUG_ANO_ENCODER_POLLING,   "debugAnoEncoderPolling"); }
+const char* cmd_debuganoencodervalues(const String& a)    { return cmd_debugsubflag_impl(a, &gSettings.debugAnoEncoderValues,    DEBUG_ANO_ENCODER_VALUES,    "debugAnoEncoderValues"); }
 const char* cmd_debugimulifecycle(const String& a)      { return cmd_debugsubflag_impl(a, &gSettings.debugImuLifecycle,      DEBUG_IMU_LIFECYCLE,      "debugImuLifecycle"); }
 const char* cmd_debugimupolling(const String& a)        { return cmd_debugsubflag_impl(a, &gSettings.debugImuPolling,        DEBUG_IMU_POLLING,        "debugImuPolling"); }
 const char* cmd_debugimuvalues(const String& a)         { return cmd_debugsubflag_impl(a, &gSettings.debugImuValues,         DEBUG_IMU_VALUES,         "debugImuValues"); }
@@ -1872,7 +1879,8 @@ const char* getDebugCategoryName(DebugFlagMask flag) {
   if (flag & DEBUG_IMU) return "IMU";
   if (flag & DEBUG_THERMAL) return "THERMAL";
   if (flag & DEBUG_TOF) return "TOF";
-  if (flag & DEBUG_GAMEPAD) return "GAMEPAD";
+  if (flag & DEBUG_INPUT) return "INPUT";
+  if (flag & DEBUG_ANO_ENCODER) return "ANO";
   if (flag & DEBUG_APDS) return "APDS";
   if (flag & DEBUG_PRESENCE) return "PRESENCE";
   // Bits 40-47: per-sensor frame/data flags
@@ -1883,9 +1891,12 @@ const char* getDebugCategoryName(DebugFlagMask flag) {
   if (flag & DEBUG_TOF_LIFECYCLE)      return "TOF_LIFE";
   if (flag & DEBUG_TOF_POLLING)        return "TOF_POLL";
   if (flag & DEBUG_TOF_VALUES)         return "TOF_VAL";
-  if (flag & DEBUG_GAMEPAD_LIFECYCLE)  return "GAMEPAD_LIFE";
-  if (flag & DEBUG_GAMEPAD_POLLING)    return "GAMEPAD_POLL";
-  if (flag & DEBUG_GAMEPAD_VALUES)     return "GAMEPAD_VAL";
+  if (flag & DEBUG_INPUT_LIFECYCLE)  return "INPUT_LIFE";
+  if (flag & DEBUG_INPUT_POLLING)    return "INPUT_POLL";
+  if (flag & DEBUG_INPUT_VALUES)     return "INPUT_VAL";
+  if (flag & DEBUG_ANO_ENCODER_LIFECYCLE) return "ANO_LIFE";
+  if (flag & DEBUG_ANO_ENCODER_POLLING)   return "ANO_POLL";
+  if (flag & DEBUG_ANO_ENCODER_VALUES)    return "ANO_VAL";
   if (flag & DEBUG_IMU_LIFECYCLE)      return "IMU_LIFE";
   if (flag & DEBUG_IMU_POLLING)        return "IMU_POLL";
   if (flag & DEBUG_IMU_VALUES)         return "IMU_VAL";
@@ -2653,7 +2664,8 @@ const CommandEntry debugCommands[] = {
   { "debugimu", "Debug IMU sensor (BNO055).", true, cmd_debugimu, "Usage: debugimu <0|1>" },
   { "debugthermal", "Debug thermal sensor (MLX90640).", true, cmd_debugthermal, "Usage: debugthermal <0|1>" },
   { "debugtof", "Debug ToF sensor (VL53L4CX).", true, cmd_debugtof, "Usage: debugtof <0|1>" },
-  { "debuggamepad", "Debug gamepad (Seesaw).", true, cmd_debuggamepad, "Usage: debuggamepad <0|1>" },
+  { "debuginput",      "Debug input abstraction layer (HAL_Input + OLED dispatch).", true, cmd_debuginput,      "Usage: debuginput <0|1>" },
+  { "debuganoencoder", "Debug ANO rotary encoder driver internals.",                 true, cmd_debuganoencoder, "Usage: debuganoencoder <0|1>" },
   { "debugapds", "Debug APDS sensor (APDS9960).", true, cmd_debugapds, "Usage: debugapds <0|1>" },
   { "debugpresence", "Debug presence sensor (STHS34PF80).", true, cmd_debugpresence, "Usage: debugpresence <0|1>" },
   // Per-sensor sub-flag setters (Lifecycle / Polling / Values)
@@ -2663,9 +2675,12 @@ const CommandEntry debugCommands[] = {
   { "debugtoflifecycle",      "Debug ToF init/connect/recovery.",             true, cmd_debugtoflifecycle,      "Usage: debugtoflifecycle <0|1>" },
   { "debugtofpolling",        "Debug ToF poll cadence/capture.",              true, cmd_debugtofpolling,        "Usage: debugtofpolling <0|1>" },
   { "debugtofvalues",         "Debug ToF range/object detection values.",     true, cmd_debugtofvalues,         "Usage: debugtofvalues <0|1>" },
-  { "debuggamepadlifecycle",  "Debug gamepad init/connect/recovery.",         true, cmd_debuggamepadlifecycle,  "Usage: debuggamepadlifecycle <0|1>" },
-  { "debuggamepadpolling",    "Debug gamepad poll cadence.",                  true, cmd_debuggamepadpolling,    "Usage: debuggamepadpolling <0|1>" },
-  { "debuggamepadvalues",     "Debug gamepad button press/release events.",   true, cmd_debuggamepadvalues,     "Usage: debuggamepadvalues <0|1>" },
+  { "debuginputlifecycle",    "Debug input abstraction layer lifecycle.",     true, cmd_debuginputlifecycle,  "Usage: debuginputlifecycle <0|1>" },
+  { "debuginputpolling",      "Debug input abstraction layer poll/dispatch.", true, cmd_debuginputpolling,    "Usage: debuginputpolling <0|1>" },
+  { "debuginputvalues",       "Debug input abstraction layer event values.",  true, cmd_debuginputvalues,     "Usage: debuginputvalues <0|1>" },
+  { "debuganoencoderlifecycle", "Debug ANO encoder init/connect/recovery.",   true, cmd_debuganoencoderlifecycle, "Usage: debuganoencoderlifecycle <0|1>" },
+  { "debuganoencoderpolling",   "Debug ANO encoder poll/encoder reads.",      true, cmd_debuganoencoderpolling,   "Usage: debuganoencoderpolling <0|1>" },
+  { "debuganoencodervalues",    "Debug ANO encoder rotation/button events.",  true, cmd_debuganoencodervalues,    "Usage: debuganoencodervalues <0|1>" },
   { "debugimulifecycle",      "Debug IMU init/connect/recovery.",             true, cmd_debugimulifecycle,      "Usage: debugimulifecycle <0|1>" },
   { "debugimupolling",        "Debug IMU poll cadence.",                      true, cmd_debugimupolling,        "Usage: debugimupolling <0|1>" },
   { "debugimuvalues",         "Debug IMU orientation/acceleration values.",   true, cmd_debugimuvalues,         "Usage: debugimuvalues <0|1>" },

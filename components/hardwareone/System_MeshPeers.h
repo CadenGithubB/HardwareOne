@@ -69,6 +69,14 @@ String displayName(const uint8_t mac[6]);
 // O(slots) — cheap (slots is typically ≤16). Use for status bars / counters.
 int countHealthy();
 
+// Count of mesh peers with an active health slot regardless of heartbeat
+// recency. Always >= countHealthy(). Use as the denominator when displaying
+// "online/total" so the ratio is always sensible — counting the denominator
+// from a different array (e.g. gMeshPeerMeta) can produce a smaller number
+// than countHealthy() when health and metadata get out of sync, which shows
+// up as nonsense like "1/0 devices" on the OLED status page.
+int countActive();
+
 // Count of mesh peers whose room metadata matches `room` exactly. Forwards
 // to countMeshPeerMetaByRoom for backward compatibility with existing
 // callers. NULL/empty room → 0.

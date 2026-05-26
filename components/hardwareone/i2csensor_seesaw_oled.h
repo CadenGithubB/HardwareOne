@@ -7,7 +7,7 @@
 #include "OLED_Utils.h"
 #include "HAL_Display.h"  // For gDisplay and oledDisplay macro alias
 
-// Button bit definitions are now in Sensor_Gamepad_Seesaw.h
+// Button bit definitions are now in i2csensor_seesaw.h
 #define GAMEPAD_BUTTON_SEL   0  // Only SEL is not in header
 
 // Display gamepad state visualization
@@ -16,7 +16,7 @@ static void displayGamepadVisual() {
   
   oledDisplay->setTextSize(1);
   
-  if (!gGamepadEnabled || !gGamepadConnected) {
+  if (!gInputEnabled || !gInputConnected) {
     oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
     oledDisplay->println("Gamepad not active");
     oledDisplay->println();
@@ -30,14 +30,14 @@ static void displayGamepadVisual() {
   uint32_t buttons = 0xFFFFFFFF;  // All unpressed (active low)
   bool dataValid = false;
   
-  if (gGamepadCache.mutex && xSemaphoreTake(gGamepadCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-    if (gGamepadCache.gamepadDataValid) {
-      joyX = gGamepadCache.gamepadX;
-      joyY = gGamepadCache.gamepadY;
-      buttons = gGamepadCache.gamepadButtons;
+  if (gInputCache.mutex && xSemaphoreTake(gInputCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+    if (gInputCache.dataValid) {
+      joyX = gInputCache.joyX;
+      joyY = gInputCache.joyY;
+      buttons = gInputCache.buttons;
       dataValid = true;
     }
-    xSemaphoreGive(gGamepadCache.mutex);
+    xSemaphoreGive(gInputCache.mutex);
   }
   
   if (!dataValid) {
@@ -144,7 +144,7 @@ static bool gamepadOLEDModeAvailable(String* outReason) {
 static void gamepadToggleConfirmed(void* userData) {
   (void)userData;
   extern void executeOLEDCommand(const String& argsInput);
-  if (gGamepadEnabled && gGamepadConnected) {
+  if (gInputEnabled && gInputConnected) {
     executeOLEDCommand("closegamepad");
   } else {
     executeOLEDCommand("opengamepad");
@@ -154,7 +154,7 @@ static void gamepadToggleConfirmed(void* userData) {
 // Input handler for Gamepad OLED mode - X button toggles gamepad
 static bool gamepadInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
-    if (gGamepadEnabled && gGamepadConnected) {
+    if (gInputEnabled && gInputConnected) {
       oledConfirmRequest("Close gamepad?", "This disables input", gamepadToggleConfirmed, nullptr, false);
     } else {
       oledConfirmRequest("Open gamepad?", nullptr, gamepadToggleConfirmed, nullptr);

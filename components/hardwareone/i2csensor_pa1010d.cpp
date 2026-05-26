@@ -330,7 +330,7 @@ void gpsTask(void* parameter) {
   INFO_GPS_LIFECYCLEF("Task started (handle=%p, stack=%u words)",
                 (void*)xTaskGetCurrentTaskHandle(),
                 (unsigned)uxTaskGetStackHighWaterMark(nullptr));
-  INFO_GPS_LIFECYCLEF("[MODULAR] gpsTask() running from Sensor_GPS_PA1010D.cpp");
+  INFO_GPS_LIFECYCLEF("[MODULAR] gpsTask() running from i2csensor_pa1010d.cpp");
   unsigned long lastStackLog = 0;
   unsigned long lastStatusLog = 0;
   unsigned long lastGPSRead = 0;

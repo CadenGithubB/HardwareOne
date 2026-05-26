@@ -40,8 +40,8 @@
 #if ENABLE_OLED_DISPLAY
 #include "OLED_Display.h"          // oledDisplay, oledConnected
 #include "OLED_SetupWizard.h"      // renderFeaturesPage / handleFeaturesInput / etc.
-#include "System_Mutex.h"          // SensorCacheGuard for gGamepadCache
-#include "i2csensor_seesaw.h"      // gGamepadCache
+#include "System_Mutex.h"          // SensorCacheGuard for gInputCache
+#include "i2csensor_seesaw.h"      // gInputCache
 #endif
 
 #include <Arduino.h>
@@ -765,9 +765,9 @@ static void wizardMode_onTick(void* /*ud*/) {
   uint32_t buttons = sLastButtons;
   bool haveButtons = false;
   {
-    SensorCacheGuard g(gGamepadCache.mutex, pdMS_TO_TICKS(5), "wizardMode.buttonRead");
-    if (g.held && gGamepadCache.gamepadDataValid) {
-      buttons = gGamepadCache.gamepadButtons;
+    SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(5), "wizardMode.buttonRead");
+    if (g.held && gInputCache.dataValid) {
+      buttons = gInputCache.buttons;
       haveButtons = true;
     }
   }

@@ -28,7 +28,10 @@
   #include "i2csensor_bno055.h"         // imuBuildDataJSON
 #endif
 #if ENABLE_GAMEPAD_SENSOR
-  #include "i2csensor_seesaw.h"     // gamepadEnabled, gamepadConnected
+  #include "i2csensor_seesaw.h"     // gInputEnabled, gInputConnected (gamepad build)
+#endif
+#if ENABLE_ANO_ENCODER
+  #include "i2csensor_ano_encoder.h"  // anoEncoderBuildDataJSON + gAnoEncoder*
 #endif
 #if ENABLE_GPS_SENSOR
   #include "i2csensor_pa1010d.h"    // GPSCache, gGpsCache
@@ -75,10 +78,15 @@ esp_err_t handleSensorsPage(httpd_req_t* req) {
 esp_err_t handleSensorData(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
 
-  // Add CORS headers to prevent access control errors
-  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-  httpd_resp_set_hdr(req, "Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  httpd_resp_set_hdr(req, "Access-Control-Allow-Headers", "Content-Type");
+  // Intentionally NO CORS headers. hw.fetchJSON sends `credentials: 'include'`
+  // (see WebServer_Utils.cpp:528), and the W3C CORS spec forbids
+  // `Access-Control-Allow-Origin: *` on credentialed responses — Safari and
+  // Chromium-derived browsers reject the response with "access control checks"
+  // failure even for same-origin fetches once the wildcard header appears.
+  // The peer endpoints (`/api/sensors/status`, `/api/devices`, `/api/cli`)
+  // omit CORS headers entirely and work correctly; matching that pattern here
+  // unbreaks per-sensor polling (the encoder card was the first to expose this
+  // because it polls at 56 ms; gamepad has the same latent bug).
 
   // Get query parameter to determine which sensor data to return
   char query[256];
@@ -200,13 +208,13 @@ esp_err_t handleSensorData(httpd_req_t* req) {
         httpd_resp_send(req, imuResponseBuffer, jsonLen);
 
         return ESP_OK;
-      } else if (sensorType == "gamepad") {
-#if !ENABLE_GAMEPAD_SENSOR
+      } else if (sensorType == "gamepad" || sensorType == "input") {
+#if !ENABLE_OLED_INPUT
         sendJsonResponse(req, "{\"val\":0, \"error\":\"not_compiled\"}");
         return ESP_OK;
 #endif
         // Gamepad now follows queued start paradigm; read from shared state only
-        if (!gGamepadEnabled || !gGamepadConnected) {
+        if (!gInputEnabled || !gInputConnected) {
           sendJsonResponse(req, "{\"val\":0, \"error\":\"not_connected\"}");
           return ESP_OK;
         }
@@ -217,12 +225,12 @@ esp_err_t handleSensorData(httpd_req_t* req) {
         bool dataValid = false;
 
         {
-          SensorCacheGuard g(gGamepadCache.mutex, pdMS_TO_TICKS(50), "web.gamepadApi");
+          SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(50), "web.gamepadApi");
           if (g.held) {
-            buttons = gGamepadCache.gamepadButtons;
-            x = gGamepadCache.gamepadX;
-            y = gGamepadCache.gamepadY;
-            dataValid = gGamepadCache.gamepadDataValid;
+            buttons = gInputCache.buttons;
+            x = gInputCache.joyX;
+            y = gInputCache.joyY;
+            dataValid = gInputCache.dataValid;
           }
         }
 
@@ -241,6 +249,29 @@ esp_err_t handleSensorData(httpd_req_t* req) {
         DEBUG_HTTPF("/api/sensors gamepad json_len=%d", jsonLen);
         httpd_resp_send(req, gamepadBuf, jsonLen);
         return ESP_OK;
+      } else if (sensorType == "anoencoder") {
+#if !ENABLE_ANO_ENCODER
+        sendJsonResponse(req, "{\"val\":0, \"error\":\"not_compiled\"}");
+        return ESP_OK;
+#else
+        // ANO-shaped JSON: {val, pos, axis, buttons}. Built from the native
+        // gAnoEncoderCache (encoder position + per-mode axis) so the sensor
+        // card shows the real driver state, not the gamepad-shaped proxy.
+        if (!gAnoEncoderEnabled || !gAnoEncoderConnected) {
+          sendJsonResponse(req, "{\"val\":0, \"error\":\"not_connected\"}");
+          return ESP_OK;
+        }
+        char anoBuf[160];
+        int jsonLen = anoEncoderBuildDataJSON(anoBuf, sizeof(anoBuf));
+        if (jsonLen <= 0) {
+          sendJsonResponse(req, "{\"val\":0, \"error\":\"no_data\"}");
+          return ESP_OK;
+        }
+        httpd_resp_set_type(req, "application/json");
+        DEBUG_HTTPF("/api/sensors anoencoder json_len=%d", jsonLen);
+        httpd_resp_send(req, anoBuf, jsonLen);
+        return ESP_OK;
+#endif
       } else if (sensorType == "fmradio") {
 #if ENABLE_FM_RADIO
         // FM radio data - use stack-allocated buffer

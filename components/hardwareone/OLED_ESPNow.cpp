@@ -295,15 +295,17 @@ void oledEspNowDisplayStatus(Adafruit_SSD1306* display) {
   display->print("Role: ");
   display->println(roleStr);
   
-  // Device count: total = known peers (active meta slots), online = healthy
-  int totalDevices = 0;
-  for (int i = 0; i < gMeshPeerSlots; i++) {
-    if (gMeshPeerMeta[i].isActive) totalDevices++;
-  }
+  // Device count: online / total. Both pulled from the SAME gMeshPeers
+  // health array so the ratio is always sensible (numerator <= denominator).
+  // Previously the denominator counted gMeshPeerMeta[i].isActive — a
+  // different array populated by a different code path. When they got out
+  // of sync (e.g. peer sent heartbeat before meta was registered) the
+  // display rendered "1/0", which is nonsense as a ratio. countActive()
+  // and countHealthy() walk the same slots so the math always works.
   display->print("Devices: ");
   display->print(MeshPeers::countHealthy());
   display->print("/");
-  display->println(totalDevices);
+  display->println(MeshPeers::countActive());
   
   // Encryption status
   display->print("Encrypt: ");
@@ -1351,9 +1353,18 @@ void oledEspNowRefreshDeviceList() {
 
 void oledEspNowRefreshMessages() {
   if (!gEspNow) return;
-  
+
+  // Snapshot scroll position BEFORE clear so we can restore it after rebuild.
+  // This function is called on a 1-second timer from the render loop — without
+  // preserving position the user would get snapped to the top of the message
+  // list every tick, making it impossible to scroll up to read older messages
+  // while a peer is actively chatting.
+  int savedSelectedIndex = gOledEspNowState.messageList.selectedIndex;
+  int savedScrollOffset  = gOledEspNowState.messageList.scrollOffset;
+  int prevItemCount      = gOledEspNowState.messageList.itemCount;
+
   oledScrollClear(&gOledEspNowState.messageList);
-  
+
   // Get pointer to peer message history (direct access, no copy)
   PeerMessageHistory* peerHistory = findOrCreatePeerHistory(gOledEspNowState.selectedDeviceMac);
   if (!peerHistory || peerHistory->count == 0) {
@@ -1402,6 +1413,28 @@ void oledEspNowRefreshMessages() {
     // Add item with direct pointers - no data copying
     oledScrollAddItem(&gOledEspNowState.messageList, line1, line2, true, (void*)msg);
   }
+
+  // Restore scroll position. If new messages arrived (itemCount grew), the
+  // user's previous index still points at the same message they were on.
+  // If old messages aged out of the ring buffer (itemCount shrank), clamp
+  // both index and offset so they stay valid — at worst the user gets
+  // bumped to the new top, but never further than necessary.
+  int newCount = gOledEspNowState.messageList.itemCount;
+  if (newCount > 0) {
+    int idx = savedSelectedIndex;
+    int off = savedScrollOffset;
+    // Common case: same set of messages — restore as-is.
+    // Append case: count grew; keep the user's exact position.
+    // Drop case: count shrank; clamp to the new range.
+    if (idx >= newCount) idx = newCount - 1;
+    if (idx < 0)         idx = 0;
+    int maxOff = max(0, newCount - gOledEspNowState.messageList.visibleLines);
+    if (off > maxOff) off = maxOff;
+    if (off < 0)      off = 0;
+    gOledEspNowState.messageList.selectedIndex = idx;
+    gOledEspNowState.messageList.scrollOffset  = off;
+  }
+  (void)prevItemCount;  // Reserved for future "auto-follow-tail" UX option
 }
 
 String oledEspNowFormatMac(const uint8_t* mac) {
@@ -1569,7 +1602,7 @@ bool oledEspNowHandleRemoteFormInput(int deltaX, int deltaY, uint32_t newlyPress
   }
   
   // A button: Edit current field with keyboard
-  if (newlyPressed & GAMEPAD_BUTTON_A) {
+  if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
     const char* title = "";
     const char* initialText = "";
     
@@ -1593,14 +1626,14 @@ bool oledEspNowHandleRemoteFormInput(int deltaX, int deltaY, uint32_t newlyPress
   }
   
   // Y button: Send remote command
-  if (newlyPressed & GAMEPAD_BUTTON_Y) {
+  if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_Y)) {
     oledEspNowSendRemoteCommand();
     gOledEspNowState.currentView = ESPNOW_VIEW_DEVICE_DETAIL;
     return true;
   }
   
   // B button: Cancel form
-  if (newlyPressed & GAMEPAD_BUTTON_B) {
+  if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
     gOledEspNowState.currentView = ESPNOW_VIEW_DEVICE_DETAIL;
     return true;
   }

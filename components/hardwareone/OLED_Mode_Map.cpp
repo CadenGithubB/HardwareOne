@@ -7,7 +7,15 @@
 #include "OLED_Display.h"
 #include "System_BuildConfig.h"
 
-#if ENABLE_OLED_DISPLAY
+// Gate the ENTIRE Map mode on ENABLE_MAPS — when maps aren't compiled in
+// there's nothing meaningful for the page to do (it can't load tiles, can't
+// draw POIs, can't compute viewports), but the OLED mode entry would still
+// register and surface "Map" in the hardware menu. gpsMapAvailable() used
+// to be a no-op (always-true) which made the menu entry undismissable on
+// builds where ENABLE_MAPS=0. Gating at the file level is cleaner than
+// patching availability: when the feature is off, no symbol is emitted, no
+// registration runs, the menu entry simply doesn't exist.
+#if ENABLE_OLED_DISPLAY && ENABLE_MAPS
 
 #include <Adafruit_SSD1306.h>
 #include "System_Maps.h"
@@ -2051,11 +2059,14 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   // Normal map controls when menu is closed
   
   bool aHeld = false;
-#if ENABLE_GAMEPAD_SENSOR
+#if ENABLE_OLED_INPUT
   {
-    SensorCacheGuard g(gGamepadCache.mutex, pdMS_TO_TICKS(5), "map.aHeldCheck");
+    SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(5), "map.aHeldCheck");
     if (g.held) {
-      aHeld = !(gGamepadCache.gamepadButtons & GAMEPAD_BUTTON_A);
+      // buttons stores active-low (1 = unpressed). Inverting + mask
+      // gives "currently pressed" for whichever logical A bit the active
+      // input driver uses.
+      aHeld = (~gInputCache.buttons & INPUT_MASK(INPUT_BUTTON_A)) != 0;
     }
   }
 #endif

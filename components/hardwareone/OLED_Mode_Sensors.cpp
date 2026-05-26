@@ -31,7 +31,7 @@
 #include "i2csensor_pa1010d.h"    // gGpsEnabled / gGpsConnected
 #endif
 #if ENABLE_GAMEPAD_SENSOR
-#include "i2csensor_seesaw.h"     // gGamepadEnabled / gGamepadConnected
+#include "i2csensor_seesaw.h"     // gInputEnabled / gInputConnected
 #endif
 #if ENABLE_APDS_SENSOR
 #include "i2csensor_apds9960.h"   // gApdsConnected
@@ -263,7 +263,7 @@ void displaySensorData() {
 #if ENABLE_GAMEPAD_SENSOR
   totalCount++;
   oledDisplay->print("Gamepad: ");
-  if (gGamepadConnected && gGamepadEnabled) {
+  if (gInputConnected && gInputEnabled) {
     oledDisplay->println("ON");
     activeCount++;
   } else {

@@ -1038,7 +1038,7 @@ void imuTask(void* parameter) {
   INFO_IMU_LIFECYCLEF("Task started (handle=%p, stack=%u words)", 
                 (void*)xTaskGetCurrentTaskHandle(), 
                 (unsigned)uxTaskGetStackHighWaterMark(nullptr));
-  INFO_IMU_LIFECYCLEF("[MODULAR] imuTask() running from Sensor_IMU_BNO055.cpp");
+  INFO_IMU_LIFECYCLEF("[MODULAR] imuTask() running from i2csensor_bno055.cpp");
   unsigned long lastIMURead = 0;
   unsigned long lastStackLog = 0;
   while (true) {

@@ -49,24 +49,29 @@ static void displayRemoteSettingsMode() {
 }
 
 // Input handler for remote settings mode
-static bool handleRemoteSettingsInput(int deltaX, int deltaY, uint32_t newlyPressed) {
+static bool handleRemoteSettingsInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed) {
   extern SettingsEditorContext gSettingsEditor;
-  
-  // Use provided input parameters
-  
-  // Handle navigation using existing settings editor functions
-  if (deltaY < 0) {
+
+  // Canonical-signal pattern (matches local handleSettingsEditorInput):
+  // gNavEvents carries direction for ALL input devices (joystick threshold
+  // crossings with built-in auto-repeat, ANO wheel sign, ANO dpad edges).
+  // wheelDelta carries fine rotary input for value editing.
+  bool handled = false;
+
+  // ---- List navigation ----
+  if (gNavEvents.up) {
     extern void settingsEditorUp();
     settingsEditorUp();
-  } else if (deltaY > 0) {
+    handled = true;
+  } else if (gNavEvents.down) {
     extern void settingsEditorDown();
     settingsEditorDown();
+    handled = true;
   }
-  
-  // Handle A button (select/confirm)
-  if (newlyPressed & GAMEPAD_BUTTON_A) {
+
+  // ---- A button (select / confirm + remote apply) ----
+  if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
     if (gSettingsEditor.state == SETTINGS_VALUE_EDIT && gSettingsEditor.hasChanges) {
-      // Apply the change remotely
       if (gSettingsEditor.currentModule && gSettingsEditor.currentEntry) {
         String value;
         if (gSettingsEditor.currentEntry->type == SETTING_BOOL) {
@@ -74,25 +79,22 @@ static bool handleRemoteSettingsInput(int deltaX, int deltaY, uint32_t newlyPres
         } else {
           value = String(gSettingsEditor.editValue);
         }
-        
         applyRemoteSettingChange(
           gSettingsEditor.currentModule->name,
           gSettingsEditor.currentEntry->jsonKey,
           value
         );
-        
         gSettingsEditor.hasChanges = false;
       }
     }
-    
     extern void settingsEditorSelect();
     settingsEditorSelect();
+    handled = true;
   }
-  
-  // Handle B button (back/cancel)
-  if (newlyPressed & GAMEPAD_BUTTON_B) {
+
+  // ---- B button (back / cancel) ----
+  if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
     if (gSettingsEditor.state == SETTINGS_CATEGORY_SELECT) {
-      // Exit remote settings mode - clean up then let global handler pop mode stack
       freeRemoteSettingsModules();
       gRemoteSettingsActive = false;
       return false;  // Let global handler call oledMenuBack()
@@ -102,32 +104,44 @@ static bool handleRemoteSettingsInput(int deltaX, int deltaY, uint32_t newlyPres
     }
     return true;
   }
-  
-  // Handle left/right for value editing
-  if (gSettingsEditor.state == SETTINGS_VALUE_EDIT) {
-    if (deltaX != 0 && gSettingsEditor.currentEntry) {
+
+  // ---- Value adjustment in edit mode ----
+  // Gamepad: LEFT/RIGHT joystick deflection nudges value (canonical — the
+  // joystick has no dedicated value-adjust axis).
+  // ANO encoder: wheelDelta is the canonical adjust signal; LEFT is reserved
+  // for B-back. Without the !ENABLE_ANO_ENCODER gate, ANO LEFT would step
+  // the value AND fire B-back in the same tick, persisting an unwanted
+  // mutation. Sign-based step (not multiply by raw deltaX, which could be
+  // 400+ for a full joystick deflection — that was an old latent bug that
+  // scaled value changes wildly past the intended ±step).
+  if (gSettingsEditor.state == SETTINGS_VALUE_EDIT && gSettingsEditor.currentEntry) {
+    int dir = 0;
+#if !ENABLE_ANO_ENCODER
+    if (gNavEvents.right)             dir = +1;
+    else if (gNavEvents.left)         dir = -1;
+    else
+#endif
+    if (gNavEvents.wheelDelta != 0) dir = (gNavEvents.wheelDelta > 0) ? +1 : -1;
+
+    if (dir != 0) {
       int step = 1;
-      // Larger steps for bigger ranges
       int range = gSettingsEditor.currentEntry->maxVal - gSettingsEditor.currentEntry->minVal;
       if (range > 1000) step = 100;
       else if (range > 100) step = 10;
-      
-      gSettingsEditor.editValue += deltaX * step;
-      
-      // Clamp to range
+
+      gSettingsEditor.editValue += dir * step;
       if (gSettingsEditor.editValue < gSettingsEditor.currentEntry->minVal) {
         gSettingsEditor.editValue = gSettingsEditor.currentEntry->minVal;
       }
       if (gSettingsEditor.editValue > gSettingsEditor.currentEntry->maxVal) {
         gSettingsEditor.editValue = gSettingsEditor.currentEntry->maxVal;
       }
-      
       gSettingsEditor.hasChanges = true;
-      return true;
+      handled = true;
     }
   }
-  
-  return false;
+
+  return handled;
 }
 
 // Remote settings mode entry

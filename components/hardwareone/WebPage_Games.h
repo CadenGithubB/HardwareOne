@@ -1059,8 +1059,8 @@ function getDirIndex(enemyFacing, camAngle) {
 var i2cEnabled = false;
 var imuEnabled = false;
 var imuCompiled = false;
-var gamepadEnabled = false;
-var gamepadCompiled = false;
+var inputEnabled = false;
+var inputCompiled = false;
 
 // =============================================
 // COMBAT
@@ -9721,13 +9721,13 @@ async function checkSensorAvailability() {
     var sensData = await hw.fetchJSON('/api/sensors/status');
     imuCompiled = (sensData.imuCompiled === true);
     imuEnabled = (sensData.imuEnabled === true);
-    gamepadCompiled = (sensData.gamepadCompiled === true);
-    gamepadEnabled = (sensData.gamepadEnabled === true);
-    console.log('[GAMES] Sensor status: i2c=' + i2cEnabled + ' imuCompiled=' + imuCompiled + ' imuEnabled=' + imuEnabled + ' gamepadCompiled=' + gamepadCompiled + ' gamepadEnabled=' + gamepadEnabled);
+    inputCompiled = (sensData.inputCompiled === true);
+    inputEnabled = (sensData.inputEnabled === true);
+    console.log('[GAMES] Sensor status: i2c=' + i2cEnabled + ' imuCompiled=' + imuCompiled + ' imuEnabled=' + imuEnabled + ' inputCompiled=' + inputCompiled + ' inputEnabled=' + inputEnabled);
   } catch (e) {
     console.error('[GAMES] Failed to check sensor availability:', e);
     i2cEnabled = false; imuEnabled = false; imuCompiled = false;
-    gamepadEnabled = false; gamepadCompiled = false;
+    inputEnabled = false; inputCompiled = false;
   }
 }
 
@@ -9771,8 +9771,8 @@ function startCalibration() {
 
 function startGamepadPolling() {
   if (gpPoll) return;
-  if (!i2cEnabled || !gamepadCompiled) {
-    console.warn('[GAMES] Gamepad polling disabled: i2c=' + i2cEnabled + ' gamepadCompiled=' + gamepadCompiled);
+  if (!i2cEnabled || !inputCompiled) {
+    console.warn('[GAMES] Gamepad polling disabled: i2c=' + i2cEnabled + ' inputCompiled=' + inputCompiled);
     return;
   }
   function tick() {
@@ -21993,7 +21993,7 @@ function startGame() {
     // Trigger the terrain selector change handler which does the full cave test setup
     _tSel.dispatchEvent(new Event('change'));
     // Still need to start the game loop
-    var useHardware = !USE_KEYBOARD && !USE_MOUSE && i2cEnabled && imuCompiled && imuEnabled && gamepadEnabled;
+    var useHardware = !USE_KEYBOARD && !USE_MOUSE && i2cEnabled && imuCompiled && imuEnabled && inputEnabled;
     hasBaseline = true;
     calibrating = false;
     lastUpdate = 0;
@@ -22017,7 +22017,7 @@ function startGame() {
     return;
   }
 
-  var useHardware = !USE_KEYBOARD && !USE_MOUSE && i2cEnabled && imuCompiled && imuEnabled && gamepadEnabled;
+  var useHardware = !USE_KEYBOARD && !USE_MOUSE && i2cEnabled && imuCompiled && imuEnabled && inputEnabled;
   gameOverState = false;
   running = true;
   ENDLESS_MODE = false;

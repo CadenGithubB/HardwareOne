@@ -4,6 +4,7 @@
 
 #include "OLED_Display.h"
 #include "OLED_Utils.h"
+#include "HAL_Input.h"  // INPUT_CHECK + INPUT_BUTTON_* logical mapping
 #include "System_Settings.h"
 #include "System_BuildConfig.h"
 #include "System_ESPNow.h"
@@ -528,57 +529,50 @@ void displayUnifiedMenu() {
 // Input Handling
 // ==========================
 
-bool handleUnifiedMenuInput(int deltaX, int deltaY, uint32_t newlyPressed) {
+bool handleUnifiedMenuInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed) {
+  // Canonical-signal pattern. Two simultaneous problems fixed here:
+  //
+  //   (1) Old code did `if (deltaY < -10) …` — that's a magic threshold that
+  //       only happens to work for some input devices; deltaY is 0 for the
+  //       ANO encoder so the menu never scrolled. Now reads gNavEvents.up/
+  //       down which the input layer sets correctly for every device.
+  //
+  //   (2) Old code did `newlyPressed & 0x01` (etc.) — hardcoded raw gamepad
+  //       bit numbers that don't survive a controller swap. The ANO encoder
+  //       has its own button bit layout, so `& 0x01` would mean ANO_BTN_IN
+  //       (luckily also "A") but `& 0x04` was GAMEPAD_BUTTON_X (= 1<<2);
+  //       under ANO that bit is ANO_BTN_DOWN, totally unrelated. Now uses
+  //       INPUT_CHECK + INPUT_BUTTON_* logical IDs that route through
+  //       gAnoEncoderMapping / gGamepadSeesawMapping per device.
   if (gInSubmenu) {
-    if (deltaY < -10) {
-      if (gSubmenuSelection > 0) {
-        gSubmenuSelection--;
-        return true;
-      }
-    } else if (deltaY > 10) {
-      if (gSubmenuSelection < gSubmenuItemCount - 1) {
-        gSubmenuSelection++;
-        return true;
-      }
+    if (gNavEvents.up) {
+      if (gSubmenuSelection > 0) { gSubmenuSelection--; return true; }
+    } else if (gNavEvents.down) {
+      if (gSubmenuSelection < gSubmenuItemCount - 1) { gSubmenuSelection++; return true; }
     }
-    
-    if (newlyPressed & 0x01) {
-      executeSubmenuItem(gSubmenuSelection);
-      return true;
-    }
-    
-    if (newlyPressed & 0x02) {
-      freeSubmenu();
-      return true;
-    }
-    
+    if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) { executeSubmenuItem(gSubmenuSelection); return true; }
+    if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) { freeSubmenu(); return true; }
     return false;
   }
-  
-  if (deltaY < -10) {
-    if (gUnifiedMenuSelection > 0) {
-      gUnifiedMenuSelection--;
-      return true;
-    }
-  } else if (deltaY > 10) {
-    if (gUnifiedMenuSelection < gUnifiedMenuItemCount - 1) {
-      gUnifiedMenuSelection++;
-      return true;
-    }
+
+  if (gNavEvents.up) {
+    if (gUnifiedMenuSelection > 0) { gUnifiedMenuSelection--; return true; }
+  } else if (gNavEvents.down) {
+    if (gUnifiedMenuSelection < gUnifiedMenuItemCount - 1) { gUnifiedMenuSelection++; return true; }
   }
-  
-  if (newlyPressed & 0x01) {
+
+  if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
     executeUnifiedMenuItem(gUnifiedMenuSelection);
     return true;
   }
-  
-  if (newlyPressed & 0x04) {
+  // X = "refresh menu" (rebuild from sources). Was 0x04 = GAMEPAD_BUTTON_X
+  // bit; under the logical-button mapping this is now INPUT_BUTTON_X.
+  if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
     buildUnifiedMenu();
     gUnifiedMenuSelection = 0;
     gUnifiedMenuScrollOffset = 0;
     return true;
   }
-  
   return false;
 }
 

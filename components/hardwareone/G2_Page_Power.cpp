@@ -29,7 +29,9 @@
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 
 #include "G2_Glasses.h"
+#include "OLED_Display.h"  // oledPrepareForSleep — kills LDO2 on power-gated boards
 #include "System_Debug.h"
+#include "System_Power.h"   // powerSleepTransitionAllowed/Mark — anti-flap guard
 #include "esp_system.h"
 #include "esp_sleep.h"
 #include "freertos/FreeRTOS.h"
@@ -110,8 +112,28 @@ static void doRestart() {
 }
 
 static void doPowerOff() {
+  // Anti-flap: a glitched menu-confirm path could fire this multiple times in
+  // quick succession. Refuse if cooldown hasn't elapsed. (Deep sleep is even
+  // more disruptive than light sleep — full chip reset on wake — so the
+  // guard is at least as important here as in cmd_lightsleep.)
+  unsigned long cooldownRemain = 0;
+  if (!powerSleepTransitionAllowed(&cooldownRemain)) {
+    char msg[64];
+    snprintf(msg, sizeof(msg), "Try again in %lus", (unsigned long)((cooldownRemain + 999) / 1000));
+    g2ShowText(msg);
+    DEBUG_G2F("[G2] Power: deep sleep refused — cooldown %lu ms remaining", cooldownRemain);
+    vTaskDelay(pdMS_TO_TICKS(1200));
+    return;
+  }
   g2ShowText("Powering off...");
   vTaskDelay(pdMS_TO_TICKS(800));
+  // Drop the LDO2 rail (if this board has one) so anything on I2C2 —
+  // currently the OLED on FeatherS3[D] — truly loses power instead of just
+  // sitting there with the panel "off" but Vcc still flowing. No resume
+  // counterpart needed: deep sleep wakes via reset, so the normal boot
+  // path re-asserts everything from scratch.
+  oledPrepareForSleep();
+  powerSleepTransitionMark();
   DEBUG_G2F("[G2] Power: esp_deep_sleep_start() — wake via reset button");
   // No wake source configured: chip stays in deep sleep until the user
   // hits the physical reset. Quiescent draw ~10 µA.

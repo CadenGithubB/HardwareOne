@@ -172,7 +172,7 @@ static void displaySetPatternMode() {
 // ============================================================================
 
 static bool handleSetPatternInput(int deltaX, int deltaY, uint32_t newlyPressed) {
-  // Keyboard input is now handled centrally in processGamepadMenuInput() before this is called.
+  // Keyboard input is now handled centrally in processOLEDInput() before this is called.
   // We only need to check for keyboard completion/cancellation to update our state.
   if (sKeyboardActive) {
     if (oledKeyboardIsCompleted()) {

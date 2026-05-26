@@ -653,9 +653,9 @@ void applySettings() {
     DBG_MAP(debugTofLifecycle,       DEBUG_TOF_LIFECYCLE),
     DBG_MAP(debugTofPolling,         DEBUG_TOF_POLLING),
     DBG_MAP(debugTofValues,          DEBUG_TOF_VALUES),
-    DBG_MAP(debugGamepadLifecycle,   DEBUG_GAMEPAD_LIFECYCLE),
-    DBG_MAP(debugGamepadPolling,     DEBUG_GAMEPAD_POLLING),
-    DBG_MAP(debugGamepadValues,      DEBUG_GAMEPAD_VALUES),
+    DBG_MAP(debugInputLifecycle,   DEBUG_INPUT_LIFECYCLE),
+    DBG_MAP(debugInputPolling,     DEBUG_INPUT_POLLING),
+    DBG_MAP(debugInputValues,      DEBUG_INPUT_VALUES),
     DBG_MAP(debugImuLifecycle,       DEBUG_IMU_LIFECYCLE),
     DBG_MAP(debugImuPolling,         DEBUG_IMU_POLLING),
     DBG_MAP(debugImuValues,          DEBUG_IMU_VALUES),
@@ -1478,11 +1478,16 @@ static const SettingEntry debugSettingEntries[] = {
   { "lifecycle",  SETTING_BOOL, &gSettings.debugImuLifecycle,    0, 0, nullptr, 0, 1, "Lifecycle",           nullptr, false, "imu",         "debugimulifecycle" },
   { "polling",    SETTING_BOOL, &gSettings.debugImuPolling,      0, 0, nullptr, 0, 1, "Polling",             nullptr, false, "imu",         "debugimupolling" },
   { "values",     SETTING_BOOL, &gSettings.debugImuValues,       0, 0, nullptr, 0, 1, "Values",              nullptr, false, "imu",         "debugimuvalues" },
-  // --- gamepad group ---
-  { "enabled",    SETTING_BOOL, &gSettings.debugGamepad,         0, 0, nullptr, 0, 1, "All Gamepad",         nullptr, false, "gamepad",     "debuggamepad" },
-  { "lifecycle",  SETTING_BOOL, &gSettings.debugGamepadLifecycle, 0, 0, nullptr, 0, 1, "Lifecycle",          nullptr, false, "gamepad",     "debuggamepadlifecycle" },
-  { "polling",    SETTING_BOOL, &gSettings.debugGamepadPolling,  0, 0, nullptr, 0, 1, "Polling",             nullptr, false, "gamepad",     "debuggamepadpolling" },
-  { "values",     SETTING_BOOL, &gSettings.debugGamepadValues,   0, 0, nullptr, 0, 1, "Values",              nullptr, false, "gamepad",     "debuggamepadvalues" },
+  // --- input abstraction group (HAL_Input + OLED input dispatch) ---
+  { "enabled",    SETTING_BOOL, &gSettings.debugInput,          0, 0, nullptr, 0, 1, "All Input",           nullptr, false, "input",       "debuginput" },
+  { "lifecycle",  SETTING_BOOL, &gSettings.debugInputLifecycle, 0, 0, nullptr, 0, 1, "Lifecycle",           nullptr, false, "input",       "debuginputlifecycle" },
+  { "polling",    SETTING_BOOL, &gSettings.debugInputPolling,   0, 0, nullptr, 0, 1, "Polling",             nullptr, false, "input",       "debuginputpolling" },
+  { "values",     SETTING_BOOL, &gSettings.debugInputValues,    0, 0, nullptr, 0, 1, "Values",              nullptr, false, "input",       "debuginputvalues" },
+  // --- ANO encoder driver-specific group ---
+  { "enabled",    SETTING_BOOL, &gSettings.debugAnoEncoder,          0, 0, nullptr, 0, 1, "All ANO Encoder", nullptr, false, "anoencoder",  "debuganoencoder" },
+  { "lifecycle",  SETTING_BOOL, &gSettings.debugAnoEncoderLifecycle, 0, 0, nullptr, 0, 1, "Lifecycle",       nullptr, false, "anoencoder",  "debuganoencoderlifecycle" },
+  { "polling",    SETTING_BOOL, &gSettings.debugAnoEncoderPolling,   0, 0, nullptr, 0, 1, "Polling",         nullptr, false, "anoencoder",  "debuganoencoderpolling" },
+  { "values",     SETTING_BOOL, &gSettings.debugAnoEncoderValues,    0, 0, nullptr, 0, 1, "Values",          nullptr, false, "anoencoder",  "debuganoencodervalues" },
   // --- tof group ---
   { "enabled",    SETTING_BOOL, &gSettings.debugTof,             0, 0, nullptr, 0, 1, "All ToF",             nullptr, false, "tof",         "debugtof" },
   { "lifecycle",  SETTING_BOOL, &gSettings.debugTofLifecycle,    0, 0, nullptr, 0, 1, "Lifecycle",           nullptr, false, "tof",         "debugtoflifecycle" },
@@ -1699,8 +1704,11 @@ extern const SettingsModule tofSettingsModule;
 #if ENABLE_IMU_SENSOR
 extern const SettingsModule imuSettingsModule;
 #endif
-#if ENABLE_GAMEPAD_SENSOR
-extern const SettingsModule gamepadSettingsModule;
+#if ENABLE_OLED_INPUT
+extern const SettingsModule inputSettingsModule;
+#endif
+#if ENABLE_ANO_ENCODER
+extern const SettingsModule anoEncoderSettingsModule;
 #endif
 #if ENABLE_APDS_SENSOR
 extern const SettingsModule apdsSettingsModule;
@@ -1785,8 +1793,11 @@ void registerAllSettingsModules() {
 #if ENABLE_IMU_SENSOR
   registerSettingsModule(&imuSettingsModule);
 #endif
-#if ENABLE_GAMEPAD_SENSOR
-  registerSettingsModule(&gamepadSettingsModule);
+#if ENABLE_OLED_INPUT
+  registerSettingsModule(&inputSettingsModule);
+#endif
+#if ENABLE_ANO_ENCODER
+  registerSettingsModule(&anoEncoderSettingsModule);
 #endif
 #if ENABLE_APDS_SENSOR
   registerSettingsModule(&apdsSettingsModule);

@@ -25,10 +25,17 @@
 #define INPUT_TYPE_SEESAW_GAMEPAD  1
 #define INPUT_TYPE_CLICK_WHEEL     2
 #define INPUT_TYPE_CUSTOM          3
+#define INPUT_TYPE_ANO_ENCODER     4
 
-// Default input type if not specified in System_BuildConfig.h
+// Default input type. BuildConfig owns the user-visible INPUT_DEVICE_TYPE
+// flag; this internal INPUT_TYPE is derived from it so HAL code has a single
+// constant to switch on regardless of which input device is built.
 #ifndef INPUT_TYPE
-  #define INPUT_TYPE  INPUT_TYPE_SEESAW_GAMEPAD
+  #if defined(INPUT_DEVICE_TYPE) && INPUT_DEVICE_TYPE == 2  /* INPUT_DEVICE_TYPE_ANO_ENCODER */
+    #define INPUT_TYPE  INPUT_TYPE_ANO_ENCODER
+  #else
+    #define INPUT_TYPE  INPUT_TYPE_SEESAW_GAMEPAD
+  #endif
 #endif
 
 // =============================================================================
@@ -39,6 +46,7 @@
 // The actual values come from i2csensor_seesaw.h when it's included.
 
 #include "i2csensor_seesaw.h"
+#include "i2csensor_ano_encoder.h"
 
 // =============================================================================
 // Logical Button Identifiers (hardware-agnostic)
@@ -59,9 +67,10 @@ enum InputButton {
 // =============================================================================
 
 enum InputControllerType {
-  INPUT_CONTROLLER_GAMEPAD_SEESAW,  // Adafruit Seesaw gamepad (current default)
-  INPUT_CONTROLLER_CLICK_WHEEL,     // Click wheel / rotary encoder
-  INPUT_CONTROLLER_CUSTOM           // Custom controller mapping
+  INPUT_CONTROLLER_GAMEPAD_SEESAW,  // Adafruit Seesaw gamepad
+  INPUT_CONTROLLER_CLICK_WHEEL,     // Generic click wheel / rotary encoder
+  INPUT_CONTROLLER_CUSTOM,          // Custom controller mapping
+  INPUT_CONTROLLER_ANO_ENCODER      // Adafruit ANO rotary encoder breakout
 };
 
 // =============================================================================
@@ -86,11 +95,54 @@ void inputSetCustomButtonMapping(InputButton button, uint32_t mask);
 uint32_t inputGetCustomButtonMapping(InputButton button);
 
 // =============================================================================
+// Device-agnostic data accessors
+// =============================================================================
+// Replaces gamepadGetX/Y/Buttons() — both gamepad and ANO drivers populate
+// gInputCache, so these work under either build. For ANO, joyX/Y are always
+// JOYSTICK_CENTER (no analog deflection); read gNavEvents.wheelDelta for
+// rotary state.
+int       inputGetX();
+int       inputGetY();
+
+// Raw cache buttons (active-LOW at the underlying device's native bit
+// positions — gamepad chip bits or ANO_BTN_* bits depending on build).
+// Useful when the caller already knows the device. NOT safe to send across
+// wire boundaries without translation.
+uint32_t  inputGetButtonsRaw();
+
+// Same data normalized to a canonical logical-bit layout (active-HIGH, bit
+// position == InputButton enum value):
+//    bit 0 = INPUT_BUTTON_A pressed
+//    bit 1 = INPUT_BUTTON_B
+//    bit 2 = INPUT_BUTTON_X
+//    bit 3 = INPUT_BUTTON_Y
+//    bit 4 = INPUT_BUTTON_START
+//    bit 5 = INPUT_BUTTON_SELECT
+// Use this at every wire boundary (MQTT, ESP-NOW, G2, sensor log, JSON API)
+// so peers and consumers see consistent bits regardless of which physical
+// input device is on the other end.
+uint32_t  inputGetButtonsLogical();
+
+// Lower-level: translate an arbitrary device-native cache value to the
+// canonical logical-bit layout. Exposed so callers that hold a cache snapshot
+// in a struct (e.g., sensor-log replay) can do the translation explicitly.
+uint32_t  inputButtonsToLogical(uint32_t deviceCacheButtonsActiveLow);
+
+// =============================================================================
 // Convenience Macros
 // =============================================================================
 
 #define INPUT_CHECK(state, btn) inputIsButtonPressed(state, btn)
 #define INPUT_MASK(btn) inputGetButtonMask(btn)
+
+// =============================================================================
+// Unified Input Device CLI + Settings (works under either driver)
+// =============================================================================
+struct CommandEntry;
+struct SettingsModule;
+extern const CommandEntry inputCommands[];
+extern const size_t inputCommandsCount;
+extern const SettingsModule inputSettingsModule;
 
 // =============================================================================
 // Joystick Configuration
