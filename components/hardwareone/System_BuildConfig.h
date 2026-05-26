@@ -139,6 +139,15 @@
 //   0 = NONE, 1 = SSD1306 (OLED), 2 = ST7789 (TFT), 3 = ILI9341 (TFT)
 #define DISPLAY_TYPE            1
 
+// Input device: which physical input controller is wired to the I2C bus.
+// Exactly one driver compiles in (mutually exclusive — both share STEMMA QT
+// and would collide if both ran). CMakeLists gates the .cpp file just like
+// DISPLAY_TYPE does.
+//   0 = NONE             (no input device)
+//   1 = SEESAW_GAMEPAD   (Adafruit Mini I2C Gamepad, 0x50)
+//   2 = ANO_ENCODER      (Adafruit ANO Rotary Encoder breakout, 0x49)
+#define INPUT_DEVICE_TYPE       1
+
 // Camera: ESP32-S3 DVP camera (OV2640/OV3660/OV5640). PICO board has none.
 #ifndef ENABLE_CAMERA_SENSOR
 #define ENABLE_CAMERA_SENSOR    0
@@ -253,6 +262,10 @@
 #define DISPLAY_TYPE_ST7789    2
 #define DISPLAY_TYPE_ILI9341   3
 
+#define INPUT_DEVICE_TYPE_NONE           0
+#define INPUT_DEVICE_TYPE_SEESAW_GAMEPAD 1
+#define INPUT_DEVICE_TYPE_ANO_ENCODER    2
+
 // =============================================================================
 // DERIVED FLAGS (automatically set based on I2C_FEATURE_LEVEL)
 // =============================================================================
@@ -339,6 +352,27 @@
   #undef ENABLE_OLED_DISPLAY
   #define ENABLE_OLED_DISPLAY 0
 #endif
+
+// =============================================================================
+// DERIVED INPUT DEVICE FLAGS (based on INPUT_DEVICE_TYPE)
+// =============================================================================
+// Mutually exclusive: selecting ANO_ENCODER forces ENABLE_GAMEPAD_SENSOR off,
+// because both occupy the same role (the OLED input source) and the seesaw
+// driver would race the ANO driver for the STEMMA QT bus if both compiled in.
+// The CMakeLists gate also skips the disabled driver's .cpp.
+#if INPUT_DEVICE_TYPE == INPUT_DEVICE_TYPE_ANO_ENCODER
+  #undef  ENABLE_GAMEPAD_SENSOR
+  #define ENABLE_GAMEPAD_SENSOR 0
+  #define ENABLE_ANO_ENCODER    1
+#else
+  #define ENABLE_ANO_ENCODER    0
+#endif
+
+// Convenience: "is there ANY input device that drives the OLED UI?" Used to
+// gate the OLED's input-handling code so it compiles for either driver.
+// The two source-specific paths inside each block stay gated on their own
+// ENABLE_* flag.
+#define ENABLE_OLED_INPUT  (ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER)
 
 // =============================================================================
 // DERIVED NETWORK FLAGS (based on NETWORK_FEATURE_LEVEL)
@@ -787,6 +821,15 @@
   #define I2C2_SDA_PIN_DEFAULT  16
   #define I2C2_SCL_PIN_DEFAULT  15
 
+  // I2C2 power gating — the vertical STEMMA QT (I2C2) rides on LDO2, which
+  // is enabled by GPIO39. Physically the SAME pin as NEOPIXEL_POWER_PIN
+  // above; the duplicate name documents the I2C2 role separately so that
+  // (a) bus-1 init can drive the pin itself instead of relying on the
+  // NeoPixel driver having run, and (b) future deep-sleep code can find
+  // the right pin to drop via I2C2_POWER_PIN regardless of NeoPixel state.
+  // Boards without a software-switchable I2C2 rail leave this at -1.
+  #define I2C2_POWER_PIN        39
+
 // --- Generic ESP32 (fallback with warning) ---
 #elif defined(ARDUINO_ESP32_DEV)
   #define BOARD_SUPPORTED       1
@@ -835,6 +878,44 @@
 #endif
 #ifndef I2C2_SCL_PIN_DEFAULT
   #define I2C2_SCL_PIN_DEFAULT  -1
+#endif
+
+// Default state for i2c2BusEnabled. Derived from pin availability so the
+// secondary bus auto-enables on boards that physically have it (FeatherS3[D]
+// and equivalents) while staying off on boards without a second I2C port —
+// no risk of a stray init on -1 pins, no misleading "enabled" toggle in the
+// settings UI on incompatible boards. A board block above CAN override by
+// `#define`ing I2C2_BUS_ENABLED_DEFAULT to 0 to opt out (e.g., for a power-
+// sensitive build that doesn't want LDO2 driven at boot).
+#ifndef I2C2_BUS_ENABLED_DEFAULT
+  #if (I2C2_SDA_PIN_DEFAULT >= 0) && (I2C2_SCL_PIN_DEFAULT >= 0)
+    #define I2C2_BUS_ENABLED_DEFAULT 1
+  #else
+    #define I2C2_BUS_ENABLED_DEFAULT 0
+  #endif
+#endif
+
+// Fallback for I2C2_POWER_PIN — boards without a software-switchable I2C2
+// rail leave this at -1. When valid (>= 0), bus-1 init drives the pin HIGH
+// independently of NeoPixel state, and future sleep code can drop it to cut
+// power to anything connected to the vertical STEMMA QT.
+#ifndef I2C2_POWER_PIN
+  #define I2C2_POWER_PIN -1
+#endif
+
+// Default bus for the OLED. On boards where I2C2 has its own software-
+// controllable power rail (I2C2_POWER_PIN >= 0), the OLED is the prime
+// candidate for that bus — putting it there means the display can be
+// truly powered off (not just SSD1306-DISPLAYOFF, which leaves the chip
+// drawing tens of µA and the panel ready to glow on the next command).
+// Everywhere else, default to bus 0 so existing single-bus boards behave
+// unchanged. A board block CAN override by `#define`ing OLED_BUS_DEFAULT.
+#ifndef OLED_BUS_DEFAULT
+  #if (I2C2_POWER_PIN >= 0) && (I2C2_SDA_PIN_DEFAULT >= 0) && (I2C2_SCL_PIN_DEFAULT >= 0)
+    #define OLED_BUS_DEFAULT 1
+  #else
+    #define OLED_BUS_DEFAULT 0
+  #endif
 #endif
 
 // =============================================================================

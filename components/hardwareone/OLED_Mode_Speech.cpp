@@ -213,20 +213,23 @@ void speechMenuBack() {
 // Speech Input Handler
 // ============================================================================
 
-bool speechInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
-  (void)deltaX;
-  
-  // Navigation
-  if (deltaY < 0) {
+bool speechInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed) {
+  // Canonical-signal pattern. gNavEvents.up/down is set by the input layer
+  // from joystick threshold-crossings (with auto-repeat), ANO wheel sign,
+  // and ANO dpad edges — so this single read works for every input device.
+  // Previously read raw deltaY without a deadzone, which silently broke for
+  // the ANO encoder (deltaY is always 0 there since the wheel isn't a
+  // joystick) and was racy for tiny joystick noise on the gamepad.
+  if (gNavEvents.up) {
     speechMenuUp();
     return true;
   }
-  if (deltaY > 0) {
+  if (gNavEvents.down) {
     speechMenuDown();
     return true;
   }
-  
-  // Button handling - A/X for select, B for back
+
+  // Button handling — A/X for select, B for back
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
     speechMenuSelect();
     return true;
@@ -236,10 +239,9 @@ bool speechInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
       speechMenuBack();
       return true;
     }
-    // Return false to let global handler call oledMenuBack()
-    return false;
+    return false;  // Let global handler call oledMenuBack()
   }
-  
+
   return false;
 }
 

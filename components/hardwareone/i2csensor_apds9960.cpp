@@ -431,7 +431,7 @@ void apdsTask(void* parameter) {
   INFO_APDS_LIFECYCLEF("Task started (handle=%p, stack=%u words)", 
                 (void*)xTaskGetCurrentTaskHandle(), 
                 (unsigned)uxTaskGetStackHighWaterMark(nullptr));
-  INFO_APDS_LIFECYCLEF("[MODULAR] apdsTask() running from Sensor_APDS_APDS9960.cpp");
+  INFO_APDS_LIFECYCLEF("[MODULAR] apdsTask() running from i2csensor_apds9960.cpp");
   unsigned long lastApdsRead = 0;
   unsigned long lastStackLog = 0;
   // Note: Failure tracking now handled by centralized I2CDevice health system

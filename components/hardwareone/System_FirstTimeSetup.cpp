@@ -411,10 +411,10 @@ void firstTimeSetupIfNeeded() {
         uint32_t btns = 0;
         bool valid = false;
         if (!goBack) {
-          SensorCacheGuard g(gGamepadCache.mutex, pdMS_TO_TICKS(10), "fts.gamepadEscape");
+          SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(10), "fts.gamepadEscape");
           if (g.held) {
-            btns = gGamepadCache.gamepadButtons;
-            valid = gGamepadCache.gamepadDataValid;
+            btns = gInputCache.buttons;
+            valid = gInputCache.dataValid;
           }
         }
         if (!goBack && valid) {
@@ -673,7 +673,7 @@ void firstTimeSetupIfNeeded() {
                 gSettings.gpsAutoStart ? 1 : 0,
                 gSettings.fmRadioAutoStart ? 1 : 0,
                 gSettings.apdsAutoStart ? 1 : 0,
-                gSettings.gamepadAutoStart ? 1 : 0,
+                gSettings.inputAutoStart ? 1 : 0,
                 gSettings.rtcAutoStart ? 1 : 0,
                 gSettings.presenceAutoStart ? 1 : 0);
   
@@ -713,7 +713,7 @@ void firstTimeSetupIfNeeded() {
   }
 #endif
 #if ENABLE_GAMEPAD_SENSOR
-  if (gGamepadEnabled && !gSettings.gamepadAutoStart) {
+  if (gInputEnabled && !gSettings.inputAutoStart) {
     needsRebootForHardware = true;
   }
 #endif

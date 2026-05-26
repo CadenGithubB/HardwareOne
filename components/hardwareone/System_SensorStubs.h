@@ -66,18 +66,21 @@
 #endif
 
 #if !ENABLE_GAMEPAD_SENSOR
-  #include "i2csensor_seesaw.h"  // Provides GamepadCache struct
-  extern GamepadCache gGamepadCache;
-  extern bool gGamepadEnabled;
-  extern bool gGamepadConnected;
+  #include "i2csensor_seesaw.h"  // Provides InputCache struct
+  extern InputCache gInputCache;
+  extern bool gInputEnabled;
+  extern bool gInputConnected;
   extern unsigned long gGamepadLastStopTime;
-  extern TaskHandle_t gGamepadTaskHandle;
+  extern TaskHandle_t gInputTaskHandle;
   extern volatile UBaseType_t gGamepadWatermarkMin;
   extern volatile UBaseType_t gGamepadWatermarkNow;
   extern const struct CommandEntry gamepadCommands[];
   extern const size_t gamepadCommandsCount;
-  // Gamepad stub functions
-  inline bool gamepadStartInternal() { return false; }
+  // inputStartInternal() is provided by the ANO encoder driver when that is
+  // the active input device; only stub it when NO input driver is compiled in.
+#if !ENABLE_ANO_ENCODER
+  inline bool inputStartInternal() { return false; }
+#endif
 #endif
 
 #if !ENABLE_OLED_DISPLAY

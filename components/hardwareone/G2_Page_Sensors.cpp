@@ -45,7 +45,7 @@
 #include "i2csensor_mlx90640.h"   // gThermalCache + gThermalEnabled / gThermalConnected
 #endif
 #if ENABLE_GAMEPAD_SENSOR
-#include "i2csensor_seesaw.h"     // gGamepadCache + gGamepadEnabled / gGamepadConnected
+#include "i2csensor_seesaw.h"     // gInputCache + gInputEnabled / gInputConnected
 #endif
 #if ENABLE_APDS_SENSOR
 #include "i2csensor_apds9960.h"   // gApdsCache + gApdsEnabled / gApdsConnected
@@ -153,10 +153,10 @@ static void apdsG2FormatValue(char* out, size_t cap) {
 
 #if ENABLE_GAMEPAD_SENSOR
 static void gamepadG2FormatValue(char* out, size_t cap) {
-  SensorCacheGuard g(gGamepadCache.mutex, pdMS_TO_TICKS(5), "g2.gamepadFormat");
+  SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(5), "g2.gamepadFormat");
   if (g.held) {
-    if (gGamepadCache.gamepadDataValid) {
-      snprintf(out, cap, "btn:%lx", (unsigned long)gGamepadCache.gamepadButtons);
+    if (gInputCache.dataValid) {
+      snprintf(out, cap, "btn:%lx", (unsigned long)gInputCache.buttons);
     } else {
       snprintf(out, cap, "...");
     }
@@ -315,7 +315,7 @@ static void buildRows(G2SensorRow* rows, size_t maxRows, size_t* outCount,
 #endif
 
 #if ENABLE_GAMEPAD_SENSOR
-  add("GAMEP", "Seesaw",   "gamepad",  true,  gGamepadEnabled,  gGamepadConnected, gamepadG2FormatValue);
+  add("GAMEP", "Seesaw",   "gamepad",  true,  gInputEnabled,  gInputConnected, gamepadG2FormatValue);
 #else
   add("GAMEP", "Seesaw",   "gamepad",  false, false, false,                         nullptr);
 #endif

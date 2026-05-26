@@ -24,6 +24,21 @@ void oledApplySettings();
 // Apply OLED brightness from gSettings (can be called independently)
 void applyOLEDBrightness();
 
+// Apply OLED rotation (oledFlipped) from gSettings — calls setRotation + clears
+// the buffer so the next render tick repaints in the new orientation.
+void applyOLEDRotation();
+
+// Sleep lifecycle. On boards where the OLED rides an I2C bus with a
+// software-controllable power rail (I2C2_POWER_PIN), oledPrepareForSleep()
+// sends the SSD1306 software-off command and then drops the rail so the
+// chip loses Vcc — true power-off, not just panel-dark. oledResumeFromSleep()
+// raises the rail, waits for the LDO to settle, re-initialises the SSD1306
+// (state was lost on the power cycle), and reapplies rotation + brightness.
+// On boards where the OLED is on the always-on bus, these are equivalent to
+// the existing oledDisplayOff/On so callers don't have to branch.
+void oledPrepareForSleep();
+void oledResumeFromSleep();
+
 // Notify OLED UI that local display auth state changed (login/logout)
 void oledNotifyLocalDisplayAuthChanged();
 
@@ -203,7 +218,7 @@ public:
 // ============================================================================
 // Centralized Navigation Events (computed once per frame, use in inputFunc handlers)
 // ============================================================================
-// These are set by processGamepadMenuInput() before calling any inputFunc handler.
+// These are set by processOLEDInput() before calling any inputFunc handler.
 // Use these instead of raw deltaX/deltaY to get proper debounce and auto-repeat.
 
 struct NavEvents {
@@ -211,8 +226,13 @@ struct NavEvents {
   bool down;        // Navigation down triggered
   bool left;        // Navigation left triggered
   bool right;       // Navigation right triggered
-  int deltaX;       // Raw joystick X delta (for analog use cases)
-  int deltaY;       // Raw joystick Y delta (for analog use cases)
+  int  deltaX;      // Raw joystick X deflection (analog; 0 from non-joystick inputs)
+  int  deltaY;      // Raw joystick Y deflection (analog; 0 from non-joystick inputs)
+  int  wheelDelta;  // Signed rotary-encoder detent count this frame (0 from non-wheel inputs).
+                    //   Wheel and joystick are SEPARATE signals — modes that want wheel
+                    //   responsiveness read wheelDelta; modes that want joystick deflection
+                    //   read deltaX/Y. Neither input device fakes the other's signal, so
+                    //   modes don't have to know which physical hardware produced the input.
 };
 
 extern NavEvents gNavEvents;  // Global navigation events, updated each frame
@@ -345,7 +365,7 @@ void displayConnectedSensors();
 // OLED Change Detection - Skip rendering when nothing has changed
 // ============================================================================
 // Automatically detects changes via existing sequence counters:
-// - gamepadSeq: increments on any gamepad input
+// - seq: increments on any gamepad input
 // - gSensorStatusSeq: increments on sensor state changes
 // Call oledMarkDirty() only for non-sensor changes (menu state, settings, etc.)
 
@@ -392,12 +412,12 @@ void displayUnavailable();
 // Sensor mode functions (OLED_Mode_Sensors.cpp)
 void displaySensorData();
 void displayConnectedSensors();
-// displayIMUActions() - moved to Sensor_IMU_BNO055.cpp (modular OLED mode)
+// displayIMUActions() - moved to i2csensor_bno055.cpp (modular OLED mode)
 // displayFmRadio() - moved to fm_radio.cpp (modular OLED mode)
 void displayFileBrowser();
 void displayAutomations();
 void displayEspNow();
-// displayToFData() - moved to Sensor_ToF_VL53L4CX.cpp (modular OLED mode)
+// displayToFData() - moved to i2csensor_vl53l4cx.cpp (modular OLED mode)
 #if ENABLE_APDS_SENSOR
 void displayAPDSData();
 #endif

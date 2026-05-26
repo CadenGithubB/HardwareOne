@@ -64,7 +64,8 @@ extern bool gAllocTrackerEnabled;
 // Overhead buffer accounts for task control block, queue allocations, etc.
 static const MemoryRequirement gMemoryRequirements[] = {
   // Component       MinHeap   TaskStack              MinPSRAM
-  { "gamepad",       20480,    GAMEPAD_STACK_WORDS,   0 },       // 14KB stack + overhead
+  { "gamepad",       20480,    INPUT_STACK_WORDS,   0 },       // 14KB stack + overhead
+  { "anoencoder",    20480,    INPUT_STACK_WORDS,   0 },       // 14KB stack + overhead (same seesaw lib + INPUT_STACK_WORDS as gamepad)
   { "thermal",       40960,    THERMAL_STACK_WORDS,   0 },       // 16KB stack + frame processing overhead
   { "imu",           24576,    IMU_STACK_WORDS,       0 },       // 16KB stack + overhead
   { "tof",           16384,    TOF_STACK_WORDS,       0 },       // 12KB stack + overhead
@@ -263,7 +264,7 @@ void sampleMemoryState(bool forceFullScan) {
       {"espnow_task",        espnowHandle,          ESPNOW_HB_STACK_WORDS},
       {"cmd_exec_task",      gCmdExecTaskHandle,    CMD_EXEC_STACK_WORDS},
       {"sensor_queue_task",  queueProcessorTask,    SENSOR_QUEUE_STACK_WORDS},
-      {"gamepad_task",       gGamepadTaskHandle,     GAMEPAD_STACK_WORDS},
+      {"gamepad_task",       gInputTaskHandle,     INPUT_STACK_WORDS},
       {"thermal_task",  gThermalTaskHandle,     THERMAL_STACK_WORDS},
       {"imu_task",      gImuTaskHandle,         IMU_STACK_WORDS},
       {"tof_task",      gTofTaskHandle,         TOF_STACK_WORDS},
@@ -279,7 +280,7 @@ void sampleMemoryState(bool forceFullScan) {
       espnowHandle != nullptr,                                        // espnow_task
       gCmdExecTaskHandle != nullptr,                                  // cmd_exec_task
       queueProcessorTask != nullptr,                                  // sensor_queue_task
-      gGamepadEnabled,                                                 // gamepad_task
+      gInputEnabled,                                                 // gamepad_task
       gThermalEnabled,                                                 // thermal_task
       gImuEnabled,                                                     // imu_task
       gTofEnabled,                                                     // tof_task

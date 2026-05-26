@@ -148,8 +148,8 @@ static bool isAPDSCompiled() {
 #endif
 }
 
-static bool isGamepadCompiled() {
-#if ENABLE_GAMEPAD_SENSOR
+static bool isInputCompiled() {
+#if ENABLE_OLED_INPUT
   return true;
 #else
   return false;
@@ -244,10 +244,24 @@ static const FeatureEntry featureRegistry[] = {
     "RGB LED strip/ring effects" },
 
   // === SENSOR FEATURES ===
-  { "gamepad", "Gamepad", FEATURE_CAT_SENSOR, 2,
+  // Unified input device entry — either driver (Seesaw gamepad or ANO encoder)
+  // exposes itself here. Wizard / settings UI / feature list all use this one
+  // entry; the active driver disambiguates at runtime.
+  { "input",
+#if ENABLE_ANO_ENCODER
+    "ANO Encoder",
+#else
+    "Gamepad",
+#endif
+    FEATURE_CAT_SENSOR, 2,
     FEATURE_FLAG_RUNTIME_TOGGLE,
-    &gSettings.gamepadAutoStart, isGamepadCompiled,
-    "Seesaw gamepad for navigation" },
+    &gSettings.inputAutoStart, isInputCompiled,
+#if ENABLE_ANO_ENCODER
+    "ANO rotary encoder + 5-button D-pad for navigation"
+#else
+    "Seesaw gamepad for navigation"
+#endif
+  },
     
   { "thermal", "Thermal Camera", FEATURE_CAT_SENSOR, 32,
     FEATURE_FLAG_RUNTIME_TOGGLE,

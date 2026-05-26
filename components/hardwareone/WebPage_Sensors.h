@@ -44,6 +44,9 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username);
 #if ENABLE_GAMEPAD_SENSOR
 #include "i2csensor_seesaw_web.h"
 #endif
+#if ENABLE_ANO_ENCODER
+#include "i2csensor_ano_encoder_web.h"
+#endif
 #if ENABLE_GPS_SENSOR
 #include "i2csensor_pa1010d_web.h"
 #endif
@@ -144,6 +147,9 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
 #if ENABLE_GAMEPAD_SENSOR
   streamSeesawGamepadSensorCard(req);
 #endif
+#if ENABLE_ANO_ENCODER
+  streamAnoEncoderSensorCard(req);
+#endif
 #if ENABLE_GPS_SENSOR
   streamPA1010DGpsSensorCard(req);
 #endif
@@ -187,15 +193,22 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
   httpd_resp_send_chunk(req, "console.log('[SENSORS] Device detection starting...');(function(){try{var loading=hw._ge('sensors-loading');var grid=hw._ge('sensors-grid');", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "var setVis=function(id,show){var el=hw._ge(id);if(el){el.style.display=show?'':'none';}};", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "Promise.all([hw.fetchJSON('/api/devices'),hw.fetchJSON('/api/sensors/status')]).then(function(rs){var d=rs[0]||{};var st=rs[1]||{};console.log('[SENSORS] Devices response:',d);console.log('[SENSORS] Status response:',st);", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, "var has={imu:false,thermal:false,tof:false,gamepad:false,gps:false,servo:false,fmradio:false,camera:false,rtc:false,presence:false};if(d&&d.devices&&d.devices.forEach){d.devices.forEach(function(dev){", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, "if(dev&&dev.name==='BNO055')has.imu=true;else if(dev&&dev.name==='MLX90640')has.thermal=true;else if(dev&&dev.name==='VL53L4CX')has.tof=true;else if(dev&&dev.name==='Seesaw')has.gamepad=true;else if(dev&&dev.name==='PA1010D')has.gps=true;else if(dev&&dev.name==='PCA9685')has.servo=true;else if(dev&&dev.name==='RDA5807')has.fmradio=true;else if(dev&&dev.name==='DS3231')has.rtc=true;else if(dev&&dev.name==='STHS34PF80')has.presence=true;});}console.log('[SENSORS] Detected sensors:',has);", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, "var compiled={imu:!!st.imuCompiled,thermal:!!st.thermalCompiled,tof:!!st.tofCompiled,gamepad:!!st.gamepadCompiled,gps:!!st.gpsCompiled,fmradio:!!st.fmradioCompiled,servo:!!st.servoCompiled,camera:!!st.cameraCompiled,rtc:!!st.rtcCompiled,presence:!!st.presenceCompiled};has.camera=!!st.cameraCompiled;console.log('[SENSORS] Compiled sensors:',compiled);", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, "setVis('sensor-card-imu',has.imu&&compiled.imu);setVis('sensor-card-thermal',has.thermal&&compiled.thermal);setVis('sensor-card-tof',has.tof&&compiled.tof);setVis('sensor-card-gamepad',has.gamepad&&compiled.gamepad);setVis('sensor-card-gps',has.gps&&compiled.gps);setVis('sensor-card-servo',has.servo&&compiled.servo);setVis('sensor-card-fmradio',has.fmradio&&compiled.fmradio);setVis('sensor-card-camera',has.camera&&compiled.camera);setVis('sensor-card-rtc',has.rtc&&compiled.rtc);setVis('sensor-card-presence',has.presence&&compiled.presence);", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, "var any=(has.imu&&compiled.imu)||(has.thermal&&compiled.thermal)||(has.tof&&compiled.tof)||(has.gamepad&&compiled.gamepad)||(has.gps&&compiled.gps)||(has.servo&&compiled.servo)||(has.fmradio&&compiled.fmradio)||(has.camera&&compiled.camera)||(has.rtc&&compiled.rtc)||(has.presence&&compiled.presence);if(!any&&grid){grid.innerHTML='<div style=\"grid-column:1/-1;text-align:center;padding:2rem;color:#87ceeb;font-style:italic\">No sensors available (none compiled + detected)</div>';}console.log('[SENSORS] Device detection complete');", HTTPD_RESP_USE_STRLEN);
+  // `gamepad` and `anoencoder` are both keyed by the Seesaw chip on the bus —
+  // only one card exists in DOM at a time (whichever driver was compiled in),
+  // so the setVis for the missing one is a no-op.
+  httpd_resp_send_chunk(req, "var has={imu:false,thermal:false,tof:false,gamepad:false,anoencoder:false,gps:false,servo:false,fmradio:false,camera:false,rtc:false,presence:false};if(d&&d.devices&&d.devices.forEach){d.devices.forEach(function(dev){", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "if(dev&&dev.name==='BNO055')has.imu=true;else if(dev&&dev.name==='MLX90640')has.thermal=true;else if(dev&&dev.name==='VL53L4CX')has.tof=true;else if(dev&&dev.name==='Seesaw'){has.gamepad=true;has.anoencoder=true;}else if(dev&&dev.name==='PA1010D')has.gps=true;else if(dev&&dev.name==='PCA9685')has.servo=true;else if(dev&&dev.name==='RDA5807')has.fmradio=true;else if(dev&&dev.name==='DS3231')has.rtc=true;else if(dev&&dev.name==='STHS34PF80')has.presence=true;});}console.log('[SENSORS] Detected sensors:',has);", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "var compiled={imu:!!st.imuCompiled,thermal:!!st.thermalCompiled,tof:!!st.tofCompiled,gamepad:!!st.inputCompiled,anoencoder:!!st.inputCompiled,gps:!!st.gpsCompiled,fmradio:!!st.fmradioCompiled,servo:!!st.servoCompiled,camera:!!st.cameraCompiled,rtc:!!st.rtcCompiled,presence:!!st.presenceCompiled};has.camera=!!st.cameraCompiled;console.log('[SENSORS] Compiled sensors:',compiled);", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "setVis('sensor-card-imu',has.imu&&compiled.imu);setVis('sensor-card-thermal',has.thermal&&compiled.thermal);setVis('sensor-card-tof',has.tof&&compiled.tof);setVis('sensor-card-gamepad',has.gamepad&&compiled.gamepad);setVis('sensor-card-ano-encoder',has.anoencoder&&compiled.anoencoder);setVis('sensor-card-gps',has.gps&&compiled.gps);setVis('sensor-card-servo',has.servo&&compiled.servo);setVis('sensor-card-fmradio',has.fmradio&&compiled.fmradio);setVis('sensor-card-camera',has.camera&&compiled.camera);setVis('sensor-card-rtc',has.rtc&&compiled.rtc);setVis('sensor-card-presence',has.presence&&compiled.presence);", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "var any=(has.imu&&compiled.imu)||(has.thermal&&compiled.thermal)||(has.tof&&compiled.tof)||(has.gamepad&&compiled.gamepad)||(has.anoencoder&&compiled.anoencoder)||(has.gps&&compiled.gps)||(has.servo&&compiled.servo)||(has.fmradio&&compiled.fmradio)||(has.camera&&compiled.camera)||(has.rtc&&compiled.rtc)||(has.presence&&compiled.presence);if(!any&&grid){grid.innerHTML='<div style=\"grid-column:1/-1;text-align:center;padding:2rem;color:#87ceeb;font-style:italic\">No sensors available (none compiled + detected)</div>';}console.log('[SENSORS] Device detection complete');", HTTPD_RESP_USE_STRLEN);
   // Show banner for sensors detected on I2C bus but not compiled into firmware
   httpd_resp_send_chunk(req,
     "var nameMap={imu:'IMU (BNO055)',thermal:'Thermal Camera (MLX90640)',tof:'ToF Distance (VL53L4CX)',"
+#if ENABLE_ANO_ENCODER
+    "gamepad:'ANO Encoder (Seesaw)',gps:'GPS (PA1010D)',fmradio:'FM Radio (RDA5807)',"
+#else
     "gamepad:'Gamepad (Seesaw)',gps:'GPS (PA1010D)',fmradio:'FM Radio (RDA5807)',"
+#endif
     "rtc:'RTC (DS3231)',presence:'Presence (STHS34PF80)'};"
     "var uncompiled=[];"
     "for(var k in has){if(has[k]&&!compiled[k]&&nameMap[k])uncompiled.push(nameMap[k]);}"
@@ -212,7 +225,15 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
 
   // Control helpers
   httpd_resp_send_chunk(req, "console.log('[SENSORS] Setting up control helpers');var setClass=function(id,enabled){var el=hw._ge(id);if(!el)return;var c=enabled?'status-indicator status-enabled':'status-indicator status-disabled';if(el.className!==c)el.className=c};", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, "var bind=function(id,cmd){var el=hw._ge(id);if(el){hw.on(el,'click',function(){console.log('[SENSORS] Button clicked:',id,'cmd:',cmd);hw.postForm('/api/cli',{cmd:cmd}).then(function(r){console.log('[SENSORS] Command result:',r);try{var action=(/start$/.test(cmd)||/^open/.test(cmd)?'start':(/stop$/.test(cmd)||/^close/.test(cmd)?'stop':''));var sensor='';var c=cmd.replace(/^(open|close)/,'');if(/^imu/i.test(c))sensor='imu';else if(/^thermal/i.test(c))sensor='thermal';else if(/^tof/i.test(c))sensor='tof';else if(/^gamepad/i.test(c))sensor='gamepad';else if(/^gps/i.test(c))sensor='gps';else if(/^fmradio/i.test(c))sensor='fmradio';else if(/^camera/i.test(c))sensor='camera';else if(/^mic/i.test(c))sensor='microphone';else if(/^edgeimpulse/i.test(c))sensor='edgeimpulse';else if(/^rtc/i.test(c))sensor='rtc';else if(/^presence/i.test(c))sensor='presence';if(action==='start'&&sensor){startSensorPolling(sensor)}else if(action==='stop'&&sensor){stopSensorPolling(sensor)}}catch(_){}}).catch(function(e){console.error('[SENSORS] Command error:',e);})})}};", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req,
+    "var bind=function(id,cmd){var el=hw._ge(id);if(el){hw.on(el,'click',function(){console.log('[SENSORS] Button clicked:',id,'cmd:',cmd);hw.postForm('/api/cli',{cmd:cmd}).then(function(r){console.log('[SENSORS] Command result:',r);try{var action=(/start$/.test(cmd)||/^open/.test(cmd)?'start':(/stop$/.test(cmd)||/^close/.test(cmd)?'stop':''));var sensor='';var c=cmd.replace(/^(open|close)/,'');if(/^imu/i.test(c))sensor='imu';else if(/^thermal/i.test(c))sensor='thermal';else if(/^tof/i.test(c))sensor='tof';else if(/^gamepad/i.test(c))sensor='gamepad';else if(/^input/i.test(c))sensor='"
+#if ENABLE_ANO_ENCODER
+    "anoencoder"
+#else
+    "gamepad"
+#endif
+    "';else if(/^gps/i.test(c))sensor='gps';else if(/^fmradio/i.test(c))sensor='fmradio';else if(/^camera/i.test(c))sensor='camera';else if(/^mic/i.test(c))sensor='microphone';else if(/^edgeimpulse/i.test(c))sensor='edgeimpulse';else if(/^rtc/i.test(c))sensor='rtc';else if(/^presence/i.test(c))sensor='presence';if(action==='start'&&sensor){startSensorPolling(sensor)}else if(action==='stop'&&sensor){stopSensorPolling(sensor)}}catch(_){}}).catch(function(e){console.error('[SENSORS] Command error:',e);})})}};",
+    HTTPD_RESP_USE_STRLEN);
 #if ENABLE_IMU_SENSOR
   streamBNO055ImuSensorBindButtons(req);
 #endif
@@ -224,6 +245,9 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
 #endif
 #if ENABLE_GAMEPAD_SENSOR
   streamSeesawGamepadSensorBindButtons(req);
+#endif
+#if ENABLE_ANO_ENCODER
+  streamAnoEncoderSensorBindButtons(req);
 #endif
 #if ENABLE_GPS_SENSOR
   streamPA1010DGpsSensorBindButtons(req);
@@ -249,9 +273,9 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
   httpd_resp_send_chunk(req, "console.log('[SENSORS] Button bindings complete');", HTTPD_RESP_USE_STRLEN);
 
   // Status poller - also toggle button visibility based on enabled state
-  httpd_resp_send_chunk(req, "console.log('[SENSORS] Setting up status poller');var apply=function(s){console.log('[SENSORS] Status update:',s);try{setClass('gyro-status-indicator',!!s.imuEnabled);setClass('thermal-status-indicator',!!s.thermalEnabled);setClass('tof-status-indicator',!!s.tofEnabled);setClass('gamepad-status-indicator',!!s.gamepadEnabled);setClass('gps-status-indicator',!!s.gpsEnabled);setClass('rtc-status-indicator',!!s.rtcEnabled);setClass('presence-status-indicator',!!s.presenceEnabled);setClass('fmradio-status-indicator',!!s.fmRadioEnabled);setClass('servo-status-indicator',!!s.pwmDriverConnected);setClass('camera-status-indicator',!!s.cameraEnabled);setClass('camera-streaming-indicator',!!s.cameraStreaming);setClass('camera-ml-indicator',!!s.eiEnabled);setClass('mic-status-indicator',!!s.micEnabled);setClass('ei-status-indicator',!!s.eiEnabled);var rec=hw._ge('mic-recording-indicator');if(rec){var cls=(s.micRecording?'status-indicator status-recording':'status-indicator status-disabled');if(rec.className!==cls)rec.className=cls}", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "console.log('[SENSORS] Setting up status poller');var apply=function(s){console.log('[SENSORS] Status update:',s);try{setClass('gyro-status-indicator',!!s.imuEnabled);setClass('thermal-status-indicator',!!s.thermalEnabled);setClass('tof-status-indicator',!!s.tofEnabled);setClass('gamepad-status-indicator',!!s.inputEnabled);setClass('ano-status-indicator',!!s.inputEnabled);setClass('gps-status-indicator',!!s.gpsEnabled);setClass('rtc-status-indicator',!!s.rtcEnabled);setClass('presence-status-indicator',!!s.presenceEnabled);setClass('fmradio-status-indicator',!!s.fmRadioEnabled);setClass('servo-status-indicator',!!s.pwmDriverConnected);setClass('camera-status-indicator',!!s.cameraEnabled);setClass('camera-streaming-indicator',!!s.cameraStreaming);setClass('camera-ml-indicator',!!s.eiEnabled);setClass('mic-status-indicator',!!s.micEnabled);setClass('ei-status-indicator',!!s.eiEnabled);var rec=hw._ge('mic-recording-indicator');if(rec){var cls=(s.micRecording?'status-indicator status-recording':'status-indicator status-disabled');if(rec.className!==cls)rec.className=cls}", HTTPD_RESP_USE_STRLEN);
   // Button visibility toggling
-  httpd_resp_send_chunk(req, "var toggleBtns=function(startId,stopId,isOn){var startBtn=hw._ge(startId);var stopBtn=hw._ge(stopId);if(startBtn)startBtn.style.display=isOn?'none':'inline-block';if(stopBtn)stopBtn.style.display=isOn?'inline-block':'none';};toggleBtns('btn-gamepad-start','btn-gamepad-stop',!!s.gamepadEnabled);toggleBtns('btn-gps-start','btn-gps-stop',!!s.gpsEnabled);toggleBtns('btn-rtc-start','btn-rtc-stop',!!s.rtcEnabled);toggleBtns('btn-presence-start','btn-presence-stop',!!s.presenceEnabled);toggleBtns('btn-imu-start','btn-imu-stop',!!s.imuEnabled);toggleBtns('btn-thermal-start','btn-thermal-stop',!!s.thermalEnabled);toggleBtns('btn-tof-start','btn-tof-stop',!!s.tofEnabled);toggleBtns('btn-camera-start','btn-camera-stop',!!s.cameraEnabled);toggleBtns('btn-mic-start','btn-mic-stop',!!s.micEnabled);toggleBtns('btn-ei-enable','btn-ei-disable',!!s.eiEnabled);var camRec=hw._ge('btn-camera-record');var camRecStop=hw._ge('btn-camera-record-stop');var camRecHint=hw._ge('camera-record-hint');if(camRec){camRec.style.display=(s.cameraEnabled&&!s.cameraRecording)?'inline-block':'none';camRec.disabled=!s.sdWritable;if(camRec.title){if(s.sdWritable)camRec.title='Record stream to SD card as MJPEG AVI';else if(s.sdAvailable)camRec.title='SD mounted but writes are failing (card may be flaky)';else camRec.title='Requires SD card';}}if(camRecStop){camRecStop.style.display=(s.cameraEnabled&&s.cameraRecording)?'inline-block':'none';}if(camRecHint){if(s.cameraEnabled&&!s.sdWritable){camRecHint.style.display='block';camRecHint.textContent=s.sdAvailable?'SD card is mounted but writes are failing — card may be flaky, full, or write-protected.':'SD card required to record video.';}else{camRecHint.style.display='none';}}", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "var toggleBtns=function(startId,stopId,isOn){var startBtn=hw._ge(startId);var stopBtn=hw._ge(stopId);if(startBtn)startBtn.style.display=isOn?'none':'inline-block';if(stopBtn)stopBtn.style.display=isOn?'inline-block':'none';};toggleBtns('btn-gamepad-start','btn-gamepad-stop',!!s.inputEnabled);toggleBtns('btn-ano-start','btn-ano-stop',!!s.inputEnabled);toggleBtns('btn-gps-start','btn-gps-stop',!!s.gpsEnabled);toggleBtns('btn-rtc-start','btn-rtc-stop',!!s.rtcEnabled);toggleBtns('btn-presence-start','btn-presence-stop',!!s.presenceEnabled);toggleBtns('btn-imu-start','btn-imu-stop',!!s.imuEnabled);toggleBtns('btn-thermal-start','btn-thermal-stop',!!s.thermalEnabled);toggleBtns('btn-tof-start','btn-tof-stop',!!s.tofEnabled);toggleBtns('btn-camera-start','btn-camera-stop',!!s.cameraEnabled);toggleBtns('btn-mic-start','btn-mic-stop',!!s.micEnabled);toggleBtns('btn-ei-enable','btn-ei-disable',!!s.eiEnabled);var camRec=hw._ge('btn-camera-record');var camRecStop=hw._ge('btn-camera-record-stop');var camRecHint=hw._ge('camera-record-hint');if(camRec){camRec.style.display=(s.cameraEnabled&&!s.cameraRecording)?'inline-block':'none';camRec.disabled=!s.sdWritable;if(camRec.title){if(s.sdWritable)camRec.title='Record stream to SD card as MJPEG AVI';else if(s.sdAvailable)camRec.title='SD mounted but writes are failing (card may be flaky)';else camRec.title='Requires SD card';}}if(camRecStop){camRecStop.style.display=(s.cameraEnabled&&s.cameraRecording)?'inline-block':'none';}if(camRecHint){if(s.cameraEnabled&&!s.sdWritable){camRecHint.style.display='block';camRecHint.textContent=s.sdAvailable?'SD card is mounted but writes are failing — card may be flaky, full, or write-protected.':'SD card required to record video.';}else{camRecHint.style.display='none';}}", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "if(s.fmRadioEnabled){if(typeof startFMRadioPolling==='function')startFMRadioPolling()}else{if(typeof stopFMRadioPolling==='function')stopFMRadioPolling()}var servoStatus=hw._ge('servo-connection-status');if(servoStatus){servoStatus.textContent=s.pwmDriverConnected?'Initialized & ready':'Not initialized (use servo command to start)';servoStatus.style.color=s.pwmDriverConnected?'#28a745':'#ffc107';}}catch(_){}};", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "hw.fetchJSON('/api/sensors/status').then(apply).catch(function(e){console.error('[SENSORS] Status fetch error:',e);})", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, ";hw.pollJSON('/api/sensors/status',1000,apply);console.log('[SENSORS] Status poller started');", HTTPD_RESP_USE_STRLEN);
@@ -367,7 +391,7 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
   httpd_resp_send_chunk(req, "  return Promise.resolve('Sensor read placeholder');\n", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "}\n", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "function getSensorDataId(sensor){var k=String(sensor||'');if(window._sensorDataIds&&window._sensorDataIds[k])return window._sensorDataIds[k];if(k.indexOf('imu')!==-1)return 'gyro-data';if(k.indexOf('tof')!==-1)return 'tof-data';if(k.indexOf('thermal')!==-1)return 'thermal-data';if(k.indexOf('gamepad')!==-1)return 'gamepad-data';return k+'-data'}", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, "function startSensorPolling(sensor){console.log('[SENSORS] startSensorPolling called for:',sensor);if(sensorIntervals[sensor]){console.log('[SENSORS] Already polling',sensor);return}if(sensor==='thermal'){if(typeof startThermalPolling==='function'){startThermalPolling()}return}else if(sensor==='tof'){if(typeof startToFPolling==='function'){startToFPolling()}return}else{readSensor(sensor);var interval=(window._sensorPollingIntervals&&window._sensorPollingIntervals[sensor])?window._sensorPollingIntervals[sensor]:(sensor==='imu'?200:(sensor==='gamepad'?56:500));console.log('[SENSORS] Starting',sensor,'polling with interval:',interval+'ms');sensorIntervals[sensor]=setInterval(function(){readSensor(sensor)},interval)}}", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "function startSensorPolling(sensor){console.log('[SENSORS] startSensorPolling called for:',sensor);if(sensorIntervals[sensor]){console.log('[SENSORS] Already polling',sensor);return}if(sensor==='thermal'){if(typeof startThermalPolling==='function'){startThermalPolling()}return}else if(sensor==='tof'){if(typeof startToFPolling==='function'){startToFPolling()}return}else{readSensor(sensor);var interval=(window._sensorPollingIntervals&&window._sensorPollingIntervals[sensor])?window._sensorPollingIntervals[sensor]:(sensor==='imu'?200:((sensor==='gamepad'||sensor==='anoencoder')?56:500));console.log('[SENSORS] Starting',sensor,'polling with interval:',interval+'ms');sensorIntervals[sensor]=setInterval(function(){readSensor(sensor)},interval)}}", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "function stopSensorPolling(sensor){console.log('[SENSORS] stopSensorPolling called for:',sensor);if(sensorIntervals[sensor]){clearInterval(sensorIntervals[sensor]);delete sensorIntervals[sensor];console.log('[SENSORS] Stopped polling',sensor)}if(sensor==='thermal'){if(typeof stopThermalPolling==='function'){stopThermalPolling()}}else if(sensor==='tof'){if(typeof stopToFPolling==='function'){stopToFPolling()}}}", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "try{console.log('[SENSORS] Core control functions ready');}catch(_){ }", HTTPD_RESP_USE_STRLEN);
 
@@ -378,7 +402,7 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
     "window.applySensorStatus = function(status) {\n"
     "  if (!status) return;\n"
     "  console.log('[Queue] Applying sensor status:', status);\n"
-    "  ['thermal', 'tof', 'imu', 'gps', 'gamepad', 'fmradio', 'presence'].forEach(function(sensor) {\n"
+    "  ['thermal', 'tof', 'imu', 'gps', 'gamepad', 'ano', 'fmradio', 'presence'].forEach(function(sensor) {\n"
     "    var queueEl = document.getElementById(sensor + '-queue-status');\n"
     "    if (!queueEl) return;\n"
     "    var isQueued = status[sensor + 'Queued'];\n"
@@ -397,10 +421,12 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
     "    } else {\n"
     "      stopSensorPolling('imu');\n"
     "    }\n"
-    "    if (status.gamepadCompiled && status.gamepadEnabled) {\n"
+    "    if (status.inputCompiled && status.inputEnabled) {\n"
     "      startSensorPolling('gamepad');\n"
+    "      startSensorPolling('anoencoder');\n"
     "    } else {\n"
     "      stopSensorPolling('gamepad');\n"
+    "      stopSensorPolling('anoencoder');\n"
     "    }\n"
     "    if (status.gpsCompiled && status.gpsEnabled) {\n"
     "      startSensorPolling('gps');\n"
@@ -462,7 +488,7 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
     "    }\n"
     "  } catch (_) {}\n"
     "};\n", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, "function updateStatusIndicators(status){if(!status){console.warn('[Sensors] updateStatusIndicators called with null/undefined status');return}var t=document.getElementById('thermal-status-indicator');var f=document.getElementById('tof-status-indicator');var i=document.getElementById('gyro-status-indicator');var g=document.getElementById('gamepad-status-indicator');var r=document.getElementById('fmradio-status-indicator');var c=document.getElementById('camera-status-indicator');if(t){t.className=status.thermalEnabled?'status-indicator status-enabled':'status-indicator status-disabled'}if(f){f.className=status.tofEnabled?'status-indicator status-enabled':'status-indicator status-disabled'}if(i){i.className=status.imuEnabled?'status-indicator status-enabled':'status-indicator status-disabled'}if(g){g.className=status.gamepadEnabled?'status-indicator status-enabled':'status-indicator status-disabled'}if(r){r.className=status.fmRadioEnabled?'status-indicator status-enabled':'status-indicator status-disabled'}if(c){c.className=status.cameraEnabled?'status-indicator status-enabled':'status-indicator status-disabled'}var cs=document.getElementById('camera-streaming-indicator');if(cs){cs.className=status.cameraStreaming?'status-indicator status-recording':'status-indicator status-disabled'}var cml=document.getElementById('camera-ml-indicator');if(cml){cml.className=status.eiEnabled?'status-indicator status-enabled':'status-indicator status-disabled'}var m=document.getElementById('mic-status-indicator');if(m){m.className=status.micEnabled?'status-indicator status-enabled':'status-indicator status-disabled'}var mr=document.getElementById('mic-recording-indicator');if(mr){mr.className=status.micRecording?'status-indicator status-recording':'status-indicator status-disabled'}var ei=document.getElementById('ei-status-indicator');if(ei){ei.className=status.eiEnabled?'status-indicator status-enabled':'status-indicator status-disabled'}}", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "function updateStatusIndicators(status){if(!status){console.warn('[Sensors] updateStatusIndicators called with null/undefined status');return}var t=document.getElementById('thermal-status-indicator');var f=document.getElementById('tof-status-indicator');var i=document.getElementById('gyro-status-indicator');var g=document.getElementById('gamepad-status-indicator');var r=document.getElementById('fmradio-status-indicator');var c=document.getElementById('camera-status-indicator');if(t){t.className=status.thermalEnabled?'status-indicator status-enabled':'status-indicator status-disabled'}if(f){f.className=status.tofEnabled?'status-indicator status-enabled':'status-indicator status-disabled'}if(i){i.className=status.imuEnabled?'status-indicator status-enabled':'status-indicator status-disabled'}if(g){g.className=status.inputEnabled?'status-indicator status-enabled':'status-indicator status-disabled'}var g2=document.getElementById('ano-status-indicator');if(g2){g2.className=status.inputEnabled?'status-indicator status-enabled':'status-indicator status-disabled'}if(r){r.className=status.fmRadioEnabled?'status-indicator status-enabled':'status-indicator status-disabled'}if(c){c.className=status.cameraEnabled?'status-indicator status-enabled':'status-indicator status-disabled'}var cs=document.getElementById('camera-streaming-indicator');if(cs){cs.className=status.cameraStreaming?'status-indicator status-recording':'status-indicator status-disabled'}var cml=document.getElementById('camera-ml-indicator');if(cml){cml.className=status.eiEnabled?'status-indicator status-enabled':'status-indicator status-disabled'}var m=document.getElementById('mic-status-indicator');if(m){m.className=status.micEnabled?'status-indicator status-enabled':'status-indicator status-disabled'}var mr=document.getElementById('mic-recording-indicator');if(mr){mr.className=status.micRecording?'status-indicator status-recording':'status-indicator status-disabled'}var ei=document.getElementById('ei-status-indicator');if(ei){ei.className=status.eiEnabled?'status-indicator status-enabled':'status-indicator status-disabled'}}", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req,
     "function checkAlreadyActiveSensors() {\n"
     "  console.log('[Sensors] Checking for already-active sensors...');\n"
@@ -483,7 +509,11 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
     "        'VL53L4CX': {type: 'tof', enabledKey: 'tofEnabled', compiledKey: 'tofCompiled', indicatorId: 'tof-status-indicator'},\n"
     "        'PA1010D': {type: 'gps', enabledKey: 'gpsEnabled', compiledKey: 'gpsCompiled', indicatorId: 'gps-status-indicator'},\n"
     "        'RDA5807': {type: 'fmradio', enabledKey: 'fmRadioEnabled', compiledKey: 'fmradioCompiled', indicatorId: 'fmradio-status-indicator'},\n"
-    "        'Seesaw': {type: 'gamepad', enabledKey: 'gamepadEnabled', compiledKey: 'gamepadCompiled', indicatorId: 'gamepad-status-indicator', address: 0x50},\n"
+#if ENABLE_ANO_ENCODER
+    "        'Seesaw': {type: 'anoencoder', enabledKey: 'inputEnabled', compiledKey: 'inputCompiled', indicatorId: 'ano-status-indicator', address: 0x49},\n"
+#else
+    "        'Seesaw': {type: 'gamepad', enabledKey: 'inputEnabled', compiledKey: 'inputCompiled', indicatorId: 'gamepad-status-indicator', address: 0x50},\n"
+#endif
     "        'DS3231': {type: 'rtc', enabledKey: 'rtcEnabled', compiledKey: 'rtcCompiled', indicatorId: 'rtc-status-indicator'},\n"
     "        'STHS34PF80': {type: 'presence', enabledKey: 'presenceEnabled', compiledKey: 'presenceCompiled', indicatorId: 'presence-status-indicator'}\n"
     "      }[device.name];\n"
@@ -492,7 +522,7 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
     "        console.log('[Sensors] No map for device:', device.name);\n"
     "        return;\n"
     "      }\n"
-    "      if (device.name === 'Seesaw' && device.address !== 0x50) return;\n"
+    "      if (device.name === 'Seesaw' && map.address !== undefined && device.address !== map.address) return;\n"
     "      if (map.compiledKey && status && status[map.compiledKey] === false) {\n"
     "        console.log('[Sensors] Skipping', device.name, '(not compiled)');\n"
     "        return;\n"
@@ -641,6 +671,9 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
 #endif
 #if ENABLE_GAMEPAD_SENSOR
   streamSeesawGamepadSensorJs(req);
+#endif
+#if ENABLE_ANO_ENCODER
+  streamAnoEncoderSensorJs(req);
 #endif
 #if ENABLE_CAMERA_SENSOR
   streamCameraSensorJs(req);

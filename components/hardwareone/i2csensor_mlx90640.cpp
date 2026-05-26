@@ -71,7 +71,7 @@ extern const SettingsModule thermalSettingsModule = {
 
 // ============================================================================
 
-// Thermal cache (now defined here, declared in Sensor_Thermal_MLX90640.h)
+// Thermal cache (now defined here, declared in i2csensor_mlx90640.h)
 ThermalCache gThermalCache;
 
 // Thermal sensor state (definitions)
@@ -1342,7 +1342,7 @@ void thermalTask(void* parameter) {
   INFO_THERMAL_LIFECYCLEF("Task started (handle=%p, stack=%u words)", 
                 (void*)xTaskGetCurrentTaskHandle(), 
                 (unsigned)uxTaskGetStackHighWaterMark(nullptr));
-  INFO_THERMAL_LIFECYCLEF("[MODULAR] thermalTask() running from Sensor_Thermal_MLX90640.cpp");
+  INFO_THERMAL_LIFECYCLEF("[MODULAR] thermalTask() running from i2csensor_mlx90640.cpp");
   unsigned long lastThermalRead = 0;
   unsigned long lastStackLog = 0;
   while (true) {

@@ -346,17 +346,21 @@ inline bool i2cBusRecovery() {
 // ============================================================================
 // I2C Device Addresses
 // ============================================================================
-#define I2C_ADDR_GPS        0x10
-#define I2C_ADDR_FM_RADIO   0x11
-#define I2C_ADDR_IMU        0x28
-#define I2C_ADDR_TOF        0x29
-#define I2C_ADDR_THERMAL    0x33
-#define I2C_ADDR_APDS       0x39
+#define I2C_ADDR_GPS         0x10
+#define I2C_ADDR_FM_RADIO    0x11
+#define I2C_ADDR_IMU         0x28
+#define I2C_ADDR_TOF         0x29
+#define I2C_ADDR_THERMAL     0x33
+#define I2C_ADDR_APDS        0x39
 // I2C_ADDR_OLED 0x3D — defined above the template helpers; not redefined here
-#define I2C_ADDR_PCA9685    0x40
-#define I2C_ADDR_PRESENCE   0x5A
-#define I2C_ADDR_GAMEPAD    0x50
-#define I2C_ADDR_DS3231     0x68
+#define I2C_ADDR_PCA9685     0x40
+// ANO seesaw breakout default is 0x49 per Adafruit; some units expose solder
+// jumpers for alternates. Override at runtime via gSettings.anoEncoderI2cAddr
+// if your hardware is rebound.
+#define I2C_ADDR_ANO_ENCODER 0x49
+#define I2C_ADDR_PRESENCE    0x5A
+#define I2C_ADDR_GAMEPAD     0x50
+#define I2C_ADDR_DS3231      0x68
 
 // ============================================================================
 // Global Flags and Configuration
@@ -421,7 +425,7 @@ String identifySensor(uint8_t address);
 void tofTask(void* parameter);
 void imuTask(void* parameter);
 void thermalTask(void* parameter);
-void gamepadTask(void* parameter);
+void inputTask(void* parameter);
 void apdsTask(void* parameter);
 void gpsTask(void* parameter);
 void sensorQueueProcessorTask(void* param);
@@ -443,8 +447,7 @@ const char* cmd_tof(const String& argsInput);
 const char* cmd_imustart(const String& argsInput);
 const char* cmd_imustop(const String& argsInput);
 const char* cmd_imu(const String& argsInput);
-const char* cmd_gamepadstart_queued(const String& argsInput);
-const char* cmd_gamepadstop(const String& argsInput);
+// cmd_openinput / cmd_closeinput live in HAL_Input.cpp (unified for either driver).
 const char* cmd_gamepad(const String& argsInput);
 const char* cmd_apdscolor(const String& argsInput);
 const char* cmd_apdsproximity(const String& argsInput);

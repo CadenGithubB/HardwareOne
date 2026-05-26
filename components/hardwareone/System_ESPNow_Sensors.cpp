@@ -116,9 +116,9 @@ static const SensorBroadcastSpec gSensorSpecs[REMOTE_SENSOR_MAX] = {
   [REMOTE_SENSOR_GPS]        = { nullptr, 0, 0 },
 #endif
 #if ENABLE_GAMEPAD_SENSOR
-  [REMOTE_SENSOR_GAMEPAD]    = { gamepadBuildDataJSON,        100,  128  },
+  [REMOTE_SENSOR_INPUT]    = { gamepadBuildDataJSON,        100,  128  },
 #else
-  [REMOTE_SENSOR_GAMEPAD]    = { nullptr, 0, 0 },
+  [REMOTE_SENSOR_INPUT]    = { nullptr, 0, 0 },
 #endif
 #if ENABLE_FM_RADIO
   [REMOTE_SENSOR_FMRADIO]    = { fmRadioBuildDataJSON,        1000, 512  },
@@ -176,7 +176,7 @@ const char* sensorTypeToString(RemoteSensorType type) {
     case REMOTE_SENSOR_TOF: return "tof";
     case REMOTE_SENSOR_IMU: return "imu";
     case REMOTE_SENSOR_GPS: return "gps";
-    case REMOTE_SENSOR_GAMEPAD: return "gamepad";
+    case REMOTE_SENSOR_INPUT: return "gamepad";
     case REMOTE_SENSOR_FMRADIO: return "fmradio";
     case REMOTE_SENSOR_CAMERA: return "camera";
     case REMOTE_SENSOR_MICROPHONE: return "microphone";
@@ -192,7 +192,7 @@ RemoteSensorType stringToSensorType(const char* str) {
   if (strcmp(str, "tof") == 0) return REMOTE_SENSOR_TOF;
   if (strcmp(str, "imu") == 0) return REMOTE_SENSOR_IMU;
   if (strcmp(str, "gps") == 0) return REMOTE_SENSOR_GPS;
-  if (strcmp(str, "gamepad") == 0) return REMOTE_SENSOR_GAMEPAD;
+  if (strcmp(str, "gamepad") == 0) return REMOTE_SENSOR_INPUT;
   if (strcmp(str, "fmradio") == 0) return REMOTE_SENSOR_FMRADIO;
   if (strcmp(str, "camera") == 0) return REMOTE_SENSOR_CAMERA;
   if (strcmp(str, "microphone") == 0) return REMOTE_SENSOR_MICROPHONE;

@@ -166,6 +166,14 @@ extern const size_t imuCommandsCount;
 extern const CommandEntry gamepadCommands[];
 extern const size_t gamepadCommandsCount;
 #endif
+#if ENABLE_ANO_ENCODER
+extern const CommandEntry anoEncoderCommands[];
+extern const size_t anoEncoderCommandsCount;
+#endif
+#if ENABLE_OLED_INPUT
+extern const CommandEntry inputCommands[];
+extern const size_t inputCommandsCount;
+#endif
 #if ENABLE_APDS_SENSOR
 extern const CommandEntry apdsCommands[];
 extern const size_t apdsCommandsCount;
@@ -271,6 +279,12 @@ extern const size_t g2RingCommandsCount;
 #endif
 #if ENABLE_GAMEPAD_SENSOR
   #include "i2csensor_seesaw.h"  // For gamepadCommands
+#endif
+#if ENABLE_ANO_ENCODER
+  #include "i2csensor_ano_encoder.h"  // For anoEncoderCommands
+#endif
+#if ENABLE_OLED_INPUT
+  #include "HAL_Input.h"  // For inputCommands
 #endif
 #if ENABLE_APDS_SENSOR
   #include "i2csensor_apds9960.h"     // For apdsCommands
@@ -927,8 +941,12 @@ void logCommandExecution(const AuthContext& ctx, const char* cmd, bool success, 
   // Uses explicit MSG_ROUTE_ALL to bypass context-based serial suppression —
   // the audit line should ALWAYS appear on all interfaces regardless of command origin.
   char auditLine[384];
-  snprintf(auditLine, sizeof(auditLine), "[CMD] %s@%s: %s -> %s",
-           ctx.user.c_str(), source, redactedCmd.c_str(), status);
+  // Include resultBuf (already capped to 40 chars, newlines neutralized) so
+  // serial logs surface the actual command response — otherwise paths that
+  // return non-empty text (e.g. "Not detected on I2C bus", "already running")
+  // are indistinguishable from a literal "OK" in the audit stream.
+  snprintf(auditLine, sizeof(auditLine), "[CMD] %s@%s: %s -> %s %s",
+           ctx.user.c_str(), source, redactedCmd.c_str(), status, resultBuf);
   extern void broadcastOutputCore_Routed(const char* text, size_t len, uint8_t route);
   broadcastOutputCore_Routed(auditLine, strlen(auditLine), MSG_ROUTE_ALL);
 }
@@ -1284,10 +1302,25 @@ const char* cmd_cpufreq(const String& argsInput) {
 
 #include <esp_sleep.h>
 #include "OLED_Display.h"
+#include "System_Power.h"  // powerSleepTransitionAllowed/Mark — anti-flap guard
 
 const char* cmd_lightsleep(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  
+  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+
+  // Anti-flap: refuse if a previous sleep entry was too recent. Without this,
+  // a glitched trigger (stuck button, MQTT spam, a future "sleep on idle"
+  // racing "wake on activity") could thrash the LDO + WiFi/BLE reconnect
+  // path every few hundred ms and chew the battery in minutes. Cooldown is
+  // gSettings.powerTransitionCooldownMs (default 5000, 0 disables).
+  unsigned long cooldownRemain = 0;
+  if (!powerSleepTransitionAllowed(&cooldownRemain)) {
+    snprintf(getDebugBuffer(), 1024,
+             "Sleep refused: cooldown active — try again in %lu ms (powercooldown to tune)",
+             cooldownRemain);
+    return getDebugBuffer();
+  }
+
   // Parse optional duration (default 20 seconds)
   int seconds = 20;
   String arg = argsInput;
@@ -1298,26 +1331,36 @@ const char* cmd_lightsleep(const String& argsInput) {
       seconds = val;
     }
   }
-  
+
   BROADCAST_PRINTF("Entering light sleep for %d seconds...", seconds);
+  // Stamp the cooldown NOW (before the actual sleep call) so that a
+  // concurrent task or a wake-then-immediate-resleep loop sees a fresh
+  // last-transition time. Wake doesn't re-stamp; the clock keeps running.
+  powerSleepTransitionMark();
   delay(100);  // Allow message to be sent
   
   // Show sleep message and turn off display (uses abstracted functions)
   oledShowSleepScreen(seconds);
   delay(500);
-  oledDisplayOff();
-  
+  // oledPrepareForSleep supersedes the old oledDisplayOff: on bus-1 + power-
+  // gated builds it ALSO drops LDO2 so the OLED truly loses power, not just
+  // its panel pixels. Falls back to plain SSD1306-DISPLAYOFF everywhere else.
+  oledPrepareForSleep();
+
   // Configure wake-up source: timer
   esp_sleep_enable_timer_wakeup((uint64_t)seconds * 1000000ULL);
-  
+
   // Enter light sleep (preserves RAM, resumes here when woken)
   esp_light_sleep_start();
-  
+
   // Execution resumes here after wake-up
   DEBUG_SYSTEMF("Woke from light sleep!");
-  
-  // Turn display back on (uses abstracted function)
-  oledDisplayOn();
+
+  // oledResumeFromSleep supersedes oledDisplayOn: on bus-1 + power-gated
+  // builds it raises LDO2, waits for the rail to stabilise, re-runs the
+  // SSD1306 init (registers were lost on the power cycle), and reapplies
+  // rotation + brightness so the panel comes back exactly as it was.
+  oledResumeFromSleep();
   
   return "Woke from light sleep";
 }
@@ -1999,8 +2042,14 @@ static const CommandModule gCommandModules[] = {
 #if ENABLE_IMU_SENSOR
   { "imu",        "BNO055 9-DOF orientation sensor", imuCommands,          imuCommandsCount, CMD_MODULE_SENSOR, []() { return isSensorConnected("imu"); } },
 #endif
+#if ENABLE_OLED_INPUT
+  { "input",      "Input device (gamepad or ANO encoder)", inputCommands,       inputCommandsCount,       CMD_MODULE_SENSOR, []() { return gInputConnected; } },
+#endif
 #if ENABLE_GAMEPAD_SENSOR
-  { "gamepad",    "Seesaw gamepad controller", gamepadCommands,      gamepadCommandsCount, CMD_MODULE_SENSOR, []() { return isSensorConnected("gamepad"); } },
+  { "gamepad",    "Seesaw gamepad — raw debug commands", gamepadCommands,      gamepadCommandsCount, CMD_MODULE_SENSOR, []() { return isSensorConnected("gamepad"); } },
+#endif
+#if ENABLE_ANO_ENCODER
+  { "anoencoder", "ANO rotary encoder — debug + driver-specific config", anoEncoderCommands, anoEncoderCommandsCount, CMD_MODULE_SENSOR, []() { return gAnoEncoderConnected; } },
 #endif
 #if ENABLE_APDS_SENSOR
   { "apds",       "APDS9960 color, proximity, gesture sensor", apdsCommands,         apdsCommandsCount, CMD_MODULE_SENSOR, []() { return isSensorConnected("apds"); } },
@@ -2448,7 +2497,7 @@ void printMemoryReport() {
       { "thermal_task", THERMAL_STACK_WORDS },
       { "imu_task", IMU_STACK_WORDS },
       { "tof_task", TOF_STACK_WORDS },
-      { "gamepad_task", GAMEPAD_STACK_WORDS },
+      { "gamepad_task", INPUT_STACK_WORDS },
       { "debug_out", DEBUG_OUT_STACK_WORDS },        // Debug output queue processor
       { "apds_task", APDS_STACK_WORDS },             // APDS color/proximity/gesture sensor
       { "gps_task", GPS_STACK_WORDS },               // GPS polling task
@@ -2551,7 +2600,7 @@ void printMemoryReport() {
   size_t thermal_state_bytes = sizeof(gThermalCache) + sizeof(gThermalEnabled) + sizeof(gThermalConnected) + sizeof(gThermalTaskHandle);
   size_t imu_state_bytes = sizeof(gImuCache) + sizeof(gImuEnabled) + sizeof(gImuConnected) + sizeof(gImuTaskHandle);
   size_t tof_state_bytes = sizeof(gTofCache) + sizeof(gTofEnabled) + sizeof(gTofConnected) + sizeof(gTofTaskHandle);
-  size_t gamepad_state_bytes = sizeof(gGamepadCache) + sizeof(gGamepadEnabled) + sizeof(gGamepadConnected) + sizeof(gGamepadTaskHandle);
+  size_t gamepad_state_bytes = sizeof(gInputCache) + sizeof(gInputEnabled) + sizeof(gInputConnected) + sizeof(gInputTaskHandle);
   size_t apds_state_bytes = sizeof(gApdsCache) + sizeof(gApdsConnected) + sizeof(gApdsColorEnabled) + sizeof(gApdsProximityEnabled) + sizeof(gApdsGestureEnabled);
   size_t gps_state_bytes = sizeof(gGpsEnabled) + sizeof(gGpsConnected);
   size_t oled_state_bytes = sizeof(gOledEnabled) + sizeof(oledConnected);
@@ -2664,7 +2713,7 @@ void printMemoryReport() {
   int disabled_count = 0;
 
 #if ENABLE_THERMAL_SENSOR
-  broadcastOutput("  [Y] THERMAL  | thermalTask() in Sensor_Thermal_MLX90640.cpp");
+  broadcastOutput("  [Y] THERMAL  | thermalTask() in i2csensor_mlx90640.cpp");
   enabled_count++;
 #else
   broadcastOutput("  [N] THERMAL  | Disabled (~20-25KB flash, ~15KB RAM saved)");
@@ -2672,7 +2721,7 @@ void printMemoryReport() {
 #endif
 
 #if ENABLE_TOF_SENSOR
-  broadcastOutput("  [Y] TOF      | tofTask() in Sensor_ToF_VL53L4CX.cpp");
+  broadcastOutput("  [Y] TOF      | tofTask() in i2csensor_vl53l4cx.cpp");
   enabled_count++;
 #else
   broadcastOutput("  [N] TOF      | Disabled (~25-30KB flash, ~10KB RAM saved)");
@@ -2680,7 +2729,7 @@ void printMemoryReport() {
 #endif
 
 #if ENABLE_IMU_SENSOR
-  broadcastOutput("  [Y] IMU      | imuTask() in Sensor_IMU_BNO055.cpp");
+  broadcastOutput("  [Y] IMU      | imuTask() in i2csensor_bno055.cpp");
   enabled_count++;
 #else
   broadcastOutput("  [N] IMU      | Disabled (~12-18KB flash, ~8KB RAM saved)");
@@ -2688,15 +2737,18 @@ void printMemoryReport() {
 #endif
 
 #if ENABLE_GAMEPAD_SENSOR
-  broadcastOutput("  [Y] GAMEPAD  | gamepadTask() in Sensor_Gamepad_Seesaw.cpp");
+  broadcastOutput("  [Y] GAMEPAD  | inputTask() in i2csensor_seesaw.cpp");
+  enabled_count++;
+#elif ENABLE_ANO_ENCODER
+  broadcastOutput("  [Y] ANO_ENC  | inputTask() in i2csensor_ano_encoder.cpp");
   enabled_count++;
 #else
-  broadcastOutput("  [N] GAMEPAD  | Disabled (~8-12KB flash, ~6KB RAM saved)");
+  broadcastOutput("  [N] INPUT    | Disabled (no input device built in)");
   disabled_count++;
 #endif
 
 #if ENABLE_APDS_SENSOR
-  broadcastOutput("  [Y] APDS     | apdsTask() in Sensor_APDS_APDS9960.cpp");
+  broadcastOutput("  [Y] APDS     | apdsTask() in i2csensor_apds9960.cpp");
   enabled_count++;
 #else
   broadcastOutput("  [N] APDS     | Disabled (~6-10KB flash, ~4KB RAM saved)");
@@ -2704,7 +2756,7 @@ void printMemoryReport() {
 #endif
 
 #if ENABLE_GPS_SENSOR
-  broadcastOutput("  [Y] GPS      | gpsTask() in Sensor_GPS_PA1010D.cpp");
+  broadcastOutput("  [Y] GPS      | gpsTask() in i2csensor_pa1010d.cpp");
   enabled_count++;
 #else
   broadcastOutput("  [N] GPS      | Disabled (~5-8KB flash, ~4KB RAM saved)");

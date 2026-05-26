@@ -54,7 +54,7 @@ struct Settings {
       imuDevicePollMs(200),
       gpsDevicePollMs(200),
       apdsDevicePollMs(200),
-      gamepadDevicePollMs(90),
+      inputDevicePollMs(90),
       fmRadioDevicePollMs(250),
       imuPollingMs(200),
       imuEWMAFactor(0.1f),
@@ -136,7 +136,8 @@ struct Settings {
       debugImu(false),
       debugThermal(false),
       debugTof(false),
-      debugGamepad(false),
+      debugInput(false),
+      debugAnoEncoder(false),
       debugApds(false),
       debugPresence(false),
       debugThermalLifecycle(false),
@@ -145,9 +146,12 @@ struct Settings {
       debugTofLifecycle(false),
       debugTofPolling(false),
       debugTofValues(false),
-      debugGamepadLifecycle(false),
-      debugGamepadPolling(false),
-      debugGamepadValues(false),
+      debugInputLifecycle(false),
+      debugInputPolling(false),
+      debugInputValues(false),
+      debugAnoEncoderLifecycle(false),
+      debugAnoEncoderPolling(false),
+      debugAnoEncoderValues(false),
       debugImuLifecycle(false),
       debugImuPolling(false),
       debugImuValues(false),
@@ -221,7 +225,7 @@ struct Settings {
       bondStreamTof(false),
       bondStreamImu(false),
       bondStreamGps(false),
-      bondStreamGamepad(false),
+      bondStreamInput(false),
       bondStreamFmradio(false),
       bondStreamRtc(false),
       bondStreamPresence(false),
@@ -230,11 +234,12 @@ struct Settings {
       automationsEnabled(true),
 #endif
       i2cBusEnabled(true),
-      i2c2BusEnabled(false),
+      i2c2BusEnabled(I2C2_BUS_ENABLED_DEFAULT),  // auto-on for boards with valid I2C2 pins
       // Per-device bus assignments — all default to bus 0 (primary), so an
       // existing single-bus config is unchanged. Bumped to bus 1 only when
       // the user explicitly moves a device to the secondary STEMMA QT port.
-      oledBus(0), gamepadBus(0), gpsBus(0), rtcBus(0), fmRadioBus(0),
+      oledBus(OLED_BUS_DEFAULT),  // FeatherS3[D] → 1 (LDO2-gated rail); other boards → 0
+      inputBus(0), gpsBus(0), rtcBus(0), fmRadioBus(0),
       presenceBus(0), imuBus(0), thermalBus(0), tofBus(0), apdsBus(0), servoBus(0),
       ledBrightness(100),
       ledStartupEnabled(true),
@@ -249,9 +254,14 @@ struct Settings {
       oledBootDuration(2000),
       oledUpdateInterval(125),
       oledBrightness(255),
+      oledFlipped(true),          // True keeps the historical hardcoded setRotation(2) behavior
       oledThermalScale(2.5f),
       oledThermalColorMode("3level"),
-      gamepadAutoStart(false),
+      inputAutoStart(false),
+      anoEncoderI2cAddr(0x49),
+      anoEncoderInvert(false),
+      anoEncoderSwapUpDown(true),     // Adafruit ANO breakout's silkscreen UP/DOWN map inverted by default
+      anoEncoderSwapLeftRight(true),  // ditto LEFT/RIGHT — matches the typical assembled orientation
       thermalAutoStart(false),
       tofAutoStart(false),
       imuAutoStart(false),
@@ -319,6 +329,7 @@ struct Settings {
       powerAutoMode(false),
       powerBatteryThreshold(20),
       powerDisplayDimLevel(30),
+      powerTransitionCooldownMs(5000),  // 5s anti-flap guard on sleep entry; 0 = disabled
       srAutoStart(false),
       srModelSource(0),
       srCommandTimeout(6000),
@@ -347,7 +358,7 @@ struct Settings {
       mqttPublishGPS(false),
       mqttPublishAPDS(false),
       mqttPublishRTC(false),
-      mqttPublishGamepad(false),
+      mqttPublishInput(false),
       crashCount(0),
       lastResetReason(0)
 #if ENABLE_ONDEVICE_LLM
@@ -420,7 +431,7 @@ struct Settings {
   int imuDevicePollMs;
   int gpsDevicePollMs;
   int apdsDevicePollMs;
-  int gamepadDevicePollMs;
+  int inputDevicePollMs;
   int fmRadioDevicePollMs;
   // IMU UI settings (client-side visualization)
   int imuPollingMs;
@@ -506,7 +517,8 @@ struct Settings {
   bool debugImu;        // IMU (BNO055)
   bool debugThermal;    // Thermal (MLX90640)
   bool debugTof;        // ToF (VL53L4CX)
-  bool debugGamepad;    // Gamepad (Seesaw)
+  bool debugInput;       // Input abstraction layer (HAL_Input + OLED dispatch)
+  bool debugAnoEncoder;  // ANO Rotary Encoder driver internals
   bool debugApds;       // APDS (APDS9960)
   bool debugPresence;   // Presence (STHS34PF80)
   // Per-sensor frame/data debug flags (granular timing and data processing)
@@ -520,9 +532,12 @@ struct Settings {
   bool debugTofLifecycle;
   bool debugTofPolling;
   bool debugTofValues;
-  bool debugGamepadLifecycle;
-  bool debugGamepadPolling;
-  bool debugGamepadValues;
+  bool debugInputLifecycle;
+  bool debugInputPolling;
+  bool debugInputValues;
+  bool debugAnoEncoderLifecycle;
+  bool debugAnoEncoderPolling;
+  bool debugAnoEncoderValues;
   bool debugImuLifecycle;
   bool debugImuPolling;
   bool debugImuValues;
@@ -694,7 +709,7 @@ struct Settings {
   bool bondStreamTof;                  // Auto-stream ToF data to bonded peer
   bool bondStreamImu;                  // Auto-stream IMU data to bonded peer
   bool bondStreamGps;                  // Auto-stream GPS data to bonded peer
-  bool bondStreamGamepad;              // Auto-stream gamepad data to bonded peer
+  bool bondStreamInput;              // Auto-stream input device (gamepad/ANO) data to bonded peer
   bool bondStreamFmradio;              // Auto-stream FM radio data to bonded peer
   bool bondStreamRtc;                  // Auto-stream RTC data to bonded peer
   bool bondStreamPresence;             // Auto-stream presence sensor data to bonded peer
@@ -731,7 +746,7 @@ struct Settings {
   // type — the registry writes through a void* assuming 4-byte storage, so
   // a uint8_t field would corrupt adjacent bytes.
   int oledBus;              // SSD1306 display (HAL_Display / OLED_Utils)
-  int gamepadBus;           // Adafruit Seesaw I2C gamepad
+  int inputBus;             // Input device (gamepad or ANO encoder — only one compiled in)
   int gpsBus;               // PA1010D mini GPS
   int rtcBus;               // DS3231 precision RTC
   int fmRadioBus;           // RDA5807 FM radio
@@ -756,10 +771,15 @@ struct Settings {
   int oledBootDuration;         // Milliseconds to show boot mode before switching to default
   int oledUpdateInterval;       // Update interval in milliseconds (8 Hz = 125ms)
   int oledBrightness;           // Display brightness/contrast 0-255
+  bool oledFlipped;             // Rotate display 180° (true → setRotation(2), false → setRotation(0))
   float oledThermalScale;       // Scaling factor for thermal image (2.5 = 80x60)
   String oledThermalColorMode;  // Visualization style: 3level, 2level, gradient
   // Sensor Auto-Start settings (all I2C sensors)
-  bool gamepadAutoStart;        // Auto-start gamepad after boot completes
+  bool inputAutoStart;          // Auto-start the input device (gamepad or ANO) after boot
+  int  anoEncoderI2cAddr;       // ANO I2C address override (default 0x49 = I2C_ADDR_ANO_ENCODER)
+  bool anoEncoderInvert;        // Flip rotation direction if encoder is mounted backwards
+  bool anoEncoderSwapUpDown;    // Swap UP/DOWN button bits (for vertically-mirrored mounts)
+  bool anoEncoderSwapLeftRight; // Swap LEFT/RIGHT button bits (for horizontally-mirrored mounts)
   bool thermalAutoStart;        // Auto-start thermal camera after boot
   bool tofAutoStart;            // Auto-start ToF distance sensor after boot
   bool imuAutoStart;            // Auto-start IMU after boot
@@ -859,6 +879,7 @@ struct Settings {
   bool powerAutoMode;           // Auto-adjust power mode based on battery level
   uint8_t powerBatteryThreshold; // Switch to power saver below this battery % (default: 20)
   uint8_t powerDisplayDimLevel; // Brightness % in power saver modes (0-100, default: 30)
+  uint32_t powerTransitionCooldownMs; // Anti-flap cooldown between sleep entries (ms); 0 disables
   // ESP-SR Speech Recognition settings
   bool srAutoStart;             // Auto-start SR at boot (default: false)
   int srModelSource;  // 0=partition (default), 1=SD card, 2=LittleFS
@@ -890,7 +911,7 @@ struct Settings {
   bool mqttPublishGPS;          // Include GPS location data (default: false)
   bool mqttPublishAPDS;         // Include gesture/proximity data (default: false)
   bool mqttPublishRTC;          // Include RTC time data (default: false)
-  bool mqttPublishGamepad;      // Include gamepad input data (default: false)
+  bool mqttPublishInput;      // Include input device data (default: false)
 
   // Crash / reset tracking (persisted from RTC memory on next healthy boot)
   uint32_t crashCount;          // Accumulated abnormal resets (WDT, panic, brownout)

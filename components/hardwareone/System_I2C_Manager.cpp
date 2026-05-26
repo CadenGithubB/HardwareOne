@@ -184,6 +184,22 @@ void I2CDeviceManager::initBus(uint8_t busIdx, int sdaPin, int sclPin, uint32_t 
   TwoWire* wire = wires[busIdx];
   if (!wire) return;
 
+  // Power-gating: bus 1 on some boards (FeatherS3[D]) is powered through a
+  // switchable LDO whose enable line is exposed as I2C2_POWER_PIN. Drive it
+  // HIGH here, independent of NeoPixel state — previously this was a hidden
+  // dependency where the bus only worked if the NeoPixel driver had run
+  // first to assert the same physical pin. Now bus 1 owns the assertion
+  // for the I2C2 role and the NeoPixel still asserts it for the LED role;
+  // either alone keeps the rail up, both is idempotent.
+  if (busIdx == 1) {
+#if defined(I2C2_POWER_PIN) && (I2C2_POWER_PIN >= 0)
+    pinMode(I2C2_POWER_PIN, OUTPUT);
+    digitalWrite(I2C2_POWER_PIN, HIGH);
+    delay(5);  // brief settle so the LDO is stable before we begin clocking
+    INFO_I2CF("I2C2 power pin GPIO%d asserted HIGH (LDO2 enable)", (int)I2C2_POWER_PIN);
+#endif
+  }
+
   wire->begin(sdaPin, sclPin);
   wire->setClock(hz);
   // 100ms TwoWire-level timeout — well under CONFIG_ESP_INT_WDT_TIMEOUT_MS

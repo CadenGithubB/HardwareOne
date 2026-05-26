@@ -116,7 +116,7 @@ struct DebugFlagMask {
 #define DEBUG_IMU             ((DebugFlagMask)0x400000000ULL)  // Bit 34 - IMU (BNO055)
 #define DEBUG_THERMAL         ((DebugFlagMask)0x800000000ULL)  // Bit 35 - Thermal (MLX90640)
 #define DEBUG_TOF             ((DebugFlagMask)0x1000000000ULL) // Bit 36 - ToF (VL53L4CX)
-#define DEBUG_GAMEPAD         ((DebugFlagMask)0x2000000000ULL) // Bit 37 - Gamepad (Seesaw)
+#define DEBUG_INPUT         ((DebugFlagMask)0x2000000000ULL) // Bit 37 - Gamepad (Seesaw)
 #define DEBUG_APDS            ((DebugFlagMask)0x4000000000ULL) // Bit 38 - APDS (APDS9960)
 #define DEBUG_PRESENCE        ((DebugFlagMask)0x8000000000ULL) // Bit 39 - Presence (STHS34PF80)
 
@@ -124,8 +124,8 @@ struct DebugFlagMask {
 #define DEBUG_THERMAL_POLLING   ((DebugFlagMask)0x10000000000ULL)  // Bit 40 - Thermal frame timing, capture, FPS
 #define DEBUG_THERMAL_VALUES    ((DebugFlagMask)0x20000000000ULL)  // Bit 41 - Thermal data interpolation, processing
 #define DEBUG_TOF_POLLING       ((DebugFlagMask)0x40000000000ULL)  // Bit 42 - ToF frame capture, object detection
-#define DEBUG_GAMEPAD_POLLING   ((DebugFlagMask)0x80000000000ULL)  // Bit 43 - Gamepad frame timing, connection
-#define DEBUG_GAMEPAD_VALUES    ((DebugFlagMask)0x100000000000ULL) // Bit 44 - Gamepad button press/release events
+#define DEBUG_INPUT_POLLING   ((DebugFlagMask)0x80000000000ULL)  // Bit 43 - Gamepad frame timing, connection
+#define DEBUG_INPUT_VALUES    ((DebugFlagMask)0x100000000000ULL) // Bit 44 - Gamepad button press/release events
 #define DEBUG_IMU_POLLING       ((DebugFlagMask)0x200000000000ULL) // Bit 45 - IMU frame timing, cache operations
 #define DEBUG_IMU_VALUES        ((DebugFlagMask)0x400000000000ULL) // Bit 46 - IMU data updates
 #define DEBUG_APDS_POLLING      ((DebugFlagMask)0x800000000000ULL) // Bit 47 - APDS frame timing, connection
@@ -224,7 +224,7 @@ struct DebugFlagMask {
 #define DEBUG_THERMAL_LIFECYCLE  DEBUG_BIT(91)
 #define DEBUG_TOF_LIFECYCLE      DEBUG_BIT(92)
 #define DEBUG_TOF_VALUES         DEBUG_BIT(93)
-#define DEBUG_GAMEPAD_LIFECYCLE  DEBUG_BIT(94)
+#define DEBUG_INPUT_LIFECYCLE  DEBUG_BIT(94)
 #define DEBUG_IMU_LIFECYCLE      DEBUG_BIT(95)
 #define DEBUG_APDS_LIFECYCLE     DEBUG_BIT(96)
 #define DEBUG_APDS_VALUES        DEBUG_BIT(97)
@@ -243,6 +243,15 @@ struct DebugFlagMask {
 #define DEBUG_PRESENCE_LIFECYCLE DEBUG_BIT(110)
 #define DEBUG_PRESENCE_POLLING   DEBUG_BIT(111)
 #define DEBUG_PRESENCE_VALUES    DEBUG_BIT(112)
+
+// Bits 113-116: ANO Rotary Encoder driver. Separate from DEBUG_INPUT* (which
+// gates the shared input-abstraction layer) and from the seesaw gamepad's
+// flags — toggling DEBUG_ANO_ENCODER only affects the ANO driver's internal
+// logs (init, polling, chord state machine, axis toggle).
+#define DEBUG_ANO_ENCODER           DEBUG_BIT(113)
+#define DEBUG_ANO_ENCODER_LIFECYCLE DEBUG_BIT(114)
+#define DEBUG_ANO_ENCODER_POLLING   DEBUG_BIT(115)
+#define DEBUG_ANO_ENCODER_VALUES    DEBUG_BIT(116)
 
 // Debug sub-flags structure for granular control
 // The parent flags (DEBUG_AUTH, DEBUG_HTTP, etc.) are set when ANY child is enabled
@@ -550,9 +559,12 @@ inline uint8_t getLogLevel() { return gDebugVerbose ? LOG_LEVEL_DEBUG : DEBUG_MA
 #define DEBUG_TOF_LIFECYCLEF(fmt, ...)     DEBUGF_QUEUE_DEBUG(DEBUG_TOF        | DEBUG_TOF_LIFECYCLE,      fmt, ##__VA_ARGS__)
 #define DEBUG_TOF_POLLINGF(fmt, ...)       DEBUGF_QUEUE_DEBUG(DEBUG_TOF        | DEBUG_TOF_POLLING,        fmt, ##__VA_ARGS__)
 #define DEBUG_TOF_VALUESF(fmt, ...)        DEBUGF_QUEUE_DEBUG(DEBUG_TOF        | DEBUG_TOF_VALUES,         fmt, ##__VA_ARGS__)
-#define DEBUG_GAMEPAD_LIFECYCLEF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_GAMEPAD    | DEBUG_GAMEPAD_LIFECYCLE,  fmt, ##__VA_ARGS__)
-#define DEBUG_GAMEPAD_POLLINGF(fmt, ...)   DEBUGF_QUEUE_DEBUG(DEBUG_GAMEPAD    | DEBUG_GAMEPAD_POLLING,    fmt, ##__VA_ARGS__)
-#define DEBUG_GAMEPAD_VALUESF(fmt, ...)    DEBUGF_QUEUE_DEBUG(DEBUG_GAMEPAD    | DEBUG_GAMEPAD_VALUES,     fmt, ##__VA_ARGS__)
+#define DEBUG_INPUT_LIFECYCLEF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_INPUT    | DEBUG_INPUT_LIFECYCLE,  fmt, ##__VA_ARGS__)
+#define DEBUG_INPUT_POLLINGF(fmt, ...)   DEBUGF_QUEUE_DEBUG(DEBUG_INPUT    | DEBUG_INPUT_POLLING,    fmt, ##__VA_ARGS__)
+#define DEBUG_INPUT_VALUESF(fmt, ...)    DEBUGF_QUEUE_DEBUG(DEBUG_INPUT    | DEBUG_INPUT_VALUES,     fmt, ##__VA_ARGS__)
+#define DEBUG_ANO_ENCODER_LIFECYCLEF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_ANO_ENCODER | DEBUG_ANO_ENCODER_LIFECYCLE, fmt, ##__VA_ARGS__)
+#define DEBUG_ANO_ENCODER_POLLINGF(fmt, ...)   DEBUGF_QUEUE_DEBUG(DEBUG_ANO_ENCODER | DEBUG_ANO_ENCODER_POLLING,   fmt, ##__VA_ARGS__)
+#define DEBUG_ANO_ENCODER_VALUESF(fmt, ...)    DEBUGF_QUEUE_DEBUG(DEBUG_ANO_ENCODER | DEBUG_ANO_ENCODER_VALUES,    fmt, ##__VA_ARGS__)
 #define DEBUG_IMU_LIFECYCLEF(fmt, ...)     DEBUGF_QUEUE_DEBUG(DEBUG_IMU        | DEBUG_IMU_LIFECYCLE,      fmt, ##__VA_ARGS__)
 #define DEBUG_IMU_POLLINGF(fmt, ...)       DEBUGF_QUEUE_DEBUG(DEBUG_IMU        | DEBUG_IMU_POLLING,        fmt, ##__VA_ARGS__)
 #define DEBUG_IMU_VALUESF(fmt, ...)        DEBUGF_QUEUE_DEBUG(DEBUG_IMU        | DEBUG_IMU_VALUES,         fmt, ##__VA_ARGS__)
@@ -614,7 +626,8 @@ inline uint8_t getLogLevel() { return gDebugVerbose ? LOG_LEVEL_DEBUG : DEBUG_MA
 #define DEBUG_IMUF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_IMU, fmt, ##__VA_ARGS__)
 #define DEBUG_THERMALF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_THERMAL, fmt, ##__VA_ARGS__)
 #define DEBUG_TOFF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_TOF, fmt, ##__VA_ARGS__)
-#define DEBUG_GAMEPADF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_GAMEPAD, fmt, ##__VA_ARGS__)
+#define DEBUG_INPUTF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_INPUT, fmt, ##__VA_ARGS__)
+#define DEBUG_ANO_ENCODERF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_ANO_ENCODER, fmt, ##__VA_ARGS__)
 #define DEBUG_APDSF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_APDS, fmt, ##__VA_ARGS__)
 #define DEBUG_PRESENCEF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_PRESENCE, fmt, ##__VA_ARGS__)
 #define DEBUG_DISPLAYF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_DISPLAY, fmt, ##__VA_ARGS__)
@@ -647,7 +660,8 @@ inline uint8_t getLogLevel() { return gDebugVerbose ? LOG_LEVEL_DEBUG : DEBUG_MA
 #define ERROR_THERMALF(fmt, ...)  DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][THERMAL] "  fmt, ##__VA_ARGS__)
 #define ERROR_TOFF(fmt, ...)      DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][TOF] "      fmt, ##__VA_ARGS__)
 #define ERROR_IMUF(fmt, ...)      DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][IMU] "      fmt, ##__VA_ARGS__)
-#define ERROR_GAMEPADF(fmt, ...)  DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][GAMEPAD] "  fmt, ##__VA_ARGS__)
+#define ERROR_INPUTF(fmt, ...)  DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][INPUT] "  fmt, ##__VA_ARGS__)
+#define ERROR_ANO_ENCODERF(fmt, ...)  DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][ANO] "  fmt, ##__VA_ARGS__)
 #define ERROR_APDSF(fmt, ...)     DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][APDS] "     fmt, ##__VA_ARGS__)
 #define ERROR_PRESENCEF(fmt, ...) DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][PRESENCE] " fmt, ##__VA_ARGS__)
 #define ERROR_GPSF(fmt, ...)      DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][GPS] "      fmt, ##__VA_ARGS__)
@@ -673,7 +687,8 @@ inline uint8_t getLogLevel() { return gDebugVerbose ? LOG_LEVEL_DEBUG : DEBUG_MA
 #define WARN_MEMORYF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(0xFFFFFFFF, "[WARN][MEM] " fmt, ##__VA_ARGS__); } while (0)
 // Per-sensor WARN macros — added during DEBUG_SENSORS umbrella removal.
 // Only added for subsystems that actually use WARN_SENSORSF today.
-#define WARN_GAMEPADF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(0xFFFFFFFF, "[WARN][GAMEPAD] " fmt, ##__VA_ARGS__); } while (0)
+#define WARN_INPUTF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(0xFFFFFFFF, "[WARN][INPUT] " fmt, ##__VA_ARGS__); } while (0)
+#define WARN_ANO_ENCODERF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(0xFFFFFFFF, "[WARN][ANO] " fmt, ##__VA_ARGS__); } while (0)
 #define WARN_MAPSF(fmt, ...)    do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(0xFFFFFFFF, "[WARN][MAPS] "    fmt, ##__VA_ARGS__); } while (0)
 #define WARN_IMUF(fmt, ...)     do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(0xFFFFFFFF, "[WARN][IMU] "     fmt, ##__VA_ARGS__); } while (0)
 #define WARN_MQTTF(fmt, ...)    do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(0xFFFFFFFF, "[WARN][MQTT] "    fmt, ##__VA_ARGS__); } while (0)
@@ -688,7 +703,8 @@ inline uint8_t getLogLevel() { return gDebugVerbose ? LOG_LEVEL_DEBUG : DEBUG_MA
 #define INFO_THERMALF(fmt, ...)  do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_THERMAL,    "[INFO][THERMAL] "  fmt, ##__VA_ARGS__); } while (0)
 #define INFO_TOFF(fmt, ...)      do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_TOF,        "[INFO][TOF] "      fmt, ##__VA_ARGS__); } while (0)
 #define INFO_IMUF(fmt, ...)      do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_IMU,        "[INFO][IMU] "      fmt, ##__VA_ARGS__); } while (0)
-#define INFO_GAMEPADF(fmt, ...)  do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_GAMEPAD,    "[INFO][GAMEPAD] "  fmt, ##__VA_ARGS__); } while (0)
+#define INFO_INPUTF(fmt, ...)  do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_INPUT,    "[INFO][INPUT] "  fmt, ##__VA_ARGS__); } while (0)
+#define INFO_ANO_ENCODERF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_ANO_ENCODER, "[INFO][ANO] " fmt, ##__VA_ARGS__); } while (0)
 #define INFO_APDSF(fmt, ...)     do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_APDS,       "[INFO][APDS] "     fmt, ##__VA_ARGS__); } while (0)
 #define INFO_PRESENCEF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_PRESENCE,   "[INFO][PRESENCE] " fmt, ##__VA_ARGS__); } while (0)
 #define INFO_GPSF(fmt, ...)      do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_GPS,        "[INFO][GPS] "      fmt, ##__VA_ARGS__); } while (0)
@@ -712,9 +728,12 @@ inline uint8_t getLogLevel() { return gDebugVerbose ? LOG_LEVEL_DEBUG : DEBUG_MA
 #define INFO_IMU_LIFECYCLEF(fmt, ...)      do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_IMU        | DEBUG_IMU_LIFECYCLE,      "[INFO][IMU_LIFE] "      fmt, ##__VA_ARGS__); } while (0)
 #define INFO_IMU_POLLINGF(fmt, ...)        do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_IMU        | DEBUG_IMU_POLLING,        "[INFO][IMU_POLL] "      fmt, ##__VA_ARGS__); } while (0)
 #define INFO_IMU_VALUESF(fmt, ...)         do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_IMU        | DEBUG_IMU_VALUES,         "[INFO][IMU_VAL] "       fmt, ##__VA_ARGS__); } while (0)
-#define INFO_GAMEPAD_LIFECYCLEF(fmt, ...)  do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_GAMEPAD    | DEBUG_GAMEPAD_LIFECYCLE,  "[INFO][GAMEPAD_LIFE] "  fmt, ##__VA_ARGS__); } while (0)
-#define INFO_GAMEPAD_POLLINGF(fmt, ...)    do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_GAMEPAD    | DEBUG_GAMEPAD_POLLING,    "[INFO][GAMEPAD_POLL] "  fmt, ##__VA_ARGS__); } while (0)
-#define INFO_GAMEPAD_VALUESF(fmt, ...)     do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_GAMEPAD    | DEBUG_GAMEPAD_VALUES,     "[INFO][GAMEPAD_VAL] "   fmt, ##__VA_ARGS__); } while (0)
+#define INFO_INPUT_LIFECYCLEF(fmt, ...)  do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_INPUT    | DEBUG_INPUT_LIFECYCLE,  "[INFO][INPUT_LIFE] "  fmt, ##__VA_ARGS__); } while (0)
+#define INFO_INPUT_POLLINGF(fmt, ...)    do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_INPUT    | DEBUG_INPUT_POLLING,    "[INFO][INPUT_POLL] "  fmt, ##__VA_ARGS__); } while (0)
+#define INFO_INPUT_VALUESF(fmt, ...)     do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_INPUT    | DEBUG_INPUT_VALUES,     "[INFO][INPUT_VAL] "   fmt, ##__VA_ARGS__); } while (0)
+#define INFO_ANO_ENCODER_LIFECYCLEF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_ANO_ENCODER | DEBUG_ANO_ENCODER_LIFECYCLE, "[INFO][ANO_LIFE] " fmt, ##__VA_ARGS__); } while (0)
+#define INFO_ANO_ENCODER_POLLINGF(fmt, ...)   do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_ANO_ENCODER | DEBUG_ANO_ENCODER_POLLING,   "[INFO][ANO_POLL] " fmt, ##__VA_ARGS__); } while (0)
+#define INFO_ANO_ENCODER_VALUESF(fmt, ...)    do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_ANO_ENCODER | DEBUG_ANO_ENCODER_VALUES,    "[INFO][ANO_VAL] "  fmt, ##__VA_ARGS__); } while (0)
 #define INFO_APDS_LIFECYCLEF(fmt, ...)     do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_APDS       | DEBUG_APDS_LIFECYCLE,     "[INFO][APDS_LIFE] "     fmt, ##__VA_ARGS__); } while (0)
 #define INFO_APDS_POLLINGF(fmt, ...)       do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_APDS       | DEBUG_APDS_POLLING,       "[INFO][APDS_POLL] "     fmt, ##__VA_ARGS__); } while (0)
 #define INFO_APDS_VALUESF(fmt, ...)        do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_APDS       | DEBUG_APDS_VALUES,        "[INFO][APDS_VAL] "      fmt, ##__VA_ARGS__); } while (0)
@@ -863,7 +882,7 @@ const char* cmd_debugrtc(const String& argsInput);
 const char* cmd_debugimu(const String& argsInput);
 const char* cmd_debugthermal(const String& argsInput);
 const char* cmd_debugtof(const String& argsInput);
-const char* cmd_debuggamepad(const String& argsInput);
+const char* cmd_debuginput(const String& argsInput);
 const char* cmd_debugapds(const String& argsInput);
 const char* cmd_debugpresence(const String& argsInput);
 const char* cmd_debugverbose(const String& argsInput);

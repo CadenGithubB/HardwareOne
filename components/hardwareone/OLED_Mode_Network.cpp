@@ -409,7 +409,7 @@ void networkMenuBack() {
 static bool networkRegisteredInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   // Handle WiFi keyboard input (SSID/password entry)
   if (wifiAddingNetwork && (wifiEnteringSSID || wifiEnteringPassword)) {
-    // Keyboard is handled by centralized keyboard handler in processGamepadMenuInput()
+    // Keyboard is handled by centralized keyboard handler in processOLEDInput()
     // Just check for completion/cancellation here
     if (oledKeyboardIsCompleted()) {
       const char* input = oledKeyboardGetText();
@@ -446,13 +446,21 @@ static bool networkRegisteredInputHandler(int deltaX, int deltaY, uint32_t newly
   if (networkShowingWiFiSubmenu) {
     if (oledScrollHandleNav(&wifiSubmenuScroll)) return true;
   } else if (!gNetworkShowingStatus) {
-    // Main network menu nav
+    // Main network menu nav — read ONLY .up/.down. Older revisions had
+    // `if (gNavEvents.up || gNavEvents.left) networkMenuUp()` which was a
+    // legacy joystick-era pattern (treat horizontal deflection as vertical
+    // scroll). It collided with the unified button mapping: on the ANO
+    // encoder LEFT is a discrete button bound to INPUT_BUTTON_B (back), so
+    // a LEFT press would set gNavEvents.left → scroll up → early-return
+    // → the B-back check at the bottom of this fn never ran. Settings,
+    // Speech, UnifiedMenu and other migrated handlers all use plain
+    // up/down only; this brings Network in line with that standard.
     extern NavEvents gNavEvents;
-    if (gNavEvents.up || gNavEvents.left) {
+    if (gNavEvents.up) {
       networkMenuUp();
       return true;
     }
-    if (gNavEvents.down || gNavEvents.right) {
+    if (gNavEvents.down) {
       networkMenuDown();
       return true;
     }
@@ -1019,7 +1027,7 @@ void displayRemoteSensors() {
     PSRAM_JSON_DOC(doc);
     if (deserializeJson(doc, entry->jsonData) == DeserializationError::Ok) {
       switch (entry->sensorType) {
-        case REMOTE_SENSOR_GAMEPAD: {
+        case REMOTE_SENSOR_INPUT: {
           int x = doc["x"] | 512;
           int y = doc["y"] | 512;
           uint32_t buttons = doc["buttons"] | 0xFFFFFFFF;
@@ -1175,20 +1183,23 @@ static bool remoteSensorsAvailable(String* outReason) {
   return true;
 }
 
-static bool remoteSensorsInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
+static bool remoteSensorsInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed) {
   // Count valid entries for navigation
   int validCount = 0;
   for (int i = 0; i < MAX_REMOTE_DEVICES * MAX_SENSORS_PER_DEVICE; i++) {
     if (gRemoteSensorCache[i].valid) validCount++;
   }
   if (validCount == 0) return false;
-  
-  // Left/Up = previous, Right/Down = next
-  if (deltaY > JOYSTICK_DEADZONE || deltaX > JOYSTICK_DEADZONE) {
+
+  // Canonical-signal nav: read .up/.down only (matches migrated standard).
+  // No .left/.right conflation — those are reserved for the LEFT/RIGHT
+  // logical buttons (B/SELECT) so they can still reach INPUT_CHECK below.
+  extern NavEvents gNavEvents;
+  if (gNavEvents.down) {
     remoteSensorScrollIndex++;
     if (remoteSensorScrollIndex >= validCount) remoteSensorScrollIndex = 0;
     return true;
-  } else if (deltaY < -JOYSTICK_DEADZONE || deltaX < -JOYSTICK_DEADZONE) {
+  } else if (gNavEvents.up) {
     remoteSensorScrollIndex--;
     if (remoteSensorScrollIndex < 0) remoteSensorScrollIndex = validCount - 1;
     return true;

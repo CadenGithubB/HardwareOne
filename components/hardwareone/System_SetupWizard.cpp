@@ -21,7 +21,7 @@
 #include "HAL_Display.h"
 #include "HAL_Input.h"
 extern bool oledConnected;
-extern GamepadCache gGamepadCache;
+extern InputCache gInputCache;
 // OLED page handlers for ESP-NOW and MQTT (defined in OLED_SetupWizard.cpp)
 void handleOLEDESPNowPage(SetupWizardResult& result, bool& running);
 void handleOLEDMQTTPage(SetupWizardResult& result, bool& running);
@@ -257,8 +257,8 @@ char* getWizardDeviceNameBuf() { return wizardDeviceName; }
    const FeatureEntry* oledFeature = getFeatureById("oled");
    if (oledFeature && isFeatureCompiled(oledFeature)) infraKB += oledFeature->heapCostKB;
  
-   const FeatureEntry* gamepadFeature = getFeatureById("gamepad");
-   if (gamepadFeature && isFeatureCompiled(gamepadFeature)) infraKB += gamepadFeature->heapCostKB;
+   const FeatureEntry* inputFeature = getFeatureById("input");
+   if (inputFeature && isFeatureCompiled(inputFeature)) infraKB += inputFeature->heapCostKB;
  #endif
    return infraKB;
  }
@@ -1404,9 +1404,9 @@ SetupWizardResult runSetupWizard() {
       uint32_t buttons = lastButtons;
       bool haveButtons = false;
       {
-        SensorCacheGuard g(gGamepadCache.mutex, pdMS_TO_TICKS(10), "wizard.buttonRead");
-        if (g.held && gGamepadCache.gamepadDataValid) {
-          buttons = gGamepadCache.gamepadButtons;
+        SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(10), "wizard.buttonRead");
+        if (g.held && gInputCache.dataValid) {
+          buttons = gInputCache.buttons;
           haveButtons = true;
         }
       }

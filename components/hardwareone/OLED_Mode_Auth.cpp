@@ -19,7 +19,7 @@
 
 // External OLED display pointer (provided via HAL_Display.h #define oledDisplay gDisplay)
 extern void resetOLEDMenu();
-extern void tryAutoStartGamepadForMenu();
+extern void tryAutoStartInputForMenu();
 
 // ============================================================================
 // Login Mode
@@ -133,7 +133,7 @@ static void displayLoginMode() {
 
 // Login input handler
 static bool handleLoginModeInput(int deltaX, int deltaY, uint32_t newlyPressed) {
-  // Keyboard input is now handled centrally in processGamepadMenuInput() before this is called.
+  // Keyboard input is now handled centrally in processOLEDInput() before this is called.
   // We only need to check for keyboard completion/cancellation to update our state.
   if (loginKeyboardActive) {
     if (oledKeyboardIsCompleted()) {
@@ -195,7 +195,7 @@ static bool handleLoginModeInput(int deltaX, int deltaY, uint32_t newlyPressed) 
           // Go to menu after successful login (no stack push — login screen should not be in history)
           requestOLEDMode(OLED_MENU, "auth.login.success", false);
           resetOLEDMenu();
-          tryAutoStartGamepadForMenu();
+          tryAutoStartInputForMenu();
           
           return true;
         } else {

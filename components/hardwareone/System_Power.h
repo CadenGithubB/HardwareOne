@@ -27,6 +27,24 @@ uint8_t getPowerModeDisplayBrightness(uint8_t mode);
 void applyPowerMode(uint8_t mode);
 void checkAutoPowerMode();
 
+// ----------------------------------------------------------------------------
+// Sleep transition cooldown ("anti-flap")
+//
+// Sleep entry is expensive and not idempotent — half-initialised peripherals,
+// WiFi/BLE reconnect cycles, and a bouncing trigger can chew battery in
+// seconds. powerSleepTransitionAllowed returns true if the cooldown
+// (gSettings.powerTransitionCooldownMs) has elapsed since the last
+// successful entry call, OR if the cooldown is disabled (0). Pass a
+// non-null outRemainingMs to learn how long the caller must still wait.
+//
+// powerSleepTransitionMark stamps "now" as the last entry time. The contract
+// is: callers check Allowed() first, return early if false, otherwise call
+// Mark() right before invoking esp_light_sleep_start / esp_deep_sleep_start.
+// Light-sleep wake doesn't re-stamp — the cooldown clock keeps running so a
+// rapid wake → sleep → wake cycle is suppressed.
+bool powerSleepTransitionAllowed(unsigned long* outRemainingMs = nullptr);
+void powerSleepTransitionMark();
+
 // ============================================================================
 // Command Registry
 // ============================================================================

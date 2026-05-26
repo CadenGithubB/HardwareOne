@@ -33,9 +33,9 @@ struct SensorCacheSnapshot {
   bool tofValid;
   bool gImuEnabled;
   bool gImuConnected;
-  bool gGamepadEnabled;
-  bool gGamepadConnected;
-  bool gamepadValid;
+  bool gInputEnabled;
+  bool gInputConnected;
+  bool inputValid;
   bool gApdsColorEnabled;
   bool gApdsProximityEnabled;
   bool gApdsGestureEnabled;
@@ -59,8 +59,8 @@ struct SensorCacheSnapshot {
   float gx, gy, gz;  // gyro
   float imuTemp;     // IMU internal temperature
   // gamepad
-  uint32_t gamepadButtons;
-  int gamepadX, gamepadY;
+  uint32_t buttons;
+  int joyX, joyY;
   // apds
   uint16_t apdsRed, apdsGreen, apdsBlue, apdsClear;
   uint8_t apdsProximity;

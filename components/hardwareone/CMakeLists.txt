@@ -11,6 +11,7 @@ set(HW_CFG_NETWORK_FEATURE_LEVEL 0)
 set(HW_CFG_WEB_FEATURE_LEVEL 0)
 set(HW_CFG_I2C_FEATURE_LEVEL 0)
 set(HW_CFG_DISPLAY_TYPE 0)
+set(HW_CFG_INPUT_DEVICE_TYPE 1)  # 1 = SEESAW_GAMEPAD (default); 2 = ANO_ENCODER
 set(HW_CFG_ENABLE_MQTT 0)
 set(HW_CFG_ENABLE_HTTPS 0)
 set(HW_CFG_ENABLE_LLM 0)
@@ -46,6 +47,11 @@ if(EXISTS "${hw_cfg_file}")
     string(REGEX MATCH "#define[ \t]+DISPLAY_TYPE[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
     if(CMAKE_MATCH_1)
         set(HW_CFG_DISPLAY_TYPE "${CMAKE_MATCH_1}")
+    endif()
+
+    string(REGEX MATCH "#define[ \t]+INPUT_DEVICE_TYPE[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
+    if(CMAKE_MATCH_1)
+        set(HW_CFG_INPUT_DEVICE_TYPE "${CMAKE_MATCH_1}")
     endif()
 
     string(REGEX MATCH "#define[ \t]+ENABLE_MQTT[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
@@ -242,7 +248,6 @@ if(HW_CFG_I2C_FEATURE_LEVEL GREATER 0)
     list(APPEND hardwareone_srcs
         i2csensor_apds9960.cpp
         i2csensor_pa1010d.cpp
-        i2csensor_seesaw.cpp
         i2csensor_bno055.cpp
         i2csensor_mlx90640.cpp
         i2csensor_vl53l4cx.cpp
@@ -251,6 +256,16 @@ if(HW_CFG_I2C_FEATURE_LEVEL GREATER 0)
         i2csensor_sths34pf80.cpp
         i2csensor_pca9685.cpp
     )
+    # Input device: exactly one of the two drivers compiles in. Both own the
+    # gamepadTask() function symbol so they would collide at link time if
+    # both were included. INPUT_DEVICE_TYPE in System_BuildConfig.h selects.
+    if(HW_CFG_INPUT_DEVICE_TYPE EQUAL 2)
+        list(APPEND hardwareone_srcs i2csensor_ano_encoder.cpp)
+        message(STATUS "Input device: ANO rotary encoder")
+    else()
+        list(APPEND hardwareone_srcs i2csensor_seesaw.cpp)
+        message(STATUS "Input device: Seesaw mini gamepad")
+    endif()
     message(STATUS "I2C sensors INCLUDED (per-sensor flags inside each .cpp)")
 else()
     message(STATUS "I2C sensors EXCLUDED (I2C_FEATURE_LEVEL=0)")

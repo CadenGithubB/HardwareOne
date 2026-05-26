@@ -246,6 +246,13 @@ void oledKeyboardMoveUp();
 void oledKeyboardMoveDown();
 void oledKeyboardMoveLeft();
 void oledKeyboardMoveRight();
+// Row-major scan across the entire char grid (or linear scan through the
+// suggestions list when those are showing). +1 = next, -1 = previous; any
+// integer is accepted and the grid wraps with full-wheel modulo, so passing
+// the total accumulated detents from a fast wheel spin in a single call is
+// fine. Used by the ANO encoder path so a rotation scans a→b→c→…→z→a
+// instead of being trapped in one column.
+void oledKeyboardAdvance(int steps);
 void oledKeyboardSelectChar();
 void oledKeyboardBackspace();
 void oledKeyboardComplete();

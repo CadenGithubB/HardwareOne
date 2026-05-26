@@ -4927,7 +4927,7 @@ void buildLocalBondStatus(BondPeerStatus& status) {
   status.minFreeHeap = (uint32_t)ESP.getMinFreeHeap();
   
   // Build sensor enabled mask from runtime booleans
-  extern bool gThermalEnabled, gTofEnabled, gImuEnabled, gGamepadEnabled;
+  extern bool gThermalEnabled, gTofEnabled, gImuEnabled, gInputEnabled;
   extern bool gGpsEnabled, gPresenceEnabled;
   extern bool gRtcEnabled, gApdsEnabled, gFmRadioEnabled;
   uint16_t enabled = 0;
@@ -4940,8 +4940,8 @@ void buildLocalBondStatus(BondPeerStatus& status) {
 #if ENABLE_IMU_SENSOR
   if (gImuEnabled)      enabled |= CAP_SENSOR_IMU;
 #endif
-#if ENABLE_GAMEPAD_SENSOR
-  if (gGamepadEnabled)  enabled |= CAP_SENSOR_GAMEPAD;
+#if ENABLE_OLED_INPUT  // gInputEnabled is set by either the gamepad or ANO driver
+  if (gInputEnabled)  enabled |= CAP_SENSOR_INPUT;
 #endif
 #if ENABLE_GPS_SENSOR
   if (gGpsEnabled)      enabled |= CAP_SENSOR_GPS;
@@ -4961,7 +4961,7 @@ void buildLocalBondStatus(BondPeerStatus& status) {
   status.sensorEnabledMask = enabled;
 
   // Build sensor connected mask
-  extern bool gThermalConnected, gTofConnected, gImuConnected, gGamepadConnected;
+  extern bool gThermalConnected, gTofConnected, gImuConnected, gInputConnected;
   extern bool gGpsConnected, gPresenceConnected;
   extern bool gRtcConnected, gApdsConnected, gFmRadioConnected;
   uint16_t connected = 0;
@@ -4974,8 +4974,8 @@ void buildLocalBondStatus(BondPeerStatus& status) {
 #if ENABLE_IMU_SENSOR
   if (gImuConnected)      connected |= CAP_SENSOR_IMU;
 #endif
-#if ENABLE_GAMEPAD_SENSOR
-  if (gGamepadConnected)  connected |= CAP_SENSOR_GAMEPAD;
+#if ENABLE_OLED_INPUT  // gInputConnected is set by either the gamepad or ANO driver
+  if (gInputConnected)  connected |= CAP_SENSOR_INPUT;
 #endif
 #if ENABLE_GPS_SENSOR
   if (gGpsConnected)      connected |= CAP_SENSOR_GPS;
@@ -5100,8 +5100,8 @@ static void buildCapabilitySummary(CapabilitySummary& cap) {
 #if ENABLE_IMU_SENSOR
   cap.sensorMask |= CAP_SENSOR_IMU;
 #endif
-#if ENABLE_GAMEPAD_SENSOR
-  cap.sensorMask |= CAP_SENSOR_GAMEPAD;
+#if ENABLE_OLED_INPUT  // capability advertised to peers — true for either input driver
+  cap.sensorMask |= CAP_SENSOR_INPUT;
 #endif
 #if ENABLE_APDS_SENSOR
   cap.sensorMask |= CAP_SENSOR_APDS;
@@ -7749,7 +7749,7 @@ void processMeshHeartbeats() {
         { "tof",      gSettings.bondStreamTof,      REMOTE_SENSOR_TOF },
         { "imu",      gSettings.bondStreamImu,      REMOTE_SENSOR_IMU },
         { "gps",      gSettings.bondStreamGps,      REMOTE_SENSOR_GPS },
-        { "gamepad",  gSettings.bondStreamGamepad,   REMOTE_SENSOR_GAMEPAD },
+        { "gamepad",  gSettings.bondStreamInput,   REMOTE_SENSOR_INPUT },
         { "fmradio",  gSettings.bondStreamFmradio,   REMOTE_SENSOR_FMRADIO },
         { "rtc",      gSettings.bondStreamRtc,       REMOTE_SENSOR_RTC },
         { "presence", gSettings.bondStreamPresence,  REMOTE_SENSOR_PRESENCE },
@@ -12926,7 +12926,7 @@ const char* cmd_bond_role(const String& argsInput) {
     setSetting(gSettings.bondStreamTof, false);
     setSetting(gSettings.bondStreamImu, false);
     setSetting(gSettings.bondStreamGps, false);
-    setSetting(gSettings.bondStreamGamepad, false);
+    setSetting(gSettings.bondStreamInput, false);
     setSetting(gSettings.bondStreamFmradio, false);
     setSetting(gSettings.bondStreamRtc, false);
     setSetting(gSettings.bondStreamPresence, false);
@@ -12999,7 +12999,7 @@ const char* cmd_bond_stream(const String& argsInput) {
     broadcastOutput("");
     broadcastOutput("  Sensor streaming (runtime / saved):");
     bool savedFlags[] = {gSettings.bondStreamThermal, gSettings.bondStreamTof, gSettings.bondStreamImu, 
-                         gSettings.bondStreamGps, gSettings.bondStreamGamepad, gSettings.bondStreamFmradio,
+                         gSettings.bondStreamGps, gSettings.bondStreamInput, gSettings.bondStreamFmradio,
                          gSettings.bondStreamRtc, gSettings.bondStreamPresence};
     const char* sensors[] = {"thermal", "tof", "imu", "gps", "gamepad", "fmradio", "rtc", "presence"};
     for (int i = 0; i < 8; i++) {
@@ -13053,7 +13053,7 @@ const char* cmd_bond_stream(const String& argsInput) {
     case REMOTE_SENSOR_TOF:      setSetting(gSettings.bondStreamTof, enable); break;
     case REMOTE_SENSOR_IMU:      setSetting(gSettings.bondStreamImu, enable); break;
     case REMOTE_SENSOR_GPS:      setSetting(gSettings.bondStreamGps, enable); break;
-    case REMOTE_SENSOR_GAMEPAD:  setSetting(gSettings.bondStreamGamepad, enable); break;
+    case REMOTE_SENSOR_INPUT:  setSetting(gSettings.bondStreamInput, enable); break;
     case REMOTE_SENSOR_FMRADIO:  setSetting(gSettings.bondStreamFmradio, enable); break;
     case REMOTE_SENSOR_RTC:      setSetting(gSettings.bondStreamRtc, enable); break;
     case REMOTE_SENSOR_PRESENCE: setSetting(gSettings.bondStreamPresence, enable); break;
@@ -13235,7 +13235,7 @@ const char* cmd_espnow_bondstreamthermal(const String&);
 const char* cmd_espnow_bondstreamtof(const String&);
 const char* cmd_espnow_bondstreamimu(const String&);
 const char* cmd_espnow_bondstreamgps(const String&);
-const char* cmd_espnow_bondstreamgamepad(const String&);
+const char* cmd_espnow_bondstreaminput(const String&);
 const char* cmd_espnow_bondstreamfmradio(const String&);
 const char* cmd_espnow_bondstreamrtc(const String&);
 const char* cmd_espnow_bondstreampresence(const String&);
@@ -13376,7 +13376,7 @@ extern const CommandEntry espNowCommands[] = {
   { "bondstreamtof",                 "Set auto-stream ToF: <0|1>", true, cmd_espnow_bondstreamtof },
   { "bondstreamimu",                 "Set auto-stream IMU: <0|1>", true, cmd_espnow_bondstreamimu },
   { "bondstreamgps",                 "Set auto-stream GPS: <0|1>", true, cmd_espnow_bondstreamgps },
-  { "bondstreamgamepad",             "Set auto-stream gamepad: <0|1>", true, cmd_espnow_bondstreamgamepad },
+  { "bondstreaminput",             "Set auto-stream input device: <0|1>", true, cmd_espnow_bondstreaminput },
   { "bondstreamfmradio",             "Set auto-stream FM radio: <0|1>", true, cmd_espnow_bondstreamfmradio },
   { "bondstreamrtc",                 "Set auto-stream RTC: <0|1>", true, cmd_espnow_bondstreamrtc },
   { "bondstreampresence",            "Set auto-stream presence: <0|1>", true, cmd_espnow_bondstreampresence },
@@ -13431,7 +13431,7 @@ static const SettingEntry espnowSettingEntries[] = {
   { "bondStreamTof", SETTING_BOOL, &gSettings.bondStreamTof, false, 0, nullptr, 0, 1, "Auto-stream ToF", nullptr, false, "bond", "bondstreamtof" },
   { "bondStreamImu", SETTING_BOOL, &gSettings.bondStreamImu, false, 0, nullptr, 0, 1, "Auto-stream IMU", nullptr, false, "bond", "bondstreamimu" },
   { "bondStreamGps", SETTING_BOOL, &gSettings.bondStreamGps, false, 0, nullptr, 0, 1, "Auto-stream GPS", nullptr, false, "bond", "bondstreamgps" },
-  { "bondStreamGamepad", SETTING_BOOL, &gSettings.bondStreamGamepad, false, 0, nullptr, 0, 1, "Auto-stream Gamepad", nullptr, false, "bond", "bondstreamgamepad" },
+  { "bondStreamInput", SETTING_BOOL, &gSettings.bondStreamInput, false, 0, nullptr, 0, 1, "Auto-stream Input Device", nullptr, false, "bond", "bondstreaminput" },
   { "bondStreamFmradio", SETTING_BOOL, &gSettings.bondStreamFmradio, false, 0, nullptr, 0, 1, "Auto-stream FM Radio", nullptr, false, "bond", "bondstreamfmradio" },
   { "bondStreamRtc", SETTING_BOOL, &gSettings.bondStreamRtc, false, 0, nullptr, 0, 1, "Auto-stream RTC", nullptr, false, "bond", "bondstreamrtc" },
   { "bondStreamPresence", SETTING_BOOL, &gSettings.bondStreamPresence, false, 0, nullptr, 0, 1, "Auto-stream Presence", nullptr, false, "bond", "bondstreampresence" },
@@ -13482,7 +13482,7 @@ ESPNOW_SETTING_CMD(cmd_espnow_bondstreamthermal, "bondStreamThermal")
 ESPNOW_SETTING_CMD(cmd_espnow_bondstreamtof, "bondStreamTof")
 ESPNOW_SETTING_CMD(cmd_espnow_bondstreamimu, "bondStreamImu")
 ESPNOW_SETTING_CMD(cmd_espnow_bondstreamgps, "bondStreamGps")
-ESPNOW_SETTING_CMD(cmd_espnow_bondstreamgamepad, "bondStreamGamepad")
+ESPNOW_SETTING_CMD(cmd_espnow_bondstreaminput, "bondStreamInput")
 ESPNOW_SETTING_CMD(cmd_espnow_bondstreamfmradio, "bondStreamFmradio")
 ESPNOW_SETTING_CMD(cmd_espnow_bondstreamrtc, "bondStreamRtc")
 ESPNOW_SETTING_CMD(cmd_espnow_bondstreampresence, "bondStreamPresence")

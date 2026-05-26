@@ -3379,7 +3379,7 @@ window.togglePane = function(paneId, btnId) {
       if (!sf) return;
       sf.innerHTML =
         '<div style="margin-top:8px;background:var(--warning-bg);border:1px solid var(--warning-border);color:var(--warning-fg);padding:10px;border-radius:8px;font-size:.85em;line-height:1.4">' +
-          '<strong>⚠️ Click Save only ONCE.</strong> Deriving and saving the mesh key takes about a minute — the button will look idle but work is happening in the background. ' +
+          '<strong>Click Save only once.</strong> Deriving and saving the mesh key takes about a minute — the button will look idle but work is happening in the background. ' +
           'Clicking again will queue duplicate work and can corrupt the saved key. Wait for the page to refresh on its own.' +
         '</div>' +
         '<div class="en-form-row" style="margin-top:8px">' +

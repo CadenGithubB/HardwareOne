@@ -386,7 +386,7 @@ struct __attribute__((packed)) BondPeerStatus {
 #define CAP_SENSOR_THERMAL      (1 << 0)
 #define CAP_SENSOR_TOF          (1 << 1)
 #define CAP_SENSOR_IMU          (1 << 2)
-#define CAP_SENSOR_GAMEPAD      (1 << 3)
+#define CAP_SENSOR_INPUT      (1 << 3)
 #define CAP_SENSOR_APDS         (1 << 4)
 #define CAP_SENSOR_GPS          (1 << 5)
 #define CAP_SENSOR_RTC          (1 << 6)
@@ -429,7 +429,11 @@ static const CapabilityName SENSOR_NAMES[] = {
   { CAP_SENSOR_THERMAL,  "Therm",  "Thermal Camera" },
   { CAP_SENSOR_TOF,      "ToF",    "Time-of-Flight" },
   { CAP_SENSOR_IMU,      "IMU",    "IMU/Accelerometer" },
-  { CAP_SENSOR_GAMEPAD,  "Pad",    "Gamepad" },
+#if ENABLE_ANO_ENCODER
+  { CAP_SENSOR_INPUT,    "ANO",    "ANO Rotary Encoder" },
+#else
+  { CAP_SENSOR_INPUT,    "Pad",    "Gamepad" },
+#endif
   { CAP_SENSOR_APDS,     "APDS",   "Gesture/Color" },
   { CAP_SENSOR_GPS,      "GPS",    "GPS" },
   { CAP_SENSOR_RTC,      "RTC",    "Real-Time Clock" },

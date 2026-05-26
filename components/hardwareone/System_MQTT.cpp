@@ -63,8 +63,8 @@ extern const char* cmd_espnow_remote(const String& argsInput);
 #include "i2csensor_ds3231.h"
 #endif
 
-#if ENABLE_GAMEPAD_SENSOR
-#include "i2csensor_seesaw.h"
+#if ENABLE_OLED_INPUT
+#include "HAL_Input.h"   // inputGetX/Y/ButtonsLogical — works for gamepad OR ANO
 #endif
 
 // Forward declarations
@@ -212,7 +212,7 @@ static const SettingEntry mqttSettingEntries[] = {
   { "mqttPublishGPS", SETTING_BOOL, &gSettings.mqttPublishGPS, false, 0, nullptr, 0, 1, "Publish GPS data", nullptr, false, "publish", nullptr },
   { "mqttPublishAPDS", SETTING_BOOL, &gSettings.mqttPublishAPDS, false, 0, nullptr, 0, 1, "Publish APDS data", nullptr, false, "publish", nullptr },
   { "mqttPublishRTC", SETTING_BOOL, &gSettings.mqttPublishRTC, false, 0, nullptr, 0, 1, "Publish RTC time", nullptr, false, "publish", nullptr },
-  { "mqttPublishGamepad", SETTING_BOOL, &gSettings.mqttPublishGamepad, false, 0, nullptr, 0, 1, "Publish gamepad data", nullptr, false, "publish", nullptr }
+  { "mqttPublishInput", SETTING_BOOL, &gSettings.mqttPublishInput, false, 0, nullptr, 0, 1, "Publish input device data", nullptr, false, "publish", nullptr }
 };
 
 static bool isMqttAvailable() {
@@ -545,11 +545,16 @@ static void publishMQTTDiscovery() {
   }
 #endif
 
-#if ENABLE_GAMEPAD_SENSOR
-  if (gSettings.mqttPublishGamepad) {
-    publishDiscoveryConfig("sensor", "gamepad_x", "Gamepad X", "{{ value_json.gamepad.x }}", nullptr, nullptr, "mdi:gamepad-variant");
-    publishDiscoveryConfig("sensor", "gamepad_y", "Gamepad Y", "{{ value_json.gamepad.y }}", nullptr, nullptr, "mdi:gamepad-variant");
-    publishDiscoveryConfig("sensor", "gamepad_buttons", "Gamepad Buttons", "{{ value_json.gamepad.buttons }}", nullptr, nullptr, "mdi:gamepad");
+#if ENABLE_OLED_INPUT  // applies whether the input device is gamepad or ANO encoder
+  if (gSettings.mqttPublishInput) {
+    // JSON keys retained as "gamepad.*" for HA backwards compat (existing
+    // automations / dashboards reference them). The button bits are now in
+    // the canonical logical layout (bit 0=A, 1=B, 2=X, 3=Y, 4=START, 5=SELECT)
+    // so the meaning of those bits is consistent regardless of which physical
+    // input device produced them.
+    publishDiscoveryConfig("sensor", "gamepad_x", "Input X", "{{ value_json.gamepad.x }}", nullptr, nullptr, "mdi:gamepad-variant");
+    publishDiscoveryConfig("sensor", "gamepad_y", "Input Y", "{{ value_json.gamepad.y }}", nullptr, nullptr, "mdi:gamepad-variant");
+    publishDiscoveryConfig("sensor", "gamepad_buttons", "Input Buttons (logical)", "{{ value_json.gamepad.buttons }}", nullptr, nullptr, "mdi:gamepad");
   }
 #endif
 
@@ -728,7 +733,7 @@ static void publishMeshPeerSensorData() {
           case REMOTE_SENSOR_TOF:     key = "tof"; break;
           case REMOTE_SENSOR_IMU:     key = "imu"; break;
           case REMOTE_SENSOR_GPS:     key = "gps"; break;
-          case REMOTE_SENSOR_GAMEPAD: key = "gamepad"; break;
+          case REMOTE_SENSOR_INPUT: key = "gamepad"; break;
           case REMOTE_SENSOR_FMRADIO: key = "fmradio"; break;
           default: break;
         }
@@ -1071,11 +1076,14 @@ void publishMQTTSensorData() {
   }
 #endif
 
-#if ENABLE_GAMEPAD_SENSOR
-  if (gSettings.mqttPublishGamepad && gGamepadEnabled && gGamepadConnected) {
+#if ENABLE_OLED_INPUT  // gamepad OR ANO encoder — same JSON shape, same wire schema
+  if (gSettings.mqttPublishInput && gInputEnabled && gInputConnected) {
+    // inputGetButtonsLogical() emits the canonical bit layout (bit 0=A, 1=B,
+    // 2=X, 3=Y, 4=START, 5=SELECT) so HA / downstream consumers see the same
+    // bits regardless of the underlying physical device.
     pos += snprintf(jsonBuf + pos, 16384 - pos,
       ",\"gamepad\":{\"x\":%d,\"y\":%d,\"buttons\":%lu}",
-      gamepadGetX(), gamepadGetY(), (unsigned long)gamepadGetButtons());
+      inputGetX(), inputGetY(), (unsigned long)inputGetButtonsLogical());
   }
 #endif
   
@@ -1534,7 +1542,11 @@ MQTT_PUBLISH_CMD(presence, mqttPublishPresence, "Presence")
 MQTT_PUBLISH_CMD(gps, mqttPublishGPS, "GPS")
 MQTT_PUBLISH_CMD(apds, mqttPublishAPDS, "APDS")
 MQTT_PUBLISH_CMD(rtc, mqttPublishRTC, "RTC")
-MQTT_PUBLISH_CMD(gamepad, mqttPublishGamepad, "Gamepad")
+#if ENABLE_ANO_ENCODER
+MQTT_PUBLISH_CMD(input, mqttPublishInput, "ANO Encoder")
+#else
+MQTT_PUBLISH_CMD(input, mqttPublishInput, "Gamepad")
+#endif
 
 // Command table - names must match setting keys for web UI compatibility
 // Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
@@ -1566,7 +1578,7 @@ const CommandEntry mqttCommands[] = {
   { "mqttPublishGPS", "Publish GPS [0|1]", true, cmd_mqttpublishgps, "Usage: mqttPublishGPS [0|1]" },
   { "mqttPublishAPDS", "Publish APDS [0|1]", true, cmd_mqttpublishapds, "Usage: mqttPublishAPDS [0|1]" },
   { "mqttPublishRTC", "Publish RTC [0|1]", true, cmd_mqttpublishrtc, "Usage: mqttPublishRTC [0|1]" },
-  { "mqttPublishGamepad", "Publish gamepad [0|1]", true, cmd_mqttpublishgamepad, "Usage: mqttPublishGamepad [0|1]" }
+  { "mqttPublishInput", "Publish input device data [0|1]", true, cmd_mqttpublishinput, "Usage: mqttPublishInput [0|1]" }
 };
 
 const size_t mqttCommandsCount = sizeof(mqttCommands) / sizeof(mqttCommands[0]);

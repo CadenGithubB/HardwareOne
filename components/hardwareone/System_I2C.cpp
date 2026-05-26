@@ -95,8 +95,17 @@ static bool isSensorCompiled(const I2CSensorEntry& sensor) {
   #if !ENABLE_IMU_SENSOR
     if (strcmp(sensor.moduleName, "imu") == 0) return false;
   #endif
+  #if !ENABLE_OLED_INPUT
+    if (strcmp(sensor.moduleName, "input") == 0) return false;
+  #endif
+  // Legacy "gamepad" and "anoencoder" module names (pre-unification) — kept
+  // here so any external code path that still passes the old strings to
+  // isSensorConnected() / lookup helpers reports a sensible result.
   #if !ENABLE_GAMEPAD_SENSOR
     if (strcmp(sensor.moduleName, "gamepad") == 0) return false;
+  #endif
+  #if !ENABLE_ANO_ENCODER
+    if (strcmp(sensor.moduleName, "anoencoder") == 0) return false;
   #endif
   #if !ENABLE_APDS_SENSOR
     if (strcmp(sensor.moduleName, "apds") == 0) return false;
@@ -203,7 +212,18 @@ const I2CSensorEntry i2cSensors[] = {
   { 0x28, "BNO055", "9-DOF IMU", "Adafruit", true, 0x29, 1500, "Adafruit_BNO055", "_ADAFRUIT_BNO055_H_", "imu", 100000, 300 },
   { 0x39, "APDS9960", "RGB, Gesture & Proximity", "Adafruit", false, 0x00, 500, "Adafruit_APDS9960", "_ADAFRUIT_APDS9960_H_", "apds", 100000, 200 },
   { 0x29, "VL53L4CX", "ToF Distance (up to 6m)", "Adafruit", false, 0x00, 1000, "VL53L4CX", "_VL53L4CX_CLASS_H_", "tof", 400000, 250 },
-  { 0x50, "Seesaw", "Mini I2C Gamepad", "Adafruit", false, 0x00, 800, "Adafruit_seesaw", "_ADAFRUIT_SEESAW_H_", "gamepad", 400000, 200 },
+  // Both seesaw I2C addresses (0x49 + 0x50) belong to the unified "input"
+  // module — either the seesaw Mini Gamepad or the ANO Rotary Encoder can
+  // appear at either address depending on hardware jumpers. The compiled-in
+  // driver disambiguates at runtime; the descriptions show the relevant
+  // device for the active build.
+#if ENABLE_ANO_ENCODER
+  { 0x49, "Seesaw", "ANO Rotary Encoder (default)", "Adafruit", false, 0x00, 800, "Adafruit_seesaw", "_ADAFRUIT_SEESAW_H_", "input", 400000, 200 },
+  { 0x50, "Seesaw", "ANO Rotary Encoder (alt addr)", "Adafruit", false, 0x00, 800, "Adafruit_seesaw", "_ADAFRUIT_SEESAW_H_", "input", 400000, 200 },
+#else
+  { 0x50, "Seesaw", "Mini I2C Gamepad",              "Adafruit", false, 0x00, 800, "Adafruit_seesaw", "_ADAFRUIT_SEESAW_H_", "input", 400000, 200 },
+  { 0x49, "Seesaw", "Mini I2C Gamepad (alt addr)",   "Adafruit", false, 0x00, 800, "Adafruit_seesaw", "_ADAFRUIT_SEESAW_H_", "input", 400000, 200 },
+#endif
   { 0x33, "MLX90640", "32x24 Thermal Camera", "Adafruit", false, 0x00, 2000, "Adafruit_MLX90640", "_ADAFRUIT_MLX90640_H_", "thermal", 100000, 500 },
   { 0x10, "PA1010D", "Mini GPS Module", "Adafruit", false, 0x00, 500, "Adafruit_GPS", "_ADAFRUIT_GPS_H", "gps", 100000, 200 },
   { 0x11, "RDA5807", "FM Radio Receiver", "ScoutMakes", false, 0x00, 500, "RDA5807", NULL, "fmradio", 100000, 200 },
@@ -264,7 +284,13 @@ static uint8_t i2cAddressForDeviceType(I2CDeviceType sensor) {
     case I2C_DEVICE_THERMAL:  return I2C_ADDR_THERMAL;
     case I2C_DEVICE_TOF:      return I2C_ADDR_TOF;
     case I2C_DEVICE_IMU:      return I2C_ADDR_IMU;
-    case I2C_DEVICE_GAMEPAD:  return I2C_ADDR_GAMEPAD;
+    case I2C_DEVICE_INPUT:
+#if ENABLE_ANO_ENCODER
+      return (gSettings.anoEncoderI2cAddr > 0 && gSettings.anoEncoderI2cAddr < 0x80)
+               ? (uint8_t)gSettings.anoEncoderI2cAddr : I2C_ADDR_ANO_ENCODER;
+#else
+      return I2C_ADDR_GAMEPAD;
+#endif
     case I2C_DEVICE_GPS:      return I2C_ADDR_GPS;
     case I2C_DEVICE_FMRADIO:  return I2C_ADDR_FM_RADIO;
     case I2C_DEVICE_APDS:     return I2C_ADDR_APDS;
@@ -274,7 +300,9 @@ static uint8_t i2cAddressForDeviceType(I2CDeviceType sensor) {
   }
 }
 
-static const char* cmd_sensorstart_queued(I2CDeviceType sensor, const char* displayName, const bool& enabledFlag, const char* eventTag) {
+// Externally linkable so HAL_Input.cpp's unified cmd_openinput can dispatch
+// through the same queue as the other sensor start commands.
+const char* cmd_sensorstart_queued(I2CDeviceType sensor, const char* displayName, const bool& enabledFlag, const char* eventTag) {
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
 
   // Reject immediately if the I2C bus is disabled at runtime (distinct from hardware not connected)
@@ -332,11 +360,9 @@ const char* cmd_apdsstart_queued(const String& argsInput) {
   return cmd_sensorstart_queued(I2C_DEVICE_APDS, "APDS", gApdsColorEnabled || gApdsProximityEnabled || gApdsGestureEnabled, "openapds@enqueue");
 }
 
-// gGamepadEnabled provided by i2csensor_seesaw.h
-const char* cmd_gamepadstart_queued(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  return cmd_sensorstart_queued(I2C_DEVICE_GAMEPAD, "Gamepad", gGamepadEnabled, "opengamepad@enqueue");
-}
+// cmd_openinput (in HAL_Input.cpp) handles the input device's queued start —
+// the gamepad-specific wrapper that used to live here has been deleted now
+// that there's only one unified entrypoint for either driver.
 
 // ========== End Sensor Startup Queue System ==========
 
@@ -675,7 +701,7 @@ static const char* setDeviceBusAndReport(int& target, const String& argsInput, c
 }
 
 const char* cmd_oledbus(const String& a)     { RETURN_VALID_IF_VALIDATE_CSTR(); return setDeviceBusAndReport(gSettings.oledBus,     a, "oledBus"); }
-const char* cmd_gamepadbus(const String& a)  { RETURN_VALID_IF_VALIDATE_CSTR(); return setDeviceBusAndReport(gSettings.gamepadBus,  a, "gamepadBus"); }
+const char* cmd_inputbus(const String& a)    { RETURN_VALID_IF_VALIDATE_CSTR(); return setDeviceBusAndReport(gSettings.inputBus,  a, "inputBus"); }
 const char* cmd_gpsbus(const String& a)      { RETURN_VALID_IF_VALIDATE_CSTR(); return setDeviceBusAndReport(gSettings.gpsBus,      a, "gpsBus"); }
 const char* cmd_rtcbus(const String& a)      { RETURN_VALID_IF_VALIDATE_CSTR(); return setDeviceBusAndReport(gSettings.rtcBus,      a, "rtcBus"); }
 const char* cmd_fmradiobus(const String& a)  { RETURN_VALID_IF_VALIDATE_CSTR(); return setDeviceBusAndReport(gSettings.fmRadioBus,  a, "fmRadioBus"); }
@@ -784,7 +810,7 @@ const char* cmd_i2cstats(const String& originalCmd) {
   // Sensor connection status
   broadcastOutput("Connected Sensors:");
 
-  if (gGamepadConnected) {
+  if (gInputConnected) {
     broadcastOutput("  Gamepad (seesaw)");
   }
   if (gImuConnected) {
@@ -800,7 +826,7 @@ const char* cmd_i2cstats(const String& originalCmd) {
     broadcastOutput("  Thermal (MLX90640)");
   }
 
-  if (!gGamepadConnected && !gImuConnected && !gApdsConnected && !gTofConnected && !gThermalConnected) {
+  if (!gInputConnected && !gImuConnected && !gApdsConnected && !gTofConnected && !gThermalConnected) {
     broadcastOutput("  No sensors connected");
   }
 
@@ -822,10 +848,10 @@ extern bool tofPoll();
 // respective i2csensor_*.h headers (all already included at top of file).
 // Only sensor-side function declarations that aren't in their headers remain.
 #if ENABLE_IMU_SENSOR
-extern void imuPoll();        // Sensor_IMU_BNO055.cpp
+extern void imuPoll();        // i2csensor_bno055.cpp
 #endif
 #if ENABLE_THERMAL_SENSOR
-extern bool thermalInit();    // Sensor_Thermal_MLX90640.cpp
+extern bool thermalInit();    // i2csensor_mlx90640.cpp
 extern bool thermalPoll();
 #endif
 
@@ -849,12 +875,12 @@ void unlockThermalCache() {
 // ============================================================================
 
 // All sensor tasks moved to their respective modules for full modularization:
-// tofTask() -> Sensor_ToF_VL53L4CX.cpp
-// imuTask() -> Sensor_IMU_BNO055.cpp
-// thermalTask() -> Sensor_Thermal_MLX90640.cpp
-// gamepadTask() -> Sensor_Gamepad_Seesaw.cpp
-// apdsTask() -> Sensor_APDS_APDS9960.cpp
-// gpsTask() -> Sensor_GPS_PA1010D.cpp
+// tofTask() -> i2csensor_vl53l4cx.cpp
+// imuTask() -> i2csensor_bno055.cpp
+// thermalTask() -> i2csensor_mlx90640.cpp
+// inputTask() -> i2csensor_seesaw.cpp (gamepad) OR i2csensor_ano_encoder.cpp (ANO)
+// apdsTask() -> i2csensor_apds9960.cpp
+// gpsTask() -> i2csensor_pa1010d.cpp
 
 // ============================================================================
 // I2C Device Registry Helper Functions
@@ -1432,7 +1458,11 @@ static const SensorHeapCost sensorHeapCosts[] = {
   { "GPS",            "gps",     &gSettings.gpsAutoStart,      4 },  // PA1010D: NMEA parsing
   { "FM Radio",       "fmradio", &gSettings.fmRadioAutoStart,  2 },  // RDA5807: minimal
   { "APDS Gesture",   "apds",    &gSettings.apdsAutoStart,     4 },  // APDS9960: gesture buffers
-  { "Gamepad",        "gamepad", &gSettings.gamepadAutoStart,  2 },  // Seesaw: minimal
+#if ENABLE_ANO_ENCODER
+  { "ANO Encoder",    "input",   &gSettings.inputAutoStart,    2 },  // Adafruit ANO seesaw: minimal
+#else
+  { "Gamepad",        "input",   &gSettings.inputAutoStart,    2 },  // Seesaw mini gamepad: minimal
+#endif
   { "RTC Clock",      "rtc",     &gSettings.rtcAutoStart,      2 },  // DS3231: minimal
   { "Presence",       "presence",&gSettings.presenceAutoStart, 2 },  // STHS34PF80: minimal
 };
@@ -1677,7 +1707,7 @@ const CommandEntry i2cCommands[] = {
   { "i2c2sclpin", "Set I2C2 SCL pin: <-1..48> (-1=unavailable)", true, cmd_i2c2sclpin, "Usage: i2c2SclPin <-1..48>" },
   // Per-device bus assignment — route a sensor to bus 0 (I2C1) or bus 1 (I2C2).
   { "oledbus",     "Route OLED to bus: <0|1> (reboot required)",         true, cmd_oledbus,     "Usage: oledBus <0|1>" },
-  { "gamepadbus",  "Route Seesaw gamepad to bus: <0|1> (reboot required)", true, cmd_gamepadbus, "Usage: gamepadBus <0|1>" },
+  { "inputbus",    "Route input device to bus: <0|1> (reboot required)",  true, cmd_inputbus,    "Usage: inputBus <0|1>" },
   { "gpsbus",      "Route PA1010D GPS to bus: <0|1> (reboot required)",  true, cmd_gpsbus,      "Usage: gpsBus <0|1>" },
   { "rtcbus",      "Route DS3231 RTC to bus: <0|1> (reboot required)",   true, cmd_rtcbus,      "Usage: rtcBus <0|1>" },
   { "fmradiobus",  "Route RDA5807 FM radio to bus: <0|1> (reboot required)", true, cmd_fmradiobus, "Usage: fmRadioBus <0|1>" },
@@ -1728,7 +1758,11 @@ const char* deviceTypeDisplayName(I2CDeviceType sensor) {
     case I2C_DEVICE_THERMAL:  return "Thermal";
     case I2C_DEVICE_TOF:      return "ToF";
     case I2C_DEVICE_IMU:      return "IMU";
-    case I2C_DEVICE_GAMEPAD:  return "Gamepad";
+#if ENABLE_ANO_ENCODER
+    case I2C_DEVICE_INPUT:  return "ANO Encoder";
+#else
+    case I2C_DEVICE_INPUT:  return "Gamepad";
+#endif
     case I2C_DEVICE_GPS:      return "GPS";
     case I2C_DEVICE_FMRADIO:  return "FM Radio";
     case I2C_DEVICE_APDS:     return "APDS";
@@ -1761,9 +1795,9 @@ void handleDeviceStopped(I2CDeviceType sensor) {
       gImuLastStopTime = millis();
 #endif
       break;
-    case I2C_DEVICE_GAMEPAD:
+    case I2C_DEVICE_INPUT:
 #if ENABLE_GAMEPAD_SENSOR
-      gGamepadEnabled = false;
+      gInputEnabled = false;
       gGamepadLastStopTime = millis();
 #endif
       break;
@@ -1808,7 +1842,7 @@ void handleDeviceStopped(I2CDeviceType sensor) {
     case I2C_DEVICE_THERMAL:  broadcastSensorStatus(REMOTE_SENSOR_THERMAL, false);  break;
     case I2C_DEVICE_TOF:      broadcastSensorStatus(REMOTE_SENSOR_TOF, false);      break;
     case I2C_DEVICE_IMU:      broadcastSensorStatus(REMOTE_SENSOR_IMU, false);      break;
-    case I2C_DEVICE_GAMEPAD:  broadcastSensorStatus(REMOTE_SENSOR_GAMEPAD, false);  break;
+    case I2C_DEVICE_INPUT:  broadcastSensorStatus(REMOTE_SENSOR_INPUT, false);  break;
     case I2C_DEVICE_GPS:      broadcastSensorStatus(REMOTE_SENSOR_GPS, false);      break;
     case I2C_DEVICE_FMRADIO:  broadcastSensorStatus(REMOTE_SENSOR_FMRADIO, false);  break;
     default: break;  // APDS, RTC, Presence have no remote sensor type
@@ -1855,7 +1889,7 @@ const char* buildSensorStatusJson() {
   doc["apdsColorEnabled"] = gApdsColorEnabled;
   doc["apdsProximityEnabled"] = gApdsProximityEnabled;
   doc["apdsGestureEnabled"] = gApdsGestureEnabled;
-  doc["gamepadEnabled"] = gGamepadEnabled;
+  doc["inputEnabled"] = gInputEnabled;
 #if ENABLE_SERVO
   doc["pwmDriverConnected"] = gPwmDriverConnected;
 #else
@@ -1895,10 +1929,10 @@ const char* buildSensorStatusJson() {
   doc["imuCompiled"] = false;
 #endif
 
-#if ENABLE_GAMEPAD_SENSOR
-  doc["gamepadCompiled"] = true;
+#if ENABLE_OLED_INPUT
+  doc["inputCompiled"] = true;
 #else
-  doc["gamepadCompiled"] = false;
+  doc["inputCompiled"] = false;
 #endif
 
 #if ENABLE_APDS_SENSOR
@@ -2016,7 +2050,7 @@ const char* buildSensorStatusJson() {
   doc["imuQueued"] = isInQueue(I2C_DEVICE_IMU);
   doc["apdsQueued"] = isInQueue(I2C_DEVICE_APDS);
   doc["gpsQueued"] = isInQueue(I2C_DEVICE_GPS);
-  doc["gamepadQueued"] = isInQueue(I2C_DEVICE_GAMEPAD);
+  doc["inputQueued"] = isInQueue(I2C_DEVICE_INPUT);
   doc["rtcQueued"] = isInQueue(I2C_DEVICE_RTC);
   doc["presenceQueued"] = isInQueue(I2C_DEVICE_PRESENCE);
   
@@ -2026,7 +2060,7 @@ const char* buildSensorStatusJson() {
   int imuPos = getQueuePosition(I2C_DEVICE_IMU);
   int apdsPos = getQueuePosition(I2C_DEVICE_APDS);
   int gpsPos = getQueuePosition(I2C_DEVICE_GPS);
-  int gamepadPos = getQueuePosition(I2C_DEVICE_GAMEPAD);
+  int inputPos = getQueuePosition(I2C_DEVICE_INPUT);
   int rtcPos = getQueuePosition(I2C_DEVICE_RTC);
   int presencePos = getQueuePosition(I2C_DEVICE_PRESENCE);
   
@@ -2045,8 +2079,8 @@ const char* buildSensorStatusJson() {
   if (gpsPos > 0) {
     doc["gpsQueuePos"] = gpsPos;
   }
-  if (gamepadPos > 0) {
-    doc["gamepadQueuePos"] = gamepadPos;
+  if (inputPos > 0) {
+    doc["inputQueuePos"] = inputPos;
   }
   if (rtcPos > 0) {
     doc["rtcQueuePos"] = rtcPos;
@@ -2121,7 +2155,7 @@ void sensorQueueProcessorTask(void* param) {
           case I2C_DEVICE_IMU:
             requiredDelay = 1000;  // IMU initialization can be slow
             break;
-          case I2C_DEVICE_GAMEPAD:
+          case I2C_DEVICE_INPUT:
             requiredDelay = 600;  // Gamepad init is relatively quick
             break;
           case I2C_DEVICE_APDS:
@@ -2167,8 +2201,8 @@ void sensorQueueProcessorTask(void* param) {
         case I2C_DEVICE_IMU:
           alreadyRunning = gImuEnabled;
           break;
-        case I2C_DEVICE_GAMEPAD:
-          alreadyRunning = gGamepadEnabled;
+        case I2C_DEVICE_INPUT:
+          alreadyRunning = gInputEnabled;
           break;
         case I2C_DEVICE_APDS:
           alreadyRunning = gApdsColorEnabled || gApdsProximityEnabled || gApdsGestureEnabled;
@@ -2224,10 +2258,18 @@ void sensorQueueProcessorTask(void* param) {
           INFO_I2C_AUTOSTARTF("IMU: %s", gImuEnabled ? "SUCCESS" : "FAILED");
           notifySensorStarted("IMU", gImuEnabled);
           break;
-        case I2C_DEVICE_GAMEPAD:
-          gamepadStartInternal();
-          INFO_I2C_AUTOSTARTF("Gamepad: %s", gGamepadEnabled ? "SUCCESS" : "FAILED");
-          notifySensorStarted("Gamepad", gGamepadEnabled);
+        case I2C_DEVICE_INPUT:
+          // I2C_DEVICE_INPUT is the shared input-device slot — under ANO
+          // build, inputStartInternal() comes from the ANO driver. The label
+          // reflects whichever input device is compiled in.
+          inputStartInternal();
+#if ENABLE_ANO_ENCODER
+          INFO_I2C_AUTOSTARTF("ANO Encoder: %s", gInputEnabled ? "SUCCESS" : "FAILED");
+          notifySensorStarted("ANO Encoder", gInputEnabled);
+#else
+          INFO_I2C_AUTOSTARTF("Gamepad: %s", gInputEnabled ? "SUCCESS" : "FAILED");
+          notifySensorStarted("Gamepad", gInputEnabled);
+#endif
           break;
         case I2C_DEVICE_APDS:
 #if ENABLE_APDS_SENSOR
@@ -2341,7 +2383,7 @@ static const SettingEntry i2cSettingEntries[] = {
     0, nullptr, 0, 48, "I2C1 SDA Pin (reboot required)", nullptr, false, nullptr, "i2csdapin" },
   { "i2cSclPin", SETTING_INT, &gSettings.i2cSclPin, I2C_SCL_PIN_DEFAULT,
     0, nullptr, 0, 48, "I2C1 SCL Pin (reboot required)", nullptr, false, nullptr, "i2csclpin" },
-  { "i2c2BusEnabled", SETTING_BOOL, &gSettings.i2c2BusEnabled, 0, 0, nullptr, 0, 1, "I2C2 Bus Enabled (reboot required)", nullptr, false, nullptr, "i2c2busenabled" },
+  { "i2c2BusEnabled", SETTING_BOOL, &gSettings.i2c2BusEnabled, I2C2_BUS_ENABLED_DEFAULT, 0, nullptr, 0, 1, "I2C2 Bus Enabled (reboot required)", nullptr, false, nullptr, "i2c2busenabled" },
   { "i2c2SdaPin", SETTING_INT, &gSettings.i2c2SdaPin, I2C2_SDA_PIN_DEFAULT,
     0, nullptr, -1, 48, "I2C2 SDA Pin (reboot required, -1=unavailable)", nullptr, false, nullptr, "i2c2sdapin" },
   { "i2c2SclPin", SETTING_INT, &gSettings.i2c2SclPin, I2C2_SCL_PIN_DEFAULT,
@@ -2349,8 +2391,8 @@ static const SettingEntry i2cSettingEntries[] = {
   // Per-device bus assignment (0=I2C1/Wire1, 1=I2C2/Wire). Reboot required.
   // `options = "0|I2C1,1|I2C2"` makes the Settings page render each as a
   // labeled <select> dropdown instead of a 0..1 number input.
-  { "oledBus",     SETTING_INT, &gSettings.oledBus,     0, 0, nullptr, 0, 1, "OLED bus (reboot required)",            "0|I2C1,1|I2C2", false, nullptr, "oledbus" },
-  { "gamepadBus",  SETTING_INT, &gSettings.gamepadBus,  0, 0, nullptr, 0, 1, "Gamepad bus (reboot required)",         "0|I2C1,1|I2C2", false, nullptr, "gamepadbus" },
+  { "oledBus",     SETTING_INT, &gSettings.oledBus,     OLED_BUS_DEFAULT, 0, nullptr, 0, 1, "OLED bus (reboot required)",            "0|I2C1,1|I2C2", false, nullptr, "oledbus" },
+  { "inputBus",    SETTING_INT, &gSettings.inputBus,    0, 0, nullptr, 0, 1, "Input device bus (reboot required)",     "0|I2C1,1|I2C2", false, nullptr, "inputbus" },
   { "gpsBus",      SETTING_INT, &gSettings.gpsBus,      0, 0, nullptr, 0, 1, "GPS bus (reboot required)",             "0|I2C1,1|I2C2", false, nullptr, "gpsbus" },
   { "rtcBus",      SETTING_INT, &gSettings.rtcBus,      0, 0, nullptr, 0, 1, "RTC bus (reboot required)",             "0|I2C1,1|I2C2", false, nullptr, "rtcbus" },
   { "fmRadioBus",  SETTING_INT, &gSettings.fmRadioBus,  0, 0, nullptr, 0, 1, "FM radio bus (reboot required)",        "0|I2C1,1|I2C2", false, nullptr, "fmradiobus" },
@@ -2426,7 +2468,7 @@ void processAutoStartSensors() {
             gSettings.gpsAutoStart ? 1 : 0,
             gSettings.fmRadioAutoStart ? 1 : 0,
             gSettings.apdsAutoStart ? 1 : 0,
-            gSettings.gamepadAutoStart ? 1 : 0,
+            gSettings.inputAutoStart ? 1 : 0,
             gSettings.rtcAutoStart ? 1 : 0,
             gSettings.presenceAutoStart ? 1 : 0);
   INFO_I2C_AUTOSTARTF("[AutoStart] Processing sensor auto-start settings...");
@@ -2499,10 +2541,10 @@ void processAutoStartSensors() {
   #endif
   
   #if ENABLE_GAMEPAD_SENSOR
-  if (gSettings.gamepadAutoStart) {
-    if (isSensorAvailableForAutoStart("gamepad", I2C_DEVICE_GAMEPAD)) {
+  if (gSettings.inputAutoStart) {
+    if (isSensorAvailableForAutoStart("gamepad", I2C_DEVICE_INPUT)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing Gamepad sensor");
-      enqueueDeviceStart(I2C_DEVICE_GAMEPAD); autoStartQueued++;
+      enqueueDeviceStart(I2C_DEVICE_INPUT); autoStartQueued++;
     } else {
       INFO_I2C_AUTOSTARTF("[AutoStart] Skipping Gamepad sensor (not detected on I2C bus)");
     }

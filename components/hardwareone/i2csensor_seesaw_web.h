@@ -37,7 +37,8 @@ inline void streamSeesawGamepadSensorCard(httpd_req_t* req) {
 }
 
 inline void streamSeesawGamepadSensorBindButtons(httpd_req_t* req) {
-  httpd_resp_send_chunk(req, "bind('btn-gamepad-start','opengamepad');bind('btn-gamepad-stop','closegamepad');", HTTPD_RESP_USE_STRLEN);
+  // Unified open/close CLI commands work under either driver (HAL_Input.cpp).
+  httpd_resp_send_chunk(req, "bind('btn-gamepad-start','openinput');bind('btn-gamepad-stop','closeinput');", HTTPD_RESP_USE_STRLEN);
 }
 
 inline void streamSeesawGamepadSensorJs(httpd_req_t* req) {
@@ -136,7 +137,11 @@ inline void streamSeesawGamepadSensorJs(httpd_req_t* req) {
 }
 
 inline void streamSeesawGamepadDashboardDef(httpd_req_t* req) {
-  httpd_resp_send_chunk(req, "window.__dashSensorDefs.push({device:'Seesaw',key:'gamepad',name:'Gamepad (Seesaw)',desc:'Joystick & Buttons'});", HTTPD_RESP_USE_STRLEN);
+  // key='input' so both gamepad and ANO builds share the same status key.
+  // The user-facing `name` differs ("Gamepad (Seesaw)" vs "ANO Encoder (Seesaw)")
+  // — that's the only thing that needs to be per-build. The dashboard JS uses
+  // the key to look up status fields (inputEnabled) and DOM ids (dash-input-*).
+  httpd_resp_send_chunk(req, "window.__dashSensorDefs.push({device:'Seesaw',key:'input',name:'Gamepad (Seesaw)',desc:'Joystick & Buttons'});", HTTPD_RESP_USE_STRLEN);
 }
 
 #endif // I2CSENSOR_SEESAW_WEB_H

@@ -64,7 +64,7 @@ extern void getTimestampPrefixMsCached(char* buf, size_t bufSize);
 extern TaskHandle_t gCmdExecTaskHandle;
 
 // Per-sensor task functions (each defined in its own .cpp module).
-extern void gamepadTask(void* parameter);
+extern void inputTask(void* parameter);
 extern void thermalTask(void* parameter);
 extern void imuTask(void* parameter);
 extern void tofTask(void* parameter);
@@ -155,27 +155,27 @@ BaseType_t xTaskCreateLogged(TaskFunction_t pxTaskCode,
 // Sensor Task Creation Helpers
 // ============================================================================
 
-bool createGamepadTask() {
+bool createInputTask() {
   // Check for stale task handle (task deleted itself but handle not cleared)
-  if (gGamepadTaskHandle != nullptr) {
-    eTaskState state = eTaskGetState(gGamepadTaskHandle);
+  if (gInputTaskHandle != nullptr) {
+    eTaskState state = eTaskGetState(gInputTaskHandle);
     if (state == eDeleted || state == eInvalid) {
-      gGamepadTaskHandle = nullptr;
+      gInputTaskHandle = nullptr;
     }
   }
-  if (gGamepadTaskHandle == nullptr) {
-    const uint32_t stackWords = GAMEPAD_STACK_WORDS;  // words (~14KB)
+  if (gInputTaskHandle == nullptr) {
+    const uint32_t stackWords = INPUT_STACK_WORDS;  // words (~14KB)
     BaseType_t result = xTaskCreateLogged(
-      gamepadTask,
+      inputTask,
       "gamepad_task",
       stackWords,
       nullptr,
       1,
-      &gGamepadTaskHandle,
+      &gInputTaskHandle,
       "gamepad");
 
     if (result != pdPASS) {
-      handleDeviceStopped(I2C_DEVICE_GAMEPAD);
+      handleDeviceStopped(I2C_DEVICE_INPUT);
       return false;
     }
   }
@@ -458,7 +458,7 @@ void reportAllTaskStacks() {
     {"espnow_task", espnowHandle, ESPNOW_HB_STACK_WORDS},
     {"cmd_exec_task", gCmdExecTaskHandle, CMD_EXEC_STACK_WORDS},
     {"sensor_queue_task", queueProcessorTask, SENSOR_QUEUE_STACK_WORDS},
-    {"gamepad_task", gGamepadTaskHandle, GAMEPAD_STACK_WORDS},
+    {"gamepad_task", gInputTaskHandle, INPUT_STACK_WORDS},
     {"thermal_task", gThermalTaskHandle, THERMAL_STACK_WORDS},
     {"imu_task", gImuTaskHandle, IMU_STACK_WORDS},
     {"tof_task", gTofTaskHandle, TOF_STACK_WORDS},
@@ -482,7 +482,7 @@ void reportAllTaskStacks() {
     espnowHandle != nullptr,                                        // espnow_task
     gCmdExecTaskHandle != nullptr,                                  // cmd_exec_task
     queueProcessorTask != nullptr,                                  // sensor_queue_task
-    gGamepadEnabled,                                                 // gamepad_task
+    gInputEnabled,                                                 // gamepad_task
     gThermalEnabled,                                                 // thermal_task
     gImuEnabled,                                                     // imu_task
     gTofEnabled,                                                     // tof_task

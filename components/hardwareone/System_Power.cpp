@@ -230,10 +230,69 @@ const char* cmd_power(const String& argsInput) {
   }
 }
 
+// ============================================================================
+// Sleep transition cooldown ("anti-flap")
+// ============================================================================
+// Static state — one timestamp shared by light-sleep and deep-sleep entry
+// callers. millis() rolls over after ~49 days; the comparison uses unsigned
+// subtraction which handles the wrap correctly so long as the cooldown is
+// less than half the range (we cap the setting at 60s, far below 24 days).
+static unsigned long sLastSleepTransitionMs = 0;
+
+bool powerSleepTransitionAllowed(unsigned long* outRemainingMs) {
+  const uint32_t cooldown = gSettings.powerTransitionCooldownMs;
+  if (cooldown == 0) {
+    if (outRemainingMs) *outRemainingMs = 0;
+    return true;  // explicitly disabled
+  }
+  if (sLastSleepTransitionMs == 0) {
+    if (outRemainingMs) *outRemainingMs = 0;
+    return true;  // no previous transition recorded — first call always permitted
+  }
+  const unsigned long now = millis();
+  const unsigned long elapsed = now - sLastSleepTransitionMs;  // unsigned: handles rollover
+  if (elapsed >= cooldown) {
+    if (outRemainingMs) *outRemainingMs = 0;
+    return true;
+  }
+  if (outRemainingMs) *outRemainingMs = cooldown - elapsed;
+  return false;
+}
+
+void powerSleepTransitionMark() {
+  sLastSleepTransitionMs = millis();
+  // Avoid the sentinel value: if millis() happens to return 0 on the first
+  // call after boot (extremely unlikely but harmless to guard), bump by 1.
+  if (sLastSleepTransitionMs == 0) sLastSleepTransitionMs = 1;
+}
+
+// CLI: powercooldown [ms]
+//   no arg → print current value
+//   ms     → set new cooldown (0..60000); persisted via setSetting
+static const char* cmd_powercooldown(const String& argsInput) {
+  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+  String arg = argsInput; arg.trim();
+  if (arg.length() == 0) {
+    snprintf(getDebugBuffer(), 1024,
+             "Sleep transition cooldown: %lu ms (%s)",
+             (unsigned long)gSettings.powerTransitionCooldownMs,
+             gSettings.powerTransitionCooldownMs == 0 ? "disabled" : "active");
+    return getDebugBuffer();
+  }
+  long v = arg.toInt();
+  if (v < 0 || v > 60000) return "Usage: powercooldown <0..60000>  (ms; 0 disables)";
+  setSetting(gSettings.powerTransitionCooldownMs, (uint32_t)v);
+  snprintf(getDebugBuffer(), 1024,
+           "Sleep transition cooldown set to %ld ms%s",
+           v, v == 0 ? " (disabled)" : "");
+  return getDebugBuffer();
+}
+
 // Command table
 // Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry powerCommands[] = {
-  {"power", "Power management [mode] [auto] [threshold]", false, cmd_power, "Usage: power [mode <0-3>] [auto <on|off>] [threshold <percent>]"}
+  {"power",         "Power management [mode] [auto] [threshold]", false, cmd_power,         "Usage: power [mode <0-3>] [auto <on|off>] [threshold <percent>]"},
+  {"powercooldown", "Sleep transition cooldown (ms; 0 disables)", false, cmd_powercooldown, "Usage: powercooldown <0..60000>"}
 };
 
 const size_t powerCommandsCount = sizeof(powerCommands) / sizeof(powerCommands[0]);
@@ -254,7 +313,8 @@ static const SettingEntry powerSettingEntries[] = {
   { "mode", SETTING_U8, &gSettings.powerMode, 0, 0, nullptr, 0, 3, "Power Mode", "Performance,Balanced,PowerSaver,UltraSaver", false, nullptr, nullptr },
   { "autoMode", SETTING_BOOL, &gSettings.powerAutoMode, false, 0, nullptr, 0, 1, "Auto Mode", nullptr, false, nullptr, nullptr },
   { "batteryThreshold", SETTING_U8, &gSettings.powerBatteryThreshold, 20, 0, nullptr, 0, 100, "Battery Threshold (%)", nullptr, false, nullptr, nullptr },
-  { "displayDimLevel", SETTING_U8, &gSettings.powerDisplayDimLevel, 30, 0, nullptr, 0, 100, "Display Dim Level (%)", nullptr, false, nullptr, nullptr }
+  { "displayDimLevel", SETTING_U8, &gSettings.powerDisplayDimLevel, 30, 0, nullptr, 0, 100, "Display Dim Level (%)", nullptr, false, nullptr, nullptr },
+  { "transitionCooldownMs", SETTING_INT, &gSettings.powerTransitionCooldownMs, 5000, 0, nullptr, 0, 60000, "Sleep cooldown (ms, 0=disabled)", nullptr, false, nullptr, "powercooldown" }
 };
 
 // Columns: name, jsonSection, entries, count, isConnected, description

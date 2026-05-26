@@ -44,6 +44,15 @@ int countHealthy() {
   return n;
 }
 
+int countActive() {
+  if (!gMeshPeers) return 0;
+  int n = 0;
+  for (int i = 0; i < gMeshPeerSlots; i++) {
+    if (gMeshPeers[i].isActive) n++;
+  }
+  return n;
+}
+
 int countByRoom(const char* room) {
   return countMeshPeerMetaByRoom(room);
 }

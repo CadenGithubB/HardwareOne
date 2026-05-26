@@ -21,7 +21,7 @@
 #include "System_I2C.h"
 
 // OLED_I2C_ADDRESS, OLED_TRANSACTION, and oledConnected from OLED_Display.h
-extern GamepadCache gGamepadCache;
+extern InputCache gInputCache;
 
 // OLED text input
 extern String getOLEDTextInput(const char* prompt, bool masked, const char* defaultValue, int maxLen, bool* wasCancelled = nullptr, bool canSkip = true);
@@ -425,11 +425,11 @@ void resetWizardJoystickState() {
 JoystickNav readWizardJoystickNav() {
   JoystickNav nav = {false, false, false, false};
 
-  SensorCacheGuard g(gGamepadCache.mutex, pdMS_TO_TICKS(10), "wizard.joystickNav");
+  SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(10), "wizard.joystickNav");
   if (g.held) {
-    if (gGamepadCache.gamepadDataValid) {
-      int joyX = gGamepadCache.gamepadX;
-      int joyY = gGamepadCache.gamepadY;
+    if (gInputCache.dataValid) {
+      int joyX = gInputCache.joyX;
+      int joyY = gInputCache.joyY;
       
       int deltaX = joyX - JOYSTICK_CENTER;
       int deltaY = JOYSTICK_CENTER - joyY;  // Physical DOWN = positive (matches main menu)
@@ -616,9 +616,9 @@ static int showWizardOptionalPageIntro(SetupWizardPage page, const char* title,
     uint32_t buttons = lastButtons;
     bool haveButtons = false;
     {
-      SensorCacheGuard g(gGamepadCache.mutex, pdMS_TO_TICKS(10), "wizard.buttonRead");
-      if (g.held && gGamepadCache.gamepadDataValid) {
-        buttons = gGamepadCache.gamepadButtons;
+      SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(10), "wizard.buttonRead");
+      if (g.held && gInputCache.dataValid) {
+        buttons = gInputCache.buttons;
         haveButtons = true;
       }
     }
@@ -720,9 +720,9 @@ void handleOLEDESPNowPage(SetupWizardResult& result, bool& running) {
       uint32_t buttons = lastButtons;
       bool haveButtons = false;
       {
-        SensorCacheGuard g(gGamepadCache.mutex, pdMS_TO_TICKS(10), "wizard.buttonRead");
-        if (g.held && gGamepadCache.gamepadDataValid) {
-          buttons = gGamepadCache.gamepadButtons;
+        SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(10), "wizard.buttonRead");
+        if (g.held && gInputCache.dataValid) {
+          buttons = gInputCache.buttons;
           haveButtons = true;
         }
       }
@@ -909,9 +909,9 @@ bool getOLEDSetupModeSelection(int& setupMode) {
       uint32_t buttons = lastButtons;
       bool haveButtons = false;
       {
-        SensorCacheGuard g(gGamepadCache.mutex, pdMS_TO_TICKS(10), "wizard.buttonRead");
-        if (g.held && gGamepadCache.gamepadDataValid) {
-          buttons = gGamepadCache.gamepadButtons;
+        SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(10), "wizard.buttonRead");
+        if (g.held && gInputCache.dataValid) {
+          buttons = gInputCache.buttons;
           haveButtons = true;
         }
       }
@@ -1024,9 +1024,9 @@ bool getOLEDThemeSelection(bool& darkMode) {
       uint32_t buttons = lastButtons;
       bool haveButtons = false;
       {
-        SensorCacheGuard g(gGamepadCache.mutex, pdMS_TO_TICKS(10), "wizard.buttonRead");
-        if (g.held && gGamepadCache.gamepadDataValid) {
-          buttons = gGamepadCache.gamepadButtons;
+        SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(10), "wizard.buttonRead");
+        if (g.held && gInputCache.dataValid) {
+          buttons = gInputCache.buttons;
           haveButtons = true;
         }
       }

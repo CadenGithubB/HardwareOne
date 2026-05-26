@@ -447,7 +447,7 @@ void streamBondInner(httpd_req_t* req) {
         {id: 'thermal', name: 'Thermal',  mask: 0x01,  stream: data.streamThermal,  on: sc.thermalOn,  streamable: true},
         {id: 'tof',     name: 'ToF',      mask: 0x02,  stream: data.streamTof,      on: sc.tofOn,      streamable: true},
         {id: 'imu',     name: 'IMU',      mask: 0x04,  stream: data.streamImu,      on: sc.imuOn,      streamable: true},
-        {id: 'gamepad', name: 'Gamepad',  mask: 0x08,  stream: data.streamGamepad,  on: sc.gamepadOn,  streamable: true},
+        {id: 'input',   name: 'Input',    mask: 0x08,  stream: data.streamInput,    on: sc.inputOn,    streamable: true},
         {id: 'apds',    name: 'APDS',     mask: 0x10,  stream: false,               on: sc.apdsOn,     streamable: false},
         {id: 'gps',     name: 'GPS',      mask: 0x20,  stream: data.streamGps,      on: sc.gpsOn,      streamable: true},
         {id: 'rtc',     name: 'RTC',      mask: 0x40,  stream: data.streamRtc,      on: sc.rtcOn,      streamable: true},
@@ -1037,7 +1037,7 @@ static esp_err_t handleBondStatus(httpd_req_t* req) {
   webBondSendChunkf(req, "\"streamTof\":%s,", gSettings.bondStreamTof ? "true" : "false");
   webBondSendChunkf(req, "\"streamImu\":%s,", gSettings.bondStreamImu ? "true" : "false");
   webBondSendChunkf(req, "\"streamGps\":%s,", gSettings.bondStreamGps ? "true" : "false");
-  webBondSendChunkf(req, "\"streamGamepad\":%s,", gSettings.bondStreamGamepad ? "true" : "false");
+  webBondSendChunkf(req, "\"streamGamepad\":%s,", gSettings.bondStreamInput ? "true" : "false");
   webBondSendChunkf(req, "\"streamFmradio\":%s,", gSettings.bondStreamFmradio ? "true" : "false");
   webBondSendChunkf(req, "\"streamRtc\":%s,", gSettings.bondStreamRtc ? "true" : "false");
   webBondSendChunkf(req, "\"streamPresence\":%s,", gSettings.bondStreamPresence ? "true" : "false");
@@ -1082,8 +1082,8 @@ static esp_err_t handleBondStatus(httpd_req_t* req) {
 #if ENABLE_IMU_SENSOR
     localSensors |= CAP_SENSOR_IMU;
 #endif
-#if ENABLE_GAMEPAD_SENSOR
-    localSensors |= CAP_SENSOR_GAMEPAD;
+#if ENABLE_OLED_INPUT  // either gamepad or ANO encoder → device has input capability
+    localSensors |= CAP_SENSOR_INPUT;
 #endif
 #if ENABLE_GPS_SENSOR
     localSensors |= CAP_SENSOR_GPS;
@@ -1160,7 +1160,7 @@ static esp_err_t handleBondStatus(httpd_req_t* req) {
     webBondSendChunkf(req, "\"tof\":%s,", (connectedMask & CAP_SENSOR_TOF) ? "true" : "false");
     webBondSendChunkf(req, "\"imu\":%s,", (connectedMask & CAP_SENSOR_IMU) ? "true" : "false");
     webBondSendChunkf(req, "\"gps\":%s,", (connectedMask & CAP_SENSOR_GPS) ? "true" : "false");
-    webBondSendChunkf(req, "\"gamepad\":%s,", (connectedMask & CAP_SENSOR_GAMEPAD) ? "true" : "false");
+    webBondSendChunkf(req, "\"gamepad\":%s,", (connectedMask & CAP_SENSOR_INPUT) ? "true" : "false");
     webBondSendChunkf(req, "\"apds\":%s,", (connectedMask & CAP_SENSOR_APDS) ? "true" : "false");
     webBondSendChunkf(req, "\"fmradio\":%s,", (connectedMask & CAP_SENSOR_FMRADIO) ? "true" : "false");
     webBondSendChunkf(req, "\"presence\":%s,", (connectedMask & CAP_SENSOR_PRESENCE) ? "true" : "false");
@@ -1170,7 +1170,7 @@ static esp_err_t handleBondStatus(httpd_req_t* req) {
     webBondSendChunkf(req, "\"tofOn\":%s,", (enabledMask & CAP_SENSOR_TOF) ? "true" : "false");
     webBondSendChunkf(req, "\"imuOn\":%s,", (enabledMask & CAP_SENSOR_IMU) ? "true" : "false");
     webBondSendChunkf(req, "\"gpsOn\":%s,", (enabledMask & CAP_SENSOR_GPS) ? "true" : "false");
-    webBondSendChunkf(req, "\"gamepadOn\":%s,", (enabledMask & CAP_SENSOR_GAMEPAD) ? "true" : "false");
+    webBondSendChunkf(req, "\"gamepadOn\":%s,", (enabledMask & CAP_SENSOR_INPUT) ? "true" : "false");
     webBondSendChunkf(req, "\"presenceOn\":%s,", (enabledMask & CAP_SENSOR_PRESENCE) ? "true" : "false");
     webBondSendChunkf(req, "\"rtcOn\":%s,", (enabledMask & CAP_SENSOR_RTC) ? "true" : "false");
     webBondSendChunkf(req, "\"apdsOn\":%s,", (enabledMask & CAP_SENSOR_APDS) ? "true" : "false");
@@ -1279,7 +1279,7 @@ static esp_err_t handleBondStream(httpd_req_t* req) {
     else if (strcmp(sensorParam, "tof")      == 0) current = gSettings.bondStreamTof;
     else if (strcmp(sensorParam, "imu")      == 0) current = gSettings.bondStreamImu;
     else if (strcmp(sensorParam, "gps")      == 0) current = gSettings.bondStreamGps;
-    else if (strcmp(sensorParam, "gamepad")  == 0) current = gSettings.bondStreamGamepad;
+    else if (strcmp(sensorParam, "input")    == 0) current = gSettings.bondStreamInput;
     else if (strcmp(sensorParam, "fmradio")  == 0) current = gSettings.bondStreamFmradio;
     else if (strcmp(sensorParam, "presence") == 0) current = gSettings.bondStreamPresence;
     else if (strcmp(sensorParam, "rtc")      == 0) current = gSettings.bondStreamRtc;

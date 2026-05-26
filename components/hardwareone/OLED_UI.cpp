@@ -317,15 +317,20 @@ bool oledDialogHandleInput(uint32_t newlyPressed) {
 
   bool handled = false;
   
-  // Left/right to switch buttons
+  // Up/down to switch buttons. Even though the dialog button bar is
+  // horizontal visually, using LEFT/RIGHT here conflicts with the canonical
+  // LEFT-as-cancel mapping on the ANO encoder — pressing LEFT would move
+  // selection AND cancel the dialog in the same tick, wasting a state
+  // change. UP/DOWN is the canonical scroll axis and never conflicts with
+  // any button mapping.
   if (gOledDialog.buttonCount > 1) {
-    if (gNavEvents.left || gNavEvents.up) {
+    if (gNavEvents.up) {
       if (gOledDialog.selectedButton > 0) {
         gOledDialog.selectedButton--;
         oledMarkDirty();
       }
       handled = true;
-    } else if (gNavEvents.right || gNavEvents.down) {
+    } else if (gNavEvents.down) {
       if (gOledDialog.selectedButton < gOledDialog.buttonCount - 1) {
         gOledDialog.selectedButton++;
         oledMarkDirty();

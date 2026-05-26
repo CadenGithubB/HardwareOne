@@ -66,8 +66,15 @@ bool shouldBlockForDisplayAuth() {
 #if ENABLE_APDS_SENSOR
 #include "i2csensor_apds9960.h"
 #endif
-#if ENABLE_GAMEPAD_SENSOR
+#if ENABLE_OLED_INPUT
+// Includes the InputCache struct + gGamepad* extern declarations and
+// JOYSTICK_CENTER/DEADZONE constants — used by both the seesaw gamepad and
+// the ANO encoder driver (the ANO driver populates the gamepad-shaped cache
+// so OLED_Utils stays driver-agnostic).
 #include "i2csensor_seesaw.h"
+#if ENABLE_ANO_ENCODER
+#include "i2csensor_ano_encoder.h"
+#endif
 #endif
 #if ENABLE_IMU_SENSOR
 #include "i2csensor_bno055.h"
@@ -602,25 +609,28 @@ bool handleNotificationsInput(int deltaX, int deltaY, uint32_t newlyPressed) {
     return true;
   }
   
-  // In detail view: left/right (or up/down) scrolls between notifications
+  // In detail view: up/down scrolls between notifications. LEFT/RIGHT are
+  // reserved for back/forward (B on ANO encoder) — must NOT be consumed
+  // here or the centralized B-back fall-through never fires and the user
+  // gets stuck on the page.
   if (sNotificationsShowingDetail) {
-    if ((gNavEvents.left || gNavEvents.up) && sNotificationsSelectedIndex > 0) {
+    if (gNavEvents.up && sNotificationsSelectedIndex > 0) {
       sNotificationsSelectedIndex--;
       return true;
     }
-    if ((gNavEvents.right || gNavEvents.down) && sNotificationsSelectedIndex < count - 1) {
+    if (gNavEvents.down && sNotificationsSelectedIndex < count - 1) {
       sNotificationsSelectedIndex++;
       return true;
     }
     return false;
   }
 
-  // List view navigation
-  if ((gNavEvents.up || gNavEvents.left) && sNotificationsSelectedIndex > 0) {
+  // List view navigation (same rationale: up/down only, no axis conflation)
+  if (gNavEvents.up && sNotificationsSelectedIndex > 0) {
     sNotificationsSelectedIndex--;
     return true;
   }
-  if ((gNavEvents.down || gNavEvents.right) && sNotificationsSelectedIndex < count - 1) {
+  if (gNavEvents.down && sNotificationsSelectedIndex < count - 1) {
     sNotificationsSelectedIndex++;
     return true;
   }
@@ -1400,9 +1410,22 @@ bool oledKeyboardHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
     // Reset state when keyboard becomes inactive
     return false;
   }
-  
+
   bool inputHandled = false;
-  
+
+  // Wheel input — mode-agnostic single channel. gNavEvents.wheelDelta carries
+  // signed detent counts from any rotary input device (currently the ANO
+  // encoder). It's deliberately separate from deltaX/Y so wheel input doesn't
+  // have to fake joystick deflection — both signals can be non-zero on the
+  // same frame and both will be honoured (joystick MoveRight/Left/Up/Down +
+  // wheel Advance). oledKeyboardAdvance handles char-grid (row-major scan)
+  // and suggestion-list (linear scroll) modes internally, so this one call
+  // covers every keyboard sub-mode where wheel scrolling makes sense.
+  if (gNavEvents.wheelDelta != 0) {
+    oledKeyboardAdvance(gNavEvents.wheelDelta);
+    inputHandled = true;
+  }
+
   // Handle suggestion mode differently
   if (gOledKeyboardState.showingSuggestions) {
     // Y-axis navigates suggestions
@@ -1673,6 +1696,43 @@ void oledKeyboardMoveRight() {
   }
 }
 
+// Row-major / linear scan across the keyboard.
+//   • Normal char grid: treat the grid as a single linear strip of
+//     (ROWS * COLS) keys and move `steps` positions, wrapping at both ends.
+//     This is the behaviour the rotary wheel wants — a single dimension that
+//     the user can swipe through without ever having to think about rows.
+//   • Suggestions visible: scroll the suggestion list by `steps`, clamped at
+//     the ends (no wrap, because suggestions are an ordered ranked list and
+//     wrapping past the last one would be disorienting).
+//   • Pattern mode: ignored (pattern uses gesture deflection, not a cursor).
+//
+// `steps` can be any signed int; large magnitudes (e.g. accumulated detents
+// from a single OLED frame during a fast spin) are handled via positive-
+// remainder modulo so the result lands on a valid cell either direction.
+void oledKeyboardAdvance(int steps) {
+  if (!gOledKeyboardState.active) return;
+  if (steps == 0) return;
+
+  if (gOledKeyboardState.showingSuggestions) {
+    int last = (int)gOledKeyboardState.suggestionCount - 1;
+    if (last < 0) return;  // nothing to scroll
+    int next = (int)gOledKeyboardState.selectedSuggestion + steps;
+    if (next < 0) next = 0;
+    if (next > last) next = last;
+    gOledKeyboardState.selectedSuggestion = (uint8_t)next;
+    return;
+  }
+
+  if (gOledKeyboardState.mode == KEYBOARD_MODE_PATTERN) return;
+
+  const int total = OLED_KEYBOARD_ROWS * OLED_KEYBOARD_COLS;
+  int linear = gOledKeyboardState.cursorY * OLED_KEYBOARD_COLS + gOledKeyboardState.cursorX;
+  // Signed-safe modulo with positive remainder so `steps` can be negative.
+  int next = ((linear + steps) % total + total) % total;
+  gOledKeyboardState.cursorY = next / OLED_KEYBOARD_COLS;
+  gOledKeyboardState.cursorX = next % OLED_KEYBOARD_COLS;
+}
+
 void oledKeyboardSelectChar() {
   // Get character at current cursor position
   char selectedChar = getCharAt(gOledKeyboardState.cursorY, gOledKeyboardState.cursorX);
@@ -1850,16 +1910,16 @@ static bool oledConfirmHandleInput(uint32_t newlyPressed) {
 
   bool handled = false;
 
+  // UP = Yes, DOWN = No. LEFT/RIGHT used to also toggle but that conflicted
+  // with ANO LEFT-as-cancel — pressing LEFT would flip the selection then
+  // immediately fire B-cancel in the same tick. UP/DOWN is sufficient and
+  // unambiguous.
   if (gNavEvents.up) {
     gOledConfirmState.selectYes = true;
     oledMarkDirty();
     handled = true;
   } else if (gNavEvents.down) {
     gOledConfirmState.selectYes = false;
-    oledMarkDirty();
-    handled = true;
-  } else if (gNavEvents.left || gNavEvents.right) {
-    gOledConfirmState.selectYes = !gOledConfirmState.selectYes;
     oledMarkDirty();
     handled = true;
   }
@@ -2504,10 +2564,10 @@ void oledMarkDirtyUntil(unsigned long untilMs) {
 
 bool oledIsDirty() {
   extern volatile unsigned long gSensorStatusSeq;
-  extern GamepadCache gGamepadCache;
+  extern InputCache gInputCache;
   
   if (oledForceNextRender) return true;
-  if (gGamepadCache.gamepadSeq != oledLastRenderedGamepadSeq) return true;
+  if (gInputCache.seq != oledLastRenderedGamepadSeq) return true;
   if (gSensorStatusSeq != oledLastRenderedSensorSeq) return true;
   if (oledPairingRibbonActive()) return true;  // Continuous render during notification animations
   if (millis() < oledDirtyUntilMs) return true;  // Timed dirty (popup auto-dismiss, etc.)
@@ -2516,10 +2576,10 @@ bool oledIsDirty() {
 
 void oledClearDirty() {
   extern volatile unsigned long gSensorStatusSeq;
-  extern GamepadCache gGamepadCache;
+  extern InputCache gInputCache;
   
   oledForceNextRender = false;
-  oledLastRenderedGamepadSeq = gGamepadCache.gamepadSeq;
+  oledLastRenderedGamepadSeq = gInputCache.seq;
   oledLastRenderedSensorSeq = gSensorStatusSeq;
 }
 
@@ -2621,6 +2681,16 @@ void requestOLEDMode(OLEDMode newMode, const char* reason, bool pushStack) {
     DEBUG_DISPLAYF("[OLED_MODE] entry hook: LLM state reset");
     extern void resetLLMOLEDState();
     resetLLMOLEDState();
+  }
+#endif
+
+#if ENABLE_ANO_ENCODER
+  // Reset the rotary axis on every mode change so a horizontal-axis flip from
+  // one mode doesn't bleed into the next. MVP defaults to vertical for every
+  // mode — a per-mode hint can be added later if a mode prefers to start
+  // horizontal (radio tuner, map zoom, etc.).
+  if (newMode != currentOLEDMode) {
+    anoEncoderResetAxisForMode(ANO_AXIS_VERTICAL);
   }
 #endif
 
@@ -2879,7 +2949,7 @@ bool initOLEDDisplay() {
     
     // Show initial splash screen
     gDisplay->clearDisplay();
-    gDisplay->setRotation(2);
+    gDisplay->setRotation(gSettings.oledFlipped ? 2 : 0);
     gDisplay->setTextSize(1);
     gDisplay->setTextColor(DISPLAY_COLOR_WHITE);
     gDisplay->setCursor(0, 0);
@@ -2939,9 +3009,9 @@ void stopOLEDDisplay() {
 
 // displaySystemStatus() moved to OLED_Mode_System.cpp
 // displaySensorData() moved to OLED_Mode_Sensors.cpp
-// displayThermalVisual() moved to Sensor_Thermal_MLX90640.cpp (modular OLED mode)
+// displayThermalVisual() moved to i2csensor_mlx90640.cpp (modular OLED mode)
 
-// displayGPSData() moved to Sensor_GPS_PA1010D.cpp (modular OLED mode)
+// displayGPSData() moved to i2csensor_pa1010d.cpp (modular OLED mode)
 
 // displayFmRadio() moved to fm_radio.cpp (modular OLED mode)
 
@@ -2999,16 +3069,16 @@ void projectCubePoint(float x, float y, float z, int& screenX, int& screenY, int
 
 // displayLogo() moved to OLED_Mode_Menu.cpp
 
-// displayIMUActions() moved to Sensor_IMU_BNO055.cpp (modular OLED mode)
+// displayIMUActions() moved to i2csensor_bno055.cpp (modular OLED mode)
 
-// displayToFData() moved to Sensor_ToF_VL53L4CX.cpp (modular OLED mode)
+// displayToFData() moved to i2csensor_vl53l4cx.cpp (modular OLED mode)
 
-// displayAPDSData() moved to Sensor_APDS_APDS9960.cpp (modular OLED mode)
+// displayAPDSData() moved to i2csensor_apds9960.cpp (modular OLED mode)
 // displayConnectedSensors() moved to OLED_Mode_Sensors.cpp
 
 // Forward declaration for gamepad input processing
-bool processGamepadMenuInput();
-void tryAutoStartGamepadForMenu();
+bool processOLEDInput();
+void tryAutoStartInputForMenu();
 
 void updateOLEDDisplay() {
   // animationLastUpdate, animationFrame, animationFPS are now defined at top of file
@@ -3033,7 +3103,7 @@ void updateOLEDDisplay() {
   }
 
   // Process gamepad input for menu navigation (runs every frame, handles its own debouncing)
-  bool inputProcessed = processGamepadMenuInput();
+  bool inputProcessed = processOLEDInput();
   if (inputProcessed) {
     oledMarkDirty();
   }
@@ -3064,7 +3134,7 @@ void updateOLEDDisplay() {
       return;  // Not time to check yet
     }
     
-    // Skip render if nothing changed (uses gamepadSeq + sensorStatusSeq)
+    // Skip render if nothing changed (uses seq + sensorStatusSeq)
     if (!modeChanged && !oledIsDirty()) {
       oledLastUpdate = now;  // Reset timer even if we skip
       return;  // Nothing changed, skip expensive render
@@ -3159,7 +3229,7 @@ void updateOLEDDisplay() {
       // OLED_SYSTEM_STATUS handled by registered mode in OLED_Mode_System.cpp
       // OLED_SENSOR_DATA handled by registered mode in OLED_Mode_Sensors.cpp
       // OLED_SENSOR_LIST / OLED_BOOT_SENSORS handled by registered mode in OLED_Mode_Sensors.cpp
-      // OLED_THERMAL_VISUAL handled by registered mode in Sensor_Thermal_MLX90640.cpp
+      // OLED_THERMAL_VISUAL handled by registered mode in i2csensor_mlx90640.cpp
       // OLED_NETWORK_INFO handled by registered mode in OLED_Mode_Network.cpp
       // OLED_MESH_STATUS handled by registered mode in OLED_Mode_Network.cpp
       // OLED_CUSTOM_TEXT handled by registered mode in OLED_Mode_System.cpp
@@ -3167,8 +3237,8 @@ void updateOLEDDisplay() {
 
       // OLED_LOGO handled by registered mode in OLED_Mode_Menu.cpp
       // OLED_ANIMATION handled by registered mode in OLED_Mode_Animations.cpp
-      // OLED_IMU_ACTIONS handled by registered mode in Sensor_IMU_BNO055.cpp
-      // OLED_GPS_DATA handled by registered mode in Sensor_GPS_PA1010D.cpp
+      // OLED_IMU_ACTIONS handled by registered mode in i2csensor_bno055.cpp
+      // OLED_GPS_DATA handled by registered mode in i2csensor_pa1010d.cpp
       // OLED_FM_RADIO handled by registered mode in fm_radio.cpp
       // OLED_FILE_BROWSER handled by registered mode in OLED_Mode_FileBrowser.cpp
 
@@ -3180,7 +3250,7 @@ void updateOLEDDisplay() {
       // When ENABLE_AUTOMATION is set, OLED_AUTOMATIONS is handled by registered mode in OLED_Mode_Automations.cpp
 
       // OLED_ESPNOW handled by registered mode in OLED_Mode_Network.cpp
-      // OLED_TOF_DATA handled by registered mode in Sensor_ToF_VL53L4CX.cpp
+      // OLED_TOF_DATA handled by registered mode in i2csensor_vl53l4cx.cpp
       // OLED_APDS_DATA handled by registered mode in i2csensor_apds9960_oled.h
       // OLED_POWER / OLED_POWER_CPU / OLED_POWER_SLEEP handled by registered mode in OLED_Mode_Power.cpp
       // OLED_MEMORY_STATS handled by registered mode in OLED_Mode_System.cpp
@@ -3391,6 +3461,27 @@ const char* cmd_oled_brightness(const String& argsInput) {
   return getDebugBuffer();
 }
 
+// Flip the OLED 180° (and live-apply by re-rotating the active display).
+// Persisted via oledFlipped so the same orientation comes back on the next boot.
+const char* cmd_oled_flip(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+  String arg = argsInput; arg.trim(); arg.toLowerCase();
+  if (arg.length() == 0) {
+    snprintf(getDebugBuffer(), 1024, "OLED flip: %s", gSettings.oledFlipped ? "on (rotated 180°)" : "off (normal)");
+    return getDebugBuffer();
+  }
+  bool target;
+  if (arg == "on" || arg == "true" || arg == "1")       target = true;
+  else if (arg == "off" || arg == "false" || arg == "0") target = false;
+  else if (arg == "toggle")                              target = !gSettings.oledFlipped;
+  else return "Usage: oledflip [on|off|toggle]";
+  setSetting(gSettings.oledFlipped, target);
+  applyOLEDRotation();
+  snprintf(getDebugBuffer(), 1024, "OLED flip: %s", target ? "on (rotated 180°)" : "off (normal)");
+  return getDebugBuffer();
+}
+
 const char* cmd_oled_thermalscale(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
@@ -3495,7 +3586,7 @@ const char* cmd_oledmode(const String& argsInput) {
   switch (target) {
     case OLED_MENU:
       resetOLEDMenu();
-      tryAutoStartGamepadForMenu();
+      tryAutoStartInputForMenu();
       break;
     case OLED_ANIMATION:
       animationFrame = 0;
@@ -3959,8 +4050,15 @@ bool earlyOLEDInit() {
       oledConnected = true;
       gOledEnabled = true;
 
-      // Set rotation (0 = normal, 2 = 180 degrees)
-      oledDisplay->setRotation(2);
+      // Set rotation (0 = normal, 2 = 180 degrees) — persisted via oledFlipped
+      oledDisplay->setRotation(gSettings.oledFlipped ? 2 : 0);
+
+      // Set up the input abstraction layer NOW (not lazily from
+      // initOLEDDisplay later) so button mappings are live for any pre-WiFi
+      // OLED mode that reads INPUT_CHECK. The static initializer in
+      // HAL_Input.cpp already derives from INPUT_TYPE; this is a no-op
+      // resync in case the controller type was changed at runtime earlier.
+      inputAbstractionInit();
 
       // Start boot animation immediately
       currentBootPhase = BOOT_PHASE_ANIMATION;
@@ -4055,8 +4153,8 @@ void processOLEDBootSequence() {
           }
           
           // Auto-start gamepad if setting is enabled and I2C bus is enabled
-          if (gSettings.gamepadAutoStart && gSettings.i2cBusEnabled) {
-            tryAutoStartGamepadForMenu();
+          if (gSettings.inputAutoStart && gSettings.i2cBusEnabled) {
+            tryAutoStartInputForMenu();
           }
         }
       }
@@ -4153,7 +4251,11 @@ const OLEDMenuItem oledMenuCategory3[] = {
 #if ENABLE_ESP_SR
   { "Speech",     "notify_sensor",     OLED_SPEECH },
 #endif
-#if ENABLE_GPS_SENSOR || ENABLE_MAPS
+#if ENABLE_GPS_SENSOR && ENABLE_MAPS
+  // Map needs BOTH: GPS hardware to know your position AND map software to
+  // render tiles. Was an OR previously, so on builds with GPS on but maps
+  // off the entry would appear in the hardware menu pointing at a mode
+  // that no longer registers (gated at the file level in OLED_Mode_Map.cpp).
   { "Map",        "compass",           OLED_GPS_MAP },
 #endif
 };
@@ -4826,7 +4928,7 @@ MenuAvailability getMenuAvailability(OLEDMode mode, String* outReason) {
         if (outReason) *outReason = "Not built";
         return MenuAvailability::NOT_BUILT;
 #else
-      if (gGamepadConnected) {
+      if (gInputConnected) {
         return MenuAvailability::AVAILABLE;
       }
       // Check if hardware was detected during I2C scan (address 0x50)
@@ -5188,7 +5290,7 @@ void resetOLEDMenu() {
 // Gamepad Input for OLED Menu Navigation
 // ============================================================================
 
-#if ENABLE_GAMEPAD_SENSOR
+#if ENABLE_OLED_INPUT
 
 // Gamepad navigation state
 static unsigned long lastGamepadNavTime = 0;
@@ -5205,7 +5307,7 @@ static const unsigned long MENU_INITIAL_DELAY_MS = 200;  // Delay before auto-re
 static const unsigned long MENU_REPEAT_DELAY_MS = 100;   // Delay between repeated movements
 
 // Centralized navigation events - computed once per frame, used by all handlers
-NavEvents gNavEvents = {false, false, false, false, 0, 0};
+NavEvents gNavEvents = {false, false, false, false, 0, 0, 0};
 
 // =============================================================================
 // Data Source Selection (for bond mode)
@@ -5279,17 +5381,17 @@ static bool gInputStateValid = false;
  */
 void updateInputState() {
 #if ENABLE_GAMEPAD_SENSOR
-  if (!gGamepadCache.mutex) {
+  if (!gInputCache.mutex) {
     gInputStateValid = false;
     return;
   }
   
-  SensorCacheGuard g(gGamepadCache.mutex, pdMS_TO_TICKS(10), "oled.inputStateRead");
+  SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(10), "oled.inputStateRead");
   if (g.held) {
-    if (gGamepadCache.gamepadDataValid) {
-      gCurrentJoyX = gGamepadCache.gamepadX;
-      gCurrentJoyY = gGamepadCache.gamepadY;
-      gCurrentButtons = gGamepadCache.gamepadButtons;
+    if (gInputCache.dataValid) {
+      gCurrentJoyX = gInputCache.joyX;
+      gCurrentJoyY = gInputCache.joyY;
+      gCurrentButtons = gInputCache.buttons;
       gInputStateValid = true;
     } else {
       gInputStateValid = false;
@@ -5307,7 +5409,7 @@ void updateInputState() {
  * Returns button mask with newly pressed buttons
  */
 uint32_t getNewlyPressedButtons() {
-#if ENABLE_GAMEPAD_SENSOR
+#if ENABLE_OLED_INPUT
   if (!gInputStateValid) {
     return 0;
   }
@@ -5337,7 +5439,7 @@ uint32_t getNewlyPressedButtons() {
  * Note: Y is inverted to match menu convention where pushing down increases values
  */
 void getJoystickDelta(int& deltaX, int& deltaY) {
-#if ENABLE_GAMEPAD_SENSOR
+#if ENABLE_OLED_INPUT
   if (!gInputStateValid) {
     deltaX = 0;
     deltaY = 0;
@@ -5505,19 +5607,19 @@ void handleOLEDActionButton() {
  * Call this from updateOLEDDisplay() when in menu mode
  * Returns true if input was processed
  */
-bool processGamepadMenuInput() {
+bool processOLEDInput() {
   unsigned long now = millis();
   bool shouldDebug = (now - lastGamepadDebugTime >= GAMEPAD_DEBUG_INTERVAL);
   
   // Check gamepad enabled/connected - silent exit when disabled (no spam)
-  if (!gGamepadEnabled) {
+  if (!gInputEnabled) {
     return false;
   }
   
   // Read from gamepad cache (thread-safe)
-  if (!gGamepadCache.mutex) {
+  if (!gInputCache.mutex) {
     if (shouldDebug) {
-      DEBUG_DISPLAYF("[GAMEPAD_MENU] Exit: gGamepadCache.mutex is NULL addrs &en=%p &conn=%p &cache=%p\n", (void*)&gGamepadEnabled, (void*)&gGamepadConnected, (void*)&gGamepadCache);
+      DEBUG_DISPLAYF("[GAMEPAD_MENU] Exit: gInputCache.mutex is NULL addrs &en=%p &conn=%p &cache=%p\n", (void*)&gInputEnabled, (void*)&gInputConnected, (void*)&gInputCache);
       lastGamepadDebugTime = now;
     }
     return false;
@@ -5530,15 +5632,15 @@ bool processGamepadMenuInput() {
   
   uint32_t latchedPresses = 0;
   {
-    SensorCacheGuard g(gGamepadCache.mutex, pdMS_TO_TICKS(10), "oled.gamepadMenuRead");
+    SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(10), "oled.gamepadMenuRead");
     if (g.held) {
       mutexTaken = true;
-      if (gGamepadCache.gamepadDataValid) {
-        joyX = gGamepadCache.gamepadX;
-        joyY = gGamepadCache.gamepadY;
-        buttons = gGamepadCache.gamepadButtons;
-        latchedPresses = gGamepadCache.buttonPressedAccum;
-        gGamepadCache.buttonPressedAccum = 0;  // Consume accumulated presses
+      if (gInputCache.dataValid) {
+        joyX = gInputCache.joyX;
+        joyY = gInputCache.joyY;
+        buttons = gInputCache.buttons;
+        latchedPresses = gInputCache.buttonPressedAccum;
+        gInputCache.buttonPressedAccum = 0;  // Consume accumulated presses
         dataValid = true;
       }
     }
@@ -5586,7 +5688,20 @@ bool processGamepadMenuInput() {
   
   // EARLY EXIT: No input at all - skip all computation
   // But NOT when keyboard is active: pattern mode needs center-return events to reset deflection state
-  if (!hasJoystickInput && !hasButtonChange && !wasDeflectedX && !wasDeflectedY) {
+  //
+  // ANO encoder caveat: rotation alone doesn't deflect the joystick (joyX/Y
+  // stay at CENTER) and doesn't change `buttons` either. Without peeking at
+  // the encoder's pending-detents cache here, a wheel-only spin would early-
+  // exit and never reach the consumer below — detents would pile up forever
+  // and only get drained the next time the user pressed a button.
+  bool hasEncoderInput = false;
+#if ENABLE_ANO_ENCODER
+  // No mutex: encoderDelta is a single int32_t, racing with the driver's
+  // accumulate is benign — we read a slightly stale value, the next frame
+  // catches up. Cheaper than a 5ms guard on the hot path.
+  hasEncoderInput = (gAnoEncoderCache.encoderDelta != 0);
+#endif
+  if (!hasJoystickInput && !hasButtonChange && !wasDeflectedX && !wasDeflectedY && !hasEncoderInput) {
     if (!oledKeyboardIsActive()) return false;
   }
   
@@ -5624,8 +5739,94 @@ bool processGamepadMenuInput() {
   // CENTRALIZED NAVIGATION EVENTS - computed once, used by all handlers
   // =========================================================================
   // Reset navigation events
-  gNavEvents = {false, false, false, false, deltaX, deltaY};
-  
+  gNavEvents = {false, false, false, false, deltaX, deltaY, 0};
+
+#if ENABLE_ANO_ENCODER
+  // Canonical-signal model: every input device emits ONLY the signals that
+  // describe what it physically is. The ANO encoder has two physical input
+  // primitives — a quadrature wheel and 5 discrete buttons — and nothing
+  // about a joystick. So we emit:
+  //
+  //   • gNavEvents.wheelDelta — sum of detents consumed this frame (signed).
+  //     A separate channel from deltaX/Y so the wheel never has to fake
+  //     analog deflection. Mode handlers that want fine-grained wheel
+  //     response read this directly; modes that only want "one nav per
+  //     event" read the booleans below.
+  //
+  //   • gNavEvents.up/down/left/right — edge-style "nav happened" bools,
+  //     emitted from BOTH wheel sign (axis-aware) AND dpad press edges, so
+  //     existing menu code that only checks booleans keeps working without
+  //     change.
+  //
+  //   • newlyPressed (downstream) — button rising edges from IN/UP/DOWN/
+  //     LEFT/RIGHT plus the synthesized START from RIGHT+IN chord, mapped
+  //     to logical INPUT_BUTTON_* via gAnoEncoderMapping. Handlers read
+  //     these via INPUT_CHECK exactly as on the gamepad.
+  //
+  //   • deltaX/deltaY — left untouched (stays at 0 for the ANO because
+  //     joyX/joyY are always JOYSTICK_CENTER). Joystick-deflection-aware
+  //     modes (pattern keyboard, FM radio tuner) get nothing from the ANO,
+  //     which is correct: the wheel isn't a joystick.
+  //
+  // No mode-awareness here. The keyboard, menus, and any future mode read
+  // whichever signals make sense for them; this layer just reports what
+  // the hardware did.
+
+  // ---- Wheel ----
+  // Drain ALL pending detents in one frame. consumeOneDetent returns one
+  // at a time and is cheap; a fast spin produces a single proportional
+  // wheelDelta that the consumer can apply in one step instead of dribbling
+  // events across OLED ticks (where the OLED's 8 Hz update would cap the
+  // effective scroll rate).
+  {
+    int totalDetents = 0;
+    int d;
+    while ((d = anoEncoderConsumeOneDetent()) != 0) {
+      totalDetents += d;
+      if (totalDetents > 64 || totalDetents < -64) break;  // safety clamp
+    }
+    gNavEvents.wheelDelta = totalDetents;
+
+    // Boolean nav events from wheel sign — axis chooses up/down vs left/
+    // right so modes that pre-date wheelDelta still respond. One bool max
+    // per frame regardless of detent count; modes that want proportional
+    // response read wheelDelta.
+    if (totalDetents != 0) {
+      uint8_t axis = ANO_AXIS_VERTICAL;
+      if (gAnoEncoderCache.mutex) {
+        SensorCacheGuard g(gAnoEncoderCache.mutex, pdMS_TO_TICKS(5), "ano.readAxis");
+        if (g.held) axis = gAnoEncoderCache.currentAxis;
+      }
+      if (totalDetents > 0) {
+        if (axis == ANO_AXIS_VERTICAL) gNavEvents.down  = true;
+        else                            gNavEvents.right = true;
+      } else {
+        if (axis == ANO_AXIS_VERTICAL) gNavEvents.up   = true;
+        else                            gNavEvents.left = true;
+      }
+      DEBUG_ANO_ENCODER_VALUESF("[ANO_VAL] wheel    delta=%+d axis=%s",
+                                totalDetents, axis == ANO_AXIS_VERTICAL ? "V" : "H");
+    }
+  }
+
+  // ---- Dpad ----
+  // Edge-detected → boolean nav events. NO deltaX/Y emission: the dpad is a
+  // digital input device with no analog magnitude. Modes that want sustained
+  // / auto-repeat directional input use the wheel; modes that want a single
+  // nav step per press read the booleans here. The press also lands in
+  // newlyPressed downstream, where INPUT_CHECK maps it to its logical
+  // INPUT_BUTTON_* role (LEFT=B, UP=Y, DOWN=X, RIGHT=SELECT).
+  {
+    uint32_t dpadEdge = latchedPresses & (ANO_BTN_UP | ANO_BTN_DOWN | ANO_BTN_LEFT | ANO_BTN_RIGHT);
+    if (dpadEdge) {
+      if (dpadEdge & ANO_BTN_UP)    gNavEvents.up    = true;
+      if (dpadEdge & ANO_BTN_DOWN)  gNavEvents.down  = true;
+      if (dpadEdge & ANO_BTN_LEFT)  gNavEvents.left  = true;
+      if (dpadEdge & ANO_BTN_RIGHT) gNavEvents.right = true;
+      DEBUG_ANO_ENCODER_VALUESF("[ANO_VAL] dpad     edge=0x%02lX", (unsigned long)dpadEdge);
+    }
+  }
+#else
   // Compute X-axis navigation with auto-repeat
   if (deflectedX) {
     bool shouldMoveX = false;
@@ -5673,6 +5874,7 @@ bool processGamepadMenuInput() {
       }
     }
   }
+#endif  // !ENABLE_ANO_ENCODER (joystick → nav events)
   // =========================================================================
 
   {
@@ -5723,15 +5925,13 @@ bool processGamepadMenuInput() {
       return inputProcessed;
     }
     
-    // Menu navigation - list style only (1 item per direction)
-    // Use centralized navigation events (already computed with debounce/auto-repeat)
-    if (gNavEvents.right) {
-      oledMenuDown();  // Right = next item
-      inputProcessed = true;
-    } else if (gNavEvents.left) {
-      oledMenuUp();    // Left = prev item
-      inputProcessed = true;
-    } else if (gNavEvents.down) {
+    // Menu navigation - list style only (1 item per direction). UP/DOWN
+    // only — LEFT/RIGHT are reserved for B-back / function on ANO encoder.
+    // Previously LEFT was treated as "prev item" which dual-fired with the
+    // INPUT_BUTTON_B handler below: in a category submenu, ANO LEFT both
+    // scrolled the selection AND popped back. The scroll was wasted; UP/
+    // DOWN is the only sensible scroll axis here.
+    if (gNavEvents.down) {
       oledMenuDown();  // Down = next item
       inputProcessed = true;
     } else if (gNavEvents.up) {
@@ -5929,6 +6129,16 @@ bool processGamepadMenuInput() {
     // Check if this mode has a registered custom input handler
     const OLEDModeEntry* registeredMode = findOLEDMode(currentOLEDMode);
     if (registeredMode && registeredMode->inputFunc) {
+#if ENABLE_ANO_ENCODER
+      // Mode-dispatch log under ANO (VALUES). Shows exactly what arguments the
+      // mode's inputFunc receives — the place where wheel/button events finally
+      // become menu navigation. Suppressed when nothing meaningful is happening.
+      if (deltaX != 0 || deltaY != 0 || newlyPressed != 0) {
+        DEBUG_ANO_ENCODER_VALUESF("[ANO_VAL] dispatch mode=%d dX=%d dY=%d newly=0x%08lX",
+                                  (int)currentOLEDMode, deltaX, deltaY,
+                                  (unsigned long)newlyPressed);
+      }
+#endif
       // Use custom input handler - it returns false if it wants to exit the mode
       bool handlerProcessed = registeredMode->inputFunc(deltaX, deltaY, newlyPressed);
       if (handlerProcessed) {
@@ -5963,42 +6173,56 @@ bool processGamepadMenuInput() {
 /**
  * Try to auto-start gamepad when entering menu mode
  */
-void tryAutoStartGamepadForMenu() {
-  DEBUG_DISPLAYF("[GAMEPAD_AUTO] tryAutoStartGamepadForMenu: enabled=%d connected=%d\n", gGamepadEnabled, gGamepadConnected);
-  if (gGamepadEnabled && gGamepadConnected) {
+void tryAutoStartInputForMenu() {
+  DEBUG_DISPLAYF("[GAMEPAD_AUTO] tryAutoStartInputForMenu: enabled=%d connected=%d\n", gInputEnabled, gInputConnected);
+  if (gInputEnabled && gInputConnected) {
     DEBUG_DISPLAYF("[GAMEPAD_AUTO] Already running, skipping");
     return;  // Already running
   }
 
   bool inFirstTimeSetup = (gFirstTimeSetupState != SETUP_NOT_NEEDED);
   if (!inFirstTimeSetup) {
-    if (!gSettings.gamepadAutoStart || !gSettings.i2cBusEnabled) {
+    // Pick the right auto-start setting for the active input driver.
+#if ENABLE_ANO_ENCODER
+    bool autoStart = gSettings.inputAutoStart;
+#else
+    bool autoStart = gSettings.inputAutoStart;
+#endif
+    if (!autoStart || !gSettings.i2cBusEnabled) {
       return;
     }
   }
-  
-  // Check if gamepad hardware is present via I2C ping
-  bool pingResult = i2cPingAddress(I2C_ADDR_GAMEPAD, 100000, 50);
-  DEBUG_DISPLAYF("[GAMEPAD_AUTO] I2C ping 0x50 result: %d\n", pingResult);
+
+  // Resolve the active input device's I2C address — gamepad at 0x50, or
+  // the ANO encoder at whatever the user configured (default 0x49).
+#if ENABLE_ANO_ENCODER
+  uint8_t inputAddr = (gSettings.anoEncoderI2cAddr > 0 && gSettings.anoEncoderI2cAddr < 0x80)
+                        ? (uint8_t)gSettings.anoEncoderI2cAddr
+                        : I2C_ADDR_ANO_ENCODER;
+#else
+  uint8_t inputAddr = I2C_ADDR_GAMEPAD;
+#endif
+  bool pingResult = i2cPingAddress(inputAddr, 100000, 50);
+  DEBUG_DISPLAYF("[INPUT_AUTO] I2C ping 0x%02X result: %d\n", inputAddr, pingResult);
   if (pingResult) {
-    // Gamepad detected - try to start it
-    bool inQueue = isInQueue(I2C_DEVICE_GAMEPAD);
-    DEBUG_DISPLAYF("[GAMEPAD_AUTO] inQueue=%d\n", inQueue);
+    // Input device detected — try to start it via the shared queue slot.
+    bool inQueue = isInQueue(I2C_DEVICE_INPUT);
+    DEBUG_DISPLAYF("[INPUT_AUTO] inQueue=%d\n", inQueue);
     if (!inQueue) {
-      bool enqueued = enqueueDeviceStart(I2C_DEVICE_GAMEPAD);
-      DEBUG_DISPLAYF("[GAMEPAD_AUTO] enqueueDeviceStart result: %d\n", enqueued);
-      DEBUG_DISPLAYF("[OLED] Auto-starting gamepad for menu navigation");
+      bool enqueued = enqueueDeviceStart(I2C_DEVICE_INPUT);
+      DEBUG_DISPLAYF("[INPUT_AUTO] enqueueDeviceStart result: %d\n", enqueued);
+      DEBUG_DISPLAYF("[OLED] Auto-starting input device for menu navigation");
     }
   }
 }
 
-#else // !ENABLE_GAMEPAD_SENSOR
+#else // !ENABLE_OLED_INPUT
 
-// Stubs when gamepad is disabled
-bool processGamepadMenuInput() { return false; }
-void tryAutoStartGamepadForMenu() {}
+// Stubs when no input device is built in
+bool processOLEDInput() { return false; }
+void tryAutoStartInputForMenu() {}
 
-#endif // ENABLE_GAMEPAD_SENSOR
+#endif // ENABLE_OLED_INPUT
 
 // ============================================================================
 // OLED File Browser (128x64 optimized)
@@ -6054,6 +6278,7 @@ const CommandEntry oledCommands[] = {
   { "oledbootduration", "Boot animation duration (ms): <500-10000>", false, cmd_oled_bootduration },
   { "oledupdateinterval", "Display update interval (ms): <10-1000>", false, cmd_oled_updateinterval },
   { "oledbrightness", "Display brightness: <0-255>", false, cmd_oled_brightness },
+  { "oledflip",       "Flip display 180°: [on|off|toggle]", false, cmd_oled_flip, "Usage: oledflip [on|off|toggle]" },
   { "oledthermalscale", "Thermal image scale: <1.0-10.0>", false, cmd_oled_thermalscale },
   { "oledthermalcolormode", "Thermal color mode: <3level|grayscale|binary>", false, cmd_oled_thermalcolormode },
 };
@@ -6108,10 +6333,26 @@ void applyOLEDBrightness() {
 #endif
 }
 
+// Apply oledFlipped live by re-rotating the active display. setRotation only
+// changes the GFX coordinate transform — anything already in the frame buffer
+// stays in the old orientation until the next render tick draws over a cleared
+// buffer, so we clear + flush once to avoid showing a mirrored intermediate
+// frame. The next normal mode tick repaints in the new orientation.
+void applyOLEDRotation() {
+#if ENABLE_OLED_DISPLAY
+  if (!oledConnected || !gOledEnabled || !gDisplay) return;
+  uint8_t rot = gSettings.oledFlipped ? 2 : 0;
+  gDisplay->setRotation(rot);
+  gDisplay->clearDisplay();
+  displayUpdate();
+#endif
+}
+
 void oledApplySettings() {
 #if ENABLE_OLED_DISPLAY
   if (oledConnected && gOledEnabled) {
     applyOLEDBrightness();
+    applyOLEDRotation();
     DEBUG_SYSTEMF("OLED settings applied - boot animation running");
   }
 #endif
@@ -6136,8 +6377,8 @@ void oledNotifyLocalDisplayAuthChanged() {
   if (gLocalDisplayAuthed && currentOLEDMode == OLED_LOGIN) {
     requestOLEDMode(OLED_MENU, "auth.notify.loggedin", false);
     resetOLEDMenu();
-    tryAutoStartGamepadForMenu();
-#if ENABLE_GAMEPAD_SENSOR
+    tryAutoStartInputForMenu();
+#if ENABLE_OLED_INPUT
     // Prevent the login-confirm A press from being interpreted as a menu-select
     // on the first menu frame (avoids a brief flash into the first menu item).
     lastButtonStateInitialized = false;
@@ -6159,6 +6400,150 @@ void oledDisplayOff() {
       oledDisplay->ssd1306_command(SSD1306_DISPLAYOFF);
     });
   }
+#endif
+}
+
+// Pre-sleep + post-wake helpers. These supersede oledDisplayOff/On for
+// sleep flows because on power-gated boards (FeatherS3[D]) we also have to
+// kill / restore LDO2 — which means the SSD1306 chip loses Vcc and needs a
+// full re-init on wake. On other boards they degrade gracefully to a plain
+// SSD1306-DISPLAYOFF / DISPLAYON, so cmd_lightsleep + deep-sleep entry can
+// always call these instead of the lower-level helpers.
+void oledPrepareForSleep() {
+#if ENABLE_OLED_DISPLAY
+  // Step 1: send DISPLAYOFF while the chip still has power, so it shuts down
+  // its charge pump cleanly rather than just losing Vcc mid-frame.
+  oledDisplayOff();
+  delay(10);  // let the SSD1306 internal sequencer settle
+
+  // Step 2: if our bus has a software-controllable power rail, drop it. The
+  // pin's LOW state is preserved through light sleep automatically (the I/O
+  // MUX retains digital state). For deep sleep, GPIO39 isn't an RTC IO on
+  // ESP32-S3 so it gets reset on wake — but that's a fresh boot path anyway,
+  // and the LDO defaults disabled when its enable line floats, so this is
+  // also the desired sleep state.
+#if defined(I2C2_POWER_PIN) && (I2C2_POWER_PIN >= 0)
+  if (gSettings.oledBus == 1) {
+    digitalWrite(I2C2_POWER_PIN, LOW);
+    // Hold LDO low long enough for SSD1306 Vcc to fully decay past its
+    // POR-rearm threshold before we hand off to esp_light_sleep_start.
+    // Without this wait, the CPU gates a few ms after the enable pin
+    // drops — Vcc is still ramping down across the chip's internal caps
+    // and bus capacitance when sleep latches. On wake, the chip's POR
+    // circuit may have never seen a clean falling edge, leaving it in
+    // a half-reset state where the I2C peripheral is alive but the
+    // analog/display subsystem is wedged. 200ms is overkill on paper
+    // (SSD1306 internal caps discharge through quiescent current in
+    // ~tens of ms) but cheap insurance against slow-decay variants.
+    delay(200);
+    DEBUG_SYSTEMF("[OLED] sleep: dropped I2C2 power pin GPIO%d + 200ms decay wait",
+                  (int)I2C2_POWER_PIN);
+  }
+#endif
+#endif
+}
+
+void oledResumeFromSleep() {
+#if ENABLE_OLED_DISPLAY
+#if defined(I2C2_POWER_PIN) && (I2C2_POWER_PIN >= 0)
+  if (gSettings.oledBus == 1) {
+    // Step 1: raise the LDO enable and wait for the rail + chip to come up.
+    // The AP2127 LDO itself stabilises in ~5ms, BUT the SSD1306's internal
+    // power-on reset + charge-pump startup wants ~100ms after VCC is good
+    // before it's reliably ready to take I2C commands. The old 10ms wait was
+    // enough for the LDO but not for the SSD1306 — begin() would land before
+    // the chip was awake and fail silently, leaving the panel blank on wake.
+    pinMode(I2C2_POWER_PIN, OUTPUT);
+    digitalWrite(I2C2_POWER_PIN, HIGH);
+    delay(100);
+
+    // Step 1.5: BUS RECOVERY. When the SSD1306 lost Vcc mid-transaction (or
+    // even just had a slow power-down), it may have left SDA stuck LOW. The
+    // ESP32 I2C peripheral then sees a "busy" bus and silently NACKs every
+    // transaction we issue — Wire1.endTransmission() returns an error but
+    // the Adafruit library doesn't check it, so begin() reports success
+    // (the test-ACK probe succeeds against the I2C controller's own ACK,
+    // not the device) and frames pretend to push but never actually clock
+    // out on the wire. Symptom: render counter ticks, no transactions
+    // visible on scope, panel stays dark.
+    //
+    // performBusRecovery does the textbook fix: Wire1.end(), manually
+    // toggle SCL 9 times with SDA released to clock out any device stuck
+    // mid-byte, generate a clean STOP, then Wire1.begin() to fully reset
+    // the I2C peripheral state on the MCU side. After this, the bus is
+    // guaranteed in IDLE and the SSD1306 is in the same state begin()
+    // expects at first-boot.
+    {
+      I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+      if (mgr) {
+        mgr->performBusRecovery(1);
+      }
+    }
+
+    // Step 2: the SSD1306 just power-cycled, so EVERY register is back at
+    // ROM defaults — contrast, segment remap, COM scan dir, display on/off,
+    // GDDRAM contents, the lot. Re-running begin() walks the standard init
+    // sequence, then we reapply rotation + brightness + force a redraw.
+    //
+    // One automatic retry with another 100ms wait: cheap insurance against
+    // edge cases (cold panel, marginal LDO, bus needing a recovery clock).
+    if (oledDisplay) {
+      bool ok = false;
+      for (int attempt = 0; attempt < 2 && !ok; ++attempt) {
+        if (attempt > 0) {
+          WARN_SYSTEMF("[OLED] wake: begin() attempt %d failed — waiting + retrying", attempt);
+          delay(100);
+        }
+        ok = i2cDeviceTransaction((uint8_t)1, I2C_ADDR_OLED, 100000, 300, [&]() -> bool {
+          return oledDisplay->begin(SSD1306_SWITCHCAPVCC, I2C_ADDR_OLED);
+        });
+      }
+      if (ok) {
+        // CRITICAL: After a real power-cycle of the SSD1306, the Adafruit
+        // library's begin() reports success (chip ACKs I2C) but in practice
+        // the panel often stays dark — the high-voltage charge pump that
+        // drives the OLED pixels doesn't latch on. The chip is fully
+        // responsive over I2C and our framebuffer pushes succeed silently,
+        // but nothing is lit. Symptom: render counter ticks up, OLED back
+        // power LED is on, but panel is black.
+        //
+        // Workaround: re-send the three commands that matter directly,
+        // bypassing the library's init path entirely. DISPLAYOFF first
+        // (clean state), CHARGEPUMP=0x14 (enable internal DC-DC for
+        // SWITCHCAPVCC), DISPLAYON last. Wrapped in our own transaction
+        // so we own the bus lock and timing.
+        i2cDeviceTransactionVoid((uint8_t)1, I2C_ADDR_OLED, 400000, 200, [&]() {
+          oledDisplay->ssd1306_command(SSD1306_DISPLAYOFF);
+          oledDisplay->ssd1306_command(SSD1306_CHARGEPUMP);
+          oledDisplay->ssd1306_command(0x14);  // enable charge pump (SWITCHCAPVCC)
+          oledDisplay->ssd1306_command(SSD1306_DISPLAYON);
+        });
+
+        applyOLEDRotation();
+        applyOLEDBrightness();
+        // Push an explicit blank frame — proves the chip is responsive AND
+        // overwrites whatever GDDRAM ended up at after the power cycle, so
+        // there's no glitchy first-frame flash before the next mode render.
+        i2cDeviceTransactionVoid((uint8_t)1, I2C_ADDR_OLED, 400000, 200, [&]() {
+          oledDisplay->clearDisplay();
+          oledDisplay->display();
+        });
+        oledMarkDirty();
+        // And immediately render the current mode so the user sees something
+        // the instant they wake — don't wait for the next main-loop tick (the
+        // cmd_exec task that called us may keep the floor for a few more ms).
+        updateOLEDDisplay();
+        WARN_SYSTEMF("[OLED] wake: SSD1306 re-init + charge-pump kick on bus 1");
+      } else {
+        ERROR_SYSTEMF("[OLED] wake: SSD1306 begin() failed after LDO2 restore (both attempts)");
+      }
+    }
+    return;
+  }
+#endif
+  // Bus 0 / no power-gating: nothing was actually power-cycled, just flip
+  // the panel back on with the existing software command.
+  oledDisplayOn();
 #endif
 }
 

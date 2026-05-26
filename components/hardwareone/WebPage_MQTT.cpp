@@ -255,13 +255,13 @@ void streamMqttInner(httpd_req_t* req) {
   httpd_resp_send_chunk(req, "</td></tr><tr><td>RTC Time</td><td><span style=\"color:var(--panel-fg);\">Not compiled</span>", HTTPD_RESP_USE_STRLEN);
 #endif
 
-#if ENABLE_GAMEPAD_SENSOR
-  httpd_resp_send_chunk(req, "</td></tr><tr><td>Gamepad Input</td><td>", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, gSettings.mqttPublishGamepad ?
+#if ENABLE_OLED_INPUT  // either gamepad or ANO encoder — same mqttPublishInput toggle controls both
+  httpd_resp_send_chunk(req, "</td></tr><tr><td>Input Device</td><td>", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, gSettings.mqttPublishInput ?
     "<span style=\"color:var(--success);\">✓ Enabled</span>" :
     "<span style=\"color:var(--panel-fg);\">Disabled</span>", HTTPD_RESP_USE_STRLEN);
 #else
-  httpd_resp_send_chunk(req, "</td></tr><tr><td>Gamepad Input</td><td><span style=\"color:var(--panel-fg);\">Not compiled</span>", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "</td></tr><tr><td>Input Device</td><td><span style=\"color:var(--panel-fg);\">Not compiled</span>", HTTPD_RESP_USE_STRLEN);
 #endif
 
   httpd_resp_send_chunk(req, "</td></tr></table></div>", HTTPD_RESP_USE_STRLEN);

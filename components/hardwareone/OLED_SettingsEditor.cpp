@@ -389,110 +389,75 @@ void displaySettingsEditor() {
 // Input Handling
 // ============================================================================
 
-bool handleSettingsEditorInput(int deltaX, int deltaY, uint32_t newlyPressed) {
-  // Registered mode input handlers receive RAW deltaX/deltaY values
-  // We must apply deadzone check ourselves, just like file browser and other modes
-  
-  // Auto-repeat timing for navigation
-  static unsigned long lastMoveTimeX = 0;
-  static unsigned long lastMoveTimeY = 0;
-  static bool wasDeflectedX = false;
-  static bool wasDeflectedY = false;
-  const unsigned long INITIAL_DELAY_MS = 200;
-  const unsigned long REPEAT_DELAY_MS = 100;
-  unsigned long now = millis();
-  
+bool handleSettingsEditorInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed) {
+  // Canonical-signal pattern: read gNavEvents.up/down/left/right (set by the
+  // input layer for ALL devices — joystick threshold-crossings with built-in
+  // auto-repeat, ANO wheel sign, ANO dpad edges). Don't do our own deadzone +
+  // auto-repeat on raw deltaX/deltaY — that was a joystick-only assumption
+  // that broke for the rotary encoder, and it duplicated cadence logic the
+  // input layer already provides for the joystick path.
+  //
+  // For fine value adjustment in edit mode, ALSO read gNavEvents.wheelDelta
+  // (the canonical rotary signal): each detent = one unit, sign-correct.
+  // The joystick path still works via gNavEvents.left/right.
   bool handled = false;
-  
-  // Y-axis navigation with auto-repeat
-  bool deflectedY = abs(deltaY) > JOYSTICK_DEADZONE;
-  if (!deflectedY) {
-    wasDeflectedY = false;
-    lastMoveTimeY = 0;
-  } else {
-    bool shouldMove = false;
-    if (!wasDeflectedY) {
-      shouldMove = true;
-      wasDeflectedY = true;
-      lastMoveTimeY = now;
-    } else {
-      unsigned long elapsed = now - lastMoveTimeY;
-      unsigned long threshold = (elapsed > INITIAL_DELAY_MS) ? REPEAT_DELAY_MS : INITIAL_DELAY_MS;
-      if (elapsed >= threshold) {
-        shouldMove = true;
-        lastMoveTimeY = now;
-      }
-    }
-    
-    if (shouldMove) {
-      if (deltaY < 0) {
-        settingsEditorUp();
-      } else {
-        settingsEditorDown();
-      }
-      handled = true;
-    }
+
+  // ---- List navigation ----
+  if (gNavEvents.up) {
+    settingsEditorUp();
+    handled = true;
+  } else if (gNavEvents.down) {
+    settingsEditorDown();
+    handled = true;
   }
-  
-  // X-axis for value adjustment in edit mode with auto-repeat
+
+  // ---- Value adjustment in edit mode ----
+  // Gamepad: LEFT/RIGHT joystick deflection nudges value — the joystick has
+  // no dedicated "value adjust" axis, so we steal LEFT/RIGHT for it.
+  // ANO encoder: wheelDelta is the canonical adjust signal; LEFT is reserved
+  // for B-back. Without the compile-time gate, ANO LEFT would decrement the
+  // value AND exit edit mode in the same tick, persisting an unwanted
+  // mutation. Gating on !ENABLE_ANO_ENCODER keeps both backends clean.
   if (gSettingsEditor.state == SETTINGS_VALUE_EDIT) {
-    bool deflectedX = abs(deltaX) > JOYSTICK_DEADZONE;
-    if (!deflectedX) {
-      wasDeflectedX = false;
-      lastMoveTimeX = 0;
-    } else {
-      bool shouldMove = false;
-      if (!wasDeflectedX) {
-        shouldMove = true;
-        wasDeflectedX = true;
-        lastMoveTimeX = now;
-      } else {
-        unsigned long elapsed = now - lastMoveTimeX;
-        unsigned long threshold = (elapsed > INITIAL_DELAY_MS) ? REPEAT_DELAY_MS : INITIAL_DELAY_MS;
-        if (elapsed >= threshold) {
-          shouldMove = true;
-          lastMoveTimeX = now;
-        }
+    int adjust = 0;
+#if !ENABLE_ANO_ENCODER
+    if (gNavEvents.right)             adjust = +1;
+    else if (gNavEvents.left)         adjust = -1;
+    else
+#endif
+    if (gNavEvents.wheelDelta != 0) adjust = (gNavEvents.wheelDelta > 0) ? +1 : -1;
+
+    if (adjust > 0) {
+      if (gSettingsEditor.editValue < gSettingsEditor.currentEntry->maxVal) {
+        gSettingsEditor.editValue++;
+        gSettingsEditor.hasChanges = true;
+        handled = true;
       }
-      
-      if (shouldMove) {
-        if (deltaX < 0) {
-          // Decrease value
-          if (gSettingsEditor.editValue > gSettingsEditor.currentEntry->minVal) {
-            gSettingsEditor.editValue--;
-            gSettingsEditor.hasChanges = true;
-            handled = true;
-          }
-        } else {
-          // Increase value
-          if (gSettingsEditor.editValue < gSettingsEditor.currentEntry->maxVal) {
-            gSettingsEditor.editValue++;
-            gSettingsEditor.hasChanges = true;
-            handled = true;
-          }
-        }
+    } else if (adjust < 0) {
+      if (gSettingsEditor.editValue > gSettingsEditor.currentEntry->minVal) {
+        gSettingsEditor.editValue--;
+        gSettingsEditor.hasChanges = true;
+        handled = true;
       }
     }
   }
-  
-  // Button actions
+
+  // ---- Button actions (unchanged) ----
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
     settingsEditorSelect();
     handled = true;
   }
-  
+
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
-    // Handle back navigation
     if (gSettingsEditor.state == SETTINGS_CATEGORY_SELECT) {
-      // At top level - let caller handle exit to menu
+      // At top level — let caller handle exit to menu (returns false → menu back).
       return false;
     } else {
-      // Navigate back within settings
       settingsEditorBack();
       handled = true;
     }
   }
-  
+
   return handled;
 }
 
