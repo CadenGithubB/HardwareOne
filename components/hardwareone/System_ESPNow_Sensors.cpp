@@ -15,6 +15,8 @@
 
 #if ENABLE_GAMEPAD_SENSOR
 #include "i2csensor_seesaw.h"
+#elif ENABLE_ANO_ENCODER
+#include "i2csensor_ano_encoder.h"   // anoEncoderBuildDataJSON — the ANO input builder
 #endif
 #if ENABLE_GPS_SENSOR
 #include "i2csensor_pa1010d.h"
@@ -117,6 +119,15 @@ static const SensorBroadcastSpec gSensorSpecs[REMOTE_SENSOR_MAX] = {
 #endif
 #if ENABLE_GAMEPAD_SENSOR
   [REMOTE_SENSOR_INPUT]    = { gamepadBuildDataJSON,        100,  128  },
+#elif ENABLE_ANO_ENCODER
+  // ANO rotary encoder is the OTHER input device (mutually exclusive with the
+  // gamepad — INPUT_DEVICE_TYPE picks exactly one). Same REMOTE_SENSOR_INPUT
+  // slot, same 10 Hz cadence + 128 B budget; anoEncoderBuildDataJSON emits
+  // {"val":1,"pos":N,"axis":0|1,"buttons":B} (<60 B). Without this branch an
+  // ANO build left the input builder nullptr, so the broadcaster's
+  // `if (!spec.builder) continue;` silently dropped every input frame —
+  // streaming "turned on" but nothing reached the peer.
+  [REMOTE_SENSOR_INPUT]    = { anoEncoderBuildDataJSON,     100,  128  },
 #else
   [REMOTE_SENSOR_INPUT]    = { nullptr, 0, 0 },
 #endif
@@ -500,6 +511,21 @@ static void sensorBroadcasterTask(void* param) {
 
   for (;;) {
     const unsigned long now = millis();
+
+    // Stack HWM diagnostic. uxTaskGetStackHighWaterMark returns *free* words
+    // ever observed (low-water mark), not used — peak_used = total - free.
+    // Logged every 5s under DEBUG_ESPNOW_CORE so we can size the stack to
+    // measured peak + margin instead of guessing.
+    static unsigned long lastHwmLog = 0;
+    if (now - lastHwmLog >= 5000) {
+      lastHwmLog = now;
+      UBaseType_t hwmFreeWords = uxTaskGetStackHighWaterMark(nullptr);
+      DEBUGF(DEBUG_ESPNOW_CORE,
+             "[SENSOR_BCAST] stack free=%u words peak_used=%u of %u",
+             (unsigned)hwmFreeWords,
+             (unsigned)(SENSOR_BCAST_STACK_WORDS - hwmFreeWords),
+             (unsigned)SENSOR_BCAST_STACK_WORDS);
+    }
 
     for (int i = 0; i < REMOTE_SENSOR_MAX; i++) {
       if (!gSensorStreamingEnabled[i]) continue;

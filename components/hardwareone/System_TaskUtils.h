@@ -9,7 +9,7 @@
 // Centralized Task Stack Sizes (words; 1 word = 4 bytes on ESP32)
 // ============================================================================
 
-constexpr uint32_t CMD_EXEC_STACK_WORDS = 6144;      // ~24KB (automation run + debug vsnprintf frames need deep stack)
+constexpr uint32_t CMD_EXEC_STACK_WORDS = 8192;      // ~32KB (automation add validates commands via findCommand; extra headroom prevents overflow)
 constexpr uint32_t SENSOR_QUEUE_STACK_WORDS = 3072;  // ~12KB (bumped back from
                                                      // the 2765 "reduced 10%" value.
                                                      // gamepadInit (seesaw.begin →
@@ -43,7 +43,13 @@ constexpr uint32_t APDS_STACK_WORDS = 3072;          // ~12KB
 constexpr uint32_t GPS_STACK_WORDS = 3072;           // ~12KB
 constexpr uint32_t PRESENCE_STACK_WORDS = 3072;      // ~12KB
 constexpr uint32_t RTC_STACK_WORDS = 4096;           // ~16KB
-constexpr uint32_t SENSOR_BCAST_STACK_WORDS = 3072;  // ~12KB (ESP-NOW sensor broadcaster)
+constexpr uint32_t SENSOR_BCAST_STACK_WORDS = 6144;  // ~24KB — bumped from 12KB after first
+                                                     // bond-encrypted sensor-stream transmit
+                                                     // overflowed sensor_bcast (canary stomp).
+                                                     // Dial back to (measured HWM + ~1KB) once
+                                                     // [SENSOR_BCAST] stack peak_used has been
+                                                     // observed under the worst-case path
+                                                     // (bond-worker AEAD send + WiFi ISR).
 constexpr uint32_t MIC_RECORD_STACK_WORDS = 4096;    // ~16KB (microphone recording)
 constexpr uint32_t MIC_VIZ_STACK_WORDS = 4096;       // ~16KB (microphone visualizer)
 constexpr uint32_t SR_STACK_WORDS = 8192;             // ~32KB (speech recognition inference)
