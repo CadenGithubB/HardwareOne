@@ -190,6 +190,12 @@ struct V4FragAckWait {
 static V4FragAckWait gV4FragAckWait[V4_FRAG_ACK_WAIT_MAX];
 
 static V4FragAckWait* v4_frag_ack_alloc(const uint8_t* dst, uint32_t msgId, uint8_t fragIdx) {
+  // Serialize the slot scan + claim against the RX ACK handler (which marks
+  // acked under the same lock) and other fragmented senders. Fragmented sends
+  // run off espnow_task (cmd_exec_task / SENSOR_BCAST_TASK), so this array is
+  // genuinely multi-task. Brief scan only — never held across the ACK wait
+  // (the caller polls ->acked WITHOUT the lock; see v4_send_*_chunked).
+  EspNowTxGuard g("fragAckAlloc");
   for (int i = 0; i < V4_FRAG_ACK_WAIT_MAX; i++) {
     if (!gV4FragAckWait[i].active) {
       gV4FragAckWait[i].msgId     = msgId;
@@ -2127,7 +2133,7 @@ bool v4_send_encrypted_chunked(const uint8_t dst[6], uint8_t type, uint16_t base
       if (rc != ESP_OK) {
         WARN_ESPNOWF("[V4_ENC_FRAG_TX] esp_now_send rc=%d for frag %u/%u (retry %u)",
                      (int)rc, fragIdx + 1, fragCount, retry);
-        ackWait->active = false;
+        { EspNowTxGuard g("fragAckFree"); ackWait->active = false; }  // free under lock; delay outside
         vTaskDelay(pdMS_TO_TICKS(50 * (retry + 1)));
         continue;
       }
@@ -2143,7 +2149,7 @@ bool v4_send_encrypted_chunked(const uint8_t dst[6], uint8_t type, uint16_t base
         }
         vTaskDelay(pdMS_TO_TICKS(10));
       }
-      ackWait->active = false;
+      { EspNowTxGuard g("fragAckFree"); ackWait->active = false; }  // free under lock (poll above was lock-free)
 
       if (!fragSent) {
         WARN_ESPNOWF("[V4_ENC_FRAG_TX] ✗ frag %u/%u ACK timeout (retry %u)",
@@ -3537,6 +3543,42 @@ static void v4h_manifest_req(const V4RxCtx& ctx) {
 // The opcode is REQ_PAIRED, so by the time we get here the sender has a
 // PeerIdentity (the dispatcher rejected the frame otherwise). We still
 // re-check peerIdentitySetSubscriptions's return value because race-y
+// FS_LIST / FS_STAT / FS_GET — thin shims that unpack V4RxCtx and call into
+// System_ESPNow_FsList.cpp where the real work lives. All six opcodes are
+// gated on REQ_PAIRED + REQ_BOND_MODE + REQ_SESSION_ENC by the dispatch
+// table, so by the time we reach these handlers the sender is a bonded
+// peer over an encrypted session.
+extern void fsListOnRequestReceived(const uint8_t srcMac[6],
+                                    const uint8_t* payload, uint16_t payloadLen);
+extern void fsListOnReplyReceived(const uint8_t srcMac[6],
+                                  const uint8_t* payload, uint16_t payloadLen);
+extern void fsStatOnRequestReceived(const uint8_t srcMac[6],
+                                    const uint8_t* payload, uint16_t payloadLen);
+extern void fsStatOnReplyReceived(const uint8_t srcMac[6],
+                                  const uint8_t* payload, uint16_t payloadLen);
+extern void fsGetOnRequestReceived(const uint8_t srcMac[6],
+                                   const uint8_t* payload, uint16_t payloadLen);
+extern void fsGetOnAckReceived(const uint8_t srcMac[6],
+                               const uint8_t* payload, uint16_t payloadLen);
+static void v4h_fs_list_req(const V4RxCtx& ctx) {
+  fsListOnRequestReceived(ctx.recv_info->src_addr, ctx.payload, ctx.payloadLen);
+}
+static void v4h_fs_list_reply(const V4RxCtx& ctx) {
+  fsListOnReplyReceived(ctx.recv_info->src_addr, ctx.payload, ctx.payloadLen);
+}
+static void v4h_fs_stat_req(const V4RxCtx& ctx) {
+  fsStatOnRequestReceived(ctx.recv_info->src_addr, ctx.payload, ctx.payloadLen);
+}
+static void v4h_fs_stat_reply(const V4RxCtx& ctx) {
+  fsStatOnReplyReceived(ctx.recv_info->src_addr, ctx.payload, ctx.payloadLen);
+}
+static void v4h_fs_get_req(const V4RxCtx& ctx) {
+  fsGetOnRequestReceived(ctx.recv_info->src_addr, ctx.payload, ctx.payloadLen);
+}
+static void v4h_fs_get_ack(const V4RxCtx& ctx) {
+  fsGetOnAckReceived(ctx.recv_info->src_addr, ctx.payload, ctx.payloadLen);
+}
+
 // concurrent espnowforget could remove the slot between dispatch and here.
 static void v4h_subscribe_update(const V4RxCtx& ctx) {
   if (ctx.payloadLen < sizeof(V4PayloadSubscribe)) {
@@ -3888,6 +3930,12 @@ static const V4OpcodeEntry kV4HandlerTable[] = {
   { ESPNOW_V4_TYPE_BOND_STATUS_REQ,  V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_bond_status_req   },
   { ESPNOW_V4_TYPE_BOND_STATUS_RESP, V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_bond_status_resp  },
   { ESPNOW_V4_TYPE_MANIFEST_REQ,     V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_manifest_req      },
+  { ESPNOW_V4_TYPE_FS_LIST_REQ,      V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_fs_list_req       },
+  { ESPNOW_V4_TYPE_FS_LIST_REPLY,    V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_fs_list_reply     },
+  { ESPNOW_V4_TYPE_FS_STAT_REQ,      V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_fs_stat_req       },
+  { ESPNOW_V4_TYPE_FS_STAT_REPLY,    V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_fs_stat_reply     },
+  { ESPNOW_V4_TYPE_FS_GET_REQ,       V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_fs_get_req        },
+  { ESPNOW_V4_TYPE_FS_GET_ACK,       V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_fs_get_ack        },
 #endif
 };
 static constexpr size_t kV4HandlerTableSize = sizeof(kV4HandlerTable) / sizeof(kV4HandlerTable[0]);
@@ -4086,7 +4134,19 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
   // fragments and their retries all consume distinct frameSeqs, so the
   // 64-slot window only ever sees forward motion.
   EspNowV4Header headerCopy;
-  uint8_t plainBuf[ESPNOW_V4_MAX_PAYLOAD];
+  // PSRAM-backed plaintext scratch for SESSION_FRAME AEAD unwrap. Single
+  // shared buffer is safe because v4_try_handle_incoming runs ONLY on
+  // espnow_task (called from processMeshHeartbeats's RX ring drain — see
+  // System_ESPNow.cpp:7280; the raw ESP-NOW recv callback only pushes to the
+  // ring, it does not call this function). Sequential iteration through the
+  // ring guarantees no overlap between invocations. Moving this off-stack
+  // frees ~218 B of espnow_task stack on every encrypted RX — important
+  // because the call chain at dispatch time can be deep (v4_send_ack →
+  // v4_send_frame's own 250 B frame[] buffer is still on stack, plus the
+  // handler's own frame). Pairs with the FS_LIST defer-to-cmd_exec refactor
+  // (see System_ESPNow_FsList.cpp::captureDeferred) — same stack-relief
+  // theme.
+  EXT_RAM_BSS_ATTR static uint8_t plainBuf[ESPNOW_V4_MAX_PAYLOAD];
   if (h->flags & ESPNOW_V4_FLAG_SESSION_FRAME) {
     SessionState* s = sessionFindBySessionId(h->sessionId, recv_info->src_addr);
     if (!s || (s->state != SESSION_ACTIVE && s->state != SESSION_REKEYING)) {
@@ -4127,7 +4187,23 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
   }
 
   // === V4 FRAGMENTATION REASSEMBLY ===
-  if (h->fragCount > 1) {
+  //
+  // EXCLUDE ACK frames. v4_send_frag_ack() encodes the ORIGINAL message's
+  // fragIndex/fragCount into the ACK frame's header so the sender can match
+  // a per-fragment ACK waiter (gV4FragAckWait[].fragIndex). An ACK is never
+  // itself fragmented — it's a single 0-length frame. Without the type guard
+  // below, a frag-ACK (e.g. type=ACK msgId=38 fragIdx=0 fragCount=2) falls
+  // into this reassembly block, gets stored as a phantom "fragment 0", and
+  // NEVER reaches the ACK handler at the `h->type == ESPNOW_V4_TYPE_ACK`
+  // branch further down — so the matching V4FragAckWait slot never flips to
+  // acked and the V4_ENC_FRAG_TX sender times out + retries 3× + aborts.
+  // That broke every encrypted send larger than one frame (notably the
+  // 368-byte FS_LIST_REPLY → "io_error" in the bonded file browser). The
+  // per-fragment ACK machinery (waiter table with a fragIndex field, the
+  // ACK handler's fragIdx match, its fragCount>1 reassembly-cleanup branch)
+  // was all already written for exactly this path — it just couldn't be
+  // reached. This guard lets ACKs fall through to it.
+  if (h->fragCount > 1 && h->type != ESPNOW_V4_TYPE_ACK) {
     // Multi-fragment message - reassemble
     if (gEspNow) { gEspNow->routerMetrics.v4FragRx++; }
     
@@ -4270,16 +4346,23 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
     // on the next /api/espnow/messages poll cycle.
     sendStatusMarkDelivered(h->msgId, recv_info->src_addr);
     
-    // Check V3 fragment ACK waiters
+    // Check V3 fragment ACK waiters. Same lock as the sender's alloc/free
+    // (v4_frag_ack_alloc) so this scan can't match a slot mid-reclaim. Runs on
+    // espnow_task; the brief hold may make a concurrent sender's seal wait a
+    // few microseconds — never the reverse (no deadlock: this path doesn't
+    // block while holding the lock).
     bool foundV3 = false;
-    for (int i = 0; i < V4_FRAG_ACK_WAIT_MAX; i++) {
-      if (gV4FragAckWait[i].active && gV4FragAckWait[i].msgId == h->msgId &&
-          gV4FragAckWait[i].fragIndex == h->fragIndex) {
-        gV4FragAckWait[i].acked = true;
-        foundV3 = true;
-        DEBUGF(DEBUG_ESPNOW_CORE, "[V4_ACK_RX] Matched V3 fragment ACK waiter slot %d (msgId=%lu fragIdx=%u)",
-               i, (unsigned long)h->msgId, h->fragIndex);
-        break;
+    {
+      EspNowTxGuard g("fragAckMark");
+      for (int i = 0; i < V4_FRAG_ACK_WAIT_MAX; i++) {
+        if (gV4FragAckWait[i].active && gV4FragAckWait[i].msgId == h->msgId &&
+            gV4FragAckWait[i].fragIndex == h->fragIndex) {
+          gV4FragAckWait[i].acked = true;
+          foundV3 = true;
+          DEBUGF(DEBUG_ESPNOW_CORE, "[V4_ACK_RX] Matched V3 fragment ACK waiter slot %d (msgId=%lu fragIdx=%u)",
+                 i, (unsigned long)h->msgId, h->fragIndex);
+          break;
+        }
       }
     }
 
@@ -6215,7 +6298,15 @@ static void updatePeerMetaFromWorkerStatus(const uint8_t* srcMac, JsonVariant pa
 // Helper: Generate unique message ID
 uint32_t generateMessageId() {
   if (!gEspNow) return 0;
-  return gEspNow->nextMessageId++;
+  // Atomic post-increment: called by every sender on every task (espnow_task,
+  // cmd_exec_task, SENSOR_BCAST_TASK). A plain `++` is a non-atomic
+  // read-modify-write — two cores racing it mint duplicate msgIds, which the
+  // receiver's (origin,msgId) dedup then drops as a false duplicate. The GCC
+  // builtin keeps the struct member a plain uint32_t (no std::atomic copyability
+  // constraint on EspNowState, and the read in printEspNowStatus stays a normal
+  // aligned load). RELAXED is correct: msgIds only need uniqueness, not ordering
+  // against other memory.
+  return __atomic_fetch_add(&gEspNow->nextMessageId, 1, __ATOMIC_RELAXED);
 }
 
 // Helper: Check if chunking is needed
@@ -7256,6 +7347,10 @@ void processMeshHeartbeats() {
   // 1d. Phase 4 — stale file-transfer slot sweep. Slots with no frame in
   // kFileSlotTimeoutMs (30s) are released, freeing their PSRAM buffer.
   fileSlotsTimeoutSweep((uint32_t)millis());
+  // 1d2. Phase 4b — drive the FS_LIST protocol: build deferred replies +
+  // time out pending sender requests. Fast path when nothing's queued.
+  extern void fsListTick();
+  fsListTick();
   // 1d. Phase 3.6 — zero expired prev-keys (held briefly after a REKEY so
   // in-flight frames sent under the old keys still decrypt).
   sessionRekeyPrevKeysSweep((uint32_t)millis());
@@ -7914,12 +8009,17 @@ void processMeshHeartbeats() {
     processMetadata(gEspNow->deferredMetadataSrcMac, (const V4PayloadMetadata*)gEspNow->deferredMetadataPayload);
     DEBUG_ESPNOW_METADATAF("[METADATA] Task: processMetadata complete");
     
-    // Log metadata to message history for web UI
+    // Log metadata to message history for web UI. PSRAM-backed scratch:
+    // processMeshHeartbeats is the espnow_task super-loop body, so this
+    // function runs only on that task — a single shared static buffer is
+    // race-free. Saves 384 B of espnow_task stack on every metadata-drain
+    // tick (helpful when running alongside an active SESSION_FRAME RX
+    // unwrap that's already burning stack via plainBuf and v4_send_frame).
     const V4PayloadMetadata* meta = (const V4PayloadMetadata*)gEspNow->deferredMetadataPayload;
-    char metaMsg[384];
-    snprintf(metaMsg, sizeof(metaMsg), 
+    EXT_RAM_BSS_ATTR static char metaMsg[384];
+    snprintf(metaMsg, sizeof(metaMsg),
              "Metadata: name=%s friendly=%s room=%s zone=%s tags=%s stationary=%d",
-             meta->deviceName, meta->friendlyName, meta->room, meta->zone, 
+             meta->deviceName, meta->friendlyName, meta->room, meta->zone,
              meta->tags, (int)meta->stationary);
     
     String devName = String(meta->deviceName);

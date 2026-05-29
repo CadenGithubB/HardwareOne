@@ -299,19 +299,28 @@ int oledRenderHeader(Adafruit_SSD1306* display, const OLEDHeaderInfo* info) {
         title = oledGetCurrentModeName();
       }
     } else if (currentOLEDMode == OLED_FILE_BROWSER) {
-      // File browser breadcrumb - show "Files>folder/sub"
-      extern FileManager* gOledFileManager;
-      if (gOledFileManager) {
-        const char* path = gOledFileManager->getCurrentPath();
-        if (path && strcmp(path, "/") != 0) {
-          // Truncate path to fit: "Files>" (6 chars) + path (max 15 chars)
-          snprintf(breadcrumbBuf, sizeof(breadcrumbBuf), "Files>%s", path);
-          title = breadcrumbBuf;
+      // Picker-mode header takes priority: the picker title tells the user
+      // WHAT they're picking (e.g. "Pick model") and is more useful at a
+      // glance than the current path. The path is visible in the file
+      // listing itself when navigation matters.
+      extern const char* oledFilePickerTitle();
+      const char* pickerTitle = oledFilePickerTitle();
+      if (pickerTitle && pickerTitle[0]) {
+        title = pickerTitle;
+      } else {
+        // Viewer mode: show "Files>folder/sub" breadcrumb.
+        extern FileManager* gOledFileManager;
+        if (gOledFileManager) {
+          const char* path = gOledFileManager->getCurrentPath();
+          if (path && strcmp(path, "/") != 0) {
+            snprintf(breadcrumbBuf, sizeof(breadcrumbBuf), "Files>%s", path);
+            title = breadcrumbBuf;
+          } else {
+            title = "Files";
+          }
         } else {
           title = "Files";
         }
-      } else {
-        title = "Files";
       }
     } else if (currentOLEDMode == OLED_UNAVAILABLE && unavailableOLEDTitle.length() > 0) {
       // Unavailable overlay uses mode OLED_UNAVAILABLE but body shows unavailableOLEDTitle;
@@ -334,41 +343,61 @@ int oledRenderHeader(Adafruit_SSD1306* display, const OLEDHeaderInfo* info) {
     display->print(titleBuf);
   }
   
-  // Right side: Status icons (right-aligned)
+  // Right side: Status icons (right-aligned). Each char is 6 px wide at
+  // textSize 1; the layout below allocates a multiple of 6 per element so
+  // strings don't wrap mid-glyph to the next OLED row.
   int iconX = DISPLAY_WIDTH;
-  
+  bool drewRightSide = false;  // tracks whether to draw a "|" separator before notifications
+
   // Battery / USB indicator
   if (headerInfo.showBattery || headerInfo.showUSB) {
     extern BatteryState gBatteryState;
     extern char getBatteryIcon();
-    extern bool isBatteryCharging();
-    
-    // Check USB status first
-    bool usbConnected = isBatteryCharging();
-    
+    extern bool isUsbPresent();
+
+    // USB presence (not just "actively charging") — covers the float-charge
+    // case where CRATE ≈ 0 but VBUS is still holding the cell topped off.
+    // Falling back to isBatteryCharging() here would silently drop the USB
+    // indicator the moment the cell hits 100%.
+    bool usbConnected = isUsbPresent();
+
     if (usbConnected && headerInfo.showUSB) {
-      // USB powered - show USB indicator
-      iconX -= 12;  // Width for "USB"
+      // "USB" is 3 chars × 6 px = 18 px. Anything less wraps "B" onto the
+      // next OLED row — see commit history for the original off-by-six bug.
+      iconX -= 18;
       display->setCursor(iconX, 1);
       display->print("USB");
+      drewRightSide = true;
     } else if (headerInfo.showBattery && gBatteryState.status != BATTERY_NOT_PRESENT) {
-      // Show battery percentage and icon (only if battery present)
+      // Show "NN%" — the tier-letter icon (F/H/M/L/E from getBatteryIcon)
+      // would be redundant with the number AND reads like a unit suffix
+      // ("87F" looked like 87° Fahrenheit). The richer state info (charging
+      // vs float vs discharging) is communicated by the parallel "USB" /
+      // "USB+" branch above and on the system status page.
       int pct = (int)gBatteryState.percentage;
-      char icon = getBatteryIcon();
-      
-      // Calculate width: percentage (2-3 chars) + icon (1 char)
+
+      // Width: percentage digits (1-3 chars) + "%" (1 char). 6 px per char.
       int pctWidth = (pct >= 100) ? 18 : (pct >= 10) ? 12 : 6;
       iconX -= (pctWidth + 6);
-      
+
       display->setCursor(iconX, 1);
       display->print(pct);
-      display->print(icon);
+      display->print('%');
+      drewRightSide = true;
     }
   }
-  
+
   // Notification indicator (bell icon with count)
   int unreadCount = headerInfo.showNotifications ? oledNotificationUnreadCount() : 0;
   if (unreadCount > 0) {
+    // Visual separator between notifications and battery/USB so the two
+    // status groups don't run together visually. Only drawn when both are
+    // present — otherwise a stray "|" hangs in space at the right edge.
+    if (drewRightSide) {
+      iconX -= 8;  // 6 px for the pipe + 2 px of breathing room on its right
+      display->setCursor(iconX + 2, 1);
+      display->print('|');
+    }
     iconX -= 12;  // Space for bell + count
     display->setCursor(iconX, 1);
     display->print((char)0x07);  // Bell character
@@ -402,6 +431,7 @@ static const char* getNotificationSourceName(uint8_t source) {
     case NOTIF_SOURCE_VOICE:  return "Voice";
     case NOTIF_SOURCE_REMOTE: return "Remote";
     case NOTIF_SOURCE_SYSTEM: return "System";
+    case NOTIF_SOURCE_G2:     return "G2";
     default: return "Unknown";
   }
 }
@@ -2473,6 +2503,31 @@ bool shouldBlockForDisplayAuth() {
   return gSettings.localDisplayRequireAuth && !gLocalDisplayAuthed && !oledBootModeActive;
 }
 
+// Public AuthContext builder — single source of truth for "what OLED
+// identity looks like." Used by buildOLEDCommand (async-submit path) and
+// oledFileBrowserAuthContext (sync direct-FS path). Mirrors
+// g2HijackAuthContext on the G2 side; centralizing prevents the drift-bug
+// class that Pass 1 caught on G2 (two hand-built AuthContexts in different
+// files going out of sync as fields are added/changed). Also explicitly
+// initializes `opaque = nullptr` — buildOLEDCommand previously relied on
+// `Command uc;` default-init, leaving opaque uninitialized (benign because
+// executeCommand only reads opaque under SOURCE_WEB, but a latent bug).
+//
+// When displayRequireAuth is off, the "AuthBypass" reserved name is
+// stamped so audit logs read `[CMD] AuthBypass@display: ...` (clear
+// physical-user origin) instead of `[CMD] @display: ...` (ambiguous —
+// could be a username-propagation bug). Reserved name; see adminCreateUser.
+AuthContext oledAuthContext(const char* path) {
+  AuthContext ctx;
+  ctx.transport = SOURCE_LOCAL_DISPLAY;
+  ctx.user      = gLocalDisplayAuthed ? gLocalDisplayUser : String("AuthBypass");
+  ctx.ip        = "oled";
+  ctx.path      = path ? path : "/oled";
+  ctx.sid       = "";
+  ctx.opaque    = nullptr;
+  return ctx;
+}
+
 // Build a Command struct for OLED-originated commands.
 // Routed through cmd_exec_task via submitAndExecuteSync for unified
 // output routing, audit logging, and stack safety.
@@ -2480,16 +2535,7 @@ static Command buildOLEDCommand(const String& cmdLine) {
   Command uc;
   uc.line = cmdLine;
   uc.ctx.origin = ORIGIN_SYSTEM;
-  uc.ctx.auth.transport = SOURCE_LOCAL_DISPLAY;
-  // When displayRequireAuth is off, no user identity exists for the local
-  // display. Stamp the audit log with "AuthBypass" instead of an empty user
-  // so log lines read `[CMD] AuthBypass@display: ...` (clear physical-user
-  // origin) instead of `[CMD] @display: ...` (ambiguous — could be a
-  // username-propagation bug). Reserved name; see adminCreateUser.
-  uc.ctx.auth.user = gLocalDisplayAuthed ? gLocalDisplayUser : String("AuthBypass");
-  uc.ctx.auth.ip = "oled";
-  uc.ctx.auth.path = "/oled/command";
-  uc.ctx.auth.sid = "";
+  uc.ctx.auth = oledAuthContext("/oled/command");
   uc.ctx.id = (uint32_t)millis();
   uc.ctx.timestampMs = (uint32_t)millis();
   uc.ctx.outputMask = CMD_OUT_LOG;  // file log + OLED console (via MSG_ROUTE_OLED), no serial echo
@@ -4268,6 +4314,12 @@ const OLEDMenuItem oledMenuCategory4[] = {
   { "Automations","notify_automation", OLED_AUTOMATIONS },
 #endif
   { "Files",      "notify_files",      OLED_FILE_BROWSER },
+#if ENABLE_ONDEVICE_LLM
+  // LLM Chat — visible unconditionally when compiled in. The mode itself
+  // shows a model-picker when no model is loaded, so the entry is useful
+  // even on a fresh boot before any model has been selected.
+  { "LLM Chat",   "terminal",          OLED_LLM },
+#endif
 };
 const int oledMenuCategory4Count = sizeof(oledMenuCategory4) / sizeof(oledMenuCategory4[0]);
 

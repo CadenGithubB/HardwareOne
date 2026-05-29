@@ -93,6 +93,12 @@ enum EspNowV4Type : uint8_t {
   ESPNOW_V4_TYPE_METADATA_RESP   = 34,
   ESPNOW_V4_TYPE_METADATA_PUSH   = 35,
   ESPNOW_V4_TYPE_USER_SYNC       = 36,
+  ESPNOW_V4_TYPE_FS_LIST_REQ     = 37,  // Browse remote VFS: "list directory <path>"
+  ESPNOW_V4_TYPE_FS_LIST_REPLY   = 38,  // Reply: paginated batch of FileEntry-style records
+  ESPNOW_V4_TYPE_FS_STAT_REQ     = 39,  // Storage stats for a VFS root (total/used/free)
+  ESPNOW_V4_TYPE_FS_STAT_REPLY   = 40,  // Reply: 64-bit byte counters + percent used
+  ESPNOW_V4_TYPE_FS_GET_REQ      = 41,  // Pull a file from the peer (peer responds via FILE_* opcodes)
+  ESPNOW_V4_TYPE_FS_GET_ACK      = 42,  // Synchronous ack for FS_GET_REQ (status + fileSize)
 
   // --- Streaming (50–59) ---
   ESPNOW_V4_TYPE_STREAM          = 50,
@@ -491,6 +497,174 @@ struct __attribute__((packed)) V4PayloadFileEnd {
   uint32_t crc32;         // CRC32 of entire file
   uint8_t  success;       // 1=transfer complete, 0=aborted
 };
+
+// ---- FS LIST request/reply (ESPNOW_V4_TYPE_FS_LIST_REQ / _REPLY) ----------
+//
+// Bonded-peer remote directory browser. Sender ("client") asks the peer
+// to list entries at `path`, optionally paginated via startIndex/maxEntries.
+// Receiver builds the listing under SYSTEM identity (device-trust model —
+// bonded peers see whatever the device's bonded-peer ACL allows) and replies
+// with a fragmented V4_TYPE_FS_LIST_REPLY containing a header + N entry
+// records back-to-back in the same payload.
+//
+// Why a structured opcode (not CLI scrape):
+//   - Deterministic parsing (no `ls` text format drift)
+//   - Pagination for large directories
+//   - Native permission bits per entry → caller's UI can grey out actions
+//   - Identity propagation is well-defined (peer's bonded-trust scope)
+//   - Reply size capped at fragment-max so single round-trip suffices for
+//     typical OLED listings (≤ 32 entries × 76 B = 2.4 KB → 12 fragments
+//     under the 6400 B fragmented message limit)
+//
+// Request fits a single SESSION_FRAME (144 B < 202 B plaintext budget) so
+// it doesn't need fragmentation on the way out. Reply is sent via
+// v4_send_payload_smart which negotiates encrypted-chunked under a session.
+
+struct __attribute__((packed)) V4PayloadFsListReq {
+  uint32_t reqId;          // Client-chosen correlation ID; echoed in reply.
+                           // 0 is RESERVED (sentinel for "no request" in
+                           // the pending-request table). Senders MUST pick
+                           // a nonzero value.
+  uint16_t startIndex;     // Pagination — first entry to return (0 = start)
+  uint16_t maxEntries;     // Cap; receiver may return fewer. Hard cap: 32.
+  char     path[128];      // Null-terminated VFS path on receiver
+  uint8_t  reserved[8];    // Must be zero
+};
+static_assert(sizeof(V4PayloadFsListReq) == 144, "V4PayloadFsListReq layout");
+static_assert(sizeof(V4PayloadFsListReq) <= ESPNOW_V4_MAX_PLAINTEXT,
+              "V4PayloadFsListReq must fit single SESSION_FRAME");
+
+// Reply layout (variable-length, on wire):
+//   [V4PayloadFsListReplyHeader] [V4PayloadFsEntry × header.entryCount]
+//
+// status codes:
+//   0 = OK
+//   1 = NOT_FOUND      (path doesn't exist on receiver)
+//   2 = NOT_A_DIR      (path exists but is a file)
+//   3 = PERM_DENIED    (path exists but bonded-peer identity can't read)
+//   4 = IO_ERROR       (FS error reading dir)
+//   5 = TOO_BUSY       (receiver is in the middle of another listing;
+//                       caller should retry with backoff)
+//   6 = NOT_READY      (filesystem not mounted yet — early boot)
+//
+// hasMore=1 + nextStartIndex tells the client to issue a follow-up with
+// startIndex=nextStartIndex to fetch the rest of a large directory.
+
+enum FsListStatus : uint8_t {
+  FS_LIST_STATUS_OK          = 0,
+  FS_LIST_STATUS_NOT_FOUND   = 1,
+  FS_LIST_STATUS_NOT_A_DIR   = 2,
+  FS_LIST_STATUS_PERM_DENIED = 3,
+  FS_LIST_STATUS_IO_ERROR    = 4,
+  FS_LIST_STATUS_TOO_BUSY    = 5,
+  FS_LIST_STATUS_NOT_READY   = 6,
+};
+
+struct __attribute__((packed)) V4PayloadFsListReplyHeader {
+  uint32_t reqId;          // Echoes request
+  uint8_t  status;         // FsListStatus
+  uint8_t  entryCount;     // Number of V4PayloadFsEntry records that follow
+  uint8_t  hasMore;        // 1 if more entries available beyond this batch
+  uint8_t  reserved;       // Must be zero
+  uint16_t totalEntries;   // Total entries in directory (for UI "of N")
+  uint16_t nextStartIndex; // Pass to follow-up request when hasMore=1
+  char     path[128];      // Echoes (normalized) request path
+};
+static_assert(sizeof(V4PayloadFsListReplyHeader) == 140,
+              "V4PayloadFsListReplyHeader layout");
+
+// One entry in a FS_LIST_REPLY. Layout intentionally matches the spirit of
+// FileEntry in System_FileManager.h so the OLED render path can copy fields
+// near-1:1 from the wire into its FileEntry cache.
+struct __attribute__((packed)) V4PayloadFsEntry {
+  char     name[64];       // Null-terminated filename (no path prefix)
+  uint32_t size;           // Bytes (0 for folders)
+  uint8_t  isFolder;       // 0 or 1
+  uint8_t  perms;          // Bitmask matching FileEntry::permissions
+                           //   bit 0 = READ, bit 1 = WRITE, bit 2 = DELETE
+  uint8_t  reserved[6];    // Must be zero
+};
+static_assert(sizeof(V4PayloadFsEntry) == 76, "V4PayloadFsEntry layout");
+
+// Hard cap on entries per reply — fits comfortably under the 6400 B
+// fragmented message limit (140 + 32 × 76 = 2572 B).
+#define FS_LIST_ENTRIES_PER_REPLY 32
+
+// ---- FS STAT request/reply (ESPNOW_V4_TYPE_FS_STAT_REQ / _REPLY) ----------
+//
+// Storage stats for a VFS root on the bonded peer (total / used / free bytes
+// and a percent-used reading). Replaces the prior `BondFs.exec('fsusage')`
+// CLI-scrape path which broke on output collisions with concurrent commands.
+// One request fits a single SESSION_FRAME (140 B). Reply is 172 B —
+// also single-frame, no fragmentation needed.
+
+struct __attribute__((packed)) V4PayloadFsStatReq {
+  uint32_t reqId;          // Client-chosen correlation ID (nonzero)
+  char     path[128];      // Root path on the peer (e.g. "/" or "/sd")
+  uint8_t  reserved[8];    // Must be zero
+};
+static_assert(sizeof(V4PayloadFsStatReq) == 140, "V4PayloadFsStatReq layout");
+static_assert(sizeof(V4PayloadFsStatReq) <= ESPNOW_V4_MAX_PLAINTEXT,
+              "V4PayloadFsStatReq must fit single SESSION_FRAME");
+
+struct __attribute__((packed)) V4PayloadFsStatReply {
+  uint32_t reqId;          // Echoes request
+  uint8_t  status;         // FsListStatus values (NOT_FOUND, PERM_DENIED, etc.)
+  uint8_t  reserved1[3];   // Alignment for the 64-bit fields below
+  uint64_t totalBytes;     // Capacity of the storage backing this path
+  uint64_t usedBytes;
+  uint64_t freeBytes;
+  uint16_t percentUsedX10; // Tens-of-percent (e.g. 472 = 47.2%) so client gets
+                           // one decimal without paying for a float on the wire
+  uint16_t reserved2;
+  char     path[128];      // Echoes (normalized) request path
+};
+static_assert(sizeof(V4PayloadFsStatReply) == 164, "V4PayloadFsStatReply layout");
+static_assert(sizeof(V4PayloadFsStatReply) <= ESPNOW_V4_MAX_PLAINTEXT,
+              "V4PayloadFsStatReply must fit single SESSION_FRAME");
+
+// ---- FS GET request/ack (ESPNOW_V4_TYPE_FS_GET_REQ / _ACK) -----------------
+//
+// Pull a file from the peer. Two-stage protocol because the actual file
+// transfer rides the existing FILE_START / FILE_DATA / FILE_END opcodes
+// (which already handle chunking, CRC, and ACK retransmit):
+//
+//   client                                    peer
+//     │── FS_GET_REQ {reqId, path} ─────────►│
+//     │◄──── FS_GET_ACK {reqId, status, ────┤  (sync — fits one frame)
+//     │      fileSize} if status=OK         │
+//     │                                     │  …then peer sends the file
+//     │◄── FILE_START / FILE_DATA × N / ────┤   via the existing transfer
+//     │      FILE_END ──────────────────────┤   pipeline.
+//
+// On status != OK in the ACK, no FILE_* transfer follows. On status == OK,
+// caller's existing FILE_* receive path takes over.
+//
+// This replaces the prior `BondFs.exec('espnowsendfile <localMac> <path>')`
+// path: same outcome, deterministic structured trigger + ack instead of
+// running a CLI on the peer and inferring success from text output.
+
+struct __attribute__((packed)) V4PayloadFsGetReq {
+  uint32_t reqId;
+  char     path[128];      // File to fetch on the peer's VFS
+  uint8_t  reserved[8];
+};
+static_assert(sizeof(V4PayloadFsGetReq) == 140, "V4PayloadFsGetReq layout");
+static_assert(sizeof(V4PayloadFsGetReq) <= ESPNOW_V4_MAX_PLAINTEXT,
+              "V4PayloadFsGetReq must fit single SESSION_FRAME");
+
+struct __attribute__((packed)) V4PayloadFsGetAck {
+  uint32_t reqId;
+  uint8_t  status;         // FsListStatus values
+  uint8_t  reserved[3];
+  uint32_t fileSize;       // File size in bytes (informational — lets the
+                           // client display a progress bar without waiting
+                           // for FILE_END's CRC)
+  char     path[128];      // Echoes (normalized) request path
+};
+static_assert(sizeof(V4PayloadFsGetAck) == 140, "V4PayloadFsGetAck layout");
+static_assert(sizeof(V4PayloadFsGetAck) <= ESPNOW_V4_MAX_PLAINTEXT,
+              "V4PayloadFsGetAck must fit single SESSION_FRAME");
 
 #endif // ENABLE_ESPNOW
 

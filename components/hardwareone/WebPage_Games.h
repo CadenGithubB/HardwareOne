@@ -8,7 +8,7 @@
 #endif
 #include "WebServer_Utils.h"
 
-#if ENABLE_GAMES
+#if ENABLE_WEB_GAME_MAZE
 
 // Client-only Tilt Maze prototype
 // - Uses IMU endpoint: /api/sensors?sensor=imu

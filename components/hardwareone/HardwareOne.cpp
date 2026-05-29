@@ -950,7 +950,7 @@ const char* cmd_downloadautomation(const String& argsInput) {
   return "ERROR";
 }
 const char* cmd_conditional(const String& argsInput) {
-  return executeConditionalCommand(argsInput.c_str());
+  return executeConditionalCommand(argsInput.c_str(), currentExecUser().c_str());
 }
 #endif
 
@@ -1620,6 +1620,11 @@ void hardwareone_setup() {
     // .part files from any previous crashed-mid-transfer boot.
     fileSlotsInit();
     fileSlotsBootCleanup();
+
+    // Phase 4b — remote-directory-listing protocol (FS_LIST_REQ/REPLY).
+    // Allocates the pending-request table mutex; safe to call repeatedly.
+    extern void fsListInit();
+    fsListInit();
   }
 
   if (gSettings.espnowenabled && identityOk) {

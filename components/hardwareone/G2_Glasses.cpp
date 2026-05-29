@@ -3416,41 +3416,30 @@ static void buildG2StatusBattery(char* out, size_t cap) {
 #endif
 }
 
-// Top-right corner ESP-battery widget content. Mirrors the G2/R1
-// format ("ESP NN%") so the three corner rows read as a column.
-// Three-state output:
-//   "ESP USB"  — either isBatteryCharging() reports the rail is on
-//                USB, OR gBatteryState.status == BATTERY_NOT_PRESENT.
-//                The latter case covers builds compiled with
-//                ENABLE_BATTERY_MONITOR=0 (slim USB-only builds where
-//                the battery init explicitly says "USB power assumed"
-//                and seeds the state with status=NOT_PRESENT). We
-//                check the status flag rather than relying on
-//                isCharging because the disabled-monitor branch in
-//                System_Battery.cpp seeds isCharging=false even
-//                though the device is unambiguously on USB —
-//                semantically isCharging means "the cell is taking
-//                charge", not "AC is connected", and there's no cell
-//                to charge in that build. NOT_PRESENT is the
-//                authoritative "no cell, USB-only" signal.
-//   "ESP --%"  — battery monitor is enabled and active but the
-//                voltage read came back implausible (vBatt <= 0).
-//                Placeholder kept the same width as a real reading
-//                so the column doesn't shift on the lens.
-//   "ESP NN%"  — normal case: a plausible cell voltage was sampled
-//                and the percentage estimator is live.
-// Reads gBatteryState + helpers from System_Battery.h (included near
-// the top of this TU).
+// Top-right corner ESP-battery widget content. Mirrors the G2/R1 corner
+// format so the three rows read as a column.
+// Five-state output:
+//   "ESP: USB"        — no cell installed (NOT_PRESENT). Covers both the
+//                       ENABLE_BATTERY_MONITOR=0 build path and the
+//                       runtime case of a board with a fuel gauge but no
+//                       cell wired to B+. usbPresent is implicitly true
+//                       (device is running on VBUS).
+//   "ESP: --%"        — backend is live but the voltage read came back
+//                       implausible (vBatt <= 0). Same-width placeholder
+//                       so the column doesn't shift while the sensor
+//                       comes online or hiccups.
+//   "ESP: USB+NN%"    — USB connected AND the cell is actively taking
+//                       charge (CRATE > +threshold). Shows BOTH the USB
+//                       state and the % — older logic dropped the % here
+//                       which made the corner go blind while charging.
+//   "ESP: USB NN%"    — USB connected but cell at float-charge plateau
+//                       (CRATE ≈ 0, voltage > 4.15V). Cell is full and
+//                       USB is just holding it there.
+//   "ESP: NN%"        — on battery (USB unplugged), normal discharging.
+// All formats stay under ~13 chars to fit the corner geometry.
 static void buildEspStatusBattery(char* out, size_t cap) {
   if (!out || cap == 0) return;
-  // Status-first check: BATTERY_NOT_PRESENT is the explicit
-  // "USB-only build, no cell installed" state seeded by initBattery
-  // when ENABLE_BATTERY_MONITOR is off. isCharging is FALSE in that
-  // branch (no cell to charge), so we can't rely on isCharging
-  // alone — checking status takes priority. Falls through to the
-  // isCharging path for live builds where the cell IS being topped
-  // up via USB.
-  if (gBatteryState.status == BATTERY_NOT_PRESENT || isBatteryCharging()) {
+  if (gBatteryState.status == BATTERY_NOT_PRESENT) {
     snprintf(out, cap, "ESP: USB");
     return;
   }
@@ -3460,7 +3449,13 @@ static void buildEspStatusBattery(char* out, size_t cap) {
     return;
   }
   const int pct = (int)(getBatteryPercentage() + 0.5f);
-  snprintf(out, cap, "ESP: %d%%", pct);
+  if (isBatteryCharging()) {
+    snprintf(out, cap, "ESP: USB+%d%%", pct);
+  } else if (isUsbPresent()) {
+    snprintf(out, cap, "ESP: USB %d%%", pct);
+  } else {
+    snprintf(out, cap, "ESP: %d%%", pct);
+  }
 }
 
 // 8-cell circle bar gauge using Unicode geometric/spinner glyphs that
@@ -9263,10 +9258,14 @@ static void livePageWorker(void* /*arg*/) {
 
     if (!gLivePageBuildFn) continue;
     textBuf[0] = '\0';
-    // Install the captured lens identity for the buildFn call so any
-    // guarded VFS access inside it reads as the paired user.
+    // Install the captured lens identity + G2 notification source for the
+    // buildFn call so any guarded VFS access inside it reads as the paired
+    // user, and any notify*() attributes to "G2 / <user>". Uses the LATCHED
+    // owner ctx (captured at g2StartLivePage time, may differ from current
+    // pairedByUser if a re-stamp happened mid-page); CommandIdentityScope
+    // auto-derives NOTIF_SOURCE_G2 from the ctx's transport field.
     {
-      ExecIdentityGuard identity(gLivePageOwnerCtx);
+      CommandIdentityScope scope(gLivePageOwnerCtx);
       gLivePageBuildFn(textBuf, 2048);
     }
     size_t n = splitTextIntoRows(textBuf, rows, ptrs, kMaxRows,
@@ -9835,13 +9834,15 @@ static void liveTextWorker(void* /*arg*/) {
   // protocol internally (see renderStatusCompound for the canonical
   // example); buildFn-mode pages emit a single-TEXT CREATE via the
   // existing g2ShowText auto-routing.
-  // Install the captured lens identity for the render call. Both buildFn
-  // and renderFn paths get it — either may touch guarded VFS, and we want
-  // them to see the paired user instead of this worker task's default
-  // ANON identity. See gLiveTextOwnerCtx for design.
+  // Install the captured lens identity + G2 notification source for the
+  // render call. Both buildFn and renderFn paths get them — either may
+  // touch guarded VFS or fire notifications, and we want them to see the
+  // paired user instead of this worker task's default ANON identity, with
+  // notifications attributed to "G2 / <user>" via the auto-derive in
+  // CommandIdentityScope. See gLiveTextOwnerCtx for design.
   bool initOk;
   {
-    ExecIdentityGuard identity(gLiveTextOwnerCtx);
+    CommandIdentityScope scope(gLiveTextOwnerCtx);
     if (useRenderFn) {
       initOk = gLiveTextRenderFn();
     } else {
@@ -9927,13 +9928,15 @@ static void liveTextWorker(void* /*arg*/) {
       continue;
     }
 
-    // Same auth-context save/install/restore as the initial render path.
-    // Per-tick wrapping is unconditional even though no current page reads
-    // the FS — keeps the property "future page that does FS work just
-    // works without remembering this plumbing."
+    // Same composed identity+notif install as the initial render path
+    // (CommandIdentityScope auto-derives NOTIF_SOURCE_G2 from the latched
+    // ctx). Per-tick wrapping is unconditional even though no current page
+    // reads the FS or fires notifications — keeps the property "future page
+    // that does FS work or fires notifications just works without
+    // remembering this plumbing."
     bool tickOk;
     {
-      ExecIdentityGuard identity(gLiveTextOwnerCtx);
+      CommandIdentityScope scope(gLiveTextOwnerCtx);
       if (useRenderFn) {
         tickOk = gLiveTextRenderFn();
       } else {
@@ -13712,9 +13715,11 @@ struct BmpViewerArgs {
 };
 
 static void g2BmpViewerWorker(void* arg) {
-  // Install the paired-user identity so readBmpFromVfs's guarded reads
-  // succeed from this worker task's default ANON TLS slot.
-  ExecIdentityGuard identity(g2HijackAuthContext());
+  // Install the paired-user identity + G2 notification source so
+  // readBmpFromVfs's guarded reads succeed from this worker task's default
+  // ANON TLS slot, and any notify*() fired during the read attributes to
+  // "G2 / <user>" rather than "Unknown".
+  G2HijackCtxGuard ctxGuard;
   auto* a = (BmpViewerArgs*)arg;
 
   do {
@@ -14750,7 +14755,7 @@ struct BmpFullViewerArgs {
 };
 
 static void g2BmpFullViewerWorker(void* arg) {
-  ExecIdentityGuard identity(g2HijackAuthContext());
+  G2HijackCtxGuard ctxGuard;  // identity + NOTIF_SOURCE_G2 for VFS reads
   auto* a = (BmpFullViewerArgs*)arg;
 
   do {
@@ -15130,7 +15135,7 @@ struct JpgViewerArgs {
 };
 
 static void g2JpgViewerWorker(void* arg) {
-  ExecIdentityGuard identity(g2HijackAuthContext());
+  G2HijackCtxGuard ctxGuard;  // identity + NOTIF_SOURCE_G2 for VFS reads
   auto* a = (JpgViewerArgs*)arg;
 
   do {
@@ -15221,7 +15226,7 @@ struct JpgFullViewerArgs {
 };
 
 static void g2JpgFullViewerWorker(void* arg) {
-  ExecIdentityGuard identity(g2HijackAuthContext());
+  G2HijackCtxGuard ctxGuard;  // identity + NOTIF_SOURCE_G2 for VFS reads
   auto* a = (JpgFullViewerArgs*)arg;
 
   do {

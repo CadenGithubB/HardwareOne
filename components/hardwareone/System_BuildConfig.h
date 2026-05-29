@@ -156,9 +156,14 @@
 // Microphone: PDM microphone via I2S. PICO board has none.
 #define ENABLE_MICROPHONE_SENSOR 0
 
-// Battery monitor: ADC-based LiPo voltage. Disable when board has no
-// battery-monitoring hardware (shows "USB" on OLED/web instead).
-#define ENABLE_BATTERY_MONITOR  0
+// Battery monitor: enables the System_Battery subsystem. The actual backend
+// (ADC voltage divider vs. MAX17048G I2C fuel gauge vs. USB-only stub) is
+// auto-selected per board further down — see BATTERY_BACKEND_* in the board
+// hardware section. Leave commented to auto-default to BATTERY_MONITOR_AVAILABLE
+// for the active board; set explicitly to 0 to force-disable on a board that
+// HAS the hardware (slim USB-only build), or 1 to force-enable on a board that
+// claims it doesn't (e.g., to develop against a wired-up dev rig).
+// #define ENABLE_BATTERY_MONITOR 0
 
 
 // =============================================================================
@@ -200,7 +205,7 @@
 // On-device LLM: tiny transformer inference (Llama + GPT-2 architectures).
 // Requires ESP32-S3 + PSRAM. Models load from LittleFS or SD. FP32 / INT8.
 // Typical PSRAM usage: 1–4 MB at runtime.
-#define ENABLE_ONDEVICE_LLM     0
+#define ENABLE_ONDEVICE_LLM     1
 #if ENABLE_ONDEVICE_LLM
 // Max KV / attention context in tokens (0 = use checkpoint's seq_len only).
 // Lower uses less PSRAM; must cover prompt + max generation.
@@ -209,7 +214,7 @@
 #endif
 
 // Automation: scheduled tasks + conditional commands.
-#define ENABLE_AUTOMATION       0
+#define ENABLE_AUTOMATION       1
 
 // Bonded mode: two-device bonded pair via ESP-NOW (master/worker).
 // Master shows remote UI for worker features, manifest cached in LittleFS.
@@ -223,8 +228,16 @@
 // Higher-level features built on top of the subsystems above. Each gates
 // its own web page and (where applicable) OLED mode.
 
-// Games: browser-based games web page.
+// Games: browser-based games web page (served at /games).
+//   ENABLE_GAMES is the master switch; then pick exactly ONE game below. Both
+//   games are raw-embedded in the firmware image, and shipping both at once
+//   exceeds the app partition, so a build-time guard rejects enabling both.
+//   Default game is the Tilt Maze (preserves prior behaviour).
+//   To ship A Dark Room instead: ENABLE_GAMES 1, ENABLE_WEB_GAME_MAZE 0,
+//   ENABLE_WEB_GAME_DARKROOM 1 (and CUSTOM_ENABLE_WEB_GAMES 1 at web level 4).
 #define ENABLE_GAMES            0
+#define ENABLE_WEB_GAME_MAZE        1   // Tilt Maze (IMU/gamepad prototype)
+#define ENABLE_WEB_GAME_DARKROOM    0   // A Dark Room (en/es/fr/zh_cn)
 
 // Maps: offline maps and waypoints web page.
 #define ENABLE_MAPS             0
@@ -558,6 +571,19 @@
   #undef ENABLE_WEB_GAMES
   #define ENABLE_WEB_GAMES 0
 #endif
+
+// Per-game selection sits beneath the games web subsystem. If web games are
+// off (master off, or the web feature level disables them), force both off.
+#if !ENABLE_WEB_GAMES
+  #undef ENABLE_WEB_GAME_MAZE
+  #undef ENABLE_WEB_GAME_DARKROOM
+  #define ENABLE_WEB_GAME_MAZE     0
+  #define ENABLE_WEB_GAME_DARKROOM 0
+#endif
+// Both games are raw-embedded; shipping both overflows the app partition.
+#if ENABLE_WEB_GAME_MAZE && ENABLE_WEB_GAME_DARKROOM
+  #error "Enable only ONE web game (ENABLE_WEB_GAME_MAZE or ENABLE_WEB_GAME_DARKROOM). Both are raw-embedded and exceed the app partition; gzip-embed if you need both."
+#endif
 #if !ENABLE_MAPS
   #undef ENABLE_WEB_MAPS
   #define ENABLE_WEB_MAPS 0
@@ -633,6 +659,8 @@
   // Battery Monitoring (no built-in battery monitor on QT Py)
   #define BATTERY_ADC_PIN       -1
   #define BATTERY_MONITOR_AVAILABLE 0
+  #define BATTERY_BACKEND_ADC        0
+  #define BATTERY_BACKEND_FUEL_GAUGE 0
 
 // --- Adafruit Feather ESP32 V2 ---
 #elif defined(ARDUINO_ADAFRUIT_FEATHER_ESP32_V2_DEV)
@@ -648,9 +676,11 @@
   #define NEOPIXEL_POWER_PIN    2
   #define NEOPIXEL_COUNT_DEFAULT 1
   
-  // Battery Monitoring
+  // Battery Monitoring — Feather V2 has the VBAT/2 ADC divider on GPIO35.
   #define BATTERY_ADC_PIN       35
   #define BATTERY_MONITOR_AVAILABLE 1
+  #define BATTERY_BACKEND_ADC        1
+  #define BATTERY_BACKEND_FUEL_GAUGE 0
 
 // --- Adafruit Feather ESP32 (Original) ---
 #elif defined(ARDUINO_FEATHER_ESP32_DEV)
@@ -666,9 +696,11 @@
   #define NEOPIXEL_POWER_PIN    -1
   #define NEOPIXEL_COUNT_DEFAULT 0
   
-  // Battery Monitoring
+  // Battery Monitoring — original Feather ESP32 has the VBAT/2 ADC divider on GPIO35.
   #define BATTERY_ADC_PIN       35
   #define BATTERY_MONITOR_AVAILABLE 1
+  #define BATTERY_BACKEND_ADC        1
+  #define BATTERY_BACKEND_FUEL_GAUGE 0
 
 // --- Seeed Studio XIAO ESP32S3 Sense (with camera/mic expansion) ---
 // Note: Sense uses same variant as base XIAO ESP32S3, expansion board is add-on hardware
@@ -692,10 +724,12 @@
   #define USER_LED_PIN          -1
   #define USER_LED_ACTIVE_LOW   1
   
-  // Battery Monitoring
+  // Battery Monitoring (XIAO Sense has no battery monitoring hardware)
   #define BATTERY_ADC_PIN       -1
   #define BATTERY_MONITOR_AVAILABLE 0
-  
+  #define BATTERY_BACKEND_ADC        0
+  #define BATTERY_BACKEND_FUEL_GAUGE 0
+
   // Sense-specific: SD Card (directly on expansion board)
   // Verified working via sddiag: CS=21, SCK=7, MISO=8, MOSI=9
   #define SD_CS_PIN             21  // GPIO21 (directly on expansion board)
@@ -733,6 +767,8 @@
   // Battery Monitoring (no dedicated ADC pin - requires external wiring)
   #define BATTERY_ADC_PIN       -1
   #define BATTERY_MONITOR_AVAILABLE 0
+  #define BATTERY_BACKEND_ADC        0
+  #define BATTERY_BACKEND_FUEL_GAUGE 0
 
 // --- Seeed Studio XIAO ESP32S3 Plus (16MB flash, more GPIOs) ---
 // Set CONFIG_ARDUINO_VARIANT="XIAO_ESP32S3_Plus" in menuconfig
@@ -756,6 +792,8 @@
   // Battery Monitoring (Plus has ADC_BAT on GPIO10)
   #define BATTERY_ADC_PIN       10  // GPIO10 (ADC_BAT)
   #define BATTERY_MONITOR_AVAILABLE 1
+  #define BATTERY_BACKEND_ADC        1
+  #define BATTERY_BACKEND_FUEL_GAUGE 0
   
   // Plus-specific: Additional UART
   #define TX1_PIN               42  // GPIO42
@@ -798,13 +836,28 @@
 
   // Battery Monitoring — the FeatherS3[D] REMOVED the VBAT/2 ADC divider
   // present on the original FeatherS3 and replaced it with the MAX17048G
-  // fuel gauge on I2C1 @ 0x36. The current battery_monitor code is
-  // ADC-based and doesn't speak the fuel gauge protocol, so leave this
-  // off until a dedicated i2csensor_max17048 driver is added.
+  // fuel gauge on I2C1 @ 0x36 (same horizontal STEMMA QT bus as the RTC
+  // and other always-on sensors). The driver lives in i2csensor_max17048.cpp
+  // and is selected via BATTERY_BACKEND_FUEL_GAUGE below; System_Battery
+  // dispatches to it instead of the ADC path. Bus assignment defaults to
+  // bus 0 (gSettings.fuelGaugeBus) because that's where the chip is wired.
   // (For the original FeatherS3 with VBAT_SENSE on GPIO2, set
-  //  BATTERY_ADC_PIN=2 and BATTERY_MONITOR_AVAILABLE=1 instead.)
+  //  BATTERY_ADC_PIN=2, BATTERY_BACKEND_ADC=1, BATTERY_BACKEND_FUEL_GAUGE=0
+  //  instead — and BATTERY_MONITOR_AVAILABLE=1.)
   #define BATTERY_ADC_PIN       -1
-  #define BATTERY_MONITOR_AVAILABLE 0
+  #define BATTERY_MONITOR_AVAILABLE 1
+  #define BATTERY_BACKEND_ADC        0
+  #define BATTERY_BACKEND_FUEL_GAUGE 1
+
+  // VBUS sense — the FeatherS3/[D] routes USB VBUS to GPIO 34 through a
+  // voltage divider. Reads HIGH when USB is plugged in, LOW when not.
+  // This is the only deterministic "is USB connected?" signal on the board:
+  // the MAX17048's CRATE register lags by 30-60s after USB plug/unplug, so
+  // relying on it alone makes the OLED stick on "USB" for almost a minute
+  // after the user unplugs the cable. With this pin wired, System_Battery
+  // overrides the CRATE-based heuristic with a direct GPIO read.
+  // (Pin source: components/arduino/variants/um_feathers3/pins_arduino.h.)
+  #define BATTERY_VBUS_SENSE_PIN 34
 
   // Second I2C bus — the FeatherS3[D] exposes the vertical STEMMA QT
   // connector on its own GPIO pair, powered via LDO2. Used by the dual-bus
@@ -845,9 +898,11 @@
   #define NEOPIXEL_POWER_PIN    -1
   #define NEOPIXEL_COUNT_DEFAULT 0
   
-  // Battery Monitoring
+  // Battery Monitoring (generic ESP32 — no known battery monitoring)
   #define BATTERY_ADC_PIN       -1
   #define BATTERY_MONITOR_AVAILABLE 0
+  #define BATTERY_BACKEND_ADC        0
+  #define BATTERY_BACKEND_FUEL_GAUGE 0
 
 // --- Unsupported Board ---
 #else
@@ -863,8 +918,48 @@
   #define NEOPIXEL_COUNT_DEFAULT 0
   #define BATTERY_ADC_PIN       -1
   #define BATTERY_MONITOR_AVAILABLE 0
+  #define BATTERY_BACKEND_ADC        0
+  #define BATTERY_BACKEND_FUEL_GAUGE 0
 
 #endif
+
+// =============================================================================
+// BATTERY MONITOR — derived enable + backend sanity
+// =============================================================================
+// ENABLE_BATTERY_MONITOR defaults to the active board's BATTERY_MONITOR_AVAILABLE
+// flag so adding a new supported board "just works" without touching the user
+// config above. A user-set `#define ENABLE_BATTERY_MONITOR <0|1>` at the top of
+// this file takes precedence (force-disable on a slim build, or force-enable
+// during board bring-up).
+#ifndef ENABLE_BATTERY_MONITOR
+  #define ENABLE_BATTERY_MONITOR BATTERY_MONITOR_AVAILABLE
+#endif
+
+// Sanity: at most one backend selected. If the board didn't define either
+// flag (out-of-tree board file), fall back to 0/0 so System_Battery seeds the
+// USB-only stub instead of failing to compile.
+#ifndef BATTERY_BACKEND_ADC
+  #define BATTERY_BACKEND_ADC 0
+#endif
+#ifndef BATTERY_BACKEND_FUEL_GAUGE
+  #define BATTERY_BACKEND_FUEL_GAUGE 0
+#endif
+
+// VBUS sense fallback. Boards without a routed VBUS divider leave this at -1
+// and System_Battery falls back to the CRATE/voltage heuristic. Boards with
+// the pin wired (FeatherS3[D] → GPIO 34) override above and get instant,
+// deterministic USB-present detection.
+#ifndef BATTERY_VBUS_SENSE_PIN
+  #define BATTERY_VBUS_SENSE_PIN -1
+#endif
+#if BATTERY_BACKEND_ADC && BATTERY_BACKEND_FUEL_GAUGE
+  #error "Pick one battery backend per board — BATTERY_BACKEND_ADC and BATTERY_BACKEND_FUEL_GAUGE are mutually exclusive."
+#endif
+#if BATTERY_BACKEND_FUEL_GAUGE && !ENABLE_I2C_SYSTEM
+  #error "BATTERY_BACKEND_FUEL_GAUGE requires the I2C subsystem (I2C_FEATURE_LEVEL > 0). Lower the level or pick a different backend."
+#endif
+// If the user force-enabled the monitor on a board with no backend hardware
+// claimed, the runtime will seed USB-only and report it — no compile error.
 
 // =============================================================================
 // I2C2 (second I2C bus) — board-agnostic fallback

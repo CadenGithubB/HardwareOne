@@ -541,8 +541,63 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
     "  });\n"
     "}\n", HTTPD_RESP_USE_STRLEN);
 
+  // Remote input renderer — used for the REMOTE_SENSOR_INPUT ("input") type,
+  // which bond/mesh streaming reports for BOTH worker input devices:
+  //   ANO encoder : {"val":1,"pos":N,"axis":0|1,"buttons":B}  (buttons active-HIGH)
+  //   gamepad     : {"val":1,"x":N,"y":N,"buttons":B}          (buttons active-LOW)
+  // Detect by the "pos" key (ANO-only) and draw the matching widget into the
+  // card's pre-created elements (baseId text + baseId-dial canvas + baseId-btns
+  // chip row). Mirrors the OLED REMOTE_SENSOR_INPUT renderer + the local
+  // hwRenderAnoState/hwRenderGamepadState widgets, but parameterized by element
+  // id so it can target any remote peer's card. ANO bit layout matches
+  // i2csensor_ano_encoder.h (IN0 UP1 DN2 L3 R4 St16); gamepad bits are active-
+  // LOW (clear=pressed) at X6 Y2 A5 B1 Sel0 St16.
+  httpd_resp_send_chunk(req,
+    "window.hwRenderRemoteInput=function(baseId,j){\n"
+    "  try{\n"
+    "    if(!j||typeof j!=='object')return;\n"
+    "    var isAno=(j.pos!==undefined);\n"
+    "    var b=(j.buttons>>>0);\n"
+    "    var el=document.getElementById(baseId);\n"
+    "    if(el){el.textContent=isAno?('Pos: '+(j.pos|0)+'    Axis: '+((j.axis|0)?'Horizontal':'Vertical'))\n"
+    "                                :('X: '+(j.x|0)+'    Y: '+(j.y|0));}\n"
+    "    var cv=document.getElementById(baseId+'-dial');\n"
+    "    if(cv&&cv.getContext){\n"
+    "      var ctx=cv.getContext('2d'),w=cv.width,h=cv.height,cx=w/2,cy=h/2;\n"
+    "      var cs=getComputedStyle(document.documentElement);\n"
+    "      var fg=cs.getPropertyValue('--panel-fg').trim()||'#888';\n"
+    "      var ac=cs.getPropertyValue('--link').trim()||'#007bff';\n"
+    "      ctx.clearRect(0,0,w,h);\n"
+    "      if(isAno){\n"
+    "        ctx.strokeStyle=fg;ctx.lineWidth=2;ctx.beginPath();ctx.arc(cx,cy,cx-8,0,2*Math.PI);ctx.stroke();\n"
+    "        ctx.lineWidth=1;\n"
+    "        for(var i=0;i<12;i++){var a=(i/12)*2*Math.PI-Math.PI/2;ctx.beginPath();ctx.moveTo(cx+Math.cos(a)*(cx-12),cy+Math.sin(a)*(cy-12));ctx.lineTo(cx+Math.cos(a)*(cx-4),cy+Math.sin(a)*(cy-4));ctx.stroke();}\n"
+    "        var ang=((((j.pos|0)%24)+24)%24)/24*2*Math.PI-Math.PI/2;\n"
+    "        ctx.fillStyle=ac;ctx.beginPath();ctx.arc(cx+Math.cos(ang)*(cx-14),cy+Math.sin(ang)*(cy-14),6,0,2*Math.PI);ctx.fill();\n"
+    "      }else{\n"
+    "        ctx.strokeStyle=fg;ctx.lineWidth=2;ctx.strokeRect(8,8,w-16,h-16);\n"
+    "        var px=8+((j.x|0)/1023)*(w-16),py=8+((j.y|0)/1023)*(h-16);\n"
+    "        ctx.fillStyle=ac;ctx.beginPath();ctx.arc(px,py,6,0,2*Math.PI);ctx.fill();\n"
+    "      }\n"
+    "    }\n"
+    "    var bc=document.getElementById(baseId+'-btns');\n"
+    "    if(bc){\n"
+    "      var defs=isAno?[['IN',0],['UP',1],['DN',2],['L',3],['R',4],['St',16]]\n"
+    "                    :[['X',6],['Y',2],['A',5],['B',1],['Sel',0],['St',16]];\n"
+    "      var html='';\n"
+    "      defs.forEach(function(c){\n"
+    "        var on=isAno?!!(b&(1<<c[1])):!(b&(1<<c[1]));\n"
+    "        html+='<span style=\"display:inline-block;padding:2px 6px;margin:2px;border-radius:4px;font-size:0.75rem;'\n"
+    "          +(on?'background:var(--success);color:#fff':'background:var(--menu-item-bg);color:var(--menu-item-fg)')\n"
+    "          +'\">'+c[0]+'</span>';\n"
+    "      });\n"
+    "      bc.innerHTML=html;\n"
+    "    }\n"
+    "  }catch(_){}\n"
+    "};\n", HTTPD_RESP_USE_STRLEN);
+
   // Remote sensors loader
-  httpd_resp_send_chunk(req, 
+  httpd_resp_send_chunk(req,
     "function stopRemoteSensorsPolling(){\n"
     "  try{if(window._remoteSensorsTimer){clearInterval(window._remoteSensorsTimer);window._remoteSensorsTimer=null;}}catch(_){}\n"
     "}\n"
@@ -572,6 +627,10 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
     "          return;\n"
     "        }\n"
     "        el.textContent='x: '+payload.x+'  y: '+payload.y+'  buttons: '+btnHex;\n"
+    "        return;\n"
+    "      }\n"
+    "      if(sensorType==='input'&&payload&&typeof payload==='object'&&typeof window.hwRenderRemoteInput==='function'){\n"
+    "        window.hwRenderRemoteInput(id,payload);\n"
     "        return;\n"
     "      }\n"
     "      try{el.textContent=JSON.stringify(payload);}catch(_){el.textContent=String(payload);}\n"
@@ -631,6 +690,15 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
     "                  '<div id=\"'+base+'-btn-select\" class=\"btn btn-small\" style=\"width:80px\">Select</div>' +\n"
     "                  '<div id=\"'+base+'-btn-start\" class=\"btn btn-small\" style=\"width:80px\">Start</div>' +\n"
     "                '</div>' +\n"
+    "              '</div>';\n"
+    "          } else if(sensorType==='input'){\n"
+    "            var ib='remote-'+macKey+'-input';\n"
+    "            card.innerHTML = '<div class=\"sensor-title\"><span class=\"status-indicator status-enabled\"></span>' + device.name + ' - input</div>' +\n"
+    "              '<div class=\"sensor-description\">Remote input via ESP-NOW (MAC: ' + device.mac + ')</div>' +\n"
+    "              '<div class=\"sensor-data\" id=\"'+ib+'\">Loading...</div>' +\n"
+    "              '<div style=\"display:flex;gap:16px;align-items:center;margin-top:10px;flex-wrap:wrap\">' +\n"
+    "                '<canvas id=\"'+ib+'-dial\" width=\"90\" height=\"90\" style=\"border:1px solid var(--border);border-radius:50%;background:var(--crumb-bg)\"></canvas>' +\n"
+    "                '<div id=\"'+ib+'-btns\" style=\"display:flex;flex-wrap:wrap;max-width:170px\"></div>' +\n"
     "              '</div>';\n"
     "          } else {\n"
     "            card.innerHTML = '<div class=\"sensor-title\"><span class=\"status-indicator status-enabled\"></span>' + device.name + ' - ' + sensorType + '</div>' +\n"

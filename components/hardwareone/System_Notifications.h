@@ -24,7 +24,9 @@ enum NotificationSource : uint8_t {
   NOTIF_SOURCE_WEB     = 3,
   NOTIF_SOURCE_VOICE   = 4,
   NOTIF_SOURCE_REMOTE  = 5,
-  NOTIF_SOURCE_SYSTEM  = 6   // Firmware-generated: sensor starts, WiFi events, etc.
+  NOTIF_SOURCE_SYSTEM  = 6,  // Firmware-generated: sensor starts, WiFi events, etc.
+  NOTIF_SOURCE_G2      = 7   // BLE-attached lens — separated from OLED to mirror
+                             // the CommandSource SOURCE_LOCAL_DISPLAY/SOURCE_G2_GLASSES split.
 };
 
 // ============================================================================

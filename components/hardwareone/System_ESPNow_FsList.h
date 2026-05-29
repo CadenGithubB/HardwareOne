@@ -1,0 +1,184 @@
+// System_ESPNow_FsList.h — bonded-peer remote directory listing
+//
+// Why this module exists
+//   The OLED file browser wants to show a bonded peer's filesystem next to
+//   the local one. Until this module existed, the only option was scraping
+//   the text output of `remote:files /path` via the bonded CLI — brittle
+//   format, no permission bits, no pagination, no identity story.
+//
+//   This module owns the protocol layer for structured directory listings:
+//
+//     CLIENT                                    PEER
+//       │                                         │
+//       │── fsListSendRequest(peerMac, path) ────►│
+//       │            (V4_TYPE_FS_LIST_REQ)        │
+//       │                                         ├─ defers to task tick
+//       │                                         │  reads VFS, builds reply
+//       │◄──── V4_TYPE_FS_LIST_REPLY ─────────────┤
+//       │   (header + N V4PayloadFsEntry)         │
+//       │                                         │
+//      callback fires with parsed entries
+//
+//   Both opcodes ride the existing bonded encrypted session
+//   (REQ_PAIRED + REQ_BOND_MODE + REQ_SESSION_ENC) so they get the same
+//   confidentiality + authentication as SETTINGS_REQ / MANIFEST_REQ.
+//
+// Identity model — device trust
+//   The peer that receives an FS_LIST_REQ checks "is this from my bonded
+//   peer?" via the standard pairing gate. If yes, it reads the directory
+//   under SYSTEM identity and reports the perms its bonded-peer ACL would
+//   give the caller. Per-user identity propagation is deliberately out of
+//   scope for this iteration — same trust posture as the existing settings
+//   sync over ESP-NOW. A future enhancement can add a per-user identity
+//   token in the request payload's reserved bytes.
+//
+// Concurrency
+//   Sender: pending-request table holds up to FS_LIST_MAX_PENDING outstanding
+//   requests with timeouts. Each entry is { reqId, peerMac, callback,
+//   deadlineMs }. Single-call cancel API lets the OLED ditch a request when
+//   the user navigates away.
+//
+//   Receiver: single deferred-work slot. If a second request arrives while
+//   one is in flight, the new one gets a FS_LIST_STATUS_TOO_BUSY reply
+//   immediately (without queueing). Caller retries with backoff. This is
+//   intentional: a directory listing read at SYSTEM identity is fast (a
+//   few ms for typical VFS dirs) so head-of-line blocking is acceptable
+//   in exchange for keeping deferred state trivial.
+//
+// Memory
+//   Sender pending table: FS_LIST_MAX_PENDING × ~32 B = 128 B DRAM (static).
+//   Receiver deferred slot: ~150 B DRAM (static).
+//   Reply send buffer: built on cmd_exec stack (~3 KB peak — well under the
+//   24 KB stack that task has).
+
+#ifndef SYSTEM_ESPNOW_FSLIST_H
+#define SYSTEM_ESPNOW_FSLIST_H
+
+#include "System_BuildConfig.h"
+
+#if ENABLE_ESPNOW
+
+#include <stdint.h>
+#include <stddef.h>
+#include "System_ESPNow_Wire.h"   // V4Payload structs, FS_LIST_ENTRIES_PER_REPLY
+
+// Tunables — keep small. Sender side typically has at most 1-2 outstanding
+// requests at a time (one per active surface). 4 covers a future "OLED is
+// browsing peer's dir, web is also looking" scenario.
+#define FS_LIST_MAX_PENDING        4
+#define FS_LIST_REQUEST_TIMEOUT_MS 5000
+
+// Reply callback. `header` and `entries` point into stack-allocated buffers
+// owned by the receive path — copy what you need before returning. `entries`
+// may be nullptr if header.entryCount == 0 (empty dir or error response).
+// `peerMac` is the responding peer's MAC (matches the request target unless
+// something very weird happened).
+typedef void (*FsListReplyCallback)(const uint8_t peerMac[6],
+                                    const V4PayloadFsListReplyHeader* header,
+                                    const V4PayloadFsEntry* entries);
+
+// Stat reply callback. `reply` is owned by the receive path — copy before
+// returning. Replaces the prior fsusage-CLI-scrape pattern.
+typedef void (*FsStatReplyCallback)(const uint8_t peerMac[6],
+                                    const V4PayloadFsStatReply* reply);
+
+// Get-file ACK callback. Fires when the peer responds with FS_GET_ACK
+// (synchronous accept/reject). On status == FS_LIST_STATUS_OK the peer is
+// initiating a FILE_START/DATA/END transfer back; the caller's existing
+// inbound file-receive path will land the file on local VFS. On any other
+// status, no transfer follows. `ack->fileSize` is informational.
+typedef void (*FsGetAckCallback)(const uint8_t peerMac[6],
+                                 const V4PayloadFsGetAck* ack);
+
+// ============================================================================
+// Lifecycle
+// ============================================================================
+
+// Initialize internal state (mutex, table zeroing). Safe to call multiple
+// times; idempotent. Called from initEspNow().
+void fsListInit();
+
+// ============================================================================
+// Sender (client) API
+// ============================================================================
+
+// Send an FS_LIST_REQ to `peerMac` for `path`. `startIndex` enables
+// pagination (use 0 for the first batch; pass the previous reply's
+// nextStartIndex for subsequent batches). Returns the assigned reqId
+// (> 0) on success, or 0 if the request couldn't be queued (no slot,
+// bonded peer not reachable, etc.).
+//
+// Callback fires exactly once when the reply arrives OR the request times
+// out. On timeout, callback is invoked with a synthesized header where
+// status = FS_LIST_STATUS_IO_ERROR and entryCount = 0.
+//
+// Caller is responsible for cancelling the request via fsListCancel() if
+// it loses interest (e.g. user navigates away from the file browser).
+uint32_t fsListSendRequest(const uint8_t peerMac[6],
+                           const char* path,
+                           uint16_t startIndex,
+                           FsListReplyCallback callback);
+
+// Cancel a pending request by reqId. After this returns, the callback for
+// that request will NOT fire (if it hadn't already). Safe to call with an
+// already-resolved or unknown reqId — no-op. Works for list / stat / get.
+void fsListCancel(uint32_t reqId);
+
+// Send FS_STAT_REQ to `peerMac`. Returns reqId on success, 0 on failure.
+// Callback gets the typed reply (or a synthesized error on timeout).
+uint32_t fsStatSendRequest(const uint8_t peerMac[6],
+                           const char* path,
+                           FsStatReplyCallback callback);
+
+// Send FS_GET_REQ to `peerMac`. The callback fires when the peer ACKs
+// (synchronous, before any FILE_* transfer). If ack->status == OK the
+// peer is now sending the file via FILE_START/DATA/END — caller must
+// observe the inbound file-receive path (existing pattern) for the
+// actual content arrival.
+uint32_t fsGetSendRequest(const uint8_t peerMac[6],
+                          const char* path,
+                          FsGetAckCallback callback);
+
+// ============================================================================
+// RX bridge — called from System_ESPNow.cpp's v4 dispatch handlers
+// ============================================================================
+// V4RxCtx is defined in System_ESPNow.cpp (not in any header), so we expose
+// raw-buffer APIs here and let System_ESPNow.cpp's thin v4h_ stubs unpack
+// the fields. This keeps the protocol module standalone — no header cycle.
+
+// Record an incoming FS_LIST_REQ into the deferred slot. Called from
+// BTC_TASK (tiny stack) — minimal work only: validates the payload, copies
+// fields into static storage, returns. Actual VFS read + reply send happens
+// later in fsListTick() on the main task.
+void fsListOnRequestReceived(const uint8_t srcMac[6],
+                             const uint8_t* payload, uint16_t payloadLen);
+
+// Match an incoming FS_LIST_REPLY against the pending-request table and
+// fire the registered callback. Called from BTC_TASK — callback runs on
+// BTC_TASK too, so its body must be minimal (copy data, set a flag).
+void fsListOnReplyReceived(const uint8_t srcMac[6],
+                           const uint8_t* payload, uint16_t payloadLen);
+
+// FS_STAT_REQ + FS_STAT_REPLY mirror the list pattern: REQ defers to tick,
+// REPLY matches reqId and fires its callback.
+void fsStatOnRequestReceived(const uint8_t srcMac[6],
+                             const uint8_t* payload, uint16_t payloadLen);
+void fsStatOnReplyReceived(const uint8_t srcMac[6],
+                           const uint8_t* payload, uint16_t payloadLen);
+
+// FS_GET_REQ defers to tick (peer kicks off sendFileToMac). FS_GET_ACK is
+// the synchronous reply BEFORE the FILE_* transfer.
+void fsGetOnRequestReceived(const uint8_t srcMac[6],
+                            const uint8_t* payload, uint16_t payloadLen);
+void fsGetOnAckReceived(const uint8_t srcMac[6],
+                        const uint8_t* payload, uint16_t payloadLen);
+
+// Per-tick driver — call from the main ESP-NOW task tick. Two jobs:
+//   (1) If a deferred reply request is queued, build the reply (VFS read +
+//       serialize entries) and send it.
+//   (2) Sweep the pending-request table for timeouts; fire callbacks with
+//       a synthesized error status for any that expired.
+void fsListTick();
+
+#endif // ENABLE_ESPNOW
+#endif // SYSTEM_ESPNOW_FSLIST_H

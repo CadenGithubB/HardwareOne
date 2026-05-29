@@ -98,7 +98,16 @@ public:
   
   // Status
   bool getStorageStats(uint32_t& total, uint32_t& used, uint32_t& free);
-  
+
+  // Visibility filter — when non-null, loadDirectory() drops files where
+  // filter(entry) returns false. Folders are ALWAYS kept regardless so the
+  // user can still navigate. Used by the OLED file-picker layer (see
+  // FilePickerRequest in OLED_Display.h) to scope a browse session to e.g.
+  // *.bin or *.hwmap. Setter triggers a refresh so the new filter applies
+  // immediately to the cached directory.
+  using VisibilityFilter = bool (*)(const FileEntry& entry);
+  void setVisibilityFilter(VisibilityFilter filter);
+
 private:
   FileManagerState state;
   
@@ -123,6 +132,10 @@ private:
   // generation-versioning the cache stayed empty for the rest of the boot
   // even after the user paired.
   uint32_t loadedAtGen_ = 0;
+
+  // Visibility filter for picker-mode browsing. nullptr = no filter
+  // (default — viewer behavior).
+  VisibilityFilter visibilityFilter_ = nullptr;
 
   bool loadDirectory();
   void ensureValidSelection();

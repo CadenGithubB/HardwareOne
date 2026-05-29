@@ -12,6 +12,7 @@
 #include "System_ESPNow_Crypto.h"
 #include "System_ESPNow_Wire.h"  // EspNowV4Header, flag constants
 #include "System_MemUtil.h"      // ps_alloc, AllocPref
+#include "System_Mutex.h"        // EspNowTxGuard — serializes the session TX critical section
 
 namespace {
 
@@ -285,6 +286,14 @@ bool sessionWrapFrame(SessionState* s,
     return false;
   }
 
+  // Serialize the nonce-counter bump + AEAD seal against every other session
+  // sender. Before bonded sensor streaming, espnow_task was the sole sender so
+  // this was race-free by construction; now SENSOR_BCAST_TASK (core 1, 10 Hz)
+  // and cmd_exec_task also reach here. Without this, two cores racing the
+  // ++txSeqNext below would mint duplicate frameSeq values → nonce reuse.
+  // The guard holds only for the bump+seal (microseconds, no blocking calls).
+  EspNowTxGuard txGuard("sessionWrap");
+
   uint32_t mySeq = ++s->txSeqNext;  // first frame uses seq=1
 
   // Stamp the header fields the AEAD binds to.
@@ -423,6 +432,11 @@ bool pendingFrameQueue(const uint8_t peerMac[6], uint8_t type, uint16_t flags,
                   (unsigned)plaintextLen, (unsigned)kPendingFramePlaintextMax);
     return false;
   }
+  // Serialize the lazy table alloc + slot scan/claim against the drain and the
+  // timeout sweep (which run on espnow_task / cmd_exec_task). Same lock as the
+  // session seal; this path does no blocking work, so the hold is brief.
+  EspNowTxGuard g("pendQueue");
+
   if (!ensurePendingAllocated()) return false;
 
   // Eviction policy: if a slot already holds a pending frame for this peer,
@@ -464,6 +478,12 @@ bool pendingFrameQueue(const uint8_t peerMac[6], uint8_t type, uint16_t flags,
 
 void pendingFrameDrainForPeer(const uint8_t peerMac[6]) {
   if (!gPending || !peerMac) return;
+  // Hold the lock across the drain. Safe because each send here is
+  // v4_send_session_wrapped — a SINGLE frame (≤202 B), which seals + queues to
+  // the radio and returns WITHOUT waiting for an ACK. So we never block on
+  // espnow_task while holding the lock (no ACK-wait deadlock), and the inner
+  // sessionWrapFrame take is a same-task reentrant no-op.
+  EspNowTxGuard g("pendDrain");
   for (uint8_t i = 0; i < kPendingFrameSlots; i++) {
     PendingFrame& p = gPending[i];
     if (!p.inUse || memcmp(p.peerMac, peerMac, 6) != 0) continue;
@@ -490,6 +510,9 @@ void pendingFrameDrainForPeer(const uint8_t peerMac[6]) {
 
 uint8_t pendingFrameTimeoutSweep(uint32_t nowMs) {
   if (!gPending) return 0;
+  // Same lock as queue/drain — serializes the slot scan + free against a
+  // concurrent enqueue. No sends here, so the hold is a brief scan.
+  EspNowTxGuard g("pendSweep");
   uint8_t expired = 0;
   for (uint8_t i = 0; i < kPendingFrameSlots; i++) {
     PendingFrame& p = gPending[i];
@@ -694,25 +717,36 @@ void sessionApplyRekeyedKeys(SessionState* s,
                              const uint8_t newKeyTx[32],
                              const uint8_t newKeyRx[32]) {
   if (!s || !newKeyTx || !newKeyRx) return;
-  // Stash current RX key as the prev — gives in-flight frames from the peer
-  // (sent under the old key before they processed our REKEY) a window to
-  // decrypt. We don't keep old TX keys because we control when we switch.
-  memcpy(s->aeadKeyRxPrev, s->aeadKeyRx, 32);
-  s->prevKeysValidUntilMs = (uint32_t)millis() + kRekeyPrevKeysWindowMs;
-  // Install the new keys.
-  memcpy(s->aeadKeyTx, newKeyTx, 32);
-  memcpy(s->aeadKeyRx, newKeyRx, 32);
-  // New keys = new nonce namespace. Reset frame counters and replay window.
-  s->txSeqNext      = 0;
-  s->rxSeqHighWater = 0;
-  s->rxSeqBitmap    = 0;
-  // Done with the rekey transient state.
-  sodium_memzero(s->rekeyEphPrivKey, sizeof(s->rekeyEphPrivKey));
-  s->rekeyInitiatedAtMs = 0;
-  s->rekeyTxSeqAtInit   = 0;
-  s->state          = SESSION_ACTIVE;
-  s->establishedAtMs = (uint32_t)millis();  // age clock resets on rekey
-  s->lastUseMs       = s->establishedAtMs;
+  {
+    // Serialize the key + seq swap against in-flight senders. sessionWrapFrame
+    // holds gEspNowSessionTxMutex while it reads aeadKeyTx and bumps txSeqNext;
+    // without this guard a rekey running on cmd_exec_task could swap the TX key
+    // or reset txSeqNext mid-seal on another core, producing a frame sealed
+    // with a torn key/nonce pair. Same lock, so the seal and the swap are
+    // mutually exclusive. Scope ends BEFORE the drain below — the drain sends
+    // (re-entering sessionWrapFrame), which must not run under the held lock.
+    // Section is a handful of memcpys (microseconds, no blocking calls).
+    EspNowTxGuard txGuard("rekeyApply");
+    // Stash current RX key as the prev — gives in-flight frames from the peer
+    // (sent under the old key before they processed our REKEY) a window to
+    // decrypt. We don't keep old TX keys because we control when we switch.
+    memcpy(s->aeadKeyRxPrev, s->aeadKeyRx, 32);
+    s->prevKeysValidUntilMs = (uint32_t)millis() + kRekeyPrevKeysWindowMs;
+    // Install the new keys.
+    memcpy(s->aeadKeyTx, newKeyTx, 32);
+    memcpy(s->aeadKeyRx, newKeyRx, 32);
+    // New keys = new nonce namespace. Reset frame counters and replay window.
+    s->txSeqNext      = 0;
+    s->rxSeqHighWater = 0;
+    s->rxSeqBitmap    = 0;
+    // Done with the rekey transient state.
+    sodium_memzero(s->rekeyEphPrivKey, sizeof(s->rekeyEphPrivKey));
+    s->rekeyInitiatedAtMs = 0;
+    s->rekeyTxSeqAtInit   = 0;
+    s->state          = SESSION_ACTIVE;
+    s->establishedAtMs = (uint32_t)millis();  // age clock resets on rekey
+    s->lastUseMs       = s->establishedAtMs;
+  }
   // Phase 3.5 task #6 — drain any app-layer sends that got queued while we
   // were in REKEYING state (sessionWrapFrame rejects sends in that state, so
   // v4_send_encrypted_or_queue parks them in the pending-frame ring). Without

@@ -711,6 +711,7 @@ const char* cmd_thermalbus(const String& a)  { RETURN_VALID_IF_VALIDATE_CSTR(); 
 const char* cmd_tofbus(const String& a)      { RETURN_VALID_IF_VALIDATE_CSTR(); return setDeviceBusAndReport(gSettings.tofBus,      a, "tofBus"); }
 const char* cmd_apdsbus(const String& a)     { RETURN_VALID_IF_VALIDATE_CSTR(); return setDeviceBusAndReport(gSettings.apdsBus,     a, "apdsBus"); }
 const char* cmd_servobus(const String& a)    { RETURN_VALID_IF_VALIDATE_CSTR(); return setDeviceBusAndReport(gSettings.servoBus,    a, "servoBus"); }
+const char* cmd_fuelgaugebus(const String& a){ RETURN_VALID_IF_VALIDATE_CSTR(); return setDeviceBusAndReport(gSettings.fuelGaugeBus, a, "fuelGaugeBus"); }
 
 // Sensor-specific I2C clock commands moved to their respective sensor modules:
 // - thermalI2cClockHz -> i2csensor_mlx90640.cpp (thermal module)
@@ -1717,6 +1718,7 @@ const CommandEntry i2cCommands[] = {
   { "tofbus",      "Route VL53L4CX ToF to bus: <0|1> (reboot required)", true, cmd_tofbus,      "Usage: tofBus <0|1>" },
   { "apdsbus",     "Route APDS9960 gesture to bus: <0|1> (reboot required)", true, cmd_apdsbus, "Usage: apdsBus <0|1>" },
   { "servobus",    "Route PCA9685 servo to bus: <0|1> (reboot required)", true, cmd_servobus,  "Usage: servoBus <0|1>" },
+  { "fuelgaugebus","Route MAX17048 fuel gauge to bus: <0|1> (reboot required)", true, cmd_fuelgaugebus, "Usage: fuelGaugeBus <0|1>" },
   // Note: Sensor-specific I2C clock commands (thermalI2cClockHz, tofI2cClockHz) are in their respective sensor modules
   
   // Bus Management
@@ -2401,7 +2403,8 @@ static const SettingEntry i2cSettingEntries[] = {
   { "thermalBus",  SETTING_INT, &gSettings.thermalBus,  0, 0, nullptr, 0, 1, "Thermal bus (reboot required)",         "0|I2C1,1|I2C2", false, nullptr, "thermalbus" },
   { "tofBus",      SETTING_INT, &gSettings.tofBus,      0, 0, nullptr, 0, 1, "ToF bus (reboot required)",             "0|I2C1,1|I2C2", false, nullptr, "tofbus" },
   { "apdsBus",     SETTING_INT, &gSettings.apdsBus,     0, 0, nullptr, 0, 1, "APDS bus (reboot required)",            "0|I2C1,1|I2C2", false, nullptr, "apdsbus" },
-  { "servoBus",    SETTING_INT, &gSettings.servoBus,    0, 0, nullptr, 0, 1, "Servo bus (reboot required)",           "0|I2C1,1|I2C2", false, nullptr, "servobus" }
+  { "servoBus",    SETTING_INT, &gSettings.servoBus,    0, 0, nullptr, 0, 1, "Servo bus (reboot required)",           "0|I2C1,1|I2C2", false, nullptr, "servobus" },
+  { "fuelGaugeBus",SETTING_INT, &gSettings.fuelGaugeBus,0, 0, nullptr, 0, 1, "Fuel gauge bus (reboot required)",      "0|I2C1,1|I2C2", false, nullptr, "fuelgaugebus" }
 };
 
 // Columns: name, jsonSection, entries, count, isConnected, description

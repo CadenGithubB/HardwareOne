@@ -491,6 +491,24 @@ bool FileManager::loadDirectory() {
   }
 
   dir.close();
+
+  // Apply visibility filter (picker mode). Compacts cachedEntries[] in place,
+  // keeping folders + files where filter() returns true. Done AFTER the dir
+  // scan so a refresh under a new filter doesn't require re-reading the FS.
+  if (visibilityFilter_ && cachedCount > 0) {
+    int writeIdx = 0;
+    for (int i = 0; i < cachedCount; i++) {
+      if (cachedEntries[i].isFolder || visibilityFilter_(cachedEntries[i])) {
+        if (writeIdx != i) {
+          memcpy(&cachedEntries[writeIdx], &cachedEntries[i], sizeof(FileEntry));
+        }
+        writeIdx++;
+      }
+    }
+    cachedCount = writeIdx;
+    state.totalItems = cachedCount;
+  }
+
   cacheValid = true;
   // Tag the cache with the generation it was filled under. refresh() reads
   // this and re-fills only when gIdentityGeneration has advanced past it.
@@ -500,6 +518,17 @@ bool FileManager::loadDirectory() {
 
   gSensorPollingPaused = wasPaused;
   return true;
+}
+
+void FileManager::setVisibilityFilter(VisibilityFilter filter) {
+  if (visibilityFilter_ == filter) return;
+  visibilityFilter_ = filter;
+  // Force a full re-load — the cache was filtered against the old predicate
+  // and may be missing entries the new one would let through (or carrying
+  // ones it would drop).
+  cacheValid = false;
+  loadedAtGen_ = 0;  // bypass the gen-versioned refresh fast path
+  loadDirectory();
 }
 
 void FileManager::ensureValidSelection() {

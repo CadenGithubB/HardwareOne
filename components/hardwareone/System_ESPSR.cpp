@@ -129,6 +129,8 @@ static const char* transportToStableString(CommandSource t) {
     case SOURCE_MQTT: return "mqtt";
     case SOURCE_ESPNOW: return "espnow";
     case SOURCE_INTERNAL: return "internal";
+    case SOURCE_VOICE: return "voice";
+    case SOURCE_G2_GLASSES: return "g2";
     default: return "unknown";
   }
 }
