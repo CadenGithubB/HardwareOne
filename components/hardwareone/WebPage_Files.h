@@ -123,37 +123,17 @@ function updateStorageStats(path) {
   }).catch(e => console.error('Storage stats error:', e));
 }
 
-// Bonded storage stats — run `remote:fsusage` over the bond session and parse
-// the four lines it broadcasts (Total / Used / Free / Usage). Same prefix logic
-// the local stats use, but with a "Worker: " badge in the text so the user
-// knows which device's storage the bar represents.
+// Bonded storage stats — structured FS_STAT_REQ via BondFs.stat. Replaces a
+// fragile 4-line CLI-text scrape (Total / Used / Free / Usage) that had to
+// fight doneMarker collisions with concurrent commands. Typed JSON now;
+// "Worker: " prefix kept so the storage bar shows which device's numbers
+// are being displayed.
 function updateBondedStorageStats() {
   if (!window.BondFs) { setStorageError('BondFs unavailable'); return; }
   setStorageError('Fetching worker storage…');
-  window.BondFs.exec('fsusage', {
-    // Trailing space is critical: the worker's output starts with the title
-    // "Filesystem Usage:" (no space after the colon) and ends with "  Usage: N%"
-    // (space after the colon). Without the trailing space the doneMarker would
-    // match the title line, fire onResult immediately with only the title in
-    // `lines`, and parsing would fail every time. (Ultrathink ftw.)
-    doneMarker: 'Usage: ',
-    onResult: function(lines, err) {
-      if (err) { setStorageError('Worker storage: ' + err); return; }
-      var total = 0, used = 0, free = 0, pct = 0;
-      var got = 0;
-      // Lines look like "  Total: 3258368 bytes" / "  Used:  178432 bytes" /
-      // "  Free:  3079936 bytes" / "  Usage: 5%". Parse with simple regex per
-      // line — the exact prefix whitespace is fragile, so don't anchor on it.
-      for (var i = 0; i < lines.length; i++) {
-        var m;
-        if ((m = lines[i].match(/Total:\s+(\d+)/)))  { total = parseInt(m[1], 10); got++; }
-        else if ((m = lines[i].match(/Used:\s+(\d+)/))) { used = parseInt(m[1], 10); got++; }
-        else if ((m = lines[i].match(/Free:\s+(\d+)/))) { free = parseInt(m[1], 10); got++; }
-        else if ((m = lines[i].match(/Usage:\s+(\d+)/))) { pct = parseInt(m[1], 10); got++; }
-      }
-      if (got < 4 || total === 0) { setStorageError('Worker storage: parse failed'); return; }
-      applyStorageStats(used, total, free, pct, 'Worker: ');
-    }
+  window.BondFs.stat('/', function(s, err){
+    if (err || !s) { setStorageError('Worker storage: ' + (err || 'unknown')); return; }
+    applyStorageStats(s.used, s.total, s.free, s.usagePercent, 'Worker: ');
   });
 }
 function editFile(filePath) {

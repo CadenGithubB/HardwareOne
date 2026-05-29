@@ -19,6 +19,8 @@ set(HW_CFG_ENABLE_MAPS 0)
 set(HW_CFG_ENABLE_AUTOMATION 0)
 set(HW_CFG_ENABLE_EDGE_IMPULSE 0)
 set(HW_CFG_ENABLE_GAMES 0)
+set(HW_CFG_ENABLE_WEB_GAME_MAZE 1)
+set(HW_CFG_ENABLE_WEB_GAME_DARKROOM 0)
 set(HW_CFG_ENABLE_BLUETOOTH 0)
 set(HW_CFG_ENABLE_G2_GLASSES 0)
 
@@ -87,6 +89,16 @@ if(EXISTS "${hw_cfg_file}")
     string(REGEX MATCH "#define[ \t]+ENABLE_GAMES[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
     if(CMAKE_MATCH_1)
         set(HW_CFG_ENABLE_GAMES "${CMAKE_MATCH_1}")
+    endif()
+
+    string(REGEX MATCH "#define[ \t]+ENABLE_WEB_GAME_MAZE[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
+    if(CMAKE_MATCH_1)
+        set(HW_CFG_ENABLE_WEB_GAME_MAZE "${CMAKE_MATCH_1}")
+    endif()
+
+    string(REGEX MATCH "#define[ \t]+ENABLE_WEB_GAME_DARKROOM[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
+    if(CMAKE_MATCH_1)
+        set(HW_CFG_ENABLE_WEB_GAME_DARKROOM "${CMAKE_MATCH_1}")
     endif()
 
     string(REGEX MATCH "#define[ \t]+ENABLE_BLUETOOTH[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
@@ -158,6 +170,7 @@ set(hardwareone_srcs
         System_ESPNow.cpp
         System_ESPNow_Crypto.cpp
         System_ESPNow_Files.cpp
+        System_ESPNow_FsList.cpp
         System_ESPNow_Handlers_Crypto.cpp
         System_ESPNow_Identity.cpp
         System_ESPNow_MeshKeys.cpp
@@ -255,6 +268,7 @@ if(HW_CFG_I2C_FEATURE_LEVEL GREATER 0)
         i2csensor_ds3231.cpp
         i2csensor_sths34pf80.cpp
         i2csensor_pca9685.cpp
+        i2csensor_max17048.cpp
     )
     # Input device: exactly one of the two drivers compiles in. Both own the
     # gamepadTask() function symbol so they would collide at link time if
@@ -356,8 +370,11 @@ if(HW_CFG_ENABLE_HTTP_SERVER)
     if(HW_CFG_ENABLE_MAPS GREATER 0)
         list(APPEND hardwareone_srcs WebPage_Maps.cpp)
     endif()
-    if(HW_CFG_ENABLE_GAMES GREATER 0)
+    if(HW_CFG_ENABLE_GAMES GREATER 0 AND HW_CFG_ENABLE_WEB_GAME_MAZE GREATER 0)
         list(APPEND hardwareone_srcs WebPage_Games.cpp)
+    endif()
+    if(HW_CFG_ENABLE_GAMES GREATER 0 AND HW_CFG_ENABLE_WEB_GAME_DARKROOM GREATER 0)
+        list(APPEND hardwareone_srcs WebPage_DarkRoom.cpp)
     endif()
     list(APPEND hardwareone_requires esp_http_server)
     if(HW_CFG_ENABLE_HTTPS GREATER 0)
@@ -368,6 +385,7 @@ endif()
 
 if(HW_CFG_ENABLE_LLM GREATER 0)
     list(APPEND hardwareone_srcs System_LLM.cpp)
+    list(APPEND hardwareone_srcs System_LLMChat.cpp)
     list(APPEND hardwareone_requires espressif__esp-dsp)
     if(HW_CFG_ENABLE_HTTP_SERVER)
         list(APPEND hardwareone_srcs WebPage_LLM.cpp)

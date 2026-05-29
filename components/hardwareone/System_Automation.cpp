@@ -65,18 +65,21 @@ extern void runUnifiedSystemCommand(const String& argsInput);
 #include "System_CommandTypes.h"
 extern bool submitCommandAsync(const Command& cmd, ExecAsyncCallback callback, void* userData);
 
-// The createdBy user for the currently executing automation (set before each exec loop)
-static String gCurrentAutomationUser;
-
 // Queue an automation sub-command through the FreeRTOS command queue (async, non-blocking).
 // This avoids deadlock when already on cmd_exec task and avoids blocking the main loop.
-static void queueAutomationSubCommand(const char* cmd) {
+// `owner` is the automation's createdBy user — stamped into cmd.ctx.auth so VFS permission
+// checks and audit logs attribute the work to the correct principal on cmd_exec_task.
+// `autoName` is the automation's display name — stamped into ctx.automationName so
+// executeCommand can write COMMAND/OUTPUT autolog entries attributed to this automation,
+// with no race against the scheduler advancing to the next automation before the command runs.
+static void queueAutomationSubCommand(const char* cmd, const char* owner, const char* autoName = nullptr) {
   Command uc;
   uc.line = cmd;
   uc.ctx.origin = ORIGIN_SYSTEM;
   uc.ctx.auth.transport = SOURCE_INTERNAL;
-  uc.ctx.auth.user = gCurrentAutomationUser;
-  DEBUGF(DEBUG_AUTOMATIONS, "[autos queue] Queueing cmd='%s' with user='%s'", cmd, gCurrentAutomationUser.c_str());
+  uc.ctx.auth.user = owner ? owner : "";
+  DEBUGF(DEBUG_AUTOMATIONS, "[autos queue] Queueing cmd='%s' user='%s' automation='%s'",
+         cmd, owner ? owner : "", autoName ? autoName : "");
   uc.ctx.auth.ip = "";
   uc.ctx.auth.path = "/automation";
   uc.ctx.auth.sid = "";
@@ -87,6 +90,10 @@ static void queueAutomationSubCommand(const char* cmd) {
   uc.ctx.validateOnly = false;
   uc.ctx.replyHandle = nullptr;
   uc.ctx.httpReq = nullptr;
+  if (autoName && autoName[0]) {
+    strncpy(uc.ctx.automationName, autoName, sizeof(uc.ctx.automationName) - 1);
+    uc.ctx.automationName[sizeof(uc.ctx.automationName) - 1] = '\0';
+  }
   if (!submitCommandAsync(uc, nullptr, nullptr)) {
     DEBUGF(DEBUG_AUTOMATIONS, "[autos] FAILED to queue sub-command: %s", cmd);
   } else {
@@ -107,7 +114,6 @@ static bool isAutoInternalResult(const char* r) {
 // Automation state variables (defined here, used by .ino and this file)
 bool gAutoLogActive = false;
 String gAutoLogFile = "";
-String gAutoLogAutomationName = "";
 
 // Captured AuthContext of the user who started automation logging. Each
 // automation log line is written via VFS::openGuarded with this context, so
@@ -136,7 +142,7 @@ bool updateAutomationNextAt(long automationId, time_t newNextAt);
 time_t computeNextRunTime(const char* automationJson, time_t fromTime);
 // Unified post-fire helper (Trigger model defined later in this file).
 static void rescheduleAfterFire(long id, const char* automationJson, time_t firedAt);
-const char* executeConditionalCommand(const char* command);
+const char* executeConditionalCommand(const char* command, const char* owner, const char* autoName = nullptr);
 const char* evaluateConditionalChain(const char* chainStr, char* outBuf, size_t outBufSize);
 bool evaluateCondition(const char* condition);
 const char* validateConditionalHierarchy(const char* conditions);
@@ -164,7 +170,6 @@ public:
 };
 
 // Global automation state
-bool gInAutomationContext = false;
 long* gAutoMemoId = nullptr;
 time_t* gAutoMemoNextAt = nullptr;
 int gAutoMemoCount = 0;
@@ -795,22 +800,18 @@ void runAutomationsOnBoot() {
       DEBUGF(DEBUG_AUTOMATIONS, "[automations] Running boot automation: %s", autoName.c_str());
     }
 
-    {
-      char _createdByBuf[64];
-      extractJsonString(obj.c_str(), "\"createdBy\"", _createdByBuf, sizeof(_createdByBuf));
-      gCurrentAutomationUser = _createdByBuf;
-    }
+    char _createdByBuf[64];
+    extractJsonString(obj.c_str(), "\"createdBy\"", _createdByBuf, sizeof(_createdByBuf));
 
     if (gAutoLogActive) {
-      gAutoLogAutomationName = autoName;
       char startMsg[256];
       snprintf(startMsg, sizeof(startMsg), "Boot automation started: ID=%ld Name=%s User=%s",
-               id, autoName.c_str(), gCurrentAutomationUser.c_str());
+               id, autoName.c_str(), _createdByBuf);
       appendAutoLogEntry("AUTO_START", startMsg);
     }
 
     for (int ci = 0; ci < cmdsCount; ++ci) {
-      const char* result = executeConditionalCommand(cmdsList[ci]);
+      const char* result = executeConditionalCommand(cmdsList[ci], _createdByBuf, autoName.c_str());
 
       // Output the result (skip internal status messages - actual output comes from queue)
       if (!isAutoInternalResult(result)) {
@@ -819,7 +820,6 @@ void runAutomationsOnBoot() {
         broadcastOutput(outMsg);
       }
     }
-    gCurrentAutomationUser = "";
 
     // Free allocated command strings
     for (int ci = 0; ci < cmdsCount; ++ci) {
@@ -884,9 +884,7 @@ void resumeAutomationSystem() {
 
 // Execute automation command (queues through FreeRTOS command queue, non-blocking)
 void runAutomationCommandUnified(const String& argsInput) {
-  gInAutomationContext = true;
-  queueAutomationSubCommand(argsInput.c_str());
-  gInAutomationContext = false;
+  queueAutomationSubCommand(argsInput.c_str(), "");
 }
 
 // Automation command handlers
@@ -984,28 +982,14 @@ const char* cmd_automation_add(const String& argsInput) {
             return "ERROR";
           }
         } else {
-          // Validate this individual command by calling executeCommand in validation mode
-          
-          // Create minimal auth context for validation
-          AuthContext ctx;
-          ctx.transport = SOURCE_INTERNAL;
-          ctx.path = "/automation/validate";
-          ctx.ip = "127.0.0.1";
-          ctx.user = currentExecUser().length() > 0 ? currentExecUser() : "system";
-          ctx.sid = "";
-          ctx.opaque = nullptr;
-          
-          bool prevValidate = gCLIValidateOnly;
-          gCLIValidateOnly = true;
-          
-          char validationBuf[256];
-          executeCommand(ctx, part.c_str(), validationBuf, sizeof(validationBuf));
-          String validationResult = validationBuf;
-          
-          gCLIValidateOnly = prevValidate;
-          
-          if (validationResult != "VALID") {
-            BROADCAST_PRINTF("Error: Invalid command '%s' - %s", part.c_str(), validationResult.c_str());
+          // Validate this individual command exists in the registry.
+          // Using findCommand() instead of recursive executeCommand() — a full
+          // executeCommand() call from inside cmd_automation_add (which is
+          // itself running inside executeCommand on cmd_exec_task) doubles the
+          // already-deep stack and causes an overflow on 24 KB budgets.
+          // findCommand() is a plain registry walk with no stack-heavy setup.
+          if (!findCommand(part)) {
+            BROADCAST_PRINTF("Error: Unknown command '%s'", part.c_str());
             return "ERROR";
           }
         }
@@ -1584,7 +1568,6 @@ const char* cmd_automation_run(const String& argsInput) {
   
   // Log automation start if logging is active
   if (gAutoLogActive) {
-    gAutoLogAutomationName = autoName;
     char startBuf[256];
     snprintf(startBuf, sizeof(startBuf), "Automation started: ID=%s Name=%s User=%s", idStr.c_str(), autoName.c_str(), currentExecUser().c_str());
     appendAutoLogEntry("AUTO_START", startBuf);
@@ -1694,7 +1677,6 @@ const char* cmd_automation_run(const String& argsInput) {
         char skipBuf[256];
         snprintf(skipBuf, sizeof(skipBuf), "Automation skipped: ID=%s Name=%s Condition not met: %s", idStr.c_str(), autoName.c_str(), condition.c_str());
         appendAutoLogEntry("AUTO_SKIP", skipBuf);
-        gAutoLogAutomationName = "";
       }
       {
         char skipBroadcast[160];
@@ -1705,26 +1687,23 @@ const char* cmd_automation_run(const String& argsInput) {
     }
   }
   
-  {
-    char _createdByBuf[64];
-    extractJsonString(obj.c_str(), "\"createdBy\"", _createdByBuf, sizeof(_createdByBuf));
-    gCurrentAutomationUser = _createdByBuf;
-    DEBUGF(DEBUG_AUTOMATIONS, "[autos run] Extracted createdBy='%s' for automation id=%s", gCurrentAutomationUser.c_str(), idStr.c_str());
-  }
+  char _createdByBuf[64];
+  extractJsonString(obj.c_str(), "\"createdBy\"", _createdByBuf, sizeof(_createdByBuf));
+  DEBUGF(DEBUG_AUTOMATIONS, "[autos run] Extracted createdBy='%s' for automation id=%s", _createdByBuf, idStr.c_str());
 
   // Authorization: non-admins may only trigger automations they created themselves
-  if (!currentExecIsAdmin() && gCurrentAutomationUser != currentExecUser()) {
+  if (!currentExecIsAdmin() && String(_createdByBuf) != currentExecUser()) {
     DEBUGF(DEBUG_AUTOMATIONS, "[autos run] AUTHORIZATION DENIED: user='%s' isAdmin=%d tried to run automation created by '%s'",
-           currentExecUser().c_str(), currentExecIsAdmin(), gCurrentAutomationUser.c_str());
+           currentExecUser().c_str(), currentExecIsAdmin(), _createdByBuf);
     {
       char authErr[120];
-      snprintf(authErr, sizeof(authErr), "Error: Admin required to trigger automation created by %s", gCurrentAutomationUser.c_str());
+      snprintf(authErr, sizeof(authErr), "Error: Admin required to trigger automation created by %s", _createdByBuf);
       broadcastOutput(authErr);
     }
     return "Error: Admin required";
   }
   DEBUGF(DEBUG_AUTOMATIONS, "[autos run] AUTHORIZATION OK: user='%s' isAdmin=%d running automation created by '%s'",
-         currentExecUser().c_str(), currentExecIsAdmin(), gCurrentAutomationUser.c_str());
+         currentExecUser().c_str(), currentExecIsAdmin(), _createdByBuf);
 
   // Execute all commands (with conditional logic support)
   for (int ci = 0; ci < cmdsCount; ++ci) {
@@ -1737,7 +1716,7 @@ const char* cmd_automation_run(const String& argsInput) {
     }
     
     // Queue command for execution (async, non-blocking)
-    const char* result = executeConditionalCommand(cmdsList[ci].c_str());
+    const char* result = executeConditionalCommand(cmdsList[ci].c_str(), _createdByBuf, autoName.c_str());
     
     // Output the result (skip internal status messages - actual output comes from queue)
     if (!isAutoInternalResult(result)) {
@@ -1748,7 +1727,6 @@ const char* cmd_automation_run(const String& argsInput) {
       }
     }
   }
-  gCurrentAutomationUser = "";
   
   // Advance nextAt after manual execution via the unified post-fire helper.
   time_t now = time(nullptr);
@@ -2156,17 +2134,13 @@ bool processAutomationCallback(const char* autoJson, size_t jsonLen, void* userD
         }
       }
 
-      {
-        char _createdByBuf[64];
-        extractJsonString(obj.c_str(), "\"createdBy\"", _createdByBuf, sizeof(_createdByBuf));
-        gCurrentAutomationUser = _createdByBuf;
-      }
+      char _createdByBuf[64];
+      extractJsonString(obj.c_str(), "\"createdBy\"", _createdByBuf, sizeof(_createdByBuf));
 
       // Log scheduled automation start if logging is active
       if (gAutoLogActive) {
-        gAutoLogAutomationName = autoName;
         if (ensureDebugBuffer()) {
-          snprintf(getDebugBuffer(), 1024, "Scheduled automation started: ID=%lu Name=%s User=%s", id, autoName.c_str(), gCurrentAutomationUser.c_str());
+          snprintf(getDebugBuffer(), 1024, "Scheduled automation started: ID=%lu Name=%s User=%s", id, autoName.c_str(), _createdByBuf);
           appendAutoLogEntry("AUTO_START", String(getDebugBuffer()));
         }
       }
@@ -2176,14 +2150,13 @@ bool processAutomationCallback(const char* autoJson, size_t jsonLen, void* userD
         DEBUGF(DEBUG_AUTO_EXEC, "[autos] id=%ld run cmd[%d]='%s'", id, ci, cmdsList[ci].c_str());
 
         // Queue command for execution (async, non-blocking)
-        const char* result = executeConditionalCommand(cmdsList[ci].c_str());
+        const char* result = executeConditionalCommand(cmdsList[ci].c_str(), _createdByBuf, autoName.c_str());
 
         // Output the result (skip internal status messages - actual output comes from queue)
         if (!isAutoInternalResult(result)) {
           BROADCAST_PRINTF("[Scheduled Automation %lu] %s", id, result);
         }
       }
-      gCurrentAutomationUser = "";
       ctx->executed++;
 
       // Log scheduled automation end if logging is active
@@ -3129,7 +3102,9 @@ const char* evaluateConditionalChain(const char* chainStr, char* outBuf, size_t 
 }
 
 // Execute conditional command (const char* input, static return buffer)
-const char* executeConditionalCommand(const char* command) {
+// `owner` is the automation's createdBy user, forwarded into every queued sub-command.
+// `autoName` is the automation's display name for autolog COMMAND/OUTPUT attribution.
+const char* executeConditionalCommand(const char* command, const char* owner, const char* autoName) {
   static char errorBuf[128];  // Static buffer for error messages
   const char* cmdStr = command;
   size_t cmdLen = strlen(command);
@@ -3278,13 +3253,13 @@ const char* executeConditionalCommand(const char* command) {
       if (conditionMet) {
         if (thenCmdStart[0] != '\0') {
           DEBUGF(DEBUG_AUTOMATIONS, "[conditional] queuing THEN: %s", thenCmdStart);
-          queueAutomationSubCommand(thenCmdStart);
+          queueAutomationSubCommand(thenCmdStart, owner, autoName);
           return "Conditional THEN queued";
         }
       } else {
         if (elseBuf[0] != '\0') {
           DEBUGF(DEBUG_AUTOMATIONS, "[conditional] queuing ELSE: %s", elseBuf);
-          queueAutomationSubCommand(elseBuf);
+          queueAutomationSubCommand(elseBuf, owner, autoName);
           return "Conditional ELSE queued";
         }
       }
@@ -3294,7 +3269,7 @@ const char* executeConditionalCommand(const char* command) {
   }
   
   // Regular command - queue through FreeRTOS command queue (async, non-blocking)
-  queueAutomationSubCommand(command);
+  queueAutomationSubCommand(command, owner, autoName);
   return "Command queued";
 }
 
@@ -3406,7 +3381,6 @@ const char* cmd_autolog(const String& argsInput) {
 
     gAutoLogActive = true;
     gAutoLogFile = filename;
-    gAutoLogAutomationName = "";
 
     if (!appendAutoLogEntry("LOG_START", "Automation logging started")) {
       gAutoLogActive = false;
@@ -3427,19 +3401,13 @@ const char* cmd_autolog(const String& argsInput) {
     snprintf(getDebugBuffer(), 1024, "Automation logging stopped: %s", gAutoLogFile.c_str());
     gAutoLogActive = false;
     gAutoLogFile = "";
-    gAutoLogAutomationName = "";
     gAutoLogOwnerCtx = AuthContext{};  // clear captured identity
 
     return getDebugBuffer();
 
   } else if (subcmd == "status") {
     if (gAutoLogActive) {
-      if (gAutoLogAutomationName.length() > 0) {
-        snprintf(getDebugBuffer(), 1024, "Automation logging ACTIVE: %s (automation: %s)",
-                 gAutoLogFile.c_str(), gAutoLogAutomationName.c_str());
-      } else {
-        snprintf(getDebugBuffer(), 1024, "Automation logging ACTIVE: %s", gAutoLogFile.c_str());
-      }
+      snprintf(getDebugBuffer(), 1024, "Automation logging ACTIVE: %s", gAutoLogFile.c_str());
       return getDebugBuffer();
     } else {
       return "Automation logging INACTIVE";
@@ -3694,17 +3662,13 @@ void schedulerTickMinute() {
           }
         }
 
-        {
-          char _createdByBuf[64];
-          extractJsonString(obj.c_str(), "\"createdBy\"", _createdByBuf, sizeof(_createdByBuf));
-          gCurrentAutomationUser = _createdByBuf;
-        }
+        char _createdByBuf[64];
+        extractJsonString(obj.c_str(), "\"createdBy\"", _createdByBuf, sizeof(_createdByBuf));
 
         // Log scheduled automation start if logging is active
         if (gAutoLogActive) {
-          gAutoLogAutomationName = autoName;
           char startBuf[256];
-          snprintf(startBuf, sizeof(startBuf), "Scheduled automation started: ID=%ld Name=%s User=%s", id, autoName.c_str(), gCurrentAutomationUser.c_str());
+          snprintf(startBuf, sizeof(startBuf), "Scheduled automation started: ID=%ld Name=%s User=%s", id, autoName.c_str(), _createdByBuf);
           appendAutoLogEntry("AUTO_START", startBuf);
         }
 
@@ -3713,7 +3677,7 @@ void schedulerTickMinute() {
           DEBUGF(DEBUG_AUTOMATIONS, "[autos] id=%ld run cmd[%d]='%s'", id, ci, cmdsList[ci].c_str());
 
           // Queue command for execution (async, non-blocking)
-          const char* result = executeConditionalCommand(cmdsList[ci].c_str());
+          const char* result = executeConditionalCommand(cmdsList[ci].c_str(), _createdByBuf, autoName.c_str());
 
           // Output the result (skip internal status messages - actual output comes from queue)
           if (!isAutoInternalResult(result)) {
@@ -3724,7 +3688,6 @@ void schedulerTickMinute() {
             }
           }
         }
-        gCurrentAutomationUser = "";
         executed++;
 
         // Log scheduled automation end if logging is active

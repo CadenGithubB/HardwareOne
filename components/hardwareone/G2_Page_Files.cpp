@@ -454,11 +454,13 @@ static void exitJsonViewBackToFiles() {
 }
 
 static bool showJsonFileViaTextWidget(bool pretty) {
-  // Install the G2-paired user's identity for this page action. The g2_tap_disp
-  // worker that drives this page leaves the task's TLS slot at its default
-  // (ANON), so canRead/readTextLimited below would see no user and deny
-  // restricted files. Mirrors the pattern at G2_Glasses.cpp:13708,14744,15124,15215.
-  ExecIdentityGuard identity(g2HijackAuthContext());
+  // Install the G2-paired user's identity + notification source for this
+  // page action. The g2_tap_disp worker that drives this page leaves the
+  // task's TLS slots at their defaults (ANON identity, UNKNOWN notif src),
+  // so canRead/readTextLimited below would see no user and deny restricted
+  // files, and any notify*() fired during the read would attribute to
+  // "Unknown". G2HijackCtxGuard installs both in one composed RAII scope.
+  G2HijackCtxGuard ctxGuard;
 
   char path[FILE_MANAGER_MAX_PATH + 32];
   buildChooserPath(path, sizeof(path));

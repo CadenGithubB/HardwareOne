@@ -16,7 +16,8 @@
 
 #include <Arduino.h>
 #include <atomic>
-#include "System_User.h"  // AuthContext, isAdminUser, SOURCE_INTERNAL
+#include "System_User.h"           // AuthContext, isAdminUser, SOURCE_INTERNAL
+#include "System_Notifications.h"  // NotificationContextGuard — composed by CommandIdentityScope
 
 // Read accessors — return the calling task's current identity.
 const AuthContext& currentAuthContext();
@@ -54,6 +55,64 @@ class ExecIdentityGuard {
 #define SYSTEM_IDENTITY_SCOPE(purpose)                                        \
   ExecIdentityGuard SYSTEM_IDENTITY_SCOPE_CONCAT(_sysIdentityGuard_, __LINE__)( \
       systemIdentity(purpose))
+
+// ============================================================================
+// CommandIdentityScope — composed identity + notification install
+// ============================================================================
+//
+// The two TLS slots (auth identity + notification source) almost always want
+// to move together: a command running on behalf of <user> via <transport>
+// should also have its notifications attributed to <user> via the matching
+// NotificationSource. Forgetting one half of the pair is a class of bug
+// (sync direct-FS hijack work fired notifications with whatever stale
+// NOTIF_SOURCE_* the task last carried — typically UNKNOWN).
+//
+// CommandIdentityScope composes both guards in one stack object and derives
+// the NotificationSource from the AuthContext's transport via a private
+// 1:1 mapping (SOURCE_WEB → NOTIF_SOURCE_WEB, SOURCE_G2_GLASSES →
+// NOTIF_SOURCE_G2, etc. — see System_AuthIdentity.cpp). Callers don't pass
+// a notification source separately, which removes the "wrong source for
+// transport" footgun by construction.
+//
+// LAYER POSITION
+// --------------
+//   ExecIdentityGuard        (low-level: TLS auth slot)
+//   NotificationContextGuard (low-level: TLS notification slot)
+//        ↓ composed by ↓
+//   CommandIdentityScope     (the unified per-command scope primitive)
+//        ↓ named by ↓
+//   G2HijackCtxGuard         (sugar for G2 direct-FS scopes)
+//   OLEDFileBrowserCtxGuard  (sugar for OLED file browser scope)
+//   executeCommand           (uses CommandIdentityScope directly)
+//
+// USAGE
+// -----
+//   CommandIdentityScope scope(g2HijackAuthContext());
+//   CommandIdentityScope scope(gLiveTextOwnerCtx);  // works with any AuthContext
+//   CommandIdentityScope scope(ctx);                // from executeCommand
+//
+// DESTRUCTION ORDERING
+// --------------------
+// notifGuard_ destroys first (declared last), then identityGuard_. So when
+// the scope ends, the notification context is restored BEFORE the identity
+// — meaning any notification fired during identity-restoration unwinds with
+// the prior notification source (correct: the scope is gone).
+class CommandIdentityScope {
+ public:
+  explicit CommandIdentityScope(const AuthContext& ctx);
+  ~CommandIdentityScope() = default;
+  CommandIdentityScope(const CommandIdentityScope&)            = delete;
+  CommandIdentityScope& operator=(const CommandIdentityScope&) = delete;
+  CommandIdentityScope(CommandIdentityScope&&)                 = delete;
+  CommandIdentityScope& operator=(CommandIdentityScope&&)      = delete;
+
+ private:
+  // Declaration order = construction order. Both guards copy what they need
+  // from `ctx` at construction time; neither retains a reference, so `ctx`
+  // can be a temporary (e.g. `CommandIdentityScope(g2HijackAuthContext())`).
+  ExecIdentityGuard        identityGuard_;
+  NotificationContextGuard notifGuard_;
+};
 
 // Initialize the TLS slot for the calling task. Idempotent. Worker tasks
 // don't need to call this — their first ExecIdentityGuard construction

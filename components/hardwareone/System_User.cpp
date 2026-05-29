@@ -23,6 +23,37 @@
 #include "System_CLIConfirm.h"     // cliRequestConfirm — yes/no gate for destructive userdelete
 #include "System_Settings.h"
 #include "Bluetooth.h"
+#include "BLE_Peers.h"            // gBlePeerData[BLE_PEER_G2_GLASSES].pairedByUser
+                                  // — G2 identity source for SOURCE_G2_GLASSES branches
+                                  // (declarations are #if ENABLE_BLUETOOTH-gated inside)
+
+// ----------------------------------------------------------------------------
+// G2 identity accessors — wrap gBlePeerData[BLE_PEER_G2_GLASSES].pairedByUser
+// behind the BT compile gate so SOURCE_G2_GLASSES switch branches below
+// compile cleanly on BT-off builds. On BT-off the lens can't connect anyway,
+// so the readers return empty/false and the mutators are no-ops; nothing
+// downstream relies on a real value.
+// ----------------------------------------------------------------------------
+static inline String g2PairedUserGet() {
+#if ENABLE_BLUETOOTH
+  return gBlePeerData[BLE_PEER_G2_GLASSES].pairedByUser;
+#else
+  return String();
+#endif
+}
+static inline void g2PairedUserClear() {
+#if ENABLE_BLUETOOTH
+  gBlePeerData[BLE_PEER_G2_GLASSES].pairedByUser = String();
+#endif
+}
+static inline bool g2PairedUserMatches(const String& username) {
+#if ENABLE_BLUETOOTH
+  return gBlePeerData[BLE_PEER_G2_GLASSES].pairedByUser.equalsIgnoreCase(username);
+#else
+  (void)username;
+  return false;
+#endif
+}
 #include "OLED_Display.h"
 #include <LittleFS.h>
 #include <ArduinoJson.h>
@@ -123,6 +154,20 @@ bool tgRequireAuth(AuthContext& ctx) {
     ctx.user = gLocalDisplayUser;
     if (ctx.ip.length() == 0) ctx.ip = "local";
     return true;
+  } else if (ctx.transport == SOURCE_G2_GLASSES) {
+    // G2 lens — auth IS pairing. pairedByUser is the captured identity from
+    // pair-time (set by bleStampPairedByIfBlank when an authenticated CLI
+    // ran `bleautoconnect g2-glasses on`). Blank means "paired-but-stamp-lost"
+    // — refuse the command and tell the user how to recover (re-stamp via
+    // bleautoconnect from an authenticated CLI session).
+    String g2User = g2PairedUserGet();
+    if (g2User.length() == 0) {
+      broadcastOutput("ERROR: G2 pairedByUser blank — run 'bleautoconnect g2-glasses on' from authenticated CLI to re-stamp");
+      return false;
+    }
+    ctx.user = g2User;
+    if (ctx.ip.length() == 0) ctx.ip = "g2.local";
+    return true;
   } else {
     // SOURCE_BLUETOOTH and SOURCE_ESPNOW are expected to validate auth in
     // their command-receive handlers BEFORE submitting the command to
@@ -158,6 +203,15 @@ bool tgRequireAuth(AuthContext& ctx) {
     }
     ctx.user = gLocalDisplayUser;
     if (ctx.ip.length() == 0) ctx.ip = "local";
+    return true;
+  } else if (ctx.transport == SOURCE_G2_GLASSES) {
+    String g2User = g2PairedUserGet();
+    if (g2User.length() == 0) {
+      broadcastOutput("ERROR: G2 pairedByUser blank — run 'bleautoconnect g2-glasses on' from authenticated CLI to re-stamp");
+      return false;
+    }
+    ctx.user = g2User;
+    if (ctx.ip.length() == 0) ctx.ip = "g2.local";
     return true;
   }
   return true; // Internal commands pass through
@@ -249,7 +303,15 @@ bool loginTransport(CommandSource transport, const String& username, const Strin
       // Web auth is handled separately via session cookies
       // This function doesn't apply to web transport
       return false;
-      
+
+    case SOURCE_G2_GLASSES:
+      // G2 doesn't use credential login. Identity is captured at pair time
+      // by bleStampPairedByIfBlank, called from `bleautoconnect g2-glasses on`
+      // executed under an already-authenticated CLI session. No code path
+      // should be calling loginTransport(SOURCE_G2_GLASSES) — return false
+      // so it surfaces clearly if one ever does.
+      return false;
+
     default:
       return false;
   }
@@ -267,11 +329,19 @@ void logoutTransport(CommandSource transport) {
       gLocalDisplayUser = String();
       oledNotifyLocalDisplayAuthChanged();
       break;
-      
+
+    case SOURCE_G2_GLASSES:
+      // Clear pair-time stamp. The G2 stays paired (MAC + autoConnect
+      // preserved) but commands from the lens will be denied until
+      // someone runs `bleautoconnect g2-glasses on` from an authenticated
+      // CLI session to re-stamp pairedByUser.
+      g2PairedUserClear();
+      break;
+
     case SOURCE_BLUETOOTH:
       bleRevokeAllSessions();
       break;
-      
+
     case SOURCE_WEB:
       // Web logout is handled separately via session management
       break;
@@ -350,6 +420,14 @@ int revokeUserSessions(const String& username,
     revoked++;
   }
 
+  // G2 glasses (BLE-attached lens; pair-time identity).
+  // The pair stays valid (MAC + autoConnect kept) but the lens stops being
+  // able to act as this user until re-stamp via `bleautoconnect g2-glasses on`.
+  if (exceptTransport != SOURCE_G2_GLASSES && g2PairedUserMatches(username)) {
+    g2PairedUserClear();
+    revoked++;
+  }
+
   // Bluetooth (its own session table inside the BT module).
   if (exceptTransport != SOURCE_BLUETOOTH) {
     revoked += bleRevokeUserSessions(username);
@@ -369,14 +447,20 @@ bool isTransportAuthenticated(CommandSource transport) {
       
     case SOURCE_LOCAL_DISPLAY:
       return gLocalDisplayAuthed;
-      
+
+    case SOURCE_G2_GLASSES:
+      // G2 is "authenticated" iff the lens is paired AND pairedByUser is
+      // a non-empty captured username. Pairing without pairedByUser counts
+      // as not-authenticated (stuck-stamp state — see G2_HijackCmd.cpp).
+      return g2PairedUserGet().length() > 0;
+
     case SOURCE_BLUETOOTH:
       return bleHasAuthenticatedSession();
-      
+
     case SOURCE_WEB:
       // Web auth requires request context, can't check here
       return false;
-      
+
     default:
       return false;
   }
@@ -389,7 +473,14 @@ String getTransportUser(CommandSource transport) {
       
     case SOURCE_LOCAL_DISPLAY:
       return gLocalDisplayUser;
-      
+
+    case SOURCE_G2_GLASSES:
+      // Pair-time stamp. Empty string when not yet stamped / cleared by
+      // revoke. Callers (G2 page handlers etc.) get the username string
+      // identical to what gLocalDisplayUser would have returned before
+      // the OLED/G2 split.
+      return g2PairedUserGet();
+
     case SOURCE_BLUETOOTH:
       {
         uint16_t connId = 0;
@@ -399,11 +490,11 @@ String getTransportUser(CommandSource transport) {
         }
         return String();
       }
-      
+
     case SOURCE_WEB:
       // Web user requires request context, can't get here
       return String();
-      
+
     default:
       return String();
   }
@@ -760,6 +851,12 @@ static const char* setUserBanInternal(const String& username, bool ban, const St
     if (gLocalDisplayAuthed && gLocalDisplayUser.equalsIgnoreCase(username)) {
       gLocalDisplayAuthed = false;
       gLocalDisplayUser   = String();
+    }
+    // Clear G2 pair-time stamp if the deleted user paired the lens.
+    // Same recovery path as the admin force-logout: re-stamp via
+    // `bleautoconnect g2-glasses on` from another authenticated CLI.
+    if (g2PairedUserMatches(username)) {
+      g2PairedUserClear();
     }
     // Revoke Bluetooth sessions for this user
     (void)bleRevokeUserSessions(username);
@@ -2064,6 +2161,14 @@ const char* cmd_session_list(const String& argsInput) {
       JsonObject t = sessions.add<JsonObject>();
       t["user"]      = gLocalDisplayUser;
       t["transport"] = "oled";
+    }
+    {
+      String g2User = g2PairedUserGet();
+      if (g2User.length()) {
+        JsonObject t = sessions.add<JsonObject>();
+        t["user"]      = g2User;
+        t["transport"] = "g2";
+      }
     }
     for (int i = 0;; ++i) {
       uint16_t connId = 0;

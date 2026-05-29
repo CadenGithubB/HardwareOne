@@ -351,6 +351,7 @@ inline bool i2cBusRecovery() {
 #define I2C_ADDR_IMU         0x28
 #define I2C_ADDR_TOF         0x29
 #define I2C_ADDR_THERMAL     0x33
+#define I2C_ADDR_FUEL_GAUGE  0x36  // MAX17048G (FeatherS3[D] on-board LiPo gauge)
 #define I2C_ADDR_APDS        0x39
 // I2C_ADDR_OLED 0x3D — defined above the template helpers; not redefined here
 #define I2C_ADDR_PCA9685     0x40

@@ -5,6 +5,7 @@
 
 #include "System_BuildConfig.h"
 #include "System_Notifications.h"  // NotificationSource enum (defined there, not here)
+#include "System_User.h"           // AuthContext (returned by oledAuthContext)
 
 #if ENABLE_OLED_DISPLAY
 
@@ -278,6 +279,20 @@ bool oledConfirmIsActive();
 void executeOLEDCommand(const String& argsInput);
 // Execute a CLI command and return success status + output (for callers that need the result)
 bool executeOLEDCommandWithResult(const String& argsInput, char* out, size_t outSize);
+
+// ============= OLED AuthContext Builder =============
+// Single source of truth for "what AuthContext represents OLED-originated
+// work." Mirrors g2HijackAuthContext() on the G2 side — eliminates the
+// drift-bug class (two hand-built AuthContexts in different files going
+// out of sync as fields are added/changed) that Pass 1 caught on the G2
+// path. The `path` argument is the audit-log/permission-check path string:
+// "/oled/command" for CLI submissions via buildOLEDCommand, "/oled/files"
+// for direct-FS work via oledFileBrowserAuthContext, etc.
+//
+// Identity reflects the OLED login state: gLocalDisplayUser when logged in,
+// "AuthBypass" reserved name when displayRequireAuth is off. Audit log
+// lines and per-user permissions both pick this up automatically.
+AuthContext oledAuthContext(const char* path);
 
 // ============= Battery Icon Shared State =============
 

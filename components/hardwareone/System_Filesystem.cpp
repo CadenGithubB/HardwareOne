@@ -181,7 +181,7 @@ bool initFilesystem() {
 #if ENABLE_AUTOMATION
   // Boot-time automations.json sanitation: ensure no duplicate IDs persist from manual edits
   // Skip if automation system is disabled
-  uint32_t _dbgSaved = getDebugFlags();
+  DebugFlagMask _dbgSaved = getDebugFlags();
   setDebugFlag(DEBUG_AUTO_SCHEDULER);
   if (gSettings.automationsEnabled && VFS::existsGuarded(AUTOMATIONS_JSON_FILE, VFS::systemAuth("fs.init.automations_check"))) {
     String json;
@@ -784,6 +784,9 @@ struct PathRule {
   uint8_t     adminPerms;    // Bitmask granted to admins (typically ⊇ userPerms)
   uint8_t     systemPerms;   // Bitmask granted to internal trusted code
   bool        exactMatch;    // true = match path exactly, false = prefix match
+  bool        exemptSensitiveExt; // true = hasSensitiveExtension() does not block this path
+                                  // Use for directories that intentionally hold .bin/.key/etc.
+                                  // (e.g. /system/llm/ holds model files, /system/certs/ holds TLS)
 };
 
 // Columns: path, userPerms, adminPerms, systemPerms, exactMatch
@@ -798,50 +801,56 @@ struct PathRule {
 //                                        which fixes the original bug that
 //                                        triggered this whole refactor.)
 static const PathRule sPathRules[] = {
+  // Columns: path, userPerms, adminPerms, systemPerms, exactMatch, exemptSensitiveExt
+
   // ---- Sensitive credentials ----
   // Per-user settings: admin can READ them (the lens-Files admin-view bug fix);
   // system has full access (loadUserSettings/saveUserSettings); user gets nothing.
-  {"/system/users/user_settings",       0,         PERM_READ,                              PERM_ALL,  false},
+  {"/system/users/user_settings",       0,         PERM_READ,                                          PERM_ALL,  false, false},
   // pending_users.json: same — admin reads, system writes, user nothing.
-  {"/system/users/pending_users.json",  0,         PERM_READ,                              PERM_ALL,  true},
+  {"/system/users/pending_users.json",  0,         PERM_READ,                                          PERM_ALL,  true,  false},
 
   // ---- Immutable config files: read-only for admin, full for system ----
-  {"/system/settings.json",             0,         PERM_READ,                              PERM_ALL,  true},
-  {"/system/automations.json",          0,         PERM_READ,                              PERM_ALL,  true},
-  {"/system/espnow/devices.json",       0,         PERM_READ,                              PERM_ALL,  true},
+  {"/system/settings.json",             0,         PERM_READ,                                          PERM_ALL,  true,  false},
+  {"/system/automations.json",          0,         PERM_READ,                                          PERM_ALL,  true,  false},
+  {"/system/espnow/devices.json",       0,         PERM_READ,                                          PERM_ALL,  true,  false},
 
-  // ---- TLS certificates: admin can read/delete/import; system full access ----
-  {"/system/certs/",                    0,         PERM_READ | PERM_DELETE | PERM_IMPORT,  PERM_ALL,  false},
+  // ---- TLS certificates: admin can read/delete/import; system full ----
+  // exemptSensitiveExt: .pem/.crt/.key files live here by design.
+  {"/system/certs/",                    0,         PERM_READ | PERM_DELETE | PERM_IMPORT,              PERM_ALL,  false, true},
 
-  // ---- On-device LLM model files (same policy as certs) ----
-  {"/system/llm/",                      0,         PERM_READ | PERM_DELETE | PERM_IMPORT,  PERM_ALL,  false},
+  // ---- On-device LLM model files: admin can upload/read/delete .bin models ----
+  // exemptSensitiveExt: .bin model files live here by design — this is NOT firmware.
+  // PERM_WRITE + PERM_CREATE let the file-upload path overwrite an existing model
+  // (canEdit) or create a new one (canCreate). PERM_IMPORT covers the import flow.
+  {"/system/llm/",                      0,         PERM_READ | PERM_WRITE | PERM_CREATE | PERM_DELETE | PERM_IMPORT, PERM_ALL, false, true},
 
   // ---- G2 animated icon packs (SD; test bench + web upload) ----
-  {"/sd/g2_icon_animations/",           0,         PERM_READ | PERM_DELETE | PERM_IMPORT | PERM_CREATE, PERM_ALL, false},
+  {"/sd/g2_icon_animations/",           0,         PERM_READ | PERM_DELETE | PERM_IMPORT | PERM_CREATE, PERM_ALL, false, false},
 
   // ---- System logs: admin read-only; system full ----
-  {"/system/sys_logs/",                 0,         PERM_READ,                              PERM_ALL,  false},
+  {"/system/sys_logs/",                 0,         PERM_READ,                                          PERM_ALL,  false, false},
 
   // ---- Protected root directories (browse only) ----
-  {"/system",                           0,         PERM_READ,                              PERM_ALL,  true},
-  {"/logging_captures",                 0,         PERM_READ,                              PERM_ALL,  true},
-  {"/espnow",                           PERM_READ, PERM_READ,                              PERM_ALL,  true},
-  {"/maps",                             PERM_READ, PERM_READ,                              PERM_ALL,  true},
-  {"/sd",                               PERM_READ, PERM_READ,                              PERM_ALL,  true},
-  {"/Users",                            PERM_READ, PERM_READ,                              PERM_ALL,  true},
+  {"/system",                           0,         PERM_READ,                                          PERM_ALL,  true,  false},
+  {"/logging_captures",                 0,         PERM_READ,                                          PERM_ALL,  true,  false},
+  {"/espnow",                           PERM_READ, PERM_READ,                                          PERM_ALL,  true,  false},
+  {"/maps",                             PERM_READ, PERM_READ,                                          PERM_ALL,  true,  false},
+  {"/sd",                               PERM_READ, PERM_READ,                                          PERM_ALL,  true,  false},
+  {"/Users",                            PERM_READ, PERM_READ,                                          PERM_ALL,  true,  false},
 
   // ---- General system paths: admin read-only; system full ----
-  {"/system/",                          0,         PERM_READ,                              PERM_ALL,  false},
+  {"/system/",                          0,         PERM_READ,                                          PERM_ALL,  false, false},
 
   // ---- Logging captures: admin can read + delete; system full ----
-  {"/logging_captures/",                0,         PERM_READ | PERM_DELETE,                PERM_ALL,  false},
+  {"/logging_captures/",                0,         PERM_READ | PERM_DELETE,                            PERM_ALL,  false, false},
 
   // ---- ESP-NOW data: user can read+write+delete; admin same; system full ----
   {"/espnow/",                          PERM_READ | PERM_WRITE | PERM_DELETE,
-                                        PERM_READ | PERM_WRITE | PERM_DELETE,             PERM_ALL,  false},
+                                        PERM_READ | PERM_WRITE | PERM_DELETE,                          PERM_ALL,  false, false},
 
   // ---- Default: user data (maps, photos, recordings, etc.) — full for everyone authenticated ----
-  {nullptr,                             PERM_ALL,  PERM_ALL,                               PERM_ALL,  false},
+  {nullptr,                             PERM_ALL,  PERM_ALL,                                           PERM_ALL,  false, false},
 };
 
 // Look up the first matching rule for a path.
@@ -985,7 +994,13 @@ static bool checkPerm(const String& path, const AuthContext& ctx,
                       bool imageEditApplies) {
   FsRole role = resolveRole(ctx);
   if (role == FsRole::ANON) return false;
-  if (sensitiveExtensionApplies && hasSensitiveExtension(path) && role != FsRole::SYSTEM) return false;
+  // Directories marked exemptSensitiveExt (e.g. /system/llm/, /system/certs/)
+  // intentionally hold files with otherwise-blocked extensions (.bin, .pem, etc.)
+  // and must not be caught by the blanket sensitive-extension guard.
+  const PathRule& rule = lookupRule(path);
+  bool sensitiveBlocked = sensitiveExtensionApplies && !rule.exemptSensitiveExt
+                          && hasSensitiveExtension(path) && role != FsRole::SYSTEM;
+  if (sensitiveBlocked) return false;
   if (imageEditApplies && isImageFile(path) && role != FsRole::SYSTEM) return false;
   uint8_t granted = permsForRole(lookupRule(path), role);
   return (granted & needed) == needed;
@@ -1043,9 +1058,10 @@ void logFsAccessDeny(const String& path, const AuthContext& ctx,
     return;
   }
   // Re-check the special-case denials so the log line names the actual reason.
+  const PathRule& rule = lookupRule(path);
   bool sensitiveApplies = (needed & (PERM_READ | PERM_WRITE)) != 0;
   bool imageEditApplies = (needed == PERM_WRITE);
-  if (sensitiveApplies && hasSensitiveExtension(path) && role != FsRole::SYSTEM) {
+  if (sensitiveApplies && !rule.exemptSensitiveExt && hasSensitiveExtension(path) && role != FsRole::SYSTEM) {
     DEBUG_STORAGEF("[PERM] DENY %s '%s' role=%s reason=sensitive-extension",
                    op, path.c_str(), roleName(role));
     return;
@@ -1055,7 +1071,7 @@ void logFsAccessDeny(const String& path, const AuthContext& ctx,
                    op, path.c_str(), roleName(role));
     return;
   }
-  uint8_t granted = permsForRole(lookupRule(path), role);
+  uint8_t granted = permsForRole(rule, role);
   DEBUG_STORAGEF("[PERM] DENY %s '%s' role=%s granted=0x%02X needed=0x%02X",
                  op, path.c_str(), roleName(role), (unsigned)granted, (unsigned)needed);
 }
@@ -1069,7 +1085,8 @@ uint8_t getPermissions(const String& path, const AuthContext& ctx) {
   FsRole role = resolveRole(ctx);
   if (role == FsRole::ANON) return 0;
 
-  uint8_t granted = permsForRole(lookupRule(path), role);
+  const PathRule& rule = lookupRule(path);
+  uint8_t granted = permsForRole(rule, role);
 
   // Special-case denials, applied as bitmask filters. These mirror the
   // sensitiveExtensionApplies / imageEditApplies flags that canRead/canEdit
@@ -1080,9 +1097,11 @@ uint8_t getPermissions(const String& path, const AuthContext& ctx) {
   //   - isImageFile blocks PERM_WRITE only (used by canEdit). Reading,
   //     deleting, renaming an image stays allowed.
   // SYSTEM identity is exempt from both — internal code can read certs etc.
+  // Paths with exemptSensitiveExt=true (e.g. /system/llm/, /system/certs/)
+  // are also exempt — they intentionally contain .bin/.pem/etc. files.
   if (role != FsRole::SYSTEM) {
-    if (hasSensitiveExtension(path)) granted &= ~(PERM_READ | PERM_WRITE);
-    if (isImageFile(path))           granted &= ~PERM_WRITE;
+    if (!rule.exemptSensitiveExt && hasSensitiveExtension(path)) granted &= ~(PERM_READ | PERM_WRITE);
+    if (isImageFile(path))                                        granted &= ~PERM_WRITE;
   }
   return granted;
 }

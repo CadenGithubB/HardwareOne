@@ -4,7 +4,7 @@
 # by the HW_BOARD selection logic in CMakeLists.txt. It contains ONLY the
 # settings that distinguish this board from other ESP32-S3 boards.
 #
-# Activated by: HW_BOARD=xiao_s3 (also the default if HW_BOARD is unset)
+# Activated by: HW_BOARD=xiao_s3
 
 # Arduino variant — picks the BSP pins_arduino.h and the ARDUINO_<NAME>_DEV
 # macro that System_BuildConfig.h's #elif chain matches on for pin mapping.

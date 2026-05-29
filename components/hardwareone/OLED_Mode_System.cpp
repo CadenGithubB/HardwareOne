@@ -371,6 +371,8 @@ void displayMemoryStatsRendered() {
 extern float getBatteryVoltage();
 extern float getBatteryPercentage();
 extern char getBatteryIcon();
+extern bool isBatteryCharging();
+extern bool isUsbPresent();
 
 // Pre-gathered system status data to avoid WiFi/heap operations inside I2C transaction
 struct SystemStatusRenderData {
@@ -383,6 +385,8 @@ struct SystemStatusRenderData {
   float batteryVoltage;
   float batteryPercentage;
   char batteryIcon;
+  bool batteryCharging;       // CRATE > +threshold (cell taking charge)
+  bool batteryUsbPresent;     // USB connected (charging OR float-plateau)
   bool valid;
 };
 static SystemStatusRenderData systemStatusRenderData = {0};
@@ -415,6 +419,8 @@ void prepareSystemStatusData() {
   systemStatusRenderData.batteryVoltage = getBatteryVoltage();
   systemStatusRenderData.batteryPercentage = getBatteryPercentage();
   systemStatusRenderData.batteryIcon = getBatteryIcon();
+  systemStatusRenderData.batteryCharging = isBatteryCharging();
+  systemStatusRenderData.batteryUsbPresent = isUsbPresent();
   
   systemStatusRenderData.valid = true;
 }
@@ -435,14 +441,29 @@ void displaySystemStatusRendered() {
   // Header shows "System Status", no need for title here
   oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
 
-  // Battery Status (top priority)
+  // Battery Status (top priority). Four-state rendering — mirrors the G2
+  // corner widget's logic so the OLED and lens columns stay consistent:
+  //   icon=='?'              "Power: USB"           no cell installed
+  //   isCharging             "Batt: V.VVV NN% USB+" USB in, taking charge
+  //   usbPresent (no charge) "Batt: V.VVV NN% USB"  USB in, cell at float
+  //   else                   "Batt: V.VVV NN% I"    on battery (I = M/H/F/L/E)
 #if ENABLE_BATTERY_MONITOR
-  oledDisplay->print("Batt: ");
-  oledDisplay->print(systemStatusRenderData.batteryVoltage, 2);
-  oledDisplay->print("V ");
-  oledDisplay->print((int)systemStatusRenderData.batteryPercentage);
-  oledDisplay->print("% ");
-  oledDisplay->print(systemStatusRenderData.batteryIcon);
+  if (systemStatusRenderData.batteryIcon == '?') {
+    oledDisplay->print("Power: USB");
+  } else {
+    oledDisplay->print("Batt: ");
+    oledDisplay->print(systemStatusRenderData.batteryVoltage, 2);
+    oledDisplay->print("V ");
+    oledDisplay->print((int)systemStatusRenderData.batteryPercentage);
+    oledDisplay->print("% ");
+    if (systemStatusRenderData.batteryCharging) {
+      oledDisplay->print("USB+");
+    } else if (systemStatusRenderData.batteryUsbPresent) {
+      oledDisplay->print("USB");
+    } else {
+      oledDisplay->print(systemStatusRenderData.batteryIcon);
+    }
+  }
 #else
   oledDisplay->print("Power: USB");
 #endif

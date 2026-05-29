@@ -48,6 +48,12 @@ struct CommandContext {
   bool captureOutput = false;  // capture broadcastOutput into HTTP response
   void* replyHandle;     // placeholder for future sync replies
   httpd_req_t* httpReq;  // used by web origin if needed
+  // Non-empty when the command is an automation sub-command. Used by
+  // executeCommand to write COMMAND/OUTPUT lines to the autolog, attributed
+  // to the named automation. Stamped at queue time in queueAutomationSubCommand
+  // so there's no race between the scheduler advancing to the next automation
+  // and cmd_exec_task actually running the command.
+  char automationName[64] = {};
 };
 
 // Simple wrapper: command line + context

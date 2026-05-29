@@ -40,7 +40,7 @@ endif()
 #
 # Usage:
 #   HW_BOARD=feathers3 idf.py fullclean && HW_BOARD=feathers3 idf.py build
-#   (Unset HW_BOARD defaults to xiao_s3 — preserves prior behavior.)
+#   (Unset HW_BOARD defaults to feathers3 — FeatherS3[D] is the primary target.)
 #
 # ESP32 boards (QT Py, Feather V2) still set their variant directly in
 # sdkconfig.defaults.esp32 — they haven't been migrated to the boards/ pattern
@@ -52,7 +52,7 @@ set(_flash_size "8mb")   # used by the partition picker; overridden below
 if(_inferred_target STREQUAL "esp32s3")
     set(_hw_board "$ENV{HW_BOARD}")
     if(NOT _hw_board)
-        set(_hw_board "xiao_s3")
+        set(_hw_board "feathers3")
     endif()
     set(_board_file "${CMAKE_CURRENT_SOURCE_DIR}/boards/${_hw_board}.defaults")
     if(NOT EXISTS "${_board_file}")

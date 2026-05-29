@@ -2606,7 +2606,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
             html += '<div style="font-size:0.85rem;margin-bottom:0.5rem">';
             userSessions.forEach(function(session) {
               var transport = session.transport || '';
-              var label = transport === 'oled' ? 'OLED Display' : transport === 'serial' ? 'Serial' : transport === 'bluetooth' ? 'Bluetooth' : transport ? transport : 'Web';
+              var label = transport === 'oled' ? 'OLED Display' : transport === 'serial' ? 'Serial' : transport === 'bluetooth' ? 'Bluetooth' : transport === 'g2' ? 'G2 Glasses' : transport ? transport : 'Web';
               var detail = [];
               if (!transport) {
                 var ip = cleanIPAddress(session.ip || '');

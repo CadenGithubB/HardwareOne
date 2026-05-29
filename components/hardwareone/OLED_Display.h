@@ -465,6 +465,64 @@ void oledFileBrowserSelect();
 void oledFileBrowserBack();
 void resetOLEDFileBrowser();
 
+// ============================================================================
+// File picker — modal callback layer over OLED_Mode_FileBrowser
+// ============================================================================
+// Lets any OLED mode use the file browser as a *picker* instead of just a
+// viewer. Caller fills out a FilePickerRequest, calls oledFilePickerPush(),
+// then transitions to OLED_FILE_BROWSER via requestOLEDMode(). When the user
+// picks a file (or cancels at root), the browser pops back to the requester
+// mode and fires onPicked exactly once.
+//
+// While a picker is active the browser:
+//   - shows req.title in place of the breadcrumb
+//   - hides files where req.filter() returns false (folders always shown so
+//     the user can navigate)
+//   - on Enter on a file: fires onPicked(fullPath, cancelled=false), pops mode
+//   - on Back at root: fires onPicked(nullptr, cancelled=true), pops mode
+//
+// While no picker is active the browser behaves as before — generic viewer.
+// The .hwmap-load special case stays as a fallback for users who reach
+// the file browser via Tools→Files instead of through a Map-mode picker.
+
+#include "System_FileManager.h"  // pulls FileEntry in for the filter signature
+
+struct FilePickerRequest {
+  // Header text shown in place of the normal breadcrumb. Truncated to fit.
+  char title[32];
+
+  // Directory to navigate to on picker entry. Empty = "/".
+  char startPath[FILE_MANAGER_MAX_PATH];
+
+  // Optional filter — return true to show the entry, false to hide it.
+  // Folders are ALWAYS shown regardless of this filter so the user can
+  // navigate. nullptr = show all files.
+  bool (*filter)(const FileEntry& entry);
+
+  // Required. Called exactly once when the picker resolves:
+  //   cancelled=false → user selected a file; fullPath is valid
+  //   cancelled=true  → user backed out at root; fullPath is nullptr
+  // Runs AFTER the mode pop, so currentOLEDMode == requesterMode when
+  // the callback fires. The callback may freely call requestOLEDMode /
+  // mutate state in the requester's locals.
+  void (*onPicked)(const char* fullPath, bool cancelled);
+
+  // The OLED mode that requested the picker. Stored so we can sanity-check
+  // we're popping back to a valid mode (e.g. user didn't navigate away
+  // mid-picker via global Home).
+  OLEDMode requesterMode;
+};
+
+// Push a picker request. Caller is responsible for transitioning to the
+// browser via requestOLEDMode(OLED_FILE_BROWSER, ...) after pushing. Only
+// one picker can be active at a time; pushing while another is pending is
+// rejected (returns false).
+bool oledFilePickerPush(const FilePickerRequest& req);
+
+// True between push and callback fire — useful for the browser's own
+// state and for callers that want to suppress duplicate pushes.
+bool oledFilePickerIsActive();
+
 // Helper Functions (static in .cpp, declared here for internal use)
 void rotateCubePoint(float& x, float& y, float& z, float angleX, float angleY, float angleZ);
 void projectCubePoint(float x, float y, float z, int& screenX, int& screenY, int centerX, int centerY);

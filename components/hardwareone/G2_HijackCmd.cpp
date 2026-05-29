@@ -109,22 +109,15 @@ bool g2SubmitHijackCommand(const char* line,
   Command cmd;
   cmd.line = line;
   cmd.ctx.origin       = ORIGIN_G2_HIJACK;
-  // SOURCE_LOCAL_DISPLAY: the lens IS a local display (just BLE-attached
-  // rather than wired). Matches g2HijackAuthContext() so command-dispatched
-  // and direct-FS hijack work resolve to the same identity. Was previously
-  // SOURCE_INTERNAL with a "revisit" TODO — SOURCE_INTERNAL only matters
-  // for ANON/SYSTEM resolution when user=="system", which pairedByUser
-  // never is, so the change is purely cosmetic but removes a misleading
-  // transport label from audit lines.
-  cmd.ctx.auth.transport = SOURCE_LOCAL_DISPLAY;
-  cmd.ctx.auth.path    = "/g2/hijack";
-  cmd.ctx.auth.ip      = "g2.local";
-  // Identity = the user who paired these glasses. If pairedByUser is
-  // blank, downstream tgRequireAuth rejects and the tap fails with an
-  // auth error in the log — re-pair to stamp the field.
-  cmd.ctx.auth.user    = gBlePeerData[BLE_PEER_G2_GLASSES].pairedByUser;
-  cmd.ctx.auth.sid     = "";
-  cmd.ctx.auth.opaque  = nullptr;
+  // Delegate AuthContext build to g2HijackAuthContext() — the single source
+  // of truth for "what a G2-lens tap's identity looks like." Previously
+  // this site hand-built its own AuthContext alongside g2HijackAuthContext;
+  // the two drifted (one was migrated to SOURCE_G2_GLASSES while the other
+  // stayed at SOURCE_LOCAL_DISPLAY, causing async tap commands to log as
+  // "alice@display" while sync direct-FS work logged as "alice@g2"). Using
+  // the helper for both paths means future identity changes (path tweak,
+  // ip rename, new field) land in one place.
+  cmd.ctx.auth         = g2HijackAuthContext();
   cmd.ctx.id           = (uint32_t)millis();
   cmd.ctx.timestampMs  = (uint32_t)millis();
   cmd.ctx.outputMask   = CMD_OUT_LOG;
@@ -153,14 +146,28 @@ bool g2SubmitHijackCommand(const char* line,
 // default ANON identity and every guarded VFS call fails).
 //
 // Identity matches g2SubmitHijackCommand exactly: pairedByUser as user,
-// transport = SOURCE_LOCAL_DISPLAY (the lens IS a local display, even
-// though it's BLE-attached). Path/ip strings are documentary — they only
-// ever surface in [PERM] DENY logs and audit output.
+// transport = SOURCE_G2_GLASSES.
+//
+// Previously this used SOURCE_LOCAL_DISPLAY because "the lens IS a local
+// display, even though it's BLE-attached." That framing folded G2 into the
+// OLED's transport enum value despite the two having completely different
+// identity models — OLED is per-session login (gLocalDisplayUser), G2 is
+// pair-time stamp (pairedByUser). The split into a dedicated transport:
+//   - lets audit logs distinguish "[CMD] alice@display: ..." from
+//     "[CMD] alice@g2: ..." so it's clear which surface ran a command
+//   - makes the System_User helpers self-documenting (separate switch
+//     branches in isTransportAuthenticated / getTransportUser /
+//     applyTransportAuth, each with its own identity-source logic)
+//   - removes the need for a "transport X but with user from a different
+//     source" override in any future TransportIdentityScope helper
+//
+// Path/ip strings are documentary — they only ever surface in [PERM] DENY
+// logs and audit output. "g2.local" reads cleanly next to "local" (OLED).
 // =============================================================================
 
 AuthContext g2HijackAuthContext() {
   AuthContext ctx;
-  ctx.transport = SOURCE_LOCAL_DISPLAY;
+  ctx.transport = SOURCE_G2_GLASSES;
   ctx.user      = gBlePeerData[BLE_PEER_G2_GLASSES].pairedByUser;
   ctx.path      = "/g2/hijack";
   ctx.ip        = "g2.local";
@@ -195,11 +202,17 @@ AuthContext g2HijackAuthContext() {
   return ctx;
 }
 
-// Thin wrapper around ExecIdentityGuard so callers (handleHijackMenuTap and
-// friends) keep their existing G2HijackCtxGuard usage. The TLS-aware guard
-// installs the hijack identity into the calling task's slot for the scope of
-// this object's lifetime and restores on destruction.
+// Sugar over CommandIdentityScope: installs the G2 identity + G2 notification
+// context (auto-derived from SOURCE_G2_GLASSES) into the calling task's TLS
+// slots for the scope of this object's lifetime, and restores prior values
+// on destruction.
+//
+// The AuthContext temporary returned by g2HijackAuthContext() lives for the
+// full-expression of the initializer, which exceeds the lifetime of the
+// CommandIdentityScope constructor body — so passing it by const& is safe.
+// CommandIdentityScope's inner guards copy what they need from the ctx at
+// construction; neither retains a reference back.
 G2HijackCtxGuard::G2HijackCtxGuard()
-    : guard_(g2HijackAuthContext()) {}
+    : scope_(g2HijackAuthContext()) {}
 
 #endif // ENABLE_BLUETOOTH && ENABLE_G2_GLASSES

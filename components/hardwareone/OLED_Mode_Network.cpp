@@ -14,6 +14,10 @@
 #include "System_Utils.h"
 #include "System_User.h"
 #include "i2csensor_seesaw.h"  // For JOYSTICK_DEADZONE
+#include "i2csensor_ano_encoder.h"  // ANO_BTN_*/ANO_AXIS_* bit defines (live outside the
+                                    // ENABLE_ANO_ENCODER guard) — the master decodes a
+                                    // remote peer's ANO input regardless of its own input HW
+#include <math.h>                   // cosf/sinf for the remote ANO rotary dial
 
 #if ENABLE_WIFI
 #include <WiFi.h>
@@ -1028,23 +1032,82 @@ void displayRemoteSensors() {
     if (deserializeJson(doc, entry->jsonData) == DeserializationError::Ok) {
       switch (entry->sensorType) {
         case REMOTE_SENSOR_INPUT: {
+          // Two distinct input devices both stream as REMOTE_SENSOR_INPUT:
+          //   gamepad : {"val":1,"x":N,"y":N,"buttons":B}        (buttons active-LOW)
+          //   ANO enc : {"val":1,"pos":N,"axis":0|1,"buttons":B} (buttons active-HIGH)
+          // Detect the ANO shape by the presence of "pos" (gamepad never sends it)
+          // and render the matching widget. Before this split, ANO data fell into
+          // the gamepad joystick layout below: x/y defaulted to 512 (dead-center
+          // stick) and the gamepad button-bit mapping mislabeled the ANO buttons.
+          if (!doc["pos"].isNull()) {
+            // ---- ANO rotary encoder widget ----
+            long     pos  = doc["pos"]     | 0L;
+            int      axis = doc["axis"]    | 0;
+            uint32_t b    = doc["buttons"] | 0u;   // active-HIGH: set bit = pressed
+
+            // Left column: position + active axis.
+            oledDisplay->setCursor(0, 24);
+            oledDisplay->print("Pos: ");
+            oledDisplay->print(pos);
+            oledDisplay->setCursor(0, 36);
+            oledDisplay->print("Axis: ");
+            oledDisplay->print(axis == ANO_AXIS_HORIZONTAL ? "Horiz" : "Vert");
+
+            // Right side: a rotary dial whose needle tracks pos folded into one
+            // revolution. encoderPosition is a monotonic absolute count, so we
+            // mod it into the ANO's 24 detents/rev to get a needle that visibly
+            // sweeps as the knob turns. Divisor is purely cosmetic.
+            const int cx = 108, cy = 32, r = 11;
+            oledDisplay->drawCircle(cx, cy, r, DISPLAY_COLOR_WHITE);
+            long detent = ((pos % 24) + 24) % 24;  // 0..23, correct for negative pos
+            float ang = (float)detent * (2.0f * (float)M_PI / 24.0f) - (float)M_PI / 2.0f;  // 0 at 12 o'clock
+            int nx = cx + (int)(cosf(ang) * (float)(r - 2));
+            int ny = cy + (int)(sinf(ang) * (float)(r - 2));
+            oledDisplay->drawLine(cx, cy, nx, ny, DISPLAY_COLOR_WHITE);
+            oledDisplay->fillCircle(nx, ny, 1, DISPLAY_COLOR_WHITE);
+
+            // Bottom row: button labels, BOXED (inverted) while held. ANO is
+            // active-HIGH so a set bit means pressed (opposite of the gamepad).
+            struct BtnCell { const char* label; uint32_t bit; };
+            static const BtnCell kAnoBtns[] = {
+              { "IN", ANO_BTN_IN },   { "UP", ANO_BTN_UP },   { "DN", ANO_BTN_DOWN },
+              { "L",  ANO_BTN_LEFT }, { "R",  ANO_BTN_RIGHT }, { "St", ANO_VIRT_START },
+            };
+            int bx = 0;
+            const int by = 48;
+            for (const BtnCell& cell : kAnoBtns) {
+              int w = (int)strlen(cell.label) * 6 + 2;  // 6px/char (size-1 font) + pad
+              bool pressed = (b & cell.bit) != 0;
+              if (pressed) {
+                oledDisplay->fillRect(bx, by - 1, w, 10, DISPLAY_COLOR_WHITE);
+                oledDisplay->setTextColor(DISPLAY_COLOR_BLACK);
+              }
+              oledDisplay->setCursor(bx + 1, by);
+              oledDisplay->print(cell.label);
+              if (pressed) oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);  // restore
+              bx += w + 2;
+            }
+            break;
+          }
+
+          // ---- gamepad joystick widget (buttons active-LOW) ----
           int x = doc["x"] | 512;
           int y = doc["y"] | 512;
           uint32_t buttons = doc["buttons"] | 0xFFFFFFFF;
-          
+
           // Draw joystick position (small box)
           int joyX = 10 + ((x * 20) / 1023);
           int joyY = 35 + ((y * 15) / 1023);
           oledDisplay->drawRect(10, 35, 22, 17, DISPLAY_COLOR_WHITE);
           oledDisplay->fillCircle(joyX, joyY, 2, DISPLAY_COLOR_WHITE);
-          
+
           oledDisplay->setCursor(40, 28);
           oledDisplay->print("X:");
           oledDisplay->print(x);
           oledDisplay->setCursor(40, 38);
           oledDisplay->print("Y:");
           oledDisplay->print(y);
-          
+
           // Button indicators
           oledDisplay->setCursor(85, 28);
           oledDisplay->print((buttons & (1<<6)) ? " " : "X");

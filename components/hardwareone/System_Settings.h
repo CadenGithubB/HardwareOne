@@ -241,6 +241,7 @@ struct Settings {
       oledBus(OLED_BUS_DEFAULT),  // FeatherS3[D] → 1 (LDO2-gated rail); other boards → 0
       inputBus(0), gpsBus(0), rtcBus(0), fmRadioBus(0),
       presenceBus(0), imuBus(0), thermalBus(0), tofBus(0), apdsBus(0), servoBus(0),
+      fuelGaugeBus(0),
       ledBrightness(100),
       ledStartupEnabled(true),
       ledStartupEffect("rainbow"),
@@ -756,6 +757,7 @@ struct Settings {
   int tofBus;               // VL53L4CX time-of-flight (compiled out)
   int apdsBus;              // APDS9960 gesture/proximity (compiled out)
   int servoBus;             // PCA9685 16-channel servo (compiled out)
+  int fuelGaugeBus;         // MAX17048G LiPo fuel gauge (FeatherS3[D] on-board)
   // Hardware settings (LED)
   int ledBrightness;        // 0-100%
   bool ledStartupEnabled;   // Enable startup effect

@@ -895,6 +895,7 @@ void logCommandExecution(const AuthContext& ctx, const char* cmd, bool success, 
     case SOURCE_BLUETOOTH: source = "bluetooth"; break;
     case SOURCE_MQTT: source = "mqtt"; break;
     case SOURCE_VOICE: source = "voice"; break;
+    case SOURCE_G2_GLASSES: source = "g2"; break;
     default: source = "unknown"; break;
   }
   
@@ -2911,8 +2912,6 @@ const char* cmd_taskstats(const String& originalCmd) {
 // ============================================================================
 // External dependencies for command execution
 extern bool gAutoLogActive;
-extern bool gInAutomationContext;
-extern String gAutoLogAutomationName;
 extern CLIState gCLIState;
 extern bool gCLIValidateOnly;
 extern QueueHandle_t gCmdExecQ;
@@ -2968,29 +2967,23 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
   // Clear output buffer
   out[0] = '\0';
 
-  // Install the command's identity into the calling task's TLS slot for the
-  // duration of this call. RAII restores on every return path (success, auth
-  // failure, validation, etc.). Cross-task identity isolation is structural
-  // — no other task can observe this command's identity.
-  ExecIdentityGuard identity(ctx);
+  // Install the command's identity + notification source into the calling
+  // task's TLS slots for the duration of this call. CommandIdentityScope
+  // composes ExecIdentityGuard + NotificationContextGuard and auto-derives
+  // the NotificationSource from ctx.transport via a 1:1 mapping (see
+  // System_AuthIdentity.cpp::transportToNotifSource — the single source of
+  // truth for that mapping across the firmware). RAII restores on every
+  // return path: success, auth failure, validation, internal error.
+  // Cross-task identity isolation is structural — no other task can observe
+  // this command's identity or notification context.
+  CommandIdentityScope scope(ctx);
 
-  // Scoped notification context: attributes all notifications from this command
-  // to the correct transport + user. The RAII guard automatically clears the
-  // context when executeCommand() returns, regardless of which return path is
-  // taken — including early returns from auth failures, validation, etc.
-  uint8_t notifSrc = NOTIF_SOURCE_UNKNOWN;
-  switch (ctx.transport) {
-    case SOURCE_WEB:            notifSrc = NOTIF_SOURCE_WEB;    break;
-    case SOURCE_SERIAL:         notifSrc = NOTIF_SOURCE_CLI;    break;
-    case SOURCE_LOCAL_DISPLAY:  notifSrc = NOTIF_SOURCE_OLED;   break;
-    case SOURCE_VOICE:          notifSrc = NOTIF_SOURCE_VOICE;  break;
-    case SOURCE_ESPNOW:
-    case SOURCE_BLUETOOTH:
-    case SOURCE_MQTT:           notifSrc = NOTIF_SOURCE_REMOTE; break;
-    default: break;
-  }
-  NotificationContextGuard notifGuard(notifSrc,
-    ctx.user.length() > 0 ? ctx.user.c_str() : nullptr);
+  // Resolve the full CommandContext so we can read automationName.
+  // cmd_exec_task always calls setCurrentCommandContext(&r->ctx) before
+  // invoking executeCommand, so this returns the correct ctx for queued
+  // automation sub-commands. Direct callers that don't set it get nullptr,
+  // which correctly suppresses autolog (non-automation paths).
+  CommandContext* cmdCtx = static_cast<CommandContext*>(currentCommandContext());
 
   // Create command String once — reuse everywhere (avoids 5+ String(cmd) temporaries)
   String command = cmd;
@@ -3003,15 +2996,12 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
     return false;
   }
 
-  // Log command execution if automation logging is active
-  if (gAutoLogActive && gInAutomationContext) {
-    if (gAutoLogAutomationName.length() > 0) {
-      char logBuf[300];
-      snprintf(logBuf, sizeof(logBuf), "[%s] %s", gAutoLogAutomationName.c_str(), cmd);
-      appendAutoLogEntry("COMMAND", logBuf);
-    } else {
-      appendAutoLogEntry("COMMAND", cmd);
-    }
+  // Log command execution if automation logging is active and this command
+  // carries an automationName (i.e. it was queued as an automation sub-command).
+  if (gAutoLogActive && cmdCtx && cmdCtx->automationName[0]) {
+    char logBuf[300];
+    snprintf(logBuf, sizeof(logBuf), "[%s] %s", cmdCtx->automationName, cmd);
+    appendAutoLogEntry("COMMAND", logBuf);
   }
 
   if (command.length() == 0) {
@@ -3173,8 +3163,8 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
         const char* commandResult = found->handler(args);
         snprintf(out, outSize, "%s", commandResult);
 
-        // Log output if automation logging is active
-        if (gAutoLogActive && gInAutomationContext) {
+        // Log output if this is an automation sub-command with logging active.
+        if (gAutoLogActive && cmdCtx && cmdCtx->automationName[0]) {
           char logBuf[201];
           snprintf(logBuf, sizeof(logBuf), "%.197s%s", out, strlen(out) > 197 ? "..." : "");
           for (char* c = logBuf; *c; c++) { if (*c == '\n' || *c == '\r') *c = ' '; }
@@ -3239,8 +3229,8 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
   }
   // ===== END INLINED REGISTRY LOGIC =====
 
-  // Log command output if automation logging is active
-  if (gAutoLogActive && gInAutomationContext) {
+  // Log command output if this is an automation sub-command with logging active.
+  if (gAutoLogActive && cmdCtx && cmdCtx->automationName[0]) {
     char logBuf[201];
     snprintf(logBuf, sizeof(logBuf), "%.197s%s", out, strlen(out) > 197 ? "..." : "");
     for (char* c = logBuf; *c; c++) { if (*c == '\n' || *c == '\r') *c = ' '; }
@@ -3753,8 +3743,14 @@ const char* cmd_logout(const String& originalCmd) {
       transport = SOURCE_BLUETOOTH;
     } else if (rest == "serial") {
       transport = SOURCE_SERIAL;
+    } else if (rest == "g2") {
+      // G2 has no credential login (pairing IS auth), but admins may want
+      // to clear pairedByUser without un-pairing the lens. logoutTransport
+      // calls g2PairedUserClear(); recovery is a fresh stamp via
+      // `bleautoconnect g2-glasses on` from any authenticated session.
+      transport = SOURCE_G2_GLASSES;
     } else {
-      return "Invalid transport. Use: serial, display, or bluetooth";
+      return "Invalid transport. Use: serial, display, bluetooth, or g2";
     }
   }
 

@@ -37,6 +37,8 @@ components/hardwareone/icons/
 components/arduino/
 
 # Vendored upstream / reverse-engineering reference trees (not first-party)
+# A Dark Room game source (MPL-2.0); bundler re-clones at pinned commit if absent.
+third_party/adarkroom/
 docs/FlutterApp-main/
 docs/evenrealities_rev_share-main/
 docs/even-g2-notes-main/

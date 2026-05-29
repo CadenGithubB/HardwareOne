@@ -31,7 +31,8 @@
 #include "G2_Glasses.h"            // G2HijackPage
 #include "System_CommandTypes.h"   // ExecAsyncCallback (forward used by callers)
 #include "System_User.h"           // AuthContext (for g2HijackAuthContext / G2HijackCtxGuard)
-#include "System_AuthIdentity.h"   // ExecIdentityGuard (wrapped by G2HijackCtxGuard)
+#include "System_AuthIdentity.h"   // CommandIdentityScope (wrapped by G2HijackCtxGuard)
+                                   // — transitively pulls System_Notifications.h
 
 // Snapshot of UI state at the moment a hijack command is submitted.
 // The completion callback uses this to detect staleness — if the user has
@@ -106,11 +107,19 @@ bool g2SubmitHijackCommand(const char* line,
 // reads need an AuthContext too: without one the task's TLS slot is still
 // ANON and every guarded call fails "anonymous never permitted".
 //
-// g2HijackAuthContext() builds the same identity g2SubmitHijackCommand uses
-// (pairedByUser, transport=SOURCE_LOCAL_DISPLAY). G2HijackCtxGuard is a thin
-// wrapper around ExecIdentityGuard that installs it into the calling task's
-// slot for the lifetime of the scope — drop one at the top of every
-// direct-FS hijack callback.
+// g2HijackAuthContext() is the single source of truth for "what AuthContext
+// represents a tap from the lens" — pairedByUser as the user, transport =
+// SOURCE_G2_GLASSES. Used by:
+//   * g2SubmitHijackCommand (async submit path — copies into cmd.ctx.auth)
+//   * G2HijackCtxGuard      (sync direct-FS path — feeds CommandIdentityScope)
+//   * any future site that needs to talk on behalf of the lens
+//
+// G2HijackCtxGuard is sugar over CommandIdentityScope: drop one at the top
+// of every direct-FS hijack callback and you get the paired-user identity +
+// NOTIF_SOURCE_G2 + paired-user-as-subsource installed in the calling
+// task's TLS slots for the lifetime of the scope. Both inner guards (via
+// CommandIdentityScope) save/restore the prior TLS state, so nesting and
+// early-return unwind cleanly.
 //
 // Glasses inherit the privileges of their pairer: admin pairs → admin
 // reads, regular user pairs → user-level reads. If pairedByUser is blank
@@ -127,8 +136,14 @@ class G2HijackCtxGuard {
   ~G2HijackCtxGuard() = default;
   G2HijackCtxGuard(const G2HijackCtxGuard&) = delete;
   G2HijackCtxGuard& operator=(const G2HijackCtxGuard&) = delete;
+  G2HijackCtxGuard(G2HijackCtxGuard&&) = delete;
+  G2HijackCtxGuard& operator=(G2HijackCtxGuard&&) = delete;
  private:
-  ExecIdentityGuard guard_;
+  // One composed scope. CommandIdentityScope's ctor reads from the temporary
+  // AuthContext returned by g2HijackAuthContext() and copies what it needs
+  // into the two TLS slots; the temporary is destroyed before this member
+  // is fully constructed (standard temporary lifetime), which is safe.
+  CommandIdentityScope scope_;
 };
 
 // =============================================================================

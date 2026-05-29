@@ -23,6 +23,10 @@
 #include "System_MemUtil.h"       // ps_alloc / AllocPref for batch body buffer
 #include "System_BondedPeer.h"    // BondedPeer:: — unified accessor for the bonded worker (settings/schema sync, cache reads)
 #include "System_SelfDevice.h"    // SelfDevice:: — local MAC / name / uptime / heap accessors
+#include "System_ESPNow_Wire.h"   // V4PayloadFsListReplyHeader, V4PayloadFsEntry, FsListStatus
+#include "System_ESPNow_FsList.h" // fsListSendRequest / fsListCancel — structured peer FS listing
+#include "System_FileManager.h"   // FILE_MANAGER_MAX_PATH (path buffer sizing)
+#include <freertos/semphr.h>
 
 // Forward declarations
 extern void streamPageWithContent(httpd_req_t* req, const String& activePage, const String& username, void (*contentStreamer)(httpd_req_t*, const String&));
@@ -1698,6 +1702,434 @@ static esp_err_t handleBondPairedDevices(httpd_req_t* req) {
   return ESP_OK;
 }
 
+#endif // ENABLE_BONDED_MODE — closes the wrapper that begins at line 61
+
+// =============================================================================
+// /api/bond/fs/list — structured peer directory listing via FS_LIST_REQ
+// =============================================================================
+// Replaces the old "remote:files /path" CLI scrape (BondFs.list in
+// WebServer_Utils.h) with a typed RPC. The old path streams text through
+// /api/espnow/messages and parses lines like "  name (3 items) [mount]"
+// — the doneMarker collided with concurrent `fsusage` output until a fix
+// renamed it from "Total:" to " entries", and even that's brittle.
+//
+// New path: synchronous HTTP handler that issues fsListSendRequest, waits
+// on a semaphore signalled by the reply callback, serializes the typed
+// reply as JSON. Single in-flight per device (mutex-guarded slot) — second
+// concurrent web request gets a 503-ish "bridge busy" response and the
+// browser can retry.
+//
+// Response shape stays close to the existing BondFs.list() expectations
+// (entries[].name + entries[].isDir + entries[].meta) so the JS migration
+// is one-line. Extra fields (size, perms, totalEntries, hasMore,
+// nextStartIndex) are added on top for clients that want them.
+
+namespace {
+
+struct WebFsBridge {
+  SemaphoreHandle_t        done;            // signalled by callback
+  uint32_t                 expectedReqId;   // for stale-reply rejection
+  bool                     received;
+  V4PayloadFsListReplyHeader hdr;
+  V4PayloadFsEntry         entries[FS_LIST_ENTRIES_PER_REPLY];
+  uint8_t                  entryCount;
+};
+
+static WebFsBridge sWebFsBridge = {};
+static SemaphoreHandle_t sWebFsBridgeMutex = nullptr;
+
+// Stat + get bridges parallel to the list bridge above. Each operation has
+// its own slot so web users browsing files don't block storage-stat updates
+// or vice versa. Memory is small — ~200 B per bridge.
+struct WebFsStatBridge {
+  SemaphoreHandle_t      done;
+  uint32_t               expectedReqId;
+  bool                   received;
+  V4PayloadFsStatReply   reply;
+};
+struct WebFsGetBridge {
+  SemaphoreHandle_t      done;
+  uint32_t               expectedReqId;
+  bool                   received;
+  V4PayloadFsGetAck      ack;
+};
+static WebFsStatBridge   sWebFsStatBridge = {};
+static SemaphoreHandle_t sWebFsStatMutex = nullptr;
+static WebFsGetBridge    sWebFsGetBridge = {};
+static SemaphoreHandle_t sWebFsGetMutex = nullptr;
+
+static void webFsBridgeEnsureInit() {
+  if (!sWebFsBridgeMutex) sWebFsBridgeMutex = xSemaphoreCreateMutex();
+  if (!sWebFsBridge.done) sWebFsBridge.done = xSemaphoreCreateBinary();
+  if (!sWebFsStatMutex)   sWebFsStatMutex   = xSemaphoreCreateMutex();
+  if (!sWebFsStatBridge.done) sWebFsStatBridge.done = xSemaphoreCreateBinary();
+  if (!sWebFsGetMutex)    sWebFsGetMutex    = xSemaphoreCreateMutex();
+  if (!sWebFsGetBridge.done)  sWebFsGetBridge.done  = xSemaphoreCreateBinary();
+}
+
+// Callback fires on BTC_TASK — must stay minimal. Verify the reqId matches
+// our outstanding request (stale replies from prior cancelled requests would
+// otherwise overwrite the slot), copy the payload into the bridge, signal
+// the semaphore.
+static void webFsListReplyCallback(const uint8_t /*mac*/[6],
+                                   const V4PayloadFsListReplyHeader* hdr,
+                                   const V4PayloadFsEntry* entries) {
+  if (!hdr) return;
+  if (hdr->reqId != sWebFsBridge.expectedReqId) return;  // stale; ignore
+  memcpy(&sWebFsBridge.hdr, hdr, sizeof(*hdr));
+  uint8_t n = hdr->entryCount;
+  if (n > FS_LIST_ENTRIES_PER_REPLY) n = FS_LIST_ENTRIES_PER_REPLY;
+  if (entries && n > 0) {
+    memcpy(sWebFsBridge.entries, entries, n * sizeof(V4PayloadFsEntry));
+  }
+  sWebFsBridge.entryCount = n;
+  sWebFsBridge.received = true;
+  if (sWebFsBridge.done) xSemaphoreGive(sWebFsBridge.done);
+}
+
+// Stat reply callback. Matches the active bridge's reqId, copies the reply
+// into the bridge slot, signals the semaphore. BTC_TASK-safe.
+static void webFsStatReplyCallback(const uint8_t /*mac*/[6],
+                                   const V4PayloadFsStatReply* reply) {
+  if (!reply || reply->reqId != sWebFsStatBridge.expectedReqId) return;
+  memcpy(&sWebFsStatBridge.reply, reply, sizeof(*reply));
+  sWebFsStatBridge.received = true;
+  if (sWebFsStatBridge.done) xSemaphoreGive(sWebFsStatBridge.done);
+}
+
+// Get-ACK callback. The ACK is the sync part of the two-stage GET protocol;
+// the actual file content arrives later via FILE_START/DATA/END handled by
+// System_ESPNow_Files.
+static void webFsGetAckCallback(const uint8_t /*mac*/[6],
+                                const V4PayloadFsGetAck* ack) {
+  if (!ack || ack->reqId != sWebFsGetBridge.expectedReqId) return;
+  memcpy(&sWebFsGetBridge.ack, ack, sizeof(*ack));
+  sWebFsGetBridge.received = true;
+  if (sWebFsGetBridge.done) xSemaphoreGive(sWebFsGetBridge.done);
+}
+
+// Map FsListStatus to a short error tag for the JSON response.
+static const char* fsStatusTag(uint8_t status) {
+  switch ((FsListStatus)status) {
+    case FS_LIST_STATUS_OK:          return "ok";
+    case FS_LIST_STATUS_NOT_FOUND:   return "not_found";
+    case FS_LIST_STATUS_NOT_A_DIR:   return "not_a_dir";
+    case FS_LIST_STATUS_PERM_DENIED: return "perm_denied";
+    case FS_LIST_STATUS_IO_ERROR:    return "io_error";
+    case FS_LIST_STATUS_TOO_BUSY:    return "too_busy";
+    case FS_LIST_STATUS_NOT_READY:   return "not_ready";
+    default:                         return "unknown";
+  }
+}
+
+} // anonymous namespace
+
+#if ENABLE_BONDED_MODE
+static esp_err_t handleBondFsList(httpd_req_t* req) {
+  WEB_AUTH_JSON_OR_RETURN(req, ctx);
+  webFsBridgeEnsureInit();
+  if (!sWebFsBridgeMutex || !sWebFsBridge.done) {
+    return sendJsonResponse(req, "{\"success\":false,\"error\":\"bridge init failed\"}");
+  }
+
+  // Parse query string. path is required, start is optional (default 0).
+  char qbuf[300];
+  if (httpd_req_get_url_query_str(req, qbuf, sizeof(qbuf)) != ESP_OK) {
+    return sendJsonResponse(req, "{\"success\":false,\"error\":\"missing query\"}");
+  }
+  char pathBuf[FILE_MANAGER_MAX_PATH] = {0};
+  if (httpd_query_key_value(qbuf, "path", pathBuf, sizeof(pathBuf)) != ESP_OK
+      || pathBuf[0] == '\0') {
+    return sendJsonResponse(req, "{\"success\":false,\"error\":\"missing path\"}");
+  }
+  // URL-decode the minimum the existing files API decodes — same level of
+  // handling so behavior is consistent for users moving between local and
+  // bonded views.
+  String path(pathBuf);
+  path.replace("%2F", "/");
+  path.replace("%20", " ");
+
+  uint16_t startIdx = 0;
+  char startBuf[12];
+  if (httpd_query_key_value(qbuf, "start", startBuf, sizeof(startBuf)) == ESP_OK) {
+    int v = atoi(startBuf);
+    if (v < 0) v = 0;
+    if (v > 65535) v = 65535;
+    startIdx = (uint16_t)v;
+  }
+
+  // Bonded peer must be paired AND we must have its MAC. peerMacBytes()
+  // enforces bondModeEnabled too, so this is the single gate.
+  uint8_t peerMac[6];
+  if (!BondedPeer::peerMacBytes(peerMac)) {
+    return sendJsonResponse(req, "{\"success\":false,\"error\":\"not bonded\"}");
+  }
+
+  // Serialize concurrent web peer-fs requests through the single bridge
+  // slot. 100 ms timeout to acquire — if someone else is browsing, return
+  // a "busy" so the browser can retry quickly rather than tie up httpd
+  // workers waiting in line.
+  if (xSemaphoreTake(sWebFsBridgeMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+    return sendJsonResponse(req, "{\"success\":false,\"error\":\"bridge busy\"}");
+  }
+
+  // Drain any stale "done" signal left over from a previous round (shouldn't
+  // happen with proper cleanup, but defensive — costs ~µs).
+  xSemaphoreTake(sWebFsBridge.done, 0);
+  sWebFsBridge.received = false;
+  sWebFsBridge.entryCount = 0;
+  memset(&sWebFsBridge.hdr, 0, sizeof(sWebFsBridge.hdr));
+
+  uint32_t reqId = fsListSendRequest(peerMac, path.c_str(), startIdx, webFsListReplyCallback);
+  if (reqId == 0) {
+    xSemaphoreGive(sWebFsBridgeMutex);
+    return sendJsonResponse(req, "{\"success\":false,\"error\":\"send failed\"}");
+  }
+  sWebFsBridge.expectedReqId = reqId;
+
+  // Wait for the callback. The protocol module times out at 5s and synth-
+  // esizes an IO_ERROR reply, so 6 s here covers the worst case plus a small
+  // grace window for the send path itself.
+  if (xSemaphoreTake(sWebFsBridge.done, pdMS_TO_TICKS(6000)) != pdTRUE) {
+    fsListCancel(reqId);
+    xSemaphoreGive(sWebFsBridgeMutex);
+    return sendJsonResponse(req, "{\"success\":false,\"error\":\"timeout\"}");
+  }
+
+  // Build response JSON. Streamed in chunks since 32 entries × ~110 chars
+  // = ~3.5 KB; we don't want a single contiguous String that big in DRAM.
+  httpd_resp_set_type(req, "application/json");
+  uint8_t status = sWebFsBridge.hdr.status;
+  uint8_t count  = sWebFsBridge.entryCount;
+  uint16_t total = sWebFsBridge.hdr.totalEntries;
+  bool hasMore   = sWebFsBridge.hdr.hasMore != 0;
+  uint16_t nextStart = sWebFsBridge.hdr.nextStartIndex;
+  // Snapshot path before we drop the mutex (header.path is the normalized
+  // path the peer echoed back; we use it so the client sees a canonical
+  // form even after path traversal).
+  char peerEchoPath[sizeof(sWebFsBridge.hdr.path)];
+  strlcpy(peerEchoPath, sWebFsBridge.hdr.path, sizeof(peerEchoPath));
+
+  if (status != FS_LIST_STATUS_OK) {
+    char err[160];
+    snprintf(err, sizeof(err),
+             "{\"success\":false,\"error\":\"%s\",\"path\":\"%s\"}",
+             fsStatusTag(status), peerEchoPath);
+    xSemaphoreGive(sWebFsBridgeMutex);
+    return sendJsonResponse(req, err);
+  }
+
+  // OK path — emit the entries array. Build the header chunk first, then
+  // each entry, then the trailer. Keeps a fixed ~256 B stack buffer in
+  // play instead of an N×entry-size String concatenation.
+  char chunk[300];
+  int hlen = snprintf(chunk, sizeof(chunk),
+                      "{\"success\":true,\"path\":\"%s\","
+                      "\"totalEntries\":%u,\"hasMore\":%s,"
+                      "\"nextStartIndex\":%u,\"entries\":[",
+                      peerEchoPath, (unsigned)total,
+                      hasMore ? "true" : "false", (unsigned)nextStart);
+  httpd_resp_send_chunk(req, chunk, hlen);
+
+  for (uint8_t i = 0; i < count; i++) {
+    const V4PayloadFsEntry& e = sWebFsBridge.entries[i];
+
+    // JSON-escape name. Limited set — control chars and backslash/quote
+    // are the only ones we need to handle for VFS filenames in practice.
+    char escName[80];
+    size_t out = 0;
+    for (size_t k = 0; k < sizeof(e.name) && e.name[k]; k++) {
+      if (out >= sizeof(escName) - 6) break;
+      char c = e.name[k];
+      if (c == '"' || c == '\\') {
+        escName[out++] = '\\';
+        escName[out++] = c;
+      } else if ((unsigned char)c < 0x20) {
+        out += snprintf(escName + out, sizeof(escName) - out, "\\u%04x", c);
+      } else {
+        escName[out++] = c;
+      }
+    }
+    escName[out] = '\0';
+
+    int elen = snprintf(chunk, sizeof(chunk),
+                        "%s{\"name\":\"%s\",\"isDir\":%s,\"size\":%u,\"perms\":%u}",
+                        i == 0 ? "" : ",",
+                        escName,
+                        e.isFolder ? "true" : "false",
+                        (unsigned)e.size, (unsigned)e.perms);
+    httpd_resp_send_chunk(req, chunk, elen);
+  }
+
+  httpd_resp_send_chunk(req, "]}", 2);
+  httpd_resp_send_chunk(req, NULL, 0);  // end stream
+
+  xSemaphoreGive(sWebFsBridgeMutex);
+  return ESP_OK;
+}
+
+// =============================================================================
+// /api/bond/fs/stat — structured peer storage stats via FS_STAT_REQ
+// =============================================================================
+// Replaces the BondFs.exec('fsusage') CLI-scrape path. Same bridge pattern
+// as /api/bond/fs/list — fsStatSendRequest, wait on semaphore, serialize
+// the typed reply as JSON. Query: ?path=/sd (or omit for /).
+static esp_err_t handleBondFsStat(httpd_req_t* req) {
+  WEB_AUTH_JSON_OR_RETURN(req, ctx);
+  webFsBridgeEnsureInit();
+
+  char pathBuf[FILE_MANAGER_MAX_PATH] = "/";
+  char qbuf[200];
+  if (httpd_req_get_url_query_str(req, qbuf, sizeof(qbuf)) == ESP_OK) {
+    if (httpd_query_key_value(qbuf, "path", pathBuf, sizeof(pathBuf)) != ESP_OK
+        || pathBuf[0] == '\0') {
+      strlcpy(pathBuf, "/", sizeof(pathBuf));
+    }
+    String p(pathBuf);
+    p.replace("%2F", "/");
+    p.replace("%20", " ");
+    strlcpy(pathBuf, p.c_str(), sizeof(pathBuf));
+  }
+
+  uint8_t peerMac[6];
+  if (!BondedPeer::peerMacBytes(peerMac)) {
+    return sendJsonResponse(req, "{\"success\":false,\"error\":\"not bonded\"}");
+  }
+
+  if (xSemaphoreTake(sWebFsStatMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+    return sendJsonResponse(req, "{\"success\":false,\"error\":\"bridge busy\"}");
+  }
+  xSemaphoreTake(sWebFsStatBridge.done, 0);
+  sWebFsStatBridge.received = false;
+  memset(&sWebFsStatBridge.reply, 0, sizeof(sWebFsStatBridge.reply));
+
+  uint32_t reqId = fsStatSendRequest(peerMac, pathBuf, webFsStatReplyCallback);
+  if (reqId == 0) {
+    xSemaphoreGive(sWebFsStatMutex);
+    return sendJsonResponse(req, "{\"success\":false,\"error\":\"send failed\"}");
+  }
+  sWebFsStatBridge.expectedReqId = reqId;
+
+  if (xSemaphoreTake(sWebFsStatBridge.done, pdMS_TO_TICKS(6000)) != pdTRUE) {
+    fsListCancel(reqId);
+    xSemaphoreGive(sWebFsStatMutex);
+    return sendJsonResponse(req, "{\"success\":false,\"error\":\"timeout\"}");
+  }
+
+  uint8_t status = sWebFsStatBridge.reply.status;
+  uint64_t total = sWebFsStatBridge.reply.totalBytes;
+  uint64_t used  = sWebFsStatBridge.reply.usedBytes;
+  uint64_t freeB = sWebFsStatBridge.reply.freeBytes;
+  uint16_t pct10 = sWebFsStatBridge.reply.percentUsedX10;
+  char echoPath[sizeof(sWebFsStatBridge.reply.path)];
+  strlcpy(echoPath, sWebFsStatBridge.reply.path, sizeof(echoPath));
+  xSemaphoreGive(sWebFsStatMutex);
+
+  if (status != FS_LIST_STATUS_OK) {
+    char err[160];
+    snprintf(err, sizeof(err),
+             "{\"success\":false,\"error\":\"%s\",\"path\":\"%s\"}",
+             fsStatusTag(status), echoPath);
+    return sendJsonResponse(req, err);
+  }
+
+  char body[256];
+  // Doubles for the JSON output — 64-bit ints are fine numerically but JS
+  // loses precision past 2^53. For storage sizes (< 1 EB) we're nowhere
+  // near that limit so plain JSON numbers are safe.
+  snprintf(body, sizeof(body),
+           "{\"success\":true,\"path\":\"%s\","
+           "\"total\":%llu,\"used\":%llu,\"free\":%llu,"
+           "\"usagePercent\":%u.%u}",
+           echoPath,
+           (unsigned long long)total,
+           (unsigned long long)used,
+           (unsigned long long)freeB,
+           pct10 / 10, pct10 % 10);
+  return sendJsonResponse(req, body);
+}
+
+// =============================================================================
+// /api/bond/fs/get — structured peer file pull via FS_GET_REQ
+// =============================================================================
+// Replaces the BondFs.exec('espnowsendfile') CLI trigger. Two stages:
+//   1. Synchronous: send FS_GET_REQ, wait for FS_GET_ACK, return ack status
+//      + fileSize to the client.
+//   2. If ACK was OK: the peer is now sending the file via FILE_START/DATA
+//      /END (existing transfer pipeline). The file lands at
+//      /espnow/received/<MAC>/<basename> via the standard inbound path —
+//      same place BondFs.pull's polling expects to find it.
+//
+// We don't wait for the file to fully transfer here; the client polls for
+// the file to appear. That polling logic lives on the JS side because it
+// makes sense to overlap with progress UI (and a long-poll handler would
+// tie up an httpd worker for seconds with no value over client polling).
+static esp_err_t handleBondFsGet(httpd_req_t* req) {
+  WEB_AUTH_JSON_OR_RETURN(req, ctx);
+  webFsBridgeEnsureInit();
+
+  char qbuf[300];
+  if (httpd_req_get_url_query_str(req, qbuf, sizeof(qbuf)) != ESP_OK) {
+    return sendJsonResponse(req, "{\"success\":false,\"error\":\"missing query\"}");
+  }
+  char pathBuf[FILE_MANAGER_MAX_PATH] = {0};
+  if (httpd_query_key_value(qbuf, "path", pathBuf, sizeof(pathBuf)) != ESP_OK
+      || pathBuf[0] == '\0') {
+    return sendJsonResponse(req, "{\"success\":false,\"error\":\"missing path\"}");
+  }
+  String path(pathBuf);
+  path.replace("%2F", "/");
+  path.replace("%20", " ");
+
+  uint8_t peerMac[6];
+  if (!BondedPeer::peerMacBytes(peerMac)) {
+    return sendJsonResponse(req, "{\"success\":false,\"error\":\"not bonded\"}");
+  }
+
+  if (xSemaphoreTake(sWebFsGetMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+    return sendJsonResponse(req, "{\"success\":false,\"error\":\"bridge busy\"}");
+  }
+  xSemaphoreTake(sWebFsGetBridge.done, 0);
+  sWebFsGetBridge.received = false;
+  memset(&sWebFsGetBridge.ack, 0, sizeof(sWebFsGetBridge.ack));
+
+  uint32_t reqId = fsGetSendRequest(peerMac, path.c_str(), webFsGetAckCallback);
+  if (reqId == 0) {
+    xSemaphoreGive(sWebFsGetMutex);
+    return sendJsonResponse(req, "{\"success\":false,\"error\":\"send failed\"}");
+  }
+  sWebFsGetBridge.expectedReqId = reqId;
+
+  // The ACK is supposed to be fast (single-frame reply from the peer's
+  // request handler). 6s timeout matches the protocol module's own.
+  if (xSemaphoreTake(sWebFsGetBridge.done, pdMS_TO_TICKS(6000)) != pdTRUE) {
+    fsListCancel(reqId);
+    xSemaphoreGive(sWebFsGetMutex);
+    return sendJsonResponse(req, "{\"success\":false,\"error\":\"timeout\"}");
+  }
+
+  uint8_t status = sWebFsGetBridge.ack.status;
+  uint32_t size = sWebFsGetBridge.ack.fileSize;
+  char echoPath[sizeof(sWebFsGetBridge.ack.path)];
+  strlcpy(echoPath, sWebFsGetBridge.ack.path, sizeof(echoPath));
+  xSemaphoreGive(sWebFsGetMutex);
+
+  if (status != FS_LIST_STATUS_OK) {
+    char err[160];
+    snprintf(err, sizeof(err),
+             "{\"success\":false,\"error\":\"%s\",\"path\":\"%s\"}",
+             fsStatusTag(status), echoPath);
+    return sendJsonResponse(req, err);
+  }
+
+  // OK — peer is now sending the file. Tell the client what to expect.
+  char body[256];
+  snprintf(body, sizeof(body),
+           "{\"success\":true,\"path\":\"%s\",\"size\":%u,"
+           "\"message\":\"transfer initiated; poll local FS for file landing\"}",
+           echoPath, (unsigned)size);
+  return sendJsonResponse(req, body);
+}
 #endif // ENABLE_BONDED_MODE
 
 // =============================================================================
@@ -1738,6 +2170,17 @@ void registerBondHandlers(httpd_handle_t server) {
 
   static httpd_uri_t bondPairedDevices = { .uri = "/api/bond/paired-devices", .method = HTTP_GET, .handler = handleBondPairedDevices, .user_ctx = NULL };
   httpd_register_uri_handler(server, &bondPairedDevices);
+
+  // Structured peer-FS endpoints — see handle* above. All three replace
+  // CLI-scrape paths that previously rode the bonded `remote:` command
+  // pipeline and parsed text output. Now they're typed RPCs over the
+  // FS_LIST / FS_STAT / FS_GET opcode pairs.
+  static httpd_uri_t bondFsList = { .uri = "/api/bond/fs/list", .method = HTTP_GET, .handler = handleBondFsList, .user_ctx = NULL };
+  httpd_register_uri_handler(server, &bondFsList);
+  static httpd_uri_t bondFsStat = { .uri = "/api/bond/fs/stat", .method = HTTP_GET, .handler = handleBondFsStat, .user_ctx = NULL };
+  httpd_register_uri_handler(server, &bondFsStat);
+  static httpd_uri_t bondFsGet  = { .uri = "/api/bond/fs/get",  .method = HTTP_GET, .handler = handleBondFsGet,  .user_ctx = NULL };
+  httpd_register_uri_handler(server, &bondFsGet);
 #else
   (void)server;  // Suppress unused parameter warning
 #endif

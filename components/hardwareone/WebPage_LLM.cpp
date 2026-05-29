@@ -20,6 +20,7 @@
 #include <esp_http_server.h>
 
 #include "System_LLM.h"
+#include "System_LLMChat.h"
 #include "System_Debug.h"
 #include "System_Settings.h"
 #include "System_User.h"
@@ -210,65 +211,38 @@ static esp_err_t handleLLMGenerate(httpd_req_t* req) {
     return sendJsonResponse(req, "{\"ok\":false,\"error\":\"empty prompt\"}");
   }
 
-  LLMGenParams params;
-  params.maxTokens    = doc["max_tokens"]     | gSettings.llmMaxTokens;
-  params.temperature  = doc["temperature"]    | gSettings.llmTemperature;
-  params.topp         = doc["top_p"]          | gSettings.llmTopP;
-  params.useMirostat2 = doc["mirostat2"]      | (bool)gSettings.llmUseMirostat2;
-  params.mirostatTau  = doc["mirostat_tau"]   | gSettings.llmMirostatTau;
-  params.mirostatEta  = doc["mirostat_eta"]   | gSettings.llmMirostatEta;
-  params.repPenalty   = doc["rep_penalty"]    | gSettings.llmRepPenalty;
-  params.repWindow    = doc["rep_window"]     | gSettings.llmRepWindow;
-  params.sentenceLimit= doc["sentence_limit"] | gSettings.llmSentenceLimit;
-  params.hardCap      = doc["hard_cap"]       | gSettings.llmHardCap;
-  params.dynTemp      = doc["dyn_temp"]       | (bool)gSettings.llmDynTemp;
+  // Per-request param overrides — anything the client supplied wins, anything
+  // it omits falls back to gSettings.llm* inside chatResolveParams.
+  // Sentinel-based unset detection lets the JSON path stay declarative.
+  ChatParamOverride ov;
+  if (doc["max_tokens"].is<int>())     ov.maxTokens     = doc["max_tokens"].as<int>();
+  if (doc["temperature"].is<float>())  ov.temperature   = doc["temperature"].as<float>();
+  if (doc["top_p"].is<float>())        ov.topp          = doc["top_p"].as<float>();
+  if (doc["mirostat2"].is<bool>())     ov.useMirostat2  = doc["mirostat2"].as<bool>() ? 1 : 0;
+  if (doc["mirostat_tau"].is<float>()) ov.mirostatTau   = doc["mirostat_tau"].as<float>();
+  if (doc["mirostat_eta"].is<float>()) ov.mirostatEta   = doc["mirostat_eta"].as<float>();
+  if (doc["rep_penalty"].is<float>())  ov.repPenalty    = doc["rep_penalty"].as<float>();
+  if (doc["rep_window"].is<int>())     ov.repWindow     = doc["rep_window"].as<int>();
+  if (doc["sentence_limit"].is<int>()) ov.sentenceLimit = doc["sentence_limit"].as<int>();
+  if (doc["hard_cap"].is<int>())       ov.hardCap       = doc["hard_cap"].as<int>();
+  if (doc["dyn_temp"].is<bool>())      ov.dynTemp       = doc["dyn_temp"].as<bool>() ? 1 : 0;
 
-  // Clamp
-  if (params.maxTokens    <   1) params.maxTokens    = 1;
-  if (params.maxTokens    > 512) params.maxTokens    = 512;
-  if (params.temperature  < 0.0f)  params.temperature  = 0.0f;
-  if (params.temperature  > 2.0f)  params.temperature  = 2.0f;
-  if (params.topp         < 0.01f) params.topp         = 0.01f;
-  if (params.topp         > 1.0f)  params.topp         = 1.0f;
-  if (params.mirostatTau  < 0.5f)  params.mirostatTau  = 0.5f;
-  if (params.mirostatTau  > 20.0f) params.mirostatTau  = 20.0f;
-  if (params.mirostatEta  < 0.01f) params.mirostatEta  = 0.01f;
-  if (params.mirostatEta  > 1.0f)  params.mirostatEta  = 1.0f;
-  if (params.repPenalty   < 1.0f)  params.repPenalty   = 1.0f;
-  if (params.repPenalty   > 5.0f)  params.repPenalty   = 5.0f;
-  if (params.repWindow    <   0)   params.repWindow    = 0;
-  if (params.repWindow    > 128)   params.repWindow    = 128;
-  if (params.sentenceLimit<   0)   params.sentenceLimit= 0;
-  if (params.sentenceLimit>  20)   params.sentenceLimit= 20;
-  if (params.hardCap      <   0)   params.hardCap      = 0;
-  if (params.hardCap      > 512)   params.hardCap      = 512;
+  // The legacy POST body included a `suppress` array (string list of prior
+  // answers) for the browser-driven retry path. After the chat-module migration
+  // the firmware owns retry — clients should call POST /api/llm/chat/retry
+  // instead. We keep this body field decoded but ignored, so older browser
+  // caches don't break: their suppress list just becomes a no-op and the
+  // server still returns ok+session.
+  (void)doc["suppress"];
 
-  // Tokenize suppress texts (previous answers to avoid on retry)
-  params.suppressCount = 0;
-  JsonArray suppressArr = doc["suppress"].as<JsonArray>();
-  if (suppressArr) {
-    int tmpBuf[64];
-    for (JsonVariant v : suppressArr) {
-      const char* text = v.as<const char*>();
-      if (!text || !text[0]) continue;
-      int n = llmTokenize(text, tmpBuf, 64);
-      for (int i = 0; i < n && params.suppressCount < 128; i++) {
-        int tok = tmpBuf[i];
-        bool dup = false;
-        for (int j = 0; j < params.suppressCount; j++) {
-          if (params.suppressTokens[j] == tok) { dup = true; break; }
-        }
-        if (!dup) params.suppressTokens[params.suppressCount++] = tok;
-      }
-    }
-  }
+  DEBUG_HTTPF("[LLM-API] POST /api/llm/generate: prompt='%.60s%s' max_tokens=%d temp=%.2f",
+    prompt, strlen(prompt) > 60 ? "..." : "",
+    (int)(ov.maxTokens   != INT32_MIN ? ov.maxTokens   : gSettings.llmMaxTokens),
+    (double)(!isnan(ov.temperature)   ? ov.temperature : gSettings.llmTemperature));
 
-  DEBUG_HTTPF("[LLM-API] POST /api/llm/generate (async): prompt='%.60s%s' max_tokens=%d temp=%.2f",
-    prompt, strlen(prompt) > 60 ? "..." : "", params.maxTokens, params.temperature);
-
-  int sessionId = llmStartAsync(prompt, params);
+  int sessionId = chatBeginTurn(prompt, &ov);
   if (sessionId == 0) {
-    return sendJsonResponse(req, "{\"ok\":false,\"error\":\"failed to start generation\"}");
+    return sendJsonResponse(req, "{\"ok\":false,\"error\":\"busy or failed to start\"}");
   }
 
   char json[48];
@@ -295,25 +269,123 @@ static esp_err_t handleLLMPoll(httpd_req_t* req) {
   if (httpd_query_key_value(query, "offset",  param, sizeof(param)) == ESP_OK) offset  = atoi(param);
   if (httpd_query_key_value(query, "session", param, sizeof(param)) == ESP_OK) session = atoi(param);
 
-  // Stale session → tell client to stop
-  if (session != llmGetSessionId()) {
+  // Stale session → tell client to stop. Reading the chat-module's view of the
+  // session means we get the same staleness semantics whether the user started
+  // their last prompt from the web OR the OLED — the chat module owns the
+  // canonical session ID.
+  int curSession = chatGetSessionId();
+  bool generating = chatIsGenerating();
+  if (session != 0 && (!generating || session != curSession)) {
+    // If the engine is still streaming but the client's session is stale, the
+    // *current* assistant turn is for someone else (e.g. an OLED-initiated
+    // generation). Signal done+stale so the browser stops polling.
     return sendJsonResponse(req, "{\"text\":\"\",\"done\":true,\"len\":0,\"stale\":true}");
   }
 
-  // Read up to 512 bytes of new tokens starting at offset
+  // Pull bytes from the chat module's view (which in turn drains the engine).
+  // 512 keeps the chunk under ArduinoJson's PSRAM_JSON_DOC working set.
   char chunk[512];
-  int n = llmGetResultChunk(offset, chunk, sizeof(chunk));
-  bool done = llmIsGenerationDone();
+  int n = chatReadStream(offset, chunk, sizeof(chunk));
+  int totalLen = chatGetStreamLen();
+  // "done" semantics: the chat module clears its streaming slot the moment
+  // the engine finishes. If we're not generating any more AND we just read
+  // 0 bytes past the offset, the turn is complete.
+  bool done = !chatIsGenerating();
 
-  // Serialize with ArduinoJson so token text is properly escaped
   PSRAM_JSON_DOC(jdoc);
   jdoc["done"] = done;
-  jdoc["len"]  = llmGetResultLen();
+  jdoc["len"]  = totalLen;
   jdoc["text"] = (n > 0) ? (const char*)chunk : "";
 
   String resp;
   serializeJson(jdoc, resp);
   return sendJsonResponse(req, resp.c_str());
+}
+
+// ============================================================================
+// GET /api/llm/chat/turns — full conversation as JSON
+// Used by the web UI on page load to render any prior turns (which now live
+// in firmware, not browser JS). Each entry: {role, text, tokens, tokPerSec, streaming}.
+// ============================================================================
+static esp_err_t handleLLMChatTurns(httpd_req_t* req) {
+  WEB_AUTH_OR_RETURN(req, ctx);
+
+  int count = chatGetTurnCount();
+
+  // Streaming write so a 16-turn history with 2 KB bodies doesn't allocate
+  // 32+ KB of contiguous JSON in PSRAM all at once. Per-turn buffers are
+  // small (textLen capped at LLM_CHAT_TURN_MAX_BYTES = 2 KB).
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_send_chunk(req, "[", 1);
+
+  char turnBuf[LLM_CHAT_TURN_MAX_BYTES + 1];
+  for (int i = 0; i < count; i++) {
+    ChatTurnInfo info;
+    if (!chatGetTurnInfo(i, &info)) continue;
+
+    int n = chatReadTurn(i, 0, turnBuf, sizeof(turnBuf));
+    (void)n;  // turnBuf is NUL-terminated; ArduinoJson handles the rest.
+
+    PSRAM_JSON_DOC(jdoc);
+    jdoc["role"]       = (info.role == ChatTurnRole::USER) ? "user" : "assistant";
+    jdoc["text"]       = (const char*)turnBuf;
+    jdoc["tokens"]     = info.tokenCount;
+    jdoc["tokPerSec"]  = info.tokensPerSecX10 / 10.0f;
+    jdoc["streaming"]  = info.isStreaming;
+
+    String entry;
+    serializeJson(jdoc, entry);
+    if (i > 0) httpd_resp_send_chunk(req, ",", 1);
+    httpd_resp_send_chunk(req, entry.c_str(), entry.length());
+  }
+
+  httpd_resp_send_chunk(req, "]", 1);
+  httpd_resp_send_chunk(req, NULL, 0);
+  return ESP_OK;
+}
+
+// ============================================================================
+// POST /api/llm/chat/retry — regenerate the last assistant turn
+// Replaces the legacy "browser POSTs /api/llm/generate with suppress=[prior]"
+// path. The firmware now owns retry semantics + suppress tokenization.
+// ============================================================================
+static esp_err_t handleLLMChatRetry(httpd_req_t* req) {
+  WEB_AUTH_OR_RETURN(req, ctx);
+
+  // Optional per-call param overrides (same shape as /api/llm/generate).
+  // Empty body is fine — falls back to gSettings.
+  ChatParamOverride ov;
+  if (req->content_len > 0 && req->content_len < 2048) {
+    char body[2048];
+    if (readPostBody(req, body, sizeof(body))) {
+      PSRAM_JSON_DOC(doc);
+      if (!deserializeJson(doc, body)) {
+        if (doc["max_tokens"].is<int>())     ov.maxTokens     = doc["max_tokens"].as<int>();
+        if (doc["temperature"].is<float>())  ov.temperature   = doc["temperature"].as<float>();
+        if (doc["top_p"].is<float>())        ov.topp          = doc["top_p"].as<float>();
+        if (doc["hard_cap"].is<int>())       ov.hardCap       = doc["hard_cap"].as<int>();
+      }
+    }
+  }
+
+  int sessionId = chatRetryLast(&ov);
+  if (sessionId == 0) {
+    return sendJsonResponse(req, "{\"ok\":false,\"error\":\"no prior turn or busy\"}");
+  }
+  char json[48];
+  snprintf(json, sizeof(json), "{\"ok\":true,\"session\":%d}", sessionId);
+  return sendJsonResponse(req, json);
+}
+
+// ============================================================================
+// POST /api/llm/chat/clear — wipe conversation history
+// ============================================================================
+static esp_err_t handleLLMChatClear(httpd_req_t* req) {
+  WEB_AUTH_OR_RETURN(req, ctx);
+  if (!chatClear()) {
+    return sendJsonResponse(req, "{\"ok\":false,\"error\":\"busy — stop first\"}");
+  }
+  return sendJsonResponse(req, "{\"ok\":true}");
 }
 
 // ============================================================================
@@ -346,6 +418,9 @@ void registerLLMHandlers(httpd_handle_t server) {
   static httpd_uri_t llmGenerate = { .uri = "/api/llm/generate", .method = HTTP_POST, .handler = handleLLMGenerate, .user_ctx = NULL };
   static httpd_uri_t llmStop    = { .uri = "/api/llm/stop",     .method = HTTP_POST, .handler = handleLLMStop,     .user_ctx = NULL };
   static httpd_uri_t llmPoll    = { .uri = "/api/llm/result",   .method = HTTP_GET,  .handler = handleLLMPoll,     .user_ctx = NULL };
+  static httpd_uri_t llmChatTurns = { .uri = "/api/llm/chat/turns", .method = HTTP_GET,  .handler = handleLLMChatTurns, .user_ctx = NULL };
+  static httpd_uri_t llmChatRetry = { .uri = "/api/llm/chat/retry", .method = HTTP_POST, .handler = handleLLMChatRetry, .user_ctx = NULL };
+  static httpd_uri_t llmChatClear = { .uri = "/api/llm/chat/clear", .method = HTTP_POST, .handler = handleLLMChatClear, .user_ctx = NULL };
 
   httpd_register_uri_handler(server, &llmPage);
   httpd_register_uri_handler(server, &llmStatus);
@@ -355,6 +430,9 @@ void registerLLMHandlers(httpd_handle_t server) {
   httpd_register_uri_handler(server, &llmGenerate);
   httpd_register_uri_handler(server, &llmStop);
   httpd_register_uri_handler(server, &llmPoll);
+  httpd_register_uri_handler(server, &llmChatTurns);
+  httpd_register_uri_handler(server, &llmChatRetry);
+  httpd_register_uri_handler(server, &llmChatClear);
 }
 
 #endif // ENABLE_ONDEVICE_LLM && ENABLE_HTTP_SERVER

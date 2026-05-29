@@ -1,6 +1,6 @@
 #include "System_BuildConfig.h"
 
-#if ENABLE_WEB_GAMES
+#if ENABLE_WEB_GAME_MAZE
 
 #include <Arduino.h>
 

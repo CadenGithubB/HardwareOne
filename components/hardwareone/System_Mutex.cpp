@@ -17,6 +17,7 @@ SemaphoreHandle_t gJsonResponseMutex = nullptr;
 SemaphoreHandle_t gMeshRetryMutex = nullptr;
 SemaphoreHandle_t gFileTransferMutex = nullptr;
 SemaphoreHandle_t gTopoStreamsMutex = nullptr;
+SemaphoreHandle_t gEspNowSessionTxMutex = nullptr;
 SemaphoreHandle_t i2sMicMutex = nullptr;
 
 // ============================================================================
@@ -30,14 +31,16 @@ void initMutexes() {
   gMeshRetryMutex = xSemaphoreCreateMutex();
   gFileTransferMutex = xSemaphoreCreateMutex();
   gTopoStreamsMutex = xSemaphoreCreateMutex();
+  gEspNowSessionTxMutex = xSemaphoreCreateMutex();
   i2sMicMutex = xSemaphoreCreateMutex();
-  
+
   // i2cMutex removed — I2cLockGuard and i2cLock/Unlock go through I2CDeviceManager::getBusMutex() directly
 
   // Log creation status
-  bool allCreated = (gFsMutex != nullptr) && (gJsonResponseMutex != nullptr) && 
+  bool allCreated = (gFsMutex != nullptr) && (gJsonResponseMutex != nullptr) &&
                     (gMeshRetryMutex != nullptr) && (gFileTransferMutex != nullptr) &&
-                    (gTopoStreamsMutex != nullptr) && (i2sMicMutex != nullptr);
+                    (gTopoStreamsMutex != nullptr) && (gEspNowSessionTxMutex != nullptr) &&
+                    (i2sMicMutex != nullptr);
   
   if (!allCreated) {
     if (gOutputFlags & OUTPUT_SERIAL) {
@@ -264,6 +267,31 @@ TopoStreamsGuard::TopoStreamsGuard(const char* owner) : held(false) {
 TopoStreamsGuard::~TopoStreamsGuard() {
   if (held && gTopoStreamsMutex) {
     xSemaphoreGive(gTopoStreamsMutex);
+  }
+}
+
+// ============================================================================
+// EspNowTxGuard Implementation
+// ============================================================================
+
+EspNowTxGuard::EspNowTxGuard(const char* owner) : held(false) {
+  if (gEspNowSessionTxMutex) {
+    // Reentrant-safe: if this task already holds it, skip — the outer holder
+    // releases. (sessionWrapFrame isn't nested today, but match the convention
+    // so a future nested send can't self-deadlock.)
+    if (isHeldByCurrentTask(gEspNowSessionTxMutex)) return;
+    // portMAX_DELAY is safe: the guarded section is the txSeqNext bump + AEAD
+    // seal (microseconds, no blocking calls), so a waiter is unblocked almost
+    // immediately and priority inheritance prevents inversion.
+    if (xSemaphoreTake(gEspNowSessionTxMutex, portMAX_DELAY) == pdTRUE) {
+      held = true;
+    }
+  }
+}
+
+EspNowTxGuard::~EspNowTxGuard() {
+  if (held && gEspNowSessionTxMutex) {
+    xSemaphoreGive(gEspNowSessionTxMutex);
   }
 }
 

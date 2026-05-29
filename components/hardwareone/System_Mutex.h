@@ -213,9 +213,37 @@ struct TopoStreamsGuard {
   bool held;
   explicit TopoStreamsGuard(const char* owner = nullptr);
   ~TopoStreamsGuard();
-  
+
   TopoStreamsGuard(const TopoStreamsGuard&) = delete;
   TopoStreamsGuard& operator=(const TopoStreamsGuard&) = delete;
+};
+
+// ESP-NOW session TX mutex — serializes the per-session AEAD send critical
+// section in sessionWrapFrame() (the ++txSeqNext nonce-counter bump + seal).
+//
+// The session layer was historically lock-free because espnow_task was the
+// ONLY task that sent on a session. That invariant broke when bonded sensor
+// streaming began calling the encrypted-send path from SENSOR_BCAST_TASK
+// (core 1) at 10 Hz while espnow_task (core 0) and cmd_exec_task also send
+// heartbeats/ACKs/bond-sync on the same session. Two cores racing
+// `++s->txSeqNext` produce duplicate frameSeq → nonce reuse (a crypto break,
+// and the receiver replay-rejects the dup). This mutex makes the bump+seal
+// atomic across every sender. Critical section is microseconds (no blocking
+// calls inside), so portMAX_DELAY in the guard never meaningfully blocks.
+extern SemaphoreHandle_t gEspNowSessionTxMutex;
+
+/**
+ * EspNowTxGuard - RAII guard for the ESP-NOW session TX critical section.
+ * Reentrant-safe (matches the other guards): if the calling task already
+ * holds the mutex, skip the take and leave release to the outer holder.
+ */
+struct EspNowTxGuard {
+  bool held;
+  explicit EspNowTxGuard(const char* owner = nullptr);
+  ~EspNowTxGuard();
+
+  EspNowTxGuard(const EspNowTxGuard&) = delete;
+  EspNowTxGuard& operator=(const EspNowTxGuard&) = delete;
 };
 
 // ============================================================================

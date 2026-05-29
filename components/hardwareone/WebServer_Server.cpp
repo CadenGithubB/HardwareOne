@@ -88,8 +88,11 @@
 #include "WebPage_LLM.h"
 #include "System_LLM.h"
 #endif
-#if ENABLE_WEB_GAMES
+#if ENABLE_WEB_GAME_MAZE
 #include "WebPage_Games.h"
+#endif
+#if ENABLE_WEB_GAME_DARKROOM
+#include "WebPage_DarkRoom.h"
 #endif
 #if ENABLE_WEB_MAPS
 #include "WebPage_Maps.h"
@@ -415,6 +418,7 @@ esp_err_t authSuccessUnified(AuthContext& ctx, const char* redirectTo) {
     case SOURCE_WEB: transportStr = "http"; break;
     case SOURCE_SERIAL: transportStr = "serial"; break;
     case SOURCE_LOCAL_DISPLAY: transportStr = "display"; break;
+    case SOURCE_G2_GLASSES: transportStr = "g2"; break;
     case SOURCE_ESPNOW: transportStr = "espnow"; break;
     case SOURCE_MQTT: transportStr = "mqtt"; break;
     default: transportStr = "internal"; break;
@@ -5185,8 +5189,11 @@ register_handlers:
  #if ENABLE_WEB_MQTT
   registerMqttHandlers(server);
  #endif
- #if ENABLE_WEB_GAMES
+ #if ENABLE_WEB_GAME_MAZE
   registerGamesHandlers(server);
+ #endif
+ #if ENABLE_WEB_GAME_DARKROOM
+  registerDarkRoomHandlers(server);
  #endif
  #if ENABLE_ONDEVICE_LLM
   registerLLMHandlers(server);

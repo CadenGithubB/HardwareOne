@@ -84,21 +84,19 @@ time_t computeNextRunTime(const char* automationJson, time_t fromTime);
 
 // Conditional command evaluation (modernized - no String returns)
 const char* evaluateConditionalChain(const char* chainStr, char* outBuf, size_t outBufSize);
-const char* executeConditionalCommand(const char* command);
+const char* executeConditionalCommand(const char* command, const char* owner);
 bool evaluateCondition(const char* condition);
 const char* validateConditionalHierarchy(const char* conditions);
 
 // Global automation state
-extern bool gInAutomationContext;
 extern long* gAutoMemoId;
 extern time_t* gAutoMemoNextAt;
 extern int gAutoMemoCount;
 extern bool gAutosDirty;
 
-// Automation logging and execution context variables (defined in automation_system.cpp)
+// Automation logging state (defined in System_Automation.cpp)
 extern bool gAutoLogActive;
 extern String gAutoLogFile;
-extern String gAutoLogAutomationName;
 
 #else // !ENABLE_AUTOMATION
 
@@ -114,11 +112,10 @@ inline bool automationsAnyDue(time_t) { return false; }
 inline bool sanitizeAutomationsJson(String&) { return false; }
 inline bool writeAutomationsJsonAtomic(const String&) { return false; }
 inline void schedulerTickMinute() {}
-inline const char* executeConditionalCommand(const char*) { return "disabled"; }
+inline const char* executeConditionalCommand(const char*, const char*) { return "disabled"; }
 inline bool evaluateCondition(const char*) { return false; }
 
 // Global state stubs
-static bool gInAutomationContext = false;
 static bool gAutosDirty = false;
 static bool gAutoLogActive = false;
 

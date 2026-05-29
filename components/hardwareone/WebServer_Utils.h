@@ -962,20 +962,9 @@ window.BondFs = (function(){
   function token(mac){ return (mac||'').replace(/:/g,'').toUpperCase(); }
   function join(base,name){ if(base==='/'||base===''){return '/'+name;} return (base.charAt(base.length-1)==='/'?base:base+'/')+name; }
   function esc(s){ return String(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'"); }
-  function parseListing(lines){
-    var entries=[], seen={};
-    var re=/^\s+(.+?)\s+\((\d+)\s+(items|bytes)\)(\s+\[mount\])?\s*$/;
-    for(var i=0;i<lines.length;i++){
-      var line=String(lines[i]||'');
-      if(!line||line.indexOf('Files (')>=0||line.indexOf('Total:')>=0||line.indexOf('No files found')>=0) continue;
-      var m=line.match(re); if(!m) continue;
-      var name=m[1].trim(); if(!name||seen[name]) continue; seen[name]=true;
-      var isDir=(m[3]==='items')||!!m[4];
-      entries.push({name:name,isDir:isDir,meta:isDir?(m[2]+' items'):(m[2]+' bytes')});
-    }
-    entries.sort(function(a,b){ if(a.isDir!==b.isDir) return a.isDir?-1:1; return a.name<b.name?-1:(a.name>b.name?1:0); });
-    return entries;
-  }
+  // The CLI-text parseListing() that used to translate `files /path` output
+  // into entry objects has been removed. All peer-FS operations now go
+  // through structured opcodes (FS_LIST / FS_STAT / FS_GET).
   // cb(available:bool, state). Reveals nothing on its own — caller decides.
   function checkAvailable(cb){
     hw.fetchJSON('/api/bond/status').then(function(d){
@@ -1020,33 +1009,84 @@ window.BondFs = (function(){
     }).catch(function(e){ if(opts.onResult) opts.onResult(null,e.message); });
   }
   // List a directory on the peer. done(entries|null, err).
-  // doneMarker is ' entries' (leading space) — matches the listing's terminal
-  // "Total: 6 entries" line but NOT fsusage's "Total: 3256320 bytes" output,
-  // which runs concurrently when the Files page also refreshes storage stats.
-  // The previous 'Total:' marker collided and fired prematurely on the wrong
-  // command's output.
-  function list(path, done){ exec('files '+path,{doneMarker:' entries',onResult:function(lines,err){ if(lines===null) done(null,err); else done(parseListing(lines),null); }}); }
-  // Pull a file from the peer onto THIS device. done({localPath,localUrl,base}|null, err).
+  // entries shape: [{name, isDir, size, perms}] sorted folders-first, alpha.
+  function list(path, done){
+    var qp = '/api/bond/fs/list?path=' + encodeURIComponent(path||'/');
+    hw.fetchJSON(qp).then(function(d){
+      if (!d || d.success !== true) {
+        done(null, (d && d.error) || 'failed');
+        return;
+      }
+      var entries = (d.entries || []).map(function(e){
+        return { name: e.name, isDir: !!e.isDir, size: e.size|0, perms: e.perms|0 };
+      });
+      entries.sort(function(a,b){
+        if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+        return a.name < b.name ? -1 : (a.name > b.name ? 1 : 0);
+      });
+      done(entries, null);
+    }).catch(function(e){
+      done(null, (e && e.message) || 'network');
+    });
+  }
+  // Storage stats for a path on the peer. done({total,used,free,usagePercent}|null, err).
+  // Replaces the prior `exec('fsusage')` 4-line text scrape.
+  function stat(path, done){
+    var qp = '/api/bond/fs/stat?path=' + encodeURIComponent(path||'/');
+    hw.fetchJSON(qp).then(function(d){
+      if (!d || d.success !== true) { done(null, (d && d.error) || 'failed'); return; }
+      done({
+        total: d.total, used: d.used, free: d.free,
+        usagePercent: d.usagePercent,
+        path: d.path
+      }, null);
+    }).catch(function(e){ done(null, (e && e.message) || 'network'); });
+  }
+  // Pull a file from the peer onto THIS device.
+  // done({localPath, localUrl, base, size}|null, err).
+  //
+  // Two-stage: structured FS_GET_REQ kicks the transfer (returns size + ack
+  // status synchronously), then we poll the local landing directory for the
+  // file to appear. File content rides the existing FILE_START/DATA/END
+  // pipeline so behavior is identical to the legacy path — just a
+  // deterministic trigger instead of a CLI scrape.
   function pull(remotePath, done){
-    if(!st.localMac){ done(null,'local MAC unavailable'); return; }
-    var base=remotePath.split('/').pop(); var dir='/espnow/received/'+token(st.peerMac); var localPath=dir+'/'+base; var localUrl='/api/files/read?name='+encodeURIComponent(localPath);
+    if (!st.peerMac){ done(null,'no bonded peer'); return; }
+    var base = remotePath.split('/').pop();
+    var dir = '/espnow/received/' + token(st.peerMac);
+    var localPath = dir + '/' + base;
+    var localUrl = '/api/files/read?name=' + encodeURIComponent(localPath);
     // Pre-create the landing dir so the polling list() below doesn't spam
-    // [STORAGE] Cannot open directory until the first chunk lands and the
-    // V4_FILE_RX path mkdir's it lazily. Both mkdirs are idempotent; ignore errors.
+    // [STORAGE] Cannot open directory until the first chunk lands.
     function mk(p, next){ hw.postFormText('/api/cli', { cmd: 'mkdir '+p }).then(function(){next();}).catch(function(){next();}); }
     mk('/espnow/received', function(){ mk(dir, function(){
-    hw.postForm('/api/bond/exec', { cmd: 'espnowsendfile '+st.localMac+' '+remotePath })
-      .then(function(r){return r.json();}).then(function(d){
-        if(!d||!d.success){ done(null,(d&&(d.result||d.error))||'command failed'); return; }
-        var polls=0; var t=setInterval(function(){ polls++;
-          hw.fetchJSON('/api/files/list?path='+encodeURIComponent(dir)).then(function(ld){
-            var items=(ld&&ld.files)?ld.files:[]; var found=false;
-            for(var i=0;i<items.length;i++){ var nm=items[i]&&items[i].name?items[i].name:items[i]; if(nm===base||String(nm).split('/').pop()===base){found=true;break;} }
-            if(found){ clearInterval(t); done({localPath:localPath,localUrl:localUrl,base:base},null); }
-            else if(polls>=30){ clearInterval(t); done(null,'timed out pulling '+base); }
-          }).catch(function(){ if(polls>=30) clearInterval(t); });
+      var qp = '/api/bond/fs/get?path=' + encodeURIComponent(remotePath);
+      hw.fetchJSON(qp).then(function(d){
+        if (!d || d.success !== true) {
+          done(null, (d && d.error) || 'get failed');
+          return;
+        }
+        // ACK was OK — peer is now sending the file. Poll local FS for it
+        // to land. Same pattern the legacy implementation used; not a wire
+        // concern, just async observation.
+        var expectedSize = d.size|0;
+        var polls = 0;
+        var t = setInterval(function(){
+          polls++;
+          hw.fetchJSON('/api/files/list?path=' + encodeURIComponent(dir)).then(function(ld){
+            var items = (ld && ld.files) ? ld.files : [];
+            for (var i = 0; i < items.length; i++) {
+              var nm = items[i] && items[i].name ? items[i].name : items[i];
+              if (nm === base || String(nm).split('/').pop() === base) {
+                clearInterval(t);
+                done({localPath:localPath, localUrl:localUrl, base:base, size:expectedSize}, null);
+                return;
+              }
+            }
+            if (polls >= 30) { clearInterval(t); done(null,'timed out pulling '+base); }
+          }).catch(function(){ if (polls >= 30) clearInterval(t); });
         }, 600);
-      }).catch(function(e){ done(null,e.message); });
+      }).catch(function(e){ done(null, (e && e.message) || 'network'); });
     }); });
   }
   // Render a directory explorer into containerId.
@@ -1126,7 +1166,10 @@ window.BondFs = (function(){
         h+=window.FileBrowser.rowHtml({
           name: en.name,
           isDir: en.isDir,
-          sizeInfo: window.FileBrowser.formatSize(en.meta, en.isDir),
+          // en.size is the bonded-fs entry's byte count (post-FS_LIST_REPLY).
+          // formatSize already accepts bare integers, so passing the number
+          // through works without changing that helper.
+          sizeInfo: en.isDir ? '' : window.FileBrowser.formatSize(en.size, false),
           iconName: window.FileBrowser.iconName(en.name, en.isDir),
           iconFallback: window.FileBrowser.iconFallback(en.isDir),
           clickExpr: rowClick,
@@ -1144,7 +1187,11 @@ window.BondFs = (function(){
     h+='</div>';
     c.innerHTML=h;
   }
-  return { state:st, token:token, join:join, esc:esc, parseListing:parseListing, checkAvailable:checkAvailable, exec:exec, list:list, pull:pull, renderExplorer:renderExplorer };
+  // Public surface. parseListing was removed when peer FS moved to structured
+  // opcodes (FS_LIST/FS_STAT/FS_GET). stat() was added in the same pass to
+  // replace the fsusage CLI scrape — exposed here so the Files page can call
+  // it from updateBondedStorageStats().
+  return { state:st, token:token, join:join, esc:esc, checkAvailable:checkAvailable, exec:exec, list:list, stat:stat, pull:pull, renderExplorer:renderExplorer };
 })();
 console.log('[BondFs] shared helper loaded');
 </script>

@@ -124,6 +124,42 @@ ExecIdentityGuard::~ExecIdentityGuard() {
 void initAuthIdentityForCurrentTask() { (void)getOrCreateSlot(); }
 
 // ============================================================================
+// CommandIdentityScope — transport→notification mapping + composed install
+// ============================================================================
+//
+// Single source of truth for "what NotificationSource matches this transport."
+// Previously this switch lived inline in executeCommand (System_Utils.cpp); it
+// was duplicated, by hand, anywhere else that needed the same mapping. Now
+// every site reaches it via CommandIdentityScope, which closes the
+// "transport-X with notif-source-Y" mismatch class entirely.
+//
+// 1:1 mapping by design: each transport has exactly one notification source.
+// SOURCE_ESPNOW / SOURCE_BLUETOOTH / SOURCE_MQTT all collapse to
+// NOTIF_SOURCE_REMOTE because the notification UI doesn't distinguish among
+// "remote wire formats" — the audit log already does. SOURCE_INTERNAL maps
+// to NOTIF_SOURCE_SYSTEM (system-generated events: boot, scheduler, sensor
+// lifecycle).
+static uint8_t transportToNotifSource(CommandSource t) {
+  switch (t) {
+    case SOURCE_WEB:            return NOTIF_SOURCE_WEB;
+    case SOURCE_SERIAL:         return NOTIF_SOURCE_CLI;
+    case SOURCE_LOCAL_DISPLAY:  return NOTIF_SOURCE_OLED;
+    case SOURCE_G2_GLASSES:     return NOTIF_SOURCE_G2;
+    case SOURCE_VOICE:          return NOTIF_SOURCE_VOICE;
+    case SOURCE_ESPNOW:
+    case SOURCE_BLUETOOTH:
+    case SOURCE_MQTT:           return NOTIF_SOURCE_REMOTE;
+    case SOURCE_INTERNAL:       return NOTIF_SOURCE_SYSTEM;
+    default:                    return NOTIF_SOURCE_UNKNOWN;
+  }
+}
+
+CommandIdentityScope::CommandIdentityScope(const AuthContext& ctx)
+    : identityGuard_(ctx),
+      notifGuard_(transportToNotifSource(ctx.transport),
+                  ctx.user.length() ? ctx.user.c_str() : nullptr) {}
+
+// ============================================================================
 // Stage 3 — per-task command-execution context accessors
 // ============================================================================
 
