@@ -4,7 +4,9 @@
 #include "System_Debug.h"  // For DEBUG_CLIF macro
 #include "System_MemUtil.h"      // For ps_alloc, AllocPref
 #include "System_ESPNow.h"       // For getEspNowTaskHandle()
+#include "System_ESPNow_Tx.h"    // For espnowtx::getTaskHandle()
 #include "System_I2C.h"          // For queueProcessorTask
+#include "HAL_Input.h"           // For INPUT_TASK_NAME / INPUT_TASK_TAG
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
@@ -84,13 +86,14 @@ BaseType_t xTaskCreateLogged(TaskFunction_t pxTaskCode,
                               void* pvParameters,
                               UBaseType_t uxPriority,
                               TaskHandle_t* pxCreatedTask,
-                              const char* tag) {
+                              const char* tag,
+                              BaseType_t coreId) {
   // Measure before
   size_t heapBefore = ESP.getFreeHeap();
   size_t psTot = ESP.getPsramSize();
   size_t psBefore = (psTot > 0) ? ESP.getFreePsram() : 0;
 
-  BaseType_t res = xTaskCreate(pxTaskCode, pcName, usStackDepth, pvParameters, uxPriority, pxCreatedTask);
+  BaseType_t res = xTaskCreatePinnedToCore(pxTaskCode, pcName, usStackDepth, pvParameters, uxPriority, pxCreatedTask, coreId);
 
   // Optionally log (only when FS is ready and not inside FS critical section)
   if (filesystemReady && !isFsLockedByCurrentTask() && isDebugFlagSet(DEBUG_MEMORY)) {
@@ -165,14 +168,20 @@ bool createInputTask() {
   }
   if (gInputTaskHandle == nullptr) {
     const uint32_t stackWords = INPUT_STACK_WORDS;  // words (~14KB)
+    // Pin to Core 1 (APP): espnow_task + the Wi-Fi stack saturate Core 0, and a
+    // starved input poll mid-I2C-transaction lets the legacy I2C driver's bus-
+    // recovery path storm the I2C ISR → INT WDT (seen on bond role-swap re-sync).
+    // Core 1 is near-idle, so the seesaw transaction completes before its 80ms
+    // timeout instead of wedging.
     BaseType_t result = xTaskCreateLogged(
       inputTask,
-      "gamepad_task",
+      INPUT_TASK_NAME,
       stackWords,
       nullptr,
       1,
       &gInputTaskHandle,
-      "gamepad");
+      INPUT_TASK_TAG,
+      1);
 
     if (result != pdPASS) {
       handleDeviceStopped(I2C_DEVICE_INPUT);
@@ -450,15 +459,18 @@ void reportAllTaskStacks() {
   // Build known tasks list dynamically (some handles are runtime-resolved)
 #if ENABLE_ESPNOW
   TaskHandle_t espnowHandle = getEspNowTaskHandle();
+  TaskHandle_t espnowTxHandle = espnowtx::getTaskHandle();
 #else
   TaskHandle_t espnowHandle = nullptr;
+  TaskHandle_t espnowTxHandle = nullptr;
 #endif
-  
+
   const KnownTask knownTasks[] = {
     {"espnow_task", espnowHandle, ESPNOW_HB_STACK_WORDS},
+    {"espnow_tx", espnowTxHandle, ESPNOW_TX_STACK_WORDS},
     {"cmd_exec_task", gCmdExecTaskHandle, CMD_EXEC_STACK_WORDS},
     {"sensor_queue_task", queueProcessorTask, SENSOR_QUEUE_STACK_WORDS},
-    {"gamepad_task", gInputTaskHandle, INPUT_STACK_WORDS},
+    {INPUT_TASK_NAME, gInputTaskHandle, INPUT_STACK_WORDS},
     {"thermal_task", gThermalTaskHandle, THERMAL_STACK_WORDS},
     {"imu_task", gImuTaskHandle, IMU_STACK_WORDS},
     {"tof_task", gTofTaskHandle, TOF_STACK_WORDS},
@@ -480,6 +492,7 @@ void reportAllTaskStacks() {
   // Enabled flags for each task — if false, handle may be stale (task self-deleted)
   const bool taskAlive[] = {
     espnowHandle != nullptr,                                        // espnow_task
+    espnowTxHandle != nullptr,                                      // espnow_tx
     gCmdExecTaskHandle != nullptr,                                  // cmd_exec_task
     queueProcessorTask != nullptr,                                  // sensor_queue_task
     gInputEnabled,                                                 // gamepad_task

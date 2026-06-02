@@ -134,6 +134,10 @@ static void doPowerOff() {
   // path re-asserts everything from scratch.
   oledPrepareForSleep();
   powerSleepTransitionMark();
+  {
+    extern void batteryLogEvent(const char* event);
+    batteryLogEvent("sleep:deep");
+  }
   DEBUG_G2F("[G2] Power: esp_deep_sleep_start() — wake via reset button");
   // No wake source configured: chip stays in deep sleep until the user
   // hits the physical reset. Quiescent draw ~10 µA.

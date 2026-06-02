@@ -1594,6 +1594,10 @@ static const SettingEntry outputSettingEntries[] = {
   // --- auth: per-channel access gates ---
   { "serialRequireAuth",  SETTING_BOOL, &gSettings.serialRequireAuth,       1, 0, nullptr, 0, 1, "Serial Require Auth",  nullptr, false, "auth", "serialrequireauth" },
   { "displayRequireAuth", SETTING_BOOL, &gSettings.localDisplayRequireAuth, 1, 0, nullptr, 0, 1, "Display Require Auth", nullptr, false, "auth", "displayrequireauth" },
+  { "sessionIdleWeb",     SETTING_INT,  &gSettings.sessionIdleWeb,          60, 0, nullptr, 0, 1440, "Web Idle Logout (min, 0=off)",    nullptr, false, "auth", "sessionidleweb" },
+  { "sessionIdleSerial",  SETTING_INT,  &gSettings.sessionIdleSerial,       60, 0, nullptr, 0, 1440, "Serial Idle Logout (min, 0=off)", nullptr, false, "auth", "sessionidleserial" },
+  { "sessionIdleBle",     SETTING_INT,  &gSettings.sessionIdleBle,          15, 0, nullptr, 0, 1440, "BLE Idle Logout (min, 0=off)",    nullptr, false, "auth", "sessionidleble" },
+  { "sessionIdleDisplay", SETTING_INT,  &gSettings.sessionIdleDisplay,      60, 0, nullptr, 0, 1440, "Display Idle Logout (min, 0=off)", nullptr, false, "auth", "sessionidledisplay" },
 };
 
 // Helper: find an output setting entry by jsonKey
@@ -1742,6 +1746,7 @@ extern const SettingsModule espsrSettingsModule;
 
 extern const SettingsModule sensorLogSettingsModule;
 extern const SettingsModule systemLogSettingsModule;
+extern const SettingsModule batteryLogSettingsModule;
 
 void registerAllSettingsModules() {
   if (gSettingsModulesRegistered) return;  // Only register once
@@ -1832,6 +1837,7 @@ void registerAllSettingsModules() {
   // Logging modules
   registerSettingsModule(&sensorLogSettingsModule);
   registerSettingsModule(&systemLogSettingsModule);
+  registerSettingsModule(&batteryLogSettingsModule);
 
 #if ENABLE_ONDEVICE_LLM
   extern const SettingsModule llmSettingsModule;

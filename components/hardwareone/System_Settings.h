@@ -320,6 +320,10 @@ struct Settings {
       httpAutoStart(true),
       httpsEnabled(false),
       serialRequireAuth(true),
+      sessionIdleWeb(60),
+      sessionIdleSerial(60),
+      sessionIdleBle(15),
+      sessionIdleDisplay(60),
       bluetoothAutoStart(true),
       bluetoothRequireAuth(true),
       bleDeviceName("HardwareOne"),
@@ -331,6 +335,9 @@ struct Settings {
       powerBatteryThreshold(20),
       powerDisplayDimLevel(30),
       powerTransitionCooldownMs(5000),  // 5s anti-flap guard on sleep entry; 0 = disabled
+      powerSaveTimeoutMinutes(10),      // Idle power-save: blank OLED + 80MHz downclock after 10 min idle; 0 = disabled
+      batteryLogEnabled(true),          // Auto-append battery time-series CSV to /battery.csv
+      batteryLogIntervalMs(60000),      // Battery-log sample period (ms)
       srAutoStart(false),
       srModelSource(0),
       srCommandTimeout(6000),
@@ -865,6 +872,13 @@ struct Settings {
   bool httpAutoStart;           // Auto-start HTTP server at boot if WiFi connected
   bool httpsEnabled;            // Use HTTPS instead of HTTP when certs are present (requires reboot)
   bool serialRequireAuth;       // Require login before accepting serial CLI commands (default: true)
+  // Per-transport idle-logout windows (minutes). Auto-logout an authenticated
+  // session after N min with no REAL interaction; 0 = disabled. Same policy
+  // everywhere (sessionIdleExpired in System_User.cpp), independent knobs.
+  uint32_t sessionIdleWeb;      // Web session idle window (default 60)
+  uint32_t sessionIdleSerial;   // Serial session idle window (default 60)
+  uint32_t sessionIdleBle;      // BLE per-connection idle window (default 15)
+  uint32_t sessionIdleDisplay;  // OLED/local-display session idle window (default 60)
   // Bluetooth settings
   bool bluetoothAutoStart;      // Auto-start Bluetooth at boot (enables BLE server)
   bool bluetoothRequireAuth;    // Require login before accepting BLE commands (always required, per-connection)
@@ -882,6 +896,9 @@ struct Settings {
   uint8_t powerBatteryThreshold; // Switch to power saver below this battery % (default: 20)
   uint8_t powerDisplayDimLevel; // Brightness % in power saver modes (0-100, default: 30)
   uint32_t powerTransitionCooldownMs; // Anti-flap cooldown between sleep entries (ms); 0 disables
+  uint32_t powerSaveTimeoutMinutes;   // Idle power-save: blank OLED + 80MHz downclock after N min idle; 0 = disabled
+  bool     batteryLogEnabled;         // Auto-log battery time-series CSV to /battery.csv (default on)
+  uint32_t batteryLogIntervalMs;      // Battery-log sample period in ms (default 60000)
   // ESP-SR Speech Recognition settings
   bool srAutoStart;             // Auto-start SR at boot (default: false)
   int srModelSource;  // 0=partition (default), 1=SD card, 2=LittleFS

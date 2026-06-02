@@ -45,6 +45,7 @@
 #include "WebPage_Login.h"
 #include "WebPage_LoginRequired.h"
 #include "WebPage_Logging.h"
+#include "WebPage_Battery.h"
 #include "WebPage_Settings.h"
 #include "System_EdgeImpulse.h"
 #include "System_ESPSR.h"
@@ -214,7 +215,10 @@ void pruneExpiredSessions() {
   lastPrune = now;
 
   for (int i = 0; i < MAX_SESSIONS; ++i) {
-    if (gSessions[i].sid.length() && gSessions[i].expiresAt > 0 && (long)(now - gSessions[i].expiresAt) >= 0) {
+    if (gSessions[i].sid.length() == 0) continue;
+    bool ttlExpired  = gSessions[i].expiresAt > 0 && (long)(now - gSessions[i].expiresAt) >= 0;
+    bool idleExpired = sessionIdleExpired(SOURCE_WEB, gSessions[i].lastInteractionMs, now);
+    if (ttlExpired || idleExpired) {
       gSessions[i] = SessionEntry();
     }
   }
@@ -286,6 +290,7 @@ String setSession(httpd_req_t* req, const String& u) {
           // Refresh and reuse existing session
           gSessions[i].lastSeen = nowMs;
           gSessions[i].expiresAt = nowMs + SESSION_TTL_MS;
+          gSessions[i].lastInteractionMs = sessionStampNow();  // login counts as a real interaction
           esp_err_t sc = writeSessionCookie(req, gSessions[i].sid);
           DEBUG_AUTHF("Reusing existing session idx=%d user=%s sid=%s | refreshed", i, u.c_str(), gSessions[i].sid.c_str());
           BROADCAST_PRINTF("[auth] reusedSession user=%s, sid=%s, exp(ms)=%lu", u.c_str(), gSessions[i].sid.c_str(), gSessions[i].expiresAt);
@@ -320,6 +325,7 @@ String setSession(httpd_req_t* req, const String& u) {
   s.createdAt = millis();
   s.lastSeen = s.createdAt;
   s.expiresAt = s.createdAt + SESSION_TTL_MS;
+  s.lastInteractionMs = sessionStampNow();  // login counts as a real interaction
 
   // Debug: Log session creation with boot ID
   DEBUG_AUTHF("Creating session for user '%s' with bootId '%s' (current: '%s')",
@@ -473,6 +479,32 @@ void clearSession(httpd_req_t* req, const char* logoutReason) {
 bool decodeBasicAuth(httpd_req_t* req, String& userOut, String& passOut, bool& headerPresent);
 extern bool isValidUser(const String& username, const String& password);
 
+// Classify a request as a REAL user interaction vs. automatic/passive chatter.
+// Only real interactions stamp SessionEntry::lastInteractionMs and thus keep an
+// authenticated session alive under the shared idle-logout policy. The web UI
+// fires a lot of background traffic (SSE stream, status/sensor polls, CLI log
+// tail) that must NOT be treated as the user "doing something".
+//
+//   * Any POST is a deliberate action (form submit, command, setting change)
+//     EXCEPT /api/cli/batch — that endpoint is dual-use: the CLI page batches
+//     passive background polls through it, so a POST there is not necessarily
+//     a user action. (Real CLI commands go through /api/cli, which is never
+//     timer-polled — verified against WebPage_CLI.h.)
+//   * A GET counts only when it is NOT under /api/ — i.e. an actual page
+//     navigation. Every /api/ GET is some poll/stream (SSE, status, logs).
+//
+// Anything else (GET /api/*, POST /api/cli/batch) is passive and ignored.
+static bool requestIsInteraction(httpd_req_t* req, const char* uri) {
+  if (!req || !uri) return false;
+  if (req->method == HTTP_POST) {
+    return strncmp(uri, "/api/cli/batch", 14) != 0;
+  }
+  if (req->method == HTTP_GET) {
+    return strncmp(uri, "/api/", 5) != 0;
+  }
+  return false;
+}
+
 // Authentication check
 bool isAuthed(httpd_req_t* req, String& outUser) {
   // httpd_req_t::uri is a fixed-size char array and never NULL; only guard req itself.
@@ -588,9 +620,28 @@ bool isAuthed(httpd_req_t* req, String& outUser) {
     return false;
   }
 
+  // Idle-logout: separate from the 24h sliding TTL above. If the last REAL
+  // interaction is older than the configured idle window, sign the session
+  // out even though the TTL hasn't lapsed (passive SSE/polls keep TTL fresh
+  // forever, which is exactly what idle-logout must defeat). Disabled when
+  // sessionIdleWeb == 0. See sessionIdleExpired() in System_User.cpp.
+  if (sessionIdleExpired(SOURCE_WEB, gSessions[idx].lastInteractionMs, now)) {
+    BROADCAST_PRINTF("[auth] idle-logout SID for uri=%.*s", 120, uri);
+    if (!hasLogoutReason(ipBuf)) {
+      storeLogoutReason(ipBuf, "You were signed out due to inactivity.");
+    }
+    gSessions[idx] = SessionEntry();
+    return false;
+  }
+
   // refresh
   gSessions[idx].lastSeen = now;
   gSessions[idx].expiresAt = now + SESSION_TTL_MS;
+  // Stamp the idle clock ONLY on genuine user actions, never on passive
+  // background traffic, so the session goes idle when the user walks away.
+  if (requestIsInteraction(req, uri)) {
+    gSessions[idx].lastInteractionMs = sessionStampNow();
+  }
   outUser = gSessions[idx].user;
   return true;
 }
@@ -1146,6 +1197,14 @@ bool sseSessionAliveAndRefresh(int sessIdx, const String& sid) {
   }
   if (gSessions[sessIdx].expiresAt > 0 && (long)(now - gSessions[sessIdx].expiresAt) >= 0) {
     DEBUG_SSEF("Session expired - terminating SSE");
+    return false;
+  }
+  // Idle-logout terminates the SSE stream too. SSE is passive traffic, so it
+  // must NOT stamp lastInteractionMs — it only reads the idle clock. When the
+  // user has been idle past the window, drop the stream so the browser's next
+  // request hits isAuthed, gets 401, and redirects to /login.
+  if (sessionIdleExpired(SOURCE_WEB, gSessions[sessIdx].lastInteractionMs, now)) {
+    DEBUG_SSEF("Session idle-expired - terminating SSE");
     return false;
   }
   gSessions[sessIdx].lastSeen = now;
@@ -5188,6 +5247,9 @@ register_handlers:
  #endif
  #if ENABLE_WEB_MQTT
   registerMqttHandlers(server);
+ #endif
+ #if ENABLE_WEB_BATTERY
+  registerBatteryHandlers(server);
  #endif
  #if ENABLE_WEB_GAME_MAZE
   registerGamesHandlers(server);

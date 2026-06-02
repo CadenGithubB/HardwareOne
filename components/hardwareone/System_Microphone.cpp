@@ -1187,7 +1187,10 @@ const char* cmd_micviz(const String& argsInput) {
   }
   
   gMicVisualizerRunning = true;
-  xTaskCreatePinnedToCore(micVisualizerTaskFunc, "mic_viz", MIC_VIZ_STACK_WORDS, nullptr, TASK_PRIORITY_NORMAL, &gMicVisualizerTask, 0);
+  // No core affinity: NORMAL prio on Core 0 was getting preempted by WiFi/BT.
+  // mic_record (Core 1, HIGH) owns the audio buffer; viz is a consumer that
+  // can run wherever the scheduler has cycles.
+  xTaskCreatePinnedToCore(micVisualizerTaskFunc, "mic_viz", MIC_VIZ_STACK_WORDS, nullptr, TASK_PRIORITY_NORMAL, &gMicVisualizerTask, tskNO_AFFINITY);
   return "Visualizer started (press any key to stop)";
 }
 

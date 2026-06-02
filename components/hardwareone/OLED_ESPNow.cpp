@@ -1247,8 +1247,11 @@ static int compareByStatus(const void* a, const void* b) {
 
 void oledEspNowRefreshDeviceList() {
   if (!gEspNow) return;
-  
-  oledScrollClear(&gOledEspNowState.deviceList);
+
+  // Keep the cursor across this rebuild — this runs on a 1s timer while the
+  // device list is open, so a plain oledScrollClear() (which resets selectedIndex
+  // to 0) would snap the selection back to the top every second.
+  oledScrollClearKeepSelection(&gOledEspNowState.deviceList);
   
   // Get own MAC to skip self
   uint8_t myMac[6];
@@ -1349,6 +1352,9 @@ void oledEspNowRefreshDeviceList() {
     }
     oledScrollAddItem(&gOledEspNowState.deviceList, noDevLine1, noDevLine2, false, nullptr);
   }
+
+  // Clamp the preserved cursor back into range (device count may have shrunk).
+  oledScrollClampSelection(&gOledEspNowState.deviceList);
 }
 
 void oledEspNowRefreshMessages() {

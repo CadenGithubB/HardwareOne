@@ -906,8 +906,10 @@ static void initAsyncMapRenderer() {
   // Create render semaphore
   sRenderSemaphore = xSemaphoreCreateBinary();
   
-  // Create render task (8KB stack in PSRAM, low priority)
-  xTaskCreatePinnedToCore(mapRenderTask, "mapRender", MAP_RENDER_STACK_WORDS, nullptr, TASK_PRIORITY_LOW, &sRenderTaskHandle, 0);
+  // Create render task (8KB stack in PSRAM, low priority). No core affinity:
+  // prio-LOW on Core 0 was getting starved by WiFi/BT/esp_timer; let the
+  // scheduler place it wherever there's actual slack.
+  xTaskCreatePinnedToCore(mapRenderTask, "mapRender", MAP_RENDER_STACK_WORDS, nullptr, TASK_PRIORITY_LOW, &sRenderTaskHandle, tskNO_AFFINITY);
   
   DEBUG_MAPSF("[MAP_ASYNC] Async renderer initialized (double-buffer + render task)");
 }

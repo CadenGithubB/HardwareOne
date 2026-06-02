@@ -67,8 +67,12 @@ extern bool submitCommandAsync(const Command& cmd, ExecAsyncCallback callback, v
 
 // Queue an automation sub-command through the FreeRTOS command queue (async, non-blocking).
 // This avoids deadlock when already on cmd_exec task and avoids blocking the main loop.
-// `owner` is the automation's createdBy user — stamped into cmd.ctx.auth so VFS permission
-// checks and audit logs attribute the work to the correct principal on cmd_exec_task.
+// `owner` is the PRINCIPAL to execute as — stamped into cmd.ctx.auth.user so VFS permission
+// checks, audit logs, and notifications attribute the work to the right user on cmd_exec_task.
+// For autonomous triggers (boot/scheduled) this is the automation's createdBy; for a MANUAL
+// run it is the TRIGGERING user (an automation run executes as whoever fired it, not the
+// creator). isAdmin is recomputed from this username by ExecIdentityGuard, so the username
+// alone is the complete principal.
 // `autoName` is the automation's display name — stamped into ctx.automationName so
 // executeCommand can write COMMAND/OUTPUT autolog entries attributed to this automation,
 // with no race against the scheduler advancing to the next automation before the command runs.
@@ -1705,18 +1709,28 @@ const char* cmd_automation_run(const String& argsInput) {
   DEBUGF(DEBUG_AUTOMATIONS, "[autos run] AUTHORIZATION OK: user='%s' isAdmin=%d running automation created by '%s'",
          currentExecUser().c_str(), currentExecIsAdmin(), _createdByBuf);
 
+  // Run AS the triggering user, not the creator. createdBy stays the owner
+  // (storage + the edit/enable/delete authz above), but a manually-fired
+  // automation is just a saved command sequence executed by whoever fired it:
+  // permission checks, audit, and notifications must attribute to them. This
+  // also closes a privilege-escalation path — executing as the creator would
+  // let a triggerer inherit the creator's rights. Captured once; currentExecUser
+  // is invariant for this command's lifetime on cmd_exec_task. (Scheduled/boot
+  // triggers have no triggering user and keep running as createdBy.)
+  String triggerUser = currentExecUser();
+
   // Execute all commands (with conditional logic support)
   for (int ci = 0; ci < cmdsCount; ++ci) {
     DEBUGF(DEBUG_AUTOMATIONS, "[autos run] id=%s cmd[%d]='%s'", idStr.c_str(), ci, cmdsList[ci].c_str());
-    
+
     // Protect against malformed commands
     if (cmdsList[ci].length() == 0 || cmdsList[ci] == "\\") {
       DEBUGF(DEBUG_AUTOMATIONS, "[autos run] skipping malformed command: '%s'", cmdsList[ci].c_str());
       continue;
     }
-    
-    // Queue command for execution (async, non-blocking)
-    const char* result = executeConditionalCommand(cmdsList[ci].c_str(), _createdByBuf, autoName.c_str());
+
+    // Queue command for execution (async, non-blocking) under the triggering user.
+    const char* result = executeConditionalCommand(cmdsList[ci].c_str(), triggerUser.c_str(), autoName.c_str());
     
     // Output the result (skip internal status messages - actual output comes from queue)
     if (!isAutoInternalResult(result)) {

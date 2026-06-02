@@ -38,6 +38,21 @@
   #endif
 #endif
 
+// Canonical task name + log tag for the input poller. The single inputTask()
+// symbol is provided by either i2csensor_seesaw.cpp or i2csensor_ano_encoder.cpp
+// depending on INPUT_TYPE — these macros keep xTaskCreate, the known-task
+// tables in System_TaskUtils / System_MemoryMonitor / System_Utils, and any
+// stack/HWM reports showing the actual driver in use instead of a misleading
+// "gamepad_task" on ANO builds. FreeRTOS task name cap is
+// CONFIG_FREERTOS_MAX_TASK_NAME_LEN (16) — both names fit.
+#if INPUT_TYPE == INPUT_TYPE_ANO_ENCODER
+  #define INPUT_TASK_NAME "ano_task"
+  #define INPUT_TASK_TAG  "ano"
+#else
+  #define INPUT_TASK_NAME "gamepad_task"
+  #define INPUT_TASK_TAG  "gamepad"
+#endif
+
 // =============================================================================
 // Gamepad Button Definitions
 // =============================================================================

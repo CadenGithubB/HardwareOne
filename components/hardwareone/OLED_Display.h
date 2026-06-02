@@ -15,6 +15,11 @@ void oledSetBootProgress(int percent, const char* label);
 // Update OLED display if connected and enabled
 void oledUpdate();
 
+// Per-loop tick that idle-logs-out the local-display (OLED) session after the
+// configured window (gSettings.sessionIdleDisplay). No-op stub in non-OLED
+// builds. See OLED_Utils.cpp for the policy.
+void localDisplaySessionTick();
+
 // Initialize OLED early in boot sequence
 void oledEarlyInit();
 
@@ -132,7 +137,16 @@ enum OLEDMode {
   OLED_SET_PATTERN,    // Set gamepad pattern password
   OLED_CHANGE_PASSWORD,// Change password for authenticated user
   OLED_NOTIFICATIONS,  // Notification history viewer
-  OLED_LLM             // On-device LLM chat
+  OLED_LLM,            // On-device LLM chat
+  OLED_NETWORK_STATUS,    // WiFi status detail (pushed from OLED_NETWORK_INFO)
+  OLED_NETWORK_WIFI_MENU, // WiFi management submenu (pushed from OLED_NETWORK_INFO)
+  OLED_NETWORK_WIFI_LIST, // Saved-network list → connect (pushed from WIFI_MENU)
+  OLED_NETWORK_WIFI_REMOVE, // Saved-network list → confirm + delete (pushed from WIFI_MENU)
+  OLED_NETWORK_WIFI_SCAN, // Scanned-network list → password + add (pushed from WIFI_MENU)
+  OLED_SPEECH_STATUS,     // ESP-SR live status detail (pushed from OLED_SPEECH)
+  OLED_BLUETOOTH_STATUS,  // BT status detail (pushed from OLED_BLUETOOTH)
+  OLED_BLUETOOTH_G2,      // G2 glasses submenu (pushed from OLED_BLUETOOTH)
+  OLED_BLUETOOTH_G2_STATUS // G2 glasses status detail (pushed from OLED_BLUETOOTH_G2)
 };
 
 // Menu item structure for OLED menu (legacy - kept for compatibility)
@@ -175,6 +189,15 @@ int getFilteredMenuItemCount();
 typedef void (*OLEDDisplayFunc)();
 typedef bool (*OLEDAvailabilityFunc)(String* outReason);  // Returns true if available
 typedef bool (*OLEDInputFunc)(int deltaX, int deltaY, uint32_t newlyPressed);  // Returns true if input handled
+// Optional per-mode entry hook. Fires once from requestOLEDMode() when this mode
+// actually becomes current. `isForward` is true for forward navigation (menu
+// select, CLI command, boot, login) and false for back-navigation (B button /
+// popOLEDMode), so a mode can reset its view on a fresh visit but preserve state
+// when the user returns to it. nullptr = no entry side-effects. This mirrors the
+// onEnter/onExit lifecycle the CLI mode framework already uses (System_CLIMode.h)
+// — the single place that owns "what happens when this mode is entered", instead
+// of scattering resets across cmd_oledmode / the menu-select path.
+typedef void (*OLEDModeEnterFunc)(bool isForward);
 
 // OLED Mode Entry - defines a display mode that can be registered from any module
 struct OLEDModeEntry {
@@ -187,6 +210,8 @@ struct OLEDModeEntry {
   bool showInMenu;            // Whether to show in main menu
   int menuOrder;              // Order in menu (lower = earlier, -1 = end)
   const char* hints;          // Footer hints string (nullptr = use central switch fallback)
+  OLEDModeEnterFunc onEnterFunc;  // Optional entry hook (nullptr = none). Trailing field:
+                                  // existing 9-field initializers value-initialize it to nullptr.
 };
 
 // Maximum number of OLED modes that can be registered
@@ -332,7 +357,9 @@ void setOLEDMode(OLEDMode newMode);  // internal – prefer requestOLEDMode for 
 // Handles auth gating, back-nav stack push, and standardised debug logging.
 // Use this for all user/external mode changes; keep setOLEDMode for pop/internal transitions.
 // pushStack=false skips the back-nav push (for boot, system, or replace-in-place transitions).
-void requestOLEDMode(OLEDMode newMode, const char* reason, bool pushStack = true);
+// isBackNav: pass true ONLY for back-navigation (popOLEDMode() destinations) so the
+// target mode's onEnterFunc receives isForward=false and can preserve its state.
+void requestOLEDMode(OLEDMode newMode, const char* reason, bool pushStack = true, bool isBackNav = false);
 
 // Slug <-> enum helpers (canonical CLI slugs; used by CLI, boot defaults, and Web selects).
 // modeFromSlug returns (OLEDMode)-1 for unknown slugs.
@@ -343,9 +370,8 @@ extern String customOLEDText;
 extern unsigned long oledLastUpdate;
 extern unsigned long animationFrame;
 
-// Network menu state (for footer rendering)
-extern bool gNetworkShowingStatus;
-extern bool networkShowingWiFiSubmenu;
+// (Network menu state flags removed — OLED_NETWORK_STATUS / OLED_NETWORK_WIFI_MENU
+//  are now real pushed sub-modes; footer hints come from OLEDModeEntry::hints.)
 extern unsigned long animationLastUpdate;
 extern int animationFPS;
 
@@ -397,10 +423,11 @@ void displayPowerCPU();
 void displayPowerSleep();
 
 // Network mode functions (OLED_Mode_Network.cpp)
-// Navigation, actions, and input handling are now registered via REGISTER_OLED_MODE_MODULE.
-void displayNetworkInfo();
-void displayMeshStatus();
-void networkMenuBack();
+// All display/input/navigation registered via REGISTER_OLED_MODE_MODULE for:
+//   OLED_NETWORK_INFO       — main menu (OLEDScrollState, Power-style)
+//   OLED_NETWORK_STATUS     — WiFi status detail (pushed sub-mode)
+//   OLED_NETWORK_WIFI_MENU  — WiFi management (pushed sub-mode, owns Add-WiFi keyboard flow)
+//   OLED_MESH_STATUS, OLED_WEB_STATS, OLED_ESPNOW, OLED_REMOTE_SENSORS
 
 // System mode functions (OLED_Mode_System.cpp)
 void displaySystemStatus();
@@ -422,10 +449,9 @@ void displayEspNow();
 void displayAPDSData();
 #endif
 
-// Menu navigation functions
-void oledMenuUp();
-void oledMenuDown();
-void oledMenuSelect();
+// Menu navigation. The launcher's up/down/select now live in its registered
+// inputFunc (mainMenuInputHandler) on an OLEDScrollState; oledMenuBack() remains
+// the shared "B = pop the mode stack" helper used by the global input handler.
 bool oledMenuBack();  // Returns true if handled (was in submenu)
 void resetOLEDMenu();
 
@@ -439,11 +465,8 @@ int getRemoteSubmenuSelection();
 void setRemoteSubmenuSelection(int sel);
 const char* getRemoteSubmenuId();
 
-// Sensor menu filtering & sorting (OLED_Mode_Menu.cpp)
-void sortSensorMenu();
-int getSensorMenuVisibleCount();
-int getSensorMenuActualIndex(int displayIndex);
-void invalidateSensorMenuSort();
+// (The sensor menu's filter/sort is now folded into populateMenuScroll() in
+// OLED_Mode_Menu.cpp — it no longer exposes sort/index helpers.)
 
 // Mode stack navigation (for submenus and back navigation)
 void pushOLEDMode(OLEDMode mode);

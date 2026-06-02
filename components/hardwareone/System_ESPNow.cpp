@@ -39,6 +39,8 @@
 #include "System_ESPNow_MeshKeys.h"  // Phase 3.1: per-mesh PBKDF2 hash + bootstrap/group key cache
 #include "System_ESPNow_Sessions.h"  // Phase 3.4: per-peer-per-mesh session state
 #include "System_ESPNow_Sensors.h"
+#include "System_ESPNow_Tx.h"        // Single-sender TX dispatcher (Phase 1)
+#include "System_MemUtil.h"          // ps_alloc — heap copy of payload for async send
 #include "G2_Page_ESPNow.h"        // g2ESPNowAppOnRxText push-kick (inline no-op when BT/G2 off)
 #include "System_MemUtil.h"
 #include "System_MemoryMonitor.h"
@@ -964,9 +966,11 @@ void sendEspNowStreamMessage(const String& message) {
   if (msgLen > ESPNOW_V4_MAX_PAYLOAD - 1) msgLen = ESPNOW_V4_MAX_PAYLOAD - 1;
   
   uint32_t msgId = generateMessageId();
-  // Phase 3.5 A2 — legacy stream path also routes through the smart helper.
-  bool sent = v4_send_payload_smart(gEspNow->streamTarget, ESPNOW_V4_TYPE_STREAM, 0, msgId,
-                                     (const uint8_t*)message.c_str(), (uint16_t)msgLen, 1);
+  // Step 3c: fire-and-forget through clerk. Caller is the cmd_exec streaming
+  // output path; stream chunks shouldn't block on prior chunks' WiFi-TX, and
+  // the per-second rate limit + drop counter above already bound the burst.
+  bool sent = espnowtx::sendAead(gEspNow->streamTarget, ESPNOW_V4_TYPE_STREAM, 0, msgId,
+                                  (const uint8_t*)message.c_str(), (uint16_t)msgLen, 1);
 
   if (sent) {
     gEspNow->streamSentCount++;
@@ -1058,8 +1062,12 @@ static void sendSessionStreamFrame(uint32_t cmdMsgId, const char* data, size_t l
   StreamSession* sess = findStreamSession(cmdMsgId);
   if (!sess || !sess->active) return;
 
-  v4_send_payload_smart(sess->targetMac, ESPNOW_V4_TYPE_STREAM, flags, cmdMsgId,
-                        data ? (const uint8_t*)data : nullptr, (uint16_t)len, 1);
+  // Step 3c: fire-and-forget — called from both espnow_task (STREAM_BEGIN at
+  // the CMD-RX site, line ~4857) and cmd_exec (output streaming). Fire-and-
+  // forget is correct from both contexts: RX-side must not block, and cmd_exec
+  // shouldn't block on per-chunk WiFi-TX either.
+  espnowtx::sendAead(sess->targetMac, ESPNOW_V4_TYPE_STREAM, flags, cmdMsgId,
+                     data ? (const uint8_t*)data : nullptr, (uint16_t)len, 1);
 }
 
 // Helper for sendEspNowStreamMessage - tries to send via session, returns true if sent
@@ -1067,8 +1075,9 @@ static bool trySendToStreamSession(uint32_t cmdMsgId, const char* data, size_t l
   StreamSession* sess = findStreamSession(cmdMsgId);
   if (!sess || !sess->active) return false;
 
-  v4_send_payload_smart(sess->targetMac, ESPNOW_V4_TYPE_STREAM, 0, cmdMsgId,
-                        (const uint8_t*)data, (uint16_t)len, 1);
+  // Step 3c: fire-and-forget through clerk (called from cmd_exec output path).
+  espnowtx::sendAead(sess->targetMac, ESPNOW_V4_TYPE_STREAM, 0, cmdMsgId,
+                     (const uint8_t*)data, (uint16_t)len, 1);
   DEBUGF(DEBUG_ESPNOW_STREAM, "[STREAM] Session %lu sent: %.50s", (unsigned long)cmdMsgId, data);
   return true;
 }
@@ -1377,14 +1386,41 @@ static void initPrimaryMeshFromLegacySettings() {
 #endif
 }
 
+// Entries older than this are stale and must not shadow a new message that
+// reuses the id. A peer that reboots restarts its msgId counter from ~0, so
+// without expiry its reused low ids collide with our pre-reboot entries and get
+// silently dropped — including the heartbeats carrying the new bootCounter that
+// would trigger recovery. Genuine duplicates (mesh loops, radio re-delivery)
+// arrive within milliseconds; bond retries use fresh msgIds — so 5s is ample.
+static constexpr uint32_t V4_DEDUP_TTL_MS = 5000;
+
 static bool v4_dedup_seen_and_insert(const uint8_t* origin, uint32_t id) {
+  uint32_t now = (uint32_t)millis();
   for (int i = 0; i < V4_DEDUP_SIZE; i++) {
-    if (gV4Dedup[i].active && gV4Dedup[i].id == id && memcmp(gV4Dedup[i].origin, origin, 6) == 0) return true;
+    if (gV4Dedup[i].active && gV4Dedup[i].id == id && memcmp(gV4Dedup[i].origin, origin, 6) == 0) {
+      // Unsigned subtraction is rollover-safe across the ~49.7-day millis() wrap.
+      if ((uint32_t)(now - gV4Dedup[i].ts) < V4_DEDUP_TTL_MS) return true;
+      // Expired: accept as new and refresh in place so an immediate radio-level
+      // duplicate of THIS message is still caught.
+      gV4Dedup[i].ts = now;
+      return false;
+    }
   }
   V4DedupEntry& e = gV4Dedup[gV4DedupIdx];
-  memcpy(e.origin, origin, 6); e.id = id; e.ts = (uint32_t)millis(); e.active = true;
+  memcpy(e.origin, origin, 6); e.id = id; e.ts = now; e.active = true;
   gV4DedupIdx = (gV4DedupIdx + 1) % V4_DEDUP_SIZE;
   return false;
+}
+
+// Drop all dedup entries from one origin. Called when a peer reboot is detected
+// (bootCounter change) so the peer's restarted-from-zero msgIds are not shadowed
+// by its pre-reboot entries — instant recovery without waiting for TTL expiry.
+static void v4_dedup_flush_origin(const uint8_t* origin) {
+  for (int i = 0; i < V4_DEDUP_SIZE; i++) {
+    if (gV4Dedup[i].active && memcmp(gV4Dedup[i].origin, origin, 6) == 0) {
+      gV4Dedup[i].active = false;
+    }
+  }
 }
 
 // Check broadcast trackers for timeouts and report results
@@ -1594,13 +1630,24 @@ bool v4_send_session_wrapped(const uint8_t dst[6], uint8_t type, uint16_t baseFl
   h->meshFingerprint = fingerprintForPeer(dst);
 
   uint8_t* outPayload = frame + sizeof(EspNowV4Header);
+  // TXDEPTH instrumentation — measures where the shared send path spends stack.
+  // uxTaskGetStackHighWaterMark returns the task's lifetime MIN free words, so
+  // the value only drops; a drop between checkpoints localizes the consumer.
+  // task name lets us compare text (cmd_exec_task) vs sensor (espnow_tx).
+  UBaseType_t hwmPre = uxTaskGetStackHighWaterMark(nullptr);
   if (!sessionWrapFrame(s, h, plaintext, plaintextLen, outPayload)) {
     setErr("sessionWrapFrame failed");
     return false;
   }
+  UBaseType_t hwmAEAD = uxTaskGetStackHighWaterMark(nullptr);
   size_t frameLen = sizeof(EspNowV4Header) + plaintextLen + 16;
   captureEspNowFrame("TX", dst, 0, frame, (int)frameLen);
   esp_err_t rc = esp_now_send(dst, frame, frameLen);
+  UBaseType_t hwmSend = uxTaskGetStackHighWaterMark(nullptr);
+  DEBUGF(DEBUG_ESPNOW_CORE,
+         "[TXDEPTH] task=%s type=%u len=%u free_words: pre=%u postAEAD=%u postSend=%u",
+         pcTaskGetName(nullptr), (unsigned)type, (unsigned)plaintextLen,
+         (unsigned)hwmPre, (unsigned)hwmAEAD, (unsigned)hwmSend);
   if (rc != ESP_OK) {
     if (errOut && errOutLen) snprintf(errOut, errOutLen, "esp_now_send rc=%d", (int)rc);
     return false;
@@ -2388,6 +2435,69 @@ static bool bondSendEncrypted(const uint8_t* mac, uint8_t type, uint16_t flags,
   return false;
 }
 
+// Async sibling of bondSendEncrypted. Same role + initiator-gating rules, but
+// the actual AEAD seal / capture / esp_now_send happens on espnow_tx instead
+// of the caller's stack. Returns true if the job was queued, false if:
+//   * we're the responder + no session (same silent-skip as bondSendEncrypted)
+//   * ps_alloc failed (out of PSRAM)
+//   * espnow_tx queue is full (drop, log)
+//
+// Caller must NOT free `payload` — this helper owns the lifetime semantics
+// internally (copies to a fresh PSRAM buffer; espnow_tx frees that copy).
+// On a false return there is no leak.
+//
+// Used by: sensor_bcast → sendBondedSensorData; the super-loop bond stages
+// 9b/9j/9k + heartbeat + CAP/MANIFEST/STATUS (Step 2); the streaming-setup
+// path (Step 2 tight-fix: sendBondStreamCtrl, firePostSyncSideEffects);
+// requestBondSettings + requestBondSchema (Step 2/3a); the bond CLI commands
+// (Step 3a: cmd_bond_requestcap/manifest/settings/schema and cmd_bond_resync's
+// worker branch). The sync bondSendEncrypted above is now an unused reference
+// implementation kept for Step 6 cleanup (along with EspNowTxGuard deletion).
+static bool bondSendEncryptedAsync(const uint8_t* mac, uint8_t type, uint16_t flags,
+                                   uint32_t msgId, const uint8_t* payload, uint16_t len) {
+  if (!gEspNow || !mac) return false;
+  uint8_t selfMac[6];
+  esp_wifi_get_mac(WIFI_IF_STA, selfMac);
+  const bool iAmInitiator = !sessionIsASide(selfMac, mac);
+  const PeerIdentity* pid = peerIdentityFindByMac(mac);
+  SessionState* s = pid ? sessionFindByPeer(mac, pid->meshId) : nullptr;
+  const bool active = (s && s->state == SESSION_ACTIVE);
+  if (!active && !iAmInitiator) {
+    // Same silent-skip as the sync sibling: responder without an active session
+    // never initiates. Caller treats this as a "drop this frame, not an error."
+    return false;
+  }
+
+  // Copy payload to a fresh PSRAM-backed buffer. The job descriptor in the
+  // queue carries only the pointer; espnow_tx frees after send.
+  uint8_t* psBuf = nullptr;
+  if (len > 0) {
+    psBuf = (uint8_t*)ps_alloc((size_t)len, AllocPref::PreferPSRAM, "espnow.tx.payload");
+    if (!psBuf) {
+      DEBUGF(DEBUG_ESPNOW_CORE, "[BOND_TX_ASYNC] ps_alloc failed len=%u", (unsigned)len);
+      return false;
+    }
+    memcpy(psBuf, payload, len);
+  }
+
+  espnowtx::Job job = {};
+  job.kind       = espnowtx::JOB_AEAD_SMART;
+  memcpy(job.peerMac, mac, 6);
+  job.type       = type;
+  job.flags      = flags;
+  job.msgId      = msgId;
+  job.ttl        = 1;
+  job.payloadLen = len;
+  job.payload    = psBuf;
+
+  if (!espnowtx::submit(job)) {
+    // Queue full — drop the frame and free the PSRAM copy we just made.
+    if (psBuf) free(psBuf);
+    return false;
+  }
+  return true;
+}
+
 // True only when an encrypted session with `mac` is currently ACTIVE on THIS
 // device. Used to gate the master's bond-sync sequence: firing CAP/MANIFEST/
 // SETTINGS requests before our own session is ACTIVE just parks them in the
@@ -2950,6 +3060,10 @@ static void v4h_bond_heartbeat(const V4RxCtx& ctx) {
   gEspNow->bondPeerUptime = hb->uptimeSec;
 
   if (bootChanged) {
+    // Peer restarted its msgId counter; clear its stale dedup entries so its
+    // reused low ids stop being dropped as duplicates. Clock-independent
+    // backstop to the TTL expiry in v4_dedup_seen_and_insert.
+    v4_dedup_flush_origin(ctx.recv_info->src_addr);
     resetBondSync();
   }
 
@@ -4565,9 +4679,12 @@ static void v4CmdResultCallback(bool ok, const char* result, void* userData) {
     memcpy(respPayload + 1, resultText, textLen);
     respPayload[1 + textLen] = '\0';
     
-    // Phase 3.5 A1 — route CMD result through smart helper (encrypted if fits).
-    v4_send_payload_smart(ctx->srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
-                          ctx->cmdMsgId, respPayload, payloadLen, 1);
+    // Step 3c: cmd_exec context (callback fires after deferred CMD finishes).
+    // sendAeadSync provides backpressure — the caller blocks until the wire
+    // send completes, so subsequent CMD callbacks don't pile up frames in the
+    // clerk queue faster than they can drain.
+    espnowtx::sendAeadSync(ctx->srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
+                           ctx->cmdMsgId, respPayload, payloadLen, 1, 2000);
     free(respPayload);
   } else {
     // Fallback: send just command name if malloc fails
@@ -4577,8 +4694,9 @@ static void v4CmdResultCallback(bool ok, const char* result, void* userData) {
     size_t nameLen = strlen(name) + 1;
     if (nameLen > sizeof(fallback) - 1) nameLen = sizeof(fallback) - 1;
     memcpy(fallback + 1, name, nameLen);
-    v4_send_payload_smart(ctx->srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
-                          ctx->cmdMsgId, fallback, 1 + nameLen, 1);
+    // Step 3c: cmd_exec context — same reasoning as the alloc'd-path send above.
+    espnowtx::sendAeadSync(ctx->srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
+                           ctx->cmdMsgId, fallback, 1 + nameLen, 1, 2000);
   }
   
   // Clean up session
@@ -4625,8 +4743,10 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
     respPayload[0] = 0;
     const char* errMsg = "Remote command must be session-encrypted";
     memcpy(respPayload + 1, errMsg, strlen(errMsg) + 1);
-    v4_send_payload_smart(srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
-                          generateMessageId(), respPayload, 1 + strlen(errMsg) + 1, 1);
+    // Step 3c: espnow_task RX-handler context — MUST NOT block (would stall
+    // the RX drainer per the processMeshHeartbeats architecture invariant).
+    espnowtx::sendAead(srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
+                       generateMessageId(), respPayload, 1 + strlen(errMsg) + 1, 1);
     return;
   }
 
@@ -4674,9 +4794,9 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
       respPayload[0] = 0;
       const char* errMsg = "Session token auth failed";
       memcpy(respPayload + 1, errMsg, strlen(errMsg) + 1);
-      // Phase 3.5 A1 — error responses go encrypted too.
-      v4_send_payload_smart(srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
-                            generateMessageId(), respPayload, 1 + strlen(errMsg) + 1, 1);
+      // Step 3c: espnow_task RX-handler context — fire-and-forget.
+      espnowtx::sendAead(srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
+                         generateMessageId(), respPayload, 1 + strlen(errMsg) + 1, 1);
       return;
     }
   } else {
@@ -4700,9 +4820,9 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
       respPayload[0] = 0;
       const char* errMsg = "Auth failed";
       memcpy(respPayload + 1, errMsg, strlen(errMsg) + 1);
-      // Phase 3.5 A1 — error responses go encrypted too.
-      v4_send_payload_smart(srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
-                            generateMessageId(), respPayload, 1 + strlen(errMsg) + 1, 1);
+      // Step 3c: espnow_task RX-handler context — fire-and-forget.
+      espnowtx::sendAead(srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
+                         generateMessageId(), respPayload, 1 + strlen(errMsg) + 1, 1);
       return;
     }
   }
@@ -4717,9 +4837,9 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
     respPayload[0] = 0;
     const char* errMsg = "No session slots";
     memcpy(respPayload + 1, errMsg, strlen(errMsg) + 1);
-    // Phase 3.5 A1 — error responses go encrypted too.
-    v4_send_payload_smart(srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
-                          msgId, respPayload, 1 + strlen(errMsg) + 1, 1);
+    // Step 3c: espnow_task RX-handler context — fire-and-forget.
+    espnowtx::sendAead(srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
+                       msgId, respPayload, 1 + strlen(errMsg) + 1, 1);
     return;
   }
   
@@ -4786,9 +4906,9 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
     respPayload[0] = 0;
     const char* errMsg = "Queue failed";
     memcpy(respPayload + 1, errMsg, strlen(errMsg) + 1);
-    // Phase 3.5 A1 — error responses go encrypted too.
-    v4_send_payload_smart(srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
-                          msgId, respPayload, 1 + strlen(errMsg) + 1, 1);
+    // Step 3c: espnow_task RX-handler context — fire-and-forget.
+    espnowtx::sendAead(srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
+                       msgId, respPayload, 1 + strlen(errMsg) + 1, 1);
   }
 }
 
@@ -5554,8 +5674,11 @@ static void requestBondSettings(const uint8_t* peerMac) {
   // NOTE: retry count is managed by the sync tick retry block — don't increment here
   
   uint32_t msgId = generateMessageId();
-  bool sent = bondSendEncrypted(peerMac, ESPNOW_V4_TYPE_SETTINGS_REQ, 0, msgId, nullptr, 0);
-  
+  // Runs on espnow_task (called only from the processMeshHeartbeats super-loop),
+  // so it routes through espnow_tx like the other super-loop sends. `sent` now
+  // means "queued"; it only selects the log line below.
+  bool sent = bondSendEncryptedAsync(peerMac, ESPNOW_V4_TYPE_SETTINGS_REQ, 0, msgId, nullptr, 0);
+
   if (sent) {
     DEBUG_ESPNOWF("[SETTINGS_REQ] Sent (msgId=%lu retry=%d)", (unsigned long)msgId, (int)gEspNow->bondSyncRetryCount);
   } else {
@@ -5772,6 +5895,157 @@ static void sendBondSchema(const uint8_t* peerMac) {
   sSchemaTransferInProgress = false;
 }
 
+// ============================================================================
+// Bond file-prep deferral — 9d/9e/9e2 in processMeshHeartbeats used to build
+// JSON (~8 KB schema, ~10 KB settings, up to ~44 KB manifest), write it to a
+// temp file under FsLockGuard, kick sendFileToMac, and clean up — all inline
+// on the espnow_task super-loop's stack. That stalled the RX drainer for tens
+// to hundreds of ms per fire. cmd_exec has the deeper stack and already runs
+// Ed25519/X25519 deferred work, so the canonical "heavy infrequent handler"
+// pattern from the architecture invariant at the top of processMeshHeartbeats
+// applies. Each 9x stage now snapshots the dest MAC, submits to cmd_exec, and
+// returns; cmd_exec installs the matching identity scope and runs the chain.
+//
+// On submit failure (queue full / ps_alloc fail) the caller re-sets its
+// "needs response" flag so the next super-loop tick retries instead of
+// dropping a peer request silently.
+//
+// NOTE: sendFileToMac itself is still synchronous today (Step 4 will move its
+// chunk loop onto espnow_tx with ACK-driven progression). Moving build+write
+// to cmd_exec is independent of that — even with sync sendFileToMac, the
+// espnow_task RX-drain budget is what we're protecting here.
+// ============================================================================
+
+enum BondFileKind : uint8_t {
+  BOND_FILE_KIND_MANIFEST = 0,
+  BOND_FILE_KIND_SETTINGS = 1,
+  BOND_FILE_KIND_SCHEMA   = 2,
+};
+
+struct BondFileSendWork {
+  uint8_t destMac[6];
+  uint8_t kind;  // BondFileKind
+};
+
+// Matches the sSchemaTransferInProgress / sSettingsTransferInProgress pattern.
+// Prevents a second deferred manifest run from overlapping the first if RX
+// receives another MANIFEST_REQ while cmd_exec is still draining the queue.
+static volatile bool sManifestTransferInProgress = false;
+
+// Build → temp-write → sendFileToMac → cleanup for the bond manifest.
+// Extracted verbatim from the inline 9d block; behavior is identical, only
+// the executing task changes. Caller installs the identity scope; systemAuth()
+// on each VFS call keeps mkdir/openGuarded/remove independent of the outer
+// scope anyway, matching the prior inline semantics.
+static void sendBondManifest(const uint8_t* peerMac) {
+  if (!peerMac || !gEspNow) {
+    BROADCAST_PRINTF("[BOND] manifest-send: peerMac/gEspNow null");
+    return;
+  }
+  if (sManifestTransferInProgress) {
+    BROADCAST_PRINTF("[BOND] manifest-send: SKIP transfer in progress");
+    return;
+  }
+  sManifestTransferInProgress = true;
+
+  BROADCAST_PRINTF("[BOND] manifest-send: building dest=%s", MAC_STR(peerMac));
+  String manifest = generateDeviceManifest();
+  BROADCAST_PRINTF("[BOND] manifest-send: built len=%d", manifest.length());
+
+  String tempPath = "/system/_manifest_out.json";
+  {
+    FsLockGuard guard("bond.manifest.send");
+    if (!filesystemReady) {
+      BROADCAST_PRINTF("[BOND] manifest-send: ERROR fs not ready");
+      sManifestTransferInProgress = false;
+      return;
+    }
+    if (!VFS::existsGuarded("/system", VFS::systemAuth("espnow.bond_manifest_send"))) {
+      VFS::mkdirGuarded("/system", VFS::systemAuth("espnow.bond_manifest_send"));
+    }
+    File f = VFS::openGuarded(tempPath, "w", VFS::systemAuth("espnow.bond_manifest_send"), true);
+    if (!f) {
+      BROADCAST_PRINTF("[BOND] manifest-send: ERROR open %s failed", tempPath.c_str());
+      sManifestTransferInProgress = false;
+      return;
+    }
+    f.print(manifest);
+    f.close();
+    BROADCAST_PRINTF("[BOND] manifest-send: wrote %s len=%d", tempPath.c_str(), manifest.length());
+  }
+
+  bool fileSent = sendFileToMac(peerMac, tempPath);
+  BROADCAST_PRINTF("[BOND] manifest-send: sendFileToMac rc=%d", (int)fileSent);
+
+  {
+    FsLockGuard guard("bond.manifest.cleanup");
+    VFS::removeGuarded(tempPath, VFS::systemAuth("espnow.bond_manifest_cleanup"));
+  }
+
+  sManifestTransferInProgress = false;
+}
+
+// cmd_exec_task runner — dispatches to the right sendBondX() by kind. Each
+// branch installs the same identity scope the previously-inline super-loop
+// code installed around the same call, so canRead()/canWrite() gates on
+// /system/_*_out.json behave identically.
+static void runDeferredBondFileSend(void* arg) {
+  auto* w = (BondFileSendWork*)arg;
+  if (!w) return;
+  switch (w->kind) {
+    case BOND_FILE_KIND_MANIFEST: {
+      SYSTEM_IDENTITY_SCOPE("espnow.bond_manifest_send");
+      sendBondManifest(w->destMac);
+      break;
+    }
+    case BOND_FILE_KIND_SETTINGS: {
+      SYSTEM_IDENTITY_SCOPE("espnow.bond_settings_send");
+      sendBondSettings(w->destMac);
+      break;
+    }
+    case BOND_FILE_KIND_SCHEMA: {
+      SYSTEM_IDENTITY_SCOPE("espnow.bond_schema_send");
+      sendBondSchema(w->destMac);
+      break;
+    }
+    default:
+      BROADCAST_PRINTF("[BOND] file-send deferred: unknown kind=%u", (unsigned)w->kind);
+      break;
+  }
+  free(w);
+}
+
+// Allocate + snapshot dest MAC + enqueue. Returns false on transient backpressure
+// (queue full / ps_alloc fail); caller re-sets its "needs response" flag so the
+// next super-loop tick retries. MAC is snapshotted at submit time because
+// gEspNow->bondPendingResponseMac can change between submit and run.
+static bool submitBondFileSend(const uint8_t destMac[6], uint8_t kind) {
+  auto* w = (BondFileSendWork*)ps_alloc(sizeof(BondFileSendWork),
+                                        AllocPref::PreferPSRAM,
+                                        "espnow.bond.file.send");
+  if (!w) {
+    BROADCAST_PRINTF("[BOND] file-send: ps_alloc failed kind=%u", (unsigned)kind);
+    return false;
+  }
+  memcpy(w->destMac, destMac, 6);
+  w->kind = kind;
+  if (!submitDeferredToCmdExec(runDeferredBondFileSend, w)) {
+    free(w);
+    BROADCAST_PRINTF("[BOND] file-send: submitDeferredToCmdExec FAILED kind=%u", (unsigned)kind);
+    return false;
+  }
+  return true;
+}
+
+// (Step 3c moved the per-file static sendEncryptedSync — and the long-removed
+// sendRawSync — to espnowtx::sendAeadSync and espnowtx::sendAead in
+// System_ESPNow_Tx.h, so System_ESPNow_FsList.cpp and any other consumer can
+// use them too. Both come in two variants: sendAeadSync (blocking, returns
+// the dispatcher's OK/FAIL) for cmd_exec callers that want backpressure or
+// branch on the send outcome, and sendAead (fire-and-forget, returns the
+// queue-accepted bool) for RX-handler callers on espnow_task that must NOT
+// block the RX drainer. See header for full task-context rules.)
+
 // Master-side: ask the bonded peer to send its schema. Symmetric with
 // requestBondSettings — same encrypted sender, no payload. Public (declared
 // in System_ESPNow.h) so the WebPage_Bond.cpp endpoint can trigger schema
@@ -5782,7 +6056,7 @@ bool requestBondSchema(const uint8_t* peerMac) {
   if (!isBondMaster()) return false;
 
   uint32_t msgId = generateMessageId();
-  bool sent = bondSendEncrypted(peerMac, ESPNOW_V4_TYPE_SCHEMA_REQ, 0, msgId, nullptr, 0);
+  bool sent = bondSendEncryptedAsync(peerMac, ESPNOW_V4_TYPE_SCHEMA_REQ, 0, msgId, nullptr, 0);
   if (sent) {
     DEBUG_ESPNOWF("[SCHEMA_REQ] Sent (msgId=%lu)", (unsigned long)msgId);
   } else {
@@ -5866,10 +6140,15 @@ static void firePostSyncSideEffects(const uint8_t peerMac[6]) {
   if (gEspNow->bondStatusReqSentOnce) return;  // already fired this sync session
 
   uint32_t statusReqId = generateMessageId();
-  bool sent = bondSendEncrypted(peerMac, ESPNOW_V4_TYPE_BOND_STATUS_REQ, 0,
-                                statusReqId, nullptr, 0);
+  // Step 2 migration: route through espnow_tx. All callers (super-loop 7856,
+  // processBondSettings, cmd_bond_role) already gate on session-ACTIVE upstream,
+  // so the responder-no-session path that returned false in the sync version
+  // can't fire here. Remaining false cases (queue full / ps_alloc fail) keep
+  // the same "leave gate clear so a retry fires next tick" semantics.
+  bool sent = bondSendEncryptedAsync(peerMac, ESPNOW_V4_TYPE_BOND_STATUS_REQ, 0,
+                                     statusReqId, nullptr, 0);
   if (!sent) {
-    // Session likely not ACTIVE yet. Leave bondStatusReqSentOnce false so the
+    // Queue full or alloc failed. Leave bondStatusReqSentOnce false so the
     // tick guard or next caller retries. No log spam — it's expected to retry.
     return;
   }
@@ -7479,7 +7758,7 @@ void processMeshHeartbeats() {
         // The session handshake is now what bootstraps the bond (see
         // bondNotifySessionEstablished), so the heartbeat no longer needs to be
         // the plaintext discovery beacon.
-        bool sent = bondSendEncrypted(bondMac, ESPNOW_V4_TYPE_BOND_HEARTBEAT, 0,
+        bool sent = bondSendEncryptedAsync(bondMac, ESPNOW_V4_TYPE_BOND_HEARTBEAT, 0,
                       generateMessageId(), (const uint8_t*)&phb, (uint16_t)sizeof(phb));
         gEspNow->bondHeartbeatsSent++;
         // Log every 6th heartbeat (every 30s) or first one, plus full state
@@ -7660,7 +7939,7 @@ void processMeshHeartbeats() {
       if (!haveCap) {
         // Need capabilities
         uint32_t reqId = generateMessageId();
-        bondSendEncrypted(peerMac, ESPNOW_V4_TYPE_BOND_CAP_REQ, ESPNOW_V4_FLAG_ACK_REQ, reqId, nullptr, 0);
+        bondSendEncryptedAsync(peerMac, ESPNOW_V4_TYPE_BOND_CAP_REQ, ESPNOW_V4_FLAG_ACK_REQ, reqId, nullptr, 0);
         gEspNow->bondSyncInFlight = BOND_SYNC_CAP;
         gEspNow->bondSyncLastAttemptMs = now;
         gEspNow->bondSyncRetryCount = 1;
@@ -7675,7 +7954,7 @@ void processMeshHeartbeats() {
           BROADCAST_PRINTF("[BOND_SYNC] Manifest found in cache, skipping request");
         } else {
           uint32_t msgId = generateMessageId();
-          bondSendEncrypted(peerMac, ESPNOW_V4_TYPE_MANIFEST_REQ, ESPNOW_V4_FLAG_ACK_REQ, msgId, nullptr, 0);
+          bondSendEncryptedAsync(peerMac, ESPNOW_V4_TYPE_MANIFEST_REQ, ESPNOW_V4_FLAG_ACK_REQ, msgId, nullptr, 0);
           gEspNow->bondSyncInFlight = BOND_SYNC_MANIFEST;
           gEspNow->bondSyncLastAttemptMs = now;
           gEspNow->bondSyncRetryCount = 1;
@@ -7704,10 +7983,10 @@ void processMeshHeartbeats() {
         gEspNow->bondSyncLastAttemptMs = now;
         gEspNow->bondSyncRetryCount++;
         if (gEspNow->bondSyncInFlight == BOND_SYNC_CAP) {
-          bondSendEncrypted(peerMac, ESPNOW_V4_TYPE_BOND_CAP_REQ, ESPNOW_V4_FLAG_ACK_REQ, generateMessageId(), nullptr, 0);
+          bondSendEncryptedAsync(peerMac, ESPNOW_V4_TYPE_BOND_CAP_REQ, ESPNOW_V4_FLAG_ACK_REQ, generateMessageId(), nullptr, 0);
           BROADCAST_PRINTF("[BOND_SYNC] Retry CAP_REQ (%d/3)", (int)gEspNow->bondSyncRetryCount);
         } else if (gEspNow->bondSyncInFlight == BOND_SYNC_MANIFEST) {
-          bondSendEncrypted(peerMac, ESPNOW_V4_TYPE_MANIFEST_REQ, ESPNOW_V4_FLAG_ACK_REQ, generateMessageId(), nullptr, 0);
+          bondSendEncryptedAsync(peerMac, ESPNOW_V4_TYPE_MANIFEST_REQ, ESPNOW_V4_FLAG_ACK_REQ, generateMessageId(), nullptr, 0);
           BROADCAST_PRINTF("[BOND_SYNC] Retry MANIFEST_REQ (%d/3)", (int)gEspNow->bondSyncRetryCount);
         } else if (gEspNow->bondSyncInFlight == BOND_SYNC_SETTINGS) {
           requestBondSettings(peerMac);
@@ -7760,106 +8039,65 @@ void processMeshHeartbeats() {
     CapabilitySummary cap;
     buildCapabilitySummary(cap);
     uint32_t respId = generateMessageId();
-    bool sent = bondSendEncrypted(gEspNow->bondPendingResponseMac, ESPNOW_V4_TYPE_BOND_CAP_RESP,
+    bool sent = bondSendEncryptedAsync(gEspNow->bondPendingResponseMac, ESPNOW_V4_TYPE_BOND_CAP_RESP,
                   ESPNOW_V4_FLAG_ACK_REQ, respId,
                   (const uint8_t*)&cap, (uint16_t)sizeof(cap));
     gEspNow->bondCapSent = true;
     BROADCAST_PRINTF("[BOND] 9b: CAP_RESP sent=%d featureMask=0x%08lX", (int)sent, (unsigned long)cap.featureMask);
   }
 
-  // 9d. Bond: peer requested our manifest — generate and send via file transfer.
-  // Gate on an encrypted session (event-driven, non-blocking): if it isn't up
-  // yet, bondSendReadyOrDeferred() kicks the handshake and returns false, the
-  // flag stays set, and we retry on a later tick once SESSION_ACTIVE — so the
-  // 44 KB manifest goes out encrypted exactly once instead of a plaintext blast
-  // followed by an encrypted re-send. Falls back to plaintext past the deadline.
+  // 9d. Bond: peer requested our manifest — defer build+write+sendFileToMac to
+  // cmd_exec. Gate on an encrypted session (event-driven, non-blocking): if it
+  // isn't up yet, bondSendReadyOrDeferred() kicks the handshake and returns
+  // false, the flag stays set, and we retry on a later tick once SESSION_ACTIVE.
+  // On submit failure we re-set the flag so the next super-loop tick retries
+  // instead of dropping the peer's request silently.
   if (gEspNow->bondNeedsManifestResponse &&
       bondSendReadyOrDeferred(gEspNow->bondPendingResponseMac)) {
     gEspNow->bondNeedsManifestResponse = false;
     BROADCAST_PRINTF("[BOND] 9d: bondNeedsManifestResponse consumed | role=%d dest=%s",
                      (int)gSettings.bondRole,
                      MAC_STR(gEspNow->bondPendingResponseMac));
-    String manifest = generateDeviceManifest();
-    BROADCAST_PRINTF("[BOND] 9d: manifest generated len=%d", manifest.length());
-    String tempPath = "/system/_manifest_out.json";
-    {
-      FsLockGuard guard("bond.manifest.send");
-      if (filesystemReady) {
-        if (!VFS::existsGuarded("/system", VFS::systemAuth("espnow.bond_manifest_send"))) VFS::mkdirGuarded("/system", VFS::systemAuth("espnow.bond_manifest_send"));
-        File f = VFS::openGuarded(tempPath, "w", VFS::systemAuth("espnow.bond_manifest_send"), true);
-        if (f) { f.print(manifest); f.close(); BROADCAST_PRINTF("[BOND] 9d: manifest written to %s", tempPath.c_str()); }
-        else { BROADCAST_PRINTF("[BOND] 9d: ERROR failed to write manifest file"); }
-      } else {
-        BROADCAST_PRINTF("[BOND] 9d: ERROR filesystem not ready");
-      }
-    }
-    uint8_t destMac[6];
-    memcpy(destMac, gEspNow->bondPendingResponseMac, 6);
-    extern bool sendFileToMac(const uint8_t* mac, const String& localPath);
-    // sendFileToMac gates on currentAuthContext().canRead(). Bond manifest
-    // contains restricted data, so install system identity around the call —
-    // matches the systemAuth() used by the write a few lines up.
-    bool fileSent = false;
-    {
-      SYSTEM_IDENTITY_SCOPE("espnow.bond_manifest_send");
-      fileSent = sendFileToMac(destMac, tempPath);
-    }
-    BROADCAST_PRINTF("[BOND] 9d: sendFileToMac result=%d", (int)fileSent);
-    {
-      FsLockGuard guard("bond.manifest.cleanup");
-      VFS::removeGuarded(tempPath, VFS::systemAuth("espnow.bond_manifest_cleanup"));
-    }
-    if (fileSent) {
-      BROADCAST_PRINTF("[BOND] 9d: manifest sent to peer");
+    if (!submitBondFileSend(gEspNow->bondPendingResponseMac, BOND_FILE_KIND_MANIFEST)) {
+      gEspNow->bondNeedsManifestResponse = true;  // retry next tick
+      BROADCAST_PRINTF("[BOND] 9d: deferral failed — will retry next tick");
     }
   }
 
-  // 9e. Bond: peer requested our settings — send settings via file transfer.
-  // Same event-driven session gate as the manifest (9d) so settings ride the
-  // encrypted session too, without blocking the RX-draining task.
+  // 9e. Bond: peer requested our settings — defer to cmd_exec, same shape as 9d.
+  // The post-submit bookkeeping (bondSettingsSent + SYNC-COMPLETE log) stays
+  // here because it reflects "we scheduled the response," matching the prior
+  // inline semantics where the flag/log fired immediately after sendBondSettings
+  // returned regardless of on-air success. Identity scope installs on cmd_exec
+  // around sendBondSettings — same systemAuth coverage the inline version had.
   if (gEspNow->bondNeedsSettingsResponse &&
       bondSendReadyOrDeferred(gEspNow->bondPendingResponseMac)) {
     gEspNow->bondNeedsSettingsResponse = false;
     BROADCAST_PRINTF("[BOND] 9e: bondNeedsSettingsResponse consumed | role=%d dest=%s",
                      (int)gSettings.bondRole,
                      MAC_STR(gEspNow->bondPendingResponseMac));
-    uint8_t destMac[6];
-    memcpy(destMac, gEspNow->bondPendingResponseMac, 6);
-    // sendBondSettings -> sendFileToMac for settings + automations; both
-    // need system identity to pass canRead() on /system/_settings_out.json
-    // and AUTOMATIONS_JSON_FILE. Same reasoning as the manifest path above.
-    {
-      SYSTEM_IDENTITY_SCOPE("espnow.bond_settings_send");
-      sendBondSettings(destMac);
-    }
-    gEspNow->bondSettingsSent = true;
-    
-    // Worker sync-complete. Bond token is derived from the encrypted session at
-    // handshake time (sessionDeriveAeadKeys → SessionState::bondToken), so no
-    // recompute here.
-    if (isBondWorker() && isBondSynced()) {
-      BROADCAST_PRINTF("[BOND_SYNC] *** SYNC COMPLETE *** role=0 (worker)");
+    if (!submitBondFileSend(gEspNow->bondPendingResponseMac, BOND_FILE_KIND_SETTINGS)) {
+      gEspNow->bondNeedsSettingsResponse = true;  // retry next tick
+      BROADCAST_PRINTF("[BOND] 9e: deferral failed — will retry next tick");
+    } else {
+      gEspNow->bondSettingsSent = true;
+      if (isBondWorker() && isBondSynced()) {
+        BROADCAST_PRINTF("[BOND_SYNC] *** SYNC COMPLETE *** role=0 (worker)");
+      }
     }
   }
 
-  // 9e2. Bond: peer requested our settings schema — send via file transfer.
-  // Same encrypted-session gate the settings/manifest paths use (9d, 9e), so
-  // the ~8 KB schema rides the AEAD session rather than going out plaintext.
-  // The receiver picks the file up in v4h_file_end → processBondSchema.
+  // 9e2. Bond: peer requested our settings schema — defer to cmd_exec, same
+  // shape as 9d/9e. Receiver picks the file up in v4h_file_end → processBondSchema.
   if (gEspNow->bondNeedsSchemaResponse &&
       bondSendReadyOrDeferred(gEspNow->bondPendingResponseMac)) {
     gEspNow->bondNeedsSchemaResponse = false;
     BROADCAST_PRINTF("[BOND] 9e2: bondNeedsSchemaResponse consumed | role=%d dest=%s",
                      (int)gSettings.bondRole,
                      MAC_STR(gEspNow->bondPendingResponseMac));
-    uint8_t destMac[6];
-    memcpy(destMac, gEspNow->bondPendingResponseMac, 6);
-    // sendBondSchema → sendFileToMac touches /system/espnow/this_device/_schema_out.json,
-    // so install system identity to pass canRead/canWrite (matches the
-    // SYSTEM_IDENTITY_SCOPE the settings path uses at 9e).
-    {
-      SYSTEM_IDENTITY_SCOPE("espnow.bond_schema_send");
-      sendBondSchema(destMac);
+    if (!submitBondFileSend(gEspNow->bondPendingResponseMac, BOND_FILE_KIND_SCHEMA)) {
+      gEspNow->bondNeedsSchemaResponse = true;  // retry next tick
+      BROADCAST_PRINTF("[BOND] 9e2: deferral failed — will retry next tick");
     }
   }
 
@@ -7953,7 +8191,7 @@ void processMeshHeartbeats() {
     BondPeerStatus localStatus;
     buildLocalBondStatus(localStatus);
     uint32_t respId = generateMessageId();
-    bondSendEncrypted(gEspNow->bondPendingResponseMac, ESPNOW_V4_TYPE_BOND_STATUS_RESP,
+    bondSendEncryptedAsync(gEspNow->bondPendingResponseMac, ESPNOW_V4_TYPE_BOND_STATUS_RESP,
                   0, respId, (const uint8_t*)&localStatus, sizeof(localStatus));
     BROADCAST_PRINTF("[BOND] 9j: Sent status response enabled=0x%04X connected=0x%04X heap=%lu",
            localStatus.sensorEnabledMask, localStatus.sensorConnectedMask,
@@ -7969,7 +8207,7 @@ void processMeshHeartbeats() {
         BondPeerStatus localStatus;
         buildLocalBondStatus(localStatus);
         uint32_t respId = generateMessageId();
-        bondSendEncrypted(peerMac, ESPNOW_V4_TYPE_BOND_STATUS_RESP,
+        bondSendEncryptedAsync(peerMac, ESPNOW_V4_TYPE_BOND_STATUS_RESP,
                       0, respId, (const uint8_t*)&localStatus, sizeof(localStatus));
         BROADCAST_PRINTF("[BOND] 9j2: Proactive status push enabled=0x%04X connected=0x%04X",
                localStatus.sensorEnabledMask, localStatus.sensorConnectedMask);
@@ -7986,7 +8224,7 @@ void processMeshHeartbeats() {
       uint8_t peerMac[6];
       if (parseMacAddress(gSettings.bondPeerMac, peerMac)) {
         uint32_t reqId = generateMessageId();
-        bondSendEncrypted(peerMac, ESPNOW_V4_TYPE_BOND_STATUS_REQ, 0, reqId, nullptr, 0);
+        bondSendEncryptedAsync(peerMac, ESPNOW_V4_TYPE_BOND_STATUS_REQ, 0, reqId, nullptr, 0);
         DEBUGF(DEBUG_ESPNOW_MESH, "[BOND] 9k: Sent status request to peer");
       }
     }
@@ -8437,6 +8675,15 @@ static bool initEspNow() {
   esp_now_register_send_cb(onEspNowDataSent);
 
   gEspNow->initialized = true;
+
+  // Spin up the single-sender TX dispatcher (idempotent). MUST live here, not
+  // in the boot path, so it comes up for BOTH boot auto-init AND manual
+  // `openespnow` — otherwise espnowtx::submit() finds a null queue, drops
+  // every bonded sensor frame, and streaming silently breaks. See
+  // System_ESPNow_Tx.h.
+  if (!espnowtx::init()) {
+    DEBUGF(DEBUG_ESPNOW_CORE, "[ESPNOW_TX] WARN: dispatcher init failed — sends fall back to producer tasks");
+  }
 
   // Initialize the master-side remote-sensor cache (the cache of OTHER devices'
   // data we've received). Worker-side wire cache no longer exists — sensors are
@@ -11486,13 +11733,17 @@ bool sendBondedSensorData(uint8_t sensorType, const uint8_t* data, uint16_t data
   
   uint16_t totalLen = sizeof(V4PayloadSensorData) + dataLen;
   uint32_t msgId = generateMessageId();
-  
-  bool sent = bondSendEncrypted(peerMac, ESPNOW_V4_TYPE_SENSOR_DATA, 0, msgId, payloadBuf, totalLen);
-  
+
+  // Async send: enqueue to espnow_tx. The AEAD seal + frame buffer + capture
+  // + esp_now_send all happen on espnow_tx's stack, not sensor_bcast's.
+  // `sent` here means "queued OK," not "made it to the air" — the V4 ACK
+  // mechanism is the delivery confirmation (same as before).
+  bool sent = bondSendEncryptedAsync(peerMac, ESPNOW_V4_TYPE_SENSOR_DATA, 0, msgId, payloadBuf, totalLen);
+
   // Single concise debug line only on success/failure
   DEBUGF(DEBUG_ESPNOW_MESH, "[BOND] Sensor TX type=%u len=%u seq=%lu %s",
-         sensorType, dataLen, (unsigned long)sd->seqNum, sent ? "OK" : "FAIL");
-  
+         sensorType, dataLen, (unsigned long)sd->seqNum, sent ? "QUEUED" : "DROP");
+
   return sent;
 }
 
@@ -11511,11 +11762,16 @@ bool sendBondStreamCtrl(RemoteSensorType sensorType, bool enable) {
   ctrl.enable = enable ? 1 : 0;
   
   uint32_t msgId = generateMessageId();
-  bool sent = bondSendEncrypted(peerMac, ESPNOW_V4_TYPE_STREAM_CTRL, ESPNOW_V4_FLAG_ACK_REQ,
+  // Step 2 migration: route through espnow_tx so the AEAD seal + esp_now_send
+  // don't run on espnow_task (called from the super-loop "9f" streaming-setup
+  // block AND from startSensorDataStreaming on cmd_exec). Master is always the
+  // initiator here (gated by isBondMaster + isBondSynced), so async returns
+  // true on queue; behavior matches the prior sync return in the happy path.
+  bool sent = bondSendEncryptedAsync(peerMac, ESPNOW_V4_TYPE_STREAM_CTRL, ESPNOW_V4_FLAG_ACK_REQ,
                             msgId, (const uint8_t*)&ctrl, sizeof(ctrl));
-  
+
   DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_STREAM_CTRL] TX %s %s -> %s",
-         sensorTypeToString(sensorType), enable ? "ON" : "OFF", sent ? "OK" : "FAIL");
+         sensorTypeToString(sensorType), enable ? "ON" : "OFF", sent ? "QUEUED" : "FAIL");
   return sent;
 }
 
@@ -11530,7 +11786,7 @@ const char* cmd_espnow_sendfile(const String& argsInput) {
   }
 
   CommandArgs a(argsInput);
-  if (!a.hasMinArgs(2)) return "Usage: espnow sendfile <name_or_mac> <filepath>";
+  if (!a.hasMinArgs(2)) return "Usage: espnowsendfile <name_or_mac> <filepath>";
 
   String target = a.arg(0);
   String filepath = a.remaining(0);
@@ -12006,10 +12262,11 @@ const char* cmd_espnow_browse(const String& argsInput) {
 
   // Send via V3 CMD (receiver parses user:pass:cmd format)
   uint32_t msgId = generateMessageId();
-  // Phase 3.5 task #6 — encrypted-or-queue (credentials protection).
-  bool sent = v4_send_encrypted_or_queue(targetMac, ESPNOW_V4_TYPE_CMD, ESPNOW_V4_FLAG_ACK_REQ, msgId,
-                                          (const uint8_t*)cmdPayload, (uint16_t)payloadLen, 1,
-                                          nullptr, 0);
+  // Step 3b: route through clerk (JOB_AEAD_SMART → v4_send_payload_smart →
+  // v4_send_encrypted_or_queue). Status-string distinction (immediate vs
+  // queued-for-SESSION_OPEN) is no longer surfaced to the user.
+  bool sent = espnowtx::sendAeadSync(targetMac, ESPNOW_V4_TYPE_CMD, ESPNOW_V4_FLAG_ACK_REQ, msgId,
+                                (const uint8_t*)cmdPayload, (uint16_t)payloadLen, 1, 2000);
 
   EXT_RAM_BSS_ATTR static char browseBuffer[256];
   if (!sent) {
@@ -12051,10 +12308,13 @@ const char* cmd_espnow_fetch(const String& argsInput) {
     return fetchBuffer;
   }
 
-  // Build V3 CMD payload: "user:pass:espnow sendfile <our_name> <path>"
-  // This tells the remote device to send the file back to us via V3 binary file transfer
+  // Build V3 CMD payload: "user:pass:espnowsendfile <our_name> <path>"
+  // This tells the remote device to send the file back to us via V3 binary file transfer.
+  // NOTE: the command token is "espnowsendfile" (one word) — it is registered that way in
+  // the command table. Emitting "espnow sendfile" (two words) makes the remote reject it as
+  // "Unknown command", which is why fetch silently failed while direct send worked.
   char cmdPayload[ESPNOW_V4_MAX_PAYLOAD];
-  int payloadLen = snprintf(cmdPayload, sizeof(cmdPayload), "%s:%s:espnow sendfile %s %s",
+  int payloadLen = snprintf(cmdPayload, sizeof(cmdPayload), "%s:%s:espnowsendfile %s %s",
                             username.c_str(), password.c_str(),
                             gSettings.espnowDeviceName.c_str(), path.c_str());
   if (payloadLen >= (int)sizeof(cmdPayload)) payloadLen = sizeof(cmdPayload) - 1;
@@ -12070,11 +12330,11 @@ const char* cmd_espnow_fetch(const String& argsInput) {
     }
   }
 
-  // Phase 3.5 task #6 — encrypted-or-queue (credentials protection).
+  // Step 3b: route through clerk (JOB_AEAD_SMART). Same semantics as the
+  // browse path above.
   uint32_t msgId = generateMessageId();
-  bool sent = v4_send_encrypted_or_queue(targetMac, ESPNOW_V4_TYPE_CMD, ESPNOW_V4_FLAG_ACK_REQ, msgId,
-                                          (const uint8_t*)cmdPayload, (uint16_t)payloadLen, 1,
-                                          nullptr, 0);
+  bool sent = espnowtx::sendAeadSync(targetMac, ESPNOW_V4_TYPE_CMD, ESPNOW_V4_FLAG_ACK_REQ, msgId,
+                                (const uint8_t*)cmdPayload, (uint16_t)payloadLen, 1, 2000);
 
   EXT_RAM_BSS_ATTR static char fetchBuffer[256];
   if (!sent) {
@@ -12136,14 +12396,13 @@ const char* cmd_espnow_remote(const String& argsInput) {
 
   uint32_t msgId = generateMessageId();
 
-  // Phase 3.5 task #6 — encrypted-or-queue (credentials protection).
-  bool success = false;
-  for (int attempt = 0; attempt < 2; attempt++) {
-    success = v4_send_encrypted_or_queue(targetMac, ESPNOW_V4_TYPE_CMD, ESPNOW_V4_FLAG_ACK_REQ, msgId,
-                                          (const uint8_t*)cmdPayload, (uint16_t)payloadLen, 1,
-                                          nullptr, 0);
-    if (success) break;
-  }
+  // Step 3b: route through clerk (JOB_AEAD_SMART). The 2-attempt retry loop
+  // is dropped — it was for transient sync WiFi-TX backpressure, which the
+  // clerk's queue handles differently. Retrying submitSync on failure (queue
+  // full / timeout / dispatcher returned false) just doubles latency without
+  // changing the outcome.
+  bool success = espnowtx::sendAeadSync(targetMac, ESPNOW_V4_TYPE_CMD, ESPNOW_V4_FLAG_ACK_REQ, msgId,
+                                   (const uint8_t*)cmdPayload, (uint16_t)payloadLen, 1, 2000);
 
   EXT_RAM_BSS_ATTR static char remoteBuffer[256];
   if (!success) {
@@ -12259,31 +12518,26 @@ const char* cmd_espnow_send(const String& argsInput) {
     return "ESP-NOW not initialized. Run 'openespnow' first.";
   }
 
-  // Parse: <name_or_mac> [--plaintext | --encrypt] <message>
-  // Default (no flag) = encrypted via SESSION_FRAME, auto-kicking SESSION_OPEN
-  // if no active session yet. --plaintext = explicit opt-out (the old default).
-  // --encrypt is still accepted as a no-op for muscle memory after step-1's
-  // opt-in flag became the default in step-3.
-  CommandArgs a(argsInput);
-  if (!a.hasMinArgs(2)) return "Usage: espnow send <name_or_mac> [--plaintext|--encrypt] <message>";
-
-  String target = a.arg(0);
-  bool encrypt = true;  // default ON in step 3
-  String message;
-  if (a.arg(1) == "--plaintext") {
-    if (!a.hasMinArgs(3)) return "Usage: espnow send <name_or_mac> --plaintext <message>";
-    encrypt = false;
-    message = a.remaining(1);
-  } else if (a.arg(1) == "--encrypt") {
-    if (!a.hasMinArgs(3)) return "Usage: espnow send <name_or_mac> --encrypt <message>";
-    encrypt = true;
-    message = a.remaining(1);
-  } else {
-    message = a.remaining(0);
+  // Parity with browse/fetch/remote: refuse if system-wide encryption is off.
+  // Pre-2026 supported a --plaintext opt-out (and a --encrypt no-op for muscle
+  // memory); both were removed when the codebase committed to encrypted-only
+  // user sends. Rationale: resolveDeviceNameOrMac already requires the target
+  // to be paired, paired peers always have an AEAD session establishable via
+  // the smart path's encrypt-or-queue, so plaintext was never strictly needed
+  // here. Eliminates the only user-facing unencrypted ESP-NOW send mechanism.
+  if (!gEspNow->encryptionEnabled) {
+    return "ESP-NOW encryption required. Set a passphrase with "
+           "'espnowsetpassphrase <mesh> <passphrase>' and pair securely.";
   }
 
-  DEBUGF(DEBUG_ESPNOW_STREAM, "[cmd_espnow_send] message.length()=%d encrypt=%d",
-         message.length(), encrypt ? 1 : 0);
+  CommandArgs a(argsInput);
+  if (!a.hasMinArgs(2)) return "Usage: espnow send <name_or_mac> <message>";
+
+  String target = a.arg(0);
+  String message = a.remaining(0);
+
+  DEBUGF(DEBUG_ESPNOW_STREAM, "[cmd_espnow_send] message.length()=%d",
+         message.length());
 
   // Resolve device name or MAC address
   uint8_t mac[6];
@@ -12307,69 +12561,32 @@ const char* cmd_espnow_send(const String& argsInput) {
   size_t msgLen = message.length();
   uint32_t msgId = generateMessageId();
 
-  if (encrypt) {
-    // This CLI sends a single encrypted SESSION_FRAME (plaintext + 16-byte
-    // Poly1305 tag must fit ESPNOW_V4_MAX_PAYLOAD = 218 B). Encrypted-chunked
-    // transport exists (v4_send_encrypted_chunked) and is used by the file /
-    // smart-send paths, but this interactive command is single-frame only.
-    if (msgLen > (size_t)(ESPNOW_V4_MAX_PAYLOAD - 16)) {
-      return "Error: encrypted message too long for a single frame (max 202 plaintext bytes).";
-    }
-    char status[96] = {0};
-    if (!v4_send_encrypted_or_queue(mac, ESPNOW_V4_TYPE_TEXT, ESPNOW_V4_FLAG_ACK_REQ,
-                                    msgId,
-                                    (const uint8_t*)message.c_str(), (uint16_t)msgLen,
-                                    1, status, sizeof(status))) {
-      if (!ensureDebugBuffer()) return "Error: encrypted send failed.";
-      snprintf(getDebugBuffer(), 1024, "Error: %s.", status[0] ? status : "encrypted send failed");
-      return getDebugBuffer();
-    }
-    // Phase 3.5 task #49 — register the msgId so the web UI's polling loop
-    // can flip the bubble to ✓✓ Delivered when the ACK lands. Works for both
-    // "sent" (immediate) and "queued" (drains after SESSION_CONFIRM) paths
-    // because the drain reuses the same msgId.
-    sendStatusRegister(msgId, mac);
-    if (!ensureDebugBuffer()) return "Encrypted message sent";
-    // Use the literal phrase "message sent" in both branches so the web UI's
-    // substring-based parser (WebPage_ESPNow.h doSendMessage) shows ✓✓ Delivered
-    // for both warm and queued paths. The queued case appends a parenthetical
-    // note for users reading the raw CLI text directly.
-    if (strcmp(status, "sent") == 0) {
-      snprintf(getDebugBuffer(), 1024,
-               "Encrypted message sent via SESSION_FRAME (ID: %lu, %u plaintext bytes)",
-               (unsigned long)msgId, (unsigned)msgLen);
-    } else if (strcmp(status, "queued") == 0) {
-      snprintf(getDebugBuffer(), 1024,
-               "Encrypted message sent (queued for SESSION_OPEN, drains on CONFIRM ~200ms; "
-               "ID: %lu, %u plaintext bytes)",
-               (unsigned long)msgId, (unsigned)msgLen);
-    } else {
-      snprintf(getDebugBuffer(), 1024,
-               "Encrypted send: %s (ID: %lu)", status, (unsigned long)msgId);
-    }
+  // This CLI sends a single encrypted SESSION_FRAME (plaintext + 16-byte
+  // Poly1305 tag must fit ESPNOW_V4_MAX_PAYLOAD = 218 B). Encrypted-chunked
+  // transport exists (v4_send_encrypted_chunked) and is used by the file /
+  // smart-send paths, but this interactive command is single-frame only.
+  if (msgLen > (size_t)(ESPNOW_V4_MAX_PAYLOAD - 16)) {
+    return "Error: encrypted message too long for a single frame (max 202 plaintext bytes).";
+  }
+  // Step 3b: route through clerk (JOB_AEAD_SMART → v4_send_payload_smart →
+  // v4_send_encrypted_or_queue). The clerk's notification is OK/FAIL only, so
+  // the "sent" vs "queued for SESSION_OPEN" status-string distinction is dropped.
+  // Smart path queues to the pending ring if session not yet ACTIVE; drain on
+  // SESSION_CONFIRM reuses the same msgId so the bubble-flip still works.
+  if (!espnowtx::sendAeadSync(mac, ESPNOW_V4_TYPE_TEXT, ESPNOW_V4_FLAG_ACK_REQ, msgId,
+                         (const uint8_t*)message.c_str(), (uint16_t)msgLen, 1, 2000)) {
+    if (!ensureDebugBuffer()) return "Error: encrypted send failed.";
+    snprintf(getDebugBuffer(), 1024, "Error: encrypted send failed (clerk timeout or queue full).");
     return getDebugBuffer();
   }
-
-  // Plaintext path (unchanged).
-  if (msgLen > ESPNOW_V4_MAX_PAYLOAD - 1) msgLen = ESPNOW_V4_MAX_PAYLOAD - 1;
-
-  bool success = false;
-  for (int attempt = 0; attempt < 2; attempt++) {
-    success = v4_send_frame(mac, ESPNOW_V4_TYPE_TEXT, ESPNOW_V4_FLAG_ACK_REQ, msgId,
-                            (const uint8_t*)message.c_str(), (uint16_t)msgLen, 1);
-    if (success) break;
-  }
-
-  if (success) {
-    // Phase 3.5 task #49 — also track plaintext sends so the bubble flip
-    // works the same way for --plaintext as for the encrypted default.
-    sendStatusRegister(msgId, mac);
-    if (!ensureDebugBuffer()) return "Message sent";
-    snprintf(getDebugBuffer(), 1024, "Message sent via V4 (ID: %lu)", (unsigned long)msgId);
-    return getDebugBuffer();
-  } else {
-    return "Failed to send message";
-  }
+  // Phase 3.5 task #49 — register the msgId so the web UI's polling loop
+  // can flip the bubble to ✓✓ Delivered when the ACK lands.
+  sendStatusRegister(msgId, mac);
+  if (!ensureDebugBuffer()) return "Encrypted message sent";
+  snprintf(getDebugBuffer(), 1024,
+           "Encrypted message sent via SESSION_FRAME (ID: %lu, %u plaintext bytes)",
+           (unsigned long)msgId, (unsigned)msgLen);
+  return getDebugBuffer();
 }
 
 // Send a synthetic large text payload to trigger fragmentation paths
@@ -12406,9 +12623,12 @@ const char* cmd_espnow_bigsend(const String& argsInput) {
   // requires the peer to be on our mesh + reachable; otherwise the send fails
   // (which is the desired test signal — we're stress-testing the encrypted
   // path, not the plaintext one).
+  // Step 3b: route through clerk (JOB_AEAD_SMART). 3s timeout because a 2500-
+  // byte payload fragments into multiple frames on the wire — longer than a
+  // single-frame send.
   uint32_t msgId = generateMessageId();
-  bool ok = v4_send_payload_smart(mac, ESPNOW_V4_TYPE_TEXT, ESPNOW_V4_FLAG_ACK_REQ, msgId,
-                                  (const uint8_t*)payload.c_str(), payload.length(), 1);
+  bool ok = espnowtx::sendAeadSync(mac, ESPNOW_V4_TYPE_TEXT, ESPNOW_V4_FLAG_ACK_REQ, msgId,
+                              (const uint8_t*)payload.c_str(), (uint16_t)payload.length(), 1, 3000);
   if (!ensureDebugBuffer()) return ok ? "OK" : "Failed";
   snprintf(getDebugBuffer(), 1024, "bigsend: %s (id=%lu, bytes=%ld)", ok ? "OK" : "FAILED", (unsigned long)msgId, size);
   return getDebugBuffer();
@@ -12467,7 +12687,7 @@ const char* cmd_bond_requestcap(const String& argsInput) {
   uint32_t reqId = generateMessageId();
   bool sent = false;
   for (int attempt = 0; attempt < 2; attempt++) {
-    sent = bondSendEncrypted(peerMac, ESPNOW_V4_TYPE_BOND_CAP_REQ, ESPNOW_V4_FLAG_ACK_REQ, reqId, nullptr, 0);
+    sent = bondSendEncryptedAsync(peerMac, ESPNOW_V4_TYPE_BOND_CAP_REQ, ESPNOW_V4_FLAG_ACK_REQ, reqId, nullptr, 0);
     if (sent) break;
   }
   return sent ? "Capability request sent. Check output for response." : "Failed to send capability request.";
@@ -12522,7 +12742,7 @@ const char* cmd_bond_requestmanifest(const String& argsInput) {
   
   // Send v3 manifest request
   uint32_t msgId = generateMessageId();
-  if (bondSendEncrypted(peerMac, ESPNOW_V4_TYPE_MANIFEST_REQ, ESPNOW_V4_FLAG_ACK_REQ, msgId, nullptr, 0)) {
+  if (bondSendEncryptedAsync(peerMac, ESPNOW_V4_TYPE_MANIFEST_REQ, ESPNOW_V4_FLAG_ACK_REQ, msgId, nullptr, 0)) {
     return "Manifest request sent (v3). Response will arrive via file transfer.";
   } else {
     return "Failed to send manifest request.";
@@ -12550,7 +12770,7 @@ const char* cmd_bond_requestsettings(const String& argsInput) {
   uint32_t msgId = generateMessageId();
   bool sent = false;
   for (int attempt = 0; attempt < 2; attempt++) {
-    sent = bondSendEncrypted(peerMac, ESPNOW_V4_TYPE_SETTINGS_REQ, ESPNOW_V4_FLAG_ACK_REQ, msgId, nullptr, 0);
+    sent = bondSendEncryptedAsync(peerMac, ESPNOW_V4_TYPE_SETTINGS_REQ, ESPNOW_V4_FLAG_ACK_REQ, msgId, nullptr, 0);
     if (sent) break;
   }
   return sent ? "Settings request sent. Response will arrive via file transfer."
@@ -12576,7 +12796,7 @@ const char* cmd_bond_requestschema(const String& argsInput) {
   uint32_t msgId = generateMessageId();
   bool sent = false;
   for (int attempt = 0; attempt < 2; attempt++) {
-    sent = bondSendEncrypted(peerMac, ESPNOW_V4_TYPE_SCHEMA_REQ, ESPNOW_V4_FLAG_ACK_REQ, msgId, nullptr, 0);
+    sent = bondSendEncryptedAsync(peerMac, ESPNOW_V4_TYPE_SCHEMA_REQ, ESPNOW_V4_FLAG_ACK_REQ, msgId, nullptr, 0);
     if (sent) break;
   }
   return sent ? "Schema request sent. Response will arrive via file transfer."
@@ -12684,10 +12904,10 @@ const char* cmd_bond_resync(const String& argsInput) {
   uint32_t msgIdMan   = generateMessageId();
   uint32_t msgIdSet   = generateMessageId();
   uint32_t msgIdSch   = generateMessageId();
-  bool capOk  = bondSendEncrypted(peerMac, ESPNOW_V4_TYPE_BOND_CAP_REQ,  ESPNOW_V4_FLAG_ACK_REQ, msgIdCap, nullptr, 0);
-  bool manOk  = bondSendEncrypted(peerMac, ESPNOW_V4_TYPE_MANIFEST_REQ,  ESPNOW_V4_FLAG_ACK_REQ, msgIdMan, nullptr, 0);
-  bool setOk  = bondSendEncrypted(peerMac, ESPNOW_V4_TYPE_SETTINGS_REQ,  ESPNOW_V4_FLAG_ACK_REQ, msgIdSet, nullptr, 0);
-  bool schOk  = bondSendEncrypted(peerMac, ESPNOW_V4_TYPE_SCHEMA_REQ,    ESPNOW_V4_FLAG_ACK_REQ, msgIdSch, nullptr, 0);
+  bool capOk  = bondSendEncryptedAsync(peerMac, ESPNOW_V4_TYPE_BOND_CAP_REQ,  ESPNOW_V4_FLAG_ACK_REQ, msgIdCap, nullptr, 0);
+  bool manOk  = bondSendEncryptedAsync(peerMac, ESPNOW_V4_TYPE_MANIFEST_REQ,  ESPNOW_V4_FLAG_ACK_REQ, msgIdMan, nullptr, 0);
+  bool setOk  = bondSendEncryptedAsync(peerMac, ESPNOW_V4_TYPE_SETTINGS_REQ,  ESPNOW_V4_FLAG_ACK_REQ, msgIdSet, nullptr, 0);
+  bool schOk  = bondSendEncryptedAsync(peerMac, ESPNOW_V4_TYPE_SCHEMA_REQ,    ESPNOW_V4_FLAG_ACK_REQ, msgIdSch, nullptr, 0);
 
   if (!ensureDebugBuffer()) {
     return (capOk && manOk && setOk && schOk)

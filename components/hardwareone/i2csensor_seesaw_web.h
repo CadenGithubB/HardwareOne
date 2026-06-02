@@ -117,7 +117,7 @@ inline void streamSeesawGamepadSensorJs(httpd_req_t* req) {
   httpd_resp_send_chunk(req,
     "window._sensorReaders = window._sensorReaders || {};\n"
     "window._sensorReaders.gamepad = function() {\n"
-    "    var url = '/api/sensors?sensor=gamepad&ts=' + Date.now();\n"
+    "    var url = '/api/sensors?sensor=input&ts=' + Date.now();\n"
     "    return hw.fetchJSON(url)\n"
     "      .then(function(j) {\n"
     "        try {\n"

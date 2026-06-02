@@ -497,8 +497,16 @@ void displayAnimation() {
 // Animation Mode Registration
 // ============================================================================
 
+// Entry hook (was a case in cmd_oledmode that only fired on CLI entry): restart
+// the animation from frame 0 on a fresh visit. Back-navigation preserves the
+// current frame.
+static void animationOnEnter(bool isForward) {
+  extern unsigned long animationFrame;
+  if (isForward) animationFrame = 0;
+}
+
 static const OLEDModeEntry sAnimationModes[] = {
-  { OLED_ANIMATION, "Animation", "animation", displayAnimation, nullptr, nullptr, false, -1, "B:Back" },
+  { OLED_ANIMATION, "Animation", "animation", displayAnimation, nullptr, nullptr, false, -1, "B:Back", animationOnEnter },
 };
 
 REGISTER_OLED_MODE_MODULE(sAnimationModes, sizeof(sAnimationModes) / sizeof(sAnimationModes[0]), "Animations");

@@ -121,11 +121,43 @@ static esp_err_t webEspnowSendJsonEscapedString(httpd_req_t* req, const char* s)
   return webEspnowSendChunk(req, "\"");
 }
 
+// Persistent staging buffer for handleEspNowMessages. Lazy-initialized on first
+// request, then reused for every subsequent poll for the lifetime of the device.
+// Pre-2026-05 this was a per-request ps_alloc+free pair; the web UI's polling
+// cadence (~one poll per 7s) made it the noisiest single PSRAM allocator in
+// memreport (134 allocs / 4.2 MB cumulative tracked over 15 min). Static buffer
+// eliminates that churn.
+//
+// Sizing is PSRAM-aware to match the underlying per-peer ring capacity:
+//   PSRAM build:    MESSAGES_PER_DEVICE = 100, so 5+ peers × 100 = hundreds
+//                   possible. Cap at 50 per poll → ~15.8 KB in PSRAM. Bursts
+//                   of >50 new messages paginate across multiple polls via
+//                   the existing ?since= cursor; no data is lost.
+//   No-PSRAM build: MESSAGES_PER_DEVICE = 5, so 5 peers × 5 = 25 messages
+//                   max population. Cap at 15 → ~4.7 KB. PreferPSRAM falls
+//                   back to DRAM here; smaller cap keeps DRAM commitment
+//                   modest (~1.5% of 326 KB internal heap).
+//
+// Concurrency: ESP-IDF httpd runs handlers sequentially on a single worker task
+// (see comment at WebServer_Server.cpp:245), so no mutex is needed — only one
+// handler invocation can touch this buffer at a time. If httpd ever switches
+// to a threaded model, this needs a per-task buffer or a guard.
+//
+// Failure mode: if the lazy ps_alloc fails (PSRAM exhausted, fragmented, etc.),
+// the handler sends an empty {"messages":[]} response and the next request will
+// retry the allocation. Once it succeeds, it sticks.
+#if CONFIG_SPIRAM_SUPPORT || CONFIG_ESP32S3_SPIRAM_SUPPORT
+  static constexpr int kWebMessagesBufCount = 50;  // ~15.8 KB in PSRAM
+#else
+  static constexpr int kWebMessagesBufCount = 15;  // ~4.7 KB DRAM (no-PSRAM fallback)
+#endif
+static ReceivedTextMessage* gWebMessagesBuf = nullptr;
+
 /**
  * @brief Fetch received ESP-NOW text messages since lastSeq
  * @param req HTTP request (query param: ?since=<seqNum>)
  * @return ESP_OK
- * 
+ *
  * Returns JSON array of messages:
  * {
  *   "messages": [
@@ -185,23 +217,32 @@ static esp_err_t handleEspNowMessages(httpd_req_t* req) {
     }
   }
   
-  // Allocate temporary buffer for messages (max 100 messages)
-  ReceivedTextMessage* messages = (ReceivedTextMessage*)ps_alloc(sizeof(ReceivedTextMessage) * 100,
-                                                                AllocPref::PreferPSRAM,
-                                                                "web.esnow.msgs");
-  if (!messages) {
-    httpd_resp_send(req, "{\"messages\":[]}", HTTPD_RESP_USE_STRLEN);
-    return ESP_OK;
+  // Lazy-init the persistent staging buffer on first request. The buffer is
+  // never freed — every subsequent poll reuses it. See gWebMessagesBuf comment
+  // above for the rationale (eliminates per-request 32 KB PSRAM alloc churn).
+  // Tag is ".static" so memreport distinguishes it from the old per-request
+  // tag; the new tag should show (1x) cumulatively, not climbing.
+  if (!gWebMessagesBuf) {
+    gWebMessagesBuf = (ReceivedTextMessage*)ps_alloc(sizeof(ReceivedTextMessage) * kWebMessagesBufCount,
+                                                     AllocPref::PreferPSRAM,
+                                                     "web.esnow.msgs.static");
+    if (!gWebMessagesBuf) {
+      // PSRAM alloc failed — send empty response, next request will retry.
+      httpd_resp_send(req, "{\"messages\":[]}", HTTPD_RESP_USE_STRLEN);
+      return ESP_OK;
+    }
   }
+  ReceivedTextMessage* messages = gWebMessagesBuf;
   
-  // Get messages from per-device buffers
+  // Get messages from per-device buffers. Cap is kWebMessagesBufCount (see
+  // gWebMessagesBuf comment block above for the PSRAM-aware sizing rationale).
   int msgCount = 0;
   if (hasMacFilter) {
     // Get messages from specific peer
-    msgCount = getPeerMessages(filterMac, messages, 100, sinceSeq);
+    msgCount = getPeerMessages(filterMac, messages, kWebMessagesBufCount, sinceSeq);
   } else {
     // Get all messages from all peers
-    msgCount = getAllMessages(messages, 100, sinceSeq);
+    msgCount = getAllMessages(messages, kWebMessagesBufCount, sinceSeq);
   }
 
   esp_err_t err = webEspnowSendChunk(req, "{\"messages\":[");
@@ -243,7 +284,10 @@ static esp_err_t handleEspNowMessages(httpd_req_t* req) {
     err = webEspnowSendChunk(req, "}");
   }
 
-  free(messages);
+  // NOTE: `messages` points at gWebMessagesBuf (the persistent buffer above).
+  // Do NOT free it — the buffer is reused on every poll for the device's
+  // lifetime. Pre-2026-05 a free() lived here paired with a per-request
+  // ps_alloc; both are gone now.
 
   // Phase 3.5 task #49 — append the tracked-send snapshot so the web UI can
   // flip chat bubbles from ✓ Sent to ✓✓ Delivered (or ✗ Failed/Timeout) on

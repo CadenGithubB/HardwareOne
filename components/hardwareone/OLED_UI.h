@@ -156,60 +156,11 @@ bool oledProgressActive();
 void oledProgressRender();
 
 // ----------------------------------------------------------------------------
-// List Selector Component - Scrollable list with selection
+// (Removed) OledList modal list-selector overlay
 // ----------------------------------------------------------------------------
-// Shows a scrollable list overlay for item selection.
-// Supports callbacks for selection and cancel.
-
-#define OLED_LIST_MAX_ITEMS 16
-#define OLED_LIST_ITEM_LEN 24
-
-struct OledListItem {
-  char label[OLED_LIST_ITEM_LEN];
-  int value;  // Custom value for callback
-};
-
-typedef void (*OledListCallback)(int selectedIndex, int value, void* userData);
-
-struct OledList {
-  char title[24];
-  OledListItem items[OLED_LIST_MAX_ITEMS];
-  uint8_t itemCount;
-  uint8_t selectedIndex;
-  uint8_t scrollOffset;
-  uint8_t visibleCount;  // How many items fit on screen
-  OledListCallback onSelect;
-  OledListCallback onCancel;
-  void* userData;
-  bool active;
-};
-
-extern OledList gOledList;
-
-// Show list selector
-void oledListShow(const char* title, const OledListItem* items, uint8_t count,
-                  OledListCallback onSelect, OledListCallback onCancel = nullptr, void* userData = nullptr);
-
-// Add item to list (alternative to passing array)
-void oledListAddItem(const char* label, int value = 0);
-
-// Clear list and start fresh
-void oledListClear(const char* title);
-
-// Finalize and show list after adding items
-void oledListFinalize(OledListCallback onSelect, OledListCallback onCancel = nullptr, void* userData = nullptr);
-
-// Close list
-void oledListClose();
-
-// Check if list is showing
-bool oledListActive();
-
-// Handle input for list
-bool oledListHandleInput(uint32_t newlyPressed);
-
-// Render list overlay
-void oledListRender();
+// The OledList component was a dormant modal list-picker superseded by
+// OLEDScrollState (OLED_Utils.h). It had no callers and was removed. For any
+// list/menu, use OLEDScrollState + oledScrollRenderSimple/oledScrollHandleNav.
 
 // ----------------------------------------------------------------------------
 // Pairing Ribbon Component - Animated status indicator

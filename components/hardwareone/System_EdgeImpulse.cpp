@@ -1834,9 +1834,12 @@ void startContinuousInference() {
     return;
   }
   
-  DEBUG_SYSTEMF("[EI_DEBUG]   Creating continuous task on core 0...");
+  DEBUG_SYSTEMF("[EI_DEBUG]   Creating continuous task (no core affinity)...");
   gEIContinuousRunning = true;
-  
+
+  // No core affinity: prio 1 on Core 0 was getting starved by WiFi (prio ~23)
+  // and BT — continuous inference would stall whenever the radios were busy.
+  // Letting the scheduler float it gets CPU on whichever core has slack.
   BaseType_t result = xTaskCreatePinnedToCore(
     continuousInferenceTask,
     "ei_continuous",
@@ -1844,7 +1847,7 @@ void startContinuousInference() {
     nullptr,
     1,
     &gEIContinuousTask,
-    0  // Run on core 0
+    tskNO_AFFINITY
   );
   
   if (result != pdPASS) {

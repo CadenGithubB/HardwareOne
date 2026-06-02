@@ -21,6 +21,11 @@
 #include "System_Command.h"
 #include "System_Debug.h"
 #include "System_Notifications.h"
+#include "System_Settings.h"   // gSettings (battery-log enable/interval) + setSetting
+#include "System_VFS.h"        // guarded LittleFS access for the CSV log
+#include "System_AuthIdentity.h" // currentAuthContext() — CLI handler file auth
+#include "System_Mutex.h"      // fsLock/fsUnlock
+#include <time.h>              // epoch timestamp column
 
 #if BATTERY_BACKEND_ADC
   #include <driver/adc.h>
@@ -273,47 +278,57 @@ static void fuelGaugeBackendSample(BatteryState& state) {
 // Maps the populated BatteryState fields to a status enum and fires
 // notifications on state transitions. Pure function of the inputs — no I/O.
 //
-// Priority order matters:
-//   1. voltage < 2V    → NOT_PRESENT (no cell wired)
-//   2. usbPresent      → FULL or CHARGING (USB is the authoritative signal;
-//                        cell at >= VBAT_FULL-0.1V counts as FULL because USB
-//                        is just holding it at the float plateau)
-//   3. voltage tiers   → DISCHARGING / LOW / CRITICAL (running on cell alone)
+// Classification (voltage-based, so it works with ANY LiPo regardless of
+// capacity — no fuel-gauge SOC required):
+//   1. voltage < 2V → NOT_PRESENT (no cell wired)
+//   2. usbPresent   → CHARGING, ALWAYS. On the charger the cell sits near 4.2V
+//                     even at low SOC (CV phase), so voltage can't tell "topped
+//                     off" from "still filling" — so we just say "Charging"
+//                     until it's unplugged.
+//   3. off charger  → voltage ladder: FULL >= 4.15, then HIGH / GOOD / MEDIUM /
+//                     LOW / CRITICAL / EMPTY (see VBAT_BAND_* in the header).
 //
-// Pre-VBUS_SENSE this used isCharging (CRATE-derived) as the gate, which broke
-// when USB was plugged in but CRATE had decayed to 0 — the status would slip
-// to DISCHARGING even though VBUS was still connected. usbPresent is the
-// correct gate; isCharging is preserved as a SUB-state ("USB+" vs "USB" on
-// the display) but doesn't drive the status enum.
+// usbPresent is the authoritative power gate (VBUS-sense GPIO, lag-free);
+// isCharging stays a display sub-state ("USB+" vs "USB"), not a status driver.
 static void classifyAndNotify(BatteryState& state) {
   const BatteryStatus prevStatus = state.status;
-  const bool wasCharging = (prevStatus == BATTERY_CHARGING || prevStatus == BATTERY_FULL);
+  // Under the rule below, "on charger" maps 1:1 to BATTERY_CHARGING.
+  const bool wasOnCharger = (prevStatus == BATTERY_CHARGING);
 
   if (state.voltage < 2.0f) {
     state.status = BATTERY_NOT_PRESENT;
   } else if (state.usbPresent) {
-    state.status = (state.voltage >= VBAT_FULL - 0.1f) ? BATTERY_FULL : BATTERY_CHARGING;
-  } else if (state.voltage <= VBAT_CRITICAL) {
-    state.status = BATTERY_CRITICAL;
-  } else if (state.voltage <= VBAT_LOW) {
+    state.status = BATTERY_CHARGING;                              // on charger → always Charging
+  } else if (state.voltage >= VBAT_BAND_FULL) {
+    state.status = BATTERY_FULL;                                  // off charger, topped off
+  } else if (state.voltage >= VBAT_BAND_HIGH) {
+    state.status = BATTERY_HIGH;
+  } else if (state.voltage >= VBAT_BAND_GOOD) {
+    state.status = BATTERY_GOOD;
+  } else if (state.voltage >= VBAT_BAND_MEDIUM) {
+    state.status = BATTERY_MEDIUM;
+  } else if (state.voltage >= VBAT_BAND_LOW) {
     state.status = BATTERY_LOW;
+  } else if (state.voltage >= VBAT_BAND_CRITICAL) {
+    state.status = BATTERY_CRITICAL;
   } else {
-    state.status = BATTERY_DISCHARGING;
+    state.status = BATTERY_EMPTY;
   }
 
   // Notifications fire only on transitions, and never on the first read
   // (prevStatus == UNKNOWN) — avoids spamming "USB connected" at boot.
   if (prevStatus != BATTERY_UNKNOWN) {
-    const bool nowCharging = (state.status == BATTERY_CHARGING || state.status == BATTERY_FULL);
-    if (nowCharging && !wasCharging) {
+    const bool nowOnCharger = (state.status == BATTERY_CHARGING);
+    if (nowOnCharger && !wasOnCharger) {
       notifyPowerUSBConnected();
-    } else if (!nowCharging && wasCharging) {
+    } else if (!nowOnCharger && wasOnCharger) {
       notifyPowerUSBDisconnected();
     }
     if (state.status == BATTERY_LOW && prevStatus != BATTERY_LOW) {
       notifyBatteryLow((int)state.percentage);
     }
-    if (state.status == BATTERY_CRITICAL && prevStatus != BATTERY_CRITICAL) {
+    if ((state.status == BATTERY_CRITICAL || state.status == BATTERY_EMPTY) &&
+        prevStatus != BATTERY_CRITICAL && prevStatus != BATTERY_EMPTY) {
       notifyBatteryCritical((int)state.percentage);
     }
   }
@@ -391,9 +406,13 @@ const char* getBatteryStatusString() {
   switch (gBatteryState.status) {
     case BATTERY_CHARGING:    return "Charging";
     case BATTERY_FULL:        return "Full";
+    case BATTERY_HIGH:        return "High";
+    case BATTERY_GOOD:        return "Good";
+    case BATTERY_MEDIUM:      return "Medium";
     case BATTERY_DISCHARGING: return "Discharging";
     case BATTERY_LOW:         return "Low";
     case BATTERY_CRITICAL:    return "Critical";
+    case BATTERY_EMPTY:       return "Empty";
     case BATTERY_NOT_PRESENT: return "Not Present";
     default:                  return "Unknown";
   }
@@ -496,5 +515,189 @@ const char* cmd_battery_calibrate(const String& /*argsInput*/) {
   return "Battery: no calibration applicable (USB-only build).";
 #endif
 }
+
+// ============================================================================
+// Battery time-series logging (CSV → /battery.csv, rotating)
+// ============================================================================
+// Appends one CSV row per sample so a full discharge curve can be pulled off
+// the device and graphed. On by default (gSettings.batteryLogEnabled), slow
+// interval (gSettings.batteryLogIntervalMs, default 60s) since battery state
+// changes slowly. Rotates at kBatteryLogMaxSize keeping a couple generations.
+// Independent of the sensor log, so it runs even when that's off.
+
+static const char*  kBatteryLogPath         = "/battery.csv";
+static const size_t kBatteryLogMaxSize       = 65536;  // 64 KB before rotation
+static const int    kBatteryLogMaxRotations  = 2;      // keep .1 and .2
+
+// Build + append one CSV row. `event` is the event-column token: "" for a
+// periodic sample, or a short tag (e.g. "powersave:enter", "cpufreq:80MHz") for
+// a power-state change. Every row carries the live battery snapshot, so an
+// event is automatically annotated with the battery state at that instant.
+static void batteryLogAppend(const char* event) {
+  extern uint32_t gBootCounter;            // session id — bumps each boot
+  const time_t epoch = time(nullptr);
+  char dt[20];
+  struct tm tmv;
+  localtime_r(&epoch, &tmv);
+  strftime(dt, sizeof(dt), "%Y-%m-%d %H:%M:%S", &tmv);
+
+  // Columns — time first, then state, then event:
+  //   boot,uptime_ms,epoch_s,datetime,pct[%],voltage[V],crate[%/hr],status,charging,usb,event
+  // Kept as clean comma-CSV for machine parsing / standard tools; visual
+  // formatting is the web UI's job, not the storage format's.
+  char line[208];
+  snprintf(line, sizeof(line), "%lu,%lu,%ld,%s,%.1f,%.3f,%.2f,%s,%d,%d,%s",
+           (unsigned long)gBootCounter,
+           (unsigned long)millis(),
+           (long)epoch,
+           dt,
+           gBatteryState.percentage,
+           gBatteryState.voltage,
+           gBatteryState.cratePctPerHr,
+           getBatteryStatusString(),
+           gBatteryState.isCharging ? 1 : 0,
+           gBatteryState.usbPresent ? 1 : 0,
+           event ? event : "");
+
+  fsLock("batlog.append");
+  // trusted: the system owns its own infrastructure log. Both the periodic
+  // sampler and the power-event annotations write as system, regardless of
+  // whether a CLI command happened to trigger the event.
+  auto ctx = VFS::systemAuth("batlog");
+  const bool fresh = !VFS::existsGuarded(String(kBatteryLogPath), ctx);
+  File f = VFS::openGuarded(String(kBatteryLogPath), "a", ctx, true);
+  if (f) {
+    if (fresh) {
+      static const char* kHeader =
+        "boot,uptime_ms,epoch_s,datetime,pct[%],voltage[V],crate[%/hr],status,charging,usb,event\n";
+      f.write((const uint8_t*)kHeader, strlen(kHeader));
+    }
+    f.write((const uint8_t*)line, strlen(line));
+    f.write((uint8_t)'\n');
+    const size_t sz = f.size();
+    f.close();
+
+    // Size rotation: drop oldest, shift .i → .(i+1), then base → .1.
+    if (sz > kBatteryLogMaxSize) {
+      char p[80], q[80];
+      snprintf(p, sizeof(p), "%s.%d", kBatteryLogPath, kBatteryLogMaxRotations);
+      if (VFS::existsGuarded(String(p), ctx)) VFS::removeGuarded(String(p), ctx);
+      for (int i = kBatteryLogMaxRotations - 1; i >= 1; i--) {
+        snprintf(p, sizeof(p), "%s.%d", kBatteryLogPath, i);
+        snprintf(q, sizeof(q), "%s.%d", kBatteryLogPath, i + 1);
+        if (VFS::existsGuarded(String(p), ctx)) VFS::renameGuarded(String(p), String(q), ctx);
+      }
+      snprintf(q, sizeof(q), "%s.1", kBatteryLogPath);
+      if (VFS::existsGuarded(String(kBatteryLogPath), ctx))
+        VFS::renameGuarded(String(kBatteryLogPath), String(q), ctx);
+    }
+  }
+  fsUnlock();
+}
+
+void batteryLogTick() {
+  if (!gSettings.batteryLogEnabled) return;
+  static unsigned long lastLogMs = 0;
+  const unsigned long nowMs = millis();
+  uint32_t interval = gSettings.batteryLogIntervalMs;
+  if (interval < 5000) interval = 5000;  // floor: never hammer the flash
+  if (lastLogMs != 0 && (nowMs - lastLogMs) < interval) return;
+  lastLogMs = nowMs;
+  batteryLogAppend("");  // periodic sample — empty event column
+}
+
+void batteryLogEvent(const char* event) {
+  // Discrete power-state annotation (sleep/wake, CPU freq, power mode, power-
+  // save enter/wake). Not interval-gated — always recorded so the discharge
+  // curve can be read against exactly when the system changed power state.
+  if (!gSettings.batteryLogEnabled) return;
+  batteryLogAppend(event);
+}
+
+// CLI: batterylog [status|on|off|interval <s>|tail|clear]
+const char* cmd_batterylog(const String& argsInput) {
+  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+  String a = argsInput; a.trim();
+  // CLI handler: act as the invoking user (per-task identity) so battery-log
+  // file reads/clears are permission-checked against the caller, not system.
+  const AuthContext& ctx = currentAuthContext();
+
+  if (a.equalsIgnoreCase("on"))  { setSetting(gSettings.batteryLogEnabled, true);  return "Battery log: ON"; }
+  if (a.equalsIgnoreCase("off")) { setSetting(gSettings.batteryLogEnabled, false); return "Battery log: OFF"; }
+
+  if (a.startsWith("interval")) {
+    String v = a.substring(8); v.trim();
+    long sec = v.toInt();
+    if (sec < 5 || sec > 3600) return "Usage: batterylog interval <5..3600>  (seconds)";
+    setSetting(gSettings.batteryLogIntervalMs, (uint32_t)(sec * 1000));
+    snprintf(getDebugBuffer(), 1024, "Battery log interval set to %ld s", sec);
+    return getDebugBuffer();
+  }
+
+  if (a.equalsIgnoreCase("clear")) {
+    fsLock("batlog.clear");
+    char p[80];
+    for (int i = 0; i <= kBatteryLogMaxRotations; i++) {
+      if (i == 0) snprintf(p, sizeof(p), "%s", kBatteryLogPath);
+      else        snprintf(p, sizeof(p), "%s.%d", kBatteryLogPath, i);
+      if (VFS::existsGuarded(String(p), ctx)) VFS::removeGuarded(String(p), ctx);
+    }
+    fsUnlock();
+    return "Battery log cleared.";
+  }
+
+  if (a.equalsIgnoreCase("tail")) {
+    fsLock("batlog.tail");
+    File f = VFS::openGuarded(String(kBatteryLogPath), "r", ctx, false);
+    if (!f) { fsUnlock(); return "Battery log: empty (no file yet)."; }
+    const size_t sz = f.size();
+    // Print roughly the last ~2KB; drop the first (partial) line when seeking.
+    bool dropPartial = false;
+    if (sz > 2048) { f.seek(sz - 2048); dropPartial = true; }
+    broadcastOutput("Battery log (recent):");
+    int shown = 0;
+    while (f.available()) {
+      String ln = f.readStringUntil('\n');
+      if (dropPartial) { dropPartial = false; continue; }
+      ln.trim();
+      if (ln.length()) { broadcastOutput(ln.c_str()); shown++; }
+    }
+    f.close();
+    fsUnlock();
+    return shown ? "[Battery] log tail shown" : "Battery log: empty.";
+  }
+
+  // Default / "status": summarize state + current reading.
+  size_t sz = 0;
+  fsLock("batlog.stat");
+  File f = VFS::openGuarded(String(kBatteryLogPath), "r", ctx, false);
+  if (f) { sz = f.size(); f.close(); }
+  fsUnlock();
+  snprintf(getDebugBuffer(), 1024,
+           "Battery log: %s | file %s (%u B) | interval %lu s\n"
+           "  now: %.1f%%  %.3fV  %+.2f%%/hr  (%s)\n"
+           "  cmds: batterylog [on|off|interval <s>|tail|clear]",
+           gSettings.batteryLogEnabled ? "ON" : "OFF",
+           kBatteryLogPath, (unsigned)sz,
+           (unsigned long)(gSettings.batteryLogIntervalMs / 1000),
+           gBatteryState.percentage, gBatteryState.voltage,
+           gBatteryState.cratePctPerHr, getBatteryStatusString());
+  return getDebugBuffer();
+}
+
+// Battery-log settings module (registered in System_Settings.cpp).
+static bool batteryLogModuleConnected() { return true; }
+static const SettingEntry batteryLogSettingEntries[] = {
+  { "enabled",    SETTING_BOOL, &gSettings.batteryLogEnabled,    true,  0, nullptr, 0, 1,       "Battery log enabled",       nullptr, false, nullptr, nullptr },
+  { "intervalMs", SETTING_INT,  &gSettings.batteryLogIntervalMs, 60000, 0, nullptr, 5000, 3600000, "Battery log interval (ms)", nullptr, false, nullptr, nullptr }
+};
+extern const SettingsModule batteryLogSettingsModule = {
+  "batteryLog",
+  "system.batteryLog",
+  batteryLogSettingEntries,
+  sizeof(batteryLogSettingEntries) / sizeof(batteryLogSettingEntries[0]),
+  batteryLogModuleConnected,
+  "Battery time-series CSV logging"
+};
 
 // Command registration handled in System_Utils.cpp.

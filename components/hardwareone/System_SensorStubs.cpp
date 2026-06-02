@@ -183,7 +183,6 @@ const size_t cameraCommandsCount = 0;
 // Bluetooth stub variables (global definitions)
 const struct CommandEntry bluetoothCommands[] = {};
 const size_t bluetoothCommandsCount = 0;
-bool gBluetoothShowingStatus = false;
 #endif
 
 // =============================================================================

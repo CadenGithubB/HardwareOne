@@ -72,6 +72,7 @@ void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
   #include "System_ESPNow_Files.h"
   #include "System_ESPNow_MeshKeys.h"
   #include "System_ESPNow_Sessions.h"
+  #include "System_ESPNow_Tx.h"
 #endif
 #include "Bluetooth.h"
 #include "G2_Glasses.h"
@@ -318,9 +319,21 @@ uint32_t gBootCounter = 0;
 
 bool gSerialAuthed = false;
 String gSerialUser = String();
+// Last REAL serial interaction (millis timebase, 0 = never). Serial has no
+// passive traffic — every completed command line is a human keystroke — so
+// there's no interaction classifier here (unlike web). One session only, so
+// this is a flat global alongside gSerialAuthed/gSerialUser rather than a
+// struct field. Drives the shared idle-logout policy (sessionIdleExpired).
+static unsigned long gSerialLastInteractionMs = 0;
 
 bool gLocalDisplayAuthed = false;
 String gLocalDisplayUser = String();
+// Last REAL physical interaction with the OLED session (millis, 0 = never).
+// Stamped on local-display login and whenever gInputCache.seq advances (a
+// gamepad/ANO button or encoder edge). Network commands never touch it, so an
+// OLED login still goes idle while the box is busy serving web/ESP-NOW. Drives
+// the shared per-transport idle-logout policy (sessionIdleExpired).
+unsigned long gLocalDisplayLastInteractionMs = 0;
 
 esp_err_t handleSensorsStatus(httpd_req_t* req);
 
@@ -389,6 +402,7 @@ volatile unsigned long gWebMirrorSeq = 0;
 // SYSTEM_IDENTITY_SCOPE for writes.
 
 #include "System_Settings.h"
+#include "System_Power.h"  // powerSleepTransitionAllowed/Mark — power-save anti-flap guard
 Settings gSettings;
 
 String gSerialCLI = "";
@@ -1641,6 +1655,8 @@ void hardwareone_setup() {
 #if DEBUG_MEM_SUMMARY
       heapLogSummary("boot.after_espnow_init");
 #endif
+      // NOTE: the espnow_tx dispatcher is started inside initEspNow() so it
+      // comes up on every init path (boot + manual `openespnow`), not just here.
     }
   }
 
@@ -1671,6 +1687,111 @@ void hardwareone_setup() {
 
   broadcastOutput("[Boot] Setup complete");
 }
+
+
+#if ENABLE_OLED_DISPLAY
+// ---------------------------------------------------------------------------
+// Power saving (Tier 1: display off + CPU downclock)
+//
+// After gSettings.powerSaveTimeoutMinutes with no activity, blank and (on
+// power-gated boards like the FeatherS3) power down the OLED, stop refreshing
+// it, and drop the CPU to the 80 MHz WiFi floor (restored on wake). The radio
+// stays up, so HTTP/ESP-NOW keep working with the screen dark. "Activity" is
+// source-agnostic: any input-device event (gamepad OR ANO) and any real
+// user/peer command (serial, web, G2, ESP-NOW RCE, ...) — routed through
+// powerSaveNoteActivity() — resets the idle timer and wakes it. So a headless
+// box with no input device benefits too: a command wakes it. Held off only
+// while genuinely busy with local capture (camera or mic). A bonded peer being
+// online no longer holds it awake — real peer commands wake it via the hook.
+// 0 minutes = disabled.
+// ---------------------------------------------------------------------------
+static bool powerSaveInhibited() {
+  // Only genuinely heavy / screen-bound local work blocks power-save. ESP-NOW is
+  // intentionally NOT here: a bonded peer being *online* is mere presence (the
+  // 5 s heartbeat), not use, so it no longer pins the device awake. Real peer
+  // activity — an @BOND/RCE command — flows through executeCommand and resets
+  // the idle timer via the activity hook instead, so the device wakes on actual
+  // use while an idle-but-bonded link is free to power-save.
+  extern bool micRecording;
+  extern bool cameraStreaming;
+  return micRecording || cameraStreaming;
+}
+
+static void powerSaveTick() {
+  static bool          asleep = false;
+  static uint32_t      lastSeq = 0;
+  static uint32_t      savedCpuMhz = 0;
+  static unsigned long lastSeenActivityMs = 0;
+  static bool          inited = false;
+
+  // Wake: restore the CPU clock (only if we lowered it), then bring the panel
+  // back. Centralized so every wake path stays in sync.
+  auto wake = [&]() {
+    if (savedCpuMhz > 80) { setCpuFrequencyMhz(savedCpuMhz); savedCpuMhz = 0; }
+    gOledEnabled = true;
+    oledResumeFromSleep();
+    oledMarkDirty();
+    asleep = false;
+    batteryLogEvent("powersave:wake");
+  };
+
+  const unsigned long now = millis();
+  if (!inited) {
+    inited = true;
+    lastSeq = gInputCache.seq;
+    powerSaveNoteActivity();
+    lastSeenActivityMs = powerSaveLastActivityMs();
+  }
+
+  // Feature disabled — keep the panel up and the idle clock fresh.
+  if (gSettings.powerSaveTimeoutMinutes == 0) {
+    if (asleep) wake();
+    lastSeq = gInputCache.seq;
+    powerSaveNoteActivity();
+    lastSeenActivityMs = powerSaveLastActivityMs();
+    return;
+  }
+
+  // Any input device (gamepad or ANO) advancing seq counts as activity.
+  const uint32_t seq = gInputCache.seq;
+  if (seq != lastSeq) { lastSeq = seq; powerSaveNoteActivity(); }
+
+  // Any noted activity (input OR a user/peer command) wakes it / resets idle.
+  // Sources only stamp the timestamp from their own task; the wake runs here
+  // on the main loop, so OLED/CPU work never happens off-task.
+  const unsigned long act = powerSaveLastActivityMs();
+  if (act != lastSeenActivityMs) {
+    lastSeenActivityMs = act;
+    if (asleep) wake();
+    return;
+  }
+
+  if (asleep) return;  // already dark, waiting for activity
+
+  // Defer the countdown while genuinely busy (camera/mic, or a bonded peer).
+  if (powerSaveInhibited()) {
+    powerSaveNoteActivity();
+    lastSeenActivityMs = powerSaveLastActivityMs();
+    return;
+  }
+
+  const unsigned long timeoutMs = (unsigned long)gSettings.powerSaveTimeoutMinutes * 60000UL;
+  if ((now - act) < timeoutMs) return;
+
+  // Idle long enough — enter power-save, respecting the anti-flap cooldown.
+  if (!powerSleepTransitionAllowed(nullptr)) return;
+  powerSleepTransitionMark();
+  oledPrepareForSleep();   // DISPLAYOFF (+ LDO2 cut on FeatherS3); board-aware
+  gOledEnabled = false;    // updateOLEDDisplay() now early-returns → refresh stops
+  // Drop to the 80 MHz WiFi floor — radio stays up so HTTP/ESP-NOW remain
+  // reachable; we only shed dynamic core power. Skip if already at/below 80
+  // (e.g. UltraSaver's 40 MHz) so power-save never raises the clock.
+  savedCpuMhz = getCpuFrequencyMhz();
+  if (savedCpuMhz > 80) setCpuFrequencyMhz(80);
+  asleep = true;
+  batteryLogEvent("powersave:enter");
+}
+#endif // ENABLE_OLED_DISPLAY
 
 
 void hardwareone_loop() {
@@ -1708,6 +1829,7 @@ void hardwareone_loop() {
       updateBattery();
     }
   }
+  batteryLogTick();  // self-gates on gSettings.batteryLogEnabled + interval
 #endif
 
 #if ENABLE_MQTT
@@ -1786,6 +1908,13 @@ void hardwareone_loop() {
 
   oledUpdate();
 
+#if ENABLE_OLED_DISPLAY
+  powerSaveTick();
+  // Idle-logout the local-display (OLED) session after sessionIdleDisplay min of
+  // no physical input. Separate from power-save: revokes the login, not pixels.
+  localDisplaySessionTick();
+#endif
+
   // Periodic tick for an active CLIMode (no-op when no mode is active or
   // when the mode doesn't define onTick). Used by the Phase 5 wizard's
   // future OLED-joystick polling; help and confirm modes don't define
@@ -1813,6 +1942,18 @@ void hardwareone_loop() {
     if (c == '\n') {
       String cmd = gSerialCLI;
       cmd.trim();
+
+      // Serial idle-logout: drop an idle session before processing this line.
+      // Serial has no passive traffic, so this only fires when the user types
+      // after being away — exactly when we'd want to force re-login. The line
+      // they just typed then falls through to the login gate and is rejected.
+      // No-op when auth is off (gSerialAuthed false) or window=0 (see
+      // sessionIdleExpired); never-stamped (0) is treated as fresh.
+      if (gSerialAuthed && sessionIdleExpired(SOURCE_SERIAL, gSerialLastInteractionMs)) {
+        gSerialAuthed = false;
+        gSerialUser = String();
+        broadcastOutput("[serial] Signed out due to inactivity. Please log in again.");
+      }
 
       // Serial auth gate: require login before executing any commands (if enabled)
       if (gSettings.serialRequireAuth && !gSerialAuthed) {
@@ -1912,6 +2053,12 @@ void hardwareone_loop() {
           broadcastOutput(out, uc.ctx);
         }
       }
+      // Every serial line is a real keystroke-driven interaction; refresh the
+      // idle clock whenever we end this line authenticated. One stamp covers
+      // both a fresh successful login and any subsequent command. Skipped when
+      // not authed (failed login / logout / auth disabled) — nothing to age.
+      if (gSerialAuthed) gSerialLastInteractionMs = sessionStampNow();
+
       gSerialCLI = "";
       Serial.print("$ ");
       break;  // Process at most one command per loop() iteration to avoid starving WDT

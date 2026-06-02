@@ -98,6 +98,14 @@ void applyPowerMode(uint8_t mode) {
   
   INFO_SYSTEMF("Power mode applied: %s (CPU: %lu MHz, Display: %d%%)",
                config.name, (unsigned long)config.cpuFreqMhz, config.displayBrightnessPercent);
+
+  // Annotate the battery log with the power-mode change (carries the freq it set).
+  {
+    extern void batteryLogEvent(const char* event);
+    char ev[40];
+    snprintf(ev, sizeof(ev), "powermode:%s:%luMHz", config.name, (unsigned long)config.cpuFreqMhz);
+    batteryLogEvent(ev);
+  }
 }
 
 void checkAutoPowerMode() {
@@ -266,6 +274,14 @@ void powerSleepTransitionMark() {
   if (sLastSleepTransitionMs == 0) sLastSleepTransitionMs = 1;
 }
 
+// ----------------------------------------------------------------------------
+// Adaptive power-save activity timestamp. Stamped by powerSaveNoteActivity()
+// from any task (the input poll, the command executor, ...). A 32-bit aligned
+// read/write is atomic on the ESP32, so no lock is needed for cross-task use.
+static volatile unsigned long sPowerSaveLastActivityMs = 0;
+void powerSaveNoteActivity()            { sPowerSaveLastActivityMs = millis(); }
+unsigned long powerSaveLastActivityMs() { return sPowerSaveLastActivityMs; }
+
 // CLI: powercooldown [ms]
 //   no arg → print current value
 //   ms     → set new cooldown (0..60000); persisted via setSetting
@@ -288,11 +304,38 @@ static const char* cmd_powercooldown(const String& argsInput) {
   return getDebugBuffer();
 }
 
+// CLI: powersave [minutes]
+//   no arg  → print current value
+//   minutes → idle timeout before the OLED blanks + the CPU downclocks
+//             (0..1440); 0 disables. Persisted via setSetting. The radio stays
+//             up (CPU only drops to the 80 MHz WiFi floor) so the device stays
+//             reachable while the screen is dark.
+static const char* cmd_powersave(const String& argsInput) {
+  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+  String arg = argsInput; arg.trim();
+  if (arg.length() == 0) {
+    snprintf(getDebugBuffer(), 1024,
+             "Power saving: %lu min (%s)",
+             (unsigned long)gSettings.powerSaveTimeoutMinutes,
+             gSettings.powerSaveTimeoutMinutes == 0 ? "disabled"
+                                                    : "blanks OLED + downclocks when idle");
+    return getDebugBuffer();
+  }
+  long v = arg.toInt();
+  if (v < 0 || v > 1440) return "Usage: powersave <0..1440>  (minutes; 0 disables)";
+  setSetting(gSettings.powerSaveTimeoutMinutes, (uint32_t)v);
+  snprintf(getDebugBuffer(), 1024,
+           "Power saving set to %ld min%s",
+           v, v == 0 ? " (disabled)" : "");
+  return getDebugBuffer();
+}
+
 // Command table
 // Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry powerCommands[] = {
   {"power",         "Power management [mode] [auto] [threshold]", false, cmd_power,         "Usage: power [mode <0-3>] [auto <on|off>] [threshold <percent>]"},
-  {"powercooldown", "Sleep transition cooldown (ms; 0 disables)", false, cmd_powercooldown, "Usage: powercooldown <0..60000>"}
+  {"powercooldown", "Sleep transition cooldown (ms; 0 disables)", false, cmd_powercooldown, "Usage: powercooldown <0..60000>"},
+  {"powersave",     "Idle power-save: OLED off + downclock (0 disables)", false, cmd_powersave, "Usage: powersave <0..1440>"}
 };
 
 const size_t powerCommandsCount = sizeof(powerCommands) / sizeof(powerCommands[0]);
@@ -314,7 +357,8 @@ static const SettingEntry powerSettingEntries[] = {
   { "autoMode", SETTING_BOOL, &gSettings.powerAutoMode, false, 0, nullptr, 0, 1, "Auto Mode", nullptr, false, nullptr, nullptr },
   { "batteryThreshold", SETTING_U8, &gSettings.powerBatteryThreshold, 20, 0, nullptr, 0, 100, "Battery Threshold (%)", nullptr, false, nullptr, nullptr },
   { "displayDimLevel", SETTING_U8, &gSettings.powerDisplayDimLevel, 30, 0, nullptr, 0, 100, "Display Dim Level (%)", nullptr, false, nullptr, nullptr },
-  { "transitionCooldownMs", SETTING_INT, &gSettings.powerTransitionCooldownMs, 5000, 0, nullptr, 0, 60000, "Sleep cooldown (ms, 0=disabled)", nullptr, false, nullptr, "powercooldown" }
+  { "transitionCooldownMs", SETTING_INT, &gSettings.powerTransitionCooldownMs, 5000, 0, nullptr, 0, 60000, "Sleep cooldown (ms, 0=disabled)", nullptr, false, nullptr, "powercooldown" },
+  { "powerSaveMinutes", SETTING_INT, &gSettings.powerSaveTimeoutMinutes, 10, 0, nullptr, 0, 1440, "Power saving (min, 0=disabled)", nullptr, false, nullptr, nullptr }
 };
 
 // Columns: name, jsonSection, entries, count, isConnected, description

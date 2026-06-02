@@ -32,38 +32,40 @@ static void initPowerScrollStates() {
 
 static void populatePowerMainMenu() {
   initPowerScrollStates();
-  int savedSel = sPowerMainScroll.selectedIndex;
-  int savedOff = sPowerMainScroll.scrollOffset;
-  oledScrollClear(&sPowerMainScroll);
+  oledScrollClearKeepSelection(&sPowerMainScroll);
   oledScrollAddItem(&sPowerMainScroll, "Adjust CPU Power");
   oledScrollAddItem(&sPowerMainScroll, "Sleep Settings");
-  sPowerMainScroll.selectedIndex = savedSel < sPowerMainScroll.itemCount ? savedSel : 0;
-  sPowerMainScroll.scrollOffset = savedOff;
+  oledScrollClampSelection(&sPowerMainScroll);
 }
 
 static void populatePowerCpuMenu() {
   initPowerScrollStates();
-  int savedSel = sPowerCpuScroll.selectedIndex;
-  int savedOff = sPowerCpuScroll.scrollOffset;
-  oledScrollClear(&sPowerCpuScroll);
+  oledScrollClearKeepSelection(&sPowerCpuScroll);
   oledScrollAddItem(&sPowerCpuScroll, "Performance 240MHz");
   oledScrollAddItem(&sPowerCpuScroll, "Balanced 160MHz");
   oledScrollAddItem(&sPowerCpuScroll, "PowerSaver 80MHz");
   oledScrollAddItem(&sPowerCpuScroll, "UltraSaver 40MHz");
-  sPowerCpuScroll.selectedIndex = savedSel < sPowerCpuScroll.itemCount ? savedSel : 0;
-  sPowerCpuScroll.scrollOffset = savedOff;
+  oledScrollClampSelection(&sPowerCpuScroll);
 }
 
 static void populatePowerSleepMenu() {
   initPowerScrollStates();
-  int savedSel = sPowerSleepScroll.selectedIndex;
-  int savedOff = sPowerSleepScroll.scrollOffset;
-  oledScrollClear(&sPowerSleepScroll);
-  oledScrollAddItem(&sPowerSleepScroll, "Light Sleep");
+  oledScrollClearKeepSelection(&sPowerSleepScroll);
+  // Live label for the power-save timeout. Scroll items store the char* (not a
+  // copy), so the buffer must outlive the render — static gives it program
+  // lifetime, and we rewrite it every frame so the value stays current.
+  static char powerSaveLabel[24];
+  if (gSettings.powerSaveTimeoutMinutes == 0) {
+    snprintf(powerSaveLabel, sizeof(powerSaveLabel), "Power Saving: Off");
+  } else {
+    snprintf(powerSaveLabel, sizeof(powerSaveLabel), "Power Saving: %lum",
+             (unsigned long)gSettings.powerSaveTimeoutMinutes);
+  }
+  oledScrollAddItem(&sPowerSleepScroll, powerSaveLabel);
+  oledScrollAddItem(&sPowerSleepScroll, "Sleep 20s");
   oledScrollAddItem(&sPowerSleepScroll, "Screen Off");
   oledScrollAddItem(&sPowerSleepScroll, "Restart Device");
-  sPowerSleepScroll.selectedIndex = savedSel < sPowerSleepScroll.itemCount ? savedSel : 0;
-  sPowerSleepScroll.scrollOffset = savedOff;
+  oledScrollClampSelection(&sPowerSleepScroll);
 }
 
 // ============================================================================
@@ -144,9 +146,20 @@ static void executePowerCpuAction() {
 
 static void executePowerSleepAction() {
   switch (sPowerSleepScroll.selectedIndex) {
-    case 0: executeOLEDCommand("lightsleep 20"); break;
-    case 1: executeOLEDCommand("oledmode off"); break;
-    case 2: executeOLEDCommand("reboot"); break;
+    case 0: {
+      // Cycle the power-save timeout through a preset ladder; persists to flash.
+      // A value set off-ladder (e.g. via web) lands back on the first step.
+      static const uint32_t presets[] = { 0, 1, 2, 5, 10, 15, 30, 60 };
+      const int n = (int)(sizeof(presets) / sizeof(presets[0]));
+      const uint32_t cur = gSettings.powerSaveTimeoutMinutes;
+      int idx = 0;
+      for (int i = 0; i < n; i++) { if (presets[i] == cur) { idx = i; break; } }
+      setSetting(gSettings.powerSaveTimeoutMinutes, presets[(idx + 1) % n]);
+      break;
+    }
+    case 1: executeOLEDCommand("lightsleep 20"); break;
+    case 2: executeOLEDCommand("oledmode off"); break;
+    case 3: executeOLEDCommand("reboot"); break;
   }
 }
 
