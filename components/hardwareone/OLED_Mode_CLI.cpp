@@ -321,6 +321,13 @@ static bool isCLIViewerAvailable(String* outReason) {
 }
 
 // CLI mode registration
+// Entry hook (owns what used to be an inline reset inside requestOLEDMode):
+// the CLI output always re-renders fresh, so reset on every entry regardless of
+// forward/back navigation.
+static void cliViewerOnEnter(bool /*isForward*/) {
+  resetCLIViewerState();
+}
+
 static const OLEDModeEntry cliViewerEntry = {
   OLED_CLI_VIEWER,
   "CLI Output",
@@ -330,7 +337,8 @@ static const OLEDModeEntry cliViewerEntry = {
   handleCLIViewerInput,
   true,
   92,
-  nullptr  // dynamic hints (shows line count)
+  nullptr,  // dynamic hints (shows line count)
+  cliViewerOnEnter
 };
 
 // Columns: mode, name, iconName, displayFunc, availFunc, inputFunc, showInMenu, menuOrder, hints

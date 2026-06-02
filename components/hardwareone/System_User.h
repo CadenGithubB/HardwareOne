@@ -55,6 +55,7 @@ struct AuthContext {
 
 extern bool gLocalDisplayAuthed;
 extern String gLocalDisplayUser;
+extern unsigned long gLocalDisplayLastInteractionMs;  // OLED session idle clock; see HardwareOne.cpp
 
 // ============================================================================
 // User Management Helper Functions (implemented in user_system.cpp)
@@ -218,6 +219,41 @@ const char* cmd_user_sync(const String& argsInput);
 const char* cmd_pending_list(const String& argsInput);
 const char* cmd_session_list(const String& argsInput);
 const char* cmd_session_revoke(const String& argsInput); // manual revoke — uses revokeUserSessions internally
+
+// ----------------------------------------------------------------------------
+// Shared session idle-timeout policy (Step 0)
+//
+// One owner of the "log out after N minutes of no REAL interaction" rule, used
+// by every authenticated channel (web, serial, BLE, ESP-NOW bond). A channel
+// stamps its own "last interaction" field with sessionStampNow() ONLY on real
+// user/peer actions — automatic/keepalive traffic (SSE, status polls, BLE
+// notifies, ESP-NOW heartbeats) must NOT stamp; that classification stays
+// per-channel — then calls sessionIdleExpired() to decide logout.
+//
+// Centralizing this keeps the window, the 0=disabled rule, the millis() wrap-
+// safety, and the 0-sentinel identical everywhere.
+
+// millis() timestamp for a "last interaction" field, never 0 (0 = "never
+// stamped"). Use this when recording activity so the sentinel stays reserved.
+unsigned long sessionStampNow();
+
+// Per-transport idle window in ms. Reads that transport's own gSettings knob
+// (sessionIdleWeb / sessionIdleSerial / sessionIdleBle / …); 0 = disabled.
+// One shared policy, independent values. Transports not yet wired return 0.
+unsigned long sessionIdleWindowMs(CommandSource transport);
+
+// Core wrap-safe expiry against an EXPLICIT window. True if a session whose
+// last real interaction was `lastInteractionMs` (millis timebase) has exceeded
+// `windowMs` as of `nowMs`. Always false when the window is disabled (0) or the
+// field was never stamped (0).
+bool sessionIdleExpired(unsigned long lastInteractionMs, unsigned long nowMs, unsigned long windowMs);
+
+// Convenience: look up the transport's window then test expiry. This is what
+// channels normally call — they name their transport, the policy does the rest.
+bool sessionIdleExpired(CommandSource transport, unsigned long lastInteractionMs, unsigned long nowMs);
+inline bool sessionIdleExpired(CommandSource transport, unsigned long lastInteractionMs) {
+  return sessionIdleExpired(transport, lastInteractionMs, millis());
+}
 
 // ============================================================================
 // Boot Sequence Management

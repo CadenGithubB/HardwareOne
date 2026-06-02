@@ -45,6 +45,18 @@ void checkAutoPowerMode();
 bool powerSleepTransitionAllowed(unsigned long* outRemainingMs = nullptr);
 void powerSleepTransitionMark();
 
+// ----------------------------------------------------------------------------
+// Adaptive power-save activity tracking
+//
+// Any subsystem representing a real user/peer interaction (an input-device
+// event, or a CLI/web/ESP-NOW command) calls powerSaveNoteActivity() to reset
+// the idle timer and wake the device if it's in power-save. Cheap + task-safe:
+// it only stamps a timestamp (a 32-bit aligned write is atomic on the ESP32);
+// the heavy wake work runs on the main loop in powerSaveTick(). This decouples
+// power-save from any specific input device, so a headless box benefits too.
+void powerSaveNoteActivity();
+unsigned long powerSaveLastActivityMs();
+
 // ============================================================================
 // Command Registry
 // ============================================================================

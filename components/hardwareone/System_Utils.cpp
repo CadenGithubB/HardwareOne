@@ -29,6 +29,7 @@
 #include "System_Debug.h"
 #include "System_TaskUtils.h"
 #include "System_I2C.h"
+#include "HAL_Input.h"          // For INPUT_TASK_NAME (gamepad vs ANO)
 #include "System_User.h"
 #include "System_AuthIdentity.h"  // ExecIdentityGuard (executeCommand + submitAndExecuteSync)
 #include "System_SelfDevice.h"   // SelfDevice:: — local identity/heap/uptime/firmware (Stage 1 consolidation)
@@ -1292,6 +1293,12 @@ const char* cmd_cpufreq(const String& argsInput) {
     }
 
     setCpuFrequencyMhz(newFreq);
+    {
+      extern void batteryLogEvent(const char* event);
+      char ev[24];
+      snprintf(ev, sizeof(ev), "cpufreq:%luMHz", (unsigned long)newFreq);
+      batteryLogEvent(ev);
+    }
     BROADCAST_PRINTF("CPU frequency set to %lu MHz", (unsigned long)newFreq);
     return "[System] CPU frequency updated";
   }
@@ -1348,6 +1355,14 @@ const char* cmd_lightsleep(const String& argsInput) {
   // its panel pixels. Falls back to plain SSD1306-DISPLAYOFF everywhere else.
   oledPrepareForSleep();
 
+  // Annotate the battery log so the discharge curve shows the sleep window.
+  extern void batteryLogEvent(const char* event);
+  {
+    char ev[24];
+    snprintf(ev, sizeof(ev), "sleep:light:%ds", seconds);
+    batteryLogEvent(ev);
+  }
+
   // Configure wake-up source: timer
   esp_sleep_enable_timer_wakeup((uint64_t)seconds * 1000000ULL);
 
@@ -1356,6 +1371,7 @@ const char* cmd_lightsleep(const String& argsInput) {
 
   // Execution resumes here after wake-up
   DEBUG_SYSTEMF("Woke from light sleep!");
+  batteryLogEvent("wake:light");
 
   // oledResumeFromSleep supersedes oledDisplayOn: on bus-1 + power-gated
   // builds it raises LDO2, waits for the rail to stabilise, re-runs the
@@ -1982,11 +1998,13 @@ const size_t commandsCount = sizeof(commands) / sizeof(commands[0]);
 #if ENABLE_BATTERY_MONITOR
 extern const char* cmd_battery_status(const String& argsInput);
 extern const char* cmd_battery_calibrate(const String& argsInput);
+extern const char* cmd_batterylog(const String& argsInput);
 
 // Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry batteryCommands[] = {
   {"batterystatus", "Show battery voltage, charge level, and status", false, cmd_battery_status, nullptr, "battery", "status"},
-  {"batterycalibrate", "Recalibrate battery ADC readings", true, cmd_battery_calibrate}
+  {"batterycalibrate", "Recalibrate battery ADC readings", true, cmd_battery_calibrate},
+  {"batterylog", "Battery time-series CSV log (on/off/interval/tail/clear)", false, cmd_batterylog, "Usage: batterylog [on|off|interval <s>|tail|clear]"}
 };
 
 const size_t batteryCommandsCount = sizeof(batteryCommands) / sizeof(batteryCommands[0]);
@@ -2498,7 +2516,7 @@ void printMemoryReport() {
       { "thermal_task", THERMAL_STACK_WORDS },
       { "imu_task", IMU_STACK_WORDS },
       { "tof_task", TOF_STACK_WORDS },
-      { "gamepad_task", INPUT_STACK_WORDS },
+      { INPUT_TASK_NAME, INPUT_STACK_WORDS },
       { "debug_out", DEBUG_OUT_STACK_WORDS },        // Debug output queue processor
       { "apds_task", APDS_STACK_WORDS },             // APDS color/proximity/gesture sensor
       { "gps_task", GPS_STACK_WORDS },               // GPS polling task
@@ -2966,6 +2984,15 @@ static bool authorizeCommand(const AuthContext& ctx, const String& line, char* o
 bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize) {
   // Clear output buffer
   out[0] = '\0';
+
+  // A real user/peer command resets the power-save idle timer (and wakes the
+  // device if it's dark). SOURCE_INTERNAL (automations, scheduler, internal
+  // helpers) is excluded so background command execution can't pin the device
+  // awake. This is what lets a headless box with no input device still power-
+  // save yet wake on a serial / web / G2 / ESP-NOW command.
+  if (ctx.transport != SOURCE_INTERNAL) {
+    powerSaveNoteActivity();
+  }
 
   // Install the command's identity + notification source into the calling
   // task's TLS slots for the duration of this call. CommandIdentityScope

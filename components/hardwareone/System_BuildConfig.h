@@ -90,6 +90,7 @@
   #define CUSTOM_ENABLE_WEB_MQTT       0
   #define CUSTOM_ENABLE_WEB_GAMES      0
   #define CUSTOM_ENABLE_WEB_MAPS       0
+  #define CUSTOM_ENABLE_WEB_BATTERY    1
 #endif
 
 // HTTPS: TLS-encrypted HTTP. Self-signed or uploaded certs in /system/certs/.
@@ -464,6 +465,7 @@
   #define ENABLE_WEB_MQTT       0
   #define ENABLE_WEB_GAMES      0
   #define ENABLE_WEB_MAPS       0
+  #define ENABLE_WEB_BATTERY    0
 #elif WEB_FEATURE_LEVEL == WEB_LEVEL_CORE
   #define ENABLE_WEB_SENSORS    0
   #define ENABLE_WEB_BLUETOOTH  0
@@ -473,6 +475,7 @@
   #define ENABLE_WEB_MQTT       0
   #define ENABLE_WEB_GAMES      0
   #define ENABLE_WEB_MAPS       0
+  #define ENABLE_WEB_BATTERY    0
 #elif WEB_FEATURE_LEVEL == WEB_LEVEL_STANDARD
   #define ENABLE_WEB_SENSORS    1
   #define ENABLE_WEB_BLUETOOTH  0
@@ -482,6 +485,7 @@
   #define ENABLE_WEB_MQTT       1
   #define ENABLE_WEB_GAMES      0
   #define ENABLE_WEB_MAPS       0
+  #define ENABLE_WEB_BATTERY    1
 #elif WEB_FEATURE_LEVEL == WEB_LEVEL_FULL
   #define ENABLE_WEB_SENSORS    1
   #define ENABLE_WEB_BLUETOOTH  1
@@ -491,6 +495,7 @@
   #define ENABLE_WEB_MQTT       1
   #define ENABLE_WEB_GAMES      1
   #define ENABLE_WEB_MAPS       1
+  #define ENABLE_WEB_BATTERY    1
 #else // WEB_LEVEL_CUSTOM
   #define ENABLE_WEB_SENSORS    CUSTOM_ENABLE_WEB_SENSORS
   #define ENABLE_WEB_BLUETOOTH  CUSTOM_ENABLE_WEB_BLUETOOTH
@@ -500,6 +505,7 @@
   #define ENABLE_WEB_MQTT       CUSTOM_ENABLE_WEB_MQTT
   #define ENABLE_WEB_GAMES      CUSTOM_ENABLE_WEB_GAMES
   #define ENABLE_WEB_MAPS       CUSTOM_ENABLE_WEB_MAPS
+  #define ENABLE_WEB_BATTERY    CUSTOM_ENABLE_WEB_BATTERY
 #endif
 
 // =============================================================================
@@ -524,6 +530,7 @@
   #undef ENABLE_WEB_MQTT
   #undef ENABLE_WEB_GAMES
   #undef ENABLE_WEB_MAPS
+  #undef ENABLE_WEB_BATTERY
   #define ENABLE_WEB_SENSORS    0
   #define ENABLE_WEB_BLUETOOTH  0
   #define ENABLE_WEB_SPEECH     0
@@ -532,6 +539,7 @@
   #define ENABLE_WEB_MQTT       0
   #define ENABLE_WEB_GAMES      0
   #define ENABLE_WEB_MAPS       0
+  #define ENABLE_WEB_BATTERY    0
 #endif
 
 // HTTPS rides on top of HTTP server.
@@ -933,6 +941,16 @@
 // during board bring-up).
 #ifndef ENABLE_BATTERY_MONITOR
   #define ENABLE_BATTERY_MONITOR BATTERY_MONITOR_AVAILABLE
+#endif
+
+// The battery web page is a consequent of battery-monitor hardware: force it
+// off on USB-only / no-battery boards even if the web feature level enabled it.
+// (Defined here, after ENABLE_BATTERY_MONITOR, since that's its prerequisite.)
+#if !ENABLE_BATTERY_MONITOR
+  #ifdef ENABLE_WEB_BATTERY
+    #undef ENABLE_WEB_BATTERY
+  #endif
+  #define ENABLE_WEB_BATTERY 0
 #endif
 
 // Sanity: at most one backend selected. If the board didn't define either

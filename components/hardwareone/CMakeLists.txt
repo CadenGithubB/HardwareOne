@@ -177,6 +177,7 @@ set(hardwareone_srcs
         System_ESPNow_Saturation.cpp
         System_ESPNow_Sensors.cpp
         System_ESPNow_Sessions.cpp
+        System_ESPNow_Tx.cpp
         System_FileManager.cpp
         System_Filesystem.cpp
         System_FirstTimeSetup.cpp
@@ -303,6 +304,7 @@ if(HW_CFG_BUILD_OLED_MODES GREATER 0)
         OLED_Mode_Menu.cpp
         OLED_Mode_FileBrowser.cpp
         OLED_Mode_Speech.cpp
+        OLED_Mode_Bluetooth.cpp
         OLED_Mode_Remote.cpp
         OLED_Mode_UnifiedMenu.cpp
         OLED_Mode_RemoteSettings.cpp
@@ -361,6 +363,7 @@ if(HW_CFG_ENABLE_HTTP_SERVER)
             WebPage_Bluetooth.cpp
             WebPage_Speech.cpp
             WebPage_MQTT.cpp
+            WebPage_Battery.cpp
             WebServer_MigrationTool.cpp
     )
     # Maps / Games web pages: tied to their feature flags. Their .cpp

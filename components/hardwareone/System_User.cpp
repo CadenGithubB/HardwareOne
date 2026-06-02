@@ -71,6 +71,42 @@ static inline bool g2PairedUserMatches(const String& username) {
 
 // Session management now in web_server.h (included above)
 
+// ----------------------------------------------------------------------------
+// Shared session idle-timeout policy (Step 0). See System_User.h for the
+// contract. Pure read of gSettings + millis(); safe to call from any task.
+// ----------------------------------------------------------------------------
+unsigned long sessionStampNow() {
+  unsigned long t = millis();
+  return (t == 0) ? 1UL : t;                 // reserve 0 to mean "never stamped"
+}
+
+unsigned long sessionIdleWindowMs(CommandSource transport) {
+  uint32_t mins = 0;                                    // unknown/unwired → disabled
+  switch (transport) {
+    case SOURCE_WEB:       mins = gSettings.sessionIdleWeb;    break;
+    case SOURCE_SERIAL:    mins = gSettings.sessionIdleSerial; break;
+    case SOURCE_BLUETOOTH: mins = gSettings.sessionIdleBle;     break;
+    case SOURCE_LOCAL_DISPLAY: mins = gSettings.sessionIdleDisplay; break;
+    // SOURCE_ESPNOW (bond) is intentionally excluded: it's a device-to-device
+    // trust channel, not a human session, so idle-logout doesn't apply. Any
+    // other transport reads as disabled.
+    default:               mins = 0;                            break;
+  }
+  return (mins == 0) ? 0UL : (unsigned long)mins * 60000UL;   // 0 = disabled
+}
+
+bool sessionIdleExpired(unsigned long lastInteractionMs, unsigned long nowMs, unsigned long windowMs) {
+  if (windowMs == 0)          return false;  // feature off → never expire
+  if (lastInteractionMs == 0) return false;  // never stamped → treat as fresh
+  // Wrap-safe: the window (<= 24h) is far below the ~49.7-day millis() rollover,
+  // and an idle session would have expired long before wrap could matter.
+  return (unsigned long)(nowMs - lastInteractionMs) > windowMs;
+}
+
+bool sessionIdleExpired(CommandSource transport, unsigned long lastInteractionMs, unsigned long nowMs) {
+  return sessionIdleExpired(lastInteractionMs, nowMs, sessionIdleWindowMs(transport));
+}
+
 // File paths
 #define PENDING_USERS_FILE "/system/users/pending_users.json"
 
@@ -291,6 +327,10 @@ bool loginTransport(CommandSource transport, const String& username, const Strin
     case SOURCE_LOCAL_DISPLAY:
       gLocalDisplayAuthed = true;
       gLocalDisplayUser = username;
+      // Start the idle clock now: login is a real interaction, and without this
+      // a user who logs in then walks away would read as never-stamped (0) and
+      // never time out. localDisplaySessionTick() refreshes it on later input.
+      gLocalDisplayLastInteractionMs = sessionStampNow();
       oledNotifyLocalDisplayAuthChanged();
       updateUserLastSeen(username);
       return true;

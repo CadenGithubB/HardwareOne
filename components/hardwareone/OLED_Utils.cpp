@@ -849,7 +849,7 @@ void oledScrollInit(OLEDScrollState* state, const char* title, int visibleLines)
   state->selectedIndex = 0;
   state->scrollOffset = 0;
   state->visibleLines = visibleLines > 0 ? visibleLines : 4;
-  state->wrapAround = true;
+  state->wrapAround = false;  // menus clamp at top/bottom (no wrap-around)
   state->title = title;  // Store pointer directly
   state->footer = nullptr;
   state->refreshCounter = 0;
@@ -859,7 +859,8 @@ void oledScrollInit(OLEDScrollState* state, const char* title, int visibleLines)
   state->separatorX = 0;
   state->iconSize = 32;
   state->singleLineItems = false;
-  
+  state->rightPaneDraw = nullptr;
+
   // Clear all items
   for (int i = 0; i < OLED_SCROLL_MAX_ITEMS; i++) {
     state->items[i].line1 = nullptr;
@@ -897,6 +898,37 @@ void oledScrollClear(OLEDScrollState* state) {
   state->selectedIndex = 0;
   state->scrollOffset = 0;
   state->refreshCounter++;  // Increment to invalidate old pointers
+}
+
+void oledScrollClearKeepSelection(OLEDScrollState* state) {
+  if (!state) return;
+  state->itemCount = 0;
+  state->refreshCounter++;  // Invalidate old pointers
+  // selectedIndex / scrollOffset deliberately preserved across the rebuild; they
+  // are clamped back into range by oledScrollClampSelection() (auto-called from
+  // oledScrollHandleNav / oledScrollRenderSimple, or explicitly by manual renders).
+}
+
+void oledScrollClampSelection(OLEDScrollState* state) {
+  if (!state) return;
+  if (state->itemCount <= 0) {
+    state->selectedIndex = 0;
+    state->scrollOffset = 0;
+    return;
+  }
+  if (state->selectedIndex >= state->itemCount) state->selectedIndex = state->itemCount - 1;
+  if (state->selectedIndex < 0) state->selectedIndex = 0;
+  // Keep the selection inside the visible window.
+  if (state->visibleLines > 0) {
+    if (state->scrollOffset > state->selectedIndex) state->scrollOffset = state->selectedIndex;
+    if (state->selectedIndex >= state->scrollOffset + state->visibleLines) {
+      state->scrollOffset = state->selectedIndex - state->visibleLines + 1;
+    }
+    int maxOff = state->itemCount - state->visibleLines;
+    if (maxOff < 0) maxOff = 0;
+    if (state->scrollOffset > maxOff) state->scrollOffset = maxOff;
+    if (state->scrollOffset < 0) state->scrollOffset = 0;
+  }
 }
 
 void oledScrollUp(OLEDScrollState* state) {
@@ -967,6 +999,7 @@ OLEDScrollItem* oledScrollGetItem(OLEDScrollState* state, int index) {
 
 bool oledScrollHandleNav(OLEDScrollState* state, bool leftRightNav) {
   if (!state || state->itemCount == 0) return false;
+  oledScrollClampSelection(state);  // fix a stale cursor after a keep-selection rebuild
   extern NavEvents gNavEvents;
   bool handled = false;
   if (gNavEvents.up || (leftRightNav && gNavEvents.left)) {
@@ -1111,15 +1144,20 @@ void oledScrollRender(Adafruit_SSD1306* display, OLEDScrollState* state,
   // Reset text color
   display->setTextColor(DISPLAY_COLOR_WHITE);
   
-  // Draw selected item's icon in right pane (split-pane mode only)
+  // Draw selected item's icon + optional right-pane decoration (split-pane only)
   if (splitPane && state->itemCount > 0) {
     OLEDScrollItem* selected = &state->items[state->selectedIndex];
+    int iconAreaX = state->separatorX + 4;
+    int iconY = OLED_CONTENT_START_Y + (OLED_CONTENT_HEIGHT - state->iconSize) / 2;
     if (selected->iconName && selected->iconName[0] != '\0') {
       extern bool drawIcon(Adafruit_SSD1306* display, const char* name, int x, int y, uint16_t color);
-      int iconAreaX = state->separatorX + 4;
       int iconX = iconAreaX + (128 - iconAreaX - state->iconSize) / 2;
-      int iconY = OLED_CONTENT_START_Y + (OLED_CONTENT_HEIGHT - state->iconSize) / 2;
       drawIcon(display, selected->iconName, iconX, iconY, DISPLAY_COLOR_WHITE);
+    }
+    // Right-pane decorator (e.g. availability badge + status text). Drawn after
+    // the icon so it can overlay a corner badge and place text below the icon.
+    if (state->rightPaneDraw) {
+      state->rightPaneDraw(display, selected, iconAreaX, iconY, state->iconSize);
     }
   }
   
@@ -1156,6 +1194,44 @@ void oledScrollRender(Adafruit_SSD1306* display, OLEDScrollState* state,
   // Render footer if hints provided
   if (footerHints) {
     oledRenderFooter(display, footerHints);
+  }
+}
+
+// Lightweight single-line list renderer — see header for rationale. Compact
+// counterpart to oledScrollRender(): one 8px line per item, "> " cursor prefix,
+// so a 5-item menu shows all 5 at once (unlike oledScrollRender's 16px two-line
+// items which only fit ~1-2 in the content area). Matches the Power / Network
+// main-menu look exactly.
+void oledScrollRenderSimple(Adafruit_SSD1306* display, OLEDScrollState* state,
+                            bool showSelection) {
+  if (!display || !state) return;
+  oledScrollClampSelection(state);  // fix a stale cursor after a keep-selection rebuild
+
+  display->setTextSize(1);
+  display->setTextColor(DISPLAY_COLOR_WHITE);
+
+  const int lineHeight = 8;
+  int visibleStart = state->scrollOffset;
+  int visibleEnd = min(state->itemCount, state->scrollOffset + state->visibleLines);
+
+  int yPos = OLED_CONTENT_START_Y;
+  for (int i = visibleStart; i < visibleEnd; i++) {
+    display->setCursor(0, yPos);
+    display->print((showSelection && i == state->selectedIndex) ? "> " : "  ");
+    if (state->items[i].line1) display->print(state->items[i].line1);
+    display->println();
+    yPos += lineHeight;
+  }
+
+  // Thin scrollbar only when the list overflows the visible window.
+  if (state->itemCount > state->visibleLines) {
+    int scrollbarX = SCREEN_WIDTH - 1;
+    int barH = state->visibleLines * lineHeight;
+    display->drawFastVLine(scrollbarX, OLED_CONTENT_START_Y, barH, DISPLAY_COLOR_WHITE);
+    int thumbH = max(4, (barH * state->visibleLines) / state->itemCount);
+    int thumbY = OLED_CONTENT_START_Y +
+                 (barH - thumbH) * state->scrollOffset / max(1, state->itemCount - state->visibleLines);
+    display->fillRect(scrollbarX - 1, thumbY, 3, thumbH, DISPLAY_COLOR_WHITE);
   }
 }
 
@@ -1686,6 +1762,12 @@ bool oledKeyboardIsActive() {
   return gOledKeyboardState.active;
 }
 
+bool oledKeyboardDrawIfActive(Adafruit_SSD1306* display) {
+  if (!gOledKeyboardState.active) return false;
+  oledKeyboardDisplay(display);
+  return true;
+}
+
 bool oledKeyboardIsCompleted() {
   return gOledKeyboardState.completed;
 }
@@ -2170,8 +2252,6 @@ uint32_t OLEDConsoleBuffer::getTimestamp(int index) const {
 #endif
 
 // External state variables needed for context-aware footer hints
-extern bool gNetworkShowingStatus;
-extern bool networkShowingWiFiSubmenu;
 extern String unavailableOLEDTitle;
 extern String unavailableOLEDReason;
 
@@ -2282,7 +2362,7 @@ void drawOLEDFooter() {
   if (!hints) switch (currentOLEDMode) {
     case OLED_NOTIFICATIONS:
       hints = sNotificationsShowingDetail
-        ? "\x1b\x1a:Nav B:Back"       // ←→ arrows when browsing detail
+        ? "\x18\x19:Nav B:Back"       // slim up/down arrows (detail nav is up/down), matching the ←→ arrow style
         : "A:Detail X:Clear B:Back";  // list view
       break;
     case OLED_ESPNOW:
@@ -2319,16 +2399,9 @@ void drawOLEDFooter() {
       #endif
       break;
       
-    case OLED_NETWORK_INFO:
-      if (networkShowingWiFiSubmenu) {
-        hints = "A:Select B:Back";
-      } else if (gNetworkShowingStatus) {
-        hints = "B:Back";
-      } else {
-        hints = "A:Select B:Back";
-      }
-      break;
-      
+    // OLED_NETWORK_INFO / OLED_NETWORK_STATUS / OLED_NETWORK_WIFI_MENU hints
+    // provided via OLEDModeEntry::hints in OLED_Mode_Network.cpp
+
     case OLED_FILE_BROWSER:
       // Show "A:Open" only for folders, just "B:Back" for files
       if (fileBrowserRenderData.valid && fileBrowserRenderData.selectedIsFolder) {
@@ -2338,17 +2411,8 @@ void drawOLEDFooter() {
       }
       break;
       
-    case OLED_BLUETOOTH:
-      {
-        extern bool gBluetoothShowingStatus;
-        if (gBluetoothShowingStatus) {
-          hints = "A:Back B:Back";
-        } else {
-          hints = "A:Select B:Back";
-        }
-      }
-      break;
-      
+    // OLED_BLUETOOTH / _STATUS / _G2 / _G2_STATUS hints come from OLEDModeEntry::hints
+
     // OLED_SYSTEM_STATUS, OLED_SENSOR_DATA, OLED_SENSOR_LIST, OLED_BOOT_SENSORS, OLED_MEMORY_STATS
     // hints provided via OLEDModeEntry registration (static "B:Back")
 
@@ -2684,7 +2748,11 @@ void setOLEDMode(OLEDMode newMode) {
 // Single authoritative mode transition entry point.
 // Auth gating, back-nav stack push, and standardised "[OLED_MODE]" logging.
 // pushStack=false for boot/system/replace-in-place transitions that must not pollute history.
-void requestOLEDMode(OLEDMode newMode, const char* reason, bool pushStack) {
+void requestOLEDMode(OLEDMode newMode, const char* reason, bool pushStack, bool isBackNav) {
+  // Remember where we came from so the centralized onEnter hook below fires only
+  // on a real mode change (and the auth-gate rewrite of newMode is accounted for).
+  OLEDMode prevMode = currentOLEDMode;
+
   // Auth gate: redirect to LOGIN if display auth is required and not yet satisfied.
   // Boot sequence bypasses this (oledBootModeActive guards the check).
   if (shouldBlockForDisplayAuth()) {
@@ -2708,27 +2776,10 @@ void requestOLEDMode(OLEDMode newMode, const char* reason, bool pushStack) {
     pushOLEDMode(currentOLEDMode);
   }
 
-  // Reset per-mode transient state on entry. Each branch logs a one-line
-  // "mode-entry hook fired" notice through DEBUG_DISPLAYF so the audit log
-  // shows the setup work that previously ran silently — useful when debugging
-  // "mode change announced but UI looks stale" symptoms.
-  if (newMode == OLED_CLI_VIEWER && newMode != currentOLEDMode) {
-    DEBUG_DISPLAYF("[OLED_MODE] entry hook: CLI_VIEWER state reset");
-    extern void resetCLIViewerState();
-    resetCLIViewerState();
-  }
-  if (newMode == OLED_CLI_INPUT && newMode != currentOLEDMode) {
-    DEBUG_DISPLAYF("[OLED_MODE] entry hook: CLI_INPUT state reset");
-    extern void resetCLIInputState();
-    resetCLIInputState();
-  }
-#if ENABLE_ONDEVICE_LLM
-  if (newMode == OLED_LLM && newMode != currentOLEDMode) {
-    DEBUG_DISPLAYF("[OLED_MODE] entry hook: LLM state reset");
-    extern void resetLLMOLEDState();
-    resetLLMOLEDState();
-  }
-#endif
+  // Per-mode entry side-effects (state resets, hardware inits) are no longer
+  // hand-coded here, in cmd_oledmode, and in the menu-select path. Each mode now
+  // owns its own reset via OLEDModeEntry::onEnterFunc, invoked centrally just
+  // below — see the onEnter dispatch after `currentOLEDMode = newMode`.
 
 #if ENABLE_ANO_ENCODER
   // Reset the rotary axis on every mode change so a horizontal-axis flip from
@@ -2741,6 +2792,16 @@ void requestOLEDMode(OLEDMode newMode, const char* reason, bool pushStack) {
 #endif
 
   currentOLEDMode = newMode;
+
+  // Centralized entry hook — the single owner of "what happens when this mode
+  // becomes current". Fires only on a real change; the mode decides (via the
+  // isForward flag) whether to reset its view or preserve it on back-nav.
+  if (newMode != prevMode) {
+    const OLEDModeEntry* entered = findOLEDMode(newMode);
+    if (entered && entered->onEnterFunc) {
+      entered->onEnterFunc(!isBackNav);
+    }
+  }
 }
 
 // Mode navigation stack for back button (minimal fixed-size stack)
@@ -2764,7 +2825,8 @@ static const OLEDModeEntry* oledModeRegistry[MAX_OLED_MODES];
 static size_t oledModeRegistrySize = 0;
 
 // Module tracking for debug
-#define MAX_OLED_MODULES 16
+#define MAX_OLED_MODULES 32  // module-NAME tracking for the boot summary only (not a mode cap);
+                             // was 16, which truncated the list and hid GC'd modules during debugging
 struct OLEDModuleInfo {
   const char* name;
   size_t count;
@@ -2872,6 +2934,7 @@ extern void oledSetPatternModeInit();
 extern void oledChangePasswordModeInit();
 extern void oledPowerModeInit();
 extern void oledCLIInputModeInit();
+extern void oledMenuModeInit();   // Menu / Logo / Sensor-menu registrars (OLED_Mode_Menu.cpp)
 #if ENABLE_ONDEVICE_LLM
 extern void oledLLMModeInit();
 #endif
@@ -2886,6 +2949,7 @@ void printRegisteredOLEDModes() {
   oledChangePasswordModeInit();
   oledPowerModeInit();
   oledCLIInputModeInit();
+  oledMenuModeInit();   // keep OLED_Mode_Menu.cpp (Menu/Logo/Sensor-menu) from being GC'd
 #if ENABLE_ONDEVICE_LLM
   oledLLMModeInit();
 #endif
@@ -3065,19 +3129,8 @@ void stopOLEDDisplay() {
 #include "OLED_Utils.h"  // For executeOLEDCommand
 
 // Network and system display functions moved to OLED_Mode_Network.cpp and OLED_Mode_System.cpp
-// Variables defined in OLED_Mode_Network.cpp
-extern int networkMenuSelection;
-extern const int NETWORK_MENU_ITEMS;
-extern bool gNetworkShowingStatus;
-extern bool networkShowingWiFiSubmenu;
-extern OLEDScrollState wifiSubmenuScroll;
-extern bool wifiSubmenuScrollInitialized;
-extern bool wifiAddingNetwork;
-extern bool wifiEnteringSSID;
-extern bool wifiEnteringPassword;
-extern String wifiNewSSID;
-extern String wifiNewPassword;
-extern void initWifiSubmenuScroll();
+// (Network state is now fully encapsulated in OLED_Mode_Network.cpp via OLEDScrollState
+//  + pushed sub-modes; no externs needed.)
 
 // 3D Cube rotation helper functions
 void rotateCubePoint(float& x, float& y, float& z, float angleX, float angleY, float angleZ) {
@@ -3206,6 +3259,8 @@ void updateOLEDDisplay() {
       prepareFileBrowserData();
       break;
     case OLED_NETWORK_INFO:
+    case OLED_NETWORK_STATUS:
+      // Both main menu and Status sub-mode read networkRenderData (RSSI/SSID/IP).
       prepareNetworkData();
       break;
     case OLED_MEMORY_STATS:
@@ -3631,23 +3686,10 @@ const char* cmd_oledmode(const String& argsInput) {
   // Per-mode initialisation side-effects (state resets, hardware inits).
   switch (target) {
     case OLED_MENU:
-      resetOLEDMenu();
+      // State reset (resetOLEDMenu) now runs via OLED_MENU's onEnterFunc. This
+      // path keeps only the gamepad auto-start, which must run on the cmd_exec
+      // task — not inside requestOLEDMode(), which the input pump also calls.
       tryAutoStartInputForMenu();
-      break;
-    case OLED_ANIMATION:
-      animationFrame = 0;
-      break;
-    case OLED_FILE_BROWSER:
-      resetOLEDFileBrowser();
-      break;
-    case OLED_ESPNOW:
-#if ENABLE_ESPNOW
-      if (!gEspNow || !gEspNow->initialized) {
-        oledEspNowShowInitPrompt();
-      } else {
-        oledEspNowInit();
-      }
-#endif
       break;
     case OLED_OFF:
       i2cOledTransactionVoid(400000, 500, [&]() {
@@ -3656,6 +3698,9 @@ const char* cmd_oledmode(const String& argsInput) {
       });
       break;
     default:
+      // OLED_ANIMATION / OLED_FILE_BROWSER / OLED_ESPNOW entry resets now run via
+      // their per-mode onEnterFunc (see each mode's registration) — no longer
+      // duplicated here or in the menu-select path.
       break;
   }
 
@@ -3844,6 +3889,11 @@ static const char* getOLEDModeName(OLEDMode mode) {
     case OLED_SENSOR_LIST: return "Devices";
     case OLED_THERMAL_VISUAL: return "Thermal";
     case OLED_NETWORK_INFO: return "Network";
+    case OLED_NETWORK_STATUS: return "Status";
+    case OLED_NETWORK_WIFI_MENU: return "WiFi";
+    case OLED_NETWORK_WIFI_LIST: return "Saved";
+    case OLED_NETWORK_WIFI_REMOVE: return "Remove";
+    case OLED_NETWORK_WIFI_SCAN: return "Scan";
     case OLED_MESH_STATUS: return "Mesh";
     case OLED_CUSTOM_TEXT: return "Text";
     case OLED_UNAVAILABLE: return "Unavail";
@@ -3863,6 +3913,9 @@ static const char* getOLEDModeName(OLEDMode mode) {
     case OLED_POWER_SLEEP: return "Sleep";
     case OLED_GAMEPAD_VISUAL: return "Gamepad";
     case OLED_BLUETOOTH: return "Bluetooth";
+    case OLED_BLUETOOTH_STATUS: return "BT Status";
+    case OLED_BLUETOOTH_G2: return "G2";
+    case OLED_BLUETOOTH_G2_STATUS: return "G2 Status";
     case OLED_REMOTE_SENSORS: return "Remote";
     case OLED_MEMORY_STATS: return "Memory";
     case OLED_WEB_STATS: return "Web Stats";
@@ -3876,6 +3929,7 @@ static const char* getOLEDModeName(OLEDMode mode) {
     case OLED_LOGOUT: return "Logout";
     case OLED_QUICK_SETTINGS: return "Quick Settings";
     case OLED_SPEECH: return "Speech";
+    case OLED_SPEECH_STATUS: return "SR Status";
     case OLED_MICROPHONE: return "Mic";
     case OLED_GPS_MAP: return "Map";
     case OLED_SETTINGS: return "Settings";
@@ -3935,6 +3989,11 @@ const char* slugFromMode(OLEDMode mode) {
     case OLED_SENSOR_LIST:     return "sensorlist";
     case OLED_THERMAL_VISUAL:  return "thermal";
     case OLED_NETWORK_INFO:    return "network";
+    case OLED_NETWORK_STATUS:  return "networkstatus";
+    case OLED_NETWORK_WIFI_MENU: return "wifimenu";
+    case OLED_NETWORK_WIFI_LIST: return "wifilist_oled";
+    case OLED_NETWORK_WIFI_REMOVE: return "wifiremove_oled";
+    case OLED_NETWORK_WIFI_SCAN: return "wifiscan_oled";
     case OLED_MESH_STATUS:     return "mesh";
     case OLED_CUSTOM_TEXT:     return "text";
     case OLED_LOGO:            return "logo";
@@ -3953,6 +4012,9 @@ const char* slugFromMode(OLEDMode mode) {
     case OLED_POWER_SLEEP:     return "powersleep";
     case OLED_GAMEPAD_VISUAL:  return "gamepad";
     case OLED_BLUETOOTH:       return "bluetooth";
+    case OLED_BLUETOOTH_STATUS: return "btstatus";
+    case OLED_BLUETOOTH_G2:     return "g2";
+    case OLED_BLUETOOTH_G2_STATUS: return "g2status";
     case OLED_REMOTE_SENSORS:  return "remote";
     case OLED_MEMORY_STATS:    return "memory";
     case OLED_WEB_STATS:       return "web";
@@ -3970,6 +4032,7 @@ const char* slugFromMode(OLEDMode mode) {
     case OLED_CHANGE_PASSWORD: return "changepass";
     case OLED_REMOTE:          return "remoteui";
     case OLED_SPEECH:          return "speech";
+    case OLED_SPEECH_STATUS:   return "speechstatus";
     case OLED_MICROPHONE:      return "mic";
     case OLED_CLI_VIEWER:      return "cli";
     case OLED_CLI_INPUT:       return "cliinput";
@@ -4000,7 +4063,6 @@ String bootProgressLabel = "";
 
 // Menu navigation state (declared early for boot sequence access)
 int oledMenuSelectedIndex = 0;
-int oledSensorMenuSelectedIndex = 0;
 
 // Category menu state (non-static for access from OLED_Mode_Menu.cpp)
 int oledMenuCategorySelected = -1;  // -1 = showing categories, 0-5 = in category submenu
@@ -4394,8 +4456,11 @@ static int gRemoteSubmenuSelection = 0;
 static bool gRemoteCommandInputActive = false;
 static char gPendingRemoteCommand[64] = "";
 
-// Start remote command input mode with keyboard
-static void startRemoteCommandInput(const char* baseCommand) {
+// Start remote command input mode with keyboard.
+// [[maybe_unused]]: its only live caller (the old oledMenuSelect remote-submenu
+// path) is gone with the menu unification, but it's kept as part of the
+// not-yet-wired remote-command subsystem (buildRemoteSubmenu et al.).
+[[maybe_unused]] static void startRemoteCommandInput(const char* baseCommand) {
   strncpy(gPendingRemoteCommand, baseCommand, sizeof(gPendingRemoteCommand) - 1);
   gPendingRemoteCommand[sizeof(gPendingRemoteCommand) - 1] = '\0';
   
@@ -5080,87 +5145,6 @@ extern const unsigned long BATTERY_ICON_UPDATE_INTERVAL = 120000; // 2 minutes
 // displayAutomations() moved to OLED_Mode_Menu.cpp
 // displayEspNow() moved to OLED_Mode_Network.cpp
 
-/**
- * Menu navigation functions
- */
-void oledMenuUp() {
-  // Handle submenu navigation
-  if (gInRemoteSubmenu) {
-    if (gRemoteSubmenuSelection > 0) {
-      gRemoteSubmenuSelection--;
-    } else {
-      gRemoteSubmenuSelection = gRemoteSubmenuItemCount - 1;  // Wrap
-    }
-    return;
-  }
-  
-  extern int oledMenuCategorySelected;
-  extern int oledMenuCategoryItemIndex;
-  extern const int oledMenuCategoryCount;
-  
-  // Check if in category submenu
-  if (oledMenuCategorySelected >= 0) {
-    // Navigate within category items
-    const OLEDMenuItem* categoryItems = nullptr;
-    int categoryItemCount = 0;
-    extern void getCategoryItems(int, const OLEDMenuItem**, int*);
-    getCategoryItems(oledMenuCategorySelected, &categoryItems, &categoryItemCount);
-    
-    if (oledMenuCategoryItemIndex > 0) {
-      oledMenuCategoryItemIndex--;
-    } else {
-      oledMenuCategoryItemIndex = categoryItemCount - 1;  // Wrap to end
-    }
-    return;
-  }
-  
-  // Navigate in top-level category menu
-  if (oledMenuSelectedIndex > 0) {
-    oledMenuSelectedIndex--;
-  } else {
-    oledMenuSelectedIndex = oledMenuCategoryCount - 1; // Wrap to end
-  }
-}
-
-void oledMenuDown() {
-  // Handle submenu navigation
-  if (gInRemoteSubmenu) {
-    if (gRemoteSubmenuSelection < gRemoteSubmenuItemCount - 1) {
-      gRemoteSubmenuSelection++;
-    } else {
-      gRemoteSubmenuSelection = 0;  // Wrap
-    }
-    return;
-  }
-  
-  extern int oledMenuCategorySelected;
-  extern int oledMenuCategoryItemIndex;
-  extern const int oledMenuCategoryCount;
-  
-  // Check if in category submenu
-  if (oledMenuCategorySelected >= 0) {
-    // Navigate within category items
-    const OLEDMenuItem* categoryItems = nullptr;
-    int categoryItemCount = 0;
-    extern void getCategoryItems(int, const OLEDMenuItem**, int*);
-    getCategoryItems(oledMenuCategorySelected, &categoryItems, &categoryItemCount);
-    
-    if (oledMenuCategoryItemIndex < categoryItemCount - 1) {
-      oledMenuCategoryItemIndex++;
-    } else {
-      oledMenuCategoryItemIndex = 0;  // Wrap to start
-    }
-    return;
-  }
-  
-  // Navigate in top-level category menu
-  if (oledMenuSelectedIndex < oledMenuCategoryCount - 1) {
-    oledMenuSelectedIndex++;
-  } else {
-    oledMenuSelectedIndex = 0; // Wrap to start
-  }
-}
-
 // Handle B button press - exit keyboard input, submenu, or pop mode stack
 // Returns true if back was consumed
 bool oledMenuBack() {
@@ -5180,10 +5164,10 @@ bool oledMenuBack() {
   // If not in menu mode, pop mode stack to go back to previous mode.
   // Category state is preserved so we return to the category submenu, not root.
   if (currentOLEDMode != OLED_MENU) {
-    requestOLEDMode(popOLEDMode(), "menu.back", false);
+    requestOLEDMode(popOLEDMode(), "menu.back", false, /*isBackNav=*/true);
     return true;
   }
-  
+
   // We're in OLED_MENU - handle category submenu back
   extern int oledMenuCategorySelected;
   extern int oledMenuCategoryItemIndex;
@@ -5200,115 +5184,6 @@ bool oledMenuBack() {
 
 // LoggingMenuState enum, loggingCurrentState, loggingMenuSelection
 // declared in OLED_Utils.h, defined in OLED_Mode_Logging.cpp
-
-void oledMenuSelect() {
-  // Handle remote command keyboard input completion
-  if (gRemoteCommandInputActive) {
-    if (oledKeyboardIsCompleted()) {
-      completeRemoteCommandInput();
-    }
-    return;
-  }
-  
-  // Category menu state
-  extern int oledMenuCategorySelected;
-  extern int oledMenuCategoryItemIndex;
-  extern const OLEDMenuItem oledMenuCategories[];
-  extern const int oledMenuCategoryCount;
-  
-  // Handle submenu item selection if in a remote submenu
-  if (gInRemoteSubmenu) {
-    if (gRemoteSubmenuSelection >= 0 && gRemoteSubmenuSelection < gRemoteSubmenuItemCount) {
-      OLEDMenuItemEx& item = gRemoteSubmenuItems[gRemoteSubmenuSelection];
-      
-      DEBUG_DISPLAYF("[SUBMENU_SELECT] sel=%d name='%s' cmd='%s'\n", gRemoteSubmenuSelection, item.name, item.command);
-      if (strlen(item.command) > 0) {
-        // Check if command needs user input (determined at menu load time)
-        if (item.needsInput) {
-          // Show keyboard for parameter input
-          startRemoteCommandInput(item.command);
-        } else {
-          // Execute immediately via unified OLED command helper
-          char remoteCmd[128];
-          snprintf(remoteCmd, sizeof(remoteCmd), "remote:%s", item.command);
-
-          char out[256];
-          executeOLEDCommandWithResult(remoteCmd, out, sizeof(out));
-
-          BROADCAST_PRINTF("[OLED] Remote: %s", item.command);
-          if (strlen(out) > 0) {
-            broadcastOutput(out);
-          }
-        }
-      }
-    }
-    return;
-  }
-  
-  // Check if we're in category menu mode
-  if (oledMenuCategorySelected < 0) {
-    // Top-level category menu - enter the selected category
-    if (oledMenuSelectedIndex >= 0 && oledMenuSelectedIndex < oledMenuCategoryCount) {
-      oledMenuCategorySelected = oledMenuSelectedIndex;
-      oledMenuCategoryItemIndex = 0;
-      DEBUG_DISPLAYF("[CATEGORY_MENU] Entered category %d\n", oledMenuCategorySelected);
-    }
-    return;
-  }
-  
-  // In category submenu - get the items for this category
-  const OLEDMenuItem* categoryItems = nullptr;
-  int categoryItemCount = 0;
-  extern void getCategoryItems(int, const OLEDMenuItem**, int*);
-  getCategoryItems(oledMenuCategorySelected, &categoryItems, &categoryItemCount);
-  
-  if (oledMenuCategoryItemIndex >= 0 && oledMenuCategoryItemIndex < categoryItemCount) {
-    const OLEDMenuItem& item = categoryItems[oledMenuCategoryItemIndex];
-    
-    DEBUG_DISPLAYF("[MENU_SELECT] sel=%d name='%s' mode=%d\n", oledMenuCategoryItemIndex, item.name, (int)item.targetMode);
-    // Category items are plain OLEDMenuItem structs - just switch to the target mode
-    OLEDMode target = item.targetMode;
-    String reason;
-    MenuAvailability availability = getMenuAvailability(target, &reason);
-    if (availability != MenuAvailability::AVAILABLE) {
-      if (reason.length() == 0) {
-        switch (availability) {
-          case MenuAvailability::FEATURE_DISABLED: reason = "Disabled"; break;
-          case MenuAvailability::NOT_DETECTED: reason = "Not detected"; break;
-          case MenuAvailability::NOT_BUILT: reason = "Not built"; break;
-          default: reason = "Unavailable"; break;
-        }
-      }
-      BROADCAST_PRINTF("[OLED] %s: %s", item.name, reason.c_str());
-
-      enterUnavailablePage(item.name, reason);
-      return;
-    }
-
-    requestOLEDMode(target, "menu.select");
-    DEBUG_DISPLAYF("[MENU_SELECT] currentOLEDMode now = %d (%s)\n", (int)currentOLEDMode, getOLEDModeName(currentOLEDMode));
-#if ENABLE_ESPNOW
-    if (currentOLEDMode == OLED_ESPNOW) {
-      if (!gEspNow || !gEspNow->initialized) {
-        oledEspNowShowInitPrompt();
-      } else {
-        oledEspNowInit();
-      }
-    }
-#endif
-    
-    // Reset file browser if entering that mode
-    if (currentOLEDMode == OLED_FILE_BROWSER) {
-      oledFileBrowserNeedsInit = true;
-    }
-    
-    // Reset logging mode state when entering from main menu
-    if (currentOLEDMode == OLED_LOGGING) {
-      loggingCurrentState = LOG_MENU_MAIN;
-      loggingMenuSelection = 0;
-    }
-  }
-}
 
 // Push current mode onto stack before navigating to new mode
 void pushOLEDMode(OLEDMode mode) {
@@ -5335,7 +5210,12 @@ OLEDMode getPreviousOLEDMode() {
 
 
 void resetOLEDMenu() {
+  // Fresh entry to the launcher returns to the top-level category list with the
+  // cursor at the top. Back-navigation into OLED_MENU skips this (onEnter passes
+  // isForward=false), so returning from a launched mode keeps your place.
   oledMenuSelectedIndex = 0;
+  oledMenuCategorySelected = -1;
+  oledMenuCategoryItemIndex = 0;
 }
 
 // ============================================================================
@@ -5944,96 +5824,8 @@ bool processOLEDInput() {
       return inputProcessed;
     }
   }
-  
-  if (currentOLEDMode == OLED_MENU) {
-    // Check if remote command keyboard input is active
-    if (gRemoteCommandInputActive) {
-      // Route all input to keyboard
-      uint32_t pressedNow = ~buttons;
-      uint32_t pressedLast = ~lastButtonState;
-      uint32_t newlyPressed = (pressedNow & ~pressedLast) | latchedPresses;
-      
-      // Calculate deltaX/deltaY for keyboard navigation
-      int deltaX = 0, deltaY = 0;
-      if (gNavEvents.right) deltaX = 1;
-      else if (gNavEvents.left) deltaX = -1;
-      if (gNavEvents.down) deltaY = 1;
-      else if (gNavEvents.up) deltaY = -1;
-      
-      if (oledKeyboardHandleInput(deltaX, deltaY, newlyPressed)) {
-        inputProcessed = true;
-      }
-      
-      // Check if keyboard completed or cancelled
-      if (oledKeyboardIsCompleted()) {
-        completeRemoteCommandInput();
-        inputProcessed = true;
-      } else if (oledKeyboardIsCancelled()) {
-        cancelRemoteCommandInput();
-        inputProcessed = true;
-      }
-      
-      lastButtonState = buttons;
-      return inputProcessed;
-    }
-    
-    // Menu navigation - list style only (1 item per direction). UP/DOWN
-    // only — LEFT/RIGHT are reserved for B-back / function on ANO encoder.
-    // Previously LEFT was treated as "prev item" which dual-fired with the
-    // INPUT_BUTTON_B handler below: in a category submenu, ANO LEFT both
-    // scrolled the selection AND popped back. The scroll was wasted; UP/
-    // DOWN is the only sensible scroll axis here.
-    if (gNavEvents.down) {
-      oledMenuDown();  // Down = next item
-      inputProcessed = true;
-    } else if (gNavEvents.up) {
-      oledMenuUp();    // Up = prev item
-      inputProcessed = true;
-    }
-    
-    // Button A (typically bit 5 or 6) - Select
-    // Button B - Back
-    // Seesaw gamepad buttons are active-low (0 = pressed)
-    uint32_t pressedNow = ~buttons;  // Invert for active-high logic
-    uint32_t pressedLast = ~lastButtonState;
-    uint32_t newlyPressed = (pressedNow & ~pressedLast) | latchedPresses;  // Rising edge + latched
 
-    if (shouldDebug && newlyPressed) {
-      DEBUG_DISPLAYF("[GAMEPAD_LOGICAL] MODE=MENU newly=0x%08lX A=%d B=%d X=%d Y=%d START=%d SEL=%d\n", (unsigned long)newlyPressed,
-                    INPUT_CHECK(newlyPressed, INPUT_BUTTON_A),
-                    INPUT_CHECK(newlyPressed, INPUT_BUTTON_B),
-                    INPUT_CHECK(newlyPressed, INPUT_BUTTON_X),
-                    INPUT_CHECK(newlyPressed, INPUT_BUTTON_Y),
-                    INPUT_CHECK(newlyPressed, INPUT_BUTTON_START),
-                    INPUT_CHECK(newlyPressed, INPUT_BUTTON_SELECT));
-    }
-    
-    if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
-      oledMenuSelect();
-      inputProcessed = true;
-    } else if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_SELECT)) {
-      // SELECT button opens quick settings - only if authenticated
-      if (!gSettings.localDisplayRequireAuth || isTransportAuthenticated(SOURCE_LOCAL_DISPLAY)) {
-        requestOLEDMode(OLED_QUICK_SETTINGS, "gamepad.menu.quicksettings");
-        inputProcessed = true;
-      }
-    } else if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_START)) {
-      // START button: toggle data source when bonded, else toggle menu style
-      if (oledRemoteSourceAvailable()) {
-        oledCycleDataSource();
-        inputProcessed = true;
-      }
-    } else if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
-      // B button: exit submenu if in one, otherwise do nothing in main menu
-      if (oledMenuBack()) {
-        inputProcessed = true;
-      }
-    }
-  // OLED_SENSOR_MENU now handled by registered inputFunc (see OLED_Mode_Menu.cpp)
-  // OLED_FILE_BROWSER now handled by registered inputFunc (see OLED_Mode_FileBrowser.cpp)
-  // OLED_POWER, OLED_POWER_CPU, OLED_POWER_SLEEP now handled by registered inputFunc (see OLED_Mode_Power.cpp)
-  // OLED_NOTIFICATIONS now handled by registered inputFunc (see OLED_Utils.cpp registration)
-  } else if (currentOLEDMode == OLED_ESPNOW) {
+  if (currentOLEDMode == OLED_ESPNOW) {
 #if ENABLE_ESPNOW
     // ESP-NOW interface navigation
     uint32_t pressedNow = ~buttons;
@@ -6406,6 +6198,43 @@ void oledApplySettings() {
     applyOLEDBrightness();
     applyOLEDRotation();
     DEBUG_SYSTEMF("OLED settings applied - boot animation running");
+  }
+#endif
+}
+
+// Local-display (OLED) session idle-logout. Same per-transport policy as
+// web/serial/BLE, keyed on PHYSICAL input only: gInputCache.seq is a monotonic
+// counter advanced solely by the gamepad/ANO input devices (the same signal
+// power-save uses), so CLI/web/ESP-NOW commands never refresh the OLED session
+// — a network-busy box still locks its own screen. Deliberately independent of
+// display-sleep: this revokes the login, it does not blank pixels, and it keeps
+// running while the panel is asleep so an idle session still expires in the dark.
+void localDisplaySessionTick() {
+#if ENABLE_OLED_DISPLAY
+  extern InputCache gInputCache;
+
+  static uint32_t lastSeenSeq = 0;
+  static bool inited = false;
+  const uint32_t seq = gInputCache.seq;
+  if (!inited) { inited = true; lastSeenSeq = seq; }
+
+  if (!gLocalDisplayAuthed) {        // no local session → nothing to age
+    lastSeenSeq = seq;
+    return;
+  }
+
+  if (seq != lastSeenSeq) {          // real physical input → refresh idle clock
+    lastSeenSeq = seq;
+    gLocalDisplayLastInteractionMs = sessionStampNow();
+    return;
+  }
+
+  if (sessionIdleExpired(SOURCE_LOCAL_DISPLAY, gLocalDisplayLastInteractionMs)) {
+    // Clears gLocalDisplayAuthed/User and forces the OLED_LOGIN screen via
+    // oledNotifyLocalDisplayAuthChanged() (or the auth guard on next render if
+    // the panel is currently asleep).
+    logoutTransport(SOURCE_LOCAL_DISPLAY);
+    broadcastOutput("[display] Signed out due to inactivity. Please log in again.");
   }
 #endif
 }

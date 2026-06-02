@@ -169,6 +169,9 @@ void bleUpdateStreams();
 bool isBLERunning();
 void getBLEStatus(char* buffer, size_t bufferSize);
 const char* getBLEStateString();
+// Recent BLE message history, newest first (used by the OLED status screen in
+// OLED_Mode_Bluetooth.cpp). Fills out[] with up to maxLines entries; returns count.
+int bleGetRecentMessages(const char* out[], int maxLines);
 
 // Mode (server vs. G2 client) — reads gSettings.bleMode
 const char* getBleModeString();

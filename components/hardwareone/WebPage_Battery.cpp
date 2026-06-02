@@ -1,0 +1,190 @@
+#include "System_BuildConfig.h"
+
+#if ENABLE_WEB_BATTERY
+
+#include <Arduino.h>
+#include <ArduinoJson.h>
+
+#include "System_User.h"          // AuthContext
+#include "System_Battery.h"       // gBatteryState, getBatteryStatusString()
+#include "System_MemUtil.h"       // ps_alloc, AllocPref, PSRAM_JSON_DOC
+#include "WebPage_Battery.h"
+#include "WebServer_Server.h"     // streamBeginHtml/EndHtml, streamPageWithContent, WEB_AUTH_OR_RETURN
+#include "WebServer_Utils.h"
+
+// ===========================================================================
+// /api/battery/status — capability-flagged live snapshot
+// ===========================================================================
+// The page renders one capability-driven UI: base fields (voltage/percent/
+// status) for any backend, and the rate/ETA extras only when caps.rate is set
+// (fuel-gauge backend). Mirrors the buildSensorStatusJson() pattern (PSRAM
+// buffer + ArduinoJson).
+static const char* buildBatteryJson() {
+  static char* buf = nullptr;
+  static const size_t kBufSize = 512;
+  if (!buf) {
+    buf = (char*)ps_alloc(kBufSize, AllocPref::PreferPSRAM, "battery.status.json");
+    if (!buf) return "{}";
+  }
+  PSRAM_JSON_DOC(doc);
+
+  const bool present = (gBatteryState.status != BATTERY_NOT_PRESENT);
+#if BATTERY_BACKEND_FUEL_GAUGE
+  const char* backend = "fuelgauge";
+  const bool  hasRate = true;
+#elif BATTERY_BACKEND_ADC
+  const char* backend = "adc";
+  const bool  hasRate = false;
+#else
+  const char* backend = "none";
+  const bool  hasRate = false;
+#endif
+
+  doc["present"]  = present;
+  doc["backend"]  = backend;
+  JsonObject caps = doc["caps"].to<JsonObject>();
+  caps["rate"]    = hasRate;
+  doc["voltage"]  = gBatteryState.voltage;
+  doc["percent"]  = gBatteryState.percentage;
+  doc["status"]   = getBatteryStatusString();
+  doc["charging"] = gBatteryState.isCharging;
+  doc["usb"]      = gBatteryState.usbPresent;
+  if (hasRate) {
+    doc["rate_pct_hr"] = gBatteryState.cratePctPerHr;
+    // Estimated minutes remaining, only while actually discharging.
+    if (present && gBatteryState.cratePctPerHr < -0.01f) {
+      doc["eta_min"] = (long)((gBatteryState.percentage / -gBatteryState.cratePctPerHr) * 60.0f);
+    }
+  }
+
+  serializeJson(doc, buf, kBufSize);
+  return buf;
+}
+
+esp_err_t handleBatteryStatus(httpd_req_t* req) {
+  WEB_AUTH_OR_RETURN(req, ctx);
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_send(req, buildBatteryJson(), HTTPD_RESP_USE_STRLEN);
+  return ESP_OK;
+}
+
+// ===========================================================================
+// /battery page
+// ===========================================================================
+static void streamBatteryContent(httpd_req_t* req, const String& username) {
+  streamBeginHtml(req, "Battery", false, username, "battery");
+
+  httpd_resp_send_chunk(req, R"HTML(
+<div class='card'>
+  <h2 style='margin-top:0'>Battery</h2>
+  <div id='bat-absent' style='display:none;opacity:.8'>No battery detected &mdash; running on USB.</div>
+  <div id='bat-live' style='display:flex;flex-wrap:wrap;gap:1.5rem;align-items:baseline'>
+    <div><span id='bat-pct' style='font-size:2.6rem;font-weight:bold'>--</span><span style='font-size:1.2rem'>%</span></div>
+    <div>Voltage: <b id='bat-volt'>--</b> V</div>
+    <div>Status: <b id='bat-status'>--</b></div>
+    <div id='bat-rate-wrap' style='display:none'>Rate: <b id='bat-rate'>--</b> %/hr</div>
+    <div id='bat-eta-wrap' style='display:none'>Est. remaining: <b id='bat-eta'>--</b></div>
+    <div>Source: <b id='bat-src'>--</b></div>
+  </div>
+</div>
+
+<div class='card'>
+  <h3 style='margin-top:0'>History</h3>
+  <canvas id='bat-chart' width='960' height='280' style='width:100%;max-width:960px;background:var(--panel-bg);border:1px solid #444'></canvas>
+  <div style='margin:.5rem 0'>
+    <button class='btn' id='bat-refresh'>Refresh log</button>
+    <span id='bat-log-info' style='margin-left:.5rem;opacity:.8'></span>
+  </div>
+  <div style='overflow:auto;max-height:340px'>
+    <table id='bat-table' style='border-collapse:collapse;font-family:monospace;font-size:.85rem'></table>
+  </div>
+</div>
+)HTML", HTTPD_RESP_USE_STRLEN);
+
+  httpd_resp_send_chunk(req, R"JS(
+<script>(function(){
+  function fmt(n,d){return (n===null||n===undefined||isNaN(n))?'--':Number(n).toFixed(d);}
+  function etaStr(min){if(min==null)return '--';var h=Math.floor(min/60),m=min%60;return h>0?(h+'h '+m+'m'):(m+'m');}
+
+  // --- live status poll (capability-driven) ---
+  function applyStatus(s){
+    if(!s){return;}
+    var absent=hw._ge('bat-absent'),live=hw._ge('bat-live');
+    if(s.present===false){if(absent)absent.style.display='';if(live)live.style.display='none';return;}
+    if(absent)absent.style.display='none';if(live)live.style.display='flex';
+    hw.setText('bat-pct',fmt(s.percent,1));
+    hw.setText('bat-volt',fmt(s.voltage,3));
+    hw.setText('bat-status',s.status||'--');
+    hw.setText('bat-src',s.charging?'Charging':(s.usb?'USB (full)':'Battery'));
+    var hasRate=s.caps&&s.caps.rate;
+    hw.toggle('bat-rate-wrap',!!hasRate);
+    if(hasRate)hw.setText('bat-rate',fmt(s.rate_pct_hr,2));
+    var showEta=hasRate&&(s.eta_min!=null&&s.eta_min!==undefined);
+    hw.toggle('bat-eta-wrap',showEta);
+    if(showEta)hw.setText('bat-eta',etaStr(s.eta_min));
+  }
+  hw.fetchJSON('/api/battery/status').then(applyStatus).catch(function(e){console.error('[BATTERY] status',e);});
+  hw.pollJSON('/api/battery/status',2000,applyStatus);
+
+  // --- log fetch + parse + render (clean comma-CSV) ---
+  function parseCSV(text){
+    var lines=text.split('\n').filter(function(l){return l.trim().length;});
+    if(!lines.length)return {hdr:[],rows:[]};
+    return {hdr:lines[0].split(','),rows:lines.slice(1).map(function(l){return l.split(',');})};
+  }
+  function col(hdr,name){for(var i=0;i<hdr.length;i++){if(hdr[i].replace(/\[.*\]/,'').trim()===name)return i;}return -1;}
+  function renderTable(d){
+    var t=hw._ge('bat-table');if(!t)return;
+    var h='<tr>';for(var i=0;i<d.hdr.length;i++){h+='<th style="text-align:left;padding:2px 10px;border-bottom:1px solid #555">'+d.hdr[i]+'</th>';}h+='</tr>';
+    var rows=d.rows.slice(-60);
+    for(var r=0;r<rows.length;r++){h+='<tr>';for(var c=0;c<rows[r].length;c++){h+='<td style="padding:1px 10px;white-space:nowrap">'+(rows[r][c]||'')+'</td>';}h+='</tr>';}
+    t.innerHTML=h;
+  }
+  function drawChart(d){
+    var cv=hw._ge('bat-chart');if(!cv||!cv.getContext)return;var ctx=cv.getContext('2d');
+    var W=cv.width,H=cv.height,padL=34,padR=10,padT=10,padB=6;
+    ctx.clearRect(0,0,W,H);
+    var ci=col(d.hdr,'pct'),ei=col(d.hdr,'event');
+    if(ci<0||!d.rows.length)return;
+    var n=d.rows.length;
+    function X(i){return padL+(W-padL-padR)*(n<=1?0:i/(n-1));}
+    function Yp(p){return padT+(H-padT-padB)*(1-(p/100));}
+    ctx.strokeStyle='#444';ctx.fillStyle='#888';ctx.font='10px monospace';ctx.lineWidth=1;
+    [0,50,100].forEach(function(p){var y=Yp(p);ctx.beginPath();ctx.moveTo(padL,y);ctx.lineTo(W-padR,y);ctx.stroke();ctx.fillText(p+'%',2,y+3);});
+    // event markers (vertical ticks) behind the curve
+    if(ei>=0){ctx.strokeStyle='#e0a030';ctx.lineWidth=1;
+      for(var j=0;j<n;j++){if(!(d.rows[j][ei]||'').trim())continue;var x=X(j);ctx.beginPath();ctx.moveTo(x,padT);ctx.lineTo(x,H-padB);ctx.stroke();}}
+    // percent curve
+    ctx.strokeStyle='#4caf50';ctx.lineWidth=2;ctx.beginPath();var started=false;
+    for(var i=0;i<n;i++){var p=parseFloat(d.rows[i][ci]);if(isNaN(p))continue;var x=X(i),y=Yp(p);started?ctx.lineTo(x,y):(ctx.moveTo(x,y),started=true);}
+    ctx.stroke();
+  }
+  function loadLog(){
+    var info=hw._ge('bat-log-info');if(info)info.textContent='loading…';
+    hw.fetchText('/api/files/view?name=battery.csv&mode=raw').then(function(text){
+      var d=parseCSV(text);renderTable(d);drawChart(d);
+      if(info)info.textContent=d.rows.length+' samples';
+    }).catch(function(e){if(info)info.textContent='no log data yet';console.error('[BATTERY] log',e);});
+  }
+  hw.on(hw._ge('bat-refresh'),'click',loadLog);
+  loadLog();
+})();</script>
+)JS", HTTPD_RESP_USE_STRLEN);
+
+  streamEndHtml(req);
+}
+
+esp_err_t handleBatteryPage(httpd_req_t* req) {
+  WEB_AUTH_OR_RETURN(req, ctx);
+  streamPageWithContent(req, "battery", ctx.user, streamBatteryContent);
+  return ESP_OK;
+}
+
+void registerBatteryHandlers(httpd_handle_t server) {
+  static httpd_uri_t batteryPage = { .uri = "/battery", .method = HTTP_GET, .handler = handleBatteryPage, .user_ctx = NULL };
+  httpd_register_uri_handler(server, &batteryPage);
+  static httpd_uri_t batteryStatus = { .uri = "/api/battery/status", .method = HTTP_GET, .handler = handleBatteryStatus, .user_ctx = NULL };
+  httpd_register_uri_handler(server, &batteryStatus);
+}
+
+#endif // ENABLE_WEB_BATTERY

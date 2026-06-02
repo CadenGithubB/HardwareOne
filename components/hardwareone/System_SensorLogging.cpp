@@ -528,10 +528,12 @@ void sensorLogTick() {
               }
             }
 
+            // Shift existing rotations up: .i -> .(i+1) for i = N-1..1. The base
+            // file is moved to .1 separately AFTER this loop, so the loop must
+            // operate on the numbered files only — never on the base path.
             for (int i = gSensorLogMaxRotations - 1; i >= 1; i--) {
               char fromFile[128], toFile[128];
-              if (i == 1) snprintf(fromFile, sizeof(fromFile), "%s", activePath);
-              else snprintf(fromFile, sizeof(fromFile), "%s.%d", activePath, i);
+              snprintf(fromFile, sizeof(fromFile), "%s.%d", activePath, i);
               snprintf(toFile, sizeof(toFile), "%s.%d", activePath, i + 1);
               if (VFS::existsGuarded(String(fromFile), VFS::systemAuth("senlog.rotate"))) {
                 VFS::renameGuarded(String(fromFile), String(toFile), VFS::systemAuth("senlog.rotate"));

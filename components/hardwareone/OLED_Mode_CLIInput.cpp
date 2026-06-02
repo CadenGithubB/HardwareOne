@@ -171,6 +171,12 @@ void resetCLIInputState() {
 // Registration
 // ============================================================================
 
+// Entry hook (was an inline reset inside requestOLEDMode): clear the input
+// buffer on every entry, forward or back.
+static void cliInputOnEnter(bool /*isForward*/) {
+  resetCLIInputState();
+}
+
 static const OLEDModeEntry sCLIInputMode = {
   OLED_CLI_INPUT,
   "CLI Input",
@@ -180,7 +186,8 @@ static const OLEDModeEntry sCLIInputMode = {
   handleCLIInputInput,
   true,
   93,   // Just after CLI Output (92)
-  nullptr
+  nullptr,
+  cliInputOnEnter
 };
 
 REGISTER_OLED_MODE_MODULE(&sCLIInputMode, 1, "CLIInput");

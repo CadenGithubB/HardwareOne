@@ -951,9 +951,18 @@ static bool fileBrowserInputHandler(int deltaX, int deltaY, uint32_t newlyPresse
 
 extern void displayFileBrowserRendered();
 
-// Columns: mode, name, iconName, displayFunc, availFunc, inputFunc, showInMenu, menuOrder, hints
+// Entry hook. Previously the reset was duplicated two ways: cmd_oledmode called
+// the heavy resetOLEDFileBrowser() (delete+reinit), while the menu set the lazy
+// oledFileBrowserNeedsInit flag. Unify on the lazy flag (reinit happens on the
+// next render) and gate on isForward so back-navigation keeps your folder/scroll
+// position instead of snapping to root.
+static void fileBrowserOnEnter(bool isForward) {
+  if (isForward) oledFileBrowserNeedsInit = true;
+}
+
+// Columns: mode, name, iconName, displayFunc, availFunc, inputFunc, showInMenu, menuOrder, hints, onEnter
 static const OLEDModeEntry sFileBrowserModes[] = {
-  { OLED_FILE_BROWSER, "Files", "file_text", displayFileBrowserRendered, nullptr, fileBrowserInputHandler, false, -1, nullptr },
+  { OLED_FILE_BROWSER, "Files", "file_text", displayFileBrowserRendered, nullptr, fileBrowserInputHandler, false, -1, nullptr, fileBrowserOnEnter },
 };
 
 REGISTER_OLED_MODE_MODULE(sFileBrowserModes, sizeof(sFileBrowserModes) / sizeof(sFileBrowserModes[0]), "FileBrowser");

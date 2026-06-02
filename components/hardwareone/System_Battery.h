@@ -22,15 +22,34 @@
 #define VBAT_LOW 3.4f
 #define VBAT_CRITICAL 3.2f
 
+// Off-charger status bands (LiPo discharge curve). These are capacity-
+// independent voltage levels, so they work with ANY battery. classifyAndNotify
+// walks them top-down once USB is absent. On the charger the status is always
+// CHARGING — during the CV charge phase the cell sits near 4.2V regardless of
+// true SOC, so voltage can't tell "topped off" from "still filling". Tune here:
+// the OLED icon, G2 widget, web page, and notifications all read the status.
+#define VBAT_BAND_FULL      4.15f   // off-charger, >= → Full
+#define VBAT_BAND_HIGH      4.00f   // >= → High
+#define VBAT_BAND_GOOD      3.80f   // >= → Good
+#define VBAT_BAND_MEDIUM    3.65f   // >= → Medium
+#define VBAT_BAND_LOW       3.45f   // >= → Low
+#define VBAT_BAND_CRITICAL  3.30f   // >= → Critical, else → Empty
+
 // Status enum — public API surface, shared across all backends.
 enum BatteryStatus {
   BATTERY_UNKNOWN = 0,
   BATTERY_CHARGING,
   BATTERY_FULL,
-  BATTERY_DISCHARGING,
+  BATTERY_DISCHARGING,   // legacy generic off-charger state; superseded by the finer bands below
   BATTERY_LOW,
   BATTERY_CRITICAL,
-  BATTERY_NOT_PRESENT
+  BATTERY_NOT_PRESENT,
+  // Finer off-charger voltage bands. Appended so the existing ordinals stay
+  // stable. classifyAndNotify() now walks the full ladder when on battery.
+  BATTERY_HIGH,
+  BATTERY_GOOD,
+  BATTERY_MEDIUM,
+  BATTERY_EMPTY
 };
 
 // Snapshot of current battery state. Updated by updateBattery() on the 10s
@@ -77,5 +96,23 @@ char getBatteryIcon();
 // CLI commands.
 const char* cmd_battery_status(const String& args);
 const char* cmd_battery_calibrate(const String& args);
+const char* cmd_batterylog(const String& args);
+
+// Time-series logging. Appends one clean comma-CSV row to /battery.csv per
+// sample so a discharge curve can be pulled off-device and graphed with
+// standard tools. Columns:
+//   boot,uptime_ms,epoch_s,datetime,pct,voltage,crate,status,charging,usb,event
+// Visual/aligned presentation is the web UI's job, not this file's format.
+// Called every main-loop battery tick; self-gates on gSettings.batteryLogEnabled
+// + gSettings.batteryLogIntervalMs and rotates the file by size. Independent of
+// the sensor log.
+void batteryLogTick();
+
+// Append a discrete power-state annotation (sleep/wake, CPU freq change, power
+// mode change, power-save enter/wake) — same schema, with the token in the
+// 'event' column and the live battery snapshot alongside it. Always recorded
+// (not interval-gated); respects gSettings.batteryLogEnabled. Safe from any
+// task. Tokens must be comma/newline-free.
+void batteryLogEvent(const char* event);
 
 #endif // SYSTEM_BATTERY_H

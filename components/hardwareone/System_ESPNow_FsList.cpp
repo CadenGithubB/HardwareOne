@@ -19,6 +19,7 @@
 #include "System_CommandTypes.h"   // ExecReq::DeferredFn (signature for submitDeferredToCmdExec)
 #include "System_Debug.h"
 #include "System_ESPNow.h"          // generateMessageId
+#include "System_ESPNow_Tx.h"       // espnowtx::sendAead / sendAeadSync (Step 3c)
 #include "System_FileManager.h"     // FileEntry, FILE_MANAGER_MAX_CACHED_ITEMS
 #include "System_Filesystem.h"      // filesystemReady, getPermissions
 #include "System_MemUtil.h"         // ps_alloc — PSRAM-backed reply buffer (off espnow_task stack)
@@ -198,8 +199,9 @@ uint32_t fsListSendRequest(const uint8_t peerMac[6],
   strlcpy(req.path, path, sizeof(req.path));
 
   uint32_t msgId = generateMessageId();
-  bool sent = v4_send_payload_smart(peerMac, ESPNOW_V4_TYPE_FS_LIST_REQ, 0, msgId,
-                                    (const uint8_t*)&req, sizeof(req), 1);
+  // Step 3c: cmd_exec context (CLI caller) — submitSync gives backpressure.
+  bool sent = espnowtx::sendAeadSync(peerMac, ESPNOW_V4_TYPE_FS_LIST_REQ, 0, msgId,
+                                     (const uint8_t*)&req, sizeof(req), 1, 2000);
   if (!sent) {
     sPending[slot].reqId = 0;
     WARN_ESPNOWF("[FSLIST] LIST send failed reqId=%u path='%s'", reqId, path);
@@ -228,8 +230,9 @@ uint32_t fsStatSendRequest(const uint8_t peerMac[6],
   strlcpy(req.path, path, sizeof(req.path));
 
   uint32_t msgId = generateMessageId();
-  bool sent = v4_send_payload_smart(peerMac, ESPNOW_V4_TYPE_FS_STAT_REQ, 0, msgId,
-                                    (const uint8_t*)&req, sizeof(req), 1);
+  // Step 3c: cmd_exec context (CLI caller).
+  bool sent = espnowtx::sendAeadSync(peerMac, ESPNOW_V4_TYPE_FS_STAT_REQ, 0, msgId,
+                                     (const uint8_t*)&req, sizeof(req), 1, 2000);
   if (!sent) {
     sPending[slot].reqId = 0;
     WARN_ESPNOWF("[FSLIST] STAT send failed reqId=%u path='%s'", reqId, path);
@@ -258,8 +261,9 @@ uint32_t fsGetSendRequest(const uint8_t peerMac[6],
   strlcpy(req.path, path, sizeof(req.path));
 
   uint32_t msgId = generateMessageId();
-  bool sent = v4_send_payload_smart(peerMac, ESPNOW_V4_TYPE_FS_GET_REQ, 0, msgId,
-                                    (const uint8_t*)&req, sizeof(req), 1);
+  // Step 3c: cmd_exec context (CLI caller).
+  bool sent = espnowtx::sendAeadSync(peerMac, ESPNOW_V4_TYPE_FS_GET_REQ, 0, msgId,
+                                     (const uint8_t*)&req, sizeof(req), 1, 2000);
   if (!sent) {
     sPending[slot].reqId = 0;
     WARN_ESPNOWF("[FSLIST] GET send failed reqId=%u path='%s'", reqId, path);
@@ -351,24 +355,27 @@ static void sendBusyReply(uint8_t op, const uint8_t srcMac[6],
       V4PayloadFsListReplyHeader busy = {};
       memcpy(&busy.reqId, payload, sizeof(busy.reqId));
       busy.status = FS_LIST_STATUS_TOO_BUSY;
-      v4_send_payload_smart(srcMac, ESPNOW_V4_TYPE_FS_LIST_REPLY, 0, msgId,
-                            (const uint8_t*)&busy, sizeof(busy), 1);
+      // Step 3c: espnow_task RX-handler context — fire-and-forget.
+      espnowtx::sendAead(srcMac, ESPNOW_V4_TYPE_FS_LIST_REPLY, 0, msgId,
+                         (const uint8_t*)&busy, sizeof(busy), 1);
       break;
     }
     case FS_OP_STAT: {
       V4PayloadFsStatReply busy = {};
       memcpy(&busy.reqId, payload, sizeof(busy.reqId));
       busy.status = FS_LIST_STATUS_TOO_BUSY;
-      v4_send_payload_smart(srcMac, ESPNOW_V4_TYPE_FS_STAT_REPLY, 0, msgId,
-                            (const uint8_t*)&busy, sizeof(busy), 1);
+      // Step 3c: espnow_task RX-handler context — fire-and-forget.
+      espnowtx::sendAead(srcMac, ESPNOW_V4_TYPE_FS_STAT_REPLY, 0, msgId,
+                         (const uint8_t*)&busy, sizeof(busy), 1);
       break;
     }
     case FS_OP_GET: {
       V4PayloadFsGetAck busy = {};
       memcpy(&busy.reqId, payload, sizeof(busy.reqId));
       busy.status = FS_LIST_STATUS_TOO_BUSY;
-      v4_send_payload_smart(srcMac, ESPNOW_V4_TYPE_FS_GET_ACK, 0, msgId,
-                            (const uint8_t*)&busy, sizeof(busy), 1);
+      // Step 3c: espnow_task RX-handler context — fire-and-forget.
+      espnowtx::sendAead(srcMac, ESPNOW_V4_TYPE_FS_GET_ACK, 0, msgId,
+                         (const uint8_t*)&busy, sizeof(busy), 1);
       break;
     }
   }
@@ -609,8 +616,9 @@ static void processListDeferred(const uint8_t srcMac[6], const V4PayloadFsListRe
     errHdr.status = FS_LIST_STATUS_NOT_READY;
     strlcpy(errHdr.path, req.path, sizeof(errHdr.path));
     uint32_t errMsgId = generateMessageId();
-    v4_send_payload_smart(srcMac, ESPNOW_V4_TYPE_FS_LIST_REPLY, 0, errMsgId,
-                          (const uint8_t*)&errHdr, sizeof(errHdr), 1);
+    // Step 3c: cmd_exec context (deferred handler).
+    espnowtx::sendAeadSync(srcMac, ESPNOW_V4_TYPE_FS_LIST_REPLY, 0, errMsgId,
+                           (const uint8_t*)&errHdr, sizeof(errHdr), 1, 2000);
     return;
   }
   V4PayloadFsListReplyHeader* hdr = (V4PayloadFsListReplyHeader*)replyBuf;
@@ -735,8 +743,10 @@ send_reply: ;
   uint16_t payloadLen = sizeof(V4PayloadFsListReplyHeader)
                       + (uint16_t)hdr->entryCount * sizeof(V4PayloadFsEntry);
   uint32_t msgId = generateMessageId();
-  bool sent = v4_send_payload_smart(srcMac, ESPNOW_V4_TYPE_FS_LIST_REPLY, 0, msgId,
-                                    replyBuf, payloadLen, 1);
+  // Step 3c: cmd_exec context (deferred handler). 3s timeout — REPLY payload
+  // can be up to ~500B with full entry list which fragments on the wire.
+  bool sent = espnowtx::sendAeadSync(srcMac, ESPNOW_V4_TYPE_FS_LIST_REPLY, 0, msgId,
+                                     replyBuf, payloadLen, 1, 3000);
   DEBUG_ESPNOWF("[FSLIST] Sent LIST REPLY reqId=%u status=%u entries=%u/%u hasMore=%u sent=%d",
                 hdr->reqId, hdr->status, hdr->entryCount, hdr->totalEntries,
                 hdr->hasMore, (int)sent);
@@ -791,8 +801,9 @@ static void processStatDeferred(const uint8_t srcMac[6], const V4PayloadFsStatRe
 
 send_stat: ;
   uint32_t msgId = generateMessageId();
-  bool sent = v4_send_payload_smart(srcMac, ESPNOW_V4_TYPE_FS_STAT_REPLY, 0, msgId,
-                                    (const uint8_t*)&reply, sizeof(reply), 1);
+  // Step 3c: cmd_exec context (deferred handler).
+  bool sent = espnowtx::sendAeadSync(srcMac, ESPNOW_V4_TYPE_FS_STAT_REPLY, 0, msgId,
+                                     (const uint8_t*)&reply, sizeof(reply), 1, 2000);
   DEBUG_ESPNOWF("[FSLIST] Sent STAT REPLY reqId=%u status=%u used=%llu/%llu pct=%u sent=%d",
                 reply.reqId, reply.status,
                 (unsigned long long)reply.usedBytes,
@@ -857,8 +868,9 @@ static void processGetDeferred(const uint8_t srcMac[6], const V4PayloadFsGetReq&
 
 send_ack: ;
   uint32_t msgId = generateMessageId();
-  v4_send_payload_smart(srcMac, ESPNOW_V4_TYPE_FS_GET_ACK, 0, msgId,
-                        (const uint8_t*)&ack, sizeof(ack), 1);
+  // Step 3c: cmd_exec context (deferred handler).
+  espnowtx::sendAeadSync(srcMac, ESPNOW_V4_TYPE_FS_GET_ACK, 0, msgId,
+                         (const uint8_t*)&ack, sizeof(ack), 1, 2000);
   DEBUG_ESPNOWF("[FSLIST] Sent GET ACK reqId=%u status=%u fileSize=%u",
                 ack.reqId, ack.status, ack.fileSize);
 

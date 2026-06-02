@@ -164,21 +164,48 @@ struct OLEDScrollState {
   int separatorX;         // X position of vertical separator line
   int iconSize;           // Icon size in right pane (default 32)
   bool singleLineItems;   // true = 10px single-line items, false = 16px two-line
+
+  // Optional right-pane decorator (split-pane only). Called once per frame for
+  // the SELECTED item, right after its icon is drawn, so a menu can render an
+  // availability badge + status text beside the icon without baking that logic
+  // into the primitive. areaX = left edge of the icon pane (separatorX + 4);
+  // iconY/iconSize describe the icon box so the callback can place text below
+  // it. nullptr = draw the icon only (the default for every existing user).
+  void (*rightPaneDraw)(Adafruit_SSD1306* display, OLEDScrollItem* selected,
+                        int areaX, int iconY, int iconSize);
 };
 
 void oledScrollInit(OLEDScrollState* state, const char* title = nullptr, int visibleLines = 4);
 bool oledScrollAddItem(OLEDScrollState* state, const char* line1, const char* line2 = nullptr, 
                        bool selectable = true, void* userData = nullptr);
 void oledScrollClear(OLEDScrollState* state);
+// Like oledScrollClear() but PRESERVES selectedIndex/scrollOffset, so a menu can
+// be rebuilt every frame (oledScrollClear* + re-add items) without losing the
+// cursor. The selection is clamped back into range automatically by
+// oledScrollHandleNav()/oledScrollRenderSimple(); for hand-rolled render loops
+// (e.g. Power) call oledScrollClampSelection() after re-adding items.
+void oledScrollClearKeepSelection(OLEDScrollState* state);
+// Clamp selectedIndex into [0, itemCount-1] and keep it within the visible window.
+// Safe no-op when already valid.
+void oledScrollClampSelection(OLEDScrollState* state);
 void oledScrollUp(OLEDScrollState* state);
 void oledScrollDown(OLEDScrollState* state);
 void oledScrollPageUp(OLEDScrollState* state);
 void oledScrollPageDown(OLEDScrollState* state);
 OLEDScrollItem* oledScrollGetSelected(OLEDScrollState* state);
 OLEDScrollItem* oledScrollGetItem(OLEDScrollState* state, int index);
-void oledScrollRender(Adafruit_SSD1306* display, OLEDScrollState* state, 
+void oledScrollRender(Adafruit_SSD1306* display, OLEDScrollState* state,
                       bool showScrollbar = true, bool showSelection = true,
                       const OLEDFooterHints* footerHints = nullptr);
+
+// Lightweight single-line list renderer — the compact counterpart to
+// oledScrollRender(). Renders each item on ONE 8px line with a "> " cursor
+// prefix (the Power / Network main-menu look), instead of oledScrollRender()'s
+// 16px two-line / split-pane items. Use this for plain single-line text menus
+// so more than one option is visible at a time. Honors scrollOffset/visibleLines
+// and draws a thin scrollbar only when the list overflows.
+void oledScrollRenderSimple(Adafruit_SSD1306* display, OLEDScrollState* state,
+                            bool showSelection = true);
 int oledScrollCalculateVisibleLines(int displayHeight, int textSize, bool hasTitle = false, bool hasFooter = false);
 
 // Generic list-menu navigation helper using centralized gNavEvents.
@@ -238,6 +265,10 @@ extern OLEDKeyboardState gOledKeyboardState;
 void oledKeyboardInit(const char* title = nullptr, const char* initialText = nullptr, int maxLength = OLED_KEYBOARD_MAX_LENGTH);
 void oledKeyboardReset();
 void oledKeyboardDisplay(Adafruit_SSD1306* display);
+// Convenience "curtain": if the keyboard overlay is active, draw it and return
+// true so a mode's display function can early-`return`. Replaces the repeated
+// `if (oledKeyboardIsActive()) { oledKeyboardDisplay(d); return; }` idiom.
+bool oledKeyboardDrawIfActive(Adafruit_SSD1306* display);
 bool oledKeyboardHandleInput(int deltaX, int deltaY, uint32_t newlyPressed);
 const char* oledKeyboardGetText();
 bool oledKeyboardIsActive();

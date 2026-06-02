@@ -29,7 +29,6 @@ extern const char* getRemoteSubmenuId();
 // Sensor menu state variables from OLED_Display.cpp
 extern const OLEDMenuItem oledSensorMenuItems[];
 extern const int oledSensorMenuItemCount;
-extern int oledSensorMenuSelectedIndex;
 
 // BatteryIconState declared in OLED_Utils.h (included above)
 
@@ -39,74 +38,118 @@ extern char getBatteryIcon();
 extern void drawIcon(DisplayDriver* display, const char* iconName, int x, int y, uint16_t color);
 extern void drawIconScaled(DisplayDriver* display, const char* iconName, int x, int y, uint16_t color, float scale);
 extern void enterUnavailablePage(const String& title, const String& reason);
+extern void resetOLEDMenu();  // defined in OLED_Utils.cpp; called by the launcher onEnter hook
 
 // ============================================================================
-// Sensor Menu Filtering & Sorting
+// Shared menu primitives (used by BOTH the sensor menu and the main launcher)
 // ============================================================================
+// These collapse the formerly hand-rolled list/menu systems onto OLEDScrollState:
+//   * menuItemRightPaneDraw - availability badge + status text in the icon pane
+//   * populateMenuScroll     - fill an OLEDScrollState from an OLEDMenuItem[]
+//   * oledMenuExecuteItem    - availability-aware "select" dispatch
+// Per-mode entry init for launched modes now runs via OLEDModeEntry::onEnterFunc,
+// so the dispatch here stays tiny.
 
-// Filtered/sorted index array - only includes compiled-in sensors
-static int sensorMenuSortedIndices[20];  // Max 20 sensor items
-static int sensorMenuVisibleCount = 0;   // Number of visible (compiled-in) items
-static bool sensorMenuSorted = false;
+// Right-pane decorator for the SELECTED item: availability badge (D/X) in the
+// top-left of the icon pane, and a status word (Ready/Off/No HW/N/A) below the
+// icon. Reads the backing descriptor via item->userData. Ported verbatim from
+// the old displaySensorMenu / displayMenuListStyle right-pane logic.
+static void menuItemRightPaneDraw(Adafruit_SSD1306* d, OLEDScrollItem* item,
+                                  int areaX, int iconY, int iconSize) {
+  if (!d || !item || !item->userData) return;
+  const OLEDMenuItem* mi = (const OLEDMenuItem*)item->userData;
+  MenuAvailability avail = getMenuAvailability(mi->targetMode, nullptr);
 
-// Get sort priority for availability (lower = higher priority)
-static int getAvailabilitySortPriority(MenuAvailability avail) {
-  switch (avail) {
-    case MenuAvailability::AVAILABLE:        return 0;  // Ready - show first
-    case MenuAvailability::FEATURE_DISABLED: return 1;  // Off but available
-    case MenuAvailability::NOT_DETECTED:     return 2;  // No hardware
+  d->setTextSize(1);
+  d->setTextColor(DISPLAY_COLOR_WHITE);
+
+  if (avail != MenuAvailability::AVAILABLE) {
+    d->setCursor(areaX + 2, OLED_CONTENT_START_Y);
+    d->print(avail == MenuAvailability::FEATURE_DISABLED ? "D" : "X");
+  }
+
+  int textY = iconY + iconSize + 2;
+  if (textY + 8 <= OLED_CONTENT_HEIGHT) {
+    d->setCursor(areaX + 2, textY);
+    switch (avail) {
+      case MenuAvailability::AVAILABLE:        d->print("Ready"); break;
+      case MenuAvailability::FEATURE_DISABLED: d->print("Off");   break;
+      case MenuAvailability::NOT_DETECTED:     d->print("No HW"); break;
+      case MenuAvailability::NOT_BUILT:        d->print("N/A");   break;
+      default: break;
+    }
+  }
+}
+
+// Availability sort rank (lower = higher priority): Ready, then Off, then No-HW.
+static int menuAvailRank(MenuAvailability a) {
+  switch (a) {
+    case MenuAvailability::AVAILABLE:        return 0;
+    case MenuAvailability::FEATURE_DISABLED: return 1;
+    case MenuAvailability::NOT_DETECTED:     return 2;
     default:                                 return 3;
   }
 }
 
-// Filter and sort the sensor menu - excludes NOT_BUILT items
-void sortSensorMenu() {
-  sensorMenuVisibleCount = 0;
-  
-  // First pass: collect only compiled-in sensors
-  for (int i = 0; i < oledSensorMenuItemCount && sensorMenuVisibleCount < 20; i++) {
-    MenuAvailability avail = getMenuAvailability(oledSensorMenuItems[i].targetMode, nullptr);
-    if (avail != MenuAvailability::NOT_BUILT) {
-      sensorMenuSortedIndices[sensorMenuVisibleCount++] = i;
+// Fill `s` from an OLEDMenuItem[] array: line1 = name, iconName = icon, and
+// userData = the descriptor (so the right-pane callback + oledMenuExecuteItem
+// can read targetMode). dropNotBuilt skips compiled-out entries; sortByAvailability
+// orders Ready->Off->No-HW (the sensor-menu behavior). Preserves the cursor.
+static void populateMenuScroll(OLEDScrollState* s, const OLEDMenuItem* items, int count,
+                               bool sortByAvailability, bool dropNotBuilt) {
+  oledScrollClearKeepSelection(s);
+
+  int order[OLED_SCROLL_MAX_ITEMS];
+  int n = 0;
+  for (int i = 0; i < count && n < OLED_SCROLL_MAX_ITEMS; i++) {
+    if (dropNotBuilt &&
+        getMenuAvailability(items[i].targetMode, nullptr) == MenuAvailability::NOT_BUILT) {
+      continue;
     }
+    order[n++] = i;
   }
-  
-  // Second pass: bubble sort by availability priority
-  for (int i = 0; i < sensorMenuVisibleCount - 1; i++) {
-    for (int j = 0; j < sensorMenuVisibleCount - i - 1; j++) {
-      int idxA = sensorMenuSortedIndices[j];
-      int idxB = sensorMenuSortedIndices[j + 1];
-      
-      MenuAvailability availA = getMenuAvailability(oledSensorMenuItems[idxA].targetMode, nullptr);
-      MenuAvailability availB = getMenuAvailability(oledSensorMenuItems[idxB].targetMode, nullptr);
-      
-      if (getAvailabilitySortPriority(availA) > getAvailabilitySortPriority(availB)) {
-        int temp = sensorMenuSortedIndices[j];
-        sensorMenuSortedIndices[j] = sensorMenuSortedIndices[j + 1];
-        sensorMenuSortedIndices[j + 1] = temp;
+
+  if (sortByAvailability) {
+    for (int a = 0; a < n - 1; a++) {
+      for (int b = 0; b < n - a - 1; b++) {
+        if (menuAvailRank(getMenuAvailability(items[order[b]].targetMode, nullptr)) >
+            menuAvailRank(getMenuAvailability(items[order[b + 1]].targetMode, nullptr))) {
+          int t = order[b]; order[b] = order[b + 1]; order[b + 1] = t;
+        }
       }
     }
   }
-  
-  sensorMenuSorted = true;
+
+  for (int k = 0; k < n; k++) {
+    const OLEDMenuItem* mi = &items[order[k]];
+    oledScrollAddItem(s, mi->name, nullptr, true, (void*)mi);
+    s->items[s->itemCount - 1].iconName = mi->iconName;  // oledScrollAddItem doesn't set iconName
+  }
+  oledScrollClampSelection(s);
 }
 
-// Get number of visible (compiled-in) sensor menu items
-int getSensorMenuVisibleCount() {
-  if (!sensorMenuSorted) sortSensorMenu();
-  return sensorMenuVisibleCount;
-}
-
-// Get the actual menu item index from display position
-int getSensorMenuActualIndex(int displayIndex) {
-  if (!sensorMenuSorted) sortSensorMenu();
-  if (displayIndex < 0 || displayIndex >= sensorMenuVisibleCount) return 0;
-  return sensorMenuSortedIndices[displayIndex];
-}
-
-// Force re-sort on next display (call when availability might have changed)
-void invalidateSensorMenuSort() {
-  sensorMenuSorted = false;
+// Availability-aware "select": switch to an available item's target mode (that
+// mode's own onEnterFunc handles its entry init), or push the current menu and
+// show the unavailable page (so B returns here). `slug` is the trace reason.
+static void oledMenuExecuteItem(const OLEDMenuItem* item, const char* slug) {
+  if (!item) return;
+  OLEDMode target = item->targetMode;
+  String reason;
+  MenuAvailability avail = getMenuAvailability(target, &reason);
+  if (avail != MenuAvailability::AVAILABLE) {
+    if (reason.length() == 0) {
+      switch (avail) {
+        case MenuAvailability::FEATURE_DISABLED: reason = "Disabled"; break;
+        case MenuAvailability::NOT_DETECTED:     reason = "Not detected"; break;
+        case MenuAvailability::NOT_BUILT:        reason = "Not built"; break;
+        default:                                 reason = "Unavailable"; break;
+      }
+    }
+    pushOLEDMode(currentOLEDMode);  // B from the unavailable page returns to this menu
+    enterUnavailablePage(item->name, reason);
+    return;
+  }
+  requestOLEDMode(target, slug);
 }
 
 // ============================================================================
@@ -132,368 +175,160 @@ void getCategoryItems(int categoryId, const OLEDMenuItem** outItems, int* outCou
   }
 }
 
+// ============================================================================
+// Main Launcher - OLEDScrollState (categories -> category items)
+// ============================================================================
+// Two live levels: the top-level category list and one category's item list.
+// The authoritative cursor/level still lives in the globals the header
+// breadcrumb and resetOLEDMenu read (oledMenuSelectedIndex /
+// oledMenuCategorySelected / oledMenuCategoryItemIndex); sMainScroll is a
+// per-frame VIEW rebuilt from them, so those consumers keep working unchanged.
+//
+// (The old launcher also had a dynamic "remote submenu" path behind
+// isInRemoteSubmenu(); that subsystem is currently unreachable - nothing calls
+// buildRemoteSubmenu() - so the live launcher is just these two levels.)
+
+static OLEDScrollState sMainScroll;
+static bool sMainScrollInit = false;
+static char sCatLabels[8][20];  // "<Category> >" decorated labels (persist for line1 ptrs)
+
+static void mainMenuEnsureInit() {
+  if (sMainScrollInit) return;
+  oledScrollInit(&sMainScroll, nullptr, 4);
+  oledScrollSetSplitPane(&sMainScroll, 68, 74, 32);
+  sMainScrollInit = true;
+}
+
+// Rebuild sMainScroll for the current level and sync its cursor from the
+// authoritative global.
+static void mainMenuPopulate() {
+  mainMenuEnsureInit();
+
+  if (oledMenuCategorySelected < 0) {
+    // Level 0 - categories. Decorate names with " >"; no availability badge.
+    oledScrollClearKeepSelection(&sMainScroll);
+    int maxLabels = (int)(sizeof(sCatLabels) / sizeof(sCatLabels[0]));
+    int n = oledMenuCategoryCount < maxLabels ? oledMenuCategoryCount : maxLabels;
+    for (int i = 0; i < n; i++) {
+      snprintf(sCatLabels[i], sizeof(sCatLabels[i]), "%s >", oledMenuCategories[i].name);
+      oledScrollAddItem(&sMainScroll, sCatLabels[i], nullptr, true, (void*)&oledMenuCategories[i]);
+      sMainScroll.items[sMainScroll.itemCount - 1].iconName = oledMenuCategories[i].iconName;
+    }
+    sMainScroll.rightPaneDraw = nullptr;          // categories: icon only
+    sMainScroll.selectedIndex = oledMenuSelectedIndex;
+  } else {
+    // Level 1 - the selected category's items, with availability badges.
+    const OLEDMenuItem* items = nullptr;
+    int count = 0;
+    getCategoryItems(oledMenuCategorySelected, &items, &count);
+    populateMenuScroll(&sMainScroll, items, count, /*sort=*/false, /*dropNotBuilt=*/false);
+    sMainScroll.rightPaneDraw = menuItemRightPaneDraw;
+    sMainScroll.selectedIndex = oledMenuCategoryItemIndex;
+  }
+  oledScrollClampSelection(&sMainScroll);
+}
+
 void displayMenuListStyle() {
   if (!oledDisplay || !oledConnected) return;
-  
-  // Check if remote command keyboard input is active
-  extern bool isRemoteCommandInputActive();
-  if (isRemoteCommandInputActive()) {
-    // Display keyboard for command input
-    oledKeyboardDisplay(oledDisplay);
-    return;
+  mainMenuPopulate();
+  oledScrollRender(oledDisplay, &sMainScroll, true, true, nullptr);
+}
+
+static bool mainMenuInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed) {
+  mainMenuPopulate();
+
+  // Up/Down within the current level; mirror the cursor back to the global.
+  if (oledScrollHandleNav(&sMainScroll)) {
+    if (oledMenuCategorySelected >= 0) oledMenuCategoryItemIndex = sMainScroll.selectedIndex;
+    else                               oledMenuSelectedIndex     = sMainScroll.selectedIndex;
+    return true;
   }
-  
-  // Layout constants - adjusted for global header
-  const int listWidth = 68;       // Width for text list area
-  const int iconAreaX = 78;       // X position for icon area (after separator)
-  const int iconSize = 32;        // Full size icon for selected item
-  const int itemHeight = 10;      // Height per menu item (text only)
-  const int maxVisibleItems = 4;  // Items visible at once (fits in content area)
-  const int startY = OLED_CONTENT_START_Y + 1;  // Start 1px below header line for even spacing
-  
-  // Update battery icon state if needed (every 2 minutes)
-  unsigned long now = millis();
-  if (!batteryIconState.valid || (now - batteryIconState.lastUpdateMs >= BATTERY_ICON_UPDATE_INTERVAL)) {
-    batteryIconState.percentage = getBatteryPercentage();
-    batteryIconState.icon = getBatteryIcon();
-    batteryIconState.lastUpdateMs = now;
-    batteryIconState.valid = true;
-  }
-  
-  // Category menu state
-  extern int oledMenuCategorySelected;
-  extern int oledMenuCategoryItemIndex;
-  extern const OLEDMenuItem oledMenuCategories[];
-  extern const int oledMenuCategoryCount;
-  
-  // Check if we're in a remote submenu (takes priority over category menu)
-  bool inRemoteSubmenu = isInRemoteSubmenu();
-  
-  // Determine what to display
-  const OLEDMenuItem* menuItems = nullptr;
-  int menuCount = 0;
-  int selectedIndex = 0;
-  bool inCategorySubmenu = false;
-  
-  if (inRemoteSubmenu) {
-    // Remote submenu mode
-    menuItems = (const OLEDMenuItem*)getRemoteSubmenuItems();
-    menuCount = getRemoteSubmenuItemCount();
-    selectedIndex = getRemoteSubmenuSelection();
-  } else if (oledMenuCategorySelected >= 0) {
-    // Category submenu mode
-    getCategoryItems(oledMenuCategorySelected, &menuItems, &menuCount);
-    selectedIndex = oledMenuCategoryItemIndex;
-    inCategorySubmenu = true;
-  } else {
-    // Top-level category menu
-    menuItems = oledMenuCategories;
-    menuCount = oledMenuCategoryCount;
-    selectedIndex = oledMenuSelectedIndex;
-  }
-  
-  // Header is now drawn globally
-  oledDisplay->setTextSize(1);
-  oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-  
-  // Draw vertical separator between list and icon
-  oledDisplay->drawFastVLine(74, OLED_CONTENT_START_Y, OLED_CONTENT_HEIGHT, DISPLAY_COLOR_WHITE);
-  
-  // Calculate scroll offset to keep selected item visible
-  int scrollOffset = 0;
-  if (selectedIndex >= maxVisibleItems) {
-    scrollOffset = selectedIndex - maxVisibleItems + 1;
-  }
-  
-  // Draw menu items (text list on left)
-  for (int i = 0; i < maxVisibleItems && (scrollOffset + i) < menuCount; i++) {
-    int idx = scrollOffset + i;
-    int y = startY + i * itemHeight;
-    
-    const OLEDMenuItem& item = menuItems[idx];
-    bool isSelected = (idx == selectedIndex);
-    
-    if (isSelected) {
-      // Highlight selected item with inverse (1px shorter to create gap with arrows)
-      // Start at y (not y-1) to maintain 1px gap from header line
-      oledDisplay->fillRect(0, y, listWidth - 1, itemHeight - 1, DISPLAY_COLOR_WHITE);
-      oledDisplay->setTextColor(DISPLAY_COLOR_BLACK);
+
+  // A - descend into a category, or launch the selected item.
+  if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
+    if (oledMenuCategorySelected < 0) {
+      oledMenuSelectedIndex     = sMainScroll.selectedIndex;
+      oledMenuCategorySelected  = sMainScroll.selectedIndex;  // category id == list position
+      oledMenuCategoryItemIndex = 0;
     } else {
-      oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
+      OLEDScrollItem* sel = oledScrollGetSelected(&sMainScroll);
+      if (sel && sel->userData) oledMenuExecuteItem((const OLEDMenuItem*)sel->userData, "menu.select");
     }
-    
-    // Position text 1px down to align with highlight box
-    oledDisplay->setCursor(2, y + 1);
-    
-    // Show ">" suffix for category items (top-level menu)
-    if (!inRemoteSubmenu && !inCategorySubmenu) {
-      oledDisplay->print(item.name);
-      oledDisplay->print(" >");
-    } else {
-      // Show "R " prefix for remote items in remote submenu
-      if (inRemoteSubmenu) {
-        OLEDMenuItemEx* remoteItem = (OLEDMenuItemEx*)&item;
-        if (remoteItem->isRemote) {
-          oledDisplay->print("R ");
-        }
-      }
-      oledDisplay->print(item.name);
+    return true;
+  }
+
+  // START - cycle data source when bonded (LOCAL/REMOTE/BOTH). SELECT->Quick
+  // Settings is handled by the global handler now that the launcher uses the
+  // normal registered-mode dispatch path.
+  if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_START)) {
+    if (oledRemoteSourceAvailable()) {
+      oledCycleDataSource();
+      return true;
     }
   }
-  
-  // Reset text color
-  oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-  
-  // Get selected item (bounds check)
-  if (menuCount == 0) return;
-  const OLEDMenuItem& selectedItem = menuItems[selectedIndex];
-  
-  // Draw selected item's icon on the right (centered in icon area)
-  const int availableIconHeight = OLED_CONTENT_HEIGHT;
-  int iconX = iconAreaX + (128 - iconAreaX - iconSize) / 2;
-  int iconY = OLED_CONTENT_START_Y + (availableIconHeight - iconSize) / 2;
-  drawIcon(oledDisplay, selectedItem.iconName, iconX, iconY, DISPLAY_COLOR_WHITE);
-  
-  // Draw availability/remote indicator in top-left corner of icon area (only for actual items, not categories)
-  if (inCategorySubmenu || inRemoteSubmenu) {
-    oledDisplay->setTextSize(1);
-    oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-    oledDisplay->setCursor(iconAreaX + 2, OLED_CONTENT_START_Y);
-    
-    if (inRemoteSubmenu) {
-      OLEDMenuItemEx* remoteItem = (OLEDMenuItemEx*)&selectedItem;
-      if (remoteItem->isRemote) {
-        oledDisplay->print("R");  // Remote item
-      } else {
-        MenuAvailability availability = getMenuAvailability(selectedItem.targetMode, nullptr);
-        if (availability != MenuAvailability::AVAILABLE) {
-          if (availability == MenuAvailability::FEATURE_DISABLED) {
-            oledDisplay->print("D");  // Disabled
-          } else {
-            oledDisplay->print("X");  // Not available
-          }
-        }
-      }
-    } else {
-      // Category submenu - check availability
-      MenuAvailability availability = getMenuAvailability(selectedItem.targetMode, nullptr);
-      if (availability != MenuAvailability::AVAILABLE) {
-        if (availability == MenuAvailability::FEATURE_DISABLED) {
-          oledDisplay->print("D");  // Disabled
-        } else {
-          oledDisplay->print("X");  // Not available
-        }
-      }
+
+  // B - leave a category submenu; at the top level let the global handler run
+  // (there is nowhere above the category list to go).
+  if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
+    if (oledMenuCategorySelected >= 0) {
+      oledMenuCategorySelected  = -1;
+      oledMenuCategoryItemIndex = 0;
+      return true;   // cursor restores to oledMenuSelectedIndex on the next populate
     }
-    
-    // Show status text below icon
-    int textY = iconY + iconSize + 2;
-    if (textY + 8 <= OLED_CONTENT_HEIGHT) {
-      oledDisplay->setTextSize(1);
-      oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-      oledDisplay->setCursor(iconAreaX + 2, textY);
-      
-      if (inRemoteSubmenu) {
-        OLEDMenuItemEx* remoteItem = (OLEDMenuItemEx*)&selectedItem;
-        if (remoteItem->isRemote) {
-          oledDisplay->print("Remote");
-        } else {
-          MenuAvailability avail = getMenuAvailability(selectedItem.targetMode, nullptr);
-          if (avail == MenuAvailability::AVAILABLE) {
-            oledDisplay->print("Ready");
-          } else if (avail == MenuAvailability::FEATURE_DISABLED) {
-            oledDisplay->print("Off");
-          } else if (avail == MenuAvailability::NOT_DETECTED) {
-            oledDisplay->print("No HW");
-          } else if (avail == MenuAvailability::NOT_BUILT) {
-            oledDisplay->print("N/A");
-          }
-        }
-      } else {
-        // Category submenu
-        MenuAvailability avail = getMenuAvailability(selectedItem.targetMode, nullptr);
-        if (avail == MenuAvailability::AVAILABLE) {
-          oledDisplay->print("Ready");
-        } else if (avail == MenuAvailability::FEATURE_DISABLED) {
-          oledDisplay->print("Off");
-        } else if (avail == MenuAvailability::NOT_DETECTED) {
-          oledDisplay->print("No HW");
-        } else if (avail == MenuAvailability::NOT_BUILT) {
-          oledDisplay->print("N/A");
-        }
-      }
-    }
+    return false;
   }
-  
-  // Draw scroll indicators if needed (must stay within content area)
-  if (scrollOffset > 0) {
-    oledDisplay->setCursor(68, OLED_CONTENT_START_Y);
-    oledDisplay->print("\x18");  // Up arrow
-  }
-  if (scrollOffset + maxVisibleItems < menuCount) {
-    int scrollDownY = OLED_CONTENT_START_Y + OLED_CONTENT_HEIGHT - 9;
-    oledDisplay->setCursor(68, scrollDownY);
-    oledDisplay->print("\x19");  // Down arrow
-  }
-  
-  // Note: Navigation hints now handled by global footer
+
+  return false;
+}
+
+// Entry hook: a fresh visit returns to the top category list (resetOLEDMenu);
+// back-navigation preserves your place (isForward == false).
+static void menuOnEnter(bool isForward) {
+  if (isForward) resetOLEDMenu();
 }
 
 // ============================================================================
 // Sensor Submenu Display
 // ============================================================================
 
-void displaySensorMenu() {
-  if (!oledDisplay || !oledConnected) return;
-  
-  // Ensure menu is sorted by availability
-  if (!sensorMenuSorted) sortSensorMenu();
-  
-  // Layout constants (matching main menu style) - adjusted for global header
-  const int listWidth = 78;
-  const int iconAreaX = 88;
-  const int iconSize = 32;
-  const int itemHeight = 10;
-  const int maxVisibleItems = 4;
-  const int startY = OLED_CONTENT_START_Y + 1;  // Start 1px below header for even spacing
-  
-  // Header is now drawn globally
-  oledDisplay->setTextSize(1);
-  oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-  
-  // Draw vertical separator between list and icon
-  oledDisplay->drawFastVLine(84, OLED_CONTENT_START_Y, OLED_CONTENT_HEIGHT, DISPLAY_COLOR_WHITE);
-  
-  // Clamp selected index to visible count
-  if (oledSensorMenuSelectedIndex >= sensorMenuVisibleCount) {
-    oledSensorMenuSelectedIndex = sensorMenuVisibleCount > 0 ? sensorMenuVisibleCount - 1 : 0;
+// ============================================================================
+// Sensor Menu - OLEDScrollState (split-pane, availability badge + status)
+// ============================================================================
+
+static OLEDScrollState sSensorScroll;
+static bool sSensorScrollInit = false;
+
+static void sensorMenuPopulate() {
+  if (!sSensorScrollInit) {
+    oledScrollInit(&sSensorScroll, nullptr, 4);
+    oledScrollSetSplitPane(&sSensorScroll, 78, 84, 32);
+    sSensorScroll.rightPaneDraw = menuItemRightPaneDraw;
+    sSensorScrollInit = true;
   }
-  
-  // Calculate scroll offset to keep selected item visible
-  int scrollOffset = 0;
-  if (oledSensorMenuSelectedIndex >= maxVisibleItems) {
-    scrollOffset = oledSensorMenuSelectedIndex - maxVisibleItems + 1;
-  }
-  
-  // Draw menu items (text list on left) - using filtered/sorted indices
-  for (int i = 0; i < maxVisibleItems && (scrollOffset + i) < sensorMenuVisibleCount; i++) {
-    int displayIdx = scrollOffset + i;
-    int actualIdx = sensorMenuSortedIndices[displayIdx];  // Map to actual item
-    int y = startY + i * itemHeight;
-    
-    bool isSelected = (displayIdx == oledSensorMenuSelectedIndex);
-    
-    if (isSelected) {
-      oledDisplay->fillRect(0, y, listWidth, itemHeight - 1, DISPLAY_COLOR_WHITE);
-      oledDisplay->setTextColor(DISPLAY_COLOR_BLACK);
-    } else {
-      oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-    }
-    
-    oledDisplay->setCursor(2, y + 1);
-    oledDisplay->print(oledSensorMenuItems[actualIdx].name);
-  }
-  
-  // Reset text color
-  oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-  
-  // Get actual item index for selected display position
-  int selectedActualIdx = sensorMenuSortedIndices[oledSensorMenuSelectedIndex];
-  
-  // Draw selected item's icon on the right
-  const int availableIconHeight = OLED_CONTENT_HEIGHT;
-  int iconX = iconAreaX + (128 - iconAreaX - iconSize) / 2;
-  int iconY = OLED_CONTENT_START_Y + (availableIconHeight - iconSize) / 2;
-  drawIcon(oledDisplay, oledSensorMenuItems[selectedActualIdx].iconName, iconX, iconY, DISPLAY_COLOR_WHITE);
-  
-  // Draw availability indicator
-  MenuAvailability availability = getMenuAvailability(oledSensorMenuItems[selectedActualIdx].targetMode, nullptr);
-  if (availability != MenuAvailability::AVAILABLE) {
-    oledDisplay->setTextSize(1);
-    oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-    oledDisplay->setCursor(iconAreaX + 2, OLED_CONTENT_START_Y);
-    if (availability == MenuAvailability::FEATURE_DISABLED) {
-      oledDisplay->print("D");
-    } else {
-      oledDisplay->print("X");
-    }
-  }
-  
-  // Show availability status text below icon
-  int textY = iconY + iconSize + 2;
-  if (textY + 8 <= OLED_CONTENT_HEIGHT) {
-    oledDisplay->setTextSize(1);
-    oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-    oledDisplay->setCursor(iconAreaX + 2, textY);
-    
-    if (availability == MenuAvailability::AVAILABLE) {
-      oledDisplay->print("Ready");
-    } else if (availability == MenuAvailability::FEATURE_DISABLED) {
-      oledDisplay->print("Off");
-    } else if (availability == MenuAvailability::NOT_DETECTED) {
-      oledDisplay->print("No HW");
-    } else if (availability == MenuAvailability::NOT_BUILT) {
-      oledDisplay->print("N/A");
-    }
-  }
-  
-  // Draw scroll indicators if needed
-  if (scrollOffset > 0) {
-    oledDisplay->setCursor(78, OLED_CONTENT_START_Y);
-    oledDisplay->print("\x18");  // Up arrow
-  }
-  if (scrollOffset + maxVisibleItems < sensorMenuVisibleCount) {
-    int scrollDownY = OLED_CONTENT_START_Y + OLED_CONTENT_HEIGHT - 9;
-    oledDisplay->setCursor(78, scrollDownY);
-    oledDisplay->print("\x19");  // Down arrow
-  }
+  // Drop compiled-out sensors and sort Ready->Off->No-HW (the prior behavior).
+  populateMenuScroll(&sSensorScroll, oledSensorMenuItems, oledSensorMenuItemCount,
+                     /*sort=*/true, /*dropNotBuilt=*/true);
 }
 
-// ============================================================================
-// Sensor Menu Input Handler (registered via OLEDModeEntry)
-// ============================================================================
+void displaySensorMenu() {
+  if (!oledDisplay || !oledConnected) return;
+  sensorMenuPopulate();
+  oledScrollRender(oledDisplay, &sSensorScroll, true, true, nullptr);
+}
 
-static bool sensorMenuInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
-  int visibleCount = getSensorMenuVisibleCount();
+static bool sensorMenuInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed) {
+  sensorMenuPopulate();
+  if (oledScrollHandleNav(&sSensorScroll)) return true;
 
-  extern NavEvents gNavEvents;
-  // Canonical nav: up/down scroll, left/right fall through to B-back. The
-  // old `|| gNavEvents.left` / `|| gNavEvents.right` conflation here caused
-  // LEFT (which the ANO encoder maps to INPUT_BUTTON_B for "back") to scroll
-  // the selection up and consume the event before the B-button handler at
-  // the bottom of this function could fire — user got stuck on the sensors
-  // page unable to back out. Other migrated handlers (Network mode etc.)
-  // never conflate horizontal+vertical axes; this one was a holdover.
-  if (gNavEvents.down) {
-    oledSensorMenuSelectedIndex = (oledSensorMenuSelectedIndex + 1) % visibleCount;
-    return true;
-  } else if (gNavEvents.up) {
-    oledSensorMenuSelectedIndex = (oledSensorMenuSelectedIndex - 1 + visibleCount) % visibleCount;
-    return true;
-  }
-  
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
-    if (oledSensorMenuSelectedIndex >= 0 && oledSensorMenuSelectedIndex < visibleCount) {
-      int actualIdx = getSensorMenuActualIndex(oledSensorMenuSelectedIndex);
-      OLEDMode target = oledSensorMenuItems[actualIdx].targetMode;
-      String reason;
-      MenuAvailability availability = getMenuAvailability(target, &reason);
-      if (availability != MenuAvailability::AVAILABLE) {
-        pushOLEDMode(OLED_SENSOR_MENU);
-        enterUnavailablePage(oledSensorMenuItems[actualIdx].name, reason);
-      } else {
-        requestOLEDMode(target, "sensormenu.select");  // auto-pushes OLED_SENSOR_MENU
-      }
+    OLEDScrollItem* sel = oledScrollGetSelected(&sSensorScroll);
+    if (sel && sel->userData) {
+      oledMenuExecuteItem((const OLEDMenuItem*)sel->userData, "sensormenu.select");
     }
     return true;
   }
-  
-  if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
-    // Return false to let global handler call oledMenuBack() which properly
-    // pops mode stack and preserves category submenu state
-    return false;
-  }
-  
+
+  // B: return false so the global handler pops the mode stack (oledMenuBack()).
   return false;
 }
 
@@ -686,10 +521,18 @@ void displayLogo() {
 // ============================================================================
 
 static const OLEDModeEntry sLogoModes[] = {
-  { OLED_MENU, "Menu", "menu", displayMenuListStyle, nullptr, nullptr, false, -1, "A:Select B:Back" },
+  { OLED_MENU, "Menu", "menu", displayMenuListStyle, nullptr, mainMenuInputHandler, false, -1, "A:Select B:Back", menuOnEnter },
   { OLED_LOGO, "Logo", "logo", displayLogo,          nullptr, nullptr, false, -1, "B:Back" },
 };
 
 REGISTER_OLED_MODE_MODULE(sLogoModes, sizeof(sLogoModes) / sizeof(sLogoModes[0]), "MenuAndLogo");
+
+// Linker anchor — called once from printRegisteredOLEDModes(). This file's only
+// external reference used to be getCategoryItems() (called by the now-deleted
+// oledMenuUp/Down/Select in OLED_Utils.cpp). With that gone, --gc-sections would
+// drop this entire object file, so the SensorMenu + MenuAndLogo static registrars
+// above would never run and OLED_MENU/OLED_LOGO/OLED_SENSOR_MENU would render
+// "Mode N no render". An external call to this no-op keeps the file linked.
+void oledMenuModeInit() {}
 
 #endif // ENABLE_OLED_DISPLAY

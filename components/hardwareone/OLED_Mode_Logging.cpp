@@ -312,6 +312,16 @@ static bool isLoggingModeAvailable(String* outReason) {
 }
 
 // Logging mode registration
+// Entry hook (was menu-select-only at 5348, so a CLI `oledmode logging` could
+// land on a stale sub-view): reset to the top logging menu on a fresh visit.
+// Back-navigation preserves the sub-view you were in.
+static void loggingOnEnter(bool isForward) {
+  if (isForward) {
+    loggingCurrentState = LOG_MENU_MAIN;
+    loggingMenuSelection = 0;
+  }
+}
+
 static const OLEDModeEntry loggingModeEntry = {
   OLED_LOGGING,
   "Logging",
@@ -321,7 +331,8 @@ static const OLEDModeEntry loggingModeEntry = {
   handleLoggingModeInput,
   true,
   93,
-  "A:Select B:Back"
+  "A:Select B:Back",
+  loggingOnEnter
 };
 
 // Columns: mode, name, iconName, displayFunc, availFunc, inputFunc, showInMenu, menuOrder, hints

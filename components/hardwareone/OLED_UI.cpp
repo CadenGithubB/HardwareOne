@@ -22,7 +22,6 @@ static portMUX_TYPE sToastMux = portMUX_INITIALIZER_UNLOCKED;
 OledToast gOledToast = {{0}, 0, OledUIIcon::NONE, false};
 OledDialog gOledDialog = {{0}, {{0}}, 0, {OledUIButton::NONE}, 0, 0, {nullptr}, nullptr, OledUIIcon::NONE, false};
 OledProgress gOledProgress = {{0}, 0, 0, false, false};
-OledList gOledList = {{0}, {{0}}, 0, 0, 0, 4, nullptr, nullptr, nullptr, false};
 
 // ============================================================================
 // Drawing Helpers
@@ -488,153 +487,6 @@ void oledProgressRender() {
 }
 
 // ============================================================================
-// List Component
-// ============================================================================
-
-void oledListClear(const char* title) {
-  memset(&gOledList, 0, sizeof(gOledList));
-  if (title) {
-    strncpy(gOledList.title, title, sizeof(gOledList.title) - 1);
-  }
-  gOledList.visibleCount = 4;  // Default visible items
-}
-
-void oledListAddItem(const char* label, int value) {
-  if (gOledList.itemCount >= OLED_LIST_MAX_ITEMS) return;
-  
-  strncpy(gOledList.items[gOledList.itemCount].label, label, OLED_LIST_ITEM_LEN - 1);
-  gOledList.items[gOledList.itemCount].value = value;
-  gOledList.itemCount++;
-}
-
-void oledListFinalize(OledListCallback onSelect, OledListCallback onCancel, void* userData) {
-  gOledList.onSelect = onSelect;
-  gOledList.onCancel = onCancel;
-  gOledList.userData = userData;
-  gOledList.selectedIndex = 0;
-  gOledList.scrollOffset = 0;
-  gOledList.active = true;
-  oledMarkDirty();
-}
-
-void oledListShow(const char* title, const OledListItem* items, uint8_t count,
-                  OledListCallback onSelect, OledListCallback onCancel, void* userData) {
-  oledListClear(title);
-  
-  int copyCount = (count > OLED_LIST_MAX_ITEMS) ? OLED_LIST_MAX_ITEMS : count;
-  memcpy(gOledList.items, items, copyCount * sizeof(OledListItem));
-  gOledList.itemCount = copyCount;
-  
-  oledListFinalize(onSelect, onCancel, userData);
-}
-
-void oledListClose() {
-  gOledList.active = false;
-  oledMarkDirty();
-}
-
-bool oledListActive() {
-  return gOledList.active;
-}
-
-bool oledListHandleInput(uint32_t newlyPressed) {
-  if (!gOledList.active) return false;
-
-  bool handled = false;
-  
-  if (gNavEvents.up) {
-    if (gOledList.selectedIndex > 0) {
-      gOledList.selectedIndex--;
-      if (gOledList.selectedIndex < gOledList.scrollOffset) {
-        gOledList.scrollOffset = gOledList.selectedIndex;
-      }
-      oledMarkDirty();
-    }
-    handled = true;
-  } else if (gNavEvents.down) {
-    if (gOledList.selectedIndex < gOledList.itemCount - 1) {
-      gOledList.selectedIndex++;
-      if (gOledList.selectedIndex >= gOledList.scrollOffset + gOledList.visibleCount) {
-        gOledList.scrollOffset = gOledList.selectedIndex - gOledList.visibleCount + 1;
-      }
-      oledMarkDirty();
-    }
-    handled = true;
-  }
-  
-  // A to select, B to cancel (INPUT_CHECK and InputButton from HAL_Input.h)
-  if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
-    if (gOledList.onSelect && gOledList.itemCount > 0) {
-      gOledList.onSelect(gOledList.selectedIndex, 
-                         gOledList.items[gOledList.selectedIndex].value,
-                         gOledList.userData);
-    }
-    oledListClose();
-    handled = true;
-  } else if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
-    if (gOledList.onCancel) {
-      gOledList.onCancel(gOledList.selectedIndex, -1, gOledList.userData);
-    }
-    oledListClose();
-    handled = true;
-  }
-  
-  return handled;
-}
-
-void oledListRender() {
-  if (!gOledList.active || !gDisplay) return;
-  
-  int boxW = SCREEN_WIDTH - 8;
-  int boxH = SCREEN_HEIGHT - 16;
-  int boxX = 4;
-  int boxY = 4;
-  
-  // Background
-  gDisplay->fillRect(boxX, boxY, boxW, boxH, DISPLAY_BG);
-  gDisplay->drawRect(boxX, boxY, boxW, boxH, DISPLAY_FG);
-  
-  gDisplay->setTextSize(1);
-  gDisplay->setTextColor(DISPLAY_FG);
-  
-  // Title
-  oledDrawTextCentered(boxX, boxY + 2, boxW, gOledList.title);
-  gDisplay->drawLine(boxX + 2, boxY + 11, boxX + boxW - 3, boxY + 11, DISPLAY_FG);
-  
-  // List items
-  int itemH = 10;
-  int listY = boxY + 14;
-  int listH = boxH - 18;
-  gOledList.visibleCount = listH / itemH;
-  
-  for (int i = 0; i < gOledList.visibleCount && (gOledList.scrollOffset + i) < gOledList.itemCount; i++) {
-    int idx = gOledList.scrollOffset + i;
-    int itemY = listY + i * itemH;
-    
-    if (idx == gOledList.selectedIndex) {
-      gDisplay->fillRect(boxX + 2, itemY, boxW - 4, itemH - 1, DISPLAY_FG);
-      gDisplay->setTextColor(DISPLAY_BG, DISPLAY_FG);
-    } else {
-      gDisplay->setTextColor(DISPLAY_FG);
-    }
-    
-    gDisplay->setCursor(boxX + 4, itemY + 1);
-    gDisplay->print(gOledList.items[idx].label);
-  }
-  
-  // Scroll indicators
-  gDisplay->setTextColor(DISPLAY_FG);
-  if (gOledList.scrollOffset > 0) {
-    gDisplay->setCursor(boxX + boxW - 8, listY);
-    gDisplay->print("^");
-  }
-  if (gOledList.scrollOffset + gOledList.visibleCount < gOledList.itemCount) {
-    gDisplay->setCursor(boxX + boxW - 8, boxY + boxH - 10);
-    gDisplay->print("v");
-  }
-}
-
-// ============================================================================
 // Pairing Ribbon Component
 // ============================================================================
 
@@ -944,7 +796,6 @@ void oledUIInit() {
   memset(&gOledToast, 0, sizeof(gOledToast));
   memset(&gOledDialog, 0, sizeof(gOledDialog));
   memset(&gOledProgress, 0, sizeof(gOledProgress));
-  memset(&gOledList, 0, sizeof(gOledList));
   memset(&gOledPairingRibbon, 0, sizeof(gOledPairingRibbon));
   gOledPairingRibbon.state = PairingRibbonState::HIDDEN;
   gOledPairingRibbon.animY = -RIBBON_HEIGHT;
@@ -954,9 +805,6 @@ bool oledUIHandleInput(uint32_t newlyPressed) {
   // Handle in priority order (topmost first)
   if (oledDialogActive()) {
     return oledDialogHandleInput(newlyPressed);
-  }
-  if (oledListActive()) {
-    return oledListHandleInput(newlyPressed);
   }
   // Toast and progress don't capture input (except progress cancel)
   if (oledProgressActive() && gOledProgress.cancellable) {
@@ -974,7 +822,6 @@ void oledUIRender() {
   
   // Render in layer order (bottom to top)
   oledProgressRender();
-  oledListRender();
   oledPairingRibbonRender();  // Pairing ribbon (below dialog/toast)
   oledDialogRender();
   oledToastRender();  // Toast always on top
@@ -1002,7 +849,7 @@ void oledUIRender() {
 }
 
 bool oledUIModalActive() {
-  return oledDialogActive() || oledListActive();
+  return oledDialogActive();
 }
 
 #endif // ENABLE_OLED_DISPLAY

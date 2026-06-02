@@ -63,6 +63,12 @@ struct SessionEntry {
   unsigned long createdAt = 0;
   unsigned long lastSeen = 0;
   unsigned long expiresAt = 0;
+  // Last REAL user interaction (millis timebase, 0 = never stamped). Distinct
+  // from lastSeen, which is bumped by ALL traffic incl. passive SSE/polls.
+  // This is stamped only on genuine user actions (see requestIsInteraction in
+  // WebServer_Server.cpp) and drives the shared idle-logout policy
+  // (sessionIdleExpired) so automatic chatter never keeps a session alive.
+  unsigned long lastInteractionMs = 0;
   String ip;
   // Small ring buffer for notices to avoid drops during reconnects
   // Using fixed-size char buffers instead of String to save memory and reduce fragmentation

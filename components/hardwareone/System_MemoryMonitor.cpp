@@ -13,6 +13,7 @@
 #include "System_TaskUtils.h"
 #include "System_ESPNow.h"
 #include "System_I2C.h"
+#include "HAL_Input.h"          // For INPUT_TASK_NAME (gamepad vs ANO)
 
 // Per-sensor enabled/connected flags + task handles come from the sensor
 // headers (which gate their own decls on ENABLE_*_SENSOR). System_SensorStubs.h
@@ -264,7 +265,7 @@ void sampleMemoryState(bool forceFullScan) {
       {"espnow_task",        espnowHandle,          ESPNOW_HB_STACK_WORDS},
       {"cmd_exec_task",      gCmdExecTaskHandle,    CMD_EXEC_STACK_WORDS},
       {"sensor_queue_task",  queueProcessorTask,    SENSOR_QUEUE_STACK_WORDS},
-      {"gamepad_task",       gInputTaskHandle,     INPUT_STACK_WORDS},
+      {INPUT_TASK_NAME,      gInputTaskHandle,     INPUT_STACK_WORDS},
       {"thermal_task",  gThermalTaskHandle,     THERMAL_STACK_WORDS},
       {"imu_task",      gImuTaskHandle,         IMU_STACK_WORDS},
       {"tof_task",      gTofTaskHandle,         TOF_STACK_WORDS},

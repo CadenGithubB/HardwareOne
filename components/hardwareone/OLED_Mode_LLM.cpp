@@ -465,6 +465,12 @@ void resetLLMOLEDState() {
 // Registration
 // ============================================================================
 
+// Entry hook (was an inline reset inside requestOLEDMode, guarded by
+// ENABLE_ONDEVICE_LLM — now owned here, where the whole file is already gated).
+static void llmOnEnter(bool /*isForward*/) {
+  resetLLMOLEDState();
+}
+
 static const OLEDModeEntry sLLMModeEntry = {
   OLED_LLM,
   "LLM Chat",
@@ -474,7 +480,8 @@ static const OLEDModeEntry sLLMModeEntry = {
   handleLLMInput,
   true,   // show in main menu
   95,     // menu order
-  nullptr
+  nullptr,
+  llmOnEnter
 };
 
 REGISTER_OLED_MODE_MODULE(&sLLMModeEntry, 1, "LLM");

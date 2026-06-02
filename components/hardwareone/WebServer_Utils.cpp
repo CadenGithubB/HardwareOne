@@ -391,6 +391,9 @@ String generateNavigation(const String& activePage, const String& username, cons
 #endif
   link("/files", "files", "Files");
   link("/logging", "logging", "Logging");
+#if ENABLE_WEB_BATTERY
+  link("/battery", "battery", "Battery");
+#endif
 #if ENABLE_WEB_SPEECH
   link("/speech", "speech", "Speech");
 #endif
