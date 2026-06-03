@@ -14468,20 +14468,26 @@ static void g2CameraStreamWorker(void* arg) {
         char path[64];
         snprintf(path, sizeof(path), "/sd/PICTURES/cam_%lu.jpg",
                  (unsigned long)millis());
-        FILE* f = fopen(path, "wb");
+        // Route through VFS (shared FsLockGuard + permission guard) instead of
+        // raw POSIX fopen — fopen also requires /sd to be registered as a POSIX
+        // mount, whereas VFS dispatches /sd to the Arduino SD backend the rest
+        // of the camera code already uses. Behavior is otherwise unchanged: the
+        // parent dir must still pre-exist (open does not create it).
+        File f = VFS::openGuarded(String(path), "w",
+                                  VFS::systemAuth("g2.cam_snapshot"), true);
         if (f) {
-          const size_t wrote = fwrite(jpegBuf, 1, jpegLen, f);
-          fclose(f);
+          const size_t wrote = f.write((const uint8_t*)jpegBuf, jpegLen);
+          f.close();
           if (wrote == jpegLen) {
             DEBUG_G2F("[G2] Camera stream: snapshot saved %s (%u B)",
                       path, (unsigned)jpegLen);
           } else {
-            DEBUG_G2F("[G2] Camera stream: snapshot fwrite short %u/%u to %s",
+            DEBUG_G2F("[G2] Camera stream: snapshot write short %u/%u to %s",
                       (unsigned)wrote, (unsigned)jpegLen, path);
           }
         } else {
-          DEBUG_G2F("[G2] Camera stream: snapshot fopen failed: %s "
-                    "(SD mounted? /PICTURES/ exists?)",
+          DEBUG_G2F("[G2] Camera stream: snapshot open failed: %s "
+                    "(SD mounted? /sd/PICTURES/ exists?)",
                     path);
         }
       }

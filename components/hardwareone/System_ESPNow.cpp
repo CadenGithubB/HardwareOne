@@ -13841,7 +13841,7 @@ ESPNOW_SETTING_CMD(cmd_espnow_bondstreamrtc, "bondStreamRtc")
 ESPNOW_SETTING_CMD(cmd_espnow_bondstreampresence, "bondStreamPresence")
 #endif
 
-static bool isEspNowInitialized() {
+bool isEspNowInitialized() {
   return gEspNow && gEspNow->initialized;
 }
 

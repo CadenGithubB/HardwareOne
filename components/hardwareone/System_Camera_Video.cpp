@@ -5,6 +5,7 @@
 
 #include "System_Camera_Video.h"
 #include "System_VFS.h"
+#include <strings.h>   // strcasecmp (used by the always-compiled viewer below)
 
 // Exposed to System_I2C.cpp status builder so UI can gate SD-dependent
 // features (e.g. the Record button). Defined unconditionally — the sensor
@@ -18,6 +19,23 @@ bool sdCardIsWritableForStatus() {
   return VFS::isSDWritable();
 }
 
+// ── Video folder ─────────────────────────────────────────────────────────────
+// Shared by the recorder (camera builds) and the always-available viewer
+// endpoints further down. Viewing/listing recordings is part of the base
+// experience: any board with an SD card can browse and download existing
+// videos, even without a camera to record new ones.
+static const char* VIDEO_FOLDER_SD = "/sd/VIDEOS";
+
+// HTTP + auth headers for the video viewer endpoints (handleVideoRecording*).
+// Compiled whenever the web server is present, independent of the camera, so
+// /api/videos and /api/videos/file are always registered.
+#if ENABLE_HTTP_SERVER
+#include <esp_http_server.h>
+#include "WebServer_Utils.h"   // WEB_AUTH_OR_RETURN
+#include "WebServer_Server.h"  // makeWebAuthCtx
+#include "System_User.h"       // AuthContext, tgRequireAuth
+#endif
+
 #if ENABLE_CAMERA_SENSOR
 
 #include "System_Camera_DVP.h"
@@ -25,22 +43,11 @@ bool sdCardIsWritableForStatus() {
 #include "System_Debug.h"
 #include "System_MemUtil.h"
 #include <SD.h>
-#include <esp_http_server.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
-// Auth check macro (WEB_AUTH_OR_RETURN) plus the AuthContext/tgRequireAuth
-// symbols it expands to.
-#include "WebServer_Utils.h"
-#include "WebServer_Server.h"   // makeWebAuthCtx
-#include "System_User.h"        // AuthContext, tgRequireAuth
-
 // ── Public state ────────────────────────────────────────────────────────────
 bool videoRecording = false;
-
-// ── Constants ───────────────────────────────────────────────────────────────
-static const char* VIDEO_FOLDER_SD = "/sd/VIDEOS";
-static const char* VIDEO_FOLDER_BARE = "/VIDEOS";  // SD.exists() form
 
 // Offsets into the 224-byte header skeleton that get patched on finalize.
 static const uint32_t AVI_HEADER_SIZE        = 224;
@@ -195,8 +202,11 @@ static bool probeJpegDims(const uint8_t* jpeg, size_t len, uint32_t* outW, uint3
 // ── File helpers ────────────────────────────────────────────────────────────
 static bool ensureVideosFolder() {
   if (!VFS::isSDAvailable()) return false;
-  if (SD.exists(VIDEO_FOLDER_BARE)) return true;
-  if (SD.mkdir(VIDEO_FOLDER_BARE)) {
+  // Route through VFS (shared FsLockGuard + permission guard) using the
+  // "/sd/..." path form; VFS dispatches /sd to the SD backend internally.
+  AuthContext sys = VFS::systemAuth("video.ensure_folder");
+  if (VFS::existsGuarded(VIDEO_FOLDER_SD, sys)) return true;
+  if (VFS::mkdirGuarded(VIDEO_FOLDER_SD, sys)) {
     INFO_STORAGEF("[Video] Created folder on SD: %s", VIDEO_FOLDER_SD);
     return true;
   }
@@ -356,14 +366,17 @@ bool startVideoRecording() {
 
   snprintf(s_path, sizeof(s_path), "%s/VID_%lu.AVI", VIDEO_FOLDER_SD, (unsigned long)millis());
 
-  // SD.open takes the bare path (no /sd prefix).
-  char bare[96];
-  snprintf(bare, sizeof(bare), "%s/VID_%lu.AVI", VIDEO_FOLDER_BARE, (unsigned long)millis());
-  STACK_TRACEF("startVideoRecording.before_SD.open path=%s", bare);
-  // Explicit create=true — without it, the two-arg overload returns null
-  // for non-existent paths even on a fully writable card.
-  s_file = SD.open(bare, FILE_WRITE, true);
-  STACK_TRACEF("startVideoRecording.after_SD.open ok=%d", s_file ? 1 : 0);
+  // Route the recording handle through VFS (shared FsLockGuard + permission
+  // guard); VFS dispatches the "/sd/..." path to the SD backend. Reuse s_path
+  // (already the /sd form) — this also fixes a latent double-millis() mismatch
+  // where the old `bare` buffer recomputed millis() and could disagree with the
+  // s_path used in the log/error lines. Per-frame writes below stay on the
+  // returned handle (same as LittleFS streaming). create=true: without it the
+  // open returns null for a non-existent path even on a writable card.
+  STACK_TRACEF("startVideoRecording.before_open path=%s", s_path);
+  s_file = VFS::openGuarded(String(s_path), FILE_WRITE,
+                           VFS::systemAuth("video.record"), /*create=*/true);
+  STACK_TRACEF("startVideoRecording.after_open ok=%d", s_file ? 1 : 0);
   if (!s_file) {
     ERROR_STORAGEF("[Video] Failed to create file: %s", s_path);
     STACK_TRACEF("startVideoRecording.sd_open_failed_returning_false");
@@ -422,11 +435,17 @@ void stopVideoRecording() {
   }
 }
 
-// ── Listing / delete ────────────────────────────────────────────────────────
+#endif  // ENABLE_CAMERA_SENSOR — end of recorder (needs the camera)
+
+// ── Listing / delete (base experience — no camera required) ──────────────────
+// Reading, enumerating, and serving recordings needs only an SD card, so these
+// live outside the camera gate. They return empty/false when SD is unavailable
+// or no recordings exist, matching the graceful-degradation pattern used by the
+// camera status/frame endpoints.
 int getVideoRecordingCount() {
   if (!VFS::isSDAvailable()) return 0;
   int count = 0;
-  File root = SD.open(VIDEO_FOLDER_BARE);
+  File root = VFS::openGuarded(VIDEO_FOLDER_SD, FILE_READ, VFS::systemAuth("video.list"));
   if (!root || !root.isDirectory()) return 0;
   File f = root.openNextFile();
   while (f) {
@@ -444,7 +463,7 @@ int getVideoRecordingCount() {
 String getVideoRecordingsList() {
   String out;
   if (!VFS::isSDAvailable()) return out;
-  File root = SD.open(VIDEO_FOLDER_BARE);
+  File root = VFS::openGuarded(VIDEO_FOLDER_SD, FILE_READ, VFS::systemAuth("video.list"));
   if (!root || !root.isDirectory()) return out;
   File f = root.openNextFile();
   while (f) {
@@ -468,12 +487,14 @@ bool deleteVideoRecording(const String& filename) {
   if (!VFS::isSDAvailable()) return false;
   // Reject paths that try to escape the folder.
   if (filename.indexOf('/') >= 0 || filename.indexOf("..") >= 0) return false;
-  String path = String(VIDEO_FOLDER_BARE) + "/" + filename;
-  return SD.remove(path.c_str());
+  String path = String(VIDEO_FOLDER_SD) + "/" + filename;
+  return VFS::removeGuarded(path, VFS::systemAuth("video.delete"));
 }
 
-// ── HTTP handlers ───────────────────────────────────────────────────────────
-// Registered in WebPage_Sensors.cpp::registerSensorHandlers.
+// ── HTTP viewer endpoints (base experience) ──────────────────────────────────
+// Registered unconditionally in WebPage_Sensors.cpp::registerSensorHandlers so
+// /api/videos and /api/videos/file exist on every web build — camera or not.
+#if ENABLE_HTTP_SERVER
 esp_err_t handleVideoRecordingsList(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
 
@@ -541,8 +562,8 @@ esp_err_t handleVideoRecordingFile(httpd_req_t* req) {
   }
 
   char path[96];
-  snprintf(path, sizeof(path), "%s/%s", VIDEO_FOLDER_BARE, filename);
-  File f = SD.open(path, FILE_READ);
+  snprintf(path, sizeof(path), "%s/%s", VIDEO_FOLDER_SD, filename);
+  File f = VFS::openGuarded(String(path), FILE_READ, VFS::systemAuth("video.serve"));
   if (!f) {
     httpd_resp_set_status(req, "404 Not Found");
     httpd_resp_send(req, "Recording not found", HTTPD_RESP_USE_STRLEN);
@@ -579,4 +600,4 @@ esp_err_t handleVideoRecordingFile(httpd_req_t* req) {
   return ESP_OK;
 }
 
-#endif  // ENABLE_CAMERA_SENSOR
+#endif  // ENABLE_HTTP_SERVER

@@ -59,7 +59,7 @@ constexpr uint32_t SENSOR_BCAST_STACK_WORDS = 4096;  // ~16KB — MEASURED sizin
                                                      // HIGH-prio task during heavy RX), NOT the
                                                      // broadcaster's own ~1.5KB of work. 16KB
                                                      // gives ~6KB margin over the observed peak.
-constexpr uint32_t ESPNOW_TX_STACK_WORDS = 6144;     // ~24KB — single dispatcher task that
+constexpr uint32_t ESPNOW_TX_STACK_WORDS = 5120;     // ~20KB — single dispatcher task that
                                                      // owns ALL ESP-NOW sends. The 10KB first
                                                      // guess CRASHED: the esp_now_send WiFi TX
                                                      // path (hardware LMK encryption) + AEAD
@@ -70,9 +70,13 @@ constexpr uint32_t ESPNOW_TX_STACK_WORDS = 6144;     // ~24KB — single dispatc
                                                      // sensor_bcast at 12KB. espnow_task runs
                                                      // this exact send at 22KB and never crashes,
                                                      // so 24KB (above that proven-safe size) has
-                                                     // real margin. [ESPNOW_TX] HWM logs every
-                                                     // 10s — dial down to (measured peak + ~4KB)
-                                                     // once we see the true number.
+                                                     // real margin. HW-MEASURED 2026-06-02: peak_used
+                                                     // held at 2728 words across taskstats + remote
+                                                     // `files` streaming (dropped=0, depth_hwm=1).
+                                                     // Trimmed 24KB->20KB (a conservative 4KB cut, not
+                                                     // the full 8KB the measurement would allow): 5120
+                                                     // leaves ~2392 words (~9.6KB, 1.88x) over peak.
+                                                     // [ESPNOW_TX] HWM still logs every 10s.
 constexpr uint32_t MIC_RECORD_STACK_WORDS = 4096;    // ~16KB (microphone recording)
 constexpr uint32_t MIC_VIZ_STACK_WORDS = 4096;       // ~16KB (microphone visualizer)
 constexpr uint32_t SR_STACK_WORDS = 8192;             // ~32KB (speech recognition inference)

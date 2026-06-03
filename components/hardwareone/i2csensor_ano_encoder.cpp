@@ -602,7 +602,15 @@ void inputTask(void* parameter) {
               gInputCache.joyY = JOYSTICK_CENTER;
               gInputCache.lastUpdate = nowMs;
               gInputCache.dataValid = true;
-              gInputCache.seq++;
+              // Bump seq ONLY on a real input edge (button change or detent),
+              // matching the native ANO cache (gAnoEncoderCache.seq above) and
+              // the seesaw path. The proxy write runs every poll (~30 ms), so an
+              // unconditional seq++ made gInputCache.seq advance ~33x/s forever
+              // — which silently defeats BOTH power-save and OLED idle-logout,
+              // since each treats any seq change as "real user activity" and so
+              // would never go idle on an ANO-encoder board. prevButtons is still
+              // the previous poll here (updated below); detentDelta is this poll.
+              if ((btns != prevButtons) || (detentDelta != 0)) gInputCache.seq++;
             }
           }
 

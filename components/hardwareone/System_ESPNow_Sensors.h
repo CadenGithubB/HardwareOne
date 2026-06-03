@@ -113,6 +113,11 @@ RemoteSensorData* findOrCreateCacheEntry(const uint8_t* deviceMac, const char* d
 void setSensorBroadcastEnabled(bool enabled);
 bool isSensorBroadcastEnabled();
 
+// True only when the ESP-NOW radio has been initialized at runtime (i.e. the
+// user clicked Initialize). ENABLE_ESPNOW merely means the feature is compiled
+// in. Lets the web sensors page tell "not initialized" apart from "active".
+bool isEspNowInitialized();
+
 // ==========================
 // Thermal Data Optimization
 // ==========================

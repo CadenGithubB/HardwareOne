@@ -625,7 +625,12 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
 
   window.qaUnloadModel = function() {
     hw.postJSON('/api/llm/unload', {})
-      .then(function(){ fetchStatus(false, null); })
+      // Acknowledge the unload explicitly. Pass afterGen=true so fetchStatus
+      // refreshes the dot/state to UNLOADED but SKIPS the generic "No model
+      // loaded…" line — we show "Model unloaded" instead (matches the CLI's
+      // `llmunload` result string). On failure, fall back to a normal status
+      // refresh so a real error still surfaces.
+      .then(function(){ addSys('Model unloaded'); fetchStatus(true, null); })
       .catch(function(){ fetchStatus(false, null); });
   };
 

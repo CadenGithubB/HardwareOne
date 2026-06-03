@@ -16,6 +16,7 @@
 #include <Arduino.h>
 #include "System_BuildConfig.h"
 
+// ── Recorder API (camera builds only) ────────────────────────────────────────
 #if ENABLE_CAMERA_SENSOR
 
 // Runtime recording state — mirrors the micRecording pattern. Read by the
@@ -34,6 +35,13 @@ bool startVideoRecording();
 // recording (no-op).
 void stopVideoRecording();
 
+#endif  // ENABLE_CAMERA_SENSOR
+
+// ── Viewer API (base experience — every build) ───────────────────────────────
+// Listing/serving recordings needs only an SD card, not a camera, so these are
+// available on all boards. They return 0/empty/false when SD is unavailable or
+// no recordings exist.
+
 // Count of .avi files in /sd/videos/.
 int getVideoRecordingCount();
 
@@ -43,7 +51,5 @@ String getVideoRecordingsList();
 
 // Delete a specific recording by filename (no path). Returns true on success.
 bool deleteVideoRecording(const String& filename);
-
-#endif  // ENABLE_CAMERA_SENSOR
 
 #endif  // SYSTEM_CAMERA_VIDEO_H
