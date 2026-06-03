@@ -150,12 +150,28 @@
 #define INPUT_DEVICE_TYPE       1
 
 // Camera: ESP32-S3 DVP camera (OV2640/OV3660/OV5640). PICO board has none.
+// Auto-enabled on the XIAO ESP32S3 Sense, which ships with an OV2640 on its
+// expansion board (camera GPIOs are hardcoded for that board in
+// System_Camera_DVP.cpp). Still overridable by a pre-define; all other boards
+// default off.
 #ifndef ENABLE_CAMERA_SENSOR
-#define ENABLE_CAMERA_SENSOR    0
+  #if defined(ARDUINO_XIAO_ESP32S3_SENSE_DEV) || (defined(ARDUINO_XIAO_ESP32S3_DEV) && defined(XIAO_ESP32S3_SENSE_ENABLED))
+    #define ENABLE_CAMERA_SENSOR  1
+  #else
+    #define ENABLE_CAMERA_SENSOR  0
+  #endif
 #endif
 
-// Microphone: PDM microphone via I2S. PICO board has none.
-#define ENABLE_MICROPHONE_SENSOR 0
+// Microphone: PDM microphone via I2S. PICO board has none. Auto-enabled on the
+// XIAO ESP32S3 Sense, which has an onboard PDM mic (CLK=GPIO42, DATA=GPIO41).
+// Overridable by a pre-define; all other boards default off.
+#ifndef ENABLE_MICROPHONE_SENSOR
+  #if defined(ARDUINO_XIAO_ESP32S3_SENSE_DEV) || (defined(ARDUINO_XIAO_ESP32S3_DEV) && defined(XIAO_ESP32S3_SENSE_ENABLED))
+    #define ENABLE_MICROPHONE_SENSOR  1
+  #else
+    #define ENABLE_MICROPHONE_SENSOR  0
+  #endif
+#endif
 
 // Battery monitor: enables the System_Battery subsystem. The actual backend
 // (ADC voltage divider vs. MAX17048G I2C fuel gauge vs. USB-only stub) is

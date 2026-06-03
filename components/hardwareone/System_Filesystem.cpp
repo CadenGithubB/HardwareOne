@@ -466,6 +466,30 @@ const char* cmd_mkdir(const String& argsInput) {
   // call. The previous canCreate(path) shim relied on the same global but
   // didn't normalize ".." and skipped the explicit role-aware check.
   if (!VFS::mkdirGuarded(path, ctx)) {
+    // mkdir is idempotent for this user-facing command: an already-existing
+    // directory is success, not an error. LittleFS.mkdir() returns false on
+    // EEXIST, which the catch-all message below previously mislabeled as
+    // "(denied)" — e.g. the web file browser pre-creates a download folder
+    // (level-by-level, since mkdir isn't recursive) that an earlier
+    // bond/file-receive already made. Probe the path (READ-gated via
+    // openGuarded) to tell the cases apart: existing dir -> OK; a file is in
+    // the way -> specific error; otherwise -> the real create failure.
+    File existing = VFS::openGuarded(path, "r", ctx);
+    if (existing) {
+      const bool isDir = existing.isDirectory();
+      existing.close();
+      if (isDir) {
+        // No "Error:"/"Usage:"/"Invalid" prefix => treated as success by the
+        // command framework (System_Command.cpp), so callers like the web
+        // download flow don't see a spurious FAIL.
+        snprintf(getDebugBuffer(), 1024, "Folder already exists: %s", path.c_str());
+        return getDebugBuffer();
+      }
+      snprintf(getDebugBuffer(), 1024,
+               "Error: Cannot create folder — a file already exists at that path: %s",
+               path.c_str());
+      return getDebugBuffer();
+    }
     snprintf(getDebugBuffer(), 1024, "Error: Failed to create folder (denied or fs error): %s", path.c_str());
     return getDebugBuffer();
   }

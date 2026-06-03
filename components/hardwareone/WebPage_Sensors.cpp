@@ -621,10 +621,14 @@ esp_err_t handleRemoteSensors(httpd_req_t* req) {
   // Return list of all remote devices with sensors
   String devicesList = getRemoteDevicesListJSON();
   DEBUG_HTTPF("/api/sensors/remote list json_len=%u", (unsigned)devicesList.length());
-  // Inject "enabled":true into the response
+  // Report ESP-NOW's *runtime* state, not just the compile flag. ENABLE_ESPNOW
+  // only means the feature is compiled in — the radio may still be uninitialized
+  // (user hasn't clicked Initialize). The web UI uses this to tell "not
+  // initialized" apart from "active but no peers reporting".
+  const bool espnowActive = isEspNowInitialized();
   String resp = devicesList;
   if (resp.startsWith("{")) {
-    resp = "{\"enabled\":true," + resp.substring(1);
+    resp = String("{\"enabled\":") + (espnowActive ? "true" : "false") + "," + resp.substring(1);
   }
   sendJsonResponse(req, resp.c_str(), resp.length());
 #else
@@ -1010,15 +1014,17 @@ void registerSensorHandlers(httpd_handle_t server) {
   httpd_register_uri_handler(server, &micRecordings);
   httpd_register_uri_handler(server, &micRecordingFile);
 
-#if ENABLE_CAMERA_SENSOR
-  // Video recording endpoints (MJPEG-AVI on SD)
+  // Video viewer endpoints (list + download AVI recordings from SD). Part of
+  // the base experience: viewing/downloading existing videos works on any
+  // SD-equipped board, independent of whether a camera is compiled in.
+  // (Recording is camera-gated; these handlers degrade gracefully — they return
+  // an empty list / "SD unavailable" when there's no SD card.)
   extern esp_err_t handleVideoRecordingsList(httpd_req_t* req);
   extern esp_err_t handleVideoRecordingFile(httpd_req_t* req);
   static httpd_uri_t vidList = { .uri = "/api/videos", .method = HTTP_GET, .handler = handleVideoRecordingsList, .user_ctx = NULL };
   static httpd_uri_t vidFile = { .uri = "/api/videos/file", .method = HTTP_GET, .handler = handleVideoRecordingFile, .user_ctx = NULL };
   httpd_register_uri_handler(server, &vidList);
   httpd_register_uri_handler(server, &vidFile);
-#endif
 }
 
 #endif // ENABLE_HTTP_SERVER

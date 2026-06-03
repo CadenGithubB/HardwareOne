@@ -90,24 +90,17 @@ String ImageManager::getCaptureFolder(ImageStorageLocation location) {
   return prefix + folder;
 }
 
-static String sdStripPrefix(const String& path) {
-  if (path.startsWith("/sd")) {
-    String p = path.substring(3);
-    if (p.length() == 0) return "/";
-    if (!p.startsWith("/")) p = "/" + p;
-    return p;
-  }
-  return path;
-}
 
 bool ImageManager::ensureCaptureFolder(ImageStorageLocation location) {
   String folder = getCaptureFolder(location);
   
   if (location == IMAGE_STORAGE_SD) {
     if (!sdAvailable) return false;
-    String sdFolder = sdStripPrefix(folder);
-    if (!SD.exists(sdFolder)) {
-      if (SD.mkdir(sdFolder)) {
+    // Route through VFS (shared lock + permission guard) like the LittleFS
+    // branch below; pass the "/sd/..." path form — VFS dispatches to SD.
+    AuthContext sys = VFS::systemAuth("imgmgr.ensure_capture_folder.sd");
+    if (!VFS::existsGuarded(folder, sys)) {
+      if (VFS::mkdirGuarded(folder, sys)) {
         INFO_STORAGEF("[ImageManager] Created folder on SD: %s", folder.c_str());
         return true;
       } else {
@@ -240,8 +233,8 @@ String ImageManager::saveImage(const uint8_t* data, size_t len, ImageStorageLoca
     if (sdAvailable) {
       ensureCaptureFolder(IMAGE_STORAGE_SD);
       String sdDisplayPath = getCaptureFolder(IMAGE_STORAGE_SD) + "/" + filename;
-      String sdFsPath = sdStripPrefix(sdDisplayPath);
-      File f = SD.open(sdFsPath, FILE_WRITE, true);  // create=true — two-arg form returns null for new paths
+      // Route through VFS (shared lock + guard); pass the "/sd/..." form.
+      File f = VFS::openGuarded(sdDisplayPath, FILE_WRITE, VFS::systemAuth("imgmgr.save_sd"), /*create=*/true);
       if (f) {
         f.write(data, len);
         f.close();
@@ -262,8 +255,7 @@ String ImageManager::saveImage(const uint8_t* data, size_t len, ImageStorageLoca
       return "";
     }
     ensureCaptureFolder(IMAGE_STORAGE_SD);
-    String sdFsPath = sdStripPrefix(fullPath);
-    File f = SD.open(sdFsPath, FILE_WRITE, true);  // create=true — two-arg form returns null for new paths
+    File f = VFS::openGuarded(fullPath, FILE_WRITE, VFS::systemAuth("imgmgr.save_sd"), /*create=*/true);
     if (f) {
       f.write(data, len);
       f.close();
@@ -306,7 +298,7 @@ std::vector<ImageInfo> ImageManager::listImages(ImageStorageLocation location) {
   if (location == IMAGE_STORAGE_SD) {
     if (!sdAvailable) return images;
     
-    File dir = SD.open(sdStripPrefix(folder));
+    File dir = VFS::openGuarded(folder, FILE_READ, VFS::systemAuth("imgmgr.list_sd"));
     if (!dir || !dir.isDirectory()) return images;
     
     File file = dir.openNextFile();
@@ -375,7 +367,7 @@ uint8_t* ImageManager::getImage(const String& path, size_t* outLen) {
   
   if (isSD) {
     if (!sdAvailable) return nullptr;
-    f = SD.open(path.substring(3));  // Remove /sd prefix
+    f = VFS::openGuarded(path, "r", VFS::systemAuth("imgmgr.get_image"));  // path is /sd/...
   } else {
     if (!littleFSAvailable) return nullptr;
     FsLockGuard guard("ImageManager.getImage.open");
@@ -410,7 +402,7 @@ bool ImageManager::getImageInfo(const String& path, ImageInfo& info) {
   
   if (isSD) {
     if (!sdAvailable) return false;
-    f = SD.open(path.substring(3));
+    f = VFS::openGuarded(path, "r", VFS::systemAuth("imgmgr.get_image_info"));  // path is /sd/...
   } else {
     if (!littleFSAvailable) return false;
     FsLockGuard guard("ImageManager.getImageInfo.open");
@@ -435,7 +427,7 @@ bool ImageManager::deleteImage(const String& path) {
   
   if (isSD) {
     if (!sdAvailable) return false;
-    return SD.remove(path.substring(3));
+    return VFS::removeGuarded(path, VFS::systemAuth("imgmgr.delete.sd"));
   } else {
     if (!littleFSAvailable) return false;
     FsLockGuard guard("ImageManager.deleteImage");

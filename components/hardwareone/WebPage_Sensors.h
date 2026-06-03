@@ -658,7 +658,7 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
     "    if (!data || !data.devices || data.devices.length === 0) {\n"
     "      if (statusDiv) {\n"
     "        var msg = (data && data.enabled === false)\n"
-    "          ? 'ESP-NOW is not enabled. Initialize it from the ESP-NOW page.'\n"
+    "          ? 'ESP-NOW is not initialized. Click Initialize on the ESP-NOW page to enable it.'\n"
     "          : 'ESP-NOW is active but no remote devices are sending sensor data.';\n"
     "        statusDiv.innerHTML = '<div style=\"text-align:center;padding:1rem;color:var(--panel-fg)\">' + msg + '</div>';\n"
     "        statusDiv.style.display = 'block';\n"
