@@ -12,6 +12,7 @@
 #include "WebServer_Server.h"           // httpd types, JSON_RESPONSE_SIZE, gJsonResponseBuffer, makeWebAuthCtx
 #include "WebServer_Utils.h"            // WEB_AUTH_OR_RETURN, sendJsonResponse
 #include "System_User.h"          // AuthContext, tgRequireAuth
+#include "System_AuthIdentity.h"  // ExecIdentityGuard — run direct handlers under the web user's identity
 #include "System_Debug.h"         // DEBUG_* macros
 #include "System_Settings.h"             // Settings, gSettings
 #include "System_Mutex.h"         // gJsonResponseMutex
@@ -851,7 +852,14 @@ esp_err_t handleMicRecordingsList(httpd_req_t* req) {
 #if ENABLE_MICROPHONE_SENSOR
   extern int getRecordingCount();
   extern String getRecordingsList();
-  
+
+  // getRecordingCount/List enumerate via currentAuthContext() (per-task TLS).
+  // This is a direct HTTP handler with no identity installed, so the read of
+  // /sd/recordings would otherwise be denied. Install the authenticated web
+  // user's identity for the duration — the listing then runs with the user's
+  // own permissions (same identity the playback handler uses). No system bypass.
+  ExecIdentityGuard identity(ctx);
+
   int count = getRecordingCount();
   String list = getRecordingsList();
   

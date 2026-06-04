@@ -63,8 +63,8 @@ void initMutexes();
  * 
  * Usage:
  *   {
- *     FsLockGuard guard("myFunction");
- *     File f = LittleFS.open(...);
+ *     FsLockGuard guard("myFunction");            // serialize a multi-step FS sequence
+ *     File f = VFS::openGuarded(path, "r", ctx);  // VFS ops reuse this lock (reentrant)
  *     // ... file operations ...
  *   } // automatically unlocks when guard goes out of scope
  */

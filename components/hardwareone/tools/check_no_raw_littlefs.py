@@ -6,12 +6,11 @@ After Phases 1-6 (see commit history / docs), every file read/write goes
 through VFS::*Guarded with a real AuthContext. That keeps the [PERM] DENY
 audit trail meaningful and the role-based rule table authoritative.
 
-This guard fails the build if anyone reintroduces raw LittleFS file I/O
-outside System_VFS.cpp (the one allowed implementation site). It catches
-LittleFS.open / .exists / .remove / .rename / .mkdir / .rmdir on any non-
-comment line. Stat queries (LittleFS.totalBytes, LittleFS.usedBytes) and
-mount/format (LittleFS.begin, LittleFS.format) are NOT file I/O, so they
-stay legitimate and aren't flagged.
+This guard fails the build if anyone reintroduces raw LittleFS or SD file
+I/O outside System_VFS.cpp (the one allowed implementation site). It catches
+LittleFS.open / SD.open / .exists / .remove / .rename / .mkdir / .rmdir on
+any non-comment line. Stat queries (.totalBytes, .usedBytes) and mount/format
+(.begin, .format) are NOT file I/O, so they stay legitimate and aren't flagged.
 
 Invoked from components/hardwareone/CMakeLists.txt via execute_process at
 configure time. Usage:
@@ -30,7 +29,7 @@ import sys
 # Match the file-I/O API surface only. .totalBytes / .usedBytes / .begin /
 # .format are intentionally excluded — those are mount and stat helpers, not
 # I/O, and have no permission story.
-PATTERN = re.compile(r"LittleFS\.(open|exists|remove|rename|mkdir|rmdir)\s*\(")
+PATTERN = re.compile(r"(?:LittleFS|SD)\.(open|exists|remove|rename|mkdir|rmdir)\s*\(")
 
 # Skip lines that are clearly comments. Catches both "// LittleFS.open(...)"
 # and " *  LittleFS.open(...)" inside /** ... */ blocks. Doesn't try to handle
@@ -71,7 +70,7 @@ def main() -> int:
         return 0
 
     print(
-        "ERROR: Raw LittleFS file I/O detected outside System_VFS.cpp.",
+        "ERROR: Raw LittleFS/SD file I/O detected outside System_VFS.cpp.",
         file=sys.stderr,
     )
     print(
@@ -93,7 +92,7 @@ def main() -> int:
     )
     print("System_VFS.h. The AuthContext argument should be:", file=sys.stderr)
     print(
-        "  - gExecAuthContext               for CLI / serial / lens handlers",
+        "  - currentAuthContext()           for CLI / serial / lens handlers",
         file=sys.stderr,
     )
     print(
