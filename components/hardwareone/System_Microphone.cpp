@@ -10,7 +10,6 @@
 #if ENABLE_MICROPHONE_SENSOR
 
 #include <Arduino.h>
-#include <driver/i2s_pdm.h>
 #include "System_VFS.h"
 #include "System_MemUtil.h"
 #include "System_Debug.h"
@@ -21,13 +20,13 @@
 #include "System_I2C.h"
 #include "System_Microphone_OLED.h"
 #include "System_AuthIdentity.h"  // currentAuthContext (recording path checks)
+#include "HAL_Audio.h"            // single PDM/I2S capture owner (audioCaptureStart/audioReadPcm)
 
 // XIAO ESP32S3 Sense PDM Microphone Pins
 #define MIC_PDM_CLK_PIN     42        // PDM CLK (GPIO42 on XIAO Sense)
 #define MIC_PDM_DATA_PIN    41        // PDM DATA (GPIO41 on XIAO Sense)
 
-// I2S PDM RX channel handle (new driver)
-static i2s_chan_handle_t rx_handle = NULL;
+// PDM I2S capture is owned by HAL_Audio — no local channel handle here.
 
 // Default audio settings
 #define DEFAULT_SAMPLE_RATE   16000
@@ -221,10 +220,11 @@ static void recordingTask(void* param) {
   uint32_t loopCount = 0;
   while (micRecording && gMicEnabled && recordingSamples < maxSamples) {
     size_t bytesRead = 0;
-    esp_err_t err;
+    esp_err_t err = ESP_OK;
     {
-      I2sMicLockGuard i2sGuard("mic.record.read");
-      err = i2s_channel_read(rx_handle, buffer, RECORDING_CHUNK_SIZE, &bytesRead, pdMS_TO_TICKS(100));
+      // Read PCM via HAL_Audio (single I2S owner); errors fold into 0 samples.
+      size_t got = audioReadPcm(buffer, RECORDING_CHUNK_SIZE / sizeof(int16_t), 100);
+      bytesRead = got * sizeof(int16_t);
     }
     
     if (err == ESP_OK && bytesRead > 0 && recordingFile) {
@@ -501,131 +501,16 @@ bool initMicrophone() {
   STACK_TRACEF("initMicrophone.enter rate=%d bitDepth=%d channels=%d",
                micSampleRate, micBitDepth, micChannels);
 
-  // Configure I2S channel for PDM RX (new driver API)
-  WARN_SYSTEMF("[MIC_INIT] Creating I2S channel config...");
-  i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
-  chan_cfg.dma_desc_num = 4;
-  chan_cfg.dma_frame_num = AUDIO_BUFFER_SIZE;
-  // Log the derived clock values the PDM driver will try to program. At
-  // sample rates ≥48kHz the default mclk_multiple=256 + bclk_div=8 combo
-  // can exceed the internal PLL limit on the S3 and cause init to fail.
-  STACK_TRACEF("initMicrophone.clk_config rate=%d mclk_mult=256 bclk_div=8 "
-               "=> target_mclk=%uHz dma_frame_num=%d dma_desc=%d",
-               micSampleRate, (unsigned)(micSampleRate * 256),
-               (int)AUDIO_BUFFER_SIZE, (int)chan_cfg.dma_desc_num);
-  
-  WARN_SYSTEMF("[MIC_INIT] Channel config: i2s_num=0, dma_desc_num=%d, dma_frame_num=%d",
-               (int)chan_cfg.dma_desc_num, (int)chan_cfg.dma_frame_num);
-  
-  WARN_SYSTEMF("[MIC_INIT] Calling i2s_new_channel()...");
-  STACK_TRACEF("initMicrophone.before_i2s_new_channel");
-  esp_err_t err = i2s_new_channel(&chan_cfg, NULL, &rx_handle);
-  STACK_TRACEF("initMicrophone.after_i2s_new_channel err=0x%x (%s) handle=%p",
-               err, esp_err_to_name(err), rx_handle);
-  WARN_SYSTEMF("[MIC_INIT] i2s_new_channel returned: 0x%x (%s), handle=%p",
-               err, esp_err_to_name(err), rx_handle);
-
-  if (err != ESP_OK) {
-    WARN_SYSTEMF("[MIC_INIT] *** I2S CHANNEL CREATE FAILED! ***");
-    INFO_MIC_LIFECYCLEF("Failed to create I2S channel: 0x%x", err);
-    STACK_TRACEF("initMicrophone.exit_channel_create_fail");
+  // I2S PDM capture is owned by HAL_Audio (the single owner). audioCaptureStart
+  // creates+inits+enables the PDM channel at micSampleRate and runs the warm-up
+  // flush, all under the shared reentrant I2S lock.
+  if (!audioCaptureStart("mic", (uint32_t)micSampleRate)) {
+    WARN_SYSTEMF("[MIC_INIT] *** audioCaptureStart(\"mic\") FAILED at rate=%d Hz ***", micSampleRate);
+    INFO_MIC_LIFECYCLEF("Failed to start PDM capture");
     return false;
   }
-
-  // Configure PDM RX mode
-  WARN_SYSTEMF("[MIC_INIT] Configuring PDM RX mode...");
-  i2s_pdm_rx_config_t pdm_rx_cfg = {
-    .clk_cfg = I2S_PDM_RX_CLK_DEFAULT_CONFIG((uint32_t)micSampleRate),
-    .slot_cfg = I2S_PDM_RX_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO),
-    .gpio_cfg = {
-      .clk = (gpio_num_t)MIC_PDM_CLK_PIN,
-      .din = (gpio_num_t)MIC_PDM_DATA_PIN,
-      .invert_flags = {
-        .clk_inv = false,
-      },
-    },
-  };
-  
-  WARN_SYSTEMF("[MIC_INIT] PDM clk_cfg: sample_rate_hz=%u, clk_src=%d, mclk_mult=%d, bclk_div=%u",
-               (unsigned)pdm_rx_cfg.clk_cfg.sample_rate_hz,
-               (int)pdm_rx_cfg.clk_cfg.clk_src,
-               (int)pdm_rx_cfg.clk_cfg.mclk_multiple,
-               (unsigned)pdm_rx_cfg.clk_cfg.bclk_div);
-  WARN_SYSTEMF("[MIC_INIT] PDM gpio_cfg: clk=%d, din=%d, clk_inv=%d",
-               (int)pdm_rx_cfg.gpio_cfg.clk, (int)pdm_rx_cfg.gpio_cfg.din,
-               (int)pdm_rx_cfg.gpio_cfg.invert_flags.clk_inv);
-  WARN_SYSTEMF("[MIC_INIT] PDM slot_cfg: data_bit_width=16, slot_mode=MONO");
-  
-  WARN_SYSTEMF("[MIC_INIT] Calling i2s_channel_init_pdm_rx_mode()...");
-  STACK_TRACEF("initMicrophone.before_pdm_init rate=%d", micSampleRate);
-  err = i2s_channel_init_pdm_rx_mode(rx_handle, &pdm_rx_cfg);
-  STACK_TRACEF("initMicrophone.after_pdm_init err=0x%x (%s) rate=%d",
-               err, esp_err_to_name(err), micSampleRate);
-  WARN_SYSTEMF("[MIC_INIT] i2s_channel_init_pdm_rx_mode returned: 0x%x (%s)", err, esp_err_to_name(err));
-
-  if (err != ESP_OK) {
-    WARN_SYSTEMF("[MIC_INIT] *** PDM RX INIT FAILED at rate=%d Hz — this is a known bad combo on S3 ***", micSampleRate);
-    INFO_MIC_LIFECYCLEF("Failed to init PDM RX: 0x%x (%s)", err, esp_err_to_name(err));
-    STACK_TRACEF("initMicrophone.exit_pdm_init_fail rate=%d", micSampleRate);
-    i2s_del_channel(rx_handle);
-    rx_handle = NULL;
-    return false;
-  }
-
-  // Enable the channel
-  WARN_SYSTEMF("[MIC_INIT] Calling i2s_channel_enable()...");
-  STACK_TRACEF("initMicrophone.before_channel_enable");
-  err = i2s_channel_enable(rx_handle);
-  STACK_TRACEF("initMicrophone.after_channel_enable err=0x%x (%s)",
-               err, esp_err_to_name(err));
-  WARN_SYSTEMF("[MIC_INIT] i2s_channel_enable returned: 0x%x (%s)", err, esp_err_to_name(err));
-
-  if (err != ESP_OK) {
-    WARN_SYSTEMF("[MIC_INIT] *** I2S CHANNEL ENABLE FAILED! ***");
-    INFO_MIC_LIFECYCLEF("Failed to enable I2S channel: 0x%x", err);
-    STACK_TRACEF("initMicrophone.exit_enable_fail");
-    i2s_del_channel(rx_handle);
-    rx_handle = NULL;
-    return false;
-  }
-
-  // Flush initial samples (PDM needs warm-up time)
-  WARN_SYSTEMF("[MIC_INIT] Starting PDM warm-up flush (10 reads of 512 bytes)...");
-  STACK_TRACEF("initMicrophone.warmup_start rate=%d", micSampleRate);
-  int16_t flushBuf[256];
-  size_t bytesRead = 0;
-  int flushCount = 0;
-  int successCount = 0;
-  for (int i = 0; i < 10; i++) {
-    uint32_t readStart = millis();
-    esp_err_t readErr = i2s_channel_read(rx_handle, flushBuf, sizeof(flushBuf), &bytesRead, pdMS_TO_TICKS(100));
-    uint32_t readMs = millis() - readStart;
-    flushCount++;
-    if (readErr == ESP_OK && bytesRead > 0) {
-      successCount++;
-      if (i == 9) {
-        int16_t mn = 32767, mx = -32768;
-        for (size_t j = 0; j < bytesRead / 2; j++) {
-          if (flushBuf[j] < mn) mn = flushBuf[j];
-          if (flushBuf[j] > mx) mx = flushBuf[j];
-        }
-        WARN_SYSTEMF("[MIC_INIT] Flush[%d]: %u bytes in %u ms, min=%d, max=%d", i, (unsigned)bytesRead, readMs, mn, mx);
-      }
-    } else {
-      WARN_SYSTEMF("[MIC_INIT] Flush[%d]: err=0x%x, bytes=%u, took %u ms", i, readErr, (unsigned)bytesRead, readMs);
-    }
-  }
-  WARN_SYSTEMF("[MIC_INIT] Warm-up flush complete: %d/%d successful reads", successCount, flushCount);
-  
-  if (successCount == 0) {
-    WARN_SYSTEMF("[MIC_INIT] WARNING: No data received from microphone during flush!");
-    INFO_MIC_LIFECYCLEF("WARNING: Microphone may not be connected or responding");
-  }
-
-  STACK_TRACEF("initMicrophone.warmup_done success=%d/%d", successCount, flushCount);
-
   gMicEnabled = true;
-  micConnected = (successCount > 0);  // Only mark connected if we got data
+  micConnected = true;  // capture started; HAL surfaces no-data at read time
   sensorStatusBumpWith("openmic");
 
   WARN_SYSTEMF("[MIC_INIT] ########## initMicrophone() SUCCESS ##########");
@@ -639,10 +524,10 @@ bool initMicrophone() {
 }
 
 void stopMicrophone() {
-  STACK_TRACEF("stopMicrophone.enter gMicEnabled=%d rx_handle=%p micRecording=%d",
-               gMicEnabled, rx_handle, micRecording);
+  STACK_TRACEF("stopMicrophone.enter gMicEnabled=%d micRecording=%d",
+               gMicEnabled, micRecording);
   WARN_SYSTEMF("[MIC_STOP] ########## stopMicrophone() BEGIN ##########");
-  WARN_SYSTEMF("[MIC_STOP] Current state: gMicEnabled=%d, rx_handle=%p", gMicEnabled, rx_handle);
+  WARN_SYSTEMF("[MIC_STOP] Current state: gMicEnabled=%d", gMicEnabled);
 
   STACK_TRACEF("stopMicrophone.before_mutex");
   I2sMicLockGuard i2sGuard("mic.stop");
@@ -665,21 +550,8 @@ void stopMicrophone() {
                (unsigned)esp_get_free_heap_size(),
                (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 
-  if (rx_handle) {
-    STACK_TRACEF("stopMicrophone.before_disable rx_handle=%p", rx_handle);
-    WARN_SYSTEMF("[MIC_STOP] Calling i2s_channel_disable()...");
-    esp_err_t err = i2s_channel_disable(rx_handle);
-    STACK_TRACEF("stopMicrophone.after_disable err=0x%x (%s)", err, esp_err_to_name(err));
-    WARN_SYSTEMF("[MIC_STOP] i2s_channel_disable returned: 0x%x (%s)", err, esp_err_to_name(err));
-
-    STACK_TRACEF("stopMicrophone.before_del_channel");
-    WARN_SYSTEMF("[MIC_STOP] Calling i2s_del_channel()...");
-    err = i2s_del_channel(rx_handle);
-    STACK_TRACEF("stopMicrophone.after_del_channel err=0x%x (%s)", err, esp_err_to_name(err));
-    WARN_SYSTEMF("[MIC_STOP] i2s_del_channel returned: 0x%x (%s)", err, esp_err_to_name(err));
-    rx_handle = NULL;
-    STACK_TRACEF("stopMicrophone.rx_handle_nulled");
-  }
+  // HAL_Audio owns the I2S channel — release our capture lease.
+  audioCaptureStop("mic");
 
   gMicEnabled = false;
   micRecording = false;
@@ -694,7 +566,7 @@ void stopMicrophone() {
 
 int16_t* captureAudioSamples(size_t sampleCount, size_t* outLen) {
   WARN_SYSTEMF("[MIC_CAPTURE] captureAudioSamples(count=%u) called", (unsigned)sampleCount);
-  WARN_SYSTEMF("[MIC_CAPTURE] gMicEnabled=%d, rx_handle=%p", gMicEnabled, rx_handle);
+  WARN_SYSTEMF("[MIC_CAPTURE] gMicEnabled=%d", gMicEnabled);
   
   if (!gMicEnabled) {
     WARN_SYSTEMF("[MIC_CAPTURE] Mic not enabled - returning NULL");
@@ -718,13 +590,16 @@ int16_t* captureAudioSamples(size_t sampleCount, size_t* outLen) {
     return nullptr;
   }
 
-  WARN_SYSTEMF("[MIC_CAPTURE] Calling i2s_channel_read(handle=%p, bufSize=%u, timeout=MAX)...", rx_handle, (unsigned)bufferSize);
+  WARN_SYSTEMF("[MIC_CAPTURE] Reading %u bytes via HAL_Audio...", (unsigned)bufferSize);
   unsigned long startMs = millis();
   size_t bytesRead = 0;
-  esp_err_t err;
+  esp_err_t err = ESP_OK;
   {
-    I2sMicLockGuard i2sGuard("mic.capture.read");
-    err = i2s_channel_read(rx_handle, buffer, bufferSize, &bytesRead, portMAX_DELAY);
+    // Read PCM via HAL_Audio (single I2S owner). A generous finite timeout
+    // replaces the old portMAX_DELAY block; at 16 kHz a full read fills in ms.
+    size_t got = audioReadPcm(buffer, bufferSize / sizeof(int16_t), 5000);
+    bytesRead = got * sizeof(int16_t);
+    if (got == 0) err = ESP_FAIL;
   }
   unsigned long elapsed = millis() - startMs;
   
@@ -799,7 +674,9 @@ int getAudioLevel() {
     return lastAudioLevel;
   }
 
-  esp_err_t err = i2s_channel_read(rx_handle, samples, sizeof(samples), &bytesRead, pdMS_TO_TICKS(50));
+  size_t gotSamples = audioReadPcm(samples, sizeof(samples) / sizeof(int16_t), 50);
+  bytesRead = gotSamples * sizeof(int16_t);
+  esp_err_t err = (gotSamples > 0) ? ESP_OK : ESP_FAIL;
 
   if (took && i2sMicMutex) {
     xSemaphoreGive(i2sMicMutex);
@@ -1028,8 +905,8 @@ const char* cmd_micsamplerate(const String& argsInput) {
   if (wasEnabled) {
     STACK_TRACEF("cmd_micsamplerate.before_reinit");
     bool ok = initMicrophone();
-    STACK_TRACEF("cmd_micsamplerate.after_reinit ok=%d gMicEnabled=%d rx_handle=%p",
-                 ok ? 1 : 0, gMicEnabled, rx_handle);
+    STACK_TRACEF("cmd_micsamplerate.after_reinit ok=%d gMicEnabled=%d",
+                 ok ? 1 : 0, gMicEnabled);
   }
 
   snprintf(gMicCmdBuffer, sizeof(gMicCmdBuffer), "Sample rate set to %d Hz (saved)", micSampleRate);
@@ -1093,8 +970,8 @@ const char* cmd_micbitdepth(const String& argsInput) {
   if (wasEnabled) {
     STACK_TRACEF("cmd_micbitdepth.before_reinit");
     bool ok = initMicrophone();
-    STACK_TRACEF("cmd_micbitdepth.after_reinit ok=%d gMicEnabled=%d rx_handle=%p",
-                 ok ? 1 : 0, gMicEnabled, rx_handle);
+    STACK_TRACEF("cmd_micbitdepth.after_reinit ok=%d gMicEnabled=%d",
+                 ok ? 1 : 0, gMicEnabled);
   }
 
   snprintf(gMicCmdBuffer, sizeof(gMicCmdBuffer), "Bit depth set to %d-bit (saved)", micBitDepth);
@@ -1120,7 +997,9 @@ static void micVisualizerTaskFunc(void* param) {
   
   while (gMicVisualizerRunning && gMicEnabled) {
     size_t bytesRead = 0;
-    esp_err_t err = i2s_channel_read(rx_handle, samples, bufSize * sizeof(int16_t), &bytesRead, pdMS_TO_TICKS(100));
+    size_t got = audioReadPcm(samples, bufSize, 100);
+    bytesRead = got * sizeof(int16_t);
+    esp_err_t err = (got > 0) ? ESP_OK : ESP_FAIL;
     
     if (err == ESP_OK && bytesRead > 0) {
       size_t sampleCount = bytesRead / sizeof(int16_t);

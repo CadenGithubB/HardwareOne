@@ -365,6 +365,7 @@ static FS* fsForPath(const String& path) {
 
 bool exists(const String& path) {
   String p = normalize(path);
+  if (p.indexOf("..") >= 0) return false;  // reject traversal (matches guarded-op rejection)
   FsLockGuard guard("VFS.exists");
 
   if (getStorageType(p) == SDCARD) {
@@ -379,6 +380,7 @@ bool exists(const String& path) {
 
 File open(const String& path, const char* mode, bool create) {
   String p = normalize(path);
+  if (p.indexOf("..") >= 0) return File();  // reject traversal (matches guarded-op rejection)
   FsLockGuard guard("VFS.open");
 
   if (getStorageType(p) == SDCARD) {
@@ -393,6 +395,7 @@ File open(const String& path, const char* mode, bool create) {
 
 bool mkdir(const String& path) {
   String p = normalize(path);
+  if (p.indexOf("..") >= 0) return false;  // reject traversal (matches guarded-op rejection)
   FsLockGuard guard("VFS.mkdir");
 
   if (getStorageType(p) == SDCARD) {
@@ -407,6 +410,7 @@ bool mkdir(const String& path) {
 
 bool remove(const String& path) {
   String p = normalize(path);
+  if (p.indexOf("..") >= 0) return false;  // reject traversal (matches guarded-op rejection)
   FsLockGuard guard("VFS.remove");
 
   if (getStorageType(p) == SDCARD) {
@@ -429,6 +433,7 @@ bool remove(const String& path) {
 bool rename(const String& pathFrom, const String& pathTo) {
   String from = normalize(pathFrom);
   String to = normalize(pathTo);
+  if (from.indexOf("..") >= 0 || to.indexOf("..") >= 0) return false;  // reject traversal
 
   StorageType tf = getStorageType(from);
   StorageType tt = getStorageType(to);
@@ -452,6 +457,7 @@ bool rename(const String& pathFrom, const String& pathTo) {
 
 bool rmdir(const String& path) {
   String p = normalize(path);
+  if (p.indexOf("..") >= 0) return false;  // reject traversal (matches guarded-op rejection)
   FsLockGuard guard("VFS.rmdir");
 
   if (getStorageType(p) == SDCARD) {

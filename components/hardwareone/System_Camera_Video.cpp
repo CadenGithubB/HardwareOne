@@ -348,8 +348,8 @@ bool startVideoRecording() {
     return false;
   }
   // Gate on WRITABLE not just mounted — a card can be mounted but have
-  // SD.open fail on the actual file create (flaky card, bad sector,
-  // write-protect). isSDWritable() has a lazy re-probe so if the card
+  // the underlying SD write fail on the actual file create (flaky card,
+  // bad sector, write-protect). isSDWritable() has a lazy re-probe so if the card
   // was briefly glitchy and has since recovered, we'll pick it up.
   const bool sdWritable = VFS::isSDWritable();
   STACK_TRACEF("startVideoRecording.sd_writable=%d (mounted=%d)",

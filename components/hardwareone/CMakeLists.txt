@@ -212,6 +212,7 @@ set(hardwareone_srcs
         System_ESPSR.cpp
         System_VFS.cpp
         System_Microphone.cpp
+        HAL_Audio.cpp
         System_SensorRegistry.cpp
         System_Notifications.cpp
         System_AuthIdentity.cpp
@@ -421,12 +422,12 @@ target_compile_options(${COMPONENT_LIB} PRIVATE
 )
 
 # ============================================================================
-# Build-time guard: no raw LittleFS file I/O outside System_VFS.cpp
+# Build-time guard: no raw LittleFS/SD file I/O outside System_VFS.cpp
 # ============================================================================
 # The permission refactor (Phases 1-6) routes every file read/write through
 # VFS::*Guarded with an AuthContext, so the [PERM] DENY audit trail and the
 # role-based rule table actually apply. This check fails the build if anyone
-# reintroduces raw LittleFS.open / .exists / .remove / .rename / .mkdir /
+# reintroduces raw LittleFS/SD .open / .exists / .remove / .rename / .mkdir /
 # .rmdir outside System_VFS.cpp — stops regressions before flash instead of
 # discovering them in an audit months later.
 #

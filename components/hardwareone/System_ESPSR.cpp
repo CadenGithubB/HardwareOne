@@ -12,6 +12,7 @@
 #include "System_Microphone.h"
 #include "System_Mutex.h"
 #include "G2_Glasses.h"  // g2MicSetAfeFeedActive / g2MicReadPcmSamples (Phase 2B)
+#include "HAL_Audio.h"   // single PDM/I2S capture owner (audioCaptureStart/audioReadPcm)
 #include "System_Command.h"
 #include "System_CLI.h"
 #include "System_User.h"
@@ -97,8 +98,6 @@ static const esp_mn_iface_t* gMNModel = nullptr;
 static SemaphoreHandle_t gMNCommandMutex = nullptr;
 static bool gMNCommandsAllocated = false;
 
-// I2S handle
-static i2s_chan_handle_t gI2SRxHandle = nullptr;
 static bool gRestoreMicAfterSR = false;
 
 // Statistics
@@ -1582,133 +1581,21 @@ static bool saveCommandsFileLocked(size_t& outSaved) {
 // ============================================================================
 
 static bool initI2SMicrophone() {
-  WARN_SYSTEMF("[SR_I2S] ========== initI2SMicrophone() START ==========");
-  WARN_SYSTEMF("[SR_I2S] Heap: free=%u, PSRAM_free=%u", 
-               (unsigned)esp_get_free_heap_size(), 
-               (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
-
-  I2sMicLockGuard i2sGuard("sr.i2s.init");
-  
-  // Create I2S channel for PDM RX
-  i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_SR_NUM, I2S_ROLE_MASTER);
-  chan_cfg.dma_desc_num = 4;
-  chan_cfg.dma_frame_num = 1024;
-  
-  WARN_SYSTEMF("[SR_I2S] Channel config: i2s_num=%d, dma_desc_num=%d, dma_frame_num=%d",
-               (int)I2S_SR_NUM, (int)chan_cfg.dma_desc_num, (int)chan_cfg.dma_frame_num);
-  
-  WARN_SYSTEMF("[SR_I2S] Calling i2s_new_channel()...");
-  esp_err_t err = i2s_new_channel(&chan_cfg, nullptr, &gI2SRxHandle);
-  WARN_SYSTEMF("[SR_I2S] i2s_new_channel returned: 0x%x (%s), handle=%p", 
-               err, esp_err_to_name(err), gI2SRxHandle);
-  if (err != ESP_OK) {
-    ERROR_SRF("Failed to create I2S channel: %s", esp_err_to_name(err));
-    return false;
-  }
-  
-  // Configure PDM RX mode for the onboard PDM microphone
-  // XIAO ESP32S3 Sense MSM261S4030H0R outputs on LEFT channel
-  i2s_pdm_rx_slot_config_t slot_cfg =
-#ifdef I2S_PDM_RX_SLOT_PCM_FMT_DEFAULT_CONFIG
-    I2S_PDM_RX_SLOT_PCM_FMT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO);
+#if ENABLE_MICROPHONE_SENSOR
+  // HAL_Audio owns the PDM I2S channel; lease it for SR.
+  return audioCaptureStart("sr", I2S_SR_SAMPLE_RATE);
 #else
-    I2S_PDM_RX_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO);
-#endif
-
-#if !defined(I2S_PDM_RX_SLOT_PCM_FMT_DEFAULT_CONFIG) && defined(I2S_PDM_DATA_FMT_PCM)
-  slot_cfg.data_fmt = I2S_PDM_DATA_FMT_PCM;
-#endif
-
-  i2s_pdm_rx_config_t pdm_cfg = {
-    .clk_cfg = I2S_PDM_RX_CLK_DEFAULT_CONFIG(I2S_SR_SAMPLE_RATE),
-    .slot_cfg = slot_cfg,
-    .gpio_cfg = {
-      .clk = (gpio_num_t)MIC_CLK_PIN,
-      .din = (gpio_num_t)MIC_DATA_PIN,
-      .invert_flags = {
-        .clk_inv = false,
-      },
-    },
-  };
-
-  WARN_SYSTEMF("[SR_I2S] PDM clk_cfg: sample_rate_hz=%u, clk_src=%d, mclk_mult=%d, bclk_div=%u",
-            (unsigned)pdm_cfg.clk_cfg.sample_rate_hz,
-            (int)pdm_cfg.clk_cfg.clk_src,
-            (int)pdm_cfg.clk_cfg.mclk_multiple,
-            (unsigned)pdm_cfg.clk_cfg.bclk_div);
-  WARN_SYSTEMF("[SR_I2S] PDM gpio_cfg: clk=%d, din=%d, clk_inv=%d",
-            (int)pdm_cfg.gpio_cfg.clk, (int)pdm_cfg.gpio_cfg.din,
-            (int)pdm_cfg.gpio_cfg.invert_flags.clk_inv);
-
-#ifdef I2S_PDM_RX_SLOT_PCM_FMT_DEFAULT_CONFIG
-  WARN_SYSTEMF("[SR_I2S] PDM slot cfg: I2S_PDM_RX_SLOT_PCM_FMT_DEFAULT_CONFIG");
-#else
-  WARN_SYSTEMF("[SR_I2S] PDM slot cfg: I2S_PDM_RX_SLOT_DEFAULT_CONFIG%s", 
-#ifdef I2S_PDM_DATA_FMT_PCM
-            " + data_fmt=PCM"
-#else
-            ""
-#endif
-  );
-#endif
-  
-  WARN_SYSTEMF("[SR_I2S] Calling i2s_channel_init_pdm_rx_mode()...");
-  err = i2s_channel_init_pdm_rx_mode(gI2SRxHandle, &pdm_cfg);
-  WARN_SYSTEMF("[SR_I2S] i2s_channel_init_pdm_rx_mode returned: 0x%x (%s)", err, esp_err_to_name(err));
-  if (err != ESP_OK) {
-    ERROR_SRF("Failed to init I2S PDM RX mode: %s", esp_err_to_name(err));
-    i2s_del_channel(gI2SRxHandle);
-    gI2SRxHandle = nullptr;
-    return false;
-  }
-  
-  WARN_SYSTEMF("[SR_I2S] Calling i2s_channel_enable()...");
-  err = i2s_channel_enable(gI2SRxHandle);
-  WARN_SYSTEMF("[SR_I2S] i2s_channel_enable returned: 0x%x (%s)", err, esp_err_to_name(err));
-  if (err != ESP_OK) {
-    ERROR_SRF("Failed to enable I2S channel: %s", esp_err_to_name(err));
-    i2s_del_channel(gI2SRxHandle);
-    gI2SRxHandle = nullptr;
-    return false;
-  }
-
-  WARN_SYSTEMF("[SR_I2S] Starting PDM warm-up flush (10 reads of 512 bytes)...");
-  {
-    int16_t flushBuf[256];
-    size_t flushBytesRead = 0;
-    int flushOkCount = 0;
-    for (int i = 0; i < 10; i++) {
-      esp_err_t flushErr = i2s_channel_read(gI2SRxHandle, flushBuf, sizeof(flushBuf), &flushBytesRead, pdMS_TO_TICKS(100));
-      if (flushErr == ESP_OK && flushBytesRead > 0) {
-        flushOkCount++;
-        if (i == 9) {
-          int16_t mn = 32767, mx = -32768;
-          for (size_t j = 0; j < flushBytesRead / 2; j++) {
-            if (flushBuf[j] < mn) mn = flushBuf[j];
-            if (flushBuf[j] > mx) mx = flushBuf[j];
-          }
-          WARN_SYSTEMF("[SR_I2S] Flush[%d]: %u bytes, min=%d, max=%d", i, (unsigned)flushBytesRead, mn, mx);
-        }
-      } else {
-        WARN_SYSTEMF("[SR_I2S] Flush[%d]: err=0x%x, bytes=%u", i, flushErr, (unsigned)flushBytesRead);
-      }
-    }
-    WARN_SYSTEMF("[SR_I2S] Warm-up flush complete: %d/10 reads OK", flushOkCount);
-  }
-  
-  WARN_SYSTEMF("[SR_I2S] ========== initI2SMicrophone() SUCCESS ==========");
-  INFO_SRF("PDM microphone initialized (CLK=%d, DATA=%d)", MIC_CLK_PIN, MIC_DATA_PIN);
-  return true;
+  // No local PDM mic in this build — SR can only use a remote (G2) source.
+  return false;
+#endif  // ENABLE_MICROPHONE_SENSOR
 }
 
 static void deinitI2SMicrophone() {
-  if (gI2SRxHandle) {
-    I2sMicLockGuard i2sGuard("sr.i2s.deinit");
-    i2s_channel_disable(gI2SRxHandle);
-    i2s_del_channel(gI2SRxHandle);
-    gI2SRxHandle = nullptr;
-    DEBUG_SRF("I2S microphone deinitialized");
-  }
+#if ENABLE_MICROPHONE_SENSOR
+  audioCaptureStop("sr");          // HAL_Audio owns I2S — release SR's lease.
+#else
+  // No local PDM mic in this build — nothing to release.
+#endif  // ENABLE_MICROPHONE_SENSOR
 }
 
 // ============================================================================
@@ -2064,7 +1951,7 @@ static void srTask(void* param) {
 
   WARN_SYSTEMF("[SR_TASK] Buffers allocated OK. feed_chunk=%u samples, i2s_read_cap=%u samples, ring_cap=%u samples, mn_cap=%u samples",
                (unsigned)feedChunkSamples, (unsigned)i2sReadSamplesCap, (unsigned)ringSamplesCap, (unsigned)mnBufSamplesCap);
-  WARN_SYSTEMF("[SR_TASK] gI2SRxHandle=%p", gI2SRxHandle);
+  WARN_SYSTEMF("[SR_TASK] (PDM I2S owned by HAL_Audio)");
   SR_DBG_L(1, "SR buffers: feed_chunk=%u samples, read_cap=%u samples (%u bytes), ring_cap=%u samples",
            (unsigned)feedChunkSamples, (unsigned)i2sReadSamplesCap, (unsigned)i2sReadBytes, (unsigned)ringSamplesCap);
   
@@ -2120,8 +2007,13 @@ static void srTask(void* param) {
       if (bytesRead > 0) gSrG2BytesOk += bytesRead;
       else               gSrG2ReadZero++;
     } else {
-      I2sMicLockGuard i2sGuard("sr.i2s.read");
-      err = i2s_channel_read(gI2SRxHandle, i2sReadBuf, i2sReadBytes, &bytesRead, pdMS_TO_TICKS(100));
+#if ENABLE_MICROPHONE_SENSOR
+      // Local PDM read via HAL_Audio (single I2S owner); errors -> 0 samples.
+      size_t got = audioReadPcm((int16_t*)i2sReadBuf, i2sReadBytes / sizeof(int16_t), 100);
+      bytesRead = got * sizeof(int16_t);
+#else
+      bytesRead = 0;  // No local PDM mic — local source yields no audio.
+#endif
     }
     uint32_t readDurationMs = millis() - readStartMs;
 
