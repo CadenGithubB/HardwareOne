@@ -9,6 +9,7 @@
 #include "HAL_Input.h"           // For INPUT_TASK_NAME / INPUT_TASK_TAG
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <cstdio>                 // snprintf (per-interval CPU% formatting)
 
 // Some ESP-IDF configurations do not provide uxTaskGetSystemState (runtime
 // stats disabled). Provide a weak stub so diagnostic commands still link. If
@@ -381,6 +382,36 @@ void reportTaskStack(TaskHandle_t handle, const char* name, uint32_t allocatedWo
 }
 
 // Report all sensor task stacks with comprehensive memory pressure stats
+// --- Per-interval (delta) CPU% tracking --------------------------------------
+// reportAllTaskStacks() prints both lifetime CPU% (ulRunTimeCounter/total) and
+// a per-interval dCPU% computed against the previous report. Keyed by task
+// HANDLE because names can be stale or duplicated. The run-time counters are
+// esp_timer microseconds (CONFIG_FREERTOS_RUN_TIME_STATS_USING_ESP_TIMER):
+// 32-bit, wrapping ~every 71 min, but unsigned deltas over the ~60 s report
+// cadence are safe. A delta wildly larger than the elapsed run-time clock means
+// a TCB handle was reused by a new task (or the counter wrapped) → reported as
+// n/a for that round rather than a garbage spike.
+struct RunSample { TaskHandle_t handle; uint32_t prevRun; };
+static RunSample*  sRunPrev      = nullptr;
+static UBaseType_t sRunPrevCount = 0;
+static UBaseType_t sRunPrevCap   = 0;
+static uint32_t    sPrevTotalRun = 0;
+static bool        sRunPrevValid = false;
+
+// Interval CPU% for a task handle, or -1 if no usable baseline this round.
+static int deltaCpuPercent(TaskHandle_t h, uint32_t curRun, uint32_t totalDelta) {
+  if (!sRunPrevValid || totalDelta == 0 || !h) return -1;
+  for (UBaseType_t i = 0; i < sRunPrevCount; i++) {
+    if (sRunPrev[i].handle == h) {
+      uint32_t d = curRun - sRunPrev[i].prevRun;            // wrap-safe unsigned
+      if (d > totalDelta + (totalDelta / 4)) return -1;     // >125% → reuse/wrap
+      uint64_t pct = (uint64_t)d * 100 / totalDelta;
+      return pct > 100 ? 100 : (int)pct;
+    }
+  }
+  return -1;  // task absent last round (newly created) → no baseline yet
+}
+
 void reportAllTaskStacks() {
   broadcastOutput("");
   broadcastOutput("========== TASK STACK REPORT ==========");
@@ -439,10 +470,13 @@ void reportAllTaskStacks() {
     return;
   }
 
+  // Per-interval CPU: elapsed run-time clock since the previous report (wrap-safe).
+  uint32_t totalDelta = sRunPrevValid ? (uint32_t)(totalRuntime - sPrevTotalRun) : 0;
+
   broadcastOutput("");
   BROADCAST_PRINTF("-- TASK BREAKDOWN (%u tasks) --", (unsigned)numTasks);
-  broadcastOutput("  Name              Stack(KB)  Used(KB)  Free(KB)  Used%%  CPU%%  TCB(B)");
-  broadcastOutput("  ----------------  ---------  --------  --------  -----  ----  ------");
+  broadcastOutput("  Name              Stack(KB)  Used(KB)  Free(KB)  Used%  CPU%  dCPU%  TCB(B)");
+  broadcastOutput("  ----------------  ---------  --------  --------  -----  ----  -----  ------");
   
   uint32_t totalStackAllocated = 0;
   uint32_t totalStackUsed = 0;
@@ -519,22 +553,30 @@ void reportAllTaskStacks() {
     uint32_t freeBytes = watermark * 4;
     uint32_t usedPercent = (usedBytes * 100) / allocBytes;
     
-    // Find CPU usage
+    // Find CPU usage by handle (names can be stale/duplicate). cpuPercent is
+    // lifetime; dCpu is the per-interval delta (n/a until a baseline exists).
     uint32_t cpuPercent = 0;
+    int dCpu = -1;
     for (UBaseType_t i = 0; i < numTasks; i++) {
-      if (strcmp(taskArray[i].pcTaskName, kt.name) == 0) {
-        cpuPercent = (totalRuntime > 0) ? ((taskArray[i].ulRunTimeCounter * 100) / totalRuntime) : 0;
+      if (taskArray[i].xHandle == kt.handle) {
+        uint32_t curRun = (uint32_t)taskArray[i].ulRunTimeCounter;
+        cpuPercent = (totalRuntime > 0) ? (uint32_t)((uint64_t)curRun * 100 / totalRuntime) : 0;  // uint64: curRun*100 overflows uint32 after ~43s uptime
+        dCpu = deltaCpuPercent(kt.handle, curRun, totalDelta);
         break;
       }
     }
-    
-    BROADCAST_PRINTF("  %-16s  %4u      %4u      %4u      %3u%%   %2u%%   %3u",
+    char dc[16];  // sized for worst-case %4d%% so -Wformat-truncation stays quiet
+    if (dCpu < 0) snprintf(dc, sizeof(dc), "%5s", "-");
+    else          snprintf(dc, sizeof(dc), "%4d%%", dCpu);
+
+    BROADCAST_PRINTF("  %-16s  %4u      %4u      %4u      %3u%%   %2u%%  %5s   %3u",
       kt.name,
       (unsigned)(allocBytes/1024),
       (unsigned)(usedBytes/1024),
       (unsigned)(freeBytes/1024),
       (unsigned)usedPercent,
       (unsigned)cpuPercent,
+      dc,
       (unsigned)TCB_SIZE);
     
     totalStackAllocated += allocBytes;
@@ -569,15 +611,20 @@ void reportAllTaskStacks() {
     uint32_t usedBytes = allocBytes - (watermark * 4);
     uint32_t freeBytes = watermark * 4;
     uint32_t usedPercent = (usedBytes * 100) / allocBytes;
-    uint32_t cpuPercent = (totalRuntime > 0) ? ((taskArray[i].ulRunTimeCounter * 100) / totalRuntime) : 0;
-    
-    BROADCAST_PRINTF("  %-16s ~%4u     ~%4u      %4u     ~%3u%%   %2u%%   %3u",
+    uint32_t cpuPercent = (totalRuntime > 0) ? (uint32_t)((uint64_t)taskArray[i].ulRunTimeCounter * 100 / totalRuntime) : 0;  // uint64: *100 overflows uint32 after ~43s uptime
+    int dCpu = deltaCpuPercent(taskArray[i].xHandle, (uint32_t)taskArray[i].ulRunTimeCounter, totalDelta);
+    char dc[16];  // sized for worst-case %4d%% so -Wformat-truncation stays quiet
+    if (dCpu < 0) snprintf(dc, sizeof(dc), "%5s", "-");
+    else          snprintf(dc, sizeof(dc), "%4d%%", dCpu);
+
+    BROADCAST_PRINTF("  %-16s ~%4u     ~%4u      %4u     ~%3u%%   %2u%%  %5s   %3u",
       name,
       (unsigned)(allocBytes/1024),
       (unsigned)(usedBytes/1024),
       (unsigned)(freeBytes/1024),
       (unsigned)usedPercent,
       (unsigned)cpuPercent,
+      dc,
       (unsigned)TCB_SIZE);
     
     totalStackAllocated += allocBytes;
@@ -585,13 +632,38 @@ void reportAllTaskStacks() {
     totalTCBOverhead += TCB_SIZE;
   }
   
-  broadcastOutput("  ----------------  ---------  --------  --------  -----  ----  ------");
+  broadcastOutput("  ----------------  ---------  --------  --------  -----  ----  -----  ------");
   BROADCAST_PRINTF("  TOTALS:           %5u     %5u      %5u                  %4u",
     (unsigned)(totalStackAllocated/1024),
     (unsigned)(totalStackUsed/1024),
     (unsigned)((totalStackAllocated - totalStackUsed)/1024),
     (unsigned)totalTCBOverhead);
-  
+
+  // -- CPU (per-interval, since last report) --
+  // Lifetime CPU% converges to a meaningless average over long uptimes; the
+  // dCPU% column + these idle lines show what was actually busy this interval.
+  broadcastOutput("");
+  if (!sRunPrevValid || totalDelta == 0) {
+    broadcastOutput("-- CPU (per-interval) --");
+    broadcastOutput("  dCPU% baseline set; per-interval values appear from the next report.");
+  } else {
+    broadcastOutput("-- CPU (per-interval, since last report) --");
+    bool printedIdle = false;
+    for (UBaseType_t i = 0; i < numTasks; i++) {
+      const char* nm = taskArray[i].pcTaskName;
+      if (!nm || (uintptr_t)nm < 0x3F000000) continue;     // guard stale snapshot ptr
+      if (strncmp(nm, "IDLE", 4) == 0) {                   // IDLE0 / IDLE1 (per core)
+        int idlePct = deltaCpuPercent(taskArray[i].xHandle,
+                                      (uint32_t)taskArray[i].ulRunTimeCounter, totalDelta);
+        if (idlePct >= 0) {
+          BROADCAST_PRINTF("  %-6s idle: %3d%% free this interval", nm, idlePct);
+          printedIdle = true;
+        }
+      }
+    }
+    if (!printedIdle) broadcastOutput("  (idle-task headroom unavailable)");
+  }
+
   // Memory accounting summary
   broadcastOutput("");
   broadcastOutput("-- MEMORY ACCOUNTING SUMMARY --");
@@ -646,8 +718,28 @@ void reportAllTaskStacks() {
     broadcastOutput("  [OK] No critical warnings - all tasks healthy");
   }
   
+  // Refresh the per-interval CPU baseline for the next report (keyed by handle).
+  {
+    UBaseType_t need = numTasks + 4;
+    if (need > sRunPrevCap) {
+      if (sRunPrev) { free(sRunPrev); sRunPrev = nullptr; sRunPrevCap = 0; }
+      sRunPrev = (RunSample*)ps_alloc(need * sizeof(RunSample), AllocPref::PreferPSRAM, "task.runprev");
+      if (sRunPrev) sRunPrevCap = need;
+    }
+    if (sRunPrev) {
+      sRunPrevCount = 0;
+      for (UBaseType_t i = 0; i < numTasks && sRunPrevCount < sRunPrevCap; i++) {
+        sRunPrev[sRunPrevCount].handle  = taskArray[i].xHandle;
+        sRunPrev[sRunPrevCount].prevRun = (uint32_t)taskArray[i].ulRunTimeCounter;
+        sRunPrevCount++;
+      }
+      sPrevTotalRun = totalRuntime;
+      sRunPrevValid = true;
+    }
+  }
+
   broadcastOutput("");
   broadcastOutput("========== END TASK STACK REPORT ==========");
   broadcastOutput("");
-  
+
 }

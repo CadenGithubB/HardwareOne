@@ -901,17 +901,197 @@ bool ensureFileViewBuffers() {
   return gFileReadBuf && gFileOutBuf;
 }
 
-static void performanceCounter() {
-  static unsigned long perfCounter = 0;
-  static unsigned long lastPerfReport = 0;
-  perfCounter++;
+// ---------------------------------------------------------------------------
+// Loop-health instrument + per-section profiler (replaces performanceCounter).
+//
+// loopHealthTick() runs FIRST each lap and is the lap-timing anchor; the loop
+// calls perfMarkSection(i) after each of its 6 sections so we know where the
+// lap's time went. Two tiers:
+//   • Tier 1 (always-on, ~free): time each lap via esp_timer and emit a
+//     rate-limited [LOOPHEALTH] WARN whenever a lap exceeds LOOP_STALL_US,
+//     ATTRIBUTED via the profiler — either to a dominant loop section
+//     ("loop-bound: INPUT 1510 ms", e.g. a synchronous serial command) or to
+//     time spent outside any section ("840 ms outside sections" = the loop was
+//     blocked/preempted, e.g. another task hogging the core). A worst-N ring +
+//     total count are kept for the `perftop` command. Always on, no flag.
+//   • Tier 2 (DEBUG_PERFORMANCE): every 5 s print laps/s, period min/avg/max,
+//     a latency histogram, and the per-section average breakdown. The window
+//     rolls every 5 s regardless of the flag (stats stay bounded); the snapshot
+//     is what `perftop` reads on demand.
+//
+// Caveat: section timing is wall-clock between marks, so a preemption that
+// lands mid-section inflates that section. The inLoop-vs-outside split (and
+// `perftop`'s live task CPU%) disambiguate. Tunable: LOOP_STALL_US.
+// ---------------------------------------------------------------------------
+static const uint32_t LOOP_STALL_US = 200000;  // 200 ms stall threshold
+static const char* const kLoopSectionNames[6] = {
+  "DIAG", "IO", "EVENT", "NET", "DISPLAY", "INPUT"
+};
 
-  // Report performance every 5 seconds
-  if (millis() - lastPerfReport > 5000) {
-    unsigned long loopsPerSec = perfCounter / 5;
-    DEBUG_PERFORMANCEF("Performance: %lu loops/sec", loopsPerSec);
-    perfCounter = 0;
-    lastPerfReport = millis();
+struct LoopPerfState {
+  // per-lap section scratch: filled by perfMarkSection() during the lap,
+  // consumed by loopHealthTick() at the top of the NEXT lap.
+  int64_t  lastMarkUs;
+  uint32_t lapSectionUs[6];
+
+  // current 5 s window accumulators
+  int64_t  lastLapUs;
+  uint32_t laps;
+  uint32_t minUs, maxUs;
+  uint64_t sumUs;
+  uint32_t stallsWindow;
+  uint32_t buckets[6];                 // <16,<32,<64,<128,<256,>=256 ms
+  uint64_t sectionSumUs[6];
+  unsigned long lastReportMs;
+  unsigned long lastStallWarnMs;
+  uint32_t stallSuppressed;
+
+  // snapshot of the last completed window (stable read for perftop)
+  bool     snapValid;
+  uint32_t snapLapsPerSec, snapMinMs, snapAvgMs, snapMaxMs, snapStalls;
+  uint32_t snapBuckets[6];
+  uint32_t snapSectionAvgUs[6];
+
+  // all-time
+  uint32_t totalStalls;
+  struct WorstStall { uint32_t ms; uint32_t atMs; uint8_t dom; bool inLoop; } worst[5];
+  uint8_t  worstCount;
+};
+static LoopPerfState gLoopPerf;   // zero-initialised (static storage)
+
+// Called after each loop section: record that section's wall-clock duration and
+// advance the mark. Cheap — one esp_timer read + a store.
+static inline void perfMarkSection(uint8_t idx) {
+  if (idx >= 6) return;
+  int64_t now = esp_timer_get_time();
+  gLoopPerf.lapSectionUs[idx] = (uint32_t)(now - gLoopPerf.lastMarkUs);
+  gLoopPerf.lastMarkUs = now;
+}
+
+static void loopHealthTick() {
+  const int64_t       nowUs = esp_timer_get_time();
+  const unsigned long nowMs = millis();
+
+  if (gLoopPerf.lastLapUs != 0) {
+    uint32_t dtUs = (uint32_t)(nowUs - gLoopPerf.lastLapUs);
+    uint32_t dtMs = dtUs / 1000;
+
+    // period distribution (laps==0 → first lap of the window seeds min/max)
+    if (gLoopPerf.laps == 0) { gLoopPerf.minUs = dtUs; gLoopPerf.maxUs = dtUs; }
+    else { if (dtUs < gLoopPerf.minUs) gLoopPerf.minUs = dtUs;
+           if (dtUs > gLoopPerf.maxUs) gLoopPerf.maxUs = dtUs; }
+    gLoopPerf.laps++;
+    gLoopPerf.sumUs += dtUs;
+    uint8_t b = dtMs < 16 ? 0 : dtMs < 32 ? 1 : dtMs < 64 ? 2 : dtMs < 128 ? 3 : dtMs < 256 ? 4 : 5;
+    gLoopPerf.buckets[b]++;
+
+    // accumulate the just-finished lap's per-section times + find the hotspot
+    uint32_t inLoopUs = 0;
+    uint8_t  dom = 0;
+    for (uint8_t i = 0; i < 6; i++) {
+      gLoopPerf.sectionSumUs[i] += gLoopPerf.lapSectionUs[i];
+      inLoopUs += gLoopPerf.lapSectionUs[i];
+      if (gLoopPerf.lapSectionUs[i] > gLoopPerf.lapSectionUs[dom]) dom = i;
+    }
+
+    // Tier 1: stall detection + attribution
+    if (dtUs >= LOOP_STALL_US) {
+      bool inLoop = inLoopUs >= (dtUs / 2);   // ≥half the lap was inside sections
+      gLoopPerf.stallsWindow++;
+      gLoopPerf.totalStalls++;
+
+      // worst-N ring (keep the 5 largest by duration)
+      if (gLoopPerf.worstCount < 5) {
+        gLoopPerf.worst[gLoopPerf.worstCount++] = { dtMs, (uint32_t)nowMs, dom, inLoop };
+      } else {
+        uint8_t smallest = 0;
+        for (uint8_t i = 1; i < 5; i++)
+          if (gLoopPerf.worst[i].ms < gLoopPerf.worst[smallest].ms) smallest = i;
+        if (dtMs > gLoopPerf.worst[smallest].ms)
+          gLoopPerf.worst[smallest] = { dtMs, (uint32_t)nowMs, dom, inLoop };
+      }
+
+      if (gLoopPerf.lastStallWarnMs == 0 || (nowMs - gLoopPerf.lastStallWarnMs) >= 5000UL) {
+        const char* more = gLoopPerf.stallSuppressed ? " [+more suppressed]" : "";
+        if (inLoop) {
+          BROADCAST_PRINTF("[LOOPHEALTH] stall: lap took %lu ms | loop-bound: %s %lu ms%s",
+                           (unsigned long)dtMs, kLoopSectionNames[dom],
+                           (unsigned long)(gLoopPerf.lapSectionUs[dom] / 1000UL), more);
+        } else {
+          BROADCAST_PRINTF("[LOOPHEALTH] stall: lap took %lu ms | %lu ms outside sections (blocked/preempted — run perftop)%s",
+                           (unsigned long)dtMs, (unsigned long)((dtUs - inLoopUs) / 1000UL), more);
+        }
+        gLoopPerf.lastStallWarnMs = nowMs;
+        gLoopPerf.stallSuppressed = 0;
+      } else {
+        gLoopPerf.stallSuppressed++;
+      }
+    }
+  }
+  gLoopPerf.lastLapUs  = nowUs;
+  gLoopPerf.lastMarkUs = nowUs;   // section[0] timing starts here
+
+  // 5 s window roll: snapshot (for perftop) + print (DEBUG_PERFORMANCE) + reset.
+  if (gLoopPerf.lastReportMs == 0) gLoopPerf.lastReportMs = nowMs;
+  if ((nowMs - gLoopPerf.lastReportMs) >= 5000UL) {
+    if (gLoopPerf.laps > 0) {
+      gLoopPerf.snapValid      = true;
+      gLoopPerf.snapLapsPerSec = gLoopPerf.laps / 5UL;
+      gLoopPerf.snapMinMs      = gLoopPerf.minUs / 1000UL;
+      gLoopPerf.snapAvgMs      = (uint32_t)(gLoopPerf.sumUs / gLoopPerf.laps) / 1000UL;
+      gLoopPerf.snapMaxMs      = gLoopPerf.maxUs / 1000UL;
+      gLoopPerf.snapStalls     = gLoopPerf.stallsWindow;
+      for (uint8_t i = 0; i < 6; i++) {
+        gLoopPerf.snapBuckets[i]      = gLoopPerf.buckets[i];
+        gLoopPerf.snapSectionAvgUs[i] = (uint32_t)(gLoopPerf.sectionSumUs[i] / gLoopPerf.laps);
+      }
+      if (isDebugFlagSet(DEBUG_PERFORMANCE)) {
+        DEBUG_PERFORMANCEF("[LOOPHEALTH] %lu laps/s | period min/avg/max=%lu/%lu/%lu ms | stalls=%lu | dist ms <16:%lu <32:%lu <64:%lu <128:%lu <256:%lu >=256:%lu",
+                           (unsigned long)gLoopPerf.snapLapsPerSec,
+                           (unsigned long)gLoopPerf.snapMinMs, (unsigned long)gLoopPerf.snapAvgMs, (unsigned long)gLoopPerf.snapMaxMs,
+                           (unsigned long)gLoopPerf.snapStalls,
+                           (unsigned long)gLoopPerf.snapBuckets[0], (unsigned long)gLoopPerf.snapBuckets[1], (unsigned long)gLoopPerf.snapBuckets[2],
+                           (unsigned long)gLoopPerf.snapBuckets[3], (unsigned long)gLoopPerf.snapBuckets[4], (unsigned long)gLoopPerf.snapBuckets[5]);
+        DEBUG_PERFORMANCEF("[LOOPHEALTH] section avg us/lap: DIAG=%lu IO=%lu EVENT=%lu NET=%lu DISPLAY=%lu INPUT=%lu",
+                           (unsigned long)gLoopPerf.snapSectionAvgUs[0], (unsigned long)gLoopPerf.snapSectionAvgUs[1],
+                           (unsigned long)gLoopPerf.snapSectionAvgUs[2], (unsigned long)gLoopPerf.snapSectionAvgUs[3],
+                           (unsigned long)gLoopPerf.snapSectionAvgUs[4], (unsigned long)gLoopPerf.snapSectionAvgUs[5]);
+      }
+    }
+    gLoopPerf.lastReportMs = nowMs;
+    gLoopPerf.laps = 0; gLoopPerf.sumUs = 0; gLoopPerf.minUs = 0; gLoopPerf.maxUs = 0; gLoopPerf.stallsWindow = 0;
+    memset(gLoopPerf.buckets, 0, sizeof(gLoopPerf.buckets));
+    memset(gLoopPerf.sectionSumUs, 0, sizeof(gLoopPerf.sectionSumUs));
+  }
+}
+
+// Dump the loop-health snapshot for the `perftop` command (prints via
+// broadcastOutput). Declared in System_TaskUtils.h.
+void perfPrintLoopHealth() {
+  if (!gLoopPerf.snapValid) {
+    broadcastOutput("[PERFTOP] loop: warming up (no completed 5s window yet)");
+    return;
+  }
+  BROADCAST_PRINTF("[PERFTOP] loop: %lu laps/s | period min/avg/max = %lu/%lu/%lu ms | stalls(last 5s)=%lu",
+                   (unsigned long)gLoopPerf.snapLapsPerSec,
+                   (unsigned long)gLoopPerf.snapMinMs, (unsigned long)gLoopPerf.snapAvgMs, (unsigned long)gLoopPerf.snapMaxMs,
+                   (unsigned long)gLoopPerf.snapStalls);
+  BROADCAST_PRINTF("[PERFTOP] section avg us/lap: DIAG=%lu IO=%lu EVENT=%lu NET=%lu DISPLAY=%lu INPUT=%lu",
+                   (unsigned long)gLoopPerf.snapSectionAvgUs[0], (unsigned long)gLoopPerf.snapSectionAvgUs[1],
+                   (unsigned long)gLoopPerf.snapSectionAvgUs[2], (unsigned long)gLoopPerf.snapSectionAvgUs[3],
+                   (unsigned long)gLoopPerf.snapSectionAvgUs[4], (unsigned long)gLoopPerf.snapSectionAvgUs[5]);
+  if (gLoopPerf.totalStalls == 0) {
+    BROADCAST_PRINTF("[PERFTOP] no loop stalls (>%lu ms) since boot", (unsigned long)(LOOP_STALL_US / 1000UL));
+  } else {
+    BROADCAST_PRINTF("[PERFTOP] worst loop stalls since boot (total %lu):", (unsigned long)gLoopPerf.totalStalls);
+    unsigned long nowMs = millis();
+    for (uint8_t i = 0; i < gLoopPerf.worstCount; i++) {
+      const LoopPerfState::WorstStall& w = gLoopPerf.worst[i];
+      BROADCAST_PRINTF("   %4lu ms  %lus ago  %s",
+                       (unsigned long)w.ms,
+                       (unsigned long)((nowMs - w.atMs) / 1000UL),
+                       w.inLoop ? kLoopSectionNames[w.dom] : "outside sections (blocked/preempted)");
+    }
   }
 }
 
@@ -1797,9 +1977,19 @@ static void powerSaveTick() {
 void hardwareone_loop() {
 
   // ========================================================================
-  // 1. DIAGNOSTICS — debug-gated, zero cost when flags are off
+  // 1. DIAGNOSTICS — tiered: always-on lightweight health watches
+  //    (loop-stall + heap-pressure WARN, ~free) plus debug-gated verbose
+  //    dumps (memory sample, task table, loop-period distribution).
   // ========================================================================
 
+  // Loop-timing anchor + per-section profiler. MUST run first so lap period and
+  // section[0] timing start here. Always-on stall WARN (with section attribution);
+  // verbose period + section distribution self-gate on DEBUG_PERFORMANCE inside.
+  loopHealthTick();
+
+  // periodicMemorySample() now does an always-on DRAM-pressure check before
+  // its DEBUG_MEMORY-gated verbose sample, so a shipping device warns before
+  // it OOMs even with memory debugging off.
   periodicMemorySample();
 
   if (isDebugFlagSet(DEBUG_MEMORY)) {
@@ -1810,10 +2000,7 @@ void hardwareone_loop() {
       reportAllTaskStacks();
     }
   }
-
-  if (isDebugFlagSet(DEBUG_PERFORMANCE)) {
-    performanceCounter();
-  }
+  perfMarkSection(0);  // section 1: DIAGNOSTICS
 
   // ========================================================================
   // 2. PERIODIC I/O — timer-gated sampling and publishing
@@ -1839,6 +2026,8 @@ void hardwareone_loop() {
 #if ENABLE_BLUETOOTH
   bleUpdateStreams();
 #endif
+
+  perfMarkSection(1);  // section 2: PERIODIC I/O
 
   // ========================================================================
   // 3. EVENT-DRIVEN — only runs when dirty/triggered
@@ -1881,6 +2070,8 @@ void hardwareone_loop() {
   }
 #endif
 
+  perfMarkSection(2);  // section 3: EVENT-DRIVEN
+
   // ========================================================================
   // 4. NETWORK MAINTENANCE — ESP-NOW retry and cleanup
   // ========================================================================
@@ -1897,6 +2088,8 @@ void hardwareone_loop() {
     }
   }
 #endif
+
+  perfMarkSection(3);  // section 4: NETWORK MAINTENANCE
 
   // ========================================================================
   // 5. DISPLAY — OLED boot sequence and periodic refresh
@@ -1920,6 +2113,8 @@ void hardwareone_loop() {
   // future OLED-joystick polling; help and confirm modes don't define
   // onTick so this is a branch-and-return for them.
   cliModeTick();
+
+  perfMarkSection(4);  // section 5: DISPLAY
 
   // ========================================================================
   // 6. USER INPUT — Serial CLI (always last before yield)
@@ -2066,6 +2261,8 @@ void hardwareone_loop() {
       gSerialCLI += c;
     }
   }
+
+  perfMarkSection(5);  // section 6: USER INPUT
 
   // ========================================================================
   // YIELD — give scheduler time to run lower-priority tasks and service ISRs

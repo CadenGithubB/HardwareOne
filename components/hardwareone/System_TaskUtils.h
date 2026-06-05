@@ -150,4 +150,9 @@ void reportTaskStack(TaskHandle_t handle, const char* name, uint32_t allocatedWo
 // Report all sensor task stacks plus system tasks
 void reportAllTaskStacks();
 
+// Print the main-loop performance snapshot (laps/s, period, per-section avg,
+// worst-N stalls) gathered by loopHealthTick() in HardwareOne.cpp. Used by the
+// `perftop` command. Implemented in HardwareOne.cpp.
+void perfPrintLoopHealth();
+
 #endif // SYSTEM_TASKUTILS_H

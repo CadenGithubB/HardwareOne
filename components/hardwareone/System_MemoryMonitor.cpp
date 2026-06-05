@@ -408,11 +408,37 @@ const char* cmd_memsample(const String& argsInput) {
 }
 
 void periodicMemorySample() {
+  // ── Tier 1 (always-on): cheap DRAM-pressure watch ────────────────────────
+  // Runs regardless of DEBUG_MEMORY so a shipping device still warns *before*
+  // it OOMs. Just an O(num_heaps) free-size query + a compare (no
+  // largest-free-block walk — that stays in the verbose path below). Checked
+  // at most once per second; the WARN line is rate-limited to one per 10 s so
+  // it can never flood the output. Also keeps gLowestHeapSeen current between
+  // verbose samples.
+  {
+    static unsigned long lastPressureCheckMs = 0;
+    unsigned long nowMs = millis();
+    if (lastPressureCheckMs == 0 || (nowMs - lastPressureCheckMs) >= 1000UL) {
+      lastPressureCheckMs = nowMs;
+      size_t dramFree = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+      if (dramFree < gLowestHeapSeen) gLowestHeapSeen = dramFree;
+      if (dramFree < HEAP_WARNING_THRESHOLD) {
+        static unsigned long lastPressureWarnMs = 0;
+        if (lastPressureWarnMs == 0 || (nowMs - lastPressureWarnMs) >= 10000UL) {
+          lastPressureWarnMs = nowMs;
+          BROADCAST_PRINTF("[HEAP_PRESSURE] WARNING: DRAM free %u B (threshold=%u, min_ever=%u)",
+                           (unsigned)dramFree, (unsigned)HEAP_WARNING_THRESHOLD, (unsigned)gLowestHeapSeen);
+        }
+      }
+    }
+  }
+
+  // ── Tier 2 (DEBUG_MEMORY): full verbose sample ───────────────────────────
   // Only sample if debug flag is enabled
   if (!isDebugFlagSet(DEBUG_MEMORY)) {
     return;
   }
-  
+
   // Check if sampling is disabled (0 = disabled)
   extern Settings gSettings;
   if (gSettings.memorySampleIntervalSec <= 0) {
