@@ -35,6 +35,11 @@ bool startVideoRecording();
 // recording (no-op).
 void stopVideoRecording();
 
+// Path + frame count of the most recently finalized recording (valid until the
+// next startVideoRecording()). Used for the camerarecord-stop confirmation.
+const char* videoLastRecordingPath();
+uint32_t    videoLastRecordingFrames();
+
 #endif  // ENABLE_CAMERA_SENSOR
 
 // ── Viewer API (base experience — every build) ───────────────────────────────
