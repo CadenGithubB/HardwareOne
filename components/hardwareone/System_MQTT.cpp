@@ -1282,9 +1282,9 @@ const char* cmd_mqtttlsmode(const String& argsInput) {
   setSetting(gSettings.mqttTLSMode, newMode);
   
   // Create /system/certs/ folder for TLS modes
-  if (newMode > 0 && !VFS::existsGuarded("/system/certs", VFS::systemAuth("mqtt.cert.dir"))) {
-    VFS::mkdirGuarded("/system",       VFS::systemAuth("mqtt.cert.dir"));
-    VFS::mkdirGuarded("/system/certs", VFS::systemAuth("mqtt.cert.dir"));
+  if (newMode > 0 && !VFS::existsGuarded("/system/certs", VFS::systemAuth(VFS::Scopes::CERTS, "mqtt.cert.dir"))) {
+    // /system is created at boot; only ensure the certs dir.
+    VFS::mkdirGuarded("/system/certs", VFS::systemAuth(VFS::Scopes::CERTS, "mqtt.cert.dir"));
     INFO_MQTT_CONNECTIONF("Created /system/certs/ folder for certificates");
   }
   

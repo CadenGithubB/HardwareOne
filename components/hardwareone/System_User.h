@@ -45,6 +45,7 @@ struct AuthContext {
   String user;   // resolved username when authenticated
   String sid;    // HTTP session id (empty for serial/TFT)
   void* opaque;  // httpd_req_t* when HTTP; nullptr otherwise
+  String scope;  // optional path-prefix confinement (empty = unconfined); enforced in checkPerm. Set via VFS::systemAuth(scope, reason).
 };
 
 // User command registry - using userSystemCommands only

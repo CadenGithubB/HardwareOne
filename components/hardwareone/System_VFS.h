@@ -167,6 +167,32 @@ bool rmdirGuarded  (const String& path, const AuthContext& ctx);
  */
 AuthContext systemAuth(const char* reason);
 
+/**
+ * Scoped variant of systemAuth: the same trusted-internal identity, but
+ * additionally CONFINED to paths within `scope` (a path prefix). Any guarded
+ * op outside `scope` is denied in checkPerm regardless of role — so a confined
+ * system context can touch its own subtree and nothing else (e.g. it can read
+ * /sd/VIDEOS but never /system/certs). Defense-in-depth: it shrinks the blast
+ * radius of a bug or unsanitized path at a request-facing site to one subtree.
+ *
+ * Always pass a named Scopes:: constant below, never a freeform prefix string.
+ */
+AuthContext systemAuth(const char* scope, const char* reason);
+
+// ── Filesystem capability scopes ─────────────────────────────────────────────
+// Named confinement boundaries for systemAuth(scope, reason). Keep these aligned
+// with where data actually lives; add new domains HERE rather than inlining a
+// prefix at a call site, so the set of "what each context may touch" stays
+// enumerable and auditable in one place.
+namespace Scopes {
+  constexpr const char* VIDEOS          = "/sd/VIDEOS";        // recorded AVI clips
+  constexpr const char* CERTS           = "/system/certs";    // TLS certs / keys
+  constexpr const char* ESPNOW_RECEIVED = "/espnow/received"; // inbound files from peers
+  // NOTE: domains with user-configurable folders (images → gSettings.cameraCaptureFolder)
+  // or dual SD+LittleFS locations (LLM models) can't use a static constant — they need a
+  // computed scope at the call site. Add those when those domains are scoped.
+}
+
 // ============================================================================
 // Overflow-aware path resolution (opt-in for append-only data)
 // ============================================================================
