@@ -18,6 +18,11 @@ output*.bmp
 size.json
 sizefiles.txt
 
+# Ad-hoc per-board firmware build outputs copied to the repo root for flashing
+# (e.g. hardwareone-idf-gamepad-step2.bin). Build products, not source.
+*.elf
+*.bin
+
 # macOS
 .DS_Store
 
