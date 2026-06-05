@@ -1975,6 +1975,7 @@ const CommandEntry commands[] = {
   { "voltage", "Read supply voltage.", false, cmd_voltage },
   { "cpufreq", "Get/set CPU frequency.", true, cmd_cpufreq },
   { "taskstats", "Detailed task statistics.", false, cmd_taskstats },
+  { "perftop", "Live performance snapshot: loop laps/s, period, per-section timing, worst stalls + live task CPU%.", false, cmd_perftop },
 
   // ---- Misc ----
   { "reboot", "Reboot the system.", true, cmd_reboot, nullptr, "system", "reboot" },
@@ -2921,6 +2922,81 @@ const char* cmd_taskstats(const String& originalCmd) {
                      (unsigned)taskArray[i].usStackHighWaterMark);
   }
 
+  return "OK";
+}
+
+
+// perftop — live performance snapshot. Prints the main-loop health (from the
+// loopHealthTick profiler in HardwareOne.cpp) plus a fresh per-task CPU%
+// sampled over ~0.75 s. Runs on the cmd_exec task, so the short sleep does NOT
+// stall the main loop. uint64 math avoids the *100 overflow that corrupts the
+// lifetime CPU% column.
+const char* cmd_perftop(const String& originalCmd) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+
+  broadcastOutput("");
+  broadcastOutput("========== PERFTOP ==========");
+
+  // 1) Main-loop health snapshot (laps/s, period, per-section avg, worst stalls)
+  perfPrintLoopHealth();
+
+  // 2) Live per-task CPU%: two run-time-stat snapshots ~750 ms apart, delta by
+  //    handle (handles can be reused, so a delta > elapsed is rejected).
+  broadcastOutput("");
+  broadcastOutput("[PERFTOP] live task CPU (0.75s sample):");
+
+  UBaseType_t n = uxTaskGetNumberOfTasks() + 6;  // headroom for tasks created mid-sample
+  TaskStatus_t* a = (TaskStatus_t*)ps_alloc(n * sizeof(TaskStatus_t), AllocPref::PreferPSRAM, "perftop.a");
+  TaskStatus_t* b = (TaskStatus_t*)ps_alloc(n * sizeof(TaskStatus_t), AllocPref::PreferPSRAM, "perftop.b");
+  if (!a || !b) {
+    if (a) free(a);
+    if (b) free(b);
+    broadcastOutput("  (cannot allocate task snapshot buffers)");
+    broadcastOutput("========== END PERFTOP ==========");
+    return "OK";
+  }
+
+  uint32_t totA = 0, totB = 0;
+  UBaseType_t na = uxTaskGetSystemState(a, n, &totA);
+  vTaskDelay(pdMS_TO_TICKS(750));
+  UBaseType_t nb = uxTaskGetSystemState(b, n, &totB);
+  uint32_t totalDelta = totB - totA;
+
+  if (totalDelta == 0 || na == 0 || nb == 0) {
+    broadcastOutput("  (run-time stats unavailable)");
+  } else {
+    // pass 0: IDLE0/IDLE1 (per-core headroom); pass 1: non-idle tasks >= 1%.
+    int shown = 0;
+    for (int pass = 0; pass < 2; pass++) {
+      for (UBaseType_t i = 0; i < nb; i++) {
+        const char* nm = b[i].pcTaskName;
+        if (!nm) continue;
+        bool isIdle = (strncmp(nm, "IDLE", 4) == 0);
+        if (pass == 0 && !isIdle) continue;
+        if (pass == 1 && isIdle) continue;
+        uint32_t prev = 0; bool found = false;
+        for (UBaseType_t j = 0; j < na; j++) {
+          if (a[j].xHandle == b[i].xHandle) { prev = a[j].ulRunTimeCounter; found = true; break; }
+        }
+        if (!found) continue;                            // task new this interval
+        uint32_t d = b[i].ulRunTimeCounter - prev;       // wrap-safe unsigned
+        if (d > totalDelta + totalDelta / 4) continue;   // handle reuse / wrap → skip
+        uint32_t pct = (uint32_t)((uint64_t)d * 100 / totalDelta);
+        if (pct > 100) pct = 100;
+        if (pass == 0) {
+          BROADCAST_PRINTF("  %-16.16s idle %3lu%%", nm, (unsigned long)pct);
+        } else if (pct >= 1) {
+          BROADCAST_PRINTF("  %-16.16s %3lu%%", nm, (unsigned long)pct);
+          shown++;
+        }
+      }
+    }
+    if (shown == 0) broadcastOutput("  (all non-idle tasks <1% this interval)");
+  }
+
+  free(a);
+  free(b);
+  broadcastOutput("========== END PERFTOP ==========");
   return "OK";
 }
 
