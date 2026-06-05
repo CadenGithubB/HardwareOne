@@ -2104,8 +2104,13 @@ const char* cmd_camerarecord(const String& argsInput) {
                                  : "Failed to start recording (SD card available?)";
   }
   if (arg == "0" || arg.equalsIgnoreCase("stop")) {
+    bool wasRecording = videoRecording;
     stopVideoRecording();
-    return "Recording stopped";
+    if (!wasRecording) return "Recording stopped";
+    static char out[160];
+    snprintf(out, sizeof(out), "Recording stopped — %s (%lu frames)",
+             videoLastRecordingPath(), (unsigned long)videoLastRecordingFrames());
+    return out;
   }
   return "Usage: camerarecord <start|stop|1|0>";
 }

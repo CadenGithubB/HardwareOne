@@ -807,8 +807,16 @@ const char* cmd_micrecord(const String& argsInput) {
       return "Failed to start recording";
     }
   } else if (arg == "0" || arg.equalsIgnoreCase("stop")) {
+    bool wasRecording = micRecording;
     stopRecording();
-    return "Recording stopped";
+    if (!wasRecording) return "Recording stopped";
+    // Integer math for "N.Ns" (avoid float printf on newlib-nano).
+    uint32_t ms = (micSampleRate > 0)
+                    ? (uint32_t)((uint64_t)recordingSamples * 1000 / (uint32_t)micSampleRate)
+                    : 0;
+    snprintf(gMicCmdBuffer, sizeof(gMicCmdBuffer), "Recording stopped — %s (%lu.%lus)",
+             currentRecordingPath, (unsigned long)(ms / 1000), (unsigned long)((ms % 1000) / 100));
+    return gMicCmdBuffer;
   }
   
   return "Usage: micrecord <start|stop|1|0>";

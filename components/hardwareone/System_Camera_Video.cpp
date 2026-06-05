@@ -204,7 +204,7 @@ static bool ensureVideosFolder() {
   if (!VFS::isSDAvailable()) return false;
   // Route through VFS (shared FsLockGuard + permission guard) using the
   // "/sd/..." path form; VFS dispatches /sd to the SD backend internally.
-  AuthContext sys = VFS::systemAuth("video.ensure_folder");
+  AuthContext sys = VFS::systemAuth(VFS::Scopes::VIDEOS, "video.ensure_folder");
   if (VFS::existsGuarded(VIDEO_FOLDER_SD, sys)) return true;
   if (VFS::mkdirGuarded(VIDEO_FOLDER_SD, sys)) {
     INFO_STORAGEF("[Video] Created folder on SD: %s", VIDEO_FOLDER_SD);
@@ -375,7 +375,7 @@ bool startVideoRecording() {
   // open returns null for a non-existent path even on a writable card.
   STACK_TRACEF("startVideoRecording.before_open path=%s", s_path);
   s_file = VFS::openGuarded(String(s_path), FILE_WRITE,
-                           VFS::systemAuth("video.record"), /*create=*/true);
+                           VFS::systemAuth(VFS::Scopes::VIDEOS, "video.record"), /*create=*/true);
   STACK_TRACEF("startVideoRecording.after_open ok=%d", s_file ? 1 : 0);
   if (!s_file) {
     ERROR_STORAGEF("[Video] Failed to create file: %s", s_path);
@@ -435,6 +435,12 @@ void stopVideoRecording() {
   }
 }
 
+// Path + frame count of the most recently finalized recording. Valid until the
+// next startVideoRecording() (which resets s_path/s_frameCount). Used for the
+// camerarecord-stop confirmation message.
+const char* videoLastRecordingPath()   { return s_path; }
+uint32_t    videoLastRecordingFrames() { return s_frameCount; }
+
 #endif  // ENABLE_CAMERA_SENSOR — end of recorder (needs the camera)
 
 // ── Listing / delete (base experience — no camera required) ──────────────────
@@ -445,7 +451,7 @@ void stopVideoRecording() {
 int getVideoRecordingCount() {
   if (!VFS::isSDAvailable()) return 0;
   int count = 0;
-  File root = VFS::openGuarded(VIDEO_FOLDER_SD, FILE_READ, VFS::systemAuth("video.list"));
+  File root = VFS::openGuarded(VIDEO_FOLDER_SD, FILE_READ, VFS::systemAuth(VFS::Scopes::VIDEOS, "video.list"));
   if (!root || !root.isDirectory()) return 0;
   File f = root.openNextFile();
   while (f) {
@@ -463,7 +469,7 @@ int getVideoRecordingCount() {
 String getVideoRecordingsList() {
   String out;
   if (!VFS::isSDAvailable()) return out;
-  File root = VFS::openGuarded(VIDEO_FOLDER_SD, FILE_READ, VFS::systemAuth("video.list"));
+  File root = VFS::openGuarded(VIDEO_FOLDER_SD, FILE_READ, VFS::systemAuth(VFS::Scopes::VIDEOS, "video.list"));
   if (!root || !root.isDirectory()) return out;
   File f = root.openNextFile();
   while (f) {
@@ -488,7 +494,7 @@ bool deleteVideoRecording(const String& filename) {
   // Reject paths that try to escape the folder.
   if (filename.indexOf('/') >= 0 || filename.indexOf("..") >= 0) return false;
   String path = String(VIDEO_FOLDER_SD) + "/" + filename;
-  return VFS::removeGuarded(path, VFS::systemAuth("video.delete"));
+  return VFS::removeGuarded(path, VFS::systemAuth(VFS::Scopes::VIDEOS, "video.delete"));
 }
 
 // ── HTTP viewer endpoints (base experience) ──────────────────────────────────
@@ -563,7 +569,7 @@ esp_err_t handleVideoRecordingFile(httpd_req_t* req) {
 
   char path[96];
   snprintf(path, sizeof(path), "%s/%s", VIDEO_FOLDER_SD, filename);
-  File f = VFS::openGuarded(String(path), FILE_READ, VFS::systemAuth("video.serve"));
+  File f = VFS::openGuarded(String(path), FILE_READ, VFS::systemAuth(VFS::Scopes::VIDEOS, "video.serve"));
   if (!f) {
     httpd_resp_set_status(req, "404 Not Found");
     httpd_resp_send(req, "Recording not found", HTTPD_RESP_USE_STRLEN);
