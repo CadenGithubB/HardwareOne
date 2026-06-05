@@ -1006,6 +1006,17 @@ static uint8_t permsForRole(const PathRule& rule, FsRole r) {
   return 0;
 }
 
+// Capability scope: true if `path` (already normalized) is within `scope` (a
+// path prefix). Empty scope = unconfined. Boundary-aware so "/sd/VIDEOS" does
+// NOT match "/sd/VIDEOS_secret" — only the scope dir itself and paths beneath it.
+static bool pathWithinScope(const String& path, const String& scope) {
+  if (scope.length() == 0) return true;
+  String base = scope;
+  while (base.length() > 1 && base.endsWith("/")) base.remove(base.length() - 1);
+  if (path == base) return true;
+  return path.startsWith(base + "/");
+}
+
 // Single decision point. Pure: returns true/false, no logging. The
 // per-denial [PERM] log line is emitted only at actual-access boundaries
 // (VFS::*Guarded) via logFsAccessDeny() — see the comment on that function
@@ -1018,6 +1029,10 @@ static bool checkPerm(const String& path, const AuthContext& ctx,
                       bool imageEditApplies) {
   FsRole role = resolveRole(ctx);
   if (role == FsRole::ANON) return false;
+  // Capability scope (defense-in-depth): a confined context may only touch its
+  // own subtree, regardless of role. Empty scope (the default) is unconfined,
+  // so this is a no-op for every existing context.
+  if (!pathWithinScope(path, ctx.scope)) return false;
   // Directories marked exemptSensitiveExt (e.g. /system/llm/, /system/certs/)
   // intentionally hold files with otherwise-blocked extensions (.bin, .pem, etc.)
   // and must not be caught by the blanket sensitive-extension guard.

@@ -941,11 +941,11 @@ const char* cmd_certinfo(const String& argsInput) {
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
 
   static const char* CERT_PATH = "/system/certs/https_server.crt";
-  if (!VFS::existsGuarded(CERT_PATH, VFS::systemAuth("wifi.cert.info"))) {
+  if (!VFS::existsGuarded(CERT_PATH, VFS::systemAuth(VFS::Scopes::CERTS, "wifi.cert.info"))) {
     return "No certificate found at /system/certs/https_server.crt";
   }
 
-  File f = VFS::openGuarded(CERT_PATH, "r", VFS::systemAuth("wifi.cert.info"));
+  File f = VFS::openGuarded(CERT_PATH, "r", VFS::systemAuth(VFS::Scopes::CERTS, "wifi.cert.info"));
   if (!f) return "Error: Cannot open certificate file";
   String certPem = f.readString();
   f.close();
@@ -1158,10 +1158,10 @@ const char* cmd_certgen(const String& argsInput) {
 
   // Save to filesystem
   {
-    if (!VFS::existsGuarded("/system",       VFS::systemAuth("wifi.cert.gen"))) VFS::mkdirGuarded("/system",       VFS::systemAuth("wifi.cert.gen"));
-    if (!VFS::existsGuarded("/system/certs", VFS::systemAuth("wifi.cert.gen"))) VFS::mkdirGuarded("/system/certs", VFS::systemAuth("wifi.cert.gen"));
+    // /system is created at boot (fs.init.mkdirs); only ensure the certs dir.
+    if (!VFS::existsGuarded("/system/certs", VFS::systemAuth(VFS::Scopes::CERTS, "wifi.cert.gen"))) VFS::mkdirGuarded("/system/certs", VFS::systemAuth(VFS::Scopes::CERTS, "wifi.cert.gen"));
 
-    File cf = VFS::openGuarded("/system/certs/https_server.crt", "w", VFS::systemAuth("wifi.cert.gen"));
+    File cf = VFS::openGuarded("/system/certs/https_server.crt", "w", VFS::systemAuth(VFS::Scopes::CERTS, "wifi.cert.gen"));
     if (!cf) {
       snprintf(gDebugBuffer, 1024, "Error: Cannot create certificate file");
       goto cleanup;
@@ -1169,7 +1169,7 @@ const char* cmd_certgen(const String& argsInput) {
     cf.print((const char*)certPem);
     cf.close();
 
-    File kf = VFS::openGuarded("/system/certs/https_server.key", "w", VFS::systemAuth("wifi.cert.gen"));
+    File kf = VFS::openGuarded("/system/certs/https_server.key", "w", VFS::systemAuth(VFS::Scopes::CERTS, "wifi.cert.gen"));
     if (!kf) {
       snprintf(gDebugBuffer, 1024, "Error: Cannot create key file");
       goto cleanup;

@@ -876,6 +876,14 @@ AuthContext systemAuth(const char* reason) {
   return ctx;
 }
 
+// Scoped trusted-internal identity: base systemAuth plus a path-prefix
+// confinement enforced in checkPerm. See systemAuth(reason) above + Scopes.
+AuthContext systemAuth(const char* scope, const char* reason) {
+  AuthContext ctx = systemAuth(reason);
+  ctx.scope = scope ? String(scope) : String();
+  return ctx;
+}
+
 }  // namespace VFS
 
 // ============================================================================

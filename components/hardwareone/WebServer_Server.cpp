@@ -5011,7 +5011,7 @@ void startHttpServer() {
     static const char* KEY_PATH  = "/system/certs/https_server.key";
 
     bool certsOk = false;
-    AuthContext sysHttps = VFS::systemAuth("web.https.cert.load");
+    AuthContext sysHttps = VFS::systemAuth(VFS::Scopes::CERTS, "web.https.cert.load");
     if (VFS::existsGuarded(CERT_PATH, sysHttps) && VFS::existsGuarded(KEY_PATH, sysHttps)) {
       File certFile = VFS::openGuarded(CERT_PATH, "r", sysHttps);
       File keyFile  = VFS::openGuarded(KEY_PATH,  "r", sysHttps);

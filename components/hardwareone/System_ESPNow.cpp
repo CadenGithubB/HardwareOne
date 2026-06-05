@@ -3911,12 +3911,14 @@ static void v4h_file_end(const V4RxCtx& ctx) {
       snprintf(deviceDir, sizeof(deviceDir), "/espnow/received/%s", senderToken);
 
       FsLockGuard guard("v4file.write");
-      VFS::mkdirGuarded("/espnow", VFS::systemAuth("espnow.v4_file_write_mkdir"));
-      VFS::mkdirGuarded("/espnow/received", VFS::systemAuth("espnow.v4_file_write_mkdir"));
-      VFS::mkdirGuarded(deviceDir, VFS::systemAuth("espnow.v4_file_write_mkdir"));
+      // /espnow is created at boot; confine every inbound-file write to the
+      // received inbox so a (peer-controlled) filename can never direct a write
+      // outside it — defense-in-depth on top of normalize()'s ".." rejection.
+      VFS::mkdirGuarded("/espnow/received", VFS::systemAuth(VFS::Scopes::ESPNOW_RECEIVED, "espnow.v4_file_write_mkdir"));
+      VFS::mkdirGuarded(deviceDir, VFS::systemAuth(VFS::Scopes::ESPNOW_RECEIVED, "espnow.v4_file_write_mkdir"));
       char filepath[128];
       snprintf(filepath, sizeof(filepath), "%s/%s", deviceDir, filename);
-      File f = VFS::openGuarded(filepath, "w", VFS::systemAuth("espnow.v4_file_write"), true);
+      File f = VFS::openGuarded(filepath, "w", VFS::systemAuth(VFS::Scopes::ESPNOW_RECEIVED, "espnow.v4_file_write"), true);
       if (f) {
         f.write(dataBuf, recvBytes);
         f.close();
