@@ -167,12 +167,37 @@ void debugOutputTask(void* parameter) {
         if ((msg->routing & MSG_ROUTE_ALLOW_IN_HELP) == 0 &&
             !(strncmp(msg->text, "[SECURITY]", 10) == 0 || strncmp(msg->text, "[AUTH]", 6) == 0 ||
               strncmp(msg->text, "[ERROR]", 7) == 0)) {
-          gHelpSuppressedCount++;
+          gHelpSuppressedCount = gHelpSuppressedCount + 1;  // (= x+1: ++ on volatile is deprecated in C++20)
           pushHelpSuppressed(msg->text);
           if (gDebugFreeQueue) {
             xQueueSend(gDebugFreeQueue, &msg, 0);
           }
           continue; // Drop from sinks to avoid overwriting help UI
+        }
+      }
+
+      // Surface dropped-message bursts so queue saturation is never silent.
+      // Rate-limited to one marker per second; a burst coalesces into one line.
+      // Emitted straight to Serial + web mirror from this (single) consumer task,
+      // so the marker itself can't be dropped or race another UART writer.
+      {
+        static unsigned long sDropSeen   = 0;
+        static unsigned long sDropMarkMs = 0;
+        unsigned long dropped = gDebugDropped;          // volatile read
+        if (dropped != sDropSeen) {
+          unsigned long nowMs = millis();
+          if (sDropMarkMs == 0 || (nowMs - sDropMarkMs) >= 1000UL) {
+            char mark[96];
+            int mw = snprintf(mark, sizeof(mark),
+                              "[%lu] [output] %lu line(s) dropped (queue saturated)",
+                              nowMs, dropped - sDropSeen);
+            if (mw > 0) {
+              if (gOutputFlags & OUTPUT_SERIAL) Serial.printf("%s\n", mark);
+              if (gWebMirror.buf) gWebMirror.appendDirect(mark, (size_t)mw, true);
+            }
+            sDropSeen   = dropped;
+            sDropMarkMs = nowMs;
+          }
         }
       }
 
@@ -514,6 +539,50 @@ void drainDebugRing() {
   // No-op: Debug output task handles all output automatically
 }
 
+// Stamp a visible "[CUT]" marker on a line that didn't fit in DEBUG_MSG_SIZE,
+// so truncation is never silent. Caller must have NUL-terminated text[] first;
+// this overwrites the tail [250..254] and leaves the NUL at [255] intact.
+static inline void markTrunc(char* text, bool truncated) {
+  if (truncated) memcpy(&text[DEBUG_MSG_SIZE - 6], "[CUT]", 5);
+}
+
+// ── Unified message enqueue (the single producer primitive) ──────────────────
+// THE one place a DebugMessage is grabbed, filled, queued, and drop-accounted.
+// ISR-safe (uses the *FromISR APIs in interrupt context). Copies up to `len`
+// bytes of `text` (a slice need not be NUL-terminated); over-long input is
+// clamped and marked [CUT]. Returns false if the message was dropped (no free
+// slot / queue full). Every output path funnels through here so they all behave
+// identically — and drops go through incrementDebugDropped() (the volatile-safe
+// counter the consumer's drop-marker reads).
+static bool enqueueChunk(const char* text, size_t len, uint8_t routing,
+                         DebugFlagMask category, bool truncated) {
+  if (!gDebugOutputQueue || !gDebugFreeQueue) return false;
+  const bool isr = xPortInIsrContext();
+
+  DebugMessage* msg = nullptr;
+  BaseType_t got = isr ? xQueueReceiveFromISR(gDebugFreeQueue, &msg, NULL)
+                       : xQueueReceive(gDebugFreeQueue, &msg, 0);
+  if (got != pdTRUE || !msg) { incrementDebugDropped(); return false; }
+
+  size_t copy = len < (size_t)(DEBUG_MSG_SIZE - 1) ? len : (size_t)(DEBUG_MSG_SIZE - 1);
+  msg->timestamp = millis();
+  msg->category  = category;
+  msg->routing   = routing;
+  memcpy(msg->text, text, copy);
+  msg->text[copy] = '\0';
+  markTrunc(msg->text, truncated || len > (size_t)(DEBUG_MSG_SIZE - 1));
+
+  BaseType_t sent = isr ? xQueueSendFromISR(gDebugOutputQueue, &msg, NULL)
+                        : xQueueSend(gDebugOutputQueue, &msg, 0);
+  if (sent != pdTRUE) {
+    if (isr) xQueueSendFromISR(gDebugFreeQueue, &msg, NULL);
+    else     xQueueSend(gDebugFreeQueue, &msg, 0);
+    incrementDebugDropped();
+    return false;
+  }
+  return true;
+}
+
 void debugQueuePrintf(DebugFlagMask flag, const char* fmt, ...) {
   if (!fmt) return;
   if (!getDebugQueue() || !getDebugFreeQueue()) return;
@@ -527,38 +596,17 @@ void debugQueuePrintf(DebugFlagMask flag, const char* fmt, ...) {
   if (currentTask == gTofTaskHandle && !gTofEnabled) return;
   if (currentTask == gFmRadioTaskHandle && !gFmRadioEnabled) return;
 
-  DebugMessage* msg = nullptr;
-  BaseType_t got = xPortInIsrContext() ?
-    xQueueReceiveFromISR(getDebugFreeQueue(), &msg, NULL) :
-    xQueueReceive(getDebugFreeQueue(), &msg, 0);
-
-  if (got != pdTRUE || !msg) {
-    incrementDebugDropped();
-    return;
-  }
-
-  msg->timestamp = millis();
-  msg->category = flag;          // debug category (DEBUG_WIFI, DEBUG_AUTH, etc.)
-  msg->routing = MSG_ROUTE_ALL;  // debug messages go to all sinks
-
+  // Format into a stack line, then hand to the shared enqueue primitive
+  // (ISR-safe; centralizes slot grab / send / drop + [CUT]). DEBUG_*F is
+  // single-line, so it uses enqueueChunk directly rather than the split layer.
+  char line[DEBUG_MSG_SIZE];
   va_list args;
   va_start(args, fmt);
-  vsnprintf(msg->text, DEBUG_MSG_SIZE, fmt, args);
+  int wn = vsnprintf(line, sizeof(line), fmt, args);
   va_end(args);
-  msg->text[DEBUG_MSG_SIZE - 1] = '\0';
-
-  BaseType_t result = xPortInIsrContext() ?
-    xQueueSendFromISR(getDebugQueue(), &msg, NULL) :
-    xQueueSend(getDebugQueue(), &msg, 0);
-
-  if (result != pdTRUE) {
-    if (xPortInIsrContext()) {
-      xQueueSendFromISR(getDebugFreeQueue(), &msg, NULL);
-    } else {
-      xQueueSend(getDebugFreeQueue(), &msg, 0);
-    }
-    incrementDebugDropped();
-  }
+  if (wn < 0) return;
+  size_t llen = (wn < (int)sizeof(line)) ? (size_t)wn : (sizeof(line) - 1);
+  enqueueChunk(line, llen, MSG_ROUTE_ALL, flag, wn >= (int)DEBUG_MSG_SIZE);
 }
 
 // ============================================================================
@@ -612,7 +660,7 @@ static void broadcastOutputCore(const char* text, size_t len, uint8_t routeOverr
   //    but allow security/auth notices to pass through
   if (gCLIState != CLI_NORMAL && !gInHelpRender) {
     if (!(strncmp(text, "[SECURITY]", 10) == 0 || strncmp(text, "[AUTH]", 6) == 0)) {
-      gHelpSuppressedCount++;
+      gHelpSuppressedCount = gHelpSuppressedCount + 1;  // (= x+1: ++ on volatile is deprecated in C++20)
       pushHelpSuppressed(text);
       return;
     }
@@ -642,23 +690,11 @@ static void broadcastOutputCore(const char* text, size_t len, uint8_t routeOverr
   }
   if (gInHelpRender) route |= MSG_ROUTE_ALLOW_IN_HELP;
 
-  // 6. Enqueue to debug output task
-  if (gDebugOutputQueue) {
-    DebugMessage* msg = nullptr;
-    if (gDebugFreeQueue && xQueueReceive(gDebugFreeQueue, &msg, 0) == pdTRUE && msg) {
-      msg->timestamp = millis();
-      msg->category = 0;   // broadcast message, no debug category
-      msg->routing = route;
-      strncpy(msg->text, text, DEBUG_MSG_SIZE - 1);
-      msg->text[DEBUG_MSG_SIZE - 1] = '\0';
-      if (xQueueSend(gDebugOutputQueue, &msg, 0) != pdTRUE) {
-        xQueueSend(gDebugFreeQueue, &msg, 0);
-        gDebugDropped++;
-      }
-    } else {
-      gDebugDropped++;
-    }
-  }
+  // 6. Enqueue — one broadcastOutput() call == one queue message, verbatim.
+  //    No splitting/packing: text goes in as sent. Over-long text (> 255 B) is
+  //    clamped and marked [CUT] — a noted platform limit; callers that want
+  //    several lines in one envelope pack them with '\n' at the call site.
+  enqueueChunk(text, len, route, /*category=*/0, len > (size_t)(DEBUG_MSG_SIZE - 1));
 
   // 7. ESP-NOW V3 session streaming (extern to avoid circular deps)
 #if ENABLE_ESPNOW
@@ -687,6 +723,72 @@ void broadcastOutput(const char* s) {
 // match the just-finished command).
 void broadcastOutputCore_Routed(const char* text, size_t len, uint8_t route) {
   broadcastOutputCore(text, len, route);
+}
+
+// ============================================================================
+// ESP-IDF log bridge — route ESP_LOGx output (wifi:/cam_hal:/i2c: ...) through
+// the firmware's single output queue so the IDF logger and broadcastOutput
+// share ONE UART writer (debug_out). Without it they are two unsynchronized
+// writers to the same UART and interleave mid-byte (e.g. "PSRAM" -> "PS7391").
+//
+// Deliberately dumb: format -> strip ANSI color -> trim trailing newline ->
+// direct free-list enqueue. It does NOT go through broadcastOutputCore (so it
+// skips the capture buffer, help-gating, and especially the SYNCHRONOUS
+// ESP-NOW stream send — none of which are safe to run from the wifi task), and
+// it makes NO ESP_LOG calls, so it cannot recurse. ISR / queue-not-ready
+// callers fall back to the previous (default) handler. Default OFF; armed via
+// the `loglink` command so it can be A/B'd on hardware without reflashing.
+// ============================================================================
+static vprintf_like_t s_prevLogVprintf = nullptr;
+static volatile bool  s_idfBridgeOn    = false;
+
+// Strip ANSI CSI (color) escape sequences in place: ESC '[' params final-byte.
+static void stripAnsiInPlace(char* s) {
+  char* w = s;
+  for (char* r = s; *r; ) {
+    if (*r == '\033') {                              // ESC
+      r++;
+      if (*r == '[') {                               // CSI introducer
+        r++;
+        while (*r && !(*r >= '@' && *r <= '~')) r++; // skip params/intermediates
+        if (*r) r++;                                 // skip the final byte
+      }
+      continue;                                      // drop the sequence
+    }
+    *w++ = *r++;
+  }
+  *w = '\0';
+}
+
+static int idfLogVprintf(const char* fmt, va_list ap) {
+  // Decide BEFORE consuming ap (a va_list can only be walked once). In ISR
+  // context, or before the queue exists, behave exactly like the old handler.
+  if (!s_idfBridgeOn || xPortInIsrContext() || !gDebugOutputQueue || !gDebugFreeQueue) {
+    return s_prevLogVprintf ? s_prevLogVprintf(fmt, ap) : vprintf(fmt, ap);
+  }
+  char buf[DEBUG_MSG_SIZE];
+  int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+  int len = (n > 0 && n < (int)sizeof(buf)) ? n : (int)strlen(buf);
+  while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r')) buf[--len] = '\0';
+  stripAnsiInPlace(buf);
+  if (buf[0] == '\0') return n;                       // nothing left (e.g. a bare "\n")
+
+  // One IDF log line == one queue message, routed to Serial+web+file only
+  // (not OLED/G2/BLE). strlen(buf) is the post-strip length (always <= 255).
+  enqueueChunk(buf, strlen(buf), MSG_ROUTE_SERIAL | MSG_ROUTE_WEB | MSG_ROUTE_FILE, /*category=*/0, false);
+  return n;
+}
+
+// Install (or restore) the bridge. Arms the flag BEFORE swapping the handler
+// so a log racing the install never sees a half-armed state.
+static void setIdfLogBridge(bool enable) {
+  if (enable && !s_idfBridgeOn) {
+    s_idfBridgeOn = true;
+    s_prevLogVprintf = esp_log_set_vprintf(idfLogVprintf);
+  } else if (!enable && s_idfBridgeOn) {
+    esp_log_set_vprintf(s_prevLogVprintf ? s_prevLogVprintf : vprintf);
+    s_idfBridgeOn = false;
+  }
 }
 
 // Print summary (and tail) of output suppressed during help; resets counters
@@ -1540,6 +1642,27 @@ const char* cmd_debugmemory(const String& argsInput) {
     if (v) setDebugFlag(DEBUG_MEMORY); else clearDebugFlag(DEBUG_MEMORY);
     return gSettings.debugMemory ? "debugMemory enabled (persistent)" : "debugMemory disabled (persistent)";
   }
+}
+
+// Runtime toggle for the ESP-IDF log bridge (setIdfLogBridge above). Default OFF;
+// flip ON to route IDF logs through the firmware's single output queue so they
+// stop interleaving with our lines on the UART. Runtime-only (not persisted yet)
+// so it can be A/B'd live without reflashing.
+const char* cmd_loglink(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String a = argsInput; a.trim();
+  if (a.length() == 0) {
+    return s_idfBridgeOn
+      ? "loglink: ON — ESP-IDF logs routed through the unified output queue"
+      : "loglink: OFF — ESP-IDF logs write the UART directly (default)";
+  }
+  bool on  = (a == "1" || a.equalsIgnoreCase("on")  || a.equalsIgnoreCase("true"));
+  bool off = (a == "0" || a.equalsIgnoreCase("off") || a.equalsIgnoreCase("false"));
+  if (!on && !off) return "Usage: loglink <0|1|on|off>";
+  setIdfLogBridge(on);
+  return on
+    ? "loglink ON — ESP-IDF logs now share the firmware output queue (no more UART interleave)"
+    : "loglink OFF — ESP-IDF logs restored to direct UART";
 }
 
 const char* cmd_debugmemoryheap(const String& a) {
@@ -2743,6 +2866,7 @@ const CommandEntry debugCommands[] = {
   { "debugautocondition", "Debug automations conditions.", true, cmd_debugautocondition, "Usage: debugautocondition <0|1>" },
   { "debugautotiming", "Debug automations timing.", true, cmd_debugautotiming, "Usage: debugautotiming <0|1>" },
   { "debugmemory",         "Debug memory (parent flag).",                              true, cmd_debugmemory,         "Usage: debugmemory <0|1>" },
+  { "loglink",             "Route ESP-IDF logs through the unified output queue (stops UART interleave).", true, cmd_loglink, "Usage: loglink <0|1>" },
   { "debugmemoryheap",     "Debug per-task heap (free/min/largest), DRAM low watermark.", true, cmd_debugmemoryheap,    "Usage: debugmemoryheap <0|1>" },
   { "debugmemorystack",    "Debug per-task stack watermarks + peak reports.",          true, cmd_debugmemorystack,    "Usage: debugmemorystack <0|1>" },
   { "debugmemorybuffers",  "Debug response/cookie buffer sizing diagnostics.",         true, cmd_debugmemorybuffers,  "Usage: debugmemorybuffers <0|1>" },

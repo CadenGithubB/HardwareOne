@@ -665,20 +665,23 @@ void reportAllTaskStacks() {
   }
 
   // Memory accounting summary
-  broadcastOutput("");
-  broadcastOutput("-- MEMORY ACCOUNTING SUMMARY --");
-  BROADCAST_PRINTF("  Task Stacks:          %6u KB", (unsigned)(totalStackAllocated/1024));
-  BROADCAST_PRINTF("  Task Control Blocks:  %6u B  (%u tasks x %u bytes)", 
-    (unsigned)totalTCBOverhead, (unsigned)taskCount, (unsigned)TCB_SIZE);
-  BROADCAST_PRINTF("  Total Task Overhead:  %6u KB", 
+  // Accounting summary packed: header+3 lines (1 msg), then frag+waste (1 msg) — was 6.
+  BROADCAST_PRINTF(
+    "\n-- MEMORY ACCOUNTING SUMMARY --\n"
+    "  Task Stacks:          %6u KB\n"
+    "  Task Control Blocks:  %6u B  (%u tasks x %u bytes)\n"
+    "  Total Task Overhead:  %6u KB",
+    (unsigned)(totalStackAllocated/1024),
+    (unsigned)totalTCBOverhead, (unsigned)taskCount, (unsigned)TCB_SIZE,
     (unsigned)((totalStackAllocated + totalTCBOverhead)/1024));
   unsigned fragPercent = 0;
   if (heapFree > 0) {
     fragPercent = (unsigned)((largestFreeBlock * 100) / heapFree);
   }
-  BROADCAST_PRINTF("  Heap Fragmentation:   %2u%% (largest block vs free)",
-    fragPercent);
-  BROADCAST_PRINTF("  Task Memory Waste:    %6u KB (allocated but unused stack)",
+  BROADCAST_PRINTF(
+    "  Heap Fragmentation:   %2u%% (largest block vs free)\n"
+    "  Task Memory Waste:    %6u KB (allocated but unused stack)",
+    fragPercent,
     (unsigned)((totalStackAllocated - totalStackUsed)/1024));
   
   // Warnings

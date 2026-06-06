@@ -9028,21 +9028,30 @@ const char* cmd_espnow_stats(const String& argsInput) {
   // both lived at 0 since refactors moved or removed their bump sites. They
   // are NOT shown here; if/when those metrics are wanted again, wire the
   // increments at the canonical paths first, then surface them.
-  broadcastOutput("ESP-NOW Statistics:");
-  BROADCAST_PRINTF("  Messages Sent: %lu", (unsigned long)gEspNow->routerMetrics.messagesSent);
-  BROADCAST_PRINTF("  Messages Received: %lu", (unsigned long)gEspNow->routerMetrics.messagesReceived);
-  BROADCAST_PRINTF("  Send Failures: %lu", (unsigned long)gEspNow->routerMetrics.messagesFailed);
-  BROADCAST_PRINTF("  Stream Sent: %lu", (unsigned long)gEspNow->streamSentCount);
-  BROADCAST_PRINTF("  Stream Received: %lu", (unsigned long)gEspNow->streamReceivedCount);
-  BROADCAST_PRINTF("  Stream Dropped: %lu", (unsigned long)gEspNow->streamDroppedCount);
+  BROADCAST_PRINTF(
+    "ESP-NOW Statistics:\n"
+    "  Messages Sent: %lu\n"
+    "  Messages Received: %lu\n"
+    "  Send Failures: %lu\n"
+    "  Stream Sent: %lu\n"
+    "  Stream Received: %lu\n"
+    "  Stream Dropped: %lu",
+    (unsigned long)gEspNow->routerMetrics.messagesSent,
+    (unsigned long)gEspNow->routerMetrics.messagesReceived,
+    (unsigned long)gEspNow->routerMetrics.messagesFailed,
+    (unsigned long)gEspNow->streamSentCount,
+    (unsigned long)gEspNow->streamReceivedCount,
+    (unsigned long)gEspNow->streamDroppedCount);
 
   if (meshEnabled()) {
-    BROADCAST_PRINTF("  Heartbeats Sent: %lu", (unsigned long)gEspNow->heartbeatsSent);
-    BROADCAST_PRINTF("  Heartbeats Received: %lu", (unsigned long)gEspNow->heartbeatsReceived);
+    BROADCAST_PRINTF("  Heartbeats Sent: %lu\n  Heartbeats Received: %lu",
+                     (unsigned long)gEspNow->heartbeatsSent,
+                     (unsigned long)gEspNow->heartbeatsReceived);
   }
   
-  BROADCAST_PRINTF("  Files Sent: %lu", (unsigned long)gEspNow->fileTransfersSent);
-  BROADCAST_PRINTF("  Files Received: %lu", (unsigned long)gEspNow->fileTransfersReceived);
+  BROADCAST_PRINTF("  Files Sent: %lu\n  Files Received: %lu",
+                   (unsigned long)gEspNow->fileTransfersSent,
+                   (unsigned long)gEspNow->fileTransfersReceived);
   
   if (gEspNow->lastResetTime > 0) {
     unsigned long uptime = (millis() - gEspNow->lastResetTime) / 1000;
@@ -9060,10 +9069,14 @@ const char* cmd_espnow_broadcaststats(const String& argsInput) {
   // Read-only status: see comment in cmd_espnow_status above.
   if (!gEspNow) return "ESP-NOW not initialized (run 'openespnow' first)";
   
-  broadcastOutput("Broadcast ACK Tracking Statistics:");
-  BROADCAST_PRINTF("  Broadcasts Tracked: %lu", (unsigned long)gBroadcastsTracked);
-  BROADCAST_PRINTF("  Broadcasts Completed (100%%): %lu", (unsigned long)gBroadcastsCompleted);
-  BROADCAST_PRINTF("  Broadcasts Timed Out: %lu", (unsigned long)gBroadcastsTimedOut);
+  BROADCAST_PRINTF(
+    "Broadcast ACK Tracking Statistics:\n"
+    "  Broadcasts Tracked: %lu\n"
+    "  Broadcasts Completed (100%%): %lu\n"
+    "  Broadcasts Timed Out: %lu",
+    (unsigned long)gBroadcastsTracked,
+    (unsigned long)gBroadcastsCompleted,
+    (unsigned long)gBroadcastsTimedOut);
   
   if (gBroadcastsTracked > 0) {
     float successRate = 100.0f * gBroadcastsCompleted / gBroadcastsTracked;
@@ -9126,20 +9139,29 @@ const char* cmd_espnow_routerstats(const String& argsInput) {
   // forever. Pruned to ONLY counters that are actually live today (router
   // top-line plus the V4 fragmentation family). If a removed section is wanted
   // back, wire the increment at its canonical path first.
-  broadcastOutput("=== ESP-NOW Router Statistics ===");
-  BROADCAST_PRINTF("Messages Sent: %lu", (unsigned long)gEspNow->routerMetrics.messagesSent);
-  BROADCAST_PRINTF("Messages Received: %lu", (unsigned long)gEspNow->routerMetrics.messagesReceived);
-  BROADCAST_PRINTF("Messages Failed: %lu", (unsigned long)gEspNow->routerMetrics.messagesFailed);
+  BROADCAST_PRINTF(
+    "=== ESP-NOW Router Statistics ===\n"
+    "Messages Sent: %lu\n"
+    "Messages Received: %lu\n"
+    "Messages Failed: %lu",
+    (unsigned long)gEspNow->routerMetrics.messagesSent,
+    (unsigned long)gEspNow->routerMetrics.messagesReceived,
+    (unsigned long)gEspNow->routerMetrics.messagesFailed);
 
-  broadcastOutput("\nV4 Fragmentation:");
-  BROADCAST_PRINTF("  Fragments TX:        %lu", (unsigned long)gEspNow->routerMetrics.v4FragTx);
-  BROADCAST_PRINTF("  Fragments RX:        %lu", (unsigned long)gEspNow->routerMetrics.v4FragRx);
-  BROADCAST_PRINTF("  Reassembled:         %lu", (unsigned long)gEspNow->routerMetrics.v4FragRxCompleted);
-  BROADCAST_PRINTF("  Reassembly GC:       %lu", (unsigned long)gEspNow->routerMetrics.v4FragRxGc);
-  BROADCAST_PRINTF("  Reassembly Timeouts: %lu", (unsigned long)gEspNow->routerMetrics.chunksTimedOut);
+  BROADCAST_PRINTF(
+    "\nV4 Fragmentation:\n"
+    "  Fragments TX:        %lu\n"
+    "  Fragments RX:        %lu\n"
+    "  Reassembled:         %lu\n"
+    "  Reassembly GC:       %lu\n"
+    "  Reassembly Timeouts: %lu",
+    (unsigned long)gEspNow->routerMetrics.v4FragTx,
+    (unsigned long)gEspNow->routerMetrics.v4FragRx,
+    (unsigned long)gEspNow->routerMetrics.v4FragRxCompleted,
+    (unsigned long)gEspNow->routerMetrics.v4FragRxGc,
+    (unsigned long)gEspNow->routerMetrics.chunksTimedOut);
 
-  broadcastOutput("\nMessage IDs:");
-  BROADCAST_PRINTF("  Next Message ID: %lu", (unsigned long)gEspNow->nextMessageId);
+  BROADCAST_PRINTF("\nMessage IDs:\n  Next Message ID: %lu", (unsigned long)gEspNow->nextMessageId);
 
   return "OK";
 }

@@ -727,8 +727,7 @@ const char* cmd_i2cscan(const String& originalCmd) {
   // matches the pattern cmd_i2cstats / streamDeviceRegistryOutput use.
   I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
 
-  broadcastOutput("I2C Bus Scan with Device Identification:");
-  broadcastOutput("========================================");
+  broadcastOutput("I2C Bus Scan with Device Identification:\n========================================");
 
   int totalCount = 0;
 
@@ -775,10 +774,11 @@ const char* cmd_i2cscan(const String& originalCmd) {
     broadcastOutput("I2C2 / Wire (bus 1): NOT INITIALIZED — check i2c2SdaPin/i2c2SclPin settings");
   }
 
-  broadcastOutput("");
-  BROADCAST_PRINTF("Total devices found: %d", totalCount);
-  broadcastOutput("Use 'sensors' to see full sensor database");
-  broadcastOutput("Use 'sensorinfo <name>' for detailed sensor information");
+  BROADCAST_PRINTF(
+    "\nTotal devices found: %d\n"
+    "Use 'sensors' to see full sensor database\n"
+    "Use 'sensorinfo <name>' for detailed sensor information",
+    totalCount);
 
   // Return value is the short result string the CLI prints after the
   // streamed output. Doesn't need to repeat what we already broadcast.
@@ -792,16 +792,14 @@ const char* cmd_i2cscan(const String& originalCmd) {
 const char* cmd_i2cstats(const String& originalCmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
-  broadcastOutput("I2C Bus Statistics:");
-  broadcastOutput("==================");
+  broadcastOutput("I2C Bus Statistics:\n==================");
 
   // Wire1 bus info (configurable)
   broadcastOutput("");
 
   // Wire1 bus info (sensor bus)
-  broadcastOutput("Wire1 (Sensor I2C):");
-  BROADCAST_PRINTF("  SDA Pin: %d", gSettings.i2cSdaPin);
-  BROADCAST_PRINTF("  SCL Pin: %d", gSettings.i2cSclPin);
+  BROADCAST_PRINTF("Wire1 (Sensor I2C):\n  SDA Pin: %d\n  SCL Pin: %d",
+                   gSettings.i2cSdaPin, gSettings.i2cSclPin);
   I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
   if (mgr) {
     BROADCAST_PRINTF("  Clock: Managed by I2CDeviceManager (per-device)");
@@ -1283,8 +1281,7 @@ const char* cmd_sensors(const String& argsInput) {
   String args = argsInput;
   args.trim();
 
-  broadcastOutput("I2C Sensor Database:");
-  broadcastOutput("===================");
+  broadcastOutput("I2C Sensor Database:\n===================");
 
   // Check for filter arguments
   String filter = "";
@@ -1295,8 +1292,9 @@ const char* cmd_sensors(const String& argsInput) {
     broadcastOutput("");
   }
 
-  broadcastOutput("Addr Name         Description                    Manufacturer");
-  broadcastOutput("---- ------------ ------------------------------ ------------");
+  broadcastOutput(
+    "Addr Name         Description                    Manufacturer\n"
+    "---- ------------ ------------------------------ ------------");
 
   int count = 0;
   for (size_t i = 0; i < i2cSensorsCount; i++) {
@@ -1354,8 +1352,7 @@ const char* cmd_sensorinfo(const String& argsInput) {
   args.trim();
 
   if (args.length() == 0) {
-    broadcastOutput("Usage: sensorinfo <sensor_name>");
-    broadcastOutput("Example: sensorinfo BNO055");
+    broadcastOutput("Usage: sensorinfo <sensor_name>\nExample: sensorinfo BNO055");
     return "ERROR";
   }
 
@@ -1391,8 +1388,7 @@ const char* cmd_sensorinfo(const String& argsInput) {
     return "ERROR";
   }
 
-  broadcastOutput("Sensor Information:");
-  broadcastOutput("==================");
+  broadcastOutput("Sensor Information:\n==================");
   BROADCAST_PRINTF("Name: %s", foundSensor->name);
   BROADCAST_PRINTF("Description: %s", foundSensor->description);
   BROADCAST_PRINTF("Manufacturer: %s", foundSensor->manufacturer);
