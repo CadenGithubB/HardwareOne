@@ -66,6 +66,7 @@ struct Settings {
       imuRollOffset(0.0f),
       imuYawOffset(0.0f),
       debugHttp(false),
+      debugHttps(false),
       debugSse(false),
       debugCli(false),
       debugAuth(false),
@@ -454,6 +455,7 @@ struct Settings {
   float imuYawOffset;      // Yaw correction offset in degrees
   // Debug settings (parent flags - kept for backward compatibility)
   bool debugHttp;
+  bool debugHttps;   // Gates ESP-IDF TLS/HTTPS log verbosity (see DEBUG_HTTPS)
   bool debugSse;
   bool debugCli;
   bool debugAuth;

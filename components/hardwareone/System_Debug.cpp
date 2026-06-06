@@ -329,6 +329,23 @@ void debugOutputTask(void* parameter) {
   }
 }
 
+// Boot-time backpressure for bursty debug output. When a tight loop emits a
+// long run of lines (e.g. the command-registry dump of 500+ commands), the
+// producer can outrun the single debugOutputTask and overflow the free-list
+// pool, silently dropping the tail. Call this periodically inside such a loop:
+// it yields until the free pool recovers above `minFree` slots, bounded by
+// `maxWaitMs` so it can never hang boot. It's a no-op once the pool is healthy
+// or before the queue is up — so it costs nothing when the relevant debug flag
+// is off (no lines are produced, the pool stays full).
+void debugQueueBackpressure(int minFree, uint32_t maxWaitMs) {
+  if (!gDebugFreeQueue) return;
+  uint32_t start = millis();
+  while ((int)uxQueueMessagesWaiting(gDebugFreeQueue) < minFree) {
+    if ((uint32_t)(millis() - start) >= maxWaitMs) break;
+    vTaskDelay(pdMS_TO_TICKS(2));
+  }
+}
+
 const char* cmd_loglevel(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
@@ -381,8 +398,9 @@ const char* cmd_loglevel(const String& argsInput) {
       case LOG_LEVEL_INFO:  espLevel = ESP_LOG_INFO;  break;
       default:              espLevel = ESP_LOG_DEBUG; break;
     }
-    esp_log_level_set("esp-tls-mbedtls", espLevel);
-    esp_log_level_set("esp_https_server", espLevel);
+    // TLS/HTTPS tags (esp-tls-mbedtls, esp_https_server, httpd, httpd_txrx)
+    // are owned by the DEBUG_HTTPS flag (applyHttpsLogLevels), not the global
+    // log level — so `loglevel debug` can't re-enable the disconnect flood.
     esp_log_level_set("wifi", espLevel);
     esp_log_level_set("wifi_init", espLevel);
     esp_log_level_set("phy_init", espLevel);
@@ -936,6 +954,28 @@ static const char* cmd_debugsubflag_impl(const String& argsInput, bool* settingP
 
 const char* cmd_debughttp(const String& a) {
   return cmd_debugsubflag_impl(a, &gSettings.debugHttp, DEBUG_HTTP, "debugHttp");
+}
+
+// Set the ESP-IDF log level for the TLS/HTTPS framework tags. These emit a
+// flood of benign noise when a browser hits a self-signed cert (handshake
+// rejects, connection resets, per-chunk write errors) — much of it at ERROR
+// level, so the global loglevel can't suppress it. verbose=false → NONE,
+// verbose=true → DEBUG. Owned by DEBUG_HTTPS.
+void applyHttpsLogLevels(bool verbose) {
+  esp_log_level_t lvl = verbose ? ESP_LOG_DEBUG : ESP_LOG_NONE;
+  esp_log_level_set("esp-tls-mbedtls", lvl);
+  esp_log_level_set("esp_https_server", lvl);
+  esp_log_level_set("httpd", lvl);
+  esp_log_level_set("httpd_txrx", lvl);
+}
+
+const char* cmd_debughttps(const String& a) {
+  const char* r = cmd_debugsubflag_impl(a, &gSettings.debugHttps, DEBUG_HTTPS, "debugHttps");
+  // Skip the side effect during the CLI validation pass (cmd_debugsubflag_impl
+  // returns "VALID" without mutating state when gCLIValidateOnly is set).
+  extern bool gCLIValidateOnly;
+  if (!gCLIValidateOnly) applyHttpsLogLevels(isDebugFlagSet(DEBUG_HTTPS));
+  return r;
 }
 
 const char* cmd_debugsse(const String& a) {
@@ -1954,6 +1994,7 @@ const char* getDebugCategoryName(DebugFlagMask flag) {
   // Return the first matching flag name (checked in bit order, low to high)
   if (flag & DEBUG_AUTH) return "AUTH";
   if (flag & DEBUG_HTTP) return "HTTP";
+  if (flag & DEBUG_HTTPS) return "HTTPS";
   if (flag & DEBUG_SSE) return "SSE";
   if (flag & DEBUG_CLI) return "CLI";
   if (flag & DEBUG_FMRADIO) return "FMRADIO";
@@ -2767,6 +2808,7 @@ const char* cmd_debugcmdflowcontext(const String& argsInput) {
 // Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry debugCommands[] = {
   { "debughttp", "Debug HTTP requests.", true, cmd_debughttp },
+  { "debughttps", "Debug HTTPS/TLS handshake + connection errors (ESP-IDF logs).", true, cmd_debughttps },
   { "debugsse", "Debug Server-Sent Events.", true, cmd_debugsse },
   { "debugcli", "Debug CLI processing.", true, cmd_debugcli },
   { "debugauth", "Debug authentication (parent flag).", true, cmd_debugauth, "Usage: debugauth <0|1>" },

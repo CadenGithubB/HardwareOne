@@ -253,6 +253,14 @@ struct DebugFlagMask {
 #define DEBUG_ANO_ENCODER_POLLING   DEBUG_BIT(115)
 #define DEBUG_ANO_ENCODER_VALUES    DEBUG_BIT(116)
 
+// Bit 117: HTTPS / TLS framework log noise. Distinct from DEBUG_HTTP (which
+// gates the firmware's own request/handler logs). This flag owns the verbosity
+// of the ESP-IDF TLS/server tags (esp-tls-mbedtls, esp_https_server, httpd,
+// httpd_txrx) via applyHttpsLogLevels(). OFF (default) silences the benign
+// handshake-reject / connection-reset / write-error flood that browsers
+// produce against a self-signed cert; ON surfaces full TLS handshake detail.
+#define DEBUG_HTTPS             DEBUG_BIT(117)
+
 // Debug sub-flags structure for granular control
 // The parent flags (DEBUG_AUTH, DEBUG_HTTP, etc.) are set when ANY child is enabled
 // This structure tracks which specific sub-categories are enabled
@@ -403,6 +411,12 @@ extern char* gDebugBuffer;
 constexpr size_t GLOBAL_DEBUG_BUFFER_SIZE = 1024;
 extern QueueHandle_t gDebugOutputQueue;
 extern QueueHandle_t gDebugFreeQueue;
+
+// Yield inside a bursty debug-output loop until the free-list pool drains back
+// above `minFree` slots (bounded by `maxWaitMs`). Prevents a producer loop from
+// overflowing the pool and dropping the tail of large boot dumps. No-op when
+// the pool is already healthy, so it's free when nothing is being emitted.
+void debugQueueBackpressure(int minFree = 96, uint32_t maxWaitMs = 200);
 extern volatile unsigned long gDebugDropped;
 extern volatile bool gDebugVerbose;
 
@@ -435,6 +449,12 @@ inline void setDebugFlags(DebugFlagMask flags) { DEBUG_MANAGER.setDebugFlags(fla
 inline void setDebugFlag(DebugFlagMask flag) { setDebugFlags(getDebugFlags() | flag); }
 inline void clearDebugFlag(DebugFlagMask flag) { setDebugFlags(getDebugFlags() & ~flag); }
 inline bool isDebugFlagSet(DebugFlagMask flag) { return gDebugVerbose || ((getDebugFlags() & flag) != (DebugFlagMask)0); }
+
+// Apply the ESP-IDF log-level for the TLS/HTTPS framework tags (esp-tls-mbedtls,
+// esp_https_server, httpd, httpd_txrx). verbose=false → ESP_LOG_NONE (quiet the
+// benign browser-disconnect flood); verbose=true → ESP_LOG_DEBUG. Driven by the
+// DEBUG_HTTPS flag; called at boot from applySettings() and on `debughttps`.
+void applyHttpsLogLevels(bool verbose);
 
 // Sub-flag accessor functions
 inline DebugSubFlags& getDebugSubFlags() { return gDebugSubFlags; }
