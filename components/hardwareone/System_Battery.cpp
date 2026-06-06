@@ -440,33 +440,34 @@ const char* cmd_battery_status(const String& /*argsInput*/) {
   broadcastOutput("║         BATTERY STATUS                 ║");
   broadcastOutput("╠════════════════════════════════════════╣");
 
-  char line[80];
-  snprintf(line, sizeof(line), "║ Voltage:     %.2fV                    ║", gBatteryState.voltage);
-  broadcastOutput(line);
-  snprintf(line, sizeof(line), "║ Percentage:  %.0f%%                    ║", gBatteryState.percentage);
-  broadcastOutput(line);
-  snprintf(line, sizeof(line), "║ Status:      %-20s ║", getBatteryStatusString());
-  broadcastOutput(line);
-  snprintf(line, sizeof(line), "║ Charging:    %-20s ║", gBatteryState.isCharging ? "Yes" : "No");
-  broadcastOutput(line);
-  snprintf(line, sizeof(line), "║ USB Power:   %-20s ║",
-           gBatteryState.usbPresent
-             ? (kHasVbusSense ? "Yes (VBUS pin)" : "Yes (inferred)")
-             : (kHasVbusSense ? "No  (VBUS pin)" : "No  (inferred)"));
-  broadcastOutput(line);
+  char line[80];  // still used by the Last-Read line and the USB-only backend below
+  // Content rows grouped (was one broadcast each). %-20.20s caps the strings so
+  // the envelope is bounded; the box borders stay single (each ~126 B in UTF-8).
+  BROADCAST_PRINTF(
+    "║ Voltage:     %.2fV                    ║\n"
+    "║ Percentage:  %.0f%%                    ║\n"
+    "║ Status:      %-20.20s ║",
+    gBatteryState.voltage, gBatteryState.percentage, getBatteryStatusString());
+  BROADCAST_PRINTF(
+    "║ Charging:    %-20.20s ║\n"
+    "║ USB Power:   %-20.20s ║",
+    gBatteryState.isCharging ? "Yes" : "No",
+    gBatteryState.usbPresent
+      ? (kHasVbusSense ? "Yes (VBUS pin)" : "Yes (inferred)")
+      : (kHasVbusSense ? "No  (VBUS pin)" : "No  (inferred)"));
 
   broadcastOutput("║                                        ║");
 
 #if BATTERY_BACKEND_ADC
-  snprintf(line, sizeof(line), "║ Backend:     ADC                       ║");
-  broadcastOutput(line);
-  snprintf(line, sizeof(line), "║ Raw ADC:     %4d / 4095               ║", gBatteryState.rawADC);
-  broadcastOutput(line);
+  BROADCAST_PRINTF(
+    "║ Backend:     ADC                       ║\n"
+    "║ Raw ADC:     %4d / 4095               ║",
+    gBatteryState.rawADC);
 #elif BATTERY_BACKEND_FUEL_GAUGE
-  snprintf(line, sizeof(line), "║ Backend:     MAX17048 fuel gauge       ║");
-  broadcastOutput(line);
-  snprintf(line, sizeof(line), "║ CRATE:       %+.2f %%/hr                ║", gBatteryState.cratePctPerHr);
-  broadcastOutput(line);
+  BROADCAST_PRINTF(
+    "║ Backend:     MAX17048 fuel gauge       ║\n"
+    "║ CRATE:       %+.2f %%/hr                ║",
+    gBatteryState.cratePctPerHr);
 #else
   snprintf(line, sizeof(line), "║ Backend:     USB-only (no battery HW)  ║");
   broadcastOutput(line);
@@ -477,15 +478,15 @@ const char* cmd_battery_status(const String& /*argsInput*/) {
   broadcastOutput(line);
 
   broadcastOutput("╠════════════════════════════════════════╣");
-  broadcastOutput("║ LiPo Voltage Reference:                ║");
-  snprintf(line, sizeof(line), "║   Full:      %.2fV                    ║", VBAT_FULL);
-  broadcastOutput(line);
-  snprintf(line, sizeof(line), "║   Nominal:   %.2fV                    ║", VBAT_NOMINAL);
-  broadcastOutput(line);
-  snprintf(line, sizeof(line), "║   Low:       %.2fV                    ║", VBAT_LOW);
-  broadcastOutput(line);
-  snprintf(line, sizeof(line), "║   Critical:  %.2fV                    ║", VBAT_CRITICAL);
-  broadcastOutput(line);
+  BROADCAST_PRINTF(
+    "║ LiPo Voltage Reference:                ║\n"
+    "║   Full:      %.2fV                    ║\n"
+    "║   Nominal:   %.2fV                    ║",
+    VBAT_FULL, VBAT_NOMINAL);
+  BROADCAST_PRINTF(
+    "║   Low:       %.2fV                    ║\n"
+    "║   Critical:  %.2fV                    ║",
+    VBAT_LOW, VBAT_CRITICAL);
   broadcastOutput("╚════════════════════════════════════════╝");
 
   return "Battery status displayed above";

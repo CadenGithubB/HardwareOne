@@ -2335,23 +2335,18 @@ void printMemoryReport() {
 
   bool useDynamicTracking = gAllocTrackerEnabled && gAllocTrackerCount > 0;
 
-  broadcastOutput("");
-  broadcastOutput("========== BOOT MEMORY REPORT (Task Manager) ==========");
-  broadcastOutput("");
-
-  // DRAM Summary
-  broadcastOutput("-- DRAM (Internal Heap) --");
-  BROADCAST_PRINTF("  Total:      %7lu bytes (%3lu KB)",
-                (unsigned long)dram_total, (unsigned long)(dram_total / 1024));
-  BROADCAST_PRINTF("  Used:       %7lu bytes (%3lu KB) [%2u%%]",
-                (unsigned long)dram_used, (unsigned long)(dram_used / 1024),
-                (unsigned)((dram_used * 100) / dram_total));
-  BROADCAST_PRINTF("  Free:       %7lu bytes (%3lu KB) [%2u%%]",
-                (unsigned long)dram_free, (unsigned long)(dram_free / 1024),
-                (unsigned)((dram_free * 100) / dram_total));
-  BROADCAST_PRINTF("  Peak Used:  %7lu bytes (%3lu KB) [%2u%%]",
-                (unsigned long)dram_peak_used, (unsigned long)(dram_peak_used / 1024),
-                (unsigned)((dram_peak_used * 100) / dram_total));
+  // Header + DRAM summary packed into 2 envelopes (was 8). DRAM value group
+  // worst case ~172 B (4 lines), safely under the 255 B slot.
+  broadcastOutput("\n========== BOOT MEMORY REPORT (Task Manager) ==========\n\n-- DRAM (Internal Heap) --");
+  BROADCAST_PRINTF(
+    "  Total:      %7lu bytes (%3lu KB)\n"
+    "  Used:       %7lu bytes (%3lu KB) [%2u%%]\n"
+    "  Free:       %7lu bytes (%3lu KB) [%2u%%]\n"
+    "  Peak Used:  %7lu bytes (%3lu KB) [%2u%%]",
+    (unsigned long)dram_total,     (unsigned long)(dram_total / 1024),
+    (unsigned long)dram_used,      (unsigned long)(dram_used / 1024),      (unsigned)((dram_used * 100) / dram_total),
+    (unsigned long)dram_free,      (unsigned long)(dram_free / 1024),      (unsigned)((dram_free * 100) / dram_total),
+    (unsigned long)dram_peak_used, (unsigned long)(dram_peak_used / 1024), (unsigned)((dram_peak_used * 100) / dram_total));
 
   // PSRAM Summary
   if (has_ps) {
@@ -2370,15 +2365,16 @@ void printMemoryReport() {
     broadcastOutput("-- PSRAM: Not available --");
   }
 
-  broadcastOutput("");
-  BROADCAST_PRINTF("  BSS (Internal): %7lu bytes (%3lu KB)",
-                (unsigned long)bss_internal_bytes, (unsigned long)(bss_internal_bytes / 1024));
-  BROADCAST_PRINTF("  BSS (PSRAM):    %7lu bytes (%3lu KB)",
-                (unsigned long)bss_psram_bytes, (unsigned long)(bss_psram_bytes / 1024));
-  BROADCAST_PRINTF("  NOINIT (Int):   %7lu bytes (%3lu KB)",
-                (unsigned long)noinit_internal_bytes, (unsigned long)(noinit_internal_bytes / 1024));
-  BROADCAST_PRINTF("  NOINIT (PSRAM): %7lu bytes (%3lu KB)",
-                (unsigned long)noinit_psram_bytes, (unsigned long)(noinit_psram_bytes / 1024));
+  // BSS/NOINIT packed into 1 envelope (was 5). Worst case ~150 B.
+  BROADCAST_PRINTF(
+    "\n  BSS (Internal): %7lu bytes (%3lu KB)\n"
+    "  BSS (PSRAM):    %7lu bytes (%3lu KB)\n"
+    "  NOINIT (Int):   %7lu bytes (%3lu KB)\n"
+    "  NOINIT (PSRAM): %7lu bytes (%3lu KB)",
+    (unsigned long)bss_internal_bytes,    (unsigned long)(bss_internal_bytes / 1024),
+    (unsigned long)bss_psram_bytes,       (unsigned long)(bss_psram_bytes / 1024),
+    (unsigned long)noinit_internal_bytes, (unsigned long)(noinit_internal_bytes / 1024),
+    (unsigned long)noinit_psram_bytes,    (unsigned long)(noinit_psram_bytes / 1024));
 
   // heap_caps view — gives the truth about WHERE allocations land
   // (internal DRAM vs DMA-capable vs PSRAM) and how fragmented each
@@ -2386,17 +2382,18 @@ void printMemoryReport() {
   // diverges from total free, the heap is fragmented and big allocs
   // (page-swap workers, image probes) will fail even with apparent
   // headroom.
-  broadcastOutput("");
-  broadcastOutput("-- HEAP CAPS (allocator-eye view) --");
   size_t cap_int_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
   size_t cap_int_largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
   size_t cap_dma_free = heap_caps_get_free_size(MALLOC_CAP_DMA);
   size_t cap_dma_largest = heap_caps_get_largest_free_block(MALLOC_CAP_DMA);
-  BROADCAST_PRINTF("  INTERNAL  free=%7lu B (%3lu KB)  largest=%7lu B  frag=%2u%%",
+  // Heap-caps header + INTERNAL + DMA packed into 1 envelope (was 4). ~161 B.
+  BROADCAST_PRINTF(
+    "\n-- HEAP CAPS (allocator-eye view) --\n"
+    "  INTERNAL  free=%7lu B (%3lu KB)  largest=%7lu B  frag=%2u%%\n"
+    "  DMA-able  free=%7lu B (%3lu KB)  largest=%7lu B",
                    (unsigned long)cap_int_free, (unsigned long)(cap_int_free / 1024),
                    (unsigned long)cap_int_largest,
-                   cap_int_free ? (unsigned)(100 - (cap_int_largest * 100) / cap_int_free) : 0);
-  BROADCAST_PRINTF("  DMA-able  free=%7lu B (%3lu KB)  largest=%7lu B",
+                   cap_int_free ? (unsigned)(100 - (cap_int_largest * 100) / cap_int_free) : 0,
                    (unsigned long)cap_dma_free, (unsigned long)(cap_dma_free / 1024),
                    (unsigned long)cap_dma_largest);
   if (has_ps) {
@@ -2609,10 +2606,11 @@ void printMemoryReport() {
   size_t static_vars_total = 0;
   
   // First-Time Setup State Management
-  broadcastOutput("  First-Time Setup State:");
-  broadcastOutput("    gFirstTimeSetupState:        4 bytes");
-  broadcastOutput("    gSetupProgressStage:         4 bytes");
-  broadcastOutput("    gFirstTimeSetupPerformed:    1 bytes");
+  broadcastOutput(
+    "  First-Time Setup State:\n"
+    "    gFirstTimeSetupState:        4 bytes\n"
+    "    gSetupProgressStage:         4 bytes\n"
+    "    gFirstTimeSetupPerformed:    1 bytes");
   static_vars_total += 9;
   
   // Sensor Module State Variables
@@ -2670,9 +2668,10 @@ void printMemoryReport() {
   static_vars_total += thermal_state_bytes + imu_state_bytes + tof_state_bytes + gamepad_state_bytes + apds_state_bytes + gps_state_bytes + oled_state_bytes;
   
   // I2C System
-  broadcastOutput("  I2C System:");
-  broadcastOutput("    Clock Stack:        32 bytes");  // Fixed 8-slot array inside I2CDeviceManager
-  broadcastOutput("    Mutex Objects:     ~64 bytes");
+  broadcastOutput(
+    "  I2C System:\n"
+    "    Clock Stack:        32 bytes\n"     // Fixed 8-slot array inside I2CDeviceManager
+    "    Mutex Objects:     ~64 bytes");
   static_vars_total += 32 + 64;
   
   // Web System Arrays
@@ -2819,33 +2818,32 @@ void printMemoryReport() {
                   enabled_count, disabled_count);
 
   // ========== TOTALS ==========
-  broadcastOutput("");
-  broadcastOutput("---------- TOTALS ----------");
-  BROADCAST_PRINTF("  TOTAL ACCOUNTED:      %6lu bytes (%3lu KB)",
-                  (unsigned long)total_known, (unsigned long)(total_known / 1024));
-  BROADCAST_PRINTF("  ACTUAL DRAM USED:     %6lu bytes (%3lu KB)",
-                  (unsigned long)dram_used, (unsigned long)(dram_used / 1024));
+  // TOTALS — grouped: header+DRAM (1 envelope), over-budget block (1), PSRAM (1+opt).
+  BROADCAST_PRINTF(
+    "\n---------- TOTALS ----------\n"
+    "  TOTAL ACCOUNTED:      %6lu bytes (%3lu KB)\n"
+    "  ACTUAL DRAM USED:     %6lu bytes (%3lu KB)",
+                  (unsigned long)total_known, (unsigned long)(total_known / 1024),
+                  (unsigned long)dram_used,   (unsigned long)(dram_used / 1024));
 
   if (dram_used > total_known) {
     size_t unaccounted = dram_used - total_known;
-    BROADCAST_PRINTF("  Unaccounted DRAM:     %6lu bytes (%3lu KB)",
-                    (unsigned long)unaccounted, (unsigned long)(unaccounted / 1024));
-    size_t overestimate = 0;  
-    if (static_total > unaccounted) {
-      overestimate = static_total - unaccounted;
-    }
-    BROADCAST_PRINTF("  Static Over-Estimate: %6lu bytes (%3lu KB)",
+    size_t overestimate = (static_total > unaccounted) ? (static_total - unaccounted) : 0;
+    BROADCAST_PRINTF(
+      "  Unaccounted DRAM:     %6lu bytes (%3lu KB)\n"
+      "  Static Over-Estimate: %6lu bytes (%3lu KB)\n"
+      "  (Static estimates are conservative upper bounds)",
+                    (unsigned long)unaccounted,  (unsigned long)(unaccounted / 1024),
                     (unsigned long)overestimate, (unsigned long)(overestimate / 1024));
-    broadcastOutput("  (Static estimates are conservative upper bounds)");
   }
 
   // Show PSRAM accounting if available
   if (has_ps && useDynamicTracking) {
-    broadcastOutput("");
-    BROADCAST_PRINTF("  PSRAM ACCOUNTED:      %6lu bytes (%3lu KB)",
-                    (unsigned long)tracked_psram, (unsigned long)(tracked_psram / 1024));
-    BROADCAST_PRINTF("  ACTUAL PSRAM USED:    %6lu bytes (%3lu KB)",
-                    (unsigned long)ps_used, (unsigned long)(ps_used / 1024));
+    BROADCAST_PRINTF(
+      "\n  PSRAM ACCOUNTED:      %6lu bytes (%3lu KB)\n"
+      "  ACTUAL PSRAM USED:    %6lu bytes (%3lu KB)",
+                    (unsigned long)tracked_psram, (unsigned long)(tracked_psram / 1024),
+                    (unsigned long)ps_used,       (unsigned long)(ps_used / 1024));
     if (ps_used > tracked_psram) {
       size_t unaccounted_psram = ps_used - tracked_psram;
       BROADCAST_PRINTF("  Unaccounted PSRAM:    %6lu bytes (%3lu KB)",
@@ -2853,9 +2851,7 @@ void printMemoryReport() {
     }
   }
 
-  broadcastOutput("");
-  broadcastOutput("========== END MEMORY REPORT ==========");
-  broadcastOutput("");
+  broadcastOutput("\n========== END MEMORY REPORT ==========\n");
 }
 
 // Command handlers
@@ -2899,12 +2895,13 @@ const char* cmd_taskstats(const String& originalCmd) {
 
   UBaseType_t actualCount = uxTaskGetSystemState(taskArray, taskCount, nullptr);
 
-  broadcastOutput("Task Statistics:");
-  broadcastOutput("=================");
-  BROADCAST_PRINTF("Total Tasks: %u", (unsigned)taskCount);
-  broadcastOutput("");
-  broadcastOutput("Task Name          State  Prio  Stack");
-  broadcastOutput("================== ===== ===== ======");
+  BROADCAST_PRINTF(
+    "Task Statistics:\n"
+    "=================\n"
+    "Total Tasks: %u\n\n"
+    "Task Name          State  Prio  Stack\n"
+    "================== ===== ===== ======",
+    (unsigned)taskCount);
 
   for (UBaseType_t i = 0; i < actualCount; i++) {
     const char* state;
