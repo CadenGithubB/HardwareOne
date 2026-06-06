@@ -108,7 +108,8 @@ enum EspNowV4Type : uint8_t {
   ESPNOW_V4_TYPE_FILE_START      = 60,
   ESPNOW_V4_TYPE_FILE_DATA       = 61,
   ESPNOW_V4_TYPE_FILE_END        = 62,
-  // 63–65 reserved (FILE_ACK, FILE_PROGRESS, FILE_CANCEL — Phase 4)
+  // 63=FILE_ACK, 64=FILE_PROGRESS reserved (Phase 4 follow-ups)
+  ESPNOW_V4_TYPE_FILE_CANCEL     = 65,  // receiver→sender: transfer won't complete (post-hoc notice)
 
   // --- Events (70–79) — Phase 5 ---
   ESPNOW_V4_TYPE_SUBSCRIBE_UPDATE = 70,  // sender → receiver: "send me only these event categories"
@@ -496,6 +497,19 @@ static_assert(sizeof(V4PayloadFileData) <= ESPNOW_V4_MAX_PLAINTEXT,
 struct __attribute__((packed)) V4PayloadFileEnd {
   uint32_t crc32;         // CRC32 of entire file
   uint8_t  success;       // 1=transfer complete, 0=aborted
+};
+
+// Phase 4: FILE_CANCEL — the receiver tells the sender a transfer it started
+// will not complete. The header's msgId correlates to the original FILE_START.
+// The sender is fire-and-forget (it already reported "sent"), so this is a
+// post-hoc failure notice for the sender's log / UI, not an in-flight abort.
+enum EspNowFileCancelReason : uint8_t {
+  FILE_CANCEL_TIMEOUT      = 1,  // no frame arrived within the slot timeout
+  FILE_CANCEL_WRITE_FAILED = 2,  // staging write / rename to flash failed
+  FILE_CANCEL_INCOMPLETE   = 3,  // FILE_END arrived but chunks were missing
+};
+struct __attribute__((packed)) V4PayloadFileCancel {
+  uint8_t reason;         // EspNowFileCancelReason
 };
 
 // ---- FS LIST request/reply (ESPNOW_V4_TYPE_FS_LIST_REQ / _REPLY) ----------
