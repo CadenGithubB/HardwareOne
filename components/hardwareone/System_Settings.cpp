@@ -595,6 +595,7 @@ void applySettings() {
     DBG_MAP(debugAuth,             DEBUG_AUTH),
     DBG_MAP(debugAuthCookies,      DEBUG_AUTH),
     DBG_MAP(debugHttp,             DEBUG_HTTP),
+    DBG_MAP(debugHttps,            DEBUG_HTTPS),
     DBG_MAP(debugSse,              DEBUG_SSE),
     DBG_MAP(debugCli,              DEBUG_CLI),
     DBG_MAP(debugCamera,           DEBUG_CAMERA),
@@ -844,17 +845,22 @@ void applySettings() {
       default:              espLevel = ESP_LOG_DEBUG; break;
     }
 
-    // Suppress noisy ESP-IDF components based on log level
-    // TLS connection-reset/write errors (benign browser disconnects)
-    esp_log_level_set("esp-tls-mbedtls", espLevel);
-    // HTTPS handshake progress messages
-    esp_log_level_set("esp_https_server", espLevel);
+    // Suppress noisy ESP-IDF components based on log level.
+    // NOTE: the TLS/HTTPS tags (esp-tls-mbedtls, esp_https_server, httpd,
+    // httpd_txrx) are intentionally NOT set here — they are owned by the
+    // DEBUG_HTTPS flag via applyHttpsLogLevels() below, so a high global
+    // loglevel can't re-spam the benign browser-disconnect flood.
     // WiFi driver state changes and init parameters
     esp_log_level_set("wifi", espLevel);
     esp_log_level_set("wifi_init", espLevel);
     // PHY calibration warnings
     esp_log_level_set("phy_init", espLevel);
   }
+
+  // TLS/HTTPS framework log verbosity is gated by DEBUG_HTTPS, independent of
+  // the global log level (mbedtls logs disconnects at ERROR, which the global
+  // level can't drop below). OFF (default) → ESP_LOG_NONE for those tags.
+  applyHttpsLogLevels(gSettings.debugHttps);
 
   DEBUG_SYSTEMF("[applySettings] Applied debug flags");
 
@@ -1359,6 +1365,8 @@ static const SettingEntry debugSettingEntries[] = {
   { "requests",   SETTING_BOOL, &gSettings.debugHttpRequests,  0, 0, nullptr, 0, 1, "Requests",            nullptr, false, "http", "debughttprequests" },
   { "responses",  SETTING_BOOL, &gSettings.debugHttpResponses, 0, 0, nullptr, 0, 1, "Responses",           nullptr, false, "http", "debughttpresponses" },
   { "streaming",  SETTING_BOOL, &gSettings.debugHttpStreaming,  0, 0, nullptr, 0, 1, "Streaming",           nullptr, false, "http", "debughttpstreaming" },
+  // --- https group (TLS handshake + connection-error noise from ESP-IDF) ---
+  { "enabled",    SETTING_BOOL, &gSettings.debugHttps,         0, 0, nullptr, 0, 1, "All HTTPS/TLS",       nullptr, false, "https", "debughttps" },
   // --- sse group ---
   { "enabled",    SETTING_BOOL, &gSettings.debugSse,           0, 0, nullptr, 0, 1, "All SSE",             nullptr, false, "sse", "debugsse" },
   { "connection", SETTING_BOOL, &gSettings.debugSseConnection, 0, 0, nullptr, 0, 1, "Connection",          nullptr, false, "sse", "debugsseconnection" },

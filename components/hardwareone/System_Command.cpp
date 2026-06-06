@@ -328,10 +328,15 @@ void printCommandModuleSummary() {
   }
   DEBUG_COMMAND_SYSTEMF("[CommandSystem] Total: %zu commands available", commandRegistrySize);
   
-  // Print all registered commands to debug
+  // Print all registered commands to debug. This is 500+ lines emitted in a
+  // tight loop; without pacing it outruns the single debugOutputTask and the
+  // tail overflows the 192-slot pool (observed: ~452 dropped lines at boot when
+  // every debug flag is on). Apply backpressure every 16 lines so the pool
+  // drains. No-op when DEBUG_COMMAND_SYSTEM is off (nothing is emitted).
   DEBUG_COMMAND_SYSTEMF("[CommandSystem] All registered commands:");
   for (size_t i = 0; i < commandRegistrySize; i++) {
     DEBUG_COMMAND_SYSTEMF("[CommandSystem]   [%zu] '%s'", i, commandRegistry[i]->name);
+    if ((i & 0x0F) == 0x0F) debugQueueBackpressure();
   }
 }
 
