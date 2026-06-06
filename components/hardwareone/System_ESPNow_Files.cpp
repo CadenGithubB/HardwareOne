@@ -13,6 +13,7 @@
 
 #include "System_Debug.h"
 #include "System_MemUtil.h"   // ps_alloc / AllocPref
+#include "System_VFS.h"       // boot cleanup of orphaned .part staging files
 
 namespace {
 
@@ -96,21 +97,40 @@ bool fileSlotsInit() {
 }
 
 void fileSlotsBootCleanup() {
-  // Phase 4 boot cleanup. INTENTIONAL NO-OP in the MVP.
-  //
-  // The MVP accumulates the full file in PSRAM then writes the destination
-  // atomically via VFS::openGuarded("w") + write() + close() at FILE_END —
-  // no separate .part file is ever created on disk, so there's nothing to
-  // purge after a crashed-mid-transfer reboot.
-  //
-  // This hook is preserved (called from boot in HardwareOne.cpp) so the
-  // future writer-task variant — which streams 4 KB chunks to a .part file
-  // and rename-on-complete — can fill it in. That variant will need a
-  // directory walk; System_VFS.h currently has no opendirGuarded equivalent
-  // of the file Guarded API, so adding one is a prerequisite (a separate
-  // task, not in scope for the Phase 4 MVP).
-  DEBUG_ESPNOWF("[FileSlots] boot cleanup: no-op (MVP writes atomically; "
-                "writer-task variant will populate this hook)");
+  // Remove orphaned staging files left if a crash / power-loss hit the brief
+  // window between the staging write and the atomic rename in v4h_file_end.
+  // Normally there are none (write + rename happen in one synchronous handler
+  // call), but sweeping keeps stray "/espnow/received/.part-*" temps from
+  // accumulating and cluttering the file browser.
+  const char* dirPath = "/espnow/received";
+  AuthContext ctx = VFS::systemAuth(VFS::Scopes::ESPNOW_RECEIVED, "espnow.file_boot_cleanup");
+  File dir = VFS::openGuarded(dirPath, "r", ctx);
+  if (!dir || !dir.isDirectory()) {
+    if (dir) dir.close();
+    return;
+  }
+  // Collect basenames first — removing during openNextFile() can invalidate
+  // the LittleFS directory iterator.
+  char victims[8][96];
+  uint8_t n = 0;
+  for (File e = dir.openNextFile(); e && n < 8; e = dir.openNextFile()) {
+    if (!e.isDirectory()) {
+      const char* nm = e.name();
+      const char* base = strrchr(nm, '/');
+      base = base ? base + 1 : nm;
+      if (strncmp(base, ".part-", 6) == 0) {
+        snprintf(victims[n], sizeof(victims[n]), "%s/%s", dirPath, base);
+        n++;
+      }
+    }
+    e.close();
+  }
+  dir.close();
+  for (uint8_t i = 0; i < n; i++) {
+    if (VFS::removeGuarded(victims[i], ctx)) {
+      INFO_ESPNOWF("[FileSlots] boot cleanup removed orphan %s", victims[i]);
+    }
+  }
 }
 
 FileTransferSlot* fileSlotsAllocate(const uint8_t peerMac[6],
@@ -308,7 +328,7 @@ void fileSlotsRelease(FileTransferSlot* slot) {
   releaseLocked(*impl(slot));
 }
 
-uint8_t fileSlotsTimeoutSweep(uint32_t nowMs) {
+uint8_t fileSlotsTimeoutSweep(uint32_t nowMs, FileSlotExpiry* out, uint8_t outCap) {
   if (!gFileSlots) return 0;
   FileSlotsLockGuard g;
   if (!g.ok) return 0;
@@ -324,6 +344,12 @@ uint8_t fileSlotsTimeoutSweep(uint32_t nowMs) {
                  (unsigned long)s.msgId,
                  (unsigned)s.receivedChunks, (unsigned)s.totalChunks,
                  (unsigned)(nowMs - s.lastFrameMs));
+    // Record (peer,msgId) so the caller can FILE_CANCEL(TIMEOUT) the sender
+    // before we wipe the slot.
+    if (out && expired < outCap) {
+      memcpy(out[expired].peerMac, s.peerMac, 6);
+      out[expired].msgId = s.msgId;
+    }
     releaseLocked(s);
     expired++;
   }

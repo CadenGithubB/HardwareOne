@@ -2304,6 +2304,18 @@ static bool v4_send_ack(const uint8_t* dst, uint32_t ackFor) {
   return result;
 }
 
+// Phase 4: tell a sender that a file transfer it started will not complete.
+// The sender is fire-and-forget (it returns "sent" once frames are handed off,
+// without waiting for completion), so this is a post-hoc failure notice keyed
+// by the original transfer's msgId (echoed in the header). Plaintext control
+// frame, mirroring v4_send_ack — it reveals only "a transfer failed" + reason.
+static bool v4_send_file_cancel(const uint8_t* dst, uint32_t msgId, uint8_t reason) {
+  V4PayloadFileCancel p;
+  p.reason = reason;
+  return v4_send_frame(dst, ESPNOW_V4_TYPE_FILE_CANCEL, 0, msgId,
+                       (const uint8_t*)&p, sizeof(p), 1);
+}
+
 // Send ACK for a specific fragment
 static bool v4_send_frag_ack(const uint8_t* dst, uint32_t msgId, uint8_t fragIndex, uint8_t fragCount) {
   char dstMac[18];
@@ -3881,6 +3893,9 @@ static void v4h_file_end(const V4RxCtx& ctx) {
                  (unsigned)fileSlotsGetTotalChunks(slot),
                  (unsigned long)recvBytes,
                  (unsigned long)fileSlotsGetTotalSize(slot));
+    // Sender is fire-and-forget and would otherwise assume success — tell it.
+    v4_send_file_cancel(sndMac, ctx.h->msgId, FILE_CANCEL_INCOMPLETE);
+    logFileTransferEvent((uint8_t*)sndMac, senderMacStr.c_str(), filename, MSG_FILE_RECV_FAILED);
     fileSlotsRelease(slot);
     return;
   }
@@ -3909,19 +3924,52 @@ static void v4h_file_end(const V4RxCtx& ctx) {
       macToPathToken(sndMac, senderToken);  // canonical PATH TOKEN form
       char deviceDir[64];
       snprintf(deviceDir, sizeof(deviceDir), "/espnow/received/%s", senderToken);
-
-      FsLockGuard guard("v4file.write");
-      // /espnow is created at boot; confine every inbound-file write to the
-      // received inbox so a (peer-controlled) filename can never direct a write
-      // outside it — defense-in-depth on top of normalize()'s ".." rejection.
-      VFS::mkdirGuarded("/espnow/received", VFS::systemAuth(VFS::Scopes::ESPNOW_RECEIVED, "espnow.v4_file_write_mkdir"));
-      VFS::mkdirGuarded(deviceDir, VFS::systemAuth(VFS::Scopes::ESPNOW_RECEIVED, "espnow.v4_file_write_mkdir"));
-      char filepath[128];
+      char filepath[160];
       snprintf(filepath, sizeof(filepath), "%s/%s", deviceDir, filename);
-      File f = VFS::openGuarded(filepath, "w", VFS::systemAuth(VFS::Scopes::ESPNOW_RECEIVED, "espnow.v4_file_write"), true);
-      if (f) {
-        f.write(dataBuf, recvBytes);
-        f.close();
+      // Atomic publish: stage to a flat ".part-<msgId>" temp in the inbox root,
+      // verify the FULL write, then rename into place. The rename is the only
+      // mutation of `filepath`, so a crash / ENOSPC / short write never leaves a
+      // truncated destination. (The old path wrote straight to `filepath` with
+      // "w" — truncating on open — and ACKed success even when write() failed.)
+      char tmpPath[48];
+      snprintf(tmpPath, sizeof(tmpPath), "/espnow/received/.part-%08lx", (unsigned long)ctx.h->msgId);
+      AuthContext wrCtx = VFS::systemAuth(VFS::Scopes::ESPNOW_RECEIVED, "espnow.v4_file_write");
+      bool wrote = false;
+      {
+        FsLockGuard guard("v4file.write");
+        // /espnow is created at boot; confine every inbound-file write to the
+        // received inbox so a (peer-controlled) filename can never direct a write
+        // outside it — defense-in-depth on top of normalize()'s ".." rejection.
+        VFS::mkdirGuarded("/espnow/received", VFS::systemAuth(VFS::Scopes::ESPNOW_RECEIVED, "espnow.v4_file_write_mkdir"));
+        VFS::mkdirGuarded(deviceDir, VFS::systemAuth(VFS::Scopes::ESPNOW_RECEIVED, "espnow.v4_file_write_mkdir"));
+        File f = VFS::openGuarded(tmpPath, "w", wrCtx, true);
+        if (f) {
+          size_t wn = f.write(dataBuf, recvBytes);
+          f.flush();
+          f.close();
+          if (wn == recvBytes) {
+            wrote = VFS::renameGuarded(tmpPath, filepath, wrCtx);
+            if (!wrote) {
+              ERROR_ESPNOWF("[V4_FILE] rename %s -> %s failed", tmpPath, filepath);
+              VFS::removeGuarded(tmpPath, wrCtx);
+            }
+          } else {
+            ERROR_ESPNOWF("[V4_FILE] short write %u/%lu to %s",
+                          (unsigned)wn, (unsigned long)recvBytes, tmpPath);
+            VFS::removeGuarded(tmpPath, wrCtx);
+          }
+        } else {
+          ERROR_ESPNOWF("[V4_FILE] cannot open staging file %s", tmpPath);
+        }
+      }
+      if (!wrote) {
+        // Don't ACK success; tell the fire-and-forget sender it actually failed.
+        v4_send_file_cancel(sndMac, ctx.h->msgId, FILE_CANCEL_WRITE_FAILED);
+        logFileTransferEvent((uint8_t*)sndMac, senderMacStr.c_str(), filename, MSG_FILE_RECV_FAILED);
+        fileSlotsRelease(slot);
+        return;
+      }
+      {
         BROADCAST_PRINTF("[V4_FILE] Complete: %s (%lu bytes)", filename, (unsigned long)recvBytes);
 
         if (strcmp(filename, "automations.json") == 0) {
@@ -3968,6 +4016,25 @@ static void v4h_file_end(const V4RxCtx& ctx) {
 
   v4_send_ack(ctx.recv_info->src_addr, ctx.h->msgId);
   fileSlotsRelease(slot);
+}
+
+// Phase 4: a peer we sent a file TO reports the transfer failed on its end
+// (timeout, staging-write failure, or missing chunks). Our sender is
+// fire-and-forget and already logged "sent", so this corrects the record:
+// surface it to the operator and count a failed send. msgId echoes the
+// original FILE_START so the operator can correlate.
+static void v4h_file_cancel(const V4RxCtx& ctx) {
+  uint8_t reason = 0;
+  if (ctx.payload && ctx.payloadLen >= sizeof(V4PayloadFileCancel)) {
+    reason = ((const V4PayloadFileCancel*)ctx.payload)->reason;
+  }
+  const char* why = (reason == FILE_CANCEL_TIMEOUT)      ? "timeout" :
+                    (reason == FILE_CANCEL_WRITE_FAILED) ? "write failed" :
+                    (reason == FILE_CANCEL_INCOMPLETE)   ? "incomplete" : "unknown";
+  String macStr = formatMacAddress(ctx.recv_info->src_addr);
+  BROADCAST_PRINTF("[V4_FILE_TX] file to %s FAILED on receiver (msgId=%lu): %s",
+                   macStr.c_str(), (unsigned long)ctx.h->msgId, why);
+  logFileTransferEvent((uint8_t*)ctx.recv_info->src_addr, macStr.c_str(), "(remote)", MSG_FILE_SEND_FAILED);
 }
 
 // ----- Handler table ------
@@ -4031,6 +4098,7 @@ static const V4OpcodeEntry kV4HandlerTable[] = {
   { ESPNOW_V4_TYPE_FILE_START,       V4_OPC_FLAG_REQ_PAIRED,                               v4h_file_start        },
   { ESPNOW_V4_TYPE_FILE_DATA,        V4_OPC_FLAG_REQ_PAIRED,                               v4h_file_data         },
   { ESPNOW_V4_TYPE_FILE_END,         V4_OPC_FLAG_REQ_PAIRED,                               v4h_file_end          },
+  { ESPNOW_V4_TYPE_FILE_CANCEL,      V4_OPC_FLAG_REQ_PAIRED,                               v4h_file_cancel       },
   // Phase 5: SUBSCRIBE_UPDATE — peer tells us which event categories they
   // want from us. REQ_PAIRED so unknown peers can't pollute our broadcast
   // gating (and to ensure peerIdentitySetSubscriptions finds the slot).
@@ -7626,8 +7694,16 @@ void processMeshHeartbeats() {
   // time to surface them to the web UI).
   sendStatusSweep((uint32_t)millis());
   // 1d. Phase 4 — stale file-transfer slot sweep. Slots with no frame in
-  // kFileSlotTimeoutMs (30s) are released, freeing their PSRAM buffer.
-  fileSlotsTimeoutSweep((uint32_t)millis());
+  // kFileSlotTimeoutMs (30s) are released, freeing their PSRAM buffer. Each
+  // expired transfer's sender gets a FILE_CANCEL(TIMEOUT) so it stops assuming
+  // the (fire-and-forget) send landed.
+  {
+    FileSlotExpiry expiredSlots[4];
+    uint8_t nExpired = fileSlotsTimeoutSweep((uint32_t)millis(), expiredSlots, 4);
+    for (uint8_t i = 0; i < nExpired && i < 4; i++) {
+      v4_send_file_cancel(expiredSlots[i].peerMac, expiredSlots[i].msgId, FILE_CANCEL_TIMEOUT);
+    }
+  }
   // 1d2. Phase 4b — drive the FS_LIST protocol: build deferred replies +
   // time out pending sender requests. Fast path when nothing's queued.
   extern void fsListTick();

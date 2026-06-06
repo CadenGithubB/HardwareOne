@@ -121,10 +121,19 @@ uint32_t       fileSlotsGetTotalSize(const FileTransferSlot* slot);
 // Release a slot — free PSRAM buffer, return to FREE state. Idempotent.
 void fileSlotsRelease(FileTransferSlot* slot);
 
+// Identifies an expired transfer so the caller can notify its sender via
+// FILE_CANCEL. Filled by fileSlotsTimeoutSweep when an `out` array is passed.
+struct FileSlotExpiry {
+  uint8_t  peerMac[6];
+  uint32_t msgId;
+};
+
 // Periodic stale-slot sweep. Called from the espnow heartbeat tick.
 // Slots with no frame in kFileSlotTimeoutMs are released. Returns the
-// count of expired slots (for diagnostics).
-uint8_t fileSlotsTimeoutSweep(uint32_t nowMs);
+// count of expired slots. If `out` is non-null, up to `outCap` expired
+// (peerMac,msgId) pairs are recorded so the caller can send each sender a
+// FILE_CANCEL(TIMEOUT). Pass nullptr/0 to skip collection.
+uint8_t fileSlotsTimeoutSweep(uint32_t nowMs, FileSlotExpiry* out = nullptr, uint8_t outCap = 0);
 
 // ---- Diagnostics ------------------------------------------------------------
 
