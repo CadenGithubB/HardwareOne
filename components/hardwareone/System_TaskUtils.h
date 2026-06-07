@@ -10,15 +10,15 @@
 // ============================================================================
 
 constexpr uint32_t CMD_EXEC_STACK_WORDS = 8192;      // ~32KB (automation add validates commands via findCommand; extra headroom prevents overflow)
-constexpr uint32_t SENSOR_QUEUE_STACK_WORDS = 3072;  // ~12KB (bumped back from
-                                                     // the 2765 "reduced 10%" value.
-                                                     // gamepadInit (seesaw.begin →
-                                                     // SWReset → ~10-deep Wire1 calls)
-                                                     // was overflowing the 11KB budget
-                                                     // when the dual-bus refactor's
-                                                     // per-bus locals in executeTransaction
-                                                     // (uint8_t bus + SemaphoreHandle_t
-                                                     // mutex) pushed the peak by ~8 B.
+constexpr uint32_t SENSOR_QUEUE_STACK_WORDS = 4096;  // 16KB. Bumped from 3072 (~12KB):
+                                                     // runtime task-stack reports flagged
+                                                     // sensor_queue_task CRITICAL at ~79%
+                                                     // peak (free ~2.5KB) with all sensors
+                                                     // enabled + remote-sensor JSON. History:
+                                                     // gamepadInit (seesaw.begin → SWReset →
+                                                     // ~10-deep Wire1 calls) had already
+                                                     // overflowed the old ~11KB budget, so
+                                                     // headroom here is load-bearing.
                                                      // 12KB gives a comfortable margin
                                                      // for future per-sensor I2C work.
 constexpr uint32_t ESPNOW_HB_STACK_WORDS = 6656;     // 26 KB. Bumped from 5530 (22 KB) after Step 3c
