@@ -925,6 +925,9 @@ const char* cmd_automation_add(const String& argsInput) {
   String cmdStr = a.value("command");
   String cmdsList = a.value("commands");
   String condition = a.value("condition");
+  // triggerMode (Option 2): "once" => the top-level condition fires only on the
+  // false->true crossing; "repeat"/missing => fire every poll while true (legacy).
+  String triggerMode = a.value("triggermode");
   String enabledStr = a.value("enabled");
   
   bool enabled = (enabledStr.equalsIgnoreCase("1") || enabledStr.equalsIgnoreCase("true") || enabledStr.equalsIgnoreCase("yes"));
@@ -1299,6 +1302,9 @@ const char* cmd_automation_add(const String& argsInput) {
   obj += "  \"createdBy\": \"" + jsonEscape(createdBy) + "\",\n";
   obj += "  \"enabled\": " + String(enabled ? "true" : "false") + ",\n";
   if (condition.length() > 0) obj += "  \"condition\": \"" + jsonEscape(condition) + "\",\n";
+  // Persist triggerMode only when "once" (missing/"repeat" = default, keeps JSON
+  // clean and backward-compatible with existing automations).
+  if (triggerMode == "once") obj += "  \"triggerMode\": \"once\",\n";
   obj += triggersJson + ",\n";
   obj += "  \"commands\": " + commandsJson + "\n";
   obj += "}";
@@ -3459,6 +3465,26 @@ void notifyAutomationScheduler() {
   gAutoCacheValid = false;
 }
 
+// triggerMode="once" edge state (RAM-only). For an automation whose top-level
+// condition uses triggerMode "once", the condition fires only on the false->true
+// crossing, then re-arms when it goes false. RAM-only is deliberate: a reboot
+// re-baselines, so a condition that's already true at boot does NOT spuriously
+// fire — the first poll just records the baseline.
+struct CondEdgeState { long id; bool lastTrue; bool seen; };
+static CondEdgeState gCondEdge[16];
+static uint8_t gCondEdgeCount = 0;
+static CondEdgeState* condEdgeFor(long id) {
+  for (uint8_t i = 0; i < gCondEdgeCount; i++) {
+    if (gCondEdge[i].id == id) return &gCondEdge[i];
+  }
+  if (gCondEdgeCount < (uint8_t)(sizeof(gCondEdge) / sizeof(gCondEdge[0]))) {
+    CondEdgeState* e = &gCondEdge[gCondEdgeCount++];
+    e->id = id; e->lastTrue = false; e->seen = false;
+    return e;
+  }
+  return nullptr;  // table full → caller falls back to level behavior (safe)
+}
+
 // Core scheduler logic - extracted for reuse
 void schedulerTickMinute() {
   // Only valid if time is synced
@@ -3658,19 +3684,33 @@ void schedulerTickMinute() {
           }
         }
 
-        // Evaluate global condition gate if present
+        // Evaluate global condition gate if present.
         if (condition.length() > 0) {
           String wrapped = "IF " + condition + " THEN _";
           bool conditionMet = evaluateCondition(wrapped.c_str());
           DEBUGF(DEBUG_AUTOMATIONS, "[autos] id=%ld condition='%s' result=%s",
                  id, condition.c_str(), conditionMet ? "TRUE" : "FALSE");
-          if (!conditionMet) {
+
+          // triggerMode: "once" fires only on the false->true crossing (edge),
+          // then re-arms when the condition goes false. Missing/"repeat" fires
+          // every poll while true (legacy). Edge state is RAM-only (gCondEdge).
+          char trigModeBuf[16] = "";
+          extractJsonString(obj.c_str(), "\"triggerMode\"", trigModeBuf, sizeof(trigModeBuf));
+          bool fire = conditionMet;
+          if (strcmp(trigModeBuf, "once") == 0) {
+            CondEdgeState* st = condEdgeFor(id);
+            fire = conditionMet && st && st->seen && !st->lastTrue;  // rising edge only
+            if (st) { st->lastTrue = conditionMet; st->seen = true; }
+          }
+
+          if (!fire) {
             if (gAutoLogActive) {
               char skipBuf[256];
               snprintf(skipBuf, sizeof(skipBuf), "Scheduled automation skipped: ID=%ld Name=%s Condition not met: %s", id, autoName.c_str(), condition.c_str());
               appendAutoLogEntry("AUTO_SKIP", skipBuf);
             }
-            DEBUGF(DEBUG_AUTOMATIONS, "[autos] id=%ld skipped - condition not met: %s", id, condition.c_str());
+            DEBUGF(DEBUG_AUTOMATIONS, "[autos] id=%ld condition-gate skip (mode=%s met=%d): %s",
+                   id, trigModeBuf[0] ? trigModeBuf : "repeat", conditionMet ? 1 : 0, condition.c_str());
             pos = objEnd + 1;
             continue;
           }
