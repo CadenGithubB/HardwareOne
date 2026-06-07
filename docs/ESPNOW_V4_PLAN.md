@@ -6,23 +6,34 @@
 
 ---
 
-## Implementation status (2026-05-19 update)
+## Implementation status (2026-06-06 update)
 
 | Phase | Status | Notes |
 |---|---|---|
 | 0 — handler-table refactor | ✓ shipped | commit `6705ee3` |
 | 1 — V4 wire cutover | ✓ shipped | commit `c6157f2` |
-| 2 — multi-mesh data model | ✓ shipped | commits `2fdec6b` through `848a7de` |
-| **3 — per-peer crypto (this doc's main content)** | **✓ shipped** | see "Phase 3 retrospective" below; what actually landed differs from the plan in interesting ways. 2026-05-19: FILE_START/DATA/END migrated to v4_send_payload_smart so file transfers now ride SESSION_FRAME when a session exists. |
-| 4 — file transfer concurrency | ✓ shipped | per-peer-pair slot table in `System_ESPNow_Files.cpp/.h`; FILE_START/DATA/END allocate, accumulate in PSRAM, and atomically commit at FILE_END. Encrypted as of 2026-05-19. |
-| 5 — event subscription registry | ✓ shipped | tasks #64–68: per-peer event category bitmap, SUBSCRIBE_UPDATE opcode, gated broadcast emit (`v4_broadcast_category`), CLI + persistence. |
-| 6 — UX (web + CLI) | partial | Phase 3 produced several UI improvements (CLI flag widening, "Delivered means delivered" web fix); broader Phase 6 scope (session-state badges in web UI, subscription management UI, encryption status indicators) is unscoped. |
+| 2 — multi-mesh data model | ✓ shipped | commits `2fdec6b` … `848a7de`; Phase 2.5–2.8 (per-mesh pair arg, per-mesh bond consumer, legacy-field sweep, `espnowmeshes` CLI + web mesh UI) all subsequently landed. |
+| **3 — per-peer crypto** | **✓ shipped** | libsodium SIGMA-I (Ed25519 / X25519 / ChaCha20-Poly1305 / Blake2b) + mbedtls PBKDF2; sessions, KEY_EX, SESSION_OPEN/CONFIRM, REKEY + auto-rotate, replay window, BROADCAST_AUTH HMAC, LMK removed. See "Phase 3 retrospective". |
+| 4 — file transfer concurrency | ✓ shipped + hardened | 4-slot per-peer-pair table, PSRAM accumulate; **atomic stage→verify→rename**, `FILE_CANCEL` failure notify, boot `.part` cleanup (commit `5ca6424`, 2026-06-06). |
+| 5 — event subscriptions | ⚠ **re-scoped** (see addendum) | What shipped is a per-peer **broadcast-category filter** (`SUBSCRIBE_UPDATE` + `subscribedEvents` bitmap in identity.json + gated `v4_broadcast_category`) — NOT the planned application-event push (EVT_BUTTON/THRESHOLD/ALARM, unicast `EVENT`, `emitEvent`, subscriptions.json). The latter was deliberately not built. |
+| 6 — UX (web + CLI) | partial (done-enough) | Shipped: `espnowmeshes` / `espnowpair [mesh]` / `espnowidentity` / `espnowsessions` / `espnowsubs` CLI; `/espnow` mesh selector + embedded mesh admin; `/bond`. Deferred (low-ROI): bespoke REST endpoints (the `/api/cli` bridge already covers them), separate admin pages, `espnowrotatekeys` / `espnowtransfers` / `espnowopcodes`. |
 
-**Loose ends (2026-05-19):**
+**Loose ends:**
 - Bond mode token re-derivation (LMK ripout done; bond half deferred as its own auth/RCE channel — see Phase 3 retrospective).
 - Bounds-check mesh integer settings on load — partially mitigated by `SETTING_U8/U16` width clamps but no explicit range validation. Filed as task #71.
 
 The Phase 3 section below describes the original design. The "Phase 3 retrospective" subsection at the end of that section documents what actually shipped and where it diverged.
+
+---
+
+## Actual-state addendum (2026-06-06)
+
+Consolidates the *current* reality so the older per-phase prose below isn't mistaken for an open to-do list.
+
+- **Phases 0–4 are done.** Phase 4 now includes the atomic-write / `FILE_CANCEL` / boot-cleanup hardening, not just the MVP.
+- **Phase 5 was consciously re-scoped — do NOT "finish the doorbell."** The plan's "event subscription registry" (application events like button / threshold / alarm, pushed as unicast `EVENT` frames to subscribers, with `emitEvent()` wired across the codebase and a `subscriptions.json`) was **deliberately not built**. What shipped instead is a small, faithful solution to the *actual* stated problem ("broadcast everything and hope" → explicit interest): a per-peer **filter on the existing broadcast categories** (heartbeat / sensor / topology / …) via `SUBSCRIBE_UPDATE` + `subscribedEvents`. Rationale: the planned push layer would deliver events that nothing on the receiving side can act on — the automation engine has only time-based triggers, so a delivered `EVENT` has no consumer. It also duplicated the existing SSE / OLED / BLE notification channels and carried a heavy cross-cutting maintenance tax.
+- **Phase 6 is "done-enough."** CLI essentials + the web mesh UI shipped; the remaining planned items (full bespoke `/api/espnow/*` REST surface, separate admin pages) are largely redundant because the web app already drives every command through the generic `/api/cli` bridge. Cherry-pick `espnowopcodes` if protocol introspection is wanted; the rest is low-ROI.
+- **The real future path for cross-device reactions is NOT a V4 transport feature** — it is **event-driven automation triggers** (sensor-threshold / button / alarm / incoming-ESP-NOW). Those give a device "eyes and ears"; combined with the already-working `espnowremote` action they unlock cross-device behavior with **zero new wire protocol**. A pub/sub `EVENT` layer only earns its place later, for genuine 1-event→N-decoupled-reactor fan-out, and only after triggers exist.
 
 ---
 

@@ -8,7 +8,7 @@
   - `EspNowDevice.meshId` persisted in `/system/espnow/devices.json`
   - Fix A: `setEspNowPassphrase()` (called from CLI / web / setup wizard)
     now syncs to `meshes[0]` — fixes the runtime-passphrase-change debt
-**Phase 2.5–2.8 status:** 🟡 pending — this document describes them in detail
+**Phase 2.5–2.8 status:** ✅ landed (per-mesh `espnowpair` arg, per-mesh bond consumer, legacy-field sweep, `espnowmeshes` CLI + web mesh UI). This doc is retained as design history; see the "Implementation status" / "Actual-state addendum" in [ESPNOW_V4_PLAN.md](ESPNOW_V4_PLAN.md) for authoritative current state.
 **Target end state:** A device can participate in up to `N_MESHES = 4` independent meshes simultaneously, with per-mesh pairing, bond mode, and passphrase. Mesh isolation is enforced at the wire layer; multi-mesh is exposed via CLI + web UX.
 
 ---
