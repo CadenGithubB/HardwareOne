@@ -6,6 +6,7 @@
 // list sub-pages. Tap-only — anything in the OLED that needs text input
 // (e.g. wifiadd <ssid> <password>, espnowsetname) is omitted.
 
+#include "WebServer_Handle.h"
 #include "G2_Page_Network.h"
 
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
@@ -33,7 +34,6 @@
 
 #if ENABLE_HTTP_SERVER
 #include <esp_http_server.h>
-extern httpd_handle_t server;
 extern bool gServerIsHttps;
 extern const char* cmd_httpstart(const String&);
 extern const char* cmd_httpstop(const String&);
@@ -55,8 +55,12 @@ enum NetworkSubMode : uint8_t {
   NET_SUB_BLUETOOTH_G2  = 8,  // G2 client controls (under Bluetooth)
   NET_SUB_HTTP          = 9,  // HTTP(S) server controls (start/stop, HTTPS toggle, auto-start)
   NET_SUB_BLUETOOTH_R1  = 10, // R1 ring controls (under Bluetooth) — mirror of G2 submenu
+  NET_SUB_WIFI_SAVED_ACT= 11, // per-saved-network action menu (Connect / Forget)
 };
 static NetworkSubMode gNetSub = NET_SUB_MAIN;
+// Index (into gWifiNetworks) of the saved network the user drilled into from
+// the saved list — consumed by the Connect/Forget action submenu.
+static int gWifiSavedSel = -1;
 
 // Single mutator so every gNetSub transition bumps the menu generation —
 // in-flight hijack-command callbacks compare cookie.menuGen against the
@@ -241,12 +245,13 @@ static void showWiFiMenu() {
   const char* items[] = {
     "<- Network",      // 0 — back to Network top-level chooser
     wifiLine,          // 1 (toggle: tap = connect best / disconnect)
-    "Status",          // 2 (drill into detailed info dump)
-    "Scan Networks",   // 3
-    "List Saved",      // 4
-    autoLine,          // 5 (toggle wifiAutoReconnect — boot-time)
-    httpLine,          // 6 — opens HTTP(S) submenu
-    espnowLine,        // 7 — opens ESP-NOW submenu
+    "Disconnect",      // 2 — explicit disconnect (works while Pending too)
+    "Status",          // 3 (drill into detailed info dump)
+    "Scan Networks",   // 4
+    "List Saved",      // 5
+    autoLine,          // 6 (toggle wifiAutoReconnect — boot-time)
+    httpLine,          // 7 — opens HTTP(S) submenu
+    espnowLine,        // 8 — opens ESP-NOW submenu
   };
   g2ShowListPage(items, sizeof(items) / sizeof(items[0]));
   DEBUG_G2F("[G2] WiFi submenu shown (connected=%d, auto=%d)",
@@ -375,6 +380,27 @@ static void showWiFiSavedList() {
             count);
 #else
   static const char* na[] = { "<- WiFi", "(WiFi not compiled)" };
+  g2ShowListPage(na, 2);
+#endif
+}
+
+// Per-saved-network action menu — reached by tapping a network on the saved
+// list. gWifiSavedSel holds its index into gWifiNetworks. Lets the user CONNECT
+// to that saved network (password already stored) or FORGET it, instead of the
+// old behaviour where a tap immediately forgot it.
+static void showWiFiSavedActionMenu() {
+  setNetSub(NET_SUB_WIFI_SAVED_ACT);
+#if ENABLE_WIFI
+  static char back[48];
+  if (gWifiSavedSel >= 0 && gWifiSavedSel < gWifiNetworkCount) {
+    snprintf(back, sizeof(back), "<- %s", gWifiNetworks[gWifiSavedSel].ssid.c_str());
+  } else {
+    strcpy(back, "<- Saved");
+  }
+  const char* items[] = { back, "Connect", "Forget" };
+  g2ShowListPage(items, sizeof(items) / sizeof(items[0]));
+#else
+  static const char* na[] = { "<- Saved", "(WiFi not compiled)" };
   g2ShowListPage(na, 2);
 #endif
 }
@@ -976,6 +1002,34 @@ static void onEspNowMenuRefreshDone(bool ok,
             (unsigned)cookie.menuGen, result ? result : "");
   enqueueWifiRedrawFromCallback(cookie, &showEspNowMenu, "ESP-NOW-menu refresh");
 }
+
+// Completion handler for the ESP-NOW *open* (start) toggle. Unlike the generic
+// refresh above, this surfaces the failure reason on the lens: openespnow
+// (cmd_espnow_init) can genuinely fail — most often "Insufficient memory for
+// ESP-NOW (need ~40KB DRAM ...)" when WiFi + HTTP + G2 are all up, or a captured
+// initEspNow() reason. The old path discarded `result` and just re-rendered the
+// menu back to "OFF", so a failed start looked like the button did nothing.
+static char sEspNowOpenMsg[128];
+static void showEspNowOpenMsg() { g2ShowText(sEspNowOpenMsg); }
+
+static void onEspNowOpenDone(bool ok,
+                             const char* result,
+                             const G2CmdCookie& cookie,
+                             void* /*userData*/) {
+  DEBUG_G2F("[G2] ESP-NOW open cmd done: ok=%d result='%s'",
+            (int)ok, result ? result : "");
+  if (gEspNow && gEspNow->initialized) {
+    // Started successfully — re-render the menu (now shows "ESP-NOW: ON").
+    enqueueWifiRedrawFromCallback(cookie, &showEspNowMenu, "ESP-NOW open ok");
+    return;
+  }
+  // Still not running → the start failed. Show the captured reason on the lens
+  // instead of silently snapping back to OFF.
+  strncpy(sEspNowOpenMsg, (result && result[0]) ? result : "ESP-NOW failed to start",
+          sizeof(sEspNowOpenMsg) - 1);
+  sEspNowOpenMsg[sizeof(sEspNowOpenMsg) - 1] = '\0';
+  enqueueWifiRedrawFromCallback(cookie, &showEspNowOpenMsg, "ESP-NOW open failed");
+}
 #endif
 
 static void onBluetoothMenuRefreshDone(bool ok,
@@ -1079,11 +1133,31 @@ static void handleWiFiTap(uint32_t idx) {
       break;
     }
 
-    case 2:  // Status — drill into detailed info
+    case 2: {  // Disconnect from the AP but KEEP the radio on, so you can scan /
+               // reconnect to another network without re-enabling WiFi. Routed
+               // through the `wifidisconnect` command (cmd_exec) like every other
+               // action — this is deliberately NOT `closewifi`, which also stops
+               // the HTTP server and disables web output. Works in any state,
+               // including while "Pending...".
+#if ENABLE_WIFI
+      G2CmdCookie cookie{};
+      cookie.targetPage   = g2GetHijackPage();
+      cookie.targetNetSub = (uint8_t)gNetSub;
+      gWifiPendingDeadlineMs = 0;   // cancel any pending overlay
+      DEBUG_G2F("[G2] WiFi: Disconnect (radio stays on) via cmd_exec");
+      if (!g2SubmitHijackCommand("wifidisconnect", cookie, onWifiMenuRefreshDone, nullptr)) {
+        WiFi.disconnect(false);
+        showWiFiMenu();
+      }
+#endif
+      break;
+    }
+
+    case 3:  // Status — drill into detailed info
       showWiFiStatusPage();
       break;
 
-    case 3: {  // Scan Networks
+    case 4: {  // Scan Networks
 #if ENABLE_WIFI
       DEBUG_G2F("[G2] WiFi: scan triggered from glasses");
       spawnNetworkScanWorker();
@@ -1091,12 +1165,12 @@ static void handleWiFiTap(uint32_t idx) {
       break;
     }
 
-    case 4: {  // List Saved
+    case 5: {  // List Saved
       showWiFiSavedList();
       break;
     }
 
-    case 5: {  // Auto Start toggle — first hijack tap routed through cmd_exec.
+    case 6: {  // Auto Start toggle — first hijack tap routed through cmd_exec.
                // Submits the existing `wifiautoreconnect <0|1>` CLI command
                // via g2SubmitHijackCommand. The completion callback enqueues
                // a Redraw job that the lens applier guards by menuGen and
@@ -1127,12 +1201,12 @@ static void handleWiFiTap(uint32_t idx) {
       break;
     }
 
-    case 6:  // HTTP(S) >> — opens the HTTP submenu (server start/stop, HTTPS
+    case 7:  // HTTP(S) >> — opens the HTTP submenu (server start/stop, HTTPS
              //              mode, auto-start, URL display).
       showHttpMenu();
       break;
 
-    case 7:  // ESP-NOW >> — opens the ESP-NOW submenu (peer list, role, etc.)
+    case 8:  // ESP-NOW >> — opens the ESP-NOW submenu (peer list, role, etc.)
       showEspNowMenu();
       break;
 
@@ -1163,21 +1237,59 @@ static void handleWiFiScanTap(uint32_t idx) {
   }
 }
 
+// Tapping a saved network now opens an action menu (Connect / Forget) instead
+// of immediately forgetting it.
 static void handleWiFiSavedTap(uint32_t idx) {
   if (idx == 0) { showWiFiMenu(); return; }
 #if ENABLE_WIFI
   size_t savedIdx = idx - 1;
   if ((int)savedIdx < gWifiNetworkCount) {
-    String ssid = gWifiNetworks[savedIdx].ssid;
-    DEBUG_G2F("[G2] WiFi: Forget '%s' via cmd_exec", ssid.c_str());
+    gWifiSavedSel = (int)savedIdx;
+    showWiFiSavedActionMenu();
+  }
+#endif
+}
+
+// Action menu for one saved network: 0 = back, 1 = Connect, 2 = Forget.
+static void handleWiFiSavedActionTap(uint32_t idx) {
+  if (idx == 0) { showWiFiSavedList(); return; }   // <- back to the saved list
+#if ENABLE_WIFI
+  if (gWifiSavedSel < 0 || gWifiSavedSel >= gWifiNetworkCount) {
+    showWiFiSavedList();
+    return;
+  }
+  String ssid = gWifiNetworks[gWifiSavedSel].ssid;
+  G2CmdCookie cookie{};
+  cookie.targetPage = g2GetHijackPage();
+
+  if (idx == 1) {  // Connect — openwifi --index is 1-based into gWifiNetworks.
+    char line[40];
+    snprintf(line, sizeof(line), "openwifi --index %d", gWifiSavedSel + 1);
+    DEBUG_G2F("[G2] WiFi: Connect saved '%s' (--index %d) via cmd_exec",
+              ssid.c_str(), gWifiSavedSel + 1);
+    cookie.targetNetSub   = NET_SUB_WIFI;     // land back on the WiFi menu
+    gWifiPendingDeadlineMs = millis() + 10000;
+    setNetSub(NET_SUB_WIFI);
+    showWiFiMenu();                            // immediate "Pending..." feedback
+    vTaskDelay(pdMS_TO_TICKS(150));
+    if (!g2SubmitHijackCommand(line, cookie, onWifiMenuRefreshDone, nullptr)) {
+      DEBUG_G2F("[G2] WiFi: Connect saved submit FAILED");
+      gWifiPendingDeadlineMs = 0;
+      showWiFiMenu();
+    } else if (!gWifiPendingTaskActive) {
+      gWifiPendingTaskActive = true;
+      if (xTaskCreate(wifiPendingWatchdogTask, "g2_wifi_pending",
+                      4096, nullptr, /*prio*/ 5, nullptr) != pdPASS) {
+        gWifiPendingTaskActive = false;
+        gWifiPendingDeadlineMs = 0;
+      }
+    }
+  } else {  // idx == 2: Forget — wifirm <ssid>, return to the saved list.
+    cookie.targetNetSub = NET_SUB_WIFI_SAVED;
     String line = String("wifirm ") + ssid;
-    G2CmdCookie cookie{};
-    cookie.targetPage   = g2GetHijackPage();
-    cookie.targetNetSub = (uint8_t)gNetSub;
+    DEBUG_G2F("[G2] WiFi: Forget saved '%s' via cmd_exec", ssid.c_str());
     if (!g2SubmitHijackCommand(line.c_str(), cookie,
                                onWifiSavedListRefreshDone, nullptr)) {
-      // Fallback: inline. Preserves UX even if cmd_exec is wedged.
-      DEBUG_G2F("[G2] WiFi forget submit FAILED — inline fallback");
       extern const char* cmd_wifirm(const String& originalCmd);
       cmd_wifirm(line);
       showWiFiSavedList();
@@ -1237,12 +1349,14 @@ static void handleEspNowTap(uint32_t idx) {
   if (idx == 1) {  // ESP-NOW state line — toggle via cmd_exec
 #if ENABLE_ESPNOW
     const char* line = running ? "closeespnow" : "openespnow";
+    // For the OPEN path, use a callback that surfaces the failure reason on the
+    // lens (init can fail on memory/coexistence); CLOSE just re-renders.
+    G2HijackCmdCallback cb = running ? onEspNowMenuRefreshDone : onEspNowOpenDone;
     G2CmdCookie cookie{};
     cookie.targetPage   = g2GetHijackPage();
     cookie.targetNetSub = (uint8_t)gNetSub;
     DEBUG_G2F("[G2] ESP-NOW toggle: %s via cmd_exec", line);
-    if (!g2SubmitHijackCommand(line, cookie,
-                               onEspNowMenuRefreshDone, nullptr)) {
+    if (!g2SubmitHijackCommand(line, cookie, cb, nullptr)) {
       DEBUG_G2F("[G2] ESP-NOW toggle: %s submit FAILED — inline fallback", line);
       extern const char* cmd_espnow_init(const String&);
       extern const char* cmd_espnow_deinit(const String&);
@@ -1812,6 +1926,7 @@ void g2NetworkHandleTap(uint32_t idx) {
     case NET_SUB_WIFI:        handleWiFiTap(idx);        break;
     case NET_SUB_WIFI_SCAN:   handleWiFiScanTap(idx);    break;
     case NET_SUB_WIFI_SAVED:  handleWiFiSavedTap(idx);   break;
+    case NET_SUB_WIFI_SAVED_ACT: handleWiFiSavedActionTap(idx); break;
     case NET_SUB_WIFI_STATUS: handleWiFiStatusTap(idx);  break;
     case NET_SUB_ESPNOW:      handleEspNowTap(idx);      break;
     case NET_SUB_ESPNOW_DEVS: handleEspNowDevsTap(idx);  break;

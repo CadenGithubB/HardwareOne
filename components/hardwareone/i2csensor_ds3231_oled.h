@@ -110,7 +110,6 @@ static bool rtcOLEDModeAvailable(String* outReason) {
 
 static void rtcToggleConfirmed(void* userData) {
   (void)userData;
-  extern void executeOLEDCommand(const String& argsInput);
 
   if (gRtcEnabled && gRtcConnected) {
     DEBUG_RTCF("[RTC] Confirmed: Stopping RTC...");
@@ -123,7 +122,6 @@ static void rtcToggleConfirmed(void* userData) {
 
 static void rtcNTPSyncConfirmed(void* userData) {
   (void)userData;
-  extern void executeOLEDCommand(const String& argsInput);
   executeOLEDCommand("ntpsync");
   // ntpsync handles RTC sync internally when RTC is connected
   oledNotificationBannerShow("NTP sync requested", PairingRibbonIcon::SUCCESS, 2000);

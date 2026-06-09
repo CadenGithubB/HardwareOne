@@ -76,7 +76,8 @@ CONFIG_ARDUINO_UDP_TASK_STACK_SIZE=4096
 # When BT is on with BLE 5.0 (CONFIG_BT_BLE_50_FEATURES_SUPPORTED), you must
 # also set CONFIG_BT_BLE_42_FEATURES_SUPPORTED=y or Arduino's Bluedroid BLE
 # library will fail to link (legacy esp_ble_gap_* / esp_ble_gattc_* APIs).
-CONFIG_BT_ENABLED=n
+CONFIG_BT_ENABLED=y
+CONFIG_BT_BLE_42_FEATURES_SUPPORTED=y
 
 # Settings below ONLY apply when CONFIG_BT_ENABLED=y. Kept here as an audit
 # trail of the tuning that was done while BT was active. They're inert when
@@ -86,17 +87,37 @@ CONFIG_BT_ENABLED=n
 # the BTC task and can transitively call g2ShowText (1 KB rebuild buffer)
 # and per-page handlers. Overflowed when tapping Status from the hijacked
 # Blocks menu. 8192 matches the ESP-IDF default for BLE-rich projects.
-# CONFIG_BT_BTC_TASK_STACK_SIZE=8192
-# CONFIG_BT_BTU_TASK_STACK_SIZE=4352
+CONFIG_BT_BTC_TASK_STACK_SIZE=8192
+CONFIG_BT_BTU_TASK_STACK_SIZE=4352
+# Route Bluedroid host allocations to PSRAM first, keeping internal DRAM free.
+# This was =y during active G2 work but was silently dropped when commit
+# 9a23158 ("BSS-to-PSRAM diversion") regenerated sdkconfig against the wrong
+# PSRAM target; it never got restored when the SPIRAM mode was fixed back to
+# octal. Pinned here so it survives future regenerations. Complements
+# CONFIG_BT_BLE_DYNAMIC_ENV_MEMORY below.
+CONFIG_BT_ALLOCATION_FROM_SPIRAM_FIRST=y
 # Move BLE host structs to the heap (PSRAM-backed) instead of BSS. Frees
 # ~14 KB of internal SRAM and gives the BT stack more headroom for HCI
 # command queue / fixed_pkt_queue allocations under load.
-# CONFIG_BT_BLE_DYNAMIC_ENV_MEMORY=y
+CONFIG_BT_BLE_DYNAMIC_ENV_MEMORY=y
 
 # BLE GATT configuration (also inert when BT is off)
-# CONFIG_BT_GATT_MAX_SR_ATTRIBUTES=100
-# CONFIG_BT_GATT_MAX_SR_PROFILES=8
-# CONFIG_BT_GATTC_MAX_CACHE_CHAR=40
+CONFIG_BT_GATT_MAX_SR_ATTRIBUTES=100
+CONFIG_BT_GATT_MAX_SR_PROFILES=8
+CONFIG_BT_GATTC_MAX_CACHE_CHAR=40
+
+# BLE controller sizing — trimmed from IDF defaults (MAX_ACT=6 / ACL=4) to
+# reclaim internal/DMA SRAM, then sized for the real worst case:
+#   G2 (2 temples) + R1 ring (1) + 1 spare = 4 connections, + 1 scan/adv = 5 acts.
+# HW-confirmed 2026-06-07: G2+R1 = 3 simultaneous connections worked at ACL=3, but
+# that's zero headroom. ACL=4 / MAX_ACT=5 gives one spare connection for the planned
+# ESP-brokered G2<->R1 pairing handshake (and transient reconnects / a future phone
+# link). Cost is only ~2-4 KB internal vs the ~46 KB BT-active floor. SCAN_DUPL_CACHE
+# 100->30: scan env has <~30 distinct advertisers; overflow only causes duplicate adv
+# callbacks (no crash) and G2 filters by name. See docs/MEMORY_LAYOUT.md §5/§9.
+CONFIG_BT_CTRL_BLE_MAX_ACT=5
+CONFIG_BT_ACL_CONNECTIONS=4
+CONFIG_BT_CTRL_SCAN_DUPL_CACHE_SIZE=30
 
 # Interrupt watchdog - 1500ms gives headroom for I2C FSM reset under HTTPS load
 # The I2C driver's i2c_hw_fsm_reset enters nested spinlocks (I2C + periph clock),

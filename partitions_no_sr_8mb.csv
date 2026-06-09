@@ -1,11 +1,16 @@
 # Partition table for builds WITHOUT ESP-SR (no speech recognition)
 # No "model" partition — all available space goes to LittleFS
-# Factory: 4948K  (matches partitions_sr.csv so a binary built for either
-#          target fits in either partition layout.)
-# LittleFS: 3180K (~3.1MB — slightly smaller than before to keep the
-#          factory partition aligned with the SR variant.)
+# Factory: 5332K  (grown 2026-06-06 from 4948K to fit the BT + G2 glasses /
+#          Bluetooth build, whose binary is ~5072K. Leaves ~260K headroom.
+#          NOTE: this no longer matches partitions_sr_8mb.csv's 4992K factory
+#          — the BT+G2 binary is too large for the SR layout anyway, so the
+#          "same binary fits either layout" invariant no longer applies here.)
+# LittleFS: 2796K (shrunk from 3180K to give the factory partition room.
+#          Moving the littlefs offset (0x4E5000 → 0x545000) reformats it:
+#          on-device files are WIPED on the first flash after this change.
+#          NVS (0x9000) is unaffected, so Wi-Fi creds etc. survive.)
 # Name,   Type, SubType, Offset,   Size,    Flags
 nvs,      data, nvs,     0x9000,   0x6000,
 phy_init, data, phy,     0xf000,   0x1000,
-factory,  app,  factory, 0x10000,  0x4D5000,
-littlefs, data, littlefs, 0x4E5000, 0x31B000,
+factory,  app,  factory, 0x10000,  0x535000,
+littlefs, data, littlefs, 0x545000, 0x2BB000,

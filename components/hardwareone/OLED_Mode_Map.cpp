@@ -1386,7 +1386,6 @@ static void executeSubmenuAction(int submenuType, int action) {
           break;
         case 1:  // Toggle GPS
           {
-            extern void executeOLEDCommand(const String& argsInput);
             if (gGpsEnabled) executeOLEDCommand("closegps");
             else executeOLEDCommand("opengps");
           }
@@ -1455,7 +1454,6 @@ static void executeSubmenuAction(int submenuType, int action) {
           // decisions in `sensorlog start` and friends are correctly
           // attributed to the local-display user.
           {
-            extern void executeOLEDCommand(const String& argsInput);
             if (GPSTrackManager::isLiveTracking()) {
               GPSTrackManager::setLiveTracking(false);
               executeOLEDCommand("sensorlog stop");

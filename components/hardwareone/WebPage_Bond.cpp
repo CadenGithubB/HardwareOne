@@ -36,7 +36,6 @@ extern void streamEndHtml(httpd_req_t* req);
 extern bool parseMacAddress(const String& macStr, uint8_t mac[6]);
 extern String getEspNowDeviceName(const uint8_t* mac);
 
-extern EspNowState* gEspNow;
 
 // =============================================================================
 // Helper Functions
@@ -1735,7 +1734,7 @@ struct WebFsBridge {
   uint8_t                  entryCount;
 };
 
-static WebFsBridge sWebFsBridge = {};
+EXT_RAM_BSS_ATTR static WebFsBridge sWebFsBridge = {};
 static SemaphoreHandle_t sWebFsBridgeMutex = nullptr;
 
 // Stat + get bridges parallel to the list bridge above. Each operation has

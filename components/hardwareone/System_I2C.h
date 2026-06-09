@@ -367,7 +367,13 @@ inline bool i2cBusRecovery() {
 // Global Flags and Configuration
 // ============================================================================
 extern bool gI2CBusEnabled;
-extern volatile bool gSensorPollingPaused;
+
+// The reference-counted "pause sensor polling" primitive (pollPause/pollResume/
+// PollPauseGuard, the legacy sensorPolling* aliases, and the gSensorPollingPaused
+// mirror) now lives in its own lightweight module so non-I2C subsystems can use
+// it without dragging in the sensor database below. Re-exported here so every
+// existing includer of System_I2C.h keeps getting the API unchanged.
+#include "System_PollPause.h"
 
 // ============================================================================
 // I2C Sensor Database

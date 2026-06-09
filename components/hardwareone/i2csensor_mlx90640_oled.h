@@ -106,7 +106,6 @@ static bool thermalOLEDModeAvailable(String* outReason) {
 
 static void thermalToggleConfirmed(void* userData) {
   (void)userData;
-  extern void executeOLEDCommand(const String& argsInput);
   if (gThermalEnabled && gThermalConnected) {
     executeOLEDCommand("closethermal");
   } else {

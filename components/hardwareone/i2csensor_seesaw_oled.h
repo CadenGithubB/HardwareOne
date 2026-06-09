@@ -143,7 +143,6 @@ static bool gamepadOLEDModeAvailable(String* outReason) {
 
 static void gamepadToggleConfirmed(void* userData) {
   (void)userData;
-  extern void executeOLEDCommand(const String& argsInput);
   if (gInputEnabled && gInputConnected) {
     executeOLEDCommand("closegamepad");
   } else {

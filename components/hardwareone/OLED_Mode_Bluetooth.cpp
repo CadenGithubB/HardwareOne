@@ -14,6 +14,7 @@
 //  file-local in Bluetooth.cpp behind bleGetRecentMessages().)
 
 #include "OLED_Display.h"
+#include "System_PollPause.h"   // PollPauseGuard — quiesce sensor polling during BLE init
 #include "System_BuildConfig.h"
 
 #if ENABLE_OLED_DISPLAY && ENABLE_BLUETOOTH
@@ -37,7 +38,7 @@ enum BtAction {
   BT_ACT_ADVERTISING,
   BT_ACT_DISCONNECT,
 };
-static OLEDScrollState sBtMenuScroll;
+EXT_RAM_BSS_ATTR static OLEDScrollState sBtMenuScroll;
 static bool sBtMenuInit = false;
 static BtAction sBtActions[OLED_SCROLL_MAX_ITEMS];
 
@@ -47,14 +48,12 @@ static void bluetoothToggleConfirmedMenu(void* userData) {
   if (gBLEState && gBLEState->initialized) {
     deinitBluetooth();
   } else {
-    // Pause sensor polling during BLE init to avoid interrupt contention
-    extern volatile bool gSensorPollingPaused;
-    bool wasPaused = gSensorPollingPaused;
-    gSensorPollingPaused = true;
+    // Pause sensor polling during BLE init to avoid interrupt contention (RAII,
+    // scoped to this else block).
+    PollPauseGuard pollGuard;
     vTaskDelay(pdMS_TO_TICKS(50));
     initBluetooth();
     startBLEAdvertising();
-    gSensorPollingPaused = wasPaused;
   }
 }
 

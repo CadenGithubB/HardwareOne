@@ -72,7 +72,6 @@ static bool presenceOLEDModeAvailable(String* outReason) {
 
 static void presenceToggleConfirmed(void* userData) {
   (void)userData;
-  extern void executeOLEDCommand(const String& argsInput);
   if (gPresenceEnabled) {
     executeOLEDCommand("closepresence");
   } else {

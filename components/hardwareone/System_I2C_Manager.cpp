@@ -8,11 +8,15 @@
 
 #include <Wire.h>
 #include <driver/i2c.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/semphr.h"
 
 #include "System_Debug.h"
 #include "System_I2C_Manager.h"
 #include "System_Logging.h"
 #include "System_Settings.h"
+#include "System_PollPause.h"   // pollPause/pollResume — global sensor-poll pause
 
 // I2C bus configuration (defaults, overridden by settings at runtime)
 #define I2C_WIRE1_DEFAULT_FREQ 100000
@@ -175,6 +179,60 @@ static bool busPinsFromSettings(uint8_t bus, int* sda, int* scl) {
   return (*sda >= 0 && *scl >= 0);
 }
 
+// ---------------------------------------------------------------------------
+// Force bus 0's I2C interrupt onto CPU1 (off the BLE controller's core)
+// ---------------------------------------------------------------------------
+// The legacy ESP-IDF I2C driver allocates its ISR with esp_intr_alloc(), which
+// pins the interrupt to whichever core calls i2c_driver_install() — and that
+// happens inside Arduino's TwoWire::begin() (via i2cInit). At boot, begin()
+// runs on the main task, which lives on CPU0, the same core as the Bluedroid
+// BLE controller (btdm_controller_task). Under RF coexistence a glitchy
+// transaction on the gamepad bus (Wire1 / I2C_NUM_1) makes the legacy driver
+// re-arm its command from inside the ISR — an interrupt storm that monopolizes
+// CPU0 and trips the interrupt watchdog (Int WDT on CPU0). Running begin() on
+// CPU1 moves that ISR off the BLE core so the storm can no longer starve it.
+//
+// TwoWire::begin() guards on `if (i2cIsInit(num))` — once we install on CPU1
+// here, every later begin() (e.g. Adafruit_seesaw's own) is a no-op and won't
+// drag the ISR back to CPU0. The only path that re-installs is the explicit
+// end()+begin() in performBusRecovery(), which routes through here too.
+//
+// esp_ipc_call_blocking() isn't usable: the IPC task stack is only 1024 B and
+// begin()/i2c_driver_install() needs more headroom. Spawn a short-lived task
+// pinned to CPU1 with a real stack, run begin() on it, then let it self-delete.
+namespace {
+struct BusBeginReq {
+  TwoWire* wire;
+  int sda;
+  int scl;
+  SemaphoreHandle_t done;
+};
+void busBeginTask(void* arg) {
+  BusBeginReq* req = static_cast<BusBeginReq*>(arg);
+  req->wire->begin(req->sda, req->scl);
+  xSemaphoreGive(req->done);   // begin() complete; req is no longer touched
+  vTaskDelete(nullptr);
+}
+}  // namespace
+
+// Run wire->begin(sda, scl) on CPU1 and block until it finishes. Falls back to
+// a direct begin on the current core if the helper task can't be created.
+static void beginBusOnCpu1(TwoWire* wire, int sda, int scl) {
+  SemaphoreHandle_t done = xSemaphoreCreateBinary();
+  if (!done) { wire->begin(sda, scl); return; }
+  BusBeginReq req{ wire, sda, scl, done };
+  TaskHandle_t th = nullptr;
+  BaseType_t ok = xTaskCreatePinnedToCore(busBeginTask, "i2c0_begin", 4096,
+                                          &req, 10, &th, 1 /* CPU1 */);
+  if (ok != pdPASS) {
+    vSemaphoreDelete(done);
+    wire->begin(sda, scl);     // fallback: begin on the current core
+    return;
+  }
+  xSemaphoreTake(done, portMAX_DELAY);   // req must outlive the task
+  vSemaphoreDelete(done);
+}
+
 void I2CDeviceManager::initBus(uint8_t busIdx, int sdaPin, int sclPin, uint32_t hz) {
   if (busIdx >= NUM_BUSES) return;
   if (sdaPin < 0 || sclPin < 0) {
@@ -200,7 +258,13 @@ void I2CDeviceManager::initBus(uint8_t busIdx, int sdaPin, int sclPin, uint32_t 
 #endif
   }
 
-  wire->begin(sdaPin, sclPin);
+  if (busIdx == 0) {
+    // Gamepad / Seesaw bus: install its ISR on CPU1, away from the BLE
+    // controller on CPU0 (see beginBusOnCpu1 for the coexistence rationale).
+    beginBusOnCpu1(wire, sdaPin, sclPin);
+  } else {
+    wire->begin(sdaPin, sclPin);
+  }
   wire->setClock(hz);
   // 100ms TwoWire-level timeout — well under CONFIG_ESP_INT_WDT_TIMEOUT_MS
   // (1500ms) so a hung transaction won't trigger the interrupt watchdog.
@@ -262,16 +326,16 @@ void I2CDeviceManager::performBusRecovery(uint8_t busIdx) {
 
   WARN_I2CF("Performing bus %u recovery (SDA=%d SCL=%d)", busIdx, sdaPin, sclPin);
 
-  // Pause polling globally (pollingPaused is a single shared flag — pausing
-  // for ANY bus recovery stops every sensor task, since we don't track
-  // pause-per-bus and it's safest to halt everything during the manual
-  // clock toggle that follows).
-  bool prevPaused = pollingPaused;
-  pausePolling();
+  // Pause polling for THIS bus only — recovery tears down and re-begins just
+  // this bus's Wire, so only sensors on it must hold off; the other bus keeps
+  // running. Uses the per-bus primitive directly (not pausePolling(), which is
+  // the blanket method that also drives the i2cpause/i2cresume CLI latch — we
+  // must not disturb that here). Ref-counted, so pair unconditionally.
+  pollPause(busIdx);
 
   bool locked = (mutex && xSemaphoreTake(mutex, pdMS_TO_TICKS(2000)) == pdTRUE);
   if (!locked) {
-    pollingPaused = prevPaused;
+    pollResume(busIdx);
     ERROR_I2CF("Bus %u recovery failed - couldn't acquire mutex", busIdx);
     return;
   }
@@ -305,8 +369,13 @@ void I2CDeviceManager::performBusRecovery(uint8_t busIdx) {
   digitalWrite(sdaPin, HIGH);
   delayMicroseconds(5);
 
-  // 4. Reinitialize this bus
-  wire->begin(sdaPin, sclPin);
+  // 4. Reinitialize this bus. Bus 0 re-installs its ISR on CPU1 (the end()
+  //    above freed it); keep it off the BLE core across recovery too.
+  if (busIdx == 0) {
+    beginBusOnCpu1(wire, sdaPin, sclPin);
+  } else {
+    wire->begin(sdaPin, sclPin);
+  }
   wire->setClock(defaultClockHz[busIdx]);
   currentClockHz[busIdx] = defaultClockHz[busIdx];
   i2c_filter_enable(i2cPortForBus(busIdx), 7);
@@ -323,9 +392,7 @@ void I2CDeviceManager::performBusRecovery(uint8_t busIdx) {
 
   xSemaphoreGive(mutex);
 
-  if (!prevPaused) {
-    resumePolling();
-  }
+  pollResume(busIdx);
 
   INFO_I2CF("Bus %u recovery complete", busIdx);
 }
@@ -529,17 +596,19 @@ int I2CDeviceManager::getQueueDepth() {
   return (queueTail - queueHead + 8) % 8;
 }
 
+// These delegate to the global pollPause/pollResume (System_PollPause.h) but
+// also track the manager's own `pollingPaused` latch, which isPollingPaused()
+// exposes so the i2cpause/i2cresume CLI commands stay idempotent (a double
+// i2cpause must not push the global depth counter out of balance).
 void I2CDeviceManager::pausePolling() {
   pollingPaused = true;
-  extern volatile bool gSensorPollingPaused;
-  gSensorPollingPaused = true;
+  pollPause();
   INFO_I2CF("Sensor polling paused");
 }
 
 void I2CDeviceManager::resumePolling() {
   pollingPaused = false;
-  extern volatile bool gSensorPollingPaused;
-  gSensorPollingPaused = false;
+  pollResume();
   INFO_I2CF("Sensor polling resumed");
 }
 

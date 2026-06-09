@@ -69,7 +69,6 @@ static bool imuOLEDModeAvailable(String* outReason) {
 
 static void imuToggleConfirmed(void* userData) {
   (void)userData;
-  extern void executeOLEDCommand(const String& argsInput);
   if (gImuEnabled && gImuConnected) {
     executeOLEDCommand("closeimu");
   } else {

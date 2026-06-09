@@ -6,6 +6,7 @@
 #include <LittleFS.h>
 
 #include "System_FileManager.h"
+#include "System_PollPause.h"   // PollPauseGuard — quiesce sensor polling during file I/O
 #include "System_Filesystem.h"
 #include "System_Mutex.h"
 #include "System_VFS.h"
@@ -315,10 +316,8 @@ bool FileManager::readFile(const char* filename, String& content) {
   String fullPath = formatPath(state.currentPath, filename);
   const AuthContext& ctx = currentAuthContext();
 
-  // Pause sensor polling during file I/O
-  extern volatile bool gSensorPollingPaused;
-  bool wasPaused = gSensorPollingPaused;
-  gSensorPollingPaused = true;
+  // Pause sensor polling during file I/O (RAII — resumes on every return path).
+  PollPauseGuard pollGuard;
 
   FsLockGuard guard("FileManager.readFile");
 
@@ -327,7 +326,6 @@ bool FileManager::readFile(const char* filename, String& content) {
   // canRead now (with sensitive-extension blocks).
   File f = VFS::openGuarded(fullPath, "r", ctx);
   if (!f) {
-    gSensorPollingPaused = wasPaused;
     return false;
   }
 
@@ -337,7 +335,6 @@ bool FileManager::readFile(const char* filename, String& content) {
   }
 
   f.close();
-  gSensorPollingPaused = wasPaused;
   return true;
 }
 
@@ -345,23 +342,18 @@ bool FileManager::writeFile(const char* filename, const String& content) {
   String fullPath = formatPath(state.currentPath, filename);
   const AuthContext& ctx = currentAuthContext();
 
-  // Pause sensor polling during file I/O
-  extern volatile bool gSensorPollingPaused;
-  bool wasPaused = gSensorPollingPaused;
-  gSensorPollingPaused = true;
+  // Pause sensor polling during file I/O (RAII — resumes on every return path).
+  PollPauseGuard pollGuard;
 
   FsLockGuard guard("FileManager.writeFile");
 
   File f = VFS::openGuarded(fullPath, "w", ctx, /*create=*/true);
   if (!f) {
-    gSensorPollingPaused = wasPaused;
     return false;
   }
-  
+
   size_t written = f.print(content);
   f.close();
-  
-  gSensorPollingPaused = wasPaused;
   return (written == content.length());
 }
 
@@ -387,10 +379,8 @@ bool FileManager::getStorageStats(uint32_t& total, uint32_t& used, uint32_t& fre
 }
 
 bool FileManager::loadDirectory() {
-  // Pause sensor polling during directory scan
-  extern volatile bool gSensorPollingPaused;
-  bool wasPaused = gSensorPollingPaused;
-  gSensorPollingPaused = true;
+  // Pause sensor polling during directory scan (RAII — resumes on every return).
+  PollPauseGuard pollGuard;
 
   FsLockGuard guard("FileManager.loadDirectory");
   const AuthContext& ctx = currentAuthContext();
@@ -398,7 +388,6 @@ bool FileManager::loadDirectory() {
   File dir = VFS::openGuarded(state.currentPath, "r", ctx);
   if (!dir || !dir.isDirectory()) {
     if (dir) dir.close();
-    gSensorPollingPaused = wasPaused;
     loadedAtGen_ = 0;  // mark "never loaded ok" — refresh() will retry
     return false;
   }
@@ -516,7 +505,7 @@ bool FileManager::loadDirectory() {
   ensureValidSelection();
   state.dirty = false;
 
-  gSensorPollingPaused = wasPaused;
+  // pollGuard resumes sensor polling on return.
   return true;
 }
 

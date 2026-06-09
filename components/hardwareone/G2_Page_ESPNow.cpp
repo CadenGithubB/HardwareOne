@@ -655,8 +655,8 @@ static void showInboxMenu() {
   // 1 back row + up to N message rows. Static buffers so we don't churn the
   // stack on every render (each ReceivedTextMessage is ~300 B; pulling 12
   // onto the stack is ~3.5 KB which is tight on BTC).
-  static ReceivedTextMessage msgs[ESPN_APP_INBOX_DISPLAY_MAX];
-  static char rows[1 + ESPN_APP_INBOX_DISPLAY_MAX][72];
+  static EXT_RAM_BSS_ATTR ReceivedTextMessage msgs[ESPN_APP_INBOX_DISPLAY_MAX];
+  static EXT_RAM_BSS_ATTR char rows[1 + ESPN_APP_INBOX_DISPLAY_MAX][72];
   const char* ptrs[1 + ESPN_APP_INBOX_DISPLAY_MAX];
   strcpy(rows[0], "<- Main Menu");
   ptrs[0] = rows[0];
@@ -697,8 +697,8 @@ static void showPeerInboxMenu() {
   }
   EspNowDevice& d = gEspNow->devices[gSelectedPeer];
 
-  static ReceivedTextMessage msgs[ESPN_APP_INBOX_DISPLAY_MAX];
-  static char rows[1 + ESPN_APP_INBOX_DISPLAY_MAX][72];
+  static EXT_RAM_BSS_ATTR ReceivedTextMessage msgs[ESPN_APP_INBOX_DISPLAY_MAX];
+  static EXT_RAM_BSS_ATTR char rows[1 + ESPN_APP_INBOX_DISPLAY_MAX][72];
   const char* ptrs[1 + ESPN_APP_INBOX_DISPLAY_MAX];
   strcpy(rows[0], "<- Peer");
   ptrs[0] = rows[0];

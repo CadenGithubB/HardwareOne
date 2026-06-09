@@ -217,7 +217,9 @@ esp_err_t handleEvents(httpd_req_t* req) {
     PSRAM_JSON_DOC(doc);
     buildSystemInfoJson(doc);
 
-    EXT_RAM_BSS_ATTR static char sysJsonBuf[1024];
+    // Must exceed the full system JSON incl. connectivity.i2c deviceList
+    // (serializeJson silently truncates → invalid JSON on the dashboard).
+    EXT_RAM_BSS_ATTR static char sysJsonBuf[4096];
     size_t len = serializeJson(doc, sysJsonBuf, sizeof(sysJsonBuf));
 
     DEBUG_SSEF("Sending system event snapshot (%d bytes json)", len);
@@ -227,7 +229,7 @@ esp_err_t handleEvents(httpd_req_t* req) {
       DEBUG_SSEF("SSE->system json: %.80s...", sysJsonBuf);
     }
 
-    EXT_RAM_BSS_ATTR static char sseEventBuf[1100];
+    EXT_RAM_BSS_ATTR static char sseEventBuf[4160];  // sysJsonBuf + "event: system\ndata: \n\n"
     snprintf(sseEventBuf, sizeof(sseEventBuf), "event: system\ndata: %s\n\n", sysJsonBuf);
     sseWrite(req, sseEventBuf);
   };

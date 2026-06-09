@@ -337,7 +337,8 @@ unsigned long gLocalDisplayLastInteractionMs = 0;
 
 esp_err_t handleSensorsStatus(httpd_req_t* req);
 
-volatile bool gSensorPollingPaused = false;
+// gSensorPollingPaused now lives in System_PollPause.cpp (its own module);
+// HardwareOne sees the declaration via System_I2C.h.
 
 #include "System_SensorLogging.h"
 
@@ -373,7 +374,6 @@ void sensorStatusBump() {
   }
 #if ENABLE_BONDED_MODE
   // Proactively push status to bonded peer so master sees changes immediately
-  extern EspNowState* gEspNow;
   if (gEspNow && gEspNow->initialized && isBondSynced()) {
     gEspNow->bondNeedsProactiveStatus = true;
   }
@@ -1604,8 +1604,7 @@ void hardwareone_setup() {
     oledSetBootProgress(85, "Starting Bluetooth");
 
     // Pause sensor polling during BLE init to avoid interrupt contention
-    bool wasPaused = gSensorPollingPaused;
-    gSensorPollingPaused = true;
+    pollPause();
     vTaskDelay(pdMS_TO_TICKS(50));  // Let pending I2C ops complete
 
 #if ENABLE_G2_GLASSES
@@ -1644,7 +1643,7 @@ void hardwareone_setup() {
       }
     }
 
-    gSensorPollingPaused = wasPaused;
+    pollResume();
   } else {
     broadcastOutput("Bluetooth disabled by default. Use quick settings (SELECT button) or 'openble' to enable.");
   }
@@ -1841,7 +1840,6 @@ void hardwareone_setup() {
   }
 
   // Send boot notification if ESP-NOW is active
-  extern EspNowState* gEspNow;
   if (gEspNow && gEspNow->initialized) {
     extern String buildBootNotification(uint32_t msgId, const char* src, uint32_t bootCounter, uint32_t timestamp);
     extern void meshSendEnvelopeToPeers(const String& envelope);

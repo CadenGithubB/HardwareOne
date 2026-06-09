@@ -51,7 +51,6 @@ static bool apdsOLEDModeAvailable(String* outReason) {
 
 static void apdsToggleConfirmed(void* userData) {
   (void)userData;
-  extern void executeOLEDCommand(const String& argsInput);
   if (gApdsColorEnabled || gApdsProximityEnabled) {
     executeOLEDCommand("closeapds");
   } else {

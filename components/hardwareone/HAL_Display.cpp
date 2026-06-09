@@ -161,8 +161,8 @@ void displayUpdate() {
 #if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
   // Skip I2C push while sensor polling is paused (bus recovery, i2cpause, etc.).
   // CPU-side framebuffer is still updated so the first push after resume is current.
-  extern volatile bool gSensorPollingPaused;
-  if (gSensorPollingPaused) return;
+  // gSensorPollingPaused comes from System_PollPause.h (via System_I2C.h).
+  if (pollPaused((uint8_t)gSettings.oledBus)) return;
   
   // Use bus-aware device transaction. Routes mutex/clock to the OLED's
   // configured bus (gSettings.oledBus). Run at 400kHz to reduce bus hold

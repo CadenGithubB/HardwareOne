@@ -1,5 +1,6 @@
 #include "System_Settings.h"        // Settings struct definition and function declarations
 #include "System_BuildConfig.h"   // ENABLE_WIFI, ENABLE_ESPNOW flags
+#include "System_PollPause.h"     // pollPause/pollResume — global sensor-poll pause
 #if ENABLE_WIFI
   #include "System_WiFi.h"   // WifiNetwork struct, OUTPUT_* macros, MAX_WIFI_NETWORKS
 #endif
@@ -995,10 +996,10 @@ void buildSettingsJsonDoc(JsonDocument& doc, bool excludePasswords) {
 bool writeSettingsJson() {
   if (!filesystemReady) return false;
 
-  // Pause sensor polling during settings I/O
-  extern volatile bool gSensorPollingPaused;
-  bool wasPaused = gSensorPollingPaused;
-  gSensorPollingPaused = true;
+  // Pause sensor polling during settings I/O. Kept as explicit pause/resume
+  // (not the RAII guard) — this function has many exit paths that resume at
+  // different points; mechanically swapping them would risk altering behavior.
+  pollPause();
 
   DEBUG_STORAGEF("[Settings] Writing to file using ArduinoJson");
 
@@ -1032,7 +1033,7 @@ bool writeSettingsJson() {
   // Check for overflow
   if (doc.overflowed()) {
     ERROR_STORAGEF("JSON document overflowed during build (need more than 5120 bytes)");
-    gSensorPollingPaused = wasPaused;
+    pollResume();
     return false;
   }
 
@@ -1044,7 +1045,7 @@ bool writeSettingsJson() {
   if (!file) {
     fsUnlock();
     ERROR_STORAGEF("Failed to open temp file for writing");
-    gSensorPollingPaused = wasPaused;
+    pollResume();
     return false;
   }
 
@@ -1057,7 +1058,7 @@ bool writeSettingsJson() {
   if (bytesWritten == 0) {
     ERROR_STORAGEF("Failed to serialize JSON");
     VFS::removeGuarded(tmp, VFS::systemAuth("settings.write"));
-    gSensorPollingPaused = wasPaused;
+    pollResume();
     return false;
   }
 
@@ -1075,7 +1076,7 @@ bool writeSettingsJson() {
     File directFile = VFS::openGuarded(SETTINGS_JSON_FILE, "w", VFS::systemAuth("settings.write"));
     if (!directFile) {
       fsUnlock();
-      gSensorPollingPaused = wasPaused;
+      pollResume();
       return false;
     }
     serializeJson(doc, directFile);
@@ -1085,7 +1086,7 @@ bool writeSettingsJson() {
   }
 
   DEBUG_STORAGEF("[Settings] Write complete");
-  gSensorPollingPaused = wasPaused;
+  pollResume();
   
   // Recompute local settings hash so bond heartbeats reflect the change
 #if ENABLE_ESPNOW && ENABLE_BONDED_MODE
@@ -1107,14 +1108,14 @@ bool readSettingsJson() {
     return false;
   }
 
-  // Pause sensor polling during settings I/O
-  extern volatile bool gSensorPollingPaused;
-  bool wasPaused = gSensorPollingPaused;
-  gSensorPollingPaused = true;
+  // Pause sensor polling during settings I/O. Kept as explicit pause/resume
+  // (not the RAII guard) — this function has many exit paths that resume at
+  // different points; mechanically swapping them would risk altering behavior.
+  pollPause();
 
   if (!VFS::existsGuarded(SETTINGS_JSON_FILE, VFS::systemAuth("settings.read"))) {
     DEBUG_STORAGEF("[Settings] File does not exist: %s", SETTINGS_JSON_FILE);
-    gSensorPollingPaused = wasPaused;
+    pollResume();
     return false;
   }
 
@@ -1122,7 +1123,7 @@ bool readSettingsJson() {
   File file = VFS::openGuarded(SETTINGS_JSON_FILE, "r", VFS::systemAuth("settings.read"));
   if (!file) {
     ERROR_STORAGEF("Failed to open settings file");
-    gSensorPollingPaused = wasPaused;
+    pollResume();
     return false;
   }
 
@@ -1138,7 +1139,7 @@ bool readSettingsJson() {
     if (error == DeserializationError::NoMemory) {
       ERROR_STORAGEF("JSON document too small (need more than 5120 bytes)");
     }
-    gSensorPollingPaused = wasPaused;
+    pollResume();
     return false;
   }
 
@@ -1215,7 +1216,7 @@ bool readSettingsJson() {
 #endif
 
   DEBUG_STORAGEF("[Settings] Load complete");
-  gSensorPollingPaused = wasPaused;
+  pollResume();
   return true;
 }
 

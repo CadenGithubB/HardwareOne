@@ -5,6 +5,7 @@
  * and all WiFi-related command handlers.
  */
 
+#include "WebServer_Handle.h"
 #include "System_BuildConfig.h"
 
 #if ENABLE_WIFI
@@ -40,7 +41,6 @@
 extern bool wifiConnected;
 extern bool syncNTPAndResolve();  // Synchronous NTP sync
 #if ENABLE_HTTP_SERVER
-extern httpd_handle_t server;
 extern bool gServerIsHttps;  // Defined in WebServer_Server.cpp
 #endif
 extern volatile uint32_t gOutputFlags;
@@ -329,6 +329,21 @@ const char* cmd_wifidisconnect(const String& argsInput) {
  #else
   return "WiFi disconnected.";
  #endif
+}
+
+// Drop the current AP association but KEEP the radio (STA mode) on, and leave
+// the HTTP server + web output running — unlike closewifi/cmd_wifidisconnect,
+// which tears those down to free heap. Use this to disconnect from one network
+// and reconnect/scan to another without re-enabling WiFi.
+const char* cmd_wifidrop(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  wifi_mode_t mode;
+  if (esp_wifi_get_mode(&mode) != ESP_OK) {
+    return "WiFi is not initialized";
+  }
+  WiFi.disconnect(false);   // false = do NOT power down the radio
+  notifyWiFiDisconnected();
+  return "WiFi disconnected (radio still on).";
 }
 
 const char* cmd_wifiscan(const String& argsInput) {
@@ -1228,7 +1243,8 @@ const CommandEntry wifiCommands[] = {
   
   // Connection Control
   { "openwifi", "Connect to WiFi [ssid] (optional)", false, cmd_wificonnect, "Usage: openwifi [ssid]" },
-  { "closewifi", "Disconnect from WiFi.", false, cmd_wifidisconnect },
+  { "closewifi", "Disconnect from WiFi (also stops HTTP server + web output to free heap).", false, cmd_wifidisconnect },
+  { "wifidisconnect", "Disconnect from the current network but keep the radio on (HTTP/web stay up).", false, cmd_wifidrop },
   { "wifiscan", "Scan for available WiFi networks.", false, cmd_wifiscan, nullptr, "wifi", "scan" },
   { "wifigettxpower", "Get WiFi TX power.", false, cmd_wifitxpower },
   
@@ -1391,7 +1407,6 @@ extern const SettingsModule wifiSettingsModule = {
 #if ENABLE_HTTP_SERVER
 
 // Server handle is owned by WebServer_Server.cpp; non-null when running.
-extern httpd_handle_t server;
 static bool isHttpServerRunning() { return server != nullptr; }
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]

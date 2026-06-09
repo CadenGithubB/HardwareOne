@@ -204,7 +204,7 @@ static void renderFireAnimation() {
 }
 
 static void renderGameOfLifeAnimation() {
-  static uint8_t grid[64][32];
+  static EXT_RAM_BSS_ATTR uint8_t grid[64][32];
   static bool initialized = false;
 
   if (!initialized) {

@@ -40,7 +40,6 @@ static esp_err_t handleEspNowPage(httpd_req_t* req) {
 #include "System_ESPNow_Sessions.h"  // SendStatus snapshot for delivery-tracking JSON
 #include "System_MemUtil.h"
 
-extern EspNowState* gEspNow;
 extern void* ps_alloc(size_t size, AllocPref pref, const char* tag);
 extern esp_err_t handleEspNowMetadata(httpd_req_t* req);
 

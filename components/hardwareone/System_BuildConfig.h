@@ -124,14 +124,14 @@
   // Memory hints (rough — full breakdown in "MEMORY SAVINGS REFERENCE" below).
   #define CUSTOM_ENABLE_OLED        1   // SSD1306 OLED display
   #define CUSTOM_ENABLE_GAMEPAD     1   // Adafruit Seesaw gamepad
-  #define CUSTOM_ENABLE_GPS         1   // PA1010D GPS module
+  #define CUSTOM_ENABLE_GPS         0   // PA1010D GPS module — disabled 2026-06-07 (not used)
   #define CUSTOM_ENABLE_IMU         0   // BNO055 IMU — not installed
   #define CUSTOM_ENABLE_TOF         0   // VL53L4CX ToF — not installed
   #define CUSTOM_ENABLE_THERMAL     0   // MLX90640 thermal camera — not installed
   #define CUSTOM_ENABLE_APDS        0   // APDS9960 gesture/proximity — not installed
-  #define CUSTOM_ENABLE_FM_RADIO    1   // RDA5807 FM radio
-  #define CUSTOM_ENABLE_RTC         1   // DS3231 precision RTC
-  #define CUSTOM_ENABLE_PRESENCE    1   // STHS34PF80 IR presence/motion
+  #define CUSTOM_ENABLE_FM_RADIO    0   // RDA5807 FM radio — disabled 2026-06-07 (not used)
+  #define CUSTOM_ENABLE_RTC         0   // DS3231 precision RTC — disabled 2026-06-07 (not used)
+  #define CUSTOM_ENABLE_PRESENCE    0   // STHS34PF80 IR presence/motion — disabled 2026-06-07 (not used)
   #define CUSTOM_ENABLE_SERVO       0   // PCA9685 servo controller — not installed
 #endif
 
@@ -194,12 +194,12 @@
 // ~14 KB IRAM + ~70 KB flash + ~80 KB DRAM that the ESP-IDF Bluedroid
 // stack consumes, you also need `CONFIG_BT_ENABLED=n` in sdkconfig.
 // (Both flags are kept in sync below — see sdkconfig.defaults.)
-#define ENABLE_BLUETOOTH        0
+#define ENABLE_BLUETOOTH        1
 
 // Even G2 Smart Glasses: BLE client to connect to Even Realities G2 glasses.
 // ESP32 acts as BLE central; mutually exclusive with phone BLE at runtime.
 // Auto-disabled if ENABLE_BLUETOOTH=0.
-#define ENABLE_G2_GLASSES       0
+#define ENABLE_G2_GLASSES       1
 
 // VFS root for G2 animated icon packs (BMP frames): SD card (`/sd/...`).
 // Keeps pack data off LittleFS; requires SD mounted (web + lens picker use VFS).
@@ -222,7 +222,7 @@
 // On-device LLM: tiny transformer inference (Llama + GPT-2 architectures).
 // Requires ESP32-S3 + PSRAM. Models load from LittleFS or SD. FP32 / INT8.
 // Typical PSRAM usage: 1–4 MB at runtime.
-#define ENABLE_ONDEVICE_LLM     1
+#define ENABLE_ONDEVICE_LLM     0
 #if ENABLE_ONDEVICE_LLM
 // Max KV / attention context in tokens (0 = use checkpoint's seq_len only).
 // Lower uses less PSRAM; must cover prompt + max generation.

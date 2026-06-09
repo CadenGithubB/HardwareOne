@@ -1390,7 +1390,7 @@ void thermalTask(void* parameter) {
       }
     }
 
-    if (gThermalEnabled && gThermalConnected && gMLX90640 != nullptr && !gSensorPollingPaused) {
+    if (gThermalEnabled && gThermalConnected && gMLX90640 != nullptr && !pollPaused(0 /* legacy Wire1 = bus 0 */)) {
       unsigned long nowMs = millis();
       unsigned long pollMs = (gSettings.thermalDevicePollMs > 0) ? (unsigned long)gSettings.thermalDevicePollMs : 100;
       bool ready = true;

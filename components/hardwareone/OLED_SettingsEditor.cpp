@@ -1,3 +1,4 @@
+#include "WebServer_Handle.h"
 #include "OLED_SettingsEditor.h"
 
 #if ENABLE_OLED_DISPLAY
@@ -150,7 +151,6 @@ int getSettingCurrentValue(const SettingEntry* entry) {
 void setSettingValue(const SettingEntry* entry, int value) {
   if (!entry || !entry->jsonKey) return;
 
-  extern void executeOLEDCommand(const String& argsInput);
   // Use cmdKey if set, otherwise jsonKey is the CLI command name
   const char* cmdName = entry->cmdKey ? entry->cmdKey : entry->jsonKey;
   String cmd = String(cmdName) + " " + String(value);
@@ -744,7 +744,6 @@ REGISTER_OLED_MODE_MODULE(settingsOLEDModes, sizeof(settingsOLEDModes) / sizeof(
 #endif
 #if ENABLE_HTTP_SERVER
 #include <esp_http_server.h>
-extern httpd_handle_t server;
 #endif
 
 // ============================================================================
@@ -789,7 +788,6 @@ static bool getQuickWiFiState() {
   return (WiFi.getMode() != WIFI_MODE_NULL);
 }
 static void toggleQuickWiFi() {
-  extern void executeOLEDCommand(const String& argsInput);
   if (WiFi.getMode() != WIFI_MODE_NULL) {
     setQuickStatus("WiFi OFF");
     executeOLEDCommand("closewifi");
@@ -809,7 +807,6 @@ static bool getQuickBluetoothState() {
 static void bluetoothToggleConfirmedQuick(void* userData) {
   (void)userData;
   extern bool isBLERunning();
-  extern void executeOLEDCommand(const String& argsInput);
   if (isBLERunning()) {
     setQuickStatus("Bluetooth OFF");
     executeOLEDCommand("closeble");
@@ -835,7 +832,6 @@ static bool getQuickHTTPState() {
 }
 static void httpToggleConfirmedQuick(void* userData) {
   (void)userData;
-  extern void executeOLEDCommand(const String& argsInput);
   if (server != nullptr) {
     setQuickStatus("HTTP OFF");
     executeOLEDCommand("closehttp");

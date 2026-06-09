@@ -526,7 +526,12 @@ void presenceTask(void* parameter) {
       }
     }
     
-    if (gPresenceEnabled && gPresenceConnected && !gSensorPollingPaused) {
+    // NOTE: hybrid driver — init() is bus-aware (5-arg), but this poll uses the
+    // legacy 4-arg i2cTaskWithTimeout(I2C_ADDR_PRESENCE, ...) which routes to
+    // bus 0 (Wire1). Gate on the bus the poll ACTUALLY uses (0), not the
+    // presenceBus setting it doesn't honor here. Revisit if the poll is migrated
+    // to the 5-arg bus-aware form.
+    if (gPresenceEnabled && gPresenceConnected && !pollPaused(0 /* poll uses legacy bus 0 */)) {
       unsigned long presencePollMs = (gSettings.presenceDevicePollMs > 0) ? (unsigned long)gSettings.presenceDevicePollMs : 200;
       
       if ((nowMs - lastPresenceRead) >= presencePollMs) {

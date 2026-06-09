@@ -808,6 +808,111 @@ void handleOLEDMQTTPage(SetupWizardResult& result, bool& running) {
 }
 
 // ============================================================================
+// WEBMODE / BTMODE conditional page (FTS / blocking engine)
+// ============================================================================
+// Pick the feature's mode (HTTP/HTTPS or Server/G2). Self-contained blocking
+// sub-flow handling BOTH OLED buttons and serial, navigated via the wizard's
+// page model — A / number / 'n' selects and advances; B / left / 'b' returns to
+// the previous page. Mirrors the MQTT/WiFi conditional-page handlers. The mode
+// table + accessors are shared with the CLI-mode engine (see System_SetupWizard
+// .cpp: wizardModeMenuForPage / wizardModeCurrentIndex / wizardModeApply), so
+// both wizards behave identically. The page only appears when its feature is
+// enabled (wizardShouldShowWebMode/BtMode), so it's never skipped silently.
+void handleModePage(SetupWizardPage page, SetupWizardResult& result, bool& running) {
+  const WizardModeMenu* sub = wizardModeMenuForPage(page);
+  if (!sub) { wizardNextPage(result); return; }   // nothing to pick — skip
+
+  int sel = wizardModeCurrentIndex(sub);
+  int lastPrinted = -1;
+  uint32_t lastButtons = 0;
+  bool lastButtonsInitialized = false;
+  sJoyUpHeld = false;
+  sJoyDownHeld = false;
+
+  while (true) {
+    if (sel != lastPrinted) {
+      Serial.println();
+      Serial.printf("=== SETUP %d/%d: %s ===\n", getWizardPageNumber(page), getWizardTotalPages(), sub->title);
+      for (int i = 0; i < sub->modeCount; i++) {
+        Serial.printf(" %s%d. [%s] %s\n", sel == i ? ">" : " ", i + 1,
+                      sel == i ? "X" : " ", sub->modes[i].label);
+      }
+      Serial.println("----------------------------------------");
+      Serial.println("Serial: # to select, 'n' next, 'b' back");
+      Serial.println("OLED:   Joystick + A=Select, B=Back");
+      Serial.print("> ");
+      lastPrinted = sel;
+    }
+
+    if (oledDisplay && oledConnected) {
+      oledDisplay->clearDisplay();
+      drawWizardHeader(getWizardPageNumber(page), getWizardTotalPages(), sub->title);
+      for (int i = 0; i < sub->modeCount && i < 4; i++) {
+        oledDisplay->setCursor(0, 20 + i * 11);
+        oledDisplay->setTextColor(SSD1306_WHITE);
+        oledDisplay->print(sel == i ? ">" : " ");
+        oledDisplay->print(sel == i ? " [X] " : " [ ] ");
+        oledDisplay->println(sub->modes[i].label);
+      }
+      const int footerY = OLED_HEADER_HEIGHT + OLED_CONTENT_HEIGHT;
+      oledDisplay->drawFastHLine(0, footerY, 128, SSD1306_WHITE);
+      oledDisplay->setCursor(0, footerY + 2);
+      oledDisplay->print("A:Select B:Back");
+      OLED_TRANSACTION(oledDisplay->display());
+    }
+
+    delay(50);
+
+    if (oledDisplay && oledConnected) {
+      JoystickNav nav = readWizardJoystickNav();
+      if (nav.up)   { sel = (sel > 0) ? sel - 1 : sub->modeCount - 1; delay(150); continue; }
+      if (nav.down) { sel = (sel < sub->modeCount - 1) ? sel + 1 : 0; delay(150); continue; }
+      if (nav.left) { wizardPrevPage(); return; }
+
+      uint32_t buttons = lastButtons;
+      bool haveButtons = false;
+      {
+        SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(10), "wizard.modeBtn");
+        if (g.held && gInputCache.dataValid) { buttons = gInputCache.buttons; haveButtons = true; }
+      }
+      if (haveButtons && !lastButtonsInitialized) {
+        lastButtons = buttons; lastButtonsInitialized = true; continue;
+      }
+      uint32_t newButtons = (~buttons) & ~(~lastButtons);
+      lastButtons = buttons;
+      if (newButtons & (INPUT_MASK(INPUT_BUTTON_A) | INPUT_MASK(INPUT_BUTTON_START))) {
+        wizardModeApply(sub, sel);
+        if (!wizardNextPage(result)) running = false;
+        return;
+      }
+      if (newButtons & INPUT_MASK(INPUT_BUTTON_B)) { wizardPrevPage(); return; }
+    }
+
+    if (Serial.available()) {
+      String input = Serial.readStringUntil('\n');
+      input.trim();
+      if (input.equalsIgnoreCase("b") || input.equalsIgnoreCase("back")) { wizardPrevPage(); return; }
+      if (input.equalsIgnoreCase("n") || input.equalsIgnoreCase("next")) {
+        wizardModeApply(sub, sel);
+        if (!wizardNextPage(result)) running = false;
+        return;
+      }
+      int n = input.toInt();
+      if (n >= 1 && n <= sub->modeCount) {
+        // Select that mode and STAY on the page (re-render shows the moved [X]),
+        // exactly like the feature/sensor pages. Advancing is 'n' only — matches
+        // the on-screen "# to select, 'n' next" hint. (Was: select-and-advance.)
+        sel = n - 1;
+        wizardModeApply(sub, sel);
+        lastPrinted = -1;   // force re-render of the page with the new selection
+        continue;
+      }
+    }
+  }
+}
+
+
+// ============================================================================
 // Setup Mode Selection (Basic vs Advanced vs Import from Backup)
 // ============================================================================
 

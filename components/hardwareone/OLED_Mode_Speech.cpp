@@ -22,7 +22,7 @@
 #include "OLED_SettingsEditor.h"  // openSettingsEditorForModule
 
 // Control menu — shared OLEDScrollState (same model as Power/Network menus).
-static OLEDScrollState sSpeechMenuScroll;
+EXT_RAM_BSS_ATTR static OLEDScrollState sSpeechMenuScroll;
 static bool sSpeechMenuInit = false;
 
 // Animation state for the wake-word "listening" indicator (status sub-mode).

@@ -19,7 +19,6 @@
 #if ENABLE_OLED_DISPLAY && ENABLE_ESPNOW && ENABLE_BONDED_MODE
 
 extern DisplayDriver* oledDisplay;
-extern EspNowState* gEspNow;
 
 extern String getEspNowDeviceName(const uint8_t* mac);
 extern bool parseMacAddress(const String& macStr, uint8_t mac[6]);

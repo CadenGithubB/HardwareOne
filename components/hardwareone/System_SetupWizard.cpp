@@ -112,6 +112,8 @@ static const size_t ledEffectCount = sizeof(ledEffects) / sizeof(ledEffects[0]);
 
 static const SetupWizardPage kPageOrder[] = {
   WIZARD_PAGE_FEATURES,
+  WIZARD_PAGE_WEBMODE,
+  WIZARD_PAGE_BTMODE,
   WIZARD_PAGE_SENSORS,
   WIZARD_PAGE_NETWORK,
   WIZARD_PAGE_SYSTEM,
@@ -320,6 +322,11 @@ void initSetupWizard() {
     if ((f->category == FEATURE_CAT_NETWORK || f->category == FEATURE_CAT_SYSTEM) && featuresPageCount < 16) {
       featuresPage[featuresPageCount].id = f->id;
       featuresPage[featuresPageCount].label = f->name;
+#if ENABLE_HTTPS
+      // The HTTP feature gains an HTTP/HTTPS sub-choice in the wizard, so label
+      // it "Web Interface" here (wizard-local; the registry name is unchanged).
+      if (strcmp(f->id, "http") == 0) featuresPage[featuresPageCount].label = "Web Interface";
+#endif
       featuresPage[featuresPageCount].heapKB = f->heapCostKB;
       featuresPage[featuresPageCount].setting = f->enabledSetting;
       featuresPage[featuresPageCount].essential = (f->flags & FEATURE_FLAG_ESSENTIAL);
@@ -414,36 +421,12 @@ void rebuildNetworkSettingsPage() {
   }
 #endif
 
-#if ENABLE_HTTP_SERVER
-  // HTTP and Bluetooth don't have a separate "enabled" setting from their
-  // auto-start flag — the feature's enabledSetting IS the auto-start flag.
-  // Gating this row on `isFeatureEnabled` would make the row self-hide the
-  // moment the user toggled it off, so we gate on `isFeatureCompiled`
-  // instead. This row is always visible when the feature is compiled in.
-  {
-    const FeatureEntry* httpFeature = getFeatureById("http");
-    if (httpFeature && isFeatureCompiled(httpFeature)) {
-      networkPage[networkPageCount].label = "HTTP auto-start";
-      networkPage[networkPageCount].boolSetting = &gSettings.httpAutoStart;
-      networkPage[networkPageCount].isBool = true;
-      networkPageCount++;
-    }
-  }
-#endif
-
-#if ENABLE_BLUETOOTH
-  // See HTTP block above — same conflation (`bluetoothAutoStart` is both the
-  // feature-enable and the auto-start). Gate on compiled-ness only.
-  {
-    const FeatureEntry* btFeature = getFeatureById("bluetooth");
-    if (btFeature && isFeatureCompiled(btFeature)) {
-      networkPage[networkPageCount].label = "BT auto-start";
-      networkPage[networkPageCount].boolSetting = &gSettings.bluetoothAutoStart;
-      networkPage[networkPageCount].isBool = true;
-      networkPageCount++;
-    }
-  }
-#endif
+  // NOTE: "HTTP auto-start" and "BT auto-start" rows used to live here, but
+  // they bound to the very same flags (httpAutoStart / bluetoothAutoStart) that
+  // the "Web Interface" / "Bluetooth" toggles on the Features page already set
+  // — a confusing duplicate. Enable now lives on the Features page; the
+  // HTTP/HTTPS and Server/G2 *mode* is chosen on the dedicated WEBMODE/BTMODE
+  // pages (see handleModePage). So these rows were removed.
 
 #if ENABLE_ESPNOW
   // Gate on compiled-ness only (see WiFi comment above).
@@ -515,8 +498,84 @@ bool wizardShouldShowMQTT() {
 #endif
 }
 
+// ---- Shared "enable -> pick a mode" table (used by BOTH wizard engines) ----
+// Web Interface -> HTTP/HTTPS (bound to httpsEnabled); Bluetooth -> Server/G2
+// (bound to bleMode). The blocking FTS wizard and the CLI-mode `featuresetup`
+// command both read this same table so their behaviour is identical.
+#if ENABLE_HTTP_SERVER && ENABLE_HTTPS
+static const WizardModeOption kWebModes[] = { {"HTTP", 0}, {"HTTPS", 1} };
+#endif
+#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
+static const WizardModeOption kBtModes[]  = { {"Server (phone)", 0}, {"G2 Glasses", 1} };
+#endif
+
+static const WizardModeMenu kModeMenus[] = {
+#if ENABLE_HTTP_SERVER && ENABLE_HTTPS
+  { "http",      "Web Mode",       kWebModes, 2, &gSettings.httpsEnabled, nullptr },
+#endif
+#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
+  { "bluetooth", "Bluetooth Mode", kBtModes,  2, nullptr, &gSettings.bleMode },
+#endif
+};
+static const size_t kModeMenuCount = sizeof(kModeMenus) / sizeof(kModeMenus[0]);
+
+const WizardModeMenu* wizardModeMenuForFeature(const char* id) {
+  if (!id) return nullptr;
+  for (size_t i = 0; i < kModeMenuCount; i++) {
+    if (strcmp(kModeMenus[i].featureId, id) == 0) return &kModeMenus[i];
+  }
+  return nullptr;
+}
+
+const WizardModeMenu* wizardModeMenuForPage(SetupWizardPage page) {
+  if (page == WIZARD_PAGE_WEBMODE) return wizardModeMenuForFeature("http");
+  if (page == WIZARD_PAGE_BTMODE)  return wizardModeMenuForFeature("bluetooth");
+  return nullptr;
+}
+
+int wizardModeCurrentIndex(const WizardModeMenu* m) {
+  if (!m) return 0;
+  int cur = m->boolSetting ? (*m->boolSetting ? 1 : 0) : *m->intSetting;
+  for (int i = 0; i < m->modeCount; i++) {
+    if (m->modes[i].value == cur) return i;
+  }
+  return 0;
+}
+
+void wizardModeApply(const WizardModeMenu* m, int idx) {
+  if (!m || idx < 0 || idx >= m->modeCount) return;
+  int v = m->modes[idx].value;
+  if (m->boolSetting)     *m->boolSetting = (v != 0);
+  else if (m->intSetting) *m->intSetting  = v;
+}
+
+// The mode-picker pages are visible whenever their feature is enabled. Gated on
+// ENABLE_OLED_DISPLAY because the FTS engine's page handler (handleModePage)
+// lives in the OLED build; on headless builds the pages stay hidden in BOTH
+// engines (so they remain consistent). Both engines navigate via
+// wizardAdvanceFrom, which respects this — no engine-specific flag needed.
+bool wizardShouldShowWebMode() {
+#if ENABLE_OLED_DISPLAY && ENABLE_HTTP_SERVER && ENABLE_HTTPS
+  return gSettings.httpAutoStart && wizardModeMenuForFeature("http") != nullptr;
+#else
+  return false;
+#endif
+}
+
+bool wizardShouldShowBtMode() {
+#if ENABLE_OLED_DISPLAY && ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
+  return gSettings.bluetoothAutoStart && wizardModeMenuForFeature("bluetooth") != nullptr;
+#else
+  return false;
+#endif
+}
+
 bool wizardIsPageVisible(SetupWizardPage page) {
   switch (page) {
+    case WIZARD_PAGE_WEBMODE:
+      return wizardShouldShowWebMode();
+    case WIZARD_PAGE_BTMODE:
+      return wizardShouldShowBtMode();
     case WIZARD_PAGE_NETWORK:
       return hasNetworkSettings();
     case WIZARD_PAGE_ESPNOW:
@@ -731,6 +790,18 @@ void wizardFinalize(SetupWizardResult& result) {
     gSettings.bleDeviceName = wizardDeviceName;
     gSettings.espnowDeviceName = wizardDeviceName;
   }
+
+#if ENABLE_HTTPS
+  // If the user picked HTTPS for the Web Interface, generate the self-signed
+  // cert now (ECDSA P-256, ~1s) so the server starts in HTTPS on first launch.
+  // The server-start path falls back to HTTP if certs are absent, so a failure
+  // here degrades gracefully rather than leaving a dead server.
+  if (gSettings.httpAutoStart && gSettings.httpsEnabled) {
+    extern const char* cmd_certgen(const String&);
+    broadcastOutput("[Wizard] HTTPS selected - generating self-signed certificate (ECDSA, ~1s)...");
+    broadcastOutput(cmd_certgen(String("")));
+  }
+#endif
 }
 
 // ============================================================================
@@ -1257,6 +1328,17 @@ SetupWizardResult runSetupWizard() {
     // ------------------------------------------------------------------
     // 1. Pages with their own input loop (ESP-NOW, MQTT, WiFi)
     // ------------------------------------------------------------------
+#if ENABLE_OLED_DISPLAY
+    // Web Interface / Bluetooth mode picker — conditional pages handled as a
+    // self-contained blocking sub-flow (like MQTT/WiFi). Only visible (and only
+    // reached) in the blocking FTS wizard, on OLED builds.
+    if (currentPage == WIZARD_PAGE_WEBMODE || currentPage == WIZARD_PAGE_BTMODE) {
+      handleModePage(currentPage, result, running);
+      lastPrintedPage = WIZARD_PAGE_COUNT;
+      continue;
+    }
+#endif
+
     if (currentPage == WIZARD_PAGE_ESPNOW) {
 #if ENABLE_OLED_DISPLAY
       if (oledDisplay && oledConnected) {

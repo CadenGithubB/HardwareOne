@@ -462,7 +462,7 @@ void inputTask(void* parameter) {
       if (checkTaskStackSafety("anoencoder", INPUT_STACK_WORDS, &gAnoEncoderEnabled)) break;
     }
 
-    if (gAnoEncoderEnabled && gAnoEncoderConnected && !gSensorPollingPaused) {
+    if (gAnoEncoderEnabled && gAnoEncoderConnected && !pollPaused((uint8_t)gSettings.inputBus)) {
       unsigned long pollMs = (gSettings.inputDevicePollMs > 0)
                               ? (unsigned long)gSettings.inputDevicePollMs : 30;
       if ((nowMs - lastRead) >= pollMs) {

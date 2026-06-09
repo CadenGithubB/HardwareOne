@@ -62,6 +62,16 @@ void g2ShowSensorsMenu();
 // sensors landing list.
 void g2ReshowSensorsDetail();
 
+// Multi-line LIVE readout for the sensor currently drilled into. Consumed by
+// renderSensorDetailLive() in G2_Glasses.cpp (the live-compound transport),
+// refreshed every tick. Caller owns the buffer; always null-terminated.
+void g2BuildSensorReadout(char* out, size_t cap);
+
+// Build the LIVE sensor-detail compound's list rows (row 0 = back, row 1 =
+// Auto-Start toggle — index order matches the DETAIL tap handler). Pointers
+// reference shared static buffers, valid until the next call. Returns count.
+size_t g2BuildSensorLiveList(const char** outRows, size_t maxRows);
+
 #if ENABLE_CAMERA_SENSOR
 // Register UI refresh after async camera power ops (call once from G2 init).
 void g2RegisterSensorsCameraPowerHook();
@@ -80,6 +90,8 @@ inline void g2BuildSensorList(char* out, size_t cap) {
 inline bool g2ShowSensorList() { return false; }
 inline void g2ShowSensorsMenu() {}
 inline void g2ReshowSensorsDetail() {}
+inline void g2BuildSensorReadout(char* out, size_t cap) { if (out && cap) out[0] = '\0'; }
+inline size_t g2BuildSensorLiveList(const char**, size_t) { return 0; }
 #if ENABLE_CAMERA_SENSOR
 inline void g2RegisterSensorsCameraPowerHook() {}
 #endif

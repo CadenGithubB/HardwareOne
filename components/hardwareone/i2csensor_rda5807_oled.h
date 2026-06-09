@@ -74,7 +74,6 @@ static bool fmRadioOLEDModeAvailable(String* outReason) {
 
 static void fmRadioToggleConfirmed(void* userData) {
   (void)userData;
-  extern void executeOLEDCommand(const String& argsInput);
   if (gRadioInitialized && gFmRadioConnected) {
     executeOLEDCommand("closefmradio");
   } else {

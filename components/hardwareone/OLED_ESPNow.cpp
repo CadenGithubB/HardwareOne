@@ -600,7 +600,6 @@ void oledEspNowMainMenuSelect() {
       break;
     case 4:  // Start/Stop
       {
-        extern void executeOLEDCommand(const String& argsInput);
         if (gEspNow && gEspNow->initialized) {
           executeOLEDCommand("closeespnow");
         } else {
@@ -1672,7 +1671,6 @@ void oledEspNowSendTextMessage() {
   if (!gEspNow || gOledEspNowState.textMessageBuffer.length() == 0) return;
   
   // Send text message to selected device
-  extern void executeOLEDCommand(const String& argsInput);
   
   // Format MAC address
   char macStr[18];
@@ -1706,7 +1704,6 @@ void oledEspNowSendRemoteCommand() {
     return;  // Don't send if any field is empty
   }
   
-  extern void executeOLEDCommand(const String& argsInput);
   
   // Format MAC address
   char macStr[18];
@@ -1877,7 +1874,6 @@ bool oledEspNowHandleSettingsInput(int deltaX, int deltaY, uint32_t newlyPressed
     
     // Stationary: toggle boolean via command
     if (gOledEspNowState.settingsEditField == 5) {
-      extern void executeOLEDCommand(const String& argsInput);
       executeOLEDCommand(gSettings.espnowStationary ? "espnowstationary 0" : "espnowstationary 1");
       gOledEspNowState.settingsEditField = -1;
       return true;
@@ -1885,7 +1881,6 @@ bool oledEspNowHandleSettingsInput(int deltaX, int deltaY, uint32_t newlyPressed
     
     // Role: cycle through options via command
     if (gOledEspNowState.settingsEditField == 7) {
-      extern void executeOLEDCommand(const String& argsInput);
       if (gSettings.meshRole == MESH_ROLE_WORKER) {
         executeOLEDCommand("espnowmeshrole master");
       } else if (gSettings.meshRole == MESH_ROLE_MASTER) {
@@ -1952,7 +1947,6 @@ bool oledEspNowHandleSettingsInput(int deltaX, int deltaY, uint32_t newlyPressed
 }
 
 void oledEspNowApplySettingsEdit(const String& value) {
-  extern void executeOLEDCommand(const String& argsInput);
   String cmd;
   switch (gOledEspNowState.settingsEditField) {
     case 0: // Device Name
@@ -2061,7 +2055,6 @@ bool oledEspNowHandleDeviceConfigInput(int deltaX, int deltaY, uint32_t newlyPre
   
   // A button: Execute selected action
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
-    extern void executeOLEDCommand(const String& argsInput);
     char macStr[18];
     snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
              gOledEspNowState.selectedDeviceMac[0],
@@ -2134,7 +2127,6 @@ void oledEspNowApplyDeviceConfigEdit(const String& value) {
     return;
   }
   
-  extern void executeOLEDCommand(const String& argsInput);
   char macStr[18];
   snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
            gOledEspNowState.selectedDeviceMac[0],

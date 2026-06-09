@@ -32,6 +32,7 @@
 #include "System_VFS.h"
 #include "System_Battery.h"   // BatteryState + getBatteryPercentage etc — for ESP corner widget
 #include "System_Microphone.h"  // gMicEnabled, micConnected, getAudioLevel, etc — for MIC detail page
+#include "System_PollPause.h"   // PollPauseGuard — pause sensor polling during BLE connect/discovery
 #include "G2_HijackCmd.h"   // g2BumpMenuGen() — called from g2SetHijackPage
 #include "System_AuthIdentity.h"  // ExecIdentityGuard + currentAuthContext
 
@@ -3416,46 +3417,31 @@ static void buildG2StatusBattery(char* out, size_t cap) {
 #endif
 }
 
-// Top-right corner ESP-battery widget content. Mirrors the G2/R1 corner
-// format so the three rows read as a column.
-// Five-state output:
-//   "ESP: USB"        — no cell installed (NOT_PRESENT). Covers both the
-//                       ENABLE_BATTERY_MONITOR=0 build path and the
-//                       runtime case of a board with a fuel gauge but no
-//                       cell wired to B+. usbPresent is implicitly true
-//                       (device is running on VBUS).
-//   "ESP: --%"        — backend is live but the voltage read came back
-//                       implausible (vBatt <= 0). Same-width placeholder
-//                       so the column doesn't shift while the sensor
-//                       comes online or hiccups.
-//   "ESP: USB+NN%"    — USB connected AND the cell is actively taking
-//                       charge (CRATE > +threshold). Shows BOTH the USB
-//                       state and the % — older logic dropped the % here
-//                       which made the corner go blind while charging.
-//   "ESP: USB NN%"    — USB connected but cell at float-charge plateau
-//                       (CRATE ≈ 0, voltage > 4.15V). Cell is full and
-//                       USB is just holding it there.
-//   "ESP: NN%"        — on battery (USB unplugged), normal discharging.
-// All formats stay under ~13 chars to fit the corner geometry.
+// Top-right corner ESP-battery widget. Same "NAME: value" shape as the G2
+// ("G2: NN%") and R1 ("R1: --%") corner rows — the "ESP:" label stays; only
+// the VALUE changes. The ESP row's geom (kStatusEspGeom) is widened so the
+// value field fits up to 4 chars, so it is exactly one of:
+//   "USB"  — no battery cell present (running on USB only).
+//   "--%"  — cell present but the read came back implausible (transient).
+//   "NN%"  — battery percentage 0..99. THIS is the focus; shown whenever a
+//            cell is present, charging or not.
+//   "100%" — battery full (now fits — the row was widened for this).
+// The old combined "USB+NN%"/"USB NN%" forms overflowed the corner and got
+// truncated by the lens, which is why the value looked blank/garbled.
 static void buildEspStatusBattery(char* out, size_t cap) {
   if (!out || cap == 0) return;
   if (gBatteryState.status == BATTERY_NOT_PRESENT) {
     snprintf(out, cap, "ESP: USB");
     return;
   }
-  const float vBatt = getBatteryVoltage();
-  if (vBatt <= 0.0f) {
+  if (getBatteryVoltage() <= 0.0f) {
     snprintf(out, cap, "ESP: --%%");
     return;
   }
-  const int pct = (int)(getBatteryPercentage() + 0.5f);
-  if (isBatteryCharging()) {
-    snprintf(out, cap, "ESP: USB+%d%%", pct);
-  } else if (isUsbPresent()) {
-    snprintf(out, cap, "ESP: USB %d%%", pct);
-  } else {
-    snprintf(out, cap, "ESP: %d%%", pct);
-  }
+  int pct = (int)(getBatteryPercentage() + 0.5f);
+  if (pct < 0)   pct = 0;
+  if (pct > 100) pct = 100;
+  snprintf(out, cap, "ESP: %d%%", pct);   // value field fits 4 chars ("100%")
 }
 
 // 8-cell circle bar gauge using Unicode geometric/spinner glyphs that
@@ -4034,6 +4020,80 @@ void g2MicDetailHandleTap(uint32_t idx) {
   }
   // idx 2 (HW row) is info-only — no action.
   DEBUG_G2F("[G2] MIC detail: tap idx=%u (info row, no action)", (unsigned)idx);
+}
+
+// ---------------------------------------------------------------------------
+// Generic sensor-detail LIVE compound (all non-camera sensors)
+// ---------------------------------------------------------------------------
+// Same shape as renderMicDetailLive: a selectable list (back / Auto Start)
+// plus a live readout child that UPDATE_TEXTs each tick WITHOUT disturbing the
+// list selection. Unlike MIC it registers NO page module/enum — it reuses the
+// Sensors page's hijack page (G2_HIJACK_PAGE_SENSORS) + tap handler at
+// gSensorsLevel == DETAIL (idx 0 back, idx 1 toggle), so taps route to the
+// existing g2SensorsHandleTap. Content comes from G2_Page_Sensors.cpp (it owns
+// the sensor caches): g2BuildSensorLiveList() for rows, g2BuildSensorReadout()
+// for the readout. Driven by the shared g2_live_text worker (no new task).
+// List narrowed (its rows are short — "Auto Start: OFF" is the widest) so the
+// readout pane can be wide enough for the squared gamepad grid + button diamond.
+static constexpr G2ContainerGeom kSensorLiveListGeom    = {   8,   8, 200, 270 };
+static constexpr G2ContainerGeom kSensorLiveReadoutGeom = { 216,   8, 352, 270 };
+static constexpr uint32_t        kSensorLiveReadoutCid  = 2;
+static const char* const         kSensorLiveReadoutName = "snsLive";
+static char gSensorLiveLastReadout[224] = {0};
+
+static bool renderSensorDetailLive() {
+  G2Temple* arm = (gR.connected && !gR.pluginDead) ? &gR
+                : (gL.connected && !gL.pluginDead) ? &gL
+                                                   : nullptr;
+  if (!arm) { DEBUG_G2F("[G2] sensor-live: no eligible temple"); return false; }
+
+  char readout[224];
+  g2BuildSensorReadout(readout, sizeof(readout));
+
+  if (!g2LensGetState().containerReady) {
+    const char* listItems[4] = { nullptr, nullptr, nullptr, nullptr };
+    size_t n = g2BuildSensorLiveList(listItems, 4);
+    if (n == 0) { DEBUG_G2F("[G2] sensor-live: empty list"); return false; }
+    G2TextChildSpec textChild = {};
+    textChild.containerName = kSensorLiveReadoutName;
+    textChild.containerId   = kSensorLiveReadoutCid;
+    textChild.content       = readout;
+    textChild.geom          = kSensorLiveReadoutGeom;
+    textChild.eventCapture  = false;
+    bool ok = sendCreateMixedListMultiTextAndWait(
+        *arm, listItems, n, kSensorLiveListGeom, &textChild, 1, BLOCKS_WIDGET_ID);
+    if (!ok) { DEBUG_G2F("[G2] sensor-live: CREATE-list+text failed"); return false; }
+    g2NoteCreateSuccess(*arm, /*isList*/ false, BLOCKS_WIDGET_ID);
+    strncpy(gSensorLiveLastReadout, readout, sizeof(gSensorLiveLastReadout) - 1);
+    gSensorLiveLastReadout[sizeof(gSensorLiveLastReadout) - 1] = '\0';
+    DEBUG_G2F("[G2] sensor-live: initial CREATE acked (1 list + 1 text)");
+    return true;
+  }
+
+  // Subsequent ticks: UPDATE_TEXT the readout child only, gated by a
+  // byte-identical cache. List child untouched → selection persists.
+  if (strcmp(readout, gSensorLiveLastReadout) == 0) return true;  // quiet tick
+  bool ok = sendUpdateTextNamed(*arm, kSensorLiveReadoutName,
+                                kSensorLiveReadoutCid, readout);
+  if (ok) {
+    strncpy(gSensorLiveLastReadout, readout, sizeof(gSensorLiveLastReadout) - 1);
+    gSensorLiveLastReadout[sizeof(gSensorLiveLastReadout) - 1] = '\0';
+  }
+  return ok;
+}
+
+bool g2ShowSensorLive() {
+  // Caller (showSensorDetail) already set gSensorsLevel = DETAIL + hijack page;
+  // reset the readout cache so the first tick isn't suppressed by a stale
+  // value, then spawn the shared live-text worker in renderFn mode.
+  gSensorLiveLastReadout[0] = '\0';
+  if (!g2StartLiveTextPage(/*buildText=*/ nullptr, /*intervalMs=*/ 1000,
+                           renderSensorDetailLive)) {
+    DEBUG_G2F("[G2] sensor-live: live-text spawn failed");
+    return false;
+  }
+  g2SetHijackPage(G2_HIJACK_PAGE_SENSORS);
+  return true;
 }
 
 static const G2PageModule kTestSuitePage = {
@@ -6038,6 +6098,23 @@ static bool connectTemple(G2Temple& t) {
     }
     t.client->setClientCallbacks(new TempleClientCallbacks(&t));
   }
+  // Pause sensor polling for the whole connect + GATT-discovery window. This is
+  // the heaviest BLE-coexistence moment: BLEClient::connect() followed by
+  // service/characteristic lookup and registerForNotify() walks the peer's
+  // attribute table (the retrieveDescriptors traffic). With the gamepad still
+  // polling its bus (Wire1 / I2C_NUM_1) every 90 ms, an RF-glitched I2C
+  // transaction makes the legacy driver re-arm from inside its ISR — an
+  // interrupt storm that trips the Int WDT on CPU0.
+  //
+  // Scoped to the gamepad's bus (gSettings.inputBus) rather than blanket: the
+  // storm was always on the gamepad bus (I2C_NUM_1), and sensors on the OTHER
+  // bus (e.g. the OLED) polled through every crash without issue — so they can
+  // keep rendering during the connect instead of freezing. If inputBus is unset
+  // (-1 → 0xFF), this falls back to a blanket pause (the safe direction).
+  // RAII so every early-return below resumes; ref-counted + nest-safe, so the
+  // per-arm L/R calls compose cleanly.
+  PollPauseGuard pollGuard((uint8_t)gSettings.inputBus);
+
   uint32_t tConnStart = millis();
   if (!t.client->connect(t.advertisedDevice)) {
     DEBUG_G2F("[G2-%c] BLE connect failed after %u ms",
@@ -8284,11 +8361,12 @@ static void pageSwapInit() {
               (unsigned)kPageSwapQueueDepth);
     return;
   }
-  // Stack 4 KB matches the per-call workers we replaced. This is
+  // Stack: 3584 words (~14 KB), trimmed from 4096 (~16 KB) 2026-06-07.
+  // Measured HWM ~6.2 KB with glasses connected → ~7.8 KB headroom. This is
   // the ONLY xTaskCreate on the page-swap path now — all
   // navigation re-uses this worker via the queue.
   BaseType_t rc = xTaskCreate(pageSwapWorkerLoop, "g2_page_swap_w",
-                              /*stack*/ 4096, nullptr,
+                              /*stack words*/ 3584, nullptr,
                               /*prio*/  tskIDLE_PRIORITY + 2,
                               &gPageSwapTaskH);
   if (rc != pdPASS) {
@@ -9546,13 +9624,16 @@ static constexpr G2ContainerGeom kStatusBattGeom  = { 458,   8, 110,  32 };
 // (battery, link state) isn't wired up yet, but the slot exists so
 // the visual layout matches the eventual two-row corner.
 static constexpr G2ContainerGeom kStatusR1Geom    = { 458,  42, 110,  32 };
-// ESP row directly below R1, third row of the right column. Reads
-// the local SoC battery state via getBatteryPercentage() +
-// isBatteryCharging() so the user sees the device's own charge level
-// without digging into the body text. USB-powered devices skip the
-// percentage and show "ESP USB" instead since the cell isn't being
-// read from in that case.
-static constexpr G2ContainerGeom kStatusEspGeom   = { 458,  76, 110,  32 };
+// ESP row directly below R1, third row of the right column. Reads the
+// local SoC battery state via buildEspStatusBattery. WIDER than the G2/R1
+// rows: left edge shifted left (x 458→408, w 110→160) while the right edge
+// stays pinned at the canvas edge (568). Sized for the WIDEST value, which
+// is "USB" — uppercase U/S/B are much wider than the "NN%" digits, so
+// "ESP: USB" overflowed the narrower box, wrapped to a 2nd line, and the
+// lens drew a scroll bar (the % values fit on one line, hence no bar there).
+// Only this row's left edge moves; its y-band (76..108) is otherwise empty,
+// so nothing collides. (Tighten x/w here if you want it less wide.)
+static constexpr G2ContainerGeom kStatusEspGeom   = { 408,  76, 160,  32 };
 static constexpr G2ContainerGeom kStatusMeterGeom = { 318, 224, 250,  56 };
 
 // Custom live-render hook for kStatusPage. Keeps a fresh CREATE on the

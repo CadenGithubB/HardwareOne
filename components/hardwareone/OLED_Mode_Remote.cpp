@@ -13,7 +13,6 @@
 #if ENABLE_OLED_DISPLAY && ENABLE_ESPNOW && ENABLE_BONDED_MODE
 
 extern DisplayDriver* oledDisplay;
-extern EspNowState* gEspNow;
 extern NavEvents gNavEvents;
 
 extern String getEspNowDeviceName(const uint8_t* mac);
