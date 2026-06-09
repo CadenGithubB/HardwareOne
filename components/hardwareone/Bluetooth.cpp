@@ -11,6 +11,7 @@
  */
 
 #include "Bluetooth.h"
+#include "System_PollPause.h"   // PollPauseGuard — quiesce sensor polling during BLE init
 #include "G2_Glasses.h"  // Header provides stubs when ENABLE_G2_GLASSES=0, so blemode CLI compiles either way
 #include "System_Utils.h"
 #include "BLE_Peers.h"        // peer registry + cmd_bleautoconnect / cmd_blepeers
@@ -1157,17 +1158,14 @@ void bleApplySettings() {
 // =============================================================================
 
 static const char* cmd_blestart(const String& argsInput) {
-  // Pause sensor polling during BLE init to avoid interrupt contention
-  extern volatile bool gSensorPollingPaused;
-  bool wasPaused = gSensorPollingPaused;
-  gSensorPollingPaused = true;
+  // Pause sensor polling during BLE init to avoid interrupt contention (RAII —
+  // resumes on every return path; the trailing string checks do no I2C work).
+  PollPauseGuard pollGuard;
   vTaskDelay(pdMS_TO_TICKS(50));  // Let pending I2C ops complete
-  
+
   bool initOk = initBluetooth();
   bool advOk = initOk ? startBLEAdvertising() : false;
-  
-  gSensorPollingPaused = wasPaused;
-  
+
   if (!initOk) {
     return "Failed to initialize Bluetooth";
   }

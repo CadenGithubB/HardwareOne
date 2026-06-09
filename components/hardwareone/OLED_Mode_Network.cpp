@@ -121,7 +121,7 @@ enum NetworkMainAction {
   NET_ACT_TOGGLE_HTTP,
 };
 
-static OLEDScrollState sNetworkMainScroll;
+EXT_RAM_BSS_ATTR static OLEDScrollState sNetworkMainScroll;
 static NetworkMainAction sNetworkMainActions[OLED_SCROLL_MAX_ITEMS];
 static bool sNetworkMainInitialized = false;
 
@@ -156,7 +156,6 @@ static void populateNetworkMainMenu() {
   }
 #if ENABLE_HTTP_SERVER
   {
-    extern httpd_handle_t server;
     bool httpRunning = (server != nullptr);
     const char* httpLabel;
     if (httpRunning) {
@@ -207,7 +206,6 @@ void displayNetworkInfoRendered() {
 #if ENABLE_HTTP_SERVER
     // Tiny suffix on the HTTP row showing protocol while running.
     if (sNetworkMainActions[i] == NET_ACT_TOGGLE_HTTP) {
-      extern httpd_handle_t server;
       if (server != nullptr) {
         oledDisplay->print(gServerIsHttps ? " [S]" : " *");
       }
@@ -252,12 +250,13 @@ static bool networkMainInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t new
         requestOLEDMode(OLED_NETWORK_WIFI_MENU, "network.wifi.menu");
         break;
       case NET_ACT_DISCONNECT:
-        executeOLEDCommand("closewifi");
+        // Drop the AP but keep the radio (and HTTP) up — HTTP has its own
+        // toggle in this menu, so Disconnect should only leave the network.
+        executeOLEDCommand("wifidisconnect");
         break;
       case NET_ACT_TOGGLE_HTTP:
 #if ENABLE_HTTP_SERVER
         {
-          extern httpd_handle_t server;
           if (server != nullptr) {
             oledConfirmRequest("Stop HTTP?", nullptr, httpStopConfirmedNetwork, nullptr, false);
           } else {
@@ -323,7 +322,7 @@ enum WifiAddStep {
   WIFI_ADD_PASS,
 };
 
-static OLEDScrollState sWifiMenuScroll;
+EXT_RAM_BSS_ATTR static OLEDScrollState sWifiMenuScroll;
 static bool sWifiMenuInitialized = false;
 static WifiAddStep sWifiAddStep = WIFI_ADD_NONE;
 static bool sWifiKeyboardActive = false;
@@ -334,15 +333,15 @@ static String sWifiAddPass = "";
 // Saved-networks picker (shared by the List + Remove sub-modes) and scan-results
 // picker. Both are plain OLEDScrollState lists rendered the SAME way as this menu
 // and the Power submenus (oledScrollRenderSimple) — no separate popup mechanism.
-static OLEDScrollState sSavedNetScroll;
+EXT_RAM_BSS_ATTR static OLEDScrollState sSavedNetScroll;
 static bool sSavedNetInitialized = false;
-static OLEDScrollState sWifiScanScroll;
+EXT_RAM_BSS_ATTR static OLEDScrollState sWifiScanScroll;
 static bool sWifiScanInitialized = false;
 
 // Scan results: bare SSID (for connect/add) + display label with signal bars.
 // Kept in stable storage because OLEDScrollState items store pointers, not copies.
 static char sWifiScanSSIDs[16][33];
-static char sWifiScanLabels[16][40];
+EXT_RAM_BSS_ATTR static char sWifiScanLabels[16][40];
 static int  sWifiScanCount = 0;
 
 // Pending removal SSID + confirm-prompt buffer. oledConfirmRequest stores the
@@ -702,7 +701,6 @@ void displayEspNow() {
 #if ENABLE_HTTP_SERVER
 #include <esp_http_server.h>
 #include "WebServer_Server.h"  // getTotalFailedLoginCount()
-extern httpd_handle_t server;
 #endif
 
 extern SessionEntry* gSessions;
@@ -935,7 +933,7 @@ void displayMeshStatusRendered() {
 #include "System_ESPNow_Sensors.h"
 #include <ArduinoJson.h>
 
-static OLEDScrollState sRemoteSensorScroll;
+EXT_RAM_BSS_ATTR static OLEDScrollState sRemoteSensorScroll;
 static bool sRemoteSensorScrollInitialized = false;
 
 static int collectValidRemoteSensors(int* outValidIndices, int maxOut) {

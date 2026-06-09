@@ -17,9 +17,9 @@
 // External references
 
 // Power menu scroll states (replaces manual selection variables)
-static OLEDScrollState sPowerMainScroll;
-static OLEDScrollState sPowerCpuScroll;
-static OLEDScrollState sPowerSleepScroll;
+EXT_RAM_BSS_ATTR static OLEDScrollState sPowerMainScroll;
+EXT_RAM_BSS_ATTR static OLEDScrollState sPowerCpuScroll;
+EXT_RAM_BSS_ATTR static OLEDScrollState sPowerSleepScroll;
 static bool sPowerScrollInitialized = false;
 
 static void initPowerScrollStates() {

@@ -423,15 +423,13 @@ const char* cmd_espnow_rel(const String& argsInput) {
 bool saveMeshPeers() {
   if (!filesystemReady) return false;
 
-  // Pause sensor polling during file I/O
-  extern volatile bool gSensorPollingPaused;
-  bool wasPaused = gSensorPollingPaused;
-  gSensorPollingPaused = true;
+  // Pause sensor polling during file I/O (RAII — resumes on every return path;
+  // from System_PollPause.h via System_I2C.h).
+  PollPauseGuard pollGuard;
 
   FsLockGuard fsGuard("mesh.peers.save");
   File file = VFS::openGuarded(MESH_PEERS_FILE, "w", VFS::systemAuth("espnow.mesh_peers_save"), true);
   if (!file) {
-    gSensorPollingPaused = wasPaused;
     return false;
   }
   int skipped = 0;
@@ -480,9 +478,8 @@ bool saveMeshPeers() {
   file.println("  ]");
   file.println("}");
   file.close();
-  
-  gSensorPollingPaused = wasPaused;
-  
+  // pollGuard resumes sensor polling on return.
+
   DEBUGF(DEBUG_ESPNOW_MESH, "[MESH] Saved role=%s, %d peer MAC addresses to filesystem",
                 getMeshRoleString(gSettings.meshRole), count);
   return skipped == 0;
@@ -566,15 +563,16 @@ bool parseMacAddress(const String& macStr, uint8_t mac[6]);
 static void loadMeshPeers() {
   if (!filesystemReady) return;
 
-  // Pause sensor polling during file I/O
-  extern volatile bool gSensorPollingPaused;
-  bool wasPaused = gSensorPollingPaused;
-  gSensorPollingPaused = true;
+  // Pause sensor polling during file I/O. Kept as explicit pause/resume (not the
+  // RAII guard) because this function deliberately resumes BEFORE the parse step
+  // below — the guard would hold the pause too long. Symbols from
+  // System_PollPause.h via System_I2C.h.
+  pollPause();
 
   FsLockGuard fsGuard("mesh.peers.load");
   File file = VFS::openGuarded(MESH_PEERS_FILE, "r", VFS::systemAuth("espnow.mesh_peers_load"));
   if (!file) {
-    gSensorPollingPaused = wasPaused;
+    pollResume();
     DEBUGF(DEBUG_ESPNOW_MESH, "[MESH] No saved peer list found");
     return;
   }
@@ -583,7 +581,7 @@ static void loadMeshPeers() {
   file.close();
   
   // Resume sensor polling before parsing
-  gSensorPollingPaused = wasPaused;
+  pollResume();
 
   // NOTE: mesh_peers.json is topology-only. Role/master/backup are persisted via settings.json.
 
@@ -11179,7 +11177,7 @@ static const char* meshesCmd_listjson() {
   // not runtime state — the user may want to view/configure them before
   // running 'openespnow'). gEspNow->listBuffer would be null pre-init.
   // 1 KB is plenty for 4 meshes (~500 bytes serialized).
-  static char meshesJsonBuf[1024];
+  EXT_RAM_BSS_ATTR static char meshesJsonBuf[1024];
   size_t needed = measureJson(doc) + 1;
   if (needed > sizeof(meshesJsonBuf)) needed = sizeof(meshesJsonBuf);
   serializeJson(doc, meshesJsonBuf, needed);

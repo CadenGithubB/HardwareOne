@@ -1089,7 +1089,7 @@ void imuTask(void* parameter) {
       }
     }
 
-    if (gImuEnabled && gImuConnected && gBNO055 != nullptr && !gSensorPollingPaused) {
+    if (gImuEnabled && gImuConnected && gBNO055 != nullptr && !pollPaused(0 /* legacy Wire1 = bus 0 */)) {
       unsigned long imuPollMs = (gSettings.imuDevicePollMs > 0) ? (unsigned long)gSettings.imuDevicePollMs : 200;
       unsigned long nowMs = millis();
       if (nowMs - lastIMURead >= imuPollMs) {

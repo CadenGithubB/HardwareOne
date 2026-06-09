@@ -1546,6 +1546,25 @@ void buildSystemInfoJson(JsonDocument& doc) {
     i2c["activeDevices"] = mgr ? mgr->getActiveDeviceCount() : 0;
     i2c["sdaPin"]   = gSettings.i2cSdaPin;
     i2c["sclPin"]   = gSettings.i2cSclPin;
+    // Detected-device list: everything the I2C discovery scan physically found
+    // on the buses (connectedDevices[]), regardless of whether the device's
+    // driver is enabled/polling. This is the honest "what's on the bus" view —
+    // the scan only finds devices that actually ACK, so each shows once, on its
+    // real bus, with the DB-assigned name (no phantom bus-0 pre-registrations,
+    // no candidate addresses, no "Auto" placeholder).
+    {
+      extern ConnectedDevice connectedDevices[];
+      extern int connectedDeviceCount;
+      JsonArray devs = i2c["deviceList"].to<JsonArray>();
+      for (int i = 0; i < connectedDeviceCount; i++) {
+        const ConnectedDevice& d = connectedDevices[i];
+        if (!d.isConnected) continue;
+        JsonObject o = devs.add<JsonObject>();
+        o["name"] = (d.name && d.name[0]) ? d.name : "device";
+        o["addr"] = d.address;
+        o["bus"]  = d.bus;
+      }
+    }
   }
 #else
   {
@@ -1714,19 +1733,18 @@ esp_err_t handleFileRead(httpd_req_t* req) {
   DEBUG_STORAGEF("[handleFileRead] START");
   
   // Pause sensor polling during file streaming to prevent I2C contention
-  bool wasPaused = gSensorPollingPaused;
-  gSensorPollingPaused = true;
+  pollPause();
   
   AuthContext ctx = makeWebAuthCtx(req);
   DEBUG_STORAGEF("[handleFileRead] Auth check for user from IP: %s", ctx.ip.c_str());
   if (!tgRequireAuth(ctx)) {
-    gSensorPollingPaused = wasPaused;
+    pollResume();
     return ESP_OK;
   }  DEBUG_STORAGEF("[handleFileRead] Auth SUCCESS for user: %s", ctx.user.c_str());
 
   if (!filesystemReady) {
     ERROR_STORAGEF("Filesystem not ready");
-    gSensorPollingPaused = wasPaused;
+    pollResume();
     httpd_resp_set_type(req, "text/plain");
     httpd_resp_send(req, "Filesystem not initialized", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
@@ -1735,7 +1753,7 @@ esp_err_t handleFileRead(httpd_req_t* req) {
   char query[256];
   if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
     WARN_WEBF("No query string in file read request");
-    gSensorPollingPaused = wasPaused;
+    pollResume();
     httpd_resp_set_type(req, "text/plain");
     httpd_resp_send(req, "No filename specified", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
@@ -1745,7 +1763,7 @@ esp_err_t handleFileRead(httpd_req_t* req) {
   char name[160];
   if (httpd_query_key_value(query, "name", name, sizeof(name)) != ESP_OK) {
     WARN_WEBF("No 'name' parameter in file read query");
-    gSensorPollingPaused = wasPaused;
+    pollResume();
     httpd_resp_set_type(req, "text/plain");
     httpd_resp_send(req, "Invalid filename", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
@@ -1764,7 +1782,7 @@ esp_err_t handleFileRead(httpd_req_t* req) {
   // which handles canRead, sensitive-extension blocks, and path traversal
   // in one place.
   if (isAdminOnlyPath(path) && !isAdminUser(ctx.user)) {
-    gSensorPollingPaused = wasPaused;
+    pollResume();
     httpd_resp_set_status(req, "403 Forbidden");
     httpd_resp_set_type(req, "text/plain");
     httpd_resp_send(req, "Forbidden: admin required", HTTPD_RESP_USE_STRLEN);
@@ -1780,7 +1798,7 @@ esp_err_t handleFileRead(httpd_req_t* req) {
   File f = VFS::openGuarded(path, "r", ctx);
   if (!f) {
     WARN_STORAGEF("File not found or access denied: %s", path.c_str());
-    gSensorPollingPaused = wasPaused;
+    pollResume();
     httpd_resp_set_type(req, "text/plain");
     httpd_resp_send(req, "File not found", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
@@ -1805,7 +1823,7 @@ esp_err_t handleFileRead(httpd_req_t* req) {
   DEBUG_STORAGEF("[handleFileRead] COMPLETE: Sent %d bytes in %d chunks", totalSent, chunkCount);
   
   // Resume sensor polling
-  gSensorPollingPaused = wasPaused;
+  pollResume();
   return ESP_OK;
 }
 
@@ -1987,21 +2005,20 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
   uint32_t heapStart = ESP.getFreeHeap();
   
   // Pause sensor polling during file upload to prevent I2C timeouts
-  bool wasPaused = gSensorPollingPaused;
-  gSensorPollingPaused = true;
+  pollPause();
   DEBUG_STORAGEF("[handleFileUpload] Sensor polling paused for upload");
 
   AuthContext ctx = makeWebAuthCtx(req);
   DEBUG_STORAGEF("[handleFileUpload] Auth check for user from IP: %s", ctx.ip.c_str());
   if (!tgRequireAuth(ctx)) {
-    gSensorPollingPaused = wasPaused;
+    pollResume();
     return ESP_OK;
   }
   DEBUG_STORAGEF("[handleFileUpload] Auth SUCCESS for user: %s", ctx.user.c_str());
 
   if (!filesystemReady) {
     DEBUG_STORAGEF("[handleFileUpload] ERROR: Filesystem not ready");
-    gSensorPollingPaused = wasPaused;
+    pollResume();
     sendJsonResponse(req, "{\"success\":false, \"error\":\"Filesystem not initialized\"}");
     return ESP_OK;
   }
@@ -2024,7 +2041,7 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
 
   // If the destination is SD but it isn't mounted, reject early with a clear message.
   if (uploadStorage == VFS::SDCARD && !VFS::isSDAvailable()) {
-    gSensorPollingPaused = wasPaused;
+    pollResume();
     sendJsonResponse(req, "{\"success\":false,\"error\":\"SD card not available\"}");
     return ESP_OK;
   }
@@ -2047,7 +2064,7 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
   // Check if estimated file size exceeds available space
   if (estimatedFileSize > maxFileSize) {
     DEBUG_STORAGEF("[handleFileUpload] ERROR: File too large for available space");
-    gSensorPollingPaused = wasPaused;
+    pollResume();
     httpd_resp_set_type(req, "application/json");
     char errBuf[128];
     snprintf(errBuf, sizeof(errBuf),
@@ -2081,7 +2098,7 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
   uint8_t* uploadOutBuf = (uint8_t*)ps_alloc(OUT_BUF_SIZE, AllocPref::PreferPSRAM);
   if (!uploadOutBuf) {
     DEBUG_STORAGEF("[handleFileUpload] ERROR: Failed to allocate output buffer");
-    gSensorPollingPaused = wasPaused;
+    pollResume();
     sendJsonResponse(req, "{\"success\":false, \"error\":\"Memory allocation failed\"}");
     return ESP_OK;
   }
@@ -2202,7 +2219,7 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
   char* uploadRecvBuf = (char*)ps_alloc(RECV_BUF_SIZE, AllocPref::PreferPSRAM);
   if (!uploadRecvBuf) {
     free(uploadOutBuf);
-    gSensorPollingPaused = wasPaused;
+    pollResume();
     DEBUG_STORAGEF("[handleFileUpload] ERROR: Failed to allocate recv buffer");
     sendJsonResponse(req, "{\"success\":false, \"error\":\"Memory allocation failed\"}");
     return ESP_OK;
@@ -2230,7 +2247,7 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
       }
       free(uploadOutBuf);
       free(uploadRecvBuf);
-      gSensorPollingPaused = wasPaused;
+      pollResume();
       sendJsonResponse(req, "{\"success\":false, \"error\":\"Recv error\"}");
       return ESP_OK;
     }
@@ -2396,7 +2413,7 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
     DEBUG_STORAGEF("[handleFileUpload] ERROR: %s (wrote %d / free %d)", reason, (int)totalWritten, (int)freeLimit);
     free(uploadOutBuf);
     free(uploadRecvBuf);
-    gSensorPollingPaused = wasPaused;
+    pollResume();
     httpd_resp_set_type(req, "application/json");
     char errBuf[128];
     snprintf(errBuf, sizeof(errBuf), "{\"success\":false,\"error\":\"%s\"}", reason);
@@ -2472,7 +2489,7 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
  #endif
 
   // Resume sensor polling after upload completes
-  gSensorPollingPaused = wasPaused;
+  pollResume();
   DEBUG_STORAGEF("[handleFileUpload] Sensor polling resumed");
 
   sendJsonResponse(req, "{\"success\":true}");
@@ -3164,8 +3181,11 @@ esp_err_t handleSystemStatus(httpd_req_t* req) {
   PSRAM_JSON_DOC(doc);
   buildSystemInfoJson(doc);
   
-  // Serialize to static buffer
-  EXT_RAM_BSS_ATTR static char sysJsonBuf[1024];
+  // Serialize to static buffer. Must comfortably exceed the full system JSON:
+  // base (~900 B) PLUS the connectivity.i2c deviceList (up to MAX_DEVICES=16
+  // entries ~50 B each). serializeJson silently TRUNCATES to fit, producing
+  // invalid JSON the dashboard can't parse — so keep generous headroom.
+  EXT_RAM_BSS_ATTR static char sysJsonBuf[4096];
   serializeJson(doc, sysJsonBuf, sizeof(sysJsonBuf));
 
   httpd_resp_send(req, sysJsonBuf, HTTPD_RESP_USE_STRLEN);
@@ -3987,19 +4007,18 @@ esp_err_t handleFileView(httpd_req_t* req) {
   DEBUG_STORAGEF("[handleFileView] ENTER heap=%u", (unsigned)ESP.getFreeHeap());
 
   // Pause sensor polling during file streaming to prevent I2C contention
-  bool wasPaused = gSensorPollingPaused;
-  gSensorPollingPaused = true;
+  pollPause();
 
   AuthContext ctx = makeWebAuthCtx(req);
   if (!tgRequireAuth(ctx)) {
-    gSensorPollingPaused = wasPaused;
+    pollResume();
     return ESP_OK;
   }
   DEBUG_STORAGEF("[handleFileView] After auth heap=%u", (unsigned)ESP.getFreeHeap());
 
   char query[256];
   if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
-    gSensorPollingPaused = wasPaused;
+    pollResume();
     httpd_resp_set_type(req, "text/plain");
     httpd_resp_send(req, "No filename specified", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
@@ -4007,7 +4026,7 @@ esp_err_t handleFileView(httpd_req_t* req) {
 
   char name[128];
   if (httpd_query_key_value(query, "name", name, sizeof(name)) != ESP_OK) {
-    gSensorPollingPaused = wasPaused;
+    pollResume();
     httpd_resp_set_type(req, "text/plain");
     httpd_resp_send(req, "Invalid filename", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
@@ -4031,7 +4050,7 @@ esp_err_t handleFileView(httpd_req_t* req) {
   path = decoded;
 
   if (isAdminOnlyPath(path) && !isAdminUser(ctx.user)) {
-    gSensorPollingPaused = wasPaused;
+    pollResume();
     httpd_resp_set_status(req, "403 Forbidden");
     httpd_resp_set_type(req, "text/plain");
     httpd_resp_send(req, "Forbidden: admin required", HTTPD_RESP_USE_STRLEN);
@@ -4091,7 +4110,7 @@ esp_err_t handleFileView(httpd_req_t* req) {
       httpd_resp_send_chunk(req, "Allocation failed", HTTPD_RESP_USE_STRLEN);
       httpd_resp_send_chunk(req, "</pre></body></html>", HTTPD_RESP_USE_STRLEN);
       httpd_resp_send_chunk(req, NULL, 0);
-      gSensorPollingPaused = wasPaused;
+      pollResume();
       return ESP_OK;
     }
 
@@ -4101,7 +4120,7 @@ esp_err_t handleFileView(httpd_req_t* req) {
     // .bin/.crt the rule table didn't explicitly admin-only.
     File file = VFS::openGuarded(path, "r", ctx);
     if (!file) {
-      gSensorPollingPaused = wasPaused;
+      pollResume();
       httpd_resp_set_type(req, "text/plain");
       httpd_resp_send(req, "File not found", HTTPD_RESP_USE_STRLEN);
       return ESP_OK;
@@ -4121,7 +4140,7 @@ esp_err_t handleFileView(httpd_req_t* req) {
       fsUnlock();
       httpd_resp_send_chunk(req, "</pre></body></html>", HTTPD_RESP_USE_STRLEN);
       httpd_resp_send_chunk(req, NULL, 0);  // end chunked response
-      gSensorPollingPaused = wasPaused;
+      pollResume();
       return ESP_OK;
     }
 
@@ -4192,7 +4211,7 @@ esp_err_t handleFileView(httpd_req_t* req) {
     flushOut(true);
     httpd_resp_send_chunk(req, "</pre></body></html>", HTTPD_RESP_USE_STRLEN);
     httpd_resp_send_chunk(req, NULL, 0);  // end chunked response
-    gSensorPollingPaused = wasPaused;
+    pollResume();
     return ESP_OK;
   }
 
@@ -4208,7 +4227,7 @@ esp_err_t handleFileView(httpd_req_t* req) {
   // sensitive-extension / role-based checks as openGuarded below.
   if (!VFS::existsGuarded(path, ctx)) {
     DEBUG_STORAGEF("[handleFileView] ERROR: File does not exist or access denied: %s", path.c_str());
-    gSensorPollingPaused = wasPaused;
+    pollResume();
     httpd_resp_set_type(req, "text/plain");
     httpd_resp_send(req, "File not found", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
@@ -4218,7 +4237,7 @@ esp_err_t handleFileView(httpd_req_t* req) {
   File file = VFS::openGuarded(path, "r", ctx);
   if (!file) {
     ERROR_STORAGEF("Failed to open file: %s", path.c_str());
-    gSensorPollingPaused = wasPaused;
+    pollResume();
     httpd_resp_set_type(req, "text/plain");
     httpd_resp_send(req, "Failed to open file", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
@@ -4248,7 +4267,7 @@ esp_err_t handleFileView(httpd_req_t* req) {
   char* viewBuf = (char*)ps_alloc(VIEW_BUF_SIZE, AllocPref::PreferPSRAM);
   if (!viewBuf) {
     file.close();
-    gSensorPollingPaused = wasPaused;
+    pollResume();
     DEBUG_STORAGEF("[handleFileView] ERROR: Failed to allocate view buffer");
     httpd_resp_set_type(req, "text/plain");
     httpd_resp_send(req, "Memory allocation failed", HTTPD_RESP_USE_STRLEN);
@@ -4292,7 +4311,7 @@ esp_err_t handleFileView(httpd_req_t* req) {
     free(viewBuf);
     httpd_resp_send_chunk(req, NULL, 0);
     DEBUG_STORAGEF("[handleFileView] Image sent: %d bytes in %d chunks, dur=%u ms", totalSent, chunkCount, (unsigned)(millis() - tVStart));
-    gSensorPollingPaused = wasPaused;
+    pollResume();
     return ESP_OK;
   }
 
@@ -4319,7 +4338,7 @@ esp_err_t handleFileView(httpd_req_t* req) {
       if (!buf) {
         file.close();
         free(viewBuf);
-        gSensorPollingPaused = wasPaused;
+        pollResume();
         DEBUG_STORAGEF("[handleFileView] ERROR: audio buf alloc failed (%d B)",
                        fileSize);
         httpd_resp_set_status(req, "500 Internal Server Error");
@@ -4338,7 +4357,7 @@ esp_err_t handleFileView(httpd_req_t* req) {
       free(buf);
       DEBUG_STORAGEF("[handleFileView] Audio sent: %d B in single shot, "
                      "dur=%u ms", (int)bytesRead, (unsigned)(millis() - tVStart));
-      gSensorPollingPaused = wasPaused;
+      pollResume();
       return ESP_OK;
     }
 
@@ -4360,7 +4379,7 @@ esp_err_t handleFileView(httpd_req_t* req) {
     DEBUG_STORAGEF("[handleFileView] Audio (chunked) sent: %d B in %d chunks, "
                    "dur=%u ms", (int)totalSent, chunkCount,
                    (unsigned)(millis() - tVStart));
-    gSensorPollingPaused = wasPaused;
+    pollResume();
     return ESP_OK;
   }
 
@@ -4389,7 +4408,7 @@ esp_err_t handleFileView(httpd_req_t* req) {
     free(viewBuf);
     httpd_resp_send_chunk(req, NULL, 0);
     DEBUG_STORAGEF("[handleFileView] Binary file sent: %d bytes in %d chunks, dur=%u ms", totalSent, chunkCount, (unsigned)(millis() - tVStart));
-    gSensorPollingPaused = wasPaused;
+    pollResume();
     return ESP_OK;
   }
 
@@ -4419,7 +4438,7 @@ esp_err_t handleFileView(httpd_req_t* req) {
   DEBUG_STORAGEF("[handleFileView] COMPLETE: Text file sent %d bytes in %d chunks (dur=%u ms)", totalSent, chunkCount, (unsigned)(millis() - tVStart));
   
   // Resume sensor polling
-  gSensorPollingPaused = wasPaused;
+  pollResume();
   return ESP_OK;
 }
 

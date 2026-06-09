@@ -9,6 +9,7 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <LittleFS.h>
+#include "WebServer_Handle.h"
 #include "System_VFS.h"   // VFS::*Guarded + systemAuth (Phase 2 perm refactor)
 
 #include "OLED_Display.h"
@@ -203,7 +204,6 @@ static bool serialWifiSelectionForRestore(String& outSSID) {
 // Migration restore handler registration (from WebServer_MigrationTool.cpp)
 #if ENABLE_MIGRATION_TOOL
 #include "WebServer_MigrationTool.h"
-extern httpd_handle_t server;
 #endif
 
 void firstTimeSetupIfNeeded() {

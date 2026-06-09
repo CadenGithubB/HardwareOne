@@ -1,6 +1,7 @@
 // OLED_Mode_System.cpp - System status, memory, and web stats display modes
 // Extracted from OLED_Display.cpp for modularity
 
+#include "WebServer_Handle.h"
 #include "OLED_Display.h"
 #include "System_BuildConfig.h"
 
@@ -138,7 +139,6 @@ void displayWebStats() {
   oledDisplay->println();
   
 #if ENABLE_HTTP_SERVER
-  extern httpd_handle_t server;
   extern unsigned long gServerStartTime;
   extern int gTotalSessions;
   extern int gFailedLoginAttempts;

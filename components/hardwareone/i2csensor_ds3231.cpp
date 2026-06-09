@@ -469,7 +469,7 @@ void rtcTask(void* pvParameters) {
     unsigned long now = millis();
 
     // Respect global polling pause (I2C bus recovery, scans, file I/O, etc.)
-    if (gSensorPollingPaused) {
+    if (pollPaused((uint8_t)gSettings.rtcBus)) {
       vTaskDelay(pdMS_TO_TICKS(100));
       continue;
     }

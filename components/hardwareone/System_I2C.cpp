@@ -167,8 +167,10 @@ void initI2CManager() {
 // Defaults to false; set correctly inside initI2CBuses() before any transactions run
 bool gI2CBusEnabled = false;
 
-// gSensorPollingPaused is defined in HardwareOne.cpp
-extern volatile bool gSensorPollingPaused;
+// The sensor-polling pause primitive (gSensorPollingPaused mirror + the
+// reference-counted pollPause/pollResume / sensorPolling* ops) moved to its own
+// module, System_PollPause.{h,cpp}. The API arrives here via System_I2C.h's
+// include of System_PollPause.h, so the readers and callers below are unchanged.
 
 // Queue processor task handle
 TaskHandle_t queueProcessorTask = nullptr;
@@ -232,6 +234,11 @@ const I2CSensorEntry i2cSensors[] = {
   
   // Detected Infrastructure (no CLI modules)
   { 0x3D, "SSD1306", "OLED 128x64 Display", "Adafruit", true, 0x3C, 0, NULL, NULL, NULL, 400000, 50 },
+#if BATTERY_BACKEND_FUEL_GAUGE
+  // On-board LiPo fuel gauge (battery backend, not a toggleable sensor) — listed
+  // so the I2C discovery scan probes 0x36 and names it instead of "Unknown".
+  { 0x36, "MAX17048", "LiPo Fuel Gauge", "Maxim", false, 0x00, 0, NULL, NULL, NULL, 400000, 100 },
+#endif
   { 0x40, "PCA9685", "16-Channel 12-bit PWM/Servo Driver", "Adafruit", true, 0x70, 0, "Adafruit_PWMServoDriver", "_ADAFRUIT_PWMSERVODRIVER_H_", NULL, 100000, 200 },
 };
 
@@ -958,18 +965,16 @@ static void scanBusForDevices(uint8_t busNumber) {
   TwoWire* wire = mgr->getWire(busNumber);
   if (!wire) return;
 
-  // Prevent concurrent I2C usage (e.g. gamepad/OLED tasks) while reinitializing/scanning
-  extern volatile bool gSensorPollingPaused;
+  // Prevent concurrent I2C usage (e.g. gamepad/OLED tasks) while reinitializing/
+  // scanning (RAII — resumes on every return path; System_PollPause.h).
   SemaphoreHandle_t busMutex = mgr->getBusMutex(busNumber);
-  bool prevPaused = gSensorPollingPaused;
-  gSensorPollingPaused = true;
+  PollPauseGuard pollGuard(busNumber);   // scope to the bus being scanned
 
   // Phase 1: Bus re-init under mutex (brief hold). Re-initializes from
   // the bus's settings pins (bus 0 = i2cSdaPin/SclPin; bus 1 = i2c2*).
   {
     bool locked = (busMutex && xSemaphoreTake(busMutex, pdMS_TO_TICKS(2000)) == pdTRUE);
     if (!locked) {
-      gSensorPollingPaused = prevPaused;
       return;
     }
 
@@ -998,8 +1003,7 @@ static void scanBusForDevices(uint8_t busNumber) {
       }
     }
   }
-
-  gSensorPollingPaused = prevPaused;
+  // pollGuard resumes sensor polling on return.
 }
 
 // Smart scan function - only checks specific addresses (used by discoverI2CDevices)
@@ -1009,17 +1013,15 @@ static void scanBusForDevicesSmart(uint8_t busNumber, const uint8_t* addresses, 
   TwoWire* wire = mgr->getWire(busNumber);
   if (!wire) return;
 
-  // Prevent concurrent I2C usage (e.g. gamepad/OLED tasks) while reinitializing/scanning
-  extern volatile bool gSensorPollingPaused;
+  // Prevent concurrent I2C usage (e.g. gamepad/OLED tasks) while reinitializing/
+  // scanning (RAII — resumes on every return path; System_PollPause.h).
   SemaphoreHandle_t busMutex = mgr->getBusMutex(busNumber);
-  bool prevPaused = gSensorPollingPaused;
-  gSensorPollingPaused = true;
+  PollPauseGuard pollGuard(busNumber);   // scope to the bus being scanned
 
   // Phase 1: Bus re-init under mutex (brief hold)
   {
     bool locked = (busMutex && xSemaphoreTake(busMutex, pdMS_TO_TICKS(2000)) == pdTRUE);
     if (!locked) {
-      gSensorPollingPaused = prevPaused;
       return;
     }
 
@@ -1053,8 +1055,7 @@ static void scanBusForDevicesSmart(uint8_t busNumber, const uint8_t* addresses, 
       }
     }
   }
-
-  gSensorPollingPaused = prevPaused;
+  // pollGuard resumes sensor polling on return.
 }
 
 
@@ -1082,31 +1083,31 @@ void discoverI2CDevices() {
       // Sensor has a header guard - check if it's defined
       // For now, assume all sensors with guards are compiled (compile-time check)
       // Runtime check would require preprocessor macros passed as runtime flags
-      #ifndef ENABLE_THERMAL_SENSOR
+      #if !ENABLE_THERMAL_SENSOR
         if (strcmp(i2cSensors[i].headerGuard, "_ADAFRUIT_MLX90640_H_") == 0) compiled = false;
       #endif
-      #ifndef ENABLE_TOF_SENSOR
+      #if !ENABLE_TOF_SENSOR
         if (strcmp(i2cSensors[i].headerGuard, "_VL53L4CX_CLASS_H_") == 0) compiled = false;
       #endif
-      #ifndef ENABLE_IMU_SENSOR
+      #if !ENABLE_IMU_SENSOR
         if (strcmp(i2cSensors[i].headerGuard, "_ADAFRUIT_BNO055_H_") == 0) compiled = false;
       #endif
-      #ifndef ENABLE_GAMEPAD_SENSOR
+      #if !ENABLE_GAMEPAD_SENSOR
         if (strcmp(i2cSensors[i].headerGuard, "_ADAFRUIT_SEESAW_H_") == 0) compiled = false;
       #endif
-      #ifndef ENABLE_APDS_SENSOR
+      #if !ENABLE_APDS_SENSOR
         if (strcmp(i2cSensors[i].headerGuard, "_ADAFRUIT_APDS9960_H_") == 0) compiled = false;
       #endif
-      #ifndef ENABLE_GPS_SENSOR
+      #if !ENABLE_GPS_SENSOR
         if (strcmp(i2cSensors[i].headerGuard, "_ADAFRUIT_GPS_H") == 0) compiled = false;
       #endif
-      #ifndef ENABLE_RTC_SENSOR
+      #if !ENABLE_RTC_SENSOR
         if (i2cSensors[i].moduleName && strcmp(i2cSensors[i].moduleName, "rtc") == 0) compiled = false;
       #endif
-      #ifndef ENABLE_FM_RADIO
+      #if !ENABLE_FM_RADIO
         if (i2cSensors[i].moduleName && strcmp(i2cSensors[i].moduleName, "fmradio") == 0) compiled = false;
       #endif
-      #ifndef ENABLE_PRESENCE_SENSOR
+      #if !ENABLE_PRESENCE_SENSOR
         if (i2cSensors[i].moduleName && strcmp(i2cSensors[i].moduleName, "presence") == 0) compiled = false;
       #endif
     }
@@ -2121,12 +2122,14 @@ void sensorQueueProcessorTask(void* param) {
       // Pause polling once for the entire batch of queued sensors.
       // This prevents already-running tasks (e.g. gamepad started during setup wizard)
       // from hammering the I2C bus with mutex timeouts while other sensors initialize.
-      bool batchPaused = false;
-      if (!gSensorPollingPaused) {
-        mgr->pausePolling();
-        INFO_I2C_AUTOSTARTF("Paused polling for sensor initialization batch");
-        batchPaused = true;
-      }
+      // Blanket-pause for the whole init batch (queued sensors span buses).
+      // Ref-counted, so it composes safely with any blanket/per-bus pause that
+      // is already active — no need to check first (the old `if
+      // (!gSensorPollingPaused)` guard would now misfire when only a per-bus
+      // pause is active). Uses the global primitive rather than
+      // mgr->pausePolling() so the i2cpause/i2cresume CLI latch is left alone.
+      pollPause();
+      INFO_I2C_AUTOSTARTF("Paused polling for sensor initialization batch");
 
       // Process all queued sensors in one batch while polling stays paused
       do {
@@ -2347,11 +2350,9 @@ void sensorQueueProcessorTask(void* param) {
 
       } while (mgr->dequeueDeviceStart(&req)); // drain entire batch
 
-      // Resume sensor polling after ALL queued sensors are initialized
-      if (batchPaused) {
-        mgr->resumePolling();
-        INFO_I2C_AUTOSTARTF("Resumed sensor polling after initialization batch");
-      }
+      // Resume sensor polling after ALL queued sensors are initialized.
+      pollResume();
+      INFO_I2C_AUTOSTARTF("Resumed sensor polling after initialization batch");
     } else {
       // Queue empty, sleep for a bit
       vTaskDelay(pdMS_TO_TICKS(100));

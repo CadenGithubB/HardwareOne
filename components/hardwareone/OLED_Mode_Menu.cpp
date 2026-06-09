@@ -188,7 +188,7 @@ void getCategoryItems(int categoryId, const OLEDMenuItem** outItems, int* outCou
 // isInRemoteSubmenu(); that subsystem is currently unreachable - nothing calls
 // buildRemoteSubmenu() - so the live launcher is just these two levels.)
 
-static OLEDScrollState sMainScroll;
+EXT_RAM_BSS_ATTR static OLEDScrollState sMainScroll;
 static bool sMainScrollInit = false;
 static char sCatLabels[8][20];  // "<Category> >" decorated labels (persist for line1 ptrs)
 
@@ -295,7 +295,7 @@ static void menuOnEnter(bool isForward) {
 // Sensor Menu - OLEDScrollState (split-pane, availability badge + status)
 // ============================================================================
 
-static OLEDScrollState sSensorScroll;
+EXT_RAM_BSS_ATTR static OLEDScrollState sSensorScroll;
 static bool sSensorScrollInit = false;
 
 static void sensorMenuPopulate() {

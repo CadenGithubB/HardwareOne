@@ -772,40 +772,33 @@ void getTimestampPrefixMsCached(char* out, size_t outSize) {
 bool readText(const char* path, String& out) {
   out = "";
 
-  // Pause sensor polling during file I/O to prevent I2C contention
-  extern volatile bool gSensorPollingPaused;
-  bool wasPaused = gSensorPollingPaused;
-  gSensorPollingPaused = true;
+  // Pause sensor polling during file I/O to prevent I2C contention (RAII —
+  // resumes on every return path; from System_PollPause.h via System_I2C.h).
+  PollPauseGuard pollGuard;
 
   FsLockGuard guard("readText");
   File f = VFS::open(String(path), "r");
   if (!f) {
-    gSensorPollingPaused = wasPaused;
     return false;
   }
   out = f.readString();
   f.close();
 
-  gSensorPollingPaused = wasPaused;
   return true;
 }
 
 bool writeText(const char* path, const String& in) {
-  extern volatile bool gSensorPollingPaused;
-  bool wasPaused = gSensorPollingPaused;
-  gSensorPollingPaused = true;
+  PollPauseGuard pollGuard;   // pause sensor polling during file I/O (RAII)
 
   FsLockGuard guard("writeText");
   File f = VFS::open(String(path), "w", true);
   if (!f) {
-    gSensorPollingPaused = wasPaused;
     return false;
   }
   f.print(in);
   f.flush();
   f.close();
 
-  gSensorPollingPaused = wasPaused;
   return true;
 }
 

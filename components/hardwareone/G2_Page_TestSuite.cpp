@@ -685,7 +685,7 @@ EXT_RAM_BSS_ATTR static const char* gRowPtrs[TEST_MAX_ROWS];
 // Animated Icons → SD pack list: full VFS paths under G2_ICON_ANIMATIONS_VFS_PATH
 // that contain frame_00.bmp (max 8), filled by buildImageAnimatedChooseRows().
 #define TS_ANIM_ICON_DIR_MAX 8
-static char        gAnimIconPickPaths[TS_ANIM_ICON_DIR_MAX][96];
+EXT_RAM_BSS_ATTR static char        gAnimIconPickPaths[TS_ANIM_ICON_DIR_MAX][96];
 static unsigned    gAnimIconPickCount;
 
 // Pagination state for char-test lists. One page var per paginated

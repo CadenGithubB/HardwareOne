@@ -45,6 +45,11 @@ bool handleSensorsInput(uint32_t buttons, JoystickNav& nav);
 bool handleNetworkInput(uint32_t buttons, JoystickNav& nav);
 bool handleSystemInput(uint32_t buttons, JoystickNav& nav, SetupWizardResult& result);
 
+// Conditional mode-picker page (WEBMODE -> HTTP/HTTPS, BTMODE -> Server/G2).
+// Self-contained blocking sub-flow (OLED + serial) navigated via the wizard's
+// page model. Called from runSetupWizard() when currentPage is one of those.
+void handleModePage(SetupWizardPage page, SetupWizardResult& result, bool& running);
+
 // Delegate to runSetupWizard() - kept for any existing call sites
 SetupWizardResult runOLEDSetupWizard();
 

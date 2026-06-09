@@ -10,11 +10,11 @@
 #include "HAL_Input.h"
 #include "System_Automation.h"
 #include "System_Settings.h"
+#include "OLED_Utils.h"   // executeOLEDCommand (was a local inline extern)
 
 // External references
 extern const char* AUTOMATIONS_JSON_FILE;
 extern bool oledMenuBack();
-extern void executeOLEDCommand(const String& argsInput);
 extern void broadcastOutput(const String& msg);
 
 // ============================================================================

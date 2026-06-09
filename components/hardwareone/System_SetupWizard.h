@@ -16,6 +16,8 @@
 
 enum SetupWizardPage {
   WIZARD_PAGE_FEATURES = 0,   // Network features (WiFi, HTTP, BT, ESP-NOW)
+  WIZARD_PAGE_WEBMODE,        // Web Interface: HTTP/HTTPS (conditional: Web Interface enabled)
+  WIZARD_PAGE_BTMODE,         // Bluetooth: Server/G2 (conditional: Bluetooth enabled)
   WIZARD_PAGE_SENSORS,        // Display + I2C sensors
   WIZARD_PAGE_NETWORK,        // Auto-start options, device name
   WIZARD_PAGE_SYSTEM,         // Time zone, log level, NTP, LED effect
@@ -75,6 +77,25 @@ struct TimezoneEntry {
   const char* name;
   int offsetMinutes;
 };
+
+// "Enable feature -> pick one of N modes" sub-choice, shared by BOTH wizard
+// engines (the blocking runSetupWizard FTS path and the non-blocking CLI-mode
+// `featuresetup` command) so the behaviour is identical. The table + accessors
+// live in System_SetupWizard.cpp; each engine just renders/handles them in its
+// own I/O style. Add a "toggle -> mode" feature with one row in kModeMenus[].
+struct WizardModeOption { const char* label; int value; };
+struct WizardModeMenu {
+  const char* featureId;          // matches the Features-page item id
+  const char* title;              // e.g. "Web Mode"
+  const WizardModeOption* modes;
+  uint8_t modeCount;
+  bool* boolSetting;              // exactly one of boolSetting/intSetting is set
+  int*  intSetting;
+};
+const WizardModeMenu* wizardModeMenuForFeature(const char* featureId);
+const WizardModeMenu* wizardModeMenuForPage(SetupWizardPage page);
+int  wizardModeCurrentIndex(const WizardModeMenu* m);   // index of current value
+void wizardModeApply(const WizardModeMenu* m, int idx); // write the bound setting
 
 // ============================================================================
 // Wizard State Access

@@ -59,7 +59,6 @@ static bool tofOLEDModeAvailable(String* outReason) {
 
 static void tofToggleConfirmed(void* userData) {
   (void)userData;
-  extern void executeOLEDCommand(const String& argsInput);
   if (gTofEnabled && gTofConnected) {
     executeOLEDCommand("closetof");
   } else {

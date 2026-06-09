@@ -106,7 +106,6 @@ static bool gpsOLEDModeAvailable(String* outReason) {
 
 static void gpsToggleConfirmed(void* userData) {
   (void)userData;
-  extern void executeOLEDCommand(const String& argsInput);
   if (gGpsEnabled && gGpsConnected) {
     executeOLEDCommand("closegps");
   } else {

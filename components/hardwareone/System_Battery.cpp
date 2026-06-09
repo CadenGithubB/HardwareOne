@@ -268,6 +268,18 @@ static void fuelGaugeBackendSample(BatteryState& state) {
     state.usbPresent = (r.cratePctPerHr > CHARGING_CRATE_THRESHOLD_PCT_HR)
                     || (r.voltage > USB_PRESENT_VOLTAGE_THRESHOLD);
   }
+
+  // "Topped off" clamp. The MAX17048's ModelGauge assumes a 4.20V full-charge
+  // point, but this board's charge IC terminates / floats the cell around
+  // ~4.17V — so the gauge's SOC plateaus a couple percent short and never
+  // reads 100%. When USB is present AND charging has terminated (not actively
+  // charging) AND the cell is sitting in the topped-off band, the pack is full
+  // for all practical purposes — report 100% so the UI matches the existing
+  // "USB (full)" state instead of sticking at 98%. Discharge and active-charge
+  // readings still come straight from the gauge's coulomb-counted SOC.
+  if (state.usbPresent && !state.isCharging && state.voltage >= VBAT_BAND_FULL) {
+    state.percentage = 100.0f;
+  }
 }
 
 #endif  // BATTERY_BACKEND_FUEL_GAUGE

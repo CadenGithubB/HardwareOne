@@ -468,7 +468,7 @@ void apdsTask(void* parameter) {
       }
     }
     
-    if (anyEnabled && gApdsConnected && !gSensorPollingPaused) {
+    if (anyEnabled && gApdsConnected && !pollPaused(0 /* legacy Wire1 = bus 0 */)) {
       unsigned long apdsPollMs = (gSettings.apdsDevicePollMs > 0) ? (unsigned long)gSettings.apdsDevicePollMs : 200;
       
       if ((nowMs - lastApdsRead) >= apdsPollMs) {

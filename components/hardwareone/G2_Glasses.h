@@ -478,6 +478,13 @@ extern volatile bool g2CamStreamSettingsExitRelaunch;
 bool g2ShowMicDetail();
 void g2MicDetailHandleTap(uint32_t idx);
 
+// Generic sensor-detail LIVE compound (all non-camera sensors). Spawns the
+// shared live-text worker with a render fn that CREATEs a selectable list
+// (back / Auto Start) + a live readout child, then per-tick UPDATE_TEXTs the
+// readout only (selection persists). Reuses the Sensors hijack page + tap
+// handler (no new page module). Entry: showSensorDetail() in G2_Page_Sensors.cpp.
+bool g2ShowSensorLive();
+
 // One-shot inter-fragment cadence override for the next sendPbFragmented
 // burst. 0 (or never calling) leaves the 20 ms default in place; any
 // other value applies to all fragments of the next multi-fragment send,

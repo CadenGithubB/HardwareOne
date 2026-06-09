@@ -42,10 +42,10 @@ extern char* gJsonResponseBuffer;
 // Track whether the running server is HTTPS (true) or HTTP (false)
 extern bool gServerIsHttps;
 
-// Global HTTP server handle (defined in HardwareOne.cpp)
-#if ENABLE_HTTP_SERVER
-extern httpd_handle_t server;
-#endif
+// Global HTTP server handle (defined in HardwareOne.cpp). Declaration lives in
+// the lightweight WebServer_Handle.h so non-web modules can get it without this
+// heavy header; re-exported here for back-compat.
+#include "WebServer_Handle.h"
 
 // ============================================================================
 // Web Server - HTTP server session and authentication functions

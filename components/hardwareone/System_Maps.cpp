@@ -291,22 +291,21 @@ bool MapCore::loadMapFile(const char* path) {
   unloadMap();
   
   // Pause sensor polling during file I/O to prevent I2C contention
-  bool wasPaused = gSensorPollingPaused;
-  gSensorPollingPaused = true;
+  pollPause();
   vTaskDelay(pdMS_TO_TICKS(50));  // Let any in-flight I2C complete
 
   FsLockGuard fsGuard("MapCore.loadMapFile");
   
   if (!VFS::existsGuarded(path, currentAuthContext())) {
     WARN_MAPSF("Map file not found: %s", path);
-    gSensorPollingPaused = wasPaused;
+    pollResume();
     return false;
   }
 
   File f = VFS::openGuarded(path, "r", currentAuthContext());
   if (!f) {
     ERROR_MAPSF("Failed to open map file: %s", path);
-    gSensorPollingPaused = wasPaused;
+    pollResume();
     return false;
   }
   
@@ -314,7 +313,7 @@ bool MapCore::loadMapFile(const char* path) {
   if (fileSize < sizeof(HWMapHeader)) {
     ERROR_MAPSF("Map file too small: %zu bytes", fileSize);
     f.close();
-    gSensorPollingPaused = wasPaused;
+    pollResume();
     return false;
   }
   
@@ -323,7 +322,7 @@ bool MapCore::loadMapFile(const char* path) {
   if (f.read((uint8_t*)&header, sizeof(header)) != sizeof(header)) {
     ERROR_MAPSF("Failed to read map header");
     f.close();
-    gSensorPollingPaused = wasPaused;
+    pollResume();
     return false;
   }
   
@@ -331,7 +330,7 @@ bool MapCore::loadMapFile(const char* path) {
   if (memcmp(header.magic, "HWMP", 4) != 0) {
     ERROR_MAPSF("Invalid map magic: %.4s", header.magic);
     f.close();
-    gSensorPollingPaused = wasPaused;
+    pollResume();
     return false;
   }
   
@@ -339,7 +338,7 @@ bool MapCore::loadMapFile(const char* path) {
   if (header.version != 6) {
     ERROR_MAPSF("Unsupported map version: %u (need v6)", header.version);
     f.close();
-    gSensorPollingPaused = wasPaused;
+    pollResume();
     return false;
   }
   
@@ -421,7 +420,7 @@ bool MapCore::loadMapFile(const char* path) {
     } else {
       ERROR_MAPSF("Failed to scan name table");
       f.close();
-      gSensorPollingPaused = wasPaused;
+      pollResume();
       unloadMap();
       return false;
     }
@@ -573,7 +572,7 @@ bool MapCore::loadMapFile(const char* path) {
   }
   if (!pool) {
     ERROR_MAPSF("Failed to allocate tile cache pool in PSRAM");
-    gSensorPollingPaused = wasPaused;
+    pollResume();
     unloadMap();
     return false;
   }
@@ -634,7 +633,7 @@ bool MapCore::loadMapFile(const char* path) {
   if (!slots) {
     free(pool);
     ERROR_MAPSF("Failed to allocate %u tile cache slot entries", totalSlots);
-    gSensorPollingPaused = wasPaused;
+    pollResume();
     unloadMap();
     return false;
   }
@@ -720,7 +719,7 @@ bool MapCore::loadMapFile(const char* path) {
   WaypointManager::loadWaypoints();
   
   // Resume sensor polling
-  gSensorPollingPaused = wasPaused;
+  pollResume();
   
   return true;
 }

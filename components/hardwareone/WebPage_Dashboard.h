@@ -339,6 +339,7 @@ inline void streamDashboardInner(httpd_req_t* req, const String& username) {
     "<div class='sys-card-row'><span>Devices:</span><strong id='conn-i2c-devices'>--</strong></div>"
     "<div class='sys-card-row'><span>Active:</span><strong id='conn-i2c-active'>--</strong></div>"
     "<div class='sys-card-row'><span>SDA / SCL:</span><strong id='conn-i2c-pins'>--</strong></div>"
+    "<div class='sys-card-row' style='align-items:flex-start'><span>Detected:</span><strong id='conn-i2c-devlist' style='text-align:right;font-size:0.82em;line-height:1.45'>--</strong></div>"
     "</div>",
     HTTPD_RESP_USE_STRLEN);
 #endif
@@ -424,6 +425,8 @@ inline void streamDashboardInner(httpd_req_t* req, const String& username) {
             "window.Dash.setText('conn-i2c-devices',(i2.devices!=null)?String(i2.devices)+' compiled':'--');"
             "window.Dash.setText('conn-i2c-active',(i2.activeDevices!=null)?String(i2.activeDevices):'--');"
             "window.Dash.setText('conn-i2c-pins',(i2.sdaPin!=null)?(i2.sdaPin+' / '+i2.sclPin):'--');"
+            "var dl=document.getElementById('conn-i2c-devlist');"
+            "if(dl){if(i2.deviceList&&i2.deviceList.length){dl.innerHTML=i2.deviceList.map(function(x){var a='0x'+(x.addr||0).toString(16).toUpperCase();var busTag=x.bus?' I2C2':' I2C1';return '<div>'+(x.name||'device')+' '+a+busTag+'</div>';}).join('');}else{dl.textContent='--';}}"
           "}"
           "if(c.llm){"
             "var ll=c.llm;"

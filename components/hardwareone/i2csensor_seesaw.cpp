@@ -470,7 +470,7 @@ void inputTask(void* parameter) {
                     gInputEnabled, gInputConnected, gSensorPollingPaused, gInputCache.dataValid);
     }
 
-    if (gInputEnabled && gInputConnected && !gSensorPollingPaused) {
+    if (gInputEnabled && gInputConnected && !pollPaused((uint8_t)gSettings.inputBus)) {
       unsigned long gamepadPollMs = (gSettings.inputDevicePollMs > 0) ? (unsigned long)gSettings.inputDevicePollMs : 90;
       if ((nowMs - lastGamepadRead) >= gamepadPollMs) {
         bool readSuccess = false;
@@ -478,13 +478,17 @@ void inputTask(void* parameter) {
         uint32_t intflags = 0;  // Hardware edge-latch: pins that had any transition since last read
         int rawX = 0, rawY = 0;
 
-        // Seesaw ATSAMD09 supports 400kHz I2C - faster transactions reduce bus hold time.
-        // 80ms timeout: must be < the gamepad bus's setTimeOut(100ms) so Wire aborts
-        // cleanly first. 3 reads × 80ms = 240ms worst case, well under
-        // CONFIG_ESP_INT_WDT_TIMEOUT_MS (1500ms).
-        // Bus-aware: routes mutex + clock to whichever bus the gamepad lives on.
+        // Poll at 100kHz (NOT the Seesaw's max 400kHz). The fast poll runs
+        // 40+ I2C transactions/sec on this bus; at 400kHz, under BLE radio
+        // coexistence (the controller is pinned to CPU0 with the I2C ISR), a
+        // marginal transaction can NACK/timeout and the legacy I2C driver
+        // re-arms the command from inside the ISR — an interrupt storm that
+        // trips the Int WDT. 100kHz (matching gamepad init) gives the timing
+        // margin to avoid that; the slower transaction is still <1ms.
+        // 80ms timeout: must be < the gamepad bus's setTimeOut(100ms) so Wire
+        // aborts cleanly first. Bus-aware: mutex + clock route to the gamepad's bus.
         const uint8_t gpBus = (uint8_t)gSettings.inputBus;
-        auto result = gGamepadSeesaw && i2cDeviceTransaction(gpBus, I2C_ADDR_GAMEPAD, 400000, 80, [&]() -> bool {
+        auto result = gGamepadSeesaw && i2cDeviceTransaction(gpBus, I2C_ADDR_GAMEPAD, 100000, 80, [&]() -> bool {
           // Exceptions are disabled (-fno-exceptions), so rely on return value only.
           // Read ONLY button pins, not all 32 GPIO pins - prevents garbage from unconfigured pins
           buttons = gGamepadSeesaw->digitalReadBulk(GAMEPAD_BUTTON_MASK);

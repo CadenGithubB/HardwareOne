@@ -3,6 +3,7 @@
 
 #include <Arduino.h>
 #include "System_BuildConfig.h"
+#include "System_Settings.h"   // gSettings.oledBus — used by the OLED_TRANSACTION macro
 
 // =============================================================================
 // OLED WRAPPER FUNCTIONS - Safe to call regardless of ENABLE_OLED_DISPLAY
@@ -336,11 +337,18 @@ MenuAvailability getMenuAvailability(OLEDMode mode, String* outReason);
 #define OLED_RESET -1
 #define OLED_I2C_ADDRESS 0x3D
 
-// Helper macro to wrap OLED operations in I2C transaction
-// Requires System_I2C.h for i2cDeviceTransactionVoid — include it before using this macro
+// Helper macro to wrap OLED operations in an I2C transaction.
+// Requires System_I2C.h (i2cDeviceTransactionVoid) and System_Settings.h
+// (gSettings.oledBus) in scope before use.
+//
+// Bus-aware: routes the per-bus mutex + clock to the OLED's configured bus
+// (gSettings.oledBus), matching HAL_Display's render path. The Adafruit SSD1306
+// object writes to its own TwoWire (the oledBus wire) internally regardless, so
+// the previous 4-arg legacy form (implicit bus 0) took the WRONG bus's mutex
+// when the OLED is on bus 1 (e.g. FeatherS3[D], I2C2) — fixed here.
 #ifndef OLED_TRANSACTION
 #define OLED_TRANSACTION(code) \
-  i2cDeviceTransactionVoid(OLED_I2C_ADDRESS, 400000, 500, [&]() { code; })
+  i2cDeviceTransactionVoid((uint8_t)gSettings.oledBus, OLED_I2C_ADDRESS, 400000, 500, [&]() { code; })
 #endif
 
 // OLED display object (now provided by Display_HAL.h as gDisplay)

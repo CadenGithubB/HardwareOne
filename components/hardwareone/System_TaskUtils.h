@@ -40,12 +40,13 @@ constexpr uint32_t IMU_STACK_WORDS = 4096;           // ~16KB (BNO055 init retri
 constexpr uint32_t TOF_STACK_WORDS = 3072;           // ~12KB
 constexpr uint32_t FMRADIO_STACK_WORDS = 4608;       // ~18KB
 constexpr uint32_t INPUT_STACK_WORDS = 3584;       // ~14KB
-constexpr uint32_t DEBUG_OUT_STACK_WORDS = 3584;     // ~14KB — was 16KB, trimmed 2KB for
-                                                     // DRAM-pressure relief. Boot HWM is
-                                                     // ~9KB → ~5KB headroom over peak burst
-                                                     // (LittleFS append + String work in
-                                                     // [ERROR] flood). Don't drop below 12KB
-                                                     // without reproducing the prior crash.
+constexpr uint32_t DEBUG_OUT_STACK_WORDS = 3072;     // ~12KB — was 14KB (orig 16KB), trimmed
+                                                     // again 2026-06-07 for ceiling relief.
+                                                     // Measured HWM ~9.3KB (with glasses
+                                                     // connected) → ~2.7KB headroom. 12KB is
+                                                     // the documented FLOOR — do NOT drop
+                                                     // below this (LittleFS append + String
+                                                     // work in [ERROR] flood crashed lower).
 constexpr uint32_t APDS_STACK_WORDS = 3072;          // ~12KB
 constexpr uint32_t GPS_STACK_WORDS = 3072;           // ~12KB
 constexpr uint32_t PRESENCE_STACK_WORDS = 3072;      // ~12KB

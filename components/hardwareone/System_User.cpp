@@ -3253,7 +3253,6 @@ static bool userSyncResolveDeviceNameOrMac(const String& deviceStr, uint8_t outM
   }
   
   // Try resolving as device name
-  extern EspNowState* gEspNow;
   if (!gEspNow) return false;
   
   for (int i = 0; i < gEspNow->deviceCount; i++) {
@@ -3278,7 +3277,6 @@ const char* cmd_user_sync(const String& argsInput) {
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   
   // Check if ESP-NOW is enabled
-  extern EspNowState* gEspNow;
   if (!gEspNow || !gEspNow->initialized) {
     return "Error: ESP-NOW not initialized";
   }

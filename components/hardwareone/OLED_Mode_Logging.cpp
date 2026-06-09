@@ -22,7 +22,7 @@
 LoggingMenuState loggingCurrentState = LOG_MENU_MAIN;
 int loggingMenuSelection = 0;
 static int loggingSensorConfigSelection = 0;
-static OLEDScrollState loggingConfigScroll;
+EXT_RAM_BSS_ATTR static OLEDScrollState loggingConfigScroll;
 
 // Menu items
 static const char* loggingMainMenuItems[] = {

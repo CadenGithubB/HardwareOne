@@ -1,3 +1,4 @@
+#include "WebServer_Handle.h"
 #include "OLED_Utils.h"
 #include "OLED_Display.h"
 #include <esp_app_desc.h>
@@ -87,6 +88,8 @@ bool shouldBlockForDisplayAuth() {
 #endif
 #if ENABLE_RTC_SENSOR
 #include "i2csensor_ds3231.h"
+#endif
+#if ENABLE_GPS_SENSOR
 #include "i2csensor_pa1010d.h"  // gGpsEnabled, gGpsConnected
 #endif
 
@@ -2419,7 +2422,6 @@ void drawOLEDFooter() {
     case OLED_WEB_STATS:
 #if ENABLE_HTTP_SERVER
       {
-        extern httpd_handle_t server;
         hints = server ? "X:Stop B:Back" : "X:Start B:Back";
       }
 #else
@@ -4531,7 +4533,6 @@ static void addSubmenuHeader(OLEDMenuItemEx* items, int& count, int maxItems, in
 // Helper: Load cached manifest for bonded peer
 // Returns empty string if not found
 static String loadCachedManifest() {
-  extern EspNowState* gEspNow;
   extern bool filesystemReady;
   
   if (!filesystemReady || !gEspNow || !gEspNow->lastRemoteCapValid) {
@@ -4567,7 +4568,6 @@ static String loadCachedManifest() {
 
 // Build submenu items for a given module from cached manifest
 void buildRemoteSubmenu(const char* submenuId) {
-  extern EspNowState* gEspNow;
   gRemoteSubmenuItemCount = 0;
   gRemoteSubmenuSelection = 0;
   strncpy(gRemoteSubmenuId, submenuId, sizeof(gRemoteSubmenuId) - 1);
@@ -4703,7 +4703,6 @@ const char* getRemoteSubmenuId() {
 
 // Load remote menu items from cached manifest - creates submenu headers for each CLI module
 static int loadRemoteMenuItems(OLEDMenuItemEx* items, int maxItems, int startIdx) {
-  extern EspNowState* gEspNow;
 
   DEBUG_DISPLAYF("[RMENU] loadRemoteMenuItems called: startIdx=%d maxItems=%d\n", startIdx, maxItems);
   if (!gSettings.bondModeEnabled) {
@@ -4926,7 +4925,7 @@ MenuAvailability getMenuAvailability(OLEDMode mode, String* outReason) {
       // Sensor modes - always allow navigation, display functions handle "not active" state
       // Block if the sensor is not built at compile time or not currently detected/connected
       case OLED_THERMAL_VISUAL:
-#ifndef ENABLE_THERMAL_SENSOR
+#if !ENABLE_THERMAL_SENSOR
         if (outReason) *outReason = "Not built";
         return MenuAvailability::NOT_BUILT;
 #else
@@ -4945,7 +4944,7 @@ MenuAvailability getMenuAvailability(OLEDMode mode, String* outReason) {
 #endif
 
     case OLED_FM_RADIO:
-#ifndef ENABLE_FM_RADIO
+#if !ENABLE_FM_RADIO
         if (outReason) *outReason = "Not built";
         return MenuAvailability::NOT_BUILT;
 #else
@@ -4964,7 +4963,7 @@ MenuAvailability getMenuAvailability(OLEDMode mode, String* outReason) {
 #endif
 
       case OLED_GPS_DATA:
-#ifndef ENABLE_GPS_SENSOR
+#if !ENABLE_GPS_SENSOR
         if (outReason) *outReason = "Not built";
         return MenuAvailability::NOT_BUILT;
 #else
@@ -4984,7 +4983,7 @@ MenuAvailability getMenuAvailability(OLEDMode mode, String* outReason) {
 #endif
 
       case OLED_IMU_ACTIONS:
-#ifndef ENABLE_IMU_SENSOR
+#if !ENABLE_IMU_SENSOR
         if (outReason) *outReason = "Not built";
         return MenuAvailability::NOT_BUILT;
 #else
@@ -5003,7 +5002,7 @@ MenuAvailability getMenuAvailability(OLEDMode mode, String* outReason) {
 #endif
 
       case OLED_TOF_DATA:
-#ifndef ENABLE_TOF_SENSOR
+#if !ENABLE_TOF_SENSOR
         if (outReason) *outReason = "Not built";
         return MenuAvailability::NOT_BUILT;
 #else
@@ -5022,7 +5021,7 @@ MenuAvailability getMenuAvailability(OLEDMode mode, String* outReason) {
 #endif
 
       case OLED_APDS_DATA:
-#ifndef ENABLE_APDS_SENSOR
+#if !ENABLE_APDS_SENSOR
         if (outReason) *outReason = "Not built";
         return MenuAvailability::NOT_BUILT;
 #else
@@ -5041,7 +5040,7 @@ MenuAvailability getMenuAvailability(OLEDMode mode, String* outReason) {
 #endif
 
       case OLED_GAMEPAD_VISUAL:
-#ifndef ENABLE_GAMEPAD_SENSOR
+#if !ENABLE_GAMEPAD_SENSOR
         if (outReason) *outReason = "Not built";
         return MenuAvailability::NOT_BUILT;
 #else
@@ -5060,7 +5059,7 @@ MenuAvailability getMenuAvailability(OLEDMode mode, String* outReason) {
 #endif
 
       case OLED_RTC_DATA:
-#ifndef ENABLE_RTC_SENSOR
+#if !ENABLE_RTC_SENSOR
         if (outReason) *outReason = "Not built";
         return MenuAvailability::NOT_BUILT;
 #else
@@ -5114,13 +5113,12 @@ MenuAvailability getMenuAvailability(OLEDMode mode, String* outReason) {
 #endif
 
     case OLED_WEB_STATS:
-#ifndef ENABLE_WIFI
+#if !ENABLE_WIFI
       if (outReason) *outReason = "Not built";
       return MenuAvailability::NOT_BUILT;
 #endif
       // Check if HTTP server is running
       {
-        extern httpd_handle_t server;
         if (!server) {
           if (outReason) *outReason = "Disabled\nRun: openhttp";
           return MenuAvailability::FEATURE_DISABLED;
@@ -5288,7 +5286,6 @@ const char* oledGetDataSourceLabel() {
 
 bool oledRemoteSourceAvailable() {
 #if ENABLE_BONDED_MODE
-  extern EspNowState* gEspNow;
   return gSettings.bondModeEnabled && 
          gEspNow && gEspNow->initialized && 
          gEspNow->bondPeerOnline;
@@ -5508,7 +5505,6 @@ void handleOLEDActionButton() {
 #if ENABLE_HTTP_SERVER
       {
         // Toggle HTTP server with confirmation
-        extern httpd_handle_t server;
         static auto httpStopConfirmedWebStats = [](void* userData) {
           (void)userData;
           executeOLEDCommand("closehttp");
@@ -6046,8 +6042,10 @@ void tryAutoStartInputForMenu() {
 #else
   uint8_t inputAddr = I2C_ADDR_GAMEPAD;
 #endif
-  bool pingResult = i2cPingAddress(inputAddr, 100000, 50);
-  DEBUG_DISPLAYF("[INPUT_AUTO] I2C ping 0x%02X result: %d\n", inputAddr, pingResult);
+  // Ping on the input device's CONFIGURED bus (was implicit bus 0 — would miss
+  // an input device on bus 1). The device-start queue then routes to the same bus.
+  bool pingResult = i2cPingAddress(inputAddr, 100000, 50, (uint8_t)gSettings.inputBus);
+  DEBUG_DISPLAYF("[INPUT_AUTO] I2C ping 0x%02X on bus %d result: %d\n", inputAddr, gSettings.inputBus, pingResult);
   if (pingResult) {
     // Input device detected — try to start it via the shared queue slot.
     bool inQueue = isInQueue(I2C_DEVICE_INPUT);

@@ -286,7 +286,7 @@ void fmRadioTask(void* parameter) {
     }
     
     // Skip polling if sensor polling is paused (to avoid I2C bus conflicts)
-    if (gSensorPollingPaused) {
+    if (pollPaused((uint8_t)gSettings.fmRadioBus)) {
       if (loopCount % 20 == 0) {  // Log every 10 seconds when paused
         DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO_TASK] Sensor polling paused, waiting (loop %lu)", loopCount);
       }
@@ -405,7 +405,7 @@ void updateFMRadio() {
   }
   
   // Skip polling if sensor polling is paused (to avoid I2C bus conflicts)
-  if (gSensorPollingPaused) {
+  if (pollPaused((uint8_t)gSettings.fmRadioBus)) {
     return;  // Don't log this - too frequent
   }
   

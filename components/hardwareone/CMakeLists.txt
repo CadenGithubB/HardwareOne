@@ -183,6 +183,7 @@ set(hardwareone_srcs
         System_FirstTimeSetup.cpp
         System_I2C.cpp
         System_I2C_Manager.cpp
+        System_PollPause.cpp
         System_Icons.cpp
         HAL_Input.cpp
         HAL_Display.cpp

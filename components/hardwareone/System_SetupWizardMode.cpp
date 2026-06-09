@@ -59,6 +59,11 @@ enum class WizardSubMode : uint8_t {
   PAGE_SYSTEM,
   PAGE_SYSTEM_DEVICENAME,   // detour after user picks "Device Name" item
 
+  // Web Interface / Bluetooth mode picker (one numbered choice). Shared mode
+  // table with the FTS engine — see System_SetupWizard.cpp wizardModeMenu*.
+  PAGE_WEBMODE,
+  PAGE_BTMODE,
+
   // ESP-NOW identity page (linear field walk)
   ESPNOW_INTRO,             // c=Configure / n=Skip / b=Back
   ESPNOW_NAME,
@@ -134,6 +139,8 @@ static void paintHeader() {
 static WizardSubMode subModeForPage(SetupWizardPage page) {
   switch (page) {
     case WIZARD_PAGE_FEATURES: return WizardSubMode::PAGE_FEATURES;
+    case WIZARD_PAGE_WEBMODE:  return WizardSubMode::PAGE_WEBMODE;
+    case WIZARD_PAGE_BTMODE:   return WizardSubMode::PAGE_BTMODE;
     case WIZARD_PAGE_SENSORS:  return WizardSubMode::PAGE_SENSORS;
     case WIZARD_PAGE_NETWORK:  return WizardSubMode::PAGE_NETWORK;
     case WIZARD_PAGE_SYSTEM:   return WizardSubMode::PAGE_SYSTEM;
@@ -160,6 +167,28 @@ static const char* paintAfterTransition() {
       static char prompt[80];
       snprintf(prompt, sizeof(prompt), "Device Name [%s]: ", getWizardDeviceName());
       return prompt;
+    }
+
+    case WizardSubMode::PAGE_WEBMODE:
+    case WizardSubMode::PAGE_BTMODE: {
+      SetupWizardPage page = getWizardCurrentPage();
+      const WizardModeMenu* m = wizardModeMenuForPage(page);
+      if (m) {
+        char header[80];
+        snprintf(header, sizeof(header), "=== %s (SETUP %d/%d) ===", m->title,
+                 getWizardPageNumber(page), getWizardTotalPages());
+        broadcastOutput("");
+        broadcastOutput(header);
+        int curIdx = wizardModeCurrentIndex(m);
+        for (int i = 0; i < m->modeCount; i++) {
+          char ln[64];
+          snprintf(ln, sizeof(ln), " %d. [%s] %s", i + 1,
+                   i == curIdx ? "X" : " ", m->modes[i].label);
+          broadcastOutput(ln);
+        }
+        broadcastOutput("----------------------------------------");
+      }
+      return "Enter number to select, 'n' to keep current, 'b' back: ";
     }
 
     case WizardSubMode::ESPNOW_INTRO: {
@@ -272,6 +301,8 @@ static CLIModeInputResult dispatchMQTT(const String& line,
                                        char* out, size_t outSize);
 static CLIModeInputResult dispatchWiFi(const String& line,
                                        char* out, size_t outSize);
+static CLIModeInputResult dispatchModePage(const String& line,
+                                           char* out, size_t outSize);
 
 // Tail-paint helper: after a state transition, render the prompt for the
 // new sub-mode and stuff it into `out` for the dispatcher to return to
@@ -309,6 +340,10 @@ static CLIModeInputResult wizardMode_onInput(const String& line, void* /*ud*/,
     case WizardSubMode::PAGE_NETWORK:
     case WizardSubMode::PAGE_SYSTEM:
       return dispatchTopLevelPage(line, out, outSize);
+
+    case WizardSubMode::PAGE_WEBMODE:
+    case WizardSubMode::PAGE_BTMODE:
+      return dispatchModePage(line, out, outSize);
 
     case WizardSubMode::PAGE_SYSTEM_DEVICENAME: {
       String name = line;
@@ -401,6 +436,46 @@ static CLIModeInputResult dispatchTopLevelPage(const String& line,
 
   snprintf(out, outSize, "Unrecognized input. Use 'n' (next), 'b' (back), "
                          "a number to toggle/select, or 'cancel' to abort the wizard.");
+  return CLI_MODE_HANDLED;
+}
+
+// ---------- Web / Bluetooth mode-picker page (one numbered choice) ----------
+static CLIModeInputResult dispatchModePage(const String& line,
+                                           char* out, size_t outSize) {
+  String lc = line; lc.toLowerCase(); lc.trim();
+  const WizardModeMenu* m = wizardModeMenuForPage(getWizardCurrentPage());
+
+  if (lc == "b" || lc == "back") {
+    wizardPrevPage();
+    sWizard.subMode = subModeForPage(getWizardCurrentPage());
+    appendPromptTo(out, outSize);
+    return CLI_MODE_HANDLED;
+  }
+
+  if (lc == "n" || lc == "next") {
+    // Advance, committing whatever mode is currently selected.
+    if (!wizardNextPage(sWizard.result)) {
+      sWizard.result.completed = true;
+      snprintf(out, outSize, "Feature configuration complete.");
+      return CLI_MODE_HANDLED_AND_EXIT;
+    }
+    sWizard.subMode = subModeForPage(getWizardCurrentPage());
+    appendPromptTo(out, outSize);
+    return CLI_MODE_HANDLED;
+  }
+
+  // Numeric: SELECT that mode and STAY on the page (re-render shows the moved
+  // [X]) — exactly like the feature/sensor pages' toggle-and-stay. Advancing is
+  // 'n'/'next' only, matching the page's "# to select, 'n' next" hint. (Was:
+  // select-and-auto-advance, which was the odd-one-out in the wizard.)
+  int num = lc.toInt();
+  if (m && num >= 1 && num <= m->modeCount) {
+    wizardModeApply(m, num - 1);
+    appendPromptTo(out, outSize);
+    return CLI_MODE_HANDLED;
+  }
+
+  snprintf(out, outSize, "Enter a mode number to select, 'n' for next, or 'b' for back.");
   return CLI_MODE_HANDLED;
 }
 

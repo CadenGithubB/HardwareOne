@@ -20,6 +20,9 @@
 #include "System_Debug.h"
 #include "System_FeatureRegistry.h"     // getFeatureById, FeatureEntry
 #include "System_Settings.h"            // setSetting, gSettings
+#include "System_Mutex.h"               // SensorCacheGuard (was pulled in transitively via
+                                        // i2csensor_* headers; include directly so it survives
+                                        // disabling individual sensors)
 #include "G2_HijackCmd.h"               // g2SubmitHijackCommand — Group A migration
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
@@ -46,6 +49,14 @@
 #endif
 #if ENABLE_GAMEPAD_SENSOR
 #include "i2csensor_seesaw.h"     // gInputCache + gInputEnabled / gInputConnected
+#endif
+#if ENABLE_ANO_ENCODER
+#include "i2csensor_ano_encoder.h" // gAnoEncoderCache + ANO_BTN_* + axis consts
+// The ANO driver defines these gamepad-shaped proxies (kept in sync with
+// gAnoEncoderEnabled/Connected) but, unlike the seesaw header, doesn't export
+// them — declare them here for the input row's enabled/connected state.
+extern bool gInputEnabled;
+extern bool gInputConnected;
 #endif
 #if ENABLE_APDS_SENSOR
 #include "i2csensor_apds9960.h"   // gApdsCache + gApdsEnabled / gApdsConnected
@@ -153,16 +164,20 @@ static void apdsG2FormatValue(char* out, size_t cap) {
 
 #if ENABLE_GAMEPAD_SENSOR
 static void gamepadG2FormatValue(char* out, size_t cap) {
+  // Landing-list overview value — kept generic ("ready"). Raw button hex was
+  // unreadable here; the specific Joy X / Joy Y / Btns readout lives in the
+  // sensor's live page (g2BuildSensorReadout).
   SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(5), "g2.gamepadFormat");
-  if (g.held) {
-    if (gInputCache.dataValid) {
-      snprintf(out, cap, "btn:%lx", (unsigned long)gInputCache.buttons);
-    } else {
-      snprintf(out, cap, "...");
-    }
-  } else {
-    snprintf(out, cap, "busy");
-  }
+  snprintf(out, cap, (g.held && gInputCache.dataValid) ? "ready" : "...");
+}
+#endif
+
+#if ENABLE_ANO_ENCODER
+static void anoG2FormatValue(char* out, size_t cap) {
+  // Landing-list overview value — kept generic ("ready"). The live wheel /
+  // D-pad readout lives in the sensor's live page (g2BuildAnoArt).
+  SensorCacheGuard g(gAnoEncoderCache.mutex, pdMS_TO_TICKS(5), "g2.anoFormat");
+  snprintf(out, cap, (g.held && gAnoEncoderCache.dataValid) ? "ready" : "...");
 }
 #endif
 
@@ -316,6 +331,11 @@ static void buildRows(G2SensorRow* rows, size_t maxRows, size_t* outCount,
 
 #if ENABLE_GAMEPAD_SENSOR
   add("GAMEP", "Seesaw",   "gamepad",  true,  gInputEnabled,  gInputConnected, gamepadG2FormatValue);
+#elif ENABLE_ANO_ENCODER
+  // Same row id ("gamepad") so the unified input commands (openinput /
+  // inputautostart) and the registry remap to "input" keep working; only the
+  // label, hardware name, formatter and live readout differ for the ANO.
+  add("ANO",   "Encoder",  "gamepad",  true,  gInputEnabled,  gInputConnected, anoG2FormatValue);
 #else
   add("GAMEP", "Seesaw",   "gamepad",  false, false, false,                         nullptr);
 #endif
@@ -460,7 +480,8 @@ bool g2ShowSensorList() {
 
 enum SensorsLevel : uint8_t {
   SENSORS_LEVEL_LIST   = 0,
-  SENSORS_LEVEL_DETAIL = 1,
+  SENSORS_LEVEL_DETAIL = 1,   // camera (static multi-action list)
+  SENSORS_LEVEL_LIVE   = 2,   // generic non-camera sensor: live readout compound
 };
 static SensorsLevel gSensorsLevel    = SENSORS_LEVEL_LIST;
 static size_t       gSensorsDetailIdx = 0;   // index into the LIST-level rows
@@ -482,7 +503,7 @@ static uint32_t           sSensorsDetailToggleLastMs     = 0;
 // buildRows() max output.
 #define SENSORS_MAX_ROWS  16
 #define SENSORS_ROW_LEN   40
-static char        gSensorsRows[SENSORS_MAX_ROWS][SENSORS_ROW_LEN];
+EXT_RAM_BSS_ATTR static char        gSensorsRows[SENSORS_MAX_ROWS][SENSORS_ROW_LEN];
 static const char* gSensorsRowPtrs[SENSORS_MAX_ROWS];
 
 // Format a list-level row: "IMU   on" / "TOF   missing" / etc. The
@@ -557,6 +578,25 @@ void g2ShowSensorsMenu() {
 //   2: <hardware name> (e.g. BNO055 — info-only)
 //   3: <label>: <live value> | <state word>
 static void showSensorDetail(const G2SensorRow& r) {
+#if ENABLE_CAMERA_SENSOR
+  const bool isCameraLive = (strcmp(r.featureId, "camera") == 0);
+#else
+  const bool isCameraLive = false;
+#endif
+  // Non-camera sensors render as a LIVE compound (selectable list + a per-tick
+  // live readout) instead of the static list built below. Camera keeps its
+  // multi-action static detail (Capture/Stream/Settings). The DETAIL-level tap
+  // routing (idx 0 = back, idx 1 = Auto-Start toggle) is reused as-is, so we
+  // set the level + hijack page here before spawning the live worker. On spawn
+  // failure we fall through to the static render so the page never goes blank.
+  if (!isCameraLive) {
+    gSensorsLevel = SENSORS_LEVEL_LIVE;
+    g2SetHijackPage(G2_HIJACK_PAGE_SENSORS);
+    if (g2ShowSensorLive()) return;
+    DEBUG_G2F("[G2] sensor-live start failed for '%s' — static detail fallback",
+              r.label);
+    gSensorsLevel = SENSORS_LEVEL_DETAIL;  // fall through to static render
+  }
   size_t out = 0;
   strncpy(gSensorsRows[out], "<- Sensors", SENSORS_ROW_LEN - 1);
   gSensorsRows[out][SENSORS_ROW_LEN - 1] = '\0';
@@ -689,6 +729,434 @@ static void showSensorDetail(const G2SensorRow& r) {
             isCamera ? "camera" : "generic");
 }
 
+// Map a G2 sensor-row featureId to its feature-registry entry. The input
+// device's row id is "gamepad", but the registry entry is the unified "input"
+// (gamepad/ANO) entry that owns gSettings.inputAutoStart — so remap it.
+// Everything else matches the registry id 1:1.
+static const FeatureEntry* sensorFeature(const char* featureId) {
+  if (featureId && strcmp(featureId, "gamepad") == 0) return getFeatureById("input");
+  return getFeatureById(featureId);
+}
+
+// Build a sensor's runtime start/stop CLI command. Most i2c sensors use
+// open<id>/close<id>; the input device is the exception (openinput/closeinput),
+// and FM radio uses open/closefm.
+static void sensorRuntimeCmd(const char* featureId, bool open, char* out, size_t cap) {
+  const char* verb = open ? "open" : "close";
+  if (strcmp(featureId, "gamepad") == 0)       snprintf(out, cap, "%sinput", verb);
+  else if (strcmp(featureId, "fmradio") == 0)  snprintf(out, cap, "%sfm", verb);
+  else                                         snprintf(out, cap, "%s%s", verb, featureId);
+}
+
+// Build a sensor's PERSISTED auto-start command. The command + value format
+// vary by device: the input device uses inputautostart, camera/mic their own
+// autostart commands, OLED uses "oledenabled <1|0>" (it has no autostart cmd —
+// gSettings.oledEnabled IS the boot state), and the i2c data sensors use
+// "sensorautostart <id> <on|off>". Using the generic form for OLED is what
+// produced "Unknown sensor".
+static void sensorAutostartCmd(const char* featureId, bool on, char* out, size_t cap) {
+  const char* v = on ? "on" : "off";
+  if (strcmp(featureId, "gamepad") == 0)        snprintf(out, cap, "inputautostart %s", v);
+  else if (strcmp(featureId, "camera") == 0)    snprintf(out, cap, "cameraautostart %s", v);
+  else if (strcmp(featureId, "microphone") == 0)snprintf(out, cap, "micautostart %s", v);
+  else if (strcmp(featureId, "oled") == 0)      snprintf(out, cap, "oledenabled %d", on ? 1 : 0);
+  else                                          snprintf(out, cap, "sensorautostart %s %s", featureId, v);
+}
+
+#if ENABLE_GAMEPAD_SENSOR
+// Render one diamond button into a fixed 3-char field: "[X]" pressed,
+// " X " released — equal width keeps the ASCII layout aligned.
+static void gpCell(bool pressed, char letter, char* dst4) {
+  dst4[0] = pressed ? '[' : ' ';
+  dst4[1] = letter;
+  dst4[2] = pressed ? ']' : ' ';
+  dst4[3] = '\0';
+}
+
+// ASCII-art gamepad for the live readout — a 3x3 joystick grid (the 'o' moves
+// with the stick), an X/Y/A/B diamond, and Sel/Start, echoing the web card.
+// Buttons are active-low (bit clear == pressed). Joystick is raw 0..1023,
+// centre ~512; the trailing "x.. y.." line is for tuning the deadzone /
+// up-down-left-right mapping (tell me if a direction is flipped).
+static void g2BuildGamepadArt(char* out, size_t cap) {
+  SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(5), "g2.gamepadArt");
+  if (!(g.held && gInputCache.dataValid)) {
+    snprintf(out, cap, "Gamepad\n(reading...)");
+    return;
+  }
+  const uint32_t b = gInputCache.buttons;
+  char X[4], Y[4], A[4], B[4];
+  gpCell((b & GAMEPAD_BUTTON_X) == 0, 'X', X);
+  gpCell((b & GAMEPAD_BUTTON_Y) == 0, 'Y', Y);
+  gpCell((b & GAMEPAD_BUTTON_A) == 0, 'A', A);
+  gpCell((b & GAMEPAD_BUTTON_B) == 0, 'B', B);
+  const char* sel = ((b & GAMEPAD_BUTTON_SELECT) == 0) ? "[Sel]" : " Sel ";
+  const char* sta = ((b & GAMEPAD_BUTTON_START)  == 0) ? "[Start]" : " Start ";
+
+  // Joystick zone grid. GRID×GRID zones via an even linear split of the raw
+  // 0..1023 range — finer = more accurate. Columns are spaced (". . ." not
+  // "...") so the dot pattern is ~square on the lens: the font's line-height
+  // is ~1.7x the char width, so without horizontal spacing GRID columns render
+  // much narrower than GRID rows are tall. Bump GRID to taste.
+  constexpr int GRID = 5;
+  constexpr int DOT_GAP = 3;                        // spaces between dots — squares the grid
+  constexpr int GW = GRID + (GRID - 1) * DOT_GAP;   // grid-line width in chars
+  auto zone = [](int v) {
+    int z = (v * GRID) / 1024;
+    return z < 0 ? 0 : (z >= GRID ? GRID - 1 : z);
+  };
+  const int col = zone(gInputCache.joyX);
+  const int row = (GRID - 1) - zone(gInputCache.joyY);   // invert Y: up = top
+
+  // Sel/Start get their own header line (off the diamond) so X/Y/A/B can be a
+  // roomy, evenly-spaced diamond beside the centre rows of the zone grid:
+  //    [Sel]   [Start]
+  //   . . . . .
+  //   . . . . .     X
+  //   . . o . .   Y     A
+  //   . . . . .     B
+  //   . . . . .
+  size_t off = 0;
+  if (off < cap) off += snprintf(out + off, cap - off, " %s   %s\n", sel, sta);
+  for (int r = 0; r < GRID; r++) {
+    // Dots spaced DOT_GAP apart so the grid reads ~square (the lens font's
+    // line-height spans several char-widths, so unspaced columns look skinny).
+    char gline[GW + 1];
+    for (int k = 0; k < GW; k++) gline[k] = ' ';
+    for (int c = 0; c < GRID; c++) gline[c * (1 + DOT_GAP)] = (r == row && c == col) ? 'o' : '.';
+    gline[GW] = '\0';
+
+    // X/Y/A/B as a roomy diamond beside the grid's centre rows (X top, Y/A
+    // spread, B bottom — spread wide so it doesn't collapse to a vertical line).
+    char seg[24] = "";
+    if      (r == 1) snprintf(seg, sizeof seg, "    %s", X);         //       X    (top)
+    else if (r == 2) snprintf(seg, sizeof seg, "%s    %s", Y, A);    //   Y     A  (mid)
+    else if (r == 3) snprintf(seg, sizeof seg, "    %s", B);         //       B    (bottom)
+
+    if (off < cap) off += snprintf(out + off, cap - off, "%s  %s\n", gline, seg);
+  }
+  if (off < cap) snprintf(out + off, cap - off, "x%d y%d", gInputCache.joyX, gInputCache.joyY);
+}
+#endif  // ENABLE_GAMEPAD_SENSOR
+
+#if ENABLE_ANO_ENCODER
+// Render one button into a fixed 3-char field: "[U]" pressed, " U " released —
+// equal width keeps the cross aligned (mirror of the gamepad's gpCell).
+static void anoCell(bool pressed, char letter, char* dst4) {
+  dst4[0] = pressed ? '[' : ' ';
+  dst4[1] = letter;
+  dst4[2] = pressed ? ']' : ' ';
+  dst4[3] = '\0';
+}
+
+// ASCII-art ANO rotary encoder for the live readout — the rotary wheel (live
+// absolute position, which axis it drives, and spin direction) over a 5-way
+// D-pad cross (Up/Down/Left/Right + centre IN press) plus the virtual START
+// chord, echoing the gamepad card's structure. Buttons are active-high in the
+// ANO_BTN_* layout. The trailing "d.. b.." line is raw tuning info.
+//   Wheel:42 +  axis:V
+//        [U]
+//    [L] [O] [R]
+//        [D]
+//       [Start]
+//   d+1 b0x02
+static void g2BuildAnoArt(char* out, size_t cap) {
+  SensorCacheGuard g(gAnoEncoderCache.mutex, pdMS_TO_TICKS(5), "g2.anoArt");
+  if (!(g.held && gAnoEncoderCache.dataValid)) {
+    snprintf(out, cap, "Encoder\n(reading...)");
+    return;
+  }
+  const long     pos  = (long)gAnoEncoderCache.encoderPosition;
+  const uint32_t b    = gAnoEncoderCache.buttons;
+  const uint8_t  axis = gAnoEncoderCache.currentAxis;
+
+  // Spin direction since the last render. Unlike a joystick the wheel has no
+  // absolute "rest" position — movement is the signal — so we diff against the
+  // previous render. The static cache survives across the 1 Hz live ticks;
+  // the first render after open shows no direction.
+  static long sLastPos = 0;
+  static bool sHavePos = false;
+  char dir = ' ';
+  if (sHavePos) dir = (pos > sLastPos) ? '+' : (pos < sLastPos) ? '-' : ' ';
+  sLastPos = pos;
+  sHavePos = true;
+
+  char U[4], D[4], L[4], R[4], C[4];
+  anoCell(b & ANO_BTN_UP,    'U', U);
+  anoCell(b & ANO_BTN_DOWN,  'D', D);
+  anoCell(b & ANO_BTN_LEFT,  'L', L);
+  anoCell(b & ANO_BTN_RIGHT, 'R', R);
+  anoCell(b & ANO_BTN_IN,    'O', C);   // centre / select press
+  const char* start = (b & ANO_VIRT_START) ? "[Start]" : " Start ";
+
+  snprintf(out, cap,
+           "Wheel:%ld %c  axis:%c\n"
+           "    %s\n"
+           "%s %s %s\n"
+           "    %s\n"
+           "   %s\n"
+           "d%+ld b0x%02lX",
+           pos, dir, (axis == ANO_AXIS_HORIZONTAL) ? 'H' : 'V',
+           U,
+           L, C, R,
+           D,
+           start,
+           (long)gAnoEncoderCache.encoderDelta, (unsigned long)(b & 0xFFu));
+}
+#endif  // ENABLE_ANO_ENCODER
+
+#if ENABLE_RTC_SENSOR
+// Dedicated multi-line RTC readout — weekday + full date, HH:MM:SS (the live
+// page ticks at 1 Hz, so the seconds advance), and the chip temperature.
+// Richer than rtcG2FormatValue's HH:MM landing-list value, which has to fit a
+// narrow column. No "°" glyph — the lens font drops uncommon symbols.
+//   Sun 2026-06-07
+//      14:30:52
+//   Temp: 24.5 C
+static const char* kRtcDow[8] = { "?", "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
+static void g2BuildRtcReadout(char* out, size_t cap) {
+  SensorCacheGuard g(gRtcCache.mutex, pdMS_TO_TICKS(5), "g2.rtcReadout");
+  if (!(g.held && gRtcCache.dataValid)) {
+    snprintf(out, cap, "RTC\n(reading...)");
+    return;
+  }
+  const RTCDateTime& t = gRtcCache.dateTime;
+  const uint8_t dow = (t.dayOfWeek >= 1 && t.dayOfWeek <= 7) ? t.dayOfWeek : 0;
+  snprintf(out, cap,
+           "%s %04u-%02u-%02u\n"
+           "   %02u:%02u:%02u\n"
+           "Temp: %.1f C",
+           kRtcDow[dow], (unsigned)t.year, (unsigned)t.month, (unsigned)t.day,
+           (unsigned)t.hour, (unsigned)t.minute, (unsigned)t.second,
+           (double)gRtcCache.temperature);
+}
+#endif  // ENABLE_RTC_SENSOR
+
+#if ENABLE_IMU_SENSOR
+// Orientation (Euler yaw/pitch/roll), accel & gyro vectors, chip temp.
+static void g2BuildImuReadout(char* out, size_t cap) {
+  SensorCacheGuard g(gImuCache.mutex, pdMS_TO_TICKS(5), "g2.imuReadout");
+  if (!(g.held && gImuCache.imuDataValid)) { snprintf(out, cap, "IMU\n(reading...)"); return; }
+  snprintf(out, cap,
+           "Yaw  : %d\n"
+           "Pitch: %d\n"
+           "Roll : %d\n"
+           "Acc %.1f %.1f %.1f\n"
+           "Gyr %.1f %.1f %.1f\n"
+           "Temp: %.0f C",
+           (int)gImuCache.oriYaw, (int)gImuCache.oriPitch, (int)gImuCache.oriRoll,
+           (double)gImuCache.accelX, (double)gImuCache.accelY, (double)gImuCache.accelZ,
+           (double)gImuCache.gyroX, (double)gImuCache.gyroY, (double)gImuCache.gyroZ,
+           (double)gImuCache.imuTemp);
+}
+#endif  // ENABLE_IMU_SENSOR
+
+#if ENABLE_TOF_SENSOR
+// Per-object distance (mm) + range status, first 3 detected objects.
+static void g2BuildTofReadout(char* out, size_t cap) {
+  SensorCacheGuard g(gTofCache.mutex, pdMS_TO_TICKS(5), "g2.tofReadout");
+  if (!(g.held && gTofCache.tofDataValid)) { snprintf(out, cap, "TOF\n(reading...)"); return; }
+  if (gTofCache.tofTotalObjects <= 0) { snprintf(out, cap, "Objects: 0\n(nothing in range)"); return; }
+  size_t off = 0;
+  off += snprintf(out + off, cap - off, "Objects: %d", gTofCache.tofTotalObjects);
+  int shown = gTofCache.tofTotalObjects > 3 ? 3 : gTofCache.tofTotalObjects;
+  for (int i = 0; i < shown && off < cap; i++) {
+    off += snprintf(out + off, cap - off, "\n#%d %dmm st%d",
+                    i + 1, gTofCache.tofObjects[i].distance_mm, gTofCache.tofObjects[i].status);
+  }
+}
+#endif  // ENABLE_TOF_SENSOR
+
+#if ENABLE_APDS_SENSOR
+// Proximity, RGBC colour channels, and last gesture code.
+static void g2BuildApdsReadout(char* out, size_t cap) {
+  SensorCacheGuard g(gApdsCache.mutex, pdMS_TO_TICKS(5), "g2.apdsReadout");
+  if (!(g.held && gApdsCache.apdsDataValid)) { snprintf(out, cap, "APDS\n(reading...)"); return; }
+  snprintf(out, cap,
+           "Prox: %u\n"
+           "R:%u G:%u B:%u\n"
+           "Clear: %u\n"
+           "Gesture: %u",
+           (unsigned)gApdsCache.apdsProximity,
+           (unsigned)gApdsCache.apdsRed, (unsigned)gApdsCache.apdsGreen,
+           (unsigned)gApdsCache.apdsBlue, (unsigned)gApdsCache.apdsClear,
+           (unsigned)gApdsCache.apdsGesture);
+}
+#endif  // ENABLE_APDS_SENSOR
+
+#if ENABLE_GPS_SENSOR
+// Fix status + satellites, and (when fixed) lat/lon/altitude/speed.
+static void g2BuildGpsReadout(char* out, size_t cap) {
+  SensorCacheGuard g(gGpsCache.mutex, pdMS_TO_TICKS(5), "g2.gpsReadout");
+  if (!(g.held && gGpsCache.dataValid)) { snprintf(out, cap, "GPS\n(reading...)"); return; }
+  if (!gGpsCache.hasFix) {
+    snprintf(out, cap, "Fix: no\nSats: %u\n(acquiring...)", (unsigned)gGpsCache.satellites);
+    return;
+  }
+  snprintf(out, cap,
+           "Fix: yes (%u)\n"
+           "Sats: %u\n"
+           "%.4f\n"
+           "%.4f\n"
+           "Alt:%.0fm Sp:%.1f",
+           (unsigned)gGpsCache.fixQuality, (unsigned)gGpsCache.satellites,
+           (double)gGpsCache.latitude, (double)gGpsCache.longitude,
+           (double)gGpsCache.altitude, (double)gGpsCache.speed);
+}
+#endif  // ENABLE_GPS_SENSOR
+
+#if ENABLE_PRESENCE_SENSOR
+// Presence / motion flags + raw values, plus ambient & object temps.
+static void g2BuildPresenceReadout(char* out, size_t cap) {
+  SensorCacheGuard g(gPresenceCache.mutex, pdMS_TO_TICKS(5), "g2.presenceReadout");
+  if (!(g.held && gPresenceCache.dataValid)) { snprintf(out, cap, "Presence\n(reading...)"); return; }
+  snprintf(out, cap,
+           "Presence: %s\n"
+           "Motion: %s\n"
+           "Pval:%d Mval:%d\n"
+           "Amb: %.1f C\n"
+           "Obj: %.1f C",
+           gPresenceCache.presenceDetected ? "yes" : "no",
+           gPresenceCache.motionDetected ? "yes" : "no",
+           (int)gPresenceCache.presenceValue, (int)gPresenceCache.motionValue,
+           (double)gPresenceCache.ambientTemp, (double)gPresenceCache.compObjectTemp);
+}
+#endif  // ENABLE_PRESENCE_SENSOR
+
+#if ENABLE_FM_RADIO
+// Tuned frequency, volume, stereo/mute, signal (RSSI/SNR), RDS station name.
+static void g2BuildFmReadout(char* out, size_t cap) {
+  SensorCacheGuard g(gFmRadioCache.mutex, pdMS_TO_TICKS(5), "g2.fmReadout");
+  if (!(g.held && gFmRadioCache.dataValid)) { snprintf(out, cap, "FM\n(reading...)"); return; }
+  const char* mode = gFmRadioCache.muted ? "Muted"
+                   : gFmRadioCache.stereo ? "Stereo" : "Mono";
+  snprintf(out, cap,
+           "%u.%u MHz\n"
+           "Vol:%u %s\n"
+           "RSSI:%u SNR:%u\n"
+           "Name:%.8s",
+           (unsigned)(gFmRadioCache.frequency / 100u),
+           (unsigned)((gFmRadioCache.frequency % 100u) / 10u),
+           (unsigned)gFmRadioCache.volume, mode,
+           (unsigned)gFmRadioCache.rssi, (unsigned)gFmRadioCache.snr,
+           gFmRadioCache.stationName[0] ? gFmRadioCache.stationName : "--");
+}
+#endif  // ENABLE_FM_RADIO
+
+// Multi-line LIVE readout for the sensor the user drilled into
+// (gSensorsDetailIdx). Consumed by renderSensorDetailLive() in
+// G2_Glasses.cpp and refreshed every live tick (UPDATE_TEXT on the readout
+// child only — the list child / selection is untouched). This is the
+// content layer; the compound/transport lives in G2_Glasses.cpp next to
+// the MIC-detail equivalent (renderMicDetailLive).
+//
+// Gamepad gets a full multi-value readout; the other sensors currently
+// fall back to "<label>: <single value>" via their existing one-line
+// formatters until each gets a fleshed-out multi-line readout.
+void g2BuildSensorReadout(char* out, size_t cap) {
+  if (!out || cap == 0) return;
+  out[0] = '\0';
+
+  G2SensorRow rows[SENSORS_MAX_ROWS];
+  size_t count = 0;
+  buildRows(rows, SENSORS_MAX_ROWS, &count, /*includeStubs=*/ false);
+  if (gSensorsDetailIdx >= count) { snprintf(out, cap, "(no sensor)"); return; }
+  const G2SensorRow& r = rows[gSensorsDetailIdx];
+
+  // Not running → there is no live data, and the per-sensor cache mutex may
+  // not even be created yet (it's made when the task starts). Don't read it;
+  // tell the user to start the sensor via the Run row.
+  if (!r.enabled) {
+    snprintf(out, cap, "%s\nstopped\ntap Run to start", r.label);
+    return;
+  }
+
+#if ENABLE_GAMEPAD_SENSOR
+  if (strcmp(r.featureId, "gamepad") == 0) {
+    g2BuildGamepadArt(out, cap);
+    return;
+  }
+#elif ENABLE_ANO_ENCODER
+  if (strcmp(r.featureId, "gamepad") == 0) {   // same row id; ANO is the active input driver
+    g2BuildAnoArt(out, cap);
+    return;
+  }
+#endif
+
+#if ENABLE_RTC_SENSOR
+  if (strcmp(r.featureId, "rtc") == 0) {
+    g2BuildRtcReadout(out, cap);
+    return;
+  }
+#endif
+#if ENABLE_IMU_SENSOR
+  if (strcmp(r.featureId, "imu") == 0)      { g2BuildImuReadout(out, cap);      return; }
+#endif
+#if ENABLE_TOF_SENSOR
+  if (strcmp(r.featureId, "tof") == 0)      { g2BuildTofReadout(out, cap);      return; }
+#endif
+#if ENABLE_APDS_SENSOR
+  if (strcmp(r.featureId, "apds") == 0)     { g2BuildApdsReadout(out, cap);     return; }
+#endif
+#if ENABLE_GPS_SENSOR
+  if (strcmp(r.featureId, "gps") == 0)      { g2BuildGpsReadout(out, cap);      return; }
+#endif
+#if ENABLE_PRESENCE_SENSOR
+  if (strcmp(r.featureId, "presence") == 0) { g2BuildPresenceReadout(out, cap); return; }
+#endif
+#if ENABLE_FM_RADIO
+  if (strcmp(r.featureId, "fmradio") == 0)  { g2BuildFmReadout(out, cap);       return; }
+#endif
+
+  // Generic fallback — single most-useful value via the existing formatter.
+  char value[24];
+  if (r.connected && r.format) {
+    r.format(value, sizeof(value));
+  } else {
+    snprintf(value, sizeof(value), "%s",
+             r.connected ? "connected" : r.enabled ? "missing" : "off");
+  }
+  snprintf(out, cap, "%s: %s", r.label, value);
+}
+
+// List rows for the LIVE sensor-detail compound. Index order MUST match the
+// SENSORS_LEVEL_LIVE tap handler:
+//   idx 0 = <- Sensors (back)
+//   idx 1 = Run: ON/OFF        (runtime start/stop — reflects live state)
+//   idx 2 = Auto Start: ON/OFF (persisted boot preference)
+// Pointers reference the shared gSensorsRows buffers — valid until the next
+// call. Returns the row count. Consumed by renderSensorDetailLive().
+size_t g2BuildSensorLiveList(const char** outRows, size_t maxRows) {
+  if (!outRows || maxRows == 0) return 0;
+  size_t n = 0;
+
+  G2SensorRow rows[SENSORS_MAX_ROWS];
+  size_t count = 0;
+  buildRows(rows, SENSORS_MAX_ROWS, &count, /*includeStubs=*/ false);
+  const G2SensorRow* r = (gSensorsDetailIdx < count) ? &rows[gSensorsDetailIdx]
+                                                     : nullptr;
+
+  strncpy(gSensorsRows[0], "<- Sensors", SENSORS_ROW_LEN - 1);
+  gSensorsRows[0][SENSORS_ROW_LEN - 1] = '\0';
+  outRows[n++] = gSensorsRows[0];
+
+  if (n < maxRows) {  // idx 1 — runtime Start/Stop (live enabled state)
+    snprintf(gSensorsRows[1], SENSORS_ROW_LEN, "Run: %s",
+             (r && r->enabled) ? "ON" : "OFF");
+    outRows[n++] = gSensorsRows[1];
+  }
+
+  if (n < maxRows) {  // idx 2 — auto-start (persisted boot preference)
+    const FeatureEntry* feat = r ? sensorFeature(r->featureId) : nullptr;
+    bool* autoPtr = (feat && feat->enabledSetting) ? feat->enabledSetting : nullptr;
+    if (autoPtr) snprintf(gSensorsRows[2], SENSORS_ROW_LEN, "Auto Start: %s",
+                          *autoPtr ? "ON" : "OFF");
+    else         snprintf(gSensorsRows[2], SENSORS_ROW_LEN, "Auto Start: n/a");
+    outRows[n++] = gSensorsRows[2];
+  }
+  return n;
+}
+
 void g2ReshowSensorsDetail() {
   // Rebuild the filtered roster so stale stub-flips don't strand the
   // cached index, then re-enter showSensorDetail with the same row.
@@ -763,6 +1231,58 @@ void g2SensorsHandleTap(uint32_t idx) {
     }
 #endif
     showSensorDetail(rows[pos]);
+    return;
+  }
+
+  if (gSensorsLevel == SENSORS_LEVEL_LIVE) {
+    // Generic non-camera sensor live page. Rows (see g2BuildSensorLiveList):
+    //   0 = back, 1 = Run (runtime start/stop), 2 = Auto Start (persisted).
+    if (idx == 0) { g2ShowSensorsMenu(); return; }
+
+    G2SensorRow rows[SENSORS_MAX_ROWS];
+    size_t count = 0;
+    buildRows(rows, SENSORS_MAX_ROWS, &count, /*includeStubs=*/ false);
+    if (gSensorsDetailIdx >= count) { g2ShowSensorsMenu(); return; }
+    const G2SensorRow& r = rows[gSensorsDetailIdx];
+
+    const uint32_t now = millis();
+    if ((uint32_t)(now - sSensorsDetailToggleLastMs) <
+        kSensorsDetailToggleDebounceMs) {
+      return;  // shared debounce
+    }
+    sSensorsDetailToggleLastMs = now;
+
+    G2CmdCookie cookie{};
+    cookie.targetPage   = g2GetHijackPage();
+    cookie.targetNetSub = 0;
+
+    if (idx == 1) {
+      // Runtime Start/Stop — the same open/close path the web/CLI uses.
+      char cmd[24];
+      sensorRuntimeCmd(r.featureId, /*open=*/ !r.enabled, cmd, sizeof(cmd));
+      BROADCAST_PRINTF("[G2] Sensors: %s runtime %s (from glasses)",
+                       r.label, r.enabled ? "STOP" : "START");
+      (void)g2SubmitHijackCommand(cmd, cookie, nullptr, nullptr);
+      // Re-CREATE so the Run row + readout refresh. Start/stop is async, so
+      // the row label can lag one redraw; the live readout self-corrects per
+      // tick once the sensor task comes up.
+      showSensorDetail(r);
+      return;
+    }
+    if (idx == 2) {
+      // Auto-Start toggle (persisted boot preference). sensorautostart
+      // accepts the row's featureId, incl. "gamepad" (-> inputAutoStart).
+      const FeatureEntry* feat = sensorFeature(r.featureId);
+      const bool cur = (feat && feat->enabledSetting) ? *feat->enabledSetting
+                                                      : false;
+      char cmd[48];
+      sensorAutostartCmd(r.featureId, /*on=*/ !cur, cmd, sizeof(cmd));
+      BROADCAST_PRINTF("[G2] Sensors: %s Auto Start %s -> %s (from glasses)",
+                       r.label, cur ? "ON" : "OFF", cur ? "OFF" : "ON");
+      (void)g2SubmitHijackCommand(cmd, cookie, nullptr, nullptr);
+      showSensorDetail(r);
+      return;
+    }
     return;
   }
 

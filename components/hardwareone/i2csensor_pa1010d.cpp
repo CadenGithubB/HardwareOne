@@ -361,7 +361,7 @@ void gpsTask(void* parameter) {
       }
     }
     
-    if (gGpsEnabled && gGpsConnected && gPA1010D != nullptr && !gSensorPollingPaused) {
+    if (gGpsEnabled && gGpsConnected && gPA1010D != nullptr && !pollPaused((uint8_t)gSettings.gpsBus)) {
       // gpsPollMs gates only the I2C health probe — NOT the NMEA read.
       // Adafruit_GPS is designed for read() to be called once per loop iteration
       // (~1ms cadence ideally). Our 10ms vTaskDelay approximates that.

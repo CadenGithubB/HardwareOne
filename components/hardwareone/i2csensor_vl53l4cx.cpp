@@ -714,7 +714,7 @@ void tofTask(void* parameter) {
         DEBUG_MEMORY_HEAPF("[HEAP] tof_task: free=%u min=%u", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
       }
     }
-    if (gTofEnabled && gTofConnected && gVL53L4CX != nullptr && !gSensorPollingPaused) {
+    if (gTofEnabled && gTofConnected && gVL53L4CX != nullptr && !pollPaused(0 /* legacy Wire1 = bus 0 */)) {
       unsigned long tofPollMs = (gSettings.tofDevicePollMs > 0) ? (unsigned long)gSettings.tofDevicePollMs : 100;
       unsigned long nowMs = millis();
       if (nowMs - lastToFRead >= tofPollMs) {
