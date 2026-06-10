@@ -37,8 +37,9 @@ CONFIG_BT_CONTROLLER_ENABLED=y
 CONFIG_BT_BLUEDROID_ENABLED=y
 CONFIG_BT_BLE_42_FEATURES_SUPPORTED=y
 
-# USB - Native USB on S3
-CONFIG_TINYUSB_CDC_ENABLED=y
+# USB - Native USB on S3. Serial uses HWCDC (CONFIG_ARDUINO_USB_MODE=1 =
+# hardware USB-Serial/JTAG), not TinyUSB — so CONFIG_TINYUSB_CDC_ENABLED was a
+# no-op and is gone in IDF 5.5 (it produced an "unknown kconfig symbol" warning).
 
 # XIAO Sense expansion board features (camera, mic, SD)
 # Add to compiler defines
