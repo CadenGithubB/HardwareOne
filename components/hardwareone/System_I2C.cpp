@@ -8,12 +8,15 @@
 #include <ArduinoJson.h>
 #include <LittleFS.h>
 #include <Wire.h>
+#include <esp_log.h>   // esp_log_level_set — quiet probe NACKs during detect scan
 
 #include "i2csensor_rda5807.h"
 #include "System_BuildConfig.h"
 #include "System_Command.h"
 #include "System_Debug.h"
 #include "System_FirstTimeSetup.h"
+#include "System_FeatureRegistry.h"  // getFeatureById/isFeatureEnabled — hardware-detect diff
+#include "System_PollPause.h"        // PollPauseGuard — quiesce a bus during the detect scan
 #include "System_I2C.h"
 #include "System_Logging.h"
 #include "System_Mutex.h"
@@ -947,6 +950,158 @@ static void addDiscoveredDevice(uint8_t address, uint8_t bus) {
   }
 }
 
+// ============================================================================
+// Hardware detection (read-only scan vs. configured features)
+// ============================================================================
+// Probes the known device addresses on every bus (quiescing each bus's sensor
+// polling during its scan) and classifies each against the feature registry.
+// Reused by the `detect` command and (later) the setup wizard's auto-config step.
+
+void detectHardware(DetectionResult& out) {
+  out = DetectionResult();
+
+  extern bool gI2CBusEnabled;
+  if (!gI2CBusEnabled) { out.busDisabled = true; return; }
+
+  const size_t n = i2cSensorsCount;
+  static const size_t MAXSENS = 32;             // table is ~14; guard caps the rest
+  bool    found[MAXSENS]    = { false };
+  uint8_t foundBus[MAXSENS];
+  for (size_t i = 0; i < MAXSENS; i++) foundBus[i] = 0xFF;
+
+  // 1) Probe each known address on each bus, pausing that bus's polling so we
+  //    don't collide with an in-flight gamepad/OLED/sensor transaction.
+  //
+  // Probe at a conservative fixed 100 kHz — presence is presence regardless of a
+  // device's operating speed, and some chips (e.g. the MAX17048 fuel gauge, whose
+  // driver itself runs at 100 kHz) are marginal at 400 kHz on the STEMMA QT chain
+  // and NACK a fast probe → false negative. Slower is always safe for an ACK check.
+  // Also silence the i2c_master NACK error log for the scan: probing absent
+  // addresses NACKs by design, which would otherwise spam red errors.
+  static const uint32_t kProbeClockHz = 100000;
+  const esp_log_level_t prevI2cLog = esp_log_level_get("i2c.master");
+  esp_log_level_set("i2c.master", ESP_LOG_NONE);
+
+  for (uint8_t bus = 0; bus < POLL_NUM_BUSES; bus++) {
+    PollPauseGuard guard(bus);
+    for (size_t i = 0; i < n && i < MAXSENS; i++) {
+      if (found[i]) continue;                   // already located on the other bus
+      const I2CSensorEntry& s = i2cSensors[i];
+      bool hit = (i2cProbeAddress(s.address, kProbeClockHz, s.i2cTimeoutMs, bus) == 0);
+      if (!hit && s.multiAddress) {
+        hit = (i2cProbeAddress(s.altAddress, kProbeClockHz, s.i2cTimeoutMs, bus) == 0);
+      }
+      if (hit) { found[i] = true; foundBus[i] = bus; }
+    }
+  }
+
+  esp_log_level_set("i2c.master", prevI2cLog);
+
+  auto addEntry = [&](uint8_t addr, uint8_t bus, const char* name,
+                      const char* mod, uint16_t kb, DetectStatus st) {
+    if (out.count >= DetectionResult::MAX) return;
+    DetectedEntry& e = out.entries[out.count++];
+    e.address = addr; e.bus = bus; e.name = name;
+    e.moduleName = mod; e.heapCostKB = kb; e.status = st;
+    switch (st) {
+      case DetectStatus::PRESENT_ENABLED:  out.nPresentEnabled++;  break;
+      case DetectStatus::PRESENT_DISABLED: out.nPresentDisabled++; break;
+      case DetectStatus::MISSING:          out.nMissing++;         break;
+      case DetectStatus::PRESENT_INFRA:    out.nInfra++;           break;
+    }
+  };
+
+  // 2) Report toggleable sensors by FEATURE (dedups shared modules like the
+  //    seesaw's 0x49/0x50; present(module) = any DB entry with it was found).
+  const char* emitted[DetectionResult::MAX]; uint8_t emittedCount = 0;
+  auto alreadyEmitted = [&](const char* m) -> bool {
+    for (uint8_t k = 0; k < emittedCount; k++)
+      if (strcmp(emitted[k], m) == 0) return true;
+    return false;
+  };
+
+  for (size_t i = 0; i < n && i < MAXSENS; i++) {
+    const I2CSensorEntry& s = i2cSensors[i];
+    if (!s.moduleName) continue;                 // infrastructure handled below
+    if (alreadyEmitted(s.moduleName)) continue;
+
+    const FeatureEntry* f = getFeatureById(s.moduleName);
+    if (f && !isFeatureCompiled(f)) continue;    // not in this build
+
+    bool present = false; uint8_t pbus = 0xFF;
+    for (size_t j = 0; j < n && j < MAXSENS; j++) {
+      if (i2cSensors[j].moduleName &&
+          strcmp(i2cSensors[j].moduleName, s.moduleName) == 0 && found[j]) {
+        present = true; pbus = foundBus[j]; break;
+      }
+    }
+    bool     enabled = f ? isFeatureEnabled(f) : false;
+    uint16_t kb      = f ? f->heapCostKB : 0;
+
+    if (present && enabled)        addEntry(s.address, pbus,  s.name, s.moduleName, kb, DetectStatus::PRESENT_ENABLED);
+    else if (present && !enabled)  addEntry(s.address, pbus,  s.name, s.moduleName, kb, DetectStatus::PRESENT_DISABLED);
+    else if (!present && enabled)  addEntry(s.address, 0xFF,  s.name, s.moduleName, kb, DetectStatus::MISSING);
+    // else not present + not enabled → nothing to report.
+
+    if (emittedCount < DetectionResult::MAX) emitted[emittedCount++] = s.moduleName;
+  }
+
+  // 3) Infrastructure devices (no toggleable feature): OLED, fuel gauge, PWM.
+  for (size_t i = 0; i < n && i < MAXSENS; i++) {
+    if (i2cSensors[i].moduleName || !found[i]) continue;
+    addEntry(i2cSensors[i].address, foundBus[i], i2cSensors[i].name, nullptr, 0, DetectStatus::PRESENT_INFRA);
+  }
+}
+
+const char* cmd_detect(const String& argsInput) {
+  (void)argsInput;
+  DetectionResult r;
+  detectHardware(r);
+
+  if (r.busDisabled)
+    return "[detect] I2C bus disabled — enable the 'i2c' feature to scan for hardware.";
+
+  BROADCAST_PRINTF("[detect] Hardware vs. configuration (I2C1=bus0, I2C2=bus1):");
+
+  if (r.nPresentEnabled) {
+    BROADCAST_PRINTF("  Present & enabled:");
+    for (uint8_t i = 0; i < r.count; i++) {
+      const DetectedEntry& e = r.entries[i];
+      if (e.status == DetectStatus::PRESENT_ENABLED)
+        BROADCAST_PRINTF("    %-10s (%s)  I2C%d  0x%02X", e.name, e.moduleName, e.bus + 1, e.address);
+    }
+  }
+  if (r.nPresentDisabled) {
+    BROADCAST_PRINTF("  Present but DISABLED (attachable):");
+    for (uint8_t i = 0; i < r.count; i++) {
+      const DetectedEntry& e = r.entries[i];
+      if (e.status == DetectStatus::PRESENT_DISABLED)
+        BROADCAST_PRINTF("    %-10s (%s)  I2C%d  0x%02X  ~%uKB", e.name, e.moduleName, e.bus + 1, e.address, (unsigned)e.heapCostKB);
+    }
+  }
+  if (r.nMissing) {
+    BROADCAST_PRINTF("  Enabled but NOT found (check wiring):");
+    for (uint8_t i = 0; i < r.count; i++) {
+      const DetectedEntry& e = r.entries[i];
+      if (e.status == DetectStatus::MISSING)
+        BROADCAST_PRINTF("    %-10s (%s)  0x%02X", e.name, e.moduleName, e.address);
+    }
+  }
+  if (r.nInfra) {
+    BROADCAST_PRINTF("  Infrastructure:");
+    for (uint8_t i = 0; i < r.count; i++) {
+      const DetectedEntry& e = r.entries[i];
+      if (e.status == DetectStatus::PRESENT_INFRA)
+        BROADCAST_PRINTF("    %-10s  I2C%d  0x%02X", e.name, e.bus + 1, e.address);
+    }
+  }
+
+  BROADCAST_PRINTF("  Summary: %u enabled, %u attachable, %u missing, %u infra. "
+                   "(run 'i2cscan' for a raw bus dump incl. unknown devices)",
+                   r.nPresentEnabled, r.nPresentDisabled, r.nMissing, r.nInfra);
+  return "[detect] done";
+}
+
 // Bus convention (post-dual-bus refactor):
 //   bus 0 → Wire1 → primary "I2C1" (horizontal STEMMA QT on FeatherS3[D])
 //   bus 1 → Wire  → secondary "I2C2" (vertical STEMMA QT on FeatherS3[D])
@@ -1727,6 +1882,7 @@ const CommandEntry i2cCommands[] = {
   // Diagnostics
   { "i2cmetrics", "Show I2C bus performance metrics.", false, cmd_i2cmetrics },
   { "i2cscan", "Scan I2C bus for devices.", false, cmd_i2cscan },
+  { "detect", "Detect hardware: scan I2C buses, diff vs. configured features.", false, cmd_detect },
   { "i2cstats", "I2C bus statistics and errors.", false, cmd_i2cstats },
   { "i2chealth", "Show per-device I2C health status.", false, cmd_i2chealth },
   
