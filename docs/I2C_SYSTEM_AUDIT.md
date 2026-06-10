@@ -39,7 +39,7 @@ What matters (for dual-bus capability AND the pause gate) is the **poll-path** t
 ### Legacy ESP-IDF driver
 Stack sits on deprecated `driver/i2c.h`. Migrating to `driver/i2c_master.h` is medium effort with a real blocker: the CPU1-ISR-pinning + glitch-filter coexistence fixes are legacy-driver-specific. **Recommendation:** migrate the 5 legacy *drivers* to the bus-aware wrappers first (cheap, removes bus-0 lock); treat the ESP-IDF driver swap as a separate deliberate project.
 
-> **DONE (v0.95.5, 2026-06-09):** the ESP-IDF driver swap shipped — upgrading IDF 5.3.1→5.5.1 auto-switches Arduino's `Wire` to the `i2c_master` (`-ng`) HAL, so the firmware is off the legacy driver. The CPU1-ISR-pin + glitch-filter coexistence knobs carried over (glitch now applied by the `-ng` HAL). HW-validated on FeatherS3 (glasses+gamepad, no Int-WDT) and XIAO Sense. See `I2C_MASTER_MIGRATION_PLAN.md`.
+> **DONE (v0.95.5, 2026-06-09):** the ESP-IDF driver swap shipped — upgrading IDF 5.3.1→5.5.1 auto-switches Arduino's `Wire` to the `i2c_master` (`-ng`) HAL, so the firmware is off the legacy driver. The CPU1-ISR-pin + glitch-filter coexistence knobs carried over (glitch now applied by the `-ng` HAL). HW-validated on FeatherS3 (glasses+gamepad, no Int-WDT) and XIAO Sense. See `idf6-p4-roadmap/I2C_MASTER_MIGRATION_PLAN.md`.
 
 ## Part 2 — Other lagging / non-modular sections
 
