@@ -397,6 +397,48 @@ extern const I2CSensorEntry i2cSensors[];
 extern const size_t i2cSensorsCount;
 
 // ============================================================================
+// Hardware detection — scan the I2C buses and diff against configured features
+// ============================================================================
+// detectHardware() is READ-ONLY: it probes the known device addresses (the
+// collision-free set above), maps each hit to its feature (moduleName ==
+// FeatureEntry.id), and classifies it against the current enable flags. It never
+// mutates config — "missing" devices are reported, never auto-disabled. Reusable
+// by the `detect` command, the dashboard, and the setup wizard's auto-config step.
+
+enum class DetectStatus : uint8_t {
+  PRESENT_ENABLED,   // on the bus AND its feature is enabled
+  PRESENT_DISABLED,  // on the bus but the feature is off (attachable)
+  MISSING,           // feature enabled but not found on any bus (report-only)
+  PRESENT_INFRA,     // present, no toggleable feature (OLED, fuel gauge, PWM)
+};
+
+struct DetectedEntry {
+  uint8_t      address;     // device address (primary)
+  uint8_t      bus;         // bus found on (0..POLL_NUM_BUSES-1), or 0xFF if MISSING
+  const char*  name;        // device name from the sensor DB
+  const char*  moduleName;  // feature id, or nullptr for infrastructure
+  uint16_t     heapCostKB;  // feature heap estimate (0 for infrastructure)
+  DetectStatus status;
+};
+
+struct DetectionResult {
+  static const uint8_t MAX = 24;
+  DetectedEntry entries[MAX];
+  uint8_t count            = 0;
+  uint8_t nPresentEnabled  = 0;
+  uint8_t nPresentDisabled = 0;
+  uint8_t nMissing         = 0;
+  uint8_t nInfra           = 0;
+  bool    busDisabled      = false;  // true if the I2C bus is off (nothing scanned)
+};
+
+// Probe both buses (each quiesced during its scan) and fill `out`. Read-only.
+void detectHardware(DetectionResult& out);
+
+// CLI `detect` — runs detectHardware() and prints the diff. Read-only.
+const char* cmd_detect(const String& argsInput);
+
+// ============================================================================
 // Device Registry
 // ============================================================================
 #define MAX_CONNECTED_DEVICES 16
