@@ -104,3 +104,36 @@ update --init --recursive && ./install.sh esp32s3 && . ./export.sh`; then in the
 (camera/speech) are off for this board, Arduino already supports 5.5, the mic is already
 migrated, and there's no `-Werror`. Payoff: i2c_master **free + official** (no fork) +
 a year of SDK fixes + the best-tested Arduino(3.3.5)+IDF(5.5) pairing.
+
+## Outcome — DONE & HW-validated (v0.95.5, 2026-06-09)
+
+Shipped via Option 1 (IDF 5.3.1 → **5.5.1** upgrade). The whole SDK jump — across
+**both** boards — cost exactly **one** functional code change.
+
+**Code changes (the entire migration):**
+- **ESP-NOW send callback** signature: `const uint8_t* mac` → `const esp_now_send_info_t* tx_info`
+  (IDF 5.4+ changed `esp_now_send_cb_t`). The only functional break.
+- **I2C cleanup** in `System_I2C_Manager.cpp`: dropped `#include <driver/i2c.h>`, the dead
+  `i2cPortForBus()` helper, and both `i2c_filter_enable()` calls — the `i2c_master` (`-ng`)
+  HAL applies the glitch filter itself (`glitch_ignore_cnt=7`). `beginBusOnCpu1` retained.
+- **sdkconfig**: dropped dead `CONFIG_TINYUSB_CDC_ENABLED` (board uses HWCDC); `sdkconfig` /
+  `dependencies.lock` regenerated for 5.5 (managed components re-resolved: esp32-camera 2.1.4,
+  esp-sr 1.9.5, esp-tflite 1.3.5, libsodium 1.0.20).
+
+**What carried over for free:** Arduino auto-flips `Wire` to `esp32-hal-i2c-ng.c` at IDF ≥ 5.4,
+so the legacy driver + its "old driver" deprecation nag are gone with no fork. ISR core-pin,
+glitch filter, scan/probe path, per-address device cache — all handled by the `-ng` HAL.
+
+**HW validation:**
+- **FeatherS3** (`HW_BOARD=feathers3`, 16 MB): WiFi/BLE-G2/web/OLED/gamepad all green;
+  glasses + gamepad together with **no Int-WDT** (the original coexistence crash); ~77 KB free DRAM.
+- **XIAO Sense** (`HW_BOARD=xiao_s3`, 8 MB): camera (OV3660), PDM mic, WiFi/BLE/web all green;
+  Octal PSRAM confirmed (8 MB). The camera's two-try init + JPEG-truncation-at-extreme-settings
+  are **pre-existing** quirks (PSRAM-DMA off by design — see `System_Camera_DVP.cpp:366-405`),
+  **not** migration regressions; the new SCCB driver just prints the first-try failure explicitly.
+
+**Coexistence band-aids RETAINED** (CPU-1 ISR pin + pause-during-connect) as defense-in-depth.
+
+**Flashing note:** crossing IDF versions, use a full `erase-flash` so stale 5.3.1 NVS/filesystem
+state never lingers. XIAO commands **must** be prefixed `HW_BOARD=xiao_s3` (bare `idf.py`
+defaults to feathers3/16 MB).

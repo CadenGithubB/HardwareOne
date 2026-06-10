@@ -7,7 +7,6 @@
  */
 
 #include <Wire.h>
-#include <driver/i2c.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -21,11 +20,10 @@
 // I2C bus configuration (defaults, overridden by settings at runtime)
 #define I2C_WIRE1_DEFAULT_FREQ 100000
 
-// Bus → ESP-IDF I2C port mapping. Arduino's Wire1 sits on I2C_NUM_1, Wire on
-// I2C_NUM_0. Used for i2c_filter_enable() during bus init / recovery.
-static inline i2c_port_t i2cPortForBus(uint8_t bus) {
-  return (bus == 0) ? I2C_NUM_1 : I2C_NUM_0;
-}
+// (Removed i2cPortForBus + the legacy i2c_filter_enable() calls: on IDF >= 5.4
+// Arduino's Wire uses the new i2c_master driver, which applies the glitch
+// filter itself — esp32-hal-i2c-ng.c sets bus_config.glitch_ignore_cnt = 7 in
+// i2cInit(). The old legacy-driver call would conflict with the master driver.)
 
 // Singleton instance
 I2CDeviceManager* I2CDeviceManager::instance = nullptr;
@@ -273,10 +271,9 @@ void I2CDeviceManager::initBus(uint8_t busIdx, int sdaPin, int sclPin, uint32_t 
   defaultClockHz[busIdx] = hz;
   busInitialized[busIdx] = true;
 
-  // Glitch filter: ignore pulses < 7 APB cycles (~88ns at 80MHz). Prevents
-  // spurious bus errors from EMI/noise that trigger i2c_hw_disable ->
-  // I2C_ENTER_CRITICAL -> periph_spinlock deadlock -> interrupt WDT crash.
-  i2c_filter_enable(i2cPortForBus(busIdx), 7);
+  // Glitch filter (ignore pulses < 7 APB cycles, ~88ns @ 80MHz; prevents EMI
+  // spurious bus errors) is now applied by the i2c_master driver under Wire —
+  // esp32-hal-i2c-ng.c sets glitch_ignore_cnt=7 in i2cInit(). No manual call.
 
   INFO_I2CF("Bus %u initialized: %s (SDA=%d, SCL=%d, %lu Hz)",
             busIdx, (busIdx == 0) ? "Wire1/I2C1" : "Wire/I2C2",
@@ -378,7 +375,8 @@ void I2CDeviceManager::performBusRecovery(uint8_t busIdx) {
   }
   wire->setClock(defaultClockHz[busIdx]);
   currentClockHz[busIdx] = defaultClockHz[busIdx];
-  i2c_filter_enable(i2cPortForBus(busIdx), 7);
+  // Glitch filter re-applied automatically by the i2c_master driver on the
+  // wire->begin() above (esp32-hal-i2c-ng.c, glitch_ignore_cnt=7).
   delay(50);
 
   // 5. Reset health for devices on THIS bus only — devices on the other bus

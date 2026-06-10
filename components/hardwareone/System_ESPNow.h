@@ -1046,7 +1046,7 @@ bool resolveDeviceNameOrMac(const String& nameOrMac, uint8_t* outMac);
 
 // Callbacks
 void onEspNowDataRecv(const esp_now_recv_info_t* recvInfo, const uint8_t* data, int len);
-void onEspNowDataSent(const uint8_t* mac, esp_now_send_status_t status);
+void onEspNowDataSent(const esp_now_send_info_t* tx_info, esp_now_send_status_t status);
 
 // Message queue processing (called from loop)
 void cleanupTimedOutChunks();
