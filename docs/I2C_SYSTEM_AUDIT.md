@@ -39,6 +39,8 @@ What matters (for dual-bus capability AND the pause gate) is the **poll-path** t
 ### Legacy ESP-IDF driver
 Stack sits on deprecated `driver/i2c.h`. Migrating to `driver/i2c_master.h` is medium effort with a real blocker: the CPU1-ISR-pinning + glitch-filter coexistence fixes are legacy-driver-specific. **Recommendation:** migrate the 5 legacy *drivers* to the bus-aware wrappers first (cheap, removes bus-0 lock); treat the ESP-IDF driver swap as a separate deliberate project.
 
+> **DONE (v0.95.5, 2026-06-09):** the ESP-IDF driver swap shipped — upgrading IDF 5.3.1→5.5.1 auto-switches Arduino's `Wire` to the `i2c_master` (`-ng`) HAL, so the firmware is off the legacy driver. The CPU1-ISR-pin + glitch-filter coexistence knobs carried over (glitch now applied by the `-ng` HAL). HW-validated on FeatherS3 (glasses+gamepad, no Int-WDT) and XIAO Sense. See `I2C_MASTER_MIGRATION_PLAN.md`.
+
 ## Part 2 — Other lagging / non-modular sections
 
 ### Inline-`extern` anti-pattern (pervasive — same class as the old pause idiom)
@@ -83,6 +85,6 @@ CRITICAL:  ESP-NOW (System_ESPNow.cpp ~14.2k LOC, 14 header externs)
 
 ### Deferred (large / own effort / needs opt-in)
 - Migrate 5 legacy I2C drivers to bus-aware wrappers (untestable without the hardware; low priority)
-- ESP-IDF `driver/i2c_master.h` migration (medium, coexistence blocker)
+- ~~ESP-IDF `driver/i2c_master.h` migration (medium, coexistence blocker)~~ — **DONE v0.95.5** (via IDF 5.5.1 upgrade)
 - `System_Battery` legacy ADC migration (functional today; risky to touch)
 - Monolith refactors: G2 Glasses, ESP-NOW, OLED manager extraction (each a multi-session project)

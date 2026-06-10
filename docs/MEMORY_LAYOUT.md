@@ -3,6 +3,8 @@
 **What lives in Flash vs PSRAM vs internal SRAM, why, and the knobs that move it.**
 
 Last measured: 2026-06-07, app v0.95, ESP-IDF v5.3.1, BT+G2 enabled.
+(Codebase is now app **v0.95.5** / **ESP-IDF v5.5.1** — figures below are pre-upgrade;
+the 5.5.1 boot deltas are small: FeatherS3 ~77 KB free DRAM, XIAO Sense ~42 KB.)
 Numbers are from `idf.py size` / `xtensa-esp32s3-elf-nm` on the actual build plus
 the on-device `BOOT MEMORY REPORT`. Re-measure after big changes.
 
@@ -266,6 +268,7 @@ See also `docs/HEAP_OPTIMIZATION_FINDINGS.md` for the optimization history.
 
 Running log of **measured** build points. Append a row whenever a config materially changes
 (measurement commands in §7). All rows: ESP-IDF v5.3.1, app v0.95, BT+G2 ON, `no_sr`, unless noted.
+(Pre-upgrade rows; codebase is now ESP-IDF v5.5.1 / app v0.95.5 — re-measure before relying on exact bytes.)
 
 `(m)` = measured on device/binary · `(c)` = calculated · `(e)` = estimated, verify on HW.
 
