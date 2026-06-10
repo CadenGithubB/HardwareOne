@@ -5133,14 +5133,17 @@ static void onEspNowRawRecv(const esp_now_recv_info* recv_info, const uint8_t* i
  * @note Updates gEspNow->lastStatus and gEspNow->txDone flags
  * @warning Do not call blocking functions or allocate memory
  */
-void onEspNowDataSent(const uint8_t* mac_addr, esp_now_send_status_t status) {
+// IDF 5.4+ changed esp_now_send_cb_t: first arg is now const esp_now_send_info_t*
+// (= wifi_tx_info_t; dest MAC at tx_info->des_addr) instead of const uint8_t* mac.
+// This callback doesn't use the MAC, so it's a straight signature swap.
+void onEspNowDataSent(const esp_now_send_info_t* tx_info, esp_now_send_status_t status) {
   // This callback fires once per esp_now_send() completion regardless of the
   // call path (single-frame / fragmented / encrypted / ACK / …) and is the only
   // single point where TX accounting can be done correctly without touching
   // every send-site. Cumulative counters here feed both `espnowstats` and
   // `espnowsaturation` (frames/sec, fail-rate). Without this the previous
   // "Stream Sent" reading was stuck at the constructor's 0 (latent stats bug).
-  (void)mac_addr;
+  (void)tx_info;
   if (!gEspNow) return;
 
   if (status == ESP_NOW_SEND_SUCCESS) {
