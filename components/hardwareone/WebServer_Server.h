@@ -237,7 +237,10 @@ inline AuthContext makeWebAuthCtx(httpd_req_t* req) {
 
 // Session JSON building
 void buildAllSessionsJson(const String& currentSid, JsonArray& sessions);
-void buildSystemInfoJson(JsonDocument& doc);
+// Defined in System_Utils.cpp (moved out of the web TU so the CLI `status json`
+// can build it without ENABLE_HTTP_SERVER). includeDeviceList=false yields the
+// compact form (drops the unbounded I2C deviceList) for CLI/MQTT.
+void buildSystemInfoJson(JsonDocument& doc, bool includeDeviceList = true);
 
 // Logout reason management
 void storeLogoutReason(const String& ip, const String& reason);

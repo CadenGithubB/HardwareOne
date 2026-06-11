@@ -38,6 +38,24 @@
 #include "System_SensorStubs.h"  // Stubs for disabled sensors/modules
 #include "System_MemoryMonitor.h"
 #include "System_Notifications.h"
+
+// Subsystem headers needed by buildSystemInfoJson() — the device-info JSON
+// aggregator was moved here from WebServer_Server.cpp so the CLI `status json`
+// no longer depends on the web server being compiled in. Each is feature-
+// guarded to match the corresponding section of the builder. (ESP-NOW, BLE,
+// SelfDevice, MemUtil, I2C, Clock are already included above.)
+#if ENABLE_WIFI && ENABLE_MQTT
+#include "System_MQTT.h"        // isMqttConnected()
+#endif
+#if ENABLE_G2_GLASSES
+#include "G2_Glasses.h"         // isG2ClientInitialized(), isG2Connected()
+#endif
+#if ENABLE_ONDEVICE_LLM
+#include "System_LLM.h"         // LLMStatus, llmGetStatus()
+#endif
+#if ENABLE_HTTP_SERVER
+#include "WebServer_Server.h"   // server, gServerIsHttps, gSessions, MAX_SESSIONS
+#endif
 #include "i2csensor_ds3231.h"  // RTC for time functions
 // Additional sensor headers for the gXxxEnabled/gXxxConnected externs used by cmd_voltage.
 #if ENABLE_IMU_SENSOR
@@ -1058,6 +1076,7 @@ namespace {
     { "testpassword ",     MASK_TOKEN_AT_POS,    2, nullptr },  // testpassword <secret>
     { "userrequest ",      MASK_AFTER_TOKEN_POS, 2, nullptr },  // userrequest <name> <pass> ...
     { "espnowremote ",     CALL_HANDLER,         0, &redactEspNowRemote },
+    { "blesecret ",        MASK_TOKEN_AT_POS,    2, nullptr },  // blesecret <passphrase>
   };
 }
 
@@ -1379,8 +1398,278 @@ const char* cmd_lightsleep(const String& argsInput) {
 // Core System Commands (moved from .ino)
 // =========================================================================
 
+// ---------------------------------------------------------------------------
+// Output contract — opt-in structured (JSON) output
+// ---------------------------------------------------------------------------
+// Per the firmware output contract (see executeCommand below), a command has
+// two output channels with different shapes:
+//   • broadcastOutput()  — human, line-oriented, <=255 B per call, live-
+//                          streamed + decorated. The default for people.
+//   • the return value    — one verbatim blob, <=4 KB, delivered once. The
+//                          channel for byte-exact / machine-readable output.
+// When the caller passes a standalone `json` token, the command must emit its
+// payload ONLY via the return value (a single JSON document) and call NO
+// broadcastOutput — otherwise the stream and the blob interleave and the JSON
+// is unparseable.
+//
+// argWantsJson() detects the `json` token at a word boundary so it won't
+// false-match an argument that merely contains the substring (e.g. a filename).
+// Declared in System_Utils.h — shared by info commands across translation units
+// (status, devices, …) as the JSON contract rolls out.
+bool argWantsJson(const String& args) {
+  String a = args;
+  a.trim();
+  if (a.length() == 0) return false;
+  int idx = a.indexOf("json");
+  while (idx >= 0) {
+    bool leftOk  = (idx == 0) || (a[idx - 1] == ' ');
+    bool rightOk = (idx + 4 >= (int)a.length()) || (a[idx + 4] == ' ');
+    if (leftOk && rightOk) return true;
+    idx = a.indexOf("json", idx + 4);
+  }
+  return false;
+}
+
+// Reset reason labels matching esp_reset_reason_t (shared by both output paths)
+static const char* const kResetReasonLabels[] = {
+  "Unknown", "Power-on", "External", "Software", "Panic",
+  "Int WDT", "Task WDT", "WDT", "Deepsleep", "Brownout", "SDIO"
+};
+
+// ---------------------------------------------------------------------------
+// buildSystemInfoJson — single source of truth for device-info JSON
+// ---------------------------------------------------------------------------
+// Moved here from WebServer_Server.cpp (which is wholly #if ENABLE_HTTP_SERVER)
+// so the CLI `status json` can use it WITHOUT depending on the web server being
+// compiled in. The web / SSE / migration callers still reach it via the
+// declaration in WebServer_Server.h — one schema, one definition, many
+// consumers (CLI status json, /api/system, SSE, migration tool).
+//
+// includeDeviceList=false drops the only unbounded section (the I2C deviceList
+// array) so the CLI/MQTT blob stays compact (~800 B) and fits even the 2 KB
+// MQTT result buffer. Web callers pass the default (true) for the full nested
+// view. NEVER emit secrets here — this is read over BLE / MQTT / web.
+void buildSystemInfoJson(JsonDocument& doc, bool includeDeviceList) {
+  // Schema version + identity + last-reset info. Added when the builder moved
+  // to core so the CLI status view and the web dashboard share one schema.
+  doc["v"]     = 1;
+  doc["fw"]    = SelfDevice::firmwareVersion();
+  doc["board"] = BOARD_NAME;
+  {
+    uint32_t reason = gSettings.lastResetReason;
+    doc["reset_reason"]      = (reason < 11) ? kResetReasonLabels[reason] : "Unknown";
+    doc["reset_reason_code"] = (unsigned long)reason;
+    doc["crash_count"]       = (unsigned long)gSettings.crashCount;
+  }
+
+  // System time. "" if not yet synced — UI uses empty as the sentinel.
+  // Format is "YYYY-MM-DD HH:MM:SS" (space separator, not 'T') to match
+  // the historical public-API shape; this is the only Clock-using site
+  // that emits this exact format so it stays inline.
+  if (Clock::isSynced()) {
+    time_t now = Clock::epochSeconds();
+    struct tm tminfo;
+    localtime_r(&now, &tminfo);
+    char timeBuf[32];
+    strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%d %H:%M:%S", &tminfo);
+    doc["system_time"] = timeBuf;
+  } else {
+    doc["system_time"] = "";
+  }
+
+  // Uptime
+  unsigned long uptimeMs = millis();
+  unsigned long seconds = uptimeMs / 1000UL;
+  unsigned long minutes = seconds / 60UL;
+  unsigned long hours = minutes / 60UL;
+  char uptimeHms[32];
+  snprintf(uptimeHms, sizeof(uptimeHms), "%luh %lum %lus", hours, minutes % 60UL, seconds % 60UL);
+  doc["uptime_hms"] = uptimeHms;
+
+  // Network info
+  JsonObject net = doc["net"].to<JsonObject>();
+  if (WiFi.isConnected()) {
+    net["ssid"] = WiFi.SSID();
+    net["ip"] = WiFi.localIP().toString();
+    net["rssi"] = WiFi.RSSI();
+    net["channel"] = WiFi.channel();
+    net["mac"] = WiFi.macAddress();
+  } else {
+    net["ssid"] = "";
+    net["ip"] = "";
+    net["rssi"] = 0;
+    net["channel"] = 0;
+    net["mac"] = WiFi.macAddress();
+  }
+
+  // Memory info (nested object with KB values). ESP.getHeapSize/getPsramSize
+  // remain inline — those are constants for the build, not duplicated state.
+  JsonObject mem = doc["mem"].to<JsonObject>();
+  mem["heap_free_kb"] = (int)(SelfDevice::freeHeapBytes() / 1024);
+  mem["heap_total_kb"] = (int)(ESP.getHeapSize() / 1024);
+  mem["psram_total_kb"] = (int)(ESP.getPsramSize() / 1024);
+  mem["psram_free_kb"] = (int)(SelfDevice::psramFreeBytes() / 1024);
+
+  // Storage info (nested object with KB values)
+  JsonObject storage = doc["storage"].to<JsonObject>();
+  {
+    uint64_t totalBytes = 0, usedBytes = 0, freeBytes = 0;
+    VFS::getStats(VFS::INTERNAL, totalBytes, usedBytes, freeBytes);
+    storage["total_kb"] = (int)(totalBytes / 1024);
+    storage["used_kb"] = (int)(usedBytes / 1024);
+    storage["free_kb"] = (int)(freeBytes / 1024);
+  }
+  if (VFS::isSDAvailable()) {
+    uint64_t sdTotal = 0, sdUsed = 0, sdFree = 0;
+    if (VFS::getStats(VFS::SDCARD, sdTotal, sdUsed, sdFree)) {
+      JsonObject sd = storage["sd"].to<JsonObject>();
+      sd["total_mb"] = (int)(sdTotal / (1024 * 1024));
+      sd["used_mb"] = (int)(sdUsed / (1024 * 1024));
+      sd["free_mb"] = (int)(sdFree / (1024 * 1024));
+    }
+  }
+
+  // Connectivity status
+  JsonObject conn = doc["connectivity"].to<JsonObject>();
+
+#if ENABLE_ESPNOW
+  {
+    JsonObject espnow = conn["espnow"].to<JsonObject>();
+    espnow["enabled"] = gSettings.espnowenabled;
+    espnow["running"] = (gEspNow && gEspNow->initialized);
+    espnow["mesh"] = gSettings.espnowmesh;
+    espnow["deviceName"] = gSettings.espnowDeviceName;
+    espnow["encrypted"] = (gEspNow && gEspNow->encryptionEnabled);
+    espnow["passphraseSet"] = (gSettings.meshes[0].passphrase.length() > 0);
+#if ENABLE_BONDED_MODE
+    JsonObject bond = conn["bond"].to<JsonObject>();
+    bond["enabled"] = gSettings.bondModeEnabled;
+    bond["role"] = (int)gSettings.bondRole;
+    bond["online"] = isBondModeOnline();
+    bond["synced"] = isBondSynced();
+    bond["peer"] = gSettings.bondPeerMac;
+#endif
+  }
+#endif
+
+#if ENABLE_WIFI && ENABLE_MQTT
+  {
+    JsonObject mqtt = conn["mqtt"].to<JsonObject>();
+    mqtt["enabled"] = gSettings.mqttAutoStart;
+    mqtt["connected"] = isMqttConnected();
+    mqtt["host"] = gSettings.mqttHost;
+  }
+#endif
+
+#if ENABLE_BLUETOOTH
+  {
+    // Aggregate-status pattern (mirrors ESPNow mesh-or-direct): subsystem reports
+    // running when EITHER the BLE server OR the G2 client is initialized.
+    JsonObject bt = conn["bluetooth"].to<JsonObject>();
+    bt["running"] = bleSubsystemActive();
+    bt["state"]   = bleSubsystemStateString();
+    bt["mode"]    = getBleModeString();   // "server" | "client"
+    bt["server"]  = isBLERunning();
+#if ENABLE_G2_GLASSES
+    bt["client"]    = isG2ClientInitialized();
+    bt["g2Connected"] = isG2Connected();
+#else
+    bt["client"]    = false;
+    bt["g2Connected"] = false;
+#endif
+  }
+#endif
+
+#if ENABLE_HTTP_SERVER
+  {
+    JsonObject ws = conn["webserver"].to<JsonObject>();
+    bool running = (server != nullptr);
+    ws["running"] = running;
+    ws["https"] = (running && gServerIsHttps);
+    ws["port"] = (running && gServerIsHttps) ? 443 : 80;
+    int active = 0;
+    for (int i = 0; i < MAX_SESSIONS; i++) {
+      if (gSessions[i].sid.length() > 0) active++;
+    }
+    ws["sessions"] = active;
+    ws["maxSessions"] = MAX_SESSIONS;
+  }
+#endif
+
+#if ENABLE_I2C_SYSTEM
+  {
+    JsonObject i2c = conn["i2c"].to<JsonObject>();
+    i2c["compiled"] = true;
+    i2c["enabled"]  = gI2CBusEnabled;
+    auto* mgr = I2CDeviceManager::getInstance();
+    i2c["devices"]  = mgr ? mgr->getDeviceCount() : 0;
+    i2c["activeDevices"] = mgr ? mgr->getActiveDeviceCount() : 0;
+    i2c["sdaPin"]   = gSettings.i2cSdaPin;
+    i2c["sclPin"]   = gSettings.i2cSclPin;
+    // Detected-device list: everything the I2C discovery scan physically found
+    // on the buses. Omitted in compact mode (CLI/MQTT) since it is the only
+    // unbounded section. Built by the SAME helper that backs `devices json`
+    // (defined in System_I2C.cpp) so the two views never diverge.
+    if (includeDeviceList) {
+      extern void buildI2cDeviceListJson(JsonArray& arr);
+      JsonArray devs = i2c["deviceList"].to<JsonArray>();
+      buildI2cDeviceListJson(devs);
+    }
+  }
+#else
+  {
+    JsonObject i2c = conn["i2c"].to<JsonObject>();
+    i2c["compiled"] = false;
+    i2c["enabled"]  = false;
+    i2c["devices"]  = 0;
+  }
+#endif
+
+#if ENABLE_ONDEVICE_LLM
+  {
+    LLMStatus llmSt = llmGetStatus();
+    const char* llmStateStr = "UNLOADED";
+    switch (llmSt.state) {
+      case LLMState::LOADING:    llmStateStr = "LOADING"; break;
+      case LLMState::READY:      llmStateStr = "READY"; break;
+      case LLMState::GENERATING: llmStateStr = "GENERATING"; break;
+      case LLMState::ERROR:      llmStateStr = "ERROR"; break;
+      default: break;
+    }
+    JsonObject llm = conn["llm"].to<JsonObject>();
+    llm["state"] = llmStateStr;
+    const char* slash = strrchr(llmSt.modelPath, '/');
+    llm["model"] = slash ? (slash + 1) : llmSt.modelPath;
+    llm["psramKB"] = (unsigned)((llmSt.totalPsramUsed + 512) / 1024);
+    llm["tokPerSec"] = llmSt.lastTokensPerSec;
+  }
+#endif
+}
+
 const char* cmd_status(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+
+  uint32_t reason = gSettings.lastResetReason;
+  const char* reasonLabel = (reason < 11) ? kResetReasonLabels[reason] : "Unknown";
+  size_t psTot = ESP.getPsramSize();
+
+  // ---- Structured path: delegate to the shared buildSystemInfoJson() (the
+  //      same builder /api/system uses) in COMPACT form, and serialize verbatim
+  //      into a persistent PSRAM buffer. No broadcastOutput; no Arduino String
+  //      (which would land in DRAM) — keeps the small-buffer / DRAM discipline.
+  if (argWantsJson(argsInput)) {
+    PSRAM_JSON_DOC(doc);
+    buildSystemInfoJson(doc, /*includeDeviceList=*/false);
+    static char* statusJsonBuf = nullptr;
+    if (!statusJsonBuf) {
+      statusJsonBuf = (char*)ps_alloc(2048, AllocPref::PreferPSRAM, "status.json");
+    }
+    if (!statusJsonBuf) return "{\"error\":\"oom\"}";
+    serializeJson(doc, statusJsonBuf, 2048);
+    return statusJsonBuf;
+  }
+
+  // ---- Human path: live lines via broadcastOutput, short status return.
   BROADCAST_PRINTF("HardwareOne v%s (%s)", SelfDevice::firmwareVersion(), BOARD_NAME);
   broadcastOutput("System Status:");
 #if ENABLE_WIFI
@@ -1392,19 +1681,11 @@ const char* cmd_status(const String& argsInput) {
   BROADCAST_PRINTF("  Filesystem: %s", filesystemReady ? "Ready" : "Error");
   BROADCAST_PRINTF("  Free Heap: %lu bytes", (unsigned long)SelfDevice::freeHeapBytes());
 
-  size_t psTot = ESP.getPsramSize();
   if (psTot > 0) {
     BROADCAST_PRINTF("  Free PSRAM: %lu bytes", (unsigned long)SelfDevice::psramFreeBytes());
     BROADCAST_PRINTF("  Total PSRAM: %lu bytes", (unsigned long)psTot);
   }
 
-  // Reset reason labels matching esp_reset_reason_t
-  static const char* const kResetReasonLabels[] = {
-    "Unknown", "Power-on", "External", "Software", "Panic",
-    "Int WDT", "Task WDT", "WDT", "Deepsleep", "Brownout", "SDIO"
-  };
-  uint32_t reason = gSettings.lastResetReason;
-  const char* reasonLabel = (reason < 11) ? kResetReasonLabels[reason] : "Unknown";
   BROADCAST_PRINTF("  Last Reset: %s", reasonLabel);
   BROADCAST_PRINTF("  Crash Count: %lu", (unsigned long)gSettings.crashCount);
 
@@ -1416,6 +1697,20 @@ const char* cmd_uptime(const String& argsInput) {
   uint32_t seconds = SelfDevice::uptimeSeconds();
   uint32_t minutes = seconds / 60;
   uint32_t hours = minutes / 60;
+
+  // Structured path: numbers + fixed-format string only (no escaping needed),
+  // returned verbatim via a small PSRAM buffer. No broadcastOutput.
+  if (argWantsJson(argsInput)) {
+    static char* buf = nullptr;
+    if (!buf) buf = (char*)ps_alloc(192, AllocPref::PreferPSRAM, "uptime.json");
+    if (!buf) return "{\"error\":\"oom\"}";
+    snprintf(buf, 192,
+      "{\"v\":1,\"uptime_s\":%lu,\"uptime_ms\":%lu,\"uptime_hms\":\"%luh %lum %lus\"}",
+      (unsigned long)seconds, (unsigned long)millis(),
+      (unsigned long)hours, (unsigned long)(minutes % 60), (unsigned long)(seconds % 60));
+    return buf;
+  }
+
   BROADCAST_PRINTF("Uptime: %luh %lum %lus",
                    (unsigned long)hours, (unsigned long)(minutes % 60), (unsigned long)(seconds % 60));
   return "[System] Uptime displayed";
@@ -1423,7 +1718,46 @@ const char* cmd_uptime(const String& argsInput) {
 
 const char* cmd_time(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  
+
+  // Structured path: resolve the active time source (RTC primary, NTP fallback)
+  // and emit one verbatim JSON blob via a small PSRAM buffer. No broadcastOutput.
+  // All values are digits / a fixed time format, so manual building is safe.
+  if (argWantsJson(argsInput)) {
+    char timeBuf[40] = "";
+    const char* src = "none";
+    bool synced = false;
+    bool haveTemp = false;
+    float temp = 0.0f;
+#if ENABLE_RTC_SENSOR
+    if (gRtcEnabled && gRtcConnected) {
+      RTCDateTime dt;
+      if (rtcReadDateTime(&dt)) {
+        snprintf(timeBuf, sizeof(timeBuf), "%04d-%02d-%02dT%02d:%02d:%02d",
+                 dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second);
+        src = "rtc"; synced = true; haveTemp = true; temp = rtcReadTemperature();
+      }
+    }
+#endif
+    if (!synced) {
+      struct tm timeinfo;
+      if (getLocalTime(&timeinfo, 0)) {
+        strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%dT%H:%M:%S", &timeinfo);
+        src = "ntp"; synced = true;
+      }
+    }
+    static char* buf = nullptr;
+    if (!buf) buf = (char*)ps_alloc(256, AllocPref::PreferPSRAM, "time.json");
+    if (!buf) return "{\"error\":\"oom\"}";
+    int p = snprintf(buf, 256,
+      "{\"v\":1,\"synced\":%s,\"source\":\"%s\",\"time\":\"%s\",\"uptime_ms\":%lu",
+      synced ? "true" : "false", src, timeBuf, (unsigned long)millis());
+    if (haveTemp && p > 0 && p < 256) {
+      p += snprintf(buf + p, 256 - p, ",\"rtc_temp_c\":%.1f", temp);
+    }
+    if (p > 0 && p < 256) snprintf(buf + p, 256 - p, "}");
+    return buf;
+  }
+
   // Show uptime in milliseconds
   unsigned long uptimeMs = millis();
   BROADCAST_PRINTF("Uptime: %lu ms", uptimeMs);
@@ -3047,6 +3381,35 @@ static bool authorizeCommand(const AuthContext& ctx, const String& line, char* o
 }
 
 // Core command execution with authentication and registry dispatch
+// ===========================================================================
+// OUTPUT CONTRACT (read before adding command output)
+// ===========================================================================
+// Every command emits through two channels with DIFFERENT shapes — they are
+// not interchangeable, and a command must not split one logical payload across
+// both:
+//
+//   1. broadcastOutput()  — HUMAN, line-oriented. One call == one line,
+//      clamped to ~255 B (longer is [CUT]). Live-streamed to every active sink
+//      (serial / web / BLE-per-connection / log / OLED / G2) and decorated with
+//      timestamps on the live path. This is the spine for people-facing output
+//      and progress. A command that streams here should return a short status
+//      string (e.g. "OK").
+//
+//   2. the return value (copied into `out`, <=4 KB) — the command's canonical
+//      RESULT as a single verbatim blob. No 255 B line clamp, no decoration.
+//      This is the channel for byte-exact / machine-readable output (JSON) and
+//      is what MQTT publishes and what BLE/web deliver as the addressed reply.
+//      Request/response callers may also FOLD the broadcast stream into this
+//      blob via captureOutput (see cmd_exec worker) — that is how a human-
+//      streaming command still yields an HTTP body.
+//
+// JSON / structured mode: when a command is asked for `json` (see
+// argWantsJson), it must put the whole document in the return value and emit
+// NOTHING via broadcastOutput — otherwise the live lines and the blob
+// interleave and the JSON cannot be parsed.
+//
+// Rollout is incremental: `status` is the pilot; other info commands follow.
+// ===========================================================================
 bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize) {
   // Clear output buffer
   out[0] = '\0';

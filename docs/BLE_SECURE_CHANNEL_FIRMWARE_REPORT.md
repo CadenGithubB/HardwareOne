@@ -36,11 +36,13 @@ GrapheneOS `removeBond` orphan-bond trap.)
   or a plaintext command.
 
 ## 3. Operator configuration (device side)
-- `blesecret <passphrase>` — set the PSK passphrase (≥ 8 chars). `blesecret clear` removes
-  it; bare `blesecret` reports set/unset. Setting it derives + caches the PSK off the BT task.
+- `blesecret <passphrase>` — set the PSK passphrase (≥10 chars; needs upper+lower+digit+symbol).
+  Refused over Bluetooth — set via serial/OLED/web. `blesecret clear` removes it; bare `blesecret`
+  reports set/unset. Setting it derives + caches the PSK off the BT task.
 - `blesecure on|off` — require the secure channel (`on` needs a secret first).
 - Persisted settings: `bleSecureChannelSecret` (secret, hidden), `bleRequireSecureChannel`
-  (bool, default false).
+  (bool, **default ON** — but only enforced once a passphrase is set, so a fresh device is
+  plaintext for provisioning, then secure).
 
 ## 4. Modes (device behavior)
 - **Plaintext** (no secret / `blesecure off`): REQUEST bytes are a UTF-8 command line; reply
@@ -139,9 +141,9 @@ A standalone re-derivation (Python + pynacl/libsodium) reproducing these lives i
 history / can be regenerated; treat these as the canonical regression fixture for BOTH sides.
 
 ## 12. Known caveats / validate on hardware
-- **BTC_TASK stack:** the handshake's X25519+HKDF currently runs on the BLE callback task
-  (~3–4 KB stack); PBKDF2 is pre-computed off it. If HW testing shows stack pressure, defer the
-  handshake to the `cmd_exec` task. *(Not yet validated — no app to interop-test.)*
+- **BTC_TASK stack:** RESOLVED — the handshake is deferred off BTC_TASK (8 KB) to `cmd_exec`
+  via `submitDeferredToCmdExec`; the BLE callback only copies the frame + queues. PBKDF2 uses
+  HW-SHA and is pre-derived off the callback. HW-validated end-to-end.
 - **Chunk size** is a fixed 200 B (Android-safe); can be made `negotiatedMTU − 28` for iOS /
   low-MTU clients.
 - **No reply-boundary marker** in v1 (terminal-append). Add a "final frame" flag if the app
@@ -158,3 +160,28 @@ history / can be regenerated; treat these as the canonical regression fixture fo
 6. One command per app→device DATA frame; reassemble device→app replies by concatenation in
    arrival order.
 7. First secure REQUEST = HELLO (`0x01`); reconnect ⇒ new handshake.
+
+## 14. Hardening applied (2026-06-11) + deferred follow-ups
+
+Applied since the initial report (wire protocol / vectors / §13 checklist UNCHANGED):
+- `blesecret` passphrase is now **redacted** in command/audit logs (was logged in cleartext).
+- Passphrase **policy**: ≥10 chars with uppercase + lowercase + digit + symbol (was ≥8). The
+  app should enforce the same so both ends accept the chosen passphrase.
+- **Encryption required by default** (`bleRequireSecureChannel` defaults on). `bleScRequired()` =
+  require && secret-set, so a device with no passphrase stays plaintext for provisioning, then
+  enforces once a secret is set.
+- `blesecret` is **refused over Bluetooth** — provision via serial/OLED/web so the passphrase
+  never traverses BLE.
+- **Data-service streams** (sensor/system/event, `…de11–de14`) are **suppressed in required mode**
+  (they are NOT on the Secure Channel — prevents a plaintext leak).
+- **Boot console** prints a "BLE is UNENCRYPTED — set a passphrase" notice when required-but-unset.
+
+Deferred (TODO — not yet done):
+- **Surface the "unencrypted BLE" warning beyond the serial console.** Today only the boot
+  console shows it. Add one or more: a **web-dashboard banner** (recommended — most-seen; mirror
+  the existing "Detected but not compiled" banner, gated on `require && !secret`), an **OLED boot
+  splash** for headless users, and/or a **passphrase prompt in the first-time-setup** Bluetooth-Mode
+  page so it's provisioned during setup. *(May fall out naturally of later UI work.)*
+- **Encrypted Data-service streaming** (vs. suppression) if live sensor/event push is ever needed.
+- Lower-severity audit items still open: per-device PBKDF2 salt, AAD-bind the frame type/counter,
+  failed-handshake rate-limiting, at-rest PSK encryption (see the security audit).

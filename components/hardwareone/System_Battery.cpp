@@ -19,6 +19,7 @@
 #include "System_Battery.h"
 #include "System_BuildConfig.h"
 #include "System_Command.h"
+#include "System_Utils.h"      // argWantsJson() — opt-in JSON output
 #include "System_Debug.h"
 #include "System_Notifications.h"
 #include "System_Settings.h"   // gSettings (battery-log enable/interval) + setSetting
@@ -444,8 +445,36 @@ char getBatteryIcon() {
 // CLI commands
 // ============================================================================
 
-const char* cmd_battery_status(const String& /*argsInput*/) {
+const char* cmd_battery_status(const String& argsInput) {
   updateBattery();
+
+  // Structured path: bounded battery telemetry as one verbatim JSON blob via a
+  // PSRAM buffer. No broadcastOutput. All values are numbers / fixed status
+  // strings (no escaping needed). Schema: {"v":1,"voltage","percentage",
+  // "status","charging","usbPresent","vbusSense","lastReadMsAgo","backend",...}
+  if (argWantsJson(argsInput)) {
+    EXT_RAM_BSS_ATTR static char jbuf[256];
+    int p = snprintf(jbuf, sizeof(jbuf),
+      "{\"v\":1,\"voltage\":%.2f,\"percentage\":%.0f,\"status\":\"%s\","
+      "\"charging\":%s,\"usbPresent\":%s,\"vbusSense\":%s,\"lastReadMsAgo\":%lu",
+      gBatteryState.voltage, gBatteryState.percentage, getBatteryStatusString(),
+      gBatteryState.isCharging ? "true" : "false",
+      gBatteryState.usbPresent ? "true" : "false",
+      kHasVbusSense ? "true" : "false",
+      (unsigned long)(millis() - gBatteryState.lastReadMs));
+#if BATTERY_BACKEND_ADC
+    if (p > 0 && p < (int)sizeof(jbuf))
+      p += snprintf(jbuf + p, sizeof(jbuf) - p, ",\"backend\":\"adc\",\"rawADC\":%d", gBatteryState.rawADC);
+#elif BATTERY_BACKEND_FUEL_GAUGE
+    if (p > 0 && p < (int)sizeof(jbuf))
+      p += snprintf(jbuf + p, sizeof(jbuf) - p, ",\"backend\":\"fuelgauge\",\"cratePctPerHr\":%.2f", gBatteryState.cratePctPerHr);
+#else
+    if (p > 0 && p < (int)sizeof(jbuf))
+      p += snprintf(jbuf + p, sizeof(jbuf) - p, ",\"backend\":\"usb-only\"");
+#endif
+    if (p > 0 && p < (int)sizeof(jbuf)) snprintf(jbuf + p, sizeof(jbuf) - p, "}");
+    return jbuf;
+  }
 
   broadcastOutput("");
   broadcastOutput("╔════════════════════════════════════════╗");

@@ -1864,6 +1864,10 @@ void hardwareone_setup() {
   systemLogAutoStart();
 
   broadcastOutput("[Boot] Setup complete");
+
+  // Last lines of boot: nudge to provision the BLE passphrase if encryption is wanted
+  // but unset (so the operator can't miss that Bluetooth is currently plaintext).
+  bleSecurityBootNotice();
 }
 
 

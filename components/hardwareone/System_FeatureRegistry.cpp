@@ -441,7 +441,32 @@ static const char* getCategoryName(FeatureCategory cat) {
 
 const char* cmd_features(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  
+
+  // Structured path: full capability list (what this build supports + runtime
+  // state), one verbatim JSON blob via the return value. No broadcastOutput.
+  // Lets the app gate UI on what the device actually has.
+  // Schema: {"v":1,"features":[{"id","name","category","heapKB","compiled",
+  //          "enabled","toggleable"}, ...]}
+  if (argWantsJson(argsInput)) {
+    PSRAM_JSON_DOC(doc);
+    doc["v"] = 1;
+    JsonArray arr = doc["features"].to<JsonArray>();
+    for (size_t i = 0; i < featureRegistryCount; i++) {
+      const FeatureEntry* f = &featureRegistry[i];
+      JsonObject o = arr.add<JsonObject>();
+      o["id"]         = f->id;
+      o["name"]       = f->name;
+      o["category"]   = getCategoryName(f->category);
+      o["heapKB"]     = f->heapCostKB;
+      o["compiled"]   = isFeatureCompiled(f);
+      o["enabled"]    = isFeatureEnabled(f);
+      o["toggleable"] = (bool)(f->flags & FEATURE_FLAG_RUNTIME_TOGGLE);
+    }
+    PSRAM_STATIC_BUF(jbuf, 4096);  // feature list can exceed 2 KB
+    serializeJson(doc, jbuf, jbuf_SIZE);
+    return jbuf;
+  }
+
   CommandArgs a(argsInput);
 
   // No args - show all features with heap estimates

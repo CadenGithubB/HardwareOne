@@ -123,6 +123,7 @@ extern BLESystemState* gBLEState;
 // Initialization
 bool initBluetooth();
 void deinitBluetooth();
+void bleSecurityBootNotice();  // boot-time "set a passphrase" nudge when BLE is unencrypted
 
 // Device type management
 const char* bleDeviceTypeToString(BLEDeviceType type);
@@ -206,6 +207,7 @@ extern const size_t bluetoothSettingsCount;
 // Stub declarations when Bluetooth is disabled
 inline bool initBluetooth() { return false; }
 inline void deinitBluetooth() {}
+inline void bleSecurityBootNotice() {}
 inline bool startBLEAdvertising() { return false; }
 inline void stopBLEAdvertising() {}
 inline bool isBLEConnected() { return false; }
