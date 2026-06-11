@@ -40,13 +40,17 @@ constexpr uint32_t IMU_STACK_WORDS = 4096;           // ~16KB (BNO055 init retri
 constexpr uint32_t TOF_STACK_WORDS = 3072;           // ~12KB
 constexpr uint32_t FMRADIO_STACK_WORDS = 4608;       // ~18KB
 constexpr uint32_t INPUT_STACK_WORDS = 3584;       // ~14KB
-constexpr uint32_t DEBUG_OUT_STACK_WORDS = 3072;     // ~12KB — was 14KB (orig 16KB), trimmed
-                                                     // again 2026-06-07 for ceiling relief.
-                                                     // Measured HWM ~9.3KB (with glasses
-                                                     // connected) → ~2.7KB headroom. 12KB is
-                                                     // the documented FLOOR — do NOT drop
-                                                     // below this (LittleFS append + String
-                                                     // work in [ERROR] flood crashed lower).
+constexpr uint32_t DEBUG_OUT_STACK_WORDS = 4096;     // 16KB — RESTORED to original 2026-06-11.
+                                                     // The 12KB "floor" (HWM ~9.3KB → ~2.7KB
+                                                     // headroom) was NOT enough: an [ERROR] logged
+                                                     // during boot (NTP-sync timeout) sent the task
+                                                     // through appendLineWithCap()->LittleFS append,
+                                                     // whose deep write path + the timestamp String
+                                                     // exceeded the headroom and overflowed. The HWM
+                                                     // is driven entirely by debug_out doing inline
+                                                     // FILE I/O (system-log + error-log writes); see
+                                                     // the drain loop. Do NOT trim below 16KB unless
+                                                     // those file writes are moved off this task.
 constexpr uint32_t APDS_STACK_WORDS = 3072;          // ~12KB
 constexpr uint32_t GPS_STACK_WORDS = 3072;           // ~12KB
 constexpr uint32_t PRESENCE_STACK_WORDS = 3072;      // ~12KB
