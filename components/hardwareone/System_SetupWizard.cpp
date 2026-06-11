@@ -30,6 +30,60 @@ void handleOLEDMQTTPage(SetupWizardResult& result, bool& running);
 extern String waitForSerialInputBlocking();
 
 // ============================================================================
+// Setup Archetypes (deployment presets) — see System_SetupWizard.h
+// ============================================================================
+static const char* const SEED_HANDHELD[] = { "wifi", "http", "i2c", "oled", "input", "automation", nullptr };
+static const char* const SEED_HEADLESS[] = { "wifi", "http", "i2c", "espnow", "automation", nullptr };
+static const char* const SEED_GLASSES[]  = { "wifi", "http", "i2c", "bluetooth", "automation", nullptr };
+static const char* const SEED_MESH[]     = { "wifi", "espnow", "i2c", "automation", nullptr };
+
+// requiredFeatures: ALL must be compiled, else the archetype is hidden.
+static const char* const REQ_HANDHELD[] = { "oled", "input", nullptr };  // local display + non-serial input
+static const char* const REQ_GLASSES[]  = { "bluetooth", nullptr };
+static const char* const REQ_MESH[]     = { "espnow", nullptr };
+
+const SetupArchetype setupArchetypes[] = {
+  { "handheld", "Standard Handheld",
+    "Board + OLED + gamepad + sensors. Local menu and web UI - the full handheld.",
+    SEED_HANDHELD, REQ_HANDHELD },
+  { "headless", "Headless / relay",
+    "No local screen. Managed over WiFi/web + ESP-NOW. Good for relay & remote nodes.",
+    SEED_HEADLESS, nullptr },
+  { "glasses", "G2 Companion",
+    "Drives Even G2 smart glasses over Bluetooth, plus WiFi + web UI.",
+    SEED_GLASSES, REQ_GLASSES },
+  { "mesh", "Meshed Node",
+    "Pairs with your other Hardware One devices over an ESP-NOW mesh.",
+    SEED_MESH, REQ_MESH },
+};
+const size_t setupArchetypesCount = sizeof(setupArchetypes) / sizeof(setupArchetypes[0]);
+
+bool setupArchetypeAvailable(const SetupArchetype* a) {
+  if (!a) return false;
+  if (!a->requiredFeatures) return true;  // general-purpose: always offered
+  for (const char* const* p = a->requiredFeatures; *p; ++p) {
+    const FeatureEntry* f = getFeatureById(*p);
+    if (!f || !isFeatureCompiled(f)) return false;
+  }
+  return true;
+}
+
+// Enable an archetype's seed features (set each persisted flag). At first-boot
+// setup these take effect on the post-setup boot (reboot-gated WiFi/OLED/I2C
+// likewise). Detected sensors are NOT touched here — applyDetectedHardware()
+// handles those. No-op for Advanced/Import. Returns the number of features enabled.
+int applyArchetypeSeed(const SetupArchetype* a) {
+  if (!a || !a->seedFeatures) return 0;
+  int n = 0;
+  for (const char* const* p = a->seedFeatures; *p; ++p) {
+    const FeatureEntry* f = getFeatureById(*p);
+    if (f && isFeatureCompiled(f) && f->enabledSetting) { *f->enabledSetting = true; n++; }
+  }
+  if (n) writeSettingsJson();
+  return n;
+}
+
+// ============================================================================
 // Time Zone Data
 // ============================================================================
 
@@ -277,15 +331,19 @@ char* getWizardDeviceNameBuf() { return wizardDeviceName; }
    sWizardBaselineCalibrated = true;
  }
 
+uint32_t wizardEnabledModeExtraHeapKB();  // defined with the mode-menu table below
+
 void getHeapBarData(uint32_t* enabledKB, uint32_t* maxKB, int* percentage) {
   uint32_t totalHeapKB = (uint32_t)(ESP.getHeapSize() / 1024);
   if (totalHeapKB == 0) totalHeapKB = 1;
- 
+
    if (!sWizardBaselineCalibrated) {
      calibrateWizardBaseline();
    }
 
-  uint32_t enabledCostKB = getEnabledFeaturesHeapEstimate();
+  // Feature-granular base + the selected sub-mode's extra (HTTPS/G2) so the bar
+  // reflects mode choices, not just which features are on.
+  uint32_t enabledCostKB = getEnabledFeaturesHeapEstimate() + wizardEnabledModeExtraHeapKB();
   uint32_t estimatedUsedKB = sWizardBaselineKB + enabledCostKB;
   if (estimatedUsedKB > totalHeapKB) estimatedUsedKB = totalHeapKB;
 
@@ -502,11 +560,15 @@ bool wizardShouldShowMQTT() {
 // Web Interface -> HTTP/HTTPS (bound to httpsEnabled); Bluetooth -> Server/G2
 // (bound to bleMode). The blocking FTS wizard and the CLI-mode `featuresetup`
 // command both read this same table so their behaviour is identical.
+// Per-mode extraHeapKB: estimated RAM the mode adds over the feature's base.
+// HTTPS +20KB (mbedTLS session buffers, ~20KB each per HEAP_OPTIMIZATION_FINDINGS);
+// G2 +10KB (glasses protocol state + persistent heartbeat worker over a plain
+// BLE server). Baseline modes (HTTP, Server) add 0.
 #if ENABLE_HTTP_SERVER && ENABLE_HTTPS
-static const WizardModeOption kWebModes[] = { {"HTTP", 0}, {"HTTPS", 1} };
+static const WizardModeOption kWebModes[] = { {"HTTP", 0, 0}, {"HTTPS", 1, 20} };
 #endif
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
-static const WizardModeOption kBtModes[]  = { {"Server (phone)", 0}, {"G2 Glasses", 1} };
+static const WizardModeOption kBtModes[]  = { {"Server (phone)", 0, 0}, {"G2 Glasses", 1, 10} };
 #endif
 
 static const WizardModeMenu kModeMenus[] = {
@@ -547,6 +609,21 @@ void wizardModeApply(const WizardModeMenu* m, int idx) {
   int v = m->modes[idx].value;
   if (m->boolSetting)     *m->boolSetting = (v != 0);
   else if (m->intSetting) *m->intSetting  = v;
+}
+
+// Sum the extraHeapKB of the currently-selected mode for every enabled feature
+// that has a mode menu (HTTPS over HTTP, G2 over BLE server). Feature-granular
+// getEnabledFeaturesHeapEstimate() can't see this, so the wizard heap bar folds
+// it in to reflect the mode choice. Returns 0 when no moded feature is enabled.
+uint32_t wizardEnabledModeExtraHeapKB() {
+  uint32_t extra = 0;
+  for (size_t i = 0; i < kModeMenuCount; i++) {
+    const WizardModeMenu* m = &kModeMenus[i];
+    const FeatureEntry* f = getFeatureById(m->featureId);
+    if (!f || !isFeatureEnabled(f)) continue;
+    extra += m->modes[wizardModeCurrentIndex(m)].extraHeapKB;
+  }
+  return extra;
 }
 
 // The mode-picker pages are visible whenever their feature is enabled. Gated on

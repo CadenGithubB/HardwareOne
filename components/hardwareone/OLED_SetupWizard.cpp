@@ -85,6 +85,48 @@ void drawWizardFooter(const char* leftAction, const char* rightAction, const cha
 
 
 // ============================================================================
+// Shared info-page renderer — title + header rule, wrapped body, footer rule
+// ============================================================================
+void drawSetupInfoPage(const char* title, const char* body, const char* footer,
+                       int pageNum, int pageCount) {
+  if (!oledDisplay || !oledConnected) return;
+  OLED_TRANSACTION(
+    oledDisplay->clearDisplay();
+    oledDisplay->setTextSize(1);
+    oledDisplay->setTextColor(SSD1306_WHITE);
+    // Header: optional "n/N" indicator top-right, then the title clipped to the
+    // space left of it (so a long title never overlaps the indicator).
+    int titleMax = 21;  // chars per 128px line at size 1
+    if (pageCount > 0) {
+      char ind[12];
+      snprintf(ind, sizeof(ind), "%d/%d", pageNum, pageCount);
+      int indChars = strlen(ind);
+      oledDisplay->setTextWrap(false);
+      oledDisplay->setCursor(128 - indChars * 6, 0);
+      oledDisplay->print(ind);
+      titleMax = 21 - indChars - 1;  // leave a 1-char gap before the indicator
+    }
+    String tt = String(title);
+    if ((int)tt.length() > titleMax) tt = tt.substring(0, titleMax - 1) + ".";
+    oledDisplay->setTextWrap(false);
+    oledDisplay->setCursor(0, 0);
+    oledDisplay->print(tt);
+    oledDisplay->setTextWrap(true);
+    oledDisplay->drawFastHLine(0, 10, 128, SSD1306_WHITE);
+    // Body (word-wraps at the display width)
+    oledDisplay->setCursor(0, 14);
+    oledDisplay->print(body);
+    // Footer: rule + free-form hint
+    const int footerY = OLED_HEADER_HEIGHT + OLED_CONTENT_HEIGHT;
+    oledDisplay->drawFastHLine(0, footerY, 128, SSD1306_WHITE);
+    oledDisplay->setCursor(0, footerY + 2);
+    oledDisplay->print(footer);
+    oledDisplay->display();
+  );
+}
+
+
+// ============================================================================
 // Page Renderers
 // ============================================================================
 
@@ -857,7 +899,7 @@ void handleModePage(SetupWizardPage page, SetupWizardResult& result, bool& runni
       const int footerY = OLED_HEADER_HEIGHT + OLED_CONTENT_HEIGHT;
       oledDisplay->drawFastHLine(0, footerY, 128, SSD1306_WHITE);
       oledDisplay->setCursor(0, footerY + 2);
-      oledDisplay->print("A:Select B:Back");
+      oledDisplay->print("A/>:Next  B/<:Back");
       OLED_TRANSACTION(oledDisplay->display());
     }
 
@@ -865,9 +907,14 @@ void handleModePage(SetupWizardPage page, SetupWizardResult& result, bool& runni
 
     if (oledDisplay && oledConnected) {
       JoystickNav nav = readWizardJoystickNav();
-      if (nav.up)   { sel = (sel > 0) ? sel - 1 : sub->modeCount - 1; delay(150); continue; }
-      if (nav.down) { sel = (sel < sub->modeCount - 1) ? sel + 1 : 0; delay(150); continue; }
+      // Apply on scroll (like the feature-toggle pages) so the header heap bar
+      // updates live to reflect the highlighted mode (e.g. HTTPS over HTTP).
+      if (nav.up)   { sel = (sel > 0) ? sel - 1 : sub->modeCount - 1; wizardModeApply(sub, sel); delay(150); continue; }
+      if (nav.down) { sel = (sel < sub->modeCount - 1) ? sel + 1 : 0; wizardModeApply(sub, sel); delay(150); continue; }
       if (nav.left) { wizardPrevPage(); return; }
+      // Joystick right advances (apply current pick + next), matching A and the
+      // other wizard pages — without this, right did nothing on the mode pages.
+      if (nav.right) { wizardModeApply(sub, sel); if (!wizardNextPage(result)) running = false; return; }
 
       uint32_t buttons = lastButtons;
       bool haveButtons = false;
@@ -1057,6 +1104,88 @@ bool getOLEDSetupModeSelection(int& setupMode) {
   }
 
   return false;
+}
+
+// ============================================================================
+// Archetype Selection (Level 2 — shown after "Basic")
+// ============================================================================
+// Card-per-item on OLED (name + wrapped blurb + nav), full list + blurbs on
+// serial. Returns the chosen archetype index, or -1 if the user backed out
+// (B button / 'b') to return to the Basic/Advanced/Import menu.
+int getOLEDArchetypeSelection() {
+  // Only offer archetypes whose defining feature is compiled (hides e.g.
+  // "G2 Glasses Companion" without Bluetooth, "Meshed Node" without ESP-NOW).
+  int avail[16];
+  int NUM = 0;
+  for (size_t i = 0; i < setupArchetypesCount && NUM < 16; i++) {
+    if (setupArchetypeAvailable(&setupArchetypes[i])) avail[NUM++] = (int)i;
+  }
+  if (NUM == 0) return 0;  // unreachable: handheld/headless are always available
+  int selection = 0;
+  uint32_t lastButtons = 0;
+  bool lastButtonsInitialized = false;
+  int lastPrintedSelection = -1;
+
+  sJoyUpHeld = false;
+  sJoyDownHeld = false;
+
+  while (true) {
+    // Serial: full list + per-option blurb, cursor on current
+    if (selection != lastPrintedSelection) {
+      Serial.println();
+      Serial.println("========================================");
+      Serial.println("    WHAT WILL YOU USE THIS DEVICE FOR?");
+      Serial.println("========================================");
+      for (int i = 0; i < NUM; i++) {
+        const SetupArchetype& opt = setupArchetypes[avail[i]];
+        Serial.printf(" %s%d. %s\n", i == selection ? ">" : " ", i + 1, opt.name);
+        Serial.printf("      %s\n", opt.blurb);
+      }
+      Serial.println("----------------------------------------");
+      Serial.printf("Serial: 1-%d, or 'b' back   OLED: Joy=move A=pick B=back\n", NUM);
+      Serial.print("> ");
+      lastPrintedSelection = selection;
+    }
+
+    // OLED: one card for the highlighted archetype
+    if (oledDisplay && oledConnected) {
+      const SetupArchetype& a = setupArchetypes[avail[selection]];
+      drawSetupInfoPage(a.name, a.blurb, "Joy A:Pick B:Back", selection + 1, NUM);
+    }
+
+    delay(50);
+
+    if (oledDisplay && oledConnected) {
+      JoystickNav nav = readWizardJoystickNav();
+      if (nav.up)   { selection = (selection > 0) ? selection - 1 : NUM - 1; delay(150); continue; }
+      if (nav.down) { selection = (selection < NUM - 1) ? selection + 1 : 0; delay(150); continue; }
+
+      uint32_t buttons = lastButtons;
+      bool haveButtons = false;
+      {
+        SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(10), "wizard.archetypeRead");
+        if (g.held && gInputCache.dataValid) { buttons = gInputCache.buttons; haveButtons = true; }
+      }
+      if (haveButtons && !lastButtonsInitialized) { lastButtons = buttons; lastButtonsInitialized = true; continue; }
+      uint32_t pressedNow = ~buttons;
+      uint32_t pressedLast = ~lastButtons;
+      uint32_t newButtons = pressedNow & ~pressedLast;
+      lastButtons = buttons;
+      if (newButtons & INPUT_MASK(INPUT_BUTTON_A)) return avail[selection];
+      if (newButtons & INPUT_MASK(INPUT_BUTTON_B)) return -1;
+    }
+
+    if (Serial.available()) {
+      String input = Serial.readStringUntil('\n');
+      input.trim();
+      if (input.equalsIgnoreCase("b") || input.equalsIgnoreCase("back")) return -1;
+      int num = input.toInt();
+      if (num >= 1 && num <= NUM) return avail[num - 1];
+      for (int i = 0; i < NUM; i++) {
+        if (input.equalsIgnoreCase(setupArchetypes[avail[i]].id)) return avail[i];
+      }
+    }
+  }
 }
 
 // ============================================================================

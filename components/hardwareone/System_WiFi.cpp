@@ -60,7 +60,7 @@ static const char* wifiStatusToString(wl_status_t status);
 static void wifiEnsureIdle(unsigned long waitMs);
 int findWiFiNetwork(const String& ssid);
 void sortWiFiByPriority();
-void upsertWiFiNetwork(const String& ssid, const String& password, int priority, bool hidden);
+bool upsertWiFiNetwork(const String& ssid, const String& password, int priority, bool hidden);
 bool removeWiFiNetwork(const String& ssid);
 void saveWiFiNetworks();
 bool connectWiFiIndex(int index0based, unsigned long timeoutMs, bool showPriority = false);
@@ -148,7 +148,9 @@ const char* cmd_wifiadd(const String& originalCmd) {
   if (pri <= 0 && a.has(2)) pri = 1;
   bool hid = a.argBool(3, ssid.length() == 0);
   // Networks already in memory from settings.json
-  upsertWiFiNetwork(ssid, pass, pri, hid);
+  if (!upsertWiFiNetwork(ssid, pass, pri, hid)) {
+    return "Error: cannot add a WiFi network with a blank SSID";
+  }
   sortWiFiByPriority();
   saveWiFiNetworks();
   notifyWiFiNetworkAdded(ssid.c_str());
@@ -499,17 +501,27 @@ void sortWiFiByPriority() {
   }
 }
 
-void upsertWiFiNetwork(const String& ssid, const String& password, int priority, bool hidden) {
+bool upsertWiFiNetwork(const String& ssid, const String& password, int priority, bool hidden) {
+  // Block blank SSIDs at the source: a network with no name can only fail to
+  // connect (and previously crashed the connect path), so never store one. This
+  // is the single chokepoint every save path funnels through.
+  String trimmed = ssid;
+  trimmed.trim();
+  if (trimmed.length() == 0) {
+    ERROR_WIFIF("Refusing to save WiFi network with a blank SSID");
+    broadcastOutput("ERROR: cannot save a WiFi network with a blank name");
+    return false;
+  }
   int idx = findWiFiNetwork(ssid);
   if (idx >= 0) {
     gWifiNetworks[idx].password = password;
     if (priority > 0) gWifiNetworks[idx].priority = priority;
     gWifiNetworks[idx].hidden = hidden;
-    return;
+    return true;
   }
   if (gWifiNetworkCount >= MAX_WIFI_NETWORKS) {
     broadcastOutput("[WiFi] Network list full; cannot add");
-    return;
+    return false;
   }
   WifiNetwork nw;
   nw.ssid = ssid;
@@ -518,6 +530,7 @@ void upsertWiFiNetwork(const String& ssid, const String& password, int priority,
   nw.hidden = hidden;
   nw.lastConnected = 0;
   gWifiNetworks[gWifiNetworkCount++] = nw;
+  return true;
 }
 
 bool removeWiFiNetwork(const String& ssid) {

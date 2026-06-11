@@ -260,6 +260,47 @@ inline bool i2cPingAddress(uint8_t address, uint32_t clockHz, uint32_t timeoutMs
   return (i2cProbeAddress(address, clockHz, timeoutMs, bus) == 0);
 }
 
+// Confirm a device is really present by reading >=1 byte after its address ACKs.
+// A bare address-ACK can be a phantom (bus capacitance, a neighbour chip partly
+// decoding the address, or a clock-stretching device glitching an ACK onto a
+// nearby address). A real device returns data; a phantom NAKs the read. Returns
+// true only if a byte actually came back. NOTE: write-only devices (the SSD1306
+// OLED) NAK reads — use i2cConfirmPresent(), which exempts them, not this raw call.
+inline bool i2cConfirmRead(uint8_t address, uint32_t clockHz, uint32_t timeoutMs, uint8_t bus = 0) {
+  extern bool gI2CBusEnabled;
+  if (!gI2CBusEnabled) return false;
+
+  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  if (!mgr) return false;
+  if (!mgr->isBusInitialized(bus)) return false;
+
+  SemaphoreHandle_t mutex = mgr->getBusMutex(bus);
+  TwoWire*          wire  = mgr->getWire(bus);
+  if (!mutex || !wire) return false;
+
+  bool ok = false;
+  if (xSemaphoreTake(mutex, pdMS_TO_TICKS(timeoutMs)) == pdTRUE) {
+    wire->setClock(clockHz);
+    size_t got = wire->requestFrom((uint16_t)address, (size_t)1);
+    if (got >= 1) {
+      while (wire->available()) (void)wire->read();
+      ok = true;
+    }
+    wire->setClock(100000);
+    xSemaphoreGive(mutex);
+  }
+  return ok;
+}
+
+// True when a device that ACKed `address` is *confirmed* present. Normal devices
+// must return a read byte (filters phantom address-ACKs); the write-only SSD1306
+// OLED (0x3D primary, 0x3C alt) NAKs reads, so for it the ACK is the confirmation.
+// Scans should gate "present" on this, not on a bare ACK.
+inline bool i2cConfirmPresent(uint8_t address, uint32_t clockHz, uint32_t timeoutMs, uint8_t bus = 0) {
+  if (address == I2C_ADDR_OLED || address == 0x3C) return true;  // OLED: write-only
+  return i2cConfirmRead(address, clockHz, timeoutMs, bus);
+}
+
 // Centralized device stop handler: ESP-NOW broadcast + notification
 void handleDeviceStopped(I2CDeviceType device);
 
@@ -435,8 +476,16 @@ struct DetectionResult {
 // Probe both buses (each quiesced during its scan) and fill `out`. Read-only.
 void detectHardware(DetectionResult& out);
 
-// CLI `detect` — runs detectHardware() and prints the diff. Read-only.
+// CLI `detect` — runs detectHardware() and prints the diff. `detect apply`
+// (admin) auto-enables cheap present-but-disabled devices. Read-only otherwise.
 const char* cmd_detect(const String& argsInput);
+
+// Auto-config: enable the cheap present-but-disabled devices a scan found (set
+// the feature flag + persist). Heavy devices (camera/microphone/speech/gamepad)
+// are LEFT OFF for an explicit offer; missing devices are untouched. Reused by
+// `detect apply` and the setup wizard's Basic auto-config step.
+struct ApplyResult { uint8_t enabled; uint8_t offered; bool rebootNeeded; };
+ApplyResult applyDetectedHardware(const DetectionResult& r);
 
 // ============================================================================
 // Device Registry

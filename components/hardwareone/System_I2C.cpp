@@ -17,6 +17,7 @@
 #include "System_FirstTimeSetup.h"
 #include "System_FeatureRegistry.h"  // getFeatureById/isFeatureEnabled — hardware-detect diff
 #include "System_PollPause.h"        // PollPauseGuard — quiesce a bus during the detect scan
+#include "System_AuthIdentity.h"     // currentExecIsAdmin — gate 'detect apply'
 #include "System_I2C.h"
 #include "System_Logging.h"
 #include "System_Mutex.h"
@@ -747,7 +748,7 @@ const char* cmd_i2cscan(const String& originalCmd) {
                      gSettings.i2cSdaPin, gSettings.i2cSclPin);
     int count = 0;
     for (uint8_t addr = 1; addr < 127; addr++) {
-      if (i2cPingAddress(addr, 100000, 50, 0)) {
+      if (i2cPingAddress(addr, 100000, 50, 0) && i2cConfirmPresent(addr, 100000, 50, 0)) {
         String identification = identifySensor(addr);
         BROADCAST_PRINTF("  0x%02X (%d) - %s", addr, addr, identification.c_str());
         count++;
@@ -767,7 +768,7 @@ const char* cmd_i2cscan(const String& originalCmd) {
                      gSettings.i2c2SdaPin, gSettings.i2c2SclPin);
     int count = 0;
     for (uint8_t addr = 1; addr < 127; addr++) {
-      if (i2cPingAddress(addr, 100000, 50, 1)) {
+      if (i2cPingAddress(addr, 100000, 50, 1) && i2cConfirmPresent(addr, 100000, 50, 1)) {
         // identifySensor() looks up by address only — same name on either bus.
         String identification = identifySensor(addr);
         BROADCAST_PRINTF("  0x%02X (%d) - %s", addr, addr, identification.c_str());
@@ -987,9 +988,14 @@ void detectHardware(DetectionResult& out) {
     for (size_t i = 0; i < n && i < MAXSENS; i++) {
       if (found[i]) continue;                   // already located on the other bus
       const I2CSensorEntry& s = i2cSensors[i];
-      bool hit = (i2cProbeAddress(s.address, kProbeClockHz, s.i2cTimeoutMs, bus) == 0);
+      // Probe for an ACK, then confirm by read-back to reject phantom ACKs
+      // (see i2cConfirmPresent — write-only OLED is exempt). Prevents a ghost
+      // address (e.g. 0x68) from being reported as a real device.
+      bool hit = (i2cProbeAddress(s.address, kProbeClockHz, s.i2cTimeoutMs, bus) == 0) &&
+                 i2cConfirmPresent(s.address, kProbeClockHz, s.i2cTimeoutMs, bus);
       if (!hit && s.multiAddress) {
-        hit = (i2cProbeAddress(s.altAddress, kProbeClockHz, s.i2cTimeoutMs, bus) == 0);
+        hit = (i2cProbeAddress(s.altAddress, kProbeClockHz, s.i2cTimeoutMs, bus) == 0) &&
+              i2cConfirmPresent(s.altAddress, kProbeClockHz, s.i2cTimeoutMs, bus);
       }
       if (hit) { found[i] = true; foundBus[i] = bus; }
     }
@@ -1053,13 +1059,52 @@ void detectHardware(DetectionResult& out) {
   }
 }
 
+// "Heavy" = spawns a heavy subsystem and/or carries the BLE-coexistence history;
+// these are OFFERED (left off) rather than auto-enabled. Everything else with a
+// toggleable feature auto-enables when found present-but-disabled.
+static bool detectIsHeavyModule(const char* id) {
+  if (!id) return false;
+  return strcmp(id, "camera") == 0 || strcmp(id, "microphone") == 0 ||
+         strcmp(id, "espsr")  == 0 || strcmp(id, "input") == 0;
+}
+
+ApplyResult applyDetectedHardware(const DetectionResult& r) {
+  ApplyResult out{0, 0, false};
+  for (uint8_t i = 0; i < r.count; i++) {
+    const DetectedEntry& e = r.entries[i];
+    if (e.status != DetectStatus::PRESENT_DISABLED) continue;            // only act on newly-present
+    if (detectIsHeavyModule(e.moduleName)) { out.offered++; continue; } // offer, don't auto-enable
+    const FeatureEntry* f = getFeatureById(e.moduleName);
+    if (!f || !canToggleFeature(f) || !f->enabledSetting) continue;
+    *f->enabledSetting = true;
+    out.enabled++;
+    if (f->flags & FEATURE_FLAG_REQUIRES_REBOOT) out.rebootNeeded = true;
+  }
+  if (out.enabled) writeSettingsJson();
+  return out;
+}
+
 const char* cmd_detect(const String& argsInput) {
-  (void)argsInput;
+  CommandArgs a(argsInput);
+  String sub = a.arg(0); sub.toLowerCase();
+  const bool apply = (sub == "apply");
+
+  if (apply && !currentExecIsAdmin())
+    return "[detect] 'apply' changes config — admin login required.";
+
   DetectionResult r;
   detectHardware(r);
 
   if (r.busDisabled)
     return "[detect] I2C bus disabled — enable the 'i2c' feature to scan for hardware.";
+
+  if (apply) {
+    ApplyResult ar = applyDetectedHardware(r);
+    BROADCAST_PRINTF("[detect apply] enabled %u newly-present device(s); left %u heavy device(s) off (enable manually).%s",
+                     (unsigned)ar.enabled, (unsigned)ar.offered,
+                     ar.rebootNeeded ? " Reboot for reboot-gated features." : "");
+    return "[detect apply] done";
+  }
 
   BROADCAST_PRINTF("[detect] Hardware vs. configuration (I2C1=bus0, I2C2=bus1):");
 
@@ -1153,7 +1198,11 @@ static void scanBusForDevices(uint8_t busNumber) {
       uint8_t err = wire->endTransmission();
       xSemaphoreGive(busMutex);
 
-      if (err == 0) {
+      // Confirm by read-back before registering. A bare address-ACK can be a
+      // phantom (bus capacitance / a neighbour chip / a clock-stretch glitch),
+      // which would otherwise be mislabeled from the address table (e.g. a
+      // ghost 0x68 shown as "DS3231 RTC"). OLED is exempt (write-only).
+      if (err == 0 && i2cConfirmPresent(addr, 100000, 200, busNumber)) {
         addDiscoveredDevice(addr, busNumber);
       }
     }
@@ -1205,7 +1254,11 @@ static void scanBusForDevicesSmart(uint8_t busNumber, const uint8_t* addresses, 
       uint8_t err = wire->endTransmission();
       xSemaphoreGive(busMutex);
 
-      if (err == 0) {
+      // Confirm by read-back before registering. A bare address-ACK can be a
+      // phantom (bus capacitance / a neighbour chip / a clock-stretch glitch),
+      // which would otherwise be mislabeled from the address table (e.g. a
+      // ghost 0x68 shown as "DS3231 RTC"). OLED is exempt (write-only).
+      if (err == 0 && i2cConfirmPresent(addr, 100000, 200, busNumber)) {
         addDiscoveredDevice(addr, busNumber);
       }
     }
@@ -1882,7 +1935,7 @@ const CommandEntry i2cCommands[] = {
   // Diagnostics
   { "i2cmetrics", "Show I2C bus performance metrics.", false, cmd_i2cmetrics },
   { "i2cscan", "Scan I2C bus for devices.", false, cmd_i2cscan },
-  { "detect", "Detect hardware: scan I2C buses, diff vs. configured features.", false, cmd_detect },
+  { "detect", "Detect hardware: scan I2C buses, diff vs. configured features.", false, cmd_detect, "Usage: detect [apply]\n  detect       - read-only report (present/enabled/missing)\n  detect apply - auto-enable cheap detected devices (admin; reboot for some)" },
   { "i2cstats", "I2C bus statistics and errors.", false, cmd_i2cstats },
   { "i2chealth", "Show per-device I2C health status.", false, cmd_i2chealth },
   
