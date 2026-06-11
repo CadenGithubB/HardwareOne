@@ -330,6 +330,8 @@ struct Settings {
       bleDeviceName("HardwareOne"),
       bleTxPower(3),
       bleMode(0),
+      bleRequireSecureChannel(false),
+      bleSecureChannelSecret(""),
       // BLE peer fields moved to gBlePeerData[] (see BLE_Peers.h)
       powerMode(0),
       powerAutoMode(false),
@@ -887,6 +889,8 @@ struct Settings {
   String bleDeviceName;         // BLE advertised device name (default: "HardwareOne")
   int bleTxPower;               // BLE TX power level 0-7 (0=min, 7=max, default: 3)
   int bleMode;                  // BLE role: 0=server (phone peripheral), 1=G2 client (central). Mutually exclusive at runtime.
+  bool bleRequireSecureChannel; // Require the app-layer Secure Channel (server mode); refuse plaintext commands when set
+  String bleSecureChannelSecret;// Pre-shared passphrase for the Secure Channel (PBKDF2 -> PSK). Secret.
   // BLE peer MACs and auto-reconnect flags now live in BLE_Peers.cpp's
   // gBlePeerData[BLE_PEER_MAX] array, persisted under "bluetooth.peers"
   // in settings.json. See BLE_Peers.h. Removed flat keys:

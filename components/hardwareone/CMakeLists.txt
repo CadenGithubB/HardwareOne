@@ -144,6 +144,7 @@ endif()
 set(hardwareone_srcs
         HardwareOne.cpp
         Bluetooth.cpp
+        System_BleSecureChannel.cpp
         BLE_IDF.cpp
         G2_Glasses.cpp
         G2_Ring.cpp

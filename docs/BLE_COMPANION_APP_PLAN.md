@@ -118,3 +118,98 @@ current *implementation* is weak (500 ms latency; silently drops a line that won
 App-side implication: until B/C lands, the app should expect possible truncation of
 very long replies and not assume a fixed envelope — it gets `negotiated_MTU − 3` bytes
 per notification.
+
+---
+
+## Device behaviour model — the mental model for the app
+
+So the app author isn't guessing about what's on the other end:
+
+- **It's a CLI over BLE.** The device exposes its whole command line over the Command
+  service: the app writes a command string to REQUEST, the device runs it on a worker
+  task, and notifies the text result on RESPONSE. Same commands as the serial console and
+  web CLI — there is no bespoke binary protocol.
+- **Replies are asynchronous and notification-based.** A command does not "return" inline;
+  the result arrives later as a RESPONSE notification (practically ~one command → one
+  reply). Be event-driven, never block waiting on a write to "return" data.
+- **Two mutually-exclusive BLE roles.** `bleMode` is either **Server** (phone peripheral —
+  what the app talks to) or **G2 client** (drives smart glasses). They share one radio and
+  never run at once. The app only ever sees Server mode; if the device is switched to G2
+  it stops advertising the command service entirely.
+- **Authorization = `login`, always.** Connecting grants nothing. The device requires
+  `login <user> <pass>` per connection; until then only `login`/`logout`/`whoami` work and
+  anything else returns `Authentication required`. True in both encrypted and plaintext
+  modes.
+- **Confidentiality = optional APP-LAYER encryption** (the "Secure Channel", `blesecure`,
+  server mode only, **off by default**). It is **NOT** BLE link-layer bonding — there is no
+  OS pairing dialog, no passkey, no bond, and no `removeBond` GrapheneOS trap. All crypto
+  rides inside the existing REQUEST/RESPONSE chars (X25519 + a pre-shared passphrase +
+  ChaCha20-Poly1305). This is the ESP-NOW security model. `login` still runs *on top* —
+  encryption = confidentiality, login = authorization.
+- **Shared secret, provisioned out-of-band.** The operator sets a passphrase on the device
+  (`blesecret <phrase>`); the user enters the **same** passphrase in the app once (store it
+  in Keystore). Both sides derive the same PSK via PBKDF2. No per-connection pairing step.
+- **When required (`blesecure on`)** the device refuses plaintext commands and only executes
+  DATA frames sent after a successful handshake. When off (default) plaintext works as today
+  and a client MAY still negotiate a Secure Channel opportunistically.
+
+## Encryption: Secure Channel v1 (build the app to match byte-for-byte)
+
+App-layer only — no bonding, no pairing dialog. All frames ride the existing REQUEST (write)
+/ RESPONSE (notify) chars. All integers big-endian. Each GATT message = `type(1) || body`:
+
+```
+0x01 HELLO        body = appEphPub(32) || appNonce(16)       (app → device)
+0x02 HELLO_ACK    body = devEphPub(32) || devNonce(16)       (device → app)
+0x03 CONFIRM      body = ct(2) || tag(16)   = AEAD("ok", K_c2d, ctr 0)   (app → device)
+0x04 CONFIRM_ACK  body = ct(2) || tag(16)   = AEAD("ok", K_d2c, ctr 0)   (device → app)
+0x10 DATA         body = ctr(8) || ct(N) || tag(16)          (either direction)
+```
+
+Crypto:
+```
+ss  = X25519(ownEphPriv, peerEphPub)
+PSK = PBKDF2-HMAC-SHA256(passphrase, salt="HW1-SC-v1-psk", iters=100000, 32 bytes)
+K   = HKDF-SHA256(ikm = ss||PSK, salt = appNonce||devNonce, info="HW1-SC-v1", 64 bytes)
+      K_c2d = K[0:32] (app→device)    K_d2c = K[32:64] (device→app)
+AEAD = ChaCha20-Poly1305-IETF (12-byte nonce, 16-byte tag, no AAD)
+nonce(12) = dirTag(4) || ctr(8);  dirTag = 0x00000000 (c2d) / 0x00000001 (d2c)
+per-direction ctr strictly increasing (CONFIRM/CONFIRM_ACK = 0; DATA = 1,2,3,…) → replay-safe
+```
+A decrypt failure = wrong passphrase / MITM → abort the channel.
+
+Handshake (once per connection, before login):
+1. App → HELLO       (app makes an ephemeral X25519 keypair + 16-byte nonce)
+2. Dev → HELLO_ACK   (device does the same; both derive `ss` then `K`)
+3. App → CONFIRM     (proves the app holds the right passphrase, via K_c2d)
+4. Dev → CONFIRM_ACK (proves the device side) → channel **ESTABLISHED**
+
+Then every command/reply is a DATA frame; plaintext is the same UTF-8 CLI line as today.
+A reply longer than one frame arrives as **multiple DATA frames** — decrypt each and
+concatenate (device chunks at ~200 plaintext bytes/frame, so negotiate a large MTU).
+`login <user> <pass>` runs INSIDE the channel after ESTABLISHED.
+
+Android primitives (all available on GrapheneOS): X25519 (`java.security` XDH API 33+, or
+lazysodium/BouncyCastle), HKDF-SHA256 (HMAC-SHA256), `PBKDF2WithHmacSHA256`, and
+`Cipher.getInstance("ChaCha20-Poly1305")` (API 28+).
+
+## How the phone (app) is expected to behave — runtime contract
+
+1. Scan by **service UUID** (not just name); `connectGatt(autoConnect=false)`; request HIGH
+   connection priority.
+2. `discoverServices()` → `requestMtu(517)` → wait for `onMtuChanged` (treat the granted
+   value as your real per-notification size; never assume 514 — iOS caps at 185).
+3. Enable RESPONSE notifications: `setCharacteristicNotification(true)` **and** write
+   `0x0001` to its CCCD (`00002902-…`). Skip the CCCD write and you receive nothing.
+4. If using encryption: run the Secure Channel handshake (HELLO → … → CONFIRM_ACK), then
+   send/receive everything as DATA frames. If the device requires the channel and you send
+   plaintext, it replies "Secure channel required". If the handshake won't decrypt, the
+   passphrase is wrong → prompt the user to re-enter it.
+5. `login <user> <pass>` (inside the channel when encrypted); gate the command UI on the reply.
+6. Command/response loop: write a line, render RESPONSE notifications as they arrive
+   (multi-line; reassemble multi-frame DATA replies). Stay event-driven.
+7. On disconnect: reconnect and **re-run the handshake** — channel state is per-connection
+   and keys are wiped on disconnect; there's no persisted bond to restore. The stored
+   passphrase keeps this seamless for the user.
+8. **No OS pairing, ever:** no `createBond`, no `ACTION_PAIRING_REQUEST`, no passkey dialog.
+   If you find yourself reaching for those, you're on the old (wrong) design.
