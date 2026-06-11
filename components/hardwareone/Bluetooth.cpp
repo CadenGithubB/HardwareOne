@@ -30,6 +30,7 @@
 #include "System_Mutex.h"   // SensorCacheGuard — used by the G2 sensor-stream paths below
 #include "System_SelfDevice.h"  // SelfDevice::firmwareVersion() for the Device Info BLE characteristic
 #include "System_Settings.h"
+#include "System_BleSecureChannel.h"  // app-layer Secure Channel v1 (replaces BLE link-layer bonding)
 
 #include <esp_gatts_api.h>
 #include <esp_bt.h>            // esp_bt_controller_get_status() — used by isBLERunning()
@@ -336,7 +337,8 @@ class ServerCallbacks : public BLEServerCallbacks {
     gBLEState->connections[slot].authed = false;
     gBLEState->connections[slot].user = "";
     gBLEState->connections[slot].lastActivityMs = millis();
-    
+    bleScReset(param->connect.conn_id);  // fresh secure-channel state for this connection
+
     // Identify device type by MAC address (uses static lookup - ISR-safe)
     gBLEState->connections[slot].deviceType = bleIdentifyDeviceByMAC(param->connect.remote_bda);
     gBLEState->connections[slot].deviceName = bleDeviceTypeToString(gBLEState->connections[slot].deviceType);
@@ -370,6 +372,7 @@ class ServerCallbacks : public BLEServerCallbacks {
     
     if (param) {
       bleClearConnectionByConnId(param->disconnect.conn_id);
+      bleScReset(param->disconnect.conn_id);  // wipe secure-channel keys on disconnect
     }
     
     if (gBLEState->activeConnectionCount > 0) {
@@ -506,7 +509,10 @@ static uint8_t bleMessageHead = 0;
 void bleAddMessageToHistory(const char* msg);
 #endif
 
-static void processIncomingBLECommand(uint16_t connId, const char* data, size_t len) {
+// Command tail — runs on cmd_exec_task (deep stack), called directly for plaintext
+// commands or by the deferred secure-channel handler after a DATA frame is decrypted.
+// `data` is already plaintext here (no secure-channel parsing in this function).
+static void processBleCommandLine(uint16_t connId, const char* data, size_t len) {
   // Build printable command string (filter non-printable bytes) - stack buffer, zero heap allocations
   char cmdBuf[512];
   size_t outIdx = 0;
@@ -668,6 +674,49 @@ static void processIncomingBLECommand(uint16_t connId, const char* data, size_t 
     const char* msg = "Error: Failed to queue command";
     sendBLEResponseToConn(connId, msg, strlen(msg));
   }
+}
+
+// Defer secure-channel work off BTC_TASK (8 KB) onto cmd_exec_task (deep stack) —
+// the X25519/HKDF handshake won't fit comfortably on the BLE callback stack. Mirrors
+// how ESP-NOW pushes radio-callback crypto onto cmd_exec via submitDeferredToCmdExec.
+extern bool submitDeferredToCmdExec(ExecReq::DeferredFn fn, void* arg);
+
+struct BleScDeferred { uint16_t connId; uint16_t len; uint8_t buf[517]; };
+
+// Runs on cmd_exec_task. Frees its own arg (per submitDeferredToCmdExec contract).
+static void bleScDeferredInbound(void* arg) {
+  BleScDeferred* d = (BleScDeferred*)arg;
+  char   plain[512];
+  size_t pl = 0;
+  BleScResult r = bleScHandleInbound(d->connId, d->buf, d->len, plain, sizeof(plain), &pl);
+  if (r == BLE_SC_PLAINTEXT_READY) {
+    processBleCommandLine(d->connId, plain, pl);   // execute the decrypted command
+  }
+  free(d);
+}
+
+// Entry from the GATT write callback — runs on BTC_TASK (8 KB, time-critical). Keep it
+// light: secure-channel frames are copied + deferred to cmd_exec (where the handshake
+// crypto runs); plaintext commands go straight to the command tail (which itself defers
+// the heavy command execution via submitCommandAsync).
+static void processIncomingBLECommand(uint16_t connId, const char* data, size_t len) {
+  const uint8_t t = (len > 0) ? (uint8_t)data[0] : 0;
+  const bool isFrame = (t == 0x01 /*HELLO*/ || t == 0x03 /*CONFIRM*/ || t == 0x10 /*DATA*/);
+  if (isFrame && len <= sizeof(((BleScDeferred*)0)->buf)) {
+    BleScDeferred* d = (BleScDeferred*)ps_alloc(sizeof(BleScDeferred), AllocPref::PreferPSRAM, "ble.sc.rx");
+    if (d) {
+      d->connId = connId; d->len = (uint16_t)len; memcpy(d->buf, data, len);
+      if (!submitDeferredToCmdExec(bleScDeferredInbound, d)) free(d);
+    }
+    return;
+  }
+  // Plaintext path: refuse if the secure channel is required, else run the command.
+  if (bleScRequired()) {
+    const char* msg = "Secure channel required — connect with the encrypted app.";
+    sendBLEResponseToConn(connId, msg, strlen(msg));
+    return;
+  }
+  processBleCommandLine(connId, data, len);
 }
 
 // =============================================================================
@@ -868,10 +917,15 @@ bool initBluetooth() {
   
   gBLEState->initialized = true;
   gBLEState->connectionState = BLE_STATE_IDLE;
-  
+
+  // Secure Channel: create the tx mutex, then pre-derive the PSK here (init runs on a
+  // large-stack task) so the per-connection handshake never pays the PBKDF2 cost.
+  bleScInit();
+  bleScWarmPsk();
+
   BLE_DEBUGF(DEBUG_BLE_CORE, "Bluetooth initialized successfully");
   broadcastOutput("[BLE] Initialized - ready to advertise");
-  
+
   return true;
 }
 
@@ -995,15 +1049,19 @@ uint32_t getBLEConnectionDuration() {
 // DATA TRANSMISSION
 // =============================================================================
 
-bool sendBLEResponse(const char* data, size_t len) {
+// RAW notify to the RESPONSE characteristic — the ONLY function that actually touches
+// the radio for output. The secure-channel encryptor and the handshake replies emit
+// through this; it does NOT encrypt. Everything that is *output* (results, streamed
+// CLI text) must go through sendBLEResponse()/sendBLEResponseToConn() instead, which
+// encrypt when a channel is up.
+bool bleRawNotify(const char* data, size_t len) {
   if (!isBLEConnected() || !pCmdResponseChar) {
-    BLE_DEBUGF(DEBUG_BLE_DATA, "sendBLEResponse dropped (connected=%d char=%p)",
+    BLE_DEBUGF(DEBUG_BLE_DATA, "bleRawNotify dropped (connected=%d char=%p)",
                isBLEConnected(), (void*)pCmdResponseChar);
     return false;
   }
-  
   pCmdResponseChar->setValue((uint8_t*)data, len);
-  pCmdResponseChar->notify();  // ESP32 BLE notify() works the same
+  pCmdResponseChar->notify();
   gBLEState->responsesSent++;
 
   #if ENABLE_OLED_DISPLAY
@@ -1013,27 +1071,48 @@ bool sendBLEResponse(const char* data, size_t len) {
     bleAddMessageToHistory(tagged);
   }
   #endif
-  
-  BLE_DEBUGF(DEBUG_BLE_DATA, "Response sent (%d bytes)", len);
   return true;
+}
+
+// Output chokepoint for broadcast/streamed device output (the debug-drain "path A" via
+// System_Debug.cpp, plus any other caller). If a Secure Channel is established for a
+// connected client, encrypt+frame the output for it — so STREAMED CLI output (menus,
+// help, reports) is confidential, not just the short command result. In secure-required
+// mode with no established channel, DROP rather than leak plaintext over the air.
+bool sendBLEResponse(const char* data, size_t len) {
+  if (!data || len == 0) return false;
+  if (gBLEState) {
+    for (int i = 0; i < BLE_MAX_CONNECTIONS; i++) {
+      if (gBLEState->connections[i].active &&
+          bleScEstablished(gBLEState->connections[i].connId)) {
+        return bleScSendEncrypted(gBLEState->connections[i].connId, data, len);
+      }
+    }
+  }
+  if (bleScRequired()) return false;     // never emit plaintext on a must-be-secure link
+  return bleRawNotify(data, len);        // plaintext mode (no channel) — as before
 }
 
 bool sendBLEResponseToConn(uint16_t connId, const char* data, size_t len) {
   if (!data || len == 0) return false;
 
+  // Established Secure Channel → frame+encrypt for THIS connection (shares the same
+  // per-connection txCtr as path A, serialized by the channel's tx mutex).
+  if (bleScEstablished(connId)) {
+    return bleScSendEncrypted(connId, data, len);
+  }
+  if (bleScRequired()) return false;     // don't leak plaintext for a secure-required link
+
+  // Plaintext mode (no channel): original behavior.
   if (!gBLEState || gBLEState->activeConnectionCount <= 1) {
-    BLE_DEBUGF(DEBUG_BLE_DATA, "sendBLEResponseToConn passthrough conn=%u", (unsigned)connId);
-    return sendBLEResponse(data, len);
+    return bleRawNotify(data, len);
   }
-
   if (!ensureDebugBuffer()) {
-    return sendBLEResponse(data, len);
+    return bleRawNotify(data, len);
   }
-
   char* tagged = getDebugBuffer();
   snprintf(tagged, 1024, "[ble conn:%u] %.*s", (unsigned)connId, (int)len, data);
-  BLE_DEBUGF(DEBUG_BLE_DATA, "sendBLEResponseToConn fallback broadcast (conn=%u)", (unsigned)connId);
-  return sendBLEResponse(tagged, strlen(tagged));
+  return bleRawNotify(tagged, strlen(tagged));
 }
 
 void bleSessionTick() {
@@ -1243,6 +1322,42 @@ static const char* cmd_blestatus(const String& argsInput) {
   BLE_DEBUGF(DEBUG_BLE_CORE, "BLE status requested. Active=%d", gBLEState->activeConnectionCount);
 
   return buf;
+}
+
+// ---- Secure Channel (app-layer encryption) commands ----
+static const char* cmd_blesecret(const String& argsInput) {
+  String a = argsInput; a.trim();
+  if (a.length() == 0) {
+    return gSettings.bleSecureChannelSecret.length()
+      ? "BLE secure-channel secret is SET (hidden). 'blesecret clear' to remove."
+      : "BLE secure-channel secret NOT set. Set one: blesecret <passphrase>";
+  }
+  if (a.equalsIgnoreCase("clear")) {
+    setSetting(gSettings.bleSecureChannelSecret, String(""));
+    bleScInvalidatePsk();
+    return "BLE secure-channel secret cleared.";
+  }
+  if (a.length() < 8) return "Error: passphrase must be at least 8 characters.";
+  setSetting(gSettings.bleSecureChannelSecret, a);
+  bleScInvalidatePsk();
+  bleScWarmPsk();  // derive PSK now (cmd_exec task, big stack) so BTC_TASK handshake doesn't
+  return "BLE secure-channel secret set. Provision the SAME passphrase in the app.";
+}
+
+static const char* cmd_blesecure(const String& argsInput) {
+  String a = argsInput; a.trim(); a.toLowerCase();
+  if (a.length() == 0) {
+    return gSettings.bleRequireSecureChannel ? "BLE secure channel: REQUIRED"
+                                             : "BLE secure channel: optional (plaintext allowed)";
+  }
+  bool on  = (a == "on"  || a == "1" || a == "true"  || a == "yes");
+  bool off = (a == "off" || a == "0" || a == "false" || a == "no");
+  if (!on && !off) return "Usage: blesecure [on|off]";
+  if (on && gSettings.bleSecureChannelSecret.length() == 0)
+    return "Set a secret first: blesecret <passphrase>";
+  setSetting(gSettings.bleRequireSecureChannel, on);
+  return on ? "BLE secure channel REQUIRED — plaintext commands now refused."
+            : "BLE secure channel optional — plaintext allowed.";
 }
 
 static const char* cmd_bledisconnect(const String& argsInput) {
@@ -1638,6 +1753,10 @@ const CommandEntry bluetoothCommands[] = {
   // Mode (server vs. G2 client) - mutually exclusive at runtime
   { "blemode",        "Get/set BLE mode [server|client].",                     false, cmd_blemode,         "Usage: blemode [server|client]" },
 
+  // App-layer Secure Channel v1 (X25519+PSK+ChaCha20-Poly1305; no BLE bonding)
+  { "blesecret", "Set/clear the BLE Secure Channel passphrase: blesecret <phrase|clear>.", true, cmd_blesecret, "Usage: blesecret <passphrase|clear>" },
+  { "blesecure", "Require app-layer BLE encryption [on|off].",                            true, cmd_blesecure, "Usage: blesecure [on|off]" },
+
   // Auto-reconnect at boot to saved-MAC peers (no scan fallback). Pairing is
   // separate (`openg2 auto`, `ringconnect`) and always saves the MAC; these
   // flags only control whether boot reconnects automatically. The generic
@@ -1667,7 +1786,9 @@ const SettingEntry bluetoothSettingsEntries[] = {
   { "bluetoothRequireAuth",  SETTING_BOOL,   &gSettings.bluetoothRequireAuth,  true, 0, nullptr, 0, 1, "Require Authentication", nullptr, false, nullptr, "blerequireauth" },
   { "bluetoothDeviceName", SETTING_STRING, &gSettings.bleDeviceName, 0, 0, "HardwareOne", 0, 0, "Device Name", nullptr, false, nullptr, nullptr },
   { "bluetoothTxPower",      SETTING_INT,    &gSettings.bleTxPower,            3, 0, nullptr, 0, 7, "TX Power (0-7)", nullptr, false, nullptr, "bletxpower" },
-  { "bluetoothMode",         SETTING_INT,    &gSettings.bleMode,               0,    0, nullptr, 0, 1, "Mode (0=server, 1=g2)", nullptr, false, nullptr, "blemode" }
+  { "bluetoothMode",         SETTING_INT,    &gSettings.bleMode,               0,    0, nullptr, 0, 1, "Mode (0=server, 1=g2)", nullptr, false, nullptr, "blemode" },
+  { "bleRequireSecureChannel", SETTING_BOOL, &gSettings.bleRequireSecureChannel, false, 0, nullptr, 0, 1, "Require Secure Channel", nullptr, false, nullptr, "blesecure" },
+  { "bleSecureChannelSecret",  SETTING_STRING, &gSettings.bleSecureChannelSecret, 0, 0, "", 0, 0, "Secure Channel Secret", nullptr, true, nullptr, "blesecret" }
 };
 
 const size_t bluetoothSettingsCount = sizeof(bluetoothSettingsEntries) / sizeof(bluetoothSettingsEntries[0]);
