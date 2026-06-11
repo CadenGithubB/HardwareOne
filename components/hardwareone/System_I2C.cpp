@@ -1400,6 +1400,34 @@ static void streamDeviceRegistryOutput() {
 // I2C Device Registry Command Handlers
 // ============================================================================
 
+// Honest device-info counts for the status/device-info UI. These deliberately
+// do NOT use the I2CDeviceManager registry counts (getDeviceCount /
+// getActiveDeviceCount), which drift from physical reality via phantom bus-0
+// pre-registrations and "ever-talked, never-reset" accounting — that mismatch
+// is exactly what made the dashboard show "4 active" with only 3 detected.
+//
+//   i2cCompiledSensorCount() — how many sensor TYPES this build supports
+//     (a capability count; the honest "N compiled").
+//   i2cConnectedDeviceCount() — how many devices are physically on the bus
+//     right now. SAME source + predicate (connectedDevices[].isConnected) as
+//     buildI2cDeviceListJson() below, so this count and the emitted deviceList
+//     can never disagree.
+int i2cCompiledSensorCount() {
+  int n = 0;
+  for (size_t i = 0; i < i2cSensorsCount; i++) {
+    if (isSensorCompiled(i2cSensors[i])) n++;
+  }
+  return n;
+}
+
+int i2cConnectedDeviceCount() {
+  int n = 0;
+  for (int i = 0; i < connectedDeviceCount; i++) {
+    if (connectedDevices[i].isConnected) n++;
+  }
+  return n;
+}
+
 // Shared I2C device-list builder — emits the discovered-device array consumed
 // by BOTH `devices json` and buildSystemInfoJson()'s full (web) form, so the
 // two never diverge. Each entry: {name, addr (decimal I2C address), bus}.
