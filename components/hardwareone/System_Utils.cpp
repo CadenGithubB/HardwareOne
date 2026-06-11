@@ -1601,9 +1601,15 @@ void buildSystemInfoJson(JsonDocument& doc, bool includeDeviceList) {
     JsonObject i2c = conn["i2c"].to<JsonObject>();
     i2c["compiled"] = true;
     i2c["enabled"]  = gI2CBusEnabled;
-    auto* mgr = I2CDeviceManager::getInstance();
-    i2c["devices"]  = mgr ? mgr->getDeviceCount() : 0;
-    i2c["activeDevices"] = mgr ? mgr->getActiveDeviceCount() : 0;
+    // Honest, contradiction-proof counts (NOT the manager registry, which
+    // drifts via phantom bus-0 pre-registrations + ever-talked accounting):
+    //   devices       = compiled sensor TYPES (capability)
+    //   activeDevices = devices physically connected NOW; same source as the
+    //                   deviceList below, so it can never exceed/contradict it.
+    extern int i2cCompiledSensorCount();
+    extern int i2cConnectedDeviceCount();
+    i2c["devices"]       = i2cCompiledSensorCount();
+    i2c["activeDevices"] = i2cConnectedDeviceCount();
     i2c["sdaPin"]   = gSettings.i2cSdaPin;
     i2c["sclPin"]   = gSettings.i2cSclPin;
     // Detected-device list: everything the I2C discovery scan physically found

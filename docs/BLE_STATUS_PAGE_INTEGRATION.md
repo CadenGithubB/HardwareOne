@@ -154,17 +154,24 @@ Strings may be empty (`""`) — empty is a meaningful sentinel where noted.
       "maxSessions": 2
     },
     "i2c": {
-      "compiled": true,
-      "enabled": true,
-      "devices": 3,              // discovered device count
-      "activeDevices": 2,        // devices with a polling driver enabled
+      "compiled": true,          // is the I2C subsystem compiled into this build
+      "enabled": true,           // is the bus currently enabled
+      "devices": 5,              // compiled sensor TYPES (capability count)
+      "activeDevices": 3,        // devices physically connected RIGHT NOW
       "sdaPin": 8,
       "sclPin": 9
-      // NOTE: the per-device list is intentionally NOT in `status json` (it is
-      // the only unbounded array — keeping it out is what makes the status poll
-      // ~800 B). `i2c.devices`/`i2c.activeDevices` give you the counts for the
-      // card header; fetch the actual list on demand with `devices json` (see
-      // the next section).
+      // SEMANTICS (changed): `devices` = how many sensor types this firmware
+      // build supports (capability). `activeDevices` = how many devices are
+      // physically on the bus now. activeDevices is derived from the same
+      // source as `devices json`'s list, so it is GUARANTEED to equal the
+      // length of that list — it can never read higher than what's detected.
+      // (Older builds surfaced internal registry counts here, which could show
+      // more "active" than were detected; that's fixed.)
+      //
+      // The per-device list itself is intentionally NOT in `status json` (it is
+      // the only unbounded array — keeping it out is what makes the poll
+      // ~800 B). Show "{activeDevices} connected" on the card; fetch the list
+      // on demand with `devices json` (next section) when the card is opened.
     },
     "llm": {                     // only if on-device LLM is compiled
       "state": "READY",          // UNLOADED | LOADING | READY | GENERATING | ERROR
