@@ -28,6 +28,7 @@
 #include "System_MemUtil.h"
 #include "System_MemoryMonitor.h"
 #include "System_Mutex.h"   // SensorCacheGuard — used by the G2 sensor-stream paths below
+#include "System_SelfDevice.h"  // SelfDevice::firmwareVersion() for the Device Info BLE characteristic
 #include "System_Settings.h"
 
 #include <esp_gatts_api.h>
@@ -737,7 +738,16 @@ bool initBluetooth() {
     }
     return false;
   }
-  
+
+  // Raise the GATT MTU ceiling so command responses aren't capped at the BLE
+  // default of 23 (= 20 usable bytes). 517 is the BLE max; payload becomes
+  // MTU-3 = 514 bytes, which fully covers the 512-byte gBLEOutputBuffer flush
+  // (System_Debug.cpp) — so the existing line-batched output streams to a phone
+  // untruncated without any per-notification chunking. The client must also
+  // request a large MTU; the negotiated value is min(client, this). NOTE: this
+  // is a global Bluedroid setting — the G2 client path sets its own (244).
+  BLEDevice::setMTU(517);
+
   // Set TX power level (ESP_PWR_LVL_N12 to ESP_PWR_LVL_P9)
   // Map 0-7 to actual power levels
   esp_power_level_t powerLevel = (esp_power_level_t)constrain(gSettings.bleTxPower, 0, 7);
@@ -770,7 +780,7 @@ bool initBluetooth() {
     BLE_FIRMWARE_CHAR_UUID,
     BLECharacteristic::PROPERTY_READ
   );
-  pFirmwareChar->setValue("2.1.0");
+  pFirmwareChar->setValue(SelfDevice::firmwareVersion());  // real build version, not a hardcoded string
   
   pDeviceInfoService->start();
   
@@ -1206,8 +1216,17 @@ static const char* cmd_blestatus(const String& argsInput) {
       uint32_t duration = (millis() - gBLEState->connections[i].connectedSince) / 1000;
       char macStr[18];
       macToStackBuf(gBLEState->connections[i].deviceAddr, macStr);
-      written = snprintf(buf + offset, remaining, "[%d] %s\n    MAC: %s | %lu sec | %lu cmds\n", 
-               i, gBLEState->connections[i].deviceName.c_str(),
+      // Append the signed-in user once this connection authenticates, so the
+      // status text — and the web "Connected Clients" card, which parses this
+      // line — shows who's logged in, not just the device type ("Unknown").
+      char userSuffix[72];
+      if (gBLEState->connections[i].authed && gBLEState->connections[i].user.length() > 0) {
+        snprintf(userSuffix, sizeof(userSuffix), " (%s)", gBLEState->connections[i].user.c_str());
+      } else {
+        userSuffix[0] = '\0';
+      }
+      written = snprintf(buf + offset, remaining, "[%d] %s%s\n    MAC: %s | %lu sec | %lu cmds\n",
+               i, gBLEState->connections[i].deviceName.c_str(), userSuffix,
                macStr, duration, gBLEState->connections[i].commandsReceived);
       if (written > 0) { offset += written; remaining -= written; }
     }
