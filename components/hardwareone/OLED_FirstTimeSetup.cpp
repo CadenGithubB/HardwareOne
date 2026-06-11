@@ -516,16 +516,22 @@ bool getOLEDWiFiSelection(String& outSSID) {
           WiFi.scanDelete();
           return getOLEDWiFiSelection(outSSID);
         }
-        // Check if input is a network number (1-based index)
+        // A bare number selects the Nth *named* network — skip hidden (empty-SSID)
+        // ones so the serial pick matches the on-screen list (which hides them).
+        // Prevents picking a blank SSID, which fails to connect (and crashed import).
         int idx = serialInput.toInt();
-        if (idx > 0 && idx <= networkCount) {
-          outSSID = WiFi.SSID(idx - 1);
-          broadcastOutput(outSSID);
-          return true;
+        bool picked = false;
+        if (idx >= 1 && String(idx) == serialInput) {
+          int seen = 0;
+          for (int i = 0; i < networkCount; i++) {
+            if (WiFi.SSID(i).length() == 0) continue;  // skip hidden, like the display
+            if (++seen == idx) { outSSID = WiFi.SSID(i); picked = true; break; }
+          }
         }
-        // Otherwise treat as literal SSID
-        outSSID = serialInput;
-        broadcastOutput(serialInput);
+        if (!picked) {
+          outSSID = serialInput;  // literal SSID — manual entry / a hidden net by name
+        }
+        broadcastOutput(outSSID);
         return true;
       }
     }

@@ -29,6 +29,13 @@ JoystickNav readWizardJoystickNav();
 // Page renderers (OLED output only - called from unified loop when OLED connected)
 void drawWizardHeader(int pageNum, int totalPages, const char* title);
 void drawWizardFooter(const char* leftAction, const char* rightAction, const char* backAction);
+
+// Render a titled info "card" with the standard header + footer separator rules
+// (matches the wizard's other screens). body word-wraps; footer is a free-form
+// action hint. When pageCount > 0 a "n/N" indicator is drawn top-right and the
+// title is clipped to the space left of it (so it never overlaps). OLED-only.
+void drawSetupInfoPage(const char* title, const char* body, const char* footer,
+                       int pageNum = 0, int pageCount = 0);
 void renderFeaturesPage();
 void renderSensorsPage();
 void renderNetworkPage();

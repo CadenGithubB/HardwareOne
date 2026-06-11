@@ -83,7 +83,10 @@ struct TimezoneEntry {
 // `featuresetup` command) so the behaviour is identical. The table + accessors
 // live in System_SetupWizard.cpp; each engine just renders/handles them in its
 // own I/O style. Add a "toggle -> mode" feature with one row in kModeMenus[].
-struct WizardModeOption { const char* label; int value; };
+// extraHeapKB = RAM this mode costs *on top of* the feature's base heapCostKB
+// (e.g. HTTPS adds TLS buffers over plain HTTP). 0 for the baseline mode. The
+// wizard heap bar adds the selected mode's extra so it reflects the choice.
+struct WizardModeOption { const char* label; int value; uint16_t extraHeapKB; };
 struct WizardModeMenu {
   const char* featureId;          // matches the Features-page item id
   const char* title;              // e.g. "Web Mode"
@@ -241,5 +244,35 @@ void printSerialPageStatus();
 
 // Get heap bar data
 void getHeapBarData(uint32_t* enabledKB, uint32_t* maxKB, int* percentage);
+
+// ============================================================================
+// Setup Archetypes (deployment presets)
+// ============================================================================
+// The SECOND-level menu, shown after the user picks "Basic" on the mode chooser
+// (Basic / Advanced / Import). Each seeds a feature bundle (the connectivity/role
+// intent that hardware can't detect); hardware autodetect then fills in the
+// attached sensors. Rendered card-per-item on OLED (one card + description at a
+// time, since the OLED can't fit a list AND descriptions) and a list + blurbs on serial.
+
+struct SetupArchetype {
+  const char*        id;              // "handheld"
+  const char*        name;            // "Standard Handheld" (fits one OLED line)
+  const char*        blurb;           // <=80-char card body / serial focus line (ASCII)
+  const char* const* seedFeatures;     // null-terminated feature ids to enable
+  const char* const* requiredFeatures; // null-terminated feature ids that must ALL be compiled, or nullptr = always shown
+};
+
+extern const SetupArchetype setupArchetypes[];
+extern const size_t setupArchetypesCount;
+
+// True if this archetype should be offered — every feature in requiredFeatures is
+// compiled (or it has none). Hides "G2 Glasses" without Bluetooth, "Mesh" without
+// ESP-NOW, and "Standard Handheld" without the local-UI stack (OLED + input device).
+bool setupArchetypeAvailable(const SetupArchetype* a);
+
+// Enable an archetype's seed features (set flag + persist). Does NOT touch
+// detected sensors (applyDetectedHardware() does). No-op for Advanced/Import.
+// Returns the number of features enabled.
+int applyArchetypeSeed(const SetupArchetype* a);
 
 #endif // SYSTEM_SETUPWIZARD_H

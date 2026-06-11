@@ -152,6 +152,7 @@ static void rebootWithMessage(const char* message) {
 // Forward declaration for OLED setup mode selection
 #if ENABLE_OLED_DISPLAY
 extern bool getOLEDSetupModeSelection(int& setupMode);
+extern int getOLEDArchetypeSelection();  // Level-2 deployment picker; -1 = back
 #endif
 
 #if ENABLE_WIFI
@@ -159,45 +160,61 @@ extern bool getOLEDSetupModeSelection(int& setupMode);
 // (getOLEDWiFiSelection lives in OLED_FirstTimeSetup.cpp and is not built).
 static bool serialWifiSelectionForRestore(String& outSSID) {
   outSSID = "";
-  WiFi.mode(WIFI_STA);
-  int n = WiFi.scanNetworks(false, true);
-  if (n > 0) {
-    broadcastOutput(String("Found ") + n + " networks:");
-    for (int i = 0; i < n && i < 10; i++) {
-      char line[96];
-      snprintf(line, sizeof(line), "  %d. %-24s  %lddBm",
-               i + 1, WiFi.SSID(i).c_str(), (long)WiFi.RSSI(i));
-      broadcastOutput(line);
+  while (true) {
+    WiFi.mode(WIFI_STA);
+    int n = WiFi.scanNetworks(false, true);
+
+    // Number only NAMED networks; group hidden (empty-SSID) ones into a count —
+    // mirrors the OLED picker so a numbered pick can never yield a blank SSID (a
+    // blank SSID fails to connect, which is what crashed the import flow). Hidden
+    // networks are joined by typing the exact SSID. Loop (not recurse) on rescan.
+    int named[20];
+    int namedCount = 0;
+    int hiddenCount = 0;
+    for (int i = 0; i < n; i++) {
+      if (WiFi.SSID(i).length() == 0) { hiddenCount++; continue; }
+      if (namedCount < 20) named[namedCount++] = i;
     }
-    if (n > 10) {
-      broadcastOutput(String("  ... and ") + (n - 10) + " more");
+
+    if (namedCount > 0) {
+      broadcastOutput(String("Found ") + namedCount + " network(s):");
+      for (int j = 0; j < namedCount; j++) {
+        char line[96];
+        snprintf(line, sizeof(line), "  %d. %-24s  %lddBm",
+                 j + 1, WiFi.SSID(named[j]).c_str(), (long)WiFi.RSSI(named[j]));
+        broadcastOutput(line);
+      }
+    } else {
+      broadcastOutput("No named WiFi networks found.");
     }
-  } else {
-    broadcastOutput("No WiFi networks found.");
-  }
-  broadcastOutput("Enter a number to select, type an SSID directly, 'rescan' to refresh, or 'b' to go back:");
-  String input = waitForSerialInputBlocking();
-  input.trim();
-  if (input.equalsIgnoreCase("b") || input.equalsIgnoreCase("back")) {
+    if (hiddenCount > 0) {
+      broadcastOutput(String("  (+") + hiddenCount + " hidden network" +
+                      (hiddenCount == 1 ? "" : "s") + " - type the exact SSID to join one)");
+    }
+    broadcastOutput("Enter a number, type an SSID to join manually, 'rescan', or 'b' to go back:");
+
+    String input = waitForSerialInputBlocking();
+    input.trim();
+
+    if (input.equalsIgnoreCase("b") || input.equalsIgnoreCase("back")) { WiFi.scanDelete(); return false; }
+    if (input.length() == 0) { WiFi.scanDelete(); return false; }
+    if (input.equalsIgnoreCase("rescan")) { WiFi.scanDelete(); continue; }
+
+    // Bare in-range integer -> Nth named network; anything else -> typed SSID.
+    String ssid = input;
+    int idx = input.toInt();
+    if (idx >= 1 && idx <= namedCount && String(idx) == input) {
+      ssid = WiFi.SSID(named[idx - 1]);
+    }
     WiFi.scanDelete();
-    return false;
+    ssid.trim();
+    if (ssid.length() == 0) {
+      broadcastOutput("SSID cannot be empty - please try again.");
+      continue;
+    }
+    outSSID = ssid;
+    return true;
   }
-  if (input.equalsIgnoreCase("rescan")) {
-    WiFi.scanDelete();
-    return serialWifiSelectionForRestore(outSSID);
-  }
-  if (input.length() == 0) {
-    WiFi.scanDelete();
-    return false;
-  }
-  String ssid = input;
-  int idx = input.toInt();
-  if (idx > 0 && idx <= n) {
-    ssid = WiFi.SSID(idx - 1);
-  }
-  WiFi.scanDelete();
-  outSSID = ssid;
-  return outSSID.length() > 0;
 }
 #endif // ENABLE_WIFI
 
@@ -383,10 +400,17 @@ void firstTimeSetupIfNeeded() {
       broadcastOutput("");
 
 #if ENABLE_OLED_DISPLAY
-      {
-        String msg = "RESTORE MODE\n\nUse Migration Tool\nbrowser application to\nsend .hwbackup\n\nIP: " + ipStr + "\n\nB = back";
-        showOLEDMessage(msg.c_str(), false);
-      }
+      // The full restore message doesn't fit the OLED (showOLEDMessage shows ~5
+      // lines), so present it as flip-able pages — A = next, B = back. Serial
+      // (above) shows the whole thing at once. Pages are rendered in the wait loop.
+      String rtitles[3] = { "Restore Mode", "Device IP", "Get the Tool" };
+      String rbodies[3];
+      rbodies[0] = "Send a .hwbackup to this device using the HardwareOne Migration Tool.";
+      rbodies[1] = "  " + ipStr + "\n\nPoint the Migration Tool at this address.";
+      rbodies[2] = "github.com/\nCadenGithubB/\nHardwareOne-\nMigration-Tool";
+      const int RPAGES = 3;
+      int rpage = 0;
+      int lastRpage = -1;
 #endif
 
       // Step 5: Poll until restore completes or user presses B / types 'back'
@@ -395,7 +419,15 @@ void firstTimeSetupIfNeeded() {
       bool btnStateInit = false;
 #endif
       while (!gRestoreComplete && !goBack) {
-        delay(500);
+#if ENABLE_OLED_DISPLAY
+        // Render the current help page (only when it changes, to avoid flicker)
+        if (rpage != lastRpage) {
+          drawSetupInfoPage(rtitles[rpage].c_str(), rbodies[rpage].c_str(),
+                            "Joy:flip B:back", rpage + 1, RPAGES);
+          lastRpage = rpage;
+        }
+#endif
+        delay(100);
 
         // Serial 'back' escape
         if (Serial.available()) {
@@ -407,7 +439,15 @@ void firstTimeSetupIfNeeded() {
         }
 
 #if ENABLE_GAMEPAD_SENSOR
-        // Gamepad B button escape (active-low, detect new press)
+#if ENABLE_OLED_DISPLAY
+        // Joystick up/down flips the help pages — same control as the archetype cards.
+        {
+          JoystickNav nav = readWizardJoystickNav();
+          if (nav.down)    { rpage = (rpage + 1) % RPAGES; }
+          else if (nav.up) { rpage = (rpage + RPAGES - 1) % RPAGES; }
+        }
+#endif
+        // Gamepad B button = back (active-low, detect new press)
         uint32_t btns = 0;
         bool valid = false;
         if (!goBack) {
@@ -464,54 +504,109 @@ void firstTimeSetupIfNeeded() {
   if (goBack) continue;  // Jump back to mode selection
 
   bool advancedSetup = (setupMode == 1);
-  broadcastOutput(advancedSetup ? "Advanced setup selected." : "Basic setup selected.");
+
+  // Basic (setupMode 0) -> Level 2: pick a deployment archetype, seed its bundle.
+  // (Advanced runs the classic manual wizard; Import was handled above.)
+  if (setupMode == 0) {
+    int archIdx = 0;
+#if ENABLE_OLED_DISPLAY
+    if (gOledEnabled && oledConnected) {
+      archIdx = getOLEDArchetypeSelection();   // index, or -1 = back
+    } else {
+#endif
+      broadcastOutput("");
+      broadcastOutput("What will you use this device for?");
+      int avail[16];
+      int navail = 0;
+      for (size_t i = 0; i < setupArchetypesCount && navail < 16; i++) {
+        if (!setupArchetypeAvailable(&setupArchetypes[i])) continue;  // hide uncompiled
+        avail[navail++] = (int)i;
+        char ln[176];
+        snprintf(ln, sizeof(ln), "  %d. %s - %s", navail,
+                 setupArchetypes[i].name, setupArchetypes[i].blurb);
+        broadcastOutput(ln);
+      }
+      broadcastOutput("Enter a number, or 'b' to go back (default: 1): ");
+      String ai = waitForSerialInputBlocking();
+      ai.trim();
+      if (ai.equalsIgnoreCase("b") || ai.equalsIgnoreCase("back")) {
+        archIdx = -1;
+      } else {
+        int num = ai.toInt();
+        archIdx = (navail > 0 && num >= 1 && num <= navail) ? avail[num - 1]
+                                                            : (navail > 0 ? avail[0] : 0);
+      }
+#if ENABLE_OLED_DISPLAY
+    }
+#endif
+    if (archIdx < 0) continue;  // back -> re-show the Basic/Advanced/Import menu
+    int seeded = applyArchetypeSeed(&setupArchetypes[archIdx]);
+    char msg[80];
+    snprintf(msg, sizeof(msg), "%s selected (%d features pre-enabled).",
+             setupArchetypes[archIdx].name, seeded);
+    broadcastOutput(msg);
+  } else {
+    broadcastOutput("Advanced setup selected.");
+  }
   broadcastOutput("");
   
-  // Username stage
+  // Username stage ('b' on serial / B button on OLED goes back to the menu)
   setSetupProgressStage(SETUP_PROMPT_USERNAME);
   if (!(gOledEnabled && oledConnected)) {
-    broadcastOutput("Enter admin username (cannot be blank): ");
+    broadcastOutput("Enter admin username ('b' to go back): ");
   }
   String u = "";
+  bool setupBack = false;
   while (u.length() == 0) {
 #if ENABLE_OLED_DISPLAY
-    u = getOLEDTextInput("Admin Username:", false, "", 32, nullptr, false);
+    bool cancelled = false;
+    u = getOLEDTextInput("Admin Username:", false, "", 32, &cancelled, false);
+    if (cancelled) { setupBack = true; break; }
 #else
     u = waitForSerialInputBlocking();
+    u.trim();
+    if (u.equalsIgnoreCase("b") || u.equalsIgnoreCase("back")) { setupBack = true; break; }
 #endif
     u.trim();
     if (u.length() == 0) {
       if (!(gOledEnabled && oledConnected)) {
-        broadcastOutput("Username cannot be blank. Please enter admin username: ");
+        broadcastOutput("Username cannot be blank ('b' to go back): ");
       }
 #if ENABLE_OLED_DISPLAY
       showOLEDMessage("Username cannot\nbe blank!", true);
 #endif
     }
   }
+  if (setupBack) continue;  // back to the Basic/Advanced/Import menu
 
-  // Password stage  
+  // Password stage ('b' on serial / B button on OLED goes back to the menu)
   setSetupProgressStage(SETUP_PROMPT_PASSWORD);
   String p = "";
+  setupBack = false;
   while (p.length() == 0) {
     if (!(gOledEnabled && oledConnected)) {
-      broadcastOutput("Enter admin password (cannot be blank): ");
+      broadcastOutput("Enter admin password ('b' to go back): ");
     }
 #if ENABLE_OLED_DISPLAY
-    p = getOLEDTextInput("Admin Password:", true, "", 32, nullptr, false);
+    bool cancelled = false;
+    p = getOLEDTextInput("Admin Password:", true, "", 32, &cancelled, false);
+    if (cancelled) { setupBack = true; break; }
 #else
     p = waitForSerialInputBlocking();
+    p.trim();
+    if (p.equalsIgnoreCase("b") || p.equalsIgnoreCase("back")) { setupBack = true; break; }
 #endif
     p.trim();
     if (p.length() == 0) {
       if (!(gOledEnabled && oledConnected)) {
-        broadcastOutput("Password cannot be blank. Please enter admin password: ");
+        broadcastOutput("Password cannot be blank ('b' to go back): ");
       }
 #if ENABLE_OLED_DISPLAY
       showOLEDMessage("Password cannot\nbe blank!", true);
 #endif
     }
   }
+  if (setupBack) continue;  // back to the Basic/Advanced/Import menu
 
   // Create users.json with admin (ID 1), nextId field, and empty bootAnchors array - hash the password
   String hashedPassword = hashUserPassword(p);
