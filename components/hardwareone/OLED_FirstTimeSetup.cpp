@@ -363,16 +363,23 @@ bool getOLEDWiFiSelection(String& outSSID) {
   WiFi.mode(WIFI_STA);
   int networkCount = WiFi.scanNetworks(false, true);
 
+  // Number ONLY named networks, sequentially — this MUST match the input parser
+  // below, which maps "N" to the Nth named network (hidden/empty SSIDs skipped).
+  // Numbering the raw scan index here (blanks included) is exactly what made
+  // typing the shown number for a network with hidden nets above it save the
+  // literal digit as the SSID (e.g. "4" -> NO_SSID_AVAIL).
   Serial.printf("Found %d networks:\n", networkCount);
-  for (int i = 0; i < networkCount && i < 10; i++) {
-    Serial.printf("  %d. %-24s  %lddBm\n",
-                  i + 1,
-                  WiFi.SSID(i).c_str(),
-                  (long)WiFi.RSSI(i));
+  int sNamed = 0, sHidden = 0;
+  for (int i = 0; i < networkCount; i++) {
+    if (WiFi.SSID(i).length() == 0) { sHidden++; continue; }  // hidden — not numbered
+    sNamed++;
+    if (sNamed <= 15) {
+      Serial.printf("  %d. %-24s  %lddBm\n", sNamed, WiFi.SSID(i).c_str(), (long)WiFi.RSSI(i));
+    }
   }
-  if (networkCount > 10) {
-    Serial.printf("  ... and %d more\n", networkCount - 10);
-  }
+  if (sNamed > 15) Serial.printf("  ... and %d more named\n", sNamed - 15);
+  if (sHidden > 0) Serial.printf("  (+%d hidden network%s — type the exact SSID to join)\n",
+                                 sHidden, sHidden == 1 ? "" : "s");
   Serial.println("Enter a number to select, type an SSID directly, 'rescan' to refresh, or 'skip':");
   Serial.print("> ");
   
@@ -520,16 +527,24 @@ bool getOLEDWiFiSelection(String& outSSID) {
         // ones so the serial pick matches the on-screen list (which hides them).
         // Prevents picking a blank SSID, which fails to connect (and crashed import).
         int idx = serialInput.toInt();
+        bool isPureNumber = (idx >= 1 && String(idx) == serialInput);
         bool picked = false;
-        if (idx >= 1 && String(idx) == serialInput) {
+        if (isPureNumber) {
           int seen = 0;
           for (int i = 0; i < networkCount; i++) {
             if (WiFi.SSID(i).length() == 0) continue;  // skip hidden, like the display
             if (++seen == idx) { outSSID = WiFi.SSID(i); picked = true; break; }
           }
-        }
-        if (!picked) {
-          outSSID = serialInput;  // literal SSID — manual entry / a hidden net by name
+          if (!picked) {
+            // A number with no matching listed network is a mistype, NOT an SSID
+            // literally named e.g. "4". Reject + re-prompt instead of saving the
+            // digit as the SSID (which only fails later with NO_SSID_AVAIL).
+            Serial.printf("'%s' isn't in the list (1-%d). Pick again, type an exact SSID, or 'skip'.\n> ",
+                          serialInput.c_str(), seen);
+            continue;
+          }
+        } else {
+          outSSID = serialInput;  // non-numeric → literal SSID (manual entry / hidden net by name)
         }
         broadcastOutput(outSSID);
         return true;
