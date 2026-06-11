@@ -1400,8 +1400,41 @@ static void streamDeviceRegistryOutput() {
 // I2C Device Registry Command Handlers
 // ============================================================================
 
+// Shared I2C device-list builder — emits the discovered-device array consumed
+// by BOTH `devices json` and buildSystemInfoJson()'s full (web) form, so the
+// two never diverge. Each entry: {name, addr (decimal I2C address), bus}.
+// Only devices currently flagged isConnected are emitted.
+void buildI2cDeviceListJson(JsonArray& arr) {
+  for (int i = 0; i < connectedDeviceCount; i++) {
+    const ConnectedDevice& d = connectedDevices[i];
+    if (!d.isConnected) continue;
+    JsonObject o = arr.add<JsonObject>();
+    o["name"] = (d.name && d.name[0]) ? d.name : "device";
+    o["addr"] = d.address;
+    o["bus"]  = d.bus;
+  }
+}
+
 const char* cmd_devices(const String& originalCmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+
+  // Structured path (output contract): machine-readable device list, returned
+  // as one verbatim JSON blob via the return value. No broadcastOutput; no
+  // Arduino String (DRAM) — serialize into a persistent PSRAM buffer.
+  // Schema: {"v":1,"count":N,"devices":[{"name","addr","bus"}, ...]}
+  if (argWantsJson(originalCmd)) {
+    PSRAM_JSON_DOC(doc);
+    doc["v"] = 1;
+    JsonArray arr = doc["devices"].to<JsonArray>();
+    buildI2cDeviceListJson(arr);
+    doc["count"] = arr.size();
+    static char* devJsonBuf = nullptr;
+    if (!devJsonBuf) devJsonBuf = (char*)ps_alloc(2048, AllocPref::PreferPSRAM, "devices.json");
+    if (!devJsonBuf) return "{\"error\":\"oom\"}";
+    serializeJson(doc, devJsonBuf, 2048);
+    return devJsonBuf;
+  }
+
   streamDeviceRegistryOutput();
   return "[I2C] Device registry displayed";
 }

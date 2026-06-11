@@ -8923,6 +8923,22 @@ static bool initEspNow() {
 }
 
 // ESP-NOW init command
+// Deferred ESP-NOW init for web callers. initEspNow() is heavy (~360 KB alloc +
+// task spin-up) and perturbs the WiFi radio — and a web "Initialize" request
+// rides that same WiFi link. Running it synchronously while the browser's fetch
+// is held open races the HTTPS connection against the radio reconfiguration,
+// which surfaces intermittently as "TypeError: Load failed". So for SOURCE_WEB
+// we ACK immediately and run the real init here, a beat later, on cmd_exec_task.
+static void deferredEspNowInitFn(void* /*arg*/) {
+  // Re-check: a second queued request (double-click) must not re-init.
+  if (gEspNow && gEspNow->initialized) return;
+  // The one place a short delay legitimately helps: AFTER the ACK's HTTP 200 has
+  // flushed, BEFORE the radio-perturbing work begins.
+  vTaskDelay(pdMS_TO_TICKS(300));
+  if (gEspNow && gEspNow->initialized) return;
+  (void)initEspNow();  // outcome surfaced via broadcastOutput + page status poll
+}
+
 const char* cmd_espnow_init(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (gEspNow && gEspNow->initialized) {
@@ -8932,6 +8948,19 @@ const char* cmd_espnow_init(const String& argsInput) {
   // Check memory before initializing ESP-NOW (task stack + state struct)
   if (!checkMemoryAvailable("espnow", nullptr)) {
     return "Insufficient memory for ESP-NOW (need ~40KB DRAM + ~320KB PSRAM)";
+  }
+
+  // Web callers: ACK now, init async (see deferredEspNowInitFn) so the HTTPS
+  // response is sent before the radio reconfigures. The memory check above
+  // already ran synchronously, so an immediate OOM is still reported here.
+  // Other transports (serial/OLED/BLE) keep synchronous init — their reply does
+  // not ride the WiFi STA link, and callers like OLED expect ESP-NOW ready on
+  // return.
+  if (currentAuthContext().transport == SOURCE_WEB) {
+    if (submitDeferredToCmdExec(deferredEspNowInitFn, nullptr)) {
+      return "ESP-NOW initializing — poll 'espnowstatus' for completion";
+    }
+    // Couldn't queue the deferred work — fall through to synchronous init.
   }
 
   if (initEspNow()) {

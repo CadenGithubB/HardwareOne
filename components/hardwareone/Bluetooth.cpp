@@ -31,6 +31,8 @@
 #include "System_SelfDevice.h"  // SelfDevice::firmwareVersion() for the Device Info BLE characteristic
 #include "System_Settings.h"
 #include "System_BleSecureChannel.h"  // app-layer Secure Channel v1 (replaces BLE link-layer bonding)
+#include "System_AuthIdentity.h"      // currentAuthContext() — gate blesecret to trusted transports
+#include <cctype>                     // passphrase complexity policy
 
 #include <esp_gatts_api.h>
 #include <esp_bt.h>            // esp_bt_controller_get_status() — used by isBLERunning()
@@ -1325,6 +1327,22 @@ static const char* cmd_blestatus(const String& argsInput) {
 }
 
 // ---- Secure Channel (app-layer encryption) commands ----
+// Passphrase policy: >=10 chars with an upper, lower, digit, and symbol.
+static const char* blePassphrasePolicyError(const String& p) {
+  if (p.length() < 10) return "be at least 10 characters";
+  bool up = false, lo = false, di = false, sy = false;
+  for (size_t i = 0; i < p.length(); i++) {
+    unsigned char c = (unsigned char)p[i];
+    if (isupper(c)) up = true; else if (islower(c)) lo = true;
+    else if (isdigit(c)) di = true; else if (ispunct(c)) sy = true;
+  }
+  if (!up) return "include an uppercase letter";
+  if (!lo) return "include a lowercase letter";
+  if (!di) return "include a digit";
+  if (!sy) return "include a symbol";
+  return nullptr;
+}
+
 static const char* cmd_blesecret(const String& argsInput) {
   String a = argsInput; a.trim();
   if (a.length() == 0) {
@@ -1332,16 +1350,27 @@ static const char* cmd_blesecret(const String& argsInput) {
       ? "BLE secure-channel secret is SET (hidden). 'blesecret clear' to remove."
       : "BLE secure-channel secret NOT set. Set one: blesecret <passphrase>";
   }
+  // Provision the master secret only over a trusted local transport — never let it
+  // traverse a (plaintext) BLE link where it could be sniffed.
+  if (currentAuthContext().transport == SOURCE_BLUETOOTH) {
+    return "Set the secure-channel passphrase via serial, OLED, or web — not over Bluetooth.";
+  }
   if (a.equalsIgnoreCase("clear")) {
     setSetting(gSettings.bleSecureChannelSecret, String(""));
     bleScInvalidatePsk();
-    return "BLE secure-channel secret cleared.";
+    return "BLE secure-channel secret cleared. (Encryption no longer enforced.)";
   }
-  if (a.length() < 8) return "Error: passphrase must be at least 8 characters.";
+  if (const char* need = blePassphrasePolicyError(a)) {
+    static char buf[96];
+    snprintf(buf, sizeof(buf), "Error: passphrase must %s (>=10 with upper, lower, digit, symbol).", need);
+    return buf;
+  }
   setSetting(gSettings.bleSecureChannelSecret, a);
   bleScInvalidatePsk();
   bleScWarmPsk();  // derive PSK now (cmd_exec task, big stack) so BTC_TASK handshake doesn't
-  return "BLE secure-channel secret set. Provision the SAME passphrase in the app.";
+  return gSettings.bleRequireSecureChannel
+    ? "Secret set — encryption is now REQUIRED. Enter the SAME passphrase in the app. ('blesecure off' to allow plaintext.)"
+    : "Secret set. Run 'blesecure on' to require encryption, and enter the SAME passphrase in the app.";
 }
 
 static const char* cmd_blesecure(const String& argsInput) {
@@ -1358,6 +1387,26 @@ static const char* cmd_blesecure(const String& argsInput) {
   setSetting(gSettings.bleRequireSecureChannel, on);
   return on ? "BLE secure channel REQUIRED — plaintext commands now refused."
             : "BLE secure channel optional — plaintext allowed.";
+}
+
+// Boot-time security nudge: encryption is wanted (bleRequireSecureChannel, default on)
+// but no passphrase is set, so the channel can't be enforced and BLE is PLAINTEXT.
+// Printed as the last lines of boot so the operator can't miss it. No-op once a secret
+// is set, or if the user explicitly opted into plaintext (blesecure off), or in G2 mode.
+void bleSecurityBootNotice() {
+  if (!gSettings.bluetoothAutoStart) return;                    // BT not running
+  if (gSettings.bleMode != BLE_MODE_SERVER) return;             // G2 client mode: N/A
+  if (!gSettings.bleRequireSecureChannel) return;               // user chose plaintext
+  if (gSettings.bleSecureChannelSecret.length() > 0) return;    // already provisioned
+  broadcastOutput("");
+  broadcastOutput("************************* BLE SECURITY *************************");
+  broadcastOutput("Bluetooth is UNENCRYPTED — no secure-channel passphrase is set.");
+  broadcastOutput("Any phone in range can connect in plaintext. To secure it, set one:");
+  broadcastOutput("   blesecret <passphrase>   (serial/OLED/web; >=10 chars, upper+");
+  broadcastOutput("                             lower+digit+symbol), then enter the SAME");
+  broadcastOutput("                             passphrase in the app.");
+  broadcastOutput("   (or 'blesecure off' to intentionally allow plaintext.)");
+  broadcastOutput("***************************************************************");
 }
 
 static const char* cmd_bledisconnect(const String& argsInput) {
@@ -1610,6 +1659,29 @@ static const char* cmd_bletxpower(const String& argsInput) {
 }
 
 static const char* cmd_bleinfo(const String& argsInput) {
+  // Structured path: BLE config + live state, one verbatim JSON blob via the
+  // return value. No broadcastOutput. ArduinoJson escapes the user-settable
+  // device name correctly. No secrets emitted.
+  if (argWantsJson(argsInput)) {
+    bool init = (gBLEState && gBLEState->initialized);
+    PSRAM_JSON_DOC(doc);
+    doc["v"]              = 1;
+    doc["deviceName"]     = gSettings.bleDeviceName;
+    doc["txPower"]        = gSettings.bleTxPower;
+    doc["autoStart"]      = gSettings.bluetoothAutoStart;
+    doc["requireAuth"]    = gSettings.bluetoothRequireAuth;
+    doc["secureChannelRequired"] = bleScRequired();
+    doc["initialized"]    = init;
+    doc["state"]          = getBLEStateString();
+    doc["connections"]    = init ? gBLEState->activeConnectionCount : 0;
+    doc["maxConnections"] = BLE_MAX_CONNECTIONS;
+    static char* jbuf = nullptr;
+    if (!jbuf) jbuf = (char*)ps_alloc(512, AllocPref::PreferPSRAM, "bleinfo.json");
+    if (!jbuf) return "{\"error\":\"oom\"}";
+    serializeJson(doc, jbuf, 512);
+    return jbuf;
+  }
+
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   char* buf = getDebugBuffer();
   int pos = 0;
@@ -1787,7 +1859,7 @@ const SettingEntry bluetoothSettingsEntries[] = {
   { "bluetoothDeviceName", SETTING_STRING, &gSettings.bleDeviceName, 0, 0, "HardwareOne", 0, 0, "Device Name", nullptr, false, nullptr, nullptr },
   { "bluetoothTxPower",      SETTING_INT,    &gSettings.bleTxPower,            3, 0, nullptr, 0, 7, "TX Power (0-7)", nullptr, false, nullptr, "bletxpower" },
   { "bluetoothMode",         SETTING_INT,    &gSettings.bleMode,               0,    0, nullptr, 0, 1, "Mode (0=server, 1=g2)", nullptr, false, nullptr, "blemode" },
-  { "bleRequireSecureChannel", SETTING_BOOL, &gSettings.bleRequireSecureChannel, false, 0, nullptr, 0, 1, "Require Secure Channel", nullptr, false, nullptr, "blesecure" },
+  { "bleRequireSecureChannel", SETTING_BOOL, &gSettings.bleRequireSecureChannel, true, 0, nullptr, 0, 1, "Require Secure Channel", nullptr, false, nullptr, "blesecure" },
   { "bleSecureChannelSecret",  SETTING_STRING, &gSettings.bleSecureChannelSecret, 0, 0, "", 0, 0, "Secure Channel Secret", nullptr, true, nullptr, "blesecret" }
 };
 
@@ -1909,7 +1981,10 @@ bool blePushSensorData(const char* jsonData, size_t len) {
   if (!isBLEConnected() || !pSensorDataChar) {
     return false;
   }
-  
+  // The Data-service streams are NOT part of the Secure Channel (separate chars).
+  // When encryption is required, suppress them rather than emit plaintext over the air.
+  if (bleScRequired()) return false;
+
   pSensorDataChar->setValue((uint8_t*)jsonData, len);
   pSensorDataChar->notify();
   
@@ -1924,7 +1999,8 @@ bool blePushSystemStatus(const char* jsonData, size_t len) {
   if (!isBLEConnected() || !pSystemStatusChar) {
     return false;
   }
-  
+  if (bleScRequired()) return false;  // not on the Secure Channel — don't leak plaintext
+
   pSystemStatusChar->setValue((uint8_t*)jsonData, len);
   pSystemStatusChar->notify();
   
@@ -1939,7 +2015,8 @@ bool blePushEvent(BLEEventType eventType, const char* message, const char* detai
   if (!isBLEConnected() || !pEventNotifyChar) {
     return false;
   }
-  
+  if (bleScRequired()) return false;  // not on the Secure Channel — don't leak plaintext
+
   // Build event JSON
   char eventJson[256];
   int pos = snprintf(eventJson, sizeof(eventJson),

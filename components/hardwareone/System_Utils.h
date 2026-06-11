@@ -129,6 +129,13 @@ bool isHelpModeCommand(const char* cmdName);
 // Check if a command requires admin privileges
 bool commandRequiresAdmin(const String& cmdLine);
 
+// Opt-in structured (JSON) output detector. Returns true if `args` contains a
+// standalone `json` token at a word boundary (so it won't false-match a value
+// that merely contains the substring). Per the output contract (see
+// executeCommand in System_Utils.cpp), a command in JSON mode emits its payload
+// ONLY via the return value (one verbatim document) and calls NO broadcastOutput.
+bool argWantsJson(const String& args);
+
 // Execute a command through the registry (returns result string)
 // Note: This is a lower-level function; executeCommand() in .ino handles auth context
 const char* dispatchCommand(const String& argsInput);

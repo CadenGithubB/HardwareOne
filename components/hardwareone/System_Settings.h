@@ -330,7 +330,7 @@ struct Settings {
       bleDeviceName("HardwareOne"),
       bleTxPower(3),
       bleMode(0),
-      bleRequireSecureChannel(false),
+      bleRequireSecureChannel(true),
       bleSecureChannelSecret(""),
       // BLE peer fields moved to gBlePeerData[] (see BLE_Peers.h)
       powerMode(0),
