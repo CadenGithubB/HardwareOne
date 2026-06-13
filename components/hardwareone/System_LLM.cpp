@@ -70,6 +70,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <cstdio>
+#include <cstdarg>
 #include <climits>
 #include <algorithm>
 
@@ -200,6 +201,16 @@ void llmPsramFree(void** ptr) {
   }
 }
 
+// printf-style setter for gLLM.errorMsg — replaces the repeated
+// setLlmError( ...) boilerplate. Message only;
+// runState transitions stay explicit at the call sites that need them.
+void setLlmError(const char* fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), fmt, ap);
+  va_end(ap);
+}
+
 // ============================================================================
 // 5. Math Primitives  →  moved to System_LLM_Kernels.{h,cpp}
 //    rmsnorm, layernorm, softmax, scaleCount, the quant matmuls, and wmatmul.
@@ -231,6 +242,20 @@ static VecStats vecstats(const float* v, int n) {
 
 // Position gating: log pos 0, 1, then every 8th. All layers, full volume.
 #define FORWARD_DBG_POS(pos) ((pos) <= 1 || ((pos) % 8 == 0))
+
+// At logged positions, compute vector health stats and warn on NaN/Inf.
+// Replaces the repeated "if (FORWARD_DBG_POS) { VecStats x = vecstats(...);
+// if (x.nans||x.infs) DEBUG(...) }" blocks scattered through forward(). Pass
+// l = -1 for non-layer points. Debug-only — never touches the activations, so
+// generation output is unchanged.
+static inline void checkVec(const char* what, const float* v, int n, int pos, int l) {
+  if (!FORWARD_DBG_POS(pos)) return;
+  VecStats s = vecstats(v, n);
+  if (s.nans || s.infs) {
+    DEBUG_LLM_FORWARDF("[LLM] CRITICAL: NaN/Inf in %s at L%d pos=%d (nan=%d inf=%d)",
+                       what, l, pos, s.nans, s.infs);
+  }
+}
 
 // ── Generation-time prompt diagnostics ──────────────────────────────────────
 // Tracks which prompt tokens the model attends to during generation.
@@ -330,18 +355,11 @@ static float* forward(int token, int pos) {
   // GPT-2: add learned positional embedding
   if (isGPT2 && w->pos_embedding_table) {
     float* pe = w->pos_embedding_table + pos * dim;
-    for (int i = 0; i < dim; i++) s->x[i] += pe[i];
+    vecAddInPlace(s->x, pe, dim);
   }
 
   // Debug: post-embedding activation health
-  if (FORWARD_DBG_POS(pos)) {
-    VecStats es = vecstats(s->x, dim);
-    //DEBUG_LLM_FORWARDF("[LLM] pos=%d emb+pe: min=%.3f max=%.3f mean=%.3f L2=%.3f nan=%d inf=%d",
-    //                   pos, es.vmin, es.vmax, es.mean, es.l2, es.nans, es.infs);
-    if (es.nans || es.infs) {
-      DEBUG_LLM_FORWARDF("[LLM] CRITICAL: NaN/Inf in embedding at pos=%d token=%d!", pos, token);
-    }
-  }
+  checkVec("embedding", s->x, dim, pos, -1);
 
   // Precompute this token's RoPE cos/sin once (identical across all layers).
   // Llama only — GPT-2 uses absolute positional embeddings added above.
@@ -375,18 +393,10 @@ static float* forward(int token, int pos) {
     linear(key_cache_row,   s->xb, T.wk);
     linear(value_cache_row, s->xb, T.wv);
 
-    // Debug: Q/K/V matmul outputs
-    if (FORWARD_DBG_POS(pos)) {
-      VecStats qs = vecstats(s->q, dim);
-      VecStats ks = vecstats(key_cache_row, kv_dim);
-      VecStats vs = vecstats(value_cache_row, kv_dim);
-      //DEBUG_LLM_FORWARDF("[LLM] L%d pos=%d Q: [%.3f,%.3f] L2=%.3f  K: [%.3f,%.3f] L2=%.3f  V: [%.3f,%.3f] L2=%.3f",
-      //                   l, pos, qs.vmin, qs.vmax, qs.l2, ks.vmin, ks.vmax, ks.l2, vs.vmin, vs.vmax, vs.l2);
-      if (qs.nans || qs.infs || ks.nans || ks.infs || vs.nans || vs.infs) {
-        DEBUG_LLM_FORWARDF("[LLM] CRITICAL: NaN/Inf in QKV at L%d pos=%d! Q:%d/%d K:%d/%d V:%d/%d",
-                           l, pos, qs.nans, qs.infs, ks.nans, ks.infs, vs.nans, vs.infs);
-      }
-    }
+    // Debug: Q/K/V matmul health
+    checkVec("Q", s->q,            dim,    pos, l);
+    checkVec("K", key_cache_row,   kv_dim, pos, l);
+    checkVec("V", value_cache_row, kv_dim, pos, l);
 
     // RoPE relative positional encoding (Llama only — GPT-2 uses absolute pos
     // embeddings). cos/sin were precomputed once per token above.
@@ -527,15 +537,10 @@ static float* forward(int token, int pos) {
     linear(s->xb2, s->xb, T.wo);
 
     // Residual connection
-    for (int i = 0; i < dim; i++) s->x[i] += s->xb2[i];
+    vecAddInPlace(s->x, s->xb2, dim);
 
-    // Debug: post-attention residual
-    if (FORWARD_DBG_POS(pos)) {
-      VecStats rs = vecstats(s->x, dim);
-      //DEBUG_LLM_FORWARDF("[LLM] L%d pos=%d post_attn_res: [%.3f,%.3f] mean=%.3f L2=%.3f nan=%d",
-      //                   l, pos, rs.vmin, rs.vmax, rs.mean, rs.l2, rs.nans + rs.infs);
-      (void)rs;
-    }
+    // Debug: post-attention residual health
+    checkVec("post_attn_res", s->x, dim, pos, l);
 
     // FFN norm (LayerNorm for GPT-2, RMSNorm for Llama)
     if (isGPT2) {
@@ -548,15 +553,8 @@ static float* forward(int token, int pos) {
       // GPT-2 FFN: up projection → GELU → down projection (no gate)
       linear(s->hb, s->xb, T.w3);
 
-      // Debug: pre-GELU activation range (dead neurons = all near-zero or clamped)
-      if (FORWARD_DBG_POS(pos)) {
-        VecStats pg = vecstats(s->hb, hidden_dim);
-        int dead = 0;
-        for (int i = 0; i < hidden_dim; i++) if (fabsf(s->hb[i]) < 1e-6f) dead++;
-        //DEBUG_LLM_FORWARDF("[LLM] L%d pos=%d preGELU: [%.3f,%.3f] L2=%.3f dead=%d/%d nan=%d",
-        //                   l, pos, pg.vmin, pg.vmax, pg.l2, dead, hidden_dim, pg.nans + pg.infs);
-        (void)pg; (void)dead;
-      }
+      // Debug: pre-GELU activation health
+      checkVec("pre_gelu", s->hb, hidden_dim, pos, l);
 
       // GELU (tanh approximation — matches HF gelu_new)
       for (int i = 0; i < hidden_dim; i++) {
@@ -564,13 +562,8 @@ static float* forward(int token, int pos) {
         s->hb[i] = 0.5f * x * (1.0f + tanhf(GELU_COEFF_A * (x + GELU_COEFF_B * x * x * x)));
       }
 
-      // Debug: post-GELU
-      if (FORWARD_DBG_POS(pos)) {
-        VecStats ag = vecstats(s->hb, hidden_dim);
-        //DEBUG_LLM_FORWARDF("[LLM] L%d pos=%d postGELU: [%.3f,%.3f] L2=%.3f",
-        //                   l, pos, ag.vmin, ag.vmax, ag.l2);
-        (void)ag;
-      }
+      // Debug: post-GELU health
+      checkVec("post_gelu", s->hb, hidden_dim, pos, l);
 
       linear(s->xb, s->hb, T.w2);
     } else {
@@ -587,18 +580,10 @@ static float* forward(int token, int pos) {
     }
 
     // Residual
-    for (int i = 0; i < dim; i++) s->x[i] += s->xb[i];
+    vecAddInPlace(s->x, s->xb, dim);
 
-    // Debug: post-FFN residual stream health — track growth across layers.
-    // Healthy: L2 grows slowly. Exploding: L2 doubles+ per layer. Vanishing: L2 → 0.
-    if (FORWARD_DBG_POS(pos)) {
-      VecStats fs = vecstats(s->x, dim);
-      //DEBUG_LLM_FORWARDF("[LLM] L%d pos=%d post_ffn_res: [%.3f,%.3f] mean=%.3f L2=%.3f nan=%d",
-      //                   l, pos, fs.vmin, fs.vmax, fs.mean, fs.l2, fs.nans + fs.infs);
-      if (fs.nans || fs.infs) {
-        DEBUG_LLM_FORWARDF("[LLM] CRITICAL: NaN/Inf in residual at L%d pos=%d!", l, pos);
-      }
-    }
+    // Debug: post-FFN residual stream health (NaN/Inf = numerical blowup)
+    checkVec("post_ffn_res", s->x, dim, pos, l);
 
   }
 
@@ -609,11 +594,8 @@ static float* forward(int token, int pos) {
     rmsnorm(s->x, s->x, w->rms_final_weight, dim);
   }
 
-  // Debug: post-final-norm activation
-  if (FORWARD_DBG_POS(pos)) {
-    VecStats fn = vecstats(s->x, dim);
-    (void)fn;
-  }
+  // Debug: post-final-norm activation health
+  checkVec("final_norm", s->x, dim, pos, -1);
 
   // Classifier into logits (always FP32 or Q8, never Q4)
   linear(s->logits, s->x, w->clsT);
@@ -687,7 +669,7 @@ bool llmLoadModel(const char* modelPath, int maxCtx) {
   if (!gLLM.mutex) llmInit();
 
   if (!filesystemReady) {
-    strlcpy(gLLM.errorMsg, "Filesystem not ready", sizeof(gLLM.errorMsg));
+    setLlmError("Filesystem not ready");
     gLLM.runState = LLMState::ERROR;
     return false;
   }
@@ -906,7 +888,7 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
   size_t prompt_buf_n = strlen(prompt) + 3;
   int* prompt_tokens = (int*)malloc(prompt_buf_n * sizeof(int));
   if (!prompt_tokens) {
-    snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "OOM: prompt_tokens alloc");
+    setLlmError("OOM: prompt_tokens alloc");
     if (norm_prompt) free(norm_prompt);
     gLLM.runState = LLMState::ERROR;
     return -1;
