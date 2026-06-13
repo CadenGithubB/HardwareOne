@@ -20,6 +20,7 @@
 #include "System_BuildConfig.h"
 #include "System_Command.h"
 #include "System_Utils.h"      // argWantsJson() — opt-in JSON output
+#include "System_MemUtil.h"    // PSRAM_JSON_DOC / ps_alloc — battery json builder
 #include "System_Debug.h"
 #include "System_Notifications.h"
 #include "System_Settings.h"   // gSettings (battery-log enable/interval) + setSetting
@@ -445,6 +446,38 @@ char getBatteryIcon() {
 // CLI commands
 // ============================================================================
 
+// Single source of truth for battery telemetry JSON — used by BOTH `battery json`
+// (CLI/BLE, via cmd_battery_status) and the web /api/battery/status, so every
+// interface returns the SAME schema. `present` is the availability gate: false
+// (or backend "usb-only") means there's no battery hardware → the app/UI hides
+// the battery card. No secrets; safe on any transport.
+void buildBatteryJson(JsonDocument& doc) {
+  doc["v"]             = 1;
+  doc["present"]       = (gBatteryState.status != BATTERY_NOT_PRESENT);
+#if BATTERY_BACKEND_FUEL_GAUGE
+  doc["backend"]       = "fuelgauge";
+#elif BATTERY_BACKEND_ADC
+  doc["backend"]       = "adc";
+#else
+  doc["backend"]       = "usb-only";
+#endif
+  doc["voltage"]       = gBatteryState.voltage;
+  doc["percentage"]    = gBatteryState.percentage;
+  doc["status"]        = getBatteryStatusString();
+  doc["charging"]      = gBatteryState.isCharging;
+  doc["usbPresent"]    = gBatteryState.usbPresent;
+  doc["vbusSense"]     = kHasVbusSense;
+  doc["lastReadMsAgo"] = (unsigned long)(millis() - gBatteryState.lastReadMs);
+#if BATTERY_BACKEND_FUEL_GAUGE
+  doc["ratePctPerHr"]  = gBatteryState.cratePctPerHr;
+  if (gBatteryState.status != BATTERY_NOT_PRESENT && gBatteryState.cratePctPerHr < -0.01f) {
+    doc["etaMinutes"]  = (long)((gBatteryState.percentage / -gBatteryState.cratePctPerHr) * 60.0f);
+  }
+#elif BATTERY_BACKEND_ADC
+  doc["rawADC"]        = gBatteryState.rawADC;
+#endif
+}
+
 const char* cmd_battery_status(const String& argsInput) {
   updateBattery();
 
@@ -453,26 +486,12 @@ const char* cmd_battery_status(const String& argsInput) {
   // strings (no escaping needed). Schema: {"v":1,"voltage","percentage",
   // "status","charging","usbPresent","vbusSense","lastReadMsAgo","backend",...}
   if (argWantsJson(argsInput)) {
-    EXT_RAM_BSS_ATTR static char jbuf[256];
-    int p = snprintf(jbuf, sizeof(jbuf),
-      "{\"v\":1,\"voltage\":%.2f,\"percentage\":%.0f,\"status\":\"%s\","
-      "\"charging\":%s,\"usbPresent\":%s,\"vbusSense\":%s,\"lastReadMsAgo\":%lu",
-      gBatteryState.voltage, gBatteryState.percentage, getBatteryStatusString(),
-      gBatteryState.isCharging ? "true" : "false",
-      gBatteryState.usbPresent ? "true" : "false",
-      kHasVbusSense ? "true" : "false",
-      (unsigned long)(millis() - gBatteryState.lastReadMs));
-#if BATTERY_BACKEND_ADC
-    if (p > 0 && p < (int)sizeof(jbuf))
-      p += snprintf(jbuf + p, sizeof(jbuf) - p, ",\"backend\":\"adc\",\"rawADC\":%d", gBatteryState.rawADC);
-#elif BATTERY_BACKEND_FUEL_GAUGE
-    if (p > 0 && p < (int)sizeof(jbuf))
-      p += snprintf(jbuf + p, sizeof(jbuf) - p, ",\"backend\":\"fuelgauge\",\"cratePctPerHr\":%.2f", gBatteryState.cratePctPerHr);
-#else
-    if (p > 0 && p < (int)sizeof(jbuf))
-      p += snprintf(jbuf + p, sizeof(jbuf) - p, ",\"backend\":\"usb-only\"");
-#endif
-    if (p > 0 && p < (int)sizeof(jbuf)) snprintf(jbuf + p, sizeof(jbuf) - p, "}");
+    PSRAM_JSON_DOC(doc);
+    buildBatteryJson(doc);   // single source of truth (also feeds /api/battery/status)
+    static char* jbuf = nullptr;
+    if (!jbuf) jbuf = (char*)ps_alloc(512, AllocPref::PreferPSRAM, "battery.json");
+    if (!jbuf) return "{\"error\":\"oom\"}";
+    serializeJson(doc, jbuf, 512);
     return jbuf;
   }
 

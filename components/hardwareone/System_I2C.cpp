@@ -1428,19 +1428,48 @@ int i2cConnectedDeviceCount() {
   return n;
 }
 
-// Shared I2C device-list builder — emits the discovered-device array consumed
-// by BOTH `devices json` and buildSystemInfoJson()'s full (web) form, so the
-// two never diverge. Each entry: {name, addr (decimal I2C address), bus}.
-// Only devices currently flagged isConnected are emitted.
-void buildI2cDeviceListJson(JsonArray& arr) {
+// Shared I2C device-list builder — the single source for every device-list
+// serialization in the firmware. Two forms:
+//   • lean (verbose=false, default): {name, addr, bus}, CONNECTED devices only.
+//     Consumed by `devices json` (CLI/BLE) and buildSystemInfoJson()'s
+//     connectivity.i2c.deviceList (status json / /api/system / SSE).
+//   • verbose (verbose=true): the full registry record per device, ALL entries
+//     (with isConnected as a field). Byte-compatible with the previous
+//     hand-rolled serialization — same keys + value types — so /api/devices'
+//     web page and the `devicefile` command keep working unchanged.
+void buildI2cDeviceListJson(JsonArray& arr, bool verbose = false) {
   for (int i = 0; i < connectedDeviceCount; i++) {
     const ConnectedDevice& d = connectedDevices[i];
-    if (!d.isConnected) continue;
+    if (!verbose && !d.isConnected) continue;   // lean: connected devices only
     JsonObject o = arr.add<JsonObject>();
-    o["name"] = (d.name && d.name[0]) ? d.name : "device";
-    o["addr"] = d.address;
-    o["bus"]  = d.bus;
+    if (verbose) {
+      char hexAddr[8];
+      snprintf(hexAddr, sizeof(hexAddr), "0x%02X", d.address);
+      o["address"]         = d.address;
+      o["addressHex"]      = hexAddr;   // char[] -> ArduinoJson copies it
+      o["name"]            = (d.name && d.name[0]) ? d.name : "device";
+      o["description"]     = d.description  ? d.description  : "";
+      o["manufacturer"]    = d.manufacturer ? d.manufacturer : "";
+      o["bus"]             = d.bus;
+      o["isConnected"]     = d.isConnected;
+      o["lastSeen"]        = (unsigned long)d.lastSeen;
+      o["firstDiscovered"] = (unsigned long)d.firstDiscovered;
+    } else {
+      o["name"] = (d.name && d.name[0]) ? d.name : "device";
+      o["addr"] = d.address;
+      o["bus"]  = d.bus;
+    }
   }
+}
+
+// Rich device-registry document {lastDiscovery, discoveryCount, devices:[verbose]}
+// — the single source for /api/devices (web) and the `devicefile` command,
+// replacing two byte-identical hand-rolled String serializations.
+void buildDeviceRegistryJson(JsonDocument& doc) {
+  doc["lastDiscovery"]  = (unsigned long)millis();
+  doc["discoveryCount"] = discoveryCount;
+  JsonArray arr = doc["devices"].to<JsonArray>();
+  buildI2cDeviceListJson(arr, /*verbose=*/true);
 }
 
 const char* cmd_devices(const String& originalCmd) {
@@ -1517,36 +1546,132 @@ const char* cmd_devicefile(const String& originalCmd) {
     return "[I2C] Registry empty";
   }
 
-  String json = "{";
-  json += "\"lastDiscovery\":" + String((unsigned long)millis()) + ",";
-  json += "\"discoveryCount\":" + String(discoveryCount) + ",";
-  json += "\"devices\":[";
-  for (int i = 0; i < connectedDeviceCount; i++) {
-    ConnectedDevice& dev = connectedDevices[i];
-    char hexAddr[5];
-    snprintf(hexAddr, sizeof(hexAddr), "0x%02X", dev.address);
-    if (i > 0) json += ",";
-    json += "{";
-    json += "\"address\":" + String(dev.address) + ",";
-    json += "\"addressHex\":\"" + String(hexAddr) + "\",";
-    json += "\"name\":\"" + String(dev.name) + "\",";
-    json += "\"description\":\"" + String(dev.description) + "\",";
-    json += "\"manufacturer\":\"" + String(dev.manufacturer) + "\",";
-    json += "\"bus\":" + String(dev.bus) + ",";
-    json += "\"isConnected\":";
-    json += dev.isConnected ? "true" : "false";
-    json += ",\"lastSeen\":" + String((unsigned long)dev.lastSeen);
-    json += ",\"firstDiscovered\":" + String((unsigned long)dev.firstDiscovered);
-    json += "}";
-  }
-  json += "]}";
-
-  broadcastOutput(json.c_str());
+  // Single source of truth (also feeds /api/devices) — no hand-rolled String.
+  PSRAM_JSON_DOC(doc);
+  buildDeviceRegistryJson(doc);
+  static char* regBuf = nullptr;
+  if (!regBuf) regBuf = (char*)ps_alloc(4096, AllocPref::PreferPSRAM, "devicefile.json");
+  if (!regBuf) return "[I2C] Out of memory";
+  serializeJson(doc, regBuf, 4096);
+  broadcastOutput(regBuf);
   return "[I2C] Registry JSON displayed";
+}
+
+// ---- Live sensor view (Phase 2: state + live `data` readings) -------------
+// Contract: docs/BLE_SENSORS_INTEGRATION.md. One entry per COMPILED sensor:
+// id/name/kind + live enabled/connected, plus `data` (the sensor's native
+// readings, embedded verbatim) for active, non-stream sensors. Readings reuse
+// the same per-sensor builders ESP-NOW/MQTT use — no new data plumbing.
+typedef int (*SensorDataFn)(char*, size_t);
+// Forward-declare the per-sensor builders (also declared in their headers;
+// matching redeclarations are harmless). Guarded so only compiled ones link.
+#if ENABLE_PRESENCE_SENSOR
+extern int presenceBuildDataJSON(char* buf, size_t bufSize);
+#endif
+#if ENABLE_TOF_SENSOR
+extern int tofBuildDataJSON(char* buf, size_t bufSize);
+#endif
+#if ENABLE_IMU_SENSOR
+extern int imuBuildDataJSON(char* buf, size_t bufSize);
+#endif
+#if ENABLE_GPS_SENSOR
+extern int gpsBuildDataJSON(char* buf, size_t bufSize);
+#endif
+#if ENABLE_FM_RADIO
+extern int fmRadioBuildDataJSON(char* buf, size_t bufSize);
+#endif
+#if ENABLE_RTC_SENSOR
+extern int rtcBuildDataJSON(char* buf, size_t bufSize);
+#endif
+#if ENABLE_GAMEPAD_SENSOR
+extern int gamepadBuildDataJSON(char* buf, size_t bufSize);
+#endif
+
+static void addSensorEntry(JsonArray& arr, const char* id, const char* name,
+                           const char* kind, bool enabled, bool connected, SensorDataFn dataFn) {
+  JsonObject o = arr.add<JsonObject>();
+  o["id"]        = id;
+  o["name"]      = name;
+  o["kind"]      = kind;
+  o["enabled"]   = enabled;     // LIVE running state (toggled by open<id>/close<id>), NOT autostart
+  o["connected"] = connected;   // physically present on the bus right now
+
+  // Live readings: native per-sensor JSON, embedded only for active, non-stream
+  // sensors. Parsed into the doc (copied) so the scratch buffer is safe to reuse
+  // across sensors. Largest non-stream builder is ToF (~1 KB).
+  if (dataFn && enabled && connected && strcmp(kind, "stream") != 0) {
+    static char* dbuf = nullptr;
+    if (!dbuf) dbuf = (char*)ps_alloc(1024, AllocPref::PreferPSRAM, "sensor.data.scratch");
+    if (dbuf) {
+      int n = dataFn(dbuf, 1024);
+      if (n > 0) {
+        PSRAM_JSON_DOC(tmp);
+        if (deserializeJson(tmp, dbuf) == DeserializationError::Ok) {
+          o["data"] = tmp;  // deep-copied into the parent doc
+        }
+      }
+    }
+  }
+}
+
+// {"v":1,"seq":N,"sensors":[...]} — only sensors compiled into this build appear.
+// `enabled` is the LIVE running flag (g<X>Enabled) — so the app's power toggle,
+// which sends open<id>/close<id>, reflects reality. (Auto-start-on-boot is a
+// SEPARATE persisted knob, surfaced in `controls json` as <id>AutoStart, NOT
+// this toggle.) seq bumps on enable/connect changes.
+static void buildSensorsJson(JsonDocument& doc) {
+  doc["v"]   = 1;
+  doc["seq"] = (unsigned long)gSensorStatusSeq;
+  JsonArray arr = doc["sensors"].to<JsonArray>();
+#if ENABLE_PRESENCE_SENSOR
+  addSensorEntry(arr, "presence", "STHS34PF80 presence",    "scalar", gPresenceEnabled, isSensorConnected("presence"), presenceBuildDataJSON);
+#endif
+#if ENABLE_TOF_SENSOR
+  addSensorEntry(arr, "tof",      "VL53L4CX distance",      "vector", gTofEnabled, isSensorConnected("tof"), tofBuildDataJSON);
+#endif
+#if ENABLE_IMU_SENSOR
+  addSensorEntry(arr, "imu",      "BNO055 orientation",     "vector", gImuEnabled, isSensorConnected("imu"), imuBuildDataJSON);
+#endif
+#if ENABLE_GPS_SENSOR
+  addSensorEntry(arr, "gps",      "PA1010D GPS",            "vector", gGpsEnabled, isSensorConnected("gps"), gpsBuildDataJSON);
+#endif
+#if ENABLE_FM_RADIO
+  addSensorEntry(arr, "fmradio",  "RDA5807 FM radio",       "scalar", gFmRadioEnabled, isSensorConnected("fmradio"), fmRadioBuildDataJSON);
+#endif
+#if ENABLE_RTC_SENSOR
+  addSensorEntry(arr, "rtc",      "DS3231 RTC",             "scalar", gRtcEnabled, isSensorConnected("rtc"), rtcBuildDataJSON);
+#endif
+#if ENABLE_APDS_SENSOR
+  addSensorEntry(arr, "apds",     "APDS9960 gesture/color", "scalar",
+                 (gApdsColorEnabled || gApdsProximityEnabled || gApdsGestureEnabled),
+                 isSensorConnected("apds"), nullptr);
+#endif
+#if ENABLE_GAMEPAD_SENSOR
+  // id is "input" — the canonical, unified module name (Seesaw gamepad OR ANO
+  // encoder). Matches controls json / open<id>/close<id> / sensorautostart /
+  // the I2C DB moduleName, so the app correlates on one name with no overrides.
+  addSensorEntry(arr, "input",    "Seesaw gamepad",         "scalar", gInputEnabled, gInputConnected, gamepadBuildDataJSON);
+#endif
+#if ENABLE_THERMAL_SENSOR
+  addSensorEntry(arr, "thermal",  "MLX90640 thermal",       "stream", gThermalEnabled, isSensorConnected("thermal"), nullptr);
+#endif
 }
 
 const char* cmd_sensors(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+
+  // Structured path: LIVE sensor state (Phase 1 — no `data` readings yet).
+  // `sensors json` is the live view; the human `sensors` below is the static
+  // chip catalog. One verbatim PSRAM blob, no broadcastOutput.
+  if (argWantsJson(argsInput)) {
+    PSRAM_JSON_DOC(doc);
+    buildSensorsJson(doc);
+    static char* sensorsJsonBuf = nullptr;
+    if (!sensorsJsonBuf) sensorsJsonBuf = (char*)ps_alloc(4096, AllocPref::PreferPSRAM, "sensors.json");
+    if (!sensorsJsonBuf) return "{\"error\":\"oom\"}";
+    serializeJson(doc, sensorsJsonBuf, 4096);
+    return sensorsJsonBuf;
+  }
 
   String args = argsInput;
   args.trim();
@@ -1800,7 +1925,7 @@ static const char* cmd_sensorautostart(const String& argsInput) {
   // Find sensor in cost table
   const SensorHeapCost* found = nullptr;
   for (size_t i = 0; i < sensorHeapCostCount; i++) {
-    if (sensor == sensorHeapCosts[i].shortName || 
+    if (sensor == sensorHeapCosts[i].shortName ||
         (sensor == "fm" && strcmp(sensorHeapCosts[i].shortName, "fmradio") == 0)) {
       found = &sensorHeapCosts[i];
       break;
@@ -1829,7 +1954,7 @@ static const char* cmd_sensorautostart(const String& argsInput) {
   }
   
   if (!found) {
-    return "Unknown sensor. Options: thermal, tof, imu, gps, fmradio, apds, gamepad, all";
+    return "Unknown sensor. Options: thermal, tof, imu, gps, fmradio, apds, input, all";
   }
   
   bool wasEnabled = *found->autoStartFlag;
@@ -2008,7 +2133,7 @@ const CommandEntry i2cCommands[] = {
   { "devicefile", "Show device registry JSON file.", false, cmd_devicefile },
   
   // Sensor Auto-Start
-  { "sensorautostart", "Sensor auto-start: [sensor] [on|off]", true, cmd_sensorautostart, "Usage: sensorautostart [sensor] [on|off]\n       sensorautostart all [on|off]\nSensors: thermal, tof, imu, gps, fmradio, apds, gamepad" }
+  { "sensorautostart", "Sensor auto-start: [sensor] [on|off]", true, cmd_sensorautostart, "Usage: sensorautostart [sensor] [on|off]\n       sensorautostart all [on|off]\nSensors: thermal, tof, imu, gps, fmradio, apds, input" }
 };
 
 const size_t i2cCommandsCount = sizeof(i2cCommands) / sizeof(i2cCommands[0]);

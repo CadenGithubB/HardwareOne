@@ -15,56 +15,23 @@
 // ===========================================================================
 // /api/battery/status — capability-flagged live snapshot
 // ===========================================================================
-// The page renders one capability-driven UI: base fields (voltage/percent/
-// status) for any backend, and the rate/ETA extras only when caps.rate is set
-// (fuel-gauge backend). Mirrors the buildSensorStatusJson() pattern (PSRAM
-// buffer + ArduinoJson).
-static const char* buildBatteryJson() {
-  static char* buf = nullptr;
-  static const size_t kBufSize = 512;
-  if (!buf) {
-    buf = (char*)ps_alloc(kBufSize, AllocPref::PreferPSRAM, "battery.status.json");
-    if (!buf) return "{}";
-  }
-  PSRAM_JSON_DOC(doc);
-
-  const bool present = (gBatteryState.status != BATTERY_NOT_PRESENT);
-#if BATTERY_BACKEND_FUEL_GAUGE
-  const char* backend = "fuelgauge";
-  const bool  hasRate = true;
-#elif BATTERY_BACKEND_ADC
-  const char* backend = "adc";
-  const bool  hasRate = false;
-#else
-  const char* backend = "none";
-  const bool  hasRate = false;
-#endif
-
-  doc["present"]  = present;
-  doc["backend"]  = backend;
-  JsonObject caps = doc["caps"].to<JsonObject>();
-  caps["rate"]    = hasRate;
-  doc["voltage"]  = gBatteryState.voltage;
-  doc["percent"]  = gBatteryState.percentage;
-  doc["status"]   = getBatteryStatusString();
-  doc["charging"] = gBatteryState.isCharging;
-  doc["usb"]      = gBatteryState.usbPresent;
-  if (hasRate) {
-    doc["rate_pct_hr"] = gBatteryState.cratePctPerHr;
-    // Estimated minutes remaining, only while actually discharging.
-    if (present && gBatteryState.cratePctPerHr < -0.01f) {
-      doc["eta_min"] = (long)((gBatteryState.percentage / -gBatteryState.cratePctPerHr) * 60.0f);
-    }
-  }
-
-  serializeJson(doc, buf, kBufSize);
-  return buf;
-}
-
+// Battery JSON is built by the single core builder in System_Battery.cpp
+// (buildBatteryJson(JsonDocument&)) so the web /api/battery/status and the
+// `battery json` CLI/BLE command return the IDENTICAL schema. Fields: present,
+// backend, voltage, percentage, status, charging, usbPresent, vbusSense,
+// lastReadMsAgo, ratePctPerHr/etaMinutes (fuelgauge only), rawADC (adc only).
 esp_err_t handleBatteryStatus(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
   httpd_resp_set_type(req, "application/json");
-  httpd_resp_send(req, buildBatteryJson(), HTTPD_RESP_USE_STRLEN);
+  static char* buf = nullptr;
+  static const size_t kBufSize = 512;
+  if (!buf) buf = (char*)ps_alloc(kBufSize, AllocPref::PreferPSRAM, "battery.status.json");
+  if (!buf) { httpd_resp_send(req, "{}", HTTPD_RESP_USE_STRLEN); return ESP_OK; }
+  PSRAM_JSON_DOC(doc);
+  extern void buildBatteryJson(JsonDocument& doc);  // core: System_Battery.cpp
+  buildBatteryJson(doc);
+  serializeJson(doc, buf, kBufSize);
+  httpd_resp_send(req, buf, HTTPD_RESP_USE_STRLEN);
   return ESP_OK;
 }
 
@@ -112,16 +79,16 @@ static void streamBatteryContent(httpd_req_t* req, const String& username) {
     var absent=hw._ge('bat-absent'),live=hw._ge('bat-live');
     if(s.present===false){if(absent)absent.style.display='';if(live)live.style.display='none';return;}
     if(absent)absent.style.display='none';if(live)live.style.display='flex';
-    hw.setText('bat-pct',fmt(s.percent,1));
+    hw.setText('bat-pct',fmt(s.percentage,1));
     hw.setText('bat-volt',fmt(s.voltage,3));
     hw.setText('bat-status',s.status||'--');
-    hw.setText('bat-src',s.charging?'Charging':(s.usb?'USB (full)':'Battery'));
-    var hasRate=s.caps&&s.caps.rate;
+    hw.setText('bat-src',s.charging?'Charging':(s.usbPresent?'USB (full)':'Battery'));
+    var hasRate=s.backend==='fuelgauge';
     hw.toggle('bat-rate-wrap',!!hasRate);
-    if(hasRate)hw.setText('bat-rate',fmt(s.rate_pct_hr,2));
-    var showEta=hasRate&&(s.eta_min!=null&&s.eta_min!==undefined);
+    if(hasRate)hw.setText('bat-rate',fmt(s.ratePctPerHr,2));
+    var showEta=hasRate&&(s.etaMinutes!=null&&s.etaMinutes!==undefined);
     hw.toggle('bat-eta-wrap',showEta);
-    if(showEta)hw.setText('bat-eta',etaStr(s.eta_min));
+    if(showEta)hw.setText('bat-eta',etaStr(s.etaMinutes));
   }
   hw.fetchJSON('/api/battery/status').then(applyStatus).catch(function(e){console.error('[BATTERY] status',e);});
   hw.pollJSON('/api/battery/status',2000,applyStatus);
