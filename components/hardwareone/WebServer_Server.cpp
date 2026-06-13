@@ -1781,27 +1781,9 @@ esp_err_t handleFileWrite(httpd_req_t* req) {
   }
   DEBUG_STORAGEF("[handleFileWrite] File closed, wrote %d bytes in %d chunks", content.length(), writeChunks);
 
-#if ENABLE_AUTOMATION
-  // Post-save hooks for specific files
-  if (name == "/system/automations.json") {
-    DEBUG_STORAGEF("[handleFileWrite] Automations.json detected, running post-save hooks");
-    // Read back and sanitize duplicate IDs; persist atomically if changed
-    String json;
-    if (readText(AUTOMATIONS_JSON_FILE, json)) {
-      DEBUG_STORAGEF("[handleFileWrite] Read back automations.json: %d bytes", json.length());
-      if (sanitizeAutomationsJson(json)) {
-        DEBUG_STORAGEF("[handleFileWrite] Sanitization needed, writing atomic");
-        writeAutomationsJsonAtomic(json);  // best-effort atomic writeback
-        gAutosDirty = true;                // ensure scheduler refreshes
-        DEBUGF(DEBUG_AUTO_SCHEDULER, "[autos] Sanitized duplicate IDs after file write; scheduler refresh queued");
-      } else {
-        DEBUG_STORAGEF("[handleFileWrite] No sanitization needed");
-      }
-    } else {
-      DEBUG_STORAGEF("[handleFileWrite] WARNING: Failed to read back automations.json");
-    }
-  }
-#endif
+  // Post-save hooks — shared with the web upload path and the BLE filewrite
+  // command (no-ops unless this is automations.json).
+  runFileWritePostSaveHooks(name);
 
   sendJsonResponse(req, "{\"success\":true}");
   DEBUG_STORAGEF("[handleFileWrite] COMPLETE: Success");
@@ -2248,16 +2230,9 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
                  (int)totalWritten, path.c_str(), isBinary ? "true" : "false", (int)ESP.getFreeHeap() - (int)heapStart, (unsigned)(millis() - tStart));
   INFO_WEBF("[UPLOAD] %s: %d bytes written in %u ms", path.c_str(), (int)totalWritten, (unsigned)(millis() - tStart));
 
-#if ENABLE_AUTOMATION
-  // Post-save hook: keep existing behavior for automations.json (read/validate)
-  if (path == "/system/automations.json") {
-    String json;
-    if (readText(AUTOMATIONS_JSON_FILE, json)) {
-      if (sanitizeAutomationsJson(json)) writeAutomationsJsonAtomic(json);
-      else DEBUG_STORAGEF("[handleFileUpload] automations.json OK");
-    }
-  }
-#endif
+  // Post-save hook: automations.json sanitize — shared with the web write path
+  // and the BLE filewrite command (no-ops unless this is automations.json).
+  runFileWritePostSaveHooks(path);
 
  #if ENABLE_WEB_MAPS
   // Post-save hook: auto-organize maps uploaded ANYWHERE on the filesystem
@@ -3648,23 +3623,12 @@ esp_err_t handleFilesList(httpd_req_t* req) {
     return ESP_OK;
   }
 
+  // Shared with the `files json` CLI/BLE command — single source of truth for the
+  // {success,dirPerms,files[]} envelope so web and app never drift. dirPerms
+  // reflects what THIS user can do in the directory (admin gets more, etc.).
   bool userIsAdmin = isAdminUser(ctx.user);
-  String body;
-  bool ok = buildFilesListing(dirPath, body, /*asJson=*/true, ctx, /*hideAdminPaths=*/!userIsAdmin);
   String json;
-  if (ok) {
-    // Pass caller's identity so the dirPerms reflect what THIS user can do
-    // in the directory (admin gets more, etc.).
-    uint8_t dp = getDirPerms(dirPath, ctx);
-    char hdrBuf[64];
-    snprintf(hdrBuf, sizeof(hdrBuf), "{\"success\":true,\"dirPerms\":%d,\"files\":[", (int)dp);
-    json = hdrBuf;
-    json += body;
-    json += "]}";
-  } else {
-    json = "{\"success\":false,\"error\":\"Directory not found or not accessible\"}";
-  }
-
+  buildFilesListJson(dirPath, ctx, /*hideAdminPaths=*/!userIsAdmin, json);
   sendJsonResponse(req, json.c_str());
   return ESP_OK;
 }
@@ -3679,30 +3643,19 @@ esp_err_t handleFilesStats(httpd_req_t* req) {
 
   // Optional ?path= query param — use SD stats when path is under /sd/
   // httpd_query_key_value does NOT percent-decode, so urlDecode() is required.
-  VFS::StorageType storageType = VFS::INTERNAL;
+  // buildFilesStatsJson() maps the path to its tier, handles the SD-not-mounted
+  // case, and is shared with the `files stats json` CLI command.
+  String statsPath = "/";
   char query[256];
   if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
     char pathVal[128];
     if (httpd_query_key_value(query, "path", pathVal, sizeof(pathVal)) == ESP_OK) {
-      storageType = VFS::getStorageType(urlDecode(String(pathVal)));
+      statsPath = urlDecode(String(pathVal));
     }
   }
 
-  // If SD was requested but isn't mounted, return a clear error rather than
-  // reporting 0 bytes free (which would produce a misleading "file too large").
-  if (storageType == VFS::SDCARD && !VFS::isSDAvailable()) {
-    sendJsonResponse(req, "{\"success\":false,\"error\":\"SD card not available\"}");
-    return ESP_OK;
-  }
-
-  uint64_t totalBytes = 0, usedBytes = 0, freeBytes = 0;
-  VFS::getStats(storageType, totalBytes, usedBytes, freeBytes);
-  int usagePercent = (totalBytes == 0) ? 0 : (int)((usedBytes * 100) / totalBytes);
-
-  char json[128];
-  snprintf(json, sizeof(json), "{\"success\":true,\"total\":%llu,\"used\":%llu,\"free\":%llu,\"usagePercent\":%d}",
-           totalBytes, usedBytes, freeBytes, usagePercent);
-
+  char json[160];
+  buildFilesStatsJson(statsPath, json, sizeof(json));
   sendJsonResponse(req, json);
   return ESP_OK;
 }

@@ -427,18 +427,148 @@ bool buildFilesListing(const String& inPath, String& out, bool asJson, const Aut
 // Filesystem CLI Command Handlers
 // ============================================================================
 
+// Append `len` bytes of `data` to `out` as the body of a JSON string (no
+// surrounding quotes), escaping per RFC 8259. Callers only route printable
+// ASCII through here; binary / high-bit content goes out base64 instead.
+static void appendJsonStringBytes(String& out, const uint8_t* data, size_t len) {
+  static const char hex[] = "0123456789abcdef";
+  for (size_t i = 0; i < len; i++) {
+    uint8_t c = data[i];
+    switch (c) {
+      case '"':  out += "\\\""; break;
+      case '\\': out += "\\\\"; break;
+      case '\b': out += "\\b";  break;
+      case '\f': out += "\\f";  break;
+      case '\n': out += "\\n";  break;
+      case '\r': out += "\\r";  break;
+      case '\t': out += "\\t";  break;
+      default:
+        if (c < 0x20) {
+          out += "\\u00";
+          out += hex[(c >> 4) & 0xF];
+          out += hex[c & 0xF];
+        } else {
+          out += (char)c;
+        }
+    }
+  }
+}
+
+// True if the buffer holds bytes that can't sit in a UTF-8 JSON string as-is
+// (NUL, high-bit, or a control char other than tab/newline/CR). Such content is
+// base64-encoded instead so the `enc` field tells the app how to decode.
+static bool bytesNeedBase64(const uint8_t* data, size_t len) {
+  for (size_t i = 0; i < len; i++) {
+    uint8_t c = data[i];
+    if (c == 0 || c >= 0x80) return true;
+    if (c < 0x20 && c != '\t' && c != '\n' && c != '\r') return true;
+  }
+  return false;
+}
+
+// Build the storage-stats JSON ({total,used,free,usagePercent}) for the tier
+// that owns `path`. Shared by the web /api/files/stats handler and the
+// `files stats json` CLI command so both report identical numbers.
+void buildFilesStatsJson(const String& path, char* out, size_t outSize) {
+  VFS::StorageType st = VFS::getStorageType(path);
+  if (st == VFS::SDCARD && !VFS::isSDAvailable()) {
+    snprintf(out, outSize, "{\"success\":false,\"error\":\"SD card not available\"}");
+    return;
+  }
+  uint64_t total = 0, used = 0, freeBytes = 0;
+  VFS::getStats(st, total, used, freeBytes);
+  int usagePercent = (total == 0) ? 0 : (int)((used * 100) / total);
+  snprintf(out, outSize,
+           "{\"success\":true,\"total\":%llu,\"used\":%llu,\"free\":%llu,\"usagePercent\":%d}",
+           (unsigned long long)total, (unsigned long long)used,
+           (unsigned long long)freeBytes, usagePercent);
+}
+
+// Build the COMPLETE JSON listing envelope ({success,dirPerms,files:[...]}) for
+// `path` under `ctx`. Single source of truth for both the web /api/files/list
+// handler and the `files json` CLI/BLE command so the shape can't drift. The
+// transport-specific bits (HTTP 403, BLE static buffer) stay in the callers.
+bool buildFilesListJson(const String& path, const AuthContext& ctx, bool hideAdminPaths, String& out) {
+  String body;
+  bool ok = buildFilesListing(path, body, /*asJson=*/true, ctx, hideAdminPaths);
+  if (!ok) {
+    out = "{\"success\":false,\"error\":\"Directory not found or not accessible\"}";
+    return false;
+  }
+  uint8_t dp = getDirPerms(path, ctx);
+  out  = "{\"success\":true,\"dirPerms\":";
+  out += (int)dp;
+  out += ",\"files\":[";
+  out += body;
+  out += "]}";
+  return true;
+}
+
+// Post-save hook shared by every file-write path (web write, web upload, BLE
+// filewrite): keep automations.json free of duplicate IDs and flag the scheduler.
+// Safe to call for any path — no-ops unless the path is automations.json.
+void runFileWritePostSaveHooks(const String& path) {
+#if ENABLE_AUTOMATION
+  if (path == "/system/automations.json") {
+    String json;
+    if (readText(AUTOMATIONS_JSON_FILE, json) && sanitizeAutomationsJson(json)) {
+      writeAutomationsJsonAtomic(json);  // best-effort atomic writeback
+      gAutosDirty = true;                // ensure scheduler refreshes
+    }
+  }
+#else
+  (void)path;
+#endif
+}
+
+// `files json` wrapper: applies the BLE/CLI-specific admin-only pre-check, then
+// defers to the shared buildFilesListJson(). Returns a pointer to a static
+// buffer (valid until the next call), per the command-return contract.
+static const char* filesListingJsonForApp(const String& path) {
+  static String s_listJson;
+  const AuthContext& ctx = currentAuthContext();
+  bool admin = isAdminUser(ctx.user);
+  if (isAdminOnlyPath(path) && !admin) {
+    s_listJson = "{\"success\":false,\"error\":\"Admin required\"}";
+    return s_listJson.c_str();
+  }
+  buildFilesListJson(path, ctx, /*hideAdminPaths=*/!admin, s_listJson);
+  return s_listJson.c_str();
+}
+
 const char* cmd_files(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!filesystemReady) {
     return "Error: LittleFS not ready";
   }
 
-  // Parse optional path argument
-  String path = "/";
-  String argsTrimmed = argsInput;
-  argsTrimmed.trim();
-  if (argsTrimmed.length() > 0) path = argsTrimmed;
+  String args = argsInput;
+  args.trim();
 
+  // `files stats [json] [path]` — storage usage JSON for the path's tier. Always
+  // JSON; the optional `json` token is accepted for symmetry and ignored.
+  if (args == "stats" || args.startsWith("stats ")) {
+    String rest = (args.length() > 5) ? args.substring(6) : String("");
+    rest.trim();
+    if (rest == "json")              rest = "";
+    else if (rest.startsWith("json ")) { rest = rest.substring(5); rest.trim(); }
+    String path = rest.length() ? rest : String("/");
+    static char statsBuf[160];
+    buildFilesStatsJson(path, statsBuf, sizeof(statsBuf));
+    return statsBuf;
+  }
+
+  // `files json [path]` — directory listing as JSON (companion app / BLE).
+  if (args == "json") return filesListingJsonForApp("/");
+  if (args.startsWith("json ")) {
+    String path = args.substring(5);
+    path.trim();
+    if (path.length() == 0) path = "/";
+    return filesListingJsonForApp(path);
+  }
+
+  // Legacy human-readable listing (serial console). Path may contain spaces.
+  String path = args.length() ? args : String("/");
   String out;
   bool ok = buildFilesListing(path, out, /*asJson=*/false, currentAuthContext());
   if (!ok) {
@@ -617,6 +747,160 @@ const char* cmd_filerename(const String& argsInput) {
   return getDebugBuffer();
 }
 
+// Chunked, permission-guarded file read for the companion app. The web browser
+// streams bytes over HTTP; BLE can't, so the app pulls a file in bounded windows
+// by looping on `offset` until `eof`. Returns a JSON envelope; binary / non-ASCII
+// content (or an explicit `b64` arg) is base64-encoded and flagged via `enc`.
+const char* cmd_fileread(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!filesystemReady) return "Error: LittleFS not ready";
+
+  static String s_readJson;
+  CommandArgs a(argsInput);
+  if (!a.hasMinArgs(1)) return "Usage: fileread <path> [offset] [len] [b64]";
+
+  String path = a.arg(0);
+  if (!path.startsWith("/")) path = "/" + path;
+  long offset = a.has(1) ? a.argInt(1, 0) : 0;
+  long reqLen = a.has(2) ? a.argInt(2, 0) : 0;
+  bool forceB64 = false;
+  for (int i = 3; i < a.count(); i++) if (a.arg(i) == "b64") forceB64 = true;
+
+  const size_t MAX_CHUNK = 4096;  // bound per-call memory + reply size
+  const AuthContext& ctx = currentAuthContext();
+
+  FsLockGuard _g("fileread");
+  File f = VFS::openGuarded(path, "r", ctx);
+  if (!f || f.isDirectory()) {
+    if (f) f.close();
+    s_readJson = "{\"success\":false,\"error\":\"Not found or access denied\"}";
+    return s_readJson.c_str();
+  }
+  size_t total = f.size();
+
+  if (offset < 0) offset = 0;
+  if ((size_t)offset > total) offset = (long)total;
+  size_t avail = total - (size_t)offset;
+  size_t want = (reqLen <= 0) ? MAX_CHUNK : (size_t)reqLen;
+  if (want > MAX_CHUNK) want = MAX_CHUNK;
+  if (want > avail)     want = avail;
+
+  uint8_t* buf = nullptr;
+  size_t got = 0;
+  if (want > 0) {
+    buf = (uint8_t*)ps_alloc(want, AllocPref::PreferPSRAM, "fileread.chunk");
+    if (!buf) {
+      f.close();
+      s_readJson = "{\"success\":false,\"error\":\"OOM\"}";
+      return s_readJson.c_str();
+    }
+    if (offset > 0) f.seek((uint32_t)offset);
+    got = f.read(buf, want);
+  }
+  f.close();
+
+  bool eof = ((size_t)offset + got >= total);
+  bool useB64 = forceB64 || (buf && bytesNeedBase64(buf, got));
+
+  s_readJson  = "{\"success\":true,\"path\":\"";
+  appendJsonStringBytes(s_readJson, (const uint8_t*)path.c_str(), path.length());
+  s_readJson += "\",\"size\":"; s_readJson += (unsigned long)total;
+  s_readJson += ",\"offset\":"; s_readJson += (unsigned long)offset;
+  s_readJson += ",\"len\":";    s_readJson += (unsigned long)got;
+  s_readJson += ",\"eof\":";    s_readJson += (eof ? "true" : "false");
+  if (useB64) {
+    s_readJson += ",\"enc\":\"b64\",\"data\":\"";
+    if (got) s_readJson += base64Encode(buf, got);
+    s_readJson += "\"}";
+  } else {
+    s_readJson += ",\"enc\":\"utf8\",\"data\":\"";
+    if (got) appendJsonStringBytes(s_readJson, buf, got);
+    s_readJson += "\"}";
+  }
+  if (buf) free(buf);
+  return s_readJson.c_str();
+}
+
+// Chunked, permission-guarded file write for the companion app. BLE inbound is
+// capped at one ~512-byte command per frame with no reassembly, so the app
+// uploads a file as a sequence of small base64 chunks: offset 0 truncates/creates,
+// later offsets must equal the current file size (strictly sequential append).
+// `final` runs the post-save hooks. Returns a JSON envelope.
+const char* cmd_filewrite(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!filesystemReady) return "Error: LittleFS not ready";
+
+  static char respBuf[192];
+  CommandArgs a(argsInput);
+  if (!a.hasMinArgs(3)) return "Usage: filewrite <path> <offset> <b64chunk> [final]";
+
+  String path = a.arg(0);
+  if (!path.startsWith("/")) path = "/" + path;
+  long offset = a.argInt(1, -1);
+  String b64 = a.arg(2);
+  bool isFinal = false;
+  for (int i = 3; i < a.count(); i++) if (a.arg(i) == "final") isFinal = true;
+
+  if (offset < 0) {
+    snprintf(respBuf, sizeof(respBuf), "{\"success\":false,\"error\":\"Bad offset\"}");
+    return respBuf;
+  }
+
+  const AuthContext& ctx = currentAuthContext();
+  // Keep the explicit "Admin required" response for admin-only branches, matching
+  // the web handler; openGuarded would also deny but with a vaguer message.
+  if (isAdminOnlyPath(path) && !isAdminUser(ctx.user)) {
+    snprintf(respBuf, sizeof(respBuf), "{\"success\":false,\"error\":\"Admin required\"}");
+    return respBuf;
+  }
+
+  String bytes = base64Decode(b64);
+  const size_t MAX_BLE_FILE = 256 * 1024;  // BLE is for config/text; large media via web
+  if ((size_t)offset + bytes.length() > MAX_BLE_FILE) {
+    snprintf(respBuf, sizeof(respBuf),
+             "{\"success\":false,\"error\":\"File too large for BLE (cap %u KB); use the web browser\"}",
+             (unsigned)(MAX_BLE_FILE / 1024));
+    return respBuf;
+  }
+
+  FsLockGuard _g("filewrite");
+  // offset 0 -> "w" (truncate/create); else "a" (append).
+  const char* mode = (offset == 0) ? "w" : "a";
+  File f = VFS::openGuarded(path, mode, ctx, /*create=*/true);
+  if (!f) {
+    snprintf(respBuf, sizeof(respBuf),
+             "{\"success\":false,\"error\":\"Writes to this path are not allowed\"}");
+    return respBuf;
+  }
+  // Sequential-integrity check: an append must land exactly at end-of-file. Report
+  // the real size so the app can resync after a dropped/duplicated chunk.
+  if (offset > 0 && (long)f.size() != offset) {
+    long have = (long)f.size();
+    f.close();
+    snprintf(respBuf, sizeof(respBuf),
+             "{\"success\":false,\"error\":\"Offset mismatch\",\"size\":%ld}", have);
+    return respBuf;
+  }
+
+  size_t toWrite = bytes.length();
+  size_t written = toWrite ? f.write((const uint8_t*)bytes.c_str(), toWrite) : 0;
+  f.flush();
+  long newSize = (long)f.size();
+  f.close();
+
+  if (written != toWrite) {
+    snprintf(respBuf, sizeof(respBuf),
+             "{\"success\":false,\"error\":\"Write failed (short write)\",\"size\":%ld}", newSize);
+    return respBuf;
+  }
+
+  if (isFinal) runFileWritePostSaveHooks(path);
+
+  snprintf(respBuf, sizeof(respBuf),
+           "{\"success\":true,\"size\":%ld,\"final\":%s}", newSize, isFinal ? "true" : "false");
+  return respBuf;
+}
+
 // filedelete is now a two-step interactive flow built on the CLIMode
 // framework's confirm mode. The flow:
 //   1. cmd_filedelete validates the path and captures the caller's
@@ -634,38 +918,39 @@ const char* cmd_filerename(const String& argsInput) {
 static String      s_pendingFiledeletePath;
 static AuthContext s_pendingFiledeleteCtx;  // captured by VALUE so it survives between commands
 
-static const char* filedelete_confirmed(void* /*userData*/) {
-  // Static response buffer -- the dispatcher copies the return string
-  // before this callback's frame is reclaimed, but using a static keeps
-  // the lifetime explicit and avoids a getDebugBuffer dependency here.
+// Perform the actual delete under `ctx`. Shared by the interactive confirm
+// callback and the one-shot `filedelete <path> confirm` path. Returns a static
+// buffer (the dispatcher copies it before the next command runs).
+static const char* doFiledelete(const String& path, const AuthContext& ctx) {
   static char respBuf[256];
 
   if (!filesystemReady) return "Error: LittleFS not ready";
 
-  // Re-check existence: the user had time to look at the prompt, and
-  // something else could have removed the file in the meantime (rare,
-  // but possible with concurrent SSE/MQTT writes).
-  if (!VFS::existsGuarded(s_pendingFiledeletePath, s_pendingFiledeleteCtx)) {
+  // Re-check existence: something else could have removed the file in the
+  // meantime (rare, but possible with concurrent SSE/MQTT writes; and the
+  // interactive flow gives the user time to look at the prompt).
+  if (!VFS::existsGuarded(path, ctx)) {
     return "Error: File no longer exists or access denied";
   }
 
   // If the file is the currently loaded map, unload it first to close the FD.
 #if ENABLE_MAPS
-  if (MapCore::hasValidMap() &&
-      s_pendingFiledeletePath == String(MapCore::getCurrentMap().filepath)) {
+  if (MapCore::hasValidMap() && path == String(MapCore::getCurrentMap().filepath)) {
     MapCore::unloadMap();
   }
 #endif
 
-  if (!VFS::removeGuarded(s_pendingFiledeletePath, s_pendingFiledeleteCtx)) {
+  if (!VFS::removeGuarded(path, ctx)) {
     snprintf(respBuf, sizeof(respBuf),
-             "Error: Failed to delete file (denied or fs error): %s",
-             s_pendingFiledeletePath.c_str());
+             "Error: Failed to delete file (denied or fs error): %s", path.c_str());
     return respBuf;
   }
-  snprintf(respBuf, sizeof(respBuf), "Deleted file: %s",
-           s_pendingFiledeletePath.c_str());
+  snprintf(respBuf, sizeof(respBuf), "Deleted file: %s", path.c_str());
   return respBuf;
+}
+
+static const char* filedelete_confirmed(void* /*userData*/) {
+  return doFiledelete(s_pendingFiledeletePath, s_pendingFiledeleteCtx);
 }
 
 static const char* filedelete_cancelled(void* /*userData*/) {
@@ -679,13 +964,35 @@ static const char* filedelete_cancelled(void* /*userData*/) {
 const char* cmd_filedelete(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!filesystemReady) return "Error: LittleFS not ready";
-  String path = argsInput;
-  path.trim();
-  if (path.length() == 0) return "Usage: filedelete <path>";
+  String args = argsInput;
+  args.trim();
+  if (args.length() == 0) return "Usage: filedelete <path> [confirm]";
+
+  // One-shot confirm token for programmatic clients (companion app / BLE):
+  // `filedelete <path> confirm` deletes immediately, skipping the interactive
+  // two-step yes/no gate that a stateful console session needs.
+  bool oneShot = false;
+  const char* confirmTokens[] = { "confirm", "--yes", "-y", "yes" };
+  for (const char* tok : confirmTokens) {
+    String suffix = String(" ") + tok;
+    if (args.endsWith(suffix)) {
+      args = args.substring(0, args.length() - suffix.length());
+      args.trim();
+      oneShot = true;
+      break;
+    }
+  }
+
+  String path = args;
+  if (path.length() == 0) return "Usage: filedelete <path> [confirm]";
   if (!path.startsWith("/")) { path = "/" + path; }
 
   const AuthContext& ctx = currentAuthContext();
   if (!VFS::existsGuarded(path, ctx)) return "Error: File does not exist or access denied";
+
+  if (oneShot) {
+    return doFiledelete(path, ctx);
+  }
 
   // Stash for the confirm callbacks. Capture the AuthContext BY VALUE
   // because currentAuthContext() returns a reference to per-task TLS
@@ -764,14 +1071,22 @@ static const char* cmd_logtier(const String& argsInput) {
 
 // Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry filesystemCommands[] = {
-  { "files", "List files [path]", true, cmd_files,
-    "files [path]        - List files in LittleFS (default '/')\n"
+  { "files", "List files [path] | files json [path] | files stats json [path]", true, cmd_files,
+    "files [path]            - List files in LittleFS (default '/')\n"
+    "files json [path]       - List as JSON (app/BLE): {success,dirPerms,files[]}\n"
+    "files stats json [path] - Storage usage JSON for the path's tier\n"
     "Example: files /logging_captures" },
   { "mkdir", "Create directory: <path>", true, cmd_mkdir, "Usage: mkdir <path>" },
   { "rmdir", "Remove directory: <path>", true, cmd_rmdir, "Usage: rmdir <path>" },
   { "filecreate", "Create file: <path> [content]", true, cmd_filecreate, "Usage: filecreate <path>" },
   { "fileview", "View file: <path> [offset]", true, cmd_fileview, "Usage: fileview <path>" },
-  { "filedelete", "Delete file: <path>", true, cmd_filedelete, "Usage: filedelete <path>" },
+  { "fileread", "Read file chunk as JSON: <path> [offset] [len] [b64]", true, cmd_fileread,
+    "fileread <path> [offset] [len] [b64] - Chunked permission-guarded read (app/BLE).\n"
+    "Returns {success,size,offset,len,eof,enc,data}; loop offset until eof." },
+  { "filewrite", "Write file chunk: <path> <offset> <b64chunk> [final]", true, cmd_filewrite,
+    "filewrite <path> <offset> <b64chunk> [final] - Sequential chunked write (app/BLE).\n"
+    "offset 0 truncates/creates; later offsets must equal current size; 'final' runs post-save hooks." },
+  { "filedelete", "Delete file: <path> [confirm]", true, cmd_filedelete, "Usage: filedelete <path> [confirm]" },
   { "filerename", "Rename file: <oldpath> <newname>", true, cmd_filerename, "Usage: filerename <oldpath> <newname>" },
   { "logtier", "Show current log storage tier (LittleFS vs SD overflow).", false, cmd_logtier,
     "logtier             - Report which tier logs are writing to and free space on each." },

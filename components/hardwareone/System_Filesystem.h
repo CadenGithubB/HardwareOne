@@ -27,6 +27,32 @@ extern bool filesystemReady;
  */
 bool buildFilesListing(const String& inPath, String& out, bool asJson, const AuthContext& ctx, bool hideAdminPaths = false);
 
+/**
+ * Build the storage-stats JSON ({total,used,free,usagePercent}) for the storage
+ * tier that owns `path` (SD vs internal LittleFS). Shared by the web
+ * /api/files/stats handler and the `files stats json` CLI command so both report
+ * identical numbers. Writes a NUL-terminated JSON object into `out`.
+ */
+void buildFilesStatsJson(const String& path, char* out, size_t outSize);
+
+/**
+ * Build the complete directory-listing JSON envelope
+ * ({success,dirPerms,files:[...]}) for `path` under `ctx`. Single source of truth
+ * for the web /api/files/list handler and the `files json` CLI/BLE command so the
+ * shape can't drift. Returns false (and an error envelope in `out`) if the
+ * directory can't be listed. Transport-specific concerns (HTTP 403, BLE static
+ * buffer, admin-only pre-checks) stay in the callers.
+ */
+bool buildFilesListJson(const String& path, const AuthContext& ctx, bool hideAdminPaths, String& out);
+
+/**
+ * Post-save hook shared by every file-write path (web write, web upload, BLE
+ * filewrite): keep /system/automations.json free of duplicate IDs and flag the
+ * scheduler to refresh. Safe to call for any path — no-ops unless it's
+ * automations.json.
+ */
+void runFileWritePostSaveHooks(const String& path);
+
 // Filesystem command registry (for system_utils.cpp)
 struct CommandEntry;  // Forward declaration
 
