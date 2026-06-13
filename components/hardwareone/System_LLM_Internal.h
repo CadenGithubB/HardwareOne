@@ -208,3 +208,7 @@ extern LLMRuntime gLLM;
 
 void* llmPsramAlloc(size_t size, const char* tag);
 void  llmPsramFree(void** ptr);
+
+// Set gLLM.errorMsg (printf-style). Does NOT change runState — callers that
+// also transition to ERROR keep doing that explicitly.
+void  setLlmError(const char* fmt, ...) __attribute__((format(printf, 1, 2)));

@@ -217,21 +217,21 @@ struct LoadContext {
 static bool parseModelHeader(File& f, LoadContext& ctx) {
   uint8_t hdr[64];
   if (f.read(hdr, 64) != 64) {
-    snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Failed to read LLM1 header");
+    setLlmError("Failed to read LLM1 header");
     return false;
   }
 
   uint32_t magic = ((uint32_t)hdr[0] << 24) | ((uint32_t)hdr[1] << 16) |
                    ((uint32_t)hdr[2] << 8) | (uint32_t)hdr[3];
   if (magic != LLM1_MAGIC) {
-    snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg),
+    setLlmError(
              "Not an LLM1 file (magic=0x%08lX, expected 0x4C4C4D31)", (unsigned long)magic);
     return false;
   }
 
   uint8_t version = hdr[4];
   if (version < 1 || version > 3) {
-    snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Unsupported LLM1 version: %u (supported: 1-3)", version);
+    setLlmError("Unsupported LLM1 version: %u (supported: 1-3)", version);
     return false;
   }
 
@@ -474,7 +474,7 @@ static bool computeMemoryLayout(LoadContext& ctx) {
   // coldSize has a fixed V component too
   size_t fixedCold = (size_t)V * sizeof(float);
   if (fixedBytes + fixedCold > budget) {
-    snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg),
+    setLlmError(
              "Weights too large for PSRAM: need %uKB, have %uKB (short %uKB)",
              (unsigned)((fixedBytes + fixedCold)/1024), (unsigned)(budget/1024),
              (unsigned)((fixedBytes + fixedCold - budget)/1024));
@@ -524,7 +524,7 @@ static bool computeMemoryLayout(LoadContext& ctx) {
 
   // Final sanity check (should not fail after auto-fit, but be safe)
   if (totalNeeded + LLM_PSRAM_RESERVE_BYTES > freePSRAM) {
-    snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg),
+    setLlmError(
              "Not enough PSRAM: need %uKB + %uKB reserve = %uKB, have %uKB (short %uKB)",
              (unsigned)(totalNeeded/1024), (unsigned)(LLM_PSRAM_RESERVE_BYTES/1024),
              (unsigned)((totalNeeded + LLM_PSRAM_RESERVE_BYTES)/1024),
@@ -798,7 +798,7 @@ static bool buildLayerTensors() {
 bool loadWeights(const char* path) {
   File f = VFS::openGuarded(path, "r", VFS::systemAuth("llm.load_weights"));
   if (!f) {
-    snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Cannot open model: %s", path);
+    setLlmError("Cannot open model: %s", path);
     return false;
   }
 
@@ -811,7 +811,7 @@ bool loadWeights(const char* path) {
 
   // ---- Read embedded tokenizer ----
   if (!loadTokenizerFromFile(f)) {
-    snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Failed to load embedded tokenizer");
+    setLlmError("Failed to load embedded tokenizer");
     f.close();
     return false;
   }
@@ -1053,12 +1053,12 @@ bool loadWeights(const char* path) {
   if (isMix || isQ8) {
     if (v3) readPrefix(f);  // skip prefix byte
     if (!readTensorQ8(f, w->emb_i8, w->emb_sc, V * D, gs)) {
-      snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Failed reading embedding tensor (Q8)");
+      setLlmError("Failed reading embedding tensor (Q8)");
       f.close(); return false;
     }
   } else {
     if (!readTensor(f, w->token_embedding_table, V * D, qt, gs, false)) {
-      snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Failed reading embedding tensor");
+      setLlmError("Failed reading embedding tensor");
       f.close(); return false;
     }
   }
@@ -1067,7 +1067,7 @@ bool loadWeights(const char* path) {
   if (isGPT2) {
     if (v3) readPrefix(f);
     if (!readTensor(f, w->pos_embedding_table, p->seq_len * D, qt, gs, true)) {
-      snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Failed reading positional embedding");
+      setLlmError("Failed reading positional embedding");
       f.close(); return false;
     }
     DEBUG_LLM_LOADF("[LLM] Positional embedding loaded (%d x %d)", p->seq_len, D);
@@ -1086,13 +1086,13 @@ bool loadWeights(const char* path) {
     // Norm tensors: always FP32, always indexed by global layer l
     if (v3) readPrefix(f);
     if (!readTensor(f, w->rms_att_weight + l*D, D, qt, gs, true)) {
-      snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Failed reading attn_norm layer %d", l);
+      setLlmError("Failed reading attn_norm layer %d", l);
       f.close(); return false;
     }
     if (hasNormBias) {
       if (v3) readPrefix(f);
       if (!readTensor(f, w->rms_att_bias + l*D, D, qt, gs, true)) {
-        snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Failed reading attn_norm_bias layer %d", l);
+        setLlmError("Failed reading attn_norm_bias layer %d", l);
         f.close(); return false;
       }
     }
@@ -1147,20 +1147,20 @@ bool loadWeights(const char* path) {
              && readTensor(f, w->wo+lD2,  D*D,      qt, gs, false);
     }
     if (!layerOk) {
-      snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Failed reading QKV/O layer %d", l);
+      setLlmError("Failed reading QKV/O layer %d", l);
       f.close(); return false;
     }
 
     // FFN norm (always FP32)
     if (v3) readPrefix(f);
     if (!readTensor(f, w->rms_ffn_weight + l*D, D, qt, gs, true)) {
-      snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Failed reading ffn_norm layer %d", l);
+      setLlmError("Failed reading ffn_norm layer %d", l);
       f.close(); return false;
     }
     if (hasNormBias) {
       if (v3) readPrefix(f);
       if (!readTensor(f, w->rms_ffn_bias + l*D, D, qt, gs, true)) {
-        snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Failed reading ffn_norm_bias layer %d", l);
+        setLlmError("Failed reading ffn_norm_bias layer %d", l);
         f.close(); return false;
       }
     }
@@ -1169,7 +1169,7 @@ bool loadWeights(const char* path) {
     if (isGPT2) {
       if (v3) readPrefix(f);
       if (!readTensor(f, w->w1 + l, 1, qt, gs, true)) {
-        snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Failed reading GPT-2 gate layer %d", l);
+        setLlmError("Failed reading GPT-2 gate layer %d", l);
         f.close(); return false;
       }
     } else if (isQ4Layer) {
@@ -1177,7 +1177,7 @@ bool loadWeights(const char* path) {
       off.w1_data = q4_data_cursor;  off.w1_sc = q4_sc_cursor;
       if (v3) readPrefix(f);
       if (!readTensorQ4(f, w->q4_data + q4_data_cursor, w->q4_scales + q4_sc_cursor, H*D, gs)) {
-        snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Failed reading gate(Q4) layer %d", l);
+        setLlmError("Failed reading gate(Q4) layer %d", l);
         f.close(); return false;
       }
       q4_data_cursor += ((size_t)H * D + 1) / 2;  q4_sc_cursor += scaleCount((size_t)H * D, gs);
@@ -1186,13 +1186,13 @@ bool loadWeights(const char* path) {
       size_t q8scDH = (size_t)q8_li * scaleCount((size_t)H * D, gs);
       if (v3) readPrefix(f);
       if (!readTensorQ8(f, w->w1_i8+q8lDH, w->w1_sc+q8scDH, H*D, gs)) {
-        snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Failed reading gate(Q8) layer %d", l);
+        setLlmError("Failed reading gate(Q8) layer %d", l);
         f.close(); return false;
       }
     } else {
       size_t lDH = (size_t)l * (size_t)D * H;
       if (!readTensor(f, w->w1+lDH, H*D, qt, gs, false)) {
-        snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Failed reading gate layer %d", l);
+        setLlmError("Failed reading gate layer %d", l);
         f.close(); return false;
       }
     }
@@ -1203,7 +1203,7 @@ bool loadWeights(const char* path) {
       off.w3_data = q4_data_cursor;  off.w3_sc = q4_sc_cursor;
       if (v3) readPrefix(f);
       if (!readTensorQ4(f, w->q4_data + q4_data_cursor, w->q4_scales + q4_sc_cursor, H*D, gs)) {
-        snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Failed reading up(Q4) layer %d", l);
+        setLlmError("Failed reading up(Q4) layer %d", l);
         f.close(); return false;
       }
       q4_data_cursor += ((size_t)H * D + 1) / 2;  q4_sc_cursor += scaleCount((size_t)H * D, gs);
@@ -1211,7 +1211,7 @@ bool loadWeights(const char* path) {
       off.w2_data = q4_data_cursor;  off.w2_sc = q4_sc_cursor;
       if (v3) readPrefix(f);
       if (!readTensorQ4(f, w->q4_data + q4_data_cursor, w->q4_scales + q4_sc_cursor, D*H, gs)) {
-        snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Failed reading down(Q4) layer %d", l);
+        setLlmError("Failed reading down(Q4) layer %d", l);
         f.close(); return false;
       }
       q4_data_cursor += ((size_t)D * H + 1) / 2;  q4_sc_cursor += scaleCount((size_t)D * H, gs);
@@ -1220,19 +1220,19 @@ bool loadWeights(const char* path) {
       size_t q8scDH = (size_t)q8_li * scaleCount((size_t)D * H, gs);
       if (v3) readPrefix(f);
       if (!readTensorQ8(f, w->w3_i8+q8lDH, w->w3_sc+q8scDH, H*D, gs)) {
-        snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Failed reading up(Q8) layer %d", l);
+        setLlmError("Failed reading up(Q8) layer %d", l);
         f.close(); return false;
       }
       if (v3) readPrefix(f);
       if (!readTensorQ8(f, w->w2_i8+q8lDH, w->w2_sc+q8scDH, D*H, gs)) {
-        snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Failed reading down(Q8) layer %d", l);
+        setLlmError("Failed reading down(Q8) layer %d", l);
         f.close(); return false;
       }
     } else {
       size_t lDH = (size_t)l * (size_t)D * H;
       if (!readTensor(f, w->w3+lDH, H*D, qt, gs, false)
        || !readTensor(f, w->w2+lDH, D*H, qt, gs, false)) {
-        snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Failed reading FFN layer %d", l);
+        setLlmError("Failed reading FFN layer %d", l);
         f.close(); return false;
       }
     }
@@ -1251,13 +1251,13 @@ bool loadWeights(const char* path) {
   // 3. Final norm (always FP32)
   if (v3) readPrefix(f);
   if (!readTensor(f, w->rms_final_weight, D, qt, gs, true)) {
-    snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Failed reading final norm");
+    setLlmError("Failed reading final norm");
     f.close(); return false;
   }
   if (hasNormBias) {
     if (v3) readPrefix(f);
     if (!readTensor(f, w->rms_final_bias, D, qt, gs, true)) {
-      snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Failed reading final norm bias");
+      setLlmError("Failed reading final norm bias");
       f.close(); return false;
     }
   }
@@ -1275,19 +1275,19 @@ bool loadWeights(const char* path) {
     }
   } else {
     if (shared_weights) {
-      snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Tied flag mismatch");
+      setLlmError("Tied flag mismatch");
       f.close(); return false;
     }
     // LM head is always Q8 (never Q4), even in mixed mode
     if (isQ8 || isMix) {
       if (v3) readPrefix(f);
       if (!readTensorQ8(f, w->wcls_i8, w->wcls_sc, V * D, gs)) {
-        snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Failed reading LM head (Q8)");
+        setLlmError("Failed reading LM head (Q8)");
         f.close(); return false;
       }
     } else {
       if (!readTensor(f, w->wcls, V * D, qt, gs, false)) {
-        snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Failed reading LM head");
+        setLlmError("Failed reading LM head");
         f.close(); return false;
       }
     }

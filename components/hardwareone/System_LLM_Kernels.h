@@ -25,6 +25,9 @@ void layernorm(float* o, const float* x, const float* weight, const float* bias,
 // In-place softmax over the first `size` elements.
 void softmax(float* x, int size);
 
+// In-place vector add: dst[i] += src[i]. A natural spot for SIMD (dsps) later.
+void vecAddInPlace(float* dst, const float* src, int n);
+
 // Quant-aware matrix-vector dispatch: w(d,n) @ x(n,) -> xout(d,).
 // Exactly one weight representation is non-null and selects the path:
 //   fp  -> FP32        i8/sc -> INT8 (per-group scales)   q4/q4_sc -> INT4 packed
