@@ -457,6 +457,9 @@ static bool computeMemoryLayout(LoadContext& ctx) {
   // rope_cos[D/2] + rope_sin[D/2] = D floats, rope_inv[head_size].
   int headSize = (p->n_heads > 0) ? D / p->n_heads : D;
   ctx.hotSize = (4 * D + 2 * H) * sizeof(float) + ((size_t)D + headSize) * sizeof(float);
+  // Non-FP32 KV needs hot scratch: k_tmp[kv_dim] + v_tmp[kv_dim] + kv_deq[headSize].
+  if (gLLM.kvPrecision != KV_FP32)
+    ctx.hotSize += ((size_t)2 * kv_dim + headSize) * sizeof(float);
   fixedBytes += ctx.hotSize;
 
   size_t freePSRAM = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
@@ -483,7 +486,7 @@ static bool computeMemoryLayout(LoadContext& ctx) {
 
   // Auto-fit: reduce context until total fits in PSRAM
   // Per-context-slot cost: KV cache + attention scores
-  size_t perCtxSlot = 2 * L * kv_dim * sizeof(float)   // KV cache per position
+  size_t perCtxSlot = llmKvCacheBytes(gLLM.kvPrecision, L, 1, kv_dim, p->n_kv_heads)  // KV per position
                     + p->n_heads * sizeof(float);        // attention scores per position
   size_t remaining = budget - fixedBytes - fixedCold;
   int maxFitCtx = (int)(remaining / perCtxSlot);
@@ -500,7 +503,7 @@ static bool computeMemoryLayout(LoadContext& ctx) {
     DEBUG_LLM_MEMORYF("[LLM] Context: model seq_len=%d -> runtime ctx=%d", p->seq_len, seq_ctx);
   }
 
-  ctx.kvCacheSize = 2 * L * seq_ctx * kv_dim * sizeof(float);
+  ctx.kvCacheSize = llmKvCacheBytes(gLLM.kvPrecision, L, seq_ctx, kv_dim, p->n_kv_heads);
   ctx.coldSize = (p->n_heads * seq_ctx + V) * sizeof(float);
   size_t totalNeeded = fixedBytes + ctx.kvCacheSize + ctx.coldSize;
 
@@ -605,11 +608,96 @@ static void spotCheckWeights(const LoadContext& ctx) {
   DEBUG_LLM_LOADF("[LLM] ═══ Compare SPOT values above with converter PACK_SUMMARY ═══");
 }
 
+// Re-derive every RunState pointer from the two surviving base blocks
+// (stateHotData = internal-RAM hot scratch, stateData = PSRAM KV/logits) using
+// only gLLM.config + gLLM.seq_ctx. Idempotent: the loader calls it to bind
+// pointers after allocation, and forward()'s corruption guard calls it again to
+// recover a zeroed RunState pointer without a full reload. Returns false only if
+// a base block is gone or the config is unusable (then a reload is the only fix).
+bool llmBindRunState() {
+  if (!gLLM.stateHotData || !gLLM.stateData) return false;
+  const LLMConfig* p = &gLLM.config;
+  const int D = p->dim, H = p->hidden_dim, L = p->n_layers, V = p->vocab_size;
+  const int n_heads = p->n_heads;
+  const int seq_ctx = gLLM.seq_ctx;
+  if (D <= 0 || H <= 0 || L <= 0 || V <= 0 || n_heads <= 0 || p->n_kv_heads <= 0 || seq_ctx <= 0)
+    return false;
+  const int kv_dim   = (p->dim * p->n_kv_heads) / p->n_heads;
+  const int headSize = D / n_heads;
+
+  RunState* s = &gLLM.state;
+  float* hp = gLLM.stateHotData;
+  s->x   = hp;  hp += D;
+  s->xb  = hp;  hp += D;
+  s->xb2 = hp;  hp += D;
+  s->q   = hp;  hp += D;
+  s->hb  = hp;  hp += H;
+  s->hb2 = hp;  hp += H;
+
+  // RoPE scratch, carved from the same internal-RAM hot block.
+  s->rope_cos = hp;  hp += D / 2;
+  s->rope_sin = hp;  hp += D / 2;
+  s->rope_inv = hp;  hp += headSize;
+  // Precompute inverse frequencies once (constant across tokens and layers).
+  for (int hd = 0; hd < headSize; hd++) {
+    s->rope_inv[hd] = 1.0f / powf(10000.0f, (float)hd / (float)headSize);
+  }
+
+  // Non-FP32 KV scratch (hot block): linear() emits FP32 into k_tmp/v_tmp before
+  // packing, kv_deq dequantizes a head-slice on read. Only carved when needed, so
+  // FP32 mode keeps its exact prior DRAM footprint (these stay null there).
+  if (gLLM.kvPrecision != KV_FP32) {
+    s->k_tmp  = hp;  hp += kv_dim;
+    s->v_tmp  = hp;  hp += kv_dim;
+    s->kv_deq = hp;  hp += headSize;
+  } else {
+    s->k_tmp = s->v_tmp = s->kv_deq = nullptr;
+  }
+
+  // Cold block (PSRAM): KV cache (precision-dependent) followed by att + logits
+  // (always FP32). FP16 KV is 4*kvCount bytes; INT8 KV is int8 data (aligned up
+  // to 4) + FP32 per-head scales — both keep att 4-byte aligned. Layout here must
+  // match llmKvCacheBytes() exactly.
+  const size_t kvCount = (size_t)L * seq_ctx * kv_dim;
+  // Clear every alternate pointer; the active branch fills only its own set.
+  s->key_cache = nullptr;     s->value_cache = nullptr;
+  s->key_cache_f16 = nullptr; s->value_cache_f16 = nullptr;
+  s->key_cache_q8 = nullptr;  s->value_cache_q8 = nullptr;
+  s->key_scales = nullptr;    s->value_scales = nullptr;
+  if (gLLM.kvPrecision == KV_FP16) {
+    uint16_t* kp = (uint16_t*)gLLM.stateData;
+    s->key_cache_f16   = kp;  kp += kvCount;
+    s->value_cache_f16 = kp;  kp += kvCount;
+    float* cp = (float*)kp;
+    s->att    = cp;  cp += n_heads * seq_ctx;
+    s->logits = cp;  cp += V;
+  } else if (gLLM.kvPrecision == KV_INT8) {
+    const int nkv = p->n_kv_heads;
+    int8_t* bp = (int8_t*)gLLM.stateData;
+    s->key_cache_q8   = bp;  bp += kvCount;
+    s->value_cache_q8 = bp;  bp += kvCount;
+    uintptr_t a = ((uintptr_t)bp + 3u) & ~(uintptr_t)3u;  // align to FP32 scales
+    float* cp = (float*)a;
+    const size_t scaleCount = (size_t)L * seq_ctx * (size_t)nkv;
+    s->key_scales   = cp;  cp += scaleCount;
+    s->value_scales = cp;  cp += scaleCount;
+    s->att    = cp;  cp += n_heads * seq_ctx;
+    s->logits = cp;  cp += V;
+  } else {
+    float* cp = gLLM.stateData;
+    s->key_cache   = cp;  cp += kvCount;
+    s->value_cache = cp;  cp += kvCount;
+    s->att    = cp;  cp += n_heads * seq_ctx;
+    s->logits = cp;  cp += V;
+  }
+  return true;
+}
+
 // Allocate hot (internal RAM) and cold (PSRAM) activation buffers.
 // ctx is non-const: fragmentation recovery may reduce kvCacheSize/coldSize.
 static bool allocateRunState(LoadContext& ctx) {
   const LLMConfig* p = &gLLM.config;
-  const int D = ctx.D, H = ctx.H, L = ctx.L, V = ctx.V;
+  const int L = ctx.L, V = ctx.V;   // D/H/seq_ctx now bound inside llmBindRunState()
   const int kv_dim = ctx.kv_dim;
   int seq_ctx = gLLM.seq_ctx;
 
@@ -641,7 +729,7 @@ static bool allocateRunState(LoadContext& ctx) {
       gLLM.stateHotData = nullptr;
       return false;
     }
-    size_t perCtxSlot = 2 * L * kv_dim * sizeof(float) + p->n_heads * sizeof(float);
+    size_t perCtxSlot = llmKvCacheBytes(gLLM.kvPrecision, L, 1, kv_dim, p->n_kv_heads) + p->n_heads * sizeof(float);
     int newCtx = (int)((largestBlock - fixedCold) / perCtxSlot);
     if (newCtx < 1) newCtx = 1;
     if (newCtx >= seq_ctx) newCtx = seq_ctx - 1;  // must shrink at least 1
@@ -653,7 +741,7 @@ static bool allocateRunState(LoadContext& ctx) {
     DEBUG_LLM_MEMORYF("[LLM] Fragmentation recovery: ctx %d -> %d", seq_ctx, newCtx);
     seq_ctx = newCtx;
     gLLM.seq_ctx = seq_ctx;
-    ctx.kvCacheSize = 2 * L * seq_ctx * kv_dim * sizeof(float);
+    ctx.kvCacheSize = llmKvCacheBytes(gLLM.kvPrecision, L, seq_ctx, kv_dim, p->n_kv_heads);
     ctx.coldSize = (p->n_heads * seq_ctx + V) * sizeof(float);
     coldStateBytes = ctx.kvCacheSize + ctx.coldSize;
     gLLM.stateData = (float*)llmPsramAlloc(coldStateBytes, "llm.state.cold.retry");
@@ -666,30 +754,9 @@ static bool allocateRunState(LoadContext& ctx) {
   }
   gLLM.stateSize = coldStateBytes;
 
-  RunState* s = &gLLM.state;
-  float* hp = gLLM.stateHotData;
-  s->x   = hp;  hp += D;
-  s->xb  = hp;  hp += D;
-  s->xb2 = hp;  hp += D;
-  s->q   = hp;  hp += D;
-  s->hb  = hp;  hp += H;
-  s->hb2 = hp;  hp += H;
-
-  // RoPE scratch, carved from the same internal-RAM hot block.
-  int headSize = (p->n_heads > 0) ? D / p->n_heads : D;
-  s->rope_cos = hp;  hp += D / 2;
-  s->rope_sin = hp;  hp += D / 2;
-  s->rope_inv = hp;  hp += headSize;
-  // Precompute inverse frequencies once (constant across tokens and layers).
-  for (int hd = 0; hd < headSize; hd++) {
-    s->rope_inv[hd] = 1.0f / powf(10000.0f, (float)hd / (float)headSize);
-  }
-
-  float* cp = gLLM.stateData;
-  s->key_cache   = cp;  cp += L * seq_ctx * kv_dim;
-  s->value_cache = cp;  cp += L * seq_ctx * kv_dim;
-  s->att    = cp;  cp += p->n_heads * seq_ctx;
-  s->logits = cp;  cp += V;
+  // Bind RunState pointers into the freshly allocated base blocks. Shared with
+  // the corruption-recovery path (llmBindRunState is the single source of truth).
+  if (!llmBindRunState()) return false;
 
   // Pre-allocate repetition penalty ring buffer (reused per generation call)
   int repSize = LLM_DEFAULT_REP_WINDOW;

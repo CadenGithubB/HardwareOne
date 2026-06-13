@@ -243,6 +243,7 @@ void chatResolveParams(const ChatParamOverride& o, LLMGenParams* out) {
   out->maxTokens    = (o.maxTokens     != INT32_MIN) ? o.maxTokens     : gSettings.llmMaxTokens;
   out->temperature  = !isnan(o.temperature)          ? o.temperature   : gSettings.llmTemperature;
   out->topp         = !isnan(o.topp)                 ? o.topp          : gSettings.llmTopP;
+  out->minP         = gSettings.llmMinP;  // min-p: persisted setting (0 = off → use top-p); no per-request override yet
   out->useMirostat2 = (o.useMirostat2  >= 0)         ? (o.useMirostat2 != 0) : (bool)gSettings.llmUseMirostat2;
   out->mirostatTau  = !isnan(o.mirostatTau)          ? o.mirostatTau   : gSettings.llmMirostatTau;
   out->mirostatEta  = !isnan(o.mirostatEta)          ? o.mirostatEta   : gSettings.llmMirostatEta;
@@ -259,6 +260,8 @@ void chatResolveParams(const ChatParamOverride& o, LLMGenParams* out) {
   if (out->temperature  > 2.0f)  out->temperature  = 2.0f;
   if (out->topp         < 0.01f) out->topp         = 0.01f;
   if (out->topp         > 1.0f)  out->topp         = 1.0f;
+  if (out->minP         < 0.0f)  out->minP         = 0.0f;
+  if (out->minP         > 1.0f)  out->minP         = 1.0f;
   if (out->mirostatTau  < 0.5f)  out->mirostatTau  = 0.5f;
   if (out->mirostatTau  > 20.0f) out->mirostatTau  = 20.0f;
   if (out->mirostatEta  < 0.01f) out->mirostatEta  = 0.01f;

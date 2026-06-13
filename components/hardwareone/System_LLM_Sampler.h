@@ -9,7 +9,11 @@
 
 // Categorical / top-p (nucleus) sampling. Returns the chosen token id.
 // `logits` is modified in place. temperature==0 → greedy argmax.
-int sample(float* logits, int vocab_size, float temperature, float topp);
+// If outChosenProb != nullptr, it receives the post-softmax probability of the
+// chosen token (Phase 2 confidence signal), or -1.0f when no signal is available
+// (temperature==0 greedy path computes no softmax).
+int sample(float* logits, int vocab_size, float temperature, float topp, float minp,
+           float* outChosenProb = nullptr);
 
 // Mirostat v2 adaptive-surprise sampling. `mu` is persistent state across the
 // tokens of one generation (init to 2*tau). `logits` modified in place.

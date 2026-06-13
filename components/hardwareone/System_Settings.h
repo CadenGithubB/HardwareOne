@@ -375,6 +375,8 @@ struct Settings {
 #if ENABLE_ONDEVICE_LLM
       ,llmTemperature(0.5f)
       ,llmTopP(0.8f)
+      ,llmMinP(0.0f)
+      ,llmKvPrecision(0)
       ,llmMaxTokens(256)
       ,llmSentenceLimit(2)
       ,llmHardCap(80)
@@ -945,6 +947,8 @@ struct Settings {
   // On-device LLM generation defaults (System_LLM)
   float llmTemperature;         // Sampling temperature (default: 0.5)
   float llmTopP;                // Nucleus sampling threshold (default: 0.8)
+  float llmMinP;                // Min-p relative floor (0 = off; typical 0.05-0.1). When >0, replaces top-p.
+  int llmKvPrecision;           // KV cache precision: 0=FP32, 1=FP16 (half PSRAM, ~no quality loss). Applied at model load.
   int llmMaxTokens;             // Max tokens per generation (default: 256)
   int llmSentenceLimit;         // Stop after N sentences, 0=disabled (default: 2)
   int llmHardCap;               // Hard token cap, 0=disabled (default: 80)
