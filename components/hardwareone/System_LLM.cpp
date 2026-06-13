@@ -862,6 +862,20 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
   // Work on a mutable copy for normalization
   char* norm_prompt = strdup(prompt);
   if (norm_prompt) {
+    // BLE intake (Bluetooth.cpp processBleCommandLine) normalizes \r\n\t → space,
+    // so the app's "Q: ...\nA:" / "Q: ...\nDo:" framing arrives as "Q: ... A:" /
+    // "Q: ... Do:". Restore the trailing newline the model was trained on, so the
+    // tokenizer emits the A:(4)/Do:(5) special token as the last prompt token and
+    // the Do:-mode + "\nA:"-based filler logic below behave identically to the web
+    // path. No-op for web/serial, which already deliver a real newline.
+    {
+      size_t npLen = strlen(norm_prompt);
+      if (npLen >= 4 && strcmp(norm_prompt + npLen - 4, " Do:") == 0) {
+        norm_prompt[npLen - 4] = '\n';
+      } else if (npLen >= 3 && strcmp(norm_prompt + npLen - 3, " A:") == 0) {
+        norm_prompt[npLen - 3] = '\n';
+      }
+    }
     // Find the question body: after "Q: " (or "Q:" ) and before "\nA:"
     // Filler detection (log-only — no stripping). Stripping was removed because
     // it starved the KV cache of semantic context, causing topic drift in later

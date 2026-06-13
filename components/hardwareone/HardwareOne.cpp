@@ -1303,7 +1303,13 @@ void hardwareone_setup() {
         while (1) delay(1000);
       }
     const uint32_t cmdExecStackWords = CMD_EXEC_STACK_WORDS;  // words (≈24 KB) - automation run + debug vsnprintf frames need deep stack
-    if (xTaskCreateLogged(commandExecTask, "cmd_exec_task", cmdExecStackWords, nullptr, TASK_PRIORITY_LOW, &gCmdExecTaskHandle, "cmd.exec") != pdPASS) {
+    // Pin to core 0 (PRO_CPU), alongside the BLE host (BTC_TASK) and web server.
+    // The on-device LLM task (llm_gen) is pinned to core 1 at a higher priority; if
+    // cmd_exec is left unpinned it can sit on core 1 and be preempted by a 15 s
+    // generation, so BLE/serial command replies (e.g. the llmgenerate {session})
+    // arrive seconds late and IDLE1 starves → task-WDT. Keeping command I/O on core 0
+    // gives the BLE path the same isolation the web path already enjoys.
+    if (xTaskCreateLogged(commandExecTask, "cmd_exec_task", cmdExecStackWords, nullptr, TASK_PRIORITY_LOW, &gCmdExecTaskHandle, "cmd.exec", 0) != pdPASS) {
       ERROR_SYSTEMF("FATAL: Failed to create command exec task");
       while (1) delay(1000);
     }
