@@ -25,13 +25,17 @@ When switching between **ESP32** and **ESP32-S3** (different architectures), you
 idf.py fullclean
 
 # 2. Set the target chip
-idf.py set-target esp32      # For ESP32-based boards (QT Py, Feather)
-idf.py set-target esp32s3    # For ESP32-S3 boards (XIAO S3, XIAO S3 Plus)
+idf.py set-target esp32      # For ESP32-based boards (QT Py, Feather V2)
+idf.py set-target esp32s3    # For ESP32-S3 boards (XIAO S3, FeatherS3)
 
-# 3. If your board variant differs from the default, update it
-idf.py menuconfig
-# → Component config → Arduino → Board
+# 3. Pick the board with HW_BOARD (defaults: esp32→qtpy_esp32, esp32s3→feathers3)
+HW_BOARD=feather_esp32_v2 idf.py build
 ```
+
+The `HW_BOARD` env var (see the section below) is the canonical way to select
+a board on **both** chip families — it layers the right variant, PSRAM mode/CS,
+and flash size for you. `menuconfig → Component config → Arduino → Board` still
+works for one-off overrides but is reverted by the next `fullclean`.
 
 ---
 
@@ -42,17 +46,28 @@ but they differ in pin map AND **PSRAM mode** (XIAO=Octal, FeatherS3=Quad), so
 swapping just the `CONFIG_ARDUINO_VARIANT` isn't enough — the bootloader gets
 baked with the PSRAM mode and has to be rebuilt.
 
-To make this painless, the project has one file per board under `boards/`:
+To make this painless, the project has one file per board under `boards/`. The
+`HW_BOARD` mechanism is **not** S3-only — every supported board (both chip
+families) has a file here:
 
 ```
-boards/xiao_s3.defaults     # CONFIG_ARDUINO_VARIANT="XIAO_ESP32S3"  +  PSRAM Octal
-boards/feathers3.defaults   # CONFIG_ARDUINO_VARIANT="um_feathers3"  +  PSRAM Quad
+boards/feathers3.defaults         # esp32s3  — um_feathers3       + PSRAM Quad,  16 MB
+boards/xiao_s3.defaults           # esp32s3  — XIAO_ESP32S3       + PSRAM Octal,  8 MB
+boards/qtpy_esp32.defaults        # esp32    — adafruit_qtpy_esp32      + PSRAM Quad, 8 MB
+boards/feather_esp32_v2.defaults  # esp32    — adafruit_feather_esp32_v2 + PSRAM Quad, 8 MB
 ```
 
 `CMakeLists.txt` reads the `HW_BOARD` env var at configure time and layers the
-matching board file on top of `sdkconfig.defaults.esp32s3` (which holds only
-the settings common to all S3 boards). When `HW_BOARD` is unset, it defaults
-to `xiao_s3` so existing builds keep working unchanged.
+matching board file on top of the chip-family defaults (`sdkconfig.defaults.<target>`,
+which holds only the settings common to all boards of that chip). Each board
+file carries a `# HW_TARGET: <chip>` marker; the build **validates** it against
+the active target and fails with a `set-target` hint on mismatch — so you can't
+accidentally bake an S3 PSRAM mode onto an ESP32 image.
+
+When `HW_BOARD` is unset, it defaults per target: `feathers3` for esp32s3,
+`qtpy_esp32` for esp32 — so existing builds keep working unchanged. `HW_BOARD`
+only *layers* board settings; it does not switch chips, so set the target with
+`idf.py set-target` first.
 
 ### Switching boards
 
@@ -74,19 +89,22 @@ HW_BOARD=feathers3 idf.py reconfigure 2>&1 | grep HW_BOARD
 in the bootloader, not just the app — without it you get a board that boots but
 reports 0 KB PSRAM.
 
-### Adding a new ESP32-S3 board
+### Adding a new board
 
 1. Add a new `#elif defined(ARDUINO_<NAME>_DEV)` block to
    `components/hardwareone/System_BuildConfig.h` (pin map + features).
 2. Drop a `boards/<short_name>.defaults` containing **only** the lines that
-   differ from `sdkconfig.defaults.esp32s3` (typically `CONFIG_ARDUINO_VARIANT`
-   and `CONFIG_SPIRAM_MODE_*`).
-3. Build with `HW_BOARD=<short_name>`.
+   differ from the chip-family default (`sdkconfig.defaults.<target>`) —
+   typically `CONFIG_ARDUINO_VARIANT`, `CONFIG_SPIRAM_MODE_*`, the flash size,
+   and (on ESP32 PICO parts) `CONFIG_PICO_PSRAM_CS_IO`. Start the file with a
+   `# HW_TARGET: <chip>` marker so the build can validate it against the target.
+3. Build with `HW_BOARD=<short_name>` (after `idf.py set-target <chip>`).
 
-> ESP32 boards (QT Py, Feather V2) currently still set `CONFIG_ARDUINO_VARIANT`
-> directly in `sdkconfig.defaults.esp32` — they haven't been migrated to the
-> `boards/` pattern yet. The `HW_BOARD` hook automatically no-ops when the
-> target is ESP32 so the old flow keeps working untouched.
+> **Original Adafruit Feather ESP32 (HUZZAH32) is not supported.** It has 4 MB
+> flash and no PSRAM; this firmware's factory app partition alone is ~4.83 MB
+> (and there is no `partitions_*_4mb.csv`), so it cannot be flashed at the
+> current feature set. Its pin map still exists in `System_BuildConfig.h` for
+> reference, but there is intentionally no `boards/feather_esp32.defaults`.
 
 ### Alternative: menuconfig (one-off changes)
 

@@ -1,0 +1,28 @@
+# Board overrides — Adafruit QT Py ESP32 (ESP32 PICO-V3-02)
+#
+# This file is layered on top of sdkconfig.defaults + sdkconfig.defaults.esp32
+# by the HW_BOARD selection logic in CMakeLists.txt. It contains ONLY the
+# settings that distinguish this board from other ESP32 boards.
+#
+# Activated by: HW_BOARD=qtpy_esp32  (the default board for target esp32).
+# Chip: ESP32 (classic) — run `idf.py set-target esp32` first; the build will
+# refuse to layer this file onto a non-esp32 target.
+
+# HW_TARGET: esp32
+
+# Arduino variant — picks the BSP pins_arduino.h and the ARDUINO_<NAME>_DEV
+# macro that System_BuildConfig.h's #elif chain matches on for pin mapping.
+CONFIG_ARDUINO_VARIANT="adafruit_qtpy_esp32"
+
+# PSRAM mode — the ESP32 PICO-V3-02 carries 2 MB Quad PSRAM.
+# Wrong mode boots fine but reports 0 KB PSRAM (silent failure — LLM,
+# big web responses, ESP-NOW buffers will OOM at runtime).
+CONFIG_SPIRAM_MODE_QUAD=y
+
+# PSRAM chip-select GPIO for the in-package PICO PSRAM (ESP32-PICO-D4/V3).
+CONFIG_PICO_PSRAM_CS_IO=10
+
+# Flash size — QT Py ESP32 Pico has 8 MB. The partition picker in
+# CMakeLists.txt sees this flag and selects partitions_*_8mb.csv.
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
