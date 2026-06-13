@@ -49,7 +49,10 @@
 
 // Inference task
 #define LLM_TASK_STACK_SIZE       (16 * 1024)
-#define LLM_TASK_PRIORITY         3
+// Priority 2: still outranks loopTask/cmd_exec (prio 1) so generation makes
+// progress, but the per-token and in-matmul vTaskDelay yields hand those tasks
+// windows to answer BLE/serial polls promptly (see in-forward yields).
+#define LLM_TASK_PRIORITY         2
 
 // ============================================================================
 // Model Binary Format (LLM1 — esp32-llm-converter)

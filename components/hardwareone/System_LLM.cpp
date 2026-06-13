@@ -52,6 +52,11 @@
 #if ENABLE_ONDEVICE_LLM
 
 #include "System_LLM.h"
+#include "System_LLM_Internal.h"  // private engine types + gLLM runtime singleton
+#include "System_LLM_Kernels.h"   // rmsnorm/layernorm/softmax/wmatmul/scaleCount
+#include "System_LLM_Sampler.h"   // sample / sample_mirostat2
+#include "System_LLM_Tokenizer.h" // encode / decode / loadTokenizerFromFile / freeTokenizer
+#include "System_LLM_Model.h"     // loadWeights
 #include "System_Command.h"
 #include "System_Debug.h"
 #include "System_MemUtil.h"
@@ -101,184 +106,37 @@
 static constexpr float GELU_COEFF_A = 0.7978845608f;  // sqrt(2/pi)
 static constexpr float GELU_COEFF_B = 0.044715f;
 
-// Logit clamp bounds — prevents ±Inf from INT8 accumulation errors
-static constexpr float LOGIT_CLAMP_MAX =  50.0f;
-static constexpr float LOGIT_CLAMP_MIN = -50.0f;
+// (LOGIT_CLAMP_MAX/MIN moved to System_LLM_Sampler.cpp with the sampler.)
 
-// File I/O chunk size for reading tensors from flash
-static constexpr size_t READ_CHUNK_SIZE = 4096;
+// (READ_CHUNK_SIZE moved to System_LLM_Model.cpp with the loader.)
 
 // EOS token IDs by architecture
 static constexpr int EOS_TOKEN_LLAMA = 2;   // Llama/SentencePiece
 static constexpr int EOS_TOKEN_GPT2  = 0;   // GPT-2 (<|endoftext|>)
 
 // Generation loop intervals
-static constexpr int YIELD_INTERVAL      = 4;   // vTaskDelay every N generated tokens
+// YIELD_INTERVAL = 1: yield once per generated token. The task runs at
+// priority 3 pinned to core 1, where it outranks the Arduino loop and the
+// (priority-1) command task that services BLE/serial. With weights in PSRAM a
+// token takes ~1 s, so yielding every 4th token left ~4-5 s between yields —
+// right at the 5 s task-WDT limit (IDLE1 starved → WDT on llm_gen), and it
+// blocked command replies for the whole generation (the app saw "no response"
+// while streaming). Yielding every token keeps core 1 cooperative.
+static constexpr int YIELD_INTERVAL      = 1;   // vTaskDelay every N generated tokens
 static constexpr int HEALTH_LOG_INTERVAL = 16;   // log generation health every N tokens
 
 // ============================================================================
-// 2. Data Structures — Transformer Weights, Run State, Tokenizer
+// 2. Data Structures — moved to System_LLM_Internal.h
+//    TransformerWeights, RunState, the tokenizer structs, and the LLMRuntime
+//    singleton type now live in the shared internal header so the kernels,
+//    sampler, tokenizer, and model-loader TUs operate on the same `gLLM`.
 // ============================================================================
 
-// Transformer Weights — pointers into a single PSRAM block
-
-struct TransformerWeights {
-  // FP32 weights (always used in quant_type==0; for quant_type==1 these are null
-  // for quantized tensors — norms + pos embedding + GPT-2 w1 dummy stay FP32)
-  float* token_embedding_table;  // (vocab_size, dim) — null in INT8 mode
-  float* rms_att_weight;         // (layer, dim) — always FP32
-  float* rms_ffn_weight;         // (layer, dim) — always FP32
-  float* wq;                     // (layer, dim, dim) — null in INT8 mode
-  float* wk;                     // (layer, dim, kv_dim) — null in INT8 mode
-  float* wv;                     // (layer, dim, kv_dim) — null in INT8 mode
-  float* wo;                     // (layer, dim, dim) — null in INT8 mode
-  float* w1;                     // (layer, hidden_dim, dim) — null in INT8/Llama; FP32 dummy for GPT-2
-  float* w2;                     // (layer, dim, hidden_dim) — null in INT8 mode
-  float* w3;                     // (layer, hidden_dim, dim) — null in INT8 mode
-  float* rms_final_weight;       // (dim,) — always FP32
-  float* rms_att_bias;           // (layer, dim) — GPT-2 v2 only, always FP32; NULL otherwise
-  float* rms_ffn_bias;           // (layer, dim) — GPT-2 v2 only, always FP32; NULL otherwise
-  float* rms_final_bias;         // (dim,) — GPT-2 v2 only, always FP32; NULL otherwise
-  float* wcls;                   // (vocab_size, dim) — null in INT8 mode; may alias embedding in FP32 mode
-  float* pos_embedding_table;    // (seq_len, dim) — GPT-2 only, always FP32
-
-  // INT8 weights + per-group scales (used when quant_type==1 or Q8 layers in quant_type==2)
-  // All quantized tensors: scales first (float[n_groups]), then data (int8[n_elements])
-  int8_t* emb_i8;  float* emb_sc;    // token embedding
-  int8_t* wq_i8;   float* wq_sc;
-  int8_t* wk_i8;   float* wk_sc;
-  int8_t* wv_i8;   float* wv_sc;
-  int8_t* wo_i8;   float* wo_sc;
-  int8_t* w1_i8;   float* w1_sc;     // Llama gate only; GPT-2 w1 stays FP32 dummy
-  int8_t* w2_i8;   float* w2_sc;
-  int8_t* w3_i8;   float* w3_sc;
-  int8_t* wcls_i8; float* wcls_sc;   // null if tied (points to emb_i8/emb_sc when tied)
-
-  // ── INT4 mixed mode (quant_type==2) ──
-  // Per-layer quant: 1=INT8, 2=INT4 (length n_layers; null if not mixed)
-  uint8_t* layer_quant;
-
-  // Contiguous Q4 packed data block (nibble-packed, all Q4 layers)
-  uint8_t* q4_data;
-  size_t   q4_data_size;
-
-  // Contiguous Q4 scales block (FP32, all Q4 layers)
-  float*   q4_scales;
-  size_t   q4_scales_size;
-
-  // Per-layer byte offsets into q4_data / q4_scales for each tensor type.
-  // Only valid for layers where layer_quant[l] == 2.
-  // Attention tensors: wq, wk, wv, wo — offsets into q4_data (packed bytes)
-  //                    and into q4_scales (float offsets, not bytes)
-  struct Q4LayerOffsets {
-    size_t wq_data;  size_t wq_sc;
-    size_t wk_data;  size_t wk_sc;
-    size_t wv_data;  size_t wv_sc;
-    size_t wo_data;  size_t wo_sc;
-    size_t w1_data;  size_t w1_sc;  // gate (Llama only)
-    size_t w2_data;  size_t w2_sc;  // down
-    size_t w3_data;  size_t w3_sc;  // up
-  };
-  Q4LayerOffsets* q4_offsets;  // array of n_layers (null entries for INT8 layers)
-};
-
-// Run State — activation buffers and KV cache
-
-struct RunState {
-  float* x;          // activation at current position (dim,)
-  float* xb;         // same, inside a residual branch (dim,)
-  float* xb2;        // additional buffer (dim,)
-  float* hb;         // buffer for hidden dimension in ffn (hidden_dim,)
-  float* hb2;        // buffer for hidden dimension in ffn (hidden_dim,)
-  float* q;          // query (dim,)
-  float* key_cache;  // (layer, seq_len, kv_dim)
-  float* value_cache;// (layer, seq_len, kv_dim)
-  float* att;        // attention scores (n_heads, seq_len)
-  float* logits;     // output logits (vocab_size,)
-};
-
-// Tokenizer (merge-based BPE, embedded in LLM1 model file)
-
-struct MergeEntry {
-  uint32_t left_id;
-  uint32_t right_id;
-  uint32_t merged_id;
-};
-
-// Merge lookup: keyed by (left_id << 16) | right_id -> {merged_id, priority}
-struct MergeLookup {
-  uint32_t key;       // (left_id << 16) | right_id
-  uint32_t merged_id;
-  int priority;       // lower = higher precedence (index in merge list)
-};
-
-// Pre-split token: a multi-byte vocab entry that must be matched as a whole
-// string before BPE runs (like HuggingFace's added_tokens / special tokens).
-struct PreSplitToken {
-  const char* str;  // points into vocab string pool (not separately allocated)
-  int id;
-  int len;          // strlen(str) — cached to avoid recomputing
-};
-
-struct TokenizerState {
-  char** vocab;
-  int vocab_size;
-  MergeEntry* merges;
-  int merge_count;
-  // Fast lookup for encoding
-  MergeLookup* merge_map;
-  int merge_map_capacity;
-  int byte_to_token[256]; // single-byte char -> token id (-1 if not found)
-  // Special / added tokens that must be matched before BPE
-  PreSplitToken* presplit;
-  int presplit_count;
-};
-
 // ============================================================================
-// 3. Module State
+// 3. Module State — LLMRuntime type defined in System_LLM_Internal.h
 // ============================================================================
 
-static struct {
-  LLMConfig config;
-  TransformerWeights weights;
-  RunState state;
-  TokenizerState tokenizer;
-
-  // Raw allocated blocks (for free)
-  float*   weightsData;    // FP32 weights (quant_type==0) or norms+scales (quant_type==1)
-  int8_t*  weightsQ8Data;  // INT8 weight data block; null for FP32 models
-  float*   stateData;      // Cold state: KV cache + att + logits (PSRAM)
-  float*   stateHotData;   // Hot activations: x/xb/xb2/q/hb/hb2 (internal RAM)
-  char*    tokenizerData;  // string pool for vocab entries
-
-  size_t weightsSize;
-  size_t weightsQ8Size;
-  size_t stateSize;
-  size_t stateHotSize;
-
-  LLMState runState;
-  volatile bool stopRequested;
-  float lastTokPerSec;
-  int lastTokCount;
-  int lastContextUsed;   // prompt + generated tokens in last run
-  int lastContextMax;    // KV cache capacity for last run
-  char modelPath[64];
-  char errorMsg[128];
-
-  // Effective context for KV cache (<= config.seq_len); may be capped by requestedMaxCtx
-  int seq_ctx;
-  int requestedMaxCtx;   // set by llmLoadModel before loadWeights is called
-
-  // Repetition penalty ring buffer (allocated at model load, reused per generation)
-  int* repBuf;
-  int repBufSize;  // = LLM_DEFAULT_REP_WINDOW (capped 1-256)
-
-  // Top-p sampling index buffer (allocated once at model load, reused per token)
-  int* sampleIndices;
-  int sampleIndicesSize;  // = vocab_size
-
-  SemaphoreHandle_t mutex;
-} gLLM = {};
+LLMRuntime gLLM = {};
 
 // ============================================================================
 // Async Generation State (background task + PSRAM result buffer)
@@ -327,7 +185,7 @@ static void llmAsyncTask(void* /*pv*/) {
 // 4. PSRAM Allocation Helpers
 // ============================================================================
 
-static void* llmPsramAlloc(size_t size, const char* tag) {
+void* llmPsramAlloc(size_t size, const char* tag) {
   void* p = heap_caps_calloc(1, size, MALLOC_CAP_SPIRAM);
   if (!p) {
     ERROR_LLMF("PSRAM alloc failed: %s (%u bytes)", tag, (unsigned)size);
@@ -335,7 +193,7 @@ static void* llmPsramAlloc(size_t size, const char* tag) {
   return p;
 }
 
-static void llmPsramFree(void** ptr) {
+void llmPsramFree(void** ptr) {
   if (ptr && *ptr) {
     heap_caps_free(*ptr);
     *ptr = nullptr;
@@ -343,142 +201,11 @@ static void llmPsramFree(void** ptr) {
 }
 
 // ============================================================================
-// 5. Math Primitives
+// 5. Math Primitives  →  moved to System_LLM_Kernels.{h,cpp}
+//    rmsnorm, layernorm, softmax, scaleCount, the quant matmuls, and wmatmul.
+//    They are pure functions (no engine state) — the compute seam for SIMD /
+//    per-target backends. forward() and the sampler call them via the header.
 // ============================================================================
-
-static void rmsnorm(float* o, const float* x, const float* weight, int size) {
-  float ss = 0.0f;
-  for (int j = 0; j < size; j++) ss += x[j] * x[j];
-  ss /= size;
-  ss += 1e-5f;
-  ss = 1.0f / sqrtf(ss);
-  for (int j = 0; j < size; j++) o[j] = weight[j] * (ss * x[j]);
-}
-
-// LayerNorm with optional bias (bias may be NULL for v1 models)
-static void layernorm(float* o, const float* x, const float* weight, const float* bias, int size) {
-  float mean = 0.0f;
-  for (int j = 0; j < size; j++) mean += x[j];
-  mean /= size;
-  float var = 0.0f;
-  for (int j = 0; j < size; j++) { float d = x[j] - mean; var += d * d; }
-  var /= size;
-  float s = 1.0f / sqrtf(var + 1e-5f);
-  if (bias) {
-    for (int j = 0; j < size; j++) o[j] = weight[j] * ((x[j] - mean) * s) + bias[j];
-  } else {
-    for (int j = 0; j < size; j++) o[j] = weight[j] * ((x[j] - mean) * s);
-  }
-}
-
-static void softmax(float* x, int size) {
-  float max_val = x[0];
-  for (int i = 1; i < size; i++) {
-    if (x[i] > max_val) max_val = x[i];
-  }
-  float sum = 0.0f;
-  for (int i = 0; i < size; i++) {
-    x[i] = expf(x[i] - max_val);
-    sum += x[i];
-  }
-  for (int i = 0; i < size; i++) x[i] /= sum;
-}
-
-static void matmul(float* xout, const float* x, const float* w, int n, int d) {
-  // w(d,n) @ x(n,) -> xout(d,)
-  // Use esp-dsp dot product for SIMD acceleration on S3
-  for (int i = 0; i < d; i++) {
-    float val = 0.0f;
-    dsps_dotprod_f32(x, w + i * n, &val, n);
-    xout[i] = val;
-  }
-}
-
-// Number of scale groups for n_elements with given group_size.
-static inline size_t scaleCount(size_t n_elements, int group_size) {
-  return ((size_t)n_elements + group_size - 1) / group_size;
-}
-
-// Fused INT8 dequantize + matmul: w(d,n) @ x(n,) -> xout(d,)
-// Scales are stored in flat (row-major) quantization order: the scale for
-// element at flat index k is scales[k / group_size].
-//
-// Fast path (common case, n % group_size == 0): precomputes per-row scale
-// pointer and iterates over groups with a scalar multiply pulled out of the
-// inner loop, avoiding an integer division per element.
-static void matmul_q8(float* xout, const float* x, const int8_t* w,
-                      const float* scales, int group_size, int n, int d) {
-  const int n_groups = (n + group_size - 1) / group_size;
-  const bool aligned = (n_groups * group_size == n);  // n % group_size == 0
-
-  if (aligned) {
-    // Fast path: group boundaries fall on exact element boundaries.
-    // The scale for row i, group g is at scales[i * n_groups + g].
-    for (int i = 0; i < d; i++) {
-      const int8_t* row      = w      + (size_t)i * n;
-      const float*  row_sc   = scales + (size_t)i * n_groups;
-      float val = 0.0f;
-      for (int g = 0; g < n_groups; g++) {
-        const float sc      = row_sc[g];
-        const int8_t* rg    = row + g * group_size;
-        const float*  xg    = x   + g * group_size;
-        for (int j = 0; j < group_size; j++) {
-          val += (float)rg[j] * xg[j] * sc;
-        }
-      }
-      xout[i] = val;
-    }
-  } else {
-    // General fallback (unusual: n not a multiple of group_size)
-    for (int i = 0; i < d; i++) {
-      const int8_t* row      = w + (size_t)i * n;
-      const size_t  row_base = (size_t)i * n;
-      float val = 0.0f;
-      for (int j = 0; j < n; j++) {
-        val += ((float)row[j] * scales[(row_base + j) / group_size]) * x[j];
-      }
-      xout[i] = val;
-    }
-  }
-}
-
-// Fused INT4 dequantize + matmul: w_packed(d, ceil(n/2) bytes) @ x(n,) -> xout(d,)
-// Nibble packing: low nibble (bits 3:0) = even index, high nibble (bits 7:4) = odd index.
-// Signed 4-bit range [-8, 7].  Scales are identical layout to INT8 (per-group FP32).
-static void matmul_q4(float* xout, const float* x, const uint8_t* w_packed,
-                      const float* scales, int group_size, int n, int d) {
-  const int n_groups        = (n + group_size - 1) / group_size;
-  const int row_packed_bytes = (n + 1) / 2;
-
-  for (int i = 0; i < d; i++) {
-    const uint8_t* row    = w_packed + (size_t)i * row_packed_bytes;
-    const float*   row_sc = scales   + (size_t)i * n_groups;
-    float val = 0.0f;
-
-    for (int g = 0; g < n_groups; g++) {
-      const float  sc    = row_sc[g];
-      const int    start = g * group_size;
-      const int    end   = (start + group_size > n) ? n : start + group_size;
-      for (int j = start; j < end; j++) {
-        uint8_t byte = row[j >> 1];
-        int8_t  w_val = (j & 1) ? (int8_t)(byte) >> 4         // high nibble (odd)
-                                : (int8_t)((byte) << 4) >> 4;  // low nibble (even)
-        val += (float)w_val * x[j] * sc;
-      }
-    }
-    xout[i] = val;
-  }
-}
-
-// Dispatch: calls matmul (FP32), matmul_q4 (INT4 packed), or matmul_q8 (INT8).
-static inline void wmatmul(float* xout, const float* x,
-                            const float* fp, const int8_t* i8, const float* sc,
-                            const uint8_t* q4, const float* q4_sc,
-                            int gs, int n, int d) {
-  if (fp)       matmul(xout, x, fp, n, d);
-  else if (q4)  matmul_q4(xout, x, q4, q4_sc, gs, n, d);
-  else          matmul_q8(xout, x, i8, sc, gs, n, d);
-}
 
 // ============================================================================
 // 6. Forward Pass Debug Utilities
@@ -616,6 +343,17 @@ static float* forward(int token, int pos) {
     }
   }
 
+  // Precompute this token's RoPE cos/sin once (identical across all layers).
+  // Llama only — GPT-2 uses absolute positional embeddings added above.
+  if (!isGPT2) {
+    for (int i = 0; i < dim; i += 2) {
+      int head_dim = i % head_size;
+      float val = pos * s->rope_inv[head_dim];
+      s->rope_cos[i >> 1] = cosf(val);
+      s->rope_sin[i >> 1] = sinf(val);
+    }
+  }
+
   // Forward through all layers
   int fwd_q8_li = 0;  // Q8 layer index for mixed mode (= l for pure INT8)
 
@@ -702,14 +440,12 @@ static float* forward(int token, int pos) {
       }
     }
 
-    // RoPE relative positional encoding (Llama only — GPT-2 uses absolute pos embeddings)
+    // RoPE relative positional encoding (Llama only — GPT-2 uses absolute pos
+    // embeddings). cos/sin were precomputed once per token above.
     if (!isGPT2) {
       for (int i = 0; i < dim; i += 2) {
-        int head_dim = i % head_size;
-        float freq = 1.0f / powf(10000.0f, head_dim / (float)head_size);
-        float val = pos * freq;
-        float fcr = cosf(val);
-        float fci = sinf(val);
+        float fcr = s->rope_cos[i >> 1];
+        float fci = s->rope_sin[i >> 1];
         int rotn = (i < kv_dim) ? 2 : 1;  // rotate q and k
         for (int v = 0; v < rotn; v++) {
           float* vec = (v == 0) ? s->q : key_cache_row;
@@ -995,1791 +731,21 @@ static float* forward(int token, int pos) {
 }
 
 // ============================================================================
-// 8. Sampling
+// 8. Sampling  →  moved to System_LLM_Sampler.{h,cpp}
+//    sample_argmax/sample_topp (static there), sample(), sample_mirostat2().
+//    forward()/llmGenerate call sample()/sample_mirostat2() via the header.
 // ============================================================================
 
-static int sample_argmax(const float* probabilities, int n) {
-  int max_i = 0;
-  float max_p = probabilities[0];
-  for (int i = 1; i < n; i++) {
-    if (probabilities[i] > max_p) {
-      max_i = i;
-      max_p = probabilities[i];
-    }
-  }
-  return max_i;
-}
-
-static int sample_topp(float* probabilities, int n, float topp) {
-  // Top-p (nucleus) sampling: only consider the smallest set of tokens whose
-  // cumulative probability exceeds topp.  This prunes the long tail of low-
-  // probability tokens that cause garbled / random output.
-  //
-  // Uses pre-allocated gLLM.sampleIndices buffer (allocated once at model load)
-  // to avoid malloc/free churn every token, which fragments the heap.
-
-  int* indices = gLLM.sampleIndices;
-  if (!indices || gLLM.sampleIndicesSize < n) {
-    // Fallback: plain categorical sampling (no allocation needed)
-    DEBUG_LLM_GENERATEF("[LLM] sample_topp: no index buffer, falling back to categorical");
-    float r = (float)esp_random() / (float)UINT32_MAX;
-    float cdf = 0.0f;
-    for (int i = 0; i < n; i++) {
-      cdf += probabilities[i];
-      if (cdf > r) return i;
-    }
-    return n - 1;
-  }
-  for (int i = 0; i < n; i++) indices[i] = i;
-
-  float cumsum = 0.0f;
-  int nucleus_n = 0;
-
-  // Partial selection sort by descending probability.  Pull the largest
-  // probability to position [i], stop once cumulative mass >= topp.
-  // For a typical peaked distribution this is ~50–200 iterations, not 8192.
-  for (int i = 0; i < n && cumsum < topp; i++) {
-    // Find the max in the unsorted tail [i..n)
-    int max_idx = i;
-    float max_val = probabilities[i];
-    for (int j = i + 1; j < n; j++) {
-      if (probabilities[j] > max_val) {
-        max_idx = j;
-        max_val = probabilities[j];
-      }
-    }
-    // Swap both probabilities and indices
-    if (max_idx != i) {
-      float tmp_p = probabilities[i];
-      probabilities[i] = probabilities[max_idx];
-      probabilities[max_idx] = tmp_p;
-      int tmp_i = indices[i];
-      indices[i] = indices[max_idx];
-      indices[max_idx] = tmp_i;
-    }
-    cumsum += probabilities[i];
-    nucleus_n = i + 1;
-  }
-
-  // Debug: log nucleus stats and top candidates
-  DEBUG_LLM_GENERATEF("[LLM] top-p: nucleus=%d/%d tokens, cumsum=%.4f (target=%.2f)",
-                      nucleus_n, n, cumsum, topp);
-  // Log top 5 candidates in the nucleus
-  int dbg_n = (nucleus_n < 5) ? nucleus_n : 5;
-  for (int di = 0; di < dbg_n; di++) {
-    DEBUG_LLM_GENERATEF("[LLM]   nucleus[%d]: tok=%d prob=%.4f (%.1f%%)",
-                        di, indices[di], probabilities[di], probabilities[di] * 100.0f);
-  }
-
-  // Sample from the nucleus only (re-normalised by cumsum)
-  float r = (float)esp_random() / (float)UINT32_MAX * cumsum;
-  float cdf = 0.0f;
-  int result = indices[nucleus_n - 1]; // fallback to last in nucleus
-  int result_rank = nucleus_n - 1;
-  for (int i = 0; i < nucleus_n; i++) {
-    cdf += probabilities[i];
-    if (cdf > r) { result = indices[i]; result_rank = i; break; }
-  }
-
-  DEBUG_LLM_GENERATEF("[LLM]   sampled tok=%d at rank=%d/%d (r=%.4f)",
-                      result, result_rank, nucleus_n, r / cumsum);
-
-  return result;
-}
-
-static int sample(float* logits, int vocab_size, float temperature, float topp) {
-  if (temperature == 0.0f) {
-    int tok = sample_argmax(logits, vocab_size);
-    DEBUG_LLM_GENERATEF("[LLM] sample: greedy (temp=0) -> tok=%d logit=%.2f", tok, logits[tok]);
-    return tok;
-  }
-
-  // Clamp logits before temperature scaling to prevent saturation from INT8
-  // accumulation errors or extreme activations compounding into ±Inf after division
-  for (int q = 0; q < vocab_size; q++) {
-    if (logits[q] > LOGIT_CLAMP_MAX) logits[q] = LOGIT_CLAMP_MAX;
-    if (logits[q] < LOGIT_CLAMP_MIN) logits[q] = LOGIT_CLAMP_MIN;
-  }
-
-  // Apply temperature
-  for (int q = 0; q < vocab_size; q++) {
-    logits[q] /= temperature;
-  }
-
-  // Compute pre-softmax stats for debug
-  float pre_max = logits[0], pre_min = logits[0];
-  for (int q = 1; q < vocab_size; q++) {
-    if (logits[q] > pre_max) pre_max = logits[q];
-    if (logits[q] < pre_min) pre_min = logits[q];
-  }
-
-  // Softmax
-  softmax(logits, vocab_size);
-
-  // Post-softmax: find max prob and compute entropy estimate
-  float max_prob = 0.0f;
-  int max_prob_id = 0;
-  float entropy = 0.0f;
-  for (int q = 0; q < vocab_size; q++) {
-    if (logits[q] > max_prob) { max_prob = logits[q]; max_prob_id = q; }
-    if (logits[q] > 1e-8f) entropy -= logits[q] * log2f(logits[q]);
-  }
-  DEBUG_LLM_GENERATEF("[LLM] sample: temp=%.2f topp=%.2f pre_logit=[%.1f,%.1f] top_prob=%.3f(tok=%d) entropy=%.1f bits",
-                      temperature, topp, pre_min, pre_max, max_prob, max_prob_id, entropy);
-
-  if (topp <= 0.0f || topp >= 1.0f) {
-    // Simple random sample (no top-p filtering)
-    //DEBUG_LLM_GENERATEF("[LLM] sample: categorical (topp=%.2f, no nucleus filter)", topp);
-    float r = (float)esp_random() / (float)UINT32_MAX;
-    float cdf = 0.0f;
-    for (int i = 0; i < vocab_size; i++) {
-      cdf += logits[i];
-      if (cdf > r) return i;
-    }
-    return vocab_size - 1;
-  }
-
-  return sample_topp(logits, vocab_size, topp);
-}
-
-// Mirostat v2 sampling — adaptive surprise targeting.
-// Maintains a running estimate `mu` of the distribution's perplexity per step.
-// Tokens whose individual surprise (-log2 p) exceeds mu are excluded, then we
-// sample from the remainder and update mu toward `tau` bits of target surprise.
-//
-// logits: raw logits (modified in place — apply temperature scaling + softmax here)
-// mu:     persistent state across tokens within one generation (init to 2*tau)
-// tau:    target surprise in bits (typical 3–7; higher = more diverse output)
-// eta:    learning rate for mu update (typical 0.05–0.2)
-static int sample_mirostat2(float* logits, int n, float temperature, float tau, float eta, float* mu) {
-  if (temperature <= 0.0f) return sample_argmax(logits, n);
-
-  // Apply temperature and convert to probabilities
-  for (int i = 0; i < n; i++) logits[i] /= temperature;
-  softmax(logits, n);  // logits now holds probabilities
-
-  // Exclude tokens more surprising than mu bits: threshold = 2^(-mu)
-  float threshold = powf(2.0f, -(*mu));
-
-  // Sum probability mass of included tokens
-  float included_sum = 0.0f;
-  for (int i = 0; i < n; i++) {
-    if (logits[i] >= threshold) included_sum += logits[i];
-  }
-
-  // Debug: log Mirostat state
-  int included_count = 0;
-  for (int i = 0; i < n; i++) if (logits[i] >= threshold) included_count++;
-  DEBUG_LLM_GENERATEF("[LLM] mirostat2: mu=%.3f threshold=%.6f included=%d/%d mass=%.4f tau=%.1f eta=%.2f",
-                      *mu, threshold, included_count, n, included_sum, tau, eta);
-
-  // If nothing passes the surprise threshold, mu has drifted too low (threshold ≈ 1.0).
-  // Reset mu to 2*tau and sample from the full distribution rather than collapsing to
-  // argmax — argmax would corrupt mu further and create a feedback death spiral.
-  if (included_sum <= 0.0f) {
-    DEBUG_LLM_GENERATEF("[LLM] mirostat2: RESET mu from %.3f to %.3f (death spiral prevention)", *mu, 2.0f * tau);
-    *mu = 2.0f * tau;
-    return sample_argmax(logits, n);
-  }
-
-  // Sample from included tokens proportionally
-  float r = ((float)esp_random() / (float)UINT32_MAX) * included_sum;
-  float cdf = 0.0f;
-  int chosen = -1;
-  for (int i = 0; i < n; i++) {
-    if (logits[i] >= threshold) {
-      cdf += logits[i];
-      if (chosen < 0 && r <= cdf) chosen = i;
-    }
-  }
-  // Fallback if float rounding left chosen unset
-  if (chosen < 0) {
-    for (int i = 0; i < n; i++) {
-      if (logits[i] >= threshold) { chosen = i; break; }
-    }
-  }
-  if (chosen < 0) return sample_argmax(logits, n);
-
-  // Update mu: error = (surprise of chosen token in bits) - tau
-  float p_chosen = logits[chosen];  // still original softmax probability
-  if (p_chosen > 0.0f) {
-    float surprise_bits = -log2f(p_chosen);
-    float old_mu = *mu;
-    *mu -= eta * (surprise_bits - tau);
-    // Clamp to a sane range
-    if (*mu < 0.01f) *mu = 0.01f;
-    if (*mu > tau * 20.0f) *mu = tau * 20.0f;
-    DEBUG_LLM_GENERATEF("[LLM] mirostat2: chose tok=%d p=%.4f surprise=%.2f bits mu: %.3f -> %.3f",
-                        chosen, p_chosen, surprise_bits, old_mu, *mu);
-  }
-
-  return chosen;
-}
-
 // ============================================================================
-// 9. Tokenizer — merge-based BPE (LLM1 embedded format)
+// 9. Tokenizer  →  moved to System_LLM_Tokenizer.{h,cpp}
+//    loadTokenizerFromFile / freeTokenizer / encode / decode (called via header).
 // ============================================================================
 
-// Simple open-addressing hash map for merge lookups
-static int mergeLookup(const TokenizerState* t, uint32_t left_id, uint32_t right_id,
-                       uint32_t* out_merged, int* out_priority) {
-  if (!t->merge_map || t->merge_map_capacity == 0) return 0;
-  uint32_t key = (left_id << 16) | (right_id & 0xFFFF);
-  uint32_t idx = key % (uint32_t)t->merge_map_capacity;
-  for (int probe = 0; probe < t->merge_map_capacity; probe++) {
-    MergeLookup* e = &t->merge_map[(idx + probe) % t->merge_map_capacity];
-    if (e->key == 0 && e->merged_id == 0 && e->priority == 0) return 0;
-    if (e->key == key) {
-      *out_merged = e->merged_id;
-      *out_priority = e->priority;
-      return 1;
-    }
-  }
-  return 0;
-}
-
-static void mergeMapInsert(TokenizerState* t, uint32_t left_id, uint32_t right_id,
-                           uint32_t merged_id, int priority) {
-  uint32_t key = (left_id << 16) | (right_id & 0xFFFF);
-  uint32_t idx = key % (uint32_t)t->merge_map_capacity;
-  for (int probe = 0; probe < t->merge_map_capacity; probe++) {
-    MergeLookup* e = &t->merge_map[(idx + probe) % t->merge_map_capacity];
-    if (e->key == 0 && e->merged_id == 0 && e->priority == 0) {
-      e->key = key;
-      e->merged_id = merged_id;
-      e->priority = priority;
-      return;
-    }
-  }
-}
-
-// Load tokenizer from embedded blob in an open LLM1 file.
-// File position must be at the tok_byte_len field (offset 64).
-static bool loadTokenizerFromFile(File& f) {
-  TokenizerState* t = &gLLM.tokenizer;
-
-  // Read blob size
-  uint32_t tok_byte_len = 0;
-  if (f.read((uint8_t*)&tok_byte_len, 4) != 4) return false;
-
-  size_t blobStart = f.position();
-
-  // Read tokenizer header
-  uint32_t tok_vocab_size = 0, merge_count = 0;
-  f.read((uint8_t*)&tok_vocab_size, 4);
-  f.read((uint8_t*)&merge_count, 4);
-
-  if (tok_vocab_size == 0 || tok_vocab_size > 131072) {
-    ERROR_LLMF("Bad tokenizer vocab_size: %u", tok_vocab_size);
-    return false;
-  }
-
-  t->vocab_size = (int)tok_vocab_size;
-  t->merge_count = (int)merge_count;
-
-  // Allocate vocab pointer array in internal RAM — it's only ~13KB for typical
-  // vocab sizes and is accessed frequently during tokenization. Keeping it in
-  // fast DRAM also reduces PSRAM fragmentation before the large weight/state allocs.
-  t->vocab = (char**)calloc(tok_vocab_size, sizeof(char*));
-  if (!t->vocab) {
-    // Fall back to PSRAM if DRAM is tight
-    t->vocab = (char**)llmPsramAlloc(tok_vocab_size * sizeof(char*), "tok.vocab");
-    if (!t->vocab) return false;
-  }
-
-  // First pass: calculate total string pool size
-  size_t vocabStart = f.position();
-  size_t totalStringBytes = 0;
-  for (uint32_t i = 0; i < tok_vocab_size; i++) {
-    uint8_t byte_len = 0;
-    f.read(&byte_len, 1);
-    totalStringBytes += byte_len + 1; // +1 for null terminator
-    if (byte_len > 0) f.seek(f.position() + byte_len);
-  }
-
-  // Allocate string pool
-  char* stringPool = (char*)llmPsramAlloc(totalStringBytes, "tok.strings");
-  if (!stringPool) return false;
-  gLLM.tokenizerData = stringPool;
-
-  // Second pass: read vocab strings
-  f.seek(vocabStart);
-  char* poolPtr = stringPool;
-  for (uint32_t i = 0; i < tok_vocab_size; i++) {
-    uint8_t byte_len = 0;
-    f.read(&byte_len, 1);
-    t->vocab[i] = poolPtr;
-    if (byte_len > 0) {
-      f.read((uint8_t*)poolPtr, byte_len);
-    }
-    poolPtr[byte_len] = '\0';
-    poolPtr += byte_len + 1;
-  }
-
-  // Build byte_to_token lookup (single-byte vocab entries)
-  // and collect multi-byte tokens for pre-split matching
-  memset(t->byte_to_token, -1, sizeof(t->byte_to_token));
-  int multiByteCount = 0;
-  for (uint32_t i = 0; i < tok_vocab_size; i++) {
-    const char* s = t->vocab[i];
-    int slen = strlen(s);
-    if (slen == 1) {
-      t->byte_to_token[(uint8_t)s[0]] = (int)i;
-    } else if (slen >= 2 && slen <= 8) {
-      // Candidate for pre-split — count first, allocate after
-      multiByteCount++;
-    }
-  }
-
-  // Pre-split table is built AFTER merge table is loaded (see below)
-  t->presplit = nullptr;
-  t->presplit_count = 0;
-
-  // Read merge table
-  t->merges = nullptr;
-  t->merge_map = nullptr;
-  t->merge_map_capacity = 0;
-  if (merge_count > 0) {
-    t->merges = (MergeEntry*)llmPsramAlloc(merge_count * sizeof(MergeEntry), "tok.merges");
-    if (!t->merges) return false;
-
-    for (uint32_t i = 0; i < merge_count; i++) {
-      f.read((uint8_t*)&t->merges[i].left_id, 4);
-      f.read((uint8_t*)&t->merges[i].right_id, 4);
-      f.read((uint8_t*)&t->merges[i].merged_id, 4);
-    }
-
-    // Build merge hash map (2x capacity for low collision rate)
-    t->merge_map_capacity = (int)(merge_count * 2);
-    if (t->merge_map_capacity < 16) t->merge_map_capacity = 16;
-    t->merge_map = (MergeLookup*)llmPsramAlloc(
-      t->merge_map_capacity * sizeof(MergeLookup), "tok.mergemap");
-    if (!t->merge_map) return false;
-    memset(t->merge_map, 0, t->merge_map_capacity * sizeof(MergeLookup));
-
-    for (uint32_t i = 0; i < merge_count; i++) {
-      mergeMapInsert(t, t->merges[i].left_id, t->merges[i].right_id,
-                     t->merges[i].merged_id, (int)i);
-    }
-  }
-
-  // Build pre-split table: only tokens that BPE merges CANNOT produce.
-  // HuggingFace "added tokens" (like Q: and A:) are matched as whole strings
-  // before BPE runs. On device we replicate this by pre-splitting only those
-  // tokens whose ID never appears as a mergedId in any merge rule — meaning
-  // BPE has no way to construct them from component tokens.
-  if (multiByteCount > 0 && merge_count > 0) {
-    // Build a set of token IDs that BPE merges can produce
-    // Use a simple boolean array (vocab is small enough)
-    bool* bpeReachable = (bool*)calloc(tok_vocab_size, sizeof(bool));
-    if (bpeReachable) {
-      for (uint32_t i = 0; i < merge_count; i++) {
-        int mid = t->merges[i].merged_id;
-        if (mid >= 0 && mid < (int)tok_vocab_size) {
-          bpeReachable[mid] = true;
-        }
-      }
-
-      // Count how many multi-byte tokens are NOT reachable by BPE
-      int unreachableCount = 0;
-      for (uint32_t i = 0; i < tok_vocab_size; i++) {
-        const char* s = t->vocab[i];
-        int slen = strlen(s);
-        if (slen >= 2 && slen <= 8 && !bpeReachable[i]) {
-          // Check all bytes are individually representable
-          bool allMapped = true;
-          for (int j = 0; j < slen; j++) {
-            if (t->byte_to_token[(uint8_t)s[j]] == -1) { allMapped = false; break; }
-          }
-          if (allMapped) unreachableCount++;
-        }
-      }
-
-      if (unreachableCount > 0) {
-        // Presplit is tiny (~400 bytes) — use DRAM to reduce PSRAM fragmentation
-        t->presplit = (PreSplitToken*)calloc(unreachableCount, sizeof(PreSplitToken));
-        if (t->presplit) {
-          int idx = 0;
-          for (uint32_t i = 0; i < tok_vocab_size; i++) {
-            const char* s = t->vocab[i];
-            int slen = strlen(s);
-            if (slen < 2 || slen > 8 || bpeReachable[i]) continue;
-            bool allMapped = true;
-            for (int j = 0; j < slen; j++) {
-              if (t->byte_to_token[(uint8_t)s[j]] == -1) { allMapped = false; break; }
-            }
-            if (!allMapped) continue;
-            t->presplit[idx].str = s;
-            t->presplit[idx].id = (int)i;
-            t->presplit[idx].len = slen;
-            idx++;
-          }
-          t->presplit_count = idx;
-          // Sort by length descending so longer matches take priority
-          for (int a = 0; a < idx - 1; a++) {
-            for (int b = a + 1; b < idx; b++) {
-              if (t->presplit[b].len > t->presplit[a].len) {
-                PreSplitToken tmp = t->presplit[a];
-                t->presplit[a] = t->presplit[b];
-                t->presplit[b] = tmp;
-              }
-            }
-          }
-        }
-      }
-      free(bpeReachable);
-    }
-    DEBUG_LLM_TOKENIZERF("[LLM] Pre-split tokens: %d entries (from %d multi-byte vocab)", t->presplit_count, multiByteCount);
-    for (int j = 0; j < t->presplit_count && j < 10; j++) {
-      DEBUG_LLM_TOKENIZERF("[LLM]   presplit[%d] id=%d len=%d \"%s\"",
-                            j, t->presplit[j].id, t->presplit[j].len, t->presplit[j].str);
-    }
-  }
-
-  // Verify we consumed the right amount of the tokenizer blob
-  size_t expectedEnd = blobStart + tok_byte_len;
-  if (f.position() != expectedEnd) {
-    DEBUG_LLM_TOKENIZERF("[LLM] Tokenizer blob pos mismatch: at %u, expected %u",
-                         (unsigned)f.position(), (unsigned)expectedEnd);
-    f.seek(expectedEnd);
-  }
-
-  DEBUG_LLM_TOKENIZERF("[LLM] Tokenizer loaded: vocab_size=%d merges=%d", t->vocab_size, t->merge_count);
-  return true;
-}
-
-static void freeTokenizer() {
-  TokenizerState* t = &gLLM.tokenizer;
-  // vocab and presplit may be in DRAM (calloc) or PSRAM — heap_caps_free handles both
-  llmPsramFree((void**)&t->vocab);
-  llmPsramFree((void**)&t->merges);
-  llmPsramFree((void**)&t->merge_map);
-  if (t->presplit) { free(t->presplit); t->presplit = nullptr; }
-  llmPsramFree((void**)&gLLM.tokenizerData);
-  memset(t, 0, sizeof(TokenizerState));
-}
-
-// Encode a string into tokens using merge-based BPE
-static int encode(const char* text, int* tokens, int maxTokens) {
-  TokenizerState* t = &gLLM.tokenizer;
-  int n_tokens = 0;
-
-  DEBUG_LLM_TOKENIZERF("[LLM][encode] Input (%d chars): \"%.*s%s\"",
-                        (int)strlen(text),
-                        (int)(strlen(text) > 100 ? 100 : strlen(text)), text,
-                        strlen(text) > 100 ? "..." : "");
-  DEBUG_LLM_TOKENIZERF("[LLM][encode] Presplit table has %d entries", t->presplit_count);
-
-  // Step 1: scan input, matching multi-byte presplit tokens first,
-  // then falling back to single-byte token mapping.
-  // This mirrors HuggingFace's handling of added/special tokens:
-  // they are matched as whole strings before BPE runs.
-  const char* c = text;
-  int presplit_hits = 0;
-  while (*c != '\0' && n_tokens < maxTokens) {
-    // Try presplit tokens (longest first)
-    bool matched = false;
-    for (int p = 0; p < t->presplit_count; p++) {
-      if (strncmp(c, t->presplit[p].str, t->presplit[p].len) == 0) {
-        tokens[n_tokens++] = t->presplit[p].id;
-        DEBUG_LLM_TOKENIZERF("[LLM][encode] PRESPLIT MATCH at pos %d: \"%s\" -> id=%d",
-                              (int)(c - text), t->presplit[p].str, t->presplit[p].id);
-        c += t->presplit[p].len;
-        matched = true;
-        presplit_hits++;
-        break;
-      }
-    }
-    if (matched) continue;
-
-    // Single-byte fallback
-    int id = t->byte_to_token[(uint8_t)*c];
-    if (id != -1) {
-      tokens[n_tokens++] = id;
-    } else {
-      DEBUG_LLM_TOKENIZERF("[LLM][encode] Unmapped byte 0x%02X '%c' at pos %d — skipped",
-                            (uint8_t)*c, (*c >= 32 && *c < 127) ? *c : '?', (int)(c - text));
-    }
-    c++;
-  }
-
-  DEBUG_LLM_TOKENIZERF("[LLM][encode] After step 1 (presplit+bytes): %d tokens, %d presplit hits",
-                        n_tokens, presplit_hits);
-
-  // Debug: dump pre-BPE token list
-  {
-    int show = (n_tokens < 30) ? n_tokens : 30;
-    for (int i = 0; i < show; i++) {
-      const char* piece = (tokens[i] >= 0 && tokens[i] < t->vocab_size) ?
-                           t->vocab[tokens[i]] : "?";
-      DEBUG_LLM_TOKENIZERF("[LLM][encode]   pre-bpe[%d] = %d \"%s\"", i, tokens[i], piece);
-    }
-    if (n_tokens > 30) {
-      DEBUG_LLM_TOKENIZERF("[LLM][encode]   ... (%d more)", n_tokens - 30);
-    }
-  }
-
-  if (n_tokens < 2 || t->merge_count == 0) return n_tokens;
-
-  // Step 2: repeatedly apply the highest-priority (lowest index) applicable merge
-  int merge_rounds = 0;
-  bool changed = true;
-  while (changed) {
-    changed = false;
-    int best_priority = INT_MAX;
-    int best_pos = -1;
-    uint32_t best_merged = 0;
-
-    for (int i = 0; i < n_tokens - 1; i++) {
-      uint32_t merged;
-      int priority;
-      if (mergeLookup(t, (uint32_t)tokens[i], (uint32_t)tokens[i + 1], &merged, &priority)) {
-        if (priority < best_priority) {
-          best_priority = priority;
-          best_pos = i;
-          best_merged = merged;
-        }
-      }
-    }
-
-    if (best_pos >= 0) {
-      if (merge_rounds < 20) {
-        const char* lpiece = (tokens[best_pos] >= 0 && tokens[best_pos] < t->vocab_size) ?
-                              t->vocab[tokens[best_pos]] : "?";
-        const char* rpiece = (tokens[best_pos+1] >= 0 && tokens[best_pos+1] < t->vocab_size) ?
-                              t->vocab[tokens[best_pos+1]] : "?";
-        const char* mpiece = ((int)best_merged >= 0 && (int)best_merged < t->vocab_size) ?
-                              t->vocab[best_merged] : "?";
-        DEBUG_LLM_TOKENIZERF("[LLM][encode] BPE merge #%d: pos=%d \"%s\"(%d)+\"%s\"(%d) -> \"%s\"(%u) pri=%d",
-                              merge_rounds, best_pos, lpiece, tokens[best_pos],
-                              rpiece, tokens[best_pos+1], mpiece, best_merged, best_priority);
-      }
-      tokens[best_pos] = (int)best_merged;
-      for (int i = best_pos + 1; i < n_tokens - 1; i++) {
-        tokens[i] = tokens[i + 1];
-      }
-      n_tokens--;
-      changed = true;
-      merge_rounds++;
-    }
-  }
-
-  DEBUG_LLM_TOKENIZERF("[LLM][encode] After step 2 (BPE): %d tokens, %d merge rounds", n_tokens, merge_rounds);
-
-  // Debug: dump final token list with special token flags
-  {
-    int show = (n_tokens < 30) ? n_tokens : 30;
-    for (int i = 0; i < show; i++) {
-      const char* piece = (tokens[i] >= 0 && tokens[i] < t->vocab_size) ?
-                           t->vocab[tokens[i]] : "?";
-      const char* tag = "";
-      if (tokens[i] == 3) tag = " <<<< Q: SPECIAL TOKEN";
-      else if (tokens[i] == 4) tag = " <<<< A: SPECIAL TOKEN";
-      else if (tokens[i] <= 4) tag = " (special)";
-      DEBUG_LLM_TOKENIZERF("[LLM][encode]   final[%d] = %d \"%s\"%s", i, tokens[i], piece, tag);
-    }
-    if (n_tokens > 30) {
-      DEBUG_LLM_TOKENIZERF("[LLM][encode]   ... (%d more)", n_tokens - 30);
-    }
-  }
-
-  return n_tokens;
-}
-
-static const char* decode(int prev_token, int token) {
-  TokenizerState* t = &gLLM.tokenizer;
-  if (token < 0 || token >= t->vocab_size) return "";
-  const char* piece = t->vocab[token];
-  // Handle raw byte tokens like <0x0A>
-  if (piece[0] == '<' && piece[1] == '0' && piece[2] == 'x') {
-    static char byte_buf[2];
-    unsigned int byte_val;
-    sscanf(piece + 1, "0x%02x", &byte_val);
-    byte_buf[0] = (char)byte_val;
-    byte_buf[1] = '\0';
-    return byte_buf;
-  }
-  return piece;
-}
-
 // ============================================================================
-// 10. Model Loading (LLM1 format)
+// 10. Model Loading  →  moved to System_LLM_Model.{h,cpp}
+//    loadWeights() (called by llmLoadModel via header); helpers + LoadContext
+//    are static inside that TU.
 // ============================================================================
-
-static bool llmValidationErr(char* err, size_t errLen, const char* msg) {
-  if (err && errLen) snprintf(err, errLen, "%s", msg);
-  return false;
-}
-
-static bool validateLlmConfig(const LLMConfig* p, char* err, size_t errLen) {
-  if (p->dim < 32 || p->dim > 4096) {
-    return llmValidationErr(err, errLen, "Invalid model: dim out of range");
-  }
-  if (p->hidden_dim < 32 || p->hidden_dim > 16384) {
-    return llmValidationErr(err, errLen, "Invalid model: hidden_dim out of range");
-  }
-  if (p->n_layers < 1 || p->n_layers > 128) {
-    return llmValidationErr(err, errLen, "Invalid model: n_layers out of range");
-  }
-  if (p->n_heads < 1 || p->n_heads > 128 || p->n_kv_heads < 1 || p->n_kv_heads > 128) {
-    return llmValidationErr(err, errLen, "Invalid model: head counts out of range");
-  }
-  if (p->dim % p->n_heads != 0) {
-    return llmValidationErr(err, errLen, "Invalid model: dim not divisible by n_heads");
-  }
-  if (p->n_heads % p->n_kv_heads != 0) {
-    return llmValidationErr(err, errLen, "Invalid model: n_heads not divisible by n_kv_heads");
-  }
-  if (p->vocab_size < 64 || p->vocab_size > 131072) {
-    return llmValidationErr(err, errLen, "Invalid model: vocab_size out of range");
-  }
-  if (p->seq_len < 1 || p->seq_len > 8192) {
-    return llmValidationErr(err, errLen, "Invalid model: seq_len out of range");
-  }
-  if (p->quant_type > 2) {
-    return llmValidationErr(err, errLen, "Invalid model: unknown quant_type (expected 0, 1, or 2)");
-  }
-  if ((p->quant_type == 1 || p->quant_type == 2) && p->group_size == 0) {
-    return llmValidationErr(err, errLen, "Invalid model: quantized model with group_size=0");
-  }
-  if (p->quant_type == 2 && p->file_version < 3) {
-    return llmValidationErr(err, errLen, "Invalid model: INT4_MIXED requires file version >= 3");
-  }
-  if (p->quant_type == 2 && (p->n_q8_start + p->n_q8_end) > p->n_layers) {
-    return llmValidationErr(err, errLen, "Invalid model: n_q8_start + n_q8_end > n_layers");
-  }
-  if (p->arch_type > 1) {
-    return llmValidationErr(err, errLen, "Unsupported model: unknown arch_type (expected 0=Llama or 1=GPT-2)");
-  }
-  if (p->arch_type == 1 && p->n_kv_heads != p->n_heads) {
-    return llmValidationErr(err, errLen, "Invalid GPT-2 model: n_kv_heads must equal n_heads (no GQA)");
-  }
-  return true;
-}
-
-// Read chunked data from LittleFS into a buffer, yielding periodically.
-static bool readChunked(File& f, uint8_t* dest, size_t bytes) {
-  const size_t chunkSize = READ_CHUNK_SIZE;
-  size_t remaining = bytes;
-  while (remaining > 0) {
-    size_t toRead = (remaining < chunkSize) ? remaining : chunkSize;
-    size_t got = f.read(dest, toRead);
-    if (got == 0) return false;
-    dest += got;
-    remaining -= got;
-    if (remaining % (64 * 1024) < chunkSize) vTaskDelay(1);
-  }
-  return true;
-}
-
-// Read a single tensor from file into an FP32 destination buffer.
-// If the file stores INT8, dequantizes on the fly.
-// force_fp32: norm tensors are always FP32 in file regardless of quant_type.
-static bool readTensor(File& f, float* dest, uint32_t expected_elements,
-                       uint8_t quant_type, uint16_t group_size, bool force_fp32) {
-  uint32_t n_elements = 0;
-  if (f.read((uint8_t*)&n_elements, 4) != 4) return false;
-
-  if (n_elements != expected_elements) {
-    ERROR_LLMF("Tensor size mismatch: got %u, expected %u at offset %u",
-               n_elements, expected_elements, (unsigned)(f.position() - 4));
-    return false;
-  }
-
-  if (quant_type == 0 || force_fp32) {
-    // FP32: read directly
-    return readChunked(f, (uint8_t*)dest, n_elements * sizeof(float));
-  }
-
-  // INT8: read scales, then dequantize int8 values
-  uint32_t n_groups = (n_elements + group_size - 1) / group_size;
-
-  // Read scales into temp buffer (heap, not stack — could be large)
-  float* scales = (float*)malloc(n_groups * sizeof(float));
-  if (!scales) return false;
-  if (!readChunked(f, (uint8_t*)scales, n_groups * sizeof(float))) {
-    free(scales);
-    return false;
-  }
-
-  // Read and dequantize one group at a time
-  int8_t* tmp = (int8_t*)malloc(group_size);
-  if (!tmp) { free(scales); return false; }
-
-  for (uint32_t g = 0; g < n_groups; g++) {
-    uint32_t start = g * (uint32_t)group_size;
-    uint32_t count = ((n_elements - start) < group_size) ? (n_elements - start) : group_size;
-    if (f.read((uint8_t*)tmp, count) != count) {
-      free(scales); free(tmp);
-      return false;
-    }
-    float scale = scales[g];
-    for (uint32_t i = 0; i < count; i++) {
-      dest[start + i] = (float)tmp[i] * scale;
-    }
-    if (g % 64 == 0) vTaskDelay(1);
-  }
-
-  free(scales);
-  free(tmp);
-  return true;
-}
-
-// Read an INT8 tensor directly into pre-allocated int8 data and float scale buffers.
-// For use when quant_type==1 and the tensor is NOT a norm (i.e., not force_fp32).
-static bool readTensorQ8(File& f, int8_t* dest_data, float* dest_scales,
-                          uint32_t expected_elements, uint16_t group_size) {
-  uint32_t n_elements = 0;
-  if (f.read((uint8_t*)&n_elements, 4) != 4) return false;
-  if (n_elements != expected_elements) {
-    ERROR_LLMF("Tensor Q8 size mismatch: got %u, expected %u at offset %u",
-               n_elements, expected_elements, (unsigned)(f.position() - 4));
-    return false;
-  }
-  uint32_t n_groups = (n_elements + group_size - 1) / group_size;
-  if (!readChunked(f, (uint8_t*)dest_scales, n_groups * sizeof(float))) return false;
-  if (!readChunked(f, (uint8_t*)dest_data, n_elements)) return false;
-  return true;
-}
-
-// Read an INT4 nibble-packed tensor directly into pre-allocated packed uint8 + float scale buffers.
-// Nibble packing: low nibble = even index, high nibble = odd index.  Signed [-8, 7].
-static bool readTensorQ4(File& f, uint8_t* dest_packed, float* dest_scales,
-                          uint32_t expected_elements, uint16_t group_size) {
-  uint32_t n_elements = 0;
-  if (f.read((uint8_t*)&n_elements, 4) != 4) return false;
-  if (n_elements != expected_elements) {
-    ERROR_LLMF("Tensor Q4 size mismatch: got %u, expected %u at offset %u",
-               n_elements, expected_elements, (unsigned)(f.position() - 4));
-    return false;
-  }
-  uint32_t n_groups      = (n_elements + group_size - 1) / group_size;
-  uint32_t packed_bytes  = (n_elements + 1) / 2;
-  if (!readChunked(f, (uint8_t*)dest_scales, n_groups * sizeof(float))) return false;
-  if (!readChunked(f, dest_packed, packed_bytes)) return false;
-  return true;
-}
-
-// Compute the file size of a tensor block in the LLM1 file.
-// tensorQt: per-tensor quant (0=FP32, 1=INT8, 2=INT4).  For VERSION<=2 pass
-// the global quant_type; for VERSION=3 pass the per-tensor quant.
-static size_t tensorFileSize(uint32_t n_elements, uint8_t tensorQt, uint16_t group_size, bool is_norm) {
-  size_t sz = 4; // uint32 element count prefix
-  if (tensorQt == 0 || is_norm) {
-    sz += (size_t)n_elements * 4;                             // FP32
-  } else if (tensorQt == 2) {
-    uint32_t n_groups = (n_elements + group_size - 1) / group_size;
-    sz += (size_t)n_groups * 4 + ((size_t)n_elements + 1) / 2; // scales + packed nibbles
-  } else {
-    uint32_t n_groups = (n_elements + group_size - 1) / group_size;
-    sz += (size_t)n_groups * 4 + (size_t)n_elements;          // scales + INT8 data
-  }
-  return sz;
-}
-
-// Shared context passed between loadWeights helper functions
-struct LoadContext {
-  int D, H, L, V, kv_dim;
-  uint8_t qt;
-  uint16_t gs;
-  bool isGPT2, hasNormBias, v3;
-  bool shared_weights;  // set by prescanTiedWeights
-  int pfx;  // per-tensor prefix byte count (1 for v3, 0 otherwise)
-  size_t weightsBytes, weightsQ8Bytes;
-  size_t weightsQ4Bytes, weightsQ4ScBytes, mixedMetaBytes;
-  size_t kvCacheSize, hotSize, coldSize;
-};
-
-// Parse the 64-byte LLM1 header and validate the config.
-// On success, gLLM.config is populated and ctx derived fields are set.
-static bool parseModelHeader(File& f, LoadContext& ctx) {
-  uint8_t hdr[64];
-  if (f.read(hdr, 64) != 64) {
-    snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Failed to read LLM1 header");
-    return false;
-  }
-
-  uint32_t magic = ((uint32_t)hdr[0] << 24) | ((uint32_t)hdr[1] << 16) |
-                   ((uint32_t)hdr[2] << 8) | (uint32_t)hdr[3];
-  if (magic != LLM1_MAGIC) {
-    snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg),
-             "Not an LLM1 file (magic=0x%08lX, expected 0x4C4C4D31)", (unsigned long)magic);
-    return false;
-  }
-
-  uint8_t version = hdr[4];
-  if (version < 1 || version > 3) {
-    snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Unsupported LLM1 version: %u (supported: 1-3)", version);
-    return false;
-  }
-
-  LLMConfig* p = &gLLM.config;
-  p->file_version = version;
-  p->quant_type = hdr[5];
-  memcpy(&p->group_size, &hdr[6], 2);
-  uint16_t tmp16;
-  memcpy(&tmp16, &hdr[8], 2);  p->dim = tmp16;
-  memcpy(&tmp16, &hdr[10], 2); p->hidden_dim = tmp16;
-  p->n_layers = hdr[12];
-  p->n_heads = hdr[13];
-  p->n_kv_heads = hdr[14];
-  uint32_t tmp32;
-  memcpy(&tmp32, &hdr[15], 4); p->vocab_size = (int)tmp32;
-  memcpy(&tmp16, &hdr[19], 2); p->seq_len = tmp16;
-  p->arch_type = hdr[21];
-  p->n_q8_start = (version >= 3) ? hdr[22] : 0;
-  p->n_q8_end   = (version >= 3) ? hdr[23] : 0;
-
-  if (!validateLlmConfig(p, gLLM.errorMsg, sizeof(gLLM.errorMsg)))
-    return false;
-
-  // Populate derived context fields
-  ctx.D = p->dim;  ctx.H = p->hidden_dim;  ctx.L = p->n_layers;  ctx.V = p->vocab_size;
-  ctx.kv_dim = (p->dim * p->n_kv_heads) / p->n_heads;
-  ctx.qt = p->quant_type;  ctx.gs = p->group_size;
-  ctx.isGPT2 = (p->arch_type == 1);
-  ctx.hasNormBias = (version >= 2 && ctx.isGPT2);  // GPT-2 LayerNorm biases present in all v2+ models
-  ctx.v3 = (version >= 3);
-  ctx.pfx = ctx.v3 ? 1 : 0;
-
-  return true;
-}
-
-// Pre-scan past all tensor data to read the tied-weights flag, then seek back.
-// Sets ctx.shared_weights and returns the tensor data start position.
-static bool prescanTiedWeights(File& f, LoadContext& ctx) {
-  LLMConfig* p = &gLLM.config;
-  const int D = ctx.D, H = ctx.H, L = ctx.L, V = ctx.V;
-  const uint8_t qt = ctx.qt;
-  const uint16_t gs = ctx.gs;
-  const int kv_dim = ctx.kv_dim;
-  const int pfx = ctx.pfx;
-
-  size_t tensorDataStart = f.position();
-
-  DEBUG_LLM_LOADF("[LLM] LLM1 v%d model: dim=%d hidden=%d layers=%d heads=%d kv_heads=%d vocab=%d seq=%d quant=%s",
-                  p->file_version, D, H, L, p->n_heads, p->n_kv_heads,
-                  V, p->seq_len, qt == 2 ? "MIXED(Q4/Q8)" : (qt == 1 ? "INT8" : "FP32"));
-  if (qt == 2) {
-    DEBUG_LLM_LOADF("[LLM] Mixed policy: first %d + last %d layers INT8, middle %d layers INT4",
-                    p->n_q8_start, p->n_q8_end, L - p->n_q8_start - p->n_q8_end);
-  }
-
-  size_t tensorDataSize = 0;
-
-  if (qt == 2) {
-    const int nQ8s = p->n_q8_start, nQ8e = p->n_q8_end;
-    tensorDataSize += pfx + tensorFileSize(V * D, 1, gs, false);
-    if (ctx.isGPT2) tensorDataSize += pfx + tensorFileSize(p->seq_len * D, 0, gs, true);
-    for (int l = 0; l < L; l++) {
-      uint8_t layerQt = (l < nQ8s || l >= L - nQ8e) ? 1 : 2;
-      int gateElements = ctx.isGPT2 ? 1 : H * D;
-      tensorDataSize += pfx + tensorFileSize(D, 0, gs, true);
-      if (ctx.hasNormBias) tensorDataSize += pfx + tensorFileSize(D, 0, gs, true);
-      tensorDataSize += pfx + tensorFileSize(D * D, layerQt, gs, false);
-      tensorDataSize += pfx + tensorFileSize(D * kv_dim, layerQt, gs, false);
-      tensorDataSize += pfx + tensorFileSize(D * kv_dim, layerQt, gs, false);
-      tensorDataSize += pfx + tensorFileSize(D * D, layerQt, gs, false);
-      tensorDataSize += pfx + tensorFileSize(D, 0, gs, true);
-      if (ctx.hasNormBias) tensorDataSize += pfx + tensorFileSize(D, 0, gs, true);
-      tensorDataSize += pfx + tensorFileSize(gateElements, ctx.isGPT2 ? 0 : layerQt, gs, ctx.isGPT2);
-      tensorDataSize += pfx + tensorFileSize(H * D, layerQt, gs, false);
-      tensorDataSize += pfx + tensorFileSize(D * H, layerQt, gs, false);
-    }
-    tensorDataSize += pfx + tensorFileSize(D, 0, gs, true);
-    if (ctx.hasNormBias) tensorDataSize += pfx + tensorFileSize(D, 0, gs, true);
-  } else {
-    tensorDataSize += tensorFileSize(V * D, qt, gs, false);
-    if (ctx.isGPT2) tensorDataSize += tensorFileSize(p->seq_len * D, qt, gs, true);
-    int gateElements = ctx.isGPT2 ? 1 : H * D;
-    for (int l = 0; l < L; l++) {
-      tensorDataSize += tensorFileSize(D, qt, gs, true);
-      if (ctx.hasNormBias) tensorDataSize += tensorFileSize(D, qt, gs, true);
-      tensorDataSize += tensorFileSize(D * D, qt, gs, false);
-      tensorDataSize += tensorFileSize(D * kv_dim, qt, gs, false);
-      tensorDataSize += tensorFileSize(D * kv_dim, qt, gs, false);
-      tensorDataSize += tensorFileSize(D * D, qt, gs, false);
-      tensorDataSize += tensorFileSize(D, qt, gs, true);
-      if (ctx.hasNormBias) tensorDataSize += tensorFileSize(D, qt, gs, true);
-      tensorDataSize += tensorFileSize(gateElements, qt, gs, ctx.isGPT2);
-      tensorDataSize += tensorFileSize(H * D, qt, gs, false);
-      tensorDataSize += tensorFileSize(D * H, qt, gs, false);
-    }
-    tensorDataSize += tensorFileSize(D, qt, gs, true);
-    if (ctx.hasNormBias) tensorDataSize += tensorFileSize(D, qt, gs, true);
-  }
-
-  f.seek(tensorDataStart + tensorDataSize);
-  uint8_t tied_flag = 1;
-  f.read(&tied_flag, 1);
-  ctx.shared_weights = (tied_flag != 0);
-  DEBUG_LLM_LOADF("[LLM] Weights tied=%d", ctx.shared_weights);
-
-  f.seek(tensorDataStart);
-  return true;
-}
-
-// Compute PSRAM memory requirements for all weight blocks and run state.
-// Populates ctx size fields and checks PSRAM budget. Returns false if OOM.
-static bool computeMemoryLayout(LoadContext& ctx) {
-  LLMConfig* p = &gLLM.config;
-  const int D = ctx.D, H = ctx.H, L = ctx.L, V = ctx.V;
-  const uint8_t qt = ctx.qt;
-  const uint16_t gs = ctx.gs;
-  const int kv_dim = ctx.kv_dim;
-
-  // Start with model's seq_len, capped by user request if given
-  int seq_ctx = p->seq_len;
-  if (gLLM.requestedMaxCtx > 0 && seq_ctx > gLLM.requestedMaxCtx) seq_ctx = gLLM.requestedMaxCtx;
-
-  ctx.weightsBytes = 0;
-  ctx.weightsQ8Bytes = 0;
-  ctx.weightsQ4Bytes = 0;
-  ctx.weightsQ4ScBytes = 0;
-  ctx.mixedMetaBytes = 0;
-
-  if (qt == 0) {
-    size_t w1Floats = ctx.isGPT2 ? (size_t)L : (size_t)L * H * D;
-    size_t weightsFloats = (size_t)V * D
-      + (ctx.isGPT2 ? (size_t)p->seq_len * D : 0)
-      + (size_t)L * D
-      + (size_t)L * D * D
-      + (size_t)L * D * kv_dim
-      + (size_t)L * D * kv_dim
-      + (size_t)L * D * D
-      + (size_t)L * D
-      + w1Floats
-      + (size_t)L * D * H
-      + (size_t)L * H * D
-      + (size_t)D
-      + (ctx.hasNormBias ? (size_t)L * D * 2 + D : 0);
-    if (!ctx.shared_weights) weightsFloats += (size_t)V * D;
-    ctx.weightsBytes = weightsFloats * sizeof(float);
-  } else if (qt == 1) {
-    size_t normsFloats = (size_t)L * D + (size_t)L * D + D
-      + (ctx.isGPT2 ? (size_t)p->seq_len * D + L : 0)
-      + (ctx.hasNormBias ? (size_t)L * D * 2 + D : 0);
-    size_t scalesFloats = scaleCount((size_t)V * D, gs)
-      + (size_t)L * scaleCount((size_t)D * D, gs)
-      + (size_t)L * scaleCount((size_t)D * kv_dim, gs)
-      + (size_t)L * scaleCount((size_t)D * kv_dim, gs)
-      + (size_t)L * scaleCount((size_t)D * D, gs)
-      + (ctx.isGPT2 ? 0 : (size_t)L * scaleCount((size_t)H * D, gs))
-      + (size_t)L * scaleCount((size_t)D * H, gs)
-      + (size_t)L * scaleCount((size_t)H * D, gs);
-    if (!ctx.shared_weights) scalesFloats += scaleCount((size_t)V * D, gs);
-    ctx.weightsBytes = (normsFloats + scalesFloats) * sizeof(float);
-    ctx.weightsQ8Bytes = (size_t)V * D
-      + (size_t)L * D * D
-      + (size_t)L * D * kv_dim
-      + (size_t)L * D * kv_dim
-      + (size_t)L * D * D
-      + (ctx.isGPT2 ? 0 : (size_t)L * H * D)
-      + (size_t)L * D * H
-      + (size_t)L * H * D;
-    if (!ctx.shared_weights) ctx.weightsQ8Bytes += (size_t)V * D;
-  }
-
-  if (qt == 2) {
-    const int nQ8s = p->n_q8_start, nQ8e = p->n_q8_end;
-    const int nQ8 = nQ8s + nQ8e, nQ4 = L - nQ8;
-
-    size_t normsFloats = (size_t)L * D + (size_t)L * D + D
-      + (ctx.isGPT2 ? (size_t)p->seq_len * D + L : 0)
-      + (ctx.hasNormBias ? (size_t)L * D * 2 + D : 0);
-
-    size_t scalesFloats = scaleCount((size_t)V * D, gs)
-      + (size_t)L * scaleCount((size_t)D * D, gs)
-      + (size_t)L * scaleCount((size_t)D * kv_dim, gs)
-      + (size_t)L * scaleCount((size_t)D * kv_dim, gs)
-      + (size_t)L * scaleCount((size_t)D * D, gs)
-      + (ctx.isGPT2 ? 0 : (size_t)L * scaleCount((size_t)H * D, gs))
-      + (size_t)L * scaleCount((size_t)D * H, gs)
-      + (size_t)L * scaleCount((size_t)H * D, gs);
-    if (!ctx.shared_weights) scalesFloats += scaleCount((size_t)V * D, gs);
-
-    size_t q8ScalesFloats = scaleCount((size_t)V * D, gs)
-      + (size_t)nQ8 * scaleCount((size_t)D * D, gs)
-      + (size_t)nQ8 * scaleCount((size_t)D * kv_dim, gs)
-      + (size_t)nQ8 * scaleCount((size_t)D * kv_dim, gs)
-      + (size_t)nQ8 * scaleCount((size_t)D * D, gs)
-      + (ctx.isGPT2 ? 0 : (size_t)nQ8 * scaleCount((size_t)H * D, gs))
-      + (size_t)nQ8 * scaleCount((size_t)D * H, gs)
-      + (size_t)nQ8 * scaleCount((size_t)H * D, gs);
-    if (!ctx.shared_weights) q8ScalesFloats += scaleCount((size_t)V * D, gs);
-
-    size_t q4ScalesFloats = scalesFloats - q8ScalesFloats;
-
-    ctx.weightsBytes = (normsFloats + q8ScalesFloats) * sizeof(float);
-
-    size_t perLayerQ8Data = (size_t)D * D + (size_t)D * kv_dim + (size_t)D * kv_dim + (size_t)D * D
-      + (ctx.isGPT2 ? 0 : (size_t)H * D) + (size_t)D * H + (size_t)H * D;
-    ctx.weightsQ8Bytes = (size_t)V * D + (size_t)nQ8 * perLayerQ8Data;
-    if (!ctx.shared_weights) ctx.weightsQ8Bytes += (size_t)V * D;
-
-    size_t perLayerQ4Packed = ((size_t)D * D + 1) / 2 + ((size_t)D * kv_dim + 1) / 2
-      + ((size_t)D * kv_dim + 1) / 2 + ((size_t)D * D + 1) / 2
-      + (ctx.isGPT2 ? 0 : ((size_t)H * D + 1) / 2)
-      + ((size_t)D * H + 1) / 2 + ((size_t)H * D + 1) / 2;
-    ctx.weightsQ4Bytes = (size_t)nQ4 * perLayerQ4Packed;
-    ctx.weightsQ4ScBytes = q4ScalesFloats * sizeof(float);
-    ctx.mixedMetaBytes = (size_t)L * sizeof(uint8_t) + (size_t)L * sizeof(TransformerWeights::Q4LayerOffsets);
-
-    DEBUG_LLM_MEMORYF("[LLM] Mixed Q4/Q8: nQ8=%d nQ4=%d", nQ8, nQ4);
-  }
-
-  // Fixed-size memory (weights, not context-dependent)
-  size_t fixedBytes = ctx.weightsBytes + ctx.weightsQ8Bytes + ctx.weightsQ4Bytes
-                    + ctx.weightsQ4ScBytes + ctx.mixedMetaBytes;
-  ctx.hotSize = (4 * D + 2 * H) * sizeof(float);
-  fixedBytes += ctx.hotSize;
-
-  size_t freePSRAM = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
-  size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
-  // Use largest contiguous block as budget basis — total free can be misleading
-  // because the cold state (KV cache + logits) is one big contiguous allocation.
-  // After weights fragment PSRAM, the largest block shrinks significantly.
-  // We use the smaller of (total free) and (weights + largest_block) to be safe:
-  // weights can be multiple smaller allocs, but cold state must be contiguous.
-  size_t budget = (freePSRAM > LLM_PSRAM_RESERVE_BYTES) ? freePSRAM - LLM_PSRAM_RESERVE_BYTES : 0;
-  DEBUG_LLM_MEMORYF("[LLM] PSRAM: total_free=%uKB largest_block=%uKB",
-                    (unsigned)(freePSRAM/1024), (unsigned)(largestBlock/1024));
-
-  // Check if even weights alone exceed budget (ctx-independent)
-  // coldSize has a fixed V component too
-  size_t fixedCold = (size_t)V * sizeof(float);
-  if (fixedBytes + fixedCold > budget) {
-    snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg),
-             "Weights too large for PSRAM: need %uKB, have %uKB (short %uKB)",
-             (unsigned)((fixedBytes + fixedCold)/1024), (unsigned)(budget/1024),
-             (unsigned)((fixedBytes + fixedCold - budget)/1024));
-    return false;
-  }
-
-  // Auto-fit: reduce context until total fits in PSRAM
-  // Per-context-slot cost: KV cache + attention scores
-  size_t perCtxSlot = 2 * L * kv_dim * sizeof(float)   // KV cache per position
-                    + p->n_heads * sizeof(float);        // attention scores per position
-  size_t remaining = budget - fixedBytes - fixedCold;
-  int maxFitCtx = (int)(remaining / perCtxSlot);
-  if (maxFitCtx < 1) maxFitCtx = 1;
-  if (seq_ctx > maxFitCtx) {
-    DEBUG_LLM_MEMORYF("[LLM] Auto-fit: ctx %d -> %d (PSRAM budget %uKB, weights %uKB, per-slot %u bytes)",
-                      seq_ctx, maxFitCtx, (unsigned)(budget/1024), (unsigned)(fixedBytes/1024),
-                      (unsigned)perCtxSlot);
-    seq_ctx = maxFitCtx;
-  }
-
-  gLLM.seq_ctx = seq_ctx;
-  if (seq_ctx < p->seq_len) {
-    DEBUG_LLM_MEMORYF("[LLM] Context: model seq_len=%d -> runtime ctx=%d", p->seq_len, seq_ctx);
-  }
-
-  ctx.kvCacheSize = 2 * L * seq_ctx * kv_dim * sizeof(float);
-  ctx.coldSize = (p->n_heads * seq_ctx + V) * sizeof(float);
-  size_t totalNeeded = fixedBytes + ctx.kvCacheSize + ctx.coldSize;
-
-  if (qt == 2) {
-    DEBUG_LLM_MEMORYF("[LLM] Memory (MIXED): fp=%uKB q8=%uKB q4=%uKB q4sc=%uKB kv=%uKB act=%uKB total=%uKB free=%uKB",
-                      (unsigned)(ctx.weightsBytes/1024), (unsigned)(ctx.weightsQ8Bytes/1024),
-                      (unsigned)(ctx.weightsQ4Bytes/1024), (unsigned)(ctx.weightsQ4ScBytes/1024),
-                      (unsigned)(ctx.kvCacheSize/1024), (unsigned)((ctx.hotSize + ctx.coldSize)/1024),
-                      (unsigned)(totalNeeded/1024), (unsigned)(freePSRAM/1024));
-  } else if (qt == 1) {
-    DEBUG_LLM_MEMORYF("[LLM] Memory (INT8): fp_block=%uKB q8_block=%uKB kv=%uKB act=%uKB total=%uKB free=%uKB ctx=%d",
-                      (unsigned)(ctx.weightsBytes/1024), (unsigned)(ctx.weightsQ8Bytes/1024),
-                      (unsigned)(ctx.kvCacheSize/1024), (unsigned)((ctx.hotSize + ctx.coldSize)/1024),
-                      (unsigned)(totalNeeded/1024), (unsigned)(freePSRAM/1024), seq_ctx);
-  } else {
-    DEBUG_LLM_MEMORYF("[LLM] Memory (FP32): weights=%uKB kv=%uKB act=%uKB total=%uKB free=%uKB ctx=%d",
-                      (unsigned)(ctx.weightsBytes/1024), (unsigned)(ctx.kvCacheSize/1024),
-                      (unsigned)((ctx.hotSize + ctx.coldSize)/1024), (unsigned)(totalNeeded/1024),
-                      (unsigned)(freePSRAM/1024), seq_ctx);
-  }
-
-  // Final sanity check (should not fail after auto-fit, but be safe)
-  if (totalNeeded + LLM_PSRAM_RESERVE_BYTES > freePSRAM) {
-    snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg),
-             "Not enough PSRAM: need %uKB + %uKB reserve = %uKB, have %uKB (short %uKB)",
-             (unsigned)(totalNeeded/1024), (unsigned)(LLM_PSRAM_RESERVE_BYTES/1024),
-             (unsigned)((totalNeeded + LLM_PSRAM_RESERVE_BYTES)/1024),
-             (unsigned)(freePSRAM/1024),
-             (unsigned)((totalNeeded + LLM_PSRAM_RESERVE_BYTES - freePSRAM)/1024));
-    return false;
-  }
-  return true;
-}
-
-// Log min/max/mean for key tensors — cross-reference with converter PACK_SUMMARY.
-static void spotCheckWeights(const LoadContext& ctx) {
-  const TransformerWeights* w = &gLLM.weights;
-  const LLMConfig* p = &gLLM.config;
-  const int D = ctx.D, V = ctx.V;
-  const uint16_t gs = ctx.gs;
-  const bool isQ8  = (ctx.qt == 1);
-  const bool isMix = (ctx.qt == 2);
-
-  auto spotCheck = [](const float* data, int n, const char* name) {
-    if (!data || n <= 0) return;
-    float vmin = data[0], vmax = data[0], vsum = 0.f;
-    int nans = 0;
-    for (int i = 0; i < n; i++) {
-      float v = data[i];
-      if (isnan(v) || isinf(v)) { nans++; continue; }
-      if (v < vmin) vmin = v;
-      if (v > vmax) vmax = v;
-      vsum += v;
-    }
-    int valid = n - nans;
-    float mean = valid > 0 ? vsum / valid : 0.f;
-    DEBUG_LLM_LOADF("[LLM] SPOT %s (%d): min=%.6f max=%.6f mean=%.6f nan=%d",
-                    name, n, vmin, vmax, mean, nans);
-  };
-
-  auto spotCheckQ8 = [&](const int8_t* data, const float* scales, int n, int group_sz, const char* name) {
-    if (!data || !scales || n <= 0) return;
-    int sample_n = (n < 512) ? n : 512;
-    float vmin = 1e30f, vmax = -1e30f, vsum = 0.f;
-    int8_t imin = data[0], imax = data[0];
-    for (int i = 0; i < sample_n; i++) {
-      int8_t raw = data[i];
-      if (raw < imin) imin = raw;
-      if (raw > imax) imax = raw;
-      float sc = scales[i / group_sz];
-      float deq = (float)raw * sc;
-      if (deq < vmin) vmin = deq;
-      if (deq > vmax) vmax = deq;
-      vsum += deq;
-    }
-    float sc0 = scales[0];
-    float scLast = scales[(sample_n - 1) / group_sz];
-    DEBUG_LLM_LOADF("[LLM] SPOT %s (%d, sampled %d): i8=[%d,%d] sc=[%.6f,%.6f] deq=[%.6f,%.6f] mean=%.6f",
-                    name, n, sample_n, imin, imax, sc0, scLast, vmin, vmax, vsum / sample_n);
-  };
-
-  if (isQ8 || isMix) spotCheckQ8(w->emb_i8, w->emb_sc, V * D, gs, "embedding");
-  else               spotCheck(w->token_embedding_table, V * D, "embedding");
-
-  if (ctx.isGPT2 && w->pos_embedding_table)
-    spotCheck(w->pos_embedding_table, p->seq_len * D, "pos_embedding");
-
-  spotCheck(w->rms_att_weight, D, "L0_attn_norm");
-  if (ctx.hasNormBias) spotCheck(w->rms_att_bias, D, "L0_attn_norm_bias");
-  spotCheck(w->rms_ffn_weight, D, "L0_ffn_norm");
-  if (ctx.hasNormBias) spotCheck(w->rms_ffn_bias, D, "L0_ffn_norm_bias");
-
-  if (isQ8 || isMix)  spotCheckQ8(w->wq_i8, w->wq_sc, D * D, gs, "L0_wq");
-  else if (w->wq)     spotCheck(w->wq, D * D, "L0_wq");
-
-  spotCheck(w->rms_final_weight, D, "final_norm");
-  if (ctx.hasNormBias) spotCheck(w->rms_final_bias, D, "final_norm_bias");
-
-  if ((isQ8 || isMix) && w->wcls_i8) spotCheckQ8(w->wcls_i8, w->wcls_sc, V * D, gs, "lm_head");
-  else if (w->wcls)                   spotCheck(w->wcls, V * D, "lm_head");
-
-  DEBUG_LLM_LOADF("[LLM] ═══ Compare SPOT values above with converter PACK_SUMMARY ═══");
-}
-
-// Allocate hot (internal RAM) and cold (PSRAM) activation buffers.
-// ctx is non-const: fragmentation recovery may reduce kvCacheSize/coldSize.
-static bool allocateRunState(LoadContext& ctx) {
-  const LLMConfig* p = &gLLM.config;
-  const int D = ctx.D, H = ctx.H, L = ctx.L, V = ctx.V;
-  const int kv_dim = ctx.kv_dim;
-  int seq_ctx = gLLM.seq_ctx;
-
-  gLLM.stateHotData = (float*)heap_caps_calloc(1, ctx.hotSize, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-  if (!gLLM.stateHotData) {
-    DEBUG_LLM_MEMORYF("[LLM] Internal RAM alloc failed (%uB), falling back to PSRAM for hot state", (unsigned)ctx.hotSize);
-    gLLM.stateHotData = (float*)llmPsramAlloc(ctx.hotSize, "llm.state.hot");
-    if (!gLLM.stateHotData) return false;
-  }
-  gLLM.stateHotSize = ctx.hotSize;
-
-  // Cold state (KV cache + att + logits) is one large contiguous PSRAM allocation.
-  // After weight loading fragments PSRAM, the largest free block may be smaller
-  // than total free bytes. Retry with reduced context if allocation fails.
-  size_t coldStateBytes = ctx.kvCacheSize + ctx.coldSize;
-  gLLM.stateData = (float*)llmPsramAlloc(coldStateBytes, "llm.state.cold");
-  if (!gLLM.stateData) {
-    // Fragmentation: largest contiguous block is too small. Shrink context to fit.
-    size_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
-    size_t freePSRAM = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
-    DEBUG_LLM_MEMORYF("[LLM] Cold state alloc failed: need %uKB, PSRAM free=%uKB largest=%uKB — retrying with reduced ctx",
-                      (unsigned)(coldStateBytes/1024), (unsigned)(freePSRAM/1024), (unsigned)(largestBlock/1024));
-    // Recompute: how many context slots fit in largest contiguous block?
-    size_t fixedCold = (size_t)V * sizeof(float);  // logits array (always needed)
-    if (largestBlock <= fixedCold) {
-      ERROR_LLMF("Cannot fit even logits in PSRAM (need %uKB, largest=%uKB)",
-                 (unsigned)(fixedCold/1024), (unsigned)(largestBlock/1024));
-      heap_caps_free(gLLM.stateHotData);
-      gLLM.stateHotData = nullptr;
-      return false;
-    }
-    size_t perCtxSlot = 2 * L * kv_dim * sizeof(float) + p->n_heads * sizeof(float);
-    int newCtx = (int)((largestBlock - fixedCold) / perCtxSlot);
-    if (newCtx < 1) newCtx = 1;
-    if (newCtx >= seq_ctx) newCtx = seq_ctx - 1;  // must shrink at least 1
-    if (newCtx < 1) {
-      heap_caps_free(gLLM.stateHotData);
-      gLLM.stateHotData = nullptr;
-      return false;
-    }
-    DEBUG_LLM_MEMORYF("[LLM] Fragmentation recovery: ctx %d -> %d", seq_ctx, newCtx);
-    seq_ctx = newCtx;
-    gLLM.seq_ctx = seq_ctx;
-    ctx.kvCacheSize = 2 * L * seq_ctx * kv_dim * sizeof(float);
-    ctx.coldSize = (p->n_heads * seq_ctx + V) * sizeof(float);
-    coldStateBytes = ctx.kvCacheSize + ctx.coldSize;
-    gLLM.stateData = (float*)llmPsramAlloc(coldStateBytes, "llm.state.cold.retry");
-    if (!gLLM.stateData) {
-      ERROR_LLMF("Cold state retry also failed (%uKB)", (unsigned)(coldStateBytes/1024));
-      heap_caps_free(gLLM.stateHotData);
-      gLLM.stateHotData = nullptr;
-      return false;
-    }
-  }
-  gLLM.stateSize = coldStateBytes;
-
-  RunState* s = &gLLM.state;
-  float* hp = gLLM.stateHotData;
-  s->x   = hp;  hp += D;
-  s->xb  = hp;  hp += D;
-  s->xb2 = hp;  hp += D;
-  s->q   = hp;  hp += D;
-  s->hb  = hp;  hp += H;
-  s->hb2 = hp;  hp += H;
-
-  float* cp = gLLM.stateData;
-  s->key_cache   = cp;  cp += L * seq_ctx * kv_dim;
-  s->value_cache = cp;  cp += L * seq_ctx * kv_dim;
-  s->att    = cp;  cp += p->n_heads * seq_ctx;
-  s->logits = cp;  cp += V;
-
-  // Pre-allocate repetition penalty ring buffer (reused per generation call)
-  int repSize = LLM_DEFAULT_REP_WINDOW;
-  if (repSize > 256) repSize = 256;
-  if (repSize > 0) {
-    gLLM.repBuf = (int*)malloc(repSize * sizeof(int));
-    gLLM.repBufSize = gLLM.repBuf ? repSize : 0;
-  }
-
-  // Pre-allocate top-p sampling index buffer (reused every token instead of malloc/free per token)
-  gLLM.sampleIndices = (int*)malloc(V * sizeof(int));
-  gLLM.sampleIndicesSize = gLLM.sampleIndices ? V : 0;
-
-  return true;
-}
-
-static bool loadWeights(const char* path) {
-  File f = VFS::openGuarded(path, "r", VFS::systemAuth("llm.load_weights"));
-  if (!f) {
-    snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Cannot open model: %s", path);
-    return false;
-  }
-
-  // ---- Parse header ----
-  LoadContext ctx = {};
-  if (!parseModelHeader(f, ctx)) { f.close(); return false; }
-
-  LLMConfig* p = &gLLM.config;
-  int kv_dim = ctx.kv_dim;
-
-  // ---- Read embedded tokenizer ----
-  if (!loadTokenizerFromFile(f)) {
-    snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Failed to load embedded tokenizer");
-    f.close();
-    return false;
-  }
-
-  // ---- Pre-scan for tied weights and compute memory layout ----
-  if (!prescanTiedWeights(f, ctx)) { f.close(); return false; }
-  if (!computeMemoryLayout(ctx)) { f.close(); return false; }
-
-  const int D = ctx.D, H = ctx.H, L = ctx.L, V = ctx.V;
-  const uint8_t qt = ctx.qt;
-  const uint16_t gs = ctx.gs;
-  const bool isGPT2 = ctx.isGPT2;
-  const bool hasNormBias = ctx.hasNormBias;
-  const bool shared_weights = ctx.shared_weights;
-  const bool v3 = ctx.v3;
-  const size_t weightsBytes = ctx.weightsBytes;
-  const size_t weightsQ8Bytes = ctx.weightsQ8Bytes;
-  const size_t weightsQ4Bytes = ctx.weightsQ4Bytes;
-  const size_t weightsQ4ScBytes = ctx.weightsQ4ScBytes;
-
-  // ---- Allocate weight blocks and map pointers ----
-  gLLM.weightsData = (float*)llmPsramAlloc(weightsBytes, "llm.weights");
-  if (!gLLM.weightsData) { f.close(); return false; }
-  gLLM.weightsSize = weightsBytes;
-
-  TransformerWeights* w = &gLLM.weights;
-
-  if (qt == 0) {
-    // FP32 mode: single float block, same layout as before
-    float* ptr = gLLM.weightsData;
-    w->token_embedding_table = ptr; ptr += V * D;
-    if (isGPT2) {
-      w->pos_embedding_table = ptr; ptr += p->seq_len * D;
-    } else {
-      w->pos_embedding_table = nullptr;
-    }
-    w->rms_att_weight = ptr; ptr += L * D;
-    w->wq = ptr;             ptr += L * D * D;
-    w->wk = ptr;             ptr += L * D * kv_dim;
-    w->wv = ptr;             ptr += L * D * kv_dim;
-    w->wo = ptr;             ptr += L * D * D;
-    w->rms_ffn_weight = ptr; ptr += L * D;
-    w->w1 = ptr;             ptr += isGPT2 ? L : L * H * D;
-    w->w2 = ptr;             ptr += L * D * H;
-    w->w3 = ptr;             ptr += L * H * D;
-    w->rms_final_weight = ptr; ptr += D;
-    if (hasNormBias) {
-      w->rms_att_bias   = ptr; ptr += L * D;
-      w->rms_ffn_bias   = ptr; ptr += L * D;
-      w->rms_final_bias = ptr; ptr += D;
-    } else {
-      w->rms_att_bias = w->rms_ffn_bias = w->rms_final_bias = nullptr;
-    }
-    if (!shared_weights) w->wcls = ptr;
-  } else if (qt == 1) {
-    // INT8 mode: float block = norms + scales; separate int8 data block
-    gLLM.weightsQ8Data = (int8_t*)llmPsramAlloc(weightsQ8Bytes, "llm.q8");
-    if (!gLLM.weightsQ8Data) { f.close(); return false; }
-    gLLM.weightsQ8Size = weightsQ8Bytes;
-
-    // -- FP32 pointer: norms first --
-    float* fp = gLLM.weightsData;
-    w->token_embedding_table = nullptr;         // INT8 — use emb_i8/emb_sc
-    w->rms_att_weight  = fp; fp += L * D;
-    w->rms_ffn_weight  = fp; fp += L * D;
-    w->rms_final_weight = fp; fp += D;
-    if (isGPT2) {
-      w->pos_embedding_table = fp; fp += p->seq_len * D;
-      w->w1 = fp; fp += L;           // dummy FP32 per layer (not used in fwd; must be read)
-    } else {
-      w->pos_embedding_table = nullptr;
-      w->w1 = nullptr;               // Llama: w1 is INT8
-    }
-    if (hasNormBias) {
-      w->rms_att_bias   = fp; fp += L * D;
-      w->rms_ffn_bias   = fp; fp += L * D;
-      w->rms_final_bias = fp; fp += D;
-    } else {
-      w->rms_att_bias = w->rms_ffn_bias = w->rms_final_bias = nullptr;
-    }
-    // Null out FP32 matrix pointers (INT8 path uses _i8/_sc instead)
-    w->wq = w->wk = w->wv = w->wo = nullptr;
-    w->w2 = w->w3 = w->wcls = nullptr;
-
-    // -- Scales (all contiguous in the float block after norms) --
-    w->emb_sc  = fp; fp += scaleCount((size_t)V * D, gs);
-    w->wq_sc   = fp; fp += L * scaleCount((size_t)D * D, gs);
-    w->wk_sc   = fp; fp += L * scaleCount((size_t)D * kv_dim, gs);
-    w->wv_sc   = fp; fp += L * scaleCount((size_t)D * kv_dim, gs);
-    w->wo_sc   = fp; fp += L * scaleCount((size_t)D * D, gs);
-    if (!isGPT2) {
-      w->w1_sc = fp; fp += L * scaleCount((size_t)H * D, gs);
-    } else {
-      w->w1_sc = nullptr;
-    }
-    w->w2_sc   = fp; fp += L * scaleCount((size_t)D * H, gs);
-    w->w3_sc   = fp; fp += L * scaleCount((size_t)H * D, gs);
-    if (!shared_weights) {
-      w->wcls_sc = fp; // last field — no advance needed
-    }
-
-    // -- INT8 data pointers --
-    int8_t* q8 = gLLM.weightsQ8Data;
-    w->emb_i8  = q8; q8 += (size_t)V * D;
-    w->wq_i8   = q8; q8 += (size_t)L * D * D;
-    w->wk_i8   = q8; q8 += (size_t)L * D * kv_dim;
-    w->wv_i8   = q8; q8 += (size_t)L * D * kv_dim;
-    w->wo_i8   = q8; q8 += (size_t)L * D * D;
-    if (!isGPT2) {
-      w->w1_i8 = q8; q8 += (size_t)L * H * D;
-    } else {
-      w->w1_i8 = nullptr;
-    }
-    w->w2_i8   = q8; q8 += (size_t)L * D * H;
-    w->w3_i8   = q8; q8 += (size_t)L * H * D;
-    if (!shared_weights) {
-      w->wcls_i8 = q8; // last field — no advance needed
-    }
-  } else {
-    // ── INT4_MIXED mode (qt==2) ──
-    // Allocate Q8 data block (embedding + INT8 layers)
-    gLLM.weightsQ8Data = (int8_t*)llmPsramAlloc(weightsQ8Bytes, "llm.q8");
-    if (!gLLM.weightsQ8Data) { f.close(); return false; }
-    gLLM.weightsQ8Size = weightsQ8Bytes;
-
-    // Allocate Q4 packed data block
-    w->q4_data = (uint8_t*)llmPsramAlloc(weightsQ4Bytes, "llm.q4");
-    if (!w->q4_data) { f.close(); return false; }
-    w->q4_data_size = weightsQ4Bytes;
-
-    // Allocate Q4 scales block
-    w->q4_scales = (float*)llmPsramAlloc(weightsQ4ScBytes, "llm.q4sc");
-    if (!w->q4_scales) { f.close(); return false; }
-    w->q4_scales_size = weightsQ4ScBytes;
-
-    // Allocate per-layer metadata
-    w->layer_quant = (uint8_t*)llmPsramAlloc(L, "llm.lq");
-    if (!w->layer_quant) { f.close(); return false; }
-    w->q4_offsets = (TransformerWeights::Q4LayerOffsets*)llmPsramAlloc(
-        L * sizeof(TransformerWeights::Q4LayerOffsets), "llm.q4off");
-    if (!w->q4_offsets) { f.close(); return false; }
-    memset(w->q4_offsets, 0, L * sizeof(TransformerWeights::Q4LayerOffsets));
-
-    // Fill layer_quant array
-    const int nQ8s = p->n_q8_start;
-    const int nQ8e = p->n_q8_end;
-    for (int l = 0; l < L; l++) {
-      w->layer_quant[l] = (l < nQ8s || l >= L - nQ8e) ? 1 : 2;
-    }
-
-    // -- FP32 block: norms + Q8 scales --
-    float* fp = gLLM.weightsData;
-    w->token_embedding_table = nullptr;
-    w->rms_att_weight  = fp; fp += L * D;
-    w->rms_ffn_weight  = fp; fp += L * D;
-    w->rms_final_weight = fp; fp += D;
-    if (isGPT2) {
-      w->pos_embedding_table = fp; fp += p->seq_len * D;
-      w->w1 = fp; fp += L;
-    } else {
-      w->pos_embedding_table = nullptr;
-      w->w1 = nullptr;
-    }
-    if (hasNormBias) {
-      w->rms_att_bias   = fp; fp += L * D;
-      w->rms_ffn_bias   = fp; fp += L * D;
-      w->rms_final_bias = fp; fp += D;
-    } else {
-      w->rms_att_bias = w->rms_ffn_bias = w->rms_final_bias = nullptr;
-    }
-    w->wq = w->wk = w->wv = w->wo = nullptr;
-    w->w2 = w->w3 = w->wcls = nullptr;
-
-    // Q8 layer scales in the float block (only for INT8 layers)
-    const int nQ8 = nQ8s + nQ8e;
-    w->emb_sc  = fp; fp += scaleCount((size_t)V * D, gs);
-    w->wq_sc   = fp; fp += nQ8 * scaleCount((size_t)D * D, gs);
-    w->wk_sc   = fp; fp += nQ8 * scaleCount((size_t)D * kv_dim, gs);
-    w->wv_sc   = fp; fp += nQ8 * scaleCount((size_t)D * kv_dim, gs);
-    w->wo_sc   = fp; fp += nQ8 * scaleCount((size_t)D * D, gs);
-    if (!isGPT2) {
-      w->w1_sc = fp; fp += nQ8 * scaleCount((size_t)H * D, gs);
-    } else {
-      w->w1_sc = nullptr;
-    }
-    w->w2_sc   = fp; fp += nQ8 * scaleCount((size_t)D * H, gs);
-    w->w3_sc   = fp; fp += nQ8 * scaleCount((size_t)H * D, gs);
-    if (!shared_weights) {
-      w->wcls_sc = fp;
-    }
-
-    // Q8 data block: embedding first, then INT8-layer weights (contiguous by tensor type)
-    int8_t* q8 = gLLM.weightsQ8Data;
-    w->emb_i8 = q8; q8 += (size_t)V * D;
-    w->wq_i8  = q8; q8 += (size_t)nQ8 * D * D;
-    w->wk_i8  = q8; q8 += (size_t)nQ8 * D * kv_dim;
-    w->wv_i8  = q8; q8 += (size_t)nQ8 * D * kv_dim;
-    w->wo_i8  = q8; q8 += (size_t)nQ8 * D * D;
-    if (!isGPT2) {
-      w->w1_i8 = q8; q8 += (size_t)nQ8 * H * D;
-    } else {
-      w->w1_i8 = nullptr;
-    }
-    w->w2_i8  = q8; q8 += (size_t)nQ8 * D * H;
-    w->w3_i8  = q8; q8 += (size_t)nQ8 * H * D;
-    if (!shared_weights) {
-      w->wcls_i8 = q8;
-    }
-
-    DEBUG_LLM_LOADF("[LLM] Mixed Q4/Q8 pointers mapped: Q8 layers=%d, Q4 layers=%d", nQ8, L - nQ8);
-  }
-
-  // ---- Read tensors from file ----
-  const bool isQ8  = (qt == 1);
-  const bool isMix = (qt == 2);
-  DEBUG_LLM_LOADF("[LLM] Loading weights from flash (%s)...",
-                  isMix ? "MIXED Q4/Q8" : (isQ8 ? "INT8 in PSRAM" : "FP32"));
-
-  if (isQ8 || isMix) {
-    size_t sc_emb  = scaleCount((size_t)V * D, gs);
-    size_t sc_wq   = scaleCount((size_t)D * D, gs);
-    size_t sc_wkv  = scaleCount((size_t)D * kv_dim, gs);
-    size_t sc_wdh  = scaleCount((size_t)D * H, gs);
-    DEBUG_LLM_LOADF("[LLM] Scale geometry: dim=%d kv_dim=%d hidden=%d gs=%d", D, kv_dim, H, gs);
-    DEBUG_LLM_LOADF("[LLM]   emb: %u  wq/wo: %u  wk/wv: %u  w1/w2/w3: %u",
-                    (unsigned)sc_emb, (unsigned)sc_wq, (unsigned)sc_wkv, (unsigned)sc_wdh);
-  }
-
-  // Helper: read and discard a VERSION=3 per-tensor quant prefix byte.
-  // Returns the prefix value, or -1 on read error.
-  auto readPrefix = [&](File& file) -> int {
-    if (!v3) return -2; // no prefix for VERSION<=2
-    uint8_t pfxByte = 0;
-    if (file.read(&pfxByte, 1) != 1) return -1;
-    return (int)pfxByte;
-  };
-
-  // 1. Embedding (always Q8 for quantized models)
-  if (isMix || isQ8) {
-    if (v3) readPrefix(f);  // skip prefix byte
-    if (!readTensorQ8(f, w->emb_i8, w->emb_sc, V * D, gs)) {
-      snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Failed reading embedding tensor (Q8)");
-      f.close(); return false;
-    }
-  } else {
-    if (!readTensor(f, w->token_embedding_table, V * D, qt, gs, false)) {
-      snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Failed reading embedding tensor");
-      f.close(); return false;
-    }
-  }
-
-  // 1b. Positional embedding (GPT-2 only, always FP32)
-  if (isGPT2) {
-    if (v3) readPrefix(f);
-    if (!readTensor(f, w->pos_embedding_table, p->seq_len * D, qt, gs, true)) {
-      snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Failed reading positional embedding");
-      f.close(); return false;
-    }
-    DEBUG_LLM_LOADF("[LLM] Positional embedding loaded (%d x %d)", p->seq_len, D);
-  }
-
-  // 2. Per-layer tensors
-  // For mixed mode: Q8 layer data is contiguous (indexed by q8_li, not global l)
-  // and Q4 data/scales are tracked with running cursors to build the offset table.
-  int q8_li = 0;                // Q8 layer counter for mixed mode
-  size_t q4_data_cursor = 0;    // running byte offset into w->q4_data
-  size_t q4_sc_cursor = 0;      // running float offset into w->q4_scales
-
-  for (int l = 0; l < L; l++) {
-    const bool isQ4Layer = isMix && (w->layer_quant[l] == 2);
-
-    // Norm tensors: always FP32, always indexed by global layer l
-    if (v3) readPrefix(f);
-    if (!readTensor(f, w->rms_att_weight + l*D, D, qt, gs, true)) {
-      snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Failed reading attn_norm layer %d", l);
-      f.close(); return false;
-    }
-    if (hasNormBias) {
-      if (v3) readPrefix(f);
-      if (!readTensor(f, w->rms_att_bias + l*D, D, qt, gs, true)) {
-        snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Failed reading attn_norm_bias layer %d", l);
-        f.close(); return false;
-      }
-    }
-
-    // QKV + output projections
-    bool layerOk;
-    if (isQ4Layer) {
-      // INT4 layer: read Q4 tensors, build offset table
-      auto& off = w->q4_offsets[l];
-      uint32_t nWQ = D * D, nWK = D * kv_dim, nWV = D * kv_dim, nWO = D * D;
-
-      off.wq_data = q4_data_cursor;  off.wq_sc = q4_sc_cursor;
-      if (v3) readPrefix(f);
-      layerOk = readTensorQ4(f, w->q4_data + q4_data_cursor, w->q4_scales + q4_sc_cursor, nWQ, gs);
-      q4_data_cursor += ((size_t)nWQ + 1) / 2;  q4_sc_cursor += scaleCount(nWQ, gs);
-
-      off.wk_data = q4_data_cursor;  off.wk_sc = q4_sc_cursor;
-      if (v3) readPrefix(f);
-      layerOk = layerOk && readTensorQ4(f, w->q4_data + q4_data_cursor, w->q4_scales + q4_sc_cursor, nWK, gs);
-      q4_data_cursor += ((size_t)nWK + 1) / 2;  q4_sc_cursor += scaleCount(nWK, gs);
-
-      off.wv_data = q4_data_cursor;  off.wv_sc = q4_sc_cursor;
-      if (v3) readPrefix(f);
-      layerOk = layerOk && readTensorQ4(f, w->q4_data + q4_data_cursor, w->q4_scales + q4_sc_cursor, nWV, gs);
-      q4_data_cursor += ((size_t)nWV + 1) / 2;  q4_sc_cursor += scaleCount(nWV, gs);
-
-      off.wo_data = q4_data_cursor;  off.wo_sc = q4_sc_cursor;
-      if (v3) readPrefix(f);
-      layerOk = layerOk && readTensorQ4(f, w->q4_data + q4_data_cursor, w->q4_scales + q4_sc_cursor, nWO, gs);
-      q4_data_cursor += ((size_t)nWO + 1) / 2;  q4_sc_cursor += scaleCount(nWO, gs);
-    } else if (isQ8 || isMix) {
-      // INT8 layer (pure INT8 or Q8 layer in mixed mode)
-      size_t q8lD2  = (size_t)q8_li * D * D;
-      size_t q8lDkv = (size_t)q8_li * D * kv_dim;
-      size_t q8scWQ  = (size_t)q8_li * scaleCount((size_t)D * D, gs);
-      size_t q8scWKV = (size_t)q8_li * scaleCount((size_t)D * kv_dim, gs);
-      if (v3) readPrefix(f);
-      layerOk = readTensorQ8(f, w->wq_i8+q8lD2,  w->wq_sc+q8scWQ,  D*D,      gs);
-      if (v3) readPrefix(f);
-      layerOk = layerOk && readTensorQ8(f, w->wk_i8+q8lDkv, w->wk_sc+q8scWKV, D*kv_dim, gs);
-      if (v3) readPrefix(f);
-      layerOk = layerOk && readTensorQ8(f, w->wv_i8+q8lDkv, w->wv_sc+q8scWKV, D*kv_dim, gs);
-      if (v3) readPrefix(f);
-      layerOk = layerOk && readTensorQ8(f, w->wo_i8+q8lD2,  w->wo_sc+q8scWQ,  D*D,      gs);
-    } else {
-      // FP32 mode
-      size_t lD2  = (size_t)l * D * D;
-      size_t lDkv = (size_t)l * D * kv_dim;
-      layerOk = readTensor(f, w->wq+lD2,  D*D,      qt, gs, false)
-             && readTensor(f, w->wk+lDkv, D*kv_dim, qt, gs, false)
-             && readTensor(f, w->wv+lDkv, D*kv_dim, qt, gs, false)
-             && readTensor(f, w->wo+lD2,  D*D,      qt, gs, false);
-    }
-    if (!layerOk) {
-      snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Failed reading QKV/O layer %d", l);
-      f.close(); return false;
-    }
-
-    // FFN norm (always FP32)
-    if (v3) readPrefix(f);
-    if (!readTensor(f, w->rms_ffn_weight + l*D, D, qt, gs, true)) {
-      snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Failed reading ffn_norm layer %d", l);
-      f.close(); return false;
-    }
-    if (hasNormBias) {
-      if (v3) readPrefix(f);
-      if (!readTensor(f, w->rms_ffn_bias + l*D, D, qt, gs, true)) {
-        snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Failed reading ffn_norm_bias layer %d", l);
-        f.close(); return false;
-      }
-    }
-
-    // Gate (w1): GPT-2 always FP32 dummy; Llama FP32/Q8/Q4
-    if (isGPT2) {
-      if (v3) readPrefix(f);
-      if (!readTensor(f, w->w1 + l, 1, qt, gs, true)) {
-        snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Failed reading GPT-2 gate layer %d", l);
-        f.close(); return false;
-      }
-    } else if (isQ4Layer) {
-      auto& off = w->q4_offsets[l];
-      off.w1_data = q4_data_cursor;  off.w1_sc = q4_sc_cursor;
-      if (v3) readPrefix(f);
-      if (!readTensorQ4(f, w->q4_data + q4_data_cursor, w->q4_scales + q4_sc_cursor, H*D, gs)) {
-        snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Failed reading gate(Q4) layer %d", l);
-        f.close(); return false;
-      }
-      q4_data_cursor += ((size_t)H * D + 1) / 2;  q4_sc_cursor += scaleCount((size_t)H * D, gs);
-    } else if (isQ8 || isMix) {
-      size_t q8lDH  = (size_t)q8_li * (size_t)D * H;
-      size_t q8scDH = (size_t)q8_li * scaleCount((size_t)H * D, gs);
-      if (v3) readPrefix(f);
-      if (!readTensorQ8(f, w->w1_i8+q8lDH, w->w1_sc+q8scDH, H*D, gs)) {
-        snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Failed reading gate(Q8) layer %d", l);
-        f.close(); return false;
-      }
-    } else {
-      size_t lDH = (size_t)l * (size_t)D * H;
-      if (!readTensor(f, w->w1+lDH, H*D, qt, gs, false)) {
-        snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Failed reading gate layer %d", l);
-        f.close(); return false;
-      }
-    }
-
-    // Up (w3) + Down (w2)
-    if (isQ4Layer) {
-      auto& off = w->q4_offsets[l];
-      off.w3_data = q4_data_cursor;  off.w3_sc = q4_sc_cursor;
-      if (v3) readPrefix(f);
-      if (!readTensorQ4(f, w->q4_data + q4_data_cursor, w->q4_scales + q4_sc_cursor, H*D, gs)) {
-        snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Failed reading up(Q4) layer %d", l);
-        f.close(); return false;
-      }
-      q4_data_cursor += ((size_t)H * D + 1) / 2;  q4_sc_cursor += scaleCount((size_t)H * D, gs);
-
-      off.w2_data = q4_data_cursor;  off.w2_sc = q4_sc_cursor;
-      if (v3) readPrefix(f);
-      if (!readTensorQ4(f, w->q4_data + q4_data_cursor, w->q4_scales + q4_sc_cursor, D*H, gs)) {
-        snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Failed reading down(Q4) layer %d", l);
-        f.close(); return false;
-      }
-      q4_data_cursor += ((size_t)D * H + 1) / 2;  q4_sc_cursor += scaleCount((size_t)D * H, gs);
-    } else if (isQ8 || isMix) {
-      size_t q8lDH  = (size_t)q8_li * (size_t)D * H;
-      size_t q8scDH = (size_t)q8_li * scaleCount((size_t)D * H, gs);
-      if (v3) readPrefix(f);
-      if (!readTensorQ8(f, w->w3_i8+q8lDH, w->w3_sc+q8scDH, H*D, gs)) {
-        snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Failed reading up(Q8) layer %d", l);
-        f.close(); return false;
-      }
-      if (v3) readPrefix(f);
-      if (!readTensorQ8(f, w->w2_i8+q8lDH, w->w2_sc+q8scDH, D*H, gs)) {
-        snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Failed reading down(Q8) layer %d", l);
-        f.close(); return false;
-      }
-    } else {
-      size_t lDH = (size_t)l * (size_t)D * H;
-      if (!readTensor(f, w->w3+lDH, H*D, qt, gs, false)
-       || !readTensor(f, w->w2+lDH, D*H, qt, gs, false)) {
-        snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Failed reading FFN layer %d", l);
-        f.close(); return false;
-      }
-    }
-
-    if (!isQ4Layer) q8_li++;
-    DEBUG_LLM_LOADF("[LLM] Layer %d/%d loaded (%s)", l + 1, L,
-                    isQ4Layer ? "Q4" : (isQ8 || isMix ? "Q8" : "FP32"));
-  }
-
-  if (isMix) {
-    DEBUG_LLM_LOADF("[LLM] Q4 cursors final: data=%u/%u scales=%u/%u",
-                    (unsigned)q4_data_cursor, (unsigned)w->q4_data_size,
-                    (unsigned)(q4_sc_cursor * sizeof(float)), (unsigned)w->q4_scales_size);
-  }
-
-  // 3. Final norm (always FP32)
-  if (v3) readPrefix(f);
-  if (!readTensor(f, w->rms_final_weight, D, qt, gs, true)) {
-    snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Failed reading final norm");
-    f.close(); return false;
-  }
-  if (hasNormBias) {
-    if (v3) readPrefix(f);
-    if (!readTensor(f, w->rms_final_bias, D, qt, gs, true)) {
-      snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Failed reading final norm bias");
-      f.close(); return false;
-    }
-  }
-
-  // 4. Tied flag + optional LM head
-  uint8_t tied_check = 1;
-  f.read(&tied_check, 1);
-  if (tied_check != 0) {
-    // Tied: LM head shares embedding weights
-    if (isQ8 || isMix) {
-      w->wcls_i8 = w->emb_i8;
-      w->wcls_sc = w->emb_sc;
-    } else {
-      w->wcls = w->token_embedding_table;
-    }
-  } else {
-    if (shared_weights) {
-      snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Tied flag mismatch");
-      f.close(); return false;
-    }
-    // LM head is always Q8 (never Q4), even in mixed mode
-    if (isQ8 || isMix) {
-      if (v3) readPrefix(f);
-      if (!readTensorQ8(f, w->wcls_i8, w->wcls_sc, V * D, gs)) {
-        snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Failed reading LM head (Q8)");
-        f.close(); return false;
-      }
-    } else {
-      if (!readTensor(f, w->wcls, V * D, qt, gs, false)) {
-        snprintf(gLLM.errorMsg, sizeof(gLLM.errorMsg), "Failed reading LM head");
-        f.close(); return false;
-      }
-    }
-  }
-
-  f.close();
-  DEBUG_LLM_LOADF("[LLM] Weights loaded successfully (%s)",
-                  isMix ? "MIXED Q4/Q8" : (isQ8 ? "INT8" : "FP32"));
-
-  spotCheckWeights(ctx);
-
-  // ---- Allocate run state ----
-  if (!allocateRunState(ctx)) return false;
-
-  return true;
-}
 
 // ============================================================================
 // 11. Public API
@@ -3719,7 +1685,9 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
                           pos, S);
     }
 
-    // Yield periodically to avoid watchdog
+    // Yield to IDLE/loop/command tasks on core 1 (see YIELD_INTERVAL note).
+    // At YIELD_INTERVAL=1 this fires every token, keeping IDLE1 fed (task-WDT)
+    // and letting cmd_exec answer BLE/serial polls mid-generation.
     if (generated % YIELD_INTERVAL == 0) {
       vTaskDelay(1);
     }
@@ -3884,11 +1852,12 @@ int  llmGetSessionId()     { return (int)gLLMSessionId; }
 // 12. CLI Commands
 // ============================================================================
 
-#include "System_Utils.h"  // CommandEntry
+#include "System_Utils.h"      // CommandEntry, argWantsJson
+#include "System_LLMChat.h"    // chatBeginTurn — shared async conversation layer
 
 EXT_RAM_BSS_ATTR static char llmCmdBuf[512];
 
-static const char* cmd_llm_status(const String&) {
+static const char* cmd_llm_status(const String& argsInput) {
   LLMStatus st = llmGetStatus();
   const char* stateStr = "UNLOADED";
   switch (st.state) {
@@ -3898,6 +1867,33 @@ static const char* cmd_llm_status(const String&) {
     case LLMState::ERROR:      stateStr = "ERROR"; break;
     default: break;
   }
+
+  // Structured path: one verbatim JSON blob via a PSRAM buffer (no
+  // broadcastOutput). This is what the app's Chat page polls for
+  // state / model / tok-s. Schema:
+  //   {"v":1,"state","model","tokPerSec","error","psramKB",
+  //    "contextUsed","contextMax","tokens"}
+  if (argWantsJson(argsInput)) {
+    const char* model = st.modelPath;
+    const char* slash = strrchr(st.modelPath, '/');
+    if (slash) model = slash + 1;            // filename only, per contract
+    PSRAM_JSON_DOC(doc);
+    doc["v"]           = 1;
+    doc["state"]       = stateStr;
+    doc["model"]       = model;
+    doc["tokPerSec"]   = st.lastTokensPerSec;
+    doc["error"]       = st.errorMsg;        // "" when no error
+    doc["psramKB"]     = (unsigned)(st.totalPsramUsed / 1024);
+    doc["contextUsed"] = st.lastContextUsed;
+    doc["contextMax"]  = st.lastContextMax;
+    doc["tokens"]      = st.lastTokenCount;
+    static char* jbuf = nullptr;
+    if (!jbuf) jbuf = (char*)ps_alloc(512, AllocPref::PreferPSRAM, "llmstatus.json");
+    if (!jbuf) return "{\"error\":\"oom\"}";
+    serializeJson(doc, jbuf, 512);
+    return jbuf;
+  }
+
   snprintf(llmCmdBuf, sizeof(llmCmdBuf),
     "LLM State: %s\n"
     "Model: %s\n"
@@ -3938,22 +1934,49 @@ static const char* cmd_llm_load(const String& args) {
     modelPath = customPath;
   }
 
+  // JSON reply mirrors POST /api/llm/load ({"ok":true} / {"ok":false,"error"}).
+  // The app sends `llmload <name>` (no `json` token) and parses the reply like
+  // the web, so this must be a JSON object, not the old human "Model loaded:".
   bool ok = llmLoadModel(modelPath);
   if (ok) {
-    snprintf(llmCmdBuf, sizeof(llmCmdBuf), "Model loaded: %s", modelPath);
+    snprintf(llmCmdBuf, sizeof(llmCmdBuf), "{\"v\":1,\"ok\":true}");
   } else {
     LLMStatus st = llmGetStatus();
-    snprintf(llmCmdBuf, sizeof(llmCmdBuf), "Load failed: %s", st.errorMsg);
+    // errorMsg is firmware-controlled (short, no quotes/backslashes) — safe to inline.
+    snprintf(llmCmdBuf, sizeof(llmCmdBuf), "{\"v\":1,\"ok\":false,\"error\":\"%s\"}", st.errorMsg);
   }
   return llmCmdBuf;
 }
 
 static const char* cmd_llm_unload(const String&) {
   llmUnload();
-  return "Model unloaded";
+  return "{\"v\":1,\"ok\":true}";   // mirror POST /api/llm/unload
 }
 
-static const char* cmd_llm_models(const String&) {
+static const char* cmd_llm_models(const String& argsInput) {
+  // Structured path: {"v":1,"models":["a.bin","b.bin"]} — names only, the
+  // shape the app's model picker consumes. Reuse llmListModels() (the single
+  // source of truth for the LittleFS + SD scan, which emits rich objects) and
+  // project it down to the filename list the contract asks for.
+  if (argWantsJson(argsInput)) {
+    String rich = llmListModels();   // [{"name","size","path","storage"},...]
+    PSRAM_JSON_DOC(src);
+    PSRAM_JSON_DOC(out);
+    out["v"] = 1;
+    JsonArray names = out["models"].to<JsonArray>();
+    if (deserializeJson(src, rich) == DeserializationError::Ok) {
+      for (JsonObject m : src.as<JsonArray>()) {
+        const char* n = m["name"] | "";
+        if (n[0]) names.add(n);              // linked into src, alive until serialize
+      }
+    }
+    static char* jbuf = nullptr;
+    if (!jbuf) jbuf = (char*)ps_alloc(1024, AllocPref::PreferPSRAM, "llmmodels.json");
+    if (!jbuf) return "{\"error\":\"oom\"}";
+    serializeJson(out, jbuf, 1024);
+    return jbuf;
+  }
+
   String models = llmListModels();
   bool sdAvail = VFS::isSDAvailable();
   snprintf(llmCmdBuf, sizeof(llmCmdBuf), "Models (internal + %s):\n%s",
@@ -3962,6 +1985,32 @@ static const char* cmd_llm_models(const String&) {
 }
 
 static const char* cmd_llm_generate(const String& args) {
+  // Structured (async, non-blocking) path. Contract: `llmgenerate json <prompt>`
+  // — the leading `json` token is the mode flag, everything after it is the
+  // prompt (which may contain spaces, and may itself mention the word "json").
+  // So detect the LEADING token here rather than via argWantsJson(), which
+  // scans the whole string and would false-trigger on a prompt that merely
+  // says "json". Kicks generation off via the shared chat layer and returns
+  // {session} immediately — it must NOT block until generation finishes (that
+  // is the whole reason this path exists; the blocking human path below would
+  // tie up the BLE channel for the entire run and trip the app's watchdog).
+  {
+    String a = args; a.trim();
+    if (a == "json" || a.startsWith("json ")) {
+      if (!llmIsReady()) return "{\"v\":1,\"ok\":false,\"error\":\"model not ready\"}";
+      String prompt = a.startsWith("json ") ? a.substring(5) : String();
+      prompt.trim();
+      if (prompt.length() == 0) return "{\"v\":1,\"ok\":false,\"error\":\"empty prompt\"}";
+      int session = chatBeginTurn(prompt.c_str(), nullptr);
+      if (session <= 0) return "{\"v\":1,\"ok\":false,\"error\":\"busy or failed to start\"}";
+      // Mirror the web's {"ok":true,"session":N} (POST /api/llm/generate &
+      // /chat/retry). The app validates the start by `ok`, so omitting it reads
+      // as "command not recognized" → its "streaming not supported" fallback.
+      snprintf(llmCmdBuf, sizeof(llmCmdBuf), "{\"v\":1,\"ok\":true,\"session\":%d}", session);
+      return llmCmdBuf;
+    }
+  }
+
   if (!llmIsReady()) return "Error: no model loaded";
 
   CommandArgs ca(args);
@@ -3990,9 +2039,139 @@ static const char* cmd_llm_generate(const String& args) {
   return llmCmdBuf;
 }
 
+static const char* cmd_llm_result(const String& args) {
+  // Poll for streamed tokens. Contract: `llmresult json <offset>` →
+  //   {"v":1,"text":"<bytes since offset>","done":<bool>,"len":<total so far>}
+  // Mirrors GET /api/llm/result. We read straight from the engine's result
+  // buffer (llmGetResult*) rather than the chat layer's streaming cursor:
+  // the engine buffer persists after generation ends, so the final chunk and
+  // the total length stay readable on the very poll where done flips true —
+  // whereas chatReadStream()/chatGetStreamLen() return 0 the instant the
+  // streaming turn is finalized, which would silently drop the tail.
+  String a = args; a.trim();
+  if (!(a == "json" || a.startsWith("json ")))
+    return "Usage: llmresult json <offset>";
+
+  int offset = 0;
+  if (a.startsWith("json ")) {
+    String rest = a.substring(5); rest.trim();
+    offset = rest.toInt();
+    if (offset < 0) offset = 0;
+  }
+
+  // 512-byte read window mirrors the web poller. The app polls ~every 350 ms
+  // and advances offset = len, so this easily outpaces on-device generation;
+  // any backlog (engine ran ahead) just drains across successive polls — no
+  // data is lost because the engine buffer is not cleared until the next gen.
+  char chunk[512];
+  int  n     = llmGetResultChunk(offset, chunk, sizeof(chunk));
+  int  total = llmGetResultLen();
+  bool done  = llmIsGenerationDone();
+
+  PSRAM_JSON_DOC(doc);
+  doc["v"]    = 1;
+  doc["text"] = (n > 0) ? (const char*)chunk : "";   // linked; chunk outlives serialize
+  doc["done"] = done;
+  doc["len"]  = total;
+  // Sized for the worst case: a full 512-byte window where every byte needs
+  // \uXXXX escaping (512×6) + envelope, still inside the 4 KB command-return
+  // cap. Real LLM text escapes to ~1.1× so the typical blob is ~550 B.
+  static char* jbuf = nullptr;
+  if (!jbuf) jbuf = (char*)ps_alloc(3200, AllocPref::PreferPSRAM, "llmresult.json");
+  if (!jbuf) return "{\"error\":\"oom\"}";
+  serializeJson(doc, jbuf, 3200);
+  return jbuf;
+}
+
 static const char* cmd_llm_stop(const String&) {
   llmStop();
-  return "Stop requested";
+  return "{\"v\":1,\"ok\":true}";   // mirror POST /api/llm/stop
+}
+
+static const char* cmd_llm_clear(const String&) {
+  // Reset the shared conversation. Thin wrapper over chatClear() — the same
+  // call POST /api/llm/chat/clear makes. Without this, a BLE app's "New chat"
+  // only wipes its own bubbles while the device keeps accumulating turns
+  // (the model still "remembers" cleared messages and contextUsed creeps up).
+  // chatClear() refuses mid-generation, so surface that as a stop-first hint.
+  // JSON mirrors POST /api/llm/chat/clear so the app parses it like the web.
+  if (!chatClear()) return "{\"v\":1,\"ok\":false,\"error\":\"busy — stop first\"}";
+  return "{\"v\":1,\"ok\":true}";
+}
+
+static const char* cmd_llm_retry(const String&) {
+  // Regenerate the last assistant reply. Thin wrapper over chatRetryLast()
+  // (mirror of POST /api/llm/chat/retry): it drops the last reply, steers the
+  // model away from repeating it, and kicks off a fresh async generation.
+  // Returns a session exactly like `llmgenerate json` — the app then polls
+  // `llmresult json <offset>` to stream the new reply.
+  if (!llmIsReady()) return "{\"v\":1,\"ok\":false,\"error\":\"model not ready\"}";
+  int session = chatRetryLast(nullptr);
+  if (session <= 0) return "{\"v\":1,\"ok\":false,\"error\":\"no prior turn or busy\"}";
+  snprintf(llmCmdBuf, sizeof(llmCmdBuf), "{\"v\":1,\"session\":%d}", session);
+  return llmCmdBuf;
+}
+
+static const char* cmd_llm_turns(const String& args) {
+  // Resync the conversation after a reconnect. Wraps the same turn-reader
+  // functions the web's GET /api/llm/chat/turns uses (chatGetTurnCount /
+  // chatGetTurnInfo / chatReadTurn — web-only until now).
+  //
+  // The web endpoint streams an unbounded array; a BLE command reply is capped
+  // at 4 KB and can't chunk arbitrarily. So this is paginated ONE TURN PER
+  // CALL by index — a single turn (<=2 KB body) always fits. The app reads
+  // `count` from any response, then fetches index 0..count-1. Schema:
+  //   {"v":1,"count":N,"index":I,"role":"user|assistant","text":"…",
+  //    "tokens":T,"tokPerSec":F,"streaming":bool}
+  //   out-of-range → {"v":1,"count":N,"index":I,"end":true}
+  String a = args; a.trim();
+  if (!(a == "json" || a.startsWith("json ")))
+    return "Usage: llmturns json <index>";
+
+  int index = 0;
+  if (a.startsWith("json ")) {
+    String rest = a.substring(5); rest.trim();
+    index = rest.toInt();
+    if (index < 0) index = 0;
+  }
+
+  int count = chatGetTurnCount();
+  PSRAM_JSON_DOC(doc);
+  doc["v"]     = 1;
+  doc["count"] = count;
+  doc["index"] = index;
+
+  ChatTurnInfo info;
+  if (index >= count || !chatGetTurnInfo(index, &info)) {
+    doc["end"] = true;
+    static char* ebuf = nullptr;
+    if (!ebuf) ebuf = (char*)ps_alloc(96, AllocPref::PreferPSRAM, "llmturns_end.json");
+    if (!ebuf) return "{\"error\":\"oom\"}";
+    serializeJson(doc, ebuf, 96);
+    return ebuf;
+  }
+
+  // Read the turn body into a reusable PSRAM scratch buffer. Assigned to the
+  // doc as a (non-const) char* so ArduinoJson COPIES it into the doc pool —
+  // the scratch buffer can then be reused safely on the next call.
+  static char* turnBuf = nullptr;
+  if (!turnBuf) turnBuf = (char*)ps_alloc(LLM_CHAT_TURN_MAX_BYTES + 1, AllocPref::PreferPSRAM, "llmturn.txt");
+  if (!turnBuf) return "{\"error\":\"oom\"}";
+  chatReadTurn(index, 0, turnBuf, LLM_CHAT_TURN_MAX_BYTES + 1);
+
+  doc["role"]      = (info.role == ChatTurnRole::USER) ? "user" : "assistant";
+  doc["text"]      = turnBuf;                       // char* → copied into doc
+  doc["tokens"]    = info.tokenCount;
+  doc["tokPerSec"] = info.tokensPerSecX10 / 10.0f;
+  doc["streaming"] = info.isStreaming;
+
+  // One turn body is <=2 KB; realistic text escapes to ~1.1×, so the blob sits
+  // well under the 4 KB command-return cap.
+  static char* jbuf = nullptr;
+  if (!jbuf) jbuf = (char*)ps_alloc(4096, AllocPref::PreferPSRAM, "llmturns.json");
+  if (!jbuf) return "{\"error\":\"oom\"}";
+  serializeJson(doc, jbuf, 4096);
+  return jbuf;
 }
 
 // ============================================================================
@@ -4049,7 +2228,11 @@ const CommandEntry llmCommands[] = {
   { "llmunload",        "Unload model and free PSRAM",          true,  cmd_llm_unload },
   { "llmmodels",        "List available model files",           false, cmd_llm_models },
   { "llmgenerate",      "Generate text from prompt",            false, cmd_llm_generate,     "Usage: llmgenerate <prompt text>" },
+  { "llmresult",        "Poll streamed generation (JSON)",      false, cmd_llm_result,       "Usage: llmresult json <offset>" },
   { "llmstop",          "Stop in-progress generation",          false, cmd_llm_stop },
+  { "llmclear",         "Reset the LLM conversation",           false, cmd_llm_clear },
+  { "llmretry",         "Regenerate the last reply (JSON)",     false, cmd_llm_retry },
+  { "llmturns",         "Read a conversation turn (JSON)",      false, cmd_llm_turns,        "Usage: llmturns json <index>" },
   { "llmtemperature",   "Set default sampling temperature",     true,  cmd_llm_temperature,  "Usage: llmtemperature <0.0-2.0>" },
   { "llmtopp",          "Set default Top-P threshold",          true,  cmd_llm_topp,         "Usage: llmtopp <0.0-1.0>" },
   { "llmmaxtokens",     "Set default max tokens per reply",     true,  cmd_llm_maxtokens,    "Usage: llmmaxtokens <1-512>" },

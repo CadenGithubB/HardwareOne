@@ -16,6 +16,15 @@ CONFIG_SPIRAM=y
 CONFIG_SPIRAM_TYPE_AUTO=y
 CONFIG_SPIRAM_SPEED_80M=y
 
+# Data-cache line size: 64 B (the S3 hardware maximum) instead of the 32 B
+# default. For sequential streaming — notably on-device LLM weight reads, which
+# are PSRAM-bandwidth bound — this halves the number of slow PSRAM fetch
+# round-trips (one bus setup per 64 B instead of per 32 B). Free: line size only
+# re-slices the fixed data cache, so it costs no RAM. Cache *size* is left at
+# 32 KB on purpose — bumping to 64 KB would steal ~32 KB of scarce internal
+# DRAM and wouldn't help a stream-once / never-reuse workload.
+CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
+
 # Flash mode - S3 can use QIO
 CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
 
