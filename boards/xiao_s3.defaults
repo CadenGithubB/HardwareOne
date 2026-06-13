@@ -6,6 +6,8 @@
 #
 # Activated by: HW_BOARD=xiao_s3
 
+# HW_TARGET: esp32s3
+
 # Arduino variant — picks the BSP pins_arduino.h and the ARDUINO_<NAME>_DEV
 # macro that System_BuildConfig.h's #elif chain matches on for pin mapping.
 CONFIG_ARDUINO_VARIANT="XIAO_ESP32S3"

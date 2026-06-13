@@ -31,29 +31,39 @@ if(NOT _inferred_target)
     set(_inferred_target "esp32s3")
 endif()
 
-# --- 2. Board selection (ESP32-S3 only) ---
+# --- 2. Board selection (HW_BOARD, all targets) ---
 #
 # Each file in boards/ holds the settings that distinguish one board from the
-# others in its chip family (Arduino variant, PSRAM mode, flash size, …). The
-# chip-family defaults (sdkconfig.defaults.esp32s3) are auto-loaded by IDF
+# others in its chip family (Arduino variant, PSRAM mode/CS, flash size, …).
+# The chip-family defaults (sdkconfig.defaults.<target>) are auto-loaded by IDF
 # based on target; the board file is layered on top so its values override.
 #
-# Usage:
-#   HW_BOARD=feathers3 idf.py fullclean && HW_BOARD=feathers3 idf.py build
-#   (Unset HW_BOARD defaults to feathers3 — FeatherS3[D] is the primary target.)
+# Each board file declares which chip it targets with a "# HW_TARGET: <chip>"
+# marker. The active target (step 1) is chosen by `idf.py set-target`; HW_BOARD
+# only LAYERS board deltas on top of it — it does not switch chips — so the two
+# must agree. We validate that below and fail with a fix-it hint rather than
+# silently mis-building (e.g. an S3 PSRAM mode baked onto an ESP32 bootloader).
 #
-# ESP32 boards (QT Py, Feather V2) still set their variant directly in
-# sdkconfig.defaults.esp32 — they haven't been migrated to the boards/ pattern
-# yet. The block below skips board-file layering for any non-S3 target so the
-# old ESP32 flow continues to work untouched.
-set(_hw_board "")
+# Usage:
+#   # ESP32-S3 boards (default feathers3):
+#   HW_BOARD=xiao_s3          idf.py set-target esp32s3 && idf.py fullclean && idf.py build
+#   # ESP32 boards (default qtpy_esp32):
+#   HW_BOARD=feather_esp32_v2 idf.py set-target esp32   && idf.py fullclean && idf.py build
+#
+# Default board per target: esp32s3 → feathers3, esp32 → qtpy_esp32. Any other
+# target (or no boards/ file) skips layering and uses CONFIG_ARDUINO_VARIANT
+# straight from sdkconfig.defaults.<target>.
+set(_hw_board "$ENV{HW_BOARD}")
 set(_board_file "")
-set(_flash_size "8mb")   # used by the partition picker; overridden below
-if(_inferred_target STREQUAL "esp32s3")
-    set(_hw_board "$ENV{HW_BOARD}")
-    if(NOT _hw_board)
+set(_flash_size "8mb")   # used by the partition picker; overridden from the board file below
+if(NOT _hw_board)
+    if(_inferred_target STREQUAL "esp32s3")
         set(_hw_board "feathers3")
+    elseif(_inferred_target STREQUAL "esp32")
+        set(_hw_board "qtpy_esp32")
     endif()
+endif()
+if(_hw_board)
     set(_board_file "${CMAKE_CURRENT_SOURCE_DIR}/boards/${_hw_board}.defaults")
     if(NOT EXISTS "${_board_file}")
         file(GLOB _available_boards
@@ -65,6 +75,21 @@ if(_inferred_target STREQUAL "esp32s3")
             "HW_BOARD=${_hw_board} but boards/${_hw_board}.defaults does not exist. "
             "Available: ${_available_str}")
     endif()
+    # Validate the board's declared chip matches the active target. HW_BOARD
+    # layers settings; it cannot change the target, so a mismatch is always a
+    # mistake — point the user at set-target instead of producing a bad image.
+    file(STRINGS "${_board_file}" _bt_line REGEX "^# *HW_TARGET:")
+    if(_bt_line)
+        string(REGEX REPLACE "^# *HW_TARGET:[ \t]*([A-Za-z0-9]+).*" "\\1" _board_target "${_bt_line}")
+        if(NOT _board_target STREQUAL _inferred_target)
+            message(FATAL_ERROR
+                "HW_BOARD=${_hw_board} targets '${_board_target}', but the active chip is "
+                "'${_inferred_target}'. HW_BOARD only layers board settings — it does not "
+                "switch chips. Run:\n"
+                "    idf.py set-target ${_board_target} && idf.py fullclean\n"
+                "then rebuild with HW_BOARD=${_hw_board}.")
+        endif()
+    endif()
     # Flash size comes from the board file's CONFIG_ESPTOOLPY_FLASHSIZE_*MB
     # marker. The partition picker below uses it to pick partitions_*_<size>.csv.
     file(STRINGS "${_board_file}" _fs_line REGEX "^CONFIG_ESPTOOLPY_FLASHSIZE_[0-9]+MB=y")
@@ -72,9 +97,9 @@ if(_inferred_target STREQUAL "esp32s3")
         string(REGEX MATCH "FLASHSIZE_([0-9]+MB)" _ "${_fs_line}")
         string(TOLOWER "${CMAKE_MATCH_1}" _flash_size)
     endif()
-    message(STATUS "HW_BOARD=${_hw_board} (flash=${_flash_size}) → layering ${_board_file}")
+    message(STATUS "HW_BOARD=${_hw_board} (target=${_inferred_target}, flash=${_flash_size}) → layering ${_board_file}")
 else()
-    message(STATUS "Target=${_inferred_target} (not esp32s3) → board file layering skipped; "
+    message(STATUS "Target=${_inferred_target}: no boards/ mapping → layering skipped; "
                    "using CONFIG_ARDUINO_VARIANT from sdkconfig.defaults.${_inferred_target}")
 endif()
 
@@ -120,7 +145,8 @@ if(EXISTS "${_buildconfig}")
     endif()
 endif()
 
-# --- 4. SDKCONFIG_DEFAULTS layering + sdkconfig auto-recovery (S3 only) ---
+# --- 4. SDKCONFIG_DEFAULTS layering + sdkconfig auto-recovery ---
+# Runs whenever a board file was selected in step 2 (any target).
 if(_board_file)
     set(SDKCONFIG_DEFAULTS
         "${CMAKE_CURRENT_SOURCE_DIR}/sdkconfig.defaults"

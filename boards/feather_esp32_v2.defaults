@@ -1,0 +1,32 @@
+# Board overrides — Adafruit Feather ESP32 V2 (ESP32 PICO-MINI-02)
+#
+# This file is layered on top of sdkconfig.defaults + sdkconfig.defaults.esp32
+# by the HW_BOARD selection logic in CMakeLists.txt. It contains ONLY the
+# settings that distinguish this board from other ESP32 boards.
+#
+# Activated by: HW_BOARD=feather_esp32_v2
+# Chip: ESP32 (classic) — run `idf.py set-target esp32` first; the build will
+# refuse to layer this file onto a non-esp32 target.
+
+# HW_TARGET: esp32
+
+# Arduino variant — picks the BSP pins_arduino.h and the ARDUINO_<NAME>_DEV
+# macro that System_BuildConfig.h's #elif chain matches on for pin mapping.
+CONFIG_ARDUINO_VARIANT="adafruit_feather_esp32_v2"
+
+# PSRAM mode — the Feather ESP32 V2 carries 2 MB Quad PSRAM (BOARD_HAS_PSRAM
+# in the Arduino core board definition; 8 MB flash + 2 MB PSRAM module).
+# Wrong mode boots fine but reports 0 KB PSRAM (silent failure — LLM,
+# big web responses, ESP-NOW buffers will OOM at runtime).
+CONFIG_SPIRAM_MODE_QUAD=y
+
+# PSRAM chip-select GPIO. The Feather V2's PICO-MINI-02 uses the same in-package
+# PICO PSRAM as the QT Py; GPIO10 is the value the QT Py build is validated with.
+# NOTE: UNVERIFIED on Feather V2 hardware specifically. If `psram` / free-heap
+# reports 0 KB PSRAM on first boot, this is the line to check against the module
+# (the original FeatherS3 footgun: wrong CS = silent no-PSRAM boot).
+CONFIG_PICO_PSRAM_CS_IO=10
+
+# Flash size — Feather ESP32 V2 has 8 MB.
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
