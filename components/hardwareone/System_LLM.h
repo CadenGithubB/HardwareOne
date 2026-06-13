@@ -40,6 +40,7 @@
 #define LLM_DEFAULT_MAX_TOKENS      256
 #define LLM_DEFAULT_TEMPERATURE     0.5f
 #define LLM_DEFAULT_TOPP            0.8f
+#define LLM_DEFAULT_MINP            0.0f   // min-p relative floor (0 = off → use top-p)
 #define LLM_DEFAULT_MIROSTAT_TAU    5.0f   // target surprise in bits (Mirostat 2)
 #define LLM_DEFAULT_MIROSTAT_ETA    0.1f   // Mirostat learning rate
 #define LLM_DEFAULT_REP_PENALTY     1.3f   // repetition penalty divisor (1.0 = disabled)
@@ -100,6 +101,8 @@ struct LLMStatus {
   int lastTokenCount;         // Tokens generated in last run
   int lastContextUsed;        // Context positions used in last generation (prompt + generated)
   int lastContextMax;         // Total KV cache capacity (seq_ctx)
+  float lastMeanLogprob;      // Phase 2 confidence: mean log-prob of generated tokens (0 = no signal; less negative = more confident)
+  int lastConfTokens;         // Phase 2: # tokens that contributed to lastMeanLogprob
   char errorMsg[128];         // Last error message
 };
 
@@ -155,7 +158,8 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
                 int hardCap = LLM_DEFAULT_HARD_CAP,
                 bool dynTemp = false,
                 const int* suppressTokens = nullptr,
-                int suppressTokenCount = 0);
+                int suppressTokenCount = 0,
+                float minP = LLM_DEFAULT_MINP);
 
 // Request stop of in-progress generation (thread-safe)
 void llmStop();
@@ -169,6 +173,7 @@ struct LLMGenParams {
   int   maxTokens;
   float temperature;
   float topp;
+  float minP;
   bool  useMirostat2;
   float mirostatTau;
   float mirostatEta;

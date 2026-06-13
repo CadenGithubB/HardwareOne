@@ -175,7 +175,7 @@ static void llmAsyncTask(void* /*pv*/) {
   ac->params.repPenalty,   ac->params.repWindow,    ac->params.sentenceLimit,
   ac->params.hardCap,      ac->params.dynTemp,
   ac->params.suppressCount > 0 ? ac->params.suppressTokens : nullptr,
-  ac->params.suppressCount);
+  ac->params.suppressCount, ac->params.minP);
 
   gLLMResultDone = true;
   gLLMTask       = nullptr;
@@ -286,6 +286,19 @@ static float* forward(int token, int pos) {
   const int S = gLLM.seq_ctx;
   const bool isGPT2 = (p->arch_type == 1);
 
+  // Corruption guard: a memory overrun elsewhere can zero RunState pointers
+  // (observed: s->x → null mid-generation → LoadProhibited panic in
+  // vecAddInPlace). Detect it here and return nullptr so the generation loop
+  // can attempt a soft recovery (llmBindRunState) instead of dereferencing null.
+  const bool kvOk = (gLLM.kvPrecision == KV_FP16) ? (s->key_cache_f16 && s->value_cache_f16)
+                  : (gLLM.kvPrecision == KV_INT8) ? (s->key_cache_q8  && s->value_cache_q8)
+                  :                                 (s->key_cache     && s->value_cache);
+  if (!s->x || !s->xb || !s->xb2 || !s->q || !s->logits || !kvOk || !s->att) {
+    DEBUG_LLM_GENERATEF("[LLM] forward: RunState corrupted at pos=%d (x=%p logits=%p kvOk=%d) — bailing",
+                        pos, (void*)s->x, (void*)s->logits, (int)kvOk);
+    return nullptr;
+  }
+
   int dim = p->dim;
   int kv_dim = (p->dim * p->n_kv_heads) / p->n_heads;
   int kv_mul = p->n_heads / p->n_kv_heads;
@@ -385,8 +398,13 @@ static float* forward(int token, int pos) {
 
     // Key and value point to the KV cache
     int loff = l * S * kv_dim;
-    float* key_cache_row = s->key_cache + loff + pos * kv_dim;
-    float* value_cache_row = s->value_cache + loff + pos * kv_dim;
+    const uint8_t kvPrec = gLLM.kvPrecision;
+    const bool kvPacked = (kvPrec != KV_FP32);  // FP16/INT8 produce into temps, then pack
+    // K/V are produced in FP32 working buffers. FP32 mode points these straight
+    // at the cache row (zero-copy, identical to before); FP16/INT8 use hot temps
+    // and pack into the compressed cache after RoPE (below).
+    float* key_cache_row   = kvPacked ? s->k_tmp : (s->key_cache   + loff + pos * kv_dim);
+    float* value_cache_row = kvPacked ? s->v_tmp : (s->value_cache + loff + pos * kv_dim);
 
     // QKV matmuls (weights prepackaged at load — see buildLayerTensors)
     linear(s->q,            s->xb, T.wq);
@@ -415,13 +433,66 @@ static float* forward(int token, int pos) {
       }
     }
 
+    // Pack this position's K/V (post-RoPE) into the compressed cache.
+    // FP32 mode already wrote straight into the cache above — nothing to do.
+    if (kvPrec == KV_FP16) {
+      uint16_t* kdst = s->key_cache_f16   + loff + pos * kv_dim;
+      uint16_t* vdst = s->value_cache_f16 + loff + pos * kv_dim;
+      for (int i = 0; i < kv_dim; i++) {
+        kdst[i] = f32_to_f16(key_cache_row[i]);
+        vdst[i] = f32_to_f16(value_cache_row[i]);
+      }
+    } else if (kvPrec == KV_INT8) {
+      // Per-(kv-head) symmetric INT8: scale = max|x|/127 over each head-slice.
+      const int nkv = p->n_kv_heads;
+      int8_t* kdst = s->key_cache_q8   + loff + pos * kv_dim;
+      int8_t* vdst = s->value_cache_q8 + loff + pos * kv_dim;
+      float*  ksc  = s->key_scales   + (size_t)(l * S + pos) * nkv;
+      float*  vsc  = s->value_scales + (size_t)(l * S + pos) * nkv;
+      for (int kh = 0; kh < nkv; kh++) {
+        const int base = kh * head_size;
+        float kmax = 0.0f, vmax = 0.0f;
+        for (int i = 0; i < head_size; i++) {
+          float ak = fabsf(key_cache_row[base + i]);   if (ak > kmax) kmax = ak;
+          float av = fabsf(value_cache_row[base + i]); if (av > vmax) vmax = av;
+        }
+        float ks = (kmax > 0.0f) ? (kmax / 127.0f) : 1.0f;
+        float vs = (vmax > 0.0f) ? (vmax / 127.0f) : 1.0f;
+        ksc[kh] = ks;  vsc[kh] = vs;
+        const float kinv = 1.0f / ks, vinv = 1.0f / vs;
+        for (int i = 0; i < head_size; i++) {
+          int qk = (int)lrintf(key_cache_row[base + i]   * kinv);
+          int qv = (int)lrintf(value_cache_row[base + i] * vinv);
+          if (qk > 127) qk = 127; else if (qk < -127) qk = -127;
+          if (qv > 127) qv = 127; else if (qv < -127) qv = -127;
+          kdst[base + i] = (int8_t)qk;
+          vdst[base + i] = (int8_t)qv;
+        }
+      }
+    }
+
     // Multi-head attention
     for (int h = 0; h < p->n_heads; h++) {
       float* q_h = s->q + h * head_size;
       float* att_h = s->att + h * S;
       // Iterate over all timesteps including current
       for (int t = 0; t <= pos; t++) {
-        float* k = s->key_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
+        // FP16: dequant this position's K head-slice into scratch, then run the
+        // same SIMD dot-product. FP32: point straight at the cache.
+        float* k;
+        if (kvPrec == KV_FP16) {
+          const uint16_t* kf = s->key_cache_f16 + loff + t * kv_dim + (h / kv_mul) * head_size;
+          for (int i = 0; i < head_size; i++) s->kv_deq[i] = f16_to_f32(kf[i]);
+          k = s->kv_deq;
+        } else if (kvPrec == KV_INT8) {
+          const int kvh = h / kv_mul;
+          const int8_t* kf = s->key_cache_q8 + loff + t * kv_dim + kvh * head_size;
+          const float ks = s->key_scales[(size_t)(l * S + t) * p->n_kv_heads + kvh];
+          for (int i = 0; i < head_size; i++) s->kv_deq[i] = (float)kf[i] * ks;
+          k = s->kv_deq;
+        } else {
+          k = s->key_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
+        }
         float score = 0.0f;
         dsps_dotprod_f32(q_h, k, &score, head_size);
         score /= sqrtf((float)head_size);
@@ -433,10 +504,18 @@ static float* forward(int token, int pos) {
       float* xb_h = s->xb + h * head_size;
       memset(xb_h, 0, head_size * sizeof(float));
       for (int t = 0; t <= pos; t++) {
-        float* v = s->value_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
         float a = att_h[t];
-        for (int i = 0; i < head_size; i++) {
-          xb_h[i] += a * v[i];
+        if (kvPrec == KV_FP16) {
+          const uint16_t* vf = s->value_cache_f16 + loff + t * kv_dim + (h / kv_mul) * head_size;
+          for (int i = 0; i < head_size; i++) xb_h[i] += a * f16_to_f32(vf[i]);
+        } else if (kvPrec == KV_INT8) {
+          const int kvh = h / kv_mul;
+          const int8_t* vf = s->value_cache_q8 + loff + t * kv_dim + kvh * head_size;
+          const float avs = a * s->value_scales[(size_t)(l * S + t) * p->n_kv_heads + kvh];
+          for (int i = 0; i < head_size; i++) xb_h[i] += avs * (float)vf[i];
+        } else {
+          float* v = s->value_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
+          for (int i = 0; i < head_size; i++) xb_h[i] += a * v[i];
         }
       }
     }
@@ -684,6 +763,14 @@ bool llmLoadModel(const char* modelPath, int maxCtx) {
   }
   gLLM.requestedMaxCtx = maxCtx;
 
+  // KV-cache precision is a load-time choice (the buffers are sized/typed now and
+  // immutable until reload). 0=FP32, 1=FP16, 2=INT8.
+  gLLM.kvPrecision = (uint8_t)gSettings.llmKvPrecision;
+  if (gLLM.kvPrecision > KV_INT8) gLLM.kvPrecision = KV_FP32;  // clamp unknown values
+  DEBUG_LLM_LOADF("[LLM] KV cache precision: %s",
+                  gLLM.kvPrecision == KV_FP16 ? "FP16 (half PSRAM)" :
+                  gLLM.kvPrecision == KV_INT8 ? "INT8 (quarter PSRAM, per-head scales)" : "FP32");
+
   gLLM.runState = LLMState::LOADING;
   strlcpy(gLLM.modelPath, modelPath, sizeof(gLLM.modelPath));
 
@@ -702,6 +789,13 @@ bool llmLoadModel(const char* modelPath, int maxCtx) {
                   (unsigned)((gLLM.weightsSize + gLLM.weightsQ8Size) / 1024),
                   (unsigned)(gLLM.stateSize / 1024),
                   gLLM.seq_ctx, gLLM.config.seq_len);
+  // Post-load budgeting line: KV precision + headroom left for fact tables /
+  // bigger models. Compare kvPrec=FP16 vs FP32 across two loads to see the win.
+  DEBUG_LLM_LOADF("[LLM] Model ready. kvPrec=%s  PSRAM free after load: %uKB (largest block %uKB)",
+                  (gLLM.kvPrecision == KV_FP16) ? "FP16" :
+                  (gLLM.kvPrecision == KV_INT8) ? "INT8" : "FP32",
+                  (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024),
+                  (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) / 1024));
   return true;
 }
 
@@ -766,6 +860,8 @@ LLMStatus llmGetStatus() {
   status.lastTokenCount = gLLM.lastTokCount;
   status.lastContextUsed = gLLM.lastContextUsed;
   status.lastContextMax = gLLM.lastContextMax;
+  status.lastMeanLogprob = gLLM.lastMeanLogprob;
+  status.lastConfTokens = gLLM.lastConfTokens;
   strlcpy(status.errorMsg, gLLM.errorMsg, sizeof(status.errorMsg));
   return status;
 }
@@ -775,7 +871,8 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
                 bool useMirostat2, float mirostatTau, float mirostatEta,
                 float repPenalty, int repWindow, int sentenceLimit, int hardCap,
                 bool dynTemp,
-                const int* suppressTokens, int suppressTokenCount) {
+                const int* suppressTokens, int suppressTokenCount,
+                float minP) {
   if (gLLM.runState != LLMState::READY) {
     return -1;
   }
@@ -886,6 +983,18 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
     if (qStart && aMarker && aMarker > qStart) {
       char* body = qStart + 3;  // skip "Q: "
       int bodyLen = (int)(aMarker - body);
+      // Phase 0 (casing): the model was trained on title-cased "Q:" lines, and
+      // lowercase question words tokenize to different ids (who=1558 vs Who=2387),
+      // producing visibly worse answers. Title-case the first letter of the
+      // question body to match the training distribution. Q&A path only — Do:
+      // mode ends in "\nDo:" (no "\nA:"), so this block is skipped by design.
+      // Only fires when the lead char is lowercase, so well-cased web prompts
+      // (e.g. "What is ESPNOW") stay byte-identical.
+      if (bodyLen > 0 && body[0] >= 'a' && body[0] <= 'z') {
+        DEBUG_LLM_GENERATEF("[LLM] casing: title-cased '%c'->'%c' to match training Q: format",
+                            body[0], (char)(body[0] - 32));
+        body[0] = (char)(body[0] - 32);
+      }
       for (int fi = 0; fi < NUM_FILLER; fi++) {
         int fLen = strlen(FILLER_PREFIXES[fi]);
         if (bodyLen >= fLen && strncasecmp(body, FILLER_PREFIXES[fi], fLen) == 0) {
@@ -1104,12 +1213,21 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
     }
   }
 
-  // Clear KV cache for fresh generation
+  // Clear KV cache for fresh generation (zero bits == 0.0 for both float and half)
   int kv_dim = (p->dim * p->n_kv_heads) / p->n_heads;
   const int S = gLLM.seq_ctx;
-  size_t kvSize = p->n_layers * S * kv_dim * sizeof(float);
-  memset(gLLM.state.key_cache, 0, kvSize);
-  memset(gLLM.state.value_cache, 0, kvSize);
+  size_t kvCount = (size_t)p->n_layers * S * kv_dim;
+  if (gLLM.kvPrecision == KV_FP16) {
+    memset(gLLM.state.key_cache_f16,   0, kvCount * sizeof(uint16_t));
+    memset(gLLM.state.value_cache_f16, 0, kvCount * sizeof(uint16_t));
+  } else if (gLLM.kvPrecision == KV_INT8) {
+    // Only the int8 data needs clearing; scales are written before any read.
+    memset(gLLM.state.key_cache_q8,   0, kvCount);
+    memset(gLLM.state.value_cache_q8, 0, kvCount);
+  } else {
+    memset(gLLM.state.key_cache,   0, kvCount * sizeof(float));
+    memset(gLLM.state.value_cache, 0, kvCount * sizeof(float));
+  }
 
   // ── Initialize prompt diagnostics ─────────────────────────────────────────
   // Makes prompt token info available to forward() for deep attention analysis.
@@ -1165,6 +1283,16 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
                       isGPT2gen ? "GPT2" : "Llama",
                       p->dim, p->n_layers, p->n_heads, p->vocab_size, p->seq_len,
                       (p->quant_type == 1) ? "INT8" : "FP32");
+  // One-shot verification line for this session's new features. Grep "[LLM] feat:".
+  //   casing  → also look for "[LLM] casing:" (fires only on lowercase input)
+  //   minP    → also look for "[LLM] min-p:"  (fires only when minP>0)
+  //   conf    → reported on the final "Generated N tokens ... conf=" line
+  //   kvPrec  → FP16 halves the KV cache (see load-time "KV cache precision:")
+  //   guard   → "[LLM] forward: RunState corrupted" / "rebound RunState" on trigger
+  DEBUG_LLM_GENERATEF("[LLM] feat: casing=on minP=%.2f%s confidence=on kvPrec=%s corruptGuard=armed",
+                      minP, (minP > 0.0f) ? "(active)" : "(off)",
+                      (gLLM.kvPrecision == KV_FP16) ? "FP16" :
+                      (gLLM.kvPrecision == KV_INT8) ? "INT8" : "FP32");
 
   // ── Generation loop ─────────────────────────────────────────────────────────
   unsigned long startMs = millis();
@@ -1172,10 +1300,49 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
   int steps = std::min(maxTokens + num_prompt_tokens, S);
   float mirostat_mu = 2.0f * mirostatTau;
 
+  // Phase 2: confidence signal. Accumulate the mean log-probability of the
+  // tokens the model actually generated. Low mean-logprob = the model was
+  // flailing through flat distributions (open-domain uncertainty) — a backstop
+  // for the no-fact lane, NOT a detector of confident-wrong answers (see plan).
+  // Pure observability: does not alter sampling or generation in any way.
+  float confSumLogprob = 0.0f;
+  int   confCount = 0;
+
+  // Soft-recovery budget for RunState-pointer corruption (see forward() guard).
+  const int LLM_MAX_CORRUPTION_RETRIES = 2;
+  int  corruptionRetries = 0;
+  bool corruptionFatal = false;
+
   while (pos < steps) {
     if (gLLM.stopRequested) break;
 
+    // Debug hook (llmcorrupttest): force one RunState-pointer corruption to prove
+    // the guard + rebind + retry path end-to-end. Fires once, then self-clears.
+    if (gLLM.injectCorruptOnce) {
+      gLLM.injectCorruptOnce = false;
+      gLLM.state.x = nullptr;
+      DEBUG_LLM_GENERATEF("[LLM] TEST: injected RunState corruption (s->x=null) at pos=%d — expect guard+rebound below", pos);
+    }
+
     float* logits = forward(token, pos);
+    if (!logits) {
+      // forward() bailed on a corrupted RunState. Recover by re-binding the
+      // pointers from the surviving base blocks, then retry this position — the
+      // KV-cache contents for earlier positions stay valid, so generation can
+      // continue. Bounded so we never spin if a base block is gone or the
+      // corruption is ongoing; otherwise we stop cleanly instead of panicking.
+      if (corruptionRetries < LLM_MAX_CORRUPTION_RETRIES && llmBindRunState()) {
+        corruptionRetries++;
+        DEBUG_LLM_GENERATEF("[LLM] state corruption at pos=%d — rebound RunState, retry %d/%d",
+                            pos, corruptionRetries, LLM_MAX_CORRUPTION_RETRIES);
+        logits = forward(token, pos);
+      }
+      if (!logits) {
+        setLlmError("LLM state corruption at pos=%d (recovery failed after %d tries)", pos, corruptionRetries);
+        corruptionFatal = true;
+        break;
+      }
+    }
 
     int next;
     if (pos < num_prompt_tokens - 1) {
@@ -1283,9 +1450,11 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
           (void)prev_name; (void)cur_name; (void)cosim; (void)prev_norm; (void)cur_norm; (void)dot;
         }
 
-        // KV cache health: check that prompt positions have non-zero K/V
+        // KV cache health: check that prompt positions have non-zero K/V.
+        // FP32-only diagnostic — in FP16 mode key_cache is null (half-float store).
         int kv_d = (p->dim * p->n_kv_heads) / p->n_heads;
         int check_layers[] = {0, p->n_layers/2, p->n_layers-1};
+        if (gLLM.kvPrecision == KV_FP32)
         for (int cli = 0; cli < 3; cli++) {
           int cl = check_layers[cli];
           int cloff = cl * S * kv_d;
@@ -1458,11 +1627,18 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
         }
       }
 
+      float chosenProb = -1.0f;  // <0 = no signal (greedy / mirostat path)
       if (useMirostat2) {
         next = sample_mirostat2(logits, p->vocab_size, effective_temp,
                                 mirostatTau, mirostatEta, &mirostat_mu);
       } else {
-        next = sample(logits, p->vocab_size, effective_temp, effective_topp);
+        next = sample(logits, p->vocab_size, effective_temp, effective_topp, minP, &chosenProb);
+      }
+
+      // Phase 2: fold this generated token's confidence into the running mean.
+      if (chosenProb > 0.0f) {
+        confSumLogprob += logf(chosenProb);
+        confCount++;
       }
 
       // Clamp to valid vocab range — prevents OOV tokens from corrupting output
@@ -1632,14 +1808,21 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
   gLLM.lastContextUsed = pos;      // total positions consumed (prompt + generated)
   gLLM.lastContextMax = S;         // KV cache capacity for this run
 
-  DEBUG_LLM_GENERATEF("[LLM] Generated %d tokens in %lums (%.1f tok/s) ctx=%d/%d stopped=%s",
+  // Phase 2: finalize the confidence signal for this run.
+  gLLM.lastConfTokens = confCount;
+  gLLM.lastMeanLogprob = (confCount > 0) ? (confSumLogprob / (float)confCount) : 0.0f;
+
+  DEBUG_LLM_GENERATEF("[LLM] Generated %d tokens in %lums (%.1f tok/s) ctx=%d/%d stopped=%s conf=%.3f(n=%d)",
                       generated, elapsed, gLLM.lastTokPerSec, pos, S,
-                      gLLM.stopRequested ? "user" : (generated == 0 ? "eos/empty" : "maxlen"));
+                      gLLM.stopRequested ? "user" : (generated == 0 ? "eos/empty" : "maxlen"),
+                      gLLM.lastMeanLogprob, gLLM.lastConfTokens);
 
   free(prompt_tokens);
   if (norm_prompt) free(norm_prompt);
 
-  gLLM.runState = LLMState::READY;
+  // If state corruption could not be recovered, surface ERROR rather than
+  // masking it as a normal (truncated) completion.
+  gLLM.runState = corruptionFatal ? LLMState::ERROR : LLMState::READY;
   return generated;
 }
 
@@ -1779,6 +1962,17 @@ int  llmGetSessionId()     { return (int)gLLMSessionId; }
 
 EXT_RAM_BSS_ATTR static char llmCmdBuf[512];
 
+// Debug: arm a one-shot RunState corruption to verify the forward() guard +
+// llmBindRunState rebind + retry recovery path. The next generation nulls s->x;
+// the guard catches it, rebinds from the intact base blocks, and continues — so
+// the answer still completes. Lets the corruption-recovery path be proven on demand.
+static const char* cmd_llm_corrupt_test(const String& /*args*/) {
+  if (!llmIsReady()) return "LLM not loaded — load a model first";
+  gLLM.injectCorruptOnce = true;
+  return "Armed: next generation injects one RunState corruption. Run a prompt, then look for "
+         "'[LLM] TEST: injected' followed by 'rebound RunState, retry 1/2' — the answer should still complete.";
+}
+
 static const char* cmd_llm_status(const String& argsInput) {
   LLMStatus st = llmGetStatus();
   const char* stateStr = "UNLOADED";
@@ -1809,6 +2003,8 @@ static const char* cmd_llm_status(const String& argsInput) {
     doc["contextUsed"] = st.lastContextUsed;
     doc["contextMax"]  = st.lastContextMax;
     doc["tokens"]      = st.lastTokenCount;
+    doc["meanLogprob"] = st.lastMeanLogprob;   // Phase 2 confidence (0 = no signal)
+    doc["confTokens"]  = st.lastConfTokens;
     static char* jbuf = nullptr;
     if (!jbuf) jbuf = (char*)ps_alloc(512, AllocPref::PreferPSRAM, "llmstatus.json");
     if (!jbuf) return "{\"error\":\"oom\"}";
@@ -2115,6 +2311,12 @@ static const SettingEntry llmSettingEntries[] = {
   { "mirostatEta",   SETTING_FLOAT,  &gSettings.llmMirostatEta,   0, 0.1f, nullptr,    0,    0, "Mirostat Eta",         nullptr, false, nullptr, "llmmirostateta"   },
   { "dynTemp",       SETTING_BOOL,   &gSettings.llmDynTemp,       0, 0,    nullptr,    0,    0, "Dynamic Temp",         nullptr, false, nullptr, "llmdyntemp"       },
   { "defaultModel",  SETTING_STRING, &gSettings.llmDefaultModel,  0, 0,    "model.bin",0,    0, "Default Model",        nullptr, false, nullptr, "llmdefaultmodel"  },
+  // ── APPEND-ONLY below this line ───────────────────────────────────────────
+  // The CLI setting commands (LLM_SETTING_CMD) map to this table by INDEX, so
+  // inserting mid-table silently misroutes every command after the insert point.
+  // New settings go HERE, at the end, with a matching macro+command index below.
+  { "minP",          SETTING_FLOAT,  &gSettings.llmMinP,          0, 0.0f, nullptr,    0,    1, "Min-P (0=off)",        nullptr, false, nullptr, "llmminp"   },  // idx 13
+  { "kvPrecision",   SETTING_INT,    &gSettings.llmKvPrecision,   0, 0,    nullptr,    0,    2, "KV Cache (0=FP32,1=FP16,2=INT8, reload to apply)", nullptr, false, nullptr, "llmkvprec" },  // idx 14
 };
 
 extern const SettingsModule llmSettingsModule = {
@@ -2143,6 +2345,8 @@ LLM_SETTING_CMD(cmd_llm_mirostattau,   9)
 LLM_SETTING_CMD(cmd_llm_mirostateta,  10)
 LLM_SETTING_CMD(cmd_llm_dyntemp,      11)
 LLM_SETTING_CMD(cmd_llm_defaultmodel, 12)
+LLM_SETTING_CMD(cmd_llm_minp,         13)
+LLM_SETTING_CMD(cmd_llm_kvprec,       14)
 
 const CommandEntry llmCommands[] = {
   { "llmstatus",        "Show LLM engine status",               false, cmd_llm_status },
@@ -2152,6 +2356,7 @@ const CommandEntry llmCommands[] = {
   { "llmgenerate",      "Generate text from prompt",            false, cmd_llm_generate,     "Usage: llmgenerate <prompt text>" },
   { "llmresult",        "Poll streamed generation (JSON)",      false, cmd_llm_result,       "Usage: llmresult json <offset>" },
   { "llmstop",          "Stop in-progress generation",          false, cmd_llm_stop },
+  { "llmcorrupttest",   "Debug: force corruption-recovery test", true, cmd_llm_corrupt_test },
   { "llmclear",         "Reset the LLM conversation",           false, cmd_llm_clear },
   { "llmretry",         "Regenerate the last reply (JSON)",     false, cmd_llm_retry },
   { "llmturns",         "Read a conversation turn (JSON)",      false, cmd_llm_turns,        "Usage: llmturns json <index>" },
@@ -2168,6 +2373,8 @@ const CommandEntry llmCommands[] = {
   { "llmmirostateta",   "Set Mirostat learning rate",           true,  cmd_llm_mirostateta,  "Usage: llmmirostateta <0.01-0.5>" },
   { "llmdyntemp",       "Enable/disable dynamic temperature",   true,  cmd_llm_dyntemp,      "Usage: llmdyntemp <0|1>" },
   { "llmdefaultmodel",  "Set default model filename",           true,  cmd_llm_defaultmodel, "Usage: llmdefaultmodel <filename.bin>" },
+  { "llmminp",          "Set min-p sampling floor (0=off)",     true,  cmd_llm_minp,         "Usage: llmminp <0.0-1.0>" },
+  { "llmkvprec",        "KV cache precision (0=FP32,1=FP16)",   true,  cmd_llm_kvprec,       "Usage: llmkvprec <0|1>  (reload model to apply)" },
 };
 const size_t llmCommandsCount = sizeof(llmCommands) / sizeof(llmCommands[0]);
 

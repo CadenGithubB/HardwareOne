@@ -96,6 +96,25 @@ struct TransformerWeights {
 // Run State — activation buffers and KV cache
 // ============================================================================
 
+// KV-cache storage precision, chosen at model load (RunState binding + forward()
+// branch on it). FP32 = baseline. FP16 = half the PSRAM, ~no quality loss, no
+// scales. INT8 reserved (not yet implemented; selecting it falls back to FP32).
+enum KVPrecision : uint8_t { KV_FP32 = 0, KV_FP16 = 1, KV_INT8 = 2 };
+
+// Total cold-block bytes for the KV cache (K+V) at the given precision and ctx.
+// INT8 also carries per-(layer,pos,kv-head) scales (FP32), 4-byte aligned after
+// the int8 data. Single source of truth shared by sizing, alloc, and binding.
+static inline size_t llmKvCacheBytes(uint8_t prec, int L, int ctx, int kv_dim, int n_kv_heads) {
+  if (prec == KV_INT8) {
+    size_t data = 2 * (size_t)L * ctx * kv_dim;        // int8 K + V
+    data = (data + 3u) & ~(size_t)3u;                  // align the trailing FP32 scales
+    size_t scales = 2 * (size_t)L * ctx * (size_t)n_kv_heads * sizeof(float);
+    return data + scales;
+  }
+  size_t elem = (prec == KV_FP16) ? sizeof(uint16_t) : sizeof(float);
+  return 2 * (size_t)L * ctx * kv_dim * elem;
+}
+
 struct RunState {
   float* x;          // activation at current position (dim,)
   float* xb;         // same, inside a residual branch (dim,)
@@ -103,8 +122,24 @@ struct RunState {
   float* hb;         // buffer for hidden dimension in ffn (hidden_dim,)
   float* hb2;        // buffer for hidden dimension in ffn (hidden_dim,)
   float* q;          // query (dim,)
-  float* key_cache;  // (layer, seq_len, kv_dim)
-  float* value_cache;// (layer, seq_len, kv_dim)
+  float* key_cache;  // FP32 KV cache (layer, seq_len, kv_dim) — used when kvPrecision==FP32
+  float* value_cache;// FP32 KV cache (layer, seq_len, kv_dim) — used when kvPrecision==FP32
+  // FP16 KV cache (half-float storage). Used when kvPrecision==FP16; the FP32
+  // pointers above are null in that mode (and vice-versa). att/logits stay FP32.
+  uint16_t* key_cache_f16;
+  uint16_t* value_cache_f16;
+  // INT8 KV cache (per-kv-head symmetric quant). Used when kvPrecision==INT8;
+  // null otherwise. Scales are per (layer, position, kv-head): max|x|/127.
+  int8_t*   key_cache_q8;
+  int8_t*   value_cache_q8;
+  float*    key_scales;      // (n_layers * seq_ctx * n_kv_heads)
+  float*    value_scales;    // (n_layers * seq_ctx * n_kv_heads)
+  // Working scratch for non-FP32 KV: linear() emits FP32 into k_tmp/v_tmp, then
+  // we pack into the cache; kv_deq dequantizes a head-slice on read. Hot block,
+  // only carved when kvPrecision != FP32 (nullptr otherwise → no DRAM cost).
+  float* k_tmp;      // (kv_dim,)
+  float* v_tmp;      // (kv_dim,)
+  float* kv_deq;     // (head_size,)
   float* att;        // attention scores (n_heads, seq_len)
   float* logits;     // output logits (vocab_size,)
   // RoPE scratch (Llama). rope_inv: per-dim inverse frequencies, constant —
@@ -182,12 +217,16 @@ struct LLMRuntime {
   int lastTokCount;
   int lastContextUsed;   // prompt + generated tokens in last run
   int lastContextMax;    // KV cache capacity for last run
+  float lastMeanLogprob; // Phase 2: mean log-prob of generated tokens (0 = no signal). Less negative = more confident.
+  int lastConfTokens;    // Phase 2: # generated tokens that contributed to lastMeanLogprob
   char modelPath[64];
   char errorMsg[128];
 
   // Effective context for KV cache (<= config.seq_len); may be capped by requestedMaxCtx
   int seq_ctx;
   int requestedMaxCtx;   // set by llmLoadModel before loadWeights is called
+  uint8_t kvPrecision;   // KVPrecision: KV-cache storage format, set at load from gSettings.llmKvPrecision
+  volatile bool injectCorruptOnce;  // debug: llmcorrupttest sets this to force one RunState corruption next generation
 
   // Repetition penalty ring buffer (allocated at model load, reused per generation)
   int* repBuf;
@@ -212,3 +251,12 @@ void  llmPsramFree(void** ptr);
 // Set gLLM.errorMsg (printf-style). Does NOT change runState — callers that
 // also transition to ERROR keep doing that explicitly.
 void  setLlmError(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+
+// Re-derive all RunState pointers (s->x .. s->logits) from the two surviving
+// base blocks (gLLM.stateHotData / gLLM.stateData) using gLLM.config + seq_ctx.
+// Single source of truth for state-pointer binding: called once at model load
+// and again as a recovery step if forward() detects a zeroed RunState pointer
+// (memory-corruption soft-recovery). Returns false if a base block is gone or
+// the config is unusable — in that case only a full reload can recover.
+// Defined in System_LLM_Model.cpp.
+bool  llmBindRunState();

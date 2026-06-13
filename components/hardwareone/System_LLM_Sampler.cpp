@@ -33,7 +33,7 @@ static int sample_argmax(const float* probabilities, int n) {
   return max_i;
 }
 
-static int sample_topp(float* probabilities, int n, float topp) {
+static int sample_topp(float* probabilities, int n, float topp, float* outChosenProb = nullptr) {
   // Top-p (nucleus) sampling: only consider the smallest set of tokens whose
   // cumulative probability exceeds topp.  This prunes the long tail of low-
   // probability tokens that cause garbled / random output.
@@ -49,8 +49,9 @@ static int sample_topp(float* probabilities, int n, float topp) {
     float cdf = 0.0f;
     for (int i = 0; i < n; i++) {
       cdf += probabilities[i];
-      if (cdf > r) return i;
+      if (cdf > r) { if (outChosenProb) *outChosenProb = probabilities[i]; return i; }
     }
+    if (outChosenProb) *outChosenProb = probabilities[n - 1];
     return n - 1;
   }
   for (int i = 0; i < n; i++) indices[i] = i;
@@ -99,10 +100,12 @@ static int sample_topp(float* probabilities, int n, float topp) {
   float cdf = 0.0f;
   int result = indices[nucleus_n - 1]; // fallback to last in nucleus
   int result_rank = nucleus_n - 1;
+  float chosen_prob = probabilities[nucleus_n - 1];
   for (int i = 0; i < nucleus_n; i++) {
     cdf += probabilities[i];
-    if (cdf > r) { result = indices[i]; result_rank = i; break; }
+    if (cdf > r) { result = indices[i]; result_rank = i; chosen_prob = probabilities[i]; break; }
   }
+  if (outChosenProb) *outChosenProb = chosen_prob;
 
   DEBUG_LLM_GENERATEF("[LLM]   sampled tok=%d at rank=%d/%d (r=%.4f)",
                       result, result_rank, nucleus_n, r / cumsum);
@@ -110,8 +113,11 @@ static int sample_topp(float* probabilities, int n, float topp) {
   return result;
 }
 
-int sample(float* logits, int vocab_size, float temperature, float topp) {
+int sample(float* logits, int vocab_size, float temperature, float topp, float minp,
+           float* outChosenProb) {
+  if (outChosenProb) *outChosenProb = -1.0f;  // default: no signal
   if (temperature == 0.0f) {
+    // Greedy: no softmax computed, so no confidence signal (left at -1.0f).
     int tok = sample_argmax(logits, vocab_size);
     DEBUG_LLM_GENERATEF("[LLM] sample: greedy (temp=0) -> tok=%d logit=%.2f", tok, logits[tok]);
     return tok;
@@ -150,6 +156,28 @@ int sample(float* logits, int vocab_size, float temperature, float topp) {
   DEBUG_LLM_GENERATEF("[LLM] sample: temp=%.2f topp=%.2f pre_logit=[%.1f,%.1f] top_prob=%.3f(tok=%d) entropy=%.1f bits",
                       temperature, topp, pre_min, pre_max, max_prob, max_prob_id, entropy);
 
+  // Min-p: when active (minp>0) keep only tokens with prob >= minp * p_max — a
+  // relative floor that adapts to the model's confidence (tight when it's sure,
+  // looser when it isn't). Replaces top-p for this token. logits[] holds
+  // probabilities here. minp==0 falls through to the existing top-p path, so this
+  // is a clean A/B toggle.
+  if (minp > 0.0f) {
+    float thresh = minp * max_prob;
+    float mass = 0.0f;
+    for (int q = 0; q < vocab_size; q++) {
+      if (logits[q] < thresh) logits[q] = 0.0f; else mass += logits[q];
+    }
+    DEBUG_LLM_GENERATEF("[LLM] min-p: floor=%.4f (minp=%.2f x pmax=%.3f) kept_mass=%.3f",
+                        thresh, minp, max_prob, mass);
+    float r = ((float)esp_random() / (float)UINT32_MAX) * mass;
+    float cdf = 0.0f;
+    for (int q = 0; q < vocab_size; q++) {
+      if (logits[q] > 0.0f) { cdf += logits[q]; if (cdf > r) { if (outChosenProb) *outChosenProb = logits[q]; return q; } }
+    }
+    if (outChosenProb) *outChosenProb = max_prob;  // float-rounding fallback
+    return max_prob_id;  // float-rounding fallback: the most likely token
+  }
+
   if (topp <= 0.0f || topp >= 1.0f) {
     // Simple random sample (no top-p filtering)
     //DEBUG_LLM_GENERATEF("[LLM] sample: categorical (topp=%.2f, no nucleus filter)", topp);
@@ -157,12 +185,13 @@ int sample(float* logits, int vocab_size, float temperature, float topp) {
     float cdf = 0.0f;
     for (int i = 0; i < vocab_size; i++) {
       cdf += logits[i];
-      if (cdf > r) return i;
+      if (cdf > r) { if (outChosenProb) *outChosenProb = logits[i]; return i; }
     }
+    if (outChosenProb) *outChosenProb = logits[vocab_size - 1];
     return vocab_size - 1;
   }
 
-  return sample_topp(logits, vocab_size, topp);
+  return sample_topp(logits, vocab_size, topp, outChosenProb);
 }
 
 // Mirostat v2 sampling — adaptive surprise targeting.
