@@ -278,15 +278,21 @@ to gate UI (don't show a thermal-camera page if `compiled:false`). Can exceed
 - `source` — `"rtc"` | `"ntp"` | `"none"`. `rtc_temp_c` present only with an RTC.
 - `synced:false` → show "time not set".
 
-**`battery json`** — battery telemetry for a battery widget:
+**`batterystatus json`** — battery telemetry for a battery widget. **Identical schema
+on every interface** (CLI/BLE `batterystatus json` and web `/api/battery/status` share
+one core builder).
 ```json
-{"v":1,"voltage":3.97,"percentage":82,"status":"Discharging","charging":false,
- "usbPresent":true,"vbusSense":true,"lastReadMsAgo":1200,
- "backend":"adc","rawADC":2450}
+{"v":1,"present":true,"backend":"fuelgauge","voltage":3.97,"percentage":82,
+ "status":"Discharging","charging":false,"usbPresent":true,"vbusSense":true,
+ "lastReadMsAgo":1200,"ratePctPerHr":-4.2,"etaMinutes":1170}
 ```
-- `backend` — `"adc"` | `"fuelgauge"` | `"usb-only"`. With `"adc"` you get
-  `rawADC`; with `"fuelgauge"` you get `cratePctPerHr` (charge rate %/hr);
-  `"usb-only"` means no battery hardware (treat percentage as nominal).
+- **`present`** — the availability gate. `false` (or `backend:"usb-only"`) means
+  **no battery hardware** → hide the battery card.
+- `backend` — `"fuelgauge"` | `"adc"` | `"usb-only"`. `fuelgauge` adds
+  `ratePctPerHr` (charge rate %/hr) and, while discharging, `etaMinutes`;
+  `adc` adds `rawADC`; `usb-only` = no battery (treat `percentage` as nominal).
+- `percentage` 0–100 (may be fractional; round for display). `status` is a
+  short label (`Charging`/`Discharging`/`Full`/…).
 - `vbusSense:false` → `usbPresent`/`charging` are inferred from voltage, not a
   real USB-detect pin (slightly less reliable).
 
