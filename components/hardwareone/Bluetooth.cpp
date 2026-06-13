@@ -511,6 +511,22 @@ static uint8_t bleMessageHead = 0;
 void bleAddMessageToHistory(const char* msg);
 #endif
 
+// True if the command line is a filesystem-browser verb. These move file
+// contents and paths over the link, so they must run only over the app-layer
+// Secure Channel — see the gate in processBleCommandLine. The boundary check
+// (NUL or space after the verb) keeps "files" from matching "fileread" etc.
+static bool bleIsFileBrowserCommand(const char* line) {
+  static const char* kVerbs[] = {
+    "files", "fileread", "filewrite", "fileview", "filecreate",
+    "filedelete", "filerename", "mkdir", "rmdir"
+  };
+  for (const char* v : kVerbs) {
+    size_t n = strlen(v);
+    if (strncasecmp(line, v, n) == 0 && (line[n] == '\0' || line[n] == ' ')) return true;
+  }
+  return false;
+}
+
 // Command tail — runs on cmd_exec_task (deep stack), called directly for plaintext
 // commands or by the deferred secure-channel handler after a DATA frame is decrypted.
 // `data` is already plaintext here (no secure-channel parsing in this function).
@@ -646,6 +662,18 @@ static void processBleCommandLine(uint16_t connId, const char* data, size_t len)
       bleSendAuthRequired(connId);
       return;
     }
+  }
+
+  // Secure Channel gate for the file browser. File contents and paths must never
+  // cross the link in cleartext, so these commands require an established Secure
+  // Channel regardless of the global plaintext setting. When the command arrived
+  // as a decrypted DATA frame the channel is already established (bleScEstablished
+  // is true), so this only rejects the cleartext path. The operator must have set
+  // a `blesecret` for the app to be able to establish the channel.
+  if (bleIsFileBrowserCommand(cmdStart) && !bleScEstablished(connId)) {
+    const char* msg = "{\"success\":false,\"error\":\"secure_channel_required\"}";
+    sendBLEResponseToConn(connId, msg, strlen(msg));
+    return;
   }
 
   // Execute command via central cmd_exec task (avoids BTC_TASK stack overflow)
