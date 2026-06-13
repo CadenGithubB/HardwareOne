@@ -13,6 +13,7 @@
 #pragma once
 
 #include "System_LLM.h"
+#include "System_LLM_Kernels.h"   // QuantTensor
 #include <cstdint>
 #include <cstddef>
 #include "freertos/FreeRTOS.h"
@@ -81,6 +82,14 @@ struct TransformerWeights {
     size_t w3_data;  size_t w3_sc;  // up
   };
   Q4LayerOffsets* q4_offsets;  // array of n_layers (null entries for INT8 layers)
+
+  // ── Prepackaged weights for linear() ──
+  // Per-layer attention + FFN matrices with offsets resolved at load time, so
+  // forward() indexes instead of recomputing pointers every token. Built by
+  // buildLayerTensors() after all the raw pointers above are set.
+  struct LayerTensors { QuantTensor wq, wk, wv, wo, w1, w2, w3; };
+  LayerTensors* layerT;   // array[n_layers]
+  QuantTensor   clsT;     // classifier (wcls)
 };
 
 // ============================================================================

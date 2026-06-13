@@ -34,3 +34,23 @@ void wmatmul(float* xout, const float* x,
              const float* fp, const int8_t* i8, const float* sc,
              const uint8_t* q4, const float* q4_sc,
              int gs, int n, int d);
+
+// A weight matrix packaged for linear(): exactly one of {fp, i8, q4} is set,
+// with offsets already resolved. Built once at model load (buildLayerTensors)
+// so forward() doesn't recompute per-layer offsets on every token.
+struct QuantTensor {
+  const float*   fp;     // FP32 weights, or null
+  const int8_t*  i8;     // INT8 data, or null
+  const float*   sc;     // INT8 per-group scales, or null
+  const uint8_t* q4;     // INT4 packed data, or null
+  const float*   q4_sc;  // INT4 per-group scales, or null
+  int gs;                // quant group_size
+  int n, d;              // w(d,n) @ x(n,) -> out(d,)
+};
+
+// Matrix-vector product with a prepackaged weight. Identical to the wmatmul
+// call it forwards to — same dispatch, offsets resolved at load instead of
+// per token.
+inline void linear(float* out, const float* x, const QuantTensor& w) {
+  wmatmul(out, x, w.fp, w.i8, w.sc, w.q4, w.q4_sc, w.gs, w.n, w.d);
+}
