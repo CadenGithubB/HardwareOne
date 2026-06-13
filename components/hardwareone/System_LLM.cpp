@@ -355,10 +355,8 @@ static float* forward(int token, int pos) {
   }
 
   // Forward through all layers
-  int fwd_q8_li = 0;  // Q8 layer index for mixed mode (= l for pure INT8)
-
   for (int l = 0; l < p->n_layers; l++) {
-    const bool isQ4Layer = (w->layer_quant && w->layer_quant[l] == 2);
+    const TransformerWeights::LayerTensors& T = w->layerT[l];
 
     // Attention norm (LayerNorm for GPT-2, RMSNorm for Llama)
     if (isGPT2) {
@@ -372,60 +370,10 @@ static float* forward(int token, int pos) {
     float* key_cache_row = s->key_cache + loff + pos * kv_dim;
     float* value_cache_row = s->value_cache + loff + pos * kv_dim;
 
-    // FP32 offsets (used when qt==0; FP32 ptrs are null otherwise)
-    size_t fp_lD2  = (size_t)l * dim * dim;
-    size_t fp_lDkv = (size_t)l * dim * kv_dim;
-    size_t fp_lDH  = (size_t)l * (size_t)dim * hidden_dim;
-
-    // Q8 offsets: indexed by fwd_q8_li (= l for pure INT8; sparse for mixed mode)
-    size_t q8_lD2   = (size_t)fwd_q8_li * dim * dim;
-    size_t q8_lDkv  = (size_t)fwd_q8_li * dim * kv_dim;
-    size_t q8_lDH   = (size_t)fwd_q8_li * (size_t)dim * hidden_dim;
-    size_t q8_scWQ  = gs ? q8_lD2  / gs : 0;
-    size_t q8_scWKV = gs ? q8_lDkv / gs : 0;
-    size_t q8_scWO  = q8_scWQ;
-    size_t q8_scWDH = gs ? q8_lDH  / gs : 0;
-
-    // Q4 pointers for this layer (null unless this is a Q4 layer)
-    const uint8_t* q4wq = nullptr; const float* q4wq_s = nullptr;
-    const uint8_t* q4wk = nullptr; const float* q4wk_s = nullptr;
-    const uint8_t* q4wv = nullptr; const float* q4wv_s = nullptr;
-    const uint8_t* q4wo = nullptr; const float* q4wo_s = nullptr;
-    const uint8_t* q4w1 = nullptr; const float* q4w1_s = nullptr;
-    const uint8_t* q4w2 = nullptr; const float* q4w2_s = nullptr;
-    const uint8_t* q4w3 = nullptr; const float* q4w3_s = nullptr;
-
-    if (isQ4Layer) {
-      const auto& off = w->q4_offsets[l];
-      q4wq = w->q4_data + off.wq_data;  q4wq_s = w->q4_scales + off.wq_sc;
-      q4wk = w->q4_data + off.wk_data;  q4wk_s = w->q4_scales + off.wk_sc;
-      q4wv = w->q4_data + off.wv_data;  q4wv_s = w->q4_scales + off.wv_sc;
-      q4wo = w->q4_data + off.wo_data;  q4wo_s = w->q4_scales + off.wo_sc;
-      q4w1 = w->q4_data + off.w1_data;  q4w1_s = w->q4_scales + off.w1_sc;
-      q4w2 = w->q4_data + off.w2_data;  q4w2_s = w->q4_scales + off.w2_sc;
-      q4w3 = w->q4_data + off.w3_data;  q4w3_s = w->q4_scales + off.w3_sc;
-    }
-
-    // Q8 pointers (null if this is a Q4 layer)
-    const int8_t* i8_wq  = (!isQ4Layer && w->wq_i8)  ? w->wq_i8  + q8_lD2   : nullptr;
-    const float*  sc_wq  = (!isQ4Layer && w->wq_sc)   ? w->wq_sc  + q8_scWQ   : nullptr;
-    const int8_t* i8_wk  = (!isQ4Layer && w->wk_i8)   ? w->wk_i8  + q8_lDkv  : nullptr;
-    const float*  sc_wk  = (!isQ4Layer && w->wk_sc)    ? w->wk_sc  + q8_scWKV  : nullptr;
-    const int8_t* i8_wv  = (!isQ4Layer && w->wv_i8)   ? w->wv_i8  + q8_lDkv  : nullptr;
-    const float*  sc_wv  = (!isQ4Layer && w->wv_sc)    ? w->wv_sc  + q8_scWKV  : nullptr;
-    const int8_t* i8_wo  = (!isQ4Layer && w->wo_i8)   ? w->wo_i8  + q8_lD2   : nullptr;
-    const float*  sc_wo  = (!isQ4Layer && w->wo_sc)    ? w->wo_sc  + q8_scWO   : nullptr;
-
-    // QKV matmuls
-    wmatmul(s->q,          s->xb,
-            w->wq  ? w->wq  + fp_lD2  : nullptr, i8_wq, sc_wq,
-            q4wq, q4wq_s, gs, dim, dim);
-    wmatmul(key_cache_row, s->xb,
-            w->wk  ? w->wk  + fp_lDkv : nullptr, i8_wk, sc_wk,
-            q4wk, q4wk_s, gs, dim, kv_dim);
-    wmatmul(value_cache_row, s->xb,
-            w->wv  ? w->wv  + fp_lDkv : nullptr, i8_wv, sc_wv,
-            q4wv, q4wv_s, gs, dim, kv_dim);
+    // QKV matmuls (weights prepackaged at load — see buildLayerTensors)
+    linear(s->q,            s->xb, T.wq);
+    linear(key_cache_row,   s->xb, T.wk);
+    linear(value_cache_row, s->xb, T.wv);
 
     // Debug: Q/K/V matmul outputs
     if (FORWARD_DBG_POS(pos)) {
@@ -576,9 +524,7 @@ static float* forward(int token, int pos) {
     }
 
     // Output projection
-    wmatmul(s->xb2, s->xb,
-            w->wo  ? w->wo  + fp_lD2 : nullptr, i8_wo, sc_wo,
-            q4wo, q4wo_s, gs, dim, dim);
+    linear(s->xb2, s->xb, T.wo);
 
     // Residual connection
     for (int i = 0; i < dim; i++) s->x[i] += s->xb2[i];
@@ -598,19 +544,9 @@ static float* forward(int token, int pos) {
       rmsnorm(s->xb, s->x, w->rms_ffn_weight + l * dim, dim);
     }
 
-    // FFN Q8 pointers for w1/w2/w3 (null if Q4 layer)
-    const int8_t* i8_w1 = (!isQ4Layer && w->w1_i8) ? w->w1_i8 + q8_lDH : nullptr;
-    const float*  sc_w1 = (!isQ4Layer && w->w1_sc)  ? w->w1_sc + q8_scWDH : nullptr;
-    const int8_t* i8_w2 = (!isQ4Layer && w->w2_i8) ? w->w2_i8 + q8_lDH : nullptr;
-    const float*  sc_w2 = (!isQ4Layer && w->w2_sc)  ? w->w2_sc + q8_scWDH : nullptr;
-    const int8_t* i8_w3 = (!isQ4Layer && w->w3_i8) ? w->w3_i8 + q8_lDH : nullptr;
-    const float*  sc_w3 = (!isQ4Layer && w->w3_sc)  ? w->w3_sc + q8_scWDH : nullptr;
-
     if (isGPT2) {
       // GPT-2 FFN: up projection → GELU → down projection (no gate)
-      wmatmul(s->hb, s->xb,
-              w->w3  ? w->w3  + fp_lDH : nullptr, i8_w3, sc_w3,
-              q4w3, q4w3_s, gs, dim, hidden_dim);
+      linear(s->hb, s->xb, T.w3);
 
       // Debug: pre-GELU activation range (dead neurons = all near-zero or clamped)
       if (FORWARD_DBG_POS(pos)) {
@@ -636,26 +572,18 @@ static float* forward(int token, int pos) {
         (void)ag;
       }
 
-      wmatmul(s->xb, s->hb,
-              w->w2  ? w->w2  + fp_lDH : nullptr, i8_w2, sc_w2,
-              q4w2, q4w2_s, gs, hidden_dim, dim);
+      linear(s->xb, s->hb, T.w2);
     } else {
       // Llama FFN: SwiGLU (gate * silu(up)) → down
-      wmatmul(s->hb,  s->xb,
-              w->w1  ? w->w1  + fp_lDH : nullptr, i8_w1, sc_w1,
-              q4w1, q4w1_s, gs, dim, hidden_dim);
-      wmatmul(s->hb2, s->xb,
-              w->w3  ? w->w3  + fp_lDH : nullptr, i8_w3, sc_w3,
-              q4w3, q4w3_s, gs, dim, hidden_dim);
+      linear(s->hb,  s->xb, T.w1);
+      linear(s->hb2, s->xb, T.w3);
       for (int i = 0; i < hidden_dim; i++) {
         float val = s->hb[i];
         val *= (1.0f / (1.0f + expf(-val)));
         val *= s->hb2[i];
         s->hb[i] = val;
       }
-      wmatmul(s->xb,  s->hb,
-              w->w2  ? w->w2  + fp_lDH : nullptr, i8_w2, sc_w2,
-              q4w2, q4w2_s, gs, hidden_dim, dim);
+      linear(s->xb,  s->hb, T.w2);
     }
 
     // Residual
@@ -672,7 +600,6 @@ static float* forward(int token, int pos) {
       }
     }
 
-    if (!isQ4Layer) fwd_q8_li++;
   }
 
   // Final norm (LayerNorm for GPT-2, RMSNorm for Llama)
@@ -689,9 +616,7 @@ static float* forward(int token, int pos) {
   }
 
   // Classifier into logits (always FP32 or Q8, never Q4)
-  wmatmul(s->logits, s->x,
-          w->wcls, w->wcls_i8, w->wcls_sc,
-          nullptr, nullptr, gs, dim, p->vocab_size);
+  linear(s->logits, s->x, w->clsT);
 
   // Dump logit distribution stats — healthy model has wide spread and clear top candidates.
   // Flat/uniform logits = broken weights. NaN = numerical explosion.
@@ -815,6 +740,7 @@ void llmUnload() {
   llmPsramFree((void**)&gLLM.weights.q4_scales);
   llmPsramFree((void**)&gLLM.weights.layer_quant);
   llmPsramFree((void**)&gLLM.weights.q4_offsets);
+  llmPsramFree((void**)&gLLM.weights.layerT);
   llmPsramFree((void**)&gLLM.stateData);
   if (gLLM.stateHotData) {
     heap_caps_free(gLLM.stateHotData);

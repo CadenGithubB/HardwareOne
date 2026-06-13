@@ -706,6 +706,95 @@ static bool allocateRunState(LoadContext& ctx) {
   return true;
 }
 
+static inline QuantTensor mkTensor(const float* fp, const int8_t* i8, const float* sc,
+                                   const uint8_t* q4, const float* q4_sc,
+                                   int gs, int n, int d) {
+  QuantTensor t; t.fp=fp; t.i8=i8; t.sc=sc; t.q4=q4; t.q4_sc=q4_sc; t.gs=gs; t.n=n; t.d=d;
+  return t;
+}
+
+// Prepackage per-layer attention + FFN weights (and the classifier) into
+// QuantTensors with offsets resolved once, so forward() indexes instead of
+// recomputing pointers every token. The offset math mirrors exactly what
+// forward() used to do inline — stored pointer values are identical, so output
+// is byte-for-byte unchanged. Call after all raw weight pointers are set.
+static bool buildLayerTensors() {
+  const LLMConfig* p   = &gLLM.config;
+  TransformerWeights* w = &gLLM.weights;
+  const int dim        = p->dim;
+  const int kv_dim     = (p->dim * p->n_kv_heads) / p->n_heads;
+  const int hidden_dim = p->hidden_dim;
+  const int gs         = p->group_size;
+  const int L          = p->n_layers;
+
+  w->layerT = (TransformerWeights::LayerTensors*)llmPsramAlloc(
+                (size_t)L * sizeof(TransformerWeights::LayerTensors), "llm.layerT");
+  if (!w->layerT) return false;
+
+  int q8_li = 0;  // Q8 layer index (= l for pure INT8; sparse for mixed Q4/Q8)
+  for (int l = 0; l < L; l++) {
+    const bool isQ4 = (w->layer_quant && w->layer_quant[l] == 2);
+
+    const size_t fp_lD2  = (size_t)l * dim * dim;
+    const size_t fp_lDkv = (size_t)l * dim * kv_dim;
+    const size_t fp_lDH  = (size_t)l * (size_t)dim * hidden_dim;
+    const size_t q8_lD2  = (size_t)q8_li * dim * dim;
+    const size_t q8_lDkv = (size_t)q8_li * dim * kv_dim;
+    const size_t q8_lDH  = (size_t)q8_li * (size_t)dim * hidden_dim;
+    const size_t scWQ  = gs ? q8_lD2  / gs : 0;
+    const size_t scWKV = gs ? q8_lDkv / gs : 0;
+    const size_t scWDH = gs ? q8_lDH  / gs : 0;
+
+    const TransformerWeights::Q4LayerOffsets* off = isQ4 ? &w->q4_offsets[l] : nullptr;
+    TransformerWeights::LayerTensors& T = w->layerT[l];
+
+    T.wq = mkTensor(w->wq ? w->wq + fp_lD2 : nullptr,
+                    (!isQ4 && w->wq_i8) ? w->wq_i8 + q8_lD2 : nullptr,
+                    (!isQ4 && w->wq_sc) ? w->wq_sc + scWQ  : nullptr,
+                    isQ4 ? w->q4_data + off->wq_data : nullptr,
+                    isQ4 ? w->q4_scales + off->wq_sc : nullptr, gs, dim, dim);
+    T.wk = mkTensor(w->wk ? w->wk + fp_lDkv : nullptr,
+                    (!isQ4 && w->wk_i8) ? w->wk_i8 + q8_lDkv : nullptr,
+                    (!isQ4 && w->wk_sc) ? w->wk_sc + scWKV  : nullptr,
+                    isQ4 ? w->q4_data + off->wk_data : nullptr,
+                    isQ4 ? w->q4_scales + off->wk_sc : nullptr, gs, dim, kv_dim);
+    T.wv = mkTensor(w->wv ? w->wv + fp_lDkv : nullptr,
+                    (!isQ4 && w->wv_i8) ? w->wv_i8 + q8_lDkv : nullptr,
+                    (!isQ4 && w->wv_sc) ? w->wv_sc + scWKV  : nullptr,
+                    isQ4 ? w->q4_data + off->wv_data : nullptr,
+                    isQ4 ? w->q4_scales + off->wv_sc : nullptr, gs, dim, kv_dim);
+    T.wo = mkTensor(w->wo ? w->wo + fp_lD2 : nullptr,
+                    (!isQ4 && w->wo_i8) ? w->wo_i8 + q8_lD2 : nullptr,
+                    (!isQ4 && w->wo_sc) ? w->wo_sc + scWQ  : nullptr,
+                    isQ4 ? w->q4_data + off->wo_data : nullptr,
+                    isQ4 ? w->q4_scales + off->wo_sc : nullptr, gs, dim, dim);
+    T.w1 = mkTensor(w->w1 ? w->w1 + fp_lDH : nullptr,
+                    (!isQ4 && w->w1_i8) ? w->w1_i8 + q8_lDH : nullptr,
+                    (!isQ4 && w->w1_sc) ? w->w1_sc + scWDH : nullptr,
+                    isQ4 ? w->q4_data + off->w1_data : nullptr,
+                    isQ4 ? w->q4_scales + off->w1_sc : nullptr, gs, dim, hidden_dim);
+    T.w2 = mkTensor(w->w2 ? w->w2 + fp_lDH : nullptr,
+                    (!isQ4 && w->w2_i8) ? w->w2_i8 + q8_lDH : nullptr,
+                    (!isQ4 && w->w2_sc) ? w->w2_sc + scWDH : nullptr,
+                    isQ4 ? w->q4_data + off->w2_data : nullptr,
+                    isQ4 ? w->q4_scales + off->w2_sc : nullptr, gs, hidden_dim, dim);
+    T.w3 = mkTensor(w->w3 ? w->w3 + fp_lDH : nullptr,
+                    (!isQ4 && w->w3_i8) ? w->w3_i8 + q8_lDH : nullptr,
+                    (!isQ4 && w->w3_sc) ? w->w3_sc + scWDH : nullptr,
+                    isQ4 ? w->q4_data + off->w3_data : nullptr,
+                    isQ4 ? w->q4_scales + off->w3_sc : nullptr, gs, dim, hidden_dim);
+
+    if (!isQ4) q8_li++;
+  }
+
+  // Classifier — always FP32 or INT8, never Q4 — (n=dim, d=vocab_size).
+  w->clsT = mkTensor(w->wcls, w->wcls_i8, w->wcls_sc, nullptr, nullptr,
+                     gs, dim, p->vocab_size);
+
+  DEBUG_LLM_LOADF("[LLM] Built %d layer tensor sets + classifier for linear()", L);
+  return true;
+}
+
 bool loadWeights(const char* path) {
   File f = VFS::openGuarded(path, "r", VFS::systemAuth("llm.load_weights"));
   if (!f) {
@@ -1212,6 +1301,9 @@ bool loadWeights(const char* path) {
 
   // ---- Allocate run state ----
   if (!allocateRunState(ctx)) return false;
+
+  // ---- Prepackage per-layer weights for linear() ----
+  if (!buildLayerTensors()) return false;
 
   return true;
 }
