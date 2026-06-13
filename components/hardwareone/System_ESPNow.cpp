@@ -1269,15 +1269,21 @@ void espnowMeshesWriteJson(JsonDocument& doc, bool excludePasswords) {
     JsonObject e = meshesArr.add<JsonObject>();
     e["label"]     = m.label;
     if (!excludePasswords) {
-      e["passphrase"] = m.passphrase;
+      // At-rest AES (device key) — was plaintext. The bond-sync path uses
+      // excludePasswords=true, so this only encrypts the persisted settings.json;
+      // peers are never sent this device-key-encrypted blob.
+      putSecret(e, "passphrase", m.passphrase);
     }
     e["enabled"]   = m.enabled;
     e["isDefault"] = m.isDefault;
-    // Phase 3.1: persist the PBKDF2-stretched hash in hex. Irreversible, so
-    // safe at rest in plaintext. Wrap the hex buffer in String() to force
-    // deep-copy into ArduinoJson's pool — the stack `hex[]` goes out of
-    // scope before serializeJson() runs (task #14 fix).
-    if (m.passphraseHashValid) {
+    // The PBKDF2-stretched hash IS the mesh key material — the group/bootstrap
+    // keys derive directly from it (System_ESPNow_MeshKeys.cpp). It is NOT a
+    // harmless "irreversible digest": anyone who reads it derives the group key
+    // WITHOUT the passphrase. So encrypt it at rest (device key) like the
+    // passphrase, and keep it OUT of the sync/web (excludePasswords) paths. If
+    // it's absent on load, the hash is re-stretched from the passphrase at boot
+    // — so dropping it from those paths is safe.
+    if (!excludePasswords && m.passphraseHashValid) {
       char hex[65];
       static const char* kHex = "0123456789abcdef";
       for (int k = 0; k < 32; k++) {
@@ -1285,7 +1291,7 @@ void espnowMeshesWriteJson(JsonDocument& doc, bool excludePasswords) {
         hex[k * 2 + 1] = kHex[m.passphraseHashPbkdf2[k] & 0xF];
       }
       hex[64] = '\0';
-      e["passphraseHashPbkdf2"] = String(hex);
+      putSecret(e, "passphraseHashPbkdf2", String(hex));
     }
   }
 #if ENABLE_BONDED_MODE
@@ -1311,15 +1317,16 @@ void espnowMeshesReadJson(JsonDocument& doc) {
     for (JsonObjectConst e : meshesArr) {
       if (idx >= Settings::N_MESHES) break;
       gSettings.meshes[idx].label      = String((const char*)(e["label"]      | ""));
-      gSettings.meshes[idx].passphrase = String((const char*)(e["passphrase"] | ""));
+      gSettings.meshes[idx].passphrase = getSecret(e, "passphrase");  // decrypt at-rest AES
       gSettings.meshes[idx].enabled    = e["enabled"]   | false;
       gSettings.meshes[idx].isDefault  = e["isDefault"] | false;
       // Phase 3.1: load the cached PBKDF2 hash if present. Hex-decode strict;
       // any malformed value falls back to "no cached hash" (will trigger a
       // re-stretch at boot) rather than refusing to load settings.
       gSettings.meshes[idx].passphraseHashValid = false;
-      const char* hashHex = e["passphraseHashPbkdf2"] | (const char*)nullptr;
-      if (hashHex && strlen(hashHex) == 64) {
+      String hashHex = getSecret(e, "passphraseHashPbkdf2");  // decrypt at-rest AES (key material)
+      if (hashHex.length() == 64) {
+        const char* hp = hashHex.c_str();
         auto nyb = [](char c) -> int {
           if (c >= '0' && c <= '9') return c - '0';
           if (c >= 'a' && c <= 'f') return c - 'a' + 10;
@@ -1328,8 +1335,8 @@ void espnowMeshesReadJson(JsonDocument& doc) {
         };
         bool ok = true;
         for (int k = 0; k < 32 && ok; k++) {
-          int hi = nyb(hashHex[k * 2]);
-          int lo = nyb(hashHex[k * 2 + 1]);
+          int hi = nyb(hp[k * 2]);
+          int lo = nyb(hp[k * 2 + 1]);
           if (hi < 0 || lo < 0) { ok = false; break; }
           gSettings.meshes[idx].passphraseHashPbkdf2[k] = (uint8_t)((hi << 4) | lo);
         }

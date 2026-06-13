@@ -1030,6 +1030,16 @@ String encryptString(const String& plaintext);
 String decryptString(const String& encrypted);
 String getDeviceEncryptionKey();
 
+// JSON-field secret helpers — the uniform way to (de)serialize a *recoverable*
+// secret inside an ArduinoJson object: encrypt-on-write / decrypt-on-read with
+// the device key. This is the array/struct-field equivalent of a SettingEntry's
+// `isSecret` flag (which only covers scalar registered settings). Use these for
+// any secret stored inside a JSON array/object — WiFi network passwords, mesh
+// passphrases, etc. — so the at-rest encryption can't be forgotten or drift.
+// (For binary keys / manually-written files, call encryptString directly.)
+void   putSecret(JsonObject obj, const char* key, const String& plaintext);
+String getSecret(JsonObjectConst obj, const char* key);
+
 // Device fingerprint for backup compatibility checking
 // One-way hash derived from device encryption key — safe to include in backups
 String getDeviceFingerprint();

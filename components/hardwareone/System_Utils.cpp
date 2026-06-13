@@ -961,7 +961,11 @@ void logCommandExecution(const AuthContext& ctx, const char* cmd, bool success, 
   snprintf(auditLine, sizeof(auditLine), "[CMD] %s@%s: %s -> %s %s",
            ctx.user.c_str(), source, redactedCmd.c_str(), status, resultBuf);
   extern void broadcastOutputCore_Routed(const char* text, size_t len, uint8_t route);
-  broadcastOutputCore_Routed(auditLine, strlen(auditLine), MSG_ROUTE_ALL);
+  // Exclude BLE: its notify characteristic is the command *response* channel that
+  // the app reads JSON replies from. Echoing the "[CMD] …" audit line onto it
+  // interleaves with the reply (e.g. {"v":1,...}[CMD] dev@bluetooth: …). The audit
+  // still reaches serial / web / file / OLED / G2.
+  broadcastOutputCore_Routed(auditLine, strlen(auditLine), MSG_ROUTE_ALL & ~MSG_ROUTE_BLE);
 }
 
 // Automation logging
@@ -1617,7 +1621,7 @@ void buildSystemInfoJson(JsonDocument& doc, bool includeDeviceList) {
     // unbounded section. Built by the SAME helper that backs `devices json`
     // (defined in System_I2C.cpp) so the two views never diverge.
     if (includeDeviceList) {
-      extern void buildI2cDeviceListJson(JsonArray& arr);
+      extern void buildI2cDeviceListJson(JsonArray& arr, bool verbose = false);
       JsonArray devs = i2c["deviceList"].to<JsonArray>();
       buildI2cDeviceListJson(devs);
     }

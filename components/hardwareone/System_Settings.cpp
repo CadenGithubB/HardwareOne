@@ -214,8 +214,11 @@ const char* cmd_httpAutoStart(const String& argsInput);
 const char* cmd_httpsEnabled(const String& argsInput);
 #endif
 
+const char* cmd_controls(const String& argsInput);  // defined below; machine-readable control descriptor
+
 // Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry settingsCommands[] = {
+  { "controls", "Per-module control descriptor (JSON): controls json [module]", false, cmd_controls, "Usage: controls json <module>  (e.g. 'controls json imu'); 'controls json' lists modules" },
 #if ENABLE_WIFI
   // ---- WiFi Network Settings ----
   { "wifitxpower", "Set WiFi TX power: <dBm>", true, cmd_wifitxpower },
@@ -530,6 +533,20 @@ String decryptString(const String& encryptedPassword) {
 
   DEBUG_STORAGEF("[AES] String decrypted successfully (len=%d)", output.length());
   return output;
+}
+
+// JSON-field secret helpers (declared in System_Settings.h). Encrypt-on-write /
+// decrypt-on-read for recoverable secrets stored inside a JSON object — the
+// array/struct equivalent of a SettingEntry isSecret flag. Empty plaintext is
+// stored as "" (not an encrypted blob), and getSecret returns "" for an absent
+// or empty field (decryptString already rejects non-"AES:" input).
+void putSecret(JsonObject obj, const char* key, const String& plaintext) {
+  obj[key] = plaintext.length() ? encryptString(plaintext) : String("");
+}
+
+String getSecret(JsonObjectConst obj, const char* key) {
+  const char* enc = obj[key] | "";
+  return decryptString(String(enc));
 }
 
 // ============================================================================
@@ -976,9 +993,7 @@ void buildSettingsJsonDoc(JsonDocument& doc, bool excludePasswords) {
       
       // Security: Encrypt passwords in file, exclude from web API
       if (!excludePasswords) {
-        // Encrypt password for filesystem storage (protects against file access)
-        String encryptedPassword = encryptString(gWifiNetworks[i].password);
-        net["password"] = encryptedPassword;
+        putSecret(net, "password", gWifiNetworks[i].password);  // at-rest AES (device key)
       }
       // For web API (excludePasswords=true), password field is omitted entirely
       
@@ -1200,7 +1215,7 @@ bool readSettingsJson() {
       
       if (ssid && password) {
         gWifiNetworks[gWifiNetworkCount].ssid = ssid;
-        gWifiNetworks[gWifiNetworkCount].password = decryptString(password);
+        gWifiNetworks[gWifiNetworkCount].password = getSecret(net, "password");
         gWifiNetworks[gWifiNetworkCount].priority = priority;
         gWifiNetworks[gWifiNetworkCount].hidden = hidden;
         gWifiNetworks[gWifiNetworkCount].lastConnected = lastConnected;
@@ -2235,6 +2250,98 @@ const char* handleSettingCommand(const SettingEntry* entry, const String& argsIn
 // transport across the bond). One source of truth means master and worker
 // emit identical JSON shapes by construction.
 // ============================================================================
+
+// ============================================================================
+// controls json — per-module control descriptor (metadata + CURRENT value)
+// ============================================================================
+// Drives the app's sensor/feature control panels: each entry carries the
+// control type + range/options AND the live value, so sliders/steppers/selects/
+// toggles render at their real position and two-way-bind. Set a value by
+// sending `<key> <value>` — command matching is case-insensitive, so the
+// camelCase jsonKey works directly as the command. Scoped to ONE module; the
+// full settings surface across all modules would exceed the return/BLE buffer.
+// Contract: docs/BLE_SENSOR_CONTROLS_CONTRACT.md.
+static void buildModuleControlsJson(JsonDocument& doc, const char* moduleName) {
+  doc["v"] = 1;
+  doc["module"] = moduleName;
+  JsonArray entries = doc["entries"].to<JsonArray>();
+  size_t modCount = 0;
+  const SettingsModule** mods = getSettingsModules(modCount);
+  for (size_t mi = 0; mi < modCount; mi++) {
+    const SettingsModule* m = mods[mi];
+    if (!m || !m->name || strcasecmp(m->name, moduleName) != 0) continue;
+    if (m->description) doc["name"] = m->description;
+    for (size_t i = 0; i < m->count; i++) {
+      const SettingEntry* e = &m->entries[i];
+      if (!e || !e->jsonKey || !e->valuePtr || e->isSecret) continue;  // never expose secrets
+      JsonObject o = entries.add<JsonObject>();
+      o["key"]   = e->jsonKey;                          // also the set command (case-insensitive)
+      o["label"] = e->label ? e->label : e->jsonKey;
+      switch (e->type) {
+        case SETTING_INT:    o["type"] = "int";    o["value"] = *(int*)e->valuePtr; break;
+        case SETTING_U8:     o["type"] = "int";    o["value"] = (int)*(uint8_t*)e->valuePtr; break;
+        case SETTING_U16:    o["type"] = "int";    o["value"] = (int)*(uint16_t*)e->valuePtr; break;
+        case SETTING_U32:    o["type"] = "int";    o["value"] = (uint32_t)*(uint32_t*)e->valuePtr; break;
+        case SETTING_FLOAT:  o["type"] = "float";  o["value"] = *(float*)e->valuePtr; break;
+        case SETTING_BOOL:   o["type"] = "bool";   o["value"] = *(bool*)e->valuePtr; break;
+        case SETTING_STRING: o["type"] = "string"; o["value"] = *(String*)e->valuePtr; break;
+      }
+      if (e->type != SETTING_BOOL && e->type != SETTING_STRING &&
+          (e->minVal != 0 || e->maxVal != 0)) {
+        o["min"] = e->minVal;
+        o["max"] = e->maxVal;
+      }
+      if (e->options)  o["options"]  = e->options;   // comma-separated -> select
+      if (e->readOnly) o["readOnly"] = true;
+      if (e->group)    o["group"]    = e->group;
+    }
+    return;  // module found + emitted
+  }
+  doc["error"] = "unknown module";
+}
+
+// `controls json <module>` -> that module's controls (metadata + current value).
+// `controls json` (no module) -> the list of available module names.
+const char* cmd_controls(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String args = argsInput; args.trim();
+
+  if (!argWantsJson(args)) {
+    return "Usage: controls json <module>   (e.g. 'controls json imu')\n"
+           "       controls json            (lists available modules)";
+  }
+
+  // Extract the module token (the first non-'json' token).
+  String module = "";
+  int start = 0;
+  while (start < (int)args.length()) {
+    int sp = args.indexOf(' ', start);
+    if (sp < 0) sp = args.length();
+    String tok = args.substring(start, sp);
+    tok.trim();
+    if (tok.length() && !tok.equalsIgnoreCase("json")) { module = tok; break; }
+    start = sp + 1;
+  }
+
+  PSRAM_JSON_DOC(doc);
+  if (module.length() == 0) {
+    doc["v"] = 1;
+    JsonArray arr = doc["modules"].to<JsonArray>();
+    size_t modCount = 0;
+    const SettingsModule** mods = getSettingsModules(modCount);
+    for (size_t mi = 0; mi < modCount; mi++) {
+      if (mods[mi] && mods[mi]->name) arr.add(mods[mi]->name);
+    }
+  } else {
+    buildModuleControlsJson(doc, module.c_str());
+  }
+
+  static char* controlsJsonBuf = nullptr;
+  if (!controlsJsonBuf) controlsJsonBuf = (char*)ps_alloc(4096, AllocPref::PreferPSRAM, "controls.json");
+  if (!controlsJsonBuf) return "{\"error\":\"oom\"}";
+  serializeJson(doc, controlsJsonBuf, 4096);
+  return controlsJsonBuf;
+}
 
 void buildSettingsSchemaJson(JsonDocument& doc) {
   JsonArray modules = doc["modules"].to<JsonArray>();

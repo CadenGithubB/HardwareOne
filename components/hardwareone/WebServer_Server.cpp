@@ -2666,39 +2666,21 @@ esp_err_t handleUserSettingsSet(httpd_req_t* req) {
 esp_err_t handleDeviceRegistryGet(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
 
-  extern ConnectedDevice connectedDevices[];
-  extern int connectedDeviceCount;
-  extern int discoveryCount;
-
   httpd_resp_set_type(req, "application/json");
   httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
 
-  String regContent = "{";
-  regContent += "\"lastDiscovery\":" + String((unsigned long)millis()) + ",";
-  regContent += "\"discoveryCount\":" + String(discoveryCount) + ",";
-  regContent += "\"devices\":[";
-  for (int i = 0; i < connectedDeviceCount; i++) {
-    ConnectedDevice& dev = connectedDevices[i];
-    char hexAddr[5];
-    snprintf(hexAddr, sizeof(hexAddr), "0x%02X", dev.address);
-    if (i > 0) regContent += ",";
-    regContent += "{";
-    regContent += "\"address\":" + String(dev.address) + ",";
-    regContent += "\"addressHex\":\"" + String(hexAddr) + "\",";
-    regContent += "\"name\":\"" + String(dev.name) + "\",";
-    regContent += "\"description\":\"" + String(dev.description) + "\",";
-    regContent += "\"manufacturer\":\"" + String(dev.manufacturer) + "\",";
-    regContent += "\"bus\":" + String(dev.bus) + ",";
-    regContent += "\"isConnected\":";
-    regContent += dev.isConnected ? "true" : "false";
-    regContent += ",\"lastSeen\":" + String((unsigned long)dev.lastSeen);
-    regContent += ",\"firstDiscovered\":" + String((unsigned long)dev.firstDiscovered);
-    regContent += "}";
-  }
-  regContent += "]}";
-
-  DEBUG_HTTPF("/api/devices len=%u", (unsigned)regContent.length());
-  httpd_resp_send(req, regContent.c_str(), HTTPD_RESP_USE_STRLEN);
+  // Single source of truth — same builder the `devicefile` CLI command uses,
+  // so /api/devices and devicefile can never diverge. Byte-compatible schema.
+  static char* buf = nullptr;
+  static const size_t kBufSize = 4096;
+  if (!buf) buf = (char*)ps_alloc(kBufSize, AllocPref::PreferPSRAM, "api.devices.json");
+  if (!buf) { httpd_resp_send(req, "{}", HTTPD_RESP_USE_STRLEN); return ESP_OK; }
+  PSRAM_JSON_DOC(doc);
+  extern void buildDeviceRegistryJson(JsonDocument& doc);  // System_I2C.cpp
+  buildDeviceRegistryJson(doc);
+  serializeJson(doc, buf, kBufSize);
+  DEBUG_HTTPF("/api/devices len=%u", (unsigned)strlen(buf));
+  httpd_resp_send(req, buf, HTTPD_RESP_USE_STRLEN);
   return ESP_OK;
 }
 
