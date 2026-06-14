@@ -2020,8 +2020,8 @@ const char* cmd_user_list(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!filesystemReady) return "Error: LittleFS not ready";
 
-  // Check if JSON output is requested (just check for "json" in args)
-  bool jsonOutput = (argsInput.indexOf("json") >= 0);
+  // Check if JSON output is requested (word-boundary "json" token via argWantsJson)
+  bool jsonOutput = argWantsJson(argsInput);
   
   DEBUG_USERSF("[USER_LIST_DEBUG] Called with args='%s', jsonOutput=%d", argsInput.c_str(), jsonOutput);
 
@@ -2097,7 +2097,7 @@ const char* cmd_pending_list(const String& argsInput) {
   if (!filesystemReady) return "Error: LittleFS not ready";
 
   // Check if JSON output is requested
-  bool jsonOutput = (argsInput.indexOf("json") >= 0);
+  bool jsonOutput = argWantsJson(argsInput);
 
   if (!VFS::existsGuarded(PENDING_USERS_FILE, VFS::systemAuth("user.pending.list"))) {
     if (jsonOutput) return "[]";
@@ -2178,7 +2178,7 @@ const char* cmd_session_list(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   // Check if JSON output is requested
-  bool jsonOutput = (argsInput.indexOf("json") >= 0);
+  bool jsonOutput = argWantsJson(argsInput);
 
   if (jsonOutput) {
     // Use static PSRAM buffer - 2KB sufficient for session list

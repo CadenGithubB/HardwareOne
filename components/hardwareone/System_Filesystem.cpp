@@ -550,8 +550,10 @@ const char* cmd_files(const String& argsInput) {
   if (args == "stats" || args.startsWith("stats ")) {
     String rest = (args.length() > 5) ? args.substring(6) : String("");
     rest.trim();
-    if (rest == "json")              rest = "";
-    else if (rest.startsWith("json ")) { rest = rest.substring(5); rest.trim(); }
+    if (argLeadingTokenIsJson(rest)) {
+      rest = (rest == "json") ? String("") : rest.substring(5);
+      rest.trim();
+    }
     String path = rest.length() ? rest : String("/");
     static char statsBuf[160];
     buildFilesStatsJson(path, statsBuf, sizeof(statsBuf));
@@ -559,9 +561,9 @@ const char* cmd_files(const String& argsInput) {
   }
 
   // `files json [path]` — directory listing as JSON (companion app / BLE).
-  if (args == "json") return filesListingJsonForApp("/");
-  if (args.startsWith("json ")) {
-    String path = args.substring(5);
+  // Leading-token (not argWantsJson): a path may itself contain a "json" token.
+  if (argLeadingTokenIsJson(args)) {
+    String path = (args == "json") ? String("") : args.substring(5);
     path.trim();
     if (path.length() == 0) path = "/";
     return filesListingJsonForApp(path);
