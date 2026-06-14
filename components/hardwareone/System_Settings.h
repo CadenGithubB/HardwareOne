@@ -284,6 +284,7 @@ struct Settings {
       systemLogCategoryTags(true),
       cameraAutoStart(false),  // Camera does NOT auto-start by default
       microphoneAutoStart(false),  // Microphone does NOT auto-start by default
+      llmAutoStart(false),  // On-device LLM does NOT auto-load a model by default
       microphoneSampleRate(16000),
       microphoneGain(70),
       microphoneBitDepth(16),
@@ -817,6 +818,9 @@ struct Settings {
   bool systemLogCategoryTags;   // Prefix log lines with [CATEGORY] tags
   bool cameraAutoStart;         // Auto-start ESP32-S3 camera after boot
   bool microphoneAutoStart;     // Auto-start ESP32-S3 PDM microphone after boot
+  // NOTE: kept OUTSIDE the #if ENABLE_ONDEVICE_LLM block below so the always-
+  // compiled feature registry can reference &gSettings.llmAutoStart in any build.
+  bool llmAutoStart;            // Auto-load the default LLM model at boot (default: false)
   // Microphone settings
   int microphoneSampleRate;     // Sample rate in Hz (8000, 16000, 22050, 44100, 48000)
   int microphoneGain;           // Software gain 0-100% (default 90)
