@@ -1,4 +1,5 @@
 #include "System_BuildConfig.h"
+#include "System_Filesystem.h"  // requireQuotedPath (uniform quoted-path rule)
 #include "System_Maps.h"
 
 #if ENABLE_MAPS
@@ -1901,9 +1902,12 @@ const char* cmd_mapload(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   CommandArgs a(argsInput);
-  if (!a.hasMinArgs(1)) return "Usage: mapload <path>";
+  String path;
+  const char* qerr = requireQuotedToken(a, 0, path);
+  if (qerr) return qerr;
+  if (a.has(1)) return "Error: unexpected argument — usage: mapload \"<path>\"";
 
-  if (MapCore::loadMapFile(a.arg(0).c_str())) {
+  if (MapCore::loadMapFile(path.c_str())) {
     const LoadedMap& currentMap = MapCore::getCurrentMap();
     if (!ensureDebugBuffer()) return "Map loaded";
     snprintf(getDebugBuffer(), 1024, "Loaded: %s (%lu features)", 
@@ -3065,11 +3069,14 @@ const char* cmd_waypointfile(const String& argsInput) {
 
   CommandArgs a(argsInput);
   if (!a.hasMinArgs(2)) {
-    return "Usage: waypointfile <file> <wpName>\n   or: waypointfile <file> <lat> <lon> [wpName]";
+    return "Usage: waypointfile \"<file>\" <wpName>\n   or: waypointfile \"<file>\" <lat> <lon> [wpName]";
   }
 
+  String filePathStr;
+  const char* qerr = requireQuotedToken(a, 0, filePathStr);
+  if (qerr) return qerr;
   char filepath[WAYPOINT_FILE_PATH_LEN];
-  strlcpy(filepath, a.arg(0).c_str(), sizeof(filepath));
+  strlcpy(filepath, filePathStr.c_str(), sizeof(filepath));
 
   // Determine format: is arg(1) a numeric latitude?
   // strtof returns endptr == start if no conversion was performed.
@@ -3310,14 +3317,14 @@ const char* cmd_maporganize(const String& argsInput) {
 // Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry mapCommands[] = {
   {"map", "Show current map info", false, cmd_map, nullptr},
-  {"mapload", "Load map file: <path>", false, cmd_mapload, nullptr},
+  {"mapload", "Load map file: \"<path>\"", false, cmd_mapload, nullptr},
   {"mapunload", "Unload current map (free PSRAM on device)", false, cmd_mapunload, nullptr},
   {"maplist", "List available maps", false, cmd_maplist, nullptr},
   {"whereami", "Show current location context", false, cmd_whereami, nullptr},
   {"search", "Search map features: <name>", false, cmd_search, nullptr},
   {"waypoint", "Manage waypoints: <list|add|del|goto|clear>", false, cmd_waypoint, nullptr},
   {"gpstrack", "Manage GPS tracks: <status|load|clear>", false, cmd_gpstrack, nullptr},
-  {"waypointfile", "Link file to waypoint: <file> <wpName>", false, cmd_waypointfile, nullptr},
+  {"waypointfile", "Link file to waypoint: \"<file>\" <wpName>", false, cmd_waypointfile, nullptr},
   {"waypointfiles", "Waypoint files: <name> [del <idx>]", false, cmd_waypointfiles, nullptr},
   {"maporganize", "Organize map files in /maps into subdirectories", false, cmd_maporganize, nullptr}
 };

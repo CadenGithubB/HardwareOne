@@ -570,47 +570,15 @@ const char* cmd_images(const String& argsInput) {
   return buf;
 }
 
-const char* cmd_imageview(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  
-  String path = argsInput;
-  path.trim();
-  
-  if (path.length() == 0) {
-    return "Usage: imageview <path>";
-  }
-  
-  ImageInfo info;
-  if (!gImageManager.getImageInfo(path, info)) {
-    return "Image not found";
-  }
-  
-  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  char* buf = getDebugBuffer();
-  
-  snprintf(buf, 1024, 
-           "File: %s\n"
-           "Path: %s\n"
-           "Size: %lu bytes\n"
-           "Location: %s\n",
-           info.filename.c_str(),
-           info.fullPath.c_str(),
-           (unsigned long)info.size,
-           info.isOnSD ? "SD Card" : "LittleFS");
-  
-  return buf;
-}
-
 const char* cmd_imagedelete(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  String path = argsInput;
-  path.trim();
-  
-  if (path.length() == 0) {
-    return "Usage: imagedelete <path>";
-  }
-  
+  CommandArgs a(argsInput);
+  String path;
+  const char* qerr = requireQuotedToken(a, 0, path);
+  if (qerr) return qerr;
+  if (a.has(1)) return "Error: unexpected argument — usage: imagedelete \"<path>\"";
+
   if (gImageManager.deleteImage(path)) {
     return "Image deleted";
   }
@@ -640,9 +608,10 @@ const char* cmd_imagesend(const String& argsInput) {
     path = images.back().fullPath;
   } else {
     device = a.arg(0);
-    path = a.arg(1);
+    const char* qerr = requireQuotedToken(a, 1, path);
+    if (qerr) return qerr;
   }
-  
+
   // Use ESP-NOW file send (stubs return false when ESP-NOW disabled)
   uint8_t mac[6];
   if (!resolveDeviceNameOrMac(device, mac)) {
@@ -665,9 +634,8 @@ const char* cmd_imagesend(const String& argsInput) {
 extern const CommandEntry imageCommands[] = {
   {"capture", "Capture and save image: capture [littlefs|sd|both]", false, cmd_capture},
   {"images", "List saved images: images [littlefs|sd]", false, cmd_images},
-  {"imageview", "View image info: imageview <path>", false, cmd_imageview},
-  {"imagedelete", "Delete image: imagedelete <path>", true, cmd_imagedelete},
-  {"imagesend", "Send image via ESP-NOW: imagesend <device> [path]", false, cmd_imagesend},
+  {"imagedelete", "Delete image: imagedelete \"<path>\"", true, cmd_imagedelete},
+  {"imagesend", "Send image via ESP-NOW: imagesend <device> [\"<path>\"]", false, cmd_imagesend},
 };
 
 extern const size_t imageCommandsCount = sizeof(imageCommands) / sizeof(imageCommands[0]);
