@@ -14,7 +14,9 @@
 
 You compile and flash each ESP32 chip to fit a specific job — a smart-home sensor, a Smart Glasses companion gadget made to live in your pocket or backpack, a headless mesh node, a camera node that captures photos and beams them across the mesh, and many more. No matter what feature set a device is built for, every one of them speaks the same custom ESP-NOW protocol, letting them form a private, router-free mesh. And because each device brings its own capabilities to that mesh, they can pool their data and work together — turning a scattered collection of chips into one system you can monitor from a single dashboard.
 
-> Built on **ESP-IDF** (not Arduino IDE). Runs on the **Seeed XIAO ESP32-S3**, **Adafruit QT PY ESP32-S3**, and **Adafruit Feather ESP32** boards.
+On any single device, control works the same way no matter how you reach it: one command system — the CLI — issued over USB serial, a browser, the on-device screen + gamepad, Bluetooth, voice, or another node on the mesh. Same commands, same permission checks, every way in.
+
+> Built on **ESP-IDF** (not Arduino IDE). Runs on the **Seeed XIAO ESP32-S3**, **Unexpected Maker FeatherS3**, **Adafruit Feather ESP32**, and several other ESP32 / ESP32-S3 boards.
 
 ---
 
@@ -93,11 +95,14 @@ Hardware One can be used in several different ways depending on the hardware you
 
 Each device in your setup runs one board. Multiple boards can coexist on the same ESP-NOW mesh network simultaneously.
 
-| Board | Camera | PDM Mic | Battery monitor | Notes |
-| ----- | :----: | :-----: | :-------------: | ----- |
-| Seeed XIAO ESP32-S3 | ✅ | ✅ | ❌ | Primary dev target |
-| Adafruit QT PY ESP32-S3 | ✅ | ✅ | ❌ | Stemma QT onboard |
-| Adafruit Feather ESP32 | ❌ | ❌ | ✅ (GPIO35) | Good for battery builds |
+| Board | Flash / PSRAM | Camera | PDM Mic | Battery monitor | Notes |
+| ----- | :-----------: | :----: | :-----: | :-------------: | ----- |
+| Seeed XIAO ESP32-S3 (+ Sense) | 8 / 8 MB | ✅ | ✅ | ❌ | Camera, mic & microSD come on the Sense expansion. Primary dev target |
+| Unexpected Maker FeatherS3 | 16 / 8 MB | ❌ | ❌ | ✅ | Quad PSRAM; dual STEMMA QT (second I2C bus); onboard RGB LED; MAX17048 fuel gauge |
+| Adafruit Feather ESP32 V2 | 8 / 2 MB | ❌ | ❌ | ✅ (GPIO35) | Onboard NeoPixel + battery monitoring |
+| Adafruit QT Py ESP32 | 8 / 2 MB | ❌ | ❌ | ❌ | ESP32-PICO; STEMMA QT onboard; compact |
+
+> A **generic ESP32** fallback build also exists for unlisted boards — it compiles, but verify the I2C pins match your hardware.
 
 ### Peripherals — Stemma QT / I2C
 
