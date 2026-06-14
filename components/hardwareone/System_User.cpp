@@ -2027,14 +2027,14 @@ const char* cmd_user_list(const String& argsInput) {
 
   if (!VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth("user.list"))) {
     DEBUG_USERSF("[USER_LIST_DEBUG] File not found: %s", USERS_JSON_FILE);
-    return jsonOutput ? "[]" : "No users found";
+    return jsonOutput ? "{\"v\":1,\"users\":[]}" : "No users found";
   }
 
   // Open and parse users file with ArduinoJson
   File file = VFS::openGuarded(USERS_JSON_FILE, "r", VFS::systemAuth("user.list"));
   if (!file) {
     ERROR_SESSIONF("Failed to open users file");
-    if (jsonOutput) return "[]";
+    if (jsonOutput) return "{\"v\":1,\"users\":[]}";
     broadcastOutput("Error: Failed to read users file");
     return "ERROR";
   }
@@ -2046,7 +2046,7 @@ const char* cmd_user_list(const String& argsInput) {
 
   if (error) {
     ERROR_SESSIONF("JSON parse error: %s", error.c_str());
-    if (jsonOutput) return "[]";
+    if (jsonOutput) return "{\"v\":1,\"users\":[]}";
     broadcastOutput("Error: Malformed users file");
     return "ERROR";
   }
@@ -2054,7 +2054,7 @@ const char* cmd_user_list(const String& argsInput) {
   JsonArray users = doc["users"];
   if (!users) {
     DEBUG_USERSF("[USER_LIST_DEBUG] No users array found");
-    return jsonOutput ? "[]" : "No users found";
+    return jsonOutput ? "{\"v\":1,\"users\":[]}" : "No users found";
   }
 
   if (jsonOutput) {
@@ -2063,9 +2063,13 @@ const char* cmd_user_list(const String& argsInput) {
     static const size_t kBufSize = 2048;
     if (!jsonBuf) {
       jsonBuf = (char*)ps_alloc(kBufSize, AllocPref::PreferPSRAM, "user.list.json");
-      if (!jsonBuf) return "[]";
+      if (!jsonBuf) return "{\"v\":1,\"users\":[]}";
     }
-    size_t len = serializeJson(users, jsonBuf, kBufSize);
+    // Wrap under {"v":1,"users":[...]} for the object-only JSON contract.
+    PSRAM_JSON_DOC(out);
+    out["v"] = 1;
+    out["users"].set(users);
+    size_t len = serializeJson(out, jsonBuf, kBufSize);
     if (len >= kBufSize) {
       ERROR_MEMORYF("user list JSON truncated: %zu >= %zu", len, kBufSize);
     }
@@ -2100,7 +2104,7 @@ const char* cmd_pending_list(const String& argsInput) {
   bool jsonOutput = argWantsJson(argsInput);
 
   if (!VFS::existsGuarded(PENDING_USERS_FILE, VFS::systemAuth("user.pending.list"))) {
-    if (jsonOutput) return "[]";
+    if (jsonOutput) return "{\"v\":1,\"pending\":[]}";
     broadcastOutput("No pending users");
     return "OK";
   }
@@ -2108,7 +2112,7 @@ const char* cmd_pending_list(const String& argsInput) {
   // Open and parse pending users file with ArduinoJson
   File file = VFS::openGuarded(PENDING_USERS_FILE, "r", VFS::systemAuth("user.pending.list"));
   if (!file) {
-    if (jsonOutput) return "[]";
+    if (jsonOutput) return "{\"v\":1,\"pending\":[]}";
     ERROR_SESSIONF("Failed to read pending users file");
     broadcastOutput("Error: Failed to read pending users file");
     return "ERROR";
@@ -2120,7 +2124,7 @@ const char* cmd_pending_list(const String& argsInput) {
   file.close();
 
   if (error) {
-    if (jsonOutput) return "[]";
+    if (jsonOutput) return "{\"v\":1,\"pending\":[]}";
     ERROR_SESSIONF("Malformed pending users file");
     broadcastOutput("Error: Malformed pending users file");
     return "ERROR";
@@ -2128,7 +2132,7 @@ const char* cmd_pending_list(const String& argsInput) {
 
   JsonArray pending = doc.as<JsonArray>();
   if (!pending) {
-    return jsonOutput ? "[]" : "No pending users";
+    return jsonOutput ? "{\"v\":1,\"pending\":[]}" : "No pending users";
   }
 
   if (jsonOutput) {
@@ -2137,18 +2141,19 @@ const char* cmd_pending_list(const String& argsInput) {
     static const size_t kBufSize = 2048;
     if (!jsonBuf) {
       jsonBuf = (char*)ps_alloc(kBufSize, AllocPref::PreferPSRAM, "pending.list.json");
-      if (!jsonBuf) return "[]";
+      if (!jsonBuf) return "{\"v\":1,\"pending\":[]}";
     }
-    // Build sanitized output without password hashes
+    // Build sanitized {"v":1,"pending":[...]} object without password hashes.
     PSRAM_JSON_DOC(sanitized);
-    JsonArray sanitizedArray = sanitized.to<JsonArray>();
+    sanitized["v"] = 1;
+    JsonArray sanitizedArray = sanitized["pending"].to<JsonArray>();
     for (JsonObject user : pending) {
       JsonObject sanitizedUser = sanitizedArray.add<JsonObject>();
       sanitizedUser["username"] = user["username"];
       sanitizedUser["timestamp"] = user["timestamp"];
       // Explicitly exclude password field for security
     }
-    size_t len = serializeJson(sanitizedArray, jsonBuf, kBufSize);
+    size_t len = serializeJson(sanitized, jsonBuf, kBufSize);
     if (len >= kBufSize) {
       ERROR_MEMORYF("pending list JSON truncated: %zu >= %zu", len, kBufSize);
     }
@@ -2186,10 +2191,11 @@ const char* cmd_session_list(const String& argsInput) {
     static const size_t kBufSize = 2048;
     if (!jsonBuf) {
       jsonBuf = (char*)ps_alloc(kBufSize, AllocPref::PreferPSRAM, "session.list.json");
-      if (!jsonBuf) return "[]";
+      if (!jsonBuf) return "{\"v\":1,\"sessions\":[]}";
     }
     PSRAM_JSON_DOC(doc);
-    JsonArray sessions = doc.to<JsonArray>();
+    doc["v"] = 1;
+    JsonArray sessions = doc["sessions"].to<JsonArray>();
     buildAllSessionsJson("", sessions);
     // Append active transport (non-web) sessions as synthetic entries
     if (gSerialAuthed && gSerialUser.length()) {
@@ -2219,7 +2225,7 @@ const char* cmd_session_list(const String& argsInput) {
       t["transport"] = "bluetooth";
       t["sid"]       = String(connId);
     }
-    size_t len = serializeJson(sessions, jsonBuf, kBufSize);
+    size_t len = serializeJson(doc, jsonBuf, kBufSize);
     if (len >= kBufSize) {
       ERROR_MEMORYF("session list JSON truncated: %zu >= %zu", len, kBufSize);
     }

@@ -363,9 +363,10 @@ const char* cmd_wifiscan(const String& argsInput) {
   if (n < 0) return "WiFi scan failed";
 
   if (json) {
-    // Build JSON array and return it directly (for web API consumption)
+    // Build {"v":1,"networks":[...]} object (the array is carried under a key so
+    // it conforms to the object-only JSON contract; web/app read .networks).
     static String jsonResult;
-    jsonResult = "[";
+    jsonResult = "{\"v\":1,\"networks\":[";
     for (int i = 0; i < n; ++i) {
       if (i > 0) jsonResult += ",";
       char entry[256];
@@ -374,7 +375,7 @@ const char* cmd_wifiscan(const String& argsInput) {
                (long)WiFi.channel(i), (int)WiFi.encryptionType(i));
       jsonResult += entry;
     }
-    jsonResult += "]";
+    jsonResult += "]}";
     return jsonResult.c_str();
   } else {
     snprintf(getDebugBuffer(), 1024, "%d networks found:", n);
