@@ -840,6 +840,9 @@ void broadcastOutput(const String& s, const CommandContext& ctx) {
     case ORIGIN_WEB: source = "web"; break;
     case ORIGIN_AUTOMATION: source = "auto"; break;
     case ORIGIN_BLUETOOTH: source = "bluetooth"; break;
+    case ORIGIN_G2_HIJACK: source = "g2"; break;
+    case ORIGIN_ESPNOW: source = "espnow"; break;
+    case ORIGIN_LOCAL_DISPLAY: source = "oled"; break;
     case ORIGIN_SYSTEM:
     default: source = "system"; break;
   }

@@ -79,7 +79,7 @@ extern bool submitCommandAsync(const Command& cmd, ExecAsyncCallback callback, v
 static void queueAutomationSubCommand(const char* cmd, const char* owner, const char* autoName = nullptr) {
   Command uc;
   uc.line = cmd;
-  uc.ctx.origin = ORIGIN_SYSTEM;
+  uc.ctx.origin = ORIGIN_AUTOMATION;
   uc.ctx.auth.transport = SOURCE_INTERNAL;
   uc.ctx.auth.user = owner ? owner : "";
   DEBUGF(DEBUG_AUTOMATIONS, "[autos queue] Queueing cmd='%s' user='%s' automation='%s'",

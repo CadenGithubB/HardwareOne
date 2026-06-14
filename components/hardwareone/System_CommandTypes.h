@@ -22,11 +22,19 @@ enum CommandOrigin {
   ORIGIN_AUTOMATION,
   ORIGIN_SYSTEM,
   ORIGIN_BLUETOOTH,
-  ORIGIN_G2_HIJACK    // G2 glasses hijack UI — taps that mutate system state
+  ORIGIN_G2_HIJACK,   // G2 glasses hijack UI — taps that mutate system state
                       // are routed through cmd_exec_task via g2SubmitHijackCommand()
                       // (see G2_HijackCmd.h). Distinguished from ORIGIN_BLUETOOTH
                       // because G2 hijack has no logged-in user and a different
                       // audit path (/g2/hijack/...) than the BLE CLI characteristic.
+  ORIGIN_ESPNOW,      // remote command received from another node over ESP-NOW
+                      // (transport SOURCE_ESPNOW). Runs as the authenticated remote
+                      // user (ctx.auth.user), NOT system — origin is audit-only.
+                      // Split from ORIGIN_SYSTEM so remote command execution is
+                      // attributable in the audit trail.
+  ORIGIN_LOCAL_DISPLAY // command issued from the on-device OLED + gamepad UI
+                       // (transport SOURCE_LOCAL_DISPLAY). Split from ORIGIN_SYSTEM
+                       // for the same audit-attribution reason.
 };
 
 // Per-command output routing mask.
