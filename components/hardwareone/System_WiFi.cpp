@@ -366,7 +366,7 @@ const char* cmd_wifiscan(const String& argsInput) {
     // Build {"v":1,"networks":[...]} object (the array is carried under a key so
     // it conforms to the object-only JSON contract; web/app read .networks).
     static String jsonResult;
-    jsonResult = "{\"v\":1,\"networks\":[";
+    jsonResult = "{\"schema\":1,\"networks\":[";
     for (int i = 0; i < n; ++i) {
       if (i > 0) jsonResult += ",";
       char entry[256];

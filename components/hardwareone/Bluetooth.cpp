@@ -1692,7 +1692,7 @@ static const char* cmd_bleinfo(const String& argsInput) {
   if (argWantsJson(argsInput)) {
     bool init = (gBLEState && gBLEState->initialized);
     PSRAM_JSON_DOC(doc);
-    doc["v"]              = 1;
+    doc["schema"]              = 1;
     doc["deviceName"]     = gSettings.bleDeviceName;
     doc["txPower"]        = gSettings.bleTxPower;
     doc["autoStart"]      = gSettings.bluetoothAutoStart;

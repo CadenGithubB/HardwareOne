@@ -99,7 +99,7 @@ esp_err_t handleSensorData(httpd_req_t* req) {
 
       if (sensorType == "thermal") {
 #if !ENABLE_THERMAL_SENSOR
-        sendJsonResponse(req, "{\"v\":0, \"error\":\"not_compiled\"}");
+        sendJsonResponse(req, "{\"schema\":1,\"ok\":false, \"error\":\"not_compiled\"}");
         return ESP_OK;
 #endif
         // Preferred path: use shared response buffer (avoids large stack usage)
@@ -145,7 +145,8 @@ esp_err_t handleSensorData(httpd_req_t* req) {
 
           // Use ArduinoJson to avoid 768+ String concatenations
           PSRAM_JSON_DOC(doc);
-          doc["v"] = gThermalCache.thermalDataValid ? 1 : 0;
+          doc["schema"] = 1;
+          doc["ok"] = gThermalCache.thermalDataValid;
           doc["seq"] = gThermalCache.thermalSeq;
           doc["mn"] = serialized(String(gThermalCache.thermalMinTemp, 1));
           doc["mx"] = serialized(String(gThermalCache.thermalMaxTemp, 1));
@@ -177,7 +178,7 @@ esp_err_t handleSensorData(httpd_req_t* req) {
         return ESP_OK;
       } else if (sensorType == "tof") {
 #if !ENABLE_TOF_SENSOR
-        sendJsonResponse(req, "{\"v\":0, \"error\":\"not_compiled\"}");
+        sendJsonResponse(req, "{\"schema\":1,\"ok\":false, \"error\":\"not_compiled\"}");
         return ESP_OK;
 #endif
         // Always return ToF data, using stack-allocated buffer (no String allocations)
@@ -194,7 +195,7 @@ esp_err_t handleSensorData(httpd_req_t* req) {
         return ESP_OK;
       } else if (sensorType == "imu") {
 #if !ENABLE_IMU_SENSOR
-        sendJsonResponse(req, "{\"v\":0, \"error\":\"not_compiled\"}");
+        sendJsonResponse(req, "{\"schema\":1,\"ok\":false, \"error\":\"not_compiled\"}");
         return ESP_OK;
 #endif
         // Always return IMU data, using stack-allocated buffer (no String allocations)
@@ -277,7 +278,7 @@ esp_err_t handleSensorData(httpd_req_t* req) {
 #if ENABLE_FM_RADIO
         // FM radio data - use stack-allocated buffer
         if (!gFmRadioEnabled || !gRadioInitialized) {
-          sendJsonResponse(req, "{\"v\":0, \"error\":\"not_enabled\"}");
+          sendJsonResponse(req, "{\"schema\":1,\"ok\":false, \"error\":\"not_enabled\"}");
           return ESP_OK;
         }
 
@@ -291,11 +292,11 @@ esp_err_t handleSensorData(httpd_req_t* req) {
           httpd_resp_send(req, fmRadioResponseBuffer, jsonLen);
           return ESP_OK;
         } else {
-          sendJsonResponse(req, "{\"v\":0, \"error\":\"data_unavailable\"}");
+          sendJsonResponse(req, "{\"schema\":1,\"ok\":false, \"error\":\"data_unavailable\"}");
           return ESP_OK;
         }
 #else
-        sendJsonResponse(req, "{\"v\":0, \"error\":\"not_compiled\"}");
+        sendJsonResponse(req, "{\"schema\":1,\"ok\":false, \"error\":\"not_compiled\"}");
         return ESP_OK;
 #endif
       } else if (sensorType == "camera") {

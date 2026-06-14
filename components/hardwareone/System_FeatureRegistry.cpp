@@ -468,7 +468,7 @@ const char* cmd_features(const String& argsInput) {
   //          "enabled","toggleable"}, ...]}
   if (argWantsJson(argsInput)) {
     PSRAM_JSON_DOC(doc);
-    doc["v"] = 1;
+    doc["schema"] = 1;
     JsonArray arr = doc["features"].to<JsonArray>();
     for (size_t i = 0; i < featureRegistryCount; i++) {
       const FeatureEntry* f = &featureRegistry[i];

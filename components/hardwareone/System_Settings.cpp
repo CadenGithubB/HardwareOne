@@ -2262,7 +2262,7 @@ const char* handleSettingCommand(const SettingEntry* entry, const String& argsIn
 // full settings surface across all modules would exceed the return/BLE buffer.
 // Contract: docs/BLE_SENSOR_CONTROLS_CONTRACT.md.
 static void buildModuleControlsJson(JsonDocument& doc, const char* moduleName) {
-  doc["v"] = 1;
+  doc["schema"] = 1;
   doc["module"] = moduleName;
   JsonArray entries = doc["entries"].to<JsonArray>();
   size_t modCount = 0;
@@ -2325,7 +2325,7 @@ const char* cmd_controls(const String& argsInput) {
 
   PSRAM_JSON_DOC(doc);
   if (module.length() == 0) {
-    doc["v"] = 1;
+    doc["schema"] = 1;
     JsonArray arr = doc["modules"].to<JsonArray>();
     size_t modCount = 0;
     const SettingsModule** mods = getSettingsModules(modCount);

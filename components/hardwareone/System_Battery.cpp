@@ -452,7 +452,7 @@ char getBatteryIcon() {
 // (or backend "usb-only") means there's no battery hardware → the app/UI hides
 // the battery card. No secrets; safe on any transport.
 void buildBatteryJson(JsonDocument& doc) {
-  doc["v"]             = 1;
+  doc["schema"]             = 1;
   doc["present"]       = (gBatteryState.status != BATTERY_NOT_PRESENT);
 #if BATTERY_BACKEND_FUEL_GAUGE
   doc["backend"]       = "fuelgauge";
