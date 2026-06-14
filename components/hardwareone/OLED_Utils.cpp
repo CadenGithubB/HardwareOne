@@ -2600,7 +2600,7 @@ AuthContext oledAuthContext(const char* path) {
 static Command buildOLEDCommand(const String& cmdLine) {
   Command uc;
   uc.line = cmdLine;
-  uc.ctx.origin = ORIGIN_SYSTEM;
+  uc.ctx.origin = ORIGIN_LOCAL_DISPLAY;
   uc.ctx.auth = oledAuthContext("/oled/command");
   uc.ctx.id = (uint32_t)millis();
   uc.ctx.timestampMs = (uint32_t)millis();

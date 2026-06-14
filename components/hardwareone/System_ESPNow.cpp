@@ -4950,7 +4950,7 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
   // Build command for cmd_exec task
   Command cmd;
   cmd.line = actualCmd;
-  cmd.ctx.origin = ORIGIN_SYSTEM;
+  cmd.ctx.origin = ORIGIN_ESPNOW;
   cmd.ctx.auth.transport = SOURCE_ESPNOW;
   cmd.ctx.auth.path = actualCmd;
   cmd.ctx.auth.user = username;
