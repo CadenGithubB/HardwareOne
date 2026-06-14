@@ -1703,6 +1703,17 @@ void hardwareone_setup() {
   oledSetBootProgress(90, "Skipping HTTP");
 #endif
 
+  // On-device LLM - auto-load the default model at boot if enabled in settings.
+  // Mirrors the sensor/SR auto-start pattern (gSettings.<x>AutoStart -> runtime
+  // start command). Loading is heavy (PSRAM + time), so it's opt-in (default off).
+#if ENABLE_ONDEVICE_LLM
+  if (gSettings.llmAutoStart) {
+    broadcastOutput("Auto-loading on-device LLM model...");
+    String llmAutoCmd = "llmload " + gSettings.llmDefaultModel;
+    runUnifiedSystemCommand(llmAutoCmd);
+  }
+#endif
+
   // MQTT client - auto-start if enabled in settings and WiFi is connected
 #if ENABLE_MQTT
   if (gSettings.mqttClientEnabled && gSettings.mqttAutoStart) {

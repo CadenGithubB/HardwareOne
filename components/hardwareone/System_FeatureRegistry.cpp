@@ -196,6 +196,14 @@ static bool isEdgeImpulseCompiled() {
 #endif
 }
 
+static bool isLLMCompiled() {
+#if ENABLE_ONDEVICE_LLM
+  return true;
+#else
+  return false;
+#endif
+}
+
 // ============================================================================
 // Feature Registry - All System Features
 // ============================================================================
@@ -322,6 +330,17 @@ static const FeatureEntry featureRegistry[] = {
     FEATURE_FLAG_RUNTIME_TOGGLE,
     &gSettings.edgeImpulseEnabled, isEdgeImpulseCompiled,
     "ML inference for object detection (requires camera)" },
+
+  // On-device LLM is pure compute (no device/sensor), so it's filed under
+  // System rather than Sensor like its mic/camera-driven ML cousins above.
+  // Always listed (NOT #if'd) so `features json` reports compiled:false on
+  // builds without it — discoverable like a disconnected sensor. The runtime
+  // toggle (gSettings.llmAutoStart) controls auto-loading the default model at
+  // boot, matching every other feature's AutoStart/Enabled setting.
+  { "llm", "On-Device LLM", FEATURE_CAT_SYSTEM, 24,
+    FEATURE_FLAG_RUNTIME_TOGGLE,
+    &gSettings.llmAutoStart, isLLMCompiled,
+    "Tiny transformer text generation (ESP32-S3 + PSRAM)" },
 
   // === HARDWARE FEATURES (shown on first page) ===
   { "i2c", "I2C Bus", FEATURE_CAT_NETWORK, 4,

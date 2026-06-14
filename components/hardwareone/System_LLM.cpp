@@ -2113,7 +2113,7 @@ static const char* cmd_llm_generate(const String& args) {
   // tie up the BLE channel for the entire run and trip the app's watchdog).
   {
     String a = args; a.trim();
-    if (a == "json" || a.startsWith("json ")) {
+    if (argLeadingTokenIsJson(a)) {
       if (!llmIsReady()) return "{\"v\":1,\"ok\":false,\"error\":\"model not ready\"}";
       String prompt = a.startsWith("json ") ? a.substring(5) : String();
       prompt.trim();
@@ -2166,7 +2166,7 @@ static const char* cmd_llm_result(const String& args) {
   // whereas chatReadStream()/chatGetStreamLen() return 0 the instant the
   // streaming turn is finalized, which would silently drop the tail.
   String a = args; a.trim();
-  if (!(a == "json" || a.startsWith("json ")))
+  if (!argLeadingTokenIsJson(a))
     return "Usage: llmresult json <offset>";
 
   int offset = 0;
@@ -2242,7 +2242,7 @@ static const char* cmd_llm_turns(const String& args) {
   //    "tokens":T,"tokPerSec":F,"streaming":bool}
   //   out-of-range → {"v":1,"count":N,"index":I,"end":true}
   String a = args; a.trim();
-  if (!(a == "json" || a.startsWith("json ")))
+  if (!argLeadingTokenIsJson(a))
     return "Usage: llmturns json <index>";
 
   int index = 0;
@@ -2316,6 +2316,7 @@ static const SettingEntry llmSettingEntries[] = {
   // New settings go HERE, at the end, with a matching macro+command index below.
   { "minP",          SETTING_FLOAT,  &gSettings.llmMinP,          0, 0.0f, nullptr,    0,    1, "Min-P (0=off)",        nullptr, false, nullptr, "llmminp"   },  // idx 13
   { "kvPrecision",   SETTING_INT,    &gSettings.llmKvPrecision,   0, 0,    nullptr,    0,    2, "KV Cache (0=FP32,1=FP16,2=INT8, reload to apply)", nullptr, false, nullptr, "llmkvprec" },  // idx 14
+  { "autoStart",     SETTING_BOOL,   &gSettings.llmAutoStart,     0, 0,    nullptr,    0,    1, "Auto-start at boot",   nullptr, false, nullptr, "llmautostart" },  // idx 15
 };
 
 extern const SettingsModule llmSettingsModule = {
@@ -2346,11 +2347,13 @@ LLM_SETTING_CMD(cmd_llm_dyntemp,      11)
 LLM_SETTING_CMD(cmd_llm_defaultmodel, 12)
 LLM_SETTING_CMD(cmd_llm_minp,         13)
 LLM_SETTING_CMD(cmd_llm_kvprec,       14)
+LLM_SETTING_CMD(cmd_llm_autostart,    15)
 
 const CommandEntry llmCommands[] = {
   { "llmstatus",        "Show LLM engine status",               false, cmd_llm_status },
   { "llmload",          "Load model [model.bin]",               true,  cmd_llm_load,         "Usage: llmload [filename.bin]" },
   { "llmunload",        "Unload model and free PSRAM",          true,  cmd_llm_unload },
+  { "llmautostart",     "Auto-load default model at boot (0|1)", true,  cmd_llm_autostart,    "Usage: llmautostart <0|1>" },
   { "llmmodels",        "List available model files",           false, cmd_llm_models },
   { "llmgenerate",      "Generate text from prompt",            false, cmd_llm_generate,     "Usage: llmgenerate <prompt text>" },
   { "llmresult",        "Poll streamed generation (JSON)",      false, cmd_llm_result,       "Usage: llmresult json <offset>" },
