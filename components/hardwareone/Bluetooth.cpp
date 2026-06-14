@@ -484,8 +484,13 @@ static void bleLoginAsyncCallback(bool cmdExecOk, const char* result, void* user
   if (authOk) {
     BLE_DEBUGF(DEBUG_BLE_CORE, "Login success conn=%u user='%s'", (unsigned)job->connId, job->user);
     (void)bleBindSession(job->connId, String(job->user));
-    // Auto-enable BLE broadcast output on first authenticated session
-    gOutputFlags |= OUTPUT_BLE;
+    // BLE broadcast/console output stays OFF on connect by default: keeps the
+    // load down and the response characteristic clean (no [CMD] audit echo
+    // mixed into command replies) for RPC-style clients. The client opts in
+    // live with `outble 1` when it wants the streamed console, and `outble 0`
+    // to stop it. Disconnect re-clears OUTPUT_BLE regardless (see onDisconnect),
+    // so a left-on flag never persists across sessions. Boot default is
+    // OUTPUT_SERIAL only (HardwareOne.cpp), so it also starts OFF.
     char out[160];
     snprintf(out, sizeof(out), "[ble] Login successful. User: %s%s", job->user,
              isAdminUser(String(job->user)) ? " (admin)" : "");
