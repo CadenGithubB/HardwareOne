@@ -1481,7 +1481,7 @@ const char* cmd_devices(const String& originalCmd) {
   // Schema: {"v":1,"count":N,"devices":[{"name","addr","bus"}, ...]}
   if (argWantsJson(originalCmd)) {
     PSRAM_JSON_DOC(doc);
-    doc["v"] = 1;
+    doc["schema"] = 1;
     JsonArray arr = doc["devices"].to<JsonArray>();
     buildI2cDeviceListJson(arr);
     doc["count"] = arr.size();
@@ -1620,7 +1620,7 @@ static void addSensorEntry(JsonArray& arr, const char* id, const char* name,
 // SEPARATE persisted knob, surfaced in `controls json` as <id>AutoStart, NOT
 // this toggle.) seq bumps on enable/connect changes.
 static void buildSensorsJson(JsonDocument& doc) {
-  doc["v"]   = 1;
+  doc["schema"]   = 1;
   doc["seq"] = (unsigned long)gSensorStatusSeq;
   JsonArray arr = doc["sensors"].to<JsonArray>();
 #if ENABLE_PRESENCE_SENSOR

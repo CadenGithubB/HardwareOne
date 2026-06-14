@@ -1993,7 +1993,7 @@ static const char* cmd_llm_status(const String& argsInput) {
     const char* slash = strrchr(st.modelPath, '/');
     if (slash) model = slash + 1;            // filename only, per contract
     PSRAM_JSON_DOC(doc);
-    doc["v"]           = 1;
+    doc["schema"]           = 1;
     doc["state"]       = stateStr;
     doc["model"]       = model;
     doc["tokPerSec"]   = st.lastTokensPerSec;
@@ -2056,18 +2056,18 @@ static const char* cmd_llm_load(const String& args) {
   // the web, so this must be a JSON object, not the old human "Model loaded:".
   bool ok = llmLoadModel(modelPath);
   if (ok) {
-    snprintf(llmCmdBuf, sizeof(llmCmdBuf), "{\"v\":1,\"ok\":true}");
+    snprintf(llmCmdBuf, sizeof(llmCmdBuf), "{\"schema\":1,\"ok\":true}");
   } else {
     LLMStatus st = llmGetStatus();
     // errorMsg is firmware-controlled (short, no quotes/backslashes) — safe to inline.
-    snprintf(llmCmdBuf, sizeof(llmCmdBuf), "{\"v\":1,\"ok\":false,\"error\":\"%s\"}", st.errorMsg);
+    snprintf(llmCmdBuf, sizeof(llmCmdBuf), "{\"schema\":1,\"ok\":false,\"error\":\"%s\"}", st.errorMsg);
   }
   return llmCmdBuf;
 }
 
 static const char* cmd_llm_unload(const String&) {
   llmUnload();
-  return "{\"v\":1,\"ok\":true}";   // mirror POST /api/llm/unload
+  return "{\"schema\":1,\"ok\":true}";   // mirror POST /api/llm/unload
 }
 
 static const char* cmd_llm_models(const String& argsInput) {
@@ -2079,7 +2079,7 @@ static const char* cmd_llm_models(const String& argsInput) {
     String rich = llmListModels();   // [{"name","size","path","storage"},...]
     PSRAM_JSON_DOC(src);
     PSRAM_JSON_DOC(out);
-    out["v"] = 1;
+    out["schema"] = 1;
     JsonArray names = out["models"].to<JsonArray>();
     if (deserializeJson(src, rich) == DeserializationError::Ok) {
       for (JsonObject m : src.as<JsonArray>()) {
@@ -2114,16 +2114,16 @@ static const char* cmd_llm_generate(const String& args) {
   {
     String a = args; a.trim();
     if (argLeadingTokenIsJson(a)) {
-      if (!llmIsReady()) return "{\"v\":1,\"ok\":false,\"error\":\"model not ready\"}";
+      if (!llmIsReady()) return "{\"schema\":1,\"ok\":false,\"error\":\"model not ready\"}";
       String prompt = a.startsWith("json ") ? a.substring(5) : String();
       prompt.trim();
-      if (prompt.length() == 0) return "{\"v\":1,\"ok\":false,\"error\":\"empty prompt\"}";
+      if (prompt.length() == 0) return "{\"schema\":1,\"ok\":false,\"error\":\"empty prompt\"}";
       int session = chatBeginTurn(prompt.c_str(), nullptr);
-      if (session <= 0) return "{\"v\":1,\"ok\":false,\"error\":\"busy or failed to start\"}";
+      if (session <= 0) return "{\"schema\":1,\"ok\":false,\"error\":\"busy or failed to start\"}";
       // Mirror the web's {"ok":true,"session":N} (POST /api/llm/generate &
       // /chat/retry). The app validates the start by `ok`, so omitting it reads
       // as "command not recognized" → its "streaming not supported" fallback.
-      snprintf(llmCmdBuf, sizeof(llmCmdBuf), "{\"v\":1,\"ok\":true,\"session\":%d}", session);
+      snprintf(llmCmdBuf, sizeof(llmCmdBuf), "{\"schema\":1,\"ok\":true,\"session\":%d}", session);
       return llmCmdBuf;
     }
   }
@@ -2186,7 +2186,7 @@ static const char* cmd_llm_result(const String& args) {
   bool done  = llmIsGenerationDone();
 
   PSRAM_JSON_DOC(doc);
-  doc["v"]    = 1;
+  doc["schema"]    = 1;
   doc["text"] = (n > 0) ? (const char*)chunk : "";   // linked; chunk outlives serialize
   doc["done"] = done;
   doc["len"]  = total;
@@ -2202,7 +2202,7 @@ static const char* cmd_llm_result(const String& args) {
 
 static const char* cmd_llm_stop(const String&) {
   llmStop();
-  return "{\"v\":1,\"ok\":true}";   // mirror POST /api/llm/stop
+  return "{\"schema\":1,\"ok\":true}";   // mirror POST /api/llm/stop
 }
 
 static const char* cmd_llm_clear(const String&) {
@@ -2212,8 +2212,8 @@ static const char* cmd_llm_clear(const String&) {
   // (the model still "remembers" cleared messages and contextUsed creeps up).
   // chatClear() refuses mid-generation, so surface that as a stop-first hint.
   // JSON mirrors POST /api/llm/chat/clear so the app parses it like the web.
-  if (!chatClear()) return "{\"v\":1,\"ok\":false,\"error\":\"busy — stop first\"}";
-  return "{\"v\":1,\"ok\":true}";
+  if (!chatClear()) return "{\"schema\":1,\"ok\":false,\"error\":\"busy — stop first\"}";
+  return "{\"schema\":1,\"ok\":true}";
 }
 
 static const char* cmd_llm_retry(const String&) {
@@ -2222,10 +2222,10 @@ static const char* cmd_llm_retry(const String&) {
   // model away from repeating it, and kicks off a fresh async generation.
   // Returns a session exactly like `llmgenerate json` — the app then polls
   // `llmresult json <offset>` to stream the new reply.
-  if (!llmIsReady()) return "{\"v\":1,\"ok\":false,\"error\":\"model not ready\"}";
+  if (!llmIsReady()) return "{\"schema\":1,\"ok\":false,\"error\":\"model not ready\"}";
   int session = chatRetryLast(nullptr);
-  if (session <= 0) return "{\"v\":1,\"ok\":false,\"error\":\"no prior turn or busy\"}";
-  snprintf(llmCmdBuf, sizeof(llmCmdBuf), "{\"v\":1,\"session\":%d}", session);
+  if (session <= 0) return "{\"schema\":1,\"ok\":false,\"error\":\"no prior turn or busy\"}";
+  snprintf(llmCmdBuf, sizeof(llmCmdBuf), "{\"schema\":1,\"session\":%d}", session);
   return llmCmdBuf;
 }
 
@@ -2254,7 +2254,7 @@ static const char* cmd_llm_turns(const String& args) {
 
   int count = chatGetTurnCount();
   PSRAM_JSON_DOC(doc);
-  doc["v"]     = 1;
+  doc["schema"]     = 1;
   doc["count"] = count;
   doc["index"] = index;
 

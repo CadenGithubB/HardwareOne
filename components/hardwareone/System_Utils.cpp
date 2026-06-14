@@ -1480,7 +1480,7 @@ static const char* const kResetReasonLabels[] = {
 void buildSystemInfoJson(JsonDocument& doc, bool includeDeviceList) {
   // Schema version + identity + last-reset info. Added when the builder moved
   // to core so the CLI status view and the web dashboard share one schema.
-  doc["v"]     = 1;
+  doc["schema"]     = 1;
   doc["fw"]    = SelfDevice::firmwareVersion();
   doc["board"] = BOARD_NAME;
   {
@@ -1739,7 +1739,7 @@ const char* cmd_uptime(const String& argsInput) {
     if (!buf) buf = (char*)ps_alloc(192, AllocPref::PreferPSRAM, "uptime.json");
     if (!buf) return "{\"error\":\"oom\"}";
     snprintf(buf, 192,
-      "{\"v\":1,\"uptime_s\":%lu,\"uptime_ms\":%lu,\"uptime_hms\":\"%luh %lum %lus\"}",
+      "{\"schema\":1,\"uptime_s\":%lu,\"uptime_ms\":%lu,\"uptime_hms\":\"%luh %lum %lus\"}",
       (unsigned long)seconds, (unsigned long)millis(),
       (unsigned long)hours, (unsigned long)(minutes % 60), (unsigned long)(seconds % 60));
     return buf;
@@ -1783,7 +1783,7 @@ const char* cmd_time(const String& argsInput) {
     if (!buf) buf = (char*)ps_alloc(256, AllocPref::PreferPSRAM, "time.json");
     if (!buf) return "{\"error\":\"oom\"}";
     int p = snprintf(buf, 256,
-      "{\"v\":1,\"synced\":%s,\"source\":\"%s\",\"time\":\"%s\",\"uptime_ms\":%lu",
+      "{\"schema\":1,\"synced\":%s,\"source\":\"%s\",\"time\":\"%s\",\"uptime_ms\":%lu",
       synced ? "true" : "false", src, timeBuf, (unsigned long)millis());
     if (haveTemp && p > 0 && p < 256) {
       p += snprintf(buf + p, 256 - p, ",\"rtc_temp_c\":%.1f", temp);

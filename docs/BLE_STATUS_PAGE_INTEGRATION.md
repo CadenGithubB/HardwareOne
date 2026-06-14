@@ -54,7 +54,7 @@ matters (lowercase `json`).
 
 ## Versioning
 
-Top-level `"v"` is the schema version (currently `1`). Check it; if it's a
+Top-level `"schema"` is the schema version (currently `1`). Check it; if it's a
 number you don't recognize, degrade gracefully rather than assuming fields.
 
 ## Error shape
@@ -77,7 +77,7 @@ Strings may be empty (`""`) — empty is a meaningful sentinel where noted.
 
 ```json
 {
-  "v": 1,
+  "schema": 1,
   "fw": "1.2.3",                 // firmware version string
   "board": "feathers3",          // board name
   "reset_reason": "Power-on",    // human label for the last reset
@@ -210,7 +210,7 @@ Returns:
 
 ```json
 {
-  "v": 1,
+  "schema": 1,
   "count": 3,
   "devices": [
     { "name": "DS3231",  "addr": 104, "bus": 0 },
@@ -248,7 +248,7 @@ for detail views; `status json` already carries the summaries.
 to gate UI (don't show a thermal-camera page if `compiled:false`). Can exceed
 2 KB — read it on demand, not on a poll.
 ```json
-{"v":1,"features":[
+{"schema":1,"features":[
   {"id":"thermal","name":"Thermal Camera","category":"Sensor",
    "heapKB":32,"compiled":true,"enabled":false,"toggleable":true}, ...]}
 ```
@@ -258,7 +258,7 @@ to gate UI (don't show a thermal-camera page if `compiled:false`). Can exceed
 
 **`bleinfo json`** — BLE configuration + live state (no secrets):
 ```json
-{"v":1,"deviceName":"HardwareOne","txPower":7,"autoStart":true,
+{"schema":1,"deviceName":"HardwareOne","txPower":7,"autoStart":true,
  "requireAuth":true,"secureChannelRequired":true,"initialized":true,
  "state":"advertising","connections":1,"maxConnections":3}
 ```
@@ -267,12 +267,12 @@ to gate UI (don't show a thermal-camera page if `compiled:false`). Can exceed
 
 **`uptime json`**:
 ```json
-{"v":1,"uptime_s":11560,"uptime_ms":11560123,"uptime_hms":"3h 12m 40s"}
+{"schema":1,"uptime_s":11560,"uptime_ms":11560123,"uptime_hms":"3h 12m 40s"}
 ```
 
 **`time json`** — active time source (RTC primary, NTP fallback):
 ```json
-{"v":1,"synced":true,"source":"rtc","time":"2026-06-11T14:03:22",
+{"schema":1,"synced":true,"source":"rtc","time":"2026-06-11T14:03:22",
  "uptime_ms":11560123,"rtc_temp_c":27.5}
 ```
 - `source` — `"rtc"` | `"ntp"` | `"none"`. `rtc_temp_c` present only with an RTC.
@@ -282,7 +282,7 @@ to gate UI (don't show a thermal-camera page if `compiled:false`). Can exceed
 on every interface** (CLI/BLE `batterystatus json` and web `/api/battery/status` share
 one core builder).
 ```json
-{"v":1,"present":true,"backend":"fuelgauge","voltage":3.97,"percentage":82,
+{"schema":1,"present":true,"backend":"fuelgauge","voltage":3.97,"percentage":82,
  "status":"Discharging","charging":false,"usbPresent":true,"vbusSense":true,
  "lastReadMsAgo":1200,"ratePctPerHr":-4.2,"etaMinutes":1170}
 ```
