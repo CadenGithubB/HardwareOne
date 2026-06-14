@@ -2285,13 +2285,10 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
         console.log('[SETTINGS] WiFi scan result length:', (txt||'').length);
         var data = [];
         try {
-          data = JSON.parse(txt || '[]');
+          var raw = JSON.parse(txt || '{}');
+          data = Array.isArray(raw) ? raw : (raw && raw.networks) || [];
         } catch(_) {
-          try {
-            data = JSON.parse((txt || '').substring((txt || '').indexOf('[')));
-          } catch(__) {
-            data = [];
-          }
+          data = [];
         }
         if (!Array.isArray(data)) {
           data = [];
@@ -2533,9 +2530,12 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
       .then(function(results) {
         var users = [], sessions = [], pending = [];
         try {
-          users = JSON.parse(results[0] || '[]');
-          sessions = JSON.parse(results[1] || '[]');
-          pending = JSON.parse(results[2] || '[]');
+          var ru = JSON.parse(results[0] || '{}');
+          var rs = JSON.parse(results[1] || '{}');
+          var rp = JSON.parse(results[2] || '{}');
+          users    = Array.isArray(ru) ? ru : (ru && ru.users) || [];
+          sessions = Array.isArray(rs) ? rs : (rs && rs.sessions) || [];
+          pending  = Array.isArray(rp) ? rp : (rp && rp.pending) || [];
         } catch(e) {
           container.innerHTML = '<div style="color:#dc3545">Error parsing data: ' + e.message + '</div>';
           return;
@@ -2821,7 +2821,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
       postSettingsCli('userlist json')
       .then(function(t) {
         var users = [];
-        try { users = JSON.parse(t); } catch(e) {}
+        try { var ru = JSON.parse(t); users = Array.isArray(ru) ? ru : (ru && ru.users) || []; } catch(e) {}
         var sel = $('usersync-user');
         if (!sel) return;
         sel.innerHTML = '';
