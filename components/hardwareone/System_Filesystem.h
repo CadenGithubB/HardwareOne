@@ -160,6 +160,31 @@ bool isAdminOnlyPath(const String& path);
 bool normalizeFsPath(const String& in, String& out);
 
 // ============================================================================
+// Quoted-path command contract (uniform across all path-taking commands)
+// ----------------------------------------------------------------------------
+// Every command that takes a filesystem path reads it as a DOUBLE-QUOTED token,
+// e.g.  fileview "/system/notes"  — even when the name has no spaces. This one
+// rule lets a single tokenizer handle names with spaces and keeps bare flags
+// (json/confirm) unambiguous vs. a folder literally named "json".
+// ============================================================================
+
+class CommandArgs;  // fwd decl (System_Command.h)
+
+// Validate that arg `idx` is a non-empty quoted path token. On success returns
+// nullptr and fills `out` with the path (leading slash ensured). On failure
+// returns a ready-to-return "Error:" cstring describing the quoting problem.
+const char* requireQuotedPath(const CommandArgs& a, int idx, String& out);
+
+// Like requireQuotedPath but returns the token verbatim (no leading slash
+// forced) — for commands whose name/path is resolved against a feature folder
+// (e.g. a recording name, a model filename) rather than an absolute VFS path.
+const char* requireQuotedToken(const CommandArgs& a, int idx, String& out);
+
+// Wrap a path for embedding in a command string a producer hands to the parser
+// (web / ESP-NOW / app glue). Returns "\"<path>\"".
+String quotePath(const String& path);
+
+// ============================================================================
 // File I/O Helpers
 // ============================================================================
 

@@ -5,6 +5,7 @@
  */
 
 #include "System_Camera_DVP.h"
+#include "System_Filesystem.h"  // requireQuotedPath (uniform quoted-path rule)
 #include <esp_attr.h>
 #include "System_Camera_Video.h"
 #include "System_BuildConfig.h"
@@ -2127,9 +2128,11 @@ const char* cmd_cameravideolist(const String& argsInput) {
 
 const char* cmd_cameravideodelete(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String name = argsInput;
-  name.trim();
-  if (name.length() == 0) return "Usage: cameravideodelete <filename>";
+  CommandArgs a(argsInput);
+  String name;
+  const char* qerr = requireQuotedToken(a, 0, name);
+  if (qerr) return qerr;
+  if (a.has(1)) return "Error: unexpected argument — usage: cameravideodelete \"<filename>\"";
   return deleteVideoRecording(name) ? "Deleted" : "Delete failed (file not found or SD unavailable)";
 }
 
@@ -2185,7 +2188,7 @@ const CommandEntry cameraCommands[] = {
   {"cameratargetdevice",    "Target device: <name>",      true,  cmd_cameratargetdevice},
   {"camerarecord",          "Start/stop MJPEG-AVI recording (SD only): <start|stop>", false, cmd_camerarecord, nullptr, "sensor", "camera", "record"},
   {"cameravideolist",       "List AVI recordings on SD",  false, cmd_cameravideolist},
-  {"cameravideodelete",     "Delete recording: <filename>", true, cmd_cameravideodelete},
+  {"cameravideodelete",     "Delete recording: \"<filename>\"", true, cmd_cameravideodelete},
 };
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]

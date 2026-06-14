@@ -706,9 +706,8 @@ battery calibrate               - Recalibrate ADC voltage readings
 ```
 capture [littlefs|sd|both]      - Capture and save an image
 images [littlefs|sd]            - List saved images
-imageview <path>                - Show image file info
-imagedelete <path>              - Delete an image
-imagesend <device> [path]       - Send image to a peer via ESP-NOW
+imagedelete "<path>"            - Delete an image
+imagesend <device> ["<path>"]   - Send image to a peer via ESP-NOW
 ```
 </details>
 

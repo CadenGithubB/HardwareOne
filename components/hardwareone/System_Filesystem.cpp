@@ -542,35 +542,37 @@ const char* cmd_files(const String& argsInput) {
     return "Error: LittleFS not ready";
   }
 
-  String args = argsInput;
-  args.trim();
+  // Grammar:  files [stats] [json] ["<path>"]
+  // `stats`/`json` are BARE flag tokens; the optional path, when present, must
+  // be a quoted token (so a folder literally named "json" — quoted — is read as
+  // a path, not the flag). `files stats` is always JSON; a following `json` is
+  // accepted for symmetry and ignored.
+  CommandArgs a(argsInput);
+  int idx = 0;
+  bool wantStats = (a.has(idx) && !a.argWasQuoted(idx) && a.arg(idx) == "stats");
+  if (wantStats) idx++;
+  bool wantJson  = (a.has(idx) && !a.argWasQuoted(idx) && a.arg(idx) == "json");
+  if (wantJson) idx++;
 
-  // `files stats [json] [path]` — storage usage JSON for the path's tier. Always
-  // JSON; the optional `json` token is accepted for symmetry and ignored.
-  if (args == "stats" || args.startsWith("stats ")) {
-    String rest = (args.length() > 5) ? args.substring(6) : String("");
-    rest.trim();
-    if (argLeadingTokenIsJson(rest)) {
-      rest = (rest == "json") ? String("") : rest.substring(5);
-      rest.trim();
-    }
-    String path = rest.length() ? rest : String("/");
+  String path = "/";
+  if (a.has(idx)) {
+    const char* qerr = requireQuotedPath(a, idx, path);
+    if (qerr) return qerr;
+    idx++;
+  }
+  if (a.has(idx))
+    return "Error: unexpected argument — quote the path, e.g. files \"/My Folder\"";
+
+  if (wantStats) {
     static char statsBuf[160];
     buildFilesStatsJson(path, statsBuf, sizeof(statsBuf));
     return statsBuf;
   }
-
-  // `files json [path]` — directory listing as JSON (companion app / BLE).
-  // Leading-token (not argWantsJson): a path may itself contain a "json" token.
-  if (argLeadingTokenIsJson(args)) {
-    String path = (args == "json") ? String("") : args.substring(5);
-    path.trim();
-    if (path.length() == 0) path = "/";
+  if (wantJson) {
     return filesListingJsonForApp(path);
   }
 
-  // Legacy human-readable listing (serial console). Path may contain spaces.
-  String path = args.length() ? args : String("/");
+  // Legacy human-readable listing (serial console).
   String out;
   bool ok = buildFilesListing(path, out, /*asJson=*/false, currentAuthContext());
   if (!ok) {
@@ -587,10 +589,11 @@ const char* cmd_mkdir(const String& argsInput) {
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
 
   if (!filesystemReady) return "Error: LittleFS not ready";
-  String path = argsInput;
-  path.trim();
-  if (path.length() == 0) return "Usage: mkdir <path>";
-  if (!path.startsWith("/")) { path = "/" + path; }
+  CommandArgs a(argsInput);
+  String path;
+  const char* qerr = requireQuotedPath(a, 0, path);
+  if (qerr) return qerr;
+  if (a.has(1)) return "Error: unexpected argument — usage: mkdir \"<path>\"";
   // Phase 4: read the dispatch-time AuthContext explicitly. Each transport
   // (web/serial/BT/internal) sets this before executeCommand fires.
   const AuthContext& ctx = currentAuthContext();
@@ -634,10 +637,11 @@ const char* cmd_rmdir(const String& argsInput) {
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
 
   if (!filesystemReady) return "Error: LittleFS not ready";
-  String path = argsInput;
-  path.trim();
-  if (path.length() == 0) return "Usage: rmdir <path>";
-  if (!path.startsWith("/")) { path = "/" + path; }
+  CommandArgs a(argsInput);
+  String path;
+  const char* qerr = requireQuotedPath(a, 0, path);
+  if (qerr) return qerr;
+  if (a.has(1)) return "Error: unexpected argument — usage: rmdir \"<path>\"";
   const AuthContext& ctx = currentAuthContext();
   if (!VFS::rmdirGuarded(path, ctx)) {
     snprintf(getDebugBuffer(), 1024, "Error: Failed to remove folder (denied, not empty, or fs error): %s", path.c_str());
@@ -652,10 +656,11 @@ const char* cmd_filecreate(const String& argsInput) {
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
 
   if (!filesystemReady) return "Error: LittleFS not ready";
-  String path = argsInput;
-  path.trim();
-  if (path.length() == 0) return "Usage: filecreate <path>";
-  if (!path.startsWith("/")) { path = "/" + path; }
+  CommandArgs a(argsInput);
+  String path;
+  const char* qerr = requireQuotedPath(a, 0, path);
+  if (qerr) return qerr;
+  if (a.has(1)) return "Error: unexpected argument — usage: filecreate \"<path>\"";
   if (path.endsWith("/")) return "Error: Path must be a file (not a directory)";
   const AuthContext& ctx = currentAuthContext();
   // openGuarded("w", create=true) on a non-existent path falls back to
@@ -674,10 +679,11 @@ const char* cmd_fileview(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!filesystemReady) return "Error: LittleFS not ready";
 
-  String path = argsInput;
-  path.trim();
-  if (path.length() == 0) return "Usage: fileview <path>";
-  if (!path.startsWith("/")) { path = "/" + path; }
+  CommandArgs a(argsInput);
+  String path;
+  const char* qerr = requireQuotedPath(a, 0, path);
+  if (qerr) return qerr;
+  if (a.has(1)) return "Error: unexpected argument — usage: fileview \"<path>\"";
 
   const AuthContext& ctx = currentAuthContext();
   // existsGuarded gates by canRead — combines the previous canRead +
@@ -725,13 +731,17 @@ const char* cmd_filerename(const String& argsInput) {
 
   if (!filesystemReady) return "Error: LittleFS not ready";
   CommandArgs a(argsInput);
-  if (!a.hasMinArgs(2)) return "Usage: filerename <oldpath> <newname>";
-
-  String oldPath = a.arg(0);
+  String oldPath;
+  const char* qerr = requireQuotedPath(a, 0, oldPath);
+  if (qerr) return qerr;
+  // newName is a bare filename, not a full path — require it quoted (so spaces
+  // are kept) but DON'T force a leading slash the way requireQuotedPath does.
+  if (!a.has(1) || !a.argWasQuoted(1))
+    return "Error: new name must be in quotes — filerename \"<oldpath>\" \"<newname>\"";
   String newName = a.arg(1);
-
-  if (!oldPath.startsWith("/")) oldPath = "/" + oldPath;
-  if (newName.length() == 0) return "Usage: filerename <oldpath> <newname>";
+  if (newName.length() == 0) return "Error: new name is empty";
+  if (a.has(2))
+    return "Error: unexpected argument — filerename \"<oldpath>\" \"<newname>\"";
 
   int lastSlash = oldPath.lastIndexOf('/');
   String parentDir = (lastSlash > 0) ? oldPath.substring(0, lastSlash) : "";
@@ -759,10 +769,9 @@ const char* cmd_fileread(const String& argsInput) {
 
   static String s_readJson;
   CommandArgs a(argsInput);
-  if (!a.hasMinArgs(1)) return "Usage: fileread <path> [offset] [len] [b64]";
-
-  String path = a.arg(0);
-  if (!path.startsWith("/")) path = "/" + path;
+  String path;
+  if (requireQuotedPath(a, 0, path) != nullptr)
+    return "{\"success\":false,\"error\":\"path must be a quoted token\"}";
   long offset = a.has(1) ? a.argInt(1, 0) : 0;
   long reqLen = a.has(2) ? a.argInt(2, 0) : 0;
   bool forceB64 = false;
@@ -834,10 +843,11 @@ const char* cmd_filewrite(const String& argsInput) {
 
   static char respBuf[192];
   CommandArgs a(argsInput);
-  if (!a.hasMinArgs(3)) return "Usage: filewrite <path> <offset> <b64chunk> [final]";
-
-  String path = a.arg(0);
-  if (!path.startsWith("/")) path = "/" + path;
+  String path;
+  if (requireQuotedPath(a, 0, path) != nullptr)
+    return "{\"success\":false,\"error\":\"path must be a quoted token\"}";
+  if (!a.hasMinArgs(3))
+    return "{\"success\":false,\"error\":\"usage: filewrite needs path, offset, b64\"}";
   long offset = a.argInt(1, -1);
   String b64 = a.arg(2);
   bool isFinal = false;
@@ -966,28 +976,27 @@ static const char* filedelete_cancelled(void* /*userData*/) {
 const char* cmd_filedelete(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!filesystemReady) return "Error: LittleFS not ready";
-  String args = argsInput;
-  args.trim();
-  if (args.length() == 0) return "Usage: filedelete <path> [confirm]";
+  CommandArgs a(argsInput);
+  String path;
+  const char* qerr = requireQuotedPath(a, 0, path);
+  if (qerr) return qerr;
 
   // One-shot confirm token for programmatic clients (companion app / BLE):
-  // `filedelete <path> confirm` deletes immediately, skipping the interactive
-  // two-step yes/no gate that a stateful console session needs.
+  // `filedelete "<path>" confirm` deletes immediately, skipping the interactive
+  // two-step yes/no gate that a stateful console session needs. It's a BARE
+  // token after the quoted path — so a file literally named "/foo confirm"
+  // (quoted) can no longer have its own safety gate swallowed.
   bool oneShot = false;
-  const char* confirmTokens[] = { "confirm", "--yes", "-y", "yes" };
-  for (const char* tok : confirmTokens) {
-    String suffix = String(" ") + tok;
-    if (args.endsWith(suffix)) {
-      args = args.substring(0, args.length() - suffix.length());
-      args.trim();
+  if (a.has(1)) {
+    String tok = a.arg(1);
+    if (!a.argWasQuoted(1) &&
+        (tok == "confirm" || tok == "--yes" || tok == "-y" || tok == "yes")) {
       oneShot = true;
-      break;
+    } else {
+      return "Error: unexpected argument — usage: filedelete \"<path>\" [confirm]";
     }
   }
-
-  String path = args;
-  if (path.length() == 0) return "Usage: filedelete <path> [confirm]";
-  if (!path.startsWith("/")) { path = "/" + path; }
+  if (a.has(2)) return "Error: unexpected argument — usage: filedelete \"<path>\" [confirm]";
 
   const AuthContext& ctx = currentAuthContext();
   if (!VFS::existsGuarded(path, ctx)) return "Error: File does not exist or access denied";
@@ -1008,7 +1017,7 @@ const char* cmd_filedelete(const String& argsInput) {
   // Originating command line stored for the resolution audit -- shows up
   // in [CMD] log as "filedelete /foo (confirm: yes) -> Deleted file: /foo"
   // (or "(confirm: no) -> Cancelled. /foo not deleted." on cancel).
-  String origCmd = "filedelete " + path;
+  String origCmd = "filedelete " + quotePath(path);
   if (!cliRequestConfirm(prompt, origCmd, filedelete_confirmed, filedelete_cancelled, nullptr)) {
     return "Error: cannot request confirm (another interactive mode is active)";
   }
@@ -1073,23 +1082,23 @@ static const char* cmd_logtier(const String& argsInput) {
 
 // Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry filesystemCommands[] = {
-  { "files", "List files [path] | files json [path] | files stats json [path]", true, cmd_files,
-    "files [path]            - List files in LittleFS (default '/')\n"
-    "files json [path]       - List as JSON (app/BLE): {success,dirPerms,files[]}\n"
-    "files stats json [path] - Storage usage JSON for the path's tier\n"
-    "Example: files /logging_captures" },
-  { "mkdir", "Create directory: <path>", true, cmd_mkdir, "Usage: mkdir <path>" },
-  { "rmdir", "Remove directory: <path>", true, cmd_rmdir, "Usage: rmdir <path>" },
-  { "filecreate", "Create file: <path> [content]", true, cmd_filecreate, "Usage: filecreate <path>" },
-  { "fileview", "View file: <path> [offset]", true, cmd_fileview, "Usage: fileview <path>" },
-  { "fileread", "Read file chunk as JSON: <path> [offset] [len] [b64]", true, cmd_fileread,
-    "fileread <path> [offset] [len] [b64] - Chunked permission-guarded read (app/BLE).\n"
+  { "files", "List files [\"path\"] | files json [\"path\"] | files stats json [\"path\"]", true, cmd_files,
+    "files [\"path\"]            - List files in LittleFS (default '/')\n"
+    "files json [\"path\"]       - List as JSON (app/BLE): {success,dirPerms,files[]}\n"
+    "files stats json [\"path\"] - Storage usage JSON for the path's tier\n"
+    "Paths are always double-quoted, e.g. files \"/logging_captures\"" },
+  { "mkdir", "Create directory: \"<path>\"", true, cmd_mkdir, "Usage: mkdir \"<path>\"" },
+  { "rmdir", "Remove directory: \"<path>\"", true, cmd_rmdir, "Usage: rmdir \"<path>\"" },
+  { "filecreate", "Create file: \"<path>\"", true, cmd_filecreate, "Usage: filecreate \"<path>\"" },
+  { "fileview", "View file: \"<path>\"", true, cmd_fileview, "Usage: fileview \"<path>\"" },
+  { "fileread", "Read file chunk as JSON: \"<path>\" [offset] [len] [b64]", true, cmd_fileread,
+    "fileread \"<path>\" [offset] [len] [b64] - Chunked permission-guarded read (app/BLE).\n"
     "Returns {success,size,offset,len,eof,enc,data}; loop offset until eof." },
-  { "filewrite", "Write file chunk: <path> <offset> <b64chunk> [final]", true, cmd_filewrite,
-    "filewrite <path> <offset> <b64chunk> [final] - Sequential chunked write (app/BLE).\n"
+  { "filewrite", "Write file chunk: \"<path>\" <offset> <b64chunk> [final]", true, cmd_filewrite,
+    "filewrite \"<path>\" <offset> <b64chunk> [final] - Sequential chunked write (app/BLE).\n"
     "offset 0 truncates/creates; later offsets must equal current size; 'final' runs post-save hooks." },
-  { "filedelete", "Delete file: <path> [confirm]", true, cmd_filedelete, "Usage: filedelete <path> [confirm]" },
-  { "filerename", "Rename file: <oldpath> <newname>", true, cmd_filerename, "Usage: filerename <oldpath> <newname>" },
+  { "filedelete", "Delete file: \"<path>\" [confirm]", true, cmd_filedelete, "Usage: filedelete \"<path>\" [confirm]" },
+  { "filerename", "Rename file: \"<oldpath>\" \"<newname>\"", true, cmd_filerename, "Usage: filerename \"<oldpath>\" \"<newname>\"" },
   { "logtier", "Show current log storage tier (LittleFS vs SD overflow).", false, cmd_logtier,
     "logtier             - Report which tier logs are writing to and free space on each." },
 };
@@ -1267,6 +1276,14 @@ bool normalizeFsPath(const String& in, String& out) {
   // safer to reject outright.
   if (in.indexOf("..") >= 0) return false;
 
+  // Paths cross the command line as quoted tokens and the tokenizer has no
+  // escape, so a literal double-quote is ambiguous — reject it (and control
+  // chars) at this single chokepoint rather than in every producer.
+  for (size_t i = 0; i < in.length(); i++) {
+    char c = in[i];
+    if (c == '"' || (unsigned char)c < 0x20) return false;
+  }
+
   out.reserve(in.length());
   out = "";
   bool prevSlash = false;
@@ -1285,6 +1302,42 @@ bool normalizeFsPath(const String& in, String& out) {
     out.remove(out.length() - 1);
   }
   return out.length() > 0;
+}
+
+// ----------------------------------------------------------------------------
+// Quoted-path contract helpers (see System_Filesystem.h). One definition that
+// every path-taking command shares, so "how a path is read" lives in one place.
+// ----------------------------------------------------------------------------
+const char* requireQuotedPath(const CommandArgs& a, int idx, String& out) {
+  if (a.unterminatedQuote())
+    return "Error: unmatched quote — wrap the path, e.g. fileview \"/dir/name\"";
+  if (!a.has(idx) || !a.argWasQuoted(idx))
+    return "Error: path must be in quotes, e.g. fileview \"/system/notes\"";
+  out = a.arg(idx);
+  if (out.length() == 0)
+    return "Error: path is empty — e.g. fileview \"/system/notes\"";
+  if (!out.startsWith("/")) out = "/" + out;
+  return nullptr;
+}
+
+const char* requireQuotedToken(const CommandArgs& a, int idx, String& out) {
+  if (a.unterminatedQuote())
+    return "Error: unmatched quote — wrap it in double-quotes, e.g. \"my file\"";
+  if (!a.has(idx) || !a.argWasQuoted(idx))
+    return "Error: name must be in quotes, e.g. \"my recording.wav\"";
+  out = a.arg(idx);
+  if (out.length() == 0)
+    return "Error: name is empty";
+  return nullptr;
+}
+
+String quotePath(const String& path) {
+  String out;
+  out.reserve(path.length() + 2);
+  out = "\"";
+  out += path;
+  out += "\"";
+  return out;
 }
 
 // ============================================================================

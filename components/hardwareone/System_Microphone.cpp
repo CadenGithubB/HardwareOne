@@ -5,6 +5,7 @@
  */
 
 #include "System_Microphone.h"
+#include "System_Filesystem.h"  // requireQuotedPath (uniform quoted-path rule)
 #include <esp_attr.h>
 
 #if ENABLE_MICROPHONE_SENSOR
@@ -838,14 +839,18 @@ const char* cmd_miclist(const String& argsInput) {
 const char* cmd_micdelete(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  String arg = argsInput;
-  arg.trim();
-  
-  if (arg.length() == 0) {
-    return "Usage: micdelete <filename> or micdelete all";
+  // `micdelete all` (bare keyword) wipes recordings; otherwise the filename is a
+  // quoted token (uniform quoted-path rule).
+  CommandArgs a(argsInput);
+  bool isAll = (a.has(0) && !a.argWasQuoted(0) && a.arg(0).equalsIgnoreCase("all"));
+  String arg;
+  if (!isAll) {
+    const char* qerr = requireQuotedToken(a, 0, arg);
+    if (qerr) return qerr;
+    if (a.has(1)) return "Error: unexpected argument — micdelete \"<filename>\" or micdelete all";
   }
-  
-  if (arg.equalsIgnoreCase("all")) {
+
+  if (isAll) {
     auto wipeWavs = [](const char* folder) -> int {
       int deleted = 0;
       if (!VFS::existsGuarded(folder, currentAuthContext())) return 0;
@@ -1108,7 +1113,7 @@ const CommandEntry micCommands[] = {
   { "micviz", "Real-time audio level visualizer.", false, cmd_micviz, "Usage: micviz (press any key to stop)" },
   { "micrecord", "Start/stop recording to WAV file.", false, cmd_micrecord, "Usage: micrecord <start|stop>" },
   { "miclist", "List saved recordings.", false, cmd_miclist, "Usage: miclist" },
-  { "micdelete", "Delete recording(s).", true, cmd_micdelete, "Usage: micdelete <filename|all>" },
+  { "micdelete", "Delete recording(s).", true, cmd_micdelete, "Usage: micdelete \"<filename>\" | micdelete all" },
   { "micsamplerate", "Get/set sample rate.", false, cmd_micsamplerate, "Usage: micsamplerate [8000-48000]" },
   { "micgain", "Get/set microphone gain.", false, cmd_micgain, "Usage: micgain [0-100]" },
   { "micbitdepth", "Get/set bit depth.", false, cmd_micbitdepth, "Usage: micbitdepth [16|32]" },

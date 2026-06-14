@@ -11923,10 +11923,12 @@ const char* cmd_espnow_sendfile(const String& argsInput) {
   }
 
   CommandArgs a(argsInput);
-  if (!a.hasMinArgs(2)) return "Usage: espnowsendfile <name_or_mac> <filepath>";
+  if (!a.hasMinArgs(2)) return "Usage: espnowsendfile <name_or_mac> \"<filepath>\"";
 
   String target = a.arg(0);
-  String filepath = a.remaining(0);
+  String filepath;
+  const char* qerr = requireQuotedToken(a, 1, filepath);
+  if (qerr) return qerr;
 
   uint8_t mac[6];
   if (!resolveDeviceNameOrMac(target, mac)) {
@@ -12368,7 +12370,11 @@ const char* cmd_espnow_browse(const String& argsInput) {
   String target = a.arg(0);
   String username = a.arg(1);
   String password = a.arg(2);
-  String path = a.has(3) ? a.remaining(2) : "/";
+  String path = "/";
+  if (a.has(3)) {
+    const char* qerr = requireQuotedToken(a, 3, path);
+    if (qerr) return qerr;
+  }
   if (path.length() == 0) path = "/";
 
   uint8_t targetMac[6];
@@ -12380,9 +12386,10 @@ const char* cmd_espnow_browse(const String& argsInput) {
     return browseBuffer;
   }
 
-  // Build V3 CMD payload: "user:pass:files /path"
+  // Build V3 CMD payload: "user:pass:files \"/path\"" — the remote parses the
+  // path as a quoted token (uniform quoted-path rule), so it survives spaces.
   char cmdPayload[ESPNOW_V4_MAX_PAYLOAD];
-  int payloadLen = snprintf(cmdPayload, sizeof(cmdPayload), "%s:%s:files %s",
+  int payloadLen = snprintf(cmdPayload, sizeof(cmdPayload), "%s:%s:files \"%s\"",
                             username.c_str(), password.c_str(), path.c_str());
   if (payloadLen >= (int)sizeof(cmdPayload)) payloadLen = sizeof(cmdPayload) - 1;
 
@@ -12434,7 +12441,9 @@ const char* cmd_espnow_fetch(const String& argsInput) {
   String target = a.arg(0);
   String username = a.arg(1);
   String password = a.arg(2);
-  String path = a.remaining(2);
+  String path;
+  const char* qerr = requireQuotedToken(a, 3, path);
+  if (qerr) return qerr;
 
   uint8_t targetMac[6];
   if (!resolveDeviceNameOrMac(target, targetMac)) {
@@ -12451,7 +12460,7 @@ const char* cmd_espnow_fetch(const String& argsInput) {
   // the command table. Emitting "espnow sendfile" (two words) makes the remote reject it as
   // "Unknown command", which is why fetch silently failed while direct send worked.
   char cmdPayload[ESPNOW_V4_MAX_PAYLOAD];
-  int payloadLen = snprintf(cmdPayload, sizeof(cmdPayload), "%s:%s:espnowsendfile %s %s",
+  int payloadLen = snprintf(cmdPayload, sizeof(cmdPayload), "%s:%s:espnowsendfile %s \"%s\"",
                             username.c_str(), password.c_str(),
                             gSettings.espnowDeviceName.c_str(), path.c_str());
   if (payloadLen >= (int)sizeof(cmdPayload)) payloadLen = sizeof(cmdPayload) - 1;
@@ -13799,9 +13808,9 @@ extern const CommandEntry espNowCommands[] = {
   // ---- ESP-NOW Communication ----
   { "espnowsend", "Send message (auto-routes via mesh if enabled): 'espnowsend <name_or_mac> <message>'.", false, cmd_espnow_send, "Usage: espnowsend <name_or_mac> <message>" },
   { "espnowbroadcast", "Broadcast message: 'espnowbroadcast <message>'.", false, cmd_espnow_broadcast, "Usage: espnowbroadcast <message>" },
-  { "espnowsendfile", "Send file: 'espnowsendfile <name_or_mac> <filepath>'.", false, cmd_espnow_sendfile, "Usage: espnowsendfile <name_or_mac> <filepath>" },
-  { "espnowbrowse", "Browse remote files: 'espnowbrowse <name_or_mac> <user> <pass> [path]'.", false, cmd_espnow_browse, "Usage: espnowbrowse <target> <username> <password> [path]" },
-  { "espnowfetch", "Fetch remote file: 'espnowfetch <name_or_mac> <user> <pass> <path>'.", false, cmd_espnow_fetch, "Usage: espnowfetch <target> <username> <password> <path>" },
+  { "espnowsendfile", "Send file: 'espnowsendfile <name_or_mac> \"<filepath>\"'.", false, cmd_espnow_sendfile, "Usage: espnowsendfile <name_or_mac> \"<filepath>\"" },
+  { "espnowbrowse", "Browse remote files: 'espnowbrowse <name_or_mac> <user> <pass> [\"path\"]'.", false, cmd_espnow_browse, "Usage: espnowbrowse <target> <username> <password> [\"path\"]" },
+  { "espnowfetch", "Fetch remote file: 'espnowfetch <name_or_mac> <user> <pass> \"<path>\"'.", false, cmd_espnow_fetch, "Usage: espnowfetch <target> <username> <password> \"<path>\"" },
   { "espnowremote", "Execute remote command: 'espnowremote <name_or_mac> <user> <pass> <cmd>'.", false, cmd_espnow_remote, "Usage: espnowremote <target> <username> <password> <command>" },
   { "openstream", "Start streaming all output to ESP-NOW caller (admin, remote only).", true, cmd_espnow_startstream },
   { "closestream", "Stop streaming output to ESP-NOW device (admin).", true, cmd_espnow_stopstream },

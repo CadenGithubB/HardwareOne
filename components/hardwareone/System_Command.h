@@ -70,6 +70,14 @@ public:
   bool           has(int index) const { return index >= 0 && index < argCount_; }
   bool           hasMinArgs(int n) const { return argCount_ >= n; }
 
+  // True if the token at `index` was written inside double-quotes (content taken
+  // verbatim, spaces and all). File commands use this to require a quoted path
+  // and to tell a bare flag (json/confirm) from a quoted folder named "json".
+  bool           argWasQuoted(int index) const { return index >= 0 && index < argCount_ && quoted_[index]; }
+
+  // True if the input had an opening quote with no closing quote (malformed).
+  bool           unterminatedQuote() const { return unterminatedQuote_; }
+
   // Typed extraction with defaults
   int   argInt(int index, int defaultVal = 0)     const;
   float argFloat(int index, float defaultVal = 0) const;
@@ -94,7 +102,9 @@ private:
   String raw_;                   // original input, trimmed
   String args_[MAX_ARGS];       // parsed tokens
   int    offsets_[MAX_ARGS];    // byte offset of each token in raw_
+  bool   quoted_[MAX_ARGS];     // whether each token was double-quoted
   int    argCount_ = 0;
+  bool   unterminatedQuote_ = false;  // opening quote with no closing quote
 
   static const String empty_;   // returned by arg() on out-of-range
 

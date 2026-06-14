@@ -3710,8 +3710,9 @@ esp_err_t handleFilesCreate(httpd_req_t* req) {
   }
 
   if (type == "folder") {
-    // Use CLI command for consistent validation and error handling
-    String cmd = "mkdir " + path;
+    // Use CLI command for consistent validation and error handling.
+    // Paths cross the command line as quoted tokens (uniform quoted-path rule).
+    String cmd = "mkdir " + quotePath(path);
     String resultStr;
     bool success = executeUnifiedWebCommand(req, ctx, cmd, resultStr);
     httpd_resp_set_type(req, "application/json");
@@ -3730,8 +3731,9 @@ esp_err_t handleFilesCreate(httpd_req_t* req) {
       path = "/" + name + "." + type;
     }
     // Route through unified executor using CLI-equivalent command
+    // (path is a quoted token — uniform quoted-path rule).
     char cmdBuf[128];
-    snprintf(cmdBuf, sizeof(cmdBuf), "filecreate %s", path.c_str());
+    snprintf(cmdBuf, sizeof(cmdBuf), "filecreate \"%s\"", path.c_str());
     String cmd = cmdBuf;
     String out;
     bool ok = executeUnifiedWebCommand(req, ctx, cmd, out);

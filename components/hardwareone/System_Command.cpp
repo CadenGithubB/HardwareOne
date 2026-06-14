@@ -369,13 +369,19 @@ void CommandArgs::parse() {
       while (pos < len && raw_[pos] != '"') pos++;
       args_[argCount_]    = raw_.substring(start, pos);
       offsets_[argCount_] = start - 1;  // offset points to the opening quote
+      quoted_[argCount_]  = true;
+      if (pos < len) {
+        pos++;  // skip closing quote
+      } else {
+        unterminatedQuote_ = true;  // ran off the end with no closing quote
+      }
       argCount_++;
-      if (pos < len) pos++;  // skip closing quote
     } else {
       // unquoted token
       while (pos < len && raw_[pos] != ' ') pos++;
       args_[argCount_]    = raw_.substring(start, pos);
       offsets_[argCount_] = start;
+      quoted_[argCount_]  = false;
       argCount_++;
     }
   }

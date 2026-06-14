@@ -1,4 +1,6 @@
 #include "System_EdgeImpulse.h"
+#include "System_Command.h"     // CommandArgs
+#include "System_Filesystem.h"  // requireQuotedPath (uniform quoted-path rule)
 #include <esp_attr.h>
 
 #if ENABLE_EDGE_IMPULSE
@@ -2143,18 +2145,12 @@ const char* cmd_ei_detect(const String& argsInput) {
 const char* cmd_ei_file(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  String path = argsInput;
-  path.trim();
-  
-  if (path.length() == 0) {
-    return "Usage: ei file <path>\nExample: ei file /images/test.jpg";
-  }
-  
-  // Ensure path starts with /
-  if (!path.startsWith("/")) {
-    path = "/" + path;
-  }
-  
+  CommandArgs a(argsInput);
+  String path;
+  const char* qerr = requireQuotedPath(a, 0, path);
+  if (qerr) return qerr;
+  if (a.has(1)) return "Error: unexpected argument — usage: ei file \"<path>\"";
+
   // Check file exists
   if (!VFS::existsGuarded(path, currentAuthContext())) {
     snprintf(gEICmdBuffer, sizeof(gEICmdBuffer), "File not found: %s", path.c_str());
@@ -2276,13 +2272,12 @@ const char* cmd_ei_model_list(const String& argsInput) {
 const char* cmd_ei_model_load(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  String trimmed = argsInput;
-  trimmed.trim();
-  
-  if (trimmed.length() == 0) {
-    return "Usage: ei model load <filename or path>\nExample: ei model load default.tflite";
-  }
-  
+  CommandArgs a(argsInput);
+  String trimmed;
+  const char* qerr = requireQuotedToken(a, 0, trimmed);
+  if (qerr) return qerr;
+  if (a.has(1)) return "Error: unexpected argument — usage: ei model load \"<filename>\"";
+
   // Build full path if just filename given
   String path = trimmed;
   if (!path.startsWith("/")) {
@@ -2456,13 +2451,13 @@ const CommandEntry edgeImpulseCommands[] = {
   { "ei", "Edge Impulse ML inference commands.", false, cmd_ei, "Usage: ei <subcommand>" },
   { "eienable", "Enable/disable Edge Impulse inference.", false, cmd_ei_enable, "Usage: eienable <0|1>" },
   { "eidetect", "Run single object detection inference.", false, cmd_ei_detect, "Usage: eidetect" },
-  { "eifile", "Run inference on stored JPEG image.", false, cmd_ei_file, "Usage: eifile <path>" },
+  { "eifile", "Run inference on stored JPEG image.", false, cmd_ei_file, "Usage: eifile \"<path>\"" },
   { "eicontinuous", "Start/stop continuous inference mode.", false, cmd_ei_continuous, "Usage: eicontinuous <0|1>" },
   { "eiconfidence", "Set minimum detection confidence.", false, cmd_ei_confidence, "Usage: eiconfidence <0.0-1.0>" },
   { "eistatus", "Show Edge Impulse status.", false, cmd_ei_status, "Usage: eistatus" },
   { "eimodel", "Model management commands.", false, cmd_ei_model, "Usage: eimodel <subcommand>" },
   { "eimodellist", "List available .tflite models.", false, cmd_ei_model_list, "Usage: eimodellist" },
-  { "eimodelload", "Load a TFLite model from LittleFS.", false, cmd_ei_model_load, "Usage: eimodelload <filename>" },
+  { "eimodelload", "Load a TFLite model from LittleFS.", false, cmd_ei_model_load, "Usage: eimodelload \"<filename>\"" },
   { "eimodelinfo", "Show loaded model information.", false, cmd_ei_model_info, "Usage: eimodelinfo" },
   { "eimodelunload", "Unload the current model.", false, cmd_ei_model_unload, "Usage: eimodelunload" },
   { "eitrack", "State tracking commands.", false, cmd_ei_track, "Usage: eitrack <subcommand>" },

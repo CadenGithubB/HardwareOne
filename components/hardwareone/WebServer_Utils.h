@@ -554,7 +554,7 @@ inline String getFileBrowserScript() {
 
       if (isFolder) {
         if (!confirm(confirmMsg)) return;
-        hw.postFormText('/api/cli', { cmd: 'rmdir ' + filePath })
+        hw.postFormText('/api/cli', { cmd: 'rmdir "' + filePath + '"' })
         .then(function(txt) {
           if (txt.indexOf('Error') >= 0 || txt.indexOf('Failed') >= 0) {
             alert('Delete failed: ' + txt);
@@ -569,7 +569,7 @@ inline String getFileBrowserScript() {
       }
 
       // File path: two-step confirm flow.
-      hw.cliConfirm('filedelete ' + filePath, confirmMsg).then(function(r) {
+      hw.cliConfirm('filedelete "' + filePath + '"', confirmMsg).then(function(r) {
         if (r.cancelled) return;
         if (!r.ok) { alert('Delete failed: ' + (r.result || 'no response')); return; }
         loadDirectory(currentPath);
@@ -602,7 +602,7 @@ inline String getFileBrowserScript() {
       var newName = await hwPrompt('Rename "' + oldName + '" to:', oldName);
       if (!newName || newName === oldName) return;
       
-      hw.postFormText('/api/cli', { cmd: 'filerename ' + filePath + ' ' + newName })
+      hw.postFormText('/api/cli', { cmd: 'filerename "' + filePath + '" "' + newName + '"' })
       .then(function(t) {
         if (!t || t.startsWith('Error')) {
           hwAlert('Rename failed: ' + (t || 'Unknown error'));
@@ -832,7 +832,7 @@ inline String getFileBrowserScript() {
         if (!name) return;
         var fullPath = currentPath === '/' ? '/' + name : currentPath + '/' + name;
         setStatus('Creating folder...', false);
-        hw.postFormText('/api/cli', { cmd: 'mkdir ' + fullPath })
+        hw.postFormText('/api/cli', { cmd: 'mkdir "' + fullPath + '"' })
         .then(function(txt) {
           setStatus(txt, txt.indexOf('Error') >= 0);
           loadExplorer();
@@ -841,14 +841,14 @@ inline String getFileBrowserScript() {
         .catch(function(e) { setStatus('Error: ' + e.message, true); });
       });
     };
-    
+
     // Action: Create file
     window[managerId + 'CreateFile'] = function() {
       hwPrompt('Enter file name (with extension):').then(function(name) {
         if (!name) return;
         var fullPath = currentPath === '/' ? '/' + name : currentPath + '/' + name;
         setStatus('Creating file...', false);
-        hw.postFormText('/api/cli', { cmd: 'filecreate ' + fullPath })
+        hw.postFormText('/api/cli', { cmd: 'filecreate "' + fullPath + '"' })
         .then(function(txt) {
           setStatus(txt, txt.indexOf('Error') >= 0);
           loadExplorer();
@@ -1058,7 +1058,7 @@ window.BondFs = (function(){
     var localUrl = '/api/files/read?name=' + encodeURIComponent(localPath);
     // Pre-create the landing dir so the polling list() below doesn't spam
     // [STORAGE] Cannot open directory until the first chunk lands.
-    function mk(p, next){ hw.postFormText('/api/cli', { cmd: 'mkdir '+p }).then(function(){next();}).catch(function(){next();}); }
+    function mk(p, next){ hw.postFormText('/api/cli', { cmd: 'mkdir "'+p+'"' }).then(function(){next();}).catch(function(){next();}); }
     mk('/espnow/received', function(){ mk(dir, function(){
       var qp = '/api/bond/fs/get?path=' + encodeURIComponent(remotePath);
       hw.fetchJSON(qp).then(function(d){
