@@ -1,6 +1,16 @@
+<div align="center">
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/logo-white.svg">
+  <source media="(prefers-color-scheme: light)" srcset="assets/logo-black.svg">
+  <img alt="Hardware One logo" src="assets/logo-black.svg" width="140">
+</picture>
+
 # Hardware One v0.95.5
 
 **Hardware One is a modular ESP32 firmware that works like a distributed operating system for cheap microcontrollers.**
+
+</div>
 
 You compile and flash each ESP32 chip to fit a specific job — a smart-home sensor, a Smart Glasses companion gadget made to live in your pocket or backpack, a headless mesh node, a camera node that captures photos and beams them across the mesh, and many more. No matter what feature set a device is built for, every one of them speaks the same custom ESP-NOW protocol, letting them form a private, router-free mesh. And because each device brings its own capabilities to that mesh, they can pool their data and work together — turning a scattered collection of chips into one system you can monitor from a single dashboard.
 
