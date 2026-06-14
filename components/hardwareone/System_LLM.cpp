@@ -828,8 +828,7 @@ void llmUnload() {
     gLLM.repBufSize = 0;
   }
   if (gLLM.sampleIndices) {
-    free(gLLM.sampleIndices);
-    gLLM.sampleIndices = nullptr;
+    llmPsramFree((void**)&gLLM.sampleIndices);  // PSRAM-allocated (nulls the ptr)
     gLLM.sampleIndicesSize = 0;
   }
 

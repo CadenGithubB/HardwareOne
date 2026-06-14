@@ -766,8 +766,12 @@ static bool allocateRunState(LoadContext& ctx) {
     gLLM.repBufSize = gLLM.repBuf ? repSize : 0;
   }
 
-  // Pre-allocate top-p sampling index buffer (reused every token instead of malloc/free per token)
-  gLLM.sampleIndices = (int*)malloc(V * sizeof(int));
+  // Pre-allocate the top-p sampling index buffer in PSRAM (reused every token
+  // instead of malloc/free per token). It's only touched by sample_topp's
+  // partial sort — a tiny fraction of per-token time, and the nucleus is usually
+  // 1 token on this model — so keeping ~V*4 bytes (~13KB) out of internal DRAM
+  // relieves heap pressure during generation at no measurable speed cost.
+  gLLM.sampleIndices = (int*)llmPsramAlloc((size_t)V * sizeof(int), "llm.sampleidx");
   gLLM.sampleIndicesSize = gLLM.sampleIndices ? V : 0;
 
   return true;
