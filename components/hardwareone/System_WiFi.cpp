@@ -358,7 +358,7 @@ const char* cmd_wifiscan(const String& argsInput) {
   
   String args = argsInput;
   args.trim();
-  bool json = (args == "json");
+  bool json = argWantsJson(args);
   int n = WiFi.scanNetworks(/*async=*/false, /*hidden=*/true);
   if (n < 0) return "WiFi scan failed";
 

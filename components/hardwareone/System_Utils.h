@@ -136,6 +136,12 @@ bool commandRequiresAdmin(const String& cmdLine);
 // ONLY via the return value (one verbatim document) and calls NO broadcastOutput.
 bool argWantsJson(const String& args);
 
+// argLeadingTokenIsJson() — true iff the FIRST space-delimited token is exactly
+// "json". The positional counterpart to argWantsJson(): use it where "json" must
+// lead because later tokens are real args that may contain a "json" token
+// (e.g. `llm json <prompt>`, `files json <path>`, `files /logs json`).
+bool argLeadingTokenIsJson(const String& args);
+
 // Execute a command through the registry (returns result string)
 // Note: This is a lower-level function; executeCommand() in .ino handles auth context
 const char* dispatchCommand(const String& argsInput);

@@ -894,12 +894,49 @@ void runAutomationCommandUnified(const String& argsInput) {
 // Automation command handlers
 const char* cmd_automation_list(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  const bool wantJson = argWantsJson(argsInput);
+
   String json;
   if (!readText(AUTOMATIONS_JSON_FILE, json)) {
+    if (wantJson) return "{\"error\":\"read failed\"}";
     broadcastOutput("Error: failed to read automations.json");
     return "ERROR";
   }
-  broadcastOutput(json);
+
+  // Private channel: the stored automations document goes back verbatim via the
+  // RETURN VALUE (the app reads it off its own channel). No broadcastOutput —
+  // that unconditional broadcast is what used to dump this whole JSON blob onto
+  // the shared human consoles. Held in a function-static String so the returned
+  // c_str() stays valid until the next command (handlers run serially on
+  // cmd_exec_task). Returned verbatim — it's a document with its own schema, not
+  // a synthesized {"v":1} status blob, so wrapping it would break app compat.
+  if (wantJson) {
+    static String jsonHold;
+    jsonHold = json;
+    return jsonHold.c_str();
+  }
+
+  // Human channel: a readable summary instead of the raw JSON wall.
+  PSRAM_JSON_DOC(doc);
+  if (deserializeJson(doc, json)) {
+    broadcastOutput("Error: automations.json is corrupt (use 'automationlist json' for the raw record)");
+    return "ERROR";
+  }
+  JsonArray arr = doc["automations"].as<JsonArray>();
+  const int n = arr.size();
+  if (n == 0) {
+    broadcastOutput("No automations configured.");
+    return "OK";
+  }
+  BROADCAST_PRINTF("Automations (%d):", n);
+  int i = 0;
+  for (JsonObject a : arr) {
+    const char* nm = a["name"] | "(unnamed)";
+    BROADCAST_PRINTF("  [%d] %-24.24s (id=%ld, %s)",
+                     i++, nm, a["id"].as<long>(),
+                     (a["enabled"] | false) ? "enabled" : "disabled");
+  }
+  broadcastOutput("(use 'automationlist json' for the full record)");
   return "OK";
 }
 

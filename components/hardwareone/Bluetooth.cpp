@@ -1204,7 +1204,6 @@ void bleSessionTick() {
       }
     }
   }
-  BLE_DEBUGF(DEBUG_BLE_CORE, "Session tick");
 }
 
 // =============================================================================

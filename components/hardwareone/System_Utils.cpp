@@ -949,22 +949,34 @@ void logCommandExecution(const AuthContext& ctx, const char* cmd, bool success, 
   // Append to audit log with 500KB cap (rotates automatically)
   appendLineWithCap("/system/sys_logs/command-audit.log", entry, 500 * 1024);
   
-  // Broadcast command execution notice to all interfaces (serial, web, OLED, etc.)
-  // This is the "who did what from where" audit trail visible everywhere.
-  // Uses explicit MSG_ROUTE_ALL to bypass context-based serial suppression —
-  // the audit line should ALWAYS appear on all interfaces regardless of command origin.
+  // Console echo of the "who did what from where" notice. This is OPERATIONAL
+  // visibility (the broadcast domain) — always shown, like it has always been,
+  // NOT a debug-gated item. (An earlier version gated it behind LOG_LEVEL_INFO +
+  // a DEBUG_AUDIT flag; HW testing showed that hid it by default, which is wrong
+  // for operational output — the audit trail is something you want to see, not a
+  // debug trace. The durable copy is the file write above.)
+  //
+  // JSON suppression (the actual fix): a JSON reply ('{'/'[') is internal-comms
+  // payload that already went out the caller's private channel (BLE notify /
+  // web / etc.). Echoing a truncated fragment of it onto the shared consoles is
+  // just noise (e.g. `... -> OK {"v":1,"present":true,"backend":"fuel...`), so
+  // we drop the preview for JSON and keep only the status. Human-readable
+  // results (e.g. "Not detected on I2C bus", "already running") are still
+  // surfaced — those ARE useful broadcast output.
+  const bool resultIsJson = (result && (result[0] == '{' || result[0] == '['));
   char auditLine[384];
-  // Include resultBuf (already capped to 40 chars, newlines neutralized) so
-  // serial logs surface the actual command response — otherwise paths that
-  // return non-empty text (e.g. "Not detected on I2C bus", "already running")
-  // are indistinguishable from a literal "OK" in the audit stream.
-  snprintf(auditLine, sizeof(auditLine), "[CMD] %s@%s: %s -> %s %s",
-           ctx.user.c_str(), source, redactedCmd.c_str(), status, resultBuf);
+  if (resultIsJson) {
+    snprintf(auditLine, sizeof(auditLine), "[CMD] %s@%s: %s -> %s",
+             ctx.user.c_str(), source, redactedCmd.c_str(), status);
+  } else {
+    snprintf(auditLine, sizeof(auditLine), "[CMD] %s@%s: %s -> %s %s",
+             ctx.user.c_str(), source, redactedCmd.c_str(), status, resultBuf);
+  }
   extern void broadcastOutputCore_Routed(const char* text, size_t len, uint8_t route);
-  // Exclude BLE: its notify characteristic is the command *response* channel that
-  // the app reads JSON replies from. Echoing the "[CMD] …" audit line onto it
-  // interleaves with the reply (e.g. {"v":1,...}[CMD] dev@bluetooth: …). The audit
-  // still reaches serial / web / file / OLED / G2.
+  // Exclude BLE: its notify characteristic is the command *response* channel
+  // the app reads JSON replies from. Echoing the audit line onto it would
+  // interleave with the reply. The echo still reaches serial / web / file /
+  // OLED / G2.
   broadcastOutputCore_Routed(auditLine, strlen(auditLine), MSG_ROUTE_ALL & ~MSG_ROUTE_BLE);
 }
 
@@ -1432,6 +1444,18 @@ bool argWantsJson(const String& args) {
     idx = a.indexOf("json", idx + 4);
   }
   return false;
+}
+
+// argLeadingTokenIsJson() — true iff the FIRST space-delimited token is exactly
+// "json". Use this (NOT argWantsJson) for commands where "json" must be
+// positional because later tokens are real arguments that may themselves be or
+// contain a "json" token — e.g. `llm json <prompt>` (a prompt may say "json")
+// or `files json <path>` / `files /logs json` (a path may contain "json").
+// argWantsJson would false-trigger on those; this only matches the lead token.
+bool argLeadingTokenIsJson(const String& args) {
+  String a = args;
+  a.trim();
+  return a == "json" || a.startsWith("json ");
 }
 
 // Reset reason labels matching esp_reset_reason_t (shared by both output paths)
