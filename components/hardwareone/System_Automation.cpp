@@ -3427,8 +3427,9 @@ const char* cmd_autolog(const String& argsInput) {
   subcmd.toLowerCase();
 
   if (subcmd == "start") {
-    String filename = a.arg(1);
-    if (filename.length() == 0) return "Usage: autolog start <filename>";
+    String filename;
+    const char* qerr = requireQuotedToken(a, 1, filename);
+    if (qerr) return qerr;
 
     // Capture the starter's identity BEFORE flipping gAutoLogActive — every
     // subsequent appendAutoLogEntry write is gated on this ctx via
@@ -3471,7 +3472,7 @@ const char* cmd_autolog(const String& argsInput) {
     }
 
   } else {
-    return "Usage: autolog start <filename> | autolog stop | autolog status";
+    return "Usage: autolog start \"<filename>\" | autolog stop | autolog status";
   }
 }
 
@@ -3870,7 +3871,7 @@ const CommandEntry automationCommands[] = {
   { "automationtrigger", "Arm afterDelay automation timer: automationtrigger id=<id>.", false, cmd_automation_trigger },
 
   // Utility commands
-  { "autolog", "Automation logging: autolog start <file> | stop | status.", false, cmd_autolog, "Usage: autolog start <filename> | autolog stop | autolog status" },
+  { "autolog", "Automation logging: autolog start \"<file>\" | stop | status.", false, cmd_autolog, "Usage: autolog start \"<filename>\" | autolog stop | autolog status" },
   { "validate-conditions", "Validate conditional automation syntax: validate-conditions IF temp>75 THEN ledcolor red.", true, cmd_validate_conditions },
   { "print", "Broadcast a message to all outputs: print <message>.", false, cmd_print },
   

@@ -2145,7 +2145,7 @@ const char* cmd_log(const String& argsInput) {
   CommandArgs ca(argsInput);
   if (ca.count() == 0) {
     return "Usage: log <start|stop|status|autostart>\n"
-           "  start [filepath] [flags=0xXXXX] [tags=0|1]: Begin system logging\n"
+           "  start [\"filepath\"] [flags=0xXXXX] [tags=0|1]: Begin system logging\n"
            "    filepath: Log file path (auto-generated if omitted)\n"
            "    flags: Debug flags to enable (e.g., flags=0x0203)\n"
            "    tags: Enable category tags (default: 1)\n"
@@ -2263,6 +2263,10 @@ const char* cmd_log(const String& argsInput) {
         String tagsStr = token.substring(5);
         categoryTags = tagsStr.toInt();
       } else if (token.length() > 0 && !hasFilepath) {
+        // The log path must be a quoted token (uniform quoted-path rule); a bare
+        // token here is almost certainly an unquoted path.
+        if (!ca.argWasQuoted(i))
+          return "Error: log path must be in quotes, e.g. log start \"/logs/sys.txt\"";
         filepath = token;
         hasFilepath = true;
       }
@@ -2980,7 +2984,7 @@ const CommandEntry debugCommands[] = {
   { "debugfmradio", "Debug FM Radio operations.", true, cmd_debugfmradio, "Usage: debugfmradio <0|1>" },
   { "memorysampleintervalsec", "Set memory sampling interval in seconds (0=disabled).", true, cmd_memorysampleintervalsec, "Usage: memorysampleintervalsec <0-300>" },
   { "loglevel", "Set log level (error|warn|info|debug).", true, cmd_loglevel },
-  { "log", "System-wide logging to file.", false, cmd_log, "Usage: log <start|stop|status>\n  start [filepath] [flags=0xXXXX] [tags=0|1]: Begin system logging\n    filepath: Log file path (auto-generated if omitted)\n    flags: Debug flags to enable (e.g., flags=0x0203)" },
+  { "log", "System-wide logging to file.", false, cmd_log, "Usage: log <start|stop|status>\n  start [\"filepath\"] [flags=0xXXXX] [tags=0|1]: Begin system logging\n    filepath: Log file path, quoted (auto-generated if omitted)\n    flags: Debug flags to enable (e.g., flags=0x0203)" },
   { "webconsole", "Enable/disable browser-side debug console output in the web UI.", true, cmd_webconsole, "Usage: webconsole <0|1>" },
 };
 

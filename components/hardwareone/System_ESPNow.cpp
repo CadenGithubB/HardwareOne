@@ -12365,7 +12365,7 @@ const char* cmd_espnow_browse(const String& argsInput) {
   }
 
   CommandArgs a(argsInput);
-  if (!a.hasMinArgs(3)) return "Usage: espnow browse <target> <username> <password> [path]";
+  if (!a.hasMinArgs(3)) return "Usage: espnow browse <target> <username> <password> [\"path\"]";
 
   String target = a.arg(0);
   String username = a.arg(1);
@@ -12436,7 +12436,7 @@ const char* cmd_espnow_fetch(const String& argsInput) {
   }
 
   CommandArgs a(argsInput);
-  if (!a.hasMinArgs(4)) return "Usage: espnow fetch <target> <username> <password> <path>";
+  if (!a.hasMinArgs(4)) return "Usage: espnow fetch <target> <username> <password> \"<path>\"";
 
   String target = a.arg(0);
   String username = a.arg(1);

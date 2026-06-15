@@ -25,6 +25,7 @@
 #include "System_G2_Protocol.h"
 #include "Bluetooth.h"
 #include "System_Debug.h"
+#include "System_Filesystem.h"  // requireQuotedToken (uniform quoted-path rule)
 #include "System_Command.h"
 #include "System_Utils.h"
 #include "System_Notifications.h"
@@ -11372,7 +11373,11 @@ static const char* cmd_g2micrec(const String& argsInput) {
       xSemaphoreGive(gMicRecMutex);
       return "G2 mic rec: already recording — run g2micrec stop first";
     }
-    String path = ca.count() > 1 ? ca.arg(1) : String("");
+    String path;
+    if (ca.count() > 1) {
+      const char* qerr = requireQuotedToken(ca, 1, path);
+      if (qerr) { xSemaphoreGive(gMicRecMutex); return qerr; }
+    }
     if (path.length() == 0) {
       uint32_t ts = (uint32_t)time(nullptr);
       if (ts == 0) ts = millis() / 1000;
@@ -11425,7 +11430,7 @@ static const char* cmd_g2micrec(const String& argsInput) {
   xSemaphoreTake(gMicRecMutex, portMAX_DELAY);
   if (!gMicRecFile) {
     xSemaphoreGive(gMicRecMutex);
-    return "G2 mic rec: idle (use g2micrec start [path])";
+    return "G2 mic rec: idle (use g2micrec start [\"path\"])";
   }
   String path    = gMicRecPath;
   uint32_t bytes = gMicRecBytes;
@@ -11490,7 +11495,11 @@ static const char* cmd_g2micwav(const String& argsInput) {
       return "G2 mic wav: lc3_setup_decoder failed";
     }
 
-    String path = ca.count() > 1 ? ca.arg(1) : String("");
+    String path;
+    if (ca.count() > 1) {
+      const char* qerr = requireQuotedToken(ca, 1, path);
+      if (qerr) { free(mem); xSemaphoreGive(gMicWavMutex); return qerr; }
+    }
     if (path.length() == 0) {
       uint32_t ts = (uint32_t)time(nullptr);
       if (ts == 0) ts = millis() / 1000;
@@ -11554,7 +11563,7 @@ static const char* cmd_g2micwav(const String& argsInput) {
   xSemaphoreTake(gMicWavMutex, portMAX_DELAY);
   if (!gMicWavFile) {
     xSemaphoreGive(gMicWavMutex);
-    return "G2 mic wav: idle (use g2micwav start [path])";
+    return "G2 mic wav: idle (use g2micwav start [\"path\"])";
   }
   String path    = gMicWavPath;
   uint32_t bytes = gMicWavBytes;
@@ -12008,8 +12017,8 @@ extern const CommandEntry g2Commands[] = {
   { "g2micstats",   "G2 mic probe: dump per-arm frame counters",                                            false, cmd_g2micstats },
   { "g2micreset",   "G2 mic probe: zero per-arm counters",                                                  false, cmd_g2micreset },
   { "g2micverbose", "G2 mic probe: per-frame log [on|off]",                                                 false, cmd_g2micverbose },
-  { "g2micrec",     "G2 mic dump: g2micrec start [path] | stop | status — writes raw 205B LC3 packets to SD", false, cmd_g2micrec },
-  { "g2micwav",     "G2 mic decode: g2micwav start [path] | stop | status — decodes LC3 → 16k mono WAV on SD", false, cmd_g2micwav },
+  { "g2micrec",     "G2 mic dump: g2micrec start [\"path\"] | stop | status — writes raw 205B LC3 packets to SD", false, cmd_g2micrec },
+  { "g2micwav",     "G2 mic decode: g2micwav start [\"path\"] | stop | status — decodes LC3 → 16k mono WAV on SD", false, cmd_g2micwav },
   { "g2protostats", "Show G2 protocol stats per sid: g2protostats [verbose]",      false, cmd_g2protostats },
   { "g2probe",      "Fire arbitrary pb cmd: g2probe <sid_hex> <cmd_dec> [body_hex]", false, cmd_g2probe },
   { "g2devcfg",     "Typed sid=0x80 sender: g2devcfg <heartbeat|auth|role|time|ring> [args]", false, cmd_g2devcfg },
