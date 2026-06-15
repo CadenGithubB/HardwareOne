@@ -349,9 +349,9 @@ espnowpair <mac> <name>         - Pair with a device
 espnowunpair <name_or_mac>      - Remove a paired peer
 espnowsend <name_or_mac> <msg>  - Send a text message (auto-routes via mesh)
 espnowbroadcast <message>       - Broadcast to all peers
-espnowsendfile <name_or_mac> <path>        - Send a file to a peer
-espnowbrowse <name_or_mac> <user> <pass> [path]  - Browse remote filesystem
-espnowfetch <name_or_mac> <user> <pass> <path>   - Fetch a file from a peer
+espnowsendfile <name_or_mac> "<path>"      - Send a file to a peer
+espnowbrowse <name_or_mac> <user> <pass> ["path"]  - Browse remote filesystem
+espnowfetch <name_or_mac> <user> <pass> "<path>"   - Fetch a file from a peer
 espnowremote <name_or_mac> <user> <pass> <cmd>   - Execute command on peer
 
 --- Mesh ---
@@ -468,13 +468,15 @@ blerequireauth [on|off]         - Require authentication for BLE access
 
 ```
 fsusage                         - Show filesystem usage
-files [path]                    - List files (default '/')
-mkdir <path>                    - Create directory
-rmdir <path>                    - Remove directory
-filecreate <path> [content]     - Create file
-fileview <path> [offset]        - View file contents
-filedelete <path>               - Delete file
-filerename <oldpath> <newname>  - Rename file
+files ["path"]                  - List files (default '/')
+mkdir "<path>"                  - Create directory
+rmdir "<path>"                  - Remove directory
+filecreate "<path>"             - Create empty file
+fileview "<path>"               - View file contents
+filedelete "<path>"             - Delete file
+filerename "<oldpath>" "<newname>"  - Rename file
+
+(Paths are always double-quoted, e.g. fileview "/logs/boot.txt".)
 ```
 </details>
 
@@ -660,7 +662,7 @@ llmstop                         - Interrupt in-progress generation
 
 ```
 maplist                         - List available map files
-mapload <path>                  - Load a map file into memory
+mapload "<path>"                - Load a map file into memory
 mapunload                       - Unload current map and free PSRAM
 map                             - Show current map info and GPS position
 whereami                        - Show current location context (map, room, zone)

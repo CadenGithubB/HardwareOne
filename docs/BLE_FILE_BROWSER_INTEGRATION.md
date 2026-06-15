@@ -24,14 +24,21 @@ command channel: **no new GATT service, no web/HTTP dependency.**
 
    | Action | Command |
    |---|---|
-   | List a directory | `files json [path]` |
-   | Storage usage | `files stats json [path]` |
-   | Read file (chunked) | `fileread <path> [offset] [len] [b64]` |
-   | Write file (chunked) | `filewrite <path> <offset> <b64chunk> [final]` |
-   | Create folder | `mkdir <path>` |
-   | Create empty file | `filecreate <path>` |
-   | Rename | `filerename <oldpath> <newname>` |
-   | Delete | `filedelete <path> confirm` |
+   | List a directory | `files json ["path"]` |
+   | Storage usage | `files stats json ["path"]` |
+   | Read file (chunked) | `fileread "<path>" [offset] [len] [b64]` |
+   | Write file (chunked) | `filewrite "<path>" <offset> <b64chunk> [final]` |
+   | Create folder | `mkdir "<path>"` |
+   | Create empty file | `filecreate "<path>"` |
+   | Rename | `filerename "<oldpath>" "<newname>"` |
+   | Delete | `filedelete "<path>" confirm` |
+
+   > **Paths MUST be double-quoted — always, even when they contain no spaces.**
+   > Every path argument is wrapped in `"..."` (the firmware reads it as one
+   > quoted token). An unquoted path now returns an error (for JSON commands,
+   > `{"success":false,"error":"path must be a quoted token"}`). Flag/number
+   > args (`json`, `confirm`, `final`, offset, len) stay **bare** — do not quote
+   > them. A filename may not contain a literal `"` (the firmware rejects it).
 
    `mkdir` / `filecreate` / `filerename` return short human-readable strings
    (success if the reply has no `Error:`/`Usage:` prefix). The rest return JSON.
@@ -137,7 +144,7 @@ The tier is chosen from the path (`/sd…` → SD card, else internal LittleFS):
 
 ---
 
-## Reading a file — `fileread <path> [offset] [len] [b64]`
+## Reading a file — `fileread "<path>" [offset] [len] [b64]`
 
 BLE can't stream like HTTP, so pull the file in bounded windows: start at
 `offset 0` and loop, advancing `offset` by `len`, until `eof` is true.
@@ -183,7 +190,7 @@ browser for big files.
 
 ---
 
-## Writing / editing a file — `filewrite <path> <offset> <b64chunk> [final]`
+## Writing / editing a file — `filewrite "<path>" <offset> <b64chunk> [final]`
 
 The REQUEST characteristic caps each inbound command at ~512 bytes with no
 reassembly, so upload as a sequence of **small base64 chunks** (keep the raw
@@ -224,13 +231,13 @@ To **edit** an existing text file: `fileread` it, let the user edit, then
 
 ## Create / rename / delete
 
-- **Create folder:** `mkdir <path>` — idempotent (existing folder is success).
-- **Create empty file:** `filecreate <path>`.
-- **Rename:** `filerename <oldpath> <newname>` — `newname` is just the basename
+- **Create folder:** `mkdir "<path>"` — idempotent (existing folder is success).
+- **Create empty file:** `filecreate "<path>"`.
+- **Rename:** `filerename "<oldpath>" "<newname>"` — `newname` is just the basename
   (the file stays in the same directory). Reply `Renamed: <old> -> <new>` on
   success.
-- **Delete:** `filedelete <path> confirm` — the trailing `confirm` token does a
-  one-shot delete (the bare `filedelete <path>` is an interactive two-step gate
+- **Delete:** `filedelete "<path>" confirm` — the trailing `confirm` token (bare,
+  not quoted) does a one-shot delete (the bare `filedelete "<path>"` is an interactive two-step gate
   meant for the serial console; **always pass `confirm` from the app**). Reply
   `Deleted file: <path>` on success.
 
