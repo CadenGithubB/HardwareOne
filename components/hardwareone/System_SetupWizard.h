@@ -9,6 +9,7 @@
 #define SYSTEM_SETUPWIZARD_H
 
 #include <Arduino.h>
+#include "System_BuildConfig.h"  // feature flags (ENABLE_WIFI, ...) used below
 
 // ============================================================================
 // Wizard Pages and State
@@ -227,16 +228,27 @@ bool isWizardCancelRequested();
 // Defined in System_SetupWizard.cpp.
 extern volatile bool gWizardOwnsSerial;
 
-// Serial-only fallback for builds without OLED compiled in.
-// When ENABLE_OLED_DISPLAY=1, this just calls runSetupWizard().
-SetupWizardResult runSerialSetupWizard();
-
 // Render the standard "SETUP n/N: <page>" banner + entries + nav hint
 // for the current page via broadcastOutput. Defined in
 // System_SetupWizard.cpp; consumed by the legacy runSetupWizard loop
 // AND the new CLIMode-based wizard (System_SetupWizardMode.cpp) so they
 // share identical paint output.
 void printSerialPageStatus();
+
+// Shared WiFi scan-and-list printer for the serial/CLI wizard paths
+// (handleSerialWiFiPage and the CLIMode WIFI_SSID state). Scans, then prints
+// "Found N network(s):" with NAMED-ONLY numbering
+// plus a "(+H hidden ...)" line — mirroring the OLED picker so a numbered pick
+// can never resolve to a blank SSID (the bug that let typing a list number for
+// a hidden AP save an empty/NO_SSID_AVAIL SSID). Fills namedScanIdx[] with the
+// scan indices of named APs so the caller maps choice K -> WiFi.SSID(
+// namedScanIdx[K-1]); returns the count stored (== the valid numeric range).
+// Does NOT delete the scan — the caller owns WiFi.scanDelete() once it has read
+// the chosen SSID. Output goes through broadcastOutput so every transport
+// (serial, web CLI, BLE, OLED console) sees the same list.
+#if ENABLE_WIFI
+int wifiScanPrintNamed(int* namedScanIdx, int namedCap);
+#endif
 
 // ============================================================================
 // Heap Bar Helper

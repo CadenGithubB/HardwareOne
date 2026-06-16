@@ -1254,6 +1254,47 @@ static void handleSerialMQTTPage(SetupWizardResult& result, bool& running) {
   }
 }
 
+#if ENABLE_WIFI
+// Shared WiFi scan-and-list printer — see System_SetupWizard.h for contract.
+// Numbers NAMED networks only; hidden (empty-SSID) APs are collapsed into a
+// single "(+H hidden ...)" line so a numbered pick can never yield a blank
+// SSID. namedScanIdx[k] holds the raw scan index of the (k+1)-th named AP.
+int wifiScanPrintNamed(int* namedScanIdx, int namedCap) {
+  int n = WiFi.scanNetworks(false, true);
+  int storedNamed = 0;   // named APs we numbered (capped at namedCap)
+  int totalNamed  = 0;   // all named APs seen
+  int hiddenCount = 0;
+  for (int i = 0; i < n; i++) {
+    if (WiFi.SSID(i).length() == 0) { hiddenCount++; continue; }
+    totalNamed++;
+    if (storedNamed < namedCap) namedScanIdx[storedNamed++] = i;
+  }
+
+  if (storedNamed > 0) {
+    broadcastOutput(String("Found ") + totalNamed + " network(s):");
+    for (int j = 0; j < storedNamed; j++) {
+      char line[96];
+      snprintf(line, sizeof(line), "  %d. %-24s  %lddBm  %s",
+               j + 1, WiFi.SSID(namedScanIdx[j]).c_str(),
+               (long)WiFi.RSSI(namedScanIdx[j]),
+               (WiFi.encryptionType(namedScanIdx[j]) == WIFI_AUTH_OPEN) ? "Open" : "Secured");
+      broadcastOutput(line);
+    }
+    if (totalNamed > storedNamed) {
+      broadcastOutput(String("  (... and ") + (totalNamed - storedNamed) +
+                      " more named — type the exact SSID to join)");
+    }
+  } else {
+    broadcastOutput("No named WiFi networks found.");
+  }
+  if (hiddenCount > 0) {
+    broadcastOutput(String("  (+") + hiddenCount + " hidden network" +
+                    (hiddenCount == 1 ? "" : "s") + " — type the exact SSID to join)");
+  }
+  return storedNamed;
+}
+#endif
+
 // Serial WiFi page helper - full scan + numbered list
 static void handleSerialWiFiPage(SetupWizardResult& result, bool& running) {
   int pageNum = getWizardPageNumber(WIZARD_PAGE_WIFI);
@@ -1263,18 +1304,8 @@ static void handleSerialWiFiPage(SetupWizardResult& result, bool& running) {
   bool wifiPageDone = false;
   while (!wifiPageDone) {
 #if ENABLE_WIFI
-    int n = WiFi.scanNetworks(false, true);
-    if (n > 0) {
-      Serial.printf("Found %d networks:\n", n);
-      for (int i = 0; i < n && i < 10; i++) {
-        Serial.printf("  %d. %-24s  %lddBm  %s\n",
-          i + 1, WiFi.SSID(i).c_str(), (long)WiFi.RSSI(i),
-          (WiFi.encryptionType(i) == WIFI_AUTH_OPEN) ? "Open" : "Secured");
-      }
-      if (n > 10) Serial.printf("  ... and %d more\n", n - 10);
-    } else {
-      Serial.println("No WiFi networks found.");
-    }
+    int named[24];
+    int namedCount = wifiScanPrintNamed(named, 24);
     Serial.println("----------------------------------------");
     Serial.println("Enter number, SSID directly, 'rescan', or 'skip':");
     Serial.println("('b' or 'back' to return to previous page)");
@@ -1306,8 +1337,10 @@ static void handleSerialWiFiPage(SetupWizardResult& result, bool& running) {
     }
     String ssid = ssidInput;
     int idx = ssidInput.toInt();
-    if (idx > 0 && idx <= n) {
-      ssid = WiFi.SSID(idx - 1);
+    // Map a bare in-range integer to the Nth NAMED network; anything else
+    // (incl. SSIDs that start with a digit, e.g. "2WIRE") is a typed SSID.
+    if (idx >= 1 && idx <= namedCount && String(idx) == ssidInput) {
+      ssid = WiFi.SSID(named[idx - 1]);
     }
     WiFi.scanDelete();
     if (ssid.length() > 0) {
@@ -1686,167 +1719,3 @@ SetupWizardResult runAndApplyFeatureWizard(unsigned long idleTimeoutMs) {
   return result;
 }
 
-// ============================================================================
-// runSerialSetupWizard - delegates to runSetupWizard() when OLED compiled;
-// remains a real implementation only for ENABLE_OLED_DISPLAY=0 builds.
-// ============================================================================
-
-#if ENABLE_OLED_DISPLAY
-SetupWizardResult runSerialSetupWizard() {
-  return runSetupWizard();
-}
-#else
-// NOTE: This is only the active path when ENABLE_OLED_DISPLAY=0.
-// All wizard changes should be made to runSetupWizard() above.
-SetupWizardResult runSerialSetupWizard() {
-  SetupWizardResult result;
-  result.completed = false;
-  result.wifiEnabled = false;
-  result.wifiConfigured = false;
-  result.deviceName = "HardwareOne";
-  result.timezoneOffset = -240;
-  result.timezoneAbbrev = "EDT";
-  
-  initSetupWizard();
-  
-  Serial.println();
-  Serial.println("========================================");
-  Serial.println("       FEATURE CONFIGURATION WIZARD    ");
-  Serial.println("========================================");
-  Serial.println("Configure which features to enable.");
-  Serial.println();
-  
-  bool running = true;
-  
-  while (running) {
-    // Display current page
-    switch (currentPage) {
-      case WIZARD_PAGE_FEATURES:
-        printSerialFeaturePage("Features", featuresPage, featuresPageCount);
-        break;
-        
-      case WIZARD_PAGE_SENSORS:
-        printSerialFeaturePage("Display & Sensors", sensorsPage, sensorsPageCount);
-        break;
-        
-      case WIZARD_PAGE_NETWORK:
-        printSerialNetworkPage();
-        break;
-        
-      case WIZARD_PAGE_SYSTEM:
-        printSerialSystemPage();
-        break;
-        
-      case WIZARD_PAGE_WIFI:
-        // Handle WiFi setup
-        Serial.println();
-        Serial.println("=== WiFi Setup ===");
-        Serial.println("----------------------------------------");
-        {
-#if ENABLE_WIFI
-          int n = WiFi.scanNetworks(false, true);
-          if (n > 0) {
-            Serial.printf("Found %d networks:\n", n);
-            for (int i = 0; i < n && i < 10; i++) {
-              Serial.printf("  %d. %-24s  %lddBm  %s\n",
-                i + 1,
-                WiFi.SSID(i).c_str(),
-                (long)WiFi.RSSI(i),
-                (WiFi.encryptionType(i) == WIFI_AUTH_OPEN) ? "Open" : "Secured");
-            }
-            if (n > 10) Serial.printf("  ... and %d more\n", n - 10);
-          } else {
-            Serial.println("No WiFi networks found");
-          }
-          Serial.println("----------------------------------------");
-          Serial.println("Enter number to select, type an SSID directly, 'rescan' to refresh, or 'skip':");
-          Serial.println("('b' or 'back' to return to previous page)");
-          Serial.print("> ");
-          String ssidInput = waitForSerialInputBlocking();
-          ssidInput.trim();
-          if (ssidInput.equalsIgnoreCase("b") || ssidInput.equalsIgnoreCase("back")) {
-            WiFi.scanDelete();
-            wizardPrevPage();
-            continue;
-          }
-          if (ssidInput.equalsIgnoreCase("skip") || ssidInput.length() == 0) {
-            WiFi.scanDelete();
-            result.completed = true;
-            running = false;
-            continue;
-          }
-          String ssid = ssidInput;
-          int idx = ssidInput.toInt();
-          if (idx > 0 && idx <= n) {
-            ssid = WiFi.SSID(idx - 1);
-          }
-          WiFi.scanDelete();
-          if (ssid.length() > 0) {
-            Serial.println("Enter WiFi password (or 'b' to go back):");
-            Serial.print("> ");
-            String pass = waitForSerialInputBlocking();
-            pass.trim();
-            if (pass.equalsIgnoreCase("b") || pass.equalsIgnoreCase("back")) {
-              continue;  // Loop back to WiFi page (re-scan)
-            }
-            result.wifiSSID = ssid;
-            result.wifiPassword = pass;
-            result.wifiConfigured = true;
-          }
-#else
-          Serial.println("WiFi not compiled in this build");
-#endif
-        }
-        result.completed = true;
-        running = false;
-        continue;
-        
-      default:
-        running = false;
-        continue;
-    }
-    
-    // Get input
-    String input = waitForSerialInputBlocking();
-    input.trim();
-    input.toLowerCase();
-    
-    if (input == "n" || input == "next") {
-      if (!wizardNextPage(result)) {
-        running = false;
-      }
-    } else if (input == "b" || input == "back") {
-      wizardPrevPage();
-    } else if (input.length() > 0) {
-      int num = input.toInt();
-      if (num > 0) {
-        currentSelection = num - 1;
-        if (currentPage == WIZARD_PAGE_SYSTEM) {
-          wizardCycleOption();
-        } else {
-          wizardToggleCurrentItem();
-        }
-      }
-    }
-  }
-  
-  wizardFinalize(result);
-  
-  Serial.println();
-  Serial.println("========================================");
-  Serial.println("    CONFIGURATION COMPLETE!");
-  Serial.printf("    Timezone: %s\n", result.timezoneAbbrev.c_str());
-  {
-    uint32_t usedKB = 0;
-    uint32_t totalKB = 1;
-    int pct = 0;
-    getHeapBarData(&usedKB, &totalKB, &pct);
-    uint32_t estFreeKB = (usedKB >= totalKB) ? 0 : (totalKB - usedKB);
-    Serial.printf("    Heap estimate: ~%luKB\n", (unsigned long)estFreeKB);
-  }
-  Serial.println("========================================");
-  Serial.println();
-  
-  return result;
-}
-#endif // !ENABLE_OLED_DISPLAY
