@@ -34,6 +34,13 @@ static const uint8_t SC_HELLO_ACK   = 0x02;
 static const uint8_t SC_CONFIRM     = 0x03;
 static const uint8_t SC_CONFIRM_ACK = 0x04;
 static const uint8_t SC_DATA        = 0x10;
+static const uint8_t SC_REJECT      = 0x05;   // device->app: handshake refused, body = reason(1)
+
+// SC_REJECT reason codes — the app maps each to a human-readable message instead
+// of showing a bare "handshake timed out". Sent best-effort right before the
+// handshake aborts so the failure is never silent.
+static const uint8_t SC_REJ_NO_PASSPHRASE = 0x01;  // device has no blesecret configured
+static const uint8_t SC_REJ_AUTH_FAILED   = 0x02;  // wrong passphrase (or tampering/MITM)
 
 static const char    SC_INFO[]      = "HW1-SC-v1";   // HKDF info
 static const char    SC_PSK_SALT[]  = "HW1-SC-v1";   // PBKDF2 salt — MUST match app (verified vs test vectors)
@@ -217,6 +224,14 @@ bool bleScSendEncrypted(uint16_t connId, const char* plaintext, size_t len) {
   return ok;
 }
 
+// Tell the app *why* the handshake won't proceed instead of going silent — the
+// app can only observe silence as a generic timeout. body = reason(1).
+// Best-effort: a failed notify just degrades back to the old silent behavior.
+static void scSendReject(uint8_t reason) {
+  uint8_t frame[2] = { SC_REJECT, reason };
+  bleRawNotify((const char*)frame, sizeof(frame));
+}
+
 // ----- inbound handshake / data -----
 BleScResult bleScHandleInbound(uint16_t connId, const uint8_t* data, size_t len,
                                char* out, size_t outCap, size_t* outLen) {
@@ -226,7 +241,8 @@ BleScResult bleScHandleInbound(uint16_t connId, const uint8_t* data, size_t len,
   // commands start >= 0x20) is plaintext.
   if (type != SC_HELLO && type != SC_CONFIRM && type != SC_DATA) return BLE_SC_NOT_A_FRAME;
   if (!scSodiumReady() || !scDerivePsk()) {                      // no secret -> can't run channel
-    scLog(connId, "secure frame received but no passphrase set (blesecret) — ignoring");
+    scLog(connId, "secure frame received but no passphrase set (blesecret) — rejecting");
+    scSendReject(SC_REJ_NO_PASSPHRASE);
     return BLE_SC_ERROR;
   }
 
@@ -240,7 +256,7 @@ BleScResult bleScHandleInbound(uint16_t connId, const uint8_t* data, size_t len,
     crypto_kx_keypair(devPub, c->ephSec);          // X25519 keypair
     randombytes_buf(devNonce, sizeof(devNonce));
     uint8_t ss[32];
-    if (crypto_scalarmult(ss, c->ephSec, appPub) != 0) { scLog(connId, "HELLO: invalid peer key, aborting"); bleScReset(connId); return BLE_SC_ERROR; }
+    if (crypto_scalarmult(ss, c->ephSec, appPub) != 0) { scLog(connId, "HELLO: invalid peer key, aborting"); scSendReject(SC_REJ_AUTH_FAILED); bleScReset(connId); return BLE_SC_ERROR; }
     // K = HKDF(ikm = ss||PSK, salt = appNonce||devNonce, info)
     uint8_t ikm[64];  memcpy(ikm, ss, 32); memcpy(ikm + 32, gPsk, 32);
     uint8_t salt[32]; memcpy(salt, appNonce, 16); memcpy(salt + 16, devNonce, 16);
@@ -265,9 +281,10 @@ BleScResult bleScHandleInbound(uint16_t connId, const uint8_t* data, size_t len,
     if (crypto_aead_chacha20poly1305_ietf_decrypt_detached(
             pt, nullptr, data + 1, 2, data + 3, nullptr, 0, nonce, c->kC2D) != 0) {
       scLog(connId, "CONFIRM failed to decrypt — wrong passphrase or MITM; dropping channel");
+      scSendReject(SC_REJ_AUTH_FAILED);
       bleScReset(connId); return BLE_SC_ERROR;   // wrong PSK / MITM
     }
-    if (pt[0] != 'o' || pt[1] != 'k') { scLog(connId, "CONFIRM bad payload; dropping channel"); bleScReset(connId); return BLE_SC_ERROR; }
+    if (pt[0] != 'o' || pt[1] != 'k') { scLog(connId, "CONFIRM bad payload; dropping channel"); scSendReject(SC_REJ_AUTH_FAILED); bleScReset(connId); return BLE_SC_ERROR; }
     // Reply CONFIRM_ACK = AEAD("ok", K_d2c, ctr 0)
     uint8_t ackNonce[12]; scNonce(ackNonce, DIR_D2C, 0);
     uint8_t ack[1 + 2 + 16]; ack[0] = SC_CONFIRM_ACK;

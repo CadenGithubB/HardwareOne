@@ -23,9 +23,15 @@
 //   0x03 CONFIRM      body = ct(2) || tag(16)     (AEAD of "ok", key K_c2d, ctr 0)
 //   0x04 CONFIRM_ACK  body = ct(2) || tag(16)     (AEAD of "ok", key K_d2c, ctr 0)
 //   0x10 DATA         body = ctr(8) || ct(N) || tag(16)
+//   0x05 REJECT       body = reason(1)            (device->app only; handshake refused)
+//                     reason 0x01 = no passphrase set on device (run `blesecret`)
+//                     reason 0x02 = auth failed (wrong passphrase or tampering/MITM)
+//     REJECT is sent best-effort right before the device aborts a handshake, so
+//     the app shows a real cause instead of a generic timeout. Treat any other
+//     reason byte as a generic auth failure.
 //
 //   ss  = X25519(ownEphPriv, peerEphPub)
-//   PSK = PBKDF2-HMAC-SHA256(passphrase, salt="HW1-SC-v1-psk", iters=100000, 32B)
+//   PSK = PBKDF2-HMAC-SHA256(passphrase, salt="HW1-SC-v1", iters=100000, 32B)
 //   K   = HKDF-SHA256(ikm = ss||PSK, salt = appNonce||devNonce, info="HW1-SC-v1", 64B)
 //         K_c2d = K[0:32]  (app->device)   K_d2c = K[32:64]  (device->app)
 //   AEAD nonce(12) = dirTag(4) || ctr(8);  dirTag = 0x00000000 (c2d) / 0x00000001 (d2c)

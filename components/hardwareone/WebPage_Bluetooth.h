@@ -575,14 +575,14 @@ inline void streamBluetoothInner(httpd_req_t* req) {
     if(discBtn)  discBtn.style.display  = (bleMode === 'server' && state === 'connected') ? '' : 'none';
   }
 
-  function parseServerState(text){
-    var lower = (text || '').toLowerCase();
-    if(lower.indexOf('not initialized') >= 0) return 'off';
-    if(lower.indexOf('connected') >= 0) return 'connected';
-    if(lower.indexOf('advertising') >= 0) return 'advertising';
-    if(lower.indexOf('disabled') >= 0 || lower.indexOf('stopped') >= 0) return 'off';
-    if(lower.indexOf('ble status') >= 0) return 'on';
-    return 'unknown';
+  // Derive the pill state from STRUCTURED bleinfo-json fields — no text parsing.
+  function stateFromInfo(info){
+    if(!info || !info.initialized) return 'off';
+    if((info.connections || 0) > 0) return 'connected';
+    var s = (info.state || '').toLowerCase();
+    if(s.indexOf('advertis') >= 0) return 'advertising';
+    if(s.indexOf('connect') >= 0) return 'connected';
+    return 'on';
   }
 
   // Parse the single-line format produced by getG2Status():
@@ -678,45 +678,40 @@ inline void streamBluetoothInner(httpd_req_t* req) {
     }
   }
 
-  function renderConnections(text){
+  function esc(s){
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function(c){
+      return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+    });
+  }
+
+  // Render the connected-clients list from STRUCTURED bleinfo-json data (no text
+  // parsing). Identity is the authenticated user; an unauthed connection shows
+  // "Unknown" + a badge — distinct from a user literally named "Unknown" because
+  // we branch on the `authed` boolean, not the displayed string.
+  function renderConnections(clients){
     var list = el('bt-conn-list');
     if(!list) return;
+    clients = clients || [];
 
-    var lines = (text || '').split('\n');
-    // Parse "Active connections: X/Y"
-    var countMatch = text.match(/Active connections:\s*(\d+)\/(\d+)/);
-    if(countMatch) setText('bt-conn-count', countMatch[1] + ' / ' + countMatch[2]);
-
-    var slots = [];
-    for(var i = 0; i < lines.length; i++){
-      var slotMatch = lines[i].match(/^\[(\d+)\]\s+(.+)/);
-      if(slotMatch){
-        var details = lines[i+1] || '';
-        var macMatch  = details.match(/MAC:\s*([0-9A-Fa-f:]+)/);
-        var durMatch  = details.match(/(\d+)\s*sec/);
-        var cmdMatch  = details.match(/(\d+)\s*cmds/);
-        slots.push({
-          slot: slotMatch[1],
-          name: slotMatch[2].trim(),
-          mac:  macMatch  ? macMatch[1]  : '--',
-          dur:  durMatch  ? durMatch[1]  + 's' : '--',
-          cmds: cmdMatch  ? cmdMatch[1]  : '0'
-        });
-      }
-    }
-
-    if(slots.length === 0){
+    if(clients.length === 0){
       list.innerHTML = '<div class="bt-empty">No active connections</div>';
       return;
     }
 
     var html = '';
-    slots.forEach(function(s){
+    clients.forEach(function(c){
+      var authed = !!c.authed;
+      var who    = authed ? (c.user || '(unnamed)') : 'Unknown';
+      var nameStyle = authed ? '' : 'opacity:.7;font-style:italic';
+      var badge = authed ? '' :
+        ' <span style="font-size:.7em;color:#c80;border:1px solid currentColor;border-radius:3px;padding:0 4px;vertical-align:middle">not logged in</span>';
+      var since = parseInt(c.since, 10) || 0;
+      var cmds  = parseInt(c.commands, 10) || 0;
       html += '<div class="bt-conn-item">'
         + '<div>'
-        + '<div class="bt-conn-name">' + s.name + '</div>'
-        + '<div class="bt-conn-mac">'  + s.mac  + '</div>'
-        + '<div class="bt-conn-meta">Slot ' + s.slot + ' &nbsp;·&nbsp; ' + s.dur + ' &nbsp;·&nbsp; ' + s.cmds + ' cmds</div>'
+        + '<div class="bt-conn-name" style="' + nameStyle + '">' + esc(who) + badge + '</div>'
+        + '<div class="bt-conn-mac">'  + esc(c.mac || '--') + '</div>'
+        + '<div class="bt-conn-meta">' + since + 's &nbsp;·&nbsp; ' + cmds + ' cmds</div>'
         + '</div>'
         + '<div class="bt-conn-actions">'
         + '<button class="btn" style="font-size:.78em;padding:3px 8px" onclick="btDisconnect()">Kick</button>'
@@ -779,17 +774,21 @@ inline void streamBluetoothInner(httpd_req_t* req) {
         // doesn't update this tick.
       });
     } else {
-      cli('blestatus').then(function(out){
-        var state = parseServerState(out);
-        applyState(state);
-        if(state !== 'off') {
-          renderConnections(out);
-          showStatusText(out);
-        } else {
-          showStatusText('');
-        }
+      // Single structured source: bleinfo json drives the pill, the client
+      // list, the count, and the lifetime line. Zero text parsing — an unauthed
+      // "Unknown" can't be confused with a user named "Unknown".
+      cli('bleinfo json').then(function(j){
+        var info = {};
+        try { info = JSON.parse(j) || {}; } catch(e) {}
+        applyState(stateFromInfo(info));
+        renderConnections(info.clients || []);
+        setText('bt-conn-count', (info.connections || 0) + ' / ' + (info.maxConnections || 4));
+        showStatusText(info.initialized
+          ? ('Lifetime: ' + (info.totalConnections || 0) + ' connections · ' +
+             (info.commandsReceived || 0) + ' commands')
+          : '');
       }).catch(function(){
-        // Don't flip to off on transient errors — leave previous state.
+        // Transient error — leave the previous state/list rather than flicker.
       });
     }
   }
@@ -809,18 +808,15 @@ inline void streamBluetoothInner(httpd_req_t* req) {
   // ── config load (server mode) ─────────────────────────────────────────────
   function loadConfig(){
     setText('bt-cfg-status', 'Loading…');
-    cli('bleinfo').then(function(out){
-      var nameMatch = out.match(/Device Name:\s*(.+)/);
-      if(nameMatch){ var inp = el('bt-cfg-name'); if(inp) inp.value = nameMatch[1].trim(); }
-
-      var txMatch = out.match(/TX Power:\s*(\d+)/);
-      if(txMatch){ var inp = el('bt-cfg-txpower'); if(inp) inp.value = txMatch[1]; }
-
-      autoStartState   = /Auto-Start:\s*Yes/i.test(out);
-      requireAuthState = /Require Auth:\s*Yes/i.test(out);
+    cli('bleinfo json').then(function(j){
+      var info = {};
+      try { info = JSON.parse(j) || {}; } catch(e) {}
+      var nameInp = el('bt-cfg-name');    if(nameInp) nameInp.value = info.deviceName || '';
+      var txInp   = el('bt-cfg-txpower'); if(txInp && info.txPower != null) txInp.value = info.txPower;
+      autoStartState   = !!info.autoStart;
+      requireAuthState = !!info.requireAuth;
       updateToggle('btn-bt-autostart',   autoStartState);
       updateToggle('btn-bt-requireauth', requireAuthState);
-
       setText('bt-cfg-status', 'Loaded at ' + new Date().toLocaleTimeString());
     }).catch(function(){
       setText('bt-cfg-status', 'Failed to load config');

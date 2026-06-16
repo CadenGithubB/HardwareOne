@@ -2380,7 +2380,14 @@ void buildSettingsSchemaJson(JsonDocument& doc) {
         case SETTING_STRING: entry["type"] = "string"; break;
       }
 
-      if (e->isSecret) entry["secret"] = true;
+      if (e->isSecret) {
+        entry["secret"] = true;
+        // Report WHETHER a value exists, without ever exposing it, so the web UI
+        // can show "(set)" vs "(not set)". The secret value itself is never
+        // serialized to the web.
+        if (e->type == SETTING_STRING && e->valuePtr)
+          entry["set"] = (((String*)e->valuePtr)->length() > 0);
+      }
       if (e->readOnly) entry["readOnly"] = true;
       if (e->group)    entry["group"] = e->group;
       if (e->cmdKey)   entry["cmdKey"] = e->cmdKey;

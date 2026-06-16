@@ -1329,18 +1329,16 @@ static const char* cmd_blestatus(const String& argsInput) {
       uint32_t duration = (millis() - gBLEState->connections[i].connectedSince) / 1000;
       char macStr[18];
       macToStackBuf(gBLEState->connections[i].deviceAddr, macStr);
-      // Append the signed-in user once this connection authenticates, so the
-      // status text — and the web "Connected Clients" card, which parses this
-      // line — shows who's logged in, not just the device type ("Unknown").
-      char userSuffix[72];
-      if (gBLEState->connections[i].authed && gBLEState->connections[i].user.length() > 0) {
-        snprintf(userSuffix, sizeof(userSuffix), " (%s)", gBLEState->connections[i].user.c_str());
-      } else {
-        userSuffix[0] = '\0';
-      }
-      written = snprintf(buf + offset, remaining, "[%d] %s%s\n    MAC: %s | %lu sec | %lu cmds\n",
-               i, gBLEState->connections[i].deviceName.c_str(), userSuffix,
-               macStr, duration, gBLEState->connections[i].commandsReceived);
+      // Identity shown is the AUTHENTICATED user (firmware-proven via login),
+      // NOT the device-advertised name (which the client controls and we don't
+      // trust). A connection that hasn't logged in shows "Unknown"; once it
+      // authenticates it flips to that user's username. The web "Connected
+      // Clients" card parses this line; the MAC still identifies the device.
+      const char* who = (gBLEState->connections[i].authed &&
+                         gBLEState->connections[i].user.length() > 0)
+                          ? gBLEState->connections[i].user.c_str() : "Unknown";
+      written = snprintf(buf + offset, remaining, "[%d] %s\n    MAC: %s | %lu sec | %lu cmds\n",
+               i, who, macStr, duration, gBLEState->connections[i].commandsReceived);
       if (written > 0) { offset += written; remaining -= written; }
     }
   }
@@ -1707,10 +1705,31 @@ static const char* cmd_bleinfo(const String& argsInput) {
     doc["state"]          = getBLEStateString();
     doc["connections"]    = init ? gBLEState->activeConnectionCount : 0;
     doc["maxConnections"] = BLE_MAX_CONNECTIONS;
+    doc["totalConnections"] = init ? gBLEState->totalConnections : 0;  // lifetime
+    doc["commandsReceived"] = init ? gBLEState->commandsReceived : 0;  // lifetime
+    // Per-connection identity for the web "Connected Clients" card. Emit the
+    // AUTHENTICATED facts (authed + raw user) rather than a pre-baked "Unknown",
+    // so the UI can tell an unauthenticated connection from a user named
+    // "Unknown" — the ambiguity the old text format couldn't represent.
+    JsonArray clients = doc["clients"].to<JsonArray>();
+    if (init) {
+      for (int i = 0; i < BLE_MAX_CONNECTIONS; i++) {
+        const BLEConnection& c = gBLEState->connections[i];
+        if (!c.active) continue;
+        JsonObject o = clients.add<JsonObject>();
+        o["connId"]   = c.connId;
+        o["authed"]   = c.authed;
+        o["user"]     = c.user;   // "" when not authed; UI renders authed ? user : "Unknown"
+        o["since"]    = (uint32_t)((millis() - c.connectedSince) / 1000);
+        o["commands"] = c.commandsReceived;
+        char macStr[18]; macToStackBuf(c.deviceAddr, macStr);
+        o["mac"]      = String(macStr);
+      }
+    }
     static char* jbuf = nullptr;
-    if (!jbuf) jbuf = (char*)ps_alloc(512, AllocPref::PreferPSRAM, "bleinfo.json");
+    if (!jbuf) jbuf = (char*)ps_alloc(2048, AllocPref::PreferPSRAM, "bleinfo.json");
     if (!jbuf) return "{\"error\":\"oom\"}";
-    serializeJson(doc, jbuf, 512);
+    serializeJson(doc, jbuf, 2048);
     return jbuf;
   }
 
