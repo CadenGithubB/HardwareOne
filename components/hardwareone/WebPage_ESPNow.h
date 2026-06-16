@@ -871,9 +871,11 @@ window.togglePane = function(paneId, btnId) {
           + '<div class="message-log" id="log-' + mac + '" style="margin-bottom:12px;max-height:300px;overflow-y:auto"><div class="message-empty">No messages yet. Start a conversation!</div></div>'
           + '<div id="text-input-' + mac + '" style="display:block">'
           + '<div style="display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap">'
-          + '<textarea id="msg-' + mac + '" placeholder="Message to send" style="flex:1;min-width:220px;min-height:60px;resize:vertical;font-family:inherit;padding:8px;border:1px solid var(--border);border-radius:4px;background:var(--panel-bg);color:var(--panel-fg)"></textarea>'
+          + '<textarea id="msg-' + mac + '" maxlength="1024" oninput="updateMsgCounter(\'' + mac + '\')" placeholder="Message to send" style="flex:1;min-width:220px;min-height:60px;resize:vertical;font-family:inherit;padding:8px;border:1px solid var(--border);border-radius:4px;background:var(--panel-bg);color:var(--panel-fg)"></textarea>'
           + '<button class="btn message-action-btn" onclick="doSendMessage(\'' + mac + '\')" style="align-self:flex-start">Send</button>'
           + '</div>'
+          + '<div id="msg-count-' + mac + '" style="font-size:.78em;color:var(--muted);margin-top:5px">1024 characters left</div>'
+          + '<div style="font-size:.72em;color:var(--muted);margin-top:2px">Longer messages are auto-split. For large content, use the File tab.</div>'
           + '</div>'
           + '<div id="remote-input-' + mac + '" style="display:none">'
           + '<div class="input-group" style="margin-bottom:8px">'
@@ -1185,7 +1187,7 @@ window.togglePane = function(paneId, btnId) {
       // Also show in message log
       appendLogLine('log-' + mac, 'SENT', 'Sending file: ' + filename, 'sending');
       
-      hw.postFormText('/api/cli', { cmd: 'espnowsendfile ' + mac + ' ' + path })
+      hw.postFormText('/api/cli', { cmd: 'espnowsendfile ' + mac + ' "' + path + '"' })
         .then(t=>{
           const success = t.toLowerCase().indexOf('success') >= 0 || t.toLowerCase().indexOf('sent') >= 0;
           
@@ -2964,7 +2966,7 @@ window.togglePane = function(paneId, btnId) {
           return;
         }
         document.getElementById('file-transfer-status').textContent = 'Sending file...';
-        hw.postFormText('/api/cli', { cmd: 'espnowsendfile ' + mac + ' ' + filepath })
+        hw.postFormText('/api/cli', { cmd: 'espnowsendfile ' + mac + ' "' + filepath + '"' })
         .then(text => {
           document.getElementById('file-transfer-status').textContent = text;
           if (text.indexOf('successfully') >= 0) {
