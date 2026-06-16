@@ -706,26 +706,6 @@
   #define BATTERY_BACKEND_ADC        1
   #define BATTERY_BACKEND_FUEL_GAUGE 0
 
-// --- Adafruit Feather ESP32 (Original) ---
-#elif defined(ARDUINO_FEATHER_ESP32_DEV)
-  #define BOARD_SUPPORTED       1
-  #define BOARD_NAME            "Adafruit Feather ESP32"
-  
-  // I2C Bus Configuration
-  #define I2C_SDA_PIN_DEFAULT   23
-  #define I2C_SCL_PIN_DEFAULT   22
-  
-  // NeoPixel Configuration (no built-in NeoPixel)
-  #define NEOPIXEL_PIN_DEFAULT  -1
-  #define NEOPIXEL_POWER_PIN    -1
-  #define NEOPIXEL_COUNT_DEFAULT 0
-  
-  // Battery Monitoring — original Feather ESP32 has the VBAT/2 ADC divider on GPIO35.
-  #define BATTERY_ADC_PIN       35
-  #define BATTERY_MONITOR_AVAILABLE 1
-  #define BATTERY_BACKEND_ADC        1
-  #define BATTERY_BACKEND_FUEL_GAUGE 0
-
 // --- Seeed Studio XIAO ESP32S3 Sense (with camera/mic expansion) ---
 // Note: Sense uses same variant as base XIAO ESP32S3, expansion board is add-on hardware
 // To enable Sense-specific features, define XIAO_ESP32S3_SENSE_ENABLED in your build
@@ -793,40 +773,6 @@
   #define BATTERY_MONITOR_AVAILABLE 0
   #define BATTERY_BACKEND_ADC        0
   #define BATTERY_BACKEND_FUEL_GAUGE 0
-
-// --- Seeed Studio XIAO ESP32S3 Plus (16MB flash, more GPIOs) ---
-// Set CONFIG_ARDUINO_VARIANT="XIAO_ESP32S3_Plus" in menuconfig
-#elif defined(ARDUINO_XIAO_ESP32S3_PLUS_DEV)
-  #define BOARD_SUPPORTED       1
-  #define BOARD_NAME            "Seeed XIAO ESP32S3 Plus"
-  
-  // I2C Bus Configuration (same as base XIAO ESP32S3)
-  #define I2C_SDA_PIN_DEFAULT   5   // GPIO5 (D4)
-  #define I2C_SCL_PIN_DEFAULT   6   // GPIO6 (D5)
-  
-  // NeoPixel Configuration (no built-in NeoPixel)
-  #define NEOPIXEL_PIN_DEFAULT  -1
-  #define NEOPIXEL_POWER_PIN    -1
-  #define NEOPIXEL_COUNT_DEFAULT 0
-  
-  // User LED (active low on GPIO21)
-  #define USER_LED_PIN          21
-  #define USER_LED_ACTIVE_LOW   1
-  
-  // Battery Monitoring (Plus has ADC_BAT on GPIO10)
-  #define BATTERY_ADC_PIN       10  // GPIO10 (ADC_BAT)
-  #define BATTERY_MONITOR_AVAILABLE 1
-  #define BATTERY_BACKEND_ADC        1
-  #define BATTERY_BACKEND_FUEL_GAUGE 0
-  
-  // Plus-specific: Additional UART
-  #define TX1_PIN               42  // GPIO42
-  #define RX1_PIN               41  // GPIO41
-  
-  // Plus-specific: Additional SPI
-  #define MOSI1_PIN             11  // GPIO11
-  #define MISO1_PIN             12  // GPIO12
-  #define SCK1_PIN              13  // GPIO13
 
 // --- Unexpected Maker FeatherS3 / FeatherS3[D] ---
 // Set CONFIG_ARDUINO_VARIANT="um_feathers3" in menuconfig.
