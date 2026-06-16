@@ -10,7 +10,6 @@ This document explains how to switch between different ESP32 board configuration
 | Adafruit Feather ESP32 V2 | ESP32 | `adafruit_feather_esp32_v2` | Battery monitoring, built-in NeoPixel |
 | Seeed XIAO ESP32S3 | ESP32-S3 | `XIAO_ESP32S3` | Base board |
 | Seeed XIAO ESP32S3 Sense | ESP32-S3 | `XIAO_ESP32S3` + `XIAO_ESP32S3_SENSE_ENABLED` | Camera, mic, SD slot |
-| Seeed XIAO ESP32S3 Plus | ESP32-S3 | `XIAO_ESP32S3_Plus` | 16MB flash, battery ADC, extra UART/SPI |
 | Unexpected Maker FeatherS3[D] | ESP32-S3 | `um_feathers3` | 2× STEMMA QT, MAX17048G fuel gauge, **Quad** PSRAM |
 | Generic ESP32 | ESP32 | `esp32` | Fallback — verify pins manually |
 
