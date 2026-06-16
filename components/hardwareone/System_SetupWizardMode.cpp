@@ -91,8 +91,20 @@ static struct {
   WizardSubMode subMode;
   SetupWizardResult result;
 
-  // WiFi sub-mode scratch
-  int   wifiScanCount;       // last scan's network count (printed list)
+  // WiFi sub-mode scratch. wifiNamed[] holds the scan indices of the NAMED
+  // networks shown in the last list (hidden/empty-SSID APs are excluded), so a
+  // numbered pick maps choice K -> WiFi.SSID(wifiNamed[K-1]) and can never
+  // resolve to a blank SSID. Must survive between the prompt render (which
+  // scans + fills it) and the onInput parse (which reads it) — the WiFi scan
+  // result stays alive until WiFi.scanDelete() in the parser.
+  int   wifiNamed[24];
+  int   wifiNamedCount;      // valid numeric range for the printed list
+  // True while a live WiFi scan + printed list are valid for the current
+  // WIFI_SSID view. Gates the scan/print in paintAfterTransition() so a
+  // repaint of the same page does NOT kick off another blocking scan + list
+  // dump. Cleared on every WiFi.scanDelete() (back/skip/pick/rescan) and at
+  // reset, so genuine (re)entry rescans, but idle repaints don't.
+  bool  wifiScanValid;
   String wifiPendingSsid;    // SSID selected, awaiting password
 
   // Tracks whether the user used the "configure" path on ESP-NOW so the
@@ -247,33 +259,23 @@ static const char* paintAfterTransition() {
 
     case WizardSubMode::WIFI_SSID: {
 #if ENABLE_WIFI
-      int pageNum = getWizardPageNumber(WIZARD_PAGE_WIFI);
-      int totalPages = getWizardTotalPages();
-      char header[80];
-      snprintf(header, sizeof(header), "=== WiFi Setup (SETUP %d/%d) ===",
-               pageNum, totalPages);
-      broadcastOutput("");
-      broadcastOutput(header);
-      int n = WiFi.scanNetworks(false, true);
-      sWizard.wifiScanCount = n;
-      if (n > 0) {
-        char line[80];
-        snprintf(line, sizeof(line), "Found %d networks:", n);
-        broadcastOutput(line);
-        for (int i = 0; i < n && i < 10; i++) {
-          snprintf(line, sizeof(line), "  %d. %-24s  %lddBm  %s",
-                   i + 1, WiFi.SSID(i).c_str(), (long)WiFi.RSSI(i),
-                   (WiFi.encryptionType(i) == WIFI_AUTH_OPEN) ? "Open" : "Secured");
-          broadcastOutput(line);
-        }
-        if (n > 10) {
-          snprintf(line, sizeof(line), "  ... and %d more", n - 10);
-          broadcastOutput(line);
-        }
-      } else {
-        broadcastOutput("No WiFi networks found.");
+      // Scan + dump the list ONCE per view. wifiScanPrintNamed() runs a
+      // blocking WiFi.scanNetworks() and broadcasts the whole list, so doing
+      // it on every repaint floods the console (and the async list vs. the
+      // sync prompt interleave). Gate it: scan on (re)entry, reuse the live
+      // scan buffer on idle repaints. Cleared at every scanDelete + reset.
+      if (!sWizard.wifiScanValid) {
+        int pageNum = getWizardPageNumber(WIZARD_PAGE_WIFI);
+        int totalPages = getWizardTotalPages();
+        char header[80];
+        snprintf(header, sizeof(header), "=== WiFi Setup (SETUP %d/%d) ===",
+                 pageNum, totalPages);
+        broadcastOutput("");
+        broadcastOutput(header);
+        sWizard.wifiNamedCount = wifiScanPrintNamed(sWizard.wifiNamed, 24);
+        broadcastOutput("----------------------------------------");
+        sWizard.wifiScanValid = true;
       }
-      broadcastOutput("----------------------------------------");
       return "Enter number, SSID directly, 'rescan', 'skip', or 'b' back: ";
 #else
       broadcastOutput("WiFi not compiled in this build.");
@@ -660,6 +662,7 @@ static CLIModeInputResult dispatchWiFi(const String& line,
 #if ENABLE_WIFI
       if (lc == "b" || lc == "back") {
         WiFi.scanDelete();
+        sWizard.wifiScanValid = false;
         wizardPrevPage();
         sWizard.subMode = subModeForPage(getWizardCurrentPage());
         appendPromptTo(out, outSize);
@@ -667,22 +670,26 @@ static CLIModeInputResult dispatchWiFi(const String& line,
       }
       if (lc == "rescan") {
         WiFi.scanDelete();
+        sWizard.wifiScanValid = false;        // force a fresh scan on the repaint
         appendPromptTo(out, outSize);  // re-paints scan results
         return CLI_MODE_HANDLED;
       }
       if (lc == "skip" || raw.length() == 0) {
         WiFi.scanDelete();
+        sWizard.wifiScanValid = false;
         sWizard.result.completed = true;
         snprintf(out, outSize, "WiFi configuration skipped.");
         return CLI_MODE_HANDLED_AND_EXIT;
       }
-      // Number -> pick from scan list
+      // Bare in-range integer -> Nth NAMED network; digit-leading SSIDs
+      // (e.g. "2WIRE123") fall through to typed-SSID handling.
       String ssid = raw;
       int idx = raw.toInt();
-      if (idx > 0 && idx <= sWizard.wifiScanCount) {
-        ssid = WiFi.SSID(idx - 1);
+      if (idx >= 1 && idx <= sWizard.wifiNamedCount && String(idx) == raw) {
+        ssid = WiFi.SSID(sWizard.wifiNamed[idx - 1]);
       }
       WiFi.scanDelete();
+      sWizard.wifiScanValid = false;
       if (ssid.length() == 0) {
         snprintf(out, outSize, "Empty SSID; type a number, an SSID, "
                                "or 'rescan'/'skip'/'b'.");
@@ -749,7 +756,8 @@ static void wizardMode_onEnter(void* /*ud*/) {
   sWizard.result.deviceName = "HardwareOne";
   sWizard.result.timezoneOffset = -240;
   sWizard.result.timezoneAbbrev = "EDT";
-  sWizard.wifiScanCount     = 0;
+  sWizard.wifiNamedCount    = 0;
+  sWizard.wifiScanValid     = false;
   sWizard.wifiPendingSsid   = "";
   sWizard.espnowConfiguring = false;
 
