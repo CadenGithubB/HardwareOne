@@ -500,6 +500,15 @@ inline String getCapabilityListLong(uint32_t mask, const CapabilityName* names) 
   #define MESSAGES_PER_DEVICE 5
 #endif
 
+// Max length of a user text message (espnowsend). Messages above
+// ESPNOW_V4_MAX_PLAINTEXT (~202 B) are fragmented over the generic
+// chunk/reassemble transport (same path command-results use) and rebuilt on
+// the receiver. This cap sizes the receive queue slot AND the per-message
+// history slot — the web inbox reads the history ring, so it must hold the
+// full message. 1024 → ~+600 KB PSRAM across the 100×8 history ring; cheap on
+// an 8 MB-PSRAM board, and 6 fragments max (1024 / 200).
+#define ESPNOW_TEXT_MAX_LEN 1024
+
 // Dynamic peer history allocation parameters
 #define PEER_HISTORY_INITIAL_CAPACITY 5    // Start with 5 peer slots (~125 KB)
 #define PEER_HISTORY_GROWTH_INCREMENT 3    // Grow by 3 slots at a time (~75 KB per growth)
@@ -517,17 +526,18 @@ enum LogMessageType {
 struct ReceivedTextMessage {
   uint8_t senderMac[6];            // Sender MAC
   char senderName[32];             // Sender device name
-  char message[256];               // Message text (trimmed to 256 chars)
+  char message[ESPNOW_TEXT_MAX_LEN + 1]; // Message text (fragmented text reassembles up to ESPNOW_TEXT_MAX_LEN)
   unsigned long timestamp;         // When received (millis)
   bool encrypted;                  // Whether message was encrypted
   uint32_t seqNum;                 // Sequence number for deduplication
+  uint32_t reqId;                  // Correlation id (the request's msgId) for command results; 0 if N/A
   LogMessageType msgType;          // Message type (text, file transfer, etc)
   bool active;                     // Whether this slot is in use
-  
-  ReceivedTextMessage() : timestamp(0), encrypted(false), seqNum(0), msgType(MSG_TEXT), active(false) {
+
+  ReceivedTextMessage() : timestamp(0), encrypted(false), seqNum(0), reqId(0), msgType(MSG_TEXT), active(false) {
     memset(senderMac, 0, 6);
     memset(senderName, 0, 32);
-    memset(message, 0, 256);
+    memset(message, 0, sizeof(message));
   }
 };
 
@@ -802,7 +812,7 @@ struct EspNowState {
   struct TextQueueEntry {
     uint8_t srcMac[6];
     char deviceName[32];
-    char content[256];
+    char content[ESPNOW_TEXT_MAX_LEN + 1];
     bool encrypted;
     bool used;
   };
@@ -816,6 +826,7 @@ struct EspNowState {
   char deferredCmdRespDeviceName[32];
   char* deferredCmdRespResult;  // PSRAM-allocated at init (6144 bytes — matches V4_FRAG_MAX × V4_MAX_FRAGMENT_PAYLOAD)
   bool deferredCmdRespSuccess;
+  uint32_t deferredCmdRespReqId; // Correlation id — the request's msgId, echoed in the CMD_RESP frame header
   
   // STREAM message ring buffer (replaces single-buffer to prevent overwrite loss).
   // Allocated separately in initEspNow(): STREAM_QUEUE_SIZE_PSRAM slots when PSRAM
@@ -928,6 +939,7 @@ struct EspNowState {
     deferredCmdRespPending(false),
     deferredCmdRespResult(nullptr),
     deferredCmdRespSuccess(false),
+    deferredCmdRespReqId(0),
     streamQueue(nullptr),
     streamQueueCap(0),
     streamQueueMask(0),
@@ -1155,7 +1167,7 @@ void sendChunkedResponse(const uint8_t* targetMac, bool success, const String& r
 
 // Per-device message buffer management (espnow_message_buffer.cpp)
 PeerMessageHistory* findOrCreatePeerHistory(uint8_t* peerMac);
-bool storeMessageInPeerHistory(uint8_t* peerMac, const char* peerName, const char* message, bool encrypted, LogMessageType msgType);
+bool storeMessageInPeerHistory(uint8_t* peerMac, const char* peerName, const char* message, bool encrypted, LogMessageType msgType, uint32_t reqId = 0);
 void logFileTransferEvent(uint8_t* peerMac, const char* peerName, const char* filename, LogMessageType eventType);
 int getPeerMessages(uint8_t* peerMac, ReceivedTextMessage* outMessages, int maxMessages, uint32_t sinceSeq);
 int getAllMessages(ReceivedTextMessage* outMessages, int maxMessages, uint32_t sinceSeq);

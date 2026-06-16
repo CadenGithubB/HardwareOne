@@ -874,7 +874,35 @@ const char* cmd_espnow_sensorstream(const String& argsInput) {
 
 const char* cmd_espnow_sensorstatus(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  
+
+  if (argWantsJson(argsInput)) {
+    PSRAM_JSON_DOC(doc);
+    doc["schema"]    = 1;
+    doc["broadcast"] = isSensorBroadcastEnabled();
+    bool isMaster = (gSettings.meshRole == MESH_ROLE_MASTER);
+    doc["role"] = isMaster ? "master" : "worker";
+    if (isMaster) {
+      // Master: nest the remote sensor cache ({"devices":[...]}) verbatim.
+      PSRAM_JSON_DOC(tmp);
+      if (deserializeJson(tmp, getRemoteDevicesListJSON()) == DeserializationError::Ok &&
+          tmp["devices"].is<JsonArray>()) {
+        doc["devices"] = tmp["devices"];
+      } else {
+        doc["devices"].to<JsonArray>();
+      }
+    } else {
+      // Worker: which sensors are currently streaming.
+      JsonObject streaming = doc["streaming"].to<JsonObject>();
+      const char* sensors[] = {"thermal","tof","imu","gps","input","fmradio","camera","microphone"};
+      for (int i = 0; i < 8; i++) {
+        streaming[sensors[i]] = isSensorDataStreamingEnabled(stringToSensorType(sensors[i]));
+      }
+    }
+    EXT_RAM_BSS_ATTR static char jbuf[4096];
+    serializeJson(doc, jbuf, sizeof(jbuf));
+    return jbuf;
+  }
+
   // Show current streaming status
   // Show master broadcast flag status
   BROADCAST_PRINTF("[ESP-NOW] Sensor broadcast: %s", isSensorBroadcastEnabled() ? "ENABLED" : "DISABLED");

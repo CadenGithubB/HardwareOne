@@ -261,6 +261,8 @@ static esp_err_t handleEspNowMessages(httpd_req_t* req) {
 
     err = webEspnowSendChunkf(req, "\"seq\":%lu,", (unsigned long)msg.seqNum);
     if (err != ESP_OK) break;
+    err = webEspnowSendChunkf(req, "\"reqId\":%lu,", (unsigned long)msg.reqId);
+    if (err != ESP_OK) break;
     err = webEspnowSendChunkf(req, "\"mac\":\"%s\",", macStr);
     if (err != ESP_OK) break;
 
