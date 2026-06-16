@@ -2881,7 +2881,10 @@ static void v4h_text(const V4RxCtx& ctx) {
   DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_RX] TEXT message detected, payload: %.*s",
          ctx.payloadLen > 0 ? printLen : 7,
          ctx.payloadLen > 0 ? (const char*)ctx.payload : "(empty)");
-  if (ctx.payloadLen > 0 && ctx.payloadLen <= ESPNOW_V4_MAX_PAYLOAD && gEspNow) {
+  // Accept reassembled multi-frame text up to ESPNOW_TEXT_MAX_LEN — a long
+  // espnowsend arrives here as one rebuilt payload (the reassembler is
+  // type-agnostic), so the cap mirrors the sender's, not the single-frame size.
+  if (ctx.payloadLen > 0 && ctx.payloadLen <= ESPNOW_TEXT_MAX_LEN && gEspNow) {
     int head = gEspNow->textQueueHead;
     int nextHead = (head + 1) & (EspNowState::TEXT_QUEUE_SIZE - 1);
     if (nextHead != gEspNow->textQueueTail) {
@@ -2947,6 +2950,7 @@ static void v4h_cmd_resp(const V4RxCtx& ctx) {
     strncpy(gEspNow->deferredCmdRespDeviceName, ctx.deviceName, sizeof(gEspNow->deferredCmdRespDeviceName) - 1);
     gEspNow->deferredCmdRespDeviceName[sizeof(gEspNow->deferredCmdRespDeviceName) - 1] = '\0';
     gEspNow->deferredCmdRespSuccess = resp->success;
+    gEspNow->deferredCmdRespReqId = ctx.h->msgId;  // correlate this result back to the request that produced it
     gEspNow->deferredCmdRespPending = true;
   }
 }
@@ -4820,8 +4824,9 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
     memcpy(respPayload + 1, errMsg, strlen(errMsg) + 1);
     // Step 3c: espnow_task RX-handler context — MUST NOT block (would stall
     // the RX drainer per the processMeshHeartbeats architecture invariant).
+    // Echo the request's msgId so the requester can correlate this rejection.
     espnowtx::sendAead(srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
-                       generateMessageId(), respPayload, 1 + strlen(errMsg) + 1, 1);
+                       msgId, respPayload, 1 + strlen(errMsg) + 1, 1);
     return;
   }
 
@@ -4870,8 +4875,9 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
       const char* errMsg = "Session token auth failed";
       memcpy(respPayload + 1, errMsg, strlen(errMsg) + 1);
       // Step 3c: espnow_task RX-handler context — fire-and-forget.
+      // Echo the request's msgId so the requester can correlate this failure.
       espnowtx::sendAead(srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
-                         generateMessageId(), respPayload, 1 + strlen(errMsg) + 1, 1);
+                         msgId, respPayload, 1 + strlen(errMsg) + 1, 1);
       return;
     }
   } else {
@@ -4896,8 +4902,9 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
       const char* errMsg = "Auth failed";
       memcpy(respPayload + 1, errMsg, strlen(errMsg) + 1);
       // Step 3c: espnow_task RX-handler context — fire-and-forget.
+      // Echo the request's msgId so the requester can correlate this failure.
       espnowtx::sendAead(srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
-                         generateMessageId(), respPayload, 1 + strlen(errMsg) + 1, 1);
+                         msgId, respPayload, 1 + strlen(errMsg) + 1, 1);
       return;
     }
   }
@@ -7959,7 +7966,8 @@ void processMeshHeartbeats() {
                               deviceName.c_str(),
                               gEspNow->deferredCmdRespResult,
                               true,
-                              MSG_TEXT);
+                              MSG_TEXT,
+                              gEspNow->deferredCmdRespReqId);
     
     if (gEspNow->deferredCmdRespSuccess) {
       BROADCAST_PRINTF("[ESP-NOW] Command result from %s: %s", deviceName.c_str(), gEspNow->deferredCmdRespResult);
@@ -9079,6 +9087,26 @@ const char* cmd_espnow_status(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   // Read-only status: report "idle" instead of erroring when not initialized
   // (dashboard polls this; classifier sees no "Error:" prefix -> logs OK).
+  if (argWantsJson(argsInput)) {
+    if (!ensureDebugBuffer()) return "{\"schema\":1,\"ok\":false,\"error\":\"buffer\"}";
+    PSRAM_JSON_DOC(doc);
+    doc["schema"] = 1;
+    if (!gEspNow) { doc["ok"] = false; doc["error"] = "ESP-NOW not initialized"; }
+    else {
+      doc["initialized"] = gEspNow->initialized;
+      doc["channel"]     = gEspNow->channel;
+      if (gEspNow->initialized) {
+        uint8_t mac[6]; WiFi.macAddress(mac);
+        char macStr[18];
+        snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
+                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+        doc["mac"]           = String(macStr);
+        doc["pairedDevices"] = (gEspNow->deviceCount > 0) ? (gEspNow->deviceCount - 1) : 0;
+      }
+    }
+    serializeJson(doc, getDebugBuffer(), 1024);
+    return getDebugBuffer();
+  }
   if (!gEspNow) return "ESP-NOW not initialized (run 'openespnow' first)";
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   
@@ -9133,6 +9161,28 @@ const char* cmd_espnow_status(const String& argsInput) {
 const char* cmd_espnow_stats(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   // Read-only status: see comment in cmd_espnow_status above.
+  if (argWantsJson(argsInput)) {
+    if (!gEspNow) return "{\"schema\":1,\"ok\":false,\"error\":\"ESP-NOW not initialized\"}";
+    if (!ensureDebugBuffer()) return "{\"schema\":1,\"ok\":false,\"error\":\"buffer\"}";
+    PSRAM_JSON_DOC(doc);
+    doc["schema"]           = 1;
+    doc["messagesSent"]     = (unsigned long)gEspNow->routerMetrics.messagesSent;
+    doc["messagesReceived"] = (unsigned long)gEspNow->routerMetrics.messagesReceived;
+    doc["messagesFailed"]   = (unsigned long)gEspNow->routerMetrics.messagesFailed;
+    doc["streamSent"]       = (unsigned long)gEspNow->streamSentCount;
+    doc["streamReceived"]   = (unsigned long)gEspNow->streamReceivedCount;
+    doc["streamDropped"]    = (unsigned long)gEspNow->streamDroppedCount;
+    if (meshEnabled()) {
+      doc["heartbeatsSent"]     = (unsigned long)gEspNow->heartbeatsSent;
+      doc["heartbeatsReceived"] = (unsigned long)gEspNow->heartbeatsReceived;
+    }
+    doc["filesSent"]     = (unsigned long)gEspNow->fileTransfersSent;
+    doc["filesReceived"] = (unsigned long)gEspNow->fileTransfersReceived;
+    doc["uptimeSec"]     = (unsigned long)(gEspNow->lastResetTime > 0
+                            ? (millis() - gEspNow->lastResetTime) / 1000 : millis() / 1000);
+    serializeJson(doc, getDebugBuffer(), 1024);
+    return getDebugBuffer();
+  }
   if (!gEspNow) return "ESP-NOW not initialized (run 'openespnow' first)";
 
   // Output each line separately to avoid DEBUG_MSG_SIZE (256 byte) truncation.
@@ -9986,6 +10036,14 @@ const char* cmd_espnow_meshmetrics(const String& argsInput) {
 const char* cmd_espnow_mode(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   CommandArgs a(argsInput);
+  if (argWantsJson(argsInput)) {
+    PSRAM_JSON_DOC(doc);
+    doc["schema"]  = 1;
+    doc["enabled"] = gSettings.espnowenabled;
+    doc["mode"]    = getEspNowModeString();
+    serializeJson(doc, getDebugBuffer(), 1024);
+    return getDebugBuffer();
+  }
   if (a.count() == 0) {
     snprintf(getDebugBuffer(), 1024, "ESP-NOW mode: %s", getEspNowModeString());
     return getDebugBuffer();
@@ -10133,6 +10191,24 @@ const char* cmd_espnow_stationary(const String& argsInput) {
 
 const char* cmd_espnow_deviceinfo(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  if (argWantsJson(argsInput)) {
+    PSRAM_JSON_DOC(doc);
+    doc["schema"]       = 1;
+    doc["name"]         = gSettings.espnowDeviceName;
+    doc["friendlyName"] = gSettings.espnowFriendlyName;
+    doc["room"]         = gSettings.espnowRoom;
+    doc["zone"]         = gSettings.espnowZone;
+    doc["tags"]         = gSettings.espnowTags;
+    doc["stationary"]   = gSettings.espnowStationary;
+    const char* roleStr = "worker";
+    if (gSettings.meshRole == MESH_ROLE_MASTER) roleStr = "master";
+    else if (gSettings.meshRole == MESH_ROLE_BACKUP_MASTER) roleStr = "backup";
+    doc["meshRole"] = roleStr;
+    uint8_t myMac[6]; esp_wifi_get_mac(WIFI_IF_STA, myMac);
+    doc["mac"] = String(MAC_STR(myMac));
+    serializeJson(doc, getDebugBuffer(), 1024);
+    return getDebugBuffer();
+  }
   char* buf = getDebugBuffer();
   int pos = 0;
   pos += snprintf(buf + pos, 1024 - pos, "=== Device Metadata ===\n");
@@ -10445,6 +10521,17 @@ const char* cmd_espnow_hbmode(const String& argsInput) {
 const char* cmd_espnow_meshrole(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   CommandArgs a(argsInput);
+
+  if (argWantsJson(argsInput)) {
+    PSRAM_JSON_DOC(doc);
+    doc["schema"]        = 1;
+    doc["role"]          = getMeshRoleString(gSettings.meshRole);
+    doc["masterMac"]     = gSettings.meshMasterMAC;
+    doc["backupEnabled"] = gSettings.meshBackupEnabled;
+    doc["backupMac"]     = gSettings.meshBackupMAC;
+    serializeJson(doc, getDebugBuffer(), 1024);
+    return getDebugBuffer();
+  }
 
   if (a.count() == 0) {
     int pos = 0;
@@ -10980,15 +11067,16 @@ const char* cmd_test_filelock(const String& argsInput) {
 // List paired devices
 const char* cmd_espnow_list(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gEspNow) return "{\"error\":\"ESP-NOW not initialized\"}";
+  if (!gEspNow) return "{\"schema\":1,\"ok\":false,\"error\":\"ESP-NOW not initialized\"}";
   if (!gEspNow->initialized) {
-    return "{\"error\":\"ESP-NOW not initialized\"}";
+    return "{\"schema\":1,\"ok\":false,\"error\":\"ESP-NOW not initialized\"}";
   }
 
   // Build JSON from gEspNow->devices[] — the authoritative source of truth.
   // esp_now_fetch_peer() only reflects the hardware peer table which may lag
   // behind after a reboot until loadMeshPeers() re-registers all peers.
   PSRAM_JSON_DOC(doc);
+  doc["schema"] = 1;
   JsonArray devices = doc["devices"].to<JsonArray>();
 
   int listedCount = 0;
@@ -11023,18 +11111,19 @@ const char* cmd_espnow_list(const String& argsInput) {
 // Mesh status command
 const char* cmd_espnow_meshstatus(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gEspNow) return "{\"error\":\"ESP-NOW not initialized\"}";
+  if (!gEspNow) return "{\"schema\":1,\"ok\":false,\"error\":\"ESP-NOW not initialized\"}";
   if (!gEspNow->initialized) {
-    return "{\"error\":\"ESP-NOW not initialized\"}";
+    return "{\"schema\":1,\"ok\":false,\"error\":\"ESP-NOW not initialized\"}";
   }
 
   if (!meshEnabled()) {
-    return "{\"error\":\"Mesh mode not enabled\"}";
+    return "{\"schema\":1,\"ok\":false,\"error\":\"Mesh mode not enabled\"}";
   }
 
   // Use ArduinoJson to avoid String concatenation heap fragmentation
   // Use PSRAM allocator to avoid internal heap fragmentation in cmd_exec task
   PSRAM_JSON_DOC(doc);
+  doc["schema"] = 1;
   JsonArray peers = doc["peers"].to<JsonArray>();
   uint32_t now = millis();
   int activePeers = 0;
@@ -12077,6 +12166,29 @@ const char* cmd_espnow_setpassphrase(const String& argsInput) {
 // Encryption status command
 const char* cmd_espnow_encstatus(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  if (argWantsJson(argsInput)) {
+    if (!ensureDebugBuffer()) return "{\"schema\":1,\"ok\":false,\"error\":\"buffer\"}";
+    PSRAM_JSON_DOC(doc);
+    doc["schema"] = 1;
+    if (!gEspNow || !gEspNow->initialized) {
+      doc["ok"]    = false;
+      doc["error"] = "ESP-NOW not initialized";
+    } else {
+      doc["running"]   = true;
+      doc["encrypted"] = gEspNow->encryptionEnabled;
+      if (gEspNow->encryptionEnabled) {
+        doc["passphraseSet"]    = gEspNow->passphrase.length() > 0;
+        doc["passphraseLength"] = (int)gEspNow->passphrase.length();
+        char fp[9];
+        snprintf(fp, sizeof(fp), "%02X%02X%02X%02X",
+                 gEspNow->derivedKey[0], gEspNow->derivedKey[1],
+                 gEspNow->derivedKey[2], gEspNow->derivedKey[3]);
+        doc["keyFingerprint"] = String(fp);
+      }
+    }
+    serializeJson(doc, getDebugBuffer(), 1024);
+    return getDebugBuffer();
+  }
   // Read-only status: see comment in cmd_espnow_status above.
   if (!gEspNow) return "ESP-NOW not initialized (run 'openespnow' first)";
   if (!gEspNow->initialized) {
@@ -12353,19 +12465,28 @@ const char* cmd_espnow_requestmeta(const String& argsInput) {
 // ============================================================================
 
 // Remote file browse
+// reqId-correlation ack helper (Phase 3): in `json` mode, swap a human error
+// string for a json error so a `... json` caller never has to parse free text.
+// On success these senders return {"schema":1,"ok":true,"reqId":<msgId>} — the
+// caller polls `espnowmessages json` and matches that reqId to the result.
+static inline const char* espnowAckErr(bool wantJson, const char* text, const char* jsonErr) {
+  return wantJson ? jsonErr : text;
+}
+
 const char* cmd_espnow_browse(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gEspNow) return "Error: ESP-NOW not initialized";
+  const bool wantJson = argWantsJson(argsInput);
+  if (!gEspNow) return espnowAckErr(wantJson, "Error: ESP-NOW not initialized", "{\"schema\":1,\"ok\":false,\"error\":\"not initialized\"}");
   if (!gEspNow->initialized) {
-    return "ESP-NOW not initialized. Run 'openespnow' first.";
+    return espnowAckErr(wantJson, "ESP-NOW not initialized. Run 'openespnow' first.", "{\"schema\":1,\"ok\":false,\"error\":\"not initialized\"}");
   }
 
   if (!gEspNow->encryptionEnabled) {
-    return "ESP-NOW encryption required. Set a passphrase with 'espnowsetpassphrase <mesh> <passphrase>' and pair securely.";
+    return espnowAckErr(wantJson, "ESP-NOW encryption required. Set a passphrase with 'espnowsetpassphrase <mesh> <passphrase>' and pair securely.", "{\"schema\":1,\"ok\":false,\"error\":\"encryption required\"}");
   }
 
   CommandArgs a(argsInput);
-  if (!a.hasMinArgs(3)) return "Usage: espnow browse <target> <username> <password> [\"path\"]";
+  if (!a.hasMinArgs(3)) return espnowAckErr(wantJson, "Usage: espnow browse <target> <username> <password> [\"path\"]", "{\"schema\":1,\"ok\":false,\"error\":\"usage\"}");
 
   String target = a.arg(0);
   String username = a.arg(1);
@@ -12373,12 +12494,13 @@ const char* cmd_espnow_browse(const String& argsInput) {
   String path = "/";
   if (a.has(3)) {
     const char* qerr = requireQuotedToken(a, 3, path);
-    if (qerr) return qerr;
+    if (qerr) return espnowAckErr(wantJson, qerr, "{\"schema\":1,\"ok\":false,\"error\":\"bad path arg\"}");
   }
   if (path.length() == 0) path = "/";
 
   uint8_t targetMac[6];
   if (!resolveDeviceNameOrMac(target, targetMac)) {
+    if (wantJson) return "{\"schema\":1,\"ok\":false,\"error\":\"not paired\"}";
     EXT_RAM_BSS_ATTR static char browseBuffer[256];
     snprintf(browseBuffer, sizeof(browseBuffer),
              "Target device '%s' not found or not paired. Pair the device first (prefer 'espnowpairsecure').",
@@ -12396,11 +12518,11 @@ const char* cmd_espnow_browse(const String& argsInput) {
   if (isMeshMode()) {
     if (!isPairedDevice(targetMac)) {
       BROADCAST_PRINTF("[ESP-NOW][mesh] browse send rejected: not paired MAC=%s", formatMacAddress(targetMac).c_str());
-      return "Rejected (mesh): device not paired. Use 'espnowpair' first.";
+      return espnowAckErr(wantJson, "Rejected (mesh): device not paired. Use 'espnowpair' first.", "{\"schema\":1,\"ok\":false,\"error\":\"not paired (mesh)\"}");
     }
     if (!espnowPeerExists(targetMac)) {
       BROADCAST_PRINTF("[ESP-NOW][mesh] browse send rejected: no peer entry MAC=%s", formatMacAddress(targetMac).c_str());
-      return "Rejected (mesh): destination not in ESP-NOW peer table.";
+      return espnowAckErr(wantJson, "Rejected (mesh): destination not in ESP-NOW peer table.", "{\"schema\":1,\"ok\":false,\"error\":\"no peer entry\"}");
     }
   }
 
@@ -12414,10 +12536,13 @@ const char* cmd_espnow_browse(const String& argsInput) {
 
   EXT_RAM_BSS_ATTR static char browseBuffer[256];
   if (!sent) {
-    snprintf(browseBuffer, sizeof(browseBuffer), "Failed to send V3 browse request");
-    return browseBuffer;
+    return espnowAckErr(wantJson, "Failed to send V3 browse request", "{\"schema\":1,\"ok\":false,\"error\":\"send failed\"}");
   }
 
+  if (wantJson) {
+    snprintf(browseBuffer, sizeof(browseBuffer), "{\"schema\":1,\"ok\":true,\"reqId\":%lu}", (unsigned long)msgId);
+    return browseBuffer;
+  }
   snprintf(browseBuffer, sizeof(browseBuffer), "File browse request sent to %s for path: %s",
            target.c_str(), path.c_str());
   return browseBuffer;
@@ -12426,27 +12551,29 @@ const char* cmd_espnow_browse(const String& argsInput) {
 // Remote file fetch (pull a file from remote device)
 const char* cmd_espnow_fetch(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gEspNow) return "Error: ESP-NOW not initialized";
+  const bool wantJson = argWantsJson(argsInput);
+  if (!gEspNow) return espnowAckErr(wantJson, "Error: ESP-NOW not initialized", "{\"schema\":1,\"ok\":false,\"error\":\"not initialized\"}");
   if (!gEspNow->initialized) {
-    return "ESP-NOW not initialized. Run 'openespnow' first.";
+    return espnowAckErr(wantJson, "ESP-NOW not initialized. Run 'openespnow' first.", "{\"schema\":1,\"ok\":false,\"error\":\"not initialized\"}");
   }
 
   if (!gEspNow->encryptionEnabled) {
-    return "ESP-NOW encryption required. Set a passphrase with 'espnowsetpassphrase <mesh> <passphrase>' and pair securely.";
+    return espnowAckErr(wantJson, "ESP-NOW encryption required. Set a passphrase with 'espnowsetpassphrase <mesh> <passphrase>' and pair securely.", "{\"schema\":1,\"ok\":false,\"error\":\"encryption required\"}");
   }
 
   CommandArgs a(argsInput);
-  if (!a.hasMinArgs(4)) return "Usage: espnow fetch <target> <username> <password> \"<path>\"";
+  if (!a.hasMinArgs(4)) return espnowAckErr(wantJson, "Usage: espnow fetch <target> <username> <password> \"<path>\"", "{\"schema\":1,\"ok\":false,\"error\":\"usage\"}");
 
   String target = a.arg(0);
   String username = a.arg(1);
   String password = a.arg(2);
   String path;
   const char* qerr = requireQuotedToken(a, 3, path);
-  if (qerr) return qerr;
+  if (qerr) return espnowAckErr(wantJson, qerr, "{\"schema\":1,\"ok\":false,\"error\":\"bad path arg\"}");
 
   uint8_t targetMac[6];
   if (!resolveDeviceNameOrMac(target, targetMac)) {
+    if (wantJson) return "{\"schema\":1,\"ok\":false,\"error\":\"not paired\"}";
     EXT_RAM_BSS_ATTR static char fetchBuffer[256];
     snprintf(fetchBuffer, sizeof(fetchBuffer),
              "Target device '%s' not found or not paired. Pair the device first (prefer 'espnowpairsecure').",
@@ -12468,11 +12595,11 @@ const char* cmd_espnow_fetch(const String& argsInput) {
   if (isMeshMode()) {
     if (!isPairedDevice(targetMac)) {
       BROADCAST_PRINTF("[ESP-NOW][mesh] fetch send rejected: not paired MAC=%s", formatMacAddress(targetMac).c_str());
-      return "Rejected (mesh): device not paired. Use 'espnowpair' first.";
+      return espnowAckErr(wantJson, "Rejected (mesh): device not paired. Use 'espnowpair' first.", "{\"schema\":1,\"ok\":false,\"error\":\"not paired (mesh)\"}");
     }
     if (!espnowPeerExists(targetMac)) {
       BROADCAST_PRINTF("[ESP-NOW][mesh] fetch send rejected: no peer entry MAC=%s", formatMacAddress(targetMac).c_str());
-      return "Rejected (mesh): destination not in ESP-NOW peer table.";
+      return espnowAckErr(wantJson, "Rejected (mesh): destination not in ESP-NOW peer table.", "{\"schema\":1,\"ok\":false,\"error\":\"no peer entry\"}");
     }
   }
 
@@ -12484,10 +12611,13 @@ const char* cmd_espnow_fetch(const String& argsInput) {
 
   EXT_RAM_BSS_ATTR static char fetchBuffer[256];
   if (!sent) {
-    snprintf(fetchBuffer, sizeof(fetchBuffer), "Failed to send V3 fetch request");
-    return fetchBuffer;
+    return espnowAckErr(wantJson, "Failed to send V3 fetch request", "{\"schema\":1,\"ok\":false,\"error\":\"send failed\"}");
   }
 
+  if (wantJson) {
+    snprintf(fetchBuffer, sizeof(fetchBuffer), "{\"schema\":1,\"ok\":true,\"reqId\":%lu}", (unsigned long)msgId);
+    return fetchBuffer;
+  }
   snprintf(fetchBuffer, sizeof(fetchBuffer), "File fetch request sent to %s for: %s",
            target.c_str(), path.c_str());
   return fetchBuffer;
@@ -12496,18 +12626,19 @@ const char* cmd_espnow_fetch(const String& argsInput) {
 // Remote command execution
 const char* cmd_espnow_remote(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gEspNow) return "Error: ESP-NOW not initialized";
+  const bool wantJson = argWantsJson(argsInput);
+  if (!gEspNow) return espnowAckErr(wantJson, "Error: ESP-NOW not initialized", "{\"schema\":1,\"ok\":false,\"error\":\"not initialized\"}");
   if (!gEspNow->initialized) {
-    return "ESP-NOW not initialized. Run 'openespnow' first.";
+    return espnowAckErr(wantJson, "ESP-NOW not initialized. Run 'openespnow' first.", "{\"schema\":1,\"ok\":false,\"error\":\"not initialized\"}");
   }
 
   if (!gEspNow->encryptionEnabled) {
-    return "ESP-NOW encryption required. Set a passphrase with "
-           "'espnowsetpassphrase <mesh> <passphrase>' and pair securely.";
+    return espnowAckErr(wantJson, "ESP-NOW encryption required. Set a passphrase with "
+           "'espnowsetpassphrase <mesh> <passphrase>' and pair securely.", "{\"schema\":1,\"ok\":false,\"error\":\"encryption required\"}");
   }
 
   CommandArgs a(argsInput);
-  if (!a.hasMinArgs(4)) return "Usage: espnow remote <target> <username> <password> <command>";
+  if (!a.hasMinArgs(4)) return espnowAckErr(wantJson, "Usage: espnow remote <target> <username> <password> <command>", "{\"schema\":1,\"ok\":false,\"error\":\"usage\"}");
 
   String target = a.arg(0);
   String username = a.arg(1);
@@ -12516,6 +12647,7 @@ const char* cmd_espnow_remote(const String& argsInput) {
 
   uint8_t targetMac[6];
   if (!resolveDeviceNameOrMac(target, targetMac)) {
+    if (wantJson) return "{\"schema\":1,\"ok\":false,\"error\":\"not paired\"}";
     EXT_RAM_BSS_ATTR static char remoteBuffer[256];
     snprintf(remoteBuffer, sizeof(remoteBuffer),
              "Target device '%s' not found or not paired. Pair the device first (prefer 'espnowpairsecure').",
@@ -12529,7 +12661,7 @@ const char* cmd_espnow_remote(const String& argsInput) {
     esp_wifi_get_mac(WIFI_IF_STA, selfSta);
     esp_wifi_get_mac(WIFI_IF_AP, selfAp);
     if (memcmp(targetMac, selfSta, 6) == 0 || memcmp(targetMac, selfAp, 6) == 0) {
-      return "Error: Cannot send remote command to self. This device is paired with its own MAC. Unpair and pair with the correct remote device.";
+      return espnowAckErr(wantJson, "Error: Cannot send remote command to self. This device is paired with its own MAC. Unpair and pair with the correct remote device.", "{\"schema\":1,\"ok\":false,\"error\":\"self target\"}");
     }
   }
 
@@ -12552,14 +12684,17 @@ const char* cmd_espnow_remote(const String& argsInput) {
 
   EXT_RAM_BSS_ATTR static char remoteBuffer[256];
   if (!success) {
-    snprintf(remoteBuffer, sizeof(remoteBuffer), "Failed to send remote command");
-    return remoteBuffer;
+    return espnowAckErr(wantJson, "Failed to send remote command", "{\"schema\":1,\"ok\":false,\"error\":\"send failed\"}");
   }
 
   // Show "Running" notification so the user sees immediate feedback
   // The CMD_RESP will update this in-place to OK/FAIL when the result arrives
   notifyRemoteCommandReceived(target.c_str(), command.c_str());
 
+  if (wantJson) {
+    snprintf(remoteBuffer, sizeof(remoteBuffer), "{\"schema\":1,\"ok\":true,\"reqId\":%lu}", (unsigned long)msgId);
+    return remoteBuffer;
+  }
   snprintf(remoteBuffer, sizeof(remoteBuffer), "Remote command sent via V4 to %s: %s",
            target.c_str(), command.c_str());
   return remoteBuffer;
@@ -12707,12 +12842,13 @@ const char* cmd_espnow_send(const String& argsInput) {
   size_t msgLen = message.length();
   uint32_t msgId = generateMessageId();
 
-  // This CLI sends a single encrypted SESSION_FRAME (plaintext + 16-byte
-  // Poly1305 tag must fit ESPNOW_V4_MAX_PAYLOAD = 218 B). Encrypted-chunked
-  // transport exists (v4_send_encrypted_chunked) and is used by the file /
-  // smart-send paths, but this interactive command is single-frame only.
-  if (msgLen > (size_t)(ESPNOW_V4_MAX_PAYLOAD - 16)) {
-    return "Error: encrypted message too long for a single frame (max 202 plaintext bytes).";
+  // Messages up to ESPNOW_V4_MAX_PLAINTEXT (~202 B) ride a single SESSION_FRAME;
+  // longer ones (up to ESPNOW_TEXT_MAX_LEN) are fragmented by the smart path's
+  // v4_send_encrypted_chunked — the same generic chunk/reassemble transport
+  // command-results use — and rebuilt on the receiver (v4h_text accepts the
+  // reassembled payload up to the same cap).
+  if (msgLen > (size_t)ESPNOW_TEXT_MAX_LEN) {
+    return "Error: message too long (max 1024 bytes). Send larger content as a file.";
   }
   // Step 3b: route through clerk (JOB_AEAD_SMART → v4_send_payload_smart →
   // v4_send_encrypted_or_queue). The clerk's notification is OK/FAIL only, so
@@ -12844,7 +12980,34 @@ const char* cmd_bond_requestcap(const String& argsInput) {
  */
 const char* cmd_bond_showcap(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  
+
+  if (argWantsJson(argsInput)) {
+    CapabilitySummary jc;
+    buildCapabilitySummary(jc);
+    if (!ensureDebugBuffer()) return "{\"schema\":1,\"ok\":false,\"error\":\"buffer\"}";
+    PSRAM_JSON_DOC(doc);
+    doc["schema"] = 1;
+    doc["device"] = jc.deviceName;
+    char macStr[18];
+    snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
+             jc.mac[0], jc.mac[1], jc.mac[2], jc.mac[3], jc.mac[4], jc.mac[5]);
+    doc["mac"]  = String(macStr);
+    doc["role"] = jc.role == 1 ? "master" : "worker";
+    char fwStr[9];
+    snprintf(fwStr, sizeof(fwStr), "%02X%02X%02X%02X",
+             jc.fwHash[0], jc.fwHash[1], jc.fwHash[2], jc.fwHash[3]);
+    doc["fwHash"]      = String(fwStr);
+    doc["featureMask"] = (unsigned long)jc.featureMask;   // decode with CAP_FEATURE_* bits
+    doc["serviceMask"] = (unsigned long)jc.serviceMask;   // decode with CAP_SERVICE_* bits
+    doc["sensorMask"]  = (unsigned long)jc.sensorMask;    // decode with CAP_SENSOR_*  bits
+    doc["flashMB"]     = (unsigned long)jc.flashSizeMB;
+    doc["psramMB"]     = (unsigned long)jc.psramSizeMB;
+    doc["wifiChannel"] = jc.wifiChannel;
+    doc["uptimeSec"]   = (unsigned long)jc.uptimeSeconds;
+    serializeJson(doc, getDebugBuffer(), 1024);
+    return getDebugBuffer();
+  }
+
   CapabilitySummary cap;
   buildCapabilitySummary(cap);
   
@@ -13282,7 +13445,37 @@ const char* cmd_bond_disconnect(const String& argsInput) {
  */
 const char* cmd_bond_status(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  
+
+  if (argWantsJson(argsInput)) {
+    if (!ensureDebugBuffer()) return "{\"schema\":1,\"ok\":false,\"error\":\"buffer\"}";
+    PSRAM_JSON_DOC(doc);
+    doc["schema"]  = 1;
+    doc["enabled"] = gSettings.bondModeEnabled;
+    doc["role"]    = isBondMaster() ? "master" : "worker";
+    if (gSettings.bondModeEnabled) {
+      uint8_t pm[6];
+      String pname = "";
+      if (parseMacAddress(gSettings.bondPeerMac, pm)) pname = getEspNowDeviceName(pm);
+      doc["peer"]     = gSettings.bondPeerMac;
+      doc["peerName"] = pname;
+      bool online = gEspNow && gEspNow->bondPeerOnline;
+      doc["online"]    = online;
+      doc["syncState"] = (!online) ? "offline" : (isBondSynced() ? "synced" : "syncing");
+      JsonObject sync = doc["sync"].to<JsonObject>();
+      sync["cap"]        = gEspNow ? gEspNow->lastRemoteCapValid : false;
+      sync["manifest"]   = gEspNow ? gEspNow->bondManifestReceived : false;
+      sync["settingsRx"] = gEspNow ? gEspNow->bondSettingsReceived : false;
+      sync["settingsTx"] = gEspNow ? gEspNow->bondSettingsSent : false;
+      doc["heartbeatsSent"]     = (unsigned long)(gEspNow ? gEspNow->bondHeartbeatsSent : 0UL);
+      doc["heartbeatsReceived"] = (unsigned long)(gEspNow ? gEspNow->bondHeartbeatsReceived : 0UL);
+      uint32_t lastAgo = (gEspNow && gEspNow->lastBondHeartbeatReceivedMs > 0)
+                         ? (millis() - gEspNow->lastBondHeartbeatReceivedMs) / 1000 : 0;
+      doc["lastHeartbeatAgo"] = lastAgo;
+    }
+    serializeJson(doc, getDebugBuffer(), 1024);
+    return getDebugBuffer();
+  }
+
   if (!gSettings.bondModeEnabled) {
     if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
     char* buf = getDebugBuffer();
@@ -13740,6 +13933,73 @@ const char* cmd_espnow_bondstreamrtc(const String&);
 const char* cmd_espnow_bondstreampresence(const String&);
 #endif
 
+// Buffered ESP-NOW message history as JSON. This is what lets a BLE/CLI client
+// retrieve the ASYNC results of relayed remote ops (espnowremote/browse/fetch) —
+// otherwise those only reach the web's /api/espnow/messages poll, which a BLE
+// app cannot hit. Mirrors that endpoint's per-message shape.
+//   Usage: espnowmessages json [sinceSeq] [mac]
+// sinceSeq pages incrementally (return only messages newer than that seq); mac
+// filters to one peer. Same access level as espnowremote (the producer).
+const char* cmd_espnow_messages(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  CommandArgs a(argsInput);
+
+  uint32_t since = 0;
+  uint8_t  mac[6];
+  bool     hasMac = false;
+  for (int i = 0; i < a.count(); i++) {
+    const String& t = a.arg(i);
+    if (t.equalsIgnoreCase("json")) continue;
+    if (parseMacAddress(t, mac)) hasMac = true;          // looks like a MAC
+    else since = (uint32_t)strtoul(t.c_str(), nullptr, 10);  // else a seq number
+  }
+
+  const int MAXM = 20;
+  static ReceivedTextMessage* msgs = nullptr;
+  if (!msgs) msgs = (ReceivedTextMessage*)ps_alloc(sizeof(ReceivedTextMessage) * MAXM,
+                                                   AllocPref::PreferPSRAM, "espnow.msgs.cli");
+  if (!msgs) return argWantsJson(argsInput) ? "{\"schema\":1,\"ok\":false,\"error\":\"oom\"}" : "OOM";
+  int n = hasMac ? getPeerMessages(mac, msgs, MAXM, since)
+                 : getAllMessages(msgs, MAXM, since);
+
+  if (argWantsJson(argsInput)) {
+    PSRAM_JSON_DOC(doc);
+    doc["schema"] = 1;
+    JsonArray arr = doc["messages"].to<JsonArray>();
+    for (int i = 0; i < n; i++) {
+      JsonObject o = arr.add<JsonObject>();
+      char macStr[18];
+      formatMacAddressBuf(msgs[i].senderMac, macStr, sizeof(macStr));
+      o["seq"]   = (unsigned long)msgs[i].seqNum;
+      o["reqId"] = (unsigned long)msgs[i].reqId;
+      o["mac"]  = String(macStr);
+      o["name"] = msgs[i].senderName;
+      o["msg"]  = msgs[i].message;
+      o["enc"]  = msgs[i].encrypted;
+      o["ts"]   = (unsigned long)msgs[i].timestamp;
+      o["type"] = (int)msgs[i].msgType;
+    }
+    static char* jbuf = nullptr;
+    if (!jbuf) jbuf = (char*)ps_alloc(32768, AllocPref::PreferPSRAM, "espnow.messages.json");
+    if (!jbuf) return "{\"schema\":1,\"ok\":false,\"error\":\"oom\"}";
+    serializeJson(doc, jbuf, 32768);
+    return jbuf;
+  }
+
+  // Human text fallback (serial console).
+  if (n == 0) return "No ESP-NOW messages";
+  for (int i = 0; i < n; i++) {
+    char macStr[18];
+    formatMacAddressBuf(msgs[i].senderMac, macStr, sizeof(macStr));
+    BROADCAST_PRINTF("[#%lu] %s%s: %s",
+                     (unsigned long)msgs[i].seqNum,
+                     msgs[i].senderName[0] ? msgs[i].senderName : macStr,
+                     msgs[i].encrypted ? " [enc]" : "",
+                     msgs[i].message);
+  }
+  return "OK";
+}
+
 // Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 extern const CommandEntry espNowCommands[] = {
   // ---- ESP-NOW Status & Statistics ----
@@ -13771,6 +14031,7 @@ extern const CommandEntry espNowCommands[] = {
   { "espnowunpair", "Unpair ESP-NOW device (also clears its crypto identity): 'espnowunpair <name_or_mac>'.", true, cmd_espnow_unpair, "Usage: espnowunpair <name_or_mac>" },
   { "espnowforget", "Forget a peer's crypto identity + close its session: 'espnowforget <name_or_mac>'.", true, cmd_espnow_forget, "Usage: espnowforget <name_or_mac>" },
   { "espnowlist", "List all paired ESP-NOW devices.", false, cmd_espnow_list },
+  { "espnowmessages", "Buffered message history as JSON: 'espnowmessages json [sinceSeq] [mac]' — async results of espnowremote/browse/fetch.", false, cmd_espnow_messages },
   
   // ---- ESP-NOW Mesh Configuration ----
   { "espnowmeshstatus", "Show mesh peer health (heartbeats & ACKs).", false, cmd_espnow_meshstatus },
@@ -14149,7 +14410,8 @@ bool storeMessageInPeerHistory(
   const char* peerName,
   const char* message,
   bool encrypted,
-  LogMessageType msgType
+  LogMessageType msgType,
+  uint32_t reqId
 ) {
   if (!gEspNow) return false;
   
@@ -14168,13 +14430,14 @@ bool storeMessageInPeerHistory(
   slot.senderName[31] = '\0';
   
   size_t msgLen = strlen(message);
-  size_t copyLen = msgLen < 255 ? msgLen : 255;
+  size_t copyLen = msgLen < sizeof(slot.message) - 1 ? msgLen : sizeof(slot.message) - 1;
   memcpy(slot.message, message, copyLen);
   slot.message[copyLen] = '\0';
   
   slot.timestamp = millis();
   slot.encrypted = encrypted;
   slot.seqNum = ++gEspNow->globalMessageSeqNum;
+  slot.reqId = reqId;
   slot.msgType = msgType;
   slot.active = true;
   
