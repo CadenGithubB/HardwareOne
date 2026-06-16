@@ -251,7 +251,7 @@ window.SchemaPanel = (function(){
              '<span style="white-space:nowrap">' + entry.label + '</span></label>';
     }
     if (entry.type === 'string' && entry.secret) {
-      var placeholder = (val !== undefined && val !== '') ? '(set - leave blank to keep)' : '(not set)';
+      var placeholder = entry.set ? '(set - leave blank to keep)' : '(not set)';
       return '<label style="display:flex;flex-direction:column;gap:0.25rem;font-size:0.9em;color:var(--panel-fg)">' + entry.label + '<input type="password" id="' + id + '" placeholder="' + placeholder + '"' + cmdAttr + ' style="padding:0.5rem;border:1px solid var(--border);border-radius:4px;width:240px"></label>';
     }
     if (entry.type === 'int' || entry.type === 'float' ||
@@ -547,7 +547,7 @@ window.SchemaPanel.render({
     if (e.type === 'bool') {
       return '<label style="' + grayStyle + '"><input type="checkbox" id="' + id + '"' + (val ? ' checked' : '') + disAttr + cmdAttr + ' style="margin-right:0.5rem">' + e.label + '</label>';
     } else if (e.type === 'string' && e.secret) {
-      var placeholder = val !== undefined && val !== '' ? '(set - leave blank to keep)' : '(not set)';
+      var placeholder = e.set ? '(set - leave blank to keep)' : '(not set)';
       return '<label style="' + grayStyle + '">' + e.label + '<br><input type="password" id="' + id + '" placeholder="' + placeholder + '"' + disAttr + cmdAttr + ' style="padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:200px"></label>';
     } else if (e.type === 'int' || e.type === 'float') {
       var step = e.type === 'float' ? '0.01' : '1';
@@ -778,7 +778,7 @@ window.SchemaPanel.render({
       return '<label style="' + grayStyle + '"><input type="checkbox" id="' + id + '"' + (val ? ' checked' : '') + disAttr + cmdAttr + ' style="margin-right:0.5rem">' + e.label + '</label>';
     } else if (e.type === 'string' && e.secret) {
       // Secret field: use password input, show placeholder if set, blank = unchanged
-      var placeholder = val !== undefined && val !== '' ? '(set - leave blank to keep)' : '(not set)';
+      var placeholder = e.set ? '(set - leave blank to keep)' : '(not set)';
       return '<label style="' + grayStyle + '">' + e.label + '<br><input type="password" id="' + id + '" placeholder="' + placeholder + '"' + disAttr + cmdAttr + ' style="padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:200px"></label>';
     } else if (e.type === 'string' && e.options) {
       var opts = e.options.split(',').map(function(o) {
