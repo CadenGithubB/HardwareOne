@@ -100,10 +100,17 @@ the actual peer output arrives asynchronously and lands in a message buffer.
 Poll this command to read it.
 ```json
 { "schema":1, "messages":[
-  { "seq":42, "reqId":1234567, "mac":"AA:BB:CC:DD:EE:FF", "name":"node2",
-    "msg":"<peer output / text>", "enc":true, "ts":1234567, "type":3 }
+  { "seq":42, "reqId":1234567, "piece":1, "of":1, "mac":"AA:BB:CC:DD:EE:FF",
+    "name":"node2", "msg":"<peer output / text>", "enc":true, "ts":1234567, "type":3 }
 ]}
 ```
+- `piece` / `of` — **chunked messages.** A message longer than one ESP-NOW frame
+  is stored as **separate records**, each one fragment (≤200 B), all sharing the
+  same `reqId` (the group id). `piece` is the 1-based fragment index, `of` is the
+  total. The device does **not** reassemble — the client must **group by `reqId`,
+  order by `piece`, and concatenate `msg`** to get the full message. `of:1` means
+  a normal single-frame message (no stitching needed). If pieces are missing
+  (lost / aged out of the ring), render what you have as partial.
 - `seq` — the buffer's own monotonic cursor (for incremental polling, below).
 - `reqId` — **correlation id**: the `msgId` of the request that produced this message. For a relayed remote op (`espnowremote`/`browse`/`fetch`) this equals the `reqId` returned by the send ack (see below), so you can match a result to the exact request that caused it. `0` for unsolicited messages (peer text, file-event logs) that aren't answers to a request.
 - `sinceSeq` — pass the highest `seq` you've seen to get only newer messages (incremental poll). Omit/`0` = all buffered.

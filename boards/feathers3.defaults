@@ -22,8 +22,9 @@ CONFIG_ARDUINO_VARIANT="um_feathers3"
 # big web responses, ESP-NOW buffers will OOM at runtime).
 CONFIG_SPIRAM_MODE_QUAD=y
 
-# Flash size — FeatherS3 / FeatherS3[D] have 16 MB QSPI flash. The partition
-# picker in CMakeLists.txt sees this flag and selects partitions_*_16mb.csv,
-# which gives LittleFS ~11.3 MB (vs 3.1 MB on 8 MB boards).
-CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
-CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+# Flash size — this unit has 8 MB QSPI flash. The partition picker in
+# CMakeLists.txt sees this flag and selects partitions_*_8mb.csv, which gives
+# LittleFS ~3.1 MB. (Stock UM FeatherS3 ships with 16 MB → ~11.3 MB LittleFS;
+# switch back to CONFIG_ESPTOOLPY_FLASHSIZE_16MB if flashing a 16 MB board.)
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="8MB"

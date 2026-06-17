@@ -440,7 +440,7 @@ static void transmitSensorData(RemoteSensorType sensorType, const char* jsonData
   
   
   // Send via V4 binary protocol (both bond and mesh modes)
-  extern bool v4_broadcast_sensor_data(RemoteSensorType sensorType, const char* jsonData, uint16_t jsonLen);
+  extern bool v4_broadcast_sensor_data(RemoteSensorType sensorType, const char* jsonData, uint16_t jsonLen, int* outAttempted);
   
 #if ENABLE_BONDED_MODE
   // Check for bond mode first
@@ -491,10 +491,16 @@ static void transmitSensorData(RemoteSensorType sensorType, const char* jsonData
   // Mesh mode - send via V4 binary protocol
   DEBUG_ESPNOW_STREAMF("%s", "[SENSOR_DATA_TX] Using V4 binary protocol for mesh broadcast");
   
-  bool sent = v4_broadcast_sensor_data(sensorType, jsonData, jsonLen);
+  int attempted = 0;
+  bool sent = v4_broadcast_sensor_data(sensorType, jsonData, jsonLen, &attempted);
   if (sent) {
     DEBUG_ESPNOW_STREAMF("[SENSOR_TX] SUCCESS: Broadcast %s data (mesh)", sensorTypeToString(sensorType));
+  } else if (attempted == 0) {
+    // No live mesh peers to send to (e.g. peer rebooting/offline). Not a fault —
+    // nobody is subscribed/present, so there is nothing to transmit.
+    DEBUG_ESPNOW_STREAMF("[SENSOR_TX] no live mesh peers for %s data (nothing to send)", sensorTypeToString(sensorType));
   } else {
+    // Peers were present and we attempted a send, but every frame failed.
     DEBUG_ESPNOW_STREAMF("[SENSOR_TX] ERROR: Failed to broadcast %s data", sensorTypeToString(sensorType));
   }
 }

@@ -50,10 +50,12 @@ To make this painless, the project has one file per board under `boards/`. The
 families) has a file here:
 
 ```
-boards/feathers3.defaults         # esp32s3  — um_feathers3       + PSRAM Quad,  16 MB
-boards/xiao_s3.defaults           # esp32s3  — XIAO_ESP32S3       + PSRAM Octal,  8 MB
-boards/qtpy_esp32.defaults        # esp32    — adafruit_qtpy_esp32      + PSRAM Quad, 8 MB
-boards/feather_esp32_v2.defaults  # esp32    — adafruit_feather_esp32_v2 + PSRAM Quad, 8 MB
+# The MB value below is FLASH size (drives the partition table). PSRAM size is
+# auto-detected (CONFIG_SPIRAM_TYPE_AUTO) — FeatherS3 = 8 MB Quad, XIAO = 8 MB Octal.
+boards/feathers3.defaults         # esp32s3  — um_feathers3       + Quad PSRAM,  16 MB flash
+boards/xiao_s3.defaults           # esp32s3  — XIAO_ESP32S3       + Octal PSRAM,  8 MB flash
+boards/qtpy_esp32.defaults        # esp32    — adafruit_qtpy_esp32      + Quad PSRAM, 8 MB flash
+boards/feather_esp32_v2.defaults  # esp32    — adafruit_feather_esp32_v2 + Quad PSRAM, 8 MB flash
 ```
 
 `CMakeLists.txt` reads the `HW_BOARD` env var at configure time and layers the

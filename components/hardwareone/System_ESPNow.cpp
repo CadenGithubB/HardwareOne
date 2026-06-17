@@ -239,7 +239,7 @@ bool v4_broadcast(uint8_t type, uint16_t flags, uint32_t msgId, const uint8_t* p
 // EspNowEventCategory enum.
 bool v4_broadcast_category(uint8_t type, uint16_t flags, uint32_t msgId,
                            const uint8_t* payload, uint16_t payloadLen, uint8_t ttl,
-                           uint32_t category);
+                           uint32_t category, int* outAttempted = nullptr);
 // (v4_send_chunked removed 2026-05 — plaintext multi-frame is unreachable now
 // that smart is strict encrypt-or-fail. RX-side plaintext reassembly remains
 // for one release window to tolerate old-firmware peers, then can be removed.)
@@ -264,7 +264,7 @@ bool v4_send_command_response(const uint8_t* dst, uint32_t cmdMsgId, bool succes
 bool v4_send_text(const uint8_t* dst, const char* text, uint16_t textLen);
 bool v4_broadcast_text(const char* text, uint16_t textLen);
 bool v4_broadcast_sensor_status(RemoteSensorType sensorType, bool enabled);
-bool v4_broadcast_sensor_data(RemoteSensorType sensorType, const char* jsonData, uint16_t jsonLen);
+bool v4_broadcast_sensor_data(RemoteSensorType sensorType, const char* jsonData, uint16_t jsonLen, int* outAttempted = nullptr);
 bool v4_send_user_sync(const uint8_t* dst, const char* jsonPayload, uint16_t jsonLen);
 
 // MAC address formatting (stack buffer version to reduce heap churn)
@@ -1082,7 +1082,7 @@ static bool trySendToStreamSession(uint32_t cmdMsgId, const char* data, size_t l
 
 // EspNowV4Header, V4PayloadCmdResp, V4PayloadFile* moved to System_ESPNow_Wire.h
 
-struct V4DedupEntry { uint8_t origin[6]; uint32_t id; uint32_t ts; bool active; };
+struct V4DedupEntry { uint8_t origin[6]; uint32_t id; uint32_t ts; uint8_t fragIndex; bool active; };
 #define V4_DEDUP_SIZE 64
 static V4DedupEntry gV4Dedup[V4_DEDUP_SIZE];
 static int gV4DedupIdx = 0;
@@ -1399,10 +1399,16 @@ static void initPrimaryMeshFromLegacySettings() {
 // arrive within milliseconds; bond retries use fresh msgIds — so 5s is ample.
 static constexpr uint32_t V4_DEDUP_TTL_MS = 5000;
 
-static bool v4_dedup_seen_and_insert(const uint8_t* origin, uint32_t id) {
+// fragIndex is part of the key: a multi-fragment message reuses one msgId across
+// all its fragments (the group id), so deduping by (origin,msgId) alone would
+// drop fragments 1..N-1 as "duplicates" of fragment 0. Keying on fragIndex too
+// keeps distinct fragments distinct while still catching a true retransmit of
+// the SAME fragment. Single-frame messages always pass fragIndex 0.
+static bool v4_dedup_seen_and_insert(const uint8_t* origin, uint32_t id, uint8_t fragIndex = 0) {
   uint32_t now = (uint32_t)millis();
   for (int i = 0; i < V4_DEDUP_SIZE; i++) {
-    if (gV4Dedup[i].active && gV4Dedup[i].id == id && memcmp(gV4Dedup[i].origin, origin, 6) == 0) {
+    if (gV4Dedup[i].active && gV4Dedup[i].id == id && gV4Dedup[i].fragIndex == fragIndex &&
+        memcmp(gV4Dedup[i].origin, origin, 6) == 0) {
       // Unsigned subtraction is rollover-safe across the ~49.7-day millis() wrap.
       if ((uint32_t)(now - gV4Dedup[i].ts) < V4_DEDUP_TTL_MS) return true;
       // Expired: accept as new and refresh in place so an immediate radio-level
@@ -1412,7 +1418,7 @@ static bool v4_dedup_seen_and_insert(const uint8_t* origin, uint32_t id) {
     }
   }
   V4DedupEntry& e = gV4Dedup[gV4DedupIdx];
-  memcpy(e.origin, origin, 6); e.id = id; e.ts = now; e.active = true;
+  memcpy(e.origin, origin, 6); e.id = id; e.fragIndex = fragIndex; e.ts = now; e.active = true;
   gV4DedupIdx = (gV4DedupIdx + 1) % V4_DEDUP_SIZE;
   return false;
 }
@@ -1856,12 +1862,14 @@ bool v4_broadcast(uint8_t type, uint16_t flags, uint32_t msgId, const uint8_t* p
 // uninterested peers drops out.
 bool v4_broadcast_category(uint8_t type, uint16_t flags, uint32_t msgId,
                            const uint8_t* payload, uint16_t payloadLen, uint8_t ttl,
-                           uint32_t category) {
+                           uint32_t category, int* outAttempted) {
+  if (outAttempted) *outAttempted = 0;
   if (!gEspNow || !gEspNow->initialized) return false;
 
   bool anySuccess = false;
   int sentCount = 0;
   int skippedCount = 0;
+  int attemptedCount = 0;  // peers we actually called v4_send_frame on (vs absent/skipped)
   BroadcastTracker* tracker = nullptr;
 
   if (flags & ESPNOW_V4_FLAG_ACK_REQ) {
@@ -1886,6 +1894,7 @@ bool v4_broadcast_category(uint8_t type, uint16_t flags, uint32_t msgId,
       skippedCount++;
       continue;
     }
+    attemptedCount++;
     bool sent = v4_send_frame(gMeshPeers[i].mac, type, flagsAuthed, msgId,
                               payload, payloadLen, ttl);
     if (sent) {
@@ -1902,6 +1911,7 @@ bool v4_broadcast_category(uint8_t type, uint16_t flags, uint32_t msgId,
   DEBUGF(DEBUG_ESPNOW_ROUTER,
          "[V4_BROADCAST_GATED] type=%u msgId=%lu category=0x%08lX sent=%d skipped=%d",
          type, (unsigned long)msgId, (unsigned long)category, sentCount, skippedCount);
+  if (outAttempted) *outAttempted = attemptedCount;
   return anySuccess;
 }
 
@@ -2221,6 +2231,12 @@ bool v4_send_encrypted_chunked(const uint8_t dst[6], uint8_t type, uint16_t base
 
   DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_ENC_FRAG_TX] ✓ SUCCESS: all %u fragments sent + ACKed", fragCount);
   DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_ENC_FRAG_TX] ==============================");
+  // A fragmented send is ACKed per-fragment (the waiter above), which never
+  // reaches the broadcast-tracker ACK path that flips the web UI's delivery
+  // bubble. Mark it delivered here so a long (chunked) message shows
+  // ✓✓ Delivered instead of a false "No ACK (timeout)". No-op for sends that
+  // weren't registered via sendStatusRegister (only user TEXT sends are).
+  sendStatusMarkDelivered(msgId, dst);
   return true;
 }
 
@@ -2605,7 +2621,8 @@ bool v4_broadcast_sensor_status(RemoteSensorType sensorType, bool enabled) {
 }
 
 // Broadcast sensor data to all mesh peers
-bool v4_broadcast_sensor_data(RemoteSensorType sensorType, const char* jsonData, uint16_t jsonLen) {
+bool v4_broadcast_sensor_data(RemoteSensorType sensorType, const char* jsonData, uint16_t jsonLen, int* outAttempted) {
+  if (outAttempted) *outAttempted = 0;
   if (!jsonData || jsonLen == 0 || jsonLen > 200) {
     DEBUGF(DEBUG_ESPNOW_MESH, "[V4_BROADCAST_SENSOR_DATA] ERROR: Invalid params (jsonData=%p len=%u)",
            jsonData, jsonLen);
@@ -2627,9 +2644,12 @@ bool v4_broadcast_sensor_data(RemoteSensorType sensorType, const char* jsonData,
          sensorTypeToString(sensorType), jsonLen, totalLen);
   DEBUGF(DEBUG_ESPNOW_MESH, "[V4_BROADCAST_SENSOR_DATA] JSON (first 80 chars): %.80s", jsonData);
   // Phase 5: gate on per-peer SENSOR subscription.
+  int attempted = 0;
   bool result = v4_broadcast_category(ESPNOW_V4_TYPE_SENSOR_BROADCAST, 0, msgId,
-                                       buffer, totalLen, 2, ESPNOW_EVT_SENSOR);
-  DEBUGF(DEBUG_ESPNOW_MESH, "[V4_BROADCAST_SENSOR_DATA] Result: %s", result ? "SUCCESS" : "FAILED");
+                                       buffer, totalLen, 2, ESPNOW_EVT_SENSOR, &attempted);
+  if (outAttempted) *outAttempted = attempted;
+  DEBUGF(DEBUG_ESPNOW_MESH, "[V4_BROADCAST_SENSOR_DATA] Result: %s",
+         result ? "SUCCESS" : (attempted == 0 ? "NO LIVE PEERS" : "FAILED"));
   return result;
 }
 
@@ -2900,6 +2920,11 @@ static void v4h_text(const V4RxCtx& ctx) {
       // legacy ESPNOW_V4_FLAG_ENCRYPTED header bit, never set anymore, so the
       // web UI's message bubble always showed "not encrypted".)
       slot.encrypted = ctx.isSessionEncrypted;
+      // Carry the fragment tags so the drain can store this piece as its own
+      // record. Single-frame text has fragCount==1 → stored as piece 1/1.
+      slot.msgId     = ctx.h->msgId;
+      slot.fragIndex = ctx.h->fragIndex;
+      slot.fragCount = ctx.h->fragCount;
       slot.used = true;
       gEspNow->textQueueHead = nextHead;
       DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_RX] TEXT message enqueued slot=%d (encrypted=%s)",
@@ -2964,6 +2989,27 @@ static void v4h_heartbeat(const V4RxCtx& ctx) {
     const V4PayloadHeartbeat* hb = (const V4PayloadHeartbeat*)ctx.payload;
     noteMeshPeerRxActivity(ctx.recv_info->src_addr, EspNowMeshRxKind::MeshHeartbeat, hb->rssi);
     if (gEspNow) gEspNow->heartbeatsReceived++;
+
+    // Proactive session pre-warm. If this heartbeat is from a peer we've ALREADY
+    // paired with (a long-term identity exists) and we don't yet have an ACTIVE
+    // session, kick SESSION_OPEN now so the encrypted channel is ready BEFORE the
+    // first message. Without this, sessions are established lazily on first send —
+    // and a multi-frame (long) message sent first gets dropped, because the
+    // chunked transport requires an active session and can't queue mid-stream.
+    // Gated on pid!=null so we ONLY auto-handshake with known peers (never
+    // strangers heard via broadcast) and only ever send SESSION_OPEN, never
+    // KEY_EX (no passphrase material on the wire). espnowSessionOpenInitiate is
+    // non-blocking and a no-op if a handshake is already in flight, so it is safe
+    // in this RX-handler context and self-rate-limits (fires once per session).
+    {
+      const PeerIdentity* pid = peerIdentityFindByMac(ctx.recv_info->src_addr);
+      if (pid) {
+        SessionState* s = sessionFindByPeer(ctx.recv_info->src_addr, pid->meshId);
+        if (!s || s->state != SESSION_ACTIVE) {
+          espnowSessionOpenInitiate(ctx.recv_info->src_addr, nullptr);
+        }
+      }
+    }
 
     // Backup master failover: track heartbeats from the configured master MAC.
     // 2026-05-19 — REQUIRE authentication on the frame before trusting that
@@ -3035,7 +3081,7 @@ static void v4h_sensor_broadcast(const V4RxCtx& ctx) {
 
     if (dataLen > 0 && ctx.payloadLen >= (sizeof(V4PayloadSensorBroadcast) + dataLen)) {
       const char* jsonData = (const char*)sb->data;
-      DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_SENSOR_BROADCAST] JSON (first 100 chars): %.100s", jsonData);
+      DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_SENSOR_BROADCAST] JSON (%u bytes): %.*s", (unsigned)dataLen, (int)dataLen, jsonData);
 
       DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_SENSOR_BROADCAST] Caching sensor data");
       RemoteSensorData* entry = findOrCreateCacheEntry(ctx.recv_info->src_addr, ctx.deviceName, sensorType);
@@ -4396,7 +4442,13 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
   // ACK handler's fragIdx match, its fragCount>1 reassembly-cleanup branch)
   // was all already written for exactly this path — it just couldn't be
   // reached. This guard lets ACKs fall through to it.
-  if (h->fragCount > 1 && h->type != ESPNOW_V4_TYPE_ACK) {
+  // TEXT is deliberately excluded from device-side reassembly: long text is
+  // stored per-fragment (each fragment becomes its own small history record,
+  // tagged msgId/fragIndex/fragCount) and reassembled CLIENT-side. This keeps
+  // the device from ever materializing a multi-KB lump in RAM. So multi-frame
+  // TEXT falls through to the normal per-frame dispatch below; v4h_text stashes
+  // each fragment's tags and the drain stores them as separate pieces.
+  if (h->fragCount > 1 && h->type != ESPNOW_V4_TYPE_ACK && h->type != ESPNOW_V4_TYPE_TEXT) {
     // Multi-fragment message - reassemble
     if (gEspNow) { gEspNow->routerMetrics.v4FragRx++; }
     
@@ -4611,8 +4663,8 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
       h->type != ESPNOW_V4_TYPE_FILE_START &&
       h->type != ESPNOW_V4_TYPE_FILE_DATA &&
       h->type != ESPNOW_V4_TYPE_FILE_END) {
-    if (h->msgId != 0 && v4_dedup_seen_and_insert(h->origin, h->msgId)) {
-      DEBUG_ESPNOWF("[V4_DEDUP] Dropped duplicate: type=%u msgId=%lu", h->type, (unsigned long)h->msgId);
+    if (h->msgId != 0 && v4_dedup_seen_and_insert(h->origin, h->msgId, h->fragIndex)) {
+      DEBUG_ESPNOWF("[V4_DEDUP] Dropped duplicate: type=%u msgId=%lu frag=%u", h->type, (unsigned long)h->msgId, h->fragIndex);
       return true;
     }
   } else {
@@ -7766,11 +7818,21 @@ void processMeshHeartbeats() {
         activePeerCount++;
     }
     // Also count paired devices from registry (bootstrap case: after reboot, gMeshPeers is empty)
+    // and — crucially — create a mesh-health slot for each. v4_broadcast_category()
+    // below ONLY fans the heartbeat out to active gMeshPeers entries, so without
+    // this the heartbeat is "sent" to an empty list (sent=0) and the mesh never
+    // comes up after a reboot until the peers are manually re-paired. Bootstrapping
+    // the slot here lets the first heartbeat reach the paired peer, whose reply then
+    // populates the slot properly via noteMeshPeerRxActivity. Idempotent: returns the
+    // existing slot if already present. peerIdentityWantsEvent() defaults to true for
+    // peers with no explicit subscription, so the bootstrapped peer is sent, not skipped.
     uint8_t pairedDeviceCount = 0;
     if (gEspNow && gEspNow->deviceCount > 0) {
       for (int i = 0; i < gEspNow->deviceCount; i++) {
-        if (!isSelfMac(gEspNow->devices[i].mac))
+        if (!isSelfMac(gEspNow->devices[i].mac)) {
           pairedDeviceCount++;
+          getMeshPeerHealth(gEspNow->devices[i].mac, true);  // bootstrap slot so the heartbeat reaches it
+        }
       }
     }
     // Send heartbeat if we have either active peers OR paired devices
@@ -8364,16 +8426,26 @@ void processMeshHeartbeats() {
   {
     int tail = gEspNow->textQueueTail;
     int processed = 0;
-    while (tail != gEspNow->textQueueHead && processed < 4) {
+    while (tail != gEspNow->textQueueHead && processed < 8) {
       auto& entry = gEspNow->textQueue[tail];
       if (entry.used) {
         String devName = String(entry.deviceName);
         if (devName.length() == 0) devName = formatMacAddress(entry.srcMac);
+        // Store this piece as its own record. Group = msgId; piece = fragIndex+1
+        // of fragCount. Single-frame text is just piece 1/1. The client groups
+        // by reqId and stitches — the device never holds the whole message.
         bool stored = storeMessageInPeerHistory(entry.srcMac, devName.c_str(),
                                                 entry.content, entry.encrypted,
-                                                MSG_TEXT);
-        BROADCAST_PRINTF("[%s%s] %s", devName.c_str(),
-                         entry.encrypted ? " [enc]" : "", entry.content);
+                                                MSG_TEXT, entry.msgId,
+                                                (uint8_t)(entry.fragIndex + 1), entry.fragCount);
+        if (entry.fragCount > 1) {
+          BROADCAST_PRINTF("[%s%s] (part %u/%u) %s", devName.c_str(),
+                           entry.encrypted ? " [enc]" : "",
+                           entry.fragIndex + 1, entry.fragCount, entry.content);
+        } else {
+          BROADCAST_PRINTF("[%s%s] %s", devName.c_str(),
+                           entry.encrypted ? " [enc]" : "", entry.content);
+        }
         // ESP-NOW App page push-kick: if the user is currently viewing the
         // inbox (merged or per-peer), enqueue a Redraw so the new entry
         // appears within one applier-tick. No-op when the page isn't
@@ -12812,10 +12884,19 @@ const char* cmd_espnow_send(const String& argsInput) {
   }
 
   CommandArgs a(argsInput);
-  if (!a.hasMinArgs(2)) return "Usage: espnow send <name_or_mac> <message>";
+  // Optional leading "json" flag — on-device UIs (OLED) use it to retrieve the
+  // msgId so they can poll sendStatus for a post-send delivery indicator. It is
+  // LEADING (never trailing) so it can never be mistaken for free-form message
+  // text. json acks mirror the rest of the contract: {schema,ok,msgId|error}.
+  bool jsonMode = a.arg(0).equalsIgnoreCase("json");
+  int base = jsonMode ? 1 : 0;
+  if (!a.hasMinArgs(base + 2)) {
+    return jsonMode ? "{\"schema\":1,\"ok\":false,\"error\":\"usage\"}"
+                    : "Usage: espnow send [json] <name_or_mac> <message>";
+  }
 
-  String target = a.arg(0);
-  String message = a.remaining(0);
+  String target = a.arg(base);
+  String message = a.remaining(base);
 
   DEBUGF(DEBUG_ESPNOW_STREAM, "[cmd_espnow_send] message.length()=%d",
          message.length());
@@ -12823,6 +12904,7 @@ const char* cmd_espnow_send(const String& argsInput) {
   // Resolve device name or MAC address
   uint8_t mac[6];
   if (!resolveDeviceNameOrMac(target, mac)) {
+    if (jsonMode) return "{\"schema\":1,\"ok\":false,\"error\":\"not found\"}";
     EXT_RAM_BSS_ATTR static char errBuf[256];
     snprintf(errBuf, sizeof(errBuf),
              "Device '%s' not found. Use 'espnowdevices' to see paired devices.",
@@ -12836,7 +12918,8 @@ const char* cmd_espnow_send(const String& argsInput) {
   esp_wifi_get_mac(WIFI_IF_STA, selfSta);
   esp_wifi_get_mac(WIFI_IF_AP, selfAp);
   if (memcmp(mac, selfSta, 6) == 0 || memcmp(mac, selfAp, 6) == 0) {
-    return "Cannot send message to self. Use a different device MAC address.";
+    return jsonMode ? "{\"schema\":1,\"ok\":false,\"error\":\"self target\"}"
+                    : "Cannot send message to self. Use a different device MAC address.";
   }
 
   size_t msgLen = message.length();
@@ -12848,22 +12931,60 @@ const char* cmd_espnow_send(const String& argsInput) {
   // command-results use — and rebuilt on the receiver (v4h_text accepts the
   // reassembled payload up to the same cap).
   if (msgLen > (size_t)ESPNOW_TEXT_MAX_LEN) {
-    return "Error: message too long (max 1024 bytes). Send larger content as a file.";
+    return jsonMode ? "{\"schema\":1,\"ok\":false,\"error\":\"too long\"}"
+                    : "Error: message too long (max 1024 bytes). Send larger content as a file.";
+  }
+
+  // Multi-frame (chunked) sends require an ACTIVE session — the chunked transport
+  // can't queue across the handshake the way single-frame sends do, so a long
+  // message fired before the session is up would be dropped. The heartbeat path
+  // pre-warms sessions, but cover the brief boot/discovery window too: if this is
+  // a multi-frame send to a known peer with no active session yet, kick the
+  // handshake and wait briefly for it. Safe to block here — this runs on the
+  // cmd_exec task, NOT the espnow RX task, so the RX drainer keeps processing the
+  // inbound SESSION_CONFIRM and the handshake can complete. Best-effort: if it
+  // doesn't come up in time, the send proceeds and fails cleanly (marked below).
+  if (msgLen > (size_t)ESPNOW_V4_MAX_PLAINTEXT) {
+    const PeerIdentity* pid = peerIdentityFindByMac(mac);
+    if (pid) {
+      SessionState* s = sessionFindByPeer(mac, pid->meshId);
+      if (!s || s->state != SESSION_ACTIVE) {
+        espnowSessionOpenInitiate(mac, nullptr);  // kick (no-op if already in flight)
+        uint32_t deadline = (uint32_t)millis() + 3000;
+        while ((int32_t)(deadline - (uint32_t)millis()) > 0) {
+          vTaskDelay(pdMS_TO_TICKS(50));
+          s = sessionFindByPeer(mac, pid->meshId);
+          if (s && s->state == SESSION_ACTIVE) break;
+        }
+      }
+    }
   }
   // Step 3b: route through clerk (JOB_AEAD_SMART → v4_send_payload_smart →
   // v4_send_encrypted_or_queue). The clerk's notification is OK/FAIL only, so
   // the "sent" vs "queued for SESSION_OPEN" status-string distinction is dropped.
   // Smart path queues to the pending ring if session not yet ACTIVE; drain on
   // SESSION_CONFIRM reuses the same msgId so the bubble-flip still works.
+  // Phase 3.5 task #49 — register the msgId so the web UI's polling loop can
+  // flip the bubble to ✓✓ Delivered. Register BEFORE sending: a long (chunked)
+  // message is sent SYNCHRONOUSLY, and v4_send_encrypted_chunked marks the msgId
+  // delivered from INSIDE sendAeadSync once all fragments ACK. If we registered
+  // afterward, that mark would hit an unregistered msgId (no-op) and the bubble
+  // would wrongly time out. Single-frame sends ACK asynchronously, so early
+  // registration is harmless for them.
+  sendStatusRegister(msgId, mac);
   if (!espnowtx::sendAeadSync(mac, ESPNOW_V4_TYPE_TEXT, ESPNOW_V4_FLAG_ACK_REQ, msgId,
                          (const uint8_t*)message.c_str(), (uint16_t)msgLen, 1, 2000)) {
+    sendStatusMarkFailed(msgId, mac);  // don't leave an orphan PENDING entry
+    if (jsonMode) return "{\"schema\":1,\"ok\":false,\"error\":\"send failed\"}";
     if (!ensureDebugBuffer()) return "Error: encrypted send failed.";
     snprintf(getDebugBuffer(), 1024, "Error: encrypted send failed (clerk timeout or queue full).");
     return getDebugBuffer();
   }
-  // Phase 3.5 task #49 — register the msgId so the web UI's polling loop
-  // can flip the bubble to ✓✓ Delivered when the ACK lands.
-  sendStatusRegister(msgId, mac);
+  if (jsonMode) {
+    if (!ensureDebugBuffer()) return "{\"schema\":1,\"ok\":true}";
+    snprintf(getDebugBuffer(), 1024, "{\"schema\":1,\"ok\":true,\"msgId\":%lu}", (unsigned long)msgId);
+    return getDebugBuffer();
+  }
   if (!ensureDebugBuffer()) return "Encrypted message sent";
   snprintf(getDebugBuffer(), 1024,
            "Encrypted message sent via SESSION_FRAME (ID: %lu, %u plaintext bytes)",
@@ -13972,6 +14093,8 @@ const char* cmd_espnow_messages(const String& argsInput) {
       formatMacAddressBuf(msgs[i].senderMac, macStr, sizeof(macStr));
       o["seq"]   = (unsigned long)msgs[i].seqNum;
       o["reqId"] = (unsigned long)msgs[i].reqId;
+      o["piece"] = msgs[i].piece;
+      o["of"]    = msgs[i].pieceTotal;
       o["mac"]  = String(macStr);
       o["name"] = msgs[i].senderName;
       o["msg"]  = msgs[i].message;
@@ -14411,7 +14534,9 @@ bool storeMessageInPeerHistory(
   const char* message,
   bool encrypted,
   LogMessageType msgType,
-  uint32_t reqId
+  uint32_t reqId,
+  uint8_t piece,
+  uint8_t pieceTotal
 ) {
   if (!gEspNow) return false;
   
@@ -14438,6 +14563,8 @@ bool storeMessageInPeerHistory(
   slot.encrypted = encrypted;
   slot.seqNum = ++gEspNow->globalMessageSeqNum;
   slot.reqId = reqId;
+  slot.piece = piece;
+  slot.pieceTotal = pieceTotal;
   slot.msgType = msgType;
   slot.active = true;
   
@@ -14553,8 +14680,54 @@ int getAllMessages(ReceivedTextMessage* outMessages, int maxMessages, uint32_t s
       }
     }
   }
-  
+
   return copied;
+}
+
+// Collapse a peer's per-fragment records into one zero-copy reference per logical
+// message (see CollapsedMsgRef in the header for the contract + rationale). Walks
+// the ring chronologically; fragments of one message share a reqId and are stored
+// consecutively, so a linear group-merge is correct. No text is copied — each
+// output entry points at the message's first present fragment in the live ring.
+int espnowCollapsedPeerMessages(uint8_t* peerMac, CollapsedMsgRef* out, int maxN) {
+  if (!gEspNow || !out || maxN <= 0) return 0;
+
+  PeerMessageHistory* history = findOrCreatePeerHistory(peerMac);
+  if (!history || history->count == 0) return 0;
+
+  int w = 0;  // number of logical messages written
+  for (int i = 0; i < history->count; i++) {
+    uint8_t idx = (history->tail + i) % MESSAGES_PER_DEVICE;
+    const ReceivedTextMessage& msg = history->messages[idx];
+    if (!msg.active) continue;
+
+    // Multi-fragment text: merge into an existing group with the same reqId.
+    // reqId == 0 (unsolicited / file events) and single-frame text never merge —
+    // each is its own logical message.
+    if (msg.reqId != 0 && msg.pieceTotal > 1) {
+      int g = -1;
+      for (int k = 0; k < w; k++) {
+        if (out[k].reqId == msg.reqId &&
+            memcmp(out[k].head->senderMac, msg.senderMac, 6) == 0) { g = k; break; }
+      }
+      if (g >= 0) {
+        if (out[g].partsPresent < 255) out[g].partsPresent++;
+        // Prefer the lowest-numbered present fragment as the preview head, so the
+        // truncated list line shows the true start of the message.
+        if (msg.piece < out[g].head->piece) out[g].head = &msg;
+        if (msg.pieceTotal > out[g].partsTotal) out[g].partsTotal = msg.pieceTotal;
+        continue;
+      }
+    }
+
+    if (w >= maxN) break;  // caller buffer full; remaining (older) messages dropped
+    out[w].head = &msg;
+    out[w].reqId = msg.reqId;
+    out[w].partsPresent = 1;
+    out[w].partsTotal = (msg.pieceTotal > 1) ? msg.pieceTotal : 1;
+    w++;
+  }
+  return w;
 }
 
 #endif // ENABLE_ESPNOW
