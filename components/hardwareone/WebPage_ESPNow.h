@@ -871,7 +871,7 @@ window.togglePane = function(paneId, btnId) {
           + '<div class="message-log" id="log-' + mac + '" style="margin-bottom:12px;max-height:300px;overflow-y:auto"><div class="message-empty">No messages yet. Start a conversation!</div></div>'
           + '<div id="text-input-' + mac + '" style="display:block">'
           + '<div style="display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap">'
-          + '<textarea id="msg-' + mac + '" maxlength="1024" oninput="updateMsgCounter(\'' + mac + '\')" placeholder="Message to send" style="flex:1;min-width:220px;min-height:60px;resize:vertical;font-family:inherit;padding:8px;border:1px solid var(--border);border-radius:4px;background:var(--panel-bg);color:var(--panel-fg)"></textarea>'
+          + '<textarea id="msg-' + mac + '" maxlength="1024" oninput="var c=document.getElementById(this.id.replace(\'msg-\',\'msg-count-\'));if(c)c.textContent=(1024-this.value.length)+\' characters left\';" placeholder="Message to send" style="flex:1;min-width:220px;min-height:60px;resize:vertical;font-family:inherit;padding:8px;border:1px solid var(--border);border-radius:4px;background:var(--panel-bg);color:var(--panel-fg)"></textarea>'
           + '<button class="btn message-action-btn" onclick="doSendMessage(\'' + mac + '\')" style="align-self:flex-start">Send</button>'
           + '</div>'
           + '<div id="msg-count-' + mac + '" style="font-size:.78em;color:var(--muted);margin-top:5px">1024 characters left</div>'
@@ -939,7 +939,7 @@ window.togglePane = function(paneId, btnId) {
           + '<input type="password" id="sp-' + mac + '" placeholder="Password" style="flex:1">'
           + '</div>'
           + '<div class="sensor-grid">'
-          + ['thermal','tof','imu','gps','gamepad','fmradio','rtc','presence'].map(function(s){
+          + ['thermal','tof','imu','gps','input','fmradio','rtc','presence'].map(function(s){
               return '<div class="sensor-pill" id="sensor-pill-' + s + '-' + mac + '" onclick="toggleSensorSelection(\'' + mac + '\',\'' + s + '\')">' + s + '</div>';
             }).join('')
           + '</div>'
@@ -986,6 +986,15 @@ window.togglePane = function(paneId, btnId) {
       return '<div>Unknown panel</div>';
     };
     console.log('[ESP-NOW] Chunk 3F: renderDevicePanel ready');
+    // Live "N characters left" counter under the message box. The textarea's
+    // oninput calls this; without it every keystroke hit an undefined function.
+    window.updateMsgCounter = function(mac) {
+      var ta = document.getElementById('msg-' + mac);
+      var lbl = document.getElementById('msg-count-' + mac);
+      if (!ta || !lbl) return;
+      var left = 1024 - ta.value.length;
+      lbl.textContent = left + ' characters left';
+    };
     console.log('[ESP-NOW] Chunk 3G: appendLogLine start');
     window.appendLogLine = function(containerId, type, message, status) {
       console.log('[appendLogLine] Called with:', {containerId, type, message, status});
@@ -2077,7 +2086,7 @@ window.togglePane = function(paneId, btnId) {
       }
       next();
     };
-    window.__sensorList = window.__sensorList || ['thermal','tof','imu','gps','gamepad','fmradio','rtc','presence'];
+    window.__sensorList = window.__sensorList || ['thermal','tof','imu','gps','input','fmradio','rtc','presence'];
     window.sensorActiveState = window.sensorActiveState || {};
     window.sensorPendingState = window.sensorPendingState || {};
     window.updateSensorStatus = function(mac) {
@@ -3563,9 +3572,57 @@ window.togglePane = function(paneId, btnId) {
   var lastSeqNum = 0;
   var pollInterval = null;
   var authFailed = false;
-  
+  var pendingGroups = {};   // reqId -> accumulating multi-piece (chunked) message
+  var pollTick = 0;
+
+  // Chunked text: a long message arrives as N pieces that share a reqId, each
+  // tagged piece/of. The device stores them as separate small records and never
+  // reassembles — WE stitch here, client-side, where RAM is free. Single-frame
+  // messages (of<=1) render immediately, exactly as before.
+  function renderIncoming(mac, text, partial) {
+    if (typeof window.appendLogLine === 'function') {
+      window.appendLogLine('log-' + mac, 'RECEIVED', partial ? (text + '  …(partial — some pieces missing)') : text, null);
+    } else {
+      console.error('[ESP-NOW] appendLogLine not available');
+    }
+  }
+  function handleIncomingMessage(msg) {
+    var mac = (msg.mac || '').toUpperCase();
+    if (!mac) return;
+    var text = msg.msg || '';
+    var of = msg.of || 1;
+    var piece = msg.piece || 1;
+    var reqId = msg.reqId || 0;
+    if (of <= 1 || !reqId) { renderIncoming(mac, text, false); return; }  // not chunked
+    var g = pendingGroups[reqId];
+    if (!g) { g = pendingGroups[reqId] = { of: of, mac: mac, parts: {}, count: 0, tick: pollTick }; }
+    if (!(piece in g.parts)) { g.parts[piece] = text; g.count++; }
+    if (g.count >= g.of) {  // all pieces in — join in order and render once
+      var full = '';
+      for (var k = 1; k <= g.of; k++) full += (g.parts[k] || '');
+      renderIncoming(g.mac, full, false);
+      delete pendingGroups[reqId];
+    }
+  }
+  function flushStaleGroups() {
+    // A group whose pieces were lost or aged out of the device ring will never
+    // complete; after ~10s (20 polls) render what we have as a partial so it
+    // doesn't accumulate forever.
+    for (var id in pendingGroups) {
+      var g = pendingGroups[id];
+      if (pollTick - g.tick > 20) {
+        var full = '';
+        for (var k = 1; k <= g.of; k++) full += (g.parts[k] || '[missing] ');
+        renderIncoming(g.mac, full, true);
+        delete pendingGroups[id];
+      }
+    }
+  }
+
   function pollEspNowMessages() {
     if (authFailed) return;
+    pollTick++;
+    flushStaleGroups();
     console.log('[ESP-NOW] Polling messages since=' + lastSeqNum);
     /* Use hw.fetchJSON if available (handles auth errors), otherwise use fetch with proper headers */
     var fetchFn = (window.hw && window.hw.fetchJSON) ? 
@@ -3594,16 +3651,7 @@ window.togglePane = function(paneId, btnId) {
           console.log('[ESP-NOW] Processing ' + data.messages.length + ' messages');
           data.messages.forEach(function(msg){
             if (msg.seq > lastSeqNum) lastSeqNum = msg.seq;
-            var mac = (msg.mac || '').toUpperCase();
-            var text = msg.msg || '';
-            if (!mac) return;
-            console.log('[ESP-NOW] Received message from ' + mac + ': ' + text);
-            console.log('[ESP-NOW] Looking for container: log-' + mac);
-            if (typeof window.appendLogLine === 'function') {
-              window.appendLogLine('log-' + mac, 'RECEIVED', text, null);
-            } else {
-              console.error('[ESP-NOW] appendLogLine not available');
-            }
+            handleIncomingMessage(msg);  // groups chunked pieces by reqId, renders when complete
           });
         }
         // Phase 3.5 task #49 — apply delivery-state updates to bubbles tagged

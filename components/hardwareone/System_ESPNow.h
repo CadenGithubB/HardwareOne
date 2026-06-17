@@ -526,15 +526,17 @@ enum LogMessageType {
 struct ReceivedTextMessage {
   uint8_t senderMac[6];            // Sender MAC
   char senderName[32];             // Sender device name
-  char message[ESPNOW_TEXT_MAX_LEN + 1]; // Message text (fragmented text reassembles up to ESPNOW_TEXT_MAX_LEN)
+  char message[256];               // ONE fragment (≤200 B) or a single-frame message — never a reassembled lump
   unsigned long timestamp;         // When received (millis)
   bool encrypted;                  // Whether message was encrypted
   uint32_t seqNum;                 // Sequence number for deduplication
-  uint32_t reqId;                  // Correlation id (the request's msgId) for command results; 0 if N/A
+  uint32_t reqId;                  // Group id: the message's msgId. Pieces of one chunked message share it. 0 if N/A
+  uint8_t  piece;                  // 1-based fragment index within the message (1 when not chunked)
+  uint8_t  pieceTotal;             // total fragments in the message (1 when not chunked)
   LogMessageType msgType;          // Message type (text, file transfer, etc)
   bool active;                     // Whether this slot is in use
 
-  ReceivedTextMessage() : timestamp(0), encrypted(false), seqNum(0), reqId(0), msgType(MSG_TEXT), active(false) {
+  ReceivedTextMessage() : timestamp(0), encrypted(false), seqNum(0), reqId(0), piece(1), pieceTotal(1), msgType(MSG_TEXT), active(false) {
     memset(senderMac, 0, 6);
     memset(senderName, 0, 32);
     memset(message, 0, sizeof(message));
@@ -807,12 +809,18 @@ struct EspNowState {
   uint8_t deferredMetadataPayload[216];  // V4PayloadMetadata size (212) + 4 bytes padding
   
   // Deferred message handling (ISR-safe pattern: callback sets flag, task processes)
-  // TEXT message ring buffer (4 slots — prevents silent overwrite when messages arrive back-to-back)
-  static constexpr int TEXT_QUEUE_SIZE = 4;  // Must be power of 2
+  // TEXT message ring buffer. Deepened from 4 → 16: a long text now arrives as
+  // N per-fragment entries (not one), so a multi-fragment burst needs headroom
+  // or pieces get dropped. Cheap now that content is one fragment (256 B) not
+  // a 1 KB lump. Must be a power of 2.
+  static constexpr int TEXT_QUEUE_SIZE = 16;
   struct TextQueueEntry {
     uint8_t srcMac[6];
     char deviceName[32];
-    char content[ESPNOW_TEXT_MAX_LEN + 1];
+    char content[256];     // ONE fragment (≤200 B) or a single-frame message
+    uint32_t msgId;        // group id — pieces of one chunked message share it
+    uint8_t fragIndex;     // 0-based fragment index from the frame header
+    uint8_t fragCount;     // total fragments in the message (1 when not chunked)
     bool encrypted;
     bool used;
   };
@@ -1167,10 +1175,32 @@ void sendChunkedResponse(const uint8_t* targetMac, bool success, const String& r
 
 // Per-device message buffer management (espnow_message_buffer.cpp)
 PeerMessageHistory* findOrCreatePeerHistory(uint8_t* peerMac);
-bool storeMessageInPeerHistory(uint8_t* peerMac, const char* peerName, const char* message, bool encrypted, LogMessageType msgType, uint32_t reqId = 0);
+bool storeMessageInPeerHistory(uint8_t* peerMac, const char* peerName, const char* message, bool encrypted, LogMessageType msgType, uint32_t reqId = 0, uint8_t piece = 1, uint8_t pieceTotal = 1);
 void logFileTransferEvent(uint8_t* peerMac, const char* peerName, const char* filename, LogMessageType eventType);
 int getPeerMessages(uint8_t* peerMac, ReceivedTextMessage* outMessages, int maxMessages, uint32_t sinceSeq);
 int getAllMessages(ReceivedTextMessage* outMessages, int maxMessages, uint32_t sinceSeq);
+
+// Chunked-message collapse VIEW (shared by on-device displays — OLED now, G2 later).
+// Chunked text is stored as separate per-fragment records sharing a reqId (see the
+// textQueue drain in System_ESPNow.cpp). Remote clients (web/BLE phone) reassemble
+// those fragments themselves; on-device displays have no remote client, so this
+// helper gives them ONE logical entry per message without copying or concatenating:
+//   - `head` points at the message's first present fragment IN THE LIVE RING
+//     (zero-copy; valid only until the ring overwrites it — same lifetime rule as
+//     the raw records). head->message already holds the first ~200 B, which is all
+//     a truncated list preview needs. Full text (>1 fragment) is assembled on
+//     demand by walking the ring for `reqId` — deferred until a reader view exists.
+//   - `partsPresent` / `partsTotal` let the caller flag multi-part / incomplete
+//     messages (partsTotal == 1 for ordinary single-frame text).
+// Output is chronological (oldest→newest), capped at maxN. CollapsedMsgRef is tiny
+// (~12 B), so a caller buffer sized to MESSAGES_PER_DEVICE is cheap.
+struct CollapsedMsgRef {
+  const ReceivedTextMessage* head;  // first present fragment, in the live ring (zero-copy)
+  uint32_t reqId;                   // group id (0 for unsolicited / single-frame)
+  uint8_t  partsPresent;            // fragments currently in the ring for this message
+  uint8_t  partsTotal;              // total fragments the message was split into (1 = single-frame)
+};
+int espnowCollapsedPeerMessages(uint8_t* peerMac, CollapsedMsgRef* out, int maxN);
 
 // File transfer to specific MAC (used by ImageManager)
 bool sendFileToMac(const uint8_t* mac, const String& localPath);
