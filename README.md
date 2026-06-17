@@ -12,9 +12,9 @@
 
 </div>
 
-You compile and flash each ESP32 chip to fit a specific job — a smart-home sensor, a Smart Glasses companion gadget made to live in your pocket or backpack, a headless mesh node, a camera node that captures photos and beams them across the mesh, and many more. No matter what feature set a device is built for, every one of them speaks the same custom ESP-NOW protocol, letting them form a private, router-free mesh. And because each device brings its own capabilities to that mesh, they can pool their data and work together — turning a scattered collection of chips into one system you can monitor from a single dashboard.
+You compile and flash each ESP32 chip to fit a specific job: a smart-home sensor, a Smart Glasses companion gadget made to live in your pocket or backpack, a headless mesh node, a camera node that captures photos and beams them across the mesh, and many more. No matter what feature set a device is built for, every one of them speaks the same custom ESP-NOW protocol, letting them form a private, router-free mesh. And because each device brings its own capabilities to that mesh, they can pool their data and work together - turning a scattered collection of chips into one system you can monitor from a single dashboard.
 
-On any single device, control works the same way no matter how you reach it: one command system — the CLI — issued over USB serial, a browser, the on-device screen + gamepad, Bluetooth, voice, or another node on the mesh. Same commands, same permission checks, every way in.
+On any single device, control works the same way no matter how you reach it: one command system - the CLI - issued over USB serial, a browser, the on-device screen + gamepad, Bluetooth, voice, or another node on the mesh. Same commands, same permission checks, every way in.
 
 > Built on **ESP-IDF** (not Arduino IDE). Runs on the **Seeed XIAO ESP32-S3**, **Unexpected Maker FeatherS3**, **Adafruit Feather ESP32**, and several other ESP32 / ESP32-S3 boards.
 
