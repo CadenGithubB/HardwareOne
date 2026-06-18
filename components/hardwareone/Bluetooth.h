@@ -138,8 +138,9 @@ bool isBLEConnected();
 void disconnectBLE();
 uint32_t getBLEConnectionDuration();
 
-// Send response back to connected client
-bool sendBLEResponse(const char* data, size_t len);
+// Send response back to connected client. blocking=false makes the secure-channel send
+// try-lock (best-effort; used by the debug console mirror so it never stalls the debug task).
+bool sendBLEResponse(const char* data, size_t len, bool blocking = true);
 
 // Send response to a specific BLE connection (preferred for interactive CLI)
 bool sendBLEResponseToConn(uint16_t connId, const char* data, size_t len);
@@ -213,7 +214,7 @@ inline void stopBLEAdvertising() {}
 inline bool isBLEConnected() { return false; }
 inline void disconnectBLE() {}
 inline uint32_t getBLEConnectionDuration() { return 0; }
-inline bool sendBLEResponse(const char*, size_t) { return false; }
+inline bool sendBLEResponse(const char*, size_t, bool = true) { return false; }
 inline bool sendBLEResponseToConn(uint16_t, const char*, size_t) { return false; }
 inline void bleClearConnectionByConnId(uint16_t) {}
 inline void bleSessionTick() {}

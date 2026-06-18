@@ -495,11 +495,20 @@ inline String getCapabilityListLong(uint32_t mask, const CapabilityName* names) 
 // Per-device message-ring depth, per direction, based on available memory.
 // PeerMessageHistory holds TWO rings of this size (received + sent), and each
 // slot is a ReceivedTextMessage (~316 B). So per-peer cost ≈ 2 * N * 316 B:
-//   PSRAM  : N=100 → ~63 KB/peer (in PSRAM — cheap).
+//   PSRAM  : N=250 → ~154 KB/peer (in PSRAM — cheap on the 8 MB part). Capped at
+//            250 (not 256) because head/tail/count below are uint8_t (max 255).
 //   no-PSRAM: N=16 → ~10 KB/peer (in internal DRAM — tight; raised from 5 on
 //             request to keep a more useful local history on plain ESP32 boards).
+// PSRAM depth was raised 100 → 250 so a remote command's streamed output (a
+// memreport is ~88 individual records) survives long enough to be fully paged
+// over the slow BLE pull WITHOUT the ring wrapping and evicting unread records
+// mid-pull. This is a stopgap: it holds ~2-3 reports of headroom, but the ring
+// can still wrap if many reports pile up, so the app must SERIALIZE — run one
+// remote command at a time and finish paging its result before issuing another
+// (see docs/BLE_SECURE_CHANNEL_FRAMING.md). The race-free fix is a per-reqId
+// snapshot buffer; this avoids that larger change for now.
 #if CONFIG_SPIRAM_SUPPORT || CONFIG_ESP32S3_SPIRAM_SUPPORT
-  #define MESSAGES_PER_DEVICE 100
+  #define MESSAGES_PER_DEVICE 250
 #else
   #define MESSAGES_PER_DEVICE 16
 #endif
@@ -879,7 +888,10 @@ struct EspNowState {
     uint8_t srcMac[6];
     char deviceName[32];
     char content[256];
-    bool used;  // Slot contains valid data
+    uint32_t cmdMsgId;  // originating command's msgId (STREAM frame header). Stored
+                        // as the record's reqId so remote command output correlates
+                        // to its command. 0 = legacy startstream (unsolicited telemetry).
+    bool used;          // Slot contains valid data
   };
   StreamQueueEntry* streamQueue;  // ps_alloc'd ring of streamQueueCap entries
   int streamQueueCap;             // slot count (power of 2): 16 or 64

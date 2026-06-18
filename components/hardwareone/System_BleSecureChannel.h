@@ -76,7 +76,9 @@ BleScResult bleScHandleInbound(uint16_t connId, const uint8_t* data, size_t len,
 
 // Encrypt a plaintext reply as one or more DATA frames and notify them to the
 // client. Chunks to fit the negotiated MTU. Returns false if not established.
-bool bleScSendEncrypted(uint16_t connId, const char* plaintext, size_t len);
+// blocking=false try-locks the tx mutex (best-effort console mirror); true waits (command
+// results). See the .cpp for why the debug path must not block.
+bool bleScSendEncrypted(uint16_t connId, const char* plaintext, size_t len, bool blocking = true);
 
 #endif // ENABLE_BLUETOOTH
 #endif // SYSTEM_BLE_SECURE_CHANNEL_H

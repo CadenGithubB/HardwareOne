@@ -448,6 +448,26 @@ class CmdStatusCallbacks : public BLECharacteristicCallbacks {
   }
 };
 
+// Result of the most recent notify() on the response characteristic. notify() is
+// fire-and-forget at the ATT layer, but the Bluedroid wrapper surfaces the underlying
+// esp_ble_gatts_send_indicate() result through onStatus(): SUCCESS_NOTIFY when the packet
+// was accepted into the controller's ACL tx buffers, ERROR_GATT (errRc = ESP_ERR_NO_MEM /
+// congestion) when the buffers were full and the frame was DROPPED. Without this hook the
+// caller can't tell a sent frame from a lost one — which is exactly how big results
+// (memreport, espnowmessages json pages) silently lost fragments. bleRawNotify() reads
+// this to apply bounded backpressure instead of dropping. Installed on pCmdResponseChar
+// in initBluetooth().
+enum class BleNotifyResult : uint8_t { PENDING, OK, CONGESTED, TERMINAL };
+static volatile BleNotifyResult gLastNotifyResult = BleNotifyResult::PENDING;
+
+class CmdResponseCallbacks : public BLECharacteristicCallbacks {
+  void onStatus(BLECharacteristic* /*c*/, Status s, uint32_t /*code*/) override {
+    if (s == Status::SUCCESS_NOTIFY)   gLastNotifyResult = BleNotifyResult::OK;
+    else if (s == Status::ERROR_GATT)  gLastNotifyResult = BleNotifyResult::CONGESTED;  // tx buffers full → retryable
+    else                               gLastNotifyResult = BleNotifyResult::TERMINAL;   // no client / notify disabled → don't spin
+  }
+};
+
 // =============================================================================
 // COMMAND PROCESSING
 // =============================================================================
@@ -465,10 +485,44 @@ struct BleLoginAsyncJob {
   char user[64];
 };
 
+// --- BLE TX trace (debugging) ------------------------------------------------
+// Dumps the EXACT device->app payload to serial/web/file but NOT back over BLE
+// (routing it over BLE would feed the very pipe we're tracing and recurse). Chunks
+// to < DEBUG_MSG_SIZE so the full content reaches serial untruncated — copy the
+// "[BLE-TX] === BEGIN ===" .. "=== END ===" block to see what the device actually sent.
+extern void broadcastOutputCore_Routed(const char* text, size_t len, uint8_t route);
+
+// Gate for the verbose BLE TX traces — on only when `debugbluetoothdata` is set
+// (DEBUG_BLE_DATA). Non-static so System_BleSecureChannel.cpp's per-frame [BLE-SC]
+// traces share the same flag. The traces themselves still route NOT-to-BLE (0x2F)
+// to avoid feeding the very pipe they trace; this just makes them off by default.
+bool bleDataDebugEnabled() { return isDebugFlagSet(DEBUG_BLE_DATA); }
+
+static void bleTxTrace(const char* tag, uint16_t connId, const char* data, size_t len) {
+  if (!bleDataDebugEnabled()) return;
+  const uint8_t NOBLE = (uint8_t)(MSG_ROUTE_ALL & ~MSG_ROUTE_BLE);
+  size_t frags = (len + 194) / 195; if (frags == 0) frags = 1;   // 195 = SC_MAX_PAY_FRAME
+  char hdr[160];
+  int n = snprintf(hdr, sizeof(hdr),
+                   "[BLE-TX] %s connId=%u len=%zu bleFrags=%zu === BEGIN ===",
+                   tag, (unsigned)connId, len, frags);
+  if (n > 0) broadcastOutputCore_Routed(hdr, (size_t)n, NOBLE);
+  size_t off = 0; int idx = 0; char line[220];
+  while (off < len) {
+    size_t c = (len - off < 180) ? (len - off) : 180;
+    int m = snprintf(line, sizeof(line), "[BLE-TX#%d] %.*s", idx, (int)c, data + off);
+    if (m > 0) broadcastOutputCore_Routed(line, (size_t)m, NOBLE);
+    off += c; idx++;
+  }
+  const char* end = "[BLE-TX] === END ===";
+  broadcastOutputCore_Routed(end, strlen(end), NOBLE);
+}
+
 // Async callback for BLE command results - called on cmd_exec task
 static void bleCommandResultCallback(bool ok, const char* result, void* userData) {
   uint16_t connId = (uint16_t)(uintptr_t)userData;
   BLE_DEBUGF(DEBUG_BLE_DATA, "Async command result: ok=%d len=%zu connId=%u", ok, strlen(result), connId);
+  bleTxTrace("result", connId, result ? result : "", result ? strlen(result) : 0);
   sendBLEResponseToConn(connId, result, strlen(result));
 }
 
@@ -886,6 +940,7 @@ bool initBluetooth() {
     BLECharacteristic::PROPERTY_NOTIFY
   );
   pCmdResponseChar->addDescriptor(new BLE2902());  // Required for notifications
+  pCmdResponseChar->setCallbacks(new CmdResponseCallbacks());  // onStatus → notify backpressure
   
   // Status characteristic (read - connection info)
   pCmdStatusChar = pCommandService->createCharacteristic(
@@ -1089,15 +1144,49 @@ uint32_t getBLEConnectionDuration() {
 // through this; it does NOT encrypt. Everything that is *output* (results, streamed
 // CLI text) must go through sendBLEResponse()/sendBLEResponseToConn() instead, which
 // encrypt when a channel is up.
+//
+// Bounded backpressure: a single notify() silently drops its frame when the controller's
+// ACL tx buffers are full (the common case mid-burst). We detect that via onStatus
+// (CONGESTED) and retry after yielding ~one connection interval, so bursts ride out
+// transient congestion instead of losing fragments. The retry budget caps total wait so a
+// stalled/dead link can never hang the calling task — under *sustained* congestion we give
+// up and return false, and the caller reports the failure (never silent). vTaskDelay yields
+// the CPU, so waiting costs latency, not cycles. In the common (uncongested) case the first
+// notify succeeds and there is zero added delay.
 bool bleRawNotify(const char* data, size_t len) {
   if (!isBLEConnected() || !pCmdResponseChar) {
     BLE_DEBUGF(DEBUG_BLE_DATA, "bleRawNotify dropped (connected=%d char=%p)",
                isBLEConnected(), (void*)pCmdResponseChar);
     return false;
   }
-  pCmdResponseChar->setValue((uint8_t*)data, len);
-  pCmdResponseChar->notify();
-  gBLEState->responsesSent++;
+
+  const int        BLE_NOTIFY_MAX_TRIES = 6;
+  const TickType_t BLE_NOTIFY_BACKOFF   = pdMS_TO_TICKS(15);  // ~one conn interval; 6*15 = ~90ms cap
+
+  bool sent = false;
+  int  tries = 0;
+  for (int attempt = 0; attempt < BLE_NOTIFY_MAX_TRIES; attempt++) {
+    tries = attempt + 1;
+    gLastNotifyResult = BleNotifyResult::PENDING;
+    pCmdResponseChar->setValue((uint8_t*)data, len);
+    pCmdResponseChar->notify();                 // fires onStatus synchronously on this task
+    BleNotifyResult r = gLastNotifyResult;
+    // PENDING means onStatus never ran (no callbacks / unexpected path) — assume delivered
+    // rather than spin. OK = accepted into tx buffers.
+    if (r == BleNotifyResult::OK || r == BleNotifyResult::PENDING) { sent = true; break; }
+    if (r == BleNotifyResult::TERMINAL) break;  // no client / disabled — retrying won't help
+    if (!isBLEConnected()) break;               // link dropped mid-retry
+    vTaskDelay(BLE_NOTIFY_BACKOFF);             // CONGESTED — let the controller drain, then retry
+  }
+
+  // Trace only when interesting (a retry happened or we gave up) so it doesn't spam.
+  if ((!sent || tries > 1) && bleDataDebugEnabled()) {
+    char b[120];
+    int n = snprintf(b, sizeof(b), "[BLE-NOTIFY] len=%zu sent=%d tries=%d", len, sent ? 1 : 0, tries);
+    if (n > 0) broadcastOutputCore_Routed(b, (size_t)n, (uint8_t)(MSG_ROUTE_ALL & ~MSG_ROUTE_BLE));
+  }
+
+  if (sent && gBLEState) gBLEState->responsesSent++;
 
   #if ENABLE_OLED_DISPLAY
   {
@@ -1106,7 +1195,7 @@ bool bleRawNotify(const char* data, size_t len) {
     bleAddMessageToHistory(tagged);
   }
   #endif
-  return true;
+  return sent;
 }
 
 // Output chokepoint for broadcast/streamed device output (the debug-drain "path A" via
@@ -1114,13 +1203,13 @@ bool bleRawNotify(const char* data, size_t len) {
 // connected client, encrypt+frame the output for it — so STREAMED CLI output (menus,
 // help, reports) is confidential, not just the short command result. In secure-required
 // mode with no established channel, DROP rather than leak plaintext over the air.
-bool sendBLEResponse(const char* data, size_t len) {
+bool sendBLEResponse(const char* data, size_t len, bool blocking) {
   if (!data || len == 0) return false;
   if (gBLEState) {
     for (int i = 0; i < BLE_MAX_CONNECTIONS; i++) {
       if (gBLEState->connections[i].active &&
           bleScEstablished(gBLEState->connections[i].connId)) {
-        return bleScSendEncrypted(gBLEState->connections[i].connId, data, len);
+        return bleScSendEncrypted(gBLEState->connections[i].connId, data, len, blocking);
       }
     }
   }

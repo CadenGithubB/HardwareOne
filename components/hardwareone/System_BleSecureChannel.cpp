@@ -10,6 +10,7 @@
 #include <mbedtls/pkcs5.h>   // PBKDF2 on ESP32 HW-accelerated SHA-256 (CONFIG_MBEDTLS_HARDWARE_SHA)
 #include <string.h>
 #include <freertos/FreeRTOS.h>
+#include <freertos/task.h>     // vTaskDelay — inter-fragment pacing
 #include <freertos/semphr.h>
 
 // Raw notify into the RESPONSE characteristic (binary-safe; defined in Bluetooth.cpp).
@@ -65,6 +66,7 @@ struct ScConn {
   uint8_t  kD2C[32];     // device -> app
   uint64_t rxCtr;        // last accepted c2d counter (strictly increasing)
   uint64_t txCtr;        // next d2c counter to emit
+  uint16_t txMsgId;      // d2c application message id (increments per bleScSendEncrypted call)
 };
 static ScConn gSc[BLE_MAX_CONNECTIONS];
 
@@ -204,21 +206,81 @@ static size_t scBuildData(ScConn* c, const uint8_t* pt, size_t len, uint8_t* buf
   return 9 + len + 16;
 }
 
-bool bleScSendEncrypted(uint16_t connId, const char* plaintext, size_t len) {
+// Per-frame application framing header (inside the encrypted plaintext, device->app only).
+// Lets the app reassemble multi-frame messages and DETECT loss: the secure channel's d2c
+// counter already flags a dropped frame as a gap, but without this header the app can't tell
+// which message is incomplete or where the next one begins. With it, every frame self-
+// describes (msgId, fragIdx, fragCount), so a lost fragment leaves an identifiable hole — the
+// app discards that msgId and re-requests WITHOUT advancing its cursor, instead of silently
+// parsing a short/garbled page and stalling. See docs/BLE_SECURE_CHANNEL_FRAMING.md for the
+// wire format the app must implement.
+//   layout: [ver(1)=0x01][msgId lo][msgId hi][fragIdx(1)][fragCount(1)][payload...]
+static const uint8_t  SC_FRAME_VER     = 0x01;
+static const size_t   SC_APP_HDR       = 5;
+static const size_t   SC_MAX_PAY_FRAME = SC_MAX_PT_PER_FRAME - SC_APP_HDR;  // 195 payload bytes/frame
+
+// Inter-fragment pacing. notify() only queues into the controller's tx buffers; firing a
+// multi-fragment message back-to-back (~2ms apart) overruns what a connection event can
+// carry and Android silently drops the surplus notifications — so the app never reassembles
+// the page and re-requests it. Spacing fragments at ~one connection interval lets the phone
+// keep up. 30ms matches Android's default (unforced) ~30ms interval — we deliberately do NOT
+// request a faster interval because WiFi/ESP-NOW share this radio (coexistence). Applied
+// between frames only (single-frame messages — the common case — pay nothing).
+static const TickType_t SC_FRAME_PACING = pdMS_TO_TICKS(30);
+
+bool bleScSendEncrypted(uint16_t connId, const char* plaintext, size_t len, bool blocking) {
   // Take the tx mutex for the WHOLE chunked message so its frames stay contiguous with
   // monotonic counters even when path A and path B send concurrently from two tasks.
-  if (gScTxMutex) xSemaphoreTake(gScTxMutex, portMAX_DELAY);
+  // blocking=false is the best-effort console-mirror path (the single debugOutputTask): if a
+  // paced command result currently holds the mutex (hundreds of ms with pacing), skip rather
+  // than stall the debug task — stalling it would back up gDebugOutputQueue and starve
+  // serial/web/OLED. Command results pass blocking=true (must not drop).
+  if (gScTxMutex && xSemaphoreTake(gScTxMutex, blocking ? portMAX_DELAY : 0) != pdTRUE) return false;
   ScConn* c = scFind(connId);
   if (!c || c->phase != 2) { if (gScTxMutex) xSemaphoreGive(gScTxMutex); return false; }
-  uint8_t frame[9 + SC_MAX_PT_PER_FRAME + 16];
-  size_t off = 0;
+
+  // fragCount is carried in one byte, so a single framed message tops out at 255 fragments
+  // (~49 KB). Callers that emit more must page (the CLI already pages espnowmessages json).
+  size_t fragCount = (len + SC_MAX_PAY_FRAME - 1) / SC_MAX_PAY_FRAME;
+  if (fragCount == 0) fragCount = 1;             // a zero-length message still sends one frame
+  if (fragCount > 255) { if (gScTxMutex) xSemaphoreGive(gScTxMutex); return false; }
+  uint16_t msgId = c->txMsgId++;
+
+  // BLE TX trace (debugging): gated behind `debugbluetoothdata` (bleDataDebugEnabled),
+  // routed to serial/web/file but NOT BLE (0x2F = MSG_ROUTE_ALL & ~MSG_ROUTE_BLE) so the
+  // trace can't feed back into the channel we're tracing.
+  extern void broadcastOutputCore_Routed(const char* text, size_t len, uint8_t route);
+  extern bool bleDataDebugEnabled();
+  const bool scTrace = bleDataDebugEnabled();
+  if (scTrace) { char b[100];
+    int n = snprintf(b, sizeof(b), "[BLE-SC] send msgId=%u len=%zu frags=%zu", (unsigned)msgId, len, fragCount);
+    if (n > 0) broadcastOutputCore_Routed(b, (size_t)n, 0x2F); }
+
+  uint8_t framePt[SC_MAX_PT_PER_FRAME];          // app-header + payload (pre-encryption)
+  uint8_t frame[9 + SC_MAX_PT_PER_FRAME + 16];   // ctr + ciphertext + tag (on the wire)
+  size_t  off = 0;
+  uint8_t idx = 0;
   bool ok = true;
   do {
-    size_t chunk = (len - off < SC_MAX_PT_PER_FRAME) ? (len - off) : SC_MAX_PT_PER_FRAME;
-    size_t flen = scBuildData(c, (const uint8_t*)plaintext + off, chunk, frame);
-    if (!bleRawNotify((const char*)frame, flen)) { ok = false; break; }
+    size_t chunk = (len - off < SC_MAX_PAY_FRAME) ? (len - off) : SC_MAX_PAY_FRAME;
+    framePt[0] = SC_FRAME_VER;
+    framePt[1] = (uint8_t)(msgId & 0xFF);
+    framePt[2] = (uint8_t)((msgId >> 8) & 0xFF);
+    framePt[3] = idx;
+    framePt[4] = (uint8_t)fragCount;
+    if (chunk) memcpy(framePt + SC_APP_HDR, (const uint8_t*)plaintext + off, chunk);
+    size_t flen = scBuildData(c, framePt, SC_APP_HDR + chunk, frame);
+    bool nok = bleRawNotify((const char*)frame, flen);   // bounded backpressure lives in bleRawNotify
+    if (scTrace) { char b[110];
+      int n = snprintf(b, sizeof(b), "[BLE-SC]  frame %u/%u payload=%zu wire=%zu notify=%s",
+                       (unsigned)idx, (unsigned)fragCount, chunk, flen, nok ? "ok" : "FAIL");
+      if (n > 0) broadcastOutputCore_Routed(b, (size_t)n, 0x2F); }
+    if (!nok) { ok = false; break; }
     off += chunk;
+    idx++;
+    if (off < len) vTaskDelay(SC_FRAME_PACING);   // pace fragments so the phone doesn't drop them
   } while (off < len);
+  sodium_memzero(framePt, sizeof(framePt));
   sodium_memzero(frame, sizeof(frame));
   if (gScTxMutex) xSemaphoreGive(gScTxMutex);
   return ok;

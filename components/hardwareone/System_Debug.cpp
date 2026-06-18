@@ -76,8 +76,8 @@ static volatile unsigned long gHelpSuppressedCount = 0;
 #if ENABLE_BLUETOOTH
 static String gBLEOutputBuffer;
 static unsigned long gBLELastFlush = 0;
-static const uint32_t BLE_OUTPUT_FLUSH_INTERVAL_MS = 500;  // Send to BLE every 500ms
-static const size_t BLE_OUTPUT_BUFFER_MAX = 512;            // Max chars to buffer (BLE MTU limited)
+static const uint32_t BLE_OUTPUT_FLUSH_INTERVAL_MS = 150;   // Flush to BLE every 150ms (snappier; sendBLEResponse fragments)
+static const size_t BLE_OUTPUT_BUFFER_MAX = 1024;          // Coalesce up to ~1KB per flush (fragmented by the secure channel)
 #endif
 
 // G2 glasses output buffer (accumulates messages for periodic display)
@@ -289,17 +289,28 @@ void debugOutputTask(void* parameter) {
       #if ENABLE_BLUETOOTH
       if ((msg->routing & MSG_ROUTE_BLE) && (gOutputFlags & OUTPUT_BLE) &&
           isBLEConnected() && bleHasAuthenticatedSession()) {
-        size_t msgLen = strlen(msg->text);
+        size_t msgLen = strlen(msg->text);   // <= DEBUG_MSG_SIZE (256) < BLE_OUTPUT_BUFFER_MAX
         if (gBLEOutputBuffer.length() + msgLen + 2 < BLE_OUTPUT_BUFFER_MAX) {
           gBLEOutputBuffer += msg->text;
           gBLEOutputBuffer += "\n";
         }
+        // NON-BLOCKING flush: never stall this single debugOutputTask on the secure-channel tx
+        // mutex. A paced multi-fragment command result can hold that mutex for hundreds of ms;
+        // blocking here would stop draining gDebugOutputQueue and starve serial/web/OLED/file.
+        // If the tx is busy we keep buffering and retry on the next message/interval; only when
+        // the buffer is also full do we drop (best-effort console mirror — history is
+        // authoritative). The "[output] dropped" marker still surfaces any loss.
         unsigned long now = millis();
-        if (gBLEOutputBuffer.length() >= BLE_OUTPUT_BUFFER_MAX - 50 ||
-            (now - gBLELastFlush >= BLE_OUTPUT_FLUSH_INTERVAL_MS && gBLEOutputBuffer.length() > 0)) {
-          sendBLEResponse(gBLEOutputBuffer.c_str(), gBLEOutputBuffer.length());
-          gBLEOutputBuffer = "";
-          gBLELastFlush = now;
+        bool full = gBLEOutputBuffer.length() >= BLE_OUTPUT_BUFFER_MAX - DEBUG_MSG_SIZE;
+        bool due  = (now - gBLELastFlush >= BLE_OUTPUT_FLUSH_INTERVAL_MS);
+        if (gBLEOutputBuffer.length() > 0 && (full || due)) {
+          if (sendBLEResponse(gBLEOutputBuffer.c_str(), gBLEOutputBuffer.length(), /*blocking=*/false)) {
+            gBLEOutputBuffer = "";
+            gBLELastFlush = now;
+          } else if (full) {
+            gBLEOutputBuffer = "";   // tx busy and buffer full → drop to bound growth
+            gBLELastFlush = now;
+          }
         }
       }
       #endif
