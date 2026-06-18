@@ -283,6 +283,17 @@ static esp_err_t handleEspNowMessages(httpd_req_t* req) {
     if (err != ESP_OK) break;
     err = webEspnowSendChunkf(req, ",\"type\":%d", (int)msg.msgType);
     if (err != ESP_OK) break;
+    // Direction: true = we sent it (now in the shared sent[] history), false =
+    // received. The client renders sent on the right and de-dupes its own
+    // optimistic bubble by reqId; without this flag a sent echo would wrongly
+    // render as a received message.
+    err = webEspnowSendChunkf(req, ",\"sent\":%s", msg.isSent ? "true" : "false");
+    if (err != ESP_OK) break;
+    // Durable per-message delivery state (0 pending,1 delivered,2 timeout,3 failed)
+    // so sent rows render Delivered even for messages sent from another interface
+    // or after a reload — not only freshly-sent web bubbles via the deliveries[] flip.
+    err = webEspnowSendChunkf(req, ",\"sendState\":%u", msg.sendState);
+    if (err != ESP_OK) break;
 
     err = webEspnowSendChunk(req, "}");
   }

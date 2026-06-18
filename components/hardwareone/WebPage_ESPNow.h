@@ -1347,7 +1347,7 @@ window.togglePane = function(paneId, btnId) {
       listDiv.innerHTML = '<div style="color:var(--muted);padding:12px;text-align:center">Requesting automations via ESP-NOW...</div>';
       var macHex = mac.replace(/:/g, '').toUpperCase();
       var filePath = '/espnow/received/' + macHex + '/automations.json';
-      hw.postFormText('/api/cli', { cmd: 'espnowfetch ' + mac + ' ' + u + ' ' + p + ' /system/automations.json' })
+      hw.postFormText('/api/cli', { cmd: 'espnowfetch ' + mac + ' ' + u + ' ' + p + ' "/system/automations.json"' })
       .then(function(resp) {
         var lower = (resp || '').toLowerCase();
         if (lower.indexOf('error') >= 0 || lower.indexOf('not initialized') >= 0) {
@@ -1506,8 +1506,10 @@ window.togglePane = function(paneId, btnId) {
         .catch(function() {})
         .finally(function() {
       
-      // Send browse command (sends V3 CMD: user:pass:files /path)
-      var cmd = 'espnowremote ' + mac + ' ' + u + ' ' + p + ' files ' + browsePath;
+      // Send browse command (sends V3 CMD: user:pass:files "/path"). The remote
+      // 'files' command requires the path in quotes (quoted-path standard), so
+      // quote it here — an unquoted path is rejected with "path must be in quotes".
+      var cmd = 'espnowremote ' + mac + ' ' + u + ' ' + p + ' files "' + browsePath + '"';
       hw.postFormText('/api/cli', { cmd: cmd })
       .then(function(text) {
         if (!text.includes('Remote command sent')) {
@@ -1776,7 +1778,8 @@ window.togglePane = function(paneId, btnId) {
         statusDiv.style.color = '#856404';
         statusDiv.textContent = 'Fetching ' + filename + ' from ' + mac + '...';
       }
-      var cmd = 'espnowfetch ' + mac + ' ' + u + ' ' + p + ' ' + remotePath;
+      // Quote the path — espnowfetch requires a quoted path (quoted-path standard).
+      var cmd = 'espnowfetch ' + mac + ' ' + u + ' ' + p + ' "' + remotePath + '"';
       hw.postFormText('/api/cli', { cmd: cmd }).then(function(text) {
         if (!text.includes('File fetch request sent') && !text.includes('Receiving file')) {
           if (statusDiv) {
@@ -3579,11 +3582,27 @@ window.togglePane = function(paneId, btnId) {
   // tagged piece/of. The device stores them as separate small records and never
   // reassembles — WE stitch here, client-side, where RAM is free. Single-frame
   // messages (of<=1) render immediately, exactly as before.
-  function renderIncoming(mac, text, partial) {
-    if (typeof window.appendLogLine === 'function') {
+  // sendState mirrors the device's SendStatusState: 0 pending, 1 delivered,
+  // 2 timeout/no-ACK, 3 failed. For SENT rows we render the durable state from
+  // the record (so it's right for messages sent elsewhere or after a reload) and
+  // tag the bubble with data-msg-id so the live deliveries[] flip can still
+  // upgrade pending → delivered within the tracker's window.
+  function renderMessage(mac, text, partial, isSent, sendState, reqId) {
+    if (typeof window.appendLogLine !== 'function') { console.error('[ESP-NOW] appendLogLine not available'); return; }
+    if (!isSent) {
       window.appendLogLine('log-' + mac, 'RECEIVED', partial ? (text + '  …(partial — some pieces missing)') : text, null);
-    } else {
-      console.error('[ESP-NOW] appendLogLine not available');
+      return;
+    }
+    var bubble = window.appendLogLine('log-' + mac, 'SENT', text, (sendState === 1) ? 'delivered' : 'sent');
+    if (!bubble) return;
+    if (reqId) bubble.setAttribute('data-msg-id', reqId);
+    if (sendState === 2 || sendState === 3) {
+      var sd = bubble.querySelector('.message-status');
+      if (sd) {
+        sd.innerHTML = (sendState === 2) ? '<span class="status-icon">✗</span>No ACK (timeout)'
+                                         : '<span class="status-icon">✗</span>Failed';
+        bubble.classList.add('message-error');
+      }
     }
   }
   function handleIncomingMessage(msg) {
@@ -3593,14 +3612,26 @@ window.togglePane = function(paneId, btnId) {
     var of = msg.of || 1;
     var piece = msg.piece || 1;
     var reqId = msg.reqId || 0;
-    if (of <= 1 || !reqId) { renderIncoming(mac, text, false); return; }  // not chunked
+    var isSent = !!msg.sent;
+    var sendState = msg.sendState || 0;
+    // Sent messages now come from the shared device history (so the OLED/BLE see
+    // our sends and we see theirs). If this is the polled echo of a message WE
+    // just sent from this browser, its optimistic bubble is already on screen
+    // tagged with data-msg-id — skip it so it doesn't double. A sent message with
+    // no matching bubble originated on another interface → render it as SENT.
+    if (isSent && reqId &&
+        document.querySelector('.message-bubble[data-msg-id="' + reqId + '"]')) {
+      return;
+    }
+    if (of <= 1 || !reqId) { renderMessage(mac, text, false, isSent, sendState, reqId); return; }  // not chunked
     var g = pendingGroups[reqId];
-    if (!g) { g = pendingGroups[reqId] = { of: of, mac: mac, parts: {}, count: 0, tick: pollTick }; }
+    if (!g) { g = pendingGroups[reqId] = { of: of, mac: mac, parts: {}, count: 0, tick: pollTick, isSent: isSent, sendState: sendState, reqId: reqId }; }
+    g.sendState = sendState;  // latest fragment's state (all share it once resolved)
     if (!(piece in g.parts)) { g.parts[piece] = text; g.count++; }
     if (g.count >= g.of) {  // all pieces in — join in order and render once
       var full = '';
       for (var k = 1; k <= g.of; k++) full += (g.parts[k] || '');
-      renderIncoming(g.mac, full, false);
+      renderMessage(g.mac, full, false, g.isSent, g.sendState, g.reqId);
       delete pendingGroups[reqId];
     }
   }
@@ -3613,7 +3644,7 @@ window.togglePane = function(paneId, btnId) {
       if (pollTick - g.tick > 20) {
         var full = '';
         for (var k = 1; k <= g.of; k++) full += (g.parts[k] || '[missing] ');
-        renderIncoming(g.mac, full, true);
+        renderMessage(g.mac, full, true, g.isSent, g.sendState, g.reqId);
         delete pendingGroups[id];
       }
     }
