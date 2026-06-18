@@ -4064,6 +4064,16 @@ static void v4h_file_end(const V4RxCtx& ctx) {
     }
 
     logFileTransferEvent((uint8_t*)sndMac, senderMacStr.c_str(), filename, MSG_FILE_RECV_SUCCESS);
+#if ENABLE_OLED_DISPLAY
+    {
+      // On-device confirmation for any inbound file (OLED FS_GET download, push, etc.).
+      // oledToastShow is thread-safe + self-marks dirty, so it surfaces regardless of
+      // which screen is showing.
+      char toastMsg[40];
+      snprintf(toastMsg, sizeof(toastMsg), "Received: %.28s", filename);
+      oledToastShow(toastMsg);
+    }
+#endif
     if (gEspNow) gEspNow->fileTransfersReceived++;
   } else {
     logFileTransferEvent((uint8_t*)sndMac, senderMacStr.c_str(), filename, MSG_FILE_RECV_FAILED);
@@ -4158,6 +4168,18 @@ static const V4OpcodeEntry kV4HandlerTable[] = {
   // want from us. REQ_PAIRED so unknown peers can't pollute our broadcast
   // gating (and to ensure peerIdentitySetSubscriptions finds the slot).
   { ESPNOW_V4_TYPE_SUBSCRIBE_UPDATE, V4_OPC_FLAG_REQ_PAIRED,                               v4h_subscribe_update  },
+  // Remote filesystem (FsList) is a BASE ESP-NOW capability — browse/stat/fetch a
+  // paired peer's files over an active encrypted session. NOT bond-gated (bonding
+  // piggybacks on it). Gated only by REQ_PAIRED + REQ_SESSION_ENC: any securely
+  // paired peer with a live session may enumerate/pull files (served under SYSTEM
+  // identity). Both REQ and REPLY/ACK rows live here so a requester whose own bond
+  // mode is off still accepts the peer's replies.
+  { ESPNOW_V4_TYPE_FS_LIST_REQ,      V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_fs_list_req       },
+  { ESPNOW_V4_TYPE_FS_LIST_REPLY,    V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_fs_list_reply     },
+  { ESPNOW_V4_TYPE_FS_STAT_REQ,      V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_fs_stat_req       },
+  { ESPNOW_V4_TYPE_FS_STAT_REPLY,    V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_fs_stat_reply     },
+  { ESPNOW_V4_TYPE_FS_GET_REQ,       V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_fs_get_req        },
+  { ESPNOW_V4_TYPE_FS_GET_ACK,       V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_fs_get_ack        },
 #if ENABLE_BONDED_MODE
   { ESPNOW_V4_TYPE_BOND_HEARTBEAT,   V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_bond_heartbeat    },
   { ESPNOW_V4_TYPE_STREAM_CTRL,      V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_stream_ctrl       },
@@ -4169,12 +4191,7 @@ static const V4OpcodeEntry kV4HandlerTable[] = {
   { ESPNOW_V4_TYPE_BOND_STATUS_REQ,  V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_bond_status_req   },
   { ESPNOW_V4_TYPE_BOND_STATUS_RESP, V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_bond_status_resp  },
   { ESPNOW_V4_TYPE_MANIFEST_REQ,     V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_manifest_req      },
-  { ESPNOW_V4_TYPE_FS_LIST_REQ,      V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_fs_list_req       },
-  { ESPNOW_V4_TYPE_FS_LIST_REPLY,    V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_fs_list_reply     },
-  { ESPNOW_V4_TYPE_FS_STAT_REQ,      V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_fs_stat_req       },
-  { ESPNOW_V4_TYPE_FS_STAT_REPLY,    V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_fs_stat_reply     },
-  { ESPNOW_V4_TYPE_FS_GET_REQ,       V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_fs_get_req        },
-  { ESPNOW_V4_TYPE_FS_GET_ACK,       V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_fs_get_ack        },
+  // (FS_LIST / FS_STAT / FS_GET rows moved above — now base ESP-NOW, not bond-gated.)
 #endif
 };
 static constexpr size_t kV4HandlerTableSize = sizeof(kV4HandlerTable) / sizeof(kV4HandlerTable[0]);
@@ -12980,6 +12997,11 @@ const char* cmd_espnow_send(const String& argsInput) {
     snprintf(getDebugBuffer(), 1024, "Error: encrypted send failed (clerk timeout or queue full).");
     return getDebugBuffer();
   }
+  // Record into this peer's shared sent[] history so EVERY interface (web/OLED/
+  // BLE/G2) shows the same outgoing message — not just the UI that sent it. msgId
+  // lets the web de-dupe its own optimistic bubble and lets on-device UIs poll
+  // delivery status. Recorded on accept (queued sends reuse this msgId on drain).
+  storeSentMessageInPeerHistory(mac, message.c_str(), msgId);
   if (jsonMode) {
     if (!ensureDebugBuffer()) return "{\"schema\":1,\"ok\":true}";
     snprintf(getDebugBuffer(), 1024, "{\"schema\":1,\"ok\":true,\"msgId\":%lu}", (unsigned long)msgId);
@@ -14101,6 +14123,8 @@ const char* cmd_espnow_messages(const String& argsInput) {
       o["enc"]  = msgs[i].encrypted;
       o["ts"]   = (unsigned long)msgs[i].timestamp;
       o["type"] = (int)msgs[i].msgType;
+      o["sent"] = msgs[i].isSent;          // direction: true = we sent it, false = received
+      o["sendState"] = msgs[i].sendState;  // sent rows: 0 pending,1 delivered,2 timeout,3 failed
     }
     static char* jbuf = nullptr;
     if (!jbuf) jbuf = (char*)ps_alloc(32768, AllocPref::PreferPSRAM, "espnow.messages.json");
@@ -14528,6 +14552,44 @@ PeerMessageHistory* findOrCreatePeerHistory(uint8_t* peerMac) {
 }
 
 // Store a message in the per-device buffer
+// Fill one ring slot and advance head/tail/count. Shared by the received-store
+// and sent-store paths so the two rings behave identically (only the ring +
+// direction differ). `keyMac` becomes the record's senderMac — the conversation
+// key reported as the JSON `mac` (the peer on both directions); `fragment`/
+// `fragLen` is ONE fragment's text.
+static void espnowStoreInRing(
+  ReceivedTextMessage* ring, uint8_t& head, uint8_t& tail, uint8_t& count,
+  const uint8_t* keyMac, const char* name,
+  const char* fragment, size_t fragLen,
+  bool encrypted, LogMessageType msgType,
+  uint32_t reqId, uint8_t piece, uint8_t pieceTotal, bool isSent
+) {
+  ReceivedTextMessage& slot = ring[head];
+
+  memcpy(slot.senderMac, keyMac, 6);
+  strncpy(slot.senderName, name ? name : "", 31);
+  slot.senderName[31] = '\0';
+
+  size_t copyLen = fragLen < sizeof(slot.message) - 1 ? fragLen : sizeof(slot.message) - 1;
+  memcpy(slot.message, fragment, copyLen);
+  slot.message[copyLen] = '\0';
+
+  slot.timestamp = millis();
+  slot.encrypted = encrypted;
+  slot.seqNum = ++gEspNow->globalMessageSeqNum;
+  slot.reqId = reqId;
+  slot.piece = piece;
+  slot.pieceTotal = pieceTotal;
+  slot.msgType = msgType;
+  slot.active = true;
+  slot.isSent = isSent;
+  slot.sendState = 0;  // SEND_STATUS_PENDING; terminal state stamped later for sent rows
+
+  head = (head + 1) % MESSAGES_PER_DEVICE;
+  if (count < MESSAGES_PER_DEVICE) count++;       // grow until full
+  else tail = (tail + 1) % MESSAGES_PER_DEVICE;   // then drop oldest
+}
+
 bool storeMessageInPeerHistory(
   uint8_t* peerMac,
   const char* peerName,
@@ -14539,46 +14601,63 @@ bool storeMessageInPeerHistory(
   uint8_t pieceTotal
 ) {
   if (!gEspNow) return false;
-  
+
   PeerMessageHistory* history = findOrCreatePeerHistory(peerMac);
   if (!history) {
     broadcastOutput("[ESP-NOW] ERROR: No free peer history slots");
     return false;
   }
-  
-  // Get the next slot in the ring buffer
-  ReceivedTextMessage& slot = history->messages[history->head];
-  
-  // Copy data
-  memcpy(slot.senderMac, peerMac, 6);
-  strncpy(slot.senderName, peerName, 31);
-  slot.senderName[31] = '\0';
-  
-  size_t msgLen = strlen(message);
-  size_t copyLen = msgLen < sizeof(slot.message) - 1 ? msgLen : sizeof(slot.message) - 1;
-  memcpy(slot.message, message, copyLen);
-  slot.message[copyLen] = '\0';
-  
-  slot.timestamp = millis();
-  slot.encrypted = encrypted;
-  slot.seqNum = ++gEspNow->globalMessageSeqNum;
-  slot.reqId = reqId;
-  slot.piece = piece;
-  slot.pieceTotal = pieceTotal;
-  slot.msgType = msgType;
-  slot.active = true;
-  
-  // Advance head pointer
-  history->head = (history->head + 1) % MESSAGES_PER_DEVICE;
-  
-  // If buffer is full, advance tail (drop oldest message)
-  if (history->count < MESSAGES_PER_DEVICE) {
-    history->count++;
-  } else {
-    history->tail = (history->tail + 1) % MESSAGES_PER_DEVICE;
-  }
-  
+
+  espnowStoreInRing(history->messages, history->head, history->tail, history->count,
+                    peerMac, peerName, message, strlen(message),
+                    encrypted, msgType, reqId, piece, pieceTotal, /*isSent=*/false);
   return true;
+}
+
+bool storeSentMessageInPeerHistory(uint8_t* peerMac, const char* message, uint32_t msgId) {
+  if (!gEspNow || !message) return false;
+
+  PeerMessageHistory* history = findOrCreatePeerHistory(peerMac);
+  if (!history) {
+    broadcastOutput("[ESP-NOW] ERROR: No free peer history slots");
+    return false;
+  }
+
+  // Split into ≤200 B fragments sharing msgId — mirrors how received chunked text
+  // is stored, so the collapse view reassembles sent the same way and long sends
+  // aren't truncated. A short message (the common case) is a single 1-of-1 piece.
+  const size_t FRAG = 200;  // on-the-wire fragment payload cap (slot holds 256)
+  size_t total = strlen(message);
+  uint8_t pieceTotal = (total <= FRAG) ? 1 : (uint8_t)((total + FRAG - 1) / FRAG);
+  for (uint8_t p = 0; p < pieceTotal; p++) {
+    size_t off = (size_t)p * FRAG;
+    size_t len = (total - off) < FRAG ? (total - off) : FRAG;
+    // senderMac = peer (conversation key); name empty (sent rows show delivery
+    // status, not a sender name); sends are always encrypted post-2026.
+    espnowStoreInRing(history->sent, history->sentHead, history->sentTail, history->sentCount,
+                      peerMac, "", message + off, len,
+                      /*encrypted=*/true, MSG_TEXT, msgId, (uint8_t)(p + 1), pieceTotal, /*isSent=*/true);
+  }
+  return true;
+}
+
+void espnowUpdateSentDeliveryState(const uint8_t* peerMac, uint32_t msgId, uint8_t state) {
+  if (!gEspNow || !peerMac || msgId == 0) return;
+  // Don't create a peer slot just to update — only stamp if history exists.
+  PeerMessageHistory* history = nullptr;
+  for (int i = 0; i < gEspNow->peerHistoryCapacity; i++) {
+    if (gEspNow->peerMessageHistories[i].active &&
+        memcmp(gEspNow->peerMessageHistories[i].peerMac, peerMac, 6) == 0) {
+      history = &gEspNow->peerMessageHistories[i];
+      break;
+    }
+  }
+  if (!history) return;
+  // Stamp every fragment of this message (all share msgId in reqId).
+  for (int i = 0; i < MESSAGES_PER_DEVICE; i++) {
+    ReceivedTextMessage& slot = history->sent[i];
+    if (slot.active && slot.isSent && slot.reqId == msgId) slot.sendState = state;
+  }
 }
 
 // Log a file transfer event to the message buffer
@@ -14622,28 +14701,43 @@ void logFileTransferEvent(
   BROADCAST_PRINTF("[ESP-NOW] %s: %s", deviceName.c_str(), message);
 }
 
-// Get all messages for a specific peer (for web UI API)
+// Get all messages for a specific peer (for web UI API). Merges the received and
+// sent rings into one seqNum-ordered timeline; each record's isSent gives direction.
 int getPeerMessages(uint8_t* peerMac, ReceivedTextMessage* outMessages, int maxMessages, uint32_t sinceSeq) {
   if (!gEspNow || !outMessages) return 0;
-  
+
   PeerMessageHistory* history = findOrCreatePeerHistory(peerMac);
-  if (!history || history->count == 0) return 0;
-  
+  if (!history) return 0;
+
   int copied = 0;
-  
-  // Walk through ring buffer from tail to head
+
+  // Received ring (tail → head)
   for (int i = 0; i < history->count && copied < maxMessages; i++) {
     uint8_t idx = (history->tail + i) % MESSAGES_PER_DEVICE;
     ReceivedTextMessage& msg = history->messages[idx];
-    
-    if (!msg.active) continue;
-    if (msg.seqNum <= sinceSeq) continue;
-    
-    // Copy message to output array
-    memcpy(&outMessages[copied], &msg, sizeof(ReceivedTextMessage));
-    copied++;
+    if (!msg.active || msg.seqNum <= sinceSeq) continue;
+    memcpy(&outMessages[copied++], &msg, sizeof(ReceivedTextMessage));
   }
-  
+
+  // Sent ring (tail → head)
+  for (int i = 0; i < history->sentCount && copied < maxMessages; i++) {
+    uint8_t idx = (history->sentTail + i) % MESSAGES_PER_DEVICE;
+    ReceivedTextMessage& msg = history->sent[idx];
+    if (!msg.active || msg.seqNum <= sinceSeq) continue;
+    memcpy(&outMessages[copied++], &msg, sizeof(ReceivedTextMessage));
+  }
+
+  // Merge the two rings into one timeline by seqNum (insertion order = time order).
+  for (int i = 0; i < copied - 1; i++) {
+    for (int j = 0; j < copied - i - 1; j++) {
+      if (outMessages[j].seqNum > outMessages[j + 1].seqNum) {
+        ReceivedTextMessage temp = outMessages[j];
+        outMessages[j] = outMessages[j + 1];
+        outMessages[j + 1] = temp;
+      }
+    }
+  }
+
   return copied;
 }
 
@@ -14653,20 +14747,24 @@ int getAllMessages(ReceivedTextMessage* outMessages, int maxMessages, uint32_t s
   
   int copied = 0;
   
-  // Collect messages from all peer histories (use dynamic capacity)
+  // Collect messages from all peer histories (use dynamic capacity). Both the
+  // received and sent rings are included; the seqNum sort below interleaves them.
   for (int p = 0; p < gEspNow->peerHistoryCapacity && copied < maxMessages; p++) {
     PeerMessageHistory& history = gEspNow->peerMessageHistories[p];
-    if (!history.active || history.count == 0) continue;
-    
+    if (!history.active) continue;
+
     for (int i = 0; i < history.count && copied < maxMessages; i++) {
       uint8_t idx = (history.tail + i) % MESSAGES_PER_DEVICE;
       ReceivedTextMessage& msg = history.messages[idx];
-      
-      if (!msg.active) continue;
-      if (msg.seqNum <= sinceSeq) continue;
-      
-      memcpy(&outMessages[copied], &msg, sizeof(ReceivedTextMessage));
-      copied++;
+      if (!msg.active || msg.seqNum <= sinceSeq) continue;
+      memcpy(&outMessages[copied++], &msg, sizeof(ReceivedTextMessage));
+    }
+
+    for (int i = 0; i < history.sentCount && copied < maxMessages; i++) {
+      uint8_t idx = (history.sentTail + i) % MESSAGES_PER_DEVICE;
+      ReceivedTextMessage& msg = history.sent[idx];
+      if (!msg.active || msg.seqNum <= sinceSeq) continue;
+      memcpy(&outMessages[copied++], &msg, sizeof(ReceivedTextMessage));
     }
   }
   
@@ -14689,16 +14787,16 @@ int getAllMessages(ReceivedTextMessage* outMessages, int maxMessages, uint32_t s
 // the ring chronologically; fragments of one message share a reqId and are stored
 // consecutively, so a linear group-merge is correct. No text is copied — each
 // output entry points at the message's first present fragment in the live ring.
-int espnowCollapsedPeerMessages(uint8_t* peerMac, CollapsedMsgRef* out, int maxN) {
-  if (!gEspNow || !out || maxN <= 0) return 0;
-
-  PeerMessageHistory* history = findOrCreatePeerHistory(peerMac);
-  if (!history || history->count == 0) return 0;
-
-  int w = 0;  // number of logical messages written
-  for (int i = 0; i < history->count; i++) {
-    uint8_t idx = (history->tail + i) % MESSAGES_PER_DEVICE;
-    const ReceivedTextMessage& msg = history->messages[idx];
+// Collapse one ring (received or sent) into logical-message refs, appending to
+// out[] starting at index `startW`. Group-merge only searches refs added by THIS
+// call (>= startW) and also gates on isSent, so a received and a sent fragment
+// that happen to share a reqId never merge. Returns the new write count.
+static int espnowCollapseRing(const ReceivedTextMessage* ring, uint8_t tail, uint8_t count,
+                              CollapsedMsgRef* out, int startW, int maxN) {
+  int w = startW;
+  for (int i = 0; i < count; i++) {
+    uint8_t idx = (tail + i) % MESSAGES_PER_DEVICE;
+    const ReceivedTextMessage& msg = ring[idx];
     if (!msg.active) continue;
 
     // Multi-fragment text: merge into an existing group with the same reqId.
@@ -14706,8 +14804,8 @@ int espnowCollapsedPeerMessages(uint8_t* peerMac, CollapsedMsgRef* out, int maxN
     // each is its own logical message.
     if (msg.reqId != 0 && msg.pieceTotal > 1) {
       int g = -1;
-      for (int k = 0; k < w; k++) {
-        if (out[k].reqId == msg.reqId &&
+      for (int k = startW; k < w; k++) {
+        if (out[k].reqId == msg.reqId && out[k].isSent == msg.isSent &&
             memcmp(out[k].head->senderMac, msg.senderMac, 6) == 0) { g = k; break; }
       }
       if (g >= 0) {
@@ -14725,8 +14823,42 @@ int espnowCollapsedPeerMessages(uint8_t* peerMac, CollapsedMsgRef* out, int maxN
     out[w].reqId = msg.reqId;
     out[w].partsPresent = 1;
     out[w].partsTotal = (msg.pieceTotal > 1) ? msg.pieceTotal : 1;
+    out[w].isSent = msg.isSent;
     w++;
   }
+  return w;
+}
+
+int espnowCollapsedPeerMessages(uint8_t* peerMac, CollapsedMsgRef* out, int maxN) {
+  if (!gEspNow || !out || maxN <= 0) return 0;
+
+  PeerMessageHistory* history = findOrCreatePeerHistory(peerMac);
+  if (!history || history->count == 0) return 0;
+
+  return espnowCollapseRing(history->messages, history->tail, history->count, out, 0, maxN);
+}
+
+int espnowGetConversation(uint8_t* peerMac, CollapsedMsgRef* out, int maxN) {
+  if (!gEspNow || !out || maxN <= 0) return 0;
+
+  PeerMessageHistory* history = findOrCreatePeerHistory(peerMac);
+  if (!history) return 0;
+
+  // Collapse both rings into one buffer, then order the combined set oldest→newest
+  // by timestamp so callers see a single interleaved sent/received conversation.
+  int w = espnowCollapseRing(history->messages, history->tail, history->count, out, 0, maxN);
+  w = espnowCollapseRing(history->sent, history->sentTail, history->sentCount, out, w, maxN);
+
+  for (int i = 0; i < w - 1; i++) {
+    for (int j = 0; j < w - i - 1; j++) {
+      if (out[j].head->timestamp > out[j + 1].head->timestamp) {
+        CollapsedMsgRef temp = out[j];
+        out[j] = out[j + 1];
+        out[j + 1] = temp;
+      }
+    }
+  }
+
   return w;
 }
 

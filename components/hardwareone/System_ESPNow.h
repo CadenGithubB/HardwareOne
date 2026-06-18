@@ -492,12 +492,16 @@ inline String getCapabilityListLong(uint32_t mask, const CapabilityName* names) 
 }
 
 
-// Per-device message buffer size based on available memory
-// With PSRAM: 100 messages per device (~30KB each), Without: 5 messages (~1.5KB each)
+// Per-device message-ring depth, per direction, based on available memory.
+// PeerMessageHistory holds TWO rings of this size (received + sent), and each
+// slot is a ReceivedTextMessage (~316 B). So per-peer cost ≈ 2 * N * 316 B:
+//   PSRAM  : N=100 → ~63 KB/peer (in PSRAM — cheap).
+//   no-PSRAM: N=16 → ~10 KB/peer (in internal DRAM — tight; raised from 5 on
+//             request to keep a more useful local history on plain ESP32 boards).
 #if CONFIG_SPIRAM_SUPPORT || CONFIG_ESP32S3_SPIRAM_SUPPORT
   #define MESSAGES_PER_DEVICE 100
 #else
-  #define MESSAGES_PER_DEVICE 5
+  #define MESSAGES_PER_DEVICE 16
 #endif
 
 // Max length of a user text message (espnowsend). Messages above
@@ -535,24 +539,51 @@ struct ReceivedTextMessage {
   uint8_t  pieceTotal;             // total fragments in the message (1 when not chunked)
   LogMessageType msgType;          // Message type (text, file transfer, etc)
   bool active;                     // Whether this slot is in use
+  bool isSent;                     // Direction: false = received, true = we sent it.
+                                   // Received and sent live in SEPARATE rings (see
+                                   // PeerMessageHistory) so neither evicts the other;
+                                   // this flag travels with the record when it's copied
+                                   // into a flat read array (getPeerMessages /
+                                   // getAllMessages) so the consumer still knows which
+                                   // side of the conversation a record belongs to.
+  uint8_t sendState;               // Sent records only: DURABLE delivery state, values
+                                   // mirror SendStatusState (0=pending/Sent, 1=delivered,
+                                   // 2=timeout/no-ACK, 3=failed). Stamped by
+                                   // espnowUpdateSentDeliveryState() when the ACK resolves
+                                   // so UIs show Delivered even after the ephemeral 30s
+                                   // sendStatus ring entry is swept. Unused for received.
 
-  ReceivedTextMessage() : timestamp(0), encrypted(false), seqNum(0), reqId(0), piece(1), pieceTotal(1), msgType(MSG_TEXT), active(false) {
+  ReceivedTextMessage() : timestamp(0), encrypted(false), seqNum(0), reqId(0), piece(1), pieceTotal(1), msgType(MSG_TEXT), active(false), isSent(false), sendState(0) {
     memset(senderMac, 0, 6);
     memset(senderName, 0, 32);
     memset(message, 0, sizeof(message));
   }
 };
 
-// Per-device message history buffer
+// Per-device message history buffer.
+//
+// Two SEPARATE rings, each sized MESSAGES_PER_DEVICE:
+//   messages[] — text/events RECEIVED from this peer.
+//   sent[]     — text WE sent to this peer (recorded once at the cmd_espnow_send
+//                chokepoint so every interface — web/OLED/BLE/G2 — sees the same
+//                outgoing history; previously each UI kept its own private echo).
+// Keeping them separate means a chatty direction never evicts the other, and the
+// received budget is untouched on RAM-tight (non-PSRAM, 5-slot) builds. Reads
+// merge the two by seqNum (flat APIs) or timestamp (the collapsed conversation
+// view) so callers see one time-ordered conversation.
 struct PeerMessageHistory {
   uint8_t peerMac[6];                           // Peer MAC address
-  ReceivedTextMessage messages[MESSAGES_PER_DEVICE];  // Ring buffer of messages
-  uint8_t head;                                 // Next write position
-  uint8_t tail;                                 // Oldest message position
-  uint8_t count;                                // Number of messages in buffer
+  ReceivedTextMessage messages[MESSAGES_PER_DEVICE];  // Received ring buffer
+  uint8_t head;                                 // Next write position (received)
+  uint8_t tail;                                 // Oldest message position (received)
+  uint8_t count;                                // Number of messages in buffer (received)
+  ReceivedTextMessage sent[MESSAGES_PER_DEVICE];      // Sent ring buffer (same capacity)
+  uint8_t sentHead;                             // Next write position (sent)
+  uint8_t sentTail;                             // Oldest message position (sent)
+  uint8_t sentCount;                            // Number of messages in buffer (sent)
   bool active;                                  // Whether this peer slot is in use
-  
-  PeerMessageHistory() : head(0), tail(0), count(0), active(false) {
+
+  PeerMessageHistory() : head(0), tail(0), count(0), sentHead(0), sentTail(0), sentCount(0), active(false) {
     memset(peerMac, 0, 6);
   }
 };
@@ -1176,7 +1207,22 @@ void sendChunkedResponse(const uint8_t* targetMac, bool success, const String& r
 // Per-device message buffer management (espnow_message_buffer.cpp)
 PeerMessageHistory* findOrCreatePeerHistory(uint8_t* peerMac);
 bool storeMessageInPeerHistory(uint8_t* peerMac, const char* peerName, const char* message, bool encrypted, LogMessageType msgType, uint32_t reqId = 0, uint8_t piece = 1, uint8_t pieceTotal = 1);
+// Record a message WE sent to peerMac into that peer's sent[] ring (the shared
+// outgoing history every interface reads). Long text is split into ≤200 B
+// fragments sharing msgId — same per-fragment model as received — so nothing is
+// truncated. Call once at the send chokepoint (cmd_espnow_send). msgId is the
+// send's correlation id (used for delivery-status polling + web bubble de-dup).
+bool storeSentMessageInPeerHistory(uint8_t* peerMac, const char* message, uint32_t msgId);
+// Stamp the DURABLE delivery state onto the sent[] record(s) for msgId (all
+// fragments share it). Called from the sendStatus terminal transitions
+// (delivered / failed / timeout) so the conversation shows the resolved state
+// long after the ephemeral sendStatus ring entry is swept. state mirrors
+// SendStatusState. No-op if the peer/msgId isn't in history.
+void espnowUpdateSentDeliveryState(const uint8_t* peerMac, uint32_t msgId, uint8_t state);
 void logFileTransferEvent(uint8_t* peerMac, const char* peerName, const char* filename, LogMessageType eventType);
+// getPeerMessages / getAllMessages merge BOTH rings (received + sent), newest-by-seqNum
+// last, so a poller paging on sinceSeq sees one unified, time-ordered conversation.
+// Each record's isSent flag carries its direction.
 int getPeerMessages(uint8_t* peerMac, ReceivedTextMessage* outMessages, int maxMessages, uint32_t sinceSeq);
 int getAllMessages(ReceivedTextMessage* outMessages, int maxMessages, uint32_t sinceSeq);
 
@@ -1199,8 +1245,19 @@ struct CollapsedMsgRef {
   uint32_t reqId;                   // group id (0 for unsolicited / single-frame)
   uint8_t  partsPresent;            // fragments currently in the ring for this message
   uint8_t  partsTotal;              // total fragments the message was split into (1 = single-frame)
+  bool     isSent;                  // direction (from head->isSent): false=received, true=sent
 };
 int espnowCollapsedPeerMessages(uint8_t* peerMac, CollapsedMsgRef* out, int maxN);
+
+// Collapsed, direction-tagged, time-ordered CONVERSATION with one peer — the
+// shared read used by on-device UIs (OLED now, G2 later) so each interface shows
+// the same merged sent+received timeline without re-implementing the merge.
+// Collapses both rings (received + sent) and orders the result oldest→newest by
+// timestamp; each ref's isSent says which side it is. Zero-copy (same live-ring
+// lifetime rule as espnowCollapsedPeerMessages). out should be sized to hold both
+// rings (2 * MESSAGES_PER_DEVICE worst case); returns the number written, capped
+// at maxN (oldest dropped first).
+int espnowGetConversation(uint8_t* peerMac, CollapsedMsgRef* out, int maxN);
 
 // File transfer to specific MAC (used by ImageManager)
 bool sendFileToMac(const uint8_t* mac, const String& localPath);

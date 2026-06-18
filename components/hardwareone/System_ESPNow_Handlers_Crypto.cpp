@@ -709,6 +709,32 @@ void runDeferredSessionOpen(void* arg) {
     return;
   }
 
+  // --- Glare resolution (simultaneous SESSION_OPEN) ---
+  // If we already have our OWN in-flight initiated handshake to this peer — a
+  // slot still in ESTABLISHING (the responder path below flips to ACTIVE
+  // synchronously, so ESTABLISHING here means an initiation we sent that is
+  // awaiting its CONFIRM) — then both sides opened at once. Without a tiebreaker
+  // each side would accept the other's OPEN and clobber its own initiation, so
+  // the two ends would settle on DIFFERENT sessionIds and every later
+  // SESSION_FRAME would be dropped ("no active session"). Break the tie with the
+  // same MAC ordering used everywhere else: the A-side (numerically lower MAC) is
+  // the canonical initiator and KEEPS its own session (ignore the peer's OPEN —
+  // our CONFIRM will win on both ends); the B-side falls through and yields,
+  // accepting the peer's OPEN. Both then converge on the A-initiated session.
+  {
+    SessionState* existing = sessionFindByPeer(msg->initiatorMac, peer->meshId);
+    if (existing && existing->state == SESSION_ESTABLISHING &&
+        sessionIsASide(selfMac, msg->initiatorMac)) {
+      WARN_ESPNOWF("SESSION_OPEN glare with %02X:%02X:%02X:%02X:%02X:%02X — we are A-side, "
+                   "keeping our initiation (ignoring peer sessionId=%u)",
+                   msg->initiatorMac[0], msg->initiatorMac[1], msg->initiatorMac[2],
+                   msg->initiatorMac[3], msg->initiatorMac[4], msg->initiatorMac[5],
+                   (unsigned)msg->sessionId);
+      free(w);
+      return;
+    }
+  }
+
   SessionState* s = sessionAllocate(msg->initiatorMac, peer->meshId);
   if (!s) { free(w); return; }
   s->sessionId    = msg->sessionId;

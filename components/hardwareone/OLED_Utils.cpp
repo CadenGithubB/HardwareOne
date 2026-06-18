@@ -332,6 +332,15 @@ int oledRenderHeader(Adafruit_SSD1306* display, const OLEDHeaderInfo* info) {
       strncpy(unavailHeaderBuf, unavailableOLEDTitle.c_str(), 15);
       unavailHeaderBuf[15] = '\0';
       title = unavailHeaderBuf;
+#if ENABLE_ESPNOW
+    } else if (currentOLEDMode == OLED_ESPNOW) {
+      // The conversation (device-detail) view surfaces the interaction mode in
+      // the header ("ESPNOW: Text/Remote/File") instead of a separate in-body
+      // "Mode:" line; other ESP-NOW views return nullptr and keep "ESP-NOW".
+      extern const char* oledEspNowHeaderTitle();
+      const char* espnowTitle = oledEspNowHeaderTitle();
+      title = (espnowTitle && espnowTitle[0]) ? espnowTitle : oledGetCurrentModeName();
+#endif
     } else {
       title = oledGetCurrentModeName();
     }
@@ -2383,7 +2392,10 @@ void drawOLEDFooter() {
             hints = "A:Open X:Broadcast B:Back";
             break;
           case ESPNOW_VIEW_DEVICE_DETAIL:
-            hints = "A:Send X:Mode B:Back";
+            // File mode shows a Send/Receive selector (A=select); Text/Remote send (A=send).
+            hints = (gOledEspNowState.interactionMode == ESPNOW_MODE_FILE)
+                      ? "A:Select X:Mode B:Back"
+                      : "A:Send X:Mode B:Back";
             break;
           case ESPNOW_VIEW_MODE_SELECT:
             hints = "A:Select B:Cancel";

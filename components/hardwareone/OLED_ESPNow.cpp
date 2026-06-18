@@ -37,47 +37,54 @@ static const int ESPNOW_MENU_ITEM_COUNT = 6;
 // Global state
 OLEDEspNowState gOledEspNowState;
 
-// ---------------------------------------------------------------------------
-// OLED-local sent-message store
-// ---------------------------------------------------------------------------
-// Sent text is NOT written to the shared peer history (storeMessageInPeerHistory
-// only records received traffic), so — exactly like the web's browser-side
-// bubbles — the OLED keeps its own small record of what it sent. This lets the
-// conversation render sent-on-the-right with live delivery status, without
-// leaking sent messages into getAllMessages (which would double-show on the web
-// and clutter the BLE/G2 inboxes).
-struct OledSentMsg {
-  uint8_t       peerMac[6];
-  char          text[96];
-  uint32_t      msgId;       // for sendStatusGet() polling
-  unsigned long ts;          // millis() at send — time-ordered merge with received
-  bool          active;
-};
-#define OLED_SENT_RING 12
-static EXT_RAM_BSS_ATTR OledSentMsg gOledSentRing[OLED_SENT_RING];
-static int gOledSentHead = 0;
-
-static void oledRecordSentMessage(const uint8_t* mac, const char* text, uint32_t msgId) {
-  OledSentMsg& s = gOledSentRing[gOledSentHead];
-  memcpy(s.peerMac, mac, 6);
-  strncpy(s.text, text, sizeof(s.text) - 1);
-  s.text[sizeof(s.text) - 1] = '\0';
-  s.msgId = msgId;
-  s.ts = millis();
-  s.active = true;
-  gOledSentHead = (gOledSentHead + 1) % OLED_SENT_RING;
-}
+// Sent text is now recorded in the SHARED per-peer history (sent[] ring) at the
+// cmd_espnow_send chokepoint, so the OLED no longer keeps a private sent ring —
+// it reads the unified conversation via espnowGetConversation(). This is what
+// lets the OLED see messages sent from the web/BLE too, not just ones typed here.
 
 // Per-row direction/status metadata, kept in lockstep with messageList.items by
 // oledEspNowRefreshMessages and read by the device-detail renderer (left=received,
 // right=sent + live delivery status).
-static struct { bool isSent; uint32_t msgId; } gOledRowMeta[OLED_SCROLL_MAX_ITEMS];
+static struct { bool isSent; uint32_t msgId; uint8_t sendState; } gOledRowMeta[OLED_SCROLL_MAX_ITEMS];
+
+// --- Conversation (device-detail) message-list geometry ---
+// The conversation view relies on the GLOBAL header bar (title "ESPNOW: Text"),
+// so message rows start at OLED_CONTENT_START_Y like the sibling ESP-NOW views
+// and stack down to the GLOBAL footer band. The footer top is
+// OLED_HEADER_HEIGHT + OLED_CONTENT_HEIGHT (the exact value drawOLEDFooter() uses),
+// so deriving the visible-row count and the render/scrollbar bounds from it here
+// keeps the shared scroll window (oledScrollUp/Down + the follow-tail restore) in
+// lockstep with what actually fits. Hardcoding it (the old visibleLines=3 / yPos<56)
+// let a scrolled-to row spill into and below the footer, which also made the list
+// look stuck because the cursor lived in a slot that wasn't physically on screen.
+static constexpr int kMsgListTopY  = OLED_CONTENT_START_Y;  // first row Y, below the global header
+static constexpr int kMsgRowHeight = 16;  // two 8px lines per message row
+static inline int oledEspNowMsgFooterTopY() { return OLED_HEADER_HEIGHT + OLED_CONTENT_HEIGHT; }
+static inline int oledEspNowMsgVisibleRows() {
+  return max(1, (oledEspNowMsgFooterTopY() - kMsgListTopY) / kMsgRowHeight);
+}
+
+// Title shown in the GLOBAL header bar (oledRenderHeader) for OLED_ESPNOW. Only
+// the conversation (device-detail) view customizes it — "ESPNOW: Text/Remote/
+// File" — so the interaction mode lives in the header instead of a clipped
+// in-body "Mode:" line. All other ESP-NOW sub-views return nullptr so the caller
+// falls back to the plain "ESP-NOW" mode name.
+const char* oledEspNowHeaderTitle() {
+  if (gOledEspNowState.currentView != ESPNOW_VIEW_DEVICE_DETAIL) return nullptr;
+  switch (gOledEspNowState.interactionMode) {
+    case ESPNOW_MODE_TEXT:   return "ESPNOW: Text";
+    case ESPNOW_MODE_REMOTE: return "ESPNOW: Remote";
+    case ESPNOW_MODE_FILE:   return "ESPNOW: File";
+  }
+  return nullptr;
+}
 
 void oledEspNowInit() {
   gOledEspNowState.currentView = ESPNOW_VIEW_MAIN_MENU;
   gOledEspNowState.interactionMode = ESPNOW_MODE_TEXT;
   gOledEspNowState.modeSelectorIndex = 0;
   gOledEspNowState.modeSelectorActive = false;
+  gOledEspNowState.fileChooserIndex = 0;
   gOledEspNowState.lastUpdate = 0;
   gOledEspNowState.needsRefresh = true;
   memset(gOledEspNowState.selectedDeviceMac, 0, 6);
@@ -95,6 +102,9 @@ void oledEspNowInit() {
   // Initialize scrolling lists
   oledScrollInit(&gOledEspNowState.deviceList, "ESP-NOW Devices", 3);
   oledScrollInit(&gOledEspNowState.messageList, nullptr, 3);
+  // Truthful visible-row count (footer-aware) so the shared scroll helpers and the
+  // follow-tail restore never push the selection into/below the footer.
+  gOledEspNowState.messageList.visibleLines = oledEspNowMsgVisibleRows();
   
   // Settings menu state (local)
   gOledEspNowState.settingsMenuIndex = 0;
@@ -692,83 +702,53 @@ void oledEspNowDisplayDeviceList(Adafruit_SSD1306* display) {
 
 void oledEspNowDisplayDeviceDetail(Adafruit_SSD1306* display) {
   if (!display) return;
-  
-  // Look up mesh metadata and health for this device
-  MeshPeerMeta* meta = getMeshPeerMeta(gOledEspNowState.selectedDeviceMac);
-  MeshPeerHealth* health = getMeshPeerHealth(gOledEspNowState.selectedDeviceMac, false);
-  bool alive = MeshPeers::isHealthy(gOledEspNowState.selectedDeviceMac);
-  
-  // Draw header with device name + online indicator
+
+  // The interaction mode + device context live in the GLOBAL header bar
+  // ("ESPNOW: Text/Remote/File", via oledEspNowHeaderTitle()), so content starts
+  // at OLED_CONTENT_START_Y like the sibling ESP-NOW views. (The old in-body
+  // device-name + "Mode:" lines were drawn at y=0/8 and got clobbered/clipped by
+  // the global header — removed.)
   display->setTextSize(1);
   display->setTextColor(DISPLAY_COLOR_WHITE);
-  display->setCursor(0, 0);
-  
-  // Prefer friendly name from metadata
-  String header = "";
-  if (meta && meta->friendlyName[0]) header = meta->friendlyName;
-  else if (gOledEspNowState.selectedDeviceName.length() > 0) header = gOledEspNowState.selectedDeviceName;
-  else header = oledEspNowFormatMac(gOledEspNowState.selectedDeviceMac);
-  
-  // Append online/offline indicator
-  int maxNameLen = health ? 18 : 21;  // Reserve space for status if health data exists
-  if ((int)header.length() > maxNameLen) { header = header.substring(0, maxNameLen - 1); header += '~'; }
-  display->print(header);
-  if (health) {
-    display->print(alive ? " [+]" : " [-]");
-  }
-  display->println();
-  
-  // Line 2: room/zone or mode indicator
-  display->setCursor(0, 8);
-  if (meta && meta->room[0]) {
-    display->print(meta->room);
-    if (meta->zone[0]) {
-      display->print("/");
-      display->print(meta->zone);
-    }
-    // Show mode indicator compactly on the right
-    const char* modeChar = gOledEspNowState.interactionMode == ESPNOW_MODE_TEXT ? "T" :
-                           gOledEspNowState.interactionMode == ESPNOW_MODE_REMOTE ? "R" : "F";
-    int modeX = 128 - 6;  // Right-align single char
-    display->setCursor(modeX, 8);
-    display->print(modeChar);
-  } else {
-    display->print("Mode: ");
-    if (gOledEspNowState.interactionMode == ESPNOW_MODE_TEXT) {
-      display->println("Text");
-    } else if (gOledEspNowState.interactionMode == ESPNOW_MODE_REMOTE) {
-      display->println("Remote");
-    } else {
-      display->println("File");
-    }
-  }
-  
-  // Draw separator
-  display->drawFastHLine(0, 17, 128, DISPLAY_COLOR_WHITE);
-  
+
   // If in File mode, show file browser prompt instead of message list
   if (gOledEspNowState.interactionMode == ESPNOW_MODE_FILE) {
-    display->setCursor(0, 20);
+    // Send / Receive options shown inline (A=select, Up/Down=move, X=mode, B=back).
     display->setTextSize(1);
-    display->println("File Transfer Mode");
-    display->println();
-    display->println("Press A to browse");
-    display->println("files to send");
-    display->println();
+    const char* opts[2] = { "Send Files", "Receive Files" };
+    int y = OLED_CONTENT_START_Y + 4;
+    for (int i = 0; i < 2; i++) {
+      bool sel = (gOledEspNowState.fileChooserIndex == i);
+      if (sel) {
+        display->fillRect(0, y - 1, SCREEN_WIDTH, 11, DISPLAY_COLOR_WHITE);
+        display->setTextColor(DISPLAY_COLOR_BLACK);
+      } else {
+        display->setTextColor(DISPLAY_COLOR_WHITE);
+      }
+      display->setCursor(6, y + 1);
+      display->print(sel ? "> " : "  ");
+      display->print(opts[i]);
+      y += 14;
+    }
+    display->setTextColor(DISPLAY_COLOR_WHITE);
     return;
   }
   
-  // Render message list (offset by header height)
-  int yOffset = 18;
+  // Render message list below the global header. The visible window, the per-row
+  // clip and the scrollbar all derive from the SAME footer geometry as
+  // messageList.visibleLines (see kMsgList* above), so a scrolled-to row can never
+  // land in or below the global footer.
+  const int yOffset    = kMsgListTopY;
+  const int footerTopY = oledEspNowMsgFooterTopY();
+  const int lineHeight = 8;
   int visibleStart = gOledEspNowState.messageList.scrollOffset;
-  int visibleEnd = min(gOledEspNowState.messageList.itemCount, 
+  int visibleEnd = min(gOledEspNowState.messageList.itemCount,
                        visibleStart + gOledEspNowState.messageList.visibleLines);
-  
+
   int yPos = yOffset;
-  int lineHeight = 8;
-  
+
   const int rightEdge = SCREEN_WIDTH - 4;  // leave room for the scrollbar
-  for (int i = visibleStart; i < visibleEnd && yPos < 56; i++) {
+  for (int i = visibleStart; i < visibleEnd && (yPos + kMsgRowHeight) <= footerTopY; i++) {
     OLEDScrollItem* item = &gOledEspNowState.messageList.items[i];
     bool isSelected = (i == gOledEspNowState.messageList.selectedIndex);
     bool isSent = gOledRowMeta[i].isSent;  // left = received, right = sent (web-style)
@@ -790,14 +770,15 @@ void oledEspNowDisplayDeviceDetail(Adafruit_SSD1306* display) {
 
     // Line 2: delivery status (sent, right) or sender (received, left).
     if (isSent) {
-      SendStatus st;
-      bool found = sendStatusGet(gOledRowMeta[i].msgId, &st);
+      // Durable delivery state from the message record (stamped on ACK by
+      // espnowUpdateSentDeliveryState) — NOT the ephemeral sendStatus ring, which
+      // is swept after 30s and used to make delivered rows revert to "Sent".
       const char* label; bool icon = true, dbl = false;
-      switch (found ? st.state : SEND_STATUS_PENDING) {
+      switch (gOledRowMeta[i].sendState) {
         case SEND_STATUS_DELIVERED: label = "Delivered"; dbl = true; break;
         case SEND_STATUS_TIMEOUT:   label = "No ACK"; icon = false; break;
         case SEND_STATUS_FAILED:    label = "Failed"; icon = false; break;
-        default:                    label = "Sent"; break;  // PENDING: left device, awaiting ACK
+        default:                    label = "Sent"; break;  // PENDING: awaiting ACK
       }
       int iconW = icon ? (dbl ? 8 : 6) : 0;
       int lblW = (int)strlen(label) * 6 + iconW;
@@ -815,8 +796,8 @@ void oledEspNowDisplayDeviceDetail(Adafruit_SSD1306* display) {
   // Show scrollbar if needed
   if (gOledEspNowState.messageList.itemCount > gOledEspNowState.messageList.visibleLines) {
     int scrollbarX = SCREEN_WIDTH - 1;
-    int scrollbarHeight = 38;  // 56 - 18
     int scrollbarY = yOffset;
+    int scrollbarHeight = footerTopY - yOffset;  // content band, above the global footer
     
     display->drawFastVLine(scrollbarX, scrollbarY, scrollbarHeight, DISPLAY_COLOR_WHITE);
     
@@ -871,7 +852,6 @@ void oledEspNowDisplayModeSelect(Adafruit_SSD1306* display) {
     display->print("  File     ");
   }
 }
-
 
 bool oledEspNowHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
   // Handle input based on current view
@@ -1070,13 +1050,25 @@ bool oledEspNowHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
       return false;
       
     case ESPNOW_VIEW_DEVICE_DETAIL:
-      // If in File mode, A button opens file browser
+      // File mode shows Send/Receive inline: Up/Down move the cursor, A selects.
+      // X (mode) and B (back) fall through to the shared all-modes handlers below.
       if (gOledEspNowState.interactionMode == ESPNOW_MODE_FILE) {
-        // A button: Open file browser
+        if (gNavEvents.up && gOledEspNowState.fileChooserIndex > 0) {
+          gOledEspNowState.fileChooserIndex--;
+          return true;
+        }
+        if (gNavEvents.down && gOledEspNowState.fileChooserIndex < 1) {
+          gOledEspNowState.fileChooserIndex++;
+          return true;
+        }
         if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
-          extern void resetOLEDFileBrowser();
-          requestOLEDMode(OLED_FILE_BROWSER, "espnow.filebrowse");  // pushes current so B returns here
-          resetOLEDFileBrowser();
+          if (gOledEspNowState.fileChooserIndex == 1) {
+            oledFileBrowserStartEspnowReceive(gOledEspNowState.selectedDeviceMac);
+            requestOLEDMode(OLED_FILE_BROWSER, "espnow.receive");  // B returns here
+          } else {
+            oledFileBrowserStartEspnowSend(gOledEspNowState.selectedDeviceMac);
+            requestOLEDMode(OLED_FILE_BROWSER, "espnow.send");
+          }
           return true;
         }
       } else if (gOledEspNowState.interactionMode == ESPNOW_MODE_TEXT) {
@@ -1143,7 +1135,7 @@ bool oledEspNowHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
         return true;
       }
       return false;  // No input handled
-      
+
     case ESPNOW_VIEW_MODE_SELECT:
       // Navigate mode selector using centralized navigation events
       if (gNavEvents.up && gOledEspNowState.modeSelectorIndex > 0) {
@@ -1422,54 +1414,44 @@ void oledEspNowRefreshMessages() {
 
   oledScrollClear(&gOledEspNowState.messageList);
 
-  // Build the conversation as a single time-ordered list: received messages
-  // (collapsed per reqId, rendered left) merged with this device's own sent
-  // messages (rendered right). Sent text isn't in the shared history, so it comes
-  // from the OLED-local sent ring — same model as the web's browser-side bubbles.
+  // Build the conversation from the SHARED store: the core merges this peer's
+  // received + sent rings into one time-ordered list (espnowGetConversation), so
+  // the OLED shows the same outgoing history as every other interface — including
+  // messages sent from the web or BLE, not just ones typed here. Sent rows carry
+  // msgId (head->reqId) for the live delivery-status indicator; received rows show
+  // the sender name + part count. (Zero-copy refs into the live rings.)
   uint8_t* mac = gOledEspNowState.selectedDeviceMac;
 
-  // Received: collapse the per-fragment ring into one zero-copy ref per logical
-  // message (a long incoming message would otherwise render as N "part" rows).
-  static EXT_RAM_BSS_ATTR CollapsedMsgRef refs[MESSAGES_PER_DEVICE];
-  int rc = espnowCollapsedPeerMessages(mac, refs, MESSAGES_PER_DEVICE);
+  static EXT_RAM_BSS_ATTR CollapsedMsgRef refs[2 * MESSAGES_PER_DEVICE];
+  int rc = espnowGetConversation(mac, refs, 2 * MESSAGES_PER_DEVICE);
 
-  struct MergeRow { unsigned long ts; bool isSent; const char* text; const char* meta; uint32_t msgId; };
-  static EXT_RAM_BSS_ATTR MergeRow merge[OLED_SCROLL_MAX_ITEMS];
-  static EXT_RAM_BSS_ATTR char metaBuf[OLED_SCROLL_MAX_ITEMS][24];  // persistent "(k/n)" labels
+  static EXT_RAM_BSS_ATTR char metaBuf[OLED_SCROLL_MAX_ITEMS][24];  // persistent "name (k/n)" labels
   const int CAP = OLED_SCROLL_MAX_ITEMS;
+
+  // Show the most recent CAP messages (conversation is oldest→newest).
+  int start = (rc > CAP) ? (rc - CAP) : 0;
   int m = 0;
-
-  // Sent rows for this peer FIRST so they're never crowded out by a long received
-  // history (status is drawn live by the renderer). Few in practice (≤ ring size).
-  for (int i = 0; i < OLED_SENT_RING && m < CAP; i++) {
-    OledSentMsg& s = gOledSentRing[i];
-    if (!s.active || memcmp(s.peerMac, mac, 6) != 0) continue;
-    merge[m].ts     = s.ts;
-    merge[m].isSent = true;
-    merge[m].text   = s.text;
-    merge[m].meta   = nullptr;
-    merge[m].msgId  = s.msgId;
-    m++;
-  }
-
-  // Received rows: fill the remaining capacity with the most recent.
-  int remaining = CAP - m;
-  int rStart = (rc > remaining) ? (rc - remaining) : 0;
-  for (int i = rStart; i < rc && m < CAP; i++) {
+  for (int i = start; i < rc && m < CAP; i++) {
     const ReceivedTextMessage* msg = refs[i].head;
     if (!msg || !oledEspNowValidateMessagePtr(msg, mac)) continue;  // ref still in the live ring
-    merge[m].ts     = msg->timestamp;
-    merge[m].isSent = false;
-    merge[m].text   = msg->message;   // zero-copy into the live ring
-    merge[m].msgId  = 0;
-    if (refs[i].partsTotal > 1) {
+
+    gOledRowMeta[m].isSent    = refs[i].isSent;
+    gOledRowMeta[m].msgId     = refs[i].isSent ? msg->reqId : 0;
+    gOledRowMeta[m].sendState = msg->sendState;  // durable; survives the 30s sendStatus sweep
+
+    const char* meta;
+    if (refs[i].isSent) {
+      meta = nullptr;  // sent rows: delivery status drawn live by the renderer
+    } else if (refs[i].partsTotal > 1) {
       const char* who = (msg->senderName[0]) ? msg->senderName : "Unknown";
       snprintf(metaBuf[m], sizeof(metaBuf[m]), "%s (%u/%u)", who,
                refs[i].partsPresent, refs[i].partsTotal);
-      merge[m].meta = metaBuf[m];
+      meta = metaBuf[m];
     } else {
-      merge[m].meta = (msg->senderName[0]) ? msg->senderName : "Unknown";
+      meta = (msg->senderName[0]) ? msg->senderName : "Unknown";
     }
+
+    oledScrollAddItem(&gOledEspNowState.messageList, msg->message, meta, true, nullptr);
     m++;
   }
 
@@ -1479,21 +1461,6 @@ void oledEspNowRefreshMessages() {
     gOledRowMeta[0].isSent = false; gOledRowMeta[0].msgId = 0;
     oledScrollAddItem(&gOledEspNowState.messageList, noMsgLine1, noMsgLine2, false, nullptr);
     return;
-  }
-
-  // Time-order (insertion sort — small array; meta pointers travel with the row).
-  for (int i = 1; i < m; i++) {
-    MergeRow key = merge[i];
-    int j = i - 1;
-    while (j >= 0 && merge[j].ts > key.ts) { merge[j + 1] = merge[j]; j--; }
-    merge[j + 1] = key;
-  }
-
-  // Feed the scroll list and the parallel row metadata in lockstep.
-  for (int i = 0; i < m; i++) {
-    gOledRowMeta[i].isSent = merge[i].isSent;
-    gOledRowMeta[i].msgId  = merge[i].msgId;
-    oledScrollAddItem(&gOledEspNowState.messageList, merge[i].text, merge[i].meta, true, nullptr);
   }
 
   // Restore scroll position with auto-follow-tail behavior:
@@ -1584,14 +1551,14 @@ bool oledEspNowValidateMessagePtr(const void* msgPtr, const uint8_t* peerMac) {
   }
   
   if (!history) return false;
-  
-  // Check if pointer is within the message array bounds
+
+  // Pointer must land inside EITHER the received ring or the sent ring (the
+  // conversation view zero-copies refs from both).
   const ReceivedTextMessage* msg = (const ReceivedTextMessage*)msgPtr;
-  const ReceivedTextMessage* arrayStart = &history->messages[0];
-  const ReceivedTextMessage* arrayEnd = &history->messages[MESSAGES_PER_DEVICE];
-  
-  if (msg < arrayStart || msg >= arrayEnd) return false;
-  
+  bool inRecv = (msg >= &history->messages[0] && msg < &history->messages[MESSAGES_PER_DEVICE]);
+  bool inSent = (msg >= &history->sent[0]     && msg < &history->sent[MESSAGES_PER_DEVICE]);
+  if (!inRecv && !inSent) return false;
+
   // Check if message is still active
   return msg->active;
 }
@@ -1764,25 +1731,18 @@ void oledEspNowSendTextMessage() {
            gOledEspNowState.selectedDeviceMac[5]);
   
   // Build command: espnowsend json <mac> <message>. The "json" flag makes the
-  // handler return {"ok":true,"msgId":N} so we can poll sendStatus for a
-  // transient delivery indicator (sent text isn't stored in peer history).
+  // handler return {"ok":true,"msgId":N}. cmd_espnow_send records the sent text
+  // into the shared peer history itself, so the conversation row appears on the
+  // next refresh (and on every other interface too); we only use the ack here to
+  // confirm success and keep the view re-rendering so the row can animate
+  // Sent → Delivered as the ACK arrives asynchronously.
   char cmdBuf[256];
   snprintf(cmdBuf, sizeof(cmdBuf), "espnowsend json %s %s", macStr, gOledEspNowState.textMessageBuffer.c_str());
   char resp[96];
   if (executeOLEDCommandWithResult(cmdBuf, resp, sizeof(resp))) {
-    // Parse the msgId out of the JSON ack (cheap strstr — avoids a JSON parse).
-    const char* p = strstr(resp, "\"msgId\":");
-    if (p) {
-      uint32_t mid = (uint32_t)strtoul(p + 8, nullptr, 10);
-      if (mid != 0) {
-        // Record locally so the conversation shows it sent-on-the-right with live
-        // delivery status (sent text isn't kept in the shared peer history).
-        oledRecordSentMessage(gOledEspNowState.selectedDeviceMac,
-                              gOledEspNowState.textMessageBuffer.c_str(), mid);
-        // Keep the view re-rendering so the row can animate Sent → Delivered as
-        // the ACK arrives asynchronously.
-        oledMarkDirtyUntil(millis() + 13000);
-      }
+    const char* p = strstr(resp, "\"msgId\":");  // cheap strstr — avoids a JSON parse
+    if (p && (uint32_t)strtoul(p + 8, nullptr, 10) != 0) {
+      oledMarkDirtyUntil(millis() + 13000);
     }
   }
 

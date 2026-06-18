@@ -652,6 +652,12 @@ void sendStatusRegister(uint32_t msgId, const uint8_t peerMac[6]) {
   slot->resolvedAtMs   = 0;
 }
 
+// Mirror the resolved send state onto the DURABLE sent[] history record so the
+// conversation keeps showing Delivered/Failed/No-ACK after this ephemeral entry
+// is swept (kSendStatusKeepResolvedMs). Declared in System_ESPNow.h; forward-
+// declared here to avoid pulling that heavy header into the session unit.
+void espnowUpdateSentDeliveryState(const uint8_t* peerMac, uint32_t msgId, uint8_t state);
+
 void sendStatusMarkDelivered(uint32_t msgId, const uint8_t srcMac[6]) {
   if (!gSendStatus || msgId == 0 || !srcMac) return;
   SendStatus* s = findByMsgId(msgId);
@@ -662,6 +668,7 @@ void sendStatusMarkDelivered(uint32_t msgId, const uint8_t srcMac[6]) {
   if (memcmp(s->peerMac, srcMac, 6) != 0) return;
   s->state        = SEND_STATUS_DELIVERED;
   s->resolvedAtMs = (uint32_t)millis();
+  espnowUpdateSentDeliveryState(s->peerMac, msgId, SEND_STATUS_DELIVERED);
 }
 
 void sendStatusMarkFailed(uint32_t msgId, const uint8_t peerMac[6]) {
@@ -671,6 +678,7 @@ void sendStatusMarkFailed(uint32_t msgId, const uint8_t peerMac[6]) {
   if (peerMac && memcmp(s->peerMac, peerMac, 6) != 0) return;
   s->state        = SEND_STATUS_FAILED;
   s->resolvedAtMs = (uint32_t)millis();
+  espnowUpdateSentDeliveryState(s->peerMac, msgId, SEND_STATUS_FAILED);
 }
 
 void sendStatusSweep(uint32_t nowMs) {
@@ -682,6 +690,7 @@ void sendStatusSweep(uint32_t nowMs) {
       if ((nowMs - s.registeredAtMs) >= kSendStatusPendingTimeoutMs) {
         s.state        = SEND_STATUS_TIMEOUT;
         s.resolvedAtMs = nowMs;
+        espnowUpdateSentDeliveryState(s.peerMac, s.msgId, SEND_STATUS_TIMEOUT);
       }
     } else {
       // Resolved — free the slot after the polling-window retention period.

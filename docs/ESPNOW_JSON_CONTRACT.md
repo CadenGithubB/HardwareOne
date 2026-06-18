@@ -101,9 +101,26 @@ Poll this command to read it.
 ```json
 { "schema":1, "messages":[
   { "seq":42, "reqId":1234567, "piece":1, "of":1, "mac":"AA:BB:CC:DD:EE:FF",
-    "name":"node2", "msg":"<peer output / text>", "enc":true, "ts":1234567, "type":3 }
+    "name":"node2", "msg":"<peer output / text>", "enc":true, "ts":1234567, "type":3,
+    "sent":false, "sendState":0 }
 ]}
 ```
+- `sent` — **direction.** `false` = received from the peer; `true` = a message
+  **we** sent to that peer. Sent messages are now recorded in shared per-device
+  history (at the `espnowsend` chokepoint) so every interface shows the same
+  conversation, not just the UI that sent it. A client that renders its own
+  optimistic "sending…" bubble should **de-dupe the polled echo by `reqId`**
+  (which equals the send's `msgId`); a `sent:true` record with no matching local
+  bubble originated on another interface and should be rendered as outgoing.
+- `sendState` — **durable delivery state of a sent message** (`sent:true` rows
+  only; `0` and meaningless for received). `0` = pending/Sent (awaiting ACK),
+  `1` = delivered (ACK received), `2` = timeout / no ACK, `3` = failed (e.g. the
+  encrypted-session handshake never completed). This is stamped onto the stored
+  record when the ACK resolves, so it stays correct **after a reload** and long
+  after the in-RAM `sendstatus` tracker entry is swept (~30 s). Prefer this over
+  the legacy `/api/espnow/sendstatus` poll + `deliveries[]` snapshot for showing
+  a bubble's ✓ → ✓✓; those remain only for live pending→delivered upgrades inside
+  the tracker's retention window.
 - `piece` / `of` — **chunked messages.** A message longer than one ESP-NOW frame
   is stored as **separate records**, each one fragment (≤200 B), all sharing the
   same `reqId` (the group id). `piece` is the 1-based fragment index, `of` is the

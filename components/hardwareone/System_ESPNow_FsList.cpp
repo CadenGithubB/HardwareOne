@@ -635,7 +635,8 @@ static void processListDeferred(const uint8_t srcMac[6], const V4PayloadFsListRe
   }
 
   {
-    // Read under SYSTEM identity — bonded peer is trusted at device level.
+    // Read under SYSTEM identity — a securely paired + session peer is trusted at
+    // device level (FsList is base ESP-NOW, not bond-gated).
     // Per-user identity propagation can be layered on later via a token in
     // the request's reserved bytes.
     SYSTEM_IDENTITY_SCOPE("espnow.fs_list_reply");

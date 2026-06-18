@@ -64,6 +64,7 @@ struct OLEDEspNowState {
   
   // Mode selector state
   int modeSelectorIndex;  // 0=Text, 1=Remote, 2=File
+  int fileChooserIndex;   // File chooser: 0=Send Files, 1=Receive Files
   bool modeSelectorActive;
   
   // Text mode keyboard state
@@ -112,6 +113,17 @@ void oledEspNowInit();
 
 // Main display function (called from displayEspNow())
 void oledEspNowDisplay(Adafruit_SSD1306* display);
+
+// Global-header title for OLED_ESPNOW: "ESPNOW: Text/Remote/File" in the
+// conversation view, nullptr elsewhere (caller falls back to "ESP-NOW").
+const char* oledEspNowHeaderTitle();
+
+// Launch the shared OLED file browser (OLED_FILE_BROWSER) targeting a specific
+// ESP-NOW peer. Receive → browse + FS_GET download the peer's files; Send →
+// pick a local file and send it to the peer. Defined in OLED_Mode_FileBrowser.cpp.
+// Caller transitions to OLED_FILE_BROWSER via requestOLEDMode() afterward.
+void oledFileBrowserStartEspnowReceive(const uint8_t mac[6]);
+void oledFileBrowserStartEspnowSend(const uint8_t mac[6]);
 
 // Gamepad input handler
 bool oledEspNowHandleInput(int deltaX, int deltaY, uint32_t newlyPressed);
