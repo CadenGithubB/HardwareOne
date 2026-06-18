@@ -963,10 +963,11 @@ void sendEspNowStreamMessage(const String& message) {
   size_t msgLen = message.length();
   if (msgLen > ESPNOW_V4_MAX_PAYLOAD - 1) msgLen = ESPNOW_V4_MAX_PAYLOAD - 1;
   
-  uint32_t msgId = generateMessageId();
-  // Step 3c: fire-and-forget through clerk. Caller is the cmd_exec streaming
-  // output path; stream chunks shouldn't block on prior chunks' WiFi-TX, and
-  // the per-second rate limit + drop counter above already bound the burst.
+  // Legacy global stream (startstream/stopstream) is uncorrelated live telemetry,
+  // not a reply to any request — send msgId 0 so the receiver stores it as reqId 0
+  // ("unsolicited"), exactly as before. (0 is also the dedup-skip sentinel.)
+  // Command-session output uses the command's msgId instead (see sendSessionStreamFrame).
+  uint32_t msgId = 0;
   bool sent = espnowtx::sendAead(gEspNow->streamTarget, ESPNOW_V4_TYPE_STREAM, 0, msgId,
                                   (const uint8_t*)message.c_str(), (uint16_t)msgLen, 1);
 
@@ -3851,6 +3852,9 @@ static void v4h_stream(const V4RxCtx& ctx) {
     memcpy(entry.srcMac, ctx.recv_info->src_addr, 6);
     strncpy(entry.deviceName, ctx.deviceName, sizeof(entry.deviceName) - 1);
     entry.deviceName[sizeof(entry.deviceName) - 1] = '\0';
+    // Carry the command correlation id (frame msgId). For remote command output
+    // this is the command's reqId; for legacy startstream it's 0 (unsolicited).
+    entry.cmdMsgId = ctx.h->msgId;
     entry.used = true;
     gEspNow->streamQueueHead = nextHead;
   } else {
@@ -8022,11 +8026,15 @@ void processMeshHeartbeats() {
       if (entry.used) {
         String devName = String(entry.deviceName);
         if (devName.length() == 0) devName = formatMacAddress(entry.srcMac);
+        // reqId = the originating command's msgId so remote command output
+        // correlates to its command (streaming preserved — this only tags it).
+        // Legacy startstream sends msgId 0, so its telemetry stays "unsolicited".
         storeMessageInPeerHistory(entry.srcMac,
                                   devName.c_str(),
                                   entry.content,
                                   true,
-                                  MSG_TEXT);
+                                  MSG_TEXT,
+                                  entry.cmdMsgId);
         BROADCAST_PRINTF("[STREAM:%s] %s", devName.c_str(), entry.content);
         entry.used = false;
       }
@@ -14097,7 +14105,11 @@ const char* cmd_espnow_messages(const String& argsInput) {
     else since = (uint32_t)strtoul(t.c_str(), nullptr, 10);  // else a seq number
   }
 
-  const int MAXM = 20;
+  // Page size capped at 8: keeps the serialized JSON comfortably under the 4096-byte async
+  // command-result buffer (ExecReq.out) so a page is never truncated into invalid JSON, and
+  // keeps the BLE fragment count per page low so the paced send stays quick and reliable.
+  // memreport (the largest/burstiest producer) is the worst case and fits within this.
+  const int MAXM = 8;
   static ReceivedTextMessage* msgs = nullptr;
   if (!msgs) msgs = (ReceivedTextMessage*)ps_alloc(sizeof(ReceivedTextMessage) * MAXM,
                                                    AllocPref::PreferPSRAM, "espnow.msgs.cli");
