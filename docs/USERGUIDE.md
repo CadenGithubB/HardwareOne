@@ -1,4 +1,4 @@
-# Hardware One v0.95.7 — User Guide
+# Hardware One v0.95.7 - User Guide
 
 This is the full reference for Hardware One. It covers every subsystem, all CLI commands, configuration options, and how the major features work. For initial setup, see the [Quick Start Guide](QUICKSTART.md).
 
@@ -30,15 +30,15 @@ All feature flags live in one file: `components/hardwareone/System_BuildConfig.h
 | `WEB_FEATURE_LEVEL` | `4` (Custom) | `0`=disabled, `1`=core UI, `2`=standard modules, `3`=all modules, `4`=custom |
 | `DISPLAY_TYPE` | `1` (SSD1306) | `0`=none, `1`=SSD1306 OLED, `2`=ST7789 TFT, `3`=ILI9341 TFT |
 | `ENABLE_BLUETOOTH` | `0` | BLE server with GATT services |
-| `ENABLE_G2_GLASSES` | `0` | Even Realities G2 BLE client (requires `ENABLE_BLUETOOTH=1`) — **planned, not yet working** |
+| `ENABLE_G2_GLASSES` | `0` | Even Realities G2 BLE client (requires `ENABLE_BLUETOOTH=1`) - **planned, not yet working** |
 | `ENABLE_MQTT` | `1` | Home Assistant MQTT integration |
 | `ENABLE_AUTOMATION` | `1` | Scheduled tasks and conditional commands |
 | `ENABLE_CAMERA_SENSOR` | `0` | ESP32-S3 DVP camera (OV2640/OV5640) |
 | `ENABLE_MICROPHONE_SENSOR` | `0` | PDM microphone via I2S |
 | `ENABLE_BATTERY_MONITOR` | `0` | LiPo voltage monitoring via ADC |
 | `ENABLE_EDGE_IMPULSE` | `0` | Edge Impulse ML inference |
-| `ENABLE_BONDED_MODE` | `0` | Bonded Microcontrollers — two devices share command registries and the controller shows a Remote tab with the paired device's features |
-| `ENABLE_ONDEVICE_LLM` | `1` | On-device LLM inference — tiny transformer runs locally on ESP32-S3 with PSRAM. Requires a model file on LittleFS or SD card. |
+| `ENABLE_BONDED_MODE` | `0` | Bonded Microcontrollers - two devices share command registries and the controller shows a Remote tab with the paired device's features |
+| `ENABLE_ONDEVICE_LLM` | `1` | On-device LLM inference - tiny transformer runs locally on ESP32-S3 with PSRAM. Requires a model file on LittleFS or SD card. |
 
 When `I2C_FEATURE_LEVEL = 4`, individual sensors are controlled by `CUSTOM_ENABLE_*` flags:
 
@@ -56,7 +56,7 @@ When `I2C_FEATURE_LEVEL = 4`, individual sensors are controlled by `CUSTOM_ENABL
 | `CUSTOM_ENABLE_FM_RADIO` | RDA5807 FM radio |
 | `CUSTOM_ENABLE_SERVO` | PCA9685 servo controller |
 
-> If a module is enabled in the config but not physically connected, its commands will fail gracefully — the rest of the system is unaffected.
+> If a module is enabled in the config but not physically connected, its commands will fail gracefully - the rest of the system is unaffected.
 
 ---
 
@@ -80,15 +80,15 @@ When switching between chip families: `idf.py fullclean` then `idf.py set-target
 
 Navigate to the device's IP address in a browser. The web server must be running (`webstart` or `webauto on`).
 
-- **Sensors** — live sensor data, start/stop individual sensors, logging controls
-- **ESP-NOW** — peer list, pairing, bonding, metadata sync, file transfer, mesh status
-- **Pair** — guided pairing/bonding wizard for connecting two devices
-- **Maps** — offline map viewer, waypoint management, GPS track logging (requires `ENABLE_MAPS`)
-- **Bluetooth** — BLE connection status and controls (requires `ENABLE_BLUETOOTH`)
-- **MQTT** — broker configuration, topic preview, Home Assistant status (requires `ENABLE_MQTT`)
-- **Settings** — all device settings, debug flags, user management
-- **LLM** — on-device language model chat interface: load/unload model, ask questions, adjust temperature and sampling settings (requires `ENABLE_ONDEVICE_LLM`)
-- **CLI** — full command interface in the browser, with history
+- **Sensors** - live sensor data, start/stop individual sensors, logging controls
+- **ESP-NOW** - peer list, pairing, bonding, metadata sync, file transfer, mesh status
+- **Pair** - guided pairing/bonding wizard for connecting two devices
+- **Maps** - offline map viewer, waypoint management, GPS track logging (requires `ENABLE_MAPS`)
+- **Bluetooth** - BLE connection status and controls (requires `ENABLE_BLUETOOTH`)
+- **MQTT** - broker configuration, topic preview, Home Assistant status (requires `ENABLE_MQTT`)
+- **Settings** - all device settings, debug flags, user management
+- **LLM** - on-device language model chat interface: load/unload model, ask questions, adjust temperature and sampling settings (requires `ENABLE_ONDEVICE_LLM`)
+- **CLI** - full command interface in the browser, with history
 
 Authentication is required. Default credentials are set on first boot via the setup wizard or the `users` CLI commands.
 
@@ -99,12 +99,12 @@ Authentication is required. Default credentials are set on first boot via the se
 The OLED displays a menu system navigated with the Seesaw gamepad (joystick + buttons). On first boot a setup wizard runs to configure WiFi, device name, room, and zone. After that it goes to the main menu.
 
 Main menu sections:
-- **Network** — WiFi status, ESP-NOW peer list, connect/disconnect
-- **Sensors** — per-sensor live readout and start/stop
-- **System** — memory, uptime, IP address, reboot
-- **Settings** — brightness, display timeout, output routing
-- **Logging** — view recent log entries
-- **Power** — battery level (if enabled), sleep controls
+- **Network** - WiFi status, ESP-NOW peer list, connect/disconnect
+- **Sensors** - per-sensor live readout and start/stop
+- **System** - memory, uptime, IP address, reboot
+- **Settings** - brightness, display timeout, output routing
+- **Logging** - view recent log entries
+- **Power** - battery level (if enabled), sleep controls
 
 ---
 
@@ -115,7 +115,7 @@ ESP-NOW V3 is Hardware One's inter-device wireless protocol. Devices pair with a
 ### Pairing
 1. On both devices, go to the **Pair** tab in the web UI (or use `espnow pair` CLI).
 2. Set the same passphrase on both devices.
-3. One device initiates — the other accepts.
+3. One device initiates - the other accepts.
 4. Once paired, devices appear in each other's peer list.
 
 ### Bonding (Master/Worker)
@@ -137,7 +137,7 @@ Files can be transferred between paired devices via the web UI or CLI (`espnow s
 
 ## Automations
 
-Automations are scheduled or conditional command sequences stored on the device. They run locally — no internet required.
+Automations are scheduled or conditional command sequences stored on the device. They run locally - no internet required.
 
 ### Syntax
 ```
@@ -147,9 +147,9 @@ IF <condition> THEN <command>; <command>
 ```
 
 ### Schedule formats
-- `TIME=HH:MM` — run at a specific time daily
-- `INTERVAL=Xs` / `Xm` / `Xh` — repeat every N seconds/minutes/hours
-- `BOOT` — run once on startup
+- `TIME=HH:MM` - run at a specific time daily
+- `INTERVAL=Xs` / `Xm` / `Xh` - repeat every N seconds/minutes/hours
+- `BOOT` - run once on startup
 
 ### Conditions
 ```
@@ -201,14 +201,14 @@ mqtt status                  - Show connection status
 
 ## On-Device LLM
 
-Requires `ENABLE_ONDEVICE_LLM=1` and an ESP32-S3 board with PSRAM. Runs a tiny transformer model entirely on-device — no internet connection required.
+Requires `ENABLE_ONDEVICE_LLM=1` and an ESP32-S3 board with PSRAM. Runs a tiny transformer model entirely on-device - no internet connection required.
 
 ### Model files
 
 Place LLM1-format model files (produced by `esp32-llm-converter`) in one of two locations:
 
-- **LittleFS (internal flash):** `/system/llm/model.bin` — default path, loaded automatically
-- **SD card:** `/sd/llm/<filename>.bin` — useful for swapping models without reflashing
+- **LittleFS (internal flash):** `/system/llm/model.bin` - default path, loaded automatically
+- **SD card:** `/sd/llm/<filename>.bin` - useful for swapping models without reflashing
 
 The default path (`/system/llm/model.bin`) is loaded when you call `llmload` with no arguments. Use `llmmodels` to list all available files across both storage locations.
 
@@ -224,8 +224,8 @@ The **LLM** tab provides a chat interface. Select a model from the dropdown, cli
 
 The model supports two generation modes triggered by how the prompt ends:
 
-- **Normal mode** — generates a natural-language response, stopping after the configured sentence limit.
-- **Do: mode** — when the prompt ends with the `Do:` token, the model outputs a CLI command instead of prose. Used internally by the automation and web UI to translate natural-language requests into executable commands.
+- **Normal mode** - generates a natural-language response, stopping after the configured sentence limit.
+- **Do: mode** - when the prompt ends with the `Do:` token, the model outputs a CLI command instead of prose. Used internally by the automation and web UI to translate natural-language requests into executable commands.
 
 ### CLI commands
 
@@ -281,7 +281,7 @@ Available debug modules (type `help debug` on device for full list):
 | `debugllm` | LLM general (parent flag) |
 | `debugllmload` | Model load, header validation, weight mapping |
 | `debugllmtokenizer` | Tokenizer BPE encode/decode |
-| `debugllmforward` | Transformer forward pass (verbose — use sparingly) |
+| `debugllmforward` | Transformer forward pass (verbose - use sparingly) |
 | `debugllmgenerate` | Generation loop, sampling, throughput |
 | `debugllmmemory` | PSRAM estimates, context cap, allocations |
 
@@ -292,7 +292,7 @@ Available debug modules (type `help debug` on device for full list):
 Type `help` on the device to enter the interactive help system. Type a module name to see its commands. Type `help all` to include disconnected sensors.
 
 <details>
-<summary><strong>core — System commands</strong></summary>
+<summary><strong>core - System commands</strong></summary>
 
 ```
 status                          - Show system status (WiFi, FS, memory)
@@ -316,7 +316,7 @@ pendinglist                     - List pending user account requests
 </details>
 
 <details>
-<summary><strong>wifi — Network management</strong></summary>
+<summary><strong>wifi - Network management</strong></summary>
 
 ```
 openwifi [ssid]                 - Connect to WiFi (optional SSID override)
@@ -337,7 +337,7 @@ certgen [rsa]                   - Generate self-signed certificate (default: ECD
 </details>
 
 <details>
-<summary><strong>espnow — ESP-NOW mesh</strong></summary>
+<summary><strong>espnow - ESP-NOW mesh</strong></summary>
 
 ```
 openespnow                      - Initialize ESP-NOW
@@ -394,7 +394,7 @@ espnowusersync [on|off]         - Enable/disable credential sync across mesh
 </details>
 
 <details>
-<summary><strong>bond — Bonded mode (requires ENABLE_BONDED_MODE)</strong></summary>
+<summary><strong>bond - Bonded mode (requires ENABLE_BONDED_MODE)</strong></summary>
 
 ```
 bondconnect <mac_or_name>       - Connect to bonded peer
@@ -413,7 +413,7 @@ closestream                     - Stop streaming to ESP-NOW device (admin)
 </details>
 
 <details>
-<summary><strong>mqtt — MQTT broker</strong></summary>
+<summary><strong>mqtt - MQTT broker</strong></summary>
 
 ```
 openmqtt                        - Start MQTT client
@@ -445,7 +445,7 @@ mqttExternalSensors             - List external sensor data received via MQTT
 </details>
 
 <details>
-<summary><strong>bluetooth — BLE (requires ENABLE_BLUETOOTH)</strong></summary>
+<summary><strong>bluetooth - BLE (requires ENABLE_BLUETOOTH)</strong></summary>
 
 ```
 openble                         - Start BLE and begin advertising
@@ -464,7 +464,7 @@ blerequireauth [on|off]         - Require authentication for BLE access
 </details>
 
 <details>
-<summary><strong>filesystem — LittleFS file operations</strong></summary>
+<summary><strong>filesystem - LittleFS file operations</strong></summary>
 
 ```
 fsusage                         - Show filesystem usage
@@ -481,7 +481,7 @@ filerename "<oldpath>" "<newname>"  - Rename file
 </details>
 
 <details>
-<summary><strong>sd — SD card</strong></summary>
+<summary><strong>sd - SD card</strong></summary>
 
 ```
 sdmount                         - Mount SD card
@@ -493,7 +493,7 @@ sddiag                          - SD card hardware diagnostics
 </details>
 
 <details>
-<summary><strong>oled — Display control (requires OLED)</strong></summary>
+<summary><strong>oled - Display control (requires OLED)</strong></summary>
 
 ```
 openoled                        - Start OLED display
@@ -517,7 +517,7 @@ setgamepadpassword              - Set gamepad joystick unlock pattern
 </details>
 
 <details>
-<summary><strong>led — NeoPixel & startup effects</strong></summary>
+<summary><strong>led - NeoPixel & startup effects</strong></summary>
 
 ```
 ledcolor <color>                - Set NeoPixel color (name or hex)
@@ -534,7 +534,7 @@ ledstartupduration <ms>         - Startup effect duration
 </details>
 
 <details>
-<summary><strong>i2c — I2C bus management</strong></summary>
+<summary><strong>i2c - I2C bus management</strong></summary>
 
 ```
 i2cscan                         - Scan bus and list detected device addresses
@@ -557,7 +557,7 @@ discover                        - Re-scan and register I2C devices
 </details>
 
 <details>
-<summary><strong>automation — Scheduled & conditional commands</strong></summary>
+<summary><strong>automation - Scheduled & conditional commands</strong></summary>
 
 ```
 automation                      - Show automation system status
@@ -573,7 +573,7 @@ print <message>                 - Broadcast a message to all output channels
 </details>
 
 <details>
-<summary><strong>settings — Device configuration</strong></summary>
+<summary><strong>settings - Device configuration</strong></summary>
 
 ```
 wifiautoreconnect <0|1>         - WiFi auto-reconnect on disconnect
@@ -591,7 +591,7 @@ featuresetup                    - Run interactive feature configuration wizard
 </details>
 
 <details>
-<summary><strong>users — User management (admin)</strong></summary>
+<summary><strong>users - User management (admin)</strong></summary>
 
 ```
 userlist                        - List all users
@@ -620,7 +620,7 @@ logout                          - Log out
 </details>
 
 <details>
-<summary><strong>debug — Debug flags</strong></summary>
+<summary><strong>debug - Debug flags</strong></summary>
 
 ```
 debug<flagname> 1               - Enable flag (persistent, saved to flash)
@@ -631,7 +631,7 @@ See [Debug Flags](#debug-flags) section for the full flag list.
 </details>
 
 <details>
-<summary><strong>sensorlog — Sensor data logging</strong></summary>
+<summary><strong>sensorlog - Sensor data logging</strong></summary>
 
 ```
 sensorlog start <sensor>        - Start logging sensor data to CSV on LittleFS
@@ -645,7 +645,7 @@ sensorlog sensors               - List loggable sensors
 </details>
 
 <details>
-<summary><strong>llm — On-device LLM inference (requires ENABLE_ONDEVICE_LLM)</strong></summary>
+<summary><strong>llm - On-device LLM inference (requires ENABLE_ONDEVICE_LLM)</strong></summary>
 
 ```
 llmstatus                       - Show LLM state, model config, PSRAM usage, last generation stats
@@ -658,7 +658,7 @@ llmstop                         - Interrupt in-progress generation
 </details>
 
 <details>
-<summary><strong>maps — Offline maps & waypoints (requires ENABLE_MAPS)</strong></summary>
+<summary><strong>maps - Offline maps & waypoints (requires ENABLE_MAPS)</strong></summary>
 
 ```
 maplist                         - List available map files
@@ -683,7 +683,7 @@ maporganize                     - Organize map files in /maps into subdirectorie
 </details>
 
 <details>
-<summary><strong>power — Power management</strong></summary>
+<summary><strong>power - Power management</strong></summary>
 
 ```
 power                           - Show power mode status
@@ -694,7 +694,7 @@ power threshold <value>         - Set power threshold
 </details>
 
 <details>
-<summary><strong>battery — Battery monitoring (requires ENABLE_BATTERY_MONITOR)</strong></summary>
+<summary><strong>battery - Battery monitoring (requires ENABLE_BATTERY_MONITOR)</strong></summary>
 
 ```
 battery status                  - Show voltage, estimated charge level, and status
@@ -703,7 +703,7 @@ battery calibrate               - Recalibrate ADC voltage readings
 </details>
 
 <details>
-<summary><strong>images — Image capture and management</strong></summary>
+<summary><strong>images - Image capture and management</strong></summary>
 
 ```
 capture [littlefs|sd|both]      - Capture and save an image
@@ -714,7 +714,7 @@ imagesend <device> ["<path>"]   - Send image to a peer via ESP-NOW
 </details>
 
 <details>
-<summary><strong>camera — DVP camera (ESP32-S3 only, requires ENABLE_CAMERA_SENSOR)</strong></summary>
+<summary><strong>camera - DVP camera (ESP32-S3 only, requires ENABLE_CAMERA_SENSOR)</strong></summary>
 
 ```
 opencamera                      - Start camera sensor
@@ -752,7 +752,7 @@ cameratiny                      - Capture a small frame (for ESP-NOW transfer)
 </details>
 
 <details>
-<summary><strong>microphone — PDM microphone (ESP32-S3 only, requires ENABLE_MICROPHONE_SENSOR)</strong></summary>
+<summary><strong>microphone - PDM microphone (ESP32-S3 only, requires ENABLE_MICROPHONE_SENSOR)</strong></summary>
 
 ```
 openmic                         - Start microphone
@@ -771,7 +771,7 @@ micautostart [on|off]           - Auto-start on boot
 </details>
 
 <details>
-<summary><strong>speech — ESP-SR voice recognition (requires ENABLE_ESPSR)</strong></summary>
+<summary><strong>speech - ESP-SR voice recognition (requires ENABLE_ESPSR)</strong></summary>
 
 ```
 opensr                          - Start ESP-SR pipeline
@@ -823,10 +823,10 @@ srdebugreset                    - Reset SR counters
 </details>
 
 <details>
-<summary><strong>g2 — Even Realities G2 glasses (requires ENABLE_G2_GLASSES) — ⚠️ planned, not yet working</strong></summary>
+<summary><strong>g2 - Even Realities G2 glasses (requires ENABLE_G2_GLASSES) - ⚠️ planned, not yet working</strong></summary>
 
 > **Status: not functional yet.** These commands compile and the scaffolding is
-> in place, but the G2 BLE client is a work-in-progress goal — connection,
+> in place, but the G2 BLE client is a work-in-progress goal - connection,
 > display, and gesture handling are not reliable. Documented here as the
 > intended command surface once the feature lands.
 
@@ -845,7 +845,7 @@ g2verbose [on|off]              - Toggle verbose packet logging
 </details>
 
 <details>
-<summary><strong>edgeimpulse — Edge Impulse ML inference (requires ENABLE_EDGE_IMPULSE)</strong></summary>
+<summary><strong>edgeimpulse - Edge Impulse ML inference (requires ENABLE_EDGE_IMPULSE)</strong></summary>
 
 ```
 eienable                        - Enable/disable Edge Impulse inference
@@ -869,7 +869,7 @@ eitrackclear                    - Clear all tracked objects
 </details>
 
 <details>
-<summary><strong>thermal — MLX90640 thermal camera</strong></summary>
+<summary><strong>thermal - MLX90640 thermal camera</strong></summary>
 
 ```
 openthermal                     - Start thermal sensor
@@ -895,7 +895,7 @@ thermalrollingminmaxguardc <0.0-10.0>   - Rolling normalization guard band
 </details>
 
 <details>
-<summary><strong>tof — VL53L4CX Time-of-Flight sensor</strong></summary>
+<summary><strong>tof - VL53L4CX Time-of-Flight sensor</strong></summary>
 
 ```
 opentof                         - Start ToF sensor
@@ -911,7 +911,7 @@ toftransitionms <0-5000>        - Reading transition time
 </details>
 
 <details>
-<summary><strong>imu — BNO055 9-DoF IMU</strong></summary>
+<summary><strong>imu - BNO055 9-DoF IMU</strong></summary>
 
 ```
 openimu                         - Start IMU sensor
@@ -933,7 +933,7 @@ imuwebmaxfps <1-30>             - Web UI max frame rate
 </details>
 
 <details>
-<summary><strong>apds — APDS9960 gesture/proximity/color sensor</strong></summary>
+<summary><strong>apds - APDS9960 gesture/proximity/color sensor</strong></summary>
 
 ```
 openapds                        - Start APDS9960 sensor
@@ -948,7 +948,7 @@ apdsautostart [on|off]          - Auto-start on boot
 </details>
 
 <details>
-<summary><strong>gps — PA1010D GPS module</strong></summary>
+<summary><strong>gps - PA1010D GPS module</strong></summary>
 
 ```
 opengps                         - Start GPS module
@@ -960,7 +960,7 @@ gpslog [interval_ms]            - Start GPS track logging (persists across boots
 </details>
 
 <details>
-<summary><strong>rtc — DS3231 precision RTC</strong></summary>
+<summary><strong>rtc - DS3231 precision RTC</strong></summary>
 
 ```
 openrtc                         - Start RTC
@@ -973,7 +973,7 @@ rtcautostart [on|off]           - Auto-start on boot
 </details>
 
 <details>
-<summary><strong>presence — STHS34PF80 IR presence/motion sensor</strong></summary>
+<summary><strong>presence - STHS34PF80 IR presence/motion sensor</strong></summary>
 
 ```
 openpresence                    - Start presence sensor
@@ -985,7 +985,7 @@ presenceautostart [on|off]      - Auto-start on boot
 </details>
 
 <details>
-<summary><strong>fmradio — RDA5807 FM radio</strong></summary>
+<summary><strong>fmradio - RDA5807 FM radio</strong></summary>
 
 ```
 openfmradio                     - Start FM radio
@@ -1001,7 +1001,7 @@ fmradioautostart [on|off]       - Auto-start on boot
 </details>
 
 <details>
-<summary><strong>servo — PCA9685 servo controller</strong></summary>
+<summary><strong>servo - PCA9685 servo controller</strong></summary>
 
 ```
 servo <channel> <angle>         - Move servo to angle (degrees)
@@ -1013,7 +1013,7 @@ servocalibrate <channel>        - Enter calibration mode for a channel
 </details>
 
 <details>
-<summary><strong>gamepad — Seesaw gamepad</strong></summary>
+<summary><strong>gamepad - Seesaw gamepad</strong></summary>
 
 ```
 opengamepad                     - Start gamepad
@@ -1031,7 +1031,7 @@ gamepadautostart [on|off]       - Auto-start on boot
 Supports up to 4 simultaneous distance measurements. Range up to 6m. Polling rate configurable via settings (`tofPollingMs`, default 220ms).
 
 ### MLX90640 (Thermal)
-32×24 IR thermal camera. Web UI displays interpolated heatmap with HSL color mapping. Configurable palette, interpolation steps, and frame rate. High memory footprint — uses PSRAM.
+32×24 IR thermal camera. Web UI displays interpolated heatmap with HSL color mapping. Configurable palette, interpolation steps, and frame rate. High memory footprint - uses PSRAM.
 
 ### BNO055 (IMU)
 9-DoF orientation (accel + gyro + magnetometer fusion). Orientation correction configurable via settings (`imuOrientationMode`, `imuPitchOffset`, etc.).
@@ -1043,13 +1043,13 @@ Three independent modes: color/RGB (`apdscolor`), proximity (`apdsproximity`), g
 NMEA output parsed for lat/lon/speed/heading. Track logging to LittleFS. Offline map viewer in web UI.
 
 ### FM Radio (RDA5807)
-Tune, seek up/down, set volume, mute. `fmradio tune <MHz>` — e.g., `fmradio tune 101.5`.
+Tune, seek up/down, set volume, mute. `fmradio tune <MHz>` - e.g., `fmradio tune 101.5`.
 
-### Even Realities G2 Glasses *(planned — not yet working)*
+### Even Realities G2 Glasses *(planned - not yet working)*
 > **Status: work in progress.** This is a goal feature, not a working one yet.
 > The intention is a BLE client that connects to G2 glasses, sends display text
 > via their teleprompter protocol, and maps glasses gestures to OLED menu
-> navigation — mutually exclusive with phone BLE server mode at runtime. The
+> navigation - mutually exclusive with phone BLE server mode at runtime. The
 > CLI commands exist as placeholders but the underlying protocol is still being
 > developed. Do not expect this to work on a current build.
 

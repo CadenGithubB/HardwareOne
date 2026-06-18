@@ -51,7 +51,7 @@ With `ENABLE_BONDED_MODE=1`, two devices can bond into a paired set. One acts as
 ## Software Setup
 
 Hardware One requires **ESP-IDF v5.5.1** (not the Arduino IDE). The firmware vendors
-arduino-esp32 3.3.5 (supports IDF ≥5.3,<5.6); **v5.5.1 is the validated pairing** — older
+arduino-esp32 3.3.5 (supports IDF ≥5.3,<5.6); **v5.5.1 is the validated pairing** - older
 5.3.x predates the `i2c_master` `Wire` HAL this build relies on. If you don't have it installed:
 
 - [ESP-IDF v5.5.1 install guide](https://docs.espressif.com/projects/esp-idf/en/v5.5.1/esp32/get-started/index.html)
@@ -66,7 +66,7 @@ cd HardwareOne
 
 ### 2. Configure your build (optional)
 
-Open `components/hardwareone/System_BuildConfig.h` and enable or disable any features you want — sensors, web modules, ESP-NOW, MQTT, etc. The defaults are set for the standard full build. If you're happy with defaults, skip this step.
+Open `components/hardwareone/System_BuildConfig.h` and enable or disable any features you want - sensors, web modules, ESP-NOW, MQTT, etc. The defaults are set for the standard full build. If you're happy with defaults, skip this step.
 
 If you are using Bonded mode, ensure that you reconfigure, fullclean, and then compile the build again.
 
@@ -86,7 +86,7 @@ idf.py build
 idf.py -p PORT flash monitor
 ```
 
-> You can also run `idf.py -p PORT flash monitor` directly — it will build automatically if anything has changed. The separate `build` step is useful if you want to confirm the build succeeds before connecting the device.
+> You can also run `idf.py -p PORT flash monitor` directly - it will build automatically if anything has changed. The separate `build` step is useful if you want to confirm the build succeeds before connecting the device.
 
 - **XIAO / QT PY ESP32-S3:** port is usually `/dev/cu.usbmodem*` (native USB). You may need to hold the BOOT button when initiating the flash.
 - **QT PY ESP32 / Feather ESP32:** port is usually `/dev/cu.usbserial*` or `/dev/cu.SLAB*` (UART bridge).
@@ -97,7 +97,7 @@ That's it. The build can take a few minutes the first time.
 
 ## Switching Between Board Families
 
-If you are switching between an **ESP32** board (QT PY, Feather) and an **ESP32-S3** board (XIAO, QT PY S3), a full clean is required — the two chip families have different architectures and the build cache is not compatible. This being said, once compiled the boards can be used together without issue. The only difference is setup.
+If you are switching between an **ESP32** board (QT PY, Feather) and an **ESP32-S3** board (XIAO, QT PY S3), a full clean is required - the two chip families have different architectures and the build cache is not compatible. This being said, once compiled the boards can be used together without issue. The only difference is setup.
 
 ```bash
 idf.py fullclean
@@ -109,7 +109,7 @@ The project includes target-specific defaults (`sdkconfig.defaults.esp32` and `s
 
 - **PSRAM mode:** ESP32 uses Quad SPI PSRAM at 40 MHz; ESP32-S3 uses Octal SPI PSRAM at 80 MHz. Using the wrong mode will cause a boot failure or crash.
 - **Flash mode:** ESP32 uses `DIO`; ESP32-S3 can use `QIO`.
-- **Bluetooth:** ESP32 supports Classic BT + BLE 4.2; ESP32-S3 is **BLE 5.0 only** — no Classic Bluetooth.
+- **Bluetooth:** ESP32 supports Classic BT + BLE 4.2; ESP32-S3 is **BLE 5.0 only** - no Classic Bluetooth.
 
 If you need to deviate from the defaults, run `idf.py menuconfig` after `set-target`. See [BOARD_SWITCHING.md](BOARD_SWITCHING.md) for the full per-board menuconfig reference.
 
@@ -117,32 +117,32 @@ If you need to deviate from the defaults, run `idf.py menuconfig` after `set-tar
 
 ## First-Time Use
 
-On first boot, the device detects that no users file exists and launches the setup wizard automatically. The wizard runs on **serial and OLED simultaneously** — use whichever is more convenient. Open the serial monitor at **115200 baud** to follow along or drive setup from your computer.
+On first boot, the device detects that no users file exists and launches the setup wizard automatically. The wizard runs on **serial and OLED simultaneously** - use whichever is more convenient. Open the serial monitor at **115200 baud** to follow along or drive setup from your computer.
 
-### Step 1 — Choose setup mode
+### Step 1 - Choose setup mode
 
 You'll be prompted to choose:
 
-- **Basic** — creates your admin account and uses default settings for everything else. Quickest way to get running.
-- **Advanced** — runs the full configuration wizard after account creation, letting you configure features, sensors, WiFi, device name, and web UI theme.
+- **Basic** - creates your admin account and uses default settings for everything else. Quickest way to get running.
+- **Advanced** - runs the full configuration wizard after account creation, letting you configure features, sensors, WiFi, device name, and web UI theme.
 
-### Step 2 — Create your admin account
+### Step 2 - Create your admin account
 
 Enter a username and password when prompted. These are your credentials for the web UI. Both fields are required and cannot be blank.
 
-### Step 3 — Advanced wizard (Advanced mode only)
+### Step 3 - Advanced wizard (Advanced mode only)
 
 The wizard walks through seven pages:
 
-1. **Features** — enable or disable network features (WiFi, HTTP server, Bluetooth, ESP-NOW)
-2. **Sensors** — enable or disable I2C sensors and display
-3. **Network** — auto-start options and device name
-4. **System** — timezone and log level
-5. **WiFi** — scan for networks and enter credentials. You can select by number, type an SSID directly, rescan, or skip.
-6. **Device name** — sets the name used for Bluetooth and ESP-NOW identity (default: `HardwareOne`)
-7. **Web UI theme** — choose Light or Dark
+1. **Features** - enable or disable network features (WiFi, HTTP server, Bluetooth, ESP-NOW)
+2. **Sensors** - enable or disable I2C sensors and display
+3. **Network** - auto-start options and device name
+4. **System** - timezone and log level
+5. **WiFi** - scan for networks and enter credentials. You can select by number, type an SSID directly, rescan, or skip.
+6. **Device name** - sets the name used for Bluetooth and ESP-NOW identity (default: `HardwareOne`)
+7. **Web UI theme** - choose Light or Dark
 
-### Step 4 — Access the UI
+### Step 4 - Access the UI
 > If you chose Basic mode or skipped WiFi during the wizard, the web server will not auto-start. This means that the Serial interface and the OLED interface (if connected) are the only ones available. Run `webstart` in the serial console to start it manually, or `webauto on` to enable auto-start on every boot.
 > If you chose Advanced mode and enabled Wifi during the wizard, the device will connect to WiFi and prints its IP address in the serial monitor. Navigate to that address in a browser to access the web UI. Use the username and password entered in the first time setup to login.
 
