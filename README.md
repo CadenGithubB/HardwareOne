@@ -6,7 +6,7 @@
   <img alt="Hardware One logo" src="assets/logo-black.svg" width="140">
 </picture>
 
-# Hardware One v0.95.5
+# Hardware One v0.95.7
 
 **Hardware One is a modular ESP32 firmware that works like a distributed operating system for cheap microcontrollers.**
 
@@ -25,7 +25,7 @@ On any single device, control works the same way no matter how you reach it: one
 Hardware One can be used in several different ways depending on the hardware you attach and the role you want the device to play:
 
 ### 1) Barebones / Headless Node
-- Just the microcontroller board — no display, no sensors, no gamepad.
+- Just the microcontroller board - no display, no sensors, no gamepad.
 - Full web UI, ESP-NOW, WiFi, CLI, MQTT, automation, and remote management features still available.
 - Good for relay nodes and remote endpoints.
 
@@ -85,13 +85,13 @@ Hardware One can be used in several different ways depending on the hardware you
 | Battery monitoring (LiPo voltage via ADC) | ⚙️ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
 | PCA9685 servo controller | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
 
-> If a module is enabled in the build config but not physically connected, its commands will gracefully fail — nothing breaks.
+> If a module is enabled in the build config but not physically connected, its commands will gracefully fail - nothing breaks.
 
 ---
 
 ## Supported Hardware
 
-### Boards — pick one
+### Boards - pick one
 
 Each device in your setup runs one board. Multiple boards can coexist on the same ESP-NOW mesh network simultaneously.
 
@@ -102,9 +102,9 @@ Each device in your setup runs one board. Multiple boards can coexist on the sam
 | Adafruit Feather ESP32 V2 | 8 / 2 MB | ❌ | ❌ | ✅ (GPIO35) | Onboard NeoPixel + battery monitoring |
 | Adafruit QT Py ESP32 | 8 / 2 MB | ❌ | ❌ | ❌ | ESP32-PICO; STEMMA QT onboard; compact |
 
-> A **generic ESP32** fallback build also exists for unlisted boards — it compiles, but verify the I2C pins match your hardware.
+> A **generic ESP32** fallback build also exists for unlisted boards - it compiles, but verify the I2C pins match your hardware.
 
-### Peripherals — Stemma QT / I2C
+### Peripherals - Stemma QT / I2C
 
 These connect via Stemma QT (or standard I2C) and work the same on any supported board. Mix and match as needed.
 
@@ -124,7 +124,7 @@ These connect via Stemma QT (or standard I2C) and work the same on any supported
 | PCA9685 servo driver | [ID: 815](https://www.adafruit.com/product/815) |
 | Stemma QT hub (for chaining) | [ID: 5625](https://www.adafruit.com/product/5625) |
 
-### Peripherals — board-specific
+### Peripherals - board-specific
 
 | Peripheral | Compatible boards |
 | ---------- | ----------------- |
