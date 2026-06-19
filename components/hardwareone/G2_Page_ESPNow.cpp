@@ -155,45 +155,47 @@ static int countInboxForPeer(const uint8_t* mac) {
   return 0;
 }
 
-// Compact relative-time prefix ("5s" / "12m" / "3h" / "2d"). The lens row is
-// ~32 chars wide so we keep this short and unit-suffixed rather than spelling
-// out "ago". `nowMs` is passed in so a whole-render walk uses one consistent
-// reference point (avoids the 0..tick-length jitter from re-reading millis()
-// inside the loop). Writes into `out`; max 5 chars including NUL.
-static void formatAgeShort(unsigned long timestampMs, unsigned long nowMs,
-                           char* out, size_t cap) {
-  if (cap == 0) return;
-  // Defensive: protect against clock-stamped timestamps that look "in the
-  // future" (clock changes, wrap-around during the ~50-day uint32 millis
-  // rollover). Treat those as "now" instead of negative.
-  unsigned long age = (nowMs >= timestampMs) ? (nowMs - timestampMs) : 0;
-  if      (age <      1000) snprintf(out, cap, "now");
-  else if (age <     60000) snprintf(out, cap, "%lus", age / 1000);
-  else if (age <   3600000) snprintf(out, cap, "%lum", age / 60000);
-  else if (age <  86400000) snprintf(out, cap, "%luh", age / 3600000);
-  else                      snprintf(out, cap, "%lud", age / 86400000);
-}
+// Column width for the chat view. The lens text grid is ~50 cols (G2_GEOM_LARGE);
+// keep a small margin. Long messages are hard-wrapped to this width (never
+// truncated) and the conversation is paged — see the chat helpers below.
+static constexpr int kChatCols = 48;
 
-// Format one inbox row into `out`. Layout: "[<age>] <name>: <msg>" — truncated
-// by snprintf to whatever fits. `name` falls back to MAC tail if empty.
-static void formatInboxRow(char* out, size_t cap,
-                           const ReceivedTextMessage& msg,
-                           unsigned long nowMs,
-                           bool showSender) {
-  char age[8] = {0};
-  formatAgeShort(msg.timestamp, nowMs, age, sizeof(age));
-  if (showSender) {
-    // MAC tail fallback when senderName is empty.
-    char tail[16];
-    if (msg.senderName[0]) {
-      snprintf(tail, sizeof(tail), "%s", msg.senderName);
-    } else {
-      snprintf(tail, sizeof(tail), "%02X%02X%02X",
-               msg.senderMac[3], msg.senderMac[4], msg.senderMac[5]);
-    }
-    snprintf(out, cap, "[%s] %s: %s", age, tail, msg.message);
+// Reassembly scratch for chatLogicalLine — multi-fragment text is stitched by
+// reqId (see espnowReassembleByReqId). PSRAM; DRAM is tight. Sized for the max
+// reassembled message (ESPNOW_TEXT_MAX_LEN-ish) plus the label.
+static EXT_RAM_BSS_ATTR char gChatReasm[1152];
+
+// Build the UNWRAPPED, labelled, sanitized text for one collapsed message:
+//   sent     -> "me: <text>"
+//   received -> "<name>: <text>"
+// Multi-fragment messages are reassembled to their FULL text by reqId (parity
+// with the web/BLE UIs, which stitch the same way); an incomplete one (missing
+// fragments) gets a " ..." suffix. Printable ASCII only (control/non-ASCII would
+// break the layout / the protobuf UTF-8 string). No truncation here — the caller
+// wraps and pages. `ref.head` is a zero-copy live-ring pointer; read immediately.
+static void chatLogicalLine(char* out, size_t cap, const CollapsedMsgRef& ref) {
+  if (!out || cap == 0) return;
+  out[0] = '\0';
+  const ReceivedTextMessage* msg = ref.head;
+  if (!msg) return;
+
+  const char* body   = msg->message;   // single-frame: the record's own text
+  const char* suffix = "";
+  if (ref.partsTotal > 1) {
+    bool complete = false;
+    int n = espnowReassembleByReqId(msg->senderMac, ref.reqId, ref.isSent,
+                                    gChatReasm, sizeof(gChatReasm), &complete);
+    if (n > 0) { body = gChatReasm; if (!complete) suffix = " ..."; }
+    // else: fall back to the first fragment (body unchanged)
+  }
+  if (ref.isSent) {
+    snprintf(out, cap, "me: %s%s", body, suffix);
   } else {
-    snprintf(out, cap, "[%s] %s", age, msg.message);
+    const char* who = msg->senderName[0] ? msg->senderName : "?";
+    snprintf(out, cap, "%s: %s%s", who, body, suffix);
+  }
+  for (char* c = out; *c; c++) {
+    if ((unsigned char)*c < 0x20 || (unsigned char)*c > 0x7E) *c = ' ';
   }
 }
 #endif  // ENABLE_ESPNOW
@@ -638,57 +640,182 @@ static void showBondDetailMenu() {
 // -----------------------------------------------------------------------------
 // Inbox views — merged chronological + per-peer slice
 // -----------------------------------------------------------------------------
-// Both views read directly from gEspNow->peerMessageHistories via the public
-// getAllMessages / getPeerMessages API — zero new storage, just a chronological
-// rendering over data that espnow_task is already populating in its textQueue
-// drain (System_ESPNow.cpp, step 11 of processMeshHeartbeats).
+// Both views read the SHARED message store via the collapsed/direction-aware API
+// (espnowCollapsedAllMessages for the global inbox, espnowGetConversation for the
+// per-peer inbox) — the same reads the OLED uses, so every interface shows one
+// merged sent+received timeline with multi-fragment messages collapsed to a
+// single logical row. Zero new storage; espnow_task populates the rings in its
+// textQueue drain (System_ESPNow.cpp processMeshHeartbeats).
 
-// Cap on rows the list widget can show without scrolling becoming awkward on
-// the 4-bpp lens. Newest-first; older entries are visible by tapping each
-// message's sender and using "Send..." (or just scrolling history elsewhere).
-#define ESPN_APP_INBOX_DISPLAY_MAX 12
-
-static void showInboxMenu() {
-  setSub(ESPN_APP_SUB_INBOX);
+// Conversation rendering — PAGED TextContainer (scroll up/down through pages,
+// exactly like the Files/Settings JSON viewer).
+//
+// The firmware's reliable single-CREATE text body is small (~180 B; see the JSON
+// viewer's FILES_JSON_PAGE_BODY_BUDGET) and the List widget rejects long rows
+// outright. So we render the chat as a TextContainer, hard-wrap each message
+// across lines (never truncated), and split the whole conversation into
+// CHAT_PAGE_BUDGET-sized pages. Scroll-up pages older, scroll-down/tap pages
+// newer, double-tap exits. This is the G2-side chunking; the base ESP-NOW store
+// is untouched.
+#define CHAT_PAGE_BUDGET 176          // < 180 proven-safe text body; header is extra
+#define CHAT_MAX_PAGES   32
+#define CHAT_BUF_SIZE    4096
 
 #if ENABLE_ESPNOW
-  // 1 back row + up to N message rows. Static buffers so we don't churn the
-  // stack on every render (each ReceivedTextMessage is ~300 B; pulling 12
-  // onto the stack is ~3.5 KB which is tight on BTC).
-  static EXT_RAM_BSS_ATTR ReceivedTextMessage msgs[ESPN_APP_INBOX_DISPLAY_MAX];
-  static EXT_RAM_BSS_ATTR char rows[1 + ESPN_APP_INBOX_DISPLAY_MAX][72];
-  const char* ptrs[1 + ESPN_APP_INBOX_DISPLAY_MAX];
-  strcpy(rows[0], "<- Main Menu");
-  ptrs[0] = rows[0];
-  size_t n = 1;
+// Shared collapse buffer for both inbox views (they never render simultaneously).
+static EXT_RAM_BSS_ATTR CollapsedMsgRef gInboxRefs[2 * MESSAGES_PER_DEVICE];
+// Full wrapped conversation (PSRAM — DRAM is tight); paged for display.
+static EXT_RAM_BSS_ATTR char     gChatBuf[CHAT_BUF_SIZE];
+static EXT_RAM_BSS_ATTR char     gChatPageBuf[CHAT_PAGE_BUDGET + 64];  // header + page slice
+static EXT_RAM_BSS_ATTR char     gChatLogical[1184];                   // one labelled (reassembled) line, pre-wrap
+static uint16_t gChatPageOff[CHAT_MAX_PAGES + 1];  // page start offsets + end sentinel
+static int      gChatPageCount = 0;
+static int      gChatPage      = 0;                 // current page (0 = oldest)
+static char     gChatTitle[20] = {0};
+static void   (*gChatExitFn)() = nullptr;
+#endif  // ENABLE_ESPNOW
 
-  // getAllMessages returns up to maxN, sorted newest-first.
-  int got = getAllMessages(msgs, ESPN_APP_INBOX_DISPLAY_MAX, /*sinceSeq=*/0);
-  if (got > 0) {
-    unsigned long now = (unsigned long)millis();
-    for (int i = 0; i < got && (size_t)i < ESPN_APP_INBOX_DISPLAY_MAX; i++) {
-      formatInboxRow(rows[1 + i], sizeof(rows[1 + i]), msgs[i], now,
-                     /*showSender=*/true);
-      ptrs[n++] = rows[1 + i];
+// Text-view exit handlers — the inbox is a TextContainer, so a double-tap routes
+// through gTextViewExitFn (armed by g2ShowTextPage) to run the back-navigation.
+static void exitInboxToMain()       { showMainMenu(); }
+static void exitPeerInboxToDetail() { showPeerDetail(); }
+
+#if ENABLE_ESPNOW
+// Hard-wrap `logical` into gChatBuf at <= kChatCols columns (continuation lines
+// indented 2 spaces), newline-separated. Never truncates; bounds-checked.
+static void chatAppendWrapped(size_t& pos, const char* logical) {
+  size_t L = strlen(logical), i = 0;
+  bool first = true;
+  while (i < L) {
+    size_t indent = first ? 0 : 2;
+    size_t width  = (size_t)kChatCols > indent ? (size_t)kChatCols - indent : 1;
+    size_t take   = (L - i < width) ? (L - i) : width;
+    if (pos + indent + take + 1 >= CHAT_BUF_SIZE) break;
+    for (size_t k = 0; k < indent; k++) gChatBuf[pos++] = ' ';
+    memcpy(gChatBuf + pos, logical + i, take); pos += take;
+    gChatBuf[pos++] = '\n';
+    i += take;
+    first = false;
+  }
+  gChatBuf[pos] = '\0';
+}
+
+// Rough wrapped-byte estimate for one message — used to pick the newest tail
+// that fits gChatBuf.
+static size_t chatEstBytes(const CollapsedMsgRef& ref) {
+  const ReceivedTextMessage* m = ref.head;
+  if (!m) return 0;
+  size_t lbl     = ref.isSent ? 4 : (strlen(m->senderName[0] ? m->senderName : "?") + 2);
+  // Multi-fragment messages reassemble to ~partsTotal*200 B; estimate that so the
+  // newest-tail fit below doesn't overflow gChatBuf mid-build.
+  size_t textLen = (ref.partsTotal > 1) ? ((size_t)ref.partsTotal * 200)
+                                        : strlen(m->message);
+  size_t total   = lbl + textLen;
+  size_t w       = (size_t)kChatCols > 2 ? (size_t)kChatCols - 2 : 1;
+  return total + (total / w + 1) * 3;   // + per-line newline/indent overhead
+}
+
+// Split the [0,totalLen) wrapped buffer into <= CHAT_PAGE_BUDGET pages at line
+// boundaries. Each wrapped line is <= ~kChatCols, well under the budget.
+static void chatSplitPages(size_t totalLen) {
+  gChatPageCount = 0;
+  size_t i = 0;
+  while (i < totalLen && gChatPageCount < CHAT_MAX_PAGES) {
+    gChatPageOff[gChatPageCount++] = (uint16_t)i;
+    size_t pe = i;
+    while (pe < totalLen) {
+      size_t le = pe;
+      while (le < totalLen && gChatBuf[le] != '\n') le++;
+      size_t lineLen = (le < totalLen) ? (le - pe + 1) : (le - pe);
+      if (pe > i && (pe - i) + lineLen > CHAT_PAGE_BUDGET) break;
+      pe += lineLen;
+      if (le >= totalLen) break;
     }
+    i = pe;
   }
+  gChatPageOff[gChatPageCount] = (uint16_t)totalLen;
+}
 
-  if (n == 1) {
-    static const char* empty[] = { "<- Main Menu", "(no messages yet)" };
-    g2ShowListPage(empty, 2);
-  } else {
-    g2ShowListPage(ptrs, n);
+// Build gChatBuf from the newest messages that fit, then page it. Leaves the
+// current page on the newest (last) page.
+static void chatBuildPages(int rc) {
+  size_t budget = CHAT_BUF_SIZE - 256, acc = 0;
+  int start = rc;
+  for (int i = rc - 1; i >= 0; i--) {
+    if (!gInboxRefs[i].head) continue;
+    size_t e = chatEstBytes(gInboxRefs[i]);
+    if (acc + e > budget) break;
+    acc += e;
+    start = i;
   }
-  DEBUG_G2F("[G2-ESP-NOW-APP] inbox shown (%d msgs)", got);
+  size_t pos = 0;
+  gChatBuf[0] = '\0';
+  for (int i = start; i < rc; i++) {
+    if (!gInboxRefs[i].head) continue;
+    chatLogicalLine(gChatLogical, sizeof(gChatLogical), gInboxRefs[i]);
+    chatAppendWrapped(pos, gChatLogical);
+  }
+  chatSplitPages(pos);
+  gChatPage = (gChatPageCount > 0) ? (gChatPageCount - 1) : 0;
+}
+
+// Assemble header + current page slice and (re)render via g2ShowTextPage. With
+// >1 page, scroll/tap pages (navFn); with one page, a tap exits.
+static void chatRenderPage(G2TapFn navFn) {
+  size_t off   = (gChatPageCount > 0) ? gChatPageOff[gChatPage]     : 0;
+  size_t end   = (gChatPageCount > 0) ? gChatPageOff[gChatPage + 1] : 0;
+  size_t slice = end - off;
+
+  int hn;
+  if (gChatPageCount > 1) {
+    hn = snprintf(gChatPageBuf, sizeof(gChatPageBuf), "%s [%d/%d] scroll=page 2x=exit\n",
+                  gChatTitle, gChatPage + 1, gChatPageCount);
+  } else {
+    hn = snprintf(gChatPageBuf, sizeof(gChatPageBuf), "%s  (tap=back)\n", gChatTitle);
+  }
+  size_t p = (hn > 0) ? (size_t)hn : 0;
+  if (slice == 0) {
+    snprintf(gChatPageBuf + p, sizeof(gChatPageBuf) - p, "(no messages yet)");
+  } else {
+    if (p + slice >= sizeof(gChatPageBuf)) slice = sizeof(gChatPageBuf) - p - 1;
+    memcpy(gChatPageBuf + p, gChatBuf + off, slice);
+    gChatPageBuf[p + slice] = '\0';
+  }
+  g2ShowTextPage(gChatPageBuf, G2_GEOM_LARGE, gChatExitFn,
+                 (gChatPageCount > 1) ? navFn : nullptr);
+}
+
+// Scroll/tap page navigation: scroll-up (PREV) = older, scroll-down/tap (NEXT) =
+// newer. Wraps around, matching the JSON viewer.
+static void chatNavPage(G2TapKind kind) {
+  if (gChatPageCount <= 1) return;
+  if (kind == G2_TAP_PAGE_PREV) {
+    gChatPage = (gChatPage == 0) ? (gChatPageCount - 1) : (gChatPage - 1);
+  } else {
+    gChatPage = (gChatPage + 1) % gChatPageCount;
+  }
+  chatRenderPage(chatNavPage);
+}
+#endif  // ENABLE_ESPNOW
+
+// Inbox views — paged one-pane chat. received = "<name>: ...", sent = "me: ...";
+// long messages wrap; scroll/tap pages through history, double-tap exits.
+static void showInboxMenu() {
+  setSub(ESPN_APP_SUB_INBOX);
+#if ENABLE_ESPNOW
+  int rc = espnowCollapsedAllMessages(gInboxRefs, 2 * MESSAGES_PER_DEVICE);
+  snprintf(gChatTitle, sizeof(gChatTitle), "Inbox");
+  gChatExitFn = exitInboxToMain;
+  chatBuildPages(rc);
+  chatRenderPage(chatNavPage);
+  DEBUG_G2F("[G2-ESP-NOW-APP] inbox (text) rc=%d pages=%d", rc, gChatPageCount);
 #else
-  static const char* na[] = { "<- Main Menu", "(ESP-NOW not compiled)" };
-  g2ShowListPage(na, 2);
+  g2ShowTextPage("ESP-NOW not compiled", G2_GEOM_LARGE, exitInboxToMain, nullptr);
 #endif
 }
 
 static void showPeerInboxMenu() {
   setSub(ESPN_APP_SUB_PEER_INBOX);
-
 #if ENABLE_ESPNOW
   if (!gEspNow || !gEspNow->initialized ||
       gSelectedPeer < 0 || gSelectedPeer >= gEspNow->deviceCount) {
@@ -696,38 +823,15 @@ static void showPeerInboxMenu() {
     return;
   }
   EspNowDevice& d = gEspNow->devices[gSelectedPeer];
-
-  static EXT_RAM_BSS_ATTR ReceivedTextMessage msgs[ESPN_APP_INBOX_DISPLAY_MAX];
-  static EXT_RAM_BSS_ATTR char rows[1 + ESPN_APP_INBOX_DISPLAY_MAX][72];
-  const char* ptrs[1 + ESPN_APP_INBOX_DISPLAY_MAX];
-  strcpy(rows[0], "<- Peer");
-  ptrs[0] = rows[0];
-  size_t n = 1;
-
-  int got = getPeerMessages(d.mac, msgs, ESPN_APP_INBOX_DISPLAY_MAX,
-                            /*sinceSeq=*/0);
-  if (got > 0) {
-    unsigned long now = (unsigned long)millis();
-    for (int i = 0; i < got && (size_t)i < ESPN_APP_INBOX_DISPLAY_MAX; i++) {
-      // showSender=false — the user knows whose inbox they're looking at;
-      // dropping the prefix gives the message text more room.
-      formatInboxRow(rows[1 + i], sizeof(rows[1 + i]), msgs[i], now,
-                     /*showSender=*/false);
-      ptrs[n++] = rows[1 + i];
-    }
-  }
-
-  if (n == 1) {
-    static const char* empty[] = { "<- Peer", "(no messages from this peer)" };
-    g2ShowListPage(empty, 2);
-  } else {
-    g2ShowListPage(ptrs, n);
-  }
-  DEBUG_G2F("[G2-ESP-NOW-APP] peer-inbox shown (peer=%d, %d msgs)",
-            gSelectedPeer, got);
+  int rc = espnowGetConversation(d.mac, gInboxRefs, 2 * MESSAGES_PER_DEVICE);
+  snprintf(gChatTitle, sizeof(gChatTitle), "%s", d.name.length() ? d.name.c_str() : "peer");
+  gChatExitFn = exitPeerInboxToDetail;
+  chatBuildPages(rc);
+  chatRenderPage(chatNavPage);
+  DEBUG_G2F("[G2-ESP-NOW-APP] peer-inbox (text) peer=%d rc=%d pages=%d",
+            gSelectedPeer, rc, gChatPageCount);
 #else
-  static const char* na[] = { "<- Peer", "(ESP-NOW not compiled)" };
-  g2ShowListPage(na, 2);
+  g2ShowTextPage("ESP-NOW not compiled", G2_GEOM_LARGE, exitPeerInboxToDetail, nullptr);
 #endif
 }
 
@@ -985,7 +1089,7 @@ static void handlePeerDetailTap(uint32_t idx) {
       TextEntryConfig cfg = {};
       cfg.prompt   = "Send to peer";
       cfg.initial  = "";
-      cfg.maxLen   = 80;
+      cfg.maxLen   = 32;  // g2BeginTextEntry rejects maxLen > 32
       cfg.onCommit = sendTypedToPeerCommit;
       cfg.onCancel = sendTypedToPeerCancel;
       if (!g2BeginTextEntry(cfg)) {
@@ -1017,7 +1121,7 @@ static void handleBroadcastTap(uint32_t idx) {
       TextEntryConfig cfg = {};
       cfg.prompt   = "Broadcast";
       cfg.initial  = "";
-      cfg.maxLen   = 80;
+      cfg.maxLen   = 32;  // g2BeginTextEntry rejects maxLen > 32
       cfg.onCommit = broadcastTypedCommit;
       cfg.onCancel = broadcastTypedCancel;
       if (!g2BeginTextEntry(cfg)) {
@@ -1079,28 +1183,12 @@ static void handleInboxTap(uint32_t idx) {
   if (idx == 0) { showMainMenu(); return; }
 
 #if ENABLE_ESPNOW
-  // Re-fetch the same window we rendered. The list-row indices line up 1:1
-  // with msgs[] positions because both renderer and dispatcher source from
-  // getAllMessages() with identical args.
-  ReceivedTextMessage msgs[ESPN_APP_INBOX_DISPLAY_MAX];
-  int got = getAllMessages(msgs, ESPN_APP_INBOX_DISPLAY_MAX, /*sinceSeq=*/0);
-  int slot = (int)idx - 1;
-  if (slot < 0 || slot >= got) {
-    DEBUG_G2F("[G2-ESP-NOW-APP] inbox: tap idx=%u out of range (got=%d)",
-              (unsigned)idx, got);
-    return;
-  }
-  // Look up the sender's slot in gEspNow->devices[] so Peer Detail has a
-  // valid gSelectedPeer to render against.
-  if (!gEspNow || !gEspNow->initialized) { showMainMenu(); return; }
-  for (int i = 0; i < gEspNow->deviceCount; i++) {
-    if (memcmp(gEspNow->devices[i].mac, msgs[slot].senderMac, 6) == 0) {
-      gSelectedPeer = i;
-      showPeerDetail();
-      return;
-    }
-  }
-  DEBUG_G2F("[G2-ESP-NOW-APP] inbox: sender no longer paired (slot=%d)", slot);
+  // The inbox now renders as a TextContainer chat view, so taps route through
+  // the text-view exit path (gTextViewExitFn -> exitInboxToMain), not here.
+  // This list-style dispatcher is only a defensive fallback (e.g. a stray tap
+  // before the text page primes) — just go back to Main.
+  (void)idx;
+  showMainMenu();
 #else
   (void)idx;
 #endif
