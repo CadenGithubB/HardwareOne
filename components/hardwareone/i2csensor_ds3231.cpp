@@ -615,7 +615,13 @@ bool rtcStartInternal() {
 
 const char* cmd_rtc(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  
+
+  if (argWantsJson(argsInput)) {
+    if (!ensureDebugBuffer()) return "{\"valid\":false,\"error\":\"buffer\"}";
+    int n = rtcBuildDataJSON(getDebugBuffer(), 1024);  // shared builder (also feeds sensors json)
+    return (n > 0) ? getDebugBuffer() : "{\"valid\":false}";
+  }
+
   static String response;
   response = "";
   

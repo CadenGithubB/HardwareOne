@@ -300,6 +300,15 @@ int anoEncoderBuildDataJSON(char* buf, size_t bufSize) {
 // Command handlers
 // ============================================================================
 const char* cmd_anoencoder(const String& argsInput) {
+  if (argWantsJson(argsInput)) {
+    static char jbuf[160];
+    snprintf(jbuf, sizeof(jbuf),
+      "{\"schema\":1,\"connected\":%s,\"position\":%ld,\"axis\":%u,\"buttons\":%lu}",
+      gAnoEncoderConnected ? "true" : "false",
+      (long)gAnoEncoderCache.encoderPosition, (unsigned)gAnoEncoderCache.currentAxis,
+      (unsigned long)gAnoEncoderCache.buttons);
+    return jbuf;
+  }
   if (!gAnoEncoderConnected) {
     if (!anoEncoderInitConnection()) return "[ANO] Error: Not connected - check wiring";
   }

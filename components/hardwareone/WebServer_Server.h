@@ -183,6 +183,10 @@ bool unbanIp(const char* ip);
 // Broadcast the current ban list to all connected clients (used by cmd_banlist).
 void broadcastBanList();
 
+// JSON form of the IP ban list (used by `banlist json`). Defined alongside the
+// ban data in WebServer_Server.cpp; only linked in HTTP-enabled builds.
+const char* banListJson();
+
 extern volatile unsigned long gSensorStatusSeq;
 extern const char* gLastStatusCause;
 extern volatile int gBroadcastSkipSessionIdx;
@@ -326,6 +330,11 @@ esp_err_t handleMicRecordingDelete(httpd_req_t* req);
 
 // Auth logging helper (implemented in main .ino)
 void logAuthAttempt(bool success, const char* path, const String& userTried, const String& ip, const String& reason);
+
+// Single audit front-door for all credential logins (web/serial/BLE/OLED).
+// Maps transport -> canonical "<x>/login" path; G2 logs separately (g2/pair).
+void recordLoginAttempt(CommandSource transport, const String& user,
+                        const String& ip, bool success, const char* reason);
 
 // SSE helpers moved from .ino
 bool sseSessionAliveAndRefresh(int sessIdx, const String& sid);

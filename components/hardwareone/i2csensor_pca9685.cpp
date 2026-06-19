@@ -12,6 +12,8 @@
 #include "System_Utils.h"
 #include "System_Debug.h"  // For BROADCAST_PRINTF macro
 #include "System_Command.h"
+#include "System_MemUtil.h"  // PSRAM_JSON_DOC
+#include <ArduinoJson.h>
 #include "System_I2C.h"
 #include <Wire.h>
 
@@ -141,7 +143,25 @@ const char* cmd_servoprofile(const String& argsInput) {
 
 const char* cmd_servolist(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  
+
+  if (argWantsJson(argsInput)) {
+    PSRAM_JSON_DOC(doc);
+    doc["schema"] = 1;
+    JsonArray arr = doc["servos"].to<JsonArray>();
+    for (int i = 0; i < MAX_SERVO_CHANNELS; i++) {
+      if (!servoProfiles[i].configured) continue;
+      JsonObject o = arr.add<JsonObject>();
+      o["channel"]     = i;
+      o["name"]        = servoProfiles[i].name;
+      o["minPulse"]    = servoProfiles[i].minPulse;
+      o["maxPulse"]    = servoProfiles[i].maxPulse;
+      o["centerPulse"] = servoProfiles[i].centerPulse;
+    }
+    doc["count"] = (int)arr.size();
+    serializeJson(doc, getDebugBuffer(), 1024);
+    return getDebugBuffer();
+  }
+
   broadcastOutput("Configured Servos:");
   broadcastOutput("Ch  Name            Min    Max    Center  Status");
   broadcastOutput("--  --------------  -----  -----  ------  --------");

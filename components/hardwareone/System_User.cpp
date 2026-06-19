@@ -311,11 +311,27 @@ bool isAdminUser(const String& who) {
 // ============================================================================
 
 bool loginTransport(CommandSource transport, const String& username, const String& password) {
+  // serial / display / bluetooth are the credential-login transports that funnel
+  // through here (web uses cookie sessions; G2 uses pair-time identity). Audit
+  // each attempt once via the shared recordLoginAttempt() front-door.
+  const bool credentialTransport = (transport == SOURCE_SERIAL ||
+                                    transport == SOURCE_LOCAL_DISPLAY ||
+                                    transport == SOURCE_BLUETOOTH);
+
   // Validate credentials first
   if (!isValidUser(username, password)) {
+#if ENABLE_HTTP_SERVER
+    if (credentialTransport)
+      recordLoginAttempt(transport, username, String(), false, "Invalid credentials");
+#endif
     return false;
   }
-  
+
+#if ENABLE_HTTP_SERVER
+  if (credentialTransport)
+    recordLoginAttempt(transport, username, String(), true, "Login successful");
+#endif
+
   // Set auth state based on transport
   switch (transport) {
     case SOURCE_SERIAL:
@@ -2362,6 +2378,7 @@ const char* cmd_unban(const String& argsInput) {
 
 const char* cmd_banlist(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  if (argWantsJson(argsInput)) return banListJson();  // built in WebServer_Server.cpp where sIpBans lives
   broadcastBanList();
   return "";
 }
@@ -2402,6 +2419,7 @@ const char* cmd_unbanuser(const String& argsInput) {
 // Note: cmd_login and cmd_logout are in System_Utils.cpp (always available)
 const char* cmd_session_list(const String& originalCmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  if (argWantsJson(originalCmd)) return "{\"schema\":1,\"available\":false,\"reason\":\"http server disabled\"}";
   return "Session management requires HTTP server to be enabled";
 }
 const char* cmd_session_revoke(const String& originalCmd) {
@@ -2418,6 +2436,7 @@ const char* cmd_unban(const String& originalCmd) {
 }
 const char* cmd_banlist(const String& originalCmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  if (argWantsJson(originalCmd)) return "{\"schema\":1,\"available\":false,\"reason\":\"http server disabled\"}";
   return "Ban management requires HTTP server to be enabled";
 }
 const char* cmd_banuser(const String& originalCmd) {

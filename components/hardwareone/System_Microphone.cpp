@@ -16,6 +16,8 @@
 #include "System_Debug.h"
 #include "System_TaskUtils.h"
 #include "System_Command.h"
+#include "System_Utils.h"   // argWantsJson
+#include <ArduinoJson.h>
 #include "System_Mutex.h"
 #include "System_Settings.h"
 #include "System_I2C.h"
@@ -738,6 +740,14 @@ const char* buildMicrophoneStatusJson() {
 
 const char* cmd_mic(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  if (argWantsJson(argsInput)) {
+    snprintf(gMicCmdBuffer, sizeof(gMicCmdBuffer),
+      "{\"schema\":1,\"enabled\":%s,\"connected\":%s,\"recording\":%s,"
+      "\"sampleRate\":%d,\"bitDepth\":%d,\"channels\":%d,\"level\":%d}",
+      gMicEnabled ? "true" : "false", micConnected ? "true" : "false", micRecording ? "true" : "false",
+      micSampleRate, micBitDepth, micChannels, gMicEnabled ? getAudioLevel() : 0);
+    return gMicCmdBuffer;
+  }
   snprintf(gMicCmdBuffer, sizeof(gMicCmdBuffer),
     "Microphone Status:\n"
     "  Enabled: %s\n"
@@ -772,6 +782,11 @@ const char* cmd_micstop(const String& argsInput) {
 
 const char* cmd_miclevel(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  if (argWantsJson(argsInput)) {
+    snprintf(gMicCmdBuffer, sizeof(gMicCmdBuffer), "{\"schema\":1,\"enabled\":%s,\"level\":%d}",
+      gMicEnabled ? "true" : "false", gMicEnabled ? getAudioLevel() : 0);
+    return gMicCmdBuffer;
+  }
   if (!gMicEnabled) {
     return "Microphone not enabled";
   }
@@ -825,12 +840,36 @@ const char* cmd_micrecord(const String& argsInput) {
 
 const char* cmd_miclist(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  
+
+  if (argWantsJson(argsInput)) {
+    PSRAM_JSON_DOC(doc);
+    doc["schema"] = 1;
+    doc["count"] = getRecordingCount();
+    JsonArray arr = doc["recordings"].to<JsonArray>();
+    String list = getRecordingsList();  // "name:size,name:size,..."
+    int start = 0;
+    while (start < (int)list.length()) {
+      int comma = list.indexOf(',', start);
+      String entry = (comma < 0) ? list.substring(start) : list.substring(start, comma);
+      entry.trim();
+      if (entry.length()) {
+        int colon = entry.lastIndexOf(':');
+        JsonObject o = arr.add<JsonObject>();
+        if (colon > 0) { o["filename"] = entry.substring(0, colon); o["size"] = entry.substring(colon + 1).toInt(); }
+        else           { o["filename"] = entry; }
+      }
+      if (comma < 0) break;
+      start = comma + 1;
+    }
+    serializeJson(doc, getDebugBuffer(), 1024);
+    return getDebugBuffer();
+  }
+
   int count = getRecordingCount();
   if (count == 0) {
     return "No recordings found";
   }
-  
+
   String list = getRecordingsList();
   snprintf(gMicCmdBuffer, sizeof(gMicCmdBuffer), "Recordings (%d):\n%s", count, list.c_str());
   return gMicCmdBuffer;

@@ -1177,9 +1177,22 @@ static void ringSpoofStop() {
 // CLI commands
 // =============================================================================
 
-static const char* cmd_ringstatus(const String& /*args*/) {
+static const char* cmd_ringstatus(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   EXT_RAM_BSS_ATTR static char buf[256];
+  if (argWantsJson(args)) {
+    const uint32_t upMs = (gRing.connected && gRing.connectedSince) ? (millis() - gRing.connectedSince) : 0;
+    CompactJson j(buf, sizeof(buf));
+    j.kv("schema", 1)
+     .kv("connected", (bool)gRing.connected)
+     .kv("name", gRingDeviceName.length() ? gRingDeviceName.c_str() : "")
+     .kv("addr", gRingDeviceAddress.length() ? gRingDeviceAddress.c_str() : "")
+     .kv("mtu", (unsigned)gRing.mtu)
+     .kv("rx", (unsigned long)gRing.packetsReceived)
+     .kv("upMs", (unsigned long)upMs)
+     .kv("scanFound", (bool)gRingScanFound);
+    return j.c_str();
+  }
   g2RingGetStatus(buf, sizeof(buf));
   return buf;
 }

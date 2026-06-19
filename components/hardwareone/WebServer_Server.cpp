@@ -1017,6 +1017,25 @@ void broadcastBanList() {
   }
 }
 
+// JSON form of the ban list, built where the data lives (sIpBans is static to
+// this file). Returned to the caller via getDebugBuffer; called by cmd_banlist
+// when `json` is requested.
+const char* banListJson() {
+  if (!sIpBansLoaded) loadIpBans();
+  PSRAM_JSON_DOC(doc);
+  doc["schema"] = 1;
+  JsonArray arr = doc["bans"].to<JsonArray>();
+  for (int i = 0; i < MAX_IP_BANS; i++) {
+    if (sIpBans[i].ip[0] == '\0') continue;
+    JsonObject o = arr.add<JsonObject>();
+    o["ip"]     = sIpBans[i].ip;
+    o["reason"] = sIpBans[i].reason[0] ? sIpBans[i].reason : "";
+  }
+  doc["count"] = (int)arr.size();
+  serializeJson(doc, getDebugBuffer(), 1024);
+  return getDebugBuffer();
+}
+
 // ============================================================================
 
 // Helper: enqueue a targeted revoke notice for a specific session index.
@@ -1424,9 +1443,13 @@ void logAuthAttempt(bool success, const char* path, const String& userTried, con
   // "/login". The reason-based matches catch events whose path varies by
   // transport (e.g. password change is "/account/password-change" from web
   // but "/oled/command" from OLED).
+  // Any "<transport>/login" path (web "/login", serial/login, bluetooth/login,
+  // display/login) plus the G2 pair event and credential-rotation reasons.
+  // endsWith avoids spurious matches like "/login-help" / "/configure-login-page".
   bool isSecurityAuditEvent =
-      (cleanPath == "/login") ||
-      (cleanPath == "serial/login") ||
+      cleanPath.endsWith("/login") ||
+      (cleanPath == "g2/pair") ||
+      (cleanPath == "espnow/bond") ||
       (reason.indexOf("Login successful") >= 0) ||
       (reason.indexOf("Password changed") >= 0) ||
       (reason.indexOf("Current password incorrect") >= 0) ||
@@ -1456,6 +1479,25 @@ void logAuthAttempt(bool success, const char* path, const String& userTried, con
 
   const char* logFile = success ? LOG_OK_FILE : LOG_FAIL_FILE;
   appendLineWithCap(logFile, line, LOG_CAP_BYTES);
+}
+
+// Single audit front-door for all credential logins (web, serial, BLE, OLED).
+// G2 is excluded — it has no credential login (its pair-time identity is logged
+// separately with path "g2/pair"). Maps the transport to a canonical
+// "<x>/login" path and fills a synthetic IP when the caller has none, so every
+// login path records consistently through one place.
+void recordLoginAttempt(CommandSource transport, const String& user,
+                        const String& ip, bool success, const char* reason) {
+  const char* path;
+  const char* defIp;
+  switch (transport) {
+    case SOURCE_WEB:           path = "web/login";       defIp = "web";   break;
+    case SOURCE_SERIAL:        path = "serial/login";    defIp = "local"; break;
+    case SOURCE_BLUETOOTH:     path = "bluetooth/login"; defIp = "ble";   break;
+    case SOURCE_LOCAL_DISPLAY: path = "display/login";   defIp = "local"; break;
+    default:                   path = "login";           defIp = "local"; break;
+  }
+  logAuthAttempt(success, path, user, ip.length() ? ip : String(defIp), reason ? reason : "");
 }
 
 // Streaming content for Dashboard page (moved from .ino)
@@ -3265,7 +3307,7 @@ esp_err_t handleLogin(httpd_req_t* req) {
       snprintf(lockMsg, sizeof(lockMsg),
                "Too many failed attempts. Try again in %lu second%s.",
                remainingSec, remainingSec == 1 ? "" : "s");
-      logAuthAttempt(false, req->uri, u, ip, "Locked out");
+      recordLoginAttempt(SOURCE_WEB, u, ip, false, "Locked out");
       httpd_resp_set_type(req, "text/html");
       streamBeginHtml(req, "Sign In", /*isPublic=*/true, "", "login");
       String logoutReason = getLogoutReason(ip);
@@ -3291,7 +3333,7 @@ esp_err_t handleLogin(httpd_req_t* req) {
       String fakeCmd = "login " + u + " ****";
       logCommandExecution(auditCtx, fakeCmd.c_str(), false, "Invalid credentials");
     }
-    logAuthAttempt(false, req->uri, u, ip, "Invalid credentials");
+    recordLoginAttempt(SOURCE_WEB, u, ip, false, "Invalid credentials");
 
     // Show login form with error — include remaining attempts before first lockout
     LoginAttemptEntry* e = findLoginEntry(ip.c_str());
@@ -3319,7 +3361,7 @@ esp_err_t handleLogin(httpd_req_t* req) {
 
   // Clear brute-force record and any existing logout reason for this IP
   clearLoginAttempts(ip.c_str());
-  logAuthAttempt(true, req->uri, u, ip, "Login successful");
+  recordLoginAttempt(SOURCE_WEB, u, ip, true, "Login successful");
 
   // Audit log: successful login (password redacted)
   {

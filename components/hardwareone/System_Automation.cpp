@@ -1555,28 +1555,25 @@ const char* cmd_automation_run(const String& argsInput) {
   CommandArgs a(argsInput);
   String idStr = a.value("id");
   if (idStr.length() == 0) {
-    broadcastOutput("Usage: automation run id=<id>");
-    return "ERROR";
+    return "Error: missing 'id' parameter (usage: automation run id=<id>)";
   }
-  
+
   String json;
   if (!readText(AUTOMATIONS_JSON_FILE, json)) {
-    broadcastOutput("Error: failed to read automations.json");
-    return "ERROR";
+    return "Error: failed to read automations.json";
   }
-  
+
   char needleBuf[32];
   snprintf(needleBuf, sizeof(needleBuf), "\"id\": %s", idStr.c_str());
   int idPos = json.indexOf(needleBuf);
   if (idPos < 0) {
-    broadcastOutput("Error: automation id not found");
-    return "ERROR";
+    snprintf(getDebugBuffer(), 1024, "Error: automation id %s not found (it may have been deleted)", idStr.c_str());
+    return getDebugBuffer();
   }
-  
+
   int objStart = json.lastIndexOf('{', idPos);
   if (objStart < 0) {
-    broadcastOutput("Error: malformed automations.json (objStart)");
-    return "ERROR";
+    return "Error: malformed automations.json (objStart)";
   }
   
   int depth = 0, objEnd = -1;
@@ -1593,8 +1590,7 @@ const char* cmd_automation_run(const String& argsInput) {
   }
   
   if (objEnd < 0) {
-    broadcastOutput("Error: malformed automations.json (objEnd)");
-    return "ERROR";
+    return "Error: malformed automations.json (objEnd)";
   }
   
   String obj = json.substring(objStart, objEnd + 1);
@@ -1906,22 +1902,31 @@ const char* cmd_automation(const String& argsInput) {
   subCmd.toLowerCase();
   String subArgs = a.remaining(0);
 
-  // Handle "system" subcommand
+  // Handle "system" subcommand. The global enable flag is a system setting
+  // (gSettings.automationsEnabled), not part of automations.json — so it has its
+  // own command rather than riding the verbatim automationlist json document.
+  // `json` is accepted on enable/disable/status and reports the resulting state
+  // as {"schema":1,"enabled":<bool>} so JSON-only clients don't have to scrape
+  // the "Automation system: enabled" text.
   if (subCmd == "system") {
-    if (subArgs.equalsIgnoreCase("enable")) {
+    const bool wantJson = argWantsJson(subArgs);
+    String op = a.arg(1);
+    op.toLowerCase();
+    if (op == "enable") {
       setSetting(gSettings.automationsEnabled, true);
-      return "Automation system: enabled";
-    } else if (subArgs.equalsIgnoreCase("disable")) {
+    } else if (op == "disable") {
       setSetting(gSettings.automationsEnabled, false);
-      return "Automation system: disabled";
-    } else if (subArgs.equalsIgnoreCase("status")) {
-      if (gSettings.automationsEnabled) {
-        return "Automation system: enabled";
-      } else {
-        return "Automation system: disabled";
-      }
+    } else if (op != "status") {
+      return wantJson ? "{\"error\":\"usage: automation system <enable|disable|status> [json]\"}"
+                      : "Usage: automation system <enable|disable|status>";
     }
-    return "Usage: automation system <enable|disable|status>";
+    if (wantJson) {
+      snprintf(getDebugBuffer(), 1024, "{\"schema\":1,\"enabled\":%s}",
+               gSettings.automationsEnabled ? "true" : "false");
+      return getDebugBuffer();
+    }
+    return gSettings.automationsEnabled ? "Automation system: enabled"
+                                        : "Automation system: disabled";
   }
 
   // Handle regular automation commands
@@ -3862,7 +3867,7 @@ const CommandEntry automationCommands[] = {
   // Primary dispatcher: "automation <subcommand> [args]"
   // Subcommands: system enable|disable|status, list, add, enable, disable, delete, run, sanitize, recompute
   { "automation", "Automation system: automation <subcommand> [args].", false, cmd_automation,
-    "Usage: automation <system enable|disable|status | list | add | enable | disable | delete | run | trigger | sanitize | recompute>" },
+    "Usage: automation <system enable|disable|status [json] | list [json] | add | enable | disable | delete | run | trigger | sanitize | recompute>" },
 
   // Single-word aliases for common operations (follow naming convention)
   { "automationlist", "List all automations.", false, cmd_automation_list },

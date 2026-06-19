@@ -137,6 +137,12 @@ float readToFDistance() {
 const char* cmd_tof(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
+  if (argWantsJson(argsInput)) {
+    if (!ensureDebugBuffer()) return "{\"valid\":false,\"error\":\"buffer\"}";
+    int n = tofBuildDataJSON(getDebugBuffer(), 1024);  // shared builder (also feeds sensors json / MQTT)
+    return (n > 0) ? getDebugBuffer() : "{\"valid\":false}";
+  }
+
   float distance = readToFDistance();
   if (distance < 999.0) {
     BROADCAST_PRINTF("Distance: %.1f cm", distance);

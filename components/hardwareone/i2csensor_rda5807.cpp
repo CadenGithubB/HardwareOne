@@ -669,7 +669,13 @@ const char* cmd_fmradio_mute(const String& argsInput) {
 
 const char* cmd_fmradio_status(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  
+
+  if (argWantsJson(argsInput)) {
+    if (!ensureDebugBuffer()) return "{\"valid\":false,\"error\":\"buffer\"}";
+    int n = fmRadioBuildDataJSON(getDebugBuffer(), 1024);  // shared builder (also feeds sensors json)
+    return (n > 0) ? getDebugBuffer() : "{\"valid\":false}";
+  }
+
   // Output each line separately to avoid DEBUG_MSG_SIZE (256 byte) truncation
   broadcastOutput("FM Radio Status:");
   BROADCAST_PRINTF("  Connected: %s", gFmRadioConnected ? "Yes" : "No");

@@ -154,15 +154,25 @@ try{ fetch('/api/cli/logs', { credentials: 'same-origin', cache:'no-store' })
 .then(function(r){ return r.text(); })
 .then(function(text){ var t=__applyClear(text); t=__stripAnsi(t); if(cliOutput){ cliOutput.textContent = t || ''; try{ localStorage.setItem('cliOutputHistory', cliOutput.textContent); }catch(_){} try{ if(!scrolledOnce){ cliOutput.scrollTop = cliOutput.scrollHeight; scrolledOnce = true; } }catch(_){} } })
 .catch(function(e){ try { console.debug('[CLI] logs fetch error: ' + e.message); } catch(_){} }); }catch(_){ }
-try {
-  if (window.__cliPoller) { try{ clearInterval(window.__cliPoller); }catch(_){} }
-  window.__cliPoller = setInterval(function(){
-    fetch('/api/cli/logs', { credentials: 'same-origin', cache: 'no-store' })
-      .then(function(r){ if(r.status===401){ if(window.__cliPoller){ clearInterval(window.__cliPoller); window.__cliPoller=null; } return ''; } return r.text(); })
-      .then(function(text){ if(text && !cliBondMode){ var t=__applyClear(text); t=__stripAnsi(t); if(cliOutput){ cliOutput.textContent = t; try{ localStorage.setItem('cliOutputHistory', cliOutput.textContent); }catch(_){} } } })
-      .catch(function(_){ });
-  }, 500);
-} catch(e) { try{ console.debug('[CLI] polling init error: ' + e.message); }catch(_){} }
+function cliStopLogPoller(){ try{ if(window.__cliPoller){ clearInterval(window.__cliPoller); window.__cliPoller=null; } }catch(_){} }
+function cliStartLogPoller(){
+  // Exactly one local-logs poller, and NEVER while targeting the bonded peer.
+  // The device HTTP server has only 5 sockets with LRU purge on; an always-on
+  // /api/cli/logs poll competes with BondFs.exec's fetches for the last socket
+  // and gets an in-flight bonded request force-closed (browser: "Load failed").
+  cliStopLogPoller();
+  if (cliBondMode) return;
+  try {
+    window.__cliPoller = setInterval(function(){
+      if (cliBondMode) { cliStopLogPoller(); return; }  // stopped the moment we switch to bonded
+      fetch('/api/cli/logs', { credentials: 'same-origin', cache: 'no-store' })
+        .then(function(r){ if(r.status===401){ cliStopLogPoller(); return ''; } return r.text(); })
+        .then(function(text){ if(text && !cliBondMode){ var t=__applyClear(text); t=__stripAnsi(t); if(cliOutput){ cliOutput.textContent = t; try{ localStorage.setItem('cliOutputHistory', cliOutput.textContent); }catch(_){} } } })
+        .catch(function(_){ });
+    }, 500);
+  } catch(e) { try{ console.debug('[CLI] polling init error: ' + e.message); }catch(_){} }
+}
+cliStartLogPoller();
 try{ window.addEventListener('beforeunload', function(){ try{ if(window.__cliPoller){ clearInterval(window.__cliPoller); window.__cliPoller=null; } }catch(_){ } }, {capture:true}); }catch(_){ }
 if(cliInput){ cliInput.addEventListener('keydown', function(e){
   if (e.key === 'ArrowUp') { e.preventDefault(); if (historyIndex === -1) { currentCommand = cliInput.value; } if (historyIndex < commandHistory.length - 1) { historyIndex++; cliInput.value = commandHistory[commandHistory.length - 1 - historyIndex]; } }
@@ -227,6 +237,9 @@ function cliInitBondToggle(){
 
 function cliSetTarget(bonded){
   cliBondMode = !!bonded;
+  // Free up a socket for the bonded fetches; resume local log polling when back
+  // on "This Device". See cliStartLogPoller() for why this matters.
+  try { if (cliBondMode) { cliStopLogPoller(); } else { cliStartLogPoller(); } } catch(_){}
   var bl = document.getElementById('cli-btn-local');
   var bb = document.getElementById('cli-btn-bonded');
   if (bl) bl.style.opacity = cliBondMode ? '0.55' : '1';

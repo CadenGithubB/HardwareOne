@@ -70,6 +70,20 @@ extern const SettingsModule apdsSettingsModule = {
 // APDS Sensor Command Handlers
 // ============================================================================
 
+// Shared data builder — feeds `apdsread json`, `sensors json`, and any other
+// consumer. Mirrors the other sensors' *BuildDataJSON contract.
+int apdsBuildDataJSON(char* buf, size_t bufSize) {
+  if (!buf || bufSize == 0) return 0;
+  bool color = gApdsColorEnabled, prox = gApdsProximityEnabled, gest = gApdsGestureEnabled;
+  return snprintf(buf, bufSize,
+    "{\"valid\":%s,\"colorEnabled\":%s,\"proximityEnabled\":%s,\"gestureEnabled\":%s,"
+    "\"r\":%u,\"g\":%u,\"b\":%u,\"c\":%u,\"proximity\":%u}",
+    (color || prox || gest) ? "true" : "false",
+    color ? "true" : "false", prox ? "true" : "false", gest ? "true" : "false",
+    gApdsCache.apdsRed, gApdsCache.apdsGreen, gApdsCache.apdsBlue, gApdsCache.apdsClear,
+    gApdsCache.apdsProximity);
+}
+
 const char* cmd_apdscolor(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   apdsColorPoll();
@@ -90,6 +104,12 @@ const char* cmd_apdsgesture(const String& argsInput) {
 
 const char* cmd_apdsread(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+
+  if (argWantsJson(argsInput)) {
+    if (!ensureDebugBuffer()) return "{\"valid\":false,\"error\":\"buffer\"}";
+    int n = apdsBuildDataJSON(getDebugBuffer(), 1024);
+    return (n > 0) ? getDebugBuffer() : "{\"valid\":false}";
+  }
 
   bool anyEnabled = gApdsColorEnabled || gApdsProximityEnabled || gApdsGestureEnabled;
   if (!anyEnabled) {

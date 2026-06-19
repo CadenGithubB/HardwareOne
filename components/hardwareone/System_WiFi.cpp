@@ -13,7 +13,9 @@
 #include "System_WiFi.h"
 #include "System_Settings.h"      // For writeSettingsJson()
 #include "System_Debug.h"  // For DEBUG_WIFIF and BROADCAST_PRINTF macros
-#include "System_Utils.h"  // For RETURN_VALID_IF_VALIDATE_CSTR macro
+#include "System_Utils.h"  // For RETURN_VALID_IF_VALIDATE_CSTR macro + argWantsJson
+#include "System_MemUtil.h"  // PSRAM_JSON_DOC
+#include <ArduinoJson.h>
 #include "System_Command.h"
 #include "System_Notifications.h"
 #include "System_Filesystem.h"  // filesystemReady
@@ -80,6 +82,25 @@ static bool wifiInitialized = false;
 const char* cmd_wifiinfo(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
+  // JSON: returned to the caller only. The text path below still uses
+  // broadcastOutput exactly as before, so plain `wifistatus` is unchanged.
+  if (argWantsJson(argsInput)) {
+    PSRAM_JSON_DOC(doc);
+    doc["schema"] = 1;
+    bool conn = WiFi.isConnected();
+    doc["connected"] = conn;
+    if (conn) {
+      doc["ssid"] = WiFi.SSID();
+      doc["ip"]   = WiFi.localIP().toString();
+      doc["rssi"] = WiFi.RSSI();
+    } else {
+      doc["savedSsid"] = gSettings.wifiSSID;
+    }
+    doc["mac"] = WiFi.macAddress();
+    serializeJson(doc, getDebugBuffer(), 1024);
+    return getDebugBuffer();
+  }
+
   if (WiFi.isConnected()) {
     broadcastOutput("WiFi Status:");
     snprintf(getDebugBuffer(), 1024, "  SSID: %s", WiFi.SSID().c_str());
@@ -103,6 +124,23 @@ const char* cmd_wifiinfo(const String& argsInput) {
 
 const char* cmd_wifilist(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+
+  if (argWantsJson(argsInput)) {
+    PSRAM_JSON_DOC(doc);
+    doc["schema"] = 1;
+    JsonArray arr = doc["networks"].to<JsonArray>();
+    for (int i = 0; i < gWifiNetworkCount; ++i) {
+      JsonObject o = arr.add<JsonObject>();
+      o["index"]    = i + 1;
+      o["priority"] = gWifiNetworks[i].priority;
+      o["ssid"]     = gWifiNetworks[i].ssid;
+      o["hidden"]   = gWifiNetworks[i].hidden;
+      o["primary"]  = (i == 0);
+    }
+    doc["count"] = gWifiNetworkCount;
+    serializeJson(doc, getDebugBuffer(), 1024);
+    return getDebugBuffer();
+  }
 
   // Networks already loaded from settings.json by readSettingsJson()
   if (gWifiNetworkCount == 0) {
@@ -955,6 +993,16 @@ const char* cmd_httpstop(const String& argsInput) {
 const char* cmd_httpstatus(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
+  if (argWantsJson(argsInput)) {
+    const bool running = (server != NULL);
+    snprintf(getDebugBuffer(), 1024,
+             "{\"schema\":1,\"running\":%s,\"https\":%s,\"port\":%d}",
+             running ? "true" : "false",
+             gServerIsHttps ? "true" : "false",
+             running ? (gServerIsHttps ? 443 : 80) : 0);
+    return getDebugBuffer();
+  }
+
   if (server != NULL) {
     return gServerIsHttps ? "HTTPS server: RUNNING (port 443)" : "HTTP server: RUNNING (port 80)";
   } else {
@@ -1238,7 +1286,7 @@ const char* cmd_certgen(const String& argsInput) { (void)argsInput; RETURN_VALID
 #if !ENABLE_HTTP_SERVER
 const char* cmd_httpstart(const String& argsInput) { (void)argsInput; RETURN_VALID_IF_VALIDATE_CSTR(); return "HTTP server disabled at build time"; }
 const char* cmd_httpstop(const String& argsInput) { (void)argsInput; RETURN_VALID_IF_VALIDATE_CSTR(); return "HTTP server disabled at build time"; }
-const char* cmd_httpstatus(const String& argsInput) { (void)argsInput; RETURN_VALID_IF_VALIDATE_CSTR(); return "HTTP server: DISABLED"; }
+const char* cmd_httpstatus(const String& argsInput) { RETURN_VALID_IF_VALIDATE_CSTR(); return argWantsJson(argsInput) ? "{\"schema\":1,\"running\":false,\"compiled\":false}" : "HTTP server: DISABLED"; }
 #endif
 
 // ============================================================================

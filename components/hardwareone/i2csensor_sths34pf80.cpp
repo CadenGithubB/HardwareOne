@@ -211,7 +211,13 @@ const char* cmd_presencestop(const String& argsInput) {
 
 const char* cmd_presenceread(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  
+
+  if (argWantsJson(argsInput)) {
+    if (!ensureDebugBuffer()) return "{\"valid\":false,\"error\":\"buffer\"}";
+    int n = presenceBuildDataJSON(getDebugBuffer(), 1024);  // shared builder (also feeds sensors json)
+    return (n > 0) ? getDebugBuffer() : "{\"valid\":false}";
+  }
+
   if (!gPresenceConnected || !gPresenceEnabled) {
     return "[PRESENCE] Error: Sensor not running - use 'openpresence' first";
   }
@@ -239,7 +245,13 @@ const char* cmd_presenceread(const String& argsInput) {
 
 const char* cmd_presencestatus(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  
+
+  if (argWantsJson(argsInput)) {
+    if (!ensureDebugBuffer()) return "{\"valid\":false,\"error\":\"buffer\"}";
+    int n = presenceBuildDataJSON(getDebugBuffer(), 1024);
+    return (n > 0) ? getDebugBuffer() : "{\"valid\":false}";
+  }
+
   if (!ensureDebugBuffer()) return "[PRESENCE] Error: Debug buffer unavailable";
   
   snprintf(getDebugBuffer(), 1024,

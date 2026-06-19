@@ -285,13 +285,15 @@ const char* cmd_thermalstart(const String& argsInput) {
 
 const char* cmd_thermalread(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  const bool wantJson = argWantsJson(argsInput);
 
   if (!gThermalEnabled || !gThermalConnected) {
-    return "[Thermal] Not running. Use 'openthermal' to start.";
+    return wantJson ? "{\"valid\":false,\"enabled\":false}"
+                    : "[Thermal] Not running. Use 'openthermal' to start.";
   }
 
   if (!gThermalCache.thermalDataValid || !gThermalCache.thermalFrame) {
-    return "[Thermal] No data available yet";
+    return wantJson ? "{\"valid\":false}" : "[Thermal] No data available yet";
   }
 
   // Compute min/max/avg from cached frame
@@ -303,6 +305,13 @@ const char* cmd_thermalread(const String& argsInput) {
     sumT += t;
   }
   float avgT = sumT / 768.0f;
+
+  if (wantJson) {
+    snprintf(getDebugBuffer(), 1024,
+      "{\"valid\":true,\"min\":%.1f,\"max\":%.1f,\"avg\":%.1f,\"seq\":%lu}",
+      minT, maxT, avgT, (unsigned long)gThermalCache.thermalSeq);
+    return getDebugBuffer();
+  }
 
   BROADCAST_PRINTF("Thermal: min=%.1f°C max=%.1f°C avg=%.1f°C (seq=%lu)",
                    minT, maxT, avgT, (unsigned long)gThermalCache.thermalSeq);
