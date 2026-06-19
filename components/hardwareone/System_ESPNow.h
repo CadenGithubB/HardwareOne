@@ -1271,6 +1271,23 @@ int espnowCollapsedPeerMessages(uint8_t* peerMac, CollapsedMsgRef* out, int maxN
 // at maxN (oldest dropped first).
 int espnowGetConversation(uint8_t* peerMac, CollapsedMsgRef* out, int maxN);
 
+// Collapsed, direction-tagged, time-ordered GLOBAL inbox across ALL peers — the
+// all-peers analogue of espnowGetConversation, for a "messages from everyone"
+// view (G2 global inbox). Collapses every active peer's received + sent rings and
+// orders the combined set oldest→newest by timestamp. Same zero-copy live-ring
+// lifetime rule as espnowCollapsedPeerMessages. Caps at maxN during collection
+// (like getAllMessages), so a very large multi-peer history can miss the true
+// global-newest — fine for small meshes. Returns the number written.
+int espnowCollapsedAllMessages(CollapsedMsgRef* out, int maxN);
+
+// Reassemble the full text of a multi-fragment message (gathered by reqId) into
+// `out`, in piece order — the reader-side equivalent of the web/BLE reqId-stitch,
+// so on-device UIs can show the whole message. reqId==0 returns 0 (use the
+// record's own text). `complete` (optional) is true only if all fragments were
+// present. Returns bytes written (excluding NUL).
+int espnowReassembleByReqId(const uint8_t* peerMac, uint32_t reqId, bool isSent,
+                            char* out, size_t cap, bool* complete = nullptr);
+
 // File transfer to specific MAC (used by ImageManager)
 bool sendFileToMac(const uint8_t* mac, const String& localPath);
 

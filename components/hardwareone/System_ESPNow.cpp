@@ -14874,4 +14874,91 @@ int espnowGetConversation(uint8_t* peerMac, CollapsedMsgRef* out, int maxN) {
   return w;
 }
 
+// All-peers collapsed read: the global-inbox analogue of espnowGetConversation.
+// Collapses every active peer's received + sent rings into logical-message refs,
+// then orders the combined set oldest→newest by timestamp (callers show the tail
+// for "most recent"). reqId+isSent+senderMac gating in espnowCollapseRing means
+// fragments from different peers never false-merge. Caps at maxN during
+// collection — fine for small meshes; logs if it truncates.
+int espnowCollapsedAllMessages(CollapsedMsgRef* out, int maxN) {
+  if (!gEspNow || !out || maxN <= 0 || !gEspNow->peerMessageHistories) return 0;
+
+  int w = 0;
+  for (int p = 0; p < gEspNow->peerHistoryCapacity && w < maxN; p++) {
+    PeerMessageHistory& history = gEspNow->peerMessageHistories[p];
+    if (!history.active) continue;
+    w = espnowCollapseRing(history.messages, history.tail, history.count, out, w, maxN);
+    w = espnowCollapseRing(history.sent, history.sentTail, history.sentCount, out, w, maxN);
+  }
+
+  for (int i = 0; i < w - 1; i++) {
+    for (int j = 0; j < w - i - 1; j++) {
+      if (out[j].head->timestamp > out[j + 1].head->timestamp) {
+        CollapsedMsgRef temp = out[j];
+        out[j] = out[j + 1];
+        out[j + 1] = temp;
+      }
+    }
+  }
+
+  if (w >= maxN) {
+    DEBUG_ESPNOWF("[ESPNOW] collapsedAll hit cap maxN=%d; older logical messages dropped", maxN);
+  }
+  return w;
+}
+
+// Reassemble the full text of a (possibly multi-fragment) message into `out`.
+// Walks the peer's received (isSent=false) or sent (isSent=true) ring, gathers
+// the records sharing `reqId`, and concatenates their fragments in piece order —
+// the reader-side equivalent of the reqId-stitching the web/BLE UIs do, so
+// on-device displays (G2/OLED) can show the whole message, not just fragment 1.
+// `reqId == 0` (unsolicited / single-frame) returns 0 — the caller should use
+// the record's own text then. `complete` (if non-null) is set true only when all
+// pieceTotal fragments were found. Returns bytes written (excluding NUL).
+int espnowReassembleByReqId(const uint8_t* peerMac, uint32_t reqId, bool isSent,
+                            char* out, size_t cap, bool* complete) {
+  if (complete) *complete = false;
+  if (!out || cap == 0) return 0;
+  out[0] = '\0';
+  if (!gEspNow || !peerMac || reqId == 0 || !gEspNow->peerMessageHistories) return 0;
+
+  PeerMessageHistory* h = nullptr;
+  for (int i = 0; i < gEspNow->peerHistoryCapacity; i++) {
+    PeerMessageHistory& c = gEspNow->peerMessageHistories[i];
+    if (c.active && memcmp(c.peerMac, peerMac, 6) == 0) { h = &c; break; }
+  }
+  if (!h) return 0;
+
+  const ReceivedTextMessage* ring = isSent ? h->sent : h->messages;
+  uint8_t tail = isSent ? h->sentTail : h->tail;
+  uint8_t cnt  = isSent ? h->sentCount : h->count;
+
+  // Determine the fragment count from any matching record.
+  uint8_t total = 0;
+  for (int i = 0; i < cnt; i++) {
+    const ReceivedTextMessage& m = ring[(tail + i) % MESSAGES_PER_DEVICE];
+    if (m.active && m.reqId == reqId) { total = m.pieceTotal ? m.pieceTotal : 1; break; }
+  }
+  if (total == 0) return 0;
+
+  // Concatenate fragments in piece order (1..total).
+  size_t pos = 0;
+  uint8_t found = 0;
+  for (uint8_t p = 1; p <= total; p++) {
+    for (int i = 0; i < cnt; i++) {
+      const ReceivedTextMessage& m = ring[(tail + i) % MESSAGES_PER_DEVICE];
+      if (!m.active || m.reqId != reqId || m.piece != p) continue;
+      size_t l = strlen(m.message);
+      if (pos + l >= cap) l = (cap > pos + 1) ? (cap - 1 - pos) : 0;
+      if (l) { memcpy(out + pos, m.message, l); pos += l; }
+      found++;
+      break;
+    }
+    if (pos >= cap - 1) break;
+  }
+  out[pos] = '\0';
+  if (complete) *complete = (found >= total);
+  return (int)pos;
+}
+
 #endif // ENABLE_ESPNOW
