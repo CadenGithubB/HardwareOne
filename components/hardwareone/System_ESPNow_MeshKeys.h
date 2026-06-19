@@ -4,15 +4,15 @@
 // ============================================================================
 // ESP-NOW V4 Phase 3.1 — per-mesh key derivation cache.
 //
-// Each mesh has a long-lived PBKDF2-stretched hash (lives in
-// gSettings.meshes[i].passphraseHashPbkdf2; persisted across boots). From
+// Each mesh has a long-lived PBKDF2-stretched key (lives in
+// gSettings.meshes[i].passphraseStretchedKey; persisted across boots). From
 // that one stretched value, two purpose-specific subkeys are derived via
 // Blake2b KDF and cached in RAM for the lifetime of the boot:
 //
-//   bootstrapKey  = KDF(stretchedHash, ctx="esp-boot")  — HMAC key for the
+//   bootstrapKey  = KDF(stretchedKey, ctx="esp-boot")  — HMAC key for the
 //                                                         KEY_EX_* handshake
 //                                                         in Phase 3.3.
-//   groupKey      = KDF(stretchedHash, ctx="esp-grup")  — AEAD key for
+//   groupKey      = KDF(stretchedKey, ctx="esp-grup")  — AEAD key for
 //                                                         BROADCAST_AUTH
 //                                                         frames in Phase 3.5.
 //
@@ -21,10 +21,10 @@
 // commits that just wire up the handshake / broadcast paths.
 //
 // Boot rule:
-//   - If a mesh has a passphrase but no cached PBKDF2 hash on disk, stretch
+//   - If a mesh has a passphrase but no cached stretched key on disk, stretch
 //     it at boot (~1-2 s blocking per mesh) and persist. One-time cost per
 //     mesh per firmware version.
-//   - Re-derive the in-RAM subkeys whenever the stretched hash changes
+//   - Re-derive the in-RAM subkeys whenever the stretched key changes
 //     (boot, passphrase set, mesh rename).
 //
 // Everything below requires espnowCryptoInit() to have completed.
@@ -46,20 +46,20 @@ struct MeshDerivedKeys {
   uint8_t  groupKey[32];       // KDF subkey for mesh broadcast AEAD (Phase 3.5)
 };
 
-// One-shot stretcher: compute the PBKDF2 hash for mesh slot `meshIdx` from
+// One-shot stretcher: compute the PBKDF2-stretched key for mesh slot `meshIdx` from
 // its current passphrase, write into gSettings.meshes[meshIdx], mark valid.
 // Caller is responsible for persisting settings afterward.
 //
 // Cost: ~1-2 seconds on ESP32 @ 240 MHz with 100k iterations. Call from a
 // non-realtime context (boot, CLI handler). Skips work if passphrase is
-// empty (clears the hash & marks invalid instead).
+// empty (clears the key & marks invalid instead).
 //
-// Returns true if the hash is valid after the call (including the empty-
+// Returns true if the key is valid after the call (including the empty-
 // passphrase clear case).
 bool meshKeysStretchPassphrase(uint8_t meshIdx);
 
-// Derive bootstrapKey + groupKey from the cached stretched hash into
-// gMeshDerivedKeys[meshIdx]. No-op if the mesh has no valid hash.
+// Derive bootstrapKey + groupKey from the cached stretched key into
+// gMeshDerivedKeys[meshIdx]. No-op if the mesh has no valid key.
 bool meshKeysDerive(uint8_t meshIdx);
 
 // Convenience: stretch (if needed) AND derive for every configured mesh.
@@ -68,7 +68,7 @@ bool meshKeysDerive(uint8_t meshIdx);
 uint8_t meshKeysInitAll();
 
 // Invalidate the derived keys for a mesh — e.g. after passphrase change.
-// Doesn't touch the persisted stretched hash; caller is responsible for
+// Doesn't touch the persisted stretched key; caller is responsible for
 // calling stretch + derive afterward.
 void meshKeysInvalidate(uint8_t meshIdx);
 

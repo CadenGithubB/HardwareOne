@@ -404,19 +404,6 @@ bool macEqual6(const uint8_t a[6], const uint8_t b[6]) {
   return memcmp(a, b, 6) == 0;
 }
 
-// V2 reliability toggles (ack/dedup)
-const char* cmd_espnow_rel(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  String args = argsInput;
-  args.trim();
-  if (args.length() == 0) {
-    return "Reliability status: ACK=on, dedup=on (both MANDATORY - v2 protocol)";
-  }
-  // Reliability (ACK+dedup) is MANDATORY and cannot be disabled in v2 protocol
-  return "Reliability (ACK+dedup) is MANDATORY and always enabled for robust operation.";
-}
-
 // Save mesh peer MAC addresses to filesystem (topology only, not health metrics)
 // This is called only when topology changes (new peer discovered, peer removed, mode change)
 // Health metrics (timestamps, counters) rebuild naturally from heartbeats after reboot
@@ -1284,15 +1271,15 @@ void espnowMeshesWriteJson(JsonDocument& doc, bool excludePasswords) {
     // passphrase, and keep it OUT of the sync/web (excludePasswords) paths. If
     // it's absent on load, the hash is re-stretched from the passphrase at boot
     // — so dropping it from those paths is safe.
-    if (!excludePasswords && m.passphraseHashValid) {
+    if (!excludePasswords && m.passphraseStretchedKeyValid) {
       char hex[65];
       static const char* kHex = "0123456789abcdef";
       for (int k = 0; k < 32; k++) {
-        hex[k * 2]     = kHex[(m.passphraseHashPbkdf2[k] >> 4) & 0xF];
-        hex[k * 2 + 1] = kHex[m.passphraseHashPbkdf2[k] & 0xF];
+        hex[k * 2]     = kHex[(m.passphraseStretchedKey[k] >> 4) & 0xF];
+        hex[k * 2 + 1] = kHex[m.passphraseStretchedKey[k] & 0xF];
       }
       hex[64] = '\0';
-      putSecret(e, "passphraseHashPbkdf2", String(hex));
+      putSecret(e, "passphraseStretchedKey", String(hex));
     }
   }
 #if ENABLE_BONDED_MODE
@@ -1324,10 +1311,10 @@ void espnowMeshesReadJson(JsonDocument& doc) {
       // Phase 3.1: load the cached PBKDF2 hash if present. Hex-decode strict;
       // any malformed value falls back to "no cached hash" (will trigger a
       // re-stretch at boot) rather than refusing to load settings.
-      gSettings.meshes[idx].passphraseHashValid = false;
-      String hashHex = getSecret(e, "passphraseHashPbkdf2");  // decrypt at-rest AES (key material)
-      if (hashHex.length() == 64) {
-        const char* hp = hashHex.c_str();
+      gSettings.meshes[idx].passphraseStretchedKeyValid = false;
+      String keyHex = getSecret(e, "passphraseStretchedKey");  // decrypt at-rest AES (key material)
+      if (keyHex.length() == 64) {
+        const char* hp = keyHex.c_str();
         auto nyb = [](char c) -> int {
           if (c >= '0' && c <= '9') return c - '0';
           if (c >= 'a' && c <= 'f') return c - 'a' + 10;
@@ -1339,9 +1326,9 @@ void espnowMeshesReadJson(JsonDocument& doc) {
           int hi = nyb(hp[k * 2]);
           int lo = nyb(hp[k * 2 + 1]);
           if (hi < 0 || lo < 0) { ok = false; break; }
-          gSettings.meshes[idx].passphraseHashPbkdf2[k] = (uint8_t)((hi << 4) | lo);
+          gSettings.meshes[idx].passphraseStretchedKey[k] = (uint8_t)((hi << 4) | lo);
         }
-        gSettings.meshes[idx].passphraseHashValid = ok;
+        gSettings.meshes[idx].passphraseStretchedKeyValid = ok;
       }
       // fingerprint recomputed below
       idx++;
@@ -1915,155 +1902,6 @@ bool v4_broadcast_category(uint8_t type, uint16_t flags, uint32_t msgId,
   if (outAttempted) *outAttempted = attemptedCount;
   return anySuccess;
 }
-
-// (v4_send_chunked deleted 2026-05 — plaintext multi-frame had its last caller
-// removed when v4_send_payload_smart became strict encrypt-or-fail. Encrypted
-// multi-frame lives in v4_send_encrypted_chunked below. Receive-side plaintext
-// reassembly is kept untouched for one release window in case an older-firmware
-// peer sends one; can be removed in a follow-up.)
-#if 0  // ARCHIVE — kept inside #if 0 for one release as a reference. Delete after.
-bool v4_send_chunked(const uint8_t* dst, uint8_t type, uint16_t flags, uint32_t msgId,
-                            const uint8_t* payload, uint16_t payloadLen, uint8_t ttl) {
-  if (!dst || (payloadLen > 0 && !payload)) return false;
-
-  // If payload fits in single frame, use regular send
-  if (payloadLen <= ESPNOW_V4_MAX_PAYLOAD) {
-    return v4_send_frame(dst, type, flags, msgId, payload, payloadLen, ttl);
-  }
-  
-  // Calculate fragments needed
-  uint16_t fragPayloadSize = V4_MAX_FRAGMENT_PAYLOAD;
-  uint8_t fragCount = (payloadLen + fragPayloadSize - 1) / fragPayloadSize;
-  if (fragCount > V4_FRAG_MAX) {
-    WARN_ESPNOWF("[V4_FRAG_TX] Payload too large: %u bytes requires %u frags (max %u)", 
-                 payloadLen, fragCount, V4_FRAG_MAX);
-    return false;
-  }
-  
-  char dstMac[18];
-  formatMacAddressBuf(dst, dstMac, sizeof(dstMac));
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_TX] ==============================");
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_TX] Starting fragmented send to %s", dstMac);
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_TX] msgId=%lu type=%u payloadLen=%u",
-         (unsigned long)msgId, type, payloadLen);
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_TX] fragCount=%u fragSize=%u", fragCount, fragPayloadSize);
-  
-  uint8_t myMac[6];
-  esp_wifi_get_mac(WIFI_IF_STA, myMac);
-  
-  // Send fragments with ACK waiting and retry logic (V2-style reliability)
-  const uint8_t MAX_RETRIES = 3;
-  const uint32_t ACK_TIMEOUT_MS = 200;  // 200ms per fragment
-  
-  uint16_t offset = 0;
-  for (uint8_t fragIdx = 0; fragIdx < fragCount; fragIdx++) {
-    uint16_t fragLen = (offset + fragPayloadSize <= payloadLen) ? fragPayloadSize : (payloadLen - offset);
-    
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_TX] --- Fragment %u/%u ---", fragIdx + 1, fragCount);
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_TX] offset=%u len=%u", offset, fragLen);
-    
-    // Build fragment frame
-    uint8_t frame[250];
-    EspNowV4Header h = {};
-    h.magic = (uint16_t)ESPNOW_V4_MAGIC;
-    h.ver = ESPNOW_V4_VERSION;
-    h.type = type;
-    h.flags = flags | ESPNOW_V4_FLAG_ACK_REQ;  // Always request ACK for fragments
-    h.headerLen = (uint8_t)sizeof(EspNowV4Header);
-    h.msgId = msgId;
-    memcpy(h.origin, myMac, 6);
-    h.ttl = ttl;
-    h.fragIndex = fragIdx;
-    h.fragCount = fragCount;
-    h.meshFingerprint = fingerprintForPeer(dst);  // Phase 2: per-fragment scope
-    h.crc16 = v4_crc16_ccitt(payload + offset, fragLen);
-    
-    memcpy(frame, &h, sizeof(h));
-    memcpy(frame + sizeof(h), payload + offset, fragLen);
-    
-    // Retry loop for this fragment
-    bool fragSent = false;
-    for (uint8_t retry = 0; retry < MAX_RETRIES; retry++) {
-      if (retry > 0) {
-        DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_TX] Retry attempt %u/%u for fragment %u",
-               retry + 1, MAX_RETRIES, fragIdx + 1);
-      }
-      // Allocate ACK wait slot
-      V4FragAckWait* ackWait = v4_frag_ack_alloc(dst, msgId, fragIdx);
-      if (!ackWait) {
-        WARN_ESPNOWF("[V4_FRAG_TX] No ACK slot available for frag %u/%u", fragIdx + 1, fragCount);
-        DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_TX] Aborting: ACK tracking full");
-        return false;
-      }
-      
-      ackWait->acked = false;
-      ackWait->sentMs = millis();
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_TX] ACK waiter allocated for msgId=%lu fragIdx=%u",
-             (unsigned long)msgId, fragIdx);
-      
-      // Send fragment
-      uint16_t totalLen = sizeof(h) + fragLen;
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_TX] Calling esp_now_send: totalLen=%u", totalLen);
-      captureEspNowFrame("TX", dst, 0, frame, (int)totalLen);
-      esp_err_t result = esp_now_send(dst, frame, totalLen);
-      if (result != ESP_OK) {
-        WARN_ESPNOWF("[V4_FRAG_TX] Fragment %u/%u send failed (retry %u): esp_err=%d", 
-                     fragIdx + 1, fragCount, retry, result);
-        ackWait->active = false;
-        uint32_t backoffMs = 50 * (retry + 1);
-        DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_TX] Backing off %lums before retry", (unsigned long)backoffMs);
-        vTaskDelay(pdMS_TO_TICKS(backoffMs));  // Exponential backoff
-        continue;
-      }
-      
-      if (gEspNow) { gEspNow->routerMetrics.v4FragTx++; }
-      
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_TX] ✓ Fragment %u/%u sent: %u bytes (offset=%u, retry=%u)",
-             fragIdx + 1, fragCount, fragLen, offset, retry);
-      
-      // Wait for ACK
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_TX] Waiting for ACK (timeout=%lums)...",
-             (unsigned long)ACK_TIMEOUT_MS);
-      uint32_t waitStart = millis();
-      while ((millis() - waitStart) < ACK_TIMEOUT_MS) {
-        if (ackWait->acked) {
-          uint32_t elapsed = millis() - waitStart;
-          DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_TX] ✓ Fragment %u/%u ACK received after %lums",
-                 fragIdx + 1, fragCount, (unsigned long)elapsed);
-          fragSent = true;
-          break;
-        }
-        vTaskDelay(pdMS_TO_TICKS(10));
-      }
-      
-      ackWait->active = false;  // Release slot
-      
-      if (fragSent) {
-        break;  // Success, move to next fragment
-      }
-      
-      uint32_t elapsed = millis() - waitStart;
-      WARN_ESPNOWF("[V4_FRAG_TX] ✗ Fragment %u/%u ACK timeout after %lums (retry %u)",
-                   fragIdx + 1, fragCount, (unsigned long)elapsed, retry);
-    }
-    
-    if (!fragSent) {
-      WARN_ESPNOWF("[V4_FRAG_TX] FAILED: Fragment %u/%u did not ACK after %u retries",
-                   fragIdx + 1, fragCount, MAX_RETRIES);
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_TX] Aborting: Only %u/%u fragments succeeded",
-             fragIdx, fragCount);
-      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_TX] ==============================");
-      return false;
-    }
-    
-    offset += fragLen;
-  }
-  
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_TX] ✓ SUCCESS: All %u fragments sent with ACKs!", fragCount);
-  DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_TX] ==============================");
-  return true;
-}
-#endif  // ARCHIVE v4_send_chunked
 
 // Phase 3.5 task #51 — encrypted multi-frame send.
 //
@@ -4811,8 +4649,8 @@ static void v4CmdResultCallback(bool ok, const char* result, void* userData) {
   sendSessionStreamFrame(ctx->cmdMsgId, nullptr, 0, ESPNOW_V4_FLAG_STREAM_END);
   
   // Send CMD_RESP with success/fail byte + actual command result text.
-  // v4_send_chunked handles fragmentation for large results automatically.
-  // The receiver reassembles fragments before processing.
+  // v4_send_encrypted_chunked handles fragmentation for large results
+  // automatically. The receiver reassembles fragments before processing.
   const char* resultText = (result && resultLen > 0) ? result : 
                            (ctx->cmdName[0] ? ctx->cmdName : (ok ? "OK" : "FAIL"));
   size_t textLen = strlen(resultText);
@@ -5578,12 +5416,12 @@ static String generateDeviceManifest() {
 #endif
   
   // Add fwHash as hex string for cache keying
-  char hashHex[33];
+  char keyHex[33];
   for (int i = 0; i < 16; i++) {
-    snprintf(hashHex + (i * 2), 3, "%02x", cap.fwHash[i]);
+    snprintf(keyHex + (i * 2), 3, "%02x", cap.fwHash[i]);
   }
-  hashHex[32] = '\0';
-  capObj["fwHash"] = hashHex;
+  keyHex[32] = '\0';
+  capObj["fwHash"] = keyHex;
   
   // UI apps section (curated list of OLED modes)
   JsonArray apps = doc["uiApps"].to<JsonArray>();
@@ -5647,14 +5485,14 @@ static bool cacheManifestToLittleFS(const uint8_t fwHash[16], const String& mani
   if (!filesystemReady) return false;
   
   // Build filename from hash
-  char hashHex[33];
+  char keyHex[33];
   for (int i = 0; i < 16; i++) {
-    snprintf(hashHex + (i * 2), 3, "%02x", fwHash[i]);
+    snprintf(keyHex + (i * 2), 3, "%02x", fwHash[i]);
   }
-  hashHex[32] = '\0';
+  keyHex[32] = '\0';
   
   char path[64];
-  snprintf(path, sizeof(path), "/system/manifests/%s.json", hashHex);
+  snprintf(path, sizeof(path), "/system/manifests/%s.json", keyHex);
   
   // Ensure directory exists
   if (!VFS::existsGuarded("/system/manifests", VFS::systemAuth("espnow.manifest_cache_mkdir"))) {
@@ -6406,14 +6244,14 @@ static String loadManifestFromCache(const uint8_t fwHash[16]) {
   if (!filesystemReady) return "";
   
   // Build filename from hash
-  char hashHex[33];
+  char keyHex[33];
   for (int i = 0; i < 16; i++) {
-    snprintf(hashHex + (i * 2), 3, "%02x", fwHash[i]);
+    snprintf(keyHex + (i * 2), 3, "%02x", fwHash[i]);
   }
-  hashHex[32] = '\0';
+  keyHex[32] = '\0';
   
   char path[64];
-  snprintf(path, sizeof(path), "/system/manifests/%s.json", hashHex);
+  snprintf(path, sizeof(path), "/system/manifests/%s.json", keyHex);
   
   if (!VFS::existsGuarded(path, VFS::systemAuth("espnow.manifest_load"))) {
     return "";  // Not cached
@@ -8049,12 +7887,15 @@ void processMeshHeartbeats() {
     gEspNow->deferredCmdRespPending = false;
     String deviceName = String(gEspNow->deferredCmdRespDeviceName);
     if (deviceName.length() == 0) deviceName = formatMacAddress(gEspNow->deferredCmdRespSrcMac);
-    storeMessageInPeerHistory(gEspNow->deferredCmdRespSrcMac,
-                              deviceName.c_str(),
-                              gEspNow->deferredCmdRespResult,
-                              true,
-                              MSG_TEXT,
-                              gEspNow->deferredCmdRespReqId);
+    // Chunk the result: a command's output can exceed the 256 B record slot
+    // (e.g. `files json` for a non-trivial dir). Storing it whole truncated it
+    // mid-JSON; chunking lets the client reassemble by reqId.
+    storeReceivedMessageChunked(gEspNow->deferredCmdRespSrcMac,
+                                deviceName.c_str(),
+                                gEspNow->deferredCmdRespResult,
+                                true,
+                                MSG_TEXT,
+                                gEspNow->deferredCmdRespReqId);
     
     if (gEspNow->deferredCmdRespSuccess) {
       BROADCAST_PRINTF("[ESP-NOW] Command result from %s: %s", deviceName.c_str(), gEspNow->deferredCmdRespResult);
@@ -10339,8 +10180,54 @@ const char* cmd_espnow_deviceinfo(const String& argsInput) {
 // Master Aggregation CLI Commands (Phase 3)
 // ==========================
 
+// Shared by the espnowdevices json CLI branch and the web metadata handler so
+// the per-peer metadata shape lives in exactly one place.
+void espnowSerializeMeshPeerMeta(JsonObject o, const MeshPeerMeta& m) {
+  MeshPeerHealth* health = getMeshPeerHealth(m.mac, false);
+  bool alive = health ? isMeshPeerAlive(health) : false;
+  uint32_t lastContact = 0;
+  if (health) {
+    lastContact = health->lastMeshHeartbeatMs;
+    if (health->lastRxActivityMs > lastContact) lastContact = health->lastRxActivityMs;
+  }
+  uint32_t ageSec = lastContact ? ((millis() - lastContact) / 1000) : 0;
+  o["mac"]          = String(MAC_STR(m.mac));
+  o["deviceName"]   = m.name;          // matches web's "deviceName"
+  o["friendlyName"] = m.friendlyName;
+  o["room"]         = m.room;
+  o["zone"]         = m.zone;
+  o["tags"]         = m.tags;
+  o["stationary"]   = m.stationary;
+  o["online"]       = alive;
+  o["lastSeenSec"]  = ageSec;
+  o["source"]       = "mesh";
+}
+
 const char* cmd_espnow_devices(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+
+  // JSON: all-peers dump of the synced metadata cache (gMeshPeerMeta) in one
+  // call — the BLE/CLI parity for the web's per-peer /api/espnow/metadata, but
+  // for the whole mesh at once. Same per-peer shape (espnowSerializeMeshPeerMeta)
+  // the web handler now uses. This is the on-device source; no per-peer
+  // round-trip or creds, available whether or not the web is compiled in.
+  if (argWantsJson(argsInput)) {
+    PSRAM_JSON_DOC(doc);
+    doc["schema"] = 1;
+    JsonArray devs = doc["devices"].to<JsonArray>();
+    int count = 0;
+    for (int i = 0; i < gMeshPeerSlots; i++) {
+      if (!gMeshPeerMeta[i].isActive) continue;
+      espnowSerializeMeshPeerMeta(devs.add<JsonObject>(), gMeshPeerMeta[i]);
+      count++;
+    }
+    doc["count"] = count;
+    static String out;
+    out = "";
+    serializeJson(doc, out);
+    return out.c_str();
+  }
+
   char* buf = getDebugBuffer();
   int pos = 0;
   pos += snprintf(buf + pos, 1024 - pos, "=== Mesh Devices ===\n");
@@ -11555,7 +11442,7 @@ static const char* meshesCmd_setpassphrase(const String& label, const String& pa
       // then re-stretch and re-derive synchronously. PBKDF2 stretching is
       // ~12 s with HW SHA accel — submitSync's 60 s timeout covers it.
       meshKeysInvalidate(i);
-      gSettings.meshes[i].passphraseHashValid = false;
+      gSettings.meshes[i].passphraseStretchedKeyValid = false;
       if (passphrase.length() > 0) {
         meshKeysStretchPassphrase(i);
         meshKeysDerive(i);
@@ -11597,7 +11484,7 @@ static const char* meshesCmd_rename(const String& oldLabel, const String& newLab
       // cached hash is wrong for the new label. Recompute now if we have a
       // passphrase to stretch from.
       meshKeysInvalidate(i);
-      gSettings.meshes[i].passphraseHashValid = false;
+      gSettings.meshes[i].passphraseStretchedKeyValid = false;
       if (gSettings.meshes[i].passphrase.length() > 0) {
         meshKeysStretchPassphrase(i);
         meshKeysDerive(i);
@@ -12188,14 +12075,6 @@ static int meshSlotByLabel(const String& label) {
     if (gSettings.meshes[i].label == label) return (int)i;
   }
   return -1;
-}
-
-// Return the slot index of the currently-default mesh, or 0 as a fallback.
-static int defaultMeshSlot() {
-  for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
-    if (gSettings.meshes[i].enabled && gSettings.meshes[i].isDefault) return (int)i;
-  }
-  return 0;
 }
 
 const char* cmd_espnow_setpassphrase(const String& argsInput) {
@@ -14219,7 +14098,7 @@ extern const CommandEntry espNowCommands[] = {
   { "espnowdeviceinfo", "Show all local device metadata.", false, cmd_espnow_deviceinfo },
   
   // ---- Master Aggregation ----
-  { "espnowdevices", "List all mesh devices with room/zone/tags/status (master).", false, cmd_espnow_devices },
+  { "espnowdevices", "List all mesh devices with room/zone/tags/status: espnowdevices [json].", false, cmd_espnow_devices },
   { "espnowrooms", "List rooms and their devices (master).", false, cmd_espnow_rooms },
   { "espnowfind", "Find devices by name, room, or tag: 'espnowfind <query>'.", false, cmd_espnow_find, "Usage: espnowfind <query>" },
   { "espnowroomcmd", "Run command on all devices in a room.", true, cmd_espnow_roomcmd, "Usage: espnowroomcmd <room> <user> <pass> <command>" },
@@ -14602,6 +14481,28 @@ static void espnowStoreInRing(
   else tail = (tail + 1) % MESSAGES_PER_DEVICE;   // then drop oldest
 }
 
+// Split `message` into <=200 B pieces sharing `reqId` and store each into `ring`
+// with piece/of set. The slot caps at 256 B, so a single store of long content
+// (a command result, a long send) would truncate; chunking lets the client
+// reassemble by reqId. Shared by the sent and received chunked-store wrappers.
+// A short message is a single 1-of-1 piece.
+static void espnowStoreChunked(
+  ReceivedTextMessage* ring, uint8_t& head, uint8_t& tail, uint8_t& count,
+  const uint8_t* keyMac, const char* name, const char* message,
+  bool encrypted, LogMessageType msgType, uint32_t reqId, bool isSent
+) {
+  const size_t FRAG = 200;  // slot holds 256; keep a margin
+  size_t total = message ? strlen(message) : 0;
+  uint8_t pieceTotal = (total <= FRAG) ? 1 : (uint8_t)((total + FRAG - 1) / FRAG);
+  if (pieceTotal == 0) pieceTotal = 1;
+  for (uint8_t p = 0; p < pieceTotal; p++) {
+    size_t off = (size_t)p * FRAG;
+    size_t len = (total - off) < FRAG ? (total - off) : FRAG;
+    espnowStoreInRing(ring, head, tail, count, keyMac, name, message + off, len,
+                      encrypted, msgType, reqId, (uint8_t)(p + 1), pieceTotal, isSent);
+  }
+}
+
 bool storeMessageInPeerHistory(
   uint8_t* peerMac,
   const char* peerName,
@@ -14635,21 +14536,30 @@ bool storeSentMessageInPeerHistory(uint8_t* peerMac, const char* message, uint32
     return false;
   }
 
-  // Split into ≤200 B fragments sharing msgId — mirrors how received chunked text
-  // is stored, so the collapse view reassembles sent the same way and long sends
-  // aren't truncated. A short message (the common case) is a single 1-of-1 piece.
-  const size_t FRAG = 200;  // on-the-wire fragment payload cap (slot holds 256)
-  size_t total = strlen(message);
-  uint8_t pieceTotal = (total <= FRAG) ? 1 : (uint8_t)((total + FRAG - 1) / FRAG);
-  for (uint8_t p = 0; p < pieceTotal; p++) {
-    size_t off = (size_t)p * FRAG;
-    size_t len = (total - off) < FRAG ? (total - off) : FRAG;
-    // senderMac = peer (conversation key); name empty (sent rows show delivery
-    // status, not a sender name); sends are always encrypted post-2026.
-    espnowStoreInRing(history->sent, history->sentHead, history->sentTail, history->sentCount,
-                      peerMac, "", message + off, len,
-                      /*encrypted=*/true, MSG_TEXT, msgId, (uint8_t)(p + 1), pieceTotal, /*isSent=*/true);
+  // Split into ≤200 B pieces sharing msgId (shared chunker) so the collapse view
+  // reassembles sent the same way and long sends aren't truncated. name empty
+  // (sent rows show delivery status, not a sender name); sends are always
+  // encrypted post-2026.
+  espnowStoreChunked(history->sent, history->sentHead, history->sentTail, history->sentCount,
+                     peerMac, "", message, /*encrypted=*/true, MSG_TEXT, msgId, /*isSent=*/true);
+  return true;
+}
+
+bool storeReceivedMessageChunked(uint8_t* peerMac, const char* peerName, const char* message,
+                                 bool encrypted, LogMessageType msgType, uint32_t reqId) {
+  if (!gEspNow || !message) return false;
+
+  PeerMessageHistory* history = findOrCreatePeerHistory(peerMac);
+  if (!history) {
+    broadcastOutput("[ESP-NOW] ERROR: No free peer history slots");
+    return false;
   }
+
+  // Received long content (e.g. a remote command's result) chunked the same way
+  // as sent text, so a multi-hundred-byte result isn't truncated at the 256 B
+  // slot. The client reassembles by reqId.
+  espnowStoreChunked(history->messages, history->head, history->tail, history->count,
+                     peerMac, peerName, message, encrypted, msgType, reqId, /*isSent=*/false);
   return true;
 }
 

@@ -30,7 +30,7 @@ constexpr const char* kCtxBootstrap  = "esp-boot";  // exactly 8 bytes
 constexpr const char* kCtxGroup      = "esp-grup";  // exactly 8 bytes
 
 // Salt = SHA256("espnow-v4-mesh-salt:" || meshLabel). Stable per label,
-// distinct per mesh. Rename → salt changes → hash must be recomputed.
+// distinct per mesh. Rename → salt changes → key must be recomputed.
 void computeMeshSalt(const String& label, uint8_t out[32]) {
   String input = String(kSaltPrefix) + label;
   crypto_hash_sha256(out,
@@ -47,10 +47,10 @@ bool meshKeysStretchPassphrase(uint8_t meshIdx) {
   Settings::MeshIdentity& m = gSettings.meshes[meshIdx];
 
   if (m.passphrase.length() == 0) {
-    // No passphrase — clear the cached hash. Persisting an all-zero hash
+    // No passphrase — clear the cached key. Persisting an all-zero key
     // would be ambiguous, so we explicitly mark it invalid instead.
-    memset(m.passphraseHashPbkdf2, 0, sizeof(m.passphraseHashPbkdf2));
-    m.passphraseHashValid = false;
+    memset(m.passphraseStretchedKey, 0, sizeof(m.passphraseStretchedKey));
+    m.passphraseStretchedKeyValid = false;
     return false;
   }
 
@@ -59,7 +59,7 @@ bool meshKeysStretchPassphrase(uint8_t meshIdx) {
 
   uint32_t startMs = millis();
   bool ok = espnowCryptoPbkdf2HmacSha256(
-      m.passphraseHashPbkdf2,
+      m.passphraseStretchedKey,
       reinterpret_cast<const uint8_t*>(m.passphrase.c_str()), m.passphrase.length(),
       salt, sizeof(salt),
       kPbkdf2Iters);
@@ -68,12 +68,12 @@ bool meshKeysStretchPassphrase(uint8_t meshIdx) {
   sodium_memzero(salt, sizeof(salt));
 
   if (!ok) {
-    memset(m.passphraseHashPbkdf2, 0, sizeof(m.passphraseHashPbkdf2));
-    m.passphraseHashValid = false;
+    memset(m.passphraseStretchedKey, 0, sizeof(m.passphraseStretchedKey));
+    m.passphraseStretchedKeyValid = false;
     ERROR_ESPNOWF("mesh '%s' passphrase stretch failed", m.label.c_str());
     return false;
   }
-  m.passphraseHashValid = true;
+  m.passphraseStretchedKeyValid = true;
   INFO_ESPNOWF("mesh '%s' passphrase stretched (%lu iters in %u ms)",
                m.label.c_str(),
                (unsigned long)kPbkdf2Iters, (unsigned)elapsedMs);
@@ -86,15 +86,15 @@ bool meshKeysDerive(uint8_t meshIdx) {
   Settings::MeshIdentity& m = gSettings.meshes[meshIdx];
   MeshDerivedKeys& dk = gMeshDerivedKeys[meshIdx];
 
-  if (!m.passphraseHashValid) {
+  if (!m.passphraseStretchedKeyValid) {
     dk.valid = false;
     memset(&dk, 0, sizeof(dk));
     return false;
   }
 
-  bool ok1 = espnowCryptoKdfSubkey(dk.bootstrapKey, m.passphraseHashPbkdf2,
+  bool ok1 = espnowCryptoKdfSubkey(dk.bootstrapKey, m.passphraseStretchedKey,
                                    kSubkeyBootstrap, kCtxBootstrap);
-  bool ok2 = espnowCryptoKdfSubkey(dk.groupKey,     m.passphraseHashPbkdf2,
+  bool ok2 = espnowCryptoKdfSubkey(dk.groupKey,     m.passphraseStretchedKey,
                                    kSubkeyGroup,    kCtxGroup);
   if (!ok1 || !ok2) {
     memset(&dk, 0, sizeof(dk));
@@ -114,8 +114,8 @@ uint8_t meshKeysInitAll() {
     Settings::MeshIdentity& m = gSettings.meshes[i];
     if (!m.enabled || m.label.length() == 0) continue;
 
-    // Stretch lazily — only if we haven't cached a hash yet.
-    if (!m.passphraseHashValid && m.passphrase.length() > 0) {
+    // Stretch lazily — only if we haven't cached a stretched key yet.
+    if (!m.passphraseStretchedKeyValid && m.passphrase.length() > 0) {
       meshKeysStretchPassphrase(i);
     }
     if (meshKeysDerive(i)) validCount++;
