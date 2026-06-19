@@ -445,10 +445,34 @@ const char* cmd_i2chealth(const String& argsInput) {
   
   I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
   if (!mgr) return "Error: I2C manager not initialized";
-  
+
+  if (argWantsJson(argsInput)) {
+    PSRAM_JSON_DOC(doc);
+    doc["schema"] = 1;
+    doc["deviceCount"] = mgr->getDeviceCount();
+    JsonArray arr = doc["devices"].to<JsonArray>();
+    for (int i = 0; i < mgr->getDeviceCount(); i++) {
+      I2CDevice* dev = &mgr->devices[i];
+      if (!dev->isInitialized()) continue;
+      const I2CDevice::Health& h = dev->getHealth();
+      JsonObject o = arr.add<JsonObject>();
+      o["address"]            = dev->address;
+      o["name"]               = dev->name ? dev->name : "?";
+      o["consecutiveErrors"]  = h.consecutiveErrors;
+      o["totalErrors"]        = h.totalErrors;
+      o["degraded"]           = dev->isDegraded();
+      o["nack"]               = h.nackCount;
+      o["timeout"]            = h.timeoutCount;
+      o["busError"]           = h.busErrorCount;
+      o["adaptiveTimeoutMs"]  = (unsigned long)dev->getAdaptiveTimeout();
+    }
+    serializeJson(doc, getDebugBuffer(), 1024);
+    return getDebugBuffer();
+  }
+
   char* p = getDebugBuffer();
   int remaining = 1024;
-  
+
   int deviceCount = mgr->getDeviceCount();
   int n = snprintf(p, remaining, "I2C Device Health (%d devices):\n", deviceCount);
   p += n; remaining -= n;
@@ -490,9 +514,19 @@ const char* cmd_i2cmetrics(const String& argsInput) {
   
   I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
   if (!mgr) return "Error: I2C manager not initialized";
-  
+
   const I2CBusMetrics& metrics = mgr->getMetrics();
-  
+
+  if (argWantsJson(argsInput)) {
+    unsigned long upSec = (millis() - metrics.lastResetMs) / 1000;
+    snprintf(getDebugBuffer(), 1024,
+      "{\"schema\":1,\"uptimeSec\":%lu,\"totalTransactions\":%lu,\"mutexTimeouts\":%lu,"
+      "\"busContentions\":%lu,\"totalBytes\":%lu}",
+      upSec, (unsigned long)metrics.totalTransactions, (unsigned long)metrics.mutexTimeouts,
+      (unsigned long)metrics.mutexContentions, (unsigned long)metrics.totalBytesTransferred);
+    return getDebugBuffer();
+  }
+
   char* p = getDebugBuffer();
   int remaining = 1024;
   
@@ -1586,6 +1620,9 @@ extern int rtcBuildDataJSON(char* buf, size_t bufSize);
 #if ENABLE_GAMEPAD_SENSOR
 extern int gamepadBuildDataJSON(char* buf, size_t bufSize);
 #endif
+#if ENABLE_APDS_SENSOR
+extern int apdsBuildDataJSON(char* buf, size_t bufSize);
+#endif
 
 static void addSensorEntry(JsonArray& arr, const char* id, const char* name,
                            const char* kind, bool enabled, bool connected, SensorDataFn dataFn) {
@@ -1619,38 +1656,43 @@ static void addSensorEntry(JsonArray& arr, const char* id, const char* name,
 // which sends open<id>/close<id>, reflects reality. (Auto-start-on-boot is a
 // SEPARATE persisted knob, surfaced in `controls json` as <id>AutoStart, NOT
 // this toggle.) seq bumps on enable/connect changes.
-static void buildSensorsJson(JsonDocument& doc) {
+// includeData=false → "brief" enumeration: per-sensor state only (id/name/kind/
+// enabled/connected), no embedded readings. Small + bounded, so it never hits the
+// 2 KB command-result ceiling regardless of sensor count — the app uses it to
+// discover which sensors are live, then fetches each one's <x>read json.
+static void buildSensorsJson(JsonDocument& doc, bool includeData = true) {
   doc["schema"]   = 1;
   doc["seq"] = (unsigned long)gSensorStatusSeq;
+  doc["brief"] = !includeData;
   JsonArray arr = doc["sensors"].to<JsonArray>();
 #if ENABLE_PRESENCE_SENSOR
-  addSensorEntry(arr, "presence", "STHS34PF80 presence",    "scalar", gPresenceEnabled, isSensorConnected("presence"), presenceBuildDataJSON);
+  addSensorEntry(arr, "presence", "STHS34PF80 presence",    "scalar", gPresenceEnabled, isSensorConnected("presence"), includeData ? presenceBuildDataJSON : nullptr);
 #endif
 #if ENABLE_TOF_SENSOR
-  addSensorEntry(arr, "tof",      "VL53L4CX distance",      "vector", gTofEnabled, isSensorConnected("tof"), tofBuildDataJSON);
+  addSensorEntry(arr, "tof",      "VL53L4CX distance",      "vector", gTofEnabled, isSensorConnected("tof"), includeData ? tofBuildDataJSON : nullptr);
 #endif
 #if ENABLE_IMU_SENSOR
-  addSensorEntry(arr, "imu",      "BNO055 orientation",     "vector", gImuEnabled, isSensorConnected("imu"), imuBuildDataJSON);
+  addSensorEntry(arr, "imu",      "BNO055 orientation",     "vector", gImuEnabled, isSensorConnected("imu"), includeData ? imuBuildDataJSON : nullptr);
 #endif
 #if ENABLE_GPS_SENSOR
-  addSensorEntry(arr, "gps",      "PA1010D GPS",            "vector", gGpsEnabled, isSensorConnected("gps"), gpsBuildDataJSON);
+  addSensorEntry(arr, "gps",      "PA1010D GPS",            "vector", gGpsEnabled, isSensorConnected("gps"), includeData ? gpsBuildDataJSON : nullptr);
 #endif
 #if ENABLE_FM_RADIO
-  addSensorEntry(arr, "fmradio",  "RDA5807 FM radio",       "scalar", gFmRadioEnabled, isSensorConnected("fmradio"), fmRadioBuildDataJSON);
+  addSensorEntry(arr, "fmradio",  "RDA5807 FM radio",       "scalar", gFmRadioEnabled, isSensorConnected("fmradio"), includeData ? fmRadioBuildDataJSON : nullptr);
 #endif
 #if ENABLE_RTC_SENSOR
-  addSensorEntry(arr, "rtc",      "DS3231 RTC",             "scalar", gRtcEnabled, isSensorConnected("rtc"), rtcBuildDataJSON);
+  addSensorEntry(arr, "rtc",      "DS3231 RTC",             "scalar", gRtcEnabled, isSensorConnected("rtc"), includeData ? rtcBuildDataJSON : nullptr);
 #endif
 #if ENABLE_APDS_SENSOR
   addSensorEntry(arr, "apds",     "APDS9960 gesture/color", "scalar",
                  (gApdsColorEnabled || gApdsProximityEnabled || gApdsGestureEnabled),
-                 isSensorConnected("apds"), nullptr);
+                 isSensorConnected("apds"), includeData ? apdsBuildDataJSON : nullptr);
 #endif
 #if ENABLE_GAMEPAD_SENSOR
   // id is "input" — the canonical, unified module name (Seesaw gamepad OR ANO
   // encoder). Matches controls json / open<id>/close<id> / sensorautostart /
   // the I2C DB moduleName, so the app correlates on one name with no overrides.
-  addSensorEntry(arr, "input",    "Seesaw gamepad",         "scalar", gInputEnabled, gInputConnected, gamepadBuildDataJSON);
+  addSensorEntry(arr, "input",    "Seesaw gamepad",         "scalar", gInputEnabled, gInputConnected, includeData ? gamepadBuildDataJSON : nullptr);
 #endif
 #if ENABLE_THERMAL_SENSOR
   addSensorEntry(arr, "thermal",  "MLX90640 thermal",       "stream", gThermalEnabled, isSensorConnected("thermal"), nullptr);
@@ -1660,12 +1702,17 @@ static void buildSensorsJson(JsonDocument& doc) {
 const char* cmd_sensors(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
-  // Structured path: LIVE sensor state (Phase 1 — no `data` readings yet).
-  // `sensors json` is the live view; the human `sensors` below is the static
-  // chip catalog. One verbatim PSRAM blob, no broadcastOutput.
+  // Structured path: LIVE sensor state + embedded per-sensor readings.
+  // `sensors json`       → full view (state + each active sensor's `data`).
+  // `sensors json brief` → enumeration only (state, no `data`) — small + bounded,
+  //   for discovery before fetching each sensor via its own <x>read json. Use the
+  //   brief form over BLE; the full form can exceed the 2 KB command-result cap
+  //   when several sensors are active. One verbatim PSRAM blob, no broadcastOutput.
   if (argWantsJson(argsInput)) {
+    String la = argsInput; la.toLowerCase();
+    const bool brief = (la.indexOf("brief") >= 0);
     PSRAM_JSON_DOC(doc);
-    buildSensorsJson(doc);
+    buildSensorsJson(doc, !brief);
     static char* sensorsJsonBuf = nullptr;
     if (!sensorsJsonBuf) sensorsJsonBuf = (char*)ps_alloc(4096, AllocPref::PreferPSRAM, "sensors.json");
     if (!sensorsJsonBuf) return "{\"error\":\"oom\"}";
@@ -2126,7 +2173,7 @@ const CommandEntry i2cCommands[] = {
   { "i2chealth", "Show per-device I2C health status.", false, cmd_i2chealth },
   
   // Device Registry
-  { "sensors", "List I2C sensors [filter]", false, cmd_sensors, "Usage: sensors [filter] - filter by name, description, or manufacturer\nExample: sensors temperature, sensors adafruit, sensors imu" },
+  { "sensors", "List I2C sensors [filter]", false, cmd_sensors, "Usage: sensors [filter] - filter by name, description, or manufacturer\n       sensors json [brief] - live state (+readings; 'brief' = state only, no data)\nExample: sensors temperature, sensors json brief" },
   { "sensorinfo", "Sensor details: <name>", false, cmd_sensorinfo, "Usage: sensorinfo <sensor_name>\nExample: sensorinfo BNO055" },
   { "devices", "Show discovered I2C device registry.", false, cmd_devices },
   { "discover", "Re-scan and register I2C devices.", false, cmd_discover },

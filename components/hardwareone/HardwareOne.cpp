@@ -2199,7 +2199,7 @@ void hardwareone_loop() {
 #if ENABLE_HTTP_SERVER
               BROADCAST_PRINTF("[serial] Login locked out. Retry in %lu seconds.",
                                lockoutRemainingMs / 1000UL);
-              logAuthAttempt(false, "serial/login", u, serialIp, "Locked out");
+              recordLoginAttempt(SOURCE_SERIAL, u, serialIp, false, "Locked out");
 #endif
             } else if (isValidUser(u, p)) {
               AuthContext ctx;
@@ -2213,7 +2213,7 @@ void hardwareone_loop() {
               // internally for SOURCE_SERIAL; no need to duplicate that here.
               clearLoginAttempts(serialIp);
               authSuccessUnified(ctx, nullptr);
-              logAuthAttempt(true, "serial/login", u, serialIp, "Login successful");
+              recordLoginAttempt(SOURCE_SERIAL, u, serialIp, true, "Login successful");
 #else
               // Stub build: minimal local state set since authSuccessUnified is a no-op stub.
               gSerialAuthed = true;
@@ -2224,7 +2224,7 @@ void hardwareone_loop() {
             } else {
 #if ENABLE_HTTP_SERVER
               recordFailedLogin(serialIp);
-              logAuthAttempt(false, "serial/login", u, serialIp, "Invalid credentials");
+              recordLoginAttempt(SOURCE_SERIAL, u, serialIp, false, "Invalid credentials");
 #endif
               broadcastOutput("[serial] Authentication failed.");
             }

@@ -76,6 +76,12 @@ extern bool createIMUTask();
 const char* cmd_imu(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
+  if (argWantsJson(argsInput)) {
+    if (!ensureDebugBuffer()) return "{\"valid\":false,\"error\":\"buffer\"}";
+    int n = imuBuildDataJSON(getDebugBuffer(), 1024);  // shared builder (also feeds sensors json / MQTT)
+    return (n > 0) ? getDebugBuffer() : "{\"valid\":false}";
+  }
+
   if (!gImuConnected || !gImuEnabled) {
     broadcastOutput("IMU sensor not connected or not started. Use 'imustart' first.");
     return "ERROR";

@@ -6,6 +6,7 @@
 #include "System_Debug.h"
 #include "System_Filesystem.h"
 #include "System_MemUtil.h"
+#include "System_Utils.h"  // argWantsJson
 #include "System_Mutex.h"
 #include "System_Notifications.h"
 
@@ -967,16 +968,19 @@ static const char* cmd_sdformat(const String& argsInput) {
 
 static const char* cmd_sdinfo(const String& argsInput) {
   EXT_RAM_BSS_ATTR static char buf[512];
-  
+  const bool wantJson = argWantsJson(argsInput);
+
 #if !defined(SD_CS_PIN)
+  if (wantJson) return "{\"schema\":1,\"supported\":false}";
   snprintf(buf, sizeof(buf), "ERROR: SD card not supported on this board");
   return buf;
 #else
   if (!VFS::isSDAvailable()) {
+    if (wantJson) return "{\"schema\":1,\"supported\":true,\"mounted\":false}";
     snprintf(buf, sizeof(buf), "SD card not mounted. Use 'sdmount' to mount.");
     return buf;
   }
-  
+
   uint8_t cardType = SD.cardType();
   const char* typeStr = "Unknown";
   switch (cardType) {
@@ -985,10 +989,26 @@ static const char* cmd_sdinfo(const String& argsInput) {
     case CARD_SDHC: typeStr = "SDHC"; break;
     default: break;
   }
-  
+
   uint64_t total, used, free;
-  if (VFS::getStats(VFS::SDCARD, total, used, free)) {
-    snprintf(buf, sizeof(buf), 
+  bool haveStats = VFS::getStats(VFS::SDCARD, total, used, free);
+
+  if (wantJson) {
+    if (haveStats) {
+      snprintf(buf, sizeof(buf),
+        "{\"schema\":1,\"supported\":true,\"mounted\":true,\"type\":\"%s\","
+        "\"totalMB\":%llu,\"usedMB\":%llu,\"freeMB\":%llu,\"mount\":\"/sd\"}",
+        typeStr, total / (1024*1024), used / (1024*1024), free / (1024*1024));
+    } else {
+      snprintf(buf, sizeof(buf),
+        "{\"schema\":1,\"supported\":true,\"mounted\":true,\"type\":\"%s\",\"statsAvailable\":false}",
+        typeStr);
+    }
+    return buf;
+  }
+
+  if (haveStats) {
+    snprintf(buf, sizeof(buf),
       "SD Card Info:\n"
       "  Type: %s\n"
       "  Size: %llu MB\n"

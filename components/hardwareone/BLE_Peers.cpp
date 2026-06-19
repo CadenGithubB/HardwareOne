@@ -20,6 +20,8 @@
 #include "System_Debug.h"
 #include "System_Utils.h"      // RETURN_VALID_IF_VALIDATE_CSTR, parseBoolArg
 #include "System_Command.h"    // CommandEntry, ensureDebugBuffer, getDebugBuffer
+#include "System_MemUtil.h"    // PSRAM_JSON_DOC
+#include <ArduinoJson.h>
 #include "System_User.h"
 #include "System_AuthIdentity.h"  // currentAuthContext + bumpIdentityGeneration
 
@@ -180,6 +182,16 @@ void bleStampPairedByIfBlank(BlePeerKind kind) {
 
   // CASE C — stamping happens here.
   setSetting(d.pairedByUser, who);
+#if ENABLE_HTTP_SERVER
+  // One-time security-audit record — G2 only. The glasses have no credential
+  // login, so pair-time is when their owning user is captured (this is the
+  // login-equivalent for that transport). Other BLE peers (ring/phone) aren't
+  // audited here: pairing them isn't a login and doesn't grant command rights.
+  if (kind == BLE_PEER_G2_GLASSES) {
+    extern void logAuthAttempt(bool, const char*, const String&, const String&, const String&);
+    logAuthAttempt(true, "g2/pair", who, String("ble"), "G2 glasses paired");
+  }
+#endif
   // Bump the identity generation: a previously-unowned peer just acquired
   // an owner. Any cached state that derived its visibility from "the
   // hijack identity is X" needs to re-fill. See System_AuthIdentity.h
@@ -400,9 +412,34 @@ void blePeersReadJson(JsonDocument& doc) {
   }
 }
 
-const char* cmd_blepeers(const String& /*argsInput*/) {
+const char* cmd_blepeers(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "(no buffer)";
+
+  if (argWantsJson(argsInput)) {
+    PSRAM_JSON_DOC(doc);
+    doc["schema"] = 1;
+    JsonArray arr = doc["peers"].to<JsonArray>();
+    for (size_t i = 0; i < gPeerCount; i++) {
+      const BlePeerSpec* p = gPeerInOrder[i];
+      if (!p) continue;
+      const BlePeerData& d = gBlePeerData[p->kind];
+      const bool linked = (p->ops && p->ops->isConnected) ? p->ops->isConnected() : false;
+      JsonObject o = arr.add<JsonObject>();
+      o["name"]        = p->name;
+      o["displayName"] = p->displayName ? p->displayName : "";
+      o["connectable"] = p->connectable;
+      o["connected"]   = linked;
+      o["autoConnect"] = d.autoConnect;
+      o["mac1"]        = d.mac1;
+      if (p->macCount > 1) o["mac2"] = d.mac2;
+      o["pairedBy"]    = d.pairedByUser;
+    }
+    doc["count"] = (int)gPeerCount;
+    serializeJson(doc, getDebugBuffer(), 1024);
+    return getDebugBuffer();
+  }
+
   char* out = getDebugBuffer();
   size_t cap = 1024;
   size_t pos = 0;

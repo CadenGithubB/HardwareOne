@@ -229,7 +229,13 @@ const char* cmd_gpsstop(const String& argsInput) {
 
 const char* cmd_gps(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  
+
+  if (argWantsJson(argsInput)) {
+    if (!ensureDebugBuffer()) return "{\"valid\":false,\"error\":\"buffer\"}";
+    int n = gpsBuildDataJSON(getDebugBuffer(), 1024);  // shared builder (also feeds sensors json / MQTT)
+    return (n > 0) ? getDebugBuffer() : "{\"valid\":false}";
+  }
+
   DEBUG_GPS_POLLINGF("[GPS_CMD] Reading GPS data (enabled=%d, task=%p)...",
                  gGpsEnabled ? 1 : 0, gGpsTaskHandle);
   

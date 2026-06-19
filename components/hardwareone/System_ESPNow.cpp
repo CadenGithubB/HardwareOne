@@ -2399,9 +2399,25 @@ void bondNotifySessionEstablished(const uint8_t* peerMac) {
   bool wasOffline = !gEspNow->bondPeerOnline;
   gEspNow->bondPeerOnline = true;
   gEspNow->lastBondHeartbeatReceivedMs = millis();  // session ACTIVE counts as liveness
-  if (wasOffline && isBondMaster()) {
-    gEspNow->bondNeedsCapabilityRequest = true;
-    INFO_ESPNOWF("[BOND] session ACTIVE with peer — master kicking capability sync");
+  if (wasOffline) {
+#if ENABLE_HTTP_SERVER
+    // Security audit: the bonded (RCE-capable) command channel just went live with
+    // the configured peer. The bond token was derived during the encrypted
+    // handshake; this transition is the point command-execution over the bond
+    // becomes usable. One line per session (guarded by wasOffline, not per
+    // heartbeat) and already filtered to the configured bond peer above. Fires on
+    // both master and worker. Runs on cmd_exec_task — safe for the log file write.
+    extern void logAuthAttempt(bool, const char*, const String&, const String&, const String&);
+    String bondWho = getEspNowDeviceName(peerMac);
+    if (bondWho.length() == 0) bondWho = formatMacAddress(peerMac);
+    logAuthAttempt(true, "espnow/bond", bondWho, String("espnow"),
+                   String("Bond session active (role=") +
+                       (isBondMaster() ? "master" : "worker") + ")");
+#endif
+    if (isBondMaster()) {
+      gEspNow->bondNeedsCapabilityRequest = true;
+      INFO_ESPNOWF("[BOND] session ACTIVE with peer — master kicking capability sync");
+    }
   }
 #else
   (void)peerMac;
@@ -3238,6 +3254,45 @@ static void v4h_topo_peer(const V4RxCtx& ctx) {
 // here (same extern as System_ESPNow_Handlers_Crypto.cpp) so USER_SYNC can
 // defer its heavy body off espnow_task.
 extern bool submitDeferredToCmdExec(ExecReq::DeferredFn fn, void* arg);
+
+// ---------------------------------------------------------------------------
+// Failed bond-auth audit — the mirror of the espnow/bond SUCCESS line.
+// A peer presenting a bad/malformed/missing bond token, or sending bond traffic
+// while unpaired, is a failed attempt to gain the RCE/command channel; it belongs
+// in failed_login.log exactly like a bad password does. Two constraints shape
+// this: (1) the failures are detected on espnow_task (RX drain / super-loop)
+// where synchronous FS writes are forbidden — so we defer the actual write to
+// cmd_exec_task via submitDeferredToCmdExec (same model as runDeferredSession-
+// Confirm); (2) a hostile or looping peer can spam attempts, so we throttle to
+// one logged failure per window to protect the 680 KB-capped log file.
+struct BondAuthFailLog { char who[40]; char ip[20]; char reason[72]; };
+
+static void runDeferredBondAuthFailLog(void* arg) {
+  auto* w = static_cast<BondAuthFailLog*>(arg);
+#if ENABLE_HTTP_SERVER
+  extern void logAuthAttempt(bool, const char*, const String&, const String&, const String&);
+  logAuthAttempt(false, "espnow/bond", String(w->who), String(w->ip), String(w->reason));
+#endif
+  free(w);
+}
+
+static void logBondAuthFailure(const uint8_t* mac, const char* reason) {
+  static uint32_t sLastFailLogMs = 0;
+  uint32_t now = millis();
+  if (sLastFailLogMs != 0 && (now - sLastFailLogMs) < 5000) return;  // throttle: 1 / 5s
+  sLastFailLogMs = now;
+  auto* w = static_cast<BondAuthFailLog*>(
+      ps_alloc(sizeof(BondAuthFailLog), AllocPref::PreferPSRAM, "espnow.bondfail.log"));
+  if (!w) return;
+  String who = mac ? getEspNowDeviceName(mac) : String("");
+  if (who.length() == 0 && mac) who = formatMacAddress(mac);
+  if (who.length() == 0) who = "unknown";
+  strncpy(w->who, who.c_str(), sizeof(w->who) - 1);     w->who[sizeof(w->who) - 1]     = '\0';
+  strncpy(w->ip, "espnow", sizeof(w->ip) - 1);          w->ip[sizeof(w->ip) - 1]       = '\0';
+  strncpy(w->reason, reason ? reason : "Bond auth failed", sizeof(w->reason) - 1);
+  w->reason[sizeof(w->reason) - 1] = '\0';
+  if (!submitDeferredToCmdExec(runDeferredBondAuthFailLog, w)) free(w);
+}
 
 // USER_SYNC is heavy: JSON parse, admin auth (password verify), users.json
 // read/modify/write, target password hashing, per-user settings write. All of
@@ -4781,6 +4836,10 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
     
     if (!authOk) {
       WARN_ESPNOWF("[BOND_AUTH]   AUTH FAILED - sending error response");
+      // Failed bond-channel auth (bad/malformed/wrong-length token) — record it
+      // in failed_login.log, mirroring the espnow/bond success line. Deferred +
+      // throttled inside logBondAuthFailure (we are on espnow_task here).
+      logBondAuthFailure(srcMac, "Invalid bond session token");
       uint8_t respPayload[48];
       respPayload[0] = 0;
       const char* errMsg = "Session token auth failed";
@@ -8184,6 +8243,10 @@ void processMeshHeartbeats() {
                        gEspNow->bondUnpairedRejectMac[4], gEspNow->bondUnpairedRejectMac[5],
                        (int)gEspNow->bondUnpairedRejectType,
                        (unsigned long)gEspNow->bondUnpairedRejectCount);
+      // Also surface in failed_login.log: an unpaired peer trying to drive the
+      // bond channel is a failed attempt to gain command execution. Deferred +
+      // throttled inside logBondAuthFailure (we are on espnow_task here).
+      logBondAuthFailure(gEspNow->bondUnpairedRejectMac, "Bond traffic from unpaired peer");
     }
   }
 
@@ -9231,6 +9294,23 @@ const char* cmd_espnow_saturationreset(const String& argsInput) {
 const char* cmd_espnow_routerstats(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   // Read-only status: see comment in cmd_espnow_status above.
+  if (argWantsJson(argsInput)) {
+    if (!gEspNow) return "{\"schema\":1,\"ok\":false,\"error\":\"ESP-NOW not initialized\"}";
+    snprintf(getDebugBuffer(), 1024,
+      "{\"schema\":1,\"messagesSent\":%lu,\"messagesReceived\":%lu,\"messagesFailed\":%lu,"
+      "\"v4FragTx\":%lu,\"v4FragRx\":%lu,\"reassembled\":%lu,\"reassemblyGc\":%lu,"
+      "\"reassemblyTimeouts\":%lu,\"nextMessageId\":%lu}",
+      (unsigned long)gEspNow->routerMetrics.messagesSent,
+      (unsigned long)gEspNow->routerMetrics.messagesReceived,
+      (unsigned long)gEspNow->routerMetrics.messagesFailed,
+      (unsigned long)gEspNow->routerMetrics.v4FragTx,
+      (unsigned long)gEspNow->routerMetrics.v4FragRx,
+      (unsigned long)gEspNow->routerMetrics.v4FragRxCompleted,
+      (unsigned long)gEspNow->routerMetrics.v4FragRxGc,
+      (unsigned long)gEspNow->routerMetrics.chunksTimedOut,
+      (unsigned long)gEspNow->nextMessageId);
+    return getDebugBuffer();
+  }
   if (!gEspNow) return "ESP-NOW not initialized (run 'openespnow' first)";
 
   // Audit (2026-05) — this command USED to print ~18 lines of counters that
@@ -9303,6 +9383,19 @@ const char* cmd_espnow_identity(const String& argsInput) {
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
 
   const EspNowIdentity& id = espnowIdentityGet();
+
+  if (argWantsJson(argsInput)) {
+    if (!id.valid) return "{\"schema\":1,\"valid\":false}";
+    uint8_t jm[6]; WiFi.macAddress(jm);
+    char jpub[65]; espnowIdentityFormatPubHex(id.pub, jpub, sizeof(jpub));
+    snprintf(getDebugBuffer(), 1024,
+      "{\"schema\":1,\"valid\":true,\"mac\":\"%02X:%02X:%02X:%02X:%02X:%02X\","
+      "\"pub\":\"%s\",\"createdAtSec\":%u,\"regenCount\":%u}",
+      jm[0],jm[1],jm[2],jm[3],jm[4],jm[5], jpub,
+      (unsigned)id.createdAtSec, (unsigned)id.regenCount);
+    return getDebugBuffer();
+  }
+
   if (!id.valid) {
     return "Error: ESP-NOW identity not initialized (crypto/identity boot path failed)";
   }
@@ -9556,6 +9649,24 @@ const char* cmd_espnow_rekey(const String& argsInput) {
 const char* cmd_espnow_subs(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+
+  if (argWantsJson(argsInput)) {
+    PSRAM_JSON_DOC(doc);
+    doc["schema"] = 1;
+    JsonArray arr = doc["peers"].to<JsonArray>();
+    uint8_t slots = peerIdentitySlotCount();
+    for (uint8_t i = 0; i < slots; i++) {
+      const PeerIdentity* pid = peerIdentityAt(i);
+      if (!pid) continue;
+      JsonObject o = arr.add<JsonObject>();
+      o["mac"]    = String(MAC_STR(pid->mac));
+      o["meshId"] = (unsigned)pid->meshId;
+      o["subs"]   = (unsigned long)pid->subscribedEvents;  // bitmask; see help for bit meanings
+    }
+    serializeJson(doc, getDebugBuffer(), 1024);
+    return getDebugBuffer();
+  }
+
   char* p   = getDebugBuffer();
   size_t cap = 1024;
   int written = snprintf(p, cap,
@@ -9709,6 +9820,32 @@ const char* cmd_espnow_sessionsend(const String& argsInput) {
 const char* cmd_espnow_sessions(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+
+  if (argWantsJson(argsInput)) {
+    PSRAM_JSON_DOC(doc);
+    doc["schema"] = 1;
+    JsonArray arr = doc["sessions"].to<JsonArray>();
+    uint8_t slots = sessionSlotCount();
+    uint32_t nowMs = (uint32_t)millis();
+    static const char* kStates[] = { "FREE", "ESTAB", "ACTIVE", "REKEY", "CLOSED" };
+    for (uint8_t i = 0; i < slots; i++) {
+      const SessionState* s = sessionAt(i);
+      if (!s) continue;
+      JsonObject o = arr.add<JsonObject>();
+      o["slot"]      = (int)i;
+      o["mac"]       = String(MAC_STR(s->peerMac));
+      o["meshId"]    = (unsigned)s->meshId;
+      o["sessionId"] = (unsigned)s->sessionId;
+      o["dir"]       = s->myDirection == 0 ? "A" : "B";
+      o["state"]     = (s->state < 5) ? kStates[s->state] : "?";
+      o["ageMs"]     = (unsigned long)(nowMs - s->establishedAtMs);
+      o["txSeq"]     = (unsigned long)s->txSeqNext;
+      o["rxHwm"]     = (unsigned long)s->rxSeqHighWater;
+    }
+    serializeJson(doc, getDebugBuffer(), 1024);
+    return getDebugBuffer();
+  }
+
   char* p   = getDebugBuffer();
   size_t cap = 1024;
   int written = snprintf(p, cap, "ESP-NOW Sessions:\n");
@@ -9943,6 +10080,16 @@ const char* cmd_espnow_meshmetrics(const String& argsInput) {
   // Read-only status: see comment in cmd_espnow_status above.
   if (!gEspNow) return "ESP-NOW not initialized (run 'openespnow' first)";
   if (!ensureDebugBuffer()) return "Error: Buffer allocation failed";
+
+  if (argWantsJson(argsInput)) {
+    // Counters are uninstrumented (see note below); expose the live config only.
+    snprintf(getDebugBuffer(), 1024,
+      "{\"schema\":1,\"mode\":\"%s\",\"activePeers\":%d,\"ttl\":%d,\"adaptiveTtl\":%s}",
+      (gEspNow->mode == ESPNOW_MODE_MESH) ? "mesh" : "direct",
+      (int)gEspNow->deviceCount, gSettings.meshTTL,
+      gSettings.meshAdaptiveTTL ? "true" : "false");
+    return getDebugBuffer();
+  }
 
   // Audit (2026-05) — every mesh-routing COUNTER this command USED to print
   // (meshRoutes / directRoutes / meshForwards / meshForwardsByType[8] /
@@ -10275,6 +10422,40 @@ const char* cmd_espnow_devices(const String& argsInput) {
 
 const char* cmd_espnow_rooms(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+
+  if (argWantsJson(argsInput)) {
+    PSRAM_JSON_DOC(doc);
+    doc["schema"] = 1;
+    JsonArray roomsArr = doc["rooms"].to<JsonArray>();
+    const char* seen[MESH_PEER_MAX];
+    int seenCount = 0;
+    for (int i = 0; i < gMeshPeerSlots; i++) {
+      if (!gMeshPeerMeta[i].isActive) continue;
+      const char* room = gMeshPeerMeta[i].room[0] ? gMeshPeerMeta[i].room : "Unassigned";
+      bool dup = false;
+      for (int r = 0; r < seenCount; r++) if (strcmp(seen[r], room) == 0) { dup = true; break; }
+      if (dup || seenCount >= MESH_PEER_MAX) continue;
+      seen[seenCount++] = room;
+      JsonObject ro = roomsArr.add<JsonObject>();
+      ro["room"] = room;
+      JsonArray devs = ro["devices"].to<JsonArray>();
+      for (int j = 0; j < gMeshPeerSlots; j++) {
+        if (!gMeshPeerMeta[j].isActive) continue;
+        const char* r2 = gMeshPeerMeta[j].room[0] ? gMeshPeerMeta[j].room : "Unassigned";
+        if (strcmp(r2, room) != 0) continue;
+        MeshPeerHealth* h = getMeshPeerHealth(gMeshPeerMeta[j].mac, false);
+        JsonObject d = devs.add<JsonObject>();
+        const char* dn = gMeshPeerMeta[j].friendlyName[0] ? gMeshPeerMeta[j].friendlyName : gMeshPeerMeta[j].name;
+        d["name"]   = String(dn[0] ? dn : MAC_STR(gMeshPeerMeta[j].mac));
+        d["tags"]   = gMeshPeerMeta[j].tags;
+        d["online"] = h ? isMeshPeerAlive(h) : false;
+      }
+    }
+    doc["count"] = seenCount;
+    serializeJson(doc, getDebugBuffer(), 1024);
+    return getDebugBuffer();
+  }
+
   char* buf = getDebugBuffer();
   int pos = 0;
   pos += snprintf(buf + pos, 1024 - pos, "=== Rooms ===\n");
@@ -10562,7 +10743,19 @@ const char* cmd_espnow_worker(const String& argsInput) {
   subcmd.toLowerCase();
 
   // Show current configuration
-  if (a.count() == 0 || subcmd == "show") {
+  if (a.count() == 0 || subcmd == "show" || subcmd == "json") {
+    if (argWantsJson(argsInput)) {
+      snprintf(getDebugBuffer(), 1024,
+               "{\"schema\":1,\"enabled\":%s,\"intervalMs\":%u,"
+               "\"fields\":{\"heap\":%s,\"rssi\":%s,\"thermal\":%s,\"imu\":%s}}",
+               gWorkerStatusConfig.enabled ? "true" : "false",
+               gWorkerStatusConfig.intervalMs,
+               gWorkerStatusConfig.includeHeap ? "true" : "false",
+               gWorkerStatusConfig.includeRssi ? "true" : "false",
+               gWorkerStatusConfig.includeThermal ? "true" : "false",
+               gWorkerStatusConfig.includeImu ? "true" : "false");
+      return getDebugBuffer();
+    }
     snprintf(getDebugBuffer(), 1024,
              "Worker Status Config:\n"
              "  enabled: %s\n"

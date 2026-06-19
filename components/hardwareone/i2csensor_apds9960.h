@@ -25,6 +25,9 @@ extern APDSCache gApdsCache;
 extern bool gApdsColorEnabled;
 extern bool gApdsProximityEnabled;
 extern bool gApdsGestureEnabled;
+
+// Shared sensor-data JSON builder (apdsread json / sensors json).
+int apdsBuildDataJSON(char* buf, size_t bufSize);
 extern bool gApdsConnected;
 extern unsigned long gApdsLastStopTime;
 extern TaskHandle_t gApdsTaskHandle;

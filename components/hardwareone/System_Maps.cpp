@@ -1875,7 +1875,27 @@ const char* cmd_map(const String& argsInput) {
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   
   const LoadedMap& currentMap = MapCore::getCurrentMap();
-  
+
+  if (argWantsJson(argsInput)) {
+    PSRAM_JSON_DOC(doc);
+    doc["schema"] = 1;
+    doc["valid"] = currentMap.valid;
+    if (currentMap.valid) {
+      char rgn[9]; memcpy(rgn, currentMap.header.regionName, 8); rgn[8] = '\0';
+      doc["filename"]     = String(currentMap.filename);
+      doc["region"]       = String(rgn);
+      doc["featureCount"] = (unsigned long)currentMap.header.featureCount;
+      doc["fileSize"]     = (unsigned long)currentMap.fileSize;
+      JsonObject b = doc["bounds"].to<JsonObject>();
+      b["minLat"] = currentMap.header.minLat / 1000000.0;
+      b["minLon"] = currentMap.header.minLon / 1000000.0;
+      b["maxLat"] = currentMap.header.maxLat / 1000000.0;
+      b["maxLon"] = currentMap.header.maxLon / 1000000.0;
+    }
+    serializeJson(doc, getDebugBuffer(), 1024);
+    return getDebugBuffer();
+  }
+
   if (!currentMap.valid) {
     return "No map loaded. Use 'mapload <path>' or upload to /maps/";
   }
@@ -1934,7 +1954,25 @@ const char* cmd_whereami(const String& argsInput) {
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   
   const LocationContext& ctx = LocationContextManager::getContext();
-  
+
+  if (argWantsJson(argsInput)) {
+    PSRAM_JSON_DOC(doc);
+    doc["schema"] = 1;
+    doc["valid"] = ctx.valid;
+    if (ctx.valid) {
+      if (ctx.nearestRoad[0] != '\0') {
+        doc["road"]          = String(ctx.nearestRoad);
+        doc["roadDistanceM"] = ctx.roadDistanceM;
+      }
+      if (ctx.nearestArea[0] != '\0') {
+        doc["area"]          = String(ctx.nearestArea);
+        doc["areaDistanceM"] = ctx.areaDistanceM;
+      }
+    }
+    serializeJson(doc, getDebugBuffer(), 1024);
+    return getDebugBuffer();
+  }
+
   if (!ctx.valid) {
     return "Location context not available. Need GPS fix and loaded map.";
   }
@@ -2009,10 +2047,20 @@ const char* cmd_maplist(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  
+
   char maps[8][96];
   int count = MapCore::getAvailableMaps(maps, 8);
-  
+
+  if (argWantsJson(argsInput)) {
+    PSRAM_JSON_DOC(doc);
+    doc["schema"] = 1;
+    JsonArray arr = doc["maps"].to<JsonArray>();
+    for (int i = 0; i < count; i++) arr.add(String("/maps/") + maps[i]);
+    doc["count"] = count;
+    serializeJson(doc, getDebugBuffer(), 1024);
+    return getDebugBuffer();
+  }
+
   if (count == 0) {
     return "No maps found in /maps/";
   }

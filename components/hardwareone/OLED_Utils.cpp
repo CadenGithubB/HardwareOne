@@ -3778,6 +3778,37 @@ const char* cmd_oledclear(const String& argsInput) {
 const char* cmd_oledstatus(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
+  if (argWantsJson(argsInput)) {
+    PSRAM_JSON_DOC(doc);
+    doc["schema"] = 1;
+    doc["connected"] = oledConnected;
+    if (oledConnected) {
+      doc["address"] = OLED_I2C_ADDRESS;
+      doc["width"]   = SCREEN_WIDTH;
+      doc["height"]  = SCREEN_HEIGHT;
+      doc["enabled"] = gOledEnabled;
+      const char* modeStr;
+      switch (currentOLEDMode) {
+        case OLED_SYSTEM_STATUS:  modeStr = "System Status"; break;
+        case OLED_SENSOR_DATA:    modeStr = "Sensor Data"; break;
+        case OLED_SENSOR_LIST:    modeStr = "Sensor List"; break;
+        case OLED_THERMAL_VISUAL: modeStr = "Thermal Visual"; break;
+        case OLED_GAMEPAD_VISUAL: modeStr = "Gamepad Visual"; break;
+        case OLED_NETWORK_INFO:   modeStr = "Network Info"; break;
+        case OLED_MESH_STATUS:    modeStr = "Mesh Status"; break;
+        case OLED_CUSTOM_TEXT:    modeStr = "Custom Text"; break;
+        case OLED_LOGO:           modeStr = "Logo"; break;
+        case OLED_ANIMATION:      modeStr = "Animation"; break;
+        case OLED_FILE_BROWSER:   modeStr = "File Browser"; break;
+        case OLED_OFF:            modeStr = "Off"; break;
+        default:                  modeStr = "Unknown"; break;
+      }
+      doc["mode"] = modeStr;
+    }
+    serializeJson(doc, getDebugBuffer(), 1024);
+    return getDebugBuffer();
+  }
+
   if (!oledConnected) {
     broadcastOutput("OLED display: Not connected");
     return "OK";

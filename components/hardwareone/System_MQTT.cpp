@@ -1154,7 +1154,23 @@ const char* cmd_closemqtt(const String& argsInput) {
 
 const char* cmd_mqttstatus(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  
+
+  // JSON: returned to the caller only (no broadcastOutput); text path unchanged.
+  if (argWantsJson(argsInput)) {
+    PSRAM_JSON_DOC(doc);
+    doc["schema"] = 1;
+    doc["enabled"] = mqttEnabled;
+    doc["connected"] = mqttTofConnected;
+    doc["host"] = gSettings.mqttHost;
+    doc["port"] = gSettings.mqttPort;
+    doc["user"] = gSettings.mqttUser;
+    doc["baseTopic"] = gSettings.mqttBaseTopic;
+    doc["publishIntervalMs"] = gSettings.mqttPublishIntervalMs;
+    if (lastError.length() > 0) doc["lastError"] = lastError;
+    serializeJson(doc, getDebugBuffer(), 1024);
+    return getDebugBuffer();
+  }
+
   // Output each line separately to avoid DEBUG_MSG_SIZE (256 byte) truncation
   broadcastOutput("=== MQTT STATUS ===");
   BROADCAST_PRINTF("Enabled: %s", mqttEnabled ? "Yes" : "No");
@@ -1475,11 +1491,32 @@ const char* cmd_mqtttopics(const String& argsInput) {
 
 const char* cmd_mqttexternalsensors(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  
+
+  if (argWantsJson(argsInput)) {
+    if (!ensureDebugBuffer()) return "{\"schema\":1,\"error\":\"buffer\"}";
+    PSRAM_JSON_DOC(doc);
+    doc["schema"] = 1;
+    JsonArray arr = doc["sensors"].to<JsonArray>();
+    if (externalSensorMutex && externalSensorCount > 0 &&
+        xSemaphoreTake(externalSensorMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+      unsigned long now = millis();
+      for (int i = 0; i < externalSensorCount; i++) {
+        JsonObject o = arr.add<JsonObject>();
+        o["name"]   = externalSensors[i].name;
+        o["value"]  = externalSensors[i].value.substring(0, 64);  // ArduinoJson escapes untrusted MQTT data
+        o["ageSec"] = (unsigned long)((now - externalSensors[i].lastUpdate) / 1000);
+      }
+      xSemaphoreGive(externalSensorMutex);
+    }
+    doc["count"] = (int)arr.size();
+    serializeJson(doc, getDebugBuffer(), 1024);
+    return getDebugBuffer();
+  }
+
   if (!ensureDebugBuffer()) return "Error";
   char* buf = getDebugBuffer();
   int pos = 0;
-  
+
   if (!externalSensorMutex || externalSensorCount == 0) {
     return "No external sensors received";
   }

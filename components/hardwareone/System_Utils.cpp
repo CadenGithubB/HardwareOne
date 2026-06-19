@@ -936,15 +936,21 @@ void logCommandExecution(const AuthContext& ctx, const char* cmd, bool success, 
   
   // Status indicator
   const char* status = success ? "OK" : "FAIL";
-  
-  // Format: [timestamp] user@source cmd -> status result
-  snprintf(entry, sizeof(entry), "[%lu] %s@%s %s -> %s %s",
-           ts,
-           ctx.user.c_str(),
-           source,
-           redactedCmd.c_str(),
-           status,
-           resultBuf);
+
+  // A JSON reply ('{'/'[') is internal-comms payload that already went out the
+  // caller's private channel; recording it just bloats the audit file (e.g.
+  // thousands of `bleinfo json -> OK {...}` lines). For JSON, log status only;
+  // keep the short human-readable result (errors etc.) for everything else.
+  const bool resultIsJson = (result && (result[0] == '{' || result[0] == '['));
+
+  // Format: [timestamp] user@source cmd -> status [result]
+  if (resultIsJson) {
+    snprintf(entry, sizeof(entry), "[%lu] %s@%s %s -> %s",
+             ts, ctx.user.c_str(), source, redactedCmd.c_str(), status);
+  } else {
+    snprintf(entry, sizeof(entry), "[%lu] %s@%s %s -> %s %s",
+             ts, ctx.user.c_str(), source, redactedCmd.c_str(), status, resultBuf);
+  }
   
   // Append to audit log with 500KB cap (rotates automatically)
   appendLineWithCap("/system/sys_logs/command-audit.log", entry, 500 * 1024);
@@ -963,7 +969,6 @@ void logCommandExecution(const AuthContext& ctx, const char* cmd, bool success, 
   // we drop the preview for JSON and keep only the status. Human-readable
   // results (e.g. "Not detected on I2C bus", "already running") are still
   // surfaced — those ARE useful broadcast output.
-  const bool resultIsJson = (result && (result[0] == '{' || result[0] == '['));
   char auditLine[384];
   if (resultIsJson) {
     snprintf(auditLine, sizeof(auditLine), "[CMD] %s@%s: %s -> %s",
@@ -1244,6 +1249,11 @@ const char* cmd_temperature(const String& originalCmd) {
   float tempC = temperatureRead();
   float tempF = (tempC * 9.0 / 5.0) + 32.0;
 
+  if (argWantsJson(originalCmd)) {
+    snprintf(getDebugBuffer(), 1024, "{\"schema\":1,\"tempC\":%.1f,\"tempF\":%.1f}", tempC, tempF);
+    return getDebugBuffer();
+  }
+
   snprintf(getDebugBuffer(), 1024, "ESP32 Internal Temperature:\n  %.1f°C (%.1f°F)", tempC, tempF);
   return getDebugBuffer();
 }
@@ -1286,6 +1296,14 @@ const char* cmd_voltage(const String& originalCmd) {
   if (gApdsConnected) {
     estimatedCurrent += 3;  // APDS9960 typical
     broadcastOutput("APDS Sensor: Active (+3mA)");
+  }
+
+  if (argWantsJson(originalCmd)) {
+    snprintf(getDebugBuffer(), 1024,
+      "{\"schema\":1,\"measured\":false,\"estimatedCurrentMa\":%.0f,\"estimatedPowerW\":%.2f,"
+      "\"note\":\"estimate only — see batterystatus json for measured\"}",
+      estimatedCurrent, (estimatedCurrent * 3.3) / 1000.0);
+    return getDebugBuffer();
   }
 
   broadcastOutput("");
@@ -1898,7 +1916,9 @@ const char* cmd_timeset(const String& argsInput) {
 
 const char* cmd_fsusage(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  const bool wantJson = argWantsJson(argsInput);
   if (!filesystemReady) {
+    if (wantJson) return "{\"schema\":1,\"ready\":false}";
     broadcastOutput("Error: LittleFS not ready");
     return "ERROR";
   }
@@ -1907,6 +1927,15 @@ const char* cmd_fsusage(const String& argsInput) {
   size_t usedBytes = LittleFS.usedBytes();
   size_t freeBytes = totalBytes - usedBytes;
   unsigned int usagePercent = (usedBytes * 100) / (totalBytes == 0 ? 1 : totalBytes);
+
+  // JSON to the caller only (no broadcastOutput); text path below unchanged.
+  if (wantJson) {
+    snprintf(getDebugBuffer(), 1024,
+             "{\"schema\":1,\"ready\":true,\"totalBytes\":%lu,\"usedBytes\":%lu,\"freeBytes\":%lu,\"usagePercent\":%u}",
+             (unsigned long)totalBytes, (unsigned long)usedBytes,
+             (unsigned long)freeBytes, usagePercent);
+    return getDebugBuffer();
+  }
 
   broadcastOutput("Filesystem Usage:");
   BROADCAST_PRINTF("  Total: %lu bytes", (unsigned long)totalBytes);
@@ -3218,7 +3247,36 @@ void printMemoryReport() {
 // Command handlers
 const char* cmd_memreport(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  (void)argsInput;
+  if (argWantsJson(argsInput)) {
+    PSRAM_JSON_DOC(doc);
+    doc["schema"] = 1;
+    size_t dramTotal = ESP.getHeapSize();
+    size_t dramFree  = ESP.getFreeHeap();
+    size_t dramMin   = ESP.getMinFreeHeap();
+    JsonObject dram = doc["dram"].to<JsonObject>();
+    dram["total"]    = (unsigned long)dramTotal;
+    dram["used"]     = (unsigned long)(dramTotal - dramFree);
+    dram["free"]     = (unsigned long)dramFree;
+    dram["minFree"]  = (unsigned long)dramMin;
+    dram["peakUsed"] = (unsigned long)(dramTotal - dramMin);
+    JsonObject ps = doc["psram"].to<JsonObject>();
+    bool hasPs = psramFound();
+    ps["available"] = hasPs;
+    if (hasPs) {
+      size_t psTotal = ESP.getPsramSize();
+      size_t psFree  = ESP.getFreePsram();
+      ps["total"] = (unsigned long)psTotal;
+      ps["used"]  = (unsigned long)(psTotal - psFree);
+      ps["free"]  = (unsigned long)psFree;
+    }
+    JsonObject hc = doc["heapCaps"].to<JsonObject>();
+    hc["internalFree"]    = (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    hc["internalLargest"] = (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    hc["dmaFree"]         = (unsigned long)heap_caps_get_free_size(MALLOC_CAP_DMA);
+    hc["dmaLargest"]      = (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_DMA);
+    serializeJson(doc, getDebugBuffer(), 1024);
+    return getDebugBuffer();
+  }
   printMemoryReport();
   return "Memory report printed to serial";
 }

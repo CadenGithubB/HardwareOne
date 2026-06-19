@@ -25,6 +25,7 @@
 #include "System_Command.h"
 #include "System_Settings.h"
 #include "System_I2C.h"
+#include "System_Utils.h"   // argWantsJson
 #include <ArduinoJson.h>
 
 static SemaphoreHandle_t gCameraMutex = nullptr;
@@ -2118,6 +2119,31 @@ const char* cmd_camerarecord(const String& argsInput) {
 
 const char* cmd_cameravideolist(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+
+  if (argWantsJson(argsInput)) {
+    PSRAM_JSON_DOC(doc);
+    doc["schema"] = 1;
+    doc["count"] = getVideoRecordingCount();
+    JsonArray arr = doc["recordings"].to<JsonArray>();
+    String list = getVideoRecordingsList();  // "name:size\nname:size"
+    int start = 0;
+    while (start < (int)list.length()) {
+      int nl = list.indexOf('\n', start);
+      String entry = (nl < 0) ? list.substring(start) : list.substring(start, nl);
+      entry.trim();
+      if (entry.length()) {
+        int colon = entry.lastIndexOf(':');
+        JsonObject o = arr.add<JsonObject>();
+        if (colon > 0) { o["filename"] = entry.substring(0, colon); o["size"] = entry.substring(colon + 1).toInt(); }
+        else           { o["filename"] = entry; }
+      }
+      if (nl < 0) break;
+      start = nl + 1;
+    }
+    serializeJson(doc, getDebugBuffer(), 1024);
+    return getDebugBuffer();
+  }
+
   int count = getVideoRecordingCount();
   if (count == 0) return "No video recordings found";
   String list = getVideoRecordingsList();

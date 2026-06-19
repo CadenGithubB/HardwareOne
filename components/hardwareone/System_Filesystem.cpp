@@ -1036,7 +1036,24 @@ const char* cmd_filedelete(const String& argsInput) {
 // latched into SD overflow, plus free-space snapshots on each tier.
 static const char* cmd_logtier(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  (void)argsInput;
+
+  if (argWantsJson(argsInput)) {
+    bool overflow = VFS::isLogOverflowActive();
+    bool sdOk = VFS::isSDAvailable();
+    uint64_t st = 0, su = 0, sf = 0;
+    if (sdOk) VFS::getStats(VFS::SDCARD, st, su, sf);
+    const char* tier = !overflow ? "littlefs" : (sdOk ? "sd-overflow" : "sd-overflow-unmounted");
+    snprintf(getDebugBuffer(), 1024,
+      "{\"schema\":1,\"tier\":\"%s\",\"overflow\":%s,"
+      "\"littlefs\":{\"free\":%lu,\"total\":%lu,\"used\":%lu},"
+      "\"sd\":{\"available\":%s,\"total\":%llu,\"used\":%llu,\"free\":%llu}}",
+      tier, overflow ? "true" : "false",
+      (unsigned long)VFS::getCachedLittleFsFree(), (unsigned long)LittleFS.totalBytes(),
+      (unsigned long)LittleFS.usedBytes(),
+      sdOk ? "true" : "false",
+      (unsigned long long)st, (unsigned long long)su, (unsigned long long)sf);
+    return getDebugBuffer();
+  }
 
   size_t flashFree = VFS::getCachedLittleFsFree();
   size_t flashTotal = LittleFS.totalBytes();

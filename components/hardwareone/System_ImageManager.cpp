@@ -3,6 +3,8 @@
 #include "System_Debug.h"
 #include "System_Utils.h"
 #include "System_Command.h"
+#include "System_MemUtil.h"  // PSRAM_JSON_DOC
+#include <ArduinoJson.h>
 #include "System_ESPNow.h"
 #include "System_Mutex.h"
 #include "System_VFS.h"
@@ -540,7 +542,27 @@ const char* cmd_images(const String& argsInput) {
   // Get storage stats
   StorageStats stats = gImageManager.getStorageStats(location);
   const char* locName = (location == IMAGE_STORAGE_SD) ? "SD" : "LittleFS";
-  
+
+  if (argWantsJson(argsInput)) {
+    PSRAM_JSON_DOC(doc);
+    doc["schema"] = 1;
+    doc["location"] = locName;
+    doc["available"] = stats.available;
+    if (stats.available) {
+      doc["usedBytes"]  = (unsigned long)stats.usedBytes;
+      doc["totalBytes"] = (unsigned long)stats.totalBytes;
+      doc["imageCount"] = stats.imageCount;
+      JsonArray arr = doc["images"].to<JsonArray>();
+      for (const auto& img : gImageManager.listImages(location)) {
+        JsonObject o = arr.add<JsonObject>();
+        o["filename"] = img.filename;
+        o["size"]     = (unsigned long)img.size;
+      }
+    }
+    serializeJson(doc, getDebugBuffer(), 1024);
+    return getDebugBuffer();
+  }
+
   if (!stats.available) {
     snprintf(buf, 1024, "%s not available", locName);
     return buf;

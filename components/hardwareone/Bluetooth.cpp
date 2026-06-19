@@ -1395,12 +1395,47 @@ static const char* cmd_blestop(const String& argsInput) {
 }
 
 static const char* cmd_blestatus(const String& argsInput) {
+  const bool wantJson = argWantsJson(argsInput);
+
   if (!gBLEState || !gBLEState->initialized) {
+    if (wantJson) return "{\"schema\":1,\"initialized\":false}";
     return "Bluetooth not initialized. Run 'openble' first.";
   }
-  
+
+  // JSON: machine-readable connection state for the app. Returned to the caller
+  // only (no broadcastOutput) so it never lands on the shared consoles.
+  if (wantJson) {
+    if (!ensureDebugBuffer()) return "{\"schema\":1,\"error\":\"buffer\"}";
+    PSRAM_JSON_DOC(doc);
+    doc["schema"] = 1;
+    doc["initialized"] = true;
+    doc["state"] = getBLEStateString();
+    doc["activeConnections"] = gBLEState->activeConnectionCount;
+    doc["maxConnections"] = BLE_MAX_CONNECTIONS;
+    doc["totalConnections"] = gBLEState->totalConnections;
+    doc["commandsReceived"] = gBLEState->commandsReceived;
+    doc["responsesSent"] = gBLEState->responsesSent;
+    JsonArray conns = doc["connections"].to<JsonArray>();
+    for (int i = 0; i < BLE_MAX_CONNECTIONS; i++) {
+      if (!gBLEState->connections[i].active) continue;
+      JsonObject c = conns.add<JsonObject>();
+      char macStr[18];
+      macToStackBuf(gBLEState->connections[i].deviceAddr, macStr);
+      const char* who = (gBLEState->connections[i].authed &&
+                         gBLEState->connections[i].user.length() > 0)
+                          ? gBLEState->connections[i].user.c_str() : "Unknown";
+      c["index"]        = i;
+      c["user"]         = String(who);
+      c["mac"]          = String(macStr);
+      c["connectedSec"] = (uint32_t)((millis() - gBLEState->connections[i].connectedSince) / 1000);
+      c["commands"]     = gBLEState->connections[i].commandsReceived;
+    }
+    serializeJson(doc, getDebugBuffer(), 1024);
+    return getDebugBuffer();
+  }
+
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  
+
   char* buf = getDebugBuffer();
   int offset = 0;
   int remaining = 1024;
