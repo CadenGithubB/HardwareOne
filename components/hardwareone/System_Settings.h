@@ -692,18 +692,21 @@ struct Settings {
   struct MeshIdentity {
     String   label;                    // Human-readable name, e.g. "primary", "work"
     String   passphrase;               // User-typed (raw). 3.6 will remove this from persistence — only ever
-                                       //   held in RAM long enough to (re)compute passphraseHashPbkdf2.
+                                       //   held in RAM long enough to (re)compute passphraseStretchedKey.
     uint16_t fingerprint;              // CRC16-CCITT of label — stamped in V4 header meshFingerprint
     bool     enabled;                  // Inactive meshes are skipped in heartbeat emission, RX validation
     bool     isDefault;                // The mesh new pairings join unless overridden
-    // Phase 3.1: PBKDF2-HMAC-SHA256(passphrase, salt=SHA256("espnow-v4-mesh-salt:"||label), 100k iters).
-    // 32 bytes. Persisted in plaintext (irreversible). Refreshed on passphrase change or label rename.
-    // Source of truth for downstream KDFs (bootstrap key, group key) from 3.1 onward.
-    uint8_t  passphraseHashPbkdf2[32];
-    bool     passphraseHashValid;      // false until first stretch completes (lazy boot-time fill)
+    // 32-byte mesh master key: PBKDF2-HMAC-SHA256(passphrase,
+    //   salt=SHA256("espnow-v4-mesh-salt:"||label), 100k iters). Cached so boot
+    //   skips the slow stretch; re-derived on passphrase change or label rename.
+    //   Persisted AES-encrypted at rest (putSecret), same as `passphrase`. This is
+    //   a derived KEY (the source of the bootstrap/group KDFs) — NOT a one-way
+    //   verification hash, despite the old "passphraseHashPbkdf2" name.
+    uint8_t  passphraseStretchedKey[32];
+    bool     passphraseStretchedKeyValid;      // false until first stretch completes (lazy boot-time fill)
     MeshIdentity()
       : label(""), passphrase(""), fingerprint(0), enabled(false), isDefault(false),
-        passphraseHashPbkdf2{0}, passphraseHashValid(false) {}
+        passphraseStretchedKey{0}, passphraseStretchedKeyValid(false) {}
   };
   MeshIdentity meshes[N_MESHES];
 

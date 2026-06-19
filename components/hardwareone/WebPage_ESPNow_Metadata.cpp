@@ -11,6 +11,7 @@
 #include "WebServer_Server.h"
 #include "WebServer_Utils.h"
 #include "System_MemUtil.h"
+#include <ArduinoJson.h>
 
 // External declarations
 extern MeshPeerMeta* gMeshPeerMeta;
@@ -94,27 +95,17 @@ esp_err_t handleEspNowMetadata(httpd_req_t* req) {
     DEBUG_ESPNOW_METADATAF("[METADATA] API: gMeshPeerMeta is null");
   }
   
-  // If found in mesh metadata, return it
+  // If found in mesh metadata, return it. Built via the shared core serializer
+  // (espnowSerializeMeshPeerMeta) so the field shape matches `espnowdevices json`
+  // exactly and strings are JSON-escaped (the old raw snprintf was not).
   if (meta) {
-    char json[512];
-    snprintf(json, sizeof(json),
-             "{\"found\":true,"
-             "\"mac\":\"%02X:%02X:%02X:%02X:%02X:%02X\","
-             "\"deviceName\":\"%s\","
-             "\"friendlyName\":\"%s\","
-             "\"room\":\"%s\","
-             "\"zone\":\"%s\","
-             "\"tags\":\"%s\","
-             "\"stationary\":%s,"
-             "\"source\":\"mesh\"}",
-             targetMac[0], targetMac[1], targetMac[2], targetMac[3], targetMac[4], targetMac[5],
-             meta->name,
-             meta->friendlyName,
-             meta->room,
-             meta->zone,
-             meta->tags,
-             meta->stationary ? "true" : "false");
-    httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
+    PSRAM_JSON_DOC(doc);
+    JsonObject o = doc.to<JsonObject>();
+    o["found"] = true;
+    espnowSerializeMeshPeerMeta(o, *meta);
+    String out;
+    serializeJson(doc, out);
+    httpd_resp_send(req, out.c_str(), HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
   }
   

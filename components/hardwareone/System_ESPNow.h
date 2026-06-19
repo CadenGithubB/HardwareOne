@@ -1225,6 +1225,13 @@ bool storeMessageInPeerHistory(uint8_t* peerMac, const char* peerName, const cha
 // truncated. Call once at the send chokepoint (cmd_espnow_send). msgId is the
 // send's correlation id (used for delivery-status polling + web bubble de-dup).
 bool storeSentMessageInPeerHistory(uint8_t* peerMac, const char* message, uint32_t msgId);
+
+// Received-side chunked store: split a (possibly long) received message — e.g. a
+// remote command's result — into <=200 B pieces sharing reqId, so the feed
+// delivers reassemblable pieces instead of one record truncated at the 256 B
+// slot. Mirrors the sent path; the client stitches by reqId.
+bool storeReceivedMessageChunked(uint8_t* peerMac, const char* peerName, const char* message,
+                                 bool encrypted, LogMessageType msgType, uint32_t reqId);
 // Stamp the DURABLE delivery state onto the sent[] record(s) for msgId (all
 // fragments share it). Called from the sendStatus terminal transitions
 // (delivered / failed / timeout) so the conversation shows the resolved state
@@ -1287,6 +1294,13 @@ int espnowCollapsedAllMessages(CollapsedMsgRef* out, int maxN);
 // present. Returns bytes written (excluding NUL).
 int espnowReassembleByReqId(const uint8_t* peerMac, uint32_t reqId, bool isSent,
                             char* out, size_t cap, bool* complete = nullptr);
+
+// Serialize one mesh peer's metadata + liveness into a JSON object. Single
+// source of truth for the peer-metadata shape, shared by the `espnowdevices
+// json` CLI branch and the web /api/espnow/metadata handler so the field set
+// lives in exactly one place (and both get ArduinoJson string escaping).
+// Adds online/lastSeenSec from MeshPeerHealth on top of the stored metadata.
+void espnowSerializeMeshPeerMeta(JsonObject o, const MeshPeerMeta& m);
 
 // File transfer to specific MAC (used by ImageManager)
 bool sendFileToMac(const uint8_t* mac, const String& localPath);

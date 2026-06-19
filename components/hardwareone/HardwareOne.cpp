@@ -1809,7 +1809,7 @@ void hardwareone_setup() {
     for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
       Settings::MeshIdentity& m = gSettings.meshes[i];
       if (!m.enabled || m.label.length() == 0) continue;
-      if (!m.passphraseHashValid && m.passphrase.length() > 0) {
+      if (!m.passphraseStretchedKeyValid && m.passphrase.length() > 0) {
         if (meshKeysStretchPassphrase(i)) meshesDirty = true;
       }
     }
