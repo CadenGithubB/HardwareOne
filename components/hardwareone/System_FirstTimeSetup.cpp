@@ -691,8 +691,9 @@ void firstTimeSetupIfNeeded() {
   admin["username"] = u;
   // Password now stored in per-user settings file, not here
   admin["role"] = "admin";
-  admin["createdAt"] = (const char*)nullptr;  // null
-  admin["createdBy"] = "provisional";
+  admin["createdAt"] = (const char*)nullptr;  // resolved lazily via boot anchor
+  admin["createdBy"] = "firstsetup";          // provenance: onboarding wizard owner
+  admin["createdAtSource"] = "pending";       // time-derivation status (see resolver)
   admin["createdMs"] = millis();
   admin["ntpAnchorId"] = gNTPAnchorId;
   admin["bootCount"] = 1;

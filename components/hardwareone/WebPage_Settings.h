@@ -2663,6 +2663,12 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
             html += '<div><label style="display:block;font-size:0.85rem;color:var(--muted);margin-bottom:0.25rem">Password for ' + username + '</label>';
             html += '<input type="password" id="sync-user-pass-' + uid + '" placeholder="User\'s password" style="width:100%;box-sizing:border-box"></div>';
             html += '</div>';
+            html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0.5rem;margin-bottom:0.5rem">';
+            html += '<div><label style="display:block;font-size:0.85rem;color:var(--muted);margin-bottom:0.25rem">Target Admin Username</label>';
+            html += '<input type="text" id="sync-recv-admin-user-' + uid + '" placeholder="Admin on target device" autocomplete="off" style="width:100%;box-sizing:border-box"></div>';
+            html += '<div><label style="display:block;font-size:0.85rem;color:var(--muted);margin-bottom:0.25rem">Target Admin Password</label>';
+            html += '<input type="password" id="sync-recv-admin-pass-' + uid + '" placeholder="That admin\'s password" style="width:100%;box-sizing:border-box"></div>';
+            html += '</div>';
             html += '<button class="btn" data-uid="' + uid + '" data-user="' + username + '" onclick="syncUserToDeviceFor(this.dataset.uid,this.dataset.user)" title="Send sync">Sync</button>';
             html += '</div>';
           }
@@ -2872,16 +2878,20 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
       var device = $('usersync-device') ? $('usersync-device').value : '';
       var adminPass = $('usersync-admin-password') ? $('usersync-admin-password').value : '';
       var userPass = $('usersync-user-password') ? $('usersync-user-password').value : '';
-      if (!username || !device || !adminPass || !userPass) {
-        alert('Please select a user, select a device, and enter both passwords');
+      var recvAdminUser = $('usersync-recv-admin-user') ? $('usersync-recv-admin-user').value : '';
+      var recvAdminPass = $('usersync-recv-admin-pass') ? $('usersync-recv-admin-pass').value : '';
+      if (!username || !device || !adminPass || !userPass || !recvAdminUser || !recvAdminPass) {
+        alert('Select a user and device, then fill in your admin password, the user\'s password, and the target device admin username + password');
         return;
       }
-      var cmd = 'usersync ' + username + ' ' + device + ' ' + adminPass + ' ' + userPass;
+      // Order: usersync <username> <userPass> <device> <targetAdminUser> <targetAdminPass> <yourAdminPass>
+      var cmd = 'usersync ' + username + ' ' + userPass + ' ' + device + ' ' + recvAdminUser + ' ' + recvAdminPass + ' ' + adminPass;
       postSettingsCli(cmd)
       .then(function(t) {
         alert(t || 'Sync complete');
         if ($('usersync-admin-password')) $('usersync-admin-password').value = '';
         if ($('usersync-user-password')) $('usersync-user-password').value = '';
+        if ($('usersync-recv-admin-pass')) $('usersync-recv-admin-pass').value = '';
       })
       .catch(function(e) { alert('Error: ' + e.message); });
     };
@@ -2919,16 +2929,20 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
       var device = $('sync-device-' + uid) ? $('sync-device-' + uid).value : '';
       var adminPass = $('sync-admin-pass-' + uid) ? $('sync-admin-pass-' + uid).value : '';
       var userPass = $('sync-user-pass-' + uid) ? $('sync-user-pass-' + uid).value : '';
-      if (!device || !adminPass || !userPass) {
-        alert('Please select a device and enter both passwords');
+      var recvAdminUser = $('sync-recv-admin-user-' + uid) ? $('sync-recv-admin-user-' + uid).value : '';
+      var recvAdminPass = $('sync-recv-admin-pass-' + uid) ? $('sync-recv-admin-pass-' + uid).value : '';
+      if (!device || !adminPass || !userPass || !recvAdminUser || !recvAdminPass) {
+        alert('Select a device, then fill in your admin password, the user\'s password, and the target device admin username + password');
         return;
       }
-      var cmd = 'usersync ' + username + ' ' + device + ' ' + adminPass + ' ' + userPass;
+      // Order: usersync <username> <userPass> <device> <targetAdminUser> <targetAdminPass> <yourAdminPass>
+      var cmd = 'usersync ' + username + ' ' + userPass + ' ' + device + ' ' + recvAdminUser + ' ' + recvAdminPass + ' ' + adminPass;
       postSettingsCli(cmd)
       .then(function(t) {
         alert(t || 'Sync complete');
         if ($('sync-admin-pass-' + uid)) $('sync-admin-pass-' + uid).value = '';
         if ($('sync-user-pass-' + uid)) $('sync-user-pass-' + uid).value = '';
+        if ($('sync-recv-admin-pass-' + uid)) $('sync-recv-admin-pass-' + uid).value = '';
       })
       .catch(function(e) { alert('Error: ' + e.message); });
     };

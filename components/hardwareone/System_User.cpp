@@ -751,6 +751,7 @@ bool adminCreateUser(const String& username, const String& plainPassword, bool m
     newUser["role"] = "user";
     newUser["createdAt"] = (const char*)nullptr;
     newUser["createdBy"] = createdBy.length() ? createdBy.c_str() : "admin";
+    newUser["createdAtSource"] = "pending";  // createdAt resolved lazily via boot anchor
     newUser["createdMs"] = millis();
     newUser["ntpAnchorId"] = gNTPAnchorId;
     newUser["bootCount"] = gBootCounter;
@@ -1163,8 +1164,9 @@ bool approvePendingUserInternal(const String& username, String& errorOut) {
     user["username"] = username;
     // Password now stored in per-user settings file, not here
     user["role"] = "admin";
-    user["createdAt"] = (const char*)nullptr;  // null
-    user["createdBy"] = "provisional";
+    user["createdAt"] = (const char*)nullptr;  // resolved lazily via boot anchor
+    user["createdBy"] = "firstsetup";          // first admin = device owner (not "approved")
+    user["createdAtSource"] = "pending";       // time-derivation status
     user["createdMs"] = millis();
     user["ntpAnchorId"] = gNTPAnchorId;
     user["bootCount"] = gBootCounter;
@@ -1223,13 +1225,19 @@ bool approvePendingUserInternal(const String& username, String& errorOut) {
       }
     }
     
+    // Record WHO approved this pending request (provenance), distinct from a
+    // first-setup owner admin. Falls back to "admin" if there is no auth context.
+    char approvedByBuf[48];
+    { String ap = currentAuthContext().user;
+      snprintf(approvedByBuf, sizeof(approvedByBuf), "approved:%s", ap.length() ? ap.c_str() : "admin"); }
     JsonObject newUser = users.add<JsonObject>();
     newUser["id"] = nextId;
     newUser["username"] = username;
     // Password now stored in per-user settings file, not here
     newUser["role"] = "user";
-    newUser["createdAt"] = (const char*)nullptr;  // null
-    newUser["createdBy"] = "provisional";
+    newUser["createdAt"] = (const char*)nullptr;  // resolved lazily via boot anchor
+    newUser["createdBy"] = approvedByBuf;         // provenance: approved by an admin
+    newUser["createdAtSource"] = "pending";       // time-derivation status
     newUser["createdMs"] = millis();
     newUser["ntpAnchorId"] = gNTPAnchorId;
     newUser["bootCount"] = gBootCounter;
@@ -2699,7 +2707,11 @@ static bool parseUserTimestampInfo(const String& userObj, int userStart,
   bool hasNullCreatedAt    = (userObj.indexOf("\"createdAt\":null") >= 0) ||
                              (userObj.indexOf("\"createdAt\": null") >= 0);
   bool hasMissingCreatedAt = (userObj.indexOf("\"createdAt\"") < 0);
-  bool isApproximate       = (userObj.indexOf("\"createdBy\":\"approx_power_cycle\"") >= 0) ||
+  // The approximate sentinel now lives in createdAtSource; also accept the
+  // legacy createdBy location so pre-split users are still re-resolved.
+  bool isApproximate       = (userObj.indexOf("\"createdAtSource\":\"approx_power_cycle\"") >= 0) ||
+                             (userObj.indexOf("\"createdAtSource\": \"approx_power_cycle\"") >= 0) ||
+                             (userObj.indexOf("\"createdBy\":\"approx_power_cycle\"") >= 0) ||
                              (userObj.indexOf("\"createdBy\": \"approx_power_cycle\"") >= 0);
   info.needsResolution = hasNullCreatedAt || hasMissingCreatedAt || isApproximate;
 
@@ -2822,7 +2834,9 @@ static bool resolveUserTimestamp(String& usersJson, const UserTimestampInfo& inf
   }
 
   // Mark whether this was an exact resolution or a cross-boot approximation.
-  replaceJsonField(usersJson, "createdBy",
+  // Record HOW createdAt was derived in createdAtSource; leave createdBy
+  // (provenance: who created the account) untouched.
+  replaceJsonField(usersJson, "createdAtSource",
                    crossBoot ? "\"approx_ntp\"" : "\"ntp_resolved\"",
                    info.jsonStartPos);
   return true;
@@ -2843,7 +2857,7 @@ static bool approximateUserTimestamp(String& usersJson, const UserTimestampInfo&
     return false;
   }
 
-  replaceJsonField(usersJson, "createdBy", "\"approx_power_cycle\"", info.jsonStartPos);
+  replaceJsonField(usersJson, "createdAtSource", "\"approx_power_cycle\"", info.jsonStartPos);
   return true;
 }
 
@@ -2881,8 +2895,11 @@ void cleanupOldBootAnchors(void* docPtr) {
   JsonArray usersArray = (*workingDoc)["users"];
   if (usersArray) {
     for (JsonObject user : usersArray) {
-      const char* createdBy = user["createdBy"] | "";
-      if (strcmp(createdBy, "provisional") == 0) {
+      // A user whose createdAt is still null/missing is awaiting timestamp
+      // resolution from a boot anchor — don't prune anchors out from under it.
+      // (Previously keyed off createdBy=="provisional"; createdBy no longer
+      // carries resolution status after the provenance/source split.)
+      if (user["createdAt"].isNull()) {
         return;
       }
     }
@@ -3142,7 +3159,10 @@ const CommandEntry userSystemCommands[] = {
   { "useradd", "Create user: <username> <password> [0|1]", true, cmd_user_add, "Usage: useradd <username> <password> [0|1]\nOptional: 1 = require new password on next login, 0 = omit" },
   { "userlist", "List all users.", true, cmd_user_list },
   { "userrequest", "Request account: <user> <pass> [confirm]", false, cmd_user_request, "Usage: userrequest <username> <password> [confirmPassword]" },
-  { "usersync", "Sync user to ESP-NOW: <username> <target>", true, cmd_user_sync },
+  { "usersync", "Sync a user to another device over ESP-NOW.", true, cmd_user_sync,
+    "Usage: usersync <username> <userPass> <device> <targetAdminUser> <targetAdminPass> <yourAdminPass>\n"
+    "  targetAdminUser/targetAdminPass = an admin account on the RECEIVING device (validated there).\n"
+    "  yourAdminPass = your admin password on THIS device; userPass = the synced user's password." },
 
   // Session management commands
   { "pendinglist", "List pending user requests.", true, cmd_pending_list },
@@ -3313,14 +3333,22 @@ const char* cmd_user_sync(const String& argsInput) {
   
   // Parse command args
   CommandArgs a(argsInput);
-  if (!a.hasMinArgs(4)) {
-    return "Usage: user sync <username> <device> <admin_password> <user_password>";
+  if (!a.hasMinArgs(6)) {
+    return "Usage: usersync <username> <userPass> <device> <targetAdminUser> <targetAdminPass> <yourAdminPass>";
   }
 
-  String username = a.arg(0);
-  String deviceStr = a.arg(1);
-  String adminPass = a.arg(2);
-  String userPass = a.arg(3);
+  // Auth mirrors remote command execution (espnow remote): the RECEIVING device
+  // authenticates an admin from ITS OWN user store, so we transmit the TARGET
+  // device's admin username+password. Fields are grouped logically — the synced
+  // account + its password, then the device, then the target-admin + its
+  // password, then your re-auth; the audit redactor (redactUserSyncCmd) masks
+  // the three password tokens by position.
+  String username      = a.arg(0);  // the user being synced
+  String userPass      = a.arg(1);  // the synced user's password
+  String deviceStr     = a.arg(2);  // target device (name or MAC)
+  String recvAdminUser = a.arg(3);  // admin that exists on the TARGET device
+  String recvAdminPass = a.arg(4);  // the TARGET admin's password
+  String myAdminPass   = a.arg(5);  // this device's admin password (local re-auth)
   
   // Verify user exists locally
   uint32_t userId = 0;
@@ -3364,6 +3392,14 @@ const char* cmd_user_sync(const String& argsInput) {
   if (!isAdminUser(adminUser)) {
     return "Error: Admin privileges required for user sync";
   }
+  // Re-confirm the admin password was re-entered (sensitive cross-device push of
+  // a credential), and that the target device's admin credentials were provided.
+  if (!isValidUser(adminUser, myAdminPass)) {
+    return "Error: Your admin password is incorrect";
+  }
+  if (recvAdminUser.length() == 0 || recvAdminPass.length() == 0) {
+    return "Error: Target device admin username and password required";
+  }
   
   INFO_USERF("[USER_SYNC] Syncing user '%s' (role=%s) to device '%s'", 
              username.c_str(), role.c_str(), deviceName.c_str());
@@ -3380,8 +3416,8 @@ const char* cmd_user_sync(const String& argsInput) {
   
   // Build JSON payload (no V2 envelope, just the sync data)
   JsonObject payload = doc.to<JsonObject>();
-  payload["admin_user"] = adminUser;
-  payload["admin_pass"] = adminPass;
+  payload["recv_admin_user"] = recvAdminUser;
+  payload["recv_admin_pass"] = recvAdminPass;
   payload["target_user"] = username;
   payload["target_pass"] = userPass;
   payload["role"] = role;

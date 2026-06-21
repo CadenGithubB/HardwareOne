@@ -1056,6 +1056,24 @@ namespace {
     return c;
   }
 
+  // usersync <username> <userPass> <device> <targetAdminUser> <targetAdminPass> <yourAdminPass>
+  // Mask the THREE password tokens (positions 3, 6, 7); keep username(2),
+  // device(4), and targetAdminUser(5) visible for the audit trail.
+  static String redactUserSyncCmd(const String& in) {
+    String c = in;
+    const int kPwTokens[] = { 7, 6, 3 };  // high → low so edits don't shift earlier tokens
+    for (int k = 0; k < 3; k++) {
+      int pos = kPwTokens[k];
+      int prevSpace = indexOfNthSpace(c, pos - 1);
+      if (prevSpace < 0) continue;
+      int nextSpace = c.indexOf(' ', prevSpace + 1);
+      String head = c.substring(0, prevSpace + 1);
+      String tail = (nextSpace > 0) ? c.substring(nextSpace) : String();
+      c = head + "***" + tail;
+    }
+    return c;
+  }
+
   // Rule table (extend here to add new redactions)
   // Columns: prefix (lowercase cmd prefix), type (MASK_TOKEN_AT_POS|MASK_AFTER_TOKEN_POS|CALL_HANDLER), param (1-based token index), handler (custom fn or nullptr)
   static const RedactRule kRules[] = {
@@ -1077,6 +1095,8 @@ namespace {
     { "userchangepassword ", MASK_AFTER_TOKEN_POS, 1, nullptr },  // <curPass> <newPass> <confirmPass>
     { "userresetpassword ",  MASK_AFTER_TOKEN_POS, 2, nullptr },  // <username> <newPassword> [flag]
     { "useradd ",            MASK_AFTER_TOKEN_POS, 2, nullptr },  // <username> <password> [flag]
+    // usersync <username> <userPass> <device> <targetAdminUser> <targetAdminPass> <yourAdminPass>
+    { "usersync ",           CALL_HANDLER,         0, &redactUserSyncCmd },  // mask pw tokens 3,6,7
   };
 }
 

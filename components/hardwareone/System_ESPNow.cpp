@@ -3277,11 +3277,15 @@ static void doUserSyncWork(const DeferredUserSyncWork* w) {
     return;
   }
 
-  const char* adminUser  = doc["admin_user"]  | "";
-  const char* adminPass  = doc["admin_pass"]  | "";
-  const char* targetUser = doc["target_user"] | "";
-  const char* targetPass = doc["target_pass"] | "";
-  const char* role       = doc["role"]        | "user";
+  // admin_user/admin_pass carry the RECEIVING device's admin (i.e. THIS device).
+  // The sender supplies the target's admin credentials and we validate them
+  // against our OWN user store below — the same model as a remote command
+  // (v4_handle_cmd: isValidUser against the local DB, session-encryption required).
+  const char* adminUser  = doc["recv_admin_user"] | "";
+  const char* adminPass  = doc["recv_admin_pass"] | "";
+  const char* targetUser = doc["target_user"]     | "";
+  const char* targetPass = doc["target_pass"]     | "";
+  const char* role       = doc["role"]            | "user";
 
   if (!strlen(adminUser) || !strlen(adminPass) || !strlen(targetUser) || !strlen(targetPass)) {
     WARN_ESPNOWF("[USER_SYNC] Missing required fields from %s", deviceName);
@@ -3354,8 +3358,27 @@ static void doUserSyncWork(const DeferredUserSyncWork* w) {
     JsonObject newUser = users.add<JsonObject>();
     newUser["id"]        = nextId;
     newUser["username"]  = targetUser;
-    newUser["role"]      = role;
-    newUser["createdAt"] = (const char*)nullptr;
+    // SECURITY: synced accounts are always created as a standard user — never
+    // admin, even when they are admin on the source device. Privilege must be
+    // granted deliberately on THIS device (userpromote), not propagated by a
+    // sync. The source role is read only to log a downgrade notice below.
+    newUser["role"]      = "user";
+    // Stamp the real creation time when the wall clock is available (we are
+    // creating the user right now). Otherwise this is written null and resolved
+    // lazily by resolvePendingUserCreationTimes(), which runs only at boot /
+    // NTP-sync — so a user synced after this boot's NTP sync would otherwise
+    // stay createdAt=null until the next reboot.
+    char createdAtBuf[24];
+    time_t nowT = time(nullptr);
+    struct tm tmUtc;
+    if (nowT > 1577836800 && gmtime_r(&nowT, &tmUtc) &&
+        strftime(createdAtBuf, sizeof(createdAtBuf), "%Y-%m-%dT%H:%M:%SZ", &tmUtc) > 0) {
+      newUser["createdAt"]       = createdAtBuf;    // exact creation time
+      newUser["createdAtSource"] = "clock";         // stamped live from the wall clock
+    } else {
+      newUser["createdAt"]       = (const char*)nullptr;  // no clock yet → lazy resolve
+      newUser["createdAtSource"] = "pending";
+    }
     char createdByBuf[48];
     snprintf(createdByBuf, sizeof(createdByBuf), "espnow:%s", deviceName);
     newUser["createdBy"] = createdByBuf;
@@ -3381,15 +3404,25 @@ static void doUserSyncWork(const DeferredUserSyncWork* w) {
     defaults["password"] = hashedPassword;
     saveUserSettings((uint32_t)nextId, defaults);
 
-    INFO_ESPNOWF("[USER_SYNC] Created user '%s' (id=%d role=%s) from %s",
-                 targetUser, nextId, role, deviceName);
-    BROADCAST_PRINTF("[ESP-NOW] User sync: Created '%s' (role=%s) from %s",
-                     targetUser, role, deviceName);
+    bool srcWasAdmin = (strcmp(role, "user") != 0);
+    INFO_ESPNOWF("[USER_SYNC] Created user '%s' (id=%d) as standard user from %s%s",
+                 targetUser, nextId, deviceName,
+                 srcWasAdmin ? " [source was admin — not propagated]" : "");
+    BROADCAST_PRINTF("[ESP-NOW] User sync: Created '%s' as standard user from %s%s",
+                     targetUser, deviceName,
+                     srcWasAdmin ? " (was admin on source; use userpromote to elevate)" : "");
 
     char respBuf[128];
     snprintf(respBuf, sizeof(respBuf), "User '%s' created (id=%d)", targetUser, nextId);
     v4_send_command_response(srcAddr, msgId, true, respBuf, strlen(respBuf));
   }
+
+  // The new account must be visible to the auth layer immediately. The canonical
+  // creation path (adminCreateUser) bumps the identity generation to invalidate
+  // auth caches; the hand-rolled sync write above must do the same, or the synced
+  // user may fail to authenticate until the next bump / reboot.
+  extern void bumpIdentityGeneration(const char* reason);
+  bumpIdentityGeneration("user.sync");
 }
 
 static void runDeferredUserSync(void* arg) {
