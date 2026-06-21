@@ -109,7 +109,6 @@ static String   gFilesJsonPages[FILES_JSON_MAX_PAGES];
 static size_t   gFilesJsonPageCount   = 0;
 static size_t   gFilesJsonCurrentPage = 0;
 static char     gFilesJsonTitle[FILES_ROW_LEN] = {0};
-static char     gFilesJsonPath[FILE_MANAGER_MAX_PATH + 32] = {0};
 static bool     gFilesJsonTruncated = false;
 
 // -----------------------------------------------------------------------------
@@ -444,7 +443,6 @@ static void clearJsonViewerState() {
   gFilesJsonPageCount = 0;
   gFilesJsonCurrentPage = 0;
   gFilesJsonTitle[0] = '\0';
-  gFilesJsonPath[0] = '\0';
   gFilesJsonTruncated = false;
 }
 
@@ -498,8 +496,6 @@ static bool showJsonFileViaTextWidget(bool pretty) {
   }
 
   clearJsonViewerState();
-  strncpy(gFilesJsonPath, path, sizeof(gFilesJsonPath) - 1);
-  gFilesJsonPath[sizeof(gFilesJsonPath) - 1] = '\0';
   const char* base = strrchr(path, '/');
   base = base ? (base + 1) : path;
   snprintf(gFilesJsonTitle, sizeof(gFilesJsonTitle), "%s%s",

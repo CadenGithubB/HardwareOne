@@ -494,11 +494,6 @@ bool peerIdentityPersist(const uint8_t mac[6], uint8_t meshId,
   return true;
 }
 
-void peerIdentityNoteSeen(const uint8_t mac[6], uint32_t nowSec) {
-  int idx = findSlotByMac(mac);
-  if (idx < 0) return;
-  gPeerIdentities[idx].lastSeenSec = nowSec;
-}
 
 bool peerIdentitySetSubscriptions(const uint8_t mac[6], uint32_t subscribedEvents) {
   int idx = findSlotByMac(mac);

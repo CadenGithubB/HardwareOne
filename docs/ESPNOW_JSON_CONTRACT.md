@@ -59,12 +59,17 @@ Enabled:
 Not initialized → `{ "schema":1, "ok":false, "error":"ESP-NOW not initialized" }`
 
 ## `espnowsensorstatus json`
-Master (aggregates remote sensor cache). NOTE: `sensors` is an **array of
-sensor-type strings** — which sensors that device *has* — NOT a readings object.
-(Live readings stream separately; this is presence, not values.)
+Master (aggregates remote sensor cache). ⚠️ **`sensors` is now an array of OBJECTS**
+(changed from bare type strings): each `{ "type":<sensor>, "enabled":<streaming?>,
+"fresh":<recent data?> }`. `enabled` = the sensor is *streaming to the mesh* (not
+"hardware on"); `fresh` = data within the freshness TTL. (Live readings stream
+separately; this is presence + streaming-state, not values.) See APP_JSON_CONTRACT.md
+§8 for the full remote-sensor semantics.
 ```json
 { "schema":1, "broadcast":true, "role":"master",
-  "devices":[ { "mac":"AA:..", "name":"node2", "sensors":["thermal","imu"] } ] }
+  "devices":[ { "mac":"AA:..", "name":"node2",
+    "sensors":[ { "type":"thermal", "enabled":false, "fresh":false },
+                { "type":"imu",     "enabled":true,  "fresh":true } ] } ] }
 ```
 Worker (its own stream toggles):
 ```json
@@ -129,10 +134,20 @@ Poll this command to read it.
   a normal single-frame message (no stitching needed). If pieces are missing
   (lost / aged out of the ring), render what you have as partial.
 - `seq` — the buffer's own monotonic cursor (for incremental polling, below).
-- `reqId` — **correlation id**: the `msgId` of the request that produced this message. For a relayed remote op (`espnowremote`/`browse`/`fetch`) this equals the `reqId` returned by the send ack (see below), so you can match a result to the exact request that caused it. `0` for unsolicited messages (peer text, file-event logs) that aren't answers to a request.
+- `reqId` — **group / correlation id.** Also the stitch key for multi-frame messages (see `piece`/`of`). Value by message kind:
+  - **Received peer text** (`sent:false`, text `type`): the **sender's** `msgId` — **non-zero**. ⚠️ *Earlier revisions of this doc said `0` here; that was wrong.* Since the chunked-store rework, received text carries a real group id so multi-frame text can be stitched. **Do not treat a non-zero `reqId` as "this is a command result, hide it."**
+  - **Sent text** (`sent:true`): **our** send `msgId` — non-zero; equals the `reqId` from the `espnowsend`/relay ack. De-dupe your optimistic bubble by it.
+  - **Relayed remote-op results** (`espnowremote`/`browse`/`fetch`): the request's `msgId` (from the ack), so you can match a result to its request.
+  - **`0`** only for ungrouped device-generated records: the **metadata snapshot** (the `espnowrequestmeta` result) and file-event log lines.
+  - ⚠️ **Render every `messages[]` record as a conversation entry.** Drive direction off `sent`, stitch multi-piece records by `reqId`+`piece`/`of`, show delivery from `sendState`. **Do NOT filter the conversation to `reqId==0`** — that leaves only the metadata/log records visible and silently drops all real text (both sent and received).
 - `sinceSeq` — pass the highest `seq` you've seen to get only newer messages (incremental poll). Omit/`0` = all buffered.
 - `mac` — optional, filters to one peer.
-- `type` — message-type int (text vs command-response vs file-transfer).
+- `type` — message-class int (`LogMessageType`). **This is the durable, reload-safe way to separate chat from non-chat** — classify by `type`, not by `reqId`:
+  - `0` = **TEXT** — chat (sent or received). Show in the conversation.
+  - `1`–`5` = file-transfer events (send start/success/failed, recv success/failed).
+  - `6` = **CMD_RESULT** — output of a relayed remote op (`espnowremote`/`browse`/`fetch`) or streamed command output. Route to a Command/console view, **not** chat.
+  - `7` = **SYSTEM_EVENT** — device/system notice (peer-metadata snapshot, etc.). Hide from chat or render as a system line.
+  - **BOOT notifications now arrive as `type:7` SYSTEM_EVENT** — they ride a dedicated `ESPNOW_V4_TYPE_BOOT` wire frame and the receiver files them as a system event, so they're filtered out of chat exactly like the metadata snapshot (no content-matching needed). Caveat: a peer still on older firmware that sends BOOT-as-TEXT will show as `type:0` until it's updated, so both devices should run this build.
 - **Pattern:** send `espnowremote … json` → read `reqId` from the ack → poll `espnowmessages json <lastSeq>` and pick the message whose `reqId` matches. (Both success and failure responses now echo the request's `reqId`, so a failed remote command is correlatable too.) Same as the web's `/api/espnow/messages` loop, now reachable over BLE.
 
 ### Relay send acks now carry the ticket (`espnowremote` / `espnowbrowse` / `espnowfetch` ` json`)

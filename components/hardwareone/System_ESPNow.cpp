@@ -297,9 +297,6 @@ static const char* MESH_PEERS_FILE = "/system/espnow/mesh_peers.json";
 
 // Note: gEspNow is defined in HardwareOne.ino as non-static (extern in header)
 
-// Legacy compatibility accessors (to minimize code changes)
-static uint32_t gMeshMsgCounter = 1;  // Message ID counter for mesh envelopes
-
 std::vector<MeshTopoNode> gMeshTopology;        // Exported for .ino access
 uint32_t gTopoRequestId = 0;                    // Exported for .ino access
 uint32_t gTopoRequestTimeout = 0;               // Exported for .ino access
@@ -328,18 +325,15 @@ struct WorkerStatusConfig {
 static WorkerStatusConfig gWorkerStatusConfig;
 
 // Metadata transmission tracking
-static bool gMetadataSentThisSession = false;  // Whether metadata has been sent since boot
 static bool gMetadataChanged = false;          // Whether metadata changed since last send
 static String gLastSentFriendlyName = "";
 static String gLastSentRoom = "";
 static String gLastSentZone = "";
 static String gLastSentTags = "";
-static bool gLastSentStationary = false;
 
 // Master/Backup heartbeat tracking
 static uint32_t gLastMasterHeartbeat = 0;
 static uint32_t gLastBackupHeartbeat = 0;
-static uint32_t gLastWorkerStatusReport = 0;
 static bool gBackupPromoted = false;
 
 // --------------------------
@@ -360,7 +354,12 @@ static InboundRxItem gEspNowRxRing[8];
 static volatile uint32_t gEspNowRxDrops = 0;
 MeshSeenEntry gMeshSeen[MESH_DEDUP_SIZE];  // Exported for .ino access
 int gMeshSeenIndex = 0;                     // Exported for .ino access
-int gMeshPeerSlots = 8;  // Runtime slot count, set from gSettings.meshPeerMax at init
+int gMeshPeerSlots = 0;  // Runtime slot count — 0 until the peer arrays are allocated at
+                         // init. Kept 0 (not the default max) so every `for (i <
+                         // gMeshPeerSlots)` loop is a safe no-op while gMeshPeerMeta /
+                         // gMeshPeers are still null (e.g. a CLI/BLE `espnowdevices`
+                         // before `openespnow` — that was a null-deref crash at isActive
+                         // offset 0xE0). Set to the real count only after both arrays exist.
 MeshPeerHealth* gMeshPeers = nullptr;
 MeshPeerMeta* gMeshPeerMeta = nullptr;
 uint32_t gLastHeartbeatSentMs = 0;
@@ -895,12 +894,6 @@ void sendChunkedResponse(const uint8_t* targetMac, bool success, const String& r
   gEspNow->streamingSuspended = wasStreaming;
 }
 
-// Send plain text message via V3
-void sendTextMessage(const uint8_t* targetMac, const String& text) {
-  if (!gEspNow) return;
-  
-  v4_send_text(targetMac, text.c_str(), text.length());
-}
 
 // Forward declaration for session-based streaming helper (defined in V3 protocol section)
 static bool trySendToStreamSession(uint32_t cmdMsgId, const char* data, size_t len);
@@ -1081,12 +1074,6 @@ static uint32_t gBroadcastsTracked = 0;
 static uint32_t gBroadcastsCompleted = 0;
 static uint32_t gBroadcastsTimedOut = 0;
 
-// Initialize all broadcast trackers
-static void broadcast_tracker_init() {
-  for (int i = 0; i < BROADCAST_TRACKER_SLOTS; i++) {
-    gBroadcastTrackers[i].reset();
-  }
-}
 
 // Find tracker by msgId, return nullptr if not found
 static BroadcastTracker* broadcast_tracker_find(uint32_t msgId) {
@@ -1179,15 +1166,6 @@ static Settings::MeshIdentity* meshByFingerprint(uint16_t fingerprint) {
   return nullptr;
 }
 
-// Find a mesh by label (case-sensitive). Returns nullptr if not found.
-static Settings::MeshIdentity* meshByLabel(const String& label) {
-  for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
-    if (gSettings.meshes[i].enabled && gSettings.meshes[i].label == label) {
-      return &gSettings.meshes[i];
-    }
-  }
-  return nullptr;
-}
 
 // Look up the mesh fingerprint to stamp on a frame addressed to `mac`. For
 // known peers, uses the peer's stored meshId. For broadcast (FF:FF:...) and
@@ -2216,29 +2194,6 @@ static bool v4_send_frag_ack(const uint8_t* dst, uint32_t msgId, uint8_t fragInd
 }
 
 // V3 sender functions for mesh system messages
-// TIME_SYNC unicast — 2026-05-19: strict-encrypt (was plaintext v4_send_frame
-// which let any on-air attacker reset the clock). Handler now requires
-// REQ_AUTHENTICATED, so plaintext attempts get dropped server-side anyway;
-// we go through v4_send_encrypted_or_queue here so legitimate sync makes it.
-// Returns false if no peer identity (KEY_EX not done) — caller should just
-// retry on next sync tick; NTP / RTC will keep the clock from drifting.
-static bool v4_send_time_sync(const uint8_t* dst, uint32_t epochTime, int32_t timeOffset) {
-  V4PayloadTimeSync payload;
-  payload.epochTime = epochTime;
-  payload.timeOffset = timeOffset;
-
-  uint32_t msgId = generateMessageId();
-  char dstMac[18];
-  formatMacAddressBuf(dst, dstMac, sizeof(dstMac));
-  DEBUGF(DEBUG_ESPNOW_MESH, "[V4_TX_TIME_SYNC] Sending (encrypted) to %s msgId=%lu", dstMac, (unsigned long)msgId);
-  DEBUGF(DEBUG_ESPNOW_MESH, "[V4_TX_TIME_SYNC] epochTime=%lu timeOffset=%ld",
-         (unsigned long)epochTime, (long)timeOffset);
-  bool result = v4_send_encrypted_or_queue(dst, ESPNOW_V4_TYPE_TIME_SYNC, 0, msgId,
-                                            (const uint8_t*)&payload, sizeof(payload), 2,
-                                            nullptr, 0);
-  DEBUGF(DEBUG_ESPNOW_MESH, "[V4_TX_TIME_SYNC] Result: %s", result ? "SUCCESS/QUEUED" : "FAILED");
-  return result;
-}
 
 // TIME_SYNC broadcast — 2026-05-19: route through v4_broadcast so BROADCAST_AUTH
 // HMAC is appended; receiver verifies group-key knowledge before applying the
@@ -2288,24 +2243,6 @@ bool v4_broadcast_topo_request(uint32_t reqId) {
 //      initiator: kick SESSION_OPEN (single-frame queue path). No session + I am
 //      the responder: skip this send; the initiator will bring the session up.
 // Receivers enforce the matching rule via V4_OPC_FLAG_REQ_SESSION_ENC.
-static bool bondSendEncrypted(const uint8_t* mac, uint8_t type, uint16_t flags,
-                              uint32_t msgId, const uint8_t* payload, uint16_t len) {
-  if (!gEspNow || !mac) return false;
-  uint8_t selfMac[6];
-  esp_wifi_get_mac(WIFI_IF_STA, selfMac);
-  const bool iAmInitiator = !sessionIsASide(selfMac, mac);  // higher MAC initiates
-  const PeerIdentity* pid = peerIdentityFindByMac(mac);
-  SessionState* s = pid ? sessionFindByPeer(mac, pid->meshId) : nullptr;
-  const bool active = (s && s->state == SESSION_ACTIVE);
-  if (active || iAmInitiator) {
-    // Active → encrypt (smart picks single vs chunked, never kicks).
-    // Initiator + no session → smart's single-frame path queues + kicks SESSION_OPEN.
-    return v4_send_payload_smart(mac, type, flags, msgId, payload, len, 1);
-  }
-  // Responder with no session yet — stay silent so we never initiate (avoids the
-  // simultaneous-open race). The initiator's traffic establishes the session.
-  return false;
-}
 
 // Async sibling of bondSendEncrypted. Same role + initiator-gating rules, but
 // the actual AEAD seal / capture / esp_now_send happens on espnow_tx instead
@@ -2579,26 +2516,6 @@ bool v4_send_command_response(const uint8_t* dst, uint32_t cmdMsgId, bool succes
   return result;
 }
 
-static bool v4_send_file_response(const uint8_t* dst, uint32_t reqMsgId, bool success, const char* message) {
-  if (!message) return false;
-  
-  uint16_t msgLen = strlen(message);
-  uint16_t totalLen = 1 + msgLen;  // success byte + message
-  
-  uint8_t buffer[256];
-  buffer[0] = success ? 1 : 0;
-  memcpy(buffer + 1, message, msgLen);
-  
-  char dstMac[18];
-  formatMacAddressBuf(dst, dstMac, sizeof(dstMac));
-  DEBUGF(DEBUG_ESPNOW_CORE, "[V4_TX_FILE_RESP] Sending to %s reqMsgId=%lu success=%d",
-         dstMac, (unsigned long)reqMsgId, success);
-  
-  bool result = v4_send_frame(dst, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ, 
-                              reqMsgId, buffer, totalLen, 1);
-  DEBUGF(DEBUG_ESPNOW_CORE, "[V4_TX_FILE_RESP] Result: %s", result ? "SUCCESS" : "FAILED");
-  return result;
-}
 
 bool v4_broadcast_text(const char* text, uint16_t textLen) {
   if (!text || textLen == 0 || textLen > ESPNOW_V4_MAX_PAYLOAD) return false;
@@ -2617,7 +2534,6 @@ static TopologyStream* findOrCreateTopoStream(const uint8_t* senderMac, uint32_t
 static void            addTopoDeviceName(const uint8_t* mac, const char* name);
 static bool            getTopoDeviceName(const uint8_t* mac, char* outBuf, size_t outLen);
 static void            finalizeTopologyStream(TopologyStream* stream);
-static void            updateUnpairedDevice(const uint8_t* mac, const String& name, int rssi);
 #if ENABLE_BONDED_MODE
 static bool            cacheManifestToLittleFS(const uint8_t fwHash[16], const String& manifest);
 #endif
@@ -2775,6 +2691,10 @@ static void v4h_text(const V4RxCtx& ctx) {
       // legacy ESPNOW_V4_FLAG_ENCRYPTED header bit, never set anymore, so the
       // web UI's message bubble always showed "not encrypted".)
       slot.encrypted = ctx.isSessionEncrypted;
+      // A frame that arrived under the dedicated BOOT type is a device/system
+      // notice, not chat — tag it so the drain stores MSG_SYSTEM_EVENT and clients
+      // filter it out of the conversation (same class as the metadata snapshot).
+      slot.msgType = (ctx.h->type == ESPNOW_V4_TYPE_BOOT) ? MSG_SYSTEM_EVENT : MSG_TEXT;
       // Carry the fragment tags so the drain can store this piece as its own
       // record. Single-frame text has fragCount==1 → stored as piece 1/1.
       slot.msgId     = ctx.h->msgId;
@@ -2946,7 +2866,10 @@ static void v4h_sensor_broadcast(const V4RxCtx& ctx) {
         entry->jsonData[copyLen] = '\0';
         entry->jsonLength = (uint16_t)copyLen;
         entry->lastUpdate = millis();
+        entry->lastSeen = entry->lastUpdate;
         entry->valid = true;
+        entry->enabled = true;     // live data implies the sensor is running
+        entry->connected = true;
         DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_SENSOR_BROADCAST] Data cached successfully (%u bytes)", (unsigned)copyLen);
       } else {
         DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_SENSOR_BROADCAST] ERROR: Failed to allocate cache entry");
@@ -3550,7 +3473,10 @@ static void v4h_sensor_data(const V4RxCtx& ctx) {
   entry->jsonData[copyLen] = '\0';
   entry->jsonLength = (uint16_t)copyLen;
   entry->lastUpdate = millis();
+  entry->lastSeen = entry->lastUpdate;
   entry->valid = true;
+  entry->enabled = true;     // live data implies the sensor is running
+  entry->connected = true;
   DEBUGF(DEBUG_ESPNOW_MESH, "[BOND] Sensor %s from %s len=%u seq=%lu",
          sensorTypeToString(sensorType), ctx.deviceName, (unsigned)copyLen, (unsigned long)sd->seqNum);
 }
@@ -3780,8 +3706,14 @@ static void v4h_file_start(const V4RxCtx& ctx) {
                                               fs->chunkSize,
                                               &err);
   if (!slot) {
-    ERROR_ESPNOWF("[V4_FILE] FILE_START rejected for '%s' from %s: %s",
-                  fs->filename, ctx.deviceName, err ? err : "(unknown)");
+    if (err && strcmp(err, kFileSlotErrTooBig) == 0) {
+      ERROR_ESPNOWF("[V4_FILE] FILE_START rejected: '%s' is %lu bytes, exceeds the %lu MB transfer limit (from %s)",
+                    fs->filename, (unsigned long)fs->fileSize,
+                    (unsigned long)(kFileSlotMaxStreamSize / (1024UL * 1024UL)), ctx.deviceName);
+    } else {
+      ERROR_ESPNOWF("[V4_FILE] FILE_START rejected for '%s' from %s: %s",
+                    fs->filename, ctx.deviceName, err ? err : "(unknown)");
+    }
     return;
   }
   DEBUG_ESPNOWF("[V4_FILE_RX] FILE_START: %s (%lu bytes, %u chunks, chunkSize=%u) from %s",
@@ -3801,6 +3733,25 @@ static void v4h_file_data(const V4RxCtx& ctx) {
   }
   const V4PayloadFileData* fd = (const V4PayloadFileData*)ctx.payload;
   uint16_t dataLen = ctx.payloadLen - 2;
+
+  // Streaming slot (file > 128 KB): espnow_task ONLY memcpy's the chunk into a
+  // double-buffer — the flash write is deferred to cmd_exec so the RX drain is never
+  // blocked on flash (that's what was dropping chunks at ~87). A gap / writer-
+  // backpressure / queue-full aborts the transfer (cleanup is queued on cmd_exec by
+  // the append); we just tell the fire-and-forget sender to stop.
+  if (fileSlotsIsStreaming(slot)) {
+    StreamAppendResult r = fileSlotsStreamAppend(slot, fd->chunkIndex, fd->data, dataLen);
+    if (r == STREAM_APPEND_FAIL) {
+      // Use the frame's src_addr (== this slot's peer) for the cancel so we don't
+      // race cmd_exec, which may already be tearing the slot down.
+      String senderMacStr = formatMacAddress(ctx.recv_info->src_addr);
+      v4_send_file_cancel(ctx.recv_info->src_addr, ctx.h->msgId, FILE_CANCEL_INCOMPLETE);
+      logFileTransferEvent((uint8_t*)ctx.recv_info->src_addr, senderMacStr.c_str(),
+                           fileSlotsGetFilename(slot), MSG_FILE_RECV_FAILED);
+    }
+    return;
+  }
+
   if (!fileSlotsWriteChunk(slot, fd->chunkIndex, fd->data, dataLen)) {
     return;  // bounds violation already logged inside the helper
   }
@@ -3812,6 +3763,64 @@ static void v4h_file_data(const V4RxCtx& ctx) {
                  (unsigned long)fileSlotsGetReceivedBytes(slot),
                  (unsigned long)fileSlotsGetTotalSize(slot));
   }
+}
+
+// cmd_exec finalize for a STREAMING receive (submitted by v4h_file_end). Drains any
+// buffers still in flight, closes the .part, renames it into the inbox, ACKs the
+// fire-and-forget sender, logs, and releases the slot — all OFF espnow_task so the RX
+// drain is never blocked on flash. arg = the FileTransferSlot* (stable until released
+// here; the slot is COMPLETING, so nothing else touches it). Mirrors the old inline
+// FILE_END streaming publish, just moved to cmd_exec.
+static void fileWriterFinalizeJob(void* arg) {
+  FileTransferSlot* slot = (FileTransferSlot*)arg;
+  if (!slot) return;
+  // Snapshot identity before any teardown (the slot is wiped at the end).
+  uint8_t  sndMac[6];
+  memcpy(sndMac, fileSlotsGetSenderMac(slot), 6);
+  char filename[64];
+  strncpy(filename, fileSlotsGetFilename(slot), sizeof(filename) - 1);
+  filename[sizeof(filename) - 1] = '\0';
+  uint32_t recvBytes = fileSlotsGetReceivedBytes(slot);
+  uint32_t msgId     = fileSlotsGetMsgId(slot);
+  String   senderMacStr = formatMacAddress(sndMac);
+
+  bool ok = fileSlotsStreamFinalizeWrite(slot);  // drain remaining buffers + close .part
+  if (ok) {
+    char senderToken[13];
+    macToPathToken(sndMac, senderToken);
+    char deviceDir[64];
+    snprintf(deviceDir, sizeof(deviceDir), "/espnow/received/%s", senderToken);
+    char filepath[160];
+    snprintf(filepath, sizeof(filepath), "%s/%s", deviceDir, filename);
+    AuthContext wrCtx = VFS::systemAuth(VFS::Scopes::ESPNOW_RECEIVED, "espnow.v4_file_stream_publish");
+    {
+      FsLockGuard guard("v4file.stream.publish");
+      VFS::mkdirGuarded("/espnow/received", wrCtx);
+      VFS::mkdirGuarded(deviceDir, wrCtx);
+      ok = VFS::renameGuarded(fileSlotsGetPartPath(slot), filepath, wrCtx);
+    }
+    if (!ok) ERROR_ESPNOWF("[V4_FILE] stream publish rename failed -> %s", filepath);
+  }
+
+  if (ok) {
+    BROADCAST_PRINTF("[V4_FILE] Complete (streamed): %s (%lu bytes)", filename, (unsigned long)recvBytes);
+    logFileTransferEvent(sndMac, senderMacStr.c_str(), filename, MSG_FILE_RECV_SUCCESS);
+#if ENABLE_OLED_DISPLAY
+    {
+      char toastMsg[40];
+      snprintf(toastMsg, sizeof(toastMsg), "Received: %.28s", filename);
+      oledToastShow(toastMsg);
+    }
+#endif
+    if (gEspNow) gEspNow->fileTransfersReceived++;
+    v4_send_ack(sndMac, msgId);
+  } else {
+    // Drained/closed/renamed but something failed — correct the fire-and-forget
+    // sender instead of letting it assume success.
+    v4_send_file_cancel(sndMac, msgId, FILE_CANCEL_WRITE_FAILED);
+    logFileTransferEvent(sndMac, senderMacStr.c_str(), filename, MSG_FILE_RECV_FAILED);
+  }
+  fileSlotsRelease(slot);
 }
 
 // FILE_END — finalize the slot's transfer; route manifest/settings to bond
@@ -3837,6 +3846,39 @@ static void v4h_file_end(const V4RxCtx& ctx) {
                fileSlotsGetReceivedChunks(slot),
                fileSlotsGetTotalChunks(slot),
                fe->success);
+
+  // ---- Streaming slot (file > 128 KB): bytes are buffered to a .part on flash via
+  // cmd_exec. FILE_END hands finalize (drain remaining buffers, close, rename, ACK,
+  // release) to cmd_exec too, so espnow_task does no FS here. A streaming slot is
+  // never a bond config file (those are small → RAM path below) → no special
+  // processing: stream files are plain inbox files. dataBuf is null here. ----
+  if (fileSlotsIsStreaming(slot)) {
+    bool complete = fileSlotsIsComplete(slot);
+    if (complete && fe->success && fileSlotsStreamBeginFinalize(slot)) {
+      // Off-task finalize: the job owns drain + close + rename + ACK + release.
+      if (!submitDeferredToCmdExec(fileWriterFinalizeJob, slot)) {
+        ERROR_ESPNOWF("[V4_FILE] stream finalize submit failed (queue full) — aborting '%s'", filename);
+        v4_send_file_cancel(sndMac, ctx.h->msgId, FILE_CANCEL_WRITE_FAILED);
+        logFileTransferEvent((uint8_t*)sndMac, senderMacStr.c_str(), filename, MSG_FILE_RECV_FAILED);
+        // Slot is COMPLETING; free it via a plain abort job, falling back to an
+        // inline release only if that submit also fails.
+        if (!submitDeferredToCmdExec(fileSlotsStreamAbortJob, slot)) fileSlotsRelease(slot);
+      }
+    } else {
+      if (!complete) {
+        BROADCAST_PRINTF("[V4_FILE] REJECTED incomplete stream '%s': %u/%u chunks, %lu/%lu bytes",
+                     filename,
+                     (unsigned)fileSlotsGetReceivedChunks(slot),
+                     (unsigned)fileSlotsGetTotalChunks(slot),
+                     (unsigned long)recvBytes,
+                     (unsigned long)fileSlotsGetTotalSize(slot));
+      }
+      v4_send_file_cancel(sndMac, ctx.h->msgId, complete ? FILE_CANCEL_WRITE_FAILED : FILE_CANCEL_INCOMPLETE);
+      logFileTransferEvent((uint8_t*)sndMac, senderMacStr.c_str(), filename, MSG_FILE_RECV_FAILED);
+      fileSlotsStreamFail(slot);  // queue close/delete/free on cmd_exec
+    }
+    return;
+  }
 
   if (!fileSlotsIsComplete(slot)) {
     BROADCAST_PRINTF("[V4_FILE] REJECTED incomplete transfer '%s': %u/%u chunks, %lu/%lu bytes",
@@ -4044,6 +4086,7 @@ static const V4OpcodeEntry kV4HandlerTable[] = {
   // from any source is silently dropped here.
   { ESPNOW_V4_TYPE_TIME_SYNC,        V4_OPC_FLAG_REQ_AUTHENTICATED,                        v4h_time_sync         },
   { ESPNOW_V4_TYPE_TEXT,             0,                                                    v4h_text              },
+  { ESPNOW_V4_TYPE_BOOT,             0,                                                    v4h_text              },  // boot/online notice; v4h_text tags it MSG_SYSTEM_EVENT
   { ESPNOW_V4_TYPE_CMD,              V4_OPC_FLAG_REQ_PAIRED,                               v4h_cmd               },
   { ESPNOW_V4_TYPE_CMD_RESP,         0,                                                    v4h_cmd_resp          },
   { ESPNOW_V4_TYPE_HEARTBEAT,        0,                                                    v4h_heartbeat         },
@@ -4314,6 +4357,8 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
     uint16_t plainLen = 0;
     if (!sessionUnwrapFrame(s, h, payload, payloadLen, plainBuf, &plainLen)) {
       // sessionUnwrapFrame already logged the reason (AEAD-fail or replay).
+      // (Self-heal of a desynced session is TX-driven — see sendStatusSweep in
+      // System_ESPNow_Sessions.cpp — so received frames can't trigger it.)
       return true;
     }
     // Acknowledge requested ACK *only* for authenticated frames (we mustn't
@@ -5114,7 +5159,7 @@ static void onEspNowRawRecv(const esp_now_recv_info* recv_info, const uint8_t* i
  * @param tx_info Transmission info structure (ESP-IDF v5.x)
  * @param status Send result (ESP_NOW_SEND_SUCCESS or ESP_NOW_SEND_FAIL)
  * @note Called in interrupt context - keep processing minimal
- * @note Updates gEspNow->lastStatus and gEspNow->txDone flags
+ * @note Updates routerMetrics TX counters (messagesSent / messagesFailed)
  * @warning Do not call blocking functions or allocate memory
  */
 // IDF 5.4+ changed esp_now_send_cb_t: first arg is now const esp_now_send_info_t*
@@ -5135,9 +5180,6 @@ void onEspNowDataSent(const esp_now_send_info_t* tx_info, esp_now_send_status_t 
   } else {
     gEspNow->routerMetrics.messagesFailed++;
   }
-
-  gEspNow->lastStatus = status;
-  gEspNow->txDone = true;
 }
 
 /**
@@ -5146,27 +5188,6 @@ void onEspNowDataSent(const esp_now_send_info_t* tx_info, esp_now_send_status_t 
  * @note Displays setup instructions and returns error to block initialization
  */
 
-/**
- * @brief Check if mesh routing should be used
- * @param mac Destination MAC address
- * @return true if mesh routing should be used
- */
-static bool shouldUseMesh(const uint8_t* mac) {
-  if (!gEspNow) return false;
-  
-  // If mesh mode disabled, never use mesh
-  if (gEspNow->mode != ESPNOW_MODE_MESH) {
-    return false;
-  }
-  
-  // If peer is directly paired, prefer direct
-  if (esp_now_is_peer_exist(mac)) {
-    return false;
-  }
-  
-  // Peer not directly paired, use mesh routing
-  return true;
-}
 
 #if ENABLE_BONDED_MODE
 // ==========================
@@ -6532,102 +6553,10 @@ static void processMetadata(const uint8_t* srcMac, const V4PayloadMetadata* meta
   }
 }
 
-/**
- * Master Metadata Push: Broadcast metadata to all encrypted mesh peers
- * Security: Only sends to verified encrypted peers
- */
-static void broadcastMetadataToMesh() {
-  if (!gEspNow || !gEspNow->initialized) return;
-  
-  esp_now_peer_info_t peer;
-  esp_now_peer_num_t peerNum;
-  
-  esp_now_get_peer_num(&peerNum);
-  if (peerNum.total_num == 0) return;
-  
-  // First send our own metadata to all encrypted peers
-  uint8_t myMac[6];
-  esp_wifi_get_mac(WIFI_IF_STA, myMac);
-  
-  V4PayloadMetadata myMetadata;
-  buildMetadataPayload(&myMetadata);
-  
-  int sentCount = 0;
-  
-  // Iterate through all peers
-  for (int i = 0; i < peerNum.total_num; i++) {
-    if (esp_now_fetch_peer(true, &peer) == ESP_OK) {
-      // Phase 3.5 task #6 — was: gated on peer.encrypt (LMK flag). With LMK
-      // removed in task #47, peer.encrypt is always false. New gate: have we
-      // got a long-term identity for this peer? v4_send_encrypted_or_queue
-      // returns false if not, which is the right behaviour (silently skip
-      // metadata push to unknown peers — they'll surface later via KEY_EX).
-      {
-        // Send our metadata
-        uint32_t msgId = generateMessageId();
-        if (v4_send_encrypted_or_queue(peer.peer_addr, ESPNOW_V4_TYPE_METADATA_PUSH, 0, msgId,
-                                        (const uint8_t*)&myMetadata, sizeof(myMetadata), 1,
-                                        nullptr, 0)) {
-          sentCount++;
-          delay(5);  // Small delay between sends to avoid congestion
-        }
-
-        // Also forward stored metadata from other workers (master push)
-        for (int j = 0; j < gMeshPeerSlots; j++) {
-          if (gMeshPeerMeta && gMeshPeerMeta[j].isActive && gMeshPeerMeta[j].lastMetaUpdate > 0 &&
-              !macEqual6(gMeshPeerMeta[j].mac, peer.peer_addr) &&  // Don't echo back
-              !macEqual6(gMeshPeerMeta[j].mac, myMac)) {  // Don't forward our own
-
-            // Build metadata payload from stored data
-            V4PayloadMetadata fwdMetadata;
-            memset(&fwdMetadata, 0, sizeof(fwdMetadata));
-            strncpy(fwdMetadata.deviceName, gMeshPeerMeta[j].name, sizeof(fwdMetadata.deviceName) - 1);
-            strncpy(fwdMetadata.friendlyName, gMeshPeerMeta[j].friendlyName, sizeof(fwdMetadata.friendlyName) - 1);
-            strncpy(fwdMetadata.room, gMeshPeerMeta[j].room, sizeof(fwdMetadata.room) - 1);
-            strncpy(fwdMetadata.zone, gMeshPeerMeta[j].zone, sizeof(fwdMetadata.zone) - 1);
-            strncpy(fwdMetadata.tags, gMeshPeerMeta[j].tags, sizeof(fwdMetadata.tags) - 1);
-            fwdMetadata.stationary = gMeshPeerMeta[j].stationary ? 1 : 0;
-
-            uint32_t fwdMsgId = generateMessageId();
-            v4_send_encrypted_or_queue(peer.peer_addr, ESPNOW_V4_TYPE_METADATA_PUSH, 0, fwdMsgId,
-                                        (const uint8_t*)&fwdMetadata, sizeof(fwdMetadata), 1,
-                                        nullptr, 0);
-            delay(5);
-          }
-        }
-      }
-    }
-  }
-  
-  if (sentCount > 0) {
-    DEBUG_ESPNOWF("[METADATA_PUSH] Broadcast to %d encrypted peers", sentCount);
-  }
-}
 
 // ==========================
 // Message Handler Implementations
 // ==========================
-
-// Update peer metadata from a worker status JSON payload
-static void updatePeerMetaFromWorkerStatus(const uint8_t* srcMac, JsonVariant payload) {
-  if (!srcMac) return;
-  MeshPeerMeta* meta = getMeshPeerMeta(srcMac, true);
-  if (!meta) return;
-  const char* name         = payload["name"]         | "";
-  const char* friendlyName = payload["friendlyName"] | "";
-  const char* room         = payload["room"]         | "";
-  const char* zone         = payload["zone"]         | "";
-  const char* tags         = payload["tags"]         | "";
-  if (name[0])         strncpy(meta->name,         name,         sizeof(meta->name) - 1);
-  if (friendlyName[0]) strncpy(meta->friendlyName, friendlyName, sizeof(meta->friendlyName) - 1);
-  if (room[0])         strncpy(meta->room,         room,         sizeof(meta->room) - 1);
-  if (zone[0])         strncpy(meta->zone,         zone,         sizeof(meta->zone) - 1);
-  if (tags[0])         strncpy(meta->tags,         tags,         sizeof(meta->tags) - 1);
-  meta->lastMetaUpdate = millis();
-  meta->isActive = true;
-  memcpy(meta->mac, srcMac, 6);
-}
-
 
 // Helper: Generate unique message ID
 uint32_t generateMessageId() {
@@ -6649,44 +6578,6 @@ bool shouldChunk(size_t size) {
 }
 
 // Helper: Update unpaired device tracking
-static void updateUnpairedDevice(const uint8_t* mac, const String& name, int rssi) {
-  if (!gEspNow) return;
-  
-  // Filter out own MAC (STA and AP) to prevent self-pairing
-  uint8_t selfSta[6], selfAp[6];
-  esp_wifi_get_mac(WIFI_IF_STA, selfSta);
-  esp_wifi_get_mac(WIFI_IF_AP, selfAp);
-  if (memcmp(mac, selfSta, 6) == 0 || memcmp(mac, selfAp, 6) == 0) return;
-  
-  unsigned long now = millis();
-  
-  // Find existing or empty slot
-  for (int i = 0; i < MAX_UNPAIRED_DEVICES; i++) {
-    if (memcmp(gEspNow->unpairedDevices[i].mac, mac, 6) == 0) {
-      // Update existing
-      gEspNow->unpairedDevices[i].name = name;
-      gEspNow->unpairedDevices[i].rssi = rssi;
-      gEspNow->unpairedDevices[i].lastSeenMs = now;
-      gEspNow->unpairedDevices[i].heartbeatCount++;
-      return;
-    }
-  }
-  
-  // Add new (find empty slot)
-  for (int i = 0; i < MAX_UNPAIRED_DEVICES; i++) {
-    if (gEspNow->unpairedDevices[i].lastSeenMs == 0) {
-      memcpy(gEspNow->unpairedDevices[i].mac, mac, 6);
-      gEspNow->unpairedDevices[i].name = name;
-      gEspNow->unpairedDevices[i].rssi = rssi;
-      gEspNow->unpairedDevices[i].lastSeenMs = now;
-      gEspNow->unpairedDevices[i].heartbeatCount = 1;
-      if (gEspNow->unpairedDeviceCount < MAX_UNPAIRED_DEVICES) {
-        gEspNow->unpairedDeviceCount++;
-      }
-      return;
-    }
-  }
-}
 
 // ============================================================================
 // TOPOLOGY STREAM MANAGEMENT (moved from .ino)
@@ -6812,102 +6703,7 @@ static bool getTopoDeviceName(const uint8_t* mac, char* outBuf, size_t outLen) {
   return false;
 }
 
-// Helper: Buffer a PEER message for later processing
-static bool bufferPeerMessage(const String& message, uint32_t reqId, const uint8_t* masterMac) {
-  // Find empty slot
-  for (int i = 0; i < MAX_BUFFERED_PEERS; i++) {
-    if (!gPeerBuffer[i].active) {
-      gPeerBuffer[i].message = message;
-      gPeerBuffer[i].reqId = reqId;
-      memcpy(gPeerBuffer[i].masterMac, masterMac, 6);
-      gPeerBuffer[i].receivedMs = millis();
-      gPeerBuffer[i].active = true;
-      DEBUG_ESPNOWF("[PEER_BUFFER] Buffered PEER for reqId=%lu, master=%s (slot %d)",
-                    (unsigned long)reqId, MAC_STR(masterMac), i);
-      return true;
-    }
-  }
-  WARN_ESPNOWF("Peer buffer full, dropping PEER for reqId=%lu", (unsigned long)reqId);
-  return false;
-}
 
-// Helper: Forward a topology PEER message using the stream's stored path
-// Returns true if forwarded successfully, false otherwise
-static bool forwardTopologyPeer(const String& message, TopologyStream* stream) {
-  if (!stream || stream->path.length() == 0) {
-    ERROR_ESPNOWF("No stream or no path, cannot forward");
-    return false;
-  }
-  
-  // Parse incoming message
-  PSRAM_JSON_DOC(doc);
-  DeserializationError error = deserializeJson(doc, message);
-  if (error) {
-    WARN_ESPNOWF("JSON parse error in forward");
-    return false;
-  }
-  
-  // Check TTL
-  int ttl = doc["ttl"] | 3;
-  if (ttl <= 0) {
-    DEBUG_ESPNOWF("[PEER_FWD] TTL exhausted, dropping PEER");
-    return false;
-  }
-  
-  // Get my MAC
-  uint8_t myMac[6];
-  esp_wifi_get_mac(WIFI_IF_STA, myMac);
-  String myMacStr = macToHexString(myMac);
-  
-  // Split path into array
-  std::vector<String> pathVec;
-  int start = 0;
-  int end = -1;
-  while ((end = stream->path.indexOf(',', start)) != -1) {
-    pathVec.push_back(stream->path.substring(start, end));
-    start = end + 1;
-  }
-  pathVec.push_back(stream->path.substring(start));
-  
-  // Find my position in path
-  int myIdx = -1;
-  for (size_t j = 0; j < pathVec.size(); j++) {
-    if (pathVec[j] == myMacStr) {
-      myIdx = j;
-      break;
-    }
-  }
-  
-  DEBUG_ESPNOWF("[PEER_FWD] Path: '%s', myMac: '%s', myIdx: %d", 
-               stream->path.c_str(), myMacStr.c_str(), myIdx);
-  
-  if (myIdx <= 0) {
-    if (myIdx == 0) {
-      DEBUG_ESPNOWF("[PEER_FWD] I am master, should process locally");
-    } else {
-      DEBUG_ESPNOWF("[PEER_FWD] My MAC not found in path, cannot forward");
-    }
-    return false;
-  }
-  
-  // Get previous hop
-  String prevHopStr = pathVec[myIdx - 1];
-  uint8_t prevHop[6];
-  macFromHexString(prevHopStr.c_str(), prevHop);
-  
-  // Decrement TTL and forward
-  doc["ttl"] = ttl - 1;
-  String forwarded;
-  serializeJson(doc, forwarded);
-  
-  DEBUG_ESPNOWF("[PEER_FWD] Forwarding to previous hop: %s (ttl=%d->%d)", 
-               prevHopStr.c_str(), ttl, ttl - 1);
-  
-  esp_err_t result = esp_now_send(prevHop, (uint8_t*)forwarded.c_str(), forwarded.length());
-  DEBUG_ESPNOWF("[PEER_FWD] Forward result: %s", result == ESP_OK ? "OK" : "FAILED");
-  
-  return (result == ESP_OK);
-}
 
 // ============================================================================
 // ESP-NOW COMMAND FUNCTIONS (Migrated from .ino file)
@@ -7088,28 +6884,6 @@ static void cleanupStaleTopoStreams() {
   }
 }
 
-// Helper: Clean up timed-out chunk buffers
-void cleanupTimedOutChunks() {
-  if (!gEspNow) return;
-  
-  unsigned long now = millis();
-  const unsigned long timeout = 5000;  // 5 seconds
-  
-  for (int i = 0; i < 4; i++) {
-    if (gEspNow->chunkBuffers[i].active) {
-      if (now - gEspNow->chunkBuffers[i].lastChunkTime > timeout) {
-        DEBUGF(DEBUG_ESPNOW_STREAM,
-               "[Router] Chunk buffer %d timed out (msgId %lu, %lu/%lu chunks)",
-               i,
-               (unsigned long)gEspNow->chunkBuffers[i].msgId,
-               (unsigned long)gEspNow->chunkBuffers[i].receivedChunks,
-               (unsigned long)gEspNow->chunkBuffers[i].totalChunks);
-        gEspNow->routerMetrics.chunksTimedOut++;
-        gEspNow->chunkBuffers[i].reset();
-      }
-    }
-  }
-}
 
 // ============================================================================
 // ESP-NOW COMMAND FUNCTIONS
@@ -7514,15 +7288,27 @@ void v2_init_envelope(JsonDocument& doc, const char* type, uint32_t msgId,
 // Cross-mesh peers can't be in gMeshPeers (no shared bootstrap key, so KEY_EX
 // would never have established their identity), so this is exclusively
 // same-mesh fan-out — encryption always works once the handshake settles.
-void meshSendEnvelopeToPeers(const String& envelope) {
+static void meshBroadcastEnvelopeTyped(const String& envelope, uint8_t v4Type) {
   if (!gEspNow || !gEspNow->initialized || !gMeshPeers) return;
   const uint8_t* data = (const uint8_t*)envelope.c_str();
   uint16_t len = (uint16_t)envelope.length();
   uint32_t msgId = generateMessageId();
   for (int i = 0; i < gMeshPeerSlots; i++) {
     if (gMeshPeers[i].isActive && !isSelfMac(gMeshPeers[i].mac))
-      v4_send_payload_smart(gMeshPeers[i].mac, ESPNOW_V4_TYPE_TEXT, 0, msgId, data, len, 3);
+      v4_send_payload_smart(gMeshPeers[i].mac, v4Type, 0, msgId, data, len, 3);
   }
+}
+
+// Generic envelope broadcast (legacy v2/v3 wrapper) — goes out as TEXT.
+void meshSendEnvelopeToPeers(const String& envelope) {
+  meshBroadcastEnvelopeTyped(envelope, ESPNOW_V4_TYPE_TEXT);
+}
+
+// Boot/online notice — its OWN V4 type so the receiver files it as a system
+// event (MSG_SYSTEM_EVENT), not a chat bubble. (It used to ride
+// ESPNOW_V4_TYPE_TEXT, so every reboot showed up as a chat message on peers.)
+void meshSendBootToPeers(const String& envelope) {
+  meshBroadcastEnvelopeTyped(envelope, ESPNOW_V4_TYPE_BOOT);
 }
 
 // Build a JSON boot notification string
@@ -7589,6 +7375,28 @@ static bool espnowInboundFileActiveFrom(const uint8_t mac[6]) {
       return true;
   }
   return false;
+}
+
+// Upper bound on how long an outbound-send flag defers a rekey. Generously above
+// the worst-case in-cap transfer (4 MB @ ~9 KB/s ≈ 8 min) so a real max-size send
+// is never cut short, while a flag left stuck by a task that died mid-send can't
+// defer a rotation forever. Raise alongside kFileSlotMaxStreamSize if the cap grows.
+static constexpr uint32_t kFileSendMaxDeferMs = 15u * 60u * 1000u;
+
+// True while a file transfer in EITHER direction is in progress with this peer —
+// the rekey scheduler defers a key rotation for the peer while this holds, so a
+// rotation never lands mid-transfer. Outbound: a flag set by FileSendActiveGuard
+// around sendFileToMac (the slot table is inbound-only), bounded by
+// kFileSendMaxDeferMs so a stuck flag can't defer forever. Inbound: reuse
+// espnowInboundFileActiveFrom — a RECEIVING slot self-bounds via kFileSlotTimeoutMs.
+static bool espnowFileTransferActiveWithPeer(const uint8_t* peerMac) {
+  if (!peerMac) return false;
+  if (gEspNow && gEspNow->fileSendInProgress &&
+      memcmp(gEspNow->fileSendPeer, peerMac, 6) == 0 &&
+      ((uint32_t)millis() - gEspNow->fileSendStartedMs) < kFileSendMaxDeferMs) {
+    return true;
+  }
+  return espnowInboundFileActiveFrom(peerMac);
 }
 
 #if ENABLE_BONDED_MODE
@@ -7709,7 +7517,17 @@ void processMeshHeartbeats() {
       if (!sc || sc->state != SESSION_ACTIVE) continue;
       bool ageTrigger = (nowMs2 - sc->establishedAtMs) >= kRekeyAgeThresholdMs;
       bool txTrigger  = sc->txSeqNext >= kRekeyTxFramesThreshold;
-      if (ageTrigger || txTrigger) {
+      bool wantRekey  = ageTrigger || txTrigger;
+      if (wantRekey && espnowFileTransferActiveWithPeer(sc->peerMac)) {
+        // Defer: a key rotation must not land mid file-transfer. A >2 MB transfer
+        // crosses the 10k tx threshold, and rekeying mid-transfer is the one
+        // untested interaction. Safe to wait — the transfer adds at most ~21k
+        // frames (far from the 4-billion nonce wrap) and the next tick after it
+        // ends will rekey. Self-bounding via the send flag's staleness + slot
+        // timeouts, so a stuck transfer can't postpone rotation forever.
+        DEBUG_ESPNOWF("REKEY deferred (file transfer active with peer) sessionId=%u txSeq=%lu",
+                      (unsigned)sc->sessionId, (unsigned long)sc->txSeqNext);
+      } else if (wantRekey) {
         // Log once per trigger (the initiate function's guard prevents spam).
         INFO_ESPNOWF("REKEY auto-trigger for sessionId=%u peer=%02X:%02X:%02X:%02X:%02X:%02X "
                      "(reason=%s txSeq=%lu ageMs=%lu)",
@@ -7859,7 +7677,6 @@ void processMeshHeartbeats() {
       gEspNow->lastBondHeartbeatReceivedMs > 0 &&
       (now - (uint32_t)gEspNow->lastBondHeartbeatReceivedMs) >= BOND_HEARTBEAT_TIMEOUT_MS) {
     gEspNow->bondPeerOnline = false;
-    gEspNow->bondLastOfflineMs = now;
     resetBondSync();
     // All-encrypted bond: tear down the (now-stale) session so the next send
     // re-establishes a fresh one. Critical for peer-reboot recovery — if the
@@ -7930,7 +7747,7 @@ void processMeshHeartbeats() {
                                   devName.c_str(),
                                   entry.content,
                                   true,
-                                  MSG_TEXT,
+                                  MSG_CMD_RESULT,   // remote-command stream output, not chat
                                   entry.cmdMsgId);
         BROADCAST_PRINTF("[STREAM:%s] %s", devName.c_str(), entry.content);
         entry.used = false;
@@ -7953,7 +7770,7 @@ void processMeshHeartbeats() {
                                 deviceName.c_str(),
                                 gEspNow->deferredCmdRespResult,
                                 true,
-                                MSG_TEXT,
+                                MSG_CMD_RESULT,   // remote-command result, not chat — preserve the CMD_RESP class
                                 gEspNow->deferredCmdRespReqId);
     
     if (gEspNow->deferredCmdRespSuccess) {
@@ -8348,7 +8165,7 @@ void processMeshHeartbeats() {
     String devName = String(meta->deviceName);
     if (devName.length() == 0) devName = formatMacAddress(gEspNow->deferredMetadataSrcMac);
     storeMessageInPeerHistory(gEspNow->deferredMetadataSrcMac, devName.c_str(), 
-                              metaMsg, false, MSG_TEXT);
+                              metaMsg, false, MSG_SYSTEM_EVENT);  // peer-metadata snapshot, not chat
   }
   
   // 11. Drain text message queue
@@ -8365,7 +8182,7 @@ void processMeshHeartbeats() {
         // by reqId and stitches — the device never holds the whole message.
         bool stored = storeMessageInPeerHistory(entry.srcMac, devName.c_str(),
                                                 entry.content, entry.encrypted,
-                                                MSG_TEXT, entry.msgId,
+                                                entry.msgType, entry.msgId,
                                                 (uint8_t)(entry.fragIndex + 1), entry.fragCount);
         if (entry.fragCount > 1) {
           BROADCAST_PRINTF("[%s%s] (part %u/%u) %s", devName.c_str(),
@@ -8527,14 +8344,19 @@ static bool initEspNow() {
   // Capture heap before initialization
   size_t heapBefore = ESP.getFreeHeap();
   
-  // Set runtime peer slot count from settings (capped to compile-time ceiling)
-  gMeshPeerSlots = gSettings.meshPeerMax;
-  if (gMeshPeerSlots < 1) gMeshPeerSlots = 1;
-  if (gMeshPeerSlots > MESH_PEER_MAX) gMeshPeerSlots = MESH_PEER_MAX;
+  // Peer slot count from settings (capped to compile-time ceiling). Computed into
+  // a LOCAL and committed to gMeshPeerSlots ONLY after both arrays are allocated
+  // below. Otherwise a CLI/BLE read command (e.g. `espnowdevices`) running before
+  // init — or after a partial-alloc failure — would walk a null gMeshPeerMeta
+  // (every loop is `for (i < gMeshPeerSlots)`), faulting on isActive at offset
+  // 0xE0. gMeshPeerSlots stays 0 until the arrays actually exist.
+  int slots = gSettings.meshPeerMax;
+  if (slots < 1) slots = 1;
+  if (slots > MESH_PEER_MAX) slots = MESH_PEER_MAX;
 
   // Allocate mesh peer arrays (dynamic based on meshPeerMax setting)
   if (!gMeshPeers) {
-    size_t healthSize = sizeof(MeshPeerHealth) * gMeshPeerSlots;
+    size_t healthSize = sizeof(MeshPeerHealth) * slots;
     gMeshPeers = (MeshPeerHealth*)ps_alloc(healthSize, AllocPref::PreferPSRAM, "mesh.peers");
     if (gMeshPeers) {
       memset(gMeshPeers, 0, healthSize);
@@ -8546,10 +8368,10 @@ static bool initEspNow() {
     }
   }
   if (!gMeshPeerMeta) {
-    size_t metaSize = sizeof(MeshPeerMeta) * gMeshPeerSlots;
+    size_t metaSize = sizeof(MeshPeerMeta) * slots;
     gMeshPeerMeta = (MeshPeerMeta*)ps_alloc(metaSize, AllocPref::PreferPSRAM, "mesh.meta");
     if (gMeshPeerMeta) {
-      for (int i = 0; i < gMeshPeerSlots; i++) gMeshPeerMeta[i].clear();
+      for (int i = 0; i < slots; i++) gMeshPeerMeta[i].clear();
     } else {
       snprintf(gLastInitErrorReason, sizeof(gLastInitErrorReason),
                "out of PSRAM (peer meta array)");
@@ -8557,6 +8379,8 @@ static bool initEspNow() {
       return false;
     }
   }
+  // Both arrays exist — NOW it's safe to advertise the slot count to readers.
+  gMeshPeerSlots = slots;
 
   // Allocate ESP-NOW state on first use
   // Initialize primary mesh metadata
@@ -8931,7 +8755,7 @@ static bool initEspNow() {
   uint32_t timestamp = (now > 1609459200) ? now : 0;  // Valid if after 2021-01-01
   
   String bootMsg = buildBootNotification(generateMessageId(), gEspNow->deviceName.c_str(), gBootCounter, timestamp);
-  meshSendEnvelopeToPeers(bootMsg);
+  meshSendBootToPeers(bootMsg);
   BROADCAST_PRINTF("[ESP-NOW] Boot notification sent (counter=%lu)", (unsigned long)gBootCounter);
 
   notifyEspNowStarted(true);
@@ -9187,11 +9011,9 @@ const char* cmd_espnow_stats(const String& argsInput) {
   if (!gEspNow) return "ESP-NOW not initialized (run 'openespnow' first)";
 
   // Output each line separately to avoid DEBUG_MSG_SIZE (256 byte) truncation.
-  // Audit (2026-05): pruned two orphan counters that were displayed but never
-  // incremented anywhere — `gEspNow->receiveErrors` and `gEspNow->meshForwards`
-  // both lived at 0 since refactors moved or removed their bump sites. They
-  // are NOT shown here; if/when those metrics are wanted again, wire the
-  // increments at the canonical paths first, then surface them.
+  // Audit (2026-06): the orphan receiveErrors / meshForwards counters (displayed
+  // but never incremented) were removed from EspNowState. If those metrics are
+  // wanted again, add the fields + wire increments at the canonical paths first.
   BROADCAST_PRINTF(
     "ESP-NOW Statistics:\n"
     "  Messages Sent: %lu\n"
@@ -9352,10 +9174,8 @@ const char* cmd_espnow_resetstats(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gEspNow) return "Error: ESP-NOW not initialized";
   
-  gEspNow->receiveErrors = 0;
   gEspNow->heartbeatsSent = 0;
   gEspNow->heartbeatsReceived = 0;
-  gEspNow->meshForwards = 0;
   gEspNow->streamSentCount = 0;
   gEspNow->streamReceivedCount = 0;
   gEspNow->streamDroppedCount = 0;
@@ -10091,13 +9911,11 @@ const char* cmd_espnow_meshmetrics(const String& argsInput) {
     return getDebugBuffer();
   }
 
-  // Audit (2026-05) — every mesh-routing COUNTER this command USED to print
-  // (meshRoutes / directRoutes / meshForwards / meshForwardsByType[8] /
-  // meshPathLength* / meshMaxPathLength / meshTTLExhausted / meshLoopDetected)
-  // has zero increment sites in the codebase: multi-hop forwarding is not
-  // currently being instrumented. Showing all-zeros every time was actively
-  // misleading. Reduced to just the live mesh configuration. If/when those
-  // forwarding paths gain real instrumentation, restore the counters here.
+  // Audit (2026-06) — the mesh-routing counters this command used to print
+  // (meshRoutes / directRoutes / meshForwards / path-length / TTL / loop stats)
+  // had zero increment sites (multi-hop forwarding was never instrumented), so
+  // they were removed from RouterMetrics. Only the live mesh configuration is
+  // shown below. Re-add the fields + real instrumentation together if wanted.
 
   int peerCount = (int)gEspNow->deviceCount;
   int pos = 0;
@@ -11895,6 +11713,23 @@ const char* cmd_espnow_broadcast(const String& argsInput) {
 
 // Helper function to send a file to a specific MAC address via v3 binary protocol
 // Used by FILE_BROWSE fetch and other internal functions
+// RAII flag set around an outbound file send so the rekey scheduler can see it
+// (the slot table only tracks INBOUND transfers). Peer + start-time are published
+// BEFORE the flag so a concurrent reader that sees the flag sees a valid peer.
+// Consumed by espnowFileTransferActiveWithPeer (defined up by the rekey trigger).
+struct FileSendActiveGuard {
+  explicit FileSendActiveGuard(const uint8_t* mac) {
+    if (gEspNow && mac) {
+      memcpy(gEspNow->fileSendPeer, mac, 6);
+      gEspNow->fileSendStartedMs = (uint32_t)millis();
+      gEspNow->fileSendInProgress = true;
+    }
+  }
+  ~FileSendActiveGuard() { if (gEspNow) gEspNow->fileSendInProgress = false; }
+  FileSendActiveGuard(const FileSendActiveGuard&) = delete;
+  FileSendActiveGuard& operator=(const FileSendActiveGuard&) = delete;
+};
+
 bool sendFileToMac(const uint8_t* mac, const String& localPath) {
   if (!gEspNow || !gEspNow->initialized) {
     return false;
@@ -11947,14 +11782,23 @@ bool sendFileToMac(const uint8_t* mac, const String& localPath) {
     }
   }
 
-  FsLockGuard fsGuard("espnow.send_file.open");
-  File file = VFS::openGuarded(localPath, "r", currentAuthContext());
-  if (!file) {
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FILE_TX] Cannot open file: %s", localPath.c_str());
-    return false;
+  // Open + size under the FS lock, then RELEASE it. The send loop below runs for
+  // many seconds (paced 15-50 ms/chunk); holding the FS lock across the whole
+  // transfer (as this used to) starves every other FS user — web, OLED, a concurrent
+  // inbound streaming write — for its entire duration. Re-take the lock only briefly
+  // around each chunk read instead. The File handle stays valid across the gaps (it's
+  // a private local; nothing else touches it).
+  File file;
+  uint32_t fileSize = 0;
+  {
+    FsLockGuard guard("espnow.send_file.open");
+    file = VFS::openGuarded(localPath, "r", currentAuthContext());
+    if (!file) {
+      DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FILE_TX] Cannot open file: %s", localPath.c_str());
+      return false;
+    }
+    fileSize = file.size();
   }
-  
-  uint32_t fileSize = file.size();
   
   // Phase 3.5: chunk size aligned to ESPNOW_V4_MAX_PLAINTEXT so that the
   // V4PayloadFileData.data[] declared size (200) matches what we put on the
@@ -11969,8 +11813,8 @@ bool sendFileToMac(const uint8_t* mac, const String& localPath) {
   const uint16_t v4ChunkSize = ESPNOW_V4_MAX_PLAINTEXT - 2;  // 200 bytes
   uint32_t maxFileSize = 65535 * v4ChunkSize;  // 16-bit chunk count max
   if (fileSize > maxFileSize) {
-    file.close();
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FILE_TX] File too large: %lu bytes (max %lu)", 
+    { FsLockGuard guard("espnow.send_file.close"); file.close(); }
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FILE_TX] File too large: %lu bytes (max %lu)",
            (unsigned long)fileSize, (unsigned long)maxFileSize);
     return false;
   }
@@ -11984,7 +11828,12 @@ bool sendFileToMac(const uint8_t* mac, const String& localPath) {
   uint16_t totalChunks = (fileSize > 0) ? (uint16_t)((fileSize + v4ChunkSize - 1) / v4ChunkSize) : 0;
   
   uint32_t transferId = generateMessageId();
-  
+
+  // Mark this peer as "send in progress" for the whole START→DATA→END window so
+  // the rekey scheduler defers a key rotation until we're done (a big send is what
+  // crosses the 10k tx threshold). Cleared on every exit path below via the dtor.
+  FileSendActiveGuard sendGuard(mac);
+
   // Build and send FILE_START
   V4PayloadFileStart startPayload = {};
   startPayload.fileSize = fileSize;
@@ -11996,7 +11845,7 @@ bool sendFileToMac(const uint8_t* mac, const String& localPath) {
   // encrypted fast-path vs plaintext chunked accordingly — no queue/evict.
   if (!fileSendFrame(ESPNOW_V4_TYPE_FILE_START, ESPNOW_V4_FLAG_ACK_REQ, transferId,
                      (const uint8_t*)&startPayload, sizeof(startPayload))) {
-    file.close();
+    { FsLockGuard guard("espnow.send_file.close"); file.close(); }
     DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FILE_TX] Failed to send FILE_START");
     return false;
   }
@@ -12010,11 +11859,17 @@ bool sendFileToMac(const uint8_t* mac, const String& localPath) {
   // Send chunks - use stack buffer sized for v3 payload
   uint8_t chunkPayload[ESPNOW_V4_MAX_PAYLOAD];
   uint16_t chunkIdx = 0;
-  while (file.available() && chunkIdx < totalChunks) {
+  while (chunkIdx < totalChunks) {
     V4PayloadFileData* fd = (V4PayloadFileData*)chunkPayload;
     fd->chunkIndex = chunkIdx;
-    
-    int bytesRead = file.read(fd->data, v4ChunkSize);
+
+    // Re-take the FS lock only for the read itself (not across the send/pacing
+    // delays below), so other tasks can use the filesystem between chunks.
+    int bytesRead;
+    {
+      FsLockGuard guard("espnow.send_file.read");
+      bytesRead = file.read(fd->data, v4ChunkSize);
+    }
     if (bytesRead <= 0) break;
     
     uint16_t payloadLen = 2 + bytesRead;  // chunkIndex (2) + data
@@ -12048,8 +11903,8 @@ bool sendFileToMac(const uint8_t* mac, const String& localPath) {
       vTaskDelay(pdMS_TO_TICKS(50));
     }
   }
-  file.close();
-  
+  { FsLockGuard guard("espnow.send_file.close"); file.close(); }
+
   // Small delay before FILE_END to ensure last chunks are processed
   vTaskDelay(pdMS_TO_TICKS(100));
   
@@ -12239,6 +12094,21 @@ const char* cmd_espnow_sendfile(const String& argsInput) {
   int lastSlash = filepath.lastIndexOf('/');
   if (lastSlash >= 0) {
     filename = filepath.substring(lastSlash + 1);
+  }
+
+  // Pre-check against the receiver's hard ceiling. Files <= 128 KB are buffered
+  // whole in PSRAM on the receiver; larger files stream chunk-by-chunk straight
+  // to flash (up to kFileSlotMaxStreamSize). Past that the receiver rejects at
+  // FILE_START, and that rejection is NOT signaled back to the sender — so
+  // without this check we'd stream the whole file and then falsely report
+  // success. Fail fast here with the real reason so the command result (and the
+  // relayed espnowfetch result the user actually sees) says WHY.
+  if (fileSize > kFileSlotMaxStreamSize) {
+    snprintf(sendfileBuffer, sizeof(sendfileBuffer),
+             "Error: '%s' is %lu bytes — exceeds the %lu MB ESP-NOW file-transfer limit; not sent",
+             filename.c_str(), (unsigned long)fileSize,
+             (unsigned long)(kFileSlotMaxStreamSize / (1024UL * 1024UL)));
+    return sendfileBuffer;
   }
 
   BROADCAST_PRINTF("[ESP-NOW] Sending file to %s: %s (%lu bytes) via v3", deviceName.c_str(), filename.c_str(), (unsigned long)fileSize);
@@ -13094,50 +12964,6 @@ const char* cmd_espnow_send(const String& argsInput) {
   return getDebugBuffer();
 }
 
-// Send a synthetic large text payload to trigger fragmentation paths
-const char* cmd_espnow_bigsend(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gEspNow) return "Error: ESP-NOW not initialized";
-  if (!gEspNow->initialized) return "ESP-NOW not initialized. Run 'openespnow' first.";
-
-  CommandArgs a(argsInput); // format: "<mac|name> <bytes>"
-  if (!a.hasMinArgs(2)) return "Usage: espnow bigsend <name_or_mac> <bytes>";
-
-  String target = a.arg(0);
-  long size = a.argInt(1, 0);
-  if (size <= 0) return "Error: bytes must be > 0";
-  // Keep within v2 fragment defaults (~2880 decoded bytes across 32 frags)
-  if (size > 2500) size = 2500;
-
-  // Resolve MAC
-  uint8_t mac[6];
-  if (!resolveDeviceNameOrMac(target, mac)) {
-    return "Error: Unknown device (use paired name or MAC)";
-  }
-
-  // Build v2 JSON TEXT payload with repeated 'A' characters
-  String textContent;
-  textContent.reserve(size);
-  for (int i = 0; i < size; i++) textContent += 'A';
-  
-  uint8_t myMac[6];
-  esp_wifi_get_mac(WIFI_IF_STA, myMac);
-  String payload = textContent;
-
-  // Send via V4 smart (strict encrypt-or-fail post-2026-05). Test-only bigsend
-  // requires the peer to be on our mesh + reachable; otherwise the send fails
-  // (which is the desired test signal — we're stress-testing the encrypted
-  // path, not the plaintext one).
-  // Step 3b: route through clerk (JOB_AEAD_SMART). 3s timeout because a 2500-
-  // byte payload fragments into multiple frames on the wire — longer than a
-  // single-frame send.
-  uint32_t msgId = generateMessageId();
-  bool ok = espnowtx::sendAeadSync(mac, ESPNOW_V4_TYPE_TEXT, ESPNOW_V4_FLAG_ACK_REQ, msgId,
-                              (const uint8_t*)payload.c_str(), (uint16_t)payload.length(), 1, 3000);
-  if (!ensureDebugBuffer()) return ok ? "OK" : "Failed";
-  snprintf(getDebugBuffer(), 1024, "bigsend: %s (id=%lu, bytes=%ld)", ok ? "OK" : "FAILED", (unsigned long)msgId, size);
-  return getDebugBuffer();
-}
 
 #if ENABLE_BONDED_MODE
 
@@ -14818,42 +14644,59 @@ void logFileTransferEvent(
 
 // Get all messages for a specific peer (for web UI API). Merges the received and
 // sent rings into one seqNum-ordered timeline; each record's isSent gives direction.
+// Two-pointer merge of one peer's received + sent rings by seqNum, appending to
+// out[] from index `copied` up to maxMessages, keeping only seq > sinceSeq.
+// Both rings are stored oldest→newest (tail→head) in strictly ascending global
+// seq, so a linear merge yields ascending output. CRITICAL: the page cap is
+// applied AFTER interleaving — never by draining the received ring first — so a
+// sent row never gets starved by a received row of higher seq. (The old code
+// filled the cap from messages[] first, advancing the poller's cursor past the
+// sent rows below that high-water; those sent messages — your own 2/4/6 sends —
+// then sat permanently below `sinceSeq` and never came back.) Returns new count.
+static int mergePeerRingsBySeq(const PeerMessageHistory& h, ReceivedTextMessage* out,
+                               int copied, int maxMessages, uint32_t sinceSeq) {
+  int ri = 0, si = 0;
+  while (copied < maxMessages) {
+    // Advance each cursor to its next live, newer-than-sinceSeq record. Stale /
+    // already-seen rows are the low-seq ones at the front, so this is O(1) after
+    // the first call.
+    while (ri < h.count) {
+      uint8_t idx = (h.tail + ri) % MESSAGES_PER_DEVICE;
+      if (h.messages[idx].active && h.messages[idx].seqNum > sinceSeq) break;
+      ri++;
+    }
+    while (si < h.sentCount) {
+      uint8_t idx = (h.sentTail + si) % MESSAGES_PER_DEVICE;
+      if (h.sent[idx].active && h.sent[idx].seqNum > sinceSeq) break;
+      si++;
+    }
+    bool haveR = ri < h.count, haveS = si < h.sentCount;
+    if (!haveR && !haveS) break;
+
+    const ReceivedTextMessage* pick;
+    if (haveR && haveS) {
+      uint8_t ridx = (h.tail + ri) % MESSAGES_PER_DEVICE;
+      uint8_t sidx = (h.sentTail + si) % MESSAGES_PER_DEVICE;
+      if (h.messages[ridx].seqNum <= h.sent[sidx].seqNum) { pick = &h.messages[ridx]; ri++; }
+      else                                                { pick = &h.sent[sidx];     si++; }
+    } else if (haveR) {
+      uint8_t ridx = (h.tail + ri) % MESSAGES_PER_DEVICE; pick = &h.messages[ridx]; ri++;
+    } else {
+      uint8_t sidx = (h.sentTail + si) % MESSAGES_PER_DEVICE; pick = &h.sent[sidx]; si++;
+    }
+    memcpy(&out[copied++], pick, sizeof(ReceivedTextMessage));
+  }
+  return copied;
+}
+
 int getPeerMessages(uint8_t* peerMac, ReceivedTextMessage* outMessages, int maxMessages, uint32_t sinceSeq) {
   if (!gEspNow || !outMessages) return 0;
 
   PeerMessageHistory* history = findOrCreatePeerHistory(peerMac);
   if (!history) return 0;
 
-  int copied = 0;
-
-  // Received ring (tail → head)
-  for (int i = 0; i < history->count && copied < maxMessages; i++) {
-    uint8_t idx = (history->tail + i) % MESSAGES_PER_DEVICE;
-    ReceivedTextMessage& msg = history->messages[idx];
-    if (!msg.active || msg.seqNum <= sinceSeq) continue;
-    memcpy(&outMessages[copied++], &msg, sizeof(ReceivedTextMessage));
-  }
-
-  // Sent ring (tail → head)
-  for (int i = 0; i < history->sentCount && copied < maxMessages; i++) {
-    uint8_t idx = (history->sentTail + i) % MESSAGES_PER_DEVICE;
-    ReceivedTextMessage& msg = history->sent[idx];
-    if (!msg.active || msg.seqNum <= sinceSeq) continue;
-    memcpy(&outMessages[copied++], &msg, sizeof(ReceivedTextMessage));
-  }
-
-  // Merge the two rings into one timeline by seqNum (insertion order = time order).
-  for (int i = 0; i < copied - 1; i++) {
-    for (int j = 0; j < copied - i - 1; j++) {
-      if (outMessages[j].seqNum > outMessages[j + 1].seqNum) {
-        ReceivedTextMessage temp = outMessages[j];
-        outMessages[j] = outMessages[j + 1];
-        outMessages[j + 1] = temp;
-      }
-    }
-  }
-
-  return copied;
+  // One peer = one interleaved timeline; output is already ascending by seqNum.
+  return mergePeerRingsBySeq(*history, outMessages, 0, maxMessages, sinceSeq);
 }
 
 // Get all messages from all peers (for global view)
@@ -14861,28 +14704,18 @@ int getAllMessages(ReceivedTextMessage* outMessages, int maxMessages, uint32_t s
   if (!gEspNow || !outMessages || !gEspNow->peerMessageHistories) return 0;
   
   int copied = 0;
-  
-  // Collect messages from all peer histories (use dynamic capacity). Both the
-  // received and sent rings are included; the seqNum sort below interleaves them.
+
+  // Per peer, interleave its received + sent rings by seq via the shared merge
+  // (so a peer's sent rows aren't starved by its received rows — same fix as
+  // getPeerMessages). The cross-peer cap still fills peer-by-peer, so a very
+  // large multi-peer history can still miss the true global-newest — documented
+  // limitation, fine for small meshes.
   for (int p = 0; p < gEspNow->peerHistoryCapacity && copied < maxMessages; p++) {
     PeerMessageHistory& history = gEspNow->peerMessageHistories[p];
     if (!history.active) continue;
-
-    for (int i = 0; i < history.count && copied < maxMessages; i++) {
-      uint8_t idx = (history.tail + i) % MESSAGES_PER_DEVICE;
-      ReceivedTextMessage& msg = history.messages[idx];
-      if (!msg.active || msg.seqNum <= sinceSeq) continue;
-      memcpy(&outMessages[copied++], &msg, sizeof(ReceivedTextMessage));
-    }
-
-    for (int i = 0; i < history.sentCount && copied < maxMessages; i++) {
-      uint8_t idx = (history.sentTail + i) % MESSAGES_PER_DEVICE;
-      ReceivedTextMessage& msg = history.sent[idx];
-      if (!msg.active || msg.seqNum <= sinceSeq) continue;
-      memcpy(&outMessages[copied++], &msg, sizeof(ReceivedTextMessage));
-    }
+    copied = mergePeerRingsBySeq(history, outMessages, copied, maxMessages, sinceSeq);
   }
-  
+
   // Sort by sequence number (simple bubble sort, good enough for small arrays)
   for (int i = 0; i < copied - 1; i++) {
     for (int j = 0; j < copied - i - 1; j++) {

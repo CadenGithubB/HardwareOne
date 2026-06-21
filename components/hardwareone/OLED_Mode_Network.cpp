@@ -936,12 +936,19 @@ void displayMeshStatusRendered() {
 EXT_RAM_BSS_ATTR static OLEDScrollState sRemoteSensorScroll;
 static bool sRemoteSensorScrollInitialized = false;
 
-static int collectValidRemoteSensors(int* outValidIndices, int maxOut) {
+static int collectConnectedRemoteSensors(int* outValidIndices, int maxOut) {
   int validCount = 0;
+  unsigned long now = millis();
   for (int i = 0; i < MAX_REMOTE_DEVICES * MAX_SENSORS_PER_DEVICE && validCount < maxOut; i++) {
-    if (gRemoteSensorCache[i].valid) {
-      outValidIndices[validCount++] = i;
-    }
+    // Full mirror: list every CONNECTED (present) remote sensor — including
+    // disabled ones — not just the actively-streaming ones, matching the web.
+    RemoteSensorData& e = gRemoteSensorCache[i];
+    if (!e.connected) continue;
+    // Presence aging from the display path: a device we haven't heard from in a
+    // while is gone — free its slot so it drops off (keeps the cache healthy even
+    // when no web client is around to age it).
+    if (now - e.lastSeen > REMOTE_SENSOR_PRESENCE_TTL_MS) { e.connected = false; continue; }
+    outValidIndices[validCount++] = i;
   }
   return validCount;
 }
@@ -1011,7 +1018,7 @@ void displayRemoteSensors() {
   }
 
   int validIndices[MAX_REMOTE_DEVICES * MAX_SENSORS_PER_DEVICE];
-  int validCount = collectValidRemoteSensors(validIndices,
+  int validCount = collectConnectedRemoteSensors(validIndices,
                      (int)(sizeof(validIndices) / sizeof(validIndices[0])));
 
   if (validCount == 0) {
@@ -1037,6 +1044,16 @@ void displayRemoteSensors() {
   oledDisplay->print(entry->deviceName);
   oledDisplay->print(" - ");
   oledDisplay->println(sensorTypeToString(entry->sensorType));
+
+  // Streaming state (mirrors the web dot): only render live data when fresh.
+  // A connected sensor that isn't streaming shows "Disabled" so present-but-off
+  // is clearly distinct from active — rather than rendering a stale frame.
+  bool freshData = entry->valid && (millis() - entry->lastUpdate <= REMOTE_SENSOR_TTL_MS);
+  if (!freshData) {
+    oledDisplay->setCursor(0, 28);
+    oledDisplay->println(entry->enabled ? "Streaming starting..." : "Disabled (not streaming)");
+    return;
+  }
 
   // Parse and display sensor data based on type
   if (entry->jsonLength > 0) {
@@ -1258,7 +1275,7 @@ static bool remoteSensorsAvailable(String* outReason) {
 static bool remoteSensorsInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t /*newlyPressed*/) {
   // Count valid entries; only enable nav if there are >=2 entries to switch between.
   int dummy[MAX_REMOTE_DEVICES * MAX_SENSORS_PER_DEVICE];
-  int validCount = collectValidRemoteSensors(dummy, (int)(sizeof(dummy) / sizeof(dummy[0])));
+  int validCount = collectConnectedRemoteSensors(dummy, (int)(sizeof(dummy) / sizeof(dummy[0])));
   if (validCount == 0) return false;
 
   populateRemoteSensorScroll(validCount);

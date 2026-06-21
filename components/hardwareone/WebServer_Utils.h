@@ -1106,7 +1106,7 @@ window.BondFs = (function(){
     // IIFE). Adding a new file extension or tweaking icon styling there
     // automatically updates this view too.
 
-    var peerLabel=(st.peerName||'Bonded device');
+    var peerLabel=opts.peerLabel||(st.peerName||'Bonded device');
     var h='';
     // Outer bordered container (matches createFileManager)
     h+='<div style="border:1px solid var(--border);border-radius:4px;background:var(--panel-bg);color:var(--panel-fg);overflow:hidden;">';

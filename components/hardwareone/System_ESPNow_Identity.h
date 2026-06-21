@@ -129,10 +129,6 @@ const PeerIdentity* peerIdentityFindByMac(const uint8_t mac[6]);
 bool peerIdentityPersist(const uint8_t mac[6], uint8_t meshId,
                          const uint8_t pub[32], uint32_t bondedAtSec);
 
-// Update lastSeenSec for an existing peer. No-op if peer not found. Does not
-// persist to disk on every call — caller controls when to flush (typically
-// on bond/disconnect, not per heartbeat).
-void peerIdentityNoteSeen(const uint8_t mac[6], uint32_t nowSec);
 
 // Phase 5 — record the peer's subscription bitmap and persist immediately.
 // Called from the SUBSCRIBE_UPDATE handler. Returns false if the peer isn't

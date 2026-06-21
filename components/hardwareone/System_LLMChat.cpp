@@ -349,8 +349,10 @@ int chatRetryLast(const ChatParamOverride* opt) {
   }
   if (lastUserSlot < 0) return 0;
 
-  // Snapshot the prompt before mutations so the pointer stays valid.
-  static char promptBuf[1024];
+  // Snapshot the prompt before mutations so the pointer stays valid. PSRAM-resident
+  // (the snapshot is required for pointer stability across the turn-ring pop/append
+  // below; only its placement moved off scarce internal DRAM).
+  EXT_RAM_BSS_ATTR static char promptBuf[1024];
   uint32_t plen = sTurns[lastUserSlot].textLen;
   if (plen >= sizeof(promptBuf)) plen = sizeof(promptBuf) - 1;
   memcpy(promptBuf, sTurns[lastUserSlot].text, plen);

@@ -75,11 +75,12 @@ enum EspNowV4Type : uint8_t {
   ESPNOW_V4_TYPE_KEY_EX_CONFIRM  = 12,
   ESPNOW_V4_TYPE_SESSION_OPEN    = 13,
   ESPNOW_V4_TYPE_SESSION_CONFIRM = 14,
-  ESPNOW_V4_TYPE_SESSION_CLOSE   = 15,
+  // 15 reserved (was SESSION_CLOSE — never sent or handled; removed 2026-06)
   ESPNOW_V4_TYPE_SESSION_REKEY   = 16,
 
   // --- Discovery / timing (20–29) ---
   ESPNOW_V4_TYPE_HEARTBEAT       = 20,
+  ESPNOW_V4_TYPE_BOOT            = 21,  // Device boot/online notice — its OWN type so the RX files it as a system event, not chat
   ESPNOW_V4_TYPE_TOPO_REQ        = 22,
   ESPNOW_V4_TYPE_TOPO_START      = 23,
   ESPNOW_V4_TYPE_TOPO_PEER       = 24,
@@ -119,7 +120,7 @@ enum EspNowV4Type : uint8_t {
   ESPNOW_V4_TYPE_SENSOR_BROADCAST= 80,
   ESPNOW_V4_TYPE_SENSOR_DATA     = 81,  // Binary sensor data (bond mode streaming)
   ESPNOW_V4_TYPE_SENSOR_STATUS   = 82,
-  ESPNOW_V4_TYPE_WORKER_STATUS   = 83,  // Detailed worker status report to master
+  // 83 reserved (was WORKER_STATUS — sender removed 2026-05-21; opcode removed 2026-06)
 
   // --- Bond (90–99) ---
   ESPNOW_V4_TYPE_BOND_HEARTBEAT  = 90,
@@ -223,18 +224,6 @@ struct __attribute__((packed)) V4PayloadTopoPeer {
   int8_t   rssi;        // Last RSSI
   uint8_t  encrypted;   // 1 if encrypted
   char     name[32];    // Peer name
-};
-
-// Worker status payload (detailed, for master consumption)
-struct __attribute__((packed)) V4PayloadWorkerStatus {
-  uint32_t freeHeap;
-  uint32_t totalHeap;
-  int8_t   rssi;
-  uint8_t  gThermalEnabled;
-  uint8_t  gImuEnabled;
-  uint8_t  reserved;
-  char     name[20];
-  // Metadata fields follow as variable JSON payload if needed
 };
 
 #if ENABLE_BONDED_MODE

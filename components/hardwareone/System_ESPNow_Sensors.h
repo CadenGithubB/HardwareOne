@@ -47,14 +47,23 @@ struct RemoteSensorData {
   RemoteSensorType sensorType;
   char jsonData[REMOTE_SENSOR_BUFFER_SIZE];  // Fixed buffer, no heap allocation
   uint16_t jsonLength;                        // Actual data length in buffer
-  unsigned long lastUpdate;                   // millis() when last updated
-  bool valid;                                 // Data is valid and not expired
+  unsigned long lastUpdate;                   // millis() of last DATA arrival (drives `valid`/fresh)
+  unsigned long lastSeen;                     // millis() of last STATUS or DATA (drives presence aging)
+  // Three orthogonal states mirroring the LOCAL sensor model
+  // (compiled/connected/enabled). `connected` doubles as the slot-occupancy
+  // marker — a slot is free iff !connected. This fixes the prior overload of
+  // `valid` (which was simultaneously "fresh data", "enabled", AND "slot free",
+  // so a disabled sensor's slot could be silently reclaimed).
+  bool connected;                             // sensor present on the remote (slot in use)
+  bool enabled;                               // sensor currently running on the remote
+  bool valid;                                 // fresh data available (within REMOTE_SENSOR_TTL_MS)
 };
 
 // Maximum remote devices to track
 #define MAX_REMOTE_DEVICES 8
 #define MAX_SENSORS_PER_DEVICE 8
-#define REMOTE_SENSOR_TTL_MS 30000  // 30 seconds TTL
+#define REMOTE_SENSOR_TTL_MS 30000  // data-freshness TTL (drives `valid`/fresh)
+#define REMOTE_SENSOR_PRESENCE_TTL_MS 60000  // drop a present-but-silent sensor (device gone) after 60s
 
 // Total cache size: 8 devices * 8 sensors * ~310 bytes = ~20KB (fixed, no heap growth)
 
@@ -92,9 +101,6 @@ int formatRemoteSensorReadable(const char* json, char* out, size_t outSize, int 
 
 // Get list of all remote devices with sensors
 String getRemoteDevicesListJSON();
-
-// Clean up expired remote sensor data
-void cleanupExpiredRemoteSensorData();
 
 // Helper: Convert sensor type to string
 const char* sensorTypeToString(RemoteSensorType type);
@@ -147,9 +153,6 @@ struct RemoteGPSData {
 // Get remote GPS data from bonded device or mesh workers
 // Returns true if valid GPS data is available from a remote source
 bool getRemoteGPSData(RemoteGPSData* outData);
-
-// Check if remote GPS data is available (quick check without full parse)
-bool hasRemoteGPSData();
 
 #endif // ENABLE_ESPNOW
 #endif // SYSTEM_ESPNOW_SENSORS_H

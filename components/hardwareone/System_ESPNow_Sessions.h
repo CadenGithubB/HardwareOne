@@ -47,6 +47,13 @@ constexpr uint32_t kRekeyAgeThresholdMs    = 3600000;   // 1 hour
 // in-flight exchange time to complete before we re-fire on the same trigger.
 constexpr uint32_t kRekeyMinIntervalMs = 30000;
 
+// How many of OUR OWN unicast sends to a peer must time out in a row (with no
+// delivered ACK in between to reset the run) before we treat the ACTIVE session
+// as desynced and drop it for a re-handshake. >1 so a single bad ~10s window
+// (transient RF loss / a brief peer outage) can't tear down a healthy session;
+// the count resets the moment any send gets through. Tune 1..3 to taste.
+constexpr uint8_t kSessionSendTimeoutsBeforeReestablish = 2;
+
 struct SessionState {
   uint8_t  peerMac[6];
   uint8_t  meshId;
@@ -61,7 +68,8 @@ struct SessionState {
   uint32_t establishedAtMs;    // millis() when the session went ACTIVE
   uint32_t lastUseMs;          // millis() of last TX or RX through this session
   uint8_t  state;              // SessionStateLifecycle enum
-  uint8_t  _pad2[3];
+  uint8_t  consecutiveSendTimeouts; // our own send no-ACK run (TX-driven self-heal); reset on any delivered ACK
+  uint8_t  _pad2[2];
 
   // ---- Phase 3.6 — REKEY state -----------------------------------------------
   // Previous AEAD keys, kept valid briefly after a key swap so in-flight frames

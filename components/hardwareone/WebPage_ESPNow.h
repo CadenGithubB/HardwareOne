@@ -1313,6 +1313,8 @@ window.togglePane = function(paneId, btnId) {
         if (sensorsInput) sensorsInput.style.display = 'block';
         if (messageLog) messageLog.style.display = 'none';
         if (btnSensors) btnSensors.classList.add('interact-tab-active');
+        // Reflect what the peer is currently streaming (see loadSensorStreamingState).
+        if (window.loadSensorStreamingState) window.loadSensorStreamingState(mac);
         // Pre-fill credentials from remote tab if available
         var ruEl2 = document.getElementById('ru-' + mac);
         var rpEl2 = document.getElementById('rp-' + mac);
@@ -1381,6 +1383,9 @@ window.togglePane = function(paneId, btnId) {
               // with proper click handlers, Run buttons, and event listeners
               window.tryLoadExistingAutomations(mac);
               if (typeof hw !== 'undefined') hw.notify('success', 'Automations loaded', 2000);
+              // Transfer done — reset the button out of its "Receiving N/30" state
+              // (the success path previously left it stuck) and clear __autoFetchState.
+              window.markAutomationsFetchIdle(mac, 'Refresh Automations');
             })
             .catch(function(e) {
               listDiv.innerHTML = '<div style="color:var(--danger);padding:12px">Error: ' + esc(e.message) + '</div>';
@@ -1591,7 +1596,29 @@ window.togglePane = function(paneId, btnId) {
                   }
                 }
                 var entries = window.parseRemoteFileListing(flatLines);
-                window.renderRemoteFileExplorer(mac, browsePath, entries);
+                // Render with the SHARED file-explorer (window.BondFs.renderExplorer +
+                // window.FileBrowser) so the remote browser matches the local / Files /
+                // Logging views — same icons, breadcrumb, hover rows. Data source stays
+                // the espnowbrowse text-scrape (arbitrary peer + credentials), so we
+                // feed the parsed {name,isDir,size} entries straight in. peerLabel shows
+                // the peer MAC (not the bonded peer). Track current path for the Browse
+                // button (the old renderer used to set this).
+                window.remoteCurrentPath = window.remoteCurrentPath || {};
+                window.remoteCurrentPath[mac] = browsePath;
+                window.BondFs.renderExplorer('remote-fexplorer-' + mac, browsePath, entries, {
+                  peerLabel: mac,
+                  onNavigate: function(p) { window.browseRemoteFiles(mac, p); },
+                  fileActions: [{
+                    label: 'Select',
+                    title: 'Select this file — then click Fetch File to download it to this device',
+                    fn: function(full) {
+                      var input = document.getElementById('remote-fp-' + mac);
+                      if (input) input.value = full;
+                      var sd = document.getElementById('remote-fstat-' + mac);
+                      if (sd) sd.textContent = 'Selected: ' + full + ' — click Fetch File to download';
+                    }
+                  }]
+                });
                 if (statusDiv) statusDiv.textContent = 'Browse complete - ' + entries.length + ' items in ' + browsePath;
               } else if (pollCount > 2) {
                 if (statusDiv) statusDiv.textContent = 'Waiting for response... (' + pollCount + '/' + maxPolls + ')';
@@ -1651,118 +1678,6 @@ window.togglePane = function(paneId, btnId) {
       return entries;
     };
     console.log('[ESP-NOW] Chunk 3P: parseRemoteFileListing ready');
-    console.log('[ESP-NOW] Chunk 3Q: renderRemoteFileExplorer start');
-    // Render the parsed entries into #remote-fexplorer-<mac> with a clickable
-    // breadcrumb. Folders re-issue browseRemoteFiles() to navigate; files
-    // populate #remote-fp-<mac> so Fetch File can pull them. DOM-built (no
-    // inline onclick) so arbitrary filenames can't break out of an attribute.
-    window.renderRemoteFileExplorer = function(mac, path, entries) {
-      var container = document.getElementById('remote-fexplorer-' + mac);
-      if (!container) return;
-      path = path || '/';
-      window.remoteCurrentPath = window.remoteCurrentPath || {};
-      window.remoteCurrentPath[mac] = path;
-
-      function joinRemotePath(base, name) {
-        if (base === '/' || base === '') return '/' + name;
-        return (base.charAt(base.length - 1) === '/' ? base : base + '/') + name;
-      }
-
-      var explorer = document.createElement('div');
-      explorer.className = 'remote-explorer';
-
-      // Breadcrumb: clickable path segments
-      var crumb = document.createElement('div');
-      crumb.className = 'remote-explorer-crumb';
-      var rootSpan = document.createElement('span');
-      rootSpan.textContent = '/';
-      rootSpan.addEventListener('click', function() { window.browseRemoteFiles(mac, '/'); });
-      crumb.appendChild(rootSpan);
-      var accum = '';
-      var segs = path.split('/');
-      for (var s = 0; s < segs.length; s++) {
-        if (!segs[s]) continue;
-        accum += '/' + segs[s];
-        var sep = document.createElement('span');
-        sep.textContent = '/';
-        sep.style.cursor = 'default';
-        crumb.appendChild(sep);
-        var segSpan = document.createElement('span');
-        segSpan.textContent = segs[s];
-        (function(p) {
-          segSpan.addEventListener('click', function() { window.browseRemoteFiles(mac, p); });
-        })(accum);
-        crumb.appendChild(segSpan);
-      }
-      explorer.appendChild(crumb);
-
-      // Scrollable body (matches .remote-explorer-body CSS the UI revamp added)
-      var body = document.createElement('div');
-      body.className = 'remote-explorer-body';
-
-      // Parent (..) navigation when not at root
-      if (path !== '/') {
-        var trimmed = path.replace(/\/+$/, '');
-        var idx = trimmed.lastIndexOf('/');
-        var parent = idx <= 0 ? '/' : trimmed.substring(0, idx);
-        var up = document.createElement('div');
-        up.className = 'remote-entry';
-        var upIcon = document.createElement('span');
-        upIcon.className = 'remote-entry-icon';
-        upIcon.textContent = '[..]';
-        var upLabel = document.createElement('span');
-        upLabel.className = 'remote-entry-label';
-        upLabel.textContent = '..';
-        up.appendChild(upIcon);
-        up.appendChild(upLabel);
-        up.addEventListener('click', function() { window.browseRemoteFiles(mac, parent); });
-        body.appendChild(up);
-      }
-
-      if (!entries || entries.length === 0) {
-        var empty = document.createElement('div');
-        empty.className = 'remote-entry remote-entry-empty';
-        empty.style.display = 'flex';
-        empty.textContent = 'Empty directory';
-        body.appendChild(empty);
-      } else {
-        for (var e = 0; e < entries.length; e++) {
-          (function(entry) {
-            var row = document.createElement('div');
-            row.className = 'remote-entry';
-            var icon = document.createElement('span');
-            icon.className = 'remote-entry-icon';
-            icon.textContent = entry.isDir ? (entry.isMount ? '[M]' : '[D]') : '[F]';
-            var label = document.createElement('span');
-            label.className = 'remote-entry-label';
-            label.textContent = entry.name;
-            var meta = document.createElement('span');
-            meta.className = 'remote-entry-meta';
-            meta.textContent = entry.meta;
-            row.appendChild(icon);
-            row.appendChild(label);
-            row.appendChild(meta);
-            var full = joinRemotePath(path, entry.name);
-            if (entry.isDir) {
-              row.addEventListener('click', function() { window.browseRemoteFiles(mac, full); });
-            } else {
-              row.addEventListener('click', function() {
-                var input = document.getElementById('remote-fp-' + mac);
-                if (input) input.value = full;
-                var statusDiv = document.getElementById('remote-fstat-' + mac);
-                if (statusDiv) statusDiv.textContent = 'Selected: ' + full + ' — click Fetch File to download';
-              });
-            }
-            body.appendChild(row);
-          })(entries[e]);
-        }
-      }
-      explorer.appendChild(body);
-
-      container.innerHTML = '';
-      container.appendChild(explorer);
-    };
-    console.log('[ESP-NOW] Chunk 3Q: renderRemoteFileExplorer ready');
     window.fetchRemoteFile = function(mac) {
       var u = (document.getElementById('remote-user-' + mac) || {}).value || '';
       var p = (document.getElementById('remote-pass-' + mac) || {}).value || '';
@@ -1987,11 +1902,21 @@ window.togglePane = function(paneId, btnId) {
             if (!window.__autoCache) window.__autoCache = {};
             var html = '<div style="display:flex;flex-direction:column;gap:8px">';
             autos.forEach(function(a, idx) {
-              var sched = a.schedule || {};
-              var schedStr = sched.type || '?';
-              if (sched.type === 'time' && sched.time) schedStr = sched.time;
-              else if (sched.type === 'interval' && sched.intervalMs) schedStr = (sched.intervalMs / 1000) + 's';
-              else if (sched.type === 'boot') schedStr = 'boot';
+              // Schedule lives in the `triggers` array (type/time/intervalMs/...),
+              // NOT a `schedule` object — reading a.schedule gave '?'/unknown.
+              var triggers = Array.isArray(a.triggers) ? a.triggers : [];
+              var trig = triggers[0] || {};
+              var ttype = trig.type || (triggers.length === 0 ? 'manual' : '?');
+              // Cadence = the "Repeat" field (recurrence): daily / weekly / monthly /
+              // yearly. A time trigger with no recurrence defaults to daily (matches
+              // the local automations table). Without this, "14:02" alone is ambiguous.
+              var rec = (trig.recurrence || '').toLowerCase();
+              var cadence = (ttype === 'time') ? (rec || 'daily') : '';
+              var schedStr = ttype;
+              if (ttype === 'time' && trig.time) schedStr = trig.time + (cadence ? ' ' + cadence : '');
+              else if (ttype === 'interval' && trig.intervalMs) schedStr = 'every ' + (trig.intervalMs / 1000) + 's';
+              else if (ttype === 'boot') schedStr = 'boot';
+              if (triggers.length > 1) schedStr += ' +' + (triggers.length - 1);
               var enabled = a.enabled !== false;
               var cmds = Array.isArray(a.commands) ? a.commands : [];
               var conditions = Array.isArray(a.conditions) ? a.conditions : [];
@@ -2003,10 +1928,12 @@ window.togglePane = function(paneId, btnId) {
               html += '<div style="color:var(--muted);font-size:0.85em;white-space:nowrap">' + esc(schedStr) + ' &bull; ' + cmds.length + ' cmd' + (cmds.length !== 1 ? 's' : '') + '</div>';
               html += '</div>';
               html += '<div id="' + detailId + '" style="display:none;margin-top:8px;padding-top:8px;border-top:1px solid var(--border);font-size:0.85em">';
-              html += '<div style="margin-bottom:6px"><span style="color:var(--muted)">Schedule:</span> <strong>' + esc(sched.type || 'unknown') + '</strong>';
-              if (sched.time) html += ' at ' + esc(sched.time);
-              if (sched.intervalMs) html += ' every ' + (sched.intervalMs / 1000) + 's';
-              if (sched.days) html += ' on ' + esc(String(sched.days));
+              html += '<div style="margin-bottom:6px"><span style="color:var(--muted)">Schedule:</span> <strong>';
+              if (ttype === 'time' && rec === 'monthly') html += 'day ' + esc(String(trig.dayOfMonth || '?')) + ' of each month at ' + esc(trig.time || '?');
+              else if (ttype === 'time' && rec === 'yearly') html += esc(String(trig.month || '?')) + '/' + esc(String(trig.dayOfMonth || '?')) + ' at ' + esc(trig.time || '?');
+              else if (ttype === 'time') { html += esc(trig.time || '?') + ' (' + esc(cadence) + ')' + (trig.days ? ' on ' + esc(String(trig.days)) : ''); var wi = trig.weekInterval || 1; if (wi > 1) html += ', every ' + wi + ' weeks'; }
+              else { html += esc(ttype); if (trig.intervalMs) html += ' every ' + (trig.intervalMs / 1000) + 's'; }
+              html += '</strong>';
               html += '</div>';
               if (conditions.length > 0) {
                 html += '<div style="margin-bottom:6px"><span style="color:var(--muted)">Conditions:</span>';
@@ -2112,6 +2039,33 @@ window.togglePane = function(paneId, btnId) {
       if (!window.sensorPendingState[mac]) window.sensorPendingState[mac] = {};
       window.__sensorList.forEach(function(sensor){ window.updateSensorPill(mac, sensor); });
       window.updateSensorStatus(mac);
+    };
+    // Populate the pills' ACTIVE state from the peer's current streaming status on
+    // load/open. Previously the pills were inert until clicked, so a reopened tab
+    // showed no indication of what was already streaming. Source: the master's
+    // remote-sensor cache — a sensor with FRESH data is one whose stream is
+    // currently arriving. No credentials needed (already known from the mesh).
+    window.loadSensorStreamingState = function(mac) {
+      window.ensureSensorState(mac);
+      var macHex = mac.replace(/:/g, '').toLowerCase();
+      hw.fetchJSON('/api/sensors/remote').then(function(data) {
+        if (!data || !data.devices || !data.devices.forEach) return;
+        var dev = null;
+        data.devices.forEach(function(d) {
+          if (d && d.mac && String(d.mac).replace(/:/g, '').toLowerCase() === macHex) dev = d;
+        });
+        var active = window.sensorActiveState[mac] || (window.sensorActiveState[mac] = {});
+        window.__sensorList.forEach(function(s) { active[s] = 'off'; });
+        if (dev && dev.sensors && dev.sensors.forEach) {
+          dev.sensors.forEach(function(s) {
+            var t = (s && typeof s === 'object') ? s.type : s;
+            var streaming = (s && typeof s === 'object') ? !!s.fresh : true;
+            if (window.__sensorList.indexOf(t) >= 0) active[t] = streaming ? 'on' : 'off';
+          });
+        }
+        window.__sensorList.forEach(function(s) { window.updateSensorPill(mac, s); });
+        window.updateSensorStatus(mac);
+      }).catch(function() {});
     };
     window.toggleSensorSelection = function(mac, sensor) {
       window.ensureSensorState(mac);
