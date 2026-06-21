@@ -6,7 +6,6 @@
 struct MeshPeerHealth;
 struct TopologyStream;
 struct RouterMetrics;
-struct ChunkBuffer;
 
 #include "System_Utils.h"
 
@@ -1862,14 +1861,14 @@ void hardwareone_setup() {
   // Send boot notification if ESP-NOW is active
   if (gEspNow && gEspNow->initialized) {
     extern String buildBootNotification(uint32_t msgId, const char* src, uint32_t bootCounter, uint32_t timestamp);
-    extern void meshSendEnvelopeToPeers(const String& envelope);
+    extern void meshSendBootToPeers(const String& envelope);
     extern uint32_t generateMessageId();
 
     time_t now = time(nullptr);
     uint32_t timestamp = (now > 1609459200) ? now : 0;
 
     String bootMsg = buildBootNotification(generateMessageId(), gEspNow->deviceName.c_str(), gBootCounter, timestamp);
-    meshSendEnvelopeToPeers(bootMsg);
+    meshSendBootToPeers(bootMsg);
     BROADCAST_PRINTF("[ESP-NOW] Boot notification sent (counter=%lu)", (unsigned long)gBootCounter);
   }
 #endif
@@ -2095,21 +2094,8 @@ void hardwareone_loop() {
   perfMarkSection(2);  // section 3: EVENT-DRIVEN
 
   // ========================================================================
-  // 4. NETWORK MAINTENANCE — ESP-NOW retry and cleanup
+  // 4. NETWORK MAINTENANCE
   // ========================================================================
-
-#if ENABLE_ESPNOW
-  {
-    static unsigned long lastEspNowCleanup = 0;
-    unsigned long nowEspNow = millis();
-    if (nowEspNow - lastEspNowCleanup >= 2000) {
-      lastEspNowCleanup = nowEspNow;
-      if (gEspNow && gEspNow->initialized) {
-        cleanupTimedOutChunks();
-      }
-    }
-  }
-#endif
 
   perfMarkSection(3);  // section 4: NETWORK MAINTENANCE
 

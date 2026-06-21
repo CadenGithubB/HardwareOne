@@ -914,43 +914,18 @@ void logCommandExecution(const AuthContext& ctx, const char* cmd, bool success, 
   // Redact sensitive data from command
   String redactedCmd = redactCmdForAudit(cmd);
   
-  // Result summary (first 40 chars, single line, no heap alloc)
-  char resultBuf[44];
-  if (result && result[0] != '\0') {
-    size_t len = strlen(result);
-    if (len > 40) {
-      memcpy(resultBuf, result, 37);
-      resultBuf[37] = '.'; resultBuf[38] = '.'; resultBuf[39] = '.';
-      resultBuf[40] = '\0';
-    } else {
-      strncpy(resultBuf, result, sizeof(resultBuf) - 1);
-      resultBuf[sizeof(resultBuf) - 1] = '\0';
-    }
-    // Replace newlines with spaces
-    for (char* p = resultBuf; *p; p++) {
-      if (*p == '\n' || *p == '\r') *p = ' ';
-    }
-  } else {
-    strcpy(resultBuf, "OK");
-  }
-  
   // Status indicator
   const char* status = success ? "OK" : "FAIL";
 
-  // A JSON reply ('{'/'[') is internal-comms payload that already went out the
-  // caller's private channel; recording it just bloats the audit file (e.g.
-  // thousands of `bleinfo json -> OK {...}` lines). For JSON, log status only;
-  // keep the short human-readable result (errors etc.) for everything else.
-  const bool resultIsJson = (result && (result[0] == '{' || result[0] == '['));
+  // Audit trail = WHO ran WHAT from WHERE + the OK/FAIL outcome — NOT the command
+  // output. Result bodies (human text or JSON) are noise here: they already went
+  // out the caller's own channel, and detailed failures live in the security /
+  // error logs. So we record status only — the line stops at OK / FAIL.
+  (void)result;
 
-  // Format: [timestamp] user@source cmd -> status [result]
-  if (resultIsJson) {
-    snprintf(entry, sizeof(entry), "[%lu] %s@%s %s -> %s",
-             ts, ctx.user.c_str(), source, redactedCmd.c_str(), status);
-  } else {
-    snprintf(entry, sizeof(entry), "[%lu] %s@%s %s -> %s %s",
-             ts, ctx.user.c_str(), source, redactedCmd.c_str(), status, resultBuf);
-  }
+  // Format: [timestamp] user@source cmd -> status
+  snprintf(entry, sizeof(entry), "[%lu] %s@%s %s -> %s",
+           ts, ctx.user.c_str(), source, redactedCmd.c_str(), status);
   
   // Append to audit log with 500KB cap (rotates automatically)
   appendLineWithCap("/system/sys_logs/command-audit.log", entry, 500 * 1024);
@@ -962,21 +937,12 @@ void logCommandExecution(const AuthContext& ctx, const char* cmd, bool success, 
   // for operational output — the audit trail is something you want to see, not a
   // debug trace. The durable copy is the file write above.)
   //
-  // JSON suppression (the actual fix): a JSON reply ('{'/'[') is internal-comms
-  // payload that already went out the caller's private channel (BLE notify /
-  // web / etc.). Echoing a truncated fragment of it onto the shared consoles is
-  // just noise (e.g. `... -> OK {"v":1,"present":true,"backend":"fuel...`), so
-  // we drop the preview for JSON and keep only the status. Human-readable
-  // results (e.g. "Not detected on I2C bus", "already running") are still
-  // surfaced — those ARE useful broadcast output.
+  // Console echo mirrors the file: status only — the line stops at OK / FAIL.
+  // (Result bodies already went out the caller's own channel; echoing a preview
+  // here was just noise.)
   char auditLine[384];
-  if (resultIsJson) {
-    snprintf(auditLine, sizeof(auditLine), "[CMD] %s@%s: %s -> %s",
-             ctx.user.c_str(), source, redactedCmd.c_str(), status);
-  } else {
-    snprintf(auditLine, sizeof(auditLine), "[CMD] %s@%s: %s -> %s %s",
-             ctx.user.c_str(), source, redactedCmd.c_str(), status, resultBuf);
-  }
+  snprintf(auditLine, sizeof(auditLine), "[CMD] %s@%s: %s -> %s",
+           ctx.user.c_str(), source, redactedCmd.c_str(), status);
   extern void broadcastOutputCore_Routed(const char* text, size_t len, uint8_t route);
   // Exclude BLE: its notify characteristic is the command *response* channel
   // the app reads JSON replies from. Echoing the audit line onto it would
@@ -1070,18 +1036,21 @@ namespace {
     return idx;
   }
 
-  static String redactEspNowRemote(const String& in) {
-    // Expect: "espnowremote <target> <username> <password> <command>..."
+  // Shared handler for peer-credential commands: "<cmd> <target> <username>
+  // <password> <rest>..." (espnowremote / espnowbrowse / espnowfetch). Redact
+  // ONLY the password — the username is audit-relevant (WHO ran it) and <rest>
+  // (the remote command / path) stays visible (WHAT was run).
+  static String redactPeerCredCmd(const String& in) {
     String c = in;
     int base = c.indexOf(' ');                      // after "espnowremote"
     if (base > 0) {
       int t1 = c.indexOf(' ', base + 1);                 // end of <target>
       int t2 = (t1 > 0) ? c.indexOf(' ', t1 + 1) : -1;   // end of <username>
       int t3 = (t2 > 0) ? c.indexOf(' ', t2 + 1) : -1;   // end of <password>
-      if (t1 > 0 && t2 > 0) {
-        String head = c.substring(0, t1 + 1);  // includes trailing space after <target>
-        String afterUser = (t3 > 0) ? c.substring(t3) : String();
-        return head + "***:***" + (afterUser.length() ? String(" ") + afterUser : String());
+      if (t2 > 0) {
+        String head = c.substring(0, t2 + 1);  // "espnowremote <target> <username> "
+        String afterPass = (t3 > 0) ? c.substring(t3) : String();  // " <command>..."
+        return head + "***" + afterPass;
       }
     }
     return c;
@@ -1096,8 +1065,18 @@ namespace {
     { "testencryption ",   MASK_TOKEN_AT_POS,    2, nullptr },  // testencryption <secret>
     { "testpassword ",     MASK_TOKEN_AT_POS,    2, nullptr },  // testpassword <secret>
     { "userrequest ",      MASK_AFTER_TOKEN_POS, 2, nullptr },  // userrequest <name> <pass> ...
-    { "espnowremote ",     CALL_HANDLER,         0, &redactEspNowRemote },
+    { "espnowremote ",     CALL_HANDLER,         0, &redactPeerCredCmd },  // <target> <user> <pass> <cmd>
+    { "espnowbrowse ",     CALL_HANDLER,         0, &redactPeerCredCmd },  // <target> <user> <pass> [path]
+    { "espnowfetch ",      CALL_HANDLER,         0, &redactPeerCredCmd },  // <target> <user> <pass> <path>
     { "blesecret ",        MASK_TOKEN_AT_POS,    2, nullptr },  // blesecret <passphrase>
+    // Passphrase setters — MASK_AFTER_TOKEN_POS masks the whole rest of the line
+    // (robust to quoted / spaced passphrases), keeping the mesh label visible.
+    { "espnowsetpassphrase ",        MASK_AFTER_TOKEN_POS, 2, nullptr },  // espnowsetpassphrase <mesh> <passphrase>
+    { "espnowmeshes setpassphrase ", MASK_AFTER_TOKEN_POS, 3, nullptr },  // espnowmeshes setpassphrase <label> <passphrase>
+    // User credential commands — keep <username> visible where present, mask password(s).
+    { "userchangepassword ", MASK_AFTER_TOKEN_POS, 1, nullptr },  // <curPass> <newPass> <confirmPass>
+    { "userresetpassword ",  MASK_AFTER_TOKEN_POS, 2, nullptr },  // <username> <newPassword> [flag]
+    { "useradd ",            MASK_AFTER_TOKEN_POS, 2, nullptr },  // <username> <password> [flag]
   };
 }
 

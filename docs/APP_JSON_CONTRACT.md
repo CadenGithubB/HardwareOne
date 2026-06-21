@@ -225,7 +225,52 @@ feature is compiled out). Treat accordingly.
 
 ---
 
-## 8. Status
+## 8. Remote sensors, streaming state & automation cadence (NEW — breaking shape change)
+
+This session reworked how a MASTER exposes its bonded/mesh **peers'** sensors. If the app
+consumes any of the remote-device endpoints below, it must update. (The LOCAL sensor
+contract in §6 is **unchanged**.)
+
+### 8.1 Remote-device list — `sensors` changed from strings to objects (breaking)
+Returned by web `GET /api/sensors/remote` (no params) **and** nested verbatim under
+`devices` in the BLE/CLI `espnowsensorstatus json` (master role):
+- **Before:** `"sensors": ["thermal","input"]`
+- **Now:** `"sensors": [ { "type": "input", "enabled": true, "fresh": true } ]`
+
+Full shape:
+```json
+{ "devices": [ { "mac": "<HEX>", "name": "dev",
+  "sensors": [ { "type": "input", "enabled": true, "fresh": true } ] } ] }
+```
+Action: read `sensor.type` (was the bare string). You gain `enabled`/`fresh` for a per-sensor
+on/off indicator.
+
+### 8.2 Per-sensor remote read — now wrapped (breaking)
+Web `GET /api/sensors/remote?device=<MAC>&sensor=<type>` previously returned the raw sensor
+JSON (or `{"error":...}`). Now:
+```json
+{ "connected": true, "enabled": true, "fresh": true, "data": { ...sensor json... } }
+```
+- `data` is the reading object, or **`null`** when not fresh (disabled / stale) — there is no
+  more `{"error":...}` for "no data".
+- Drive the status dot from `enabled`; render `data` for the live value.
+
+### 8.3 What `enabled` MEANS for a remote sensor
+`enabled` = **"is it streaming its data to the mesh"** — the axis the Sensor Streaming UI
+toggles — NOT whether the sensor hardware is powered. (An always-on sensor like the gamepad
+is "on" forever; what matters across the link is whether it's broadcasting.) So:
+streaming → `enabled:true, fresh:true`; stopped → `enabled:false, fresh:false`. A present-but-
+not-streaming sensor still appears in the list (render it red/off) and ages out only after the
+device goes silent (~60 s).
+
+### 8.4 Automation cadence — already in the data (no firmware change)
+A peer's automations arrive as its `automations.json`. Each automation's schedule is in
+`triggers[]`; for a `time` trigger the cadence is `triggers[0].recurrence` =
+`daily` | `weekly` | `monthly` | `yearly` (the "Repeat" dropdown). **A time trigger with no
+`recurrence` means daily.** Render the cadence next to the time (e.g. `14:02 daily`) — showing
+bare `14:02` is ambiguous. The field was always present; just surface it.
+
+## 9. Status
 
 All of the above builds clean and is pending on-device validation; on confirmation it
 will be committed with a version bump. If a shape here doesn't match what the device

@@ -528,12 +528,18 @@ inline String getCapabilityListLong(uint32_t mask, const CapabilityName* names) 
 
 // Message types for logging
 enum LogMessageType {
-  MSG_TEXT = 0,           // Regular text message
+  MSG_TEXT = 0,           // Regular text message (chat — sent or received)
   MSG_FILE_SEND_START,    // File transfer started
   MSG_FILE_SEND_SUCCESS,  // File transfer completed successfully
   MSG_FILE_SEND_FAILED,   // File transfer failed
   MSG_FILE_RECV_SUCCESS,  // File received successfully
-  MSG_FILE_RECV_FAILED    // File receive failed
+  MSG_FILE_RECV_FAILED,   // File receive failed
+  // Non-chat records that still live in the per-peer history so clients can
+  // show/hide them durably by `type` (no session-bound reqId bookkeeping). The
+  // command-response class EXISTS on the wire (ESPNOW_V4_TYPE_CMD_RESP); these
+  // preserve it into storage instead of flattening everything to MSG_TEXT.
+  MSG_CMD_RESULT,         // Output of a relayed remote op (espnowremote/browse/fetch) or streamed cmd output
+  MSG_SYSTEM_EVENT        // Device/system notice (peer-metadata snapshot, etc.)
 };
 
 struct ReceivedTextMessage {
@@ -597,102 +603,21 @@ struct PeerMessageHistory {
   }
 };
 
-// Chunk reassembly buffer
-struct ChunkBuffer {
-  uint32_t msgId;                    // Message ID being reassembled
-  uint32_t totalChunks;              // Total number of chunks expected
-  uint32_t receivedChunks;           // Number of chunks received so far
-  String chunks[10];                 // Chunk data (max 10 chunks = 2000 bytes)
-  bool chunkReceived[10];            // Track which chunks we have
-  unsigned long lastChunkTime;       // Timestamp of last chunk received
-  uint8_t senderMac[6];              // Sender MAC address
-  bool active;                       // Whether this buffer is in use
-  
-  // Constructor
-  ChunkBuffer() : msgId(0), totalChunks(0), receivedChunks(0), 
-                  lastChunkTime(0), active(false) {
-    memset(chunkReceived, 0, sizeof(chunkReceived));
-    memset(senderMac, 0, 6);
-  }
-  
-  // Check if message is complete
-  bool isComplete() const {
-    return active && (receivedChunks == totalChunks);
-  }
-  
-  // Reassemble complete message
-  String reassemble() const {
-    String result = "";
-    for (uint32_t i = 0; i < totalChunks; i++) {
-      result += chunks[i];
-    }
-    return result;
-  }
-  
-  // Reset buffer
-  void reset() {
-    msgId = 0;
-    totalChunks = 0;
-    receivedChunks = 0;
-    lastChunkTime = 0;
-    active = false;
-    memset(chunkReceived, 0, sizeof(chunkReceived));
-    memset(senderMac, 0, 6);
-    for (int i = 0; i < 10; i++) {
-      chunks[i] = "";
-    }
-  }
-};
-
 // Router metrics
 struct RouterMetrics {
   uint32_t messagesSent;
   uint32_t messagesReceived;
   uint32_t messagesFailed;
-  uint32_t messagesRetried;
-  uint32_t messagesDropped;
-  uint32_t directRoutes;
-  uint32_t meshRoutes;
-  uint32_t chunkedMessages;
-  uint32_t chunksSent;
-  uint32_t chunksDropped;
-  uint32_t chunksReceived;
-  uint32_t chunksReassembled;
   uint32_t chunksTimedOut;
-  uint32_t avgSendTimeUs;
-  uint32_t maxSendTimeUs;
-  uint32_t messagesQueued;       // Messages added to retry queue
-  uint32_t messagesDequeued;     // Messages removed from retry queue
-  uint32_t retriesAttempted;     // Total retry attempts
-  uint32_t retriesSucceeded;     // Successful retries
-  uint32_t queueOverflows;       // Times queue was full
-  // V3 binary fragmentation metrics
-  uint32_t v4FragTx;             // Total V3 fragments transmitted
-  uint32_t v4FragRx;             // Total V3 fragments received
-  uint32_t v4FragRxCompleted;    // V3 messages fully reassembled
-  uint32_t v4FragRxGc;           // V3 reassembly contexts GC'ed due to timeout
-  // Mesh routing metrics (per-message-type tracking)
-  uint32_t meshForwardsByType[8];    // Forwards by type: [HB, ACK, MESH_SYS, FILE, CMD, TEXT, RESPONSE, STREAM]
-  uint32_t meshTTLExhausted;         // Messages dropped due to TTL=0
-  uint32_t meshLoopDetected;         // Messages dropped due to path loop detection
-  uint32_t meshPathLengthSum;        // Sum of all path lengths (for averaging)
-  uint32_t meshPathLengthCount;      // Count of messages with path data
-  uint8_t meshMaxPathLength;         // Maximum path length observed
-  uint32_t meshFallbacks;            // Direct send failures that fell back to mesh routing
-  
-  // Constructor
+  // V4 fragmentation metrics (gV4Reasm path)
+  uint32_t v4FragTx;             // Total fragments transmitted
+  uint32_t v4FragRx;             // Total fragments received
+  uint32_t v4FragRxCompleted;    // Messages fully reassembled
+  uint32_t v4FragRxGc;           // Reassembly contexts GC'ed due to timeout
+
   RouterMetrics() : messagesSent(0), messagesReceived(0), messagesFailed(0),
-                    messagesRetried(0), messagesDropped(0), directRoutes(0),
-                    meshRoutes(0), chunkedMessages(0), chunksSent(0),
-                    chunksDropped(0), chunksReceived(0), chunksReassembled(0),
-                    chunksTimedOut(0), avgSendTimeUs(0), maxSendTimeUs(0),
-                    messagesQueued(0), messagesDequeued(0), retriesAttempted(0),
-                    retriesSucceeded(0), queueOverflows(0),
-                    v4FragTx(0), v4FragRx(0), v4FragRxCompleted(0), v4FragRxGc(0),
-                    meshTTLExhausted(0), meshLoopDetected(0), meshPathLengthSum(0), 
-                    meshPathLengthCount(0), meshMaxPathLength(0), meshFallbacks(0) {
-    memset(meshForwardsByType, 0, sizeof(meshForwardsByType));
-  }
+                    chunksTimedOut(0),
+                    v4FragTx(0), v4FragRx(0), v4FragRxCompleted(0), v4FragRxGc(0) {}
 };
 
 
@@ -704,12 +629,7 @@ struct EspNowState {
   bool initialized;
   uint8_t channel;
   EspNowMode mode;
-  
-  // Send flow control
-  volatile bool txDone;
-  volatile esp_now_send_status_t lastStatus;
-  volatile bool lastAckReceived;  // Track if last send received ACK (for CLI responses)
-  
+
   // Encryption
   String passphrase;
   uint8_t derivedKey[16];
@@ -731,11 +651,7 @@ struct EspNowState {
   uint32_t streamSentCount;
   uint32_t streamReceivedCount;
   unsigned long lastStreamSendTime;
-  
-  // File transfer ACK
-  volatile uint16_t fileAckLast;
-  char fileAckHashExpected[16];
-  
+
   // List output buffer (PSRAM-allocated at init)
   char* listBuffer;
   
@@ -743,8 +659,6 @@ struct EspNowState {
   RouterMetrics routerMetrics;
   uint32_t nextMessageId;
   
-  // Chunk reassembly (max 4 concurrent chunked messages)
-  ChunkBuffer chunkBuffers[4];
   
   // Per-device message history buffers (for web UI and OLED)
   // Dynamically allocated - starts small and grows as peers are discovered
@@ -754,17 +668,22 @@ struct EspNowState {
   uint32_t globalMessageSeqNum; // Global sequence number for all messages
   
   // Statistics (non-router specific)
-  uint32_t receiveErrors;
   uint32_t heartbeatsSent;
   uint32_t heartbeatsReceived;
-  uint32_t meshForwards;
   uint32_t fileTransfersSent;
   uint32_t fileTransfersReceived;
+
+  // Outbound file-send tracking — lets the rekey scheduler defer a key rotation
+  // while WE are mid-send to a peer. The slot table only tracks INBOUND transfers,
+  // yet a big OUTBOUND send is exactly what pushes our session txSeq past the rekey
+  // threshold. Set by a RAII guard in sendFileToMac; fileSendStartedMs lets the
+  // rekey trigger bound a flag left stuck by a task that died mid-send.
+  volatile bool fileSendInProgress;
+  uint8_t       fileSendPeer[6];
+  uint32_t      fileSendStartedMs;
+
   unsigned long lastResetTime;
-  
-  // Heartbeat mode
-  bool heartbeatPublic;
-  
+
   // Device name
   String deviceName;
   
@@ -777,7 +696,6 @@ struct EspNowState {
   // Bond heartbeat tracking
   uint32_t bondHeartbeatsSent;
   uint32_t bondHeartbeatsReceived;
-  unsigned long lastBondHeartbeatSentMs;
   unsigned long lastBondHeartbeatReceivedMs;
   bool bondPeerOnline;              // true if heartbeat received within timeout
   uint32_t bondPeerBootCounter;     // Peer's boot counter (detect reboots)
@@ -785,7 +703,6 @@ struct EspNowState {
   uint32_t bondLocalSettingsHash;   // Our settings hash (sent in heartbeat)
   uint32_t bondCachedPeerSettingsHash; // Peer's hash at the moment we last cached their settings file. dirty = (bondPeerSettingsHash != this) when bondSettingsReceived.
   uint32_t bondPeerUptime;          // Peer's uptime in seconds (from heartbeat)
-  uint32_t bondLastOfflineMs;       // millis() when peer last went offline
   
   // Master-driven sync tick state
   BondSyncRequestType bondSyncInFlight; // What request is currently pending
@@ -862,6 +779,7 @@ struct EspNowState {
     uint8_t fragIndex;     // 0-based fragment index from the frame header
     uint8_t fragCount;     // total fragments in the message (1 when not chunked)
     bool encrypted;
+    LogMessageType msgType; // MSG_TEXT (chat) or MSG_SYSTEM_EVENT (BOOT/system notice) — drain stores accordingly
     bool used;
   };
   TextQueueEntry textQueue[TEXT_QUEUE_SIZE];
@@ -913,9 +831,6 @@ struct EspNowState {
     initialized(false),
     channel(0),
     mode(ESPNOW_MODE_DIRECT),
-    txDone(false),
-    lastStatus(ESP_NOW_SEND_SUCCESS),
-    lastAckReceived(false),
     passphrase(""),
     encryptionEnabled(false),
     deviceCount(0),
@@ -927,25 +842,23 @@ struct EspNowState {
     streamSentCount(0),
     streamReceivedCount(0),
     lastStreamSendTime(0),
-    fileAckLast(0),
     listBuffer(nullptr),
     nextMessageId(1),
     globalMessageSeqNum(0),
-    receiveErrors(0),
     heartbeatsSent(0),
     heartbeatsReceived(0),
-    meshForwards(0),
     fileTransfersSent(0),
     fileTransfersReceived(0),
+    fileSendInProgress(false),
+    fileSendPeer{},
+    fileSendStartedMs(0),
     lastResetTime(0),
-    heartbeatPublic(true),
     deviceName(""),
     lastRemoteCapValid(false),
     lastRemoteCapTime(0),
 #if ENABLE_BONDED_MODE
     bondHeartbeatsSent(0),
     bondHeartbeatsReceived(0),
-    lastBondHeartbeatSentMs(0),
     lastBondHeartbeatReceivedMs(0),
     bondPeerOnline(false),
     bondPeerBootCounter(0),
@@ -953,7 +866,6 @@ struct EspNowState {
     bondLocalSettingsHash(0),
     bondCachedPeerSettingsHash(0),
     bondPeerUptime(0),
-    bondLastOfflineMs(0),
     bondSyncInFlight(BOND_SYNC_NONE),
     bondSyncRetryCount(0),
     bondSyncLastAttemptMs(0),
@@ -1020,7 +932,6 @@ struct EspNowState {
     memset(deferredCmdPayload, 0, sizeof(deferredCmdPayload));
     memset(devices, 0, sizeof(devices));
     memset(unpairedDevices, 0, sizeof(unpairedDevices));
-    memset(fileAckHashExpected, 0, 16);
     // listBuffer is a pointer — zeroed after ps_alloc in initEspNow
     memset(&lastRemoteCap, 0, sizeof(lastRemoteCap));
   }
@@ -1040,7 +951,6 @@ struct EspNowState {
 const char* checkEspNowFirstTimeSetup();
 
 // Maintenance functions
-void cleanupTimedOutChunks();
 bool saveMeshPeers();
 
 // Device management
@@ -1110,9 +1020,6 @@ bool resolveDeviceNameOrMac(const String& nameOrMac, uint8_t* outMac);
 // Callbacks
 void onEspNowDataRecv(const esp_now_recv_info_t* recvInfo, const uint8_t* data, int len);
 void onEspNowDataSent(const esp_now_send_info_t* tx_info, esp_now_send_status_t status);
-
-// Message queue processing (called from loop)
-void cleanupTimedOutChunks();
 
 // ESP-NOW command functions (cmd_espnow_stopstream implemented in espnow_system.cpp)
 const char* cmd_espnow_send(const String& argsInput);
@@ -1188,6 +1095,7 @@ void checkTopologyCollectionWindow();  // Check collection window and finalize w
 
 // Mesh envelope sender (for remote sensor broadcasting)
 void meshSendEnvelopeToPeers(const String& envelope);
+void meshSendBootToPeers(const String& envelope);  // boot notice via ESPNOW_V4_TYPE_BOOT — RX stores it as MSG_SYSTEM_EVENT, not chat
 
 // Topology state (for auto-discovery check in loop)
 extern uint32_t gLastTopoRequest;
@@ -1415,7 +1323,6 @@ extern const size_t espNowCommandsCount;
 inline const char* checkEspNowFirstTimeSetup() { return "ESP-NOW disabled"; }
 inline const char* cmd_espnow_init(const String& argsInput) { return "ESP-NOW disabled"; }
 inline void sendEspNowStreamMessage(const char* topic, const char* payload) {}
-inline void cleanupTimedOutChunks() {}
 inline bool isSelfMac(const uint8_t* mac) { return false; }
 inline bool isMeshPeerAlive(const MeshPeerHealth* peer) { return false; }
 inline bool isMeshPeerRecentlyActive(const MeshPeerHealth*) { return false; }

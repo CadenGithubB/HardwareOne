@@ -546,8 +546,14 @@ static constexpr size_t kBondSensorDisplayMax = 15;
 // handler, so row N maps to the same entry in both. Returns count collected.
 static size_t collectBondSensorIdx(int* out, size_t maxN) {
   size_t n = 0;
+  unsigned long now = millis();
   for (int i = 0; i < MAX_REMOTE_DEVICES * MAX_SENSORS_PER_DEVICE && n < maxN; i++) {
-    if (gRemoteSensorCache[i].valid) out[n++] = i;
+    // Full mirror: list every CONNECTED (present) remote sensor, streaming or not.
+    RemoteSensorData& e = gRemoteSensorCache[i];
+    if (!e.connected) continue;
+    // Age out a vanished device from the display path so its slot frees up.
+    if (now - e.lastSeen > REMOTE_SENSOR_PRESENCE_TTL_MS) { e.connected = false; continue; }
+    out[n++] = i;
   }
   return n;
 }
@@ -556,7 +562,7 @@ static size_t collectBondSensorIdx(int* out, size_t maxN) {
 static RemoteSensorData* findBondSensorEntry(const uint8_t* mac, RemoteSensorType type) {
   for (int i = 0; i < MAX_REMOTE_DEVICES * MAX_SENSORS_PER_DEVICE; i++) {
     RemoteSensorData& e = gRemoteSensorCache[i];
-    if (e.valid && e.sensorType == type && memcmp(e.deviceMac, mac, 6) == 0) return &e;
+    if (e.connected && e.sensorType == type && memcmp(e.deviceMac, mac, 6) == 0) return &e;
   }
   return nullptr;
 }
@@ -577,7 +583,9 @@ static void showBondSensorsMenu() {
   for (size_t i = 0; i < got && (n - 1) < kBondSensorDisplayMax; i++) {
     const RemoteSensorData& e = gRemoteSensorCache[idx[i]];
     const char* dn = (e.deviceName[0]) ? e.deviceName : "?";
-    snprintf(rows[n], sizeof(rows[n]), "%s - %s", dn, sensorTypeToString(e.sensorType));
+    // " (off)" marks a connected-but-not-streaming sensor (enabled = streaming).
+    snprintf(rows[n], sizeof(rows[n]), "%s - %s%s", dn, sensorTypeToString(e.sensorType),
+             e.enabled ? "" : " (off)");
     ptrs[n] = rows[n];
     n++;
   }
@@ -610,7 +618,16 @@ static void showBondDetailMenu() {
   const char* dn = (e->deviceName[0]) ? e->deviceName : "?";
   snprintf(hdr, sizeof(hdr), "%s - %s", dn, sensorTypeToString(e->sensorType));
 
-  int nLines = formatRemoteSensorReadable(e->jsonData, body, sizeof(body), 8);
+  // Only render live data when fresh; otherwise label the sensor's state so a
+  // present-but-not-streaming sensor reads "Disabled" instead of a stale frame.
+  bool freshData = e->valid && (millis() - e->lastUpdate <= REMOTE_SENSOR_TTL_MS);
+  int nLines;
+  if (!freshData) {
+    snprintf(body, sizeof(body), "%s", e->enabled ? "Streaming starting..." : "Disabled (not streaming)");
+    nLines = 1;
+  } else {
+    nLines = formatRemoteSensorReadable(e->jsonData, body, sizeof(body), 8);
+  }
 
   // Split `body` (newline-separated "key: value" lines) into row pointers in
   // place — replace each '\n' with a NUL and point a row at each segment.

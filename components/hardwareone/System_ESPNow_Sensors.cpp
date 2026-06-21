@@ -171,9 +171,12 @@ void initRemoteSensorSystem() {
     gRemoteSensorCache[i].jsonData[0] = '\0';
     gRemoteSensorCache[i].jsonLength = 0;
     gRemoteSensorCache[i].lastUpdate = 0;
+    gRemoteSensorCache[i].lastSeen = 0;
+    gRemoteSensorCache[i].connected = false;
+    gRemoteSensorCache[i].enabled = false;
     gRemoteSensorCache[i].valid = false;
   }
-  
+
   DEBUGF(DEBUG_ESPNOW_CORE, "[REMOTE_SENSORS] System initialized");
 }
 
@@ -216,7 +219,8 @@ RemoteSensorType stringToSensorType(const char* str) {
 // Find cache entry for device+sensor
 static RemoteSensorData* findCacheEntry(const uint8_t* deviceMac, RemoteSensorType sensorType) {
   for (int i = 0; i < MAX_REMOTE_DEVICES * MAX_SENSORS_PER_DEVICE; i++) {
-    if (memcmp(gRemoteSensorCache[i].deviceMac, deviceMac, 6) == 0 &&
+    if (gRemoteSensorCache[i].connected &&
+        memcmp(gRemoteSensorCache[i].deviceMac, deviceMac, 6) == 0 &&
         gRemoteSensorCache[i].sensorType == sensorType) {
       return &gRemoteSensorCache[i];
     }
@@ -230,14 +234,20 @@ RemoteSensorData* findOrCreateCacheEntry(const uint8_t* deviceMac, const char* d
   RemoteSensorData* entry = findCacheEntry(deviceMac, sensorType);
   if (entry) return entry;
   
-  // Find empty slot
+  // Find empty slot (a slot is free iff !connected)
   for (int i = 0; i < MAX_REMOTE_DEVICES * MAX_SENSORS_PER_DEVICE; i++) {
-    if (!gRemoteSensorCache[i].valid) {
+    if (!gRemoteSensorCache[i].connected) {
       memcpy(gRemoteSensorCache[i].deviceMac, deviceMac, 6);
       strncpy(gRemoteSensorCache[i].deviceName, deviceName, 31);
       gRemoteSensorCache[i].deviceName[31] = '\0';
       gRemoteSensorCache[i].sensorType = sensorType;
-      gRemoteSensorCache[i].valid = false;  // Will be set to true when data arrives
+      gRemoteSensorCache[i].connected = true;   // slot now in use
+      gRemoteSensorCache[i].enabled = false;    // until status/data says otherwise
+      gRemoteSensorCache[i].valid = false;      // set true when data arrives
+      gRemoteSensorCache[i].lastSeen = millis();
+      gRemoteSensorCache[i].lastUpdate = 0;
+      gRemoteSensorCache[i].jsonLength = 0;
+      gRemoteSensorCache[i].jsonData[0] = '\0';
       return &gRemoteSensorCache[i];
     }
   }
@@ -250,19 +260,16 @@ RemoteSensorData* findOrCreateCacheEntry(const uint8_t* deviceMac, const char* d
 // Update remote sensor status (called from V3 message handler)
 void updateRemoteSensorStatus(const uint8_t* mac, const char* name, RemoteSensorType type, bool enabled) {
   RemoteSensorData* entry = findOrCreateCacheEntry(mac, name, type);
-  if (entry) {
-    if (!enabled) {
-      // Mark as invalid when disabled
-      entry->valid = false;
-      DEBUGF(DEBUG_ESPNOW_CORE, "[REMOTE_SENSORS] Sensor %s disabled on %s",
-             sensorTypeToString(type), name);
-    } else {
-      // Mark as valid when enabled (data will arrive separately)
-      entry->lastUpdate = millis();
-      DEBUGF(DEBUG_ESPNOW_CORE, "[REMOTE_SENSORS] Sensor %s enabled on %s",
-             sensorTypeToString(type), name);
-    }
-  }
+  if (!entry) return;
+  // SENSOR_STATUS carries the remote's on/off state — the "enabled" axis, kept
+  // distinct from `valid` (fresh data) and `connected` (present). The entry stays
+  // connected so a disabled sensor shows as a red card instead of vanishing.
+  entry->connected = true;
+  entry->enabled = enabled;
+  entry->lastSeen = millis();
+  if (!enabled) entry->valid = false;  // disabled → no live data
+  DEBUGF(DEBUG_ESPNOW_CORE, "[REMOTE_SENSORS] Sensor %s %s on %s",
+         sensorTypeToString(type), enabled ? "enabled" : "disabled", name);
 }
 
 
@@ -361,6 +368,10 @@ void startSensorDataStreaming(RemoteSensorType sensorType) {
   // for this sensor. No separate force-send flag needed.
   gLastTxMs[sensorType] = 0;
 
+  // Tell masters right away that this sensor is now streaming, so their dot/cards
+  // flip without waiting for the next 5s presence announce or first data frame.
+  broadcastSensorStatus(sensorType, true);
+
   DEBUG_ESPNOW_STREAMF("[SENSOR_STREAM] Streaming enabled: %s (flag=%d)",
          sensorTypeToString(sensorType), gSensorStreamingEnabled[sensorType]);
   
@@ -393,7 +404,10 @@ void stopSensorDataStreaming(RemoteSensorType sensorType) {
   
   DEBUG_ESPNOW_STREAMF("[SENSOR_STREAM] Setting streaming flag for %s to FALSE", sensorTypeToString(sensorType));
   gSensorStreamingEnabled[sensorType] = false;
-  
+  // Tell masters immediately that this sensor stopped streaming (don't wait for
+  // the 5s presence announce) — this is what makes the remote dot go red and stay.
+  broadcastSensorStatus(sensorType, false);
+
   // Check if all sensors are now disabled - if so, stop broadcaster task
   bool anyEnabled = false;
   for (int i = 0; i < REMOTE_SENSOR_MAX; i++) {
@@ -505,6 +519,44 @@ static void transmitSensorData(RemoteSensorType sensorType, const char* jsonData
   }
 }
 
+// Worker → master: announce every locally-CONNECTED sensor's on/off state — not
+// just the streaming ones — so masters can list present-but-disabled remote
+// sensors as red cards, the same way the local sensors page shows a connected-
+// but-disabled sensor. Reuses the existing SENSOR_STATUS opcode;
+// broadcastSensorStatus() self-gates on worker + mesh + broadcast-enabled.
+// The connected/enabled globals resolve to real driver state or a `false` stub
+// (System_SensorStubs.cpp), so referencing them unconditionally is link-safe.
+static void announceConnectedSensors() {
+  extern bool gThermalConnected;
+  extern bool gTofConnected;
+  extern bool gImuConnected;
+  extern bool gGpsConnected;
+  extern bool gInputConnected;
+  extern bool gFmRadioConnected;
+  extern bool gRtcConnected;
+  extern bool gPresenceConnected;
+  struct Item { bool connected; RemoteSensorType type; };
+  const Item items[] = {
+    { gThermalConnected,  REMOTE_SENSOR_THERMAL },
+    { gTofConnected,      REMOTE_SENSOR_TOF },
+    { gImuConnected,      REMOTE_SENSOR_IMU },
+    { gGpsConnected,      REMOTE_SENSOR_GPS },
+    { gInputConnected,    REMOTE_SENSOR_INPUT },
+    { gFmRadioConnected,  REMOTE_SENSOR_FMRADIO },
+    { gRtcConnected,      REMOTE_SENSOR_RTC },
+    { gPresenceConnected, REMOTE_SENSOR_PRESENCE },
+  };
+  for (const auto& it : items) {
+    // The status we announce is the STREAMING state, not the sensor-on state.
+    // For a REMOTE sensor, "is it streaming to me" is the only axis the master
+    // can observe (it only ever sees streamed data) and the one the Sensor
+    // Streaming UI toggles. Announcing gXxxEnabled (sensor-on) was wrong: an
+    // always-on sensor like the gamepad reported enabled=true forever, so after
+    // the user stopped streaming the master's dot bounced back to green.
+    if (it.connected) broadcastSensorStatus(it.type, isSensorDataStreamingEnabled(it.type));
+  }
+}
+
 // Broadcaster task — wakes every 50ms; for each streaming-enabled sensor whose
 // per-sensor interval has elapsed, calls its builder on demand and transmits.
 // No intermediate "wire cache": the builder reads the sensor's own native cache
@@ -531,6 +583,15 @@ static void sensorBroadcasterTask(void* param) {
              (unsigned)hwmFreeWords,
              (unsigned)(SENSOR_BCAST_STACK_WORDS - hwmFreeWords),
              (unsigned)SENSOR_BCAST_STACK_WORDS);
+    }
+
+    // Presence heartbeat: announce connected sensors' on/off state every ~5s so
+    // masters keep present-but-disabled remote sensors as red cards (mirrors the
+    // local model). Cheap — at most a handful of small SENSOR_STATUS frames.
+    static unsigned long lastPresenceAnnounce = 0;
+    if (now - lastPresenceAnnounce >= 5000) {
+      lastPresenceAnnounce = now;
+      announceConnectedSensors();
     }
 
     for (int i = 0; i < REMOTE_SENSOR_MAX; i++) {
@@ -612,23 +673,25 @@ static void stopSensorBroadcaster() {
 
 String getRemoteSensorDataJSON(const uint8_t* deviceMac, RemoteSensorType sensorType) {
   RemoteSensorData* entry = findCacheEntry(deviceMac, sensorType);
-  if (!entry || !entry->valid) {
-    DEBUG_ESPNOW_METADATAF("[GET_REMOTE_JSON] No valid entry for sensor type %d", sensorType);
-    return "{\"error\":\"No data available\"}";
+  if (!entry) {
+    // Unknown to us = not connected. Mirrors a local sensor that isn't present.
+    return "{\"connected\":false,\"enabled\":false,\"fresh\":false,\"data\":null}";
   }
-  
-  // Check if data is expired
+  // Freshness is independent of enabled/connected: a sensor can be connected +
+  // enabled but momentarily stale, or connected + disabled (red dot, no data).
   unsigned long now = millis();
-  if (now - entry->lastUpdate > REMOTE_SENSOR_TTL_MS) {
-    entry->valid = false;
-    DEBUG_ESPNOW_METADATAF("[GET_REMOTE_JSON] Data expired for sensor type %d (age=%lu)", sensorType, now - entry->lastUpdate);
-    return "{\"error\":\"Data expired\"}";
-  }
-  
-  DEBUG_ESPNOW_METADATAF("[GET_REMOTE_JSON] Returning cached data: entry=%p, valid=%d, lastUpdate=%lu, age=%lu, len=%u, data=%.80s",
-                 entry, entry->valid, entry->lastUpdate, now - entry->lastUpdate, entry->jsonLength, entry->jsonData);
-  // Return from fixed buffer (creates String only at API response time, not on every cache update)
-  return String(entry->jsonData);
+  bool fresh = entry->valid && (now - entry->lastUpdate <= REMOTE_SENSOR_TTL_MS);
+  if (!fresh) entry->valid = false;
+  String out;
+  out.reserve(entry->jsonLength + 96);
+  out += "{\"connected\":"; out += entry->connected ? "true" : "false";
+  out += ",\"enabled\":";   out += entry->enabled ? "true" : "false";
+  out += ",\"fresh\":";     out += fresh ? "true" : "false";
+  out += ",\"data\":";
+  if (fresh && entry->jsonLength > 0) out += entry->jsonData;  // jsonData is a valid JSON value
+  else out += "null";
+  out += "}";
+  return out;
 }
 
 int formatRemoteSensorReadable(const char* json, char* out, size_t outSize, int maxLines) {
@@ -682,40 +745,43 @@ String getRemoteDevicesListJSON() {
   PSRAM_JSON_DOC(doc);
   JsonArray devices = doc["devices"].to<JsonArray>();
   
-  // Build list of unique devices with their sensors
+  // List every CONNECTED (present) remote sensor — including disabled ones, so the
+  // web shows them as red cards instead of dropping them. Each sensor carries its
+  // own enabled/fresh state so the dot mirrors the local model.
+  unsigned long now = millis();
   for (int i = 0; i < MAX_REMOTE_DEVICES * MAX_SENSORS_PER_DEVICE; i++) {
-    if (!gRemoteSensorCache[i].valid) continue;
-    
-    // Check if data is expired
-    unsigned long now = millis();
-    if (now - gRemoteSensorCache[i].lastUpdate > REMOTE_SENSOR_TTL_MS) {
-      gRemoteSensorCache[i].valid = false;
+    RemoteSensorData& e = gRemoteSensorCache[i];
+    if (!e.connected) continue;
+
+    // Presence aging: a sensor we haven't heard from (status OR data) in a long
+    // time means the device went away — free the slot so its card disappears.
+    if (now - e.lastSeen > REMOTE_SENSOR_PRESENCE_TTL_MS) {
+      e.connected = false;
       continue;
     }
-    
+
+    bool fresh = e.valid && (now - e.lastUpdate <= REMOTE_SENSOR_TTL_MS);
+
     // Find or create device entry
-    String macStr = macToHexString(gRemoteSensorCache[i].deviceMac);
+    String macStr = macToHexString(e.deviceMac);
     JsonObject deviceObj;
     bool found = false;
-    
     for (JsonObject dev : devices) {
-      if (strcmp(dev["mac"], macStr.c_str()) == 0) {
-        deviceObj = dev;
-        found = true;
-        break;
-      }
+      if (strcmp(dev["mac"], macStr.c_str()) == 0) { deviceObj = dev; found = true; break; }
     }
-    
     if (!found) {
       deviceObj = devices.add<JsonObject>();
       deviceObj["mac"] = macStr;
-      deviceObj["name"] = gRemoteSensorCache[i].deviceName;
+      deviceObj["name"] = e.deviceName;
       deviceObj["sensors"].to<JsonArray>();
     }
-    
-    // Add sensor to device
+
+    // Add sensor as an object {type, enabled, fresh} (was a bare type string).
     JsonArray sensors = deviceObj["sensors"];
-    sensors.add(sensorTypeToString(gRemoteSensorCache[i].sensorType));
+    JsonObject s = sensors.add<JsonObject>();
+    s["type"] = sensorTypeToString(e.sensorType);
+    s["enabled"] = e.enabled;
+    s["fresh"] = fresh;
   }
   
   String result;
@@ -723,22 +789,6 @@ String getRemoteDevicesListJSON() {
   return result;
 }
 
-void cleanupExpiredRemoteSensorData() {
-  unsigned long now = millis();
-  
-  for (int i = 0; i < MAX_REMOTE_DEVICES * MAX_SENSORS_PER_DEVICE; i++) {
-    if (gRemoteSensorCache[i].valid) {
-      if (now - gRemoteSensorCache[i].lastUpdate > REMOTE_SENSOR_TTL_MS) {
-        DEBUGF(DEBUG_ESPNOW_CORE, "[REMOTE_SENSORS] Expired data for %s %s",
-               gRemoteSensorCache[i].deviceName,
-               sensorTypeToString(gRemoteSensorCache[i].sensorType));
-        gRemoteSensorCache[i].valid = false;
-        gRemoteSensorCache[i].jsonData[0] = '\0';
-        gRemoteSensorCache[i].jsonLength = 0;
-      }
-    }
-  }
-}
 
 // ==========================
 // Thermal Data Optimization
@@ -968,18 +1018,6 @@ const char* cmd_espnow_sensorbroadcast(const String& argsInput) {
 
 #include <ArduinoJson.h>
 
-bool hasRemoteGPSData() {
-  unsigned long now = millis();
-  
-  for (int i = 0; i < MAX_REMOTE_DEVICES * MAX_SENSORS_PER_DEVICE; i++) {
-    if (gRemoteSensorCache[i].valid && 
-        gRemoteSensorCache[i].sensorType == REMOTE_SENSOR_GPS &&
-        (now - gRemoteSensorCache[i].lastUpdate) < REMOTE_SENSOR_TTL_MS) {
-      return true;
-    }
-  }
-  return false;
-}
 
 bool getRemoteGPSData(RemoteGPSData* outData) {
   if (!outData) return false;

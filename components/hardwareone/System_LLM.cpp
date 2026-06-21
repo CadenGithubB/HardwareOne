@@ -152,10 +152,12 @@ static volatile int   gLLMSessionId  = 0;         // bumped per llmStartAsync ca
 static TaskHandle_t   gLLMTask       = nullptr;   // running gen task handle (or null)
 
 struct LLMAsyncContext {
-  char         prompt[2048];
+  char         prompt[1024];  // callers cap the prompt at 1024 (see llmStartAsync sites)
   LLMGenParams params;
 };
-static LLMAsyncContext gLLMAsyncCtx;
+// PSRAM-resident: this ~1.6 KB context was sitting in scarce internal DRAM for no
+// reason — the async task reads it off the LLM (PSRAM-bound) path anyway.
+EXT_RAM_BSS_ATTR static LLMAsyncContext gLLMAsyncCtx;
 
 static void llmAsyncTask(void* /*pv*/) {
   const LLMAsyncContext* ac = &gLLMAsyncCtx;

@@ -12,25 +12,34 @@
 //
 // Scope decisions:
 //
-// - In-RAM (PSRAM) accumulation, single write at FILE_END. The plan called
-//   for a dedicated file_writer_task that drains 4 KB buffers to disk as
-//   they fill. We're shipping the simpler "accumulate full file in PSRAM
-//   then write once" model for now because the per-file cap (64 KB) × 4
-//   slots = 256 KB worst case, which is fine on 2 MB PSRAM. The writer-
-//   task pattern is a follow-up if file sizes ever grow past the budget.
+// - HYBRID size-routed receive (Phase A/B). Files <= kFileSlotMaxFileSize (128 KB)
+//   are buffered WHOLE in PSRAM and written once at FILE_END — the original,
+//   unchanged path; small bond config files (_settings_out.json, automations.json)
+//   always land here and keep their in-RAM FILE_END processing. Files LARGER than
+//   that STREAM to a .part file on flash, bounded by flash, not PSRAM. espnow_task
+//   only memcpy's each chunk into a 4 KB double-buffer; a filled buffer is handed to
+//   cmd_exec_task (via submitDeferredToCmdExec), which does the actual flash write —
+//   so the RX drain is never blocked on flash (the single-task inline-flush variant
+//   dropped chunks at ~87 when an erase stalled RX). This is purely additive:
+//   anything that worked at <= 128 KB behaves byte-for-byte as before; only
+//   previously-rejected big files take the new path. See
+//   docs/ESPNOW_FILE_STREAMING_PHASE_A.md.
 //
 // - No new opcodes (FILE_PROGRESS / FILE_CANCEL). Current code uses silent
 //   timeouts and the existing v4_send_ack on FILE_END. Adding explicit
 //   progress / cancel opcodes is a follow-up.
 //
-// - Boot-time cleanup: deletes /tmp/.transfer-*.part on init. Necessary
-//   for the writer-task pattern (deferred) but harmless either way.
+// - Boot-time cleanup: deletes /espnow/received/.part-* on init (orphaned RAM-path
+//   staging temps AND streaming .part files from a transfer that died mid-flight).
 //
-// - Per-slot mutex: the receive callback path is single-threaded
-//   (espnow_task), so cross-task races within FILE_DATA aren't possible.
-//   But FILE_END can run on cmd_exec_task in the deferred-work pattern,
-//   and the timeout sweep runs on the heartbeat task, so the slot table
-//   itself gets a single mutex protecting allocation / find / release.
+// - Per-slot mutex: FILE_START / FILE_DATA / FILE_END all run INLINE on espnow_task
+//   (the RX drain), so within a transfer the frames are serialized by that single
+//   task. The timeout sweep runs on the heartbeat task and the slot table is shared,
+//   so a single mutex protects allocation / find / release. In STREAMING mode the
+//   actual .part writes (and all teardown) run on cmd_exec_task, never espnow_task;
+//   the mutex guards the buffer/FIFO metadata while the flash write happens outside
+//   it, and a streaming slot is only ever freed by its cmd_exec finalize/abort job
+//   (RECEIVING → COMPLETING → FREE), so the sweep never closes a handle mid-write.
 // ============================================================================
 
 #include "System_BuildConfig.h"
@@ -58,9 +67,23 @@ constexpr const char* kFileSlotErrBadArgs  = "BAD_ARGS";   // size/chunk params 
 constexpr const char* kFileSlotErrAlloc    = "ALLOC";      // PSRAM alloc failed
 constexpr const char* kFileSlotErrTooBig   = "TOO_BIG";    // exceeds per-file budget
 
-// Per-file PSRAM cap. 64 KB matches the pre-Phase-4 limit; 4 slots × 64 KB
-// = 256 KB peak. Adjust if files grow.
-constexpr uint32_t kFileSlotMaxFileSize = 65536;
+// Per-file PSRAM cap (the whole file is buffered in PSRAM during receive). 128 KB;
+// with 4 slots that's 512 KB peak PSRAM — fine on an 8 MB part. The SENDER pre-checks
+// this same constant in cmd_espnow_sendfile and refuses an oversize file up front with
+// a clear reason, rather than streaming it and letting the receiver reject at FILE_START
+// (which isn't signaled back). Raise further only if needed; the real unbounded fix is
+// streaming chunks straight to a .part file on flash instead of buffering whole-file.
+constexpr uint32_t kFileSlotMaxFileSize = 131072;
+
+// Files LARGER than kFileSlotMaxFileSize are STREAMED chunk-by-chunk straight to
+// a .part file on flash (no whole-file PSRAM buffer) — Phase A. Files <= the cap
+// still use the original whole-file-in-PSRAM path, UNCHANGED, so the small config
+// files the bond layer parses in RAM (_settings_out.json, automations.json, …) are
+// never affected (they're always well under 128 KB → always the RAM path).
+// Streaming is bounded by free flash; this is a sanity ceiling (and stays under the
+// 16-bit chunk-count limit of ~13 MB). Per-file RAM in streaming mode is just two
+// 4 KB double-buffers, regardless of file size.
+constexpr uint32_t kFileSlotMaxStreamSize = 4u * 1024u * 1024u;  // 4 MB sanity ceiling
 
 // Stale-slot reclaim threshold. No frame received in this window → drop.
 constexpr uint32_t kFileSlotTimeoutMs = 30000;
@@ -105,18 +128,61 @@ bool fileSlotsWriteChunk(FileTransferSlot* slot,
                           const uint8_t* data,
                           uint16_t dataLen);
 
-// True when every expected chunk has arrived (or fileSize == 0).
+// True when every expected chunk has arrived (or fileSize == 0). For a streaming
+// slot, a gap or write error during receive makes this permanently false.
 bool fileSlotsIsComplete(const FileTransferSlot* slot);
+
+// --- Streaming mode (file > kFileSlotMaxFileSize) ---------------------------
+// Big files don't buffer whole in PSRAM; they stream to a .part file on flash.
+// CRITICAL: the flash writes do NOT run on espnow_task (that stalls RX and drops
+// chunks). espnow_task only memcpy's each chunk into a small double-buffer; when a
+// buffer fills it's handed to cmd_exec_task (via submitDeferredToCmdExec) which does
+// the actual flash write. All teardown (close/rename/delete/free) also runs on
+// cmd_exec_task so it never races espnow_task's fills. This mirrors the established
+// "defer heavy/FS work off the RX task" pattern used by SESSION_OPEN/CONFIRM/REKEY.
+//
+// Lifecycle: RECEIVING → (FILE_END or gap/timeout) → COMPLETING (a finalize/abort
+// job is queued on cmd_exec) → FREE (the job releases the slot). espnow_task and the
+// timeout sweep never free a streaming slot directly.
+
+// True if this slot streams to flash. For these, fileSlotsGetBuffer() returns null.
+bool        fileSlotsIsStreaming(const FileTransferSlot* slot);
+// The on-flash staging path of a streaming slot (the finalize job renames it).
+const char* fileSlotsGetPartPath(const FileTransferSlot* slot);
+
+enum StreamAppendResult : uint8_t {
+  STREAM_APPEND_OK   = 0,  // chunk buffered (and a drain job submitted if a buffer filled)
+  STREAM_APPEND_DUP  = 1,  // duplicate/old chunk — ignored
+  STREAM_APPEND_FAIL = 2,  // gap, backpressure, or error — transfer aborted (cleanup queued); caller should FILE_CANCEL
+};
+// Append one in-order chunk to a streaming slot (runs on espnow_task). Self-
+// contained: on a full buffer it submits a cmd_exec drain job; on failure it marks
+// the slot failed and submits a cmd_exec abort job. Never touches flash itself.
+StreamAppendResult fileSlotsStreamAppend(FileTransferSlot* slot, uint16_t chunkIdx,
+                                         const uint8_t* data, uint16_t dataLen);
+// FILE_END for a streaming slot (espnow_task): commit the last partial buffer and
+// mark COMPLETING. Returns true if a finalize job should be submitted; false if the
+// slot was already failing/aborting (caller should just FILE_CANCEL instead).
+bool        fileSlotsStreamBeginFinalize(FileTransferSlot* slot);
+// Abort a streaming transfer (gap/timeout/incomplete): mark failed + queue cleanup
+// on cmd_exec. Idempotent. Safe to call from espnow_task or the heartbeat sweep.
+void        fileSlotsStreamFail(FileTransferSlot* slot);
+// cmd_exec finalize: drain remaining buffers + close the .part. Returns true if the
+// whole file was written without error (caller then renames it into place).
+bool        fileSlotsStreamFinalizeWrite(FileTransferSlot* slot);
+// cmd_exec job entrypoints (submitted via submitDeferredToCmdExec, arg = slot ptr).
+void        fileSlotsStreamDrainJob(void* arg);
+void        fileSlotsStreamAbortJob(void* arg);
 
 // Accessors for the FILE_END processor.
 const uint8_t* fileSlotsGetBuffer(const FileTransferSlot* slot);
 uint32_t       fileSlotsGetReceivedBytes(const FileTransferSlot* slot);
 const char*    fileSlotsGetFilename(const FileTransferSlot* slot);
 const uint8_t* fileSlotsGetSenderMac(const FileTransferSlot* slot);
-uint32_t       fileSlotsGetMsgId(const FileTransferSlot* slot);
 uint16_t       fileSlotsGetReceivedChunks(const FileTransferSlot* slot);
 uint16_t       fileSlotsGetTotalChunks(const FileTransferSlot* slot);
 uint32_t       fileSlotsGetTotalSize(const FileTransferSlot* slot);
+uint32_t       fileSlotsGetMsgId(const FileTransferSlot* slot);
 
 // Release a slot — free PSRAM buffer, return to FREE state. Idempotent.
 void fileSlotsRelease(FileTransferSlot* slot);

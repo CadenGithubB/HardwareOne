@@ -658,6 +658,30 @@ void sendStatusRegister(uint32_t msgId, const uint8_t peerMac[6]) {
 // declared here to avoid pulling that heavy header into the session unit.
 void espnowUpdateSentDeliveryState(const uint8_t* peerMac, uint32_t msgId, uint8_t state);
 
+// TX-driven session liveness. Tracks consecutive unicast send-timeouts on a peer's
+// ACTIVE session: a delivered ACK clears the run; each no-ACK timeout bumps it, and
+// once it reaches kSessionSendTimeoutsBeforeReestablish the keys have very likely
+// desynced (a handshake/REKEY frame dropped under load — nothing else tears down a
+// wedged-but-"active" session). Drop it; the encrypt-or-queue send path re-handshakes
+// on the next send. Driven ONLY by our own send results (no remote trigger / DoS
+// surface); requiring several in a row + the 10s no-ACK window means a transient blip
+// can't tear down a healthy session.
+static void sessionNoteSendResult(const uint8_t peerMac[6], bool delivered) {
+  if (!gSessions) return;
+  for (uint8_t j = 0; j < kSessionSlots; j++) {
+    SessionState& sess = gSessions[j];
+    if (sess.state != SESSION_ACTIVE || memcmp(sess.peerMac, peerMac, 6) != 0) continue;
+    if (delivered) {
+      sess.consecutiveSendTimeouts = 0;
+    } else if (++sess.consecutiveSendTimeouts >= kSessionSendTimeoutsBeforeReestablish) {
+      WARN_ESPNOWF("session: %u send-timeouts in a row (sessionId=%u) — dropping suspected-"
+                   "desynced session; next send re-handshakes",
+                   (unsigned)sess.consecutiveSendTimeouts, (unsigned)sess.sessionId);
+      sessionClear(&sess);
+    }
+  }
+}
+
 void sendStatusMarkDelivered(uint32_t msgId, const uint8_t srcMac[6]) {
   if (!gSendStatus || msgId == 0 || !srcMac) return;
   SendStatus* s = findByMsgId(msgId);
@@ -669,6 +693,7 @@ void sendStatusMarkDelivered(uint32_t msgId, const uint8_t srcMac[6]) {
   s->state        = SEND_STATUS_DELIVERED;
   s->resolvedAtMs = (uint32_t)millis();
   espnowUpdateSentDeliveryState(s->peerMac, msgId, SEND_STATUS_DELIVERED);
+  sessionNoteSendResult(s->peerMac, /*delivered=*/true);  // a real ACK → session healthy, clear the run
 }
 
 void sendStatusMarkFailed(uint32_t msgId, const uint8_t peerMac[6]) {
@@ -691,6 +716,12 @@ void sendStatusSweep(uint32_t nowMs) {
         s.state        = SEND_STATUS_TIMEOUT;
         s.resolvedAtMs = nowMs;
         espnowUpdateSentDeliveryState(s.peerMac, s.msgId, SEND_STATUS_TIMEOUT);
+        // TX-driven session self-heal: count this no-ACK against the peer's ACTIVE
+        // session. After kSessionSendTimeoutsBeforeReestablish in a row (a delivered
+        // ACK resets it), the keys have desynced — drop it so the next send
+        // re-handshakes. Only our own send failures drive this; establishing
+        // sessions aren't ACTIVE yet, so an in-progress handshake is never cleared.
+        sessionNoteSendResult(s.peerMac, /*delivered=*/false);
       }
     } else {
       // Resolved — free the slot after the polling-window retention period.
