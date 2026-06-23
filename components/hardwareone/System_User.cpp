@@ -3144,12 +3144,12 @@ static const char* cmd_serialrequireauth(const String& argsInput) {
 const CommandEntry userSystemCommands[] = {
   // Authentication commands
   { "login", "Login: <user> <pass> [transport]", false, cmd_login, "Usage: login <username> <password> [transport]\nTransport: serial (default), display, bluetooth" },
-  { "logout", "Logout [transport]", false, cmd_logout },
+  { "logout", "Logout [transport]", false, cmd_logout, "Usage: logout [transport]\nTransport: serial (default), display, bluetooth, g2" },
   { "serialrequireauth", "Enable/disable serial auth requirement [on|off].", true, cmd_serialrequireauth, "Usage: serialrequireauth [on|off]" },
   
   // User management commands
-  { "userapprove", "Approve pending request: <username>", true, cmd_user_approve },
-  { "userdeny", "Deny pending request: <username>", true, cmd_user_deny },
+  { "userapprove", "Approve pending request: <username>", true, cmd_user_approve, "Usage: userapprove <username>" },
+  { "userdeny", "Deny pending request: <username>", true, cmd_user_deny, "Usage: userdeny <username>" },
   { "userpromote", "Promote to admin: <username>", true, cmd_user_promote, "Usage: userpromote <username>" },
   { "userdemote", "Demote from admin: <username>", true, cmd_user_demote, "Usage: userdemote <username>" },
   { "userdelete", "Delete user: <username>", true, cmd_user_delete, "Usage: userdelete <username>" },

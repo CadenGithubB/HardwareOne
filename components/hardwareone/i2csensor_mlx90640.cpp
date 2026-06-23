@@ -35,7 +35,7 @@ extern TwoWire Wire1;
 static const SettingEntry thermalSettingEntries[] = {
   { "thermalAutoStart", SETTING_BOOL, &gSettings.thermalAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, nullptr },
   { "thermalPollingMs", SETTING_INT, &gSettings.thermalPollingMs, 250, 0, nullptr, 50, 5000, "Polling (ms)", nullptr, false, "timing", nullptr },
-  { "thermalPaletteDefault", SETTING_STRING, &gSettings.thermalPaletteDefault, 0, 0, "grayscale", 0, 0, "Default Palette", "grayscale,ironbow,rainbow,hot,cool", false, "display", nullptr },
+  { "thermalPaletteDefault", SETTING_STRING, &gSettings.thermalPaletteDefault, 0, 0, "grayscale", 0, 0, "Default Palette", "grayscale,iron,rainbow,hot,coolwarm", false, "display", nullptr },
   { "thermalEWMAFactor", SETTING_FLOAT, &gSettings.thermalEWMAFactor, 0, 0.2f, nullptr, 0, 1, "EWMA Factor", nullptr, false, "filtering", nullptr },
   { "thermalTransitionMs", SETTING_INT, &gSettings.thermalTransitionMs, 80, 0, nullptr, 0, 5000, "Transition (ms)", nullptr, false, "timing", nullptr },
   { "thermalWebMaxFps", SETTING_INT, &gSettings.thermalWebMaxFps, 10, 0, nullptr, 1, 30, "Web Max FPS", nullptr, false, "timing", nullptr },

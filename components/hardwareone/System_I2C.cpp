@@ -2163,7 +2163,7 @@ const CommandEntry i2cCommands[] = {
   { "i2creset", "Reset I2C bus: pause polling, recover bus, resume.", true, cmd_i2creset },
   { "i2cpause", "Pause all I2C sensor polling.", true, cmd_i2cpause },
   { "i2cresume", "Resume I2C sensor polling.", true, cmd_i2cresume },
-  { "i2crecover", "Clear degraded state for device: <address>", true, cmd_i2crecover },
+  { "i2crecover", "Clear degraded state for device: <address>", true, cmd_i2crecover, "Usage: i2crecover <address>  (hex 0x01-0x7F or decimal 1-127)" },
   
   // Diagnostics
   { "i2cmetrics", "Show I2C bus performance metrics.", false, cmd_i2cmetrics },

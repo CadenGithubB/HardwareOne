@@ -3365,15 +3365,15 @@ const char* cmd_maporganize(const String& argsInput) {
 // Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry mapCommands[] = {
   {"map", "Show current map info", false, cmd_map, nullptr},
-  {"mapload", "Load map file: \"<path>\"", false, cmd_mapload, nullptr},
+  {"mapload", "Load map file: \"<path>\"", false, cmd_mapload, "Usage: mapload \"<path>\""},
   {"mapunload", "Unload current map (free PSRAM on device)", false, cmd_mapunload, nullptr},
   {"maplist", "List available maps", false, cmd_maplist, nullptr},
   {"whereami", "Show current location context", false, cmd_whereami, nullptr},
-  {"search", "Search map features: <name>", false, cmd_search, nullptr},
-  {"waypoint", "Manage waypoints: <list|add|del|goto|clear>", false, cmd_waypoint, nullptr},
-  {"gpstrack", "Manage GPS tracks: <status|load|clear>", false, cmd_gpstrack, nullptr},
-  {"waypointfile", "Link file to waypoint: \"<file>\" <wpName>", false, cmd_waypointfile, nullptr},
-  {"waypointfiles", "Waypoint files: <name> [del <idx>]", false, cmd_waypointfiles, nullptr},
+  {"search", "Search map features: <name>", false, cmd_search, "Usage: search <name>"},
+  {"waypoint", "Manage waypoints: <list|add|del|goto|clear|clearall|rename|notes>", false, cmd_waypoint, "Usage: waypoint [list|add <lat> <lon> [name]|del <index>|goto <index>|clear|clearall|rename <index> <name>|notes <index> <notes>]"},
+  {"gpstrack", "Manage GPS tracks: <status|load|clear>", false, cmd_gpstrack, "Usage: gpstrack [status|load <filepath>|clear]"},
+  {"waypointfile", "Link file to waypoint: \"<file>\" <wpName>", false, cmd_waypointfile, "Usage: waypointfile \"<file>\" <wpName> | waypointfile \"<file>\" <lat> <lon> [wpName]"},
+  {"waypointfiles", "Waypoint files: <name> [del <idx>]", false, cmd_waypointfiles, "Usage: waypointfiles <wpName> [del <index>]"},
   {"maporganize", "Organize map files in /maps into subdirectories", false, cmd_maporganize, nullptr}
 };
 const size_t mapCommandsCount = sizeof(mapCommands) / sizeof(mapCommands[0]);

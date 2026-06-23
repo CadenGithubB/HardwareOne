@@ -602,7 +602,8 @@ static const char* cmd_clear(const String& argsInput) {
 
 // Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry cliCommands[] = {
-  { "help", "Display help menu (help [topic])", false, cmd_help },
+  { "help", "Display help menu (help [topic])", false, cmd_help,
+    "Usage: help [<module>|sensors|all|tail]" },
   { "back", "Return to main help menu", false, cmd_back },
   { "exit", "Exit help mode", false, cmd_exit },
   { "clear", "Clear CLI history", false, cmd_clear },

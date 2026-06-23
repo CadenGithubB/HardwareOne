@@ -29,7 +29,6 @@
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
-#include <LittleFS.h>
 #include <WiFi.h>
 #include <esp_app_desc.h>
 
@@ -131,8 +130,15 @@ static void addDirectoryToBackup(JsonObject& files, JsonArray& warnings, JsonArr
 
   File dir = VFS::openGuarded(dirPath, "r", ctx);
   if (!dir || !dir.isDirectory()) {
-    char warn[128];
-    snprintf(warn, sizeof(warn), "%s directory not found, skipped", dirPath);
+    // openGuarded returns an empty File for two very different reasons: a
+    // permission denial (canRead said no) or the directory genuinely not
+    // existing. Distinguish them so the backup warning isn't misleading.
+    char warn[160];
+    if (!canRead(String(dirPath), ctx)) {
+      snprintf(warn, sizeof(warn), "%s access denied (admin required), skipped", dirPath);
+    } else {
+      snprintf(warn, sizeof(warn), "%s not found, skipped", dirPath);
+    }
     warnings.add(warn);
     return;
   }
@@ -215,6 +221,18 @@ static esp_err_t handleBackup(httpd_req_t* req) {
     return ESP_OK;
   }
   DEBUG_HTTPF("[Backup] Authentication successful, user=%s", ctx.user.c_str());
+
+  // Backup exports whole-device configuration — every user's settings, TLS
+  // certificates, and credential files. Restrict to admins. (A non-admin would
+  // also receive a silently-incomplete bundle, since the guarded directory
+  // reads below grant user_settings/ and certs/ to admins only.)
+  if (!isAdminUser(ctx.user)) {
+    DEBUG_HTTPF("[Backup] Denied: user '%s' is not an admin", ctx.user.c_str());
+    httpd_resp_set_status(req, "403 Forbidden");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, "{\"error\":\"Admin access required\"}", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
 
   if (!filesystemReady) {
     httpd_resp_set_type(req, "application/json");
@@ -438,6 +456,22 @@ static esp_err_t handleRestore(httpd_req_t* req) {
     return ESP_OK;
   }
 
+  // Cross-device restore: preserve the WiFi network the user entered during Import.
+  // The source device's wifiNetworks (under network.wifi.networks) carry passwords
+  // encrypted with the source's device key and won't decrypt here, so we keep THIS
+  // device's current creds instead of overwriting them with useless ones.
+  PSRAM_JSON_DOC(deviceSettingsDoc);
+  bool haveDeviceWifi = false;
+  if (!compatible) {
+    String curSettings;
+    if (readText(SETTINGS_FILE, curSettings)) {
+      DeserializationError derr = deserializeJson(deviceSettingsDoc, curSettings);
+      if (!derr && deviceSettingsDoc["network"]["wifi"]["networks"].is<JsonArray>()) {
+        haveDeviceWifi = true;
+      }
+    }
+  }
+
   // Write each file from the backup
   JsonObject files = doc["files"].as<JsonObject>();
   int filesWritten = 0;
@@ -484,7 +518,15 @@ static esp_err_t handleRestore(httpd_req_t* req) {
 
     // Serialize the value to a string for writing
     String content;
-    if (kv.value().is<const char*>()) {
+    if (!compatible && haveDeviceWifi && pathStr == SETTINGS_FILE) {
+      // Merge restored (source) settings with THIS device's WiFi creds so the device
+      // can reconnect after a cross-device restore, and force auto-reconnect on.
+      PSRAM_JSON_DOC(mergedDoc);
+      mergedDoc.set(kv.value());
+      mergedDoc["network"]["wifi"]["networks"] = deviceSettingsDoc["network"]["wifi"]["networks"];
+      mergedDoc["network"]["wifi"]["autoReconnect"] = true;
+      serializeJsonPretty(mergedDoc, content);
+    } else if (kv.value().is<const char*>()) {
       content = kv.value().as<String>();
     } else {
       serializeJsonPretty(kv.value(), content);
@@ -522,7 +564,10 @@ static esp_err_t handleRestore(httpd_req_t* req) {
   resultDoc["filesErrored"] = filesErrored;
   if (!compatible) {
     resultDoc["credentialsSkipped"] = true;
-    resultDoc["message"] = "Non-sensitive data restored. Device will reboot into first-time setup for credential creation.";
+    resultDoc["message"] = "Non-sensitive data restored. Device will reboot into a guided login setup.";
+    // Tell the next boot to run the streamlined credential-only flow (create just the
+    // admin login) instead of the full first-time-setup menu.
+    writeText(PENDING_CRED_SETUP_FILE, "1");
   }
 
   httpd_resp_set_type(req, "application/json");

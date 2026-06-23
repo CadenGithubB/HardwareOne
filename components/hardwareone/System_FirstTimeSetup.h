@@ -48,6 +48,12 @@ extern bool gFirstTimeSetupPerformed;
 extern volatile bool gAcceptingRestore;
 extern volatile bool gRestoreComplete;
 
+// Marker file written by the migration-tool restore handler after a cross-device
+// (partial) restore: settings were restored but user credentials were intentionally
+// skipped. On the next boot, firstTimeSetupIfNeeded() sees this and runs a
+// streamlined credential-only flow instead of the full Basic/Advanced/Import menu.
+extern const char* PENDING_CRED_SETUP_FILE;
+
 // ============================================================================
 // State Management Functions
 // ============================================================================

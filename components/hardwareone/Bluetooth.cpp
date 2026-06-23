@@ -1985,13 +1985,13 @@ const CommandEntry bluetoothCommands[] = {
   { "bleread",      "Read Bluetooth connection status.",         false, cmd_blestatus },
   { "blestatus",    "Show Bluetooth connection status.",         false, cmd_blestatus },
   { "bleinfo",      "Show BLE configuration and settings.",      false, cmd_bleinfo },
-  { "blename",      "Get/set BLE device name [name].",           false, cmd_blename },
-  { "bletxpower",   "Get/set BLE TX power [0-7].",               false, cmd_bletxpower },
+  { "blename",      "Get/set BLE device name [name].",           false, cmd_blename, "Usage: blename [name]" },
+  { "bletxpower",   "Get/set BLE TX power [0-7].",               false, cmd_bletxpower, "Usage: bletxpower [0..7]" },
   { "bledisconnect","Disconnect current BLE client.",            false, cmd_bledisconnect },
   { "bleadv",       "Start/stop/toggle BLE advertising [start|stop|toggle].", false, cmd_bleadv, "Usage: bleadv [start|stop|toggle]" },
-  { "blesend",      "Send message to BLE client: <message>.",    false, cmd_blesend },
-  { "blestream",    "Control streaming: <on|off|sensors|system>.",false, cmd_blestream },
-  { "bleevent",     "Send event to BLE client: <event>.",        false, cmd_bleevent },
+  { "blesend",      "Send message to BLE client: <message>.",    false, cmd_blesend, "Usage: blesend <message>" },
+  { "blestream",    "Control streaming: <on|off|sensors|system>.",false, cmd_blestream, "Usage: blestream [on|off|sensors|system|events|interval] | interval <sensor_ms> <system_ms>" },
+  { "bleevent",     "Send event to BLE client: <event>.",        false, cmd_bleevent, "Usage: bleevent <message>" },
   
   // Auto-start
   { "bleautostart",    "Enable/disable BLE auto-start after boot [on|off].",   false, cmd_bleautostart,    "Usage: bleautostart [on|off]" },
@@ -2033,7 +2033,7 @@ const SettingEntry bluetoothSettingsEntries[] = {
   { "bluetoothRequireAuth",  SETTING_BOOL,   &gSettings.bluetoothRequireAuth,  true, 0, nullptr, 0, 1, "Require Authentication", nullptr, false, nullptr, "blerequireauth" },
   { "bluetoothDeviceName", SETTING_STRING, &gSettings.bleDeviceName, 0, 0, "HardwareOne", 0, 0, "Device Name", nullptr, false, nullptr, nullptr },
   { "bluetoothTxPower",      SETTING_INT,    &gSettings.bleTxPower,            3, 0, nullptr, 0, 7, "TX Power (0-7)", nullptr, false, nullptr, "bletxpower" },
-  { "bluetoothMode",         SETTING_INT,    &gSettings.bleMode,               0,    0, nullptr, 0, 1, "Mode (0=server, 1=g2)", nullptr, false, nullptr, "blemode" },
+  { "bluetoothMode",         SETTING_INT,    &gSettings.bleMode,               0,    0, nullptr, 0, 1, "Mode (0=server, 1=g2)", "0:Server,1:Client (G2)", false, nullptr, "blemode" },
   { "bleRequireSecureChannel", SETTING_BOOL, &gSettings.bleRequireSecureChannel, true, 0, nullptr, 0, 1, "Require Secure Channel", nullptr, false, nullptr, "blesecure" },
   { "bleSecureChannelSecret",  SETTING_STRING, &gSettings.bleSecureChannelSecret, 0, 0, "", 0, 0, "Secure Channel Secret", nullptr, true, nullptr, "blesecret" }
 };

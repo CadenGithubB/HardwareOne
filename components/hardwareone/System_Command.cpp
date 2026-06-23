@@ -481,7 +481,7 @@ bool CommandArgs::hasKey(const String& key) const {
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry cliSettingsEntries[] = {
-  { "oledHistorySize", SETTING_INT, &gSettings.oledCliHistorySize, 50, 0, nullptr, 10, 100, "OLED History", nullptr, false, nullptr, nullptr }
+  { "oledHistorySize", SETTING_INT, &gSettings.oledCliHistorySize, 50, 0, nullptr, 10, 100, "OLED History", nullptr, false, nullptr, "oledclihistorysize" }
 };
 
 // Columns: name, jsonSection, entries, count, isConnected, description

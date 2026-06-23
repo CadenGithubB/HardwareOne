@@ -194,7 +194,7 @@ static const SettingEntry mqttSettingEntries[] = {
   { "mqttAutoStart", SETTING_BOOL, &gSettings.mqttAutoStart, false, 0, nullptr, 0, 1, "Auto-start at boot", nullptr, false, "broker", nullptr },
   { "mqttHost", SETTING_STRING, &gSettings.mqttHost, 0, 0, "", 0, 0, "Broker Host", nullptr, false, "broker", nullptr },
   { "mqttPort", SETTING_INT, &gSettings.mqttPort, 1883, 0, nullptr, 1, 65535, "Broker Port", nullptr, false, "broker", nullptr },
-  { "mqttTLSMode", SETTING_INT, &gSettings.mqttTLSMode, 0, 0, nullptr, 0, 2, "TLS Mode (0=None, 1=TLS, 2=TLS+Verify)", nullptr, false, "broker", nullptr },
+  { "mqttTLSMode", SETTING_INT, &gSettings.mqttTLSMode, 0, 0, nullptr, 0, 2, "TLS Mode (0=None, 1=TLS, 2=TLS+Verify)", "0:None,1:TLS,2:TLS+Verify", false, "broker", nullptr },
   { "mqttCACertPath", SETTING_STRING, &gSettings.mqttCACertPath, 0, 0, "/system/certs/mqtt_ca.crt", 0, 0, "CA certificate path", nullptr, false, "broker", nullptr },
   { "mqttSubscribeExternal", SETTING_BOOL, &gSettings.mqttSubscribeExternal, false, 0, nullptr, 0, 1, "Subscribe to external topics", nullptr, false, "topics", nullptr },
   { "mqttSubscribeTopics", SETTING_STRING, &gSettings.mqttSubscribeTopics, 0, 0, "", 0, 0, "Topics (comma-separated)", nullptr, false, "topics", nullptr },

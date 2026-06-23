@@ -1304,11 +1304,11 @@ const CommandEntry wifiCommands[] = {
   { "wifipromote", "Promote WiFi to top priority: <ssid>", true, cmd_wifipromote, "Usage: wifipromote <ssid>" },
   
   // Connection Control
-  { "openwifi", "Connect to WiFi [ssid] (optional)", false, cmd_wificonnect, "Usage: openwifi [ssid]" },
+  { "openwifi", "Connect to WiFi: [--best | --index <N>] (default: best)", false, cmd_wificonnect, "Usage: openwifi [--best | --index <1..N>]" },
   { "closewifi", "Disconnect from WiFi (also stops HTTP server + web output to free heap).", false, cmd_wifidisconnect },
   { "wifidisconnect", "Disconnect from the current network but keep the radio on (HTTP/web stay up).", false, cmd_wifidrop },
   { "wifiscan", "Scan for available WiFi networks.", false, cmd_wifiscan, nullptr, "wifi", "scan" },
-  { "wifigettxpower", "Get WiFi TX power.", false, cmd_wifitxpower },
+  { "wifigettxpower", "Set WiFi TX power: <dBm> (alias of wifitxpower)", false, cmd_wifitxpower, "Usage: wifigettxpower <dBm>  (sets TX power; clamps to ~2..21 dBm)" },
   
   // Network Services
   { "ntpsync",   "Sync time with NTP server.",               false, cmd_ntpsync },
