@@ -2350,8 +2350,10 @@ const CommandEntry commands[] = {
   { "status", "Show system status (WiFi, FS, memory).", false, cmd_status, nullptr, "system", "status" },
   { "uptime", "Show device uptime.", false, cmd_uptime },
   { "time", "Show device time (uptime + NTP if synced).", false, cmd_time },
-  { "timeset", "Set time manually: timeset YYYY-MM-DD HH:MM:SS or <unix_timestamp>.", true, cmd_timeset },
-  { "memsample", "Memory snapshot with component requirements. Use 'memsample track [on|off|reset|status]' for allocation tracking.", false, cmd_memsample },
+  { "timeset", "Set time manually: timeset YYYY-MM-DD HH:MM:SS or <unix_timestamp>.", true, cmd_timeset,
+    "Usage: timeset <YYYY-MM-DD HH:MM:SS>|<unix_timestamp>" },
+  { "memsample", "Memory snapshot with component requirements. Use 'memsample track [on|off|reset|status]' for allocation tracking.", false, cmd_memsample,
+    "Usage: memsample [track <on|off|reset|status>]" },
   { "memreport", "Comprehensive memory report (Task Manager style).", false, cmd_memreport },
   { "fsusage", "Show filesystem usage.", false, cmd_fsusage },
   
@@ -2362,7 +2364,8 @@ const CommandEntry commands[] = {
   // ---- System Diagnostics ----
   { "temperature", "Read ESP32 internal temperature.", false, cmd_temperature },
   { "voltage", "Read supply voltage.", false, cmd_voltage },
-  { "cpufreq", "Get/set CPU frequency.", true, cmd_cpufreq },
+  { "cpufreq", "Get/set CPU frequency.", true, cmd_cpufreq,
+    "Usage: cpufreq [80|160|240]" },
   { "taskstats", "Detailed task statistics.", false, cmd_taskstats },
   { "perftop", "Live performance snapshot: loop laps/s, period, per-section timing, worst stalls + live task CPU%.", false, cmd_perftop },
 
@@ -2373,11 +2376,15 @@ const CommandEntry commands[] = {
     "Usage: factoryreset (no args, confirmation required)\n"
     "Deletes /system/users/users.json so the first-time setup wizard runs\n"
     "on next boot. WiFi credentials and other settings are preserved." },
-  { "broadcast", "Send message to all or specific user.", true, cmd_broadcast },
+  { "broadcast", "Send message to all or specific user.", true, cmd_broadcast,
+    "Usage: broadcast <message>" },
   { "pendinglist", "List pending user requests.", true, cmd_pending_list },
-  { "wait", "Delay execution for N milliseconds: wait <ms>.", false, cmd_wait },
-  { "sleep", "Alias for wait: sleep <ms>.", false, cmd_wait },
-  { "lightsleep", "Enter ESP32 light sleep: lightsleep [seconds] (default 20s).", true, cmd_lightsleep },
+  { "wait", "Delay execution for N milliseconds: wait <ms>.", false, cmd_wait,
+    "Usage: wait <ms>  (1..60000)" },
+  { "sleep", "Alias for wait: sleep <ms>.", false, cmd_wait,
+    "Usage: sleep <ms>  (1..60000)" },
+  { "lightsleep", "Enter ESP32 light sleep: lightsleep [seconds] (default 20s).", true, cmd_lightsleep,
+    "Usage: lightsleep [seconds]  (1..3600, default 20)" },
 };
 
 const size_t commandsCount = sizeof(commands) / sizeof(commands[0]);

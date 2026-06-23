@@ -1885,11 +1885,11 @@ static const char* cmd_ringbridge(const String& args) {
 
 extern const CommandEntry g2RingCommands[] = {
   { "ringstatus",     "Show R1 ring connection status",            false, cmd_ringstatus     },
-  { "ringscan",       "Scan for the R1 ring: ringscan [seconds] (default 30, max 300)", false, cmd_ringscan },
-  { "ringconnect",    "Connect to the R1 ring: ringconnect [mac] (auto-scans if no mac; bypasses scan with mac)", false, cmd_ringconnect },
+  { "ringscan",       "Scan for the R1 ring: ringscan [seconds] (default 30, max 300)", false, cmd_ringscan, "Usage: ringscan [seconds] (1..300, default 30)" },
+  { "ringconnect",    "Connect to the R1 ring: ringconnect [mac] (auto-scans if no mac; bypasses scan with mac)", false, cmd_ringconnect, "Usage: ringconnect [mac]  (no mac = scan-then-connect; mac = direct connect, no scan)" },
   { "ringdisconnect", "Disconnect from the R1 ring",               false, cmd_ringdisconnect },
-  { "ringverbose",    "Toggle full hex dump of ring notify frames", false, cmd_ringverbose    },
-  { "ringquery",      "Send an R1 health/status request: ringquery <wear|health|hr|hrv|spo2|temp|activity|sleep|report|raw> [type] [hex_payload]", false, cmd_ringquery },
+  { "ringverbose",    "Toggle full hex dump of ring notify frames", false, cmd_ringverbose, "Usage: ringverbose [<on|off>]  (bare = toggle)" },
+  { "ringquery",      "Send an R1 health/status request: ringquery <wear|health|hr|hrv|spo2|temp|activity|sleep|report|raw> [type] [hex_payload]", false, cmd_ringquery, "Usage: ringquery <wear|health|hr|hrv|spo2|temp|activity|sleep|report|raw> [args] | <hr|hrv|spo2|temp|activity|sleep> [daily|point|measure] | report <on|off|0xNN> | raw <module> <cmd> <subCmd> [hex_payload] [status=NN]" },
   // NOTE: `ringtoglasses` and `ringbridge` are UNREGISTERED on purpose.
   // Both targeted getting ring data onto the G2's built-in health UI, and
   // both are dead ends. See R1_RING_PROTOCOL.md §13 for the full writeup:

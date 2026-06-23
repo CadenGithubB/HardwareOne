@@ -654,10 +654,10 @@ const char* cmd_imagesend(const String& argsInput) {
 // Command registration
 // Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 extern const CommandEntry imageCommands[] = {
-  {"capture", "Capture and save image: capture [littlefs|sd|both]", false, cmd_capture},
-  {"images", "List saved images: images [littlefs|sd]", false, cmd_images},
-  {"imagedelete", "Delete image: imagedelete \"<path>\"", true, cmd_imagedelete},
-  {"imagesend", "Send image via ESP-NOW: imagesend <device> [\"<path>\"]", false, cmd_imagesend},
+  {"capture", "Capture and save image: capture [littlefs|sd|both]", false, cmd_capture, "Usage: capture [littlefs|lfs|sd|both]"},
+  {"images", "List saved images: images [littlefs|sd]", false, cmd_images, "Usage: images [sd] [json]"},
+  {"imagedelete", "Delete image: imagedelete \"<path>\"", true, cmd_imagedelete, "Usage: imagedelete \"<path>\""},
+  {"imagesend", "Send image via ESP-NOW: imagesend <device> [\"<path>\"]", false, cmd_imagesend, "Usage: imagesend <device> [\"<path>\"]"},
 };
 
 extern const size_t imageCommandsCount = sizeof(imageCommands) / sizeof(imageCommands[0]);

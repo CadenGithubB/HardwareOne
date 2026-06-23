@@ -2,9 +2,10 @@
 // OLED CLI Input Mode
 // ============================================================================
 // Keyboard-based command input for the OLED display.
-// Shows the OLED keyboard for typing commands; executes via SOURCE_LOCAL_DISPLAY
-// (same auth context as all other OLED operations). The last few lines of CLI
-// console output are shown above the keyboard so the user can see the result.
+// Shows the OLED keyboard full-screen for typing commands; executes via
+// SOURCE_LOCAL_DISPLAY (same auth context as all other OLED operations). The
+// typed command and its result are echoed to the shared console and are viewable
+// on the separate CLI Output page.
 
 #include "OLED_Display.h"
 #include "System_BuildConfig.h"
@@ -18,11 +19,6 @@
 #include "System_Utils.h"
 
 extern OLEDConsoleBuffer gOledConsole;
-
-// Number of output preview lines shown above the keyboard
-static const int CLI_INPUT_PREVIEW_LINES = 2;
-// Pixel height per preview line
-static const int CLI_INPUT_LINE_HEIGHT   = 10;
 
 static bool     sKeyboardActive  = false;
 static bool     sAwaitingResult  = false;
@@ -42,51 +38,18 @@ static void startInputKeyboard() {
 static void displayCLIInput() {
   if (!oledDisplay) return;
 
-  oledDisplay->setTextSize(1);
-  oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-
-  // Always show last N output lines at the top of the content area
-  if (gOledConsole.mutex && xSemaphoreTake(gOledConsole.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-    int total = gOledConsole.getLineCount();
-    int previewY = OLED_CONTENT_START_Y;
-
-    for (int i = 0; i < CLI_INPUT_PREVIEW_LINES; i++) {
-      int idx = total - CLI_INPUT_PREVIEW_LINES + i;
-      if (idx < 0) {
-        previewY += CLI_INPUT_LINE_HEIGHT;
-        continue;
-      }
-      const char* line = gOledConsole.getLine(idx);
-      if (line) {
-        oledDisplay->setCursor(0, previewY);
-        char truncated[22];
-        strncpy(truncated, line, 21);
-        truncated[21] = '\0';
-        oledDisplay->print(truncated);
-      }
-      previewY += CLI_INPUT_LINE_HEIGHT;
-    }
-    xSemaphoreGive(gOledConsole.mutex);
-  }
-
-  // Separator line between preview and keyboard
-  int sepY = OLED_CONTENT_START_Y + CLI_INPUT_PREVIEW_LINES * CLI_INPUT_LINE_HEIGHT;
-  oledDisplay->drawFastHLine(0, sepY, 128, DISPLAY_COLOR_WHITE);
-
-  // Keyboard renders below the separator.
-  // The keyboard display function always fills from OLED_CONTENT_START_Y, so we
-  // temporarily shift its origin by drawing it into a sub-region via a clip offset.
-  // Since Adafruit_SSD1306 doesn't support clip regions natively, we instead
-  // initialise the keyboard only when needed and let it fill the lower portion.
-  // The keyboard is rendered at full height; the preview area is drawn on top each
-  // frame, so only the lines below the separator are visible to the user.
-  if (oledKeyboardIsActive()) {
-    oledKeyboardDisplay(oledDisplay);
-  }
-
-  // If keyboard isn't active yet, auto-open it
+  // Auto-open the keyboard on the first frame after entry so it renders this
+  // same frame (oledKeyboardInit sets active=true synchronously).
   if (!sKeyboardActive) {
     startInputKeyboard();
+  }
+
+  // Render the keyboard full-screen, like every other keyboard-input mode. The
+  // global header is suppressed while a keyboard is active, so the keyboard owns
+  // the whole content area. Command results are echoed to the shared console and
+  // are viewable on the separate CLI Output page.
+  if (oledKeyboardIsActive()) {
+    oledKeyboardDisplay(oledDisplay);
   }
 }
 

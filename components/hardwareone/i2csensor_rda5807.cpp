@@ -771,7 +771,7 @@ const CommandEntry fmRadioCommands[] = {
   { "closefmradio", "Stop FM Radio sensor.", false, cmd_fmradio_stop, nullptr, "sensor", "radio", "close" },
   { "fmradioread", "Read FM Radio status.", false, cmd_fmradio_status },
   { "fmradiotune", "Tune to frequency: <freq>", false, cmd_fmradio_tune, "Usage: fmradiotune <frequency> (e.g., 103.9 or 10390)" },
-  { "fmradioseek", "Seek next station [up|down]", false, cmd_fmradio_seek },
+  { "fmradioseek", "Seek next station [up|down]", false, cmd_fmradio_seek, "Usage: fmradioseek [up|down]" },
   { "fmradiovolume", "Set volume: <0-15>", false, cmd_fmradio_volume, "Usage: fmradiovolume <0-15>" },
   { "fmradiomute", "Mute audio", false, cmd_fmradio_mute },
   { "fmradiounmute", "Unmute audio", false, cmd_fmradio_mute },

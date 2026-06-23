@@ -1003,11 +1003,11 @@ const CommandEntry imuCommands[] = {
   
   // Device-level settings (sensor hardware behavior)
   { "imudevicepollms", "IMU device poll interval: <50..1000>", true, cmd_imudevicepollms, "Usage: imuDevicePollMs <50..1000>" },
-  { "imuorientationmode", "IMU orientation mode: <0..8>", true, cmd_imuorientationmode },
-  { "imuorientationcorrection", "IMU orientation correction: <0|1>", true, cmd_imuorientationcorrection },
-  { "imupitchoffset", "IMU pitch offset: <-180..180>", true, cmd_imupitchoffset },
-  { "imurolloffset", "IMU roll offset: <-180..180>", true, cmd_imurolloffset },
-  { "imuyawoffset", "IMU yaw offset: <-180..180>", true, cmd_imuyawoffset },
+  { "imuorientationmode", "IMU orientation mode: <0..8>", true, cmd_imuorientationmode, "Usage: imuorientationmode <0..8>" },
+  { "imuorientationcorrection", "IMU orientation correction: <0|1>", true, cmd_imuorientationcorrection, "Usage: imuorientationcorrection <0|1>" },
+  { "imupitchoffset", "IMU pitch offset: <-180..180>", true, cmd_imupitchoffset, "Usage: imupitchoffset <-180..180>" },
+  { "imurolloffset", "IMU roll offset: <-180..180>", true, cmd_imurolloffset, "Usage: imurolloffset <-180..180>" },
+  { "imuyawoffset", "IMU yaw offset: <-180..180>", true, cmd_imuyawoffset, "Usage: imuyawoffset <-180..180>" },
   
   // Auto-start
   { "imuautostart", "Enable/disable IMU auto-start after boot [on|off]", false, cmd_imuautostart, "Usage: imuautostart [on|off]" },
@@ -1146,7 +1146,7 @@ static const SettingEntry imuSettingEntries[] = {
   { "imuTransitionMs", SETTING_INT, &gSettings.imuTransitionMs, 100, 0, nullptr, 0, 1000, "Transition (ms)", nullptr, false, "timing", nullptr },
   { "imuWebMaxFps", SETTING_INT, &gSettings.imuWebMaxFps, 15, 0, nullptr, 1, 30, "Web Max FPS", nullptr, false, "timing", nullptr },
   { "imuDevicePollMs", SETTING_INT, &gSettings.imuDevicePollMs, 200, 0, nullptr, 50, 1000, "Poll Interval (ms)", nullptr, false, "timing", nullptr },
-  { "imuOrientationMode", SETTING_INT, &gSettings.imuOrientationMode, 8, 0, nullptr, 0, 8, "Orientation Mode", nullptr, false, "orientation", nullptr },
+  { "imuOrientationMode", SETTING_INT, &gSettings.imuOrientationMode, 8, 0, nullptr, 0, 8, "Orientation Mode", "0:Normal,1:Flip Pitch,2:Flip Roll,3:Flip Yaw,4:Flip Pitch+Roll,5:Roll 180 Fix,6:Rotate 90 CCW,7:Alt Extreme Pitch,8:Upside Down", false, "orientation", nullptr },
   { "imuOrientationCorrectionEnabled", SETTING_BOOL, &gSettings.imuOrientationCorrectionEnabled, true, 0, nullptr, 0, 1, "Orientation Correction", nullptr, false, "orientation", nullptr },
   { "imuPitchOffset", SETTING_FLOAT, &gSettings.imuPitchOffset, 0, 0.0f, nullptr, -180, 180, "Pitch Offset", nullptr, false, "orientation", nullptr },
   { "imuRollOffset", SETTING_FLOAT, &gSettings.imuRollOffset, 0, 0.0f, nullptr, -180, 180, "Roll Offset", nullptr, false, "orientation", nullptr },

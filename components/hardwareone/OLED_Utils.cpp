@@ -2079,9 +2079,9 @@ static void oledConfirmRender() {
 
   oledDisplay->setTextSize(1);
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-  oledDisplay->setCursor(boxX + 4, boxY + 4);
-  oledDisplay->print("CONFIRM");
 
+  // No title row: the box top overlaps the header bar, so anything drawn there
+  // gets clipped. Start the question at +14 so it clears the header.
   int y = boxY + 14;
   if (gOledConfirmState.line1) {
     oledDisplay->setCursor(boxX + 4, y);
@@ -6152,20 +6152,22 @@ const CommandEntry oledCommands[] = {
     "Usage: oledmode <menu|status|sensordata|sensorlist|thermal|network|mesh|gps|text|logo|anim|imuactions|fmradio|files|automations|espnow|memory|off>\n"
     "Example: oledmode memory\n"
     "Example: oledmode off" },
-  { "oledtext", "Set custom text: <message>", false, cmd_oledtext },
-  { "oledanim", "Select animation: <name> or fps <1-60>", false, cmd_oledanim },
+  { "oledtext", "Set custom text: <message>", false, cmd_oledtext, "Usage: oledtext <message>" },
+  { "oledanim", "Select animation: <name> or fps <1-60>", false, cmd_oledanim,
+    "Usage: oledanim <name>\n"
+    "       oledanim fps <1-60>" },
   { "oledclear", "Clear OLED display.", false, cmd_oledclear },
   { "oledstatus", "Show OLED status.", false, cmd_oledstatus },
-  { "oledrequireauth", "OLED auth requirement: <0|1>", true, cmd_oled_requireauth },
-  { "oledenabled", "Enable/disable OLED: <0|1>", false, cmd_oled_enabled },
-  { "oledbootmode", "OLED boot mode: <logo|status|thermal|off>", false, cmd_oled_bootmode },
-  { "oleddefaultmode", "OLED default mode: <status|thermal|off>", false, cmd_oled_defaultmode },
-  { "oledbootduration", "Boot animation duration (ms): <500-10000>", false, cmd_oled_bootduration },
-  { "oledupdateinterval", "Display update interval (ms): <10-1000>", false, cmd_oled_updateinterval },
-  { "oledbrightness", "Display brightness: <0-255>", false, cmd_oled_brightness },
+  { "oledrequireauth", "OLED auth requirement: <0|1>", true, cmd_oled_requireauth, "Usage: oledrequireauth <0|1>" },
+  { "oledenabled", "Enable/disable OLED: <0|1>", false, cmd_oled_enabled, "Usage: oledenabled <0|1>" },
+  { "oledbootmode", "OLED boot mode: <logo|status|sensors|thermal|network|mesh|off>", false, cmd_oled_bootmode, "Usage: oledbootmode <logo|status|sensors|thermal|network|mesh|off>" },
+  { "oleddefaultmode", "OLED default mode: <logo|status|sensors|thermal|network|mesh|off>", false, cmd_oled_defaultmode, "Usage: oleddefaultmode <logo|status|sensors|thermal|network|mesh|off>" },
+  { "oledbootduration", "Boot animation duration (ms): <0-60000>", false, cmd_oled_bootduration, "Usage: oledbootduration <0..60000>" },
+  { "oledupdateinterval", "Display update interval (ms): <10-1000>", false, cmd_oled_updateinterval, "Usage: oledupdateinterval <10..1000>" },
+  { "oledbrightness", "Display brightness: <0-255>", false, cmd_oled_brightness, "Usage: oledbrightness <0..255>" },
   { "oledflip",       "Flip display 180°: [on|off|toggle]", false, cmd_oled_flip, "Usage: oledflip [on|off|toggle]" },
-  { "oledthermalscale", "Thermal image scale: <1.0-10.0>", false, cmd_oled_thermalscale },
-  { "oledthermalcolormode", "Thermal color mode: <3level|grayscale|binary>", false, cmd_oled_thermalcolormode },
+  { "oledthermalscale", "Thermal image scale: <0.1-10.0>", false, cmd_oled_thermalscale, "Usage: oledthermalscale <0.1..10.0>" },
+  { "oledthermalcolormode", "Thermal color mode: <3level|grayscale>", false, cmd_oled_thermalcolormode, "Usage: oledthermalcolormode <3level|grayscale>" },
 };
 
 const size_t oledCommandsCount = sizeof(oledCommands) / sizeof(oledCommands[0]);

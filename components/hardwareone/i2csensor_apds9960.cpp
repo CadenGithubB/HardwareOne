@@ -413,7 +413,7 @@ const CommandEntry apdsCommands[] = {
   { "openapds", "Start APDS9960 sensor.", false, cmd_apdsstart, nullptr, "sensor", "gesture", "open" },
   { "closeapds", "Stop APDS9960 sensor.", false, cmd_apdsstop, nullptr, "sensor", "gesture", "close" },
   { "apdsread", "Read APDS9960 sensor status and data.", false, cmd_apdsread },
-  { "apdsmode", "Control APDS modes: apdsmode <color|proximity|gesture> [on|off].", false, cmd_apdsmode },
+  { "apdsmode", "Control APDS modes: apdsmode <color|proximity|gesture> [on|off].", false, cmd_apdsmode, "Usage: apdsmode <color|proximity|gesture> [<on|off>]" },
   
   // Read commands (per-mode)
   { "apdscolor", "Read APDS9960 color values.", false, cmd_apdscolor },

@@ -308,7 +308,7 @@ const CommandEntry inputCommands[] = {
   { "openinput",         "Start the input device (gamepad or ANO encoder).", false, cmd_openinput,         nullptr, "sensor", "input", "open" },
   { "closeinput",        "Stop the input device.",                            false, cmd_closeinput,        nullptr, "sensor", "input", "close" },
   { "inputautostart",    "Enable/disable input device auto-start [on|off]",   false, cmd_inputautostart,    "Usage: inputautostart [on|off]" },
-  { "inputdevicepollms", "Set input device poll interval ms [10-1000]",       true,  cmd_inputdevicepollms },
+  { "inputdevicepollms", "Set input device poll interval ms [10-1000]",       true,  cmd_inputdevicepollms, "Usage: inputdevicepollms <10-1000>" },
 };
 const size_t inputCommandsCount = sizeof(inputCommands) / sizeof(inputCommands[0]);
 

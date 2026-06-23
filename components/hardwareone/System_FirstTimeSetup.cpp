@@ -45,6 +45,7 @@ volatile FirstTimeSetupState gFirstTimeSetupState = SETUP_NOT_NEEDED;
 volatile SetupProgressStage gSetupProgressStage = SETUP_PROMPT_USERNAME;
 volatile bool gAcceptingRestore = false;
 volatile bool gRestoreComplete = false;
+const char* PENDING_CRED_SETUP_FILE = "/system/.pending_credential_setup";
 
 // File paths (defined in HardwareOne.cpp / System_User.cpp)
 extern const char* SETTINGS_JSON_FILE;
@@ -223,11 +224,152 @@ static bool serialWifiSelectionForRestore(String& outSSID) {
 #include "WebServer_MigrationTool.h"
 #endif
 
+#if ENABLE_MIGRATION_TOOL
+// Create the initial admin user: users.json (id 1, bootCounter 1, nextId 2) plus the
+// per-user settings file holding the hashed password and theme. Mirrors the inline
+// creation in firstTimeSetupIfNeeded()'s Basic/Advanced path and is used by the
+// post-restore streamlined credential flow. (If the first-admin shape changes, update
+// both — a future cleanup could unify them.)
+static bool createInitialAdminUser(const String& username, const String& plaintextPassword, bool useDarkTheme) {
+  String hashedPassword = hashUserPassword(plaintextPassword);
+
+  PSRAM_JSON_DOC(doc);
+  doc["bootCounter"] = 1;
+  doc["nextId"] = 2;
+
+  JsonArray users = doc["users"].to<JsonArray>();
+  JsonObject admin = users.add<JsonObject>();
+  admin["id"] = 1;
+  admin["username"] = username;
+  admin["role"] = "admin";
+  admin["createdAt"] = (const char*)nullptr;  // resolved lazily via boot anchor
+  admin["createdBy"] = "firstsetup";          // provenance: onboarding wizard owner
+  admin["createdAtSource"] = "pending";       // time-derivation status (see resolver)
+  admin["createdMs"] = millis();
+  admin["ntpAnchorId"] = gNTPAnchorId;
+  admin["bootCount"] = 1;
+  doc["bootAnchors"].to<JsonArray>();
+
+  File file = VFS::openGuarded(USERS_JSON_FILE, "w", VFS::systemAuth("setup.users.create"));
+  if (!file) {
+    broadcastOutput("ERROR: Failed to create users.json");
+    return false;
+  }
+  size_t written = serializeJson(doc, file);
+  file.close();
+  if (written == 0) {
+    broadcastOutput("ERROR: Failed to write users.json");
+    return false;
+  }
+  broadcastOutput("Saved /system/users/users.json");
+
+  // Per-user settings hold the (hashed) password and theme.
+  PSRAM_JSON_DOC(defaults);
+  defaults["theme"] = useDarkTheme ? "dark" : "light";
+  defaults["password"] = hashedPassword;
+  if (!saveUserSettings(1, defaults)) {
+    broadcastOutput("ERROR: Failed to create user settings");
+  }
+
+  gBootCounter = 1;  // keep in-memory counter in sync with what we wrote
+  if (time(nullptr) > 0) {
+    resolvePendingUserCreationTimes();  // resolve creation timestamp if NTP already synced
+  }
+  return true;
+}
+
+// Streamlined post-restore login setup. Runs when a cross-device (partial) restore
+// left settings in place but no user credentials. Collects just username + password,
+// creates the admin, and reboots into the (now fully configured) device. Returns
+// false if the user backed out or creation failed, so the caller falls back to the
+// normal setup menu.
+static bool runPostRestoreCredentialSetup() {
+  setFirstTimeSetupState(SETUP_IN_PROGRESS);
+
+  broadcastOutput("");
+  broadcastOutput("========================================");
+  broadcastOutput("  RESTORE COMPLETE - CREATE YOUR LOGIN");
+  broadcastOutput("========================================");
+  broadcastOutput("Your settings were restored from a backup.");
+  broadcastOutput("This device needs its own admin login.");
+  broadcastOutput("");
+#if ENABLE_OLED_DISPLAY
+  if (gOledEnabled && oledConnected) {
+    showOLEDMessage("Restore done!\n\nCreate your\nadmin login", false);
+  }
+#endif
+
+  // Username (cancel/back -> fall back to the full setup menu)
+  setSetupProgressStage(SETUP_PROMPT_USERNAME);
+  String u = "";
+  while (u.length() == 0) {
+#if ENABLE_OLED_DISPLAY
+    if (gOledEnabled && oledConnected) {
+      bool cancelled = false;
+      u = getOLEDTextInput("Admin Username:", false, "", 32, &cancelled, false);
+      if (cancelled) return false;
+    } else {
+#endif
+      broadcastOutput("Enter admin username: ");
+      u = waitForSerialInputBlocking();
+#if ENABLE_OLED_DISPLAY
+    }
+#endif
+    u.trim();
+  }
+
+  // Password
+  setSetupProgressStage(SETUP_PROMPT_PASSWORD);
+  String p = "";
+  while (p.length() == 0) {
+#if ENABLE_OLED_DISPLAY
+    if (gOledEnabled && oledConnected) {
+      bool cancelled = false;
+      p = getOLEDTextInput("Admin Password:", true, "", 32, &cancelled, false);
+      if (cancelled) return false;
+    } else {
+#endif
+      broadcastOutput("Enter admin password: ");
+      p = waitForSerialInputBlocking();
+#if ENABLE_OLED_DISPLAY
+    }
+#endif
+    p.trim();
+  }
+
+  if (!createInitialAdminUser(u, p, /*useDarkTheme=*/false)) {
+    broadcastOutput("ERROR: Could not create admin user. Falling back to full setup.");
+    return false;
+  }
+
+  setSetupProgressStage(SETUP_FINISHED);
+  setFirstTimeSetupState(SETUP_NOT_NEEDED);
+  gFirstTimeSetupPerformed = true;  // suppress stale-cookie notice; WiFi connects next boot
+  rebootWithMessage("Login created. Rebooting with your restored settings...");
+  return true;  // unreached (rebootWithMessage restarts)
+}
+#endif  // ENABLE_MIGRATION_TOOL
+
 void firstTimeSetupIfNeeded() {
   // Check current state instead of filesystem
   if (gFirstTimeSetupState == SETUP_NOT_NEEDED) {
     return;  // Already configured
   }
+
+#if ENABLE_MIGRATION_TOOL
+  // A cross-device (partial) restore writes settings but intentionally skips user
+  // credentials, leaving users.json absent. Instead of the full Basic/Advanced/Import
+  // menu, guide the user through creating just their admin login.
+  if (VFS::existsGuarded(PENDING_CRED_SETUP_FILE, VFS::systemAuth("setup.restore.cred_marker"))) {
+    // Clear the marker first so a power-cycle mid-flow falls back to the normal menu
+    // (prevents a boot loop).
+    VFS::removeGuarded(PENDING_CRED_SETUP_FILE, VFS::systemAuth("setup.restore.cred_marker"));
+    if (runPostRestoreCredentialSetup()) {
+      return;  // unreached (success path reboots)
+    }
+    // Backed out / failed -> continue to the normal setup menu below.
+  }
+#endif
 
   // Outer restart loop — re-entered if user presses B / types 'back' during restore wait
   while (true) {

@@ -221,8 +221,8 @@ const CommandEntry settingsCommands[] = {
   { "controls", "Per-module control descriptor (JSON): controls json [module]", false, cmd_controls, "Usage: controls json <module>  (e.g. 'controls json imu'); 'controls json' lists modules" },
 #if ENABLE_WIFI
   // ---- WiFi Network Settings ----
-  { "wifitxpower", "Set WiFi TX power: <dBm>", true, cmd_wifitxpower },
-  { "wifiautoreconnect", "WiFi auto-reconnect: <0|1>", true, cmd_wifiautoreconnect },
+  { "wifitxpower", "Set WiFi TX power: <dBm>", true, cmd_wifitxpower, "Usage: wifitxpower <dBm>" },
+  { "wifiautoreconnect", "WiFi auto-reconnect: <0|1>", true, cmd_wifiautoreconnect, "Usage: wifiautoreconnect <0|1>" },
   
   // ---- System Time Settings ----
   { "ntpserver", "Set NTP server: <hostname>", true, cmd_ntpserver, "Usage: ntpserver <host>" },
@@ -251,10 +251,10 @@ const CommandEntry settingsCommands[] = {
   { "oledclihistorysize", "Set OLED CLI history size: <10..100>", true, cmd_oledclihistorysize, "Usage: oledclihistorysize <10..100>" },
 
   // ---- Output Settings ----
-  { "outserial",          "Set serial output: <0|1> [persist|temp]", true, cmd_outserial },
-  { "outweb",             "Set web output: <0|1> [persist|temp]", true, cmd_outweb },
-  { "serialrequireauth",  "Require auth for serial: <0|1>", true, cmd_serialrequireauth },
-  { "displayrequireauth", "Require auth for display: <0|1>", true, cmd_displayrequireauth },
+  { "outserial",          "Set serial output: <0|1> [persist|temp]", true, cmd_outserial, "Usage: outserial <0|1> [persist|temp]" },
+  { "outweb",             "Set web output: <0|1> [persist|temp]", true, cmd_outweb, "Usage: outweb <0|1> [persist|temp]" },
+  { "serialrequireauth",  "Require auth for serial: <0|1>", true, cmd_serialrequireauth, "Usage: serialrequireauth <0|1>" },
+  { "displayrequireauth", "Require auth for display: <0|1>", true, cmd_displayrequireauth, "Usage: displayrequireauth <0|1>" },
 
   // ---- Batch write ----
   { "beginwrite",   "Start a batch settings update — defers flash write until savesettings.", true, cmd_beginwrite },
@@ -1583,7 +1583,7 @@ static const SettingEntry debugSettingEntries[] = {
   // OFF = suppress; ON = allow normal JS console output. Does NOT route
   // firmware broadcastOutput anywhere — that's plumbed via MSG_ROUTE_*.
   { "webConsole", SETTING_BOOL, &gSettings.webConsoleDebug,     0, 0, nullptr, 0, 1, "Allow page console.log", nullptr, false, "page", "webconsole" },
-  { "logLevel",         SETTING_INT,  &gSettings.logLevel,            3, 0, nullptr, 0, 3, "Log Level",            nullptr, false, nullptr, "loglevel" },
+  { "logLevel",         SETTING_INT,  &gSettings.logLevel,            3, 0, nullptr, 0, 3, "Log Level",            "0:error,1:warn,2:info,3:debug", false, nullptr, "loglevel" },
 };
 
 // Columns: name, jsonSection, entries, count, isConnected, description

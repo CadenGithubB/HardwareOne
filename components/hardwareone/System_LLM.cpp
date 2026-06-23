@@ -2317,7 +2317,7 @@ static const SettingEntry llmSettingEntries[] = {
   // inserting mid-table silently misroutes every command after the insert point.
   // New settings go HERE, at the end, with a matching macro+command index below.
   { "minP",          SETTING_FLOAT,  &gSettings.llmMinP,          0, 0.0f, nullptr,    0,    1, "Min-P (0=off)",        nullptr, false, nullptr, "llmminp"   },  // idx 13
-  { "kvPrecision",   SETTING_INT,    &gSettings.llmKvPrecision,   0, 0,    nullptr,    0,    2, "KV Cache (0=FP32,1=FP16,2=INT8, reload to apply)", nullptr, false, nullptr, "llmkvprec" },  // idx 14
+  { "kvPrecision",   SETTING_INT,    &gSettings.llmKvPrecision,   0, 0,    nullptr,    0,    2, "KV Cache (0=FP32,1=FP16,2=INT8, reload to apply)", "0:FP32,1:FP16,2:INT8", false, nullptr, "llmkvprec" },  // idx 14
   { "autoStart",     SETTING_BOOL,   &gSettings.llmAutoStart,     0, 0,    nullptr,    0,    1, "Auto-start at boot",   nullptr, false, nullptr, "llmautostart" },  // idx 15
 };
 
@@ -2378,7 +2378,7 @@ const CommandEntry llmCommands[] = {
   { "llmdyntemp",       "Enable/disable dynamic temperature",   true,  cmd_llm_dyntemp,      "Usage: llmdyntemp <0|1>" },
   { "llmdefaultmodel",  "Set default model filename",           true,  cmd_llm_defaultmodel, "Usage: llmdefaultmodel <filename.bin>" },
   { "llmminp",          "Set min-p sampling floor (0=off)",     true,  cmd_llm_minp,         "Usage: llmminp <0.0-1.0>" },
-  { "llmkvprec",        "KV cache precision (0=FP32,1=FP16)",   true,  cmd_llm_kvprec,       "Usage: llmkvprec <0|1>  (reload model to apply)" },
+  { "llmkvprec",        "KV cache precision (0=FP32,1=FP16,2=INT8)", true,  cmd_llm_kvprec,       "Usage: llmkvprec <0..2>  (0=FP32,1=FP16,2=INT8; reload model to apply)" },
 };
 const size_t llmCommandsCount = sizeof(llmCommands) / sizeof(llmCommands[0]);
 

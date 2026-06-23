@@ -3861,7 +3861,7 @@ static bool isESPSRConnected() {
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry espsrSettingsEntries[] = {
   { "srAutoStart", SETTING_BOOL, &gSettings.srAutoStart, 0, 0, nullptr, 0, 1, "Auto-start at boot", nullptr, false, nullptr, nullptr },
-  { "srModelSource", SETTING_INT, &gSettings.srModelSource, 0, 0, nullptr, 0, 2, "Model source (0=partition, 1=SD, 2=LittleFS)", nullptr, false, nullptr, nullptr },
+  { "srModelSource", SETTING_INT, &gSettings.srModelSource, 0, 0, nullptr, 0, 2, "Model source (0=partition, 1=SD, 2=LittleFS)", "0|Partition,1|SD,2|LittleFS", false, nullptr, nullptr },
   { "srCommandTimeout", SETTING_INT, &gSettings.srCommandTimeout, 6000, 0, nullptr, 1000, 30000, "Command timeout (ms)", nullptr, false, nullptr, nullptr }
 };
 

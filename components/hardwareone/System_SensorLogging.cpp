@@ -1037,7 +1037,7 @@ static const SettingEntry sensorLogSettingEntries[] = {
   { "sensorLogPath", SETTING_STRING, &gSettings.sensorLogPath, 0, 0, "/logs/sensors/sensors.txt", 0, 0, "Log file path", nullptr, false, nullptr, nullptr },
   { "sensorLogIntervalMs", SETTING_INT, &gSettings.sensorLogIntervalMs, 5000, 0, nullptr, 100, 3600000, "Poll interval (ms)", nullptr, false, nullptr, nullptr },
   { "sensorLogMask", SETTING_INT, &gSettings.sensorLogMask, 0, 0, nullptr, 0, 255, "Sensor bitmask", nullptr, false, nullptr, nullptr },
-  { "sensorLogFormat", SETTING_INT, &gSettings.sensorLogFormat, 0, 0, nullptr, 0, 2, "Format (0=text,1=csv,2=track)", nullptr, false, nullptr, nullptr }
+  { "sensorLogFormat", SETTING_INT, &gSettings.sensorLogFormat, 0, 0, nullptr, 0, 2, "Format (0=text,1=csv,2=track)", "0|Text,1|CSV,2|Track", false, nullptr, nullptr }
 };
 
 // Columns: name, jsonSection, entries, count, isConnected, description

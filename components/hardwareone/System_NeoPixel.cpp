@@ -445,7 +445,7 @@ const char* cmd_ledeffect(const String& argsInput) {
 const CommandEntry neopixelCommands[] = {
   { "ledcolor", "Set LED color: <color>", false, cmd_ledcolor, "Usage: ledcolor <red|green|blue|yellow|magenta|cyan|white|orange|purple|pink>", "led", "change color" },
   { "ledclear", "Turn off LED.", false, cmd_ledclear, nullptr, "led", "turn off" },
-  { "ledeffect", "Run LED effect: <effect>", false, cmd_ledeffect },
+  { "ledeffect", "Run LED effect: <effect>", false, cmd_ledeffect, "Usage: ledeffect <fade|blink|pulse|strobe|off> [color] [color2] [duration 100..60000]" },
 };
 
 const size_t neopixelCommandsCount = sizeof(neopixelCommands) / sizeof(neopixelCommands[0]);
@@ -460,7 +460,7 @@ const size_t neopixelCommandsCount = sizeof(neopixelCommands) / sizeof(neopixelC
 static const SettingEntry ledSettingEntries[] = {
   { "ledBrightness", SETTING_INT, &gSettings.ledBrightness, 100, 0, nullptr, 0, 255, "Brightness", nullptr, false, nullptr, nullptr },
   { "ledStartupEnabled", SETTING_BOOL, &gSettings.ledStartupEnabled, true, 0, nullptr, 0, 1, "Startup Enabled", nullptr, false, nullptr, nullptr },
-  { "ledStartupEffect", SETTING_STRING, &gSettings.ledStartupEffect, 0, 0, "rainbow", 0, 0, "Startup Effect", "rainbow,pulse,solid,chase,breathe", false, nullptr, nullptr },
+  { "ledStartupEffect", SETTING_STRING, &gSettings.ledStartupEffect, 0, 0, "rainbow", 0, 0, "Startup Effect", "none,rainbow,pulse,fade,blink,strobe", false, nullptr, nullptr },
   { "ledStartupColor", SETTING_STRING, &gSettings.ledStartupColor, 0, 0, "cyan", 0, 0, "Startup Color", nullptr, false, nullptr, nullptr },
   { "ledStartupColor2", SETTING_STRING, &gSettings.ledStartupColor2, 0, 0, "magenta", 0, 0, "Startup Color 2", nullptr, false, nullptr, nullptr },
   { "ledStartupDuration", SETTING_INT, &gSettings.ledStartupDuration, 1000, 0, nullptr, 100, 10000, "Startup Duration (ms)", nullptr, false, nullptr, nullptr }

@@ -3871,13 +3871,15 @@ const CommandEntry automationCommands[] = {
 
   // Single-word aliases for common operations (follow naming convention)
   { "automationlist", "List all automations.", false, cmd_automation_list },
-  { "automationadd", "Add automation (same as 'automation add').", false, cmd_automation_add },
+  { "automationadd", "Add automation (KEY=VALUE; name/type/command required). Same as 'automation add'.", false, cmd_automation_add,
+    "Usage: automationadd name=<name> type=atTime|afterDelay|interval command=<cmd>|commands=<c1;c2> [time=HH:MM] [delayms=<n>] [intervalms=<n>] [days=Mon,Tue] [condition=<expr>] [enabled=1] [runatboot=1]" },
   { "automationrun", "Run automation by ID: automationrun id=<id>.", false, cmd_automation_run },
   { "automationtrigger", "Arm afterDelay automation timer: automationtrigger id=<id>.", false, cmd_automation_trigger },
 
   // Utility commands
   { "autolog", "Automation logging: autolog start \"<file>\" | stop | status.", false, cmd_autolog, "Usage: autolog start \"<filename>\" | autolog stop | autolog status" },
-  { "validate-conditions", "Validate conditional automation syntax: validate-conditions IF temp>75 THEN ledcolor red.", true, cmd_validate_conditions },
+  { "validate-conditions", "Validate conditional automation syntax: validate-conditions IF temp>75 THEN ledcolor red.", true, cmd_validate_conditions,
+    "Usage: validate-conditions IF <expr> THEN <command> [ELSE <command>]  (e.g. validate-conditions IF temp>75 THEN ledcolor red)" },
   { "print", "Broadcast a message to all outputs: print <message>.", false, cmd_print },
   
   // NOTE: downloadautomation and if/conditional commands are registered
