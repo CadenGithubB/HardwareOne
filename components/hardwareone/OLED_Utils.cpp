@@ -2949,6 +2949,12 @@ extern void oledChangePasswordModeInit();
 extern void oledPowerModeInit();
 extern void oledCLIInputModeInit();
 extern void oledMenuModeInit();   // Menu / Logo / Sensor-menu registrars (OLED_Mode_Menu.cpp)
+#if ENABLE_BLUETOOTH
+extern void oledBluetoothModeInit();   // OLED_Mode_Bluetooth.cpp
+#endif
+#if ENABLE_ESPNOW && ENABLE_BONDED_MODE
+extern void oledRemoteSettingsModeInit();   // OLED_Mode_RemoteSettings.cpp
+#endif
 #if ENABLE_ONDEVICE_LLM
 extern void oledLLMModeInit();
 #endif
@@ -2964,6 +2970,12 @@ void printRegisteredOLEDModes() {
   oledPowerModeInit();
   oledCLIInputModeInit();
   oledMenuModeInit();   // keep OLED_Mode_Menu.cpp (Menu/Logo/Sensor-menu) from being GC'd
+#if ENABLE_BLUETOOTH
+  oledBluetoothModeInit();   // keep OLED_Mode_Bluetooth.cpp from being GC'd
+#endif
+#if ENABLE_ESPNOW && ENABLE_BONDED_MODE
+  oledRemoteSettingsModeInit();   // keep OLED_Mode_RemoteSettings.cpp from being GC'd
+#endif
 #if ENABLE_ONDEVICE_LLM
   oledLLMModeInit();
 #endif

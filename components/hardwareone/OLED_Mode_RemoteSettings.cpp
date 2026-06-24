@@ -159,4 +159,8 @@ static const OLEDModeEntry remoteSettingsModeEntry = {
 
 REGISTER_OLED_MODE_MODULE(&remoteSettingsModeEntry, 1, "RemoteSettings");
 
+// Linker anchor — keep this object file from being dropped by --gc-sections so the
+// registrar above runs (otherwise OLED_REMOTE_SETTINGS renders "no render").
+void oledRemoteSettingsModeInit() {}
+
 #endif // ENABLE_OLED_DISPLAY && ENABLE_ESPNOW && ENABLE_BONDED_MODE

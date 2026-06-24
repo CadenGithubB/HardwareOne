@@ -407,4 +407,10 @@ static const OLEDModeEntry bluetoothOLEDModes[] = {
 
 REGISTER_OLED_MODE_MODULE(bluetoothOLEDModes, sizeof(bluetoothOLEDModes) / sizeof(bluetoothOLEDModes[0]), "Bluetooth");
 
+// Linker anchor — with no external reference, --gc-sections drops this whole object
+// file and the registrar above never runs, so OLED_BLUETOOTH renders "no render".
+// printRegisteredOLEDModes() calls this no-op to force the file to be linked.
+// (Mirrors oledMenuModeInit() in OLED_Mode_Menu.cpp.)
+void oledBluetoothModeInit() {}
+
 #endif // ENABLE_OLED_DISPLAY && ENABLE_BLUETOOTH
