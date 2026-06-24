@@ -1,12 +1,19 @@
 # Partition table for 16MB-flash boards WITHOUT ESP-SR (no speech recognition)
 # Used by 16MB-flash boards (e.g. FeatherS3[D]) selected via HW_BOARD.
-# No "model" partition — all the extra 8MB (vs the 8MB layout) goes to LittleFS.
-# Factory:  4948K (0x4D5000)  — same size as the 8MB layout so an app binary
-#                                built for either fits in either partition map.
-# LittleFS: 11628K (0xB1B000) — ~11.3 MB, +8.4 MB vs the 8MB layout.
+# No "model" partition — the flash left after the app goes to LittleFS.
+#
+# Factory:  5716K (0x595000) — grown +768K (0xC0000) on 2026-06-24 to give the
+#                              app headroom (e.g. on-device PNG decode). This is
+#                              LARGER than the 4948K factory used by the 8MB and
+#                              ESP-SR layouts, so an app that consumes the extra
+#                              headroom will NOT fit those partition maps.
+# LittleFS: 10604K (0xA5B000) — ~10.4 MB. Reduced by 768K to fund the app growth;
+#                              the 768K is taken from user-facing on-device
+#                              storage. Because this partition's offset moves,
+#                              existing LittleFS contents are erased on reflash.
 # Total:    ~16384K
 # Name,   Type, SubType, Offset,   Size,    Flags
 nvs,      data, nvs,     0x9000,   0x6000,
 phy_init, data, phy,     0xf000,   0x1000,
-factory,  app,  factory, 0x10000,  0x4D5000,
-littlefs, data, littlefs, 0x4E5000, 0xB1B000,
+factory,  app,  factory, 0x10000,  0x595000,
+littlefs, data, littlefs, 0x5A5000, 0xA5B000,
