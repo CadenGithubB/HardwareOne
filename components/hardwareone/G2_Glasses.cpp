@@ -13917,10 +13917,14 @@ bool g2ShowBmpFile(const char* path, void (*onDone)()) {
 //   4-bpp BMP        ~21 KB      (held until push completes)
 // ─────────────────────────────────────────────────────────────────────
 
-#if ENABLE_CAMERA_SENSOR
-#include "esp_camera.h"
+// img_converters.h (fmt2rgb888) and the buildBmp4bppFromRgb888 helper
+// below are NOT camera-sensor-specific. The esp32-camera component — and
+// its software conversions library — is linked unconditionally (see the
+// component CMakeLists REQUIRES list), so JPEG software-decode works on
+// every board whether or not a physical sensor is present. Only the
+// live-sensor code (capture/stream, further down) is gated on
+// ENABLE_CAMERA_SENSOR.
 #include "img_converters.h"
-#include "System_Camera_DVP.h"   // captureFrame, cameraWidth, cameraHeight, gCameraEnabled
 
 // Build a 288×144 4-bpp top-down grayscale BMP at `out` from a
 // `srcW`×`srcH` RGB888 buffer at `src`. Sampling is nearest-neighbour
@@ -14135,6 +14139,10 @@ static size_t buildBmp4bppFromRgb888(uint8_t* out, size_t outCap,
             (unsigned)diagSamp);
   return total;
 }
+
+#if ENABLE_CAMERA_SENSOR
+#include "esp_camera.h"
+#include "System_Camera_DVP.h"   // captureFrame, cameraWidth, cameraHeight, gCameraEnabled
 
 struct CameraViewerArgs {
   void (*onDone)();
@@ -15044,11 +15052,11 @@ bool g2ShowBmpFileFullScreen(const char* path, void (*onDone)()) {
 // All allocations prefer PSRAM via ps_alloc.
 // ═════════════════════════════════════════════════════════════════════
 
-#if ENABLE_CAMERA_SENSOR
-#include "img_converters.h"  // already included inside the camera block
-                             // above; harmless re-include thanks to the
-                             // header guard. Keeps this section self-
-                             // contained against future re-orderings.
+// JPG file viewer — unconditional. fmt2rgb888 comes from the esp32-camera
+// conversions library, which is linked on every board (component
+// CMakeLists REQUIRES), so file-based JPEG decode does not depend on a
+// physical sensor / ENABLE_CAMERA_SENSOR — only live capture/stream does.
+#include "img_converters.h"  // already included unconditionally above (header-guarded)
 
 // Walk the JPEG marker stream looking for SOF0/SOF1/SOF2/etc to
 // extract the source image's pixel dimensions. We need this before
@@ -15434,17 +15442,6 @@ bool g2ShowJpgFileFullScreen(const char* path, void (*onDone)()) {
   }
   return true;
 }
-
-#else  // !ENABLE_CAMERA_SENSOR
-bool g2ShowJpgFile(const char* path, void (*onDone)()) {
-  (void)path; (void)onDone;
-  return false;
-}
-bool g2ShowJpgFileFullScreen(const char* path, void (*onDone)()) {
-  (void)path; (void)onDone;
-  return false;
-}
-#endif  // ENABLE_CAMERA_SENSOR
 
 // ─────────────────────────────────────────────────────────────────────
 // QGlizzy — static-image probe with a hardcoded path. Loads
