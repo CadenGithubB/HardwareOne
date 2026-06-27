@@ -227,7 +227,7 @@ const CommandEntry settingsCommands[] = {
   // ---- System Time Settings ----
   { "ntpserver", "Set NTP server: <hostname>", true, cmd_ntpserver, "Usage: ntpserver <host>" },
 #endif
-  { "tzoffsetminutes", "Set timezone offset: <-720..720>", true, cmd_tzoffsetminutes, "Usage: tzoffsetminutes <-720..720>" },
+  { "tzoffsetminutes", "Set timezone offset: <-720..840>", true, cmd_tzoffsetminutes, "Usage: tzoffsetminutes <-720..840>" },
   
   // Note: Thermal and ToF sensor settings are now in their respective sensor files:
   // - thermal_sensor.cpp: thermalCommands[]
@@ -1246,9 +1246,11 @@ const char* cmd_tzoffsetminutes(const String& argsInput) {
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   String valStr = argsInput;
   valStr.trim();
-  if (valStr.length() == 0) return "Usage: tzoffsetminutes <-720..720>";
+  if (valStr.length() == 0) return "Usage: tzoffsetminutes <-720..840>";
   int offset = atoi(valStr.c_str());
-  if (offset < -720 || offset > 720) return "Error: timezone offset must be between -720 and 720 minutes";
+  // -720..+840 = UTC-12 .. UTC+14, the real-world timezone span (e.g. Kiribati
+  // Line Islands at +14). Matches the tzOffsetMinutes setting's min/max.
+  if (offset < -720 || offset > 840) return "Error: timezone offset must be between -720 and 840 minutes";
   setSetting(gSettings.tzOffsetMinutes, offset);
 #if ENABLE_WIFI
   setupNTP();
