@@ -9,6 +9,7 @@
 #include <LittleFS.h>
 #include <Wire.h>
 #include <esp_log.h>   // esp_log_level_set — quiet probe NACKs during detect scan
+#include <soc/soc_caps.h>  // SOC_GPIO_PIN_COUNT — board's GPIO count for pin-range limits
 
 #include "i2csensor_rda5807.h"
 #include "System_BuildConfig.h"
@@ -631,6 +632,19 @@ String identifySensor(uint8_t address) {
 
 // ========== End I2C Helper Functions ==========
 
+// Highest usable GPIO number on the chip this firmware is compiled for, taken
+// from the SoC capabilities (classic ESP32 = 39, ESP32-S3 = 48). The I2C pin
+// commands derive their upper bound from this so the limit tracks the running
+// board instead of a hardcoded cap that was only correct for one chip.
+#define HW_GPIO_MAX (SOC_GPIO_PIN_COUNT - 1)
+#if SOC_GPIO_PIN_COUNT >= 49
+  #define HW_GPIO_MAX_STR "48"
+#elif SOC_GPIO_PIN_COUNT >= 40
+  #define HW_GPIO_MAX_STR "39"
+#else
+  #define HW_GPIO_MAX_STR "max GPIO"
+#endif
+
 // ========== I2C Infrastructure Commands ==========
 
 const char* cmd_i2cbusenabled(const String& argsInput) {
@@ -648,10 +662,10 @@ const char* cmd_i2csdapin(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String valStr = argsInput;
   valStr.trim();
-  if (valStr.length() == 0) return "Usage: i2cSdaPin <0..39> (reboot required)";
+  if (valStr.length() == 0) return "Usage: i2cSdaPin <0.." HW_GPIO_MAX_STR "> (max GPIO for this board; reboot required)";
   int v = valStr.toInt();
   if (v < 0) v = 0;
-  if (v > 39) v = 39;
+  if (v > HW_GPIO_MAX) v = HW_GPIO_MAX;
   setSetting(gSettings.i2cSdaPin, v);
   snprintf(getDebugBuffer(), 1024, "i2cSdaPin set to %d (reboot required)", v);
   return getDebugBuffer();
@@ -661,10 +675,10 @@ const char* cmd_i2csclpin(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String valStr = argsInput;
   valStr.trim();
-  if (valStr.length() == 0) return "Usage: i2cSclPin <0..39> (reboot required)";
+  if (valStr.length() == 0) return "Usage: i2cSclPin <0.." HW_GPIO_MAX_STR "> (max GPIO for this board; reboot required)";
   int v = valStr.toInt();
   if (v < 0) v = 0;
-  if (v > 39) v = 39;
+  if (v > HW_GPIO_MAX) v = HW_GPIO_MAX;
   setSetting(gSettings.i2cSclPin, v);
   snprintf(getDebugBuffer(), 1024, "i2cSclPin set to %d (reboot required)", v);
   return getDebugBuffer();
@@ -672,11 +686,11 @@ const char* cmd_i2csclpin(const String& argsInput) {
 
 // ---- Bus 1 (I2C2) variants ----
 // Same shape as the bus 0 commands above, plus:
-//   * Pin range is -1..48 — -1 means "unavailable on this board" (sentinel
-//     used on XIAO / QT Py / Feather V2 where there is no second I2C port).
-//     Settings page surfaces this as the "(-1=unavailable)" hint.
-//   * Upper bound 48 matches ESP32-S3's GPIO range (vs the bus-0 commands'
-//     legacy 0..39 cap which predates the S3 port).
+//   * Lower bound is -1 (vs 0 on bus 0) — -1 means "unavailable on this board"
+//     (sentinel used on XIAO / QT Py / Feather V2 where there is no second I2C
+//     port). Settings page surfaces this as the "(-1=unavailable)" hint.
+//   * Upper bound is HW_GPIO_MAX (the SoC's highest GPIO: 39 on classic ESP32,
+//     48 on ESP32-S3), shared with the bus-0 commands so both track the board.
 const char* cmd_i2c2busenabled(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String valStr = argsInput;
@@ -692,10 +706,10 @@ const char* cmd_i2c2sdapin(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String valStr = argsInput;
   valStr.trim();
-  if (valStr.length() == 0) return "Usage: i2c2SdaPin <-1..48> (-1=unavailable, reboot required)";
+  if (valStr.length() == 0) return "Usage: i2c2SdaPin <-1.." HW_GPIO_MAX_STR "> (-1=unavailable; max GPIO for this board; reboot required)";
   int v = valStr.toInt();
   if (v < -1) v = -1;
-  if (v > 48) v = 48;
+  if (v > HW_GPIO_MAX) v = HW_GPIO_MAX;
   setSetting(gSettings.i2c2SdaPin, v);
   snprintf(getDebugBuffer(), 1024, "i2c2SdaPin set to %d (reboot required)", v);
   return getDebugBuffer();
@@ -705,10 +719,10 @@ const char* cmd_i2c2sclpin(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String valStr = argsInput;
   valStr.trim();
-  if (valStr.length() == 0) return "Usage: i2c2SclPin <-1..48> (-1=unavailable, reboot required)";
+  if (valStr.length() == 0) return "Usage: i2c2SclPin <-1.." HW_GPIO_MAX_STR "> (-1=unavailable; max GPIO for this board; reboot required)";
   int v = valStr.toInt();
   if (v < -1) v = -1;
-  if (v > 48) v = 48;
+  if (v > HW_GPIO_MAX) v = HW_GPIO_MAX;
   setSetting(gSettings.i2c2SclPin, v);
   snprintf(getDebugBuffer(), 1024, "i2c2SclPin set to %d (reboot required)", v);
   return getDebugBuffer();
@@ -2139,11 +2153,11 @@ extern const char* cmd_apdsstart_queued(const String& argsInput);
 const CommandEntry i2cCommands[] = {
   // Bus Configuration
   { "i2cbusenabled", "Enable/disable I2C1 bus: <0|1> (reboot required)", true, cmd_i2cbusenabled, "Usage: i2cBusEnabled <0|1>" },
-  { "i2csdapin", "Set I2C1 SDA pin: <0..39>", true, cmd_i2csdapin, "Usage: i2cSdaPin <0..39>" },
-  { "i2csclpin", "Set I2C1 SCL pin: <0..39>", true, cmd_i2csclpin, "Usage: i2cSclPin <0..39>" },
+  { "i2csdapin", "Set I2C1 SDA pin: <0.." HW_GPIO_MAX_STR "> (max GPIO for this board)", true, cmd_i2csdapin, "Usage: i2cSdaPin <0.." HW_GPIO_MAX_STR "> (max GPIO for this board)" },
+  { "i2csclpin", "Set I2C1 SCL pin: <0.." HW_GPIO_MAX_STR "> (max GPIO for this board)", true, cmd_i2csclpin, "Usage: i2cSclPin <0.." HW_GPIO_MAX_STR "> (max GPIO for this board)" },
   { "i2c2busenabled", "Enable/disable I2C2 bus: <0|1> (reboot required)", true, cmd_i2c2busenabled, "Usage: i2c2BusEnabled <0|1>" },
-  { "i2c2sdapin", "Set I2C2 SDA pin: <-1..48> (-1=unavailable)", true, cmd_i2c2sdapin, "Usage: i2c2SdaPin <-1..48>" },
-  { "i2c2sclpin", "Set I2C2 SCL pin: <-1..48> (-1=unavailable)", true, cmd_i2c2sclpin, "Usage: i2c2SclPin <-1..48>" },
+  { "i2c2sdapin", "Set I2C2 SDA pin: <-1.." HW_GPIO_MAX_STR "> (-1=unavailable)", true, cmd_i2c2sdapin, "Usage: i2c2SdaPin <-1.." HW_GPIO_MAX_STR "> (-1=unavailable)" },
+  { "i2c2sclpin", "Set I2C2 SCL pin: <-1.." HW_GPIO_MAX_STR "> (-1=unavailable)", true, cmd_i2c2sclpin, "Usage: i2c2SclPin <-1.." HW_GPIO_MAX_STR "> (-1=unavailable)" },
   // Per-device bus assignment — route a sensor to bus 0 (I2C1) or bus 1 (I2C2).
   { "oledbus",     "Route OLED to bus: <0|1> (reboot required)",         true, cmd_oledbus,     "Usage: oledBus <0|1>" },
   { "inputbus",    "Route input device to bus: <0|1> (reboot required)",  true, cmd_inputbus,    "Usage: inputBus <0|1>" },
@@ -2816,19 +2830,20 @@ void sensorQueueProcessorTask(void* param) {
 //                  vertical STEMMA QT). On other boards I2C2_*_PIN_DEFAULT
 //                  is -1 so the pin range below clamps to the default and
 //                  the bus stays disabled regardless of what the user toggles.
-// The min/max of -1..48 on the SDA/SCL pin entries (vs 0..48 on bus 0)
-// allows the "unavailable" sentinel -1 to round-trip through settings save.
+// The min/max of -1..HW_GPIO_MAX on the bus-1 SDA/SCL pin entries (vs 0..HW_GPIO_MAX
+// on bus 0) allows the "unavailable" sentinel -1 to round-trip through settings save.
+// HW_GPIO_MAX (defined above) is the SoC's highest GPIO, so the bound tracks the board.
 static const SettingEntry i2cSettingEntries[] = {
   { "i2cBusEnabled", SETTING_BOOL, &gSettings.i2cBusEnabled, 1, 0, nullptr, 0, 1, "I2C1 Bus Enabled (reboot required)", nullptr, false, nullptr, "i2cbusenabled" },
   { "i2cSdaPin", SETTING_INT, &gSettings.i2cSdaPin, I2C_SDA_PIN_DEFAULT,
-    0, nullptr, 0, 48, "I2C1 SDA Pin (reboot required)", nullptr, false, nullptr, "i2csdapin" },
+    0, nullptr, 0, HW_GPIO_MAX, "I2C1 SDA Pin (reboot required)", nullptr, false, nullptr, "i2csdapin" },
   { "i2cSclPin", SETTING_INT, &gSettings.i2cSclPin, I2C_SCL_PIN_DEFAULT,
-    0, nullptr, 0, 48, "I2C1 SCL Pin (reboot required)", nullptr, false, nullptr, "i2csclpin" },
+    0, nullptr, 0, HW_GPIO_MAX, "I2C1 SCL Pin (reboot required)", nullptr, false, nullptr, "i2csclpin" },
   { "i2c2BusEnabled", SETTING_BOOL, &gSettings.i2c2BusEnabled, I2C2_BUS_ENABLED_DEFAULT, 0, nullptr, 0, 1, "I2C2 Bus Enabled (reboot required)", nullptr, false, nullptr, "i2c2busenabled" },
   { "i2c2SdaPin", SETTING_INT, &gSettings.i2c2SdaPin, I2C2_SDA_PIN_DEFAULT,
-    0, nullptr, -1, 48, "I2C2 SDA Pin (reboot required, -1=unavailable)", nullptr, false, nullptr, "i2c2sdapin" },
+    0, nullptr, -1, HW_GPIO_MAX, "I2C2 SDA Pin (reboot required, -1=unavailable)", nullptr, false, nullptr, "i2c2sdapin" },
   { "i2c2SclPin", SETTING_INT, &gSettings.i2c2SclPin, I2C2_SCL_PIN_DEFAULT,
-    0, nullptr, -1, 48, "I2C2 SCL Pin (reboot required, -1=unavailable)", nullptr, false, nullptr, "i2c2sclpin" },
+    0, nullptr, -1, HW_GPIO_MAX, "I2C2 SCL Pin (reboot required, -1=unavailable)", nullptr, false, nullptr, "i2c2sclpin" },
   // Per-device bus assignment (0=I2C1/Wire1, 1=I2C2/Wire). Reboot required.
   // `options = "0|I2C1,1|I2C2"` makes the Settings page render each as a
   // labeled <select> dropdown instead of a 0..1 number input.

@@ -3553,10 +3553,10 @@ const char* cmd_oled_bootduration(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   String _arg = argsInput; _arg.trim();
-  if (_arg.length() == 0) return "Usage: oledbootduration <0..60000>";
+  if (_arg.length() == 0) return "Usage: oledbootduration <500..10000>";
   const char* p = _arg.c_str();
   int v = atoi(p);
-  if (v < 0 || v > 60000) return "Error: OLED boot duration must be 0..60000 ms";
+  if (v < 500 || v > 10000) return "Error: OLED boot duration must be 500..10000 ms (0.5s..10s)";
   setSetting(gSettings.oledBootDuration, v);
   snprintf(getDebugBuffer(), 1024, "OLED boot duration set to %dms", v);
   return getDebugBuffer();
@@ -6174,7 +6174,7 @@ const CommandEntry oledCommands[] = {
   { "oledenabled", "Enable/disable OLED: <0|1>", false, cmd_oled_enabled, "Usage: oledenabled <0|1>" },
   { "oledbootmode", "OLED boot mode: <logo|status|sensors|thermal|network|mesh|off>", false, cmd_oled_bootmode, "Usage: oledbootmode <logo|status|sensors|thermal|network|mesh|off>" },
   { "oleddefaultmode", "OLED default mode: <logo|status|sensors|thermal|network|mesh|off>", false, cmd_oled_defaultmode, "Usage: oleddefaultmode <logo|status|sensors|thermal|network|mesh|off>" },
-  { "oledbootduration", "Boot animation duration (ms): <0-60000>", false, cmd_oled_bootduration, "Usage: oledbootduration <0..60000>" },
+  { "oledbootduration", "Boot animation duration (ms): <500-10000>", false, cmd_oled_bootduration, "Usage: oledbootduration <500..10000>" },
   { "oledupdateinterval", "Display update interval (ms): <10-1000>", false, cmd_oled_updateinterval, "Usage: oledupdateinterval <10..1000>" },
   { "oledbrightness", "Display brightness: <0-255>", false, cmd_oled_brightness, "Usage: oledbrightness <0..255>" },
   { "oledflip",       "Flip display 180°: [on|off|toggle]", false, cmd_oled_flip, "Usage: oledflip [on|off|toggle]" },

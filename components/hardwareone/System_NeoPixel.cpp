@@ -458,7 +458,7 @@ const size_t neopixelCommandsCount = sizeof(neopixelCommands) / sizeof(neopixelC
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry ledSettingEntries[] = {
-  { "ledBrightness", SETTING_INT, &gSettings.ledBrightness, 100, 0, nullptr, 0, 255, "Brightness", nullptr, false, nullptr, nullptr },
+  { "ledBrightness", SETTING_INT, &gSettings.ledBrightness, 100, 0, nullptr, 0, 100, "Brightness", nullptr, false, nullptr, nullptr },
   { "ledStartupEnabled", SETTING_BOOL, &gSettings.ledStartupEnabled, true, 0, nullptr, 0, 1, "Startup Enabled", nullptr, false, nullptr, nullptr },
   { "ledStartupEffect", SETTING_STRING, &gSettings.ledStartupEffect, 0, 0, "rainbow", 0, 0, "Startup Effect", "none,rainbow,pulse,fade,blink,strobe", false, nullptr, nullptr },
   { "ledStartupColor", SETTING_STRING, &gSettings.ledStartupColor, 0, 0, "cyan", 0, 0, "Startup Color", nullptr, false, nullptr, nullptr },
