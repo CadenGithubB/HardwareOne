@@ -1012,7 +1012,7 @@ const char* cmd_sensorlog(const String& argsInput) {
 // Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry sensorLoggingCommands[] = {
   { "sensorlog", "Sensor data logging: start, stop, status, format, maxsize, rotations, sensors", false, cmd_sensorlog,
-    "Usage: sensorlog <start|stop|status|format|maxsize|rotations|sensors> [args...]\n"
+    "Usage: sensorlog <start|stop|status|format|maxsize|rotations|sensors|interval|autostart> [args...]\n"
     "  start <filepath> [interval_ms]: Begin logging (default 5000ms)\n"
     "  stop: Stop logging\n"
     "  status: Show current logging status\n"
@@ -1020,7 +1020,9 @@ const CommandEntry sensorLoggingCommands[] = {
     "    track = GPS-only compact format with signal loss dedup\n"
     "  maxsize <bytes>: Set max file size before rotation (default: 256000)\n"
     "  rotations <count>: Set number of old logs to keep (0-9, default: 3)\n"
-    "  sensors <thermal|tof|imu|gamepad|apds|gps|presence|all|none>: Select sensors to log" },
+    "  sensors <thermal|tof|imu|gamepad|apds|gps|presence|all|none>: Select sensors to log\n"
+    "  interval <ms>: Set poll interval 100-3600000 (default 5000)\n"
+    "  autostart [on|off]: Auto-start logging on boot (bare = toggle)" },
 };
 
 const size_t sensorLoggingCommandsCount = sizeof(sensorLoggingCommands) / sizeof(sensorLoggingCommands[0]);
