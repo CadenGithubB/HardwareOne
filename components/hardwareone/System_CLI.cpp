@@ -410,6 +410,13 @@ static void renderModuleHelp(const CommandModule* module, bool showAll) {
     } else {
       BROADCAST_PRINTF("%s Commands:", upperName);
     }
+
+    // Subsystem overview (the module's "how this works" blurb), printed above the
+    // command list on `help <module>` / `help all`. The bare module list stays curt.
+    if (module->long_description && module->long_description[0]) {
+      broadcastOutput(module->long_description);
+      broadcastOutput("");
+    }
     
     // Show connection status for sensors
     if (isSensorModule) {

@@ -107,7 +107,8 @@ struct CommandEntry {
 // Command module structure - each module registers its command table
 struct CommandModule {
   const char* name;                           // module name (for help categories)
-  const char* description;                    // module description for help (can be nullptr)
+  const char* description;                    // short one-line blurb for the `help` module list (can be nullptr)
+  const char* long_description;               // full subsystem overview shown atop `help <module>` (can be nullptr)
   const CommandEntry* commands;               // pointer to command array
   size_t count;                               // number of commands in array
   uint8_t flags;                              // module flags (CMD_MODULE_*)
