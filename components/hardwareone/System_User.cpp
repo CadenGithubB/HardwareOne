@@ -3159,8 +3159,8 @@ const CommandEntry userSystemCommands[] = {
   { "useradd", "Create user: <username> <password> [0|1]", true, cmd_user_add, "Usage: useradd <username> <password> [0|1]\nOptional: 1 = require new password on next login, 0 = omit" },
   { "userlist", "List all users.", true, cmd_user_list },
   { "userrequest", "Request account: <user> <pass> [confirm]", false, cmd_user_request, "Usage: userrequest <username> <password> [confirmPassword]" },
-  { "usersync", "Sync a user to another device over ESP-NOW.", true, cmd_user_sync,
-    "Usage: usersync <username> <userPass> <device> <targetAdminUser> <targetAdminPass> <yourAdminPass>\n"
+  { "usersync", "Sync a user to another device over ESP-NOW. (async; result only on the target device - check its userlist)", true, cmd_user_sync,
+    "Usage: usersync <username> <userPass> <device> <targetAdminUser> <targetAdminPass> <yourAdminPass>\n\n       Returns OK on delivery; the user is created on the TARGET device (no confirmation returns here) - verify on that device's userlist."
     "  targetAdminUser/targetAdminPass = an admin account on the RECEIVING device (validated there).\n"
     "  yourAdminPass = your admin password on THIS device; userPass = the synced user's password." },
 
