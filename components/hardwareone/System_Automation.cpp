@@ -67,19 +67,15 @@ extern bool submitCommandAsync(const Command& cmd, ExecAsyncCallback callback, v
 
 // Queue an automation sub-command through the FreeRTOS command queue (async, non-blocking).
 // This avoids deadlock when already on cmd_exec task and avoids blocking the main loop.
-// `owner` is the PRINCIPAL to execute as — stamped into cmd.ctx.auth.user so VFS permission
-// checks, audit logs, and notifications attribute the work to the right user on cmd_exec_task.
-// For autonomous triggers (boot/scheduled) this is the automation's createdBy; for a MANUAL
-// run it is the TRIGGERING user (an automation run executes as whoever fired it, not the
-// creator). isAdmin is recomputed from this username by ExecIdentityGuard, so the username
-// alone is the complete principal.
+// `owner` is the automation's createdBy user — stamped into cmd.ctx.auth so VFS permission
+// checks and audit logs attribute the work to the correct principal on cmd_exec_task.
 // `autoName` is the automation's display name — stamped into ctx.automationName so
 // executeCommand can write COMMAND/OUTPUT autolog entries attributed to this automation,
 // with no race against the scheduler advancing to the next automation before the command runs.
 static void queueAutomationSubCommand(const char* cmd, const char* owner, const char* autoName = nullptr) {
   Command uc;
   uc.line = cmd;
-  uc.ctx.origin = ORIGIN_AUTOMATION;
+  uc.ctx.origin = ORIGIN_SYSTEM;
   uc.ctx.auth.transport = SOURCE_INTERNAL;
   uc.ctx.auth.user = owner ? owner : "";
   DEBUGF(DEBUG_AUTOMATIONS, "[autos queue] Queueing cmd='%s' user='%s' automation='%s'",
@@ -894,49 +890,12 @@ void runAutomationCommandUnified(const String& argsInput) {
 // Automation command handlers
 const char* cmd_automation_list(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  const bool wantJson = argWantsJson(argsInput);
-
   String json;
   if (!readText(AUTOMATIONS_JSON_FILE, json)) {
-    if (wantJson) return "{\"error\":\"read failed\"}";
     broadcastOutput("Error: failed to read automations.json");
     return "ERROR";
   }
-
-  // Private channel: the stored automations document goes back verbatim via the
-  // RETURN VALUE (the app reads it off its own channel). No broadcastOutput —
-  // that unconditional broadcast is what used to dump this whole JSON blob onto
-  // the shared human consoles. Held in a function-static String so the returned
-  // c_str() stays valid until the next command (handlers run serially on
-  // cmd_exec_task). Returned verbatim — it's a document with its own schema, not
-  // a synthesized {"v":1} status blob, so wrapping it would break app compat.
-  if (wantJson) {
-    static String jsonHold;
-    jsonHold = json;
-    return jsonHold.c_str();
-  }
-
-  // Human channel: a readable summary instead of the raw JSON wall.
-  PSRAM_JSON_DOC(doc);
-  if (deserializeJson(doc, json)) {
-    broadcastOutput("Error: automations.json is corrupt (use 'automationlist json' for the raw record)");
-    return "ERROR";
-  }
-  JsonArray arr = doc["automations"].as<JsonArray>();
-  const int n = arr.size();
-  if (n == 0) {
-    broadcastOutput("No automations configured.");
-    return "OK";
-  }
-  BROADCAST_PRINTF("Automations (%d):", n);
-  int i = 0;
-  for (JsonObject a : arr) {
-    const char* nm = a["name"] | "(unnamed)";
-    BROADCAST_PRINTF("  [%d] %-24.24s (id=%ld, %s)",
-                     i++, nm, a["id"].as<long>(),
-                     (a["enabled"] | false) ? "enabled" : "disabled");
-  }
-  broadcastOutput("(use 'automationlist json' for the full record)");
+  broadcastOutput(json);
   return "OK";
 }
 
@@ -962,9 +921,6 @@ const char* cmd_automation_add(const String& argsInput) {
   String cmdStr = a.value("command");
   String cmdsList = a.value("commands");
   String condition = a.value("condition");
-  // triggerMode (Option 2): "once" => the top-level condition fires only on the
-  // false->true crossing; "repeat"/missing => fire every poll while true (legacy).
-  String triggerMode = a.value("triggermode");
   String enabledStr = a.value("enabled");
   
   bool enabled = (enabledStr.equalsIgnoreCase("1") || enabledStr.equalsIgnoreCase("true") || enabledStr.equalsIgnoreCase("yes"));
@@ -1339,9 +1295,6 @@ const char* cmd_automation_add(const String& argsInput) {
   obj += "  \"createdBy\": \"" + jsonEscape(createdBy) + "\",\n";
   obj += "  \"enabled\": " + String(enabled ? "true" : "false") + ",\n";
   if (condition.length() > 0) obj += "  \"condition\": \"" + jsonEscape(condition) + "\",\n";
-  // Persist triggerMode only when "once" (missing/"repeat" = default, keeps JSON
-  // clean and backward-compatible with existing automations).
-  if (triggerMode == "once") obj += "  \"triggerMode\": \"once\",\n";
   obj += triggersJson + ",\n";
   obj += "  \"commands\": " + commandsJson + "\n";
   obj += "}";
@@ -1555,25 +1508,28 @@ const char* cmd_automation_run(const String& argsInput) {
   CommandArgs a(argsInput);
   String idStr = a.value("id");
   if (idStr.length() == 0) {
-    return "Error: missing 'id' parameter (usage: automation run id=<id>)";
+    broadcastOutput("Usage: automation run id=<id>");
+    return "ERROR";
   }
-
+  
   String json;
   if (!readText(AUTOMATIONS_JSON_FILE, json)) {
-    return "Error: failed to read automations.json";
+    broadcastOutput("Error: failed to read automations.json");
+    return "ERROR";
   }
-
+  
   char needleBuf[32];
   snprintf(needleBuf, sizeof(needleBuf), "\"id\": %s", idStr.c_str());
   int idPos = json.indexOf(needleBuf);
   if (idPos < 0) {
-    snprintf(getDebugBuffer(), 1024, "Error: automation id %s not found (it may have been deleted)", idStr.c_str());
-    return getDebugBuffer();
+    broadcastOutput("Error: automation id not found");
+    return "ERROR";
   }
-
+  
   int objStart = json.lastIndexOf('{', idPos);
   if (objStart < 0) {
-    return "Error: malformed automations.json (objStart)";
+    broadcastOutput("Error: malformed automations.json (objStart)");
+    return "ERROR";
   }
   
   int depth = 0, objEnd = -1;
@@ -1590,7 +1546,8 @@ const char* cmd_automation_run(const String& argsInput) {
   }
   
   if (objEnd < 0) {
-    return "Error: malformed automations.json (objEnd)";
+    broadcastOutput("Error: malformed automations.json (objEnd)");
+    return "ERROR";
   }
   
   String obj = json.substring(objStart, objEnd + 1);
@@ -1748,28 +1705,18 @@ const char* cmd_automation_run(const String& argsInput) {
   DEBUGF(DEBUG_AUTOMATIONS, "[autos run] AUTHORIZATION OK: user='%s' isAdmin=%d running automation created by '%s'",
          currentExecUser().c_str(), currentExecIsAdmin(), _createdByBuf);
 
-  // Run AS the triggering user, not the creator. createdBy stays the owner
-  // (storage + the edit/enable/delete authz above), but a manually-fired
-  // automation is just a saved command sequence executed by whoever fired it:
-  // permission checks, audit, and notifications must attribute to them. This
-  // also closes a privilege-escalation path — executing as the creator would
-  // let a triggerer inherit the creator's rights. Captured once; currentExecUser
-  // is invariant for this command's lifetime on cmd_exec_task. (Scheduled/boot
-  // triggers have no triggering user and keep running as createdBy.)
-  String triggerUser = currentExecUser();
-
   // Execute all commands (with conditional logic support)
   for (int ci = 0; ci < cmdsCount; ++ci) {
     DEBUGF(DEBUG_AUTOMATIONS, "[autos run] id=%s cmd[%d]='%s'", idStr.c_str(), ci, cmdsList[ci].c_str());
-
+    
     // Protect against malformed commands
     if (cmdsList[ci].length() == 0 || cmdsList[ci] == "\\") {
       DEBUGF(DEBUG_AUTOMATIONS, "[autos run] skipping malformed command: '%s'", cmdsList[ci].c_str());
       continue;
     }
-
-    // Queue command for execution (async, non-blocking) under the triggering user.
-    const char* result = executeConditionalCommand(cmdsList[ci].c_str(), triggerUser.c_str(), autoName.c_str());
+    
+    // Queue command for execution (async, non-blocking)
+    const char* result = executeConditionalCommand(cmdsList[ci].c_str(), _createdByBuf, autoName.c_str());
     
     // Output the result (skip internal status messages - actual output comes from queue)
     if (!isAutoInternalResult(result)) {
@@ -1902,31 +1849,22 @@ const char* cmd_automation(const String& argsInput) {
   subCmd.toLowerCase();
   String subArgs = a.remaining(0);
 
-  // Handle "system" subcommand. The global enable flag is a system setting
-  // (gSettings.automationsEnabled), not part of automations.json — so it has its
-  // own command rather than riding the verbatim automationlist json document.
-  // `json` is accepted on enable/disable/status and reports the resulting state
-  // as {"schema":1,"enabled":<bool>} so JSON-only clients don't have to scrape
-  // the "Automation system: enabled" text.
+  // Handle "system" subcommand
   if (subCmd == "system") {
-    const bool wantJson = argWantsJson(subArgs);
-    String op = a.arg(1);
-    op.toLowerCase();
-    if (op == "enable") {
+    if (subArgs.equalsIgnoreCase("enable")) {
       setSetting(gSettings.automationsEnabled, true);
-    } else if (op == "disable") {
+      return "Automation system: enabled";
+    } else if (subArgs.equalsIgnoreCase("disable")) {
       setSetting(gSettings.automationsEnabled, false);
-    } else if (op != "status") {
-      return wantJson ? "{\"error\":\"usage: automation system <enable|disable|status> [json]\"}"
-                      : "Usage: automation system <enable|disable|status>";
+      return "Automation system: disabled";
+    } else if (subArgs.equalsIgnoreCase("status")) {
+      if (gSettings.automationsEnabled) {
+        return "Automation system: enabled";
+      } else {
+        return "Automation system: disabled";
+      }
     }
-    if (wantJson) {
-      snprintf(getDebugBuffer(), 1024, "{\"schema\":1,\"enabled\":%s}",
-               gSettings.automationsEnabled ? "true" : "false");
-      return getDebugBuffer();
-    }
-    return gSettings.automationsEnabled ? "Automation system: enabled"
-                                        : "Automation system: disabled";
+    return "Usage: automation system <enable|disable|status>";
   }
 
   // Handle regular automation commands
@@ -3432,9 +3370,8 @@ const char* cmd_autolog(const String& argsInput) {
   subcmd.toLowerCase();
 
   if (subcmd == "start") {
-    String filename;
-    const char* qerr = requireQuotedToken(a, 1, filename);
-    if (qerr) return qerr;
+    String filename = a.arg(1);
+    if (filename.length() == 0) return "Usage: autolog start <filename>";
 
     // Capture the starter's identity BEFORE flipping gAutoLogActive — every
     // subsequent appendAutoLogEntry write is gated on this ctx via
@@ -3477,7 +3414,7 @@ const char* cmd_autolog(const String& argsInput) {
     }
 
   } else {
-    return "Usage: autolog start \"<filename>\" | autolog stop | autolog status";
+    return "Usage: autolog start <filename> | autolog stop | autolog status";
   }
 }
 
@@ -3506,26 +3443,6 @@ const char* cmd_validate_conditions(const String& argsInput) {
 void notifyAutomationScheduler() {
   gAutosDirty = true;
   gAutoCacheValid = false;
-}
-
-// triggerMode="once" edge state (RAM-only). For an automation whose top-level
-// condition uses triggerMode "once", the condition fires only on the false->true
-// crossing, then re-arms when it goes false. RAM-only is deliberate: a reboot
-// re-baselines, so a condition that's already true at boot does NOT spuriously
-// fire — the first poll just records the baseline.
-struct CondEdgeState { long id; bool lastTrue; bool seen; };
-static CondEdgeState gCondEdge[16];
-static uint8_t gCondEdgeCount = 0;
-static CondEdgeState* condEdgeFor(long id) {
-  for (uint8_t i = 0; i < gCondEdgeCount; i++) {
-    if (gCondEdge[i].id == id) return &gCondEdge[i];
-  }
-  if (gCondEdgeCount < (uint8_t)(sizeof(gCondEdge) / sizeof(gCondEdge[0]))) {
-    CondEdgeState* e = &gCondEdge[gCondEdgeCount++];
-    e->id = id; e->lastTrue = false; e->seen = false;
-    return e;
-  }
-  return nullptr;  // table full → caller falls back to level behavior (safe)
 }
 
 // Core scheduler logic - extracted for reuse
@@ -3727,33 +3644,19 @@ void schedulerTickMinute() {
           }
         }
 
-        // Evaluate global condition gate if present.
+        // Evaluate global condition gate if present
         if (condition.length() > 0) {
           String wrapped = "IF " + condition + " THEN _";
           bool conditionMet = evaluateCondition(wrapped.c_str());
           DEBUGF(DEBUG_AUTOMATIONS, "[autos] id=%ld condition='%s' result=%s",
                  id, condition.c_str(), conditionMet ? "TRUE" : "FALSE");
-
-          // triggerMode: "once" fires only on the false->true crossing (edge),
-          // then re-arms when the condition goes false. Missing/"repeat" fires
-          // every poll while true (legacy). Edge state is RAM-only (gCondEdge).
-          char trigModeBuf[16] = "";
-          extractJsonString(obj.c_str(), "\"triggerMode\"", trigModeBuf, sizeof(trigModeBuf));
-          bool fire = conditionMet;
-          if (strcmp(trigModeBuf, "once") == 0) {
-            CondEdgeState* st = condEdgeFor(id);
-            fire = conditionMet && st && st->seen && !st->lastTrue;  // rising edge only
-            if (st) { st->lastTrue = conditionMet; st->seen = true; }
-          }
-
-          if (!fire) {
+          if (!conditionMet) {
             if (gAutoLogActive) {
               char skipBuf[256];
               snprintf(skipBuf, sizeof(skipBuf), "Scheduled automation skipped: ID=%ld Name=%s Condition not met: %s", id, autoName.c_str(), condition.c_str());
               appendAutoLogEntry("AUTO_SKIP", skipBuf);
             }
-            DEBUGF(DEBUG_AUTOMATIONS, "[autos] id=%ld condition-gate skip (mode=%s met=%d): %s",
-                   id, trigModeBuf[0] ? trigModeBuf : "repeat", conditionMet ? 1 : 0, condition.c_str());
+            DEBUGF(DEBUG_AUTOMATIONS, "[autos] id=%ld skipped - condition not met: %s", id, condition.c_str());
             pos = objEnd + 1;
             continue;
           }
@@ -3867,19 +3770,17 @@ const CommandEntry automationCommands[] = {
   // Primary dispatcher: "automation <subcommand> [args]"
   // Subcommands: system enable|disable|status, list, add, enable, disable, delete, run, sanitize, recompute
   { "automation", "Automation system: automation <subcommand> [args].", false, cmd_automation,
-    "Usage: automation <system enable|disable|status [json] | list [json] | add | enable | disable | delete | run | trigger | sanitize | recompute>" },
+    "Usage: automation <system enable|disable|status | list | add | enable | disable | delete | run | trigger | sanitize | recompute>" },
 
   // Single-word aliases for common operations (follow naming convention)
   { "automationlist", "List all automations.", false, cmd_automation_list },
-  { "automationadd", "Add automation (KEY=VALUE; name/type/command required). Same as 'automation add'.", false, cmd_automation_add,
-    "Usage: automationadd name=<name> type=atTime|afterDelay|interval command=<cmd>|commands=<c1;c2> [time=HH:MM] [delayms=<n>] [intervalms=<n>] [days=Mon,Tue] [condition=<expr>] [enabled=1] [runatboot=1]" },
+  { "automationadd", "Add automation (same as 'automation add').", false, cmd_automation_add },
   { "automationrun", "Run automation by ID: automationrun id=<id>.", false, cmd_automation_run },
   { "automationtrigger", "Arm afterDelay automation timer: automationtrigger id=<id>.", false, cmd_automation_trigger },
 
   // Utility commands
-  { "autolog", "Automation logging: autolog start \"<file>\" | stop | status.", false, cmd_autolog, "Usage: autolog start \"<filename>\" | autolog stop | autolog status" },
-  { "validate-conditions", "Validate conditional automation syntax: validate-conditions IF temp>75 THEN ledcolor red.", true, cmd_validate_conditions,
-    "Usage: validate-conditions IF <expr> THEN <command> [ELSE <command>]  (e.g. validate-conditions IF temp>75 THEN ledcolor red)" },
+  { "autolog", "Automation logging: autolog start <file> | stop | status.", false, cmd_autolog, "Usage: autolog start <filename> | autolog stop | autolog status" },
+  { "validate-conditions", "Validate conditional automation syntax: validate-conditions IF temp>75 THEN ledcolor red.", true, cmd_validate_conditions },
   { "print", "Broadcast a message to all outputs: print <message>.", false, cmd_print },
   
   // NOTE: downloadautomation and if/conditional commands are registered

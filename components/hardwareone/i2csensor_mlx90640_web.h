@@ -3,6 +3,7 @@
 
 #include <Arduino.h>
 #include "WebServer_Utils.h"
+#include "System_Settings.h"  // gSettings.thermalWebMaxFps
 
 inline void streamMLX90640ThermalSensorCard(httpd_req_t* req) {
   httpd_resp_send_chunk(req, R"HTML(
@@ -29,6 +30,16 @@ inline void streamMLX90640ThermalSensorBindButtons(httpd_req_t* req) {
 inline void streamMLX90640ThermalSensorJs(httpd_req_t* req) {
   httpd_resp_send_chunk(req, "<script>", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "try{console.log('[SENSORS] Loading thermal sensor module JS...');}catch(_){ }", HTTPD_RESP_USE_STRLEN);
+
+  // Web thermal frame-rate ceiling: clamp the browser's polling cadence so the
+  // thermal canvas never refreshes faster than gSettings.thermalWebMaxFps.
+  {
+    int twf = gSettings.thermalWebMaxFps;
+    if (twf < 1) twf = 1; else if (twf > 30) twf = 30;
+    char twfBuf[80];
+    int twfLen = snprintf(twfBuf, sizeof(twfBuf), "try{window.__thermalWebMaxFps=%d;}catch(_){ }", twf);
+    if (twfLen > 0) httpd_resp_send_chunk(req, twfBuf, twfLen);
+  }
   
   // Thermal color map functions (verbatim from web_sensors.h)
   httpd_resp_send_chunk(req, "function initThermalColorMap(){console.log('[Thermal] Initializing color map for palette: '+thermalPalette);if(thermalPalette==='iron'){thermalColorMap=getIronColorMap()}else if(thermalPalette==='rainbow'){thermalColorMap=getRainbowColorMap()}else if(thermalPalette==='hot'){thermalColorMap=getHotColorMap()}else if(thermalPalette==='coolwarm'){thermalColorMap=getCoolwarmColorMap()}else{thermalColorMap=getGrayscaleColorMap()}console.log('[Thermal] Color map initialized with '+Object.keys(thermalColorMap).length+' colors')}", HTTPD_RESP_USE_STRLEN);
@@ -103,7 +114,7 @@ inline void streamMLX90640ThermalSensorJs(httpd_req_t* req) {
     "      console.error('Thermal fetch error:', e);\n"
     "    });\n"
     "}\n", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, "function startThermalPolling(){console.log('[SENSORS] startThermalPolling called');if(thermalPollingInterval){console.log('[SENSORS] Thermal already polling');return}updateThermalVisualization();thermalPollingInterval=setInterval(function(){updateThermalVisualization()},thermalPollingMs);console.log('[SENSORS] Thermal polling started with interval:',thermalPollingMs+'ms')}", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "function startThermalPolling(){console.log('[SENSORS] startThermalPolling called');if(thermalPollingInterval){console.log('[SENSORS] Thermal already polling');return}var __maxFps=(window.__thermalWebMaxFps||30);var __eff=Math.max(thermalPollingMs||0,Math.ceil(1000/__maxFps));updateThermalVisualization();thermalPollingInterval=setInterval(function(){updateThermalVisualization()},__eff);console.log('[SENSORS] Thermal polling started with interval:',__eff+'ms (maxFps='+__maxFps+')')}", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "function stopThermalPolling(){console.log('[SENSORS] stopThermalPolling called');if(thermalPollingInterval){clearInterval(thermalPollingInterval);thermalPollingInterval=null;console.log('[SENSORS] Thermal polling stopped')}}", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "try{console.log('[SENSORS] Chunk 4: Thermal functions ready');}catch(_){ }", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "</script>", HTTPD_RESP_USE_STRLEN);

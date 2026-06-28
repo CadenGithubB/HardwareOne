@@ -40,7 +40,7 @@ struct Settings {
       thermalTransitionMs(80),
       tofTransitionMs(200),
       tofUiMaxDistanceMm(3400),
-      i2cClockThermalHz(800000),
+      i2cClockThermalHz(400000),
       i2cClockToFHz(200000),
       thermalTargetFps(8),
       thermalWebMaxFps(10),

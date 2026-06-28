@@ -2180,16 +2180,16 @@ const CommandEntry i2cCommands[] = {
   { "i2crecover", "Clear degraded state for device: <address>", true, cmd_i2crecover, "Usage: i2crecover <address>  (hex 0x01-0x7F or decimal 1-127)" },
   
   // Diagnostics
-  { "i2cmetrics", "Show I2C bus performance metrics.", false, cmd_i2cmetrics },
+  { "i2cmetrics", "Show I2C bus performance metrics. (add 'json' for JSON output)", false, cmd_i2cmetrics },
   { "i2cscan", "Scan I2C bus for devices.", false, cmd_i2cscan },
   { "detect", "Detect hardware: scan I2C buses, diff vs. configured features.", false, cmd_detect, "Usage: detect [apply]\n  detect       - read-only report (present/enabled/missing)\n  detect apply - auto-enable cheap detected devices (admin; reboot for some)" },
   { "i2cstats", "I2C bus statistics and errors.", false, cmd_i2cstats },
-  { "i2chealth", "Show per-device I2C health status.", false, cmd_i2chealth },
+  { "i2chealth", "Show per-device I2C health status. (add 'json' for JSON output)", false, cmd_i2chealth },
   
   // Device Registry
   { "sensors", "List I2C sensors [filter]", false, cmd_sensors, "Usage: sensors [filter] - filter by name, description, or manufacturer\n       sensors json [brief] - live state (+readings; 'brief' = state only, no data)\nExample: sensors temperature, sensors json brief" },
   { "sensorinfo", "Sensor details: <name>", false, cmd_sensorinfo, "Usage: sensorinfo <sensor_name>\nExample: sensorinfo BNO055" },
-  { "devices", "Show discovered I2C device registry.", false, cmd_devices },
+  { "devices", "Show discovered I2C device registry. (add 'json' for JSON output)", false, cmd_devices },
   { "discover", "Re-scan and register I2C devices.", false, cmd_discover },
   { "devicefile", "Show device registry JSON file.", false, cmd_devicefile },
   

@@ -53,7 +53,7 @@ const char* cmd_hardwareled_startupcolor(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   String arg = argsInput; arg.trim();
-  if (arg.length() == 0) return "Usage: ledstartupcolor <red|green|blue|cyan|magenta|yellow|white|orange|purple>";
+  if (arg.length() == 0) return "Usage: ledstartupcolor <color name|off>  (any of ~80 named colors; unknown names default to cyan)";
   setSetting(gSettings.ledStartupColor, arg.c_str());
   snprintf(getDebugBuffer(), 1024, "LED startup color set to %s", gSettings.ledStartupColor.c_str());
   return getDebugBuffer();
@@ -63,7 +63,7 @@ const char* cmd_hardwareled_startupcolor2(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   String arg = argsInput; arg.trim();
-  if (arg.length() == 0) return "Usage: ledstartupcolor2 <red|green|blue|cyan|magenta|yellow|white|orange|purple>";
+  if (arg.length() == 0) return "Usage: ledstartupcolor2 <color name|off>  (any of ~80 named colors; unknown names default to magenta)";
   setSetting(gSettings.ledStartupColor2, arg.c_str());
   snprintf(getDebugBuffer(), 1024, "LED startup color 2 set to %s", gSettings.ledStartupColor2.c_str());
   return getDebugBuffer();
@@ -90,8 +90,8 @@ extern const CommandEntry ledCommands[] = {
   { "ledbrightness",        "Set LED brightness 0-100.",                      false, cmd_hardwareled_brightness,    "Usage: ledbrightness <0..100>" },
   { "ledstartupenabled",    "Enable/disable LED startup effect [0|1].",        false, cmd_hardwareled_startupenabled,"Usage: ledstartupenabled <0|1>" },
   { "ledstartupeffect",     "Set LED startup effect [none|rainbow|pulse|fade|blink|strobe].",   false, cmd_hardwareled_startupeffect, "Usage: ledstartupeffect <none|rainbow|pulse|fade|blink|strobe>" },
-  { "ledstartupcolor",      "Set LED startup primary color.",                  false, cmd_hardwareled_startupcolor,  "Usage: ledstartupcolor <red|green|blue|cyan|magenta|yellow|white|orange|purple>" },
-  { "ledstartupcolor2",     "Set LED startup secondary color.",                false, cmd_hardwareled_startupcolor2, "Usage: ledstartupcolor2 <red|green|blue|cyan|magenta|yellow|white|orange|purple>" },
+  { "ledstartupcolor",      "Set LED startup primary color (any of ~80 named colors or 'off'; unknown defaults to cyan).",                  false, cmd_hardwareled_startupcolor,  "Usage: ledstartupcolor <color name|off>  (any of ~80 named colors; unknown names default to cyan)" },
+  { "ledstartupcolor2",     "Set LED startup secondary color (any of ~80 named colors or 'off'; unknown defaults to magenta).",                false, cmd_hardwareled_startupcolor2, "Usage: ledstartupcolor2 <color name|off>  (any of ~80 named colors; unknown names default to magenta)" },
   { "ledstartupduration",   "Set LED startup effect duration in ms.",         false, cmd_hardwareled_startupduration,"Usage: ledstartupduration <100..10000>" },
 };
 

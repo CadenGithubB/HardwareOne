@@ -1540,23 +1540,11 @@ const char* cmd_mqttexternalsensors(const String& argsInput) {
   return buf;
 }
 
-const char* cmd_debugmqtt(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  
-  String arg = argsInput;
-  arg.trim();
-  if (arg.length() == 0) {
-    return gSettings.debugMqtt ? "MQTT debug: enabled" : "MQTT debug: disabled";
-  }
-  if (arg == "1" || arg == "true" || arg == "on") {
-    setSetting(gSettings.debugMqtt, true);
-    return "MQTT debug enabled";
-  } else if (arg == "0" || arg == "false" || arg == "off") {
-    setSetting(gSettings.debugMqtt, false);
-    return "MQTT debug disabled";
-  }
-  return "Error: Use 0/1, true/false, or on/off";
-}
+// NOTE: cmd_debugmqtt is defined canonically in System_Debug.cpp as part of the
+// debug sub-flag family (sets the runtime DEBUG_MQTT bit and supports
+// [temp|runtime]). A duplicate non-static definition used to live here, which
+// was a One Definition Rule violation; it has been removed. The `debugmqtt`
+// command is registered by the debug module's command table.
 
 // Helper macro for boolean publish settings
 #define MQTT_PUBLISH_CMD(name, setting, label) \
@@ -1588,11 +1576,11 @@ MQTT_PUBLISH_CMD(input, mqttPublishInput, "Gamepad")
 // Command table - names must match setting keys for web UI compatibility
 // Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry mqttCommands[] = {
-  { "debugmqtt", "MQTT debug logging [0|1]", true, cmd_debugmqtt, "Usage: debugmqtt [0|1]" },
+  // debugmqtt is registered by the debug module (System_Debug.cpp) — see ODR note above.
   { "mqttclientenabled", "Enable/disable MQTT [0|1]", true, cmd_mqttclientenabled, "Usage: mqttclientenabled [0|1]" },
   { "openmqtt", "Start MQTT client", false, cmd_openmqtt },
   { "closemqtt", "Stop MQTT client", false, cmd_closemqtt },
-  { "mqttstatus", "Show MQTT status", false, cmd_mqttstatus },
+  { "mqttstatus", "Show MQTT status (add 'json' for JSON output)", false, cmd_mqttstatus },
   { "mqttautostart", "MQTT auto-start [0|1]", true, cmd_mqttautostart, "Usage: mqttautostart [0|1]" },
   { "mqttHost", "MQTT broker host [hostname]", true, cmd_mqtthost, "Usage: mqttHost [hostname]" },
   { "mqttPort", "MQTT broker port [port]", true, cmd_mqttport, "Usage: mqttPort [port]" },
@@ -1600,7 +1588,7 @@ const CommandEntry mqttCommands[] = {
   { "mqttCACertPath", "CA cert path [path|clear]", true, cmd_mqttcacertpath, "Usage: mqttCACertPath [path|clear]" },
   { "mqttSubscribeExternal", "External subscriptions [0|1]", true, cmd_mqttsubscribe, "Usage: mqttSubscribeExternal [0|1]" },
   { "mqttSubscribeTopics", "Subscribe topics [topics]", true, cmd_mqtttopics, "Usage: mqttSubscribeTopics [topic1,topic2,...]" },
-  { "mqttExternalSensors", "List external sensor data", false, cmd_mqttexternalsensors },
+  { "mqttExternalSensors", "List external sensor data (add 'json' for JSON output)", false, cmd_mqttexternalsensors },
   { "mqttUser", "MQTT username [user|clear]", true, cmd_mqttuser, "Usage: mqttUser [username|clear]" },
   { "mqttPassword", "MQTT password [pass|clear]", true, cmd_mqttpassword, "Usage: mqttPassword [password|clear]" },
   { "mqttBaseTopic", "Base topic [topic|auto]", true, cmd_mqttbasetopic, "Usage: mqttBaseTopic [topic|auto]" },

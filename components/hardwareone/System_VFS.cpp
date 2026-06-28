@@ -1153,7 +1153,7 @@ static const char* cmd_sddiag(const String& argsInput) {
 
   // Full report via broadcast (serial/web/file) — avoids CLI return size limits.
   broadcastMultilineReport(buf);
-  return "sddiag complete (see serial log output)";
+  return "sddiag complete (full report sent to this session's output)";
   
 #endif
 }
@@ -1168,7 +1168,7 @@ const CommandEntry sdCommands[] = {
   { "sdformat", "Format SD card as FAT32", false, cmd_sdformat,
     "sdformat confirm - Format SD card (WARNING: erases all data)" },
   { "sdinfo", "Show SD card information", false, cmd_sdinfo,
-    "sdinfo - Display SD card type, size, and usage" },
+    "sdinfo - Display SD card type, size, and usage [json]" },
   { "sddiag", "SD card hardware diagnostics", false, cmd_sddiag,
     "sddiag - Test raw SPI communication with SD card" },
 };

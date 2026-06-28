@@ -3157,7 +3157,7 @@ const CommandEntry userSystemCommands[] = {
   { "userresetpassword", "Reset user password: <username> <newPassword> [0|1]", true, cmd_user_resetpassword,
     "Usage: userresetpassword <username> <newPassword> [0|1]\nOptional: 1 = require password change on next login" },
   { "useradd", "Create user: <username> <password> [0|1]", true, cmd_user_add, "Usage: useradd <username> <password> [0|1]\nOptional: 1 = require new password on next login, 0 = omit" },
-  { "userlist", "List all users.", true, cmd_user_list },
+  { "userlist", "List all users. (add 'json' for JSON output)", true, cmd_user_list },
   { "userrequest", "Request account: <user> <pass> [confirm]", false, cmd_user_request, "Usage: userrequest <username> <password> [confirmPassword]" },
   { "usersync", "Sync a user to another device over ESP-NOW. (async; result only on the target device - check its userlist)", true, cmd_user_sync,
     "Usage: usersync <username> <userPass> <device> <targetAdminUser> <targetAdminPass> <yourAdminPass>\n\n       Returns OK on delivery; the user is created on the TARGET device (no confirmation returns here) - verify on that device's userlist."
@@ -3165,14 +3165,14 @@ const CommandEntry userSystemCommands[] = {
     "  yourAdminPass = your admin password on THIS device; userPass = the synced user's password." },
 
   // Session management commands
-  { "pendinglist", "List pending user requests.", true, cmd_pending_list },
-  { "sessionlist", "List active sessions.", true, cmd_session_list },
+  { "pendinglist", "List pending user requests. (add 'json' for JSON output)", true, cmd_pending_list },
+  { "sessionlist", "List active sessions. (add 'json' for JSON output)", true, cmd_session_list },
   { "sessionrevoke", "Revoke session: <sid|user> [reason]", true, cmd_session_revoke, "Usage:\n  sessionrevoke sid <sid> [reason]\n  sessionrevoke user <username> [reason]" },
 
   // IP ban management
   { "ban",      "Permanently ban an IP: <ip> [reason]",      true, cmd_ban,      "Usage: ban <ip> [reason]\nBlocks all access from the IP until manually unbanned." },
   { "unban",    "Remove an IP ban: <ip>",                    true, cmd_unban,    "Usage: unban <ip>" },
-  { "banlist",  "List all banned IPs.",                      true, cmd_banlist },
+  { "banlist",  "List all banned IPs. (add 'json' for JSON output)",                      true, cmd_banlist },
   { "banuser",  "Permanently ban a user account: <username> [reason]", true, cmd_banuser,  "Usage: banuser <username> [reason]\nPrevents the account from logging in until manually unbanned." },
   { "unbanuser","Remove a user account ban: <username>",     true, cmd_unbanuser,"Usage: unbanuser <username>" }
 };

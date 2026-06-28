@@ -67,7 +67,7 @@ static const MemoryRequirement gMemoryRequirements[] = {
   // Component       MinHeap   TaskStack              MinPSRAM
   { "gamepad",       20480,    INPUT_STACK_WORDS,   0 },       // 14KB stack + overhead
   { "anoencoder",    20480,    INPUT_STACK_WORDS,   0 },       // 14KB stack + overhead (same seesaw lib + INPUT_STACK_WORDS as gamepad)
-  { "thermal",       40960,    THERMAL_STACK_WORDS,   0 },       // 16KB stack + frame processing overhead
+  { "thermal",       49152,    THERMAL_STACK_WORDS,   0 },       // 24KB stack + frame processing overhead
   { "imu",           24576,    IMU_STACK_WORDS,       0 },       // 16KB stack + overhead
   { "tof",           16384,    TOF_STACK_WORDS,       0 },       // 12KB stack + overhead
   { "fmradio",       20480,    FMRADIO_STACK_WORDS,   0 },       // 18KB stack + overhead

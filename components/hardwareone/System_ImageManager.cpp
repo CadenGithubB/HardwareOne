@@ -657,7 +657,7 @@ extern const CommandEntry imageCommands[] = {
   {"capture", "Capture and save image: capture [littlefs|sd|both]", false, cmd_capture, "Usage: capture [littlefs|lfs|sd|both]"},
   {"images", "List saved images: images [littlefs|sd]", false, cmd_images, "Usage: images [sd] [json]"},
   {"imagedelete", "Delete image: imagedelete \"<path>\"", true, cmd_imagedelete, "Usage: imagedelete \"<path>\""},
-  {"imagesend", "Send image via ESP-NOW: imagesend <device> [\"<path>\"] (async send; arrives on the peer, no local result)", false, cmd_imagesend, "Usage: imagesend <device> [\"<path>\"]\n       Returns OK on dispatch; the image is written to the peer's /espnow/received/ inbox - no completion status returns to the sender."},
+  {"imagesend", "Send image via ESP-NOW: imagesend <device> [\"<path>\"] (async send; arrives on the peer, no local result)", false, cmd_imagesend, "Usage: imagesend <device> [\"<path>\"]\n       Returns 'Sending <path> to <device>' on dispatch; the image is written to the peer's /espnow/received/ inbox - no completion status returns to the sender."},
 };
 
 extern const size_t imageCommandsCount = sizeof(imageCommands) / sizeof(imageCommands[0]);

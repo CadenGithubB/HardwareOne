@@ -1145,13 +1145,13 @@ const char* cmd_micautostart(const String& argsInput) {
 // Command registry
 // Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry micCommands[] = {
-  { "micread", "Read microphone sensor status.", false, cmd_mic, "Usage: micread" },
+  { "micread", "Read microphone sensor status.", false, cmd_mic, "Usage: micread [json]" },
   { "openmic", "Start microphone sensor.", false, cmd_micstart, nullptr, "sensor", "microphone", "open" },
   { "closemic", "Stop microphone sensor.", false, cmd_micstop, nullptr, "sensor", "microphone", "close" },
-  { "miclevel", "Get current audio level.", false, cmd_miclevel, "Usage: miclevel" },
+  { "miclevel", "Get current audio level.", false, cmd_miclevel, "Usage: miclevel [json]" },
   { "micviz", "Real-time audio level visualizer.", false, cmd_micviz, "Usage: micviz (press any key to stop)" },
-  { "micrecord", "Start/stop recording to WAV file.", false, cmd_micrecord, "Usage: micrecord <start|stop>" },
-  { "miclist", "List saved recordings.", false, cmd_miclist, "Usage: miclist" },
+  { "micrecord", "Start/stop recording to WAV file (bare = show recording status).", false, cmd_micrecord, "Usage: micrecord [start|stop|1|0]" },
+  { "miclist", "List saved recordings.", false, cmd_miclist, "Usage: miclist [json]" },
   { "micdelete", "Delete recording(s).", true, cmd_micdelete, "Usage: micdelete \"<filename>\" | micdelete all" },
   { "micsamplerate", "Get/set sample rate.", false, cmd_micsamplerate, "Usage: micsamplerate [8000-48000]" },
   { "micgain", "Get/set microphone gain.", false, cmd_micgain, "Usage: micgain [0-100]" },

@@ -149,7 +149,7 @@ const char* cmd_wifilist(const String& argsInput) {
   }
 
   broadcastOutput("Saved Networks (priority asc, numbered)");
-  broadcastOutput("Use 'wificonnect <index>' to connect to a specific entry.");
+  broadcastOutput("Use 'openwifi --index <N>' to connect to a specific entry.");
 
   for (int i = 0; i < gWifiNetworkCount; ++i) {
     if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
@@ -306,7 +306,7 @@ const char* cmd_wificonnect(const String& originalCmd) {
     index1 = a.argInt(1, 0);
     if (index1 <= 0 || index1 > gWifiNetworkCount) {
       if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-      snprintf(getDebugBuffer(), 1024, "Usage: wificonnect --index <1..%d>", gWifiNetworkCount);
+      snprintf(getDebugBuffer(), 1024, "Usage: openwifi --index <1..%d>", gWifiNetworkCount);
       return getDebugBuffer();
     }
   } else {
@@ -315,7 +315,7 @@ const char* cmd_wificonnect(const String& originalCmd) {
     if (sel > 0) index1 = sel;
     else {
       if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-      snprintf(getDebugBuffer(), 1024, "Usage: wificonnect [--best | --index <1..%d>]", gWifiNetworkCount);
+      snprintf(getDebugBuffer(), 1024, "Usage: openwifi [--best | --index <1..%d>]", gWifiNetworkCount);
       return getDebugBuffer();
     }
   }
@@ -338,7 +338,7 @@ const char* cmd_wificonnect(const String& originalCmd) {
   if (prevSSID.length() > 0) {
     broadcastOutput("Attempted rollback to previous connection");
   }
-  broadcastOutput("Check 'wifiinfo' for status");
+  broadcastOutput("Check 'wifistatus' for status");
   return "ERROR";
 }
 
@@ -1296,19 +1296,19 @@ const char* cmd_httpstatus(const String& argsInput) { RETURN_VALID_IF_VALIDATE_C
 // Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry wifiCommands[] = {
   // Network Management
-  { "wifiread", "Read current WiFi connection info.", false, cmd_wifiinfo },
-  { "wifistatus", "Show current WiFi connection info.", false, cmd_wifiinfo, nullptr, "wifi", "status" },
-  { "wifilist", "List saved WiFi networks.", false, cmd_wifilist },
+  { "wifiread", "Read current WiFi connection info. (add 'json' for JSON output)", false, cmd_wifiinfo },
+  { "wifistatus", "Show current WiFi connection info. (add 'json' for JSON output)", false, cmd_wifiinfo, nullptr, "wifi", "status" },
+  { "wifilist", "List saved WiFi networks. (add 'json' for JSON output)", false, cmd_wifilist },
   { "wifiadd", "Add WiFi network: <ssid> <pass> [priority] [hidden]", true, cmd_wifiadd, "Usage: wifiadd <ssid> <pass> [priority] [hidden0|1]" },
   { "wifirm", "Remove WiFi network: <ssid>", true, cmd_wifirm, "Usage: wifirm <ssid>" },
-  { "wifipromote", "Promote WiFi to top priority: <ssid>", true, cmd_wifipromote, "Usage: wifipromote <ssid>" },
+  { "wifipromote", "Promote WiFi to top priority: <ssid> [newPriority]", true, cmd_wifipromote, "Usage: wifipromote <ssid> [newPriority]" },
   
   // Connection Control
   { "openwifi", "Connect to WiFi: [--best | --index <N>] (default: best)", false, cmd_wificonnect, "Usage: openwifi [--best | --index <1..N>]" },
   { "closewifi", "Disconnect from WiFi (also stops HTTP server + web output to free heap).", false, cmd_wifidisconnect },
   { "wifidisconnect", "Disconnect from the current network but keep the radio on (HTTP/web stay up).", false, cmd_wifidrop },
-  { "wifiscan", "Scan for available WiFi networks.", false, cmd_wifiscan, nullptr, "wifi", "scan" },
-  { "wifigettxpower", "Set WiFi TX power: <dBm> (alias of wifitxpower)", false, cmd_wifitxpower, "Usage: wifigettxpower <dBm>  (sets TX power; clamps to ~2..21 dBm)" },
+  { "wifiscan", "Scan for available WiFi networks. (add 'json' for JSON output)", false, cmd_wifiscan, nullptr, "wifi", "scan" },
+  { "wifigettxpower", "Set WiFi TX power: <dBm> (alias of wifitxpower; admin)", true, cmd_wifitxpower, "Usage: wifigettxpower <dBm>  (sets TX power; clamps to ~2..21 dBm)" },
   
   // Network Services
   { "ntpsync",   "Sync time with NTP server.",               false, cmd_ntpsync },
@@ -1316,8 +1316,8 @@ const CommandEntry wifiCommands[] = {
 #if ENABLE_HTTP_SERVER
   { "openhttp", "Start HTTP server.", false, cmd_httpstart },
   { "closehttp", "Stop HTTP server.", false, cmd_httpstop },
-  { "httpread", "Read HTTP server status.", false, cmd_httpstatus },
-  { "httpstatus", "Show HTTP server status.", false, cmd_httpstatus },
+  { "httpread", "Read HTTP server status. (add 'json' for JSON output)", false, cmd_httpstatus },
+  { "httpstatus", "Show HTTP server status. (add 'json' for JSON output)", false, cmd_httpstatus },
 #endif
   { "certinfo", "Show HTTPS certificate details.", false, cmd_certinfo },
   { "certgen", "Generate self-signed HTTPS certificate: [rsa] (default: ECDSA P-256)", true, cmd_certgen, "Usage: certgen [rsa]  Default: ECDSA P-256 (~1s). Use 'certgen rsa' for RSA-2048 (~30-60s)." },

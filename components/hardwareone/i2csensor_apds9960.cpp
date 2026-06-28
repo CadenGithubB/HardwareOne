@@ -329,7 +329,7 @@ void apdsColorPoll() {
   }
 
   if (!gApdsColorEnabled) {
-    broadcastOutput("Color sensing not enabled. Use 'apdscolorstart' first.");
+    broadcastOutput("Color sensing not enabled. Use 'openapds' or 'apdsmode color on' first.");
     return;
   }
 
@@ -359,7 +359,7 @@ void apdsProximityPoll() {
   }
 
   if (!gApdsProximityEnabled) {
-    broadcastOutput("Proximity sensing not enabled. Use 'apdsproximitystart' first.");
+    broadcastOutput("Proximity sensing not enabled. Use 'openapds' or 'apdsmode proximity on' first.");
     return;
   }
 
@@ -374,7 +374,7 @@ void apdsGesturePoll() {
   }
 
   if (!gApdsGestureEnabled) {
-    broadcastOutput("Gesture sensing not enabled. Use 'apdsgesturestart' first.");
+    broadcastOutput("Gesture sensing not enabled. Use 'openapds' or 'apdsmode gesture on' first.");
     return;
   }
 
@@ -412,7 +412,7 @@ const CommandEntry apdsCommands[] = {
   // Primary commands (3-level voice: "sensor" -> "gesture" -> "open/close")
   { "openapds", "Start APDS9960 sensor.", false, cmd_apdsstart, nullptr, "sensor", "gesture", "open" },
   { "closeapds", "Stop APDS9960 sensor.", false, cmd_apdsstop, nullptr, "sensor", "gesture", "close" },
-  { "apdsread", "Read APDS9960 sensor status and data.", false, cmd_apdsread },
+  { "apdsread", "Read APDS9960 sensor status and data. (add 'json' for JSON output)", false, cmd_apdsread },
   { "apdsmode", "Control APDS modes: apdsmode <color|proximity|gesture> [on|off].", false, cmd_apdsmode, "Usage: apdsmode <color|proximity|gesture> [<on|off>]" },
   
   // Read commands (per-mode)

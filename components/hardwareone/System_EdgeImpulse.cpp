@@ -1821,19 +1821,19 @@ static void continuousInferenceTask(void* param) {
   vTaskDelete(nullptr);
 }
 
-void startContinuousInference() {
+bool startContinuousInference() {
   DEBUG_SYSTEMF("[EI_DEBUG] startContinuousInference() called");
   DEBUG_SYSTEMF("[EI_DEBUG]   Already running: %s", gEIContinuousRunning ? "YES" : "NO");
   DEBUG_SYSTEMF("[EI_DEBUG]   Model loaded: %s", gEIModelLoaded ? "YES" : "NO");
   
   if (gEIContinuousRunning) {
     DEBUG_SYSTEMF("[EI_DEBUG]   Skipping - already running");
-    return;
+    return true;
   }
   
   if (!gEIModelLoaded) {
     ERROR_SYSTEMF("[EdgeImpulse] Cannot start continuous - no model loaded");
-    return;
+    return false;
   }
   
   DEBUG_SYSTEMF("[EI_DEBUG]   Creating continuous task (no core affinity)...");
@@ -1855,11 +1855,12 @@ void startContinuousInference() {
   if (result != pdPASS) {
     ERROR_SYSTEMF("[EdgeImpulse] Failed to create continuous task (result=%d)", result);
     gEIContinuousRunning = false;
-    return;
+    return false;
   }
   
   setSetting(gSettings.edgeImpulseContinuous, true);
   DEBUG_SYSTEMF("[EI_DEBUG]   Continuous inference started, task handle=%p", gEIContinuousTask);
+  return true;
 }
 
 void stopContinuousInference() {
@@ -2191,8 +2192,10 @@ const char* cmd_ei_continuous(const String& argsInput) {
   
   int val = trimmed.toInt();
   if (val) {
-    startContinuousInference();
-    return "Continuous inference started";
+    if (startContinuousInference()) {
+      return "Continuous inference started";
+    }
+    return "Error: cannot start continuous inference (load a model first with eimodelload)";
   } else {
     stopContinuousInference();
     return "Continuous inference stopped";

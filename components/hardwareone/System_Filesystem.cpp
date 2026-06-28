@@ -1117,7 +1117,7 @@ const CommandEntry filesystemCommands[] = {
   { "filedelete", "Delete file: \"<path>\" [confirm]", true, cmd_filedelete, "Usage: filedelete \"<path>\" [confirm]" },
   { "filerename", "Rename file: \"<oldpath>\" \"<newname>\"", true, cmd_filerename, "Usage: filerename \"<oldpath>\" \"<newname>\"" },
   { "logtier", "Show current log storage tier (LittleFS vs SD overflow).", false, cmd_logtier,
-    "logtier             - Report which tier logs are writing to and free space on each." },
+    "logtier             - Report which tier logs are writing to and free space on each. [json]" },
 };
 
 const size_t filesystemCommandsCount = sizeof(filesystemCommands) / sizeof(filesystemCommands[0]);

@@ -2131,8 +2131,8 @@ static void oledConfirmRender() {
 OLEDConsoleBuffer gOledConsole;
 
 // Constructor
-OLEDConsoleBuffer::OLEDConsoleBuffer() 
-  : head(0), count(0), mutex(nullptr) {
+OLEDConsoleBuffer::OLEDConsoleBuffer()
+  : head(0), count(0), capacity(OLED_CONSOLE_LINES), mutex(nullptr) {
   memset(lines, 0, sizeof(lines));
   memset(timestamps, 0, sizeof(timestamps));
 }
@@ -2141,15 +2141,18 @@ OLEDConsoleBuffer::OLEDConsoleBuffer()
 void OLEDConsoleBuffer::init() {
   head = 0;
   count = 0;
+  // Latch effective history depth from settings (clamped to physical capacity).
+  int eff = gSettings.oledCliHistorySize;
+  if (eff < 10) eff = 10; else if (eff > OLED_CONSOLE_LINES) eff = OLED_CONSOLE_LINES;
+  capacity = (uint8_t)eff;
   memset(lines, 0, sizeof(lines));
   memset(timestamps, 0, sizeof(timestamps));
-  
+
   if (!mutex) {
     mutex = xSemaphoreCreateMutex();
     if (mutex) {
-      DEBUG_SYSTEMF("OLED console buffer initialized (%d lines × %d chars = %d bytes)",
-                    OLED_CONSOLE_LINES, OLED_CONSOLE_LINE_LEN,
-                    OLED_CONSOLE_LINES * OLED_CONSOLE_LINE_LEN);
+      DEBUG_SYSTEMF("OLED console buffer initialized (%d/%d lines × %d chars)",
+                    (int)capacity, OLED_CONSOLE_LINES, OLED_CONSOLE_LINE_LEN);
     } else {
       ERROR_SYSTEMF("Failed to create OLED console buffer mutex");
     }
@@ -2193,11 +2196,11 @@ void OLEDConsoleBuffer::append(const char* text, uint32_t timestamp) {
     // Store timestamp
     timestamps[head] = timestamp;
     
-    // Advance head (circular)
-    head = (head + 1) % OLED_CONSOLE_LINES;
+    // Advance head (circular, within the effective capacity)
+    head = (head + 1) % capacity;
     
-    // Update count (saturate at buffer size)
-    if (count < OLED_CONSOLE_LINES) {
+    // Update count (saturate at effective capacity)
+    if (count < capacity) {
       count++;
     }
     
@@ -2220,12 +2223,12 @@ const char* OLEDConsoleBuffer::getLine(int index) const {
   // If buffer not full: oldest is at 0
   // If buffer full: oldest is at head (just overwritten = oldest remaining)
   int bufferIndex;
-  if (count < OLED_CONSOLE_LINES) {
+  if (count < capacity) {
     bufferIndex = index;
   } else {
-    bufferIndex = (head + index) % OLED_CONSOLE_LINES;
+    bufferIndex = (head + index) % capacity;
   }
-  
+
   return lines[bufferIndex];
 }
 
@@ -2237,12 +2240,12 @@ uint32_t OLEDConsoleBuffer::getTimestamp(int index) const {
   
   // Calculate actual buffer position (same logic as getLine)
   int bufferIndex;
-  if (count < OLED_CONSOLE_LINES) {
+  if (count < capacity) {
     bufferIndex = index;
   } else {
-    bufferIndex = (head + index) % OLED_CONSOLE_LINES;
+    bufferIndex = (head + index) % capacity;
   }
-  
+
   return timestamps[bufferIndex];
 }
 
@@ -4004,7 +4007,7 @@ OLEDMode modeFromSlug(const String& slug) {
   if (slug == "off") return OLED_OFF;
   if (slug == "menu") return OLED_MENU;
   if (slug == "status") return OLED_SYSTEM_STATUS;
-  if (slug == "sensordata") return OLED_SENSOR_DATA;
+  if (slug == "sensordata" || slug == "sensors") return OLED_SENSOR_DATA;
   if (slug == "sensorlist") return OLED_SENSOR_LIST;
   if (slug == "thermal") return OLED_THERMAL_VISUAL;
   if (slug == "network") return OLED_NETWORK_INFO;
@@ -6157,7 +6160,7 @@ bool oledFileBrowserNeedsInit = true;
 const CommandEntry oledCommands[] = {
   { "openoled", "Start OLED display.", false, cmd_oledstart },
   { "closeoled", "Stop OLED display.", false, cmd_oledstop },
-  { "oledread", "Read OLED display status.", false, cmd_oledstatus },
+  { "oledread", "Read OLED display status. (add 'json' for JSON output)", false, cmd_oledstatus },
   { "oledstart", "Start OLED display.", false, cmd_oledstart },
   { "oledstop", "Stop OLED display.", false, cmd_oledstop },
   { "oledmode", "Set display mode: <mode>", false, cmd_oledmode,
@@ -6169,7 +6172,7 @@ const CommandEntry oledCommands[] = {
     "Usage: oledanim <name>\n"
     "       oledanim fps <1-60>" },
   { "oledclear", "Clear OLED display.", false, cmd_oledclear },
-  { "oledstatus", "Show OLED status.", false, cmd_oledstatus },
+  { "oledstatus", "Show OLED status. (add 'json' for JSON output)", false, cmd_oledstatus },
   { "oledrequireauth", "OLED auth requirement: <0|1>", true, cmd_oled_requireauth, "Usage: oledrequireauth <0|1>" },
   { "oledenabled", "Enable/disable OLED: <0|1>", false, cmd_oled_enabled, "Usage: oledenabled <0|1>" },
   { "oledbootmode", "OLED boot mode: <logo|status|sensors|thermal|network|mesh|off>", false, cmd_oled_bootmode, "Usage: oledbootmode <logo|status|sensors|thermal|network|mesh|off>" },

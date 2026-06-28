@@ -992,7 +992,7 @@ const CommandEntry imuCommands[] = {
   { "closeimu", "Stop BNO055 IMU sensor.", false, cmd_imustop, nullptr, "sensor", "motion sensor", "close" },
   
   // Information
-  { "imuread", "Read IMU sensor data.", false, cmd_imu },
+  { "imuread", "Read IMU sensor data. (add 'json' for JSON output)", false, cmd_imu },
   { "imuactions", "Show IMU action detection state.", false, cmd_imuactions },
   
   // UI Settings (client-side visualization)
@@ -1005,9 +1005,9 @@ const CommandEntry imuCommands[] = {
   { "imudevicepollms", "IMU device poll interval: <50..1000>", true, cmd_imudevicepollms, "Usage: imuDevicePollMs <50..1000>" },
   { "imuorientationmode", "IMU orientation mode: <0..8>", true, cmd_imuorientationmode, "Usage: imuorientationmode <0..8>" },
   { "imuorientationcorrection", "IMU orientation correction: <0|1>", true, cmd_imuorientationcorrection, "Usage: imuorientationcorrection <0|1>" },
-  { "imupitchoffset", "IMU pitch offset: <-180..180>", true, cmd_imupitchoffset, "Usage: imupitchoffset <-180..180>" },
-  { "imurolloffset", "IMU roll offset: <-180..180>", true, cmd_imurolloffset, "Usage: imurolloffset <-180..180>" },
-  { "imuyawoffset", "IMU yaw offset: <-180..180>", true, cmd_imuyawoffset, "Usage: imuyawoffset <-180..180>" },
+  { "imupitchoffset", "IMU pitch offset in degrees (recommended -180..180)", true, cmd_imupitchoffset, "Usage: imupitchoffset <degrees>  (recommended -180..180)" },
+  { "imurolloffset", "IMU roll offset in degrees (recommended -180..180)", true, cmd_imurolloffset, "Usage: imurolloffset <degrees>  (recommended -180..180)" },
+  { "imuyawoffset", "IMU yaw offset in degrees (recommended -180..180)", true, cmd_imuyawoffset, "Usage: imuyawoffset <degrees>  (recommended -180..180)" },
   
   // Auto-start
   { "imuautostart", "Enable/disable IMU auto-start after boot [on|off]", false, cmd_imuautostart, "Usage: imuautostart [on|off]" },
