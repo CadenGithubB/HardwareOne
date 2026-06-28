@@ -47,10 +47,10 @@ static const SettingEntry thermalSettingEntries[] = {
   { "thermalInterpolationSteps", SETTING_INT, &gSettings.thermalInterpolationSteps, 5, 0, nullptr, 1, 8, "Interp. Steps", nullptr, false, "interpolation", nullptr },
   { "thermalInterpolationBufferSize", SETTING_INT, &gSettings.thermalInterpolationBufferSize, 2, 0, nullptr, 1, 10, "Interp. Buffer", nullptr, false, "interpolation", nullptr },
   { "thermalTargetFps", SETTING_INT, &gSettings.thermalTargetFps, 8, 0, nullptr, 1, 8, "Target FPS", nullptr, false, "timing", nullptr },
-  { "thermalDevicePollMs", SETTING_INT, &gSettings.thermalDevicePollMs, 100, 0, nullptr, 50, 1000, "Poll Interval (ms)", nullptr, false, "timing", nullptr },
+  { "thermalDevicePollMs", SETTING_INT, &gSettings.thermalDevicePollMs, 100, 0, nullptr, 100, 2000, "Poll Interval (ms)", nullptr, false, "timing", nullptr },
   { "thermalTemporalAlpha", SETTING_FLOAT, &gSettings.thermalTemporalAlpha, 0, 0.5f, nullptr, 0, 1, "Temporal Alpha", nullptr, false, "filtering", nullptr },
   { "thermalRotation", SETTING_INT, &gSettings.thermalRotation, 0, 0, nullptr, 0, 3, "Rotation (0-3)", nullptr, false, "display", nullptr },
-  { "thermalI2cClockHz", SETTING_INT, &gSettings.i2cClockThermalHz, 800000, 0, nullptr, 100000, 1000000, "I2C Clock (Hz)", nullptr, false, nullptr, nullptr }
+  { "thermalI2cClockHz", SETTING_INT, &gSettings.i2cClockThermalHz, 400000, 0, nullptr, 100000, 1000000, "I2C Clock (Hz)", nullptr, false, nullptr, nullptr }
 };
 
 static bool isThermalConnected() {
@@ -367,6 +367,28 @@ const char* cmd_thermaltransitionms(const String& argsInput) {
   if (v < 0 || v > 5000) return "[Thermal] Error: Transition time must be 0-5000ms";
   setSetting(gSettings.thermalTransitionMs, v);
   BROADCAST_PRINTF("thermalTransitionMs set to %d", v);
+  return "[Thermal] Setting updated";
+}
+
+const char* cmd_thermalwebmaxfps(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String _arg = argsInput; _arg.trim();
+  if (_arg.length() == 0) return "Usage: thermalwebmaxfps <1..30>";
+  int v = _arg.toInt();
+  if (v < 1 || v > 30) return "[Thermal] Error: Web max FPS must be 1-30";
+  setSetting(gSettings.thermalWebMaxFps, v);
+  BROADCAST_PRINTF("thermalWebMaxFps set to %d", v);
+  return "[Thermal] Setting updated";
+}
+
+const char* cmd_thermali2cclockhz(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String _arg = argsInput; _arg.trim();
+  if (_arg.length() == 0) return "Usage: thermali2cclockhz <100000..1000000>";
+  int v = _arg.toInt();
+  if (v < 100000 || v > 1000000) return "[Thermal] Error: I2C clock must be 100000-1000000 Hz";
+  setSetting(gSettings.i2cClockThermalHz, v);
+  BROADCAST_PRINTF("thermalI2cClockHz set to %d", v);
   return "[Thermal] Setting updated";
 }
 
@@ -1258,7 +1280,24 @@ const char* cmd_thermaldiag(const String& argsInput) {
                (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
   buf += n; remaining -= n;
   
-  return getDebugBuffer();
+  // The assembled report exceeds the 256-char broadcast cap (DEBUG_MSG_SIZE),
+  // so returning it whole gets truncated ("...100[CUT]"). Re-emit it one line at
+  // a time through BROADCAST_PRINTF — every report line is well under the cap —
+  // then return a short status as the command result.
+  const char* report = getDebugBuffer();
+  char line[256];
+  size_t li = 0;
+  for (const char* p = report; ; ++p) {
+    if (*p == '\n' || *p == '\0') {
+      line[li] = '\0';
+      if (li > 0) BROADCAST_PRINTF("%s", line);
+      li = 0;
+      if (*p == '\0') break;
+    } else if (li < sizeof(line) - 1) {
+      line[li++] = *p;
+    }
+  }
+  return "[thermal] diagnostics complete";
 }
 
 // ============================================================================
@@ -1291,7 +1330,7 @@ const CommandEntry thermalCommands[] = {
   // Start/Stop (3-level voice: "sensor" -> "thermal camera" -> "open/close")
   { "openthermal", "Start MLX90640 thermal sensor.", false, cmd_thermalstart, nullptr, "sensor", "thermal camera", "open" },
   { "closethermal", "Stop MLX90640 thermal sensor.", false, cmd_thermalstop, nullptr, "sensor", "thermal camera", "close" },
-  { "thermalread", "Read thermal sensor data (min/max/avg).", false, cmd_thermalread },
+  { "thermalread", "Read thermal frame; min/max/avg broadcast to output. (add 'json' for JSON output)", false, cmd_thermalread },
   
   // UI Settings (client-side visualization)
   { "thermalpollingms", "Thermal UI polling: <50..5000>", true, cmd_thermalpollingms, "Usage: thermalpollingms <50..5000>" },
@@ -1313,6 +1352,8 @@ const CommandEntry thermalCommands[] = {
   // Device-level settings (sensor hardware behavior)
   { "thermaltargetfps", "Thermal target FPS: <1..8>", true, cmd_thermaltargetfps, "Usage: thermalTargetFps <1..8>" },
   { "thermaldevicepollms", "Thermal device poll: <100..2000>", true, cmd_thermaldevicepollms, "Usage: thermalDevicePollMs <100..2000>" },
+  { "thermali2cclockhz", "Thermal I2C clock: <100000..1000000>", true, cmd_thermali2cclockhz, "Usage: thermalI2cClockHz <100000..1000000>" },
+  { "thermalwebmaxfps", "Thermal web max FPS: <1..30>", true, cmd_thermalwebmaxfps, "Usage: thermalWebMaxFps <1..30>" },
   
   // Diagnostics
   { "thermaldiag", "Run thermal sensor diagnostics.", false, cmd_thermaldiag },
@@ -1408,7 +1449,7 @@ void thermalTask(void* parameter) {
         if (dt < 0) ready = false;
       }
       if (ready && (nowMs - lastThermalRead) >= pollMs) {
-        uint32_t thermalHz = (gSettings.i2cClockThermalHz > 0) ? (uint32_t)gSettings.i2cClockThermalHz : 800000;
+        uint32_t thermalHz = (gSettings.i2cClockThermalHz > 0) ? (uint32_t)gSettings.i2cClockThermalHz : 400000;
         bool ok = false;
         
         // Thermal frame read takes 400-800ms at 100kHz (768 pixels); needs generous timeout

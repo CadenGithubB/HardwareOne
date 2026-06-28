@@ -9285,9 +9285,9 @@ const char* cmd_espnow_keyex(const String& argsInput) {
   }
   CommandArgs a(argsInput);
   if (a.count() < 1) {
-    return "Usage: espnowkeyex <mac> [<mesh>]\n"
-           "  <mac>   target peer MAC (AA:BB:CC:DD:EE:FF)\n"
-           "  <mesh>  mesh label (defaults to current default mesh)";
+    return "Usage: espnowkeyex <name_or_mac> [<mesh>]\n"
+           "  <name_or_mac>  paired device name OR target peer MAC (AA:BB:CC:DD:EE:FF)\n"
+           "  <mesh>         mesh label (defaults to current default mesh)";
   }
   String macStr = a.arg(0);
   String meshLabel = (a.count() >= 2) ? a.arg(1) : String("");
@@ -9624,7 +9624,9 @@ const char* cmd_espnow_sessionsend(const String& argsInput) {
 
   CommandArgs a(argsInput);
   if (a.count() < 2) {
-    return "Usage: espnowsessionsend <name_or_mac> <message...>";
+    return "Usage: espnowsessionsend <name_or_mac> <message...>\n"
+           "       Delivers an encrypted CHAT message (lands in the peer's espnowmessages). NOT command execution.\n"
+           "       To run a command on the peer: espnowremote <target> <target-user> <target-pass> <command>";
   }
   uint8_t mac[6];
   if (!resolveDeviceNameOrMac(a.arg(0), mac) && !parseMacAddress(a.arg(0), mac)) {
@@ -9753,7 +9755,7 @@ const char* cmd_espnow_regenidentity(const String& argsInput) {
            "ESP-NOW identity regenerated.\n"
            "  Ed25519 pub: %s\n"
            "  regenCount:  %u\n"
-           "NOTE: all previously paired peers must be re-paired once Phase 3.3 lands.",
+           "NOTE: all previously paired peers must be re-paired (re-run KEY_EX / espnowpairsecure on both ends).",
            pubHex,
            (unsigned)fresh.regenCount);
   return getDebugBuffer();
@@ -11059,7 +11061,7 @@ const char* cmd_test_cleanup(const String& argsInput) {
 const char* cmd_test_filelock(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
-  broadcastOutput("\n=== File Transfer Slot Table (Phase 4) ===");
+  broadcastOutput("\n=== File Transfer Slot Table ===");
   uint8_t total  = fileSlotsSlotCount();
   uint8_t active = fileSlotsActiveCount();
   BROADCAST_PRINTF("Slots: %u/%u in use", (unsigned)active, (unsigned)total);
@@ -11502,7 +11504,7 @@ static const char* meshesCmd_setpassphrase(const String& label, const String& pa
                  "Existing paired peers will need to re-pair if they were "
                  "using the old passphrase for encryption.",
                  label.c_str(),
-                 i == 0 ? " Key re-derived." : " (Not used for current encryption — Phase 3.)");
+                 i == 0 ? " Key re-derived." : " (Not used for current encryption.)");
       }
       return getDebugBuffer();
     }
@@ -12358,7 +12360,7 @@ const char* cmd_espnow_pairsecure(const String& argsInput) {
 
   CommandArgs a(argsInput);
   if (!a.hasMinArgs(2)) {
-    return "Usage: espnow pairsecure <mac_address> <device_name> [mesh]";
+    return "Usage: espnowpairsecure <mac_address> <device_name> [mesh]";
   }
 
   String macStr = a.arg(0);
@@ -12710,7 +12712,7 @@ const char* cmd_espnow_remote(const String& argsInput) {
   }
 
   CommandArgs a(argsInput);
-  if (!a.hasMinArgs(4)) return espnowAckErr(wantJson, "Usage: espnow remote <target> <username> <password> <command>", "{\"schema\":1,\"ok\":false,\"error\":\"usage\"}");
+  if (!a.hasMinArgs(4)) return espnowAckErr(wantJson, "Usage: espnowremote <target> <target-user> <target-pass> <command>\n       <target-user>/<target-pass> are an account ON THE TARGET device (verified there), not this device's login.\n       Async: returns a reqId; read the output with 'espnowmessages json 0 <target-mac>'.", "{\"schema\":1,\"ok\":false,\"error\":\"usage\"}");
 
   String target = a.arg(0);
   String username = a.arg(1);
@@ -12767,8 +12769,11 @@ const char* cmd_espnow_remote(const String& argsInput) {
     snprintf(remoteBuffer, sizeof(remoteBuffer), "{\"schema\":1,\"ok\":true,\"reqId\":%lu}", (unsigned long)msgId);
     return remoteBuffer;
   }
-  snprintf(remoteBuffer, sizeof(remoteBuffer), "Remote command sent via V4 to %s: %s",
-           target.c_str(), command.c_str());
+  snprintf(remoteBuffer, sizeof(remoteBuffer),
+           "Sent '%s' to %s. Output is ASYNC - read it with:  espnowmessages json 0 %02X:%02X:%02X:%02X:%02X:%02X  (match reqId %lu)",
+           command.c_str(), target.c_str(),
+           targetMac[0], targetMac[1], targetMac[2], targetMac[3], targetMac[4], targetMac[5],
+           (unsigned long)msgId);
   return remoteBuffer;
 }
 
@@ -13802,7 +13807,7 @@ const char* cmd_bond_stream(const String& argsInput) {
   // Validate sensor name
   RemoteSensorType sensorType = stringToSensorType(sensorName.c_str());
   if (strcmp(sensorTypeToString(sensorType), sensorName.c_str()) != 0) {
-    return "Unknown sensor. Valid: thermal, tof, imu, gps, gamepad, fmradio, rtc, presence";
+    return "Unknown sensor. Valid: thermal, tof, imu, gps, input, fmradio, rtc, presence";
   }
   
   // Parse action
@@ -14105,14 +14110,14 @@ extern const CommandEntry espNowCommands[] = {
   // ---- ESP-NOW Cryptographic Identity (Phase 3.0/3.3) ----
   { "espnowidentity", "Show long-term Ed25519 identity (MAC, pub key, createdAtSec, regenCount).", false, cmd_espnow_identity },
   { "espnowregenidentity", "Regenerate Ed25519 identity. Requires '--confirm-wipe-all-bonds'.", true, cmd_espnow_regenidentity, "Usage: espnowregenidentity --confirm-wipe-all-bonds" },
-  { "espnowkeyex", "Initiate KEY_EX handshake with a peer (Phase 3.3 — runs alongside legacy pairing). (async - handshake completes later; check espnowsessions)", true, cmd_espnow_keyex, "Usage: espnowkeyex <mac> [<mesh>]\n       Returns OK when KEY_EX_HELLO is sent; the handshake completes asynchronously - inspect with 'espnowsessions' / 'espnowencstatus'." },
+  { "espnowkeyex", "Initiate KEY_EX handshake with a peer (runs alongside legacy pairing). (async - handshake completes later; check espnowsessions)", true, cmd_espnow_keyex, "Usage: espnowkeyex <name_or_mac> [<mesh>]\n       Returns OK when KEY_EX_HELLO is sent; the handshake completes asynchronously - inspect with 'espnowsessions' / 'espnowencstatus'." },
   { "espnowprobe", "Reachability probe via KEY_EX. Synchronous, bounded timeout. Reports alive+mesh+firmware in one shot (no plaintext on the wire).", true, cmd_espnow_probe, "Usage: espnowprobe <name_or_mac> [<timeoutMs (50-5000, default 500)>] [<mesh>]" },
-  { "espnowsessionopen", "Initiate SESSION handshake (Phase 3.4 — requires prior espnowkeyex). (async - session goes ACTIVE later; check espnowsessions)", true, cmd_espnow_sessionopen, "Usage: espnowsessionopen <mac> [<mesh>]\n       Returns OK when SESSION_OPEN is sent; the session becomes ACTIVE when CONFIRM arrives - run 'espnowsessions'." },
+  { "espnowsessionopen", "Initiate SESSION handshake (requires prior espnowkeyex). (async - session goes ACTIVE later; check espnowsessions)", true, cmd_espnow_sessionopen, "Usage: espnowsessionopen <name_or_mac> [<mesh>]\n       Returns OK when SESSION_OPEN is sent; the session becomes ACTIVE when CONFIRM arrives - run 'espnowsessions'." },
   { "espnowsessions", "Show in-RAM session state (peer, sessionId, dir, age, counters).", false, cmd_espnow_sessions },
-  { "espnowsessionsend", "Send AEAD-wrapped TEXT through active session (Phase 3.5a demo). (async send; delivery only, no reply)", true, cmd_espnow_sessionsend, "Usage: espnowsessionsend <mac> <message>\n       Returns OK on delivery; no application reply comes back." },
-  { "espnowrekey", "Force immediate SESSION_REKEY for a peer (Phase 3.6 — manual trigger). (async - completes later; check espnowsessions)", true, cmd_espnow_rekey, "Usage: espnowrekey <mac>\n       Returns OK when REKEY is sent; new keys derive when the peer's REKEY arrives - verify with 'espnowsessions'." },
-  { "espnowsubs", "Phase 5: list peers + their event-subscription bitmaps (what they want from us).", false, cmd_espnow_subs },
-  { "espnowrequestevents", "Phase 5: ask a peer to send US only events in <bitmask>. Updates state ON THE PEER. (async - changes peer state, no reply; verify with espnowsubs on the peer)", true, cmd_espnow_requestevents, "Usage: espnowrequestevents <mac> <bitmask>\n       Returns OK on delivery; this updates the PEER's subscription (no confirmation returns) - run 'espnowsubs' on that peer to verify." },
+  { "espnowsessionsend", "DIAGNOSTIC: send an AEAD-encrypted CHAT message over an active session (exercises the session-crypto path). NOT executed on the peer and returns no reply - to RUN a command use 'espnowremote'.", true, cmd_espnow_sessionsend, "Usage: espnowsessionsend <name_or_mac> <message>\n       Delivers an encrypted CHAT message (lands in the peer's espnowmessages). It is NOT command execution and no reply comes back.\n       To run a command on the peer: espnowremote <target> <target-user> <target-pass> <command>." },
+  { "espnowrekey", "Force immediate SESSION_REKEY for a peer (manual trigger). (async - completes later; check espnowsessions)", true, cmd_espnow_rekey, "Usage: espnowrekey <name_or_mac>\n       Returns OK when REKEY is sent; new keys derive when the peer's REKEY arrives - verify with 'espnowsessions'." },
+  { "espnowsubs", "List peers + their event-subscription bitmaps (what they want from us).", false, cmd_espnow_subs },
+  { "espnowrequestevents", "Ask a peer to send US only events in <bitmask>. Updates state ON THE PEER. (async - changes peer state, no reply; verify with espnowsubs on the peer)", true, cmd_espnow_requestevents, "Usage: espnowrequestevents <name_or_mac> <bitmask>\n       Returns OK on delivery; this updates the PEER's subscription (no confirmation returns) - run 'espnowsubs' on that peer to verify." },
 
   // ---- ESP-NOW Initialization & Pairing ----
   { "openespnow", "Initialize ESP-NOW communication.", true, cmd_espnow_init },
@@ -14126,7 +14131,7 @@ extern const CommandEntry espNowCommands[] = {
   // ---- ESP-NOW Mesh Configuration ----
   { "espnowmeshstatus", "Show mesh peer health (heartbeats & ACKs).", false, cmd_espnow_meshstatus },
   { "espnowmeshmetrics", "Show mesh routing metrics (forwards, path stats, drops).", false, cmd_espnow_meshmetrics },
-  { "espnowmeshes", "Manage multi-mesh slots: 'espnowmeshes [list|add|remove|enable|setdefault|rename] ...'.", true, cmd_espnow_meshes, "Usage: espnowmeshes list\n       espnowmeshes add <label>          (then set passphrase via 'espnowsetpassphrase <label> <pw>')\n       espnowmeshes remove <label>       (alias: disable)\n       espnowmeshes enable <label>\n       espnowmeshes setdefault <label>\n       espnowmeshes rename <oldLabel> <newLabel>" },
+  { "espnowmeshes", "Manage multi-mesh slots: 'espnowmeshes [list|add|remove|enable|setdefault|rename|setpassphrase] ...'.", true, cmd_espnow_meshes, "Usage: espnowmeshes list\n       espnowmeshes add <label>          (then set passphrase via 'espnowsetpassphrase <label> <pw>')\n       espnowmeshes remove <label>       (alias: disable)\n       espnowmeshes enable <label>\n       espnowmeshes setdefault <label>\n       espnowmeshes setpassphrase <label> <passphrase>\n       espnowmeshes rename <oldLabel> <newLabel>" },
   { "espnowmode", "Get/set ESP-NOW mode: 'espnowmode [direct|mesh]'.", true, cmd_espnow_mode, "Usage: espnowmode [direct|mesh]" },
   { "espnowmeshttl", "Get/set mesh TTL: 'espnowmeshttl [1-10|adaptive]'.", false, cmd_espnow_meshttl, "Usage: espnowmeshttl [<1..10>|adaptive]" },
   { "espnowsetname", "Get/set device name: 'espnowsetname [name]'.", true, cmd_espnow_setname, "Usage: espnowsetname [<name>]   (<=20 chars; letters, numbers, - and _ only)" },
@@ -14135,9 +14140,9 @@ extern const CommandEntry espNowCommands[] = {
   { "espnowmeshmaster", "Get/set master MAC: 'espnowmeshmaster [MAC]'.", true, cmd_espnow_meshmaster, "Usage: espnowmeshmaster [<AA:BB:CC:DD:EE:FF>]" },
   { "espnowmeshbackup", "Get/set backup MAC: 'espnowmeshbackup [MAC]'.", true, cmd_espnow_meshbackup, "Usage: espnowmeshbackup [<AA:BB:CC:DD:EE:FF>]" },
   { "espnowbackupenable", "Enable/disable backup master feature: 'espnowbackupenable [on|off]'.", true, cmd_espnow_backupenable, "Usage: espnowbackupenable [on|off]" },
-  { "espnowmeshtopo", "Discover mesh topology (master only). (async - read results with espnowtoporesults)", false, cmd_espnow_meshtopo },
+  { "espnowmeshtopo", "Discover mesh topology (run on the master; role not enforced). (async - read results with espnowtoporesults)", false, cmd_espnow_meshtopo },
   { "espnowtoporesults", "Get topology discovery results.", false, cmd_espnow_toporesults },
-  { "espnowtimesync", "Broadcast NTP time to mesh (master only). (async broadcast; delivery only, no reply)", false, cmd_espnow_timesync },
+  { "espnowtimesync", "Broadcast NTP time to mesh (intended for the master; role not enforced). (async broadcast; delivery only, no reply)", false, cmd_espnow_timesync },
   { "espnowtimestatus", "Show time synchronization status.", false, cmd_espnow_timestatus },
   { "espnowmeshsave", "Manually save mesh peer topology to filesystem.", false, cmd_espnow_meshsave },
   
@@ -14151,18 +14156,18 @@ extern const CommandEntry espNowCommands[] = {
   
   // ---- Master Aggregation ----
   { "espnowdevices", "List all mesh devices with room/zone/tags/status: espnowdevices [json].", false, cmd_espnow_devices },
-  { "espnowrooms", "List rooms and their devices (master).", false, cmd_espnow_rooms },
+  { "espnowrooms", "List rooms and their devices (aggregated from this node's cached peer metadata).", false, cmd_espnow_rooms },
   { "espnowfind", "Find devices by name, room, or tag: 'espnowfind <query>'.", false, cmd_espnow_find, "Usage: espnowfind <query>" },
-  { "espnowroomcmd", "Run command on all devices in a room. (async - replies via espnowmessages json)", true, cmd_espnow_roomcmd, "Usage: espnowroomcmd <room> <user> <pass> <command>\n       Returns OK on dispatch; each device's reply arrives later in 'espnowmessages json'." },
-  { "espnowtagcmd", "Run command on all devices with a tag. (async - replies via espnowmessages json)", true, cmd_espnow_tagcmd, "Usage: espnowtagcmd <tag> <user> <pass> <command>\n       Returns OK on dispatch; each device's reply arrives later in 'espnowmessages json'." },
+  { "espnowroomcmd", "Run command on all devices in a room; user/pass must be valid on EACH target device. (async - replies via espnowmessages json)", true, cmd_espnow_roomcmd, "Usage: espnowroomcmd <room> <target-user> <target-pass> <command>\n       Credentials are checked ON EACH target device, not this one.\n       Returns OK on dispatch; each device's reply arrives later in 'espnowmessages json'." },
+  { "espnowtagcmd", "Run command on all devices with a tag; user/pass must be valid on EACH target device. (async - replies via espnowmessages json)", true, cmd_espnow_tagcmd, "Usage: espnowtagcmd <tag> <target-user> <target-pass> <command>\n       Credentials are checked ON EACH target device, not this one.\n       Returns OK on dispatch; each device's reply arrives later in 'espnowmessages json'." },
   
   // ---- ESP-NOW Communication ----
-  { "espnowsend", "Send message (auto-routes via mesh if enabled): 'espnowsend <name_or_mac> <message>'. (async send; delivery only, no reply)", false, cmd_espnow_send, "Usage: espnowsend <name_or_mac> <message>\n       Returns OK on delivery; one-way message, no result comes back." },
-  { "espnowbroadcast", "Broadcast message: 'espnowbroadcast <message>'. (async send; delivery only, no reply)", false, cmd_espnow_broadcast, "Usage: espnowbroadcast <message>\n       Returns the count sent; one-way broadcast, no per-device reply." },
+  { "espnowsend", "Send message (auto-routes via mesh if enabled): 'espnowsend [json] <name_or_mac> <message>'. Requires ESP-NOW encryption enabled. (async send; delivery only, no reply)", false, cmd_espnow_send, "Usage: espnowsend [json] <name_or_mac> <message>\n       Requires ESP-NOW encryption (set a mesh passphrase first); plaintext send was removed.\n       Leading 'json' flag returns {schema,ok,msgId} for delivery-status polling.\n       Returns OK on delivery; one-way message, no result comes back." },
+  { "espnowbroadcast", "Broadcast message: 'espnowbroadcast <message>'. (async send; delivery only, no reply)", false, cmd_espnow_broadcast, "Usage: espnowbroadcast <message>   (single frame, <= 218 bytes; longer text is NOT fragmented and fails silently)\n       Returns whether the single broadcast frame was transmitted to all peers, NOT a per-device delivery count; no per-device reply." },
   { "espnowsendfile", "Send file: 'espnowsendfile <name_or_mac> \"<filepath>\"'. (synchronous local send; does not confirm peer accepted)", false, cmd_espnow_sendfile, "Usage: espnowsendfile <name_or_mac> \"<filepath>\"\n       Blocks until the file is sent; 'success' means locally transmitted, not that the receiver stored it." },
-  { "espnowbrowse", "Browse remote files: 'espnowbrowse <name_or_mac> <user> <pass> [\"path\"]'. (async - result via espnowmessages json)", false, cmd_espnow_browse, "Usage: espnowbrowse <target> <username> <password> [\"path\"]\n       Returns OK on delivery; the remote listing arrives later - read with 'espnowmessages json' (match the reqId)." },
-  { "espnowfetch", "Fetch remote file: 'espnowfetch <name_or_mac> <user> <pass> \"<path>\"'. (async - status via espnowmessages json; file saved on this device)", false, cmd_espnow_fetch, "Usage: espnowfetch <target> <username> <password> \"<path>\"\n       Returns OK on delivery; status lands in 'espnowmessages json'; the fetched file is written to this device's filesystem." },
-  { "espnowremote", "Execute remote command: 'espnowremote <name_or_mac> <user> <pass> <cmd>'. (async - result via espnowmessages json)", false, cmd_espnow_remote, "Usage: espnowremote <target> <username> <password> <command>\n       Returns OK on delivery; the remote command output arrives later - read with 'espnowmessages json' (match the reqId)." },
+  { "espnowbrowse", "Browse a peer's files; user/pass are an account ON THE TARGET: 'espnowbrowse <target> <target-user> <target-pass> [\"path\"]'. (async - result via espnowmessages json)", false, cmd_espnow_browse, "Usage: espnowbrowse <target> <target-user> <target-pass> [\"path\"]\n       Credentials are verified ON THE TARGET device, not this one.\n       Returns OK on delivery; the remote listing arrives later - read with 'espnowmessages json' (match the reqId)." },
+  { "espnowfetch", "Fetch a file from a peer; user/pass are an account ON THE TARGET: 'espnowfetch <target> <target-user> <target-pass> \"<path>\"'. (async - status via espnowmessages json; file saved on this device)", false, cmd_espnow_fetch, "Usage: espnowfetch <target> <target-user> <target-pass> \"<path>\"\n       Credentials are verified ON THE TARGET device, not this one.\n       Returns OK on delivery; status lands in 'espnowmessages json'; the fetched file is written to this device's filesystem." },
+  { "espnowremote", "Execute a command on a peer: 'espnowremote <target> <target-user> <target-pass> <cmd>'. user/pass are an account ON THE TARGET (verified there), not this device. (async - result via espnowmessages json)", false, cmd_espnow_remote, "Usage: espnowremote <target> <target-user> <target-pass> <command>\n       <target-user>/<target-pass> are credentials ON THE TARGET device, not this one.\n       Async: returns a reqId on delivery; read the output later with 'espnowmessages json 0 <target-mac>' (match the reqId)." },
   { "openstream", "Start streaming all output to ESP-NOW caller (admin, remote only).", true, cmd_espnow_startstream },
   { "closestream", "Stop streaming output to ESP-NOW device (admin).", true, cmd_espnow_stopstream },
   { "espnowworker", "Configure worker status reporting: 'espnowworker [show|on|off|interval <ms>|fields <list>]'.", false, cmd_espnow_worker, "Usage: espnowworker [show|on|off|interval <ms>|fields <heap,rssi,thermal,imu>]" },
@@ -14170,14 +14175,14 @@ extern const CommandEntry espNowCommands[] = {
   { "espnowsensorstatus", "Show remote sensor cache (master) or worker streaming status (worker).", false, cmd_espnow_sensorstatus },
   { "espnowsensorbroadcast", "Enable/disable all sensor ESP-NOW communication: 'espnowsensorbroadcast <on|off>'.", false, cmd_espnow_sensorbroadcast, "Usage: espnowsensorbroadcast [on|off]" },
   { "espnowusersync", "Enable/disable user credential sync: 'espnowusersync [on|off]'.", true, cmd_espnow_usersync, "Usage: espnowusersync [on|off]" },
-  { "espnowrequestmeta", "Request metadata from peer: 'espnowrequestmeta <name_or_mac>'. (async - updates cache; view with espnowdevices/espnowdeviceinfo)", false, cmd_espnow_requestmeta, "Usage: espnowrequestmeta <name_or_mac>\n       Returns OK on delivery; the peer's name/room/zone/tags arrive later and update the local cache shown by 'espnowdevices' and 'espnowdeviceinfo'." },
+  { "espnowrequestmeta", "Request metadata from peer: 'espnowrequestmeta <name_or_mac>'. (async - updates cache; view with espnowdevices)", false, cmd_espnow_requestmeta, "Usage: espnowrequestmeta <name_or_mac>\n       Returns OK on delivery; the peer's name/room/zone/tags arrive later and update the local peer cache shown by 'espnowdevices' / 'espnowrooms' / 'espnowfind'." },
   
 #if ENABLE_BONDED_MODE
   // ---- Bond Mode Commands (1:1 handshake relationship) ----
   { "bondconnect", "Connect to bonded peer device: 'bondconnect <mac_or_name>'. (async - bond establishes when peer is seen; watch bondstatus)", false, cmd_bond_connect, "Usage: bondconnect <mac_or_name>\n       Returns immediately; the bond completes when the peer appears via heartbeat - watch 'bondstatus'." },
   { "bonddisconnect", "Disconnect from bonded peer device.", false, cmd_bond_disconnect },
   { "bondstatus", "Show bond mode status and configuration.", false, cmd_bond_status },
-  { "bondrole", "Set bond mode role: 'bondrole <master|worker>'.", false, cmd_bond_role, "Usage: bondrole <master|worker>" },
+  { "bondrole", "Get/set bond mode role: 'bondrole [master|worker]' (no arg shows current role).", false, cmd_bond_role, "Usage: bondrole [master|worker]   (no arg shows current role)" },
   { "bondshowcap", "Show local device capability summary.", false, cmd_bond_showcap },
   { "bondrequestcap", "Request capability summary from bonded peer. (async - remote cap via GET /api/bond/status; note bondshowcap shows LOCAL cap)", false, cmd_bond_requestcap },
   { "bondshowmanifest", "Show local device manifest (UI apps + CLI commands).", false, cmd_bond_showmanifest },
@@ -14186,14 +14191,14 @@ extern const CommandEntry espNowCommands[] = {
   { "bondrequestschema", "Request settings schema from bonded peer. (async - cached; read via GET /api/bond/settings/schema)", false, cmd_bond_requestschema },
   { "bondresync", "Force re-sync of bond state (cap+manifest+settings+schema). Use when UI is stuck on 'Establishing Bond' or peer state looks stale. (async - results populate as they arrive)", false, cmd_bond_resync, "Usage: bondresync [--cap|--manifest|--settings|--schema|--all]\n       Returns OK on dispatch; results arrive over time - view via 'bondshowremotemanifest' and GET /api/bond/status, /api/bond/settings, /api/bond/settings/schema." },
   { "bondshowremotemanifest", "Show cached remote manifest(s): 'bondshowremotemanifest [fwHash]'.", false, cmd_bond_showremotemanifest, "Usage: bondshowremotemanifest [<fwHash>]" },
-  { "bondstream", "Stream sensor data to bonded master (worker only): 'bondstream <sensor> <on|off>'. (local toggle; streamed data lands on the master's espnowsensorstatus)", false, cmd_bond_stream, "Usage: bondstream <sensor> <on|off>\n       bondstream (show status)\n       Local on/off toggle; the worker streams to the bonded master, viewable there via 'espnowsensorstatus' / GET /api/sensors/remote." },
-  { "bondtestsensor", "Test v3 sensor data transmission: 'bondtestsensor [sensor_type]'. (async - frame appears on the master via espnowsensorstatus)", false, cmd_bond_testsensor, "Usage: bondtestsensor [thermal|tof|imu|gps|gamepad|fmradio]\n       Returns OK on send; the test frame appears on the bonded master's remote-sensor cache ('espnowsensorstatus' / GET /api/sensors/remote)." },
+  { "bondstream", "Toggle bond sensor streaming (works on both roles): 'bondstream <sensor> <on|off>'. WORKER streams its sensor to the bonded master; MASTER commands the bonded worker to start/stop. (local toggle; data lands on the master's espnowsensorstatus)", false, cmd_bond_stream, "Usage: bondstream <sensor> <on|off>\n       bondstream (show status)\n       On a WORKER: streams this device's sensor to the bonded master. On a MASTER: tells the bonded worker to start/stop that sensor.\n       Streamed data is viewable on the master via 'espnowsensorstatus' / GET /api/sensors/remote." },
+  { "bondtestsensor", "Test v3 sensor data transmission (worker only - a master cannot send sensor data): 'bondtestsensor [sensor_type]'. (async - frame appears on the master via espnowsensorstatus)", false, cmd_bond_testsensor, "Usage: bondtestsensor [thermal|tof|imu|gps|input|fmradio|rtc|presence]   (worker only)\n       Returns OK on send; the test frame appears on the bonded master's remote-sensor cache ('espnowsensorstatus' / GET /api/sensors/remote)." },
 #endif
   
   // ---- ESP-NOW Encryption ----
   { "espnowsetpassphrase", "Set encryption passphrase on a mesh: 'espnowsetpassphrase <mesh> <phrase>'.", true, cmd_espnow_setpassphrase, "Usage: espnowsetpassphrase <mesh> <passphrase>\n       espnowsetpassphrase <mesh> clear" },
   { "espnowencstatus", "Show ESP-NOW encryption status and key fingerprint.", true, cmd_espnow_encstatus },
-  { "espnowpairsecure", "Pair device with encryption: 'espnowpairsecure <mac> <name> [mesh]'. (local pair is synchronous; secure channel completes async - see espnowsessions)", true, cmd_espnow_pairsecure, "Usage: espnowpairsecure <mac_address> <device_name> [mesh]\n       The device is added synchronously; KEY_EX then runs asynchronously (~100ms) so the encrypted channel becomes usable shortly after - inspect with 'espnowsessions' / 'espnowencstatus'." },
+  { "espnowpairsecure", "Pair device with encryption: 'espnowpairsecure <mac> <name> [mesh]'. (local pair is synchronous; secure channel completes async - see espnowsessions)", true, cmd_espnow_pairsecure, "Usage: espnowpairsecure <mac_address> <device_name> [mesh]\n       Requires a mesh passphrase first - run 'espnowsetpassphrase <mesh> <passphrase>'.\n       The device is added synchronously; KEY_EX then runs asynchronously (~100ms) so the encrypted channel becomes usable shortly after - inspect with 'espnowsessions' / 'espnowencstatus'." },
   
   // ---- ESP-NOW Testing Commands ----
   { "teststreams", "Test topology stream management functions.", false, cmd_test_streams },

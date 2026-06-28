@@ -4,7 +4,9 @@
  * Stores the last N lines of CLI/debug output for display on OLED screen.
  * Independent of web interface and gWebMirror.
  * 
- * Memory cost: 50 lines × 64 chars = 3.2KB + overhead ≈ 3.5KB total
+ * Memory cost: 100 lines × 64 chars = 6.4KB + overhead ≈ 6.8KB total.
+ * Effective depth is capped at runtime by gSettings.oledCliHistorySize
+ * (latched at init(); change + reboot to apply).
  */
 
 #ifndef OLED_CONSOLEBUFFER_H
@@ -18,15 +20,16 @@
 #if ENABLE_OLED_DISPLAY
 
 // Ring buffer configuration
-#define OLED_CONSOLE_LINES 50      // Keep last 50 lines
+#define OLED_CONSOLE_LINES 100     // Physical ring capacity (max selectable history depth)
 #define OLED_CONSOLE_LINE_LEN 64   // 64 chars per line (enough for OLED width)
 
 // OLED Console Buffer - stores recent CLI output
 struct OLEDConsoleBuffer {
   char lines[OLED_CONSOLE_LINES][OLED_CONSOLE_LINE_LEN];
   uint32_t timestamps[OLED_CONSOLE_LINES];
-  uint8_t head;   // Write position (next slot to write)
-  uint8_t count;  // Number of valid lines (0 to OLED_CONSOLE_LINES)
+  uint8_t head;      // Write position (next slot to write)
+  uint8_t count;     // Number of valid lines (0 to capacity)
+  uint8_t capacity;  // Effective depth = gSettings.oledCliHistorySize (latched at init)
   SemaphoreHandle_t mutex;
   
   OLEDConsoleBuffer();

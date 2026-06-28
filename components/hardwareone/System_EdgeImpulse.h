@@ -68,7 +68,7 @@ void initEdgeImpulse();
 EIResults runEdgeImpulseInference();
 
 // Start/stop continuous inference mode
-void startContinuousInference();
+bool startContinuousInference();  // returns true if running on exit, false if it could not start
 void stopContinuousInference();
 bool isContinuousInferenceRunning();
 

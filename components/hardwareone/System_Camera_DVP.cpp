@@ -2213,7 +2213,7 @@ const CommandEntry cameraCommands[] = {
   {"camerasendaftercapture", "Send after capture: <on|off>", true, cmd_camerasendaftercapture, "Usage: camerasendaftercapture <on|off|1|0|true>"},
   {"cameratargetdevice",    "Target device: <name>",      true,  cmd_cameratargetdevice, "Usage: cameratargetdevice <name>"},
   {"camerarecord",          "Start/stop MJPEG-AVI recording (SD only): <start|stop>", false, cmd_camerarecord, "Usage: camerarecord <start|stop|1|0>", "sensor", "camera", "record"},
-  {"cameravideolist",       "List AVI recordings on SD",  false, cmd_cameravideolist},
+  {"cameravideolist",       "List AVI recordings on SD (add 'json' for JSON output)",  false, cmd_cameravideolist},
   {"cameravideodelete",     "Delete recording: \"<filename>\"", true, cmd_cameravideodelete, "Usage: cameravideodelete \"<filename>\""},
 };
 

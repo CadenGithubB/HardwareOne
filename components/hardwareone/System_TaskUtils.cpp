@@ -201,7 +201,7 @@ bool createThermalTask() {
     }
   }
   if (gThermalTaskHandle == nullptr) {
-    const uint32_t thermalStack = THERMAL_STACK_WORDS;  // words; ~16KB (reduced from 24KB - frame buffers moved to PSRAM)
+    const uint32_t thermalStack = THERMAL_STACK_WORDS;  // words; ~24KB (16KB was too tight on ESP32-classic — overflowed on failed-read retry storm + debug logging)
     if (xTaskCreateLogged(thermalTask, "thermal_task", thermalStack, nullptr, TASK_PRIORITY_LOW, &gThermalTaskHandle, "thermal") != pdPASS) {
       return false;
     }

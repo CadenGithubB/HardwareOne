@@ -661,9 +661,10 @@ extern const CommandEntry featureCommands[] = {
   { "features", "Show/toggle system features with heap estimates.", false, cmd_features,
     "features              - List all features\n"
     "features <id>         - Show feature details\n"
-    "features <id> <on|off> - Enable/disable feature" },
+    "features <id> <on|off> - Enable/disable feature\n"
+    "features json         - JSON capability list" },
   { "featuresetup", "Run the interactive feature configuration wizard.", true, cmd_featuresetup,
-    "featuresetup  - Launch the feature toggle wizard (serial + OLED)" }
+    "featuresetup  - Launch the feature config wizard (any CLI transport; navigate with n/b/numbers, 'cancel' to abort)" }
 };
 
 extern const size_t featureCommandsCount = sizeof(featureCommands) / sizeof(featureCommands[0]);

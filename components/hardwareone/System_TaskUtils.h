@@ -35,7 +35,11 @@ constexpr uint32_t ESPNOW_HB_STACK_WORDS = 6656;     // 26 KB. Bumped from 5530 
                                                      // and consider trimming back if the post-Step-4 peak
                                                      // drops well below 17 KB. 26 KB chosen as 26×1024 = nice
                                                      // round number with ~8.5 KB margin over current HWM.
-constexpr uint32_t THERMAL_STACK_WORDS = 4096;       // ~16KB
+constexpr uint32_t THERMAL_STACK_WORDS = 6144;       // ~24KB — restored from 16KB: the MLX90640
+                                                     // getFrame()/CalculateTo path plus per-poll debug
+                                                     // logging overflowed 16KB on ESP32-classic when
+                                                     // frame reads fail (NACK retry storm). 24KB was the
+                                                     // original pre-trim value.
 constexpr uint32_t IMU_STACK_WORDS = 4096;           // ~16KB (BNO055 init retries need extra stack)
 constexpr uint32_t TOF_STACK_WORDS = 3072;           // ~12KB
 constexpr uint32_t FMRADIO_STACK_WORDS = 4608;       // ~18KB

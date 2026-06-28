@@ -667,6 +667,22 @@ const char* cmd_fmradio_mute(const String& argsInput) {
   return "OK";
 }
 
+// Dedicated unmute: cmd_fmradio_mute decides mute/unmute from its argument and
+// can't see the invoked command name, so a bare `fmradiounmute` (empty args)
+// used to fall through to MUTE. This forces unmute unconditionally.
+const char* cmd_fmradio_unmute(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!gFmRadioConnected || !gRadioInitialized) {
+    return "[FM Radio] Error: Not initialized - use 'fmradio start' first";
+  }
+  gFmRadioCache.muted = false;
+  i2cDeviceTransactionVoid((uint8_t)gSettings.fmRadioBus, I2C_ADDR_FM_RADIO, FM_RADIO_I2C_CLOCK, 200, [&]() {
+    radio.setMute(false);
+  });
+  BROADCAST_PRINTF("FM Radio unmuted");
+  return "OK";
+}
+
 const char* cmd_fmradio_status(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
@@ -769,12 +785,12 @@ const CommandEntry fmRadioCommands[] = {
   // 3-level voice: "sensor" -> "radio" -> "open/close"
   { "openfmradio", "Start FM Radio sensor.", false, cmd_fmradio_start, nullptr, "sensor", "radio", "open" },
   { "closefmradio", "Stop FM Radio sensor.", false, cmd_fmradio_stop, nullptr, "sensor", "radio", "close" },
-  { "fmradioread", "Read FM Radio status.", false, cmd_fmradio_status },
+  { "fmradioread", "Read FM Radio status. (add 'json' for JSON output)", false, cmd_fmradio_status },
   { "fmradiotune", "Tune to frequency: <freq>", false, cmd_fmradio_tune, "Usage: fmradiotune <frequency> (e.g., 103.9 or 10390)" },
   { "fmradioseek", "Seek next station [up|down]", false, cmd_fmradio_seek, "Usage: fmradioseek [up|down]" },
   { "fmradiovolume", "Set volume: <0-15>", false, cmd_fmradio_volume, "Usage: fmradiovolume <0-15>" },
   { "fmradiomute", "Mute audio", false, cmd_fmradio_mute },
-  { "fmradiounmute", "Unmute audio", false, cmd_fmradio_mute },
+  { "fmradiounmute", "Unmute audio", false, cmd_fmradio_unmute },
   
   // Auto-start
   { "fmradioautostart", "Enable/disable FM Radio auto-start after boot [on|off]", false, cmd_fmradioautostart, "Usage: fmradioautostart [on|off]" },

@@ -423,12 +423,13 @@ const char* cmd_ledeffect(const String& argsInput) {
 
   // Execute effect
   int effectCode = 0;
-  if (effectType == "fade") effectCode = 1;
-  else if (effectType == "blink") effectCode = 2;
-  else if (effectType == "pulse") effectCode = 3;
-  else if (effectType == "strobe") effectCode = 4;
+  if (effectType == "fade") effectCode = EFFECT_FADE;
+  else if (effectType == "pulse") effectCode = EFFECT_PULSE;
+  else if (effectType == "blink") effectCode = EFFECT_BLINK;
+  else if (effectType == "rainbow") effectCode = EFFECT_RAINBOW;
+  else if (effectType == "strobe") effectCode = EFFECT_STROBE;
   else {
-    snprintf(getDebugBuffer(), 1024, "Unknown effect: %s. Options: fade, blink, pulse, strobe", effectType.c_str());
+    snprintf(getDebugBuffer(), 1024, "Unknown effect: %s. Options: fade, pulse, blink, rainbow, strobe", effectType.c_str());
     return getDebugBuffer();
   }
 
@@ -445,7 +446,7 @@ const char* cmd_ledeffect(const String& argsInput) {
 const CommandEntry neopixelCommands[] = {
   { "ledcolor", "Set LED color: <color>", false, cmd_ledcolor, "Usage: ledcolor <red|green|blue|yellow|magenta|cyan|white|orange|purple|pink>", "led", "change color" },
   { "ledclear", "Turn off LED.", false, cmd_ledclear, nullptr, "led", "turn off" },
-  { "ledeffect", "Run LED effect: <effect>", false, cmd_ledeffect, "Usage: ledeffect <fade|blink|pulse|strobe|off> [color] [color2] [duration 100..60000]" },
+  { "ledeffect", "Run LED effect: <effect>", false, cmd_ledeffect, "Usage: ledeffect <fade|pulse|blink|rainbow|strobe|off> [color] [color2] [duration 100..60000]" },
 };
 
 const size_t neopixelCommandsCount = sizeof(neopixelCommands) / sizeof(neopixelCommands[0]);

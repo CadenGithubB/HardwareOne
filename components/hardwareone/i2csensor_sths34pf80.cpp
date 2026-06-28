@@ -460,8 +460,8 @@ const CommandEntry presenceCommands[] = {
   // 3-level voice: "sensor" -> "presence" -> "open/close"
   { "openpresence", "Start STHS34PF80 IR presence/motion sensor.", false, cmd_presencestart, nullptr, "sensor", "presence", "open" },
   { "closepresence", "Stop STHS34PF80 sensor.", false, cmd_presencestop, nullptr, "sensor", "presence", "close" },
-  { "presenceread", "Read STHS34PF80 presence/motion/temperature data.", false, cmd_presenceread },
-  { "presencestatus", "Show STHS34PF80 sensor status.", false, cmd_presencestatus },
+  { "presenceread", "Read STHS34PF80 presence/motion/temperature data. (add 'json' for JSON output)", false, cmd_presenceread },
+  { "presencestatus", "Show STHS34PF80 sensor status. (add 'json' for JSON output)", false, cmd_presencestatus },
   
   // Auto-start
   { "presenceautostart", "Enable/disable presence auto-start after boot [on|off]", false, cmd_presenceautostart, "Usage: presenceautostart [on|off]" },

@@ -1982,15 +1982,15 @@ const CommandEntry bluetoothCommands[] = {
   // Start/Stop (3-level voice: "connection" -> "bluetooth" -> "open/close")
   { "openble",      "Start Bluetooth LE and begin advertising.", false, cmd_blestart, nullptr, "connection", "bluetooth", "open" },
   { "closeble",     "Stop Bluetooth LE and deinitialize.",       false, cmd_blestop,  nullptr, "connection", "bluetooth", "close" },
-  { "bleread",      "Read Bluetooth connection status.",         false, cmd_blestatus },
-  { "blestatus",    "Show Bluetooth connection status.",         false, cmd_blestatus },
-  { "bleinfo",      "Show BLE configuration and settings.",      false, cmd_bleinfo },
+  { "bleread",      "Read Bluetooth connection status. (add 'json' for JSON output)",         false, cmd_blestatus },
+  { "blestatus",    "Show Bluetooth connection status. (add 'json' for JSON output)",         false, cmd_blestatus },
+  { "bleinfo",      "Show BLE configuration and settings. (add 'json' for JSON output)",      false, cmd_bleinfo },
   { "blename",      "Get/set BLE device name [name].",           false, cmd_blename, "Usage: blename [name]" },
   { "bletxpower",   "Get/set BLE TX power [0-7].",               false, cmd_bletxpower, "Usage: bletxpower [0..7]" },
   { "bledisconnect","Disconnect current BLE client.",            false, cmd_bledisconnect },
   { "bleadv",       "Start/stop/toggle BLE advertising [start|stop|toggle].", false, cmd_bleadv, "Usage: bleadv [start|stop|toggle]" },
   { "blesend",      "Send message to BLE client: <message>.",    false, cmd_blesend, "Usage: blesend <message>" },
-  { "blestream",    "Control streaming: <on|off|sensors|system>.",false, cmd_blestream, "Usage: blestream [on|off|sensors|system|events|interval] | interval <sensor_ms> <system_ms>" },
+  { "blestream",    "Control streaming: <on|off|sensors|system|events|interval>.",false, cmd_blestream, "Usage: blestream [on|off|sensors|system|events|interval] | interval <sensor_ms> <system_ms>" },
   { "bleevent",     "Send event to BLE client: <event>.",        false, cmd_bleevent, "Usage: bleevent <message>" },
   
   // Auto-start

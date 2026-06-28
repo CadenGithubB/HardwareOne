@@ -2347,24 +2347,24 @@ extern const char* cmd_pending_list(const String& argsInput);
 // Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry commands[] = {
   // ---- Core / General ----
-  { "status", "Show system status (WiFi, FS, memory).", false, cmd_status, nullptr, "system", "status" },
-  { "uptime", "Show device uptime.", false, cmd_uptime },
-  { "time", "Show device time (uptime + NTP if synced).", false, cmd_time },
+  { "status", "Show system status (WiFi, FS, memory). (add 'json' for JSON output)", false, cmd_status, nullptr, "system", "status" },
+  { "uptime", "Show device uptime. (add 'json' for JSON output)", false, cmd_uptime },
+  { "time", "Show device time (uptime + NTP if synced). (add 'json' for JSON output)", false, cmd_time },
   { "timeset", "Set time manually: timeset YYYY-MM-DD HH:MM:SS or <unix_timestamp>.", true, cmd_timeset,
     "Usage: timeset <YYYY-MM-DD HH:MM:SS>|<unix_timestamp>" },
   { "memsample", "Memory snapshot with component requirements. Use 'memsample track [on|off|reset|status]' for allocation tracking.", false, cmd_memsample,
     "Usage: memsample [track <on|off|reset|status>]" },
-  { "memreport", "Comprehensive memory report (Task Manager style).", false, cmd_memreport },
-  { "fsusage", "Show filesystem usage.", false, cmd_fsusage },
+  { "memreport", "Comprehensive memory report (Task Manager style). (add 'json' for JSON output)", false, cmd_memreport },
+  { "fsusage", "Show filesystem usage. (add 'json' for JSON output)", false, cmd_fsusage },
   
   // ---- Testing Commands (Admin Only) ----
   { "testencryption", "Test WiFi password encryption (admin only).", true, cmd_testencryption },
   { "testpassword", "Test user password hashing (admin only).", true, cmd_testpassword },
 
   // ---- System Diagnostics ----
-  { "temperature", "Read ESP32 internal temperature.", false, cmd_temperature },
-  { "voltage", "Read supply voltage.", false, cmd_voltage },
-  { "cpufreq", "Get/set CPU frequency.", true, cmd_cpufreq,
+  { "temperature", "Read ESP32 internal temperature. (add 'json' for JSON output)", false, cmd_temperature },
+  { "voltage", "Estimate power draw from active subsystems (not a real voltage measurement; use batterystatus for measured volts). (add 'json' for JSON output)", false, cmd_voltage },
+  { "cpufreq", "Get/set CPU frequency (admin).", true, cmd_cpufreq,
     "Usage: cpufreq [80|160|240]" },
   { "taskstats", "Detailed task statistics.", false, cmd_taskstats },
   { "perftop", "Live performance snapshot: loop laps/s, period, per-section timing, worst stalls + live task CPU%.", false, cmd_perftop },
@@ -2376,7 +2376,7 @@ const CommandEntry commands[] = {
     "Usage: factoryreset (no args, confirmation required)\n"
     "Deletes /system/users/users.json so the first-time setup wizard runs\n"
     "on next boot. WiFi credentials and other settings are preserved." },
-  { "broadcast", "Send message to all or specific user.", true, cmd_broadcast,
+  { "broadcast", "Send a message to all connected output interfaces.", true, cmd_broadcast,
     "Usage: broadcast <message>" },
   { "pendinglist", "List pending user requests.", true, cmd_pending_list },
   { "wait", "Delay execution for N milliseconds: wait <ms>.", false, cmd_wait,
@@ -2400,7 +2400,7 @@ extern const char* cmd_batterylog(const String& argsInput);
 // Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry batteryCommands[] = {
   {"batterystatus", "Show battery voltage, charge level, and status", false, cmd_battery_status, nullptr, "battery", "status"},
-  {"batterycalibrate", "Recalibrate battery ADC readings", true, cmd_battery_calibrate},
+  {"batterycalibrate", "Recalibrate/re-probe the battery sensor (ADC characterize or fuel-gauge re-probe)", true, cmd_battery_calibrate},
   {"batterylog", "Battery time-series CSV log (on/off/interval/tail/clear)", false, cmd_batterylog, "Usage: batterylog [on|off|interval <s>|tail|clear]"}
 };
 

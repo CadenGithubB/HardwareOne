@@ -2352,11 +2352,11 @@ LLM_SETTING_CMD(cmd_llm_kvprec,       14)
 LLM_SETTING_CMD(cmd_llm_autostart,    15)
 
 const CommandEntry llmCommands[] = {
-  { "llmstatus",        "Show LLM engine status",               false, cmd_llm_status },
+  { "llmstatus",        "Show LLM engine status (add 'json' for JSON output)",               false, cmd_llm_status },
   { "llmload",          "Load model [model.bin]",               true,  cmd_llm_load,         "Usage: llmload [filename.bin]" },
   { "llmunload",        "Unload model and free PSRAM",          true,  cmd_llm_unload },
   { "llmautostart",     "Auto-load default model at boot (0|1)", true,  cmd_llm_autostart,    "Usage: llmautostart <0|1>" },
-  { "llmmodels",        "List available model files",           false, cmd_llm_models },
+  { "llmmodels",        "List available model files (add 'json' for JSON output)",           false, cmd_llm_models },
   { "llmgenerate",      "Generate text from prompt",            false, cmd_llm_generate,     "Usage: llmgenerate <prompt text>" },
   { "llmresult",        "Poll streamed generation (JSON)",      false, cmd_llm_result,       "Usage: llmresult json <offset>" },
   { "llmstop",          "Stop in-progress generation",          false, cmd_llm_stop },
@@ -2374,7 +2374,7 @@ const CommandEntry llmCommands[] = {
   { "llmmaxcontext",    "Set KV cache context window (0=auto)", true,  cmd_llm_maxcontext,   "Usage: llmmaxcontext <0-4096>" },
   { "llmusemirostat2",  "Enable/disable Mirostat 2 sampling",   true,  cmd_llm_usemirostat2, "Usage: llmusemirostat2 <0|1>" },
   { "llmmirostattau",   "Set Mirostat target surprise (bits)",  true,  cmd_llm_mirostattau,  "Usage: llmmirostattau <1-10>" },
-  { "llmmirostateta",   "Set Mirostat learning rate",           true,  cmd_llm_mirostateta,  "Usage: llmmirostateta <0.01-0.5>" },
+  { "llmmirostateta",   "Set Mirostat learning rate",           true,  cmd_llm_mirostateta,  "Usage: llmmirostateta <0.01-1.0>" },
   { "llmdyntemp",       "Enable/disable dynamic temperature",   true,  cmd_llm_dyntemp,      "Usage: llmdyntemp <0|1>" },
   { "llmdefaultmodel",  "Set default model filename",           true,  cmd_llm_defaultmodel, "Usage: llmdefaultmodel <filename.bin>" },
   { "llmminp",          "Set min-p sampling floor (0=off)",     true,  cmd_llm_minp,         "Usage: llmminp <0.0-1.0>" },

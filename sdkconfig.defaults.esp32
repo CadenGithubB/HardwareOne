@@ -22,9 +22,26 @@ CONFIG_SPIRAM_SPEED_40M=y
 # Flash mode
 CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
 
-# Bluetooth - DISABLED on ESP32-classic: the Bluedroid stack + controller
-# don't fit alongside the full feature set in the classic ESP32's tighter IRAM
-# (kept in sync with ENABLE_BLUETOOTH in System_BuildConfig.h).
-CONFIG_BT_ENABLED=n
-# CONFIG_BT_BLUEDROID_ENABLED / CONFIG_BT_CONTROLLER_ENABLED only apply when BT is on.
-# CONFIG_BT_CLASSIC_ENABLED is available on ESP32
+# Bluetooth - ENABLED (BLE-only) for the G2 glasses on the QT Py. The Bluedroid
+# stack + controller are a tight fit in the ESP32-classic's IRAM alongside WiFi +
+# web + ESP-NOW; if the link overflows iram0_0_seg, drop features to recover space.
+# (kept in sync with ENABLE_BLUETOOTH in System_BuildConfig.h.)
+CONFIG_BT_ENABLED=y
+# BLE-only controller (no BR/EDR Classic) — G2 is a BLE central; saves RAM/flash.
+CONFIG_BTDM_CTRL_MODE_BLE_ONLY=y
+# Bluedroid host (CONFIG_BT_BLUEDROID_ENABLED) + BLE 4.2 come from sdkconfig.defaults.
+
+# IRAM recovery: BLE-only BT overruns the ESP32-classic's IRAM by a few hundred
+# bytes (iram0_0_seg overflowed by 468 B), so move non-ISR FreeRTOS functions to
+# flash — frees several KB of IRAM at negligible runtime cost (ISR-safe funcs stay
+# in IRAM). Required for the BT + G2 build to link on esp32-classic.
+CONFIG_FREERTOS_PLACE_FUNCTIONS_INTO_FLASH=y
+
+# Min chip revision: the QT Py's ESP32-PICO-V3-02 is rev v3.0, where the original
+# ESP32 PSRAM-cache silicon bug is FIXED. Targeting rev 3 lets us turn off the
+# cache workaround below — which otherwise pins ~12 libc groups (str/mem/math/…)
+# into IRAM, and on the classic ESP32 IRAM shares SRAM with the heap, so this
+# reclaims both IRAM and runtime heap.
+# NOTE: the image will then only boot on rev-3+ ESP32 silicon (the QT Py qualifies).
+CONFIG_ESP32_REV_MIN_3=y
+CONFIG_SPIRAM_CACHE_WORKAROUND=n

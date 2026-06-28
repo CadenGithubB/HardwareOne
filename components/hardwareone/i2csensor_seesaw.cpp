@@ -382,7 +382,7 @@ void gamepadPoll() {
 
 // Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry gamepadCommands[] = {
-  { "gamepadread", "Read Seesaw gamepad state (x/y/buttons).", false, cmd_gamepad },
+  { "gamepadread", "Read Seesaw gamepad state (x/y/buttons). (add 'json' for JSON output)", false, cmd_gamepad },
 };
 
 const size_t gamepadCommandsCount = sizeof(gamepadCommands) / sizeof(gamepadCommands[0]);

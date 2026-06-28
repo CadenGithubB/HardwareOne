@@ -2,6 +2,7 @@
 #define WEBPAGE_CLI_H
 
 #include "WebServer_Utils.h"
+#include "System_Settings.h"  // gSettings.webCliHistorySize
 
 // Streamed inner content for the CLI page
 inline void streamCLIInner(httpd_req_t* req, const String& username) {
@@ -140,6 +141,15 @@ try{console.log('[CLI] Core init ready');}catch(_){}
 </script>
 )JS", HTTPD_RESP_USE_STRLEN);
 
+  // JS: history cap from gSettings.webCliHistorySize (number of commands kept)
+  {
+    int wch = gSettings.webCliHistorySize;
+    if (wch < 1) wch = 1; else if (wch > 100) wch = 100;
+    char wchBuf[80];
+    int wchLen = snprintf(wchBuf, sizeof(wchBuf), "<script>try{window.__cliHistoryMax=%d;}catch(_){ }</script>", wch);
+    if (wchLen > 0) httpd_resp_send_chunk(req, wchBuf, wchLen);
+  }
+
   // JS: Session/init
   httpd_resp_send_chunk(req, R"JS(
 <script>
@@ -201,7 +211,7 @@ function executeCommand(){
     exitingHelp = true;
   }
   if (commandHistory[commandHistory.length - 1] !== command) {
-    commandHistory.push(command); if (commandHistory.length > 50) commandHistory.shift();
+    commandHistory.push(command); if (commandHistory.length > (window.__cliHistoryMax || 50)) commandHistory.shift();
     try{ localStorage.setItem('cliHistory', JSON.stringify(commandHistory)); }catch(_){}
   }
   historyIndex = -1; currentCommand = '';
@@ -258,7 +268,7 @@ function cliSetTarget(bonded){
 function runBondedCommand(command){
   if (!window.BondFs) { if(cliOutput){ cliOutput.textContent += 'Error: bonded helper unavailable\n'; } return; }
   if (commandHistory[commandHistory.length - 1] !== command) {
-    commandHistory.push(command); if (commandHistory.length > 50) commandHistory.shift();
+    commandHistory.push(command); if (commandHistory.length > (window.__cliHistoryMax || 50)) commandHistory.shift();
     try{ localStorage.setItem('cliHistory', JSON.stringify(commandHistory)); }catch(_){}
   }
   historyIndex = -1; currentCommand = '';

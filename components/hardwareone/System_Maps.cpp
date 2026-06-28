@@ -3364,11 +3364,11 @@ const char* cmd_maporganize(const String& argsInput) {
 // Command registry
 // Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry mapCommands[] = {
-  {"map", "Show current map info", false, cmd_map, nullptr},
+  {"map", "Show current map info (add 'json' for JSON output)", false, cmd_map, nullptr},
   {"mapload", "Load map file: \"<path>\"", false, cmd_mapload, "Usage: mapload \"<path>\""},
   {"mapunload", "Unload current map (free PSRAM on device)", false, cmd_mapunload, nullptr},
-  {"maplist", "List available maps", false, cmd_maplist, nullptr},
-  {"whereami", "Show current location context", false, cmd_whereami, nullptr},
+  {"maplist", "List available maps (add 'json' for JSON output)", false, cmd_maplist, nullptr},
+  {"whereami", "Show current location context (add 'json' for JSON output)", false, cmd_whereami, nullptr},
   {"search", "Search map features: <name>", false, cmd_search, "Usage: search <name>"},
   {"waypoint", "Manage waypoints: <list|add|del|goto|clear|clearall|rename|notes>", false, cmd_waypoint, "Usage: waypoint [list|add <lat> <lon> [name]|del <index>|goto <index>|clear|clearall|rename <index> <name>|notes <index> <notes>]"},
   {"gpstrack", "Manage GPS tracks: <status|load|clear>", false, cmd_gpstrack, "Usage: gpstrack [status|load <filepath>|clear]"},
@@ -3651,7 +3651,7 @@ static const char* cmd_mapcachekb(const String& argsInput) {
 static const SettingEntry mapsSettingEntries[] = {
   { "zoom",        SETTING_FLOAT, &gSettings.mapZoom,           0,    1.0f, nullptr, 0, 0,    "Default zoom (0.5-20.0)",            nullptr, false, nullptr, "mapzoom" },
   { "layers",      SETTING_INT,   &gSettings.mapVisibleLayers,  0x3FF, 0,   nullptr, 0, 0x3FF, "Visible layers (bitmask, 0-0x3FF)", nullptr, false, nullptr, "maplayers" },
-  { "cacheSizeKB", SETTING_INT,   &gSettings.mapCacheSizeKB,    1024, 0,    nullptr, 256, 4096, "Tile cache size (KB, reboot to apply)", nullptr, false, nullptr, "mapcachekb" },
+  { "cacheSizeKB", SETTING_INT,   &gSettings.mapCacheSizeKB,    1024, 0,    nullptr, 256, 4096, "Tile cache size (KB, effective on next map load)", nullptr, false, nullptr, "mapcachekb" },
 };
 
 // Columns: name, jsonSection, entries, count, isConnected, description
@@ -3676,7 +3676,7 @@ void mapsApplyPersistedSettings() {
 const CommandEntry mapsSettingCommands[] = {
   { "mapzoom",      "Set default map zoom: <0.5..20.0>",                 true, cmd_mapzoom,      "Usage: mapzoom <0.5..20.0>" },
   { "maplayers",    "Set visible layer bitmask: <0..1023>",              true, cmd_maplayers,    "Usage: maplayers <bitmask 0..1023>" },
-  { "mapcachekb",   "Set tile cache size in KB (reboot to apply)",        true, cmd_mapcachekb,   "Usage: mapcachekb <256..4096>" },
+  { "mapcachekb",   "Set tile cache size in KB (effective on next map load)",        true, cmd_mapcachekb,   "Usage: mapcachekb <256..4096>" },
 };
 const size_t mapsSettingCommandsCount = sizeof(mapsSettingCommands) / sizeof(mapsSettingCommands[0]);
 

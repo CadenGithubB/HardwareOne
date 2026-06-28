@@ -3511,9 +3511,34 @@ static const char* cmd_sr_timeout(const String& argsInput) {
   return buf;
 }
 
+// Forward declarations so cmd_sr_tuning can delegate "srtuning <sub> <value>"
+// to the dedicated single-param setters defined below.
+static const char* cmd_sr_tuning_swgain(const String& argsInput);
+static const char* cmd_sr_tuning_gain(const String& argsInput);
+static const char* cmd_sr_tuning_agc(const String& argsInput);
+static const char* cmd_sr_tuning_vad(const String& argsInput);
+static const char* cmd_sr_tuning_filters(const String& argsInput);
+
 static const char* cmd_sr_tuning(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  (void)argsInput;
+
+  // "srtuning <param> <value>" delegates to the matching setter; bare prints status.
+  String args = argsInput;
+  args.trim();
+  if (args.length() > 0) {
+    int sp = args.indexOf(' ');
+    String sub = (sp < 0) ? args : args.substring(0, sp);
+    String rest = (sp < 0) ? String("") : args.substring(sp + 1);
+    sub.toLowerCase();
+    rest.trim();
+    if (sub == "gain")    return cmd_sr_tuning_gain(rest);
+    if (sub == "agc")     return cmd_sr_tuning_agc(rest);
+    if (sub == "vad")     return cmd_sr_tuning_vad(rest);
+    if (sub == "swgain")  return cmd_sr_tuning_swgain(rest);
+    if (sub == "filters") return cmd_sr_tuning_filters(rest);
+    return "Error: unknown tuning param. Use: srtuning [gain|agc|vad|swgain|filters] <value>";
+  }
+
   EXT_RAM_BSS_ATTR static char buf[520];
   int mg = gSettings.microphoneGain;
   float swgain = 24.0f * ((float)mg / 50.0f);
@@ -3529,8 +3554,8 @@ static const char* cmd_sr_tuning(const String& argsInput) {
     "confidence: %.2f (command threshold)\n"
     "timeout: %d ms\n"
     "\nUsage: micgain <0-100>\n"
-    "Usage: sr tuning <gain|agc|vad|filters> <value>\n"
-    "Usage: sr tuning swgain <1.0-50.0> (sets micgain)",
+    "Usage: srtuning <gain|agc|vad|filters> <value>\n"
+    "Usage: srtuning swgain <1.0-50.0> (sets micgain)",
     mg, swgain, (int)getMicDcOffset(), gSrFiltersEnabled ? "ON" : "OFF",
     gSettings.srAfeGain, gSettings.srAgcMode, gSettings.srVadMode,
     gSrMinCommandConfidence, gSettings.srCommandTimeout);
@@ -3798,12 +3823,12 @@ static const char* cmd_sr_snip_config(const String& argsInput) {
 // Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry espsrCommands[] = {
   { "sr", "ESP-SR speech recognition commands.", false, cmd_sr, "Usage: sr <enable|start|stop|status|stack|cmds|debug|confidence|timeout|tuning|accept|dyngain|raw|autotune|snip>" },
-  { "srenable", "Enable/disable ESP-SR (compile-time flag).", true, cmd_sr_enable, "Usage: srenable <0|1>" },
-  { "opensr", "Start ESP-SR pipeline.", false, cmd_sr_start, "Usage: opensr" },
+  { "srenable", "ESP-SR enable is a compile-time flag (cannot be toggled at runtime).", true, cmd_sr_enable, "Usage: srenable   (informational; ESP-SR is set at compile time, any 0|1 argument is ignored)" },
+  { "opensr", "Start ESP-SR pipeline and arm voice as the current user.", false, cmd_sr_start, "Usage: opensr" },
   { "closesr", "Stop ESP-SR pipeline.", false, cmd_sr_stop, "Usage: closesr", "voice", "close" },
   { "srstatus", "Show ESP-SR status.", false, cmd_sr_status, "Usage: srstatus" },
   { "srstack", "Show sr_task stack high-water mark (run after voice stress test).", false, cmd_sr_stack, "Usage: srstack" },
-  { "srstart", "Start ESP-SR pipeline.", false, cmd_sr_start, "Usage: srstart" },
+  { "srstart", "Start ESP-SR pipeline and arm voice as the current user.", false, cmd_sr_start, "Usage: srstart" },
   { "srstop", "Stop ESP-SR pipeline.", false, cmd_sr_stop, "Usage: srstop" },
   { "voicearm", "Arm voice command execution as the current authenticated user.", false, cmd_voice_arm_cli, "Usage: voicearm" },
   { "voicedisarm", "Disarm voice command execution.", false, cmd_voice_disarm_cli, "Usage: voicedisarm" },
@@ -3821,14 +3846,14 @@ const CommandEntry espsrCommands[] = {
   { "srdebugtelem", "Set periodic telemetry interval (ms, 0=off).", false, cmd_sr_debug_telem, "Usage: srdebugtelem [ms]" },
   { "srdebugstats", "Print current SR statistics.", false, cmd_sr_debug_stats, "Usage: srdebugstats" },
   { "srdebugreset", "Reset SR debug counters.", false, cmd_sr_debug_reset, "Usage: srdebugreset" },
-  { "srconfidence", "Get/set command confidence threshold.", false, cmd_sr_confidence, "Usage: srconfidence [0.0-1.0]" },
+  { "srconfidence", "Get/set command confidence threshold.", false, cmd_sr_confidence, "Usage: srconfidence [<0.0-1.0> | category <0.0-1.0> | target <0.0-1.0>]" },
   { "sraccept", "Configure target acceptance policy (gap acceptance).", false, cmd_sr_accept, "Usage: sraccept [on|off|floor <0.0-1.0>|gap <0.0-1.0>|speech <0|1>]" },
   { "srdyngain", "Configure dynamic gain normalization (MultiNet input only).", false, cmd_sr_dyngain, "Usage: srdyngain [on|off|min <0.1-10>|max <0.1-10>|target <1000-30000>|alpha <0.0-1.0>|reset]" },
   { "srraw", "Toggle raw output mode (shows all MultiNet hypotheses).", false, cmd_sr_raw, "Usage: srraw [on|off]" },
   { "srautotune", "Auto-cycle through gain configurations to find best settings.", false, cmd_sr_autotune, "Usage: srautotune [start|stop|status]" },
   { "srtimeout", "Get/set command listening timeout.", false, cmd_sr_timeout, "Usage: srtimeout [1000-30000]" },
-  { "setmicsource", "Phase 2B: switch SR feed source (local PDM / G2 left temple).", false, cmd_setmicsource, "Usage: setmicsource [local|g2]" },
-  { "srtuning", "Show/set audio tuning parameters.", false, cmd_sr_tuning, "Usage: srtuning [gain|agc|vad]" },
+  { "setmicsource", "Switch SR feed source (local PDM / G2 left temple).", false, cmd_setmicsource, "Usage: setmicsource [local|g2]" },
+  { "srtuning", "Show/set audio tuning parameters.", false, cmd_sr_tuning, "Usage: srtuning [<gain|agc|vad|swgain|filters> <value>]  (bare = show status)" },
   { "srtuningswgain", "Set software gain (1.0-50.0) by updating shared micgain.", false, cmd_sr_tuning_swgain, "Usage: srtuningswgain <1.0-50.0>" },
   { "srtuninggain", "Set AFE linear gain (0.1-10.0).", false, cmd_sr_tuning_gain, "Usage: srtuninggain <0.1-10.0>" },
   { "srtuningagc", "Set AGC mode (0=off, 1-3=levels).", false, cmd_sr_tuning_agc, "Usage: srtuningagc <0-3>" },

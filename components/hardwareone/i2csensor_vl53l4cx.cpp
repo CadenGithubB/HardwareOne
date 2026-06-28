@@ -637,7 +637,7 @@ const CommandEntry tofCommands[] = {
   // Start/Stop/Read (3-level voice: "sensor" -> "time of flight" -> "open/close")
   { "opentof", "Start VL53L4CX ToF sensor.", false, cmd_tofstart, nullptr, "sensor", "time of flight", "open" },
   { "closetof", "Stop VL53L4CX ToF sensor.", false, cmd_tofstop, nullptr, "sensor", "time of flight", "close" },
-  { "tofread", "Read ToF distance sensor.", false, cmd_tof },
+  { "tofread", "Read ToF distance sensor. (add 'json' for JSON output)", false, cmd_tof },
   
   // UI Settings (client-side visualization)
   { "tofpollingms", "ToF UI polling: <50..5000>", true, cmd_tofpollingms, "Usage: tofpollingms <50..5000>" },
