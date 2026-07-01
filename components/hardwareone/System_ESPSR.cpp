@@ -3480,7 +3480,7 @@ static const char* cmd_sr_autotune(const String& argsInput) {
   
   if (args == "stop") {
     if (!gSrAutoTuneActive) {
-      return "Auto-tune not running.";
+      return "Error: Auto-tune not running.";
     }
     gSrAutoTuneActive = false;
     gSrRawOutputEnabled = false;
@@ -3733,7 +3733,7 @@ static const char* cmd_sr_snip_stop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   (void)argsInput;
   if (!gSrSnipSessionActive) {
-    return "No active snippet session";
+    return "Error: No active snippet session";
   }
   gSrSnipManualStopRequested = true;
   return "Manual snippet capture stopped";

@@ -8908,11 +8908,11 @@ const char* cmd_espnow_init(const String& argsInput) {
   // went wrong without digging through serial broadcasts.
   static char fullMsg[128];
   if (gLastInitErrorReason[0]) {
-    snprintf(fullMsg, sizeof(fullMsg), "Cannot start ESP-NOW: %s",
+    snprintf(fullMsg, sizeof(fullMsg), "Error: Cannot start ESP-NOW: %s",
              gLastInitErrorReason);
   } else {
     snprintf(fullMsg, sizeof(fullMsg),
-             "Cannot start ESP-NOW (no reason captured)");
+             "Error: Cannot start ESP-NOW (no reason captured)");
   }
   return fullMsg;
 }
@@ -11699,7 +11699,7 @@ const char* cmd_espnow_unpair(const String& argsInput) {
   if (!resolveDeviceNameOrMac(target, mac)) {
     EXT_RAM_BSS_ATTR static char errBuf[256];
     snprintf(errBuf, sizeof(errBuf), 
-             "Device '%s' not found. Use 'espnowdevices' to see paired devices.", 
+             "Error: Device '%s' not found. Use 'espnowdevices' to see paired devices.", 
              target.c_str());
     return errBuf;
   }
@@ -11709,7 +11709,7 @@ const char* cmd_espnow_unpair(const String& argsInput) {
   esp_err_t result = esp_now_del_peer(mac);
   if (result != ESP_OK) {
     if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-    snprintf(getDebugBuffer(), 1024, "Failed to unpair device: %d", result);
+    snprintf(getDebugBuffer(), 1024, "Error: Failed to unpair device: %d", result);
     return getDebugBuffer();
   }
 
@@ -12172,7 +12172,7 @@ const char* cmd_espnow_sendfile(const String& argsInput) {
   if (!resolveDeviceNameOrMac(target, mac)) {
     EXT_RAM_BSS_ATTR static char errBuf[256];
     snprintf(errBuf, sizeof(errBuf), 
-             "Device '%s' not found. Use 'espnowdevices' to see paired devices.", 
+             "Error: Device '%s' not found. Use 'espnowdevices' to see paired devices.", 
              target.c_str());
     return errBuf;
   }
@@ -12187,7 +12187,7 @@ const char* cmd_espnow_sendfile(const String& argsInput) {
   if (isMeshMode()) {
     if (!espnowPeerExists(mac)) {
       BROADCAST_PRINTF("[ESP-NOW][mesh] file send rejected: no peer entry MAC=%s", formatMacAddress(mac).c_str());
-      snprintf(sendfileBuffer, sizeof(sendfileBuffer), "Rejected (mesh): destination not in ESP-NOW peer table.");
+      snprintf(sendfileBuffer, sizeof(sendfileBuffer), "Error: Rejected (mesh): destination not in ESP-NOW peer table.");
       return sendfileBuffer;
     }
     BROADCAST_PRINTF("[ESP-NOW][mesh] file send accepted MAC=%s", formatMacAddress(mac).c_str());
@@ -12682,7 +12682,7 @@ const char* cmd_espnow_browse(const String& argsInput) {
     }
     if (!espnowPeerExists(targetMac)) {
       BROADCAST_PRINTF("[ESP-NOW][mesh] browse send rejected: no peer entry MAC=%s", formatMacAddress(targetMac).c_str());
-      return espnowAckErr(wantJson, "Rejected (mesh): destination not in ESP-NOW peer table.", "{\"schema\":1,\"ok\":false,\"error\":\"no peer entry\"}");
+      return espnowAckErr(wantJson, "Error: Rejected (mesh): destination not in ESP-NOW peer table.", "{\"schema\":1,\"ok\":false,\"error\":\"no peer entry\"}");
     }
   }
 
@@ -12763,7 +12763,7 @@ const char* cmd_espnow_fetch(const String& argsInput) {
     }
     if (!espnowPeerExists(targetMac)) {
       BROADCAST_PRINTF("[ESP-NOW][mesh] fetch send rejected: no peer entry MAC=%s", formatMacAddress(targetMac).c_str());
-      return espnowAckErr(wantJson, "Rejected (mesh): destination not in ESP-NOW peer table.", "{\"schema\":1,\"ok\":false,\"error\":\"no peer entry\"}");
+      return espnowAckErr(wantJson, "Error: Rejected (mesh): destination not in ESP-NOW peer table.", "{\"schema\":1,\"ok\":false,\"error\":\"no peer entry\"}");
     }
   }
 
@@ -13006,7 +13006,7 @@ const char* cmd_espnow_send(const String& argsInput) {
     if (jsonMode) return "{\"schema\":1,\"ok\":false,\"error\":\"not found\"}";
     EXT_RAM_BSS_ATTR static char errBuf[256];
     snprintf(errBuf, sizeof(errBuf),
-             "Device '%s' not found. Use 'espnowdevices' to see paired devices.",
+             "Error: Device '%s' not found. Use 'espnowdevices' to see paired devices.",
              target.c_str());
     return errBuf;
   }

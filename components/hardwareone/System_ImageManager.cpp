@@ -565,7 +565,7 @@ const char* cmd_images(const String& argsInput) {
   }
 
   if (!stats.available) {
-    snprintf(buf, 1024, "%s not available", locName);
+    snprintf(buf, 1024, "Error: %s not available", locName);
     return buf;
   }
   
@@ -644,7 +644,7 @@ const char* cmd_imagesend(const String& argsInput) {
   uint8_t mac[6];
   if (!resolveDeviceNameOrMac(device, mac)) {
     static char errBuf[128];
-    snprintf(errBuf, sizeof(errBuf), "Device '%s' not found", device.c_str());
+    snprintf(errBuf, sizeof(errBuf), "Error: Device '%s' not found", device.c_str());
     return errBuf;
   }
   

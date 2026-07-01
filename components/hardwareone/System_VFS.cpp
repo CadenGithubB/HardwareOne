@@ -926,7 +926,7 @@ static const char* cmd_sdunmount(const String& argsInput) {
   return buf;
 #else
   if (!VFS::isSDAvailable()) {
-    snprintf(buf, sizeof(buf), "SD card is not mounted");
+    snprintf(buf, sizeof(buf), "Error: SD card is not mounted");
     return buf;
   }
   
@@ -977,7 +977,7 @@ static const char* cmd_sdinfo(const String& argsInput) {
 #else
   if (!VFS::isSDAvailable()) {
     if (wantJson) return "{\"schema\":1,\"supported\":true,\"mounted\":false}";
-    snprintf(buf, sizeof(buf), "SD card not mounted. Use 'sdmount' to mount.");
+    snprintf(buf, sizeof(buf), "Error: SD card not mounted. Use 'sdmount' to mount.");
     return buf;
   }
 

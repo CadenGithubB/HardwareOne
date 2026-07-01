@@ -3393,7 +3393,7 @@ const char* cmd_autolog(const String& argsInput) {
     return getDebugBuffer();
 
   } else if (subcmd == "stop") {
-    if (!gAutoLogActive) return "Automation logging is not active";
+    if (!gAutoLogActive) return "Error: Automation logging is not active";
 
     appendAutoLogEntry("LOG_STOP", "Automation logging stopped");
 
