@@ -1379,10 +1379,10 @@ static const char* cmd_blestart(const String& argsInput) {
   bool advOk = initOk ? startBLEAdvertising() : false;
 
   if (!initOk) {
-    return "Failed to initialize Bluetooth";
+    return "Error: Failed to initialize Bluetooth";
   }
   if (!advOk) {
-    return "Failed to start advertising";
+    return "Error: Failed to start advertising";
   }
   BLE_DEBUGF(DEBUG_BLE_CORE, "BLE started and advertising");
   return "Bluetooth started and advertising";
@@ -1399,7 +1399,7 @@ static const char* cmd_blestatus(const String& argsInput) {
 
   if (!gBLEState || !gBLEState->initialized) {
     if (wantJson) return "{\"schema\":1,\"initialized\":false}";
-    return "Bluetooth not initialized. Run 'openble' first.";
+    return "Error: Bluetooth not initialized. Run 'openble' first.";
   }
 
   // JSON: machine-readable connection state for the app. Returned to the caller
@@ -1507,7 +1507,7 @@ static const char* cmd_blesecret(const String& argsInput) {
   // Provision the master secret only over a trusted local transport — never let it
   // traverse a (plaintext) BLE link where it could be sniffed.
   if (currentAuthContext().transport == SOURCE_BLUETOOTH) {
-    return "Set the secure-channel passphrase via serial, OLED, or web — not over Bluetooth.";
+    return "Error: Set the secure-channel passphrase via serial, OLED, or web — not over Bluetooth.";
   }
   if (a.equalsIgnoreCase("clear")) {
     setSetting(gSettings.bleSecureChannelSecret, String(""));
@@ -1535,9 +1535,9 @@ static const char* cmd_blesecure(const String& argsInput) {
   }
   bool on  = (a == "on"  || a == "1" || a == "true"  || a == "yes");
   bool off = (a == "off" || a == "0" || a == "false" || a == "no");
-  if (!on && !off) return "Usage: blesecure [on|off]";
+  if (!on && !off) return "Error: invalid arguments — Usage: blesecure [on|off]";
   if (on && gSettings.bleSecureChannelSecret.length() == 0)
-    return "Set a secret first: blesecret <passphrase>";
+    return "Error: Set a secret first: blesecret <passphrase>";
   setSetting(gSettings.bleRequireSecureChannel, on);
   return on ? "BLE secure channel REQUIRED — plaintext commands now refused."
             : "BLE secure channel optional — plaintext allowed.";
@@ -1565,7 +1565,7 @@ void bleSecurityBootNotice() {
 
 static const char* cmd_bledisconnect(const String& argsInput) {
   if (!isBLEConnected()) {
-    return "No client connected";
+    return "Error: No client connected";
   }
   BLE_DEBUGF(DEBUG_BLE_CORE, "Manual disconnect requested");
   disconnectBLE();
@@ -1597,12 +1597,12 @@ static const char* cmd_bleadv(const String& argsInput) {
     return "Advertising started";
   }
   BLE_DEBUGF(DEBUG_BLE_CORE, "bleadv manual trigger failed");
-  return "Failed to start advertising";
+  return "Error: Failed to start advertising";
 }
 
 static const char* cmd_blesend(const String& argsInput) {
   if (!isBLEConnected()) {
-    return "No client connected";
+    return "Error: No client connected";
   }
   
   // Extract message after first space (skip command name) - zero heap allocations
@@ -1611,20 +1611,21 @@ static const char* cmd_blesend(const String& argsInput) {
   while (*msg == ' ') msg++;  // Skip spaces
   
   if (*msg == '\0') {
-    return "Usage: blesend <message>";
+    return "Error: invalid arguments — Usage: blesend <message>";
   }
   
   if (sendBLEResponse(msg, strlen(msg))) {
     BLE_DEBUGF(DEBUG_BLE_DATA, "blesend transmitted len=%u", (unsigned)strlen(msg));
+    cliHint("this pushes raw text to the client; it does not run a command - to check the connection, run 'blestatus'");
     return "Message sent via BLE";
   }
   BLE_DEBUGF(DEBUG_BLE_DATA, "blesend failed len=%u", (unsigned)strlen(msg));
-  return "Failed to send message";
+  return "Error: Failed to send message";
 }
 
 static const char* cmd_blestream(const String& argsInput) {
   if (!gBLEState || !gBLEState->initialized) {
-    return "Bluetooth not initialized";
+    return "Error: Bluetooth not initialized";
   }
   
   // Parse args - skip command name, zero heap allocations
@@ -1712,17 +1713,17 @@ static const char* cmd_blestream(const String& argsInput) {
                    (unsigned long)systemMs);
         return buf;
       }
-      return "Intervals must be >= 100ms";
+      return "Error: Intervals must be >= 100ms";
     }
-    return "Usage: blestream interval <sensor_ms> <system_ms>";
+    return "Error: invalid arguments — Usage: blestream interval <sensor_ms> <system_ms>";
   }
   
-  return "Usage: blestream <on|off|sensors|system|events|interval>";
+  return "Error: invalid arguments — Usage: blestream <on|off|sensors|system|events|interval>";
 }
 
 static const char* cmd_bleevent(const String& argsInput) {
   if (!isBLEConnected()) {
-    return "No client connected";
+    return "Error: No client connected";
   }
   
   // Extract message after first space - zero heap allocations
@@ -1731,7 +1732,7 @@ static const char* cmd_bleevent(const String& argsInput) {
   while (*msg == ' ') msg++;  // Skip spaces
   
   if (*msg == '\0') {
-    return "Usage: bleevent <message>";
+    return "Error: invalid arguments — Usage: bleevent <message>";
   }
   
   if (blePushEvent(BLE_EVENT_CUSTOM, msg)) {
@@ -1739,7 +1740,7 @@ static const char* cmd_bleevent(const String& argsInput) {
     return "Event sent via BLE";
   }
   BLE_DEBUGF(DEBUG_BLE_DATA, "bleevent failed");
-  return "Failed to send event";
+  return "Error: Failed to send event";
 }
 
 static const char* cmd_blename(const String& argsInput) {
@@ -1755,7 +1756,7 @@ static const char* cmd_blename(const String& argsInput) {
     while (len > 0 && args[len - 1] == ' ') len--;
     
     if (len == 0 || len > 29) {
-      return "Name must be 1-29 characters";
+      return "Error: Name must be 1-29 characters";
     }
     
     String newName(args, len);
@@ -1785,7 +1786,7 @@ static const char* cmd_bletxpower(const String& argsInput) {
     int level = atoi(args);
     
     if (level < 0 || level > 7) {
-      return "TX power must be 0-7 (0=min/-12dBm, 7=max/+9dBm)";
+      return "Error: TX power must be 0-7 (0=min/-12dBm, 7=max/+9dBm)";
     }
     
     setSetting(gSettings.bleTxPower, level);
@@ -1959,7 +1960,7 @@ static const char* cmd_blemode(const String& argsInput) {
 
   if (arg == "client" || arg == "g2") {
 #if !ENABLE_G2_GLASSES
-    return "[BLE] G2 client not compiled (ENABLE_G2_GLASSES=0)";
+    return "Error: [BLE] G2 client not compiled (ENABLE_G2_GLASSES=0)";
 #else
     if (gBLEState && gBLEState->initialized) {
       broadcastOutput("[BLE] Stopping BLE server mode");
@@ -1970,7 +1971,7 @@ static const char* cmd_blemode(const String& argsInput) {
 #endif
   }
 
-  return "Usage: blemode [server|client]";
+  return "Error: invalid arguments — Usage: blemode [server|client]";
 }
 
 // =============================================================================
@@ -2031,7 +2032,7 @@ const size_t bluetoothCommandsCount = sizeof(bluetoothCommands) / sizeof(bluetoo
 const SettingEntry bluetoothSettingsEntries[] = {
   { "bluetoothAutoStart",    SETTING_BOOL,   &gSettings.bluetoothAutoStart,    true, 0, nullptr, 0, 1, "Auto-start at boot", nullptr, false, nullptr, "bleautostart" },
   { "bluetoothRequireAuth",  SETTING_BOOL,   &gSettings.bluetoothRequireAuth,  true, 0, nullptr, 0, 1, "Require Authentication", nullptr, false, nullptr, "blerequireauth" },
-  { "bluetoothDeviceName", SETTING_STRING, &gSettings.bleDeviceName, 0, 0, "HardwareOne", 0, 0, "Device Name", nullptr, false, nullptr, nullptr },
+  { "bluetoothDeviceName", SETTING_STRING, &gSettings.bleDeviceName, 0, 0, "HardwareOne", 0, 0, "Device Name", nullptr, false, nullptr, "blename" },
   { "bluetoothTxPower",      SETTING_INT,    &gSettings.bleTxPower,            3, 0, nullptr, 0, 7, "TX Power (0-7)", nullptr, false, nullptr, "bletxpower" },
   { "bluetoothMode",         SETTING_INT,    &gSettings.bleMode,               0,    0, nullptr, 0, 1, "Mode (0=server, 1=g2)", "0:Server,1:Client (G2)", false, nullptr, "blemode" },
   { "bleRequireSecureChannel", SETTING_BOOL, &gSettings.bleRequireSecureChannel, true, 0, nullptr, 0, 1, "Require Secure Channel", nullptr, false, nullptr, "blesecure" },

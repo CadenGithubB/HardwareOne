@@ -524,7 +524,8 @@ const char* cmd_capture(const String& argsInput) {
     snprintf(buf, sizeof(buf), "Captured: %s", result.c_str());
     return buf;
   }
-  return "Capture failed";
+  cliHint("if the camera is not started, run 'opencamera' first; for storage/space errors check 'sdinfo'");
+  return "Error: Capture failed";
 }
 
 const char* cmd_images(const String& argsInput) {
@@ -578,6 +579,11 @@ const char* cmd_images(const String& argsInput) {
   
   if (images.empty()) {
     pos += snprintf(buf + pos, 1024 - pos, "(no images)\n");
+    if (location == IMAGE_STORAGE_SD) {
+      pos += snprintf(buf + pos, 1024 - pos, "Hint: to take a photo, run 'capture sd'; for internal storage, run 'images'\n");
+    } else {
+      pos += snprintf(buf + pos, 1024 - pos, "Hint: to take a photo, run 'capture'; for SD-card photos, run 'images sd'\n");
+    }
   } else {
     for (const auto& img : images) {
       pos += snprintf(buf + pos, 1024 - pos, "  %s (%lu bytes)\n",
@@ -604,7 +610,7 @@ const char* cmd_imagedelete(const String& argsInput) {
   if (gImageManager.deleteImage(path)) {
     return "Image deleted";
   }
-  return "Failed to delete image";
+  return "Error: Failed to delete image";
 }
 
 const char* cmd_imagesend(const String& argsInput) {
@@ -615,7 +621,7 @@ const char* cmd_imagesend(const String& argsInput) {
   
   CommandArgs a(argsInput);
   if (a.count() == 0) {
-    return "Usage: imagesend <device> [path]";
+    return "Error: invalid arguments — Usage: imagesend <device> [path]";
   }
 
   String device, path;
@@ -645,10 +651,11 @@ const char* cmd_imagesend(const String& argsInput) {
   if (sendFileToMac(mac, path)) {
     static char buf[128];
     snprintf(buf, sizeof(buf), "Sending %s to %s", path.c_str(), device.c_str());
+    cliHint("send is asynchronous — the image lands in the peer's /espnow/received/ inbox; no completion status returns here");
     return buf;
   }
-  
-  return "Failed to send image";
+
+  return "Error: Failed to send image";
 }
 
 // Command registration

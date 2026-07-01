@@ -265,7 +265,7 @@ const char* cmd_thermalstart(const String& argsInput) {
   }
 
   if (!i2cPingAddress(I2C_ADDR_THERMAL, 100000, 50)) {
-    return "[Thermal] Not detected on I2C bus";
+    return "Error: [Thermal] Not detected on I2C bus";
   }
 
   DEBUG_CLIF("[THERMAL_START] Calling enqueueDeviceStart(I2C_DEVICE_THERMAL=%d)", I2C_DEVICE_THERMAL);
@@ -279,7 +279,7 @@ const char* cmd_thermalstart(const String& argsInput) {
     return "[Thermal] Sensor queued for open";
   } else {
     DEBUG_CLIF("[THERMAL_START] FAILED to enqueue (queue full)");
-    return "[Thermal] Error: Failed to enqueue open (queue full)";
+    return "Error: [Thermal] Failed to enqueue open (queue full)";
   }
 }
 
@@ -288,8 +288,8 @@ const char* cmd_thermalread(const String& argsInput) {
   const bool wantJson = argWantsJson(argsInput);
 
   if (!gThermalEnabled || !gThermalConnected) {
-    return wantJson ? "{\"valid\":false,\"enabled\":false}"
-                    : "[Thermal] Not running. Use 'openthermal' to start.";
+    return wantJson ? "{\"valid\":false,\"enabled\":false,\"hint\":\"the sensor is not open - run 'openthermal' first\"}"
+                    : "Error: [Thermal] Not running. Use 'openthermal' to start.";
   }
 
   if (!gThermalCache.thermalDataValid || !gThermalCache.thermalFrame) {
@@ -328,7 +328,7 @@ const char* cmd_thermalstop(const String& argsInput) {
 const char* cmd_thermalpalettedefault(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String _arg = argsInput; _arg.trim();
-  if (_arg.length() == 0) return "Usage: thermalpalettedefault <grayscale|iron|rainbow|hot|coolwarm>";
+  if (_arg.length() == 0) return "Error: invalid arguments — Usage: thermalpalettedefault <grayscale|iron|rainbow|hot|coolwarm>";
   const char* p = _arg.c_str();
   // Case-insensitive compare for palette names
   if (strncasecmp(p, "grayscale", 9) == 0) {
@@ -342,7 +342,7 @@ const char* cmd_thermalpalettedefault(const String& argsInput) {
   } else if (strncasecmp(p, "coolwarm", 8) == 0) {
     setSetting(gSettings.thermalPaletteDefault, "coolwarm");
   } else {
-    return "[Thermal] Error: Palette must be grayscale|iron|rainbow|hot|coolwarm";
+    return "Error: [Thermal] Palette must be grayscale|iron|rainbow|hot|coolwarm";
   }
   BROADCAST_PRINTF("thermalPaletteDefault set to %s", gSettings.thermalPaletteDefault.c_str());
   return "[Thermal] Setting updated";
@@ -351,9 +351,9 @@ const char* cmd_thermalpalettedefault(const String& argsInput) {
 const char* cmd_thermalewmafactor(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String _arg = argsInput; _arg.trim();
-  if (_arg.length() == 0) return "Usage: thermalewmafactor <0.0..1.0>";
+  if (_arg.length() == 0) return "Error: invalid arguments — Usage: thermalewmafactor <0.0..1.0>";
   float f = strtof(_arg.c_str(), nullptr);
-  if (f < 0.0f || f > 1.0f) return "[Thermal] Error: EWMA factor must be 0.0-1.0";
+  if (f < 0.0f || f > 1.0f) return "Error: [Thermal] EWMA factor must be 0.0-1.0";
   setSetting(gSettings.thermalEWMAFactor, f);
   BROADCAST_PRINTF("thermalEWMAFactor set to %.3f", f);
   return "[Thermal] Setting updated";
@@ -362,9 +362,9 @@ const char* cmd_thermalewmafactor(const String& argsInput) {
 const char* cmd_thermaltransitionms(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String _arg = argsInput; _arg.trim();
-  if (_arg.length() == 0) return "Usage: thermaltransitionms <0..5000>";
+  if (_arg.length() == 0) return "Error: invalid arguments — Usage: thermaltransitionms <0..5000>";
   int v = _arg.toInt();
-  if (v < 0 || v > 5000) return "[Thermal] Error: Transition time must be 0-5000ms";
+  if (v < 0 || v > 5000) return "Error: [Thermal] Transition time must be 0-5000ms";
   setSetting(gSettings.thermalTransitionMs, v);
   BROADCAST_PRINTF("thermalTransitionMs set to %d", v);
   return "[Thermal] Setting updated";
@@ -373,9 +373,9 @@ const char* cmd_thermaltransitionms(const String& argsInput) {
 const char* cmd_thermalwebmaxfps(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String _arg = argsInput; _arg.trim();
-  if (_arg.length() == 0) return "Usage: thermalwebmaxfps <1..30>";
+  if (_arg.length() == 0) return "Error: invalid arguments — Usage: thermalwebmaxfps <1..30>";
   int v = _arg.toInt();
-  if (v < 1 || v > 30) return "[Thermal] Error: Web max FPS must be 1-30";
+  if (v < 1 || v > 30) return "Error: [Thermal] Web max FPS must be 1-30";
   setSetting(gSettings.thermalWebMaxFps, v);
   BROADCAST_PRINTF("thermalWebMaxFps set to %d", v);
   return "[Thermal] Setting updated";
@@ -384,9 +384,9 @@ const char* cmd_thermalwebmaxfps(const String& argsInput) {
 const char* cmd_thermali2cclockhz(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String _arg = argsInput; _arg.trim();
-  if (_arg.length() == 0) return "Usage: thermali2cclockhz <100000..1000000>";
+  if (_arg.length() == 0) return "Error: invalid arguments — Usage: thermali2cclockhz <100000..1000000>";
   int v = _arg.toInt();
-  if (v < 100000 || v > 1000000) return "[Thermal] Error: I2C clock must be 100000-1000000 Hz";
+  if (v < 100000 || v > 1000000) return "Error: [Thermal] I2C clock must be 100000-1000000 Hz";
   setSetting(gSettings.i2cClockThermalHz, v);
   BROADCAST_PRINTF("thermalI2cClockHz set to %d", v);
   return "[Thermal] Setting updated";
@@ -395,9 +395,9 @@ const char* cmd_thermali2cclockhz(const String& argsInput) {
 const char* cmd_thermalupscalefactor(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String _arg = argsInput; _arg.trim();
-  if (_arg.length() == 0) return "Usage: thermalupscalefactor <1..4>";
+  if (_arg.length() == 0) return "Error: invalid arguments — Usage: thermalupscalefactor <1..4>";
   int v = _arg.toInt();
-  if (v < 1 || v > 4) return "[Thermal] Error: Upscale factor must be 1-4";
+  if (v < 1 || v > 4) return "Error: [Thermal] Upscale factor must be 1-4";
   setSetting(gSettings.thermalUpscaleFactor, v);
   BROADCAST_PRINTF("thermalUpscaleFactor set to %d", v);
   return "[Thermal] Setting updated";
@@ -406,7 +406,7 @@ const char* cmd_thermalupscalefactor(const String& argsInput) {
 const char* cmd_thermalrollingminmaxenabled(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String _arg = argsInput; _arg.trim();
-  if (_arg.length() == 0) return "Usage: thermalrollingminmaxenabled <0|1>";
+  if (_arg.length() == 0) return "Error: invalid arguments — Usage: thermalrollingminmaxenabled <0|1>";
   const char* p = _arg.c_str();
   bool enabled = (*p == '1' || strncasecmp(p, "true", 4) == 0);
   setSetting(gSettings.thermalRollingMinMaxEnabled, enabled);
@@ -417,9 +417,9 @@ const char* cmd_thermalrollingminmaxenabled(const String& argsInput) {
 const char* cmd_thermalrollingminmaxalpha(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String _arg = argsInput; _arg.trim();
-  if (_arg.length() == 0) return "Usage: thermalrollingminmaxalpha <0.0..1.0>";
+  if (_arg.length() == 0) return "Error: invalid arguments — Usage: thermalrollingminmaxalpha <0.0..1.0>";
   float f = strtof(_arg.c_str(), nullptr);
-  if (f < 0.0f || f > 1.0f) return "[Thermal] Error: Rolling min/max alpha must be 0.0-1.0";
+  if (f < 0.0f || f > 1.0f) return "Error: [Thermal] Rolling min/max alpha must be 0.0-1.0";
   setSetting(gSettings.thermalRollingMinMaxAlpha, f);
   BROADCAST_PRINTF("thermalRollingMinMaxAlpha set to %.3f", f);
   return "[Thermal] Setting updated";
@@ -428,9 +428,9 @@ const char* cmd_thermalrollingminmaxalpha(const String& argsInput) {
 const char* cmd_thermalrollingminmaxguardc(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String _arg = argsInput; _arg.trim();
-  if (_arg.length() == 0) return "Usage: thermalrollingminmaxguardc <0.0..10.0>";
+  if (_arg.length() == 0) return "Error: invalid arguments — Usage: thermalrollingminmaxguardc <0.0..10.0>";
   float f = strtof(_arg.c_str(), nullptr);
-  if (f < 0.0f || f > 10.0f) return "[Thermal] Error: Rolling min/max guard must be 0.0-10.0°C";
+  if (f < 0.0f || f > 10.0f) return "Error: [Thermal] Rolling min/max guard must be 0.0-10.0°C";
   setSetting(gSettings.thermalRollingMinMaxGuardC, f);
   BROADCAST_PRINTF("thermalRollingMinMaxGuardC set to %.3f", f);
   return "[Thermal] Setting updated";
@@ -439,9 +439,9 @@ const char* cmd_thermalrollingminmaxguardc(const String& argsInput) {
 const char* cmd_thermaltemporalalpha(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String _arg = argsInput; _arg.trim();
-  if (_arg.length() == 0) return "Usage: thermaltemporalalpha <0.0..1.0>";
+  if (_arg.length() == 0) return "Error: invalid arguments — Usage: thermaltemporalalpha <0.0..1.0>";
   float f = strtof(_arg.c_str(), nullptr);
-  if (f < 0.0f || f > 1.0f) return "[Thermal] Error: Temporal alpha must be 0.0-1.0";
+  if (f < 0.0f || f > 1.0f) return "Error: [Thermal] Temporal alpha must be 0.0-1.0";
   setSetting(gSettings.thermalTemporalAlpha, f);
   BROADCAST_PRINTF("thermalTemporalAlpha set to %.3f", f);
   return "[Thermal] Setting updated";
@@ -450,9 +450,9 @@ const char* cmd_thermaltemporalalpha(const String& argsInput) {
 const char* cmd_thermalrotation(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String _arg = argsInput; _arg.trim();
-  if (_arg.length() == 0) return "Usage: thermalrotation <0|1|2|3> (0=0°, 1=90°, 2=180°, 3=270°)";
+  if (_arg.length() == 0) return "Error: invalid arguments — Usage: thermalrotation <0|1|2|3> (0=0°, 1=90°, 2=180°, 3=270°)";
   int v = _arg.toInt();
-  if (v < 0 || v > 3) return "[Thermal] Error: Rotation must be 0-3 (0=0°, 1=90°, 2=180°, 3=270°)";
+  if (v < 0 || v > 3) return "Error: [Thermal] Rotation must be 0-3 (0=0°, 1=90°, 2=180°, 3=270°)";
 
   int oldRotation = gSettings.thermalRotation;
   setSetting(gSettings.thermalRotation, v);
@@ -1150,9 +1150,9 @@ void thermalInterpolateFrame(const float* src, float* dst, int targetWidth, int 
 const char* cmd_thermalpollingms(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String _arg = argsInput; _arg.trim();
-  if (_arg.length() == 0) return "Usage: thermalpollingms <50..5000>";
+  if (_arg.length() == 0) return "Error: invalid arguments — Usage: thermalpollingms <50..5000>";
   int v = _arg.toInt();
-  if (v < 50 || v > 5000) return "[Thermal] Error: Polling interval must be 50-5000ms";
+  if (v < 50 || v > 5000) return "Error: [Thermal] Polling interval must be 50-5000ms";
   setSetting(gSettings.thermalPollingMs, v);
   BROADCAST_PRINTF("thermalPollingMs set to %d", v);
   return "[Thermal] Setting updated";
@@ -1161,7 +1161,7 @@ const char* cmd_thermalpollingms(const String& argsInput) {
 const char* cmd_thermalinterpolationenabled(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String _arg = argsInput; _arg.trim();
-  if (_arg.length() == 0) return "Usage: thermalinterpolationenabled <0|1>";
+  if (_arg.length() == 0) return "Error: invalid arguments — Usage: thermalinterpolationenabled <0|1>";
   const char* p = _arg.c_str();
   // Accept 0, 1, true, false (case insensitive)
   bool enabled = (*p == '1' || strncasecmp(p, "true", 4) == 0);
@@ -1173,9 +1173,9 @@ const char* cmd_thermalinterpolationenabled(const String& argsInput) {
 const char* cmd_thermalinterpolationsteps(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String _arg = argsInput; _arg.trim();
-  if (_arg.length() == 0) return "Usage: thermalinterpolationsteps <1..8>";
+  if (_arg.length() == 0) return "Error: invalid arguments — Usage: thermalinterpolationsteps <1..8>";
   int v = _arg.toInt();
-  if (v < 1 || v > 8) return "[Thermal] Error: Interpolation steps must be 1-8";
+  if (v < 1 || v > 8) return "Error: [Thermal] Interpolation steps must be 1-8";
   setSetting(gSettings.thermalInterpolationSteps, v);
   BROADCAST_PRINTF("thermalInterpolationSteps set to %d", v);
   return "[Thermal] Setting updated";
@@ -1184,9 +1184,9 @@ const char* cmd_thermalinterpolationsteps(const String& argsInput) {
 const char* cmd_thermalinterpolationbuffersize(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String _arg = argsInput; _arg.trim();
-  if (_arg.length() == 0) return "Usage: thermalinterpolationbuffersize <1..10>";
+  if (_arg.length() == 0) return "Error: invalid arguments — Usage: thermalinterpolationbuffersize <1..10>";
   int v = _arg.toInt();
-  if (v < 1 || v > 10) return "[Thermal] Error: Interpolation buffer size must be 1-10";
+  if (v < 1 || v > 10) return "Error: [Thermal] Interpolation buffer size must be 1-10";
   setSetting(gSettings.thermalInterpolationBufferSize, v);
   BROADCAST_PRINTF("thermalInterpolationBufferSize set to %d", v);
   return "[Thermal] Setting updated";
@@ -1322,7 +1322,7 @@ const char* cmd_thermalautostart(const String& argsInput) {
     setSetting(gSettings.thermalAutoStart, false);
     return "[Thermal] Auto-start disabled";
   }
-  return "Usage: thermalautostart [on|off]";
+  return "Error: invalid arguments — Usage: thermalautostart [on|off]";
 }
 
 // Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
@@ -1490,7 +1490,7 @@ const char* cmd_thermaltargetfps(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String valStr = argsInput;
   valStr.trim();
-  if (valStr.length() == 0) return "Usage: thermalTargetFps <1..8>";
+  if (valStr.length() == 0) return "Error: invalid arguments — Usage: thermalTargetFps <1..8>";
   int v = valStr.toInt();
   if (v < 1) v = 1;
   if (v > 8) v = 8;
@@ -1503,7 +1503,7 @@ const char* cmd_thermaldevicepollms(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String valStr = argsInput;
   valStr.trim();
-  if (valStr.length() == 0) return "Usage: thermalDevicePollMs <100..2000>";
+  if (valStr.length() == 0) return "Error: invalid arguments — Usage: thermalDevicePollMs <100..2000>";
   int v = valStr.toInt();
   if (v < 100) v = 100;
   if (v > 2000) v = 2000;

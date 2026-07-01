@@ -414,7 +414,7 @@ void blePeersReadJson(JsonDocument& doc) {
 
 const char* cmd_blepeers(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!ensureDebugBuffer()) return "(no buffer)";
+  if (!ensureDebugBuffer()) return "Error: (no buffer)";
 
   if (argWantsJson(argsInput)) {
     PSRAM_JSON_DOC(doc);
@@ -436,6 +436,7 @@ const char* cmd_blepeers(const String& argsInput) {
       o["pairedBy"]    = d.pairedByUser;
     }
     doc["count"] = (int)gPeerCount;
+    doc["hint"] = "to see a bonded peer's data, run 'bondstatus' (or 'bondrequestcap' for its capabilities)";
     serializeJson(doc, getDebugBuffer(), 1024);
     return getDebugBuffer();
   }
@@ -466,6 +467,7 @@ const char* cmd_blepeers(const String& argsInput) {
                     d.pairedByUser.length() ? d.pairedByUser.c_str() : "(none)");
     pos += snprintf(out + pos, cap - pos, "\n");
   }
+  cliHint("to see a bonded peer's data, run 'bondstatus' (or 'bondrequestcap' for its capabilities)");
   return out;
 }
 

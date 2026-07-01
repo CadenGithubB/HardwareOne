@@ -90,7 +90,8 @@ const char* cmd_gamepad(const String& argsInput) {
   if (!gInputConnected) {
     // Attempt on-demand init with retry/backoff
     if (!gamepadInitConnection()) {
-      return "[Gamepad] Error: Not connected - check wiring";
+      cliHint("to start the gamepad, run 'openinput'; if it is still missing, confirm the address with 'i2cscan'");
+      return "Error: [Gamepad] Not connected - check wiring";
     }
   }
   gamepadPoll();

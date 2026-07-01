@@ -119,7 +119,7 @@ const char* cmd_webclihistorysize(const String& argsInput) {
 
   String valStr = argsInput;
   valStr.trim();
-  if (valStr.length() == 0) return "Usage: webclihistorysize <1..100>";
+  if (valStr.length() == 0) return "Error: invalid arguments — Usage: webclihistorysize <1..100>";
   int v = valStr.toInt();
   if (v < 1) v = 1;
   if (v > 100) v = 100;
@@ -134,7 +134,7 @@ const char* cmd_oledclihistorysize(const String& argsInput) {
 
   String valStr = argsInput;
   valStr.trim();
-  if (valStr.length() == 0) return "Usage: oledclihistorysize <10..100>";
+  if (valStr.length() == 0) return "Error: invalid arguments — Usage: oledclihistorysize <10..100>";
   int v = valStr.toInt();
   if (v < 10) v = 10;  // Minimum 10 lines for OLED
   if (v > 100) v = 100;
@@ -158,7 +158,7 @@ const char* cmd_outserial(const String& argsInput) {
     if (t2.length()) { modeTemp = (t2 == "temp"); }
   }
   if (v != 0) v = 1;
-  if (v < 0) return "Usage: outserial <0|1> [persist|temp]";
+  if (v < 0) return "Error: invalid arguments — Usage: outserial <0|1> [persist|temp]";
   if (modeTemp) {
     if (v) gOutputFlags |= OUTPUT_SERIAL;
     else gOutputFlags &= ~OUTPUT_SERIAL;
@@ -186,7 +186,7 @@ const char* cmd_outweb(const String& argsInput) {
     if (t2.length()) { modeTemp = (t2 == "temp"); }
   }
   if (v != 0) v = 1;
-  if (v < 0) return "Usage: outweb <0|1> [persist|temp]";
+  if (v < 0) return "Error: invalid arguments — Usage: outweb <0|1> [persist|temp]";
   if (modeTemp) {
     if (v) gOutputFlags |= OUTPUT_WEB;
     else gOutputFlags &= ~OUTPUT_WEB;
@@ -1246,7 +1246,7 @@ const char* cmd_tzoffsetminutes(const String& argsInput) {
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   String valStr = argsInput;
   valStr.trim();
-  if (valStr.length() == 0) return "Usage: tzoffsetminutes <-720..840>";
+  if (valStr.length() == 0) return "Error: invalid arguments — Usage: tzoffsetminutes <-720..840>";
   int offset = atoi(valStr.c_str());
   // -720..+840 = UTC-12 .. UTC+14, the real-world timezone span (e.g. Kiribati
   // Line Islands at +14). Matches the tzOffsetMinutes setting's min/max.
@@ -1265,7 +1265,7 @@ const char* cmd_ntpserver(const String& argsInput) {
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   String valStr = argsInput;
   valStr.trim();
-  if (valStr.length() == 0) return "Usage: ntpserver <host>";
+  if (valStr.length() == 0) return "Error: invalid arguments — Usage: ntpserver <host>";
   const char* p = valStr.c_str();
 
   // Resolve host first
@@ -1314,7 +1314,7 @@ const char* cmd_ntpserver(const String& argsInput) {
 }
 #else
 const char* cmd_ntpserver(const String& argsInput) {
-  return "NTP server command requires WiFi to be enabled";
+  return "Error: NTP server command requires WiFi to be enabled";
 }
 #endif // ENABLE_WIFI
 
@@ -1323,7 +1323,7 @@ const char* cmd_espnowenabled(const String& argsInput) {
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   String valStr = argsInput;
   valStr.trim();
-  if (valStr.length() == 0) return "Usage: espnowenabled <0|1>";
+  if (valStr.length() == 0) return "Error: invalid arguments — Usage: espnowenabled <0|1>";
   const char* p = valStr.c_str();
   bool enabled = (*p == '1' || strncasecmp(p, "true", 4) == 0);
   setSetting(gSettings.espnowenabled, enabled);
@@ -1337,7 +1337,7 @@ const char* cmd_httpAutoStart(const String& argsInput) {
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   String valStr = argsInput;
   valStr.trim();
-  if (valStr.length() == 0) return "Usage: httpAutoStart <0|1>";
+  if (valStr.length() == 0) return "Error: invalid arguments — Usage: httpAutoStart <0|1>";
   const char* p = valStr.c_str();
   bool enabled = (*p == '1' || strncasecmp(p, "true", 4) == 0);
   setSetting(gSettings.httpAutoStart, enabled);
@@ -1352,7 +1352,7 @@ const char* cmd_httpsEnabled(const String& argsInput) {
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   String valStr = argsInput;
   valStr.trim();
-  if (valStr.length() == 0) return "Usage: httpsEnabled <0|1>";
+  if (valStr.length() == 0) return "Error: invalid arguments — Usage: httpsEnabled <0|1>";
   const char* p = valStr.c_str();
   bool enabled = (*p == '1' || strncasecmp(p, "true", 4) == 0);
   setSetting(gSettings.httpsEnabled, enabled);
@@ -2247,6 +2247,80 @@ const char* handleSettingCommand(const SettingEntry* entry, const String& argsIn
 }
 
 // ============================================================================
+// Settings-editor field commands
+// ----------------------------------------------------------------------------
+// Static, registered CLI commands — one per editable setting that had no
+// dedicated module command — so the web/OLED settings screen can save those
+// fields. NOT runtime auto-registration: these are real CommandEntry rows in a
+// static table the skill scanner sees. Each looks up its OWN SettingEntry by
+// its (unique) cmdKey and writes via handleSettingCommand. Settings that need a
+// live apply action keep pointing their cmdKey at a dedicated command instead.
+// ============================================================================
+const SettingEntry* findSettingByCmdKey(const char* cmdKey) {
+  if (!cmdKey || !cmdKey[0]) return nullptr;
+  size_t n = 0;
+  const SettingsModule** mods = getSettingsModules(n);
+  for (size_t m = 0; m < n; m++) {
+    const SettingsModule* mod = mods[m];
+    if (!mod) continue;
+    for (size_t i = 0; i < mod->count; i++) {
+      const SettingEntry* e = &mod->entries[i];
+      if (e->cmdKey && strcasecmp(e->cmdKey, cmdKey) == 0) return e;
+    }
+  }
+  return nullptr;
+}
+
+#define SETTING_EDITOR_CMD(func, cmdKeyLit) \
+  static const char* func(const String& a) { \
+    RETURN_VALID_IF_VALIDATE_CSTR(); \
+    const SettingEntry* e = findSettingByCmdKey(cmdKeyLit); \
+    if (!e) return "Error: setting not found for this command"; \
+    return handleSettingCommand(e, a); \
+  }
+
+SETTING_EDITOR_CMD(cmd_set_sessionidleweb,      "sessionidleweb")
+SETTING_EDITOR_CMD(cmd_set_sessionidleserial,   "sessionidleserial")
+SETTING_EDITOR_CMD(cmd_set_sessionidleble,      "sessionidleble")
+SETTING_EDITOR_CMD(cmd_set_sessionidledisplay,  "sessionidledisplay")
+SETTING_EDITOR_CMD(cmd_set_powerdim,            "powerdim")
+SETTING_EDITOR_CMD(cmd_set_logcategorytags,     "logcategorytags")
+SETTING_EDITOR_CMD(cmd_set_tofi2cclockhz,       "tofi2cclockhz")
+SETTING_EDITOR_CMD(cmd_set_presencedevicepollms,"presencedevicepollms")
+SETTING_EDITOR_CMD(cmd_set_apdsdevicepollms,    "apdsdevicepollms")
+SETTING_EDITOR_CMD(cmd_set_fmradiodevicepollms, "fmradiodevicepollms")
+SETTING_EDITOR_CMD(cmd_set_gpsdevicepollms,     "gpsdevicepollms")
+SETTING_EDITOR_CMD(cmd_set_sensorlogpath,       "sensorlogpath")
+SETTING_EDITOR_CMD(cmd_set_eirequirelabels,     "eirequirelabels")
+SETTING_EDITOR_CMD(cmd_set_eimaxdetections,     "eimaxdetections")
+SETTING_EDITOR_CMD(cmd_set_eiinputsize,         "eiinputsize")
+SETTING_EDITOR_CMD(cmd_set_eiinterval,          "eiinterval")
+SETTING_EDITOR_CMD(cmd_set_srautostart,         "srautostart")
+SETTING_EDITOR_CMD(cmd_set_srmodelsource,       "srmodelsource")
+
+const CommandEntry settingEditorCommands[] = {
+  { "sessionidleweb",      "Set web CLI session idle-logout (min)",      true, cmd_set_sessionidleweb,      "Usage: sessionidleweb <0-1440>" },
+  { "sessionidleserial",   "Set serial session idle-logout (min)",       true, cmd_set_sessionidleserial,   "Usage: sessionidleserial <0-1440>" },
+  { "sessionidleble",      "Set BLE session idle-logout (min)",          true, cmd_set_sessionidleble,      "Usage: sessionidleble <0-1440>" },
+  { "sessionidledisplay",  "Set OLED session idle-logout (min)",         true, cmd_set_sessionidledisplay,  "Usage: sessionidledisplay <0-1440>" },
+  { "powerdim",            "Set display dim level (%)",                  true, cmd_set_powerdim,            "Usage: powerdim <0-100>" },
+  { "logcategorytags",     "Set log category-tags flag (persist only)",  true, cmd_set_logcategorytags,     "Usage: logcategorytags <0|1>" },
+  { "tofi2cclockhz",       "Set ToF I2C clock (Hz)",                     true, cmd_set_tofi2cclockhz,       "Usage: tofi2cclockhz <50000-400000>" },
+  { "presencedevicepollms","Set presence sensor poll interval (ms)",     true, cmd_set_presencedevicepollms,"Usage: presencedevicepollms <50-5000>" },
+  { "apdsdevicepollms",    "Set APDS poll interval (ms)",                true, cmd_set_apdsdevicepollms,    "Usage: apdsdevicepollms <value>" },
+  { "fmradiodevicepollms", "Set FM radio poll interval (ms)",            true, cmd_set_fmradiodevicepollms, "Usage: fmradiodevicepollms <value>" },
+  { "gpsdevicepollms",     "Set GPS poll interval (ms)",                 true, cmd_set_gpsdevicepollms,     "Usage: gpsdevicepollms <value>" },
+  { "sensorlogpath",       "Set default sensor-log file path",           true, cmd_set_sensorlogpath,       "Usage: sensorlogpath <\"/path\">" },
+  { "eirequirelabels",     "Set Edge Impulse require-labels flag",       true, cmd_set_eirequirelabels,     "Usage: eirequirelabels <0|1>" },
+  { "eimaxdetections",     "Set Edge Impulse max detections",            true, cmd_set_eimaxdetections,     "Usage: eimaxdetections <value>" },
+  { "eiinputsize",         "Set Edge Impulse input size",                true, cmd_set_eiinputsize,         "Usage: eiinputsize <value>" },
+  { "eiinterval",          "Set Edge Impulse inference interval (ms)",   true, cmd_set_eiinterval,          "Usage: eiinterval <100-10000>" },
+  { "srautostart",         "Set ESP-SR auto-start flag",                 true, cmd_set_srautostart,         "Usage: srautostart <0|1>" },
+  { "srmodelsource",       "Set ESP-SR model source",                    true, cmd_set_srmodelsource,       "Usage: srmodelsource <value>" },
+};
+const size_t settingEditorCommandsCount = sizeof(settingEditorCommands) / sizeof(settingEditorCommands[0]);
+
+// ============================================================================
 // Settings schema JSON — shared by the local /api/settings/schema web handler
 // and the worker's sendBondSchema() (which serializes this to a file for
 // transport across the bond). One source of truth means master and worker
@@ -2309,7 +2383,7 @@ const char* cmd_controls(const String& argsInput) {
   String args = argsInput; args.trim();
 
   if (!argWantsJson(args)) {
-    return "Usage: controls json <module>   (e.g. 'controls json imu')\n"
+    return "Error: invalid arguments — Usage: controls json <module>   (e.g. 'controls json imu')\n"
            "       controls json            (lists available modules)";
   }
 
@@ -2392,7 +2466,7 @@ void buildSettingsSchemaJson(JsonDocument& doc) {
       }
       if (e->readOnly) entry["readOnly"] = true;
       if (e->group)    entry["group"] = e->group;
-      if (e->cmdKey)   entry["cmdKey"] = e->cmdKey;
+      if (e->cmdKey) entry["cmdKey"] = e->cmdKey;
 
       if (e->type == SETTING_INT || e->type == SETTING_U8 ||
           e->type == SETTING_U16 || e->type == SETTING_U32 ||

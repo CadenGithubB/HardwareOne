@@ -624,6 +624,8 @@ esp_err_t handleWaypointsAPI(httpd_req_t* req) {
         String addOut;
         bool ok = executeUnifiedWebCommand(req, ctx, addCmd, addOut);
         if (ok) {
+          // Tolerate the uniform "OK: " status-token stamp before the anchored parse.
+          if (addOut.startsWith("OK: ")) addOut = addOut.substring(4);
           // Parse returned index from "Added waypoint N: ..." output
           int addedIdx = -1;
           if (addOut.startsWith("Added waypoint ")) {

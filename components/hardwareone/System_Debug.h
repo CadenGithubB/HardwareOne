@@ -473,6 +473,21 @@ inline void incrementDebugDropped() { DEBUG_MANAGER.incrementDebugDropped(); }
 void broadcastOutput(const String& s);
 void broadcastOutput(const char* s);
 
+// CLI next-step hint (see System_Debug.cpp). Text form prints "Hint: <text>";
+// JSON command output sets a top-level "hint" string field instead. Use only
+// where output is a genuine dead end or could be misread — not everywhere.
+void cliHint(const char* text);
+void cliHintf(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+
+// Convenience for the common "this output is a listing, not a reading" case.
+void emitListingTrailer(const char* what, const char* readHint, const char* extraNote = nullptr);
+
+// Log de-spam primitive: returns true at most once per windowMs for a given
+// by-ref last-timestamp (first call always returns true). Use to throttle a
+// repeating WARN/log line from a flapping peer/condition. Generalized from the
+// hand-rolled notifyCooldownOk / logBondAuthFailure idiom. millis()-based.
+bool logCooldownOk(uint32_t& lastMs, uint32_t windowMs);
+
 // Forward declaration for CommandContext (defined in main .ino)
 struct CommandContext;
 void broadcastOutput(const String& s, const CommandContext& ctx);

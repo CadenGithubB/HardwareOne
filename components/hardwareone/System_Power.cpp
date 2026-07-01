@@ -171,7 +171,7 @@ const char* cmd_power(const String& argsInput) {
   
   if (subCmd.equalsIgnoreCase("mode")) {
     if (subArgs.length() == 0) {
-      return "Error: Usage: power mode [perf|balanced|saver|ultra|0-3]";
+      return "Error: invalid arguments — Usage: power mode [perf|balanced|saver|ultra|0-3]";
     }
     
     uint8_t newMode = 255;
@@ -207,7 +207,7 @@ const char* cmd_power(const String& argsInput) {
     
   } else if (subCmd.equalsIgnoreCase("auto")) {
     if (subArgs.length() == 0) {
-      return "Error: Usage: power auto [on|off]";
+      return "Error: invalid arguments — Usage: power auto [on|off]";
     }
     
     bool enable = subArgs.equalsIgnoreCase("on") || subArgs.equalsIgnoreCase("true") || subArgs == "1";
@@ -221,7 +221,7 @@ const char* cmd_power(const String& argsInput) {
     
   } else if (subCmd.equalsIgnoreCase("threshold")) {
     if (subArgs.length() == 0) {
-      return "Error: Usage: power threshold [0-100]";
+      return "Error: invalid arguments — Usage: power threshold [0-100]";
     }
     
     int threshold = subArgs.toInt();
@@ -296,7 +296,7 @@ static const char* cmd_powercooldown(const String& argsInput) {
     return getDebugBuffer();
   }
   long v = arg.toInt();
-  if (v < 0 || v > 60000) return "Usage: powercooldown <0..60000>  (ms; 0 disables)";
+  if (v < 0 || v > 60000) return "Error: invalid arguments — Usage: powercooldown <0..60000>  (ms; 0 disables)";
   setSetting(gSettings.powerTransitionCooldownMs, (uint32_t)v);
   snprintf(getDebugBuffer(), 1024,
            "Sleep transition cooldown set to %ld ms%s",
@@ -322,7 +322,7 @@ static const char* cmd_powersave(const String& argsInput) {
     return getDebugBuffer();
   }
   long v = arg.toInt();
-  if (v < 0 || v > 1440) return "Usage: powersave <0..1440>  (minutes; 0 disables)";
+  if (v < 0 || v > 1440) return "Error: invalid arguments — Usage: powersave <0..1440>  (minutes; 0 disables)";
   setSetting(gSettings.powerSaveTimeoutMinutes, (uint32_t)v);
   snprintf(getDebugBuffer(), 1024,
            "Power saving set to %ld min%s",
@@ -353,10 +353,10 @@ static bool isPowerModuleConnected() {
 static const SettingEntry powerSettingEntries[] = {
   // Fields are uint8_t — must use SETTING_U8 to avoid 4-byte-write overflow
   // into adjacent struct members. See System_Settings.h SettingType enum.
-  { "mode", SETTING_U8, &gSettings.powerMode, 0, 0, nullptr, 0, 3, "Power Mode", "Performance,Balanced,PowerSaver,UltraSaver", false, nullptr, nullptr },
-  { "autoMode", SETTING_BOOL, &gSettings.powerAutoMode, false, 0, nullptr, 0, 1, "Auto Mode", nullptr, false, nullptr, nullptr },
-  { "batteryThreshold", SETTING_U8, &gSettings.powerBatteryThreshold, 20, 0, nullptr, 0, 100, "Battery Threshold (%)", nullptr, false, nullptr, nullptr },
-  { "displayDimLevel", SETTING_U8, &gSettings.powerDisplayDimLevel, 30, 0, nullptr, 0, 100, "Display Dim Level (%)", nullptr, false, nullptr, nullptr },
+  { "mode", SETTING_U8, &gSettings.powerMode, 0, 0, nullptr, 0, 3, "Power Mode", "Performance,Balanced,PowerSaver,UltraSaver", false, nullptr, "power mode" },
+  { "autoMode", SETTING_BOOL, &gSettings.powerAutoMode, false, 0, nullptr, 0, 1, "Auto Mode", nullptr, false, nullptr, "power auto" },
+  { "batteryThreshold", SETTING_U8, &gSettings.powerBatteryThreshold, 20, 0, nullptr, 0, 100, "Battery Threshold (%)", nullptr, false, nullptr, "power threshold" },
+  { "displayDimLevel", SETTING_U8, &gSettings.powerDisplayDimLevel, 30, 0, nullptr, 0, 100, "Display Dim Level (%)", nullptr, false, nullptr, "powerdim" },
   { "transitionCooldownMs", SETTING_INT, &gSettings.powerTransitionCooldownMs, 5000, 0, nullptr, 0, 60000, "Sleep cooldown (ms, 0=disabled)", nullptr, false, nullptr, "powercooldown" },
   { "powerSaveMinutes", SETTING_INT, &gSettings.powerSaveTimeoutMinutes, 10, 0, nullptr, 0, 1440, "Power saving (min, 0=disabled)", nullptr, false, nullptr, "powersave" }
 };

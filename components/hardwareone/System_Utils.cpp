@@ -1132,7 +1132,7 @@ const char* settingBoolToggle(bool& field, const String& argsInput, const char* 
     snprintf(buf, sizeof(buf), "%s disabled", label);
     return buf;
   }
-  snprintf(buf, sizeof(buf), "%s: invalid value (use on|off)", label);
+  snprintf(buf, sizeof(buf), "Error: %s: invalid value (use on|off)", label);
   return buf;
 }
 
@@ -1310,6 +1310,7 @@ const char* cmd_voltage(const String& originalCmd) {
   BROADCAST_PRINTF("Estimated Power (3.3V): %.2fW", (estimatedCurrent * 3.3) / 1000.0);
   broadcastOutput("");
   broadcastOutput("Note: Direct voltage measurement requires external ADC connection");
+  cliHint("these are estimates, not a reading — for measured battery volts and charge, run 'batterystatus'");
 
   return "[System] Voltage info displayed";
 }
@@ -1849,7 +1850,7 @@ const char* cmd_timeset(const String& argsInput) {
   arg.trim();
   
   if (arg.length() == 0) {
-    return "Usage: timeset YYYY-MM-DD HH:MM:SS  or  timeset <unix_timestamp>";
+    return "Error: invalid arguments — Usage: timeset YYYY-MM-DD HH:MM:SS  or  timeset <unix_timestamp>";
   }
   
   struct tm timeinfo = {0};
@@ -1872,7 +1873,7 @@ const char* cmd_timeset(const String& argsInput) {
     int year, month, day, hour, minute, second;
     if (sscanf(arg.c_str(), "%d-%d-%d %d:%d:%d", 
                &year, &month, &day, &hour, &minute, &second) != 6) {
-      return "Invalid format. Use: YYYY-MM-DD HH:MM:SS or unix timestamp";
+      return "Error: Invalid format. Use: YYYY-MM-DD HH:MM:SS or unix timestamp";
     }
     
     timeinfo.tm_year = year - 1900;
@@ -1958,7 +1959,7 @@ const char* cmd_testencryption(const String& argsInput) {
   args.trim();
 
   if (args.length() == 0) {
-    return "Usage: testencryption <password_to_test>";
+    return "Error: invalid arguments — Usage: testencryption <password_to_test>";
   }
 
   String encrypted = encryptString(args);
@@ -1980,7 +1981,7 @@ const char* cmd_testpassword(const String& argsInput) {
   args.trim();
 
   if (args.length() == 0) {
-    return "Usage: testpassword <password_to_test>";
+    return "Error: invalid arguments — Usage: testpassword <password_to_test>";
   }
 
   String hashed = hashUserPassword(args);
@@ -2125,7 +2126,7 @@ const char* cmd_broadcast(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String msg = argsInput;
   msg.trim();
-  if (msg.length() == 0) return "Usage: broadcast <message>";
+  if (msg.length() == 0) return "Error: invalid arguments — Usage: broadcast <message>";
   broadcastOutput(msg);
   return "[System] Message broadcast";
 }
@@ -2134,7 +2135,7 @@ const char* cmd_wait(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String val = argsInput;
   val.trim();
-  if (val.length() == 0) return "Usage: wait <ms>";
+  if (val.length() == 0) return "Error: invalid arguments — Usage: wait <ms>";
   int ms = val.toInt();
   if (ms > 0 && ms <= 60000) delay(ms);
   return "[System] Wait complete";
@@ -2984,6 +2985,9 @@ static const CommandModule gCommandModules[] = {
     "that persist to flash; kvprec and maxcontext only take effect on the next model "
     "load.", llmCommands,          llmCommandsCount, 0, nullptr },
 #endif
+  { "settingsedit", "Per-field settings save commands",
+    "Static CLI commands the web/OLED settings screen uses to persist individual settings fields that have no dedicated module command. Each writes one setting via handleSettingCommand; the value is read live or applied on next start. Fields that need a live apply action are routed to their module command instead of getting one of these.",
+    settingEditorCommands, settingEditorCommandsCount, 0, nullptr },
  };
 static const size_t gCommandModulesCount = sizeof(gCommandModules) / sizeof(gCommandModules[0]);
 
@@ -3005,7 +3009,7 @@ bool commandRequiresAdmin(const String& cmdLine) {
 const char* dispatchCommand(const String& argsInput) {
   const CommandEntry* entry = findCommand(argsInput);
   if (!entry) {
-    return "Unknown command";
+    return "Error: Unknown command";
   }
   return entry->handler(argsInput);
 }
@@ -3965,6 +3969,48 @@ static bool authorizeCommand(const AuthContext& ctx, const String& line, char* o
 //
 // Rollout is incremental: `status` is the pilot; other info commands follow.
 // ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Uniform status-token stamp — the "OK:" half of the OK:/Error: return contract
+// above. Applied to every SUCCESS result at the single executeCommand funnel, so
+// the leading status word reaches ALL interfaces (serial/web/BLE/OLED/MQTT/
+// ESP-NOW) at once. Failures already carry "Error"/"ERROR"; this gives success
+// the symmetric token. Exemptions keep machine-read tokens and structured
+// payloads byte-exact.
+// ---------------------------------------------------------------------------
+
+// Prepend "OK: " to a successful, human-facing result in place. No-op for
+// failures (success==false), empty results, JSON/structured payloads ({,[),
+// results that already lead with a status word (OK / OK: / SUCCESS), and
+// validate-pass sentinels (gCLIValidateOnly -> "VALID"). Machine-readable
+// results are protected STRUCTURALLY by the JSON ({,[) rule — there is no
+// per-command allowlist to maintain.
+static void stampOkStatus(char* out, size_t outSize, bool success) {
+  if (!success || !out || outSize < 6) return;
+  extern bool gCLIValidateOnly;
+  if (gCLIValidateOnly) return;                          // validate sentinels (e.g. "VALID")
+  size_t n = strlen(out);
+  if (n == 0) return;
+  if (out[0] == '{') return;                             // JSON object - structured payload
+  if (out[0] == '[') {
+    // Exempt a real JSON ARRAY ([{  ["  []  [<digit>  [-) but NOT a tag-first
+    // result like "[Thermal] 23.5C" - those are successes and must get the OK:
+    // stamp like every other success (a tag's 2nd char is a letter; a JSON-array
+    // start is not). No command returns a literal [-array today, so this only
+    // ever fires defensively for a future serialized JSON array.
+    char c = out[1];  // safe: out[0] != '\0', so out[1] is a char or the terminator
+    if (c == '{' || c == '"' || c == ']' || c == '-' || (c >= '0' && c <= '9')) return;
+  }
+  if (out[0] == 'O' && out[1] == 'K' &&
+      (out[2] == '\0' || out[2] == ':')) return;         // bare "OK" sentinel or already "OK:"
+  if (strncmp(out, "SUCCESS", 7) == 0) return;           // existing success token — no double-stamp
+  const size_t pfx = 4;                                  // "OK: "
+  size_t keep = (n + pfx <= outSize - 1) ? n : (outSize - 1 - pfx);
+  memmove(out + pfx, out, keep);
+  memcpy(out, "OK: ", pfx);
+  out[pfx + keep] = '\0';
+}
+
 bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize) {
   // Clear output buffer
   out[0] = '\0';
@@ -4185,6 +4231,7 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
         // Command audit logging (always-on)
         bool success = (strncmp(out, "Error", 5) != 0) && (strncmp(out, "ERROR", 5) != 0);
         logCommandExecution(ctx, cmd, success, out);
+        stampOkStatus(out, outSize, success);  // stamp AFTER audit so the log keeps the raw result
 
         {
           char auditBuf[180];
@@ -4226,6 +4273,7 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
     if (!handlerEnteredMode) {
       bool success = (strncmp(out, "Error", 5) != 0) && (strncmp(out, "ERROR", 5) != 0);
       logCommandExecution(ctx, cmd, success, out);
+      stampOkStatus(out, outSize, success);  // stamp AFTER audit so the log keeps the raw result
     } else {
       DEBUG_CMD_FLOWF("[execCmd] suppressing audit -- handler entered mode '%s'",
                       cliCurrentMode() && cliCurrentMode()->name
@@ -4701,7 +4749,7 @@ const char* cmd_login(const String& originalCmd) {
   // transport can be: serial, display, bluetooth
   CommandArgs a(originalCmd);
   if (!a.hasMinArgs(2)) {
-    return "Usage: login <username> <password> [transport]\nTransport: serial (default), display, bluetooth";
+    return "Error: invalid arguments — Usage: login <username> <password> [transport]\nTransport: serial (default), display, bluetooth";
   }
 
   String username = a.arg(0);
@@ -4718,7 +4766,7 @@ const char* cmd_login(const String& originalCmd) {
   } else if (transportStr == "serial") {
     transport = SOURCE_SERIAL;
   } else {
-    return "Invalid transport. Use: serial, display, or bluetooth";
+    return "Error: Invalid transport. Use: serial, display, or bluetooth";
   }
 
   // Attempt login
@@ -4731,7 +4779,7 @@ const char* cmd_login(const String& originalCmd) {
     return buf;
   } else {
     notifyLoginFailed(username.c_str(), transportStr.c_str());
-    return "Authentication failed";
+    return "Error: Authentication failed";
   }
 }
 
@@ -4761,7 +4809,7 @@ const char* cmd_logout(const String& originalCmd) {
       // `bleautoconnect g2-glasses on` from any authenticated session.
       transport = SOURCE_G2_GLASSES;
     } else {
-      return "Invalid transport. Use: serial, display, bluetooth, or g2";
+      return "Error: Invalid transport. Use: serial, display, bluetooth, or g2";
     }
   }
 

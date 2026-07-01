@@ -746,6 +746,50 @@ void broadcastOutput(const char* s) {
   broadcastOutputCore(s, strlen(s), 0);
 }
 
+// ---------------------------------------------------------------------------
+// CLI next-step hints
+// ---------------------------------------------------------------------------
+// One understated "what to do next" line for command output. It helps a human
+// discover the right follow-up command, and lets tools/automation recover when
+// a command's output isn't the value they were after. The format lives in ONE
+// place — restyle it here and every hint in the project updates. Use sparingly:
+// only where the output is a genuine dead end or could be misread, never where
+// the output already answers the question. For JSON command output, set a
+// top-level "hint" string field instead of calling these.
+// Log de-spam: returns true at most once per windowMs (first call always true).
+// Generalized from notifyCooldownOk / logBondAuthFailure so flapping-peer WARNs
+// share one throttle primitive instead of re-rolling the millis() guard.
+bool logCooldownOk(uint32_t& lastMs, uint32_t windowMs) {
+  uint32_t now = millis();
+  if (lastMs != 0 && (now - lastMs) < windowMs) return false;
+  lastMs = now;
+  return true;
+}
+
+void cliHint(const char* text) {
+  if (!text || !text[0]) return;
+  BROADCAST_PRINTF("Hint: %s", text);
+}
+
+void cliHintf(const char* fmt, ...) {
+  char buf[224];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(buf, sizeof(buf), fmt, ap);
+  va_end(ap);
+  cliHint(buf);
+}
+
+// Convenience for the most common case: the output is a listing/catalog, not a
+// reading. `readHint` names the read command(s); `extraNote` (optional) is a
+// short caveat (e.g. how a filter matches). The hint leads with the action.
+void emitListingTrailer(const char* what, const char* readHint, const char* extraNote) {
+  (void)what;
+  broadcastOutput("");
+  if (extraNote && extraNote[0]) cliHint(extraNote);
+  cliHintf("to read a value — %s", readHint);
+}
+
 // Explicit-route entry point for context-aware overload (HardwareOne.cpp)
 // Called when the caller already knows the route (e.g. after
 // clearCurrentCommandContext, where falling back to MSG_ROUTE_ALL wouldn't
@@ -882,7 +926,7 @@ const char* cmd_outdisplay(const String& argsInput) {
     if (t2.length()) { modeTemp = (t2 == "temp"); }
   }
   if (v != 0) v = 1;
-  if (v < 0) return "Usage: outdisplay <0|1> [persist|temp]";
+  if (v < 0) return "Error: invalid arguments — Usage: outdisplay <0|1> [persist|temp]";
   if (modeTemp) {
     if (v) gOutputFlags |= OUTPUT_DISPLAY;
     else gOutputFlags &= ~OUTPUT_DISPLAY;
@@ -1125,7 +1169,7 @@ const char* cmd_debugbluetooth(const String& argsInput) {
   String mode = ca.arg(1);
   bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
   int v = ca.argInt(0, 0);
-  if (v != 0 && v != 1) return "Usage: debugbluetooth <0|1> [temp|runtime]";
+  if (v != 0 && v != 1) return "Error: invalid arguments — Usage: debugbluetooth <0|1> [temp|runtime]";
   if (!modeTemp) setSetting(gSettings.debugBluetooth, (bool)(v == 1));
   if (v) setDebugFlag(DEBUG_BLUETOOTH);
   else clearDebugFlag(DEBUG_BLUETOOTH);
@@ -1140,7 +1184,7 @@ const char* cmd_debugbluetoothcore(const String& argsInput) {
   String mode = ca.arg(1);
   bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
   int v = ca.argInt(0, 0);
-  if (v != 0 && v != 1) return "Usage: debugbluetoothcore <0|1> [temp|runtime]";
+  if (v != 0 && v != 1) return "Error: invalid arguments — Usage: debugbluetoothcore <0|1> [temp|runtime]";
   if (!modeTemp) setSetting(gSettings.debugBluetoothCore, (bool)(v == 1));
   if (v) setDebugFlag(DEBUG_BLUETOOTH_CORE);
   else clearDebugFlag(DEBUG_BLUETOOTH_CORE);
@@ -1155,7 +1199,7 @@ const char* cmd_debugbluetoothgatt(const String& argsInput) {
   String mode = ca.arg(1);
   bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
   int v = ca.argInt(0, 0);
-  if (v != 0 && v != 1) return "Usage: debugbluetoothgatt <0|1> [temp|runtime]";
+  if (v != 0 && v != 1) return "Error: invalid arguments — Usage: debugbluetoothgatt <0|1> [temp|runtime]";
   if (!modeTemp) setSetting(gSettings.debugBluetoothGatt, (bool)(v == 1));
   if (v) setDebugFlag(DEBUG_BLUETOOTH_GATT);
   else clearDebugFlag(DEBUG_BLUETOOTH_GATT);
@@ -1170,7 +1214,7 @@ const char* cmd_debugbluetoothdata(const String& argsInput) {
   String mode = ca.arg(1);
   bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
   int v = ca.argInt(0, 0);
-  if (v != 0 && v != 1) return "Usage: debugbluetoothdata <0|1> [temp|runtime]";
+  if (v != 0 && v != 1) return "Error: invalid arguments — Usage: debugbluetoothdata <0|1> [temp|runtime]";
   if (!modeTemp) setSetting(gSettings.debugBluetoothData, (bool)(v == 1));
   if (v) setDebugFlag(DEBUG_BLUETOOTH_DATA);
   else clearDebugFlag(DEBUG_BLUETOOTH_DATA);
@@ -1200,7 +1244,7 @@ const char* cmd_debugverbose(const String& argsInput) {
   CommandArgs ca(argsInput);
   if (ca.count() == 0) return gDebugVerbose ? "debugVerbose is ON" : "debugVerbose is OFF";
   int v = ca.argInt(0, -1);
-  if (v != 0 && v != 1) return "Usage: debugverbose <0|1>";
+  if (v != 0 && v != 1) return "Error: invalid arguments — Usage: debugverbose <0|1>";
   gDebugVerbose = (v == 1);
   return gDebugVerbose ? "debugVerbose enabled" : "debugVerbose disabled";
 }
@@ -1212,7 +1256,7 @@ const char* cmd_debugcommandsystem(const String& argsInput) {
   bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
   int v = ca.argInt(0, 0);
   if (v != 0 && v != 1) {
-    return "Usage: debugcommandsystem <0|1> [temp|runtime]";
+    return "Error: invalid arguments — Usage: debugcommandsystem <0|1> [temp|runtime]";
   }
   if (!modeTemp) {
     setSetting(gSettings.debugCommandSystem, (bool)(v != 0));
@@ -1552,7 +1596,7 @@ const char* cmd_debugbuffer(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   if (!gDebugOutputQueue) {
-    return "Debug output queue is not initialized";
+    return "Error: Debug output queue is not initialized";
   }
 
   int depth = gDebugOutputQueue ? uxQueueMessagesWaiting(gDebugOutputQueue) : 0;
@@ -1709,7 +1753,7 @@ const char* cmd_loglink(const String& argsInput) {
   }
   bool on  = (a == "1" || a.equalsIgnoreCase("on")  || a.equalsIgnoreCase("true"));
   bool off = (a == "0" || a.equalsIgnoreCase("off") || a.equalsIgnoreCase("false"));
-  if (!on && !off) return "Usage: loglink <0|1|on|off>";
+  if (!on && !off) return "Error: invalid arguments — Usage: loglink <0|1|on|off>";
   setIdfLogBridge(on);
   return on
     ? "loglink ON — ESP-IDF logs now share the firmware output queue (no more UART interleave)"
@@ -2155,7 +2199,7 @@ const char* cmd_log(const String& argsInput) {
   
   CommandArgs ca(argsInput);
   if (ca.count() == 0) {
-    return "Usage: log <start|stop|status|autostart>\n"
+    return "Error: invalid arguments — Usage: log <start|stop|status|autostart>\n"
            "  start [\"filepath\"] [flags=0xXXXX] [tags=0|1]: Begin system logging\n"
            "    filepath: Log file path (auto-generated if omitted)\n"
            "    flags: Debug flags to enable (e.g., flags=0x0203)\n"
@@ -2364,7 +2408,7 @@ const char* cmd_log(const String& argsInput) {
     } else if (mode == "off" || mode == "0" || mode == "false" || mode == "disable") {
       newValue = false;
     } else {
-      return "Usage: log autostart [on|off]  (bare = toggle)";
+      return "Error: invalid arguments — Usage: log autostart [on|off]  (bare = toggle)";
     }
     setSetting(gSettings.systemLogAutoStart, newValue);
     snprintf(gDebugBuffer, 1024, "System log auto-start %s", newValue ? "ENABLED" : "DISABLED");
@@ -3224,7 +3268,7 @@ void systemLogAutoStart() {
 static const SettingEntry systemLogSettingEntries[] = {
   { "systemLogAutoStart",    SETTING_BOOL,   &gSettings.systemLogAutoStart,    0, 0, nullptr, 0, 1, "Auto-start logging after boot", nullptr, false, nullptr, "log autostart" },
   { "systemLogPath", SETTING_STRING, &gSettings.systemLogPath, 0, 0, "", 0, 0, "Log file path (empty = auto-generate)", nullptr, false, nullptr, nullptr },
-  { "systemLogCategoryTags", SETTING_BOOL, &gSettings.systemLogCategoryTags, 1, 0, nullptr, 0, 1, "Include category tags", nullptr, false, nullptr, nullptr },
+  { "systemLogCategoryTags", SETTING_BOOL, &gSettings.systemLogCategoryTags, 1, 0, nullptr, 0, 1, "Include category tags", nullptr, false, nullptr, "logcategorytags" },
 };
 
 extern const SettingsModule systemLogSettingsModule = {

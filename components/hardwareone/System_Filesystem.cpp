@@ -581,6 +581,7 @@ const char* cmd_files(const String& argsInput) {
   }
 
   broadcastOutput(out);
+  emitListingTrailer("files and directories", "read a file's contents with 'fileview' or 'fileread'");
   return "[FS] Listing complete";
 }
 

@@ -138,6 +138,7 @@ const char* cmd_wifilist(const String& argsInput) {
       o["primary"]  = (i == 0);
     }
     doc["count"] = gWifiNetworkCount;
+    doc["hint"] = "current connection: 'wifistatus'; connect: 'openwifi'";
     serializeJson(doc, getDebugBuffer(), 1024);
     return getDebugBuffer();
   }
@@ -170,6 +171,7 @@ const char* cmd_wifilist(const String& argsInput) {
     broadcastOutput(buf);
   }
 
+  emitListingTrailer("saved WiFi networks", "current connection: 'wifistatus'; connect: 'openwifi'");
   return "[WiFi] Network list displayed";
 }
 
@@ -179,7 +181,7 @@ const char* cmd_wifiadd(const String& originalCmd) {
   
   // wifiadd <ssid> <pass> [priority] [hidden0|1]
   CommandArgs a(originalCmd);
-  if (!a.hasMinArgs(2)) return "Usage: wifiadd <ssid> <pass> [priority] [hidden0|1]";
+  if (!a.hasMinArgs(2)) return "Error: invalid arguments — Usage: wifiadd <ssid> <pass> [priority] [hidden0|1]";
   String ssid = a.arg(0);
   String pass = a.arg(1);
   int pri = a.argInt(2, 0);
@@ -203,7 +205,7 @@ const char* cmd_wifirm(const String& originalCmd) {
   
   String ssid = originalCmd;
   ssid.trim();
-  if (ssid.length() == 0) return "Usage: wifirm <ssid>";
+  if (ssid.length() == 0) return "Error: invalid arguments — Usage: wifirm <ssid>";
   // Networks already in memory from settings.json
   bool ok = removeWiFiNetwork(ssid);
   if (ok) {
@@ -223,7 +225,7 @@ const char* cmd_wifipromote(const String& originalCmd) {
   
   // wifipromote <ssid> [newPriority]
   CommandArgs a(originalCmd);
-  if (!a.hasMinArgs(1)) return "Usage: wifipromote <ssid> [newPriority]";
+  if (!a.hasMinArgs(1)) return "Error: invalid arguments — Usage: wifipromote <ssid> [newPriority]";
   String ssid = a.arg(0);
   int newPri = a.argInt(1, 1);
   if (newPri <= 0) newPri = 1;
@@ -348,7 +350,7 @@ const char* cmd_wifidisconnect(const String& argsInput) {
   // Check if WiFi is initialized before attempting disconnect
   wifi_mode_t mode;
   if (esp_wifi_get_mode(&mode) != ESP_OK) {
-    return "WiFi is not initialized";
+    return "Error: WiFi is not initialized";
   }
 
   // Stop HTTP server to free heap
@@ -379,7 +381,7 @@ const char* cmd_wifidrop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   wifi_mode_t mode;
   if (esp_wifi_get_mode(&mode) != ESP_OK) {
-    return "WiFi is not initialized";
+    return "Error: WiFi is not initialized";
   }
   WiFi.disconnect(false);   // false = do NOT power down the radio
   notifyWiFiDisconnected();
@@ -398,7 +400,7 @@ const char* cmd_wifiscan(const String& argsInput) {
   args.trim();
   bool json = argWantsJson(args);
   int n = WiFi.scanNetworks(/*async=*/false, /*hidden=*/true);
-  if (n < 0) return "WiFi scan failed";
+  if (n < 0) return "Error: WiFi scan failed";
 
   if (json) {
     // Build {"v":1,"networks":[...]} object (the array is carried under a key so
@@ -425,6 +427,7 @@ const char* cmd_wifiscan(const String& argsInput) {
     }
   }
 
+  emitListingTrailer("nearby WiFi networks", "current connection: 'wifistatus'; connect: 'openwifi'");
   snprintf(getDebugBuffer(), 1024, "Scan complete: %d networks found", n);
   return getDebugBuffer();
 }
@@ -435,7 +438,7 @@ const char* cmd_wifitxpower(const String& argsInput) {
 
   String valStr = argsInput;
   valStr.trim();
-  if (valStr.length() == 0) return "Usage: wifitxpower <dBm>";
+  if (valStr.length() == 0) return "Error: invalid arguments — Usage: wifitxpower <dBm>";
   float dBm = valStr.toFloat();
   int q = (int)roundf(dBm * 4.0f);
   if (q < 8) q = 8;    // ~2 dBm
@@ -900,6 +903,9 @@ const char* cmd_ntpsync(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   // Allow any authenticated user to sync NTP
   bool ok = syncNTPAndResolve();
+  if (!ok) {
+    cliHint("NTP needs an internet connection - check 'wifistatus' and connect with 'openwifi' if offline");
+  }
   return ok ? "NTP sync complete" : "NTP sync failed";
 }
 
@@ -952,6 +958,7 @@ const char* cmd_httpstart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   if (!WiFi.isConnected()) {
+    cliHint("to connect, run 'openwifi'; check the result with 'wifistatus'");
     return "ERROR: WiFi not connected. Connect to WiFi before starting HTTP server.";
   }
 
@@ -1019,7 +1026,7 @@ const char* cmd_certinfo(const String& argsInput) {
 
   static const char* CERT_PATH = "/system/certs/https_server.crt";
   if (!VFS::existsGuarded(CERT_PATH, VFS::systemAuth(VFS::Scopes::CERTS, "wifi.cert.info"))) {
-    return "No certificate found at /system/certs/https_server.crt";
+    return "Error: No certificate found at /system/certs/https_server.crt";
   }
 
   File f = VFS::openGuarded(CERT_PATH, "r", VFS::systemAuth(VFS::Scopes::CERTS, "wifi.cert.info"));
@@ -1411,9 +1418,9 @@ void setupWiFi() {
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry wifiSettingsEntries[] = {
-  { "enabled",            SETTING_BOOL,   &gSettings.wifiEnabled,       true, 0, nullptr, 0, 1, "WiFi Enabled", nullptr, false, nullptr, "wifienabled" },
-  { "ssid",               SETTING_STRING, &gSettings.wifiSSID,          0, 0, "", 0, 0, "WiFi SSID", nullptr, false, nullptr, "wifissid" },
-  { "password",           SETTING_STRING, &gSettings.wifiPassword,      0, 0, "", 0, 0, "WiFi Password", nullptr, true, nullptr, "wifipassword" },
+  { "enabled",            SETTING_BOOL,   &gSettings.wifiEnabled,       true, 0, nullptr, 0, 1, "WiFi Enabled", nullptr, false, nullptr, nullptr, true },
+  { "ssid",               SETTING_STRING, &gSettings.wifiSSID,          0, 0, "", 0, 0, "WiFi SSID", nullptr, false, nullptr, nullptr, true },
+  { "password",           SETTING_STRING, &gSettings.wifiPassword,      0, 0, "", 0, 0, "WiFi Password", nullptr, true, nullptr, nullptr, true },
   { "autoReconnect",      SETTING_BOOL,   &gSettings.wifiAutoReconnect, true, 0, nullptr, 0, 1, "Auto-reconnect", nullptr, false, nullptr, "wifiautoreconnect" },
   { "ntpServer",          SETTING_STRING, &gSettings.ntpServer,         0, 0, "pool.ntp.org", 0, 0, "NTP Server", nullptr, false, nullptr, "ntpserver" },
   // Timezone offsets as "minutes|label" pairs — the schema renderer's enum

@@ -349,12 +349,12 @@ void buildStateChangeJson(String& output) {
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry edgeImpulseSettingEntries[] = {
   { "enabled", SETTING_BOOL, &gSettings.edgeImpulseEnabled, 0, 0, nullptr, 0, 1, "Enable Inference", nullptr, false, nullptr, "eienable" },
-  { "requireLabels", SETTING_BOOL, &gSettings.edgeImpulseRequireLabels, 1, 0, nullptr, 0, 1, "Require Labels", nullptr, false, nullptr, nullptr },
-  { "minConfidence", SETTING_FLOAT, &gSettings.edgeImpulseMinConfidence, 0, 0.6f, nullptr, 0, 1, "Min Confidence", nullptr, false, nullptr, nullptr },
-  { "maxDetections", SETTING_INT, &gSettings.edgeImpulseMaxDetections, 5, 0, nullptr, 1, 10, "Max Detections", nullptr, false, nullptr, nullptr },
-  { "inputSize", SETTING_INT, &gSettings.edgeImpulseInputSize, 96, 0, nullptr, 48, 320, "Input Size", nullptr, false, nullptr, nullptr },
+  { "requireLabels", SETTING_BOOL, &gSettings.edgeImpulseRequireLabels, 1, 0, nullptr, 0, 1, "Require Labels", nullptr, false, nullptr, "eirequirelabels" },
+  { "minConfidence", SETTING_FLOAT, &gSettings.edgeImpulseMinConfidence, 0, 0.6f, nullptr, 0, 1, "Min Confidence", nullptr, false, nullptr, "eiconfidence" },
+  { "maxDetections", SETTING_INT, &gSettings.edgeImpulseMaxDetections, 5, 0, nullptr, 1, 10, "Max Detections", nullptr, false, nullptr, "eimaxdetections" },
+  { "inputSize", SETTING_INT, &gSettings.edgeImpulseInputSize, 96, 0, nullptr, 48, 320, "Input Size", nullptr, false, nullptr, "eiinputsize" },
   { "continuous", SETTING_BOOL, &gSettings.edgeImpulseContinuous, 0, 0, nullptr, 0, 1, "Continuous Mode", nullptr, false, nullptr, "eicontinuous" },
-  { "intervalMs", SETTING_INT, &gSettings.edgeImpulseIntervalMs, 1000, 0, nullptr, 100, 10000, "Interval (ms)", nullptr, false, nullptr, nullptr }
+  { "intervalMs", SETTING_INT, &gSettings.edgeImpulseIntervalMs, 1000, 0, nullptr, 100, 10000, "Interval (ms)", nullptr, false, nullptr, "eiinterval" }
 };
 
 // Columns: name, jsonSection, entries, count, isConnected, description
@@ -2314,7 +2314,7 @@ const char* cmd_ei_model_info(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!gEIModelLoaded || !gInterpreter) {
-    return "No model loaded. Use 'ei model load <filename>' to load one.";
+    return "Error: No model loaded. Use 'ei model load <filename>' to load one.";
   }
   
   const char* inputType = "unknown";
@@ -2357,7 +2357,7 @@ const char* cmd_ei_model_unload(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!gEIModelLoaded) {
-    return "No model is currently loaded.";
+    return "Error: No model is currently loaded.";
   }
   
   String oldPath = gLoadedModelPath;
@@ -2383,7 +2383,7 @@ const char* cmd_ei_track_status(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!gStateTrackingEnabled) {
-    return "State tracking is disabled. Use 'ei track enable 1' to enable.";
+    return "Error: State tracking is disabled. Use 'ei track enable 1' to enable.";
   }
   
   if (gTrackedObjectCount == 0) {

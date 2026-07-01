@@ -83,7 +83,7 @@ TaskHandle_t gPresenceTaskHandle = nullptr;
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry presenceSettingEntries[] = {
   { "presenceAutoStart", SETTING_BOOL, &gSettings.presenceAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, nullptr },
-  { "presenceDevicePollMs", SETTING_INT, &gSettings.presenceDevicePollMs, 100, 0, nullptr, 50, 5000, "Poll Interval (ms)", nullptr, false, nullptr, nullptr }
+  { "presenceDevicePollMs", SETTING_INT, &gSettings.presenceDevicePollMs, 100, 0, nullptr, 50, 5000, "Poll Interval (ms)", nullptr, false, nullptr, "presencedevicepollms" }
 };
 
 static bool isPresenceConnected() {
@@ -172,7 +172,7 @@ const char* cmd_presencestart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (gPresenceEnabled) {
-    return "[PRESENCE] Error: Already running";
+    return "Error: [PRESENCE] Already running";
   }
   
   if (isInQueue(I2C_DEVICE_PRESENCE)) {
@@ -183,25 +183,26 @@ const char* cmd_presencestart(const String& argsInput) {
   }
 
   if (!i2cPingAddress(I2C_ADDR_PRESENCE, 100000, 50, (uint8_t)gSettings.presenceBus)) {
-    return "[Presence] Not detected on I2C bus";
+    return "Error: [Presence] Not detected on I2C bus";
   }
 
   if (enqueueDeviceStart(I2C_DEVICE_PRESENCE)) {
     sensorStatusBumpWith("openpresence@enqueue");
+    cliHint("the sensor opens in the background - read it with 'presenceread' once it is up");
     if (!ensureDebugBuffer()) return "[PRESENCE] Sensor queued for open";
     int pos = getQueuePosition(I2C_DEVICE_PRESENCE);
     snprintf(getDebugBuffer(), 1024, "[PRESENCE] Sensor queued for open (position %d)", pos);
     return getDebugBuffer();
   }
   
-  return "[PRESENCE] Error: Failed to enqueue open (queue full)";
+  return "Error: [PRESENCE] Failed to enqueue open (queue full)";
 }
 
 const char* cmd_presencestop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!gPresenceEnabled) {
-    return "[PRESENCE] Error: Not running";
+    return "Error: [PRESENCE] Not running";
   }
   
   handleDeviceStopped(I2C_DEVICE_PRESENCE);
@@ -219,10 +220,10 @@ const char* cmd_presenceread(const String& argsInput) {
   }
 
   if (!gPresenceConnected || !gPresenceEnabled) {
-    return "[PRESENCE] Error: Sensor not running - use 'openpresence' first";
+    return "Error: [PRESENCE] Sensor not running - use 'openpresence' first";
   }
   
-  if (!ensureDebugBuffer()) return "[PRESENCE] Error: Debug buffer unavailable";
+  if (!ensureDebugBuffer()) return "Error: [PRESENCE] Debug buffer unavailable";
   
   {
     SensorCacheGuard g(gPresenceCache.mutex, pdMS_TO_TICKS(100), "presence.cmdRead");
@@ -240,7 +241,7 @@ const char* cmd_presenceread(const String& argsInput) {
     }
   }
 
-  return "[PRESENCE] Error: Could not read cache";
+  return "Error: [PRESENCE] Could not read cache";
 }
 
 const char* cmd_presencestatus(const String& argsInput) {
@@ -252,7 +253,7 @@ const char* cmd_presencestatus(const String& argsInput) {
     return (n > 0) ? getDebugBuffer() : "{\"valid\":false}";
   }
 
-  if (!ensureDebugBuffer()) return "[PRESENCE] Error: Debug buffer unavailable";
+  if (!ensureDebugBuffer()) return "Error: [PRESENCE] Debug buffer unavailable";
   
   snprintf(getDebugBuffer(), 1024,
     "[PRESENCE] Status: connected=%d enabled=%d taskHandle=%p dataValid=%d",
@@ -452,7 +453,7 @@ const char* cmd_presenceautostart(const String& argsInput) {
     setSetting(gSettings.presenceAutoStart, false);
     return "[Presence] Auto-start disabled";
   }
-  return "Usage: presenceautostart [on|off]";
+  return "Error: invalid arguments — Usage: presenceautostart [on|off]";
 }
 
 // Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget

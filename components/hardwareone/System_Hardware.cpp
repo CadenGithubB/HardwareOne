@@ -11,7 +11,7 @@ const char* cmd_hardwareled_brightness(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   String arg = argsInput; arg.trim();
-  if (arg.length() == 0) return "Usage: ledbrightness <0..100>";
+  if (arg.length() == 0) return "Error: invalid arguments — Usage: ledbrightness <0..100>";
   int v = arg.toInt();
   if (v < 0 || v > 100) return "Error: LED brightness must be 0..100";
   setSetting(gSettings.ledBrightness, v);
@@ -27,7 +27,7 @@ const char* cmd_hardwareled_startupenabled(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   String arg = argsInput; arg.trim();
-  if (arg.length() == 0) return "Usage: ledstartupenabled <0|1>";
+  if (arg.length() == 0) return "Error: invalid arguments — Usage: ledstartupenabled <0|1>";
   bool enabled = (arg == "1" || arg.equalsIgnoreCase("true"));
   setSetting(gSettings.ledStartupEnabled, enabled);
   snprintf(getDebugBuffer(), 1024, "LED startup effect %s", enabled ? "enabled" : "disabled");
@@ -38,7 +38,7 @@ const char* cmd_hardwareled_startupeffect(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   String arg = argsInput; arg.trim(); arg.toLowerCase();
-  if (arg.length() == 0) return "Usage: ledstartupeffect <none|rainbow|pulse|fade|blink|strobe>";
+  if (arg.length() == 0) return "Error: invalid arguments — Usage: ledstartupeffect <none|rainbow|pulse|fade|blink|strobe>";
   if (arg == "none"   || arg == "rainbow" || arg == "pulse" ||
       arg == "fade"   || arg == "blink"   || arg == "strobe") {
     setSetting(gSettings.ledStartupEffect, arg.c_str());
@@ -53,7 +53,7 @@ const char* cmd_hardwareled_startupcolor(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   String arg = argsInput; arg.trim();
-  if (arg.length() == 0) return "Usage: ledstartupcolor <color name|off>  (any of ~80 named colors; unknown names default to cyan)";
+  if (arg.length() == 0) return "Error: invalid arguments — Usage: ledstartupcolor <color name|off>  (any of ~80 named colors; unknown names default to cyan)";
   setSetting(gSettings.ledStartupColor, arg.c_str());
   snprintf(getDebugBuffer(), 1024, "LED startup color set to %s", gSettings.ledStartupColor.c_str());
   return getDebugBuffer();
@@ -63,7 +63,7 @@ const char* cmd_hardwareled_startupcolor2(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   String arg = argsInput; arg.trim();
-  if (arg.length() == 0) return "Usage: ledstartupcolor2 <color name|off>  (any of ~80 named colors; unknown names default to magenta)";
+  if (arg.length() == 0) return "Error: invalid arguments — Usage: ledstartupcolor2 <color name|off>  (any of ~80 named colors; unknown names default to magenta)";
   setSetting(gSettings.ledStartupColor2, arg.c_str());
   snprintf(getDebugBuffer(), 1024, "LED startup color 2 set to %s", gSettings.ledStartupColor2.c_str());
   return getDebugBuffer();
@@ -73,7 +73,7 @@ const char* cmd_hardwareled_startupduration(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   String arg = argsInput; arg.trim();
-  if (arg.length() == 0) return "Usage: ledstartupduration <100..10000>";
+  if (arg.length() == 0) return "Error: invalid arguments — Usage: ledstartupduration <100..10000>";
   int v = arg.toInt();
   if (v < 100 || v > 10000) return "Error: LED duration must be 100..10000 ms";
   setSetting(gSettings.ledStartupDuration, v);

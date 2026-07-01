@@ -857,21 +857,21 @@ bool isUserBanned(const String& username) {
 // Also stores optional reason. Kicks active sessions when banning.
 // Returns error string on failure, nullptr on success.
 static const char* setUserBanInternal(const String& username, bool ban, const String& reason) {
-  if (username.length() == 0) return "Username required";
-  if (!filesystemReady)       return "Filesystem not ready";
+  if (username.length() == 0) return "Error: Username required";
+  if (!filesystemReady)       return "Error: Filesystem not ready";
 
   uint32_t userId = 0;
   getUserIdByUsername(username, userId);
-  if (userId == 0) return "User not found";
-  if (userId == 1) return "Cannot ban the primary admin account";
+  if (userId == 0) return "Error: User not found";
+  if (userId == 1) return "Error: Cannot ban the primary admin account";
 
   {
     FsLockGuard guard("users.set_ban");
-    if (!VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth("user.setBan"))) return "users.json not found";
+    if (!VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth("user.setBan"))) return "Error: users.json not found";
     File f = VFS::openGuarded(USERS_JSON_FILE, "r", VFS::systemAuth("user.setBan"));
-    if (!f) return "Failed to read users.json";
+    if (!f) return "Error: Failed to read users.json";
     PSRAM_JSON_DOC(doc);
-    if (deserializeJson(doc, f)) { f.close(); return "Malformed users.json"; }
+    if (deserializeJson(doc, f)) { f.close(); return "Error: Malformed users.json"; }
     f.close();
 
     bool found = false;
@@ -890,10 +890,10 @@ static const char* setUserBanInternal(const String& username, bool ban, const St
         break;
       }
     }
-    if (!found) return "User not found";
+    if (!found) return "Error: User not found";
 
     File wf = VFS::openGuarded(USERS_JSON_FILE, "w", VFS::systemAuth("user.setBan"));
-    if (!wf) return "Failed to write users.json";
+    if (!wf) return "Error: Failed to write users.json";
     serializeJson(doc, wf);
     wf.close();
   }
@@ -1788,7 +1788,7 @@ const char* cmd_user_deny(const String& argsInput) {
     snprintf(getDebugBuffer(), 1024, "Error: %s", err.c_str());
     return getDebugBuffer();
   }
-  if (!ensureDebugBuffer()) return "Denied";
+  if (!ensureDebugBuffer()) return "Error: Denied";
   snprintf(getDebugBuffer(), 1024, "Denied user '%s'", username.c_str());
   return getDebugBuffer();
 }
@@ -1798,7 +1798,7 @@ const char* cmd_user_promote(const String& argsInput) {
   if (!filesystemReady) return "Error: LittleFS not ready";
   String username = argsInput;
   username.trim();
-  if (username.length() == 0) return "Usage: user promote <username>";
+  if (username.length() == 0) return "Error: invalid arguments — Usage: user promote <username>";
   DEBUG_USERSF("[users] CLI promote username=%s", username.c_str());
   String err;
   if (!promoteUserToAdminInternal(username, err)) {
@@ -1816,7 +1816,7 @@ const char* cmd_user_demote(const String& argsInput) {
   if (!filesystemReady) return "Error: LittleFS not ready";
   String username = argsInput;
   username.trim();
-  if (username.length() == 0) return "Usage: user demote <username>";
+  if (username.length() == 0) return "Error: invalid arguments — Usage: user demote <username>";
   DEBUG_USERSF("[users] CLI demote username=%s", username.c_str());
   String err;
   if (!demoteUserFromAdminInternal(username, err)) {
@@ -1863,7 +1863,7 @@ const char* cmd_user_delete(const String& argsInput) {
   if (!filesystemReady) return "Error: LittleFS not ready";
   String username = argsInput;
   username.trim();
-  if (username.length() == 0) return "Usage: user delete <username>";
+  if (username.length() == 0) return "Error: invalid arguments — Usage: user delete <username>";
   DEBUG_USERSF("[users] CLI delete (prompt) username=%s", username.c_str());
 
   // Stash the target name for the confirm callbacks. We do NOT capture
@@ -1962,7 +1962,7 @@ const char* cmd_user_changepassword(const String& argsInput) {
 
   // Parse: "currentPassword newPassword confirmPassword"
   CommandArgs a(argsInput);
-  if (!a.hasMinArgs(3)) return "Usage: user changepassword <currentPassword> <newPassword> <confirmPassword>";
+  if (!a.hasMinArgs(3)) return "Error: invalid arguments — Usage: user changepassword <currentPassword> <newPassword> <confirmPassword>";
 
   return userChangePasswordCore(a.arg(0), a.arg(1), a.arg(2));
 }
@@ -1974,7 +1974,7 @@ const char* cmd_user_resetpassword(const String& argsInput) {
   // Parse: "<username> <newPassword> [0|1]" — optional 1 = require new password on next login
   CommandArgs a(argsInput);
   if (!a.hasMinArgs(2)) {
-    return "Usage: user resetpassword <username> <newPassword> [0|1]\nOptional: 1 = require password change on next login, 0 = omit";
+    return "Error: invalid arguments — Usage: user resetpassword <username> <newPassword> [0|1]\nOptional: 1 = require password change on next login, 0 = omit";
   }
 
   String username = a.arg(0);
@@ -2011,7 +2011,7 @@ const char* cmd_user_add(const String& argsInput) {
 
   CommandArgs a(argsInput);
   if (!a.hasMinArgs(2)) {
-    return "Usage: user add <username> <password> [0|1]\n(optional last arg: 1 = require new password on next login)";
+    return "Error: invalid arguments — Usage: user add <username> <password> [0|1]\n(optional last arg: 1 = require new password on next login)";
   }
 
   String username = a.arg(0);
@@ -2345,14 +2345,14 @@ const char* cmd_session_revoke(const String& argsInput) {
     return getDebugBuffer();
   }
 
-  return "Usage:\n"
+  return "Error: invalid arguments — Usage:\n"
          "  sessionrevoke sid <sid> [reason]\n"
          "  sessionrevoke user <username> [reason]";
 }
 const char* cmd_ban(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   CommandArgs a(argsInput);
-  if (!a.hasMinArgs(1)) return "Usage: ban <ip> [reason]";
+  if (!a.hasMinArgs(1)) return "Error: invalid arguments — Usage: ban <ip> [reason]";
 
   String ip = a.arg(0);
   String reason = a.has(1) ? a.remaining(0) : String();
@@ -2374,7 +2374,7 @@ const char* cmd_unban(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String ip = argsInput;
   ip.trim();
-  if (ip.length() == 0) return "Usage: unban <ip>";
+  if (ip.length() == 0) return "Error: invalid arguments — Usage: unban <ip>";
 
   if (unbanIp(ip.c_str())) {
     static char buf[80];
@@ -2394,7 +2394,7 @@ const char* cmd_banlist(const String& argsInput) {
 const char* cmd_banuser(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   CommandArgs a(argsInput);
-  if (!a.hasMinArgs(1)) return "Usage: banuser <username> [reason]";
+  if (!a.hasMinArgs(1)) return "Error: invalid arguments — Usage: banuser <username> [reason]";
 
   String username = a.arg(0);
   String reason = a.has(1) ? a.remaining(0) : String();
@@ -2412,7 +2412,7 @@ const char* cmd_unbanuser(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String username = argsInput;
   username.trim();
-  if (username.length() == 0) return "Usage: unbanuser <username>";
+  if (username.length() == 0) return "Error: invalid arguments — Usage: unbanuser <username>";
 
   const char* err = setUserBanInternal(username, false, "");
   if (err) return err;
@@ -2462,7 +2462,7 @@ const char* cmd_user_request(const String& argsInput) {
   if (!filesystemReady) return "Error: LittleFS not ready";
   // Syntax: args = "<username> <password> [confirmPassword]"
   CommandArgs a(argsInput);
-  if (!a.hasMinArgs(2)) return "Usage: user request <username> <password> [confirmPassword]";
+  if (!a.hasMinArgs(2)) return "Error: invalid arguments — Usage: user request <username> <password> [confirmPassword]";
 
   String username = a.arg(0);
   String password = a.arg(1);
@@ -3137,7 +3137,7 @@ static const char* cmd_serialrequireauth(const String& argsInput) {
     setSetting(gSettings.serialRequireAuth, false);
     return "[Serial] Require auth disabled - serial commands bypass login";
   }
-  return "Usage: serialrequireauth [on|off]";
+  return "Error: invalid arguments — Usage: serialrequireauth [on|off]";
 }
 
 // Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
@@ -3334,7 +3334,7 @@ const char* cmd_user_sync(const String& argsInput) {
   // Parse command args
   CommandArgs a(argsInput);
   if (!a.hasMinArgs(6)) {
-    return "Usage: usersync <username> <userPass> <device> <targetAdminUser> <targetAdminPass> <yourAdminPass>";
+    return "Error: invalid arguments — Usage: usersync <username> <userPass> <device> <targetAdminUser> <targetAdminPass> <yourAdminPass>";
   }
 
   // Auth mirrors remote command execution (espnow remote): the RECEIVING device

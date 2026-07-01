@@ -398,7 +398,7 @@ const char* cmd_memsample(const String& argsInput) {
       broadcastOutput(statusBuf);
       return "[Memory] Tracking status displayed";
     } else {
-      return "Usage: memsample track [on|off|reset|status]";
+      return "Error: invalid arguments — Usage: memsample track [on|off|reset|status]";
     }
   }
   

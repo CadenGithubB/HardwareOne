@@ -8,6 +8,7 @@
 #include <esp_attr.h>
 #include "System_Settings.h"
 #include "System_Command.h"
+#include "System_Debug.h"        // emitListingTrailer() for agent-facing listing trailer
 #include "System_MemUtil.h"
 #include "System_Utils.h"
 #include "System_SetupWizard.h"
@@ -469,6 +470,7 @@ const char* cmd_features(const String& argsInput) {
   if (argWantsJson(argsInput)) {
     PSRAM_JSON_DOC(doc);
     doc["schema"] = 1;
+    doc["hint"] = "sensor/battery DATA: use the read command ('batterystatus', or 'open<sensor>' then '<sensor>read'); to enable/disable a feature: 'features <id> on|off'";
     JsonArray arr = doc["features"].to<JsonArray>();
     for (size_t i = 0; i < featureRegistryCount; i++) {
       const FeatureEntry* f = &featureRegistry[i];
@@ -533,16 +535,18 @@ const char* cmd_features(const String& argsInput) {
       "Usage: features <id> <on|off>",
       (unsigned long)enabledCost, (unsigned long)freeHeapKB,
       (unsigned long)getTotalPossibleHeapCost());
-    
+
+    emitListingTrailer("compiled-in features and their on/off state",
+      "sensor/battery DATA: use the read command ('batterystatus', or 'open<sensor>' then '<sensor>read'); to enable/disable a feature: 'features <id> on|off'");
     return buf;
   }
-  
+
   // Parse args: <id> [on|off]
   if (!a.has(1)) {
     // Single arg - show feature details
     const FeatureEntry* f = getFeatureById(a.arg(0).c_str());
     if (!f) {
-      return "Unknown feature. Run 'features' to see list.";
+      return "Error: Unknown feature. Run 'features' to see list.";
     }
     
     EXT_RAM_BSS_ATTR static char buf[512];
@@ -581,16 +585,16 @@ const char* cmd_features(const String& argsInput) {
   
   if (!canToggleFeature(f)) {
     if (!isFeatureCompiled(f)) {
-      return "Feature not compiled in this build.";
+      return "Error: Feature not compiled in this build.";
     }
-    return "Feature cannot be toggled (compile-time only).";
+    return "Error: Feature cannot be toggled (compile-time only).";
   }
   
   bool enable = (value == "on" || value == "true" || value == "1");
   bool disable = (value == "off" || value == "false" || value == "0");
   
   if (!enable && !disable) {
-    return "Value must be on/off, true/false, or 1/0";
+    return "Error: Value must be on/off, true/false, or 1/0";
   }
   
   bool wasEnabled = *f->enabledSetting;

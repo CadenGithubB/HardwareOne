@@ -332,7 +332,7 @@ const char* cmd_ledcolor(const String& argsInput) {
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
 
   if (colorName.length() == 0) {
-    return "Usage: ledcolor <red|green|blue|yellow|magenta|cyan|white|orange|purple|pink>";
+    return "Error: invalid arguments — Usage: ledcolor <red|green|blue|yellow|magenta|cyan|white|orange|purple|pink>";
   }
   
   RGB color;

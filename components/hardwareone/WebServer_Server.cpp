@@ -3758,7 +3758,8 @@ esp_err_t handleFilesCreate(httpd_req_t* req) {
     String resultStr;
     bool success = executeUnifiedWebCommand(req, ctx, cmd, resultStr);
     httpd_resp_set_type(req, "application/json");
-    if (success && resultStr.startsWith("Created folder:")) {
+    // Rely on the dispatcher's success bool rather than the (now status-stamped) prose.
+    if (success) {
       httpd_resp_send(req, "{\"success\":true}", HTTPD_RESP_USE_STRLEN);
     } else {
       // Extract error message and return as JSON

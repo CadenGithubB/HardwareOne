@@ -83,7 +83,7 @@ const char* cmd_imu(const String& argsInput) {
   }
 
   if (!gImuConnected || !gImuEnabled) {
-    broadcastOutput("IMU sensor not connected or not started. Use 'imustart' first.");
+    broadcastOutput("IMU sensor not connected or not started. Use 'openimu' first.");
     return "ERROR";
   }
 
@@ -213,7 +213,7 @@ const char* cmd_imustart(const String& argsInput) {
 
   // Check if already enabled or queued
   if (gImuEnabled) {
-    return "[IMU] Error: Already running";
+    return "Error: [IMU] Already running";
   }
   if (isInQueue(I2C_DEVICE_IMU)) {
     int pos = getQueuePosition(I2C_DEVICE_IMU);
@@ -222,7 +222,7 @@ const char* cmd_imustart(const String& argsInput) {
   }
 
   if (!i2cPingAddress(I2C_ADDR_IMU, 100000, 50)) {
-    return "[IMU] Not detected on I2C bus";
+    return "Error: [IMU] Not detected on I2C bus";
   }
 
   // Enqueue the request to centralized queue
@@ -232,7 +232,7 @@ const char* cmd_imustart(const String& argsInput) {
     BROADCAST_PRINTF("IMU sensor queued for open (position %d)", pos);
     return "[IMU] Sensor queued for open";
   } else {
-    return "[IMU] Error: Failed to enqueue open (queue full)";
+    return "Error: [IMU] Failed to enqueue open (queue full)";
   }
 }
 
@@ -247,7 +247,7 @@ const char* cmd_imuactions(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   if (!gImuEnabled || !gImuConnected) {
-    broadcastOutput("[IMU] Error: Not enabled. Use 'imustart' first.");
+    broadcastOutput("Error: [IMU] Not enabled. Use 'openimu' first.");
     return "ERROR";
   }
 
@@ -332,7 +332,7 @@ const char* cmd_imuactions(const String& argsInput) {
 
 bool imuInit() {
   if (gBNO055 != nullptr) {
-    broadcastOutput("[IMU] Error: Already initialized!");
+    broadcastOutput("Error: [IMU] Already initialized!");
     return true;
   }
 
@@ -370,7 +370,7 @@ bool imuInit() {
     uint32_t clocks[maxAttempts] = { 100000, 100000, 50000, 100000, 100000 };
     
     for (int attempt = 1; attempt <= maxAttempts; ++attempt) {
-      DEBUG_IMU_LIFECYCLEF("[IMU] Error: Init attempt %d/%d at I2C %lu Hz", attempt, maxAttempts, clocks[attempt - 1]);
+      DEBUG_IMU_LIFECYCLEF("Error: [IMU] Init attempt %d/%d at I2C %lu Hz", attempt, maxAttempts, clocks[attempt - 1]);
 
       // Clock management now handled by I2CDeviceManager
       delay(150);
@@ -422,7 +422,7 @@ bool imuInit() {
       gBNO055 = nullptr;
     }
     ERROR_IMUF("Error: Failed to initialize BNO055 IMU sensor after %d attempts", maxAttempts);
-    broadcastOutput("[IMU] Error: Failed to initialize IMU sensor (timeout after 3s)");
+    broadcastOutput("Error: [IMU] Failed to initialize IMU sensor (timeout after 3s)");
     return false;
   });
 }
@@ -523,11 +523,11 @@ void imuApplyOrientationCorrection(float& pitch, float& roll, float& yaw) {
 void imuPoll() {
   if (!gImuEnabled || !gImuConnected || gBNO055 == nullptr) {
     if (!gImuConnected) {
-      broadcastOutput("[IMU] Error: Not connected. Check wiring.");
+      broadcastOutput("Error: [IMU] Not connected. Check wiring.");
     } else if (!gImuEnabled) {
-      broadcastOutput("[IMU] Error: Not started - use 'imustart' first");
+      broadcastOutput("Error: [IMU] Not started - use 'openimu' first");
     } else {
-      broadcastOutput("[IMU] Error: Failed to initialize BNO055 sensor");
+      broadcastOutput("Error: [IMU] Failed to initialize BNO055 sensor");
     }
     return;
   }
@@ -838,7 +838,7 @@ void imuUpdateActions() {
 const char* cmd_imupollingms(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String _arg = argsInput; _arg.trim();
-  if (_arg.length() == 0) return "Usage: imupollingms <50..2000>";
+  if (_arg.length() == 0) return "Error: invalid arguments — Usage: imupollingms <50..2000>";
   int v = _arg.toInt();
   if (v < 50 || v > 2000) return "Error: imuPollingMs must be 50..2000";
   setSetting(gSettings.imuPollingMs, v);
@@ -849,7 +849,7 @@ const char* cmd_imupollingms(const String& argsInput) {
 const char* cmd_imuewmafactor(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String _arg = argsInput; _arg.trim();
-  if (_arg.length() == 0) return "Usage: imuewmafactor <0.0..1.0>";
+  if (_arg.length() == 0) return "Error: invalid arguments — Usage: imuewmafactor <0.0..1.0>";
   float f = strtof(_arg.c_str(), nullptr);
   if (f < 0.0f || f > 1.0f) return "Error: imuEWMAFactor must be 0..1";
   setSetting(gSettings.imuEWMAFactor, f);
@@ -860,7 +860,7 @@ const char* cmd_imuewmafactor(const String& argsInput) {
 const char* cmd_imutransitionms(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String _arg = argsInput; _arg.trim();
-  if (_arg.length() == 0) return "Usage: imutransitionms <0..1000>";
+  if (_arg.length() == 0) return "Error: invalid arguments — Usage: imutransitionms <0..1000>";
   int v = _arg.toInt();
   if (v < 0 || v > 1000) return "Error: imuTransitionMs must be 0..1000";
   setSetting(gSettings.imuTransitionMs, v);
@@ -871,7 +871,7 @@ const char* cmd_imutransitionms(const String& argsInput) {
 const char* cmd_imuwebmaxfps(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String _arg = argsInput; _arg.trim();
-  if (_arg.length() == 0) return "Usage: imuwebmaxfps <1..30>";
+  if (_arg.length() == 0) return "Error: invalid arguments — Usage: imuwebmaxfps <1..30>";
   int v = _arg.toInt();
   if (v < 1 || v > 30) return "Error: imuWebMaxFps must be 1..30";
   setSetting(gSettings.imuWebMaxFps, v);
@@ -887,7 +887,7 @@ const char* cmd_imudevicepollms(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String valStr = argsInput;
   valStr.trim();
-  if (valStr.length() == 0) return "Usage: imuDevicePollMs <50..1000>";
+  if (valStr.length() == 0) return "Error: invalid arguments — Usage: imuDevicePollMs <50..1000>";
   int v = valStr.toInt();
   if (v < 50) v = 50;
   if (v > 1000) v = 1000;
@@ -980,7 +980,7 @@ const char* cmd_imuautostart(const String& argsInput) {
     setSetting(gSettings.imuAutoStart, false);
     return "[IMU] Auto-start disabled";
   }
-  return "Usage: imuautostart [on|off]";
+  return "Error: invalid arguments — Usage: imuautostart [on|off]";
 }
 
 // IMU Command Registry (Sensor-Specific)
@@ -1145,9 +1145,9 @@ static const SettingEntry imuSettingEntries[] = {
   { "imuEWMAFactor", SETTING_FLOAT, &gSettings.imuEWMAFactor, 0, 0.1f, nullptr, 0, 1, "EWMA Factor", nullptr, false, "timing", nullptr },
   { "imuTransitionMs", SETTING_INT, &gSettings.imuTransitionMs, 100, 0, nullptr, 0, 1000, "Transition (ms)", nullptr, false, "timing", nullptr },
   { "imuWebMaxFps", SETTING_INT, &gSettings.imuWebMaxFps, 15, 0, nullptr, 1, 30, "Web Max FPS", nullptr, false, "timing", nullptr },
-  { "imuDevicePollMs", SETTING_INT, &gSettings.imuDevicePollMs, 200, 0, nullptr, 50, 1000, "Poll Interval (ms)", nullptr, false, "timing", nullptr },
-  { "imuOrientationMode", SETTING_INT, &gSettings.imuOrientationMode, 8, 0, nullptr, 0, 8, "Orientation Mode", "0:Normal,1:Flip Pitch,2:Flip Roll,3:Flip Yaw,4:Flip Pitch+Roll,5:Roll 180 Fix,6:Rotate 90 CCW,7:Alt Extreme Pitch,8:Upside Down", false, "orientation", nullptr },
-  { "imuOrientationCorrectionEnabled", SETTING_BOOL, &gSettings.imuOrientationCorrectionEnabled, true, 0, nullptr, 0, 1, "Orientation Correction", nullptr, false, "orientation", nullptr },
+  { "imuDevicePollMs", SETTING_INT, &gSettings.imuDevicePollMs, 200, 0, nullptr, 50, 1000, "Poll Interval (ms)", nullptr, false, "timing", "imudevicepollms" },
+  { "imuOrientationMode", SETTING_INT, &gSettings.imuOrientationMode, 8, 0, nullptr, 0, 8, "Orientation Mode", "0:Normal,1:Flip Pitch,2:Flip Roll,3:Flip Yaw,4:Flip Pitch+Roll,5:Roll 180 Fix,6:Rotate 90 CCW,7:Alt Extreme Pitch,8:Upside Down", false, "orientation", "imuorientationmode" },
+  { "imuOrientationCorrectionEnabled", SETTING_BOOL, &gSettings.imuOrientationCorrectionEnabled, true, 0, nullptr, 0, 1, "Orientation Correction", nullptr, false, "orientation", "imuorientationcorrection" },
   { "imuPitchOffset", SETTING_FLOAT, &gSettings.imuPitchOffset, 0, 0.0f, nullptr, -180, 180, "Pitch Offset", nullptr, false, "orientation", nullptr },
   { "imuRollOffset", SETTING_FLOAT, &gSettings.imuRollOffset, 0, 0.0f, nullptr, -180, 180, "Roll Offset", nullptr, false, "orientation", nullptr },
   { "imuYawOffset", SETTING_FLOAT, &gSettings.imuYawOffset, 0, 0.0f, nullptr, -180, 180, "Yaw Offset", nullptr, false, "orientation", nullptr }

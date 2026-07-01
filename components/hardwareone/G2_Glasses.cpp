@@ -10541,7 +10541,7 @@ static const char* cmd_g2connect(const String& argsInput) {
   if (!g2Connect(eye)) {
     return gConnectTaskActive
            ? "G2: connect already in progress — wait or use closeg2"
-           : "G2: failed to start connect task";
+           : "Error: G2: failed to start connect task";
   }
   return "G2: scan/connect started in background — use g2status to watch";
 }
@@ -10619,12 +10619,12 @@ static const char* cmd_g2settings(const String& argsInput) {
            ? "G2 settings verbose: ON (every field of every sid=0x09 push)"
            : "G2 settings verbose: OFF";
   }
-  return "Usage: g2settings verbose [on|off]";
+  return "Error: invalid arguments — Usage: g2settings verbose [on|off]";
 }
 
 static const char* cmd_g2show(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return g2ShowText(argsInput.c_str()) ? "G2: text sent" : "G2: send failed";
+  return g2ShowText(argsInput.c_str()) ? "G2: text sent" : "Error: G2: send failed";
 }
 
 // Live-update probe cadence — read by Q13 (image-tile streaming) and Q14
@@ -10664,7 +10664,7 @@ static const char* cmd_g2listrebuild(const String& argsInput) {
   } else if (v.length() == 0) {
     // No arg — show current state.
   } else {
-    return "Usage: g2listrebuild [on|off]";
+    return "Error: invalid arguments — Usage: g2listrebuild [on|off]";
   }
   snprintf(out, sizeof(out),
            "G2 list-rebuild fast path: %s (%s)",
@@ -10687,7 +10687,7 @@ static const char* cmd_g2liverate(const String& argsInput) {
   }
   long n = v.toInt();
   if (n < 100) {
-    return "Usage: g2liverate [ms>=100]";
+    return "Error: invalid arguments — Usage: g2liverate [ms>=100]";
   }
   gG2LiveRateMs = (uint32_t)n;
   snprintf(out, sizeof(out), "G2 live-update rate set to %u ms",
@@ -10713,7 +10713,7 @@ static const char* cmd_g2liveloop(const String& argsInput) {
     } else if (val == "off" || val == "0" || val == "false") {
       gG2LiveLoopKeepAlive = false;
     } else if (val.length() != 0) {
-      return "Usage: g2liveloop keep [on|off]";
+      return "Error: invalid arguments — Usage: g2liveloop keep [on|off]";
     }
     snprintf(out, sizeof(out),
              "G2 live-loop keep-alive: %s (re-CREATEs on lens idle-timeout)",
@@ -10888,21 +10888,21 @@ static const char* cmd_g2ai(const String& argsInput) {
   // card with a separate heading panel.
   return g2ShowEvenAIReplyNoAsk(argsInput.c_str())
          ? "G2: AI reply sent (CTRL+ANALYSE+REPLY — no question panel)"
-         : "G2: AI reply failed";
+         : "Error: G2: AI reply failed";
 }
 
 static const char* cmd_g2ai_noask(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   return g2ShowEvenAIReplyNoAsk(argsInput.c_str())
          ? "G2: AI reply sent (CTRL+ANALYSE+REPLY — skip ASK)"
-         : "G2: AI reply failed";
+         : "Error: G2: AI reply failed";
 }
 
 static const char* cmd_g2ai_direct(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   return g2ShowEvenAIReplyDirect(argsInput.c_str())
          ? "G2: AI reply sent (CTRL+REPLY — original failing path)"
-         : "G2: AI reply failed";
+         : "Error: G2: AI reply failed";
 }
 
 // =============================================================================
@@ -11002,7 +11002,7 @@ static const char* cmd_g2probe(const String& argsInput) {
   static char ret[160];
   CommandArgs ca(argsInput);
   if (ca.count() < 2) {
-    return "Usage: g2probe <sid_hex> <cmd_dec> [body_hex]\n"
+    return "Error: invalid arguments — Usage: g2probe <sid_hex> <cmd_dec> [body_hex]\n"
            "  Fires `08 <cmd> 10 <magic> [body]` on the given sid (flag=0x20).\n"
            "  Example: g2probe 07 9              -- EvenAI HEARTBEAT\n"
            "           g2probe 07 10 080110A001  -- EvenAI CONFIG voiceSwitch=0,streamSpeed=160\n"
@@ -11012,7 +11012,7 @@ static const char* cmd_g2probe(const String& argsInput) {
   const uint32_t cmd = (uint32_t)ca.argInt(1, 0);
 
   if (sid == 0x80) {
-    return "G2: probe denied — sid=0x80 (dev_config) is in the brick blocklist.";
+    return "Error: G2: probe denied — sid=0x80 (dev_config) is in the brick blocklist.";
   }
 
   uint8_t body[200];
@@ -11020,27 +11020,27 @@ static const char* cmd_g2probe(const String& argsInput) {
   if (ca.count() >= 3) {
     String hex = ca.arg(2);
     bodyLen = parseHexBytes(hex.c_str(), body, sizeof(body));
-    if (bodyLen == SIZE_MAX) return "G2: probe — bad hex body (need pairs of nibbles)";
+    if (bodyLen == SIZE_MAX) return "Error: G2: probe — bad hex body (need pairs of nibbles)";
   }
 
   // Build pb: f1 cmd, f2 magic=250, then raw body.
   uint8_t pb[256];
   size_t pos = 0;
-  if (!g2PbWriteUint32(pb, sizeof(pb), &pos, /*field*/ 1, cmd)) return "G2: probe build failed (cmd)";
-  if (!g2PbWriteUint32(pb, sizeof(pb), &pos, /*field*/ 2, 250)) return "G2: probe build failed (magic)";
+  if (!g2PbWriteUint32(pb, sizeof(pb), &pos, /*field*/ 1, cmd)) return "Error: G2: probe build failed (cmd)";
+  if (!g2PbWriteUint32(pb, sizeof(pb), &pos, /*field*/ 2, 250)) return "Error: G2: probe build failed (magic)";
   if (bodyLen) {
-    if (pos + bodyLen > sizeof(pb)) return "G2: probe — body too large for single fragment";
+    if (pos + bodyLen > sizeof(pb)) return "Error: G2: probe — body too large for single fragment";
     memcpy(pb + pos, body, bodyLen);
     pos += bodyLen;
   }
 
   uint8_t env[256];
   size_t n = g2BuildEnvelope(allocSeq(), sid, G2_FLAG_REQUEST, pb, pos, env, sizeof(env));
-  if (n == 0) return "G2: probe — envelope build failed";
+  if (n == 0) return "Error: G2: probe — envelope build failed";
 
   G2Temple* arm = pickEvenAIArm("g2probe");
-  if (!arm) return "G2: probe — no reachable temple";
-  if (!sendEnvelope(*arm, env, n)) return "G2: probe — send failed (mutex timeout?)";
+  if (!arm) return "Error: G2: probe — no reachable temple";
+  if (!sendEnvelope(*arm, env, n)) return "Error: G2: probe — send failed (mutex timeout?)";
 
   snprintf(ret, sizeof(ret),
            "G2: probe sid=0x%02X (%s) cmd=%u body=%u B sent — watch logs for response",
@@ -11075,7 +11075,7 @@ static const char* cmd_g2devcfg(const String& argsInput) {
   static char ret[200];
   CommandArgs ca(argsInput);
   if (ca.count() < 1) {
-    return "Usage: g2devcfg <heartbeat|auth|role|time|ring> [args]\n"
+    return "Error: invalid arguments — Usage: g2devcfg <heartbeat|auth|role|time|ring> [args]\n"
            "  heartbeat                  — empty cmd=14, safest validator\n"
            "  auth                       — fixed AuthMgr (cmd=4)\n"
            "  role <both|right|left>     — PipeRoleChange (cmd=5)\n"
@@ -11086,7 +11086,7 @@ static const char* cmd_g2devcfg(const String& argsInput) {
 
   G2Temple* arm = nullptr;
   if (gR.connected && !gR.pluginDead) arm = &gR;
-  if (!arm) return "G2 devcfg: right arm not connected";
+  if (!arm) return "Error: G2 devcfg: right arm not connected";
 
   String sub = ca.arg(0); sub.toLowerCase();
   uint8_t env[96];
@@ -11108,7 +11108,7 @@ static const char* cmd_g2devcfg(const String& argsInput) {
     if (r == "both")       roleVal = G2_DEVCFG_ROLE_BOTH;
     else if (r == "right") roleVal = G2_DEVCFG_ROLE_RIGHT;
     else if (r == "left")  roleVal = G2_DEVCFG_ROLE_LEFT;
-    else return "G2 devcfg: role must be both|right|left";
+    else return "Error: G2 devcfg: role must be both|right|left";
     n = g2BuildDevCfgPipeRoleChange(allocSeq(), G2_MAGIC_DEVCFG_PIPE_ROLE,
                                     roleVal, env, sizeof(env));
     cmd = G2_DEVCFG_CMD_PIPE_ROLE_CHANGE;
@@ -11129,21 +11129,21 @@ static const char* cmd_g2devcfg(const String& argsInput) {
     uint8_t macBle[6];
     String macStr = ca.arg(1);
     size_t macLen = parseHexBytes(macStr.c_str(), macBle, sizeof(macBle));
-    if (macLen != 6) return "G2 devcfg: ring mac must be 6 bytes (aa:bb:cc:dd:ee:ff)";
+    if (macLen != 6) return "Error: G2 devcfg: ring mac must be 6 bytes (aa:bb:cc:dd:ee:ff)";
     String name = ca.arg(2);
     n = g2BuildDevCfgRingConnect(allocSeq(), G2_MAGIC_DEVCFG_RING_CONNECT,
                                  /*connect=*/true,
                                  macBle, name.c_str(), env, sizeof(env));
     cmd = G2_DEVCFG_CMD_RING_CONNECT_INFO;
     if (n == 0) {
-      return "G2 devcfg: ring build failed (name empty/>32 chars or null mac)";
+      return "Error: G2 devcfg: ring build failed (name empty/>32 chars or null mac)";
     }
   } else {
-    return "G2 devcfg: unknown subcommand — try heartbeat|auth|role|time|ring";
+    return "Error: G2 devcfg: unknown subcommand — try heartbeat|auth|role|time|ring";
   }
 
-  if (n == 0) return "G2 devcfg: envelope build failed";
-  if (!sendEnvelope(*arm, env, n)) return "G2 devcfg: send failed (mutex timeout?)";
+  if (n == 0) return "Error: G2 devcfg: envelope build failed";
+  if (!sendEnvelope(*arm, env, n)) return "Error: G2 devcfg: send failed (mutex timeout?)";
 
   snprintf(ret, sizeof(ret),
            "G2 devcfg: sid=0x80 cmd=%u envLen=%u sent to right — watch logs for response",
@@ -11177,13 +11177,13 @@ static const char* cmd_g2imgprobe(const String& argsInput) {
   if (ca.count() >= 1) {
     int v = ca.argInt(0, (int)sizeBytes);
     if (v > 0 && v <= 4096) sizeBytes = (size_t)v;
-    else return "G2: imgprobe — size must be 1..4096 bytes";
+    else return "Error: G2: imgprobe — size must be 1..4096 bytes";
   }
 
   // Build the test pattern on the heap; 4 KB on stack would crowd the
   // BTC task's budget. Free at the end of this function.
   uint8_t* pattern = (uint8_t*)ps_alloc(sizeBytes, AllocPref::PreferPSRAM, "g2.imgprobe.pattern");
-  if (!pattern) return "G2: imgprobe — pattern alloc failed";
+  if (!pattern) return "Error: G2: imgprobe — pattern alloc failed";
   for (size_t i = 0; i < sizeBytes; i++) {
     pattern[i] = (i & 1) ? 0x0F : 0xF0;
   }
@@ -11196,7 +11196,7 @@ static const char* cmd_g2imgprobe(const String& argsInput) {
   uint8_t* body = (uint8_t*)ps_alloc(bodyCap, AllocPref::PreferPSRAM, "g2.imgprobe.body");
   if (!body) {
     free(pattern);
-    return "G2: imgprobe — body alloc failed";
+    return "Error: G2: imgprobe — body alloc failed";
   }
 
   // Schema-correct probe: pretend we have a container named "img" with
@@ -11214,19 +11214,19 @@ static const char* cmd_g2imgprobe(const String& argsInput) {
   free(pattern);
   if (bodyLen == 0) {
     free(body);
-    return "G2: imgprobe — body build failed";
+    return "Error: G2: imgprobe — body build failed";
   }
 
   G2Temple* arm = pickEvenAIArm("g2imgprobe");
   if (!arm) {
     free(body);
-    return "G2: imgprobe — no reachable temple";
+    return "Error: G2: imgprobe — no reachable temple";
   }
 
   const bool ok = sendPbFragmented(*arm, allocSeq(), G2_SID_EVEN_CORE,
                                    G2_FLAG_REQUEST, body, bodyLen);
   free(body);
-  if (!ok) return "G2: imgprobe — fragmented send failed";
+  if (!ok) return "Error: G2: imgprobe — fragmented send failed";
 
   snprintf(ret, sizeof(ret),
            "G2: imgprobe sent %u B body via Cmd=3 multi-frag — "
@@ -11264,13 +11264,13 @@ static const char* cmd_g2micon(const String& argsInput) {
   char first = armArg.length() > 0 ? armArg.charAt(0) : '\0';
   bool preferLeft = !(first == 'r' || first == 'R');
   G2Temple* arm = pickMicArm("g2micon", preferLeft);
-  if (!arm) return "G2 mic: no reachable temple";
+  if (!arm) return "Error: G2 mic: no reachable temple";
 
   uint8_t buf[64];
   size_t n = g2BuildAudioCtrl(allocSeq(), G2_MAGIC_AUDIO_CTRL,
                               /*enable*/ true, buf, sizeof(buf));
-  if (!n) return "G2 mic: AudioCtrl build failed";
-  if (!sendEnvelope(*arm, buf, n)) return "G2 mic: TX failed";
+  if (!n) return "Error: G2 mic: AudioCtrl build failed";
+  if (!sendEnvelope(*arm, buf, n)) return "Error: G2 mic: TX failed";
   gMicProbeActive = true;
   snprintf(ret, sizeof(ret),
            "G2 mic: AudioCtrCmd{en=1} sent on %c — watch [G2-MIC-%c] logs "
@@ -11284,12 +11284,12 @@ static const char* cmd_g2micoff(const String& /*argsInput*/) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   static char ret[160];
   G2Temple* arm = pickMicArm("g2micoff", true);
-  if (!arm) return "G2 mic: no reachable temple";
+  if (!arm) return "Error: G2 mic: no reachable temple";
   uint8_t buf[64];
   size_t n = g2BuildAudioCtrl(allocSeq(), G2_MAGIC_AUDIO_CTRL,
                               /*enable*/ false, buf, sizeof(buf));
-  if (!n) return "G2 mic: AudioCtrl build failed";
-  if (!sendEnvelope(*arm, buf, n)) return "G2 mic: TX failed";
+  if (!n) return "Error: G2 mic: AudioCtrl build failed";
+  if (!sendEnvelope(*arm, buf, n)) return "Error: G2 mic: TX failed";
   gMicProbeActive = false;
   snprintf(ret, sizeof(ret),
            "G2 mic: AudioCtrCmd{en=0} sent on %c — frame counters "
@@ -11364,14 +11364,14 @@ static const char* cmd_g2micrec(const String& argsInput) {
   sub.toLowerCase();
 
   ensureMicRecMutex();
-  if (!gMicRecMutex) return "G2 mic rec: mutex alloc failed";
+  if (!gMicRecMutex) return "Error: G2 mic rec: mutex alloc failed";
 
   if (sub == "start") {
-    if (!VFS::isSDAvailable()) return "G2 mic rec: SD card not available";
+    if (!VFS::isSDAvailable()) return "Error: G2 mic rec: SD card not available";
     xSemaphoreTake(gMicRecMutex, portMAX_DELAY);
     if (gMicRecFile) {
       xSemaphoreGive(gMicRecMutex);
-      return "G2 mic rec: already recording — run g2micrec stop first";
+      return "Error: G2 mic rec: already recording — run g2micrec stop first";
     }
     String path;
     if (ca.count() > 1) {
@@ -11412,7 +11412,7 @@ static const char* cmd_g2micrec(const String& argsInput) {
     xSemaphoreTake(gMicRecMutex, portMAX_DELAY);
     if (!gMicRecFile) {
       xSemaphoreGive(gMicRecMutex);
-      return "G2 mic rec: not recording";
+      return "Error: G2 mic rec: not recording";
     }
     String path     = gMicRecPath;
     uint32_t bytes  = gMicRecBytes;
@@ -11464,14 +11464,14 @@ static const char* cmd_g2micwav(const String& argsInput) {
   sub.toLowerCase();
 
   ensureMicWavMutex();
-  if (!gMicWavMutex) return "G2 mic wav: mutex alloc failed";
+  if (!gMicWavMutex) return "Error: G2 mic wav: mutex alloc failed";
 
   if (sub == "start") {
-    if (!VFS::isSDAvailable()) return "G2 mic wav: SD card not available";
+    if (!VFS::isSDAvailable()) return "Error: G2 mic wav: SD card not available";
     xSemaphoreTake(gMicWavMutex, portMAX_DELAY);
     if (gMicWavFile) {
       xSemaphoreGive(gMicWavMutex);
-      return "G2 mic wav: already recording — run g2micwav stop first";
+      return "Error: G2 mic wav: already recording — run g2micwav stop first";
     }
 
     // Allocate decoder memory + set up the decoder. liblc3 needs ~6 KB
@@ -11479,7 +11479,7 @@ static const char* cmd_g2micwav(const String& argsInput) {
     unsigned decSize = lc3_decoder_size(kMicLc3FrameUs, kMicLc3SampleHz);
     if (decSize == 0) {
       xSemaphoreGive(gMicWavMutex);
-      return "G2 mic wav: lc3_decoder_size returned 0 (bad params?)";
+      return "Error: G2 mic wav: lc3_decoder_size returned 0 (bad params?)";
     }
     void* mem = malloc(decSize);
     if (!mem) {
@@ -11492,7 +11492,7 @@ static const char* cmd_g2micwav(const String& argsInput) {
     if (!dec) {
       free(mem);
       xSemaphoreGive(gMicWavMutex);
-      return "G2 mic wav: lc3_setup_decoder failed";
+      return "Error: G2 mic wav: lc3_setup_decoder failed";
     }
 
     String path;
@@ -11540,7 +11540,7 @@ static const char* cmd_g2micwav(const String& argsInput) {
     xSemaphoreTake(gMicWavMutex, portMAX_DELAY);
     if (!gMicWavFile) {
       xSemaphoreGive(gMicWavMutex);
-      return "G2 mic wav: not recording";
+      return "Error: G2 mic wav: not recording";
     }
     String path     = gMicWavPath;
     uint32_t bytes  = gMicWavBytes;
@@ -11620,11 +11620,11 @@ static const char* cmd_g2aiconfig(const String& argsInput) {
   size_t n = g2BuildEvenAIConfig(allocSeq(), G2_MAGIC_EVEN_AI_CTRL,
                                  voiceSwitch, streamSpeed,
                                  env, sizeof(env));
-  if (n == 0) return "G2: aiconfig — envelope build failed";
+  if (n == 0) return "Error: G2: aiconfig — envelope build failed";
 
   G2Temple* arm = pickEvenAIArm("g2aiconfig");
-  if (!arm) return "G2: aiconfig — no reachable temple";
-  if (!sendEnvelope(*arm, env, n)) return "G2: aiconfig — send failed (mutex timeout?)";
+  if (!arm) return "Error: G2: aiconfig — no reachable temple";
+  if (!sendEnvelope(*arm, env, n)) return "Error: G2: aiconfig — send failed (mutex timeout?)";
 
   // Format what we sent so the user can correlate with the next RX log.
   char vsBuf[16] = "(omit)";
@@ -11650,7 +11650,7 @@ static const char* cmd_g2aih(const String& argsInput) {
     // No separator: treat the whole input as the body, default heading.
     return g2ShowEvenAIReply(argsInput.c_str())
            ? "G2: AI reply sent"
-           : "G2: AI reply failed";
+           : "Error: G2: AI reply failed";
   }
   String heading = argsInput.substring(0, sep);
   String body    = argsInput.substring(sep + 1);
@@ -11658,7 +11658,7 @@ static const char* cmd_g2aih(const String& argsInput) {
   body.trim();
   return g2ShowEvenAIReply(heading.c_str(), body.c_str())
          ? "G2: AI reply sent (custom heading)"
-         : "G2: AI reply failed";
+         : "Error: G2: AI reply failed";
 }
 
 // Generic page-display helper. Looks up a page in the registry, builds
@@ -11716,7 +11716,7 @@ static const char* cmd_g2notify(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String args = argsInput;
   args.trim();
-  if (args.length() == 0) return "Usage: g2notify [<seconds>] <text>";
+  if (args.length() == 0) return "Error: invalid arguments — Usage: g2notify [<seconds>] <text>";
 
   // Look for a leading integer for duration. If found, consume it.
   uint32_t duration = 5000;
@@ -11736,15 +11736,15 @@ static const char* cmd_g2notify(const String& argsInput) {
       }
     }
   }
-  if (args.length() == 0) return "Usage: g2notify [<seconds>] <text>";
+  if (args.length() == 0) return "Error: invalid arguments — Usage: g2notify [<seconds>] <text>";
   return g2ShowNotification(args.c_str(), duration)
          ? "G2 notify: shown (placeholder — not a real overlay, full-screen)"
-         : "G2 notify: show failed";
+         : "Error: G2 notify: show failed";
 }
 
 static const char* cmd_g2clear(const String& /*argsInput*/) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return g2ClearDisplay() ? "G2: cleared" : "G2: clear failed";
+  return g2ClearDisplay() ? "G2: cleared" : "Error: G2: clear failed";
 }
 
 static const char* cmd_g2scan(const String& /*argsInput*/) {
@@ -11754,7 +11754,7 @@ static const char* cmd_g2scan(const String& /*argsInput*/) {
 
 static const char* cmd_g2init(const String& /*argsInput*/) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return initG2Client() ? "G2: init ok" : "G2: init failed";
+  return initG2Client() ? "G2: init ok" : "Error: G2: init failed";
 }
 
 static const char* cmd_g2deinit(const String& /*argsInput*/) {
@@ -11765,7 +11765,7 @@ static const char* cmd_g2deinit(const String& /*argsInput*/) {
 
 static const char* cmd_g2battery(const String& /*argsInput*/) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!isG2Connected()) return "G2: not connected";
+  if (!isG2Connected()) return "Error: G2: not connected";
   // Kick a request on each connected temple; responses land asynchronously
   // and update gBatteryL/gBatteryR. Print whatever we have cached now — the
   // fresh response will show up on subsequent status queries.
@@ -11791,7 +11791,7 @@ static const char* cmd_g2battery(const String& /*argsInput*/) {
 
 static const char* cmd_g2mic(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!isG2Connected()) return "G2: not connected";
+  if (!isG2Connected()) return "Error: G2: not connected";
   CommandArgs ca(argsInput);
   String a = ca.arg(0); a.toLowerCase();
   bool enable = (a == "on" || a == "start" || a == "1");
@@ -11799,7 +11799,7 @@ static const char* cmd_g2mic(const String& argsInput) {
   uint8_t seq = allocSeq();
   size_t n = g2BuildAudioCtrl(seq, G2_MAGIC_AUDIO_CTRL, enable,
                               buf, sizeof(buf));
-  if (n == 0 || !sendToBoth(buf, n)) return "G2 mic: send failed";
+  if (n == 0 || !sendToBoth(buf, n)) return "Error: G2 mic: send failed";
   // NOTE: audio frames are delivered on the left temple's render-notify
   // (…e6402), not on the command-notify (…e5402) we currently subscribe
   // to. Enabling the mic here is harmless but no audio will arrive until
@@ -11829,7 +11829,7 @@ static const char* cmd_g2streamres(const String& argsInput) {
   if (xi < 0) xi = s.indexOf('X');
   if (xi < 0) xi = s.indexOf(' ');
   if (xi <= 0) {
-    return "Usage: g2streamres <W>x<H>  (examples: 96x96, 160x120, 288x144)";
+    return "Error: invalid arguments — Usage: g2streamres <W>x<H>  (examples: 96x96, 160x120, 288x144)";
   }
   int w = s.substring(0, xi).toInt();
   int h = s.substring(xi + 1).toInt();
@@ -11866,7 +11866,7 @@ static const char* cmd_g2packrate(const String& argsInput) {
   }
   int v = s.toInt();
   if (v < 20 || v > 2000) {
-    return "Usage: g2packrate <ms>  (range 20..2000)";
+    return "Error: invalid arguments — Usage: g2packrate <ms>  (range 20..2000)";
   }
   setSetting(gSettings.g2PackRateMs, v);
   snprintf(ret, sizeof(ret),
@@ -11893,7 +11893,7 @@ static const char* cmd_g2streamtonemap(const String& argsInput) {
   }
   int p = parseBoolArg(s);
   if (p < 0) {
-    return "Usage: g2streamtonemap <on|off>";
+    return "Error: invalid arguments — Usage: g2streamtonemap <on|off>";
   }
   setSetting(gSettings.g2StreamToneMap, p ? true : false);
   snprintf(ret, sizeof(ret),
@@ -11933,7 +11933,7 @@ static const char* cmd_g2verbose(const String& argsInput) {
 // command shows the snapshot, the wire path will too.
 static const char* cmd_g2hijacktest(const String& /*argsInput*/) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gR.connected) return "G2: right temple not connected";
+  if (!gR.connected) return "Error: G2: right temple not connected";
   handleMenuStartUp(gR, BLOCKS_WIDGET_ID);
   return g2FsmHijackActive() ? "G2 hijack: fired (status page shown)"
                              : "G2 hijack: fire attempted — check logs";
@@ -11945,10 +11945,10 @@ static const char* cmd_g2hijacktest(const String& /*argsInput*/) {
 // fresh allowance if this manual try doesn't succeed.
 static const char* cmd_g2recover(const String& /*argsInput*/) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gG2State || !gG2State->initialized) return "G2: client not initialized";
+  if (!gG2State || !gG2State->initialized) return "Error: G2: client not initialized";
   if (gL.connected && gR.connected) return "G2: both temples already connected";
   if (!gL.connected && !gR.connected) {
-    return "G2: both temples down — use 'openg2 auto' for a full reconnect";
+    return "Error: G2: both temples down — use 'openg2 auto' for a full reconnect";
   }
   resetRecoveryBackoff();
   const bool ok = attemptMissingArmRecovery();
@@ -11974,8 +11974,8 @@ static const char* cmd_g2recover(const String& /*argsInput*/) {
 // string.
 static const char* cmd_g2reopen(const String& /*argsInput*/) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gR.connected) return "G2: right temple not connected — reconnect first";
-  if (gR.pluginDead) return "G2: plugin task silent — reconnect to recover";
+  if (!gR.connected) return "Error: G2: right temple not connected — reconnect first";
+  if (gR.pluginDead) return "Error: G2: plugin task silent — reconnect to recover";
   handleMenuStartUp(gR, BLOCKS_WIDGET_ID);
   return "G2: hijack re-launch dispatched (watch logs for CREATE ack)";
 }
@@ -13723,7 +13723,7 @@ static const char* cmd_g2bmp(const String& argsInput) {
   CommandArgs ca(argsInput);
   String path = ca.arg(0);
   path.trim();
-  if (path.length() == 0) return "Usage: g2bmp </path/to/file.bmp> [brightness -100..100] [contrast -100..100] [holdSeconds 0..120]";
+  if (path.length() == 0) return "Error: invalid arguments — Usage: g2bmp </path/to/file.bmp> [brightness -100..100] [contrast -100..100] [holdSeconds 0..120]";
   int brightness = 0;
   int contrast = 0;
   int holdSeconds = 3;
@@ -13738,7 +13738,7 @@ static const char* cmd_g2bmp(const String& argsInput) {
   if (holdSeconds > 120) holdSeconds = 120;
 
   G2Temple* arm = pickEvenAIArm("g2bmp");
-  if (!arm) return "G2 BMP: no reachable temple";
+  if (!arm) return "Error: G2 BMP: no reachable temple";
 
   const char* loadErr = "";
   uint8_t* bmp = nullptr;
@@ -13758,7 +13758,7 @@ static const char* cmd_g2bmp(const String& argsInput) {
   const uint32_t kPushMagicBase = G2_MAGIC_IMAGE_BASE + 0x21;  // 243+
   if (kPushMagicBase + estimatedFrags >= 256) {
     free(bmp);
-    return "G2 BMP: too many fragments for magic window";
+    return "Error: G2 BMP: too many fragments for magic window";
   }
 
   DEBUG_G2F("[G2] g2bmp: path='%s' bytes=%u dims=%dx%d frags=%u bright=%d contrast=%d hold=%ds",
@@ -13766,7 +13766,7 @@ static const char* cmd_g2bmp(const String& argsInput) {
             brightness, contrast, holdSeconds);
   if (!probeTearDownActiveContainer(*arm)) {
     free(bmp);
-    return "G2 BMP: pre-push SHUTDOWN failed";
+    return "Error: G2 BMP: pre-push SHUTDOWN failed";
   }
 
   unsigned okFrags = 0;

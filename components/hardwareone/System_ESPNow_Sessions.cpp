@@ -547,15 +547,18 @@ static constexpr uint32_t kSessionEstablishTimeoutMs = 6000;  // > pending-frame
 
 uint8_t sessionEstablishingTimeoutSweep(uint32_t nowMs) {
   if (!gSessions) return 0;
+  static uint32_t sLastEstabWarnMs = 0;  // throttle: a re-keyed peer times out every 6s forever
   uint8_t reset = 0;
   for (uint8_t i = 0; i < kSessionSlots; i++) {
     SessionState& s = gSessions[i];
     if (s.state != SESSION_ESTABLISHING) continue;
     if ((nowMs - s.lastUseMs) < kSessionEstablishTimeoutMs) continue;
-    WARN_ESPNOWF("session: ESTABLISHING timeout for %02X:%02X:%02X:%02X:%02X:%02X "
-                 "(no SESSION_CONFIRM in %ums) — resetting so the next send re-kicks SESSION_OPEN",
-                 s.peerMac[0], s.peerMac[1], s.peerMac[2], s.peerMac[3], s.peerMac[4], s.peerMac[5],
-                 (unsigned)kSessionEstablishTimeoutMs);
+    if (logCooldownOk(sLastEstabWarnMs, 30000)) {
+      WARN_ESPNOWF("session: ESTABLISHING timeout for %02X:%02X:%02X:%02X:%02X:%02X "
+                   "(no SESSION_CONFIRM in %ums) — resetting so the next send re-kicks SESSION_OPEN",
+                   s.peerMac[0], s.peerMac[1], s.peerMac[2], s.peerMac[3], s.peerMac[4], s.peerMac[5],
+                   (unsigned)kSessionEstablishTimeoutMs);
+    }
     sessionClear(&s);
     reset++;
   }

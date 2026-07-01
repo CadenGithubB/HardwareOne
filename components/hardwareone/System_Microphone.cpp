@@ -771,7 +771,7 @@ const char* cmd_micstart(const String& argsInput) {
   if (initMicrophone()) {
     return "Microphone started successfully";
   }
-  return "Failed to start microphone";
+  return "Error: Failed to start microphone";
 }
 
 const char* cmd_micstop(const String& argsInput) {
@@ -788,7 +788,7 @@ const char* cmd_miclevel(const String& argsInput) {
     return gMicCmdBuffer;
   }
   if (!gMicEnabled) {
-    return "Microphone not enabled";
+    return "Error: Microphone not enabled";
   }
   int level = getAudioLevel();
   snprintf(gMicCmdBuffer, sizeof(gMicCmdBuffer), "Audio level: %d%%", level);
@@ -799,7 +799,7 @@ const char* cmd_micrecord(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!gMicEnabled) {
-    return "Microphone not enabled. Use 'openmic' first.";
+    return "Error: Microphone not enabled. Use 'openmic' first.";
   }
 
   String arg = argsInput;
@@ -820,7 +820,7 @@ const char* cmd_micrecord(const String& argsInput) {
     if (startRecording()) {
       return "Recording started";
     } else {
-      return "Failed to start recording";
+      return "Error: Failed to start recording";
     }
   } else if (arg == "0" || arg.equalsIgnoreCase("stop")) {
     bool wasRecording = micRecording;
@@ -835,7 +835,7 @@ const char* cmd_micrecord(const String& argsInput) {
     return gMicCmdBuffer;
   }
   
-  return "Usage: micrecord <start|stop|1|0>";
+  return "Error: invalid arguments — Usage: micrecord <start|stop|1|0>";
 }
 
 const char* cmd_miclist(const String& argsInput) {
@@ -920,7 +920,7 @@ const char* cmd_micdelete(const String& argsInput) {
     snprintf(gMicCmdBuffer, sizeof(gMicCmdBuffer), "Deleted: %s", arg.c_str());
     return gMicCmdBuffer;
   }
-  return "File not found";
+  return "Error: File not found";
 }
 
 const char* cmd_micsamplerate(const String& argsInput) {
@@ -936,7 +936,7 @@ const char* cmd_micsamplerate(const String& argsInput) {
 
   int rate = arg.toInt();
   if (rate < 8000 || rate > 48000) {
-    return "Sample rate must be 8000-48000 Hz";
+    return "Error: Sample rate must be 8000-48000 Hz";
   }
 
   STACK_TRACEF("cmd_micsamplerate.enter requested=%d current=%d gMicEnabled=%d",
@@ -978,7 +978,7 @@ const char* cmd_micgain(const String& argsInput) {
 
   int gain = arg.toInt();
   if (gain < 0 || gain > 100) {
-    return "Gain must be 0-100%";
+    return "Error: Gain must be 0-100%";
   }
   
   micGain = gain;
@@ -1001,7 +1001,7 @@ const char* cmd_micbitdepth(const String& argsInput) {
 
   int depth = arg.toInt();
   if (depth != 16 && depth != 32) {
-    return "Bit depth must be 16 or 32";
+    return "Error: Bit depth must be 16 or 32";
   }
 
   STACK_TRACEF("cmd_micbitdepth.enter requested=%d current=%d gMicEnabled=%d",
@@ -1109,7 +1109,7 @@ const char* cmd_micviz(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!gMicEnabled) {
-    return "Microphone not enabled. Use 'openmic' first.";
+    return "Error: Microphone not enabled. Use 'openmic' first.";
   }
   
   if (gMicVisualizerRunning) {
@@ -1139,7 +1139,7 @@ const char* cmd_micautostart(const String& argsInput) {
     setSetting(gSettings.microphoneAutoStart, false);
     return "[Mic] Auto-start disabled";
   }
-  return "Usage: micautostart [on|off]";
+  return "Error: invalid arguments — Usage: micautostart [on|off]";
 }
 
 // Command registry
@@ -1166,7 +1166,7 @@ const size_t micCommandsCount = sizeof(micCommands) / sizeof(micCommands[0]);
 // Settings module registration
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry micSettingEntries[] = {
-  { "microphoneAutoStart", SETTING_BOOL, &gSettings.microphoneAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, nullptr },
+  { "microphoneAutoStart", SETTING_BOOL, &gSettings.microphoneAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, "micautostart" },
 };
 
 static bool isMicConnected() {

@@ -54,6 +54,7 @@ const char* cmd_fmradio_tune(const String& argsInput);
 const char* cmd_fmradio_seek(const String& argsInput);
 const char* cmd_fmradio_volume(const String& argsInput);
 const char* cmd_fmradio_mute(const String& argsInput);
+const char* cmd_fmradio_unmute(const String& argsInput);
 const char* cmd_fmradio_status(const String& argsInput);
 
 // FM Radio functions

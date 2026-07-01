@@ -597,7 +597,7 @@ const char* cmd_sensorlog(const String& argsInput) {
 
   CommandArgs a(argsInput);
   if (a.count() == 0) {
-    return "Usage: sensorlog <start|stop|status|format|maxsize|rotations|sensors|autostart> [args...]\n"
+    return "Error: invalid arguments — Usage: sensorlog <start|stop|status|format|maxsize|rotations|sensors|autostart> [args...]\n"
            "  start <filepath> [interval_ms]: Begin logging (default 5000ms)\n"
            "  stop: Stop logging\n"
            "  status: Show current logging status\n"
@@ -667,7 +667,7 @@ const char* cmd_sensorlog(const String& argsInput) {
   // Handle 'stop' subcommand
   if (subCmd == "stop") {
     if (!gSensorLoggingEnabled) {
-      return "Sensor logging is not running";
+      return "Error: Sensor logging is not running";
     }
     gSensorLoggingEnabled = false;
     notifySensorStopped("Logging");
@@ -678,11 +678,11 @@ const char* cmd_sensorlog(const String& argsInput) {
   // Handle 'start' subcommand
   if (subCmd == "start") {
     if (gSensorLoggingEnabled) {
-      return "Sensor logging already running. Use 'sensorlog stop' first.";
+      return "Error: Sensor logging already running. Use 'sensorlog stop' first.";
     }
 
     if (!a.has(1)) {
-      return "Usage: sensorlog start <filepath> [interval_ms]\n"
+      return "Error: invalid arguments — Usage: sensorlog start <filepath> [interval_ms]\n"
              "Example: sensorlog start /logs/sensors/sensors.txt 1000";
     }
 
@@ -813,6 +813,7 @@ const char* cmd_sensorlog(const String& argsInput) {
     snprintf(getDebugBuffer(), 1024, "SUCCESS: Sensor logging started\n  File: %s\n  Interval: %lums",
              filepath.c_str(), (unsigned long)interval);
     broadcastOutput(getDebugBuffer());
+    cliHintf("readings are written to the file, not to this output - read them back with 'fileview \"%s\"', and stop logging with 'sensorlog stop'", filepath.c_str());
     return getDebugBuffer();
   }
 
@@ -1036,8 +1037,8 @@ const size_t sensorLoggingCommandsCount = sizeof(sensorLoggingCommands) / sizeof
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry sensorLogSettingEntries[] = {
   { "sensorLogAutoStart",    SETTING_BOOL,   &gSettings.sensorLogAutoStart,    0, 0, nullptr, 0, 1,       "Auto-start logging after boot", nullptr, false, nullptr, "sensorlog autostart" },
-  { "sensorLogPath", SETTING_STRING, &gSettings.sensorLogPath, 0, 0, "/logs/sensors/sensors.txt", 0, 0, "Log file path", nullptr, false, nullptr, nullptr },
-  { "sensorLogIntervalMs", SETTING_INT, &gSettings.sensorLogIntervalMs, 5000, 0, nullptr, 100, 3600000, "Poll interval (ms)", nullptr, false, nullptr, nullptr },
+  { "sensorLogPath", SETTING_STRING, &gSettings.sensorLogPath, 0, 0, "/logs/sensors/sensors.txt", 0, 0, "Log file path", nullptr, false, nullptr, "sensorlogpath" },
+  { "sensorLogIntervalMs", SETTING_INT, &gSettings.sensorLogIntervalMs, 5000, 0, nullptr, 100, 3600000, "Poll interval (ms)", nullptr, false, nullptr, "sensorlog interval" },
   { "sensorLogMask", SETTING_INT, &gSettings.sensorLogMask, 0, 0, nullptr, 0, 255, "Sensor bitmask", nullptr, false, nullptr, nullptr },
   { "sensorLogFormat", SETTING_INT, &gSettings.sensorLogFormat, 0, 0, nullptr, 0, 2, "Format (0=text,1=csv,2=track)", "0|Text,1|CSV,2|Track", false, nullptr, nullptr }
 };

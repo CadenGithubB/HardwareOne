@@ -482,7 +482,7 @@ const char* cmd_fmradio(const String& argsInput) {
   }
   
   DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] Unknown subcommand: '%s'", subCmd.c_str());
-  return "Usage: fmradio [start|stop|tune <freq>|seek [up|down]|volume <0-15>|mute|status]";
+  return "Error: invalid arguments — Usage: fmradio [start|stop|tune <freq>|seek [up|down]|volume <0-15>|mute|status]";
 }
 
 const char* cmd_fmradio_start(const String& argsInput) {
@@ -497,12 +497,13 @@ const char* cmd_fmradio_start(const String& argsInput) {
   }
 
   if (!i2cPingAddress(I2C_ADDR_FM_RADIO, 100000, 50, (uint8_t)gSettings.fmRadioBus)) {
-    return "[FM Radio] Not detected on I2C bus";
+    return "Error: [FM Radio] Not detected on I2C bus";
   }
 
   // Queue the FM radio start request
   enqueueDeviceStart(I2C_DEVICE_FMRADIO);
-  
+
+  cliHint("the radio powers up in the background - check it with 'fmradioread', then tune with 'fmradiotune <freq>'");
   return "FM Radio start queued";
 }
 
@@ -510,9 +511,9 @@ const char* cmd_fmradio_stop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!gFmRadioEnabled) {
-    return "FM Radio not running";
+    return "Error: FM Radio not running";
   }
-  
+
   handleDeviceStopped(I2C_DEVICE_FMRADIO);
   fmRadioStopInternal();  // Sensor-specific: hardware deinit
   sensorStatusBumpWith("fmradio stopped");
@@ -528,7 +529,7 @@ const char* cmd_fmradio_tune(const String& argsInput) {
   freqStr.trim();
   
   if (freqStr.length() == 0) {
-    return "Usage: fmradio tune <frequency> (e.g., 103.9 or 10390)";
+    return "Error: invalid arguments — Usage: fmradio tune <frequency> (e.g., 103.9 or 10390)";
   }
   
   float freq = freqStr.toFloat();
@@ -544,12 +545,12 @@ const char* cmd_fmradio_tune(const String& argsInput) {
   
   // Validate frequency range (76-108 MHz)
   if (freqInt < 7600 || freqInt > 10800) {
-    return "[FM Radio] Error: Frequency must be 76.0-108.0 MHz";
+    return "Error: [FM Radio] Frequency must be 76.0-108.0 MHz";
   }
   
   if (!gFmRadioConnected || !gRadioInitialized) {
     if (!fmRadioInit()) {
-      return "[FM Radio] Error: Not initialized - use 'fmradio start' first";
+      return "Error: [FM Radio] Not initialized - use 'fmradio start' first";
     }
   }
   
@@ -570,7 +571,7 @@ const char* cmd_fmradio_seek(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!gFmRadioConnected || !gRadioInitialized) {
-    return "[FM Radio] Error: Not initialized - use 'fmradio start' first";
+    return "Error: [FM Radio] Not initialized - use 'fmradio start' first";
   }
   
   bool seekUp = true;  // Default seek up
@@ -624,7 +625,7 @@ const char* cmd_fmradio_volume(const String& argsInput) {
   int vol = volStr.toInt();
   
   if (vol < 0 || vol > 15) {
-    return "[FM Radio] Error: Volume must be 0-15";
+    return "Error: [FM Radio] Volume must be 0-15";
   }
   
   if (!gFmRadioConnected || !gRadioInitialized) {
@@ -649,7 +650,7 @@ const char* cmd_fmradio_mute(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!gFmRadioConnected || !gRadioInitialized) {
-    return "[FM Radio] Error: Not initialized - use 'fmradio start' first";
+    return "Error: [FM Radio] Not initialized - use 'fmradio start' first";
   }
   
   // Check if this is "mute" or "unmute" command
@@ -673,7 +674,7 @@ const char* cmd_fmradio_mute(const String& argsInput) {
 const char* cmd_fmradio_unmute(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gFmRadioConnected || !gRadioInitialized) {
-    return "[FM Radio] Error: Not initialized - use 'fmradio start' first";
+    return "Error: [FM Radio] Not initialized - use 'fmradio start' first";
   }
   gFmRadioCache.muted = false;
   i2cDeviceTransactionVoid((uint8_t)gSettings.fmRadioBus, I2C_ADDR_FM_RADIO, FM_RADIO_I2C_CLOCK, 200, [&]() {
@@ -777,7 +778,7 @@ const char* cmd_fmradioautostart(const String& argsInput) {
     setSetting(gSettings.fmRadioAutoStart, false);
     return "[FM Radio] Auto-start disabled";
   }
-  return "Usage: fmradioautostart [on|off]";
+  return "Error: invalid arguments — Usage: fmradioautostart [on|off]";
 }
 
 // Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
@@ -808,7 +809,7 @@ const size_t fmRadioCommandsCount = sizeof(fmRadioCommands) / sizeof(fmRadioComm
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry fmRadioSettingEntries[] = {
   { "fmRadioAutoStart", SETTING_BOOL, &gSettings.fmRadioAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, nullptr },
-  { "fmRadioDevicePollMs", SETTING_INT, &gSettings.fmRadioDevicePollMs, 250, 0, nullptr, 100, 5000, "Poll Interval (ms)", nullptr, false, nullptr, nullptr }
+  { "fmRadioDevicePollMs", SETTING_INT, &gSettings.fmRadioDevicePollMs, 250, 0, nullptr, 100, 5000, "Poll Interval (ms)", nullptr, false, nullptr, "fmradiodevicepollms" }
 };
 
 static bool isFMRadioConnected() {
