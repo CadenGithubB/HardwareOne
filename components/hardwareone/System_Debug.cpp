@@ -391,7 +391,7 @@ const char* cmd_loglevel(const String& argsInput) {
   } else if (valStr == "debug" || valStr == "d" || valStr == "3") {
     newLevel = LOG_LEVEL_DEBUG;
   } else {
-    return "Invalid level. Use: error(0), warn(1), info(2), or debug(3)";
+    return "Error: Invalid level. Use: error(0), warn(1), info(2), or debug(3)";
   }
 
   if (newLevel < LOG_LEVEL_ERROR) newLevel = LOG_LEVEL_ERROR;
@@ -2249,7 +2249,7 @@ const char* cmd_log(const String& argsInput) {
   // Handle 'stop' subcommand
   if (subCmd == "stop") {
     if (!gSystemLogEnabled) {
-      return "System logging is not running";
+      return "Error: System logging is not running";
     }
     
     // Flush and close persistent file handle if open

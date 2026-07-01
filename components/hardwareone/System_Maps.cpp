@@ -2999,7 +2999,7 @@ const char* cmd_gpstrack(const String& argsInput) {
                GPSTrackManager::getPointCount(), validMsg);
       return buf;
     } else {
-      snprintf(buf, 1024, "Failed to load track: %s", errorMsg.c_str());
+      snprintf(buf, 1024, "Error: Failed to load track: %s", errorMsg.c_str());
       return buf;
     }
   }
@@ -3143,7 +3143,7 @@ const char* cmd_waypointfile(const String& argsInput) {
     strlcpy(wpName, a.arg(3).c_str(), sizeof(wpName));
 
     if (!VFS::existsGuarded(filepath, currentAuthContext())) {
-      snprintf(buf, 1024, "File not found: %s", filepath);
+      snprintf(buf, 1024, "Error: File not found: %s", filepath);
       return buf;
     }
 
@@ -3180,7 +3180,7 @@ const char* cmd_waypointfile(const String& argsInput) {
     } else {
       const Waypoint* wp = WaypointManager::getWaypoint(wpIndex);
       if (wp && wp->fileCount >= MAX_WAYPOINT_FILES) {
-        snprintf(buf, 1024, "'%s' has max files (%d)", wp->name, MAX_WAYPOINT_FILES);
+        snprintf(buf, 1024, "Error: '%s' has max files (%d)", wp->name, MAX_WAYPOINT_FILES);
       } else {
         return "Error: Failed to link (already linked?)";
       }
@@ -3193,13 +3193,13 @@ const char* cmd_waypointfile(const String& argsInput) {
   strlcpy(wpNameOnly, arg1.c_str(), sizeof(wpNameOnly));
 
   if (!VFS::existsGuarded(filepath, currentAuthContext())) {
-    snprintf(buf, 1024, "File not found: %s", filepath);
+    snprintf(buf, 1024, "Error: File not found: %s", filepath);
     return buf;
   }
 
   int wpIndex = WaypointManager::findWaypointByName(wpNameOnly);
   if (wpIndex < 0) {
-    snprintf(buf, 1024, "Waypoint not found: %s", wpNameOnly);
+    snprintf(buf, 1024, "Error: Waypoint not found: %s", wpNameOnly);
     return buf;
   }
 
@@ -3209,7 +3209,7 @@ const char* cmd_waypointfile(const String& argsInput) {
   } else {
     const Waypoint* wp = WaypointManager::getWaypoint(wpIndex);
     if (wp && wp->fileCount >= MAX_WAYPOINT_FILES) {
-      snprintf(buf, 1024, "'%s' has max files (%d)", wpNameOnly, MAX_WAYPOINT_FILES);
+      snprintf(buf, 1024, "Error: '%s' has max files (%d)", wpNameOnly, MAX_WAYPOINT_FILES);
     } else {
       return "Error: Failed to link (already linked?)";
     }
@@ -3230,7 +3230,7 @@ const char* cmd_waypointfiles(const String& argsInput) {
   const String& wpName = a.arg(0);
   int wpIndex = WaypointManager::findWaypointByName(wpName.c_str());
   if (wpIndex < 0) {
-    snprintf(buf, 1024, "Waypoint not found: %s", wpName.c_str());
+    snprintf(buf, 1024, "Error: Waypoint not found: %s", wpName.c_str());
     return buf;
   }
 
@@ -3241,7 +3241,7 @@ const char* cmd_waypointfiles(const String& argsInput) {
     if (WaypointManager::removeFile(wpIndex, fileIdx)) {
       snprintf(buf, 1024, "Removed file %d from '%s'", fileIdx, wpName.c_str());
     } else {
-      snprintf(buf, 1024, "Invalid file index %d for '%s'", fileIdx, wpName.c_str());
+      snprintf(buf, 1024, "Error: Invalid file index %d for '%s'", fileIdx, wpName.c_str());
     }
     return buf;
   }

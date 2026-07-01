@@ -337,7 +337,7 @@ const char* cmd_ledcolor(const String& argsInput) {
   
   RGB color;
   if (!getRGBFromName(colorName, color)) {
-    snprintf(getDebugBuffer(), 1024, "Unknown color: %s", colorName.c_str());
+    snprintf(getDebugBuffer(), 1024, "Error: Unknown color: %s", colorName.c_str());
     return getDebugBuffer();
   }
   
@@ -429,7 +429,7 @@ const char* cmd_ledeffect(const String& argsInput) {
   else if (effectType == "rainbow") effectCode = EFFECT_RAINBOW;
   else if (effectType == "strobe") effectCode = EFFECT_STROBE;
   else {
-    snprintf(getDebugBuffer(), 1024, "Unknown effect: %s. Options: fade, pulse, blink, rainbow, strobe", effectType.c_str());
+    snprintf(getDebugBuffer(), 1024, "Error: Unknown effect: %s. Options: fade, pulse, blink, rainbow, strobe", effectType.c_str());
     return getDebugBuffer();
   }
 

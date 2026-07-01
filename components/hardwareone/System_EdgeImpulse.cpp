@@ -2126,7 +2126,7 @@ const char* cmd_ei_detect(const String& argsInput) {
   EIResults results = runEdgeImpulseInference();
   
   if (!results.success) {
-    snprintf(gEICmdBuffer, sizeof(gEICmdBuffer), "Detection failed: %s", 
+    snprintf(gEICmdBuffer, sizeof(gEICmdBuffer), "Error: Detection failed: %s",
       results.errorMessage ? results.errorMessage : "unknown error");
     return gEICmdBuffer;
   }
@@ -2154,14 +2154,14 @@ const char* cmd_ei_file(const String& argsInput) {
 
   // Check file exists
   if (!VFS::existsGuarded(path, currentAuthContext())) {
-    snprintf(gEICmdBuffer, sizeof(gEICmdBuffer), "File not found: %s", path.c_str());
+    snprintf(gEICmdBuffer, sizeof(gEICmdBuffer), "Error: File not found: %s", path.c_str());
     return gEICmdBuffer;
   }
 
   EIResults results = runInferenceFromFile(path.c_str());
   
   if (!results.success) {
-    snprintf(gEICmdBuffer, sizeof(gEICmdBuffer), "Inference failed: %s", 
+    snprintf(gEICmdBuffer, sizeof(gEICmdBuffer), "Error: Inference failed: %s",
       results.errorMessage ? results.errorMessage : "unknown error");
     return gEICmdBuffer;
   }
@@ -2290,7 +2290,7 @@ const char* cmd_ei_model_load(const String& argsInput) {
   }
   
   if (!VFS::existsGuarded(path, currentAuthContext())) {
-    snprintf(gEICmdBuffer, sizeof(gEICmdBuffer), "Model not found: %s", path.c_str());
+    snprintf(gEICmdBuffer, sizeof(gEICmdBuffer), "Error: Model not found: %s", path.c_str());
     return gEICmdBuffer;
   }
   
@@ -2305,7 +2305,7 @@ const char* cmd_ei_model_load(const String& argsInput) {
       path.c_str(), gModelInputWidth, gModelInputHeight, gModelInputChannels,
       gInterpreter ? gInterpreter->arena_used_bytes() : 0);
   } else {
-    snprintf(gEICmdBuffer, sizeof(gEICmdBuffer), "Failed to load model: %s", path.c_str());
+    snprintf(gEICmdBuffer, sizeof(gEICmdBuffer), "Error: Failed to load model: %s", path.c_str());
   }
   return gEICmdBuffer;
 }

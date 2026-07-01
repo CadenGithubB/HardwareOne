@@ -11749,7 +11749,7 @@ static const char* cmd_g2clear(const String& /*argsInput*/) {
 
 static const char* cmd_g2scan(const String& /*argsInput*/) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return g2Connect(G2_EYE_AUTO) ? "G2: found" : "G2: not found";
+  return g2Connect(G2_EYE_AUTO) ? "G2: found" : "Error: G2: not found";
 }
 
 static const char* cmd_g2init(const String& /*argsInput*/) {

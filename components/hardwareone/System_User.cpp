@@ -2291,7 +2291,7 @@ const char* cmd_session_revoke(const String& argsInput) {
     String reason = a.has(2) ? a.remaining(1) : String();
     if (!reason.length()) reason = defaultReason;
     int idx = findSessionIndexBySID(sid);
-    if (idx < 0) return "Session not found for given SID.";
+    if (idx < 0) return "Error: Session not found for given SID.";
     if (gSessions[idx].ip.length() > 0) {
       storeLogoutReason(gSessions[idx].ip, reason);
     }

@@ -214,7 +214,7 @@ const char* cmd_wifirm(const String& originalCmd) {
     snprintf(getDebugBuffer(), 1024, "Removed network '%s'", ssid.c_str());
     return getDebugBuffer();
   } else {
-    snprintf(getDebugBuffer(), 1024, "Network not found: '%s'", ssid.c_str());
+    snprintf(getDebugBuffer(), 1024, "Error: Network not found: '%s'", ssid.c_str());
     return getDebugBuffer();
   }
 }
@@ -232,7 +232,7 @@ const char* cmd_wifipromote(const String& originalCmd) {
   // Networks already in memory from settings.json
   int idx = findWiFiNetwork(ssid);
   if (idx < 0) {
-    snprintf(getDebugBuffer(), 1024, "Network not found: '%s'", ssid.c_str());
+    snprintf(getDebugBuffer(), 1024, "Error: Network not found: '%s'", ssid.c_str());
     return getDebugBuffer();
   }
   gWifiNetworks[idx].priority = newPri;
@@ -445,7 +445,7 @@ const char* cmd_wifitxpower(const String& argsInput) {
   if (q > 84) q = 84;  // ~21 dBm (hardware dependent)
   esp_err_t err = esp_wifi_set_max_tx_power((int8_t)q);
   if (err != ESP_OK) {
-    snprintf(getDebugBuffer(), 1024, "Failed to set tx power: %d", err);
+    snprintf(getDebugBuffer(), 1024, "Error: Failed to set tx power: %d", err);
     return getDebugBuffer();
   }
   snprintf(getDebugBuffer(), 1024, "TX power set to %.2f dBm (raw=%d)", q / 4.0f, q);
@@ -459,7 +459,7 @@ const char* cmd_wifigettxpower(const String& argsInput) {
   int8_t q = 0;
   esp_err_t err = esp_wifi_get_max_tx_power(&q);
   if (err != ESP_OK) {
-    snprintf(getDebugBuffer(), 1024, "Failed to get tx power: %d", err);
+    snprintf(getDebugBuffer(), 1024, "Error: Failed to get tx power: %d", err);
     return getDebugBuffer();
   }
   snprintf(getDebugBuffer(), 1024, "TX power: %.2f dBm (raw=%d)", q / 4.0f, (int)q);
@@ -906,7 +906,7 @@ const char* cmd_ntpsync(const String& argsInput) {
   if (!ok) {
     cliHint("NTP needs an internet connection - check 'wifistatus' and connect with 'openwifi' if offline");
   }
-  return ok ? "NTP sync complete" : "NTP sync failed";
+  return ok ? "NTP sync complete" : "Error: NTP sync failed";
 }
 
 const char* cmd_ntpstatus(const String& argsInput) {
@@ -983,7 +983,7 @@ const char* cmd_httpstop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   if (server == NULL) {
-    return "HTTP server is not running";
+    return "Error: HTTP server is not running";
   }
 
   bool wasHttps = gServerIsHttps;

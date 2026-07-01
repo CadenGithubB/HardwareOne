@@ -1140,7 +1140,7 @@ const char* cmd_openmqtt(const String& argsInput) {
     return "[MQTT] Client started, connecting...";
   } else {
     if (!ensureDebugBuffer()) return "Error: [MQTT] Start failed";
-    snprintf(getDebugBuffer(), 1024, "[MQTT] Start failed: %s", lastError.c_str());
+    snprintf(getDebugBuffer(), 1024, "Error: [MQTT] Start failed: %s", lastError.c_str());
     return getDebugBuffer();
   }
 }

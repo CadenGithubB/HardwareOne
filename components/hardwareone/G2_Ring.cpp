@@ -1356,12 +1356,12 @@ static const char* cmd_ringquery(const String& args) {
               (unsigned)f.serial, mask, (unsigned)f.length);
     return ret;
   } else if (subject == "raw") {
-    if (ca.count() < 4) return "ringquery raw: need <module> <cmd> <subCmd> [hex_payload]";
+    if (ca.count() < 4) return "Error: ringquery raw: need <module> <cmd> <subCmd> [hex_payload]";
     long mod = ca.argInt(1, -1);
     long cmd = ca.argInt(2, -1);
     long sub = ca.argInt(3, -1);
     if (mod < 0 || mod > 0xFF || cmd < 0 || cmd > 0xFF || sub < 0 || sub > 0xFF) {
-      return "ringquery raw: module/cmd/subCmd must be 0..255";
+      return "Error: ringquery raw: module/cmd/subCmd must be 0..255";
     }
 
     // Optional hex payload (e.g. "01" or "01FF" or "0x01 0xFF" — strip
@@ -1406,12 +1406,12 @@ static const char* cmd_ringquery(const String& args) {
             val.toLowerCase();
             if (val.startsWith("0x")) val = val.substring(2);
             if (val.length() == 0 || val.length() > 2) {
-              return "ringquery raw: status=NN must be 1-2 hex digits (00..FF)";
+              return "Error: ringquery raw: status=NN must be 1-2 hex digits (00..FF)";
             }
             char* end = nullptr;
             long parsed = strtol(val.c_str(), &end, 16);
             if (end == val.c_str() || parsed < 0 || parsed > 0xFF) {
-              return "ringquery raw: status=NN must be a hex byte 00..FF";
+              return "Error: ringquery raw: status=NN must be a hex byte 00..FF";
             }
             statusByte = (uint8_t)parsed;
           }
@@ -1436,11 +1436,11 @@ static const char* cmd_ringquery(const String& args) {
       }
       if (clean.length() > 0) {
         if (clean.length() & 1) {
-          return "ringquery raw: hex payload must be an even number of hex digits";
+          return "Error: ringquery raw: hex payload must be an even number of hex digits";
         }
         payloadLen = clean.length() / 2;
         if (payloadLen > R1_MAX_PAYLOAD) {
-          return "ringquery raw: payload too large";
+          return "Error: ringquery raw: payload too large";
         }
         for (size_t i = 0; i < payloadLen; i++) {
           char hi = clean.charAt(2 * i);
