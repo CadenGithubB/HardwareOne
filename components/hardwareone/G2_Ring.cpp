@@ -1214,7 +1214,7 @@ static const char* cmd_ringconnect(const String& args) {
   if (ca.count() >= 1) {
     String mac = ca.arg(0);
     if (!g2RingConnectMac(mac)) {
-      return "RING: direct-MAC connect failed (already running? MAC format?)";
+      return "Error: RING: direct-MAC connect failed (already running? MAC format?)";
     }
     static char buf[200];
     snprintf(buf, sizeof(buf),
@@ -1296,12 +1296,12 @@ static const char* cmd_ringquery(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   static char ret[200];
   if (!gRing.connected || !gRing.writeChar) {
-    return "RING: not connected (run 'ringconnect' first)";
+    return "Error: RING: not connected (run 'ringconnect' first)";
   }
 
   CommandArgs ca(args);
   if (ca.count() < 1) {
-    return "Usage: ringquery <wear|health|hr|hrv|spo2|temp|activity|sleep|report|raw> [type]\n"
+    return "Error: invalid arguments — Usage: ringquery <wear|health|hr|hrv|spo2|temp|activity|sleep|report|raw> [type]\n"
            "       ringquery hr [daily|point|measure]   (same shape for hrv/spo2/temp/activity/sleep)\n"
            "       ringquery report on|off|<byte>       (e.g. 0x10 to set bit 4 only — bit-bash to find what triggers push)\n"
            "       ringquery raw <module> <cmd> <subCmd> [hex_payload] [status=NN]\n"
@@ -1491,7 +1491,7 @@ static const char* cmd_ringquery(const String& args) {
   }
 
   if (f.length == 0) {
-    return "RING: failed to encode query frame";
+    return "Error: RING: failed to encode query frame";
   }
 
   gRing.writeChar->writeValue(f.bytes, f.length, false);
@@ -1546,7 +1546,7 @@ static const char* cmd_ringtoglasses(const String& args) {
     if (secs < 10)  secs = 10;
     if (secs > 600) secs = 600;
     if (!ringSpoofStart((uint32_t)secs)) {
-      return "ringtoglasses: failed to start task (out of memory?)";
+      return "Error: ringtoglasses: failed to start task (out of memory?)";
     }
     snprintf(ret, sizeof(ret),
              "ringtoglasses: started (interval=%lds). First push in ~%lds.",
@@ -1562,12 +1562,12 @@ static const char* cmd_ringtoglasses(const String& args) {
 
   if (sub == "now") {
     if (!ringSpoofSendOnce(G2_MAGIC_RING_RAW_PUSH)) {
-      return "ringtoglasses: one-shot push failed (cache empty? right temple down?)";
+      return "Error: ringtoglasses: one-shot push failed (cache empty? right temple down?)";
     }
     return "ringtoglasses: one-shot push sent (see [RING] spoof TX log)";
   }
 
-  return "Usage: ringtoglasses <on [sec]|off|now|status>";
+  return "Error: invalid arguments — Usage: ringtoglasses <on [sec]|off|now|status>";
 }
 
 // =============================================================================
@@ -1747,7 +1747,7 @@ static const char* cmd_ringbridge(const String& args) {
     }
     mac.trim(); name.trim();
     if (mac.length() < 17) {
-      return "ringbridge on: no ring MAC known — `ringconnect` once first "
+      return "Error: ringbridge on: no ring MAC known — `ringconnect` once first "
              "(or `ringscan`) so we have something to tell the temple.";
     }
     if (name.length() == 0) {
@@ -1765,7 +1765,7 @@ static const char* cmd_ringbridge(const String& args) {
       for (int i = 0; i < 6; i++) {
         unsigned v = 0;
         if (sscanf(s + i * 3, "%2x", &v) != 1) {
-          return "ringbridge on: failed to parse ring MAC";
+          return "Error: ringbridge on: failed to parse ring MAC";
         }
         macBle[i] = (uint8_t)v;
       }
@@ -1785,7 +1785,7 @@ static const char* cmd_ringbridge(const String& args) {
     //      reversed). Reversing it (which an earlier version of this firmware
     //      did) makes the ring directed-advertise toward a non-existent MAC.
     if (!gRing.connected || !gRing.writeChar) {
-      return "ringbridge on: ring is not currently connected — run "
+      return "Error: ringbridge on: ring is not currently connected — run "
              "`ringconnect` first, then re-issue `ringbridge on`. The R1 must "
              "stay connected to us throughout the bridge (the temple bonds in "
              "parallel; multi-central is supported).";
@@ -1823,9 +1823,9 @@ static const char* cmd_ringbridge(const String& args) {
                                              /*connect=*/true,
                                              macBle, name.c_str(),
                                              env, sizeof(env));
-    if (envLen == 0) return "ringbridge on: failed to build RING_CONNECT_INFO frame";
+    if (envLen == 0) return "Error: ringbridge on: failed to build RING_CONNECT_INFO frame";
     if (!g2SendToRightTemple(env, envLen)) {
-      return "ringbridge on: send to right temple failed (R-temple down?)";
+      return "Error: ringbridge on: send to right temple failed (R-temple down?)";
     }
     gBridgeRequested = true;
     // Start the 30s keepalive so the temple's bridge state doesn't time out.
@@ -1849,7 +1849,7 @@ static const char* cmd_ringbridge(const String& args) {
     String name = gRingDeviceName.length() ? gRingDeviceName : String("EVEN R1");
     mac.trim();
     if (mac.length() < 17) {
-      return "ringbridge off: no MAC known to address the release — "
+      return "Error: ringbridge off: no MAC known to address the release — "
              "send `g2devcfg ring <mac> <name>` manually if you need to.";
     }
     uint8_t macBle[6] = {0};
@@ -1858,7 +1858,7 @@ static const char* cmd_ringbridge(const String& args) {
       for (int i = 0; i < 6; i++) {
         unsigned v = 0;
         if (sscanf(s + i * 3, "%2x", &v) != 1) {
-          return "ringbridge off: failed to parse ring MAC";
+          return "Error: ringbridge off: failed to parse ring MAC";
         }
         macBle[i] = (uint8_t)v;
       }
@@ -1869,9 +1869,9 @@ static const char* cmd_ringbridge(const String& args) {
                                              /*connect=*/false,
                                              macBle, name.c_str(),
                                              env, sizeof(env));
-    if (envLen == 0) return "ringbridge off: failed to build release frame";
+    if (envLen == 0) return "Error: ringbridge off: failed to build release frame";
     if (!g2SendToRightTemple(env, envLen)) {
-      return "ringbridge off: send to right temple failed (R-temple down?)";
+      return "Error: ringbridge off: send to right temple failed (R-temple down?)";
     }
     gBridgeRequested = false;
     ringBridgeHeartbeatStop();
@@ -1880,7 +1880,7 @@ static const char* cmd_ringbridge(const String& args) {
            "bridge), so direct `ringquery ...` commands continue to work.";
   }
 
-  return "Usage: ringbridge <on|off|status>";
+  return "Error: invalid arguments — Usage: ringbridge <on|off|status>";
 }
 
 extern const CommandEntry g2RingCommands[] = {

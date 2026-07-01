@@ -347,7 +347,7 @@ const char* cmd_sensorstart_queued(I2CDeviceType sensor, const char* displayName
              displayName, pos, getQueueDepth());
     return getDebugBuffer();
   } else {
-    snprintf(getDebugBuffer(), 1024, "Failed to queue %s sensor (queue full)", displayName);
+    snprintf(getDebugBuffer(), 1024, "Error: Failed to queue %s sensor (queue full)", displayName);
     return getDebugBuffer();
   }
 }
@@ -651,7 +651,7 @@ const char* cmd_i2cbusenabled(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String valStr = argsInput;
   valStr.trim();
-  if (valStr.length() == 0) return "Usage: i2cBusEnabled <0|1> (reboot required)";
+  if (valStr.length() == 0) return "Error: invalid arguments — Usage: i2cBusEnabled <0|1> (reboot required)";
   bool v = (valStr.toInt() != 0);
   setSetting(gSettings.i2cBusEnabled, v);
   snprintf(getDebugBuffer(), 1024, "i2cBusEnabled set to %d (reboot required)", (int)v);
@@ -662,7 +662,7 @@ const char* cmd_i2csdapin(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String valStr = argsInput;
   valStr.trim();
-  if (valStr.length() == 0) return "Usage: i2cSdaPin <0.." HW_GPIO_MAX_STR "> (max GPIO for this board; reboot required)";
+  if (valStr.length() == 0) return "Error: invalid arguments — Usage: i2cSdaPin <0.." HW_GPIO_MAX_STR "> (max GPIO for this board; reboot required)";
   int v = valStr.toInt();
   if (v < 0) v = 0;
   if (v > HW_GPIO_MAX) v = HW_GPIO_MAX;
@@ -675,7 +675,7 @@ const char* cmd_i2csclpin(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String valStr = argsInput;
   valStr.trim();
-  if (valStr.length() == 0) return "Usage: i2cSclPin <0.." HW_GPIO_MAX_STR "> (max GPIO for this board; reboot required)";
+  if (valStr.length() == 0) return "Error: invalid arguments — Usage: i2cSclPin <0.." HW_GPIO_MAX_STR "> (max GPIO for this board; reboot required)";
   int v = valStr.toInt();
   if (v < 0) v = 0;
   if (v > HW_GPIO_MAX) v = HW_GPIO_MAX;
@@ -695,7 +695,7 @@ const char* cmd_i2c2busenabled(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String valStr = argsInput;
   valStr.trim();
-  if (valStr.length() == 0) return "Usage: i2c2BusEnabled <0|1> (reboot required)";
+  if (valStr.length() == 0) return "Error: invalid arguments — Usage: i2c2BusEnabled <0|1> (reboot required)";
   bool v = (valStr.toInt() != 0);
   setSetting(gSettings.i2c2BusEnabled, v);
   snprintf(getDebugBuffer(), 1024, "i2c2BusEnabled set to %d (reboot required)", (int)v);
@@ -706,7 +706,7 @@ const char* cmd_i2c2sdapin(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String valStr = argsInput;
   valStr.trim();
-  if (valStr.length() == 0) return "Usage: i2c2SdaPin <-1.." HW_GPIO_MAX_STR "> (-1=unavailable; max GPIO for this board; reboot required)";
+  if (valStr.length() == 0) return "Error: invalid arguments — Usage: i2c2SdaPin <-1.." HW_GPIO_MAX_STR "> (-1=unavailable; max GPIO for this board; reboot required)";
   int v = valStr.toInt();
   if (v < -1) v = -1;
   if (v > HW_GPIO_MAX) v = HW_GPIO_MAX;
@@ -719,7 +719,7 @@ const char* cmd_i2c2sclpin(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String valStr = argsInput;
   valStr.trim();
-  if (valStr.length() == 0) return "Usage: i2c2SclPin <-1.." HW_GPIO_MAX_STR "> (-1=unavailable; max GPIO for this board; reboot required)";
+  if (valStr.length() == 0) return "Error: invalid arguments — Usage: i2c2SclPin <-1.." HW_GPIO_MAX_STR "> (-1=unavailable; max GPIO for this board; reboot required)";
   int v = valStr.toInt();
   if (v < -1) v = -1;
   if (v > HW_GPIO_MAX) v = HW_GPIO_MAX;
@@ -746,7 +746,7 @@ static const char* setDeviceBusAndReport(int& target, const String& argsInput, c
                settingName, (int)(I2CDeviceManager::NUM_BUSES - 1));
       return getDebugBuffer();
     }
-    return "Usage: <bus> (reboot required)";
+    return "Error: invalid arguments — Usage: <bus> (reboot required)";
   }
   int v = valStr.toInt();
   if (v < 0) v = 0;
@@ -841,6 +841,8 @@ const char* cmd_i2cscan(const String& originalCmd) {
 
   // Return value is the short result string the CLI prints after the
   // streamed output. Doesn't need to repeat what we already broadcast.
+  emitListingTrailer("detected I2C hardware",
+                     "battery: run 'batterystatus'; a sensor: 'open<sensor>' then '<sensor>read'");
   if (ensureDebugBuffer()) {
     snprintf(getDebugBuffer(), 1024, "[i2cscan] %d device(s) found", totalCount);
     return getDebugBuffer();
@@ -1138,13 +1140,13 @@ const char* cmd_detect(const String& argsInput) {
   const bool apply = (sub == "apply");
 
   if (apply && !currentExecIsAdmin())
-    return "[detect] 'apply' changes config — admin login required.";
+    return "Error: [detect] 'apply' changes config — admin login required.";
 
   DetectionResult r;
   detectHardware(r);
 
   if (r.busDisabled)
-    return "[detect] I2C bus disabled — enable the 'i2c' feature to scan for hardware.";
+    return "Error: [detect] I2C bus disabled — enable the 'i2c' feature to scan for hardware.";
 
   if (apply) {
     ApplyResult ar = applyDetectedHardware(r);
@@ -1530,6 +1532,7 @@ const char* cmd_devices(const String& originalCmd) {
   if (argWantsJson(originalCmd)) {
     PSRAM_JSON_DOC(doc);
     doc["schema"] = 1;
+    doc["hint"] = "battery: run 'batterystatus'; a sensor: 'open<sensor>' then '<sensor>read'";
     JsonArray arr = doc["devices"].to<JsonArray>();
     buildI2cDeviceListJson(arr);
     doc["count"] = arr.size();
@@ -1541,6 +1544,8 @@ const char* cmd_devices(const String& originalCmd) {
   }
 
   streamDeviceRegistryOutput();
+  emitListingTrailer("detected I2C hardware",
+                     "battery: run 'batterystatus'; a sensor: 'open<sensor>' then '<sensor>read'");
   return "[I2C] Device registry displayed";
 }
 
@@ -1580,6 +1585,8 @@ const char* cmd_discover(const String& originalCmd) {
 
   streamDeviceRegistryOutput();
 
+  emitListingTrailer("detected I2C hardware",
+                     "battery: run 'batterystatus'; a sensor: 'open<sensor>' then '<sensor>read'");
   return "Discovery complete";
 }
 
@@ -1599,7 +1606,7 @@ const char* cmd_devicefile(const String& originalCmd) {
   buildDeviceRegistryJson(doc);
   static char* regBuf = nullptr;
   if (!regBuf) regBuf = (char*)ps_alloc(4096, AllocPref::PreferPSRAM, "devicefile.json");
-  if (!regBuf) return "[I2C] Out of memory";
+  if (!regBuf) return "Error: [I2C] Out of memory";
   serializeJson(doc, regBuf, 4096);
   broadcastOutput(regBuf);
   return "[I2C] Registry JSON displayed";
@@ -1727,6 +1734,7 @@ const char* cmd_sensors(const String& argsInput) {
     const bool brief = (la.indexOf("brief") >= 0);
     PSRAM_JSON_DOC(doc);
     buildSensorsJson(doc, !brief);
+    doc["hint"] = "battery: run 'batterystatus'; a sensor: 'open<sensor>' then '<sensor>read'";
     static char* sensorsJsonBuf = nullptr;
     if (!sensorsJsonBuf) sensorsJsonBuf = (char*)ps_alloc(4096, AllocPref::PreferPSRAM, "sensors.json");
     if (!sensorsJsonBuf) return "{\"error\":\"oom\"}";
@@ -1798,6 +1806,9 @@ const char* cmd_sensors(const String& argsInput) {
   broadcastOutput("Usage: sensors [filter] - filter by name, description, or manufacturer");
   broadcastOutput("Example: sensors temperature, sensors adafruit, sensors imu");
 
+  emitListingTrailer("detected sensors",
+                     "battery: run 'batterystatus'; a sensor: 'open<sensor>' then '<sensor>read'",
+                     "the filter matches sensor name/description, not an I2C address (e.g. 'sensors 0x36' matches nothing)");
   return "[I2C] Sensor list displayed";
 }
 
@@ -1887,6 +1898,9 @@ const char* cmd_sensorinfo(const String& argsInput) {
     broadcastOutput("  ✗ Not currently connected");
   }
 
+  emitListingTrailer("detected sensors",
+                     "battery: run 'batterystatus'; a sensor: 'open<sensor>' then '<sensor>read'",
+                     "the filter matches sensor name/description, not an I2C address (e.g. 'sensors 0x36' matches nothing)");
   return "[I2C] Sensor info displayed";
 }
 
@@ -1968,7 +1982,7 @@ static const char* cmd_sensorautostart(const String& argsInput) {
   }
   
   if (!a.hasMinArgs(2)) {
-    return "Usage: sensorautostart <sensor> <on|off>";
+    return "Error: invalid arguments — Usage: sensorautostart <sensor> <on|off>";
   }
 
   String sensor = a.arg(0);
@@ -1980,7 +1994,7 @@ static const char* cmd_sensorautostart(const String& argsInput) {
   bool disable = (value == "off" || value == "false" || value == "0");
   
   if (!enable && !disable) {
-    return "Value must be on/off, true/false, or 1/0";
+    return "Error: Value must be on/off, true/false, or 1/0";
   }
   
   // Find sensor in cost table
@@ -2015,7 +2029,7 @@ static const char* cmd_sensorautostart(const String& argsInput) {
   }
   
   if (!found) {
-    return "Unknown sensor. Options: thermal, tof, imu, gps, fmradio, apds, input, all";
+    return "Error: Unknown sensor. Options: thermal, tof, imu, gps, fmradio, apds, input, all";
   }
   
   bool wasEnabled = *found->autoStartFlag;
@@ -2101,7 +2115,7 @@ const char* cmd_i2crecover(const String& argsInput) {
   args.trim();
   
   if (args.isEmpty()) {
-    return "Usage: i2crecover <address>\nExample: i2crecover 0x5A";
+    return "Error: invalid arguments — Usage: i2crecover <address>\nExample: i2crecover 0x5A";
   }
   
   // Parse address (hex or decimal)

@@ -68,24 +68,24 @@ bool servoInit() {
 
 const char* cmd_servo(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!ensureDebugBuffer()) return "[Servo] Error: Debug buffer unavailable";
+  if (!ensureDebugBuffer()) return "Error: [Servo] Debug buffer unavailable";
   
   // Initialize PWM driver if not already done
   if (!gPwmDriverConnected) {
     if (!servoInit()) {
-      return "[Servo] Error: PCA9685 not found at 0x40 - check wiring";
+      return "Error: [Servo] PCA9685 not found at 0x40 - check wiring";
     }
   }
   
   // Parse: <channel> <angle>
   CommandArgs a(argsInput);
-  if (!a.hasMinArgs(2)) return "Usage: servo <channel> <angle>";
+  if (!a.hasMinArgs(2)) return "Error: invalid arguments — Usage: servo <channel> <angle>";
 
   int channel = a.argInt(0, -1);
   int angle = a.argInt(1, -1);
   
-  if (channel < 0 || channel > 15) return "[Servo] Error: Channel must be 0-15";
-  if (angle < 0 || angle > 180) return "[Servo] Error: Angle must be 0-180";
+  if (channel < 0 || channel > 15) return "Error: [Servo] Channel must be 0-15";
+  if (angle < 0 || angle > 180) return "Error: [Servo] Angle must be 0-180";
   
   // Use profile if configured, otherwise use default range
   int pulseWidth;
@@ -111,11 +111,11 @@ const char* cmd_servo(const String& argsInput) {
 
 const char* cmd_servoprofile(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!ensureDebugBuffer()) return "[Servo] Error: Debug buffer unavailable";
+  if (!ensureDebugBuffer()) return "Error: [Servo] Debug buffer unavailable";
   
   // Parse: <channel> <minPulse> <maxPulse> <centerPulse> <name>
   CommandArgs a(argsInput);
-  if (!a.hasMinArgs(5)) return "Usage: servoprofile <ch> <minPulse> <maxPulse> <centerPulse> <name>";
+  if (!a.hasMinArgs(5)) return "Error: invalid arguments — Usage: servoprofile <ch> <minPulse> <maxPulse> <centerPulse> <name>";
 
   int channel = a.argInt(0, -1);
   int minPulse = a.argInt(1, -1);
@@ -123,11 +123,11 @@ const char* cmd_servoprofile(const String& argsInput) {
   int centerPulse = a.argInt(3, -1);
   String name = a.remaining(3);
   
-  if (channel < 0 || channel > 15) return "[Servo] Error: Channel must be 0-15";
-  if (minPulse < 500 || minPulse > 2500) return "[Servo] Error: Min pulse must be 500-2500µs";
-  if (maxPulse < 500 || maxPulse > 2500) return "[Servo] Error: Max pulse must be 500-2500µs";
-  if (centerPulse < minPulse || centerPulse > maxPulse) return "[Servo] Error: Center pulse must be between min and max";
-  if (name.length() == 0 || name.length() > 31) return "[Servo] Error: Name must be 1-31 characters";
+  if (channel < 0 || channel > 15) return "Error: [Servo] Channel must be 0-15";
+  if (minPulse < 500 || minPulse > 2500) return "Error: [Servo] Min pulse must be 500-2500µs";
+  if (maxPulse < 500 || maxPulse > 2500) return "Error: [Servo] Max pulse must be 500-2500µs";
+  if (centerPulse < minPulse || centerPulse > maxPulse) return "Error: [Servo] Center pulse must be between min and max";
+  if (name.length() == 0 || name.length() > 31) return "Error: [Servo] Name must be 1-31 characters";
   
   servoProfiles[channel].configured = true;
   servoProfiles[channel].minPulse = minPulse;
@@ -188,18 +188,18 @@ const char* cmd_servolist(const String& argsInput) {
 
 const char* cmd_servocalibrate(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!ensureDebugBuffer()) return "[Servo] Error: Debug buffer unavailable";
+  if (!ensureDebugBuffer()) return "Error: [Servo] Debug buffer unavailable";
   
   // Parse: <channel>
   String valStr = argsInput;
   valStr.trim();
-  if (valStr.length() == 0) return "Usage: servocalibrate <channel>";
+  if (valStr.length() == 0) return "Error: invalid arguments — Usage: servocalibrate <channel>";
   
   int channel = valStr.toInt();
-  if (channel < 0 || channel > 15) return "[Servo] Error: Channel must be 0-15";
+  if (channel < 0 || channel > 15) return "Error: [Servo] Channel must be 0-15";
   
   if (!gPwmDriverConnected) {
-    return "[Servo] Error: PCA9685 not initialized - run 'servo' command first";
+    return "Error: [Servo] PCA9685 not initialized - run 'servo' command first";
   }
   
   broadcastOutput("SERVO CALIBRATION MODE");
@@ -229,24 +229,24 @@ const char* cmd_servocalibrate(const String& argsInput) {
 
 const char* cmd_pwm(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!ensureDebugBuffer()) return "[Servo] Error: Debug buffer unavailable";
+  if (!ensureDebugBuffer()) return "Error: [Servo] Debug buffer unavailable";
   
   // Initialize PWM driver if not already done
   if (!gPwmDriverConnected) {
     if (!servoInit()) {
-      return "[Servo] Error: PCA9685 not found at 0x40 - check wiring";
+      return "Error: [Servo] PCA9685 not found at 0x40 - check wiring";
     }
   }
   
   // Parse: <channel> <value> [freq]
   CommandArgs a(argsInput);
-  if (!a.hasMinArgs(2)) return "Usage: pwm <channel> <value> [freq]";
+  if (!a.hasMinArgs(2)) return "Error: invalid arguments — Usage: pwm <channel> <value> [freq]";
 
   int channel = a.argInt(0, -1);
   int value = a.argInt(1, -1);
 
-  if (channel < 0 || channel > 15) return "[Servo] Error: Channel must be 0-15";
-  if (value < 0 || value > 4095) return "[Servo] Error: Value must be 0-4095";
+  if (channel < 0 || channel > 15) return "Error: [Servo] Channel must be 0-15";
+  if (value < 0 || value > 4095) return "Error: [Servo] Value must be 0-4095";
 
   // Optional frequency parameter
   if (a.has(2)) {
@@ -257,7 +257,7 @@ const char* cmd_pwm(const String& argsInput) {
       });
       snprintf(getDebugBuffer(), 1024, "PWM channel %d set to %d (freq: %dHz)", channel, value, freq);
     } else {
-      snprintf(getDebugBuffer(), 1024, "[Servo] Error: Frequency must be 24-1526Hz");
+      snprintf(getDebugBuffer(), 1024, "Error: [Servo] Frequency must be 24-1526Hz");
     }
   } else {
     snprintf(getDebugBuffer(), 1024, "PWM channel %d set to %d", channel, value);

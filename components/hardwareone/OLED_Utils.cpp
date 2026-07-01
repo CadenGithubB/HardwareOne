@@ -3443,7 +3443,7 @@ const char* cmd_oled_enabled(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   String _arg = argsInput; _arg.trim();
-  if (_arg.length() == 0) return "Usage: oledenabled <0|1>";
+  if (_arg.length() == 0) return "Error: invalid arguments — Usage: oledenabled <0|1>";
   const char* p = _arg.c_str();
   bool enabled = (*p == '1' || strncasecmp(p, "true", 4) == 0);
   setSetting(gSettings.oledEnabled, enabled);
@@ -3488,7 +3488,7 @@ const char* cmd_oled_requireauth(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   String _arg = argsInput; _arg.trim();
-  if (_arg.length() == 0) return "Usage: oledrequireauth <0|1>";
+  if (_arg.length() == 0) return "Error: invalid arguments — Usage: oledrequireauth <0|1>";
   const char* p = _arg.c_str();
   bool enabled = (*p == '1' || strncasecmp(p, "true", 4) == 0);
   setSetting(gSettings.localDisplayRequireAuth, enabled);
@@ -3500,7 +3500,7 @@ const char* cmd_oled_bootmode(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   String _arg = argsInput; _arg.trim();
-  if (_arg.length() == 0) return "Usage: oledbootmode <logo|status|sensors|thermal|network|mesh|off>";
+  if (_arg.length() == 0) return "Error: invalid arguments — Usage: oledbootmode <logo|status|sensors|thermal|network|mesh|off>";
   const char* p = _arg.c_str();
   // Case-insensitive compare for mode names
   if (strncasecmp(p, "logo", 4) == 0) {
@@ -3528,7 +3528,7 @@ const char* cmd_oled_defaultmode(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   String _arg = argsInput; _arg.trim();
-  if (_arg.length() == 0) return "Usage: oleddefaultmode <logo|status|sensors|thermal|network|mesh|off>";
+  if (_arg.length() == 0) return "Error: invalid arguments — Usage: oleddefaultmode <logo|status|sensors|thermal|network|mesh|off>";
   const char* p = _arg.c_str();
   // Case-insensitive compare for mode names
   if (strncasecmp(p, "logo", 4) == 0) {
@@ -3556,7 +3556,7 @@ const char* cmd_oled_bootduration(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   String _arg = argsInput; _arg.trim();
-  if (_arg.length() == 0) return "Usage: oledbootduration <500..10000>";
+  if (_arg.length() == 0) return "Error: invalid arguments — Usage: oledbootduration <500..10000>";
   const char* p = _arg.c_str();
   int v = atoi(p);
   if (v < 500 || v > 10000) return "Error: OLED boot duration must be 500..10000 ms (0.5s..10s)";
@@ -3569,7 +3569,7 @@ const char* cmd_oled_updateinterval(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   String _arg = argsInput; _arg.trim();
-  if (_arg.length() == 0) return "Usage: oledupdateinterval <10..1000>";
+  if (_arg.length() == 0) return "Error: invalid arguments — Usage: oledupdateinterval <10..1000>";
   const char* p = _arg.c_str();
   int v = atoi(p);
   if (v < 10 || v > 1000) return "Error: OLED update interval must be 10..1000 ms";
@@ -3582,7 +3582,7 @@ const char* cmd_oled_brightness(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   String _arg = argsInput; _arg.trim();
-  if (_arg.length() == 0) return "Usage: oledbrightness <0..255>";
+  if (_arg.length() == 0) return "Error: invalid arguments — Usage: oledbrightness <0..255>";
   const char* p = _arg.c_str();
   int v = atoi(p);
   if (v < 0 || v > 255) return "Error: OLED brightness must be 0..255";
@@ -3605,7 +3605,7 @@ const char* cmd_oled_flip(const String& argsInput) {
   if (arg == "on" || arg == "true" || arg == "1")       target = true;
   else if (arg == "off" || arg == "false" || arg == "0") target = false;
   else if (arg == "toggle")                              target = !gSettings.oledFlipped;
-  else return "Usage: oledflip [on|off|toggle]";
+  else return "Error: invalid arguments — Usage: oledflip [on|off|toggle]";
   setSetting(gSettings.oledFlipped, target);
   applyOLEDRotation();
   snprintf(getDebugBuffer(), 1024, "OLED flip: %s", target ? "on (rotated 180°)" : "off (normal)");
@@ -3616,7 +3616,7 @@ const char* cmd_oled_thermalscale(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   String _arg = argsInput; _arg.trim();
-  if (_arg.length() == 0) return "Usage: oledthermalscale <0.1..10.0>";
+  if (_arg.length() == 0) return "Error: invalid arguments — Usage: oledthermalscale <0.1..10.0>";
   const char* p = _arg.c_str();
   float f = strtof(p, nullptr);
   if (f < 0.1 || f > 10.0) return "Error: OLED thermal scale must be 0.1..10.0";
@@ -3629,7 +3629,7 @@ const char* cmd_oled_thermalcolormode(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   String _arg = argsInput; _arg.trim();
-  if (_arg.length() == 0) return "Usage: oledthermalcolormode <3level|grayscale>";
+  if (_arg.length() == 0) return "Error: invalid arguments — Usage: oledthermalcolormode <3level|grayscale>";
   const char* p = _arg.c_str();
   if (strncasecmp(p, "3level", 6) == 0) {
     setSetting(gSettings.oledThermalColorMode, "3level");

@@ -689,7 +689,7 @@ const char* cmd_batterylog(const String& argsInput) {
   if (a.startsWith("interval")) {
     String v = a.substring(8); v.trim();
     long sec = v.toInt();
-    if (sec < 5 || sec > 3600) return "Usage: batterylog interval <5..3600>  (seconds)";
+    if (sec < 5 || sec > 3600) return "Error: invalid arguments — Usage: batterylog interval <5..3600>  (seconds)";
     setSetting(gSettings.batteryLogIntervalMs, (uint32_t)(sec * 1000));
     snprintf(getDebugBuffer(), 1024, "Battery log interval set to %ld s", sec);
     return getDebugBuffer();

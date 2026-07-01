@@ -878,7 +878,7 @@ const char* cmd_espnow_sensorstream(const String& argsInput) {
   CommandArgs a(argsInput);
   if (!a.hasMinArgs(2)) {
     DEBUG_ESPNOW_STREAMF("%s", "[SENSOR_STREAM_CMD] ERROR: Missing sensor name");
-    return "Usage: espnow sensorstream <sensor> <on|off>";
+    return "Error: invalid arguments — Usage: espnow sensorstream <sensor> <on|off>";
   }
 
   String sensorName = a.arg(0);
@@ -890,7 +890,7 @@ const char* cmd_espnow_sensorstream(const String& argsInput) {
   RemoteSensorType sensorType = stringToSensorType(sensorName.c_str());
   if (strcmp(sensorTypeToString(sensorType), sensorName.c_str()) != 0) {
     DEBUG_ESPNOW_STREAMF("[SENSOR_STREAM_CMD] ERROR: Unknown sensor '%s'", sensorName.c_str());
-    return "Usage: espnow sensorstream <sensor> <on|off>";
+    return "Error: invalid arguments — Usage: espnow sensorstream <sensor> <on|off>";
   }
   DEBUG_ESPNOW_STREAMF("[SENSOR_STREAM_CMD] Sensor type resolved: %d (%s)", sensorType, sensorTypeToString(sensorType));
 
@@ -898,7 +898,7 @@ const char* cmd_espnow_sensorstream(const String& argsInput) {
   int boolResult = parseBoolArg(a.arg(1));
   if (boolResult < 0) {
     DEBUG_ESPNOW_STREAMF("[SENSOR_STREAM_CMD] ERROR: Invalid action '%s'", a.arg(1).c_str());
-    return "Usage: espnow sensorstream <sensor> <on|off>";
+    return "Error: invalid arguments — Usage: espnow sensorstream <sensor> <on|off>";
   }
   bool enable = (boolResult == 1);
   
@@ -1008,7 +1008,7 @@ const char* cmd_espnow_sensorbroadcast(const String& argsInput) {
     broadcastOutput("[ESP-NOW] Sensor broadcast DISABLED - no sensor data will be sent");
     return "OK: Sensor broadcast disabled";
   } else {
-    return "Usage: espnow sensorbroadcast <on|off>";
+    return "Error: invalid arguments — Usage: espnow sensorbroadcast <on|off>";
   }
 }
 

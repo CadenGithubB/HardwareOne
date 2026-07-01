@@ -310,7 +310,10 @@ const char* cmd_anoencoder(const String& argsInput) {
     return jbuf;
   }
   if (!gAnoEncoderConnected) {
-    if (!anoEncoderInitConnection()) return "[ANO] Error: Not connected - check wiring";
+    if (!anoEncoderInitConnection()) {
+      cliHint("to start the encoder, run 'openinput'; if it is still missing, confirm the address with 'i2cscan'");
+      return "Error: [ANO] Not connected - check wiring";
+    }
   }
   static char buf[80];
   snprintf(buf, sizeof(buf), "[ANO] pos=%ld axis=%u buttons=0x%08lX",
@@ -329,7 +332,7 @@ const char* cmd_anoencoderi2caddr(const String& argsInput) {
     return buf;
   }
   int v = a.argInt(0, 0);
-  if (v < 1 || v > 127) return "Usage: anoencoderi2caddr <1-127> (decimal) — try i2cscan first";
+  if (v < 1 || v > 127) return "Error: invalid arguments — Usage: anoencoderi2caddr <1-127> (decimal) — try i2cscan first";
   setSetting(gSettings.anoEncoderI2cAddr, v);
   return "[ANO] I2C address updated (reboot required)";
 }
@@ -348,7 +351,7 @@ const char* cmd_anoencoderinvert(const String& argsInput) {
     setSetting(gSettings.anoEncoderInvert, false);
     return "[ANO] Rotation normal";
   }
-  return "Usage: anoencoderinvert [on|off]";
+  return "Error: invalid arguments — Usage: anoencoderinvert [on|off]";
 }
 
 // Helper: parse on/off/toggle into a bool, applied to the given setting field.
@@ -368,7 +371,7 @@ const char* cmd_anoencoderswapud(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   bool target = false;
   if (!parseOnOffToggleArg(argsInput, gSettings.anoEncoderSwapUpDown, &target)) {
-    return "Usage: anoencoderswapud [on|off|toggle]";
+    return "Error: invalid arguments — Usage: anoencoderswapud [on|off|toggle]";
   }
   String arg = argsInput; arg.trim();
   if (arg.length() != 0) setSetting(gSettings.anoEncoderSwapUpDown, target);
@@ -379,7 +382,7 @@ const char* cmd_anoencoderswaplr(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   bool target = false;
   if (!parseOnOffToggleArg(argsInput, gSettings.anoEncoderSwapLeftRight, &target)) {
-    return "Usage: anoencoderswaplr [on|off|toggle]";
+    return "Error: invalid arguments — Usage: anoencoderswaplr [on|off|toggle]";
   }
   String arg = argsInput; arg.trim();
   if (arg.length() != 0) setSetting(gSettings.anoEncoderSwapLeftRight, target);

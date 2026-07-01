@@ -259,8 +259,16 @@ extern const char* cmd_sensorstart_queued(I2CDeviceType sensor, const char* disp
 
 static const char* cmd_openinput(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return cmd_sensorstart_queued(I2C_DEVICE_INPUT, inputDeviceLabel(),
-                                gInputEnabled, "openinput@enqueue");
+  const char* result = cmd_sensorstart_queued(I2C_DEVICE_INPUT, inputDeviceLabel(),
+                                              gInputEnabled, "openinput@enqueue");
+  // The device starts asynchronously and this command returns no button state —
+  // point at the driver read command so the next step is to read live input.
+#if ENABLE_ANO_ENCODER
+  cliHint("to read live input, run 'anoencoderread' once the device is up");
+#else
+  cliHint("to read live input, run 'gamepadread' once the device is up");
+#endif
+  return result;
 }
 
 static const char* cmd_closeinput(const String& argsInput) {
@@ -285,7 +293,7 @@ static const char* cmd_inputautostart(const String& argsInput) {
     setSetting(gSettings.inputAutoStart, false);
     return "[Input] Auto-start disabled";
   }
-  return "Usage: inputautostart [on|off]";
+  return "Error: invalid arguments — Usage: inputautostart [on|off]";
 }
 
 static const char* cmd_inputdevicepollms(const String& argsInput) {
@@ -297,7 +305,7 @@ static const char* cmd_inputdevicepollms(const String& argsInput) {
     return buf;
   }
   int ms = a.argInt(0, 0);
-  if (ms < 10 || ms > 1000) return "Usage: inputdevicepollms <10-1000>";
+  if (ms < 10 || ms > 1000) return "Error: invalid arguments — Usage: inputdevicepollms <10-1000>";
   setSetting(gSettings.inputDevicePollMs, ms);
   return "[Input] Poll interval updated";
 }

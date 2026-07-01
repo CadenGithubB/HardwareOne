@@ -202,6 +202,31 @@ static void sendKeyExConfirm(const uint8_t peerMac[6], uint16_t meshFingerprint,
                 reinterpret_cast<const uint8_t*>(&conf), sizeof(conf), 1);
 }
 
+// Per-peer throttle for the repeating SESSION_OPEN-reject WARN. A re-flashed or
+// mis-keyed peer re-sends SESSION_OPEN every heartbeat (~5s); unthrottled the
+// reject floods the log. Returns the rejects accumulated for this peer since the
+// last emit when it is time to log again (one line per ~30s per peer), else 0.
+// Shared by both reject branches so the count is per-peer regardless of branch.
+// Single-task (runDeferredSessionOpen runs on cmd_exec_task) so the ring needs
+// no lock; logCooldownOk is the shared throttle primitive.
+static uint16_t sessionRejectLogCount(const uint8_t mac[6]) {
+  static struct { uint8_t mac[6]; uint32_t lastMs; uint16_t n; bool used; } slots[4] = {};
+  int idx = -1, oldest = 0;
+  for (int i = 0; i < 4; i++) {
+    if (slots[i].used && memcmp(slots[i].mac, mac, 6) == 0) { idx = i; break; }
+    if (!slots[i].used && idx < 0) idx = i;
+    if (slots[i].lastMs < slots[oldest].lastMs) oldest = i;
+  }
+  if (idx < 0) idx = oldest;  // no match and no free slot — evict the stalest
+  auto& s = slots[idx];
+  if (!s.used || memcmp(s.mac, mac, 6) != 0) {
+    memcpy(s.mac, mac, 6); s.lastMs = 0; s.n = 0; s.used = true;
+  }
+  s.n++;
+  if (logCooldownOk(s.lastMs, 30000)) { uint16_t c = s.n; s.n = 0; return c; }
+  return 0;
+}
+
 // ============================================================================
 // Receive handlers
 // ============================================================================
@@ -219,11 +244,14 @@ void v4hKeyExHello(const V4RxCtx& ctx) {
                                     msg->senderMac, msg->senderPubEd25519,
                                     msg->hmac, &bootKey);
   if (meshSlot < 0) {
-    WARN_ESPNOWF("KEY_EX_HELLO rejected (reason=%d) from %02X:%02X:%02X:%02X:%02X:%02X meshFp=0x%04X",
-                 meshSlot,
+    const char* why = (meshSlot == -2) ? "unknown mesh - this device has no mesh matching that label/fingerprint"
+                    : (meshSlot == -3) ? "HMAC FAIL = PASSPHRASE MISMATCH - the two devices do NOT share the same mesh passphrase"
+                    : (meshSlot == -4) ? "sender MAC mismatch (frame header vs payload)"
+                    : "invalid payload";
+    WARN_ESPNOWF("KEY_EX_HELLO from %02X:%02X:%02X:%02X:%02X:%02X rejected: reason=%d (%s) meshFp=0x%04X",
                  msg->senderMac[0], msg->senderMac[1], msg->senderMac[2],
                  msg->senderMac[3], msg->senderMac[4], msg->senderMac[5],
-                 (unsigned)msg->meshFingerprint);
+                 meshSlot, why, (unsigned)msg->meshFingerprint);
     return;
   }
 
@@ -688,9 +716,18 @@ void runDeferredSessionOpen(void* arg) {
 
   const PeerIdentity* peer = peerIdentityFindByMac(msg->initiatorMac);
   if (!peer) {
-    WARN_ESPNOWF("SESSION_OPEN from %02X:%02X:%02X:%02X:%02X:%02X — no KEY_EX identity, rejecting",
-                 msg->initiatorMac[0], msg->initiatorMac[1], msg->initiatorMac[2],
-                 msg->initiatorMac[3], msg->initiatorMac[4], msg->initiatorMac[5]);
+    uint16_t n = sessionRejectLogCount(msg->initiatorMac);
+    if (n) {
+      // Split across two queued lines so the actionable fix isn't lost to the
+      // 256-byte DEBUG_MSG_SIZE [CUT] truncation.
+      WARN_ESPNOWF("SESSION_OPEN from %02X:%02X:%02X:%02X:%02X:%02X rejected (x%u in 30s): no stored "
+                   "identity for this peer - it was re-flashed/factory-erased (identity key rotated) "
+                   "or KEY_EX never completed.",
+                   msg->initiatorMac[0], msg->initiatorMac[1], msg->initiatorMac[2],
+                   msg->initiatorMac[3], msg->initiatorMac[4], msg->initiatorMac[5], (unsigned)n);
+      WARN_ESPNOWF("  -> IDENTITY problem, NOT a passphrase one (passphrase isn't checked here). "
+                   "Fix: run 'espnowforget' then 'espnowpairsecure' on BOTH devices to re-pair.");
+    }
     free(w);
     return;
   }
@@ -701,10 +738,18 @@ void runDeferredSessionOpen(void* arg) {
                       msg->ephX25519Pub, msg->nonceA);
   if (!espnowCryptoEd25519Verify(msg->signature, transcript, sizeof(transcript),
                                  peer->longTermPub)) {
-    WARN_ESPNOWF("SESSION_OPEN: Ed25519 verify failed (sessionId=%u peer=%02X:%02X:%02X:%02X:%02X:%02X)",
-                 (unsigned)msg->sessionId,
-                 msg->initiatorMac[0], msg->initiatorMac[1], msg->initiatorMac[2],
-                 msg->initiatorMac[3], msg->initiatorMac[4], msg->initiatorMac[5]);
+    uint16_t n = sessionRejectLogCount(msg->initiatorMac);
+    if (n) {
+      // Split across two queued lines (see 256-byte DEBUG_MSG_SIZE note above).
+      WARN_ESPNOWF("SESSION_OPEN from %02X:%02X:%02X:%02X:%02X:%02X rejected (x%u in 30s): signature "
+                   "does NOT match the identity key we stored - the peer's key CHANGED "
+                   "(re-flash/factory-erase/re-setup).",
+                   msg->initiatorMac[0], msg->initiatorMac[1], msg->initiatorMac[2],
+                   msg->initiatorMac[3], msg->initiatorMac[4], msg->initiatorMac[5], (unsigned)n);
+      WARN_ESPNOWF("  -> Not a passphrase issue; we won't auto-accept a changed key "
+                   "(anti-key-substitution). Authorize it: 'espnowpairsecure' on THIS device, then "
+                   "re-handshake from the peer.");
+    }
     free(w);
     return;
   }

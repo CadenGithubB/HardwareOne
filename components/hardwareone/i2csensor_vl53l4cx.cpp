@@ -64,6 +64,7 @@ float readToFDistance() {
   if (!gTofConnected || !gTofEnabled || gVL53L4CX == nullptr) {
     if (!gTofConnected) {
       broadcastOutput("ToF sensor not connected. Check wiring.");
+      cliHint("to start the sensor once it is wired, run 'opentof'");
     } else if (!gTofEnabled) {
       broadcastOutput("ToF sensor not started. Use 'opentof' first.");
     } else {
@@ -259,7 +260,7 @@ const char* cmd_tofstart(const String& argsInput) {
   }
 
   if (!i2cPingAddress(I2C_ADDR_TOF, 100000, 50)) {
-    return "[ToF] Not detected on I2C bus";
+    return "Error: [ToF] Not detected on I2C bus";
   }
 
   // Enqueue the request to centralized queue
@@ -267,9 +268,10 @@ const char* cmd_tofstart(const String& argsInput) {
     sensorStatusBumpWith("opentof@enqueue");
     int pos = getQueuePosition(I2C_DEVICE_TOF);
     BROADCAST_PRINTF("ToF sensor queued for open (position %d)", pos);
+    cliHint("the sensor opens in the background - read a distance with 'tofread' once it is up");
     return "[ToF] Sensor queued for open";
   } else {
-    return "[ToF] Error: Failed to enqueue open (queue full)";
+    return "Error: [ToF] Failed to enqueue open (queue full)";
   }
 }
 
@@ -283,9 +285,9 @@ const char* cmd_tofstop(const String& argsInput) {
 const char* cmd_toftransitionms(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String _arg = argsInput; _arg.trim();
-  if (_arg.length() == 0) return "Usage: toftransitionms <0..5000>";
+  if (_arg.length() == 0) return "Error: invalid arguments — Usage: toftransitionms <0..5000>";
   int v = _arg.toInt();
-  if (v < 0 || v > 5000) return "[ToF] Error: Transition time must be 0-5000ms";
+  if (v < 0 || v > 5000) return "Error: [ToF] Transition time must be 0-5000ms";
   setSetting(gSettings.tofTransitionMs, v);
   BROADCAST_PRINTF("tofTransitionMs set to %d", v);
   return "[ToF] Setting updated";
@@ -294,9 +296,9 @@ const char* cmd_toftransitionms(const String& argsInput) {
 const char* cmd_tofmaxdistancemm(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String _arg = argsInput; _arg.trim();
-  if (_arg.length() == 0) return "Usage: tofmaxdistancemm <100..10000>";
+  if (_arg.length() == 0) return "Error: invalid arguments — Usage: tofmaxdistancemm <100..10000>";
   int v = _arg.toInt();
-  if (v < 100 || v > 10000) return "[ToF] Error: Max distance must be 100-10000mm";
+  if (v < 100 || v > 10000) return "Error: [ToF] Max distance must be 100-10000mm";
   setSetting(gSettings.tofUiMaxDistanceMm, v);
   BROADCAST_PRINTF("tofUiMaxDistanceMm set to %d", v);
   return "[ToF] Setting updated";
@@ -576,9 +578,9 @@ int tofBuildDataJSON(char* buf, size_t bufSize) {
 const char* cmd_tofpollingms(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String _arg = argsInput; _arg.trim();
-  if (_arg.length() == 0) return "Usage: tofpollingms <50..5000>";
+  if (_arg.length() == 0) return "Error: invalid arguments — Usage: tofpollingms <50..5000>";
   int v = _arg.toInt();
-  if (v < 50 || v > 5000) return "[ToF] Error: Polling interval must be 50-5000ms";
+  if (v < 50 || v > 5000) return "Error: [ToF] Polling interval must be 50-5000ms";
   setSetting(gSettings.tofPollingMs, v);
   BROADCAST_PRINTF("tofPollingMs set to %d", v);
   return "[ToF] Setting updated";
@@ -587,9 +589,9 @@ const char* cmd_tofpollingms(const String& argsInput) {
 const char* cmd_tofstabilitythreshold(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String _arg = argsInput; _arg.trim();
-  if (_arg.length() == 0) return "Usage: tofstabilitythreshold <0..50>";
+  if (_arg.length() == 0) return "Error: invalid arguments — Usage: tofstabilitythreshold <0..50>";
   int v = _arg.toInt();
-  if (v < 0 || v > 50) return "[ToF] Error: Stability threshold must be 0-50";
+  if (v < 0 || v > 50) return "Error: [ToF] Stability threshold must be 0-50";
   setSetting(gSettings.tofStabilityThreshold, v);
   BROADCAST_PRINTF("tofStabilityThreshold set to %d", v);
   return "[ToF] Setting updated";
@@ -603,7 +605,7 @@ const char* cmd_tofdevicepollms(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String valStr = argsInput;
   valStr.trim();
-  if (valStr.length() == 0) return "Usage: tofDevicePollMs <100..2000>";
+  if (valStr.length() == 0) return "Error: invalid arguments — Usage: tofDevicePollMs <100..2000>";
   int v = valStr.toInt();
   if (v < 100) v = 100;
   if (v > 2000) v = 2000;
@@ -629,7 +631,7 @@ const char* cmd_tofautostart(const String& argsInput) {
     setSetting(gSettings.tofAutoStart, false);
     return "[ToF] Auto-start disabled";
   }
-  return "Usage: tofautostart [on|off]";
+  return "Error: invalid arguments — Usage: tofautostart [on|off]";
 }
 
 // Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
@@ -767,7 +769,7 @@ static const SettingEntry tofSettingEntries[] = {
   { "tofTransitionMs", SETTING_INT, &gSettings.tofTransitionMs, 200, 0, nullptr, 0, 5000, "Transition (ms)", nullptr, false, nullptr, nullptr },
   { "tofMaxDistanceMm", SETTING_INT, &gSettings.tofUiMaxDistanceMm, 3400, 0, nullptr, 100, 10000, "Max Distance (mm)", nullptr, false, nullptr, nullptr },
   { "tofDevicePollMs", SETTING_INT, &gSettings.tofDevicePollMs, 220, 0, nullptr, 100, 2000, "Poll Interval (ms)", nullptr, false, nullptr, nullptr },
-  { "tofI2cClockHz", SETTING_INT, &gSettings.i2cClockToFHz, 200000, 0, nullptr, 50000, 400000, "I2C Clock (Hz)", nullptr, false, nullptr, nullptr }
+  { "tofI2cClockHz", SETTING_INT, &gSettings.i2cClockToFHz, 200000, 0, nullptr, 50000, 400000, "I2C Clock (Hz)", nullptr, false, nullptr, "tofi2cclockhz" }
 };
 
 static bool isToFConnected() {

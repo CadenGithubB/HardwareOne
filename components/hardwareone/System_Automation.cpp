@@ -45,6 +45,7 @@
 #include "System_User.h"
 #include "System_AuthIdentity.h"  // currentAuthContext / currentExecUser / currentExecIsAdmin
 #include "System_Utils.h"
+#include "System_Mutex.h"          // SensorCacheGuard (was pulled in transitively before 71bcd2c)
 
 #if ENABLE_APDS_SENSOR
 #include "i2csensor_apds9960.h"
@@ -162,12 +163,8 @@ extern const char* AUTOMATIONS_JSON_FILE;  // Defined in .ino as "/system/automa
 
 // Filesystem lock helpers (defined in .ino) - now in automation_system.h
 
-// RAII filesystem lock guard
-class FsLockGuard {
-public:
-  FsLockGuard(const char* owner) { fsLock(owner); }
-  ~FsLockGuard() { fsUnlock(); }
-};
+// RAII filesystem lock guard (FsLockGuard) + SensorCacheGuard now live in
+// System_Mutex.h (consolidated by 71bcd2c); the stale local copy was removed.
 
 // Global automation state
 long* gAutoMemoId = nullptr;
@@ -896,6 +893,7 @@ const char* cmd_automation_list(const String& argsInput) {
     return "ERROR";
   }
   broadcastOutput(json);
+  cliHint("to run one of these now, use 'automation run id=<id>'; to enable or disable one, use 'automation enable id=<id>' / 'automation disable id=<id>'");
   return "OK";
 }
 
@@ -1837,6 +1835,7 @@ const char* cmd_automation_trigger(const String& argsInput) {
   char msg[160];
   snprintf(msg, sizeof(msg), "Armed automation id=%ld (fires in %d ms)", id, delayMs);
   broadcastOutput(msg);
+  cliHint("the commands run later when the timer elapses, not now - to capture what they output, start 'autolog start <file>' first and read it back with 'fileview \"<file>\"'");
   return "OK";
 }
 
@@ -1864,7 +1863,7 @@ const char* cmd_automation(const String& argsInput) {
         return "Automation system: disabled";
       }
     }
-    return "Usage: automation system <enable|disable|status>";
+    return "Error: invalid arguments — Usage: automation system <enable|disable|status>";
   }
 
   // Handle regular automation commands
@@ -3371,7 +3370,7 @@ const char* cmd_autolog(const String& argsInput) {
 
   if (subcmd == "start") {
     String filename = a.arg(1);
-    if (filename.length() == 0) return "Usage: autolog start <filename>";
+    if (filename.length() == 0) return "Error: invalid arguments — Usage: autolog start <filename>";
 
     // Capture the starter's identity BEFORE flipping gAutoLogActive — every
     // subsequent appendAutoLogEntry write is gated on this ctx via
@@ -3414,7 +3413,7 @@ const char* cmd_autolog(const String& argsInput) {
     }
 
   } else {
-    return "Usage: autolog start <filename> | autolog stop | autolog status";
+    return "Error: invalid arguments — Usage: autolog start <filename> | autolog stop | autolog status";
   }
 }
 
@@ -3754,7 +3753,7 @@ void stopAutomationScheduler() {
 
 static const char* cmd_print(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (argsInput.length() == 0) return "Usage: print <message>";
+  if (argsInput.length() == 0) return "Error: invalid arguments — Usage: print <message>";
   broadcastOutput(argsInput.c_str());
   return "Message printed";
 }

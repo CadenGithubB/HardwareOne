@@ -53,6 +53,7 @@ void secureClearString(String& s);
 // Examples:
 //   2-level: { ..., "camera", nullptr, "open" }      -> "camera" -> "open"
 //   3-level: { ..., "sensor", "thermal", "open" }    -> "sensor" -> "thermal" -> "open"
+
 struct CommandEntry {
   const char* name;                           // canonical command name
   const char* help;                           // short help text

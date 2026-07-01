@@ -1897,7 +1897,7 @@ const char* cmd_map(const String& argsInput) {
   }
 
   if (!currentMap.valid) {
-    return "No map loaded. Use 'mapload <path>' or upload to /maps/";
+    return "Error: No map loaded. Use 'mapload <path>' or upload to /maps/";
   }
   
   snprintf(getDebugBuffer(), 1024,
@@ -1935,14 +1935,14 @@ const char* cmd_mapload(const String& argsInput) {
     return getDebugBuffer();
   }
   
-  return "Failed to load map";
+  return "Error: Failed to load map";
 }
 
 const char* cmd_mapunload(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   (void)argsInput;
   if (!MapCore::hasValidMap()) {
-    return "No map loaded on device.";
+    return "Error: No map loaded on device.";
   }
   MapCore::unloadMap();
   return "Map unloaded (PSRAM/cache freed on device).";
@@ -1974,7 +1974,7 @@ const char* cmd_whereami(const String& argsInput) {
   }
 
   if (!ctx.valid) {
-    return "Location context not available. Need GPS fix and loaded map.";
+    return "Error: Location context not available. Need GPS fix and loaded map.";
   }
   
   char* buf = getDebugBuffer();
@@ -2001,10 +2001,11 @@ const char* cmd_search(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   CommandArgs a(argsInput);
-  if (!a.hasMinArgs(1)) return "Usage: search <name>";
+  if (!a.hasMinArgs(1)) return "Error: invalid arguments — Usage: search <name>";
 
   if (!MapCore::hasValidMap()) {
-    return "No map loaded";
+    cliHint("search needs a loaded map - list them with 'maplist', then load one with 'mapload \"<path>\"'");
+    return "Error: No map loaded";
   }
 
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
@@ -2067,11 +2068,12 @@ const char* cmd_maplist(const String& argsInput) {
   
   char* buf = getDebugBuffer();
   int offset = snprintf(buf, 1024, "Available maps:\n");
-  
+
   for (int i = 0; i < count && offset < 900; i++) {
     offset += snprintf(buf + offset, 1024 - offset, "  /maps/%s\n", maps[i]);
   }
-  
+
+  cliHint("to load one of these, use 'mapload \"<path>\"'");
   return buf;
 }
 
@@ -2959,6 +2961,7 @@ const char* cmd_gpstrack(const String& argsInput) {
 
   if (sub.length() == 0 || sub == "status") {
     if (!GPSTrackManager::hasTrack()) {
+      cliHint("to load a track, use 'gpstrack load <filepath>'");
       return "No GPS track loaded";
     }
 
@@ -2978,7 +2981,7 @@ const char* cmd_gpstrack(const String& argsInput) {
   }
 
   if (sub == "load") {
-    if (!a.hasMinArgs(2)) return "Usage: gpstrack load <filepath>";
+    if (!a.hasMinArgs(2)) return "Error: invalid arguments — Usage: gpstrack load <filepath>";
     String errorMsg;
 
     if (GPSTrackManager::loadTrack(a.arg(1).c_str(), errorMsg)) {
@@ -3006,7 +3009,7 @@ const char* cmd_gpstrack(const String& argsInput) {
     return "GPS track cleared";
   }
 
-  return "Usage: gpstrack [status|load <filepath>|clear]";
+  return "Error: invalid arguments — Usage: gpstrack [status|load <filepath>|clear]";
 }
 
 const char* cmd_waypoint(const String& argsInput) {
@@ -3034,7 +3037,7 @@ const char* cmd_waypoint(const String& argsInput) {
   }
 
   if (sub == "add") {
-    if (!a.hasMinArgs(3)) return "Usage: waypoint add <lat> <lon> [name]";
+    if (!a.hasMinArgs(3)) return "Error: invalid arguments — Usage: waypoint add <lat> <lon> [name]";
     float lat = a.argFloat(1);
     float lon = a.argFloat(2);
     String name = a.has(3) ? a.arg(3) : String("WP");
@@ -3043,30 +3046,30 @@ const char* cmd_waypoint(const String& argsInput) {
     if (idx >= 0) {
       snprintf(buf, 1024, "Added waypoint %d: %s", idx, name.c_str());
     } else {
-      return "No free waypoint slots";
+      return "Error: No free waypoint slots";
     }
     return buf;
   }
 
   if (sub == "del") {
-    if (!a.hasMinArgs(2)) return "Usage: waypoint del <index>";
+    if (!a.hasMinArgs(2)) return "Error: invalid arguments — Usage: waypoint del <index>";
     if (WaypointManager::deleteWaypoint(a.argInt(1))) {
       snprintf(buf, 1024, "Deleted waypoint %d", a.argInt(1));
     } else {
-      return "Invalid waypoint index";
+      return "Error: Invalid waypoint index";
     }
     return buf;
   }
 
   if (sub == "goto") {
-    if (!a.hasMinArgs(2)) return "Usage: waypoint goto <index>";
+    if (!a.hasMinArgs(2)) return "Error: invalid arguments — Usage: waypoint goto <index>";
     int idx = a.argInt(1);
     const Waypoint* wp = WaypointManager::getWaypoint(idx);
     if (wp) {
       WaypointManager::selectTarget(idx);
       snprintf(buf, 1024, "Navigation target: %s", wp->name);
     } else {
-      return "Invalid waypoint index";
+      return "Error: Invalid waypoint index";
     }
     return buf;
   }
@@ -3082,30 +3085,30 @@ const char* cmd_waypoint(const String& argsInput) {
   }
 
   if (sub == "rename") {
-    if (!a.hasMinArgs(3)) return "Usage: waypoint rename <index> <name>";
+    if (!a.hasMinArgs(3)) return "Error: invalid arguments — Usage: waypoint rename <index> <name>";
     int idx = a.argInt(1);
     String name = a.remaining(1);  // everything after the index arg
     if (WaypointManager::setName(idx, name.c_str())) {
       snprintf(buf, 1024, "Renamed waypoint %d: %s", idx, name.c_str());
     } else {
-      return "Invalid waypoint index";
+      return "Error: Invalid waypoint index";
     }
     return buf;
   }
 
   if (sub == "notes") {
-    if (!a.hasMinArgs(3)) return "Usage: waypoint notes <index> <notes>";
+    if (!a.hasMinArgs(3)) return "Error: invalid arguments — Usage: waypoint notes <index> <notes>";
     int idx = a.argInt(1);
     String notes = a.remaining(1);  // everything after the index arg
     if (WaypointManager::setNotes(idx, notes.c_str())) {
       snprintf(buf, 1024, "Set notes for waypoint %d", idx);
     } else {
-      return "Invalid waypoint index";
+      return "Error: Invalid waypoint index";
     }
     return buf;
   }
 
-  return "Usage: waypoint [list|add|del|goto|clear|clearall|rename|notes]";
+  return "Error: invalid arguments — Usage: waypoint [list|add|del|goto|clear|clearall|rename|notes]";
 }
 
 // Link a file to a waypoint by GPS coordinates (creates waypoint if needed, or finds nearest)
@@ -3117,7 +3120,7 @@ const char* cmd_waypointfile(const String& argsInput) {
 
   CommandArgs a(argsInput);
   if (!a.hasMinArgs(2)) {
-    return "Usage: waypointfile \"<file>\" <wpName>\n   or: waypointfile \"<file>\" <lat> <lon> [wpName]";
+    return "Error: invalid arguments — Usage: waypointfile \"<file>\" <wpName>\n   or: waypointfile \"<file>\" <lat> <lon> [wpName]";
   }
 
   String filePathStr;
@@ -3149,7 +3152,7 @@ const char* cmd_waypointfile(const String& argsInput) {
       wpIndex = WaypointManager::findWaypointByName(wpName);
       if (wpIndex < 0) {
         wpIndex = WaypointManager::addWaypoint(lat, lon, wpName);
-        if (wpIndex < 0) return "No free waypoint slots";
+        if (wpIndex < 0) return "Error: No free waypoint slots";
         snprintf(buf, 1024, "Created waypoint '%s' at %.5f, %.5f", wpName, lat, lon);
       }
     } else {
@@ -3167,7 +3170,7 @@ const char* cmd_waypointfile(const String& argsInput) {
           }
         }
       }
-      if (wpIndex < 0) return "No nearby waypoint. Provide a name to create one.";
+      if (wpIndex < 0) return "Error: No nearby waypoint. Provide a name to create one.";
     }
 
     if (WaypointManager::addFile(wpIndex, filepath)) {
@@ -3179,7 +3182,7 @@ const char* cmd_waypointfile(const String& argsInput) {
       if (wp && wp->fileCount >= MAX_WAYPOINT_FILES) {
         snprintf(buf, 1024, "'%s' has max files (%d)", wp->name, MAX_WAYPOINT_FILES);
       } else {
-        return "Failed to link (already linked?)";
+        return "Error: Failed to link (already linked?)";
       }
     }
     return buf;
@@ -3208,7 +3211,7 @@ const char* cmd_waypointfile(const String& argsInput) {
     if (wp && wp->fileCount >= MAX_WAYPOINT_FILES) {
       snprintf(buf, 1024, "'%s' has max files (%d)", wpNameOnly, MAX_WAYPOINT_FILES);
     } else {
-      return "Failed to link (already linked?)";
+      return "Error: Failed to link (already linked?)";
     }
   }
   return buf;
@@ -3222,7 +3225,7 @@ const char* cmd_waypointfiles(const String& argsInput) {
   char* buf = getDebugBuffer();
 
   CommandArgs a(argsInput);
-  if (!a.hasMinArgs(1)) return "Usage: waypointfiles <wpName> [del <index>]";
+  if (!a.hasMinArgs(1)) return "Error: invalid arguments — Usage: waypointfiles <wpName> [del <index>]";
 
   const String& wpName = a.arg(0);
   int wpIndex = WaypointManager::findWaypointByName(wpName.c_str());
@@ -3233,7 +3236,7 @@ const char* cmd_waypointfiles(const String& argsInput) {
 
   // Delete action: waypointfiles <wpName> del <index>
   if (a.arg(1) == "del") {
-    if (!a.hasMinArgs(3)) return "Usage: waypointfiles <wpName> del <index>";
+    if (!a.hasMinArgs(3)) return "Error: invalid arguments — Usage: waypointfiles <wpName> del <index>";
     int fileIdx = a.argInt(2);
     if (WaypointManager::removeFile(wpIndex, fileIdx)) {
       snprintf(buf, 1024, "Removed file %d from '%s'", fileIdx, wpName.c_str());
@@ -3612,7 +3615,7 @@ float LocationContextManager::haversineDistance(float lat1, float lon1, float la
 static const char* cmd_mapzoom(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String v = argsInput; v.trim();
-  if (v.length() == 0) return "Usage: mapzoom <0.5..20.0>";
+  if (v.length() == 0) return "Error: invalid arguments — Usage: mapzoom <0.5..20.0>";
   float f = v.toFloat();
   if (f < 0.5f) f = 0.5f;
   if (f > 20.0f) f = 20.0f;
@@ -3625,7 +3628,7 @@ static const char* cmd_mapzoom(const String& argsInput) {
 static const char* cmd_maplayers(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String v = argsInput; v.trim();
-  if (v.length() == 0) return "Usage: maplayers <bitmask 0..1023>";
+  if (v.length() == 0) return "Error: invalid arguments — Usage: maplayers <bitmask 0..1023>";
   int n = v.toInt();
   if (n < 0) n = 0;
   if (n > 0x3FF) n = 0x3FF;
@@ -3638,7 +3641,7 @@ static const char* cmd_maplayers(const String& argsInput) {
 static const char* cmd_mapcachekb(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String v = argsInput; v.trim();
-  if (v.length() == 0) return "Usage: mapcachekb <256..4096>";
+  if (v.length() == 0) return "Error: invalid arguments — Usage: mapcachekb <256..4096>";
   int n = v.toInt();
   if (n < 256) n = 256;
   if (n > 4096) n = 4096;

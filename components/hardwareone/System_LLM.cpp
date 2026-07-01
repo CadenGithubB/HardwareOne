@@ -1968,7 +1968,7 @@ EXT_RAM_BSS_ATTR static char llmCmdBuf[512];
 // the guard catches it, rebinds from the intact base blocks, and continues — so
 // the answer still completes. Lets the corruption-recovery path be proven on demand.
 static const char* cmd_llm_corrupt_test(const String& /*args*/) {
-  if (!llmIsReady()) return "LLM not loaded — load a model first";
+  if (!llmIsReady()) return "Error: LLM not loaded — load a model first";
   gLLM.injectCorruptOnce = true;
   return "Armed: next generation injects one RunState corruption. Run a prompt, then look for "
          "'[LLM] TEST: injected' followed by 'rebound RunState, retry 1/2' — the answer should still complete.";
@@ -2125,7 +2125,13 @@ static const char* cmd_llm_generate(const String& args) {
       // Mirror the web's {"ok":true,"session":N} (POST /api/llm/generate &
       // /chat/retry). The app validates the start by `ok`, so omitting it reads
       // as "command not recognized" → its "streaming not supported" fallback.
-      snprintf(llmCmdBuf, sizeof(llmCmdBuf), "{\"schema\":1,\"ok\":true,\"session\":%d}", session);
+      // Generation runs async: this only starts it. The reply streams in
+      // separately, so point the caller at the poll command (the `hint` key
+      // mirrors the human-path cliHint — same text either way).
+      snprintf(llmCmdBuf, sizeof(llmCmdBuf),
+               "{\"schema\":1,\"ok\":true,\"session\":%d,"
+               "\"hint\":\"the reply streams in asynchronously - read it with 'llmresult json 0'\"}",
+               session);
       return llmCmdBuf;
     }
   }
@@ -2133,7 +2139,7 @@ static const char* cmd_llm_generate(const String& args) {
   if (!llmIsReady()) return "Error: no model loaded";
 
   CommandArgs ca(args);
-  if (ca.count() == 0) return "Usage: llm generate <prompt>";
+  if (ca.count() == 0) return "Error: invalid arguments — Usage: llm generate <prompt>";
   String a = ca.raw();  // full prompt text
 
   // Build output into buffer
@@ -2169,7 +2175,7 @@ static const char* cmd_llm_result(const String& args) {
   // streaming turn is finalized, which would silently drop the tail.
   String a = args; a.trim();
   if (!argLeadingTokenIsJson(a))
-    return "Usage: llmresult json <offset>";
+    return "Error: invalid arguments — Usage: llmresult json <offset>";
 
   int offset = 0;
   if (a.startsWith("json ")) {
@@ -2227,7 +2233,12 @@ static const char* cmd_llm_retry(const String&) {
   if (!llmIsReady()) return "{\"schema\":1,\"ok\":false,\"error\":\"model not ready\"}";
   int session = chatRetryLast(nullptr);
   if (session <= 0) return "{\"schema\":1,\"ok\":false,\"error\":\"no prior turn or busy\"}";
-  snprintf(llmCmdBuf, sizeof(llmCmdBuf), "{\"schema\":1,\"session\":%d}", session);
+  // Like llmgenerate, this only kicks off the regeneration; the new reply
+  // streams in separately via the result poller.
+  snprintf(llmCmdBuf, sizeof(llmCmdBuf),
+           "{\"schema\":1,\"session\":%d,"
+           "\"hint\":\"the new reply streams in asynchronously - read it with 'llmresult json 0'\"}",
+           session);
   return llmCmdBuf;
 }
 
@@ -2245,7 +2256,7 @@ static const char* cmd_llm_turns(const String& args) {
   //   out-of-range → {"v":1,"count":N,"index":I,"end":true}
   String a = args; a.trim();
   if (!argLeadingTokenIsJson(a))
-    return "Usage: llmturns json <index>";
+    return "Error: invalid arguments — Usage: llmturns json <index>";
 
   int index = 0;
   if (a.startsWith("json ")) {

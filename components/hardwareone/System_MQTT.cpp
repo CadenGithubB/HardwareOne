@@ -1133,9 +1133,13 @@ const char* cmd_openmqtt(const String& argsInput) {
   }
   
   if (startMQTT()) {
+    // The broker connection completes asynchronously in the event handler, so
+    // "started" is not yet "connected" — point the caller at where the live
+    // connection state lands.
+    cliHint("the broker connection completes asynchronously - confirm it with 'mqttstatus'");
     return "[MQTT] Client started, connecting...";
   } else {
-    if (!ensureDebugBuffer()) return "[MQTT] Start failed";
+    if (!ensureDebugBuffer()) return "Error: [MQTT] Start failed";
     snprintf(getDebugBuffer(), 1024, "[MQTT] Start failed: %s", lastError.c_str());
     return getDebugBuffer();
   }
@@ -1291,7 +1295,7 @@ const char* cmd_mqtttlsmode(const String& argsInput) {
   }
   
   if (newMode < 0 || newMode > 2) {
-    return "Usage: mqttTLSMode [0|1|2|none|tls|verify]\n  0/none = No TLS\n  1/tls = TLS (no verification)\n  2/verify = TLS + Certificate Verification";
+    return "Error: invalid arguments — Usage: mqttTLSMode [0|1|2|none|tls|verify]\n  0/none = No TLS\n  1/tls = TLS (no verification)\n  2/verify = TLS + Certificate Verification";
   }
   
   int oldMode = gSettings.mqttTLSMode;

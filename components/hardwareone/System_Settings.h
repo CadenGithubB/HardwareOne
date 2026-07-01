@@ -1191,6 +1191,14 @@ void printSettingsModuleSummary();
 // Returns result message
 const char* handleSettingCommand(const SettingEntry* entry, const String& argsInput);
 
+// Look up an editable setting by its (unique) editor cmdKey.
+const SettingEntry* findSettingByCmdKey(const char* cmdKey);
+
+// Static per-field settings-editor commands (one per editable setting that has
+// no dedicated module command). Registered via gCommandModules.
+extern const CommandEntry settingEditorCommands[];
+extern const size_t settingEditorCommandsCount;
+
 // Build the settings schema JSON into a JsonDocument. Shared by the local
 // /api/settings/schema web handler (in WebServer_Server.cpp) and the worker's
 // sendBondSchema() which serializes this to a file for the bond transport

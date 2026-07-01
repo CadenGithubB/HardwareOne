@@ -1072,7 +1072,7 @@ const char* cmd_camerastart(const String& argsInput) {
   if (cameraPowerRequestStartSync(60000)) {
     return "Camera started successfully";
   }
-  return "Camera initialization failed";
+  return "Error: Camera initialization failed";
 }
 
 const char* cmd_camerastop(const String& argsInput) {
@@ -1084,7 +1084,7 @@ const char* cmd_camerastop(const String& argsInput) {
 const char* cmd_cameracapture(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gCameraEnabled) {
-    return "Camera not enabled - run opencamera first";
+    return "Error: Camera not enabled - run opencamera first";
   }
   
   size_t len = 0;
@@ -1093,9 +1093,12 @@ const char* cmd_cameracapture(const String& argsInput) {
     static char result[64];
     snprintf(result, sizeof(result), "Captured frame: %u bytes", (unsigned)len);
     free(frame);
+    // The captured frame is measured then discarded — it is not written to
+    // storage. To save a photo to disk, use 'camerasave'.
+    cliHint("to save a photo to storage, run 'camerasave'");
     return result;
   }
-  return "Frame capture failed";
+  return "Error: Frame capture failed";
 }
 
 const char* cmd_camerares(const String& argsInput) {
@@ -1130,7 +1133,7 @@ const char* cmd_camerares(const String& argsInput) {
   else if (sizeStr == "xga"   || sizeStr == "1024x768") newSize = FRAMESIZE_XGA;
   else if (sizeStr == "sxga"  || sizeStr == "1280x1024") newSize = FRAMESIZE_SXGA;
   else if (sizeStr == "uxga"  || sizeStr == "1600x1200") newSize = FRAMESIZE_UXGA;
-  else return "Unknown resolution. Use: 96x96, qqvga, qcif, hqvga, 240x240, qvga, vga, svga, xga, sxga, uxga";
+  else return "Error: Unknown resolution. Use: 96x96, qqvga, qcif, hqvga, 240x240, qvga, vga, svga, xga, sxga, uxga";
   
   // Save to settings for persistence
   setSetting(gSettings.cameraFramesize, (int)cameraFramesizeSettingFromEnum(newSize));
@@ -1173,7 +1176,7 @@ const char* cmd_cameraframesize(const String& argsInput) {
   
   int newSize = valStr.toInt();
   if (newSize < 0 || newSize > 10) {
-    return "Framesize must be 0-10 (0-5: QVGA..UXGA, 6-10: 96x96/QQVGA/QCIF/HQVGA/240x240)";
+    return "Error: Framesize must be 0-10 (0-5: QVGA..UXGA, 6-10: 96x96/QQVGA/QCIF/HQVGA/240x240)";
   }
   
   setSetting(gSettings.cameraFramesize, newSize);
@@ -1205,7 +1208,7 @@ const char* cmd_cameraquality(const String& argsInput) {
   
   int quality = valStr.toInt();
   if (quality < 0 || quality > 63) {
-    return "Quality must be 0-63";
+    return "Error: Quality must be 0-63";
   }
   
   // Save to settings for persistence
@@ -1227,7 +1230,7 @@ const char* cmd_cameraquality(const String& argsInput) {
 const char* cmd_cameratiny(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gCameraEnabled) {
-    return "Camera not enabled - run opencamera first";
+    return "Error: Camera not enabled - run opencamera first";
   }
   
   size_t len = 0;
@@ -1239,7 +1242,7 @@ const char* cmd_cameratiny(const String& argsInput) {
     free(frame);
     return result;
   }
-  return "Tiny frame capture failed";
+  return "Error: Tiny frame capture failed";
 }
 
 // Helper to apply a camera setting and optionally save
@@ -1263,7 +1266,7 @@ static bool applyCameraSetting(const char* name, int value, int minVal, int maxV
 
 const char* cmd_camerabrightness(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraEnabled) return "Camera not enabled";
+  if (!gCameraEnabled) return "Error: Camera not enabled";
   
   String valStr = argsInput;
   valStr.trim();
@@ -1282,12 +1285,12 @@ const char* cmd_camerabrightness(const String& argsInput) {
     snprintf(result, sizeof(result), "Brightness set to %d (saved)", val);
     return result;
   }
-  return "Failed (use -2 to 2)";
+  return "Error: Failed (use -2 to 2)";
 }
 
 const char* cmd_cameracontrast(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraEnabled) return "Camera not enabled";
+  if (!gCameraEnabled) return "Error: Camera not enabled";
   
   String valStr = argsInput;
   valStr.trim();
@@ -1306,12 +1309,12 @@ const char* cmd_cameracontrast(const String& argsInput) {
     snprintf(result, sizeof(result), "Contrast set to %d (saved)", val);
     return result;
   }
-  return "Failed (use -2 to 2)";
+  return "Error: Failed (use -2 to 2)";
 }
 
 const char* cmd_camerasaturation(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraEnabled) return "Camera not enabled";
+  if (!gCameraEnabled) return "Error: Camera not enabled";
   
   String valStr = argsInput;
   valStr.trim();
@@ -1330,12 +1333,12 @@ const char* cmd_camerasaturation(const String& argsInput) {
     snprintf(result, sizeof(result), "Saturation set to %d (saved)", val);
     return result;
   }
-  return "Failed (use -2 to 2)";
+  return "Error: Failed (use -2 to 2)";
 }
 
 const char* cmd_camerawb(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraEnabled) return "Camera not enabled";
+  if (!gCameraEnabled) return "Error: Camera not enabled";
   
   String valStr = argsInput;
   valStr.trim();
@@ -1347,7 +1350,7 @@ const char* cmd_camerawb(const String& argsInput) {
   }
   
   int val = valStr.toInt();
-  if (val < 0 || val > 4) return "WB mode must be 0-4";
+  if (val < 0 || val > 4) return "Error: WB mode must be 0-4";
   
   sensor_t* s = esp_camera_sensor_get();
   if (s && s->set_wb_mode(s, val) == 0) {
@@ -1356,12 +1359,12 @@ const char* cmd_camerawb(const String& argsInput) {
     snprintf(result, sizeof(result), "WB mode set to %d (saved)", val);
     return result;
   }
-  return "Failed to set WB mode";
+  return "Error: Failed to set WB mode";
 }
 
 const char* cmd_camerasharpness(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraEnabled) return "Camera not enabled";
+  if (!gCameraEnabled) return "Error: Camera not enabled";
   
   String valStr = argsInput;
   valStr.trim();
@@ -1373,7 +1376,7 @@ const char* cmd_camerasharpness(const String& argsInput) {
   }
   
   int val = valStr.toInt();
-  if (val < -2 || val > 2) return "Sharpness must be -2 to 2";
+  if (val < -2 || val > 2) return "Error: Sharpness must be -2 to 2";
   
   sensor_t* s = esp_camera_sensor_get();
   if (s && s->set_sharpness && s->set_sharpness(s, val) == 0) {
@@ -1382,12 +1385,12 @@ const char* cmd_camerasharpness(const String& argsInput) {
     snprintf(result, sizeof(result), "Sharpness set to %d (saved)", val);
     return result;
   }
-  return "Failed (OV3660 only, use -2 to 2)";
+  return "Error: Failed (OV3660 only, use -2 to 2)";
 }
 
 const char* cmd_cameradenoise(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraEnabled) return "Camera not enabled";
+  if (!gCameraEnabled) return "Error: Camera not enabled";
   
   String valStr = argsInput;
   valStr.trim();
@@ -1399,7 +1402,7 @@ const char* cmd_cameradenoise(const String& argsInput) {
   }
   
   int val = valStr.toInt();
-  if (val < 0 || val > 8) return "Denoise must be 0-8";
+  if (val < 0 || val > 8) return "Error: Denoise must be 0-8";
   
   sensor_t* s = esp_camera_sensor_get();
   if (s && s->set_denoise && s->set_denoise(s, val) == 0) {
@@ -1408,12 +1411,12 @@ const char* cmd_cameradenoise(const String& argsInput) {
     snprintf(result, sizeof(result), "Denoise set to %d (saved)", val);
     return result;
   }
-  return "Failed to set denoise";
+  return "Error: Failed to set denoise";
 }
 
 const char* cmd_cameraeffect(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraEnabled) return "Camera not enabled";
+  if (!gCameraEnabled) return "Error: Camera not enabled";
   
   String valStr = argsInput;
   valStr.trim();
@@ -1425,7 +1428,7 @@ const char* cmd_cameraeffect(const String& argsInput) {
   }
   
   int val = valStr.toInt();
-  if (val < 0 || val > 6) return "Effect must be 0-6";
+  if (val < 0 || val > 6) return "Error: Effect must be 0-6";
   
   sensor_t* s = esp_camera_sensor_get();
   if (s && s->set_special_effect(s, val) == 0) {
@@ -1434,12 +1437,12 @@ const char* cmd_cameraeffect(const String& argsInput) {
     snprintf(result, sizeof(result), "Effect set to %d (saved)", val);
     return result;
   }
-  return "Failed to set effect";
+  return "Error: Failed to set effect";
 }
 
 const char* cmd_cameraexposure(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraEnabled) return "Camera not enabled";
+  if (!gCameraEnabled) return "Error: Camera not enabled";
   
   String valStr = argsInput;
   valStr.trim();
@@ -1451,7 +1454,7 @@ const char* cmd_cameraexposure(const String& argsInput) {
   }
   
   int val = valStr.toInt();
-  if (val < -2 || val > 2) return "AE Level must be -2 to 2";
+  if (val < -2 || val > 2) return "Error: AE Level must be -2 to 2";
   
   sensor_t* s = esp_camera_sensor_get();
   if (s && s->set_ae_level(s, val) == 0) {
@@ -1460,15 +1463,15 @@ const char* cmd_cameraexposure(const String& argsInput) {
     snprintf(result, sizeof(result), "AE Level set to %d (saved)", val);
     return result;
   }
-  return "Failed to set AE level";
+  return "Error: Failed to set AE level";
 }
 
 const char* cmd_cameraaec(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraEnabled) return "Camera not enabled";
+  if (!gCameraEnabled) return "Error: Camera not enabled";
 
   sensor_t* s = esp_camera_sensor_get();
-  if (!s) return "Camera sensor not available";
+  if (!s) return "Error: Camera sensor not available";
 
   String arg = argsInput;
   arg.trim();
@@ -1484,7 +1487,7 @@ const char* cmd_cameraaec(const String& argsInput) {
   if (s->set_exposure_ctrl(s, enable ? 1 : 0) == 0) {
     return enable ? "Auto exposure enabled" : "Auto exposure disabled (manual)";
   }
-  return "Failed";
+  return "Error: Failed";
 }
 
 const char* cmd_camerafps(const String& argsInput) {
@@ -1501,7 +1504,7 @@ const char* cmd_camerafps(const String& argsInput) {
   }
 
   int val = valStr.toInt();
-  if (val < 1 || val > 20) return "cameraStreamFps must be 1-20";
+  if (val < 1 || val > 20) return "Error: cameraStreamFps must be 1-20";
   setSetting(gSettings.cameraStreamFps, val);
   static char buf[64];
   snprintf(buf, sizeof(buf), "cameraStreamFps set to %d fps", val);
@@ -1510,20 +1513,20 @@ const char* cmd_camerafps(const String& argsInput) {
 
 const char* cmd_cameraaecvalue(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraEnabled) return "Camera not enabled";
+  if (!gCameraEnabled) return "Error: Camera not enabled";
 
   String valStr = argsInput;
   valStr.trim();
   
   if (valStr.length() == 0) {
-    return "Usage: cameraaecvalue <0-1200>";
+    return "Error: invalid arguments — Usage: cameraaecvalue <0-1200>";
   }
 
   int val = valStr.toInt();
-  if (val < 0 || val > 1200) return "AEC value must be 0-1200";
+  if (val < 0 || val > 1200) return "Error: AEC value must be 0-1200";
 
   sensor_t* s = esp_camera_sensor_get();
-  if (!s) return "Camera sensor not available";
+  if (!s) return "Error: Camera sensor not available";
 
   (void)s->set_exposure_ctrl(s, 0);
   if (s->set_aec_value(s, val) == 0) {
@@ -1531,15 +1534,15 @@ const char* cmd_cameraaecvalue(const String& argsInput) {
     snprintf(result, sizeof(result), "Manual exposure set to %d", val);
     return result;
   }
-  return "Failed";
+  return "Error: Failed";
 }
 
 const char* cmd_cameraagc(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraEnabled) return "Camera not enabled";
+  if (!gCameraEnabled) return "Error: Camera not enabled";
 
   sensor_t* s = esp_camera_sensor_get();
-  if (!s) return "Camera sensor not available";
+  if (!s) return "Error: Camera sensor not available";
 
   String arg = argsInput;
   arg.trim();
@@ -1555,25 +1558,25 @@ const char* cmd_cameraagc(const String& argsInput) {
   if (s->set_gain_ctrl(s, enable ? 1 : 0) == 0) {
     return enable ? "Auto gain enabled" : "Auto gain disabled (manual)";
   }
-  return "Failed";
+  return "Error: Failed";
 }
 
 const char* cmd_cameraagcgain(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraEnabled) return "Camera not enabled";
+  if (!gCameraEnabled) return "Error: Camera not enabled";
 
   String valStr = argsInput;
   valStr.trim();
   
   if (valStr.length() == 0) {
-    return "Usage: cameraagcgain <0-30>";
+    return "Error: invalid arguments — Usage: cameraagcgain <0-30>";
   }
 
   int val = valStr.toInt();
-  if (val < 0 || val > 30) return "AGC gain must be 0-30";
+  if (val < 0 || val > 30) return "Error: AGC gain must be 0-30";
 
   sensor_t* s = esp_camera_sensor_get();
-  if (!s) return "Camera sensor not available";
+  if (!s) return "Error: Camera sensor not available";
 
   (void)s->set_gain_ctrl(s, 0);
   if (s->set_agc_gain(s, val) == 0) {
@@ -1581,7 +1584,7 @@ const char* cmd_cameraagcgain(const String& argsInput) {
     snprintf(result, sizeof(result), "Manual gain set to %d", val);
     return result;
   }
-  return "Failed";
+  return "Error: Failed";
 }
 
 // =============================================================================
@@ -1596,11 +1599,11 @@ const char* cmd_cameraagcgain(const String& argsInput) {
 // gives AEC headroom to actually brighten the image.
 const char* cmd_cameragainceiling(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraEnabled) return "Camera not enabled";
+  if (!gCameraEnabled) return "Error: Camera not enabled";
 
   String s = argsInput; s.trim();
   sensor_t* sens = esp_camera_sensor_get();
-  if (!sens) return "Camera sensor not available";
+  if (!sens) return "Error: Camera sensor not available";
 
   if (s.length() == 0) {
     static char r[64];
@@ -1611,14 +1614,14 @@ const char* cmd_cameragainceiling(const String& argsInput) {
     return r;
   }
   int v = s.toInt();
-  if (v < 0 || v > 6) return "gainceiling must be 0..6 (2X..128X)";
+  if (v < 0 || v > 6) return "Error: gainceiling must be 0..6 (2X..128X)";
   if (sens->set_gainceiling(sens, (gainceiling_t)v) == 0) {
     static char r[64];
     static const char* kNames[] = {"2X","4X","8X","16X","32X","64X","128X"};
     snprintf(r, sizeof(r), "Gainceiling set to %d (%s)", v, kNames[v]);
     return r;
   }
-  return "Failed";
+  return "Error: Failed";
 }
 
 // parseBoolArg(const String&) is defined in System_Utils.h. It returns
@@ -1633,9 +1636,9 @@ static const char* cameraBoolToggle(const String& argsInput,
                                     const char* tag,
                                     uint8_t currentVal,
                                     int (*setter)(sensor_t*, int)) {
-  if (!gCameraEnabled) return "Camera not enabled";
+  if (!gCameraEnabled) return "Error: Camera not enabled";
   sensor_t* s = esp_camera_sensor_get();
-  if (!s || !setter) return "Camera sensor not available";
+  if (!s || !setter) return "Error: Camera sensor not available";
 
   static char r[80];
   String a = argsInput; a.trim();
@@ -1653,7 +1656,7 @@ static const char* cameraBoolToggle(const String& argsInput,
     snprintf(r, sizeof(r), "%s: %s", tag, p ? "ON" : "OFF");
     return r;
   }
-  return "Failed";
+  return "Error: Failed";
 }
 
 const char* cmd_camerawhitebal(const String& argsInput) {
@@ -1727,26 +1730,26 @@ const char* cmd_cameracolorbar(const String& argsInput) {
 // camerareg 0x3824 0x1f 0x04). Format: <addr_hex> <mask_hex> <value_hex>.
 const char* cmd_camerareg(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraEnabled) return "Camera not enabled";
+  if (!gCameraEnabled) return "Error: Camera not enabled";
   sensor_t* s = esp_camera_sensor_get();
-  if (!s) return "Camera sensor not available";
+  if (!s) return "Error: Camera sensor not available";
 
   String a = argsInput; a.trim();
   if (a.length() == 0) {
-    return "Usage: camerareg <addr_hex> <mask_hex> <value_hex>  "
+    return "Error: invalid arguments — Usage: camerareg <addr_hex> <mask_hex> <value_hex>  "
            "(example: camerareg 0x3824 0x1f 0x04)";
   }
   unsigned addr = 0, mask = 0, val = 0;
   // Accept "0x" prefix and bare hex. sscanf with %x handles both.
   if (sscanf(a.c_str(), "%x %x %x", &addr, &mask, &val) != 3) {
-    return "Bad format. Usage: camerareg <addr_hex> <mask_hex> <value_hex>";
+    return "Error: Bad format. Usage: camerareg <addr_hex> <mask_hex> <value_hex>";
   }
   if (s->set_reg(s, (int)addr, (int)mask, (int)val) == 0) {
     static char r[80];
     snprintf(r, sizeof(r), "set_reg(0x%04X, 0x%02X, 0x%02X) ok", addr, mask, val);
     return r;
   }
-  return "set_reg failed";
+  return "Error: set_reg failed";
 }
 
 // Print all current sensor status values. Emits each section as its own
@@ -1761,9 +1764,9 @@ const char* cmd_camerareg(const String& argsInput) {
 // in the hardware register. Use camerafx to set them together.
 const char* cmd_cameradump(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraEnabled) return "Camera not enabled";
+  if (!gCameraEnabled) return "Error: Camera not enabled";
   sensor_t* s = esp_camera_sensor_get();
-  if (!s) return "Camera sensor not available";
+  if (!s) return "Error: Camera sensor not available";
 
   static const char* kGCNames[] = {"2X","4X","8X","16X","32X","64X","128X"};
   const camera_status_t& st = s->status;
@@ -1806,9 +1809,9 @@ const char* cmd_cameradump(const String& argsInput) {
 // Usage: camerafx <bri> <con> <sat>   (each -2..+2)
 const char* cmd_camerafx(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraEnabled) return "Camera not enabled";
+  if (!gCameraEnabled) return "Error: Camera not enabled";
   sensor_t* s = esp_camera_sensor_get();
-  if (!s) return "Camera sensor not available";
+  if (!s) return "Error: Camera sensor not available";
 
   String a = argsInput; a.trim();
   if (a.length() == 0) {
@@ -1821,10 +1824,10 @@ const char* cmd_camerafx(const String& argsInput) {
   }
   int bri = -99, con = -99, sat = -99;
   if (sscanf(a.c_str(), "%d %d %d", &bri, &con, &sat) != 3) {
-    return "Usage: camerafx <bri> <con> <sat>  (-2..+2 each)";
+    return "Error: invalid arguments — Usage: camerafx <bri> <con> <sat>  (-2..+2 each)";
   }
   if (bri < -2 || bri > 2 || con < -2 || con > 2 || sat < -2 || sat > 2) {
-    return "Each value must be -2..+2";
+    return "Error: Each value must be -2..+2";
   }
 
   // Order matters: write contrast first, brightness second, saturation
@@ -1851,7 +1854,7 @@ const char* cmd_camerafx(const String& argsInput) {
 
 const char* cmd_camerahmirror(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraEnabled) return "Camera not enabled";
+  if (!gCameraEnabled) return "Error: Camera not enabled";
   
   String arg = argsInput;
   arg.trim();
@@ -1868,12 +1871,12 @@ const char* cmd_camerahmirror(const String& argsInput) {
     setSetting(gSettings.cameraHMirror, enable);
     return enable ? "H-Mirror enabled (saved)" : "H-Mirror disabled (saved)";
   }
-  return "Failed";
+  return "Error: Failed";
 }
 
 const char* cmd_cameravflip(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraEnabled) return "Camera not enabled";
+  if (!gCameraEnabled) return "Error: Camera not enabled";
   
   String arg = argsInput;
   arg.trim();
@@ -1890,12 +1893,12 @@ const char* cmd_cameravflip(const String& argsInput) {
     setSetting(gSettings.cameraVFlip, enable);
     return enable ? "V-Flip enabled (saved)" : "V-Flip disabled (saved)";
   }
-  return "Failed";
+  return "Error: Failed";
 }
 
 const char* cmd_camerarotate(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraEnabled) return "Camera not started";
+  if (!gCameraEnabled) return "Error: Camera not started";
   
   String arg = argsInput;
   arg.trim();
@@ -1916,7 +1919,7 @@ const char* cmd_camerarotate(const String& argsInput) {
     setSetting(gSettings.cameraVFlip, enable);
     return enable ? "Rotated 180° (hmirror+vflip enabled, saved)" : "Rotation disabled (saved)";
   }
-  return "Failed";
+  return "Error: Failed";
 }
 
 // ============================================================================
@@ -1937,7 +1940,7 @@ const char* cmd_cameraautostart(const String& argsInput) {
     setSetting(gSettings.cameraAutoStart, false);
     return "[Camera] Auto-start disabled";
   }
-  return "Usage: cameraautostart [on|off]";
+  return "Error: invalid arguments — Usage: cameraautostart [on|off]";
 }
 
 const char* cmd_camerastoragelocation(const String& argsInput) {
@@ -2063,7 +2066,7 @@ extern ImageManager gImageManager;
 const char* cmd_camerasave(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gCameraEnabled) {
-    return "Camera not enabled - run opencamera first";
+    return "Error: Camera not enabled - run opencamera first";
   }
   
   // Determine storage location from settings
@@ -2083,7 +2086,7 @@ const char* cmd_camerasave(const String& argsInput) {
     snprintf(result, sizeof(result), "Saved: %s", savedPath.c_str());
     return result;
   }
-  return "Failed to save image";
+  return "Error: Failed to save image";
 }
 
 // ── Video recording commands ────────────────────────────────────────────────
@@ -2093,7 +2096,7 @@ static char gCameraCmdBuffer[192];
 
 const char* cmd_camerarecord(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraEnabled) return "Camera not enabled - run opencamera first";
+  if (!gCameraEnabled) return "Error: Camera not enabled - run opencamera first";
 
   String arg = argsInput;
   arg.trim();
@@ -2103,7 +2106,7 @@ const char* cmd_camerarecord(const String& argsInput) {
   }
   if (arg == "1" || arg.equalsIgnoreCase("start")) {
     return startVideoRecording() ? "Recording started"
-                                 : "Failed to start recording (SD card available?)";
+                                 : "Error: Failed to start recording (SD card available?)";
   }
   if (arg == "0" || arg.equalsIgnoreCase("stop")) {
     bool wasRecording = videoRecording;
@@ -2114,7 +2117,7 @@ const char* cmd_camerarecord(const String& argsInput) {
              videoLastRecordingPath(), (unsigned long)videoLastRecordingFrames());
     return out;
   }
-  return "Usage: camerarecord <start|stop|1|0>";
+  return "Error: invalid arguments — Usage: camerarecord <start|stop|1|0>";
 }
 
 const char* cmd_cameravideolist(const String& argsInput) {
@@ -2159,7 +2162,7 @@ const char* cmd_cameravideodelete(const String& argsInput) {
   const char* qerr = requireQuotedToken(a, 0, name);
   if (qerr) return qerr;
   if (a.has(1)) return "Error: unexpected argument — usage: cameravideodelete \"<filename>\"";
-  return deleteVideoRecording(name) ? "Deleted" : "Delete failed (file not found or SD unavailable)";
+  return deleteVideoRecording(name) ? "Deleted" : "Error: Delete failed (file not found or SD unavailable)";
 }
 
 // Command registry
@@ -2225,11 +2228,11 @@ static const SettingEntry cameraSettingEntries[] = {
   { "cameraBrightness", SETTING_INT, &gSettings.cameraBrightness, 2, 0, nullptr, -2, 2, "Brightness (-2 to 2)", nullptr, false, "tuning", nullptr },
   { "cameraContrast", SETTING_INT, &gSettings.cameraContrast, 2, 0, nullptr, -2, 2, "Contrast (-2 to 2)", nullptr, false, "tuning", nullptr },
   { "cameraSaturation", SETTING_INT, &gSettings.cameraSaturation, 2, 0, nullptr, -2, 2, "Saturation (-2 to 2)", nullptr, false, "tuning", nullptr },
-  { "cameraAELevel", SETTING_INT, &gSettings.cameraAELevel, 0, 0, nullptr, -2, 2, "Exposure Compensation (-2 to 2)", nullptr, false, "tuning", nullptr },
-  { "cameraWBMode", SETTING_INT, &gSettings.cameraWBMode, 0, 0, nullptr, 0, 4, "White Balance", "0:Auto,1:Sunny,2:Cloudy,3:Office,4:Home", false, "tuning", nullptr },
+  { "cameraAELevel", SETTING_INT, &gSettings.cameraAELevel, 0, 0, nullptr, -2, 2, "Exposure Compensation (-2 to 2)", nullptr, false, "tuning", "cameraexposure" },
+  { "cameraWBMode", SETTING_INT, &gSettings.cameraWBMode, 0, 0, nullptr, 0, 4, "White Balance", "0:Auto,1:Sunny,2:Cloudy,3:Office,4:Home", false, "tuning", "camerawb" },
   { "cameraSharpness", SETTING_INT, &gSettings.cameraSharpness, 0, 0, nullptr, -2, 2, "Sharpness (-2 to 2, OV3660)", nullptr, false, "tuning", nullptr },
   { "cameraDenoise", SETTING_INT, &gSettings.cameraDenoise, 0, 0, nullptr, 0, 8, "Denoise (0-8)", nullptr, false, "tuning", nullptr },
-  { "cameraSpecialEffect", SETTING_INT, &gSettings.cameraSpecialEffect, 0, 0, nullptr, 0, 6, "Special Effect", "0:None,1:Negative,2:Grayscale,3:Red Tint,4:Green Tint,5:Blue Tint,6:Sepia", false, "tuning", nullptr },
+  { "cameraSpecialEffect", SETTING_INT, &gSettings.cameraSpecialEffect, 0, 0, nullptr, 0, 6, "Special Effect", "0:None,1:Negative,2:Grayscale,3:Red Tint,4:Green Tint,5:Blue Tint,6:Sepia", false, "tuning", "cameraeffect" },
   { "cameraHMirror", SETTING_BOOL, &gSettings.cameraHMirror, 0, 0, nullptr, 0, 1, "Horizontal mirror", nullptr, false, "image", nullptr },
   { "cameraVFlip", SETTING_BOOL, &gSettings.cameraVFlip, 0, 0, nullptr, 0, 1, "Vertical flip", nullptr, false, "image", nullptr },
   { "cameraQuality", SETTING_INT, &gSettings.cameraQuality, 12, 0, nullptr, 0, 63, "JPEG quality (0-63, lower=better)", nullptr, false, "image", nullptr },

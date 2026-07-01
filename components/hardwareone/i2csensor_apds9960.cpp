@@ -46,7 +46,7 @@ TaskHandle_t gApdsTaskHandle = nullptr;
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry apdsSettingEntries[] = {
   { "apdsAutoStart", SETTING_BOOL, &gSettings.apdsAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, nullptr },
-  { "apdsDevicePollMs", SETTING_INT, &gSettings.apdsDevicePollMs, 200, 0, nullptr, 50, 5000, "Poll Interval (ms)", nullptr, false, nullptr, nullptr }
+  { "apdsDevicePollMs", SETTING_INT, &gSettings.apdsDevicePollMs, 200, 0, nullptr, 50, 5000, "Poll Interval (ms)", nullptr, false, nullptr, "apdsdevicepollms" }
 };
 
 static bool isAPDSConnected() {
@@ -87,18 +87,21 @@ int apdsBuildDataJSON(char* buf, size_t bufSize) {
 const char* cmd_apdscolor(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   apdsColorPoll();
+  cliHint("to get the values back as data, run 'apdsread json'");
   return "APDS color data read (check serial output)";
 }
 
 const char* cmd_apdsproximity(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   apdsProximityPoll();
+  cliHint("to get the value back as data, run 'apdsread json'");
   return "APDS proximity data read (check serial output)";
 }
 
 const char* cmd_apdsgesture(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   apdsGesturePoll();
+  cliHint("to get the value back as data, run 'apdsread json'");
   return "APDS gesture data read (check serial output)";
 }
 
@@ -113,10 +116,10 @@ const char* cmd_apdsread(const String& argsInput) {
 
   bool anyEnabled = gApdsColorEnabled || gApdsProximityEnabled || gApdsGestureEnabled;
   if (!anyEnabled) {
-    return "[APDS] Not running. Use 'openapds' to start.";
+    return "Error: [APDS] Not running. Use 'openapds' to start.";
   }
 
-  if (!ensureDebugBuffer()) return "[APDS] Error: buffer unavailable";
+  if (!ensureDebugBuffer()) return "Error: [APDS] buffer unavailable";
   char* buf = getDebugBuffer();
   int remaining = 1024;
   int n = 0;
@@ -149,7 +152,7 @@ const char* cmd_apdsstart(const String& argsInput) {
   
   bool anyEnabled = gApdsColorEnabled || gApdsProximityEnabled || gApdsGestureEnabled;
   if (anyEnabled) {
-    return "[APDS] Error: Already running";
+    return "Error: [APDS] Already running";
   }
   
   if (isInQueue(I2C_DEVICE_APDS)) {
@@ -160,7 +163,7 @@ const char* cmd_apdsstart(const String& argsInput) {
   }
 
   if (!i2cPingAddress(I2C_ADDR_APDS, 100000, 50)) {
-    return "[APDS] Not detected on I2C bus";
+    return "Error: [APDS] Not detected on I2C bus";
   }
 
   if (enqueueDeviceStart(I2C_DEVICE_APDS)) {
@@ -171,7 +174,7 @@ const char* cmd_apdsstart(const String& argsInput) {
     return getDebugBuffer();
   }
   
-  return "[APDS] Error: Failed to enqueue open (queue full)";
+  return "Error: [APDS] Failed to enqueue open (queue full)";
 }
 
 // Stop APDS sensor (all modes)
@@ -180,7 +183,7 @@ const char* cmd_apdsstop(const String& argsInput) {
   
   bool anyEnabled = gApdsColorEnabled || gApdsProximityEnabled || gApdsGestureEnabled;
   if (!anyEnabled) {
-    return "[APDS] Error: Not running";
+    return "Error: [APDS] Not running";
   }
   
   handleDeviceStopped(I2C_DEVICE_APDS);
@@ -193,14 +196,14 @@ const char* cmd_apdsmode(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!gApdsConnected || gAPDS9960 == nullptr) {
-    return "[APDS] Error: Sensor not initialized - use 'openapds' first";
+    return "Error: [APDS] Sensor not initialized - use 'openapds' first";
   }
   
   // Parse: apdsmode <color|proximity|gesture> [on|off]
   CommandArgs a(argsInput);
 
   if (a.count() == 0) {
-    if (!ensureDebugBuffer()) return "[APDS] Error: Debug buffer unavailable";
+    if (!ensureDebugBuffer()) return "Error: [APDS] Debug buffer unavailable";
     snprintf(getDebugBuffer(), 1024, "[APDS] Modes: color=%s proximity=%s gesture=%s",
              gApdsColorEnabled ? "on" : "off",
              gApdsProximityEnabled ? "on" : "off",
@@ -235,7 +238,7 @@ const char* cmd_apdsmode(const String& argsInput) {
     return enable ? "[APDS] Gesture mode enabled" : "[APDS] Gesture mode disabled";
   }
   
-  return "[APDS] Error: Unknown mode - use 'color', 'proximity', or 'gesture'";
+  return "Error: [APDS] Unknown mode - use 'color', 'proximity', or 'gesture'";
 }
 
 // ============================================================================
@@ -404,7 +407,7 @@ const char* cmd_apdsautostart(const String& argsInput) {
     setSetting(gSettings.apdsAutoStart, false);
     return "[APDS] Auto-start disabled";
   }
-  return "Usage: apdsautostart [on|off]";
+  return "Error: invalid arguments — Usage: apdsautostart [on|off]";
 }
 
 // Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget

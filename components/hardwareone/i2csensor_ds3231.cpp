@@ -631,7 +631,7 @@ const char* cmd_rtc(const String& argsInput) {
   if (arg.length() == 0 || arg == "status") {
     // Show RTC status and current time
     if (!gRtcConnected) {
-      response = "[RTC] Not connected. Use 'openrtc' to initialize.";
+      response = "Error: [RTC] Not connected. Use 'openrtc' to initialize.";
       return response.c_str();
     }
     
@@ -658,14 +658,15 @@ const char* cmd_rtc(const String& argsInput) {
                tzBuf, temp, (unsigned long)rtcToUnixTime(&utc));
       response += tempBuf;
     } else {
-      response = "[RTC] Failed to read time";
+      response = "Error: [RTC] Failed to read time";
     }
     return response.c_str();
   }
-  
+
   if (arg == "temp" || arg == "temperature") {
     if (!gRtcConnected) {
-      return "[RTC] Not connected";
+      cliHint("the RTC is not open - run 'openrtc' first");
+      return "Error: [RTC] Not connected";
     }
     float temp = rtcReadTemperature();
     char tempBuf[32];
@@ -674,7 +675,7 @@ const char* cmd_rtc(const String& argsInput) {
     return response.c_str();
   }
   
-  response = "[RTC] Unknown command. Use: rtcread [status|temp]";
+  response = "Error: [RTC] Unknown command. Use: rtcread [status|temp]";
   return response.c_str();
 }
 
@@ -685,15 +686,15 @@ const char* cmd_rtcset(const String& argsInput) {
   response = "";
   
   if (!gRtcConnected) {
-    return "[RTC] Not connected. Use 'openrtc' first.";
+    return "Error: [RTC] Not connected. Use 'openrtc' first.";
   }
-  
+
   String arg = argsInput;
   arg.trim();
-  
+
   // Parse: YYYY-MM-DD HH:MM:SS or unix timestamp
   if (arg.length() == 0) {
-    return "[RTC] Usage: rtcset YYYY-MM-DD HH:MM:SS  or  rtcset <unix_timestamp>";
+    return "Error: invalid arguments — Usage: rtcset YYYY-MM-DD HH:MM:SS  or  rtcset <unix_timestamp>";
   }
   
   RTCDateTime dt;
@@ -715,7 +716,7 @@ const char* cmd_rtcset(const String& argsInput) {
     int year, month, day, hour, minute, second;
     if (sscanf(arg.c_str(), "%d-%d-%d %d:%d:%d", 
                &year, &month, &day, &hour, &minute, &second) != 6) {
-      return "[RTC] Invalid format. Use: YYYY-MM-DD HH:MM:SS";
+      return "Error: [RTC] Invalid format. Use: YYYY-MM-DD HH:MM:SS";
     }
     
     dt.year = year;
@@ -742,9 +743,9 @@ const char* cmd_rtcset(const String& argsInput) {
       response += "\n[RTC] Marked as calibrated for future boots";
     }
   } else {
-    response = "[RTC] Failed to set time";
+    response = "Error: [RTC] Failed to set time";
   }
-  
+
   return response.c_str();
 }
 
@@ -752,18 +753,18 @@ const char* cmd_rtcsync(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
   if (!gRtcConnected) {
-    return "[RTC] Not connected. Use 'openrtc' first.";
+    return "Error: [RTC] Not connected. Use 'openrtc' first.";
   }
-  
+
   String arg = argsInput;
   arg.trim();
-  
+
   if (arg == "tosystem" || arg == "to" || arg.length() == 0) {
     // RTC -> System (default)
     if (rtcSyncToSystem()) {
       return "[RTC] System time updated from RTC";
     }
-    return "[RTC] Sync failed";
+    return "Error: [RTC] Sync failed";
   }
   
   if (arg == "fromsystem" || arg == "from") {
@@ -775,10 +776,10 @@ const char* cmd_rtcsync(const String& argsInput) {
       }
       return "[RTC] RTC updated from system time";
     }
-    return "[RTC] Sync failed";
+    return "Error: [RTC] Sync failed";
   }
-  
-  return "[RTC] Usage: rtcsync [to|from]  (to=RTC->system, from=system->RTC)";
+
+  return "Error: invalid arguments — Usage: rtcsync [to|from]  (to=RTC->system, from=system->RTC)";
 }
 
 const char* cmd_rtcstart(const String& argsInput) {
@@ -790,13 +791,13 @@ const char* cmd_rtcstart(const String& argsInput) {
   }
   
   if (!rtcInit()) {
-    return "[RTC] Failed to initialize - check wiring";
+    return "Error: [RTC] Failed to initialize - check wiring";
   }
-  
+
   if (!createRTCTask()) {
-    return "[RTC] Failed to create task";
+    return "Error: [RTC] Failed to create task";
   }
-  
+
   return "[RTC] Opened successfully";
 }
 
@@ -805,9 +806,9 @@ const char* cmd_rtcstop(const String& argsInput) {
   (void)argsInput;
   
   if (!gRtcEnabled) {
-    return "[RTC] Not running";
+    return "Error: [RTC] Not running";
   }
-  
+
   handleDeviceStopped(I2C_DEVICE_RTC);
   rtcStop();  // Sensor-specific: wait for task exit and cleanup
   return "[RTC] Closed";
@@ -899,7 +900,7 @@ const char* cmd_rtcautostart(const String& argsInput) {
     setSetting(gSettings.rtcAutoStart, false);
     return "[RTC] Auto-start disabled";
   }
-  return "Usage: rtcautostart [on|off]";
+  return "Error: invalid arguments — Usage: rtcautostart [on|off]";
 }
 
 // Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget

@@ -204,18 +204,19 @@ const char* cmd_gpsstart(const String& argsInput) {
   }
 
   if (!i2cPingAddress(I2C_ADDR_GPS, 100000, 50, (uint8_t)gSettings.gpsBus)) {
-    return "[GPS] Not detected on I2C bus";
+    return "Error: [GPS] Not detected on I2C bus";
   }
 
   if (enqueueDeviceStart(I2C_DEVICE_GPS)) {
     sensorStatusBumpWith("opengps@enqueue");
+    cliHint("the GPS opens in the background - read location with 'gpsread' once it is up (a fix can take a minute outdoors)");
     if (!ensureDebugBuffer()) return "[GPS] Sensor queued for open";
     int pos = getQueuePosition(I2C_DEVICE_GPS);
     snprintf(getDebugBuffer(), 1024, "[GPS] Sensor queued for open (position %d)", pos);
     return getDebugBuffer();
   }
   
-  return "[GPS] Error: Failed to enqueue open (queue full)";
+  return "Error: [GPS] Failed to enqueue open (queue full)";
 }
 
 const char* cmd_gpsstop(const String& argsInput) {
@@ -240,11 +241,12 @@ const char* cmd_gps(const String& argsInput) {
                  gGpsEnabled ? 1 : 0, gGpsTaskHandle);
   
   if (!gGpsConnected || gPA1010D == nullptr) {
-    return "[GPS] Error: Module not connected or initialized";
+    cliHint("the GPS is not open - run 'opengps' first");
+    return "Error: [GPS] Module not connected or initialized";
   }
-  
+
   if (!ensureDebugBuffer()) {
-    return "[GPS] Error: Debug buffer unavailable";
+    return "Error: [GPS] Debug buffer unavailable";
   }
   
   // Use BROADCAST_PRINTF for each line (zero String churn)
@@ -517,7 +519,7 @@ int getGPSSatellites() {
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry gpsSettingEntries[] = {
   { "gpsAutoStart", SETTING_BOOL, &gSettings.gpsAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, nullptr },
-  { "gpsDevicePollMs", SETTING_INT, &gSettings.gpsDevicePollMs, 200, 0, nullptr, 50, 10000, "Poll Interval (ms)", nullptr, false, nullptr, nullptr }
+  { "gpsDevicePollMs", SETTING_INT, &gSettings.gpsDevicePollMs, 200, 0, nullptr, 50, 10000, "Poll Interval (ms)", nullptr, false, nullptr, "gpsdevicepollms" }
 };
 
 static bool isGPSConnected() {
@@ -554,7 +556,7 @@ const char* cmd_gpsautostart(const String& argsInput) {
     setSetting(gSettings.gpsAutoStart, false);
     return "[GPS] Auto-start disabled";
   }
-  return "Usage: gpsautostart [on|off]";
+  return "Error: invalid arguments — Usage: gpsautostart [on|off]";
 }
 
 // One-shot command: persist all GPS logging settings AND start everything immediately.
@@ -571,7 +573,7 @@ const char* cmd_gpslog(const String& argsInput) {
     if (parsed >= 100 && parsed <= 3600000) {
       intervalMs = (uint32_t)parsed;
     } else {
-      return "Usage: gpslog [interval_ms]  (default 1000, min 100)";
+      return "Error: invalid arguments — Usage: gpslog [interval_ms]  (default 1000, min 100)";
     }
   }
 

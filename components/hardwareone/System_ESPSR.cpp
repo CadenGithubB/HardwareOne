@@ -2730,7 +2730,7 @@ static const char* setEnabledFromArgs(const String& argsInput) {
 const char* cmd_sr(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   (void)argsInput;
-  return "Usage: sr <enable|start|stop|status|stack|cmds|debug|confidence|timeout|tuning|accept|dyngain|raw|autotune|snip>";
+  return "Error: invalid arguments — Usage: sr <enable|start|stop|status|stack|cmds|debug|confidence|timeout|tuning|accept|dyngain|raw|autotune|snip>";
 }
 
 const char* cmd_sr_enable(const String& argsInput) {
@@ -2767,6 +2767,10 @@ const char* cmd_sr_start(const String& argsInput) {
     out += "')";
   } else {
     out += " (voice NOT armed)";
+    // SR is listening but recognized commands will be rejected until voice
+    // is armed to an authenticated user. Arming needs a real transport/user
+    // (not the internal console), so name the explicit arm command.
+    cliHint("recognized commands are rejected until armed - run 'voicearm'");
   }
   return out.c_str();
 }
@@ -2863,7 +2867,7 @@ static const char* cmd_sr_stack(const String& argsInput) {
   (void)argsInput;
   static char buf[224];
   if (!gSRTaskHandle || !gESPSRRunning) {
-    return "sr_task: not running — use srstart first";
+    return "Error: sr_task: not running — use srstart first";
   }
   const UBaseType_t hwm = uxTaskGetStackHighWaterMark(gSRTaskHandle);
   const uint32_t allocB = (uint32_t)SR_STACK_WORDS * 4u;
@@ -2897,7 +2901,7 @@ static const char* cmd_voice_help(const String& argsInput) {
 static const char* cmd_sr_cmds(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   (void)argsInput;
-  return "Usage: sr cmds <list|add|del|clear|save|reload>";
+  return "Error: invalid arguments — Usage: sr cmds <list|add|del|clear|save|reload>";
 }
 
 static const char* cmd_sr_cmds_list(const String& argsInput) {
@@ -2941,10 +2945,10 @@ static const char* cmd_sr_cmds_list(const String& argsInput) {
 static const char* cmd_sr_cmds_add(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   CommandArgs a(argsInput);
-  if (!a.hasMinArgs(2)) return "Usage: sr cmds add <id> <phrase>";
+  if (!a.hasMinArgs(2)) return "Error: invalid arguments — Usage: sr cmds add <id> <phrase>";
   String idStr = a.arg(0);
   String phrase = a.remaining(0);
-  if (!isAllDigits(idStr) || phrase.length() == 0) return "Usage: sr cmds add <id> <phrase>";
+  if (!isAllDigits(idStr) || phrase.length() == 0) return "Error: invalid arguments — Usage: sr cmds add <id> <phrase>";
   int id = a.argInt(0, 0);
   if (id <= 0) return "Error: id must be > 0";
 
@@ -2975,7 +2979,7 @@ static const char* cmd_sr_cmds_del(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String arg = argsInput;
   arg.trim();
-  if (arg.length() == 0) return "Usage: sr cmds del <phrase|id>";
+  if (arg.length() == 0) return "Error: invalid arguments — Usage: sr cmds del <phrase|id>";
 
   if (!mnCommandsReady()) {
     return "Error: MultiNet not initialized. Run: srstart";
@@ -3020,7 +3024,7 @@ static const char* cmd_sr_cmds_clear(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String arg = argsInput;
   arg.trim();
-  if (arg != "confirm") return "Usage: sr cmds clear confirm";
+  if (arg != "confirm") return "Error: invalid arguments — Usage: sr cmds clear confirm";
 
   if (!mnCommandsReady()) {
     return "Error: MultiNet not initialized. Run: srstart";
@@ -3141,7 +3145,7 @@ static const char* cmd_setmicsource(const String& argsInput) {
   }
   if (v == "g2" || v == "g2_left" || v == "left") {
     if (!g2MicSetAfeFeedActive(true)) {
-      return "mic source: failed to arm G2 feed (alloc/decoder error)";
+      return "Error: mic source: failed to arm G2 feed (alloc/decoder error)";
     }
     gSrMicSource = SR_MIC_SOURCE_G2_LEFT;
     return "mic source: g2_left — also run `g2micon` from a hijack page";
@@ -3151,13 +3155,13 @@ static const char* cmd_setmicsource(const String& argsInput) {
     g2MicSetAfeFeedActive(false);
     return "mic source: local PDM (I2S)";
   }
-  return "Usage: setmicsource [local|g2]";
+  return "Error: invalid arguments — Usage: setmicsource [local|g2]";
 }
 
 static const char* cmd_sr_debug(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   (void)argsInput;
-  return "Usage: sr debug <level|telem|stats|reset>";
+  return "Error: invalid arguments — Usage: sr debug <level|telem|stats|reset>";
 }
 
 static const char* cmd_sr_debug_level(const String& argsInput) {
@@ -3310,7 +3314,7 @@ static const char* cmd_sr_accept(const String& argsInput) {
     return gSrTargetRequireSpeech ? "OK (require_speech=1)" : "OK (require_speech=0)";
   }
 
-  return "Usage: sr accept [on|off|floor <0.0-1.0>|gap <0.0-1.0>|speech <0|1>]";
+  return "Error: invalid arguments — Usage: sr accept [on|off|floor <0.0-1.0>|gap <0.0-1.0>|speech <0|1>]";
 }
 
 static const char* cmd_sr_dyngain(const String& argsInput) {
@@ -3399,7 +3403,7 @@ static const char* cmd_sr_dyngain(const String& argsInput) {
     return buf;
   }
 
-  return "Usage: sr dyngain [on|off|min <0.1-10>|max <0.1-10>|target <1000-30000>|alpha <0.0-1.0>|reset]";
+  return "Error: invalid arguments — Usage: sr dyngain [on|off|min <0.1-10>|max <0.1-10>|target <1000-30000>|alpha <0.0-1.0>|reset]";
 }
 
 static const char* cmd_sr_raw(const String& argsInput) {
@@ -3423,7 +3427,7 @@ static const char* cmd_sr_raw(const String& argsInput) {
     return "OK (raw output disabled)";
   }
   
-  return "Usage: sr raw [on|off]";
+  return "Error: invalid arguments — Usage: sr raw [on|off]";
 }
 
 static const char* cmd_sr_autotune(const String& argsInput) {
@@ -3485,7 +3489,7 @@ static const char* cmd_sr_autotune(const String& argsInput) {
     return "Auto-tune stopped. Review the results above to pick best config.";
   }
   
-  return "Usage: sr autotune [start|stop|status]";
+  return "Error: invalid arguments — Usage: sr autotune [start|stop|status]";
 }
 
 static const char* cmd_sr_timeout(const String& argsInput) {
@@ -3683,13 +3687,13 @@ static const char* cmd_sr_tuning_filters(const String& argsInput) {
     gSrFiltersEnabled = false;
     return "Audio filters DISABLED (DC offset + gain only)";
   }
-  return "Usage: sr tuning filters <on|off>";
+  return "Error: invalid arguments — Usage: sr tuning filters <on|off>";
 }
 
 static const char* cmd_sr_snip(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   (void)argsInput;
-  return "Usage: sr snip <on|off|start|stop|status|config>";
+  return "Error: invalid arguments — Usage: sr snip <on|off|start|stop|status|config>";
 }
 
 static const char* cmd_sr_snip_on(const String& argsInput) {
@@ -3782,7 +3786,7 @@ static const char* cmd_sr_snip_config(const String& argsInput) {
     out += "\nUsage: sr snip config <pre_ms|max_ms|dest> <value>";
     return out.c_str();
   }
-  if (!a.hasMinArgs(2)) return "Usage: sr snip config <pre_ms|max_ms|dest> <value>";
+  if (!a.hasMinArgs(2)) return "Error: invalid arguments — Usage: sr snip config <pre_ms|max_ms|dest> <value>";
   String key = a.arg(0);
   key.toLowerCase();
   String val = a.arg(1);
@@ -3817,7 +3821,7 @@ static const char* cmd_sr_snip_config(const String& argsInput) {
     }
     return "Destination updated";
   }
-  return "Unknown config key. Use: pre_ms, max_ms, dest";
+  return "Error: Unknown config key. Use: pre_ms, max_ms, dest";
 }
 
 // Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
@@ -3885,9 +3889,9 @@ static bool isESPSRConnected() {
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry espsrSettingsEntries[] = {
-  { "srAutoStart", SETTING_BOOL, &gSettings.srAutoStart, 0, 0, nullptr, 0, 1, "Auto-start at boot", nullptr, false, nullptr, nullptr },
-  { "srModelSource", SETTING_INT, &gSettings.srModelSource, 0, 0, nullptr, 0, 2, "Model source (0=partition, 1=SD, 2=LittleFS)", "0|Partition,1|SD,2|LittleFS", false, nullptr, nullptr },
-  { "srCommandTimeout", SETTING_INT, &gSettings.srCommandTimeout, 6000, 0, nullptr, 1000, 30000, "Command timeout (ms)", nullptr, false, nullptr, nullptr }
+  { "srAutoStart", SETTING_BOOL, &gSettings.srAutoStart, 0, 0, nullptr, 0, 1, "Auto-start at boot", nullptr, false, nullptr, "srautostart" },
+  { "srModelSource", SETTING_INT, &gSettings.srModelSource, 0, 0, nullptr, 0, 2, "Model source (0=partition, 1=SD, 2=LittleFS)", "0|Partition,1|SD,2|LittleFS", false, nullptr, "srmodelsource" },
+  { "srCommandTimeout", SETTING_INT, &gSettings.srCommandTimeout, 6000, 0, nullptr, 1000, 30000, "Command timeout (ms)", nullptr, false, nullptr, "srtimeout" }
 };
 
 // Columns: name, jsonSection, entries, count, isConnected, description
