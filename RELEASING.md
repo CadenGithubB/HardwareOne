@@ -3,8 +3,12 @@
 How to cut a versioned release of this firmware. Every release has BOTH a
 `CHANGELOG.md` entry and a matching GitHub Release with the same notes.
 
-This repo is trunk-based: content commits and the release commit + tag land
-directly on `main`. Use Conventional Commits (feat/fix/docs/chore + scope).
+This repo is trunk-based: the release commit + tag land directly on `main`.
+Commit style is plain-English and version-prefixed, like a changelog line:
+`vX.Y.Z: what the change gives you` (e.g. `v0.97.0: unified sensor reading format -
+one shared shape for every sensor`), optionally with a `- ` bullet body. Pure-docs
+commits use `docs: <plain summary>`. Describe the user-facing outcome, not the
+mechanism; do NOT use Conventional Commit type()/scope prefixes.
 
 ## Version is declared in (keep all four in sync)
 - `CMakeLists.txt` -> `set(PROJECT_VER "X.Y.Z")` - the runtime source of truth; flows via
@@ -21,7 +25,7 @@ PATCH = fixes/docs. MINOR = backward-compatible features. Breaking changes bump 
 1. Draft notes from `git log <last-tag>..HEAD --oneline`, grouped into Added / Changed / Fixed / Security / Docs.
 2. Bump the version in ALL four files above so they agree.
 3. Add `## [X.Y.Z] - <date>` to the top of `CHANGELOG.md`. Get the date from `date +%F` - do not guess it.
-4. Commit content as conventional commits, then a final `chore(release): X.Y.Z` carrying the version bump + CHANGELOG entry.
+4. Commit the change as ONE `vX.Y.Z: <plain summary>` commit that carries the code + the version bump (all four files) + the CHANGELOG entry. The version-prefixed commit IS the release - there is no separate content vs `chore(release)` split.
 5. Tag and push: `git tag vX.Y.Z && git push origin main --follow-tags`
 6. Create the GitHub Release (notes mirror the CHANGELOG section). Write notes to a file and use
    `--notes-file` (NOT `--notes`) so backticks/quotes/apostrophes are not mangled by the shell:
