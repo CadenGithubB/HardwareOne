@@ -23,6 +23,7 @@
 struct FMRadioCache {
   SemaphoreHandle_t mutex = nullptr;
   bool dataValid = false;
+  unsigned long lastUpdate = 0;  // millis() of the last successful poll — feeds the sensor envelope's ts/age
   uint16_t frequency = 10390;    // Current frequency in 10kHz units (10390 = 103.9 MHz)
   uint8_t volume = 6;            // 0-15
   bool muted = false;

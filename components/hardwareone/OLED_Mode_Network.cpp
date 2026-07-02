@@ -1192,24 +1192,21 @@ void displayRemoteSensors() {
           // ToF JSON: {"objects":[{"distance_mm":123,"status":0},...]}
           JsonArray objects = doc["objects"];
           if (objects.size() > 0) {
+            // Objects are now detected-only, so objects[0] existing IS a detection
+            // (the per-object "detected" flag was dropped).
             JsonObject obj = objects[0];
             int dist = obj["distance_mm"] | 0;
             int status = obj["status"] | -1;
-            bool detected = obj["detected"] | false;
 
             oledDisplay->setCursor(0, 28);
-            if (detected) {
-              oledDisplay->print("Distance: ");
-              oledDisplay->print(dist);
-              oledDisplay->println(" mm");
-              oledDisplay->print("Status: ");
-              oledDisplay->println(status == 0 ? "OK" : "Error");
-            } else {
-              oledDisplay->println("No object detected");
-            }
+            oledDisplay->print("Distance: ");
+            oledDisplay->print(dist);
+            oledDisplay->println(" mm");
+            oledDisplay->print("Status: ");
+            oledDisplay->println(status == 0 ? "OK" : "Error");
           } else {
             oledDisplay->setCursor(0, 28);
-            oledDisplay->println("No ToF data");
+            oledDisplay->println("No object detected");
           }
           break;
         }

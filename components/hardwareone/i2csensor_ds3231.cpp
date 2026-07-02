@@ -385,21 +385,27 @@ RTCDateTime rtcLocalTime(const RTCDateTime* utc) {
 int rtcBuildDataJSON(char* buf, size_t bufSize) {
   if (!buf || bufSize == 0) return 0;
   
-  int pos = 0;
   SensorCacheGuard g(gRtcCache.mutex, pdMS_TO_TICKS(50), "rtc.buildJSON");
-  if (g.held) {
-    pos = snprintf(buf, bufSize,
-                   "{\"valid\":%s,\"year\":%u,\"month\":%u,\"day\":%u,"
-                   "\"hour\":%u,\"minute\":%u,\"second\":%u,"
-                   "\"temp\":%.1f,\"ts\":%lu}",
-                   gRtcCache.dataValid ? "true" : "false",
+  if (!g.held) {
+    // Cache-lock timeout: not-ready envelope (was: return 0 / no output).
+    int pos = sensorEnvelopeBegin(buf, bufSize, false, gRtcConnected, 0);
+    if (pos == 0) return 0;
+    int n = snprintf(buf + pos, bufSize - pos,
+                     ",\"year\":0,\"month\":0,\"day\":0,\"hour\":0,\"minute\":0,\"second\":0,\"temp\":0}");
+    if (n < 0 || (size_t)n >= bufSize - pos) return 0;
+    return pos + n;
+  }
+
+  int pos = sensorEnvelopeBegin(buf, bufSize, gRtcCache.dataValid, gRtcConnected, gRtcCache.lastUpdate);
+  if (pos == 0) return 0;
+  int n = snprintf(buf + pos, bufSize - pos,
+                   ",\"year\":%u,\"month\":%u,\"day\":%u,"
+                   "\"hour\":%u,\"minute\":%u,\"second\":%u,\"temp\":%.1f}",
                    gRtcCache.dateTime.year, gRtcCache.dateTime.month, gRtcCache.dateTime.day,
                    gRtcCache.dateTime.hour, gRtcCache.dateTime.minute, gRtcCache.dateTime.second,
-                   gRtcCache.temperature,
-                   gRtcCache.lastUpdate);
-    if (pos < 0 || (size_t)pos >= bufSize) pos = 0;
-  }
-  return pos;
+                   gRtcCache.temperature);
+  if (n < 0 || (size_t)n >= bufSize - pos) return 0;
+  return pos + n;
 }
 
 // ============================================================================

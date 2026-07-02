@@ -283,6 +283,48 @@ const char* cmd_thermalstart(const String& argsInput) {
   }
 }
 
+// Compact SUMMARY reading on the shared sensor envelope: the raw min/avg/max
+// scene temperature (recomputed from the cached frame under the thermal mutex).
+// The full 768-pixel frame stays on its own channel (thermalBuildDataJSON /
+// the ESP-NOW frame) — this is the lightweight "what's the thermal scene" read.
+// NB: uses the RAW frame min/max, not the rolling/smoothed display-scale values.
+int thermalBuildSummaryJSON(char* buf, size_t bufSize) {
+  if (!buf || bufSize == 0) return 0;
+
+  if (!lockThermalCache(pdMS_TO_TICKS(50))) {
+    // Cache-lock timeout: not-ready envelope.
+    int pos = sensorEnvelopeBegin(buf, bufSize, false, gThermalConnected, 0);
+    if (pos == 0) return 0;
+    int n = snprintf(buf + pos, bufSize - pos, ",\"min\":0,\"avg\":0,\"max\":0}");
+    if (n < 0 || (size_t)n >= bufSize - pos) return 0;
+    return pos + n;
+  }
+
+  bool ready = gThermalCache.thermalDataValid && gThermalCache.thermalFrame;
+  unsigned long ts = gThermalCache.thermalLastUpdate;
+  float minT = 0.0f, maxT = 0.0f, avgT = 0.0f;
+  if (ready) {
+    minT = 9999.0f; maxT = -9999.0f;
+    float sumT = 0.0f;
+    for (int i = 0; i < 768; i++) {
+      float t = gThermalCache.thermalFrame[i] / 100.0f;
+      if (t < minT) minT = t;
+      if (t > maxT) maxT = t;
+      sumT += t;
+    }
+    avgT = sumT / 768.0f;
+  }
+  unlockThermalCache();
+
+  int pos = sensorEnvelopeBegin(buf, bufSize, ready, gThermalConnected, ts);
+  if (pos == 0) return 0;
+  int n = snprintf(buf + pos, bufSize - pos,
+                   ",\"min\":%.1f,\"avg\":%.1f,\"max\":%.1f}",
+                   minT, avgT, maxT);
+  if (n < 0 || (size_t)n >= bufSize - pos) return 0;
+  return pos + n;
+}
+
 const char* cmd_thermalread(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   const bool wantJson = argWantsJson(argsInput);
@@ -292,11 +334,17 @@ const char* cmd_thermalread(const String& argsInput) {
                     : "Error: [Thermal] Not running. Use 'openthermal' to start.";
   }
 
-  if (!gThermalCache.thermalDataValid || !gThermalCache.thermalFrame) {
-    return wantJson ? "{\"valid\":false}" : "[Thermal] No data available yet";
+  // JSON path: the shared summary envelope (frame stays on its own channel).
+  if (wantJson) {
+    int n = thermalBuildSummaryJSON(getDebugBuffer(), 1024);
+    return (n > 0) ? getDebugBuffer() : "{\"valid\":false}";
   }
 
-  // Compute min/max/avg from cached frame
+  if (!gThermalCache.thermalDataValid || !gThermalCache.thermalFrame) {
+    return "[Thermal] No data available yet";
+  }
+
+  // Human path: raw min/max/avg from the cached frame, broadcast as text.
   float minT = 9999.0f, maxT = -9999.0f, sumT = 0.0f;
   for (int i = 0; i < 768; i++) {
     float t = gThermalCache.thermalFrame[i] / 100.0f;
@@ -305,13 +353,6 @@ const char* cmd_thermalread(const String& argsInput) {
     sumT += t;
   }
   float avgT = sumT / 768.0f;
-
-  if (wantJson) {
-    snprintf(getDebugBuffer(), 1024,
-      "{\"valid\":true,\"min\":%.1f,\"max\":%.1f,\"avg\":%.1f,\"seq\":%lu}",
-      minT, maxT, avgT, (unsigned long)gThermalCache.thermalSeq);
-    return getDebugBuffer();
-  }
 
   BROADCAST_PRINTF("Thermal: min=%.1f°C max=%.1f°C avg=%.1f°C (seq=%lu)",
                    minT, maxT, avgT, (unsigned long)gThermalCache.thermalSeq);

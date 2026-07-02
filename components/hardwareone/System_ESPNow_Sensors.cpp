@@ -98,7 +98,10 @@ struct SensorBroadcastSpec {
 
 static const SensorBroadcastSpec gSensorSpecs[REMOTE_SENSOR_MAX] = {
 #if ENABLE_THERMAL_SENSOR
-  [REMOTE_SENSOR_THERMAL]    = { buildThermalDataJSONInteger, 1000, 4096 },
+  // DISABLED: the 768-pixel frame always exceeds the 200 B sensor-broadcast gate
+  // (v4_broadcast_sensor_data), so it was built every second and silently dropped.
+  // Re-enable over the mesh by pointing this at thermalBuildSummaryJSON (~90 B).
+  [REMOTE_SENSOR_THERMAL]    = { nullptr, 0, 0 },
 #else
   [REMOTE_SENSOR_THERMAL]    = { nullptr, 0, 0 },
 #endif
@@ -712,8 +715,11 @@ int formatRemoteSensorReadable(const char* json, char* out, size_t outSize, int 
     if (lines >= maxLines) break;
     const char* key = kv.key().c_str();
     if (!key || !key[0]) continue;
-    // Skip bookkeeping/noise keys that aren't useful on a small screen.
-    if (!strcmp(key, "ts") || !strcmp(key, "seq") || !strcmp(key, "val") || !strcmp(key, "valid"))
+    // Skip bookkeeping/noise keys that aren't useful on a small screen. This
+    // includes the shared sensor-reading envelope's metadata (valid/connected/
+    // ts/age) — the value keys are what matter on a tiny remote readout.
+    if (!strcmp(key, "ts") || !strcmp(key, "seq") || !strcmp(key, "val") ||
+        !strcmp(key, "valid") || !strcmp(key, "connected") || !strcmp(key, "age"))
       continue;
 
     char valbuf[20];

@@ -586,53 +586,33 @@ void imuPoll() {
 int imuBuildDataJSON(char* buf, size_t bufSize) {
   if (!buf || bufSize == 0) return 0;
 
-  int pos = 0;
-
   SensorCacheGuard g(gImuCache.mutex, pdMS_TO_TICKS(CACHE_MUTEX_TIMEOUT_MS), "imu.buildJSON");
-  if (g.held) {
-    unsigned long nowMs = millis();
-    unsigned long lastUpdateMs = gImuCache.imuLastUpdate;
-    unsigned long ageMs = (lastUpdateMs > 0 && nowMs >= lastUpdateMs) ? (nowMs - lastUpdateMs) : 0;
+  if (!g.held) {
+    // Cache-lock timeout: not-ready envelope (was: {"error":"IMU cache timeout"}).
+    int pos = sensorEnvelopeBegin(buf, bufSize, false, gImuConnected, 0);
+    if (pos == 0) return 0;
+    int n = snprintf(buf + pos, bufSize - pos, ",\"accel\":null,\"gyro\":null,\"ori\":null,\"temp\":null}");
+    if (n < 0 || (size_t)n >= bufSize - pos) return 0;
+    return pos + n;
+  }
 
-    bool enabled = gImuEnabled;
-    bool connected = gImuConnected;
-    bool initReq = gImuInitRequested;
-    bool initDone = gImuInitDone;
-    bool initOk = gImuInitResult;
-
-    // Build complete JSON response in a single snprintf call
-    pos = snprintf(buf, bufSize,
-                   "{\"valid\":%s,\"seq\":%lu,"
-                   "\"enabled\":%s,\"connected\":%s,"
-                   "\"initRequested\":%s,\"initDone\":%s,\"initResult\":%s,"
-                   "\"ageMs\":%lu,"
-                   "\"accel\":{\"x\":%.3f,\"y\":%.3f,\"z\":%.3f},"
+  // valid/connected/ts/age come from the shared envelope. Body carries ONLY the
+  // measurement (accel/gyro/ori/temp). Dropped: seq (bookkeeping, redundant with
+  // ts), enabled (duplicate of the discovery-layer enabled), init* flags
+  // (device-state, unconsumed) — see docs/SENSOR_ENVELOPE_CLEANUP_PLAN.md.
+  int pos = sensorEnvelopeBegin(buf, bufSize, gImuCache.imuDataValid, gImuConnected, gImuCache.imuLastUpdate);
+  if (pos == 0) return 0;
+  int n = snprintf(buf + pos, bufSize - pos,
+                   ",\"accel\":{\"x\":%.3f,\"y\":%.3f,\"z\":%.3f},"
                    "\"gyro\":{\"x\":%.3f,\"y\":%.3f,\"z\":%.3f},"
                    "\"ori\":{\"yaw\":%.2f,\"pitch\":%.2f,\"roll\":%.2f},"
-                   "\"temp\":%.1f,\"timestamp\":%lu}",
-                   gImuCache.imuDataValid ? "true" : "false",
-                   (unsigned long)gImuCache.imuSeq,
-                   enabled ? "true" : "false",
-                   connected ? "true" : "false",
-                   initReq ? "true" : "false",
-                   initDone ? "true" : "false",
-                   initOk ? "true" : "false",
-                   ageMs,
+                   "\"temp\":%.1f}",
                    gImuCache.accelX, gImuCache.accelY, gImuCache.accelZ,
                    gImuCache.gyroX, gImuCache.gyroY, gImuCache.gyroZ,
                    gImuCache.oriYaw, gImuCache.oriPitch, gImuCache.oriRoll,
-                   gImuCache.imuTemp,
-                   gImuCache.imuLastUpdate);
-
-    if (pos < 0 || (size_t)pos >= bufSize) {
-      pos = snprintf(buf, bufSize, "{\"error\":\"IMU JSON overflow\"}");
-    }
-  } else {
-    // Timeout - return error response
-    pos = snprintf(buf, bufSize, "{\"error\":\"IMU cache timeout\"}");
-  }
-
-  return pos;
+                   gImuCache.imuTemp);
+  if (n < 0 || (size_t)n >= bufSize - pos) return 0;
+  return pos + n;
 }
 // ============================================================================
 // IMU Action Detection Functions

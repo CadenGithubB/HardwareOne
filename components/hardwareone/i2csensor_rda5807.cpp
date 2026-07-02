@@ -212,6 +212,7 @@ void fmRadioDeinit() {
   gRadioInitialized = false;
   gFmRadioConnected = false;
   gFmRadioEnabled = false;
+  gFmRadioCache.dataValid = false;  // stale on shutdown → envelope reports valid:false
   memset(gFmRadioCache.stationName, 0, sizeof(gFmRadioCache.stationName));
   memset(gFmRadioCache.stationText, 0, sizeof(gFmRadioCache.stationText));
   DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] Deinitialization completed");
@@ -436,6 +437,10 @@ void updateFMRadio() {
       
       // Update headphone detection based on RSSI
       gFmRadioCache.headphonesConnected = (gFmRadioCache.rssi >= 15);
+
+      // Freshness stamp for the shared sensor envelope (ts/age + valid).
+      gFmRadioCache.lastUpdate = now;
+      gFmRadioCache.dataValid = true;
     });
     return true;  // Assume success for void operation
   });
@@ -744,11 +749,15 @@ int fmRadioBuildDataJSON(char* buf, size_t bufSize) {
     }
   }
 
-  int len = snprintf(buf, bufSize,
-    "{\"connected\":%s,\"enabled\":%s,\"frequency\":%.1f,\"volume\":%d,"
+  // valid = fresh poll data (set in updateFMRadio, cleared on deinit),
+  // connected = radio present on the bus, ts/age from the last poll. Dropped:
+  // top-level "connected" (envelope carries it) AND "enabled" (duplicate of the
+  // sensors-json discovery-layer enabled).
+  int pos = sensorEnvelopeBegin(buf, bufSize, snap.dataValid, gFmRadioConnected, snap.lastUpdate);
+  if (pos == 0) return 0;
+  int n = snprintf(buf + pos, bufSize - pos,
+    ",\"frequency\":%.1f,\"volume\":%d,"
     "\"muted\":%s,\"stereo\":%s,\"rssi\":%d,\"headphones\":%s,\"station\":\"%s\",\"radioText\":\"%s\"}",
-    gFmRadioConnected ? "true" : "false",
-    gFmRadioEnabled ? "true" : "false",
     snap.frequency / 100.0,
     snap.volume,
     snap.muted ? "true" : "false",
@@ -757,7 +766,8 @@ int fmRadioBuildDataJSON(char* buf, size_t bufSize) {
     snap.headphonesConnected ? "true" : "false",
     snap.stationName,
     snap.stationText);
-  return len;
+  if (n < 0 || (size_t)n >= bufSize - pos) return 0;
+  return pos + n;
 }
 
 // ============================================================================

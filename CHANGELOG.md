@@ -8,6 +8,20 @@ Entries for 0.96.1 and earlier were backfilled from git history (this repo had
 no tags or releases before 0.96.2); they are terse, commit-grounded summaries,
 dated from each version's commit. Dates are YYYY-MM-DD.
 
+## [0.97.0] - 2026-07-01
+Unified sensor reading format: every sensor now shares one envelope shape, and the bodies were trimmed to just the measurement.
+### Added
+- Shared reading envelope (`valid`, `connected`, `ts`, `age`) at the head of every sensor's data, via `sensorEnvelopeBegin()`.
+- Thermal min/avg/max summary reading (`thermalread json`), also embedded in `sensors json` like the other sensors.
+- FM radio readings now carry a real `ts`/`age` (added a `lastUpdate` to its cache).
+### Changed
+- Sensor bodies trimmed to measurement-only: dropped bookkeeping (`seq`, `total_objects`) and device-state already in the discovery layer (`enabled`, IMU init flags, APDS mode flags).
+- ToF emits only detected objects (was 4 fixed slots padded with nulls); dropped the redundant `distance_cm`.
+- Not-ready / error readings now report `valid:false` instead of an `{"error":...}` shape; renamed `val` -> `valid` and `timestamp`/`ageMs` -> `ts`/`age` where they differed.
+### Fixed
+- ToF JSON builder could underflow its remaining-length; APDS read its cache without holding the mutex.
+- Disabled the thermal ESP-NOW broadcast: the 768-pixel frame never fit the 200-byte packet limit, so it was built and silently dropped every second.
+
 ## [0.96.3] - 2026-07-01
 Small CLI fixes: imagesend needs an explicit path, and espnowbroadcast flags no-peers as an error.
 ### Changed

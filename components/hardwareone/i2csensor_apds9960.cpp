@@ -74,14 +74,28 @@ extern const SettingsModule apdsSettingsModule = {
 // consumer. Mirrors the other sensors' *BuildDataJSON contract.
 int apdsBuildDataJSON(char* buf, size_t bufSize) {
   if (!buf || bufSize == 0) return 0;
-  bool color = gApdsColorEnabled, prox = gApdsProximityEnabled, gest = gApdsGestureEnabled;
-  return snprintf(buf, bufSize,
-    "{\"valid\":%s,\"colorEnabled\":%s,\"proximityEnabled\":%s,\"gestureEnabled\":%s,"
-    "\"r\":%u,\"g\":%u,\"b\":%u,\"c\":%u,\"proximity\":%u}",
-    (color || prox || gest) ? "true" : "false",
-    color ? "true" : "false", prox ? "true" : "false", gest ? "true" : "false",
-    gApdsCache.apdsRed, gApdsCache.apdsGreen, gApdsCache.apdsBlue, gApdsCache.apdsClear,
-    gApdsCache.apdsProximity);
+
+  // Read the cached RGBC/proximity values UNDER the cache mutex (the poll task
+  // writes them un-atomically). `valid` = real data validity (apdsDataValid).
+  // The color/prox/gesture mode flags are device-state, not measurement — they
+  // live in the sensors-json discovery layer, not in the reading body.
+  SensorCacheGuard g(gApdsCache.mutex, pdMS_TO_TICKS(50), "apds.buildJSON");
+  if (!g.held) {
+    int pos = sensorEnvelopeBegin(buf, bufSize, false, gApdsConnected, 0);
+    if (pos == 0) return 0;
+    int n = snprintf(buf + pos, bufSize - pos, ",\"r\":0,\"g\":0,\"b\":0,\"c\":0,\"proximity\":0}");
+    if (n < 0 || (size_t)n >= bufSize - pos) return 0;
+    return pos + n;
+  }
+
+  int pos = sensorEnvelopeBegin(buf, bufSize, gApdsCache.apdsDataValid, gApdsConnected, gApdsCache.apdsLastUpdate);
+  if (pos == 0) return 0;
+  int n = snprintf(buf + pos, bufSize - pos,
+                   ",\"r\":%u,\"g\":%u,\"b\":%u,\"c\":%u,\"proximity\":%u}",
+                   gApdsCache.apdsRed, gApdsCache.apdsGreen, gApdsCache.apdsBlue, gApdsCache.apdsClear,
+                   gApdsCache.apdsProximity);
+  if (n < 0 || (size_t)n >= bufSize - pos) return 0;
+  return pos + n;
 }
 
 const char* cmd_apdscolor(const String& argsInput) {
