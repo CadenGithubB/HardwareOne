@@ -65,20 +65,23 @@ inline void streamAnoEncoderSensorJs(httpd_req_t* req) {
   //   IN=bit 0, UP=bit 1, DOWN=bit 2, LEFT=bit 3, RIGHT=bit 4
   //   Virtual START=bit 16 (synthesized from RIGHT+IN chord by the driver).
   httpd_resp_send_chunk(req,
-    "window.hwRenderAnoState = function(j) {\n"
+    "window.hwRenderAnoState = function(j, ids) {\n"
     "  try {\n"
     "    if (!j || typeof j !== 'object') return;\n"
+    "    ids = ids || {};\n"
+    "    var idData=ids.data||'ano-data', idPos=ids.pos||'ano-pos', idAxis=ids.axis||'ano-axis', idWheel=ids.wheel||'ano-wheel';\n"
+    "    var idIn=ids.btnIn||'ano-btn-in', idUp=ids.btnUp||'ano-btn-up', idDown=ids.btnDown||'ano-btn-down', idLeft=ids.btnLeft||'ano-btn-left', idRight=ids.btnRight||'ano-btn-right', idStart=ids.btnStart||'ano-btn-start';\n"
     "    var hasData = (j.pos !== undefined && j.buttons !== undefined);\n"
     "    if (!hasData) return;\n"
     "    var pos = j.pos|0, axis = j.axis|0, b = j.buttons>>>0;\n"
-    "    var dataEl = document.getElementById('ano-data');\n"
+    "    var dataEl = document.getElementById(idData);\n"
     "    if (dataEl) {\n"
     "      var bHex = '0x' + (b & 0xFFFF).toString(16).toUpperCase().padStart(4,'0');\n"
     "      dataEl.textContent = 'Pos: ' + pos + '  Axis: ' + (axis ? 'horizontal' : 'vertical') + '  Buttons: ' + bHex;\n"
     "    }\n"
-    "    var posEl = document.getElementById('ano-pos');\n"
+    "    var posEl = document.getElementById(idPos);\n"
     "    if (posEl) posEl.textContent = pos;\n"
-    "    var axisEl = document.getElementById('ano-axis');\n"
+    "    var axisEl = document.getElementById(idAxis);\n"
     "    if (axisEl) axisEl.textContent = axis ? 'horizontal ↔' : 'vertical ↕';\n"
     "    // Buttons stored active-high in gAnoEncoderCache (bit set = pressed)\n"
     "    var pins = {in:0, up:1, down:2, left:3, right:4, start:16};\n"
@@ -88,15 +91,15 @@ inline void streamAnoEncoderSensorJs(httpd_req_t* req) {
     "      e.style.background = p ? 'var(--success)' : 'var(--menu-item-bg)';\n"
     "      e.style.color = p ? '#fff' : 'var(--menu-item-fg)';\n"
     "    }\n"
-    "    setBtn('ano-btn-in',    !!(b & (1<<pins.in)));\n"
-    "    setBtn('ano-btn-up',    !!(b & (1<<pins.up)));\n"
-    "    setBtn('ano-btn-down',  !!(b & (1<<pins.down)));\n"
-    "    setBtn('ano-btn-left',  !!(b & (1<<pins.left)));\n"
-    "    setBtn('ano-btn-right', !!(b & (1<<pins.right)));\n"
-    "    setBtn('ano-btn-start', !!(b & (1<<pins.start)));\n"
+    "    setBtn(idIn,    !!(b & (1<<pins.in)));\n"
+    "    setBtn(idUp,    !!(b & (1<<pins.up)));\n"
+    "    setBtn(idDown,  !!(b & (1<<pins.down)));\n"
+    "    setBtn(idLeft,  !!(b & (1<<pins.left)));\n"
+    "    setBtn(idRight, !!(b & (1<<pins.right)));\n"
+    "    setBtn(idStart, !!(b & (1<<pins.start)));\n"
     "    // Rotary wheel visual — draw a dot at the angle implied by pos\n"
     "    try {\n"
-    "      var cv = document.getElementById('ano-wheel');\n"
+    "      var cv = document.getElementById(idWheel);\n"
     "      if (cv) {\n"
     "        var ctx = cv.getContext('2d');\n"
     "        var w = cv.width, h = cv.height;\n"
@@ -131,6 +134,27 @@ inline void streamAnoEncoderSensorJs(httpd_req_t* req) {
     "  } catch (_) {}\n"
     "};\n",
     HTTPD_RESP_USE_STRLEN);
+
+  // Shared card-body builder: the rich D-pad layout with baseId-prefixed ids, so
+  // a remote peer's ANO card reuses hwRenderAnoState (no duplicate renderer).
+  httpd_resp_send_chunk(req,
+    "window.hwBuildAnoInner=function(baseId){\n"
+    "  return '<div style=\"margin-top:10px;display:flex;gap:16px;align-items:center;flex-wrap:wrap\">'+\n"
+    "    '<div style=\"display:flex;flex-direction:column;align-items:center;gap:4px\">'+\n"
+    "    '<canvas id=\"'+baseId+'-wheel\" width=\"100\" height=\"100\" style=\"border-radius:50%;background:var(--menu-item-bg)\"></canvas>'+\n"
+    "    '<div style=\"font-size:0.75rem;color:var(--text-muted)\">Position: <span id=\"'+baseId+'-pos\">0</span></div>'+\n"
+    "    '<div style=\"font-size:0.75rem;color:var(--text-muted)\">Axis: <span id=\"'+baseId+'-axis\">vertical</span></div>'+\n"
+    "    '</div>'+\n"
+    "    '<div style=\"display:grid;grid-template-columns:repeat(3,36px);grid-template-rows:repeat(3,36px);gap:4px\">'+\n"
+    "    '<div></div><div id=\"'+baseId+'-btn-up\" class=\"btn btn-small\" style=\"font-size:0.7rem;padding:4px\">UP</div><div></div>'+\n"
+    "    '<div id=\"'+baseId+'-btn-left\" class=\"btn btn-small\" style=\"font-size:0.7rem;padding:4px\">LEFT</div>'+\n"
+    "    '<div id=\"'+baseId+'-btn-in\" class=\"btn btn-small\" style=\"font-size:0.7rem;padding:4px;background:var(--menu-item-bg)\">IN</div>'+\n"
+    "    '<div id=\"'+baseId+'-btn-right\" class=\"btn btn-small\" style=\"font-size:0.7rem;padding:4px\">RIGHT</div>'+\n"
+    "    '<div></div><div id=\"'+baseId+'-btn-down\" class=\"btn btn-small\" style=\"font-size:0.7rem;padding:4px\">DOWN</div><div></div>'+\n"
+    "    '</div>'+\n"
+    "    '<div style=\"display:flex;flex-direction:column;gap:4px\"><div id=\"'+baseId+'-btn-start\" class=\"btn btn-small\" style=\"font-size:0.65rem;padding:4px\">START</div></div>'+\n"
+    "    '</div>';\n"
+    "};\n", HTTPD_RESP_USE_STRLEN);
 
   // Sensor reader — registers in window._sensorReaders.anoencoder
   httpd_resp_send_chunk(req,
