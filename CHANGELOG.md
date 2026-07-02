@@ -8,6 +8,13 @@ Entries for 0.96.1 and earlier were backfilled from git history (this repo had
 no tags or releases before 0.96.2); they are terse, commit-grounded summaries,
 dated from each version's commit. Dates are YYYY-MM-DD.
 
+## [0.97.1] - 2026-07-01
+Sensors web page: a remote (ESP-NOW peer) sensor now renders as a readable card instead of a raw JSON dump.
+### Added
+- Shared `hwRenderGenericSensor` labeled-field card for remote sensors (ToF, thermal, GPS, RTC, presence, IMU), replacing the raw `JSON.stringify` fallback.
+### Changed
+- Remote gamepad / rotary-encoder now reuse the local card renderer (parameterized `hwRenderAnoState` + a shared `hwBuildAnoInner`); removed the duplicate `hwRenderRemoteInput`.
+
 ## [0.97.0] - 2026-07-01
 Unified sensor reading format: every sensor now shares one envelope shape, and the bodies were trimmed to just the measurement.
 ### Added
