@@ -318,20 +318,34 @@ int gpsBuildDataJSON(char* buf, size_t bufSize) {
   if (!buf || bufSize == 0) return 0;
 
   SensorCacheGuard g(gGpsCache.mutex, pdMS_TO_TICKS(50), "gps.buildJSON");
-  if (!g.held) return 0;
-
-  if (gGpsCache.hasFix) {
-    return snprintf(buf, bufSize,
-                    "{\"val\":1,\"fix\":1,\"quality\":%d,\"sats\":%d,"
-                    "\"lat\":%.6f,\"lon\":%.6f,\"alt\":%.2f,\"speed\":%.2f}",
-                    (int)gGpsCache.fixQuality, (int)gGpsCache.satellites,
-                    gGpsCache.latitude, gGpsCache.longitude,
-                    gGpsCache.altitude, gGpsCache.speed);
+  if (!g.held) {
+    // Cache-lock timeout: not-ready envelope (was: return 0 / no output).
+    int pos = sensorEnvelopeBegin(buf, bufSize, false, gGpsConnected, 0);
+    if (pos == 0) return 0;
+    int n = snprintf(buf + pos, bufSize - pos,
+                     ",\"fix\":0,\"quality\":0,\"sats\":0,\"lat\":0,\"lon\":0,\"alt\":0,\"speed\":0}");
+    if (n < 0 || (size_t)n >= bufSize - pos) return 0;
+    return pos + n;
   }
-  return snprintf(buf, bufSize,
-                  "{\"val\":1,\"fix\":0,\"quality\":0,\"sats\":%d,"
-                  "\"lat\":0,\"lon\":0,\"alt\":0,\"speed\":0}",
-                  (int)gGpsCache.satellites);
+
+  int pos = sensorEnvelopeBegin(buf, bufSize, gGpsCache.dataValid, gGpsConnected, gGpsCache.lastUpdate);
+  if (pos == 0) return 0;
+  int n;
+  if (gGpsCache.hasFix) {
+    n = snprintf(buf + pos, bufSize - pos,
+                 ",\"fix\":1,\"quality\":%d,\"sats\":%d,"
+                 "\"lat\":%.6f,\"lon\":%.6f,\"alt\":%.2f,\"speed\":%.2f}",
+                 (int)gGpsCache.fixQuality, (int)gGpsCache.satellites,
+                 gGpsCache.latitude, gGpsCache.longitude,
+                 gGpsCache.altitude, gGpsCache.speed);
+  } else {
+    n = snprintf(buf + pos, bufSize - pos,
+                 ",\"fix\":0,\"quality\":0,\"sats\":%d,"
+                 "\"lat\":0,\"lon\":0,\"alt\":0,\"speed\":0}",
+                 (int)gGpsCache.satellites);
+  }
+  if (n < 0 || (size_t)n >= bufSize - pos) return 0;
+  return pos + n;
 }
 
 void gpsTask(void* parameter) {

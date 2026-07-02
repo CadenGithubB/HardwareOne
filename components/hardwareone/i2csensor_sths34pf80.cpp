@@ -479,29 +479,29 @@ const size_t presenceCommandsCount = sizeof(presenceCommands) / sizeof(presenceC
 int presenceBuildDataJSON(char* buf, size_t bufSize) {
   if (!buf || bufSize == 0) return 0;
   
-  int pos = 0;
-  {
-    SensorCacheGuard g(gPresenceCache.mutex, pdMS_TO_TICKS(50), "presence.buildJSON");
-    if (g.held) {
-      pos = snprintf(buf, bufSize,
-                     "{\"valid\":%s,\"ambient\":%.2f,"
-                     "\"presence\":%d,\"presenceDetected\":%s,"
-                     "\"motion\":%d,\"motionDetected\":%s,"
-                     "\"tempShock\":%d,\"tempShockDetected\":%s,"
-                     "\"ts\":%lu}",
-                     gPresenceCache.dataValid ? "true" : "false",
-                     gPresenceCache.ambientTemp,
-                     gPresenceCache.presenceValue,
-                     gPresenceCache.presenceDetected ? "true" : "false",
-                     gPresenceCache.motionValue,
-                     gPresenceCache.motionDetected ? "true" : "false",
-                     gPresenceCache.tempShockValue,
-                     gPresenceCache.tempShockDetected ? "true" : "false",
-                     gPresenceCache.lastUpdate);
-      if (pos < 0 || (size_t)pos >= bufSize) pos = 0;
-    }
+  SensorCacheGuard g(gPresenceCache.mutex, pdMS_TO_TICKS(50), "presence.buildJSON");
+  if (!g.held) {
+    // Cache-lock timeout: not-ready envelope (was: return 0 / no output).
+    int pos = sensorEnvelopeBegin(buf, bufSize, false, gPresenceConnected, 0);
+    if (pos == 0) return 0;
+    int n = snprintf(buf + pos, bufSize - pos,
+                     ",\"ambient\":0,\"presence\":0,\"presenceDetected\":false,"
+                     "\"motion\":0,\"motionDetected\":false,\"tempShock\":0,\"tempShockDetected\":false}");
+    if (n < 0 || (size_t)n >= bufSize - pos) return 0;
+    return pos + n;
   }
-  return pos;
+
+  int pos = sensorEnvelopeBegin(buf, bufSize, gPresenceCache.dataValid, gPresenceConnected, gPresenceCache.lastUpdate);
+  if (pos == 0) return 0;
+  int n = snprintf(buf + pos, bufSize - pos,
+                   ",\"ambient\":%.2f,\"presence\":%d,\"presenceDetected\":%s,"
+                   "\"motion\":%d,\"motionDetected\":%s,\"tempShock\":%d,\"tempShockDetected\":%s}",
+                   gPresenceCache.ambientTemp,
+                   gPresenceCache.presenceValue, gPresenceCache.presenceDetected ? "true" : "false",
+                   gPresenceCache.motionValue, gPresenceCache.motionDetected ? "true" : "false",
+                   gPresenceCache.tempShockValue, gPresenceCache.tempShockDetected ? "true" : "false");
+  if (n < 0 || (size_t)n >= bufSize - pos) return 0;
+  return pos + n;
 }
 
 // ============================================================================

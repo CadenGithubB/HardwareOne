@@ -517,6 +517,19 @@ void discoverI2CDevices();
 bool isSensorConnected(const char* name);
 String identifySensor(uint8_t address);
 
+// Shared sensor-reading envelope: every <x>BuildDataJSON opens its payload with
+// this so all interfaces (BLE/web/OLED/serial/MQTT/ESP-NOW) parse ONE shape.
+// Writes, WITHOUT a closing brace:
+//   {"valid":<bool>,"connected":<bool>,"ts":<lastUpdateMs>[,"age":<now-ts>]
+// The caller then appends its own value keys (each starting with a comma) and
+// the closing '}'. ts = the cache's lastUpdate (millis; 0 = never sampled);
+// age = millis()-lastUpdate in ms, OMITTED when lastUpdateMs==0. Keys are short
+// on purpose (envelope ~45 B; ESP-NOW RX buffer is 256 B). Returns bytes written
+// (always < bufSize, leaving room for the caller's suffix), or 0 on
+// error/overflow — a 0 return means the caller must NOT append.
+int sensorEnvelopeBegin(char* buf, size_t bufSize, bool valid, bool connected,
+                        unsigned long lastUpdateMs);
+
 // ============================================================================
 // Sensor Task Functions
 // ============================================================================

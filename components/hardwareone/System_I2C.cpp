@@ -1644,6 +1644,37 @@ extern int gamepadBuildDataJSON(char* buf, size_t bufSize);
 #if ENABLE_APDS_SENSOR
 extern int apdsBuildDataJSON(char* buf, size_t bufSize);
 #endif
+#if ENABLE_THERMAL_SENSOR
+// Thermal registers its COMPACT summary builder (not the 768-px frame) so a
+// stream sensor can still surface a glanceable reading in `sensors json`.
+extern int thermalBuildSummaryJSON(char* buf, size_t bufSize);
+#endif
+
+// Shared sensor-reading envelope. See System_I2C.h for the contract. Writes the
+// common opening (no closing brace) so every per-sensor builder emits ONE shape;
+// the builder appends its own value keys and '}'. Returns bytes written, or 0 on
+// overflow (so the caller never appends past the buffer).
+int sensorEnvelopeBegin(char* buf, size_t bufSize, bool valid, bool connected,
+                        unsigned long lastUpdateMs) {
+  if (!buf || bufSize == 0) return 0;
+  int n;
+  if (lastUpdateMs != 0) {
+    unsigned long now = millis();
+    unsigned long age = (now >= lastUpdateMs) ? (now - lastUpdateMs) : 0UL;
+    n = snprintf(buf, bufSize,
+                 "{\"valid\":%s,\"connected\":%s,\"ts\":%lu,\"age\":%lu",
+                 valid ? "true" : "false", connected ? "true" : "false",
+                 lastUpdateMs, age);
+  } else {
+    n = snprintf(buf, bufSize,
+                 "{\"valid\":%s,\"connected\":%s,\"ts\":0",
+                 valid ? "true" : "false", connected ? "true" : "false");
+  }
+  // snprintf returns the would-be length; treat truncation or error as overflow
+  // so the caller never writes past the end of the buffer.
+  if (n < 0 || (size_t)n >= bufSize) { buf[0] = '\0'; return 0; }
+  return n;
+}
 
 static void addSensorEntry(JsonArray& arr, const char* id, const char* name,
                            const char* kind, bool enabled, bool connected, SensorDataFn dataFn) {
@@ -1654,10 +1685,11 @@ static void addSensorEntry(JsonArray& arr, const char* id, const char* name,
   o["enabled"]   = enabled;     // LIVE running state (toggled by open<id>/close<id>), NOT autostart
   o["connected"] = connected;   // physically present on the bus right now
 
-  // Live readings: native per-sensor JSON, embedded only for active, non-stream
-  // sensors. Parsed into the doc (copied) so the scratch buffer is safe to reuse
-  // across sensors. Largest non-stream builder is ToF (~1 KB).
-  if (dataFn && enabled && connected && strcmp(kind, "stream") != 0) {
+  // Live readings: native per-sensor JSON, embedded for any active sensor that
+  // provides a data builder. Parsed into the doc (copied) so the scratch buffer
+  // is safe to reuse across sensors. Stream sensors (thermal) register a COMPACT
+  // SUMMARY builder here — never their full frame — so the 1 KB scratch holds.
+  if (dataFn && enabled && connected) {
     static char* dbuf = nullptr;
     if (!dbuf) dbuf = (char*)ps_alloc(1024, AllocPref::PreferPSRAM, "sensor.data.scratch");
     if (dbuf) {
@@ -1716,7 +1748,7 @@ static void buildSensorsJson(JsonDocument& doc, bool includeData = true) {
   addSensorEntry(arr, "input",    "Seesaw gamepad",         "scalar", gInputEnabled, gInputConnected, includeData ? gamepadBuildDataJSON : nullptr);
 #endif
 #if ENABLE_THERMAL_SENSOR
-  addSensorEntry(arr, "thermal",  "MLX90640 thermal",       "stream", gThermalEnabled, isSensorConnected("thermal"), nullptr);
+  addSensorEntry(arr, "thermal",  "MLX90640 thermal",       "stream", gThermalEnabled, isSensorConnected("thermal"), includeData ? thermalBuildSummaryJSON : nullptr);
 #endif
 }
 

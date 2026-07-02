@@ -415,12 +415,23 @@ int gamepadBuildDataJSON(char* buf, size_t bufSize) {
   if (!buf || bufSize == 0) return 0;
 
   SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(50), "gamepad.buildJSON");
-  if (!g.held) return 0;
+  if (!g.held) {
+    // Cache-lock timeout: not-ready envelope (was: return 0 / no output).
+    int pos = sensorEnvelopeBegin(buf, bufSize, false, gInputConnected, 0);
+    if (pos == 0) return 0;
+    int n = snprintf(buf + pos, bufSize - pos, ",\"x\":0,\"y\":0,\"buttons\":0}");
+    if (n < 0 || (size_t)n >= bufSize - pos) return 0;
+    return pos + n;
+  }
 
-  return snprintf(buf, bufSize,
-                  "{\"val\":1,\"x\":%d,\"y\":%d,\"buttons\":%lu}",
-                  gInputCache.joyX, gInputCache.joyY,
-                  (unsigned long)gInputCache.buttons);
+  int pos = sensorEnvelopeBegin(buf, bufSize, gInputCache.dataValid, gInputConnected, gInputCache.lastUpdate);
+  if (pos == 0) return 0;
+  int n = snprintf(buf + pos, bufSize - pos,
+                   ",\"x\":%d,\"y\":%d,\"buttons\":%lu}",
+                   gInputCache.joyX, gInputCache.joyY,
+                   (unsigned long)gInputCache.buttons);
+  if (n < 0 || (size_t)n >= bufSize - pos) return 0;
+  return pos + n;
 }
 
 void inputTask(void* parameter) {

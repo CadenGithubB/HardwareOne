@@ -288,12 +288,24 @@ int anoEncoderConsumeOneDetent() {
 int anoEncoderBuildDataJSON(char* buf, size_t bufSize) {
   if (!buf || bufSize == 0) return 0;
   SensorCacheGuard g(gAnoEncoderCache.mutex, pdMS_TO_TICKS(50), "ano.buildJSON");
-  if (!g.held) return 0;
-  return snprintf(buf, bufSize,
-                  "{\"val\":1,\"pos\":%ld,\"axis\":%u,\"buttons\":%lu}",
-                  (long)gAnoEncoderCache.encoderPosition,
-                  (unsigned)gAnoEncoderCache.currentAxis,
-                  (unsigned long)gAnoEncoderCache.buttons);
+  if (!g.held) {
+    // Cache-lock timeout: not-ready envelope (was: return 0 / no output).
+    int pos = sensorEnvelopeBegin(buf, bufSize, false, gAnoEncoderConnected, 0);
+    if (pos == 0) return 0;
+    int n = snprintf(buf + pos, bufSize - pos, ",\"pos\":0,\"axis\":0,\"buttons\":0}");
+    if (n < 0 || (size_t)n >= bufSize - pos) return 0;
+    return pos + n;
+  }
+
+  int pos = sensorEnvelopeBegin(buf, bufSize, gAnoEncoderCache.dataValid, gAnoEncoderConnected, gAnoEncoderCache.lastUpdate);
+  if (pos == 0) return 0;
+  int n = snprintf(buf + pos, bufSize - pos,
+                   ",\"pos\":%ld,\"axis\":%u,\"buttons\":%lu}",
+                   (long)gAnoEncoderCache.encoderPosition,
+                   (unsigned)gAnoEncoderCache.currentAxis,
+                   (unsigned long)gAnoEncoderCache.buttons);
+  if (n < 0 || (size_t)n >= bufSize - pos) return 0;
+  return pos + n;
 }
 
 // ============================================================================

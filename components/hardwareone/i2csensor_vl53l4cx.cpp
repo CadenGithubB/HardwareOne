@@ -529,43 +529,46 @@ int tofBuildDataJSON(char* buf, size_t bufSize) {
     if (!gTofCache.tofDataValid) {
       DEBUG_TOF_POLLINGF("tofBuildDataJSON: tofDataValid=%s, gTofEnabled=%d, gTofConnected=%d, lastUpdate=%lu",
                    "false", gTofEnabled ? 1 : 0, gTofConnected ? 1 : 0, gTofCache.tofLastUpdate);
-      pos = snprintf(buf, bufSize, "{\"error\":\"ToF sensor not ready\"}");
+      // Not-ready reading: uniform envelope with valid=false + empty object list
+      // (replaces the old {"error":"ToF sensor not ready"} shape).
+      pos = sensorEnvelopeBegin(buf, bufSize, false, gTofConnected, gTofCache.tofLastUpdate);
+      if (pos == 0) return 0;
+      pos += snprintf(buf + pos, bufSize - pos, ",\"objects\":[]}");
       return pos;
     }
 
-    // Build JSON response from cached data
-    pos = snprintf(buf, bufSize, "{\"objects\":[");
+    // Valid reading: shared envelope opening, then ToF's own object list + counts.
+    // ts now carries the timestamp, so the old top-level "timestamp" key is gone.
+    pos = sensorEnvelopeBegin(buf, bufSize, true, gTofConnected, gTofCache.tofLastUpdate);
+    if (pos == 0) return 0;
+    pos += snprintf(buf + pos, bufSize - pos, ",\"objects\":[");
 
+    // Emit ONLY detected objects (variable-length). Presence in the array IS the
+    // detection, so per-object "detected" is redundant and dropped; "distance_cm"
+    // (=mm/10) and the top-level "total_objects"/"seq" are dropped too — the `id`
+    // (1-4) identifies which target slot.
+    bool first = true;
     for (int j = 0; j < 4; j++) {
-      if (j > 0) {
-        pos += snprintf(buf + pos, bufSize - pos, ",");
-      }
-
-      // Build each object's JSON
-      if (gTofCache.tofObjects[j].detected) {
-        pos += snprintf(buf + pos, bufSize - pos,
-                        "{\"id\":%d,\"detected\":true,\"distance_mm\":%d,\"distance_cm\":%.1f,\"status\":%d,\"valid\":%s}",
-                        j + 1,
-                        gTofCache.tofObjects[j].distance_mm,
-                        gTofCache.tofObjects[j].distance_cm,
-                        gTofCache.tofObjects[j].status,
-                        gTofCache.tofObjects[j].valid ? "true" : "false");
-      } else {
-        pos += snprintf(buf + pos, bufSize - pos,
-                        "{\"id\":%d,\"detected\":false,\"distance_mm\":null,\"distance_cm\":null,\"status\":null,\"valid\":false}",
-                        j + 1);
-      }
+      if (pos < 0 || (size_t)pos >= bufSize) break;  // buffer full — stop before bufSize-pos underflows
+      if (!gTofCache.tofObjects[j].detected) continue;
+      pos += snprintf(buf + pos, bufSize - pos,
+                      "%s{\"id\":%d,\"distance_mm\":%d,\"status\":%d,\"valid\":%s}",
+                      first ? "" : ",", j + 1,
+                      gTofCache.tofObjects[j].distance_mm,
+                      gTofCache.tofObjects[j].status,
+                      gTofCache.tofObjects[j].valid ? "true" : "false");
+      first = false;
     }
 
-    // Add footer with metadata
-    pos += snprintf(buf + pos, bufSize - pos,
-                    "],\"total_objects\":%d,\"seq\":%lu,\"timestamp\":%lu}",
-                    gTofCache.tofTotalObjects,
-                    (unsigned long)gTofCache.tofSeq,
-                    gTofCache.tofLastUpdate);
+    if (pos >= 0 && (size_t)pos < bufSize) {
+      pos += snprintf(buf + pos, bufSize - pos, "]}");
+    }
   } else {
-    // Timeout - return error response
-    pos = snprintf(buf, bufSize, "{\"error\":\"ToF cache timeout\"}");
+    // Cache timeout: can't read the cache under lock, so ts=0 (unknown) + valid=false
+    // (replaces the old {"error":"ToF cache timeout"} shape).
+    pos = sensorEnvelopeBegin(buf, bufSize, false, gTofConnected, 0);
+    if (pos == 0) return 0;
+    pos += snprintf(buf + pos, bufSize - pos, ",\"objects\":[],\"total_objects\":0}");
   }
 
   return pos;

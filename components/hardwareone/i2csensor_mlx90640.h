@@ -81,6 +81,9 @@ bool thermalPoll();
 
 // JSON building
 int thermalBuildDataJSON(char* buf, size_t bufSize);
+// Compact SUMMARY reading (min/avg/max scene temp) on the shared sensor envelope.
+// The full 768-px frame stays on thermalBuildDataJSON / the ESP-NOW frame channel.
+int thermalBuildSummaryJSON(char* buf, size_t bufSize);
 
 // Thermal interpolation (defined in thermal_sensor.cpp)
 void thermalInterpolateFrame(const float* src, float* dst, int targetWidth, int targetHeight);
