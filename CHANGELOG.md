@@ -8,6 +8,13 @@ Entries for 0.96.1 and earlier were backfilled from git history (this repo had
 no tags or releases before 0.96.2); they are terse, commit-grounded summaries,
 dated from each version's commit. Dates are YYYY-MM-DD.
 
+## [0.96.3] - 2026-07-01
+Small CLI fixes: imagesend needs an explicit path, and espnowbroadcast flags no-peers as an error.
+### Changed
+- `imagesend <device> "<path>"` now requires an explicit path (removed the implicit "send the most recent image").
+### Fixed
+- `espnowbroadcast` with no paired devices now returns an `Error:` message instead of a plain string.
+
 ## [0.96.2] - 2026-06-28
 CLI self-documentation: the built-in `help` now describes every module and command accurately.
 ### Added

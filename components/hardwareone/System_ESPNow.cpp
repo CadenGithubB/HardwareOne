@@ -11816,7 +11816,7 @@ const char* cmd_espnow_broadcast(const String& argsInput) {
   int failed = result ? 0 : 1;
 
   if (sent == 0 && failed == 0) {
-    return "No paired devices to broadcast to";
+    return "Error: No paired devices to broadcast to";
   }
 
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";

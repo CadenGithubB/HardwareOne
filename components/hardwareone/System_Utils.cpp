@@ -2891,8 +2891,8 @@ static const CommandModule gCommandModules[] = {
     "capture simply fails. images lists saved photos with sizes and storage stats (add "
     "sd to list the card, json for app/BLE output); imagedelete \"<path>\" removes one "
     "(path must be quoted). imagesend transmits a photo to another device over ESP-NOW: "
-    "imagesend <device> [\"<path>\"] resolves the device by name or MAC and sends the "
-    "named file, or, when no path is given, sends the most recent LittleFS image.", imageCommands,        imageCommandsCount, 0, nullptr },
+    "imagesend <device> \"<path>\" resolves the device by name or MAC and sends the "
+    "named file (path required).", imageCommands,        imageCommandsCount, 0, nullptr },
 #endif
 #if ENABLE_MAPS
   { "map",        "Map navigation and waypoints", "On-device offline map subsystem backed by region map files stored under /maps/ "

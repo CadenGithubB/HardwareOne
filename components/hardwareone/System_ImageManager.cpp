@@ -616,29 +616,17 @@ const char* cmd_imagedelete(const String& argsInput) {
 const char* cmd_imagesend(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  // Parse: <device> <path>
-  // Or: <device> (sends most recent image)
-  
+  // Parse: <device> "<path>"  (both required — no implicit "send most recent")
+
   CommandArgs a(argsInput);
-  if (a.count() == 0) {
-    return "Error: invalid arguments — Usage: imagesend <device> [path]";
-  }
-
-  String device, path;
-
   if (!a.has(1)) {
-    device = a.arg(0);
-    // Get most recent image
-    std::vector<ImageInfo> images = gImageManager.listImages(IMAGE_STORAGE_LITTLEFS);
-    if (images.empty()) {
-      return "No images to send";
-    }
-    path = images.back().fullPath;
-  } else {
-    device = a.arg(0);
-    const char* qerr = requireQuotedToken(a, 1, path);
-    if (qerr) return qerr;
+    return "Error: invalid arguments — Usage: imagesend <device> \"<path>\"";
   }
+
+  String device = a.arg(0);
+  String path;
+  const char* qerr = requireQuotedToken(a, 1, path);
+  if (qerr) return qerr;
 
   // Use ESP-NOW file send (stubs return false when ESP-NOW disabled)
   uint8_t mac[6];
@@ -664,7 +652,7 @@ extern const CommandEntry imageCommands[] = {
   {"capture", "Capture and save image: capture [littlefs|sd|both]", false, cmd_capture, "Usage: capture [littlefs|lfs|sd|both]"},
   {"images", "List saved images: images [littlefs|sd]", false, cmd_images, "Usage: images [sd] [json]"},
   {"imagedelete", "Delete image: imagedelete \"<path>\"", true, cmd_imagedelete, "Usage: imagedelete \"<path>\""},
-  {"imagesend", "Send image via ESP-NOW: imagesend <device> [\"<path>\"] (async send; arrives on the peer, no local result)", false, cmd_imagesend, "Usage: imagesend <device> [\"<path>\"]\n       Returns 'Sending <path> to <device>' on dispatch; the image is written to the peer's /espnow/received/ inbox - no completion status returns to the sender."},
+  {"imagesend", "Send image via ESP-NOW: imagesend <device> \"<path>\" (async send; arrives on the peer, no local result)", false, cmd_imagesend, "Usage: imagesend <device> \"<path>\"\n       Returns 'Sending <path> to <device>' on dispatch; the image is written to the peer's /espnow/received/ inbox - no completion status returns to the sender."},
 };
 
 extern const size_t imageCommandsCount = sizeof(imageCommands) / sizeof(imageCommands[0]);
