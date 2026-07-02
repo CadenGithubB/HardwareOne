@@ -215,7 +215,7 @@ endif()
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
-set(PROJECT_VER "0.96.2")
+set(PROJECT_VER "0.96.3")
 project(hardwareone-idf)
 
 # Add board-specific defines based on target (must be AFTER project())
