@@ -165,7 +165,7 @@ static void cameraDimsForFramesize(framesize_t fs, int& w, int& h) {
 static char* cameraStatusBuffer = nullptr;
 static const size_t kStatusBufSize = 512;
 
-bool initCamera() {
+bool initCamera(bool isRecovery) {
   DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] ========== initCamera() ENTRY ==========");
   DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] gCameraEnabled=%d cameraConnected=%d", gCameraEnabled, cameraConnected);
   DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Heap free: %u, PSRAM free: %u", esp_get_free_heap_size(), heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
@@ -460,6 +460,7 @@ bool initCamera() {
     cameraConnected = false;
     gCameraEnabled = false;
     unlockCameraMutex();
+    logSystemEvent("CAM", "camera init FAILED: 0x%x (%s)", err, cameraErrorToString(err));
     return false;
   }
   
@@ -633,6 +634,19 @@ bool initCamera() {
   DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Final heap: %u, PSRAM: %u", esp_get_free_heap_size(), heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
   INFO_CAMERAF("Initialized: %s (%dx%d)", cameraModel, cameraWidth, cameraHeight);
   unlockCameraMutex();
+  // Durable lifecycle event — skipped for per-frame recovery re-inits (isRecovery)
+  // so a glitchy camera doesn't log "online" every few seconds during a stream.
+  // A NULL sensor handle means esp_camera_init() succeeded but sensor config was
+  // skipped (framesize/quality/format not applied) — report that honestly rather
+  // than claiming a clean start.
+  if (!isRecovery) {
+    if (s) {
+      logSystemEvent("CAM", "camera online: %s (%dx%d)", cameraModel, cameraWidth, cameraHeight);
+    } else {
+      logSystemEvent("CAM", "camera online but DEGRADED — sensor handle NULL, config not applied (%dx%d)",
+                     cameraWidth, cameraHeight);
+    }
+  }
   return true;
 }
 
@@ -701,7 +715,7 @@ uint8_t* captureFrame(size_t* outLen) {
 
     stopCamera();
     vTaskDelay(pdMS_TO_TICKS(150));
-    bool ok = initCamera();
+    bool ok = initCamera(/*isRecovery=*/true);
     if (ok) {
       fb = esp_camera_fb_get();
     }

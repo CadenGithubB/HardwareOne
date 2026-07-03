@@ -103,6 +103,7 @@ void g2BuildPowerInfo(char* out, size_t cap) {
 
 static void doRestart() {
   g2ShowText("Restarting...");
+  logSystemEvent("REBOOT", "restart requested from G2 glasses power menu");
   // Give the BLE notify task time to deliver the CREATE-text and let the
   // lens paint it before we yank power. 800 ms covers the worst-case
   // single-fragment swap latency observed on 2.2.0.242.

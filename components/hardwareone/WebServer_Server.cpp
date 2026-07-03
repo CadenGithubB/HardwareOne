@@ -4891,11 +4891,13 @@ void startHttpServer() {
 
         goto register_handlers;
       } else {
+        logSystemEvent("HTTP", "HTTPS requested but falling back to plain HTTP (ssl_start failed)");
         broadcastOutput("WARNING: HTTPS failed to start, falling back to HTTP");
         sHttpsCertData = "";
         sHttpsKeyData = "";
       }
     } else {
+      logSystemEvent("HTTP", "HTTPS requested but falling back to plain HTTP (certs missing)");
       broadcastOutput("WARNING: HTTPS enabled but certs not found, falling back to HTTP");
     }
   }
@@ -4924,7 +4926,9 @@ void startHttpServer() {
     config.recv_wait_timeout = 30;  // 30 second timeout for large uploads
     config.send_wait_timeout = 30;  // 30 second timeout for large responses
     // Note: max header length is set via CONFIG_HTTPD_MAX_REQ_HDR_LEN in sdkconfig
-    if (httpd_start(&server, &config) != ESP_OK) {
+    esp_err_t httpStartErr = httpd_start(&server, &config);
+    if (httpStartErr != ESP_OK) {
+      logSystemEvent("HTTP", "web server FAILED to start: %s (err=%d)", esp_err_to_name(httpStartErr), (int)httpStartErr);
       broadcastOutput("ERROR: Failed to start HTTP server");
       return;
     }
@@ -5103,6 +5107,11 @@ register_handlers:
   gOutputFlags |= OUTPUT_WEB;
   
   broadcastOutput(gServerIsHttps ? "HTTPS server started" : "HTTP server started");
+  // Positive counterpart to the HTTPS-fallback / start-failed events above:
+  // records the security posture the server ACTUALLY came up with, so a silent
+  // HTTPS->HTTP downgrade is visible as EVENT log context, not just its warning.
+  logSystemEvent("HTTP", "web server started (%s on port %d)",
+                 gServerIsHttps ? "HTTPS" : "plain HTTP", gServerIsHttps ? 443 : 80);
 }
 
 // Web Mirror Buffer moved to WebCore_Utils.cpp

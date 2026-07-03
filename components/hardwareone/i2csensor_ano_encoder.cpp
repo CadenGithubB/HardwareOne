@@ -645,12 +645,14 @@ void inputTask(void* parameter) {
           if (i2cShouldAutoDisable(anoI2cAddr())) {
             ERROR_ANO_ENCODERF("[ANO_TASK] Too many failures - auto-disabling");
             handleDeviceStopped(I2C_DEVICE_INPUT);
+            logSystemEvent("SENSOR", "ANO Encoder auto-disabled after %u consecutive I2C failures", errors);
           }
         } else {
           consecutiveInvalidReads++;
           if (consecutiveInvalidReads >= INVALID_READ_AUTO_DISABLE_THRESHOLD) {
             ERROR_ANO_ENCODERF("[ANO_TASK] %u invalid reads - auto-disabling", consecutiveInvalidReads);
             handleDeviceStopped(I2C_DEVICE_INPUT);
+            logSystemEvent("SENSOR", "ANO Encoder auto-disabled after %u consecutive invalid reads (device likely disconnected)", consecutiveInvalidReads);
           }
         }
         lastRead = nowMs;

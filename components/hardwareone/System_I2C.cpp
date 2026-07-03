@@ -1528,7 +1528,7 @@ const char* cmd_devices(const String& originalCmd) {
   // Structured path (output contract): machine-readable device list, returned
   // as one verbatim JSON blob via the return value. No broadcastOutput; no
   // Arduino String (DRAM) — serialize into a persistent PSRAM buffer.
-  // Schema: {"v":1,"count":N,"devices":[{"name","addr","bus"}, ...]}
+  // Schema: {"schema":1,"hint":"...","devices":[{"name","addr","bus"}, ...],"count":N}
   if (argWantsJson(originalCmd)) {
     PSRAM_JSON_DOC(doc);
     doc["schema"] = 1;
@@ -1704,7 +1704,7 @@ static void addSensorEntry(JsonArray& arr, const char* id, const char* name,
   }
 }
 
-// {"v":1,"seq":N,"sensors":[...]} — only sensors compiled into this build appear.
+// {"schema":1,"seq":N,"brief":BOOL,"sensors":[...]} — only sensors compiled into this build appear.
 // `enabled` is the LIVE running flag (g<X>Enabled) — so the app's power toggle,
 // which sends open<id>/close<id>, reflects reality. (Auto-start-on-boot is a
 // SEPARATE persisted knob, surfaced in `controls json` as <id>AutoStart, NOT
@@ -2940,6 +2940,10 @@ static bool isSensorAvailableForAutoStart(const char* moduleName, I2CDeviceType 
     INFO_I2C_AUTOSTARTF("[AutoStart] %s not in registry but responds to I2C ping", moduleName);
     return true;
   }
+  // Reached only when the sensor's autostart flag is set (every caller gates on
+  // it), so a false return here means "enabled in settings but not detected" —
+  // durable so a silently-absent sensor is attributable after reboot.
+  logSystemEvent("SENSOR", "%s autostart skipped: enabled in settings but not detected on I2C bus", moduleName);
   return false;
 }
 

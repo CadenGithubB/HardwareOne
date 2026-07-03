@@ -2001,7 +2001,10 @@ const char* cmd_testpassword(const String& argsInput) {
 const char* cmd_reboot(const String& originalCmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   broadcastOutput("Rebooting system...");
-  delay(100);  // Allow message to be sent
+  // Durable record so the next boot is attributable: a BOOT event with no
+  // preceding REBOOT event = power cut or crash, not a commanded restart.
+  logSystemEvent("REBOOT", "commanded restart (reboot) by '%s'", currentExecUser().c_str());
+  delay(300);  // Allow the queued output + EVENT line to flush to disk first
   ESP.restart();
   return "[System] Rebooting";  // Won't actually return due to restart
 }
@@ -2086,6 +2089,8 @@ static const char* factoryreset_confirmed(void* /*userData*/) {
   };
   esp_timer_create(&timerArgs, &timer);
   esp_timer_start_once(timer, 1000ULL * 1000ULL);  // 1 s expressed in microseconds
+
+  logSystemEvent("SETUP", "factory reset — %s deleted; rebooting to setup wizard", USERS_JSON_FILE);
 
   snprintf(respBuf, sizeof(respBuf),
            "Factory reset complete. %s deleted. Rebooting in 1 second to start setup wizard...",
@@ -2237,6 +2242,11 @@ bool syncNTPAndResolve() {
   broadcastOutput("  Contacting NTP server, please wait...");
 
   bool ntpSynced = false;
+  // Capture the pre-sync clock so we can detect a large NTP *step*. If the
+  // clock was already seeded to a plausible wall-clock value (RTC early-sync at
+  // boot) and NTP then moves it by a lot, that gap is RTC drift / a dead RTC
+  // battery — and it silently corrupts the meaning of every other timestamp.
+  const time_t preSyncTime = time(nullptr);
   // SNTP startup delay is now CONFIG_LWIP_SNTP_MAXIMUM_STARTUP_DELAY=100 ms,
   // and DHCP-provided NTP servers (router-local, RTT ~1 ms) win when present.
   // 100 ms polling cadence catches the response within one iteration on a
@@ -2270,6 +2280,19 @@ bool syncNTPAndResolve() {
                       timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday,
                       timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
       logTimeSyncedMarkerIfReady();
+      // Only meaningful if the RTC had already seeded a plausible time before
+      // NTP ran (year >= 2024). A cold boot with epoch-0 clock is an expected
+      // first-set, not a "step". Threshold at ~2 min so ordinary sub-second
+      // corrections stay silent.
+      {
+        const time_t postSyncTime = time(nullptr);
+        if (preSyncTime > 1704067200 /* 2024-01-01 */) {
+          long stepSec = (long)(postSyncTime - preSyncTime);
+          if (stepSec > 120 || stepSec < -120) {
+            logSystemEvent("TIME", "clock stepped %+lds by NTP while already set — check RTC battery/drift", stepSec);
+          }
+        }
+      }
       ntpSynced = true;
       break;
     }

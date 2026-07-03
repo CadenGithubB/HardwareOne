@@ -1,6 +1,7 @@
 #include "System_VFS.h"
 #include <esp_attr.h>
 
+#include "System_AuthIdentity.h"  // currentExecUser (event log attribution)
 #include "System_BuildConfig.h"
 #include "System_Command.h"
 #include "System_Debug.h"
@@ -293,6 +294,8 @@ void noteSDWriteFailure(const char* hint) {
   if (gSdWritable) {
     WARN_STORAGEF("[SD] Write failure reported (%s); marking card not writable",
                   hint ? hint : "unspecified");
+    logSystemEvent("SD", "SD write failure (hint=%s) — card marked not writable",
+                   hint ? hint : "unspecified");
   }
   gSdWritable = false;
 }
@@ -580,6 +583,10 @@ bool resolveOverflowPath(const char* primaryPath, size_t reserveBytes,
         gLogOverflowWarned = true;
         WARN_SYSTEMF("[LOG] LittleFS low on free space (%u < %u bytes); new log writes will route to SD overflow",
                      (unsigned)gLogFreeCheckCached, (unsigned)want);
+        logSystemEvent("FS", "LittleFS free below reserve (%u < %u bytes) — log writes latched to SD overflow (SD mounted: %s%s)",
+                       (unsigned)gLogFreeCheckCached, (unsigned)want,
+                       isSDAvailable() ? "yes" : "no",
+                       isSDAvailable() ? "" : "; log data may be dropped");
       }
     }
   }
@@ -959,6 +966,7 @@ static const char* cmd_sdformat(const String& argsInput) {
   
   if (VFS::formatSD()) {
     snprintf(buf, sizeof(buf), "SD card formatted successfully as FAT32 and mounted at /sd");
+    logSystemEvent("SD", "SD card formatted by '%s' — ALL card data erased", currentExecUser().c_str());
   } else {
     snprintf(buf, sizeof(buf), "ERROR: Failed to format SD card. Ensure card is inserted properly.");
   }

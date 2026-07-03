@@ -9,6 +9,7 @@
 
 #include "System_Notifications.h"
 #include "System_BuildConfig.h"
+#include "System_Debug.h"  // logSystemEvent — durable sensor lifecycle record
 
 #if ENABLE_OLED_DISPLAY
 #include "OLED_UI.h"
@@ -437,6 +438,14 @@ void notifySensorStarted(const char* sensorName, bool success) {
     success ? PairingRibbonIcon::SUCCESS : PairingRibbonIcon::ERROR_ICON, 1500);
   #endif
   notifyWeb(success ? "success" : "error", msg, 1500);
+  // Durable per-sensor lifecycle line: at boot this becomes a manifest of what
+  // came up vs. what was configured-but-failed. The OLED/web toasts above are
+  // transient; this survives a reboot. The failure cause is left unqualified
+  // here — this funnel serves both I2C sensors and non-I2C pseudo-sensors (e.g.
+  // "Logging", which fails on disk space, not detection) — callers that know the
+  // cause emit their own more specific event (e.g. [EVENT][LOG]).
+  logSystemEvent("SENSOR", "%s %s", sensorName ? sensorName : "sensor",
+                 success ? "online" : "start FAILED");
 }
 
 void notifySensorStopped(const char* sensorName) {

@@ -776,6 +776,13 @@ static void publishMeshPeerSensorData() {
 // MQTT Event Handler
 // ============================================================================
 
+// Timestamp of the last successful broker connect; nonzero means "was connected".
+// Gates the [EVENT] disconnect log to once per transition — esp-mqtt retries every
+// ~10s and fires DISCONNECTED per failed attempt, and MQTT_EVENT_ERROR clears
+// mqttTofConnected before DISCONNECTED on live-connection drops, so the flag alone
+// isn't a reliable was-connected signal at DISCONNECTED time.
+static uint32_t sMqttConnectedAtMs = 0;
+
 static void mqtt_event_handler(void* handler_args, esp_event_base_t base, int32_t event_id, void* event_data) {
   esp_mqtt_event_handle_t event = (esp_mqtt_event_handle_t)event_data;
   
@@ -785,6 +792,8 @@ static void mqtt_event_handler(void* handler_args, esp_event_base_t base, int32_
       lastError = "";
       broadcastOutput("[MQTT] Connected to broker");
       INFO_MQTT_CONNECTIONF("Connected to %s:%d", gSettings.mqttHost.c_str(), gSettings.mqttPort);
+      sMqttConnectedAtMs = millis();
+      logSystemEvent("MQTT", "connected to broker %s:%d", gSettings.mqttHost.c_str(), gSettings.mqttPort);
       
       // Publish availability
       if (gSettings.mqttBaseTopic.length() > 0) {
@@ -803,6 +812,11 @@ static void mqtt_event_handler(void* handler_args, esp_event_base_t base, int32_
       break;
       
     case MQTT_EVENT_DISCONNECTED:
+      if (sMqttConnectedAtMs != 0) {
+        logSystemEvent("MQTT", "broker connection lost (was connected %lus)",
+                       (unsigned long)((millis() - sMqttConnectedAtMs) / 1000));
+        sMqttConnectedAtMs = 0;
+      }
       mqttTofConnected = false;
       WARN_MQTTF("Disconnected from broker");
       break;

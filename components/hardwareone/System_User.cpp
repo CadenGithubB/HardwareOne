@@ -893,7 +893,10 @@ static const char* setUserBanInternal(const String& username, bool ban, const St
     if (!found) return "Error: User not found";
 
     File wf = VFS::openGuarded(USERS_JSON_FILE, "w", VFS::systemAuth("user.setBan"));
-    if (!wf) return "Error: Failed to write users.json";
+    if (!wf) {
+      logSystemEvent("USERS", "users.json REWRITE FAILED during %s of '%s' — auth database may be inconsistent", ban ? "ban" : "unban", username.c_str());
+      return "Error: Failed to write users.json";
+    }
     serializeJson(doc, wf);
     wf.close();
   }
@@ -1257,6 +1260,7 @@ bool approvePendingUserInternal(const String& username, String& errorOut) {
     file.close();
 
     if (written == 0) {
+      logSystemEvent("USERS", "users.json REWRITE FAILED during approve of '%s' — auth database may be inconsistent", username.c_str());
       errorOut = "Failed to write users.json";
       return false;
     }
@@ -1282,6 +1286,9 @@ bool approvePendingUserInternal(const String& username, String& errorOut) {
   // what." Approval is when the account first matters. See
   // System_AuthIdentity.h for the full bump-site list.
   bumpIdentityGeneration("user.approve");
+  // [EVENT] Covers BOTH the CLI and the web approve path (the web POST
+  // bypasses the command audit, so this is the single source of truth).
+  logSystemEvent("USERS", "user '%s' approved (id=%lu)", username.c_str(), (unsigned long)createdUserId);
   BROADCAST_PRINTF("[admin] Approved user: %s", username.c_str());
 
   // If NTP already synced, resolve the creation timestamp immediately
@@ -1719,6 +1726,7 @@ static bool deleteUserInternal(const String& username, String& errorOut) {
     return false;
   }
   if (!writeTextAtomic(USERS_JSON_FILE, json)) {
+    logSystemEvent("USERS", "users.json REWRITE FAILED during delete of '%s' — auth database may be inconsistent", username.c_str());
     errorOut = "Failed to write users.json";
     return false;
   }

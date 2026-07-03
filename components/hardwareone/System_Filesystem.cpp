@@ -53,15 +53,18 @@ bool initFilesystem() {
   // Configure LittleFS using ESP-IDF native API (bypasses Arduino wrapper issues)
   if (!LittleFS.begin(false, "/littlefs", 10, "littlefs")) {
     ESP_LOGW("FS", "LittleFS mount failed; formatting and retrying");
+    logSystemEvent("FS", "LittleFS mount FAILED — formatting data partition (ALL files erased)");
 
     if (!LittleFS.format()) {
       ESP_LOGE("FS", "LittleFS format failed");
+      logSystemEvent("FS", "LittleFS format FAILED — filesystem unavailable this boot");
       filesystemReady = false;
       return false;
     }
 
     if (!LittleFS.begin(false, "/littlefs", 10, "littlefs")) {
       ESP_LOGE("FS", "LittleFS mount failed after format");
+      logSystemEvent("FS", "LittleFS mount FAILED after format — filesystem unavailable this boot");
       filesystemReady = false;
       return false;
     }
@@ -86,6 +89,7 @@ bool initFilesystem() {
   cleanupLogOrphan(LOG_FAIL_FILE);
   cleanupLogOrphan(LOG_I2C_FILE);
   cleanupLogOrphan(LOG_ERROR_FILE);
+  cleanupLogOrphan(LOG_EVENTS_FILE);
 
 #if ENABLE_CAMERA_SENSOR
   // Initialize ImageManager now that filesystem is ready (creates photos folder)
@@ -139,6 +143,8 @@ bool initFilesystem() {
           fullPath += name;
           VFS::removeGuarded(fullPath.c_str(), sys);
           ESP_LOGI("FS", "Cleaned orphaned temp file: %s", fullPath.c_str());
+          logSystemEvent("FS", "removed orphaned temp file %s (interrupted write on a previous boot)",
+                         fullPath.c_str());
           cleaned++;
         }
         entry = d.openNextFile();
@@ -161,6 +167,7 @@ bool initFilesystem() {
         content.trim();
         if (content.length() > 0 && content[0] != '{' && content[0] != '[') {
           ESP_LOGW("FS", "%s appears corrupt (not valid JSON), removing", path);
+          logSystemEvent("FS", "%s failed boot JSON check — DELETED", path);
           VFS::removeGuarded(path, sys);
         }
       }

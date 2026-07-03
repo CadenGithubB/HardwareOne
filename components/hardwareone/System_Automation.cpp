@@ -97,6 +97,30 @@ static void queueAutomationSubCommand(const char* cmd, const char* owner, const 
   }
   if (!submitCommandAsync(uc, nullptr, nullptr)) {
     DEBUGF(DEBUG_AUTOMATIONS, "[autos] FAILED to queue sub-command: %s", cmd);
+    // Durable: a scheduled automation silently half-ran — one of its commands
+    // never reached cmd_exec (queue full). Attribute to the automation so it's
+    // clear which scheduled run was truncated. Rate-limited: one automation
+    // dispatches its whole command list at once and a wedged cmd_exec (or a
+    // sub-second interval trigger) can drop many per pass — cap to one durable
+    // line per 5 s and fold the suppressed count into it so a flood can't churn
+    // system-events.log.
+    static uint32_t sLastDropLogMs = 0;
+    static uint32_t sDropsSuppressed = 0;
+    uint32_t nowMs = millis();
+    if (sLastDropLogMs == 0 || (nowMs - sLastDropLogMs) >= 5000) {
+      if (sDropsSuppressed > 0) {
+        logSystemEvent("AUTO", "sub-command DROPPED (exec queue full) in automation '%s': %s (+%lu more since last)",
+                       (autoName && autoName[0]) ? autoName : "?", cmd ? cmd : "?",
+                       (unsigned long)sDropsSuppressed);
+      } else {
+        logSystemEvent("AUTO", "sub-command DROPPED (exec queue full) in automation '%s': %s",
+                       (autoName && autoName[0]) ? autoName : "?", cmd ? cmd : "?");
+      }
+      sLastDropLogMs = nowMs;
+      sDropsSuppressed = 0;
+    } else {
+      sDropsSuppressed++;
+    }
   } else {
     DEBUGF(DEBUG_AUTOMATIONS, "[autos] Queued sub-command: %s", cmd);
   }

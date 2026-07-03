@@ -155,6 +155,9 @@ void helpSuppressedTailDump() {
 // Forward declaration (definition with I2C helpers below)
 static String buildTimestampPrefix();
 
+// Forward declaration (definition with logSystemEvent below)
+static void flushPreInitEvents();
+
 // Debug output task - single writer for all debug messages
 static TaskHandle_t gDebugOutputTaskHandle = nullptr;
 
@@ -276,6 +279,15 @@ void debugOutputTask(void* parameter) {
           lastErrText[sizeof(lastErrText) - 1] = '\0';
           lastErrTimeMs = now;
         }
+      }
+
+      // System-event ring (always, independent of routing — [EVENT] lines are
+      // the always-on lifecycle record; see logSystemEvent()). Low volume by
+      // design (discrete decisions, not polling), so no dedupe window needed.
+      if (filesystemReady && strncmp(msg->text, "[EVENT]", 7) == 0) {
+        String line = buildTimestampPrefix();
+        line += msg->text;
+        appendLineWithCap(LOG_EVENTS_FILE, line, LOG_EVENTS_CAP);
       }
 
       // OLED console
@@ -540,6 +552,10 @@ void initDebugSystem() {
     }
   }
   
+  // Flush system events recorded before the queue existed (early boot:
+  // filesystem init, settings load) so they reach LOG_EVENTS_FILE.
+  flushPreInitEvents();
+
   DEBUG_SYSTEMF("Debug system initialized");
 }
 
@@ -636,6 +652,70 @@ void debugQueuePrintf(DebugFlagMask flag, const char* fmt, ...) {
   if (wn < 0) return;
   size_t llen = (wn < (int)sizeof(line)) ? (size_t)wn : (sizeof(line) - 1);
   enqueueChunk(line, llen, MSG_ROUTE_ALL, flag, wn >= (int)DEBUG_MSG_SIZE);
+}
+
+// ── System event log (always-on) ─────────────────────────────────────────────
+// logSystemEvent() records low-volume lifecycle decisions (boot, FS format,
+// settings load/save failures, WiFi connects) as "[EVENT][CAT] ..." lines,
+// independent of debug flags and log level. The output task tees every
+// [EVENT] line durably to LOG_EVENTS_FILE (see debugOutputTask). Events
+// emitted before initDebugSystem() — filesystem init, settings load — echo
+// to Serial immediately and are held here until the queue exists; the ring
+// keeps the FIRST N events (chronologically the boot record that matters).
+static const int    kPreInitEventSlots = 12;
+static const size_t kPreInitEventLen   = 192;
+EXT_RAM_BSS_ATTR static char gPreInitEvents[kPreInitEventSlots][kPreInitEventLen];
+static int gPreInitEventCount   = 0;
+static int gPreInitEventDropped = 0;
+
+void logSystemEvent(const char* category, const char* fmt, ...) {
+  if (!fmt) return;
+  char line[DEBUG_MSG_SIZE];
+  int hdr = snprintf(line, sizeof(line), "[EVENT][%s] ", category ? category : "SYS");
+  if (hdr < 0 || hdr >= (int)sizeof(line)) return;
+  va_list args;
+  va_start(args, fmt);
+  int wn = vsnprintf(line + hdr, sizeof(line) - hdr, fmt, args);
+  va_end(args);
+  if (wn < 0) return;
+  size_t llen = strnlen(line, sizeof(line) - 1);
+
+  if (gDebugOutputQueue && gDebugFreeQueue) {
+    enqueueChunk(line, llen, MSG_ROUTE_ALL | MSG_ROUTE_ALLOW_IN_HELP, 0,
+                 wn >= (int)(sizeof(line) - hdr));
+    return;
+  }
+
+  // Debug system not up yet (early boot): show it on serial now, keep a copy
+  // (with its true uptime) for the durable log once the queue exists.
+  Serial.printf("[%lu] %s\n", millis(), line);
+  if (gPreInitEventCount < kPreInitEventSlots) {
+    snprintf(gPreInitEvents[gPreInitEventCount], kPreInitEventLen,
+             "%s (+%lums)", line, millis());
+    gPreInitEventCount++;
+  } else {
+    gPreInitEventDropped++;
+  }
+}
+
+// Called at the end of initDebugSystem(): move early-boot events into the
+// queue so they reach LOG_EVENTS_FILE. They already printed to Serial at
+// emit time, so the flush routes everywhere except Serial (no duplicates).
+static void flushPreInitEvents() {
+  const uint8_t route = (MSG_ROUTE_ALL & ~MSG_ROUTE_SERIAL) | MSG_ROUTE_ALLOW_IN_HELP;
+  for (int i = 0; i < gPreInitEventCount; i++) {
+    enqueueChunk(gPreInitEvents[i], strnlen(gPreInitEvents[i], kPreInitEventLen - 1),
+                 route, 0, false);
+  }
+  if (gPreInitEventDropped > 0) {
+    char note[80];
+    int nn = snprintf(note, sizeof(note),
+                      "[EVENT][SYS] %d early-boot event(s) dropped (ring full)",
+                      gPreInitEventDropped);
+    if (nn > 0) enqueueChunk(note, (size_t)nn, route, 0, false);
+  }
+  gPreInitEventCount = 0;
+  gPreInitEventDropped = 0;
 }
 
 // ============================================================================
@@ -3136,6 +3216,7 @@ const char* LOG_OK_FILE = "/system/sys_logs/successful_login.log";              
 const char* LOG_FAIL_FILE = "/system/sys_logs/failed_login.log";                // ~680KB cap
 const char* LOG_I2C_FILE = "/system/sys_logs/i2c_errors.log";                   // 64KB cap
 const char* LOG_ERROR_FILE = "/system/sys_logs/errors.log";                      // LOG_ERROR_CAP
+const char* LOG_EVENTS_FILE = "/system/sys_logs/system-events.log";              // LOG_EVENTS_CAP
 
 void logToFile(const char* path, const String& line, size_t capBytes) {
   appendLineWithCap(path, line, capBytes);
@@ -3170,6 +3251,7 @@ void logTimeSyncedMarkerIfReady() {
   appendLineWithCap(LOG_FAIL_FILE, line, LOG_CAP_BYTES);
   appendLineWithCap(LOG_I2C_FILE, line, LOG_I2C_CAP);
   appendLineWithCap(LOG_ERROR_FILE, line, LOG_ERROR_CAP);
+  appendLineWithCap(LOG_EVENTS_FILE, line, LOG_EVENTS_CAP);
   
   gTimeSyncedMarkerWritten = true;
 
@@ -3206,6 +3288,30 @@ void logI2CError(uint8_t address, const char* deviceName, int consecutiveErrors,
   }
   
   appendLineWithCap(LOG_I2C_FILE, line, LOG_I2C_CAP);
+}
+
+// Always-on per-boot orientation divider. Unlike logTimeSyncedMarkerIfReady()
+// (which is gated on NTP/RTC producing a valid wall-clock time), this fires
+// unconditionally early in boot so EVERY log carries a "which boot am I looking
+// at" marker — even on an offline boot that never syncs time. Written to the
+// login / i2c / error logs; system-events.log is intentionally skipped because
+// it already gets the richer "[EVENT][BOOT] boot #N | reset=… | fw v…" line.
+// The timestamp is millis-based here (time isn't synced yet); the later
+// time-synced marker ties millis→wall-clock once NTP lands.
+void logBootAnchorToLogs(const char* resetReason) {
+  if (!filesystemReady) return;
+  extern uint32_t gBootCounter;
+
+  String line = buildTimestampPrefix();
+  line += "Device Powered On | boot #";
+  line += String((unsigned long)gBootCounter);
+  line += " | reset=";
+  line += resetReason ? resetReason : "?";
+
+  appendLineWithCap(LOG_OK_FILE, line, LOG_CAP_BYTES);
+  appendLineWithCap(LOG_FAIL_FILE, line, LOG_CAP_BYTES);
+  appendLineWithCap(LOG_I2C_FILE, line, LOG_I2C_CAP);
+  appendLineWithCap(LOG_ERROR_FILE, line, LOG_ERROR_CAP);
 }
 
 void logI2CRecovery(uint8_t address, const char* deviceName, int totalErrors) {
@@ -3247,6 +3353,7 @@ void systemLogAutoStart() {
   if (!f) {
     fsUnlock();
     broadcastOutput("[SYSTEM_LOG] Auto-start failed: Could not create file: " + filepath);
+    logSystemEvent("LOG", "debug-capture log autostart FAILED — could not create %s", filepath.c_str());
     return;
   }
   f.printf("# System log auto-started at %lu ms\n", millis());
@@ -3259,6 +3366,7 @@ void systemLogAutoStart() {
   gOutputFlags |= OUTPUT_FILE;
 
   broadcastOutput("[SYSTEM_LOG] Auto-start enabled, logging to: " + filepath);
+  logSystemEvent("LOG", "debug-capture log autostart OK → %s", filepath.c_str());
 }
 
 // ============================================================================

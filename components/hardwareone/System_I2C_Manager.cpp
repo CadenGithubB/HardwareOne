@@ -278,6 +278,9 @@ void I2CDeviceManager::initBus(uint8_t busIdx, int sdaPin, int sclPin, uint32_t 
   INFO_I2CF("Bus %u initialized: %s (SDA=%d, SCL=%d, %lu Hz)",
             busIdx, (busIdx == 0) ? "Wire1/I2C1" : "Wire/I2C2",
             sdaPin, sclPin, (unsigned long)hz);
+  logSystemEvent("I2C", "bus %u online: %s (SDA=%d SCL=%d @ %lu Hz)",
+                 busIdx, (busIdx == 0) ? "I2C1" : "I2C2",
+                 sdaPin, sclPin, (unsigned long)hz);
 }
 
 void I2CDeviceManager::initBuses() {
@@ -289,6 +292,8 @@ void I2CDeviceManager::initBuses() {
   } else {
     WARN_I2CF("Bus 0 pins not configured (sda=%d scl=%d) — primary I2C unavailable",
               sda0, scl0);
+    logSystemEvent("I2C", "bus 0 init FAILED (pins sda=%d scl=%d) — every device on the primary bus is unavailable",
+                   sda0, scl0);
   }
 
   // Bus 1 (secondary) — only when the user explicitly enabled it AND the
@@ -301,6 +306,10 @@ void I2CDeviceManager::initBuses() {
       WARN_I2CF("i2c2BusEnabled but pins invalid (sda=%d scl=%d) — bus 1 NOT initialized; "
                 "check I2C2 settings or use a board with a second port (e.g., FeatherS3[D])",
                 sda1, scl1);
+      // Symmetric with the bus-0 failure event: a user enabled I2C2 but its pins
+      // are invalid, so every device on the secondary bus is silently unavailable.
+      logSystemEvent("I2C", "bus 1 init FAILED (i2c2 enabled but pins sda=%d scl=%d invalid) — secondary bus unavailable",
+                     sda1, scl1);
     }
   }
 

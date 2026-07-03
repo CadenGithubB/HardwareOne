@@ -153,7 +153,8 @@ const char* fileSlotsGetPartPath(const FileTransferSlot* slot);
 enum StreamAppendResult : uint8_t {
   STREAM_APPEND_OK   = 0,  // chunk buffered (and a drain job submitted if a buffer filled)
   STREAM_APPEND_DUP  = 1,  // duplicate/old chunk — ignored
-  STREAM_APPEND_FAIL = 2,  // gap, backpressure, or error — transfer aborted (cleanup queued); caller should FILE_CANCEL
+  STREAM_APPEND_FAIL = 2,  // gap, backpressure, or error — transfer aborted THIS chunk (cleanup queued); caller should FILE_CANCEL and log once
+  STREAM_APPEND_ALREADY_FAILED = 3,  // slot was already aborting from an earlier chunk — caller should FILE_CANCEL but NOT re-log (avoids per-chunk durable-log flood)
 };
 // Append one in-order chunk to a streaming slot (runs on espnow_task). Self-
 // contained: on a full buffer it submits a cmd_exec drain job; on failure it marks

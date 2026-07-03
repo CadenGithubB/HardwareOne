@@ -647,6 +647,7 @@ void inputTask(void* parameter) {
             handleDeviceStopped(I2C_DEVICE_INPUT);
             DEBUG_INPUT_LIFECYCLEF("Gamepad auto-disabled: %u consecutive I2C failures", errors);
             sensorStatusBumpWith("gamepad@auto_disabled");
+            logSystemEvent("SENSOR", "Gamepad auto-disabled after %u consecutive I2C failures", errors);
           }
         } else {
           // I2C succeeded but data validation failed (garbage data during bus contention)
@@ -658,6 +659,7 @@ void inputTask(void* parameter) {
             ERROR_INPUTF("[GAMEPAD_TASK] %u consecutive invalid reads - auto-disabling gamepad", consecutiveInvalidReads);
             handleDeviceStopped(I2C_DEVICE_INPUT);
             sensorStatusBumpWith("gamepad@invalid_data_disabled");
+            logSystemEvent("SENSOR", "Gamepad auto-disabled after %u consecutive invalid reads (device likely disconnected)", consecutiveInvalidReads);
           }
         }
         lastGamepadRead = nowMs;

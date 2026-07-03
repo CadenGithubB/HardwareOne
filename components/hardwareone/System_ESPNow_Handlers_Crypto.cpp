@@ -279,14 +279,36 @@ void v4hKeyExHello(const V4RxCtx& ctx) {
                  "refusing overwrite — run 'espnowforget' or re-run 'espnowpairsecure'",
                  msg->senderMac[0], msg->senderMac[1], msg->senderMac[2],
                  msg->senderMac[3], msg->senderMac[4], msg->senderMac[5]);
+    // Event log is min-interval gated: repeated HELLOs from the same rogue
+    // sender must not flood the event stream.
+    static uint32_t sHelloConflictEventMs = 0;
+    uint32_t nowMs = millis();
+    if (sHelloConflictEventMs == 0 || (uint32_t)(nowMs - sHelloConflictEventMs) >= 60000UL) {
+      sHelloConflictEventMs = nowMs ? nowMs : 1;
+      logSystemEvent("ESPNOW", "SECURITY: peer %02X:%02X:%02X:%02X:%02X:%02X presented a DIFFERENT pubkey — identity overwrite refused",
+                     msg->senderMac[0], msg->senderMac[1], msg->senderMac[2],
+                     msg->senderMac[3], msg->senderMac[4], msg->senderMac[5]);
+    }
     confirmStatus = 2;
   } else {
     time_t now = time(nullptr);
     uint32_t bondedAt = (uint32_t)((now > 0) ? now : 0);
+    // Event-log gate: persist always rewrites the file (refreshes lastSeenSec),
+    // so a re-sent HELLO with the same key re-persists routinely. Only log the
+    // event when the stored identity actually changes (first pairing or an
+    // operator-authorized key replacement). Computed BEFORE persist mutates
+    // the slot `existing` points into.
+    bool identityNewOrReplaced = !existing ||
+        memcmp(existing->longTermPub, msg->senderPubEd25519, 32) != 0;
     if (!peerIdentityPersist(msg->senderMac, (uint8_t)meshSlot,
                              msg->senderPubEd25519, bondedAt)) {
       ERROR_ESPNOWF("KEY_EX_HELLO: identity persist failed; not replying");
       return;
+    }
+    if (identityNewOrReplaced) {
+      logSystemEvent("ESPNOW", "paired: new peer identity persisted %02X:%02X:%02X:%02X:%02X:%02X",
+                     msg->senderMac[0], msg->senderMac[1], msg->senderMac[2],
+                     msg->senderMac[3], msg->senderMac[4], msg->senderMac[5]);
     }
     logMac("KEY_EX_HELLO accepted from", msg->senderMac);
   }
@@ -356,6 +378,15 @@ void v4hKeyExReply(const V4RxCtx& ctx) {
   if (conflict) {
     WARN_ESPNOWF("KEY_EX_REPLY: peer presented new pubkey, refusing overwrite — "
                  "signaling reject (status=2). Run 'espnowforget' or re-run 'espnowpairsecure'.");
+    // Event log is min-interval gated — symmetric with the HELLO-side guard.
+    static uint32_t sReplyConflictEventMs = 0;
+    uint32_t nowMs = millis();
+    if (sReplyConflictEventMs == 0 || (uint32_t)(nowMs - sReplyConflictEventMs) >= 60000UL) {
+      sReplyConflictEventMs = nowMs ? nowMs : 1;
+      logSystemEvent("ESPNOW", "SECURITY: peer %02X:%02X:%02X:%02X:%02X:%02X presented a DIFFERENT pubkey — identity overwrite refused",
+                     msg->responderMac[0], msg->responderMac[1], msg->responderMac[2],
+                     msg->responderMac[3], msg->responderMac[4], msg->responderMac[5]);
+    }
     // Tell the responder we rejected them — symmetric with the HELLO-side
     // conflict path. The peer is already in our hw table (we sent the HELLO
     // that triggered this REPLY), but ensure it before sending defensively.
@@ -367,10 +398,21 @@ void v4hKeyExReply(const V4RxCtx& ctx) {
 
   time_t now = time(nullptr);
   uint32_t bondedAt = (uint32_t)((now > 0) ? now : 0);
+  // Event-log gate: only log when the stored identity actually changes (first
+  // pairing or authorized key replacement) — a duplicate REPLY re-persists the
+  // same key routinely (lastSeenSec refresh) and must not log. Computed BEFORE
+  // persist mutates the slot `existing` points into.
+  bool identityNewOrReplaced = !existing ||
+      memcmp(existing->longTermPub, msg->responderPubEd25519, 32) != 0;
   if (!peerIdentityPersist(msg->responderMac, (uint8_t)meshSlot,
                            msg->responderPubEd25519, bondedAt)) {
     ERROR_ESPNOWF("KEY_EX_REPLY: identity persist failed");
     return;
+  }
+  if (identityNewOrReplaced) {
+    logSystemEvent("ESPNOW", "paired: new peer identity persisted %02X:%02X:%02X:%02X:%02X:%02X",
+                   msg->responderMac[0], msg->responderMac[1], msg->responderMac[2],
+                   msg->responderMac[3], msg->responderMac[4], msg->responderMac[5]);
   }
   logMac("KEY_EX_REPLY accepted from", msg->responderMac);
 

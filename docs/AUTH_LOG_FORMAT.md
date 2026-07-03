@@ -23,8 +23,21 @@ The split is driven purely by the `success` bool inside `logAuthAttempt()`
 (`success ? LOG_OK_FILE : LOG_FAIL_FILE`). The same event type can land in either
 file depending on outcome.
 
-Each file also receives a per-boot anchor line on NTP time-sync:
-`… | Device Powered On | Time Synced via NTP`.
+Each file receives up to two per-boot anchor lines, so a reader can always tell
+which boot session (and how trustworthy the timestamps) they're looking at:
+
+- **Boot divider (always):** written early in every boot, regardless of NTP —
+  `… | Device Powered On | boot #<N> | reset=<reason>`. Its timestamp is
+  millis-based (wall-clock isn't known yet). This is the orientation marker and
+  appears even on offline boots that never sync time.
+- **Time-sync anchor (on sync only):** written when NTP/RTC makes the clock
+  valid — `… | Device Powered On | Time Synced via NTP`. From this line down,
+  timestamps are wall-clock accurate.
+
+(`system-events.log` does **not** get the boot divider — it carries the richer
+`[EVENT][BOOT] boot #N | reset=… | crashCount=… | fw v…` event instead. It **does**
+get the time-sync anchor line, written to all five logs as a per-stream
+"wall-clock starts here" marker so each file reads correctly in isolation.)
 
 ---
 
