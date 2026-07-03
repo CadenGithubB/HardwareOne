@@ -8,6 +8,16 @@ Entries for 0.96.1 and earlier were backfilled from git history (this repo had
 no tags or releases before 0.96.2); they are terse, commit-grounded summaries,
 dated from each version's commit. Dates are YYYY-MM-DD.
 
+## [0.97.2] - 2026-07-03
+Durable system event log: the firmware now keeps a persistent, always-on record of what it does at the system level, so an unexpected event (like an odd startup message) can be read back from the device instead of reconstructed after the fact.
+### Added
+- logSystemEvent() writes always-on [EVENT][CAT] lines to /system/sys_logs/system-events.log (256 KB capped ring), independent of debug flags and viewable from the web logging page. Early-boot events are held in a small buffer and flushed once the log system is up.
+- Lifecycle coverage across boot, filesystem (mount/format, file deletions, orphan cleanup), settings load/save/failures, WiFi, MQTT, HTTP/HTTPS server, ESP-NOW init and mesh/bond peer online-offline, users, I2C buses and sensors, camera, OLED, voice (SR), LLM, automations, and every reboot path - logged in both directions (came up / went down) where it applies.
+- Per-boot orientation divider ("Device Powered On | boot #N | reset=...") written to the login, i2c, and error logs so each log file reads correctly on its own.
+### Docs
+- New docs/AUTH_LOG_FORMAT.md documents the boot divider and time-sync anchor lines.
+- Sensor JSON comments aligned with the unified reading envelope (valid/connected/ts fields).
+
 ## [0.97.1] - 2026-07-01
 Sensors web page: a remote (ESP-NOW peer) sensor now renders as a readable card instead of a raw JSON dump.
 ### Added

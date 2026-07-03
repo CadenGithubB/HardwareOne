@@ -555,6 +555,7 @@ void apdsTask(void* parameter) {
             gApdsConnected = false;
             sensorStatusBumpWith("apds@auto_disabled");
             DEBUG_APDS_LIFECYCLEF("APDS auto-disabled after %u consecutive I2C failures", errors);
+            logSystemEvent("SENSOR", "APDS auto-disabled after %u consecutive I2C failures", errors);
             break;
           }
         }

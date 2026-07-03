@@ -1631,6 +1631,7 @@ static bool initAFE() {
       INFO_SRF("SD card models loaded successfully");
     } else {
       INFO_SRF("SD card model loading failed, falling back to partition models");
+      logSystemEvent("SR", "model source fallback: SD load failed → using partition models (not the configured source)");
     }
   } else if (gSettings.srModelSource == 2) {
     // Try LittleFS models
@@ -1641,6 +1642,7 @@ static bool initAFE() {
       INFO_SRF("LittleFS models loaded successfully");
     } else {
       INFO_SRF("LittleFS model loading failed, falling back to partition models");
+      logSystemEvent("SR", "model source fallback: LittleFS load failed → using partition models (not the configured source)");
     }
   }
   
@@ -1660,6 +1662,7 @@ static bool initAFE() {
         INFO_SRF("Partition models loaded successfully");
       } else {
         ERROR_SRF("Failed to load models from partition");
+        logSystemEvent("SR", "FAILED to load models from partition — speech recognition unavailable this boot");
       }
     } else {
       INFO_SRF("Using previously initialized models");

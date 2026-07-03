@@ -1142,6 +1142,7 @@ void sensorLogAutoStart() {
   if (!VFS::existsGuarded("/logs/sensors", VFS::systemAuth("senlog.autostart_mkdir"))) {
     if (!VFS::mkdirGuarded("/logs/sensors", VFS::systemAuth("senlog.autostart_mkdir"))) {
       broadcastOutput("[sensorlog] Auto-start failed: Could not create /logs/sensors directory");
+      logSystemEvent("LOG", "sensor-log autostart FAILED — could not create /logs/sensors directory");
       return;
     }
     broadcastOutput("[sensorlog] Created /logs/sensors directory");
@@ -1155,5 +1156,8 @@ void sensorLogAutoStart() {
   if (result && strncmp(result, "SUCCESS", 7) != 0) {
     // Command failed - broadcast the error
     BROADCAST_PRINTF("[sensorlog] Auto-start failed: %s", result);
+    logSystemEvent("LOG", "sensor-log autostart FAILED: %s", result);
+  } else {
+    logSystemEvent("LOG", "sensor-log autostart OK → %s", path.c_str());
   }
 }

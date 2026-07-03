@@ -417,6 +417,7 @@ void gpsTask(void* parameter) {
             ERROR_GPSF("Too many consecutive GPS failures - auto-disabling");
             gGpsEnabled = false;
             sensorStatusBumpWith("gps@auto_disabled");
+            logSystemEvent("SENSOR", "GPS auto-disabled after too many consecutive I2C failures");
           }
         }
       }

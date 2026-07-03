@@ -186,7 +186,11 @@ extern int gMeshPeerSlots;
 
 struct MeshPeerHealth {
   uint8_t mac[6];
-  uint8_t _pad[2];               // Padding for alignment
+  bool onlineLogged;             // Edge latch for the [EVENT][MESH] online/offline pair.
+                                 // Keyed on heartbeat-based aliveness, NOT isActive (which
+                                 // any RX frame re-arms) — so a powered-off / ACK-only peer
+                                 // that never heartbeats never logs a spurious 'offline'.
+  uint8_t _pad[1];               // Padding for alignment
   uint32_t lastMeshHeartbeatMs;  // Last V3 HEARTBEAT from this peer (mesh sync / isMeshPeerAlive)
   uint32_t lastRxActivityMs;     // Last ACK, HEARTBEAT, TEXT, or bootstrap liveness bump
   uint32_t lastAckMs;            // Last ACK from this peer

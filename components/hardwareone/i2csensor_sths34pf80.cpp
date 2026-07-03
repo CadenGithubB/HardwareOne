@@ -561,6 +561,7 @@ void presenceTask(void* parameter) {
             gPresenceConnected = false;
             sensorStatusBumpWith("presence@auto_disabled");
             DEBUG_PRESENCE_LIFECYCLEF("Presence auto-disabled after %u consecutive I2C failures", errors);
+            logSystemEvent("SENSOR", "Presence auto-disabled after %u consecutive I2C failures", errors);
             break;
           }
         }

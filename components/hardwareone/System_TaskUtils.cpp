@@ -96,6 +96,20 @@ BaseType_t xTaskCreateLogged(TaskFunction_t pxTaskCode,
 
   BaseType_t res = xTaskCreatePinnedToCore(pxTaskCode, pcName, usStackDepth, pvParameters, uxPriority, pxCreatedTask, coreId);
 
+  // Durable, always-on record of task-create FAILURES only. A task that fails
+  // to spawn (heap/PSRAM exhaustion) means its whole feature silently never
+  // runs — the canonical "it just stopped working" divergence. Successes are
+  // deliberately NOT logged here: ~20 tasks spawn every boot and the useful
+  // "it came up" signal lives one level up (per-sensor/subsystem online events),
+  // while per-task memory telemetry is the DEBUG_MEMORY block below.
+  if (res != pdPASS) {
+    size_t psFree = (psTot > 0) ? ESP.getFreePsram() : 0;
+    logSystemEvent("TASK", "failed to create '%s'%s%s (heap=%u psram=%u) — feature unavailable this boot",
+                   pcName ? pcName : "?",
+                   (tag && tag[0]) ? " tag=" : "", (tag && tag[0]) ? tag : "",
+                   (unsigned)ESP.getFreeHeap(), (unsigned)psFree);
+  }
+
   // Optionally log (only when FS is ready and not inside FS critical section)
   if (filesystemReady && !isFsLockedByCurrentTask() && isDebugFlagSet(DEBUG_MEMORY)) {
     char tsPrefix[40];

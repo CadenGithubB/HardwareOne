@@ -392,6 +392,15 @@ extern bool gSystemLogCategoryTags;  // Enable/disable category tags in log outp
 // Initialize debug system (call from setup())
 void initDebugSystem();
 
+// Record an always-on system lifecycle event: boot decisions, FS format /
+// file deletions, settings load/save failures, WiFi connects. Emits an
+// "[EVENT][<category>] ..." line independent of debug flags and log level;
+// the output task persists it to LOG_EVENTS_FILE and mirrors it to the
+// normal sinks. Safe to call before initDebugSystem() — early-boot events
+// echo to Serial immediately and are ring-buffered until the queue exists.
+// Keep it LOW VOLUME: discrete state changes only, never per-iteration data.
+void logSystemEvent(const char* category, const char* fmt, ...) __attribute__((format(printf, 2, 3)));
+
 // Ensure debug buffer is allocated
 bool ensureDebugBuffer();
 

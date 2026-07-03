@@ -1156,6 +1156,22 @@ RTC_NOINIT_ATTR static uint32_t rtcLastResetReason;
 RTC_NOINIT_ATTR static uint32_t rtcMagic;
 #define RTC_CRASH_MAGIC 0xC0FFEE42u
 
+static const char* resetReasonName(uint32_t r) {
+  switch ((esp_reset_reason_t)r) {
+    case ESP_RST_POWERON:   return "poweron";
+    case ESP_RST_EXT:       return "external";
+    case ESP_RST_SW:        return "software";
+    case ESP_RST_PANIC:     return "panic";
+    case ESP_RST_INT_WDT:   return "int_wdt";
+    case ESP_RST_TASK_WDT:  return "task_wdt";
+    case ESP_RST_WDT:       return "other_wdt";
+    case ESP_RST_DEEPSLEEP: return "deepsleep";
+    case ESP_RST_BROWNOUT:  return "brownout";
+    case ESP_RST_SDIO:      return "sdio";
+    default:                return "other";
+  }
+}
+
 void hardwareone_setup() {
 
   // ========================================================================
@@ -1226,9 +1242,13 @@ void hardwareone_setup() {
   if (filesystemReady && haveSettings) {
     if (readSettingsJson()) {
       Serial.println("[Settings] Loaded from file");
+    } else {
+      // Parse/open failure: the file is left on disk; RAM runs on defaults.
+      logSystemEvent("SETTINGS", "settings.json load FAILED — running on defaults (file left on disk)");
     }
   } else if (filesystemReady) {
     Serial.println("[Settings] No file found, writing defaults");
+    logSystemEvent("SETTINGS", "no settings.json — writing defaults");
     writeSettingsJson();
   }
 
@@ -1242,6 +1262,16 @@ void hardwareone_setup() {
     setSetting(gSettings.crashCount, rtcCrashCount);
     setSetting(gSettings.lastResetReason, rtcLastResetReason);
   }
+
+  logSystemEvent("BOOT", "boot #%lu | reset=%s(%lu) | crashCount=%lu | fw v%s",
+                 (unsigned long)gBootCounter, resetReasonName(rtcLastResetReason),
+                 (unsigned long)rtcLastResetReason, (unsigned long)rtcCrashCount,
+                 SelfDevice::firmwareVersion());
+
+  // Unconditional per-boot orientation divider into the login/i2c/error logs so
+  // every log is attributable to a boot even when NTP never syncs (offline). The
+  // "clock now accurate" line is still added later by logTimeSyncedMarkerIfReady().
+  logBootAnchorToLogs(resetReasonName(rtcLastResetReason));
 
   // If time is already valid (warm boot, retained RTC), resolve user creation times early
   if (time(nullptr) > 0) {

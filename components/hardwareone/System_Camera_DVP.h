@@ -23,8 +23,11 @@ extern const char* cameraModel;
 extern int cameraWidth;
 extern int cameraHeight;
 
-// Camera initialization
-bool initCamera();
+// Camera initialization.
+// isRecovery=true suppresses the durable [EVENT][CAM] "online" line — used by the
+// per-frame capture-recovery path so a glitchy camera doesn't emit a lifecycle
+// "online" event on every re-init (see captureFrame).
+bool initCamera(bool isRecovery = false);
 void stopCamera();
 
 // Stack-heavy power transitions run on a dedicated worker (see System_Camera_DVP.cpp).

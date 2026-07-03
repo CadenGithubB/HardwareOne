@@ -4250,12 +4250,19 @@ bool earlyOLEDInit() {
       });
 
       DEBUG_DISPLAYF("OLED boot animation started at 0x%02X", detectedAddr);
-      
+      logSystemEvent("DISPLAY", "OLED online at 0x%02X (bus %u)", detectedAddr, oledBus);
       return true;
     }
   }
   
   DEBUG_DISPLAYF("OLED not detected or initialization failed");
+  // Genuine "configured but didn't come up" divergence only when OLED is actually
+  // enabled in settings. During first-time setup the enabled gate above is bypassed,
+  // so a board with no OLED attached reaches here with oledEnabled=false — don't
+  // write a false hardware-failure record into a fresh device's very first log.
+  if (gSettings.oledEnabled) {
+    logSystemEvent("DISPLAY", "OLED enabled but init FAILED at boot (not detected / begin() failed on bus %u)", oledBus);
+  }
   return false;
 }
 

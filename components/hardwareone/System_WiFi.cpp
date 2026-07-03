@@ -818,6 +818,8 @@ bool connectWiFiIndex(int index0based, unsigned long timeoutMs, bool showPriorit
       // interrupt WDT. WIFI_PS_NONE eliminates this contention.
       esp_wifi_set_ps(WIFI_PS_NONE);
       BROADCAST_PRINTF("WiFi connected: %s", WiFi.localIP().toString().c_str());
+      logSystemEvent("WIFI", "connected to '%s' (%s)",
+                     nw.ssid.c_str(), WiFi.localIP().toString().c_str());
       notifyWiFiConnected(WiFi.localIP().toString().c_str());
       gWifiNetworks[index0based].lastConnected = millis();
       saveWiFiNetworks();
@@ -1341,6 +1343,32 @@ const size_t wifiCommandsCount = sizeof(wifiCommands) / sizeof(wifiCommands[0]);
 // WiFi Lazy Initialization (similar to sensor task pattern)
 // ============================================================================
 
+// Log-only WiFi event handler: emits exactly one [EVENT][WIFI] line per lost
+// association. Edge-gated via sWasConnected so driver-level retry storms of
+// ARDUINO_EVENT_WIFI_STA_DISCONNECTED don't repeat the line. Runs on the
+// WiFi/event task; logSystemEvent is queue-based and safe there. No reconnect
+// logic here — observation only.
+static void wifiEventLogger(arduino_event_id_t event, arduino_event_info_t info) {
+  static bool sWasConnected = false;
+  static uint32_t sConnectedAtMs = 0;
+  if (event == ARDUINO_EVENT_WIFI_STA_GOT_IP) {
+    sWasConnected = true;
+    sConnectedAtMs = millis();
+  } else if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
+    if (sWasConnected) {
+      sWasConnected = false;
+      char ssid[33];
+      uint8_t len = info.wifi_sta_disconnected.ssid_len;
+      if (len > 32) len = 32;
+      memcpy(ssid, info.wifi_sta_disconnected.ssid, len);
+      ssid[len] = '\0';
+      logSystemEvent("WIFI", "connection lost: '%s' reason=%d (connected %lus)",
+                     ssid, (int)info.wifi_sta_disconnected.reason,
+                     (unsigned long)((millis() - sConnectedAtMs) / 1000));
+    }
+  }
+}
+
 // Ensure WiFi is initialized (lazy initialization to save ~32KB at boot)
 bool ensureWiFiInitialized() {
   if (wifiInitialized) {
@@ -1349,6 +1377,14 @@ bool ensureWiFiInitialized() {
   }
 
   DEBUG_WIFIF("[WiFi] Initializing WiFi subsystem (lazy init)");
+  // Register the log-only event handler once per boot (guarded in case
+  // wifiInitialized is ever reset by a future deinit path).
+  static bool sEventLoggerRegistered = false;
+  if (!sEventLoggerRegistered) {
+    sEventLoggerRegistered = true;
+    WiFi.onEvent(wifiEventLogger, ARDUINO_EVENT_WIFI_STA_GOT_IP);
+    WiFi.onEvent(wifiEventLogger, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+  }
   WiFi.mode(WIFI_STA);
   DEBUG_WIFIF("[WiFi] Mode set to WIFI_STA");
   wifiInitialized = true;
@@ -1405,6 +1441,13 @@ void setupWiFi() {
 
   if (!connected) {
     broadcastOutput("WiFi connect timed out; continuing without network");
+    // Once-per-boot latch: setupWiFi can also run via first-time setup.
+    static bool sBootConnectFailLogged = false;
+    if (!sBootConnectFailLogged) {
+      sBootConnectFailLogged = true;
+      logSystemEvent("WIFI", "boot connect failed — continuing offline (%d saved networks, final status=%d)",
+                     gWifiNetworkCount, (int)WiFi.status());
+    }
     DEBUG_WIFIF("[WiFi Setup] Final WiFi status: %d", WiFi.status());
   } else {
     DEBUG_WIFIF("[WiFi Setup] Connected to: %s, IP: %s",

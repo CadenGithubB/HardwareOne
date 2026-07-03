@@ -83,10 +83,16 @@ void detectFirstTimeSetupState() {
   // that first-time setup has been completed. Settings can exist without users.
   bool usersExist = VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth("setup.detect"));
   gFirstTimeSetupState = usersExist ? SETUP_NOT_NEEDED : SETUP_REQUIRED;
-  
-  DEBUG_SYSTEMF("[SETUP_STATE] Early detection: %s (users file exists: %s)", 
+
+  DEBUG_SYSTEMF("[SETUP_STATE] Early detection: %s (users file exists: %s)",
                 gFirstTimeSetupState == SETUP_NOT_NEEDED ? "NOT_NEEDED" : "REQUIRED",
                 usersExist ? "YES" : "NO");
+
+  // SETUP_REQUIRED is only ever established here (direct assignment above,
+  // not via the setter), so the durable event is emitted here too.
+  if (gFirstTimeSetupState == SETUP_REQUIRED) {
+    logSystemEvent("SETUP", "first-time setup required (users.json absent)");
+  }
   
   // Also broadcast to serial for immediate feedback
   if (gFirstTimeSetupState == SETUP_REQUIRED) {
@@ -104,8 +110,16 @@ bool isFirstTimeSetup() {
 }
 
 void setFirstTimeSetupState(FirstTimeSetupState state) {
+  FirstTimeSetupState prev = gFirstTimeSetupState;
   gFirstTimeSetupState = state;
   DEBUG_SYSTEMF("[SETUP_STATE] State changed to: %d", (int)state);
+  // Durable record of setup lifecycle, on real transitions only (wizard
+  // back-navigation re-enters IN_PROGRESS repeatedly). SETUP_NOT_NEEDED is
+  // every normal boot (noise) and SETUP_REQUIRED is only set by direct
+  // assignment in detectFirstTimeSetupState(), which logs its own event.
+  if (state == prev) return;
+  if (state == SETUP_IN_PROGRESS) logSystemEvent("SETUP", "first-time setup started");
+  if (state == SETUP_COMPLETE)    logSystemEvent("SETUP", "first-time setup complete");
 }
 
 void setSetupProgressStage(SetupProgressStage stage) {
@@ -141,6 +155,9 @@ static void clearOledIfActive() {
 static void rebootWithMessage(const char* message) {
   broadcastOutput("");
   broadcastOutput(message);
+  // Durable record so a setup/restore-driven restart is attributable (vs a
+  // power cut or crash). Reason carries the user-facing message verbatim.
+  logSystemEvent("REBOOT", "setup restart: %s", message ? message : "(no message)");
   clearOledIfActive();
   delay(1000);
   ESP.restart();

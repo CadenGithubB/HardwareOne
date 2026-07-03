@@ -483,7 +483,11 @@ StreamAppendResult fileSlotsStreamAppend(FileTransferSlot* slot, uint16_t chunkI
   FileTransferSlotImpl& s = *impl(slot);
   FileSlotsLockGuard g;
   if (!g.ok) return STREAM_APPEND_FAIL;
-  if (!s.streaming || s.state != FILE_SLOT_RECEIVING || s.streamFailed) return STREAM_APPEND_FAIL;
+  if (!s.streaming) return STREAM_APPEND_FAIL;
+  // Abort already in progress from an earlier chunk (streamFailed set, or slot
+  // handed to COMPLETING teardown): report ALREADY_FAILED so the caller cancels
+  // without emitting another durable RECV_FAILED — the first failing chunk logged it.
+  if (s.streamFailed || s.state != FILE_SLOT_RECEIVING) return STREAM_APPEND_ALREADY_FAILED;
 
   if (s.chunkSize == 0 || s.totalChunks == 0 || chunkIdx >= s.totalChunks) {
     fileSlotsStreamFailLocked(s);

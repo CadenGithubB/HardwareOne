@@ -3456,6 +3456,7 @@ static void doUserSyncWork(const DeferredUserSyncWork* w) {
     if (!f || serializeJson(userDoc, f) == 0) {
       if (f) f.close();
       ERROR_ESPNOWF("[USER_SYNC] Failed to write users.json");
+      logSystemEvent("USERS", "users.json WRITE FAILED during mesh user-sync of '%s' — auth database may be inconsistent", targetUser);
       v4_send_command_response(srcAddr, msgId, false, "Failed to write users.json", strlen("Failed to write users.json"));
       return;
     }
@@ -3474,6 +3475,10 @@ static void doUserSyncWork(const DeferredUserSyncWork* w) {
     BROADCAST_PRINTF("[ESP-NOW] User sync: Created '%s' as standard user from %s%s",
                      targetUser, deviceName,
                      srcWasAdmin ? " (was admin on source; use userpromote to elevate)" : "");
+    // Account creation the LOCAL command audit never sees (it arrived over the
+    // mesh, not via a local command). Durable so the account is attributable.
+    logSystemEvent("USERS", "user '%s' (id=%d) created via mesh user-sync from '%s'",
+                   targetUser, nextId, deviceName);
 
     char respBuf[128];
     snprintf(respBuf, sizeof(respBuf), "User '%s' created (id=%d)", targetUser, nextId);
@@ -3837,13 +3842,20 @@ static void v4h_file_data(const V4RxCtx& ctx) {
   // the append); we just tell the fire-and-forget sender to stop.
   if (fileSlotsIsStreaming(slot)) {
     StreamAppendResult r = fileSlotsStreamAppend(slot, fd->chunkIndex, fd->data, dataLen);
-    if (r == STREAM_APPEND_FAIL) {
+    if (r == STREAM_APPEND_FAIL || r == STREAM_APPEND_ALREADY_FAILED) {
       // Use the frame's src_addr (== this slot's peer) for the cancel so we don't
-      // race cmd_exec, which may already be tearing the slot down.
-      String senderMacStr = formatMacAddress(ctx.recv_info->src_addr);
+      // race cmd_exec, which may already be tearing the slot down. The cancel is a
+      // single unreliable frame, so we re-send it per in-flight chunk to raise the
+      // odds the fire-and-forget sender hears it.
       v4_send_file_cancel(ctx.recv_info->src_addr, ctx.h->msgId, FILE_CANCEL_INCOMPLETE);
-      logFileTransferEvent((uint8_t*)ctx.recv_info->src_addr, senderMacStr.c_str(),
-                           fileSlotsGetFilename(slot), MSG_FILE_RECV_FAILED);
+      // Durable RECV_FAILED exactly once — on the FIRST failing chunk (STREAM_APPEND_FAIL).
+      // Every later in-flight chunk returns ALREADY_FAILED, so an aborted big-file
+      // transfer logs one line, not one per remaining chunk (~1700 on a 343 KB file).
+      if (r == STREAM_APPEND_FAIL) {
+        String senderMacStr = formatMacAddress(ctx.recv_info->src_addr);
+        logFileTransferEvent((uint8_t*)ctx.recv_info->src_addr, senderMacStr.c_str(),
+                             fileSlotsGetFilename(slot), MSG_FILE_RECV_FAILED);
+      }
     }
     return;
   }
@@ -7348,6 +7360,7 @@ void buildMeshStatusPeersJson(JsonArray peers, uint32_t nowMillis, int* outTotal
 void setMeshRole(MeshRole role, const char* reason) {
   if (gSettings.meshRole == (uint8_t)role) return;
   BROADCAST_PRINTF("[MESH_ROLE] %d -> %d | %s", (int)gSettings.meshRole, (int)role, reason ? reason : "");
+  logSystemEvent("MESH", "role %d -> %d (%s)", (int)gSettings.meshRole, (int)role, reason ? reason : "");
   gSettings.meshRole = (uint8_t)role;
 }
 
@@ -7591,6 +7604,14 @@ void processMeshHeartbeats() {
     uint8_t nExpired = fileSlotsTimeoutSweep((uint32_t)millis(), expiredSlots, 4);
     for (uint8_t i = 0; i < nExpired && i < 4; i++) {
       v4_send_file_cancel(expiredSlots[i].peerMac, expiredSlots[i].msgId, FILE_CANCEL_TIMEOUT);
+      // Durable RECV_FAILED for the timeout path too — the sweep is the "sender
+      // vanished / sustained RF loss" abort (the most common real failure), and
+      // without this it was the one receive-failure kind with no [EVENT] record.
+      // Once per expired slot (slot then released), so no flood. Filename isn't
+      // retained in the expiry record, so report by MAC + msgId.
+      String toMacStr = formatMacAddress(expiredSlots[i].peerMac);
+      logSystemEvent("ESPNOW", "file receive FAILED (timeout — sender stopped) from %s msgId=%lu",
+                     toMacStr.c_str(), (unsigned long)expiredSlots[i].msgId);
     }
   }
   // 1d2. Phase 4b — drive the FS_LIST protocol: build deferred replies +
@@ -7773,6 +7794,10 @@ void processMeshHeartbeats() {
       gEspNow->lastBondHeartbeatReceivedMs > 0 &&
       (now - (uint32_t)gEspNow->lastBondHeartbeatReceivedMs) >= BOND_HEARTBEAT_TIMEOUT_MS) {
     gEspNow->bondPeerOnline = false;
+    // Edge-gated by the bondPeerOnline check above: fires once on the
+    // online -> offline transition, not every sweep while offline.
+    logSystemEvent("BOND", "bond peer %s offline (heartbeat timeout) — sync reset",
+                   gSettings.bondPeerMac.c_str());
     resetBondSync();
     // All-encrypted bond: tear down the (now-stale) session so the next send
     // re-establishes a fresh one. Critical for peer-reboot recovery — if the
@@ -7791,11 +7816,35 @@ void processMeshHeartbeats() {
   }
 #endif // ENABLE_BONDED_MODE
 
-  // 3c. Mark stale mesh peers offline (mirrors bond's bondPeerOnline = false pattern)
+  // 3c. Log mesh peer online/offline transitions and reclaim stale slots.
+  //
+  // The durable event is edge-gated on onlineLogged, which tracks heartbeat-based
+  // ALIVENESS (isMeshPeerAlive), NOT isActive. isActive is re-armed by every RX
+  // frame (noteMeshPeerRxActivity) and by slot (re)creation, so gating the log on
+  // it flooded system-events.log: a powered-off peer that the 5 s bootstrap keeps
+  // re-creating, or a peer sending ACKs/TEXT but no heartbeats, produced one
+  // 'offline' line per sweep (100 Hz). onlineLogged only flips true when the peer
+  // is genuinely alive, so those cases never log a spurious offline; the natural
+  // 30 s heartbeat-timeout window bounds a flapping peer to ~1 pair per timeout.
+  // A reclaimed slot is memset by getMeshPeerHealth, so onlineLogged resets with it.
   if (gMeshPeers) {
     for (int i = 0; i < gMeshPeerSlots; i++) {
-      if (gMeshPeers[i].isActive && !isMeshPeerAlive(&gMeshPeers[i])) {
-        gMeshPeers[i].isActive = false;
+      MeshPeerHealth& p = gMeshPeers[i];
+      if (!p.isActive) continue;
+      const uint8_t* pm = p.mac;
+      if (isMeshPeerAlive(&p)) {
+        if (!p.onlineLogged) {
+          p.onlineLogged = true;
+          logSystemEvent("MESH", "peer %02X:%02X:%02X:%02X:%02X:%02X online",
+                         pm[0], pm[1], pm[2], pm[3], pm[4], pm[5]);
+        }
+      } else {
+        if (p.onlineLogged) {
+          p.onlineLogged = false;
+          logSystemEvent("MESH", "peer %02X:%02X:%02X:%02X:%02X:%02X offline (heartbeat timeout)",
+                         pm[0], pm[1], pm[2], pm[3], pm[4], pm[5]);
+        }
+        p.isActive = false;  // reclaim stale slot (unchanged from prior behavior)
       }
     }
   }
@@ -8608,6 +8657,9 @@ static bool initEspNow() {
     snprintf(gLastInitErrorReason, sizeof(gLastInitErrorReason),
              "%s", setupError);
     broadcastOutput(setupError);
+    // Enabled but couldn't come up because identity/name isn't set — exactly the
+    // "configured but didn't start" divergence this log exists to record.
+    logSystemEvent("ESPNOW", "init FAILED — mesh unavailable (%s)", setupError);
     return false;
   }
 
@@ -8682,6 +8734,7 @@ static bool initEspNow() {
                      (unsigned)heapNow,
                      (unsigned)heapBefore,
                      (int)wMode);
+    logSystemEvent("ESPNOW", "init FAILED — mesh unavailable: %s (heap=%uB)", reason, (unsigned)heapNow);
     return false;
   }
 
@@ -8834,6 +8887,10 @@ static bool initEspNow() {
   // Start ESP-NOW heartbeat task (parallel processing)
   if (!startEspNowTask()) {
     broadcastOutput("[ESP-NOW] WARNING: Failed to start heartbeat task - mesh features may not work");
+    // gEspNow->initialized was already set true above, so without this the device
+    // is left half-initialized (no 'init OK', no 'init FAILED') — a heap-starved
+    // heartbeat-task failure would otherwise be durably invisible.
+    logSystemEvent("ESPNOW", "init FAILED — heartbeat task did not start (out of memory?), mesh features unavailable");
     return false;
   }
   
@@ -8855,6 +8912,8 @@ static bool initEspNow() {
   BROADCAST_PRINTF("[ESP-NOW] Boot notification sent (counter=%lu)", (unsigned long)gBootCounter);
 
   notifyEspNowStarted(true);
+  logSystemEvent("ESPNOW", "init OK — mesh online on channel %d (mode=%s)",
+                 gEspNow->channel, gEspNow->mode == ESPNOW_MODE_MESH ? "mesh" : "direct");
   return true;
 }
 
@@ -14776,6 +14835,16 @@ void logFileTransferEvent(
     deviceName = formatMacAddress(peerMac);
   }
   BROADCAST_PRINTF("[ESP-NOW] %s: %s", deviceName.c_str(), message);
+
+  // Durable record of inbound files only. The peer-history ring above is
+  // RAM-only (lost on reboot); a file arriving on the device is a real "state
+  // changed" event worth keeping. Sends are user-initiated (covered elsewhere)
+  // and deliberately not duplicated here.
+  if (eventType == MSG_FILE_RECV_SUCCESS) {
+    logSystemEvent("ESPNOW", "file received from %s: %s", deviceName.c_str(), filename ? filename : "?");
+  } else if (eventType == MSG_FILE_RECV_FAILED) {
+    logSystemEvent("ESPNOW", "file receive FAILED from %s: %s", deviceName.c_str(), filename ? filename : "?");
+  }
 }
 
 // Get all messages for a specific peer (for web UI API). Merges the received and

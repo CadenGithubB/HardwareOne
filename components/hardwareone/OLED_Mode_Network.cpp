@@ -1062,8 +1062,8 @@ void displayRemoteSensors() {
       switch (entry->sensorType) {
         case REMOTE_SENSOR_INPUT: {
           // Two distinct input devices both stream as REMOTE_SENSOR_INPUT:
-          //   gamepad : {"val":1,"x":N,"y":N,"buttons":B}        (buttons active-LOW)
-          //   ANO enc : {"val":1,"pos":N,"axis":0|1,"buttons":B} (buttons active-HIGH)
+          //   gamepad : {"x":N,"y":N,"buttons":B}        (buttons active-LOW)
+          //   ANO enc : {"pos":N,"axis":0|1,"buttons":B} (buttons active-HIGH)
           // Detect the ANO shape by the presence of "pos" (gamepad never sends it)
           // and render the matching widget. Before this split, ANO data fell into
           // the gamepad joystick layout below: x/y defaulted to 512 (dead-center
@@ -1171,7 +1171,7 @@ void displayRemoteSensors() {
         }
 
         case REMOTE_SENSOR_GPS: {
-          // GPS JSON: {"val":1,"fix":1,"sats":8,"lat":..,"lon":..}
+          // GPS JSON: {"fix":1,"sats":8,"lat":..,"lon":..,...}
           float lat = doc["lat"] | 0.0f;
           float lon = doc["lon"] | 0.0f;
           int sats = doc["sats"] | 0;

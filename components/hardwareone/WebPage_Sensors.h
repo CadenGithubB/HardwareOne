@@ -543,8 +543,8 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
 
   // Remote input renderer — used for the REMOTE_SENSOR_INPUT ("input") type,
   // which bond/mesh streaming reports for BOTH worker input devices:
-  //   ANO encoder : {"val":1,"pos":N,"axis":0|1,"buttons":B}  (buttons active-HIGH)
-  //   gamepad     : {"val":1,"x":N,"y":N,"buttons":B}          (buttons active-LOW)
+  //   ANO encoder : {"pos":N,"axis":0|1,"buttons":B}  (buttons active-HIGH)
+  //   gamepad     : {"x":N,"y":N,"buttons":B}         (buttons active-LOW)
   // Remote INPUT (gamepad/ANO) reuses the SHARED, parameterized renderers —
   // hwRenderGamepadState / hwRenderAnoState (+ hwBuildAnoInner for the card body).
   // The old dedicated hwRenderRemoteInput duplicate was removed; see updateRemoteSensor.

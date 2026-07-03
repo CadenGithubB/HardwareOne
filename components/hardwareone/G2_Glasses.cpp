@@ -5602,6 +5602,8 @@ static void beatOne(G2Temple& t) {
                        "recover BLE state",
                        t.side == 'L' ? "LEFT" : "RIGHT",
                        (unsigned)t.txStuckBeats, approxSec);
+      logSystemEvent("G2", "%s temple TX wedged (%u consecutive heartbeat send failures) — forcing disconnect to recover",
+                     t.side == 'L' ? "LEFT" : "RIGHT", (unsigned)t.txStuckBeats);
       g2RingDump(t.side == 'L' ? "tx-wedged (L)" : "tx-wedged (R)");
       g2PushStatusEvent(t.side == 'L' ? "tx-wedged-L" : "tx-wedged-R");
       // disconnectTemple will itself try a clean Cmd=9 SHUTDOWN via
@@ -5675,6 +5677,7 @@ static constexpr uint8_t kMaxRecoveryAttempts =
 
 static uint32_t gNextRecoveryAttemptMs = 0;  // 0 = no attempt scheduled yet
 static uint8_t  gRecoveryAttemptCount  = 0;
+static bool     gRecoveryGiveUpLogged  = false;  // once-per-episode event latch
 
 // Reset the backoff state. Call from anywhere a fresh recovery cycle is
 // warranted — both temples are up (success), one drops (so the next
@@ -5817,10 +5820,18 @@ static void recoveryHeartbeatTick() {
   if (gNextRecoveryAttemptMs == 0) {
     gNextRecoveryAttemptMs = millis() + kRecoveryBackoffMs[0];
     gRecoveryAttemptCount  = 0;
+    gRecoveryGiveUpLogged  = false;  // new episode — re-arm the give-up event
     return;
   }
   // Out of attempts — silent give-up. Manual g2recover resets.
-  if (gRecoveryAttemptCount >= kMaxRecoveryAttempts) return;
+  if (gRecoveryAttemptCount >= kMaxRecoveryAttempts) {
+    if (!gRecoveryGiveUpLogged) {
+      gRecoveryGiveUpLogged = true;
+      logSystemEvent("G2", "half-connected recovery gave up: %s temple still missing after %u attempts",
+                     gL.connected ? "RIGHT" : "LEFT", (unsigned)kMaxRecoveryAttempts);
+    }
+    return;
+  }
   // Not yet time.
   if ((int32_t)(millis() - gNextRecoveryAttemptMs) < 0) return;
 

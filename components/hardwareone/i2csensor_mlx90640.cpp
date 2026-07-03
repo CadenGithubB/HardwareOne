@@ -1506,6 +1506,7 @@ void thermalTask(void* parameter) {
             ERROR_THERMALF("Too many consecutive thermal failures - auto-disabling");
             gThermalEnabled = false;
             sensorStatusBumpWith("thermal@auto_disabled");
+            logSystemEvent("SENSOR", "Thermal auto-disabled after too many consecutive I2C failures");
             // Task will clean up and delete itself on next loop iteration
           }
         }

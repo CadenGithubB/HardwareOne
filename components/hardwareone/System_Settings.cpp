@@ -1031,6 +1031,8 @@ bool writeSettingsJson() {
       existingFile.close();
       if (err) {
         WARN_STORAGEF("Failed to read existing settings for merge: %s", err.c_str());
+        logSystemEvent("SETTINGS", "merge-read of existing file failed (%s) — unregistered sections dropped from this save",
+                       err.c_str());
         doc.clear();  // Start fresh if parse failed
       } else {
         INFO_STORAGEF("Loaded existing settings for merge (preserving orphaned sections)");
@@ -1048,6 +1050,7 @@ bool writeSettingsJson() {
   // Check for overflow
   if (doc.overflowed()) {
     ERROR_STORAGEF("JSON document overflowed during build (need more than 5120 bytes)");
+    logSystemEvent("SETTINGS", "save FAILED (JSON build overflow) — settings NOT persisted");
     pollResume();
     return false;
   }
@@ -1060,6 +1063,7 @@ bool writeSettingsJson() {
   if (!file) {
     fsUnlock();
     ERROR_STORAGEF("Failed to open temp file for writing");
+    logSystemEvent("SETTINGS", "save FAILED (cannot open %s) — settings NOT persisted", tmp);
     pollResume();
     return false;
   }
@@ -1072,6 +1076,7 @@ bool writeSettingsJson() {
 
   if (bytesWritten == 0) {
     ERROR_STORAGEF("Failed to serialize JSON");
+    logSystemEvent("SETTINGS", "save FAILED (serialize wrote 0 bytes) — settings NOT persisted");
     VFS::removeGuarded(tmp, VFS::systemAuth("settings.write"));
     pollResume();
     return false;
@@ -1086,11 +1091,13 @@ bool writeSettingsJson() {
 
   if (!okRename) {
     WARN_STORAGEF("Rename failed, trying direct write");
+    logSystemEvent("SETTINGS", "atomic rename failed — falling back to direct rewrite of %s", SETTINGS_JSON_FILE);
     // Fallback: write directly
     fsLock("settings.direct");
     File directFile = VFS::openGuarded(SETTINGS_JSON_FILE, "w", VFS::systemAuth("settings.write"));
     if (!directFile) {
       fsUnlock();
+      logSystemEvent("SETTINGS", "save FAILED (rename and direct open both failed) — settings NOT persisted");
       pollResume();
       return false;
     }
@@ -1172,6 +1179,7 @@ bool readSettingsJson() {
     INFO_STORAGEF("[Settings] No firmwareVersion in settings file (pre-versioning build)");
   } else if (strcmp(savedVersion, runningVersion) != 0) {
     INFO_STORAGEF("[Settings] Settings written by v%s, running v%s", savedVersion, runningVersion);
+    logSystemEvent("BOOT", "settings last saved by fw v%s (now running v%s)", savedVersion, runningVersion);
   }
 
   registerAllSettingsModules();

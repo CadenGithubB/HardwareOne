@@ -1340,6 +1340,9 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
       }
       if (!logits) {
         setLlmError("LLM state corruption at pos=%d (recovery failed after %d tries)", pos, corruptionRetries);
+        // errorMsg above is RAM-only; record durably. corruptionFatal breaks the
+        // generation loop right after, so this fires once per failed generation.
+        logSystemEvent("LLM", "state corruption at pos=%d — recovery failed after %d tries; ERROR state until reload", pos, corruptionRetries);
         corruptionFatal = true;
         break;
       }

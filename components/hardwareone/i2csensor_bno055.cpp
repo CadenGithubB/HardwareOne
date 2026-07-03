@@ -1102,6 +1102,7 @@ void imuTask(void* parameter) {
             ERROR_IMUF("Too many consecutive IMU failures - auto-disabling");
             gImuEnabled = false;
             sensorStatusBumpWith("imu@auto_disabled");
+            logSystemEvent("SENSOR", "IMU auto-disabled after too many consecutive I2C failures");
           }
         }
         

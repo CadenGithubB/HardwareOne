@@ -745,6 +745,7 @@ void tofTask(void* parameter) {
             ERROR_TOFF("Too many consecutive ToF failures - auto-disabling");
             gTofEnabled = false;
             sensorStatusBumpWith("tof@auto_disabled");
+            logSystemEvent("SENSOR", "ToF auto-disabled after too many consecutive I2C failures");
           }
         }
         
