@@ -54,6 +54,10 @@ extern "C" {
 #include "G2_Page_TextEntry.h" // generic on-glasses text-entry overlay
 #include "G2_Page_ESPNow.h"    // g2ShowESPNowAppMenu / g2ESPNowAppHandleTap
 #include "G2_HijackFsm.h"      // shadow FSM tracking page-swap / hijack lifecycle
+#if ENABLE_MAPS
+#include "System_Maps.h"       // MapCore/OffscreenMapRenderer — g2map renders the offline map to the lens
+#include "System_TaskUtils.h"  // MAP_RENDER_STACK_WORDS — size the g2map worker like the OLED render task
+#endif
 #include "System_Settings.h"
 #include "System_Clock.h"  // Clock::tzOffsetQuarterHours() — explicit-unit tz accessor (defeats minutes/quarter-hours swap footgun)
 #if ENABLE_WIFI
@@ -790,6 +794,12 @@ volatile bool            gImgProbeAbort          = false;
 // pre-stream listener that no worker is draining).
 static volatile uint32_t gCamStreamPendingTap = 0;
 static volatile bool     gCamStreamActive     = false;
+#if ENABLE_MAPS
+// Interactive Maps page (g2MapPageWorker) — list-tap bitfield (bit = row
+// index) + active gate, mirroring the camera-stream pattern above.
+static volatile uint32_t gMapPagePendingTap = 0;
+static volatile bool     gMapPageActive     = false;
+#endif
 
 // Settings-page back-row → relaunch-stream coordination. See header
 // comment on g2CamStreamSettingsExitRelaunch for the full contract.
@@ -2337,6 +2347,11 @@ static void handleDevEvent(G2Temple& t, const uint8_t* devBody, size_t devLen) {
       // dispatch below (different containers, different intent).
       if (etype == 0 && strcmp(cname, "lstCam") == 0) {
         if (gCamStreamActive) {
+          // Refresh the 60 s hijack safety-timeout on every real stream
+          // control tap — same rationale as the map page / 'app' menu. The
+          // frame loop also feeds it per successful push; this is the instant
+          // path so a tap landing between frames still counts.
+          if (g2FsmHijackActive()) gHijackStartedMs = millis();
           uint32_t bit = (idx == 0) ? 0x1u :
                          (idx == 1) ? 0x2u :
                          (idx == 2) ? 0x4u : 0u;
@@ -2353,6 +2368,27 @@ static void handleDevEvent(G2Temple& t, const uint8_t* devBody, size_t devLen) {
         }
         return;
       }
+#if ENABLE_MAPS
+      // Interactive Maps page list dispatch (container 'lstMap'). Rows:
+      //   0 Back · 1 Zoom In · 2 Zoom Out · 3 Reset View · 4 Recenter.
+      // Set the row's bit; the worker drains gMapPagePendingTap each loop.
+      // Only while gMapPageActive so late echoes after teardown are ignored.
+      if (etype == 0 && strcmp(cname, "lstMap") == 0) {
+        if (gMapPageActive && idx < 32) {
+          // Refresh the 60 s hijack safety-timeout on every real tap. The
+          // watchdog (heartbeat task, HIJACK_SAFETY_MS) measures from the last
+          // input-refreshed timestamp; without this it force-exits the map
+          // page ~60 s after the Apps→Maps tap no matter how actively the user
+          // is zooming/panning — surfacing as a spurious "kicked back to the
+          // menu" mid-use. Mirrors the 'app'-menu and probe-hold paths below;
+          // g2FsmHijackActive() is true in the ImageProbing state.
+          if (g2FsmHijackActive()) gHijackStartedMs = millis();
+          gMapPagePendingTap |= (1u << idx);
+          DEBUG_G2F("[G2] MapPage tap: idx=%u", (unsigned)idx);
+        }
+        return;
+      }
+#endif
       // Image-probe hold dismissal — single-tap path. When a probe surfaces
       // a List widget (e.g. mixed list+image probes Q16/Q17/Q18), single
       // taps on rows arrive here as ListEvent CLICK(0) instead of the
@@ -3670,7 +3706,7 @@ static const G2PageModule kNetworkPage = {
 };
 
 static const G2PageModule kFilesPage = {
-  "files", "Files",
+  "files", nullptr,   // hidden from the main menu — reached via the Apps submenu
   "Show Files browser on the lens",
   g2BuildFilesInfo,
   g2ShowFilesMenu,
@@ -3711,7 +3747,7 @@ static const G2PageModule kPowerPage = {
 };
 
 static const G2PageModule kEspNowAppPage = {
-  "espnowapp", "ESP-NOW App",
+  "espnowapp", nullptr,   // hidden from the main menu — reached via the Apps submenu
   "Show ESP-NOW App page (send/broadcast/ping/peers) on the lens",
   g2BuildESPNowAppInfo,
   g2ShowESPNowAppMenu,
@@ -3723,6 +3759,80 @@ static const G2PageModule kEspNowAppPage = {
   // job that re-runs the appropriate show*Menu(). For ping, the user
   // double-taps (or re-taps a row) to pick up the result — Phase 2 will
   // wire a push-kick path if we want sub-second RTT updates.
+  /*liveIntervalMs=*/ 0,
+  /*backLabel=*/    "<- Main Menu",
+  /*prefersTextWidget=*/ false,   // own showMenu — flag is irrelevant
+  /*liveRender=*/    nullptr,
+};
+
+// ─────────────────────────────────────────────────────────────────────
+// Apps launcher — a top-level submenu that groups the "app" pages
+// (ESP-NOW App, Files) plus the Maps viewer under one entry, so the main
+// hijack menu stays short. Each row forwards to another page's
+// show*Menu() (which flips gHijackPage itself) or launches the map
+// viewer. Stateless — no sub-mode tracking needed. Files and ESP-NOW App
+// stay registered (with hijackLabel=nullptr) so tap routing to their
+// handleTap still works; they're just no longer top-level rows.
+// ─────────────────────────────────────────────────────────────────────
+#if ENABLE_MAPS
+static bool g2ShowMapPage(void (*onDone)());   // interactive list+image Maps page, defined below
+#endif
+
+static void g2BuildAppsInfo(char* out, size_t cap) {
+  if (!out || cap == 0) return;
+#if ENABLE_MAPS
+  snprintf(out, cap, "Apps\nESP-NOW App\nFiles\nMaps");
+#else
+  snprintf(out, cap, "Apps\nESP-NOW App\nFiles");
+#endif
+}
+
+static void g2ShowAppsMenu() {
+  const char* items[4];
+  size_t n = 0;
+  items[n++] = "<- Main Menu";
+  items[n++] = "ESP-NOW App";
+  items[n++] = "Files";
+#if ENABLE_MAPS
+  // Reflect map availability in the label so tapping "Maps" with no tiles
+  // on the device isn't a silent no-op (getAvailableMaps scans /maps for
+  // <name>/<name>.hwmap subdirs — the same check the worker does).
+  char probe[1][96];
+  const bool haveMap = MapCore::hasValidMap() || (MapCore::getAvailableMaps(probe, 1) > 0);
+  items[n++] = haveMap ? "Maps" : "Maps (none)";
+#endif
+  if (g2ShowListPage(items, n)) {
+    g2SetHijackPage(G2_HIJACK_PAGE_APPS);
+    DEBUG_G2F("[G2] Apps menu shown (%u items)", (unsigned)n);
+  } else {
+    DEBUG_G2F("[G2] Apps menu show FAILED");
+  }
+}
+
+static void g2AppsHandleTap(uint32_t idx) {
+  switch (idx) {
+    case 0: {  // <- back to the root hijack menu
+      g2SetHijackPage(G2_HIJACK_PAGE_MAIN);
+      extern void g2RedrawHijackMainMenu();
+      g2RedrawHijackMainMenu();
+      return;
+    }
+    case 1: g2ShowESPNowAppMenu(); return;  // callee sets gHijackPage = ESPNOW_APP
+    case 2: g2ShowFilesMenu();     return;  // callee sets gHijackPage = FILES
+#if ENABLE_MAPS
+    case 3: g2ShowMapPage(&g2ShowAppsMenu); return;  // interactive map page; returns to Apps on Back
+#endif
+    default: return;
+  }
+}
+
+static const G2PageModule kAppsPage = {
+  "apps", "Apps",
+  "Show the Apps launcher (ESP-NOW App, Files, Maps) on the lens",
+  g2BuildAppsInfo,
+  g2ShowAppsMenu,
+  g2AppsHandleTap,
+  G2_HIJACK_PAGE_APPS,
   /*liveIntervalMs=*/ 0,
   /*backLabel=*/    "<- Main Menu",
   /*prefersTextWidget=*/ false,   // own showMenu — flag is irrelevant
@@ -4118,11 +4228,17 @@ static void registerG2Pages(void) {
   g2RegisterPage(kStatusPage);
   g2RegisterPage(kSensorsPage);
   g2RegisterPage(kNetworkPage);
-  g2RegisterPage(kFilesPage);
+  g2RegisterPage(kAppsPage);       // Apps launcher (ESP-NOW App, Files, Maps)
   g2RegisterPage(kSettingsPage);
   g2RegisterPage(kPowerPage);
-  g2RegisterPage(kEspNowAppPage);
   g2RegisterPage(kTestSuitePage);
+  // Files + ESP-NOW App are registered but hijackLabel=nullptr, so they no
+  // longer appear as top-level rows — they live under Apps. Kept registered
+  // so the tap dispatcher can still route to g2FilesHandleTap /
+  // g2ESPNowAppHandleTap when those pages are active (lookup keys on
+  // hijackPage, not on menu visibility).
+  g2RegisterPage(kFilesPage);
+  g2RegisterPage(kEspNowAppPage);
 #if ENABLE_CAMERA_SENSOR
   g2RegisterPage(kCameraSettingsPage);   // hidden — see kCameraSettingsPage above
   g2RegisterPage(kMicDetailPage);        // hidden — see kMicDetailPage above
@@ -12003,6 +12119,9 @@ static const char* cmd_g2dumpframes(const String& /*argsInput*/) {
 }
 
 static const char* cmd_g2bmp(const String& argsInput);
+#if ENABLE_MAPS
+static const char* cmd_g2map(const String& argsInput);
+#endif
 
 // `extern` on both this table and its count below because System_Utils.cpp
 // refers to them as `extern const ...` — without it, C++ gives file-scope
@@ -12035,6 +12154,9 @@ extern const CommandEntry g2Commands[] = {
   { "g2devcfg",     "Typed sid=0x80 sender: g2devcfg <heartbeat|auth|role|time|ring> [args]", false, cmd_g2devcfg, "Usage: g2devcfg <heartbeat|auth|role <both|right|left>|time [tzQuarterHours]|ring <mac> <name>>" },
   { "g2notify",     "Transient text (placeholder): g2notify [secs] <text>", false, cmd_g2notify, "Usage: g2notify [<seconds>] <text>  (seconds 1..599, default 5)" },
   { "g2bmp",        "Display BMP: g2bmp </path.bmp> [brightness -100..100] [contrast -100..100] [holdSeconds 0..120]", false, cmd_g2bmp, "Usage: g2bmp </path/to/file.bmp> [brightness -100..100] [contrast -100..100] [holdSeconds 0..120]" },
+#if ENABLE_MAPS
+  { "g2map",        "Render the offline map on the G2 lens (288x144)",  false, cmd_g2map, "Usage: g2map   (renders the current map view; double-tap the lens to dismiss)" },
+#endif
   { "g2sensors",    "Show device's sensor list on the G2 lens",        false, cmd_g2sensors },
   { "g2network",    "Show Network info page on the G2 lens",           false, cmd_g2network },
   { "g2settingspage","Show Settings inspector page on the G2 lens",    false, cmd_g2settingspage },
@@ -13912,6 +14034,302 @@ bool g2ShowBmpFile(const char* path, void (*onDone)()) {
   }
   return true;
 }
+
+#if ENABLE_MAPS
+// ─────────────────────────────────────────────────────────────────────
+// Map viewer — render the loaded offline map HEADLESSLY into our own
+// 128×64 1-bit SSD1306-page buffer (reusing the OLED map renderer as a
+// black box — nothing in System_Maps is modified), scale it into a
+// 288×144 4-bpp grayscale BMP, and push it to one lens over the same
+// image transport as g2bmp/camera. Pure downstream consumer.
+// ─────────────────────────────────────────────────────────────────────
+
+// Scale a 128×64 SSD1306-page buffer (byte = 8 vertical px, LSB = top,
+// a set bit = a drawn map feature) into a 288×144 4-bpp top-down BMP.
+// 288×144 is the HW-proven native lens-tile size, and the output bytes
+// are IDENTICAL to what the proven camera path (buildBmp4bppFromRgb888
+// fed a 128×64 white/black RGB888) emits: same 118-byte header, same
+// 16-shade gray palette, same 4-byte-aligned 144-byte row stride, same
+// nearest-neighbour sampling (sx = dx*128/288, sy = dy*64/144), same
+// 4-bpp packing (high nibble = even column, low = odd). 128:64 = 288:144
+// = 2:1, so the upscale fills the frame with no letterbox.
+static size_t buildMapBmp4bpp288x144FromPage(uint8_t* out, size_t outCap,
+                                             const uint8_t* page) {
+  const int32_t  dstW       = 288;
+  const int32_t  dstH       = 144;
+  const uint32_t rowStride  = ((uint32_t)dstW * 4 + 31) / 32 * 4;  // = 144
+  const uint32_t pixelSize  = rowStride * (uint32_t)dstH;
+  const uint32_t headerSize = 14 + 40 + 64;
+  const uint32_t total      = headerSize + pixelSize;
+  if (!out || !page || total > outCap) return 0;
+
+  auto wr16 = [](uint8_t* p, uint16_t v) {
+    p[0] = (uint8_t)(v & 0xff); p[1] = (uint8_t)((v >> 8) & 0xff);
+  };
+  auto wr32 = [](uint8_t* p, uint32_t v) {
+    p[0] = (uint8_t)(v & 0xff);          p[1] = (uint8_t)((v >> 8) & 0xff);
+    p[2] = (uint8_t)((v >> 16) & 0xff);  p[3] = (uint8_t)((v >> 24) & 0xff);
+  };
+
+  // BITMAPFILEHEADER (14 B)
+  out[0] = 'B'; out[1] = 'M';
+  wr32(out + 2,  total);
+  wr16(out + 6,  0);
+  wr16(out + 8,  0);
+  wr32(out + 10, headerSize);
+  // BITMAPINFOHEADER (40 B) — negative biHeight => top-down
+  wr32(out + 14, 40);
+  wr32(out + 18, (uint32_t)dstW);
+  wr32(out + 22, (uint32_t)(-dstH));
+  wr16(out + 26, 1);
+  wr16(out + 28, 4);              // biBitCount = 4-bpp
+  wr32(out + 30, 0);              // BI_RGB
+  wr32(out + 34, pixelSize);
+  wr32(out + 38, 2835);
+  wr32(out + 42, 2835);
+  wr32(out + 46, 16);
+  wr32(out + 50, 0);
+  // 16-shade grayscale palette (BGRA), matching buildBmp4bpp.
+  for (int i = 0; i < 16; i++) {
+    const uint8_t v = (uint8_t)((i * 255) / 15);
+    out[54 + i*4 + 0] = v;
+    out[54 + i*4 + 1] = v;
+    out[54 + i*4 + 2] = v;
+    out[54 + i*4 + 3] = 0;
+  }
+
+  // Pixels: nearest-neighbour upscale 128×64 → 288×144, 4-bpp packed.
+  // memset clears each row first so the (already 4-byte-aligned) stride
+  // has no stale bytes.
+  uint8_t* px = out + headerSize;
+  for (int32_t dy = 0; dy < dstH; dy++) {
+    const int32_t  sy      = (dy * 64) / dstH;             // 0..63
+    const uint8_t* pageRow = page + (size_t)(sy / 8) * 128;
+    const uint8_t  bitMask = (uint8_t)(1 << (sy & 7));
+    uint8_t* dstRow = px + (size_t)dy * rowStride;
+    memset(dstRow, 0, rowStride);
+    for (int32_t dx = 0; dx < dstW; dx++) {
+      const int32_t sx  = (dx * 128) / dstW;               // 0..127
+      const uint8_t nib = (pageRow[sx] & bitMask) ? 0x0F : 0x00;
+      if ((dx & 1) == 0) dstRow[dx >> 1] |= (uint8_t)(nib << 4);  // even → high
+      else               dstRow[dx >> 1] |= nib;                  // odd  → low
+    }
+  }
+  return total;
+}
+
+struct MapPageArgs {
+  void (*onDone)();
+};
+
+// Render the CURRENT shared map state (gMapCenter*, gMapZoom, gMapRotation,
+// gVisibleLayers) into a 288×144 4-bpp BMP for the lens. Initializes the
+// center to the loaded map's midpoint the first time (mirrors the OLED map's
+// first-open behaviour). Returns the BMP length, or 0 on failure.
+static size_t g2RenderCurrentMapBmp(uint8_t* bmp, size_t cap) {
+  if (!MapCore::hasValidMap()) return 0;
+  const LoadedMap& m = MapCore::getCurrentMap();
+  extern float gMapCenterLat;
+  extern float gMapCenterLon;
+  extern bool  gMapCenterSet;
+  if (!gMapCenterSet) {
+    gMapCenterLat = (m.header.minLat + m.header.maxLat) / 2000000.0f;
+    gMapCenterLon = (m.header.minLon + m.header.maxLon) / 2000000.0f;
+    gMapCenterSet = true;
+  }
+  uint8_t* page = (uint8_t*)ps_alloc(OFFSCREEN_BUF_SIZE, AllocPref::PreferPSRAM, "g2.map.page");
+  if (!page) return 0;
+  OffscreenMapRenderer r(page, 128, 64, 0);
+  r.clear();
+  // zoom/rotation/layers come from the shared globals via the params snapshot;
+  // renderMap draws at gMapZoom (default 1.0 = full detail, matches the OLED).
+  MapRenderParams params = mapRenderParamsFromGlobals();
+  MapCore::renderMap(&r, gMapCenterLat, gMapCenterLon, params);
+  const size_t len = buildMapBmp4bpp288x144FromPage(bmp, cap, page);
+  free(page);
+  return len;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Interactive Maps page — a list+image compound (control list on the LEFT,
+// 288×144 map image on the RIGHT), mirroring the camera-stream page. Each
+// control tap mutates the shared map state and re-pushes just the image
+// (Cmd=3) into the existing container — the list stays put. Lives until the
+// user taps "<- Back". NOTE: a REBUILD-list against a live list+image
+// compound silently drops the image on this firmware, so the list labels are
+// static (no on/off state shown) — the feedback is the map itself changing.
+// ─────────────────────────────────────────────────────────────────────
+static void g2MapPageWorker(void* arg) {
+  // Paired-user identity + G2 notify source so tile-loading FS reads succeed.
+  G2HijackCtxGuard ctxGuard;
+  auto* a = (MapPageArgs*)arg;
+
+  // Control rows. Bit index in gMapPagePendingTap == row index (see the
+  // 'lstMap' dispatch in the BLE notify handler).
+  static const char* const kRows[] = {
+    "<- Back",     // 0
+    "Zoom In",     // 1
+    "Zoom Out",    // 2
+    "Reset View",  // 3
+    "Recenter",    // 4
+  };
+  static constexpr size_t kRowCount = sizeof(kRows) / sizeof(kRows[0]);
+
+  do {
+    G2Temple* arm = pickEvenAIArm("mapPage");
+    if (!arm) { DEBUG_G2F("[G2] map page: no eligible arm"); break; }
+
+    // Ensure a map is loaded; auto-load the first available.
+    if (!MapCore::hasValidMap()) {
+      char maps[8][96];
+      const int n = MapCore::getAvailableMaps(maps, 8);
+      if (n <= 0) { DEBUG_G2F("[G2] map page: no maps on device (/maps/*.hwmap)"); break; }
+      char p[128];
+      snprintf(p, sizeof(p), "/maps/%s", maps[0]);
+      if (!MapCore::loadMapFile(p)) { DEBUG_G2F("[G2] map page: load failed for '%s'", p); break; }
+    }
+
+    // Tear down the Apps list, then CREATE the list+image compound once.
+    if (!probeTearDownActiveContainer(*arm)) {
+      DEBUG_G2F("[G2] map page: pre-page SHUTDOWN failed");
+      break;
+    }
+    // Clear stale image-probe state so a leftover flag can't terminate us
+    // (matches the camera-stream setup).
+    gImgProbeHoldTapPending = false;
+    gImgProbeAbort          = false;
+    gImgProbeHoldActive     = false;
+    gMapPagePendingTap      = 0;
+
+    // Layout: control list on the LEFT, 288×144 map image on the RIGHT.
+    const G2ContainerGeom kListGeom = { 8, 8, 264, 272 };
+    G2ImageTile imgTile = {};
+    imgTile.x = 280;
+    imgTile.y = 72;      // vertically center the 144-tall image in the lens
+    imgTile.w = 288;
+    imgTile.h = 144;
+    imgTile.containerId   = 2;
+    imgTile.containerName = "imgMap";
+
+    const uint32_t kCreateMagic   = G2_MAGIC_IMAGE_BASE + 0x20;  // 242
+    const uint32_t kPushMagicBase = G2_MAGIC_IMAGE_BASE + 0x21;  // 243+ (6 frags → 243..248)
+    {
+      uint8_t createBuf[1024];
+      const size_t createLen = g2BuildCreateMixedListImage(
+          allocSeq(), kCreateMagic,
+          /*listName*/ "lstMap",
+          kRows, kRowCount, kListGeom,
+          imgTile, BLOCKS_WIDGET_ID,
+          createBuf, sizeof(createBuf));
+      if (createLen == 0) { DEBUG_G2F("[G2] map page: CREATE-mixed build failed"); break; }
+      probePrepImageCreateAck(kCreateMagic);
+      if (!sendEnvelope(*arm, createBuf, createLen)) {
+        DEBUG_G2F("[G2] map page: CREATE-mixed TX failed");
+        break;
+      }
+      if (!probeWaitImageCreateAck(kCreateMagic, kImgCreateAckTimeoutMs)) {
+        DEBUG_G2F("[G2] map page: CREATE-mixed ack timeout");
+        probePostProbeShutdown(*arm);
+        break;
+      }
+      DEBUG_G2F("[G2] map page: CREATE-mixed acked (list@'lstMap' + image@'imgMap' 288x144)");
+    }
+
+    gMapPageActive = true;   // BLE handler now routes lstMap taps to us
+    bool dirty = true;       // render the initial frame
+
+    while (true) {
+      if (!gLens.hijackActive) { DEBUG_G2F("[G2] map page: hijack ended"); break; }
+      if (gImgProbeAbort)      { DEBUG_G2F("[G2] map page: abort flag set"); break; }
+
+      // Drain control taps (bit == row index). Read-and-clear.
+      const uint32_t taps = gMapPagePendingTap;
+      gMapPagePendingTap = 0;
+      if (taps) {
+        extern float gMapZoom;
+        extern float gMapRotation;
+        extern float gMapCenterLat;
+        extern float gMapCenterLon;
+        extern bool  gMapCenterSet;
+        if (taps & (1u << 0)) { DEBUG_G2F("[G2] map page: Back → exit"); break; }
+        if (taps & (1u << 1)) { gMapZoom *= 1.5f; if (gMapZoom > 30.0f) gMapZoom = 30.0f; dirty = true; }
+        if (taps & (1u << 2)) { gMapZoom /= 1.5f; if (gMapZoom < 0.20f) gMapZoom = 0.20f; dirty = true; }
+        if (taps & (1u << 3)) { gMapZoom = 1.0f; gMapRotation = 0.0f; dirty = true; }
+        if (taps & (1u << 4)) {  // Recenter to the loaded map's midpoint
+          const LoadedMap& cm = MapCore::getCurrentMap();
+          gMapCenterLat = (cm.header.minLat + cm.header.maxLat) / 2000000.0f;
+          gMapCenterLon = (cm.header.minLon + cm.header.maxLon) / 2000000.0f;
+          gMapCenterSet = true;
+          dirty = true;
+        }
+      }
+
+      if (dirty) {
+        const size_t bmpCap = 14 + 40 + 64 + (288 / 2) * 144 + 64;
+        uint8_t* bmp = (uint8_t*)ps_alloc(bmpCap, AllocPref::PreferPSRAM, "g2.map.bmp");
+        if (bmp) {
+          const size_t bmpLen = g2RenderCurrentMapBmp(bmp, bmpCap);
+          if (bmpLen > 0) {
+            // Push into the existing image child (no re-CREATE). Blocks for
+            // full ack (tolerate=0) so pushes never overlap → reusing the
+            // same magic range each frame is safe.
+            unsigned okFrags = 0, totalFrags = 0;
+            (void)sendImageBmpFragmentsNoCreate(*arm, "mapPage",
+                                                kPushMagicBase,
+                                                imgTile.containerId, imgTile.containerName,
+                                                bmp, bmpLen, &okFrags, &totalFrags,
+                                                /*tolerateMissedAcks*/ 0);
+            DEBUG_G2F("[G2] map page: image pushed (%u/%u frags)", okFrags, totalFrags);
+          } else {
+            DEBUG_G2F("[G2] map page: render failed (no valid map?)");
+          }
+          free(bmp);
+        }
+        dirty = false;
+      }
+
+      vTaskDelay(pdMS_TO_TICKS(120));   // poll for taps between renders
+    }
+
+    gMapPageActive     = false;
+    gMapPagePendingTap = 0;
+    probePostProbeShutdown(*arm);
+  } while (0);
+
+  if (a->onDone) a->onDone();
+  delete a;
+  vTaskDelete(nullptr);
+}
+
+// Public entry — spawn the interactive map-page worker. Stack matches the
+// OLED map render task (renderMap is the stack-heavy step; the image push
+// runs after it returns each frame, so max-not-sum).
+static bool g2ShowMapPage(void (*onDone)()) {
+  if (ESP.getFreeHeap() < 16 * 1024) {
+    DEBUG_G2F("[G2] map page: declining — heap low (%u B free)",
+              (unsigned)ESP.getFreeHeap());
+    return false;
+  }
+  auto* a = new MapPageArgs;
+  if (!a) return false;
+  a->onDone = onDone;
+  if (xTaskCreate(g2MapPageWorker, "g2_map_page", MAP_RENDER_STACK_WORDS, a,
+                  tskIDLE_PRIORITY + 2, nullptr) != pdPASS) {
+    DEBUG_G2F("[G2] map page: xTaskCreate failed");
+    delete a;
+    return false;
+  }
+  return true;
+}
+
+static const char* cmd_g2map(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  (void)argsInput;
+  if (!isG2Connected()) return "Error: G2 map: not connected";
+  if (!g2ShowMapPage(nullptr)) return "Error: G2 map: busy or heap low — try again";
+  return "G2 map: opening interactive map page — tap a control on the lens; Back to exit.";
+}
+#endif // ENABLE_MAPS
 
 // ─────────────────────────────────────────────────────────────────────
 // Camera viewer — capture one JPEG, decode to RGB888 via
