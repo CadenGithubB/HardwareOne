@@ -1007,6 +1007,15 @@ const char* cmd_espnow_encstatus(const String& argsInput);
 const char* cmd_espnow_pairsecure(const String& originalCmd);
 void deriveKeyFromPassphrase(const String& passphrase, uint8_t* key);
 
+// WPS-style pairing mode (global timed window; distinct from the per-peer
+// espnowOpenPairingWindow KEY_EX re-key window). Broadcasts a discovery beacon
+// and auto secure-pairs same-mesh devices whose window is also open.
+const char* cmd_espnow_pairmode(const String& argsInput);
+void     espnowPairModeOpen(uint32_t seconds);   // clamps to <=600; 0 -> default 120
+void     espnowPairModeClose();
+bool     espnowPairModeActive();
+uint32_t espnowPairModeRemainingMs();
+
 // Time sync
 const char* cmd_espnow_timesync(const String& originalCmd);
 const char* cmd_espnow_timestatus(const String& argsInput);

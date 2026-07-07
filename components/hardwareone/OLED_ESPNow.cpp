@@ -47,6 +47,14 @@ OLEDEspNowState gOledEspNowState;
 // right=sent + live delivery status).
 static struct { bool isSent; uint32_t msgId; uint8_t sendState; } gOledRowMeta[OLED_SCROLL_MAX_ITEMS];
 
+// =============================================================================
+// Pairing view — WPS-style toggle (see espnowpairmode / espnowPairMode* core)
+// =============================================================================
+// Open the timed pairing window on BOTH same-mesh devices; they broadcast a
+// discovery beacon and auto secure-pair each other. This screen is just the
+// on/off toggle + countdown + a live list of what has paired in. All discovery
+// and pairing logic lives in System_ESPNow.cpp; the OLED only drives the window.
+
 // --- Conversation (device-detail) message-list geometry ---
 // The conversation view relies on the GLOBAL header bar (title "ESPNOW: Text"),
 // so message rows start at OLED_CONTENT_START_Y like the sibling ESP-NOW views
@@ -592,19 +600,50 @@ void oledEspNowDisplayRooms(Adafruit_SSD1306* display) {
 
 void oledEspNowDisplayPairing(Adafruit_SSD1306* display) {
   if (!display) return;
-  
+
   display->setTextSize(1);
   display->setTextColor(DISPLAY_COLOR_WHITE);
-  display->setCursor(0, 0);
-  display->println("== PAIRING MODE ==");
-  display->println();
-  display->println("Listening for new");
-  display->println("devices...");
-  display->println();
-  display->println("New devices will");
-  display->println("appear in list.");
-  
-  // Note: Footer is drawn by global render loop
+  int y = OLED_CONTENT_START_Y;
+
+  if (espnowPairModeActive()) {
+    // Keep re-rendering for the live countdown. Self-extinguishing: a short
+    // window re-armed each frame stops within ~1.2s of the window closing or
+    // the user leaving the view — no fixed multi-minute dirty window.
+    oledMarkDirtyUntil(millis() + 1200);
+
+    uint32_t remS = espnowPairModeRemainingMs() / 1000;
+    char line[22];
+    snprintf(line, sizeof(line), "Pairing ON  %lu:%02lu",
+             (unsigned long)(remS / 60), (unsigned long)(remS % 60));
+    display->setCursor(0, y); display->println(line); y += 11;
+    display->setCursor(0, y); display->println("Searching..."); y += 11;
+
+    // Live list of paired peers — grows as devices pair in during the window.
+    int shown = 0;
+    if (gEspNow) {
+      for (int i = 0; i < gEspNow->deviceCount && shown < 2; i++) {
+        if (isSelfMac(gEspNow->devices[i].mac)) continue;
+        String nm = gEspNow->devices[i].name;
+        display->setCursor(0, y);
+        display->print("+ ");
+        display->println(nm.length() ? nm : String("device"));
+        y += 10; shown++;
+      }
+    }
+    return;
+  }
+
+  // Window closed.
+  display->setCursor(0, y); display->println("Pairing mode OFF"); y += 12;
+  if (gEspNow && !gEspNow->encryptionEnabled) {
+    display->setCursor(0, y); display->println("Set a mesh"); y += 10;
+    display->setCursor(0, y); display->println("passphrase first."); y += 10;
+    display->setCursor(0, y); display->println("(Settings)");
+  } else {
+    display->setCursor(0, y); display->println("Press A to start,"); y += 10;
+    display->setCursor(0, y); display->println("then do the same"); y += 10;
+    display->setCursor(0, y); display->println("on the other one.");
+  }
 }
 
 // =============================================================================
@@ -888,8 +927,26 @@ bool oledEspNowHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
       return false;
     
     case ESPNOW_VIEW_STATUS:
-    case ESPNOW_VIEW_PAIRING:
       // B button: Back to main menu
+      if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
+        gOledEspNowState.currentView = ESPNOW_VIEW_MAIN_MENU;
+        return true;
+      }
+      return false;
+
+    case ESPNOW_VIEW_PAIRING:
+      // A toggles the pairing window on/off; B returns to the menu.
+      if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
+        if (espnowPairModeActive()) {
+          espnowPairModeClose();
+        } else if (gEspNow && !gEspNow->encryptionEnabled) {
+          // Can't pair without the shared mesh key — no-op; the screen shows why.
+        } else {
+          espnowPairModeOpen(120);
+        }
+        oledMarkDirty();
+        return true;
+      }
       if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
         gOledEspNowState.currentView = ESPNOW_VIEW_MAIN_MENU;
         return true;
@@ -1011,44 +1068,51 @@ bool oledEspNowHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
     case ESPNOW_VIEW_SETTINGS:
       return oledEspNowHandleSettingsInput(deltaX, deltaY, newlyPressed);
       
-    case ESPNOW_VIEW_SETTINGS_KEYBOARD:
-      if (oledKeyboardHandleInput(deltaX, deltaY, newlyPressed)) {
-        if (oledKeyboardIsCompleted()) {
-          String value = oledKeyboardGetText();
-          oledEspNowApplySettingsEdit(value);
-          oledKeyboardReset();
-          gOledEspNowState.currentView = ESPNOW_VIEW_SETTINGS;
-        }
-        return true;
-      }
-      // B button cancels keyboard
-      if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
+    case ESPNOW_VIEW_SETTINGS_KEYBOARD: {
+      // Let the keyboard process this frame's input, then act on the resulting
+      // state. Checking IsCancelled() here (not only IsCompleted()) is what makes
+      // a single B press return to the settings list: the keyboard's own B
+      // handler flips it to cancelled+inactive, so without this branch the view
+      // would stay on a now-inactive keyboard. The global header then paints over
+      // its title, leaving a title-less "ghost" keyboard that looks exactly like
+      // the device-name entry screen — and it took a SECOND B press to escape.
+      bool kbHandled = oledKeyboardHandleInput(deltaX, deltaY, newlyPressed);
+      if (oledKeyboardIsCompleted()) {
+        String value = oledKeyboardGetText();
+        oledEspNowApplySettingsEdit(value);
         oledKeyboardReset();
         gOledEspNowState.currentView = ESPNOW_VIEW_SETTINGS;
         return true;
       }
-      return false;
-      
+      if (oledKeyboardIsCancelled()) {
+        oledKeyboardReset();
+        gOledEspNowState.currentView = ESPNOW_VIEW_SETTINGS;
+        return true;
+      }
+      return kbHandled;
+    }
+
     case ESPNOW_VIEW_DEVICE_CONFIG:
       return oledEspNowHandleDeviceConfigInput(deltaX, deltaY, newlyPressed);
       
-    case ESPNOW_VIEW_DEVICE_CONFIG_KEYBOARD:
-      if (oledKeyboardHandleInput(deltaX, deltaY, newlyPressed)) {
-        if (oledKeyboardIsCompleted()) {
-          String value = oledKeyboardGetText();
-          oledEspNowApplyDeviceConfigEdit(value);
-          oledKeyboardReset();
-          gOledEspNowState.currentView = ESPNOW_VIEW_DEVICE_CONFIG;
-        }
-        return true;
-      }
-      if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
+    case ESPNOW_VIEW_DEVICE_CONFIG_KEYBOARD: {
+      // Same single-press cancel fix as ESPNOW_VIEW_SETTINGS_KEYBOARD above.
+      bool kbHandled = oledKeyboardHandleInput(deltaX, deltaY, newlyPressed);
+      if (oledKeyboardIsCompleted()) {
+        String value = oledKeyboardGetText();
+        oledEspNowApplyDeviceConfigEdit(value);
         oledKeyboardReset();
         gOledEspNowState.currentView = ESPNOW_VIEW_DEVICE_CONFIG;
         return true;
       }
-      return false;
-      
+      if (oledKeyboardIsCancelled()) {
+        oledKeyboardReset();
+        gOledEspNowState.currentView = ESPNOW_VIEW_DEVICE_CONFIG;
+        return true;
+      }
+      return kbHandled;
+    }
+
     case ESPNOW_VIEW_DEVICE_DETAIL:
       // File mode shows Send/Receive inline: Up/Down move the cursor, A selects.
       // X (mode) and B (back) fall through to the shared all-modes handlers below.

@@ -85,6 +85,7 @@ enum EspNowV4Type : uint8_t {
   ESPNOW_V4_TYPE_TOPO_START      = 23,
   ESPNOW_V4_TYPE_TOPO_PEER       = 24,
   ESPNOW_V4_TYPE_TIME_SYNC       = 25,
+  ESPNOW_V4_TYPE_PAIR_BEACON     = 26,  // WPS-style pairing beacon — plaintext FF broadcast sent while a pairing window is open
 
   // --- Application unicast (30–49) ---
   ESPNOW_V4_TYPE_CMD             = 30,
@@ -194,6 +195,21 @@ struct __attribute__((packed)) V4PayloadHeartbeat {
   char     deviceName[20];
 };
 static_assert(sizeof(V4PayloadHeartbeat) == 32, "V4PayloadHeartbeat must be 32 bytes");
+
+// WPS-style pairing beacon (ESPNOW_V4_TYPE_PAIR_BEACON). Sent PLAINTEXT to the
+// FF broadcast address (flags=0) every ~1.5s while a device's pairing window is
+// open. Same-mesh scoping is enforced for free by the header meshFingerprint
+// gate (RX drops beacons whose fingerprint matches no enabled local mesh), so
+// no fingerprint is carried here. All fields are attacker-controllable — the
+// receiver must sanitize deviceName and never trust it beyond a display label;
+// real trust comes from the subsequent KEY_EX (mesh-passphrase HMAC).
+struct __attribute__((packed)) V4PayloadPairBeacon {
+  uint8_t  role;            // sender MESH_ROLE_* (informational)
+  uint8_t  flags;           // reserved (0)
+  uint8_t  reserved[2];     // pad, 0
+  char     deviceName[20];  // sender's espnowDeviceName (not guaranteed NUL-terminated)
+};
+static_assert(sizeof(V4PayloadPairBeacon) == 24, "V4PayloadPairBeacon must be 24 bytes");
 
 // Time sync payload
 struct __attribute__((packed)) V4PayloadTimeSync {
