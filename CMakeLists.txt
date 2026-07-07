@@ -16,7 +16,20 @@ cmake_minimum_required(VERSION 3.16)
 # Precedence: IDF_TARGET env var (set by `idf.py set-target` and by idf.py
 # during normal builds) → existing sdkconfig → S3 fallback for a totally
 # fresh checkout (project is S3-first).
-set(_inferred_target "$ENV{IDF_TARGET}")
+# `idf.py set-target <chip>` and normal builds pass the target as a CMake cache
+# variable (-DIDF_TARGET=<chip>). Prefer it so board/target validation compares
+# against the target being configured RIGHT NOW, not a stale sdkconfig. Without
+# this, switching to an ESP32 board while an ESP32-S3 build exists (or vice
+# versa) trips the mismatch guard below during set-target's own reconfigure and
+# aborts the switch (the reconfigure deletes/replaces sdkconfig, so reading it
+# yields the old chip or the S3 fallback). Env var and sdkconfig remain fallbacks.
+set(_inferred_target "")
+if(DEFINED IDF_TARGET AND NOT "${IDF_TARGET}" STREQUAL "")
+    set(_inferred_target "${IDF_TARGET}")
+endif()
+if(NOT _inferred_target)
+    set(_inferred_target "$ENV{IDF_TARGET}")
+endif()
 set(_sdkconfig "${CMAKE_CURRENT_SOURCE_DIR}/sdkconfig")
 if(NOT _inferred_target)
     if(EXISTS "${_sdkconfig}")
