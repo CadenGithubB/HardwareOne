@@ -35,6 +35,7 @@ static void populatePowerMainMenu() {
   oledScrollClearKeepSelection(&sPowerMainScroll);
   oledScrollAddItem(&sPowerMainScroll, "Adjust CPU Power");
   oledScrollAddItem(&sPowerMainScroll, "Sleep Settings");
+  oledScrollAddItem(&sPowerMainScroll, "Restart Device");
   oledScrollClampSelection(&sPowerMainScroll);
 }
 
@@ -64,7 +65,7 @@ static void populatePowerSleepMenu() {
   oledScrollAddItem(&sPowerSleepScroll, powerSaveLabel);
   oledScrollAddItem(&sPowerSleepScroll, "Sleep 20s");
   oledScrollAddItem(&sPowerSleepScroll, "Screen Off");
-  oledScrollAddItem(&sPowerSleepScroll, "Restart Device");
+  // "Restart Device" now lives on the main Power menu (with a confirmation).
   oledScrollClampSelection(&sPowerSleepScroll);
 }
 
@@ -123,12 +124,24 @@ void displayPowerSleep() {
 // Power Menu Actions
 // ============================================================================
 
+// Confirm-dialog callback: fired only when the user picks "Yes" on the reboot
+// prompt. Routed through the command system (same path as the old Sleep-menu
+// entry) so it gets a normal [CMD] audit-log entry.
+static void powerRebootConfirmed(void* /*userData*/) {
+  DEBUG_SYSTEMF("[POWER_OLED] Reboot confirmed - restarting device");
+  executeOLEDCommand("reboot");
+}
+
 static void executePowerAction() {
   int sel = sPowerMainScroll.selectedIndex;
   if (sel == 0) {
     requestOLEDMode(OLED_POWER_CPU, "power.submenu.cpu");
   } else if (sel == 1) {
     requestOLEDMode(OLED_POWER_SLEEP, "power.submenu.sleep");
+  } else if (sel == 2) {
+    // Guard the reboot behind a confirmation, defaulting to "No", so a stray
+    // A/X press can't restart the device.
+    oledConfirmRequest("Restart device?", nullptr, powerRebootConfirmed, nullptr, false);
   }
 }
 
@@ -159,7 +172,6 @@ static void executePowerSleepAction() {
     }
     case 1: executeOLEDCommand("lightsleep 20"); break;
     case 2: executeOLEDCommand("oledmode off"); break;
-    case 3: executeOLEDCommand("reboot"); break;
   }
 }
 
