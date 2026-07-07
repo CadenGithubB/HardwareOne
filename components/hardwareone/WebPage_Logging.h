@@ -273,7 +273,7 @@ inline void streamLoggingInner(httpd_req_t* req) {
     
     <!-- Debug Message Categories -->
     <div style='font-weight:bold;color:var(--panel-fg);margin:1rem 0 0.75rem'>Debug Message Categories</div>
-      <div style='padding:0.5rem;background:var(--panel-bg);border:1px solid var(--border);border-radius:4px;max-height:300px;overflow-y:auto'>
+      <div id='sys-flags-pane' style='padding:0.5rem;background:var(--panel-bg);border:1px solid var(--border);border-radius:4px;max-height:300px;overflow-y:auto'>
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
             <input type='checkbox' id='flag-auth' value='0x0001' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>Authentication</span>
