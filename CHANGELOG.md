@@ -8,6 +8,24 @@ Entries for 0.96.1 and earlier were backfilled from git history (this repo had
 no tags or releases before 0.96.2); they are terse, commit-grounded summaries,
 dated from each version's commit. Dates are YYYY-MM-DD.
 
+## [0.97.3] - 2026-07-06
+Maps on the G2 glasses, WPS-style ESP-NOW pairing, and a batch of OLED, web, and build fixes.
+### Added
+- G2 glasses: a "Maps" page under a new "Apps" hijack submenu renders the offline map to the lens as a list+image compound (Zoom In/Out, Reset View, Recenter); the `g2map` CLI opens it too. GPS and RTC re-enabled.
+- ESP-NOW WPS-style pairing mode: open a timed window (`espnowpairmode`, or the OLED ESP-NOW > Pairing screen) on two same-mesh devices and they broadcast a discovery beacon and auto secure-pair. Admin-only; refuses without a mesh passphrase.
+- OLED CLI Input page shows an inline OK/FAILED result screen after each command.
+- OLED Power menu: "Restart Device" moved to the top menu behind a Yes/No confirmation.
+### Changed
+- Setup wizard timezone list shows a representative city (e.g. "US Eastern - New York") instead of only an abbreviation.
+- Web logging page: the debug-flag checkbox pane is now wired to its select-all/none and flag-collection JS.
+### Fixed
+- G2 hijack map and camera pages refresh the 60s safety-timeout on every control tap, so active use no longer drops back to the menu mid-interaction.
+- OLED Change Password: the on-screen keyboard now draws when a field is selected (was active but never rendered).
+- OLED ESP-NOW settings/device-config keyboards exit on a single B press (was leaving a title-less ghost keyboard).
+- Build: prefer `-DIDF_TARGET` over a stale sdkconfig so `idf.py set-target` can switch boards without tripping the target-mismatch guard.
+### Docs
+- Planning docs: sensor reading-envelope / envelope-cleanup / rendering-unification, ESP-NOW pairing-mode brief, a settings.json lifecycle audit, and a G2 map multi-shade rendering plan.
+
 ## [0.97.2] - 2026-07-03
 Durable system event log: the firmware now keeps a persistent, always-on record of what it does at the system level, so an unexpected event (like an odd startup message) can be read back from the device instead of reconstructed after the fact.
 ### Added
