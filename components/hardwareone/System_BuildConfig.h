@@ -89,7 +89,7 @@
   #define CUSTOM_ENABLE_WEB_BOND       1
   #define CUSTOM_ENABLE_WEB_MQTT       0
   #define CUSTOM_ENABLE_WEB_GAMES      0
-  #define CUSTOM_ENABLE_WEB_MAPS       0
+  #define CUSTOM_ENABLE_WEB_MAPS       1
   #define CUSTOM_ENABLE_WEB_BATTERY    1
 #endif
 
@@ -124,13 +124,13 @@
   // Memory hints (rough — full breakdown in "MEMORY SAVINGS REFERENCE" below).
   #define CUSTOM_ENABLE_OLED        1   // SSD1306 OLED display
   #define CUSTOM_ENABLE_GAMEPAD     1   // Adafruit Seesaw gamepad
-  #define CUSTOM_ENABLE_GPS         0   // PA1010D GPS module — disabled 2026-06-07 (not used)
+  #define CUSTOM_ENABLE_GPS         1   // PA1010D GPS module - re-enabled 2026-07-03
   #define CUSTOM_ENABLE_IMU         0   // BNO055 IMU — not installed
   #define CUSTOM_ENABLE_TOF         0   // VL53L4CX ToF — not installed
   #define CUSTOM_ENABLE_THERMAL     1   // MLX90640 thermal camera
   #define CUSTOM_ENABLE_APDS        0   // APDS9960 gesture/proximity — not installed
   #define CUSTOM_ENABLE_FM_RADIO    0   // RDA5807 FM radio — disabled 2026-06-07 (not used)
-  #define CUSTOM_ENABLE_RTC         0   // DS3231 precision RTC — disabled 2026-06-07 (not used)
+  #define CUSTOM_ENABLE_RTC         1   // DS3231 precision RTC - re-enabled 2026-07-03
   #define CUSTOM_ENABLE_PRESENCE    0   // STHS34PF80 IR presence/motion — disabled 2026-06-07 (not used)
   #define CUSTOM_ENABLE_SERVO       0   // PCA9685 servo controller — not installed
 #endif
@@ -257,7 +257,7 @@
 #define ENABLE_WEB_GAME_DARKROOM    0   // A Dark Room (en/es/fr/zh_cn)
 
 // Maps: offline maps and waypoints web page.
-#define ENABLE_MAPS             0
+#define ENABLE_MAPS             1
 
 
 // ╔═══════════════════════════════════════════════════════════════════════════╗

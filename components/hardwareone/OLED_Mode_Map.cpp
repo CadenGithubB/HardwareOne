@@ -2123,8 +2123,12 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
     float accelLon = (effectiveDeltaX * cosR - effectiveDeltaY * sinR) * accel;
     float accelLat = (effectiveDeltaX * sinR + effectiveDeltaY * cosR) * accel;
     
-    gMapVelocityLon -= accelLon;
-    gMapVelocityLat += accelLat;
+    // Pan follows the joystick direction (push right → view moves east,
+    // push up → view moves north). accelLon/accelLat already include the
+    // rotation matrix, so negating both keeps the mapping correct at any
+    // gMapRotation.
+    gMapVelocityLon += accelLon;
+    gMapVelocityLat -= accelLat;
     
     gMapVelocityLon = fmaxf(-maxVelocity, fminf(maxVelocity, gMapVelocityLon));
     gMapVelocityLat = fmaxf(-maxVelocity, fminf(maxVelocity, gMapVelocityLat));

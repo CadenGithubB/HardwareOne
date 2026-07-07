@@ -609,6 +609,11 @@ enum G2HijackPage : uint8_t {
   // (peers / peer detail / broadcast / stats) and selected peer index in
   // file-static within G2_Page_ESPNow.cpp.
   G2_HIJACK_PAGE_ESPNOW_APP      = 10,
+  // Apps launcher — a submenu grouping the app-like pages (ESP-NOW App,
+  // Files) plus the Maps viewer under one top-level entry, keeping the
+  // main hijack menu short. Stateless: each row forwards to another page's
+  // show*Menu() (which flips gHijackPage) or launches the map viewer.
+  G2_HIJACK_PAGE_APPS            = 11,
 };
 G2HijackPage g2GetHijackPage();
 void         g2SetHijackPage(G2HijackPage p);
