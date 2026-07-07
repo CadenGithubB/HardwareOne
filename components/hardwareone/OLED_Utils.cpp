@@ -2403,6 +2403,9 @@ void drawOLEDFooter() {
           case ESPNOW_VIEW_MODE_SELECT:
             hints = "A:Select B:Cancel";
             break;
+          case ESPNOW_VIEW_PAIRING:
+            hints = "A:Toggle B:Back";
+            break;
           case ESPNOW_VIEW_TEXT_KEYBOARD:
           case ESPNOW_VIEW_REMOTE_FORM:
             hints = "A:Type X:Done B:Cancel";

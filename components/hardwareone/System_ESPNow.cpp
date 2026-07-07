@@ -4173,6 +4173,140 @@ static void v4h_file_cancel(const V4RxCtx& ctx) {
 //     deliberately: it is HW-validated and the bond SEND side still does the same
 //     heavy FS in processMeshHeartbeats (the super-loop), so deferring file_end
 //     alone buys no clean RX task. Revisit together with the super-loop split.
+// ============================================================================
+// WPS-style pairing mode (global timed window)
+// ============================================================================
+// DISTINCT from the per-peer espnowOpenPairingWindow()/espnowConsumePairingWindow()
+// KEY_EX re-key window. While this global window is open the device broadcasts a
+// plaintext FF PAIR_BEACON (~1.5s), and on hearing another same-mesh device's
+// beacon *while its own window is also open* it auto secure-pairs that peer.
+// Runtime-only (a reboot leaves it off). "Same mesh" is enforced upstream by the
+// header meshFingerprint gate; encryption (a mesh passphrase) is required.
+static uint32_t gPairModeUntilMs = 0;
+
+void espnowPairModeOpen(uint32_t seconds) {
+  if (seconds == 0)   seconds = 120;
+  if (seconds > 600)  seconds = 600;
+  uint32_t until = (uint32_t)millis() + seconds * 1000u;
+  if (until == 0) until = 1;  // 0 is the "off" sentinel
+  gPairModeUntilMs = until;
+}
+void espnowPairModeClose() { gPairModeUntilMs = 0; }
+bool espnowPairModeActive() {
+  return gPairModeUntilMs != 0 && (int32_t)(gPairModeUntilMs - (uint32_t)millis()) > 0;
+}
+uint32_t espnowPairModeRemainingMs() {
+  if (!espnowPairModeActive()) return 0;
+  return gPairModeUntilMs - (uint32_t)millis();
+}
+
+// True if this MAC is already in the local device registry (self included).
+static bool pairModeIsPaired(const uint8_t* mac) {
+  if (!gEspNow) return false;
+  for (int i = 0; i < gEspNow->deviceCount; i++) {
+    if (memcmp(gEspNow->devices[i].mac, mac, 6) == 0) return true;
+  }
+  return false;
+}
+
+// Copy an over-the-air (attacker-controlled, maybe non-terminated) char[20] name
+// into a safe single-token label: whitelist [A-Za-z0-9_-], space->'_', drop the
+// rest. Prevents JSON-at-rest injection (saveEspNowDevices writes names raw) and
+// keeps it a single espnowpairsecure arg. Empty result => caller derives from MAC.
+static void pairModeSanitizeName(const char* raw, char* out, size_t outSize) {
+  size_t j = 0;
+  for (size_t i = 0; i < 20 && j + 1 < outSize; i++) {
+    char c = raw[i];
+    if (c == '\0') break;
+    if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+        (c >= '0' && c <= '9') || c == '-' || c == '_') {
+      out[j++] = c;
+    } else if (c == ' ') {
+      out[j++] = '_';
+    }
+  }
+  out[j] = '\0';
+}
+
+// Per-MAC cooldown so a beacon stream (one every ~1.5s) can't flood the 6-deep
+// cmd_exec queue with duplicate auto-pair jobs before the first one completes.
+static uint8_t  gAutoPairSeenMac[4][6] = {};
+static uint32_t gAutoPairSeenAt[4]     = {};
+static const uint32_t AUTOPAIR_COOLDOWN_MS = 8000;
+static bool pairModeRecentlySeen(const uint8_t* mac) {
+  uint32_t now = (uint32_t)millis();
+  for (int i = 0; i < 4; i++) {
+    if (gAutoPairSeenAt[i] != 0 &&
+        (uint32_t)(now - gAutoPairSeenAt[i]) < AUTOPAIR_COOLDOWN_MS &&
+        memcmp(gAutoPairSeenMac[i], mac, 6) == 0) return true;
+  }
+  return false;
+}
+static void pairModeMarkSeen(const uint8_t* mac) {
+  uint32_t now = (uint32_t)millis();
+  int slot = 0; uint32_t oldest = gAutoPairSeenAt[0];
+  for (int i = 0; i < 4; i++) {
+    if (gAutoPairSeenAt[i] == 0) { slot = i; break; }
+    if (gAutoPairSeenAt[i] < oldest) { oldest = gAutoPairSeenAt[i]; slot = i; }
+  }
+  memcpy(gAutoPairSeenMac[slot], mac, 6);
+  gAutoPairSeenAt[slot] = (now == 0) ? 1 : now;
+}
+
+// Deferred to cmd_exec_task (threading invariant: no FS/crypto inline on
+// espnow_task). Reuses cmd_espnow_pairsecure wholesale — the sole security gate
+// is our own precheck, so log the event here for the audit trail.
+struct PairModeJob { uint8_t mac[6]; char name[24]; };
+static void runDeferredPairModePair(void* arg) {
+  PairModeJob* w = static_cast<PairModeJob*>(arg);
+  if (espnowPairModeActive() && !pairModeIsPaired(w->mac)) {
+    char macStr[18];
+    formatMacAddressBuf(w->mac, macStr, sizeof(macStr));
+    String args = String(macStr) + " " + w->name;
+    const char* res = cmd_espnow_pairsecure(args);
+    BROADCAST_PRINTF("[PAIRMODE] auto-pair %s (%s): %s", w->name, macStr, res ? res : "(null)");
+    logSystemEvent("ESPNOW", "pair-mode auto-paired %s (%s)", macStr, w->name);
+  }
+  free(w);
+}
+
+// RX handler for PAIR_BEACON. Inline on espnow_task — must stay cheap; the heavy
+// pair is deferred. All beacon fields are untrusted.
+static void v4h_pair_beacon(const V4RxCtx& ctx) {
+  if (ctx.payloadLen < sizeof(V4PayloadPairBeacon)) return;
+  if (!espnowPairModeActive()) return;              // mutual WPS gate: OUR window must be open too
+  const uint8_t* mac = ctx.recv_info->src_addr;
+  if (isSelfMac(mac)) return;
+  if (pairModeIsPaired(mac)) return;                // only auto-pair UNKNOWN peers (no OTA rename of known ones)
+  if (pairModeRecentlySeen(mac)) return;            // rate-limit repeat beacons
+  pairModeMarkSeen(mac);
+
+  const V4PayloadPairBeacon* b = (const V4PayloadPairBeacon*)ctx.payload;
+  PairModeJob* w = (PairModeJob*)ps_alloc(sizeof(PairModeJob), AllocPref::PreferPSRAM, "espnow.pairmode");
+  if (!w) return;
+  memcpy(w->mac, mac, 6);
+  pairModeSanitizeName(b->deviceName, w->name, sizeof(w->name));
+  if (w->name[0] == '\0') {
+    snprintf(w->name, sizeof(w->name), "peer_%02X%02X%02X", mac[3], mac[4], mac[5]);
+  }
+  if (!submitDeferredToCmdExec(runDeferredPairModePair, w)) free(w);
+}
+
+// Broadcast one pairing beacon to FF. BROADCAST_AUTH appends a mesh-group-key
+// (passphrase-derived) HMAC so ONLY devices holding the same passphrase can
+// trigger our auto-pair — the handler row is REQ_AUTHENTICATED, so an outsider's
+// forged/plaintext beacon is dropped after one cheap HMAC verify, before it can
+// mutate the device registry. No ACK_REQ (a broadcast would ACK-storm). Fresh
+// msgId each call or dedup eats it.
+static void sendPairBeacon() {
+  V4PayloadPairBeacon beacon = {};
+  beacon.role = gSettings.meshRole;
+  strncpy(beacon.deviceName, gSettings.espnowDeviceName.c_str(), sizeof(beacon.deviceName) - 1);
+  uint8_t bcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+  v4_send_frame(bcast, ESPNOW_V4_TYPE_PAIR_BEACON, ESPNOW_V4_FLAG_BROADCAST_AUTH,
+                generateMessageId(), (const uint8_t*)&beacon, sizeof(beacon), 1);
+}
+
 static const V4OpcodeEntry kV4HandlerTable[] = {
   // Phase 3.3: KEY_EX handshake. NOT REQ_PAIRED — these *establish* pairing.
   // Handler verifies HMAC via mesh bootstrap key; loud-rejects bad frames.
@@ -4198,6 +4332,11 @@ static const V4OpcodeEntry kV4HandlerTable[] = {
   { ESPNOW_V4_TYPE_CMD,              V4_OPC_FLAG_REQ_PAIRED,                               v4h_cmd               },
   { ESPNOW_V4_TYPE_CMD_RESP,         0,                                                    v4h_cmd_resp          },
   { ESPNOW_V4_TYPE_HEARTBEAT,        0,                                                    v4h_heartbeat         },
+  // Discovery beacon carries a mesh-group-key BROADCAST_AUTH HMAC (see sendPairBeacon).
+  // REQ_AUTHENTICATED gates auto-pair to same-passphrase devices so an outsider cannot
+  // forge a beacon to pollute our registry. NOT REQ_PAIRED — the sender is unpaired by
+  // definition (pairing is what this establishes).
+  { ESPNOW_V4_TYPE_PAIR_BEACON,      V4_OPC_FLAG_REQ_AUTHENTICATED,                        v4h_pair_beacon       },
   { ESPNOW_V4_TYPE_SENSOR_STATUS,    0,                                                    v4h_sensor_status     },
   { ESPNOW_V4_TYPE_SENSOR_BROADCAST, 0,                                                    v4h_sensor_broadcast  },
   { ESPNOW_V4_TYPE_TOPO_REQ,         0,                                                    v4h_topo_req          },
@@ -7662,6 +7801,18 @@ void processMeshHeartbeats() {
   // 2. Send periodic V3 mesh heartbeat (if we have active peers OR paired devices)
   static const uint32_t HB_INTERVAL_MS = 5000;
   uint32_t now = (uint32_t)millis();
+
+  // 2a. WPS pairing beacon — while a pairing window is open, broadcast a plaintext
+  // FF beacon so same-mesh devices in pairing mode can discover + auto-pair us.
+  // Deliberately NOT gated on having peers (the heartbeat below is): this is the
+  // open discovery signal a fresh, peer-less device otherwise never emits.
+  static const uint32_t PAIR_BEACON_INTERVAL_MS = 1500;
+  static uint32_t sLastPairBeaconMs = 0;
+  if (espnowPairModeActive() && (now - sLastPairBeaconMs >= PAIR_BEACON_INTERVAL_MS)) {
+    sLastPairBeaconMs = now;
+    sendPairBeacon();
+  }
+
   if (now - gLastHeartbeatSentMs >= HB_INTERVAL_MS) {
     gLastHeartbeatSentMs = now;
     // Count active runtime peers
@@ -14252,6 +14403,52 @@ const char* cmd_espnow_messages(const String& argsInput) {
   return "OK";
 }
 
+// WPS-style pairing mode: open a timed window on BOTH same-mesh devices and they
+// auto secure-pair. Requires a mesh passphrase (encryption). Runtime-only.
+const char* cmd_espnow_pairmode(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!gEspNow || !gEspNow->initialized) {
+    return "Error: ESP-NOW not initialized. Run 'openespnow' first.";
+  }
+  CommandArgs a(argsInput);
+  String sub = a.count() > 0 ? a.arg(0) : "";
+  sub.toLowerCase();
+
+  if (sub == "off" || sub == "stop") {
+    espnowPairModeClose();
+    return "Pairing mode off.";
+  }
+  if (sub == "status") {
+    if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+    if (espnowPairModeActive()) {
+      snprintf(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE,
+               "Pairing mode ON (%lus left).",
+               (unsigned long)(espnowPairModeRemainingMs() / 1000));
+    } else {
+      snprintf(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE, "Pairing mode off.");
+    }
+    return getDebugBuffer();
+  }
+
+  // Open the window. Pairing rides KEY_EX (mesh-passphrase HMAC), so a passphrase
+  // must already be set — refuse early with an actionable message otherwise.
+  if (!gEspNow->encryptionEnabled) {
+    return "Error: Set a mesh passphrase first (espnowsetpassphrase). Pairing needs the shared mesh key.";
+  }
+  uint32_t secs = 120;
+  if (sub.length() > 0) {
+    long v = sub.toInt();
+    if (v > 0) secs = (uint32_t)v;
+  }
+  if (secs > 600) secs = 600;
+  espnowPairModeOpen(secs);
+  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+  snprintf(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE,
+           "Pairing mode ON for %lus. Open pairing on the other device too (same mesh).",
+           (unsigned long)secs);
+  return getDebugBuffer();
+}
+
 // Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 extern const CommandEntry espNowCommands[] = {
   // ---- ESP-NOW Status & Statistics ----
@@ -14356,6 +14553,7 @@ extern const CommandEntry espNowCommands[] = {
   { "espnowsetpassphrase", "Set encryption passphrase on a mesh: 'espnowsetpassphrase <mesh> <phrase>'.", true, cmd_espnow_setpassphrase, "Usage: espnowsetpassphrase <mesh> <passphrase>\n       espnowsetpassphrase <mesh> clear" },
   { "espnowencstatus", "Show ESP-NOW encryption status and key fingerprint.", true, cmd_espnow_encstatus },
   { "espnowpairsecure", "Pair device with encryption: 'espnowpairsecure <mac> <name> [mesh]'. (local pair is synchronous; secure channel completes async - see espnowsessions)", true, cmd_espnow_pairsecure, "Usage: espnowpairsecure <mac_address> <device_name> [mesh]\n       Requires a mesh passphrase first - run 'espnowsetpassphrase <mesh> <passphrase>'.\n       The device is added synchronously; KEY_EX then runs asynchronously (~100ms) so the encrypted channel becomes usable shortly after - inspect with 'espnowsessions' / 'espnowencstatus'." },
+  { "espnowpairmode", "WPS-style pairing: 'espnowpairmode [seconds|off|status]'. Open the window on BOTH same-mesh devices and they auto secure-pair.", true, cmd_espnow_pairmode, "Usage: espnowpairmode [<seconds>|off|status]\n       Default 120s, max 600. Requires a mesh passphrase set on both devices (same mesh).\n       While open, the device broadcasts a discovery beacon and auto-pairs any\n       other device whose window is also open. Pairing only, never bonding." },
   
   // ---- ESP-NOW Testing Commands ----
   { "teststreams", "Test topology stream management functions.", false, cmd_test_streams },
