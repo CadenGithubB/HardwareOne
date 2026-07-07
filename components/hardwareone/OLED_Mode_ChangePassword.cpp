@@ -45,7 +45,17 @@ static void displayChangePasswordMode() {
     ERROR_SYSTEMF("[CHANGE_PASSWORD] FATAL: oledDisplay is null!");
     return;
   }
-  
+
+  // If the on-screen keyboard is active (a field was selected for entry), render
+  // it full-screen instead of the fields view — same pattern every other
+  // keyboard-input mode uses (Login, CLI Input, LLM, SetPattern, ...). Without
+  // this guard the keyboard is active and receiving input but is never drawn, so
+  // selecting a field appears to do nothing.
+  if (oledKeyboardIsActive()) {
+    oledKeyboardDisplay(oledDisplay);
+    return;
+  }
+
   oledDisplay->clearDisplay();
   
   // Header
