@@ -87,37 +87,40 @@ int applyArchetypeSeed(const SetupArchetype* a) {
 // Time Zone Data
 // ============================================================================
 
+// Fixed-offset entries (no auto DST). The abbrev distinguishes the daylight
+// vs standard variant of each zone; the name gives a representative city and
+// the offset so it is findable without knowing the abbreviation.
 static const TimezoneEntry timezones[] = {
   // UTC
-  { "UTC",  "UTC / GMT (0:00)",                  0 },
-  // North America — Daylight Saving (summer)
-  { "EDT",  "US Eastern Daylight (-4:00)",     -240 },
-  { "CDT",  "US Central Daylight (-5:00)",     -300 },
-  { "MDT",  "US Mountain Daylight (-6:00)",    -360 },
-  { "PDT",  "US Pacific Daylight (-7:00)",     -420 },
-  { "AKDT", "Alaska Daylight (-8:00)",         -480 },
-  // North America — Standard Time (winter)
-  { "EST",  "US Eastern Standard (-5:00)",     -300 },
-  { "CST",  "US Central Standard (-6:00)",     -360 },
-  { "MST",  "US Mountain Standard (-7:00)",    -420 },
-  { "PST",  "US Pacific Standard (-8:00)",     -480 },
-  { "AKST", "Alaska Standard (-9:00)",         -540 },
-  { "HST",  "Hawaii (-10:00)",                 -600 },
+  { "UTC",  "UTC / GMT (0:00)",                     0 },
+  // North America — Daylight Saving
+  { "EDT",  "US Eastern - New York (-4:00)",     -240 },
+  { "CDT",  "US Central - Chicago (-5:00)",      -300 },
+  { "MDT",  "US Mountain - Denver (-6:00)",      -360 },
+  { "PDT",  "US Pacific - Los Angeles (-7:00)",  -420 },
+  { "AKDT", "Alaska - Anchorage (-8:00)",        -480 },
+  // North America — Standard Time
+  { "EST",  "US Eastern - New York (-5:00)",     -300 },
+  { "CST",  "US Central - Chicago (-6:00)",      -360 },
+  { "MST",  "US Mountain - Denver/Phoenix (-7:00)", -420 },
+  { "PST",  "US Pacific - Los Angeles (-8:00)",  -480 },
+  { "AKST", "Alaska - Anchorage (-9:00)",        -540 },
+  { "HST",  "Hawaii - Honolulu (-10:00)",        -600 },
   // Europe
-  { "GMT",  "UK / Ireland (0:00)",                0 },
-  { "BST",  "UK Summer Time (+1:00)",            60 },
-  { "CET",  "Central Europe (+1:00)",            60 },
-  { "CEST", "Central Europe Summer (+2:00)",    120 },
-  { "EET",  "Eastern Europe (+2:00)",           120 },
-  { "EEST", "Eastern Europe Summer (+3:00)",    180 },
+  { "GMT",  "UK/Ireland - London (0:00)",           0 },
+  { "BST",  "UK/Ireland - London (+1:00)",         60 },
+  { "CET",  "Central Europe - Paris/Berlin (+1:00)", 60 },
+  { "CEST", "Central Europe - Paris/Berlin (+2:00)", 120 },
+  { "EET",  "Eastern Europe - Athens (+2:00)",    120 },
+  { "EEST", "Eastern Europe - Athens (+3:00)",    180 },
   // Asia / Pacific
-  { "IST",  "India (+5:30)",                    330 },
-  { "SGT",  "Singapore (+8:00)",                480 },
-  { "JST",  "Japan (+9:00)",                    540 },
-  { "AEST", "Australia East (+10:00)",          600 },
-  { "AEDT", "Australia East Summer (+11:00)",   660 },
-  { "NZST", "New Zealand (+12:00)",             720 },
-  { "NZDT", "New Zealand Summer (+13:00)",      780 },
+  { "IST",  "India - Mumbai/Delhi (+5:30)",       330 },
+  { "SGT",  "Singapore (+8:00)",                  480 },
+  { "JST",  "Japan - Tokyo (+9:00)",              540 },
+  { "AEST", "Australia East - Sydney (+10:00)",   600 },
+  { "AEDT", "Australia East - Sydney (+11:00)",   660 },
+  { "NZST", "New Zealand - Auckland (+12:00)",    720 },
+  { "NZDT", "New Zealand - Auckland (+13:00)",    780 },
 };
 static const size_t timezoneCount = sizeof(timezones) / sizeof(timezones[0]);
 
