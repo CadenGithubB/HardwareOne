@@ -189,7 +189,7 @@ inline void streamCameraSensorJs(httpd_req_t* req) {
     "};\n"
     "window.deleteCameraRecording = function(name) {\n"
     "  if (!confirm('Delete ' + name + '?')) return;\n"
-    "  hw.postFormText('/api/cli', {cmd:'cameravideodelete ' + name})\n"
+    "  hw.postFormText('/api/cli', {cmd:'cameravideodelete \"' + name + '\"'})\n"
     "    .then(function(){ setTimeout(loadCameraRecordings, 200); });\n"
     "};\n",
     HTTPD_RESP_USE_STRLEN);

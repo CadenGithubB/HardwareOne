@@ -2661,6 +2661,13 @@ bool GPSTrackManager::parseGPSLine(const char* line, float& lat, float& lon) {
     lat = atof(latPtr + 4);
     lon = atof(lonPtr + 4);
   } else {
+    // A general sensor-log line carries a "gps:" tag; reaching here means it had
+    // no lat=/lon= (a no_fix reading), so reject it outright. Without this, the
+    // CSV fallback below would blindly parse the first "<num>,<num>" on the line
+    // — which in a multi-sensor log could be a comma-bearing co-logged sensor
+    // (e.g. thermal "20.5,21.0,22.3"), injecting a bogus position. The dedicated
+    // GPS-track CSV format has no "gps:" marker, so it is unaffected.
+    if (strstr(line, "gps:")) return false;
     // Try Format 2: Dedicated GPS track CSV
     // "HH:MM:SS,lat,lon,alt_m,speed_kn,satellites" (new format with time)
     // "timestamp_ms,lat,lon,alt_m,speed_kn,satellites" (old format with millis)
@@ -2810,9 +2817,14 @@ bool GPSTrackManager::saveTrack(char* outPath, size_t outPathSize) {
 
   // Generate timestamped filename
   const char* dir = "/logging_captures/tracks";
+  // /logging_captures/ grants CREATE/WRITE to SYSTEM only (admins get just
+  // READ|DELETE), so create the track file as system — same as gpstrackmerge
+  // and the sensor logger. currentAuthContext() here fails from web/OLED (admin)
+  // with a create denial.
+  const AuthContext sys = VFS::systemAuth("gpstrack.save");
   fsLock("gpstrack.save");
-  if (!VFS::existsGuarded(dir, currentAuthContext())) {
-    VFS::mkdirGuarded(dir, currentAuthContext());
+  if (!VFS::existsGuarded(dir, sys)) {
+    VFS::mkdirGuarded(dir, sys);
   }
 
   time_t now = time(nullptr);
@@ -2826,7 +2838,7 @@ bool GPSTrackManager::saveTrack(char* outPath, size_t outPathSize) {
 
   snprintf(outPath, outPathSize, "%s/track-%s.csv", dir, timestamp);
 
-  File f = VFS::openGuarded(outPath, "w", currentAuthContext(), true);
+  File f = VFS::openGuarded(outPath, "w", sys, true);
   if (!f) {
     fsUnlock();
     return false;
@@ -3105,6 +3117,102 @@ const char* cmd_gpstrack(const String& argsInput) {
   }
 
   return "Error: invalid arguments — Usage: gpstrack [status|load <filepath>|clear]";
+}
+
+// Stitch several GPS/sensor capture logs into one file, in the given order, so
+// a day split across multiple files (e.g. by power loss) can be loaded as a
+// single track. Args: "<output>" "<in1>" "<in2>" ... — output first, then the
+// inputs front-to-back. A newline boundary is guaranteed after each file so a
+// torn last line from a power cut can't fuse into the next file's first line.
+const char* cmd_gpstrackmerge(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+
+  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+  char* buf = getDebugBuffer();
+
+  CommandArgs a(argsInput);
+  if (a.count() < 2) {
+    return "Error: invalid arguments — Usage: gpstrackmerge \"<output>\" \"<in1>\" \"<in2>\" [...] "
+           "(output first, then inputs in stitch order)";
+  }
+
+  // Output (arg 0): a bare name lands in /logging_captures/tracks/ so the map
+  // page's track picker finds it; ensure a log-ish extension.
+  String outName;
+  const char* qerr = requireQuotedToken(a, 0, outName);
+  if (qerr) return qerr;
+  String outPath = outName;
+  if (!outPath.startsWith("/")) outPath = "/logging_captures/tracks/" + outPath;
+  if (!(outPath.endsWith(".log") || outPath.endsWith(".csv") || outPath.endsWith(".txt")))
+    outPath += ".log";
+
+  // Reads use the caller's identity so a non-admin can't stitch logs they
+  // can't read. The output write uses system identity because the
+  // /logging_captures/ tree grants CREATE/WRITE to SYSTEM only (admins get
+  // just READ|DELETE, per the System_Filesystem.cpp path rules) — this is the
+  // same reason the sensor logger writes here as systemAuth.
+  const AuthContext& ctx    = currentAuthContext();
+  const AuthContext  sysCtx = VFS::systemAuth("gps.stitch");
+  FsLockGuard fsGuard("gpstrackmerge");
+
+  // Validate every input up front (quoted, exists, not the output) so a bad
+  // argument never leaves a half-written output behind.
+  for (int i = 1; i < a.count(); i++) {
+    String in;
+    const char* e = requireQuotedPath(a, i, in);
+    if (e) return e;
+    if (in == outPath) return "Error: an input file is the same as the output";
+    if (!VFS::existsGuarded(in, ctx)) {
+      snprintf(buf, 1024, "Error: input not found: %s", in.c_str());
+      return buf;
+    }
+  }
+
+  VFS::mkdirGuarded("/logging_captures", sysCtx);
+  VFS::mkdirGuarded("/logging_captures/tracks", sysCtx);
+
+  File out = VFS::openGuarded(outPath, "w", sysCtx, true);
+  if (!out) {
+    snprintf(buf, 1024, "Error: cannot create output: %s", outPath.c_str());
+    return buf;
+  }
+
+  uint8_t chunk[512];
+  unsigned long totalBytes = 0;
+  int filesDone = 0;
+  for (int i = 1; i < a.count(); i++) {
+    String in;
+    requireQuotedPath(a, i, in);  // re-derive the path (already validated above)
+    File f = VFS::openGuarded(in, "r", ctx);
+    if (!f) {
+      out.close();
+      snprintf(buf, 1024, "Error: cannot open input: %s", in.c_str());
+      return buf;
+    }
+    uint8_t lastByte = (uint8_t)'\n';
+    while (f.available()) {
+      int n = f.read(chunk, sizeof(chunk));
+      if (n <= 0) break;
+      if (out.write(chunk, (size_t)n) != (size_t)n) {  // short write == full/failing FS
+        f.close();
+        out.close();
+        snprintf(buf, 1024, "Error: write failed (filesystem full?) after %lu bytes to %s",
+                 totalBytes, outPath.c_str());
+        return buf;
+      }
+      totalBytes += (unsigned long)n;
+      lastByte = chunk[n - 1];
+    }
+    f.close();
+    if (lastByte != (uint8_t)'\n') { out.write((uint8_t)'\n'); totalBytes++; }  // clean line boundary
+    filesDone++;
+  }
+  out.close();
+
+  snprintf(buf, 1024,
+           "Stitched %d files into %s (%lu bytes). Load it: gpstrack load \"%s\"",
+           filesDone, outPath.c_str(), totalBytes, outPath.c_str());
+  return buf;
 }
 
 const char* cmd_waypoint(const String& argsInput) {
@@ -3470,6 +3578,7 @@ const CommandEntry mapCommands[] = {
   {"search", "Search map features: <name>", false, cmd_search, "Usage: search <name>"},
   {"waypoint", "Manage waypoints: <list|add|del|goto|clear|clearall|rename|notes>", false, cmd_waypoint, "Usage: waypoint [list|add <lat> <lon> [name]|del <index>|goto <index>|clear|clearall|rename <index> <name>|notes <index> <notes>]"},
   {"gpstrack", "Manage GPS tracks: <status|load|clear>", false, cmd_gpstrack, "Usage: gpstrack [status|load <filepath>|clear]"},
+  {"gpstrackmerge", "Stitch GPS logs in order: \"<out>\" \"<in1>\" \"<in2>\" ...", true, cmd_gpstrackmerge, "Usage: gpstrackmerge \"<output>\" \"<in1>\" \"<in2>\" [...]  (output first, then inputs in stitch order; max 9 inputs)"},
   {"waypointfile", "Link file to waypoint: \"<file>\" <wpName>", false, cmd_waypointfile, "Usage: waypointfile \"<file>\" <wpName> | waypointfile \"<file>\" <lat> <lon> [wpName]"},
   {"waypointfiles", "Waypoint files: <name> [del <idx>]", false, cmd_waypointfiles, "Usage: waypointfiles <wpName> [del <index>]"},
   {"maporganize", "Organize map files in /maps into subdirectories", false, cmd_maporganize, nullptr}

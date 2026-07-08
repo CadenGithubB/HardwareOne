@@ -5,6 +5,7 @@
 #include "WebPage_Maps.h"
 #include "WebServer_Utils.h"
 #include "WebServer_Server.h"
+#include "System_AuthIdentity.h"  // ExecIdentityGuard — install the web ctx into TLS so GPSTrackManager's currentAuthContext() reads see the caller
 #include "System_Maps.h"
 #include "System_Debug.h"
 #include "System_Mutex.h"
@@ -107,6 +108,13 @@ esp_err_t handleMapFeaturesAPI(httpd_req_t* req) {
 
 esp_err_t handleGPSTracksAPI(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
+  // GPSTrackManager::loadTrack/saveTrack read+write the filesystem via
+  // currentAuthContext() (the per-task TLS identity), NOT the ctx above.
+  // WEB_AUTH_OR_RETURN only makes a local ctx, so without installing it the FS
+  // layer sees the anon sentinel and denies every read under /logging_captures/
+  // -> "File not found" on a file that exists. Install the caller's identity
+  // for the whole handler, mirroring the /api/cli path (WebServer_Server.cpp).
+  ExecIdentityGuard identity(ctx);
 
   char query[256];
   if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {

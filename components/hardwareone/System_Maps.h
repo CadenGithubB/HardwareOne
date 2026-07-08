@@ -661,7 +661,7 @@ private:
 // GPS Track System
 // =============================================================================
 
-#define MAX_TRACK_POINTS 500  // Memory limit for track points
+#define MAX_TRACK_POINTS 10000  // Track point cap — buffer lives in PSRAM (ps_alloc PreferPSRAM, ~117 KB at 12 B/point)
 
 struct GPSTrackPoint {
   float lat;
