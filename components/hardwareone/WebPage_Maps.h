@@ -187,7 +187,19 @@ inline void streamMapsInner(httpd_req_t* req) {
       <option value='#ffffff'>White</option>
     </select>
   </div>
-  <div id='track-info' style='font-size:0.85rem;color:var(--panel-fg);flex:1;overflow-y:auto'></div>
+  <div style='margin-top:0.5rem;border-top:1px solid var(--border);padding-top:0.5rem'>
+    <div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:0.35rem'>
+      <span style='font-weight:bold;color:var(--panel-fg);font-size:0.9rem'>Stitch logs (top = front)</span>
+      <button class='btn' onclick='addToStitch()' style='padding:4px 10px;font-size:0.8rem'>+ Add selected</button>
+    </div>
+    <div id='stitch-list' style='font-size:0.8rem;color:var(--panel-fg);margin-bottom:0.35rem'></div>
+    <div style='display:flex;gap:6px;align-items:center;flex-wrap:wrap'>
+      <input id='stitch-name' type='text' placeholder='output name (optional)' style='flex:1;min-width:110px;padding:5px;background:var(--crumb-bg);border:1px solid var(--border);border-radius:4px;color:var(--panel-fg);font-size:0.8rem' />
+      <button class='btn' onclick='doStitch()' style='padding:5px 12px;font-size:0.8rem'>Stitch &amp; Load</button>
+    </div>
+    <div id='stitch-status' style='font-size:0.8rem;margin-top:0.35rem;color:var(--panel-fg)'></div>
+  </div>
+  <div id='track-info' style='font-size:0.85rem;color:var(--panel-fg);flex:1;overflow-y:auto;margin-top:0.5rem'></div>
 </div>
 <div style='flex:1;min-width:220px;background:var(--panel-bg);padding:1rem;border-radius:8px;border:1px solid var(--border);min-height:320px;display:flex;flex-direction:column'>
   <h3 style='margin:0 0 0.5rem 0;color:var(--panel-fg)'>Transit Routes</h3>
@@ -614,7 +626,7 @@ async function loadMap(path) {
     
     if (currentMap) {
       try {
-        const selResp = await hw.postForm('/api/cli', { cmd: 'mapload ' + path });
+        const selResp = await hw.postForm('/api/cli', { cmd: 'mapload "' + path + '"' });
         const selText = await selResp.text();
         if (!selResp.ok || (selText && selText.startsWith('Error'))) {
           console.warn('[MAP] Device map load failed:', selText);
@@ -1487,73 +1499,126 @@ function renderMap() {
   
   // Draw GPS track
   if (gpsTrack && gpsTrack.length > 1) {
+    // Canvas positions, computed once and reused for the line, the direction
+    // arrows, and the start/end markers. toCanvas() takes DEGREES (same as the
+    // track points) — the old marker code multiplied by 1e6, which put the
+    // markers a million-fold off-screen, so start/end never showed.
+    const tpts = gpsTrack.map(p => toCanvas(p.lat, p.lon));
+
+    // Clear any dash left over from dashed map features (paths, railways, ferry
+    // lines) so the track and all its markers stroke solid, not broken.
+    ctx.setLineDash([]);
+
+    // Track line (glow)
     ctx.strokeStyle = trackColor;
     ctx.lineWidth = 3;
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
     ctx.shadowColor = trackColor;
     ctx.shadowBlur = 4;
-    
     ctx.beginPath();
-    let firstPoint = true;
-    for (const point of gpsTrack) {
-      const pos = toCanvas(point.lat, point.lon);
-      if (firstPoint) {
-        ctx.moveTo(pos.x, pos.y);
-        firstPoint = false;
-      } else {
-        ctx.lineTo(pos.x, pos.y);
-      }
-    }
+    ctx.moveTo(tpts[0].x, tpts[0].y);
+    for (let i = 1; i < tpts.length; i++) ctx.lineTo(tpts[i].x, tpts[i].y);
     ctx.stroke();
     ctx.shadowBlur = 0;
-    
-    // Draw start point (green)
-    if (gpsTrack.length > 0) {
-      const start = gpsTrack[0];
-      const startLatMicro = start.lat * 1e6;
-      const startLonMicro = start.lon * 1e6;
-      if (startLatMicro >= m.minLat && startLatMicro <= m.maxLat &&
-          startLonMicro >= m.minLon && startLonMicro <= m.maxLon) {
-        const pos = toCanvas(startLatMicro, startLonMicro);
+
+    // Direction-of-travel arrowheads, evenly spaced along the path so you can
+    // read which way you went even where the track doubles back. White with a
+    // dark edge so they show on any track colour and any map shade.
+    const ARROW_SPACING = 60;            // px of path length between arrows
+    let distSince = ARROW_SPACING * 0.5; // start a little in from the start dot
+    for (let i = 1; i < tpts.length; i++) {
+      const dx = tpts[i].x - tpts[i - 1].x, dy = tpts[i].y - tpts[i - 1].y;
+      const seg = Math.hypot(dx, dy);
+      if (seg === 0) continue;
+      distSince += seg;
+      if (distSince >= ARROW_SPACING) {
+        distSince = 0;
+        ctx.save();
+        ctx.translate(tpts[i].x, tpts[i].y);
+        ctx.rotate(Math.atan2(dy, dx));
         ctx.beginPath();
-        ctx.arc(pos.x, pos.y, 6, 0, Math.PI * 2);
-        ctx.fillStyle = '#69db7c';
+        ctx.moveTo(6, 0);
+        ctx.lineTo(-5, -4);
+        ctx.lineTo(-5, 4);
+        ctx.closePath();
+        ctx.fillStyle = '#fff';
         ctx.fill();
-        ctx.strokeStyle = '#fff';
-        ctx.lineWidth = 2;
+        ctx.lineWidth = 1;
+        ctx.strokeStyle = 'rgba(0,0,0,0.6)';
         ctx.stroke();
+        ctx.restore();
       }
     }
-    
-    // Draw end point (red)
-    if (gpsTrack.length > 1) {
-      const end = gpsTrack[gpsTrack.length - 1];
-      const endLatMicro = end.lat * 1e6;
-      const endLonMicro = end.lon * 1e6;
-      if (endLatMicro >= m.minLat && endLatMicro <= m.maxLat &&
-          endLonMicro >= m.minLon && endLonMicro <= m.maxLon) {
-        const pos = toCanvas(endLatMicro, endLonMicro);
-        ctx.beginPath();
-        ctx.arc(pos.x, pos.y, 6, 0, Math.PI * 2);
-        ctx.fillStyle = '#ff6b6b';
-        ctx.fill();
-        ctx.strokeStyle = '#fff';
-        ctx.lineWidth = 2;
-        ctx.stroke();
-      }
-    }
+
+    // Labelled-marker helper: the shaped dot stays as the precise anchor, and a
+    // dark pill with coloured text sits just off it so the label reads on any
+    // map shade / track colour. Kept upright (not rotated with the map) and
+    // nudged back on-screen if it would clip the top or bottom edge.
+    const drawTrackLabel = (x, y, text, color, placeBelow) => {
+      ctx.save();
+      ctx.font = 'bold 11px system-ui, -apple-system, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      const pillH = 16, gap = 11, r = pillH / 2;
+      const pillW = ctx.measureText(text).width + 12;
+      // Preferred side; flip to the other side if it clips, then clamp fully
+      // into view so the pill stays visible even when the endpoint is near or
+      // past a map edge (partial tracks are allowed down to 50% in-bounds).
+      let cy = placeBelow ? y + gap + r : y - gap - r;
+      if (cy - r < 2 || cy + r > canvas.height - 2) cy = placeBelow ? y - gap - r : y + gap + r;
+      cy = Math.max(r + 2, Math.min(canvas.height - r - 2, cy));
+      const cx = Math.max(pillW / 2 + 2, Math.min(canvas.width - pillW / 2 - 2, x));
+      const rx = cx - pillW / 2, ry = cy - r;
+      ctx.beginPath();
+      ctx.moveTo(rx + r, ry);
+      ctx.arcTo(rx + pillW, ry, rx + pillW, ry + pillH, r);
+      ctx.arcTo(rx + pillW, ry + pillH, rx, ry + pillH, r);
+      ctx.arcTo(rx, ry + pillH, rx, ry, r);
+      ctx.arcTo(rx, ry, rx + pillW, ry, r);
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(0,0,0,0.72)';
+      ctx.fill();
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = color;
+      ctx.stroke();
+      ctx.fillStyle = color;
+      ctx.fillText(text, cx, cy + 0.5);
+      ctx.restore();
+    };
+
+    // Start marker: green CIRCLE + "START" label above it.
+    ctx.beginPath();
+    ctx.arc(tpts[0].x, tpts[0].y, 7, 0, Math.PI * 2);
+    ctx.fillStyle = '#69db7c';
+    ctx.fill();
+    ctx.lineWidth = 2.5;
+    ctx.strokeStyle = '#fff';
+    ctx.stroke();
+    drawTrackLabel(tpts[0].x, tpts[0].y, 'START', '#69db7c', false);
+
+    // End marker: red SQUARE + "END" label below it — a different shape AND a
+    // different label side, so start vs finish is unambiguous even on a loop
+    // where the two markers sit close together.
+    const ep = tpts[tpts.length - 1], eh = 6;
+    ctx.beginPath();
+    ctx.rect(ep.x - eh, ep.y - eh, eh * 2, eh * 2);
+    ctx.fillStyle = '#ff6b6b';
+    ctx.fill();
+    ctx.lineWidth = 2.5;
+    ctx.strokeStyle = '#fff';
+    ctx.stroke();
+    drawTrackLabel(ep.x, ep.y, 'END', '#ff6b6b', true);
   }
   
   // Draw GPS position
   if (gpsLat !== null && gpsLon !== null) {
-    const gpsLatMicro = gpsLat * 1e6;
-    const gpsLonMicro = gpsLon * 1e6;
-    
-    if (gpsLatMicro >= m.minLat && gpsLatMicro <= m.maxLat &&
-        gpsLonMicro >= m.minLon && gpsLonMicro <= m.maxLon) {
-      const pos = toCanvas(gpsLatMicro, gpsLonMicro);
-      
+    // toCanvas() and the map bounds are both in DEGREES — no 1e6 scaling.
+    if (gpsLat >= m.minLat && gpsLat <= m.maxLat &&
+        gpsLon >= m.minLon && gpsLon <= m.maxLon) {
+      const pos = toCanvas(gpsLat, gpsLon);
+      ctx.setLineDash([]);   // don't inherit a dash from dashed map features
+
       // Outer glow
       ctx.beginPath();
       ctx.arc(pos.x, pos.y, 12, 0, Math.PI * 2);
@@ -2671,6 +2736,91 @@ function clearGPSTrack() {
   document.getElementById('track-file').value = '';
   renderMap();
 }
+
+// ---- GPS log stitching (manual order) ----
+// Build an ordered list of capture files from the dropdown, arrange them
+// front-to-back, then stitch them server-side (gpstrackmerge) into one file
+// so a power-interrupted day split across several logs loads as one track.
+let stitchOrder = [];
+const STITCH_MAX = 9;  // CommandArgs caps at 10 tokens: 1 output + 9 inputs
+
+function stitchBase(p) { return (p || '').split('/').pop(); }
+
+function renderStitchList() {
+  const el = document.getElementById('stitch-list');
+  if (!el) return;
+  if (stitchOrder.length === 0) {
+    el.innerHTML = '<span style="color:var(--muted)">Pick a file above, then "+ Add selected". List order (top&rarr;bottom) = stitch order.</span>';
+    return;
+  }
+  let html = '';
+  stitchOrder.forEach((p, i) => {
+    html += '<div style="display:flex;align-items:center;gap:4px;padding:2px 0">'
+      + '<span style="width:1.3rem;text-align:right;color:var(--muted)">' + (i + 1) + '.</span>'
+      + '<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + escapeHtml(p) + '">' + escapeHtml(stitchBase(p)) + '</span>'
+      + '<button class="btn" onclick="stitchMove(' + i + ',-1)"' + (i === 0 ? ' disabled' : '') + ' style="padding:1px 7px;font-size:0.8rem" title="Move up">&uarr;</button>'
+      + '<button class="btn" onclick="stitchMove(' + i + ',1)"' + (i === stitchOrder.length - 1 ? ' disabled' : '') + ' style="padding:1px 7px;font-size:0.8rem" title="Move down">&darr;</button>'
+      + '<button class="btn" onclick="stitchRemove(' + i + ')" style="padding:1px 7px;font-size:0.8rem" title="Remove">&times;</button>'
+      + '</div>';
+  });
+  el.innerHTML = html;
+}
+
+function addToStitch() {
+  const sel = document.getElementById('track-file');
+  const p = sel ? sel.value : '';
+  if (!p) { alert('Select a GPS log file in the dropdown above first.'); return; }
+  if (stitchOrder.length >= STITCH_MAX) {
+    alert('Max ' + STITCH_MAX + ' files per stitch. Stitch these first, then stitch that result together with the rest.');
+    return;
+  }
+  stitchOrder.push(p);
+  renderStitchList();
+}
+
+function stitchMove(i, dir) {
+  const j = i + dir;
+  if (j < 0 || j >= stitchOrder.length) return;
+  const t = stitchOrder[i]; stitchOrder[i] = stitchOrder[j]; stitchOrder[j] = t;
+  renderStitchList();
+}
+
+function stitchRemove(i) { stitchOrder.splice(i, 1); renderStitchList(); }
+
+async function doStitch() {
+  if (stitchOrder.length < 2) { alert('Add at least 2 files to stitch (pick one in the dropdown, hit "+ Add selected", repeat).'); return; }
+  let name = (document.getElementById('stitch-name').value || '').trim();
+  if (!name) name = 'stitched-' + new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  name = name.replace(/[^A-Za-z0-9._-]/g, '_');
+  if (!/\.(log|csv|txt)$/i.test(name)) name += '.log';
+  const outPath = '/logging_captures/tracks/' + name;
+  const cmd = 'gpstrackmerge "' + outPath + '" ' + stitchOrder.map(p => '"' + p + '"').join(' ');
+  const statusEl = document.getElementById('stitch-status');
+  statusEl.style.color = 'var(--panel-fg)';
+  statusEl.textContent = 'Stitching ' + stitchOrder.length + ' files...';
+  try {
+    const resp = await hw.postForm('/api/cli', { cmd });
+    const text = (await resp.text()).trim();
+    if (!resp.ok || text.startsWith('Error')) {
+      statusEl.style.color = '#ff6b6b';
+      statusEl.textContent = text || 'Stitch failed';
+      return;
+    }
+    statusEl.style.color = '#69db7c';
+    statusEl.textContent = text;
+    stitchOrder = [];
+    renderStitchList();
+    await loadGPSTrackFiles();
+    const sel = document.getElementById('track-file');
+    if (sel) sel.value = outPath;
+    loadGPSTrack();  // auto-load the stitched track onto the map
+  } catch (e) {
+    statusEl.style.color = '#ff6b6b';
+    statusEl.textContent = 'Error: ' + e.message;
+  }
+}
+
+renderStitchList();
 
 // Track color functions
 function updateTrackColor() {

@@ -8,6 +8,19 @@ Entries for 0.96.1 and earlier were backfilled from git history (this repo had
 no tags or releases before 0.96.2); they are terse, commit-grounded summaries,
 dated from each version's commit. Dates are YYYY-MM-DD.
 
+## [0.97.5] - 2026-07-07
+A much clearer GPS-track experience on the web: readable start/end/direction and stitched multi-log day-tracks.
+### Added
+- GPS Tracks (web): a loaded track now shows a green START circle and a red END square, each labelled, plus direction-of-travel arrows along the path - so where you began, where you finished, and which way you went are obvious at a glance.
+- GPS track stitching: pick several logs in the order you want and merge them into one continuous day-track (`gpstrackmerge` CLI, or the Stitch panel on the web Maps page) - for an outing a power interruption split across several files.
+### Changed
+- GPS tracks can hold up to 10000 points (was 500); the buffer lives in PSRAM (~117 KB) - about 14 hours of continuous logging at the default 5-second interval.
+### Fixed
+- Web Maps: the GPS Tracks Load and Stitch buttons (and camera video delete) now quote the file path, so names that need quoting work instead of failing with "cannot load file".
+- Stitching or saving a track now writes under the captures folder with the right permissions (was failing with "cannot create output").
+- Loading a track over the web now runs with the caller's identity, fixing a "file not found" when the file was really there.
+- The track reader now skips a GPS line that has no fix even when other sensors are co-logged on the same line, so a stray comma can't inject a bogus point.
+
 ## [0.97.4] - 2026-07-07
 Clearer, more legible offline maps on the glasses and OLED, and no more missing chunks.
 ### Added
