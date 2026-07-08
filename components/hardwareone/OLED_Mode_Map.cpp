@@ -62,13 +62,20 @@ static OLEDMapRenderer* gOledMapRenderer = nullptr;
 // =============================================================================
 
 static const size_t SSD1306_BUF_SIZE = (128 * 64) / 8;  // 1024 bytes
+static const size_t MAP_SHADE_BUF_SIZE = 128 * 64;      // byte-per-pixel shade scratch
 
-// Double framebuffers in PSRAM
+// Double framebuffers in PSRAM (1-bit SSD1306 page layout, blitted per UI frame)
 static uint8_t* sMapBufA = nullptr;   // Buffer A (PSRAM)
 static uint8_t* sMapBufB = nullptr;   // Buffer B (PSRAM)
 static uint8_t* sMapFrontBuf = nullptr;  // Points to completed render (A or B)
 static uint8_t* sMapBackBuf  = nullptr;  // Points to in-progress render (A or B)
 static volatile bool sFrontBufReady = false;  // True once first render completes
+
+// Shade scratch (render-task-only): the renderer draws 0-15 shades here, then
+// the task crushes shade>0 into the 1-bit back buffer before the swap. The
+// OLED can't show shades — this keeps its output byte-identical while the
+// same renderer feeds real shades to the G2 map page.
+static uint8_t* sMapShadeBuf = nullptr;
 
 // Render task synchronization
 static SemaphoreHandle_t sRenderSemaphore = nullptr;  // Signals render task to start
@@ -890,10 +897,11 @@ static void drawMapMenu() {
 static void initAsyncMapRenderer() {
   if (sMapBufA) return;  // Already initialized
   
-  // Allocate double buffers in PSRAM
+  // Allocate double buffers + shade scratch in PSRAM
   sMapBufA = (uint8_t*)ps_malloc(SSD1306_BUF_SIZE);
   sMapBufB = (uint8_t*)ps_malloc(SSD1306_BUF_SIZE);
-  if (!sMapBufA || !sMapBufB) {
+  sMapShadeBuf = (uint8_t*)ps_malloc(MAP_SHADE_BUF_SIZE);
+  if (!sMapBufA || !sMapBufB || !sMapShadeBuf) {
     DEBUG_MAPSF("[MAP_ASYNC] PSRAM alloc failed for double buffers!");
     return;
   }
@@ -912,6 +920,24 @@ static void initAsyncMapRenderer() {
   xTaskCreatePinnedToCore(mapRenderTask, "mapRender", MAP_RENDER_STACK_WORDS, nullptr, TASK_PRIORITY_LOW, &sRenderTaskHandle, tskNO_AFFINITY);
   
   DEBUG_MAPSF("[MAP_ASYNC] Async renderer initialized (double-buffer + render task)");
+}
+
+// Crush the shade scratch (128x64 bytes, values 0-15) into a 1-bit SSD1306
+// page buffer (byte = 8 vertical pixels, LSB = top). shade>0 => pixel on, so
+// OLED output is byte-identical to the old direct 1-bit rendering no matter
+// how the per-class shade values are tuned.
+static void packShadeBufTo1Bit(const uint8_t* shades, uint8_t* pageBuf) {
+  for (int page = 0; page < 8; page++) {
+    const uint8_t* rows = shades + (size_t)page * 8 * 128;
+    uint8_t* out = pageBuf + (size_t)page * 128;
+    for (int x = 0; x < 128; x++) {
+      uint8_t b = 0;
+      for (int bit = 0; bit < 8; bit++) {
+        if (rows[(size_t)bit * 128 + x]) b |= (uint8_t)(1 << bit);
+      }
+      out[x] = b;
+    }
+  }
 }
 
 static void mapRenderTask(void* param) {
@@ -944,17 +970,22 @@ static void mapRenderTask(void* param) {
     uint8_t* backBuf = sMapBackBuf;
     taskEXIT_CRITICAL(&sSwapSpinlock);
     
-    // Create a local offscreen renderer targeting the back buffer
-    OffscreenMapRenderer localRenderer(backBuf, DISPLAY_WIDTH, DISPLAY_CONTENT_HEIGHT, DISPLAY_CONTENT_START_Y);
+    // Create a local offscreen renderer targeting the shade scratch buffer
+    OffscreenMapRenderer localRenderer(sMapShadeBuf, 128, 64,
+                                       DISPLAY_WIDTH, DISPLAY_CONTENT_HEIGHT,
+                                       DISPLAY_CONTENT_START_Y);
     localRenderer.clear();
-    
+
     MapCore::renderMap(&localRenderer, lat, lon, renderParams);
-    
+
     // Render GPS track if loaded
     if (hasTrack && GPSTrackManager::hasTrack()) {
       GPSTrackManager::renderTrack(&localRenderer, lat, lon, trackScaleX, trackScaleY);
     }
-    
+
+    // Crush shades to 1-bit into the back buffer (fully overwrites it)
+    packShadeBufTo1Bit(sMapShadeBuf, backBuf);
+
     // Swap front/back pointers (atomic via spinlock)
     taskENTER_CRITICAL(&sSwapSpinlock);
     uint8_t* temp = sMapFrontBuf;

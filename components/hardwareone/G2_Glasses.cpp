@@ -14037,31 +14037,33 @@ bool g2ShowBmpFile(const char* path, void (*onDone)()) {
 
 #if ENABLE_MAPS
 // ─────────────────────────────────────────────────────────────────────
-// Map viewer — render the loaded offline map HEADLESSLY into our own
-// 128×64 1-bit SSD1306-page buffer (reusing the OLED map renderer as a
-// black box — nothing in System_Maps is modified), scale it into a
-// 288×144 4-bpp grayscale BMP, and push it to one lens over the same
-// image transport as g2bmp/camera. Pure downstream consumer.
+// Map viewer — render the loaded offline map HEADLESSLY at the lens's
+// native 288×144 into a byte-per-pixel shade buffer (the shared
+// OffscreenMapRenderer draws 0-15 per pixel: brightness = feature
+// class), pack shades 1:1 into a 288×144 4-bpp grayscale BMP, and push
+// it to one lens over the same image transport as g2bmp/camera. Pure
+// downstream consumer. Native-res rendering replaced the old 128×64
+// 1-bit page + 2.25× nearest-neighbour upscale, so lines are crisp
+// (uniform 1 px) instead of alternately 2-and-3 px wide.
 // ─────────────────────────────────────────────────────────────────────
 
-// Scale a 128×64 SSD1306-page buffer (byte = 8 vertical px, LSB = top,
-// a set bit = a drawn map feature) into a 288×144 4-bpp top-down BMP.
-// 288×144 is the HW-proven native lens-tile size, and the output bytes
-// are IDENTICAL to what the proven camera path (buildBmp4bppFromRgb888
-// fed a 128×64 white/black RGB888) emits: same 118-byte header, same
-// 16-shade gray palette, same 4-byte-aligned 144-byte row stride, same
-// nearest-neighbour sampling (sx = dx*128/288, sy = dy*64/144), same
-// 4-bpp packing (high nibble = even column, low = odd). 128:64 = 288:144
-// = 2:1, so the upscale fills the frame with no letterbox.
-static size_t buildMapBmp4bpp288x144FromPage(uint8_t* out, size_t outCap,
-                                             const uint8_t* page) {
+// Pack a 288×144 shade buffer (one byte per pixel, values 0..15,
+// row-major) into a 288×144 4-bpp top-down BMP. 288×144 is the
+// HW-proven native lens-tile size, and the container bytes are
+// IDENTICAL to what the proven camera path (buildBmp4bppFromRgb888)
+// emits: same 118-byte header, same 16-shade gray palette, same
+// 4-byte-aligned 144-byte row stride, same 4-bpp packing (high nibble
+// = even column, low = odd). Only the source of the nibbles changed:
+// shade values map straight to palette indices instead of 0x0/0xF bits.
+static size_t buildMapBmp4bpp288x144FromShades(uint8_t* out, size_t outCap,
+                                               const uint8_t* shades) {
   const int32_t  dstW       = 288;
   const int32_t  dstH       = 144;
   const uint32_t rowStride  = ((uint32_t)dstW * 4 + 31) / 32 * 4;  // = 144
   const uint32_t pixelSize  = rowStride * (uint32_t)dstH;
   const uint32_t headerSize = 14 + 40 + 64;
   const uint32_t total      = headerSize + pixelSize;
-  if (!out || !page || total > outCap) return 0;
+  if (!out || !shades || total > outCap) return 0;
 
   auto wr16 = [](uint8_t* p, uint16_t v) {
     p[0] = (uint8_t)(v & 0xff); p[1] = (uint8_t)((v >> 8) & 0xff);
@@ -14098,19 +14100,16 @@ static size_t buildMapBmp4bpp288x144FromPage(uint8_t* out, size_t outCap,
     out[54 + i*4 + 3] = 0;
   }
 
-  // Pixels: nearest-neighbour upscale 128×64 → 288×144, 4-bpp packed.
+  // Pixels: shade bytes map 1:1 to 4-bpp palette indices (no scaling).
   // memset clears each row first so the (already 4-byte-aligned) stride
   // has no stale bytes.
   uint8_t* px = out + headerSize;
   for (int32_t dy = 0; dy < dstH; dy++) {
-    const int32_t  sy      = (dy * 64) / dstH;             // 0..63
-    const uint8_t* pageRow = page + (size_t)(sy / 8) * 128;
-    const uint8_t  bitMask = (uint8_t)(1 << (sy & 7));
+    const uint8_t* srcRow = shades + (size_t)dy * dstW;
     uint8_t* dstRow = px + (size_t)dy * rowStride;
     memset(dstRow, 0, rowStride);
     for (int32_t dx = 0; dx < dstW; dx++) {
-      const int32_t sx  = (dx * 128) / dstW;               // 0..127
-      const uint8_t nib = (pageRow[sx] & bitMask) ? 0x0F : 0x00;
+      const uint8_t nib = srcRow[dx] & 0x0F;
       if ((dx & 1) == 0) dstRow[dx >> 1] |= (uint8_t)(nib << 4);  // even → high
       else               dstRow[dx >> 1] |= nib;                  // odd  → low
     }
@@ -14137,16 +14136,24 @@ static size_t g2RenderCurrentMapBmp(uint8_t* bmp, size_t cap) {
     gMapCenterLon = (m.header.minLon + m.header.maxLon) / 2000000.0f;
     gMapCenterSet = true;
   }
-  uint8_t* page = (uint8_t*)ps_alloc(OFFSCREEN_BUF_SIZE, AllocPref::PreferPSRAM, "g2.map.page");
-  if (!page) return 0;
-  OffscreenMapRenderer r(page, 128, 64, 0);
+  constexpr int kLensW = 288, kLensH = 144;
+  uint8_t* shades = (uint8_t*)ps_alloc((size_t)kLensW * kLensH,
+                                       AllocPref::PreferPSRAM, "g2.map.shade");
+  if (!shades) return 0;
+  OffscreenMapRenderer r(shades, kLensW, kLensH, kLensW, kLensH, 0);
+  r.setSurfaceAreas(true);   // G2 lens: also surface water bodies + coastlines
   r.clear();
-  // zoom/rotation/layers come from the shared globals via the params snapshot;
-  // renderMap draws at gMapZoom (default 1.0 = full detail, matches the OLED).
+  // zoom/rotation/layers come from the shared globals via the params snapshot.
+  // The viewport is 2.25× the OLED's 128×64, and renderMap's px scale is
+  // zoom-only, so multiply zoom by 2.25 to keep the SAME geographic framing
+  // as the OLED at the same gMapZoom — just rendered at native lens density.
+  // LOD also sees the scaled zoom, so the denser display legitimately shows
+  // more detail (e.g. buildings appear at gMapZoom ~0.9 instead of 2.0).
   MapRenderParams params = mapRenderParamsFromGlobals();
+  params.zoom *= (float)kLensW / 128.0f;
   MapCore::renderMap(&r, gMapCenterLat, gMapCenterLon, params);
-  const size_t len = buildMapBmp4bpp288x144FromPage(bmp, cap, page);
-  free(page);
+  const size_t len = buildMapBmp4bpp288x144FromShades(bmp, cap, shades);
+  free(shades);
   return len;
 }
 

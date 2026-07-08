@@ -393,7 +393,7 @@ struct Settings {
       // Maps app
       ,mapZoom(1.0f)
       ,mapVisibleLayers(0x3FF)   // LAYER_ALL
-      ,mapCacheSizeKB(1024)      // 1 MB pool
+      ,mapCacheSizeKB(1280)      // 1.25 MB pool (holds 20 KB tiles with headroom)
     {
     // String members are now initialized in initializer list
   }
@@ -974,7 +974,7 @@ struct Settings {
   // take effect; zoom and layers apply live via their setters.
   float mapZoom;             // Default zoom level (1.0 = identity)
   int   mapVisibleLayers;    // Layer-visibility bitmask (10 bits, default 0x3FF = LAYER_ALL)
-  int   mapCacheSizeKB;      // Tile cache pool size in KB (default 1024)
+  int   mapCacheSizeKB;      // Tile cache pool size in KB (default 1280)
 };
 
 // Global settings instance (defined in .ino)

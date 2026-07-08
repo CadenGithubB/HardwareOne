@@ -176,14 +176,20 @@ enum MapLineStyle : uint8_t {
 };
 
 // Feature rendering style (display-agnostic)
+// shade doubles as z-order: pixel writes are max(existing, shade), so brighter
+// classes win overlaps regardless of draw order (renderMap streams features in
+// tile/file order, unsorted; OR==max made order invisible in the 1-bit era).
+// 1-bit sinks (OLED) crush shade>0 to a set bit at their pack step, so shade
+// tuning can never change OLED output. Overlays (position marker, waypoints,
+// GPS track) are pinned at MAP_SHADE_MAX so they beat every map feature.
 struct MapFeatureStyle {
   MapLineStyle lineStyle;
   uint8_t lineWeight;     // 1 = thin, 2 = medium, 3 = thick
-  uint8_t priority;       // Higher = render later (on top)
+  uint8_t shade;          // 0-15 brightness class (4-bpp grayscale, 15 = brightest)
   bool render;            // Whether to render at all
-  // Color info for color displays (RGB565 or similar)
-  uint16_t color;
 };
+
+#define MAP_SHADE_MAX 15  // Reserved for overlays (marker, waypoints, track)
 
 // =============================================================================
 // Map Data Structures (v6)
@@ -563,15 +569,26 @@ private:
 // =============================================================================
 
 // =============================================================================
-// Offscreen 1-bit Renderer (for async background rendering)
+// Offscreen Shade Renderer (for async background rendering)
 // =============================================================================
-
-#define OFFSCREEN_BUF_SIZE 1024  // 128x64 / 8 = 1024 bytes
+// Renders into a caller-owned byte-per-pixel shade buffer: values 0..15,
+// linear layout buffer[y * bufWidth + x], bufWidth * bufHeight bytes total.
+// Pixel writes are max(existing, shade) — see MapFeatureStyle. Each sink
+// converts at its own pack step: the OLED map task packs shade>0 into its
+// 1-bit SSD1306 page back buffer, the G2 maps shades straight to 4-bpp BMP
+// nibbles. Dash/dot pitch and the position marker scale by bufWidth/128 so
+// higher-resolution targets (G2 288x144) keep the same visual proportions
+// as the 128-wide OLED.
 
 class OffscreenMapRenderer : public MapRenderer {
 public:
-  OffscreenMapRenderer(uint8_t* buffer, int width, int height, int offsetY = 0);
-  
+  // buffer:      bufWidth * bufHeight shade bytes (one per pixel)
+  // viewW/viewH: content viewport renderMap draws into (clip region)
+  // offsetY:     first content row inside the buffer; rows
+  //              [offsetY, offsetY + viewH) must fit within bufHeight
+  OffscreenMapRenderer(uint8_t* buffer, int bufWidth, int bufHeight,
+                       int viewW, int viewH, int offsetY = 0);
+
   void setViewport(int width, int height) override;
   void clear() override;
   void drawLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1,
@@ -580,21 +597,29 @@ public:
   void drawOverlayText(int16_t x, int16_t y, const char* text, bool inverted) override {}
   void drawContextBar(const char* text, int scrollOffset) override {}
   void flush() override {}
-  
+
   MapFeatureStyle getFeatureStyle(MapFeatureType type) override;
   bool shouldRenderFeature(uint8_t type, uint8_t subtype) override;
-  
-  uint8_t* getBuffer() const { return _buffer; }
-  
+
+  // When true (the G2 lens) water bodies and coastlines are surfaced as wireframe
+  // outlines. Left false for the low-pixel 1-bit OLED, where those area outlines
+  // just clutter. Road thickness + line styles apply to both sinks regardless;
+  // only these area features are gated here.
+  void setSurfaceAreas(bool v) { _surfaceAreas = v; }
+
 private:
   uint8_t* _buffer;
+  int16_t _bufW;
+  int16_t _bufH;
   int16_t _offsetY;
-  
-  void drawPixel(int16_t x, int16_t y);
+  int16_t _scale;   // bufWidth / 128 (min 1): marker size + dash pitch multiplier
+  bool    _surfaceAreas = false;  // true only for the G2 lens (see setSurfaceAreas)
+
+  void drawPixel(int16_t x, int16_t y, uint8_t shade);
   bool clipLine(int16_t& x0, int16_t& y0, int16_t& x1, int16_t& y1);
-  void bresenhamLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1);
-  void drawDashedLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1, int dashLen);
-  void drawDottedLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1, int spacing);
+  void bresenhamLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1, uint8_t shade);
+  void drawDashedLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1, int dashLen, uint8_t shade);
+  void drawDottedLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1, int spacing, uint8_t shade);
 };
 
 #if ENABLE_OLED_DISPLAY
