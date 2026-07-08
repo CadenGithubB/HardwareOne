@@ -42,6 +42,12 @@ extern SemaphoreHandle_t gMeshRetryMutex;
 // ESP-NOW file transfer mutex - protects gActiveFileTransfer state
 extern SemaphoreHandle_t gFileTransferMutex;
 
+// Map tile-cache / lifecycle mutex - serializes MapCore::renderMap,
+// loadTileData, loadMapFile and unloadMap so the OLED map task, the G2 map
+// page, and the location-context updater never touch (or free) the shared
+// LoadedMap tile LRU cache concurrently. See MapCacheGuard below.
+extern SemaphoreHandle_t gMapCacheMutex;
+
 extern SemaphoreHandle_t i2sMicMutex;
 
 // ============================================================================
@@ -76,6 +82,38 @@ struct FsLockGuard {
   // Non-copyable
   FsLockGuard(const FsLockGuard&) = delete;
   FsLockGuard& operator=(const FsLockGuard&) = delete;
+};
+
+/**
+ * MapCacheGuard - RAII guard for the map tile-cache / lifecycle mutex.
+ *
+ * Held across the FULL render (tile load + parse), not just the cache
+ * bookkeeping: MapCore::loadTileData returns a pointer INTO the shared cache
+ * pool that the caller keeps parsing after the call returns, so a concurrent
+ * evict (another renderer) or free (unloadMap) would pull that memory out from
+ * under it. renderMap, loadTileData, loadMapFile, unloadMap and
+ * LocationContextManager::updateContext all take it.
+ *
+ * Reentrant-safe (matches the other guards in this file): renderMap holds it
+ * and calls loadTileData (whose own guard then no-ops); loadMapFile holds it
+ * and calls unloadMap (whose own guard no-ops).
+ *
+ * Lock ordering: always taken BEFORE gFsMutex — loadTileData/unloadMap grab
+ * the FS lock while this is held; nothing takes them in the reverse order.
+ *
+ * Usage:
+ *   {
+ *     MapCacheGuard guard("MapCore.renderMap");
+ *     // ... load + parse tiles ...
+ *   }
+ */
+struct MapCacheGuard {
+  bool held;
+  explicit MapCacheGuard(const char* owner = nullptr);
+  ~MapCacheGuard();
+
+  MapCacheGuard(const MapCacheGuard&) = delete;
+  MapCacheGuard& operator=(const MapCacheGuard&) = delete;
 };
 
 /**

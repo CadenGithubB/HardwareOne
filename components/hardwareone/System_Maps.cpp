@@ -293,9 +293,15 @@ MapFeatureStyle MapRenderer::getFeatureStyle(MapFeatureType type) {
 // =============================================================================
 
 bool MapCore::loadMapFile(const char* path) {
+  // Hold the map lock across the WHOLE load: the unloadMap + fresh pool/slots/
+  // tileDir allocation below must be atomic w.r.t. any concurrent renderMap, or
+  // a render could see valid=true with a half-built cache. Taken before the FS
+  // lock (global order: map -> FS). unloadMap's own guard no-ops (reentrant).
+  MapCacheGuard mapGuard("MapCore.loadMapFile");
+
   // Unload any existing map
   unloadMap();
-  
+
   // Pause sensor polling during file I/O to prevent I2C contention
   pollPause();
   vTaskDelay(pdMS_TO_TICKS(50));  // Let any in-flight I2C complete
@@ -741,9 +747,10 @@ bool MapCore::loadMapFile(const char* path) {
 }
 
 void MapCore::unloadMap() {
-  // Serialize with LittleFS map reads (loadTileData holds FsLockGuard around file I/O).
-  // Full MapCore vs render thread safety would require a dedicated map mutex; this matches
-  // existing loadMapFile/delete paths that call unloadMap without a separate map lock.
+  // Take the map lock BEFORE the FS lock (global order: map -> FS) so we can't
+  // free cachePool/slots/tileDir while a render is mid-parse holding pointers
+  // into them. Reentrant: no-op when called from loadMapFile (already holds it).
+  MapCacheGuard mapGuard("MapCore.unloadMap");
   FsLockGuard fsGuard("MapCore.unloadMap");
 
   // Log cache stats before freeing
@@ -816,7 +823,14 @@ static inline uint8_t* slotDataPtr(const LoadedMap& map, uint16_t slotIdx) {
 
 // Helper: Load tile data via multi-tier slab cache
 // Returns pointer to tile data in cache slot, or nullptr on error
+// Caller MUST hold gMapCacheMutex across BOTH this call and its use of the
+// returned pointer (it points into the shared LRU pool a concurrent miss could
+// evict). The guard here is reentrant, so it's a no-op when called from
+// renderMap/updateContext (which already hold it) and a real lock only if some
+// future caller forgets — but such a caller would still be unsafe once it
+// parses the returned bytes outside the lock, so hold it at the call site.
 const uint8_t* MapCore::loadTileData(uint16_t tileIdx, size_t* outSize) {
+  MapCacheGuard mapGuard("MapCore.loadTileData");
   if (!_currentMap.valid || !_currentMap.tileDir || tileIdx >= _currentMap.tileCount) {
     return nullptr;
   }
@@ -1089,9 +1103,14 @@ void MapCore::geoToScreen(int32_t lat, int32_t lon,
   screenY = cy + (int16_t)fmaxf(-30000.0f, fminf(30000.0f, y));
 }
 
-// Thread-safe renderMap: all mutable state comes from params, no global reads
+// Thread-safe renderMap: all mutable state comes from params, no global reads.
+// Held for the WHOLE render, not just cache bookkeeping: loadTileData hands
+// back pointers into the shared LRU pool that the loop below parses, so a
+// concurrent render (OLED task vs G2 map page) or unloadMap must not evict/free
+// those tiles mid-parse. See MapCacheGuard.
 void MapCore::renderMap(MapRenderer* renderer, float centerLat, float centerLon,
                         const MapRenderParams& params) {
+  MapCacheGuard mapGuard("MapCore.renderMap");
   if (!_currentMap.valid || !renderer || !_currentMap.tileDir) {
     DEBUG_MAPS_RENDERINGF("[MAPS] renderMap early exit: valid=%d renderer=%p tileDir=%p",
                           _currentMap.valid, renderer, _currentMap.tileDir);
@@ -3609,6 +3628,10 @@ bool LocationContextManager::shouldUpdate(float lat, float lon) {
 }
 
 void LocationContextManager::updateContext(float lat, float lon) {
+  // Runs on the OLED display task and reads tile data via loadTileData, so it
+  // races the render task(s) on the shared LRU pool exactly like renderMap.
+  // Hold the map lock across the whole scan (load + parse of every tile).
+  MapCacheGuard mapGuard("LocationContext.updateContext");
   const LoadedMap& map = MapCore::getCurrentMap();
   if (!map.valid || !map.tileDir) {
     _context.valid = false;

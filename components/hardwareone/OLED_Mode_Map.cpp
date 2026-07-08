@@ -19,6 +19,7 @@
 
 #include <Adafruit_SSD1306.h>
 #include "System_Maps.h"
+#include "System_Mutex.h"   // MapCacheGuard — serialize tile-cache reads vs mapRenderTask
 #include "OLED_Utils.h"
 #include "System_FileManager.h"
 #include "i2csensor_seesaw.h"
@@ -378,7 +379,10 @@ static void drawTrackStatus() {
 // Draw features list overlay
 static void drawFeatures() {
   if (!oledDisplay) return;
-  
+
+  // Reads map.names[] throughout, which unloadMap() frees; hold the map lock so
+  // a concurrent unload/load can't pull the name table out mid-draw.
+  MapCacheGuard mapGuard("OLED.drawFeatures");
   const LoadedMap& map = MapCore::getCurrentMap();
   
   oledDisplay->fillRect(0, 0, 128, 64, DISPLAY_COLOR_BLACK);
@@ -430,7 +434,11 @@ struct RouteInfo {
 // Draw transit routes viewer
 static void drawRoutes() {
   if (!oledDisplay) return;
-  
+
+  // Parses tile payloads returned by loadTileData below; hold the map lock
+  // across the whole scan so the async mapRenderTask can't evict a slot
+  // mid-parse. Reentrant guard → the inner loadTileData calls no-op.
+  MapCacheGuard mapGuard("OLED.drawRoutes");
   const LoadedMap& map = MapCore::getCurrentMap();
   
   oledDisplay->fillRect(0, 0, 128, 64, DISPLAY_COLOR_BLACK);
@@ -1652,6 +1660,9 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
       // Find ALL matching features (iterate through tiles)
       gSearchResultCount = 0;
       gSearchResultCurrent = 0;
+      // Hold the map lock across the whole tile scan (load + parse) so the
+      // async mapRenderTask can't evict a slot under the parser.
+      MapCacheGuard mapGuard("OLED.mapSearch");
       const LoadedMap& map = MapCore::getCurrentMap();
       if (map.valid && map.tileDir && gSearchResult[0] != '\0') {
         // Iterate through all tiles
@@ -1814,7 +1825,11 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
       return true;
     }
     
-    // Build route list (same logic as drawRoutes) using tiled architecture
+    // Build route list (same logic as drawRoutes) using tiled architecture.
+    // Hold the map lock across the tile scan AND the subsequent map.* /
+    // map.names[] use below, so a concurrent evict (mapRenderTask) or unload
+    // (file delete) can't invalidate the pool or name table mid-branch.
+    MapCacheGuard mapGuard("OLED.routesList");
     const LoadedMap& map = MapCore::getCurrentMap();
     static RouteInfo routeList[32];
     static float routeFirstLat[32];  // Store first point coords for goto
