@@ -251,35 +251,40 @@ static bool paramSubtypeIsVisible(const MapRenderParams& p, uint8_t featureType,
 // MapRenderer Base Class - Default Feature Styles
 // =============================================================================
 
+// Shade bands (0-15): brightness encodes prominence AND z-order (max-write).
+// The G2 lens shows roughly 8 visually distinct levels, so classes sit on a
+// coarse ladder (13/11/9/7/5/3) with MAP_SHADE_MAX=15 reserved for overlays.
+// Bands, not fine gradations: adjacent nibbles look alike on the lens.
+// The OLED crushes shade>0 to white, so these values only affect the G2.
 MapFeatureStyle MapRenderer::getFeatureStyle(MapFeatureType type) {
   // Default styles (can be overridden by subclasses)
   switch (type) {
     case MAP_FEATURE_HIGHWAY:
-      return {LINE_SOLID, 3, 10, true, 0xFFFF};  // White, thicker (was 2)
+      return {LINE_SOLID, 3, 13, true};   // Brightest feature class, thicker
     case MAP_FEATURE_ROAD_MAJOR:
-      return {LINE_SOLID, 2, 9, true, 0xFFFF};   // White, medium (was 1)
+      return {LINE_SOLID, 2, 11, true};
     case MAP_FEATURE_ROAD_MINOR:
-      return {LINE_DASHED, 1, 5, true, 0xC618};  // Gray, thin, dashed
+      return {LINE_DASHED, 1, 9, true};
     case MAP_FEATURE_PATH:
-      return {LINE_DOTTED, 1, 3, true, 0x8410};  // Dark gray, dotted
+      return {LINE_DOTTED, 1, 5, true};
     case MAP_FEATURE_WATER:
-      return {LINE_SOLID, 1, 8, true, 0x001F};   // Blue
+      return {LINE_SOLID, 1, 7, true};
     case MAP_FEATURE_PARK:
-      return {LINE_DOTTED, 1, 2, false, 0x07E0}; // Green, skip on mono
+      return {LINE_DOTTED, 1, 3, false};  // Skip on mono
     case MAP_FEATURE_LAND_MASK:
-      return {LINE_DOTTED, 1, 1, true, 0x8410};  // Coastline, thin dotted, lowest priority
+      return {LINE_DOTTED, 1, 3, true};   // Coastline, thin dotted, dimmest
     case MAP_FEATURE_RAILWAY:
-      return {LINE_DASHED, 1, 7, true, 0x7BEF};  // Gray, dashed
+      return {LINE_DASHED, 1, 7, true};
     case MAP_FEATURE_BUS:
-      return {LINE_DASHED, 1, 4, true, 0xFD20};  // Orange, dashed
+      return {LINE_DASHED, 1, 5, true};
     case MAP_FEATURE_FERRY:
-      return {LINE_DASHED, 2, 6, true, 0x07FF};  // Cyan, dashed, thicker
+      return {LINE_DASHED, 2, 5, true};
     case MAP_FEATURE_BUILDING:
-      return {LINE_NONE, 1, 1, false, 0x4208};   // Skip
+      return {LINE_NONE, 1, 3, false};    // Skip
     case MAP_FEATURE_STATION:
-      return {LINE_SOLID, 1, 7, true, 0xF81F};   // Magenta, point marker
+      return {LINE_SOLID, 1, 9, true};    // Point marker
     default:
-      return {LINE_SOLID, 1, 5, true, 0xFFFF};
+      return {LINE_SOLID, 1, 9, true};
   }
 }
 
@@ -541,9 +546,19 @@ bool MapCore::loadMapFile(const char* path) {
                        numTiers == MAP_CACHE_MAX_TIERS - 1;
 
     if (shouldFlush && numTiers < MAP_CACHE_MAX_TIERS) {
-      // Last tier must accommodate the largest tile
-      if (isLastPopulated && tierSlotSize < maxSlotSize) {
-        tierSlotSize = maxSlotSize;
+      // This is the last tier we'll create - either the final populated
+      // bucket, or we've hit the tier-count cap (only one tier slot left). It
+      // must hold the largest tile in the map (nothing bigger gets its own
+      // tier), and be credited with every still-unassigned tile so the pool
+      // split gives it enough slots. The old code only bumped on
+      // isLastPopulated, so when a map spanned more than MAP_CACHE_MAX_TIERS
+      // size buckets the biggest tiles had no tier and were dropped every frame.
+      bool isFinalTier = isLastPopulated || numTiers == MAP_CACHE_MAX_TIERS - 1;
+      if (isFinalTier) {
+        if (tierSlotSize < maxSlotSize) tierSlotSize = maxSlotSize;
+        // Fold in tiles from any larger buckets - they get no tier of their own
+        // and will land in this (now largest) tier at load time.
+        for (int nb = b + 1; nb < kHistBuckets; nb++) pendingCount += histogram[nb];
       }
       tierSpecs[numTiers].slotSize = tierSlotSize;
       tierSpecs[numTiers].tileCount = pendingCount;
@@ -559,7 +574,7 @@ bool MapCore::loadMapFile(const char* path) {
     numTiers = 1;
   }
 
-  // Allocate pool — size driven by gSettings.mapCacheSizeKB (default 1024 KB).
+  // Allocate pool — size driven by gSettings.mapCacheSizeKB (default 1280 KB).
   // Halves on alloc failure so the cache still comes up on tight PSRAM.
   size_t poolSize = (size_t)gSettings.mapCacheSizeKB * 1024;
   if (poolSize < 64 * 1024) poolSize = 64 * 1024;          // sanity floor
@@ -1104,8 +1119,14 @@ void MapCore::renderMap(MapRenderer* renderer, float centerLat, float centerLon,
   int32_t baseScaleX = 246;   // Microdegrees per pixel (longitude) at 1x
   int32_t scaleY = (int32_t)(baseScaleY / zoom);
   int32_t scaleX = (int32_t)(baseScaleX / zoom);
-  if (scaleX < 10) scaleX = 10;
-  if (scaleY < 10) scaleY = 10;
+  // Max-zoom-in clamp, proportional to viewport density: 10 udeg/px on the
+  // 128-wide OLED, 4 on the 288-wide G2. The G2 renders at zoom*2.25 for its
+  // native resolution; a fixed clamp of 10 would saturate its zoom (and skew
+  // its aspect) 2.25x earlier than the OLED at the same gMapZoom.
+  int32_t minScale = (10 * 128) / viewWidth;
+  if (minScale < 1) minScale = 1;
+  if (scaleX < minScale) scaleX = minScale;
+  if (scaleY < minScale) scaleY = minScale;
   
   // Pre-compute values for fast coordinate transform (avoids per-point division + trig)
   const float invScaleX = 1.0f / (float)scaleX;
@@ -1294,6 +1315,16 @@ void MapCore::renderMap(MapRenderer* renderer, float centerLat, float centerLon,
           continue;
         }
         
+        // Area polygons (water bodies, land/coast mask) are clipped to the
+        // tile+halo box by the generator, which turns each cut into an edge that
+        // runs along the box boundary (quantized coord 0 or 65535). Drawn as a
+        // wireframe outline those trace the tile/halo grid. For such features,
+        // suppress any segment whose BOTH endpoints lie on the same box edge -
+        // that only happens for a clip edge; real shoreline points are interior.
+        const bool suppressTileEdges =
+            (ftype == MAP_FEATURE_WATER && fsubtype != SUBTYPE_WATER_RIVER) ||
+            ftype == MAP_FEATURE_LAND_MASK;
+
         // Read and dequantize first point (inline transform using pre-computed values)
         uint16_t qLat = ptr[0] | (ptr[1] << 8);
         uint16_t qLon = ptr[2] | (ptr[3] << 8);
@@ -1307,10 +1338,14 @@ void MapCore::renderMap(MapRenderer* renderer, float centerLat, float centerLon,
           float fx = (float)(lon - centerLonMicro) * invScaleX;
           float fy = -(float)(lat - centerLatMicro) * invScaleY;
           if (hasRotation) { float rx = fx*cosR - fy*sinR; fy = fx*sinR + fy*cosR; fx = rx; }
-          prevX = cx + (int16_t)fx;
-          prevY = cy + (int16_t)fy;
+          // Clamp before the int16 cast (matches geoToScreen): a far-offscreen
+          // halo point must not wrap modulo 2^16 into the +/-50px visibility
+          // window below and draw a phantom line across the view.
+          prevX = cx + (int16_t)fmaxf(-30000.0f, fminf(30000.0f, fx));
+          prevY = cy + (int16_t)fmaxf(-30000.0f, fminf(30000.0f, fy));
         }
-        
+        uint16_t prevQLat = qLat, prevQLon = qLon;
+
         // Process remaining points
         for (uint16_t p = 1; p < pointCount; p++) {
           qLat = ptr[0] | (ptr[1] << 8);
@@ -1325,8 +1360,8 @@ void MapCore::renderMap(MapRenderer* renderer, float centerLat, float centerLon,
             float fx = (float)(lon - centerLonMicro) * invScaleX;
             float fy = -(float)(lat - centerLatMicro) * invScaleY;
             if (hasRotation) { float rx = fx*cosR - fy*sinR; fy = fx*sinR + fy*cosR; fx = rx; }
-            curX = cx + (int16_t)fx;
-            curY = cy + (int16_t)fy;
+            curX = cx + (int16_t)fmaxf(-30000.0f, fminf(30000.0f, fx));
+            curY = cy + (int16_t)fmaxf(-30000.0f, fminf(30000.0f, fy));
           }
           
           // Simple visibility check
@@ -1335,13 +1370,20 @@ void MapCore::renderMap(MapRenderer* renderer, float centerLat, float centerLon,
                          (curX >= -50 && curX < viewWidth + 50 &&
                           curY >= -50 && curY < viewHeight + 50);
           
-          if (visible) {
+          // Drop tile/halo-boundary clip edges of area polygons (see above).
+          bool tileEdge = suppressTileEdges &&
+              ((prevQLat == 0 && qLat == 0) || (prevQLat == 65535 && qLat == 65535) ||
+               (prevQLon == 0 && qLon == 0) || (prevQLon == 65535 && qLon == 65535));
+
+          if (visible && !tileEdge) {
             renderer->drawLine(prevX, prevY, curX, curY, style);
             totalDrawn++;
           }
-          
+
           prevX = curX;
           prevY = curY;
+          prevQLat = qLat;
+          prevQLon = qLon;
         }
       }
     }
@@ -1363,13 +1405,16 @@ void MapCore::renderMap(MapRenderer* renderer, float centerLat, float centerLon,
 }
 
 // =============================================================================
-// OffscreenMapRenderer Implementation (1-bit framebuffer for async rendering)
+// OffscreenMapRenderer Implementation (shade framebuffer for async rendering)
 // =============================================================================
 
-OffscreenMapRenderer::OffscreenMapRenderer(uint8_t* buffer, int width, int height, int offsetY)
-  : _buffer(buffer), _offsetY(offsetY) {
-  _width = width;
-  _height = height;
+OffscreenMapRenderer::OffscreenMapRenderer(uint8_t* buffer, int bufWidth, int bufHeight,
+                                           int viewW, int viewH, int offsetY)
+  : _buffer(buffer), _bufW(bufWidth), _bufH(bufHeight), _offsetY(offsetY) {
+  _width = viewW;
+  _height = viewH;
+  _scale = (int16_t)(bufWidth / 128);
+  if (_scale < 1) _scale = 1;
 }
 
 void OffscreenMapRenderer::setViewport(int width, int height) {
@@ -1378,14 +1423,16 @@ void OffscreenMapRenderer::setViewport(int width, int height) {
 }
 
 void OffscreenMapRenderer::clear() {
-  if (_buffer) memset(_buffer, 0, OFFSCREEN_BUF_SIZE);
+  if (_buffer) memset(_buffer, 0, (size_t)_bufW * (size_t)_bufH);
 }
 
-// SSD1306-compatible pixel layout: byte = 8 vertical pixels, LSB = top
-void OffscreenMapRenderer::drawPixel(int16_t x, int16_t y) {
+// Byte-per-pixel shade write: max(existing, shade) so brighter classes win
+// overlaps regardless of feature draw order (see MapFeatureStyle).
+void OffscreenMapRenderer::drawPixel(int16_t x, int16_t y, uint8_t shade) {
   int16_t ay = y + _offsetY;
-  if (x < 0 || x >= 128 || ay < 0 || ay >= 64) return;
-  _buffer[x + (ay / 8) * 128] |= (1 << (ay & 7));
+  if (x < 0 || x >= _bufW || ay < 0 || ay >= _bufH) return;
+  uint8_t& px = _buffer[(size_t)ay * _bufW + x];
+  if (shade > px) px = shade;
 }
 
 bool OffscreenMapRenderer::clipLine(int16_t& x0, int16_t& y0, int16_t& x1, int16_t& y1) {
@@ -1437,17 +1484,18 @@ bool OffscreenMapRenderer::clipLine(int16_t& x0, int16_t& y0, int16_t& x1, int16
   return false;
 }
 
-void OffscreenMapRenderer::bresenhamLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1) {
+void OffscreenMapRenderer::bresenhamLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1, uint8_t shade) {
   int16_t dx = abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
   int16_t dy = -abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
   int16_t err = dx + dy;
-  
+
   for (;;) {
-    // Direct pixel set (already clipped)
-    int16_t ay = y0;  // y0 already includes _offsetY from clipLine
-    if (ay >= 0 && ay < 64 && x0 >= 0 && x0 < 128)
-      _buffer[x0 + (ay / 8) * 128] |= (1 << (ay & 7));
-    
+    // Direct max-write (already clipped; y0 already includes _offsetY from clipLine)
+    if (y0 >= 0 && y0 < _bufH && x0 >= 0 && x0 < _bufW) {
+      uint8_t& px = _buffer[(size_t)y0 * _bufW + x0];
+      if (shade > px) px = shade;
+    }
+
     if (x0 == x1 && y0 == y1) break;
     int16_t e2 = 2 * err;
     if (e2 >= dy) { err += dy; x0 += sx; }
@@ -1455,105 +1503,124 @@ void OffscreenMapRenderer::bresenhamLine(int16_t x0, int16_t y0, int16_t x1, int
   }
 }
 
-void OffscreenMapRenderer::drawDashedLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1, int dashLen) {
+void OffscreenMapRenderer::drawDashedLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1, int dashLen, uint8_t shade) {
   int adx = abs(x1 - x0), ady = abs(y1 - y0);
   int len = (adx > ady) ? (adx + ady / 2) : (ady + adx / 2);
   if (len < 1) return;
-  
+
   float invLen = 1.0f / len;
   float dx = (x1 - x0) * invLen;
   float dy = (y1 - y0) * invLen;
   float x = x0, y = y0;
   bool draw = true;
   int segLen = 0;
-  
+
   for (int t = 0; t < len; t++) {
     if (draw) {
       int16_t px = (int16_t)x, py = (int16_t)y;
-      if (px >= 0 && px < 128 && py >= 0 && py < 64)
-        _buffer[px + (py / 8) * 128] |= (1 << (py & 7));
+      if (px >= 0 && px < _bufW && py >= 0 && py < _bufH) {
+        uint8_t& p = _buffer[(size_t)py * _bufW + px];
+        if (shade > p) p = shade;
+      }
     }
     x += dx; y += dy;
     if (++segLen >= dashLen) { segLen = 0; draw = !draw; }
   }
 }
 
-void OffscreenMapRenderer::drawDottedLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1, int spacing) {
+void OffscreenMapRenderer::drawDottedLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1, int spacing, uint8_t shade) {
   int adx = abs(x1 - x0), ady = abs(y1 - y0);
   int len = (adx > ady) ? (adx + ady / 2) : (ady + adx / 2);
   if (len < 1) return;
-  
+
   float invLen = 1.0f / len;
   float dx = (x1 - x0) * invLen;
   float dy = (y1 - y0) * invLen;
-  
+
   for (int t = 0; t <= len; t += spacing) {
     int16_t px = x0 + (int16_t)(dx * t);
     int16_t py = y0 + (int16_t)(dy * t);
-    if (px >= 0 && px < 128 && py >= 0 && py < 64)
-      _buffer[px + (py / 8) * 128] |= (1 << (py & 7));
+    if (px >= 0 && px < _bufW && py >= 0 && py < _bufH) {
+      uint8_t& p = _buffer[(size_t)py * _bufW + px];
+      if (shade > p) p = shade;
+    }
   }
 }
 
 void OffscreenMapRenderer::drawLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1,
                                      const MapFeatureStyle& style) {
   if (!_buffer) return;
-  
+
   // Apply content area offset
   y0 += _offsetY;
   y1 += _offsetY;
-  
+
   // Clip to content area
   if (!clipLine(x0, y0, x1, y1)) return;
-  
-  switch (style.lineStyle) {
-    case LINE_SOLID:
-      bresenhamLine(x0, y0, x1, y1);
-      break;
-    case LINE_DASHED:
-      drawDashedLine(x0, y0, x1, y1, 4);
-      break;
-    case LINE_DOTTED:
-      drawDottedLine(x0, y0, x1, y1, 3);
-      break;
-    case LINE_NONE:
-    default:
-      break;
+
+  // One styled pass. Dash/dot pitch scales with buffer resolution so patterns
+  // keep the same visual proportions on the 288-wide G2 as on the 128-wide OLED.
+  auto pass = [&](int16_t ax0, int16_t ay0, int16_t ax1, int16_t ay1) {
+    switch (style.lineStyle) {
+      case LINE_SOLID:  bresenhamLine(ax0, ay0, ax1, ay1, style.shade); break;
+      case LINE_DASHED: drawDashedLine(ax0, ay0, ax1, ay1, 4 * _scale, style.shade); break;
+      case LINE_DOTTED: drawDottedLine(ax0, ay0, ax1, ay1, 3 * _scale, style.shade); break;
+      case LINE_NONE:
+      default: break;
+    }
+  };
+
+  // Line weight = thickness: lay down `weight` parallel passes offset across the
+  // line's minor axis, so road class reads by thickness (highway thick -> minor
+  // thin). Thickness works on BOTH sinks - it is the G2's strongest cue and the
+  // ONLY per-class cue the 1-bit OLED can show (shade is inert there). The base
+  // line is already content-clipped; each offset pass is re-clipped so a thick
+  // line at the very top/bottom of the OLED map can't bleed into the header/footer.
+  int weight = style.lineWeight < 1 ? 1 : style.lineWeight;
+  bool horizontal = abs(x1 - x0) >= abs(y1 - y0);
+  for (int i = 0; i < weight; i++) {
+    int16_t off = (int16_t)(i - weight / 2);   // w1->{0}, w2->{-1,0}, w3->{-1,0,1}
+    if (off == 0) { pass(x0, y0, x1, y1); continue; }   // base pass, already clipped
+    int16_t ax0, ay0, ax1, ay1;
+    if (horizontal) { ax0 = x0; ay0 = (int16_t)(y0 + off); ax1 = x1; ay1 = (int16_t)(y1 + off); }
+    else            { ax0 = (int16_t)(x0 + off); ay0 = y0; ax1 = (int16_t)(x1 + off); ay1 = y1; }
+    if (clipLine(ax0, ay0, ax1, ay1)) pass(ax0, ay0, ax1, ay1);
   }
 }
 
 void OffscreenMapRenderer::drawPositionMarker(int16_t x, int16_t y) {
   if (!_buffer) return;
   y += _offsetY;
-  
+
   const int16_t ymin = _offsetY, ymax = _offsetY + _height - 1;
   if (y < ymin || y > ymax) return;
-  
-  // Crosshair
-  MapFeatureStyle solid = {LINE_SOLID, 1, 15, true, 0xFFFF};
-  int16_t x0 = x - 4, x1 = x + 4;
-  int16_t yt = (y - 4 < ymin) ? ymin : y - 4;
-  int16_t yb = (y + 4 > ymax) ? ymax : y + 4;
-  
+
+  // Crosshair (arm length scales with buffer resolution)
+  const int16_t arm = 4 * _scale;
+  int16_t x0 = x - arm, x1 = x + arm;
+  int16_t yt = (y - arm < ymin) ? ymin : y - arm;
+  int16_t yb = (y + arm > ymax) ? ymax : y + arm;
+
   // Horizontal
   int16_t cy0 = y, cy1 = y;
-  if (clipLine(x0, cy0, x1, cy1)) bresenhamLine(x0, cy0, x1, cy1);
+  if (clipLine(x0, cy0, x1, cy1)) bresenhamLine(x0, cy0, x1, cy1, MAP_SHADE_MAX);
   // Vertical
   int16_t cx0 = x, cx1 = x;
-  if (clipLine(cx0, yt, cx1, yb)) bresenhamLine(cx0, yt, cx1, yb);
-  
-  // Simple circle (midpoint algorithm, r=3)
-  if (y - 3 >= ymin && y + 3 <= ymax) {
-    int16_t r = 3, px = r, py = 0, err = 1 - r;
+  if (clipLine(cx0, yt, cx1, yb)) bresenhamLine(cx0, yt, cx1, yb, MAP_SHADE_MAX);
+
+  // Simple circle (midpoint algorithm)
+  const int16_t r0 = 3 * _scale;
+  if (y - r0 >= ymin && y + r0 <= ymax) {
+    int16_t r = r0, px = r, py = 0, err = 1 - r;
     while (px >= py) {
-      drawPixel(x + px, y + py - _offsetY);
-      drawPixel(x - px, y + py - _offsetY);
-      drawPixel(x + px, y - py - _offsetY);
-      drawPixel(x - px, y - py - _offsetY);
-      drawPixel(x + py, y + px - _offsetY);
-      drawPixel(x - py, y + px - _offsetY);
-      drawPixel(x + py, y - px - _offsetY);
-      drawPixel(x - py, y - px - _offsetY);
+      drawPixel(x + px, y + py - _offsetY, MAP_SHADE_MAX);
+      drawPixel(x - px, y + py - _offsetY, MAP_SHADE_MAX);
+      drawPixel(x + px, y - py - _offsetY, MAP_SHADE_MAX);
+      drawPixel(x - px, y - py - _offsetY, MAP_SHADE_MAX);
+      drawPixel(x + py, y + px - _offsetY, MAP_SHADE_MAX);
+      drawPixel(x - py, y + px - _offsetY, MAP_SHADE_MAX);
+      drawPixel(x + py, y - px - _offsetY, MAP_SHADE_MAX);
+      drawPixel(x - py, y - px - _offsetY, MAP_SHADE_MAX);
       py++;
       if (err < 0) {
         err += 2 * py + 1;
@@ -1565,31 +1632,53 @@ void OffscreenMapRenderer::drawPositionMarker(int16_t x, int16_t y) {
   }
 }
 
-// Reuse OLED styles for offscreen (same 1-bit rendering characteristics)
+// Feature styles for the offscreen (shade-buffer) renderer, shared by the G2
+// lens and the OLED. Roads carry a thickness hierarchy and each class a distinct
+// line style (both visible on 1-bit); shade is the G2's brightness band and is
+// inert on the OLED, which crushes any shade>0 to a set bit.
 MapFeatureStyle OffscreenMapRenderer::getFeatureStyle(MapFeatureType type) {
+  // Shared style ladder for BOTH sinks. Weight (thickness) and line style
+  // (solid/dash/dot) differentiate classes on the G2 AND the 1-bit OLED; shade
+  // adds the G2's green brightness bands and doubles as z-order (max-write:
+  // brighter draws on top) but is inert on the OLED (packed to a set bit). What
+  // differs per sink is only shouldRenderFeature - water/coast area outlines are
+  // surfaced on the G2 and kept off the low-pixel OLED. Bands:
+  //   roads 10-14 (bright, + thick->thin weight)   transit/rail 6-9 (mid, dash/dot)
+  //   water/coast/buildings 3-5 (dim).   Overlays sit above all at shade 15.
   switch (type) {
-    case MAP_FEATURE_HIGHWAY:    return {LINE_SOLID, 1, 10, true, 0xFFFF};
-    case MAP_FEATURE_ROAD_MAJOR: return {LINE_SOLID, 1, 9, true, 0xFFFF};
-    case MAP_FEATURE_ROAD_MINOR: return {LINE_SOLID, 1, 5, true, 0xFFFF};
-    case MAP_FEATURE_PATH:       return {LINE_DOTTED, 1, 3, true, 0xFFFF};
-    case MAP_FEATURE_WATER:      return {LINE_SOLID, 1, 8, true, 0xFFFF};
-    case MAP_FEATURE_PARK:       return {LINE_NONE, 1, 0, false, 0xFFFF};
-    case MAP_FEATURE_LAND_MASK:  return {LINE_NONE, 1, 0, false, 0xFFFF};
-    case MAP_FEATURE_RAILWAY:    return {LINE_DASHED, 1, 7, true, 0xFFFF};
-    case MAP_FEATURE_BUS:        return {LINE_DASHED, 1, 4, true, 0xFFFF};
-    case MAP_FEATURE_FERRY:      return {LINE_DASHED, 1, 6, true, 0xFFFF};
-    case MAP_FEATURE_BUILDING:   return {LINE_DOTTED, 1, 1, true, 0xFFFF};
-    case MAP_FEATURE_STATION:    return {LINE_SOLID, 1, 7, true, 0xFFFF};
-    default:                     return {LINE_SOLID, 1, 5, true, 0xFFFF};
+    case MAP_FEATURE_HIGHWAY:    return {LINE_SOLID,  3, 14, true};  // thickest + brightest
+    case MAP_FEATURE_ROAD_MAJOR: return {LINE_SOLID,  2, 12, true};  // medium
+    case MAP_FEATURE_STATION:    return {LINE_SOLID,  1, 11, true};  // point marker
+    case MAP_FEATURE_ROAD_MINOR: return {LINE_SOLID,  1, 10, true};  // thin
+    case MAP_FEATURE_RAILWAY:    return {LINE_DASHED, 1,  9, true};
+    case MAP_FEATURE_PATH:       return {LINE_DOTTED, 1,  7, true};
+    case MAP_FEATURE_BUS:        return {LINE_DASHED, 1,  7, true};
+    case MAP_FEATURE_FERRY:      return {LINE_DASHED, 1,  6, true};  // over water
+    case MAP_FEATURE_WATER:      return {LINE_SOLID,  1,  5, true};  // lakes/rivers/coast, dim solid
+    case MAP_FEATURE_LAND_MASK:  return {LINE_DOTTED, 1,  4, true};  // coastline outline
+    case MAP_FEATURE_BUILDING:   return {LINE_DOTTED, 1,  3, true};  // dimmest
+    case MAP_FEATURE_PARK:       return {LINE_NONE,   1,  0, false}; // area fill, meaningless as wireframe
+    default:                     return {LINE_SOLID,  1, 10, true};
   }
 }
 
 bool OffscreenMapRenderer::shouldRenderFeature(uint8_t type, uint8_t subtype) {
+  if (!_surfaceAreas) {
+    // Low-pixel 1-bit OLED: rivers only, skip parks + land_mask. Area outlines
+    // (lakes, coastlines, land mask) are just more ON lines at 1-bit with no
+    // brightness to set them apart from roads, so they clutter more than clarify.
+    switch (type) {
+      case MAP_FEATURE_WATER:     return (subtype == SUBTYPE_WATER_RIVER);
+      case MAP_FEATURE_PARK:
+      case MAP_FEATURE_LAND_MASK: return false;
+      default:                    return true;
+    }
+  }
+  // G2 lens: surface water bodies (lakes + rivers + coastline) and the
+  // land/coastline mask as wireframe outlines, so shoreline and water read
+  // instead of only rivers. Parks stay off: an unfilled park outline is noise.
   switch (type) {
-    case MAP_FEATURE_WATER:
-      return (subtype == SUBTYPE_WATER_RIVER);
     case MAP_FEATURE_PARK:
-    case MAP_FEATURE_LAND_MASK:
       return false;
     default:
       return true;
@@ -1819,34 +1908,36 @@ void OLEDMapRenderer::flush() {
 }
 
 MapFeatureStyle OLEDMapRenderer::getFeatureStyle(MapFeatureType type) {
-  // OLED-optimized styles - ALL features rendered as white lines
+  // OLED-optimized styles - ALL features rendered as white lines (the OLED
+  // draws 1-bit, so shade values here are inert; kept on the shared band
+  // ladder for consistency)
   switch (type) {
     case MAP_FEATURE_HIGHWAY:
-      return {LINE_SOLID, 1, 10, true, 0xFFFF};
+      return {LINE_SOLID, 1, 13, true};
     case MAP_FEATURE_ROAD_MAJOR:
-      return {LINE_SOLID, 1, 9, true, 0xFFFF};
+      return {LINE_SOLID, 1, 11, true};
     case MAP_FEATURE_ROAD_MINOR:
-      return {LINE_SOLID, 1, 5, true, 0xFFFF};  // Solid thin line
+      return {LINE_SOLID, 1, 9, true};   // Solid thin line
     case MAP_FEATURE_PATH:
-      return {LINE_DOTTED, 1, 3, true, 0xFFFF};
+      return {LINE_DOTTED, 1, 5, true};
     case MAP_FEATURE_WATER:
-      return {LINE_SOLID, 1, 8, true, 0xFFFF};   // Rivers only (lakes/coastlines filtered by shouldRenderFeature)
+      return {LINE_SOLID, 1, 7, true};   // Rivers only (lakes/coastlines filtered by shouldRenderFeature)
     case MAP_FEATURE_PARK:
-      return {LINE_NONE, 1, 0, false, 0xFFFF};   // Skip: polygon fill only (meaningless as wireframe)
+      return {LINE_NONE, 1, 0, false};   // Skip: polygon fill only (meaningless as wireframe)
     case MAP_FEATURE_LAND_MASK:
-      return {LINE_NONE, 1, 0, false, 0xFFFF};   // Skip: land mask is only meaningful as filled region
+      return {LINE_NONE, 1, 0, false};   // Skip: land mask is only meaningful as filled region
     case MAP_FEATURE_RAILWAY:
-      return {LINE_DASHED, 1, 7, true, 0xFFFF};
+      return {LINE_DASHED, 1, 7, true};
     case MAP_FEATURE_BUS:
-      return {LINE_DASHED, 1, 4, true, 0xFFFF};  // Dashed for bus routes
+      return {LINE_DASHED, 1, 5, true};  // Dashed for bus routes
     case MAP_FEATURE_FERRY:
-      return {LINE_DASHED, 1, 6, true, 0xFFFF};  // Dashed for ferries
+      return {LINE_DASHED, 1, 5, true};  // Dashed for ferries
     case MAP_FEATURE_BUILDING:
-      return {LINE_DOTTED, 1, 1, true, 0xFFFF};  // Dotted for buildings
+      return {LINE_DOTTED, 1, 3, true};  // Dotted for buildings
     case MAP_FEATURE_STATION:
-      return {LINE_SOLID, 1, 7, true, 0xFFFF};   // Solid for stations (drawn as point)
+      return {LINE_SOLID, 1, 9, true};   // Solid for stations (drawn as point)
     default:
-      return {LINE_SOLID, 1, 5, true, 0xFFFF};
+      return {LINE_SOLID, 1, 9, true};
   }
 }
 
@@ -2469,20 +2560,23 @@ void WaypointManager::renderWaypoints(MapRenderer* renderer,
     
     // Only render if on screen
     if (screenX >= 0 && screenX < viewWidth && screenY >= 0 && screenY < viewHeight) {
-      // Draw waypoint marker: X shape, or filled for selected target
+      // Draw waypoint marker: X shape, or filled for selected target.
+      // Marker size scales with viewport resolution (1 on the 128-wide OLED,
+      // 2 on the 288-wide G2) so markers stay legible on denser targets.
+      const int16_t mf = (viewWidth >= 256) ? 2 : 1;
       bool isTarget = (i == _selectedTarget);
       if (isTarget) {
         // Filled diamond for target
-        MapFeatureStyle style = {LINE_SOLID, 1, 15, true, 0xFFFF};
-        renderer->drawLine(screenX - 3, screenY, screenX, screenY - 3, style);
-        renderer->drawLine(screenX, screenY - 3, screenX + 3, screenY, style);
-        renderer->drawLine(screenX + 3, screenY, screenX, screenY + 3, style);
-        renderer->drawLine(screenX, screenY + 3, screenX - 3, screenY, style);
+        MapFeatureStyle style = {LINE_SOLID, 1, MAP_SHADE_MAX, true};
+        renderer->drawLine(screenX - 3 * mf, screenY, screenX, screenY - 3 * mf, style);
+        renderer->drawLine(screenX, screenY - 3 * mf, screenX + 3 * mf, screenY, style);
+        renderer->drawLine(screenX + 3 * mf, screenY, screenX, screenY + 3 * mf, style);
+        renderer->drawLine(screenX, screenY + 3 * mf, screenX - 3 * mf, screenY, style);
       } else {
         // Small X for regular waypoints
-        MapFeatureStyle style = {LINE_SOLID, 1, 15, true, 0xFFFF};
-        renderer->drawLine(screenX - 2, screenY - 2, screenX + 2, screenY + 2, style);
-        renderer->drawLine(screenX - 2, screenY + 2, screenX + 2, screenY - 2, style);
+        MapFeatureStyle style = {LINE_SOLID, 1, MAP_SHADE_MAX, true};
+        renderer->drawLine(screenX - 2 * mf, screenY - 2 * mf, screenX + 2 * mf, screenY + 2 * mf, style);
+        renderer->drawLine(screenX - 2 * mf, screenY + 2 * mf, screenX + 2 * mf, screenY - 2 * mf, style);
       }
     }
   }
@@ -2886,8 +2980,9 @@ void GPSTrackManager::renderTrack(MapRenderer* renderer,
   int32_t centerLatMicro = (int32_t)(centerLat * 1000000);
   int32_t centerLonMicro = (int32_t)(centerLon * 1000000);
   
-  // Track style: dotted line to distinguish from roads
-  MapFeatureStyle trackStyle = {LINE_DOTTED, 2, 12, true, 0xFFFF};
+  // Track style: dotted line to distinguish from roads; overlay shade so the
+  // track stays visible over every map feature (max-write)
+  MapFeatureStyle trackStyle = {LINE_DOTTED, 2, MAP_SHADE_MAX, true};
   
   // Draw track as connected line segments
   int16_t prevX = -1, prevY = -1;
@@ -2923,7 +3018,7 @@ void GPSTrackManager::renderTrack(MapRenderer* renderer,
                          scaleX, scaleY, viewWidth, viewHeight, startX, startY);
     
     if (startX >= 0 && startX < viewWidth && startY >= 0 && startY < viewHeight) {
-      MapFeatureStyle markerStyle = {LINE_SOLID, 1, 14, true, 0xFFFF};
+      MapFeatureStyle markerStyle = {LINE_SOLID, 1, MAP_SHADE_MAX, true};
       // Draw small circle for start
       renderer->drawLine(startX - 2, startY, startX + 2, startY, markerStyle);
       renderer->drawLine(startX, startY - 2, startX, startY + 2, markerStyle);
@@ -2939,7 +3034,7 @@ void GPSTrackManager::renderTrack(MapRenderer* renderer,
                          scaleX, scaleY, viewWidth, viewHeight, endX, endY);
     
     if (endX >= 0 && endX < viewWidth && endY >= 0 && endY < viewHeight) {
-      MapFeatureStyle markerStyle = {LINE_SOLID, 1, 14, true, 0xFFFF};
+      MapFeatureStyle markerStyle = {LINE_SOLID, 1, MAP_SHADE_MAX, true};
       // Draw small square for end
       renderer->drawLine(endX - 2, endY - 2, endX + 2, endY - 2, markerStyle);
       renderer->drawLine(endX + 2, endY - 2, endX + 2, endY + 2, markerStyle);
@@ -3654,7 +3749,7 @@ static const char* cmd_mapcachekb(const String& argsInput) {
 static const SettingEntry mapsSettingEntries[] = {
   { "zoom",        SETTING_FLOAT, &gSettings.mapZoom,           0,    1.0f, nullptr, 0, 0,    "Default zoom (0.5-20.0)",            nullptr, false, nullptr, "mapzoom" },
   { "layers",      SETTING_INT,   &gSettings.mapVisibleLayers,  0x3FF, 0,   nullptr, 0, 0x3FF, "Visible layers (bitmask, 0-0x3FF)", nullptr, false, nullptr, "maplayers" },
-  { "cacheSizeKB", SETTING_INT,   &gSettings.mapCacheSizeKB,    1024, 0,    nullptr, 256, 4096, "Tile cache size (KB, effective on next map load)", nullptr, false, nullptr, "mapcachekb" },
+  { "cacheSizeKB", SETTING_INT,   &gSettings.mapCacheSizeKB,    1280, 0,    nullptr, 256, 4096, "Tile cache size (KB, effective on next map load)", nullptr, false, nullptr, "mapcachekb" },
 };
 
 // Columns: name, jsonSection, entries, count, isConnected, description

@@ -8,6 +8,18 @@ Entries for 0.96.1 and earlier were backfilled from git history (this repo had
 no tags or releases before 0.96.2); they are terse, commit-grounded summaries,
 dated from each version's commit. Dates are YYYY-MM-DD.
 
+## [0.97.4] - 2026-07-07
+Clearer, more legible offline maps on the glasses and OLED, and no more missing chunks.
+### Added
+- Map feature differentiation on the glasses and OLED: roads render with a thick-to-thin weight hierarchy (highway / major / minor) and each class has a distinct line style, so the map is far easier to read. The G2 lens additionally uses 16-level green shading and surfaces water bodies and coastlines (drawn cleanly, without tracing the tile grid).
+### Changed
+- G2 glasses maps render at the lens's native 288x144 in 16-level grayscale, instead of a 128x64 1-bit page upscaled 2.25x - crisp uniform lines and feature classes that stand out. The OLED stays 128x64 but now shares the road weight hierarchy and line styles (it can't show brightness at 1-bit, but thickness and pattern read fine).
+- Larger default map tile cache: 1.25 MB, up from 1 MB (PSRAM).
+### Fixed
+- Chunks of the map no longer go missing. Tiles larger than the tile cache's biggest size class were silently dropped every frame, so dense and coastal areas showed rectangular holes; the cache now always sizes its top tier to the largest tile in the map (the generator caps tiles at 20 KB).
+### Docs
+- Updated the G2 map multi-shade rendering plan for the shipped native-resolution renderer and the OLED / water-coast follow-ups.
+
 ## [0.97.3] - 2026-07-06
 Maps on the G2 glasses, WPS-style ESP-NOW pairing, and a batch of OLED, web, and build fixes.
 ### Added

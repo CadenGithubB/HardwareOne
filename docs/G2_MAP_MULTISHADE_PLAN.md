@@ -1,10 +1,23 @@
 # G2 Map Multi-Shade Rendering — Investigation & Plan
 
-**Status: plan-only (no code changes yet). Investigated 2026-07-06.**
+**Status: IMPLEMENTED 2026-07-07 (builds green, awaiting hardware test, not committed).**
+Ramp test result: ~8 visually distinct levels on the lens → shade ladder
+13/11/9/7/5/3 with 15 reserved for overlays. Implementation follows §2 with two
+review-driven additions: renderMap's max-zoom-in clamp is now proportional to
+viewport width (10 udeg/px at 128 wide, 4 at 288) so the G2's zoom range
+matches the OLED's, and renderMap's inline transforms clamp to ±30000 before
+their int16 casts (same guard geoToScreen already had) to prevent phantom
+wrap-around lines at clamped scale.
 
 Goal: the G2 glasses map should render features in multiple shades of green
 (brightness = prominence), while the OLED keeps rendering exactly as today
 (1-bit, byte-identical output).
+
+> SUPERSEDED 2026-07-07: a later pass extended feature differentiation (a road
+> thickness hierarchy + per-class line styles) to the OLED too, because the map
+> was hard to read at 1-bit. Shade stays inert on the OLED; water/coast outlines
+> stay G2-only. So the OLED is intentionally NOT byte-identical anymore. The
+> regular/OLED renderer stays capped at 128x64.
 
 ---
 
@@ -153,4 +166,6 @@ Recommended companion fix, independent of multi-shade.
 - No web page changes (fully parallel renderer).
 - No map file format changes.
 - No subtype→style threading, no polygon fill, no priority sorting.
-- No OLED visual change of any kind.
+- No OLED visual change of any kind.  (SUPERSEDED 2026-07-07: the OLED now shares
+  the road thickness hierarchy + per-class line styles; shade stays inert on it;
+  water/coast outlines remain G2-only.)
