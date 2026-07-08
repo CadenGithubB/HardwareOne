@@ -18,6 +18,7 @@ SemaphoreHandle_t gMeshRetryMutex = nullptr;
 SemaphoreHandle_t gFileTransferMutex = nullptr;
 SemaphoreHandle_t gTopoStreamsMutex = nullptr;
 SemaphoreHandle_t gEspNowSessionTxMutex = nullptr;
+SemaphoreHandle_t gMapCacheMutex = nullptr;
 SemaphoreHandle_t i2sMicMutex = nullptr;
 
 // ============================================================================
@@ -32,6 +33,7 @@ void initMutexes() {
   gFileTransferMutex = xSemaphoreCreateMutex();
   gTopoStreamsMutex = xSemaphoreCreateMutex();
   gEspNowSessionTxMutex = xSemaphoreCreateMutex();
+  gMapCacheMutex = xSemaphoreCreateMutex();
   i2sMicMutex = xSemaphoreCreateMutex();
 
   // i2cMutex removed — I2cLockGuard and i2cLock/Unlock go through I2CDeviceManager::getBusMutex() directly
@@ -40,7 +42,7 @@ void initMutexes() {
   bool allCreated = (gFsMutex != nullptr) && (gJsonResponseMutex != nullptr) &&
                     (gMeshRetryMutex != nullptr) && (gFileTransferMutex != nullptr) &&
                     (gTopoStreamsMutex != nullptr) && (gEspNowSessionTxMutex != nullptr) &&
-                    (i2sMicMutex != nullptr);
+                    (gMapCacheMutex != nullptr) && (i2sMicMutex != nullptr);
   
   if (!allCreated) {
     if (gOutputFlags & OUTPUT_SERIAL) {
@@ -108,6 +110,31 @@ void fsLock(const char* owner) {
 void fsUnlock() {
   if (gFsMutex && isHeldByCurrentTask(gFsMutex)) {
     xSemaphoreGive(gFsMutex);
+  }
+}
+
+// ============================================================================
+// MapCacheGuard Implementation
+// ============================================================================
+
+MapCacheGuard::MapCacheGuard(const char* owner) : held(false) {
+  if (gMapCacheMutex) {
+    // Reentrant-safe: renderMap holds this and calls loadTileData; loadMapFile
+    // holds it and calls unloadMap. If this task already owns it, skip the take
+    // and leave release to the outer holder.
+    if (isHeldByCurrentTask(gMapCacheMutex)) return;
+    // portMAX_DELAY matches FsLockGuard: a partial timeout would let the caller
+    // proceed WITHOUT the lock and reintroduce the exact evict/free race this
+    // guards. Renders are bounded and priority inheritance prevents inversion.
+    if (xSemaphoreTake(gMapCacheMutex, portMAX_DELAY) == pdTRUE) {
+      held = true;
+    }
+  }
+}
+
+MapCacheGuard::~MapCacheGuard() {
+  if (held && gMapCacheMutex) {
+    xSemaphoreGive(gMapCacheMutex);
   }
 }
 
