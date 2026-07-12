@@ -936,6 +936,28 @@ static bool llmPromptInDomain(const char* prompt) {
   return false;
 }
 
+// Universal capability / identity / help questions that ANY assistant model
+// should answer even though they carry no domain content word (they are all
+// function words), so the domain gate must not blank them out. Case-insensitive
+// substring match on the raw prompt; the "Q: ...\nA:" framing doesn't interfere.
+static bool llmIsMetaPrompt(const char* prompt) {
+  char lw[192];
+  size_t n = 0;
+  for (const char* p = prompt; *p && n < sizeof(lw) - 1; ++p) {
+    char c = *p;
+    lw[n++] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+  }
+  lw[n] = '\0';
+  static const char* const META[] = {
+    "what are you", "who are you", "what do you do", "what can you do",
+    "what do you know", "what can i ask", "what is this", "how do you work",
+    "tell me about yourself", "what are you for", "what are your", "help",
+  };
+  for (size_t i = 0; i < sizeof(META) / sizeof(META[0]); ++i)
+    if (strstr(lw, META[i])) return true;
+  return false;
+}
+
 int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
                 int maxTokens, float temperature, float topp,
                 float repPenalty, int repWindow, int sentenceLimit, int hardCap,
@@ -953,8 +975,10 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
   // ── Domain refusal gate ──────────────────────────────────────────────────
   // If the loaded .bin carries a domain allow-list and the setting is on, refuse
   // prompts that contain none of the domain words (deterministic, pre-generation).
-  // Skipped for Do:/command prompts (their output is machine-parsed). Nothing is
-  // allocated yet, so the early return only has to restore runState + emit the text.
+  // Skipped for Do:/command prompts (machine-parsed) and for universal meta/help
+  // questions (what-are-you, help, ...) that any model should answer despite
+  // carrying no domain word. Nothing allocated yet, so the early return only has
+  // to restore runState + emit the text.
   if (gSettings.llmDomainGate && gLLM.domainVocabCount > 0) {
     // Do:-mode prompts (natural-language → device command) are machine-parsed and
     // must bypass the gate. The app frames them "...\nDo:", but BLE intake
@@ -965,7 +989,7 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
     const size_t promptLen = strlen(prompt);
     const bool doMode = strstr(prompt, "\nDo:") != nullptr ||
                         (promptLen >= 4 && strcmp(prompt + promptLen - 4, " Do:") == 0);
-    if (!doMode && !llmPromptInDomain(prompt)) {
+    if (!doMode && !llmIsMetaPrompt(prompt) && !llmPromptInDomain(prompt)) {
       const char* msg = gLLM.modelRefusal[0]
                           ? gLLM.modelRefusal
                           : "I can only answer questions about this model's topic.";

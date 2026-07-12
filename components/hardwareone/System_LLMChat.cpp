@@ -50,6 +50,14 @@ static int  sStreamingTurnSlot = -1;  // -1 = nothing streaming
 static int  sStreamingSessionId = 0;
 static int  sEngineOffsetDrained = 0; // bytes copied from engine into the turn
 
+// Remember the most recently FINISHED assistant turn so a client whose first
+// poll arrives after the turn was already drained + finalized can still fetch it.
+// This is what makes an instant-completing generation (e.g. a gate refusal that
+// returns in microseconds, before the browser's first poll) actually reach the
+// web/OLED live view instead of blanking. Invalidated when a new turn begins.
+static int  sLastFinishedSession = 0;
+static int  sLastFinishedSlot    = -1;
+
 static SemaphoreHandle_t sChatMutex = nullptr;
 
 // ============================================================================
@@ -204,6 +212,10 @@ static void drainEngineLocked() {
     LLMStatus st = llmGetStatus();
     t.tokenCount      = st.lastTokenCount;
     t.tokensPerSecX10 = (uint16_t)(st.lastTokensPerSec * 10.0f);
+    // Snapshot the finished turn so a client that hasn't polled yet can still
+    // fetch it (chatReadFinished), even though we clear the streaming slot here.
+    sLastFinishedSession = sStreamingSessionId;
+    sLastFinishedSlot    = sStreamingTurnSlot;
     sStreamingTurnSlot = -1;
     sStreamingSessionId = 0;
     sEngineOffsetDrained = 0;
@@ -323,6 +335,8 @@ int chatBeginTurn(const char* userPrompt, const ChatParamOverride* opt) {
   sStreamingTurnSlot   = assistantSlot;
   sStreamingSessionId  = sid;
   sEngineOffsetDrained = 0;
+  sLastFinishedSlot    = -1;   // a new turn supersedes any finished-turn snapshot
+  sLastFinishedSession = 0;
   return sid;
 }
 
@@ -478,6 +492,32 @@ int chatGetStreamLen() {
   drainEngineLocked();
   if (sStreamingTurnSlot < 0) return 0;
   return (int)sTurns[sStreamingTurnSlot].textLen;
+}
+
+// Read the most recently FINISHED assistant turn for `session`. Recovers a result
+// that completed (and was finalized) before the client's first poll — e.g. an
+// instant gate refusal, or a turn another surface's poll already drained.
+// Returns 0 unless `session` is that last-finished turn.
+int chatReadFinished(int session, int offset, char* buf, int maxLen) {
+  if (!buf || maxLen <= 0) return 0;
+  buf[0] = '\0';
+  ChatLock lk;
+  if (!lk.held) return 0;
+  if (session == 0 || session != sLastFinishedSession || sLastFinishedSlot < 0) return 0;
+  const InternalTurn& t = sTurns[sLastFinishedSlot];
+  if (!t.text || offset < 0 || (uint32_t)offset >= t.textLen) return 0;
+  int avail = (int)t.textLen - offset;
+  int copy = avail < (maxLen - 1) ? avail : (maxLen - 1);
+  memcpy(buf, t.text + offset, copy);
+  buf[copy] = '\0';
+  return copy;
+}
+
+int chatFinishedLen(int session) {
+  ChatLock lk;
+  if (!lk.held) return 0;
+  if (session == 0 || session != sLastFinishedSession || sLastFinishedSlot < 0) return 0;
+  return (int)sTurns[sLastFinishedSlot].textLen;
 }
 
 int chatReadStream(int offset, char* buf, int maxLen) {
