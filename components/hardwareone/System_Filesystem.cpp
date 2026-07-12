@@ -941,13 +941,12 @@ const char* cmd_filewrite(const String& argsInput) {
   }
 
   String bytes = base64Decode(b64);
-  const size_t MAX_BLE_FILE = 256 * 1024;  // BLE is for config/text; large media via web
-  if ((size_t)offset + bytes.length() > MAX_BLE_FILE) {
-    snprintf(respBuf, sizeof(respBuf),
-             "{\"success\":false,\"error\":\"File too large for BLE (cap %u KB); use the web browser\"}",
-             (unsigned)(MAX_BLE_FILE / 1024));
-    return respBuf;
-  }
+  // No artificial size ceiling — a BLE upload streams one append at a time and never buffers the
+  // whole file, so the only real limit is free storage (same policy as the web upload). The app
+  // pre-checks the total against free space; if the volume fills anyway, the write below short-
+  // writes and returns cleanly, so an oversized upload stops gracefully instead of corrupting.
+  // (Deliberately no per-chunk VFS::getStats here: LittleFS.usedBytes() scans the FS and would
+  // add that cost to every one of the thousands of chunks.)
 
   FsLockGuard _g("filewrite");
   // offset 0 -> "w" (truncate/create); else "a" (append).
@@ -976,7 +975,7 @@ const char* cmd_filewrite(const String& argsInput) {
 
   if (written != toWrite) {
     snprintf(respBuf, sizeof(respBuf),
-             "{\"success\":false,\"error\":\"Write failed (short write)\",\"size\":%ld}", newSize);
+             "{\"success\":false,\"error\":\"Write failed — storage full?\",\"size\":%ld}", newSize);
     return respBuf;
   }
 
