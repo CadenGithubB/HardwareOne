@@ -186,10 +186,8 @@ static void streamAutomationsInner(httpd_req_t* req) {
         <select id='a_cond_var' class='input-tall'><option value=''>— none —</option><optgroup label="Sensors"><option value="temp">Temperature</option><option value="distance">Distance</option><option value="light">Light</option><option value="motion">Motion</option></optgroup><optgroup label="Time"><option value="time">Time of day</option><option value="hour">Hour (0-23)</option><option value="day">Day of week</option><option value="ntp">Clock synced</option></optgroup><optgroup label="System"><option value="battery">Battery %</option><option value="heap">Free heap KB</option><option value="psram">Free PSRAM KB</option><option value="fsfree">Free storage KB</option><option value="uptime">Uptime min</option><option value="chiptemp">Chip temp C</option></optgroup><optgroup label="Network"><option value="wifi">WiFi state</option><option value="rssi">WiFi RSSI dBm</option><option value="peers">ESP-NOW peers</option><option value="ble">BLE state</option></optgroup><optgroup label="Location"><option value="gps">GPS fix</option><option value="speed">GPS speed kn</option><option value="sats">GPS satellites</option></optgroup><optgroup label="AI"><option value="llm">LLM state</option></optgroup><optgroup label="ESP-NOW / Bond"><option value="espnow">ESP-NOW up</option><option value="bond_mode">Bond mode</option><option value="bond_role">Bond role</option><option value="bond_paired">Bond paired</option><option value="bond_online">Bond online</option><option value="bond_synced">Bond synced</option><option value="bond_rssi">Bond RSSI dBm</option><option value="bond_peer_heap">Bond peer heap KB</option><option value="bond_peer_uptime">Bond peer uptime min</option><option value="pairmode">Pairing mode</option><option value="pairmode_secs">Pairing secs left</option><option value="peersknown">Peers known</option><option value="stalestpeerage">Stalest peer age s</option></optgroup><optgroup label="ESP-NOW metadata"><option value="room">Room</option><option value="zone">Zone</option><option value="tags">Tags</option></optgroup></select>
         <select id='a_cond_op' class='input-tall'><option value=">">&gt;</option><option value="<">&lt;</option><option value="=">=</option><option value=">=">&gt;=</option><option value="<=">&lt;=</option><option value="!=">!=</option><option value="CONTAINS">CONTAINS</option></select>
         <input id='a_cond_val' class='input-tall' placeholder='value' style='width:90px'>
-        <label style='font-size:0.85em;color:var(--panel-fg);margin-left:0.5rem'>Mode:</label>
-        <select id='a_trigger_mode' class='input-tall'><option value='repeat'>Repeat while true</option><option value='once'>Once when it becomes true</option></select>
       </div>
-      <div style='font-size:0.78em;color:var(--panel-fg);opacity:0.7;margin:0.2rem 0 0.4rem 0'>Pair with an Interval trigger to set how often the condition is checked. "Once" fires on the false-&gt;true crossing only (then re-arms when it goes false).</div>
+      <div style='font-size:0.78em;color:var(--panel-fg);opacity:0.7;margin:0.2rem 0 0.4rem 0'>Pair with an Interval trigger to set how often the condition is checked.</div>
     </div>
     <div style='margin-top:0.5rem'>
       <label style='font-size:0.9em;color:var(--panel-fg);margin-bottom:0.25rem;display:block'>Commands & Logic:</label>
@@ -1243,9 +1241,9 @@ async function createAutomation(){
     } 
     parts.push('commands="'+cmdsParam.replace(/"/g,'\\"')+'"');
     parts.push('enabled='+(en?1:0));
-    // Option 2: top-level "Fire when" condition + repeat/once trigger mode.
-    { const cv=(document.getElementById('a_cond_var')||{}).value||''; const co=(document.getElementById('a_cond_op')||{}).value||'>'; const cval=((document.getElementById('a_cond_val')||{}).value||'').trim(); const tm=(document.getElementById('a_trigger_mode')||{}).value||'repeat';
-      if(cv && cval){ parts.push('condition="'+(cv+co+cval).replace(/"/g,'\\"')+'"'); if(tm==='once') parts.push('triggermode=once'); } }
+    // Option 2: top-level "Fire when" condition gate.
+    { const cv=(document.getElementById('a_cond_var')||{}).value||''; const co=(document.getElementById('a_cond_op')||{}).value||'>'; const cval=((document.getElementById('a_cond_val')||{}).value||'').trim();
+      if(cv && cval){ parts.push('condition="'+(cv+co+cval).replace(/"/g,'\\"')+'"'); } }
     if(runAtBoot) parts.push('runatboot=1');
     // Secondary triggers: append as a JSON array via the `secondarytriggers`
     // arg. The backend merges these with the primary trigger + runAtBoot boot
@@ -1303,7 +1301,7 @@ async function createAutomation(){
       document.getElementById('a_delay').value=''; 
       document.getElementById('a_interval').value=''; 
       var elRunBoot=document.getElementById('a_runatboot'); if(elRunBoot) elRunBoot.checked=false;
-      { var cvr=document.getElementById('a_cond_var'); if(cvr) cvr.value=''; var cvv=document.getElementById('a_cond_val'); if(cvv) cvv.value=''; var tmr=document.getElementById('a_trigger_mode'); if(tmr) tmr.value='repeat'; } 
+      { var cvr=document.getElementById('a_cond_var'); if(cvr) cvr.value=''; var cvv=document.getElementById('a_cond_val'); if(cvv) cvv.value=''; } 
       const cwrap=document.getElementById('command_fields'); 
       if(cwrap){ 
         cwrap.innerHTML='<div id="command_buttons" class="row-inline" style="gap:0.5rem;margin-top:0.5rem"><button id="btn_add_cmd" type="button" class="btn btn-small" onclick="addCommandField()" title="Add another command to execute (e.g., ledcolor red, status, broadcast message)">+ Add Command</button><button id="btn_add_print" type="button" class="btn btn-small" onclick="addPrintField()" title="Add a print/broadcast message statement">+ Add Print</button><button id="btn_add_logic" type="button" class="btn btn-small" onclick="addLogicField()" title="Add conditional logic (IF/THEN statements for sensor-based automation)">+ Add Logic</button><button id="btn_add_wait" type="button" class="btn btn-small" onclick="addWaitField()" title="Add a wait/pause command with dropdown timing">+ Add Wait</button></div>'; 
@@ -1409,12 +1407,12 @@ function autoEdit(id){
     }
     if(typeVal==='afterDelay') document.getElementById('a_delay').value=sched.delayMs||a.delayMs||0;
     if(typeVal==='interval') document.getElementById('a_interval').value=sched.intervalMs||a.intervalMs||0;
-    // Option 2: populate the "Fire when" condition + trigger mode from the record.
-    { var cvr=document.getElementById('a_cond_var'); var cor=document.getElementById('a_cond_op'); var cvv=document.getElementById('a_cond_val'); var tmr=document.getElementById('a_trigger_mode');
+    // Option 2: populate the "Fire when" condition from the record.
+    { var cvr=document.getElementById('a_cond_var'); var cor=document.getElementById('a_cond_op'); var cvv=document.getElementById('a_cond_val');
       if(cvr&&cor&&cvv){ cvr.value='';cor.value='>';cvv.value='';
         var cond=(a.condition||'').trim();
         if(cond){ var ops=['CONTAINS','>=','<=','!=','>','<','=']; for(var oi=0;oi<ops.length;oi++){ var ix=cond.indexOf(ops[oi]); if(ix>0){ cvr.value=cond.substring(0,ix).trim().toLowerCase(); cor.value=ops[oi]; cvv.value=cond.substring(ix+ops[oi].length).trim(); break; } } } }
-      if(tmr) tmr.value=(a.triggerMode==='once')?'once':'repeat'; }
+      }
     const commands=Array.isArray(a.commands)?a.commands:(a.command?[a.command]:[]);
     const cwrap=document.getElementById('command_fields');
     if(cwrap){

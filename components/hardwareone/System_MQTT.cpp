@@ -160,7 +160,7 @@ static void subscribeToExternalTopics() {
 }
 
 // Check if MQTT is connected
-bool isMqttTofConnected() {
+bool isMqttConnected() {
   return mqttTofConnected;
 }
 
