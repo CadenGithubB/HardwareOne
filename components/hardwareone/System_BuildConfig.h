@@ -222,7 +222,7 @@
 // On-device LLM: tiny transformer inference (Llama + GPT-2 architectures).
 // Requires ESP32-S3 + PSRAM. Models load from LittleFS or SD. FP32 / INT8.
 // Typical PSRAM usage: 1–4 MB at runtime.
-#define ENABLE_ONDEVICE_LLM     0
+#define ENABLE_ONDEVICE_LLM     1
 #if ENABLE_ONDEVICE_LLM
 // Max KV / attention context in tokens (0 = use checkpoint's seq_len only).
 // Lower uses less PSRAM; must cover prompt + max generation.

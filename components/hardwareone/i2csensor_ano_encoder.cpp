@@ -483,7 +483,10 @@ void inputTask(void* parameter) {
     unsigned long nowMs = millis();
     if ((nowMs - lastStackLog) >= 30000) {
       lastStackLog = nowMs;
-      if (checkTaskStackSafety("anoencoder", INPUT_STACK_WORDS, &gAnoEncoderEnabled)) break;
+      // 'continue' (not 'break') so the top-of-loop shutdown runs the clean
+      // SENSOR_TASK_EXIT (vTaskDelete) path instead of returning from the task
+      // function with a near-overflowed stack (IllegalInstruction panic).
+      if (checkTaskStackSafety("anoencoder", INPUT_STACK_WORDS, &gAnoEncoderEnabled)) continue;
     }
 
     if (gAnoEncoderEnabled && gAnoEncoderConnected && !pollPaused((uint8_t)gSettings.inputBus)) {

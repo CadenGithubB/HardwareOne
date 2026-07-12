@@ -222,6 +222,25 @@ struct LLMRuntime {
   char modelPath[64];
   char errorMsg[128];
 
+  // Optional per-model metadata from the LLM1 "info block" (header offset 24 =
+  // info_len; block sits between the 64-byte header and the tokenizer). Zeroed on
+  // every load/unload; populated by loadInfoBlockFromFile() when present. Fixed
+  // storage — llmModelDescription()/llmModelIcon() hand out zero-copy pointers.
+  char    modelDesc[256];   // NUL-terminated UTF-8 description ("" if none)
+  uint8_t modelIcon[128];   // 1bpp MSB-first, row-major; up to 32x32
+  uint8_t modelIconW;       // icon width in pixels (0 if no icon)
+  uint8_t modelIconH;       // icon height in pixels (0 if no icon)
+  bool    modelHasIcon;     // true when modelIcon holds a valid bitmap
+
+  // Domain refusal gate (optional, appended to the info block after the icon).
+  // When domainVocabCount>0 and gSettings.llmDomainGate is on, a prompt containing
+  // none of these words is refused (modelRefusal) instead of generated. The vocab
+  // blob is PSRAM-allocated at load and freed in llmUnload (kept off internal DRAM).
+  char     modelRefusal[256];  // NUL-terminated refusal answer ("" = compiled default)
+  uint8_t* domainVocab;        // PSRAM: packed allow-list, each entry [u8 len][lowercase word]; nullptr if none
+  uint16_t domainVocabCount;   // number of words (0 = gate inactive)
+  size_t   domainVocabBytes;   // valid packed length in domainVocab (bounds the matcher walk)
+
   // Effective context for KV cache (<= config.seq_len); may be capped by requestedMaxCtx
   int seq_ctx;
   int requestedMaxCtx;   // set by llmLoadModel before loadWeights is called
@@ -235,6 +254,12 @@ struct LLMRuntime {
   // Top-p sampling index buffer (allocated once at model load, reused per token)
   int* sampleIndices;
   int sampleIndicesSize;  // = vocab_size
+
+  // Generated-token history for the no-repeat n-gram blocker (PSRAM, seq_ctx
+  // ints, reused per generation). Unlike repBuf's small ring, this keeps EVERY
+  // sampled token of the current run so n-gram matches can't age out.
+  int* genHist;
+  int genHistSize;  // = seq_ctx at model load
 
   SemaphoreHandle_t mutex;
 };

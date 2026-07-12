@@ -3452,15 +3452,17 @@ static void doUserSyncWork(const DeferredUserSyncWork* w) {
     newUser["bootCount"]   = gBootCounter;
     userDoc["nextId"] = nextId + 1;
 
-    f = VFS::openGuarded(USERS_JSON_FILE, "w", userSyncCtx);
-    if (!f || serializeJson(userDoc, f) == 0) {
-      if (f) f.close();
-      ERROR_ESPNOWF("[USER_SYNC] Failed to write users.json");
-      logSystemEvent("USERS", "users.json WRITE FAILED during mesh user-sync of '%s' — auth database may be inconsistent", targetUser);
-      v4_send_command_response(srcAddr, msgId, false, "Failed to write users.json", strlen("Failed to write users.json"));
-      return;
+    {
+      // Atomic write (tmp + rename) — never truncate the live auth DB in place.
+      String usersJson;
+      serializeJson(userDoc, usersJson);
+      if (usersJson.length() == 0 || !writeTextAtomic(USERS_JSON_FILE, usersJson)) {
+        ERROR_ESPNOWF("[USER_SYNC] Failed to write users.json");
+        logSystemEvent("USERS", "users.json WRITE FAILED during mesh user-sync of '%s' — auth database may be inconsistent", targetUser);
+        v4_send_command_response(srcAddr, msgId, false, "Failed to write users.json", strlen("Failed to write users.json"));
+        return;
+      }
     }
-    f.close();
 
     String hashedPassword = hashUserPassword(String(targetPass));
     PSRAM_JSON_DOC(defaults);

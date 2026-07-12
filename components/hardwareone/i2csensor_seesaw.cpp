@@ -466,7 +466,10 @@ void inputTask(void* parameter) {
     unsigned long nowMs = millis();
     if ((nowMs - lastStackLog) >= 30000) {
       lastStackLog = nowMs;
-      if (checkTaskStackSafety("gamepad", INPUT_STACK_WORDS, &gInputEnabled)) break;
+      // 'continue' (not 'break') so the top-of-loop shutdown runs the clean
+      // SENSOR_TASK_EXIT (vTaskDelete) path instead of returning from the task
+      // function with a near-overflowed stack (IllegalInstruction panic).
+      if (checkTaskStackSafety("gamepad", INPUT_STACK_WORDS, &gInputEnabled)) continue;
       if (isDebugFlagSet(DEBUG_PERFORMANCE)) {
         UBaseType_t watermark = uxTaskGetStackHighWaterMark(nullptr);
         gGamepadWatermarkNow = watermark;

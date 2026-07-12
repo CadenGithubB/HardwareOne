@@ -377,18 +377,18 @@ struct Settings {
       ,llmTemperature(0.5f)
       ,llmTopP(0.8f)
       ,llmMinP(0.0f)
-      ,llmKvPrecision(0)
+      ,llmKvPrecision(1)     // FP16 default: same PSRAM auto-fit pool holds ~2x context, ~lossless
+      ,llmNoRepeatNgram(0)   // built + reviewed but shipped OFF per user (llmnorepeatngram 3 to arm)
+      ,llmConfThreshold(-1.0f)
+      ,llmContentBoost(1.5f)
       ,llmMaxTokens(256)
       ,llmSentenceLimit(2)
       ,llmHardCap(80)
       ,llmRepPenalty(1.3f)
       ,llmRepWindow(32)
       ,llmMaxContext(0)
-      ,llmUseMirostat2(false)
-      ,llmMirostatTau(5.0f)
-      ,llmMirostatEta(0.1f)
-      ,llmDynTemp(false)
       ,llmDefaultModel("model.bin")
+      ,llmDomainGate(true)
 #endif
       // Maps app
       ,mapZoom(1.0f)
@@ -955,18 +955,18 @@ struct Settings {
   float llmTemperature;         // Sampling temperature (default: 0.5)
   float llmTopP;                // Nucleus sampling threshold (default: 0.8)
   float llmMinP;                // Min-p relative floor (0 = off; typical 0.05-0.1). When >0, replaces top-p.
-  int llmKvPrecision;           // KV cache precision: 0=FP32, 1=FP16 (half PSRAM, ~no quality loss). Applied at model load.
+  int llmKvPrecision;           // KV cache precision: 0=FP32, 1=FP16 (default: 2x context in the same PSRAM, ~no quality loss), 2=INT8. Applied at model load.
+  int llmNoRepeatNgram;         // Ban tokens completing an already-generated n-gram (default 0=off; 3 typical). Breaks verbatim phrase loops the rep penalty exempts.
+  float llmConfThreshold;       // Confidence gate: prefix "I'm not sure, but" when mean logprob of the first tokens < this (0=off, default -1.0). Calibrated for temp 0.5.
+  float llmContentBoost;        // Logit bonus for prompt content tokens (default 1.5, 0=off). Keeps answers on-topic; co-tune with repPenalty/noRepeatNgram (it exempts+favors these tokens).
   int llmMaxTokens;             // Max tokens per generation (default: 256)
   int llmSentenceLimit;         // Stop after N sentences, 0=disabled (default: 2)
   int llmHardCap;               // Hard token cap, 0=disabled (default: 80)
   float llmRepPenalty;          // Repetition penalty divisor (default: 1.3)
   int llmRepWindow;             // Look-back window for rep penalty (default: 32)
   int llmMaxContext;            // KV cache context window, 0=use compile-time default
-  bool llmUseMirostat2;         // Enable Mirostat 2 sampling (default: false)
-  float llmMirostatTau;         // Mirostat target surprise in bits (default: 5.0)
-  float llmMirostatEta;         // Mirostat learning rate (default: 0.1)
-  bool llmDynTemp;              // Dynamic temperature scaling (default: false)
   String llmDefaultModel;       // Default model filename for auto-load (default: "model.bin")
+  bool llmDomainGate;           // Refuse generation when the prompt matches none of the model's embedded domain vocab (default: on). Only enforced when the loaded .bin carries a domain vocab section.
 #endif
 
   // Maps app — persisted defaults applied at boot to gMapZoom / gVisibleLayers

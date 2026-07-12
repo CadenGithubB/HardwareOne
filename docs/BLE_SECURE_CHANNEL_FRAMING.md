@@ -30,7 +30,7 @@ framing makes any remaining loss **detectable and recoverable**.
 After decrypting an `SC_DATA` frame, the plaintext is no longer raw text. It begins with:
 
 ```
-offset 0: ver       (1 byte)  always 0x01
+offset 0: ver       (1 byte)  0x01 = text reply · 0x02 = raw binary blob
 offset 1: msgId_lo  (1 byte)  message id, little-endian
 offset 2: msgId_hi  (1 byte)
 offset 3: fragIdx    (1 byte)  0-based fragment index within this message
@@ -40,6 +40,13 @@ offset 5: payload    (N bytes) up to 195 bytes of the actual message text
 
 A whole device→app message = the concatenated `payload` of all `fragCount` fragments sharing
 the same `msgId`, in `fragIdx` order.
+
+- `ver == 0x01` — the payload is UTF-8 **text** (a CLI result / line batch). The default.
+- `ver == 0x02` — the payload is an opaque **binary blob**; do NOT UTF-8-decode or console-echo
+  it. All fragments of one message share the same `ver`. Used by `fileread "<path>" <off> <len>
+  bin`: the device sends the file chunk's raw bytes as a `0x02` message, immediately followed by
+  a normal `0x01` JSON header `{success,size,offset,len,eof,enc:"raw"}` (no `data` field). The app
+  pairs the held blob with that header — dropping base64's 33% expansion for bulk map downloads.
 
 - `msgId` increments per message, per connection, and wraps at 65536.
 - `fragCount == 1` is the common case (any message ≤ 195 bytes): single self-contained frame.
@@ -51,7 +58,7 @@ the same `msgId`, in `fragIdx` order.
 ```
 on SC_DATA decrypted -> plaintext:
     ver, msgId, fragIdx, fragCount = plaintext[0..4]
-    if ver != 0x01: drop (unknown framing)
+    if ver not in (0x01, 0x02): drop (unknown framing)   # 0x02 = raw binary blob
     payload = plaintext[5:]
 
     buf = buffers[msgId]            # keyed by msgId

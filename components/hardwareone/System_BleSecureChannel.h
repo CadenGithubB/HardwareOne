@@ -78,7 +78,11 @@ BleScResult bleScHandleInbound(uint16_t connId, const uint8_t* data, size_t len,
 // client. Chunks to fit the negotiated MTU. Returns false if not established.
 // blocking=false try-locks the tx mutex (best-effort console mirror); true waits (command
 // results). See the .cpp for why the debug path must not block.
-bool bleScSendEncrypted(uint16_t connId, const char* plaintext, size_t len, bool blocking = true);
+// binaryFrame=true stamps the app-frame header with ver=0x02 so the app treats the
+// reassembled message as an opaque byte blob (no UTF-8 decode / no console echo) — used by
+// `fileread ... bin` to ship raw file bytes without base64. Payload is still AEAD-encrypted.
+bool bleScSendEncrypted(uint16_t connId, const char* plaintext, size_t len, bool blocking = true,
+                        bool binaryFrame = false);
 
 #endif // ENABLE_BLUETOOTH
 #endif // SYSTEM_BLE_SECURE_CHANNEL_H

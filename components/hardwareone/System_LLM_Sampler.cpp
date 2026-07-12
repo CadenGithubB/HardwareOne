@@ -1,9 +1,9 @@
 /**
  * System_LLM_Sampler.cpp - Token sampling for the LLM engine.
  *
- * Extracted verbatim from System_LLM.cpp (no behavioral change): argmax, top-p
- * (nucleus), temperature/categorical, and Mirostat v2. Operates in place on the
- * logits buffer and reuses gLLM.sampleIndices to avoid per-token allocation.
+ * Sampling primitives: argmax (greedy), top-p (nucleus), min-p, and the
+ * temperature/categorical dispatcher. Operates in place on the logits buffer
+ * and reuses gLLM.sampleIndices to avoid per-token allocation.
  */
 #include "System_BuildConfig.h"
 #if ENABLE_ONDEVICE_LLM
@@ -192,80 +192,6 @@ int sample(float* logits, int vocab_size, float temperature, float topp, float m
   }
 
   return sample_topp(logits, vocab_size, topp, outChosenProb);
-}
-
-// Mirostat v2 sampling — adaptive surprise targeting.
-// Maintains a running estimate `mu` of the distribution's perplexity per step.
-// Tokens whose individual surprise (-log2 p) exceeds mu are excluded, then we
-// sample from the remainder and update mu toward `tau` bits of target surprise.
-//
-// logits: raw logits (modified in place — apply temperature scaling + softmax here)
-// mu:     persistent state across tokens within one generation (init to 2*tau)
-// tau:    target surprise in bits (typical 3–7; higher = more diverse output)
-// eta:    learning rate for mu update (typical 0.05–0.2)
-int sample_mirostat2(float* logits, int n, float temperature, float tau, float eta, float* mu) {
-  if (temperature <= 0.0f) return sample_argmax(logits, n);
-
-  // Apply temperature and convert to probabilities
-  for (int i = 0; i < n; i++) logits[i] /= temperature;
-  softmax(logits, n);  // logits now holds probabilities
-
-  // Exclude tokens more surprising than mu bits: threshold = 2^(-mu)
-  float threshold = powf(2.0f, -(*mu));
-
-  // Sum probability mass of included tokens
-  float included_sum = 0.0f;
-  for (int i = 0; i < n; i++) {
-    if (logits[i] >= threshold) included_sum += logits[i];
-  }
-
-  // Debug: log Mirostat state
-  int included_count = 0;
-  for (int i = 0; i < n; i++) if (logits[i] >= threshold) included_count++;
-  DEBUG_LLM_GENERATEF("[LLM] mirostat2: mu=%.3f threshold=%.6f included=%d/%d mass=%.4f tau=%.1f eta=%.2f",
-                      *mu, threshold, included_count, n, included_sum, tau, eta);
-
-  // If nothing passes the surprise threshold, mu has drifted too low (threshold ≈ 1.0).
-  // Reset mu to 2*tau and sample from the full distribution rather than collapsing to
-  // argmax — argmax would corrupt mu further and create a feedback death spiral.
-  if (included_sum <= 0.0f) {
-    DEBUG_LLM_GENERATEF("[LLM] mirostat2: RESET mu from %.3f to %.3f (death spiral prevention)", *mu, 2.0f * tau);
-    *mu = 2.0f * tau;
-    return sample_argmax(logits, n);
-  }
-
-  // Sample from included tokens proportionally
-  float r = ((float)esp_random() / (float)UINT32_MAX) * included_sum;
-  float cdf = 0.0f;
-  int chosen = -1;
-  for (int i = 0; i < n; i++) {
-    if (logits[i] >= threshold) {
-      cdf += logits[i];
-      if (chosen < 0 && r <= cdf) chosen = i;
-    }
-  }
-  // Fallback if float rounding left chosen unset
-  if (chosen < 0) {
-    for (int i = 0; i < n; i++) {
-      if (logits[i] >= threshold) { chosen = i; break; }
-    }
-  }
-  if (chosen < 0) return sample_argmax(logits, n);
-
-  // Update mu: error = (surprise of chosen token in bits) - tau
-  float p_chosen = logits[chosen];  // still original softmax probability
-  if (p_chosen > 0.0f) {
-    float surprise_bits = -log2f(p_chosen);
-    float old_mu = *mu;
-    *mu -= eta * (surprise_bits - tau);
-    // Clamp to a sane range
-    if (*mu < 0.01f) *mu = 0.01f;
-    if (*mu > tau * 20.0f) *mu = tau * 20.0f;
-    DEBUG_LLM_GENERATEF("[LLM] mirostat2: chose tok=%d p=%.4f surprise=%.2f bits mu: %.3f -> %.3f",
-                        chosen, p_chosen, surprise_bits, old_mu, *mu);
-  }
-
-  return chosen;
 }
 
 #endif // ENABLE_ONDEVICE_LLM

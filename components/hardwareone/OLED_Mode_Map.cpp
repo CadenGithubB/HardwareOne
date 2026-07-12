@@ -1044,18 +1044,18 @@ static void displayGPSMap() {
   bool usingRemoteGPS = false;
   
 #if ENABLE_GPS_SENSOR
-  // Use cached GPS data (gpsTask continuously polls and updates gPA1010D)
-  // Do NOT call gPA1010D->read() here - causes I2C bus contention with OLED
-  if (gGpsConnected && gPA1010D != nullptr && gGpsEnabled) {
-    if (gPA1010D->fix) {
-      lat = gPA1010D->latitudeDegrees;
-      lon = gPA1010D->longitudeDegrees;
-      if (gPA1010D->lat == 'S') lat = -lat;
-      if (gPA1010D->lon == 'W') lon = -lon;
-      hasGPSFix = true;
-      satellites = (int)gPA1010D->satellites;
-    } else {
-      satellites = (int)gPA1010D->satellites;
+  // Use cached GPS data (gps_task continuously polls and updates the cache).
+  // Read the cache struct, never gPA1010D directly — the cache lat/lon are
+  // already signed (S/W negative).
+  if (gGpsConnected && gGpsEnabled) {
+    GPSCache g;
+    if (gpsCacheSnapshot(g)) {
+      satellites = (int)g.satellites;
+      if (g.hasFix) {
+        lat = g.latitude;
+        lon = g.longitude;
+        hasGPSFix = true;
+      }
     }
   }
 #endif
@@ -1414,13 +1414,14 @@ static void executeSubmenuAction(int submenuType, int action) {
     case MENU_CAT_GPS:
       switch (action) {
         case 0:  // Center on GPS
-          if (gGpsConnected && gPA1010D != nullptr && gPA1010D->fix) {
-            gMapCenterLat = gPA1010D->latitudeDegrees;
-            gMapCenterLon = gPA1010D->longitudeDegrees;
-            if (gPA1010D->lat == 'S') gMapCenterLat = -gMapCenterLat;
-            if (gPA1010D->lon == 'W') gMapCenterLon = -gMapCenterLon;
-            gMapCenterSet = true;
-            gMapManuallyPanned = false;
+          {
+            GPSCache g;
+            if (gGpsConnected && gpsCacheSnapshot(g) && g.hasFix) {
+              gMapCenterLat = g.latitude;   // cache lat/lon already signed
+              gMapCenterLon = g.longitude;
+              gMapCenterSet = true;
+              gMapManuallyPanned = false;
+            }
           }
           break;
         case 1:  // Toggle GPS

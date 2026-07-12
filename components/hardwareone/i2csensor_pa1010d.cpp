@@ -249,44 +249,53 @@ const char* cmd_gps(const String& argsInput) {
     return "Error: [GPS] Debug buffer unavailable";
   }
   
+  // Read from the GPS cache — the gps_task is the sole reader of the device;
+  // every consumer goes through the cache, like the other sensors.
+  GPSCache gps;
+  if (!gpsCacheSnapshot(gps)) {
+    broadcastOutput("GPS Data:");
+    broadcastOutput("=========");
+    broadcastOutput("Reading GPS...");
+    snprintf(getDebugBuffer(), 1024, "GPS Data:\n=========\nReading GPS...");
+    return getDebugBuffer();
+  }
+
   // Use BROADCAST_PRINTF for each line (zero String churn)
   broadcastOutput("GPS Data:");
   broadcastOutput("=========");
-  
+
   // Fix status
-  BROADCAST_PRINTF("Fix: %s", gPA1010D->fix ? "YES" : "NO");
-  BROADCAST_PRINTF("Quality: %d", (int)gPA1010D->fixquality);
-  BROADCAST_PRINTF("Satellites: %d", (int)gPA1010D->satellites);
-  
-  if (gPA1010D->fix) {
-    // Location
-    float latitude = gPA1010D->latitudeDegrees;
-    float longitude = gPA1010D->longitudeDegrees;
-    BROADCAST_PRINTF("Latitude: %.6f %c", latitude >= 0 ? latitude : -latitude, gPA1010D->lat);
-    BROADCAST_PRINTF("Longitude: %.6f %c", longitude >= 0 ? longitude : -longitude, gPA1010D->lon);
-    BROADCAST_PRINTF("Altitude: %.2f m", gPA1010D->altitude);
-    BROADCAST_PRINTF("Speed: %.2f knots", gPA1010D->speed);
-    BROADCAST_PRINTF("Angle: %.2f°", gPA1010D->angle);
-    
+  BROADCAST_PRINTF("Fix: %s", gps.hasFix ? "YES" : "NO");
+  BROADCAST_PRINTF("Quality: %d", (int)gps.fixQuality);
+  BROADCAST_PRINTF("Satellites: %d", (int)gps.satellites);
+
+  if (gps.hasFix) {
+    // Location — cache latitude/longitude are already signed (S/W negative)
+    BROADCAST_PRINTF("Latitude: %.6f %c", gps.latitude >= 0 ? gps.latitude : -gps.latitude, gps.latitude >= 0 ? 'N' : 'S');
+    BROADCAST_PRINTF("Longitude: %.6f %c", gps.longitude >= 0 ? gps.longitude : -gps.longitude, gps.longitude >= 0 ? 'E' : 'W');
+    BROADCAST_PRINTF("Altitude: %.2f m", gps.altitude);
+    BROADCAST_PRINTF("Speed: %.2f knots", gps.speed);
+    BROADCAST_PRINTF("Angle: %.2f°", gps.angle);
+
     // Time
-    BROADCAST_PRINTF("Time: %02d:%02d:%02d", gPA1010D->hour, gPA1010D->minute, gPA1010D->seconds);
-    BROADCAST_PRINTF("Date: %02d/%02d/20%02d", gPA1010D->day, gPA1010D->month, gPA1010D->year);
+    BROADCAST_PRINTF("Time: %02d:%02d:%02d", (int)gps.hour, (int)gps.minute, (int)gps.second);
+    BROADCAST_PRINTF("Date: %02d/%02d/%04d", (int)gps.day, (int)gps.month, (int)gps.year);
   } else {
     broadcastOutput("No GPS fix - waiting for satellites...");
   }
-  
+
   // Build compact return string for web interface (uses gDebugBuffer)
-  if (gPA1010D->fix) {
-    snprintf(getDebugBuffer(), 1024, "GPS Data:\n=========\nFix: YES\nQuality: %d\nSatellites: %d\nLatitude: %.6f %c\nLongitude: %.6f %c\nAltitude: %.2f m\nSpeed: %.2f knots\nAngle: %.2f°\nTime: %02d:%02d:%02d\nDate: %02d/%02d/20%02d",
-             (int)gPA1010D->fixquality, (int)gPA1010D->satellites,
-             gPA1010D->latitudeDegrees >= 0 ? gPA1010D->latitudeDegrees : -gPA1010D->latitudeDegrees, gPA1010D->lat,
-             gPA1010D->longitudeDegrees >= 0 ? gPA1010D->longitudeDegrees : -gPA1010D->longitudeDegrees, gPA1010D->lon,
-             gPA1010D->altitude, gPA1010D->speed, gPA1010D->angle,
-             gPA1010D->hour, gPA1010D->minute, gPA1010D->seconds,
-             gPA1010D->day, gPA1010D->month, gPA1010D->year);
+  if (gps.hasFix) {
+    snprintf(getDebugBuffer(), 1024, "GPS Data:\n=========\nFix: YES\nQuality: %d\nSatellites: %d\nLatitude: %.6f %c\nLongitude: %.6f %c\nAltitude: %.2f m\nSpeed: %.2f knots\nAngle: %.2f°\nTime: %02d:%02d:%02d\nDate: %02d/%02d/%04d",
+             (int)gps.fixQuality, (int)gps.satellites,
+             gps.latitude >= 0 ? gps.latitude : -gps.latitude, gps.latitude >= 0 ? 'N' : 'S',
+             gps.longitude >= 0 ? gps.longitude : -gps.longitude, gps.longitude >= 0 ? 'E' : 'W',
+             gps.altitude, gps.speed, gps.angle,
+             (int)gps.hour, (int)gps.minute, (int)gps.second,
+             (int)gps.day, (int)gps.month, (int)gps.year);
   } else {
     snprintf(getDebugBuffer(), 1024, "GPS Data:\n=========\nFix: NO\nQuality: %d\nSatellites: %d\nNo GPS fix - waiting for satellites...",
-             (int)gPA1010D->fixquality, (int)gPA1010D->satellites);
+             (int)gps.fixQuality, (int)gps.satellites);
   }
   
   return getDebugBuffer();
@@ -300,7 +309,7 @@ const char* cmd_gps(const String& argsInput) {
 // GPS Task - FreeRTOS Task Function
 // ============================================================================
 // Purpose: Continuously reads NMEA data from PA1010D GPS module
-// Stack: 4608 words (~18KB) | Priority: 1 | Core: Any
+// Stack: GPS_STACK_WORDS = 3072 words (~12KB) | Priority: low | Core: Any
 // Lifecycle: Created by cmd_gpsstart, deleted when gGpsEnabled=false
 // Polling: Configurable via gpsDevicePollMs (default 200ms) | I2C Clock: 100kHz
 //
@@ -310,6 +319,18 @@ const char* cmd_gps(const String& argsInput) {
 //   3. Delete GPS module object
 //   4. Release mutex and delete task
 // ============================================================================
+
+// Thread-safe snapshot of the GPS cache. All consumers read GPS data through
+// this (or gpsBuildDataJSON) rather than touching gPA1010D directly — the
+// gps_task is the sole reader of the device. Returns false if the cache mutex
+// could not be taken within a short wait; callers treat that as "no data".
+bool gpsCacheSnapshot(GPSCache& out) {
+  if (!gGpsCache.mutex) return false;
+  if (xSemaphoreTake(gGpsCache.mutex, pdMS_TO_TICKS(10)) != pdTRUE) return false;
+  out = gGpsCache;
+  xSemaphoreGive(gGpsCache.mutex);
+  return true;
+}
 
 // Build GPS JSON directly into buffer from cache. Safe to call from any task —
 // only reads gGpsCache under its own mutex. Returns bytes written (excluding \0)
@@ -348,6 +369,22 @@ int gpsBuildDataJSON(char* buf, size_t bufSize) {
   return pos + n;
 }
 
+// Read one NMEA byte from the GPS, serialized through the shared per-bus I2C
+// mutex — the same lock every other sensor on this bus takes. This is the core
+// crash fix: Adafruit_GPS::read() refills its buffer via an unguarded
+// requestFrom(), which collided with other bus-0 tasks (gamepad/RTC) and
+// corrupted the I2C master driver (ESP_ERR_INVALID_STATE). NACK-tolerant so it
+// stays health-neutral: the rate-limited probe in gpsTask remains the single
+// source of truth for consecutive-error tracking / auto-disable.
+static char gpsReadChar() {
+  if (!gPA1010D) return 0;
+  char c = 0;
+  i2cTransactionNACKTolerant((uint8_t)gSettings.gpsBus, I2C_ADDR_GPS, 100000, 100, [&]() {
+    c = gPA1010D->read();
+  });
+  return c;
+}
+
 void gpsTask(void* parameter) {
   INFO_GPS_LIFECYCLEF("Task started (handle=%p, stack=%u words)",
                 (void*)xTaskGetCurrentTaskHandle(),
@@ -373,7 +410,10 @@ void gpsTask(void* parameter) {
     unsigned long nowMs = millis();
     if ((nowMs - lastStackLog) >= 30000) {
       lastStackLog = nowMs;
-      if (checkTaskStackSafety("gps", GPS_STACK_WORDS, &gGpsEnabled)) break;
+      // Stack-safety bailout clears gGpsEnabled; 'continue' (not 'break') so the
+      // top-of-loop shutdown path runs SENSOR_TASK_EXIT (clean vTaskDelete)
+      // instead of returning from the task function with a corrupt stack.
+      if (checkTaskStackSafety("gps", GPS_STACK_WORDS, &gGpsEnabled)) continue;
       if (gGpsEnabled && isDebugFlagSet(DEBUG_PERFORMANCE)) {
         UBaseType_t watermark = uxTaskGetStackHighWaterMark(nullptr);
         DEBUG_PERFORMANCEF("[STACK] gps_task watermark=%u words", (unsigned)watermark);
@@ -427,7 +467,7 @@ void gpsTask(void* parameter) {
       // do NOT use while(available()) — it never terminates. Instead call read()
       // once; it returns 0 when the PA1010D has only filler bytes (no real data).
       bool parsedNewSentence = false;
-      char c = gPA1010D->read();
+      char c = gpsReadChar();  // serialized through the shared per-bus mutex
       if (c && gPA1010D->newNMEAreceived()) {
         gPA1010D->parse(gPA1010D->lastNMEA());
         parsedNewSentence = true;
@@ -493,37 +533,42 @@ void gpsTask(void* parameter) {
 // GPS Accessor Functions (for MQTT and other modules)
 // ============================================================================
 
+// Accessors read the cache (never the device). Cache latitude/longitude are
+// already signed (S/W negative), so no sign fix-up here — doing so on top of
+// the already-signed value was a latent double-negation bug for S/W hemispheres.
 bool hasGPSFix() {
-  return gPA1010D && gPA1010D->fix;
+  GPSCache g;
+  return gpsCacheSnapshot(g) && g.hasFix;
 }
 
 float getGPSLatitude() {
-  if (!gPA1010D || !gPA1010D->fix) return 0.0f;
-  float lat = gPA1010D->latitudeDegrees;
-  if (gPA1010D->lat == 'S') lat = -lat;
-  return lat;
+  GPSCache g;
+  if (!gpsCacheSnapshot(g) || !g.hasFix) return 0.0f;
+  return g.latitude;
 }
 
 float getGPSLongitude() {
-  if (!gPA1010D || !gPA1010D->fix) return 0.0f;
-  float lon = gPA1010D->longitudeDegrees;
-  if (gPA1010D->lon == 'W') lon = -lon;
-  return lon;
+  GPSCache g;
+  if (!gpsCacheSnapshot(g) || !g.hasFix) return 0.0f;
+  return g.longitude;
 }
 
 float getGPSAltitude() {
-  if (!gPA1010D || !gPA1010D->fix) return 0.0f;
-  return gPA1010D->altitude;
+  GPSCache g;
+  if (!gpsCacheSnapshot(g) || !g.hasFix) return 0.0f;
+  return g.altitude;
 }
 
 float getGPSSpeed() {
-  if (!gPA1010D || !gPA1010D->fix) return 0.0f;
-  return gPA1010D->speed * 1.852f;  // Convert knots to km/h
+  GPSCache g;
+  if (!gpsCacheSnapshot(g) || !g.hasFix) return 0.0f;
+  return g.speed * 1.852f;  // Convert knots to km/h
 }
 
 int getGPSSatellites() {
-  if (!gPA1010D) return 0;
-  return (int)gPA1010D->satellites;
+  GPSCache g;
+  if (!gpsCacheSnapshot(g)) return 0;
+  return (int)g.satellites;
 }
 
 // ============================================================================

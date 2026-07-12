@@ -236,6 +236,17 @@ void chatInit() {
 // Parameter resolution
 // ============================================================================
 
+void chatParamOverrideFromJson(JsonObjectConst d, ChatParamOverride& ov) {
+  if (d["max_tokens"].is<int>())     ov.maxTokens     = d["max_tokens"].as<int>();
+  if (d["temperature"].is<float>())  ov.temperature   = d["temperature"].as<float>();
+  if (d["top_p"].is<float>())        ov.topp          = d["top_p"].as<float>();
+  if (d["min_p"].is<float>())        ov.minP          = d["min_p"].as<float>();
+  if (d["rep_penalty"].is<float>())  ov.repPenalty    = d["rep_penalty"].as<float>();
+  if (d["rep_window"].is<int>())     ov.repWindow     = d["rep_window"].as<int>();
+  if (d["sentence_limit"].is<int>()) ov.sentenceLimit = d["sentence_limit"].as<int>();
+  if (d["hard_cap"].is<int>())       ov.hardCap       = d["hard_cap"].as<int>();
+}
+
 void chatResolveParams(const ChatParamOverride& o, LLMGenParams* out) {
   if (!out) return;
 
@@ -243,15 +254,11 @@ void chatResolveParams(const ChatParamOverride& o, LLMGenParams* out) {
   out->maxTokens    = (o.maxTokens     != INT32_MIN) ? o.maxTokens     : gSettings.llmMaxTokens;
   out->temperature  = !isnan(o.temperature)          ? o.temperature   : gSettings.llmTemperature;
   out->topp         = !isnan(o.topp)                 ? o.topp          : gSettings.llmTopP;
-  out->minP         = gSettings.llmMinP;  // min-p: persisted setting (0 = off → use top-p); no per-request override yet
-  out->useMirostat2 = (o.useMirostat2  >= 0)         ? (o.useMirostat2 != 0) : (bool)gSettings.llmUseMirostat2;
-  out->mirostatTau  = !isnan(o.mirostatTau)          ? o.mirostatTau   : gSettings.llmMirostatTau;
-  out->mirostatEta  = !isnan(o.mirostatEta)          ? o.mirostatEta   : gSettings.llmMirostatEta;
+  out->minP         = !isnan(o.minP)                 ? o.minP          : gSettings.llmMinP;  // 0 = off → use top-p
   out->repPenalty   = !isnan(o.repPenalty)           ? o.repPenalty    : gSettings.llmRepPenalty;
   out->repWindow    = (o.repWindow     != INT32_MIN) ? o.repWindow     : gSettings.llmRepWindow;
   out->sentenceLimit= (o.sentenceLimit != INT32_MIN) ? o.sentenceLimit : gSettings.llmSentenceLimit;
   out->hardCap      = (o.hardCap       != INT32_MIN) ? o.hardCap       : gSettings.llmHardCap;
-  out->dynTemp      = (o.dynTemp       >= 0)         ? (o.dynTemp != 0): (bool)gSettings.llmDynTemp;
 
   // Clamps (same as the prior WebPage_LLM logic — single source of truth now)
   if (out->maxTokens    <   1) out->maxTokens    = 1;
@@ -262,14 +269,10 @@ void chatResolveParams(const ChatParamOverride& o, LLMGenParams* out) {
   if (out->topp         > 1.0f)  out->topp         = 1.0f;
   if (out->minP         < 0.0f)  out->minP         = 0.0f;
   if (out->minP         > 1.0f)  out->minP         = 1.0f;
-  if (out->mirostatTau  < 0.5f)  out->mirostatTau  = 0.5f;
-  if (out->mirostatTau  > 20.0f) out->mirostatTau  = 20.0f;
-  if (out->mirostatEta  < 0.01f) out->mirostatEta  = 0.01f;
-  if (out->mirostatEta  > 1.0f)  out->mirostatEta  = 1.0f;
   if (out->repPenalty   < 1.0f)  out->repPenalty   = 1.0f;
   if (out->repPenalty   > 5.0f)  out->repPenalty   = 5.0f;
   if (out->repWindow    <   0)   out->repWindow    = 0;
-  if (out->repWindow    > 128)   out->repWindow    = 128;
+  if (out->repWindow    >  32)   out->repWindow    = 32;  // ring buffer is LLM_DEFAULT_REP_WINDOW; larger was silently truncated
   if (out->sentenceLimit<   0)   out->sentenceLimit= 0;
   if (out->sentenceLimit>  20)   out->sentenceLimit= 20;
   if (out->hardCap      <   0)   out->hardCap      = 0;

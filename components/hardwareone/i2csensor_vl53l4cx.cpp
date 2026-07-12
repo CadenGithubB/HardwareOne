@@ -718,7 +718,10 @@ void tofTask(void* parameter) {
     unsigned long nowLog = millis();
     if (nowLog - lastStackLog >= 5000UL) {
       lastStackLog = nowLog;
-      if (checkTaskStackSafety("tof", TOF_STACK_WORDS, &gTofEnabled)) break;
+      // 'continue' (not 'break') so the top-of-loop shutdown runs the clean
+      // SENSOR_TASK_EXIT (vTaskDelete) path instead of returning from the task
+      // function with a near-overflowed stack (IllegalInstruction panic).
+      if (checkTaskStackSafety("tof", TOF_STACK_WORDS, &gTofEnabled)) continue;
       // CRITICAL: Check enabled flag again before debug output (prevent crash during shutdown)
       if (gTofEnabled) {
         DEBUG_PERFORMANCEF("[STACK] tof_task watermark_now=%u min=%u words", (unsigned)gTofWatermarkNow, (unsigned)gTofWatermarkMin);

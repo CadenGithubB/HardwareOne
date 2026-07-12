@@ -46,6 +46,13 @@ extern GPSCache gGpsCache;
 // acquires gGpsCache.mutex. Returns bytes written or 0 on failure.
 int gpsBuildDataJSON(char* buf, size_t bufSize);
 
+// Thread-safe snapshot of the GPS cache. Every consumer (CLI, OLED, map,
+// accessors) reads GPS data through this instead of touching gPA1010D fields
+// directly — the gps_task is the only reader of the device itself, exactly like
+// the other sensors. Returns false if the cache mutex could not be taken within
+// a short wait (treat as "no data").
+bool gpsCacheSnapshot(GPSCache& out);
+
 // GPS initialization (called by sensor queue processor)
 bool gpsStartInternal();
 

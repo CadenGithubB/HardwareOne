@@ -32,6 +32,7 @@
 #include "HAL_Input.h"          // For INPUT_TASK_NAME (gamepad vs ANO)
 #include "System_User.h"
 #include "System_AuthIdentity.h"  // ExecIdentityGuard (executeCommand + submitAndExecuteSync)
+#include "System_BootState.h"     // bootStateGetBootCount / bootStateResetBootCount (NVS boot counter)
 #include "System_SelfDevice.h"   // SelfDevice:: — local identity/heap/uptime/firmware (Stage 1 consolidation)
 #include "System_Clock.h"        // Clock:: — epoch/sync/tz/format helpers (Stage 2)
 #include "System_Command.h"
@@ -834,9 +835,13 @@ bool writeTextAtomic(const char* path, const String& content) {
     }
   }
 
-  // Fallback: direct write if rename fails
+  // Rename failed: do NOT fall back to a truncate-in-place writeText(path,...).
+  // "w" mode shreds the destination — the exact crash window this atomic write
+  // exists to close (a power cut mid-write leaves an empty/half file). Drop the
+  // tmp and fail loudly; the existing file is left fully intact and every caller
+  // already checks the returned bool.
   VFS::remove(tmp);
-  return writeText(path, content);
+  return false;
 }
 
 // ============================================================================
@@ -2369,9 +2374,53 @@ extern const char* cmd_pending_list(const String& argsInput);
 // Main/Core command registry (commands that remain in main .ino file)
 // Most commands have been modularized - this contains only core system commands
 // Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
+// Boot/reset counters. Boot count is persisted in NVS (its own flash
+// partition), separate from settings.json / users.json so its every-boot bump
+// can never corrupt those files. Crash count + last reset reason are RTC-backed
+// RAM mirrors (System_BootState.h explains the split).
+const char* cmd_bootcount(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+
+  String a = argsInput;
+  a.trim();
+
+  if (a.equalsIgnoreCase("reset")) {
+    if (!currentExecIsAdmin()) return "Error: admin required to reset the boot counter";
+    bootStateResetBootCount();
+    logSystemEvent("BOOT", "boot counter reset to 0 by %s", currentExecUser().c_str());
+    return "OK: boot counter reset to 0";
+  }
+
+  uint32_t bootCount = bootStateGetBootCount();
+  uint32_t reason    = gSettings.lastResetReason;
+  const char* reasonLabel = (reason < 11) ? kResetReasonLabels[reason] : "Unknown";
+
+  if (argWantsJson(argsInput)) {
+    PSRAM_JSON_DOC(doc);
+    doc["schema"]            = 1;
+    doc["boot_count"]        = (unsigned long)bootCount;
+    doc["boot_count_store"]  = "nvs";
+    doc["crash_count"]       = (unsigned long)gSettings.crashCount;
+    doc["reset_reason"]      = reasonLabel;
+    doc["reset_reason_code"] = (unsigned long)reason;
+    static char* buf = nullptr;
+    if (!buf) buf = (char*)ps_alloc(256, AllocPref::PreferPSRAM, "bootcount.json");
+    if (!buf) return "{\"error\":\"oom\"}";
+    serializeJson(doc, buf, 256);
+    return buf;
+  }
+
+  BROADCAST_PRINTF("Boot count:   %lu  (NVS — survives power loss & FS erase)", (unsigned long)bootCount);
+  BROADCAST_PRINTF("Crash count:  %lu  (abnormal resets since last clean power-on)", (unsigned long)gSettings.crashCount);
+  BROADCAST_PRINTF("Last reset:   %s (%lu)", reasonLabel, (unsigned long)reason);
+  return "OK";
+}
+
 const CommandEntry commands[] = {
   // ---- Core / General ----
   { "status", "Show system status (WiFi, FS, memory). (add 'json' for JSON output)", false, cmd_status, nullptr, "system", "status" },
+  { "bootcount", "Show boot count (NVS), crash count, last reset reason. 'bootcount reset' zeroes it (admin). (add 'json')", false, cmd_bootcount,
+    "Usage: bootcount [reset|json]" },
   { "uptime", "Show device uptime. (add 'json' for JSON output)", false, cmd_uptime },
   { "time", "Show device time (uptime + NTP if synced). (add 'json' for JSON output)", false, cmd_time },
   { "timeset", "Set time manually: timeset YYYY-MM-DD HH:MM:SS or <unix_timestamp>.", true, cmd_timeset,
@@ -2996,17 +3045,17 @@ static const CommandModule gCommandModules[] = {
     "llmload [file.bin] loads one (bare filenames are looked up on the SD card under "
     "/sd/llm then internal /system/llm), llmmodels lists available files, llmunload "
     "frees the PSRAM, llmstatus shows engine state, and llmautostart 0|1 / "
-    "llmdefaultmodel control boot-time loading. Generation is ASYNCHRONOUS: llmgenerate "
-    "<prompt> returns a session id immediately and the reply is streamed in the "
-    "background, so you poll llmresult json <offset> repeatedly (each call returns new "
-    "text, the running total length, and a done flag) until done flips true; llmstop "
-    "aborts an in-progress generation. The engine keeps a multi-turn conversation: "
-    "llmclear resets it, llmretry regenerates the last reply (also async), and llmturns "
-    "json <index> reads back one turn at a time. The many llm* setters (temperature, "
-    "topp, minp, maxtokens, sentencelimit, hardcap, reppenalty/repwindow, maxcontext, "
-    "mirostat2/tau/eta, dyntemp, kvprec) are admin-only sampler and KV-cache defaults "
-    "that persist to flash; kvprec and maxcontext only take effect on the next model "
-    "load.", llmCommands,          llmCommandsCount, 0, nullptr },
+    "llmdefaultmodel control boot-time loading. Two generate forms: bare 'llmgenerate "
+    "<prompt>' BLOCKS and prints the whole reply, while 'llmgenerate json ...' starts "
+    "async and returns a session id immediately — then poll llmresult json <offset> "
+    "repeatedly (each call returns new text, the running total length, and a done flag) "
+    "until done flips true; llmstop aborts an in-progress generation. The engine keeps a "
+    "multi-turn conversation: llmclear resets it, llmretry regenerates the last reply "
+    "(async), and llmturns json <index> reads back one turn at a time. The llm* setters "
+    "(temperature, topp, minp, maxtokens, sentencelimit, hardcap, reppenalty/repwindow, "
+    "maxcontext, kvprec, norepeatngram, confthreshold, contentboost) are admin-only "
+    "sampler and KV-cache defaults that persist to flash; kvprec and maxcontext only take "
+    "effect on the next model load.", llmCommands,          llmCommandsCount, 0, nullptr },
 #endif
   { "settingsedit", "Per-field settings save commands",
     "Static CLI commands the web/OLED settings screen uses to persist individual settings fields that have no dedicated module command. Each writes one setting via handleSettingCommand; the value is read live or applied on next start. Fields that need a live apply action are routed to their module command instead of getting one of these.",

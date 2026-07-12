@@ -529,7 +529,10 @@ void presenceTask(void* parameter) {
     unsigned long nowMs = millis();
     if ((nowMs - lastStackLog) >= 10000) {
       lastStackLog = nowMs;
-      if (checkTaskStackSafety("presence", PRESENCE_STACK_WORDS, &gPresenceEnabled)) break;
+      // 'continue' (not 'break') so the top-of-loop shutdown runs the clean
+      // SENSOR_TASK_EXIT (vTaskDelete) path instead of returning from the task
+      // function with a near-overflowed stack (IllegalInstruction panic).
+      if (checkTaskStackSafety("presence", PRESENCE_STACK_WORDS, &gPresenceEnabled)) continue;
       if (gPresenceEnabled && isDebugFlagSet(DEBUG_PERFORMANCE)) {
         UBaseType_t watermark = uxTaskGetStackHighWaterMark(nullptr);
         DEBUG_PERFORMANCEF("[STACK] presence_task watermark=%u words", (unsigned)watermark);
