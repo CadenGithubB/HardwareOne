@@ -74,14 +74,15 @@ void layernorm(float* o, const float* x, const float* weight, const float* bias,
 void softmax(float* x, int size);
 
 // In-place vector add: dst[i] += src[i]. A natural spot for SIMD (dsps) later.
-void vecAddInPlace(float* dst, const float* src, int n);
+// dst/src are distinct at every call site (verified) — hence __restrict.
+void vecAddInPlace(float* __restrict dst, const float* __restrict src, int n);
 
 // Quant-aware matrix-vector dispatch: w(d,n) @ x(n,) -> xout(d,).
 // Exactly one weight representation is non-null and selects the path:
 //   fp  -> FP32        i8/sc -> INT8 (per-group scales)   q4/q4_sc -> INT4 packed
 // gs = quant group_size. Large matmuls (d > threshold) yield internally so a
 // single op can't starve IDLE1 past the task-WDT window.
-void wmatmul(float* xout, const float* x,
+void wmatmul(float* __restrict xout, const float* __restrict x,
              const float* fp, const int8_t* i8, const float* sc,
              const uint8_t* q4, const float* q4_sc,
              int gs, int n, int d);
@@ -102,6 +103,6 @@ struct QuantTensor {
 // Matrix-vector product with a prepackaged weight. Identical to the wmatmul
 // call it forwards to — same dispatch, offsets resolved at load instead of
 // per token.
-inline void linear(float* out, const float* x, const QuantTensor& w) {
+inline void linear(float* __restrict out, const float* __restrict x, const QuantTensor& w) {
   wmatmul(out, x, w.fp, w.i8, w.sc, w.q4, w.q4_sc, w.gs, w.n, w.d);
 }

@@ -80,6 +80,7 @@
 
 // esp-dsp for accelerated dot product on S3
 #include "dsps_dotprod.h"
+#include "esp_timer.h"   // esp_timer_get_time() for the per-section forward profiler
 
 // ============================================================================
 // Table of Contents
@@ -277,6 +278,27 @@ struct PromptDiagnostics {
 static PromptDiagnostics gPromptDiag = {};
 
 // ============================================================================
+// Per-section forward-pass profiler (llmprofile)
+// ----------------------------------------------------------------------------
+// Accumulates wall-clock µs per section across a whole generation and dumps a
+// breakdown at the end (see llmGenerate). Answers "where does per-token time go
+// — weight matmul vs attention/KV vs the rest?" without guessing. Zero overhead
+// unless gProfActive (latched from gSettings.llmProfile at generation start):
+// profNow() skips the timer read when inactive, PROF_ADD skips read+add. An
+// esp_timer read is ~0.2µs, negligible vs the ~ms sections it brackets. Run
+// with the other debugllm* flags OFF for clean numbers.
+// ============================================================================
+struct LLMProfile {
+  int64_t embed, norm, qkv, kvpack, attn, attnOut, ffnUp, ffnDown, act, cls;
+  int32_t tokens;
+};
+static LLMProfile gProf = {};
+static bool gProfActive = false;
+
+static inline int64_t profNow() { return gProfActive ? esp_timer_get_time() : 0; }
+#define PROF_ADD(bucket, t0) do { if (gProfActive) gProf.bucket += esp_timer_get_time() - (t0); } while (0)
+
+// ============================================================================
 // 7. Forward Pass
 // ============================================================================
 
@@ -391,11 +413,13 @@ static float* forward(int token, int pos) {
     const TransformerWeights::LayerTensors& T = w->layerT[l];
 
     // Attention norm (LayerNorm for GPT-2, RMSNorm for Llama)
+    int64_t _pnorm = profNow();
     if (isGPT2) {
       layernorm(s->xb, s->x, w->rms_att_weight + l * dim, w->rms_att_bias ? w->rms_att_bias + l * dim : nullptr, dim);
     } else {
       rmsnorm(s->xb, s->x, w->rms_att_weight + l * dim, dim);
     }
+    PROF_ADD(norm, _pnorm);
 
     // Key and value point to the KV cache
     int loff = l * S * kv_dim;
@@ -408,9 +432,11 @@ static float* forward(int token, int pos) {
     float* value_cache_row = kvPacked ? s->v_tmp : (s->value_cache + loff + pos * kv_dim);
 
     // QKV matmuls (weights prepackaged at load — see buildLayerTensors)
+    int64_t _pqkv = profNow();
     linear(s->q,            s->xb, T.wq);
     linear(key_cache_row,   s->xb, T.wk);
     linear(value_cache_row, s->xb, T.wv);
+    PROF_ADD(qkv, _pqkv);
 
     // Debug: Q/K/V matmul health
     checkVec("Q", s->q,            dim,    pos, l);
@@ -419,6 +445,7 @@ static float* forward(int token, int pos) {
 
     // RoPE relative positional encoding (Llama only — GPT-2 uses absolute pos
     // embeddings). cos/sin were precomputed once per token above.
+    int64_t _pkv = profNow();
     if (!isGPT2) {
       for (int i = 0; i < dim; i += 2) {
         float fcr = s->rope_cos[i >> 1];
@@ -471,8 +498,10 @@ static float* forward(int token, int pos) {
         }
       }
     }
+    PROF_ADD(kvpack, _pkv);
 
     // Multi-head attention
+    int64_t _pattn = profNow();
     for (int h = 0; h < p->n_heads; h++) {
       float* q_h = s->q + h * head_size;
       float* att_h = s->att + h * S;
@@ -520,6 +549,7 @@ static float* forward(int token, int pos) {
         }
       }
     }
+    PROF_ADD(attn, _pattn);
 
     // Debug: attention pattern diagnostics
     if (FORWARD_DBG_POS(pos)) {
@@ -614,7 +644,9 @@ static float* forward(int token, int pos) {
     }
 
     // Output projection
+    int64_t _pout = profNow();
     linear(s->xb2, s->xb, T.wo);
+    PROF_ADD(attnOut, _pout);
 
     // Residual connection
     vecAddInPlace(s->x, s->xb2, dim);
@@ -623,40 +655,54 @@ static float* forward(int token, int pos) {
     checkVec("post_attn_res", s->x, dim, pos, l);
 
     // FFN norm (LayerNorm for GPT-2, RMSNorm for Llama)
+    int64_t _pfnorm = profNow();
     if (isGPT2) {
       layernorm(s->xb, s->x, w->rms_ffn_weight + l * dim, w->rms_ffn_bias ? w->rms_ffn_bias + l * dim : nullptr, dim);
     } else {
       rmsnorm(s->xb, s->x, w->rms_ffn_weight + l * dim, dim);
     }
+    PROF_ADD(norm, _pfnorm);
 
     if (isGPT2) {
       // GPT-2 FFN: up projection → GELU → down projection (no gate)
+      int64_t _pup = profNow();
       linear(s->hb, s->xb, T.w3);
+      PROF_ADD(ffnUp, _pup);
 
       // Debug: pre-GELU activation health
       checkVec("pre_gelu", s->hb, hidden_dim, pos, l);
 
       // GELU (tanh approximation — matches HF gelu_new)
+      int64_t _pact = profNow();
       for (int i = 0; i < hidden_dim; i++) {
         float x = s->hb[i];
         s->hb[i] = 0.5f * x * (1.0f + tanhf(GELU_COEFF_A * (x + GELU_COEFF_B * x * x * x)));
       }
+      PROF_ADD(act, _pact);
 
       // Debug: post-GELU health
       checkVec("post_gelu", s->hb, hidden_dim, pos, l);
 
+      int64_t _pdown = profNow();
       linear(s->xb, s->hb, T.w2);
+      PROF_ADD(ffnDown, _pdown);
     } else {
       // Llama FFN: SwiGLU (gate * silu(up)) → down
+      int64_t _pup = profNow();
       linear(s->hb,  s->xb, T.w1);
       linear(s->hb2, s->xb, T.w3);
+      PROF_ADD(ffnUp, _pup);
+      int64_t _pact = profNow();
       for (int i = 0; i < hidden_dim; i++) {
         float val = s->hb[i];
         val *= (1.0f / (1.0f + expf(-val)));
         val *= s->hb2[i];
         s->hb[i] = val;
       }
+      PROF_ADD(act, _pact);
+      int64_t _pdown = profNow();
       linear(s->xb,  s->hb, T.w2);
+      PROF_ADD(ffnDown, _pdown);
     }
 
     // Residual
@@ -668,11 +714,13 @@ static float* forward(int token, int pos) {
   }
 
   // Final norm (LayerNorm for GPT-2, RMSNorm for Llama)
+  int64_t _pfinal = profNow();
   if (isGPT2) {
     layernorm(s->x, s->x, w->rms_final_weight, w->rms_final_bias, dim);
   } else {
     rmsnorm(s->x, s->x, w->rms_final_weight, dim);
   }
+  PROF_ADD(norm, _pfinal);
 
   // Debug: post-final-norm activation health
   checkVec("final_norm", s->x, dim, pos, -1);
@@ -690,9 +738,12 @@ static float* forward(int token, int pos) {
   const bool debugWantsLogits = (getLogLevel() >= LOG_LEVEL_DEBUG) &&
       (isDebugFlagSet(DEBUG_LLM_FORWARD) || isDebugFlagSet(DEBUG_LLM_GENERATE));
   const bool logitsComputed = !inPromptPrefill || debugWantsLogits;
+  int64_t _pcls = profNow();
   if (logitsComputed) {
     linear(s->logits, s->x, w->clsT);
   }
+  PROF_ADD(cls, _pcls);
+  if (gProfActive) gProf.tokens++;
 
   // Dump logit distribution stats — healthy model has wide spread and clear top candidates.
   // Flat/uniform logits = broken weights. NaN = numerical explosion.
@@ -1528,6 +1579,11 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
   int  corruptionRetries = 0;
   bool corruptionFatal = false;
 
+  // Per-section profiler (llmprofile): latch on and zero the accumulators for
+  // this run. Off = forward()'s brackets compile to a single predicted branch.
+  gProfActive = gSettings.llmProfile;
+  if (gProfActive) gProf = LLMProfile{};
+
   while (pos < steps) {
     if (gLLM.stopRequested) break;
 
@@ -2078,6 +2134,38 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
                       gLLM.stopRequested ? "user" : (generated == 0 ? "eos/empty" : "maxlen"),
                       gLLM.lastMeanLogprob, gLLM.lastConfTokens);
 
+  // Per-section profiler dump (llmprofile). Unconditional print (own toggle);
+  // answers "matmul vs attention vs the rest" per forward pass. "matmul" = the
+  // five weight linears (qkv+out+ffnUp+ffnDown+cls); the gap to wall is embed,
+  // residuals, sampling, and logit post-processing.
+  if (gProfActive && gProf.tokens > 0) {
+    const int64_t mm   = gProf.qkv + gProf.attnOut + gProf.ffnUp + gProf.ffnDown + gProf.cls;
+    const int64_t prof = mm + gProf.attn + gProf.kvpack + gProf.act + gProf.norm;
+    int64_t wall = (int64_t)elapsed * 1000;                 // µs
+    if (wall < prof) wall = prof;                           // guard: never < profiled
+    if (wall <= 0)   wall = 1;
+    #define _PROF_MS(v)  ((long)(((v) + 500) / 1000))
+    #define _PROF_PCT(v) ((int)(((v) * 100 + wall / 2) / wall))
+    #define _PROF_US_PER(v) ((long)((v) / gProf.tokens))
+    DEBUGF_QUEUE(0xFFFFFFFF,
+      "[LLM][PROF] %d fwd | profiled %ldms of %ldms wall (%d%%) | matmul %ldms(%d%%) attn %ldms(%d%%)",
+      gProf.tokens, _PROF_MS(prof), _PROF_MS(wall), _PROF_PCT(prof),
+      _PROF_MS(mm), _PROF_PCT(mm), _PROF_MS(gProf.attn), _PROF_PCT(gProf.attn));
+    DEBUGF_QUEUE(0xFFFFFFFF,
+      "[LLM][PROF]   matmul: qkv=%ld out=%ld ffnUp=%ld ffnDown=%ld cls=%ld | kvpack=%ld act=%ld norm=%ld (ms)",
+      _PROF_MS(gProf.qkv), _PROF_MS(gProf.attnOut), _PROF_MS(gProf.ffnUp),
+      _PROF_MS(gProf.ffnDown), _PROF_MS(gProf.cls),
+      _PROF_MS(gProf.kvpack), _PROF_MS(gProf.act), _PROF_MS(gProf.norm));
+    DEBUGF_QUEUE(0xFFFFFFFF,
+      "[LLM][PROF]   per-fwd µs: qkv=%ld attn=%ld out=%ld ffnUp=%ld ffnDown=%ld cls=%ld kvpack=%ld act=%ld norm=%ld",
+      _PROF_US_PER(gProf.qkv), _PROF_US_PER(gProf.attn), _PROF_US_PER(gProf.attnOut),
+      _PROF_US_PER(gProf.ffnUp), _PROF_US_PER(gProf.ffnDown), _PROF_US_PER(gProf.cls),
+      _PROF_US_PER(gProf.kvpack), _PROF_US_PER(gProf.act), _PROF_US_PER(gProf.norm));
+    #undef _PROF_MS
+    #undef _PROF_PCT
+    #undef _PROF_US_PER
+  }
+
   free(prompt_tokens);
   if (norm_prompt) free(norm_prompt);
 
@@ -2615,6 +2703,7 @@ static const SettingEntry llmSettingEntries[] = {
   { "confThreshold", SETTING_FLOAT,  &gSettings.llmConfThreshold, 0, -1.0f, nullptr,  -8,    0, "Confidence gate mean-logprob (0=off)", nullptr, false, nullptr, "llmconfthreshold" },  // idx 13
   { "contentBoost",  SETTING_FLOAT,  &gSettings.llmContentBoost,  0, 1.5f, nullptr,    0,    4, "Content boost (0=off)", nullptr, false, nullptr, "llmcontentboost" },  // idx 14 (on-topic logit bonus; co-tune w/ repPenalty)
   { "domainGate",    SETTING_BOOL,   &gSettings.llmDomainGate,    1, 0,    nullptr,    0,    1, "Domain gate (refuse off-topic)", nullptr, false, nullptr, "llmdomaingate" },  // idx 15 (refuse prompts outside the .bin's embedded domain vocab)
+  { "profile",       SETTING_BOOL,   &gSettings.llmProfile,       0, 0,    nullptr,    0,    1, "Profiler (per-section fwd timing)", nullptr, false, nullptr, "llmprofile" },  // idx 16 (diagnostic; dumps a breakdown after each generation)
 };
 
 extern const SettingsModule llmSettingsModule = {
@@ -2646,6 +2735,7 @@ LLM_SETTING_CMD(cmd_llm_norepeatngram, 12)
 LLM_SETTING_CMD(cmd_llm_confthreshold, 13)
 LLM_SETTING_CMD(cmd_llm_contentboost, 14)
 LLM_SETTING_CMD(cmd_llm_domaingate,   15)
+LLM_SETTING_CMD(cmd_llm_profile,      16)
 
 const CommandEntry llmCommands[] = {
   { "llmstatus",        "Show LLM engine status (add 'json' for JSON output)",               false, cmd_llm_status },
@@ -2675,6 +2765,7 @@ const CommandEntry llmCommands[] = {
   { "llmconfthreshold", "Low-confidence hedge threshold (0=off)",  true, cmd_llm_confthreshold, "Usage: llmconfthreshold <-8.0-0>  (mean logprob; default -1.0, 0 disables)" },
   { "llmcontentboost",  "On-topic logit bonus (0=off)",         true,  cmd_llm_contentboost, "Usage: llmcontentboost <0.0-4.0>  (default 1.5; higher = stickier to prompt words)" },
   { "llmdomaingate",    "Refuse prompts outside the model's domain (0|1)", true, cmd_llm_domaingate, "Usage: llmdomaingate <0|1>  (only enforced when the model .bin carries a domain vocab)" },
+  { "llmprofile",       "Per-section forward-pass timing breakdown (0|1)",  true, cmd_llm_profile,    "Usage: llmprofile <0|1>  (diagnostic; splits qkv/attn/ffn/cls after each generation. Turn OFF other debugllm* flags for clean numbers)" },
 };
 const size_t llmCommandsCount = sizeof(llmCommands) / sizeof(llmCommands[0]);
 

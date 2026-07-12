@@ -389,6 +389,7 @@ struct Settings {
       ,llmMaxContext(0)
       ,llmDefaultModel("model.bin")
       ,llmDomainGate(true)
+      ,llmProfile(false)
 #endif
       // Maps app
       ,mapZoom(1.0f)
@@ -967,6 +968,7 @@ struct Settings {
   int llmMaxContext;            // KV cache context window, 0=use compile-time default
   String llmDefaultModel;       // Default model filename for auto-load (default: "model.bin")
   bool llmDomainGate;           // Refuse generation when the prompt matches none of the model's embedded domain vocab (default: on). Only enforced when the loaded .bin carries a domain vocab section.
+  bool llmProfile;              // Per-section forward-pass timing breakdown, dumped at end of each generation (default: off). Diagnostic only; leave off for real tok/s.
 #endif
 
   // Maps app — persisted defaults applied at boot to gMapZoom / gVisibleLayers
