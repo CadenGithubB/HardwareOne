@@ -212,28 +212,10 @@ static esp_err_t handleLLMGenerate(httpd_req_t* req) {
   }
 
   // Per-request param overrides — anything the client supplied wins, anything
-  // it omits falls back to gSettings.llm* inside chatResolveParams.
-  // Sentinel-based unset detection lets the JSON path stay declarative.
+  // it omits falls back to gSettings.llm* inside chatResolveParams. Shared with
+  // the BLE `llmgenerate json` path via chatParamOverrideFromJson (System_LLMChat).
   ChatParamOverride ov;
-  if (doc["max_tokens"].is<int>())     ov.maxTokens     = doc["max_tokens"].as<int>();
-  if (doc["temperature"].is<float>())  ov.temperature   = doc["temperature"].as<float>();
-  if (doc["top_p"].is<float>())        ov.topp          = doc["top_p"].as<float>();
-  if (doc["mirostat2"].is<bool>())     ov.useMirostat2  = doc["mirostat2"].as<bool>() ? 1 : 0;
-  if (doc["mirostat_tau"].is<float>()) ov.mirostatTau   = doc["mirostat_tau"].as<float>();
-  if (doc["mirostat_eta"].is<float>()) ov.mirostatEta   = doc["mirostat_eta"].as<float>();
-  if (doc["rep_penalty"].is<float>())  ov.repPenalty    = doc["rep_penalty"].as<float>();
-  if (doc["rep_window"].is<int>())     ov.repWindow     = doc["rep_window"].as<int>();
-  if (doc["sentence_limit"].is<int>()) ov.sentenceLimit = doc["sentence_limit"].as<int>();
-  if (doc["hard_cap"].is<int>())       ov.hardCap       = doc["hard_cap"].as<int>();
-  if (doc["dyn_temp"].is<bool>())      ov.dynTemp       = doc["dyn_temp"].as<bool>() ? 1 : 0;
-
-  // The legacy POST body included a `suppress` array (string list of prior
-  // answers) for the browser-driven retry path. After the chat-module migration
-  // the firmware owns retry — clients should call POST /api/llm/chat/retry
-  // instead. We keep this body field decoded but ignored, so older browser
-  // caches don't break: their suppress list just becomes a no-op and the
-  // server still returns ok+session.
-  (void)doc["suppress"];
+  chatParamOverrideFromJson(doc.as<JsonObjectConst>(), ov);
 
   DEBUG_HTTPF("[LLM-API] POST /api/llm/generate: prompt='%.60s%s' max_tokens=%d temp=%.2f",
     prompt, strlen(prompt) > 60 ? "..." : "",

@@ -1055,7 +1055,10 @@ void imuTask(void* parameter) {
     unsigned long nowLog = millis();
     if (nowLog - lastStackLog >= 5000UL) {
       lastStackLog = nowLog;
-      if (checkTaskStackSafety("imu", IMU_STACK_WORDS, &gImuEnabled)) break;
+      // 'continue' (not 'break') so the top-of-loop shutdown runs the clean
+      // SENSOR_TASK_EXIT (vTaskDelete) path instead of returning from the task
+      // function with a near-overflowed stack (IllegalInstruction panic).
+      if (checkTaskStackSafety("imu", IMU_STACK_WORDS, &gImuEnabled)) continue;
       // CRITICAL: Check enabled flag again before debug output (prevent crash during shutdown)
       if (gImuEnabled) {
         DEBUG_PERFORMANCEF("[STACK] imu_task watermark_now=%u min=%u words", (unsigned)gImuWatermarkNow, (unsigned)gImuWatermarkMin);

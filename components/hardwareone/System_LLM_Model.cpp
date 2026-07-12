@@ -207,6 +207,7 @@ struct LoadContext {
   bool isGPT2, hasNormBias, v3;
   bool shared_weights;  // set by prescanTiedWeights
   int pfx;  // per-tensor prefix byte count (1 for v3, 0 otherwise)
+  uint32_t infoLen;  // header offset 24: byte length of the optional info block (0 = none)
   size_t weightsBytes, weightsQ8Bytes;
   size_t weightsQ4Bytes, weightsQ4ScBytes, mixedMetaBytes;
   size_t kvCacheSize, hotSize, coldSize;
@@ -251,6 +252,10 @@ static bool parseModelHeader(File& f, LoadContext& ctx) {
   p->arch_type = hdr[21];
   p->n_q8_start = (version >= 3) ? hdr[22] : 0;
   p->n_q8_end   = (version >= 3) ? hdr[23] : 0;
+  // Optional info block length lives in the free header pad (offset 24), so it is
+  // version-independent: v3 uses bytes 22-23, but 24+ stay reserved. 0 = no block.
+  // Existing files zero-fill this region, so they parse as "no info block".
+  memcpy(&ctx.infoLen, &hdr[24], 4);
 
   if (!validateLlmConfig(p, gLLM.errorMsg, sizeof(gLLM.errorMsg)))
     return false;
@@ -774,6 +779,12 @@ static bool allocateRunState(LoadContext& ctx) {
   gLLM.sampleIndices = (int*)llmPsramAlloc((size_t)V * sizeof(int), "llm.sampleidx");
   gLLM.sampleIndicesSize = gLLM.sampleIndices ? V : 0;
 
+  // Pre-allocate the no-repeat n-gram history (every sampled token of one
+  // generation; generation is bounded by seq_ctx). PSRAM — zero DRAM cost.
+  // On alloc failure the blocker silently disables (llmGenerate null-checks).
+  gLLM.genHist = (int*)llmPsramAlloc((size_t)seq_ctx * sizeof(int), "llm.ngramhist");
+  gLLM.genHistSize = gLLM.genHist ? seq_ctx : 0;
+
   return true;
 }
 
@@ -866,6 +877,91 @@ static bool buildLayerTensors() {
   return true;
 }
 
+// Read the optional info block (description + icon) that sits between the 64-byte
+// header and the tokenizer when the header's info_len (offset 24) is non-zero.
+// Best effort: a malformed/oversized field is skipped rather than failing the
+// load. ALWAYS leaves the file cursor at infoStart + infoLen — i.e. the first
+// byte of the tokenizer block — so downstream reads (which key off the live
+// f.position()) stay correct regardless of any parse drift. infoLen==0 is a
+// no-op, leaving the cursor at the header end exactly as before this feature.
+static void loadInfoBlockFromFile(File& f, uint32_t infoLen) {
+  gLLM.modelDesc[0]  = '\0';
+  gLLM.modelHasIcon  = false;
+  gLLM.modelIconW    = 0;
+  gLLM.modelIconH    = 0;
+  gLLM.modelRefusal[0] = '\0';
+  if (gLLM.domainVocab) llmPsramFree((void**)&gLLM.domainVocab);
+  gLLM.domainVocabCount = 0;
+  gLLM.domainVocabBytes = 0;
+  if (infoLen == 0) return;
+
+  const size_t infoStart = f.position();
+
+  // Description: uint16 length prefix + UTF-8 bytes (truncated to our buffer).
+  uint16_t descLen = 0;
+  if (f.read((uint8_t*)&descLen, 2) == 2 && descLen > 0) {
+    size_t copyLen = (descLen < sizeof(gLLM.modelDesc)) ? descLen
+                                                        : sizeof(gLLM.modelDesc) - 1;
+    if (copyLen > 0) f.read((uint8_t*)gLLM.modelDesc, copyLen);
+    gLLM.modelDesc[copyLen] = '\0';
+  }
+
+  // Icon: fmt(u8) + w(u8) + h(u8) + uint16 len + packed 1bpp bitmap (MSB-first).
+  uint8_t iconFmt = 0, iconW = 0, iconH = 0;
+  uint16_t iconLen = 0;
+  if (f.read(&iconFmt, 1) == 1 && f.read(&iconW, 1) == 1 &&
+      f.read(&iconH, 1) == 1 && f.read((uint8_t*)&iconLen, 2) == 2) {
+    const size_t expect = (size_t)((iconW + 7) / 8) * iconH;
+    if (iconFmt == 1 && iconW > 0 && iconW <= 32 && iconH > 0 && iconH <= 32 &&
+        iconLen == expect && iconLen <= sizeof(gLLM.modelIcon)) {
+      if (f.read(gLLM.modelIcon, iconLen) == (int)iconLen) {
+        gLLM.modelIconW   = iconW;
+        gLLM.modelIconH   = iconH;
+        gLLM.modelHasIcon = true;
+      }
+    }
+  }
+
+  const size_t infoEnd = infoStart + infoLen;
+
+  // Refusal string (optional appended section): uint16 length prefix + UTF-8 bytes.
+  if (f.position() + 2 <= infoEnd) {
+    uint16_t refLen = 0;
+    if (f.read((uint8_t*)&refLen, 2) == 2 && refLen > 0) {
+      const size_t refEnd = f.position() + refLen;
+      if (refEnd <= infoEnd) {
+        size_t copyLen = (refLen < sizeof(gLLM.modelRefusal)) ? refLen
+                                                              : sizeof(gLLM.modelRefusal) - 1;
+        if (copyLen > 0) f.read((uint8_t*)gLLM.modelRefusal, copyLen);
+        gLLM.modelRefusal[copyLen] = '\0';
+        f.seek(refEnd);  // realign past any truncated tail so the vocab section stays aligned
+      }
+    }
+  }
+
+  // Domain vocab (optional): uint16 count, then a packed [u8 len][word] blob to infoEnd.
+  if (f.position() + 2 <= infoEnd) {
+    uint16_t vcount = 0;
+    if (f.read((uint8_t*)&vcount, 2) == 2 && vcount > 0) {
+      const size_t blobLen = infoEnd - f.position();
+      if (blobLen > 0) {
+        gLLM.domainVocab = (uint8_t*)llmPsramAlloc(blobLen, "llm.domainvocab");
+        if (gLLM.domainVocab && f.read(gLLM.domainVocab, blobLen) == (int)blobLen) {
+          gLLM.domainVocabCount = vcount;
+          gLLM.domainVocabBytes = blobLen;
+        } else {
+          if (gLLM.domainVocab) llmPsramFree((void**)&gLLM.domainVocab);
+          gLLM.domainVocabCount = 0;
+          gLLM.domainVocabBytes = 0;
+        }
+      }
+    }
+  }
+
+  // Land exactly at the tokenizer, whatever we did (or failed to do) above.
+  f.seek(infoStart + infoLen);
+}
+
 bool loadWeights(const char* path) {
   File f = VFS::openGuarded(path, "r", VFS::systemAuth("llm.load_weights"));
   if (!f) {
@@ -879,6 +975,10 @@ bool loadWeights(const char* path) {
 
   LLMConfig* p = &gLLM.config;
   int kv_dim = ctx.kv_dim;
+
+  // ---- Read optional info block (description + icon), leaving the cursor at the
+  //      tokenizer. No-op (cursor stays at byte 64) when info_len is 0. ----
+  loadInfoBlockFromFile(f, ctx.infoLen);
 
   // ---- Read embedded tokenizer ----
   if (!loadTokenizerFromFile(f)) {

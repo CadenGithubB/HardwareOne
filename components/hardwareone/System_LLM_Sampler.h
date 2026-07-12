@@ -14,7 +14,3 @@
 // (temperature==0 greedy path computes no softmax).
 int sample(float* logits, int vocab_size, float temperature, float topp, float minp,
            float* outChosenProb = nullptr);
-
-// Mirostat v2 adaptive-surprise sampling. `mu` is persistent state across the
-// tokens of one generation (init to 2*tau). `logits` modified in place.
-int sample_mirostat2(float* logits, int n, float temperature, float tau, float eta, float* mu);

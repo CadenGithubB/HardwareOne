@@ -1464,7 +1464,10 @@ void thermalTask(void* parameter) {
     unsigned long nowLog = millis();
     if (nowLog - lastStackLog >= 5000UL) {
       lastStackLog = nowLog;
-      if (checkTaskStackSafety("thermal", THERMAL_STACK_WORDS, &gThermalEnabled)) break;
+      // 'continue' (not 'break') so the top-of-loop shutdown runs the clean
+      // SENSOR_TASK_EXIT (vTaskDelete) path instead of returning from the task
+      // function with a near-overflowed stack (IllegalInstruction panic).
+      if (checkTaskStackSafety("thermal", THERMAL_STACK_WORDS, &gThermalEnabled)) continue;
       // CRITICAL: Check enabled flag again before debug output (prevent crash during shutdown)
       if (gThermalEnabled) {
         DEBUG_PERFORMANCEF("[STACK] thermal_task watermark_now=%u min=%u words", (unsigned)gThermalWatermarkNow, (unsigned)gThermalWatermarkMin);

@@ -269,29 +269,17 @@ const size_t settingsCommandsCount = sizeof(settingsCommands) / sizeof(settingsC
 // WiFi Password Encryption Helpers
 // ============================================================================
 
-String getDeviceEncryptionKey() {
-  // Cache the key so we only generate (and log) once per boot
-  static bool sInit = false;
-  static String sKey;
-  if (sInit) {
-    return sKey;
-  }
+// Cached device key. File-scope (not function-local) so selectDeviceKeyEpoch()
+// can install the candidate that actually opens the stored blobs before the
+// first decrypt happens.
+static String sDeviceKey;
+static bool sDeviceKeyInit = false;
 
-  DEBUG_SYSTEMF("[Encryption] Generating device encryption key");
-
-  // Combine two hardware identifiers for better security:
-  // 1. eFuse MAC - unique per ESP32 chip (publicly visible via WiFi/BT)
-  // 2. Flash chip unique ID - unique per flash chip (NOT publicly visible,
-  //    requires physical SPI access to read)
-  uint64_t chipId = ESP.getEfuseMac();
-  
-  uint64_t flashUid = 0;
-  esp_err_t err = esp_flash_read_unique_chip_id(NULL, &flashUid);
-  if (err != ESP_OK) {
-    DEBUG_SYSTEMF("[Encryption] Warning: could not read flash UID (0x%x), using MAC only", err);
-  }
-  
-  // Build combined input string
+// Combine two hardware identifiers into the at-rest key:
+// 1. eFuse MAC - unique per ESP32 chip (publicly visible via WiFi/BT)
+// 2. Flash chip unique ID - unique per flash chip (NOT publicly visible,
+//    requires physical SPI access to read)
+static String deriveDeviceKeyFromIds(uint64_t chipId, uint64_t flashUid) {
   char combined[80];
   snprintf(combined, sizeof(combined), "%016llx:%016llx:HARDWAREONE_V1",
            (unsigned long long)chipId,
@@ -300,19 +288,50 @@ String getDeviceEncryptionKey() {
   // Hash the combination with SHA-256 for a strong, deterministic key
   uint8_t hash[32];
   mbedtls_sha256((const uint8_t*)combined, strlen(combined), hash, 0);
-  
+
   // Convert to hex string (64 chars)
   char hexBuf[65];
   for (int i = 0; i < 32; i++) {
     snprintf(hexBuf + (i * 2), 3, "%02x", hash[i]);
   }
   hexBuf[64] = '\0';
-  
-  sKey = String(hexBuf);
+  return String(hexBuf);
+}
 
-  DEBUG_SYSTEMF("[Encryption] Key generated, length=%d", sKey.length());
-  sInit = true;
-  return sKey;
+// Short non-reversible key identifier for durable logs: lets system-events.log
+// show WHICH key epoch each boot ran under without disclosing key material.
+static String deviceKeyFingerprint(const String& keyMaterial) {
+  uint8_t hash[32];
+  mbedtls_sha256((const uint8_t*)keyMaterial.c_str(), keyMaterial.length(), hash, 0);
+  char fp[9];
+  for (int i = 0; i < 4; i++) {
+    snprintf(fp + (i * 2), 3, "%02x", hash[i]);
+  }
+  fp[8] = '\0';
+  return String(fp);
+}
+
+String getDeviceEncryptionKey() {
+  // Cache the key so we only generate (and log) once per boot
+  if (sDeviceKeyInit) {
+    return sDeviceKey;
+  }
+
+  DEBUG_SYSTEMF("[Encryption] Generating device encryption key");
+
+  uint64_t chipId = ESP.getEfuseMac();
+
+  uint64_t flashUid = 0;
+  esp_err_t err = esp_flash_read_unique_chip_id(NULL, &flashUid);
+  if (err != ESP_OK) {
+    DEBUG_SYSTEMF("[Encryption] Warning: could not read flash UID (0x%x), using MAC only", err);
+    flashUid = 0;
+  }
+
+  sDeviceKey = deriveDeviceKeyFromIds(chipId, flashUid);
+  sDeviceKeyInit = true;
+  DEBUG_SYSTEMF("[Encryption] Key generated, length=%d", sDeviceKey.length());
+  return sDeviceKey;
 }
 
 String getDeviceFingerprint() {
@@ -512,6 +531,17 @@ String decryptString(const String& encryptedPassword) {
     ERROR_STORAGEF("[AES] Invalid padding value: %d", padValue);
     return "";
   }
+  // Strict PKCS#7: every padding byte must equal padValue. A wrong-key decrypt
+  // produces random bytes that pass the single-byte range check ~6% of the
+  // time and then masquerade as a real (garbage) secret — e.g. a WiFi password
+  // that associates but loops on the 4-way handshake forever.
+  for (int pi = ciphertextLen - padValue; pi < ciphertextLen; pi++) {
+    if (plaintext[pi] != padValue) {
+      free(plaintext);
+      ERROR_STORAGEF("[AES] Corrupt padding — wrong key or damaged blob");
+      return "";
+    }
+  }
 
   int plaintextLen = ciphertextLen - padValue;
   char* result = (char*)malloc(plaintextLen + 1);
@@ -540,13 +570,101 @@ String decryptString(const String& encryptedPassword) {
 // array/struct equivalent of a SettingEntry isSecret flag. Empty plaintext is
 // stored as "" (not an encrypted blob), and getSecret returns "" for an absent
 // or empty field (decryptString already rejects non-"AES:" input).
+// Count of stored AES blobs that failed to decrypt during this boot's load.
+// While non-zero, the save path refuses to replace a stored blob with "" —
+// the RAM emptiness is damage, not intent, and the blob is still recoverable
+// once the key epoch is right again.
+static int gSecretLoadFailures = 0;
+
+int secretLoadFailureCount() { return gSecretLoadFailures; }
+
+// Guarded secret write: never replaces a stored "AES:" blob with "" after a
+// damaged load, and never persists an empty result from a FAILED encryption
+// of a non-empty value (encryptString returns "" on alloc/mbedtls errors).
+// prevBlob is the value that was on disk for this key (from the merge-read).
+void putSecretPreserving(JsonObject obj, const char* key, const String& plaintext, const String& prevBlob) {
+  bool prevIsBlob = prevBlob.startsWith("AES:");
+  if (plaintext.length() > 0) {
+    String enc = encryptString(plaintext);
+    if (enc.length() == 0 && prevIsBlob) {
+      obj[key] = prevBlob;
+      logSystemEvent("SETTINGS", "secret '%s': encryption FAILED — kept previous stored value", key);
+    } else {
+      obj[key] = enc;
+    }
+  } else if (prevIsBlob && gSecretLoadFailures > 0) {
+    obj[key] = prevBlob;
+    logSystemEvent("SETTINGS", "secret '%s': empty after damaged load — kept previous stored value", key);
+  } else {
+    // Genuine empty (never set, or explicitly cleared on a healthy boot)
+    obj[key] = String("");
+  }
+}
+
 void putSecret(JsonObject obj, const char* key, const String& plaintext) {
-  obj[key] = plaintext.length() ? encryptString(plaintext) : String("");
+  putSecretPreserving(obj, key, plaintext, String((const char*)(obj[key] | "")));
 }
 
 String getSecret(JsonObjectConst obj, const char* key) {
   const char* enc = obj[key] | "";
   return decryptString(String(enc));
+}
+
+// Standalone strict test: does `blob` decrypt cleanly under `keyMaterial`?
+// Used by selectDeviceKeyEpoch to pick the key derivation that actually opens
+// the stored secrets. Full PKCS#7 validation keeps the wrong-key false-accept
+// rate negligible (~0.4% per blob, and candidates are majority-voted).
+static bool aesBlobDecryptsWith(const String& keyMaterial, const char* blob) {
+  size_t len = strlen(blob);
+  if (len < 41 || strncmp(blob, "AES:", 4) != 0 || blob[36] != ':') return false;
+
+  uint8_t key[16];
+  uint8_t hash[32];
+  mbedtls_sha256((const uint8_t*)keyMaterial.c_str(), keyMaterial.length(), hash, 0);
+  memcpy(key, hash, 16);
+
+  uint8_t iv[16];
+  for (int i = 0; i < 16; i++) {
+    char hx[3] = { blob[4 + i * 2], blob[5 + i * 2], '\0' };
+    iv[i] = (uint8_t)strtol(hx, NULL, 16);
+  }
+
+  const char* ctHex = blob + 37;
+  int ctLen = (int)strlen(ctHex) / 2;
+  if (ctLen <= 0 || (ctLen % 16) != 0) return false;
+
+  uint8_t* ct = (uint8_t*)ps_alloc(ctLen, AllocPref::PreferPSRAM, "aes.epoch.ct");
+  uint8_t* pt = (uint8_t*)ps_alloc(ctLen, AllocPref::PreferPSRAM, "aes.epoch.pt");
+  if (!ct || !pt) {
+    if (ct) free(ct);
+    if (pt) free(pt);
+    return false;
+  }
+  for (int i = 0; i < ctLen; i++) {
+    char hx[3] = { ctHex[i * 2], ctHex[i * 2 + 1], '\0' };
+    ct[i] = (uint8_t)strtol(hx, NULL, 16);
+  }
+
+  mbedtls_aes_context aes;
+  mbedtls_aes_init(&aes);
+  mbedtls_aes_setkey_dec(&aes, key, 128);
+  int ret = mbedtls_aes_crypt_cbc(&aes, MBEDTLS_AES_DECRYPT, ctLen, iv, ct, pt);
+  mbedtls_aes_free(&aes);
+
+  bool ok = false;
+  if (ret == 0) {
+    uint8_t pad = pt[ctLen - 1];
+    if (pad >= 1 && pad <= 16) {
+      ok = true;
+      for (int i = ctLen - pad; i < ctLen; i++) {
+        if (pt[i] != pad) { ok = false; break; }
+      }
+    }
+  }
+  memset(pt, 0, ctLen);
+  free(ct);
+  free(pt);
+  return ok;
 }
 
 // ============================================================================
@@ -986,6 +1104,22 @@ void buildSettingsJsonDoc(JsonDocument& doc, bool excludePasswords) {
 
   // WiFi networks array - now nested under network.wifi.networks
   if (gWifiNetworks && gWifiNetworkCount > 0) {
+    // Capture the merge-read's on-disk password blobs BEFORE to<JsonArray>()
+    // clears the array, so the guarded write below can keep a still-recoverable
+    // blob when the RAM password is empty after a damaged load.
+    String oldSsid[MAX_WIFI_NETWORKS];
+    String oldBlob[MAX_WIFI_NETWORKS];
+    int oldCount = 0;
+    JsonArrayConst oldNets = doc["network"]["wifi"]["networks"].as<JsonArrayConst>();
+    for (JsonObjectConst oldNet : oldNets) {
+      if (oldCount >= MAX_WIFI_NETWORKS) break;
+      const char* pb = oldNet["password"] | "";
+      if (strncmp(pb, "AES:", 4) == 0) {
+        oldSsid[oldCount] = (const char*)(oldNet["ssid"] | "");
+        oldBlob[oldCount] = pb;
+        oldCount++;
+      }
+    }
     JsonArray networks = doc["network"]["wifi"]["networks"].to<JsonArray>();
     for (int i = 0; i < gWifiNetworkCount; i++) {
       JsonObject net = networks.add<JsonObject>();
@@ -993,7 +1127,11 @@ void buildSettingsJsonDoc(JsonDocument& doc, bool excludePasswords) {
       
       // Security: Encrypt passwords in file, exclude from web API
       if (!excludePasswords) {
-        putSecret(net, "password", gWifiNetworks[i].password);  // at-rest AES (device key)
+        String prevBlob;
+        for (int k = 0; k < oldCount; k++) {
+          if (oldSsid[k] == gWifiNetworks[i].ssid) { prevBlob = oldBlob[k]; break; }
+        }
+        putSecretPreserving(net, "password", gWifiNetworks[i].password, prevBlob);  // at-rest AES (device key)
       }
       // For web API (excludePasswords=true), password field is omitted entirely
       
@@ -1119,6 +1257,77 @@ bool writeSettingsJson() {
 }
 
 // ============================================================================
+// Device-key epoch selection (boot self-healing)
+// ============================================================================
+// The at-rest key is derived from eFuse MAC + the flash chip unique ID
+// (esp_flash_read_unique_chip_id). That read can transiently fail (-> UID 0)
+// or change representation across IDF/toolchain versions, silently re-keying
+// the device on a reflash: every stored secret then decrypts to ""/garbage,
+// logins break (PBKDF2 salt is this same key), and the next save clobbers the
+// still-recoverable blobs. Before anything decrypts, test the stored blobs
+// against every plausible derivation and adopt the one that actually opens
+// them. The outcome is logged durably (system-events.log) on every boot.
+
+static void collectAesBlobs(JsonVariantConst v, String* out, int cap, int& n) {
+  if (n >= cap) return;
+  if (v.is<JsonObjectConst>()) {
+    for (JsonPairConst kv : v.as<JsonObjectConst>()) collectAesBlobs(kv.value(), out, cap, n);
+  } else if (v.is<JsonArrayConst>()) {
+    for (JsonVariantConst e : v.as<JsonArrayConst>()) collectAesBlobs(e, out, cap, n);
+  } else if (v.is<const char*>()) {
+    const char* s = v.as<const char*>();
+    if (s && strncmp(s, "AES:", 4) == 0 && n < cap) out[n++] = s;
+  }
+}
+
+static void selectDeviceKeyEpoch(const JsonDocument& doc) {
+  gSecretLoadFailures = 0;
+
+  String blobs[8];
+  int nBlobs = 0;
+  collectAesBlobs(doc.as<JsonVariantConst>(), blobs, 8, nBlobs);
+
+  uint64_t chipId = ESP.getEfuseMac();
+  uint64_t flashUid = 0;
+  bool uidOk = (esp_flash_read_unique_chip_id(NULL, &flashUid) == ESP_OK);
+  if (!uidOk) flashUid = 0;
+
+  String cand[3];
+  const char* candName[3];
+  int nCand = 0;
+  cand[nCand] = deriveDeviceKeyFromIds(chipId, flashUid);
+  candName[nCand++] = uidOk ? "mac+flashUID" : "mac+0 (flashUID read FAILED)";
+  if (uidOk && flashUid != 0) {
+    cand[nCand] = deriveDeviceKeyFromIds(chipId, 0);
+    candName[nCand++] = "mac+0 (legacy/read-failed epoch)";
+    cand[nCand] = deriveDeviceKeyFromIds(chipId, __builtin_bswap64(flashUid));
+    candName[nCand++] = "mac+bswap(flashUID) (cross-IDF epoch)";
+  }
+
+  int okCount[3] = {0, 0, 0};
+  int best = 0;
+  for (int c = 0; c < nCand; c++) {
+    for (int b = 0; b < nBlobs; b++) {
+      if (aesBlobDecryptsWith(cand[c], blobs[b].c_str())) okCount[c]++;
+    }
+    if (okCount[c] > okCount[best]) best = c;
+  }
+
+  sDeviceKey = cand[best];
+  sDeviceKeyInit = true;
+
+  if (nBlobs == 0) {
+    logSystemEvent("CRYPTO", "device key: %s (fp %s) — no stored secrets to validate against",
+                   candName[best], deviceKeyFingerprint(sDeviceKey).c_str());
+  } else {
+    logSystemEvent("CRYPTO", "device key: %s (fp %s) opens %d/%d stored secrets%s",
+                   candName[best], deviceKeyFingerprint(sDeviceKey).c_str(),
+                   okCount[best], nBlobs,
+                   okCount[best] == nBlobs ? "" : " — UNREADABLE SECRETS PRESERVED, not clobbered");
+  }
+}
+
+// ============================================================================
 // Read Settings from JSON File
 // ============================================================================
 
@@ -1198,6 +1407,9 @@ bool readSettingsJson() {
   espnowMeshesReadJson(doc);
 #endif
 
+  // Pick the key epoch that actually opens the stored blobs BEFORE any decrypt
+  selectDeviceKeyEpoch(doc);
+
   // Apply settings from registered modules first (handles defaults automatically)
   size_t registeredCount = readRegisteredSettings(doc);
   if (registeredCount > 0) {
@@ -1224,6 +1436,10 @@ bool readSettingsJson() {
       if (ssid && password) {
         gWifiNetworks[gWifiNetworkCount].ssid = ssid;
         gWifiNetworks[gWifiNetworkCount].password = getSecret(net, "password");
+        if (strncmp(password, "AES:", 4) == 0 && gWifiNetworks[gWifiNetworkCount].password.length() == 0) {
+          gSecretLoadFailures++;
+          logSystemEvent("CRYPTO", "wifi password for '%s' failed to decrypt at load — stored blob preserved", ssid);
+        }
         gWifiNetworks[gWifiNetworkCount].priority = priority;
         gWifiNetworks[gWifiNetworkCount].hidden = hidden;
         gWifiNetworks[gWifiNetworkCount].lastConnected = lastConnected;
@@ -2040,7 +2256,12 @@ size_t readRegisteredSettings(JsonDocument& doc) {
           if (e->isSecret) {
             // Decrypt secret strings when reading from disk
             const char* encrypted = val | (e->stringDefault ? e->stringDefault : "");
-            *((String*)e->valuePtr) = decryptString(encrypted);
+            String dec = decryptString(encrypted);
+            if (strncmp(encrypted, "AES:", 4) == 0 && dec.length() == 0) {
+              gSecretLoadFailures++;
+              logSystemEvent("CRYPTO", "secret '%s' failed to decrypt at load — stored blob preserved", e->jsonKey);
+            }
+            *((String*)e->valuePtr) = dec;
           } else {
             *((String*)e->valuePtr) = val | (e->stringDefault ? e->stringDefault : "");
           }
@@ -2128,13 +2349,10 @@ size_t writeRegisteredSettings(JsonDocument& doc) {
           break;
         case SETTING_STRING:
           if (e->isSecret) {
-            // Encrypt secret strings before writing to disk
-            String plaintext = *((String*)e->valuePtr);
-            if (plaintext.length() > 0) {
-              target[leaf] = encryptString(plaintext);
-            } else {
-              target[leaf] = "";
-            }
+            // Guarded write: never replaces the merge-read's stored blob with
+            // "" after a damaged load or a failed encryption (target[leaf]
+            // still holds the on-disk value here).
+            putSecret(target, leaf, *((String*)e->valuePtr));
           } else {
             target[leaf] = *((String*)e->valuePtr);
           }

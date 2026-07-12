@@ -204,6 +204,7 @@ set(hardwareone_srcs
         System_Settings.cpp
         System_SetupWizard.cpp
         System_FeatureRegistry.cpp
+        System_BootState.cpp
         System_Utils.cpp
         System_TaskUtils.cpp
         System_User.cpp
@@ -336,6 +337,7 @@ set(hardwareone_requires
         arduino
         hardwareone_libs
         bt
+        nvs_flash
         esp_wifi
         esp32-camera
         fatfs

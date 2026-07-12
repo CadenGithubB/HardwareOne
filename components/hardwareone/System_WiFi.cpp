@@ -556,7 +556,16 @@ bool upsertWiFiNetwork(const String& ssid, const String& password, int priority,
   }
   int idx = findWiFiNetwork(ssid);
   if (idx >= 0) {
-    gWifiNetworks[idx].password = password;
+    if (password.length() == 0 && gWifiNetworks[idx].password.length() > 0) {
+      // Empty password for an already-saved network keeps the stored one.
+      // Every UI funnels here (web quick-connect, OLED scan-pick, CLI) and an
+      // empty re-entry is almost always "didn't retype it", not "make this an
+      // open network". To genuinely blank it: wifirm, then wifiadd.
+      broadcastOutput("[WiFi] Kept existing password for '" + ssid + "' (empty password given; use wifirm to replace the entry)");
+      logSystemEvent("WIFI", "wifiadd '%s' with empty password — kept existing stored password", ssid.c_str());
+    } else {
+      gWifiNetworks[idx].password = password;
+    }
     if (priority > 0) gWifiNetworks[idx].priority = priority;
     gWifiNetworks[idx].hidden = hidden;
     return true;

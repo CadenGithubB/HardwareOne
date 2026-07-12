@@ -16,6 +16,7 @@
 #include "OLED_FirstTimeSetup.h"
 #include "System_BuildConfig.h"
 #include "System_Debug.h"
+#include "System_BootState.h"  // bootStateGetBootCount — boot counter lives in NVS, not users.json
 #include "System_FirstTimeSetup.h"
 #include "System_MemUtil.h"
 #include "System_I2C.h"
@@ -251,7 +252,6 @@ static bool createInitialAdminUser(const String& username, const String& plainte
   String hashedPassword = hashUserPassword(plaintextPassword);
 
   PSRAM_JSON_DOC(doc);
-  doc["bootCounter"] = 1;
   doc["nextId"] = 2;
 
   JsonArray users = doc["users"].to<JsonArray>();
@@ -265,18 +265,16 @@ static bool createInitialAdminUser(const String& username, const String& plainte
   admin["createdMs"] = millis();
   admin["ntpAnchorId"] = gNTPAnchorId;
   admin["bootCount"] = 1;
-  doc["bootAnchors"].to<JsonArray>();
+  // Boot anchors live in their own file (BOOT_ANCHORS_FILE), not users.json.
 
-  File file = VFS::openGuarded(USERS_JSON_FILE, "w", VFS::systemAuth("setup.users.create"));
-  if (!file) {
-    broadcastOutput("ERROR: Failed to create users.json");
-    return false;
-  }
-  size_t written = serializeJson(doc, file);
-  file.close();
-  if (written == 0) {
-    broadcastOutput("ERROR: Failed to write users.json");
-    return false;
+  {
+    // Atomic create (tmp + rename).
+    String json;
+    serializeJson(doc, json);
+    if (json.length() == 0 || !writeTextAtomic(USERS_JSON_FILE, json)) {
+      broadcastOutput("ERROR: Failed to write users.json");
+      return false;
+    }
   }
   broadcastOutput("Saved /system/users/users.json");
 
@@ -288,7 +286,10 @@ static bool createInitialAdminUser(const String& username, const String& plainte
     broadcastOutput("ERROR: Failed to create user settings");
   }
 
-  gBootCounter = 1;  // keep in-memory counter in sync with what we wrote
+  // Re-sync the RAM global to the authoritative NVS counter (loadAndIncrementBootSeq
+  // already loaded it). Must NOT hardcode 1 — the device may have power-cycled
+  // several times before setup completed, and telemetry/heartbeats read this.
+  gBootCounter = bootStateGetBootCount();
   if (time(nullptr) > 0) {
     resolvePendingUserCreationTimes();  // resolve creation timestamp if NTP already synced
   }
@@ -841,7 +842,6 @@ void firstTimeSetupIfNeeded() {
   
   // Build JSON with ArduinoJson
   PSRAM_JSON_DOC(doc);
-  doc["bootCounter"] = 1;
   doc["nextId"] = 2;
   
   JsonArray users = doc["users"].to<JsonArray>();
@@ -856,23 +856,18 @@ void firstTimeSetupIfNeeded() {
   admin["createdMs"] = millis();
   admin["ntpAnchorId"] = gNTPAnchorId;
   admin["bootCount"] = 1;
-  
-  doc["bootAnchors"].to<JsonArray>();
+  // Boot anchors live in their own file (BOOT_ANCHORS_FILE), not users.json.
 
-  DEBUG_SYSTEMF("FTS: Writing initial users.json: bootCounter=%u (forced 1), admin.bootCount=%u, gNTPAnchorId=%lu",
-                1, 1, (unsigned long)gNTPAnchorId);
-  
-  // Write to file
-  File file = VFS::openGuarded(USERS_JSON_FILE, "w", VFS::systemAuth("setup.users.create"));
-  if (!file) {
-    broadcastOutput("ERROR: Failed to create users.json");
+  DEBUG_SYSTEMF("FTS: Writing initial users.json: admin.bootCount=%u, gNTPAnchorId=%lu",
+                1, (unsigned long)gNTPAnchorId);
+
+  // Write atomically (tmp + rename).
+  String usersJson;
+  serializeJson(doc, usersJson);
+  if (usersJson.length() == 0 || !writeTextAtomic(USERS_JSON_FILE, usersJson)) {
+    broadcastOutput("ERROR: Failed to write users.json");
   } else {
-    size_t written = serializeJson(doc, file);
-    file.close();
-    
-    if (written == 0) {
-      broadcastOutput("ERROR: Failed to write users.json");
-    } else {
+    {
       broadcastOutput("Saved /system/users/users.json");
 
       {
@@ -886,10 +881,10 @@ void firstTimeSetupIfNeeded() {
         }
       }
 
-      // Update gBootCounter in memory to match what we wrote to the file
-      // This ensures subsequent users created in the same boot get the correct value
-      gBootCounter = 1;
-      DEBUG_SYSTEMF("FTS: Updated gBootCounter to 1 in memory");
+      // Re-sync the RAM global to the authoritative NVS counter (loadAndIncrementBootSeq
+      // already loaded it). Must NOT hardcode 1 — telemetry/heartbeats read this.
+      gBootCounter = bootStateGetBootCount();
+      DEBUG_SYSTEMF("FTS: Re-synced gBootCounter to %lu from NVS", (unsigned long)gBootCounter);
       // If NTP already synced, resolve the creation timestamp immediately
       if (time(nullptr) > 0) {
         resolvePendingUserCreationTimes();

@@ -268,6 +268,53 @@ static void displayLLM_loading() {
   drawFooter("");
 }
 
+// Fill the content area with the loaded model's info-block icon + description, so
+// a freshly loaded model shows what it is before the first question. Called only
+// on the empty-conversation READY screen (there are no chat lines to draw yet).
+static void drawModelCard() {
+  const uint8_t* iconBits = nullptr;
+  uint8_t iw = 0, ih = 0;
+  const bool hasIcon = llmModelIcon(&iconBits, &iw, &ih) && iconBits;
+  const char* desc = llmModelDescription();
+  const bool hasDesc = desc && desc[0];
+  if (!hasIcon && !hasDesc) return;  // nothing to show — leave the plain empty view
+
+  int textX = 0;
+  if (hasIcon) {
+    // 1bpp MSB-first raster (matches Adafruit_GFX::drawBitmap); draw top-left.
+    oledDisplay->drawBitmap(2, OLED_CONTENT_START_Y, iconBits, iw, ih, DISPLAY_COLOR_WHITE);
+    textX = 2 + iw + 4;  // description sits to the right of the icon
+  }
+
+  if (!hasDesc) return;
+
+  int charsPerLine = (DISPLAY_WIDTH - textX) / 6;
+  if (charsPerLine < 1) charsPerLine = 1;
+  if (charsPerLine > LLM_CHARS) charsPerLine = LLM_CHARS;
+
+  // Greedy word-wrap the description across up to LLM_VISIBLE_LINES rows.
+  const char* p = desc;
+  int y = OLED_CONTENT_START_Y;
+  for (int line = 0; line < LLM_VISIBLE_LINES && *p; line++) {
+    int n = 0, lastSpace = -1;
+    while (p[n] && n < charsPerLine) {
+      if (p[n] == ' ') lastSpace = n;
+      n++;
+    }
+    int take = n;
+    if (p[n] && lastSpace > 0) take = lastSpace;  // break at a word boundary if mid-word
+    char buf[LLM_CHARS + 1];
+    int cp = (take < LLM_CHARS) ? take : LLM_CHARS;
+    memcpy(buf, p, cp);
+    buf[cp] = '\0';
+    oledDisplay->setCursor(textX, y);
+    oledDisplay->print(buf);
+    p += take;
+    while (*p == ' ') p++;  // swallow the break space(s)
+    y += LLM_LINE_H;
+  }
+}
+
 static void displayLLM_chat(bool generating) {
   rebuildRenderLines();
 
@@ -276,6 +323,12 @@ static void displayLLM_chat(bool generating) {
                   ? sRenderLineCount - LLM_VISIBLE_LINES : 0;
   if (sScrollOffset > maxScroll) sScrollOffset = maxScroll;
   if (sScrollOffset < 0) sScrollOffset = 0;
+
+  // Empty conversation on a loaded model: show its info-block icon + description
+  // instead of a blank content area. (The chat loop below draws nothing here.)
+  if (!generating && chatGetTurnCount() == 0) {
+    drawModelCard();
+  }
 
   int firstVisible = sRenderLineCount - LLM_VISIBLE_LINES - sScrollOffset;
   if (firstVisible < 0) firstVisible = 0;

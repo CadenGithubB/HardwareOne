@@ -1257,11 +1257,14 @@ void hardwareone_setup() {
   // NOTE: applySettings() deferred until after initDebugSystem() so debug queue exists
   initializeCommandSystem();
 
-  // Persist crash counter from RTC memory into settings
-  if (filesystemReady) {
-    setSetting(gSettings.crashCount, rtcCrashCount);
-    setSetting(gSettings.lastResetReason, rtcLastResetReason);
-  }
+  // Reflect the RTC-derived crash counters into the RAM mirror for status/UI
+  // reads. Plain assignment — NOT setSetting — so this no longer triggers a
+  // settings.json write on every reset/reflash. That write, firing after a
+  // failed load (when RAM is all defaults), was the trigger that could
+  // overwrite settings.json with defaults. crashCount is RTC-backed and resets
+  // on clean power-on by design, so it needs no file/NVS persistence of its own.
+  gSettings.crashCount = rtcCrashCount;
+  gSettings.lastResetReason = rtcLastResetReason;
 
   logSystemEvent("BOOT", "boot #%lu | reset=%s(%lu) | crashCount=%lu | fw v%s",
                  (unsigned long)gBootCounter, resetReasonName(rtcLastResetReason),

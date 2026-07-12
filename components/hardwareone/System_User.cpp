@@ -14,6 +14,7 @@
 #include "System_Utils.h"  // For CommandEntry
 #include "System_Command.h"
 #include "System_Clock.h"  // Clock::isValidEpoch / isSynced — replaces tm_year>=120 magic
+#include "System_BootState.h"  // bootStateIncrementBootCount — boot counter now lives in NVS
 #include "System_Mutex.h"  // For FsLockGuard
 #include "System_Debug.h"  // For DEBUG_AUTHF, DEBUG_USERF
 #include "System_Logging.h" // For log file paths and constants
@@ -757,16 +758,14 @@ bool adminCreateUser(const String& username, const String& plainPassword, bool m
     newUser["bootCount"] = gBootCounter;
     doc["nextId"] = nextId + 1;
 
-    file = VFS::openGuarded(USERS_JSON_FILE, "w", VFS::systemAuth("user.admin.create"));
-    if (!file) {
-      errorOut = "Failed to write users.json";
-      return false;
-    }
-    size_t written = serializeJson(doc, file);
-    file.close();
-    if (written == 0) {
-      errorOut = "Failed to write users.json";
-      return false;
+    {
+      // Atomic write (tmp + rename) — never truncate the live auth DB in place.
+      String json;
+      serializeJson(doc, json);
+      if (json.length() == 0 || !writeTextAtomic(USERS_JSON_FILE, json)) {
+        errorOut = "Failed to write users.json";
+        return false;
+      }
     }
     nextIdForSettings = nextId;
   }
@@ -892,13 +891,15 @@ static const char* setUserBanInternal(const String& username, bool ban, const St
     }
     if (!found) return "Error: User not found";
 
-    File wf = VFS::openGuarded(USERS_JSON_FILE, "w", VFS::systemAuth("user.setBan"));
-    if (!wf) {
-      logSystemEvent("USERS", "users.json REWRITE FAILED during %s of '%s' — auth database may be inconsistent", ban ? "ban" : "unban", username.c_str());
-      return "Error: Failed to write users.json";
+    {
+      // Atomic write (tmp + rename) — never truncate the live auth DB in place.
+      String json;
+      serializeJson(doc, json);
+      if (json.length() == 0 || !writeTextAtomic(USERS_JSON_FILE, json)) {
+        logSystemEvent("USERS", "users.json REWRITE FAILED during %s of '%s' — auth database may be inconsistent", ban ? "ban" : "unban", username.c_str());
+        return "Error: Failed to write users.json";
+      }
     }
-    serializeJson(doc, wf);
-    wf.close();
   }
 
   if (ban) {
@@ -966,10 +967,13 @@ void updateUserLastSeen(const String& username) {
     }
   }
 
-  File wf = VFS::openGuarded(USERS_JSON_FILE, "w", VFS::systemAuth("user.lastSeen"));
-  if (!wf) return;
-  serializeJson(doc, wf);
-  wf.close();
+  {
+    // Atomic write (tmp + rename). This runs on every login — a raw truncate
+    // here was the highest-frequency chance to shred the auth DB on a power cut.
+    String json;
+    serializeJson(doc, json);
+    if (json.length() == 0 || !writeTextAtomic(USERS_JSON_FILE, json)) return;
+  }
   DEBUG_USERSF("[users] lastSeen updated for '%s' -> %s", username.c_str(), isoTimestamp);
 }
 
@@ -1158,7 +1162,6 @@ bool approvePendingUserInternal(const String& username, String& errorOut) {
     // Create users.json with the first user (ID 1) using ArduinoJson
     PSRAM_JSON_DOC(doc);
     doc["version"] = 1;
-    doc["bootCounter"] = gBootCounter;
     doc["nextId"] = 2;
     
     JsonArray users = doc["users"].to<JsonArray>();
@@ -1174,22 +1177,16 @@ bool approvePendingUserInternal(const String& username, String& errorOut) {
     user["ntpAnchorId"] = gNTPAnchorId;
     user["bootCount"] = gBootCounter;
     
-    doc["bootAnchors"].to<JsonArray>();
-    
-    DEBUG_SYSTEMF("ApproveInit: Creating users.json with bootCounter=%lu, admin.bootCount=%lu, gNTPAnchorId=%lu", (unsigned long)gBootCounter, (unsigned long)gBootCounter, (unsigned long)gNTPAnchorId);
-    
-    // Serialize to file
-    File file = VFS::openGuarded(USERS_JSON_FILE, "w", VFS::systemAuth("user.approve"));
-    if (!file) {
-      errorOut = "Failed to create users.json";
-      return false;
-    }
-    size_t written = serializeJson(doc, file);
-    file.close();
-    
-    if (written == 0) {
-      errorOut = "Failed to write users.json";
-      return false;
+    DEBUG_SYSTEMF("ApproveInit: Creating users.json with admin.bootCount=%lu, gNTPAnchorId=%lu", (unsigned long)gBootCounter, (unsigned long)gNTPAnchorId);
+
+    // Serialize atomically (tmp + rename). Boot anchors live in their own file now.
+    {
+      String json;
+      serializeJson(doc, json);
+      if (json.length() == 0 || !writeTextAtomic(USERS_JSON_FILE, json)) {
+        errorOut = "Failed to create users.json";
+        return false;
+      }
     }
 
     createdUserId = 1;
@@ -1250,19 +1247,15 @@ bool approvePendingUserInternal(const String& username, String& errorOut) {
     // Update nextId
     doc["nextId"] = nextId + 1;
     
-    // Write back to file
-    file = VFS::openGuarded(USERS_JSON_FILE, "w", VFS::systemAuth("user.approve"));
-    if (!file) {
-      errorOut = "Failed to write users.json";
-      return false;
-    }
-    size_t written = serializeJson(doc, file);
-    file.close();
-
-    if (written == 0) {
-      logSystemEvent("USERS", "users.json REWRITE FAILED during approve of '%s' — auth database may be inconsistent", username.c_str());
-      errorOut = "Failed to write users.json";
-      return false;
+    // Write back atomically (tmp + rename).
+    {
+      String json;
+      serializeJson(doc, json);
+      if (json.length() == 0 || !writeTextAtomic(USERS_JSON_FILE, json)) {
+        logSystemEvent("USERS", "users.json REWRITE FAILED during approve of '%s' — auth database may be inconsistent", username.c_str());
+        errorOut = "Failed to write users.json";
+        return false;
+      }
     }
 
     createdUserId = (uint32_t)nextId;
@@ -2547,6 +2540,13 @@ const char* cmd_user_request(const String& argsInput) {
 // File path (exported for use by other modules)
 const char* USERS_JSON_FILE = "/system/users/users.json";
 
+// Boot anchors (NTP time-sync scaffolding) live in their OWN file, decoupled
+// from the credential database. They are written once per boot on NTP sync;
+// keeping them out of users.json means users.json only changes on real account
+// edits, and an anchor write can never touch the auth DB. Structure:
+//   {"bootAnchors":[{"ntpAnchorId":N,"epochAtSync":E,"millisAtSync":M}, ...]}
+const char* BOOT_ANCHORS_FILE = "/system/boot_anchors.json";
+
 // External dependencies for timestamp resolution
 extern uint32_t gNTPAnchorId;
 extern uint32_t gBootCounter;
@@ -2700,6 +2700,26 @@ static int parseBootAnchors(const String& usersJson, BootAnchor* anchors, int ma
   }
 
   return count;
+}
+
+// Read boot anchors from their dedicated file. Returns count (0 if the file is
+// absent, empty, or corrupt — all benign: anchors are regenerated on NTP sync).
+static int readBootAnchors(BootAnchor* anchors, int maxCount) {
+  if (!filesystemReady) return 0;
+  String json;
+  if (!readText(BOOT_ANCHORS_FILE, json) || json.length() == 0) return 0;
+  return parseBootAnchors(json, anchors, maxCount);
+}
+
+// Highest ntpAnchorId currently persisted (0 if none). Seeds gNTPAnchorId at boot.
+static uint32_t highestBootAnchorId() {
+  BootAnchor anchors[16];
+  int n = readBootAnchors(anchors, 16);
+  uint32_t maxId = 0;
+  for (int i = 0; i < n; i++) {
+    if (anchors[i].ntpAnchorId > maxId) maxId = anchors[i].ntpAnchorId;
+  }
+  return maxId;
 }
 
 // Parse user timestamp info from user object
@@ -2869,81 +2889,58 @@ static bool approximateUserTimestamp(String& usersJson, const UserTimestampInfo&
   return true;
 }
 
-// Cleanup old boot anchors (keep only most recent)
-void cleanupOldBootAnchors(void* docPtr) {
-  if (!filesystemReady || !VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth("user.bootAnchor"))) return;
+// Prune boot anchors down to the single most-recent one — but only once NO user
+// is still awaiting timestamp resolution (a pending user needs its anchor kept).
+// Anchors now live in their own file (BOOT_ANCHORS_FILE); the pending-user guard
+// still reads users.json, optionally reusing a users doc the caller already has.
+// The usersDocPtr param is a JsonDocument* of parsed users.json, or nullptr.
+void cleanupOldBootAnchors(void* usersDocPtr) {
+  if (!filesystemReady) return;
 
-  PSRAM_JSON_DOC(localDoc);
-  JsonDocument* workingDoc = static_cast<JsonDocument*>(docPtr);
-  
-  if (!workingDoc) {
-    static char* cleanupBuf = nullptr;
-    static const size_t CLEANUP_BUF_SIZE = 8192;
-    if (!cleanupBuf) {
-      cleanupBuf = (char*)ps_alloc(CLEANUP_BUF_SIZE, AllocPref::PreferPSRAM, "cleanup.json.buf");
-      if (!cleanupBuf) return;
+  // 1) Don't prune if any user still has an unresolved (null) createdAt — that
+  //    user's anchor must survive until it can be resolved.
+  bool anyPending = false;
+  {
+    PSRAM_JSON_DOC(localUsers);
+    JsonDocument* usersDoc = static_cast<JsonDocument*>(usersDocPtr);
+    if (!usersDoc) {
+      String usersJson;
+      if (readText(USERS_JSON_FILE, usersJson) && usersJson.length() > 0) {
+        DeserializationError err = deserializeJson(localUsers, usersJson);
+        if (!err) usersDoc = &localUsers;
+      }
     }
-
-    size_t bytesRead = 0;
-    {
-      File f = VFS::openGuarded(USERS_JSON_FILE, "r", VFS::systemAuth("user.bootAnchor"));
-      if (!f) return;
-      bytesRead = f.readBytes(cleanupBuf, CLEANUP_BUF_SIZE - 1);
-      cleanupBuf[bytesRead] = '\0';
-      f.close();
-    }
-
-    if (bytesRead == 0) return;
-
-    DeserializationError error = deserializeJson(localDoc, cleanupBuf);
-    if (error) return;
-    workingDoc = &localDoc;
-  }
-
-  JsonArray usersArray = (*workingDoc)["users"];
-  if (usersArray) {
-    for (JsonObject user : usersArray) {
-      // A user whose createdAt is still null/missing is awaiting timestamp
-      // resolution from a boot anchor — don't prune anchors out from under it.
-      // (Previously keyed off createdBy=="provisional"; createdBy no longer
-      // carries resolution status after the provenance/source split.)
-      if (user["createdAt"].isNull()) {
-        return;
+    if (usersDoc) {
+      JsonArray usersArray = (*usersDoc)["users"];
+      if (usersArray) {
+        for (JsonObject user : usersArray) {
+          if (user["createdAt"].isNull()) { anyPending = true; break; }
+        }
       }
     }
   }
+  if (anyPending) return;
 
-  JsonArray bootAnchorsArray = (*workingDoc)["bootAnchors"];
-  if (!bootAnchorsArray || bootAnchorsArray.size() == 0) return;
+  // 2) Prune the anchors file to just the most recent anchor.
+  BootAnchor anchors[16];
+  int n = readBootAnchors(anchors, 16);
+  if (n <= 1) return;  // nothing to prune
 
-  uint32_t maxNTPAnchorId = 0;
-  JsonObject maxAnchor;
-  
-  for (JsonObject anchor : bootAnchorsArray) {
-    uint32_t ntpAnchorId = anchor["ntpAnchorId"] | 0;
-    if (ntpAnchorId > maxNTPAnchorId) {
-      maxNTPAnchorId = ntpAnchorId;
-      maxAnchor = anchor;
-    }
+  int maxIdx = 0;
+  for (int i = 1; i < n; i++) {
+    if (anchors[i].ntpAnchorId > anchors[maxIdx].ntpAnchorId) maxIdx = i;
   }
 
-  if (maxNTPAnchorId > 0 && !maxAnchor.isNull()) {
-    uint32_t ntpAnchorIdVal = maxAnchor["ntpAnchorId"] | 0;
-    uint32_t epochVal = maxAnchor["epochAtSync"] | 0;
-    uint32_t millisVal = maxAnchor["millisAtSync"] | 0;
-    
-    bootAnchorsArray.clear();
-    JsonObject newAnchor = bootAnchorsArray.add<JsonObject>();
-    newAnchor["ntpAnchorId"] = (uint32_t)ntpAnchorIdVal;
-    newAnchor["epochAtSync"] = (uint32_t)epochVal;
-    newAnchor["millisAtSync"] = (uint32_t)millisVal;
+  PSRAM_JSON_DOC(doc);
+  JsonArray arr = doc["bootAnchors"].to<JsonArray>();
+  JsonObject a = arr.add<JsonObject>();
+  a["ntpAnchorId"]  = (uint32_t)anchors[maxIdx].ntpAnchorId;
+  a["epochAtSync"]  = (uint32_t)anchors[maxIdx].epochAtSync;
+  a["millisAtSync"] = (uint32_t)anchors[maxIdx].millisAtSync;
 
-    File file = VFS::openGuarded(USERS_JSON_FILE, "w", VFS::systemAuth("user.bootAnchor"));
-    if (file) {
-      serializeJson(*workingDoc, file);
-      file.close();
-    }
-  }
+  String out;
+  serializeJson(doc, out);
+  writeTextAtomic(BOOT_ANCHORS_FILE, out);
 }
 
 // Resolve pending user creation timestamps
@@ -2978,7 +2975,7 @@ void resolvePendingUserCreationTimes() {
 
   const int MAX_ANCHORS = 16;
   BootAnchor anchors[MAX_ANCHORS];
-  int anchorCount = parseBootAnchors(usersJson, anchors, MAX_ANCHORS);
+  int anchorCount = readBootAnchors(anchors, MAX_ANCHORS);  // from BOOT_ANCHORS_FILE
   DEBUG_NTP_RESOLVEF("[resolve] Found %d boot anchors", anchorCount);
   
   for (int i = 0; i < anchorCount; i++) {
@@ -3068,38 +3065,34 @@ void resolvePendingUserCreationTimes() {
   if (modified) {
     DEBUG_NTP_RESOLVEF("[resolve] Writing modified users.json");
     if (writeTextAtomic(USERS_JSON_FILE, usersJson)) {
-      PSRAM_JSON_DOC(doc);
-      DeserializationError error = deserializeJson(doc, usersJson);
-      if (!error) {
-        cleanupOldBootAnchors(&doc);
-      } else {
-        cleanupOldBootAnchors();
-      }
+      cleanupOldBootAnchors();  // prunes BOOT_ANCHORS_FILE, guarded by pending-user check
     }
   } else {
     DEBUG_NTP_RESOLVEF("[resolve] No modifications needed");
   }
 }
 
-// Write boot anchor for user creation timestamp resolution
+// Append a boot anchor (NTP just synced) to the dedicated anchors file. Written
+// atomically via writeTextAtomic; users.json is NOT touched.
 void writeBootAnchor() {
   time_t now = time(nullptr);
   if (now <= 0 || gNTPAnchorId == 0) return;
-  if (!filesystemReady || !VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth("user.bootAnchor"))) return;
+  if (!filesystemReady) return;
 
   unsigned long currentMillis = millis();
 
-  String usersJson;
-  if (!readText(USERS_JSON_FILE, usersJson)) return;
-
+  // Load existing anchors (start empty if the file is absent or corrupt).
   PSRAM_JSON_DOC(doc);
-  DeserializationError error = deserializeJson(doc, usersJson);
-  if (error) return;
+  String existing;
+  if (readText(BOOT_ANCHORS_FILE, existing) && existing.length() > 0) {
+    DeserializationError error = deserializeJson(doc, existing);
+    if (error) doc.clear();
+  }
 
-  JsonArray bootAnchorsArray = doc["bootAnchors"].to<JsonArray>();
+  JsonArray bootAnchorsArray = doc["bootAnchors"];
+  if (bootAnchorsArray.isNull()) bootAnchorsArray = doc["bootAnchors"].to<JsonArray>();
 
-  int count = bootAnchorsArray.size();
-  if (count >= 16) {
+  if ((int)bootAnchorsArray.size() >= 16) {
     bootAnchorsArray.remove(0);
   }
 
@@ -3108,23 +3101,9 @@ void writeBootAnchor() {
   newAnchor["epochAtSync"] = (uint32_t)now;
   newAnchor["millisAtSync"] = (uint32_t)currentMillis;
 
-  char tempFile[48];
-  snprintf(tempFile, sizeof(tempFile), "%s.tmp", USERS_JSON_FILE);
-  File file = VFS::openGuarded(tempFile, "w", VFS::systemAuth("user.bootAnchor"));
-  if (!file) return;
-
-  size_t written = serializeJson(doc, file);
-  file.flush();
-  file.close();
-
-  if (written > 0) {
-    // Atomic rename (LittleFS rename overwrites destination)
-    if (!VFS::renameGuarded(tempFile, USERS_JSON_FILE, VFS::systemAuth("user.bootAnchor"))) {
-      VFS::removeGuarded(tempFile, VFS::systemAuth("user.bootAnchor"));
-    }
-  } else {
-    VFS::removeGuarded(tempFile, VFS::systemAuth("user.bootAnchor"));
-  }
+  String out;
+  serializeJson(doc, out);
+  writeTextAtomic(BOOT_ANCHORS_FILE, out);
 }
 
 // ============================================================================
@@ -3199,69 +3178,46 @@ const size_t userSystemCommandsCount = sizeof(userSystemCommands) / sizeof(userS
 
 // Increment NTP anchor ID counter (memory-only, resets on power cycle)
 void loadAndIncrementBootSeq() {
-  // NTP anchor ID is memory-only and stored in bootAnchors in users.json
-  // We derive it from the highest ntpAnchorId in existing anchors
-  gNTPAnchorId = 0;
-  gBootCounter = 0;
+  // Boot counter now lives in NVS (its own flash partition), NOT users.json.
+  // This was the ONLY reason users.json used to be rewritten every boot; moving
+  // it here makes users.json a write-rarely file (real account edits only), so a
+  // power cut can no longer destroy the auth database via the counter bump.
+  gBootCounter = bootStateIncrementBootCount();
+
+  // NTP anchor id is derived (read-only) from the highest id in the dedicated
+  // anchors file — also decoupled from users.json.
+  gNTPAnchorId = highestBootAnchorId();
+
   // Temporarily enable DEBUG_SYSTEM for boot sequence initialization (runs before settings loaded)
   DebugFlagMask _dbgSaved = getDebugFlags();
   setDebugFlag(DEBUG_SYSTEM);
-  DEBUG_SYSTEMF("BootSeqInit: filesystemReady=%d, users.json exists=%d", (int)filesystemReady, (int)(filesystemReady && VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth("user.bootSeq"))));
+  DEBUG_SYSTEMF("BootSeqInit: filesystemReady=%d, users.json exists=%d, bootCounter=%lu, maxAnchorId=%lu",
+                (int)filesystemReady,
+                (int)(filesystemReady && VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth("user.bootSeq"))),
+                (unsigned long)gBootCounter, (unsigned long)gNTPAnchorId);
 
+  // Read-only integrity pass over users.json: if it's corrupt, quarantine it so
+  // first-time setup re-arms cleanly (otherwise every login fails silently with
+  // no recovery path, since serial itself requires auth). No write-back on the
+  // healthy path — the file is never modified here.
   if (filesystemReady && VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth("user.bootSeq"))) {
     File file = VFS::openGuarded(USERS_JSON_FILE, "r", VFS::systemAuth("user.bootSeq"));
     if (!file) {
       ERROR_SYSTEMF("BootSeqInit: Failed to open users.json");
     } else {
-      // Parse with ArduinoJson
       PSRAM_JSON_DOC(doc);
       DeserializationError error = deserializeJson(doc, file);
       file.close();
-      
+
       if (error) {
         ERROR_SYSTEMF("BootSeqInit: Failed to parse users.json");
+        String bad = String(USERS_JSON_FILE) + ".bad";
+        VFS::removeGuarded(bad.c_str(), VFS::systemAuth("user.bootSeq"));
+        bool q = VFS::renameGuarded(USERS_JSON_FILE, bad.c_str(), VFS::systemAuth("user.bootSeq"));
+        logSystemEvent("USERS", "users.json corrupt at boot (%s) — %s; first-time setup will re-arm",
+                       error.c_str(), q ? "quarantined to users.json.bad" : "quarantine rename FAILED");
       } else {
-        DEBUG_NTP_ANCHORF("BootSeqInit: Loaded and parsed users.json");
-        
-        // Find highest ntpAnchorId in bootAnchors array
-        JsonArray bootAnchorsArray = doc["bootAnchors"];
-        if (bootAnchorsArray) {
-          for (JsonObject anchor : bootAnchorsArray) {
-            uint32_t seq = anchor["ntpAnchorId"] | 0;
-            if (seq > gNTPAnchorId) {
-              gNTPAnchorId = seq;
-            }
-          }
-          DEBUG_NTP_ANCHORF("BootSeqInit: Highest ntpAnchorId in anchors=%lu", (unsigned long)gNTPAnchorId);
-        }
-
-        // Parse bootCounter if present
-        gBootCounter = doc["bootCounter"] | 0;
-        DEBUG_NTP_ANCHORF("BootSeqInit: Parsed bootCounter=%lu", (unsigned long)gBootCounter);
-
-        // Increment bootCounter and persist back
-        uint32_t newCounter = gBootCounter + 1;
-        doc["bootCounter"] = newCounter;
-
-        DEBUG_NTP_ANCHORF("BootSeqInit: Updating bootCounter -> %lu", (unsigned long)newCounter);
-
-        // Write back to file
-        file = VFS::openGuarded(USERS_JSON_FILE, "w", VFS::systemAuth("user.bootSeq"));
-        if (file) {
-          size_t written = serializeJson(doc, file);
-          file.close();
-          if (written > 0) {
-            gBootCounter = newCounter;
-            INFO_SYSTEMF("BootSeqInit: Persisted users.json with bootCounter=%lu", (unsigned long)gBootCounter);
-          } else {
-            gBootCounter = newCounter;
-            WARN_SYSTEMF("BootSeqInit: Write failed; bootCounter advanced in RAM to %lu", (unsigned long)gBootCounter);
-          }
-        } else {
-          // Fallback: still advance in memory
-          gBootCounter = newCounter;
-          WARN_SYSTEMF("BootSeqInit: Persist failed; bootCounter advanced in RAM to %lu", (unsigned long)gBootCounter);
-        }
+        DEBUG_NTP_ANCHORF("BootSeqInit: users.json parsed OK");
       }
     }
   }
@@ -3270,8 +3226,8 @@ void loadAndIncrementBootSeq() {
   // Restore debug flags
   setDebugFlags(_dbgSaved);
   // Use DEBUG macro - now safe since debug system is initialized
-  DEBUG_NTP_ANCHORF("[BOOT] NTP anchor ID: %lu (derived from bootAnchors)", (unsigned long)gNTPAnchorId);
-  DEBUG_NTP_ANCHORF("[BOOT] NTP anchor ID: %lu | Boot counter: %lu (stored in users.json)", (unsigned long)gNTPAnchorId, (unsigned long)gBootCounter);
+  DEBUG_NTP_ANCHORF("[BOOT] NTP anchor ID: %lu (from %s) | Boot counter: %lu (NVS)",
+                    (unsigned long)gNTPAnchorId, BOOT_ANCHORS_FILE, (unsigned long)gBootCounter);
 }
 
 // ============================================================================

@@ -60,6 +60,7 @@ static const char* AUTOMATIONS_FILE  = "/system/automations.json";
 static const char* ESPNOW_DEVICES    = "/system/espnow/devices.json";
 static const char* ESPNOW_MESH_PEERS = "/system/espnow/mesh_peers.json";
 static const char* USER_SETTINGS_DIR  = "/system/users/user_settings";
+static const char* BOOT_ANCHORS_FILE  = "/system/boot_anchors.json";  // pending-user NTP anchors (split out of users.json)
 static const char* MAPS_DIR          = "/maps";
 
 // ============================================================================
@@ -313,6 +314,7 @@ static esp_err_t handleBackup(httpd_req_t* req) {
   if (wantSettings)    addFileToBackup(files, warnings, SETTINGS_FILE);
   if (wantUsers) {
     addFileToBackup(files, warnings, USERS_FILE);
+    addFileToBackup(files, warnings, BOOT_ANCHORS_FILE);  // so pending-user timestamps stay resolvable after restore
     addDirectoryToBackup(files, warnings, encFields, USER_SETTINGS_DIR, ctx);
   }
   if (wantAutomations) addFileToBackup(files, warnings, AUTOMATIONS_FILE);
@@ -547,7 +549,7 @@ static esp_err_t handleRestore(httpd_req_t* req) {
       }
     }
 
-    if (writeText(path, content)) {
+    if (writeTextAtomic(path, content)) {
       filesWritten++;
     } else {
       char warn[128];

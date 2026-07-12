@@ -24,7 +24,6 @@
  *   - Prompt prediction tracking (PROMPT_PRED per token, PROMPT_TRACK at boundary)
  *   - sample() pre-logit range & entropy
  *   - sample_topp nucleus stats, per-candidate detail, sampled rank
- *   - sample_mirostat2 mu/threshold detail + chosen token surprise
  *   - Rep penalty per-step log
  *   - Suppress penalty per-step log
  *   - Content logit boost per-step log
@@ -48,13 +47,14 @@
 
 #include "System_BuildConfig.h"
 #include <esp_attr.h>
+#include <ctype.h>   // isalpha/isalnum — vocab-aware prompt casing
 
 #if ENABLE_ONDEVICE_LLM
 
 #include "System_LLM.h"
 #include "System_LLM_Internal.h"  // private engine types + gLLM runtime singleton
 #include "System_LLM_Kernels.h"   // rmsnorm/layernorm/softmax/wmatmul/scaleCount
-#include "System_LLM_Sampler.h"   // sample / sample_mirostat2
+#include "System_LLM_Sampler.h"   // sample()
 #include "System_LLM_Tokenizer.h" // encode / decode / loadTokenizerFromFile / freeTokenizer
 #include "System_LLM_Model.h"     // loadWeights
 #include "System_Command.h"
@@ -92,7 +92,7 @@
 //  5. Math Primitives (rmsnorm, layernorm, softmax, matmul variants)
 //  6. Forward Pass Debug Utilities (VecStats, FORWARD_DBG_POS)
 //  7. Forward Pass
-//  8. Sampling (argmax, top-p, mirostat2, dispatcher)
+//  8. Sampling (argmax, top-p, min-p, dispatcher)
 //  9. Tokenizer (hash map, load, encode, decode)
 // 10. Model Loading (validation, read helpers, weight loading, spot checks)
 // 11. Public API (init, load, unload, generate, stop, list)
@@ -173,9 +173,8 @@ static void llmAsyncTask(void* /*pv*/) {
     return true;
   },
   ac->params.maxTokens,    ac->params.temperature,  ac->params.topp,
-  ac->params.useMirostat2, ac->params.mirostatTau,  ac->params.mirostatEta,
   ac->params.repPenalty,   ac->params.repWindow,    ac->params.sentenceLimit,
-  ac->params.hardCap,      ac->params.dynTemp,
+  ac->params.hardCap,
   ac->params.suppressCount > 0 ? ac->params.suppressTokens : nullptr,
   ac->params.suppressCount, ac->params.minP);
 
@@ -678,12 +677,27 @@ static float* forward(int token, int pos) {
   // Debug: post-final-norm activation health
   checkVec("final_norm", s->x, dim, pos, -1);
 
-  // Classifier into logits (always FP32 or Q8, never Q4)
-  linear(s->logits, s->x, w->clsT);
+  // Classifier into logits (always FP32 or Q8, never Q4).
+  // Prompt-phase skip: during prompt ingestion (pos < num_prompt_tokens-1) the
+  // next token is forced from the prompt, so nothing functional reads these
+  // logits — the ~594KB classifier stream per position is pure waste (~8% of
+  // per-token weight traffic). They ARE still computed when LLM debug is on,
+  // because the PROMPT_PRED / PROMPT_TRACK / logit-stats diagnostics read them.
+  // If a real prompt-phase logit consumer is ever added (prefill perplexity,
+  // speculative decode), revisit this gate.
+  const bool inPromptPrefill = gPromptDiag.active &&
+                               (pos < gPromptDiag.num_prompt_tokens - 1);
+  const bool debugWantsLogits = (getLogLevel() >= LOG_LEVEL_DEBUG) &&
+      (isDebugFlagSet(DEBUG_LLM_FORWARD) || isDebugFlagSet(DEBUG_LLM_GENERATE));
+  const bool logitsComputed = !inPromptPrefill || debugWantsLogits;
+  if (logitsComputed) {
+    linear(s->logits, s->x, w->clsT);
+  }
 
   // Dump logit distribution stats — healthy model has wide spread and clear top candidates.
   // Flat/uniform logits = broken weights. NaN = numerical explosion.
-  if (FORWARD_DBG_POS(pos)) {
+  // Co-gated with the skip above so a stale buffer is never scanned.
+  if (logitsComputed && FORWARD_DBG_POS(pos)) {
     float lmin = s->logits[0], lmax = s->logits[0], lsum = 0.f;
     int top_id = 0, nan_count = 0;
     for (int i = 0; i < p->vocab_size; i++) {
@@ -720,8 +734,8 @@ static float* forward(int token, int pos) {
 
 // ============================================================================
 // 8. Sampling  →  moved to System_LLM_Sampler.{h,cpp}
-//    sample_argmax/sample_topp (static there), sample(), sample_mirostat2().
-//    forward()/llmGenerate call sample()/sample_mirostat2() via the header.
+//    sample_argmax/sample_topp (static there), sample().
+//    forward()/llmGenerate call sample() via the header.
 // ============================================================================
 
 // ============================================================================
@@ -758,11 +772,9 @@ bool llmLoadModel(const char* modelPath, int maxCtx) {
   // Unload any existing model
   llmUnload();
 
-  // Store the requested context cap (0 = auto-fit to available PSRAM)
-  // HardwareOneHelpAgent needs a reduced context window to leave PSRAM for the rest of the system
-  if (strstr(modelPath, "HardwareOneHelpAgent") && (maxCtx == 0 || maxCtx > 45)) {
-    maxCtx = 45;
-  }
+  // Store the requested context cap (0 = auto-fit to available PSRAM). Any
+  // per-model context policy lives in the llmmaxcontext setting, not a
+  // filename sniff — a caller that needs to spare PSRAM passes an explicit cap.
   gLLM.requestedMaxCtx = maxCtx;
 
   // KV-cache precision is a load-time choice (the buffers are sized/typed now and
@@ -833,6 +845,10 @@ void llmUnload() {
     llmPsramFree((void**)&gLLM.sampleIndices);  // PSRAM-allocated (nulls the ptr)
     gLLM.sampleIndicesSize = 0;
   }
+  if (gLLM.genHist) {
+    llmPsramFree((void**)&gLLM.genHist);        // PSRAM-allocated (nulls the ptr)
+    gLLM.genHistSize = 0;
+  }
 
   memset(&gLLM.weights, 0, sizeof(gLLM.weights));
   memset(&gLLM.state, 0, sizeof(gLLM.state));
@@ -842,6 +858,17 @@ void llmUnload() {
   gLLM.stateHotSize = 0;
   gLLM.seq_ctx = 0;
   gLLM.runState = LLMState::UNLOADED;
+
+  // Drop any info-block metadata so a failed/early-aborted next load can't show
+  // the previous model's description or icon.
+  gLLM.modelDesc[0] = '\0';
+  gLLM.modelHasIcon = false;
+  gLLM.modelIconW   = 0;
+  gLLM.modelIconH   = 0;
+  gLLM.modelRefusal[0] = '\0';
+  if (gLLM.domainVocab) llmPsramFree((void**)&gLLM.domainVocab);
+  gLLM.domainVocabCount = 0;
+  gLLM.domainVocabBytes = 0;
 }
 
 bool llmIsReady() {
@@ -867,11 +894,51 @@ LLMStatus llmGetStatus() {
   return status;
 }
 
+const char* llmModelDescription() {
+  return gLLM.modelDesc;  // always NUL-terminated; "" when the model has no info block
+}
+
+bool llmModelIcon(const uint8_t** bits, uint8_t* width, uint8_t* height) {
+  if (!gLLM.modelHasIcon) return false;
+  if (bits)   *bits   = gLLM.modelIcon;
+  if (width)  *width  = gLLM.modelIconW;
+  if (height) *height = gLLM.modelIconH;
+  return true;
+}
+
+// Whole-word, case-insensitive test: does the prompt contain at least one word
+// from the model's embedded domain allow-list? Returns true (allow) when the model
+// carries no domain vocab, so a plain model is never gated. Cold path — runs once
+// per prompt over a packed [u8 len][lowercase word] blob (PSRAM).
+static bool llmPromptInDomain(const char* prompt) {
+  if (gLLM.domainVocabCount == 0 || !gLLM.domainVocab || gLLM.domainVocabBytes == 0)
+    return true;
+  char lw[256];
+  for (const char* p = prompt; *p; ) {
+    while (*p && !isalnum((unsigned char)*p)) p++;      // skip to a word
+    const char* ws = p;
+    while (*p && isalnum((unsigned char)*p)) p++;        // span the word
+    int wl = (int)(p - ws);
+    if (wl <= 0 || wl > 255) continue;                   // no word, or too long to be a uint8-len entry
+    for (int i = 0; i < wl; i++) {
+      char c = ws[i];
+      lw[i] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+    }
+    const uint8_t* v = gLLM.domainVocab;
+    const uint8_t* vend = v + gLLM.domainVocabBytes;
+    while (v < vend) {
+      uint8_t vl = *v++;
+      if (v + vl > vend) break;
+      if (vl == wl && memcmp(v, lw, (size_t)wl) == 0) return true;
+      v += vl;
+    }
+  }
+  return false;
+}
+
 int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
                 int maxTokens, float temperature, float topp,
-                bool useMirostat2, float mirostatTau, float mirostatEta,
                 float repPenalty, int repWindow, int sentenceLimit, int hardCap,
-                bool dynTemp,
                 const int* suppressTokens, int suppressTokenCount,
                 float minP) {
   if (gLLM.runState != LLMState::READY) {
@@ -882,6 +949,33 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
   gLLM.runState = LLMState::GENERATING;
   gLLM.stopRequested = false;
   gLLM.errorMsg[0] = '\0';
+
+  // ── Domain refusal gate ──────────────────────────────────────────────────
+  // If the loaded .bin carries a domain allow-list and the setting is on, refuse
+  // prompts that contain none of the domain words (deterministic, pre-generation).
+  // Skipped for Do:/command prompts (their output is machine-parsed). Nothing is
+  // allocated yet, so the early return only has to restore runState + emit the text.
+  if (gSettings.llmDomainGate && gLLM.domainVocabCount > 0) {
+    // Do:-mode prompts (natural-language → device command) are machine-parsed and
+    // must bypass the gate. The app frames them "...\nDo:", but BLE intake
+    // (Bluetooth.cpp) normalizes \n→space, so over BLE it arrives as "... Do:";
+    // norm_prompt (which restores the newline) isn't built until below, so detect
+    // BOTH forms on the raw prompt here — otherwise a domain-gated model refuses
+    // every BLE command instead of translating it.
+    const size_t promptLen = strlen(prompt);
+    const bool doMode = strstr(prompt, "\nDo:") != nullptr ||
+                        (promptLen >= 4 && strcmp(prompt + promptLen - 4, " Do:") == 0);
+    if (!doMode && !llmPromptInDomain(prompt)) {
+      const char* msg = gLLM.modelRefusal[0]
+                          ? gLLM.modelRefusal
+                          : "I can only answer questions about this model's topic.";
+      if (tokenCb) tokenCb(msg);
+      gLLM.lastTokCount  = 0;
+      gLLM.lastTokPerSec = 0.0f;
+      gLLM.runState = LLMState::READY;
+      return 0;
+    }
+  }
 
   LLMConfig* p = &gLLM.config;
 
@@ -995,6 +1089,55 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
         DEBUG_LLM_GENERATEF("[LLM] casing: title-cased '%c'->'%c' to match training Q: format",
                             body[0], (char)(body[0] - 32));
         body[0] = (char)(body[0] - 32);
+      }
+      // Phase 0b (vocab-aware casing): map casual casing onto whatever whole-token
+      // form the loaded model actually has. Entity names are single vocab tokens
+      // in exactly one case ("Bulbasaur"=1 token; "bulbasaur"/"BULBASAUR"=multiple
+      // fragments the model never learned) — so casually-typed names miss the
+      // trained token. For each word, tokenize it as-typed, all-lowercase, and
+      // Title-case; if a different casing yields STRICTLY fewer tokens (i.e. hits
+      // a whole-word token the typed spelling missed), rewrite the word to it.
+      // This resolves bulbasaur / BULBASAUR / Bulbasaur to the model's one name
+      // token whether it was trained proper-case OR lowercase — model-agnostic,
+      // no hardcoded name list. Words already at their fewest-token form (normal
+      // words; the sentence-start handled just above) are left untouched.
+      {
+        int wi = 0;
+        while (wi < bodyLen) {
+          while (wi < bodyLen && !isalpha((unsigned char)body[wi])) wi++;   // skip to a word
+          int ws = wi;
+          while (wi < bodyLen && isalnum((unsigned char)body[wi])) wi++;    // span the word
+          int wl = wi - ws;
+          if (wl <= 0 || wl > 32) continue;
+          // Score each casing by BOTH its space-prefixed token count (the true
+          // in-context form — BPE learns " Kanto"/" Potion" as single tokens,
+          // where the bare compare ties 3-vs-3 and misses the rewrite) AND the
+          // bare count as tiebreak (whole-name added tokens like "Bulbasaur"
+          // are stored bare, so their space forms tie at 2 while bare shows
+          // 1-vs-3). Rewrite when a casing strictly wins lexicographically.
+          char asBuf[36], loBuf[36], tiBuf[36];
+          asBuf[0] = loBuf[0] = tiBuf[0] = ' ';           // [0] = space prefix; bare form starts at [1]
+          for (int k = 0; k < wl; k++) {
+            char ch = body[ws + k];
+            char lo = (ch >= 'A' && ch <= 'Z') ? (char)(ch + 32) : ch;
+            asBuf[k + 1] = ch;
+            loBuf[k + 1] = lo;
+            tiBuf[k + 1] = (k == 0 && lo >= 'a' && lo <= 'z') ? (char)(lo - 32) : lo;
+          }
+          asBuf[wl + 1] = loBuf[wl + 1] = tiBuf[wl + 1] = '\0';
+          int tmpTok[48];
+          int sAs = encode(asBuf, tmpTok, 48), bAs = encode(asBuf + 1, tmpTok, 48);
+          int sLo = encode(loBuf, tmpTok, 48), bLo = encode(loBuf + 1, tmpTok, 48);
+          int sTi = encode(tiBuf, tmpTok, 48), bTi = encode(tiBuf + 1, tmpTok, 48);
+          const char* pick = asBuf; int sPick = sAs, bPick = bAs;
+          if (sLo > 0 && bLo > 0 && (sLo < sPick || (sLo == sPick && bLo < bPick))) { pick = loBuf; sPick = sLo; bPick = bLo; }
+          if (sTi > 0 && bTi > 0 && (sTi < sPick || (sTi == sPick && bTi < bPick))) { pick = tiBuf; sPick = sTi; bPick = bTi; }
+          if (pick != asBuf) {                             // a cleaner casing exists
+            DEBUG_LLM_GENERATEF("[LLM] casing: '%.*s' -> '%s' (space %d->%d, bare %d->%d tok)",
+                                wl, asBuf + 1, pick + 1, sAs, sPick, bAs, bPick);
+            memcpy(body + ws, pick + 1, wl);
+          }
+        }
       }
       for (int fi = 0; fi < NUM_FILLER; fi++) {
         int fLen = strlen(FILLER_PREFIXES[fi]);
@@ -1159,9 +1302,13 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
   // very common function words. During generation, these get a small logit boost
   // to nudge the model toward on-topic answers.
   static constexpr int   MAX_CONTENT_TOKENS   = 16;
-  static constexpr float CONTENT_LOGIT_BOOST       = 1.5f;  // logit bonus for content tokens (gentle nudge)
-  static constexpr float CONTENT_LOGIT_BOOST_LATE  = 1.0f;  // sustained nudge after initial window (was 0.5)
-  static constexpr int   CONTENT_BOOST_WINDOW      = 16;    // first N tokens get full boost (was 10)
+  // Full boost is a runtime setting (llmcontentboost, default 1.5, 0=off); the
+  // late boost stays proportional so the default reproduces the old 1.0 late
+  // value (1.5 * 0.667 = 1.0). Window (first N tokens get full boost) is fixed.
+  static constexpr float CONTENT_LOGIT_BOOST_LATE_RATIO = 0.667f;
+  static constexpr int   CONTENT_BOOST_WINDOW      = 16;
+  const float CONTENT_LOGIT_BOOST      = gSettings.llmContentBoost;
+  const float CONTENT_LOGIT_BOOST_LATE = CONTENT_LOGIT_BOOST * CONTENT_LOGIT_BOOST_LATE_RATIO;
   int content_tokens[MAX_CONTENT_TOKENS];
   int content_token_count = 0;
   {
@@ -1275,9 +1422,8 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
   int  sentence_count = 0;
   char sent_prev_char = '\0'; // last character seen across token pieces
 
-  DEBUG_LLM_GENERATEF("[LLM] Generate: prompt_tokens=%d max=%d temp=%.2f topp=%.2f eos=%d mirostat=%d tau=%.1f",
-                      num_prompt_tokens, maxTokens, temperature, topp, eos_id,
-                      (int)useMirostat2, mirostatTau);
+  DEBUG_LLM_GENERATEF("[LLM] Generate: prompt_tokens=%d max=%d temp=%.2f topp=%.2f eos=%d",
+                      num_prompt_tokens, maxTokens, temperature, topp, eos_id);
   DEBUG_LLM_GENERATEF("[LLM]   rep_penalty=%.2f rep_window=%d sentence_limit=%d hard_cap=%d suppress=%d",
                       REP_PENALTY, REP_WINDOW, sentenceLimit, hardCap, suppressTokenCount);
   DEBUG_LLM_GENERATEF("[LLM]   arch=%s dim=%d layers=%d heads=%d vocab=%d seq=%d quant=%s",
@@ -1294,12 +1440,21 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
                       minP, (minP > 0.0f) ? "(active)" : "(off)",
                       (gLLM.kvPrecision == KV_FP16) ? "FP16" :
                       (gLLM.kvPrecision == KV_INT8) ? "INT8" : "FP32");
+  //   ngram    → "[LLM] ngram_block:" fires when a loop is broken
+  //   confGate → "[LLM] conf_gate:" fires when an answer is hedged
+  //   prefill  → classifier skipped during prompt (no line; prompt just gets faster)
+  DEBUG_LLM_GENERATEF("[LLM] feat2: noRepeatNgram=%d%s confGate=%.2f%s contentBoost=%.2f%s prefillSkip=on",
+                      gSettings.llmNoRepeatNgram,
+                      (gSettings.llmNoRepeatNgram >= 2) ? "(active)" : "(off)",
+                      gSettings.llmConfThreshold,
+                      (gSettings.llmConfThreshold < 0.0f) ? "(armed)" : "(off)",
+                      CONTENT_LOGIT_BOOST,
+                      (CONTENT_LOGIT_BOOST > 0.0f) ? "(active)" : "(off)");
 
   // ── Generation loop ─────────────────────────────────────────────────────────
   unsigned long startMs = millis();
 
   int steps = std::min(maxTokens + num_prompt_tokens, S);
-  float mirostat_mu = 2.0f * mirostatTau;
 
   // Phase 2: confidence signal. Accumulate the mean log-probability of the
   // tokens the model actually generated. Low mean-logprob = the model was
@@ -1308,6 +1463,41 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
   // Pure observability: does not alter sampling or generation in any way.
   float confSumLogprob = 0.0f;
   int   confCount = 0;
+
+  // ── No-repeat n-gram history ────────────────────────────────────────────
+  // Every sampled token is appended; the blocker in the sampling path bans any
+  // token that would complete an n-gram already present in this history.
+  int hist_len = 0;
+
+  // ── Confidence gate ─────────────────────────────────────────────────────
+  // Hold the first CONF_GATE_TOKENS generated tokens; if the running mean
+  // logprob is below the threshold, prefix "I'm not sure, but " before
+  // releasing. All sinks poll the result buffer, so holding is invisible to
+  // them (they just see the first bytes a few seconds later). Fail-open:
+  // greedy sampling produces no confidence signal (confCount stays 0 → no
+  // hedge), and Do: output is machine-parsed by the web UI so it bypasses
+  // the gate entirely.
+  const float confGateThresh = gSettings.llmConfThreshold;  // <0 = armed, 0 = off
+  static constexpr int CONF_GATE_TOKENS = 6;                // decision window
+  EXT_RAM_BSS_ATTR static char confHoldBuf[192];            // PSRAM; single-flight via the runState!=READY gate at entry (same guarantee as repBuf/genHist)
+  int  confHoldLen = 0;
+  // Greedy (temp<=0) sampling never sets chosenProb, so confCount would stay 0
+  // and the hold would only release at end-of-generation (no streaming). Disarm
+  // up-front on that path instead of degrading it.
+  bool confHolding = (confGateThresh < 0.0f) && !isDoMode && (tokenCb != nullptr) &&
+                     (temperature > 0.0f);
+  confHoldBuf[0] = '\0';
+  auto confRelease = [&]() -> bool {
+    confHolding = false;
+    bool cbOk = true;
+    if (confCount > 0 && (confSumLogprob / (float)confCount) < confGateThresh) {
+      DEBUG_LLM_GENERATEF("[LLM] conf_gate: mean=%.3f < %.2f after %d tokens — hedging",
+                          confSumLogprob / (float)confCount, confGateThresh, confCount);
+      cbOk = tokenCb("I'm not sure, but ");
+    }
+    if (cbOk && confHoldLen > 0) cbOk = tokenCb(confHoldBuf);
+    return cbOk;
+  };
 
   // Soft-recovery budget for RunState-pointer corruption (see forward() guard).
   const int LLM_MAX_CORRUPTION_RETRIES = 2;
@@ -1360,7 +1550,13 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
       // If the model correctly predicts upcoming prompt tokens (e.g. "Q:" → " How",
       // " turn" → " off"), it's tracking the input. If it predicts unrelated
       // tokens, the prompt content isn't being encoded into the hidden state.
-      {
+      // Gated on the same condition that makes forward() compute prompt-phase
+      // logits (see the classifier skip): with debug off, `logits` holds stale
+      // values here and these scans would both lie and waste two full-vocab
+      // passes per prompt token.
+      const bool promptDbg = (getLogLevel() >= LOG_LEVEL_DEBUG) &&
+                             isDebugFlagSet(DEBUG_LLM_GENERATE);
+      if (promptDbg) {
         int actual_next = prompt_tokens[pos + 1];
         float actual_logit = (actual_next >= 0 && actual_next < p->vocab_size) ? logits[actual_next] : -999.f;
         // Find rank
@@ -1389,7 +1585,7 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
       // if it were generating. This shows what the model "thinks" should follow
       // the prompt — even though we override it with the next prompt token.
       // Reveals whether the model is tracking the prompt or already lost.
-      if (pos == num_prompt_tokens - 2) {
+      if (promptDbg && pos == num_prompt_tokens - 2) {
         // Find top-5 predicted tokens at this position
         float top5v[5] = {-1e30f,-1e30f,-1e30f,-1e30f,-1e30f};
         int   top5i[5] = {0,0,0,0,0};
@@ -1565,7 +1761,7 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
       // After that, a weaker "late" boost continues through the entire generation
       // to prevent sentence 2 from drifting off-topic.
       int gen_pos = pos - num_prompt_tokens + 1;  // 0-based generated token index
-      if (content_token_count > 0) {
+      if (content_token_count > 0 && CONTENT_LOGIT_BOOST > 0.0f) {
         float boost = (gen_pos < CONTENT_BOOST_WINDOW) ? CONTENT_LOGIT_BOOST : CONTENT_LOGIT_BOOST_LATE;
         int boosted = 0;
         for (int ci = 0; ci < content_token_count; ci++) {
@@ -1585,6 +1781,36 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
         }
       }
 
+      // ── No-repeat n-gram blocker ────────────────────────────────────────
+      // Ban any token that would complete an n-gram already generated in this
+      // run. Deliberately applied AFTER the rep penalty and content boost, and
+      // with NO content-token exemption: exempt+boosted prompt entities are
+      // exactly what stabilizes verbatim phrase loops ("It 16. It 16.") — the
+      // rep penalty structurally cannot break them, a hard ban can. EOS and
+      // the "Q:" stop token are never banned so generation can always end.
+      const int NGRAM_N = gSettings.llmNoRepeatNgram;  // 0/1 = off
+      if (NGRAM_N >= 2 && gLLM.genHist && hist_len >= NGRAM_N - 1) {
+        const int* ctxTail = &gLLM.genHist[hist_len - (NGRAM_N - 1)];
+        int nbanned = 0;
+        for (int hi = 0; hi <= hist_len - NGRAM_N; hi++) {
+          bool ngMatch = true;
+          for (int k = 0; k < NGRAM_N - 1; k++) {
+            if (gLLM.genHist[hi + k] != ctxTail[k]) { ngMatch = false; break; }
+          }
+          if (!ngMatch) continue;
+          int banTok = gLLM.genHist[hi + NGRAM_N - 1];
+          if (banTok == eos_id || banTok == 3) continue;  // never ban stop tokens
+          if (banTok >= 0 && banTok < p->vocab_size && logits[banTok] > -1e8f) {
+            logits[banTok] = -1e9f;
+            nbanned++;
+          }
+        }
+        if (nbanned > 0) {
+          DEBUG_LLM_GENERATEF("[LLM] ngram_block: banned %d token(s) (n=%d hist=%d)",
+                              nbanned, NGRAM_N, hist_len);
+        }
+      }
+
       // Sentence-aware temperature taper: reduce temperature slightly after the
       // first sentence to prevent second-sentence drift. The model is less
       // confident later in generation, so tighter sampling keeps it on-topic.
@@ -1596,22 +1822,6 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
           DEBUG_LLM_GENERATEF("[LLM] TEMP_TAPER gen=%d sent=%d: base=%.3f -> eff=%.3f (x0.8)",
                               gen_pos, sentence_count, temperature, effective_temp);
         }
-      }
-
-      // Dynamic temperature: optionally scale base temperature using top logit as a
-      // confidence proxy. Disabled by default — for memorization/domain models, flat
-      // temperature produces better recall. Enable via dyn_temp=true in the generate API.
-      if (dynTemp && effective_temp > 0.0f) {
-        float max_logit = logits[0];
-        for (int vi = 1; vi < p->vocab_size; vi++) {
-          if (logits[vi] > max_logit) max_logit = logits[vi];
-        }
-        float boost = 1.0f + (max_logit - 6.0f) * 0.08f;
-        if (boost < 0.6f) boost = 0.6f;
-        if (boost > 1.8f) boost = 1.8f;
-        effective_temp = temperature * boost;
-        DEBUG_LLM_GENERATEF("[LLM] pos=%d dyn_temp: max_logit=%.2f boost=%.2f eff=%.3f (base=%.2f)",
-                            pos, max_logit, boost, effective_temp, temperature);
       }
 
       int topId = 0;
@@ -1631,13 +1841,8 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
         }
       }
 
-      float chosenProb = -1.0f;  // <0 = no signal (greedy / mirostat path)
-      if (useMirostat2) {
-        next = sample_mirostat2(logits, p->vocab_size, effective_temp,
-                                mirostatTau, mirostatEta, &mirostat_mu);
-      } else {
-        next = sample(logits, p->vocab_size, effective_temp, effective_topp, minP, &chosenProb);
-      }
+      float chosenProb = -1.0f;  // <0 = no signal (greedy temp==0 path)
+      next = sample(logits, p->vocab_size, effective_temp, effective_topp, minP, &chosenProb);
 
       // Phase 2: fold this generated token's confidence into the running mean.
       if (chosenProb > 0.0f) {
@@ -1649,6 +1854,12 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
       if (next < 0 || next >= p->vocab_size) {
         DEBUG_LLM_GENERATEF("[LLM] WARNING: Sampled OOV token %d (vocab_size=%d), clamped to 0", next, p->vocab_size);
         next = 0;  // fallback to first token if somehow OOV
+      }
+
+      // Record for the no-repeat n-gram blocker (sampled tokens only — prompt
+      // tokens never enter, so the model may still quote a prompt phrase once).
+      if (gLLM.genHist && hist_len < gLLM.genHistSize) {
+        gLLM.genHist[hist_len++] = next;
       }
 
       const char* piece = decode(token, next);
@@ -1739,7 +1950,25 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
       }
 
       if (piece && tokenCb) {
-        if (!tokenCb(piece)) break;  // callback requested stop
+        bool cbOk;
+        if (confHolding) {
+          // Confidence gate: buffer instead of emitting until the decision
+          // window fills (or the buffer would overflow — decide immediately
+          // on the mean so far, then emit this piece normally).
+          int plen = (int)strlen(piece);
+          if (confHoldLen + plen < (int)sizeof(confHoldBuf) - 1) {
+            memcpy(confHoldBuf + confHoldLen, piece, plen);
+            confHoldLen += plen;
+            confHoldBuf[confHoldLen] = '\0';
+            cbOk = (confCount >= CONF_GATE_TOKENS) ? confRelease() : true;
+          } else {
+            cbOk = confRelease();
+            if (cbOk) cbOk = tokenCb(piece);
+          }
+        } else {
+          cbOk = tokenCb(piece);
+        }
+        if (!cbOk) break;  // callback requested stop
       }
       generated++;
 
@@ -1781,8 +2010,8 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
           if (!dup) unique++;
         }
       }
-      DEBUG_LLM_GENERATEF("[LLM] gen_health: generated=%d tok/s=%.1f mu=%.2f unique=%d/%d ctx=%d/%d",
-                          generated, tps, mirostat_mu, unique,
+      DEBUG_LLM_GENERATEF("[LLM] gen_health: generated=%d tok/s=%.1f unique=%d/%d ctx=%d/%d",
+                          generated, tps, unique,
                           rep_buf ? ((rep_fill < REP_WINDOW) ? rep_fill : REP_WINDOW) : 0,
                           pos, S);
     }
@@ -1796,6 +2025,10 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
   }
 
   // ── Finalization ────────────────────────────────────────────────────────────
+  // Confidence gate: flush anything still held — short answers (EOS, sentence
+  // limit, hard cap, Q:-stop, user stop) can end inside the decision window.
+  if (confHolding) confRelease();
+
   // Clean up prompt diagnostics
   gPromptDiag.active = false;
   gPromptDiag.tokens = nullptr;
@@ -2120,10 +2353,33 @@ static const char* cmd_llm_generate(const String& args) {
     String a = args; a.trim();
     if (argLeadingTokenIsJson(a)) {
       if (!llmIsReady()) return "{\"schema\":1,\"ok\":false,\"error\":\"model not ready\"}";
-      String prompt = a.startsWith("json ") ? a.substring(5) : String();
-      prompt.trim();
-      if (prompt.length() == 0) return "{\"schema\":1,\"ok\":false,\"error\":\"empty prompt\"}";
-      int session = chatBeginTurn(prompt.c_str(), nullptr);
+      String payload = a.startsWith("json ") ? a.substring(5) : String();
+      payload.trim();
+      if (payload.length() == 0) return "{\"schema\":1,\"ok\":false,\"error\":\"empty prompt\"}";
+
+      // Two accepted shapes:
+      //   json <raw prompt text>                    → no overrides
+      //   json {"prompt":"...","params":{...}}       → per-request overrides
+      // The object form lets the app tune a single reply (e.g. hard_cap +
+      // sentence_limit for a Do:-style short answer) without mutating settings.
+      // See docs/LLM_BLE_GENERATE_OVERRIDES.md for the wire contract.
+      String prompt;
+      ChatParamOverride ov;
+      bool haveOverrides = false;
+      if (payload[0] == '{') {
+        PSRAM_JSON_DOC(body);   // parse pool in PSRAM, not the tight internal DRAM
+        if (deserializeJson(body, payload) != DeserializationError::Ok)
+          return "{\"schema\":1,\"ok\":false,\"error\":\"invalid JSON payload\"}";
+        prompt = (const char*)(body["prompt"] | "");
+        prompt.trim();
+        if (prompt.length() == 0) return "{\"schema\":1,\"ok\":false,\"error\":\"empty prompt\"}";
+        JsonObjectConst params = body["params"].as<JsonObjectConst>();
+        if (!params.isNull()) { chatParamOverrideFromJson(params, ov); haveOverrides = true; }
+      } else {
+        prompt = payload;  // raw text form
+      }
+
+      int session = chatBeginTurn(prompt.c_str(), haveOverrides ? &ov : nullptr);
       if (session <= 0) return "{\"schema\":1,\"ok\":false,\"error\":\"busy or failed to start\"}";
       // Mirror the web's {"ok":true,"session":N} (POST /api/llm/generate &
       // /chat/retry). The app validates the start by `ok`, so omitting it reads
@@ -2319,20 +2575,22 @@ static const SettingEntry llmSettingEntries[] = {
   { "sentenceLimit", SETTING_INT,    &gSettings.llmSentenceLimit,  2, 0,    nullptr,    0,   20, "Sentence Limit",       nullptr, false, nullptr, "llmsentencelimit" },
   { "hardCap",       SETTING_INT,    &gSettings.llmHardCap,       80, 0,    nullptr,    0,  512, "Hard Cap",             nullptr, false, nullptr, "llmhardcap"       },
   { "repPenalty",    SETTING_FLOAT,  &gSettings.llmRepPenalty,    0,  1.3f, nullptr,    1,    3, "Rep Penalty",          nullptr, false, nullptr, "llmreppenalty"    },
-  { "repWindow",     SETTING_INT,    &gSettings.llmRepWindow,     32, 0,    nullptr,    1,  128, "Rep Window",           nullptr, false, nullptr, "llmrepwindow"     },
+  { "repWindow",     SETTING_INT,    &gSettings.llmRepWindow,     32, 0,    nullptr,    1, LLM_DEFAULT_REP_WINDOW, "Rep Window", nullptr, false, nullptr, "llmrepwindow" },  // max = ring size; higher values were silently truncated
   { "maxContext",    SETTING_INT,    &gSettings.llmMaxContext,     0, 0,    nullptr,    0, 4096, "Max Context (0=auto)", nullptr, false, nullptr, "llmmaxcontext"    },
-  { "useMirostat2",  SETTING_BOOL,   &gSettings.llmUseMirostat2,  0, 0,    nullptr,    0,    0, "Use Mirostat 2",       nullptr, false, nullptr, "llmusemirostat2"  },
-  { "mirostatTau",   SETTING_FLOAT,  &gSettings.llmMirostatTau,   0, 5.0f, nullptr,    1,   10, "Mirostat Tau",         nullptr, false, nullptr, "llmmirostattau"   },
-  { "mirostatEta",   SETTING_FLOAT,  &gSettings.llmMirostatEta,   0, 0.1f, nullptr,    0,    0, "Mirostat Eta",         nullptr, false, nullptr, "llmmirostateta"   },
-  { "dynTemp",       SETTING_BOOL,   &gSettings.llmDynTemp,       0, 0,    nullptr,    0,    0, "Dynamic Temp",         nullptr, false, nullptr, "llmdyntemp"       },
   { "defaultModel",  SETTING_STRING, &gSettings.llmDefaultModel,  0, 0,    "model.bin",0,    0, "Default Model",        nullptr, false, nullptr, "llmdefaultmodel"  },
   // ── APPEND-ONLY below this line ───────────────────────────────────────────
   // The CLI setting commands (LLM_SETTING_CMD) map to this table by INDEX, so
   // inserting mid-table silently misroutes every command after the insert point.
   // New settings go HERE, at the end, with a matching macro+command index below.
-  { "minP",          SETTING_FLOAT,  &gSettings.llmMinP,          0, 0.0f, nullptr,    0,    1, "Min-P (0=off)",        nullptr, false, nullptr, "llmminp"   },  // idx 13
-  { "kvPrecision",   SETTING_INT,    &gSettings.llmKvPrecision,   0, 0,    nullptr,    0,    2, "KV Cache (0=FP32,1=FP16,2=INT8, reload to apply)", "0:FP32,1:FP16,2:INT8", false, nullptr, "llmkvprec" },  // idx 14
-  { "autoStart",     SETTING_BOOL,   &gSettings.llmAutoStart,     0, 0,    nullptr,    0,    1, "Auto-start at boot",   nullptr, false, nullptr, "llmautostart" },  // idx 15
+  // (Mirostat + dynTemp rows were removed 2026-07-10; the whole table + macros
+  //  were renumbered in one verified pass — the sanctioned append-only break.)
+  { "minP",          SETTING_FLOAT,  &gSettings.llmMinP,          0, 0.0f, nullptr,    0,    1, "Min-P (0=off)",        nullptr, false, nullptr, "llmminp"   },  // idx 9
+  { "kvPrecision",   SETTING_INT,    &gSettings.llmKvPrecision,   1, 0,    nullptr,    0,    2, "KV Cache (0=FP32,1=FP16,2=INT8, reload to apply)", "0:FP32,1:FP16,2:INT8", false, nullptr, "llmkvprec" },  // idx 10 (default FP16: 2x ctx, ~lossless)
+  { "autoStart",     SETTING_BOOL,   &gSettings.llmAutoStart,     0, 0,    nullptr,    0,    1, "Auto-start at boot",   nullptr, false, nullptr, "llmautostart" },  // idx 11
+  { "noRepeatNgram", SETTING_INT,    &gSettings.llmNoRepeatNgram, 0, 0,    nullptr,    0,    8, "No-repeat n-gram (0=off)", nullptr, false, nullptr, "llmnorepeatngram" },  // idx 12 (shipped off per user; 3 typical)
+  { "confThreshold", SETTING_FLOAT,  &gSettings.llmConfThreshold, 0, -1.0f, nullptr,  -8,    0, "Confidence gate mean-logprob (0=off)", nullptr, false, nullptr, "llmconfthreshold" },  // idx 13
+  { "contentBoost",  SETTING_FLOAT,  &gSettings.llmContentBoost,  0, 1.5f, nullptr,    0,    4, "Content boost (0=off)", nullptr, false, nullptr, "llmcontentboost" },  // idx 14 (on-topic logit bonus; co-tune w/ repPenalty)
+  { "domainGate",    SETTING_BOOL,   &gSettings.llmDomainGate,    1, 0,    nullptr,    0,    1, "Domain gate (refuse off-topic)", nullptr, false, nullptr, "llmdomaingate" },  // idx 15 (refuse prompts outside the .bin's embedded domain vocab)
 };
 
 extern const SettingsModule llmSettingsModule = {
@@ -2356,14 +2614,14 @@ LLM_SETTING_CMD(cmd_llm_hardcap,       4)
 LLM_SETTING_CMD(cmd_llm_reppenalty,    5)
 LLM_SETTING_CMD(cmd_llm_repwindow,     6)
 LLM_SETTING_CMD(cmd_llm_maxcontext,    7)
-LLM_SETTING_CMD(cmd_llm_usemirostat2,  8)
-LLM_SETTING_CMD(cmd_llm_mirostattau,   9)
-LLM_SETTING_CMD(cmd_llm_mirostateta,  10)
-LLM_SETTING_CMD(cmd_llm_dyntemp,      11)
-LLM_SETTING_CMD(cmd_llm_defaultmodel, 12)
-LLM_SETTING_CMD(cmd_llm_minp,         13)
-LLM_SETTING_CMD(cmd_llm_kvprec,       14)
-LLM_SETTING_CMD(cmd_llm_autostart,    15)
+LLM_SETTING_CMD(cmd_llm_defaultmodel,  8)
+LLM_SETTING_CMD(cmd_llm_minp,          9)
+LLM_SETTING_CMD(cmd_llm_kvprec,       10)
+LLM_SETTING_CMD(cmd_llm_autostart,    11)
+LLM_SETTING_CMD(cmd_llm_norepeatngram, 12)
+LLM_SETTING_CMD(cmd_llm_confthreshold, 13)
+LLM_SETTING_CMD(cmd_llm_contentboost, 14)
+LLM_SETTING_CMD(cmd_llm_domaingate,   15)
 
 const CommandEntry llmCommands[] = {
   { "llmstatus",        "Show LLM engine status (add 'json' for JSON output)",               false, cmd_llm_status },
@@ -2384,15 +2642,15 @@ const CommandEntry llmCommands[] = {
   { "llmsentencelimit", "Set default sentence stop limit",      true,  cmd_llm_sentencelimit,"Usage: llmsentencelimit <0-20>" },
   { "llmhardcap",       "Set default hard token cap",           true,  cmd_llm_hardcap,      "Usage: llmhardcap <0-512>" },
   { "llmreppenalty",    "Set default repetition penalty",       true,  cmd_llm_reppenalty,   "Usage: llmreppenalty <1.0-3.0>" },
-  { "llmrepwindow",     "Set default rep-penalty look-back",    true,  cmd_llm_repwindow,    "Usage: llmrepwindow <1-128>" },
+  { "llmrepwindow",     "Set default rep-penalty look-back",    true,  cmd_llm_repwindow,    "Usage: llmrepwindow <1-32>" },
   { "llmmaxcontext",    "Set KV cache context window (0=auto)", true,  cmd_llm_maxcontext,   "Usage: llmmaxcontext <0-4096>" },
-  { "llmusemirostat2",  "Enable/disable Mirostat 2 sampling",   true,  cmd_llm_usemirostat2, "Usage: llmusemirostat2 <0|1>" },
-  { "llmmirostattau",   "Set Mirostat target surprise (bits)",  true,  cmd_llm_mirostattau,  "Usage: llmmirostattau <1-10>" },
-  { "llmmirostateta",   "Set Mirostat learning rate",           true,  cmd_llm_mirostateta,  "Usage: llmmirostateta <0.01-1.0>" },
-  { "llmdyntemp",       "Enable/disable dynamic temperature",   true,  cmd_llm_dyntemp,      "Usage: llmdyntemp <0|1>" },
   { "llmdefaultmodel",  "Set default model filename",           true,  cmd_llm_defaultmodel, "Usage: llmdefaultmodel <filename.bin>" },
   { "llmminp",          "Set min-p sampling floor (0=off)",     true,  cmd_llm_minp,         "Usage: llmminp <0.0-1.0>" },
   { "llmkvprec",        "KV cache precision (0=FP32,1=FP16,2=INT8)", true,  cmd_llm_kvprec,       "Usage: llmkvprec <0..2>  (0=FP32,1=FP16,2=INT8; reload model to apply)" },
+  { "llmnorepeatngram", "Ban repeating generated n-grams (0=off)", true, cmd_llm_norepeatngram, "Usage: llmnorepeatngram <0-8>  (default 0=off; 3 breaks verbatim phrase loops)" },
+  { "llmconfthreshold", "Low-confidence hedge threshold (0=off)",  true, cmd_llm_confthreshold, "Usage: llmconfthreshold <-8.0-0>  (mean logprob; default -1.0, 0 disables)" },
+  { "llmcontentboost",  "On-topic logit bonus (0=off)",         true,  cmd_llm_contentboost, "Usage: llmcontentboost <0.0-4.0>  (default 1.5; higher = stickier to prompt words)" },
+  { "llmdomaingate",    "Refuse prompts outside the model's domain (0|1)", true, cmd_llm_domaingate, "Usage: llmdomaingate <0|1>  (only enforced when the model .bin carries a domain vocab)" },
 };
 const size_t llmCommandsCount = sizeof(llmCommands) / sizeof(llmCommands[0]);
 

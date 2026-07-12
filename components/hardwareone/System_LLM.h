@@ -41,8 +41,6 @@
 #define LLM_DEFAULT_TEMPERATURE     0.5f
 #define LLM_DEFAULT_TOPP            0.8f
 #define LLM_DEFAULT_MINP            0.0f   // min-p relative floor (0 = off → use top-p)
-#define LLM_DEFAULT_MIROSTAT_TAU    5.0f   // target surprise in bits (Mirostat 2)
-#define LLM_DEFAULT_MIROSTAT_ETA    0.1f   // Mirostat learning rate
 #define LLM_DEFAULT_REP_PENALTY     1.3f   // repetition penalty divisor (1.0 = disabled)
 #define LLM_DEFAULT_REP_WINDOW      32     // tokens looked back for rep penalty
 #define LLM_DEFAULT_SENTENCE_LIMIT  2      // stop after N sentences (0 = disabled)
@@ -133,30 +131,32 @@ bool llmIsReady();
 // Get current status (thread-safe snapshot)
 LLMStatus llmGetStatus();
 
+// Optional per-model metadata from the LLM1 "info block" (a description + icon
+// baked into the .bin by the converter), populated at load time. Zero-copy: the
+// returned pointers reference fixed engine storage that stays valid until the
+// next llmLoadModel/llmUnload. Kept out of LLMStatus so the by-value status
+// snapshot (copied every OLED frame) does not grow.
+const char* llmModelDescription();   // "" when the model carries no description
+// Returns the loaded model's icon (1bpp, MSB-first, row-major) or false if none.
+bool        llmModelIcon(const uint8_t** bits, uint8_t* width, uint8_t* height);
+
 // Generate text from a prompt. Calls tokenCb for each output token.
 // Runs synchronously on the calling task — caller is responsible for
 // running this on an appropriate task (not the httpd task).
 // Returns number of tokens generated, or -1 on error.
 //
-// temperature: base sampling temperature (dynamically scaled per step from logit distribution)
-// topp:        nucleus sampling threshold (used when useMirostat2=false)
-// useMirostat2: enable Mirostat 2 sampling (adaptive surprise targeting)
-// mirostatTau: target surprise in bits (typical: 3–7, higher = more diverse)
-// mirostatEta: learning rate for Mirostat mu update (typical: 0.05–0.2)
+// temperature: base sampling temperature
+// topp:        nucleus sampling threshold
 // suppressTokens/suppressTokenCount: token IDs from previous answers to penalize
 //   throughout generation (retry mechanism — steers model away from prior answers)
 int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
                 int maxTokens = LLM_DEFAULT_MAX_TOKENS,
                 float temperature = LLM_DEFAULT_TEMPERATURE,
                 float topp = LLM_DEFAULT_TOPP,
-                bool useMirostat2 = false,
-                float mirostatTau = LLM_DEFAULT_MIROSTAT_TAU,
-                float mirostatEta = LLM_DEFAULT_MIROSTAT_ETA,
                 float repPenalty = LLM_DEFAULT_REP_PENALTY,
                 int repWindow = LLM_DEFAULT_REP_WINDOW,
                 int sentenceLimit = LLM_DEFAULT_SENTENCE_LIMIT,
                 int hardCap = LLM_DEFAULT_HARD_CAP,
-                bool dynTemp = false,
                 const int* suppressTokens = nullptr,
                 int suppressTokenCount = 0,
                 float minP = LLM_DEFAULT_MINP);
@@ -174,14 +174,10 @@ struct LLMGenParams {
   float temperature;
   float topp;
   float minP;
-  bool  useMirostat2;
-  float mirostatTau;
-  float mirostatEta;
   float repPenalty;
   int   repWindow;
   int   sentenceLimit;
   int   hardCap;
-  bool  dynTemp;
   int   suppressTokens[128];
   int   suppressCount;
 };

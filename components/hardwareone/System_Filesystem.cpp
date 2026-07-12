@@ -21,6 +21,9 @@
 #include "System_VFS.h"
 #include "System_AuthIdentity.h"  // currentAuthContext — CLI handlers' per-task identity
 #include "System_CLIConfirm.h"    // cliRequestConfirm — yes/no gate for destructive filedelete
+#if ENABLE_BLUETOOTH
+#include "System_BleSecureChannel.h"  // bleScSendEncrypted/bleScEstablished — raw-binary `fileread ... bin`
+#endif
 
 // External dependencies
 extern bool readText(const char* path, String& out);
@@ -784,58 +787,121 @@ const char* cmd_fileread(const String& argsInput) {
   long reqLen = a.has(2) ? a.argInt(2, 0) : 0;
   bool forceB64 = false;
   for (int i = 3; i < a.count(); i++) if (a.arg(i) == "b64") forceB64 = true;
+#if ENABLE_BLUETOOTH
+  // `bin` (BLE-only): ship the chunk as a raw binary Secure-Channel message instead of
+  // base64-in-JSON (no 4:3 expansion). Scoped to the BT build so it's never unused.
+  bool wantBin = false;
+  for (int i = 3; i < a.count(); i++) if (a.arg(i) == "bin") { wantBin = true; break; }
+#endif
 
   const size_t MAX_CHUNK = 4096;  // bound per-call memory + reply size
+  const size_t OUT_CAP   = 4096;  // must match sizeof(ExecReq::out); also caps the raw read below
   const AuthContext& ctx = currentAuthContext();
 
-  FsLockGuard _g("fileread");
-  File f = VFS::openGuarded(path, "r", ctx);
-  if (!f || f.isDirectory()) {
-    if (f) f.close();
-    s_readJson = "{\"success\":false,\"error\":\"Not found or access denied\"}";
-    return s_readJson.c_str();
-  }
-  size_t total = f.size();
-
-  if (offset < 0) offset = 0;
-  if ((size_t)offset > total) offset = (long)total;
-  size_t avail = total - (size_t)offset;
-  size_t want = (reqLen <= 0) ? MAX_CHUNK : (size_t)reqLen;
-  if (want > MAX_CHUNK) want = MAX_CHUNK;
-  if (want > avail)     want = avail;
-
+  // Hold the FS lock ONLY for the open/seek/read/close below — release it before building the
+  // reply or (in `bin` mode) doing the paced multi-frame BLE send, so a minutes-long map download
+  // doesn't pin the filesystem mutex ~330 ms/chunk and starve other FS users (OLED tiles, logging).
+  size_t total = 0;
   uint8_t* buf = nullptr;
   size_t got = 0;
-  if (want > 0) {
-    buf = (uint8_t*)ps_alloc(want, AllocPref::PreferPSRAM, "fileread.chunk");
-    if (!buf) {
-      f.close();
-      s_readJson = "{\"success\":false,\"error\":\"OOM\"}";
+  {
+    FsLockGuard _g("fileread");
+    File f = VFS::openGuarded(path, "r", ctx);
+    if (!f || f.isDirectory()) {
+      if (f) f.close();
+      s_readJson = "{\"success\":false,\"error\":\"Not found or access denied\"}";
       return s_readJson.c_str();
     }
-    if (offset > 0) f.seek((uint32_t)offset);
-    got = f.read(buf, want);
-  }
-  f.close();
+    total = f.size();
+
+    if (offset < 0) offset = 0;
+    if ((size_t)offset > total) offset = (long)total;
+    size_t avail = total - (size_t)offset;
+    size_t want = (reqLen <= 0) ? MAX_CHUNK : (size_t)reqLen;
+    if (want > MAX_CHUNK) want = MAX_CHUNK;
+    if (want > avail)     want = avail;
+
+    // The base64/utf8 JSON reply has to fit the shared command result buffer (ExecReq::out,
+    // System_CommandTypes.h — 4096 bytes). base64 expands the payload 4:3, so reading a full
+    // 4096-byte chunk builds a ~5.6 KB reply that gets truncated to invalid JSON downstream —
+    // that's the "Unexpected file-read reply" the companion app reports on a map download. Cap
+    // the RAW read so the encoded reply fits, with room for the envelope. The caller advances by
+    // the returned "len", so a short read is safe and the transfer still completes across every
+    // client. (`bin` ships the body out-of-band so it isn't bound by OUT_CAP, but the app's read
+    // window stays well under this cap anyway, so we keep one code path.)
+    size_t reserve = 192 + path.length();    // envelope: keys + numbers + quoted path
+    size_t encBudget = (OUT_CAP > reserve) ? (OUT_CAP - reserve) : 0;
+    size_t rawCap = (encBudget / 4) * 3;     // base64-safe raw byte budget (4:3)
+    if (want > rawCap) want = rawCap;
+
+    if (want > 0) {
+      buf = (uint8_t*)ps_alloc(want, AllocPref::PreferPSRAM, "fileread.chunk");
+      if (!buf) {
+        f.close();
+        s_readJson = "{\"success\":false,\"error\":\"OOM\"}";
+        return s_readJson.c_str();
+      }
+      if (offset > 0) f.seek((uint32_t)offset);
+      got = f.read(buf, want);
+    }
+    f.close();
+  }  // FS lock released here — reply build + BLE send below run lock-free
 
   bool eof = ((size_t)offset + got >= total);
-  bool useB64 = forceB64 || (buf && bytesNeedBase64(buf, got));
 
-  s_readJson  = "{\"success\":true,\"path\":\"";
-  appendJsonStringBytes(s_readJson, (const uint8_t*)path.c_str(), path.length());
-  s_readJson += "\",\"size\":"; s_readJson += (unsigned long)total;
-  s_readJson += ",\"offset\":"; s_readJson += (unsigned long)offset;
-  s_readJson += ",\"len\":";    s_readJson += (unsigned long)got;
-  s_readJson += ",\"eof\":";    s_readJson += (eof ? "true" : "false");
-  if (useB64) {
-    s_readJson += ",\"enc\":\"b64\",\"data\":\"";
-    if (got) s_readJson += base64Encode(buf, got);
-    s_readJson += "\"}";
-  } else {
-    s_readJson += ",\"enc\":\"utf8\",\"data\":\"";
-    if (got) appendJsonStringBytes(s_readJson, buf, got);
-    s_readJson += "\"}";
+#if ENABLE_BLUETOOTH
+  // Raw-binary fast path for the companion app. When the caller passes `bin` over an
+  // established BLE Secure Channel, ship the chunk's bytes as a raw (ver=0x02) binary
+  // Secure-Channel message and return ONLY the JSON metadata envelope (enc:"raw", no
+  // "data" field). This drops base64's 33% expansion for bulk transfers (map downloads)
+  // while keeping the same envelope the app already parses. The body is sent FIRST so the
+  // app has it in hand when this JSON header arrives (BLE preserves message order). Any
+  // non-BLE / non-secure caller — or a failed send — falls through to the base64/utf8 reply.
+  if (wantBin && ctx.transport == SOURCE_BLUETOOTH) {
+    uint16_t connId = (uint16_t)ctx.sid.toInt();
+    if (connId != 0 && bleScEstablished(connId)) {
+      // got==0 (empty window at eof) ships no body — the header's len:0/eof says it all.
+      bool sent = (got == 0) ||
+                  bleScSendEncrypted(connId, (const char*)buf, got, /*blocking=*/true, /*binaryFrame=*/true);
+      if (sent) {
+        s_readJson  = "{\"success\":true,\"path\":\"";
+        appendJsonStringBytes(s_readJson, (const uint8_t*)path.c_str(), path.length());
+        s_readJson += "\",\"size\":"; s_readJson += (unsigned long)total;
+        s_readJson += ",\"offset\":"; s_readJson += (unsigned long)offset;
+        s_readJson += ",\"len\":";    s_readJson += (unsigned long)got;
+        s_readJson += ",\"eof\":";    s_readJson += (eof ? "true" : "false");
+        s_readJson += ",\"enc\":\"raw\"}";
+        if (buf) free(buf);
+        return s_readJson.c_str();
+      }
+    }
   }
+#endif
+
+  auto buildReply = [&](bool b64) {
+    s_readJson  = "{\"success\":true,\"path\":\"";
+    appendJsonStringBytes(s_readJson, (const uint8_t*)path.c_str(), path.length());
+    s_readJson += "\",\"size\":"; s_readJson += (unsigned long)total;
+    s_readJson += ",\"offset\":"; s_readJson += (unsigned long)offset;
+    s_readJson += ",\"len\":";    s_readJson += (unsigned long)got;
+    s_readJson += ",\"eof\":";    s_readJson += (eof ? "true" : "false");
+    if (b64) {
+      s_readJson += ",\"enc\":\"b64\",\"data\":\"";
+      if (got) s_readJson += base64Encode(buf, got);
+    } else {
+      s_readJson += ",\"enc\":\"utf8\",\"data\":\"";
+      if (got) appendJsonStringBytes(s_readJson, buf, got);
+    }
+    s_readJson += "\"}";
+  };
+
+  bool useB64 = forceB64 || (buf && bytesNeedBase64(buf, got));
+  buildReply(useB64);
+  // JSON-escaped text can expand up to 2:1 — more than base64's 4:3. If a utf8
+  // reply would overflow the buffer, re-encode as base64 instead: it's more
+  // compact and is guaranteed to fit given the raw cap computed above.
+  if (!useB64 && s_readJson.length() >= OUT_CAP - 1) buildReply(true);
+
   if (buf) free(buf);
   return s_readJson.c_str();
 }
@@ -1116,9 +1182,11 @@ const CommandEntry filesystemCommands[] = {
   { "rmdir", "Remove directory: \"<path>\"", true, cmd_rmdir, "Usage: rmdir \"<path>\"" },
   { "filecreate", "Create file: \"<path>\"", true, cmd_filecreate, "Usage: filecreate \"<path>\"" },
   { "fileview", "View file: \"<path>\"", true, cmd_fileview, "Usage: fileview \"<path>\"" },
-  { "fileread", "Read file chunk as JSON: \"<path>\" [offset] [len] [b64]", true, cmd_fileread,
-    "fileread \"<path>\" [offset] [len] [b64] - Chunked permission-guarded read (app/BLE).\n"
-    "Returns {success,size,offset,len,eof,enc,data}; loop offset until eof." },
+  { "fileread", "Read file chunk as JSON: \"<path>\" [offset] [len] [b64|bin]", true, cmd_fileread,
+    "fileread \"<path>\" [offset] [len] [b64|bin] - Chunked permission-guarded read (app/BLE).\n"
+    "Returns {success,size,offset,len,eof,enc,data}; loop offset until eof.\n"
+    "`bin` (established BLE Secure Channel only): sends the chunk as a raw binary frame and\n"
+    "omits `data` (enc:\"raw\") — no base64 expansion, for fast bulk transfers like maps." },
   { "filewrite", "Write file chunk: \"<path>\" <offset> <b64chunk> [final]", true, cmd_filewrite,
     "filewrite \"<path>\" <offset> <b64chunk> [final] - Sequential chunked write (app/BLE).\n"
     "offset 0 truncates/creates; later offsets must equal current size; 'final' runs post-save hooks." },

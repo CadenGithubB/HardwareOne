@@ -491,10 +491,13 @@ void apdsTask(void* parameter) {
     unsigned long nowMs = millis();
     if ((nowMs - lastStackLog) >= 10000) {
       lastStackLog = nowMs;
+      // 'continue' (not 'break') so the top-of-loop shutdown runs the clean
+      // SENSOR_TASK_EXIT (vTaskDelete) path instead of returning from the task
+      // function with a near-overflowed stack (IllegalInstruction panic).
       if (checkTaskStackSafety("apds", APDS_STACK_WORDS, &gApdsColorEnabled)) {
         gApdsProximityEnabled = false;
         gApdsGestureEnabled = false;
-        break;
+        continue;
       }
       if (anyEnabled && isDebugFlagSet(DEBUG_PERFORMANCE)) {
         UBaseType_t watermark = uxTaskGetStackHighWaterMark(nullptr);

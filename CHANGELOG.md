@@ -8,6 +8,30 @@ Entries for 0.96.1 and earlier were backfilled from git history (this repo had
 no tags or releases before 0.96.2); they are terse, commit-grounded summaries,
 dated from each version's commit. Dates are YYYY-MM-DD.
 
+## [0.98.0] - 2026-07-11
+The on-device LLM comes online with guardrails that keep it on-topic and controls to steer its answers, plus a round of auth-store hardening and crash fixes.
+### Added
+- On-device LLM is now built into the firmware: load a tiny model from LittleFS or SD and chat with it from the web, OLED, CLI, or over BLE.
+- Domain refusal gate: a model can carry a list of its own topic words and now declines a prompt that mentions none of them (with a custom refusal line) instead of inventing an answer.
+- Answer controls you can tune per model or per message - a confidence gate that prefixes "I'm not sure, but" when the model is unsure, an n-gram blocker that breaks phrase-repeat loops, and a content boost that keeps replies on topic; the phone app can override sampling per message.
+- Model info card: a loaded model can carry an icon and a short description, shown on the OLED ready screen.
+- New `bootcount` command reports boot count, crash count, and last reset reason.
+- Files can transfer to the phone as raw binary over the secure BLE channel instead of base64 (about a third smaller), speeding up offline map downloads.
+### Changed
+- Web chat and CLI now fall back to your saved LLM settings for any field left blank, instead of forcing fixed defaults.
+- Casually typed names (like "bulbasaur") are matched to the model's trained form, so casing no longer hurts answers.
+- KV cache defaults to FP16, giving about twice the context in the same memory.
+- Re-saving a known Wi-Fi network with a blank password now keeps the stored password instead of clearing it.
+### Fixed
+- GPS could corrupt the I2C bus when it collided with other sensors; reads are now serialized through the shared bus lock and served from a cached snapshot, and a southern/western-hemisphere sign error in the cached position is fixed.
+- Sensor tasks low on stack could hard-fault; they now shut down cleanly instead.
+- Large file reads no longer truncate the reply during map downloads.
+- The offline map tile cache is now shared safely between the OLED and the glasses.
+### Security
+- Auth-database hardening against secret loss: the boot counter moved to its own NVS partition so it no longer rewrites the whole user database every boot (a power cut in that window could wipe all logins). Every user-database write is now atomic. Device-key handling self-heals across key derivations, validates decrypted padding strictly, and refuses to overwrite a still-recoverable secret with an empty value after a failed load.
+### Docs
+- New specs and plans: per-message LLM generation overrides (app integration), an exact-answer retrieval-hybrid plan, and an LLM settings/control-surface audit; updated the BLE secure-channel framing doc for the new binary frame.
+
 ## [0.97.5] - 2026-07-07
 A much clearer GPS-track experience on the web: readable start/end/direction and stitched multi-log day-tracks.
 ### Added

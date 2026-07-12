@@ -307,7 +307,10 @@ void fmRadioTask(void* parameter) {
     unsigned long now = millis();
     if (now - lastStackLog > 30000) {
       lastStackLog = now;
-      if (checkTaskStackSafety("fmradio", FMRADIO_STACK_WORDS, &gFmRadioEnabled)) break;
+      // 'continue' (not 'break') so the top-of-loop shutdown runs the clean
+      // vTaskDelete path instead of returning from the task function with a
+      // near-overflowed stack (IllegalInstruction panic).
+      if (checkTaskStackSafety("fmradio", FMRADIO_STACK_WORDS, &gFmRadioEnabled)) continue;
       if (isDebugFlagSet(DEBUG_FMRADIO)) {
         const uint32_t fmRadioStackWords = FMRADIO_STACK_WORDS;
         UBaseType_t watermark = uxTaskGetStackHighWaterMark(nullptr);

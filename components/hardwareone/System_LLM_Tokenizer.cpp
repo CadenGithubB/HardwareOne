@@ -52,7 +52,9 @@ static void mergeMapInsert(TokenizerState* t, uint32_t left_id, uint32_t right_i
 }
 
 // Load tokenizer from embedded blob in an open LLM1 file.
-// File position must be at the tok_byte_len field (offset 64).
+// The file position must already be at the tok_byte_len field: byte 64 for a
+// model with no info block, or 64 + info_len when loadInfoBlockFromFile consumed
+// an info block first. The caller (loadWeights) guarantees this.
 bool loadTokenizerFromFile(File& f) {
   TokenizerState* t = &gLLM.tokenizer;
 
@@ -178,12 +180,17 @@ bool loadTokenizerFromFile(File& f) {
         }
       }
 
-      // Count how many multi-byte tokens are NOT reachable by BPE
+      // Count how many multi-byte tokens are NOT reachable by BPE.
+      // Length cap 24, NOT 8: added tokens are whole entity names and the old
+      // 8-byte cap silently dropped every name longer than 8 chars (Bulbasaur,
+      // Charmander, Charizard, ... — 39 of the 151 Pokemon names), so those
+      // fragmented on-device while short names (Pikachu) matched whole.
+      const int PRESPLIT_MAX_LEN = 24;
       int unreachableCount = 0;
       for (uint32_t i = 0; i < tok_vocab_size; i++) {
         const char* s = t->vocab[i];
         int slen = strlen(s);
-        if (slen >= 2 && slen <= 8 && !bpeReachable[i]) {
+        if (slen >= 2 && slen <= PRESPLIT_MAX_LEN && !bpeReachable[i]) {
           // Check all bytes are individually representable
           bool allMapped = true;
           for (int j = 0; j < slen; j++) {
@@ -201,7 +208,7 @@ bool loadTokenizerFromFile(File& f) {
           for (uint32_t i = 0; i < tok_vocab_size; i++) {
             const char* s = t->vocab[i];
             int slen = strlen(s);
-            if (slen < 2 || slen > 8 || bpeReachable[i]) continue;
+            if (slen < 2 || slen > PRESPLIT_MAX_LEN || bpeReachable[i]) continue;
             bool allMapped = true;
             for (int j = 0; j < slen; j++) {
               if (t->byte_to_token[(uint8_t)s[j]] == -1) { allMapped = false; break; }

@@ -176,10 +176,10 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
       <button id='qa-stop' class='btn' style='display:none' onclick='qaStop()'>Stop</button>
     </div>
     <div class='qa-adv-body' id='qa-adv-body'>
-      <label title='Temperature — lower is more focused, higher is more varied'>Temp:<input type='number' id='qa-temp' value='0.5' min='0' max='2' step='0.05'></label>
-      <label title='Stop after N sentences (0=off)'>Sentences:<input type='number' id='qa-sentlimit' value='2' min='0' max='10'></label>
-      <label title='Repetition penalty'>Rep:<input type='number' id='qa-repen' value='1.3' min='1' max='5' step='0.05'></label>
-      <div class='qa-adv-hint'>Temp 0.5 works best for this model. Lower = more focused, higher = more varied.</div>
+      <label title='Temperature override — blank uses the saved llmtemperature setting'>Temp:<input type='number' id='qa-temp' placeholder='saved' min='0' max='2' step='0.05'></label>
+      <label title='Sentence-limit override — blank uses the saved llmsentencelimit setting'>Sentences:<input type='number' id='qa-sentlimit' placeholder='saved' min='0' max='20'></label>
+      <label title='Rep-penalty override — blank uses the saved llmreppenalty setting'>Rep:<input type='number' id='qa-repen' placeholder='saved' min='1' max='5' step='0.05'></label>
+      <div class='qa-adv-hint'>Blank fields use your saved device settings. Type a value to override it for this one message.</div>
     </div>
   </div>
 
@@ -341,18 +341,18 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
     ctx.metaLine.textContent = '';
     scrollBottom();
 
-    var temp  = parseFloat(document.getElementById('qa-temp').value)  || 0.5;
-    var sent  = parseInt(document.getElementById('qa-sentlimit').value);
-    var repen = parseFloat(document.getElementById('qa-repen').value) || 1.3;
-
-    var body = {
-      prompt:         ctx.prompt,
-      temperature:    temp,
-      top_p:          0.8,
-      sentence_limit: isNaN(sent) ? 2 : sent,
-      rep_penalty:    repen,
-      rep_window:     32
-    };
+    // Per-request overrides: only send a value the user actually typed in the
+    // Advanced panel. A blank field is omitted, so the device's saved llm*
+    // settings apply (llmtemperature / llmsentencelimit / llmreppenalty, plus
+    // top_p / rep_window / min_p / hard_cap which the resolver pulls from
+    // settings). This is why a blank panel now honours your saved settings.
+    var body = { prompt: ctx.prompt };
+    var tempStr = document.getElementById('qa-temp').value.trim();
+    var sentStr = document.getElementById('qa-sentlimit').value.trim();
+    var repStr  = document.getElementById('qa-repen').value.trim();
+    if (tempStr !== '') body.temperature    = parseFloat(tempStr);
+    if (sentStr !== '') body.sentence_limit = parseInt(sentStr);
+    if (repStr  !== '') body.rep_penalty    = parseFloat(repStr);
     if (ctx.isDoMode) { body.hard_cap = 4; body.sentence_limit = 0; }
     if (ctx.prevAnswers.length > 0) { body.suppress = ctx.prevAnswers; }
 
@@ -615,7 +615,7 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
     stateEl.textContent = 'Loading...';
     setReady(false);
     addSys('Loading ' + name + '...');
-    hw.postJSON('/api/llm/load', {model: path, max_ctx: 64})
+    hw.postJSON('/api/llm/load', {model: path})   // no max_ctx: server auto-fits to PSRAM (or the saved llmmaxcontext cap)
       .then(function(j){
         if (j.ok) { fetchStatus(false, null); }
         else { fetchStatus(false, null); }

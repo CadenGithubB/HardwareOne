@@ -34,6 +34,7 @@
 #if ENABLE_ONDEVICE_LLM
 
 #include <Arduino.h>
+#include <ArduinoJson.h>
 #include "System_LLM.h"
 
 // Ring depth — older turns roll off when this is exceeded.
@@ -67,14 +68,11 @@ struct ChatParamOverride {
   int   maxTokens     = INT32_MIN;
   float temperature   = NAN;
   float topp          = NAN;
-  int8_t useMirostat2 = -1;   // -1 unset, 0 false, 1 true
-  float mirostatTau   = NAN;
-  float mirostatEta   = NAN;
+  float minP          = NAN;
   float repPenalty    = NAN;
   int   repWindow     = INT32_MIN;
   int   sentenceLimit = INT32_MIN;
   int   hardCap       = INT32_MIN;
-  int8_t dynTemp      = -1;
 };
 
 // ============================================================================
@@ -93,6 +91,13 @@ void chatInit();
 // text will be filled by the engine asynchronously. Returns the new engine
 // session ID (>0) on success; 0 if the model isn't ready or another
 // generation is already in flight. opt may be nullptr → use settings defaults.
+// Fill a ChatParamOverride from a JSON object's per-request keys (max_tokens,
+// temperature, top_p, min_p, rep_penalty, rep_window, sentence_limit, hard_cap).
+// Absent keys keep their unset sentinel → resolver falls back to gSettings.
+// Shared by the web POST body and the BLE `llmgenerate json` path so both
+// speak the identical override contract (one source of truth).
+void chatParamOverrideFromJson(JsonObjectConst src, ChatParamOverride& out);
+
 int  chatBeginTurn(const char* userPrompt, const ChatParamOverride* opt = nullptr);
 
 // Re-run the most recent USER turn. Removes the last ASSISTANT turn (if any)

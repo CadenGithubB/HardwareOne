@@ -214,8 +214,11 @@ static size_t scBuildData(ScConn* c, const uint8_t* pt, size_t len, uint8_t* buf
 // app discards that msgId and re-requests WITHOUT advancing its cursor, instead of silently
 // parsing a short/garbled page and stalling. See docs/BLE_SECURE_CHANNEL_FRAMING.md for the
 // wire format the app must implement.
-//   layout: [ver(1)=0x01][msgId lo][msgId hi][fragIdx(1)][fragCount(1)][payload...]
+//   layout: [ver(1)][msgId lo][msgId hi][fragIdx(1)][fragCount(1)][payload...]
+//   ver 0x01 = text (UTF-8 command reply, the default); ver 0x02 = raw binary blob (payload is
+//   opaque bytes the app must NOT UTF-8-decode or console-echo — e.g. `fileread ... bin`).
 static const uint8_t  SC_FRAME_VER     = 0x01;
+static const uint8_t  SC_FRAME_VER_BIN = 0x02;
 static const size_t   SC_APP_HDR       = 5;
 static const size_t   SC_MAX_PAY_FRAME = SC_MAX_PT_PER_FRAME - SC_APP_HDR;  // 195 payload bytes/frame
 
@@ -228,7 +231,7 @@ static const size_t   SC_MAX_PAY_FRAME = SC_MAX_PT_PER_FRAME - SC_APP_HDR;  // 1
 // between frames only (single-frame messages — the common case — pay nothing).
 static const TickType_t SC_FRAME_PACING = pdMS_TO_TICKS(30);
 
-bool bleScSendEncrypted(uint16_t connId, const char* plaintext, size_t len, bool blocking) {
+bool bleScSendEncrypted(uint16_t connId, const char* plaintext, size_t len, bool blocking, bool binaryFrame) {
   // Take the tx mutex for the WHOLE chunked message so its frames stay contiguous with
   // monotonic counters even when path A and path B send concurrently from two tasks.
   // blocking=false is the best-effort console-mirror path (the single debugOutputTask): if a
@@ -263,7 +266,7 @@ bool bleScSendEncrypted(uint16_t connId, const char* plaintext, size_t len, bool
   bool ok = true;
   do {
     size_t chunk = (len - off < SC_MAX_PAY_FRAME) ? (len - off) : SC_MAX_PAY_FRAME;
-    framePt[0] = SC_FRAME_VER;
+    framePt[0] = binaryFrame ? SC_FRAME_VER_BIN : SC_FRAME_VER;
     framePt[1] = (uint8_t)(msgId & 0xFF);
     framePt[2] = (uint8_t)((msgId >> 8) & 0xFF);
     framePt[3] = idx;
