@@ -1,4 +1,4 @@
-# Hardware One v0.98.1 - User Guide
+# Hardware One v0.98.2 - User Guide
 
 This is the full reference for Hardware One. It covers every subsystem, all CLI commands, configuration options, and how the major features work. For initial setup, see the [Quick Start Guide](QUICKSTART.md).
 
@@ -152,16 +152,47 @@ IF <condition> THEN <command>; <command>
 - `BOOT` - run once on startup
 
 ### Conditions
+An automation can carry an optional "fire when" condition that gates whether it runs, and command lists can branch with `IF <expr> THEN <command> [ELSE <command>]`. Each condition is a single `<variable> <operator> <value>` test.
 ```
 IF TEMP>75 THEN ledcolor red
-IF TIME=EVENING THEN ledbrightness 30
-IF ROOM=Kitchen THEN PRINT Kitchen automation triggered
-IF ZONE=Upstairs AND TIME=NIGHT THEN ledbrightness 10
+IF BATTERY<20 THEN ledcolor red
+IF HEAP<40 THEN PRINT low memory
+IF WIFI=CONNECTED THEN PRINT online
+IF DAY=SAT THEN ledbrightness 30
+IF HOUR>=22 THEN oleddim
 IF TAGS CONTAINS outdoor THEN PRINT Outdoor device
 ```
 
-Supported operators: `>`, `<`, `=`, `!=`, `CONTAINS` (for TAGS field only).  
-Metadata values (`ROOM`, `ZONE`, `TAGS`) come from `gSettings.espnowRoom/Zone/Tags`. If not set, value is `"NONE"`.
+Numeric variables compare with `>`, `<`, `=`, `>=`, `<=`, `!=`. String/enum variables compare with `=`, `!=`, `CONTAINS`. Values are case-insensitive.
+
+| Category | Variables | Type | Notes |
+|---|---|---|---|
+| Sensors | `TEMP` `DISTANCE` `LIGHT` | numeric | thermal C / ToF cm / ambient light |
+| Sensors | `MOTION` | enum | `DETECTED` / `NONE` |
+| Time | `TIME` | enum | `MORNING` `AFTERNOON` `EVENING` `NIGHT` |
+| Time | `HOUR` | numeric | local hour, 0-23 |
+| Time | `DAY` | enum | `SUN` `MON` `TUE` `WED` `THU` `FRI` `SAT` |
+| Time | `NTP` | enum | `SYNCED` / `NONE` (clock holds a real date) |
+| System | `BATTERY` | numeric | charge percent (reads 100 on boards with no battery) |
+| System | `HEAP` `PSRAM` `FSFREE` | numeric | free internal DRAM / PSRAM / storage, in KB |
+| System | `UPTIME` | numeric | minutes since boot |
+| System | `CHIPTEMP` | numeric | SoC temperature, C |
+| Network | `WIFI` `BLE` | enum | `CONNECTED` / `NONE` |
+| Network | `RSSI` | numeric | WiFi signal, dBm (negative; only while connected) |
+| Network | `PEERS` | numeric | live ESP-NOW mesh peers (heartbeat within 30s) |
+| Location | `GPS` | enum | `FIX` / `NOFIX` |
+| Location | `SPEED` `SATS` | numeric | GPS ground speed (knots) / satellites in view |
+| AI | `LLM` | enum | `READY` / `BUSY` / `NONE` |
+| Mesh/Bond | `ESPNOW` | enum | `ACTIVE` / `NONE` (radio stack up) |
+| Mesh/Bond | `BOND_MODE` `BOND_PAIRED` `BOND_ONLINE` `BOND_SYNCED` | enum | bond config + link state |
+| Mesh/Bond | `BOND_ROLE` | enum | `MASTER` / `WORKER` |
+| Mesh/Bond | `PAIRMODE` | enum | `ACTIVE` / `NONE` (WPS pairing window open) |
+| Mesh/Bond | `BOND_RSSI` | numeric | bond link RSSI, dBm (only while online) |
+| Mesh/Bond | `BOND_PEER_HEAP` `BOND_PEER_UPTIME` | numeric | bonded peer free heap (KB) / uptime (min) |
+| Mesh/Bond | `PAIRMODE_SECS` `PEERSKNOWN` `STALESTPEERAGE` | numeric | pairing seconds left / known peers / oldest peer heartbeat age (s) |
+| ESP-NOW | `ROOM` `ZONE` `TAGS` | string | THIS device's metadata (`gSettings.espnowRoom/Zone/Tags`); `NONE` if unset |
+
+A variable whose subsystem is disabled or absent evaluates to false, so the condition simply never matches.
 
 ### PRINT command
 ```

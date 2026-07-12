@@ -35,8 +35,10 @@ static void streamAutomationsInner(httpd_req_t* req) {
 #auto_form .row-inline input,#auto_form .row-inline select{margin:0;}
 </style>
 <h3 style='margin-top:0;color:var(--panel-fg)'>Create Automation</h3>
+<input id='a_name' class='input-tall' placeholder='Name' style='width:100%;box-sizing:border-box;margin-bottom:0.6rem'>
+<div style='font-weight:600;color:var(--panel-fg);margin:0.35rem 0 0.45rem'>Triggers <span style='font-size:0.8em;font-weight:400;color:var(--muted)'>when this automation fires (up to 4)</span></div>
 <div style='display:flex;flex-wrap:wrap;gap:0.5rem;align-items:center'>
-<input id='a_name' class='input-tall' placeholder='Name' style='flex:1;min-width:160px'>
+<span style='font-size:0.82em;color:var(--muted)'>Trigger 1</span>
 <select id='a_type' class='input-tall' onchange='autoTypeChanged()'>
   <option value='atTime'>At Time</option>
   <option value='afterDelay'>After Delay</option>
@@ -125,16 +127,13 @@ static void streamAutomationsInner(httpd_req_t* req) {
     <option value='day'>days</option>
   </select>
 </div>
-<div id='secondary_triggers_section' style='margin-top:0.75rem;padding-top:0.5rem;border-top:1px dashed var(--border)'>
-  <div style='display:flex;align-items:center;gap:0.5rem;margin-bottom:0.4rem;flex-wrap:wrap'>
-    <span style='font-weight:600;color:var(--panel-fg)'>Additional Triggers</span>
-    <button type='button' class='btn btn-small' onclick='addSecondaryTrigger()'>+ Add Trigger</button>
-    <span style='font-size:0.82em;color:var(--muted)'>Fire this automation from multiple sources (max 4 total).</span>
-  </div>
+<div id='secondary_triggers_section' style='margin-top:0.5rem'>
   <div id='secondary_triggers_container'></div>
+  <button type='button' class='btn btn-small' onclick='addSecondaryTrigger()' title='Fire this automation from another source (up to 4 total)'>+ Add trigger</button>
 </div>
 <template id='secondary_trigger_template'>
   <div class='secondary-trigger' style='display:flex;align-items:center;gap:0.4rem;padding:0.5rem;border:1px solid var(--border);border-radius:4px;margin-bottom:0.3rem;flex-wrap:wrap'>
+    <span class='st-num' style='font-size:0.82em;color:var(--muted)'>Trigger</span>
     <select class='st-type input-tall' onchange='stTypeChanged(this)' style='min-width:120px'>
       <option value='time'>At Time</option>
       <option value='interval'>Interval</option>
@@ -184,7 +183,7 @@ static void streamAutomationsInner(httpd_req_t* req) {
     <div style='margin-top:0.5rem'>
       <label style='font-size:0.9em;color:var(--panel-fg);margin-bottom:0.25rem;display:block'>Fire when (optional sensor condition):</label>
       <div class='row-inline' style='gap:0.3rem;align-items:center;flex-wrap:wrap'>
-        <select id='a_cond_var' class='input-tall'><option value=''>— none —</option><option value="temp">Temperature</option><option value="distance">Distance</option><option value="light">Light</option><option value="motion">Motion</option><option value="time">Time</option><option value="room">Room</option><option value="zone">Zone</option><option value="tags">Tags</option></select>
+        <select id='a_cond_var' class='input-tall'><option value=''>— none —</option><optgroup label="Sensors"><option value="temp">Temperature</option><option value="distance">Distance</option><option value="light">Light</option><option value="motion">Motion</option></optgroup><optgroup label="Time"><option value="time">Time of day</option><option value="hour">Hour (0-23)</option><option value="day">Day of week</option><option value="ntp">Clock synced</option></optgroup><optgroup label="System"><option value="battery">Battery %</option><option value="heap">Free heap KB</option><option value="psram">Free PSRAM KB</option><option value="fsfree">Free storage KB</option><option value="uptime">Uptime min</option><option value="chiptemp">Chip temp C</option></optgroup><optgroup label="Network"><option value="wifi">WiFi state</option><option value="rssi">WiFi RSSI dBm</option><option value="peers">ESP-NOW peers</option><option value="ble">BLE state</option></optgroup><optgroup label="Location"><option value="gps">GPS fix</option><option value="speed">GPS speed kn</option><option value="sats">GPS satellites</option></optgroup><optgroup label="AI"><option value="llm">LLM state</option></optgroup><optgroup label="ESP-NOW / Bond"><option value="espnow">ESP-NOW up</option><option value="bond_mode">Bond mode</option><option value="bond_role">Bond role</option><option value="bond_paired">Bond paired</option><option value="bond_online">Bond online</option><option value="bond_synced">Bond synced</option><option value="bond_rssi">Bond RSSI dBm</option><option value="bond_peer_heap">Bond peer heap KB</option><option value="bond_peer_uptime">Bond peer uptime min</option><option value="pairmode">Pairing mode</option><option value="pairmode_secs">Pairing secs left</option><option value="peersknown">Peers known</option><option value="stalestpeerage">Stalest peer age s</option></optgroup><optgroup label="ESP-NOW metadata"><option value="room">Room</option><option value="zone">Zone</option><option value="tags">Tags</option></optgroup></select>
         <select id='a_cond_op' class='input-tall'><option value=">">&gt;</option><option value="<">&lt;</option><option value="=">=</option><option value=">=">&gt;=</option><option value="<=">&lt;=</option><option value="!=">!=</option><option value="CONTAINS">CONTAINS</option></select>
         <input id='a_cond_val' class='input-tall' placeholder='value' style='width:90px'>
         <label style='font-size:0.85em;color:var(--panel-fg);margin-left:0.5rem'>Mode:</label>
@@ -599,7 +598,7 @@ function addLogicField(){
   const varSelect = document.createElement('select'); 
   varSelect.className = 'logic-var input-tall'; 
   varSelect.style.cssText = 'height:32px'; 
-  varSelect.innerHTML = '<option value="temp">Temperature</option><option value="distance">Distance</option><option value="light">Light</option><option value="motion">Motion</option><option value="time">Time</option><option value="room">Room</option><option value="zone">Zone</option><option value="tags">Tags</option>'; 
+  varSelect.innerHTML = '<optgroup label="Sensors"><option value="temp">Temperature</option><option value="distance">Distance</option><option value="light">Light</option><option value="motion">Motion</option></optgroup><optgroup label="Time"><option value="time">Time of day</option><option value="hour">Hour (0-23)</option><option value="day">Day of week</option><option value="ntp">Clock synced</option></optgroup><optgroup label="System"><option value="battery">Battery %</option><option value="heap">Free heap KB</option><option value="psram">Free PSRAM KB</option><option value="fsfree">Free storage KB</option><option value="uptime">Uptime min</option><option value="chiptemp">Chip temp C</option></optgroup><optgroup label="Network"><option value="wifi">WiFi state</option><option value="rssi">WiFi RSSI dBm</option><option value="peers">ESP-NOW peers</option><option value="ble">BLE state</option></optgroup><optgroup label="Location"><option value="gps">GPS fix</option><option value="speed">GPS speed kn</option><option value="sats">GPS satellites</option></optgroup><optgroup label="AI"><option value="llm">LLM state</option></optgroup><optgroup label="ESP-NOW / Bond"><option value="espnow">ESP-NOW up</option><option value="bond_mode">Bond mode</option><option value="bond_role">Bond role</option><option value="bond_paired">Bond paired</option><option value="bond_online">Bond online</option><option value="bond_synced">Bond synced</option><option value="bond_rssi">Bond RSSI dBm</option><option value="bond_peer_heap">Bond peer heap KB</option><option value="bond_peer_uptime">Bond peer uptime min</option><option value="pairmode">Pairing mode</option><option value="pairmode_secs">Pairing secs left</option><option value="peersknown">Peers known</option><option value="stalestpeerage">Stalest peer age s</option></optgroup><optgroup label="ESP-NOW metadata"><option value="room">Room</option><option value="zone">Zone</option><option value="tags">Tags</option></optgroup>';
   varSelect.onchange = function() { updateValuePlaceholder(this); };
   const opSelect = document.createElement('select'); 
   opSelect.className = 'logic-operator input-tall'; 
@@ -646,6 +645,33 @@ function updateValuePlaceholder(varSelect){
     else if(varType==='tags') valueInput.placeholder='dimmable';
     else if(varType==='time') valueInput.placeholder='EVENING';
     else if(varType==='motion') valueInput.placeholder='DETECTED';
+    else if(varType==='wifi'||varType==='ble') valueInput.placeholder='CONNECTED';
+    else if(varType==='ntp') valueInput.placeholder='SYNCED';
+    else if(varType==='gps') valueInput.placeholder='FIX';
+    else if(varType==='llm') valueInput.placeholder='READY';
+    else if(varType==='day') valueInput.placeholder='SAT';
+    else if(varType==='hour') valueInput.placeholder='22';
+    else if(varType==='battery') valueInput.placeholder='20';
+    else if(varType==='rssi') valueInput.placeholder='-75';
+    else if(varType==='heap') valueInput.placeholder='40';
+    else if(varType==='psram') valueInput.placeholder='512';
+    else if(varType==='fsfree') valueInput.placeholder='100';
+    else if(varType==='uptime') valueInput.placeholder='60';
+    else if(varType==='chiptemp') valueInput.placeholder='70';
+    else if(varType==='peers') valueInput.placeholder='1';
+    else if(varType==='speed') valueInput.placeholder='10';
+    else if(varType==='sats') valueInput.placeholder='6';
+    else if(varType==='bond_online') valueInput.placeholder='OFFLINE';
+    else if(varType==='bond_synced') valueInput.placeholder='SYNCED';
+    else if(varType==='bond_paired') valueInput.placeholder='PAIRED';
+    else if(varType==='bond_role') valueInput.placeholder='MASTER';
+    else if(varType==='bond_mode'||varType==='espnow'||varType==='pairmode') valueInput.placeholder='ACTIVE';
+    else if(varType==='bond_rssi') valueInput.placeholder='-85';
+    else if(varType==='bond_peer_heap') valueInput.placeholder='40';
+    else if(varType==='bond_peer_uptime') valueInput.placeholder='5';
+    else if(varType==='pairmode_secs') valueInput.placeholder='30';
+    else if(varType==='peersknown') valueInput.placeholder='1';
+    else if(varType==='stalestpeerage') valueInput.placeholder='25';
     else valueInput.placeholder='75';
   } catch(e) { 
     console.error('updateValuePlaceholder error:', e); 
@@ -956,11 +982,17 @@ function addSecondaryTrigger(initial){
   document.getElementById('secondary_triggers_container').appendChild(node);
   if(initial){ populateSecondaryTrigger(node,initial); }
   stTypeChanged(node.querySelector('.st-type'));
+  renumberTriggers();
 }
 
 function removeSecondaryTrigger(btn){
   const row=btn.closest('.secondary-trigger');
   if(row) row.remove();
+  renumberTriggers();
+}
+function renumberTriggers(){
+  const rows=document.querySelectorAll('#secondary_triggers_container .secondary-trigger');
+  rows.forEach(function(r,i){ const lbl=r.querySelector('.st-num'); if(lbl) lbl.textContent='Trigger '+(i+2); });
 }
 
 function stTypeChanged(sel){
@@ -1220,7 +1252,7 @@ async function createAutomation(){
     // into the triggers[] array, with a cap of 4 total.
     const secondaries=collectSecondaryTriggers();
     if(secondaries===null){
-      document.getElementById('a_error').textContent='One or more Additional Triggers is incomplete. Fill in all fields or remove the row.';
+      document.getElementById('a_error').textContent='One or more triggers is incomplete. Fill in all fields or remove the row.';
       document.getElementById('a_error').style.display='block';
       throw new Error('Invalid secondary');
     }
