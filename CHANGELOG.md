@@ -8,6 +8,12 @@ Entries for 0.96.1 and earlier were backfilled from git history (this repo had
 no tags or releases before 0.96.2); they are terse, commit-grounded summaries,
 dated from each version's commit. Dates are YYYY-MM-DD.
 
+## [0.98.1] - 2026-07-12
+Fixes to the on-device LLM's domain refusal gate: it stops refusing basic help questions, and the web chat now shows the refusal message for off-topic prompts instead of going blank.
+### Fixed
+- The domain refusal gate no longer refuses universal help and identity questions like "what are you", "what do you do", or "help" - any model can answer those even though they contain no topic word. Works on the web, the phone app, and the OLED.
+- Web chat now shows the model's refusal message for an off-topic prompt instead of a blank reply. The phone app and OLED already showed it.
+
 ## [0.98.0] - 2026-07-11
 The on-device LLM comes online with guardrails that keep it on-topic and controls to steer its answers, plus a round of auth-store hardening and crash fixes.
 ### Added

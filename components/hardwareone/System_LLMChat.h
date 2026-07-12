@@ -139,6 +139,10 @@ int  chatReadTurn(int index, int offset, char* buf, int maxLen);
 // current generation without computing the index.
 int  chatGetStreamLen();
 int  chatReadStream(int offset, char* buf, int maxLen);
+// Recover the most recently finished assistant turn for a session — for a result
+// that completed before the client's first poll (e.g. an instant gate refusal).
+int  chatReadFinished(int session, int offset, char* buf, int maxLen);
+int  chatFinishedLen(int session);
 
 // True iff there's a live assistant turn currently being filled.
 bool chatIsGenerating();

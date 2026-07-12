@@ -257,21 +257,26 @@ static esp_err_t handleLLMPoll(httpd_req_t* req) {
   // canonical session ID.
   int curSession = chatGetSessionId();
   bool generating = chatIsGenerating();
-  if (session != 0 && (!generating || session != curSession)) {
-    // If the engine is still streaming but the client's session is stale, the
-    // *current* assistant turn is for someone else (e.g. an OLED-initiated
-    // generation). Signal done+stale so the browser stops polling.
+  // Genuinely stale only if a DIFFERENT session is *actively streaming* (e.g. an
+  // OLED-initiated generation took over). A finished/idle engine is NOT stale for
+  // us — our result may have completed before this first poll (an instant gate
+  // refusal returns in microseconds), so fall through and try to recover it.
+  if (session != 0 && generating && session != curSession) {
     return sendJsonResponse(req, "{\"text\":\"\",\"done\":true,\"len\":0,\"stale\":true}");
   }
 
-  // Pull bytes from the chat module's view (which in turn drains the engine).
+  // Pull bytes from the chat module's live streaming turn (drains the engine).
   // 512 keeps the chunk under ArduinoJson's PSRAM_JSON_DOC working set.
   char chunk[512];
   int n = chatReadStream(offset, chunk, sizeof(chunk));
   int totalLen = chatGetStreamLen();
-  // "done" semantics: the chat module clears its streaming slot the moment
-  // the engine finishes. If we're not generating any more AND we just read
-  // 0 bytes past the offset, the turn is complete.
+  if (n == 0 && totalLen == 0) {
+    // Nothing live for us — the generation may have finished (and its streaming
+    // slot been finalized) before this poll. Recover it from the finished-turn
+    // snapshot so instant results (gate refusals, one-liners) don't blank out.
+    n        = chatReadFinished(session, offset, chunk, sizeof(chunk));
+    totalLen = chatFinishedLen(session);
+  }
   bool done = !chatIsGenerating();
 
   PSRAM_JSON_DOC(jdoc);
