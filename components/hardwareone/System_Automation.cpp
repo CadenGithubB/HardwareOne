@@ -212,8 +212,6 @@ bool gAutosDirty = false;
 
 // Forward declarations for internal functions
 static bool extractJsonString(const char* json, const char* key, char* out, size_t outSize);
-static long extractJsonLong(const char* json, const char* key);
-static bool extractJsonBool(const char* json, const char* key);
 
 // Helper: extract JSON string value by key from C-string (simple parser)
 static bool __attribute__((unused)) extractJsonString(const char* json, const char* key, char* out, size_t outSize) {
@@ -236,32 +234,6 @@ static bool __attribute__((unused)) extractJsonString(const char* json, const ch
   strncpy(out, q1, len);
   out[len] = '\0';
   return true;
-}
-
-// Helper: extract JSON number value by key from C-string
-static long extractJsonLong(const char* json, const char* key) {
-  const char* keyPos = strstr(json, key);
-  if (!keyPos) return 0;
-
-  const char* colon = strchr(keyPos, ':');
-  if (!colon) return 0;
-
-  return atol(colon + 1);
-}
-
-// Helper: check if JSON boolean is true
-static bool extractJsonBool(const char* json, const char* key) {
-  const char* keyPos = strstr(json, key);
-  if (!keyPos) return false;
-
-  const char* colon = strchr(keyPos, ':');
-  if (!colon) return false;
-
-  // Skip whitespace after colon
-  const char* p = colon + 1;
-  while (*p == ' ' || *p == '\t') p++;
-
-  return (strncmp(p, "true", 4) == 0);
 }
 
 // Find the closing brace of a JSON object starting at objStart, handling nested objects/arrays
@@ -2021,217 +1993,6 @@ const char* cmd_automation(const String& argsInput) {
   return "ERROR";
 }
 
-// Callback function for streaming automation parser
-bool processAutomationCallback(const char* autoJson, size_t jsonLen, void* userData) {
-  SchedulerContext* ctx = (SchedulerContext*)userData;
-
-  // Extract ID
-  long id = extractJsonLong(autoJson, "\"id\"");
-  if (id == 0) return true;  // Skip invalid
-
-  // Duplicate-id guard
-  bool dupSeen = false;
-  for (int i = 0; i < ctx->seenCount; ++i) {
-    if (ctx->seenIds[i] == id) {
-      dupSeen = true;
-      break;
-    }
-  }
-  if (dupSeen) {
-    DEBUGF(DEBUG_AUTO_SCHEDULER, "[autos] duplicate id detected at runtime id=%ld; skipping and queuing sanitize", id);
-    ctx->queueSanitize = true;
-    return true;  // Continue processing
-  }
-  if (ctx->seenCount < 128) { ctx->seenIds[ctx->seenCount++] = id; }
-
-  ctx->evaluated++;
-
-  // Check if enabled
-  bool enabled = extractJsonBool(autoJson, "\"enabled\"");
-  if (!enabled) {
-    DEBUGF(DEBUG_AUTO_SCHEDULER, "[autos] id=%ld skip: disabled", id);
-    return true;  // Continue processing
-  }
-
-  // Parse nextAt field
-  time_t nextAt = (time_t)extractJsonLong(autoJson, "\"nextAt\"");
-
-  // If nextAt is missing or invalid, compute it now
-  if (nextAt <= 0) {
-    nextAt = computeNextRunTime(autoJson, ctx->now);
-    if (nextAt > 0) {
-      updateAutomationNextAt(id, nextAt);
-      DEBUGF(DEBUG_AUTO_TIMING, "[autos] id=%ld computed missing nextAt=%lu", id, (unsigned long)nextAt);
-    } else {
-      DEBUGF(DEBUG_AUTO_TIMING, "[autos] id=%ld skip: could not compute nextAt", id);
-      return true;  // Continue processing
-    }
-  }
-
-  // Check if it's time to run
-  if (ctx->now >= nextAt) {
-    // For command execution, convert to String (existing functions expect String)
-    String obj(autoJson);
-
-    // Extract commands (reuse existing logic)
-    String cmdsList[64];
-    int cmdsCount = 0;
-    int cmdsPos = obj.indexOf("\"commands\"");
-    bool haveArray = false;
-    int arrStart = -1, arrEnd = -1;
-
-    if (cmdsPos >= 0) {
-      int cmdsColon = obj.indexOf(':', cmdsPos);
-      if (cmdsColon > 0) {
-        arrStart = obj.indexOf('[', cmdsColon);
-        if (arrStart > 0) {
-          int depth = 0;
-          for (int i = arrStart; i < (int)obj.length(); ++i) {
-            char c = obj[i];
-            if (c == '[') depth++;
-            else if (c == ']') {
-              depth--;
-              if (depth == 0) {
-                arrEnd = i;
-                break;
-              }
-            }
-          }
-          haveArray = (arrStart > 0 && arrEnd > arrStart);
-        }
-      }
-    }
-
-    if (haveArray) {
-      String body = obj.substring(arrStart + 1, arrEnd);
-      int i = 0;
-      while (i < (int)body.length() && cmdsCount < 64) {
-        while (i < (int)body.length() && (body[i] == ' ' || body[i] == ',' || body[i] == '\n' || body[i] == '\r' || body[i] == '\t')) i++;
-        if (i >= (int)body.length()) break;
-        if (body[i] == '"') {
-          int q1 = i;
-          int q2 = body.indexOf('"', q1 + 1);
-          if (q2 < 0) break;
-          String one = body.substring(q1 + 1, q2);
-          one.trim();
-          if (one.length() && cmdsCount < 64) { cmdsList[cmdsCount++] = one; }
-          i = q2 + 1;
-        } else {
-          int next = body.indexOf(',', i);
-          if (next < 0) break;
-          i = next + 1;
-        }
-      }
-    } else {
-      // Fallback to single command
-      int cpos = obj.indexOf("\"command\"");
-      if (cpos >= 0) {
-        int ccolon = obj.indexOf(':', cpos);
-        int cq1 = obj.indexOf('"', ccolon + 1);
-        int cq2 = obj.indexOf('"', cq1 + 1);
-        if (cq1 > 0 && cq2 > cq1) {
-          String cmd = obj.substring(cq1 + 1, cq2);
-          cmd.trim();
-          if (cmd.length() && cmdsCount < 64) { cmdsList[cmdsCount++] = cmd; }
-        }
-      }
-    }
-
-    if (cmdsCount > 0) {
-      // Extract automation name for logging
-      String autoName = "Unknown";
-      int namePos = obj.indexOf("\"name\"");
-      if (namePos >= 0) {
-        int colonPos = obj.indexOf(':', namePos);
-        if (colonPos >= 0) {
-          int q1 = obj.indexOf('"', colonPos + 1);
-          int q2 = obj.indexOf('"', q1 + 1);
-          if (q1 >= 0 && q2 >= 0) {
-            autoName = obj.substring(q1 + 1, q2);
-          }
-        }
-      }
-
-      // Check global condition expression (new schema: expression only, e.g. "ROOM=bedroom")
-      String condition = "";
-      {
-        int condPos = obj.indexOf("\"condition\"");
-        if (condPos >= 0 && obj[condPos + 11] == '"') condPos = -1; // reject "conditions"
-        if (condPos >= 0) {
-          int condColon = obj.indexOf(':', condPos);
-          if (condColon >= 0) {
-            int condQ1 = obj.indexOf('"', condColon + 1);
-            int condQ2 = obj.indexOf('"', condQ1 + 1);
-            if (condQ1 >= 0 && condQ2 >= 0) {
-              condition = obj.substring(condQ1 + 1, condQ2);
-              condition.trim();
-            }
-          }
-        }
-      }
-
-      // Evaluate global condition gate if present
-      if (condition.length() > 0) {
-        String wrapped = "IF " + condition + " THEN _";
-        bool conditionMet = evaluateCondition(wrapped.c_str());
-        DEBUGF(DEBUG_AUTO_CONDITION, "[autos] id=%ld condition='%s' result=%s",
-               id, condition.c_str(), conditionMet ? "TRUE" : "FALSE");
-        if (!conditionMet) {
-          if (gAutoLogActive) {
-            char skipBuf[256];
-            snprintf(skipBuf, sizeof(skipBuf), "Scheduled automation skipped: ID=%ld Name=%s Condition not met: %s", id, autoName.c_str(), condition.c_str());
-            appendAutoLogEntry("AUTO_SKIP", skipBuf);
-          }
-          DEBUGF(DEBUG_AUTO_CONDITION, "[autos] id=%ld skipped - condition not met: %s", id, condition.c_str());
-          return true;
-        }
-      }
-
-      char _createdByBuf[64];
-      extractJsonString(obj.c_str(), "\"createdBy\"", _createdByBuf, sizeof(_createdByBuf));
-
-      // Log scheduled automation start if logging is active
-      if (gAutoLogActive) {
-        if (ensureDebugBuffer()) {
-          snprintf(getDebugBuffer(), 1024, "Scheduled automation started: ID=%lu Name=%s User=%s", id, autoName.c_str(), _createdByBuf);
-          appendAutoLogEntry("AUTO_START", String(getDebugBuffer()));
-        }
-      }
-
-      // Execute commands (with conditional logic support)
-      for (int ci = 0; ci < cmdsCount; ++ci) {
-        DEBUGF(DEBUG_AUTO_EXEC, "[autos] id=%ld run cmd[%d]='%s'", id, ci, cmdsList[ci].c_str());
-
-        // Queue command for execution (async, non-blocking)
-        const char* result = executeConditionalCommand(cmdsList[ci].c_str(), _createdByBuf, autoName.c_str());
-
-        // Output the result (skip internal status messages - actual output comes from queue)
-        if (!isAutoInternalResult(result)) {
-          BROADCAST_PRINTF("[Scheduled Automation %lu] %s", id, result);
-        }
-      }
-      ctx->executed++;
-
-      // Log scheduled automation end if logging is active
-      if (gAutoLogActive) {
-        if (ensureDebugBuffer()) {
-          snprintf(getDebugBuffer(), 1024, "Scheduled automation completed: ID=%lu Name=%s Commands=%d", id, autoName.c_str(), cmdsCount);
-          appendAutoLogEntry("AUTO_END", String(getDebugBuffer()));
-        }
-      }
-
-      // Update next run time via the unified post-fire helper.
-      rescheduleAfterFire(id, obj.c_str(), ctx->now);
-    } else {
-      DEBUGF(DEBUG_AUTO_SCHEDULER, "[autos] id=%ld skip: no commands found", id);
-    }
-  } else {
-    DEBUGF(DEBUG_AUTO_TIMING, "[autos] id=%ld wait: nextAt=%lu now=%lu", id, (unsigned long)nextAt, (unsigned long)ctx->now);
-  }
-
-  return true;  // Continue processing next automation
-}
-
 // ============================================================================
 // Internal trigger model (v2: per-automation array of triggers)
 // ============================================================================
@@ -2524,18 +2285,6 @@ static bool onFired(Trigger& s, time_t firedAt) {
     return true;
   }
   return false;
-}
-
-// Returns the minimum nextAt across all triggers (0 if none are scheduled).
-// Used by the RAM cache to answer "is anything due?" with a single comparison.
-static time_t minNextAtAcrossTriggers(const Trigger* arr, int count) {
-  time_t minAt = 0;
-  for (int i = 0; i < count; i++) {
-    if (arr[i].nextAt > 0 && (minAt == 0 || arr[i].nextAt < minAt)) {
-      minAt = arr[i].nextAt;
-    }
-  }
-  return minAt;
 }
 
 // Unified post-fire helper. For each trigger whose nextAt was at or before

@@ -24,16 +24,6 @@ void fsUnlock();
 // Automation system constants
 #define kAutoMemoCap 128
 
-// Context structure for streaming automation callback
-struct SchedulerContext {
-  time_t now;
-  int evaluated;
-  int executed;
-  bool queueSanitize;
-  long seenIds[128];
-  int seenCount;
-};
-
 // Automation callback type
 typedef bool (*AutomationCallback)(const char* autoJson, size_t jsonLen, void* userData);
 
@@ -77,7 +67,6 @@ void runAutomationCommandUnified(const String& argsInput);
 
 // Automation scheduler tick (called from main loop)
 void schedulerTickMinute();
-bool processAutomationCallback(const char* autoJson, size_t jsonLen, void* userData);
 
 // Helper function for automation processing (public)
 time_t computeNextRunTime(const char* automationJson, time_t fromTime);

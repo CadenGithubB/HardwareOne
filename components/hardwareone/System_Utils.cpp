@@ -2876,9 +2876,8 @@ static const CommandModule gCommandModules[] = {
     "peersknown, stalestpeerage), location (gps, speed, sats), the on-device model (llm), "
     "and ESP-NOW metadata "
     "(room, zone, tags); numeric variables use the > < = >= <= != operators and "
-    "string/enum variables use = != CONTAINS. By default a true condition"
-    "fires every poll, but triggerMode once makes it fire only on the false-to-true "
-    "edge. Supporting commands: validate-conditions checks conditional syntax without "
+    "string/enum variables use = != CONTAINS. A true condition fires every time its "
+    "trigger is due. Supporting commands: validate-conditions checks conditional syntax without "
     "running it, autolog records automation activity to a file, and print <message> "
     "broadcasts text to all outputs.", automationCommands,   automationCommandsCount, 0, nullptr },
 #endif
