@@ -57,6 +57,20 @@
 #include "i2csensor_vl53l4cx.h"
 #endif
 
+// --- Additional condition-variable sources (see evaluateCondition) ---
+#include "System_Battery.h"        // BATTERY: getBatteryPercentage()
+#include "System_Clock.h"          // NTP: Clock::isSynced()
+#include "Bluetooth.h"             // BLE: isBLEConnected() (stub returns false when BT disabled)
+#include "System_ESPNow.h"         // PEERS/bond/pairing: gMeshPeers, isBondModeOnline, espnowPairModeActive, gEspNow
+#include "System_BondedPeer.h"     // BOND_PAIRED: BondedPeer::isPaired()
+#include "System_LLM.h"            // LLM: llmGetStatus() (header self-guards on ENABLE_ONDEVICE_LLM)
+#if ENABLE_WIFI
+#include <WiFi.h>                  // WIFI / RSSI: WiFi.isConnected() / WiFi.RSSI()
+#endif
+#if ENABLE_GPS_SENSOR
+#include "i2csensor_pa1010d.h"     // GPS / SPEED / SATS: gpsCacheSnapshot()
+#endif
+
 // External dependencies from .ino
 extern bool gCLIValidateOnly;
 // gDebugBuffer, gDebugFlags, ensureDebugBuffer now from debug_system.h
@@ -1872,22 +1886,38 @@ const char* cmd_automation(const String& argsInput) {
   subCmd.toLowerCase();
   String subArgs = a.remaining(0);
 
-  // Handle "system" subcommand
+  // Handle "system" subcommand: enable | disable | status, with an optional trailing `json` token.
+  // Parse the action as the FIRST token (not the whole tail): the companion app sends
+  // `automation system <action> json` and parses the reply as {"schema":1,"enabled":bool}, while the
+  // web sends the bare command and reads the plain-text line. Matching subArgs whole against "enable"
+  // turned the app's `enable json` into "invalid arguments" — the toggle (and the status read on
+  // load) silently failed over BLE while working on web.
   if (subCmd == "system") {
-    if (subArgs.equalsIgnoreCase("enable")) {
-      setSetting(gSettings.automationsEnabled, true);
-      return "Automation system: enabled";
-    } else if (subArgs.equalsIgnoreCase("disable")) {
-      setSetting(gSettings.automationsEnabled, false);
-      return "Automation system: disabled";
-    } else if (subArgs.equalsIgnoreCase("status")) {
-      if (gSettings.automationsEnabled) {
-        return "Automation system: enabled";
-      } else {
-        return "Automation system: disabled";
-      }
+    CommandArgs sysArgs(subArgs);
+    String action = sysArgs.arg(0);
+    action.toLowerCase();
+    bool wantJson = false;
+    for (int i = 1; i < sysArgs.count(); i++) if (sysArgs.arg(i).equalsIgnoreCase("json")) wantJson = true;
+
+    bool en;
+    if (action == "enable") {
+      setSetting(gSettings.automationsEnabled, true);  en = true;
+    } else if (action == "disable") {
+      setSetting(gSettings.automationsEnabled, false); en = false;
+    } else if (action == "status") {
+      en = gSettings.automationsEnabled;
+    } else {
+      return "Error: invalid arguments — Usage: automation system <enable|disable|status> [json]";
     }
-    return "Error: invalid arguments — Usage: automation system <enable|disable|status>";
+
+    if (wantJson) {
+      static String sysJson;
+      sysJson  = "{\"schema\":1,\"enabled\":";
+      sysJson += (en ? "true" : "false");
+      sysJson += "}";
+      return sysJson.c_str();
+    }
+    return en ? "Automation system: enabled" : "Automation system: disabled";
   }
 
   // Handle regular automation commands
@@ -2888,8 +2918,238 @@ bool evaluateCondition(const char* condition) {
     } else {
       strncpy(currentStringValue, "NONE", sizeof(currentStringValue) - 1);
     }
-    DEBUGF(DEBUG_AUTOMATIONS, "[eval] TAGS: current='%s' (from setting='%s')", 
+    DEBUGF(DEBUG_AUTOMATIONS, "[eval] TAGS: current='%s' (from setting='%s')",
            currentStringValue, gSettings.espnowTags.c_str());
+  // ---- System-state variables (numeric) ----
+  } else if (strcmp(sensor, "BATTERY") == 0) {
+    // Fuel-gauge state of charge, 0-100% (reads 100 on boards with no battery hardware)
+    currentValue = getBatteryPercentage();
+  } else if (strcmp(sensor, "HEAP") == 0) {
+    // Free INTERNAL DRAM in KB (the small, contested pool -- not the combined heap)
+    currentValue = (float)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) / 1024);
+  } else if (strcmp(sensor, "PSRAM") == 0) {
+    // Free PSRAM/SPIRAM in KB (0 on boards without PSRAM)
+    currentValue = (float)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024);
+  } else if (strcmp(sensor, "FSFREE") == 0) {
+    // Free LittleFS space in KB (cached read, scheduler-safe)
+    currentValue = (float)(VFS::getCachedLittleFsFree() / 1024);
+  } else if (strcmp(sensor, "UPTIME") == 0) {
+    // Minutes since boot (millis rolls over ~49.7 days, matching every other caller)
+    currentValue = (float)(millis() / 60000UL);
+  } else if (strcmp(sensor, "CHIPTEMP") == 0) {
+    // On-die SoC temperature in Celsius (self-heated, not ambient); NAN on read failure
+    float tc = temperatureRead();
+    if (isnan(tc)) return false;
+    currentValue = tc;
+  } else if (strcmp(sensor, "HOUR") == 0) {
+    // Local hour of day 0-23 (reflects boot epoch until the clock is synced)
+    time_t now = time(nullptr);
+    struct tm* ti = localtime(&now);
+    currentValue = (float)ti->tm_hour;
+  } else if (strcmp(sensor, "RSSI") == 0) {
+    // WiFi signal strength in dBm (negative); only meaningful while associated
+ #if ENABLE_WIFI
+    if (!WiFi.isConnected()) return false;
+    currentValue = (float)WiFi.RSSI();
+ #else
+    return false;
+ #endif
+  } else if (strcmp(sensor, "SPEED") == 0) {
+    // GPS ground speed in knots (requires a fix)
+ #if ENABLE_GPS_SENSOR
+    GPSCache gps;
+    if (!gpsCacheSnapshot(gps) || !gps.hasFix) return false;
+    currentValue = gps.speed;
+ #else
+    return false;
+ #endif
+  } else if (strcmp(sensor, "SATS") == 0) {
+    // GPS satellites in view (valid even before a fix is achieved)
+ #if ENABLE_GPS_SENSOR
+    GPSCache gps;
+    if (!gpsCacheSnapshot(gps)) return false;
+    currentValue = (float)gps.satellites;
+ #else
+    return false;
+ #endif
+  } else if (strcmp(sensor, "PEERS") == 0) {
+    // Count of live ESP-NOW mesh peers (V3 heartbeat within 30s, excluding self)
+ #if ENABLE_ESPNOW
+    int alive = 0;
+    if (gMeshPeers) {
+      for (int i = 0; i < gMeshPeerSlots; i++) {
+        if (gMeshPeers[i].isActive && !isSelfMac(gMeshPeers[i].mac) && isMeshPeerAlive(&gMeshPeers[i])) alive++;
+      }
+    }
+    currentValue = (float)alive;
+ #else
+    return false;
+ #endif
+  // ---- Connectivity / device-state variables (string/enum) ----
+  } else if (strcmp(sensor, "WIFI") == 0) {
+    // STA association + IP -> CONNECTED / NONE
+    isNumeric = false;
+ #if ENABLE_WIFI
+    strncpy(currentStringValue, WiFi.isConnected() ? "CONNECTED" : "NONE", sizeof(currentStringValue) - 1);
+    currentStringValue[sizeof(currentStringValue) - 1] = '\0';
+ #else
+    return false;
+ #endif
+  } else if (strcmp(sensor, "BLE") == 0) {
+    // BLE GATT client connected -> CONNECTED / NONE (NONE when Bluetooth disabled)
+    isNumeric = false;
+    strncpy(currentStringValue, isBLEConnected() ? "CONNECTED" : "NONE", sizeof(currentStringValue) - 1);
+    currentStringValue[sizeof(currentStringValue) - 1] = '\0';
+  } else if (strcmp(sensor, "NTP") == 0) {
+    // Wall clock holds a real date (RTC or NTP source) -> SYNCED / NONE
+    isNumeric = false;
+    strncpy(currentStringValue, Clock::isSynced() ? "SYNCED" : "NONE", sizeof(currentStringValue) - 1);
+    currentStringValue[sizeof(currentStringValue) - 1] = '\0';
+  } else if (strcmp(sensor, "DAY") == 0) {
+    // Day of week -> SUN..SAT (tm_wday is 0=Sunday)
+    isNumeric = false;
+    time_t now = time(nullptr);
+    struct tm* ti = localtime(&now);
+    static const char* const kDays[] = { "SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT" };
+    int wd = ti->tm_wday;
+    if (wd < 0 || wd > 6) wd = 0;
+    strncpy(currentStringValue, kDays[wd], sizeof(currentStringValue) - 1);
+    currentStringValue[sizeof(currentStringValue) - 1] = '\0';
+  } else if (strcmp(sensor, "GPS") == 0) {
+    // GPS fix status -> FIX / NOFIX
+    isNumeric = false;
+ #if ENABLE_GPS_SENSOR
+    GPSCache gps;
+    if (!gpsCacheSnapshot(gps)) return false;
+    strncpy(currentStringValue, gps.hasFix ? "FIX" : "NOFIX", sizeof(currentStringValue) - 1);
+    currentStringValue[sizeof(currentStringValue) - 1] = '\0';
+ #else
+    return false;
+ #endif
+  } else if (strcmp(sensor, "LLM") == 0) {
+    // On-device model state -> READY / BUSY / NONE
+    isNumeric = false;
+ #if ENABLE_ONDEVICE_LLM
+    LLMState st = llmGetStatus().state;
+    const char* v = (st == LLMState::READY) ? "READY"
+                  : (st == LLMState::GENERATING || st == LLMState::LOADING) ? "BUSY" : "NONE";
+    strncpy(currentStringValue, v, sizeof(currentStringValue) - 1);
+    currentStringValue[sizeof(currentStringValue) - 1] = '\0';
+ #else
+    return false;
+ #endif
+  // ---- ESP-NOW / bond / pairing state ----
+  } else if (strcmp(sensor, "ESPNOW") == 0) {
+    // ESP-NOW radio stack initialized -> ACTIVE / NONE
+    isNumeric = false;
+ #if ENABLE_ESPNOW
+    strncpy(currentStringValue, (gEspNow && gEspNow->initialized) ? "ACTIVE" : "NONE", sizeof(currentStringValue) - 1);
+    currentStringValue[sizeof(currentStringValue) - 1] = '\0';
+ #else
+    return false;
+ #endif
+  } else if (strcmp(sensor, "BOND_MODE") == 0) {
+    // Bond mode enabled in config -> ACTIVE / NONE
+    isNumeric = false;
+    strncpy(currentStringValue, gSettings.bondModeEnabled ? "ACTIVE" : "NONE", sizeof(currentStringValue) - 1);
+    currentStringValue[sizeof(currentStringValue) - 1] = '\0';
+  } else if (strcmp(sensor, "BOND_ROLE") == 0) {
+    // This device's bond role -> MASTER / WORKER
+    isNumeric = false;
+    strncpy(currentStringValue, isBondMaster() ? "MASTER" : "WORKER", sizeof(currentStringValue) - 1);
+    currentStringValue[sizeof(currentStringValue) - 1] = '\0';
+  } else if (strcmp(sensor, "BOND_PAIRED") == 0) {
+    // A bonded partner is configured -> PAIRED / NONE
+    isNumeric = false;
+ #if ENABLE_BONDED_MODE
+    strncpy(currentStringValue, BondedPeer::isPaired() ? "PAIRED" : "NONE", sizeof(currentStringValue) - 1);
+    currentStringValue[sizeof(currentStringValue) - 1] = '\0';
+ #else
+    return false;
+ #endif
+  } else if (strcmp(sensor, "BOND_ONLINE") == 0) {
+    // Bonded peer currently reachable -> ONLINE / OFFLINE
+    isNumeric = false;
+    strncpy(currentStringValue, isBondModeOnline() ? "ONLINE" : "OFFLINE", sizeof(currentStringValue) - 1);
+    currentStringValue[sizeof(currentStringValue) - 1] = '\0';
+  } else if (strcmp(sensor, "BOND_SYNCED") == 0) {
+    // Bonded peer online AND config-synced -> SYNCED / NONE
+    isNumeric = false;
+    strncpy(currentStringValue, isBondSynced() ? "SYNCED" : "NONE", sizeof(currentStringValue) - 1);
+    currentStringValue[sizeof(currentStringValue) - 1] = '\0';
+  } else if (strcmp(sensor, "PAIRMODE") == 0) {
+    // WPS-style pairing window open -> ACTIVE / NONE
+    isNumeric = false;
+ #if ENABLE_ESPNOW
+    strncpy(currentStringValue, espnowPairModeActive() ? "ACTIVE" : "NONE", sizeof(currentStringValue) - 1);
+    currentStringValue[sizeof(currentStringValue) - 1] = '\0';
+ #else
+    return false;
+ #endif
+  } else if (strcmp(sensor, "PAIRMODE_SECS") == 0) {
+    // Seconds left in the pairing window (0 when closed)
+ #if ENABLE_ESPNOW
+    currentValue = (float)(espnowPairModeRemainingMs() / 1000UL);
+ #else
+    return false;
+ #endif
+  } else if (strcmp(sensor, "BOND_RSSI") == 0) {
+    // Link RSSI (dBm) of the last bond heartbeat; only meaningful while online
+ #if ENABLE_ESPNOW
+    if (!gEspNow || !isBondModeOnline()) return false;
+    currentValue = (float)gEspNow->bondRssiLast;
+ #else
+    return false;
+ #endif
+  } else if (strcmp(sensor, "BOND_PEER_HEAP") == 0) {
+    // Bonded peer's reported free heap in KB (from the ~30s status snapshot)
+ #if ENABLE_ESPNOW
+    if (!gEspNow || !gEspNow->bondPeerStatusValid) return false;
+    currentValue = (float)(gEspNow->bondPeerStatus.freeHeap / 1024);
+ #else
+    return false;
+ #endif
+  } else if (strcmp(sensor, "BOND_PEER_UPTIME") == 0) {
+    // Bonded peer's reported uptime in minutes (peer-reboot detection)
+ #if ENABLE_ESPNOW
+    if (!gEspNow || !gEspNow->bondPeerStatusValid) return false;
+    currentValue = (float)(gEspNow->bondPeerStatus.uptimeSec / 60);
+ #else
+    return false;
+ #endif
+  } else if (strcmp(sensor, "PEERSKNOWN") == 0) {
+    // Count of known mesh-peer slots (recently-seen, NOT alive-filtered like PEERS)
+ #if ENABLE_ESPNOW
+    int known = 0;
+    if (gMeshPeers) {
+      for (int i = 0; i < gMeshPeerSlots; i++) {
+        if (gMeshPeers[i].isActive && !isSelfMac(gMeshPeers[i].mac)) known++;
+      }
+    }
+    currentValue = (float)known;
+ #else
+    return false;
+ #endif
+  } else if (strcmp(sensor, "STALESTPEERAGE") == 0) {
+    // Seconds since the oldest mesh-peer heartbeat (link-degrading early warning)
+ #if ENABLE_ESPNOW
+    uint32_t nowMs = millis();
+    uint32_t worst = 0;
+    bool anyPeer = false;
+    if (gMeshPeers) {
+      for (int i = 0; i < gMeshPeerSlots; i++) {
+        if (gMeshPeers[i].isActive && !isSelfMac(gMeshPeers[i].mac) && gMeshPeers[i].lastMeshHeartbeatMs != 0) {
+          uint32_t age = (nowMs - gMeshPeers[i].lastMeshHeartbeatMs) / 1000UL;
+          if (age > worst) worst = age;
+          anyPeer = true;
+        }
+      }
+    }
+    if (!anyPeer) return false;
+    currentValue = (float)worst;
+ #else
+    return false;
+ #endif
   } else {
     DEBUGF(DEBUG_AUTOMATIONS, "[condition] Unknown sensor: %s", sensor);
     return false;
@@ -3537,34 +3797,22 @@ void schedulerTickMinute() {
       continue;
     }
 
-    // Parse nextAt field
-    time_t nextAt = 0;
-    int nextAtPos = obj.indexOf("\"nextAt\"");
-    if (nextAtPos >= 0) {
-      int nextAtColon = obj.indexOf(':', nextAtPos);
-      int nextAtComma = obj.indexOf(',', nextAtColon);
-      int nextAtBrace = obj.indexOf('}', nextAtColon);
-      int nextAtEnd = (nextAtComma > 0 && (nextAtBrace < 0 || nextAtComma < nextAtBrace)) ? nextAtComma : nextAtBrace;
-      if (nextAtEnd > nextAtColon) {
-        String nextAtStr = obj.substring(nextAtColon + 1, nextAtEnd);
-        nextAtStr.trim();
-        if (nextAtStr != "null" && nextAtStr.length() > 0) {
-          nextAt = (time_t)nextAtStr.toInt();
-        }
-      }
-    }
-
-    // If nextAt is missing or invalid, compute it now
+    // Fire when ANY trigger is due. computeNextRunTime returns the MINIMUM nextAt
+    // across all of the automation's triggers (each trigger's persisted nextAt, or
+    // a freshly computed nextFire for one whose nextAt is missing). We must NOT read
+    // the raw first "nextAt" string here: nextAt is stored per-trigger with no
+    // top-level field and triggers are never sorted, so the first occurrence is
+    // always triggers[0] (the primary). Gating on triggers[0] alone meant an
+    // additional trigger scheduled sooner than the primary never fired on its own
+    // cadence, and disagreed with the min-based due cache (rebuildAutoCache) --
+    // busy-spinning the full tick every main-loop pass until the primary came due.
+    // rescheduleAfterFire (below) then advances each trigger that was due, so the
+    // min moves forward and the cache/fire-check agree again.
+    time_t nextAt = computeNextRunTime(obj.c_str(), now);
     if (nextAt <= 0) {
-      nextAt = computeNextRunTime(obj.c_str(), now);
-      if (nextAt > 0) {
-        updateAutomationNextAt(id, nextAt);
-        DEBUGF(DEBUG_AUTOMATIONS, "[autos] id=%ld computed missing nextAt=%lu", id, (unsigned long)nextAt);
-      } else {
-        DEBUGF(DEBUG_AUTOMATIONS, "[autos] id=%ld skip: could not compute nextAt", id);
-        pos = objEnd + 1;
-        continue;
-      }
+      DEBUGF(DEBUG_AUTOMATIONS, "[autos] id=%ld skip: no schedulable trigger due", id);
+      pos = objEnd + 1;
+      continue;
     }
 
     // Check if it's time to run

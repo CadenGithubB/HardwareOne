@@ -8,6 +8,15 @@ Entries for 0.96.1 and earlier were backfilled from git history (this repo had
 no tags or releases before 0.96.2); they are terse, commit-grounded summaries,
 dated from each version's commit. Dates are YYYY-MM-DD.
 
+## [0.98.2] - 2026-07-12
+Automations can now check far more of the device's own state, the trigger form is simpler, and a multi-trigger scheduling bug is fixed.
+### Added
+- Automation conditions can check about 30 new things, usable in both the "fire when" condition and IF/THEN command logic: battery percent, free memory (heap, PSRAM, storage), uptime, chip temperature, hour of day, day of week, and whether the clock is synced; WiFi state and signal strength, Bluetooth state, and GPS fix/speed/satellites; the on-device model's state; and a range of ESP-NOW/bond signals - bond online/synced/paired/role, bond link signal strength, the bonded peer's free memory and uptime, whether pairing mode is open, how many mesh peers are known, and the oldest peer's heartbeat age.
+### Changed
+- The automation form now shows one unified "Triggers" list - the main trigger plus a quiet "+ Add trigger" button for extra ones (up to 4, auto-numbered) - replacing the separate always-visible "Additional Triggers" panel.
+### Fixed
+- Automations with more than one trigger now fire on each trigger's own schedule. Previously only the first trigger's schedule was honored, so an added trigger set to fire sooner than the main one never ran on its own cadence, and the scheduler repeatedly re-read the automations file until the main trigger came due.
+
 ## [0.98.1] - 2026-07-12
 Fixes to the on-device LLM's domain refusal gate: it stops refusing basic help questions, and the web chat now shows the refusal message for off-topic prompts instead of going blank.
 ### Fixed
