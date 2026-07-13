@@ -16,6 +16,10 @@
 #include "System_I2C.h"
 #include "System_MemUtil.h"
 #include "System_Mutex.h"
+#include "System_Settings.h"  // gSettings (previously only reached transitively via the
+                               // ENABLE_OLED_DISPLAY-gated OLED_Display.h include below —
+                               // broke on I2C-disabled builds since gSettings is used
+                               // unconditionally throughout this file)
 #include "System_Utils.h"
 
 #include "freertos/FreeRTOS.h"

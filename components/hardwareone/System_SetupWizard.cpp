@@ -629,13 +629,14 @@ uint32_t wizardEnabledModeExtraHeapKB() {
   return extra;
 }
 
-// The mode-picker pages are visible whenever their feature is enabled. Gated on
-// ENABLE_OLED_DISPLAY because the FTS engine's page handler (handleModePage)
-// lives in the OLED build; on headless builds the pages stay hidden in BOTH
-// engines (so they remain consistent). Both engines navigate via
+// The mode-picker pages are visible whenever their feature is enabled — on
+// every build, OLED or headless. Both engines dispatch WEBMODE/BTMODE through
+// the same OLED-if-connected-else-serial split as ESP-NOW/MQTT/WiFi (see
+// runSetupWizard), so there's always a working handler regardless of whether
+// a display is compiled in or physically present. Both engines navigate via
 // wizardAdvanceFrom, which respects this — no engine-specific flag needed.
 bool wizardShouldShowWebMode() {
-#if ENABLE_OLED_DISPLAY && ENABLE_HTTP_SERVER && ENABLE_HTTPS
+#if ENABLE_HTTP_SERVER && ENABLE_HTTPS
   return gSettings.httpAutoStart && wizardModeMenuForFeature("http") != nullptr;
 #else
   return false;
@@ -643,7 +644,7 @@ bool wizardShouldShowWebMode() {
 }
 
 bool wizardShouldShowBtMode() {
-#if ENABLE_OLED_DISPLAY && ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
+#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
   return gSettings.bluetoothAutoStart && wizardModeMenuForFeature("bluetooth") != nullptr;
 #else
   return false;
@@ -1090,12 +1091,14 @@ static void handleSerialESPNowPage(SetupWizardResult& result, bool& running) {
   Serial.print("Choice: ");
   String introChoice = waitForSerialInputBlocking();
   introChoice.trim();
+  String deviceName;
   if (introChoice.equalsIgnoreCase("b") || introChoice.equalsIgnoreCase("back")) {
     wizardPrevPage();
     return;
   }
-  if (!introChoice.equalsIgnoreCase("c") && !introChoice.equalsIgnoreCase("configure")) {
-    // Skip — disable ESP-NOW since it's unconfigured
+  if (introChoice.equalsIgnoreCase("n") || introChoice.equalsIgnoreCase("next") || introChoice.length() == 0) {
+    // Explicit skip (or blank/Enter) — disable ESP-NOW since it's unconfigured;
+    // it can't start without a name.
     gSettings.espnowenabled = false;
     if (!wizardNextPage(result)) running = false;
     return;
@@ -1106,14 +1109,24 @@ static void handleSerialESPNowPage(SetupWizardResult& result, bool& running) {
   Serial.println("----------------------------------------");
 
   String currentName = gSettings.espnowDeviceName.length() > 0 ? gSettings.espnowDeviceName : "HardwareOne";
-  Serial.printf("Device Name (for Bluetooth + ESP-NOW) [%s]: ", currentName.c_str());
-  String deviceName = waitForSerialInputBlocking();
-  deviceName.trim();
-  if (deviceName.equalsIgnoreCase("b") || deviceName.equalsIgnoreCase("back")) {
-    wizardPrevPage(); return;
+  if (introChoice.equalsIgnoreCase("c") || introChoice.equalsIgnoreCase("configure")) {
+    Serial.printf("Device Name (for Bluetooth + ESP-NOW) [%s]: ", currentName.c_str());
+    deviceName = waitForSerialInputBlocking();
+    deviceName.trim();
+    if (deviceName.equalsIgnoreCase("b") || deviceName.equalsIgnoreCase("back")) {
+      wizardPrevPage(); return;
+    }
+    if (deviceName.equalsIgnoreCase("n")) { deviceName = currentName; goto espnow_done; }
+    if (deviceName.length() == 0) deviceName = currentName;
+  } else {
+    // Not b/n/c — the user almost certainly typed their device name directly
+    // at the Choice: prompt instead of answering the c/n/b menu. Treat it as
+    // the name and continue into the configure flow rather than silently
+    // skipping (which used to also disable ESP-NOW) on what's very likely a
+    // menu mix-up, not an intentional skip.
+    deviceName = introChoice;
+    Serial.printf("Device Name (for Bluetooth + ESP-NOW): %s\n", deviceName.c_str());
   }
-  if (deviceName.equalsIgnoreCase("n")) { deviceName = currentName; goto espnow_done; }
-  if (deviceName.length() == 0) deviceName = currentName;
   result.espnowFriendlyName = deviceName;
 
   { Serial.print("Room (e.g. 'Living Room'): ");
@@ -1374,6 +1387,50 @@ static void handleSerialWiFiPage(SetupWizardResult& result, bool& running) {
   }
 }
 
+// Serial Web/Bluetooth mode picker (HTTP vs HTTPS, Server vs G2 Bluetooth).
+// Mirrors handleModePage()'s serial branch (OLED_SetupWizard.cpp) so headless
+// (ENABLE_OLED_DISPLAY=0) builds and OLED builds with no display physically
+// connected get the same choice — the OLED is an optional accessory, not a
+// requirement for full first-time setup (matches the ESPNOW/MQTT/WiFi split
+// above: one always-compiled serial handler, one optional richer OLED one).
+static void handleSerialModePage(SetupWizardPage page, SetupWizardResult& result, bool& running) {
+  const WizardModeMenu* sub = wizardModeMenuForPage(page);
+  if (!sub) { if (!wizardNextPage(result)) running = false; return; }  // nothing to pick — skip
+
+  int sel = wizardModeCurrentIndex(sub);
+  int lastPrinted = -1;
+
+  while (true) {
+    if (sel != lastPrinted) {
+      Serial.println();
+      Serial.printf("=== SETUP %d/%d: %s ===\n", getWizardPageNumber(page), getWizardTotalPages(), sub->title);
+      for (int i = 0; i < sub->modeCount; i++) {
+        Serial.printf(" %s%d. [%s] %s\n", sel == i ? ">" : " ", i + 1,
+                      sel == i ? "X" : " ", sub->modes[i].label);
+      }
+      Serial.println("----------------------------------------");
+      Serial.println("Serial: # to select, 'n' next, 'b' back");
+      Serial.print("> ");
+      lastPrinted = sel;
+    }
+
+    String input = waitForSerialInputBlocking();
+    input.trim();
+    if (input.equalsIgnoreCase("b") || input.equalsIgnoreCase("back")) { wizardPrevPage(); return; }
+    if (input.equalsIgnoreCase("n") || input.equalsIgnoreCase("next")) {
+      wizardModeApply(sub, sel);
+      if (!wizardNextPage(result)) running = false;
+      return;
+    }
+    int n = input.toInt();
+    if (n >= 1 && n <= sub->modeCount) {
+      sel = n - 1;
+      wizardModeApply(sub, sel);
+      lastPrinted = -1;  // force re-render with the new selection
+    }
+  }
+}
+
 // ============================================================================
 // THE unified wizard - single implementation for all builds
 // Serial is always active. When ENABLE_OLED_DISPLAY=1 and display is connected,
@@ -1441,16 +1498,22 @@ SetupWizardResult runSetupWizard() {
     // ------------------------------------------------------------------
     // 1. Pages with their own input loop (ESP-NOW, MQTT, WiFi)
     // ------------------------------------------------------------------
-#if ENABLE_OLED_DISPLAY
-    // Web Interface / Bluetooth mode picker — conditional pages handled as a
-    // self-contained blocking sub-flow (like MQTT/WiFi). Only visible (and only
-    // reached) in the blocking FTS wizard, on OLED builds.
+    // Web Interface / Bluetooth mode picker — conditional page handled as a
+    // self-contained blocking sub-flow, same split as ESP-NOW/MQTT/WiFi below:
+    // the OLED-rich version only runs when a display is actually connected,
+    // otherwise the always-compiled serial handler covers it.
     if (currentPage == WIZARD_PAGE_WEBMODE || currentPage == WIZARD_PAGE_BTMODE) {
-      handleModePage(currentPage, result, running);
+#if ENABLE_OLED_DISPLAY
+      if (oledDisplay && oledConnected) {
+        handleModePage(currentPage, result, running);
+        lastPrintedPage = WIZARD_PAGE_COUNT;
+        continue;
+      }
+#endif
+      handleSerialModePage(currentPage, result, running);
       lastPrintedPage = WIZARD_PAGE_COUNT;
       continue;
     }
-#endif
 
     if (currentPage == WIZARD_PAGE_ESPNOW) {
 #if ENABLE_OLED_DISPLAY
