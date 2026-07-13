@@ -526,12 +526,28 @@ static CLIModeInputResult dispatchESPNow(const String& line,
         broadcastOutput("----------------------------------------");
         appendPromptTo(out, outSize); return CLI_MODE_HANDLED;
       }
-      // anything else = skip path; disable ESP-NOW since unconfigured
-      gSettings.espnowenabled = false;
-      goNextPage();
-      appendPromptTo(out, outSize);
-      return (sWizard.subMode == WizardSubMode::DONE) ? CLI_MODE_HANDLED_AND_EXIT
-                                                       : CLI_MODE_HANDLED;
+      if (isNext || raw.length() == 0) {
+        // Explicit skip (or blank/Enter) — disable ESP-NOW since it's
+        // unconfigured; it can't start without a name.
+        gSettings.espnowenabled = false;
+        goNextPage();
+        appendPromptTo(out, outSize);
+        return (sWizard.subMode == WizardSubMode::DONE) ? CLI_MODE_HANDLED_AND_EXIT
+                                                         : CLI_MODE_HANDLED;
+      }
+      // Anything else looks like the user typed their device name directly
+      // instead of picking from the c/n/b menu — treat it as the name and
+      // continue into the configure flow (matches handleSerialESPNowPage)
+      // rather than silently skipping (which used to also disable ESP-NOW)
+      // on what's very likely a menu mix-up, not an intentional skip.
+      sWizard.espnowConfiguring = true;
+      sWizard.result.espnowFriendlyName = raw;
+      sWizard.subMode = WizardSubMode::ESPNOW_ROOM;
+      broadcastOutput("----------------------------------------");
+      broadcastOutput("All fields optional. Enter to skip field, "
+                      "'n' to finish, 'b' to go back.");
+      broadcastOutput("----------------------------------------");
+      appendPromptTo(out, outSize); return CLI_MODE_HANDLED;
 
     case WizardSubMode::ESPNOW_NAME:
       if (isBack) { goBack(); appendPromptTo(out, outSize); return CLI_MODE_HANDLED; }

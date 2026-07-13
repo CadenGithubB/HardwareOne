@@ -625,7 +625,13 @@ static int showWizardOptionalPageIntro(SetupWizardPage page, const char* title,
       Serial.println(in);
       if (in == "b" || in == "back") { wizardPrevPage(); return -1; }
       if (in == "c" || in == "configure") return 1;
-      return 0; // 's', 'n', enter, or anything else = skip
+      if (in == "n" || in == "next" || in.length() == 0) return 0; // explicit skip (or blank/Enter)
+      // Anything else looks like the user typed their answer directly instead
+      // of picking from the c/n/b menu (e.g. a device name or MQTT host) —
+      // treat it as "configure" rather than silently skipping, which is
+      // surprising for what's almost always a menu mix-up, not an intentional
+      // skip. The typed text itself is re-prompted for by the next field.
+      return 1;
     }
 
     oledDisplay->clearDisplay();
