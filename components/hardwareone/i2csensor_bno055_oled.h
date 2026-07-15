@@ -8,7 +8,7 @@
 #include <Adafruit_SSD1306.h>
 
 // Forward declaration for IMU action detection
-extern void imuUpdateActions();
+extern void imuUpdateActions(bool postEvents);
 
 // IMU OLED display function - shows action detection
 static void displayIMUActions() {

@@ -495,8 +495,8 @@ OledPairingRibbon gOledPairingRibbon = {{0}, PairingRibbonState::HIDDEN, Pairing
 // Ribbon dimensions
 static const int RIBBON_WIDTH = 80;    // Width of the ribbon
 static const int RIBBON_HEIGHT = 18;   // Height when fully visible
-static const int RIBBON_ICON_SIZE = 12; // Small icon size (0.375x scale of 32x32)
-static const int RIBBON_MIN_SIZE = 14; // Minimized indicator size
+static const int RIBBON_ICON_SIZE = 16; // Icon size in the ribbon (0.5x of 32x32 -> clean 2x2 downsample)
+static const int RIBBON_MIN_SIZE = 18; // Minimized indicator size (fits the 16px icon)
 static const int RIBBON_ANIM_DURATION_MS = 500; // Total time for slide in/out animation (~5 frames at 10 FPS)
 
 void oledPairingRibbonShow(const char* message, PairingRibbonIcon icon, uint32_t visibleMs, bool blink) {
@@ -506,7 +506,7 @@ void oledPairingRibbonShow(const char* message, PairingRibbonIcon icon, uint32_t
   
   // Calculate dynamic duration for long messages to ensure full scroll completes
   int msgLen = strlen(gOledPairingRibbon.message);
-  int textWidth = RIBBON_WIDTH - 18;  // Available pixel width for text (4px left + 14px right icon)
+  int textWidth = RIBBON_WIDTH - 22;  // Available pixel width for text (4px left + 18px right icon)
   int fullTextWidth = msgLen * 6;     // Total pixel width of message
   if (fullTextWidth > textWidth) {
     // Message needs scrolling - calculate time for one full scroll cycle
@@ -581,7 +581,7 @@ void oledPairingRibbonUpdate() {
       if (now - gOledPairingRibbon.lastScrollMs >= 100) {
         gOledPairingRibbon.lastScrollMs = now;
         int msgLen = strlen(gOledPairingRibbon.message);
-        int textWidth = RIBBON_WIDTH - 18;
+        int textWidth = RIBBON_WIDTH - 22;
         int fullTextWidth = msgLen * 6;
         if (fullTextWidth > textWidth) {
           gOledPairingRibbon.scrollOffset++;
@@ -618,14 +618,16 @@ void oledPairingRibbonUpdate() {
 static void drawPairingIcon(int x, int y, PairingRibbonIcon icon, bool visible) {
   if (!gDisplay || !visible) return;
   
-  // Map ribbon icons to embedded icon names (pairing-specific icons)
+  // Ribbon states reuse general-purpose icons, scaled down by oledDrawIcon.
+  // These read well at RIBBON_ICON_SIZE (bold, few features); the bespoke
+  // pair_* glyphs are no longer needed here.
   const char* iconName = nullptr;
   switch (icon) {
-    case PairingRibbonIcon::LINK:      iconName = "pair_link"; break;
-    case PairingRibbonIcon::LINK_OFF:  iconName = "pair_link_off"; break;
-    case PairingRibbonIcon::SYNC:      iconName = "pair_sync"; break;
-    case PairingRibbonIcon::SEARCHING: iconName = "pair_search"; break;
-    default: break;  // General icons use text fallback below
+    case PairingRibbonIcon::LINK:      iconName = "check"; break;    // linked / connected
+    case PairingRibbonIcon::LINK_OFF:  iconName = "close"; break;    // link down
+    case PairingRibbonIcon::SYNC:      iconName = "refresh"; break;  // syncing
+    case PairingRibbonIcon::SEARCHING: iconName = "search"; break;   // discovering peers
+    default: break;  // SUCCESS/ERROR draw programmatically; others use text fallback below
   }
   
   // Try embedded icon first
@@ -707,7 +709,7 @@ void oledNotificationBannerUpdate(const char* message, PairingRibbonIcon icon,
   
   // Recalculate duration: at least extraMs, longer if new text needs scrolling
   int msgLen = strlen(gOledPairingRibbon.message);
-  int textWidthBanner = RIBBON_WIDTH - 18;
+  int textWidthBanner = RIBBON_WIDTH - 22;
   int fullTextWidth = msgLen * 6;
   if (fullTextWidth > textWidthBanner) {
     int pixelsToScroll = fullTextWidth - textWidthBanner;
@@ -758,7 +760,7 @@ void oledPairingRibbonRender() {
     int msgLen = strlen(gOledPairingRibbon.message);
     int textX = x + 4;
     int textY = y + 5;
-    int textWidth = RIBBON_WIDTH - 18;  // Available width for text (4px left pad + 14px right icon area)
+    int textWidth = RIBBON_WIDTH - 22;  // Available width for text (4px left pad + 18px right icon area)
     
     int charW = 6;  // pixels per character at textSize(1)
     int maxVisible = textWidth / charW;
@@ -783,8 +785,8 @@ void oledPairingRibbonRender() {
       }
     }
     
-    // Icon on the RIGHT side
-    drawPairingIcon(x + RIBBON_WIDTH - 13, y + 3, gOledPairingRibbon.icon, iconVisible);
+    // Icon on the RIGHT side (16px, right-aligned with a 1px margin, vertically centered in the 18px ribbon)
+    drawPairingIcon(x + RIBBON_WIDTH - 17, y + 1, gOledPairingRibbon.icon, iconVisible);
   }
 }
 

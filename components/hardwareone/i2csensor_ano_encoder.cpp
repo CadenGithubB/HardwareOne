@@ -1,4 +1,5 @@
 #include "i2csensor_ano_encoder.h"
+#include "System_Events.h"  // systemEventPost — event register producer
 #include "System_BuildConfig.h"
 #include "System_MemoryMonitor.h"
 #include "System_MemUtil.h"
@@ -542,6 +543,9 @@ void inputTask(void* parameter) {
             DEBUG_ANO_ENCODER_VALUESF("[ANO_VAL] press   raw=0x%02lX (%s)",
                                       (unsigned long)newlyPressed,
                                       anoBtnNames(newlyPressed, nameBuf, sizeof(nameBuf)));
+            // Bus event: PRESS edges only (releases skipped — nav noise).
+            char evName[48];
+            systemEventPost(SYSEVT_BUTTON, anoBtnNames(newlyPressed, evName, sizeof(evName)));
           }
           if (newlyReleased) {
             char nameBuf[48];
@@ -649,6 +653,8 @@ void inputTask(void* parameter) {
             ERROR_ANO_ENCODERF("[ANO_TASK] Too many failures - auto-disabling");
             handleDeviceStopped(I2C_DEVICE_INPUT);
             logSystemEvent("SENSOR", "ANO Encoder auto-disabled after %u consecutive I2C failures", errors);
+            { char det[24]; snprintf(det, sizeof(det), "%u I2C errors", errors);
+              systemEventPost(SYSEVT_SENSOR_FAULT, "ANO", det); }
           }
         } else {
           consecutiveInvalidReads++;
@@ -656,6 +662,8 @@ void inputTask(void* parameter) {
             ERROR_ANO_ENCODERF("[ANO_TASK] %u invalid reads - auto-disabling", consecutiveInvalidReads);
             handleDeviceStopped(I2C_DEVICE_INPUT);
             logSystemEvent("SENSOR", "ANO Encoder auto-disabled after %u consecutive invalid reads (device likely disconnected)", consecutiveInvalidReads);
+            { char det[24]; snprintf(det, sizeof(det), "%u invalid reads", (unsigned)consecutiveInvalidReads);
+              systemEventPost(SYSEVT_SENSOR_FAULT, "ANO", det); }
           }
         }
         lastRead = nowMs;

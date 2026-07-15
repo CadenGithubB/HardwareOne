@@ -1,5 +1,6 @@
 #include "WebServer_Handle.h"
 #include "OLED_Utils.h"
+#include "System_Events.h"  // systemEventPost — SYSEVT_DISPLAY_INIT_FAILED
 #include "OLED_Display.h"
 #include <esp_app_desc.h>
 #include "OLED_UI.h"
@@ -10,7 +11,7 @@
 #include "System_Settings.h"
 #include "System_ESPNow.h"
 #include "System_Utils.h"  // For AuthContext
-#include "System_CommandTypes.h"  // For Command, CmdOutputMask
+#include "System_CommandTypes.h"  // For Command, CommandContext
 #include "System_FirstTimeSetup.h"
 
 // Forward declaration for memory stats display
@@ -192,70 +193,88 @@ static const char* getOLEDModeName(OLEDMode mode);
 // Default header config
 const OLEDHeaderInfo HEADER_DEFAULT = { nullptr, true, true, true, 0 };
 
-// Notification queue storage
-static OLEDNotification sNotificationQueue[OLED_NOTIFICATION_MAX];
-static int sNotificationCount = 0;
-static int sNotificationHead = 0;  // Newest notification index
+// Notification-center view — ring-backed since the Phase-1 cutover.
+// There is no separate queue storage anymore: the view materializes the
+// newest OLED_NOTIFICATION_MAX queue-enabled events straight from the event
+// register, and two watermarks replace per-entry state (read = seq at/below
+// sNotifReadSeq; cleared = hidden at/below sNotifClearedSeq). Same public
+// API as the old array, so the viewer code below is unchanged.
+static OLEDNotification sNotifView[OLED_NOTIFICATION_MAX];
+static int sNotifViewCount = 0;
+static uint32_t sNotifReadSeq = 0;
+static uint32_t sNotifClearedSeq = 0;
+// Rebuild cache keys — skip the ring walk when nothing changed. The view is
+// viewer-dependent (per-user mutes, admin-only kinds), so the key includes
+// the notification prefs generation and the logged-in OLED user.
+static uint32_t sNotifViewAtSeq = UINT32_MAX;
+static uint32_t sNotifViewAtRead = UINT32_MAX;
+static uint32_t sNotifViewAtCleared = UINT32_MAX;
+static uint32_t sNotifViewAtGen = 0;
+static char sNotifViewAtUser[SYSEVT_WHO_LEN] = "";
 
-void oledNotificationAdd(const char* message, uint8_t level, uint8_t source, const char* subsource) {
-  if (!message) return;
-  
-  // Find slot for new notification (circular buffer, newest at head)
-  int slot = sNotificationHead;
-  
-  // Copy message
-  strncpy(sNotificationQueue[slot].message, message, OLED_NOTIFICATION_MSG_LEN - 1);
-  sNotificationQueue[slot].message[OLED_NOTIFICATION_MSG_LEN - 1] = '\0';
-  
-  // Copy subsource (IP, device name, or MAC)
-  if (subsource && subsource[0]) {
-    strncpy(sNotificationQueue[slot].subsource, subsource, OLED_NOTIFICATION_SUBSOURCE_LEN - 1);
-    sNotificationQueue[slot].subsource[OLED_NOTIFICATION_SUBSOURCE_LEN - 1] = '\0';
-  } else {
-    sNotificationQueue[slot].subsource[0] = '\0';
+static void notifViewRebuild() {
+  uint32_t latest = systemEventLatestSeq();
+  const char* viewerName = gLocalDisplayAuthed ? gLocalDisplayUser.c_str() : "";
+  if (latest == sNotifViewAtSeq && sNotifReadSeq == sNotifViewAtRead &&
+      sNotifClearedSeq == sNotifViewAtCleared &&
+      notifPrefsGeneration() == sNotifViewAtGen &&
+      strncmp(viewerName, sNotifViewAtUser, sizeof(sNotifViewAtUser) - 1) == 0) {
+    return;
   }
-  
-  sNotificationQueue[slot].timestampMs = millis();
-  sNotificationQueue[slot].level = level;
-  sNotificationQueue[slot].source = source;
-  sNotificationQueue[slot].read = false;
-  
-  // Advance head
-  sNotificationHead = (sNotificationHead + 1) % OLED_NOTIFICATION_MAX;
-  if (sNotificationCount < OLED_NOTIFICATION_MAX) {
-    sNotificationCount++;
+  NotifViewer viewer;
+  notifViewerResolve(viewerName, viewer);
+  sNotifViewCount = 0;
+  SystemEvent ev;
+  for (uint32_t seq = latest; seq > sNotifClearedSeq && sNotifViewCount < OLED_NOTIFICATION_MAX; seq--) {
+    if (!systemEventGetBySeq(seq, &ev)) break;  // fell off the ring
+    NotifRule rule = notifRuleForViewer(ev.kind, viewer);
+    if (!(rule.sinks & NSINK_QUEUE)) continue;
+    OLEDNotification& n = sNotifView[sNotifViewCount++];
+    notifFormatEvent(ev, n.message, sizeof(n.message));
+    // subsource shows the who identity when present, else stays empty (the
+    // source interface renders separately via n.source).
+    strncpy(n.subsource, ev.who, OLED_NOTIFICATION_SUBSOURCE_LEN - 1);
+    n.subsource[OLED_NOTIFICATION_SUBSOURCE_LEN - 1] = '\0';
+    n.timestampMs = ev.tsMs;
+    n.level = rule.level;
+    n.source = ev.source;
+    n.read = (ev.seq <= sNotifReadSeq);
   }
+  sNotifViewAtSeq = latest;
+  sNotifViewAtRead = sNotifReadSeq;
+  sNotifViewAtCleared = sNotifClearedSeq;
+  sNotifViewAtGen = notifPrefsGeneration();
+  strncpy(sNotifViewAtUser, viewerName, sizeof(sNotifViewAtUser) - 1);
+  sNotifViewAtUser[sizeof(sNotifViewAtUser) - 1] = '\0';
 }
 
 int oledNotificationCount() {
-  return sNotificationCount;
+  notifViewRebuild();
+  return sNotifViewCount;
 }
 
 int oledNotificationUnreadCount() {
+  notifViewRebuild();
   int unread = 0;
-  for (int i = 0; i < sNotificationCount; i++) {
-    int idx = (sNotificationHead - 1 - i + OLED_NOTIFICATION_MAX) % OLED_NOTIFICATION_MAX;
-    if (!sNotificationQueue[idx].read) unread++;
+  for (int i = 0; i < sNotifViewCount; i++) {
+    if (!sNotifView[i].read) unread++;
   }
   return unread;
 }
 
 void oledNotificationMarkAllRead() {
-  for (int i = 0; i < OLED_NOTIFICATION_MAX; i++) {
-    sNotificationQueue[i].read = true;
-  }
+  sNotifReadSeq = systemEventLatestSeq();
 }
 
 void oledNotificationClear() {
-  sNotificationCount = 0;
-  sNotificationHead = 0;
+  sNotifClearedSeq = systemEventLatestSeq();
+  sNotifReadSeq = sNotifClearedSeq;
 }
 
 const OLEDNotification* oledNotificationGet(int index) {
-  if (index < 0 || index >= sNotificationCount) return nullptr;
-  // Index 0 = newest (head - 1)
-  int idx = (sNotificationHead - 1 - index + OLED_NOTIFICATION_MAX) % OLED_NOTIFICATION_MAX;
-  return &sNotificationQueue[idx];
+  notifViewRebuild();
+  if (index < 0 || index >= sNotifViewCount) return nullptr;
+  return &sNotifView[index];  // index 0 = newest
 }
 
 // Defined later in this file — header text when mode is OLED_UNAVAILABLE
@@ -2622,7 +2641,7 @@ static Command buildOLEDCommand(const String& cmdLine) {
   uc.ctx.auth = oledAuthContext("/oled/command");
   uc.ctx.id = (uint32_t)millis();
   uc.ctx.timestampMs = (uint32_t)millis();
-  uc.ctx.outputMask = CMD_OUT_LOG;  // file log + OLED console (via MSG_ROUTE_OLED), no serial echo
+  uc.ctx.outputMask = MSG_ROUTE_FILE;  // file log + OLED console (via MSG_ROUTE_OLED), no serial echo
   uc.ctx.validateOnly = false;
   uc.ctx.replyHandle = nullptr;
   uc.ctx.httpReq = nullptr;
@@ -4265,6 +4284,8 @@ bool earlyOLEDInit() {
   // write a false hardware-failure record into a fresh device's very first log.
   if (gSettings.oledEnabled) {
     logSystemEvent("DISPLAY", "OLED enabled but init FAILED at boot (not detected / begin() failed on bus %u)", oledBus);
+    char dispDet[24]; snprintf(dispDet, sizeof(dispDet), "bus %u", oledBus);
+    systemEventPost(SYSEVT_DISPLAY_INIT_FAILED, dispDet);
   }
   return false;
 }
@@ -4515,21 +4536,14 @@ int gDynamicMenuItemCount = 0;
 static bool gDynamicMenuBuilt = false;
 static DataSource gLastBuildSource = DataSource::LOCAL;
 
-// Submenu state for grouped remote items
-static bool gInRemoteSubmenu = false;
-static char gRemoteSubmenuId[16] = "";
-EXT_RAM_BSS_ATTR static OLEDMenuItemEx gRemoteSubmenuItems[MAX_DYNAMIC_MENU_ITEMS];
-static int gRemoteSubmenuItemCount = 0;
-static int gRemoteSubmenuSelection = 0;
-
 // Remote command input state (for commands that need parameters)
 static bool gRemoteCommandInputActive = false;
 static char gPendingRemoteCommand[64] = "";
 
 // Start remote command input mode with keyboard.
 // [[maybe_unused]]: its only live caller (the old oledMenuSelect remote-submenu
-// path) is gone with the menu unification, but it's kept as part of the
-// not-yet-wired remote-command subsystem (buildRemoteSubmenu et al.).
+// path) is gone with the menu unification; kept as the not-yet-wired
+// remote-command-input entry point.
 [[maybe_unused]] static void startRemoteCommandInput(const char* baseCommand) {
   strncpy(gPendingRemoteCommand, baseCommand, sizeof(gPendingRemoteCommand) - 1);
   gPendingRemoteCommand[sizeof(gPendingRemoteCommand) - 1] = '\0';
@@ -4632,141 +4646,6 @@ static String loadCachedManifest() {
   f.close();
   DEBUG_DISPLAYF("[RMENU] Loaded manifest: %d bytes\n", content.length());
   return content;
-}
-
-// Build submenu items for a given module from cached manifest
-void buildRemoteSubmenu(const char* submenuId) {
-  gRemoteSubmenuItemCount = 0;
-  gRemoteSubmenuSelection = 0;
-  strncpy(gRemoteSubmenuId, submenuId, sizeof(gRemoteSubmenuId) - 1);
-  gRemoteSubmenuId[sizeof(gRemoteSubmenuId) - 1] = '\0';
-  
-  if (!gEspNow || !gEspNow->lastRemoteCapValid) return;
-  
-  auto add = [&](const char* name, const char* icon, const char* cmd, const char* helpText) {
-    if (gRemoteSubmenuItemCount >= MAX_DYNAMIC_MENU_ITEMS) return;
-    OLEDMenuItemEx& item = gRemoteSubmenuItems[gRemoteSubmenuItemCount];
-    strncpy(item.name, name, sizeof(item.name) - 1);
-    item.name[sizeof(item.name) - 1] = '\0';
-    strncpy(item.iconName, icon, sizeof(item.iconName) - 1);
-    item.iconName[sizeof(item.iconName) - 1] = '\0';
-    strncpy(item.command, cmd, sizeof(item.command) - 1);
-    item.command[sizeof(item.command) - 1] = '\0';
-    // Parse help text once to determine if command needs input
-    item.needsInput = helpText && (strchr(helpText, '<') || strchr(helpText, '['));
-    item.targetMode = OLED_OFF;
-    item.isRemote = true;
-    item.isSubmenu = false;
-    item.submenuId[0] = '\0';
-    gRemoteSubmenuItemCount++;
-  };
-  
-  // Load cached manifest
-  String manifestStr = loadCachedManifest();
-  if (manifestStr.length() == 0) {
-    DEBUG_DISPLAYF("[RMENU] No cached manifest, using fallback");
-    // Fallback to basic commands
-    add("Status", "notify_system", "status", "Show system status");
-    add("Help", "help", "help", "Show available commands");
-    gInRemoteSubmenu = true;
-    return;
-  }
-  
-  // Parse manifest
-  PSRAM_JSON_DOC(doc);
-  DeserializationError err = deserializeJson(doc, manifestStr);
-  if (err) {
-    DEBUG_DISPLAYF("[RMENU] Manifest parse error: %s\n", err.c_str());
-    gInRemoteSubmenu = true;
-    return;
-  }
-  
-  // Find the module matching submenuId
-  JsonArray modules = doc["cliModules"].as<JsonArray>();
-  for (JsonObject module : modules) {
-    const char* moduleName = module["name"] | "";
-    if (strcmp(moduleName, submenuId) != 0) continue;
-    
-    // Found the module - add all its commands
-    JsonArray commands = module["commands"].as<JsonArray>();
-    for (JsonObject cmd : commands) {
-      const char* cmdName = cmd["name"] | "";
-      const char* cmdHelp = cmd["help"] | "";
-      bool isAdmin = cmd["admin"] | false;
-      
-      // Skip empty or admin-only commands for now
-      if (strlen(cmdName) == 0) continue;
-      
-      // Choose icon based on command type
-      const char* icon = "terminal";
-      if (strstr(cmdName, "status")) icon = "notify_system";
-      else if (strstr(cmdName, "wifi")) icon = "notify_server";
-      else if (strstr(cmdName, "ble") || strstr(cmdName, "bt")) icon = "bt_idle";
-      else if (strstr(cmdName, "gps")) icon = "compass";
-      else if (strstr(cmdName, "imu")) icon = "imu_axes";
-      else if (strstr(cmdName, "thermal")) icon = "thermal";
-      else if (strstr(cmdName, "file")) icon = "notify_files";
-      else if (strstr(cmdName, "mute")) icon = "vol_mute";
-      else if (strstr(cmdName, "volume") || strstr(cmdName, "gain")) icon = "speaker";
-      else if (strstr(cmdName, "record")) icon = "mic";
-      else if (strstr(cmdName, "set")) icon = "settings";
-      else if (strstr(cmdName, "help")) icon = "help";
-      
-      // Use first word of command as display name (truncate if needed)
-      char displayName[24];
-      strncpy(displayName, cmdName, sizeof(displayName) - 1);
-      displayName[sizeof(displayName) - 1] = '\0';
-      // Add admin indicator
-      if (isAdmin && strlen(displayName) < sizeof(displayName) - 2) {
-        strcat(displayName, " *");
-      }
-      
-      add(displayName, icon, cmdName, cmdHelp);
-    }
-    break;
-  }
-  
-  gInRemoteSubmenu = true;
-  DEBUG_DISPLAYF("[RMENU] Built submenu '%s' with %d items from manifest\n", submenuId, gRemoteSubmenuItemCount);
-}
-
-// Exit remote submenu
-void exitRemoteSubmenu() {
-  gInRemoteSubmenu = false;
-  gRemoteSubmenuId[0] = '\0';
-  gRemoteSubmenuItemCount = 0;
-  gRemoteSubmenuSelection = 0;
-}
-
-// Check if in remote submenu
-bool isInRemoteSubmenu() {
-  return gInRemoteSubmenu;
-}
-
-// Get remote submenu items
-OLEDMenuItemEx* getRemoteSubmenuItems() {
-  return gRemoteSubmenuItems;
-}
-
-// Get remote submenu item count
-int getRemoteSubmenuItemCount() {
-  return gRemoteSubmenuItemCount;
-}
-
-// Get/set remote submenu selection
-int getRemoteSubmenuSelection() {
-  return gRemoteSubmenuSelection;
-}
-
-void setRemoteSubmenuSelection(int sel) {
-  if (sel >= 0 && sel < gRemoteSubmenuItemCount) {
-    gRemoteSubmenuSelection = sel;
-  }
-}
-
-// Get current submenu ID
-const char* getRemoteSubmenuId() {
-  return gRemoteSubmenuId;
 }
 
 // Load remote menu items from cached manifest - creates submenu headers for each CLI module
@@ -5217,13 +5096,6 @@ bool oledMenuBack() {
   // Handle remote command keyboard cancellation
   if (gRemoteCommandInputActive) {
     cancelRemoteCommandInput();
-    return true;
-  }
-  
-  // Handle remote submenu back
-  if (gInRemoteSubmenu) {
-    gInRemoteSubmenu = false;
-    gRemoteSubmenuSelection = 0;
     return true;
   }
   

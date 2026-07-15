@@ -118,7 +118,11 @@ void imuPoll();
 void imuApplyOrientationCorrection(float& pitch, float& roll, float& yaw);
 
 // IMU action detection
-void imuUpdateActions();
+// postEvents: only the IMU poll task passes true — the OLED IMU page and
+// cmd_imuactions also call this for fresh display state, and event posts /
+// debounce counters from those callers would count renders instead of
+// samples and double-post across cores.
+void imuUpdateActions(bool postEvents = false);
 
 // JSON building
 int imuBuildDataJSON(char* buf, size_t bufSize);

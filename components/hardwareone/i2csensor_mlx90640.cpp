@@ -1,4 +1,5 @@
 #include "i2csensor_mlx90640.h"
+#include "System_Events.h"  // systemEventPost — event register producer
 #include "System_BuildConfig.h"
 #include "System_MemoryMonitor.h"
 #include "System_Utils.h"
@@ -551,6 +552,10 @@ bool thermalInit() {
   });
 }
 
+// Over-temp hotspot latch. Hysteresis (fire >50C / clear <45C) plus reset on
+// task start keeps a lingering hotspot from re-posting every poll.
+static bool gThermalHot = false;
+
 bool thermalPoll() {
   extern bool gMlx90640Initialized;
   extern bool lockThermalCache(TickType_t timeout);
@@ -872,6 +877,17 @@ bool thermalPoll() {
     maxTemp = rollingMax;
   } else {
     rollingInitialized = false;
+  }
+
+  // Over-temp hotspot alert, edge-latched with hysteresis: post once when the
+  // scene max crosses 50C, clear silently below 45C. Never posts every poll.
+  if (!gThermalHot && maxTemp > 50.0f) {
+    gThermalHot = true;
+    char maxC[16];
+    snprintf(maxC, sizeof(maxC), "%.1fC", maxTemp);
+    systemEventPost(SYSEVT_THERMAL_HOT_ALERT, maxC);
+  } else if (gThermalHot && maxTemp < 45.0f) {
+    gThermalHot = false;
   }
 
   if (lockThermalCache(pdMS_TO_TICKS(50))) {
@@ -1434,6 +1450,7 @@ void thermalTask(void* parameter) {
                 (void*)xTaskGetCurrentTaskHandle(), 
                 (unsigned)uxTaskGetStackHighWaterMark(nullptr));
   INFO_THERMAL_LIFECYCLEF("[MODULAR] thermalTask() running from i2csensor_mlx90640.cpp");
+  gThermalHot = false;
   unsigned long lastThermalRead = 0;
   unsigned long lastStackLog = 0;
   while (true) {
@@ -1510,6 +1527,7 @@ void thermalTask(void* parameter) {
             gThermalEnabled = false;
             sensorStatusBumpWith("thermal@auto_disabled");
             logSystemEvent("SENSOR", "Thermal auto-disabled after too many consecutive I2C failures");
+            systemEventPost(SYSEVT_SENSOR_FAULT, "Thermal", "consecutive I2C failures");
             // Task will clean up and delete itself on next loop iteration
           }
         }
@@ -1523,6 +1541,12 @@ void thermalTask(void* parameter) {
         // ESP-NOW broadcaster reads buildThermalDataJSONInteger() on demand from gThermalCache.
       }
       vTaskDelay(pdMS_TO_TICKS(10));
+    } else {
+      // Enabled-but-not-ready, disconnected, or polling paused: yield instead of
+      // busy-spinning the core. Without this else the while(true) loop had no delay
+      // on the gated path and pinned the core at 100% during any pollPause window
+      // (matches imuTask's 50 ms idle delay).
+      vTaskDelay(pdMS_TO_TICKS(50));
     }
   }
 }

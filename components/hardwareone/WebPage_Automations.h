@@ -44,6 +44,7 @@ static void streamAutomationsInner(httpd_req_t* req) {
   <option value='afterDelay'>After Delay</option>
   <option value='interval'>Interval</option>
   <option value='onBoot'>On Boot</option>
+  <option value='event'>On Event</option>
 </select>
 <div id='grp_atTime'>
 <div style='display:flex;flex-direction:column;gap:0.5rem'>
@@ -127,6 +128,10 @@ static void streamAutomationsInner(httpd_req_t* req) {
     <option value='day'>days</option>
   </select>
 </div>
+<div id='grp_event' class='vis-gone row-inline' style='gap:0.3rem;flex-wrap:wrap'>
+  <select id='a_event_on' class='input-tall'></select>
+  <input id='a_event_match' class='input-tall' maxlength='48' placeholder='match (optional)' title='Only fire when the event&#39;s subject or detail contains this text (case-insensitive). Leave empty to fire on every event of this kind.' style='width:160px'>
+</div>
 <div id='secondary_triggers_section' style='margin-top:0.5rem'>
   <div id='secondary_triggers_container'></div>
   <button type='button' class='btn btn-small' onclick='addSecondaryTrigger()' title='Fire this automation from another source (up to 4 total)'>+ Add trigger</button>
@@ -139,6 +144,7 @@ static void streamAutomationsInner(httpd_req_t* req) {
       <option value='interval'>Interval</option>
       <option value='manual'>Manual (After Delay)</option>
       <option value='boot'>On Boot</option>
+      <option value='event'>On Event</option>
     </select>
     <span class='st-fields st-fields-time' style='display:inline-flex;gap:0.3rem;align-items:center;flex-wrap:wrap'>
       <input type='time' class='st-time input-tall' style='width:120px'>
@@ -174,6 +180,10 @@ static void streamAutomationsInner(httpd_req_t* req) {
       <label style='font-size:0.85em'>Delay:</label>
       <input type='number' class='st-boot-delay input-tall' value='0' min='0' style='width:80px'>
       <span style='font-size:0.85em'>ms</span>
+    </span>
+    <span class='st-fields st-fields-event' style='display:none;gap:0.3rem;align-items:center;flex-wrap:wrap'>
+      <select class='st-event-on input-tall'></select>
+      <input class='st-event-match input-tall' maxlength='48' placeholder='match (optional)' style='width:140px'>
     </span>
     <button type='button' class='btn btn-small' onclick='removeSecondaryTrigger(this)' style='color:var(--danger);margin-left:auto'>Remove</button>
   </div>
@@ -418,34 +428,116 @@ window.onload = function() {
   // Don't auto-load automations here - let status check handle it
 };
 console.log('[AUTOMATIONS] onload registered');
-function autoTypeChanged(){ 
-  try { 
-    var t=document.getElementById('a_type').value; 
-    var g1=document.getElementById('grp_atTime'); 
-    var g2=document.getElementById('grp_afterDelay'); 
-    var g3=document.getElementById('grp_interval'); 
-    if(t==='atTime'){ 
-      g1.classList.remove('vis-gone'); 
-      g2.classList.add('vis-gone'); 
-      g3.classList.add('vis-gone'); 
-      recurChanged(); 
-    } else if(t==='afterDelay'){ 
-      g1.classList.add('vis-gone'); 
-      g2.classList.remove('vis-gone'); 
-      g3.classList.add('vis-gone'); 
-    } else if(t==='interval'){ 
-      g1.classList.add('vis-gone'); 
-      g2.classList.add('vis-gone'); 
-      g3.classList.remove('vis-gone'); 
-    } else if(t==='onBoot'){ 
-      g1.classList.add('vis-gone'); 
-      g2.classList.add('vis-gone'); 
-      g3.classList.add('vis-gone'); 
-      var rb=document.getElementById('a_runatboot'); if(rb){ rb.checked=true; } 
-    } 
-  }catch(e){ 
-    console.error('autoTypeChanged error:', e); 
-  } 
+// System event kinds (kept in sync with SystemEventKind in System_Events.h;
+// the backend validates on= against its table, so a stale list here fails
+// loudly at add time rather than silently).
+const EVENT_KINDS=[
+  ['peer_online','Mesh peer online'],['peer_offline','Mesh peer offline'],
+  ['peer_paired','Peer paired (pair mode)'],['text_rx','ESP-NOW text received'],
+  ['file_rx','ESP-NOW file received'],['bond_online','Bond peer online'],
+  ['bond_offline','Bond peer offline'],['espnow_on','ESP-NOW started'],
+  ['espnow_off','ESP-NOW stopped'],['wifi_connected','WiFi connected'],
+  ['wifi_disconnected','WiFi disconnected'],['wifi_net_added','WiFi network saved'],
+  ['wifi_net_removed','WiFi network removed'],['login_ok','Login success'],
+  ['login_fail','Login failed'],['usb_on','USB power connected'],
+  ['usb_off','USB power removed'],['battery_low','Battery low'],
+  ['battery_critical','Battery critical'],['setting_changed','Setting changed'],
+  ['sensor_started','Sensor started'],['sensor_stopped','Sensor stopped'],
+  ['reboot','Device rebooted (intentional)'],['boot','Device booted'],['crash','Device crashed'],
+  ['peer_unpaired','Peer unpaired'],['identity_regenerated','ESP-NOW identity rotated'],
+  ['user_promoted','User promoted to admin'],['user_demoted','User demoted'],['user_banned','User banned'],
+  ['ip_banned','IP banned'],['login_locked','Login lockout (brute-force)'],['voice_armed','Voice control armed'],
+  ['storage_formatted','Storage formatted'],['g2_silent_mode','Glasses silent mode'],
+  ['mqtt_start_failed','MQTT start failed'],['llm_load_failed','Model load failed'],['llm_state_corrupt','LLM engine fault'],
+  ['motion_detected','Motion detected'],['rtc_power_loss','RTC lost power'],
+  ['mic_record_started','Recording started'],['automation_fired','Automation fired'],
+  ['http_server_started','Web server started'],['http_server_stopped','Web server stopped'],
+  ['ble_on','Bluetooth on'],['ble_off','Bluetooth off'],['mqtt_ext_sensor_new','MQTT sensor discovered'],
+  ['cert_generated','TLS cert generated'],['logout','Session logout'],['user_rejected','User request denied'],
+  ['command_denied','Command denied'],['auth_db_fault','User database fault'],
+  ['factory_reset','Factory reset'],['feature_toggled','Feature toggled'],['firmware_changed','Firmware updated'],
+  ['backup_created','Backup created'],['backup_restored','Backup restored'],['config_file_corrupt','Config file corrupt'],
+  ['secret_decrypt_failed','Secret decrypt failed'],['sd_write_recovered','SD writes recovered'],
+  ['power_mode_changed','Power mode changed'],['battery_full','Battery full'],
+  ['mesh_passphrase_changed','Mesh passphrase changed'],['remote_stream_started','Remote output tap started'],
+  ['file_rx_failed','File transfer failed'],['g2_hijack_entered','Glasses session started'],
+  ['g2_hijack_exited','Glasses session ended'],['video_record_started','Video recording started'],
+  ['thermal_hot_alert','Thermal hotspot'],['tof_object_detected','Object near/far (ToF)'],['fm_tuned','FM tuned'],
+  ['ei_continuous_started','Camera-AI detection on'],['imu_walking','Walking started/stopped'],
+  ['voice_disarmed','Voice control disarmed'],['llm_model_unloaded','Model unloaded'],['display_init_failed','Display init failed'],
+  ['automation_added','Automation created'],['automation_deleted','Automation deleted'],['automation_action_dropped','Automation action dropped'],
+  ['file_deleted','File deleted'],['voice_wake','Voice wake word'],
+  ['voice_command','Voice command'],
+  ['pair_window_open','Pairing window opened'],['pair_window_closed','Pairing window closed'],
+  ['bond_reject','Bond probe from unpaired device'],
+  ['mesh_promoted','Promoted to mesh master'],['mesh_demoted','Demoted (master returned)'],
+  ['remote_cmd_rx','Remote command ran here'],
+  ['remote_cmd_sent','Remote command sent'],['remote_cmd_result','Remote command result'],
+  ['mqtt_connected','MQTT connected'],['mqtt_disconnected','MQTT disconnected'],
+  ['wifi_connect_failed','WiFi connect failed'],
+  ['time_synced','Clock synced (first valid)'],
+  ['ble_connected','BLE device connected'],['ble_disconnected','BLE device disconnected'],
+  ['g2_connected','Glasses connected'],['g2_disconnected','Glasses disconnected'],
+  ['g2_worn','Glasses picked up'],['g2_not_worn','Glasses set down'],
+  ['sd_mounted','SD card mounted'],['sd_unmounted','SD card unmounted'],
+  ['sd_write_failed','SD write failed'],['fs_low_space','Flash storage low'],
+  ['presence_detected','Presence detected'],['presence_cleared','Presence cleared'],
+  ['gesture','Gesture (APDS swipe)'],
+  ['imu_shake','Device shaken'],['imu_tap','Device tapped'],
+  ['imu_freefall','Device dropped'],['imu_orientation','Orientation changed'],
+  ['gps_fix','GPS fix acquired'],['gps_lost','GPS fix lost'],
+  ['sensor_fault','Sensor auto-disabled'],['sensor_start_failed','Sensor start failed'],
+  ['button','Button pressed'],
+  ['fm_rds_station','FM station identified'],
+  ['ei_detected','Camera AI: object detected'],['ei_lost','Camera AI: object lost'],
+  ['photo_saved','Photo saved'],['video_saved','Video saved'],['mic_saved','Recording saved'],
+  ['llm_gen_done','LLM generation done'],['llm_model_loaded','LLM model loaded'],
+  ['charging_started','Charging started'],['charging_stopped','Charging stopped'],
+  ['power_save_enter','Power save entered'],['power_save_exit','Power save exited'],
+  ['user_request','Account request submitted'],
+  ['user_added','User added'],['user_deleted','User deleted'],['user_approved','User approved'],
+  ['password_changed','Password changed'],
+  ['settings_save_failed','Settings save failed']];
+function fillEventKindSelect(sel){
+  if(!sel||sel.options.length) return;
+  EVENT_KINDS.forEach(k=>{const o=document.createElement('option');o.value=k[0];o.textContent=k[1]+' ('+k[0]+')';sel.appendChild(o);});
+}
+fillEventKindSelect(document.getElementById('a_event_on'));
+function autoTypeChanged(){
+  try {
+    var t=document.getElementById('a_type').value;
+    var g1=document.getElementById('grp_atTime');
+    var g2=document.getElementById('grp_afterDelay');
+    var g3=document.getElementById('grp_interval');
+    var g4=document.getElementById('grp_event');
+    if(g4) g4.classList.add('vis-gone');
+    if(t==='atTime'){
+      g1.classList.remove('vis-gone');
+      g2.classList.add('vis-gone');
+      g3.classList.add('vis-gone');
+      recurChanged();
+    } else if(t==='afterDelay'){
+      g1.classList.add('vis-gone');
+      g2.classList.remove('vis-gone');
+      g3.classList.add('vis-gone');
+    } else if(t==='interval'){
+      g1.classList.add('vis-gone');
+      g2.classList.add('vis-gone');
+      g3.classList.remove('vis-gone');
+    } else if(t==='onBoot'){
+      g1.classList.add('vis-gone');
+      g2.classList.add('vis-gone');
+      g3.classList.add('vis-gone');
+      var rb=document.getElementById('a_runatboot'); if(rb){ rb.checked=true; }
+    } else if(t==='event'){
+      g1.classList.add('vis-gone');
+      g2.classList.add('vis-gone');
+      g3.classList.add('vis-gone');
+      if(g4) g4.classList.remove('vis-gone');
+    }
+  }catch(e){
+    console.error('autoTypeChanged error:', e);
+  }
 }
 function recurChanged(){
   try {
@@ -856,6 +948,9 @@ function renderAutos(json) {
           summary = 'After ' + (sched.delayMs || a.delayMs || '?') + ' ms';
         } else if (t === 'interval') {
           summary = 'Every ' + (sched.intervalMs || a.intervalMs || '?') + ' ms';
+        } else if (t === 'event') {
+          if (!runAtBoot) type = 'On Event';
+          summary = 'On ' + (sched.on || '?') + (sched.match ? ' matching "' + sched.match + '"' : '');
         } else {
           summary = '\u2014';
         }
@@ -873,6 +968,7 @@ function renderAutos(json) {
             else if (tt === 'interval') extras.push('Every ' + (tr.intervalMs || '?') + 'ms');
             else if (tt === 'manual') extras.push('Manual ' + (tr.delayMs || '?') + 'ms');
             else if (tt === 'boot') extras.push('Boot' + (tr.bootDelayMs ? ' +' + tr.bootDelayMs + 'ms' : ''));
+            else if (tt === 'event') extras.push('On ' + (tr.on || '?'));
           }
           if (extras.length > 0) {
             summary += ' <em style="color:var(--muted)">+ ' + extras.join(', ') + '</em>';
@@ -978,6 +1074,7 @@ function addSecondaryTrigger(initial){
   if(!tpl) return;
   const node=tpl.content.cloneNode(true).firstElementChild;
   document.getElementById('secondary_triggers_container').appendChild(node);
+  fillEventKindSelect(node.querySelector('.st-event-on'));
   if(initial){ populateSecondaryTrigger(node,initial); }
   stTypeChanged(node.querySelector('.st-type'));
   renumberTriggers();
@@ -1043,6 +1140,12 @@ function getSecondaryTriggerData(row){
     const d=parseInt(row.querySelector('.st-boot-delay').value,10)||0;
     if(d<0) return null;
     obj.bootDelayMs=d;
+  } else if(type==='event'){
+    const on=row.querySelector('.st-event-on').value;
+    if(!on) return null;
+    obj.on=on;
+    const m=row.querySelector('.st-event-match').value.trim();
+    if(m) obj.match=m;
   }
   return obj;
 }
@@ -1076,6 +1179,9 @@ function populateSecondaryTrigger(row,t){
     row.querySelector('.st-delay-unit').value=u;
   } else if(t.type==='boot'){
     row.querySelector('.st-boot-delay').value=(typeof t.bootDelayMs!=='undefined')?t.bootDelayMs:0;
+  } else if(t.type==='event'){
+    const onSel=row.querySelector('.st-event-on'); if(onSel) onSel.value=t.on||'';
+    const mIn=row.querySelector('.st-event-match'); if(mIn) mIn.value=t.match||'';
   }
 }
 
@@ -1200,12 +1306,18 @@ async function createAutomation(){
   const buildParts=(time,idx)=>{ 
     let parts=['automation add']; 
     parts.push('name='+name+(time!==null && times.length>1?' #'+(idx+1):'')); 
-    if(type==='onBoot'){ 
-      parts.push('type=afterDelay'); 
-      parts.push('delayms=0'); 
-    } else { 
-      parts.push('type='+type); 
-    } 
+    if(type==='onBoot'){
+      parts.push('type=afterDelay');
+      parts.push('delayms=0');
+    } else {
+      parts.push('type='+type);
+    }
+    if(type==='event'){
+      const eo=(document.getElementById('a_event_on')||{}).value||'';
+      parts.push('on='+eo);
+      const em=((document.getElementById('a_event_match')||{}).value||'').trim();
+      if(em) parts.push('match="'+em.replace(/"/g,'\\"')+'"');
+    }
     if(time) parts.push('time='+time); 
     if(type==='atTime'){
       parts.push('recurrence='+recur);
@@ -1298,8 +1410,9 @@ async function createAutomation(){
         let el=document.getElementById('day_'+day); 
         if(el) el.checked=false; 
       }); 
-      document.getElementById('a_delay').value=''; 
-      document.getElementById('a_interval').value=''; 
+      document.getElementById('a_delay').value='';
+      document.getElementById('a_interval').value='';
+      var elEvMatch=document.getElementById('a_event_match'); if(elEvMatch) elEvMatch.value='';
       var elRunBoot=document.getElementById('a_runatboot'); if(elRunBoot) elRunBoot.checked=false;
       { var cvr=document.getElementById('a_cond_var'); if(cvr) cvr.value=''; var cvv=document.getElementById('a_cond_val'); if(cvv) cvv.value=''; } 
       const cwrap=document.getElementById('command_fields'); 
@@ -1375,6 +1488,7 @@ function autoEdit(id){
     // Accept both legacy (atTime/afterDelay/onBoot) and v1 (time/manual/boot) type names.
     if(typeRaw==='afterdelay'||typeRaw==='manual') typeVal='afterDelay';
     else if(typeRaw==='interval') typeVal='interval';
+    else if(typeRaw==='event') typeVal='event';
     else if(typeRaw==='onboot'||typeRaw==='boot') typeVal='onBoot';
     else if(a.runAtBoot===true) typeVal='onBoot';
     document.getElementById('a_type').value=typeVal;
@@ -1407,6 +1521,10 @@ function autoEdit(id){
     }
     if(typeVal==='afterDelay') document.getElementById('a_delay').value=sched.delayMs||a.delayMs||0;
     if(typeVal==='interval') document.getElementById('a_interval').value=sched.intervalMs||a.intervalMs||0;
+    if(typeVal==='event'){
+      const eo=document.getElementById('a_event_on'); if(eo) eo.value=sched.on||'';
+      const em=document.getElementById('a_event_match'); if(em) em.value=sched.match||'';
+    }
     // Option 2: populate the "Fire when" condition from the record.
     { var cvr=document.getElementById('a_cond_var'); var cor=document.getElementById('a_cond_op'); var cvv=document.getElementById('a_cond_val');
       if(cvr&&cor&&cvv){ cvr.value='';cor.value='>';cvv.value='';
@@ -1474,6 +1592,12 @@ function importAutomationFromJson(autoJson, statusEl){
   if(sched.runAtBoot===true||autoJson.runAtBoot===true) parts.push('runatboot=1');
   const bootDelay=typeof sched.bootDelayMs!=='undefined'?sched.bootDelayMs:autoJson.bootDelayMs;
   if(typeof bootDelay!=='undefined'&&bootDelay!==null) parts.push('bootdelayms='+bootDelay);
+  if(rawType==='event'){
+    const evOn=sched.on||autoJson.on||'';
+    if(evOn) parts.push('on='+evOn);
+    const evMatch=sched.match||autoJson.match||'';
+    if(evMatch) parts.push('match="'+evMatch.replace(/"/g,'\\"')+'"');
+  }
   // Propagate secondary triggers if present in the import JSON. This ensures
   // multi-trigger automations round-trip through export → import.
   if(Array.isArray(autoJson.secondaryTriggers) && autoJson.secondaryTriggers.length > 0){
@@ -1610,6 +1734,10 @@ function exportAllAutomations(){
           if(sched.delayMs||auto.delayMs) exportAuto.trigger.delayMs=sched.delayMs||auto.delayMs;
           if(sched.intervalMs||auto.intervalMs) exportAuto.trigger.intervalMs=sched.intervalMs||auto.intervalMs;
           if(normType==='boot'&&(sched.bootDelayMs||auto.bootDelayMs)) exportAuto.trigger.bootDelayMs=sched.bootDelayMs||auto.bootDelayMs;
+          if(normType==='event'){
+            if(sched.on) exportAuto.trigger.on=sched.on;
+            if(sched.match) exportAuto.trigger.match=sched.match;
+          }
           // runAtBoot flag lives at automation top-level in v1 schema.
           if(auto.runAtBoot===true){ exportAuto.runAtBoot=true; if(auto.bootDelayMs) exportAuto.bootDelayMs=auto.bootDelayMs; }
           // Additional (non-primary, non-synthesized-boot) triggers get
@@ -1693,6 +1821,10 @@ function exportSingleAutomation(id){
     if(typeof delayMs!=='undefined'&&delayMs!==null) exportAuto.trigger.delayMs=delayMs;
     const intervalMs=typeof sched.intervalMs!=='undefined'?sched.intervalMs:auto.intervalMs;
     if(typeof intervalMs!=='undefined'&&intervalMs!==null) exportAuto.trigger.intervalMs=intervalMs;
+    if(normType==='event'){
+      if(sched.on) exportAuto.trigger.on=sched.on;
+      if(sched.match) exportAuto.trigger.match=sched.match;
+    }
     // v1 runAtBoot/bootDelayMs at automation top-level, not inside trigger.
     if(auto.runAtBoot===true){ exportAuto.runAtBoot=true; if(auto.bootDelayMs) exportAuto.bootDelayMs=auto.bootDelayMs; }
     // Additional (non-primary, non-synthesized-boot) triggers so the export

@@ -1,4 +1,5 @@
 #include "i2csensor_bno055.h"
+#include "System_Events.h"  // systemEventPost — event register producer
 #include "System_BuildConfig.h"
 #include "System_MemoryMonitor.h"
 #include "System_Utils.h"
@@ -573,7 +574,7 @@ void imuPoll() {
     }
   }
   if (updated) {
-    imuUpdateActions();
+    imuUpdateActions(/*postEvents=*/true);
     DEBUG_IMU_VALUESF("IMU data updated");
   } else {
     DEBUG_IMU_POLLINGF("imuPoll() failed to lock cache - skipping update");
@@ -618,8 +619,12 @@ int imuBuildDataJSON(char* buf, size_t bufSize) {
 // IMU Action Detection Functions
 // ============================================================================
 
+// Walking start/stop latch. Reset on task start; the short debounce below
+// keeps the ~2s step-interval boundary from chattering started/stopped.
+static bool gWasWalking = false;
+
 // Update all IMU action detections
-void imuUpdateActions() {
+void imuUpdateActions(bool postEvents) {
   if (!gImuEnabled || !gImuConnected || !gImuCache.imuDataValid) return;
 
   unsigned long now = millis();
@@ -665,6 +670,11 @@ void imuUpdateActions() {
   if (accelVariance > shakeThreshold) {
     if (!gImuActions.isShaking) {
       gImuActions.shakeCount++;
+      if (postEvents) {
+        char inten[12];
+        snprintf(inten, sizeof(inten), "%.2f", (double)min(accelVariance / 50.0f, 1.0f));
+        systemEventPost(SYSEVT_IMU_SHAKE, inten);
+      }
     }
     gImuActions.isShaking = true;
     gImuActions.lastShakeMs = now;
@@ -703,6 +713,11 @@ void imuUpdateActions() {
     gImuActions.lastTapMs = now;
     gImuActions.tapCount++;
     gImuActions.tapStrength = min((accelMag - tapThreshold) / 20.0f, 1.0f);
+    if (postEvents) {
+      char strength[12];
+      snprintf(strength, sizeof(strength), "%.2f", (double)gImuActions.tapStrength);
+      systemEventPost(SYSEVT_IMU_TAP, strength);
+    }
   } else if (now - gImuActions.lastTapMs > tapDecay) {
     gImuActions.tapDetected = false;
     gImuActions.tapStrength = 0.0f;
@@ -733,15 +748,27 @@ void imuUpdateActions() {
   // 5. FREEFALL DETECTION - Near-zero acceleration
   const float freefallThreshold = 2.0f;  // m/s² (significantly less than 9.8)
 
+  // Bus event only after the freefall persists 150ms: shaking drives
+  // |accel| through near-zero at each direction reversal, and those
+  // momentary dips must not read as "device dropped".
+  static bool sFreefallPosted = false;
+
   if (accelMag < freefallThreshold) {
     if (!gImuActions.isFreefalling) {
       gImuActions.freefallStartMs = now;
     }
     gImuActions.isFreefalling = true;
     gImuActions.freefallDurationMs = now - gImuActions.freefallStartMs;
+    if (postEvents && !sFreefallPosted && gImuActions.freefallDurationMs >= 150) {
+      sFreefallPosted = true;
+      char dur[12];
+      snprintf(dur, sizeof(dur), "%lums", (unsigned long)gImuActions.freefallDurationMs);
+      systemEventPost(SYSEVT_IMU_FREEFALL, dur);
+    }
   } else {
     gImuActions.isFreefalling = false;
     gImuActions.freefallDurationMs = 0;
+    sFreefallPosted = false;
   }
 
   // 6. STEP COUNTING - Periodic vertical acceleration peaks
@@ -786,6 +813,31 @@ void imuUpdateActions() {
 
   gImuActions.lastAccelMag = accelMag;
 
+  // Walking start/stop bus event, edge-latched with a short debounce: the raw
+  // isWalking flag can flip at the ~2s step-interval boundary, so only post
+  // once the new state has held for 3 consecutive SAMPLES. Gated on postEvents
+  // so cached-sample renderers can't advance the debounce counter.
+  if (postEvents) {
+    static bool sWalkCandidate = false;
+    static uint8_t sWalkStable = 0;
+    bool nowWalking = gImuActions.isWalking;
+    if (nowWalking == gWasWalking) {
+      sWalkStable = 0;
+      sWalkCandidate = nowWalking;
+    } else if (nowWalking == sWalkCandidate) {
+      if (++sWalkStable >= 3) {
+        gWasWalking = nowWalking;
+        sWalkStable = 0;
+        char cadence[16];
+        snprintf(cadence, sizeof(cadence), "%.0f steps/min", gImuActions.stepFrequency);
+        systemEventPost(SYSEVT_IMU_WALKING, nowWalking ? "started" : "stopped", cadence);
+      }
+    } else {
+      sWalkCandidate = nowWalking;
+      sWalkStable = 1;
+    }
+  }
+
   // 7. ORIENTATION DETECTION - Device orientation in space
   char newOrientation = 'F';  // Default: face-up
 
@@ -808,6 +860,44 @@ void imuUpdateActions() {
     gImuActions.lastOrientation = gImuActions.orientation;
     gImuActions.orientation = newOrientation;
     gImuActions.lastOrientationChangeMs = now;
+  }
+
+  // Bus event with a 3-stable-update debounce: the raw orientation chatters
+  // at the 45-degree boundaries, so only post once the new pose has held for
+  // 3 consecutive SAMPLES. Gated on postEvents so the OLED page renderer and
+  // cmd_imuactions callers can't advance the counter on repeated renders of
+  // one cached sample.
+  if (postEvents) {
+    auto orientName = [](char c) -> const char* {
+      switch (c) {
+        case 'F': return "face-up";
+        case 'D': return "face-down";
+        case 'P': return "portrait";
+        case 'U': return "portrait-inv";
+        case 'R': return "landscape-r";
+        case 'L': return "landscape-l";
+        default:  return "?";
+      }
+    };
+    static char sPostedOrient = 0;
+    static char sCandidate = 0;
+    static uint8_t sStable = 0;
+    if (sPostedOrient == 0) sPostedOrient = newOrientation;  // first-call seed, no event
+    if (newOrientation == sPostedOrient) {
+      sStable = 0;
+      sCandidate = 0;
+    } else if (newOrientation == sCandidate) {
+      if (++sStable >= 3) {
+        char prev = sPostedOrient;
+        sPostedOrient = newOrientation;
+        sStable = 0;
+        sCandidate = 0;
+        systemEventPost(SYSEVT_IMU_ORIENTATION, orientName(newOrientation), orientName(prev));
+      }
+    } else {
+      sCandidate = newOrientation;
+      sStable = 1;
+    }
   }
 }
 
@@ -1025,6 +1115,7 @@ void imuTask(void* parameter) {
                 (void*)xTaskGetCurrentTaskHandle(), 
                 (unsigned)uxTaskGetStackHighWaterMark(nullptr));
   INFO_IMU_LIFECYCLEF("[MODULAR] imuTask() running from i2csensor_bno055.cpp");
+  gWasWalking = false;
   unsigned long lastIMURead = 0;
   unsigned long lastStackLog = 0;
   while (true) {
@@ -1106,6 +1197,7 @@ void imuTask(void* parameter) {
             gImuEnabled = false;
             sensorStatusBumpWith("imu@auto_disabled");
             logSystemEvent("SENSOR", "IMU auto-disabled after too many consecutive I2C failures");
+            systemEventPost(SYSEVT_SENSOR_FAULT, "IMU", "consecutive I2C failures");
           }
         }
         

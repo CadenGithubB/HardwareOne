@@ -456,12 +456,27 @@ String CommandArgs::value(const String& key) const {
   int start = pos + needle.length();
   if (start >= (int)raw_.length()) return String();
 
-  // quoted value?
+  // quoted value? Honor backslash-escaped quotes (\") — the web UI emits
+  // them for nested JSON (secondarytriggers=), quoted text inside commands=,
+  // and event match= patterns. The old plain indexOf('"') scan truncated all
+  // of those at the first inner quote, which silently dropped every
+  // web-created secondary trigger.
   if (raw_[start] == '"') {
     start++;
-    int end = raw_.indexOf('"', start);
-    if (end < 0) end = raw_.length();
-    return raw_.substring(start, end);
+    String out;
+    int i = start;
+    while (i < (int)raw_.length()) {
+      char c = raw_[i];
+      if (c == '\\' && i + 1 < (int)raw_.length() && raw_[i + 1] == '"') {
+        out += '"';  // unescape \" -> " ; other backslashes pass through untouched
+        i += 2;
+        continue;
+      }
+      if (c == '"') break;
+      out += c;
+      i++;
+    }
+    return out;
   }
 
   // unquoted — find next space

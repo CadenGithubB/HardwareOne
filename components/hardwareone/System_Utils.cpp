@@ -39,6 +39,7 @@
 #include "System_SensorStubs.h"  // Stubs for disabled sensors/modules
 #include "System_MemoryMonitor.h"
 #include "System_Notifications.h"
+#include "System_Events.h"  // cmd_events — system event register inspector
 
 // Subsystem headers needed by buildSystemInfoJson() — the device-info JSON
 // aggregator was moved here from WebServer_Server.cpp so the CLI `status json`
@@ -2003,14 +2004,42 @@ const char* cmd_testpassword(const String& argsInput) {
   return "[System] Password test complete";
 }
 
+// Reboot helpers — see System_Utils.h. Every intentional restart routes through
+// recordRebootIntent() so it (1) stashes a reason the NEXT boot turns into a typed
+// SYSEVT_REBOOT (the in-RAM event ring can't survive the restart) and (2) writes the
+// durable REBOOT audit line. rebootDevice() adds the inline flush + restart for
+// simple sites; deferred sites (factoryreset's esp_timer) call recordRebootIntent()
+// directly and restart on their own schedule.
+void recordRebootIntent(const char* reason, const char* auditDetail) {
+  // Capture WHO triggered the reboot now — we're still in their command scope.
+  // The event posts on the next boot, where that identity is gone, so stash it
+  // in RTC and replay it as the event's source/who.
+  uint8_t src = transportToNotifSource(currentAuthContext().transport);
+  if (src == NOTIF_SOURCE_UNKNOWN) src = NOTIF_SOURCE_SYSTEM;
+  rebootStashReason(reason, currentExecUser().c_str(), src);
+  logSystemEvent("REBOOT", "%s", (auditDetail && auditDetail[0]) ? auditDetail
+                                 : (reason ? reason : "intentional restart"));
+  // Push any pending typed events to events.log now (bypassing the 2s throttle)
+  // so the last couple seconds of history isn't lost to the restart. The
+  // caller's flush delay then lets the background writer drain to flash.
+  systemEventLogFlush();
+}
+
+void rebootDevice(const char* reason, const char* auditDetail, uint32_t flushDelayMs) {
+  recordRebootIntent(reason, auditDetail);
+  delay(flushDelayMs);  // let the queued output + REBOOT audit line flush to disk
+  ESP.restart();
+}
+
 const char* cmd_reboot(const String& originalCmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   broadcastOutput("Rebooting system...");
-  // Durable record so the next boot is attributable: a BOOT event with no
-  // preceding REBOOT event = power cut or crash, not a commanded restart.
-  logSystemEvent("REBOOT", "commanded restart (reboot) by '%s'", currentExecUser().c_str());
-  delay(300);  // Allow the queued output + EVENT line to flush to disk first
-  ESP.restart();
+  // A BOOT event with no preceding REBOOT event = power cut or crash, not a
+  // commanded restart. rebootDevice() also stashes the reason so the next boot
+  // posts SYSEVT_REBOOT (reason=command).
+  char detail[96];
+  snprintf(detail, sizeof(detail), "commanded restart (reboot) by '%s'", currentExecUser().c_str());
+  rebootDevice("command", detail, 1000);
   return "[System] Rebooting";  // Won't actually return due to restart
 }
 
@@ -2094,6 +2123,14 @@ static const char* factoryreset_confirmed(void* /*userData*/) {
   };
   esp_timer_create(&timerArgs, &timer);
   esp_timer_start_once(timer, 1000ULL * 1000ULL);  // 1 s expressed in microseconds
+
+  // Record the imminent restart: stash the reason for the next boot's SYSEVT_REBOOT
+  // and write the durable REBOOT audit line. Deferred via the esp_timer above, so we
+  // record-only here rather than using rebootDevice()'s inline restart.
+  recordRebootIntent("factory", "factory reset — rebooting to setup wizard");
+
+  // users.json is gone and the reboot is scheduled — the reset is committed.
+  systemEventPost(SYSEVT_FACTORY_RESET, currentExecUser().c_str());
 
   logSystemEvent("SETUP", "factory reset — %s deleted; rebooting to setup wizard", USERS_JSON_FILE);
 
@@ -2306,6 +2343,17 @@ bool syncNTPAndResolve() {
   if (ntpSynced) {
     DEBUG_NTP_SYNCF("[syncNTPAndResolve] NTP sync completed successfully");
     broadcastOutput("[OK] NTP time synchronized successfully");
+    // Bus event on the invalid->valid transition only (preSyncTime predates
+    // 2024 = clock was not yet set). Routine re-syncs stay silent.
+    if (preSyncTime <= 1704067200) {
+      char ts[24];
+      time_t nowT = time(nullptr);
+      struct tm tmNow;
+      if (localtime_r(&nowT, &tmNow)) {
+        strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M", &tmNow);
+        systemEventPost(SYSEVT_TIME_SYNCED, "ntp", ts);
+      }
+    }
     
     // Sync RTC from NTP time to keep RTC accurate
 #if ENABLE_RTC_SENSOR
@@ -2340,6 +2388,15 @@ bool syncNTPAndResolve() {
     if (gRtcEnabled && gRtcConnected) {
       if (rtcSyncToSystem()) {
         broadcastOutput("[OK] System time set from RTC (NTP unavailable)");
+        if (preSyncTime <= 1704067200) {
+          char ts[24];
+          time_t nowT = time(nullptr);
+          struct tm tmNow;
+          if (localtime_r(&nowT, &tmNow)) {
+            strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M", &tmNow);
+            systemEventPost(SYSEVT_TIME_SYNCED, "rtc", ts);
+          }
+        }
         resolvePendingUserCreationTimes();
         notifyAutomationScheduler();
         return true;
@@ -2441,6 +2498,8 @@ const CommandEntry commands[] = {
     "Usage: cpufreq [80|160|240]" },
   { "taskstats", "Detailed task statistics.", false, cmd_taskstats },
   { "perftop", "Live performance snapshot: loop laps/s, period, per-section timing, worst stalls + live task CPU%.", false, cmd_perftop },
+  { "events", "Show recent system events (the in-memory register that drives automation event triggers).", false, cmd_events,
+    "Usage: events [kinds [json]]\n  (bare): show the recent-event ring\n  kinds: list every valid event-kind name (json = machine form)" },
 
   // ---- Misc ----
   { "reboot", "Reboot the system.", true, cmd_reboot, nullptr, "system", "reboot" },
@@ -2511,7 +2570,8 @@ static const CommandModule gCommandModules[] = {
     "Status and inspection: status (WiFi, filesystem, memory summary), uptime, time "
     "(uptime plus NTP wall-clock if synced), temperature and voltage (ESP32 internal "
     "die temp and supply rail), taskstats/perftop (FreeRTOS task and live loop/CPU "
-    "profiling), fsusage, and the memory tools memsample (snapshot, with memsample "
+    "profiling), fsusage, events (recent system events from the in-memory register "
+    "that drives automation event triggers), and the memory tools memsample (snapshot, with memsample "
     "track on|off|reset|status for allocation tracking) and memreport. Control and "
     "power: reboot, cpufreq [80|160|240] to read or set CPU clock, lightsleep [seconds] "
     "for ESP32 light sleep, and wait <ms>/sleep <ms> to pause command-script execution. "
@@ -2855,10 +2915,13 @@ static const CommandModule gCommandModules[] = {
 #endif
 #if ENABLE_AUTOMATION
   { "automation", "Scheduled tasks and conditional commands", "The automation module runs saved jobs (stored in automations.json) that execute "
-    "one or more CLI commands on a schedule or condition. Every automation has one of "
-    "three trigger types: atTime (fires daily at time=HH:MM, optionally limited to "
-    "days=Mon,Tue,...), afterDelay (fires once after delayms milliseconds), or interval "
-    "(fires repeatedly every intervalms milliseconds); jobs can also carry runatboot=1 "
+    "one or more CLI commands on a schedule, condition, or system event. Every automation has one of "
+    "four trigger types: atTime (fires daily at time=HH:MM, optionally limited to "
+    "days=Mon,Tue,...), afterDelay (fires once after delayms milliseconds), interval "
+    "(fires repeatedly every intervalms milliseconds), or event (fires when a system "
+    "event occurs: on=<kind> with an optional match=<text> filter against the event's "
+    "subject/detail — run 'events' to see recent kinds like peer_online, text_rx, "
+    "battery_low, login_fail); jobs can also carry runatboot=1 "
     "to fire at startup. The primary entry point is automation <subcommand> (list, add, "
     "enable, disable, delete, run, trigger, sanitize, recompute) with single-word "
     "aliases automationlist, automationadd, automationrun, and automationtrigger. Note "
@@ -4013,6 +4076,12 @@ static bool authorizeCommand(const AuthContext& ctx, const String& line, char* o
     }
     snprintf(out, outSize, "Error: Admin access required for command '%s'. Contact an administrator.", cmdName.c_str());
     { char auditBuf[180]; snprintf(auditBuf, sizeof(auditBuf), "cmd=%.170s", redactCmdForAudit(line).c_str()); logAuthAttempt(false, ctx.path.c_str(), ctx.user, ctx.ip, auditBuf); }
+    // A privileged command was refused. Post only when a username is resolved
+    // (a LOGGED-IN, non-admin user) — anonymous/unauthenticated denials have no
+    // subject and are covered by the login-failure event elsewhere.
+    if (ctx.user.length() > 0) {
+      systemEventPost(SYSEVT_COMMAND_DENIED, ctx.user.c_str(), cmdName.c_str());
+    }
     return false;
   }
   return true;
@@ -4150,8 +4219,8 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
   // Commands prefixed with "remote:" or "@" are sent to bonded device
   // This works across ALL interfaces (OLED, web, serial, voice)
   bool isRemoteCommand = false;
-  String actualCommand = command;
-  
+  String actualCommand;  // populated only on the remote: / @ path below
+
   if (command.startsWith("remote:") || command.startsWith("remote ")) {
     isRemoteCommand = true;
     actualCommand = command.substring(7);  // Remove "remote:" or "remote "
@@ -4205,7 +4274,7 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
     }
     
     uint32_t msgId = generateMessageId();
-    // Opcode MUST be ESPNOW_V4_TYPE_CMD (30). This was hardcoded to a literal 5
+    // Opcode MUST be ESPNOW_V4_TYPE_CMD. This was hardcoded to a literal 5
     // with a "/* ESPNOW_V4_TYPE_CMD */" comment that rotted when the opcode enum
     // was renumbered (CMD: 5 → 30). The result: every remote/bond command went
     // out as dead opcode 5, the peer logged "Unknown type 5" and dropped it, so
@@ -4238,13 +4307,10 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
     #endif // ENABLE_ESPNOW && ENABLE_BONDED_MODE
   }
   
-  // Continue with local command execution
-  command = actualCommand;
+  // Continue with local command execution. Non-remote commands never touch
+  // actualCommand, so `command` is already the line to run — no copy-back.
 
-  // Find command handler by case-insensitive prefix match
-  String lc = command;
-  lc.toLowerCase();
-
+  // Find command handler (findCommand does its own case-insensitive matching).
   const CommandEntry* found = nullptr;
   size_t foundLen = 0;
 
@@ -4272,17 +4338,6 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
   }
 
   if (found) {
-    // Rebuild normalized command with canonical key + args
-    String normalizedCmd = String(found->name);
-    if (command.length() > foundLen) {
-      String args = command.substring(foundLen);
-      args.trim();
-      if (args.length() > 0) {
-        normalizedCmd += " ";
-        normalizedCmd += args;
-      }
-    }
-
     // Handle help mode exit for non-help commands
     if (gCLIState != CLI_NORMAL) {
       if (!isHelpModeCommand(found->name)) {
@@ -4328,8 +4383,8 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
       args = command.substring(foundLen);
       args.trim();
     }
-    DEBUG_CMD_FLOWF("[registry_exec] executing: %s (args: %s)", normalizedCmd.c_str(), args.c_str());
-    DEBUGF(DEBUG_CLI, "[registry_exec] executing: %s (args: %s)", normalizedCmd.c_str(), args.c_str());
+    DEBUG_CMD_FLOWF("[registry_exec] executing: %s (args: %s)", found->name, args.c_str());
+    DEBUGF(DEBUG_CLI, "[registry_exec] executing: %s (args: %s)", found->name, args.c_str());
 
     // Capture CLIMode state BEFORE the handler runs. If the handler enters
     // a mode (e.g. cmd_filedelete -> cliRequestConfirm) the command hasn't
@@ -4589,7 +4644,7 @@ void runUnifiedSystemCommand(const String& argsInput) {
   uc.ctx.auth = actx;
   uc.ctx.id = (uint32_t)millis();
   uc.ctx.timestampMs = (uint32_t)millis();
-  uc.ctx.outputMask = CMD_OUT_LOG;
+  uc.ctx.outputMask = MSG_ROUTE_FILE;
   uc.ctx.validateOnly = false;
   uc.ctx.replyHandle = nullptr;
   uc.ctx.httpReq = nullptr;
@@ -4606,7 +4661,7 @@ bool executeUnifiedWebCommand(httpd_req_t* req, AuthContext& ctx, const String& 
   uc.ctx.auth = ctx;
   uc.ctx.id = (uint32_t)millis();
   uc.ctx.timestampMs = (uint32_t)millis();
-  uc.ctx.outputMask = CMD_OUT_WEB | CMD_OUT_LOG;
+  uc.ctx.outputMask = MSG_ROUTE_WEB | MSG_ROUTE_FILE;
   uc.ctx.validateOnly = false;
   uc.ctx.replyHandle = nullptr;
   uc.ctx.httpReq = req;
@@ -4851,13 +4906,13 @@ const char* cmd_login(const String& originalCmd) {
   // Attempt login
   if (loginTransport(transport, username, password)) {
     bool isAdmin = isAdminUser(username);
-    notifyLoginSuccess(username.c_str(), transportStr.c_str());
+    systemEventPost(SYSEVT_LOGIN_OK, username.c_str(), transportStr.c_str());
     static char buf[128];
     snprintf(buf, sizeof(buf), "Login successful for '%s' on %s%s",
              username.c_str(), transportStr.c_str(), isAdmin ? " (admin)" : "");
     return buf;
   } else {
-    notifyLoginFailed(username.c_str(), transportStr.c_str());
+    systemEventPost(SYSEVT_LOGIN_FAIL, username.c_str(), transportStr.c_str());
     return "Error: Authentication failed";
   }
 }

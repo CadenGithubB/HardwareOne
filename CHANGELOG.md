@@ -8,6 +8,63 @@ Entries for 0.96.1 and earlier were backfilled from git history (this repo had
 no tags or releases before 0.96.2); they are terse, commit-grounded summaries,
 dated from each version's commit. Dates are YYYY-MM-DD.
 
+## [0.98.7] - 2026-07-14
+A device-wide event system is the centerpiece: a single event register now records what happens on the device, drives notifications, and lets automations react to live events. Notifications were rebuilt on top of it with per-kind and per-user controls. Also splits debug settings into their own file and fixes a batch of bugs.
+### Added
+- System event register: the new `events` command shows the most recent system events (last 48), each stamped with who or what caused it (e.g. "by web:hub"); `events kinds` lists every event type — the same vocabulary automation event triggers use. Events are also written to a durable, machine-parseable log at `/system/sys_logs/events.log` (one line per event, capped at 256 KB, on by default via the `eventlog` setting), with a gap marker if events ever outrun the writer.
+- Event-triggered automations: automations can now fire the moment something happens on the device, not just on a clock or interval. Choose "On Event" (`type=event on=<kind>`) with an optional case-insensitive `match=` filter on the event's subject/detail. Event triggers fire even when the clock isn't synced (when time-scheduled automations can't run), are rate-limited to about once every 2 seconds per automation to prevent runaway loops, and round-trip through automation import/export.
+- Events across the device: dozens of subsystems now raise named events that feed automations and the notification/event log.
+  - ESP-NOW & mesh: peer online/offline, auto-pair complete, text/file received, bonded peer online/offline, an unpaired device probing the bond channel, ESP-NOW on/off, pairing window open/close/expire, backup-master promote/demote, an authenticated remote command running here (and, on the sending device, the command being sent and its result coming back), a failed remote-command login, and metadata changes.
+  - Sensors & inputs: IMU shake/tap/freefall and orientation flips, APDS gesture swipes, presence detected/cleared, GPS fix gained/lost, FM-radio RDS station name, and gamepad/rotary-encoder buttons — plus a "sensor fault" event when a sensor auto-disables after repeated I2C errors (IMU, ToF, thermal, GPS, presence, gesture, gamepad, encoder).
+  - Camera, audio & on-device AI: camera on/off, photo saved and video recording finished (with filename, plus frame count for video), a microphone recording saved, and the camera-AI recognizing or losing an object (Edge Impulse object detection).
+  - System: battery and charger changes; WiFi, MQTT, BLE, and glasses connect/disconnect, plus WiFi networks added or removed and connection failures; the first successful clock sync; storage mounts, file deletes, low-storage and SD write-failure warnings, and a failed settings save; logins (success and failure, now including MQTT and web), user account and password changes, and access requests; per-sensor start, stop, and start-failure; voice wake and commands; on-device model load and generation; power-save enter/exit; and an intentional reboot (posted on the next boot, tagged with its reason — reboot command, first-time setup, factory reset, or the G2 power menu). (`events kinds` lists the full set.)
+- A codebase-wide event-coverage pass added the security, fault, and capability happenings that were still missing: privilege and access actions (a user promoted, demoted, or banned; an IP banned; a brute-force lockout; an ESP-NOW peer unpaired or the device's identity rotated; voice control armed; a storage volume formatted; glasses silent mode), fault conditions (a device crash, an MQTT or on-device-model start failure, an unrecoverable LLM engine fault, an RTC that lost power), and more (a microphone recording started, thermal-sensor motion, an automation firing). Security alerts and faults also raise a notification; the rest are automation-triggerable and in the event log.
+- A second pass rounded out the vocabulary with service and session lifecycle (web server up/down, Bluetooth on/off, TLS certificate generated, a session logout, power mode changed, battery full, the on-device model unloaded, voice control disarmed, glasses interactive session start/end), configuration and audit actions (factory reset, a feature toggled, firmware updated, a backup created or restored, a config file failing its integrity check, a stored secret failing to decrypt, a denied privileged command, a mesh passphrase change, an ESP-NOW output tap or failed file transfer, an automation created/deleted or an action dropped mid-run), and sensor thresholds (a thermal hotspot, a ToF object approaching or leaving, the FM radio tuned, walking started/stopped, continuous camera-AI detection on, an MQTT sensor discovered). The device now raises about 130 distinct event kinds.
+- Per-kind notification policy (admin): the new `notifydevicekind` command sets each notification kind's device-wide visibility — `all`, `admin` (admin viewers only), or `off` — saved to `/system/notifications.json` and applied across the OLED banner, web toast, and notification center. The web Settings page gains a matching admin-only "Notifications" section.
+- Per-user notification mutes: the new `notifyusermute` command, and a "Customize notifications" / "My notifications" panel on the web dashboard, let any signed-in user silence specific notification kinds just for themselves. Muted kinds disappear from that user's banners, toasts, and notification center only; the underlying events and any automations are unaffected.
+- Notification channel switches: independent device-wide on/off switches for the three notification sinks — OLED banners, web toasts, and the notification center — on by default.
+- Notification diagnostics: the new `notifstats` command reports pipeline counters (events that became banners/toasts, how many were filtered by device policy or per-user mutes, suppressed by a per-kind cooldown, or dropped; `notifstats reset` zeroes them), and the new `debugnotifications` flag streams live pipeline diagnostics.
+- More notifications: Bluetooth connect/disconnect, G2 glasses connect/disconnect and worn/removed, and web sign-in success/failure (web logins previously raised no notification, unlike the CLI and OLED).
+### Changed
+- Notifications were rebuilt on the event bus: every subsystem posts an event and a single rules table decides what becomes a banner, toast, or notification-center entry, with per-viewer routing (admin-only kinds and per-user mutes) and per-kind cooldowns. Most existing notifications are unchanged, but a few were retuned in the cutover: the failed-login cooldown is now 30 seconds (was 10), USB connect and disconnect are cooled independently, and the "remote command running" notification on the executing device is now recorded to the event log instead of popping on screen.
+- The on-device notification center now draws from the unified event log and filters by whoever is logged in at the display, so per-user mutes and admin-only kinds are honored on the local screen too.
+- Debug flags — plus the log level, the web-console toggle, and the memory-sample interval — moved out of `/system/settings.json` into a new `/system/debug.json`. They were roughly half of the ~5 KB settings document and every toggle rewrote the whole file; splitting them out frees that space for other settings and limits a debug change to a small, isolated write. The web, bonded-peer, and G2 settings views are unchanged, and device backups now include the new file.
+- `log start flags=` now accepts a full 256-bit debug mask (one hex string up to 64 digits, or colon-separated 64-bit words highest-first) instead of the old 128-bit form. Debug flags were regrouped by family into per-byte banks, so raw hex masks written for earlier firmware no longer select the same categories; the named per-feature toggles (`debuggps`, `debugwifi`, …) are unaffected.
+- The OLED status ribbon uses larger, cleaner icons — a checkmark when linked, an X when down, a refresh glyph while syncing, and a magnifier while searching for peers.
+- Changing the FM radio volume now shows a brief "Vol: N/15" banner on the OLED instead of posting a notification, so routine volume tweaks no longer pile up in the notification center.
+- The internal ESP-NOW message-type numbering was reorganized; there is intentionally no cross-version compatibility, so every meshed or bonded device must be reflashed to this version to talk to the others.
+### Fixed
+- Multi-trigger automations built in the web UI are no longer silently dropped: the command parser now understands backslash-escaped quotes, so secondary triggers, quoted command text, and event match patterns are parsed in full instead of being cut off at the first inner quote.
+- ESP-NOW traffic capture to SD now records frames. With capture enabled it had been silently writing nothing because it filtered on an outdated protocol version that no live frame matched.
+- The thermal camera and distance (ToF) sensor tasks no longer peg a CPU core at 100% while their polling is paused or the sensor isn't ready; they now idle like the other sensor tasks, saving power and freeing the core.
+### Removed
+- The `debugespnowencryption` debug toggle was removed — it never controlled any log output, so enabling it did nothing.
+
+## [0.98.6] - 2026-07-13
+First-time setup now works fully over a serial-only connection, and a bug that silently disabled ESP-NOW during setup is fixed.
+### Fixed
+- First-time setup over serial (no OLED) can now choose HTTPS and Server/G2-Bluetooth modes, matching the serial/OLED options already offered for the WiFi, MQTT, and ESP-NOW pages.
+- Typing a device name at the ESP-NOW setup prompt no longer fell through to the skip branch that silently turned ESP-NOW off; a typed name now configures ESP-NOW so it auto-starts at boot. Fixed identically in the serial, OLED, and CLI setup engines.
+
+## [0.98.5] - 2026-07-12
+A small cleanup pass: a latent MQTT link error, dead scheduler code, and an unimplemented automation trigger mode.
+### Fixed
+- Corrected a misspelled `isMqttConnected()` definition that would have failed to link if MQTT were compiled in.
+### Removed
+- Dead automation-scheduler code, and the non-functional "once when it becomes true" trigger mode, whose web control was never backed by any logic.
+
+## [0.98.4] - 2026-07-12
+BLE file uploads are now limited by free storage instead of a fixed 256 KB cap.
+### Changed
+- BLE file upload drops the 256 KB ceiling. Uploads stream one append at a time and never buffer the whole file, so the only limit is free storage, matching the web upload. A volume that fills mid-upload returns cleanly ("storage full?") instead of corrupting. Pairs with the companion app's storage-based cap.
+
+## [0.98.3] - 2026-07-12
+The on-device LLM runs about 50% faster, with a new per-section forward profiler.
+### Changed
+- On-device LLM matmul quantizes activations to INT16 once per matmul and accumulates int8xint16 in int32, replacing a per-weight int-to-float convert in the hot loop. HW-validated ~1.6 -> ~2.5 tok/s, output quality-neutral. Weights stay INT8, so PSRAM bandwidth is unchanged.
+### Added
+- `llmprofile` command/setting: per-section forward timing (matmul vs attention vs the rest) dumped after each generation. Default off, near-zero overhead when off.
+
 ## [0.98.2] - 2026-07-12
 Automations can now check far more of the device's own state, the trigger form is simpler, and a multi-trigger scheduling bug is fixed.
 ### Added

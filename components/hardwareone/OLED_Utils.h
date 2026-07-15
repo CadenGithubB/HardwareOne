@@ -54,8 +54,9 @@ struct OLEDNotification {
   bool read;        // Has user seen this notification?
 };
 
-// Add notification to persistent queue
-void oledNotificationAdd(const char* message, uint8_t level = 0, uint8_t source = NOTIF_SOURCE_UNKNOWN, const char* subsource = nullptr);
+// The notification center is a VIEW over the system event register since the
+// Phase-1 cutover — there is no add call. Events whose rule has NSINK_QUEUE
+// appear here automatically; read/clear are seq watermarks.
 
 // Get notification count (total and unread)
 int oledNotificationCount();

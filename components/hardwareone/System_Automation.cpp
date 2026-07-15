@@ -59,6 +59,7 @@
 
 // --- Additional condition-variable sources (see evaluateCondition) ---
 #include "System_Battery.h"        // BATTERY: getBatteryPercentage()
+#include "System_Events.h"         // event triggers: ring drain + kind names
 #include "System_Clock.h"          // NTP: Clock::isSynced()
 #include "Bluetooth.h"             // BLE: isBLEConnected() (stub returns false when BT disabled)
 #include "System_ESPNow.h"         // PEERS/bond/pairing: gMeshPeers, isBondModeOnline, espnowPairModeActive, gEspNow
@@ -101,7 +102,7 @@ static void queueAutomationSubCommand(const char* cmd, const char* owner, const 
   uc.ctx.auth.opaque = nullptr;
   uc.ctx.id = (uint32_t)millis();
   uc.ctx.timestampMs = (uint32_t)millis();
-  uc.ctx.outputMask = CMD_OUT_SERIAL | CMD_OUT_WEB | CMD_OUT_LOG;
+  uc.ctx.outputMask = MSG_ROUTE_SERIAL | MSG_ROUTE_WEB | MSG_ROUTE_FILE;
   uc.ctx.validateOnly = false;
   uc.ctx.replyHandle = nullptr;
   uc.ctx.httpReq = nullptr;
@@ -130,6 +131,17 @@ static void queueAutomationSubCommand(const char* cmd, const char* owner, const 
         logSystemEvent("AUTO", "sub-command DROPPED (exec queue full) in automation '%s': %s",
                        (autoName && autoName[0]) ? autoName : "?", cmd ? cmd : "?");
       }
+      // SYSTEM-EVENT: a scheduled automation half-ran — this action never
+      // reached cmd_exec. Share the durable log's 5 s throttle so a flooded
+      // queue can't churn system-events; fold suppressed drops into the detail.
+      char dropDetail[80];
+      if (sDropsSuppressed > 0) {
+        snprintf(dropDetail, sizeof(dropDetail), "exec queue full (+%lu more)", (unsigned long)sDropsSuppressed);
+      } else {
+        snprintf(dropDetail, sizeof(dropDetail), "exec queue full");
+      }
+      systemEventPost(SYSEVT_AUTOMATION_ACTION_DROPPED,
+                      (autoName && autoName[0]) ? autoName : "?", dropDetail);
       sLastDropLogMs = nowMs;
       sDropsSuppressed = 0;
     } else {
@@ -483,6 +495,24 @@ static AutoCacheEntry gAutoCache[AUTO_CACHE_MAX];
 static volatile int gAutoCacheCount = 0;
 static volatile bool gAutoCacheValid = false;
 
+// Which SystemEventKind bits any ENABLED automation subscribes to via an
+// event trigger. 256-bit mask stored as 8x32-bit words (word = kind >> 5,
+// bit = kind & 31). Rebuilt with the cache; consulted by systemEventPost
+// (via automationOnSystemEvent) so unsubscribed events never force a tick.
+static volatile uint32_t gAutoEventKindMask[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+// Set when a subscribed event was posted; cleared when the tick drains.
+static volatile bool gAutoEventsPending = false;
+
+void automationOnSystemEvent(uint8_t kind) {
+  if (kind >= SYSEVT_COUNT) return;
+  // Cache invalid = subscriptions unknown; be conservative and wake.
+  if (!gAutoCacheValid || (gAutoEventKindMask[kind >> 5] & (1UL << (kind & 31)))) {
+    gAutoEventsPending = true;
+  }
+}
+
+bool automationEventsPending() { return gAutoEventsPending; }
+
 // Re-read automations.json and refill the cache. Called at the end of the
 // full tick so post-fire nextAt updates are captured on the same pass.
 static void rebuildAutoCache() {
@@ -500,25 +530,39 @@ static void rebuildAutoCache() {
   }
   JsonArrayConst autos = doc["automations"].as<JsonArrayConst>();
   int n = 0;
+  uint32_t evtMask[8] = {0, 0, 0, 0, 0, 0, 0, 0};
   for (JsonObjectConst a : autos) {
     if (n >= AUTO_CACHE_MAX) break;
     gAutoCache[n].id = a["id"].as<long>();
     gAutoCache[n].enabled = a["enabled"] | false;
     // Cache the min nextAt across the automation's triggers. 0 means nothing
-    // is scheduled (all manual/boot, or unset).
+    // is scheduled (all manual/boot/event, or unset). Also collect the event
+    // kinds enabled automations subscribe to (for the fast wake mask).
     time_t minAt = 0;
     JsonArrayConst triggers = a["triggers"].as<JsonArrayConst>();
     if (!triggers.isNull()) {
       for (JsonVariantConst t : triggers) {
-        unsigned long raw = t["nextAt"] | 0UL;
-        time_t na = (time_t)raw;
-        if (na > 0 && (minAt == 0 || na < minAt)) minAt = na;
+        bool isEventTrig = (strcmp(t["type"] | "", "event") == 0);
+        // Event triggers never clock-fire; a stale hand-edited nextAt on one
+        // would otherwise make automationsAnyDue() spin the full tick every
+        // loop pass forever (the scheduler computes 0 for it and never
+        // clears the persisted value). Mirror parseOneTrigger's defense.
+        if (!isEventTrig) {
+          unsigned long raw = t["nextAt"] | 0UL;
+          time_t na = (time_t)raw;
+          if (na > 0 && (minAt == 0 || na < minAt)) minAt = na;
+        }
+        if (gAutoCache[n].enabled && isEventTrig) {
+          int kind = systemEventKindFromName(t["on"] | "");
+          if (kind > 0 && kind < (int)SYSEVT_COUNT) evtMask[kind >> 5] |= (1UL << (kind & 31));
+        }
       }
     }
     gAutoCache[n].nextAt = minAt;
     n++;
   }
   gAutoCacheCount = n;
+  for (int w = 0; w < 8; w++) gAutoEventKindMask[w] = evtMask[w];
   gAutoCacheValid = true;
 }
 
@@ -828,6 +872,9 @@ void runAutomationsOnBoot() {
       }
     }
 
+    // SYSTEM-EVENT: boot automation dispatched its command list.
+    systemEventPost(SYSEVT_AUTOMATION_FIRED, autoName.c_str(), "boot");
+
     // Free allocated command strings
     for (int ci = 0; ci < cmdsCount; ++ci) {
       free(cmdsList[ci]);
@@ -930,6 +977,8 @@ const char* cmd_automation_add(const String& argsInput) {
   String cmdsList = a.value("commands");
   String condition = a.value("condition");
   String enabledStr = a.value("enabled");
+  String eventOn = a.value("on");
+  String eventMatch = a.value("match");
   
   bool enabled = (enabledStr.equalsIgnoreCase("1") || enabledStr.equalsIgnoreCase("true") || enabledStr.equalsIgnoreCase("yes"));
   
@@ -945,7 +994,7 @@ const char* cmd_automation_add(const String& argsInput) {
     return "ERROR";
   }
   if (typeNorm.length() == 0) {
-    broadcastOutput("Error: missing type (atTime|afterDelay|interval)");
+    broadcastOutput("Error: missing type (atTime|afterDelay|interval|event)");
     return "ERROR";
   }
   if ((cmdStr.length() == 0 && cmdsList.length() == 0)) {
@@ -1035,8 +1084,19 @@ const char* cmd_automation_add(const String& argsInput) {
       broadcastOutput("Error: interval requires numeric intervalms (milliseconds)");
       return "ERROR";
     }
+  } else if (typeNorm == "event") {
+    eventOn.trim();
+    if (systemEventKindFromName(eventOn.c_str()) <= 0) {
+      String err = "Error: event requires on=<kind>. Valid kinds:";
+      for (int k = SYSEVT_NONE + 1; k < SYSEVT_COUNT; k++) {
+        err += " ";
+        err += systemEventKindName((uint8_t)k);
+      }
+      broadcastOutput(err.c_str());
+      return "ERROR";
+    }
   } else {
-    broadcastOutput("Error: invalid type (expected atTime|afterDelay|interval)");
+    broadcastOutput("Error: invalid type (expected atTime|afterDelay|interval|event)");
     return "ERROR";
   }
   
@@ -1206,6 +1266,9 @@ const char* cmd_automation_add(const String& argsInput) {
       if (intervalMs.length() > 0) b += ",\n      \"intervalMs\": " + intervalMs;
     } else if (tt == "boot") {
       if (bootDelayMsStr.length() > 0) b += ",\n      \"bootDelayMs\": " + bootDelayMsStr;
+    } else if (tt == "event") {
+      b += ",\n      \"on\": \"" + jsonEscape(eventOn) + "\"";
+      if (eventMatch.length() > 0) b += ",\n      \"match\": \"" + jsonEscape(eventMatch) + "\"";
     }
     return b;
   };
@@ -1271,6 +1334,12 @@ const char* cmd_automation_add(const String& argsInput) {
           } else if (strcmp(stype, "boot") == 0) {
             long bms = sv["bootDelayMs"] | 0;
             body += ",\n      \"bootDelayMs\": " + String(bms);
+          } else if (strcmp(stype, "event") == 0) {
+            const char* onV = sv["on"] | "";
+            if (systemEventKindFromName(onV) <= 0) continue;  // unknown kind, skip
+            body += ",\n      \"on\": \"" + jsonEscape(String(onV)) + "\"";
+            const char* matchV = sv["match"] | "";
+            if (matchV[0]) body += ",\n      \"match\": \"" + jsonEscape(String(matchV)) + "\"";
           } else {
             continue;  // unknown type, skip
           }
@@ -1321,6 +1390,12 @@ const char* cmd_automation_add(const String& argsInput) {
   gAutosDirty = true;
   DEBUGF(DEBUG_AUTOMATIONS, "[autos add] scheduler refresh queued (type=%s)", typeNorm.c_str());
   
+  // SYSTEM-EVENT: a new automation was created and persisted. Edits (id= reuse)
+  // share this path but are not creations, so post only on a genuine add.
+  if (idOverrideStr.length() == 0) {
+    systemEventPost(SYSEVT_AUTOMATION_ADDED, name.c_str());
+  }
+
   BROADCAST_PRINTF("%s automation id=%ld name=%s", idOverrideStr.length() > 0 ? "Updated" : "Added", id, name.c_str());
   return "OK";
 }
@@ -1443,7 +1518,11 @@ const char* cmd_automation_delete(const String& argsInput) {
   String automationObj = json.substring(objStart, objEnd + 1);
   extractJsonString(automationObj.c_str(), "\"createdBy\"", createdByBuf, sizeof(createdByBuf));
   String createdBy = createdByBuf;
-  
+  // Capture the display name before the object is spliced out of the JSON,
+  // so the delete system-event can carry it as its subject.
+  char deletedNameBuf[64];
+  extractJsonString(automationObj.c_str(), "\"name\"", deletedNameBuf, sizeof(deletedNameBuf));
+
   DEBUGF(DEBUG_AUTOMATIONS, "[autos delete] id=%s createdBy='%s' requestedBy='%s' isAdmin=%d",
          idStr.c_str(), createdBy.c_str(), currentExecUser().c_str(), currentExecIsAdmin());
 
@@ -1505,7 +1584,10 @@ const char* cmd_automation_delete(const String& argsInput) {
   }
   
   gAutosDirty = true;
-  
+
+  // SYSTEM-EVENT: automation removed and the change persisted.
+  systemEventPost(SYSEVT_AUTOMATION_DELETED, deletedNameBuf);
+
   BROADCAST_PRINTF("Deleted automation id=%s", idStr.c_str());
   return "OK";
 }
@@ -1735,6 +1817,9 @@ const char* cmd_automation_run(const String& argsInput) {
       }
     }
   }
+
+  // SYSTEM-EVENT: manual automation run dispatched its command list.
+  systemEventPost(SYSEVT_AUTOMATION_FIRED, autoName.c_str(), "manual");
   
   // Advance nextAt after manual execution via the unified post-fire helper.
   time_t now = time(nullptr);
@@ -2016,7 +2101,7 @@ const char* cmd_automation(const String& argsInput) {
 static constexpr int MAX_TRIGGERS = 4;
 
 struct Trigger {
-  enum Type { NONE, TIME, MONTHLY, YEARLY, INTERVAL, MANUAL, BOOT };
+  enum Type { NONE, TIME, MONTHLY, YEARLY, INTERVAL, MANUAL, BOOT, EVENT };
   Type type = NONE;
 
   // TIME / MONTHLY / YEARLY share hour+minute
@@ -2040,6 +2125,13 @@ struct Trigger {
 
   // BOOT
   uint32_t bootDelayMs = 0;
+
+  // EVENT — fired by the system event register (System_Events.h), never by
+  // the clock. evtKind 0 = unknown kind (parses, never matches). Match buffer
+  // spans the full detail field so long text_rx patterns aren't silently
+  // truncated into broader prefix matches.
+  uint8_t evtKind = 0;
+  char evtMatch[SYSEVT_DETAIL_LEN + 1] = {};
 
   // Scheduling state (persisted per-trigger inside the JSON)
   time_t nextAt = 0;
@@ -2141,6 +2233,19 @@ static bool parseOneTrigger(JsonVariantConst trig, Trigger& out) {
     out.bootDelayMs = trig["bootDelayMs"] | 0;
     return true;
   }
+  if (strcmp(type, "event") == 0) {
+    out.type = Trigger::EVENT;
+    // Unknown "on" names parse as evtKind 0 (never matches) instead of
+    // failing: a dropped trigger would shift rescheduleAfterFire's
+    // positional nextAt write-back and corrupt sibling triggers.
+    int kind = systemEventKindFromName(trig["on"] | "");
+    out.evtKind = (kind > 0) ? (uint8_t)kind : 0;
+    const char* m = trig["match"] | "";
+    strncpy(out.evtMatch, m, sizeof(out.evtMatch) - 1);
+    out.evtMatch[sizeof(out.evtMatch) - 1] = '\0';
+    out.nextAt = 0;  // events never clock-fire; ignore any stale persisted nextAt
+    return true;
+  }
   return false;
 }
 
@@ -2171,7 +2276,8 @@ static time_t nextFire(const Trigger& s, time_t from) {
   switch (s.type) {
     case Trigger::MANUAL:
     case Trigger::BOOT:
-      return 0;  // manually armed / dispatched by runAtBoot, not by scheduler
+    case Trigger::EVENT:
+      return 0;  // manually armed / dispatched by runAtBoot or the event matcher, not by the clock
     case Trigger::INTERVAL:
       return (s.intervalMs > 0) ? (from + (time_t)(s.intervalMs / 1000)) : 0;
     case Trigger::TIME: {
@@ -3477,11 +3583,66 @@ void notifyAutomationScheduler() {
   gAutoCacheValid = false;
 }
 
+// True when any of the automation's event triggers matches any drained bus
+// event (kind equal + match pattern hits subject/detail). Sets
+// *matchedKindName to the firing kind's name for logging.
+static bool automationEventTriggersMatch(const char* automationJson, const SystemEvent* evs,
+                                         int evCount, const char** matchedKindName) {
+  if (evCount <= 0) return false;
+  Trigger triggers[MAX_TRIGGERS];
+  int n = triggersFromJson(automationJson, triggers, MAX_TRIGGERS);
+  for (int i = 0; i < n; i++) {
+    if (triggers[i].type != Trigger::EVENT || triggers[i].evtKind == 0) continue;
+    for (int e = 0; e < evCount; e++) {
+      if (evs[e].kind != triggers[i].evtKind) continue;
+      if (systemEventMatches(evs[e], triggers[i].evtMatch)) {
+        if (matchedKindName) *matchedKindName = systemEventKindName(evs[e].kind);
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 // Core scheduler logic - extracted for reuse
 void schedulerTickMinute() {
-  // Only valid if time is synced
   time_t now = time(nullptr);
-  if (now <= 0) return;
+  bool timeValid = (now > 0);
+
+  // Drain pending bus events BEFORE the time-sync bail so event triggers
+  // work on devices without NTP/RTC. Static buffers: single consumer (this
+  // function only runs on the main loop task), and 16 events at ~90 B each
+  // would be a meaningful stack bite. Events older than 60 s are discarded
+  // unmatched — they piled up while automations were disabled, and firing
+  // on minute-old edges after a re-enable would surprise the user.
+  static uint32_t sEventCursor = UINT32_MAX;  // UINT32_MAX = start "from now"
+  static SystemEvent sEventBuf[SYSEVT_RING_SIZE];
+  static uint32_t sEventRingSkipped = 0;  // ring overwrote events before we read them
+  gAutoEventsPending = false;  // posts after this point re-set it for the next tick
+  uint32_t skippedBefore = sEventRingSkipped;
+  int evCount = systemEventFetchSince(&sEventCursor, sEventBuf, SYSEVT_RING_SIZE,
+                                      &sEventRingSkipped);
+  if (sEventRingSkipped != skippedBefore) {
+    // SILENT LOSS with correctness impact: any event trigger in the skipped
+    // gap NEVER fired. Warn (throttled) so it's visible in debug output.
+    static uint32_t sSkipWarnMs = 0;
+    if (everyMs(&sSkipWarnMs, 10000)) {
+      DEBUG_AUTOMATIONSF("[AUTO] event ring overflowed this consumer: %lu event(s) skipped total - triggers in the gap did not fire",
+                         (unsigned long)sEventRingSkipped);
+    }
+  }
+  if (evCount > 0) {
+    uint32_t nowMs = millis();
+    int w = 0;
+    for (int i = 0; i < evCount; i++) {
+      if (nowMs - sEventBuf[i].tsMs <= 60000UL) sEventBuf[w++] = sEventBuf[i];
+    }
+    evCount = w;
+    DEBUGF(DEBUG_AUTOMATIONS, "[automations] tick drained %d fresh event(s)", evCount);
+  }
+
+  // Without synced time only event fires are possible; skip the clock scan.
+  if (!timeValid && evCount == 0) return;
 
   DEBUGF(DEBUG_AUTOMATIONS, "[automations] tick now=%lu", (unsigned long)now);
 
@@ -3557,15 +3718,63 @@ void schedulerTickMinute() {
     // busy-spinning the full tick every main-loop pass until the primary came due.
     // rescheduleAfterFire (below) then advances each trigger that was due, so the
     // min moves forward and the cache/fire-check agree again.
-    time_t nextAt = computeNextRunTime(obj.c_str(), now);
-    if (nextAt <= 0) {
+    time_t nextAt = timeValid ? computeNextRunTime(obj.c_str(), now) : 0;
+    bool clockDue = (timeValid && nextAt > 0 && now >= nextAt);
+
+    // Event triggers: fire when a drained bus event matches one of this
+    // automation's event triggers. At most one fire per automation per tick
+    // even if several events matched (commands carry no per-event data, so
+    // repeat fires within one tick would be pure duplicates).
+    const char* evKindName = nullptr;
+    bool eventDue = automationEventTriggersMatch(obj.c_str(), sEventBuf, evCount, &evKindName);
+
+    // Feedback-loop damping: an automation whose commands produce the very
+    // event it subscribes to (on=setting_changed running a set, on=llm_gen_done
+    // running an llm command) would otherwise re-fire on every tick, each
+    // cycle costing command execution and possibly a flash write. Cap each
+    // automation to one EVENT fire per 2s window; clock fires are unaffected.
+    if (eventDue) {
+      static constexpr int EVT_COOLDOWN_SLOTS = 16;
+      static constexpr uint32_t EVT_COOLDOWN_MS = 2000;
+      static long sEvtFireId[EVT_COOLDOWN_SLOTS] = {};
+      static uint32_t sEvtFireMs[EVT_COOLDOWN_SLOTS] = {};
+      static int sEvtFireNext = 0;
+      uint32_t nowMs = millis();
+      int slot = -1;
+      for (int i = 0; i < EVT_COOLDOWN_SLOTS; i++) {
+        if (sEvtFireId[i] == id) { slot = i; break; }
+      }
+      if (slot >= 0 && (nowMs - sEvtFireMs[slot]) < EVT_COOLDOWN_MS) {
+        eventDue = false;
+        DEBUGF(DEBUG_AUTOMATIONS, "[autos] id=%ld event fire suppressed (cooldown)", id);
+        if (gAutoLogActive) {
+          char cdBuf[128];
+          snprintf(cdBuf, sizeof(cdBuf), "Event automation skipped: ID=%ld event cooldown (2s)", id);
+          appendAutoLogEntry("AUTO_SKIP", cdBuf);
+        }
+      } else if (eventDue) {
+        if (slot < 0) {
+          slot = sEvtFireNext;
+          sEvtFireNext = (sEvtFireNext + 1) % EVT_COOLDOWN_SLOTS;
+          sEvtFireId[slot] = id;
+        }
+        sEvtFireMs[slot] = nowMs;
+      }
+    }
+
+    if (nextAt <= 0 && !eventDue) {
       DEBUGF(DEBUG_AUTOMATIONS, "[autos] id=%ld skip: no schedulable trigger due", id);
       pos = objEnd + 1;
       continue;
     }
 
     // Check if it's time to run
-    if (now >= nextAt) {
+    if (clockDue || eventDue) {
+      const char* fireLabel = (eventDue && !clockDue) ? "Event" : "Scheduled";
+      if (eventDue) {
+        DEBUGF(DEBUG_AUTOMATIONS, "[autos] id=%ld event trigger matched: %s", id,
+               evKindName ? evKindName : "?");
+      }
       // Extract commands
       static constexpr int MAX_AUTO_CMDS = 16;  // 16 commands per automation (saves ~576B stack vs 64)
       String cmdsList[MAX_AUTO_CMDS];
@@ -3673,7 +3882,7 @@ void schedulerTickMinute() {
           if (!conditionMet) {
             if (gAutoLogActive) {
               char skipBuf[256];
-              snprintf(skipBuf, sizeof(skipBuf), "Scheduled automation skipped: ID=%ld Name=%s Condition not met: %s", id, autoName.c_str(), condition.c_str());
+              snprintf(skipBuf, sizeof(skipBuf), "%s automation skipped: ID=%ld Name=%s Condition not met: %s", fireLabel, id, autoName.c_str(), condition.c_str());
               appendAutoLogEntry("AUTO_SKIP", skipBuf);
             }
             DEBUGF(DEBUG_AUTOMATIONS, "[autos] id=%ld skipped - condition not met: %s", id, condition.c_str());
@@ -3688,7 +3897,11 @@ void schedulerTickMinute() {
         // Log scheduled automation start if logging is active
         if (gAutoLogActive) {
           char startBuf[256];
-          snprintf(startBuf, sizeof(startBuf), "Scheduled automation started: ID=%ld Name=%s User=%s", id, autoName.c_str(), _createdByBuf);
+          if (eventDue && !clockDue) {
+            snprintf(startBuf, sizeof(startBuf), "Event automation started: ID=%ld Name=%s User=%s Trigger=%s", id, autoName.c_str(), _createdByBuf, evKindName ? evKindName : "?");
+          } else {
+            snprintf(startBuf, sizeof(startBuf), "Scheduled automation started: ID=%ld Name=%s User=%s", id, autoName.c_str(), _createdByBuf);
+          }
           appendAutoLogEntry("AUTO_START", startBuf);
         }
 
@@ -3703,22 +3916,32 @@ void schedulerTickMinute() {
           if (!isAutoInternalResult(result)) {
             {
               char schedBuf[256];
-              snprintf(schedBuf, sizeof(schedBuf), "[Scheduled Automation %ld] %s", id, result);
+              snprintf(schedBuf, sizeof(schedBuf), "[%s Automation %ld] %s", fireLabel, id, result);
               broadcastOutput(schedBuf);
             }
           }
         }
         executed++;
 
+        // SYSTEM-EVENT: automation matched and dispatched its command list.
+        {
+          const char* trigType = (eventDue && !clockDue) ? "event"
+                                 : ((obj.indexOf("\"type\": \"interval\"") >= 0) ||
+                                    (obj.indexOf("\"type\":\"interval\"") >= 0)) ? "interval"
+                                 : "time";
+          systemEventPost(SYSEVT_AUTOMATION_FIRED, autoName.c_str(), trigType);
+        }
+
         // Log scheduled automation end if logging is active
         if (gAutoLogActive) {
           char endBuf[256];
-          snprintf(endBuf, sizeof(endBuf), "Scheduled automation completed: ID=%ld Name=%s Commands=%d", id, autoName.c_str(), cmdsCount);
+          snprintf(endBuf, sizeof(endBuf), "%s automation completed: ID=%ld Name=%s Commands=%d", fireLabel, id, autoName.c_str(), cmdsCount);
           appendAutoLogEntry("AUTO_END", endBuf);
         }
 
-        // Update next run time via the unified post-fire helper.
-        rescheduleAfterFire(id, obj.c_str(), now);
+        // Update next run time via the unified post-fire helper. Pure event
+        // fires touch no clock trigger, so skip the (flash-writing) reschedule.
+        if (clockDue) rescheduleAfterFire(id, obj.c_str(), now);
       } else {
         DEBUGF(DEBUG_AUTOMATIONS, "[autos] id=%ld skip: no commands found", id);
       }

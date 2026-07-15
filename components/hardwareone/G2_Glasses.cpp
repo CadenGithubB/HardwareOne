@@ -7,6 +7,7 @@
 // dual-temple connection management, session prelude, and heartbeat task.
 
 #include "G2_Glasses.h"
+#include "System_Events.h"  // systemEventPost — event register producer
 
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 
@@ -1235,6 +1236,8 @@ public:
     if (wasConnected) {
       BROADCAST_PRINTF("[G2] %s temple dropped",
                        temple->side == 'L' ? "LEFT" : "RIGHT");
+      systemEventPost(SYSEVT_G2_DISCONNECTED, temple->side == 'L' ? "LEFT" : "RIGHT",
+                      (!gL.connected && !gR.connected) ? "none left" : "one side up");
     }
 
     // If neither temple is connected, roll back global state so the
@@ -1916,6 +1919,8 @@ static void handleNotify(G2Temple& t, const uint8_t* data, size_t len) {
                            (unsigned)env.sid);
           g2PushStatusEvent(t.side == 'L' ? "plugin-alive-L"
                                            : "plugin-alive-R");
+          // Counterpart of SYSEVT_G2_NOT_WORN: plugin woke = picked up/worn.
+          systemEventPost(SYSEVT_G2_WORN, t.side == 'L' ? "LEFT" : "RIGHT");
         }
         t.pluginDead      = false;
         t.heartbeatMissed = 0;
@@ -2767,6 +2772,7 @@ static void handleDevEvent(G2Temple& t, const uint8_t* devBody, size_t devLen) {
             g2LensClearContainer();
             g2LensClearOverlay();
             g2PushStatusEvent("fw-system-exit");
+            systemEventPost(SYSEVT_G2_HIJACK_EXITED, "fw-system-exit");
             g2RingDump("firmware SYSTEM_EXIT");
           } else {
             DEBUG_G2F("[G2-%c] SYSTEM_EXIT while no hijack was active "
@@ -4335,6 +4341,7 @@ static void hijackBootstrapBody() {
     BROADCAST_PRINTF("[G2] Blocks hijack: %u-item menu shown",
                      (unsigned)kHijackMenuCount);
     g2PushStatusEvent("hijack-on");
+    systemEventPost(SYSEVT_G2_HIJACK_ENTERED, "MAIN");
   } else {
     DEBUG_G2F("[G2] Hijack: CREATE-list failed — menu NOT displayed");
     g2PushStatusEvent("hijack-fail");
@@ -4593,6 +4600,7 @@ static void sendHijackShutdown(const char* reason) {
   DEBUG_G2F("[G2] Hijack exit (%s) — sending ShutdownPage",
             reason ? reason : "?");
   g2PushStatusEvent(reason ? reason : "hijack-off");
+  systemEventPost(SYSEVT_G2_HIJACK_EXITED, reason ? reason : "hijack-off");
   if (gR.connected) {
     uint8_t buf[32];
     size_t n = g2BuildShutdown(allocSeq(), G2_MAGIC_SHUTDOWN,
@@ -5126,6 +5134,7 @@ static void handleEnvelope(G2Temple& t, const G2EnvelopeView& env) {
                       : (gSilentMode ? "ON" : "OFF"));
           gSilentMode = newSilent;
           g2PushStatusEvent(newSilent ? "silent-on" : "silent-off");
+          systemEventPost(SYSEVT_G2_SILENT_MODE, newSilent ? "on" : "off");
         }
       }
 
@@ -5762,6 +5771,10 @@ static void beatOne(G2Temple& t) {
                      (unsigned)t.heartbeatMissed);
     g2RingDump(t.side == 'L' ? "plugin silent (L)" : "plugin silent (R)");
     g2PushStatusEvent(t.side == 'L' ? "plugin-silent-L" : "plugin-silent-R");
+    // Best available "glasses set down / not worn" proxy — the plugin task
+    // goes dormant when the glasses aren't on a head. Debounced upstream by
+    // HEARTBEAT_DEAD_THRESHOLD; fires once per silence episode.
+    systemEventPost(SYSEVT_G2_NOT_WORN, t.side == 'L' ? "LEFT" : "RIGHT");
   }
 }
 
@@ -6624,6 +6637,8 @@ static bool g2ConnectSync(G2Eye eye) {
   startHeartbeatTimer();
   broadcastOutput("[G2] Connected");
   g2PushStatusEvent("connect-ok");
+  systemEventPost(SYSEVT_G2_CONNECTED,
+                  (gL.connected && gR.connected) ? "L+R" : (gL.connected ? "L" : "R"));
 
   // Persist temple MACs for boot-time auto-reconnect. bleSavePeerMac is
   // a no-op when the values match what's already stored, so calling on

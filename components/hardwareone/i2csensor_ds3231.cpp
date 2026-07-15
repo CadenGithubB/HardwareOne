@@ -17,6 +17,7 @@
 #include "System_Debug.h"
 #include "System_ESPNow.h"
 #include "System_ESPNow_Sensors.h"
+#include "System_Events.h"  // systemEventPost — event register producer
 #include "System_I2C.h"
 #include "System_MemoryMonitor.h"
 #include "System_Settings.h"
@@ -542,6 +543,7 @@ bool rtcInit() {
   if (rtcReadRegisters(DS3231_REG_STATUS, &status, 1)) {
     if (status & 0x80) {  // OSF bit
       DEBUG_RTC_LIFECYCLEF("[RTC] Oscillator was stopped - RTC time may be invalid");
+      systemEventPost(SYSEVT_RTC_POWER_LOSS, "lost", "RTC battery");
       rtcWriteRegister(DS3231_REG_STATUS, status & ~0x80);
     }
   }

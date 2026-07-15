@@ -155,6 +155,15 @@ void startHttpServer();
 // NTP Time Synchronization
 // ============================================================================
 void setupNTP();
+
+// Reboot helpers. Route all intentional restarts through these so every reboot is
+// attributable (durable REBOOT audit line) AND emits a typed SYSEVT_REBOOT on the
+// next boot. recordRebootIntent() records only (for deferred/esp_timer sites);
+// rebootDevice() records then flushes + restarts inline; rebootStashReason() is the
+// RTC accessor (defined in HardwareOne.cpp with the other reset-state vars).
+void rebootStashReason(const char* reason, const char* who, uint8_t source);
+void recordRebootIntent(const char* reason, const char* auditDetail);
+void rebootDevice(const char* reason, const char* auditDetail, uint32_t flushDelayMs);
 bool syncNTPAndResolve();  // Synchronous - runs in calling task's stack
 time_t nowEpoch();
 
@@ -169,6 +178,42 @@ struct AuthContext;
 bool readText(const char* path, String& out);
 bool writeText(const char* path, const String& content);
 bool writeTextAtomic(const char* path, const String& content);
+
+// ============================================================================
+// Diagnostics primitives — shared scaffolding for queue/saturation reporters
+// ============================================================================
+// The house instrumentation pattern (System_ESPNow_Tx stats, `debugbuffer`,
+// [MEMSAMPLE]) kept re-rolling three tiny mechanisms; new reporters compose
+// these instead. Existing HW-validated sites migrate opportunistically only.
+
+// Rate gate: true at most once per intervalMs. The caller owns the stamp
+// (a function-static at the call site). A zero stamp fires immediately —
+// right for debug reporters, which should print as soon as their flag is
+// switched on rather than waiting out a full interval.
+inline bool everyMs(uint32_t* lastMs, uint32_t intervalMs) {
+  const uint32_t now = millis();
+  if (*lastMs != 0 && (now - *lastMs) < intervalMs) return false;
+  *lastMs = now ? now : 1;
+  return true;
+}
+
+// High-water mark: raise *hwm to value when higher. Best-effort under
+// concurrency (volatile read/write, no lock) — the same tolerance the
+// codebase already accepts for diagnostic counters (gDebugDropped et al.);
+// a lost race costs one stale sample, never corruption.
+inline void observeHwm(volatile uint32_t* hwm, uint32_t value) {
+  if (value > *hwm) *hwm = value;
+}
+
+// Saturation label for a used/capacity pair — the `debugbuffer` ladder.
+inline const char* saturationLabel(uint32_t used, uint32_t cap) {
+  if (cap == 0) return "OK";
+  const uint32_t pct = (used * 100U) / cap;
+  if (pct > 90) return "CRITICAL";
+  if (pct > 75) return "WARNING";
+  if (pct > 50) return "Busy";
+  return "OK";
+}
 
 // Settings persistence
 // NOTE: Use writeSettingsJson() from .ino instead of saveUnifiedSettings()

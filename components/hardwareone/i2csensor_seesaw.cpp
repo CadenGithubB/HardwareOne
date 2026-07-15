@@ -1,4 +1,5 @@
 #include "i2csensor_seesaw.h"
+#include "System_Events.h"  // systemEventPost — event register producer
 #include "System_BuildConfig.h"
 #include "System_MemoryMonitor.h"
 #include "System_MemUtil.h"
@@ -590,7 +591,17 @@ void inputTask(void* parameter) {
             if (released & GAMEPAD_BUTTON_X) DEBUG_INPUT_VALUESF("[GAMEPAD_PRESS] X released");
             if (released & GAMEPAD_BUTTON_Y) DEBUG_INPUT_VALUESF("[GAMEPAD_PRESS] Y released");
             if (released & GAMEPAD_BUTTON_START) DEBUG_INPUT_VALUESF("[GAMEPAD_PRESS] START released");
-            
+
+            // Bus events: PRESS edges only. Releases are deliberately not
+            // posted — during OLED menu navigation every press would double
+            // the ring traffic for no automation value.
+            if (pressed & GAMEPAD_BUTTON_A) systemEventPost(SYSEVT_BUTTON, "A");
+            if (pressed & GAMEPAD_BUTTON_B) systemEventPost(SYSEVT_BUTTON, "B");
+            if (pressed & GAMEPAD_BUTTON_X) systemEventPost(SYSEVT_BUTTON, "X");
+            if (pressed & GAMEPAD_BUTTON_Y) systemEventPost(SYSEVT_BUTTON, "Y");
+            if (pressed & GAMEPAD_BUTTON_START) systemEventPost(SYSEVT_BUTTON, "START");
+            if (pressed & GAMEPAD_BUTTON_SELECT) systemEventPost(SYSEVT_BUTTON, "SELECT");
+
             lastButtons = buttons;
           }
           
@@ -651,6 +662,8 @@ void inputTask(void* parameter) {
             DEBUG_INPUT_LIFECYCLEF("Gamepad auto-disabled: %u consecutive I2C failures", errors);
             sensorStatusBumpWith("gamepad@auto_disabled");
             logSystemEvent("SENSOR", "Gamepad auto-disabled after %u consecutive I2C failures", errors);
+            { char det[24]; snprintf(det, sizeof(det), "%u I2C errors", errors);
+              systemEventPost(SYSEVT_SENSOR_FAULT, "Gamepad", det); }
           }
         } else {
           // I2C succeeded but data validation failed (garbage data during bus contention)
@@ -663,6 +676,8 @@ void inputTask(void* parameter) {
             handleDeviceStopped(I2C_DEVICE_INPUT);
             sensorStatusBumpWith("gamepad@invalid_data_disabled");
             logSystemEvent("SENSOR", "Gamepad auto-disabled after %u consecutive invalid reads (device likely disconnected)", consecutiveInvalidReads);
+            { char det[24]; snprintf(det, sizeof(det), "%u invalid reads", (unsigned)consecutiveInvalidReads);
+              systemEventPost(SYSEVT_SENSOR_FAULT, "Gamepad", det); }
           }
         }
         lastGamepadRead = nowMs;

@@ -1,4 +1,9 @@
 #include "System_ESPSR.h"
+#include "System_Events.h"  // systemEventPost — voice events
+#include "System_BuildConfig.h"
+#if ENABLE_OLED_DISPLAY
+#include "OLED_UI.h"  // oledNotificationBannerShow — voice-failure banner
+#endif
 #include <esp_attr.h>
 
 #if ENABLE_ESP_SR
@@ -135,11 +140,14 @@ static const char* transportToStableString(CommandSource t) {
 }
 
 static void voiceDisarmInternal() {
+  bool wasArmed = gVoiceArmed;
+  String prevUser = gVoiceArmedUser;
   gVoiceArmed = false;
   gVoiceArmedUser = "";
   gVoiceArmedByTransport = SOURCE_INTERNAL;
   gVoiceArmedByIp = "";
   gVoiceArmedAtMs = 0;
+  if (wasArmed) systemEventPost(SYSEVT_VOICE_DISARMED, prevUser.c_str());
 }
 
 static bool voiceArmFromContextInternal(const AuthContext& ctx) {
@@ -151,6 +159,7 @@ static bool voiceArmFromContextInternal(const AuthContext& ctx) {
   gVoiceArmedByTransport = ctx.transport;
   gVoiceArmedByIp = ctx.ip;
   gVoiceArmedAtMs = millis();
+  systemEventPost(SYSEVT_VOICE_ARMED, gVoiceArmedUser.c_str());
   return true;
 }
 
@@ -967,7 +976,14 @@ static void onVoiceCommandDetected(int commandId, const char* phrase) {
         if (!ok) {
           broadcastOutput("[VOICE] Command rejected (voice not armed or not authorized)");
         }
-        notifyVoiceCommandResult(normCat.c_str(), ok);
+        if (ok) systemEventPost(SYSEVT_VOICE_COMMAND, normCat.c_str());
+#if ENABLE_OLED_DISPLAY
+        else {
+          char vmsg[32];
+          snprintf(vmsg, sizeof(vmsg), "Voice: %s", normCat.c_str());
+          oledNotificationBannerShow(vmsg, PairingRibbonIcon::ERROR_ICON, 2000);
+        }
+#endif
         gCommandCount++;
         gLastCommand = category;
       } else {
@@ -1041,7 +1057,14 @@ static void onVoiceCommandDetected(int commandId, const char* phrase) {
       if (!ok) {
         broadcastOutput("[VOICE] Command rejected (voice not armed or not authorized)");
       }
-      notifyVoiceCommandResult(normTarget.c_str(), ok);
+      if (ok) systemEventPost(SYSEVT_VOICE_COMMAND, normTarget.c_str());
+#if ENABLE_OLED_DISPLAY
+      else {
+        char vmsg[32];
+        snprintf(vmsg, sizeof(vmsg), "Voice: %s", normTarget.c_str());
+        oledNotificationBannerShow(vmsg, PairingRibbonIcon::ERROR_ICON, 2000);
+      }
+#endif
       gCommandCount++;
     } else {
       WARN_SYSTEMF("[HIER] No CLI command found for '%s'->'%s'->'%s'!", 
@@ -2207,7 +2230,7 @@ static void srTask(void* param) {
           // User-facing feedback
           broadcastOutput("");
           broadcastOutput("[Voice] Yes?");
-          notifyVoiceListening();
+          systemEventPost(SYSEVT_VOICE_WAKE);
           INFO_SRF("[HIER-DEBUG] Voice CLI mappings count: %u", (unsigned)gVoiceCliMappingCount);
           INFO_SRF("Wake stats: count=%u, idx=%d, model=%d, vol=%.1f dB, wake_len=%d",
                    gWakeWordCount, fetchResult->wake_word_index, fetchResult->wakenet_model_index,

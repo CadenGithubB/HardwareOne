@@ -33,8 +33,9 @@
 // bytes are consumed by the Poly1305 AEAD tag (cipher || tag layout on wire).
 // Structs that may be encrypted MUST fit in this lower bound, not the raw
 // MAX_PAYLOAD. static_asserts below enforce this for the encrypt-eligible
-// payload types; new structs in the 30–49 (app unicast) / 60–69 (files) /
-// 80–89 (sensors) ranges should pick this constant for their size cap.
+// payload types; new structs in the app-unicast (50–69), remote-FS (70–89),
+// files (110–129), sensors (150–169), and bond (170–189) ranges should pick
+// this constant for their size cap.
 #define ESPNOW_V4_AEAD_TAG_LEN 16
 #define ESPNOW_V4_MAX_PLAINTEXT (ESPNOW_V4_MAX_PAYLOAD - ESPNOW_V4_AEAD_TAG_LEN)  // 202 bytes
 
@@ -47,18 +48,42 @@
             (ESPNOW_V4_MAX_PAYLOAD - ESPNOW_V4_BROADCAST_AUTH_TAG_LEN)  // 186 bytes
 
 // ---- Opcode enum -----------------------------------------------------------
-// Category-based numbering with reserved slots for future phases.
+// Category-based numbering, 20 slots per category. Renumbered 2026-07 from the
+// original 10-wide V4 map to create growth room; the wire is incompatible with
+// the old numbering and no migration path is carried — the whole fleet is
+// erased and reflashed together (version byte deliberately unchanged).
+//
 // Ranges:
-//   1–9    Transport     (ACK now; NACK/FRAG_REQ/FRAG_REPLY reserved)
-//   10–19  Crypto        (Phase 3: KEY_EX_*, SESSION_*)
-//   20–29  Discovery     (HEARTBEAT, TOPO_*, TIME_SYNC)
-//   30–49  App unicast   (CMD, CMD_RESP, TEXT, METADATA_*, USER_SYNC)
-//   50–59  Streaming     (STREAM, STREAM_CTRL)
-//   60–69  Files         (FILE_START/CHUNK/END now; ACK/PROGRESS/CANCEL Phase 4)
-//   70–79  Events        (Phase 5: SUBSCRIBE/UNSUBSCRIBE/EVENT/SUB_LIST_*)
-//   80–89  Sensors       (SENSOR_BROADCAST/DATA/STATUS, WORKER_STATUS)
-//   90–99  Bond          (BOND_HEARTBEAT, BOND_CAP_*, MANIFEST_*, SETTINGS_*, BOND_STATUS_*)
-//   200+   User-defined  (reserved for future plugin-style extensions)
+//   0        invalid — never assign
+//   1–9      Transport     (ACK live; NACK/FRAG_REQ/FRAG_REPLY reserved 2–4)
+//   10–29    Crypto        (KEY_EX_* 10–12, SESSION_* 13–15;
+//                           16/17 earmarked SESSION_AUTH_REQ/GRANT)
+//   30–49    Discovery     (HEARTBEAT, BOOT, TOPO_*, TIME_SYNC, PAIR_BEACON;
+//                           37–39 earmarked CAP_REQ/CAP_RESP/PEER_LIST)
+//   50–69    App unicast   (CMD, CMD_RESP, TEXT, METADATA_*, USER_SYNC)
+//   70–89    Remote FS     (FS_* read side live 70–75; 76–81 earmarked write
+//                           side: DELETE_REQ/ACK, PUT_REQ/ACK, MKDIR, RENAME)
+//   90–109   Streaming     (STREAM; 91–93 earmarked MEDIA_START/DATA/END)
+//   110–129  Files         (FILE_START/DATA/END/CANCEL live; FILE_ACK=113,
+//                           FILE_PROGRESS=114, FILE_NACK=116, FILE_RESUME_OK=117 reserved)
+//   130–149  Events        (SUBSCRIBE_UPDATE live; UNSUBSCRIBE_ALL/EVENT_PUSH/
+//                           SUB_LIST_REQ/SUB_LIST_REPLY reserved 131–134)
+//   150–169  Sensors       (SENSOR_BROADCAST/STATUS live; POWER_STATUS=152 reserved;
+//                           153/154 earmarked SENSOR_REQ/SENSOR_ENVELOPE)
+//   170–189  Bond          (BOND_*, MANIFEST_REQ, SETTINGS_REQ, SCHEMA_REQ, plus
+//                           BOND_STREAM_CTRL/BOND_SENSOR_DATA — moved in from
+//                           streaming/sensors because they were always bond-gated)
+//   190–199  Unallocated buffer (future whole category, or spill for a full one)
+//   200–255  User-defined  (plugin/experiment space — core NEVER allocates here)
+//
+// Allocation policy (this comment block is the source of truth for the map —
+// update it in the same commit as any enum change):
+//   * New opcodes take the lowest free slot in their category; a category that
+//     fills spills into 190–199 before ever borrowing from a neighbor.
+//   * An enum symbol is added only in the same change as its kV4HandlerTable
+//     row and handler — a TX'd opcode with no RX row is a silent drop.
+//   * Earmarks (named numbers in comments) are intentions, not allocations;
+//     re-justify or release them when the category next allocates.
 //
 // Dead V3 opcodes removed: MANIFEST_RESP, SETTINGS_RESP, SETTINGS_PUSH
 // (none were ever sent or received in V3 — manifests/settings travel as
@@ -69,69 +94,80 @@ enum EspNowV4Type : uint8_t {
   ESPNOW_V4_TYPE_ACK             = 1,
   // 2–4 reserved (NACK, FRAG_REQ, FRAG_REPLY for future negotiated retransmit)
 
-  // --- Crypto / pairing (10–19) — Phase 3 ---
-  ESPNOW_V4_TYPE_KEY_EX_HELLO    = 10,  // Phase 3 reserved
+  // --- Crypto / pairing (10–29) ---
+  ESPNOW_V4_TYPE_KEY_EX_HELLO    = 10,
   ESPNOW_V4_TYPE_KEY_EX_REPLY    = 11,
   ESPNOW_V4_TYPE_KEY_EX_CONFIRM  = 12,
   ESPNOW_V4_TYPE_SESSION_OPEN    = 13,
   ESPNOW_V4_TYPE_SESSION_CONFIRM = 14,
-  // 15 reserved (was SESSION_CLOSE — never sent or handled; removed 2026-06)
-  ESPNOW_V4_TYPE_SESSION_REKEY   = 16,
+  ESPNOW_V4_TYPE_SESSION_REKEY   = 15,
+  // 16/17 earmarked SESSION_AUTH_REQ / SESSION_AUTH_GRANT (session-scoped
+  // credential-free remote exec — mesh report §5.2 rank 11)
 
-  // --- Discovery / timing (20–29) ---
-  ESPNOW_V4_TYPE_HEARTBEAT       = 20,
-  ESPNOW_V4_TYPE_BOOT            = 21,  // Device boot/online notice — its OWN type so the RX files it as a system event, not chat
-  ESPNOW_V4_TYPE_TOPO_REQ        = 22,
-  ESPNOW_V4_TYPE_TOPO_START      = 23,
-  ESPNOW_V4_TYPE_TOPO_PEER       = 24,
-  ESPNOW_V4_TYPE_TIME_SYNC       = 25,
-  ESPNOW_V4_TYPE_PAIR_BEACON     = 26,  // WPS-style pairing beacon — plaintext FF broadcast sent while a pairing window is open
+  // --- Discovery / timing (30–49) ---
+  ESPNOW_V4_TYPE_HEARTBEAT       = 30,
+  ESPNOW_V4_TYPE_BOOT            = 31,  // Device boot/online notice — its OWN type so the RX files it as a system event, not chat
+  ESPNOW_V4_TYPE_TOPO_REQ        = 32,
+  ESPNOW_V4_TYPE_TOPO_START      = 33,
+  ESPNOW_V4_TYPE_TOPO_PEER       = 34,
+  ESPNOW_V4_TYPE_TIME_SYNC       = 35,
+  ESPNOW_V4_TYPE_PAIR_BEACON     = 36,  // WPS-style pairing beacon — plaintext FF broadcast sent while a pairing window is open
+  // 37–39 earmarked CAP_REQ / CAP_RESP / PEER_LIST (mesh capability discovery)
 
-  // --- Application unicast (30–49) ---
-  ESPNOW_V4_TYPE_CMD             = 30,
-  ESPNOW_V4_TYPE_CMD_RESP        = 31,  // (renamed CMD_RESP_STATUS in Phase 1 streaming refactor)
-  ESPNOW_V4_TYPE_TEXT            = 32,
-  ESPNOW_V4_TYPE_METADATA_REQ    = 33,
-  ESPNOW_V4_TYPE_METADATA_RESP   = 34,
-  ESPNOW_V4_TYPE_METADATA_PUSH   = 35,
-  ESPNOW_V4_TYPE_USER_SYNC       = 36,
-  ESPNOW_V4_TYPE_FS_LIST_REQ     = 37,  // Browse remote VFS: "list directory <path>"
-  ESPNOW_V4_TYPE_FS_LIST_REPLY   = 38,  // Reply: paginated batch of FileEntry-style records
-  ESPNOW_V4_TYPE_FS_STAT_REQ     = 39,  // Storage stats for a VFS root (total/used/free)
-  ESPNOW_V4_TYPE_FS_STAT_REPLY   = 40,  // Reply: 64-bit byte counters + percent used
-  ESPNOW_V4_TYPE_FS_GET_REQ      = 41,  // Pull a file from the peer (peer responds via FILE_* opcodes)
-  ESPNOW_V4_TYPE_FS_GET_ACK      = 42,  // Synchronous ack for FS_GET_REQ (status + fileSize)
+  // --- Application unicast (50–69) ---
+  ESPNOW_V4_TYPE_CMD             = 50,
+  ESPNOW_V4_TYPE_CMD_RESP        = 51,
+  ESPNOW_V4_TYPE_TEXT            = 52,
+  ESPNOW_V4_TYPE_METADATA_REQ    = 53,
+  ESPNOW_V4_TYPE_METADATA_RESP   = 54,
+  ESPNOW_V4_TYPE_METADATA_PUSH   = 55,  // RX-plumbed but never TX'd today (no sendMetadata(isPush=true) caller)
+  ESPNOW_V4_TYPE_USER_SYNC       = 56,
 
-  // --- Streaming (50–59) ---
-  ESPNOW_V4_TYPE_STREAM          = 50,
-  ESPNOW_V4_TYPE_STREAM_CTRL     = 51,
+  // --- Remote filesystem (70–89) ---
+  ESPNOW_V4_TYPE_FS_LIST_REQ     = 70,  // Browse remote VFS: "list directory <path>"
+  ESPNOW_V4_TYPE_FS_LIST_REPLY   = 71,  // Reply: paginated batch of FileEntry-style records
+  ESPNOW_V4_TYPE_FS_STAT_REQ     = 72,  // Storage stats for a VFS root (total/used/free)
+  ESPNOW_V4_TYPE_FS_STAT_REPLY   = 73,  // Reply: 64-bit byte counters + percent used
+  ESPNOW_V4_TYPE_FS_GET_REQ      = 74,  // Pull a file from the peer (peer responds via FILE_* opcodes)
+  ESPNOW_V4_TYPE_FS_GET_ACK      = 75,  // Synchronous ack for FS_GET_REQ (status + fileSize)
+  // 76–81 earmarked write side: FS_DELETE_REQ/ACK, FS_PUT_REQ/ACK, FS_MKDIR,
+  // FS_RENAME (V4PayloadFsEntry.perms already carries WRITE/DELETE bits)
 
-  // --- Files (60–69) ---
-  ESPNOW_V4_TYPE_FILE_START      = 60,
-  ESPNOW_V4_TYPE_FILE_DATA       = 61,
-  ESPNOW_V4_TYPE_FILE_END        = 62,
-  // 63=FILE_ACK, 64=FILE_PROGRESS reserved (Phase 4 follow-ups)
-  ESPNOW_V4_TYPE_FILE_CANCEL     = 65,  // receiver→sender: transfer won't complete (post-hoc notice)
+  // --- Streaming (90–109) ---
+  ESPNOW_V4_TYPE_STREAM          = 90,
+  // 91–93 earmarked MEDIA_START / MEDIA_DATA / MEDIA_END (camera/mic frames)
 
-  // --- Events (70–79) — Phase 5 ---
-  ESPNOW_V4_TYPE_SUBSCRIBE_UPDATE = 70,  // sender → receiver: "send me only these event categories"
-  // 71=UNSUBSCRIBE_ALL (future), 72=EVENT_PUSH (future), 73=SUB_LIST_REQ, 74=SUB_LIST_REPLY
+  // --- Files (110–129) ---
+  ESPNOW_V4_TYPE_FILE_START      = 110,
+  ESPNOW_V4_TYPE_FILE_DATA       = 111,
+  ESPNOW_V4_TYPE_FILE_END        = 112,
+  // 113=FILE_ACK, 114=FILE_PROGRESS reserved (transfer-feedback follow-ups)
+  ESPNOW_V4_TYPE_FILE_CANCEL     = 115,  // receiver→sender: transfer won't complete (post-hoc notice)
+  // 116=FILE_NACK (missing-chunk bitmap), 117=FILE_RESUME_OK reserved (resume work)
 
-  // --- Sensors (80–89) ---
-  ESPNOW_V4_TYPE_SENSOR_BROADCAST= 80,
-  ESPNOW_V4_TYPE_SENSOR_DATA     = 81,  // Binary sensor data (bond mode streaming)
-  ESPNOW_V4_TYPE_SENSOR_STATUS   = 82,
-  // 83 reserved (was WORKER_STATUS — sender removed 2026-05-21; opcode removed 2026-06)
+  // --- Events (130–149) ---
+  ESPNOW_V4_TYPE_SUBSCRIBE_UPDATE = 130,  // sender → receiver: "send me only these event categories"
+  // 131=UNSUBSCRIBE_ALL, 132=EVENT_PUSH, 133=SUB_LIST_REQ, 134=SUB_LIST_REPLY reserved
+  // 135 earmarked EVENT_SUB v2 (semantic-kind mask wider than 32 bits)
 
-  // --- Bond (90–99) ---
-  ESPNOW_V4_TYPE_BOND_HEARTBEAT  = 90,
-  ESPNOW_V4_TYPE_BOND_CAP_REQ    = 91,
-  ESPNOW_V4_TYPE_BOND_CAP_RESP   = 92,
-  ESPNOW_V4_TYPE_MANIFEST_REQ    = 93,
-  ESPNOW_V4_TYPE_SETTINGS_REQ    = 94,
-  ESPNOW_V4_TYPE_BOND_STATUS_REQ = 95,
-  ESPNOW_V4_TYPE_BOND_STATUS_RESP= 96,
-  ESPNOW_V4_TYPE_SCHEMA_REQ      = 97,  // Master → worker: send your settings schema (response arrives as file _schema_out.json)
+  // --- Sensors (150–169) ---
+  ESPNOW_V4_TYPE_SENSOR_BROADCAST= 150,
+  ESPNOW_V4_TYPE_SENSOR_STATUS   = 151,
+  // 152=POWER_STATUS reserved (voltage/charging/USB/heap beacon — mesh report rank 8)
+  // 153/154 earmarked SENSOR_REQ / SENSOR_ENVELOPE (mesh-legal on-demand pull)
+
+  // --- Bond (170–189) ---
+  ESPNOW_V4_TYPE_BOND_HEARTBEAT  = 170,
+  ESPNOW_V4_TYPE_BOND_CAP_REQ    = 171,
+  ESPNOW_V4_TYPE_BOND_CAP_RESP   = 172,
+  ESPNOW_V4_TYPE_MANIFEST_REQ    = 173,
+  ESPNOW_V4_TYPE_SETTINGS_REQ    = 174,
+  ESPNOW_V4_TYPE_BOND_STATUS_REQ = 175,
+  ESPNOW_V4_TYPE_BOND_STATUS_RESP= 176,
+  ESPNOW_V4_TYPE_SCHEMA_REQ      = 177,  // Master → worker: send your settings schema (response arrives as file _schema_out.json)
+  ESPNOW_V4_TYPE_BOND_STREAM_CTRL= 178,  // was STREAM_CTRL (51) — always bond-gated, now numbered and named with its policy family
+  ESPNOW_V4_TYPE_BOND_SENSOR_DATA= 179,  // was SENSOR_DATA (81) — bond binary sensor streaming
+  // 180–182 earmarked BOND_POWER_STATUS / BOND_SETTINGS_SYNC_ACK / BOND_EVENT_PUSH
 };
 
 // ---- Flag bits (16-bit in V4; was 8-bit in V3) -----------------------------
@@ -458,7 +494,7 @@ static_assert(sizeof(V4PayloadSessionRekey) == 130, "V4PayloadSessionRekey layou
 static_assert(sizeof(V4PayloadSessionRekey) <= ESPNOW_V4_MAX_PLAINTEXT,
               "REKEY must fit a SESSION_FRAME budget; rekey messages are sent inside the existing session");
 
-// ---- Phase 5 — event subscription registry (opcode 70) -------------------
+// ---- Phase 5 — event subscription registry (opcode 130) ------------------
 //
 // Sender tells receiver "these are the event categories I want from you".
 // Receiver stores the bitmap in its PeerIdentity-for-sender slot and gates

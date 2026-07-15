@@ -275,190 +275,186 @@ inline void streamLoggingInner(httpd_req_t* req) {
     <div style='font-weight:bold;color:var(--panel-fg);margin:1rem 0 0.75rem'>Debug Message Categories</div>
       <div id='sys-flags-pane' style='padding:0.5rem;background:var(--panel-bg);border:1px solid var(--border);border-radius:4px;max-height:300px;overflow-y:auto'>
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
-            <input type='checkbox' id='flag-auth' value='0x0001' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <input type='checkbox' id='flag-auth' value='0x1' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>Authentication</span>
           </label>
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
-            <input type='checkbox' id='flag-http' value='0x0002' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <input type='checkbox' id='flag-http' value='0x4' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>HTTP Requests</span>
           </label>
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
-            <input type='checkbox' id='flag-sse' value='0x0004' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <input type='checkbox' id='flag-sse' value='0x10' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>Server-Sent Events</span>
           </label>
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
-            <input type='checkbox' id='flag-cli' value='0x0008' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <input type='checkbox' id='flag-cli' value='0x20' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>CLI Processing</span>
+          </label>
+          <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
+            <input type='checkbox' id='flag-notifications' value='0x10000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <span style='font-size:0.9em;color:var(--panel-fg)'>Notification Pipeline</span>
           </label>
 
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
-            <input type='checkbox' id='flag-sensors' value='0x0040' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
-            <span style='font-size:0.9em;color:var(--panel-fg)'>General Sensor Operations</span>
-          </label>
-          <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
-            <input type='checkbox' id='flag-wifi' value='0x0200' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <input type='checkbox' id='flag-wifi' value='0x2000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>WiFi Operations</span>
           </label>
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
-            <input type='checkbox' id='flag-storage' value='0x8000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <input type='checkbox' id='flag-storage' value='0x400' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>Storage / Security</span>
           </label>
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
-            <input type='checkbox' id='flag-performance' value='0x0400' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <input type='checkbox' id='flag-performance' value='0x1000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>Performance Metrics</span>
           </label>
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
-            <input type='checkbox' id='flag-system' value='0x4000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <input type='checkbox' id='flag-system' value='0x200' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>System/Boot Operations</span>
           </label>
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
-            <input type='checkbox' id='flag-users' value='0x2000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <input type='checkbox' id='flag-users' value='0x100' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>User Management</span>
           </label>
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
-            <input type='checkbox' id='flag-automations' value='0x10000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <input type='checkbox' id='flag-automations' value='0x100000000000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>Automations</span>
           </label>
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
-            <input type='checkbox' id='flag-logger' value='0x20000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <input type='checkbox' id='flag-logger' value='0x800' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>Sensor Logger Internals</span>
           </label>
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
-            <input type='checkbox' id='flag-camera' value='0x20000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <input type='checkbox' id='flag-camera' value='0x10000000000000000000000000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>Camera Operations</span>
           </label>
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
-            <input type='checkbox' id='flag-microphone' value='0x0800' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <input type='checkbox' id='flag-microphone' value='0x100000000000000000000000000000000000000000000000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>Microphone Operations</span>
           </label>
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
-            <input type='checkbox' id='flag-fmradio' value='0x0080' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <input type='checkbox' id='flag-fmradio' value='0x1000000000000000000000000000000000000000000000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>FM Radio</span>
           </label>
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
-            <input type='checkbox' id='flag-espnow' value='0x10000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <input type='checkbox' id='flag-espnow' value='0x100000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>ESP-NOW Core</span>
           </label>
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
-            <input type='checkbox' id='flag-memory' value='0x40000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <input type='checkbox' id='flag-memory' value='0x1000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>Memory Operations</span>
           </label>
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
-            <input type='checkbox' id='flag-i2c' value='0x0100' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <input type='checkbox' id='flag-i2c' value='0x1000000000000000000000000000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>I2C Bus</span>
           </label>
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
-            <input type='checkbox' id='flag-cmdflow' value='0x1000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <input type='checkbox' id='flag-cmdflow' value='0x40' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>Command Flow</span>
           </label>
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
-            <input type='checkbox' id='flag-espnow-router' value='0x80000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <input type='checkbox' id='flag-espnow-router' value='0x200000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>ESP-NOW Router</span>
           </label>
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
-            <input type='checkbox' id='flag-espnow-mesh' value='0x100000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <input type='checkbox' id='flag-espnow-mesh' value='0x400000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>ESP-NOW Mesh</span>
           </label>
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
-            <input type='checkbox' id='flag-espnow-topo' value='0x200000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <input type='checkbox' id='flag-espnow-topo' value='0x800000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>ESP-NOW Topology</span>
           </label>
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
-            <input type='checkbox' id='flag-espnow-stream' value='0x400000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <input type='checkbox' id='flag-espnow-stream' value='0x1000000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>ESP-NOW Stream</span>
           </label>
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
-            <input type='checkbox' id='flag-command-system' value='0x800000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <input type='checkbox' id='flag-command-system' value='0x80' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>Command System</span>
           </label>
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
-            <input type='checkbox' id='flag-settings-system' value='0x1000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
-            <span style='font-size:0.9em;color:var(--panel-fg)'>Settings System</span>
-          </label>
-          <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
-            <input type='checkbox' id='flag-auto-exec' value='0x2000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <input type='checkbox' id='flag-auto-exec' value='0x200000000000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>Auto Execute</span>
           </label>
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
-            <input type='checkbox' id='flag-auto-condition' value='0x4000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <input type='checkbox' id='flag-auto-condition' value='0x400000000000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>Auto Condition</span>
           </label>
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
-            <input type='checkbox' id='flag-auto-timing' value='0x8000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <input type='checkbox' id='flag-auto-timing' value='0x800000000000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>Auto Timing</span>
           </label>
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
-            <input type='checkbox' id='flag-auto-scheduler' value='0x40000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <input type='checkbox' id='flag-auto-scheduler' value='0x1000000000000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>Auto Scheduler</span>
           </label>
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
-            <input type='checkbox' id='flag-espnow-enc' value='0x80000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <input type='checkbox' id='flag-espnow-enc' value='0x2000000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>ESP-NOW Encryption</span>
           </label>
           <div style='font-size:0.75rem;font-weight:600;color:var(--panel-fg);text-transform:uppercase;padding:0.3rem 0 0.1rem;border-bottom:1px solid var(--border);margin-top:0.5rem'>I2C Sensors</div>
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
-            <input type='checkbox' id='flag-gps' value='0x100000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <input type='checkbox' id='flag-gps' value='0x100000000000000000000000000000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>GPS (PA1010D)</span>
           </label>
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
-            <input type='checkbox' id='flag-rtc' value='0x200000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <input type='checkbox' id='flag-rtc' value='0x10000000000000000000000000000000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>RTC (DS3231)</span>
           </label>
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
-            <input type='checkbox' id='flag-imu' value='0x400000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <input type='checkbox' id='flag-imu' value='0x1000000000000000000000000000000000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>IMU (BNO055)</span>
           </label>
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
-            <input type='checkbox' id='flag-thermal' value='0x800000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <input type='checkbox' id='flag-thermal' value='0x100000000000000000000000000000000000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>Thermal (MLX90640)</span>
           </label>
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
-            <input type='checkbox' id='flag-tof' value='0x1000000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <input type='checkbox' id='flag-tof' value='0x10000000000000000000000000000000000000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>ToF (VL53L4CX)</span>
           </label>
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
-            <input type='checkbox' id='flag-gamepad' value='0x2000000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <input type='checkbox' id='flag-gamepad' value='0x1000000000000000000000000000000000000000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>Gamepad (Seesaw)</span>
           </label>
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
-            <input type='checkbox' id='flag-apds' value='0x4000000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <input type='checkbox' id='flag-apds' value='0x100000000000000000000000000000000000000000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>APDS (APDS9960)</span>
           </label>
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
-            <input type='checkbox' id='flag-presence' value='0x8000000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <input type='checkbox' id='flag-presence' value='0x10000000000000000000000000000000000000000000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>Presence (STHS34PF80)</span>
           </label>
           <div style='font-size:0.75rem;font-weight:600;color:var(--panel-fg);text-transform:uppercase;padding:0.3rem 0 0.1rem;border-bottom:1px solid var(--border);margin-top:0.5rem'>Sensor Detail</div>
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
-            <input type='checkbox' id='flag-thermal-frame' value='0x10000000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <input type='checkbox' id='flag-thermal-frame' value='0x400000000000000000000000000000000000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>Thermal Frame</span>
           </label>
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
-            <input type='checkbox' id='flag-thermal-data' value='0x20000000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <input type='checkbox' id='flag-thermal-data' value='0x800000000000000000000000000000000000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>Thermal Data</span>
           </label>
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
-            <input type='checkbox' id='flag-tof-frame' value='0x40000000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <input type='checkbox' id='flag-tof-frame' value='0x40000000000000000000000000000000000000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>ToF Frame</span>
           </label>
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
-            <input type='checkbox' id='flag-gamepad-frame' value='0x80000000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <input type='checkbox' id='flag-gamepad-frame' value='0x4000000000000000000000000000000000000000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>Gamepad Frame</span>
           </label>
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
-            <input type='checkbox' id='flag-gamepad-data' value='0x100000000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <input type='checkbox' id='flag-gamepad-data' value='0x8000000000000000000000000000000000000000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>Gamepad Data</span>
           </label>
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
-            <input type='checkbox' id='flag-imu-frame' value='0x200000000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <input type='checkbox' id='flag-imu-frame' value='0x4000000000000000000000000000000000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>IMU Frame</span>
           </label>
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
-            <input type='checkbox' id='flag-imu-data' value='0x400000000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <input type='checkbox' id='flag-imu-data' value='0x8000000000000000000000000000000000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>IMU Data</span>
           </label>
           <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
-            <input type='checkbox' id='flag-apds-frame' value='0x800000000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
+            <input type='checkbox' id='flag-apds-frame' value='0x400000000000000000000000000000000000000000000' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px'>
             <span style='font-size:0.9em;color:var(--panel-fg)'>APDS Frame</span>
           </label>
       </div>

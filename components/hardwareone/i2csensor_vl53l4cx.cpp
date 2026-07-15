@@ -1,4 +1,5 @@
 #include "i2csensor_vl53l4cx.h"
+#include "System_Events.h"  // systemEventPost — event register producer
 #include "System_BuildConfig.h"
 #include "System_MemoryMonitor.h"
 #include "System_Utils.h"
@@ -374,6 +375,10 @@ bool tofInit() {
   });
 }
 
+// Object-in-close-range latch. Hysteresis (enter <300mm / leave >400mm) plus
+// reset on task start keeps a hovering object from re-posting every poll.
+static bool gTofNear = false;
+
 bool tofPoll() {
   // gDebugFlags now from debug_system.h
   
@@ -415,6 +420,7 @@ bool tofPoll() {
     }
 
     int no_of_object_found = pMultiRangingData->NumberOfObjectsFound;
+    float nearestMm = 1e9f;  // smallest committed object distance this poll (survives guard scope)
 
     // Pattern 3: take, do all cache writes, release BEFORE the
     // VL53L4CX_ClearInterruptAndStartMeasurement hardware call. Explicit
@@ -492,6 +498,7 @@ bool tofPoll() {
         gTofCache.tofObjects[validObjectIndex].status = range_status;
         gTofCache.tofObjects[validObjectIndex].valid = true;
 
+        if (smoothed_mm < nearestMm) nearestMm = smoothed_mm;
         validObjectIndex++;
       }
     }
@@ -505,6 +512,21 @@ bool tofPoll() {
                  no_of_object_found, validObjectIndex,
                  (unsigned long)gTofCache.tofSeq);
     }  // tofGuard releases here, before the hardware call
+
+    // Object presence, edge-latched with hysteresis: enter close range below
+    // 300mm, leave above 400mm. Posts once per crossing, never every poll.
+    {
+      int reportMm = (nearestMm >= 1e9f) ? 9999 : (int)nearestMm;
+      char mm[12];
+      snprintf(mm, sizeof(mm), "%dmm", reportMm);
+      if (!gTofNear && nearestMm < 300.0f) {
+        gTofNear = true;
+        systemEventPost(SYSEVT_TOF_OBJECT_DETECTED, "near", mm);
+      } else if (gTofNear && nearestMm > 400.0f) {
+        gTofNear = false;
+        systemEventPost(SYSEVT_TOF_OBJECT_DETECTED, "far", mm);
+      }
+    }
 
     gVL53L4CX->VL53L4CX_ClearInterruptAndStartMeasurement();
 
@@ -689,6 +711,7 @@ void tofTask(void* parameter) {
                 (void*)xTaskGetCurrentTaskHandle(), 
                 (unsigned)uxTaskGetStackHighWaterMark(nullptr));
   INFO_TOF_LIFECYCLEF("[MODULAR] tofTask() running from i2csensor_vl53l4cx.cpp");
+  gTofNear = false;
   unsigned long lastToFRead = 0;
   unsigned long lastStackLog = 0;
   while (true) {
@@ -749,6 +772,7 @@ void tofTask(void* parameter) {
             gTofEnabled = false;
             sensorStatusBumpWith("tof@auto_disabled");
             logSystemEvent("SENSOR", "ToF auto-disabled after too many consecutive I2C failures");
+            systemEventPost(SYSEVT_SENSOR_FAULT, "ToF", "consecutive I2C failures");
           }
         }
         
@@ -760,6 +784,12 @@ void tofTask(void* parameter) {
         // ESP-NOW broadcaster reads tofBuildDataJSON() on demand from gTofCache.
       }
       vTaskDelay(pdMS_TO_TICKS(10));
+    } else {
+      // Enabled-but-not-ready, disconnected, or polling paused: yield instead of
+      // busy-spinning the core. Without this else the while(true) loop had no delay
+      // on the gated path and pinned the core at 100% during any pollPause window
+      // (matches imuTask's 50 ms idle delay).
+      vTaskDelay(pdMS_TO_TICKS(50));
     }
   }
 }

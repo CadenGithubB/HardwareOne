@@ -103,6 +103,8 @@ void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
 #include "System_SetupWizard.h"  // gWizardOwnsSerial — main loop yields Serial while legacy wizard is running
 #include "System_CLIMode.h"      // cliModeTick — periodic tick for active CLIMode (Phase 5 wizard)
 #include "System_TaskUtils.h"
+#include "System_Notifications.h"  // systemEventsNotifyTick — main-loop toast render for bus events
+#include "System_Events.h"         // systemEventPost — power-save enter/exit events
 // sensor_config.h included early (before WiFi)
 #if ENABLE_THERMAL_SENSOR
   #include "i2csensor_mlx90640.h"
@@ -266,18 +268,6 @@ void broadcastWithOrigin(const String& channel, const String& user, const String
 
 // NOTE: Debug macros (DEBUGF_RING, DEBUGF_BROADCAST, DEBUG_*F) now defined in debug_system.h
 // All debug functionality moved to debug_system.cpp for proper encapsulation
-// Security debug always on - now also using broadcastOutput
-// OPTIMIZED: Uses const char* overload to avoid String allocation
-#ifndef DEBUG_SECURITYF
-#define DEBUG_SECURITYF(fmt, ...) \
-  do { \
-    if (ensureDebugBuffer()) { \
-      snprintf(getDebugBuffer(), 1024, "[SECURITY] " fmt, ##__VA_ARGS__); \
-      broadcastOutput(getDebugBuffer()); \
-    } \
-  } while (0)
-#endif
-
 void setupWiFi();
 
 // WiFi global flags (defined in wifi_system.cpp)
@@ -451,7 +441,7 @@ void sseEnqueueNotice(SessionEntry& s, const String& msg);
 bool sseDequeueNotice(SessionEntry& s, String& out);
 #endif
 
-volatile uint32_t gOutputFlags = OUTPUT_SERIAL;
+volatile uint32_t gOutputFlags = MSG_ROUTE_SERIAL;
 
 // Remove ANSI CSI escape sequences (e.g., ESC[2J, ESC[H, ESC[1;32m) for serial cleanliness
 static String stripANSICSI(const String& in) {
@@ -583,8 +573,8 @@ static inline void broadcastWithOrigin(const char* source, const String& user, c
 
     // Session-only: if origin is serial and serial sink is disabled, enable for this session
     if (source && strcmp(source, "serial") == 0) {
-      if (!(gOutputFlags & OUTPUT_SERIAL)) {
-        gOutputFlags |= OUTPUT_SERIAL;  // session-only; do not modify persisted settings
+      if (!(gOutputFlags & MSG_ROUTE_SERIAL)) {
+        gOutputFlags |= MSG_ROUTE_SERIAL;  // session-only; do not modify persisted settings
       }
     }
     // Prefix and broadcast via simple sinks
@@ -678,7 +668,7 @@ bool hasAdminPrivilege(const AuthContext& ctx) {
   return isAdminUser(ctx.user);
 }
 
-// CommandOrigin, CommandContext, Command, ExecReq, ExecAsyncCallback, CmdOutputMask
+// CommandOrigin, CommandContext, Command, ExecReq, ExecAsyncCallback
 // are defined in System_CommandTypes.h (included at top of file)
 
 // Per-task current command context lives in the calling task's TLS slot
@@ -831,7 +821,7 @@ static void commandExecTask(void* pv) {
 
 // Context-aware broadcastOutput that includes origin/user/path metadata.
 // Used to broadcast a command's return value after execution completes.
-// Routing is derived from ctx.outputMask (CMD_OUT_* flags).
+// Routing is derived from ctx.outputMask (MSG_ROUTE_* sink bits).
 void broadcastOutput(const String& s, const CommandContext& ctx) {
   const char* source;
   switch (ctx.origin) {
@@ -852,8 +842,8 @@ void broadcastOutput(const String& s, const CommandContext& ctx) {
                   source, ctx.auth.user.c_str(),
                   (unsigned long)ctx.outputMask, s.c_str());
 
-  // Compute route from outputMask (CMD_OUT_* bits 0-2,4 align with MSG_ROUTE_*)
-  // OLED and G2 always included for command return values.
+  // outputMask holds MSG_ROUTE_* bits directly; keep only the sinks a
+  // command may address. OLED and G2 always included for command return values.
   uint8_t route = (uint8_t)(ctx.outputMask & (MSG_ROUTE_SERIAL | MSG_ROUTE_WEB | MSG_ROUTE_FILE | MSG_ROUTE_BLE))
                 | MSG_ROUTE_OLED | MSG_ROUTE_G2;
 
@@ -864,16 +854,16 @@ void broadcastOutput(const String& s, const CommandContext& ctx) {
   extern void broadcastOutputCore_Routed(const char* text, size_t len, uint8_t route);
   broadcastOutputCore_Routed(prefixed.c_str(), prefixed.length(), route);
 
-  // Ensure web mirror is populated even when OUTPUT_WEB is off in gOutputFlags
+  // Ensure web mirror is populated even when MSG_ROUTE_WEB is off in gOutputFlags
   // (e.g. WiFi down). The circular buffer is always allocated.
-  if (!(gOutputFlags & OUTPUT_WEB) && (route & MSG_ROUTE_WEB) && gWebMirror.buf) {
+  if (!(gOutputFlags & MSG_ROUTE_WEB) && (route & MSG_ROUTE_WEB) && gWebMirror.buf) {
     char fmtBuf[DEBUG_MSG_SIZE + 32];
     int n = snprintf(fmtBuf, sizeof(fmtBuf), "[%lu] %s", (unsigned long)millis(), prefixed.c_str());
     if (n > 0) gWebMirror.appendDirect(fmtBuf, (size_t)n, true);
   }
 
   // Targeted BLE response (direct send to originating connection, not via queue)
-  if (ctx.outputMask & CMD_OUT_BLE) {
+  if (ctx.outputMask & MSG_ROUTE_BLE) {
     uint16_t targetConnId = 0;
     if (ctx.auth.sid.length() > 0) {
       targetConnId = (uint16_t)ctx.auth.sid.toInt();
@@ -1154,6 +1144,25 @@ const char* cmd_conditional(const String& argsInput) {
 RTC_NOINIT_ATTR static uint32_t rtcCrashCount;
 RTC_NOINIT_ATTR static uint32_t rtcLastResetReason;
 RTC_NOINIT_ATTR static uint32_t rtcMagic;
+// Reboot reason stashed just before an intentional esp_restart(), consumed on the
+// next boot to post SYSEVT_REBOOT. Guarded by its own magic because RTC_NOINIT is
+// garbage on a cold power-on. Written via rebootStashReason() from the reboot helpers.
+RTC_NOINIT_ATTR static char     rtcRebootReason[24];
+RTC_NOINIT_ATTR static char     rtcRebootWho[24];       // who triggered it (username) — for the reboot event's attribution
+RTC_NOINIT_ATTR static uint8_t  rtcRebootSource;        // NotificationSource of the actor
+RTC_NOINIT_ATTR static uint32_t rtcRebootReasonMagic;
+static const uint32_t REBOOT_REASON_MAGIC = 0x5245424F;  // 'REBO'
+
+void rebootStashReason(const char* reason, const char* who, uint8_t source) {
+  if (!reason) reason = "";
+  strncpy(rtcRebootReason, reason, sizeof(rtcRebootReason) - 1);
+  rtcRebootReason[sizeof(rtcRebootReason) - 1] = '\0';
+  if (!who) who = "";
+  strncpy(rtcRebootWho, who, sizeof(rtcRebootWho) - 1);
+  rtcRebootWho[sizeof(rtcRebootWho) - 1] = '\0';
+  rtcRebootSource = source;
+  rtcRebootReasonMagic = REBOOT_REASON_MAGIC;
+}
 #define RTC_CRASH_MAGIC 0xC0FFEE42u
 
 static const char* resetReasonName(uint32_t r) {
@@ -1168,6 +1177,12 @@ static const char* resetReasonName(uint32_t r) {
     case ESP_RST_DEEPSLEEP: return "deepsleep";
     case ESP_RST_BROWNOUT:  return "brownout";
     case ESP_RST_SDIO:      return "sdio";
+    case ESP_RST_USB:       return "usb";         // reset over the USB-Serial-JTAG peripheral (flash / replug)
+    case ESP_RST_JTAG:      return "jtag";
+    case ESP_RST_EFUSE:     return "efuse";
+    case ESP_RST_PWR_GLITCH: return "pwr_glitch";
+    case ESP_RST_CPU_LOCKUP: return "cpu_lockup";
+    case ESP_RST_UNKNOWN:   return "unknown";
     default:                return "other";
   }
 }
@@ -1252,6 +1267,17 @@ void hardwareone_setup() {
     writeSettingsJson();
   }
 
+  // Debug flags persist in their own DEBUG_JSON_FILE (split out of settings.json).
+  // Load them into the gSettings.debug* shadow bools BEFORE applySettings() builds
+  // the runtime gDebugFlags mask below. Seed the file if absent (fresh device, or a
+  // first boot after upgrading onto a device whose settings.json predates the split).
+  if (filesystemReady) {
+    readDebugJson();
+    if (!VFS::existsGuarded(DEBUG_JSON_FILE, VFS::systemAuth("hwone.debug_seed_check"))) {
+      writeDebugJson();
+    }
+  }
+
   // TEMP DEBUG (2026-04-03): force debug flags on AFTER file load to diagnose
   // Command system init — single call after settings are resolved
   // NOTE: applySettings() deferred until after initDebugSystem() so debug queue exists
@@ -1266,15 +1292,60 @@ void hardwareone_setup() {
   gSettings.crashCount = rtcCrashCount;
   gSettings.lastResetReason = rtcLastResetReason;
 
-  logSystemEvent("BOOT", "boot #%lu | reset=%s(%lu) | crashCount=%lu | fw v%s",
+  // Decode an intentional reboot from the RTC stash (set just before the restart)
+  // so the boot record self-explains it. Only ESP_RST_SW is a deliberate
+  // esp_restart(); a crash/watchdog/brownout/power-loss has a different reset
+  // reason and no stash, so it can't masquerade as a reboot.
+  bool swReset   = ((esp_reset_reason_t)rtcLastResetReason == ESP_RST_SW);
+  bool haveStash = (rtcRebootReasonMagic == REBOOT_REASON_MAGIC);
+  char rebootDetail[80] = "";   // e.g. "reboot: command by web:red" (empty unless a stashed reboot)
+  if (swReset && haveStash) {
+    const char* why  = rtcRebootReason[0] ? rtcRebootReason : "software";
+    const char* rsrc = systemEventSourceName(rtcRebootSource);
+    if (rtcRebootWho[0]) snprintf(rebootDetail, sizeof(rebootDetail), "reboot: %s by %s:%s", why, rsrc, rtcRebootWho);
+    else                 snprintf(rebootDetail, sizeof(rebootDetail), "reboot: %s", why);
+  }
+
+  logSystemEvent("BOOT", "boot #%lu | reset=%s(%lu)%s%s | crashCount=%lu | fw v%s",
                  (unsigned long)gBootCounter, resetReasonName(rtcLastResetReason),
-                 (unsigned long)rtcLastResetReason, (unsigned long)rtcCrashCount,
-                 SelfDevice::firmwareVersion());
+                 (unsigned long)rtcLastResetReason,
+                 rebootDetail[0] ? " | " : "", rebootDetail,
+                 (unsigned long)rtcCrashCount, SelfDevice::firmwareVersion());
+
+  // Typed bus event for the intentional reboot — posted here on the next boot
+  // because the in-RAM event ring can't survive the restart. Fires on any
+  // software reset; the stash enriches reason/actor when the reboot went through
+  // rebootDevice()/recordRebootIntent(). (Drains to events.log + automations once
+  // loop() starts; boot posts far fewer than the ring's 48 slots before then.)
+  if (swReset) {
+    const char* why = (haveStash && rtcRebootReason[0]) ? rtcRebootReason : "software";
+    uint8_t  src    = haveStash ? rtcRebootSource : 0xFF;                        // stashed actor source, or TLS default
+    const char* who = (haveStash && rtcRebootWho[0]) ? rtcRebootWho : nullptr;   // stashed actor username
+    systemEventPost(SYSEVT_REBOOT, why, resetReasonName(rtcLastResetReason), src, who);
+  }
+
+  // Unexpected-reset (crash) event — a fault reset (panic/watchdog/brownout/lockup/
+  // glitch) is posted on the next boot as a NOTIFICATION so a crash is visible to
+  // automations + the event log. SW resets are commanded reboots, handled above.
+  {
+    esp_reset_reason_t rr = (esp_reset_reason_t)rtcLastResetReason;
+    if (rr == ESP_RST_PANIC || rr == ESP_RST_INT_WDT || rr == ESP_RST_TASK_WDT ||
+        rr == ESP_RST_WDT   || rr == ESP_RST_BROWNOUT || rr == ESP_RST_CPU_LOCKUP ||
+        rr == ESP_RST_PWR_GLITCH) {
+      char cd[40];
+      snprintf(cd, sizeof(cd), "boot #%lu crashCount=%lu", (unsigned long)gBootCounter, (unsigned long)rtcCrashCount);
+      systemEventPost(SYSEVT_CRASH, resetReasonName(rtcLastResetReason), cd);
+    }
+  }
+  rtcRebootReasonMagic = 0;   // consume — a later spontaneous SW reset won't reuse a stale reason
+  rtcRebootReason[0] = '\0';
+  rtcRebootWho[0] = '\0';
 
   // Unconditional per-boot orientation divider into the login/i2c/error logs so
-  // every log is attributable to a boot even when NTP never syncs (offline). The
-  // "clock now accurate" line is still added later by logTimeSyncedMarkerIfReady().
-  logBootAnchorToLogs(resetReasonName(rtcLastResetReason));
+  // every log is attributable to a boot even when NTP never syncs (offline) — now
+  // carrying the reboot detail so those sparse logs self-explain a commanded restart.
+  // The "clock now accurate" line is still added later by logTimeSyncedMarkerIfReady().
+  logBootAnchorToLogs(resetReasonName(rtcLastResetReason), rebootDetail[0] ? rebootDetail : nullptr);
 
   // If time is already valid (warm boot, retained RTC), resolve user creation times early
   if (time(nullptr) > 0) {
@@ -1304,6 +1375,9 @@ void hardwareone_setup() {
   // Debug system must be up before applySettings() (debug queue/task needed for flag writes)
   initDebugSystem();
   applySettings();
+  // Notification device policy (per-kind levels) — name-keyed JSON, loaded
+  // after the filesystem + settings are up, before render tasks start.
+  notifPolicyLoad();
   heapLogSummary("boot.after_debugbuf");
 
   // Initialize shared JSON response buffer for handlers
@@ -1768,6 +1842,16 @@ void hardwareone_setup() {
 
   oledSetBootProgress(100, "Boot complete!");
 
+  // Typed "device booted" event — posted here at the end of setup (the device is
+  // up and ready), the counterpart to the NTP time_synced event and the reboot
+  // event. Subject = reset reason; an intentional restart ALSO got a richer
+  // SYSEVT_REBOOT earlier with the actor, so automations can run on any startup.
+  {
+    char bootDetail[24];
+    snprintf(bootDetail, sizeof(bootDetail), "boot #%lu", (unsigned long)gBootCounter);
+    systemEventPost(SYSEVT_BOOT, resetReasonName(rtcLastResetReason), bootDetail);
+  }
+
   // Run LED startup effect if enabled (only on boards with NeoPixel hardware)
 #if defined(NEOPIXEL_PIN_DEFAULT) && NEOPIXEL_PIN_DEFAULT >= 0
   if (gSettings.ledStartupEnabled && gSettings.ledStartupEffect.length() > 0 && gSettings.ledStartupEffect != "none") {
@@ -1967,6 +2051,9 @@ static void powerSaveTick() {
     oledMarkDirty();
     asleep = false;
     batteryLogEvent("powersave:wake");
+    // Automation commands run as SOURCE_INTERNAL and skip the activity
+    // stamp, so an automation reacting to this can't re-trigger the wake.
+    systemEventPost(SYSEVT_POWER_SAVE_EXIT);
   };
 
   const unsigned long now = millis();
@@ -2024,6 +2111,11 @@ static void powerSaveTick() {
   if (savedCpuMhz > 80) setCpuFrequencyMhz(80);
   asleep = true;
   batteryLogEvent("powersave:enter");
+  {
+    char det[20];
+    snprintf(det, sizeof(det), "idle %dmin", (int)gSettings.powerSaveTimeoutMinutes);
+    systemEventPost(SYSEVT_POWER_SAVE_ENTER, det);
+  }
 }
 #endif // ENABLE_OLED_DISPLAY
 
@@ -2111,10 +2203,14 @@ void hardwareone_loop() {
     time_t nowT = time(nullptr);
     // Fast in-RAM due check: just an array scan of cached nextAt values, no
     // I/O. The expensive schedulerTickMinute only runs when something is
-    // actually due, the cache is stale, an edit occurred, or the 60s safety
-    // interval elapses.
+    // actually due, a subscribed bus event arrived, the cache is stale, an
+    // edit occurred, or the 60s safety interval elapses. Event-driven ticks
+    // are rate-limited to one per 250ms so a chatty subscribed source
+    // (gesture waving, text spam) can't degenerate the loop into a full
+    // file-read+parse every pass — events buffer in the ring meanwhile.
     bool needFullTick = gAutosDirty ||
                         automationsAnyDue(nowT) ||
+                        (automationEventsPending() && (nowAuto - lastAutoCheck >= 250)) ||
                         (nowAuto - lastAutoCheck >= 60000);
     if (needFullTick) {
       gAutosDirty = false;
@@ -2123,6 +2219,16 @@ void hardwareone_loop() {
     }
   }
 #endif
+
+  // Render human-facing notifications for mesh-origin bus events (peer
+  // online/offline, text/file received). The producers run on espnow_task,
+  // which must stay bounded — so the OLED banner + web toast happen here,
+  // on the task every other notification renders from.
+  systemEventsNotifyTick();
+
+  // Structured event-history file sink (throttled internally; hands lines to
+  // the debug output task, which does the actual file I/O).
+  systemEventLogTick();
 
   perfMarkSection(2);  // section 3: EVENT-DRIVEN
 
@@ -2279,7 +2385,7 @@ void hardwareone_loop() {
           uc.ctx.auth = actx;
           uc.ctx.id = (uint32_t)millis();
           uc.ctx.timestampMs = (uint32_t)millis();
-          uc.ctx.outputMask = CMD_OUT_SERIAL | CMD_OUT_LOG;
+          uc.ctx.outputMask = MSG_ROUTE_SERIAL | MSG_ROUTE_FILE;
           uc.ctx.validateOnly = false;
           uc.ctx.replyHandle = nullptr;
           uc.ctx.httpReq = nullptr;

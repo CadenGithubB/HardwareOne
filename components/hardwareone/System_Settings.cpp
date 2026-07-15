@@ -1,4 +1,5 @@
 #include "System_Settings.h"        // Settings struct definition and function declarations
+#include "System_Events.h"  // systemEventPost — event register producer
 #include "System_BuildConfig.h"   // ENABLE_WIFI, ENABLE_ESPNOW flags
 #include "System_PollPause.h"     // pollPause/pollResume — global sensor-poll pause
 #if ENABLE_WIFI
@@ -160,13 +161,13 @@ const char* cmd_outserial(const String& argsInput) {
   if (v != 0) v = 1;
   if (v < 0) return "Error: invalid arguments — Usage: outserial <0|1> [persist|temp]";
   if (modeTemp) {
-    if (v) gOutputFlags |= OUTPUT_SERIAL;
-    else gOutputFlags &= ~OUTPUT_SERIAL;
+    if (v) gOutputFlags |= MSG_ROUTE_SERIAL;
+    else gOutputFlags &= ~MSG_ROUTE_SERIAL;
     return v ? "outSerial (runtime) set to 1" : "outSerial (runtime) set to 0";
   } else {
     setSetting(gSettings.outSerial, (bool)(v != 0));
-    if (v) gOutputFlags |= OUTPUT_SERIAL;
-    else gOutputFlags &= ~OUTPUT_SERIAL;
+    if (v) gOutputFlags |= MSG_ROUTE_SERIAL;
+    else gOutputFlags &= ~MSG_ROUTE_SERIAL;
     return gSettings.outSerial ? "outSerial (persisted) set to 1" : "outSerial (persisted) set to 0";
   }
 }
@@ -188,13 +189,13 @@ const char* cmd_outweb(const String& argsInput) {
   if (v != 0) v = 1;
   if (v < 0) return "Error: invalid arguments — Usage: outweb <0|1> [persist|temp]";
   if (modeTemp) {
-    if (v) gOutputFlags |= OUTPUT_WEB;
-    else gOutputFlags &= ~OUTPUT_WEB;
+    if (v) gOutputFlags |= MSG_ROUTE_WEB;
+    else gOutputFlags &= ~MSG_ROUTE_WEB;
     return v ? "outWeb (runtime) set to 1" : "outWeb (runtime) set to 0";
   } else {
     setSetting(gSettings.outWeb, (bool)(v != 0));
-    if (v) gOutputFlags |= OUTPUT_WEB;
-    else gOutputFlags &= ~OUTPUT_WEB;
+    if (v) gOutputFlags |= MSG_ROUTE_WEB;
+    else gOutputFlags &= ~MSG_ROUTE_WEB;
     return gSettings.outWeb ? "outWeb (persisted) set to 1" : "outWeb (persisted) set to 0";
   }
 }
@@ -713,13 +714,17 @@ void applySettings() {
 
   // Apply persisted output lanes
   uint8_t flags = 0;
-  if (gSettings.outSerial) flags |= OUTPUT_SERIAL;
-  if (gSettings.outDisplay) flags |= OUTPUT_DISPLAY;
-  if (gSettings.outWeb) flags |= OUTPUT_WEB;
+  if (gSettings.outSerial) flags |= MSG_ROUTE_SERIAL;
+  if (gSettings.outDisplay) flags |= MSG_ROUTE_OLED;
+  if (gSettings.outWeb) flags |= MSG_ROUTE_WEB;
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
-  if (gSettings.outG2) flags |= OUTPUT_G2;
+  if (gSettings.outG2) flags |= MSG_ROUTE_G2;
 #endif
-  gOutputFlags = flags;  // replace current routing with persisted lanes
+  // FILE and BLE are runtime lanes, not persisted settings — FILE opens and
+  // closes with `log start`/`log stop`, BLE with client connect/disconnect.
+  // Preserve them so re-running applySettings (setup wizard, first-time
+  // setup) doesn't silently close an active log file or BLE mirror.
+  gOutputFlags = (gOutputFlags & (MSG_ROUTE_FILE | MSG_ROUTE_BLE)) | flags;
 
   // Apply debug settings to runtime flags using table-driven loop.
   // Each entry maps a bool field in gSettings to the runtime debug flag it enables.
@@ -740,6 +745,7 @@ void applySettings() {
     DBG_MAP(debugCameraSettings,   DEBUG_CAMERA_SETTINGS),
     DBG_MAP(debugCameraVideo,      DEBUG_CAMERA_VIDEO),
     DBG_MAP(debugDisplay,          DEBUG_DISPLAY),
+    DBG_MAP(debugNotifications,    DEBUG_NOTIFICATIONS),
     DBG_MAP(debugMicrophone,       DEBUG_MICROPHONE),
     DBG_MAP(debugWifi,             DEBUG_WIFI),
     DBG_MAP(debugStorage,          DEBUG_STORAGE),
@@ -771,7 +777,6 @@ void applySettings() {
     DBG_MAP(debugEspNowRouter,     DEBUG_ESPNOW_ROUTER),
     DBG_MAP(debugEspNowMesh,       DEBUG_ESPNOW_MESH),
     DBG_MAP(debugEspNowTopo,       DEBUG_ESPNOW_TOPO),
-    DBG_MAP(debugEspNowEncryption, DEBUG_ESPNOW_ENCRYPTION),
     DBG_MAP(debugEspNowMetadata,   DEBUG_ESPNOW_METADATA),
     DBG_MAP(debugAutoScheduler,    DEBUG_AUTO_SCHEDULER),
     DBG_MAP(debugAutoExec,         DEBUG_AUTO_EXEC),
@@ -1024,7 +1029,7 @@ void applySettings() {
 // Build Settings JSON Document
 // ============================================================================
 
-void buildSettingsJsonDoc(JsonDocument& doc, bool excludePasswords) {
+void buildSettingsJsonDoc(JsonDocument& doc, bool excludePasswords, bool mainFileOnly) {
   // Stamp firmware version so we know which build last wrote this file
   doc["firmwareVersion"] = SelfDevice::firmwareVersion();
 
@@ -1054,7 +1059,9 @@ void buildSettingsJsonDoc(JsonDocument& doc, bool excludePasswords) {
   // Write registered module settings here so section lands at the root,
   // before ToF/hardware/oled/wifiNetworks blocks
   {
-    size_t registeredCount = writeRegisteredSettings(doc);
+    // mainFileOnly excludes own-file modules (debug) from settings.json; the
+    // web/bond/G2 callers keep allFiles=true so their payloads still carry debug.
+    size_t registeredCount = writeRegisteredSettings(doc, nullptr, /*allFiles=*/!mainFileOnly);
     if (registeredCount > 0) {
       DEBUG_STORAGEF("[Settings] Wrote %zu settings from registered modules", registeredCount);
     }
@@ -1179,16 +1186,23 @@ bool writeSettingsJson() {
     fsUnlock();
   }
   
-  // Now build/overwrite with current settings (orphaned sections remain untouched)
-  buildSettingsJsonDoc(doc);
+  // Now build/overwrite with current settings (orphaned sections remain untouched).
+  // mainFileOnly=true → debug is excluded (it persists in DEBUG_JSON_FILE now).
+  buildSettingsJsonDoc(doc, /*excludePasswords=*/false, /*mainFileOnly=*/true);
 
   // Remove runtime-only fields that must never be persisted to disk
   doc.remove("wifiPrimarySSID");
+
+  // Debug now lives in DEBUG_JSON_FILE. Strip any stale system.debug block the
+  // merge-read carried in from a pre-split settings.json so it can't linger here
+  // or burn the 5120-byte budget. No-op once the on-disk file is already clean.
+  { JsonObject sysObj = doc["system"].as<JsonObject>(); if (!sysObj.isNull()) sysObj.remove("debug"); }
 
   // Check for overflow
   if (doc.overflowed()) {
     ERROR_STORAGEF("JSON document overflowed during build (need more than 5120 bytes)");
     logSystemEvent("SETTINGS", "save FAILED (JSON build overflow) — settings NOT persisted");
+    systemEventPost(SYSEVT_SETTINGS_SAVE_FAILED, "overflow", "settings.json");
     pollResume();
     return false;
   }
@@ -1202,6 +1216,7 @@ bool writeSettingsJson() {
     fsUnlock();
     ERROR_STORAGEF("Failed to open temp file for writing");
     logSystemEvent("SETTINGS", "save FAILED (cannot open %s) — settings NOT persisted", tmp);
+    systemEventPost(SYSEVT_SETTINGS_SAVE_FAILED, "open", "settings.json");
     pollResume();
     return false;
   }
@@ -1215,6 +1230,7 @@ bool writeSettingsJson() {
   if (bytesWritten == 0) {
     ERROR_STORAGEF("Failed to serialize JSON");
     logSystemEvent("SETTINGS", "save FAILED (serialize wrote 0 bytes) — settings NOT persisted");
+    systemEventPost(SYSEVT_SETTINGS_SAVE_FAILED, "serialize", "settings.json");
     VFS::removeGuarded(tmp, VFS::systemAuth("settings.write"));
     pollResume();
     return false;
@@ -1236,6 +1252,7 @@ bool writeSettingsJson() {
     if (!directFile) {
       fsUnlock();
       logSystemEvent("SETTINGS", "save FAILED (rename and direct open both failed) — settings NOT persisted");
+      systemEventPost(SYSEVT_SETTINGS_SAVE_FAILED, "rename", "settings.json");
       pollResume();
       return false;
     }
@@ -1253,6 +1270,120 @@ bool writeSettingsJson() {
   { extern void computeBondLocalSettingsHash(); computeBondLocalSettingsHash(); }
 #endif
 
+  return true;
+}
+
+// ============================================================================
+// Debug settings file (DEBUG_JSON_FILE = /system/debug.json)
+// ============================================================================
+// Debug flags were split out of settings.json: 157 flags were ~half of the
+// shared 5120-byte settings doc and every toggle rewrote the whole file. They
+// persist here instead. The debug module keeps jsonSection "system.debug", so
+// the in-RAM buildSettingsJsonDoc(scope=ALL) doc feeding /api/settings, the bond
+// mirror, and G2 is UNCHANGED — only the on-disk file layout differs. This file
+// has no secrets and no cross-section invariants, so it needs no merge-read and
+// no crypto: the debug module fully owns it.
+
+static void buildDebugJsonDoc(JsonDocument& doc) {
+  doc["firmwareVersion"] = SelfDevice::firmwareVersion();
+  registerAllSettingsModules();  // idempotent; safe if this runs before the main load
+  writeRegisteredSettings(doc, DEBUG_JSON_FILE, /*allFiles=*/false);  // debug module only
+}
+
+bool writeDebugJson() {
+  if (!filesystemReady) return false;
+  pollPause();
+
+  PSRAM_JSON_DOC(doc);
+  buildDebugJsonDoc(doc);
+
+  if (doc.overflowed()) {
+    ERROR_STORAGEF("Debug JSON overflowed during build (need more than 5120 bytes)");
+    logSystemEvent("SETTINGS", "debug save FAILED (JSON build overflow) — debug flags NOT persisted");
+    pollResume();
+    return false;
+  }
+
+  // Atomic write: temp at root (swept by the boot .tmp cleanup) then rename.
+  const char* tmp = "/debug.tmp";
+  fsLock("debug.write");
+  File file = VFS::openGuarded(tmp, "w", VFS::systemAuth("settings.write"));
+  if (!file) {
+    fsUnlock();
+    ERROR_STORAGEF("Failed to open temp file for debug write");
+    pollResume();
+    return false;
+  }
+  size_t bytesWritten = serializeJson(doc, file);
+  file.flush();
+  file.close();
+  fsUnlock();
+
+  if (bytesWritten == 0) {
+    ERROR_STORAGEF("Failed to serialize debug JSON");
+    VFS::removeGuarded(tmp, VFS::systemAuth("settings.write"));
+    pollResume();
+    return false;
+  }
+
+  fsLock("debug.rename");
+  bool okRename = VFS::renameGuarded(tmp, DEBUG_JSON_FILE, VFS::systemAuth("settings.write"));
+  fsUnlock();
+
+  if (!okRename) {
+    WARN_STORAGEF("Debug rename failed, trying direct write");
+    fsLock("debug.direct");
+    File directFile = VFS::openGuarded(DEBUG_JSON_FILE, "w", VFS::systemAuth("settings.write"));
+    if (!directFile) {
+      fsUnlock();
+      logSystemEvent("SETTINGS", "debug save FAILED (rename and direct open both failed)");
+      pollResume();
+      return false;
+    }
+    serializeJson(doc, directFile);
+    directFile.flush();
+    directFile.close();
+    fsUnlock();
+  }
+
+  pollResume();
+
+  // A debug flag is a user-visible setting, so keep the bond dirty-hash in sync
+  // (writeSettingsJson does the same). The hash content still includes debug via
+  // buildSettingsJsonDoc(scope=ALL); this just re-fires the recompute trigger.
+#if ENABLE_ESPNOW && ENABLE_BONDED_MODE
+  { extern void computeBondLocalSettingsHash(); computeBondLocalSettingsHash(); }
+#endif
+  return true;
+}
+
+bool readDebugJson() {
+  if (!filesystemReady) return false;
+  if (!VFS::existsGuarded(DEBUG_JSON_FILE, VFS::systemAuth("settings.read"))) {
+    return false;  // absent → debug stays on the defaults applied by settingsDefaults()
+  }
+  pollPause();
+
+  File file = VFS::openGuarded(DEBUG_JSON_FILE, "r", VFS::systemAuth("settings.read"));
+  if (!file) {
+    ERROR_STORAGEF("Failed to open debug settings file");
+    pollResume();
+    return false;
+  }
+  PSRAM_JSON_DOC(doc);
+  DeserializationError error = deserializeJson(doc, file);
+  file.close();
+  if (error) {
+    ERROR_STORAGEF("Debug JSON parse error: %s", error.c_str());
+    pollResume();
+    return false;
+  }
+
+  registerAllSettingsModules();  // idempotent; safe if this read runs standalone
+  size_t n = readRegisteredSettings(doc, DEBUG_JSON_FILE, /*allFiles=*/false);
+  DEBUG_STORAGEF("[Settings] Applied %zu debug settings from debug.json", n);
+
+  pollResume();
   return true;
 }
 
@@ -1389,6 +1520,7 @@ bool readSettingsJson() {
   } else if (strcmp(savedVersion, runningVersion) != 0) {
     INFO_STORAGEF("[Settings] Settings written by v%s, running v%s", savedVersion, runningVersion);
     logSystemEvent("BOOT", "settings last saved by fw v%s (now running v%s)", savedVersion, runningVersion);
+    { char verBuf[48]; snprintf(verBuf, sizeof(verBuf), "%s->%s", savedVersion, runningVersion); systemEventPost(SYSEVT_FIRMWARE_CHANGED, verBuf, "settings carried over from prior firmware"); }
   }
 
   registerAllSettingsModules();
@@ -1410,8 +1542,9 @@ bool readSettingsJson() {
   // Pick the key epoch that actually opens the stored blobs BEFORE any decrypt
   selectDeviceKeyEpoch(doc);
 
-  // Apply settings from registered modules first (handles defaults automatically)
-  size_t registeredCount = readRegisteredSettings(doc);
+  // Apply settings from registered modules first (handles defaults automatically).
+  // Main-file modules only — debug loads separately from DEBUG_JSON_FILE.
+  size_t registeredCount = readRegisteredSettings(doc, nullptr, /*allFiles=*/false);
   if (registeredCount > 0) {
     DEBUG_STORAGEF("[Settings] Applied %zu settings from registered modules", registeredCount);
   }
@@ -1439,6 +1572,7 @@ bool readSettingsJson() {
         if (strncmp(password, "AES:", 4) == 0 && gWifiNetworks[gWifiNetworkCount].password.length() == 0) {
           gSecretLoadFailures++;
           logSystemEvent("CRYPTO", "wifi password for '%s' failed to decrypt at load — stored blob preserved", ssid);
+          { char sBuf[48]; snprintf(sBuf, sizeof(sBuf), "wifi:%s", ssid); systemEventPost(SYSEVT_SECRET_DECRYPT_FAILED, sBuf, "stored blob preserved"); }
         }
         gWifiNetworks[gWifiNetworkCount].priority = priority;
         gWifiNetworks[gWifiNetworkCount].hidden = hidden;
@@ -1634,7 +1768,6 @@ static const SettingEntry debugSettingEntries[] = {
   { "router",     SETTING_BOOL, &gSettings.debugEspNowRouter,     0, 0, nullptr, 0, 1, "Router",            nullptr, false, "esp-now", "debugespnowrouter" },
   { "mesh",       SETTING_BOOL, &gSettings.debugEspNowMesh,       0, 0, nullptr, 0, 1, "Mesh",              nullptr, false, "esp-now", "debugespnowmesh" },
   { "topology",   SETTING_BOOL, &gSettings.debugEspNowTopo,       0, 0, nullptr, 0, 1, "Topology",          nullptr, false, "esp-now", "debugespnowtopo" },
-  { "encryption", SETTING_BOOL, &gSettings.debugEspNowEncryption, 0, 0, nullptr, 0, 1, "Encryption",        nullptr, false, "esp-now", "debugespnowencryption" },
   { "metadata",   SETTING_BOOL, &gSettings.debugEspNowMetadata,   0, 0, nullptr, 0, 1, "Metadata",          nullptr, false, "esp-now", "debugespnowmetadata" },
   // --- bluetooth group ---
   { "enabled",    SETTING_BOOL, &gSettings.debugBluetooth,        0, 0, nullptr, 0, 1, "All Bluetooth",     nullptr, false, "bluetooth", "debugbluetooth" },
@@ -1693,6 +1826,7 @@ static const SettingEntry debugSettingEntries[] = {
   // `[CMD] *@oled:` in command-audit.log if you want every OLED-triggered
   // command regardless of the underlying event type.
   { "enabled",    SETTING_BOOL, &gSettings.debugDisplay,         0, 0, nullptr, 0, 1, "All OLED",            nullptr, false, "oled",        "debugdisplay" },
+  { "enabled",    SETTING_BOOL, &gSettings.debugNotifications,   0, 0, nullptr, 0, 1, "All Notifications",   nullptr, false, "notifications", "debugnotifications" },
   // --- microphone group ---
   { "enabled",    SETTING_BOOL, &gSettings.debugMicrophone,      0, 0, nullptr, 0, 1, "All Microphone",      nullptr, false, "microphone",  "debugmicrophone" },
   { "lifecycle",  SETTING_BOOL, &gSettings.debugMicLifecycle,    0, 0, nullptr, 0, 1, "Lifecycle",           nullptr, false, "microphone",  "debugmiclifecycle" },
@@ -1819,7 +1953,8 @@ static const SettingsModule debugSettingsModule = {
   debugSettingEntries,
   sizeof(debugSettingEntries) / sizeof(debugSettingEntries[0]),
   nullptr,  // Always available
-  "Debug output flags for various subsystems"
+  "Debug output flags for various subsystems",
+  DEBUG_JSON_FILE  // split out of settings.json — persists in its own file
 };
 
 // ============================================================================
@@ -2089,6 +2224,10 @@ void registerAllSettingsModules() {
   registerSettingsModule(&systemLogSettingsModule);
   registerSettingsModule(&batteryLogSettingsModule);
 
+  // Notification presentation (banners/toasts/queue + per-kind muting)
+  extern const SettingsModule notifSettingsModule;
+  registerSettingsModule(&notifSettingsModule);
+
 #if ENABLE_ONDEVICE_LLM
   extern const SettingsModule llmSettingsModule;
   registerSettingsModule(&llmSettingsModule);
@@ -2185,11 +2324,17 @@ static float settingsLoadClampFloat(float raw, const SettingEntry* e) {
   return raw;
 }
 
-size_t readRegisteredSettings(JsonDocument& doc) {
+size_t readRegisteredSettings(JsonDocument& doc, const char* onlyPersistFile, bool allFiles) {
   size_t count = 0;
 
   for (size_t m = 0; m < gSettingsModuleCount; m++) {
     const SettingsModule* mod = gSettingsModules[m];
+    // Scope filter for the settings.json/debug.json split (see header):
+    // allFiles=false selects a single persistence target.
+    if (!allFiles) {
+      if (onlyPersistFile == nullptr) { if (mod->persistFile != nullptr) continue; }
+      else if (mod->persistFile == nullptr || strcmp(mod->persistFile, onlyPersistFile) != 0) continue;
+    }
     // Walk dotted jsonSection path
     JsonVariantConst section = jsonPathRead(doc, mod->jsonSection);
     if (section.isNull()) continue;
@@ -2260,6 +2405,7 @@ size_t readRegisteredSettings(JsonDocument& doc) {
             if (strncmp(encrypted, "AES:", 4) == 0 && dec.length() == 0) {
               gSecretLoadFailures++;
               logSystemEvent("CRYPTO", "secret '%s' failed to decrypt at load — stored blob preserved", e->jsonKey);
+              systemEventPost(SYSEVT_SECRET_DECRYPT_FAILED, e->jsonKey, "stored blob preserved");
             }
             *((String*)e->valuePtr) = dec;
           } else {
@@ -2284,11 +2430,17 @@ void printSettingsModuleSummary() {
   }
 }
 
-size_t writeRegisteredSettings(JsonDocument& doc) {
+size_t writeRegisteredSettings(JsonDocument& doc, const char* onlyPersistFile, bool allFiles) {
   size_t count = 0;
 
   for (size_t m = 0; m < gSettingsModuleCount; m++) {
     const SettingsModule* mod = gSettingsModules[m];
+    // Scope filter for the settings.json/debug.json split (see header):
+    // allFiles=false selects a single persistence target.
+    if (!allFiles) {
+      if (onlyPersistFile == nullptr) { if (mod->persistFile != nullptr) continue; }
+      else if (mod->persistFile == nullptr || strcmp(mod->persistFile, onlyPersistFile) != 0) continue;
+    }
     // Walk dotted jsonSection path, creating intermediate objects as needed.
     // Empty/null jsonSection writes directly to the doc root.
     JsonObject section = jsonPathCreate(doc, mod->jsonSection);
@@ -2364,6 +2516,42 @@ size_t writeRegisteredSettings(JsonDocument& doc) {
   return count;
 }
 
+// Fire SYSEVT_SETTING_CHANGED for a field changed through setSetting(). The mutator
+// only has a field reference, so reverse-look-up the registered SettingEntry by its
+// valuePtr to recover the setting's name + type, format the just-written value
+// (masking secrets), and post. A field with no registered entry (internal/runtime
+// state) posts nothing — and because setSetting() writes flash on every change, this
+// only ever fires on genuine, infrequent config changes. The handleSettingCommand
+// path below posts its own SETTING_CHANGED (it writes valuePtr directly, not via
+// setSetting), so the two paths are disjoint and never double-fire.
+void notifySettingChanged(const void* fieldPtr) {
+  if (!fieldPtr) return;
+  for (size_t m = 0; m < gSettingsModuleCount; m++) {
+    const SettingsModule* mod = gSettingsModules[m];
+    if (!mod) continue;
+    for (size_t i = 0; i < mod->count; i++) {
+      const SettingEntry* e = &mod->entries[i];
+      if (e->valuePtr != fieldPtr) continue;
+      char val[48];
+      switch (e->type) {
+        case SETTING_INT:   snprintf(val, sizeof(val), "%d", *((const int*)e->valuePtr)); break;
+        case SETTING_U8:    snprintf(val, sizeof(val), "%u", (unsigned)*((const uint8_t*)e->valuePtr)); break;
+        case SETTING_U16:   snprintf(val, sizeof(val), "%u", (unsigned)*((const uint16_t*)e->valuePtr)); break;
+        case SETTING_U32:   snprintf(val, sizeof(val), "%lu", (unsigned long)*((const uint32_t*)e->valuePtr)); break;
+        case SETTING_FLOAT: snprintf(val, sizeof(val), "%.3f", *((const float*)e->valuePtr)); break;
+        case SETTING_BOOL:  snprintf(val, sizeof(val), "%s", *((const bool*)e->valuePtr) ? "on" : "off"); break;
+        case SETTING_STRING:
+          if (e->isSecret) snprintf(val, sizeof(val), "********");
+          else             snprintf(val, sizeof(val), "%s", ((const String*)e->valuePtr)->c_str());
+          break;
+        default: val[0] = '\0'; break;
+      }
+      systemEventPost(SYSEVT_SETTING_CHANGED, e->label ? e->label : e->jsonKey, val);
+      return;  // valuePtr is unique across the registry — first match is the only one
+    }
+  }
+}
+
 const char* handleSettingCommand(const SettingEntry* entry, const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
@@ -2430,7 +2618,7 @@ const char* handleSettingCommand(const SettingEntry* entry, const String& argsIn
       }
       if (!gDeferWrites) writeSettingsJson();
       BROADCAST_PRINTF("%s set to %d", entry->jsonKey, v);
-      { char vBuf[16]; snprintf(vBuf, sizeof(vBuf), "%d", v); notifySettingChanged(entry->label ? entry->label : entry->jsonKey, vBuf); }
+      { char vBuf[16]; snprintf(vBuf, sizeof(vBuf), "%d", v); systemEventPost(SYSEVT_SETTING_CHANGED, entry->label ? entry->label : entry->jsonKey, vBuf); }
       return "[Settings] Configuration updated";
     }
     case SETTING_FLOAT: {
@@ -2445,7 +2633,7 @@ const char* handleSettingCommand(const SettingEntry* entry, const String& argsIn
       *((float*)entry->valuePtr) = f;
       if (!gDeferWrites) writeSettingsJson();
       BROADCAST_PRINTF("%s set to %.3f", entry->jsonKey, f);
-      { char vBuf[16]; snprintf(vBuf, sizeof(vBuf), "%.3f", f); notifySettingChanged(entry->label ? entry->label : entry->jsonKey, vBuf); }
+      { char vBuf[16]; snprintf(vBuf, sizeof(vBuf), "%.3f", f); systemEventPost(SYSEVT_SETTING_CHANGED, entry->label ? entry->label : entry->jsonKey, vBuf); }
       return "[Settings] Configuration updated";
     }
     case SETTING_BOOL: {
@@ -2453,7 +2641,7 @@ const char* handleSettingCommand(const SettingEntry* entry, const String& argsIn
       *((bool*)entry->valuePtr) = v;
       if (!gDeferWrites) writeSettingsJson();
       BROADCAST_PRINTF("%s set to %s", entry->jsonKey, v ? "true" : "false");
-      notifySettingChanged(entry->label ? entry->label : entry->jsonKey, v ? "on" : "off");
+      systemEventPost(SYSEVT_SETTING_CHANGED, entry->label ? entry->label : entry->jsonKey, v ? "on" : "off");
       return "[Settings] Configuration updated";
     }
     case SETTING_STRING: {
@@ -2461,10 +2649,10 @@ const char* handleSettingCommand(const SettingEntry* entry, const String& argsIn
       if (!gDeferWrites) writeSettingsJson();
       if (entry->isSecret) {
         BROADCAST_PRINTF("%s updated", entry->jsonKey);
-        notifySettingChanged(entry->label ? entry->label : entry->jsonKey, "********");
+        systemEventPost(SYSEVT_SETTING_CHANGED, entry->label ? entry->label : entry->jsonKey, "********");
       } else {
         BROADCAST_PRINTF("%s set to %s", entry->jsonKey, p);
-        notifySettingChanged(entry->label ? entry->label : entry->jsonKey, p);
+        systemEventPost(SYSEVT_SETTING_CHANGED, entry->label ? entry->label : entry->jsonKey, p);
       }
       return "[Settings] Configuration updated";
     }
@@ -2523,6 +2711,10 @@ SETTING_EDITOR_CMD(cmd_set_eiinputsize,         "eiinputsize")
 SETTING_EDITOR_CMD(cmd_set_eiinterval,          "eiinterval")
 SETTING_EDITOR_CMD(cmd_set_srautostart,         "srautostart")
 SETTING_EDITOR_CMD(cmd_set_srmodelsource,       "srmodelsource")
+SETTING_EDITOR_CMD(cmd_set_eventlog,            "eventlog")
+SETTING_EDITOR_CMD(cmd_set_notifydevicebanners,        "notifydevicebanners")
+SETTING_EDITOR_CMD(cmd_set_notifydevicetoasts,         "notifydevicetoasts")
+SETTING_EDITOR_CMD(cmd_set_notifydevicequeue,          "notifydevicequeue")
 
 const CommandEntry settingEditorCommands[] = {
   { "sessionidleweb",      "Set web CLI session idle-logout (min)",      true, cmd_set_sessionidleweb,      "Usage: sessionidleweb <0-1440>" },
@@ -2543,6 +2735,15 @@ const CommandEntry settingEditorCommands[] = {
   { "eiinterval",          "Set Edge Impulse inference interval (ms)",   true, cmd_set_eiinterval,          "Usage: eiinterval <100-10000>" },
   { "srautostart",         "Set ESP-SR auto-start flag",                 true, cmd_set_srautostart,         "Usage: srautostart <0|1>" },
   { "srmodelsource",       "Set ESP-SR model source",                    true, cmd_set_srmodelsource,       "Usage: srmodelsource <value>" },
+  { "eventlog",            "Enable/disable the structured event-history log (events.log)", true, cmd_set_eventlog,
+    "Usage: eventlog <0|1>\n  One line per system event, durable across reboots. Display/behavior unaffected." },
+  { "notifydevicebanners",        "Enable/disable OLED notification banners",   true, cmd_set_notifydevicebanners,        "Usage: notifydevicebanners <0|1>" },
+  { "notifydevicetoasts",         "Enable/disable web notification toasts",     true, cmd_set_notifydevicetoasts,         "Usage: notifydevicetoasts <0|1>" },
+  { "notifydevicequeue",          "Enable/disable the notification-center queue", true, cmd_set_notifydevicequeue,        "Usage: notifydevicequeue <0|1>" },
+  { "notifydevicekind",           "Set per-event notification visibility (device-wide)", true, cmd_notifydevicekind,
+    "Usage: notifydevicekind [list [json]] | <kind> [all|admin|off]\n  Bare: show non-default kinds; list: show every kind (json = machine form)\n  <kind> alone shows its level; with a level, sets and persists it\n  admin: only admin viewers see it; off: hidden for everyone\n  Levels affect banners/toasts/queue only - events and automations still fire" },
+  { "notifyusermute",           "Mute event kinds from notifications for YOUR user", false, cmd_notifyusermute,
+    "Usage: notifyusermute [<kind,kind,...>|none]\n  Bare: show your muted kinds; none: clear\n  Applies only to the logged-in user (stored with your dashboard preferences)\n  List valid kinds with 'events kinds'" },
 };
 const size_t settingEditorCommandsCount = sizeof(settingEditorCommands) / sizeof(settingEditorCommands[0]);
 
@@ -2739,6 +2940,7 @@ const char* cmd_savesettings(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   gDeferWrites = false;
   writeSettingsJson();
+  writeDebugJson();  // a batch may include debug flags — flush their file too
   return "Settings saved";
 }
 
@@ -2809,10 +3011,14 @@ bool saveUserSettings(uint32_t userId, const JsonDocument& doc) {
       direct.flush();
       direct.close();
       VFS::removeGuarded(tmp.c_str(), VFS::systemAuth("user_settings.save"));
+      if (written > 0) notifUserPrefsInvalidate();
       return written > 0;
     }
   }
 
+  // Any user-settings write may change notification prefs — flush the
+  // per-user cache (covers web /api/user/settings, notifyusermute, password ops).
+  notifUserPrefsInvalidate();
   return true;
 }
 

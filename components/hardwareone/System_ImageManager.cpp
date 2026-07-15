@@ -1,4 +1,5 @@
 #include "System_ImageManager.h"
+#include "System_Events.h"  // systemEventPost — event register producer
 #include "System_Settings.h"
 #include "System_Debug.h"
 #include "System_Utils.h"
@@ -286,10 +287,18 @@ String ImageManager::saveImage(const uint8_t* data, size_t len, ImageStorageLoca
     ERROR_STORAGEF("[ImageManager] Failed to save image: %s", fullPath.c_str());
     return "";
   }
-  
+
+  // Bus event: single chokepoint for CLI capture, camerasave, and web/G2
+  // (all route through this saveImage).
+  {
+    const char* base = fullPath.c_str();
+    const char* slash = strrchr(base, '/');
+    systemEventPost(SYSEVT_PHOTO_SAVED, slash ? slash + 1 : base, fullPath.c_str());
+  }
+
   // Enforce max images limit
   enforceMaxImages(location);
-  
+
   return fullPath;
 }
 

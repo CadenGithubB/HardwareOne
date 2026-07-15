@@ -22,6 +22,10 @@
 // Read accessors — return the calling task's current identity.
 const AuthContext& currentAuthContext();
 const String&      currentExecUser();
+
+// Map a command transport to its NotificationSource (WEB→web, SERIAL→cli, …).
+// Exposed so the reboot path can stamp the actor onto the next-boot reboot event.
+uint8_t transportToNotifSource(CommandSource t);
 bool               currentExecIsAdmin();
 
 // Build a SYSTEM identity AuthContext (transport=SOURCE_INTERNAL, user="system").

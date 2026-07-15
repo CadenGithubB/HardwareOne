@@ -87,6 +87,10 @@ struct SessionEntry {
   int eqHead = 0;
   int eqTail = 0;
   int eqCount = 0;
+  // Drop-oldest counters for the two rings above (diagnostics; reset with the
+  // session entry). Surfaced via sseEventDropsTotal() / notifstats.
+  uint16_t eqDropped = 0;
+  uint16_t nqDropped = 0;
   // When a notice is queued, enter a short 'burst' window to reconnect faster
   unsigned long noticeBurstUntil = 0;  // millis() timestamp; 0 means idle
   bool needsNotificationTick = false;  // set when there are pending notices to deliver
@@ -196,6 +200,15 @@ void broadcastSensorStatusToAllSessions();
 
 // Broadcast a typed SSE event to all active sessions (used by System_Notifications)
 void broadcastEventToAllSessions(const char* eventName, const char* jsonData);
+
+// Predicate-filtered variant: only sessions whose authenticated username
+// passes `allow` receive the event (per-user notification visibility).
+void broadcastEventToSessionsIf(const char* eventName, const char* jsonData,
+                                bool (*allow)(const char* username, void* arg), void* arg);
+
+// Sum of typed-event drop-oldest counts across CURRENT sessions (counters
+// reset when a session entry is recycled). Used by `notifstats`.
+uint32_t sseEventDropsTotal();
 
 // ============================================================================
 // Session Management Functions

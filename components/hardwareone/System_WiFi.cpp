@@ -6,6 +6,7 @@
  */
 
 #include "WebServer_Handle.h"
+#include "System_Events.h"  // systemEventPost — event register producer
 #include "System_BuildConfig.h"
 
 #if ENABLE_WIFI
@@ -193,7 +194,7 @@ const char* cmd_wifiadd(const String& originalCmd) {
   }
   sortWiFiByPriority();
   saveWiFiNetworks();
-  notifyWiFiNetworkAdded(ssid.c_str());
+  systemEventPost(SYSEVT_WIFI_NET_ADDED, ssid.c_str());
   snprintf(getDebugBuffer(), 1024, "Saved network '%s' with priority %d%s",
            ssid.c_str(), pri == 0 ? 1 : pri, hid ? " (hidden)" : "");
   return getDebugBuffer();
@@ -210,7 +211,7 @@ const char* cmd_wifirm(const String& originalCmd) {
   bool ok = removeWiFiNetwork(ssid);
   if (ok) {
     saveWiFiNetworks();
-    notifyWiFiNetworkRemoved(ssid.c_str());
+    systemEventPost(SYSEVT_WIFI_NET_REMOVED, ssid.c_str());
     snprintf(getDebugBuffer(), 1024, "Removed network '%s'", ssid.c_str());
     return getDebugBuffer();
   } else {
@@ -358,14 +359,15 @@ const char* cmd_wifidisconnect(const String& argsInput) {
   if (server != NULL) {
     httpd_stop(server);
     server = NULL;
+    systemEventPost(SYSEVT_HTTP_SERVER_STOPPED, "http");
   }
   // Disable web output flag
-  gOutputFlags &= ~OUTPUT_WEB;
+  gOutputFlags &= ~MSG_ROUTE_WEB;
   setSetting(gSettings.outWeb, false);
  #endif
   // Note: Web mirror buffer clearing removed - handled by debug_system.cpp
   WiFi.disconnect();
-  notifyWiFiDisconnected();
+  systemEventPost(SYSEVT_WIFI_DISCONNECTED);
  #if ENABLE_HTTP_SERVER
   return "WiFi disconnected. HTTP server stopped and web output disabled to free heap.";
  #else
@@ -384,7 +386,7 @@ const char* cmd_wifidrop(const String& argsInput) {
     return "Error: WiFi is not initialized";
   }
   WiFi.disconnect(false);   // false = do NOT power down the radio
-  notifyWiFiDisconnected();
+  systemEventPost(SYSEVT_WIFI_DISCONNECTED);
   return "WiFi disconnected (radio still on).";
 }
 
@@ -829,7 +831,7 @@ bool connectWiFiIndex(int index0based, unsigned long timeoutMs, bool showPriorit
       BROADCAST_PRINTF("WiFi connected: %s", WiFi.localIP().toString().c_str());
       logSystemEvent("WIFI", "connected to '%s' (%s)",
                      nw.ssid.c_str(), WiFi.localIP().toString().c_str());
-      notifyWiFiConnected(WiFi.localIP().toString().c_str());
+      systemEventPost(SYSEVT_WIFI_CONNECTED, WiFi.localIP().toString().c_str());
       gWifiNetworks[index0based].lastConnected = millis();
       saveWiFiNetworks();
       return true;
@@ -891,10 +893,15 @@ bool connectWiFiIndex(int index0based, unsigned long timeoutMs, bool showPriorit
   }
   
   if (showPriority) {
-    BROADCAST_PRINTF("Failed connecting to '%s' after %d attempts - WiFi status: %d", 
+    BROADCAST_PRINTF("Failed connecting to '%s' after %d attempts - WiFi status: %d",
                      nw.ssid.c_str(), kMaxWifiAttempts, WiFi.status());
   } else {
     broadcastOutput("Connection failed after 3 attempts.");
+  }
+  {
+    char det[32];
+    snprintf(det, sizeof(det), "%d attempts, status=%d", kMaxWifiAttempts, (int)WiFi.status());
+    systemEventPost(SYSEVT_WIFI_CONNECT_FAILED, nw.ssid.c_str(), det);
   }
   return false;
 }
@@ -1001,9 +1008,10 @@ const char* cmd_httpstop(const String& argsInput) {
   httpd_stop(server);
   server = NULL;
   gServerIsHttps = false;  // Reset flag on stop
+  systemEventPost(SYSEVT_HTTP_SERVER_STOPPED, "http");
   
   // Disable web output when server stops
-  gOutputFlags &= ~OUTPUT_WEB;
+  gOutputFlags &= ~MSG_ROUTE_WEB;
   
   return wasHttps ? "[HTTPS] Server stopped successfully" : "[HTTP] Server stopped successfully";
 }
@@ -1281,6 +1289,7 @@ const char* cmd_certgen(const String& argsInput) {
     "Enable HTTPS: httpsEnabled 1\n"
     "Then reboot to activate.",
     useRsa ? "RSA-2048" : "ECDSA P-256");
+  systemEventPost(SYSEVT_CERT_GENERATED, "HardwareOne", useRsa ? "RSA-2048" : "ECDSA P-256");
 
 cleanup:
   heap_caps_free(certPem);
@@ -1374,6 +1383,11 @@ static void wifiEventLogger(arduino_event_id_t event, arduino_event_info_t info)
       logSystemEvent("WIFI", "connection lost: '%s' reason=%d (connected %lus)",
                      ssid, (int)info.wifi_sta_disconnected.reason,
                      (unsigned long)((millis() - sConnectedAtMs) / 1000));
+      char det[48];
+      snprintf(det, sizeof(det), "reason=%d (connected %lus)",
+               (int)info.wifi_sta_disconnected.reason,
+               (unsigned long)((millis() - sConnectedAtMs) / 1000));
+      systemEventPost(SYSEVT_WIFI_DISCONNECTED, ssid, det);
     }
   }
 }

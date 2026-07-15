@@ -11,6 +11,7 @@
  */
 
 #include "Bluetooth.h"
+#include "System_Events.h"  // systemEventPost — event register producer
 #include "System_PollPause.h"   // PollPauseGuard — quiesce sensor polling during BLE init
 #include "G2_Glasses.h"  // Header provides stubs when ENABLE_G2_GLASSES=0, so blemode CLI compiles either way
 #include "System_Utils.h"
@@ -352,6 +353,19 @@ class ServerCallbacks : public BLEServerCallbacks {
     // Defer logging to task context
     gBLEState->deferredConnectSlot = slot;
     gBLEState->deferredConnectPending = true;
+
+    // Bus event inline (bounded spinlock copy, BTC-safe). Posted here rather
+    // than the deferred drain because the drain is skipped once connection
+    // state leaves CONNECTED — fine for connects, but the symmetric
+    // disconnect post below would be lost for the LAST disconnect.
+    {
+      const uint8_t* a = param->connect.remote_bda;
+      char macStr[18];
+      snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
+               a[0], a[1], a[2], a[3], a[4], a[5]);
+      systemEventPost(SYSEVT_BLE_CONNECTED,
+                      bleDeviceTypeToString(gBLEState->connections[slot].deviceType), macStr);
+    }
     
     // Keep advertising if we haven't reached max connections
     if (gBLEState->activeConnectionCount >= BLE_MAX_CONNECTIONS) {
@@ -384,6 +398,12 @@ class ServerCallbacks : public BLEServerCallbacks {
     // Defer logging to task context
     gBLEState->deferredDisconnectActiveCount = gBLEState->activeConnectionCount;
     gBLEState->deferredDisconnectPending = true;
+
+    {
+      char remaining[8];
+      snprintf(remaining, sizeof(remaining), "%d", gBLEState->activeConnectionCount);
+      systemEventPost(SYSEVT_BLE_DISCONNECTED, remaining);
+    }
     
     if (gBLEState->activeConnectionCount == 0) {
       gBLEState->connectionState = BLE_STATE_IDLE;
@@ -413,23 +433,28 @@ class CmdRequestCallbacks : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic* pCharacteristic, esp_ble_gatts_cb_param_t* param) override {
     // NOTE: Callback runs on BTC_TASK - defer logging to task context (ISR-safe pattern)
     if (!param || !gBLEState) return;
-    String value = pCharacteristic->getValue();
-    if (value.length() > 0) {
+    // Zero-copy read: getData()/getLength() return the characteristic's internal
+    // buffer (getData() is (uint8_t*)m_value.c_str(), so still NUL-terminated),
+    // avoiding the by-value getValue() String heap-copy on BTC_TASK for every
+    // inbound write. The buffer is valid for this synchronous callback.
+    const uint8_t* data = pCharacteristic->getData();
+    size_t len = pCharacteristic->getLength();
+    if (len > 0) {
       gBLEState->commandsReceived++;
-      
+
       // Defer logging to task context
       gBLEState->deferredCmdReceivedConnId = param->write.conn_id;
-      gBLEState->deferredCmdReceivedLen = value.length();
+      gBLEState->deferredCmdReceivedLen = len;
       gBLEState->deferredCmdReceivedPending = true;
 
       BLE_DEBUGF(DEBUG_BLE_GATT,
                  "Command write conn=%u len=%u",
                  (unsigned)param->write.conn_id,
-                 (unsigned)value.length());
-      
+                 (unsigned)len);
+
       // Route to processIncomingBLECommand which handles lightweight ops directly
       // and routes heavy commands through cmd_exec task
-      processIncomingBLECommand(param->write.conn_id, value.c_str(), value.length());
+      processIncomingBLECommand(param->write.conn_id, (const char*)data, len);
     }
   }
 };
@@ -542,9 +567,9 @@ static void bleLoginAsyncCallback(bool cmdExecOk, const char* result, void* user
     // load down and the response characteristic clean (no [CMD] audit echo
     // mixed into command replies) for RPC-style clients. The client opts in
     // live with `outble 1` when it wants the streamed console, and `outble 0`
-    // to stop it. Disconnect re-clears OUTPUT_BLE regardless (see onDisconnect),
+    // to stop it. Disconnect re-clears MSG_ROUTE_BLE regardless (see onDisconnect),
     // so a left-on flag never persists across sessions. Boot default is
-    // OUTPUT_SERIAL only (HardwareOne.cpp), so it also starts OFF.
+    // MSG_ROUTE_SERIAL only (HardwareOne.cpp), so it also starts OFF.
     char out[160];
     snprintf(out, sizeof(out), "[ble] Login successful. User: %s%s", job->user,
              isAdminUser(String(job->user)) ? " (admin)" : "");
@@ -682,7 +707,7 @@ static void processBleCommandLine(uint16_t connId, const char* data, size_t len)
     ucmd.ctx.auth.opaque = nullptr;
     ucmd.ctx.auth.user = "";
     ucmd.ctx.validateOnly = false;
-    ucmd.ctx.outputMask = CMD_OUT_LOG | CMD_OUT_BLE;
+    ucmd.ctx.outputMask = MSG_ROUTE_FILE | MSG_ROUTE_BLE;
     ucmd.ctx.replyHandle = nullptr;
     ucmd.ctx.httpReq = nullptr;
     ucmd.ctx.id = (uint32_t)millis();
@@ -753,7 +778,7 @@ static void processBleCommandLine(uint16_t connId, const char* data, size_t len)
     ucmd.ctx.auth.user = "";
   }
   ucmd.ctx.validateOnly = false;
-  ucmd.ctx.outputMask = CMD_OUT_LOG | CMD_OUT_BLE;
+  ucmd.ctx.outputMask = MSG_ROUTE_FILE | MSG_ROUTE_BLE;
   ucmd.ctx.replyHandle = nullptr;
   ucmd.ctx.httpReq = nullptr;
   ucmd.ctx.id = (uint32_t)millis();
@@ -1015,6 +1040,7 @@ bool initBluetooth() {
 
   BLE_DEBUGF(DEBUG_BLE_CORE, "Bluetooth initialized successfully");
   broadcastOutput("[BLE] Initialized - ready to advertise");
+  systemEventPost(SYSEVT_BLE_ON, deviceName);
 
   return true;
 }
@@ -1066,6 +1092,7 @@ void deinitBluetooth() {
   } else {
     broadcastOutput("[BLE] Deinitialized");
   }
+  systemEventPost(SYSEVT_BLE_OFF);
 }
 
 // =============================================================================
@@ -1163,12 +1190,19 @@ bool bleRawNotify(const char* data, size_t len) {
   const int        BLE_NOTIFY_MAX_TRIES = 6;
   const TickType_t BLE_NOTIFY_BACKOFF   = pdMS_TO_TICKS(15);  // ~one conn interval; 6*15 = ~90ms cap
 
+  // Set the characteristic value once, not per retry: the payload is identical on
+  // every attempt and setValue() heap-copies it into the wrapper's String, so only
+  // notify() needs to repeat under congestion. (The additional getValue() copies
+  // inside notify() itself are in vendored Arduino-BLE code and can't be removed
+  // without reimplementing its multi-peer + onStatus congestion path — left as-is;
+  // see audit finding Bluetooth.cpp:1191.)
+  pCmdResponseChar->setValue((uint8_t*)data, len);
+
   bool sent = false;
   int  tries = 0;
   for (int attempt = 0; attempt < BLE_NOTIFY_MAX_TRIES; attempt++) {
     tries = attempt + 1;
     gLastNotifyResult = BleNotifyResult::PENDING;
-    pCmdResponseChar->setValue((uint8_t*)data, len);
     pCmdResponseChar->notify();                 // fires onStatus synchronously on this task
     BleNotifyResult r = gLastNotifyResult;
     // PENDING means onStatus never ran (no callbacks / unexpected path) — assume delivered
@@ -1263,7 +1297,7 @@ void bleSessionTick() {
     }
     // Auto-disable BLE broadcast output when no authenticated sessions remain
     if (!bleHasAuthenticatedSession()) {
-      gOutputFlags &= ~OUTPUT_BLE;
+      gOutputFlags &= ~MSG_ROUTE_BLE;
     }
   }
   
@@ -1294,7 +1328,7 @@ void bleSessionTick() {
                  (unsigned long)(now - gBLEState->connections[i].lastActivityMs));
       // Auto-disable BLE broadcast output when no authenticated sessions remain
       if (!bleHasAuthenticatedSession()) {
-        gOutputFlags &= ~OUTPUT_BLE;
+        gOutputFlags &= ~MSG_ROUTE_BLE;
       }
     }
   }

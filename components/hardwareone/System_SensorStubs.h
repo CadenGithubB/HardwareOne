@@ -326,6 +326,9 @@
   extern String gBootId;
   inline void broadcastSensorStatusToAllSessions() {}
   inline void broadcastEventToAllSessions(const char* eventName, const char* jsonData) {}
+  inline void broadcastEventToSessionsIf(const char* eventName, const char* jsonData,
+                                         bool (*allow)(const char* username, void* arg), void* arg) {}
+  inline uint32_t sseEventDropsTotal() { return 0; }
   inline void logAuthAttempt(bool success, const char* transport, const String& ip, const String& user, const String& reason) {}
   inline bool authSuccessUnified(struct AuthContext& ctx, httpd_req_t* req) { return false; }
 #endif

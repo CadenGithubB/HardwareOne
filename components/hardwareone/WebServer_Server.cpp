@@ -36,6 +36,8 @@
 #include "System_UserSettings.h"
 #include "System_FirstTimeSetup.h"
 #include "System_Utils.h"
+#include "System_Notifications.h"  // notifyLoginSuccess/Failed — web login parity with CLI/OLED
+#include "System_Events.h"         // systemEventPost — server up/down + logout events
 #include "WebServer_Utils.h"
 #include "WebServer_Server.h"
 #include "WebPage_Automations.h"
@@ -141,6 +143,28 @@ void broadcastEventToAllSessions(const char* eventName, const char* jsonData) {
   }
 }
 
+// Predicate-filtered variant: enqueue only to sessions whose authenticated
+// username passes `allow`. Used by System_Notifications for per-user toast
+// visibility (admin-only kinds, personal mutes).
+void broadcastEventToSessionsIf(const char* eventName, const char* jsonData,
+                                bool (*allow)(const char* username, void* arg), void* arg) {
+  if (!gSessions || !eventName || !jsonData) return;
+  for (int i = 0; i < MAX_SESSIONS; i++) {
+    if (gSessions[i].sid.length() == 0) continue;
+    if (allow && !allow(gSessions[i].user.c_str(), arg)) continue;
+    sseEnqueueEvent(gSessions[i], eventName, jsonData);
+  }
+}
+
+uint32_t sseEventDropsTotal() {
+  if (!gSessions) return 0;
+  uint32_t total = 0;
+  for (int i = 0; i < MAX_SESSIONS; i++) {
+    if (gSessions[i].sid.length() > 0) total += gSessions[i].eqDropped;
+  }
+  return total;
+}
+
 void sendSSEBurstToSession(int sessionIndex, const String& eventData) {
   if (sessionIndex < 0 || sessionIndex >= MAX_SESSIONS) return;
   if (gSessions[sessionIndex].sid.length() == 0) return;
@@ -219,6 +243,7 @@ void pruneExpiredSessions() {
     bool ttlExpired  = gSessions[i].expiresAt > 0 && (long)(now - gSessions[i].expiresAt) >= 0;
     bool idleExpired = sessionIdleExpired(SOURCE_WEB, gSessions[i].lastInteractionMs, now);
     if (ttlExpired || idleExpired) {
+      systemEventPost(SYSEVT_LOGOUT, gSessions[i].user.c_str(), idleExpired ? "idle" : "ttl");
       gSessions[i] = SessionEntry();
     }
   }
@@ -469,7 +494,10 @@ void clearSession(httpd_req_t* req, const char* logoutReason) {
   // Revoke current session by cookie value
   String sid = getCookieSID(req);
   int idx = findSessionIndexBySID(sid);
-  if (idx >= 0) { gSessions[idx] = SessionEntry(); }
+  if (idx >= 0) {
+    systemEventPost(SYSEVT_LOGOUT, gSessions[idx].user.c_str(), "manual");
+    gSessions[idx] = SessionEntry();
+  }
   // Clear session cookie client-side
   writeSessionCookie(req, String());  // empty sid → Max-Age=0
   broadcastOutput("[auth] clearSession (revoked current if present)");
@@ -830,6 +858,9 @@ void recordFailedLogin(const char* ip) {
     e->lockedUntil = now + lockMs;
     DEBUG_AUTHF("[brute] IP=%s failures=%d locked=%lus", ip, (int)e->failCount, lockMs / 1000UL);
     BROADCAST_PRINTF("[auth] login locked ip=%s failures=%d duration=%lus", ip, (int)e->failCount, lockMs / 1000UL);
+    char lockSec[16];
+    snprintf(lockSec, sizeof(lockSec), "%lus", lockMs / 1000UL);
+    systemEventPost(SYSEVT_LOGIN_LOCKED, ip, lockSec);
   } else {
     DEBUG_AUTHF("[brute] IP=%s failures=%d (below lockout threshold)", ip, (int)e->failCount);
   }
@@ -970,6 +1001,7 @@ bool banIp(const char* ip, const char* reason) {
       clearLoginAttempts(ip);
 
       DEBUG_AUTHF("[ipban] banned %s reason='%s'", ip, reason ? reason : "");
+      systemEventPost(SYSEVT_IP_BANNED, ip, reason);
       return saveIpBans();
     }
   }
@@ -1080,7 +1112,7 @@ extern void streamDashboardContent(httpd_req_t* req, const String& username);
 extern void streamSettingsContent(httpd_req_t* req, const String& username);
 // Note: gJsonResponseMutex is now in mutex_system.h
 extern char* gJsonResponseBuffer;
-extern void buildSettingsJsonDoc(JsonDocument& doc, bool excludeWifiPasswords);
+// buildSettingsJsonDoc is declared in System_Settings.h (now a 3-arg signature).
 extern bool isAdminUser(const String& username);
 extern String getCookieSID(httpd_req_t* req);
 extern void buildAllSessionsJson(const String& currentSid, JsonArray& sessions);
@@ -1166,7 +1198,7 @@ void streamPageWithContent(httpd_req_t* req, const String& activePage, const Str
 
 // Use DEBUG_*F macros from debug_system.h
 
-// Output flags now centralized in debug_system.h (OUTPUT_SERIAL/OUTPUT_DISPLAY/OUTPUT_WEB)
+// Output flags now centralized in debug_system.h (MSG_ROUTE_SERIAL/MSG_ROUTE_OLED/MSG_ROUTE_WEB)
 
 // Command origin and output masks are now in enum above
 
@@ -2787,10 +2819,10 @@ esp_err_t handleAdminSessionsList(httpd_req_t* req) {
 // GET /api/output -> returns persisted (gSettings) and runtime (gOutputFlags) for serial/web/display/g2
 esp_err_t handleOutputGet(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
-  int rtSerial = (gOutputFlags & OUTPUT_SERIAL) ? 1 : 0;
-  int rtWeb = (gOutputFlags & OUTPUT_WEB) ? 1 : 0;
-  int rtDisplay = (gOutputFlags & OUTPUT_DISPLAY) ? 1 : 0;
-  int rtG2 = (gOutputFlags & OUTPUT_G2) ? 1 : 0;
+  int rtSerial = (gOutputFlags & MSG_ROUTE_SERIAL) ? 1 : 0;
+  int rtWeb = (gOutputFlags & MSG_ROUTE_WEB) ? 1 : 0;
+  int rtDisplay = (gOutputFlags & MSG_ROUTE_OLED) ? 1 : 0;
+  int rtG2 = (gOutputFlags & MSG_ROUTE_G2) ? 1 : 0;
   
   char json[320];
   snprintf(json, sizeof(json),
@@ -2854,9 +2886,9 @@ esp_err_t handleOutputTemp(httpd_req_t* req) {
   }
 
   // Respond with updated runtime snapshot
-  int rtSerial = (gOutputFlags & OUTPUT_SERIAL) ? 1 : 0;
-  int rtWeb = (gOutputFlags & OUTPUT_WEB) ? 1 : 0;
-  int rtDisplay = (gOutputFlags & OUTPUT_DISPLAY) ? 1 : 0;
+  int rtSerial = (gOutputFlags & MSG_ROUTE_SERIAL) ? 1 : 0;
+  int rtWeb = (gOutputFlags & MSG_ROUTE_WEB) ? 1 : 0;
+  int rtDisplay = (gOutputFlags & MSG_ROUTE_OLED) ? 1 : 0;
 
   char json[128];
   snprintf(json, sizeof(json),
@@ -3073,7 +3105,7 @@ esp_err_t handleCLICommand(httpd_req_t* req) {
   uc.ctx.auth = ctx;
   uc.ctx.id = (uint32_t)millis();
   uc.ctx.timestampMs = (uint32_t)millis();
-  uc.ctx.outputMask = CMD_OUT_WEB | CMD_OUT_LOG;
+  uc.ctx.outputMask = MSG_ROUTE_WEB | MSG_ROUTE_FILE;
   uc.ctx.validateOnly = doValidate;
   uc.ctx.captureOutput = doCapture;
   uc.ctx.replyHandle = nullptr;
@@ -3334,6 +3366,9 @@ esp_err_t handleLogin(httpd_req_t* req) {
       logCommandExecution(auditCtx, fakeCmd.c_str(), false, "Invalid credentials");
     }
     recordLoginAttempt(SOURCE_WEB, u, ip, false, "Invalid credentials");
+    // Web previously skipped login events entirely — every failure posts,
+    // the renderer applies the toast cooldown downstream.
+    systemEventPost(SYSEVT_LOGIN_FAIL, u.c_str(), "web");
 
     // Show login form with error — include remaining attempts before first lockout
     LoginAttemptEntry* e = findLoginEntry(ip.c_str());
@@ -3362,6 +3397,7 @@ esp_err_t handleLogin(httpd_req_t* req) {
   // Clear brute-force record and any existing logout reason for this IP
   clearLoginAttempts(ip.c_str());
   recordLoginAttempt(SOURCE_WEB, u, ip, true, "Login successful");
+  systemEventPost(SYSEVT_LOGIN_OK, u.c_str(), "web");
 
   // Audit log: successful login (password redacted)
   {
@@ -4637,6 +4673,7 @@ void sseEnqueueNotice(SessionEntry& s, const String& msg) {
   } else {
     // Drop oldest
     s.nqHead = (s.nqHead + 1) % cap;
+    if (s.nqDropped < UINT16_MAX) s.nqDropped++;  // silent loss — make it countable
     // Enqueue new at tail
     strncpy(s.noticeQueue[s.nqTail], msg.c_str(), SessionEntry::NOTICE_MAX_LEN - 1);
     s.noticeQueue[s.nqTail][SessionEntry::NOTICE_MAX_LEN - 1] = '\0';
@@ -4762,7 +4799,7 @@ esp_err_t handleCliBatch(httpd_req_t* req) {
     uc.ctx.auth = ctx;
     uc.ctx.id = (uint32_t)millis();
     uc.ctx.timestampMs = (uint32_t)millis();
-    uc.ctx.outputMask = CMD_OUT_WEB | CMD_OUT_LOG;
+    uc.ctx.outputMask = MSG_ROUTE_WEB | MSG_ROUTE_FILE;
     uc.ctx.validateOnly = false;
     uc.ctx.replyHandle = nullptr;
     uc.ctx.httpReq = req;
@@ -5104,7 +5141,7 @@ register_handlers:
 #endif
   
   // Enable web output when server starts
-  gOutputFlags |= OUTPUT_WEB;
+  gOutputFlags |= MSG_ROUTE_WEB;
   
   broadcastOutput(gServerIsHttps ? "HTTPS server started" : "HTTP server started");
   // Positive counterpart to the HTTPS-fallback / start-failed events above:
@@ -5112,6 +5149,8 @@ register_handlers:
   // HTTPS->HTTP downgrade is visible as EVENT log context, not just its warning.
   logSystemEvent("HTTP", "web server started (%s on port %d)",
                  gServerIsHttps ? "HTTPS" : "plain HTTP", gServerIsHttps ? 443 : 80);
+  systemEventPost(SYSEVT_HTTP_SERVER_STARTED, gServerIsHttps ? "https" : "http",
+                  gServerIsHttps ? "443" : "80");
 }
 
 // Web Mirror Buffer moved to WebCore_Utils.cpp

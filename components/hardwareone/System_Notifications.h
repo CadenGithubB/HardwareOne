@@ -2,183 +2,105 @@
 #define SYSTEM_NOTIFICATIONS_H
 
 /**
- * System Notifications - Centralized notification dispatch
- * 
- * All visual/audible notifications go through this module.
- * Internally dispatches to OLED toast/ribbon, G2 glasses, LED, etc.
- * based on what's enabled in BuildConfig. Callers never need to
- * check ENABLE_OLED_DISPLAY or include OLED headers directly.
- * 
- * Usage: #include "System_Notifications.h" and call notify*() functions.
- * All functions are safe to call regardless of build config (no-ops when disabled).
+ * System Notifications - the human-facing view over the event register.
+ *
+ * Phase-1 cutover (2026-07-13): the old notify*() entry-point layer is gone.
+ * Subsystems post events (systemEventPost, System_Events.h) and this module
+ * renders the ones whose per-kind rule says so — OLED banner and web toast
+ * from the main-loop tick below, and the persistent notification-center view
+ * (OLED bell/list, future web panel) derives straight from the ring via the
+ * rule helpers here. One rules table replaces ~21 hand-rolled fan-out
+ * bodies; per-kind cooldowns replace the old scattered statics.
+ *
+ * Source attribution (NotificationSource, setNotificationContext,
+ * NotificationContextGuard) now lives in System_Events.h — included here so
+ * existing includers keep compiling unchanged.
  */
 
-#include <stdint.h>
+#include "System_Events.h"
 
-// Notification source — defined here so all callers get the values without
-// pulling in OLED headers. OLED_Utils.h includes this header and reuses it.
-enum NotificationSource : uint8_t {
-  NOTIF_SOURCE_UNKNOWN = 0,
-  NOTIF_SOURCE_CLI     = 1,
-  NOTIF_SOURCE_OLED    = 2,
-  NOTIF_SOURCE_WEB     = 3,
-  NOTIF_SOURCE_VOICE   = 4,
-  NOTIF_SOURCE_REMOTE  = 5,
-  NOTIF_SOURCE_SYSTEM  = 6,  // Firmware-generated: sensor starts, WiFi events, etc.
-  NOTIF_SOURCE_G2      = 7   // BLE-attached lens — separated from OLED to mirror
-                             // the CommandSource SOURCE_LOCAL_DISPLAY/SOURCE_G2_GLASSES split.
+// ============================================================================
+// Per-kind notification rules
+// ============================================================================
+
+// Sink bits for a kind's rule row.
+enum : uint8_t {
+  NSINK_NONE   = 0,
+  NSINK_BANNER = 1 << 0,  // transient OLED banner/ribbon
+  NSINK_QUEUE  = 1 << 1,  // persistent notification-center view (ring-backed)
+  NSINK_TOAST  = 1 << 2,  // web toast via SSE
+};
+
+struct NotifRule {
+  uint8_t sinks;       // NSINK_* mask
+  uint8_t level;       // 0=info 1=success 2=warning 3=error
+  uint16_t durMs;      // banner/toast duration
+  uint16_t cooldownMs; // min gap between renders of this kind (0 = none)
 };
 
 // ============================================================================
-// Notification Source Context
+// Viewer-aware rule resolution
 // ============================================================================
+// A rule stacks four layers, most global first:
+//   1. compiled default   — which sinks a kind renders to at all
+//   2. device policy      — per-kind level from /system/notifications.json:
+//                           all (default) / admin (admin viewers only) /
+//                           off (hidden for everyone)
+//   3. sink masters       — gSettings.notifBanners/notifToasts/notifQueue
+//   4. personal mutes     — the viewer's notificationMuted array in their
+//                           per-user settings file (the same store the web
+//                           dashboard layout preferences live in)
+// None of it touches the event ring or automations — display only.
 
-// Set the source context for notifications (call before executing commands)
-// source: NotificationSource enum value
-// subsource: username, device name, or IP address (optional)
-void setNotificationContext(uint8_t source, const char* subsource = nullptr);
-
-// Clear the source context (call after command completes)
-void clearNotificationContext();
-
-// RAII guard — installs the notification context on construction and
-// restores the prior context on destruction (save/restore, NOT
-// clear-to-UNKNOWN). Nested guards within a single task now compose
-// correctly: an inner guard's destructor puts back the outer guard's
-// values, not zeros. Per-task storage means concurrent tasks each have
-// their own context without interference.
-//
-// Use this instead of manual set/clear pairs:
-//   NotificationContextGuard guard(NOTIF_SOURCE_WEB, "hub");
-//   // ... any early returns, throws, etc. all restore cleanly
-//
-struct NotificationContextGuard {
-  NotificationContextGuard(uint8_t source, const char* subsource = nullptr);
-  ~NotificationContextGuard();
-  // Stack-only: prevent copy and move so the destructor fires exactly once
-  NotificationContextGuard(const NotificationContextGuard&) = delete;
-  NotificationContextGuard& operator=(const NotificationContextGuard&) = delete;
-  NotificationContextGuard(NotificationContextGuard&&) = delete;
-  NotificationContextGuard& operator=(NotificationContextGuard&&) = delete;
-
- private:
-  uint8_t savedSource_;
-  char    savedSubsource_[32];
+struct NotifViewer {
+  bool known;            // false = anonymous surface (no login): non-admin view
+  bool isAdmin;
+  uint32_t muteMask[4];  // viewer's personal muted kinds (bit index = kind)
 };
 
-// ============================================================================
-// Pairing / Connection Events
-// ============================================================================
+// Resolve a viewer once per render pass. Per-user prefs come from a small
+// cache over the user-settings files; the admin check is live (roles can
+// change mid-session). username may be nullptr/"" for anonymous.
+void notifViewerResolve(const char* username, NotifViewer& out);
 
-void notifyPairConnected(const char* peerName);
-void notifyPairDisconnected(const char* peerName);
-void notifyPairHandshakeComplete(const char* peerName);
+// Effective rule for a kind as seen by a resolved viewer.
+NotifRule notifRuleForViewer(uint8_t kind, const NotifViewer& v);
 
-// ============================================================================
-// Remote Command Events
-// ============================================================================
+// Load the device policy file into RAM. Called once at boot (after the
+// filesystem is up) and by cmd_notifydevicekind after edits.
+void notifPolicyLoad();
 
-// We sent a command to peer and got a result back
-// commandText can be nullptr (will show generic OK/FAIL) or the actual command/result text
-void notifyRemoteCommandResult(const char* deviceName, bool success, const char* commandText = nullptr);
+// Monotonic counter bumped whenever the device policy or any user's prefs
+// change — cache key for viewer-dependent views (OLED queue rebuild).
+uint32_t notifPrefsGeneration();
 
-// Peer sent a command to us (about to execute)
-// commandText is the actual command being executed (e.g., "sensor status")
-void notifyRemoteCommandReceived(const char* deviceName, const char* commandText = nullptr);
+// Flush the per-user prefs cache. Hooked into saveUserSettings() so every
+// write path (web /api/user/settings, notifyusermute, password ops) invalidates.
+void notifUserPrefsInvalidate();
 
-// ============================================================================
-// WiFi Events
-// ============================================================================
+// CLI commands (registered in the settings-editor command table):
+//   notifydevicekind — admin: per-kind device visibility level (all|admin|off)
+//   notifyusermute — any logged-in user: personal mute list for the EXECUTING user
+const char* cmd_notifydevicekind(const String& argsInput);
+const char* cmd_notifyusermute(const String& argsInput);
 
-void notifyWiFiConnected(const char* ipAddress);
-void notifyWiFiDisconnected();
+// `notifstats` diagnostics command (registered in the debug command table):
+// pipeline loss/suppression/saturation counters; 'reset' zeroes them.
+const char* cmd_notifstats(const String& argsInput);
 
-// ============================================================================
-// Audio / Volume Events
-// ============================================================================
-
-// Volume changed (any source - FM radio, speaker, etc.)
-void notifyVolumeChanged(int volume, int maxVolume);
-
-// ============================================================================
-// BLE / G2 Glasses Events
-// ============================================================================
-
-void notifyBleDeviceConnected(const char* deviceName);
-void notifyBleDeviceDisconnected(const char* deviceName);
-void notifyGestureNavToggled(bool enabled);
+// Render an event's human-facing message ("WiFi: 192.168.1.5", "Batt low:
+// 15%"). Used by the banner/toast renderer and the queue view.
+void notifFormatEvent(const SystemEvent& e, char* out, size_t outLen);
 
 // ============================================================================
-// Battery / Power Events
+// Main-loop renderer
 // ============================================================================
 
-// USB power plugged in or unplugged
-void notifyPowerUSBConnected();
-void notifyPowerUSBDisconnected();
-
-// Battery dropped below low threshold
-void notifyBatteryLow(int percent);
-
-// Battery dropped below critical threshold
-void notifyBatteryCritical(int percent);
-
-// ============================================================================
-// Login Events
-// ============================================================================
-
-// Login succeeded - always notifies (no rate limit)
-void notifyLoginSuccess(const char* username, const char* transport);
-
-// Login failed - rate-limited to avoid spamming on brute force attempts
-void notifyLoginFailed(const char* username, const char* transport);
-
-// ============================================================================
-// Settings Change Events
-// ============================================================================
-
-// A setting was changed via CLI or settings editor
-// key: setting name (e.g., "oledBrightness"), value: new value as string
-void notifySettingChanged(const char* key, const char* value);
-
-// ============================================================================
-// Sensor Start/Stop Events
-// ============================================================================
-
-// A sensor was started or stopped (name: "IMU", "GPS", "Thermal", etc.)
-void notifySensorStarted(const char* sensorName, bool success);
-void notifySensorStopped(const char* sensorName);
-
-// ============================================================================
-// Feature Toggle Events
-// ============================================================================
-
-// ESP-NOW initialized or deinitialized
-void notifyEspNowStarted(bool success);
-void notifyEspNowStopped();
-
-// ============================================================================
-// File Operation Events
-// ============================================================================
-
-// A file was deleted (destructive action worth notifying)
-void notifyFileDeleted(const char* path);
-
-// ============================================================================
-// WiFi Network Management Events
-// ============================================================================
-
-// A WiFi network was added or removed from saved list
-void notifyWiFiNetworkAdded(const char* ssid);
-void notifyWiFiNetworkRemoved(const char* ssid);
-
-// ============================================================================
-// Voice / ESP-SR Events
-// ============================================================================
-
-// Wake word detected - device is listening for a command
-void notifyVoiceListening();
-
-// Voice command executed with result
-void notifyVoiceCommandResult(const char* command, bool success);
+// Drain the event register and render banner/toast for every event whose
+// rule enables those sinks. Called once per main-loop iteration; producers
+// on other tasks never render UI themselves. Events older than 10s render
+// nothing transient (the queue view has no such cut — it reads the ring
+// directly).
+void systemEventsNotifyTick();
 
 #endif // SYSTEM_NOTIFICATIONS_H

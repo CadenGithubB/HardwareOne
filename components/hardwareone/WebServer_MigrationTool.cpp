@@ -44,6 +44,7 @@
 #include "System_Settings.h"
 #include "System_User.h"
 #include "System_Utils.h"
+#include "System_Events.h"  // systemEventPost — SYSEVT_BACKUP_CREATED/RESTORED producer
 #if ENABLE_HTTP_SERVER
 #include "WebServer_Server.h"  // auth helpers (makeWebAuthCtx, tgRequireAuth) for backup endpoint
 #endif
@@ -55,6 +56,7 @@ extern bool writeText(const char* path, const String& content);
 
 // File path constants (must match firmware layout)
 static const char* SETTINGS_FILE     = "/system/settings.json";
+static const char* DEBUG_FILE        = "/system/debug.json";  // debug flags split out of settings.json
 static const char* USERS_FILE        = "/system/users/users.json";
 static const char* AUTOMATIONS_FILE  = "/system/automations.json";
 static const char* ESPNOW_DEVICES    = "/system/espnow/devices.json";
@@ -311,7 +313,10 @@ static esp_err_t handleBackup(httpd_req_t* req) {
   encFields.add("wifiNetworks[].password");
   encFields.add("/system/users/user_settings/*.json:password");
 
-  if (wantSettings)    addFileToBackup(files, warnings, SETTINGS_FILE);
+  if (wantSettings) {
+    addFileToBackup(files, warnings, SETTINGS_FILE);
+    addFileToBackup(files, warnings, DEBUG_FILE);  // debug flags live in their own file now — bundle with "settings"
+  }
   if (wantUsers) {
     addFileToBackup(files, warnings, USERS_FILE);
     addFileToBackup(files, warnings, BOOT_ANCHORS_FILE);  // so pending-user timestamps stay resolvable after restore
@@ -345,6 +350,25 @@ static esp_err_t handleBackup(httpd_req_t* req) {
     String json;
     serializeJson(doc, json);
     httpd_resp_send(req, json.c_str(), json.length());
+  }
+
+  // Bundle built and sent — record which categories went out.
+  {
+    char catBuf[48];
+    if (wantSettings && wantUsers && wantAutomations && wantEspnow && wantMaps && wantCerts) {
+      strcpy(catBuf, "all");
+    } else {
+      snprintf(catBuf, sizeof(catBuf), "%s%s%s%s%s%s",
+               wantSettings ? "settings," : "",
+               wantUsers ? "users," : "",
+               wantAutomations ? "automations," : "",
+               wantEspnow ? "espnow," : "",
+               wantMaps ? "maps," : "",
+               wantCerts ? "certs," : "");
+      size_t l = strlen(catBuf);
+      if (l > 0 && catBuf[l - 1] == ',') catBuf[l - 1] = '\0';
+    }
+    systemEventPost(SYSEVT_BACKUP_CREATED, catBuf, "device config exported");
   }
 
   return ESP_OK;
@@ -580,6 +604,14 @@ static esp_err_t handleRestore(httpd_req_t* req) {
   // Signal that restore is complete (the setup flow will handle reboot)
   gAcceptingRestore = false;
   gRestoreComplete = true;
+
+  // Restore finished — surface how many files landed.
+  {
+    char detBuf[80];
+    snprintf(detBuf, sizeof(detBuf), "%d file(s) written, %d errored%s",
+             filesWritten, filesErrored, compatible ? "" : " (cross-device)");
+    systemEventPost(SYSEVT_BACKUP_RESTORED, "all", detBuf);
+  }
 
   return ESP_OK;
 }

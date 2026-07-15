@@ -103,18 +103,21 @@ meshFingerprint(2) sessionId(2) frameSeq(4) crc16(2)            = 32 bytes
 
 ### Opcodes (`EspNowV4Type`)
 
+Renumbered 2026-07 into 20-wide category ranges (1–9 transport … 170–189 bond, 190–199 unallocated buffer, 200–255 user-defined). Reserved/earmarked slots live in the Wire.h comment block, which is the source of truth for the map.
+
 | Range | Opcodes |
 |---|---|
-| Control | `ACK=1` |
-| Key exchange (3.3) | `KEY_EX_HELLO=10`, `KEY_EX_REPLY=11`, `KEY_EX_CONFIRM=12` |
-| Session (3.4/3.6) | `SESSION_OPEN=13`, `SESSION_CONFIRM=14`, `SESSION_CLOSE=15`, `SESSION_REKEY=16` |
-| Mesh / topo / time | `HEARTBEAT=20`, `TOPO_REQ=22`, `TOPO_START=23`, `TOPO_PEER=24`, `TIME_SYNC=25` |
-| App | `CMD=30`, `CMD_RESP=31`, `TEXT=32`, `METADATA_REQ=33`, `METADATA_RESP=34`, `METADATA_PUSH=35`, `USER_SYNC=36` |
-| Stream | `STREAM=50`, `STREAM_CTRL=51` |
-| File | `FILE_START=60`, `FILE_DATA=61`, `FILE_END=62` |
-| Subscriptions (5) | `SUBSCRIBE_UPDATE=70` |
-| Sensors | `SENSOR_BROADCAST=80`, `SENSOR_DATA=81`, `SENSOR_STATUS=82`, `WORKER_STATUS=83` |
-| Bond | `BOND_HEARTBEAT=90`, `BOND_CAP_REQ=91`, `BOND_CAP_RESP=92`, `MANIFEST_REQ=93`, `SETTINGS_REQ=94`, `BOND_STATUS_REQ=95`, `BOND_STATUS_RESP=96` |
+| Transport (1–9) | `ACK=1` |
+| Crypto — key exchange (3.3) | `KEY_EX_HELLO=10`, `KEY_EX_REPLY=11`, `KEY_EX_CONFIRM=12` |
+| Crypto — session (3.4/3.6) | `SESSION_OPEN=13`, `SESSION_CONFIRM=14`, `SESSION_REKEY=15` |
+| Discovery / topo / time (30–49) | `HEARTBEAT=30`, `BOOT=31`, `TOPO_REQ=32`, `TOPO_START=33`, `TOPO_PEER=34`, `TIME_SYNC=35`, `PAIR_BEACON=36` |
+| App unicast (50–69) | `CMD=50`, `CMD_RESP=51`, `TEXT=52`, `METADATA_REQ=53`, `METADATA_RESP=54`, `METADATA_PUSH=55`, `USER_SYNC=56` |
+| Remote FS (70–89) | `FS_LIST_REQ=70`, `FS_LIST_REPLY=71`, `FS_STAT_REQ=72`, `FS_STAT_REPLY=73`, `FS_GET_REQ=74`, `FS_GET_ACK=75` |
+| Streaming (90–109) | `STREAM=90` |
+| Files (110–129) | `FILE_START=110`, `FILE_DATA=111`, `FILE_END=112`, `FILE_CANCEL=115` |
+| Events / subscriptions (5) (130–149) | `SUBSCRIBE_UPDATE=130` |
+| Sensors (150–169) | `SENSOR_BROADCAST=150`, `SENSOR_STATUS=151` |
+| Bond (170–189) | `BOND_HEARTBEAT=170`, `BOND_CAP_REQ=171`, `BOND_CAP_RESP=172`, `MANIFEST_REQ=173`, `SETTINGS_REQ=174`, `BOND_STATUS_REQ=175`, `BOND_STATUS_RESP=176`, `SCHEMA_REQ=177`, `BOND_STREAM_CTRL=178`, `BOND_SENSOR_DATA=179` |
 
 > **Wire-behavior footnote.** `SETTINGS_RESP`/`SETTINGS_PUSH` and `MANIFEST_RESP` are **not** live opcodes — settings and manifest data arrive as a `FILE_END` for `_settings_out.json` / `_manifest_out.json` and are post-processed inside `v4h_file_end` ([System_ESPNow.cpp:4234](../components/hardwareone/System_ESPNow.cpp)).
 
@@ -191,7 +194,7 @@ Key properties:
 | STREAM | `v4h_stream` | — | espnow_task |
 | FILE_START/DATA/END | `v4h_file_*` | REQ_PAIRED | espnow_task (FILE_END post-processing is heavy + **inline**) |
 | SUBSCRIBE_UPDATE | `v4h_subscribe_update` | REQ_PAIRED | espnow_task |
-| BOND_* / SENSOR_DATA / *_REQ/RESP | `v4h_bond_*` etc. | REQ_PAIRED + REQ_BOND_MODE | espnow_task (mostly set a `bondNeeds*` flag; work done in loop) |
+| BOND_* / BOND_SENSOR_DATA / *_REQ/RESP | `v4h_bond_*` etc. | REQ_PAIRED + REQ_BOND_MODE | espnow_task (mostly set a `bondNeeds*` flag; work done in loop) |
 
 **Deferred today:** SESSION_OPEN, SESSION_CONFIRM, SESSION_REKEY, USER_SYNC. **Everything else runs inline** on espnow_task. (This inconsistency is one of the topics of the seam-unification report.)
 
@@ -399,7 +402,7 @@ Registered in the `System_ESPNow.cpp` command table; admin-gated commands use th
 This supersedes §8's "two coexisting mechanisms" / plaintext-bond description for the bond path. Bond is now fully session-encrypted.
 
 ### What shipped
-- **Every bond unicast frame rides an AEAD `SESSION_FRAME`.** Senders go through the new `bondSendEncrypted()` helper ([System_ESPNow.cpp](../components/hardwareone/System_ESPNow.cpp), defined just above `v4_send_worker_status`); 15 send sites converted (heartbeat 90, cap req/resp 91/92, manifest_req 93, settings_req 94, status req/resp 95/96, sensor_data 81, stream_ctrl 51). `WORKER_STATUS` (83) was left plaintext **because it has no dispatch-table handler — it's dead on receive**.
+- **Every bond unicast frame rides an AEAD `SESSION_FRAME`.** Senders go through the new `bondSendEncrypted()` helper ([System_ESPNow.cpp](../components/hardwareone/System_ESPNow.cpp), defined just above `v4_send_worker_status`); 15 send sites converted (heartbeat 170, cap req/resp 171/172, manifest_req 173, settings_req 174, status req/resp 175/176, bond_sensor_data 179, bond_stream_ctrl 178). `WORKER_STATUS` (then opcode 83; since removed entirely) was left plaintext **because it had no dispatch-table handler — dead on receive**.
 - **Receiver enforcement:** new dispatch flag `V4_OPC_FLAG_REQ_SESSION_ENC` (0x08), checked in `v4_dispatch_table_try`, tagged on all 9 bond opcodes. Plaintext/BROADCAST_AUTH-only bond frames are dropped loudly.
 - **Remote-command (`@BOND` token AND `user:pass`) require session encryption** — gate hoisted above both auth branches in `v4_handle_cmd`; the deferred-CMD path carries `deferredCmdWasEncrypted` (set from `ctx.isSessionEncrypted` in `v4h_cmd`). Closes the cleartext-token → RCE hole (the `@BOND` token is a static secret).
 

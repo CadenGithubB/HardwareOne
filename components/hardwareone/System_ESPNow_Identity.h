@@ -108,13 +108,13 @@ struct PeerIdentity {
 // must be added at the END to keep the bit assignment stable across firmware
 // versions (peers will exchange bitmaps blind, so reordering is breaking).
 enum EspNowEventCategory : uint32_t {
-  ESPNOW_EVT_HEARTBEAT       = 1u << 0,   // V4 heartbeat (type 20)
-  ESPNOW_EVT_SENSOR          = 1u << 1,   // sensor broadcast / data (80, 81)
-  ESPNOW_EVT_TOPOLOGY        = 1u << 2,   // topo req/start/peer (22-24)
-  ESPNOW_EVT_BOND_HEARTBEAT  = 1u << 3,   // bond heartbeat (90)
-  ESPNOW_EVT_WORKER_STATUS   = 1u << 4,   // worker status broadcast (83)
-  ESPNOW_EVT_METADATA_PUSH   = 1u << 5,   // metadata push (35)
-  ESPNOW_EVT_TIME_SYNC       = 1u << 6,   // time sync (25)
+  ESPNOW_EVT_HEARTBEAT       = 1u << 0,   // V4 heartbeat (type 30)
+  ESPNOW_EVT_SENSOR          = 1u << 1,   // sensor broadcast / bond sensor data (150, 179)
+  ESPNOW_EVT_TOPOLOGY        = 1u << 2,   // topo req/start/peer (32-34)
+  ESPNOW_EVT_BOND_HEARTBEAT  = 1u << 3,   // bond heartbeat (170)
+  ESPNOW_EVT_WORKER_STATUS   = 1u << 4,   // retired opcode (ex-WORKER_STATUS) — bit kept for bitmap stability
+  ESPNOW_EVT_METADATA_PUSH   = 1u << 5,   // metadata push (55)
+  ESPNOW_EVT_TIME_SYNC       = 1u << 6,   // time sync (35)
   // Add new categories here; preserve existing bit values.
   ESPNOW_EVT_ALL             = 0xFFFFFFFFu  // default for legacy / pre-Phase-5 peers
 };

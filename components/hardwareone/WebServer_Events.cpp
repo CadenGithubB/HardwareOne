@@ -100,6 +100,7 @@ void sseEnqueueEvent(SessionEntry& s, const char* eventName, const char* data) {
   } else {
     // Drop oldest
     s.eqHead = (s.eqHead + 1) % cap;
+    if (s.eqDropped < UINT16_MAX) s.eqDropped++;  // silent loss — make it countable
     // Enqueue new at tail
     copyName(s.eqTail);
     copyData(s.eqTail);

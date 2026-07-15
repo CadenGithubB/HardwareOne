@@ -5,6 +5,7 @@
  */
 
 #include "System_Camera_DVP.h"
+#include "System_Events.h"  // sensor_started/stopped parity for the camera
 #include "System_Filesystem.h"  // requireQuotedPath (uniform quoted-path rule)
 #include <esp_attr.h>
 #include "System_Camera_Video.h"
@@ -461,6 +462,7 @@ bool initCamera(bool isRecovery) {
     gCameraEnabled = false;
     unlockCameraMutex();
     logSystemEvent("CAM", "camera init FAILED: 0x%x (%s)", err, cameraErrorToString(err));
+    systemEventPost(SYSEVT_SENSOR_START_FAILED, "Camera", cameraErrorToString(err));
     return false;
   }
   
@@ -646,11 +648,14 @@ bool initCamera(bool isRecovery) {
       logSystemEvent("CAM", "camera online but DEGRADED — sensor handle NULL, config not applied (%dx%d)",
                      cameraWidth, cameraHeight);
     }
+    // Camera never routes through the I2C sensor queue, so the existing
+    // sensor_started/stopped kinds miss it — post directly for parity.
+    systemEventPost(SYSEVT_SENSOR_STARTED, "Camera", cameraModel);
   }
   return true;
 }
 
-void stopCamera() {
+void stopCamera(bool isRecovery) {
   DEBUG_CAMERA_LIFECYCLEF("[CAM_STOP] stopCamera() called, gCameraEnabled=%d", gCameraEnabled);
   if (!gCameraEnabled) {
     DEBUG_CAMERA_LIFECYCLEF("[CAM_STOP] Already stopped, returning");
@@ -672,6 +677,7 @@ void stopCamera() {
   gCameraEnabled = false;
   cameraStreaming = false;
   sensorStatusBumpWith("closecamera");
+  if (!isRecovery) systemEventPost(SYSEVT_SENSOR_STOPPED, "Camera");
   
   DEBUG_CAMERA_LIFECYCLEF("[CAM_STOP] Heap after deinit: %u", esp_get_free_heap_size());
   INFO_CAMERAF("Stopped");
@@ -713,7 +719,7 @@ uint8_t* captureFrame(size_t* outLen) {
     // Recovery logging - keep these for diagnosing camera issues
     DEBUG_CAMERA_CAPTUREF("[CAM_CAPTURE] Capture failed - attempting recovery...");
 
-    stopCamera();
+    stopCamera(/*isRecovery=*/true);
     vTaskDelay(pdMS_TO_TICKS(150));
     bool ok = initCamera(/*isRecovery=*/true);
     if (ok) {
@@ -933,6 +939,7 @@ static void cameraPwrRunOne(const CameraPwrMsg& m) {
         if (!initCamera()) {
           BROADCAST_PRINTF("[CAM_PWR] initCamera failed — reverting camera auto-start");
           setSetting(gSettings.cameraAutoStart, false);
+          systemEventPost(SYSEVT_SENSOR_START_FAILED, "Camera", "init failed");
         }
       }
       break;
