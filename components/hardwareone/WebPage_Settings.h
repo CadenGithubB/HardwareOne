@@ -743,6 +743,7 @@ window.SchemaPanel.render({
   var hardwareTopModules = ['led'];   // sibling of Sensors/I2C inside Hardware
   var i2cModules = ['i2c'];
   var outputModules = ['output'];
+  var notifModules = ['notifications'];
   var appsModules = ['automation','llm','espsr','edgeimpulse','maps'];   // top-level Apps umbrella
   var loggingModules = ['sensorlog','systemlog'];
   // mlSubsections used to nest espsr/edgeimpulse INSIDE Microphone/Camera. Now
@@ -757,7 +758,7 @@ window.SchemaPanel.render({
   // to recurse into the nested layout. Identity mappings kept here for
   // backwards compatibility with any older flat settings.json that lingers.
   var sensorSections = {'camera':'camera','microphone':'microphone','edgeimpulse':'edgeimpulse','espsr':'espsr','thermal':'thermal','tof':'tof','imu':'imu','gps':'gps','fmradio':'fmradio','apds':'apds','rtc':'rtc','presence':'presence','sensorlog':'sensorlog','power':'power','debug':'debug','output':'output','oled':'oled','gamepad':'gamepad','input':'input','anoencoder':'anoencoder','led':'led','llm':'llm','maps':'maps'};
-  var moduleLabels = {camera:'Camera (OV2640/OV3660)',microphone:'Microphone (PDM)',edgeimpulse:'Machine Learning',espsr:'Voice Recognition (ESP-SR)',thermal:'Thermal Camera (MLX90640)',tof:'Time-of-Flight (VL53L4CX)',imu:'IMU (BNO055)',gps:'GPS (PA1010D)',fmradio:'FM Radio (RDA5807)',servo:'Servo Driver (PCA9685)',gamepad:'Gamepad (Seesaw)',input:'Input Device',anoencoder:'ANO Encoder (Seesaw)',apds:'APDS (APDS9960)',rtc:'RTC Clock (DS3231)',presence:'IR Presence (STHS34PF80)',sensorlog:'Sensor Logging',systemlog:'System Logging',i2c:'I2C Bus Configuration',power:'Power Management',debug:'Debug Flags',output:'Output Channels',oled:'OLED Display (SSD1306)',led:'LED Startup & Brightness',llm:'On-Device LLM',maps:'Maps'};
+  var moduleLabels = {camera:'Camera (OV2640/OV3660)',microphone:'Microphone (PDM)',edgeimpulse:'Machine Learning',espsr:'Voice Recognition (ESP-SR)',thermal:'Thermal Camera (MLX90640)',tof:'Time-of-Flight (VL53L4CX)',imu:'IMU (BNO055)',gps:'GPS (PA1010D)',fmradio:'FM Radio (RDA5807)',servo:'Servo Driver (PCA9685)',gamepad:'Gamepad (Seesaw)',input:'Input Device',anoencoder:'ANO Encoder (Seesaw)',apds:'APDS (APDS9960)',rtc:'RTC Clock (DS3231)',presence:'IR Presence (STHS34PF80)',sensorlog:'Sensor Logging',systemlog:'System Logging',i2c:'I2C Bus Configuration',power:'Power Management',debug:'Debug Flags',output:'Output Channels',oled:'OLED Display (SSD1306)',led:'LED Startup & Brightness',llm:'On-Device LLM',maps:'Maps',notifications:'Notifications'};
   
   function inferType(val) {
     if (typeof val === 'boolean') return 'bool';
@@ -1040,7 +1041,7 @@ window.SchemaPanel.render({
     var schemaModuleNames = (schema.modules || []).map(function(m) { return m.name; });
     var schemaSections = (schema.modules || []).map(function(m) { return m.section; });
     
-    var allKnownModules = sensorModules.concat(hardwareTopModules).concat(i2cModules).concat(outputModules).concat(appsModules).concat(loggingModules);
+    var allKnownModules = sensorModules.concat(hardwareTopModules).concat(i2cModules).concat(outputModules).concat(notifModules).concat(appsModules).concat(loggingModules);
     var relevantModules = (schema.modules || []).filter(function(m) {
       return allKnownModules.indexOf(m.name) !== -1;
     });
@@ -1066,6 +1067,7 @@ window.SchemaPanel.render({
     var html = '';
     var i2cHtml = '';
     var outputHtml = '';
+    var notifHtml = '';
     var appsHtml = '';
     var loggingHtml = '';
     var hwLedHtml = '';
@@ -1092,6 +1094,8 @@ window.SchemaPanel.render({
           outputHtml += renderInput(e, readEntryValue(sec, e), false);
         });
         outputHtml += '</div><button class="btn" onclick="saveDynamicSettings(\'' + mod.name + '\',\'' + mod.section + '\')">Save Output Channels Settings</button></div>';
+      } else if (notifModules.indexOf(mod.name) !== -1) {
+        notifHtml += renderModule(mod, settings, false, allMods, settings);
       } else if (hardwareTopModules.indexOf(mod.name) !== -1) {
         hwLedHtml += renderModule(mod, settings, false, allMods, settings);
       } else if (appsModules.indexOf(mod.name) !== -1) {
@@ -1118,6 +1122,8 @@ window.SchemaPanel.render({
         outputHtml += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0.75rem">';
         ents.forEach(function(e) { outputHtml += renderInput(e, e.value, true); });
         outputHtml += '</div>';
+      } else if (notifModules.indexOf(mod.name) !== -1) {
+        notifHtml += renderModule(mod, settings, true, allMods, settings);
       } else if (appsModules.indexOf(mod.name) !== -1) {
         appsHtml += renderModule(mod, settings, true, allMods, settings);
       } else if (loggingModules.indexOf(mod.name) !== -1) {
@@ -1152,6 +1158,13 @@ window.SchemaPanel.render({
     if (outputCont) {
       outputCont.innerHTML = outputHtml || '<div style="text-align:center;padding:2rem;color:var(--panel-fg);font-style:italic">Output channel settings not available</div>';
       if (outputHtml) window._snapshotContainer(outputCont);
+    }
+
+    // Populate notifications container
+    var notifCont = document.getElementById('notif-dynamic-container');
+    if (notifCont) {
+      notifCont.innerHTML = notifHtml || '<div style="text-align:center;padding:2rem;color:var(--panel-fg);font-style:italic">Notification settings not available</div>';
+      if (notifHtml) window._snapshotContainer(notifCont);
     }
 
     // Populate Apps container (automation, llm, espsr, edgeimpulse)
@@ -1202,6 +1215,7 @@ window.SchemaPanel.render({
         updates['cameraCaptureFolder'] = '/photos';
       }
     }
+
     
     var cmds = [];
     for (var k in updates) {
@@ -1293,6 +1307,67 @@ window.SchemaPanel.render({
   </div>
 </div>
 )OUTPUTPART", HTTPD_RESP_USE_STRLEN);
+
+  // Notifications section (standalone). Sink masters render via the schema
+  // container; the per-kind device policy editor loads lazily on expand
+  // (notifydevicekind list json — admin-only, so non-admins just see a note).
+  httpd_resp_send_chunk(req, R"NOTIFPART(
+<div class='settings-panel'>
+  <div style='display:flex;align-items:center;justify-content:space-between'>
+    <div><div style='font-size:1.2rem;font-weight:bold;color:var(--panel-fg)'>Notifications</div><div style='color:var(--panel-fg);font-size:0.9rem'>Sink switches and per-event visibility. Display only &mdash; events and automations are never affected. Personal muting lives on the Dashboard (Customize notifications).</div></div>
+    <button class='btn' id='btn-notif-toggle' onclick="togglePane('notif-panel-pane','btn-notif-toggle'); if(!window._notifPolicyLoaded){window._notifPolicyLoaded=1;loadNotifPolicy();}">Expand</button>
+  </div>
+  <div id='notif-panel-pane' style='display:none;margin-top:0.75rem'>
+    <div id='notif-dynamic-container'>
+      <div style='text-align:center;padding:2rem;color:var(--panel-fg)'>Loading notification settings...</div>
+    </div>
+    <div id='notif-policy-section' style='margin-top:1rem'>
+      <div style='font-weight:bold;color:var(--panel-fg);margin-bottom:0.25rem'>Event visibility (device-wide, admin)</div>
+      <div style='color:var(--panel-fg);font-size:0.85rem;margin-bottom:0.5rem'>all = everyone &middot; admin = admin viewers only &middot; off = hidden for everyone</div>
+      <div id='notif-policy-list' style='max-height:300px;overflow-y:auto;border:1px solid var(--border);border-radius:4px;padding:0.5rem;color:var(--panel-fg)'>Loading...</div>
+      <button class='btn' style='margin-top:0.5rem' onclick='saveNotifPolicy()'>Save Event Visibility</button>
+    </div>
+  </div>
+</div>
+<script>
+var _notifPolicyBaseline = null;
+function loadNotifPolicy() {
+  hw.postFormText('/api/cli', { cmd: 'notifydevicekind list json' })
+  .then(function(text) {
+    var m = text.match(/\{"kinds":\[[\s\S]*?\]\}/);
+    if (!m) { document.getElementById('notif-policy-list').textContent = 'Not available (admin login required).'; return; }
+    var kinds = JSON.parse(m[0]).kinds;
+    _notifPolicyBaseline = {};
+    var html = '';
+    kinds.forEach(function(k) {
+      _notifPolicyBaseline[k.n] = k.l;
+      html += "<div style='display:flex;justify-content:space-between;align-items:center;padding:2px 0'>" +
+              "<span style='font-size:0.85em'>" + k.n + "</span>" +
+              "<select data-kind='" + k.n + "' class='notif-policy-sel'>" +
+              ['all','admin','off'].map(function(l){ return "<option value='" + l + "'" + (l === k.l ? " selected" : "") + ">" + l + "</option>"; }).join('') +
+              "</select></div>";
+    });
+    document.getElementById('notif-policy-list').innerHTML = html;
+  })
+  .catch(function(e) { document.getElementById('notif-policy-list').textContent = 'Error: ' + e.message; });
+}
+function saveNotifPolicy() {
+  if (!_notifPolicyBaseline) return;
+  var cmds = [];
+  document.querySelectorAll('.notif-policy-sel').forEach(function(sel) {
+    var kind = sel.getAttribute('data-kind');
+    if (sel.value !== _notifPolicyBaseline[kind]) cmds.push('notifydevicekind ' + kind + ' ' + sel.value);
+  });
+  if (cmds.length === 0) { alert('No changes to save.'); return; }
+  sendSequential(cmds,
+    function() {
+      document.querySelectorAll('.notif-policy-sel').forEach(function(sel) { _notifPolicyBaseline[sel.getAttribute('data-kind')] = sel.value; });
+      alert('Event visibility saved.');
+    },
+    function(e) { alert('Save failed: ' + (e ? e.message : 'unknown')); });
+}
+</script>
+)NOTIFPART", HTTPD_RESP_USE_STRLEN);
 
   // (On-Device LLM panel folded into the Apps umbrella above.)
 

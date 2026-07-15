@@ -1,4 +1,5 @@
 #include "System_VFS.h"
+#include "System_Events.h"  // systemEventPost — event register producer
 #include <esp_attr.h>
 
 #include "System_AuthIdentity.h"  // currentExecUser (event log attribution)
@@ -172,6 +173,12 @@ static bool tryMountSD() {
         // video recorder tries to create a file.
         gSdWritable = probeSDWriteInternal();
         INFO_STORAGEF("[SD] Write probe: %s", gSdWritable ? "PASS" : "FAIL");
+        {
+          char freeMb[16];
+          snprintf(freeMb, sizeof(freeMb), "%llu",
+                   (unsigned long long)((SD.totalBytes() - SD.usedBytes()) / (1024ULL * 1024ULL)));
+          systemEventPost(SYSEVT_SD_MOUNTED, freeMb, gSdWritable ? "writable" : "read-only");
+        }
         return true;
       }
       DEBUG_STORAGEF("[SD]   Failed at %lu Hz", freq);
@@ -282,6 +289,9 @@ bool isSDWritable() {
   if (probeSDWriteInternal()) {
     INFO_STORAGEF("[SD] Write probe now succeeding — card is writable again");
     gSdWritable = true;
+    // Edge from failed->ok: recovery counterpart to SYSEVT_SD_WRITE_FAILED.
+    // Only reached while gSdWritable was false, so this fires once per recovery.
+    systemEventPost(SYSEVT_SD_WRITE_RECOVERED, "sd", "write probe succeeded after prior failure");
     return true;
   }
   return false;
@@ -296,6 +306,8 @@ void noteSDWriteFailure(const char* hint) {
                   hint ? hint : "unspecified");
     logSystemEvent("SD", "SD write failure (hint=%s) — card marked not writable",
                    hint ? hint : "unspecified");
+    // Inside the writable->not transition gate: once per failure episode.
+    systemEventPost(SYSEVT_SD_WRITE_FAILED, hint ? hint : "unspecified");
   }
   gSdWritable = false;
 }
@@ -412,6 +424,15 @@ bool mkdir(const String& path) {
   return LittleFS.mkdir(p);
 }
 
+// Post the file_deleted event: basename as subject (matchable), full path as
+// detail. Replaces the old notifyFileDeleted wrapper (Phase-1 cutover).
+static void postFileDeleted(const char* path) {
+  const char* name = path;
+  const char* slash = path ? strrchr(path, '/') : nullptr;
+  if (slash) name = slash + 1;
+  systemEventPost(SYSEVT_FILE_DELETED, name, path);
+}
+
 bool remove(const String& path) {
   String p = normalize(path);
   if (p.indexOf("..") >= 0) return false;  // reject traversal (matches guarded-op rejection)
@@ -421,14 +442,14 @@ bool remove(const String& path) {
     if (!gSdMounted) return false;
     if (p == "/sd") return false;
     bool ok = SD.remove(p.c_str() + 3);
-    if (ok) notifyFileDeleted(p.c_str());
+    if (ok) postFileDeleted(p.c_str());
     return ok;
   }
 
   if (!filesystemReady) return false;
   bool ok = LittleFS.remove(p);
   if (ok) {
-    notifyFileDeleted(p.c_str());
+    postFileDeleted(p.c_str());
     invalidateLittleFsFreeCache();  // free space just grew; don't trust the stale reading
   }
   return ok;
@@ -468,13 +489,13 @@ bool rmdir(const String& path) {
     if (!gSdMounted) return false;
     if (p == "/sd") return false;
     bool ok = SD.rmdir(p.c_str() + 3);
-    if (ok) notifyFileDeleted(p.c_str());
+    if (ok) postFileDeleted(p.c_str());
     return ok;
   }
 
   if (!filesystemReady) return false;
   bool ok = LittleFS.rmdir(p);
-  if (ok) notifyFileDeleted(p.c_str());
+  if (ok) postFileDeleted(p.c_str());
   return ok;
 }
 
@@ -587,6 +608,11 @@ bool resolveOverflowPath(const char* primaryPath, size_t reserveBytes,
                        (unsigned)gLogFreeCheckCached, (unsigned)want,
                        isSDAvailable() ? "yes" : "no",
                        isSDAvailable() ? "" : "; log data may be dropped");
+        // Inside the once-per-boot latch: zero spam by construction.
+        char freeB[16], wantB[24];
+        snprintf(freeB, sizeof(freeB), "%u", (unsigned)gLogFreeCheckCached);
+        snprintf(wantB, sizeof(wantB), "reserve %u", (unsigned)want);
+        systemEventPost(SYSEVT_FS_LOW_SPACE, freeB, wantB);
       }
     }
   }
@@ -624,6 +650,7 @@ bool unmountSD() {
     SD.end();
     gSdMounted = false;
     gSdWritable = false;
+    systemEventPost(SYSEVT_SD_UNMOUNTED);
     return true;
   }
 #endif
@@ -967,6 +994,7 @@ static const char* cmd_sdformat(const String& argsInput) {
   if (VFS::formatSD()) {
     snprintf(buf, sizeof(buf), "SD card formatted successfully as FAT32 and mounted at /sd");
     logSystemEvent("SD", "SD card formatted by '%s' — ALL card data erased", currentExecUser().c_str());
+    systemEventPost(SYSEVT_STORAGE_FORMATTED, "sd", "FAT32 — all card data erased");
   } else {
     snprintf(buf, sizeof(buf), "ERROR: Failed to format SD card. Ensure card is inserted properly.");
   }

@@ -670,7 +670,7 @@ const char* cmd_sensorlog(const String& argsInput) {
       return "Error: Sensor logging is not running";
     }
     gSensorLoggingEnabled = false;
-    notifySensorStopped("Logging");
+    systemEventPost(SYSEVT_SENSOR_STOPPED, "Logging");
     broadcastOutput("Sensor logging stop requested; will stop safely");
     return "SUCCESS: Sensor logging stop requested; will stop safely";
   }
@@ -792,7 +792,8 @@ const char* cmd_sensorlog(const String& argsInput) {
         snprintf(errMsg, sizeof(errMsg),
                  "Not enough space for log (need %uKB, flash has %uKB, no usable SD overflow)",
                  (unsigned)(gSensorLogMaxSize / 1024), (unsigned)(freeBytes / 1024));
-        notifySensorStarted("Logging", false);
+        systemEventPost(SYSEVT_SENSOR_START_FAILED, "Logging");
+        logSystemEvent("SENSOR", "Logging start FAILED");
         snprintf(getDebugBuffer(), 1024, "Error: %s", errMsg);
         return getDebugBuffer();
       }
@@ -809,7 +810,8 @@ const char* cmd_sensorlog(const String& argsInput) {
     setSetting(gSettings.sensorLogMask, (int)gSensorLogMask);
     setSetting(gSettings.sensorLogFormat, (int)gSensorLogFormat);
 
-    notifySensorStarted("Logging", true);
+    systemEventPost(SYSEVT_SENSOR_STARTED, "Logging");
+    logSystemEvent("SENSOR", "Logging online");
     snprintf(getDebugBuffer(), 1024, "SUCCESS: Sensor logging started\n  File: %s\n  Interval: %lums",
              filepath.c_str(), (unsigned long)interval);
     broadcastOutput(getDebugBuffer());

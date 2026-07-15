@@ -1,4 +1,5 @@
 #include "System_EdgeImpulse.h"
+#include "System_Events.h"  // systemEventPost — event register producer
 #include "System_Command.h"     // CommandArgs
 #include "System_Filesystem.h"  // requireQuotedPath (uniform quoted-path rule)
 #include <esp_attr.h>
@@ -164,6 +165,8 @@ struct TrackedObject {
   uint32_t stateChangeMs;   // When state last changed
   bool stateChanged;        // Flag for recent state change
   int stableCount;          // Frames at current state
+  uint8_t seenFrames;       // Consecutive frames this object has existed
+  bool announced;           // SYSEVT_EI_DETECTED posted (gates the LOST event too)
 };
 
 #define MAX_TRACKED_OBJECTS 5
@@ -233,6 +236,18 @@ static void updateTrackedObjects(const EIResults& results) {
       tracked->width = det.width;
       tracked->height = det.height;
       tracked->confidence = det.confidence;
+      if (tracked->seenFrames < 255) tracked->seenFrames++;
+
+      // Bus event once the object has survived 3 frames — raw first-frame
+      // appearances flicker at the FOMO confidence threshold, so the appear
+      // event gets the same stability treatment label changes already have.
+      if (!tracked->announced && tracked->seenFrames >= 3) {
+        tracked->announced = true;
+        char det2[32];
+        snprintf(det2, sizeof(det2), "%.0f%% at %d,%d", (double)(tracked->confidence * 100.0f),
+                 tracked->x, tracked->y);
+        systemEventPost(SYSEVT_EI_DETECTED, tracked->label, det2);
+      }
       
       // Check for state change
       if (strcmp(tracked->label, det.label) != 0) {
@@ -248,7 +263,19 @@ static void updateTrackedObjects(const EIResults& results) {
           
           DEBUG_SYSTEMF("[EdgeImpulse] State change: %s -> %s at (%d,%d)",
                         tracked->prevLabel, tracked->label, tracked->x, tracked->y);
-          
+
+          // Keep the detected/lost event pairing consistent across a label
+          // morph: the old label "leaves" and the new one "appears", so an
+          // automation counting matches per label never sees a lost with no
+          // prior detected (or vice versa).
+          if (tracked->announced) {
+            systemEventPost(SYSEVT_EI_LOST, tracked->prevLabel);
+            char det2[32];
+            snprintf(det2, sizeof(det2), "%.0f%% at %d,%d", (double)(tracked->confidence * 100.0f),
+                     tracked->x, tracked->y);
+            systemEventPost(SYSEVT_EI_DETECTED, tracked->label, det2);
+          }
+
           // Call callback if registered
           if (gStateChangeCallback) {
             char baseName[32];
@@ -275,6 +302,8 @@ static void updateTrackedObjects(const EIResults& results) {
       newObj->stateChangeMs = now;
       newObj->stateChanged = false;
       newObj->stableCount = 0;
+      newObj->seenFrames = 1;
+      newObj->announced = false;
       
       DEBUG_SYSTEMF("[EdgeImpulse] New tracked object: %s at (%d,%d)", 
                     newObj->label, newObj->x, newObj->y);
@@ -286,6 +315,11 @@ static void updateTrackedObjects(const EIResults& results) {
     if (now - gTrackedObjects[i].lastSeenMs > OBJECT_TIMEOUT_MS) {
       DEBUG_SYSTEMF("[EdgeImpulse] Object lost: %s at (%d,%d)",
                     gTrackedObjects[i].label, gTrackedObjects[i].x, gTrackedObjects[i].y);
+      // Only objects that were announced get a LOST event — un-announced
+      // flickers would otherwise post orphan losses.
+      if (gTrackedObjects[i].announced) {
+        systemEventPost(SYSEVT_EI_LOST, gTrackedObjects[i].label);
+      }
       // Shift remaining objects down
       for (int j = i; j < gTrackedObjectCount - 1; j++) {
         gTrackedObjects[j] = gTrackedObjects[j + 1];
@@ -1859,6 +1893,11 @@ bool startContinuousInference() {
   }
   
   setSetting(gSettings.edgeImpulseContinuous, true);
+  {
+    const char* slash = strrchr(gLoadedModelPath.c_str(), '/');
+    systemEventPost(SYSEVT_EI_CONTINUOUS_STARTED,
+                    slash ? slash + 1 : gLoadedModelPath.c_str());
+  }
   DEBUG_SYSTEMF("[EI_DEBUG]   Continuous inference started, task handle=%p", gEIContinuousTask);
   return true;
 }

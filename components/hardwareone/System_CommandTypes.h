@@ -37,13 +37,10 @@ enum CommandOrigin {
                        // for the same audit-attribution reason.
 };
 
-// Per-command output routing mask.
-// Bit values are aligned with MSG_ROUTE_* (System_Debug.h) by design,
-// so the mapping from CMD_OUT_* to MSG_ROUTE_* is a direct passthrough.
-enum CmdOutputMask { CMD_OUT_SERIAL = 1 << 0,   // 0x01 = MSG_ROUTE_SERIAL
-                     CMD_OUT_WEB    = 1 << 1,    // 0x02 = MSG_ROUTE_WEB
-                     CMD_OUT_LOG    = 1 << 2,    // 0x04 = MSG_ROUTE_FILE
-                     CMD_OUT_BLE    = 1 << 4 };  // 0x10 = MSG_ROUTE_BLE
+// Per-command output routing uses the MSG_ROUTE_* sink bits directly
+// (System_Debug.h) — outputMask below holds them verbatim and broadcastOutput
+// passes them through as the message route. (The former CMD_OUT_* enum was an
+// identical-by-contract copy of those bits; unified 2026-07.)
 
 // Full execution context for a command
 struct CommandContext {

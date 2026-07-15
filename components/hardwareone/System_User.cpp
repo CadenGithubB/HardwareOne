@@ -6,6 +6,7 @@
  */
 
 #include "System_User.h"
+#include "System_Events.h"  // systemEventPost — event register producer
 #include "System_BuildConfig.h"  // ENABLE_HTTP_SERVER flag
 #if ENABLE_HTTP_SERVER
   #include "WebServer_Server.h"
@@ -786,6 +787,7 @@ bool adminCreateUser(const String& username, const String& plainPassword, bool m
   // Identity topology changed (a new account is now usable). Invalidate
   // any auth-dependent caches — see System_AuthIdentity.h for the protocol.
   bumpIdentityGeneration("user.add");
+  systemEventPost(SYSEVT_USER_ADDED, u.c_str(), createdBy.length() ? createdBy.c_str() : nullptr);
   DEBUG_USERSF("[users] admin created user '%s' id=%u mustChange=%d", u.c_str(), (unsigned)createdUserId,
                mustChangeOnLogin ? 1 : 0);
   return true;
@@ -931,6 +933,7 @@ static const char* setUserBanInternal(const String& username, bool ban, const St
       }
     }
 #endif
+    systemEventPost(SYSEVT_USER_BANNED, username.c_str());
   }
 
   DEBUG_USERSF("[users] %s user ban for '%s'", ban ? "set" : "cleared", username.c_str());
@@ -1023,7 +1026,11 @@ bool getUserIdByUsername(const String& username, uint32_t& outUserId) {
     PSRAM_JSON_DOC(doc);
     DeserializationError err = deserializeJson(doc, f);
     f.close();
-    if (err) return false;
+    if (err) {
+      // Credential DB exists but is unparseable — auth cannot resolve anyone.
+      systemEventPost(SYSEVT_AUTH_DB_FAULT, "users.json parse failed", err.c_str());
+      return false;
+    }
 
     JsonArray users = doc["users"].as<JsonArray>();
     if (!users) return false;
@@ -1282,6 +1289,7 @@ bool approvePendingUserInternal(const String& username, String& errorOut) {
   // [EVENT] Covers BOTH the CLI and the web approve path (the web POST
   // bypasses the command audit, so this is the single source of truth).
   logSystemEvent("USERS", "user '%s' approved (id=%lu)", username.c_str(), (unsigned long)createdUserId);
+  systemEventPost(SYSEVT_USER_APPROVED, username.c_str());
   BROADCAST_PRINTF("[admin] Approved user: %s", username.c_str());
 
   // If NTP already synced, resolve the creation timestamp immediately
@@ -1362,6 +1370,7 @@ bool denyPendingUserInternal(const String& username, String& errorOut) {
     }
   }
 
+  systemEventPost(SYSEVT_USER_REJECTED, username.c_str());
   return true;
 }
 
@@ -1470,6 +1479,7 @@ static bool promoteUserToAdminInternal(const String& username, String& errorOut)
   // Identity topology changed (user gained admin permissions). Invalidate
   // any auth-dependent caches — see System_AuthIdentity.h for the protocol.
   bumpIdentityGeneration("user.promote");
+  systemEventPost(SYSEVT_USER_PROMOTED, username.c_str());
   BROADCAST_PRINTF("[admin] Promoted user to admin: %s", username.c_str());
 
   // Serial admin status now checked in real-time via isAdminUser()
@@ -1586,6 +1596,7 @@ static bool demoteUserFromAdminInternal(const String& username, String& errorOut
   // Identity topology changed (user lost admin permissions). Invalidate
   // any auth-dependent caches — see System_AuthIdentity.h for the protocol.
   bumpIdentityGeneration("user.demote");
+  systemEventPost(SYSEVT_USER_DEMOTED, username.c_str());
   // Force-logout the demoted user across all transports. Per the design:
   // a session that was running with admin privileges should NOT silently
   // continue with reduced privileges — the admin who clicked "demote"
@@ -1727,6 +1738,7 @@ static bool deleteUserInternal(const String& username, String& errorOut) {
   // evaporates). Invalidate any auth-dependent caches — see
   // System_AuthIdentity.h for the protocol.
   bumpIdentityGeneration("user.delete");
+  systemEventPost(SYSEVT_USER_DELETED, username.c_str());
   // Forcibly log out every active session for the deleted user across
   // all transports (web/serial/oled/bluetooth). No exception filter:
   // the account is gone, so even if the calling admin is themselves
@@ -1952,6 +1964,7 @@ const char* userChangePasswordCore(const String& currentPassword,
   // is what logAuthAttempt's filter matches on to write this to the
   // security-events file (rather than the verbose command-audit log).
   logAuthAttempt(true, caller.path.c_str(), username, caller.ip, "Password changed");
+  systemEventPost(SYSEVT_PASSWORD_CHANGED, username.c_str(), "self");
 
   if (!ensureDebugBuffer()) return "Password changed successfully";
   snprintf(getDebugBuffer(), 1024, "Password changed successfully for user '%s'", username.c_str());
@@ -1998,6 +2011,7 @@ const char* cmd_user_resetpassword(const String& argsInput) {
   // No clock bump: password reset does not change permission topology.
   revokeUserSessions(username,
                      "Your password was reset by an administrator. Please log in again.");
+  systemEventPost(SYSEVT_PASSWORD_CHANGED, username.c_str(), "admin-reset");
 
   if (!ensureDebugBuffer()) return "Password reset successfully";
   snprintf(getDebugBuffer(), 1024, "Password reset successfully for user '%s'%s", username.c_str(),
@@ -2520,6 +2534,8 @@ const char* cmd_user_request(const String& argsInput) {
 
   DEBUG_CMD_FLOWF("[users] CLI request username=%s", username.c_str());
   BROADCAST_PRINTF("[register] New user request: %s", username.c_str());
+  // Without an event, requests sit invisible until an admin runs pendinglist.
+  systemEventPost(SYSEVT_USER_REQUEST, username.c_str());
 
   if (!ensureDebugBuffer()) return "Request submitted (buffer unavailable)";
   snprintf(getDebugBuffer(), 1024, "Request submitted for '%s' (JSON)", username.c_str());

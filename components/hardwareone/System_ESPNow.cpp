@@ -28,6 +28,7 @@
 #include "System_ESPNow_Saturation.h"  // espnowSaturationTick / espnowSaturationNoteAckRtt
 #include "System_Command.h"
 #include "System_Notifications.h"
+#include "System_Events.h"  // systemEventPost — mesh/bond semantic events for the bus
 #include "System_Debug.h"
 #include "System_ESPNow.h"
 #include "System_ESPNow_Wire.h"      // V3 wire schema (Phase 0 extraction)
@@ -1452,7 +1453,7 @@ static void broadcast_tracker_check_timeouts() {
 // is now strict encrypt-or-fail, plaintext fallback removed everywhere.)
 //
 // APPLICATION payloads (the common case):
-//   * Bond traffic (any BOND_/SENSOR_DATA/STREAM_CTRL/SETTINGS opcode)
+//   * Bond traffic (any BOND_*, MANIFEST_REQ, SETTINGS_REQ, or SCHEMA_REQ opcode)
 //        -> bondSendEncrypted()        MAC-anchored single-initiator + encrypt;
 //                                       the ONLY entry the bond layer should use.
 //   * General unicast app payload      -> v4_send_payload_smart()
@@ -2351,6 +2352,12 @@ void bondNotifySessionEstablished(const uint8_t* peerMac) {
                    String("Bond session active (role=") +
                        (isBondMaster() ? "master" : "worker") + ")");
 #endif
+    {
+      String bondName = getEspNowDeviceName(peerMac);
+      systemEventPost(SYSEVT_BOND_ONLINE,
+                      bondName.length() ? bondName.c_str() : gSettings.bondPeerMac.c_str(),
+                      gSettings.bondPeerMac.c_str());
+    }
     if (isBondMaster()) {
       gEspNow->bondNeedsCapabilityRequest = true;
       INFO_ESPNOWF("[BOND] session ACTIVE with peer — master kicking capability sync");
@@ -2874,6 +2881,7 @@ static void v4h_heartbeat(const V4RxCtx& ctx) {
             gBackupPromoted = false;
             setMeshRole(MESH_ROLE_BACKUP_MASTER, "backup.master_returned");
             BROADCAST_PRINTF("[BACKUP] Master returned — demoted back to backup role");
+            systemEventPost(SYSEVT_MESH_DEMOTED, gSettings.espnowDeviceName.c_str(), "master returned");
           }
         }
       }
@@ -2960,6 +2968,11 @@ static void v4h_bond_heartbeat(const V4RxCtx& ctx) {
 
   bool bootChanged = (hb->bootCounter != 0 && gEspNow->bondPeerBootCounter != 0 &&
                       hb->bootCounter != gEspNow->bondPeerBootCounter);
+  // Pure liveness edge for the bus event; wasOffline additionally folds in
+  // bootChanged for the sync-restart logic, which would double-post
+  // bond_online after a peer reboot (session-establish posts first, then the
+  // first heartbeat's bumped bootCounter re-triggers wasOffline).
+  bool wasReallyOffline = !gEspNow->bondPeerOnline;
   bool wasOffline = !gEspNow->bondPeerOnline || bootChanged;
   uint32_t oldSettingsHash = gEspNow->bondPeerSettingsHash;
 
@@ -2989,6 +3002,10 @@ static void v4h_bond_heartbeat(const V4RxCtx& ctx) {
   gEspNow->lastBondHeartbeatReceivedMs = millis();
   gEspNow->bondHeartbeatsReceived++;
   gEspNow->bondPeerOnline = true;
+  if (wasReallyOffline) {
+    // Authenticated + encrypted edge (handler row requires session enc).
+    systemEventPost(SYSEVT_BOND_ONLINE, ctx.deviceName, gSettings.bondPeerMac.c_str());
+  }
 
   // Update RSSI from rx_ctrl
   if (ctx.recv_info->rx_ctrl) {
@@ -4192,8 +4209,18 @@ void espnowPairModeOpen(uint32_t seconds) {
   uint32_t until = (uint32_t)millis() + seconds * 1000u;
   if (until == 0) until = 1;  // 0 is the "off" sentinel
   gPairModeUntilMs = until;
+  char secs[12];
+  snprintf(secs, sizeof(secs), "%lu", (unsigned long)seconds);
+  systemEventPost(SYSEVT_PAIR_WINDOW_OPEN, secs);
 }
-void espnowPairModeClose() { gPairModeUntilMs = 0; }
+void espnowPairModeClose() {
+  // Post only for a genuinely open window: gPairModeUntilMs stays nonzero
+  // after a lazy expiry, and a "closed" event hours late would fire
+  // automations at a meaningless moment. The expiry itself posts from the
+  // sweep in processMeshHeartbeats.
+  if (espnowPairModeActive()) systemEventPost(SYSEVT_PAIR_WINDOW_CLOSED);
+  gPairModeUntilMs = 0;
+}
 bool espnowPairModeActive() {
   return gPairModeUntilMs != 0 && (int32_t)(gPairModeUntilMs - (uint32_t)millis()) > 0;
 }
@@ -4268,6 +4295,9 @@ static void runDeferredPairModePair(void* arg) {
     const char* res = cmd_espnow_pairsecure(args);
     BROADCAST_PRINTF("[PAIRMODE] auto-pair %s (%s): %s", w->name, macStr, res ? res : "(null)");
     logSystemEvent("ESPNOW", "pair-mode auto-paired %s (%s)", macStr, w->name);
+    // SYSEVT_PEER_PAIRED is posted inside cmd_espnow_pairsecure (called above),
+    // so it is NOT re-posted here — that would double-fire the event on every
+    // pairing-mode auto-pair.
   }
   free(w);
 }
@@ -4371,10 +4401,10 @@ static const V4OpcodeEntry kV4HandlerTable[] = {
   { ESPNOW_V4_TYPE_FS_GET_ACK,       V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_fs_get_ack        },
 #if ENABLE_BONDED_MODE
   { ESPNOW_V4_TYPE_BOND_HEARTBEAT,   V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_bond_heartbeat    },
-  { ESPNOW_V4_TYPE_STREAM_CTRL,      V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_stream_ctrl       },
+  { ESPNOW_V4_TYPE_BOND_STREAM_CTRL, V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_stream_ctrl       },
   { ESPNOW_V4_TYPE_BOND_CAP_REQ,     V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_bond_cap_req      },
   { ESPNOW_V4_TYPE_BOND_CAP_RESP,    V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_bond_cap_resp     },
-  { ESPNOW_V4_TYPE_SENSOR_DATA,      V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_sensor_data       },
+  { ESPNOW_V4_TYPE_BOND_SENSOR_DATA, V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_sensor_data       },
   { ESPNOW_V4_TYPE_SETTINGS_REQ,     V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_settings_req      },
   { ESPNOW_V4_TYPE_SCHEMA_REQ,       V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_schema_req        },
   { ESPNOW_V4_TYPE_BOND_STATUS_REQ,  V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_BOND_MODE | V4_OPC_FLAG_REQ_SESSION_ENC,   v4h_bond_status_req   },
@@ -4866,7 +4896,7 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
   // silently empties the bonded-device file/CLI views on the master. FILE_* frames
   // are likewise multi-frame under one msgId.
   if (h->type != ESPNOW_V4_TYPE_STREAM &&
-      h->type != ESPNOW_V4_TYPE_STREAM_CTRL &&
+      h->type != ESPNOW_V4_TYPE_BOND_STREAM_CTRL &&
       h->type != ESPNOW_V4_TYPE_CMD_RESP &&
       h->type != ESPNOW_V4_TYPE_FILE_START &&
       h->type != ESPNOW_V4_TYPE_FILE_DATA &&
@@ -5134,6 +5164,9 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
       // in failed_login.log, mirroring the espnow/bond success line. Deferred +
       // throttled inside logBondAuthFailure (we are on espnow_task here).
       logBondAuthFailure(srcMac, "Invalid bond session token");
+      // login_fail parity with web/CLI/MQTT — closes the event-register
+      // visibility hole for remote-command auth failures.
+      systemEventPost(SYSEVT_LOGIN_FAIL, deviceName, "espnow");
       uint8_t respPayload[48];
       respPayload[0] = 0;
       const char* errMsg = "Session token auth failed";
@@ -5161,6 +5194,7 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
       authOk = true;
     } else {
       BROADCAST_PRINTF("[ESP-NOW] Auth failed for user '%s' from %s", username, deviceName);
+      systemEventPost(SYSEVT_LOGIN_FAIL, username, "espnow");
       uint8_t respPayload[32];
       respPayload[0] = 0;
       const char* errMsg = "Auth failed";
@@ -5237,11 +5271,14 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
   }
   cmd.ctx.id = msgId;
   cmd.ctx.timestampMs = millis();
-  cmd.ctx.outputMask = CMD_OUT_WEB | CMD_OUT_LOG;  // local sinks; output also streams via V3 STREAM frames
+  cmd.ctx.outputMask = MSG_ROUTE_WEB | MSG_ROUTE_FILE;  // local sinks; output also streams via V3 STREAM frames
   cmd.ctx.validateOnly = false;
   cmd.ctx.replyHandle = nullptr;
   cmd.ctx.httpReq = nullptr;
   
+  // Authenticated remote command is about to run on this device.
+  systemEventPost(SYSEVT_REMOTE_CMD_RX, deviceName, actualCmd);
+
   // Queue for execution on cmd_exec task (has large stack)
   if (!submitCommandAsync(cmd, v4CmdResultCallback, asyncCtx)) {
     BROADCAST_PRINTF("[ESP-NOW] Failed to queue CMD from %s", deviceName);
@@ -5262,14 +5299,14 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
 // ESP-NOW traffic capture to SD card
 // ============================================================================
 // When gSettings.espnowCaptureToSd is true AND an SD card is mounted, every
-// incoming and outgoing V3 frame is appended to /sd/espnow/capture-<bootTs>.log
+// incoming and outgoing V4 frame is appended to /sd/espnow/capture-<bootTs>.log
 // in a human-readable one-line format. Payload is base64-encoded; encrypted
 // frames are saved as encrypted bytes (future decoder can unseal them if
 // given the passphrase).
 //
-// Heartbeats (types 7 and 14) dominate volume and are skipped by default via
-// gSettings.espnowCaptureSkipHeartbeats. A reasonable session capture stays
-// well under the 16 MB per-file cap even over several hours.
+// Heartbeats (HEARTBEAT / BOND_HEARTBEAT) dominate volume and are skipped by
+// default via gSettings.espnowCaptureSkipHeartbeats. A reasonable session
+// capture stays well under the 16 MB per-file cap even over several hours.
 //
 // Called from the recv callback (onEspNowRawRecv) and each esp_now_send path.
 
@@ -5325,7 +5362,7 @@ static bool ensureCaptureFile(time_t now) {
   return true;
 }
 
-// direction: "RX" or "TX". peerMac must be 6 bytes. data/len is the full V3
+// direction: "RX" or "TX". peerMac must be 6 bytes. data/len is the full V4
 // frame (header + payload). rssi is only valid for RX; pass 0 for TX.
 static void captureEspNowFrame(const char* direction, const uint8_t* peerMac,
                                int rssi, const uint8_t* data, int len) {
@@ -5334,10 +5371,13 @@ static void captureEspNowFrame(const char* direction, const uint8_t* peerMac,
   if (!data || len < (int)sizeof(EspNowV4Header)) return;
 
   const EspNowV4Header* h = (const EspNowV4Header*)data;
-  // Validate magic quickly — avoid capturing random junk if something non-V3 sneaks in.
-  if (h->magic != (uint16_t)ESPNOW_V4_MAGIC || h->ver != 3) return;
+  // Validate magic + version quickly — avoid capturing random junk. Use the
+  // named constant, NOT a literal: this was `h->ver != 3` (a rotted V3-era
+  // value) which never matched a live ver=4 frame, so capture silently wrote
+  // nothing. Tracking ESPNOW_V4_VERSION keeps it correct across future bumps.
+  if (h->magic != (uint16_t)ESPNOW_V4_MAGIC || h->ver != ESPNOW_V4_VERSION) return;
 
-  // Heartbeat filter (types 7=HEARTBEAT, 14=BOND_HEARTBEAT).
+  // Heartbeat filter (HEARTBEAT / BOND_HEARTBEAT dominate volume).
   if (gSettings.espnowCaptureSkipHeartbeats &&
       (h->type == ESPNOW_V4_TYPE_HEARTBEAT || h->type == ESPNOW_V4_TYPE_BOND_HEARTBEAT)) {
     return;
@@ -5362,7 +5402,7 @@ static void captureEspNowFrame(const char* direction, const uint8_t* peerMac,
   EXT_RAM_BSS_ATTR static char b64[512];
   espnowCaptureBase64(data, (size_t)len, b64, sizeof(b64));
 
-  // One line: timestamp, direction, peer, rssi, V3 type, flags, len, payload.
+  // One line: timestamp, direction, peer, rssi, V4 type, flags, len, payload.
   char line[700];
   int n = snprintf(line, sizeof(line),
     "%lu %s PEER=%s NAME=%s RSSI=%d TYPE=%u FLAGS=0x%02x LEN=%d FRAG=%u/%u B64=%s\n",
@@ -5384,7 +5424,7 @@ static void onEspNowRawRecv(const esp_now_recv_info* recv_info, const uint8_t* i
   if (gEspNow) gEspNow->routerMetrics.messagesReceived++;
 
   // Capture RX traffic if enabled (before dispatch — we want to see even frames
-  // V3 doesn't handle).
+  // the dispatcher drops as unknown).
   if (recv_info && incomingData && len > 0) {
     captureEspNowFrame("RX", recv_info->src_addr,
                        recv_info->rx_ctrl ? recv_info->rx_ctrl->rssi : 0,
@@ -5886,8 +5926,8 @@ void computeBondLocalSettingsHash() {
 static String generateDeviceSettings() {
   PSRAM_JSON_DOC(doc);
   
-  // Use the existing settings serialization (excludes passwords for security)
-  extern void buildSettingsJsonDoc(JsonDocument& doc, bool excludePasswords);
+  // Use the existing settings serialization (excludes passwords for security).
+  // buildSettingsJsonDoc is declared in System_Settings.h (now a 3-arg signature).
   buildSettingsJsonDoc(doc, true);  // true = exclude passwords
   
   // Add device identification metadata
@@ -7815,6 +7855,14 @@ void processMeshHeartbeats() {
     sendPairBeacon();
   }
 
+  // 2b. Pairing-window expiry edge: the window times out lazily (the deadline
+  // just passes; gPairModeUntilMs stays set), so detect the open->expired
+  // transition here and post the closed event exactly once at real expiry.
+  if (gPairModeUntilMs != 0 && !espnowPairModeActive()) {
+    gPairModeUntilMs = 0;
+    systemEventPost(SYSEVT_PAIR_WINDOW_CLOSED, nullptr, "expired");
+  }
+
   if (now - gLastHeartbeatSentMs >= HB_INTERVAL_MS) {
     gLastHeartbeatSentMs = now;
     // Count active runtime peers
@@ -7895,6 +7943,11 @@ void processMeshHeartbeats() {
     setMeshRole(MESH_ROLE_MASTER, "backup.promoted");  // Runtime only — not persisted, reboot restores backup role
     BROADCAST_PRINTF("[BACKUP] Master silent for %lums — promoted to master",
                      (unsigned long)gSettings.meshFailoverTimeout);
+    {
+      char det[32];
+      snprintf(det, sizeof(det), "master silent %lums", (unsigned long)gSettings.meshFailoverTimeout);
+      systemEventPost(SYSEVT_MESH_PROMOTED, gSettings.espnowDeviceName.c_str(), det);
+    }
   }
 
 #if ENABLE_BONDED_MODE
@@ -7951,6 +8004,14 @@ void processMeshHeartbeats() {
     // online -> offline transition, not every sweep while offline.
     logSystemEvent("BOND", "bond peer %s offline (heartbeat timeout) — sync reset",
                    gSettings.bondPeerMac.c_str());
+    {
+      uint8_t bm[6];
+      String bondName;
+      if (parseMacAddress(gSettings.bondPeerMac, bm)) bondName = getEspNowDeviceName(bm);
+      systemEventPost(SYSEVT_BOND_OFFLINE,
+                      bondName.length() ? bondName.c_str() : gSettings.bondPeerMac.c_str(),
+                      gSettings.bondPeerMac.c_str());
+    }
     resetBondSync();
     // All-encrypted bond: tear down the (now-stale) session so the next send
     // re-establishes a fresh one. Critical for peer-reboot recovery — if the
@@ -7990,12 +8051,20 @@ void processMeshHeartbeats() {
           p.onlineLogged = true;
           logSystemEvent("MESH", "peer %02X:%02X:%02X:%02X:%02X:%02X online",
                          pm[0], pm[1], pm[2], pm[3], pm[4], pm[5]);
+          char macStr[18];
+          formatMacAddressBuf(pm, macStr, sizeof(macStr));
+          String peerName = getEspNowDeviceName(pm);
+          systemEventPost(SYSEVT_PEER_ONLINE, peerName.length() ? peerName.c_str() : macStr, macStr);
         }
       } else {
         if (p.onlineLogged) {
           p.onlineLogged = false;
           logSystemEvent("MESH", "peer %02X:%02X:%02X:%02X:%02X:%02X offline (heartbeat timeout)",
                          pm[0], pm[1], pm[2], pm[3], pm[4], pm[5]);
+          char macStr[18];
+          formatMacAddressBuf(pm, macStr, sizeof(macStr));
+          String peerName = getEspNowDeviceName(pm);
+          systemEventPost(SYSEVT_PEER_OFFLINE, peerName.length() ? peerName.c_str() : macStr, macStr);
         }
         p.isActive = false;  // reclaim stale slot (unchanged from prior behavior)
       }
@@ -8075,6 +8144,19 @@ void processMeshHeartbeats() {
       BROADCAST_PRINTF("[ESP-NOW] Command result from %s: %s", deviceName.c_str(), gEspNow->deferredCmdRespResult);
     } else {
       BROADCAST_PRINTF("[ESP-NOW] Command FAILED from %s: %s", deviceName.c_str(), gEspNow->deferredCmdRespResult);
+    }
+
+    // Bus event: the result of a remote command we sent came back. Event-only
+    // (notifDefaultRuleFor omits it); correlate to the remote_cmd_sent event by
+    // the "#reqId" prefix. Runs on the main loop with no command scope, so it's
+    // system-attributed.
+    {
+      char resDetail[96];
+      snprintf(resDetail, sizeof(resDetail), "#%lu %s %s",
+               (unsigned long)gEspNow->deferredCmdRespReqId,
+               gEspNow->deferredCmdRespSuccess ? "ok" : "failed",
+               gEspNow->deferredCmdRespResult);
+      systemEventPost(SYSEVT_REMOTE_CMD_RESULT, deviceName.c_str(), resDetail);
     }
   }
   
@@ -8362,6 +8444,18 @@ void processMeshHeartbeats() {
       // bond channel is a failed attempt to gain command execution. Deferred +
       // throttled inside logBondAuthFailure (we are on espnow_task here).
       logBondAuthFailure(gEspNow->bondUnpairedRejectMac, "Bond traffic from unpaired peer");
+      // Bus event with its own 30s cooldown: a chatty unpaired peer heartbeats
+      // every ~5s and would otherwise post per drain delta.
+      static uint32_t sLastRejectEventMs = 0;
+      if (now - sLastRejectEventMs >= 30000) {
+        sLastRejectEventMs = now;
+        char macStr[18], det[32];
+        formatMacAddressBuf(gEspNow->bondUnpairedRejectMac, macStr, sizeof(macStr));
+        snprintf(det, sizeof(det), "%lu msgs, type=%d",
+                 (unsigned long)gEspNow->bondUnpairedRejectCount,
+                 (int)gEspNow->bondUnpairedRejectType);
+        systemEventPost(SYSEVT_BOND_REJECT, macStr, det);
+      }
     }
   }
 
@@ -8498,6 +8592,15 @@ void processMeshHeartbeats() {
         // BT/G2 are compiled out the header provides an inline no-op.
         if (stored) {
           g2ESPNowAppOnRxText(entry.srcMac);
+          // Bus event once per message (last fragment), not per fragment —
+          // the device never assembles the full text, so the event carries
+          // the final fragment's content as its (truncated) preview. Chat
+          // only: BOOT/system notices ride this queue as MSG_SYSTEM_EVENT
+          // and must not fire text_rx automations or "Msg from" toasts.
+          if (entry.msgType == MSG_TEXT &&
+              (entry.fragCount <= 1 || (uint8_t)(entry.fragIndex + 1) == entry.fragCount)) {
+            systemEventPost(SYSEVT_TEXT_RX, devName.c_str(), entry.content);
+          }
         }
         entry.used = false;
       }
@@ -9064,7 +9167,7 @@ static bool initEspNow() {
   meshSendBootToPeers(bootMsg);
   BROADCAST_PRINTF("[ESP-NOW] Boot notification sent (counter=%lu)", (unsigned long)gBootCounter);
 
-  notifyEspNowStarted(true);
+  systemEventPost(SYSEVT_ESPNOW_ON);
   logSystemEvent("ESPNOW", "init OK — mesh online on channel %d (mode=%s)",
                  gEspNow->channel, gEspNow->mode == ESPNOW_MODE_MESH ? "mesh" : "direct");
   return true;
@@ -9197,7 +9300,7 @@ static bool deinitEspNow() {
   size_t heapFreed = heapAfter - heapBefore;
   BROADCAST_PRINTF("[ESP-NOW] Deinitialized. Freed ~%u KB heap", (unsigned)(heapFreed / 1024));
 
-  notifyEspNowStopped();
+  systemEventPost(SYSEVT_ESPNOW_OFF);
   return true;
 }
 
@@ -10025,6 +10128,17 @@ const char* cmd_espnow_regenidentity(const String& argsInput) {
     return "Error: identity regeneration failed (see [ERROR][ESP-NOW] log lines)";
   }
 
+  // New Ed25519 identity is committed — announce on the event bus before the
+  // debug-buffer echo (so the event still fires if the buffer is unavailable).
+  {
+    char regenPub[65];
+    espnowIdentityFormatPubHex(fresh.pub, regenPub, sizeof(regenPub));
+    regenPub[40] = '\0';  // fit the 47-char subject cap, keep it readable
+    char regenDet[24];
+    snprintf(regenDet, sizeof(regenDet), "regen #%u", (unsigned)fresh.regenCount);
+    systemEventPost(SYSEVT_IDENTITY_REGEN, regenPub, regenDet);
+  }
+
   if (!ensureDebugBuffer()) return "OK (regenerated, but debug buffer unavailable for echo)";
   char pubHex[65];
   espnowIdentityFormatPubHex(fresh.pub, pubHex, sizeof(pubHex));
@@ -10157,6 +10271,9 @@ const char* cmd_espnow_pair(const String& argsInput) {
   }
   bool peersOk   = saveMeshPeers();
   bool devicesOk = saveEspNowDevices();
+
+  // Peer is committed to the registry — announce the (unencrypted) pair.
+  systemEventPost(SYSEVT_PEER_PAIRED, name.c_str(), macStr.c_str());
 
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   if (!peersOk || !devicesOk) {
@@ -10314,6 +10431,9 @@ const char* cmd_espnow_setname(const String& argsInput) {
 
   setSetting(gSettings.espnowDeviceName, name);
   setSetting(gSettings.espnowFirstTimeSetup, true);
+  // Raw setSetting bypasses handleSettingCommand, which is where
+  // notifySettingChanged normally fires — post the parity notification here.
+  systemEventPost(SYSEVT_SETTING_CHANGED, "espnowDeviceName", name.c_str());
   
   if (gEspNow && gEspNow->initialized) {
     uint8_t myMac[6];
@@ -10355,6 +10475,7 @@ static const char* metaGetSet(const String& args, String& field, const char* fie
   if (trimmed == "clear") {
     setSetting(field, String(""));  // Persist to flash
     gMetadataChanged = true;  // Mark metadata as dirty
+    systemEventPost(SYSEVT_SETTING_CHANGED, fieldName, "(cleared)");
     snprintf(getDebugBuffer(), 1024, "%s cleared", fieldName);
     return getDebugBuffer();
   }
@@ -10368,6 +10489,7 @@ static const char* metaGetSet(const String& args, String& field, const char* fie
   }
   setSetting(field, trimmed);  // Persist to flash
   gMetadataChanged = true;  // Mark metadata as dirty
+  systemEventPost(SYSEVT_SETTING_CHANGED, fieldName, trimmed.c_str());
   snprintf(getDebugBuffer(), 1024, "%s set to: %s", fieldName, field.c_str());
   return getDebugBuffer();
 }
@@ -11800,6 +11922,10 @@ static const char* meshesCmd_setpassphrase(const String& label, const String& pa
                  label.c_str(),
                  i == 0 ? " Key re-derived." : " (Not used for current encryption.)");
       }
+      // Bus event: passphrase set/cleared on this mesh. NEVER include the
+      // passphrase value — only the mesh label and the set/cleared transition.
+      systemEventPost(SYSEVT_MESH_PASSPHRASE_CHANGED, label.c_str(),
+                      passphrase.length() == 0 ? "cleared" : "set");
       return getDebugBuffer();
     }
   }
@@ -11932,6 +12058,9 @@ const char* cmd_espnow_unpair(const String& argsInput) {
   // bonddisconnect (bond) → espnowunpair (pairing + crypto identity).
   espnowForgetPeerCrypto(mac);
 
+  // Peer + crypto identity are gone — announce the unpair.
+  systemEventPost(SYSEVT_PEER_UNPAIRED, deviceName.c_str(), formatMacAddress(mac).c_str());
+
   if (meshEnabled()) {
     for (int i = 0; i < gMeshPeerSlots; i++) {
       if (gMeshPeers[i].isActive && macEqual6(gMeshPeers[i].mac, mac)) {
@@ -11986,6 +12115,12 @@ const char* cmd_espnow_forget(const String& argsInput) {
   }
 
   bool had = espnowForgetPeerCrypto(mac);
+
+  // Only a real identity teardown is an unpair edge — a no-op stale-file sweep
+  // (had == false) changed no bond state, so don't emit a spurious event.
+  if (had) {
+    systemEventPost(SYSEVT_PEER_UNPAIRED, getEspNowDeviceName(mac).c_str(), formatMacAddress(mac).c_str());
+  }
 
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   snprintf(getDebugBuffer(), 1024,
@@ -12325,7 +12460,7 @@ bool sendBondedSensorData(uint8_t sensorType, const uint8_t* data, uint16_t data
   // + esp_now_send all happen on espnow_tx's stack, not sensor_bcast's.
   // `sent` here means "queued OK," not "made it to the air" — the V4 ACK
   // mechanism is the delivery confirmation (same as before).
-  bool sent = bondSendEncryptedAsync(peerMac, ESPNOW_V4_TYPE_SENSOR_DATA, 0, msgId, payloadBuf, totalLen);
+  bool sent = bondSendEncryptedAsync(peerMac, ESPNOW_V4_TYPE_BOND_SENSOR_DATA, 0, msgId, payloadBuf, totalLen);
 
   // Single concise debug line only on success/failure
   DEBUGF(DEBUG_ESPNOW_MESH, "[BOND] Sensor TX type=%u len=%u seq=%lu %s",
@@ -12354,7 +12489,7 @@ bool sendBondStreamCtrl(RemoteSensorType sensorType, bool enable) {
   // block AND from startSensorDataStreaming on cmd_exec). Master is always the
   // initiator here (gated by isBondMaster + isBondSynced), so async returns
   // true on queue; behavior matches the prior sync return in the happy path.
-  bool sent = bondSendEncryptedAsync(peerMac, ESPNOW_V4_TYPE_STREAM_CTRL, ESPNOW_V4_FLAG_ACK_REQ,
+  bool sent = bondSendEncryptedAsync(peerMac, ESPNOW_V4_TYPE_BOND_STREAM_CTRL, ESPNOW_V4_FLAG_ACK_REQ,
                             msgId, (const uint8_t*)&ctrl, sizeof(ctrl));
 
   DEBUGF(DEBUG_ESPNOW_MESH, "[BOND_STREAM_CTRL] TX %s %s -> %s",
@@ -12742,6 +12877,11 @@ const char* cmd_espnow_pairsecure(const String& argsInput) {
   bool peersOk   = saveMeshPeers();
   bool devicesOk = saveEspNowDevices();
 
+  // Registry pairing is committed (radio peer + name/key saved) — announce it.
+  // Covers manual espnowpairsecure AND the pairing-mode auto-pair path, which
+  // routes through this handler (so the auto-pair site no longer double-posts).
+  systemEventPost(SYSEVT_PEER_PAIRED, deviceName.c_str(), macStr.c_str());
+
   // 2026-05-19 — auto-trigger KEY_EX so "pairsecure" actually delivers a
   // working end-to-end secure pair in one command. Without this the legacy
   // LMK (now unused post-Phase-3.5) is the only "security" installed, and
@@ -13067,9 +13207,33 @@ const char* cmd_espnow_remote(const String& argsInput) {
     return espnowAckErr(wantJson, "Failed to send remote command", "{\"schema\":1,\"ok\":false,\"error\":\"send failed\"}");
   }
 
-  // Show "Running" notification so the user sees immediate feedback
-  // The CMD_RESP will update this in-place to OK/FAIL when the result arrives
-  notifyRemoteCommandReceived(target.c_str(), command.c_str());
+  // Bus event: a remote command was sent from this device (wire-delivery
+  // confirmed above). Event-only by default (notifDefaultRuleFor omits it),
+  // mirroring the receiver's remote_cmd_rx. Runs under the sender's command
+  // identity, so it's attributed to whoever issued espnowremote. Correlate to
+  // the later remote_cmd_result by the "#reqId" prefix.
+  {
+    char sentDetail[96];
+    snprintf(sentDetail, sizeof(sentDetail), "#%lu %s", (unsigned long)msgId, command.c_str());
+    systemEventPost(SYSEVT_REMOTE_CMD_SENT, target.c_str(), sentDetail);
+  }
+
+  // Sender-side "Running:" feedback is command UX, not a notification —
+  // render the banner directly (reclassified in the Phase-1 cutover).
+#if ENABLE_OLED_DISPLAY
+  {
+    char cmdName[32];
+    const char* cstr = command.c_str();
+    const char* sp = strchr(cstr, ' ');
+    size_t nlen = sp ? (size_t)(sp - cstr) : strlen(cstr);
+    if (nlen > sizeof(cmdName) - 1) nlen = sizeof(cmdName) - 1;
+    memcpy(cmdName, cstr, nlen);
+    cmdName[nlen] = '\0';
+    char rmsg[48];
+    snprintf(rmsg, sizeof(rmsg), "Running: %s", cmdName);
+    oledNotificationBannerShow(rmsg, PairingRibbonIcon::SYNC, 2000);
+  }
+#endif
 
   if (wantJson) {
     snprintf(remoteBuffer, sizeof(remoteBuffer), "{\"schema\":1,\"ok\":true,\"reqId\":%lu}", (unsigned long)msgId);
@@ -13115,6 +13279,9 @@ const char* cmd_espnow_startstream(const String& argsInput) {
 
   DEBUGF(DEBUG_ESPNOW_STREAM, "[STREAM] Activated: target=%s name=%s active=%d counters_reset=YES",
          formatMacAddress(gEspNow->streamTarget).c_str(), senderName.c_str(), gEspNow->streamActive);
+
+  // Bus event: this device is now streaming all output to the requesting peer.
+  systemEventPost(SYSEVT_REMOTE_STREAM_STARTED, senderName.c_str());
 
   EXT_RAM_BSS_ATTR static char streamBuffer[512];
   snprintf(streamBuffer, sizeof(streamBuffer),
@@ -13830,7 +13997,19 @@ const char* cmd_bond_disconnect(const String& argsInput) {
   setSetting(gSettings.bondPeerMac, String(""));
   resetBondSync();  // Reset handshake state
   if (gEspNow) gEspNow->bondPeerOnline = false;
-  
+
+  // Bond is torn down by explicit operator command — announce it (same event
+  // the heartbeat-timeout path fires). bondPeerMac is now cleared, so resolve
+  // the name/detail from prevPeer captured above.
+  {
+    uint8_t bm[6];
+    String bondName;
+    if (parseMacAddress(prevPeer, bm)) bondName = getEspNowDeviceName(bm);
+    systemEventPost(SYSEVT_BOND_OFFLINE,
+                    bondName.length() ? bondName.c_str() : prevPeer.c_str(),
+                    prevPeer.c_str());
+  }
+
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   snprintf(getDebugBuffer(), 1024, "Disconnected from bonded device: %s", prevPeer.c_str());
   return getDebugBuffer();
@@ -15042,8 +15221,13 @@ void logFileTransferEvent(
   // and deliberately not duplicated here.
   if (eventType == MSG_FILE_RECV_SUCCESS) {
     logSystemEvent("ESPNOW", "file received from %s: %s", deviceName.c_str(), filename ? filename : "?");
+    // Bus event: single chokepoint for both the RAM-path (espnow_task) and
+    // streaming (cmd_exec) receive completions.
+    systemEventPost(SYSEVT_FILE_RX, deviceName.c_str(), filename ? filename : "?");
   } else if (eventType == MSG_FILE_RECV_FAILED) {
     logSystemEvent("ESPNOW", "file receive FAILED from %s: %s", deviceName.c_str(), filename ? filename : "?");
+    // Bus event: same chokepoint as the SYSEVT_FILE_RX success post above.
+    systemEventPost(SYSEVT_FILE_RX_FAILED, deviceName.c_str(), filename ? filename : "?");
   }
 }
 

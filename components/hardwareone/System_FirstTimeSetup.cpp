@@ -10,6 +10,7 @@
 #include <ArduinoJson.h>
 #include <LittleFS.h>
 #include "WebServer_Handle.h"
+#include "System_Utils.h"   // rebootDevice()
 #include "System_VFS.h"   // VFS::*Guarded + systemAuth (Phase 2 perm refactor)
 
 #include "OLED_Display.h"
@@ -156,12 +157,12 @@ static void clearOledIfActive() {
 static void rebootWithMessage(const char* message) {
   broadcastOutput("");
   broadcastOutput(message);
-  // Durable record so a setup/restore-driven restart is attributable (vs a
-  // power cut or crash). Reason carries the user-facing message verbatim.
-  logSystemEvent("REBOOT", "setup restart: %s", message ? message : "(no message)");
   clearOledIfActive();
-  delay(1000);
-  ESP.restart();
+  // Durable REBOOT audit line + stash the reason so the next boot posts
+  // SYSEVT_REBOOT (reason=setup); rebootDevice() flushes then restarts.
+  char detail[128];
+  snprintf(detail, sizeof(detail), "setup restart: %s", message ? message : "(no message)");
+  rebootDevice("setup", detail, 1000);
 }
 
 // ============================================================================

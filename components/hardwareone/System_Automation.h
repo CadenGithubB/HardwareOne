@@ -42,6 +42,14 @@ void notifyAutomationScheduler();
 // nextAt is at or before `now`, or if the cache is invalid (forcing a rebuild).
 bool automationsAnyDue(time_t now);
 
+// Event-bus hook: called by systemEventPost() from ANY task. Sets the
+// events-pending flag only when an enabled automation actually subscribes
+// to this event kind (per the cache's kind mask), so unsubscribed events
+// never force a scheduler tick. Flag-write only — no I/O, no locks.
+void automationOnSystemEvent(uint8_t kind);
+// Main-loop check: true when posted events are waiting for the matcher.
+bool automationEventsPending();
+
 // Automation file operations
 bool sanitizeAutomationsJson(String& jsonRef);
 bool writeAutomationsJsonAtomic(const String& json);
@@ -98,6 +106,8 @@ inline bool startAutomationScheduler() { return false; }
 inline void stopAutomationScheduler() {}
 inline void notifyAutomationScheduler() {}
 inline bool automationsAnyDue(time_t) { return false; }
+inline void automationOnSystemEvent(uint8_t) {}
+inline bool automationEventsPending() { return false; }
 inline bool sanitizeAutomationsJson(String&) { return false; }
 inline bool writeAutomationsJsonAtomic(const String&) { return false; }
 inline void schedulerTickMinute() {}

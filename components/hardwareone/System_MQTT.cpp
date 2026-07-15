@@ -6,6 +6,8 @@
  */
 
 #include "System_MQTT.h"
+#include "System_Events.h"  // systemEventPost — event register producer
+#include "System_Notifications.h"  // notifyLoginFailed — auth-failure parity
 #include "System_BuildConfig.h"
 
 #if ENABLE_WIFI && ENABLE_MQTT
@@ -127,6 +129,7 @@ static void updateExternalSensor(const char* topic, int topicLen, const char* da
       externalSensors[externalSensorCount].lastUpdate = millis();
       externalSensorCount++;
       INFO_MQTT_PUBSUBF("New external sensor: %s", topicStr.c_str());
+      systemEventPost(SYSEVT_MQTT_EXT_SENSOR_NEW, topicStr.c_str());
     }
     xSemaphoreGive(externalSensorMutex);
   }
@@ -382,6 +385,9 @@ static void handleMQTTCommand(const char* topic, int topicLen, const char* data,
   // Authenticate user
   if (!isValidUser(String(username), String(password))) {
     WARN_MQTTF("Authentication FAILED for user '%s'", username);
+    // Every failure reaches the event register; the notification renderer
+    // applies the 30s toast cooldown downstream.
+    systemEventPost(SYSEVT_LOGIN_FAIL, username, "mqtt");
     esp_mqtt_client_publish(mqttClient, responseTopic.c_str(),
       "{\"ok\":false,\"error\":\"Authentication failed\"}", 0, 0, false);
     return;
@@ -440,6 +446,7 @@ static void handleMQTTCommand(const char* topic, int topicLen, const char* data,
     DEBUG_MQTT_COMMANDSF("Failed to allocate command result buffer");
     return;
   }
+  systemEventPost(SYSEVT_REMOTE_CMD_RX, username, command);
   bool success = executeCommand(ctx, command, cmdResult, 2048);
   
   // Build and publish response
@@ -794,6 +801,11 @@ static void mqtt_event_handler(void* handler_args, esp_event_base_t base, int32_
       INFO_MQTT_CONNECTIONF("Connected to %s:%d", gSettings.mqttHost.c_str(), gSettings.mqttPort);
       sMqttConnectedAtMs = millis();
       logSystemEvent("MQTT", "connected to broker %s:%d", gSettings.mqttHost.c_str(), gSettings.mqttPort);
+      {
+        char broker[48];
+        snprintf(broker, sizeof(broker), "%s:%d", gSettings.mqttHost.c_str(), gSettings.mqttPort);
+        systemEventPost(SYSEVT_MQTT_CONNECTED, broker);
+      }
       
       // Publish availability
       if (gSettings.mqttBaseTopic.length() > 0) {
@@ -815,6 +827,11 @@ static void mqtt_event_handler(void* handler_args, esp_event_base_t base, int32_
       if (sMqttConnectedAtMs != 0) {
         logSystemEvent("MQTT", "broker connection lost (was connected %lus)",
                        (unsigned long)((millis() - sMqttConnectedAtMs) / 1000));
+        // Inside the once-per-transition gate — esp-mqtt fires DISCONNECTED
+        // on every ~10s retry, which would spam the ring outside this guard.
+        char secs[16];
+        snprintf(secs, sizeof(secs), "%lu", (unsigned long)((millis() - sMqttConnectedAtMs) / 1000));
+        systemEventPost(SYSEVT_MQTT_DISCONNECTED, secs);
         sMqttConnectedAtMs = 0;
       }
       mqttTofConnected = false;
@@ -856,6 +873,7 @@ bool startMQTT() {
 
   if (!gSettings.mqttClientEnabled) {
     lastError = "MQTT disabled (mqttClientEnabled=false)";
+    // No event: MQTT being disabled by config is a no-op, not a start failure.
     return false;
   }
   
@@ -864,11 +882,13 @@ bool startMQTT() {
   
   if (!WiFi.isConnected()) {
     lastError = "WiFi not connected";
+    systemEventPost(SYSEVT_MQTT_START_FAILED, "wifi not connected");
     return false;
   }
   
   if (gSettings.mqttHost.length() == 0) {
     lastError = "MQTT host not configured";
+    systemEventPost(SYSEVT_MQTT_START_FAILED, "host not configured");
     return false;
   }
   
@@ -910,11 +930,13 @@ bool startMQTT() {
       } else {
         lastError = "CA cert file not found: " + gSettings.mqttCACertPath;
         ERROR_MQTTF("%s", lastError.c_str());
+        systemEventPost(SYSEVT_MQTT_START_FAILED, "CA cert file not found");
         return false;
       }
     } else {
       lastError = "TLS+Verify requires CA cert path";
       ERROR_MQTTF("%s", lastError.c_str());
+      systemEventPost(SYSEVT_MQTT_START_FAILED, "TLS+verify needs CA path");
       return false;
     }
   } else if (gSettings.mqttTLSMode == 1) {
@@ -942,6 +964,7 @@ bool startMQTT() {
   if (!mqttClient) {
     lastError = "Failed to initialize MQTT client";
     ERROR_MQTTF("Client init failed");
+    systemEventPost(SYSEVT_MQTT_START_FAILED, "client init failed");
     return false;
   }
   
@@ -970,6 +993,9 @@ void stopMQTT() {
     }
     
     esp_mqtt_client_stop(mqttClient);
+    // esp_mqtt_client_stop() does NOT deliver MQTT_EVENT_DISCONNECTED, so post
+    // here so mqtt_connected doesn't stay stale after a manual stop.
+    systemEventPost(SYSEVT_MQTT_DISCONNECTED, "stopped");
     esp_mqtt_client_destroy(mqttClient);
     mqttClient = nullptr;
   }

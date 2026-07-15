@@ -1,4 +1,5 @@
 #include "System_BuildConfig.h"
+#include "System_Events.h"  // systemEventPost — event register producer
 
 #if ENABLE_APDS_SENSOR
 
@@ -464,9 +465,14 @@ const size_t apdsCommandsCount = sizeof(apdsCommands) / sizeof(apdsCommands[0]);
 //   4. Release mutex and delete task
 // ============================================================================
 
+// Proximity presence latch. Hysteresis (>200 arrive / <100 leave) plus
+// file-scope reset on task start keeps brief dropouts from flapping edges.
+static bool gApdsPresent = false;
+
 void apdsTask(void* parameter) {
-  INFO_APDS_LIFECYCLEF("Task started (handle=%p, stack=%u words)", 
-                (void*)xTaskGetCurrentTaskHandle(), 
+  gApdsPresent = false;
+  INFO_APDS_LIFECYCLEF("Task started (handle=%p, stack=%u words)",
+                (void*)xTaskGetCurrentTaskHandle(),
                 (unsigned)uxTaskGetStackHighWaterMark(nullptr));
   INFO_APDS_LIFECYCLEF("[MODULAR] apdsTask() running from i2csensor_apds9960.cpp");
   unsigned long lastApdsRead = 0;
@@ -547,6 +553,27 @@ void apdsTask(void* parameter) {
               gApdsCache.apdsDataValid = true;
             }
           }
+          // Bus event per detected swipe. The driver returns nonzero only on
+          // the poll where a gesture completed, so post-on-read is edge-safe.
+          if (gApdsGestureEnabled && gesture != 0) {
+            const char* dir = (gesture == APDS9960_UP)      ? "UP"
+                              : (gesture == APDS9960_DOWN)  ? "DOWN"
+                              : (gesture == APDS9960_LEFT)  ? "LEFT"
+                              : (gesture == APDS9960_RIGHT) ? "RIGHT"
+                                                            : "?";
+            systemEventPost(SYSEVT_GESTURE, dir);
+          }
+          // Proximity presence with hysteresis: arrive above 200, leave below
+          // 100 (of 255). Edge-latched so we post once per crossing.
+          if (gApdsProximityEnabled) {
+            if (!gApdsPresent && proximity > 200) {
+              gApdsPresent = true;
+              systemEventPost(SYSEVT_PRESENCE_DETECTED, "proximity");
+            } else if (gApdsPresent && proximity < 100) {
+              gApdsPresent = false;
+              systemEventPost(SYSEVT_PRESENCE_CLEARED, "proximity");
+            }
+          }
         } else {
           // Note: I2CDevice::recordError() called automatically by transaction
           // Check centralized health tracking for auto-disable decision
@@ -559,6 +586,8 @@ void apdsTask(void* parameter) {
             sensorStatusBumpWith("apds@auto_disabled");
             DEBUG_APDS_LIFECYCLEF("APDS auto-disabled after %u consecutive I2C failures", errors);
             logSystemEvent("SENSOR", "APDS auto-disabled after %u consecutive I2C failures", errors);
+            { char det[24]; snprintf(det, sizeof(det), "%u I2C errors", errors);
+              systemEventPost(SYSEVT_SENSOR_FAULT, "APDS", det); }
             break;
           }
         }

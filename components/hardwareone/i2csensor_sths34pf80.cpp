@@ -1,4 +1,5 @@
 #include "System_BuildConfig.h"
+#include "System_Events.h"  // systemEventPost — event register producer
 
 #if ENABLE_PRESENCE_SENSOR
 
@@ -368,6 +369,13 @@ bool presenceInit() {
   });
 }
 
+// Event-latch state for presence/motion detected/cleared. File-scope so a
+// sensor restart resets it — function-local statics survived auto-disable and
+// replayed a stale "cleared" edge with a fresh timestamp at the next start.
+static bool sPresenceEvtPresent = false;
+static uint8_t sPresenceEvtClearPolls = 0;
+static bool gMotionActive = false;
+
 bool presencePoll() {
   if (!gPresenceConnected) return false;
   
@@ -431,7 +439,36 @@ bool presencePoll() {
       gPresenceCache.dataValid = true;
     }
   }
-  
+
+  // Bus events: rising edge posts immediately (HW level-flag holds while
+  // someone is present, so this fires once per arrival). Falling edge is
+  // held down for 10 consecutive clear polls (~1-2s) so brief dropouts at
+  // the detection margin don't flap cleared/detected pairs into the ring.
+  {
+    if (presence) {
+      sPresenceEvtClearPolls = 0;
+      if (!sPresenceEvtPresent) {
+        sPresenceEvtPresent = true;
+        char sv[12];
+        snprintf(sv, sizeof(sv), "%d", (int)presenceVal);
+        systemEventPost(SYSEVT_PRESENCE_DETECTED, sv);
+      }
+    } else if (sPresenceEvtPresent) {
+      if (++sPresenceEvtClearPolls >= 10) {
+        sPresenceEvtPresent = false;
+        sPresenceEvtClearPolls = 0;
+        systemEventPost(SYSEVT_PRESENCE_CLEARED);
+      }
+    }
+  }
+
+  // Motion algorithm flag (FUNC_STATUS bit 1) is distinct from presence.
+  // Edge-latch it so we post once per rise/fall, not every poll.
+  if (motion != gMotionActive) {
+    gMotionActive = motion;
+    systemEventPost(SYSEVT_MOTION_DETECTED, motion ? "detected" : "cleared");
+  }
+
   return true;
 }
 
@@ -509,6 +546,9 @@ int presenceBuildDataJSON(char* buf, size_t bufSize) {
 // ============================================================================
 
 void presenceTask(void* parameter) {
+  sPresenceEvtPresent = false;
+  sPresenceEvtClearPolls = 0;
+  gMotionActive = false;
   INFO_PRESENCE_LIFECYCLEF("Task started (handle=%p, stack=%u words)", 
                 (void*)xTaskGetCurrentTaskHandle(), 
                 (unsigned)uxTaskGetStackHighWaterMark(nullptr));
@@ -565,6 +605,8 @@ void presenceTask(void* parameter) {
             sensorStatusBumpWith("presence@auto_disabled");
             DEBUG_PRESENCE_LIFECYCLEF("Presence auto-disabled after %u consecutive I2C failures", errors);
             logSystemEvent("SENSOR", "Presence auto-disabled after %u consecutive I2C failures", errors);
+            { char det[24]; snprintf(det, sizeof(det), "%u I2C errors", errors);
+              systemEventPost(SYSEVT_SENSOR_FAULT, "Presence", det); }
             break;
           }
         }

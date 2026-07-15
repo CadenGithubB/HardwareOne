@@ -120,7 +120,7 @@ bool g2SubmitHijackCommand(const char* line,
   cmd.ctx.auth         = g2HijackAuthContext();
   cmd.ctx.id           = (uint32_t)millis();
   cmd.ctx.timestampMs  = (uint32_t)millis();
-  cmd.ctx.outputMask   = CMD_OUT_LOG;
+  cmd.ctx.outputMask   = MSG_ROUTE_FILE;
   cmd.ctx.validateOnly = false;
   cmd.ctx.captureOutput = false;
   cmd.ctx.replyHandle  = nullptr;

@@ -4,6 +4,7 @@
  */
 
 #include "System_Camera_Video.h"
+#include "System_Events.h"  // systemEventPost — event register producer
 #include "System_VFS.h"
 #include <strings.h>   // strcasecmp (used by the always-compiled viewer below)
 
@@ -287,6 +288,12 @@ static void finalizeAndClose() {
 
   INFO_CAMERA_VIDEOF("Recording finalized: %s (%u frames, %u bytes)",
                 s_path, (unsigned)s_frameCount, (unsigned)fileSize);
+  {
+    const char* slash = strrchr(s_path, '/');
+    char det[24];
+    snprintf(det, sizeof(det), "%u frames", (unsigned)s_frameCount);
+    systemEventPost(SYSEVT_VIDEO_SAVED, slash ? slash + 1 : s_path, det);
+  }
 }
 
 static void recordingTask(void* /*arg*/) {
@@ -422,6 +429,10 @@ bool startVideoRecording() {
   }
 
   INFO_CAMERA_VIDEOF("Recording started: %s", s_path);
+  {
+    const char* slash = strrchr(s_path, '/');
+    systemEventPost(SYSEVT_VIDEO_RECORD_STARTED, slash ? slash + 1 : s_path);
+  }
   return true;
 }
 

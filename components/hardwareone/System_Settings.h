@@ -28,6 +28,9 @@ struct Settings {
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
       outG2(false),
 #endif
+      notifBanners(true),
+      notifToasts(true),
+      notifQueue(true),
       thermalPollingMs(250),
       tofPollingMs(220),
       tofStabilityThreshold(3),
@@ -98,7 +101,6 @@ struct Settings {
       debugEspNowRouter(false),
       debugEspNowMesh(false),
       debugEspNowTopo(false),
-      debugEspNowEncryption(false),
       debugEspNowMetadata(false),
       debugAutoScheduler(false),
       debugAutoExec(false),
@@ -127,6 +129,7 @@ struct Settings {
       debugCameraSettings(false),
       debugCameraVideo(false),
       debugDisplay(false),
+      debugNotifications(false),
       debugMicrophone(false),
       debugI2C(false),  // I2C bus transactions, mutex, clock changes
       debugI2CBus(false),
@@ -280,6 +283,7 @@ struct Settings {
       sensorLogMask(0),
       sensorLogFormat(0),
       systemLogAutoStart(false),
+      eventLogEnabled(true),
       systemLogPath(""),
       systemLogCategoryTags(true),
       cameraAutoStart(false),  // Camera does NOT auto-start by default
@@ -413,6 +417,12 @@ struct Settings {
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
   bool outG2;
 #endif
+  // Notification presentation (System_Notifications): per-sink master
+  // switches. Per-kind device levels live in /system/notifications.json and
+  // per-user mutes in each user's settings file — see System_Notifications.h.
+  bool notifBanners;   // OLED transient banners
+  bool notifToasts;    // web SSE toasts
+  bool notifQueue;     // notification-center queue view
   // Sensors UI (non-advanced)
   int thermalPollingMs;
   int tofPollingMs;
@@ -493,7 +503,6 @@ struct Settings {
   bool debugEspNowRouter;
   bool debugEspNowMesh;
   bool debugEspNowTopo;
-  bool debugEspNowEncryption;
   bool debugEspNowMetadata;
   bool debugAutoScheduler;
   bool debugAutoExec;
@@ -522,6 +531,7 @@ struct Settings {
   bool debugCameraSettings;   // Runtime resolution/quality/sensor register changes
   bool debugCameraVideo;      // Video recording start/finalize, frame writing
   bool debugDisplay;          // OLED init/probe/boot-animation/mode-transitions
+  bool debugNotifications;    // Notification pipeline diagnostics (ring lag/skips, SSE saturation)
   bool debugMicrophone;
   bool debugI2C;  // I2C bus transactions, mutex, clock changes
   bool debugI2CBus;        // [I2C] bus lifecycle, polling pause/resume, status bumps
@@ -818,6 +828,7 @@ struct Settings {
   int sensorLogFormat;          // Last-used format (0=text, 1=csv, 2=track)
   // System Logging settings
   bool systemLogAutoStart;      // Auto-start system logging after boot
+  bool eventLogEnabled;         // Structured event-ring history → /system/sys_logs/events.log
   String systemLogPath;         // Log file path (empty = auto-generate with timestamp)
   bool systemLogCategoryTags;   // Prefix log lines with [CATEGORY] tags
   bool cameraAutoStart;         // Auto-start ESP32-S3 camera after boot
@@ -989,10 +1000,28 @@ extern Settings gSettings;
 // Settings initialization and defaults
 void settingsDefaults();
 
-// Settings JSON serialization/deserialization
-void buildSettingsJsonDoc(JsonDocument& doc, bool excludePasswords = false);
+// Debug flags persist in their OWN file, split out of settings.json: the 157
+// debug flags were ~half of the shared 5120-byte settings doc and every toggle
+// rewrote the whole (large) settings.json. A compile-time literal (not a
+// const char* like SETTINGS_JSON_FILE) so it can be used in the static
+// debugSettingsModule initializer with no static-init-order dependency.
+#define DEBUG_JSON_FILE "/system/debug.json"
+
+// Settings JSON serialization/deserialization.
+// mainFileOnly=true excludes own-file modules (debug) — used only by the
+// settings.json writer. The web/bond/G2 builders keep the default (all modules)
+// so those in-RAM payloads still carry system.debug after the split.
+void buildSettingsJsonDoc(JsonDocument& doc, bool excludePasswords = false, bool mainFileOnly = false);
 bool readSettingsJson();
 bool writeSettingsJson();
+bool writeDebugJson();   // persist the debug module to DEBUG_JSON_FILE
+bool readDebugJson();    // load the debug module from DEBUG_JSON_FILE
+
+// Fire SYSEVT_SETTING_CHANGED for a field mutated via setSetting(). setSetting() is
+// name-agnostic (it only has the field reference), so this reverse-looks-up the
+// registered SettingEntry by valuePtr for the setting's name + type. A field with no
+// registered entry (internal/runtime state) fires nothing. Defined in System_Settings.cpp.
+void notifySettingChanged(const void* fieldPtr);
 
 // Apply settings to runtime flags
 void applySettings();
@@ -1015,6 +1044,7 @@ inline void setSetting(T& field, const T& value) {
   if (field != value) {
     field = value;
     if (!gDeferWrites) writeSettingsJson();
+    notifySettingChanged(&field);  // fire setting_changed for the registered setting (if any)
   }
 }
 
@@ -1023,6 +1053,7 @@ inline void setSetting(String& field, const String& value) {
   if (field != value) {
     field = value;
     if (!gDeferWrites) writeSettingsJson();
+    notifySettingChanged(&field);
   }
 }
 
@@ -1031,6 +1062,19 @@ inline void setSetting(String& field, const char* value) {
   if (field != value) {
     field = value;
     if (!gDeferWrites) writeSettingsJson();
+    notifySettingChanged(&field);
+  }
+}
+
+// Debug-module fields persist to DEBUG_JSON_FILE, not settings.json. This mirrors
+// setSetting() but routes the auto-write to writeDebugJson(), so a debug toggle
+// only rewrites the small debug file. Used by every debug command in
+// System_Debug.cpp. (writeDebugJson() is declared above.)
+template<typename T>
+inline void setDebugSetting(T& field, const T& value) {
+  if (field != value) {
+    field = value;
+    if (!gDeferWrites) writeDebugJson();
   }
 }
 
@@ -1160,6 +1204,8 @@ struct SettingsModule {
   size_t count;                 // Number of entries
   ConnectionCheckFunc isConnected; // Optional: check if module is available (nullptr = always available)
   const char* description;      // Optional: human-readable description for UI
+  const char* persistFile = nullptr; // Own persistence file (nullptr = /system/settings.json).
+                                     // Set only for modules split into their own file (debug → DEBUG_JSON_FILE).
 };
 
 // Maximum number of settings modules that can be registered
@@ -1174,13 +1220,15 @@ const SettingsModule** getSettingsModules(size_t& count);
 // Apply defaults from all registered modules
 void applyRegisteredDefaults();
 
-// Read settings from JSON using registered modules
-// Returns number of settings successfully read
-size_t readRegisteredSettings(JsonDocument& doc);
-
-// Write settings to JSON using registered modules
-// Returns number of settings written
-size_t writeRegisteredSettings(JsonDocument& doc);
+// Read/write settings via the registered modules.
+// Scope filter for the settings.json/debug.json split:
+//   allFiles=true  → every module (web/bond/G2/schema payloads — the default)
+//   allFiles=false → one persistence target: onlyPersistFile==nullptr selects the
+//                    main settings.json modules (skips debug); otherwise only
+//                    modules whose persistFile matches (debug → DEBUG_JSON_FILE).
+// Returns the number of settings read/written.
+size_t readRegisteredSettings(JsonDocument& doc, const char* onlyPersistFile = nullptr, bool allFiles = true);
+size_t writeRegisteredSettings(JsonDocument& doc, const char* onlyPersistFile = nullptr, bool allFiles = true);
 
 // Register ALL settings modules explicitly (called once early in boot)
 // Ensures all compiled modules are available before applying defaults

@@ -45,7 +45,7 @@ void initMutexes() {
                     (gMapCacheMutex != nullptr) && (i2sMicMutex != nullptr);
   
   if (!allCreated) {
-    if (gOutputFlags & OUTPUT_SERIAL) {
+    if (gOutputFlags & MSG_ROUTE_SERIAL) {
       Serial.println("[MUTEX] CRITICAL: Failed to create one or more mutexes!");
     }
   }

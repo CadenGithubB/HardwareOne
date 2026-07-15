@@ -234,9 +234,12 @@ def cmd_matrix(_args) -> int:
         # real JSON structure rather than one literal key with dots inside.
         path_parts = mod["jsonSection"].split(".") if mod["jsonSection"] else []
         path_str = "".join(f'["{p}"]' for p in path_parts) if path_parts else ""
+        # The debug module was split into its own file (DEBUG_JSON_FILE); every
+        # other module still persists in settings.json.
+        persist_file = "debug.json" if mod["name"] == "debug" else "settings.json"
         lines.append(
             f'## DRAWER: `{mod["name"]}` '
-            f"(persists under `settings.json{path_str}`)"
+            f"(persists under `{persist_file}{path_str}`)"
         )
         lines.append("")
         lines.append("| Folder (group) | File (label) | jsonKey | CLI command | Type |")

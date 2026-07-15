@@ -204,7 +204,7 @@ inline void streamDashboardInner(httpd_req_t* req, const String& username) {
   httpd_resp_send_chunk(req, "<div style='margin:2rem 0'>", HTTPD_RESP_USE_STRLEN);
 
   // Sensor Status Overview
-  httpd_resp_send_chunk(req, "<div style='display:flex;align-items:center;gap:0.75rem'><h3 style='margin:0'>Sensor Status</h3><button onclick='window.Dash.openLayoutEditor(\"sensor-grid\")' style='background:none;border:1px solid var(--border);color:var(--muted);border-radius:4px;padding:2px 8px;font-size:0.75rem;cursor:pointer'>Customize</button></div>", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "<div style='display:flex;align-items:center;gap:0.75rem'><h3 style='margin:0'>Sensor Status</h3><button onclick='window.Dash.openLayoutEditor(\"sensor-grid\")' style='background:none;border:1px solid var(--border);color:var(--muted);border-radius:4px;padding:2px 8px;font-size:0.75rem;cursor:pointer'>Customize</button><button onclick='window.Dash.openNotifEditor()' style='background:none;border:1px solid var(--border);color:var(--muted);border-radius:4px;padding:2px 8px;font-size:0.75rem;cursor:pointer'>Customize notifications</button></div>", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "<div id='sensor-loading' style='text-align:center;padding:2rem;color:#87ceeb'>", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "<div style='font-size:1.1rem;margin-bottom:0.5rem'>Loading sensor status...</div>", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "<div style='font-size:0.9rem;opacity:0.7'>Checking connected sensors</div>", HTTPD_RESP_USE_STRLEN);
@@ -471,6 +471,78 @@ inline void streamDashboardInner(httpd_req_t* req, const String& username) {
     "<button class='btn' onclick='window.Dash.closeLayoutEditor()'>Cancel</button>"
     "<button class='btn' onclick='window.Dash.saveLayout()'>Save</button>"
     "</div></div></div>",
+    HTTPD_RESP_USE_STRLEN);
+
+  // Per-user notification muting (same per-user store as the layout prefs;
+  // reuses the layout modal's .layout-item/.layout-actions styles).
+  httpd_resp_send_chunk(req,
+    "<style>"
+    "#dash-notif-modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:99999;align-items:center;justify-content:center}"
+    "#dash-notif-modal.open{display:flex}"
+    "#dash-notif-inner{background:var(--panel-bg);color:var(--panel-fg);border:1px solid var(--border);border-radius:8px;padding:1.5rem;min-width:320px;max-width:480px;width:90vw;box-shadow:0 8px 32px rgba(0,0,0,0.4)}"
+    "#dash-notif-inner h4{margin:0 0 0.5rem 0;font-size:1.1rem;color:var(--panel-fg)}"
+    "</style>"
+    "<div id='dash-notif-modal'><div id='dash-notif-inner'>"
+    "<h4>My notifications</h4>"
+    "<div style='font-size:0.85rem;color:var(--muted);margin-bottom:0.5rem'>Muted events are hidden from your banners, toasts, and notification center only. Events and automations are unaffected.</div>"
+    "<div id='dash-notif-list' style='max-height:50vh;overflow-y:auto'></div>"
+    "<div class='layout-actions'>"
+    "<button class='btn' onclick='window.Dash.notifMuteAll(false)'>Unmute all</button>"
+    "<button class='btn' onclick='window.Dash.closeNotifEditor()'>Cancel</button>"
+    "<button class='btn' onclick='window.Dash.saveNotifPrefs()'>Save</button>"
+    "</div></div></div>"
+    "<script>"
+    "(function(){"
+    "var _kinds=null,_muted={};"
+    "function renderNotifEditor(){"
+    "var list=document.getElementById('dash-notif-list');"
+    "if(!list||!_kinds)return;"
+    "list.innerHTML='';"
+    "_kinds.forEach(function(k){"
+    "var div=document.createElement('div');div.className='layout-item';"
+    "var sp=document.createElement('span');sp.textContent=k;"
+    "if(_muted[k])sp.className='layout-hidden';"
+    "div.appendChild(sp);"
+    "var b=document.createElement('button');b.className='btn';"
+    "b.textContent=_muted[k]?'Unmute':'Mute';"
+    "b.style.width='auto';b.style.padding='2px 10px';b.style.fontSize='0.8rem';"
+    "b.onclick=function(){_muted[k]=!_muted[k];renderNotifEditor();};"
+    "div.appendChild(b);"
+    "list.appendChild(div);"
+    "});"
+    "}"
+    "window.Dash=window.Dash||{};"
+    "window.Dash.openNotifEditor=function(){"
+    "document.getElementById('dash-notif-modal').classList.add('open');"
+    "document.getElementById('dash-notif-list').textContent='Loading...';"
+    "Promise.all(["
+    "hw.postFormText('/api/cli',{cmd:'events kinds json'}),"
+    "hw.fetchJSON('/api/user/settings')"
+    "]).then(function(res){"
+    "var m=res[0].match(/\\{\"kinds\":\\[[\\s\\S]*?\\]\\}/);"
+    "_kinds=m?JSON.parse(m[0]).kinds:[];"
+    "_muted={};"
+    "var arr=(res[1]&&res[1].settings&&Array.isArray(res[1].settings.notificationMuted))?res[1].settings.notificationMuted:[];"
+    "arr.forEach(function(n){_muted[n]=true;});"
+    "renderNotifEditor();"
+    "}).catch(function(e){document.getElementById('dash-notif-list').textContent='Error: '+e.message;});"
+    "};"
+    "window.Dash.closeNotifEditor=function(){document.getElementById('dash-notif-modal').classList.remove('open');};"
+    "window.Dash.notifMuteAll=function(v){if(!_kinds)return;_kinds.forEach(function(k){_muted[k]=v;});renderNotifEditor();};"
+    "window.Dash.saveNotifPrefs=function(){"
+    /* Save through the notifyusermute COMMAND (not the raw user-settings POST) so
+       every interface shares one validated write path. */
+    "var arr=[];for(var k in _muted){if(_muted[k])arr.push(k);}"
+    "var cmd='notifyusermute '+(arr.length?arr.join(','):'none');"
+    "hw.postFormText('/api/cli',{cmd:cmd})"
+    ".then(function(text){"
+    "if(text&&text.toLowerCase().indexOf('error')!==-1){alert('Save failed: '+text);return;}"
+    "window.Dash.closeNotifEditor();"
+    "})"
+    ".catch(function(e){alert('Save failed: '+(e?e.message:'unknown'));});"
+    "};"
+    "})();"
+    "</script>",
     HTTPD_RESP_USE_STRLEN);
 
   httpd_resp_send_chunk(req, "<script>", HTTPD_RESP_USE_STRLEN);

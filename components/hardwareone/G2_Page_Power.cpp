@@ -25,6 +25,7 @@
 // switch; light/timer-based sleep would defeat the user's intent.
 
 #include "G2_Page_Power.h"
+#include "System_Utils.h"   // rebootDevice()
 
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 
@@ -103,13 +104,11 @@ void g2BuildPowerInfo(char* out, size_t cap) {
 
 static void doRestart() {
   g2ShowText("Restarting...");
-  logSystemEvent("REBOOT", "restart requested from G2 glasses power menu");
-  // Give the BLE notify task time to deliver the CREATE-text and let the
-  // lens paint it before we yank power. 800 ms covers the worst-case
-  // single-fragment swap latency observed on 2.2.0.242.
-  vTaskDelay(pdMS_TO_TICKS(800));
-  DEBUG_G2F("[G2] Power: esp_restart()");
-  esp_restart();
+  // Durable REBOOT audit line + stash reason for the next boot's SYSEVT_REBOOT.
+  // The 800 ms flush also lets the BLE notify task deliver the CREATE-text and the
+  // lens paint it before we restart (worst-case single-fragment swap on 2.2.0.242).
+  DEBUG_G2F("[G2] Power: rebootDevice()");
+  rebootDevice("g2", "restart requested from G2 glasses power menu", 800);
 }
 
 static void doPowerOff() {

@@ -11,6 +11,7 @@
  */
 
 #include "i2csensor_rda5807.h"
+#include "System_Events.h"  // systemEventPost — event register producer
 #include "System_BuildConfig.h"
 #include "System_Utils.h"
 #include "System_TaskUtils.h"
@@ -24,6 +25,9 @@
 #include <Wire.h>
 
 #include "OLED_Display.h"
+#if ENABLE_OLED_DISPLAY
+#include "OLED_UI.h"  // oledNotificationBannerShow — direct volume banner
+#endif
 #include "System_Command.h"
 #include "System_Notifications.h"
 #include "System_Debug.h"
@@ -98,6 +102,11 @@ static void RDS_ServiceNameCallback(const char* name) {
       DEBUG_FMRADIO_VALUESF("[FM_RADIO] Station name changed from '%s' to '%s'", gFmRadioCache.stationName, name);
       strncpy(gFmRadioCache.stationName, name, 8);
       gFmRadioCache.stationName[8] = '\0';
+      // Bus event rides the existing change gate (a few intermediate partial
+      // PS-name assemblies can post right after a retune, then it's quiet).
+      char freq[16];
+      snprintf(freq, sizeof(freq), "%.1f MHz", gFmRadioCache.frequency / 100.0);
+      systemEventPost(SYSEVT_FM_RDS_STATION, gFmRadioCache.stationName, freq);
     }
   }
 }
@@ -571,6 +580,10 @@ const char* cmd_fmradio_tune(const String& argsInput) {
     memset(gFmRadioCache.stationText, 0, sizeof(gFmRadioCache.stationText));
   });
   
+  char mhz[12];
+  snprintf(mhz, sizeof(mhz), "%.1f", freqInt / 100.0);
+  systemEventPost(SYSEVT_FM_TUNED, mhz);
+
   BROADCAST_PRINTF("Tuned to %.1f MHz", freqInt / 100.0);
   return "OK";
 }
@@ -649,7 +662,15 @@ const char* cmd_fmradio_volume(const String& argsInput) {
   
   BROADCAST_PRINTF("Volume set to %d", vol);
   
-  notifyVolumeChanged(vol, 15);
+  // Volume feedback is UI, not a notification (reclassified in the
+  // Phase-1 cutover) — render the banner directly.
+#if ENABLE_OLED_DISPLAY
+  {
+    char vmsg[24];
+    snprintf(vmsg, sizeof(vmsg), "Vol: %d/15", vol);
+    oledNotificationBannerShow(vmsg, PairingRibbonIcon::INFO_ICON, 1500);
+  }
+#endif
   
   return "OK";
 }

@@ -26,6 +26,7 @@
 #include "System_Notifications.h"
 #include "System_SensorRegistry.h"
 #include "System_SensorStubs.h"
+#include "System_Events.h"          // systemEventPost — sensor lifecycle events
 
 #if ENABLE_ESPNOW
 #include "System_ESPNow.h"
@@ -2350,7 +2351,7 @@ void handleDeviceStopped(I2CDeviceType sensor) {
   }
 #endif
 
-  notifySensorStopped(name);
+  systemEventPost(SYSEVT_SENSOR_STOPPED, name);
 
   // Bump sensor status so SSE + bonded peer get notified immediately
   char cause[48];
@@ -2606,6 +2607,14 @@ const char* buildSensorStatusJson() {
 // Sensor Queue Processor Task (moved from HardwareOne.ino)
 // ============================================================================
 
+// Post the sensor lifecycle event + the durable [EVENT][SENSOR] line the old
+// notifySensorStarted wrapper emitted — at boot this is the manifest of what
+// came up vs what was configured-but-failed (Phase-1 cutover).
+static void announceSensorStart(const char* name, bool ok) {
+  systemEventPost(ok ? SYSEVT_SENSOR_STARTED : SYSEVT_SENSOR_START_FAILED, name);
+  logSystemEvent("SENSOR", "%s %s", name, ok ? "online" : "start FAILED");
+}
+
 void sensorQueueProcessorTask(void* param) {
   DEBUG_CLIF("[QUEUE] Queue processor task started");
   static unsigned long lastSensorStartTime = 0;
@@ -2749,17 +2758,17 @@ void sensorQueueProcessorTask(void* param) {
         case I2C_DEVICE_THERMAL:
           thermalStartInternal();
           INFO_I2C_AUTOSTARTF("Thermal: %s", gThermalEnabled ? "SUCCESS" : "FAILED");
-          notifySensorStarted("Thermal", gThermalEnabled);
+          announceSensorStart("Thermal", gThermalEnabled);
           break;
         case I2C_DEVICE_TOF:
           tofStartInternal();
           INFO_I2C_AUTOSTARTF("ToF: %s", gTofEnabled ? "SUCCESS" : "FAILED");
-          notifySensorStarted("ToF", gTofEnabled);
+          announceSensorStart("ToF", gTofEnabled);
           break;
         case I2C_DEVICE_IMU:
           imuStartInternal();
           INFO_I2C_AUTOSTARTF("IMU: %s", gImuEnabled ? "SUCCESS" : "FAILED");
-          notifySensorStarted("IMU", gImuEnabled);
+          announceSensorStart("IMU", gImuEnabled);
           break;
         case I2C_DEVICE_INPUT:
           // I2C_DEVICE_INPUT is the shared input-device slot — under ANO
@@ -2768,10 +2777,10 @@ void sensorQueueProcessorTask(void* param) {
           inputStartInternal();
 #if ENABLE_ANO_ENCODER
           INFO_I2C_AUTOSTARTF("ANO Encoder: %s", gInputEnabled ? "SUCCESS" : "FAILED");
-          notifySensorStarted("ANO Encoder", gInputEnabled);
+          announceSensorStart("ANO Encoder", gInputEnabled);
 #else
           INFO_I2C_AUTOSTARTF("Gamepad: %s", gInputEnabled ? "SUCCESS" : "FAILED");
-          notifySensorStarted("Gamepad", gInputEnabled);
+          announceSensorStart("Gamepad", gInputEnabled);
 #endif
           break;
         case I2C_DEVICE_APDS:
@@ -2781,7 +2790,7 @@ void sensorQueueProcessorTask(void* param) {
           INFO_I2C_AUTOSTARTF("APDS: %s (color=%d prox=%d gest=%d)",
                         apdsOk ? "SUCCESS" : "FAILED",
                         gApdsColorEnabled ? 1 : 0, gApdsProximityEnabled ? 1 : 0, gApdsGestureEnabled ? 1 : 0);
-          notifySensorStarted("APDS", apdsOk); }
+          announceSensorStart("APDS", apdsOk); }
 #else
           INFO_I2C_AUTOSTARTF("APDS: skipped (not compiled)");
 #endif
@@ -2789,13 +2798,13 @@ void sensorQueueProcessorTask(void* param) {
         case I2C_DEVICE_GPS:
           gpsStartInternal();
           INFO_I2C_AUTOSTARTF("GPS: %s", gGpsEnabled ? "SUCCESS" : "FAILED");
-          notifySensorStarted("GPS", gGpsEnabled);
+          announceSensorStart("GPS", gGpsEnabled);
           break;
         case I2C_DEVICE_FMRADIO:
 #if ENABLE_FM_RADIO
           fmRadioStartInternal();
           INFO_I2C_AUTOSTARTF("FM Radio: %s", gFmRadioEnabled ? "SUCCESS" : "FAILED");
-          notifySensorStarted("FM Radio", gFmRadioEnabled);
+          announceSensorStart("FM Radio", gFmRadioEnabled);
 #else
           INFO_I2C_AUTOSTARTF("FM Radio: skipped (not compiled)");
 #endif
@@ -2804,7 +2813,7 @@ void sensorQueueProcessorTask(void* param) {
 #if ENABLE_RTC_SENSOR
           rtcStartInternal();
           INFO_I2C_AUTOSTARTF("RTC: %s", gRtcEnabled ? "SUCCESS" : "FAILED");
-          notifySensorStarted("RTC", gRtcEnabled);
+          announceSensorStart("RTC", gRtcEnabled);
 #else
           INFO_I2C_AUTOSTARTF("RTC: skipped (not compiled)");
 #endif
@@ -2815,7 +2824,7 @@ void sensorQueueProcessorTask(void* param) {
           extern bool gPresenceEnabled;
           presenceStartInternal();
           INFO_I2C_AUTOSTARTF("Presence: %s", gPresenceEnabled ? "SUCCESS" : "FAILED");
-          notifySensorStarted("Presence", gPresenceEnabled);
+          announceSensorStart("Presence", gPresenceEnabled);
 #else
           INFO_I2C_AUTOSTARTF("Presence: skipped (not compiled)");
 #endif
@@ -2944,6 +2953,7 @@ static bool isSensorAvailableForAutoStart(const char* moduleName, I2CDeviceType 
   // it), so a false return here means "enabled in settings but not detected" —
   // durable so a silently-absent sensor is attributable after reboot.
   logSystemEvent("SENSOR", "%s autostart skipped: enabled in settings but not detected on I2C bus", moduleName);
+  systemEventPost(SYSEVT_SENSOR_START_FAILED, moduleName, "not detected on bus");
   return false;
 }
 

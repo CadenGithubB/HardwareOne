@@ -139,7 +139,7 @@ void initAuthIdentityForCurrentTask() { (void)getOrCreateSlot(); }
 // "remote wire formats" — the audit log already does. SOURCE_INTERNAL maps
 // to NOTIF_SOURCE_SYSTEM (system-generated events: boot, scheduler, sensor
 // lifecycle).
-static uint8_t transportToNotifSource(CommandSource t) {
+uint8_t transportToNotifSource(CommandSource t) {
   switch (t) {
     case SOURCE_WEB:            return NOTIF_SOURCE_WEB;
     case SOURCE_SERIAL:         return NOTIF_SOURCE_CLI;

@@ -17,6 +17,7 @@
 // loop. No dedicated task — see the rationale in i2csensor_max17048.h.
 
 #include "System_Battery.h"
+#include "System_Events.h"  // systemEventPost — event register producer
 #include "System_BuildConfig.h"
 #include "System_Command.h"
 #include "System_Utils.h"      // argWantsJson() — opt-in JSON output
@@ -334,16 +335,53 @@ static void classifyAndNotify(BatteryState& state) {
   if (prevStatus != BATTERY_UNKNOWN) {
     const bool nowOnCharger = (state.status == BATTERY_CHARGING);
     if (nowOnCharger && !wasOnCharger) {
-      notifyPowerUSBConnected();
+      systemEventPost(SYSEVT_USB_ON);
     } else if (!nowOnCharger && wasOnCharger) {
-      notifyPowerUSBDisconnected();
+      systemEventPost(SYSEVT_USB_OFF);
     }
     if (state.status == BATTERY_LOW && prevStatus != BATTERY_LOW) {
-      notifyBatteryLow((int)state.percentage);
+      { char pct[8]; snprintf(pct, sizeof(pct), "%d", (int)state.percentage);
+        systemEventPost(SYSEVT_BATTERY_LOW, pct); }
     }
     if ((state.status == BATTERY_CRITICAL || state.status == BATTERY_EMPTY) &&
         prevStatus != BATTERY_CRITICAL && prevStatus != BATTERY_EMPTY) {
-      notifyBatteryCritical((int)state.percentage);
+      { char pct[8]; snprintf(pct, sizeof(pct), "%d", (int)state.percentage);
+        systemEventPost(SYSEVT_BATTERY_CRITICAL, pct); }
+    }
+  }
+
+  // charging_started/stopped bus events: keyed on the isCharging sub-state
+  // (actually charging vs merely USB-powered — VBUS attach/detach already
+  // posts usb_on/usb_off). First-read guarded like the notifies above; the
+  // fuel gauge's CRATE hysteresis upstream damps flapping. Callable from
+  // both loopTask (periodic) and cmd_exec (batterystatus) — the static
+  // latch tolerates either caller seeing the edge first.
+  {
+    static int8_t sPrevCharging = -1;  // -1 = no reading yet
+    const int8_t nowCharging = state.isCharging ? 1 : 0;
+    if (sPrevCharging >= 0 && nowCharging != sPrevCharging) {
+      char pct[8];
+      snprintf(pct, sizeof(pct), "%d", (int)state.percentage);
+      systemEventPost(nowCharging ? SYSEVT_CHARGING_STARTED : SYSEVT_CHARGING_STOPPED, pct);
+    }
+    sPrevCharging = nowCharging;
+  }
+
+  // battery_full edge: post once when the cell tops off on the charger, never
+  // every poll. Keyed on usbPresent (on charger) + percentage, NOT isCharging —
+  // the charger drops isCharging to false the instant the cell reaches float, so
+  // it's a poor "full" gate (see BatteryState::usbPresent). Hysteresis: latch at
+  // >=100%, clear below 95% or once unplugged, so a cell hovering at the top
+  // can't re-fire.
+  {
+    static bool gWasFull = false;
+    if (!gWasFull && state.usbPresent && state.percentage >= 100.0f) {
+      char pct[8];
+      snprintf(pct, sizeof(pct), "%d", (int)state.percentage);
+      systemEventPost(SYSEVT_BATTERY_FULL, pct);
+      gWasFull = true;
+    } else if (gWasFull && (!state.usbPresent || state.percentage < 95.0f)) {
+      gWasFull = false;
     }
   }
 }

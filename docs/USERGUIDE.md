@@ -1,4 +1,4 @@
-# Hardware One v0.98.2 - User Guide
+# Hardware One v0.98.7 - User Guide
 
 This is the full reference for Hardware One. It covers every subsystem, all CLI commands, configuration options, and how the major features work. For initial setup, see the [Quick Start Guide](QUICKSTART.md).
 
@@ -150,6 +150,91 @@ IF <condition> THEN <command>; <command>
 - `TIME=HH:MM` - run at a specific time daily
 - `INTERVAL=Xs` / `Xm` / `Xh` - repeat every N seconds/minutes/hours
 - `BOOT` - run once on startup
+- `EVENT` - run when a system event occurs (see Event triggers below)
+
+### Event triggers
+Automations can fire the moment something happens on the device instead of
+polling on a clock. An event trigger names an event kind (`on=`) and an
+optional `match=` filter; the automation fires within about one main-loop pass
+of the event (milliseconds, not the next interval tick).
+
+```
+automation add name=greet type=event on=peer_online match=BACKDOOR commands="espnowsend BACKDOOR hello" enabled=1
+automation add name=lowbatt type=event on=battery_low commands="ledcolor red" enabled=1
+```
+
+On the web Automations page pick trigger type **On Event**, choose the kind,
+and optionally set a match. Event triggers work as any of the up-to-4 triggers
+on an automation, alongside time/interval/boot triggers, and the optional
+"fire when" condition still gates the run.
+
+`match` is a case-insensitive substring test against the event's subject
+(who/what: peer name, sensor name, username, setting key), its detail
+(MAC address, text preview, filename, value), OR its by-who identity (the
+user/device that caused it). Empty or `*` fires on every event of that kind.
+So `on=setting_changed match=hub` fires only when user `hub` changes a
+setting, regardless of which setting it was.
+
+| Kind | Fires when | subject / detail |
+|---|---|---|
+| `peer_online` / `peer_offline` | mesh peer heartbeat appears / times out (30s) | peer name / MAC |
+| `peer_paired` | pairing-mode auto-pair completes | peer name / MAC |
+| `text_rx` | ESP-NOW text message received | sender / text preview |
+| `file_rx` | ESP-NOW file received | sender / filename |
+| `bond_online` / `bond_offline` | bonded peer session up / heartbeat timeout | peer name / MAC |
+| `bond_reject` | unpaired device probed the bond channel (30s cooldown) | MAC / count |
+| `espnow_on` / `espnow_off` | ESP-NOW radio started / stopped | - |
+| `pair_window_open` / `pair_window_closed` | pairing mode opened / closed | seconds / - |
+| `mesh_promoted` / `mesh_demoted` | backup-master failover / master returned | device name / reason |
+| `remote_cmd_rx` | an authenticated remote command ran on THIS device (mesh or MQTT) | sender / command |
+| `wifi_connected` / `wifi_disconnected` | WiFi got IP / dropped | IP / - |
+| `wifi_connect_failed` | all connect attempts to a network failed | SSID / attempts |
+| `wifi_net_added` / `wifi_net_removed` | saved WiFi network added / removed | SSID |
+| `mqtt_connected` / `mqtt_disconnected` | broker link up / lost (once per transition) | broker / seconds up |
+| `ble_connected` / `ble_disconnected` | companion BLE device connected / dropped | device type / MAC |
+| `g2_connected` / `g2_disconnected` | glasses link up / temple dropped | sides / side |
+| `g2_worn` / `g2_not_worn` | glasses picked up / set down (plugin heartbeat proxy) | side |
+| `time_synced` | clock first became valid (NTP or RTC) | ntp\|rtc / time |
+| `login_ok` / `login_fail` | login on any transport (web, serial, OLED, BLE, MQTT, ESP-NOW) | username / transport |
+| `usb_on` / `usb_off` | USB power plugged / unplugged (30s debounce) | - |
+| `battery_low` / `battery_critical` | battery crossed threshold (30s debounce) | percent |
+| `charging_started` / `charging_stopped` | actually charging vs merely USB-powered | percent |
+| `power_save_enter` / `power_save_exit` | display power-save engaged / woke | idle minutes / - |
+| `sd_mounted` / `sd_unmounted` | SD card mounted / unmounted | free MB / - |
+| `sd_write_failed` | SD went unwritable (once per episode) | hint |
+| `fs_low_space` | flash below the log reserve (once per boot) | free bytes |
+| `setting_changed` | a setting was saved | key / value |
+| `settings_save_failed` | settings.json write failed | stage / file |
+| `sensor_started` / `sensor_stopped` | sensor came up / stopped (includes Camera) | sensor name |
+| `sensor_start_failed` | sensor failed to start | sensor name |
+| `sensor_fault` | sensor auto-disabled after repeated I2C errors | sensor name / errors |
+| `presence_detected` / `presence_cleared` | IR presence trip / cleared (held ~2s) | value |
+| `gesture` | APDS swipe detected | UP\|DOWN\|LEFT\|RIGHT |
+| `imu_shake` / `imu_tap` / `imu_freefall` | device shaken / knocked / dropped | intensity |
+| `imu_orientation` | stable orientation change (3-frame debounce) | new / previous |
+| `gps_fix` / `gps_lost` | fix acquired / lost (lost held 10s) | sats / lat,lon |
+| `button` | gamepad or encoder button PRESS (releases not posted) | button name |
+| `fm_rds_station` | RDS station name identified | name / frequency |
+| `ei_detected` / `ei_lost` | camera-AI object confirmed (3 frames) / gone (2s) | label / confidence |
+| `photo_saved` / `video_saved` / `mic_saved` | media file finished writing | filename |
+| `llm_gen_done` / `llm_model_loaded` | generation finished / model ready | reason\|model / stats |
+| `file_deleted` | a file was deleted | filename / path |
+| `voice_wake` / `voice_command` | wake word / successful voice command | - / command |
+| `user_request` / `user_added` / `user_approved` / `user_deleted` | account lifecycle | username |
+| `password_changed` | password rotated | username / self\|admin-reset |
+
+Run `events` in the CLI to watch the register live (last 48 events, newest
+first, each tagged with who caused it, e.g. `by web:hub`) - handy for finding
+the exact subject text to match on. Events are also the notification
+pipeline: kinds like WiFi, battery, login, and mesh changes render as OLED
+banners, web toasts, and entries in the OLED notification center
+automatically.
+
+Security note: mesh peer names come from peer metadata, which is not
+authenticated - a device in radio range that knows your mesh setup can
+influence names and presence. If that matters for a rule, match on the MAC
+address (the event detail) instead of the name, and prefer `bond_*` events
+(authenticated + encrypted channel) for anything sensitive.
 
 ### Conditions
 An automation can carry an optional "fire when" condition that gates whether it runs, and command lists can branch with `IF <expr> THEN <command> [ELSE <command>]`. Each condition is a single `<variable> <operator> <value>` test.
@@ -208,6 +293,7 @@ automation delete <name>     - Delete automation by name
 automation run <name>        - Run automation immediately
 automation enable <name>     - Enable automation
 automation disable <name>    - Disable automation
+events                       - Show recent system events (for event triggers)
 ```
 
 ---
@@ -342,6 +428,7 @@ cpufreq                         - Get/set CPU frequency
 memsample                       - Memory snapshot with component breakdown
 memreport                       - Comprehensive memory report (Task Manager style)
 taskstats                       - Detailed FreeRTOS task statistics
+events                          - Recent system events (drives automation event triggers)
 pendinglist                     - List pending user account requests
 ```
 </details>
@@ -595,6 +682,7 @@ automation                      - Show automation system status
 automationlist                  - List all automations
 automationadd                   - Add an automation (JSON)
 automationrun id=<id>           - Run automation immediately by ID
+automation add type=event on=<kind> [match=<text>] - Event-triggered automation
 autolog start <file>            - Start automation execution log
 autolog stop                    - Stop automation log
 autolog status                  - Show log status

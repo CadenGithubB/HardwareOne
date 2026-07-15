@@ -218,6 +218,7 @@ set(hardwareone_srcs
         HAL_Audio.cpp
         System_SensorRegistry.cpp
         System_Notifications.cpp
+        System_Events.cpp
         System_AuthIdentity.cpp
         System_BondedPeer.cpp
         System_MeshPeers.cpp

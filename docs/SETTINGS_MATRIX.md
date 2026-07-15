@@ -239,7 +239,7 @@ _hand-edit; re-run after changes to the settings registry._
 |  | Poll interval (ms) | `sensorLogIntervalMs` | `` | INT |
 |  | Sensor bitmask | `sensorLogMask` | `` | INT |
 
-## DRAWER: `debug` (persists under `settings.json["system"]["debug"]`)
+## DRAWER: `debug` (persists under `debug.json["system"]["debug"]`)
 
 | Folder (group) | File (label) | jsonKey | CLI command | Type |
 |---|---|---|---|---|

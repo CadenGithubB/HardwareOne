@@ -5,6 +5,7 @@
  */
 
 #include "System_Microphone.h"
+#include "System_Events.h"  // systemEventPost — event register producer
 #include "System_Filesystem.h"  // requireQuotedPath (uniform quoted-path rule)
 #include <esp_attr.h>
 
@@ -287,6 +288,10 @@ static void recordingTask(void* param) {
     }
     DEBUG_MIC_LIFECYCLEF("[MIC_REC_TASK] WAV file closed");
     INFO_MIC_LIFECYCLEF("Recording saved: %s (%lu samples)", currentRecordingPath, recordingSamples);
+    {
+      const char* slash = strrchr(currentRecordingPath, '/');
+      systemEventPost(SYSEVT_MIC_SAVED, slash ? slash + 1 : currentRecordingPath);
+    }
   } else {
     DEBUG_MIC_LIFECYCLEF("[MIC_REC_TASK] WARNING: recordingFile is invalid!");
   }
@@ -378,6 +383,10 @@ bool startRecording() {
   
   DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] ========== startRecording() SUCCESS ==========");
   INFO_MIC_LIFECYCLEF("Recording started: %s", currentRecordingPath);
+  {
+    const char* slash = strrchr(currentRecordingPath, '/');
+    systemEventPost(SYSEVT_MIC_RECORD_STARTED, slash ? slash + 1 : currentRecordingPath);
+  }
   return true;
 }
 
@@ -515,6 +524,7 @@ bool initMicrophone() {
   gMicEnabled = true;
   micConnected = true;  // capture started; HAL surfaces no-data at read time
   sensorStatusBumpWith("openmic");
+  systemEventPost(SYSEVT_SENSOR_STARTED, "Microphone");
 
   WARN_SYSTEMF("[MIC_INIT] ########## initMicrophone() SUCCESS ##########");
   WARN_SYSTEMF("[MIC_INIT] gMicEnabled=%d, micConnected=%d", gMicEnabled, micConnected);
@@ -559,6 +569,7 @@ void stopMicrophone() {
   gMicEnabled = false;
   micRecording = false;
   sensorStatusBumpWith("closemic");
+  systemEventPost(SYSEVT_SENSOR_STOPPED, "Microphone");
 
   WARN_SYSTEMF("[MIC_STOP] ########## stopMicrophone() COMPLETE ##########");
   WARN_SYSTEMF("[MIC_STOP] Heap after stop: free=%u, PSRAM_free=%u", 

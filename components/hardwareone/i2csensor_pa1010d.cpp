@@ -1,4 +1,5 @@
 #include "i2csensor_pa1010d.h"
+#include "System_Events.h"  // systemEventPost — event register producer
 #include "System_Utils.h"
 
 #if ENABLE_GPS_SENSOR
@@ -385,7 +386,15 @@ static char gpsReadChar() {
   return c;
 }
 
+// Event-latch state for gps_fix/gps_lost. File-scope so a sensor restart
+// resets it instead of replaying a stale "lost" edge ~10s after a
+// no-fix restart (function-local statics survived auto-disable).
+static bool sGpsEvtHasFix = false;
+static uint32_t sGpsNoFixSinceMs = 0;
+
 void gpsTask(void* parameter) {
+  sGpsEvtHasFix = false;
+  sGpsNoFixSinceMs = 0;
   INFO_GPS_LIFECYCLEF("Task started (handle=%p, stack=%u words)",
                 (void*)xTaskGetCurrentTaskHandle(),
                 (unsigned)uxTaskGetStackHighWaterMark(nullptr));
@@ -458,6 +467,7 @@ void gpsTask(void* parameter) {
             gGpsEnabled = false;
             sensorStatusBumpWith("gps@auto_disabled");
             logSystemEvent("SENSOR", "GPS auto-disabled after too many consecutive I2C failures");
+            systemEventPost(SYSEVT_SENSOR_FAULT, "GPS", "consecutive I2C failures");
           }
         }
       }
@@ -505,6 +515,31 @@ void gpsTask(void* parameter) {
         }
 
         // ESP-NOW broadcaster reads gpsBuildDataJSON() on demand from gGpsCache.
+
+        // Bus events: fix-acquired posts on the raw rising edge; fix-lost is
+        // held down for 10 s of continuous no-fix so marginal-signal flapping
+        // doesn't spam lost/fix pairs.
+        {
+          if (gPA1010D->fix) {
+            sGpsNoFixSinceMs = 0;
+            if (!sGpsEvtHasFix) {
+              sGpsEvtHasFix = true;
+              char sats[12], pos[40];
+              snprintf(sats, sizeof(sats), "%d sats", (int)gPA1010D->satellites);
+              snprintf(pos, sizeof(pos), "%.5f,%.5f",
+                       (double)gPA1010D->latitudeDegrees, (double)gPA1010D->longitudeDegrees);
+              systemEventPost(SYSEVT_GPS_FIX, sats, pos);
+            }
+          } else if (sGpsEvtHasFix) {
+            if (sGpsNoFixSinceMs == 0) {
+              sGpsNoFixSinceMs = nowMs ? nowMs : 1;
+            } else if (nowMs - sGpsNoFixSinceMs >= 10000UL) {
+              sGpsEvtHasFix = false;
+              sGpsNoFixSinceMs = 0;
+              systemEventPost(SYSEVT_GPS_LOST);
+            }
+          }
+        }
 
         // Mark OLED dirty if GPS page is active (enables real-time display updates)
 #if ENABLE_OLED_DISPLAY

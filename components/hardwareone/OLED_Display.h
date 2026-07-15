@@ -463,15 +463,6 @@ void displayAPDSData();
 bool oledMenuBack();  // Returns true if handled (was in submenu)
 void resetOLEDMenu();
 
-// Remote submenu functions (for grouped remote menu items)
-void buildRemoteSubmenu(const char* submenuId);
-void exitRemoteSubmenu();
-bool isInRemoteSubmenu();
-OLEDMenuItemEx* getRemoteSubmenuItems();
-int getRemoteSubmenuItemCount();
-int getRemoteSubmenuSelection();
-void setRemoteSubmenuSelection(int sel);
-const char* getRemoteSubmenuId();
 
 // (The sensor menu's filter/sort is now folded into populateMenuScroll() in
 // OLED_Mode_Menu.cpp — it no longer exposes sort/index helpers.)

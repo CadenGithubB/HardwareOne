@@ -15,6 +15,7 @@
 #include "System_AuthIdentity.h"  // currentAuthContext() for cmd_featuresetup transport check
 #include "System_User.h"          // CommandSource enum
 #include "System_SetupWizardMode.h"  // Phase 5: new CLIMode-based wizard for cmd_featuresetup
+#include "System_Events.h"        // systemEventPost() — SYSEVT_FEATURE_TOGGLED
 #include <esp_heap_caps.h>
 
 // External settings
@@ -599,9 +600,15 @@ const char* cmd_features(const String& argsInput) {
   
   bool wasEnabled = *f->enabledSetting;
   *f->enabledSetting = enable;
-  
+
   writeSettingsJson();
-  
+
+  // Runtime enable/disable — post only on an actual state transition (a no-op
+  // re-set to the same value must not post). subject=feature name, detail=on|off.
+  if (enable != wasEnabled) {
+    systemEventPost(SYSEVT_FEATURE_TOGGLED, f->name, enable ? "on" : "off");
+  }
+
   static char result[128];
   uint32_t freeHeapKB = ESP.getFreeHeap() / 1024;
   

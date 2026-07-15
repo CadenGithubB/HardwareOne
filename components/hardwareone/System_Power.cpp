@@ -10,6 +10,7 @@
 #include "System_Settings.h"
 #include "System_Debug.h"
 #include "System_Command.h"
+#include "System_Events.h"  // systemEventPost — event register producer
 
 // Forward declarations
 
@@ -98,6 +99,8 @@ void applyPowerMode(uint8_t mode) {
   
   INFO_SYSTEMF("Power mode applied: %s (CPU: %lu MHz, Display: %d%%)",
                config.name, (unsigned long)config.cpuFreqMhz, config.displayBrightnessPercent);
+
+  systemEventPost(SYSEVT_POWER_MODE_CHANGED, config.name);
 
   // Annotate the battery log with the power-mode change (carries the freq it set).
   {

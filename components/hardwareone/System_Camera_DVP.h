@@ -28,7 +28,10 @@ extern int cameraHeight;
 // per-frame capture-recovery path so a glitchy camera doesn't emit a lifecycle
 // "online" event on every re-init (see captureFrame).
 bool initCamera(bool isRecovery = false);
-void stopCamera();
+// isRecovery mirrors initCamera's flag: the per-frame glitch-recovery cycle
+// (stop + re-init mid-stream) suppresses the sensor_stopped bus event so a
+// flaky stream doesn't spam stop events with no paired start.
+void stopCamera(bool isRecovery = false);
 
 // Stack-heavy power transitions run on a dedicated worker (see System_Camera_DVP.cpp).
 // G2 tap path uses *_Async; CLI / web use *_Sync so callers block until done.

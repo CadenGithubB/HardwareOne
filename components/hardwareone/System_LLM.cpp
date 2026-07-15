@@ -46,6 +46,7 @@
  */
 
 #include "System_BuildConfig.h"
+#include "System_Events.h"  // systemEventPost — event register producer
 #include <esp_attr.h>
 #include <ctype.h>   // isalpha/isalnum — vocab-aware prompt casing
 
@@ -138,7 +139,12 @@ static constexpr int HEALTH_LOG_INTERVAL = 16;   // log generation health every 
 // 3. Module State — LLMRuntime type defined in System_LLM_Internal.h
 // ============================================================================
 
-LLMRuntime gLLM = {};
+// PSRAM-resident: the runtime struct's always-on inline footprint (~2 KB —
+// metadata strings, the 1 KB tokenizer byte_to_token table, path/error buffers)
+// stays off scarce internal DRAM. Hot paths dereference the buffer pointers it
+// holds (which keep their own allocations), not the struct fields, so PSRAM
+// placement is negligible for the memory-bound engine. Mirrors gLLMAsyncCtx.
+EXT_RAM_BSS_ATTR LLMRuntime gLLM = {};
 
 // ============================================================================
 // Async Generation State (background task + PSRAM result buffer)
@@ -817,6 +823,7 @@ bool llmLoadModel(const char* modelPath, int maxCtx) {
   if (!filesystemReady) {
     setLlmError("Filesystem not ready");
     gLLM.runState = LLMState::ERROR;
+    systemEventPost(SYSEVT_LLM_LOAD_FAILED, gLLM.errorMsg, modelPath);
     return false;
   }
 
@@ -844,11 +851,20 @@ bool llmLoadModel(const char* modelPath, int maxCtx) {
   // loadWeights() handles header, tokenizer, and weights (all in one file)
   if (!loadWeights(modelPath)) {
     gLLM.runState = LLMState::ERROR;
+    systemEventPost(SYSEVT_LLM_LOAD_FAILED, gLLM.errorMsg, modelPath);
     return false;
   }
 
   gLLM.runState = LLMState::READY;
   gLLM.lastContextMax = gLLM.seq_ctx;  // expose active ctx window immediately (before first generation)
+  {
+    const char* base = modelPath;
+    const char* slash = strrchr(modelPath, '/');
+    if (slash) base = slash + 1;
+    char det[24];
+    snprintf(det, sizeof(det), "ctx %d", gLLM.seq_ctx);
+    systemEventPost(SYSEVT_LLM_MODEL_LOADED, base, det);
+  }
   DEBUG_LLM_LOADF("[LLM] Model ready. PSRAM used: %uKB (weights=%uKB state=%uKB) ctx=%d/%d",
                   (unsigned)((gLLM.weightsSize + gLLM.weightsQ8Size + gLLM.stateSize) / 1024),
                   (unsigned)((gLLM.weightsSize + gLLM.weightsQ8Size) / 1024),
@@ -865,6 +881,9 @@ bool llmLoadModel(const char* modelPath, int maxCtx) {
 }
 
 void llmUnload() {
+  // Edge: only a real teardown (model present -> no-model) should post. A bare
+  // unload with nothing loaded (pre-load cleanup, double-unload) must stay quiet.
+  const bool hadModel = (gLLM.runState != LLMState::UNLOADED);
   if (gLLM.runState == LLMState::GENERATING) {
     gLLM.stopRequested = true;
     // Wait briefly for generation to stop
@@ -920,6 +939,13 @@ void llmUnload() {
   if (gLLM.domainVocab) llmPsramFree((void**)&gLLM.domainVocab);
   gLLM.domainVocabCount = 0;
   gLLM.domainVocabBytes = 0;
+
+  if (hadModel) {
+    const char* base = gLLM.modelPath;
+    const char* slash = strrchr(gLLM.modelPath, '/');
+    if (slash) base = slash + 1;
+    systemEventPost(SYSEVT_LLM_MODEL_UNLOADED, base, nullptr);
+  }
 }
 
 bool llmIsReady() {
@@ -1613,6 +1639,7 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
         // errorMsg above is RAM-only; record durably. corruptionFatal breaks the
         // generation loop right after, so this fires once per failed generation.
         logSystemEvent("LLM", "state corruption at pos=%d — recovery failed after %d tries; ERROR state until reload", pos, corruptionRetries);
+        systemEventPost(SYSEVT_LLM_STATE_CORRUPT, "run-state corruption", gLLM.errorMsg);
         corruptionFatal = true;
         break;
       }
@@ -2133,6 +2160,15 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
                       generated, elapsed, gLLM.lastTokPerSec, pos, S,
                       gLLM.stopRequested ? "user" : (generated == 0 ? "eos/empty" : "maxlen"),
                       gLLM.lastMeanLogprob, gLLM.lastConfTokens);
+  // Caution for rule authors: an automation that runs an LLM command on
+  // llm_gen_done will chain generations back-to-back (bounded by generation
+  // latency, but still a loop).
+  {
+    char det[32];
+    snprintf(det, sizeof(det), "%d tok, %.1f tok/s", generated, (double)gLLM.lastTokPerSec);
+    systemEventPost(SYSEVT_LLM_GEN_DONE,
+                    gLLM.stopRequested ? "user" : (generated == 0 ? "eos" : "maxlen"), det);
+  }
 
   // Per-section profiler dump (llmprofile). Unconditional print (own toggle);
   // answers "matmul vs attention vs the rest" per forward pass. "matmul" = the

@@ -66,7 +66,7 @@ pre-validation design**:
    integrity, not confidentiality — and auto-pair is scoped to the **default**
    mesh's fingerprint/key.)
 
-Symbols added: `ESPNOW_V4_TYPE_PAIR_BEACON=26`, `V4PayloadPairBeacon`,
+Symbols added: `ESPNOW_V4_TYPE_PAIR_BEACON=36`, `V4PayloadPairBeacon`,
 `gPairModeUntilMs` + `espnowPairMode{Open,Close,Active,RemainingMs}`,
 `cmd_espnow_pairmode` (registered), `sendPairBeacon`, `v4h_pair_beacon`,
 `runDeferredPairModePair`, `pairMode{IsPaired,SanitizeName,RecentlySeen,MarkSeen}`.
@@ -150,9 +150,11 @@ purpose-built broadcast so normal heartbeat behavior is untouched.
 ## 5. Codebase map (anchor on symbols, re-grep for lines)
 
 **Wire / protocol** — `System_ESPNow_Wire.h`
-- `enum EspNowV4Type : uint8_t` (~67). Discovery range is **20–29**; used: 20
-  HEARTBEAT, 21 BOOT, 22 TOPO_REQ, 23 TOPO_START, 24 TOPO_PEER, 25 TIME_SYNC.
-  **26–29 are FREE** → use `ESPNOW_V4_TYPE_PAIR_BEACON = 26`.
+- `enum EspNowV4Type : uint8_t`. At the time of writing the Discovery range was
+  **20–29** (20 HEARTBEAT, 21 BOOT, 22 TOPO_REQ, 23 TOPO_START, 24 TOPO_PEER,
+  25 TIME_SYNC) and **26–29 were FREE** → `ESPNOW_V4_TYPE_PAIR_BEACON = 26` was
+  picked. (The 2026-07 opcode renumber moved Discovery to 30–49; PAIR_BEACON is
+  now **36**.)
 - `struct __attribute__((packed)) V4PayloadHeartbeat` (~187), 32 bytes, has a
   `static_assert(sizeof(...)==32)`. Model the new beacon struct + static_assert
   on this.
@@ -215,7 +217,7 @@ merges them.
 exhaustive switch would otherwise warn or mislabel. Note the SD-capture heartbeat
 skip filter at ~5199 (`espnowCaptureSkipHeartbeats`) — optionally also skip
 PAIR_BEACON there so pairing bursts don't spam capture. (Also note: the comment
-there says "types 7/14" but the enum is 20/90 — **trust the enum, not stale
+there says "types 7/14" but the enum is 30/170 — **trust the enum, not stale
 comments** anywhere in this file.)
 
 **OLED** — `OLED_ESPNow.cpp`
@@ -240,7 +242,7 @@ comments** anywhere in this file.)
 ## 6. Implementation steps
 
 ### 6.1 Wire: beacon type + payload (`System_ESPNow_Wire.h`)
-- Add `ESPNOW_V4_TYPE_PAIR_BEACON = 26` in the Discovery block.
+- Add `ESPNOW_V4_TYPE_PAIR_BEACON = 36` in the Discovery block.
 - Add:
   ```c
   struct __attribute__((packed)) V4PayloadPairBeacon {
@@ -340,7 +342,7 @@ comments** anywhere in this file.)
 - ESP-NOW initialized + FF broadcast peer registered (done at init).
 
 **Downstream effects (this change touches / ripples into):**
-- **New v4 opcode (26):** handler table (add row, flag 0), min-length gate, any
+- **New v4 opcode (36):** handler table (add row, flag 0), min-length gate, any
   exhaustive `switch(type)` and type→string tables, optional SD-capture skip.
   Wire struct + static_assert. Verify no code assumes the discovery range is
   contiguous/max-24.
@@ -434,7 +436,7 @@ Build first: `idf.py build` (must be clean; watch the new `static_assert`s).
 
 ## 10. Deliverable checklist for Fable
 
-- [ ] `ESPNOW_V4_TYPE_PAIR_BEACON = 26` + `V4PayloadPairBeacon` (+static_assert).
+- [ ] `ESPNOW_V4_TYPE_PAIR_BEACON = 36` + `V4PayloadPairBeacon` (+static_assert).
 - [ ] `gPairModeUntilMs` + `espnowPairMode{Open,Close,Active,RemainingMs}` (decls in .h).
 - [ ] `cmd_espnow_pairmode` + command-table registration (encryption-gated).
 - [ ] Beacon TX in `processMeshHeartbeats` (FF broadcast, window-gated, ~1.5 s).

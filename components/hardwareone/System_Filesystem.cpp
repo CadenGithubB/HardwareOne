@@ -19,6 +19,7 @@
 #include "System_ImageManager.h"
 #include "System_Maps.h"
 #include "System_VFS.h"
+#include "System_Events.h"        // systemEventPost — SYSEVT_STORAGE_FORMATTED producer
 #include "System_AuthIdentity.h"  // currentAuthContext — CLI handlers' per-task identity
 #include "System_CLIConfirm.h"    // cliRequestConfirm — yes/no gate for destructive filedelete
 #if ENABLE_BLUETOOTH
@@ -64,6 +65,7 @@ bool initFilesystem() {
       filesystemReady = false;
       return false;
     }
+    systemEventPost(SYSEVT_STORAGE_FORMATTED, "flash", "mount failed — data partition reformatted");
 
     if (!LittleFS.begin(false, "/littlefs", 10, "littlefs")) {
       ESP_LOGE("FS", "LittleFS mount failed after format");
@@ -93,6 +95,7 @@ bool initFilesystem() {
   cleanupLogOrphan(LOG_I2C_FILE);
   cleanupLogOrphan(LOG_ERROR_FILE);
   cleanupLogOrphan(LOG_EVENTS_FILE);
+  cleanupLogOrphan(LOG_EVENT_STREAM_FILE);
 
 #if ENABLE_CAMERA_SENSOR
   // Initialize ImageManager now that filesystem is ready (creates photos folder)
@@ -162,7 +165,7 @@ bool initFilesystem() {
   // Boot-time JSON validation: warn about corrupt critical config files
   {
     AuthContext sys = VFS::systemAuth("fs.init.json_validate");
-    const char* criticalFiles[] = { "/settings.json", "/system/automations.json", "/system/users/users.json" };
+    const char* criticalFiles[] = { "/settings.json", "/system/debug.json", "/system/automations.json", "/system/users/users.json" };
     for (const char* path : criticalFiles) {
       if (!VFS::existsGuarded(path, sys)) continue;
       String content;
@@ -172,6 +175,7 @@ bool initFilesystem() {
           ESP_LOGW("FS", "%s appears corrupt (not valid JSON), removing", path);
           logSystemEvent("FS", "%s failed boot JSON check — DELETED", path);
           VFS::removeGuarded(path, sys);
+          systemEventPost(SYSEVT_CONFIG_FILE_CORRUPT, path, "failed boot JSON check - deleted");
         }
       }
     }
@@ -1254,6 +1258,7 @@ static const PathRule sPathRules[] = {
 
   // ---- Immutable config files: read-only for admin, full for system ----
   {"/system/settings.json",             0,         PERM_READ,                                          PERM_ALL,  true,  false},
+  {"/system/debug.json",                0,         PERM_READ,                                          PERM_ALL,  true,  false},
   {"/system/automations.json",          0,         PERM_READ,                                          PERM_ALL,  true,  false},
   {"/system/espnow/devices.json",       0,         PERM_READ,                                          PERM_ALL,  true,  false},
 

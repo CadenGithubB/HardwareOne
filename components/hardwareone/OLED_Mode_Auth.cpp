@@ -182,7 +182,7 @@ static bool handleLoginModeInput(int deltaX, int deltaY, uint32_t newlyPressed) 
       // Attempt login
       if (usernameBuffer.length() > 0 && passwordBuffer.length() > 0) {
         if (loginTransport(SOURCE_LOCAL_DISPLAY, usernameBuffer, passwordBuffer)) {
-          notifyLoginSuccess(usernameBuffer.c_str(), "display");
+          systemEventPost(SYSEVT_LOGIN_OK, usernameBuffer.c_str(), "display");
           errorMessage = "Login successful!";
           errorDisplayUntil = millis() + 2000;
           oledMarkDirtyUntil(errorDisplayUntil);
@@ -199,7 +199,7 @@ static bool handleLoginModeInput(int deltaX, int deltaY, uint32_t newlyPressed) 
           
           return true;
         } else {
-          notifyLoginFailed(usernameBuffer.c_str(), "display");
+          systemEventPost(SYSEVT_LOGIN_FAIL, usernameBuffer.c_str(), "display");
           errorMessage = "Invalid credentials";
           errorDisplayUntil = millis() + 3000;
           oledMarkDirtyUntil(errorDisplayUntil);

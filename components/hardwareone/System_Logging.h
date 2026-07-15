@@ -48,12 +48,14 @@ extern const char* LOG_FAIL_FILE;    // Failed login attempts
 extern const char* LOG_I2C_FILE;     // I2C device errors
 extern const char* LOG_ERROR_FILE;   // ERROR_* macro lines from debug queue ([ERROR]...)
 extern const char* LOG_EVENTS_FILE;  // System lifecycle events ([EVENT]...) — see logSystemEvent()
+extern const char* LOG_EVENT_STREAM_FILE;  // Structured event-ring history ([EVLOG]...) — see systemEventLogTick()
 
 // Log file caps (bytes)
 constexpr size_t LOG_CAP_BYTES = 696969;  // ~680 KB (for login logs)
 constexpr size_t LOG_I2C_CAP = 64 * 1024;  // 64KB (for I2C errors)
 constexpr size_t LOG_ERROR_CAP = 256 * 1024;  // 256KB ring for application errors
 constexpr size_t LOG_EVENTS_CAP = 256 * 1024;  // 256KB ring for system events
+constexpr size_t LOG_EVENT_STREAM_CAP = 256 * 1024;  // 256KB ring-derived structured event history
 
 // Time sync marker flag
 extern bool gTimeSyncedMarkerWritten;
@@ -64,7 +66,7 @@ void logTimeSyncedMarkerIfReady();
 // Always-on per-boot orientation divider, written to the login/i2c/error logs
 // regardless of NTP. system-events.log is skipped (it gets [EVENT][BOOT]). Call
 // once early in boot; pass the reset-reason string (resetReasonName()).
-void logBootAnchorToLogs(const char* resetReason);
+void logBootAnchorToLogs(const char* resetReason, const char* detail = nullptr);
 
 // I2C-specific logging
 void logI2CError(uint8_t address, const char* deviceName, int consecutiveErrors, int totalErrors, bool nowDegraded);
