@@ -1505,6 +1505,22 @@ function renderMap() {
     // markers a million-fold off-screen, so start/end never showed.
     const tpts = gpsTrack.map(p => toCanvas(p.lat, p.lon));
 
+    // Suppress physically-impossible jumps between consecutive fixes. A stitched
+    // day can place two valid but distant fixes next to each other across a GPS
+    // dropout (parked, signal lost, or a reboot between logging sessions), and
+    // connecting them draws a straight line clear across the map. Anything over
+    // 5 miles between consecutive fixes can't be real at this sample rate, so
+    // that one segment is left undrawn — the rest stays one continuous line.
+    const MAX_SEG_M = 5 * 1609.344;  // 5 miles
+    const segBreak = new Array(gpsTrack.length).fill(false);
+    for (let i = 1; i < gpsTrack.length; i++) {
+      const a = gpsTrack[i - 1], b = gpsTrack[i], R = 6371000, toR = Math.PI / 180;
+      const dLat = (b.lat - a.lat) * toR, dLon = (b.lon - a.lon) * toR;
+      const h = Math.sin(dLat / 2) ** 2 +
+                Math.cos(a.lat * toR) * Math.cos(b.lat * toR) * Math.sin(dLon / 2) ** 2;
+      segBreak[i] = 2 * R * Math.asin(Math.sqrt(h)) > MAX_SEG_M;
+    }
+
     // Clear any dash left over from dashed map features (paths, railways, ferry
     // lines) so the track and all its markers stroke solid, not broken.
     ctx.setLineDash([]);
@@ -1518,7 +1534,10 @@ function renderMap() {
     ctx.shadowBlur = 4;
     ctx.beginPath();
     ctx.moveTo(tpts[0].x, tpts[0].y);
-    for (let i = 1; i < tpts.length; i++) ctx.lineTo(tpts[i].x, tpts[i].y);
+    for (let i = 1; i < tpts.length; i++) {
+      if (segBreak[i]) ctx.moveTo(tpts[i].x, tpts[i].y);  // skip the impossible jump
+      else ctx.lineTo(tpts[i].x, tpts[i].y);
+    }
     ctx.stroke();
     ctx.shadowBlur = 0;
 
@@ -1530,7 +1549,7 @@ function renderMap() {
     for (let i = 1; i < tpts.length; i++) {
       const dx = tpts[i].x - tpts[i - 1].x, dy = tpts[i].y - tpts[i - 1].y;
       const seg = Math.hypot(dx, dy);
-      if (seg === 0) continue;
+      if (seg === 0 || segBreak[i]) continue;  // no arrow across a skipped jump
       distSince += seg;
       if (distSince >= ARROW_SPACING) {
         distSince = 0;

@@ -1214,6 +1214,18 @@ void streamChunk(httpd_req_t* req, const String& str);
 // Stream a C string as a chunk
 void streamChunk(httpd_req_t* req, const char* str);
 
+// Resolve a user's saved theme preference: "light", "dark" or "system".
+// Pages built by streamBeginHtml() get the real preference re-applied by
+// hw.initTheme() after load, but standalone pages that don't ship that script
+// have only this to go on, so they must render the right colours server-side.
+const char* resolveUserThemePref(const String& username);
+
+// Stream text into an HTML context with &, <, > and " escaped (the " makes it
+// safe inside a double-quoted attribute too). Required for any file content
+// emitted inside <pre>: unescaped, a file containing "</pre><script>" runs
+// against the viewing user's session.
+void streamHtmlEscaped(httpd_req_t* req, const char* buf, size_t len);
+
 // Begin HTML page with standard structure (doctype, head, nav, content wrapper)
 void streamBeginHtml(httpd_req_t* req, const char* title, bool isPublic,
                      const String& username, const String& activePage);

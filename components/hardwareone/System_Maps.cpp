@@ -3019,26 +3019,45 @@ void GPSTrackManager::renderTrack(MapRenderer* renderer,
   // track stays visible over every map feature (max-write)
   MapFeatureStyle trackStyle = {LINE_DOTTED, 2, MAP_SHADE_MAX, true};
   
+  // Suppress physically-impossible jumps between consecutive fixes: a stitched
+  // day can place two valid but far-apart fixes next to each other across a GPS
+  // dropout (parked, signal lost, or a reboot between sessions), and drawing
+  // that segment throws a line clear across the map. Anything over 5 miles at
+  // this sample rate can't be real, so that one segment is skipped — the rest
+  // of the track stays connected. Equirectangular metres with cosLat fixed at
+  // the view centre, compared squared, so there is no per-point sqrt/trig.
+  const float kMetersPerDeg   = 111320.0f;
+  const float cosLat          = cosf(centerLat * 0.017453292519943295f);
+  const float kMaxSegMeters   = 5.0f * 1609.344f;  // 5 miles
+  const float kMaxSegMeters2  = kMaxSegMeters * kMaxSegMeters;
+
   // Draw track as connected line segments
   int16_t prevX = -1, prevY = -1;
   bool prevValid = false;
-  
+
   for (int i = 0; i < _pointCount; i++) {
     int32_t latMicro = (int32_t)(_points[i].lat * 1000000);
     int32_t lonMicro = (int32_t)(_points[i].lon * 1000000);
-    
+
     int16_t screenX, screenY;
     MapCore::geoToScreen(latMicro, lonMicro, centerLatMicro, centerLonMicro,
                          scaleX, scaleY, viewWidth, viewHeight, screenX, screenY);
-    
+
     // Check if point is on screen (with margin)
     bool onScreen = (screenX >= -10 && screenX < viewWidth + 10 &&
                      screenY >= -10 && screenY < viewHeight + 10);
-    
-    if (onScreen && prevValid) {
+
+    bool tooLong = false;
+    if (i > 0) {
+      float dLatM = (_points[i].lat - _points[i - 1].lat) * kMetersPerDeg;
+      float dLonM = (_points[i].lon - _points[i - 1].lon) * kMetersPerDeg * cosLat;
+      tooLong = (dLatM * dLatM + dLonM * dLonM) > kMaxSegMeters2;
+    }
+
+    if (onScreen && prevValid && !tooLong) {
       renderer->drawLine(prevX, prevY, screenX, screenY, trackStyle);
     }
-    
+
     prevX = screenX;
     prevY = screenY;
     prevValid = onScreen;

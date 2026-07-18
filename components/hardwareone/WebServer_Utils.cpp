@@ -449,6 +449,63 @@ void streamChunk(httpd_req_t* req, const char* str) {
   httpd_resp_send_chunk(req, str, strlen(str));
 }
 
+const char* resolveUserThemePref(const String& username) {
+  if (!username.length()) return "light";
+  uint32_t uid = 0;
+  if (!getUserIdByUsername(username, uid) || uid == 0) return "light";
+  PSRAM_JSON_DOC(settings);
+  if (!loadUserSettings(uid, settings)) return "light";
+  const char* t = settings["theme"] | "light";
+  if (!t) return "light";
+  if (strcmp(t, "dark") == 0) return "dark";
+  if (strcmp(t, "system") == 0) return "system";
+  return "light";
+}
+
+void streamHtmlEscaped(httpd_req_t* req, const char* buf, size_t len) {
+  if (!req || !buf) return;
+  // Copy whole runs of safe bytes rather than one byte at a time, and hand a
+  // run longer than the staging buffer straight to the socket. Each chunk
+  // costs three httpd_send_all calls (length, body, CRLF) — a TLS record each
+  // over HTTPS — so text with nothing to escape must stay one chunk per call,
+  // as it was before this viewer existed. Escape-dense input (pretty-printed
+  // JSON) still batches through `out` instead of emitting a chunk per entity.
+  // Keep `out` small: it lands on the httpd task stack, which is 11 KB.
+  char out[512];
+  size_t o = 0;
+
+  auto flush = [&]() {
+    if (o) { httpd_resp_send_chunk(req, out, o); o = 0; }
+  };
+  auto put = [&](const char* src, size_t n) {
+    if (n >= sizeof(out)) {  // too big to be worth staging — send it as-is
+      flush();
+      httpd_resp_send_chunk(req, src, n);
+      return;
+    }
+    if (o + n > sizeof(out)) flush();
+    memcpy(out + o, src, n);
+    o += n;
+  };
+
+  size_t run = 0;  // start of the current run of bytes needing no escape
+  for (size_t i = 0; i < len; i++) {
+    const char* rep;
+    switch (buf[i]) {
+      case '&': rep = "&amp;"; break;
+      case '<': rep = "&lt;"; break;
+      case '>': rep = "&gt;"; break;
+      case '"': rep = "&quot;"; break;  // also makes this safe inside an attribute
+      default: continue;                // extend the run
+    }
+    if (i > run) put(buf + run, i - run);
+    put(rep, strlen(rep));
+    run = i + 1;
+  }
+  if (len > run) put(buf + run, len - run);
+  flush();
+}
+
 void streamBeginHtml(httpd_req_t* req,
                      const char* title,
                      bool isPublic,
@@ -457,20 +514,11 @@ void streamBeginHtml(httpd_req_t* req,
   if (!req) return;
   httpd_resp_set_type(req, "text/html");
 
+  // "system" can't be resolved without the client's OS setting, so paint light
+  // and let hw.initTheme() (streamed below) correct it once the page loads.
   const char* initialTheme = "light";
   if (!isPublic && username.length()) {
-    uint32_t uid = 0;
-    if (getUserIdByUsername(username, uid) && uid > 0) {
-      PSRAM_JSON_DOC(settings);
-      if (loadUserSettings(uid, settings)) {
-        const char* t = settings["theme"] | "light";
-        if (t && strcmp(t, "dark") == 0) {
-          initialTheme = "dark";
-        } else {
-          initialTheme = "light";
-        }
-      }
-    }
+    if (strcmp(resolveUserThemePref(username), "dark") == 0) initialTheme = "dark";
   }
 
   // Basic head start

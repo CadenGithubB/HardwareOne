@@ -2035,6 +2035,35 @@ static bool powerSaveInhibited() {
   return micRecording || cameraStreaming;
 }
 
+// Clock switch with an ACTIVE I2C drain. pausePolling() only stops NEW poll
+// cycles — the flag is checked at top-of-loop, so an in-flight transaction
+// (a thermal frame read can hold its bus up to its 1500 ms timeout) runs to
+// completion regardless; a fixed post-pause delay is a guess, not a guarantee.
+// Holding every bus mutex across the switch proves the buses are idle AND
+// blocks any new transaction from starting (including cmd_exec-driven reads,
+// which never consult the pause flag) for the microseconds the switch takes.
+// The 2 s take outlasts the worst legitimate holder; on timeout the bus is
+// already wedged (bus-recovery territory), so switch anyway rather than pin
+// the power state forever.
+static void setCpuFrequencyDrained(uint32_t mhz) {
+  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  if (mgr) mgr->pausePolling();
+  SemaphoreHandle_t held[I2CDeviceManager::NUM_BUSES] = {};
+  if (mgr) {
+    for (uint8_t b = 0; b < I2CDeviceManager::NUM_BUSES; b++) {
+      SemaphoreHandle_t m = mgr->getBusMutex(b);
+      if (m && xSemaphoreTake(m, pdMS_TO_TICKS(2000)) == pdTRUE) held[b] = m;
+    }
+  }
+  setCpuFrequencyMhz(mhz);
+  if (mgr) {
+    for (uint8_t b = 0; b < I2CDeviceManager::NUM_BUSES; b++) {
+      if (held[b]) xSemaphoreGive(held[b]);
+    }
+    mgr->resumePolling();
+  }
+}
+
 static void powerSaveTick() {
   static bool          asleep = false;
   static uint32_t      lastSeq = 0;
@@ -2045,7 +2074,12 @@ static void powerSaveTick() {
   // Wake: restore the CPU clock (only if we lowered it), then bring the panel
   // back. Centralized so every wake path stays in sync.
   auto wake = [&]() {
-    if (savedCpuMhz > 80) { setCpuFrequencyMhz(savedCpuMhz); savedCpuMhz = 0; }
+    if (savedCpuMhz > 80) {
+      // Same hazard as the enter path below: switching the CPU clock while
+      // any I2C task is mid-transaction panics the chip (reset=panic(4)).
+      setCpuFrequencyDrained(savedCpuMhz);
+      savedCpuMhz = 0;
+    }
     gOledEnabled = true;
     oledResumeFromSleep();
     oledMarkDirty();
@@ -2108,7 +2142,14 @@ static void powerSaveTick() {
   // reachable; we only shed dynamic core power. Skip if already at/below 80
   // (e.g. UltraSaver's 40 MHz) so power-save never raises the clock.
   savedCpuMhz = getCpuFrequencyMhz();
-  if (savedCpuMhz > 80) setCpuFrequencyMhz(80);
+  if (savedCpuMhz > 80) {
+    // Guard the clock switch. setCpuFrequencyMhz() swaps the CPU clock and
+    // fires clock-change callbacks; unguarded, doing that while gps_task was
+    // mid-I2C transaction panic-rebooted the device on every idle power-save
+    // entry (reset=panic(4) every ~10 min whenever it was left alone with a
+    // GPS fix — the whole 2026-07-17 crash-loop day).
+    setCpuFrequencyDrained(80);
+  }
   asleep = true;
   batteryLogEvent("powersave:enter");
   {
