@@ -307,12 +307,17 @@ void hijackFsmInit() {
   // Priority 5 sits above idle and below the BLE / page-swap worker
   // tasks so transitions drain promptly without preempting time-
   // sensitive paths.
-  // Stack in WORDS (4 bytes). Historical 3072 was 12 KB. Observed
-  // peak ~4.2 KB. 2560 words = 10 KB leaves ~6 KB headroom and reclaims
-  // 2 KB DRAM. The "3 KB stack" claim in the previous comment was off
-  // by a factor of 4 (stack arg is words not bytes).
+  // Stack is 2560 BYTES (2.5 KB). ESP-IDF's xTaskCreate takes usStackDepth in
+  // BYTES, not words — see System_TaskUtils.h.
+  //
+  // Correcting this comment's own history: it previously claimed the arg was
+  // words and "corrected" an earlier "3 KB stack" note by a factor of 4. That
+  // earlier note was the accurate one — 2560 is 2.5 KB, not 10 KB. The
+  // "observed peak ~4.2 KB" cited here cannot be true against a 2560 B stack;
+  // it came from the reporter while it multiplied HWM by 4 (real peak ~1.05 KB).
+  // Re-measure before resizing.
   const BaseType_t ok = xTaskCreate(fsmWorkerTask, "g2-fsm",
-                                    /*stack words*/ 2560,
+                                    /*stack bytes*/ 2560,
                                     nullptr, 5, &gFsmTaskHandle);
   if (ok != pdPASS) {
     DEBUG_G2F("[FSM] worker task create failed — dispatches will apply inline");

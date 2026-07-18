@@ -86,12 +86,17 @@ constexpr uint32_t ESPNOW_TX_STACK_WORDS = 5120;     // ~20KB — single dispatc
                                                      // the full 8KB the measurement would allow): 5120
                                                      // leaves ~2392 words (~9.6KB, 1.88x) over peak.
                                                      // [ESPNOW_TX] HWM still logs every 10s.
-constexpr uint32_t MIC_RECORD_STACK_WORDS = 4096;    // ~16KB (microphone recording)
-constexpr uint32_t MIC_VIZ_STACK_WORDS = 4096;       // ~16KB (microphone visualizer)
-constexpr uint32_t SR_STACK_WORDS = 8192;             // ~32KB (speech recognition inference)
-constexpr uint32_t SR_SNIP_STACK_WORDS = 4096;        // ~16KB (speech recognition snippet writer)
-constexpr uint32_t EI_CONTINUOUS_STACK_WORDS = 8192;  // ~32KB (EdgeImpulse continuous inference)
-constexpr uint32_t MAP_RENDER_STACK_WORDS = 8192;     // ~32KB (async map rendering)
+constexpr uint32_t MIC_RECORD_STACK_WORDS = 4096;     // 4 KB (was ~16KB) — microphone recording
+constexpr uint32_t MIC_VIZ_STACK_WORDS = 4096;     // 4 KB (was ~16KB) — microphone visualizer
+constexpr uint32_t SR_STACK_WORDS = 8192;     // 8 KB (was ~32KB) — speech recognition inference
+constexpr uint32_t SR_SNIP_STACK_WORDS = 4096;     // 4 KB (was ~16KB) — speech recognition snippet writer
+constexpr uint32_t EI_CONTINUOUS_STACK_WORDS = 8192;     // 8 KB (was ~32KB) — EdgeImpulse continuous inference
+constexpr uint32_t MAP_RENDER_STACK_WORDS = 8192;     // 8 KB (was ~32KB) — async map rendering
+constexpr uint32_t LLM_VIEW_STACK_WORDS   = 6144;     // 6 KB (was annotated ~24KB — 4x wrong). Sized for return-to-Apps onDone:
+                                                     // the return-to-Apps onDone it runs on its own stack: g2ShowAppsMenu
+                                                     // does an FS scan + deep vsnprintf logging (~16-18KB observed; an
+                                                     // undersized 16KB worker overflowed on Back). Kept under the map's
+                                                     // 32KB because this DRAM-fragmented config often has no 32KB block.
 
 // Centralized task priorities
 // LOW  (1) — sensor pollers, debug output, RTC, map render

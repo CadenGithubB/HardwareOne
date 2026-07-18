@@ -1040,9 +1040,13 @@ static bool spawnImgProbeWorker(ImgProbeFn fn) {
   // (observed 2026-04-26: stack overflow on g2_img_probe). 8 KB gives
   // ~3 KB of headroom over the worst-case probe footprint.
   static constexpr uint32_t kStackBytes = 8192;
-  // FreeRTOS task depth is StackType_t *words* (see prvInitialiseNewTask),
-  // same as xTaskCreate — never pass raw byte counts here. SPIRAM static
-  // stack buffer is kStackBytes wide; depth must be kStackBytes/sizeof word.
+  // xTaskCreateStatic's depth is in StackType_t units. On this port
+  // StackType_t is uint8_t, so a "unit" IS a byte and this division is a
+  // no-op — kStackDepth == kStackBytes == the width of the static buffer.
+  // Keeping the divide anyway makes the sizing portable if StackType_t ever
+  // widens. (ESP-IDF's xTaskCreate likewise takes BYTES — see
+  // System_TaskUtils.h; the older "never pass raw byte counts" note here had
+  // the rule backwards, though the arithmetic happened to come out right.)
   const uint32_t kStackWords = kStackBytes / sizeof(StackType_t);
 
   // Prefer normal internal stack first (no SPIRAM stack quirks). When dual

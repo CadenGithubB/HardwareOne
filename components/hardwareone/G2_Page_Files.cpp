@@ -31,6 +31,7 @@
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 
 #include "G2_Glasses.h"
+#include "G2_Page_Common.h"      // G2TextPager + paging ops (shared text viewer)
 #include "G2_HijackCmd.h"        // G2HijackCtxGuard — installs pairedByUser identity
 #include "System_FileManager.h"
 #include "System_Filesystem.h"
@@ -97,28 +98,41 @@ enum FilesChooserKind : uint8_t {
                           //  Full dispatch through g2ShowJpgFile path
                           //  (decode JPEG → 4-bpp BMP, then same wire
                           //   transport as the BMP viewers).
+  FILE_CHOOSER_TEXT = 3,  // .txt / .csv — one raw paged view + Info (no
+                          //  pretty-parse). Shares the JSON viewer's engine
+                          //  (readTextLimited → wrap → G2TextPager). Its
+                          //  chooser is 4 rows, so Info sits at idx 3.
 };
 static FilesChooserKind gFilesChooserKind = FILE_CHOOSER_BMP;
 
-// JSON text viewer state (mirrors Settings JSON flow: paged TEXT widget,
-// tap/scroll to advance, gesture/double-tap to exit back to Files list).
-#define FILES_JSON_MAX_PAGES         24
-#define FILES_JSON_PAGE_BODY_BUDGET  180
-static constexpr size_t kFilesJsonReadCapBytes = 12 * 1024;  // bounded heap use
-static String   gFilesJsonPages[FILES_JSON_MAX_PAGES];
-static size_t   gFilesJsonPageCount   = 0;
-static size_t   gFilesJsonCurrentPage = 0;
-static char     gFilesJsonTitle[FILES_ROW_LEN] = {0};
-static bool     gFilesJsonTruncated = false;
+// Paged text viewer (JSON pretty/raw, .txt, .csv). Shares the G2TextPager
+// engine in G2_Page_Common.h with Settings JSON + ESPNow chat: one flat PSRAM
+// body buffer + offset table, hard-wrapped so long CSV rows / JSON values flow
+// across lens lines instead of being clipped. tap/scroll advance, double-tap
+// exits back to the Files list.
+#define FILES_TEXT_MAX_PAGES     24
+#define FILES_TEXT_PAGE_BUDGET   176   // < 180 proven-safe single-fragment body
+// Displayable ceiling ≈ maxPages × budget. The read cap below is larger so the
+// read is whole-file (line-honest), but only this much is ever wrapped/shown.
+#define FILES_TEXT_BODY_CAP      (FILES_TEXT_MAX_PAGES * FILES_TEXT_PAGE_BUDGET + 128)
+static constexpr size_t kFilesTextReadCapBytes = 12 * 1024;  // bounded heap use
+
+EXT_RAM_BSS_ATTR static char gFilesTextBody[FILES_TEXT_BODY_CAP];        // wrapped body
+static uint16_t              gFilesTextPageOff[FILES_TEXT_MAX_PAGES + 1]; // page offsets
+EXT_RAM_BSS_ATTR static char gFilesTextPageBuf[FILES_TEXT_PAGE_BUDGET + 128]; // render scratch
+static char                  gFilesTextTitle[FILES_ROW_LEN] = {0};
+static G2TextPager gFilesPager = {
+    gFilesTextBody, gFilesTextPageOff, FILES_TEXT_MAX_PAGES,
+    FILES_TEXT_PAGE_BUDGET, /*pageCount=*/0, /*curPage=*/0, /*truncated=*/false };
 
 // -----------------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------------
 
 static void filesOverlayExpired(G2OverlayKind kind);  // forward decl
-static void exitJsonViewBackToFiles();
-static void navJsonPage(G2TapKind kind);
-static bool renderCurrentJsonPage();
+static void exitTextViewBackToFiles();
+static void filesTextNav(G2TapKind kind);
+static bool filesRenderTextPage();
 
 static FileManager* ensureFm() {
   if (!gFilesFm) {
@@ -306,6 +320,33 @@ static bool isJsonFilename(const char* name) {
          (ext[4] == 'n' || ext[4] == 'N');
 }
 
+// ".txt" — routed to the raw paged-text viewer (no pretty-parse).
+static bool isTxtFilename(const char* name) {
+  if (!name) return false;
+  size_t n = strlen(name);
+  if (n < 4) return false;
+  const char* ext = name + n - 4;
+  return (ext[0] == '.') &&
+         (ext[1] == 't' || ext[1] == 'T') &&
+         (ext[2] == 'x' || ext[2] == 'X') &&
+         (ext[3] == 't' || ext[3] == 'T');
+}
+
+// ".csv" — same raw paged-text viewer. On-lens is a quick peek: rows soft-wrap
+// at the lens column width; there is deliberately no aligned-table mode (the
+// firmware collapses runs of spaces and only ~48 chars fit per line). Full
+// tabular analysis lives in the web UI.
+static bool isCsvFilename(const char* name) {
+  if (!name) return false;
+  size_t n = strlen(name);
+  if (n < 4) return false;
+  const char* ext = name + n - 4;
+  return (ext[0] == '.') &&
+         (ext[1] == 'c' || ext[1] == 'C') &&
+         (ext[2] == 's' || ext[2] == 'S') &&
+         (ext[3] == 'v' || ext[3] == 'V');
+}
+
 // Build an absolute VFS path for the cached chooser entry. Joins the
 // FileManager's current directory with the entry name, collapsing the
 // duplicate slash when the dir is "/".
@@ -346,6 +387,16 @@ static void showFileChooser(const FileEntry& e, FilesChooserKind kind) {
     rows[3] = "View Full"; // 2x upscale -> 4-tile full-canvas
     rows[4] = "Info";
     g2ShowListPage(rows, 5);
+  } else if (kind == FILE_CHOOSER_TEXT) {
+    // .txt / .csv — one raw paged view + metadata. No pretty-parse, so this
+    // is a 4-row list with Info at idx 3 (g2FilesHandleTap keys off the
+    // chooser kind to route idx 2/3 correctly).
+    static const char* rows[4];
+    rows[0] = "<- Files";
+    rows[1] = title;
+    rows[2] = "View";
+    rows[3] = "Info";
+    g2ShowListPage(rows, 4);
   } else {
     static const char* rows[5];
     rows[0] = "<- Files";
@@ -357,101 +408,49 @@ static void showFileChooser(const FileEntry& e, FilesChooserKind kind) {
   }
   // No overlay — chooser is a deliberate stop, not a flash.
   g2LensClearOverlay();
-  DEBUG_G2F("[G2] Files: chooser shown for '%s' (%s)", e.name,
-            kind == FILE_CHOOSER_BMP ? "bmp" : "json");
+  const char* kindStr = (kind == FILE_CHOOSER_BMP)  ? "bmp"
+                      : (kind == FILE_CHOOSER_JPG)  ? "jpg"
+                      : (kind == FILE_CHOOSER_TEXT) ? "text"
+                                                    : "json";
+  DEBUG_G2F("[G2] Files: chooser shown for '%s' (%s)", e.name, kindStr);
 }
 
-static size_t splitJsonIntoPages(const String& s) {
-  for (size_t i = 0; i < FILES_JSON_MAX_PAGES; i++) gFilesJsonPages[i] = "";
-  gFilesJsonTruncated = false;
-
-  size_t pageIdx = 0;
-  size_t lineStart = 0;
-  String current;
-  current.reserve(FILES_JSON_PAGE_BODY_BUDGET + 16);
-
-  const size_t total = s.length();
-  while (lineStart < total && pageIdx < FILES_JSON_MAX_PAGES) {
-    int lineEnd = s.indexOf('\n', lineStart);
-    if (lineEnd < 0) lineEnd = total;
-    const size_t lineLen = (size_t)lineEnd - lineStart + 1;  // include '\n'
-
-    if (current.length() > 0 &&
-        current.length() + lineLen > FILES_JSON_PAGE_BODY_BUDGET) {
-      gFilesJsonPages[pageIdx++] = current;
-      current = "";
-      if (pageIdx >= FILES_JSON_MAX_PAGES) break;
-    }
-
-    size_t copyLen = lineLen;
-    if (copyLen > FILES_JSON_PAGE_BODY_BUDGET) copyLen = FILES_JSON_PAGE_BODY_BUDGET;
-    current += s.substring(lineStart, lineStart + copyLen);
-    lineStart += copyLen;
-    if (copyLen < lineLen) continue;
-    lineStart = (size_t)lineEnd + 1;
-  }
-
-  if (current.length() > 0 && pageIdx < FILES_JSON_MAX_PAGES) {
-    gFilesJsonPages[pageIdx++] = current;
-  }
-  if (lineStart < total) gFilesJsonTruncated = true;
-  return pageIdx;
+// Render the pager's current page. The chrome (title buffer, hints, separator)
+// is fixed; only gFilesTextTitle's contents change per file. The single-page
+// hint is "2x-tap=exit" because a single tap is swallowed on the FILES hijack
+// page (its list dispatcher consumes CLICK), so double-tap is the real exit.
+static bool filesRenderTextPage() {
+  static const G2TextPageChrome chrome = {
+      gFilesTextTitle,                 // title (mutated in place before render)
+      "tap/scroll=nav, 2x-tap=exit",   // multi-page hint
+      "2x-tap=exit",                   // single-page hint
+      "--------------------",          // separator rule
+      "(empty file)" };                // empty-slice text
+  return g2TextPagerRender(gFilesPager, gFilesTextPageBuf, sizeof(gFilesTextPageBuf),
+                           chrome, G2_GEOM_LARGE, exitTextViewBackToFiles,
+                           filesTextNav);
 }
 
-static bool renderCurrentJsonPage() {
-  if (gFilesJsonPageCount == 0 || gFilesJsonCurrentPage >= gFilesJsonPageCount) return false;
-
-  String body;
-  body.reserve(gFilesJsonPages[gFilesJsonCurrentPage].length() + 120);
-  body += gFilesJsonTitle;
-  if (gFilesJsonPageCount > 1) {
-    char hdr[64];
-    snprintf(hdr, sizeof(hdr), " [%u/%u] tap/scroll=nav, 2x-tap=exit\n",
-             (unsigned)(gFilesJsonCurrentPage + 1),
-             (unsigned)gFilesJsonPageCount);
-    body += hdr;
-  } else {
-    body += " - tap to back\n";
-  }
-  body += "--------------------\n";
-  body += gFilesJsonPages[gFilesJsonCurrentPage];
-  if (gFilesJsonTruncated && gFilesJsonCurrentPage == gFilesJsonPageCount - 1) {
-    body += "\n...\n[TRUNCATED: cap reached]\n";
-  }
-
-  return g2ShowTextPage(body.c_str(), G2_GEOM_LARGE,
-                        exitJsonViewBackToFiles,
-                        gFilesJsonPageCount > 1 ? navJsonPage : nullptr);
+// tap/scroll page navigation. NEXT (tap / scroll-down) advances; PREV
+// (scroll-up) goes back; both wrap. Re-renders after moving.
+static void filesTextNav(G2TapKind kind) {
+  g2TextNavPage(gFilesPager, kind != G2_TAP_PAGE_PREV);
+  filesRenderTextPage();
 }
 
-static void navJsonPage(G2TapKind kind) {
-  if (gFilesJsonPageCount == 0) return;
-  if (kind == G2_TAP_PAGE_PREV) {
-    gFilesJsonCurrentPage = (gFilesJsonCurrentPage == 0)
-                              ? gFilesJsonPageCount - 1
-                              : gFilesJsonCurrentPage - 1;
-  } else {
-    gFilesJsonCurrentPage = (gFilesJsonCurrentPage + 1) % gFilesJsonPageCount;
-  }
-  renderCurrentJsonPage();
-}
-
-static void clearJsonViewerState() {
-  for (size_t i = 0; i < gFilesJsonPageCount && i < FILES_JSON_MAX_PAGES; i++) {
-    gFilesJsonPages[i] = "";
-  }
-  gFilesJsonPageCount = 0;
-  gFilesJsonCurrentPage = 0;
-  gFilesJsonTitle[0] = '\0';
-  gFilesJsonTruncated = false;
-}
-
-static void exitJsonViewBackToFiles() {
-  clearJsonViewerState();
+static void exitTextViewBackToFiles() {
+  gFilesPager.pageCount = 0;
+  gFilesPager.curPage   = 0;
+  gFilesPager.truncated = false;
+  gFilesTextTitle[0]    = '\0';
   g2ShowFilesMenu();
 }
 
-static bool showJsonFileViaTextWidget(bool pretty) {
+// Read the chooser entry, optionally JSON-pretty-print it, wrap it, and page it
+// onto the lens via the shared G2TextPager. `pretty` only applies to JSON;
+// .txt/.csv always call with pretty=false. Returns false if the swap couldn't
+// be shown (caller falls back to the file list).
+static bool showTextFileViaWidget(bool pretty) {
   // Install the G2-paired user's identity + notification source for this
   // page action. The g2_tap_disp worker that drives this page leaves the
   // task's TLS slots at their defaults (ANON identity, UNKNOWN notif src),
@@ -465,17 +464,17 @@ static bool showJsonFileViaTextWidget(bool pretty) {
   if (!path[0]) return false;
 
   if (!canRead(String(path), currentAuthContext())) {
-    DEBUG_G2F("[G2] Files JSON: blocked by canRead '%s'", path);
-    return g2ShowTextPage("JSON viewer blocked: read permission denied.", G2_GEOM_LARGE,
-                          exitJsonViewBackToFiles, nullptr);
+    DEBUG_G2F("[G2] Files text: blocked by canRead '%s'", path);
+    return g2ShowTextPage("Viewer blocked: read permission denied.", G2_GEOM_LARGE,
+                          exitTextViewBackToFiles, nullptr);
   }
 
   String raw;
-  if (!readTextLimited(path, raw, kFilesJsonReadCapBytes)) {
-    DEBUG_G2F("[G2] Files JSON: read failed '%s'", path);
+  if (!readTextLimited(path, raw, kFilesTextReadCapBytes)) {
+    DEBUG_G2F("[G2] Files text: read failed '%s'", path);
     return false;
   }
-  const bool hitReadCap = raw.length() >= kFilesJsonReadCapBytes;
+  const bool hitReadCap = raw.length() >= kFilesTextReadCapBytes;
 
   String display;
   if (pretty) {
@@ -486,7 +485,7 @@ static bool showJsonFileViaTextWidget(bool pretty) {
       display += err.c_str();
       display += "\n// Falling back to raw JSON text\n\n";
       display += raw;
-      DEBUG_G2F("[G2] Files JSON: pretty parse failed '%s' (%s)",
+      DEBUG_G2F("[G2] Files text: pretty parse failed '%s' (%s)",
                 path, err.c_str());
     } else {
       serializeJsonPretty(doc, display);
@@ -495,28 +494,34 @@ static bool showJsonFileViaTextWidget(bool pretty) {
     display = raw;
   }
 
-  clearJsonViewerState();
+  // Wrap into the shared body buffer: strips '\r' + control bytes, soft-wraps
+  // long lines at the lens column width (so wide CSV rows stay legible), and
+  // flags truncation when the source outgrows the displayable body.
+  bool wrapTrunc = false;
+  size_t bodyLen = g2TextWrapInto(gFilesTextBody, sizeof(gFilesTextBody),
+                                  display.c_str(), G2_TEXT_DEFAULT_COLS,
+                                  /*contIndent=*/0, /*stripCtrl=*/true,
+                                  &wrapTrunc);
+  gFilesPager.curPage   = 0;
+  gFilesPager.truncated = (hitReadCap || wrapTrunc);
+  g2TextSplitPages(gFilesPager, bodyLen);
+  if (gFilesPager.pageCount == 0) {
+    // Empty (or all-control-byte) file — show a single "(empty file)" page.
+    gFilesPager.pageCount = 1;
+    gFilesTextPageOff[0]  = 0;
+    gFilesTextPageOff[1]  = 0;
+  }
+
   const char* base = strrchr(path, '/');
   base = base ? (base + 1) : path;
-  snprintf(gFilesJsonTitle, sizeof(gFilesJsonTitle), "%s%s",
-           pretty ? "Pretty " : "JSON ",
-           base);
+  snprintf(gFilesTextTitle, sizeof(gFilesTextTitle), "%s%s",
+           pretty ? "Pretty " : "", base);
 
-  gFilesJsonPageCount = splitJsonIntoPages(display);
-  if (gFilesJsonPageCount == 0) return false;
-  gFilesJsonCurrentPage = 0;
-  if (hitReadCap) gFilesJsonTruncated = true;
-
-  DEBUG_G2F("[G2] Files JSON: %s '%s' src=%uB cap=%uB pages=%u truncated=%d "
-            "(hard cap ~%u chars/page x %u pages)",
-            pretty ? "pretty" : "raw",
-            path, (unsigned)display.length(),
-            (unsigned)kFilesJsonReadCapBytes,
-            (unsigned)gFilesJsonPageCount,
-            gFilesJsonTruncated ? 1 : 0,
-            (unsigned)FILES_JSON_PAGE_BODY_BUDGET,
-            (unsigned)FILES_JSON_MAX_PAGES);
-  return renderCurrentJsonPage();
+  DEBUG_G2F("[G2] Files text: %s '%s' src=%uB body=%uB cap=%uB pages=%u trunc=%d",
+            pretty ? "pretty" : "raw", path, (unsigned)display.length(),
+            (unsigned)bodyLen, (unsigned)kFilesTextReadCapBytes,
+            (unsigned)gFilesPager.pageCount, gFilesPager.truncated ? 1 : 0);
+  return filesRenderTextPage();
 }
 
 static void showFileInfo(const FileEntry& e) {
@@ -679,10 +684,17 @@ void g2FilesHandleTap(uint32_t idx) {
           DEBUG_G2F("[G2] Files: View dispatch failed — falling back to list");
           g2ShowFilesMenu();
         }
+      } else if (gFilesChooserKind == FILE_CHOOSER_TEXT) {
+        // .txt / .csv — single raw paged view.
+        gFilesChooserActive = false;
+        DEBUG_G2F("[G2] Files: chooser text View -> '%s'", cached.name);
+        if (!showTextFileViaWidget(/*pretty=*/false)) {
+          g2ShowFilesMenu();
+        }
       } else {
         gFilesChooserActive = false;
         DEBUG_G2F("[G2] Files: chooser Pretty View -> '%s'", cached.name);
-        if (!showJsonFileViaTextWidget(/*pretty=*/true)) {
+        if (!showTextFileViaWidget(/*pretty=*/true)) {
           g2ShowFilesMenu();
         }
       }
@@ -705,10 +717,15 @@ void g2FilesHandleTap(uint32_t idx) {
           DEBUG_G2F("[G2] Files: View Full dispatch failed — falling back to list");
           g2ShowFilesMenu();
         }
+      } else if (gFilesChooserKind == FILE_CHOOSER_TEXT) {
+        // Text chooser row 3 is Info (metadata), not a second view mode.
+        gFilesChooserActive = false;
+        DEBUG_G2F("[G2] Files: chooser text Info -> '%s'", cached.name);
+        showFileInfo(cached);
       } else {
         gFilesChooserActive = false;
         DEBUG_G2F("[G2] Files: chooser JSON View -> '%s'", cached.name);
-        if (!showJsonFileViaTextWidget(/*pretty=*/false)) {
+        if (!showTextFileViaWidget(/*pretty=*/false)) {
           g2ShowFilesMenu();
         }
       }
@@ -794,6 +811,8 @@ void g2FilesHandleTap(uint32_t idx) {
       showFileChooser(e, FILE_CHOOSER_JPG);
     } else if (isJsonFilename(e.name)) {
       showFileChooser(e, FILE_CHOOSER_JSON);
+    } else if (isTxtFilename(e.name) || isCsvFilename(e.name)) {
+      showFileChooser(e, FILE_CHOOSER_TEXT);
     } else {
       showFileInfo(e);
     }

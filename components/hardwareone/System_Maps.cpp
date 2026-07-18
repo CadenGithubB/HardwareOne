@@ -66,6 +66,48 @@ unsigned long gMapLastMomentumUpdate = 0;
 float gMapZoom = 1.0f;
 
 // =============================================================================
+// Discrete map panning (shared)
+// =============================================================================
+// Nudges the map center one step in a screen-space direction. Used by surfaces
+// that pan via discrete taps rather than an analog stick (the G2 lens map page's
+// Pan N/S/E/W rows). The math mirrors the OLED joystick pan (OLED_Mode_Map.cpp):
+// one isotropic degree step scaled by 1/zoom, run through the rotation matrix,
+// then clamped to the map bounds with half a viewport of overscroll. OLED keeps
+// its own momentum path; this is the reusable "move by one step" core.
+void mapPanStep(float dx, float dy, float frac) {
+  const LoadedMap& m = MapCore::getCurrentMap();
+  if (!m.valid) return;
+
+  const float minLat = m.header.minLat / 1000000.0f;
+  const float maxLat = m.header.maxLat / 1000000.0f;
+  const float minLon = m.header.minLon / 1000000.0f;
+  const float maxLon = m.header.maxLon / 1000000.0f;
+  const float spanLat = maxLat - minLat;
+  const float spanLon = maxLon - minLon;
+
+  // Isotropic degree step ~ `frac` of the viewport (viewport span ~ map span /
+  // zoom), matching the OLED pan which uses a single accel scalar for both axes.
+  const float step = frac * 0.5f * (spanLat + spanLon) / gMapZoom;
+
+  // Rotation-aware screen->geo mapping. lat subtracts so the direction stays
+  // correct at any gMapRotation (identical sign convention to OLED_Mode_Map).
+  const float rad  = -gMapRotation * (float)M_PI / 180.0f;
+  const float cosR = cosf(rad);
+  const float sinR = sinf(rad);
+  gMapCenterLon += (dx * cosR - dy * sinR) * step;
+  gMapCenterLat -= (dx * sinR + dy * cosR) * step;
+
+  // Clamp to map bounds, allowing panning up to half a viewport past the edge.
+  const float marginLat = spanLat * 0.5f / gMapZoom;
+  const float marginLon = spanLon * 0.5f / gMapZoom;
+  gMapCenterLat = fmaxf(minLat - marginLat, fminf(maxLat + marginLat, gMapCenterLat));
+  gMapCenterLon = fmaxf(minLon - marginLon, fminf(maxLon + marginLon, gMapCenterLon));
+
+  gMapCenterSet      = true;
+  gMapManuallyPanned = true;
+}
+
+// =============================================================================
 // Map Feature Highlighting System
 // =============================================================================
 

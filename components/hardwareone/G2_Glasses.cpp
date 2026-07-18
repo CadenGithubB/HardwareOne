@@ -45,6 +45,7 @@ extern "C" {
 #include "BLE_Events.h"        // CompactJson + blePushEvent
 #include "BLE_Peers.h"         // peer registry + saved-MAC reconnect
 #include "G2_Ring.h"  // g2RingInit (eager registration in initG2Client)
+#include "G2_Page_Common.h"    // G2TextPager + paging ops (g2TextPagerRender)
 #include "G2_Page_Sensors.h"   // g2ShowSensorList() (per-page module)
 #include "G2_Page_Network.h"   // g2ShowNetworkMenu / g2NetworkHandleTap
 #include "G2_Page_Settings.h"  // g2ShowSettingsMenu / g2SettingsHandleTap
@@ -54,10 +55,14 @@ extern "C" {
 #include "G2_Page_TestSuite.h" // g2ShowTestSuiteMenu / g2TestSuiteHandleTap
 #include "G2_Page_TextEntry.h" // generic on-glasses text-entry overlay
 #include "G2_Page_ESPNow.h"    // g2ShowESPNowAppMenu / g2ESPNowAppHandleTap
+#include "G2_Page_Automations.h" // g2ShowAutomationsMenu / g2AutomationsHandleTap
 #include "G2_HijackFsm.h"      // shadow FSM tracking page-swap / hijack lifecycle
 #if ENABLE_MAPS
 #include "System_Maps.h"       // MapCore/OffscreenMapRenderer — g2map renders the offline map to the lens
 #include "System_TaskUtils.h"  // MAP_RENDER_STACK_WORDS — size the g2map worker like the OLED render task
+#if ENABLE_ONDEVICE_LLM
+#include "System_LLMChat.h"    // chat turns + streaming reads for the read-only G2 LLM viewer
+#endif
 #endif
 #include "System_Settings.h"
 #include "System_Clock.h"  // Clock::tzOffsetQuarterHours() — explicit-unit tz accessor (defeats minutes/quarter-hours swap footgun)
@@ -800,6 +805,13 @@ static volatile bool     gCamStreamActive     = false;
 // index) + active gate, mirroring the camera-stream pattern above.
 static volatile uint32_t gMapPagePendingTap = 0;
 static volatile bool     gMapPageActive     = false;
+#endif
+#if ENABLE_ONDEVICE_LLM
+// Read-only LLM viewer (g2LlmPageWorker) — same list-tap-bitfield + active
+// gate pattern as the map/camera self-driving workers. Defined near the top
+// so the BLE dispatcher (lstLlm branch) sees them before use.
+static volatile uint32_t gLlmPagePendingTap = 0;
+static volatile bool     gLlmPageActive     = false;
 #endif
 
 // Settings-page back-row → relaunch-stream coordination. See header
@@ -2394,6 +2406,20 @@ static void handleDevEvent(G2Temple& t, const uint8_t* devBody, size_t devLen) {
         return;
       }
 #endif
+#if ENABLE_ONDEVICE_LLM
+      // LLM viewer list dispatch (container 'lstLlm'). Rows: 0 Back,
+      // 1 Re-run last. Set the row's bit; the worker drains it each loop.
+      // Refresh the 60 s hijack safety-timeout on real taps (same rationale
+      // as the map/'app' paths above).
+      if (etype == 0 && strcmp(cname, "lstLlm") == 0) {
+        if (gLlmPageActive && idx < 32) {
+          if (g2FsmHijackActive()) gHijackStartedMs = millis();
+          gLlmPagePendingTap |= (1u << idx);
+          DEBUG_G2F("[G2] LlmPage tap: idx=%u", (unsigned)idx);
+        }
+        return;
+      }
+#endif
       // Image-probe hold dismissal — single-tap path. When a probe surfaces
       // a List widget (e.g. mixed list+image probes Q16/Q17/Q18), single
       // taps on rows arrive here as ListEvent CLICK(0) instead of the
@@ -3460,31 +3486,31 @@ static void buildG2StatusBattery(char* out, size_t cap) {
 #endif
 }
 
-// Top-right corner ESP-battery widget. Same "NAME: value" shape as the G2
-// ("G2: NN%") and R1 ("R1: --%") corner rows — the "ESP:" label stays; only
-// the VALUE changes. The ESP row's geom (kStatusEspGeom) is widened so the
-// value field fits up to 4 chars, so it is exactly one of:
-//   "USB"  — no battery cell present (running on USB only).
-//   "--%"  — cell present but the read came back implausible (transient).
-//   "NN%"  — battery percentage 0..99. THIS is the focus; shown whenever a
-//            cell is present, charging or not.
-//   "100%" — battery full (now fits — the row was widened for this).
-// The old combined "USB+NN%"/"USB NN%" forms overflowed the corner and got
-// truncated by the lens, which is why the value looked blank/garbled.
+// Top-right corner R1 battery widget. Same "NAME: value" shape as G2/ESP.
+// Reads the ring telemetry cache via g2RingGetTelemetry() — same API the
+// Apps → Ring dashboard uses. "--%" when no sample has been seen yet.
+static void buildR1StatusBattery(char* out, size_t cap) {
+  if (!out || cap == 0) return;
+  G2RingTelemetry t;
+  g2RingGetTelemetry(t);
+  if (t.batteryValid) snprintf(out, cap, "R1: %u%%", (unsigned)t.battery);
+  else                snprintf(out, cap, "R1: --%%");
+}
+
+// Top-right corner ESP-battery widget. Same "NAME: value" shape as G2/R1
+// and the same geom width (kStatusEspGeom matches kStatusBattGeom /
+// kStatusR1Geom). Value is either "---" (no cell / bad read) or "NN%".
 static void buildEspStatusBattery(char* out, size_t cap) {
   if (!out || cap == 0) return;
-  if (gBatteryState.status == BATTERY_NOT_PRESENT) {
-    snprintf(out, cap, "ESP: USB");
-    return;
-  }
-  if (getBatteryVoltage() <= 0.0f) {
-    snprintf(out, cap, "ESP: --%%");
+  if (gBatteryState.status == BATTERY_NOT_PRESENT ||
+      getBatteryVoltage() <= 0.0f) {
+    snprintf(out, cap, "ESP: ---");
     return;
   }
   int pct = (int)(getBatteryPercentage() + 0.5f);
   if (pct < 0)   pct = 0;
   if (pct > 100) pct = 100;
-  snprintf(out, cap, "ESP: %d%%", pct);   // value field fits 4 chars ("100%")
+  snprintf(out, cap, "ESP: %d%%", pct);
 }
 
 // 8-cell circle bar gauge using Unicode geometric/spinner glyphs that
@@ -3555,14 +3581,26 @@ static void buildG2StatusMeter(char* out, size_t cap) {
     const uint32_t psFree  = (uint32_t)ESP.getFreePsram();
     const uint32_t psTotal = (uint32_t)ESP.getPsramSize();
     const uint32_t psUsed  = psTotal > psFree ? (psTotal - psFree) : 0;
-    const unsigned psMb    = (unsigned)(psFree / (1024UL * 1024UL));
     char barP[32];
     renderCircleBar(barP, sizeof(barP),
                     psTotal > 0 ? (float)psUsed / (float)psTotal : 0.0f);
+
+    // Under 1 MB the MB figure integer-divides to a useless "0MB" — exactly when
+    // free PSRAM matters most — so fall back to the heap line's own KB form.
+    // Both variants are 5 columns wide ("%3u" + "MB" / "%4u" + "K"), so the bar
+    // columns stay aligned either way, same as the note below.
+    static constexpr uint32_t kOneMb = 1024UL * 1024UL;
+    char psVal[12];
+    if (psFree < kOneMb) {
+      snprintf(psVal, sizeof(psVal), "%4uK", (unsigned)(psFree / 1024UL));
+    } else {
+      snprintf(psVal, sizeof(psVal), "%3uMB", (unsigned)(psFree / kOneMb));
+    }
+
     // %4u / %3u right-pads the values so the bar columns line up
     // even when free heap drops below 1000 K (3 digits).
-    snprintf(out, cap, "H[%s] %4uK\nP[%s] %3uMB",
-             barH, heapKb, barP, psMb);
+    snprintf(out, cap, "H[%s] %4uK\nP[%s] %s",
+             barH, heapKb, barP, psVal);
   } else {
     snprintf(out, cap, "H[%s] %4uK", barH, heapKb);
   }
@@ -3771,43 +3809,105 @@ static const G2PageModule kEspNowAppPage = {
   /*liveRender=*/    nullptr,
 };
 
+// Automations App page — hidden (reached via the Apps launcher). showMenu /
+// handleTap live in G2_Page_Automations.cpp; the launcher forwards to
+// g2ShowAutomationsMenu(), which flips gHijackPage to _AUTOMATIONS itself.
+static const G2PageModule kAutomationsPage = {
+  "automations", nullptr,   // hidden from the main menu — reached via the Apps submenu
+  "Show the Automations app (list / run / enable / disable) on the lens",
+  g2BuildAutomationsInfo,
+  g2ShowAutomationsMenu,
+  g2AutomationsHandleTap,
+  G2_HIJACK_PAGE_AUTOMATIONS,
+  /*liveIntervalMs=*/ 0,
+  /*backLabel=*/    "<- Apps",
+  /*prefersTextWidget=*/ false,   // own showMenu — flag is irrelevant
+  /*liveRender=*/    nullptr,
+};
+
 // ─────────────────────────────────────────────────────────────────────
 // Apps launcher — a top-level submenu that groups the "app" pages
-// (ESP-NOW App, Files) plus the Maps viewer under one entry, so the main
-// hijack menu stays short. Each row forwards to another page's
-// show*Menu() (which flips gHijackPage itself) or launches the map
-// viewer. Stateless — no sub-mode tracking needed. Files and ESP-NOW App
-// stay registered (with hijackLabel=nullptr) so tap routing to their
-// handleTap still works; they're just no longer top-level rows.
+// (ESP-NOW App, Files, Automations, Ring) plus the Maps viewer and LLM
+// reader under one entry, so the main hijack menu stays short. Each row
+// forwards to another page's show*Menu() (which flips gHijackPage itself)
+// or launches the map/ring viewer. Stateless — no sub-mode tracking
+// needed. The sub-pages stay registered (with hijackLabel=nullptr) so tap
+// routing to their handleTap still works; they're just no longer
+// top-level rows.
 // ─────────────────────────────────────────────────────────────────────
 #if ENABLE_MAPS
 static bool g2ShowMapPage(void (*onDone)());   // interactive list+image Maps page, defined below
 #endif
-
-static void g2BuildAppsInfo(char* out, size_t cap) {
-  if (!out || cap == 0) return;
-#if ENABLE_MAPS
-  snprintf(out, cap, "Apps\nESP-NOW App\nFiles\nMaps");
-#else
-  snprintf(out, cap, "Apps\nESP-NOW App\nFiles");
+#if ENABLE_ONDEVICE_LLM
+static bool g2ShowLlmPage(void (*onDone)());   // read-only streaming LLM viewer, defined below
 #endif
-}
+static bool g2ShowRingPage();                  // read-only live R1 ring dashboard, defined below
 
-static void g2ShowAppsMenu() {
-  const char* items[4];
+// Apps launcher rows. A single builder emits {label, id} pairs under the
+// compile-flag guards so g2ShowAppsMenu (renders labels) and g2AppsHandleTap
+// (dispatches on id) stay in lockstep — the always-present rows (Automations,
+// Ring) then get stable ids regardless of which optional apps (Maps, LLM) are
+// compiled in. g2BuildAppsInfo reuses it too so the CLI text view can't drift.
+enum G2AppRow : uint8_t {
+  APP_ROW_BACK = 0,
+  APP_ROW_ESPNOW,
+  APP_ROW_FILES,
+  APP_ROW_MAPS,
+  APP_ROW_LLM,
+  APP_ROW_AUTOMATIONS,
+  APP_ROW_RING,
+};
+
+// Max rows = Back + ESPNow + Files + Maps + LLM + Automations + Ring.
+#define G2_APPS_MAX_ROWS 7
+
+static size_t g2AppsBuildRows(const char** labels, G2AppRow* ids, size_t cap) {
   size_t n = 0;
-  items[n++] = "<- Main Menu";
-  items[n++] = "ESP-NOW App";
-  items[n++] = "Files";
+  auto add = [&](const char* label, G2AppRow id) {
+    if (n < cap) { labels[n] = label; ids[n] = id; n++; }
+  };
+  add("<- Main Menu", APP_ROW_BACK);
+  // Row label is just "ESP-NOW" — the "App" suffix was redundant next to the
+  // other rows (Files / Maps / LLM / Automations / Ring), which don't carry it.
+  // The page itself is still the "ESP-NOW App" module internally (kEspNowAppPage,
+  // name="espnowapp"), distinct from Network -> ESP-NOW, which owns settings.
+  add("ESP-NOW",      APP_ROW_ESPNOW);
+  add("Files",        APP_ROW_FILES);
 #if ENABLE_MAPS
   // Reflect map availability in the label so tapping "Maps" with no tiles
   // on the device isn't a silent no-op (getAvailableMaps scans /maps for
   // <name>/<name>.hwmap subdirs — the same check the worker does).
   char probe[1][96];
   const bool haveMap = MapCore::hasValidMap() || (MapCore::getAvailableMaps(probe, 1) > 0);
-  items[n++] = haveMap ? "Maps" : "Maps (none)";
+  add(haveMap ? "Maps" : "Maps (none)", APP_ROW_MAPS);
 #endif
-  if (g2ShowListPage(items, n)) {
+#if ENABLE_ONDEVICE_LLM
+  add("LLM", APP_ROW_LLM);
+#endif
+  add("Automations", APP_ROW_AUTOMATIONS);
+  add("Ring",        APP_ROW_RING);
+  return n;
+}
+
+static void g2BuildAppsInfo(char* out, size_t cap) {
+  if (!out || cap == 0) return;
+  const char* labels[G2_APPS_MAX_ROWS];
+  G2AppRow    ids[G2_APPS_MAX_ROWS];
+  const size_t n = g2AppsBuildRows(labels, ids, G2_APPS_MAX_ROWS);
+  size_t off = 0;
+  off += snprintf(out + off, cap - off, "Apps");
+  for (size_t i = 1; i < n && off < cap; i++) {   // skip the Back row
+    off += snprintf(out + off, cap - off, "\n%s", labels[i]);
+  }
+}
+
+// Non-static: Apps sub-pages that live in their own TUs (e.g.
+// G2_Page_Automations.cpp) call this to return to the launcher on Back.
+void g2ShowAppsMenu() {
+  const char* labels[G2_APPS_MAX_ROWS];
+  G2AppRow    ids[G2_APPS_MAX_ROWS];
+  const size_t n = g2AppsBuildRows(labels, ids, G2_APPS_MAX_ROWS);
+  if (g2ShowListPage(labels, n)) {
     g2SetHijackPage(G2_HIJACK_PAGE_APPS);
     DEBUG_G2F("[G2] Apps menu shown (%u items)", (unsigned)n);
   } else {
@@ -3816,25 +3916,39 @@ static void g2ShowAppsMenu() {
 }
 
 static void g2AppsHandleTap(uint32_t idx) {
-  switch (idx) {
-    case 0: {  // <- back to the root hijack menu
+  const char* labels[G2_APPS_MAX_ROWS];
+  G2AppRow    ids[G2_APPS_MAX_ROWS];
+  const size_t n = g2AppsBuildRows(labels, ids, G2_APPS_MAX_ROWS);
+  if (idx >= n) return;
+  switch (ids[idx]) {
+    case APP_ROW_BACK: {  // <- back to the root hijack menu
       g2SetHijackPage(G2_HIJACK_PAGE_MAIN);
       extern void g2RedrawHijackMainMenu();
       g2RedrawHijackMainMenu();
       return;
     }
-    case 1: g2ShowESPNowAppMenu(); return;  // callee sets gHijackPage = ESPNOW_APP
-    case 2: g2ShowFilesMenu();     return;  // callee sets gHijackPage = FILES
+    case APP_ROW_ESPNOW: g2ShowESPNowAppMenu(); return;  // callee sets gHijackPage
+    case APP_ROW_FILES:  g2ShowFilesMenu();     return;  // callee sets gHijackPage
 #if ENABLE_MAPS
-    case 3: g2ShowMapPage(&g2ShowAppsMenu); return;  // interactive map page; returns to Apps on Back
+    case APP_ROW_MAPS:   g2ShowMapPage(&g2ShowAppsMenu); return;   // Back → Apps
 #endif
+#if ENABLE_ONDEVICE_LLM
+    case APP_ROW_LLM:    g2ShowLlmPage(&g2ShowAppsMenu); return;   // Back → Apps
+#endif
+    case APP_ROW_AUTOMATIONS: g2ShowAutomationsMenu(); return;     // Back → Apps (own TU)
+    case APP_ROW_RING:        g2ShowRingPage();        return;     // Back → Apps
     default: return;
   }
 }
 
 static const G2PageModule kAppsPage = {
   "apps", "Apps",
-  "Show the Apps launcher (ESP-NOW App, Files, Maps) on the lens",
+  // Deliberately NOT an app list: the rows are compile-flag dependent (Maps,
+  // LLM) so any hardcoded enumeration here goes stale — which is exactly what
+  // happened to the old "(ESP-NOW App, Files, Maps)" text. g2BuildAppsInfo
+  // derives the real, build-accurate list from g2AppsBuildRows(), and that's
+  // what `g2apps` actually prints.
+  "Show the Apps launcher on the lens",
   g2BuildAppsInfo,
   g2ShowAppsMenu,
   g2AppsHandleTap,
@@ -4139,6 +4253,132 @@ void g2MicDetailHandleTap(uint32_t idx) {
   DEBUG_G2F("[G2] MIC detail: tap idx=%u (info row, no action)", (unsigned)idx);
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Ring dashboard — read-only live readout of the paired R1 ring's vitals
+// (HR / HRV / SpO2 / battery). Reached from the Apps launcher. Same
+// live-text compound shape as the MIC detail page: a one-row "<- Apps"
+// list on the left + a live text child refreshed via UPDATE_TEXT (no
+// REBUILD, so the Back row never blanks). Vitals come from the
+// push-updated cache in G2_Ring.cpp via g2RingGetTelemetry(); a *Valid
+// flag of false renders "--" (see buildRingReadoutText).
+// ─────────────────────────────────────────────────────────────────────
+static constexpr G2ContainerGeom kRingListGeom    = {   8,   8, 340, 270 };
+static constexpr G2ContainerGeom kRingReadoutGeom = { 360,  80, 210, 200 };
+static constexpr uint32_t        kRingReadoutCid  = 2;
+static const char* const         kRingReadoutName = "ringLive";
+static char gRingLastReadout[96] = {0};
+
+// Build the readout text. Four short lines (HR / HRV / SpO2 / Battery), or
+// a hint when the ring isn't paired. *Valid=false → "--" (a real 0 never
+// passes the cache's range gates, so this is unambiguous).
+static void buildRingReadoutText(char* out, size_t cap) {
+  if (!out || cap == 0) return;
+  G2RingTelemetry t;
+  g2RingGetTelemetry(t);
+  if (!t.connected) {
+    snprintf(out, cap, "Ring offline\nPair via\nNetwork>BT>R1");
+    return;
+  }
+  char hr[12], hrv[12], spo2[12], bat[12];
+  if (t.hrValid)      snprintf(hr,  sizeof(hr),  "%u bpm", (unsigned)t.hr);      else strcpy(hr,  "--");
+  if (t.hrvValid)     snprintf(hrv, sizeof(hrv), "%d ms",  (int)t.hrv);          else strcpy(hrv, "--");
+  if (t.spo2Valid)    snprintf(spo2,sizeof(spo2),"%u%%",   (unsigned)t.spo2);    else strcpy(spo2,"--");
+  if (t.batteryValid) snprintf(bat, sizeof(bat), "%u%%",   (unsigned)t.battery); else strcpy(bat, "--");
+  snprintf(out, cap, "HR   %s\nHRV  %s\nSpO2 %s\nBat  %s", hr, hrv, spo2, bat);
+}
+
+// Live render fn driven by liveTextWorker. First call: CREATE the compound
+// (1 list row + 1 text child). Subsequent ticks: UPDATE_TEXT on the readout
+// child only, gated by a byte-identical cache. Mirrors renderMicDetailLive.
+static bool renderRingLive() {
+  G2Temple* arm = (gR.connected && !gR.pluginDead) ? &gR
+                : (gL.connected && !gL.pluginDead) ? &gL
+                                                   : nullptr;
+  if (!arm) {
+    DEBUG_G2F("[G2] ring: no eligible temple");
+    return false;
+  }
+
+  char readout[96];
+  buildRingReadoutText(readout, sizeof(readout));
+
+  if (!g2LensGetState().containerReady) {
+    const char* listItems[1] = { "<- Apps" };
+    G2TextChildSpec textChild = {};
+    textChild.containerName = kRingReadoutName;
+    textChild.containerId   = kRingReadoutCid;
+    textChild.content       = readout;
+    textChild.geom          = kRingReadoutGeom;
+    textChild.eventCapture  = false;
+    bool ok = sendCreateMixedListMultiTextAndWait(
+        *arm, listItems, 1, kRingListGeom, &textChild, 1, BLOCKS_WIDGET_ID);
+    if (!ok) {
+      DEBUG_G2F("[G2] ring: CREATE-list+text failed");
+      return false;
+    }
+    g2NoteCreateSuccess(*arm, /*isList*/ false, BLOCKS_WIDGET_ID);
+    strncpy(gRingLastReadout, readout, sizeof(gRingLastReadout) - 1);
+    gRingLastReadout[sizeof(gRingLastReadout) - 1] = '\0';
+    return true;
+  }
+
+  if (strcmp(readout, gRingLastReadout) == 0) {
+    return true;  // quiet tick, no wire I/O
+  }
+  bool ok = sendUpdateTextNamed(*arm, kRingReadoutName, kRingReadoutCid, readout);
+  if (ok) {
+    strncpy(gRingLastReadout, readout, sizeof(gRingLastReadout) - 1);
+    gRingLastReadout[sizeof(gRingLastReadout) - 1] = '\0';
+  }
+  return ok;
+}
+
+static void g2RingHandleTap(uint32_t idx);
+
+// Stub buildText for the registry's required-field check (hidden live pages
+// have no CLI text view; the live data path is on the lens).
+static void g2BuildRingInfo(char* out, size_t cap) {
+  if (!out || cap == 0) return;
+  snprintf(out, cap, "Ring dashboard (live vitals on lens; CLI view not implemented)");
+}
+
+static const G2PageModule kRingPage = {
+  // Hidden — hijackLabel=nullptr keeps it out of the main menu; the only
+  // entry is g2ShowRingPage() from the Apps launcher.
+  "ringdash", nullptr,
+  "R1 ring dashboard (live vitals on lens; CLI view not implemented)",
+  /*buildText=*/  g2BuildRingInfo,
+  /*showMenu=*/   nullptr,
+  /*handleTap=*/  g2RingHandleTap,
+  G2_HIJACK_PAGE_RING,
+  // Vitals update minute-scale (the ring emits point samples every few
+  // minutes); a 2 s tick is plenty and keeps the diff-cache short-circuiting.
+  /*liveIntervalMs=*/ 2000,
+  /*backLabel=*/      "<- Apps",
+  /*prefersTextWidget=*/ true,    // routes through g2StartLiveTextPage
+  /*liveRender=*/     renderRingLive,
+};
+
+static bool g2ShowRingPage() {
+  if (!g2StartLiveTextPage(/*buildText=*/ nullptr,
+                           kRingPage.liveIntervalMs,
+                           kRingPage.liveRender)) {
+    DEBUG_G2F("[G2] ring: live-text spawn failed");
+    return false;
+  }
+  g2SetHijackPage(G2_HIJACK_PAGE_RING);
+  gRingLastReadout[0] = '\0';   // fresh readout on entry, don't suppress first tick
+  BROADCAST_PRINTF("[G2] Hijack: Ring dashboard opened (live vitals)");
+  return true;
+}
+
+static void g2RingHandleTap(uint32_t idx) {
+  if (idx == 0) {   // <- Apps
+    g2ShowAppsMenu();
+    return;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Generic sensor-detail LIVE compound (all non-camera sensors)
 // ---------------------------------------------------------------------------
@@ -4234,7 +4474,7 @@ static void registerG2Pages(void) {
   g2RegisterPage(kStatusPage);
   g2RegisterPage(kSensorsPage);
   g2RegisterPage(kNetworkPage);
-  g2RegisterPage(kAppsPage);       // Apps launcher (ESP-NOW App, Files, Maps)
+  g2RegisterPage(kAppsPage);       // Apps launcher — rows come from g2AppsBuildRows()
   g2RegisterPage(kSettingsPage);
   g2RegisterPage(kPowerPage);
   g2RegisterPage(kTestSuitePage);
@@ -4245,6 +4485,8 @@ static void registerG2Pages(void) {
   // hijackPage, not on menu visibility).
   g2RegisterPage(kFilesPage);
   g2RegisterPage(kEspNowAppPage);
+  g2RegisterPage(kAutomationsPage);      // hidden — reached via the Apps launcher
+  g2RegisterPage(kRingPage);             // hidden — reached via the Apps launcher
 #if ENABLE_CAMERA_SENSOR
   g2RegisterPage(kCameraSettingsPage);   // hidden — see kCameraSettingsPage above
   g2RegisterPage(kMicDetailPage);        // hidden — see kMicDetailPage above
@@ -6744,7 +6986,7 @@ static void bleConnectInit() {
   // 4 KB DRAM. Don't go lower — connect-time service discovery has
   // genuinely unbounded depth on certain failure paths.
   if (xTaskCreate(bleConnectWorkerLoop, "g2_ble_connect",
-                  /*stack words*/ 5120, nullptr,
+                  /*stack bytes*/ 5120, nullptr,
                   /*prio*/  5,         &gBleConnectTaskH) != pdPASS) {
     DEBUG_G2F("[G2] ble-connect: worker xTaskCreate FAILED");
     vQueueDelete(gBleConnectQueue);
@@ -8504,12 +8746,13 @@ static void pageSwapInit() {
               (unsigned)kPageSwapQueueDepth);
     return;
   }
-  // Stack: 3584 words (~14 KB), trimmed from 4096 (~16 KB) 2026-06-07.
+  // Stack: 3584 BYTES (3.5 KB), trimmed from 4096 (4 KB) 2026-06-07.
+  // (The old "~14 KB"/"~16 KB" annotations were the 4x myth — see System_TaskUtils.h.)
   // Measured HWM ~6.2 KB with glasses connected → ~7.8 KB headroom. This is
   // the ONLY xTaskCreate on the page-swap path now — all
   // navigation re-uses this worker via the queue.
   BaseType_t rc = xTaskCreate(pageSwapWorkerLoop, "g2_page_swap_w",
-                              /*stack words*/ 3584, nullptr,
+                              /*stack bytes*/ 3584, nullptr,
                               /*prio*/  tskIDLE_PRIORITY + 2,
                               &gPageSwapTaskH);
   if (rc != pdPASS) {
@@ -8702,7 +8945,7 @@ static void tapDispatcherWorkerLoop(void* /*arg*/) {
   // peak usage is ~11.5 KB. 6400 words = 25 KB leaves ~13 KB headroom
   // and reclaims 55 KB of DRAM.
   BaseType_t rc = xTaskCreate(tapDispatcherWorkerLoop, "g2_tap_disp",
-                              /*stack words*/ 6400, nullptr,
+                              /*stack bytes*/ 6400, nullptr,
                               /*prio*/  tskIDLE_PRIORITY + 2,
                               &gTapTaskHandle);
   if (rc != pdPASS) {
@@ -8884,6 +9127,61 @@ bool g2ShowTextPage(const char* content, const G2ContainerGeom& geom,
     return false;
   }
   return true;
+}
+
+// Shared paged-text render for G2TextPager (see G2_Page_Common.h). Composes the
+// header line ("title [n/m] hint"), an optional separator, and the current page
+// slice into caller-owned `pageBuf`, then hands it to g2ShowTextPage. Keeping
+// this beside g2ShowTextPage lets the three consumers (Files, Settings JSON,
+// ESPNow chat) share one render body while owning only their tiny chrome +
+// exit/nav trampolines.
+bool g2TextPagerRender(G2TextPager& p, char* pageBuf, size_t cap,
+                       const G2TextPageChrome& chrome,
+                       const G2ContainerGeom& geom,
+                       void (*exitFn)(), G2TapFn navFn) {
+  if (!pageBuf || cap == 0) return false;
+  const char* title = chrome.title ? chrome.title : "";
+
+  // Header line: page indicator + gesture hint (or single-page hint).
+  int hn;
+  if (p.pageCount > 1) {
+    hn = snprintf(pageBuf, cap, "%s [%d/%d] %s\n", title, p.curPage + 1,
+                  p.pageCount,
+                  chrome.navHint ? chrome.navHint : "tap/scroll=nav, 2x-tap=exit");
+  } else {
+    hn = snprintf(pageBuf, cap, "%s %s\n", title,
+                  chrome.singleHint ? chrome.singleHint : "2x-tap=exit");
+  }
+  size_t pos = (hn > 0) ? (size_t)hn : 0;
+  if (pos >= cap) pos = cap - 1;
+
+  // Optional separator line under the header.
+  if (chrome.separator && chrome.separator[0] && pos < cap - 1) {
+    int sn = snprintf(pageBuf + pos, cap - pos, "%s\n", chrome.separator);
+    if (sn > 0) pos += (size_t)sn;
+    if (pos >= cap) pos = cap - 1;
+  }
+
+  // Current page slice (or the empty-page placeholder).
+  size_t off   = (p.pageCount > 0) ? p.pageOff[p.curPage]     : 0;
+  size_t end   = (p.pageCount > 0) ? p.pageOff[p.curPage + 1] : 0;
+  size_t slice = (end > off) ? (end - off) : 0;
+  if (slice == 0) {
+    snprintf(pageBuf + pos, cap - pos, "%s",
+             chrome.emptyMsg ? chrome.emptyMsg : "(empty)");
+  } else {
+    if (pos + slice >= cap) slice = cap - pos - 1;
+    memcpy(pageBuf + pos, p.body + off, slice);
+    pos += slice;
+    pageBuf[pos] = '\0';
+    // Truncation marker on the last page only.
+    if (p.truncated && p.curPage == p.pageCount - 1 && (cap - pos) > 20) {
+      snprintf(pageBuf + pos, cap - pos, "\n...[truncated]");
+    }
+  }
+
+  return g2ShowTextPage(pageBuf, geom, exitFn,
+                        (p.pageCount > 1) ? navFn : nullptr);
 }
 
 // Same shape as g2ShowTextPage but immediately follows the CREATE-text
@@ -9554,7 +9852,13 @@ bool g2StartLiveListPage(G2LivePageBuildFn buildFn, uint32_t intervalMs,
   // Initial render via the standard path so the widget gets CREATEd
   // cleanly; this also seeds containerReady so subsequent REBUILDs
   // succeed. Build the text once here and ship via g2ShowTextAsList.
-  char seed[2048];
+  // PSRAM: one-shot scratch — buildFn fills it, g2ShowTextAsList renders it, and
+  // it's dead before this returns (nothing retains the pointer). Static is safe
+  // because this path is ALREADY single-flight by design: the unguarded
+  // gLivePageBuildFn / gLivePageActive globals set below mean a concurrent second
+  // call is broken today regardless, so a shared buffer adds no new hazard.
+  // Takes 2 KB off g2_tap_disp's 6400-byte stack (~32% of the frame).
+  EXT_RAM_BSS_ATTR static char seed[2048];
   seed[0] = '\0';
   buildFn(seed, sizeof(seed));
   if (!g2ShowTextAsList(seed, gLivePageBackLabel)) {
@@ -9763,20 +10067,11 @@ static constexpr G2ContainerGeom kStatusBackGeom  = {   8,   8, 446,  40 };
 static constexpr G2ContainerGeom kStatusBodyGeom  = {   8, 160, 302, 120 };
 static constexpr G2ContainerGeom kStatusBattGeom  = { 458,   8, 110,  32 };
 // R1 row directly under the G2 battery so the right column reads
-// G2-then-R1 top-down. Content is just "R1" for now — ring telemetry
-// (battery, link state) isn't wired up yet, but the slot exists so
-// the visual layout matches the eventual two-row corner.
+// G2-then-R1 top-down. Content from buildR1StatusBattery ("R1: NN%").
 static constexpr G2ContainerGeom kStatusR1Geom    = { 458,  42, 110,  32 };
-// ESP row directly below R1, third row of the right column. Reads the
-// local SoC battery state via buildEspStatusBattery. WIDER than the G2/R1
-// rows: left edge shifted left (x 458→408, w 110→160) while the right edge
-// stays pinned at the canvas edge (568). Sized for the WIDEST value, which
-// is "USB" — uppercase U/S/B are much wider than the "NN%" digits, so
-// "ESP: USB" overflowed the narrower box, wrapped to a 2nd line, and the
-// lens drew a scroll bar (the % values fit on one line, hence no bar there).
-// Only this row's left edge moves; its y-band (76..108) is otherwise empty,
-// so nothing collides. (Tighten x/w here if you want it less wide.)
-static constexpr G2ContainerGeom kStatusEspGeom   = { 408,  76, 160,  32 };
+// ESP row directly below R1 — same x/w as G2/R1 so the three percentages
+// line up. Content is "ESP: ---" or "ESP: NN%" (see buildEspStatusBattery).
+static constexpr G2ContainerGeom kStatusEspGeom   = { 458,  76, 110,  32 };
 static constexpr G2ContainerGeom kStatusMeterGeom = { 318, 224, 250,  56 };
 
 // Custom live-render hook for kStatusPage. Keeps a fresh CREATE on the
@@ -9802,6 +10097,52 @@ static char gStatusLastMeterStr[128] = {0};
 static char gStatusLastR1Str[32]     = {0};
 static char gStatusLastEspStr[32]    = {0};
 
+// The ESP battery row only exists on boards that can actually measure the
+// battery. BATTERY_MONITOR_AVAILABLE is 0 on XIAO S3 / XIAO Sense / QT Py (no
+// fuel gauge AND no VBAT divider — see System_BuildConfig.h), where the row
+// could only ever read a permanent "ESP: ---". That's noise, so the child is
+// omitted at compile time and the lens gets the space back.
+//
+// NOTE: this is deliberately NOT keyed on the runtime value. On boards that CAN
+// measure (FeatherS3 fuel gauge, Feather V2 ADC), "ESP: ---" is meaningful — it
+// means "running on USB, no LiPo attached" — so buildEspStatusBattery keeps that
+// behaviour untouched.
+#if BATTERY_MONITOR_AVAILABLE
+static constexpr size_t kStatusTextChildCount = 5;
+#else
+static constexpr size_t kStatusTextChildCount = 4;
+#endif
+
+// Single source of truth for the Status compound's text children. CREATE and
+// REBUILD must ship the identical set (the multi-child REBUILD blanks any
+// sibling it doesn't mention), so both call this. Returns the child count.
+static size_t buildStatusTextChildren(G2TextChildSpec* out,
+                                      const char* bodyBuf, const char* battStr,
+                                      const char* r1Str,   const char* espStr,
+                                      const char* meterStr) {
+  size_t n = 0;
+  out[n++] = { /*containerName=*/ "body",  /*content=*/ bodyBuf,
+               /*containerId=*/   2,       /*geom=*/    kStatusBodyGeom,
+               /*eventCapture=*/  false };
+  out[n++] = { /*containerName=*/ "batt",  /*content=*/ battStr,
+               /*containerId=*/   3,       /*geom=*/    kStatusBattGeom,
+               /*eventCapture=*/  false };
+  out[n++] = { /*containerName=*/ "r1",    /*content=*/ r1Str,
+               /*containerId=*/   5,       /*geom=*/    kStatusR1Geom,
+               /*eventCapture=*/  false };
+#if BATTERY_MONITOR_AVAILABLE
+  out[n++] = { /*containerName=*/ "esp",   /*content=*/ espStr,
+               /*containerId=*/   6,       /*geom=*/    kStatusEspGeom,
+               /*eventCapture=*/  false };
+#else
+  (void)espStr;
+#endif
+  out[n++] = { /*containerName=*/ "meter", /*content=*/ meterStr,
+               /*containerId=*/   4,       /*geom=*/    kStatusMeterGeom,
+               /*eventCapture=*/  false };
+  return n;
+}
+
 static bool renderStatusCompound() {
   G2Temple* arm = nullptr;
   if (gR.connected && !gR.pluginDead)      arm = &gR;
@@ -9817,16 +10158,9 @@ static bool renderStatusCompound() {
   char meterStr[128];
   buildG2StatusMeter(meterStr, sizeof(meterStr));
 
-  // R1 row content. Mirrors the G2 battery format ("G2 NN%") so the
-  // two corner rows read consistently. "---" fills the percentage slot
-  // when we don't have a value, keeping column width stable so the
-  // layout doesn't shift when telemetry comes online. Ring battery
-  // isn't plumbed through yet — the placeholder is permanent until the
-  // R1 protocol exposes a battery reading; swap to an int read at that
-  // point. Disconnected state is communicated by this corner row alone
-  // (no separate body line needed).
+  // R1 row — same g2RingGetTelemetry() source as Apps → Ring.
   char r1Str[32];
-  snprintf(r1Str, sizeof(r1Str), "R1: --%%");
+  buildR1StatusBattery(r1Str, sizeof(r1Str));
 
   // ESP/USB indicator — see buildEspStatusBattery for the three-state
   // logic. Same shape as battStr/r1Str so it threads through the
@@ -9866,27 +10200,13 @@ static bool renderStatusCompound() {
   // the list every tick too or fall back to a different layout.
   if (!g2LensGetState().containerReady) {
     static const char* kBackItems[] = { "<- Main Menu" };
-    G2TextChildSpec textChildren[5] = {
-      { /*containerName=*/ "body",  /*content=*/ bodyBuf,
-        /*containerId=*/   2,       /*geom=*/    kStatusBodyGeom,
-        /*eventCapture=*/  false },
-      { /*containerName=*/ "batt",  /*content=*/ battStr,
-        /*containerId=*/   3,       /*geom=*/    kStatusBattGeom,
-        /*eventCapture=*/  false },
-      { /*containerName=*/ "r1",    /*content=*/ r1Str,
-        /*containerId=*/   5,       /*geom=*/    kStatusR1Geom,
-        /*eventCapture=*/  false },
-      { /*containerName=*/ "esp",   /*content=*/ espStr,
-        /*containerId=*/   6,       /*geom=*/    kStatusEspGeom,
-        /*eventCapture=*/  false },
-      { /*containerName=*/ "meter", /*content=*/ meterStr,
-        /*containerId=*/   4,       /*geom=*/    kStatusMeterGeom,
-        /*eventCapture=*/  false },
-    };
+    G2TextChildSpec textChildren[kStatusTextChildCount];
+    const size_t nTextChildren = buildStatusTextChildren(
+        textChildren, bodyBuf, battStr, r1Str, espStr, meterStr);
     bool ok = sendCreateMixedListMultiTextAndWait(
         *arm,
         kBackItems, 1, kStatusBackGeom,
-        textChildren, 5,
+        textChildren, nTextChildren,
         BLOCKS_WIDGET_ID);
     if (!ok) {
       free(bodyBuf);
@@ -9939,7 +10259,14 @@ static bool renderStatusCompound() {
   const bool battChanged  = strcmp(battStr,  gStatusLastBattStr)  != 0;
   const bool meterChanged = strcmp(meterStr, gStatusLastMeterStr) != 0;
   const bool r1Changed    = strcmp(r1Str,    gStatusLastR1Str)    != 0;
+  // Boards without battery monitoring don't ship an ESP child, so its content
+  // can never drive a REBUILD (it would otherwise pin espChanged=true forever
+  // and defeat the no-op short-circuit below).
+#if BATTERY_MONITOR_AVAILABLE
   const bool espChanged   = strcmp(espStr,   gStatusLastEspStr)   != 0;
+#else
+  const bool espChanged   = false;
+#endif
 
   if (!bodyChanged && !battChanged && !meterChanged && !r1Changed && !espChanged) {
     free(bodyBuf);
@@ -9948,27 +10275,16 @@ static bool renderStatusCompound() {
   }
 
   static const char* kBackItems[] = { "<- Main Menu" };
-  G2TextChildSpec textChildren[5] = {
-    { /*containerName=*/ "body",  /*content=*/ bodyBuf,
-      /*containerId=*/   2,       /*geom=*/    kStatusBodyGeom,
-      /*eventCapture=*/  false },
-    { /*containerName=*/ "batt",  /*content=*/ battStr,
-      /*containerId=*/   3,       /*geom=*/    kStatusBattGeom,
-      /*eventCapture=*/  false },
-    { /*containerName=*/ "r1",    /*content=*/ r1Str,
-      /*containerId=*/   5,       /*geom=*/    kStatusR1Geom,
-      /*eventCapture=*/  false },
-    { /*containerName=*/ "esp",   /*content=*/ espStr,
-      /*containerId=*/   6,       /*geom=*/    kStatusEspGeom,
-      /*eventCapture=*/  false },
-    { /*containerName=*/ "meter", /*content=*/ meterStr,
-      /*containerId=*/   4,       /*geom=*/    kStatusMeterGeom,
-      /*eventCapture=*/  false },
-  };
+  // Same child set the CREATE shipped — the multi-child REBUILD semantic is
+  // "render exactly this set" (unmentioned siblings blank), so both paths MUST
+  // use the identical builder or the ESP row would blank/reappear per tick.
+  G2TextChildSpec textChildren[kStatusTextChildCount];
+  const size_t nTextChildren = buildStatusTextChildren(
+      textChildren, bodyBuf, battStr, r1Str, espStr, meterStr);
   bool ok = sendRebuildMixedListMultiTextAndWait(
       *arm,
       kBackItems, 1, kStatusBackGeom,
-      textChildren, 5);
+      textChildren, nTextChildren);
   if (!ok) {
     free(bodyBuf);
     DEBUG_G2F("[G2] status-compound: REBUILD-list+multitext failed — "
@@ -11623,10 +11939,17 @@ static const char* cmd_g2micwav(const String& argsInput) {
       xSemaphoreGive(gMicWavMutex);
       return "Error: G2 mic wav: lc3_decoder_size returned 0 (bad params?)";
     }
-    void* mem = malloc(decSize);
+    // Decoder workspace is CPU-only liblc3 scratch — nothing DMAs from it, so
+    // prefer PSRAM to preserve internal DRAM for stacks/BLE. Mirrors the AFE
+    // feed path's decoder alloc above: both decoders run lc3_decode on the BLE
+    // notify task at the same packet rate, and this path additionally writes
+    // each packet to SD, which dominates any PSRAM access cost. Falls back to
+    // the internal heap on PSRAM-less boards. free() handles either.
+    void* mem = heap_caps_malloc(decSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!mem) mem = malloc(decSize);
     if (!mem) {
       xSemaphoreGive(gMicWavMutex);
-      snprintf(ret, sizeof(ret), "G2 mic wav: malloc %u B failed", decSize);
+      snprintf(ret, sizeof(ret), "G2 mic wav: decoder alloc %u B failed", decSize);
       return ret;
     }
     lc3_decoder_t dec = lc3_setup_decoder(kMicLc3FrameUs, kMicLc3SampleHz,
@@ -14194,6 +14517,10 @@ static void g2MapPageWorker(void* arg) {
     "Zoom Out",    // 2
     "Reset View",  // 3
     "Recenter",    // 4
+    "Pan N",       // 5
+    "Pan S",       // 6
+    "Pan E",       // 7
+    "Pan W",       // 8
   };
   static constexpr size_t kRowCount = sizeof(kRows) / sizeof(kRows[0]);
 
@@ -14236,7 +14563,12 @@ static void g2MapPageWorker(void* arg) {
     const uint32_t kCreateMagic   = G2_MAGIC_IMAGE_BASE + 0x20;  // 242
     const uint32_t kPushMagicBase = G2_MAGIC_IMAGE_BASE + 0x21;  // 243+ (6 frags → 243..248)
     {
-      uint8_t createBuf[1024];
+      // PSRAM: BLE envelope staging — built here, handed to sendEnvelope (which
+      // copies into the BLE TX path), then dead. No escape, nothing DMAs from it.
+      // Static is safe: g2_map_page is a single worker task, so this is never
+      // re-entered. Own buffer (not shared with the camera worker's twin) because
+      // those are separate tasks that can run concurrently.
+      EXT_RAM_BSS_ATTR static uint8_t createBuf[1024];
       const size_t createLen = g2BuildCreateMixedListImage(
           allocSeq(), kCreateMagic,
           /*listName*/ "lstMap",
@@ -14273,17 +14605,29 @@ static void g2MapPageWorker(void* arg) {
         extern float gMapCenterLat;
         extern float gMapCenterLon;
         extern bool  gMapCenterSet;
+        extern bool  gMapManuallyPanned;
         if (taps & (1u << 0)) { DEBUG_G2F("[G2] map page: Back → exit"); break; }
         if (taps & (1u << 1)) { gMapZoom *= 1.5f; if (gMapZoom > 30.0f) gMapZoom = 30.0f; dirty = true; }
         if (taps & (1u << 2)) { gMapZoom /= 1.5f; if (gMapZoom < 0.20f) gMapZoom = 0.20f; dirty = true; }
-        if (taps & (1u << 3)) { gMapZoom = 1.0f; gMapRotation = 0.0f; dirty = true; }
+        if (taps & (1u << 3)) {  // Reset View → default zoom + rotation, drop pan
+          gMapZoom = 1.0f; gMapRotation = 0.0f; gMapManuallyPanned = false; dirty = true;
+        }
         if (taps & (1u << 4)) {  // Recenter to the loaded map's midpoint
           const LoadedMap& cm = MapCore::getCurrentMap();
           gMapCenterLat = (cm.header.minLat + cm.header.maxLat) / 2000000.0f;
           gMapCenterLon = (cm.header.minLon + cm.header.maxLon) / 2000000.0f;
           gMapCenterSet = true;
+          gMapManuallyPanned = false;
           dirty = true;
         }
+        // Pan N/S/E/W — nudge the shared center via the shared discrete-pan
+        // helper (zoom-scaled, rotation-aware, bounds-clamped). Screen deltas:
+        // +y is down/south. Repeated same-direction taps inside one 120 ms
+        // drain collapse to a single step (harmless, just slower panning).
+        if (taps & (1u << 5)) { mapPanStep(0.0f, -1.0f); dirty = true; }  // N
+        if (taps & (1u << 6)) { mapPanStep(0.0f,  1.0f); dirty = true; }  // S
+        if (taps & (1u << 7)) { mapPanStep(1.0f,  0.0f); dirty = true; }  // E
+        if (taps & (1u << 8)) { mapPanStep(-1.0f, 0.0f); dirty = true; }  // W
       }
 
       if (dirty) {
@@ -14327,9 +14671,22 @@ static void g2MapPageWorker(void* arg) {
 // OLED map render task (renderMap is the stack-heavy step; the image push
 // runs after it returns each frame, so max-not-sum).
 static bool g2ShowMapPage(void (*onDone)()) {
-  if (ESP.getFreeHeap() < 16 * 1024) {
-    DEBUG_G2F("[G2] map page: declining — heap low (%u B free)",
-              (unsigned)ESP.getFreeHeap());
+  // Honest heap guard. The render worker's task stack + its tile-read staging
+  // must come from CONTIGUOUS internal DRAM, so gate on the LARGEST free block,
+  // NOT total free — same as g2ShowLlmPage. This config is DRAM-fragmented
+  // (largest ~9 KB with a model loaded even when total free is ~29-39 KB). A
+  // total-free check passes in that state and then the worker crashes: renderMap
+  // → loadTileData → File::read → an internal read-staging malloc returns null,
+  // unchecked, and memcpy null-derefs (observed: Cache/MMU fault, EXCVADDR=0).
+  // Gating on largest-block makes the page DECLINE cleanly instead — the LLM page
+  // already did this correctly, which is why it declined while Maps crashed.
+  const size_t kStackBytes = (size_t)MAP_RENDER_STACK_WORDS * sizeof(StackType_t);
+  const size_t kNeeded     = kStackBytes + 8 * 1024;  // stack + tile-read/TX/TCB margin
+  const size_t kLargest    = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  if (kLargest < kNeeded) {
+    DEBUG_G2F("[G2] map page: declining — need ~%u KB contiguous internal DRAM, largest free %u KB "
+              "(free RAM by disconnecting BLE/G2 or disabling unused features)",
+              (unsigned)(kNeeded / 1024), (unsigned)(kLargest / 1024));
     return false;
   }
   auto* a = new MapPageArgs;
@@ -14348,10 +14705,231 @@ static const char* cmd_g2map(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   (void)argsInput;
   if (!isG2Connected()) return "Error: G2 map: not connected";
-  if (!g2ShowMapPage(nullptr)) return "Error: G2 map: busy or heap low — try again";
+  if (!g2ShowMapPage(nullptr)) return "Error: G2 map: not enough free internal RAM (needs ~40 KB) or busy — free memory by disconnecting BLE/G2 or disabling unused features, then retry";
   return "G2 map: opening interactive map page — tap a control on the lens; Back to exit.";
 }
 #endif // ENABLE_MAPS
+
+#if ENABLE_ONDEVICE_LLM
+// ─────────────────────────────────────────────────────────────────────
+// LLM viewer (g2LlmPageWorker) — read-only streaming LLM output on the
+// lens. Left ~1/3: control list "lstLlm". Right ~2/3: a live text pane
+// "llmChat" that follows the current/last generation and appends tokens
+// as they arrive via UPDATE_TEXT (Cmd=5) — which patches the text child
+// in place WITHOUT blanking the list (the documented happy path for a
+// list+text compound). Prompts originate off-glasses; the page follows
+// whatever web/CLI/voice started and offers a one-tap "Re-run last".
+// See docs/G2_LLM_VIEWER_PLAN.md.
+//
+// HW-VALIDATE: the proven side-by-side "big pane" (map/camera) uses an
+// IMAGE tile; a native TEXT child at a side geometry is expressible in the
+// protocol (writeTextChildSpec carries x/y/w/h) but unproven on this
+// firmware. If the pane renders wrong, adjust kLlmChatGeom (or fall back
+// to the top-bar text layout the Status page uses).
+// ─────────────────────────────────────────────────────────────────────
+static const char* const kLlmRows[] = {
+  "<- Back",      // 0
+  "Re-run last",  // 1
+};
+static constexpr size_t kLlmRowCount = sizeof(kLlmRows) / sizeof(kLlmRows[0]);
+
+// Canvas ~576x288 (see the map page's list{8,8,264,272}+image geometry).
+// List left ~1/3; chat pane right ~2/3.
+static const G2ContainerGeom kLlmListGeom = {   8, 8, 180, 272 };
+static const G2ContainerGeom kLlmChatGeom = { 196, 8, 372, 272 };
+static constexpr uint32_t    kLlmChatChildId   = 2;
+static constexpr const char* kLlmChatChildName = "llmChat";
+
+// UPDATE_TEXT rides a single 256 B envelope (content + name/id/framing
+// overhead), so keep the visible tail conservatively small; an over-cap
+// build silently fails (frozen pane) rather than fragmenting. 180 B is a
+// safe glanceable "latest tokens" tail (like the OLED newest-lines).
+// Scroll-back over the full answer is a later phase.
+static constexpr size_t kLlmTailCap = 180;
+
+// Worker hard cap so a silent >60 s read isn't watchdog-exited mid-gen and
+// an idle page can't linger forever (mirrors the camera stream cap).
+static constexpr uint32_t kLlmSafetyCapMs = 5u * 60u * 1000u;
+
+struct LlmPageArgs { void (*onDone)(); };
+
+// PSRAM scratch for assembling the conversation before taking its tail.
+// Single-writer (the LLM worker task), so a shared static is safe.
+static EXT_RAM_BSS_ATTR char sLlmScratch[1536];
+
+// Compose the visible chat tail: recent "You: <prompt>" / "AI: <answer>"
+// turns, keeping the LAST (cap-1) bytes so newest content wins on the small
+// pane. Reads chat turns (internally mutexed) + the finished-turn fallback
+// so an answer that completed before the first poll still shows.
+static size_t g2LlmBuildChatTail(char* out, size_t cap) {
+  if (!out || cap == 0) return 0;
+  size_t pos = 0;
+  const int turns = chatGetTurnCount();
+  const int startTurn = (turns > 4) ? turns - 4 : 0;  // last ~2 exchanges
+  for (int i = startTurn; i < turns && pos < sizeof(sLlmScratch) - 1; i++) {
+    ChatTurnInfo info;
+    if (!chatGetTurnInfo(i, &info)) continue;
+    const char* tag = (info.role == ChatTurnRole::USER) ? "You: " : "AI: ";
+    int tn = snprintf(sLlmScratch + pos, sizeof(sLlmScratch) - pos, "%s", tag);
+    if (tn > 0) pos += (size_t)tn;
+    int off = 0, r;
+    char tb[128];
+    while (pos < sizeof(sLlmScratch) - 1 &&
+           (r = chatReadTurn(i, off, tb, sizeof(tb))) > 0) {
+      size_t n = (size_t)r;
+      if (pos + n > sizeof(sLlmScratch) - 1) n = sizeof(sLlmScratch) - 1 - pos;
+      memcpy(sLlmScratch + pos, tb, n);
+      pos += n; off += r;
+      if ((size_t)r < (int)sizeof(tb)) break;
+    }
+    if (pos < sizeof(sLlmScratch) - 1) sLlmScratch[pos++] = '\n';
+  }
+  sLlmScratch[pos] = '\0';
+
+  // Nothing streaming but a generation just finished → recover its tail.
+  if (pos == 0) {
+    const int sess = chatGetSessionId();
+    const int fin  = chatFinishedLen(sess);
+    if (fin > 0) {
+      const int start = (fin > (int)sizeof(sLlmScratch) - 1)
+                          ? fin - ((int)sizeof(sLlmScratch) - 1) : 0;
+      const int r = chatReadFinished(sess, start, sLlmScratch, sizeof(sLlmScratch));
+      pos = (r > 0) ? (size_t)r : 0;
+      sLlmScratch[pos] = '\0';
+    }
+  }
+
+  if (pos == 0) {
+    // NOTE: only chatBeginTurn paths feed this (web LLM page, `llmgenerate
+    // json <text>`, or the Re-run row). Plain `llmgenerate <text>` is a
+    // synchronous self-contained call that creates no chat turn — it will
+    // never appear here.
+    const char* ph = "No chat yet. Send a prompt from the web LLM page "
+                     "(or CLI: llmgenerate json <text>) - it streams here.";
+    // strlen+clamp rather than strnlen(ph, cap-1): a bound larger than the
+    // literal trips gcc's -Werror=stringop-overread on a clean-config build.
+    size_t n = strlen(ph);
+    if (n > cap - 1) n = cap - 1;
+    memcpy(out, ph, n); out[n] = '\0';
+    return n;
+  }
+
+  const size_t start = (pos > cap - 1) ? pos - (cap - 1) : 0;
+  const size_t n = pos - start;
+  memcpy(out, sLlmScratch + start, n);
+  out[n] = '\0';
+  return n;
+}
+
+static void g2LlmPageWorker(void* arg) {
+  // Paired-user identity + G2 notify source, same as the map worker.
+  G2HijackCtxGuard ctxGuard;
+  auto* a = (LlmPageArgs*)arg;
+
+  do {
+    G2Temple* arm = pickEvenAIArm("llmPage");
+    if (!arm) { DEBUG_G2F("[G2] LLM page: no eligible arm"); break; }
+
+    if (!probeTearDownActiveContainer(*arm)) {
+      DEBUG_G2F("[G2] LLM page: pre-page SHUTDOWN failed");
+      break;
+    }
+    gLlmPagePendingTap = 0;
+
+    // CREATE compound: list "lstLlm" (left 1/3) + text child "llmChat"
+    // (right 2/3). Mirrors sendCreateMixedListTextAndWait but with our own
+    // list name so taps route to us (not the Apps 'app' handler).
+    G2TextChildSpec chat = {
+      /*containerName*/ kLlmChatChildName,
+      /*content*/       "(waiting for LLM...)",
+      /*containerId*/   kLlmChatChildId,
+      /*geom*/          kLlmChatGeom,
+      /*eventCapture*/  false
+    };
+    bool created = false;
+    if (armCreateSlot("CREATE-llm")) {
+      uint8_t* pb = (uint8_t*)ps_alloc(1024, AllocPref::PreferPSRAM, "g2.pb.llm-create");
+      if (pb) {
+        size_t pbLen = g2BuildCreateMixedListTextPb(
+            G2_MAGIC_CREATE, "lstLlm", kLlmRows, kLlmRowCount,
+            kLlmListGeom, chat, BLOCKS_WIDGET_ID, pb, 1024);
+        bool sent = pbLen && sendPbFragmented(*arm, allocSeq(), G2_SID_EVEN_CORE,
+                                              G2_FLAG_REQUEST, pb, pbLen);
+        free(pb);
+        if (sent) created = waitCreateAck("CREATE-llm", BLOCKS_WIDGET_ID);
+      }
+    }
+    if (!created) { DEBUG_G2F("[G2] LLM page: compound CREATE failed"); break; }
+    DEBUG_G2F("[G2] LLM page: compound CREATE acked (list 'lstLlm' + text 'llmChat')");
+
+    gLlmPageActive = true;
+    char tail[kLlmTailCap];
+    char lastTail[kLlmTailCap];
+    lastTail[0] = '\0';
+    const uint32_t startMs = millis();
+
+    while (true) {
+      if (!gLens.hijackActive) { DEBUG_G2F("[G2] LLM page: hijack ended"); break; }
+      if (millis() - startMs > kLlmSafetyCapMs) { DEBUG_G2F("[G2] LLM page: safety cap"); break; }
+
+      const uint32_t taps = gLlmPagePendingTap;
+      gLlmPagePendingTap = 0;
+      if (taps & (1u << 0)) { DEBUG_G2F("[G2] LLM page: Back"); break; }
+      if (taps & (1u << 1)) { (void)chatRetryLast(nullptr); }  // Re-run last
+
+      // Keep the page alive while the engine is ACTIVELY generating — an
+      // authoritative device-side signal bounded by the hard-cap/sentence
+      // limit, NOT a BLE ack (ack != presence). Once done, stop refreshing
+      // and the normal tap-only 60 s watchdog governs passive reading.
+      if (chatIsGenerating() && g2FsmHijackActive()) gHijackStartedMs = millis();
+
+      const size_t n = g2LlmBuildChatTail(tail, sizeof(tail));
+      if (strcmp(tail, lastTail) != 0) {
+        sendUpdateTextNamed(*arm, kLlmChatChildName, kLlmChatChildId, tail);
+        memcpy(lastTail, tail, n + 1);
+      }
+      vTaskDelay(pdMS_TO_TICKS(250));
+    }
+
+    gLlmPageActive     = false;
+    gLlmPagePendingTap = 0;
+    probePostProbeShutdown(*arm);
+  } while (0);
+
+  if (a->onDone) a->onDone();
+  delete a;
+  vTaskDelete(nullptr);
+}
+
+// Public entry — spawn the LLM viewer worker. Heap-guarded like the map
+// page: the worker stack is internal DRAM (the chat buffers are PSRAM).
+static bool g2ShowLlmPage(void (*onDone)()) {
+  // xTaskCreate needs a CONTIGUOUS internal-DRAM block for the stack, so gate on
+  // the largest free block, NOT total free — this config is DRAM-fragmented
+  // (largest ~31 KB, frag ~65%) and a total-free check would pass and then crash
+  // on alloc. The stack (LLM_VIEW_STACK_WORDS) must cover the return-to-Apps
+  // onDone (g2ShowAppsMenu → FS scan + deep logging, ~16-18 KB); that's why the
+  // original 16 KB worker overflowed on Back.
+  const size_t kStackBytes = (size_t)LLM_VIEW_STACK_WORDS * sizeof(StackType_t);
+  const size_t kLargest    = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  if (kLargest < kStackBytes + 4 * 1024) {
+    DEBUG_G2F("[G2] LLM page: declining — need ~%u KB contiguous internal DRAM, largest free %u KB "
+              "(free RAM by disabling unused features)",
+              (unsigned)((kStackBytes + 4 * 1024) / 1024), (unsigned)(kLargest / 1024));
+    return false;
+  }
+  auto* a = new LlmPageArgs;
+  if (!a) return false;
+  a->onDone = onDone;
+  if (xTaskCreate(g2LlmPageWorker, "g2_llm_page", LLM_VIEW_STACK_WORDS, a,
+                  tskIDLE_PRIORITY + 2, nullptr) != pdPASS) {
+    DEBUG_G2F("[G2] LLM page: xTaskCreate failed");
+    delete a;
+    return false;
+  }
+  return true;
+}
+#endif // ENABLE_ONDEVICE_LLM
 
 // ─────────────────────────────────────────────────────────────────────
 // Camera viewer — capture one JPEG, decode to RGB888 via
@@ -14903,7 +15481,10 @@ static void g2CameraStreamWorker(void* arg) {
     // the image-only CREATE path. The image-push helpers below
     // (sendImageBmpFragmentsNoCreate) target this CREATE's image child.
     {
-      uint8_t createBuf[1024];
+      // PSRAM: BLE envelope staging — see the g2_map_page twin above for the
+      // rationale. Single worker task (g2_cam_stream) so static is safe; its own
+      // buffer because it can run concurrently with the map worker.
+      EXT_RAM_BSS_ATTR static uint8_t createBuf[1024];
       size_t createLen = g2BuildCreateMixedListImage(
           allocSeq(), kCreateMagic,
           /*listName*/ "lstCam",

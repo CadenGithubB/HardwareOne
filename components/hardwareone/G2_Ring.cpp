@@ -994,6 +994,17 @@ bool g2RingIsConnected() {
   return gRing.connected;
 }
 
+void g2RingGetTelemetry(G2RingTelemetry& out) {
+  // gR1Cache is written from the BLE notify task; telemetry updates are
+  // minute-scale, so a plain field copy is fine for a read-only dashboard
+  // (no lock; worst case is one stale tick, corrected on the next).
+  out.connected    = gRing.connected;
+  out.hr           = gR1Cache.hr;       out.hrValid      = gR1Cache.hrValid;
+  out.hrv          = gR1Cache.hrv;      out.hrvValid     = gR1Cache.hrvValid;
+  out.spo2         = gR1Cache.spo2;     out.spo2Valid    = gR1Cache.spo2Valid;
+  out.battery      = gR1Cache.battery;  out.batteryValid = gR1Cache.batteryValid;
+}
+
 void g2RingGetStatus(char* buf, size_t cap) {
   if (!buf || cap == 0) return;
   const uint32_t nowMs = millis();

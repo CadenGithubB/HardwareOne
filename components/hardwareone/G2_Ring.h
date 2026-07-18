@@ -130,6 +130,19 @@ bool g2RingIsConnected();
 // `ringstatus` CLI command and the web UI Ring panel.
 void g2RingGetStatus(char* buf, size_t cap);
 
+// Snapshot of the live R1 telemetry cache for read-only display (e.g. the
+// G2 Ring dashboard). Copies the notify-updated values; a *Valid flag of
+// false means "no sample seen yet" — render "--", not 0. Telemetry updates
+// are minute-scale so a plain field copy (no lock) is fine.
+struct G2RingTelemetry {
+  bool     connected;
+  uint8_t  hr;       bool hrValid;
+  int16_t  hrv;      bool hrvValid;
+  uint8_t  spo2;     bool spo2Valid;
+  uint8_t  battery;  bool batteryValid;   // approximate (byte[0] of status pkt)
+};
+void g2RingGetTelemetry(G2RingTelemetry& out);
+
 // Bridge-progress hook. Called by parseSid80Rx() when a RING_CONNECT_INFO
 // poll arrives from either temple. We mirror the most recent connRet /
 // connectRing values so `ringbridge status` can show "scanning" / "fail" /
@@ -177,6 +190,14 @@ inline bool g2RingIsConnected()  { return false; }
 inline void g2RingGetStatus(char* buf, size_t cap) {
   if (buf && cap > 0) buf[0] = '\0';
 }
+struct G2RingTelemetry {
+  bool     connected;
+  uint8_t  hr;       bool hrValid;
+  int16_t  hrv;      bool hrvValid;
+  uint8_t  spo2;     bool spo2Valid;
+  uint8_t  battery;  bool batteryValid;
+};
+inline void g2RingGetTelemetry(G2RingTelemetry& out) { out = G2RingTelemetry{}; }
 inline void g2RingNoteForwardedTelemetry(const uint8_t*, size_t) {}
 inline void g2RingNoteBridgePoll(uint64_t, bool, uint64_t, bool) {}
 
