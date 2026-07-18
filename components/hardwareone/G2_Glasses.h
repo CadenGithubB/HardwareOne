@@ -337,6 +337,32 @@ bool g2ShowTextPage(const char* content,
                     void (*exitFn)() = nullptr,
                     G2TapFn tapFn = nullptr);
 
+// -----------------------------------------------------------------------------
+// Shared paged-text render — pairs with G2TextPager + the pure paging ops in
+// G2_Page_Common.h. This is the one piece of that pager that touches the wire
+// API (g2ShowTextPage), so it lives here rather than in the dependency-free
+// common header. Used by Files, Settings JSON, and ESPNow chat.
+// -----------------------------------------------------------------------------
+struct G2TextPager;  // defined in G2_Page_Common.h
+
+struct G2TextPageChrome {
+  const char* title;       // heading text (e.g. "Pretty foo.json", "Inbox")
+  const char* navHint;     // multi-page hint; null -> "tap/scroll=nav, 2x-tap=exit"
+  const char* singleHint;  // single-page hint; null -> "2x-tap=exit"
+  const char* separator;   // rule drawn under the header; null/"" -> none
+  const char* emptyMsg;    // shown when the current page slice is empty
+};
+
+// Assemble "title [n/m] hint" + optional separator + the current page slice
+// into caller-owned `pageBuf`, then (re)render via g2ShowTextPage. `navFn` is
+// forwarded only when the pager has >1 page (single-page views exit on any
+// gesture). A "...[truncated]" marker is appended on the final page when
+// pager.truncated is set. Returns g2ShowTextPage's result.
+bool g2TextPagerRender(struct G2TextPager& pager, char* pageBuf, size_t pageBufCap,
+                       const G2TextPageChrome& chrome,
+                       const G2ContainerGeom& geom,
+                       void (*exitFn)(), G2TapFn navFn);
+
 // Variant that CREATEs the TextObject with a small placeholder, then
 // immediately REBUILD-text's `content` into it. The placeholder always
 // fits in one fragment so the CREATE is guaranteed to ack; the
@@ -614,6 +640,15 @@ enum G2HijackPage : uint8_t {
   // main hijack menu short. Stateless: each row forwards to another page's
   // show*Menu() (which flips gHijackPage) or launches the map viewer.
   G2_HIJACK_PAGE_APPS            = 11,
+  // Automations App — a tap-navigated list of the device's saved
+  // automations with per-item Run / Enable / Disable. Reached via the Apps
+  // launcher (hidden from the main hijack menu). Impl in
+  // G2_Page_Automations.cpp.
+  G2_HIJACK_PAGE_AUTOMATIONS     = 12,
+  // R1 Ring dashboard — read-only live readout (HR / HRV / SpO2 / battery)
+  // of the paired Even Realities ring. Reached via the Apps launcher.
+  // Live-text page (mirrors kMicDetailPage); impl inline in G2_Glasses.cpp.
+  G2_HIJACK_PAGE_RING            = 13,
 };
 G2HijackPage g2GetHijackPage();
 void         g2SetHijackPage(G2HijackPage p);
@@ -1062,6 +1097,14 @@ typedef void (*G2TapFn)(G2TapKind kind);
 inline bool g2ShowTextPage(const char*,
                            void (*)() = nullptr,
                            G2TapFn = nullptr) { return false; }
+struct G2TextPageChrome {
+  const char *title, *navHint, *singleHint, *separator, *emptyMsg;
+};
+// Geom param omitted here (like the g2ShowTextPage stub above): G2ContainerGeom
+// isn't declared in the G2-disabled build. Nothing calls this stub anyway.
+inline bool g2TextPagerRender(struct G2TextPager&, char*, size_t,
+                              const G2TextPageChrome&,
+                              void (*)(), G2TapFn) { return false; }
 inline bool g2ShowMultiTextPage(const void*, size_t,
                                 void (*)() = nullptr,
                                 G2TapFn = nullptr) { return false; }

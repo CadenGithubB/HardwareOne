@@ -325,28 +325,29 @@ static size_t buildEntryRowsPretty(int moduleIdx) {
 //                              flicker-free)
 //   SysEvent CLICK/etc.    → exit fn fires → back to module list
 
-#define JSON_MAX_PAGES         16
-#define JSON_PAGE_BODY_BUDGET 180   // chars/page; leaves headroom for
-                                    // the header + footer (~50 B) and
-                                    // pb framing (~20 B) within the
-                                    // ~250 B single-fragment ceiling.
+#define JSON_MAX_PAGES     16
+#define JSON_PAGE_BUDGET   176   // < 180 proven-safe single-fragment body
+#define JSON_BODY_CAP      (JSON_MAX_PAGES * JSON_PAGE_BUDGET + 128)
 
-// Cached page bodies + metadata. Built once per drill-in, kept in
-// memory until the user exits the JSON view (cleared by the exit fn).
-// Array-of-Strings rather than a single big buffer because the strings
-// can have variable length up to JSON_PAGE_BODY_BUDGET.
-static String   gJsonPages[JSON_MAX_PAGES];
-static size_t   gJsonPageCount   = 0;
-static size_t   gJsonCurrentPage = 0;
+// Shared G2TextPager engine (see G2_Page_Common.h) — one flat PSRAM body buffer
+// + offset table, hard-wrapped so long JSON string values flow across lens
+// lines instead of being clipped at the page budget. Built once per drill-in,
+// cleared by the exit fn. gJsonModuleName is the per-page header title.
+EXT_RAM_BSS_ATTR static char gJsonBody[JSON_BODY_CAP];            // wrapped body
+static uint16_t              gJsonPageOff[JSON_MAX_PAGES + 1];     // page offsets
+EXT_RAM_BSS_ATTR static char gJsonPageBuf[JSON_PAGE_BUDGET + 128]; // render scratch
 static char     gJsonModuleName[24] = {0};
+static G2TextPager gJsonPager = {
+    gJsonBody, gJsonPageOff, JSON_MAX_PAGES, JSON_PAGE_BUDGET,
+    /*pageCount=*/0, /*curPage=*/0, /*truncated=*/false };
 
 // Forward decls — exit handler needs the module list builder, the tap
 // handler needs the page renderer. Defined out of order intentionally
 // so the showModule* function can reference both.
 static void rebuildAndShowModuleList();
 static void exitJsonViewBackToModuleList();
-static void navJsonPage(G2TapKind kind);
-static bool renderCurrentJsonPage(bool isInitialCreate);
+static void settingsJsonNav(G2TapKind kind);
+static bool settingsRenderJsonPage();
 
 static void rebuildAndShowModuleList() {
   size_t n = buildModuleRows();
@@ -363,119 +364,40 @@ static void rebuildAndShowModuleList() {
 // the page cache so the next drill-in builds fresh content (settings
 // values may have changed).
 static void exitJsonViewBackToModuleList() {
-  for (size_t i = 0; i < gJsonPageCount; i++) gJsonPages[i] = "";
-  gJsonPageCount   = 0;
-  gJsonCurrentPage = 0;
-  gJsonModuleName[0] = '\0';
+  gJsonPager.pageCount = 0;
+  gJsonPager.curPage   = 0;
+  gJsonPager.truncated = false;
+  gJsonModuleName[0]   = '\0';
 
   gLevel        = SET_LEVEL_MODULES;
   gActiveModule = -1;
   rebuildAndShowModuleList();
 }
 
-// Render gJsonPages[gJsonCurrentPage] on the lens. On the first call
-// (isInitialCreate), goes through g2ShowTextPage to do the
-// SHUTDOWN+CREATE handshake and arm the exit/tap callbacks. Subsequent
-// calls reuse the existing TEXT widget via g2ShowText, which routes to
-// REBUILD_PAGE (Cmd=7) — flicker-free, no widget churn.
-static bool renderCurrentJsonPage(bool isInitialCreate) {
-  if (gJsonPageCount == 0 || gJsonCurrentPage >= gJsonPageCount) return false;
-
-  // Header: module name + page indicator + tap hint. Footer is the
-  // page indicator only (so users at the bottom of a long page can
-  // still see where they are without scrolling up).
-  String body;
-  body.reserve(gJsonPages[gJsonCurrentPage].length() + 96);
-  body += gJsonModuleName;
-  if (gJsonPageCount > 1) {
-    char hdr[64];
-    snprintf(hdr, sizeof(hdr), " [%u/%u] tap/scroll=nav, 2x-tap=exit\n",
-             (unsigned)(gJsonCurrentPage + 1), (unsigned)gJsonPageCount);
-    body += hdr;
-  } else {
-    body += " - tap to back\n";
-  }
-  body += "--------------------\n";
-  body += gJsonPages[gJsonCurrentPage];
-
-  // Always go through g2ShowTextPage (full SHUTDOWN+CREATE handshake).
-  // The "use REBUILD_PAGE for second-and-subsequent" optimisation broke
-  // on this firmware (2026-04-26): REBUILD-text never gets a Cmd=8
-  // RebuildResp ack and the BLE plugin emits "Connection lost" on the
-  // lens after a few page advances. SHUTDOWN+CREATE costs ~700 ms per
-  // page but is reliable. Re-arm the same exitFn / tapFn each time so
-  // the dispatch hooks stay live across swaps.
-  (void)isInitialCreate;
-  return g2ShowTextPage(body.c_str(), G2_GEOM_LARGE,
-                        exitJsonViewBackToModuleList,
-                        gJsonPageCount > 1 ? navJsonPage : nullptr);
+// Render the pager's current page via the shared engine. Chrome is fixed;
+// only gJsonModuleName's contents change per drill-in. Each call is a full
+// SHUTDOWN+CREATE (REBUILD-text was unreliable on this firmware, 2026-04-26)
+// and re-arms the same exit/nav hooks.
+static bool settingsRenderJsonPage() {
+  static const G2TextPageChrome chrome = {
+      gJsonModuleName,                 // title (mutated in place before render)
+      "tap/scroll=nav, 2x-tap=exit",   // multi-page hint
+      "2x-tap=exit",                   // single-page hint
+      "--------------------",          // separator rule
+      "(empty)" };                     // empty-slice text
+  return g2TextPagerRender(gJsonPager, gJsonPageBuf, sizeof(gJsonPageBuf),
+                           chrome, G2_GEOM_LARGE, exitJsonViewBackToModuleList,
+                           settingsJsonNav);
 }
 
-// Page-navigation handler for paginated TEXT view. Receives a directional
-// hint from the wire layer:
-//   G2_TAP_PAGE_NEXT — lens tap or ring scroll-down → forward
-//   G2_TAP_PAGE_PREV — ring scroll-up               → backward
-// Both directions wrap at the ends so the user can cycle.
-static void navJsonPage(G2TapKind kind) {
-  if (gJsonPageCount == 0) return;
-  if (kind == G2_TAP_PAGE_PREV) {
-    gJsonCurrentPage = (gJsonCurrentPage == 0)
-                         ? gJsonPageCount - 1
-                         : gJsonCurrentPage - 1;
-  } else {
-    gJsonCurrentPage = (gJsonCurrentPage + 1) % gJsonPageCount;
-  }
-  DEBUG_G2F("[G2] Settings JSON: %s → page %u/%u",
+// Page navigation. NEXT (lens tap / ring scroll-down) advances, PREV
+// (scroll-up) goes back; both wrap at the ends so the user can cycle.
+static void settingsJsonNav(G2TapKind kind) {
+  g2TextNavPage(gJsonPager, kind != G2_TAP_PAGE_PREV);
+  DEBUG_G2F("[G2] Settings JSON: %s → page %d/%d",
             kind == G2_TAP_PAGE_PREV ? "prev" : "next",
-            (unsigned)(gJsonCurrentPage + 1), (unsigned)gJsonPageCount);
-  renderCurrentJsonPage(/*isInitialCreate=*/false);
-}
-
-// Split `s` into gJsonPages[] chunks of <= JSON_PAGE_BODY_BUDGET
-// characters each, breaking only at newline boundaries so JSON lines
-// stay intact. Returns the number of pages produced. If the source
-// would overflow JSON_MAX_PAGES, the remaining content is appended to
-// the last page (truncated only at JSON_PAGE_BODY_BUDGET there).
-static size_t splitJsonIntoPages(const String& s) {
-  for (size_t i = 0; i < JSON_MAX_PAGES; i++) gJsonPages[i] = "";
-
-  size_t pageIdx   = 0;
-  size_t lineStart = 0;
-  String current;
-  current.reserve(JSON_PAGE_BODY_BUDGET + 16);
-
-  const size_t total = s.length();
-  while (lineStart < total && pageIdx < JSON_MAX_PAGES) {
-    int lineEnd = s.indexOf('\n', lineStart);
-    if (lineEnd < 0) lineEnd = total;
-    const size_t lineLen = (size_t)lineEnd - lineStart + 1;  // include '\n'
-
-    // If adding this line would overflow the budget AND the current
-    // page already has content, flush current and start a new page.
-    if (current.length() > 0 &&
-        current.length() + lineLen > JSON_PAGE_BODY_BUDGET) {
-      gJsonPages[pageIdx++] = current;
-      current = "";
-      if (pageIdx >= JSON_MAX_PAGES) break;
-    }
-
-    // Pathological case: a single line longer than the budget. Hard-cut
-    // it at the budget boundary — these are JSON values, not human
-    // sentences, so a mid-string break is acceptable.
-    size_t copyLen = lineLen;
-    if (copyLen > JSON_PAGE_BODY_BUDGET) copyLen = JSON_PAGE_BODY_BUDGET;
-    current += s.substring(lineStart, lineStart + copyLen);
-    lineStart += copyLen;
-    // If we hard-cut, restart from the cut point; the next iteration
-    // picks up where we left off without expecting a newline.
-    if (copyLen < lineLen) continue;
-    lineStart = (size_t)lineEnd + 1;
-  }
-
-  if (current.length() > 0 && pageIdx < JSON_MAX_PAGES) {
-    gJsonPages[pageIdx++] = current;
-  }
-  return pageIdx;
+            gJsonPager.curPage + 1, gJsonPager.pageCount);
+  settingsRenderJsonPage();
 }
 
 // Build the JSON content for `moduleIdx`, split into pages, and ship
@@ -534,18 +456,26 @@ static bool showModuleJsonViaTextWidget(int moduleIdx) {
           sizeof(gJsonModuleName) - 1);
   gJsonModuleName[sizeof(gJsonModuleName) - 1] = '\0';
 
-  gJsonPageCount   = splitJsonIntoPages(s);
-  gJsonCurrentPage = 0;
-  if (gJsonPageCount == 0) {
+  // Wrap into the shared body buffer (soft-wraps long JSON values, marks
+  // truncation if the section outgrows the displayable body), then page it.
+  bool wrapTrunc = false;
+  size_t bodyLen = g2TextWrapInto(gJsonBody, sizeof(gJsonBody), s.c_str(),
+                                  G2_TEXT_DEFAULT_COLS, /*contIndent=*/0,
+                                  /*stripCtrl=*/true, &wrapTrunc);
+  gJsonPager.curPage   = 0;
+  gJsonPager.truncated = wrapTrunc;
+  g2TextSplitPages(gJsonPager, bodyLen);
+  if (gJsonPager.pageCount == 0) {
     DEBUG_G2F("[G2] Settings JSON: split produced zero pages "
               "(module='%s', src=%u B)",
               gJsonModuleName, (unsigned)s.length());
     return false;
   }
 
-  DEBUG_G2F("[G2] Settings JSON: '%s' → %u page(s), src=%u B",
-            gJsonModuleName, (unsigned)gJsonPageCount, (unsigned)s.length());
-  return renderCurrentJsonPage(/*isInitialCreate=*/true);
+  DEBUG_G2F("[G2] Settings JSON: '%s' → %d page(s), src=%u B, trunc=%d",
+            gJsonModuleName, gJsonPager.pageCount, (unsigned)s.length(),
+            gJsonPager.truncated ? 1 : 0);
+  return settingsRenderJsonPage();
 }
 
 // -----------------------------------------------------------------------------

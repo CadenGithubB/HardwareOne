@@ -322,7 +322,7 @@ static const size_t kSettingsCount = sizeof(kSettings) / sizeof(kSettings[0]);
 #define CAM_SETTINGS_ROW_LEN  32
 // 1 back row + N settings rows. The picker page needs 1 back row + 11
 // resolution rows = 12, so size the shared buffer for that.
-static char        gRows[1 + 16][CAM_SETTINGS_ROW_LEN];
+static EXT_RAM_BSS_ATTR char gRows[1 + 16][CAM_SETTINGS_ROW_LEN];  // PSRAM: deep-copied by g2ShowListPage
 static const char* gRowPtrs[1 + 16];
 
 // -----------------------------------------------------------------------------

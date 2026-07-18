@@ -837,6 +837,16 @@ private:
 
 extern float gMapRotation;  // Rotation angle in degrees (0-360)
 
+// Move the map center one discrete step in a screen-space direction, scaled by
+// zoom and rotation and clamped to the loaded map's bounds. Shared by any
+// surface that pans via discrete input (the G2 lens map page's Pan N/S/E/W
+// rows today; OLED still pans via its own analog-stick momentum path). The
+// (dx,dy) are unit screen deltas: (0,-1)=N (0,+1)=S (+1,0)=E (-1,0)=W — screen
+// +y is down/south, mirroring the OLED joystick mapping. `frac` is the fraction
+// of the current viewport moved per call (0.10 = one-tenth of the viewport per
+// G2 Pan tap). Sets gMapCenterSet + gMapManuallyPanned.
+void mapPanStep(float dx, float dy, float frac = 0.10f);
+
 // Command handlers
 const char* cmd_map(const String& argsInput);
 const char* cmd_mapload(const String& argsInput);

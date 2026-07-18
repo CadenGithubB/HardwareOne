@@ -266,7 +266,7 @@ static void showWiFiStatusPage() {
   setNetSub(NET_SUB_WIFI_STATUS);
 #if ENABLE_WIFI
   // 12 row buffers is comfortable headroom — current layout uses up to 10.
-  static char rows[12][48];
+  static EXT_RAM_BSS_ATTR char rows[12][48];  // PSRAM: deep-copied by g2ShowListPage
   const char* ptrs[12];
   size_t n = 0;
 
@@ -327,7 +327,7 @@ static void showWiFiScanningPlaceholder() {
 //   1..N: SSID lines with RSSI suffix
 static void showScanResults() {
   setNetSub(NET_SUB_WIFI_SCAN);
-  static char rows[1 + 8][48];
+  static EXT_RAM_BSS_ATTR char rows[1 + 8][48];  // PSRAM: deep-copied by g2ShowListPage
   strcpy(rows[0], "<- WiFi");
   const char* ptrs[1 + 8];
   ptrs[0] = rows[0];
@@ -356,7 +356,7 @@ static void showScanResults() {
 static void showWiFiSavedList() {
   setNetSub(NET_SUB_WIFI_SAVED);
 #if ENABLE_WIFI
-  static char rows[1 + MAX_WIFI_NETWORKS][48];
+  static EXT_RAM_BSS_ATTR char rows[1 + MAX_WIFI_NETWORKS][48];  // PSRAM: deep-copied by g2ShowListPage
   strcpy(rows[0], "<- WiFi");
   const char* ptrs[1 + MAX_WIFI_NETWORKS];
   ptrs[0] = rows[0];
@@ -464,7 +464,7 @@ static void showEspNowMenu() {
 static void showEspNowDevices() {
   setNetSub(NET_SUB_ESPNOW_DEVS);
 #if ENABLE_ESPNOW
-  static char rows[1 + 8][48];
+  static EXT_RAM_BSS_ATTR char rows[1 + 8][48];  // PSRAM: deep-copied by g2ShowListPage
   strcpy(rows[0], "<- ESP-NOW");
   const char* ptrs[1 + 8];
   ptrs[0] = rows[0];

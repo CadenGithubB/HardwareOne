@@ -534,7 +534,7 @@ void g2ShowSensorsMenu() {
   // Stash the filtered set so handleTap can look up by row index later
   // — buildRows is cheap, but using the stashed copy guarantees the
   // dispatcher and the renderer agree on indexing.
-  static G2SensorRow gSensorsListCache[SENSORS_MAX_ROWS];
+  static EXT_RAM_BSS_ATTR G2SensorRow gSensorsListCache[SENSORS_MAX_ROWS];  // PSRAM: menu-index roster, read on-task only
   static size_t      gSensorsListCount = 0;
   for (size_t i = 0; i < count; i++) gSensorsListCache[i] = rows[i];
   gSensorsListCount = count;
