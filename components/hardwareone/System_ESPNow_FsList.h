@@ -12,7 +12,7 @@
 //       │                                         │
 //       │── fsListSendRequest(peerMac, path) ────►│
 //       │            (V4_TYPE_FS_LIST_REQ)        │
-//       │                                         ├─ defers to task tick
+//       │                                         ├─ defers to cmd_exec_task
 //       │                                         │  reads VFS, builds reply
 //       │◄──── V4_TYPE_FS_LIST_REPLY ─────────────┤
 //       │   (header + N V4PayloadFsEntry)         │
@@ -46,10 +46,12 @@
 //   in exchange for keeping deferred state trivial.
 //
 // Memory
-//   Sender pending table: FS_LIST_MAX_PENDING × ~32 B = 128 B DRAM (static).
+//   Sender pending table: FS_LIST_MAX_PENDING × 20 B = 80 B DRAM (static).
 //   Receiver deferred slot: ~150 B DRAM (static).
-//   Reply send buffer: built on cmd_exec stack (~3 KB peak — well under the
-//   24 KB stack that task has).
+//   Reply send buffer: 2572 B (140 B header + 32 × 76 B entries), ps_alloc'd in
+//   PSRAM by processListDeferred and freed after the send — deliberately NOT on
+//   the stack. cmd_exec has 8 KB total, and LittleFS directory iteration wants a
+//   lot of it; see the rationale at the allocation site.
 
 #ifndef SYSTEM_ESPNOW_FSLIST_H
 #define SYSTEM_ESPNOW_FSLIST_H
@@ -147,37 +149,41 @@ uint32_t fsGetSendRequest(const uint8_t peerMac[6],
 // the fields. This keeps the protocol module standalone — no header cycle.
 
 // Record an incoming FS_LIST_REQ into the deferred slot. Called from
-// BTC_TASK (tiny stack) — minimal work only: validates the payload, copies
-// fields into static storage, returns. Actual VFS read + reply send happens
-// later in fsListTick() on the main task.
+// espnow_task's RX-handler dispatch (6656 B stack, and its job is to drain the
+// RX ring fast) — minimal work only: validates the payload, copies fields into
+// static storage, returns. Actual VFS read + reply send is handed to
+// cmd_exec_task, which is where the heavy work belongs.
 void fsListOnRequestReceived(const uint8_t srcMac[6],
                              const uint8_t* payload, uint16_t payloadLen);
 
 // Match an incoming FS_LIST_REPLY against the pending-request table and
-// fire the registered callback. Called from BTC_TASK — callback runs on
-// BTC_TASK too, so its body must be minimal (copy data, set a flag).
+// fire the registered callback. Called from espnow_task's RX-handler dispatch —
+// the callback runs on espnow_task too, so its body must be minimal (copy data,
+// set a flag) or it stalls the RX drain.
 void fsListOnReplyReceived(const uint8_t srcMac[6],
                            const uint8_t* payload, uint16_t payloadLen);
 
-// FS_STAT_REQ + FS_STAT_REPLY mirror the list pattern: REQ defers to tick,
+// FS_STAT_REQ + FS_STAT_REPLY mirror the list pattern: REQ defers to cmd_exec,
 // REPLY matches reqId and fires its callback.
 void fsStatOnRequestReceived(const uint8_t srcMac[6],
                              const uint8_t* payload, uint16_t payloadLen);
 void fsStatOnReplyReceived(const uint8_t srcMac[6],
                            const uint8_t* payload, uint16_t payloadLen);
 
-// FS_GET_REQ defers to tick (peer kicks off sendFileToMac). FS_GET_ACK is
-// the synchronous reply BEFORE the FILE_* transfer.
+// FS_GET_REQ defers to cmd_exec (peer kicks off sendFileToMac there). FS_GET_ACK
+// is the synchronous reply BEFORE the FILE_* transfer.
 void fsGetOnRequestReceived(const uint8_t srcMac[6],
                             const uint8_t* payload, uint16_t payloadLen);
 void fsGetOnAckReceived(const uint8_t srcMac[6],
                         const uint8_t* payload, uint16_t payloadLen);
 
-// Per-tick driver — call from the main ESP-NOW task tick. Two jobs:
-//   (1) If a deferred reply request is queued, build the reply (VFS read +
-//       serialize entries) and send it.
-//   (2) Sweep the pending-request table for timeouts; fire callbacks with
-//       a synthesized error status for any that expired.
+// Per-tick driver — call from the main ESP-NOW task tick. SENDER-side only:
+// sweeps the pending-request table for timeouts and fires callbacks with a
+// synthesized error status for any that expired.
+//
+// Receiver-side reply building is NOT here. It runs on cmd_exec_task, submitted
+// the moment the request is captured — an FS_LIST reply cannot be built on
+// espnow_task without overflowing it.
 void fsListTick();
 
 #endif // ENABLE_ESPNOW

@@ -498,8 +498,8 @@ inline String getCapabilityListLong(uint32_t mask, const CapabilityName* names) 
 
 // Per-device message-ring depth, per direction, based on available memory.
 // PeerMessageHistory holds TWO rings of this size (received + sent), and each
-// slot is a ReceivedTextMessage (~316 B). So per-peer cost ≈ 2 * N * 316 B:
-//   PSRAM  : N=250 → ~154 KB/peer (in PSRAM — cheap on the 8 MB part). Capped at
+// slot is a ReceivedTextMessage (324 B). So per-peer cost ≈ 2 * N * 324 B:
+//   PSRAM  : N=250 → ~158 KB/peer (in PSRAM — cheap on the 8 MB part). Capped at
 //            250 (not 256) because head/tail/count below are uint8_t (max 255).
 //   no-PSRAM: N=16 → ~10 KB/peer (in internal DRAM — tight; raised from 5 on
 //             request to keep a more useful local history on plain ESP32 boards).
@@ -519,16 +519,28 @@ inline String getCapabilityListLong(uint32_t mask, const CapabilityName* names) 
 
 // Max length of a user text message (espnowsend). Messages above
 // ESPNOW_V4_MAX_PLAINTEXT (~202 B) are fragmented over the generic
-// chunk/reassemble transport (same path command-results use) and rebuilt on
-// the receiver. This cap sizes the receive queue slot AND the per-message
-// history slot — the web inbox reads the history ring, so it must hold the
-// full message. 1024 → ~+600 KB PSRAM across the 100×8 history ring; cheap on
-// an 8 MB-PSRAM board, and 6 fragments max (1024 / 200).
+// chunk/reassemble transport (same path command-results use); the receiver
+// stores each fragment as its own history record — device-side reassembly
+// deliberately SKIPS text, so the device never materializes a multi-KB lump —
+// and clients rejoin the pieces by msgId/fragIndex. 1024 → 6 fragments max
+// (1024 / 200).
+//
+// This is ONLY a length gate; it sizes no buffer. Both use sites are bare
+// compares: TX rejects an oversized espnowsend, RX bounds an accepted payload
+// (inert for text, which never arrives as more than one fragment). The slots
+// the text lands in are hardcoded char[256] — TextQueueEntry::content and
+// ReceivedTextMessage::message — each holding 255 B + NUL, already more than
+// a 200 B fragment can fill. So changing this number costs no memory and
+// frees none; it only moves where a long send is refused.
 #define ESPNOW_TEXT_MAX_LEN 1024
 
-// Dynamic peer history allocation parameters
-#define PEER_HISTORY_INITIAL_CAPACITY 5    // Start with 5 peer slots (~125 KB)
-#define PEER_HISTORY_GROWTH_INCREMENT 3    // Grow by 3 slots at a time (~75 KB per growth)
+// Dynamic peer history allocation parameters. One slot is a whole
+// PeerMessageHistory — ~158 KB on a PSRAM build (two 250-deep rings, see
+// above) — so these counts move PSRAM in very large chunks. Growth is capped
+// at the configured peer limit (MESH_PEER_MAX = 16 slots ≈ 2.47 MB of PSRAM
+// if every slot fills). Budget accordingly before nudging either number.
+#define PEER_HISTORY_INITIAL_CAPACITY 5    // Start with 5 peer slots (~791 KB)
+#define PEER_HISTORY_GROWTH_INCREMENT 3    // Grow by 3 slots at a time (~475 KB per growth)
 
 // Message types for logging
 enum LogMessageType {
@@ -612,15 +624,14 @@ struct RouterMetrics {
   uint32_t messagesSent;
   uint32_t messagesReceived;
   uint32_t messagesFailed;
-  uint32_t chunksTimedOut;
-  // V4 fragmentation metrics (gV4Reasm path)
+  // V4 fragmentation metrics (gV4Reasm path). Reassembly timeouts are counted by
+  // v4FragRxGc — that is the one the GC sweep actually bumps.
   uint32_t v4FragTx;             // Total fragments transmitted
   uint32_t v4FragRx;             // Total fragments received
   uint32_t v4FragRxCompleted;    // Messages fully reassembled
   uint32_t v4FragRxGc;           // Reassembly contexts GC'ed due to timeout
 
   RouterMetrics() : messagesSent(0), messagesReceived(0), messagesFailed(0),
-                    chunksTimedOut(0),
                     v4FragTx(0), v4FragRx(0), v4FragRxCompleted(0), v4FragRxGc(0) {}
 };
 
@@ -767,7 +778,8 @@ struct EspNowState {
   // Deferred metadata processing (set in callback, handled in task)
   bool deferredMetadataPending;
   uint8_t deferredMetadataSrcMac[6];
-  uint8_t deferredMetadataPayload[216];  // V4PayloadMetadata size (212) + 4 bytes padding
+  uint8_t deferredMetadataPayload[216];  // V4PayloadMetadata is 202 B packed (Wire.h caps it at the 202 B
+                                         // plaintext budget) — this staging buffer has 14 B of slack
   
   // Deferred message handling (ISR-safe pattern: callback sets flag, task processes)
   // TEXT message ring buffer. Deepened from 4 → 16: a long text now arrives as
@@ -794,7 +806,12 @@ struct EspNowState {
   bool deferredCmdRespPending;
   uint8_t deferredCmdRespSrcMac[6];
   char deferredCmdRespDeviceName[32];
-  char* deferredCmdRespResult;  // PSRAM-allocated at init (6144 bytes — matches V4_FRAG_MAX × V4_MAX_FRAGMENT_PAYLOAD)
+  char* deferredCmdRespResult;  // PSRAM-allocated at init: 6144 B, i.e. 6143 chars + NUL. This does NOT
+                                // match the fragmentation budget — V4_FRAG_MAX × V4_MAX_FRAGMENT_PAYLOAD
+                                // is 6400, so a fully reassembled CMD_RESP can be 256 B LARGER than this
+                                // buffer. v4h_cmd_resp clamps the copy to 6143, silently truncating a
+                                // maximal result. That clamp is derived from THIS allocation, not from the
+                                // wire limit: raising it toward 6400 without growing the alloc overflows.
   bool deferredCmdRespSuccess;
   uint32_t deferredCmdRespReqId; // Correlation id — the request's msgId, echoed in the CMD_RESP frame header
   

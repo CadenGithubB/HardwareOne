@@ -103,7 +103,8 @@ static DeferredReply sDeferred = {};
 
 // ============================================================================
 // Mutex — protects sPending[] and sDeferred against concurrent access from
-// BTC_TASK (RX callbacks) and the main ESP-NOW task (tick + send API).
+// espnow_task (RX handlers), cmd_exec_task (the deferred reply builder), and
+// the main ESP-NOW task (tick + send API).
 // ============================================================================
 static SemaphoreHandle_t sMutex = nullptr;
 
@@ -386,10 +387,10 @@ static void sendBusyReply(uint8_t op, const uint8_t srcMac[6],
 // order so the runner can live near captureDeferred for readability).
 static void processDeferredLocked();
 
-// Runs on cmd_exec_task (24 KB stack). Locks sMutex, drains the deferred
-// slot via processDeferredLocked() — the same code that fsListTick used to
-// invoke from espnow_task, but now living on a stack that can absorb the
-// 2.5 KB+ VFS/LittleFS work without overflowing.
+// Runs on cmd_exec_task (8 KB stack). Locks sMutex, drains the deferred slot
+// via processDeferredLocked() — the same code fsListTick used to invoke from
+// espnow_task, but now on the task sized to absorb the VFS/LittleFS work
+// instead of espnow_task's 6656 B.
 //
 // THE ARG IS UNUSED. We funnel through the single global sDeferred slot; the
 // "what to do" is encoded in sDeferred.op, not in the arg. submitDeferred-
@@ -414,8 +415,8 @@ static void runDeferredFsOpOnCmdExec(void* arg) {
 // Common deferred-slot capture for any incoming request opcode. Verifies
 // the payload size, copies into the union member matching `op`, sets the
 // op tag, returns. If the deferred slot is already busy, fires a TOO_BUSY
-// reply immediately from this BTC_TASK context (small single-frame send
-// is acceptable here).
+// reply immediately from this espnow_task RX-handler context (a small
+// fire-and-forget single-frame send is acceptable here).
 static void captureDeferred(uint8_t op, const uint8_t srcMac[6],
                             const uint8_t* payload, uint16_t payloadLen,
                             uint16_t expectedSize) {
@@ -459,13 +460,14 @@ static void captureDeferred(uint8_t op, const uint8_t srcMac[6],
   }
   sDeferred.pending = true;
 
-  // Hand the deferred work off to cmd_exec_task. Used to be processed by
-  // fsListTick() on espnow_task, but the 2.5 KB stack buffer in
-  // processListDeferred + VFS::openGuarded + LittleFS directory iteration
-  // overflowed espnow_task's 22 KB budget. cmd_exec_task has 24 KB stack
-  // and was designed exactly for this kind of heavy crypto/FS work (it's
-  // where SESSION_OPEN/CONFIRM also defer to — see comment block at
-  // System_ESPNow.cpp:3855).
+  // Hand the deferred work off to cmd_exec_task. This used to run in fsListTick()
+  // on espnow_task and overflowed it: VFS::openGuarded + LittleFS directory
+  // iteration (plus, at the time, a 2.5 KB reply buffer on the stack) do not fit
+  // in espnow_task's 6656 B, and espnow_task's whole job is draining the RX ring
+  // fast. cmd_exec_task has 8 KB and exists for exactly this heavy crypto/FS work
+  // — it's where SESSION_OPEN/CONFIRM defer to as well. See the "THREADING /
+  // DEFERRAL RULE (Seam 2 invariant)" block above the v4 handler table in
+  // System_ESPNow.cpp for the general rule.
   //
   // On submit failure (queue full) we send a TOO_BUSY response synchronously
   // and clear the pending flag so the peer can retry instead of waiting
@@ -542,7 +544,7 @@ void fsGetOnAckReceived(const uint8_t srcMac[6],
 }
 
 // ============================================================================
-// Reply builder — runs on main task tick
+// Reply builder — runs on cmd_exec_task (see runDeferredFsOpOnCmdExec)
 // ============================================================================
 
 // ============================================================================
@@ -591,9 +593,9 @@ static void processDeferredLocked() {
 }
 
 static void processListDeferred(const uint8_t srcMac[6], const V4PayloadFsListReq& req) {
-  // Reply runs on cmd_exec_task (24 KB stack — see runDeferredFsOpOnCmdExec).
-  // The reply buffer is 140 + 32*76 = 2572 B; comfortably fits on the
-  // cmd_exec stack, but we still PSRAM-allocate it for two reasons:
+  // Reply runs on cmd_exec_task (8 KB stack — see runDeferredFsOpOnCmdExec).
+  // The reply buffer is 140 + 32*76 = 2572 B — nearly a third of that stack, so
+  // PSRAM-allocating it is not just tidiness:
   //   (1) Stack headroom for VFS::openGuarded + LittleFS recursive directory
   //       iteration internals (LittleFS uses substantial stack for path
   //       resolution + per-entry metadata reads).
@@ -744,8 +746,9 @@ send_reply: ;
   uint16_t payloadLen = sizeof(V4PayloadFsListReplyHeader)
                       + (uint16_t)hdr->entryCount * sizeof(V4PayloadFsEntry);
   uint32_t msgId = generateMessageId();
-  // Step 3c: cmd_exec context (deferred handler). 3s timeout — REPLY payload
-  // can be up to ~500B with full entry list which fragments on the wire.
+  // Step 3c: cmd_exec context (deferred handler). 3s timeout — a REPLY with a
+  // full entry list is 2572 B (140 B header + 32 × 76 B), so it always fragments
+  // on the wire (13 fragments at 200 B each) and the ACK waits stack up.
   bool sent = espnowtx::sendAeadSync(srcMac, ESPNOW_V4_TYPE_FS_LIST_REPLY, 0, msgId,
                                      replyBuf, payloadLen, 1, 3000);
   DEBUG_ESPNOWF("[FSLIST] Sent LIST REPLY reqId=%u status=%u entries=%u/%u hasMore=%u sent=%d",
@@ -900,7 +903,7 @@ void fsListTick() {
   if (!lk.held) return;
 
   // NOTE: deferred reply work used to be processed here — that path overflowed
-  // espnow_task's 22 KB stack on the LIST reply (2.5 KB stack buffer + VFS +
+  // espnow_task's 6656 B stack on the LIST reply (2.5 KB stack buffer + VFS +
   // LittleFS dir iteration). Capture now hands off to cmd_exec_task via
   // submitDeferredToCmdExec at the end of captureDeferred() — see the comment
   // there. This tick now only sweeps SENDER-side timeouts.

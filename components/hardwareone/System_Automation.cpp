@@ -3604,41 +3604,89 @@ static bool automationEventTriggersMatch(const char* automationJson, const Syste
   return false;
 }
 
+// Scratch space for the event drain in schedulerTickMinute(). Sized off the
+// ring (48 x ~164 B), so it is too big to reserve at link time on behalf of the
+// many devices that never turn automations on — the only caller gates on
+// gSettings.automationsEnabled, so a disabled device never runs a tick and
+// never pays for this.
+//
+// INTERNAL, not PSRAM, for two independent reasons. systemEventFetchSince fills
+// this buffer from inside taskENTER_CRITICAL(&gEventMux): a PSRAM destination
+// would put ~7.9 KB of cache-missing writes under a global spinlock with
+// interrupts off, stalling every systemEventPost on both cores. And the events
+// themselves are not safe to externalise — SYSEVT_REMOTE_CMD_RX carries the raw
+// remote command text in detail[], so a `login <user> <pass>` arriving over
+// ESP-NOW/MQTT would land in plaintext on a probeable chip (flash encryption is
+// off).
+//
+// Deliberately never freed. cmd_automation flips automationsEnabled from the
+// command tasks (cmd_exec/web, core 0) while a tick may be mid-scan on the loop
+// task (core 1), so releasing it on disable would hand a live reader a dangling
+// pointer. Allocate-on-first-use-and-keep buys back the DRAM for anyone who
+// leaves automations off, with no teardown race to get wrong.
+static SystemEvent* sEventBuf = nullptr;
+
 // Core scheduler logic - extracted for reuse
 void schedulerTickMinute() {
   time_t now = time(nullptr);
   bool timeValid = (now > 0);
 
   // Drain pending bus events BEFORE the time-sync bail so event triggers
-  // work on devices without NTP/RTC. Static buffers: single consumer (this
-  // function only runs on the main loop task), and 16 events at ~90 B each
-  // would be a meaningful stack bite. Events older than 60 s are discarded
+  // work on devices without NTP/RTC. Events older than 60 s are discarded
   // unmatched — they piled up while automations were disabled, and firing
   // on minute-old edges after a re-enable would surprise the user.
   static uint32_t sEventCursor = UINT32_MAX;  // UINT32_MAX = start "from now"
-  static SystemEvent sEventBuf[SYSEVT_RING_SIZE];
   static uint32_t sEventRingSkipped = 0;  // ring overwrote events before we read them
   gAutoEventsPending = false;  // posts after this point re-set it for the next tick
-  uint32_t skippedBefore = sEventRingSkipped;
-  int evCount = systemEventFetchSince(&sEventCursor, sEventBuf, SYSEVT_RING_SIZE,
-                                      &sEventRingSkipped);
-  if (sEventRingSkipped != skippedBefore) {
-    // SILENT LOSS with correctness impact: any event trigger in the skipped
-    // gap NEVER fired. Warn (throttled) so it's visible in debug output.
-    static uint32_t sSkipWarnMs = 0;
-    if (everyMs(&sSkipWarnMs, 10000)) {
-      DEBUG_AUTOMATIONSF("[AUTO] event ring overflowed this consumer: %lu event(s) skipped total - triggers in the gap did not fire",
-                         (unsigned long)sEventRingSkipped);
+  if (!sEventBuf) {
+    // heap_caps_calloc, not ps_alloc(PreferInternal): the latter degrades to
+    // plain malloc(), which lands in PSRAM once an allocation clears
+    // CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL. This buffer must never go there
+    // (see above), so state the requirement instead of inheriting it from a
+    // tunable that happens to be larger than we are today.
+    sEventBuf = (SystemEvent*)heap_caps_calloc(SYSEVT_RING_SIZE, sizeof(SystemEvent),
+                                               MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!sEventBuf) {
+      static uint32_t sAllocWarnMs = 0;
+      if (everyMs(&sAllocWarnMs, 10000)) {
+        DEBUG_AUTOMATIONSF("[AUTO] event drain buffer alloc failed (%u B) - event triggers skipped until it succeeds",
+                           (unsigned)(SYSEVT_RING_SIZE * sizeof(SystemEvent)));
+      }
     }
   }
-  if (evCount > 0) {
-    uint32_t nowMs = millis();
-    int w = 0;
-    for (int i = 0; i < evCount; i++) {
-      if (nowMs - sEventBuf[i].tsMs <= 60000UL) sEventBuf[w++] = sEventBuf[i];
+  int evCount = 0;  // no buffer => nothing drained; the clock scan below still runs
+  if (sEventBuf) {
+    uint32_t skippedBefore = sEventRingSkipped;
+    evCount = systemEventFetchSince(&sEventCursor, sEventBuf, SYSEVT_RING_SIZE,
+                                    &sEventRingSkipped);
+    if (sEventRingSkipped != skippedBefore) {
+      // SILENT LOSS with correctness impact: any event trigger in the skipped
+      // gap NEVER fired. Warn (throttled) so it's visible in debug output.
+      static uint32_t sSkipWarnMs = 0;
+      if (everyMs(&sSkipWarnMs, 10000)) {
+        DEBUG_AUTOMATIONSF("[AUTO] event ring overflowed this consumer: %lu event(s) skipped total - triggers in the gap did not fire",
+                           (unsigned long)sEventRingSkipped);
+      }
     }
-    evCount = w;
-    DEBUGF(DEBUG_AUTOMATIONS, "[automations] tick drained %d fresh event(s)", evCount);
+    if (evCount > 0) {
+      uint32_t nowMs = millis();
+      int w = 0;
+      for (int i = 0; i < evCount; i++) {
+        if (nowMs - sEventBuf[i].tsMs <= 60000UL) sEventBuf[w++] = sEventBuf[i];
+      }
+      evCount = w;
+      DEBUGF(DEBUG_AUTOMATIONS, "[automations] tick drained %d fresh event(s)", evCount);
+    }
+  } else {
+    // Heap too tight to drain: event triggers sit this tick out rather than
+    // deref a null buffer. The cursor is still UINT32_MAX (this branch can only
+    // be reached before the first successful alloc), so a later tick that does
+    // get memory starts "from now" and reports no bogus skip gap. Clearing
+    // gAutoEventsPending above means we wait for the next posted event or the
+    // 60 s safety tick to retry, instead of re-reading and re-parsing
+    // automations.json every 250 ms while the heap is already exhausted.
+    // The alloc site above already warned; this branch is only ever reached on
+    // the same tick as that failure, so warning again would just double it.
   }
 
   // Without synced time only event fires are possible; skip the clock scan.
@@ -4012,14 +4060,14 @@ static const char* cmd_print(const String& argsInput) {
 const CommandEntry automationCommands[] = {
   // Primary dispatcher: "automation <subcommand> [args]"
   // Subcommands: system enable|disable|status, list, add, enable, disable, delete, run, sanitize, recompute
-  { "automation", "Automation system: automation <subcommand> [args].", false, cmd_automation,
+  { "automation", "Automation system: automation <subcommand> [args].", true, cmd_automation,
     "Usage: automation <system enable|disable|status | list | add | enable | disable | delete | run | trigger | sanitize | recompute>" },
 
   // Single-word aliases for common operations (follow naming convention)
   { "automationlist", "List all automations.", false, cmd_automation_list },
-  { "automationadd", "Add automation (same as 'automation add').", false, cmd_automation_add },
-  { "automationrun", "Run automation by ID: automationrun id=<id>.", false, cmd_automation_run },
-  { "automationtrigger", "Arm afterDelay automation timer: automationtrigger id=<id>.", false, cmd_automation_trigger },
+  { "automationadd", "Add automation (same as 'automation add').", true, cmd_automation_add },
+  { "automationrun", "Run automation by ID: automationrun id=<id>.", true, cmd_automation_run },
+  { "automationtrigger", "Arm afterDelay automation timer: automationtrigger id=<id>.", true, cmd_automation_trigger },
 
   // Utility commands
   { "autolog", "Automation logging: autolog start <file> | stop | status.", false, cmd_autolog, "Usage: autolog start <filename> | autolog stop | autolog status" },

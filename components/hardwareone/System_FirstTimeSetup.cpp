@@ -259,7 +259,7 @@ static bool createInitialAdminUser(const String& username, const String& plainte
   JsonObject admin = users.add<JsonObject>();
   admin["id"] = 1;
   admin["username"] = username;
-  admin["role"] = "admin";
+  admin["role"] = "superadmin";  // first user is the device owner → top tier
   admin["createdAt"] = (const char*)nullptr;  // resolved lazily via boot anchor
   admin["createdBy"] = "firstsetup";          // provenance: onboarding wizard owner
   admin["createdAtSource"] = "pending";       // time-derivation status (see resolver)
@@ -850,7 +850,7 @@ void firstTimeSetupIfNeeded() {
   admin["id"] = 1;
   admin["username"] = u;
   // Password now stored in per-user settings file, not here
-  admin["role"] = "admin";
+  admin["role"] = "superadmin";  // first user is the device owner → top tier
   admin["createdAt"] = (const char*)nullptr;  // resolved lazily via boot anchor
   admin["createdBy"] = "firstsetup";          // provenance: onboarding wizard owner
   admin["createdAtSource"] = "pending";       // time-derivation status (see resolver)

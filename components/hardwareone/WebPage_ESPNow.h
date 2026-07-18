@@ -2234,7 +2234,7 @@ window.togglePane = function(paneId, btnId) {
       });
 
       // Topology view is refreshed only on explicit user action (tab switch or Discover button),
-      // not on the 3-second mesh status poll — that would spam the CLI with toporesults requests.
+      // not on the 10-second mesh status poll — that would spam the CLI with toporesults requests.
     };
     
     // Pair an unpaired device

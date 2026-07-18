@@ -142,10 +142,11 @@ BaseType_t xTaskCreateLogged(TaskFunction_t pxTaskCode,
       line += " tag=";
       line += tag;
     }
-    line += " stackWords=";
-    line += String((unsigned long)usStackDepth);
+    // ESP-IDF's xTaskCreate takes usStackDepth in BYTES (deviation from vanilla
+    // FreeRTOS; StackType_t is uint8_t here) — report it as-is. The old
+    // "stackWords=N stackBytes=N*4" pair was 4x wrong. See System_TaskUtils.h.
     line += " stackBytes=";
-    line += String((unsigned long)(usStackDepth * 4));
+    line += String((unsigned long)usStackDepth);
     line += " result=";
     line += (res == pdPASS ? "ok" : "fail");
     line += " heapBefore=";
@@ -182,7 +183,7 @@ bool createInputTask() {
     }
   }
   if (gInputTaskHandle == nullptr) {
-    const uint32_t stackWords = INPUT_STACK_WORDS;  // words (~14KB)
+    const uint32_t stackWords = INPUT_STACK_WORDS;  // BYTES (3584 = 3.5 KB); name is a misnomer, see System_TaskUtils.h
     // Pin to Core 1 (APP): espnow_task + the Wi-Fi stack saturate Core 0, and a
     // starved input poll mid-I2C-transaction lets the legacy I2C driver's bus-
     // recovery path storm the I2C ISR → INT WDT (seen on bond role-swap re-sync).
@@ -355,15 +356,17 @@ bool createRTCTask() {
 // ============================================================================
 
 // Report stack usage for a single task
-void reportTaskStack(TaskHandle_t handle, const char* name, uint32_t allocatedWords) {
+void reportTaskStack(TaskHandle_t handle, const char* name, uint32_t allocatedBytes) {
   if (!handle) return;
-  
+
   // Only call expensive FreeRTOS function when debug enabled
   if (!isDebugFlagSet(DEBUG_PERFORMANCE)) return;
-  
+
+  // Both the create-time depth and the high-water mark are in BYTES on this
+  // port (StackType_t is uint8_t), so no word->byte scaling. The old "* 4" here
+  // inflated every absolute figure 4x. See System_TaskUtils.h.
   UBaseType_t watermark = uxTaskGetStackHighWaterMark(handle);
-  uint32_t allocatedBytes = allocatedWords * 4;
-  uint32_t usedBytes = allocatedBytes - (watermark * 4);
+  uint32_t usedBytes = allocatedBytes - (uint32_t)watermark;
   uint32_t usedPercent = (usedBytes * 100) / allocatedBytes;
   uint32_t freePercent = 100 - usedPercent;
   
@@ -383,7 +386,7 @@ void reportTaskStack(TaskHandle_t handle, const char* name, uint32_t allocatedWo
   line += "B (";
   line += String(usedPercent);
   line += "%) free=";
-  line += String(watermark * 4);
+  line += String((unsigned long)watermark);
   line += "B (";
   line += String(freePercent);
   line += "%) watermark=";
@@ -491,6 +494,7 @@ void reportAllTaskStacks() {
   BROADCAST_PRINTF("-- TASK BREAKDOWN (%u tasks) --", (unsigned)numTasks);
   broadcastOutput("  Name              Stack(KB)  Used(KB)  Free(KB)  Used%  CPU%  dCPU%  TCB(B)");
   broadcastOutput("  ----------------  ---------  --------  --------  -----  ----  -----  ------");
+  broadcastOutput("  ('~' = estimate: kernel tasks report no stack size, so Stack/Used/Used% assume a 4 KB margin; only Free is measured)");
   
   uint32_t totalStackAllocated = 0;
   uint32_t totalStackUsed = 0;
@@ -561,10 +565,12 @@ void reportAllTaskStacks() {
     if (!kt.handle || !alive) continue;
     if (!isTaskHandleInSnapshot(kt.handle)) continue;
     
+    // BYTES, not words — kt.stackWords holds the byte count passed to
+    // xTaskCreate, and the HWM is in bytes too. See System_TaskUtils.h.
     UBaseType_t watermark = uxTaskGetStackHighWaterMark(kt.handle);
-    uint32_t allocBytes = kt.stackWords * 4;
-    uint32_t usedBytes = allocBytes - (watermark * 4);
-    uint32_t freeBytes = watermark * 4;
+    uint32_t allocBytes = kt.stackWords;
+    uint32_t freeBytes = (uint32_t)watermark;
+    uint32_t usedBytes = allocBytes - freeBytes;
     uint32_t usedPercent = (usedBytes * 100) / allocBytes;
     
     // Find CPU usage by handle (names can be stale/duplicate). cpuPercent is
@@ -618,12 +624,16 @@ void reportAllTaskStacks() {
     
     UBaseType_t watermark = taskArray[i].usStackHighWaterMark;
     
-    // Estimate allocated stack (we don't know exact size for system tasks)
-    // Use watermark + safety margin as conservative estimate
-    uint32_t estimatedStackWords = watermark + 1024;  // Assume 4KB safety margin
-    uint32_t allocBytes = estimatedStackWords * 4;
-    uint32_t usedBytes = allocBytes - (watermark * 4);
-    uint32_t freeBytes = watermark * 4;
+    // Estimate allocated stack (we don't know the exact size for system tasks):
+    // assume alloc = free + a 4 KB margin. BYTES throughout — the watermark is
+    // already bytes on this port (see System_TaskUtils.h), so the old
+    // "(watermark + 1024) * 4" both mis-scaled AND only granted a 1 KB margin.
+    // NOTE: usedBytes is therefore the ASSUMED margin, not a measurement — the
+    // only real datum here is freeBytes (the HWM).
+    constexpr uint32_t kAssumedUsedBytes = 4096;
+    uint32_t freeBytes = (uint32_t)watermark;
+    uint32_t allocBytes = freeBytes + kAssumedUsedBytes;
+    uint32_t usedBytes = kAssumedUsedBytes;
     uint32_t usedPercent = (usedBytes * 100) / allocBytes;
     uint32_t cpuPercent = (totalRuntime > 0) ? (uint32_t)((uint64_t)taskArray[i].ulRunTimeCounter * 100 / totalRuntime) : 0;  // uint64: *100 overflows uint32 after ~43s uptime
     int dCpu = deltaCpuPercent(taskArray[i].xHandle, (uint32_t)taskArray[i].ulRunTimeCounter, totalDelta);

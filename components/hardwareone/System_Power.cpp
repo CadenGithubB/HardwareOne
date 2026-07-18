@@ -336,9 +336,9 @@ static const char* cmd_powersave(const String& argsInput) {
 // Command table
 // Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry powerCommands[] = {
-  {"power",         "Power management [mode] [auto] [threshold]", false, cmd_power,         "Usage:\n  power - show current power status\n  power mode <perf|balanced|saver|ultra|0-3>\n  power auto <on|off>\n  power threshold <0-100>"},
-  {"powercooldown", "Sleep transition cooldown (ms; 0 disables)", false, cmd_powercooldown, "Usage: powercooldown <0..60000>"},
-  {"powersave",     "Idle power-save: OLED off + downclock (0 disables)", false, cmd_powersave, "Usage: powersave <0..1440>"}
+  {"power",         "Power management [mode] [auto] [threshold]", true, cmd_power,         "Usage:\n  power - show current power status\n  power mode <perf|balanced|saver|ultra|0-3>\n  power auto <on|off>\n  power threshold <0-100>"},
+  {"powercooldown", "Sleep transition cooldown (ms; 0 disables)", true, cmd_powercooldown, "Usage: powercooldown <0..60000>"},
+  {"powersave",     "Idle power-save: OLED off + downclock (0 disables)", true, cmd_powersave, "Usage: powersave <0..1440>"}
 };
 
 const size_t powerCommandsCount = sizeof(powerCommands) / sizeof(powerCommands[0]);

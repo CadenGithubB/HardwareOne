@@ -1099,7 +1099,7 @@ const size_t imuCommandsCount = sizeof(imuCommands) / sizeof(imuCommands[0]);
 // IMU Task - FreeRTOS Task Function
 // ============================================================================
 // Purpose: Continuously reads 9-DOF orientation data from BNO055 IMU sensor
-// Stack: 4096 words (~16KB) | Priority: 1 | Core: Any
+// Stack: 4096 BYTES (4 KB) | Priority: 1 | Core: Any
 // Lifecycle: Created by cmd_imustart, deleted when gImuEnabled=false
 // Polling: Configurable via imuDevicePollMs (default 200ms) | I2C Clock: 100kHz
 //

@@ -122,23 +122,36 @@ static esp_err_t webEspnowSendJsonEscapedString(httpd_req_t* req, const char* s)
 
 // Persistent staging buffer for handleEspNowMessages. Lazy-initialized on first
 // request, then reused for every subsequent poll for the lifetime of the device.
-// Pre-2026-05 this was a per-request ps_alloc+free pair; the web UI's polling
-// cadence (~one poll per 7s) made it the noisiest single PSRAM allocator in
-// memreport (134 allocs / 4.2 MB cumulative tracked over 15 min). Static buffer
-// eliminates that churn.
+// Pre-2026-05 this was a per-request ps_alloc+free pair; the web UI polls this
+// endpoint every 500 ms while the ESP-NOW page is open, which made it the
+// noisiest single PSRAM allocator in memreport (134 allocs / 4.2 MB cumulative
+// over one tracked 15-min window — the page is only open, and only polling, for
+// part of any such window). Static buffer eliminates that churn.
 //
-// Sizing is PSRAM-aware to match the underlying per-peer ring capacity:
-//   PSRAM build:    MESSAGES_PER_DEVICE = 100, so 5+ peers × 100 = hundreds
-//                   possible. Cap at 50 per poll → ~15.8 KB in PSRAM. Bursts
-//                   of >50 new messages paginate across multiple polls via
-//                   the existing ?since= cursor; no data is lost.
-//   No-PSRAM build: MESSAGES_PER_DEVICE = 5, so 5 peers × 5 = 25 messages
-//                   max population. Cap at 15 → ~4.7 KB. PreferPSRAM falls
-//                   back to DRAM here; smaller cap keeps DRAM commitment
-//                   modest (~1.5% of 326 KB internal heap).
+// Sizing is PSRAM-aware to match the underlying per-peer ring capacity. Note
+// PeerMessageHistory holds TWO rings of MESSAGES_PER_DEVICE (received + sent),
+// so a peer's population is twice the depth quoted below:
+//   PSRAM build:    MESSAGES_PER_DEVICE = 250, so a SINGLE peer can hold 500
+//                   records — 10× this cap on its own, before any second peer.
+//                   Cap at 50 per poll → ~15.8 KB in PSRAM. A backlog drains
+//                   across polls via the existing ?since= cursor, but only
+//                   losslessly in the single-peer case — see the caveat below.
+//   No-PSRAM build: MESSAGES_PER_DEVICE = 16, so one peer holds up to 32
+//                   records and the cap of 15 sits BELOW even a single ring's
+//                   depth. Cap at 15 → ~4.7 KB. PreferPSRAM falls back to DRAM
+//                   here; smaller cap keeps DRAM commitment modest (~1.5% of
+//                   326 KB internal heap).
+//
+// Cursor caveat (multi-peer): getAllMessages fills peer-by-peer until the cap,
+// then sorts only the subset it returned — it can miss the true global-newest
+// (its own comment in System_ESPNow.cpp concedes this). The client advances
+// lastSeqNum to the MAX seq it saw in the batch, so when the cap truncates a
+// later peer's lower-seq records those records fall permanently below the
+// cursor and are never fetched. Pagination is lossless only when the capped set
+// is seq-contiguous — i.e. one peer, or the ?mac= filtered path.
 //
 // Concurrency: ESP-IDF httpd runs handlers sequentially on a single worker task
-// (see comment at WebServer_Server.cpp:245), so no mutex is needed — only one
+// (see comment at WebServer_Server.cpp:274), so no mutex is needed — only one
 // handler invocation can touch this buffer at a time. If httpd ever switches
 // to a threaded model, this needs a per-task buffer or a guard.
 //
@@ -153,14 +166,28 @@ static esp_err_t webEspnowSendJsonEscapedString(httpd_req_t* req, const char* s)
 static ReceivedTextMessage* gWebMessagesBuf = nullptr;
 
 /**
- * @brief Fetch received ESP-NOW text messages since lastSeq
- * @param req HTTP request (query param: ?since=<seqNum>)
+ * @brief Fetch ESP-NOW text messages since lastSeq — BOTH directions
+ * @param req HTTP request (query params: ?since=<seqNum>, optional &mac=<MAC>)
  * @return ESP_OK
  *
- * Returns JSON array of messages:
+ * Sent and received records come back interleaved in one array; `sent` is what
+ * tells them apart and is load-bearing for rendering (see the direction comment
+ * at its emit site). Multi-fragment text is emitted per fragment, never as a
+ * reassembled lump — reqId/piece/of let the client group the pieces and join
+ * them itself.
+ *
+ * A second top-level "deliveries" array carries the tracked-send snapshot; the
+ * client matches it to bubbles by msgId.
+ *
  * {
  *   "messages": [
- *     {"seq":123,"mac":"XX:XX:XX:XX:XX:XX","name":"device","msg":"text","enc":true,"ts":12345},
+ *     {"seq":123,"reqId":7,"piece":1,"of":1,"mac":"XX:XX:XX:XX:XX:XX",
+ *      "name":"device","msg":"text","enc":true,"ts":12345,"type":0,
+ *      "sent":false,"sendState":1},
+ *     ...
+ *   ],
+ *   "deliveries": [
+ *     {"msgId":42,"state":"delivered","mac":"XX:XX:XX:XX:XX:XX","ageMs":1200},
  *     ...
  *   ]
  * }
@@ -306,8 +333,9 @@ static esp_err_t handleEspNowMessages(httpd_req_t* req) {
   // Phase 3.5 task #49 — append the tracked-send snapshot so the web UI can
   // flip chat bubbles from ✓ Sent to ✓✓ Delivered (or ✗ Failed/Timeout) on
   // the same poll cadence as message delivery. Full snapshot of the 16-slot
-  // ring; client filters by msgId. Compact (~30 bytes per entry × 16 = 480 B
-  // worst case).
+  // ring; client filters by msgId. Budget ~64-85 B per entry — the quoted MAC
+  // alone is 26 B of that, and the key names dominate the rest — so a fully
+  // populated ring is ~1.0-1.4 KB per poll.
   if (err == ESP_OK) {
     err = webEspnowSendChunk(req, "],\"deliveries\":[");
     bool firstDelivery = true;

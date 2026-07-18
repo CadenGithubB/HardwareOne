@@ -10,10 +10,11 @@
 // eFuse+flash-UID-derived device key that the existing settings registry
 // uses for `isSecret` fields.
 //
-// Phase 3.0 only generates, loads, and exposes the keypair. No on-wire
-// crypto consumes it yet — that comes in 3.3 (KEY_EX handshake) and 3.4
-// (SESSION_OPEN). Splitting them out keeps each commit independently
-// verifiable.
+// This module generates, loads, and exposes the keypair; the on-wire crypto
+// that consumes it lives elsewhere. The public key rides KEY_EX_HELLO/REPLY so
+// peers can learn and persist it. The secret signs the SESSION_OPEN,
+// SESSION_CONFIRM and SESSION_REKEY transcripts — that signature is what lets a
+// peer trust that an ephemeral X25519 key really came from this device.
 //
 // Boot rule: identity_load_or_generate() runs after the filesystem is
 // mounted and BEFORE ESPNOW initializes. If it fails (corrupt JSON, AES
@@ -54,10 +55,17 @@ bool espnowIdentityLoadOrGenerate(EspNowIdentity& out);
 // Force-regenerate the identity. Bumps regenCount. Overwrites the on-disk
 // file atomically. Called only by the `espnowregenidentity` CLI.
 //
-// Does NOT delete peer trust records (`/system/espnow/peers/<mac>/identity.json`)
-// — those don't exist until Phase 3.2. The flag the CLI requires
-// (`--confirm-wipe-all-bonds`) is forward-looking; once 3.2 lands the
-// delete-peer-records logic will live there.
+// This function itself only touches OUR identity — it does not walk the peer
+// table. The CLI wrapper is what honours `--confirm-wipe-all-bonds`: after a
+// successful regenerate it calls peerIdentityForget() for every valid slot,
+// deleting each `/system/espnow/peers/<mac>/identity.json`.
+//
+// That wipe is not housekeeping. A new identity means every peer still holds
+// our OLD pubkey, so the trust is already dead in both directions; the stale
+// records would sit `valid` forever, and findFreeSlot() hands out the first
+// !valid slot — a full table of dead entries would lock out every future
+// pairing. If you ever call this outside the CLI, do the same, or accept that
+// the peer table silently fills with bonds no peer can honour.
 bool espnowIdentityRegenerate(EspNowIdentity& out);
 
 // Accessor for the module-internal global. `valid` is false until
@@ -87,7 +95,7 @@ void espnowIdentityFormatPubHex(const uint8_t pub[32], char* out, size_t outLen)
 // EspNowEventCategory bits (see below). When THIS device wants to broadcast
 // e.g. HEARTBEAT, it iterates paired peers and skips any whose bitmask omits
 // the HEARTBEAT bit. The peer told us their preferences via SUBSCRIBE_UPDATE
-// (ESPNOW_V4_TYPE_SUBSCRIBE_UPDATE = 70).
+// (ESPNOW_V4_TYPE_SUBSCRIBE_UPDATE = 130).
 //
 // Default for newly-paired peers OR peers loaded from a version-1 identity.json
 // (pre-Phase-5) is 0xFFFFFFFF — subscribe to everything. Phase 5 only matters
@@ -155,8 +163,10 @@ uint8_t peerIdentityLoadAll();
 // the end. Order is not meaningful (insertion order in the cache).
 const PeerIdentity* peerIdentityAt(uint8_t i);
 
-// Number of allocated peer identity slots. Same as N_MESHES * 4 for now —
-// matches the existing peer-table cap.
+// Number of allocated peer identity slots. Hard-coded to 16 in the .cpp
+// (kPeerSlots), matching the existing peer-table cap (gEspNow->devices[16] /
+// MESH_PEER_MAX). It is NOT derived from N_MESHES — raising N_MESHES would
+// silently leave this table at 16.
 uint8_t peerIdentitySlotCount();
 
 #endif  // ENABLE_ESPNOW

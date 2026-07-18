@@ -7,6 +7,7 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <FS.h>
+#include <esp_attr.h>   // EXT_RAM_BSS_ATTR
 #include <time.h>
 
 #include "System_Debug.h"
@@ -285,12 +286,16 @@ void espnowIdentityFormatPubHex(const uint8_t pub[32], char* out, size_t outLen)
 
 namespace {
 
-// Slot count: matches the existing peer-table cap. Each slot is ~50 B → tiny.
-// Placed in BSS rather than PSRAM because access frequency is high (every
-// RX dispatch could call peerIdentityFindByMac in 3.4+) and the table is
-// small enough that DRAM cost is negligible.
+// Slot count: matches the existing peer-table cap. Each slot is ~56 B → ~900 B.
+// PSRAM .bss, parallel to gEspNow->devices[16]: peerIdentityLoadAll runs at boot
+// unconditionally (the identity block is deliberately outside the espnowenabled
+// gate, for recovery), so this table cannot be made lazy — devices with ESP-NOW
+// switched off would still pay for it in internal DRAM. The tradeoff is a
+// 16-slot linear scan of PSRAM per RX dispatch, which is noise next to the
+// Ed25519/AEAD work already on that path. Contents are peer PUBLIC keys and
+// timestamps — no secret material, so plaintext-PSRAM exposure is a non-issue.
 constexpr uint8_t kPeerSlots = 16;
-PeerIdentity gPeerIdentities[kPeerSlots] = {};
+EXT_RAM_BSS_ATTR PeerIdentity gPeerIdentities[kPeerSlots] = {};
 
 constexpr const char* kPeersDir = "/system/espnow/peers";
 // File schema versions:

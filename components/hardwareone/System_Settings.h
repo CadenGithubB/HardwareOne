@@ -744,10 +744,6 @@ struct Settings {
   bool bondStreamPresence;             // Auto-stream presence sensor data to bonded peer
 #endif
   // ESP-NOW buffer size settings (runtime tuning)
-  uint16_t espnowTxQueueSize;          // TX retry queue size (1-16, default: 8)
-  uint16_t espnowRxBufferSize;         // RX deferred message buffer size (64-512, default: 256)
-  uint16_t espnowChunkSize;            // Chunk size for large messages (100-212, default: 200)
-  uint16_t espnowFileChunkSize;        // File transfer chunk size (100-216, default: 216)
 #if ENABLE_AUTOMATION
   bool automationsEnabled;  // Enable/disable automation scheduler (runs from main loop)
 #endif

@@ -63,14 +63,20 @@ struct CommandEntry {
   const char* voiceCategory;                  // 1st level: category phrase (may be nullptr)
   const char* voiceSubCategory;               // 2nd level: sub-category phrase (may be nullptr for 2-level)
   const char* voiceTarget;                    // final level: action phrase (may be nullptr)
+  bool requiresSuperAdmin;                     // top tier: ordinary admin is not enough (see authorizeCommand)
 
+  // Trailing + defaulted so the ~hundreds of existing entries are untouched;
+  // only the handful of super-admin commands pass the final `true`. It must be
+  // LAST: inserting it mid-list would let an existing voice-arg string bind to
+  // this bool (pointer→bool) and silently mark commands super.
   constexpr CommandEntry(const char* name_,
                          const char* help_,
                          bool requiresAdmin_,
                          const char* (*handler_)(const String& cmd_),
                          const char* usage_ = nullptr,
                          const char* voiceCategory_ = nullptr,
-                         const char* voiceTarget_ = nullptr)
+                         const char* voiceTarget_ = nullptr,
+                         bool requiresSuperAdmin_ = false)
       : name(name_),
         help(help_),
         requiresAdmin(requiresAdmin_),
@@ -78,7 +84,8 @@ struct CommandEntry {
         usage(usage_),
         voiceCategory(voiceCategory_),
         voiceSubCategory(nullptr),
-        voiceTarget(voiceTarget_) {}
+        voiceTarget(voiceTarget_),
+        requiresSuperAdmin(requiresSuperAdmin_) {}
 
   // 3-level constructor with sub-category
   constexpr CommandEntry(const char* name_,
@@ -88,7 +95,8 @@ struct CommandEntry {
                          const char* usage_,
                          const char* voiceCategory_,
                          const char* voiceSubCategory_,
-                         const char* voiceTarget_)
+                         const char* voiceTarget_,
+                         bool requiresSuperAdmin_ = false)
       : name(name_),
         help(help_),
         requiresAdmin(requiresAdmin_),
@@ -96,7 +104,8 @@ struct CommandEntry {
         usage(usage_),
         voiceCategory(voiceCategory_),
         voiceSubCategory(voiceSubCategory_),
-        voiceTarget(voiceTarget_) {}
+        voiceTarget(voiceTarget_),
+        requiresSuperAdmin(requiresSuperAdmin_) {}
 };
 
 // Command module flags
@@ -130,6 +139,9 @@ bool isHelpModeCommand(const char* cmdName);
 
 // Check if a command requires admin privileges
 bool commandRequiresAdmin(const String& cmdLine);
+// True if the command is in the super-admin (top-tier) allowlist — gated
+// independently of the admin flag. See System_Utils.cpp.
+bool commandRequiresSuperAdmin(const String& cmdLine);
 
 // Opt-in structured (JSON) output detector. Returns true if `args` contains a
 // standalone `json` token at a word boundary (so it won't false-match a value

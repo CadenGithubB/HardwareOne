@@ -270,6 +270,9 @@ bool isAdminUser(const String& who) {
   }
 #endif
   if (!filesystemReady) return false;
+  // Serialize with role writes (reentrant per task) so this hot-path privilege
+  // check can't tear-read a users.json mid-write.
+  FsLockGuard _g("user.isAdmin");
   // Prefer JSON
   if (VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth("user.isAdmin"))) {
     String json;
@@ -298,7 +301,9 @@ bool isAdminUser(const String& who) {
         int rq1 = json.indexOf('"', json.indexOf(':', rKey) + 1);
         int rq2 = json.indexOf('"', rq1 + 1);
         String role = (rq1 > 0 && rq2 > rq1) ? json.substring(rq1 + 1, rq2) : String("");
-        if (uname == who && role == "admin") return true;
+        // superadmin is a strict superset of admin — it satisfies every
+        // admin-gated command too.
+        if (uname == who && (role == "admin" || role == "superadmin")) return true;
       }
       pos = uq2 + 1;
     }
@@ -306,6 +311,80 @@ bool isAdminUser(const String& who) {
     return (who == firstUser);
   }
   return false;
+}
+
+// Determine if the given username is a super-admin (role == "superadmin").
+// This is the top tier: it gates identity/crypto/destructive/auth-posture
+// commands that an ordinary admin must not run (see commandRequiresSuperAdmin).
+// The bonded ESP-NOW master (kBondAdminUser) is treated as super for the life
+// of a valid bond session — the bond is the token-authenticated 1:1 trust
+// channel and is intentionally the *only* over-the-air path to super (a
+// regular mesh/pair account gets only its stored role, never elevated here).
+bool isSuperAdminUser(const String& who) {
+#if ENABLE_BONDED_MODE
+  if (who == kBondAdminUser) {
+    extern bool isBondSessionTokenValid();
+    return isBondSessionTokenValid();
+  }
+#endif
+  if (!filesystemReady) return false;
+  // Serialize with role writes — an unlocked read can tear mid-write and
+  // misjudge privilege. Reentrant per task, so nested FS ops are fine.
+  FsLockGuard _g("user.isSuperAdmin");
+  if (!VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth("user.isSuperAdmin"))) return false;
+  String json;
+  if (!readText(USERS_JSON_FILE, json)) return false;
+  int usersIdx = json.indexOf("\"users\"");
+  if (usersIdx < 0) return false;
+  // First user (device owner) — for the no-explicit-super fallback below.
+  String firstUser = "";
+  {
+    int fk = json.indexOf("\"username\"", usersIdx);
+    if (fk >= 0) {
+      int q1 = json.indexOf('"', json.indexOf(':', fk) + 1);
+      int q2 = json.indexOf('"', q1 + 1);
+      if (q1 > 0 && q2 > q1) firstUser = json.substring(q1 + 1, q2);
+    }
+  }
+  bool anyExplicitSuper = false;
+  int pos = usersIdx;
+  while (true) {
+    int uKey = json.indexOf("\"username\"", pos);
+    if (uKey < 0) break;
+    int uq1 = json.indexOf('"', json.indexOf(':', uKey) + 1);
+    int uq2 = json.indexOf('"', uq1 + 1);
+    if (uq1 < 0 || uq2 <= uq1) break;
+    String uname = json.substring(uq1 + 1, uq2);
+    int rKey = json.indexOf("\"role\"", uKey);
+    int nextU = json.indexOf("\"username\"", uKey + 1);
+    if (rKey > 0 && (nextU < 0 || rKey < nextU)) {
+      int rq1 = json.indexOf('"', json.indexOf(':', rKey) + 1);
+      int rq2 = json.indexOf('"', rq1 + 1);
+      String role = (rq1 > 0 && rq2 > rq1) ? json.substring(rq1 + 1, rq2) : String("");
+      if (role == "superadmin") {
+        anyExplicitSuper = true;
+        if (uname == who) return true;
+      }
+    }
+    pos = uq2 + 1;
+  }
+  // Fallback: ONLY when no account is explicitly superadmin, treat the owner
+  // (first user) as super so super-only recovery (e.g. factoryreset) can never
+  // be permanently locked out — e.g. on a users.json restored from before this
+  // tier existed. On a normally-created device the owner is explicitly
+  // superadmin and returns above. Guarded by anyExplicitSuper so a real super
+  // roster is never silently widened, and it grants super to the first user
+  // only — never anyone else.
+  return (!anyExplicitSuper && who == firstUser);
+}
+
+// Privilege rank for target-protection comparisons: user=0, admin=1,
+// superadmin=2. A caller may not demote/ban/delete a target of higher rank,
+// nor grant a role above its own (enforced in the user-mutation handlers).
+int userRoleRank(const String& role) {
+  if (role == "superadmin") return 2;
+  if (role == "admin") return 1;
+  return 0;
 }
 
 // ============================================================================
@@ -1176,7 +1255,7 @@ bool approvePendingUserInternal(const String& username, String& errorOut) {
     user["id"] = 1;
     user["username"] = username;
     // Password now stored in per-user settings file, not here
-    user["role"] = "admin";
+    user["role"] = "superadmin";               // first user is the device owner → top tier
     user["createdAt"] = (const char*)nullptr;  // resolved lazily via boot anchor
     user["createdBy"] = "firstsetup";          // first admin = device owner (not "approved")
     user["createdAtSource"] = "pending";       // time-derivation status
@@ -1374,9 +1453,42 @@ bool denyPendingUserInternal(const String& username, String& errorOut) {
   return true;
 }
 
-// Promote an existing user in users.json to admin (JSON-only)
-static bool promoteUserToAdminInternal(const String& username, String& errorOut) {
-  DEBUG_USERSF("[users] promote internal username=%s", username.c_str());
+// Shared authorization for user-mutation commands. Enforces the two rank rules:
+//   (1) a caller may not act on a target of HIGHER privilege than itself
+//       (a regular admin cannot demote/ban/delete a super-admin);
+//   (2) a caller may not grant a role above its own rank
+//       (only a super-admin can create or raise another super-admin).
+// newRoleRank is the rank being granted, or -1 for delete/ban (no grant).
+// Caller identity is the per-task exec identity (currentExecUser()); a live
+// bond session resolves to kBondAdminUser which isSuperAdminUser() rates super.
+// Both caller AND target rank come from isSuperAdminUser()/isAdminUser() (NOT
+// getUserRole) so the owner-fallback and any future rank logic apply uniformly
+// — otherwise a restored-backup owner reads as super for the caller but only
+// admin for the target. The founder (id==1) also has hard protection inside the
+// mutators as a second layer.
+static bool userMutationAllowed(const String& targetUser, int newRoleRank, String& errOut) {
+  const String caller = currentExecUser();
+  const int callerRank = isSuperAdminUser(caller)     ? 2 : (isAdminUser(caller)     ? 1 : 0);
+  const int targetRank = isSuperAdminUser(targetUser) ? 2 : (isAdminUser(targetUser) ? 1 : 0);
+  if (targetRank > callerRank) {
+    errOut = "Cannot modify a higher-privileged account";
+    return false;
+  }
+  if (newRoleRank > callerRank) {
+    errOut = "Cannot grant a role above your own";
+    return false;
+  }
+  return true;
+}
+
+// Set a user's role to an arbitrary value ("user"/"admin"/"superadmin") in
+// users.json. Pure data mutation: founder (id==1) protection, role replace or
+// insert, and an identity-generation bump. Direction-specific behavior (which
+// event to post, session revocation on downgrade, user-facing messaging) lives
+// in the promote/demote handlers. Authorization is the caller's responsibility
+// via userMutationAllowed() BEFORE invoking this.
+static bool setUserRoleInternal(const String& username, const char* newRole, String& errorOut) {
+  DEBUG_USERSF("[users] setrole internal username=%s role=%s", username.c_str(), newRole);
   if (username.length() == 0) {
     errorOut = "Username required";
     return false;
@@ -1447,16 +1559,16 @@ static bool promoteUserToAdminInternal(const String& username, String& errorOut)
             }
             int roleValueEnd = json.indexOf('"', roleValueStart);
             if (roleValueEnd > roleValueStart && roleValueEnd < objEnd) {
-              // Replace the entire role value with "admin"
+              // Replace the entire role value with the requested role
               String before = json.substring(0, roleValueStart);
               String after = json.substring(roleValueEnd);
-              json = before + "admin" + after;
+              json = before + newRole + after;
               updated = true;
               break;
             }
           } else {
             // No role field; insert before closing brace
-            String ins = String(",\"role\":\"admin\"");
+            String ins = String(",\"role\":\"") + newRole + "\"";
             String before = json.substring(0, objEnd);
             String after = json.substring(objEnd);
             json = before + ins + after;
@@ -1476,143 +1588,10 @@ static bool promoteUserToAdminInternal(const String& username, String& errorOut)
     errorOut = "Failed to write users.json";
     return false;
   }
-  // Identity topology changed (user gained admin permissions). Invalidate
-  // any auth-dependent caches — see System_AuthIdentity.h for the protocol.
-  bumpIdentityGeneration("user.promote");
-  systemEventPost(SYSEVT_USER_PROMOTED, username.c_str());
-  BROADCAST_PRINTF("[admin] Promoted user to admin: %s", username.c_str());
-
-  // Serial admin status now checked in real-time via isAdminUser()
-  if (gSerialAuthed && gSerialUser == username) {
-    broadcastOutput("[serial] Your admin privileges have been updated");
-  }
-
-  return true;
-}
-
-// Demote an existing admin user in users.json to regular user (JSON-only)
-static bool demoteUserFromAdminInternal(const String& username, String& errorOut) {
-  DEBUG_USERSF("[users] demote internal username=%s", username.c_str());
-  if (username.length() == 0) {
-    errorOut = "Username required";
-    return false;
-  }
-  if (!VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth("user.demote"))) {
-    errorOut = "users.json not found";
-    return false;
-  }
-  String json;
-  if (!readText(USERS_JSON_FILE, json)) {
-    errorOut = "Failed to read users.json";
-    return false;
-  }
-  int usersIdx = json.indexOf("\"users\"");
-  int openBracket = (usersIdx >= 0) ? json.indexOf('[', usersIdx) : -1;
-  int closeBracket = (openBracket >= 0) ? json.indexOf(']', openBracket) : -1;
-  if (openBracket < 0 || closeBracket <= openBracket) {
-    errorOut = "Malformed users.json";
-    return false;
-  }
-
-  // Find the object for this username within the users array
-  int searchPos = openBracket + 1;
-  bool updated = false;
-  while (true) {
-    int objStart = json.indexOf('{', searchPos);
-    if (objStart < 0 || objStart > closeBracket) break;
-    int objEnd = json.indexOf('}', objStart);
-    if (objEnd < 0 || objEnd > closeBracket) break;
-    String obj = json.substring(objStart, objEnd + 1);
-
-    int un = obj.indexOf("\"username\":");
-    if (un >= 0) {
-      un += 11;  // skip "username":
-      // Skip optional space after colon
-      while (un < obj.length() && obj[un] == ' ') un++;
-      // Skip opening quote
-      if (un < obj.length() && obj[un] == '"') un++;
-      int unEnd = obj.indexOf('"', un);
-      if (unEnd > un) {
-        String name = obj.substring(un, unEnd);
-        if (name == username) {
-          // Check for ID field (founder protection) - only for the target user
-          int idStart = obj.indexOf("\"id\":");
-          if (idStart >= 0) {
-            idStart += 5;  // skip "id":
-            // Skip optional space
-            while (idStart < obj.length() && obj[idStart] == ' ') idStart++;
-            int idEnd = idStart;
-            while (idEnd < obj.length() && obj[idEnd] >= '0' && obj[idEnd] <= '9') idEnd++;
-            if (idEnd > idStart) {
-              int userId = obj.substring(idStart, idEnd).toInt();
-              if (userId == 1) {
-                errorOut = "Cannot modify the first admin account";
-                return false;
-              }
-            }
-          }
-
-          // Look for role field in the full JSON
-          int roleFieldStart = json.indexOf("\"role\":", objStart);
-          if (roleFieldStart >= 0 && roleFieldStart < objEnd) {
-            int roleValueStart = roleFieldStart + 7;  // skip "role":
-            // Skip optional space and quote
-            while (roleValueStart < json.length() && (json[roleValueStart] == ' ' || json[roleValueStart] == '"')) {
-              if (json[roleValueStart] == '"') { roleValueStart++; break; }
-              roleValueStart++;
-            }
-            int roleValueEnd = json.indexOf('"', roleValueStart);
-            if (roleValueEnd > roleValueStart && roleValueEnd < objEnd) {
-              String currentRole = json.substring(roleValueStart, roleValueEnd);
-              if (currentRole != "admin") {
-                errorOut = "User is not an admin";
-                return false;
-              }
-              // Replace the entire role value with "user"
-              String before = json.substring(0, roleValueStart);
-              String after = json.substring(roleValueEnd);
-              json = before + "user" + after;
-              updated = true;
-              break;
-            }
-          } else {
-            // No role field means user role (default), already demoted
-            errorOut = "User is already a regular user";
-            return false;
-          }
-        }
-      }
-    }
-    searchPos = objEnd + 1;
-  }
-  if (!updated) {
-    errorOut = "User not found";
-    return false;
-  }
-  if (!writeTextAtomic(USERS_JSON_FILE, json)) {
-    errorOut = "Failed to write users.json";
-    return false;
-  }
-  // Identity topology changed (user lost admin permissions). Invalidate
-  // any auth-dependent caches — see System_AuthIdentity.h for the protocol.
-  bumpIdentityGeneration("user.demote");
-  systemEventPost(SYSEVT_USER_DEMOTED, username.c_str());
-  // Force-logout the demoted user across all transports. Per the design:
-  // a session that was running with admin privileges should NOT silently
-  // continue with reduced privileges — the admin who clicked "demote"
-  // expects immediate effect. The user re-authenticates and resumes
-  // with their now-correct non-admin permissions.
-  //
-  // Self-demote case: if the calling admin is demoting themselves, they
-  // get kicked too. That's intentional — they explicitly asked for the
-  // change and the principle of least surprise is "demote takes effect
-  // immediately, no exceptions."
-  if (gSerialAuthed && gSerialUser == username) {
-    broadcastOutput("[serial] Your admin privileges have been revoked");
-  }
-  revokeUserSessions(username, "Your admin privileges have been revoked. Please log in again.");
-  BROADCAST_PRINTF("[admin] Demoted user from admin: %s", username.c_str());
-
+  // Identity topology changed (role differs). Invalidate auth-dependent caches
+  // — see System_AuthIdentity.h. Event posting, session revocation and messaging
+  // are the handlers' job (they differ between promote and demote).
+  bumpIdentityGeneration("user.setrole");
   return true;
 }
 
@@ -1809,37 +1788,67 @@ const char* cmd_user_deny(const String& argsInput) {
 const char* cmd_user_promote(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!filesystemReady) return "Error: LittleFS not ready";
-  String username = argsInput;
-  username.trim();
-  if (username.length() == 0) return "Error: invalid arguments — Usage: user promote <username>";
-  DEBUG_USERSF("[users] CLI promote username=%s", username.c_str());
+  CommandArgs a(argsInput);
+  if (!a.hasMinArgs(1)) return "Error: invalid arguments — Usage: userpromote <username> [admin|superadmin]";
+  String username = a.arg(0);
+  String role = a.has(1) ? a.arg(1) : String("admin");
+  role.toLowerCase();
+  if (role != "admin" && role != "superadmin")
+    return "Error: role must be 'admin' or 'superadmin'";
+  DEBUG_USERSF("[users] CLI promote username=%s role=%s", username.c_str(), role.c_str());
+  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+  char* buf = getDebugBuffer();
   String err;
-  if (!promoteUserToAdminInternal(username, err)) {
-    if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-    snprintf(getDebugBuffer(), 1024, "Error: %s", err.c_str());
-    return getDebugBuffer();
+  // Rank check first: a non-super can't grant super, and no one can act on a
+  // target above their own rank.
+  if (!userMutationAllowed(username, userRoleRank(role), err)) {
+    snprintf(buf, 1024, "Error: %s", err.c_str());
+    return buf;
   }
-  if (!ensureDebugBuffer()) return "Promoted";
-  snprintf(getDebugBuffer(), 1024, "Promoted user '%s' to admin", username.c_str());
-  return getDebugBuffer();
+  if (!setUserRoleInternal(username, role.c_str(), err)) {
+    snprintf(buf, 1024, "Error: %s", err.c_str());
+    return buf;
+  }
+  systemEventPost(SYSEVT_USER_PROMOTED, username.c_str());
+  if (gSerialAuthed && gSerialUser == username)
+    broadcastOutput("[serial] Your privileges have been updated");
+  BROADCAST_PRINTF("[admin] Set user '%s' role to %s", username.c_str(), role.c_str());
+  snprintf(buf, 1024, "Promoted user '%s' to %s", username.c_str(), role.c_str());
+  return buf;
 }
 
 const char* cmd_user_demote(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!filesystemReady) return "Error: LittleFS not ready";
-  String username = argsInput;
-  username.trim();
-  if (username.length() == 0) return "Error: invalid arguments — Usage: user demote <username>";
-  DEBUG_USERSF("[users] CLI demote username=%s", username.c_str());
+  CommandArgs a(argsInput);
+  if (!a.hasMinArgs(1)) return "Error: invalid arguments — Usage: userdemote <username> [admin|user]";
+  String username = a.arg(0);
+  String role = a.has(1) ? a.arg(1) : String("user");
+  role.toLowerCase();
+  if (role != "admin" && role != "user")
+    return "Error: role must be 'admin' or 'user'";
+  DEBUG_USERSF("[users] CLI demote username=%s role=%s", username.c_str(), role.c_str());
+  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+  char* buf = getDebugBuffer();
   String err;
-  if (!demoteUserFromAdminInternal(username, err)) {
-    if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-    snprintf(getDebugBuffer(), 1024, "Error: %s", err.c_str());
-    return getDebugBuffer();
+  // Rank check: a regular admin cannot step a super-admin down; only a super
+  // can act on a super. Founder (id==1) is additionally protected in the writer.
+  if (!userMutationAllowed(username, userRoleRank(role), err)) {
+    snprintf(buf, 1024, "Error: %s", err.c_str());
+    return buf;
   }
-  if (!ensureDebugBuffer()) return "Demoted";
-  snprintf(getDebugBuffer(), 1024, "Demoted user '%s' to regular user", username.c_str());
-  return getDebugBuffer();
+  if (!setUserRoleInternal(username, role.c_str(), err)) {
+    snprintf(buf, 1024, "Error: %s", err.c_str());
+    return buf;
+  }
+  systemEventPost(SYSEVT_USER_DEMOTED, username.c_str());
+  // Force re-auth so a session that just lost privilege can't keep using it.
+  if (gSerialAuthed && gSerialUser == username)
+    broadcastOutput("[serial] Your privileges have been changed");
+  revokeUserSessions(username, "Your privileges have changed. Please log in again.");
+  BROADCAST_PRINTF("[admin] Set user '%s' role to %s", username.c_str(), role.c_str());
+  snprintf(buf, 1024, "Set user '%s' to %s", username.c_str(), role.c_str());
+  return buf;
 }
 
 // userdelete is two-step like filedelete: prompt + yes/no confirm via the
@@ -1854,6 +1863,15 @@ static const char* user_delete_confirmed(void* /*userData*/) {
 
   DEBUG_USERSF("[users] CLI delete (confirmed) username=%s",
                s_pendingUserDeleteName.c_str());
+  // Re-check rank at confirm time (not just at prompt): close the window where
+  // the target could have been elevated between the prompt and the 'yes'.
+  {
+    String merr;
+    if (!userMutationAllowed(s_pendingUserDeleteName, -1, merr)) {
+      snprintf(respBuf, sizeof(respBuf), "Error: %s", merr.c_str());
+      return respBuf;
+    }
+  }
   String err;
   if (!deleteUserInternal(s_pendingUserDeleteName, err)) {
     snprintf(respBuf, sizeof(respBuf), "Error: %s", err.c_str());
@@ -1878,6 +1896,18 @@ const char* cmd_user_delete(const String& argsInput) {
   username.trim();
   if (username.length() == 0) return "Error: invalid arguments — Usage: user delete <username>";
   DEBUG_USERSF("[users] CLI delete (prompt) username=%s", username.c_str());
+
+  // Rank check up front (fail fast, before prompting): a regular admin cannot
+  // delete a super-admin. Founder (id==1) is additionally protected in the
+  // deleter itself.
+  {
+    String merr;
+    if (!userMutationAllowed(username, -1, merr)) {
+      if (!ensureDebugBuffer()) return "Error: denied";
+      snprintf(getDebugBuffer(), 1024, "Error: %s", merr.c_str());
+      return getDebugBuffer();
+    }
+  }
 
   // Stash the target name for the confirm callbacks. We do NOT capture
   // the AuthContext here because deleteUserInternal doesn't take one --
@@ -1994,6 +2024,24 @@ const char* cmd_user_resetpassword(const String& argsInput) {
   String username = a.arg(0);
   String rest = a.arg(1);
   bool mustChange = a.argBool(2, false);
+
+  // A password reset is account takeover, so gate it like the other user
+  // mutations (promote/demote/delete/ban): a caller may not reset the password
+  // of a higher-privileged account (a plain admin cannot seize a super-admin),
+  // and the owner (id==1) changes its own password via changepassword. Without
+  // this an admin could reset a super's password and log in as them — which
+  // defeats the entire tier.
+  {
+    uint32_t targetId = 0;
+    if (getUserIdByUsername(username, targetId) && targetId == 1)
+      return "Error: the owner account manages its own password (use 'changepassword')";
+    String merr;
+    if (!userMutationAllowed(username, -1, merr)) {
+      if (!ensureDebugBuffer()) return "Error: denied";
+      snprintf(getDebugBuffer(), 1024, "Error: %s", merr.c_str());
+      return getDebugBuffer();
+    }
+  }
 
   if (rest.length() < 6) {
     return "Error: Password must be at least 6 characters";
@@ -2413,6 +2461,17 @@ const char* cmd_banuser(const String& argsInput) {
 
   String username = a.arg(0);
   String reason = a.has(1) ? a.remaining(0) : String();
+
+  // Rank check: a regular admin cannot ban a super-admin (founder also hard-
+  // protected in setUserBanInternal).
+  {
+    String merr;
+    if (!userMutationAllowed(username, -1, merr)) {
+      static char ebuf[160];
+      snprintf(ebuf, sizeof(ebuf), "Error: %s", merr.c_str());
+      return ebuf;
+    }
+  }
 
   const char* err = setUserBanInternal(username, true, reason);
   if (err) return err;
@@ -3148,13 +3207,13 @@ const CommandEntry userSystemCommands[] = {
   // Authentication commands
   { "login", "Login: <user> <pass> [transport]", false, cmd_login, "Usage: login <username> <password> [transport]\nTransport: serial (default), display, bluetooth" },
   { "logout", "Logout [transport]", false, cmd_logout, "Usage: logout [transport]\nTransport: serial (default), display, bluetooth, g2" },
-  { "serialrequireauth", "Enable/disable serial auth requirement [on|off].", true, cmd_serialrequireauth, "Usage: serialrequireauth [on|off]" },
+  { "serialrequireauth", "Enable/disable serial auth requirement [on|off].", true, cmd_serialrequireauth, "Usage: serialrequireauth [on|off]", nullptr, nullptr, /*requiresSuperAdmin=*/true },
   
   // User management commands
   { "userapprove", "Approve pending request: <username>", true, cmd_user_approve, "Usage: userapprove <username>" },
   { "userdeny", "Deny pending request: <username>", true, cmd_user_deny, "Usage: userdeny <username>" },
-  { "userpromote", "Promote to admin: <username>", true, cmd_user_promote, "Usage: userpromote <username>" },
-  { "userdemote", "Demote from admin: <username>", true, cmd_user_demote, "Usage: userdemote <username>" },
+  { "userpromote", "Promote a user: <username> [admin|superadmin]", true, cmd_user_promote, "Usage: userpromote <username> [admin|superadmin]  (default admin; granting superadmin requires a super-admin caller)" },
+  { "userdemote", "Lower a user's role: <username> [admin|user]", true, cmd_user_demote, "Usage: userdemote <username> [admin|user]  (default user; demoting a super-admin requires a super-admin caller)" },
   { "userdelete", "Delete user: <username>", true, cmd_user_delete, "Usage: userdelete <username>" },
   { "userchangepassword", "Change own password: <currentPass> <newPass> <confirmPass>", false, cmd_user_changepassword, "Usage: userchangepassword <currentPassword> <newPassword> <confirmPassword>" },
   { "userresetpassword", "Reset user password: <username> <newPassword> [0|1]", true, cmd_user_resetpassword,

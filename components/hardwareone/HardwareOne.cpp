@@ -282,6 +282,7 @@ extern bool gSkipNTPInWifiConnect;
 // Centralized command execution with AuthContext (transport-agnostic)
 static const char* originFrom(const AuthContext& ctx);
 bool hasAdminPrivilege(const AuthContext& ctx);
+bool hasSuperAdminPrivilege(const AuthContext& ctx);
 
 struct ExecReq;
 QueueHandle_t gCmdExecQ = nullptr;
@@ -390,6 +391,7 @@ volatile unsigned long gWebMirrorSeq = 0;
 // / currentExecUser() / currentExecIsAdmin() for reads, ExecIdentityGuard or
 // SYSTEM_IDENTITY_SCOPE for writes.
 
+#include "System_RamFlush.h"
 #include "System_Settings.h"
 #include "System_Power.h"  // powerSleepTransitionAllowed/Mark — power-save anti-flap guard
 Settings gSettings;
@@ -668,6 +670,10 @@ bool hasAdminPrivilege(const AuthContext& ctx) {
   return isAdminUser(ctx.user);
 }
 
+bool hasSuperAdminPrivilege(const AuthContext& ctx) {
+  return isSuperAdminUser(ctx.user);
+}
+
 // CommandOrigin, CommandContext, Command, ExecReq, ExecAsyncCallback
 // are defined in System_CommandTypes.h (included at top of file)
 
@@ -690,18 +696,20 @@ uint32_t getCurrentCommandOutputMask() {
 static void commandExecTask(void* pv) {
   DEBUG_CMD_FLOWF("[cmd_exec] task started");
   static unsigned long lastStackCheck = 0;
-  constexpr uint32_t stackBytes = CMD_EXEC_STACK_WORDS * 4;
+  // BYTES: the constant is the byte count passed to xTaskCreate and the HWM is
+  // returned in bytes on this port — no word->byte scaling. See System_TaskUtils.h.
+  constexpr uint32_t stackBytes = CMD_EXEC_STACK_WORDS;
   for (;;) {
     // Periodic stack watermark check (every 30 seconds)
     unsigned long now = millis();
     if (now - lastStackCheck > 30000) {
       UBaseType_t stackHighWater = uxTaskGetStackHighWaterMark(NULL);
-      uint32_t stackPeak = stackBytes - (stackHighWater * 4);
+      uint32_t stackPeak = stackBytes - (uint32_t)stackHighWater;
       int peakPct = (stackPeak * 100) / stackBytes;
 
       DEBUG_MEMORY_STACKF("[STACK] cmd_exec: peak=%lu bytes (%d%%), free_min=%lu bytes, total=%lu",
                     (unsigned long)stackPeak, peakPct,
-                    (unsigned long)(stackHighWater * 4), (unsigned long)stackBytes);
+                    (unsigned long)stackHighWater, (unsigned long)stackBytes);
       lastStackCheck = now;
     }
 
@@ -1341,6 +1349,18 @@ void hardwareone_setup() {
   rtcRebootReason[0] = '\0';
   rtcRebootWho[0] = '\0';
 
+  // Consume the ramflush overlay alongside the reason stash, so both RTC records
+  // are invalidated at one point. Must precede every apply site — the earliest is
+  // the automation init below — because it invalidates before applying, so a panic
+  // while restoring can't replay the same state into a boot loop.
+  ramFlushConsumeOverlay();
+
+  // cameraAutoStart is not stable across this boot: a failed initCamera() clears it
+  // (System_Camera_DVP.cpp:941) during the very replay that reads it. Snapshot the
+  // intent now, before any replay runs, so the camera's resolve can't be swayed by
+  // a write the replay itself caused.
+  [[maybe_unused]] const bool snapCameraAutoStart = gSettings.cameraAutoStart;
+
   // Unconditional per-boot orientation divider into the login/i2c/error logs so
   // every log is attributable to a boot even when NTP never syncs (offline) — now
   // carrying the reboot detail so those sparse logs self-explain a commanded restart.
@@ -1411,7 +1431,7 @@ void hardwareone_setup() {
         ERROR_SYSTEMF("FATAL: Failed to create command exec queue");
         while (1) delay(1000);
       }
-    const uint32_t cmdExecStackWords = CMD_EXEC_STACK_WORDS;  // words (≈24 KB) - automation run + debug vsnprintf frames need deep stack
+    const uint32_t cmdExecStackWords = CMD_EXEC_STACK_WORDS;  // BYTES (8192 = 8 KB; the old "≈24 KB" was the 4x myth) - automation run + debug vsnprintf frames need deep stack
     // Pin to core 0 (PRO_CPU), alongside the BLE host (BTC_TASK) and web server.
     // The on-device LLM task (llm_gen) is pinned to core 1 at a higher priority; if
     // cmd_exec is left unpinned it can sit on core 1 and be preempted by a 15 s
@@ -1601,7 +1621,7 @@ void hardwareone_setup() {
 
   bool wifiConnected = false;
   // Always attempt WiFi connection if credentials exist (controlled by wifiAutoReconnect setting)
-  if (gSettings.wifiAutoReconnect) {  // Controlled by first-time setup or settings
+  if (ramFlushResolve(RF_WIFI, gSettings.wifiAutoReconnect)) {  // Controlled by first-time setup or settings
     // Skip NTP sync in wificonnect so we can show it separately in boot progress
     gSkipNTPInWifiConnect = true;
     setupWiFi();
@@ -1715,7 +1735,9 @@ void hardwareone_setup() {
       ? (int)BLE_MODE_G2_CLIENT
       : gSettings.bleMode;
 
-  if (gSettings.bluetoothAutoStart || wantClientForAutoReconnect) {
+  // Substitute only the setting read, not the whole condition: a G2/ring peer
+  // brings the radio up in client mode independently of bluetoothAutoStart.
+  if (ramFlushResolve(RF_BLUETOOTH, gSettings.bluetoothAutoStart) || wantClientForAutoReconnect) {
     oledSetBootProgress(85, "Starting Bluetooth");
 
     // Pause sensor polling during BLE init to avoid interrupt contention
@@ -1742,7 +1764,7 @@ void hardwareone_setup() {
       }
     } else
 #endif
-    if (gSettings.bluetoothAutoStart) {
+    if (ramFlushResolve(RF_BLUETOOTH, gSettings.bluetoothAutoStart)) {
       // Server-mode path only runs when the user *explicitly* asked for BT
       // at boot. We never coerce to server from auto-reconnect flags.
       extern bool initBluetooth();
@@ -1772,7 +1794,7 @@ void hardwareone_setup() {
 
 #if ENABLE_CAMERA_SENSOR
   // Camera auto-start (independent of I2C sensor queue)
-  if (gSettings.cameraAutoStart) {
+  if (ramFlushResolve(RF_CAMERA, snapCameraAutoStart)) {
     runUnifiedSystemCommand("opencamera");
   }
 #endif
@@ -1781,15 +1803,17 @@ void hardwareone_setup() {
   // Microphone / ESP-SR auto-start
   // If ESP-SR is enabled, it takes over the microphone - don't start mic separately
   #if ENABLE_ESP_SR
-  if (gSettings.srAutoStart) {
+  // Resolve both through this same if/else — SR takes the mic, so resolving them
+  // independently would double-claim the I2S channel.
+  if (ramFlushResolve(RF_SR, gSettings.srAutoStart)) {
     broadcastOutput("Starting ESP-SR speech recognition...");
     runUnifiedSystemCommand("srstart");
-  } else if (gSettings.microphoneAutoStart) {
+  } else if (ramFlushResolve(RF_MICROPHONE, gSettings.microphoneAutoStart)) {
     broadcastOutput("Starting microphone sensor...");
     runUnifiedSystemCommand("openmic");
   }
   #else
-  if (gSettings.microphoneAutoStart) {
+  if (ramFlushResolve(RF_MICROPHONE, gSettings.microphoneAutoStart)) {
     broadcastOutput("Starting microphone sensor...");
     runUnifiedSystemCommand("openmic");
   }
@@ -1800,10 +1824,11 @@ void hardwareone_setup() {
 #if ENABLE_HTTP_SERVER
   oledSetBootProgress(90, "Starting HTTP");
 
-  if (gSettings.httpAutoStart && WiFi.isConnected()) {
+  const bool httpWanted = ramFlushResolve(RF_HTTP, gSettings.httpAutoStart);
+  if (httpWanted && WiFi.isConnected()) {
     runUnifiedSystemCommand("openhttp");
     BROADCAST_PRINTF("%s%s", gServerIsHttps ? "HTTPS server started. Try: https://" : "HTTP server started. Try: http://", WiFi.localIP().toString().c_str());
-  } else if (!gSettings.httpAutoStart) {
+  } else if (!httpWanted) {
     broadcastOutput("HTTP server available. Use 'openhttp' or quick settings (SELECT button) to start.");
   } else {
     broadcastOutput("HTTP server not started (WiFi offline). Use quick settings (SELECT button) or 'openhttp' to start manually.");
@@ -1816,7 +1841,7 @@ void hardwareone_setup() {
   // Mirrors the sensor/SR auto-start pattern (gSettings.<x>AutoStart -> runtime
   // start command). Loading is heavy (PSRAM + time), so it's opt-in (default off).
 #if ENABLE_ONDEVICE_LLM
-  if (gSettings.llmAutoStart) {
+  if (ramFlushResolve(RF_LLM, gSettings.llmAutoStart)) {
     broadcastOutput("Auto-loading on-device LLM model...");
     String llmAutoCmd = "llmload " + gSettings.llmDefaultModel;
     runUnifiedSystemCommand(llmAutoCmd);
@@ -1825,7 +1850,9 @@ void hardwareone_setup() {
 
   // MQTT client - auto-start if enabled in settings and WiFi is connected
 #if ENABLE_MQTT
-  if (gSettings.mqttClientEnabled && gSettings.mqttAutoStart) {
+  // mqttClientEnabled stays a hard master gate — the overlay resolves the
+  // autostart intent, it does not override whether MQTT is configured at all.
+  if (gSettings.mqttClientEnabled && ramFlushResolve(RF_MQTT, gSettings.mqttAutoStart)) {
     oledSetBootProgress(92, "Starting MQTT");
     if (WiFi.isConnected()) {
       runUnifiedSystemCommand("openmqtt");
@@ -1956,7 +1983,7 @@ void hardwareone_setup() {
     fsListInit();
   }
 
-  if (gSettings.espnowenabled && identityOk) {
+  if (ramFlushResolve(RF_ESPNOW, gSettings.espnowenabled) && identityOk) {
     broadcastOutput("[ESP-NOW] Auto-initialization enabled in settings");
     const char* setupError = checkEspNowFirstTimeSetup();
     if (setupError && strlen(setupError) > 0) {
@@ -1996,8 +2023,10 @@ void hardwareone_setup() {
   printCommandModuleSummary();
   printSettingsModuleSummary();
   printMemoryReport();
-  sensorLogAutoStart();
-  systemLogAutoStart();
+  // Gated at the call site: both helpers read their own autostart flag internally,
+  // so the overlay has to decide here rather than inside them.
+  if (ramFlushResolve(RF_SENSORLOG, gSettings.sensorLogAutoStart)) sensorLogAutoStart();
+  if (ramFlushResolve(RF_SYSTEMLOG, gSettings.systemLogAutoStart)) systemLogAutoStart();
 
   broadcastOutput("[Boot] Setup complete");
 

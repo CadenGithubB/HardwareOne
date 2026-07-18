@@ -46,8 +46,18 @@
 #define LLM_DEFAULT_SENTENCE_LIMIT  2      // stop after N sentences (0 = disabled)
 #define LLM_DEFAULT_HARD_CAP        80     // hard token cap regardless of sentences (0 = disabled)
 
-// Inference task
-#define LLM_TASK_STACK_SIZE       (16 * 1024)
+// Inference task. This is a BYTE count (stack depth arg is StackType_t words,
+// and sizeof(StackType_t)==1 on this Xtensa build, so words==bytes). The stack
+// is one internal-DRAM block claimed at model load and reused for every
+// generation (gLLMWorkerStack in System_LLM.cpp) — never re-acquired per
+// generation, which is what the old dynamic 16 KB xTaskCreate did until it began
+// failing once a model was loaded and the G2 page had fragmented internal DRAM
+// down to a ~9 KB largest free block. Trimmed 16→12 KB:
+// the measured gen-stack HWM is ~8-9 KB with everything on-stack, and we hoisted
+// the ~4 KB emb diagnostic scratch off-stack (System_LLM.cpp), so real HWM is
+// ~4-5 KB. 12 KB keeps the same absolute headroom the known-good 16 KB config
+// had. Confirm on HW via the one-shot HWM log in llmWorkerTask, then trim further.
+#define LLM_TASK_STACK_SIZE       (12 * 1024)
 // Priority 2: still outranks loopTask/cmd_exec (prio 1) so generation makes
 // progress, but the per-token and in-matmul vTaskDelay yields hand those tasks
 // windows to answer BLE/serial polls promptly (see in-forward yields).
@@ -142,6 +152,19 @@ bool        llmModelIcon(const uint8_t** bits, uint8_t* width, uint8_t* height);
 
 // Generate text from a prompt. Calls tokenCb for each output token.
 // Runs synchronously on the calling task — caller is responsible for
+// Wrap a bare question in the "Q: <question>\nA:" template the model is trained
+// on, writing into caller-owned `out` and returning it. The trailing A: token is
+// what asks the model to ANSWER; hand llmGenerate an unframed prompt and it
+// simply continues the sentence instead ("Where is geodude" comes back as
+// " are used to catch wild Pokemon.").
+//
+// Idempotent: anything already starting with "Q:" is returned unchanged, so
+// callers that frame upstream (the web chat page) and callers that don't (CLI,
+// OLED) can both route through it. A "do:" lead-in selects the "\nDo:" variant.
+// Every interface that accepts free-text from a human should call this; the
+// function is pure, so the caller owns the buffer and its serialization.
+const char* llmFramePrompt(const char* userText, char* out, size_t outSize);
+
 // running this on an appropriate task (not the httpd task).
 // Returns number of tokens generated, or -1 on error.
 //

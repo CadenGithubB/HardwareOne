@@ -45,7 +45,8 @@ OLEDEspNowState gOledEspNowState;
 // Per-row direction/status metadata, kept in lockstep with messageList.items by
 // oledEspNowRefreshMessages and read by the device-detail renderer (left=received,
 // right=sent + live delivery status).
-static struct { bool isSent; uint32_t msgId; uint8_t sendState; } gOledRowMeta[OLED_SCROLL_MAX_ITEMS];
+// PSRAM .bss: CPU-only row metadata, written/read solely on the OLED task.
+EXT_RAM_BSS_ATTR static struct { bool isSent; uint32_t msgId; uint8_t sendState; } gOledRowMeta[OLED_SCROLL_MAX_ITEMS];
 
 // =============================================================================
 // Pairing view — WPS-style toggle (see espnowpairmode / espnowPairMode* core)
@@ -1364,12 +1365,15 @@ void oledEspNowRefreshDeviceList() {
   uint8_t myMac[6];
   esp_wifi_get_mac(WIFI_IF_STA, myMac);
   
-  // Static buffers for scroll item text (pointers stored in scroll items)
-  static char line1Bufs[16][28];
-  static char line2Bufs[16][28];
-  
+  // Static buffers for scroll item text (pointers stored in scroll items, so
+  // they must outlive this call). PSRAM .bss: display text and sort rows,
+  // written and read solely on the OLED task, never DMA'd — no reason to hold
+  // ~1.2 KB of internal DRAM for a menu most devices never open.
+  static EXT_RAM_BSS_ATTR char line1Bufs[16][28];
+  static EXT_RAM_BSS_ATTR char line2Bufs[16][28];
+
   // Build array of device entries for filtering and sorting
-  static DeviceEntry entries[16];
+  static EXT_RAM_BSS_ATTR DeviceEntry entries[16];
   int entryCount = 0;
   
   for (int i = 0; i < gEspNow->deviceCount && entryCount < 16; i++) {

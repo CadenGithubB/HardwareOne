@@ -22,6 +22,7 @@
 #include "esp_camera.h"
 #include "sdkconfig.h"
 #include "System_Debug.h"
+#include "System_RamFlush.h"
 #include "System_MemUtil.h"
 #include "System_Command.h"
 #include "System_Settings.h"
@@ -940,6 +941,9 @@ static void cameraPwrRunOne(const CameraPwrMsg& m) {
           BROADCAST_PRINTF("[CAM_PWR] initCamera failed — reverting camera auto-start");
           setSetting(gSettings.cameraAutoStart, false);
           systemEventPost(SYSEVT_SENSOR_START_FAILED, "Camera", "init failed");
+          // The camera is off because init failed, not because the user closed it —
+          // don't let a ramflush capture read this as an intentional close.
+          ramFlushMarkAutostartFailed(RF_CAMERA);
         }
       }
       break;

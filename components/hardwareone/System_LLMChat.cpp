@@ -293,6 +293,12 @@ void chatResolveParams(const ChatParamOverride& o, LLMGenParams* out) {
   out->suppressCount = 0;  // Retry path fills this; default path leaves empty.
 }
 
+// Scratch for llmFramePrompt (System_LLM.cpp). Both users below hold ChatLock
+// across their llmStartAsync call, which serializes it. PSRAM to match the
+// engine's own prompt staging (gLLMAsyncCtx) rather than spend another KB of
+// internal heap.
+EXT_RAM_BSS_ATTR static char sFramedPrompt[1024];
+
 // ============================================================================
 // Mutating operations
 // ============================================================================
@@ -323,8 +329,11 @@ int chatBeginTurn(const char* userPrompt, const ChatParamOverride* opt) {
   LLMGenParams params;
   chatResolveParams(opt ? *opt : ChatParamOverride{}, &params);
 
-  // Hand off to the engine
-  int sid = llmStartAsync(userPrompt, params);
+  // Hand off to the engine. The turn above deliberately stores what the user
+  // actually typed — only the engine sees the Q:/A: scaffolding, so the chat
+  // ring stays clean for the OLED and G2 viewers.
+  int sid = llmStartAsync(llmFramePrompt(userPrompt, sFramedPrompt, sizeof(sFramedPrompt)),
+                          params);
   if (sid <= 0) {
     // Engine refused — roll back the empty assistant turn so the UI doesn't
     // show a stale "..." that never resolves.
@@ -406,7 +415,11 @@ int chatRetryLast(const ChatParamOverride* opt) {
   // New assistant turn for this retry attempt.
   int newSlot = appendTurnLocked(ChatTurnRole::ASSISTANT, nullptr, 0);
 
-  int sid = llmStartAsync(promptBuf, params);
+  // promptBuf is the stored USER turn, i.e. the raw text — frame it the same way
+  // the original attempt was framed, or a retry would ask the model a different
+  // question than the one it just answered.
+  int sid = llmStartAsync(llmFramePrompt(promptBuf, sFramedPrompt, sizeof(sFramedPrompt)),
+                          params);
   if (sid <= 0) {
     popLastTurnLocked();
     return 0;

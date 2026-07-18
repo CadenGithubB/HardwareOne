@@ -8,6 +8,7 @@
 #include "System_Battery.h"
 #include "System_BuildConfig.h"
 #include "System_Command.h"
+#include "System_RamFlush.h"
 #include "System_Settings.h"
 #include "System_ESPNow.h"
 #include "System_Utils.h"  // For AuthContext
@@ -2150,38 +2151,75 @@ static void oledConfirmRender() {
 OLEDConsoleBuffer gOledConsole;
 
 // Constructor
+// Runs during static init, long before gSettings is loaded, so the ring cannot
+// be sized here — init() owns the allocation.
 OLEDConsoleBuffer::OLEDConsoleBuffer()
-  : head(0), count(0), capacity(OLED_CONSOLE_LINES), mutex(nullptr) {
-  memset(lines, 0, sizeof(lines));
-  memset(timestamps, 0, sizeof(timestamps));
+  : lines(nullptr), timestamps(nullptr), head(0), count(0), capacity(0), mutex(nullptr) {
 }
 
 // Initialize buffer and mutex
 void OLEDConsoleBuffer::init() {
-  head = 0;
-  count = 0;
-  // Latch effective history depth from settings (clamped to physical capacity).
-  int eff = gSettings.oledCliHistorySize;
-  if (eff < 10) eff = 10; else if (eff > OLED_CONSOLE_LINES) eff = OLED_CONSOLE_LINES;
-  capacity = (uint8_t)eff;
-  memset(lines, 0, sizeof(lines));
-  memset(timestamps, 0, sizeof(timestamps));
+  // Idempotent, and deliberately does not reset a ring it did not just allocate:
+  // debugOutputTask is already running by the time initDebugSystem calls this
+  // (it is created first), so clearing head/count here would race a concurrent
+  // append(). A second call therefore leaves a live ring strictly alone — which
+  // also means the depth is fixed by the allocation, hence "requires reboot".
+  if (!lines) {
+    // Latch effective history depth from settings (clamped to the ceiling).
+    int eff = gSettings.oledCliHistorySize;
+    if (eff < 10) eff = 10; else if (eff > OLED_CONSOLE_LINES) eff = OLED_CONSOLE_LINES;
+
+    // Build into locals and publish `lines` last: it is the flag every accessor
+    // gates on, so a reader sees either no ring at all or a fully-formed one,
+    // and the failure path below can free without racing that gate. calloc
+    // zeroes the ring, so there is nothing further to clear.
+    //
+    // MALLOC_CAP_INTERNAL is spelled out rather than going through
+    // ps_alloc(PreferInternal), which degrades to plain malloc() and would hand
+    // this ring to PSRAM once it grew past CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL.
+    // The ring holds echoed CLI credentials (see the header), so internal is a
+    // requirement, not a preference.
+    char (*newLines)[OLED_CONSOLE_LINE_LEN] =
+      (char (*)[OLED_CONSOLE_LINE_LEN])heap_caps_calloc(eff, OLED_CONSOLE_LINE_LEN,
+                                                        MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    uint32_t* newStamps = (uint32_t*)heap_caps_calloc(eff, sizeof(uint32_t),
+                                                      MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (newLines && newStamps) {
+      head = 0;
+      count = 0;
+      capacity = (uint8_t)eff;
+      timestamps = newStamps;
+      lines = newLines;
+    } else {
+      // Hand back whichever half succeeded; neither pointer was ever published.
+      heap_caps_free(newLines);
+      heap_caps_free(newStamps);
+      ERROR_SYSTEMF("Failed to allocate OLED console buffer (%d lines × %d chars) - history disabled",
+                    eff, OLED_CONSOLE_LINE_LEN);
+    }
+  }
 
   if (!mutex) {
     mutex = xSemaphoreCreateMutex();
-    if (mutex) {
-      DEBUG_SYSTEMF("OLED console buffer initialized (%d/%d lines × %d chars)",
-                    (int)capacity, OLED_CONSOLE_LINES, OLED_CONSOLE_LINE_LEN);
-    } else {
+    if (!mutex) {
       ERROR_SYSTEMF("Failed to create OLED console buffer mutex");
     }
+  }
+
+  // Both halves must be live for the console to work — append() gates on each —
+  // so only claim success when they are, or the mutex-failure path would print a
+  // contradictory "initialized" line over its own error.
+  if (lines && mutex) {
+    DEBUG_SYSTEMF("OLED console buffer initialized (%d lines of %d max × %d chars, %u B)",
+                  (int)capacity, OLED_CONSOLE_LINES, OLED_CONSOLE_LINE_LEN,
+                  (unsigned)((size_t)capacity * (OLED_CONSOLE_LINE_LEN + sizeof(uint32_t))));
   }
 }
 
 // Append a line to the ring buffer (filters non-ASCII for OLED display)
 void OLEDConsoleBuffer::append(const char* text, uint32_t timestamp) {
-  if (!text || !mutex) return;
-  
+  if (!text || !mutex || !lines) return;
+
   if (xSemaphoreTake(mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
     // Copy text, filtering non-ASCII characters (OLED font only supports ASCII)
     char* dst = lines[head];
@@ -2229,12 +2267,12 @@ void OLEDConsoleBuffer::append(const char* text, uint32_t timestamp) {
 
 // Get number of valid lines in buffer
 int OLEDConsoleBuffer::getLineCount() const {
-  return count;
+  return lines ? count : 0;
 }
 
 // Get line by index (0 = oldest, count-1 = newest)
 const char* OLEDConsoleBuffer::getLine(int index) const {
-  if (index < 0 || index >= count) {
+  if (!lines || index < 0 || index >= count) {
     return nullptr;
   }
   
@@ -2253,7 +2291,7 @@ const char* OLEDConsoleBuffer::getLine(int index) const {
 
 // Get timestamp by index (0 = oldest, count-1 = newest)
 uint32_t OLEDConsoleBuffer::getTimestamp(int index) const {
-  if (index < 0 || index >= count) {
+  if (!timestamps || index < 0 || index >= count) {
     return 0;
   }
   
@@ -4352,7 +4390,7 @@ void processOLEDBootSequence() {
           }
           
           // Auto-start gamepad if setting is enabled and I2C bus is enabled
-          if (gSettings.inputAutoStart && gSettings.i2cBusEnabled) {
+          if (ramFlushResolve(RF_INPUT, gSettings.inputAutoStart) && gSettings.i2cBusEnabled) {
             tryAutoStartInputForMenu();
           }
         }
@@ -5962,12 +6000,11 @@ void tryAutoStartInputForMenu() {
 
   bool inFirstTimeSetup = (gFirstTimeSetupState != SETUP_NOT_NEEDED);
   if (!inFirstTimeSetup) {
-    // Pick the right auto-start setting for the active input driver.
-#if ENABLE_ANO_ENCODER
-    bool autoStart = gSettings.inputAutoStart;
-#else
-    bool autoStart = gSettings.inputAutoStart;
-#endif
+    // Both input drivers (gamepad and ANO encoder) share one auto-start setting.
+    // Resolved through ramflush because this runs on every menu entry and login,
+    // long after boot — reading the setting directly would resurrect input that a
+    // RAM-flush resume deliberately left off.
+    bool autoStart = ramFlushResolve(RF_INPUT, gSettings.inputAutoStart);
     if (!autoStart || !gSettings.i2cBusEnabled) {
       return;
     }

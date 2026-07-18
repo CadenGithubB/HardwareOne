@@ -41,8 +41,25 @@ extern void bondNotifySessionEstablished(const uint8_t* peerMac);
 // time sessionDeriveAeadKeys returns.
 
 // V4RxCtx is defined in System_ESPNow.cpp as a private struct. To keep handlers
-// in a separate translation unit, we duplicate its declaration here — must
-// stay byte-for-byte in sync with the original. If you change one, change both.
+// in a separate translation unit, we duplicate its declaration here — and the
+// duplicate is CURRENTLY OUT OF SYNC. The original carries two extra bools
+// between isPaired and deviceName:
+//
+//     bool isAuthenticated;     // SESSION_FRAME unwrap OR BROADCAST_AUTH verified
+//     bool isSessionEncrypted;  // AEAD-wrapped SESSION_FRAME specifically
+//
+// This copy has neither, so it describes a shorter object than the one the
+// dispatcher actually passes. That is an ODR violation: both translation units
+// compile and link clean, and nothing diagnoses the disagreement.
+//
+// What that means for code in this file: the layouts agree up to and including
+// isPaired, so recv_info, h, payload, payloadLen and isPaired all read
+// correctly. deviceName does NOT — through this declaration it lands on the
+// bytes the real struct uses for its two auth bools and their padding, so it
+// would silently hand back garbage instead of a string. Any field appended
+// after deviceName is unsafe for the same reason. Use only the fields at or
+// before isPaired here; every handler below does. Adding the two bools back is
+// the fix — until then, a change to either struct must be mirrored in the other.
 struct V4RxCtx {
   const esp_now_recv_info* recv_info;
   const EspNowV4Header*    h;
@@ -447,8 +464,11 @@ void v4hKeyExConfirm(const V4RxCtx& ctx) {
   const auto* msg = reinterpret_cast<const V4PayloadKeyExConfirm*>(ctx.payload);
 
   // No HMAC on CONFIRM — it's just an acknowledgement, the prior REPLY's
-  // HMAC already authenticated this peer. We do sanity-check the mesh and
-  // the sender MAC is a known peer.
+  // HMAC already authenticated this peer. What we check here is that the
+  // header origin matches the payload's confirmerMac, and that the sender is a
+  // peer we already know. We do NOT read msg->meshFingerprint at all: mesh
+  // scoping rides entirely on the dispatcher's header-level fingerprint gate,
+  // which is itself skipped when the header fingerprint is 0.
   if (memcmp(ctx.h->origin, msg->confirmerMac, 6) != 0) {
     WARN_ESPNOWF("KEY_EX_CONFIRM: header.origin / payload.confirmerMac mismatch");
     return;
@@ -716,11 +736,15 @@ void buildRekeyTranscript(uint8_t out[75],
 // ----------------------------------------------------------------------------
 // Deferred-to-cmd_exec_task work structs + worker functions.
 //
-// Ed25519 sign+verify each use ~3 KB of libsodium internal stack — adding
-// that to espnow_task (22 KB budget, ~9 KB idle HWM) caused overflows during
-// SESSION_OPEN handling. cmd_exec_task has 24 KB and is single-threaded
-// w.r.t. the existing CLI peak (17 KB), so deferring keeps everything under
-// budget without bumping any task's stack.
+// Ed25519 sign+verify each use ~3 KB of libsodium internal stack. espnow_task's
+// whole budget is 6656 B (ESPNOW_HB_STACK_WORDS — the values in
+// System_TaskUtils.h are BYTES, not words, despite the name), so one signature
+// is most of the task's stack; on top of the ambient RX depth it overflowed
+// during SESSION_OPEN handling. cmd_exec_task has 8192 B and is single-threaded
+// w.r.t. the existing CLI peak (~4.25 KB), so deferring keeps everything under
+// budget without bumping any task's stack. The margin is real but not roomy —
+// ~3 KB of libsodium against an 8 KB budget is worth re-measuring if the
+// deferred work below grows.
 //
 // On-wire RX handlers (v4hSessionOpen/Confirm) do only size validation +
 // PSRAM copy + enqueue. Heavy lifting runs in runDeferredSessionOpen/Confirm
@@ -1170,8 +1194,11 @@ bool sendRekey(SessionState* s, const uint8_t peerMac[6]) {
   uint8_t nonceRekey[16];
   espnowCryptoRandomBytes(nonceRekey, sizeof(nonceRekey));
 
-  // Snapshot txSeq before we send (the REKEY itself bumps it via wrap, but
-  // the signature commits to the pre-send count for transcript uniqueness).
+  // Snapshot txSeq before we send — the signature commits to it for transcript
+  // uniqueness. The REKEY frame itself does NOT bump it: it ships via
+  // v4_send_frame with FLAG_HANDSHAKE (plaintext, signed under our identity
+  // key), and txSeqNext is only ever incremented by sessionWrapFrame on the
+  // session-wrapped data path.
   uint32_t txSeqAtSign = s->txSeqNext;
 
   V4PayloadSessionRekey rk = {};
@@ -1324,7 +1351,7 @@ void v4hSessionRekey(const V4RxCtx& ctx) {
   }
   // PSRAM-copy + defer to cmd_exec_task (verify+ECDH+KDF+optional sign+send
   // is the same crypto profile as SESSION_OPEN/CONFIRM, so the same defer
-  // architecture applies — keeps espnow_task's stack at 22 KB).
+  // architecture applies — keeps it off espnow_task's 6656 B stack).
   auto* w = (DeferredRekeyWork*)ps_alloc(sizeof(DeferredRekeyWork),
                                          AllocPref::PreferPSRAM, "espnow.rekey.defer");
   if (!w) {

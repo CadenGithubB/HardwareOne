@@ -20,8 +20,9 @@ MeshDerivedKeys gMeshDerivedKeys[Settings::N_MESHES] = {};
 // 100000 iters via mbedtls HMAC-SHA256 backed by the ESP32 hardware SHA
 // accelerator. Empirically ~1 s on ESP32 @ 240 MHz (10× faster than
 // libsodium's software-only HMAC, which previously needed ~10 s for the
-// same count). The PBKDF2 loop yields every 1024 iters so the Task WDT
-// stays quiet even if the iteration count gets bumped further.
+// same count). The PBKDF2 loop yields every 4096 iters — ~24 yields across a
+// 100k stretch — so the Task WDT stays quiet even if the iteration count gets
+// bumped further.
 constexpr uint32_t kPbkdf2Iters    = 100000;
 constexpr const char* kSaltPrefix  = "espnow-v4-mesh-salt:";
 constexpr uint64_t  kSubkeyBootstrap = 1;

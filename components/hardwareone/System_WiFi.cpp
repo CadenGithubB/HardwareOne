@@ -1347,7 +1347,7 @@ const CommandEntry wifiCommands[] = {
   { "httpstatus", "Show HTTP server status. (add 'json' for JSON output)", false, cmd_httpstatus },
 #endif
   { "certinfo", "Show HTTPS certificate details.", false, cmd_certinfo },
-  { "certgen", "Generate self-signed HTTPS certificate: [rsa] (default: ECDSA P-256)", true, cmd_certgen, "Usage: certgen [rsa]  Default: ECDSA P-256 (~1s). Use 'certgen rsa' for RSA-2048 (~30-60s)." },
+  { "certgen", "Generate self-signed HTTPS certificate: [rsa] (default: ECDSA P-256)", true, cmd_certgen, "Usage: certgen [rsa]  Default: ECDSA P-256 (~1s). Use 'certgen rsa' for RSA-2048 (~30-60s).", nullptr, nullptr, /*requiresSuperAdmin=*/true },
 };
 
 const size_t wifiCommandsCount = sizeof(wifiCommands) / sizeof(wifiCommands[0]);
@@ -1540,9 +1540,6 @@ extern const SettingsModule wifiSettingsModule = {
 // HTTP Settings Module
 // ============================================================================
 #if ENABLE_HTTP_SERVER
-
-// Server handle is owned by WebServer_Server.cpp; non-null when running.
-static bool isHttpServerRunning() { return server != nullptr; }
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry httpSettingsEntries[] = {

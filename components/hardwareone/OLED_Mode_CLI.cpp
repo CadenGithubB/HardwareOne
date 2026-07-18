@@ -313,7 +313,11 @@ static bool handleCLIViewerInput(int deltaX, int deltaY, uint32_t newlyPressed) 
 
 // CLI availability check
 static bool isCLIViewerAvailable(String* outReason) {
-  if (!gOledConsole.mutex) {
+  // Both halves are needed, and they fail independently: the ring allocation can
+  // come up short on internal DRAM while the much smaller mutex still succeeds.
+  // Checking only the mutex would advertise the viewer and then show an empty
+  // page forever, indistinguishable from a fresh boot.
+  if (!gOledConsole.mutex || !gOledConsole.lines) {
     if (outReason) *outReason = "Console buffer not initialized";
     return false;
   }

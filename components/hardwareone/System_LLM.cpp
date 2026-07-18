@@ -156,7 +156,28 @@ static char*          gLLMResultBuf  = nullptr;  // PSRAM, allocated on first us
 static volatile int   gLLMResultLen  = 0;         // bytes written (written by task, read by HTTP)
 static volatile bool  gLLMResultDone = true;      // true = idle / finished
 static volatile int   gLLMSessionId  = 0;         // bumped per llmStartAsync call
-static TaskHandle_t   gLLMTask       = nullptr;   // running gen task handle (or null)
+static TaskHandle_t   gLLMTask       = nullptr;   // persistent gen worker handle (null until first create)
+// Stack + TCB for the persistent generation worker, claimed from internal DRAM
+// at model load (llmEnsureWorker) and retained for the rest of the boot. Devices
+// that never load a model never pay the ~12.4 KB — the reason these are pointers
+// and not link-time .bss.
+//
+// The worker is created once and never deleted: it parks on its notify between
+// generations, including across llmunload. Retiring it would buy nothing (these
+// blocks are deliberately not freed, so the task is the only thing that would go
+// away) while costing a race that has no safe form — a task cannot observe its
+// own deletion, the IDLE task unlinks its TCB some unbounded time after it stops
+// running, and re-creating on the same TCB before that lands corrupts the
+// termination list.
+//
+// They must be INTERNAL: the scheduler and ISR path touch a task's stack and TCB,
+// and task stacks in PSRAM have never been safe on this HW. Sized in StackType_t
+// units; on this build sizeof(StackType_t)==1 so the stack is LLM_TASK_STACK_SIZE
+// bytes. Static-task creation (rather than plain xTaskCreate) is what lets the
+// allocation happen exactly once, at model load on a clean heap — see the
+// fragmentation note in llmEnsureWorker.
+static StackType_t*   gLLMWorkerStack = nullptr;
+static StaticTask_t*  gLLMWorkerTcb   = nullptr;
 
 struct LLMAsyncContext {
   char         prompt[1024];  // callers cap the prompt at 1024 (see llmStartAsync sites)
@@ -166,28 +187,108 @@ struct LLMAsyncContext {
 // reason — the async task reads it off the LLM (PSRAM-bound) path anyway.
 EXT_RAM_BSS_ATTR static LLMAsyncContext gLLMAsyncCtx;
 
-static void llmAsyncTask(void* /*pv*/) {
-  const LLMAsyncContext* ac = &gLLMAsyncCtx;
+// Persistent generation worker. Created ONCE (at model load, on a clean heap)
+// and reused for every generation — it parks on a task-notification between
+// requests instead of being re-spawned per generation. That is what makes
+// generation immune to internal-DRAM fragmentation: the 12 KB stack is claimed
+// one time and never re-acquired against a fragmented heap. llmStartAsync stages
+// gLLMAsyncCtx + resets the result buffer, then xTaskNotifyGive()s us.
+static void llmWorkerTask(void* /*pv*/) {
+  for (;;) {
+    // Park until a request arrives. pdTRUE clears the notification count on
+    // exit, so two coalesced gives still yield exactly one generation (no
+    // stale-context replay). The give/take pair is a full memory barrier, so
+    // the gLLMAsyncCtx writes llmStartAsync made before its give are visible
+    // here after the take — the same publish edge the old per-gen xTaskCreate
+    // provided.
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
-  llmGenerate(ac->prompt, [](const char* token) -> bool {
-    if (!gLLMResultBuf) return false;
-    int tlen = (int)strlen(token);
-    int cur  = gLLMResultLen;
-    if (cur + tlen >= LLM_RESULT_BUF_SIZE - 1) return false;  // buffer full
-    memcpy(gLLMResultBuf + cur, token, tlen);
-    gLLMResultBuf[cur + tlen] = '\0';
-    gLLMResultLen = cur + tlen;  // publish after write
-    return true;
-  },
-  ac->params.maxTokens,    ac->params.temperature,  ac->params.topp,
-  ac->params.repPenalty,   ac->params.repWindow,    ac->params.sentenceLimit,
-  ac->params.hardCap,
-  ac->params.suppressCount > 0 ? ac->params.suppressTokens : nullptr,
-  ac->params.suppressCount, ac->params.minP);
+    const LLMAsyncContext* ac = &gLLMAsyncCtx;
+    llmGenerate(ac->prompt, [](const char* token) -> bool {
+      if (!gLLMResultBuf) return false;
+      int tlen = (int)strlen(token);
+      int cur  = gLLMResultLen;
+      if (cur + tlen >= LLM_RESULT_BUF_SIZE - 1) return false;  // buffer full
+      memcpy(gLLMResultBuf + cur, token, tlen);
+      gLLMResultBuf[cur + tlen] = '\0';
+      gLLMResultLen = cur + tlen;  // publish after write
+      return true;
+    },
+    ac->params.maxTokens,    ac->params.temperature,  ac->params.topp,
+    ac->params.repPenalty,   ac->params.repWindow,    ac->params.sentenceLimit,
+    ac->params.hardCap,
+    ac->params.suppressCount > 0 ? ac->params.suppressTokens : nullptr,
+    ac->params.suppressCount, ac->params.minP);
 
-  gLLMResultDone = true;
-  gLLMTask       = nullptr;
-  vTaskDelete(nullptr);
+    // The chat layer's drainEngineLocked finalizes on this flag, so publish it
+    // before the epilogue below and then loop back to park. This task never
+    // exits — see gLLMWorkerStack for why retiring it has no safe form.
+    gLLMResultDone = true;
+
+    // One-shot: report the deepest this task's stack got during a real
+    // generation, so the static LLM_TASK_STACK_SIZE can be trusted/trimmed with
+    // HW data instead of guesswork. uxTaskGetStackHighWaterMark returns the
+    // minimum free stack ever seen (in StackType_t words == bytes on this build).
+    static bool sLoggedStackHwm = false;
+    if (!sLoggedStackHwm) {
+      sLoggedStackHwm = true;
+      UBaseType_t freeWords = uxTaskGetStackHighWaterMark(nullptr);
+      DEBUG_LLM_GENERATEF("[LLM] llm_gen stack: %u B used of %u B (min free %u B)",
+                          (unsigned)(LLM_TASK_STACK_SIZE - freeWords * sizeof(StackType_t)),
+                          (unsigned)LLM_TASK_STACK_SIZE,
+                          (unsigned)(freeWords * sizeof(StackType_t)));
+    }
+  }
+}
+
+// Create the persistent worker once, on demand. Idempotent + serialized under
+// gLLM.mutex so a model-load and a lazy fallback can't both create it (which
+// would leak a 12 KB task and double-consume the shared context).
+static bool llmEnsureWorker() {
+  bool ok = true;
+  if (gLLM.mutex) xSemaphoreTake(gLLM.mutex, portMAX_DELAY);
+  if (!gLLMTask) {
+    // Claim the stack + TCB HERE — at model load, on the cleanest heap this
+    // device will see (the G2 viewer / map stacks are usually not up yet) — and
+    // then keep them for every subsequent generation. Timing is the whole design:
+    // the old per-generation xTaskCreatePinnedToCore asked for the same ~12 KB
+    // contiguous INTERNAL block at the worst possible moment, and once a model is
+    // loaded and the G2 page has fragmented the heap the largest free internal
+    // block is only ~9 KB — so generation returned "busy or failed to start"
+    // every time the viewer was open. Claiming once, early, dodges that; the
+    // static-task form is what makes "once" expressible.
+    //
+    // A failure here is real (unlike the old link-time .bss, which could not
+    // fail) but benign: both callers treat it as "retry later" — llmLoadModel
+    // logs and loads anyway, llmStartAsync bails and re-enters on the next
+    // generation, by which point the heap may have recovered.
+    if (!gLLMWorkerStack) {
+      gLLMWorkerStack = (StackType_t*)heap_caps_malloc(LLM_TASK_STACK_SIZE,
+                                                       MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    }
+    if (!gLLMWorkerTcb) {
+      gLLMWorkerTcb = (StaticTask_t*)heap_caps_malloc(sizeof(StaticTask_t),
+                                                      MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    }
+    if (gLLMWorkerStack && gLLMWorkerTcb) {
+      // xTaskCreateStatic* only returns null on invalid params, never on OOM.
+      gLLMTask = xTaskCreateStaticPinnedToCore(
+        llmWorkerTask, "llm_gen", LLM_TASK_STACK_SIZE / sizeof(StackType_t), nullptr,
+        LLM_TASK_PRIORITY, gLLMWorkerStack, gLLMWorkerTcb, 1);
+    }
+    if (!gLLMTask) {
+      // No task ever ran on these, so releasing the partial pair is unambiguously
+      // safe here — and it keeps a failed create from pinning 12 KB that the
+      // retry would only ask for again.
+      heap_caps_free(gLLMWorkerStack);
+      heap_caps_free(gLLMWorkerTcb);
+      gLLMWorkerStack = nullptr;
+      gLLMWorkerTcb   = nullptr;
+      ok = false;
+    }
+  }
+  if (gLLM.mutex) xSemaphoreGive(gLLM.mutex);
+  return ok;
 }
 
 // ============================================================================
@@ -865,6 +966,13 @@ bool llmLoadModel(const char* modelPath, int maxCtx) {
     snprintf(det, sizeof(det), "ctx %d", gLLM.seq_ctx);
     systemEventPost(SYSEVT_LLM_MODEL_LOADED, base, det);
   }
+  // Reserve the persistent generation worker now, while the heap is at its
+  // cleanest (model just loaded; the G2 viewer / map stacks are usually not yet
+  // allocated). Best-effort: on an already-fragmented heap this can fail, in
+  // which case llmStartAsync retries lazily. Never fail the load on this.
+  if (!llmEnsureWorker()) {
+    DEBUG_LLM_LOADF("[LLM] gen worker create deferred (heap fragmented); will retry at first generate");
+  }
   DEBUG_LLM_LOADF("[LLM] Model ready. PSRAM used: %uKB (weights=%uKB state=%uKB) ctx=%d/%d",
                   (unsigned)((gLLM.weightsSize + gLLM.weightsQ8Size + gLLM.stateSize) / 1024),
                   (unsigned)((gLLM.weightsSize + gLLM.weightsQ8Size) / 1024),
@@ -884,10 +992,23 @@ void llmUnload() {
   // Edge: only a real teardown (model present -> no-model) should post. A bare
   // unload with nothing loaded (pre-load cleanup, double-unload) must stay quiet.
   const bool hadModel = (gLLM.runState != LLMState::UNLOADED);
-  if (gLLM.runState == LLMState::GENERATING) {
-    gLLM.stopRequested = true;
-    // Wait briefly for generation to stop
-    for (int i = 0; i < 50 && gLLM.runState == LLMState::GENERATING; i++) {
+  // Quiesce any LIVE generation before freeing the weights it reads. A gen is
+  // live from llmStartAsync accepting it (gLLMResultDone=false) through the
+  // worker's epilogue (gLLMResultDone=true) — a window that includes an async
+  // gen ACCEPTED but not yet inside llmGenerate, where runState is still READY.
+  // The old runState==GENERATING-only wait missed that window and could free
+  // weights out from under a generation about to start (use-after-free). Cover
+  // both the synchronous path (runState) and the async accept window (done).
+  if (gLLM.runState == LLMState::GENERATING || !gLLMResultDone) {
+    // Let an accepted-but-not-started async gen actually enter llmGenerate
+    // first; otherwise its entry reset of stopRequested (llmGenerate ~:1049)
+    // clears the stop we set and it runs to completion under us.
+    for (int i = 0; i < 50 && gLLM.runState != LLMState::GENERATING && !gLLMResultDone; i++) {
+      vTaskDelay(pdMS_TO_TICKS(2));
+    }
+    vTaskDelay(pdMS_TO_TICKS(2));  // let that entry reset land before we set stop
+    gLLM.stopRequested = true;     // observed per-token, breaks the gen loop
+    for (int i = 0; i < 100 && (gLLM.runState == LLMState::GENERATING || !gLLMResultDone); i++) {
       vTaskDelay(pdMS_TO_TICKS(10));
     }
   }
@@ -1033,6 +1154,45 @@ static bool llmIsMetaPrompt(const char* prompt) {
   for (size_t i = 0; i < sizeof(META) / sizeof(META[0]); ++i)
     if (strstr(lw, META[i])) return true;
   return false;
+}
+
+// See System_LLM.h for the contract. The template is spelled here rather than in
+// each caller because it used to live only in the web page's JavaScript, which is
+// why the web was the one surface that got real answers while the CLI, OLED and
+// BLE quietly asked the model to continue prose instead.
+//
+// The idempotence test is a leading "Q:" rather than a search for "\nA:": BLE
+// intake flattens newlines to spaces, so an already-framed prompt can arrive as
+// "Q: ... A:" and must not be wrapped twice — the normalization below restores
+// that newline itself.
+const char* llmFramePrompt(const char* userText, char* out, size_t outSize) {
+  if (!userText || !out || outSize < 8) return userText;
+
+  const char* p = userText;
+  while (*p == ' ' || *p == '\t') p++;
+  if (strncasecmp(p, "Q:", 2) == 0) return userText;  // already framed — pass through
+
+  const char* tail = "\nA:";
+  if (strncasecmp(p, "do:", 3) == 0) {
+    tail = "\nDo:";
+    p += 3;
+    while (*p == ' ') p++;
+  }
+
+  // Truncate the question, never the tail. Prompts are capped at
+  // sizeof(gLLMAsyncCtx.prompt), so letting a long question push the A: off the
+  // end would silently un-frame it — the exact failure this exists to prevent,
+  // and an invisible one.
+  const size_t tailLen = strlen(tail);
+  const size_t maxBody = outSize - 3 - tailLen - 1;  // "Q: " + tail + NUL
+  size_t bodyLen = strlen(p);
+  if (bodyLen > maxBody) bodyLen = maxBody;
+
+  memcpy(out, "Q: ", 3);
+  memcpy(out + 3, p, bodyLen);
+  memcpy(out + 3 + bodyLen, tail, tailLen);
+  out[3 + bodyLen + tailLen] = '\0';
+  return out;
 }
 
 int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
@@ -1298,8 +1458,14 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
     const int gs = p->group_size;
     TransformerWeights* w = &gLLM.weights;
 
-    // Temp buffers for two embeddings (stack is fine for dim=128)
-    float emb_a[512], emb_b[512];  // max dim we'll handle
+    // Temp buffers for two embeddings. Hoisted to PSRAM .bss (was 4 KB — two
+    // float[512] — on the llm_gen task stack, the single biggest stack consumer
+    // in this whole function). Moving it off-stack is what lets the gen task run
+    // from a modest 12 KB internal stack instead of needing the 16 KB contiguous
+    // block that the fragmented heap can't supply. Safe as a shared static: this
+    // block is diagnostic-only and generation is single-flight (one persistent
+    // worker; llmGenerate early-returns unless runState==READY).
+    static EXT_RAM_BSS_ATTR float emb_a[512], emb_b[512];  // max dim we'll handle
     if (dim <= 512) {
       // Helper lambda: dequantize embedding for token id into buf
       auto deq_emb = [&](int tok_id, float* buf) {
@@ -2281,13 +2447,20 @@ String llmListModels() {
 int llmStartAsync(const char* prompt, const LLMGenParams& params) {
   if (!llmIsReady()) return 0;
 
-  // Stop any in-progress generation and wait for the task to exit (max 500 ms)
-  if (gLLMTask != nullptr) {
+  // The generation worker is now PERSISTENT — created once at model load and
+  // reused (no per-generation task spawn, so a fragmented heap can never fail a
+  // generation). Ensure it exists here as a lazy fallback (model loaded before
+  // the worker, or a load-time create that lost a fragmentation race).
+  if (!llmEnsureWorker()) return 0;
+
+  // Stop any in-progress generation and wait for it to finish. The worker is
+  // always alive now, so "busy" is the done flag — not a live task handle.
+  if (!gLLMResultDone) {
     llmStop();
-    for (int i = 0; i < 50 && gLLMTask != nullptr; i++) {
+    for (int i = 0; i < 50 && !gLLMResultDone; i++) {
       vTaskDelay(pdMS_TO_TICKS(10));
     }
-    if (gLLMTask != nullptr) return 0;  // task didn't exit in time
+    if (!gLLMResultDone) return 0;  // previous generation didn't stop in time
   }
 
   // Allocate PSRAM result buffer on first call
@@ -2296,28 +2469,22 @@ int llmStartAsync(const char* prompt, const LLMGenParams& params) {
     if (!gLLMResultBuf) return 0;
   }
 
-  // Reset state for this generation
+  // MANDATORY publish order (do not reorder): we observed the prior gen's
+  // gLLMResultDone==true above; now reset the buffer, clear done, bump session,
+  // and stage the context — then, and only then, wake the worker. xTaskNotifyGive
+  // is a memory barrier, so the parked worker sees a zeroed length and the fresh
+  // context; and because 'done' is set false HERE (before the give) and true only
+  // in the worker epilogue, done=true(N) strictly happens-before done=false(N+1).
   gLLMResultLen    = 0;
   gLLMResultDone   = false;
   gLLMResultBuf[0] = '\0';
   int newSession   = (int)gLLMSessionId + 1;
   gLLMSessionId    = newSession;
-
-  // Copy prompt + params into the static context the task will read from
   strlcpy(gLLMAsyncCtx.prompt, prompt, sizeof(gLLMAsyncCtx.prompt));
   gLLMAsyncCtx.params = params;
 
-  // Spawn background task pinned to core 1 (app_cpu)
-  BaseType_t rc = xTaskCreatePinnedToCore(
-    llmAsyncTask, "llm_gen",
-    LLM_TASK_STACK_SIZE, nullptr,
-    LLM_TASK_PRIORITY, &gLLMTask, 1
-  );
-  if (rc != pdPASS) {
-    gLLMResultDone = true;
-    gLLMTask       = nullptr;
-    return 0;
-  }
+  // Wake the persistent worker (replaces the old per-generation xTaskCreate).
+  xTaskNotifyGive(gLLMTask);
 
   DEBUG_HTTPF("[LLM] Async gen started: session=%d prompt='%.40s%s'",
               newSession, prompt, strlen(prompt) > 40 ? "..." : "");
@@ -2452,6 +2619,9 @@ static const char* cmd_llm_load(const String& args) {
 }
 
 static const char* cmd_llm_unload(const String&) {
+  // llmUnload() already stops a live generation and waits for it before freeing
+  // the weights, so there is nothing to add here. The generation worker stays
+  // parked on its notify holding its stack — see gLLMWorkerStack.
   llmUnload();
   return "{\"schema\":1,\"ok\":true}";   // mirror POST /api/llm/unload
 }
@@ -2549,11 +2719,21 @@ static const char* cmd_llm_generate(const String& args) {
   if (ca.count() == 0) return "Error: invalid arguments — Usage: llm generate <prompt>";
   String a = ca.raw();  // full prompt text
 
+  // This path drives the engine directly instead of going through chatBeginTurn,
+  // so it has to frame the prompt itself — otherwise `llmgenerate <question>`
+  // would keep completing prose while `llmgenerate json <question>` answered
+  // properly. Static rather than a stack buffer: llmGenerate runs on this same
+  // task and already wants ~5 KB of its stack, and llmGenerate's
+  // READY->GENERATING gate is what stops two synchronous generations — hence two
+  // users of this buffer — from overlapping.
+  EXT_RAM_BSS_ATTR static char framedBuf[1024];
+  const char* framed = llmFramePrompt(a.c_str(), framedBuf, sizeof(framedBuf));
+
   // Build output into buffer
   String output;
   output.reserve(1024);
 
-  int result = llmGenerate(a.c_str(), [&output](const char* token) -> bool {
+  int result = llmGenerate(framed, [&output](const char* token) -> bool {
     output += token;
     return (output.length() < 2000);  // safety limit for CLI
   }, 128, LLM_DEFAULT_TEMPERATURE);
@@ -2779,7 +2959,7 @@ const CommandEntry llmCommands[] = {
   { "llmunload",        "Unload model and free PSRAM",          true,  cmd_llm_unload },
   { "llmautostart",     "Auto-load default model at boot (0|1)", true,  cmd_llm_autostart,    "Usage: llmautostart <0|1>" },
   { "llmmodels",        "List available model files (add 'json' for JSON output)",           false, cmd_llm_models },
-  { "llmgenerate",      "Generate text from prompt",            false, cmd_llm_generate,     "Usage: llmgenerate <prompt text>" },
+  { "llmgenerate",      "Ask the loaded model a question",      false, cmd_llm_generate,     "Usage: llmgenerate <question>  |  llmgenerate do: <intent>\nThe question is wrapped in the model's Q:/A: format for you, same as the web chat. Prefix 'do:' to ask for a command instead of an answer. A prompt that already starts with 'Q:' is sent as-is." },
   { "llmresult",        "Poll streamed generation (JSON)",      false, cmd_llm_result,       "Usage: llmresult json <offset>" },
   { "llmstop",          "Stop in-progress generation",          false, cmd_llm_stop },
   { "llmcorrupttest",   "Debug: force corruption-recovery test", true, cmd_llm_corrupt_test },

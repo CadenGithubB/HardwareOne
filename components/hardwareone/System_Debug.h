@@ -482,12 +482,14 @@ extern volatile bool gDebugVerbose;
 //                   and will slow heavy paths if left on.
 extern volatile bool gDebugStackTraceEnabled;
 
+// hwm is in BYTES on this port (StackType_t is uint8_t) — no word->byte
+// scaling. See System_TaskUtils.h.
 #define STACK_TRACEF(fmt, ...) do { \
   if (gDebugStackTraceEnabled) { \
-    UBaseType_t _hwm_words = uxTaskGetStackHighWaterMark(nullptr); \
+    UBaseType_t _hwm_bytes = uxTaskGetStackHighWaterMark(nullptr); \
     Serial.printf("[STK %s hwm=%u heap=%u ms=%lu] " fmt "\n", \
                   pcTaskGetName(nullptr), \
-                  (unsigned)(_hwm_words * 4), \
+                  (unsigned)_hwm_bytes, \
                   (unsigned)ESP.getFreeHeap(), \
                   (unsigned long)millis(), \
                   ##__VA_ARGS__); \

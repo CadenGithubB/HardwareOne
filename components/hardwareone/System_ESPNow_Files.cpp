@@ -81,9 +81,17 @@ SemaphoreHandle_t      gFileSlotsMutex = nullptr;
 
 // Per-slot .part handle for streaming mode. Kept OUT of the POD struct (which is
 // memset on alloc/release) because File is a C++ object with a destructor — a
-// memset over it would leak the underlying handle. Indexed by slot index; opened
-// in fileSlotsAllocate, written on espnow_task, closed in finalize/release. All
-// access is serialized by gFileSlotsMutex.
+// memset over it would leak the underlying handle. Indexed by slot index.
+//
+// Every touch of this handle is cmd_exec_task's, and DELIBERATELY OUTSIDE
+// gFileSlotsMutex: streamDrainPending lazy-opens it and writes it holding only the
+// FS lock, and finalize/release close it. That is the whole point of the module —
+// espnow_task must never block on flash — so the mutex covers the FIFO/metadata
+// steps around the write, not the write. Safety comes from ownership instead: a
+// buffer sitting in the PENDING FIFO is untouchable by espnow_task, and a streaming
+// slot is only freed by its own cmd_exec finalize/abort job, so no other task can
+// close the handle mid-write. Do not "fix" this by taking the slot mutex across the
+// flash work.
 File gStreamFile[kFileSlots];
 
 struct FileSlotsLockGuard {
@@ -163,11 +171,16 @@ bool fileSlotsInit() {
 }
 
 void fileSlotsBootCleanup() {
-  // Remove orphaned staging files left if a crash / power-loss hit the brief
-  // window between the staging write and the atomic rename in v4h_file_end.
-  // Normally there are none (write + rename happen in one synchronous handler
-  // call), but sweeping keeps stray "/espnow/received/.part-*" temps from
-  // accumulating and cluttering the file browser.
+  // Remove orphaned staging files left if a crash / power-loss hit a transfer
+  // before its .part was renamed into place. How wide that window is depends on
+  // the path:
+  //   - RAM path: brief. The write + atomic rename happen in one synchronous
+  //     v4h_file_end call, so an orphan needs a crash inside that window.
+  //   - Streaming path: the ENTIRE transfer. The .part is opened at the first
+  //     flush and stays open until FILE_END (multi-minute for a big file), so
+  //     any reset mid-transfer strands one — these are the common case.
+  // Sweeping also keeps stray "/espnow/received/.part-*" temps from accumulating
+  // and cluttering the file browser.
   const char* dirPath = "/espnow/received";
   AuthContext ctx = VFS::systemAuth(VFS::Scopes::ESPNOW_RECEIVED, "espnow.file_boot_cleanup");
   File dir = VFS::openGuarded(dirPath, "r", ctx);

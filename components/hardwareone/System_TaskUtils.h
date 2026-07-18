@@ -6,11 +6,30 @@
 #include <freertos/task.h>
 
 // ============================================================================
-// Centralized Task Stack Sizes (words; 1 word = 4 bytes on ESP32)
+// Centralized Task Stack Sizes — VALUES ARE BYTES
+// ============================================================================
+// ESP-IDF's xTaskCreate() takes usStackDepth in BYTES, not words. This is an
+// explicit IDF deviation from vanilla FreeRTOS — see
+// components/freertos/FreeRTOS-Kernel/include/freertos/task.h: "BYTES. Note
+// that this differs from vanilla FreeRTOS." (On this port portSTACK_TYPE is
+// uint8_t, so StackType_t is 1 byte and "words" == bytes anyway.)
+// uxTaskGetStackHighWaterMark() likewise returns BYTES here: prvTaskCheckFreeStackSpace
+// counts fill bytes then divides by sizeof(StackType_t) — a no-op at 1.
+//
+// The _STACK_WORDS names below are therefore a MISNOMER kept only to avoid a
+// 155-site rename; the numbers are byte counts and are passed through
+// unscaled. Sanity check: these sum to ~248 KB, which fits the S3's 512 KB
+// SRAM — the old "x4" reading implied ~992 KB and the device could not boot.
+//
+// ⚠ HISTORICAL FIGURES IN THE COMMENTS BELOW ARE 4x INFLATED. Every "~NNKB"
+// note and every cited HWM/peak_used measurement was produced by the reporter
+// while it multiplied by 4 (fixed 2026-07-16 in System_TaskUtils.cpp). Divide
+// any cited KB figure by 4, or re-measure, before trusting it. The headline
+// annotation on each constant has been corrected; the narratives have not.
 // ============================================================================
 
-constexpr uint32_t CMD_EXEC_STACK_WORDS = 8192;      // ~32KB (automation add validates commands via findCommand; extra headroom prevents overflow)
-constexpr uint32_t SENSOR_QUEUE_STACK_WORDS = 4096;  // 16KB. Bumped from 3072 (~12KB):
+constexpr uint32_t CMD_EXEC_STACK_WORDS = 8192;     // 8 KB (was annotated ~32KB — 4x wrong). Automation add validates commands via findCommand.
+constexpr uint32_t SENSOR_QUEUE_STACK_WORDS = 4096;     // 4 KB (was annotated 16KB — 4x wrong). History below cites 4x-inflated HWMs:
                                                      // runtime task-stack reports flagged
                                                      // sensor_queue_task CRITICAL at ~79%
                                                      // peak (free ~2.5KB) with all sensors
@@ -21,7 +40,7 @@ constexpr uint32_t SENSOR_QUEUE_STACK_WORDS = 4096;  // 16KB. Bumped from 3072 (
                                                      // headroom here is load-bearing.
                                                      // 12KB gives a comfortable margin
                                                      // for future per-sensor I2C work.
-constexpr uint32_t ESPNOW_HB_STACK_WORDS = 6656;     // 26 KB. Bumped from 5530 (22 KB) after Step 3c
+constexpr uint32_t ESPNOW_HB_STACK_WORDS = 6656;     // 6.5 KB (was annotated 26 KB — 4x wrong). Bumped from 5530 B. Notes below are 4x-inflated:
                                                      // HWM measurement on both gamepad+ANO builds showed
                                                      // peak_used 17.5 KB of 22 KB (79%) under steady-state
                                                      // bond traffic — only 4.6 KB margin, structurally
@@ -35,17 +54,18 @@ constexpr uint32_t ESPNOW_HB_STACK_WORDS = 6656;     // 26 KB. Bumped from 5530 
                                                      // and consider trimming back if the post-Step-4 peak
                                                      // drops well below 17 KB. 26 KB chosen as 26×1024 = nice
                                                      // round number with ~8.5 KB margin over current HWM.
-constexpr uint32_t THERMAL_STACK_WORDS = 6144;       // ~24KB — restored from 16KB: the MLX90640
+constexpr uint32_t THERMAL_STACK_WORDS = 6144;     // 6 KB (was annotated ~24KB — 4x wrong). Notes below are 4x-inflated:
+                                                     // restored from 16KB: the MLX90640
                                                      // getFrame()/CalculateTo path plus per-poll debug
                                                      // logging overflowed 16KB on ESP32-classic when
                                                      // frame reads fail (NACK retry storm). 24KB was the
                                                      // original pre-trim value.
-constexpr uint32_t IMU_STACK_WORDS = 4096;           // ~16KB (BNO055 init retries need extra stack)
-constexpr uint32_t TOF_STACK_WORDS = 3072;           // ~12KB
-constexpr uint32_t FMRADIO_STACK_WORDS = 4608;       // ~18KB
-constexpr uint32_t INPUT_STACK_WORDS = 3584;       // ~14KB
-constexpr uint32_t DEBUG_OUT_STACK_WORDS = 4096;     // 16KB — RESTORED to original 2026-06-11.
-                                                     // The 12KB "floor" (HWM ~9.3KB → ~2.7KB
+constexpr uint32_t IMU_STACK_WORDS = 4096;     // 4 KB (was ~16KB) — BNO055 init retries need extra stack
+constexpr uint32_t TOF_STACK_WORDS = 3072;     // 3 KB (was ~12KB)
+constexpr uint32_t FMRADIO_STACK_WORDS = 4608;     // 4.5 KB (was ~18KB)
+constexpr uint32_t INPUT_STACK_WORDS = 3584;     // 3.5 KB (was ~14KB)
+constexpr uint32_t DEBUG_OUT_STACK_WORDS = 4096;     // 4 KB (was annotated 16KB — 4x wrong). ⚠ HW-OBSERVED 81% USED (~764 B free):
+                                                     // The earlier 3 KB "floor" (HWM ~2.3 KB → ~0.7 KB
                                                      // headroom) was NOT enough: an [ERROR] logged
                                                      // during boot (NTP-sync timeout) sent the task
                                                      // through appendLineWithCap()->LittleFS append,
@@ -53,13 +73,14 @@ constexpr uint32_t DEBUG_OUT_STACK_WORDS = 4096;     // 16KB — RESTORED to ori
                                                      // exceeded the headroom and overflowed. The HWM
                                                      // is driven entirely by debug_out doing inline
                                                      // FILE I/O (system-log + error-log writes); see
-                                                     // the drain loop. Do NOT trim below 16KB unless
-                                                     // those file writes are moved off this task.
-constexpr uint32_t APDS_STACK_WORDS = 3072;          // ~12KB
-constexpr uint32_t GPS_STACK_WORDS = 3072;           // ~12KB
-constexpr uint32_t PRESENCE_STACK_WORDS = 3072;      // ~12KB
-constexpr uint32_t RTC_STACK_WORDS = 4096;           // ~16KB
-constexpr uint32_t SENSOR_BCAST_STACK_WORDS = 4096;  // ~16KB — MEASURED sizing. With sends
+                                                     // the drain loop. Do NOT trim below this 4 KB
+                                                     // unless those file writes are moved off this task.
+constexpr uint32_t APDS_STACK_WORDS = 3072;     // 3 KB (was ~12KB)
+constexpr uint32_t GPS_STACK_WORDS = 3072;     // 3 KB (was ~12KB)
+constexpr uint32_t PRESENCE_STACK_WORDS = 3072;     // 3 KB (was ~12KB)
+constexpr uint32_t RTC_STACK_WORDS = 4096;     // 4 KB (was ~16KB)
+constexpr uint32_t SENSOR_BCAST_STACK_WORDS = 4096;     // 4 KB (was annotated ~16KB — 4x wrong). Notes below are 4x-inflated:
+                                                     // MEASURED sizing. With sends
                                                      // offloaded to espnow_tx, [SENSOR_BCAST]
                                                      // HWM still showed peak_used=2464 words
                                                      // (~9.6KB of 12KB) — only ~2.4KB margin,
@@ -68,7 +89,8 @@ constexpr uint32_t SENSOR_BCAST_STACK_WORDS = 4096;  // ~16KB — MEASURED sizin
                                                      // HIGH-prio task during heavy RX), NOT the
                                                      // broadcaster's own ~1.5KB of work. 16KB
                                                      // gives ~6KB margin over the observed peak.
-constexpr uint32_t ESPNOW_TX_STACK_WORDS = 5120;     // ~20KB — single dispatcher task that
+constexpr uint32_t ESPNOW_TX_STACK_WORDS = 5120;     // 5 KB (was annotated ~20KB — 4x wrong). Notes below are 4x-inflated:
+                                                     // single dispatcher task that
                                                      // owns ALL ESP-NOW sends. The 10KB first
                                                      // guess CRASHED: the esp_now_send WiFi TX
                                                      // path (hardware LMK encryption) + AEAD
@@ -159,7 +181,9 @@ bool createRTCTask();
 // ============================================================================
 
 // Report stack usage for a single task
-void reportTaskStack(TaskHandle_t handle, const char* name, uint32_t allocatedWords);
+// allocatedBytes: the byte count passed to xTaskCreate (see the BYTES note at
+// the top of this header — the *_STACK_WORDS constants are byte counts).
+void reportTaskStack(TaskHandle_t handle, const char* name, uint32_t allocatedBytes);
 
 // Report all sensor task stacks plus system tasks
 void reportAllTaskStacks();
