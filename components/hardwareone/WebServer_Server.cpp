@@ -3829,6 +3829,66 @@ esp_err_t handleFilesCreate(httpd_req_t* req) {
   return ESP_OK;
 }
 
+// ---------------------------------------------------------------------------
+// Standalone file-viewer shell (used by handleFileView)
+//
+// This page opens in its own tab, so it carries none of streamBeginHtml()'s
+// nav/CSS/JS — including hw.initTheme(). That leaves the server as the only
+// thing that can pick the colours, so it stamps the user's saved preference
+// into data-theme and the CSS keys off that. prefers-color-scheme is consulted
+// for data-theme=system only, i.e. only when the user asked to follow the OS.
+// ---------------------------------------------------------------------------
+#define FILE_VIEWER_DARK_VARS \
+  "--v-bg:#1a1a2e;--v-fg:#f0f0f0;--v-pre-bg:#16213e;--v-pre-border:#374151;" \
+  "--v-btn-bg:#374151;--v-btn-border:#4b5563;--v-btn-active:#4b5563"
+
+// Resolves the theme itself so the settings read is paid only when a shell is
+// actually emitted — the image/audio/.hwmap branches never reach here. Safe
+// under the caller's FsLockGuard: loadUserSettings takes the same lock and
+// FsLockGuard is reentrant per task.
+static void streamViewerHead(httpd_req_t* req, const String& displayName,
+                             const AuthContext& ctx) {
+  httpd_resp_set_type(req, "text/html; charset=utf-8");
+  streamChunkC(req, "<!DOCTYPE html><html data-theme=\"");
+  streamChunkC(req, resolveUserThemePref(ctx.user));
+  streamChunkC(req, "\"><head><meta charset=\"utf-8\">"
+    "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>");
+  streamHtmlEscaped(req, displayName.c_str(), displayName.length());
+  streamChunkC(req,
+    "</title><style>"
+    ":root{--v-bg:#f5f5f5;--v-fg:#333;--v-pre-bg:#fff;--v-pre-border:#ddd;"
+    "--v-btn-bg:#fff;--v-btn-border:#ccc;--v-btn-active:#e9ecef}"
+    "html[data-theme=dark]{" FILE_VIEWER_DARK_VARS "}"
+    "@media(prefers-color-scheme:dark){html[data-theme=system]{" FILE_VIEWER_DARK_VARS "}}"
+    "body{font-family:monospace;margin:20px;background:var(--v-bg);color:var(--v-fg);font-size:14px}"
+    "h2{font-size:1.15rem;margin:0;word-break:break-all}"
+    "pre{background:var(--v-pre-bg);color:var(--v-fg);padding:15px;border-radius:5px;"
+    "border:1px solid var(--v-pre-border);overflow-x:auto;font-size:14px;line-height:1.4;"
+    "white-space:pre-wrap;word-break:break-word}"
+    "pre:empty::after{content:'(empty file)';opacity:.6}"
+    ".bar{margin:8px 0 12px 0}"
+    ".btn{display:inline-block;padding:4px 8px;border:1px solid var(--v-btn-border);"
+    "border-radius:4px;background:var(--v-btn-bg);color:var(--v-fg);text-decoration:none;margin-right:6px}"
+    ".btn.active{background:var(--v-btn-active)}"
+    "</style></head><body><h2>");
+  streamHtmlEscaped(req, displayName.c_str(), displayName.length());
+  streamChunkC(req, "</h2><div class='bar'>");
+}
+
+// Toolbar link to the unstyled bytes. `filename` is the still-encoded query
+// value, so it goes into the href as-is apart from HTML-escaping — which also
+// keeps a hand-crafted ?name=..." from breaking out of the attribute.
+static void streamViewerRawLink(httpd_req_t* req, const String& filename) {
+  streamChunkC(req, "<a class='btn' href=\"/api/files/view?name=");
+  streamHtmlEscaped(req, filename.c_str(), filename.length());
+  streamChunkC(req, "&amp;mode=raw\">Raw</a>");
+}
+
+static void streamViewerTail(httpd_req_t* req) {
+  streamChunkC(req, "</pre></body></html>");
+  httpd_resp_send_chunk(req, NULL, 0);
+}
+
 esp_err_t handleFileView(httpd_req_t* req) {
   DEBUG_STORAGEF("[handleFileView] ENTER heap=%u", (unsigned)ESP.getFreeHeap());
 
@@ -3887,6 +3947,16 @@ esp_err_t handleFileView(httpd_req_t* req) {
 
   DEBUG_STORAGEF("[handleFileView] File='%s' decoded='%s' heap=%u", name, path.c_str(), (unsigned)ESP.getFreeHeap());
 
+  // View mode. "raw" means "the bytes, unstyled" and applies to every text
+  // type, not just JSON: the battery and logging pages fetch this endpoint
+  // with mode=raw and parse the response as text. Everything else gets the
+  // themed viewer shell.
+  char mode[16];
+  bool raw = false;
+  if (httpd_query_key_value(query, "mode", mode, sizeof(mode)) == ESP_OK) {
+    if (strcmp(mode, "raw") == 0) raw = true;
+  }
+
   // Prefer special handling for JSON: pretty or raw streaming
   String filename = String(name);
   String displayName = filename;  // for titles
@@ -3894,49 +3964,14 @@ esp_err_t handleFileView(httpd_req_t* req) {
   displayName.replace("%20", " ");
   bool isJson = filename.endsWith(".json");
   if (isJson) {
-    // Check view mode
-    char mode[16];
-    bool raw = false;
-    if (httpd_query_key_value(query, "mode", mode, sizeof(mode)) == ESP_OK) {
-      if (strcmp(mode, "raw") == 0) raw = true;
-    }
-
-    httpd_resp_set_type(req, "text/html; charset=utf-8");
-    // Header and toolbar
-    httpd_resp_send_chunk(req, "<!DOCTYPE html><html><head><title>", HTTPD_RESP_USE_STRLEN);
-    httpd_resp_send_chunk(req, filename.c_str(), filename.length());
-    httpd_resp_send_chunk(req, "</title><style>"
-      ":root{--bg:#f5f5f5;--fg:#333;--pre-bg:white;--pre-border:#ddd;--btn-bg:#fff;--btn-border:#ccc;--btn-active:#e9ecef}"
-      "@media(prefers-color-scheme:dark){:root{--bg:#1a1a2e;--fg:#f0f0f0;--pre-bg:#16213e;--pre-border:#374151;--btn-bg:#374151;--btn-border:#4b5563;--btn-active:#4b5563}}"
-      "body{font-family:monospace;margin:20px;background:var(--bg);color:var(--fg);font-size:14px}"
-      "pre{background:var(--pre-bg);color:var(--fg);padding:15px;border-radius:5px;border:1px solid var(--pre-border);overflow-x:auto;font-size:14px;line-height:1.4}"
-      ".bar{margin:8px 0 12px 0}"
-      ".btn{display:inline-block;padding:4px 8px;border:1px solid var(--btn-border);border-radius:4px;background:var(--btn-bg);color:var(--fg);text-decoration:none;margin-right:6px}"
-      ".btn.active{background:var(--btn-active)}"
-      "</style></head><body><h2>", HTTPD_RESP_USE_STRLEN);
-    httpd_resp_send_chunk(req, displayName.c_str(), displayName.length());
-    char prettyHref[192];
-    char rawHref[192];
-    snprintf(prettyHref, sizeof(prettyHref), "/api/files/view?name=%s&mode=pretty", filename.c_str());
-    snprintf(rawHref, sizeof(rawHref), "/api/files/view?name=%s&mode=raw", filename.c_str());
-    httpd_resp_send_chunk(req, "</h2><div class='bar'>", HTTPD_RESP_USE_STRLEN);
-    if (raw) {
-      httpd_resp_send_chunk(req, "<a class='btn' href=\"", HTTPD_RESP_USE_STRLEN);
-      httpd_resp_send_chunk(req, prettyHref, strlen(prettyHref));
-      httpd_resp_send_chunk(req, "\">Pretty</a><span class='btn active'>Raw</span>", HTTPD_RESP_USE_STRLEN);
-    } else {
-      httpd_resp_send_chunk(req, "<span class='btn active'>Pretty</span><a class='btn' href=\"", HTTPD_RESP_USE_STRLEN);
-      httpd_resp_send_chunk(req, rawHref, strlen(rawHref));
-      httpd_resp_send_chunk(req, "\">Raw</a>", HTTPD_RESP_USE_STRLEN);
-    }
-    httpd_resp_send_chunk(req, "</div><pre>", HTTPD_RESP_USE_STRLEN);
-
-    // Ensure streaming buffers are allocated
+    // Allocate and open *before* emitting any markup: once a chunked response
+    // has started, the httpd_resp_send() error paths below can't take it back
+    // and the client gets a second set of headers spliced into the body.
     if (!ensureFileViewBuffers()) {
-      httpd_resp_send_chunk(req, "Allocation failed", HTTPD_RESP_USE_STRLEN);
-      httpd_resp_send_chunk(req, "</pre></body></html>", HTTPD_RESP_USE_STRLEN);
-      httpd_resp_send_chunk(req, NULL, 0);
       pollResume();
+      httpd_resp_set_status(req, "500 Internal Server Error");
+      httpd_resp_set_type(req, "text/plain");
+      httpd_resp_send(req, "Allocation failed", HTTPD_RESP_USE_STRLEN);
       return ESP_OK;
     }
 
@@ -3951,6 +3986,16 @@ esp_err_t handleFileView(httpd_req_t* req) {
       httpd_resp_send(req, "File not found", HTTPD_RESP_USE_STRLEN);
       return ESP_OK;
     }
+
+    if (raw) {
+      httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    } else {
+      streamViewerHead(req, displayName, ctx);
+      streamChunkC(req, "<span class='btn active'>Pretty</span>");
+      streamViewerRawLink(req, filename);
+      streamChunkC(req, "</div><pre>\n");  // parser eats one LF after <pre>; feed it this one so the file keeps its own
+    }
+
     fsLock("file.view.json.open");
 
     if (raw) {
@@ -3964,7 +4009,6 @@ esp_err_t handleFileView(httpd_req_t* req) {
       }
       file.close();
       fsUnlock();
-      httpd_resp_send_chunk(req, "</pre></body></html>", HTTPD_RESP_USE_STRLEN);
       httpd_resp_send_chunk(req, NULL, 0);  // end chunked response
       pollResume();
       return ESP_OK;
@@ -3975,9 +4019,14 @@ esp_err_t handleFileView(httpd_req_t* req) {
     bool inString = false;
     bool escaped = false;
     size_t outLen = 0;
+    // Escape on the way out: the pretty-printer passes file content through
+    // verbatim, so an unescaped "</pre><script>" inside the JSON would run
+    // against the viewing user's session. Escaping per flush is safe because
+    // each byte maps to a self-contained entity — splitting the input at any
+    // boundary can't split an entity.
     auto flushOut = [&](bool force) {
       if (outLen && (force || outLen > (kFileOutBufSize - 64))) {
-        httpd_resp_send_chunk(req, gFileOutBuf, outLen);
+        streamHtmlEscaped(req, gFileOutBuf, outLen);
         outLen = 0;
       }
     };
@@ -4035,8 +4084,7 @@ esp_err_t handleFileView(httpd_req_t* req) {
     file.close();
     fsUnlock();
     flushOut(true);
-    httpd_resp_send_chunk(req, "</pre></body></html>", HTTPD_RESP_USE_STRLEN);
-    httpd_resp_send_chunk(req, NULL, 0);  // end chunked response
+    streamViewerTail(req);
     pollResume();
     return ESP_OK;
   }
@@ -4238,10 +4286,20 @@ esp_err_t handleFileView(httpd_req_t* req) {
     return ESP_OK;
   }
 
-  // Text file - stream it in chunks like images
-  DEBUG_STORAGEF("[handleFileView] Text file path='%s' size=%d heap=%u", path.c_str(), fileSize, (unsigned)ESP.getFreeHeap());
-  DEBUG_STORAGEF("[handleFileView] Setting content type...");
-  httpd_resp_set_type(req, "text/plain; charset=utf-8");
+  // Text file - stream it in chunks like images.
+  // Without mode=raw this goes inside the same themed shell the JSON viewer
+  // uses. Handing the browser a bare text/plain body meant .txt/.csv/.rtf were
+  // rendered with the browser's own defaults, which follow the OS rather than
+  // the theme the user picked in the app.
+  DEBUG_STORAGEF("[handleFileView] Text file path='%s' size=%d heap=%u raw=%d", path.c_str(), fileSize, (unsigned)ESP.getFreeHeap(), raw ? 1 : 0);
+  if (raw) {
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+  } else {
+    streamViewerHead(req, displayName, ctx);
+    streamChunkC(req, "<span class='btn active'>View</span>");
+    streamViewerRawLink(req, filename);
+    streamChunkC(req, "</div><pre>\n");  // parser eats one LF after <pre>; feed it this one so the file keeps its own
+  }
   DEBUG_STORAGEF("[handleFileView] Starting streaming loop...");
 
   size_t totalSent = 0;
@@ -4252,7 +4310,11 @@ esp_err_t handleFileView(httpd_req_t* req) {
     DEBUG_STORAGEF("[handleFileView] Read chunk %d: %d bytes, heap=%u", chunkCount + 1, n, (unsigned)ESP.getFreeHeap());
     chunkCount++;
     totalSent += n;
-    httpd_resp_send_chunk(req, viewBuf, n);
+    if (raw) {
+      httpd_resp_send_chunk(req, viewBuf, n);
+    } else {
+      streamHtmlEscaped(req, viewBuf, n);
+    }
     if ((chunkCount % 8) == 0) {
       DEBUG_STORAGEF("[handleFileView] Streamed %d bytes in %d chunks (heap=%u)", totalSent, chunkCount, (unsigned)ESP.getFreeHeap());
       delay(0);  // avoid WDT while streaming
@@ -4260,7 +4322,11 @@ esp_err_t handleFileView(httpd_req_t* req) {
   }
   file.close();
   free(viewBuf);
-  httpd_resp_send_chunk(req, NULL, 0);
+  if (raw) {
+    httpd_resp_send_chunk(req, NULL, 0);
+  } else {
+    streamViewerTail(req);
+  }
   DEBUG_STORAGEF("[handleFileView] COMPLETE: Text file sent %d bytes in %d chunks (dur=%u ms)", totalSent, chunkCount, (unsigned)(millis() - tVStart));
   
   // Resume sensor polling
