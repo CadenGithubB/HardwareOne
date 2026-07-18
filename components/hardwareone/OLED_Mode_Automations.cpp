@@ -52,6 +52,14 @@ static const char* autoActionMsg = nullptr;
 static unsigned long autoActionMsgTime = 0;
 static bool autoForceRefresh = false;
 
+// Pending delete target: Y arms the global confirm overlay, whose callback
+// (autoDeleteConfirmed) reads this id after the user says yes. The name is
+// snapshotted into its own buffer because oledConfirmRequest stores the line
+// pointer without copying, and the 5s list refresh can rewrite items[] while
+// the dialog is still open.
+static long sPendingDeleteId = 0;
+static char sPendingDeleteName[AUTO_NAME_MAX] = {0};
+
 // ============================================================================
 // JSON Field Extraction Helpers (local, stack-only)
 // ============================================================================
@@ -310,9 +318,9 @@ void displayAutomations() {
     oledDisplay->setCursor(4, OLED_CONTENT_START_Y + 4);
     oledDisplay->println("No automations");
     oledDisplay->setCursor(4, OLED_CONTENT_START_Y + 16);
-    oledDisplay->println("Use CLI to add:");
+    oledDisplay->println("Add from CLI Input");
     oledDisplay->setCursor(4, OLED_CONTENT_START_Y + 28);
-    oledDisplay->println("automationadd ...");
+    oledDisplay->println("(automationadd ...)");
     return;
   }
 
@@ -496,6 +504,18 @@ static void autoToggleSelected() {
   autoForceRefresh = true;
 }
 
+// Confirm-overlay callback: delete the pending automation through the shared
+// core verb (the same path web/CLI use), then force a list refresh. The list's
+// selectedIdx re-clamps in prepareAutomationData() once the row is gone.
+static void autoDeleteConfirmed(void* /*userData*/) {
+  char cmd[48];
+  snprintf(cmd, sizeof(cmd), "automation delete id=%ld", sPendingDeleteId);
+  executeOLEDCommand(String(cmd));
+  autoActionMsg = "Deleted";
+  autoActionMsgTime = millis();
+  autoForceRefresh = true;
+}
+
 static void autoBack() {
   autoRenderData.valid = false;
   autoRenderData.lastRefresh = 0;
@@ -533,6 +553,18 @@ static bool automationsInputHandler(int deltaX, int deltaY, uint32_t newlyPresse
     autoToggleSelected();
     return true;
   }
+  // Y = Delete selected automation (guarded by the global confirm overlay)
+  if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_Y)) {
+    if (gSettings.automationsEnabled && autoRenderData.count > 0 &&
+        autoRenderData.selectedIdx < autoRenderData.count) {
+      AutoListItem& sel = autoRenderData.items[autoRenderData.selectedIdx];
+      sPendingDeleteId = sel.id;
+      strncpy(sPendingDeleteName, sel.name, sizeof(sPendingDeleteName) - 1);
+      sPendingDeleteName[sizeof(sPendingDeleteName) - 1] = '\0';
+      oledConfirmRequest("Delete automation?", sPendingDeleteName, autoDeleteConfirmed, nullptr);
+    }
+    return true;
+  }
   // B = Back to menu
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
     autoBack();
@@ -547,7 +579,7 @@ static bool automationsInputHandler(int deltaX, int deltaY, uint32_t newlyPresse
 
 // Columns: mode, name, iconName, displayFunc, availFunc, inputFunc, showInMenu, menuOrder, hints
 static const OLEDModeEntry sAutomationsModes[] = {
-  { OLED_AUTOMATIONS, "Automations", "notify_automation", displayAutomations, nullptr, automationsInputHandler, false, -1, "B:Back" },
+  { OLED_AUTOMATIONS, "Automations", "notify_automation", displayAutomations, nullptr, automationsInputHandler, false, -1, "A:Run X:On/Off Y:Del" },
 };
 
 REGISTER_OLED_MODE_MODULE(sAutomationsModes, sizeof(sAutomationsModes) / sizeof(sAutomationsModes[0]), "Automations");

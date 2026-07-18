@@ -3164,7 +3164,7 @@ const CommandEntry debugCommands[] = {
   { "debugfmradio", "Debug FM Radio operations.", true, cmd_debugfmradio, "Usage: debugfmradio <0|1> [temp|runtime]" },
   { "memorysampleintervalsec", "Set memory sampling interval in seconds (0=disabled).", true, cmd_memorysampleintervalsec, "Usage: memorysampleintervalsec <0-300>" },
   { "loglevel", "Set log level (error|warn|info|debug).", true, cmd_loglevel, "Usage: loglevel <error|warn|info|debug>" },
-  { "log", "System-wide logging to file.", false, cmd_log, "Usage: log <start|stop|status|autostart>\n  start [\"filepath\"] [flags=0x...] [tags=0|1]: Begin system logging\n    filepath: Log file path, quoted (auto-generated if omitted)\n    flags: Debug flag mask, up to 64 hex digits (bit map in System_Debug.h)\n    tags: Prefix lines with category tags (0|1, default 1)\n  stop / status: Stop logging / show logging status\n  autostart [on|off]: Toggle logging auto-start on boot (bare = toggle)" },
+  { "log", "System-wide logging to file.", true, cmd_log, "Usage: log <start|stop|status|autostart>\n  start [\"filepath\"] [flags=0x...] [tags=0|1]: Begin system logging\n    filepath: Log file path, quoted (auto-generated if omitted)\n    flags: Debug flag mask, up to 64 hex digits (bit map in System_Debug.h)\n    tags: Prefix lines with category tags (0|1, default 1)\n  stop / status: Stop logging / show logging status\n  autostart [on|off]: Toggle logging auto-start on boot (bare = toggle)" },
   { "webconsole", "Enable/disable browser-side debug console output in the web UI.", true, cmd_webconsole, "Usage: webconsole <0|1>" },
 };
 

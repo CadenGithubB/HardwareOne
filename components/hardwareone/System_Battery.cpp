@@ -517,7 +517,17 @@ void buildBatteryJson(JsonDocument& doc) {
 }
 
 const char* cmd_battery_status(const String& argsInput) {
-  updateBattery();
+  // Deliberately does NOT call updateBattery(). gBatteryState is written by the
+  // 10 s tick on the main loop (HardwareOne.cpp:2160) and has NO mutex, so a
+  // forced update from the cmd_exec task raced that tick inside
+  // classifyAndNotify() — which is a transition-edge detector (reads prevStatus,
+  // writes status, fires only on a change). Concurrent runs could DOUBLE-FIRE a
+  // "charger connected" notification, or SWALLOW the transition entirely when one
+  // task overwrote status before the other sampled prevStatus. A polling client
+  // hitting this command made that race easy to trigger.
+  // Reading the cached snapshot leaves a single writer (the 10 s tick), matches
+  // what /api/battery/status already does via buildBatteryJson(), and stays
+  // self-describing: the JSON carries "lastReadMsAgo" so callers see the age.
 
   // Structured path: bounded battery telemetry as one verbatim JSON blob via a
   // PSRAM buffer. No broadcastOutput. All values are numbers / fixed status

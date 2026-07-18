@@ -32,7 +32,7 @@
 // - Boot-time cleanup: deletes /espnow/received/.part-* on init (orphaned RAM-path
 //   staging temps AND streaming .part files from a transfer that died mid-flight).
 //
-// - Per-slot mutex: FILE_START / FILE_DATA / FILE_END all run INLINE on espnow_task
+// - Slot-table mutex: FILE_START / FILE_DATA / FILE_END all run INLINE on espnow_task
 //   (the RX drain), so within a transfer the frames are serialized by that single
 //   task. The timeout sweep runs on the heartbeat task and the slot table is shared,
 //   so a single mutex protects allocation / find / release. In STREAMING mode the
@@ -67,12 +67,15 @@ constexpr const char* kFileSlotErrBadArgs  = "BAD_ARGS";   // size/chunk params 
 constexpr const char* kFileSlotErrAlloc    = "ALLOC";      // PSRAM alloc failed
 constexpr const char* kFileSlotErrTooBig   = "TOO_BIG";    // exceeds per-file budget
 
-// Per-file PSRAM cap (the whole file is buffered in PSRAM during receive). 128 KB;
-// with 4 slots that's 512 KB peak PSRAM — fine on an 8 MB part. The SENDER pre-checks
-// this same constant in cmd_espnow_sendfile and refuses an oversize file up front with
-// a clear reason, rather than streaming it and letting the receiver reject at FILE_START
-// (which isn't signaled back). Raise further only if needed; the real unbounded fix is
-// streaming chunks straight to a .part file on flash instead of buffering whole-file.
+// Per-file PSRAM cap for the whole-file-in-PSRAM receive path. 128 KB; with 4 slots
+// that's 512 KB peak PSRAM — fine on an 8 MB part.
+//
+// This is a ROUTING boundary, not a transfer ceiling: files over it are not rejected,
+// they stream to flash instead (see kFileSlotMaxStreamSize below, which IS the hard
+// ceiling and is what the sender pre-checks in cmd_espnow_sendfile). So raising this
+// does not admit bigger transfers — it only moves more files onto the path that costs
+// fileSize bytes of PSRAM per slot. 4 slots × the new value is the peak you're buying.
+// The direction that helps is DOWN.
 constexpr uint32_t kFileSlotMaxFileSize = 131072;
 
 // Files LARGER than kFileSlotMaxFileSize are STREAMED chunk-by-chunk straight to
@@ -88,14 +91,16 @@ constexpr uint32_t kFileSlotMaxStreamSize = 4u * 1024u * 1024u;  // 4 MB sanity 
 // Stale-slot reclaim threshold. No frame received in this window → drop.
 constexpr uint32_t kFileSlotTimeoutMs = 30000;
 
-// One-time allocation of the gFileSlots table in PSRAM + per-slot mutex.
+// One-time allocation of the gFileSlots table in PSRAM + the slot-table mutex.
 // Idempotent. Returns false on allocation failure (caller should disable
 // file-transfer functionality).
 bool fileSlotsInit();
 
-// Boot-time cleanup. Walks /tmp and deletes .transfer-*.part files left
-// over from a previous boot that crashed mid-transfer. Idempotent; safe to
-// call before any transfer activity.
+// Boot-time cleanup. Walks /espnow/received and deletes files whose basename
+// starts with ".part-" — staging temps left over from a previous boot that
+// crashed mid-transfer (both the RAM path's ".part-<msgId>" and streaming's
+// ".part-strm-<mac>-<msgId>"). Idempotent; safe to call before any transfer
+// activity.
 void fileSlotsBootCleanup();
 
 // Allocate a slot for a new incoming FILE_START. Returns nullptr if no
@@ -103,10 +108,14 @@ void fileSlotsBootCleanup();
 // either case *errOut (if non-null) is set to a static reason string
 // (one of the kFileSlotErr* constants).
 //
-// On success, the slot's PSRAM data buffer is allocated and the slot
-// transitions to RECEIVING. Caller (the v4h_file_start handler) is
-// responsible for writing the destination path / filename metadata into
-// the slot via fileSlotsBindMetadata before any FILE_DATA arrives.
+// On success the slot transitions to RECEIVING and is fully populated —
+// `filename` and the rest of the metadata are copied in here, so the caller
+// (the v4h_file_start handler) has nothing to bind before FILE_DATA arrives.
+//
+// What gets allocated depends on the size routing (kFileSlotMaxFileSize):
+// a RAM-path slot gets its whole-file PSRAM data buffer + chunk bitmap; a
+// streaming slot gets two PSRAM half-buffers instead and leaves dataBuffer
+// null — its .part is opened later, lazily, on cmd_exec.
 FileTransferSlot* fileSlotsAllocate(const uint8_t peerMac[6],
                                      uint32_t msgId,
                                      const char* filename,
@@ -120,9 +129,14 @@ FileTransferSlot* fileSlotsAllocate(const uint8_t peerMac[6],
 FileTransferSlot* fileSlotsFindByMsg(const uint8_t peerMac[6], uint32_t msgId);
 
 // Write a chunk into the slot's buffer at offset = chunkIdx * chunkSize.
-// Bounds-checks against the slot's fileSize. Updates receivedBytes /
-// receivedChunks / chunkMap. Returns false on bounds violation or if the
-// chunk is a duplicate (already in the map).
+// RAM-path slots ONLY — a streaming slot returns false here; those go through
+// fileSlotsStreamAppend. Bounds-checks against the slot's fileSize. Updates
+// receivedBytes / receivedChunks / chunkMap.
+//
+// Returns false on bounds violation (or a streaming/non-RECEIVING slot). A
+// duplicate chunk returns TRUE, not false: the data is re-written unconditionally
+// so a retry can repair a corrupted earlier frame, and only the counters are
+// suppressed on the second arrival.
 bool fileSlotsWriteChunk(FileTransferSlot* slot,
                           uint16_t chunkIdx,
                           const uint8_t* data,

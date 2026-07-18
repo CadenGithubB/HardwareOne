@@ -20,6 +20,7 @@
 #include "System_PollPause.h"        // PollPauseGuard — quiesce a bus during the detect scan
 #include "System_AuthIdentity.h"     // currentExecIsAdmin — gate 'detect apply'
 #include "System_I2C.h"
+#include "System_RamFlush.h"
 #include "System_Logging.h"
 #include "System_Mutex.h"
 #include "System_MemUtil.h"
@@ -2649,9 +2650,11 @@ void sensorQueueProcessorTask(void* param) {
 
       // Stack instrumentation (do not assume any fixed stack size)
       if (isDebugFlagSet(DEBUG_MEMORY)) {
-        UBaseType_t hwmWords = uxTaskGetStackHighWaterMark(NULL);
-        DEBUG_MEMORY_STACKF("[STACK][QUEUE] before start type=%d hwm=%u words (%u bytes)",
-                      (int)req.device, (unsigned)hwmWords, (unsigned)(hwmWords * 4));
+        // HWM is in BYTES on this port (StackType_t is uint8_t) — the old
+        // "words (x4 bytes)" pair was 4x wrong. See System_TaskUtils.h.
+        UBaseType_t hwmBytes = uxTaskGetStackHighWaterMark(NULL);
+        DEBUG_MEMORY_STACKF("[STACK][QUEUE] before start type=%d hwm=%u bytes",
+                      (int)req.device, (unsigned)hwmBytes);
       }
 
       // Calculate required delay based on LAST sensor type (to let it finish init)
@@ -2832,9 +2835,9 @@ void sensorQueueProcessorTask(void* param) {
       }
 
       if (isDebugFlagSet(DEBUG_MEMORY)) {
-        UBaseType_t hwmWords = uxTaskGetStackHighWaterMark(NULL);
-        INFO_MEMORYF("[STACK][QUEUE] after  start type=%d hwm=%u words (%u bytes)",
-                      (int)req.device, (unsigned)hwmWords, (unsigned)(hwmWords * 4));
+        UBaseType_t hwmBytes = uxTaskGetStackHighWaterMark(NULL);
+        INFO_MEMORYF("[STACK][QUEUE] after  start type=%d hwm=%u bytes",
+                      (int)req.device, (unsigned)hwmBytes);
       }
 
       lastSensorStartTime = millis();
@@ -2842,15 +2845,19 @@ void sensorQueueProcessorTask(void* param) {
 
       // Force stack and heap check after sensor start (high resource usage point)
       if (isDebugFlagSet(DEBUG_MEMORY)) {
+        // BYTES throughout (see System_TaskUtils.h). Two bugs fixed here: the
+        // x4 scaling, and a hardcoded 3072 that had drifted from the real
+        // SENSOR_QUEUE_STACK_WORDS (4096) — so peak% was computed against the
+        // wrong total. Use the constant so it can't drift again.
         UBaseType_t stackHighWater = uxTaskGetStackHighWaterMark(NULL);
-        const uint32_t sensorQueueStackWords = 3072;
-        uint32_t stackPeak = (sensorQueueStackWords * 4) - (stackHighWater * 4);
-        int peakPct = (stackPeak * 100) / (sensorQueueStackWords * 4);
+        constexpr uint32_t sensorQueueStackBytes = SENSOR_QUEUE_STACK_WORDS;
+        uint32_t stackPeak = sensorQueueStackBytes - (uint32_t)stackHighWater;
+        int peakPct = (stackPeak * 100) / sensorQueueStackBytes;
         size_t heapFree = ESP.getFreeHeap();
         size_t heapMin = ESP.getMinFreeHeap();
         DEBUG_MEMORY_STACKF("[STACK] sensor_queue: peak=%lu bytes (%d%%), free_min=%lu bytes | heap=%lu min=%lu",
                       (unsigned long)stackPeak, peakPct,
-                      (unsigned long)(stackHighWater * 4),
+                      (unsigned long)stackHighWater,
                       (unsigned long)heapFree, (unsigned long)heapMin);
       }
 
@@ -2954,6 +2961,13 @@ static bool isSensorAvailableForAutoStart(const char* moduleName, I2CDeviceType 
   // durable so a silently-absent sensor is attributable after reboot.
   logSystemEvent("SENSOR", "%s autostart skipped: enabled in settings but not detected on I2C bus", moduleName);
   systemEventPost(SYSEVT_SENSOR_START_FAILED, moduleName, "not detected on bus");
+
+  // Tell ramflush this sensor is off because it wasn't there, not because the user
+  // turned it off. Without this, an unplugged sensor reads live=false against
+  // intent=true and the next capture records "user turned it off" — which would
+  // suppress the configured autostart on every later boot, with replugging the
+  // sensor doing nothing to undo it.
+  ramFlushMarkAutostartFailed(ramFlushIdForModule(moduleName));
   return false;
 }
 
@@ -2992,7 +3006,7 @@ void processAutoStartSensors() {
   int autoStartQueued = 0;
   
   #if ENABLE_THERMAL_SENSOR
-  if (gSettings.thermalAutoStart) {
+  if (ramFlushResolve(RF_THERMAL, gSettings.thermalAutoStart)) {
     if (isSensorAvailableForAutoStart("thermal", I2C_DEVICE_THERMAL)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing thermal sensor");
       enqueueDeviceStart(I2C_DEVICE_THERMAL); autoStartQueued++;
@@ -3003,7 +3017,7 @@ void processAutoStartSensors() {
   #endif
   
   #if ENABLE_TOF_SENSOR
-  if (gSettings.tofAutoStart) {
+  if (ramFlushResolve(RF_TOF, gSettings.tofAutoStart)) {
     if (isSensorAvailableForAutoStart("tof", I2C_DEVICE_TOF)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing ToF sensor");
       enqueueDeviceStart(I2C_DEVICE_TOF); autoStartQueued++;
@@ -3014,7 +3028,7 @@ void processAutoStartSensors() {
   #endif
   
   #if ENABLE_IMU_SENSOR
-  if (gSettings.imuAutoStart) {
+  if (ramFlushResolve(RF_IMU, gSettings.imuAutoStart)) {
     if (isSensorAvailableForAutoStart("imu", I2C_DEVICE_IMU)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing IMU sensor");
       enqueueDeviceStart(I2C_DEVICE_IMU); autoStartQueued++;
@@ -3025,7 +3039,7 @@ void processAutoStartSensors() {
   #endif
   
   #if ENABLE_GPS_SENSOR
-  if (gSettings.gpsAutoStart) {
+  if (ramFlushResolve(RF_GPS, gSettings.gpsAutoStart)) {
     if (isSensorAvailableForAutoStart("gps", I2C_DEVICE_GPS)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing GPS sensor");
       enqueueDeviceStart(I2C_DEVICE_GPS); autoStartQueued++;
@@ -3036,7 +3050,7 @@ void processAutoStartSensors() {
   #endif
   
   #if ENABLE_FM_RADIO
-  if (gSettings.fmRadioAutoStart) {
+  if (ramFlushResolve(RF_FMRADIO, gSettings.fmRadioAutoStart)) {
     if (isSensorAvailableForAutoStart("fmradio", I2C_DEVICE_FMRADIO)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing FM Radio sensor");
       enqueueDeviceStart(I2C_DEVICE_FMRADIO); autoStartQueued++;
@@ -3047,7 +3061,7 @@ void processAutoStartSensors() {
   #endif
   
   #if ENABLE_APDS_SENSOR
-  if (gSettings.apdsAutoStart) {
+  if (ramFlushResolve(RF_APDS, gSettings.apdsAutoStart)) {
     if (isSensorAvailableForAutoStart("apds", I2C_DEVICE_APDS)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing APDS sensor");
       enqueueDeviceStart(I2C_DEVICE_APDS); autoStartQueued++;
@@ -3058,7 +3072,7 @@ void processAutoStartSensors() {
   #endif
   
   #if ENABLE_GAMEPAD_SENSOR
-  if (gSettings.inputAutoStart) {
+  if (ramFlushResolve(RF_INPUT, gSettings.inputAutoStart)) {
     if (isSensorAvailableForAutoStart("gamepad", I2C_DEVICE_INPUT)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing Gamepad sensor");
       enqueueDeviceStart(I2C_DEVICE_INPUT); autoStartQueued++;
@@ -3069,7 +3083,7 @@ void processAutoStartSensors() {
   #endif
   
   #if ENABLE_RTC_SENSOR
-  if (gSettings.rtcAutoStart) {
+  if (ramFlushResolve(RF_RTC, gSettings.rtcAutoStart)) {
     if (isSensorAvailableForAutoStart("rtc", I2C_DEVICE_RTC)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing RTC sensor");
       enqueueDeviceStart(I2C_DEVICE_RTC); autoStartQueued++;
@@ -3080,7 +3094,7 @@ void processAutoStartSensors() {
   #endif
   
   #if ENABLE_PRESENCE_SENSOR
-  if (gSettings.presenceAutoStart) {
+  if (ramFlushResolve(RF_PRESENCE, gSettings.presenceAutoStart)) {
     if (isSensorAvailableForAutoStart("presence", I2C_DEVICE_PRESENCE)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing Presence sensor");
       enqueueDeviceStart(I2C_DEVICE_PRESENCE); autoStartQueued++;

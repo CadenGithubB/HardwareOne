@@ -202,6 +202,7 @@ set(hardwareone_srcs
         System_Hardware.cpp
         System_SensorLogging.cpp
         System_SensorStubs.cpp
+        System_RamFlush.cpp
         System_Settings.cpp
         System_SetupWizard.cpp
         System_FeatureRegistry.cpp

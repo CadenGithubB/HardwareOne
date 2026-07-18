@@ -25,6 +25,7 @@
 #endif
 #include <esp_timer.h>
 #include <time.h>
+#include "System_RamFlush.h"
 #include "System_Utils.h"
 #include "System_Debug.h"
 #include "System_TaskUtils.h"
@@ -2099,6 +2100,10 @@ static const char* factoryreset_confirmed(void* /*userData*/) {
   // and trigger FTS the next boot). factoryreset is gated by the
   // requiresAdmin=true flag in the registry + the confirm prompt; system
   // auth is just the right capability to actually carry out the delete.
+  // RTC survives a factory reset, so drop any stashed ramflush overlay — otherwise
+  // a device that was reset could come back resuming the feature set it just wiped.
+  ramFlushClearOverlay();
+
   AuthContext sysCtx = VFS::systemAuth("factory.reset");
   if (!VFS::removeGuarded(USERS_JSON_FILE, sysCtx)) {
     snprintf(respBuf, sizeof(respBuf),
@@ -2503,11 +2508,20 @@ const CommandEntry commands[] = {
 
   // ---- Misc ----
   { "reboot", "Reboot the system.", true, cmd_reboot, nullptr, "system", "reboot" },
+  { "ramflush", "Reboot to reclaim RAM, restoring the features running right now.", true, cmd_ramflush,
+    "Usage: ramflush [status]\n"
+    "  (bare):  capture which features are running, reboot, and restore them\n"
+    "  status:  show what the last boot restored (no reboot)\n"
+    "\n"
+    "Restores for that one boot only — a normal reboot returns to configured\n"
+    "autostart. Never changes your autostart settings.",
+    "system", "ramflush" },
   { "factoryreset", "Wipe user accounts and reboot to re-run setup wizard.", true,
     cmd_factoryreset,
     "Usage: factoryreset (no args, confirmation required)\n"
     "Deletes /system/users/users.json so the first-time setup wizard runs\n"
-    "on next boot. WiFi credentials and other settings are preserved." },
+    "on next boot. WiFi credentials and other settings are preserved.",
+    nullptr, nullptr, /*requiresSuperAdmin=*/true },
   { "broadcast", "Send a message to all connected output interfaces.", true, cmd_broadcast,
     "Usage: broadcast <message>" },
   { "pendinglist", "List pending user requests.", true, cmd_pending_list },
@@ -3143,7 +3157,22 @@ const CommandModule* getCommandModules(size_t& count) {
 // Check if command requires admin
 bool commandRequiresAdmin(const String& cmdLine) {
   const CommandEntry* entry = findCommand(cmdLine);
-  return entry ? entry->requiresAdmin : false;
+  if (!entry) return false;
+  // super implies admin: a super-only command is always at least admin-gated,
+  // even if its row forgot requiresAdmin=true. Enforced here (the single reader
+  // of the raw flag) so the invariant holds for every caller — the auth gate
+  // and the help/visibility helper alike — with no per-row discipline. Mirrors
+  // isAdminUser(), where a superadmin also satisfies the admin check.
+  return entry->requiresAdmin || entry->requiresSuperAdmin;
+}
+
+// Top-tier gate, read straight from the command table (single source of truth,
+// same as commandRequiresAdmin) — the requiresSuperAdmin flag lives with each
+// command's own registration, so a command can never be dangerous-but-ungated
+// through a stale parallel list.
+bool commandRequiresSuperAdmin(const String& cmdLine) {
+  const CommandEntry* entry = findCommand(cmdLine);
+  return entry ? entry->requiresSuperAdmin : false;
 }
 
 // Dispatch command to handler (simple version without auth context)
@@ -3535,8 +3564,13 @@ void printMemoryReport() {
       }
 
       if (isAppTask) {
-        size_t allocatedBytes = allocatedWords * 4;
-        size_t freeBytes = taskStatusArray[i].usStackHighWaterMark * 4;
+        // BYTES: the *_STACK_WORDS constants hold byte counts (ESP-IDF's
+        // xTaskCreate takes usStackDepth in BYTES), and usStackHighWaterMark is
+        // bytes too on this port. The old "* 4" printed 4x the real allocation
+        // and was the bulk of this report's own "Static Over-Estimate".
+        // See System_TaskUtils.h.
+        size_t allocatedBytes = allocatedWords;
+        size_t freeBytes = taskStatusArray[i].usStackHighWaterMark;
         size_t usedBytes = allocatedBytes - freeBytes;
         app_tasks_total += allocatedBytes;
 
@@ -3568,7 +3602,9 @@ void printMemoryReport() {
       }
 
       if (isSystemTask) {
-        size_t freeBytes = taskStatusArray[i].usStackHighWaterMark * 4;
+        // usStackHighWaterMark is in BYTES on this port — the old "* 4" made
+        // these look 4x roomier than they are. See System_TaskUtils.h.
+        size_t freeBytes = taskStatusArray[i].usStackHighWaterMark;
         BROADCAST_PRINTF("    %-20s HWM: %5lu bytes",
                         taskStatusArray[i].pcTaskName,
                         (unsigned long)freeBytes);
@@ -4040,6 +4076,7 @@ extern bool handleHelpNavigation(const String& cmd, char* out, size_t outSize);
 extern String exitToNormalBanner();
 extern String redactCmdForAudit(const String& argsInput);
 extern bool hasAdminPrivilege(const AuthContext& ctx);
+extern bool hasSuperAdminPrivilege(const AuthContext& ctx);
 extern bool isAdminUser(const String& user);
 extern void logAuthAttempt(bool success, const char* path, const String& user, const String& ip, const String& extra);
 
@@ -4065,6 +4102,21 @@ bool adminRequiredForLine(const String& line) {
 // Centralized authorization for a command line and context.
 // Returns true if authorized, otherwise writes an error to 'out' and returns false.
 static bool authorizeCommand(const AuthContext& ctx, const String& line, char* out, size_t outSize) {
+  // Super-admin (top-tier) protection. Checked independently of the admin flag
+  // so a super-only command is gated even if its table entry is not adminOnly.
+  // A bonded session satisfies this (bond == super); a regular mesh/pair
+  // account never does — the elevation lives entirely in isSuperAdminUser.
+  if (commandRequiresSuperAdmin(line) && !hasSuperAdminPrivilege(ctx)) {
+    String cmdName = line;
+    int spacePos = line.indexOf(' ');
+    if (spacePos > 0) cmdName = line.substring(0, spacePos);
+    snprintf(out, outSize, "Error: Super-admin access required for command '%s'.", cmdName.c_str());
+    { char auditBuf[180]; snprintf(auditBuf, sizeof(auditBuf), "cmd=%.170s", redactCmdForAudit(line).c_str()); logAuthAttempt(false, ctx.path.c_str(), ctx.user, ctx.ip, auditBuf); }
+    if (ctx.user.length() > 0) {
+      systemEventPost(SYSEVT_COMMAND_DENIED, ctx.user.c_str(), cmdName.c_str());
+    }
+    return false;
+  }
   // Admin-only protection via registry
   if (commandRequiresAdmin(line) && !hasAdminPrivilege(ctx)) {
     // Extract command name for better error message (keep legacy format)
@@ -4232,6 +4284,28 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
   }
   
   if (isRemoteCommand) {
+    // Reject NESTED remote wrappers first. findCommand() doesn't understand the
+    // remote:/@ prefix, so "remote:remote:X" / "remote:@X" would classify as
+    // "no command" and slip past the privilege gate below — then bounce to the
+    // bonded peer (which runs it as bond-super) and get re-forwarded back to us,
+    // executing X with super privilege for an unprivileged local caller. There
+    // is no legitimate nesting (target the final peer directly).
+    {
+      String inner = actualCommand; inner.trim();
+      if (inner.startsWith("remote:") || inner.startsWith("remote ") || inner.startsWith("@")) {
+        strncpy(out, "Error: nested remote commands are not allowed.", outSize - 1);
+        out[outSize - 1] = '\0';
+        return false;
+      }
+    }
+    // The forwarded command runs on the bonded peer as the bond identity
+    // (kBondAdminUser = super). Bonding treats the two devices as ONE unit, so
+    // the bond session token IS the trust — the local caller's role is NOT
+    // re-checked here (the slave typically has no logged-in user at all; the
+    // owner logs into the master and drives the pair). The nested-wrapper reject
+    // above is the only guard, and it stays: it stops a command from looping
+    // back (origin→peer→origin) to run as super on the ORIGIN, which would let a
+    // local non-super escape the master's own super tier.
     #if ENABLE_ESPNOW && ENABLE_BONDED_MODE
     extern bool isBondSynced();
     extern bool isBondSessionTokenValid();

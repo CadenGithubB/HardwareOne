@@ -423,7 +423,10 @@ static_assert(sizeof(V4PayloadKeyExConfirm) == 18, "V4PayloadKeyExConfirm layout
 //
 // nonceA is sent in OPEN and echoed back inside the CONFIRM signature input
 // — that's the freshness binding from A to B. nonceB is added on the B side.
-// Total signed length: OPEN = 9 + 2 + 6 + 6 + 32 + 16 = 71 bytes; CONFIRM = 88.
+// Total signed length: OPEN = 9 + 2 + 6 + 6 + 32 + 16 = 71 bytes;
+//                      CONFIRM = 9 + 2 + 6 + 6 + 32 + 16 + 16 = 87 bytes.
+// Sign exactly those byte counts — a transcript padded to any other length
+// verifies against nothing and every handshake fails.
 //
 // Flow:
 //   A → B: SESSION_OPEN    (sessionId, ephPub_A, nonceA, sig over OPEN transcript)
@@ -523,8 +526,12 @@ struct __attribute__((packed)) V4PayloadFileStart {
 
 // Phase 3.5: chunk data sized for ESPNOW_V4_MAX_PLAINTEXT so encrypted
 // file transfers don't silently truncate every chunk by 16 bytes. Per-chunk
-// payload is 200 (was 216 in plaintext-only V3); 200 + 16 AEAD tag = 216
-// fits MAX_PAYLOAD (218). 2026-05-19: FILE_START/DATA/END now route through
+// data is 200 B (was 216 in plaintext-only V3), and the struct also carries a
+// 2 B chunkIndex: 202 B plaintext + 16 B AEAD tag = 218 = MAX_PAYLOAD EXACTLY,
+// zero headroom. There is no room for another field — adding one trips the
+// static_assert below rather than corrupting the wire, so shrink data[] (or
+// widen the transport) instead of growing this struct.
+// 2026-05-19: FILE_START/DATA/END now route through
 // v4_send_payload_smart, so each chunk is session-encrypted when a session
 // exists and plaintext otherwise. Old firmware reading
 // V4PayloadFileStart.chunkSize adapts automatically.
@@ -568,8 +575,8 @@ struct __attribute__((packed)) V4PayloadFileCancel {
 //   - Native permission bits per entry → caller's UI can grey out actions
 //   - Identity propagation is well-defined (peer's bonded-trust scope)
 //   - Reply size capped at fragment-max so single round-trip suffices for
-//     typical OLED listings (≤ 32 entries × 76 B = 2.4 KB → 12 fragments
-//     under the 6400 B fragmented message limit)
+//     typical OLED listings (140 B header + ≤ 32 entries × 76 B = 2572 B →
+//     13 fragments, well under the 32-fragment / 6400 B message limit)
 //
 // Request fits a single SESSION_FRAME (144 B < 202 B plaintext budget) so
 // it doesn't need fragmentation on the way out. Reply is sent via
@@ -650,8 +657,8 @@ static_assert(sizeof(V4PayloadFsEntry) == 76, "V4PayloadFsEntry layout");
 // Storage stats for a VFS root on the bonded peer (total / used / free bytes
 // and a percent-used reading). Replaces the prior `BondFs.exec('fsusage')`
 // CLI-scrape path which broke on output collisions with concurrent commands.
-// One request fits a single SESSION_FRAME (140 B). Reply is 172 B —
-// also single-frame, no fragmentation needed.
+// One request fits a single SESSION_FRAME (140 B). Reply is 164 B (pinned by
+// the static_assert below) — also single-frame, no fragmentation needed.
 
 struct __attribute__((packed)) V4PayloadFsStatReq {
   uint32_t reqId;          // Client-chosen correlation ID (nonzero)

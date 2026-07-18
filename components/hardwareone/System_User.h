@@ -80,6 +80,11 @@ inline constexpr const char* kBondAdminUser = "bond-admin";
 // Transport-generic authentication functions
 bool tgRequireAuth(AuthContext& ctx);
 bool isAdminUser(const String& who);
+// Top tier — role=="superadmin" (or a live bonded session). Gates the
+// identity/crypto/destructive/auth-posture command set; see commandRequiresSuperAdmin.
+bool isSuperAdminUser(const String& who);
+// Privilege rank for target-protection: user=0, admin=1, superadmin=2.
+int userRoleRank(const String& role);
 
 // Centralized transport authentication management
 bool loginTransport(CommandSource transport, const String& username, const String& password);

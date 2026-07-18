@@ -28,7 +28,11 @@ struct Sample {
   uint16_t ackRttMaxMs;         // max ACK RTT in this bucket
 };
 
-Sample      gRing[kWindowSamples] = {};
+// PSRAM .bss: pure-POD diagnostics ring, written once per second from the
+// saturation tick and read by `espnowsaturation` (espnowSaturationReport) — no
+// DMA, no ISR, not hot. `espnowstats` is a different report: it reads the
+// cumulative routerMetrics counters and never looks at this ring.
+EXT_RAM_BSS_ATTR Sample gRing[kWindowSamples] = {};
 uint8_t     gRingHead              = 0;   // next slot to write
 uint8_t     gRingFill              = 0;   // 0..kWindowSamples
 uint32_t    gLastTickMs            = 0;

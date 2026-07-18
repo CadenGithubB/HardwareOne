@@ -3610,6 +3610,17 @@ bool tryOrganizeLegacyWaypointsAtRoot(const String& wpFileName, String& outErr) 
   return true;
 }
 
+// Append "name(reason)" to a bounded diagnostics string so maporganize can
+// surface WHY a file failed to organize instead of only reporting failed=N.
+static void appendOrganizeFailure(String& details, const String& name, const String& reason) {
+  if (details.length() >= 400) return;  // keep the summary within the 1024-byte debug buffer
+  if (details.length()) details += ", ";
+  details += name;
+  details += '(';
+  details += reason;
+  details += ')';
+}
+
 const char* cmd_maporganize(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
@@ -3623,31 +3634,43 @@ const char* cmd_maporganize(const String& argsInput) {
   }
 
   int moved = 0, skipped = 0, failed = 0;
+  String failDetails;  // "name(reason), ..." surfaced when files fail to organize
   File entry = dir.openNextFile();
   while (entry) {
-    String full = String(entry.name());
+    // On arduino-esp32 core 3.x, File::name() returns the BASENAME only
+    // (e.g. "foo.hwmap"), NOT the full path — so downstream FS ops must be
+    // given an absolute path. We rebuild "/maps/<name>", matching cmd_maplist.
+    String leaf = String(entry.name());
     bool isDir = entry.isDirectory();
     entry.close();
     if (!isDir) {
-      String fn = full;
+      String fn = leaf;
       if (fn.startsWith("/maps/")) fn = fn.substring(6);
       if (fn.startsWith("/")) fn = fn.substring(1);
       if (fn.indexOf('/') == -1) {
+        String srcFull = String("/maps/") + fn;  // absolute path for FS operations
         bool isMapByExt = fn.endsWith(".hwmap");
-        bool isMapByMagic = (!isMapByExt && !fn.endsWith(".json")) ? isMapFileByMagic(full) : false;
+        bool isMapByMagic = (!isMapByExt && !fn.endsWith(".json")) ? isMapFileByMagic(srcFull) : false;
         if (isMapByExt || isMapByMagic) {
           String err;
-          if (organizeMapFromAnyPath(full, err)) moved++; else failed++;
+          if (organizeMapFromAnyPath(srcFull, err)) moved++;
+          else { failed++; appendOrganizeFailure(failDetails, fn, err); }
         } else if (fn.startsWith("waypoints_") && fn.endsWith(".json")) {
           String err;
-          if (tryOrganizeLegacyWaypointsAtRoot(fn, err)) moved++; else failed++;
+          if (tryOrganizeLegacyWaypointsAtRoot(fn, err)) moved++;
+          else { failed++; appendOrganizeFailure(failDetails, fn, err); }
         } else { skipped++; }
       } else { skipped++; }
     } else { skipped++; }
     entry = dir.openNextFile();
   }
   dir.close();
-  snprintf(buf, 1024, "Map organize: moved=%d skipped=%d failed=%d", moved, skipped, failed);
+  if (failed > 0 && failDetails.length() > 0) {
+    snprintf(buf, 1024, "Map organize: moved=%d skipped=%d failed=%d [%s]",
+             moved, skipped, failed, failDetails.c_str());
+  } else {
+    snprintf(buf, 1024, "Map organize: moved=%d skipped=%d failed=%d", moved, skipped, failed);
+  }
   return buf;
 }
 

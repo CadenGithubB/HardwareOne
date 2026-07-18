@@ -9,12 +9,14 @@
 // shares airtime with WiFi and other RF activity, so the radio's effective
 // ceiling is not constant or measurable from this device. Instead we surface
 // indicators that DO have calibrated ceilings (stream queue depth, pending
-// frames, rekey progress, send-failure ratio) and absolute rates (frames/sec,
-// ACK RTT). The single most actionable signal for stress testing is the
+// frames, send-failure ratio) and absolute rates (frames/sec, ACK RTT). The
+// single most actionable signal for stress testing is the
 // streamDroppedCount delta over the window: non-zero means the receive ring
 // overflowed during the test, i.e. we definitively saturated something.
 //
-// Memory cost: ~1.1 KiB static DRAM for the 30-sample ring. No PSRAM.
+// Memory cost: ~1.1 KiB for the 30-sample ring (36 B × 30), in PSRAM .bss — it
+// costs no internal DRAM. It's pure POD diagnostics, never touched by DMA or an
+// ISR, so PSRAM is safe here.
 
 #include "System_BuildConfig.h"
 #include <stdint.h>

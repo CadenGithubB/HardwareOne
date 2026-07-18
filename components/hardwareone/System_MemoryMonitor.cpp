@@ -57,12 +57,18 @@ extern bool gAllocTrackerEnabled;
 // Memory Threshold Registry
 // ============================================================================
 
-// Task stack sizes (in words, 1 word = 4 bytes on ESP32)
-// Centralized in System_TaskUtils.h
+// Task stack sizes are in BYTES (ESP-IDF's xTaskCreate deviates from vanilla
+// FreeRTOS; StackType_t is uint8_t here). Centralized in System_TaskUtils.h —
+// the *_STACK_WORDS names there are a misnomer, the values are byte counts.
 
 // Memory requirements registry
-// minHeapBytes = taskStackWords * 4 (bytes per word) + overhead buffer
-// Overhead buffer accounts for task control block, queue allocations, etc.
+// minHeapBytes = the task's stack (BYTES) + an overhead buffer for the task
+// control block, queue allocations, etc.
+// NOTE: the minHeap figures below were originally derived assuming stacks were
+// words (i.e. 4x their real size), so they are ~4x more conservative than
+// needed — e.g. gamepad gates on 20480 B for a 3584 B stack. Left as-is
+// deliberately: they only gate feature start-up and erring high is safe.
+// Re-tune them against measured usage if a feature is ever wrongly refused.
 static const MemoryRequirement gMemoryRequirements[] = {
   // Component       MinHeap   TaskStack              MinPSRAM
   { "gamepad",       20480,    INPUT_STACK_WORDS,   0 },       // 14KB stack + overhead
@@ -223,11 +229,15 @@ void sampleMemoryState(bool forceFullScan) {
   }
   
   // ── Main loop (caller) stack watermark - always report since this is the tightest task ──
+  // HWM is in BYTES on this port (StackType_t is uint8_t). The old "* 4" both
+  // inflated the reported figure AND made these thresholds 4x LESS sensitive —
+  // CRITICAL only fired below 256 B free instead of the intended 1024 B, so
+  // genuinely tight stacks reported clean. See System_TaskUtils.h.
   UBaseType_t mainWatermark = uxTaskGetStackHighWaterMark(NULL);  // NULL = calling task
   BROADCAST_PRINTF("[MEMSAMPLE] MainLoop stack free=%u B%s",
-                   (unsigned)(mainWatermark * 4),
-                   (mainWatermark * 4 < 1024) ? " !! CRITICAL" :
-                   (mainWatermark * 4 < 2048) ? " !! LOW" : "");
+                   (unsigned)mainWatermark,
+                   (mainWatermark < 1024) ? " !! CRITICAL" :
+                   (mainWatermark < 2048) ? " !! LOW" : "");
   
   // ── Debug queue pressure ──
   if (gDebugOutputQueue) {
@@ -301,14 +311,20 @@ void sampleMemoryState(bool forceFullScan) {
         broadcastOutput("[MEMSAMPLE] Task Stacks (name: used/total, watermark):");
         anyTask = true;
       }
+      // BYTES throughout: t.stackWords holds the byte count handed to
+      // xTaskCreate, and the HWM is bytes too. The old "* 4" inflated every
+      // absolute figure 4x (percentages stayed right, since both terms scaled)
+      // AND made these warnings 4x less sensitive — LOW only fired below 256 B
+      // free. See System_TaskUtils.h.
       UBaseType_t watermark = uxTaskGetStackHighWaterMark(t.handle);
-      uint32_t totalBytes = t.stackWords * 4;
-      uint32_t usedBytes = totalBytes - (watermark * 4);
+      uint32_t totalBytes = t.stackWords;
+      uint32_t freeBytes  = (uint32_t)watermark;
+      uint32_t usedBytes = totalBytes - freeBytes;
       uint32_t usedPct = totalBytes ? ((usedBytes * 100) / totalBytes) : 0;
-      const char* warn = (watermark * 4 < 1024) ? " !! LOW" : ((watermark * 4 < 2048) ? " ! WARN" : "");
+      const char* warn = (freeBytes < 1024) ? " !! LOW" : ((freeBytes < 2048) ? " ! WARN" : "");
       BROADCAST_PRINTF("  %-14s %5u/%5u B (%2u%%) free=%5u B%s",
                        t.name, (unsigned)usedBytes, (unsigned)totalBytes,
-                       (unsigned)usedPct, (unsigned)(watermark * 4), warn);
+                       (unsigned)usedPct, (unsigned)freeBytes, warn);
     }
   }
   

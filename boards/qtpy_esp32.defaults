@@ -26,3 +26,10 @@ CONFIG_PICO_PSRAM_CS_IO=10
 # CMakeLists.txt sees this flag and selects partitions_*_8mb.csv.
 CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
+
+# Bluetooth disabled for this build (ENABLE_BLUETOOTH=0 in System_BuildConfig.h
+# only gates our app code; this drops the Bluedroid stack + controller to
+# actually free ~14 KB IRAM / ~80 KB DRAM / ~70 KB flash on the memory-tight
+# classic ESP32). The CMakeLists HW_BOARD auto-recovery clears the stale
+# CONFIG_BT_ENABLED=y so this value re-applies.
+CONFIG_BT_ENABLED=n

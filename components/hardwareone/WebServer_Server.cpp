@@ -4951,7 +4951,23 @@ void startHttpServer() {
       sslConfig.httpd.stack_size = 11059;
       sslConfig.httpd.recv_wait_timeout = 20;
       sslConfig.httpd.send_wait_timeout = 20;
-      sslConfig.httpd.max_open_sockets = 5;  // 5 slots: page load + 2 API fetches + browser connection-pool pre-open headroom
+      // 8 slots: browsers open up to 6 parallel connections per host, and a
+      // page also holds 1 persistent SSE (/api/events) socket => 7 steady-state,
+      // +1 headroom so a transient extra connection does not force an LRU purge
+      // (lru_purge closes a not-yet-serviced connection => the browser sees a
+      // reset, mbedtls -0x0050). Requires CONFIG_LWIP_MAX_SOCKETS >= 11
+      // (esp_http_server needs max_open_sockets + 3 for listener + 2 control
+      // sockets); we set LWIP_MAX_SOCKETS=16 in sdkconfig.defaults. Raising this
+      // without the LWIP bump makes httpd_ssl_start fail and fall back to HTTP.
+      sslConfig.httpd.max_open_sockets = 8;
+      // Enable TLS session tickets (RFC 5077): browser reconnects then resume
+      // with a 1-RTT abbreviated handshake instead of a full ~250 ms software
+      // ECDHE-ECDSA-P256 handshake (no HW ECC on this part), which is what
+      // produced the back-to-back "performing session handshake" spam. mbedtls/
+      // esp-tls support is already compiled in (CONFIG_ESP_TLS_SERVER_SESSION_TICKETS),
+      // but HTTPD_SSL_CONFIG_DEFAULT() leaves this runtime flag false. Cost is a
+      // one-time ~2 KB server-wide (stateless tickets => zero per-connection).
+      sslConfig.session_tickets = true;
       sslConfig.servercert = (const uint8_t*)sHttpsCertData.c_str();
       sslConfig.servercert_len = sHttpsCertData.length() + 1;  // Include null terminator (PEM)
       sslConfig.prvtkey_pem = (const uint8_t*)sHttpsKeyData.c_str();

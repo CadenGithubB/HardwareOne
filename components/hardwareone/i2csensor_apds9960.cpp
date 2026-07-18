@@ -454,7 +454,7 @@ const size_t apdsCommandsCount = sizeof(apdsCommands) / sizeof(apdsCommands[0]);
 // APDS Task - FreeRTOS Task Function
 // ============================================================================
 // Purpose: Continuously reads color/proximity/gesture data from APDS9960 sensor
-// Stack: 3072 words (~12KB) | Priority: 1 | Core: Any
+// Stack: 3072 BYTES (3 KB) | Priority: 1 | Core: Any
 // Lifecycle: Created by cmd_apdsstart, deleted when all modes disabled
 // Polling: Fixed 100ms interval | I2C Clock: 100kHz
 //

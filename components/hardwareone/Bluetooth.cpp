@@ -29,6 +29,24 @@
 #include "System_MemUtil.h"
 #include "System_MemoryMonitor.h"
 #include "System_Mutex.h"   // SensorCacheGuard — used by the G2 sensor-stream paths below
+
+// Sensor caches for the BLE sensor-stream path (buildSensorDataJSON). Pull in the
+// REAL headers — never hand-copy these structs. This file used to re-declare
+// ThermalCache/TofCache/ImuCache locally with stale layouts; because it never
+// included these headers the compiler could not see the conflict, so it linked to
+// the real symbols and read them at the WRONG OFFSETS (the IMU stream published
+// imuTemp as "heading", never sent roll, and gated validity on a millis() byte).
+// System_SensorStubs.h supplies the types/globals when a sensor is compiled out.
+#if ENABLE_THERMAL_SENSOR
+  #include "i2csensor_mlx90640.h"   // ThermalCache, gThermalCache, gThermalEnabled/Connected
+#endif
+#if ENABLE_TOF_SENSOR
+  #include "i2csensor_vl53l4cx.h"   // TofCache, gTofCache, gTofEnabled/Connected
+#endif
+#if ENABLE_IMU_SENSOR
+  #include "i2csensor_bno055.h"     // ImuCache, gImuCache, gImuEnabled/Connected
+#endif
+#include "System_SensorStubs.h"     // stubs for disabled sensors
 #include "System_SelfDevice.h"  // SelfDevice::firmwareVersion() for the Device Info BLE characteristic
 #include "System_Settings.h"
 #include "System_BleSecureChannel.h"  // app-layer Secure Channel v1 (replaces BLE link-layer bonding)
@@ -1981,6 +1999,12 @@ static const char* cmd_blemode(const String& argsInput) {
   }
   arg.toLowerCase();
 
+  // The web settings dropdown stores bleMode as its int enum value (see the
+  // "bluetoothMode" SettingEntry: 0=server, 1=client/g2) and saves via
+  // `blemode <value>`. Accept those numeric forms in addition to the keywords.
+  if (arg == "0") arg = "server";
+  else if (arg == "1") arg = "client";
+
   if (arg == "server" || arg == "phone") {
 #if ENABLE_G2_GLASSES
     if (isG2ClientInitialized()) {
@@ -2030,13 +2054,13 @@ const CommandEntry bluetoothCommands[] = {
   
   // Auto-start
   { "bleautostart",    "Enable/disable BLE auto-start after boot [on|off].",   false, cmd_bleautostart,    "Usage: bleautostart [on|off]" },
-  { "blerequireauth", "Enable/disable BLE authentication requirement [on|off].", true, cmd_blerequireauth, "Usage: blerequireauth [on|off]" },
+  { "blerequireauth", "Enable/disable BLE authentication requirement [on|off].", true, cmd_blerequireauth, "Usage: blerequireauth [on|off]", nullptr, nullptr, /*requiresSuperAdmin=*/true },
 
   // Mode (server vs. G2 client) - mutually exclusive at runtime
   { "blemode",        "Get/set BLE mode [server|client].",                     false, cmd_blemode,         "Usage: blemode [server|client]" },
 
   // App-layer Secure Channel v1 (X25519+PSK+ChaCha20-Poly1305; no BLE bonding)
-  { "blesecret", "Set/clear the BLE Secure Channel passphrase: blesecret <phrase|clear>.", true, cmd_blesecret, "Usage: blesecret <passphrase|clear>" },
+  { "blesecret", "Set/clear the BLE Secure Channel passphrase: blesecret <phrase|clear>.", true, cmd_blesecret, "Usage: blesecret <passphrase|clear>", nullptr, nullptr, /*requiresSuperAdmin=*/true },
   { "blesecure", "Require app-layer BLE encryption [on|off].",                            true, cmd_blesecure, "Usage: blesecure [on|off]" },
 
   // Auto-reconnect at boot to saved-MAC peers (no scan fallback). Pairing is
@@ -2068,7 +2092,7 @@ const SettingEntry bluetoothSettingsEntries[] = {
   { "bluetoothRequireAuth",  SETTING_BOOL,   &gSettings.bluetoothRequireAuth,  true, 0, nullptr, 0, 1, "Require Authentication", nullptr, false, nullptr, "blerequireauth" },
   { "bluetoothDeviceName", SETTING_STRING, &gSettings.bleDeviceName, 0, 0, "HardwareOne", 0, 0, "Device Name", nullptr, false, nullptr, "blename" },
   { "bluetoothTxPower",      SETTING_INT,    &gSettings.bleTxPower,            3, 0, nullptr, 0, 7, "TX Power (0-7)", nullptr, false, nullptr, "bletxpower" },
-  { "bluetoothMode",         SETTING_INT,    &gSettings.bleMode,               0,    0, nullptr, 0, 1, "Mode (0=server, 1=g2)", "0:Server,1:Client (G2)", false, nullptr, "blemode" },
+  { "bluetoothMode",         SETTING_INT,    &gSettings.bleMode,               0,    0, nullptr, 0, 1, "Mode (0=server, 1=g2)", "0|Server,1|Client (G2)", false, nullptr, "blemode" },
   { "bleRequireSecureChannel", SETTING_BOOL, &gSettings.bleRequireSecureChannel, true, 0, nullptr, 0, 1, "Require Secure Channel", nullptr, false, nullptr, "blesecure" },
   { "bleSecureChannelSecret",  SETTING_STRING, &gSettings.bleSecureChannelSecret, 0, 0, "", 0, 0, "Secure Channel Secret", nullptr, true, nullptr, "blesecret" }
 };
@@ -2128,60 +2152,8 @@ int bleGetRecentMessages(const char* out[], int maxLines) {
 // Data Pipeline and Event System - provides continuous data streaming and 
 // event notifications over BLE.
 
-// External sensor cache references
-#if ENABLE_THERMAL_SENSOR
-extern struct ThermalCache {
-  SemaphoreHandle_t mutex;
-  int16_t* thermalFrame;
-  float* thermalInterpolated;
-  float thermalMinTemp;
-  float thermalMaxTemp;
-  float thermalCenterTemp;
-  int thermalHottestX;
-  int thermalHottestY;
-  uint32_t thermalLastUpdate;
-  bool thermalDataValid;
-  uint32_t thermalSeq;
-} gThermalCache;
-extern bool gThermalEnabled;
-extern bool gThermalConnected;
-#endif
-
-#if ENABLE_TOF_SENSOR
-extern struct TofCache {
-  SemaphoreHandle_t mutex;
-  struct TofObject {
-    bool detected;
-    int distance_mm;
-    float distance_cm;
-    uint8_t status;
-    bool valid;
-    float smoothed_distance_mm;
-    float smoothed_distance_cm;
-    bool hasHistory;
-  } tofObjects[4];
-  int tofTotalObjects;
-  uint32_t tofLastUpdate;
-  bool tofDataValid;
-  uint32_t tofSeq;
-} gTofCache;
-extern bool gTofEnabled;
-extern bool gTofConnected;
-#endif
-
-#if ENABLE_IMU_SENSOR
-extern struct ImuCache {
-  SemaphoreHandle_t mutex;
-  float accelX, accelY, accelZ;
-  float gyroX, gyroY, gyroZ;
-  float heading, pitch, roll;
-  uint32_t imuLastUpdate;
-  bool imuDataValid;
-  uint32_t imuSeq;
-} gImuCache;
-extern bool gImuEnabled;
-extern bool gImuConnected;
-#endif
+// Sensor cache types/globals come from the real sensor headers (included at the
+// top of this file) — deliberately NOT re-declared here. See that include block.
 
 // =============================================================================
 // DATA STREAMING PIPELINE
@@ -2286,11 +2258,15 @@ static void buildSensorDataJSON(char* buf, size_t bufSize) {
   if (gThermalEnabled && gThermalConnected) {
     SensorCacheGuard g(gThermalCache.mutex, pdMS_TO_TICKS(10), "ble.thermalStream");
     if (g.held && gThermalCache.thermalDataValid) {
+      // "avg" (was "center"): ThermalCache has no center field — the old local
+      // struct invented thermalCenterTemp/HottestX/HottestY, so this read landed
+      // on thermalMinTemp while min/max read the interpolated width/height ints
+      // punned as floats (both printed 0.0). thermalAvgTemp is the real field.
       pos += snprintf(buf + pos, bufSize - pos,
-                      "\"thermal\":{\"min\":%.1f,\"max\":%.1f,\"center\":%.1f,\"valid\":true},",
+                      "\"thermal\":{\"min\":%.1f,\"max\":%.1f,\"avg\":%.1f,\"valid\":true},",
                       gThermalCache.thermalMinTemp,
                       gThermalCache.thermalMaxTemp,
-                      gThermalCache.thermalCenterTemp);
+                      gThermalCache.thermalAvgTemp);
     }
   }
   #endif
@@ -2310,11 +2286,15 @@ static void buildSensorDataJSON(char* buf, size_t bufSize) {
   if (gImuEnabled && gImuConnected) {
     SensorCacheGuard g(gImuCache.mutex, pdMS_TO_TICKS(10), "ble.imuStream");
     if (g.held && gImuCache.imuDataValid) {
+      // Real field names are oriYaw/oriPitch/oriRoll. The old local struct omitted
+      // imuTemp, shifting everything after it: "heading" read imuTemp (streamed
+      // TEMPERATURE), pitch read oriYaw, roll read oriPitch, and oriRoll was never
+      // sent at all. JSON keys kept (heading == yaw) so the wire format is stable.
       pos += snprintf(buf + pos, bufSize - pos,
                       "\"imu\":{\"heading\":%.1f,\"pitch\":%.1f,\"roll\":%.1f,\"valid\":true},",
-                      gImuCache.heading,
-                      gImuCache.pitch,
-                      gImuCache.roll);
+                      gImuCache.oriYaw,
+                      gImuCache.oriPitch,
+                      gImuCache.oriRoll);
     }
   }
   #endif

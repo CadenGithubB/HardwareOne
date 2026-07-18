@@ -12,12 +12,14 @@
 // post-reboot re-handshake safe (the peer's pubkey is still on disk, so we
 // can re-verify the SESSION_OPEN signature without needing to re-pair).
 //
-// Phase 3.4 establishes sessions but doesn't yet enforce them on the wire —
-// that's Phase 3.5's job (SESSION_FRAME wrap on send, unwrap on receive).
+// Sessions are enforced on the wire: sessionWrapFrame seals outbound frames as
+// SESSION_FRAMEs and sessionUnwrapFrame verifies + replay-checks inbound ones
+// (both declared below).
 //
-// Capacity: 16 slots (same as the existing peer table). Per-slot cost is
-// well under 128 B, so ~2 KiB PSRAM total. Looked up by (peerMac, meshId) on
-// the initiator path, by (sessionId, peerMac) on the RX fast path.
+// Capacity: 16 slots (same as the existing peer table). A SessionState is
+// 208 B — the static_assert below pins that as the ceiling — so the table costs
+// 3328 B (~3.25 KiB) of PSRAM. Looked up by (peerMac, meshId) on the initiator
+// path, by (sessionId, peerMac) on the RX fast path.
 // ============================================================================
 
 #include "System_BuildConfig.h"
@@ -111,8 +113,22 @@ SessionState* sessionFindByPeer(const uint8_t peerMac[6], uint8_t meshId);
 SessionState* sessionFindBySessionId(uint16_t sessionId, const uint8_t peerMac[6]);
 
 // Allocate / reuse a slot for (peerMac, meshId). Returns nullptr if cache
-// full and no slot is freeable. Existing session for the pair is replaced
-// (cleared). State is set to SESSION_ESTABLISHING.
+// full and no slot is freeable. State is set to SESSION_ESTABLISHING.
+//
+// The two paths do NOT clear the same amount, which matters:
+//   - Free slot: full memset — every field starts at zero.
+//   - Existing session for the pair: a PARTIAL reset. It zeroes the live AEAD
+//     keys, txSeqNext, the rx replay window (rxSeqHighWater + rxSeqBitmap) and
+//     establishedAtMs. It leaves the REKEY state (aeadKeyRxPrev,
+//     prevKeysValidUntilMs, rekeyEphPrivKey, rekeyInitiatedAtMs,
+//     rekeyTxSeqAtInit), the bond token (bondToken, bondTokenValid) and
+//     consecutiveSendTimeouts exactly as they were.
+//
+// The retained prev-RX key is the sharp edge: sessionUnwrapFrame still falls
+// back to aeadKeyRxPrev while prevKeysValidUntilMs hasn't expired, so a
+// re-allocated session can decrypt frames keyed to the session it replaced for
+// up to kRekeyPrevKeysWindowMs past the last REKEY. Don't assume a re-allocated
+// slot is a blank one — sessionClear is the call that fully zeroes.
 SessionState* sessionAllocate(const uint8_t peerMac[6], uint8_t meshId);
 
 // Tear down a session and zero its key material. Idempotent.
@@ -226,7 +242,9 @@ bool pendingFrameHasForPeer(const uint8_t peerMac[6]);
 // here. The V4_ACK_RX path marks the entry DELIVERED on a matching ACK. The
 // pending-frame timeout-sweep or an early send failure marks it FAILED. A
 // periodic sweep ages out PENDING entries that never got an ACK. The web UI
-// polls /api/espnow/sendstatus?msgId=X to drive the chat bubble's ✓ → ✓✓.
+// reads the whole table out of the ESP-NOW messages JSON snapshot (the
+// "deliveries" array built in handleEspNowMessages) and matches on msgId to
+// drive the chat bubble's ✓ → ✓✓. There is no per-msgId HTTP endpoint.
 //
 // Capacity is small (kSendStatusSlots) and the table is a ring — newest
 // registrations evict the oldest entry. Web UI polling caps at ~15 attempts
@@ -270,9 +288,12 @@ void sendStatusMarkFailed(uint32_t msgId, const uint8_t peerMac[6]);
 // espnow heartbeat tick.
 void sendStatusSweep(uint32_t nowMs);
 
-// Lookup for the HTTP endpoint. Fills out *out and returns true if the
-// msgId is known. Returns false if the entry has been evicted or never
-// existed — caller should report state="unknown".
+// Single-entry lookup by msgId. Fills *out and returns true if the msgId is
+// known; false if the entry has been evicted or never existed.
+//
+// Has NO callers — the web UI takes the snapshot-walk path below instead. Kept
+// as the obvious primitive for a future by-msgId consumer, but nothing
+// exercises it today, so don't treat it as a tested path.
 bool sendStatusGet(uint32_t msgId, SendStatus* out);
 
 // Walk all slots for the JSON snapshot in handleEspNowMessages. Callers do

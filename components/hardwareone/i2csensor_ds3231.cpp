@@ -793,17 +793,17 @@ const char* cmd_rtcsync(const String& argsInput) {
 const char* cmd_rtcstart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   (void)argsInput;
-  
+
   if (gRtcEnabled && gRtcConnected) {
     return "[RTC] Already running";
   }
-  
-  if (!rtcInit()) {
-    return "Error: [RTC] Failed to initialize - check wiring";
-  }
 
-  if (!createRTCTask()) {
-    return "Error: [RTC] Failed to create task";
+  // Delegate to rtcStartInternal() rather than re-rolling init + task creation:
+  // it sets gRtcEnabled before createRTCTask(), which the task's `while
+  // (gRtcEnabled)` loop requires. Open-coding the sequence here skipped that and
+  // the task exited immediately — the exact race rtcStartInternal() documents.
+  if (!rtcStartInternal()) {
+    return "Error: [RTC] Failed to start - check wiring";
   }
 
   return "[RTC] Opened successfully";

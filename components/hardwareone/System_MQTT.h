@@ -17,6 +17,12 @@ void stopMQTT();
 void mqttTick();
 bool isMqttConnected();
 
+// Live "the MQTT client is started" state. Deliberately NOT isMqttConnected():
+// that reports broker-connected, which is async and false during a handshake, so
+// a started-but-connecting client would read as stopped. Callers asking "is MQTT
+// on right now" want this; callers asking "can I publish" want isMqttConnected().
+bool isMqttStarted();
+
 // MQTT publishing
 void publishMQTTSensorData();
 
@@ -46,6 +52,7 @@ inline void stopMQTT() {}
 inline void mqttTick() {}
 inline void publishMQTTSensorData() {}
 inline bool isMqttConnected() { return false; }
+inline bool isMqttStarted() { return false; }
 inline int getExternalSensorCount() { return 0; }
 inline bool getExternalSensor(int, String&, String&, String&, unsigned long&) { return false; }
 

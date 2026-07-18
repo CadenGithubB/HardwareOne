@@ -1434,7 +1434,7 @@ const size_t thermalCommandsCount = sizeof(thermalCommands) / sizeof(thermalComm
 // Thermal Task - FreeRTOS Task Function
 // ============================================================================
 // Purpose: Continuously reads 32x24 thermal frame data from MLX90640 sensor
-// Stack: 4096 words (~16KB) | Priority: 1 | Core: Any
+// Stack: 4096 BYTES (4 KB) | Priority: 1 | Core: Any
 // Lifecycle: Created by cmd_thermalstart, deleted when gThermalEnabled=false
 // Polling: Configurable via thermalDevicePollMs (default 100ms) | I2C Clock: 100-1000kHz
 //

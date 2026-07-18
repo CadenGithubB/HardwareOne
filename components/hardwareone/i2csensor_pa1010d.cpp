@@ -1,6 +1,8 @@
 #include "i2csensor_pa1010d.h"
 #include "System_Events.h"  // systemEventPost — event register producer
 #include "System_Utils.h"
+#include "System_MemUtil.h"  // ps_alloc — the GPS object lives in PSRAM (see gpsDestroyObject)
+#include <new>               // placement new
 
 #if ENABLE_GPS_SENSOR
 
@@ -25,6 +27,23 @@ TaskHandle_t gGpsTaskHandle = nullptr;
 
 // GPS module object (owned by this module)
 Adafruit_GPS* gPA1010D = nullptr;
+
+// The Adafruit_GPS object is ~2.8 KB — NMEA_EXTENSIONS gives it val[NMEA_MAX_INDEX]
+// of nmea_datavalue_t (~2.6 KB) — and a plain `new` puts all of that in scarce
+// internal DRAM. It is safe in PSRAM: the bulk is a PASSIVE parsed-NMEA data store
+// (written when a sentence arrives, read on demand — no per-poll compute loop walks
+// it, unlike the thermal/ToF calibration structs), and all GPS traffic is CPU-driven
+// I2C via Wire, never DMA'd into this object.
+//
+// It is therefore ps_alloc'd + placement-new'd (see gpsInit). That means it MUST be
+// torn down through this helper — `delete gPA1010D` would pair the destructor with
+// the wrong deallocator. Centralized here so the new/destroy pairing can't drift.
+static void gpsDestroyObject() {
+  if (!gPA1010D) return;
+  gPA1010D->~Adafruit_GPS();
+  free(gPA1010D);          // ps_alloc wraps heap_caps_malloc; free() handles PSRAM
+  gPA1010D = nullptr;
+}
 
 // External dependencies provided by System_I2C.h:
 // sensorStatusBumpWith, gSensorPollingPaused, drainDebugRing
@@ -113,11 +132,13 @@ bool gpsStartInternal() {
     }
 
     DEBUG_GPS_LIFECYCLEF("[GPS_INIT] Allocating Adafruit_GPS object on bus %u...", gpsBus);
-    gPA1010D = new Adafruit_GPS(gpsWire);
-    if (!gPA1010D) {
+    // PSRAM + placement-new (see gpsDestroyObject for why, and for teardown).
+    void* gpsObjBuf = ps_alloc(sizeof(Adafruit_GPS), AllocPref::PreferPSRAM, "gps.obj");
+    if (!gpsObjBuf) {
       ERROR_GPSF("Failed to allocate GPS module");
       return false;
     }
+    gPA1010D = new (gpsObjBuf) Adafruit_GPS(gpsWire);
     DEBUG_GPS_LIFECYCLEF("[GPS_INIT] GPS object allocated at %p", gPA1010D);
 
     DEBUG_GPS_LIFECYCLEF("[GPS_INIT] Calling gPA1010D->begin(0x%02X)...", I2C_ADDR_GPS);
@@ -139,8 +160,7 @@ bool gpsStartInternal() {
     }
 
     if (!initSuccess) {
-      delete gPA1010D;
-      gPA1010D = nullptr;
+      gpsDestroyObject();
       gGpsConnected = false;
       ERROR_GPSF("Failed to initialize GPS module at 0x%02X on bus %u after 3 attempts",
                  I2C_ADDR_GPS, gpsBus);
@@ -171,8 +191,7 @@ bool gpsStartInternal() {
     ERROR_GPSF("Failed to create GPS task");
     gGpsEnabled = false;
     gGpsConnected = false;
-    delete gPA1010D;
-    gPA1010D = nullptr;
+    gpsDestroyObject();
     return false;
   }
 
@@ -310,7 +329,7 @@ const char* cmd_gps(const String& argsInput) {
 // GPS Task - FreeRTOS Task Function
 // ============================================================================
 // Purpose: Continuously reads NMEA data from PA1010D GPS module
-// Stack: GPS_STACK_WORDS = 3072 words (~12KB) | Priority: low | Core: Any
+// Stack: GPS_STACK_WORDS = 3072 BYTES (3 KB) | Priority: low | Core: Any
 // Lifecycle: Created by cmd_gpsstart, deleted when gGpsEnabled=false
 // Polling: Configurable via gpsDevicePollMs (default 200ms) | I2C Clock: 100kHz
 //
@@ -408,10 +427,7 @@ void gpsTask(void* parameter) {
     // CRITICAL: Check enabled flag FIRST for graceful shutdown
     if (!gGpsEnabled) {
       gGpsConnected = false;
-      if (gPA1010D != nullptr) {
-        delete gPA1010D;
-        gPA1010D = nullptr;
-      }
+      gpsDestroyObject();
       SENSOR_TASK_EXIT(GPS);
     }
 

@@ -20,20 +20,38 @@
 // transmit took the deep path — see the SENSOR_BCAST_STACK_WORDS history in
 // System_TaskUtils.h.
 //
-// After (this module): all sends route through one dispatcher task with a
-// generously-sized stack. Producers (sensor_bcast, processMeshHeartbeats,
-// cmd_exec deferred handlers, RX-side responses) build a tiny Job descriptor,
-// copy the payload into a heap buffer, and enqueue. They never touch the
-// AEAD seal, the frame buffer, or esp_now_send themselves. Their stacks
-// shrink back to "what does my own work need."
+// After (this module): sends CAN route through one dispatcher task with a
+// generously-sized stack. A producer builds a tiny Job descriptor, copies the
+// payload into a heap buffer, and enqueues; it never touches the AEAD seal, the
+// frame buffer, or esp_now_send, so its stack shrinks back to "what does my own
+// work need."
 //
-// Knock-on benefits
+// HOW FAR THIS ACTUALLY GOT — read before sizing a task's stack off this file.
+// The migration is PARTIAL. Only callers that go through submit/submitSync (the
+// bond encrypted-send path, cmd_exec deferred handlers, RX-side responses) get
+// the benefit. Notable holdouts that still build and send frames on their OWN
+// stack:
+//   * sensor_bcast's mesh path — sensorBroadcasterTask → transmitSensorData →
+//     v4_broadcast_sensor_data → v4_broadcast_category → v4_send_frame, which
+//     owns uint8_t frame[250] and calls captureEspNowFrame (char line[700]).
+//     That's ~1 KB of stack against a real 4 KB SENSOR_BCAST budget.
+//   * Mesh heartbeats — call v4_send_payload_smart / v4_broadcast_category
+//     directly.
+// So "every sender is a Job" is the design intent, not the current state; the
+// stack-sizing hazard this module was built to kill is still live on those paths.
+//
+// Knock-on benefits (CONDITIONAL — they arrive only once the holdouts above are
+// migrated; none of them are banked yet)
 // -----------------
-//   * EspNowTxGuard mutex becomes redundant (single sender ⇒ no race on
-//     sessionState.nextSendSeq + nonce build). Removed in Phase 5.
-//   * frame[218] in v4_send_session_wrapped + line[700] in captureEspNowFrame
-//     become hoist-to-static candidates once Phase 5 lands (single-threaded
-//     by construction).
+//   * EspNowTxGuard mutex would become redundant (single sender ⇒ no race on
+//     SessionState::txSeqNext + nonce build). It is still very much alive and
+//     load-bearing — 9 sites, including the session TX critical section at
+//     System_ESPNow_Sessions.cpp:295 — precisely because sends still originate
+//     from multiple tasks. The DEADLOCK RULE on submitSync() below depends on
+//     this lock existing; do not treat it as vestigial.
+//   * frame[250] in v4_send_session_wrapped + line[700] in captureEspNowFrame
+//     become hoist-to-static candidates only when every sender is single-
+//     threaded by construction. Not today.
 //   * Adding a new sender = enqueue a Job. Never again "did anyone forget to
 //     re-size this task's stack after AEAD landed?"
 //
@@ -58,8 +76,10 @@
 //                      payload; kind stays AEAD_SMART — the bond token is not
 //                      a separate layer to the wire format).
 //
-// Future kinds (not in Phase 1):
-//   JOB_RAW          — v4_send_frame raw plaintext (broadcast, KEY_EX).
+//   JOB_RAW          — v4_send_frame raw plaintext (broadcast, KEY_EX). Live;
+//                      dispatched in runJob alongside JOB_AEAD_SMART.
+//
+// Future kinds (not implemented — runJob has no case for these):
 //   JOB_FRAG_ACK     — tiny plaintext frag-ack (high priority).
 //   JOB_AEAD_CHUNKED — multi-frag AEAD with internal ACK-wait loop.
 //
@@ -71,8 +91,10 @@
 // message delivery confirmation is the caller's V4 ACK loop, same as before.
 //
 // Callers that genuinely need synchronous "did this leave the box?" semantics
-// (CLI cmd_resp, web responses) currently still call v4_send_payload_smart
-// directly — those migrate in Phase 3 once we add a sync-completion variant.
+// have submitSync() (and the sendAeadSync() helper) below — the dispatcher wakes
+// the caller with the wire result via xTaskNotify. CMD_RESP already sends this
+// way. Note the constraint that comes with it: sync callers must not be on
+// espnow_task, since blocking there stalls the RX drain.
 // ============================================================================
 
 namespace espnowtx {

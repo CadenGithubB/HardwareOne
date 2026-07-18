@@ -277,12 +277,12 @@ void fmRadioTask(void* parameter) {
       if (!initWatermarkLogged) {
         initWatermarkLogged = true;
         if (isDebugFlagSet(DEBUG_FMRADIO)) {
-          const uint32_t fmRadioStackWords = 4608;  // keep in sync with createFMRadioTask()
+          constexpr uint32_t fmRadioStackBytes = FMRADIO_STACK_WORDS;  // BYTES (misnomer name); single source of truth
           UBaseType_t watermark = uxTaskGetStackHighWaterMark(nullptr);
           DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO_TASK] Post-init stack watermark: %u bytes (%.1f%% used of %u bytes)",
-                         (unsigned)(watermark * 4),
-                         (float)(fmRadioStackWords - watermark) * 100.0f / (float)fmRadioStackWords,
-                         (unsigned)(fmRadioStackWords * 4));
+                         (unsigned)watermark,
+                         (float)(fmRadioStackBytes - watermark) * 100.0f / (float)fmRadioStackBytes,
+                         (unsigned)fmRadioStackBytes);
         }
       }
     }
@@ -321,12 +321,12 @@ void fmRadioTask(void* parameter) {
       // near-overflowed stack (IllegalInstruction panic).
       if (checkTaskStackSafety("fmradio", FMRADIO_STACK_WORDS, &gFmRadioEnabled)) continue;
       if (isDebugFlagSet(DEBUG_FMRADIO)) {
-        const uint32_t fmRadioStackWords = FMRADIO_STACK_WORDS;
+        const uint32_t fmRadioStackBytes = FMRADIO_STACK_WORDS;  // BYTES (misnomer name); single source of truth
         UBaseType_t watermark = uxTaskGetStackHighWaterMark(nullptr);
         DEBUG_FMRADIO_POLLINGF("[FM_RADIO_TASK] Stack watermark: %u bytes (%.1f%% used of %u bytes)",
-                       (unsigned)(watermark * 4),
-                       (float)(fmRadioStackWords - watermark) * 100.0f / (float)fmRadioStackWords,
-                       (unsigned)(fmRadioStackWords * 4));
+                       (unsigned)watermark,
+                       (float)(fmRadioStackBytes - watermark) * 100.0f / (float)fmRadioStackBytes,
+                       (unsigned)fmRadioStackBytes);
       }
     }
     

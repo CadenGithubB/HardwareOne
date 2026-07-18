@@ -9,6 +9,7 @@
 #include "System_Events.h"  // systemEventPost — event register producer
 #include "System_Notifications.h"  // notifyLoginFailed — auth-failure parity
 #include "System_BuildConfig.h"
+#include <esp_attr.h>       // EXT_RAM_BSS_ATTR (PSRAM .bss staging buffers)
 
 #if ENABLE_WIFI && ENABLE_MQTT
 
@@ -167,6 +168,11 @@ bool isMqttConnected() {
   return mqttTofConnected;
 }
 
+// Check if the MQTT client is started (not necessarily connected to the broker)
+bool isMqttStarted() {
+  return mqttEnabled;
+}
+
 // Get external sensor count
 int getExternalSensorCount() {
   return externalSensorCount;
@@ -255,6 +261,28 @@ static String getDeviceId() {
 // unit: unit of measurement (nullptr if none)
 // deviceClass: HA device class (nullptr if none)
 // icon: MDI icon (nullptr for default)
+// PSRAM staging buffer shared by publishDiscoveryConfig() and
+// publishPeerDiscoveryConfig(). ONE buffer serves both because they can never be
+// live at the same time:
+//
+//   MQTT_EVENT_CONNECTED (:817 — the ONLY caller of publishMQTTDiscovery)
+//     └─ publishMQTTDiscovery()
+//          ├─ publishDiscoveryConfig(...)      x~40, each frame opens and closes
+//          └─ publishMeshPeerDiscovery()       runs only AFTER all of the above returned
+//               └─ publishPeerDiscoveryConfig(...)  x(peers x sensors)
+//
+// Neither function calls the other, so at most one is on the stack at any instant.
+// Non-reentrant for a stronger reason than that, though: esp-mqtt dispatches EVERY
+// event (CONNECTED, DATA, ...) to the single mqtt_event_handler on its own task,
+// strictly sequentially — inbound broker data arriving mid-publish queues behind the
+// handler rather than preempting it, so two tasks can never be in here at once.
+//
+// Static rather than per-call heap: publishDiscoveryConfig runs ~40x back-to-back,
+// so a malloc/free per call would be pure overhead. Keeps 1 KB off the esp-mqtt
+// task's stack (and costs 1 KB of PSRAM, not 2).
+static constexpr size_t kMqttDiscoveryJsonCap = 1024;
+EXT_RAM_BSS_ATTR static char sMqttDiscoveryConfigJson[kMqttDiscoveryJsonCap];
+
 static void publishDiscoveryConfig(const char* component, const char* objectId,
                                     const char* name, const char* valueTemplate,
                                     const char* unit, const char* deviceClass,
@@ -270,8 +298,10 @@ static void publishDiscoveryConfig(const char* component, const char* objectId,
   String discoveryTopic = gSettings.mqttDiscoveryPrefix + "/" + component + "/" + 
                           deviceId + "/" + objectId + "/config";
   
-  // Build config JSON
-  char configJson[1024];
+  // Build config JSON. Array REFERENCE to the shared PSRAM buffer (not a
+  // pointer) so sizeof(configJson) still yields the capacity for the snprintf
+  // calls below — see sMqttDiscoveryConfigJson for why sharing is safe.
+  char (&configJson)[kMqttDiscoveryJsonCap] = sMqttDiscoveryConfigJson;
   int pos = 0;
   
   pos += snprintf(configJson + pos, sizeof(configJson) - pos,
@@ -603,7 +633,10 @@ static void publishPeerDiscoveryConfig(const MeshPeerMeta& peer,
   String discoveryTopic = gSettings.mqttDiscoveryPrefix + "/" + component + "/" +
                           peerId + "/" + objectId + "/config";
 
-  char configJson[1024];
+  // Shares the same PSRAM buffer as publishDiscoveryConfig — this function only
+  // runs after every publishDiscoveryConfig frame has returned. Array reference
+  // keeps sizeof(configJson) working. See sMqttDiscoveryConfigJson.
+  char (&configJson)[kMqttDiscoveryJsonCap] = sMqttDiscoveryConfigJson;
   int pos = 0;
 
   pos += snprintf(configJson + pos, sizeof(configJson) - pos,

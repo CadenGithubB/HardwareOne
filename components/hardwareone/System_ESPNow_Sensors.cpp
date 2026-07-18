@@ -81,8 +81,10 @@ static unsigned long gLastTxMs[REMOTE_SENSOR_MAX] = {0};
 // no intermediate "wire cache" to keep in sync, which makes the entire class
 // of "first toggle ON shows nothing" bugs structurally impossible.
 //
-// minIntervalMs controls per-sensor pacing. Gamepad wants ~10 Hz so button
-// presses feel responsive; everything else is happy at 1 Hz.
+// minIntervalMs controls per-sensor pacing. The input device (gamepad / ANO)
+// wants ~10 Hz so button presses feel responsive. TOF, IMU and presence sit at
+// 2 Hz — they read as motion, so 1 Hz looks laggy. GPS, FM radio and RTC change
+// slowly enough that 1 Hz is plenty. The table below is the authority.
 //
 // bufBytes is the size required for this sensor's largest possible JSON
 // output. The broadcaster allocates ONE shared PSRAM buffer sized to the
@@ -574,8 +576,16 @@ static void sensorBroadcasterTask(void* param) {
   for (;;) {
     const unsigned long now = millis();
 
-    // Stack HWM diagnostic. uxTaskGetStackHighWaterMark returns *free* words
+    // Stack HWM diagnostic. uxTaskGetStackHighWaterMark returns the *free* stack
     // ever observed (low-water mark), not used — peak_used = total - free.
+    //
+    // UNITS: BYTES, not words, despite the "words" in the log line below and in
+    // upstream FreeRTOS's own docs. This port sets portSTACK_TYPE = uint8_t, so
+    // StackType_t is 1 byte and the count comes back unscaled. SENSOR_BCAST_STACK_WORDS
+    // is bytes too (see System_TaskUtils.h), so the subtraction is right — but read
+    // any number here as bytes or you'll credit this task with 4x the headroom it
+    // has. 4 KB total, not 16 KB.
+    //
     // Logged every 5s under DEBUG_ESPNOW_CORE so we can size the stack to
     // measured peak + margin instead of guessing.
     static unsigned long lastHwmLog = 0;

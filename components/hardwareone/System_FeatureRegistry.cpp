@@ -669,7 +669,7 @@ static const char* cmd_featuresetup(const String& argsInput) {
 
 // Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 extern const CommandEntry featureCommands[] = {
-  { "features", "Show/toggle system features with heap estimates.", false, cmd_features,
+  { "features", "Show/toggle system features with heap estimates.", true, cmd_features,
     "features              - List all features\n"
     "features <id>         - Show feature details\n"
     "features <id> <on|off> - Enable/disable feature\n"

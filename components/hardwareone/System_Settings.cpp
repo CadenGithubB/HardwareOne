@@ -254,8 +254,8 @@ const CommandEntry settingsCommands[] = {
   // ---- Output Settings ----
   { "outserial",          "Set serial output: <0|1> [persist|temp]", true, cmd_outserial, "Usage: outserial <0|1> [persist|temp]" },
   { "outweb",             "Set web output: <0|1> [persist|temp]", true, cmd_outweb, "Usage: outweb <0|1> [persist|temp]" },
-  { "serialrequireauth",  "Require auth for serial: <0|1>", true, cmd_serialrequireauth, "Usage: serialrequireauth <0|1>" },
-  { "displayrequireauth", "Require auth for display: <0|1>", true, cmd_displayrequireauth, "Usage: displayrequireauth <0|1>" },
+  { "serialrequireauth",  "Require auth for serial: <0|1>", true, cmd_serialrequireauth, "Usage: serialrequireauth <0|1>", nullptr, nullptr, /*requiresSuperAdmin=*/true },
+  { "displayrequireauth", "Require auth for display: <0|1>", true, cmd_displayrequireauth, "Usage: displayrequireauth <0|1>", nullptr, nullptr, /*requiresSuperAdmin=*/true },
 
   // ---- Batch write ----
   { "beginwrite",   "Start a batch settings update — defers flash write until savesettings.", true, cmd_beginwrite },

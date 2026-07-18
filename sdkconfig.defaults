@@ -127,12 +127,23 @@ CONFIG_ESP_INT_WDT_TIMEOUT_MS=1500
 # HTTP Server - increase header buffer for browser cookies
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
 
+# LWIP - raise the global BSD socket pool. The HTTPS server uses 8 client
+# sockets (WebServer_Server.cpp) and esp_http_server requires
+# LWIP_MAX_SOCKETS >= max_open_sockets + 3 (listener + 2 control), i.e. >= 11;
+# 16 leaves headroom for MQTT-over-TLS / SNTP / mDNS. Each extra slot is only a
+# few hundred bytes of internal DRAM (netconn + recvmbox); the heavy per-session
+# TLS content buffers live in PSRAM via CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC below.
+# (CONFIG_LWIP_MAX_ACTIVE_TCP already defaults to 16, which covers 8 sockets.)
+CONFIG_LWIP_MAX_SOCKETS=16
+
 # mbedTLS - allocate TLS buffers from PSRAM instead of internal DRAM
 # Each TLS session needs ~40-50KB; internal DRAM is too scarce for multiple sessions
 # CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC is not set
 CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
 
-# HTTPS performance: enable session ticket resumption (skip full handshake on reconnect)
+# HTTPS performance: enable session ticket resumption (skip full handshake on reconnect).
+# NOTE: this Kconfig only compiles in support. The httpd_ssl runtime flag must
+# also be set — sslConfig.session_tickets = true — done in WebServer_Server.cpp.
 CONFIG_ESP_TLS_SERVER_SESSION_TICKETS=y
 
 # Don't keep peer certificate after handshake (no mutual TLS, saves RAM per session)

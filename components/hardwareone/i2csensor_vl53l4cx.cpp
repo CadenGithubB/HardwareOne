@@ -695,7 +695,7 @@ const size_t tofCommandsCount = sizeof(tofCommands) / sizeof(tofCommands[0]);
 // ToF Task - FreeRTOS Task Function
 // ============================================================================
 // Purpose: Continuously reads distance measurements from VL53L4CX ToF sensor
-// Stack: 3072 words (~12KB) | Priority: 1 | Core: Any
+// Stack: 3072 BYTES (3 KB) | Priority: 1 | Core: Any
 // Lifecycle: Created by cmd_tofstart, deleted when gTofEnabled=false
 // Polling: Configurable via tofPollingMs (default 100ms) | I2C Clock: 50-400kHz
 //

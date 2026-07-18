@@ -24,7 +24,8 @@ Adafruit_PWMServoDriver* gPwmDriver = nullptr;
 bool gPwmDriverConnected = false;
 
 // Servo profiles (16 channels)
-ServoProfile servoProfiles[MAX_SERVO_CHANNELS];
+// PSRAM .bss: plain calibration config, read on the I2C task; never DMA'd.
+EXT_RAM_BSS_ATTR ServoProfile servoProfiles[MAX_SERVO_CHANNELS];
 
 // ============================================================================
 // PCA9685 Initialization
