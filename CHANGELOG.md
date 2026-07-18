@@ -8,6 +8,45 @@ Entries for 0.96.1 and earlier were backfilled from git history (this repo had
 no tags or releases before 0.96.2); they are terse, commit-grounded summaries,
 dated from each version's commit. Dates are YYYY-MM-DD.
 
+## [0.99.0] - 2026-07-18
+Adds a Super Admin role above admin so the most destructive commands are no longer in reach of every admin, a `ramflush` command that reboots to reclaim memory and brings your running features back with it, and a round of ESP-NOW reliability work. Several commands that could reboot, wipe, or reach across the mesh were admin-gated for the first time.
+### Added
+- Super Admin: a new role above admin, granted with `userpromote <user> superadmin` and removed with `userdemote <user> admin`. Only a super admin can run the commands that can destroy or take over the device - factory reset, formatting storage, regenerating the device identity, changing the mesh passphrase, and the switches that control whether serial, display, and Bluetooth require a login.
+- `ramflush`: reboots the device to reclaim fragmented memory, then restores the features that were actually running when you ran it. It never changes your configured autostart settings, and it deliberately forgets the session if anything else caused the restart, so a feature that wedges the device cannot bring itself back on the next boot.
+### Changed
+- A bonded ESP-NOW peer now acts with super admin rights. Bonding joins two devices as one unit and the bond token is the proof, so the far side no longer needs a separate login. Ordinary mesh pairing is unaffected and still gets only the role the account was given.
+- About two dozen commands that take real action are now admin-only: `power` and `powersave`, the remote ESP-NOW verbs (`espnowremote`, `espnowfetch`, `espnowbrowse`, `espnowsendfile`), the bond control verbs, `imagesend`, `features`, `log`, and `automation run`/`trigger`. Read-only status commands stay open. An automation owned by a non-admin that calls one of these will now fail, since automations run as their owner.
+- A regular admin can no longer demote, ban, delete, or reset the password of a super admin. A super admin can do all of those to a regular admin, and the first account stays protected from everyone.
+- ESP-NOW reliability: the receive ring and broadcast trackers moved off fixed arrays onto checked allocations, and several large tables moved to PSRAM to free scarce internal memory. The mesh fingerprint is now verified on both send and receive, and regenerating the device identity with `--confirm-wipe-all-bonds` now clears every stored peer.
+### Removed
+- The `espnowbuffers` command and the `txQueueSize`, `rxBufferSize`, `chunkSize`, and `fileChunkSize` settings. These tuned buffers that are now sized automatically.
+- The "Reassembly Timeouts" line from `routerstats`, along with the counter behind it.
+### Fixed
+- The FM radio driver failed to compile on any board with the radio enabled, because of a half-finished rename. Boards with FM radio switched off were unaffected, which is why it went unnoticed.
+- `ramflush` checked whether the gesture sensor was running using a setting name that does not exist, so it always read "off". Restoring a session could therefore switch off a gesture sensor you had configured to start automatically.
+- Stack usage reported for kernel tasks is now labelled as an estimate. Only the free-space column was ever measured; the rest assumed a fixed margin and was printed as though measured.
+### Security
+- Resetting another user's password now obeys the same rank rules as promoting or banning them. Previously any admin could reset a super admin's password and then sign in as them.
+
+## [0.98.9] - 2026-07-18
+Brings a batch of features to the G2 glasses display: automations and ring health readouts on the Apps menu, a live view of on-device AI replies, plain-text and CSV file previews, and map panning.
+### Added
+- Apps > Automations on the glasses: browse your saved automations, run one, and switch it on or off. The on/off badge only changes when the device confirms it, so a denied action will not look like it worked.
+- Apps > Ring: a live readout of heart rate, heart-rate variability, blood oxygen, and battery from a paired R1 ring. Values that are not yet known show as "--" rather than zero.
+- A read-only view of on-device AI conversations on the glasses, showing prompts and replies as they stream in. This is a first pass: it shows the most recent part of the answer, with scroll-back still to come.
+- Text and CSV file previews in the glasses file browser, alongside the existing JSON view.
+- Map panning from the glasses: step the map north, south, east, or west.
+### Changed
+- The three separate paged-text viewers on the glasses (files, settings, and ESP-NOW chat) now share one engine. Long lines wrap instead of being cut off, which is what makes CSV and plain text readable on the lens.
+- Several glasses screens keep their row buffers in PSRAM, freeing scarce internal memory.
+
+## [0.98.8] - 2026-07-18
+A small round of fixes.
+### Fixed
+- Viewing a file in the web interface now follows the theme you chose in the app. Previously it followed the browser or operating system setting, so a light-mode app could open a file as white text on black. Plain text, CSV, and empty files were unstyled entirely and now match the rest of the interface.
+- Merged GPS tracks no longer draw a long straight line across the map. Where a stitched log jumps more than five miles between fixes, that leg is left undrawn instead of being joined up.
+- The device no longer restarts itself after sitting idle. Entering and leaving power saving changes the processor clock, which could collide with a sensor read already in progress; the switch now waits for the sensor bus to be clear.
+
 ## [0.98.7] - 2026-07-14
 A device-wide event system is the centerpiece: a single event register now records what happens on the device, drives notifications, and lets automations react to live events. Notifications were rebuilt on top of it with per-kind and per-user controls. Also splits debug settings into their own file and fixes a batch of bugs.
 ### Added
