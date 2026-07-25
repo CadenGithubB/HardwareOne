@@ -24,6 +24,7 @@
 #include "System_CLIConfirm.h"    // cliRequestConfirm — yes/no gate for destructive filedelete
 #if ENABLE_BLUETOOTH
 #include "System_BleSecureChannel.h"  // bleScSendEncrypted/bleScEstablished — raw-binary `fileread ... bin`
+#include "System_TextPager.h"     // sanitize + page-split core — paged fileview
 #endif
 
 // External dependencies
@@ -106,7 +107,13 @@ bool initFilesystem() {
   // canonical trusted-internal context (no user identity exists yet).
   {
     AuthContext sys = VFS::systemAuth("fs.init.mkdirs");
-    VFS::mkdirGuarded("/logging_captures",            sys);
+    // Whole capture tree up-front so writers never depend on a parent existing
+    // by luck (mkdir is non-recursive). Subdirs used to appear ad-hoc from
+    // whichever feature ran first.
+    VFS::mkdirGuarded(CAPTURE_DIR,                    sys);
+    VFS::mkdirGuarded(CAPTURE_DIR_SENSORS,            sys);  // sensorlog output
+    VFS::mkdirGuarded(CAPTURE_DIR_SYSTEM,             sys);  // `log start` output
+    VFS::mkdirGuarded(CAPTURE_DIR_TRACKS,             sys);  // GPS tracks
     VFS::mkdirGuarded("/system",                      sys);  // settings, automations, devices, etc.
     VFS::mkdirGuarded("/system/sys_logs",             sys);  // protected system logs
     VFS::mkdirGuarded("/system/users",                sys);  // users.json + per-user settings dir
@@ -578,7 +585,7 @@ const char* cmd_files(const String& argsInput) {
     return "Error: unexpected argument — quote the path, e.g. files \"/My Folder\"";
 
   if (wantStats) {
-    static char statsBuf[160];
+    EXT_RAM_BSS_ATTR static char statsBuf[160];
     buildFilesStatsJson(path, statsBuf, sizeof(statsBuf));
     return statsBuf;
   }
@@ -698,7 +705,16 @@ const char* cmd_fileview(const String& argsInput) {
   String path;
   const char* qerr = requireQuotedPath(a, 0, path);
   if (qerr) return qerr;
-  if (a.has(1)) return "Error: unexpected argument — usage: fileview \"<path>\"";
+  // Optional 1-based page number. Replaces the old hard 8000-byte cut, which
+  // made everything past 8 KB unreachable from serial (and the web CLI bridge
+  // silently truncates ~4 KB, so remote views cut even earlier). Pages are
+  // sized to survive every transport.
+  int page = 1;
+  if (a.has(1)) {
+    page = a.argInt(1, 0);
+    if (page < 1) return "Error: page must be >= 1 — usage: fileview \"<path>\" [page]";
+  }
+  if (a.has(2)) return "Error: unexpected argument — usage: fileview \"<path>\" [page]";
 
   const AuthContext& ctx = currentAuthContext();
   // existsGuarded gates by canRead — combines the previous canRead +
@@ -712,29 +728,98 @@ const char* cmd_fileview(const String& argsInput) {
     return "ERROR";
   }
 
+  // Read cap 60000 B: under the pager's 64 KB uint16_t-offset ceiling with
+  // margin. Cap-hit is detected by length == cap (readTextLimited has no
+  // explicit truncation flag).
+  const size_t kReadCap = 60000;
   String content;
-  if (!readText(path.c_str(), content)) {
+  if (!readTextLimited(path.c_str(), content, kReadCap)) {
     if (ensureDebugBuffer()) {
       snprintf(getDebugBuffer(), 1024, "Error: Unable to open: %s", path.c_str());
       broadcastOutput(getDebugBuffer());
     }
     return "ERROR";
   }
+  const bool readCapHit = (content.length() >= kReadCap);
 
-  const size_t MAX_SHOW = 8000;
-  if (content.length() > MAX_SHOW) {
+  // Sanitize + wrap into a scratch buffer: CRLF -> LF, tabs -> space, control
+  // bytes dropped (a stray binary file no longer sprays escape sequences into
+  // the terminal). Wrap at 200 cols — broadcastOutput clamps any single call
+  // at 255 B ('[CUT]'-stamped, no splitting), so every emitted line must stay
+  // under that; 200 leaves margin and terminals re-flow long lines anyway.
+  // Wrapping can GROW the text (a continuation '\n' per 200 cols), so size the
+  // buffer with 1 extra byte per 200 + slack.
+  const size_t kCols = 200;
+  const size_t bodyCap = content.length() + (content.length() / kCols) + 16;
+  char* body = (char*)ps_alloc(bodyCap, AllocPref::PreferPSRAM, "fs.fileview.body");
+  if (!body) return "Error: fileview: buffer alloc failed";
+  bool wrapTrunc = false;
+  const size_t bodyLen = textWrapInto(body, bodyCap, content.c_str(),
+                                      kCols, /*contIndent=*/0,
+                                      /*stripCtrl=*/true, &wrapTrunc);
+
+  // Split at line boundaries into transport-safe pages. Budget 3500 B keeps a
+  // page + header/trailer under the ~4095 B web-bridge cap. Worst-case page
+  // count at this cap is ~35 (lines just over half the budget), so 40 slots
+  // cover it; the pager sets `truncated` if that ever overflows.
+  uint16_t pageOff[41];
+  TextPager pg = { body, pageOff, 40, 3500, 0, 0, false };
+  pg.truncated = readCapHit || wrapTrunc;
+  textSplitPages(pg, bodyLen);
+  const int pageCount = (pg.pageCount > 0) ? pg.pageCount : 1;
+
+  if (page > pageCount) {
+    free(body);
     if (ensureDebugBuffer()) {
-      snprintf(getDebugBuffer(), 1024, "--- BEGIN (truncated) %s ---", path.c_str());
+      snprintf(getDebugBuffer(), 1024, "Error: page %d out of range — %s has %d page%s",
+               page, path.c_str(), pageCount, pageCount == 1 ? "" : "s");
       broadcastOutput(getDebugBuffer());
     }
-    String truncated = content.substring(0, MAX_SHOW);
-    broadcastOutput(truncated);
-    if (ensureDebugBuffer()) {
-      snprintf(getDebugBuffer(), 1024, "--- TRUNCATED (%u bytes total) ---", content.length());
-      broadcastOutput(getDebugBuffer());
+    return "ERROR";
+  }
+
+  if (ensureDebugBuffer()) {
+    snprintf(getDebugBuffer(), 1024, "--- %s  page %d/%d (%u B%s) ---",
+             path.c_str(), page, pageCount, (unsigned)content.length(),
+             pg.truncated ? ", truncated" : "");
+    broadcastOutput(getDebugBuffer());
+  }
+
+  if (pg.pageCount > 0) {
+    // Emit the page CHUNK-WISE: broadcastOutput clamps one call at 255 B (no
+    // splitting — the old whole-String broadcast was silently cut to 255 B on
+    // serial/SSE/BLE and only survived via the web bridge's capture buffer).
+    // Batch whole lines into <=240 B chunks so nothing ever trips the clamp
+    // while keeping the call count (and debug-queue pressure) low.
+    const size_t start = pg.pageOff[page - 1];
+    const size_t end   = pg.pageOff[page];
+    char chunk[241];
+    size_t cl = 0;
+    for (size_t i = start; i < end; ) {
+      size_t le = i;
+      while (le < end && body[le] != '\n') le++;
+      const size_t lineLen = le - i;              // excl. '\n'; wrap caps it at 200
+      if (cl > 0 && cl + 1 + lineLen > sizeof(chunk) - 1) {
+        chunk[cl] = '\0';
+        broadcastOutput(chunk);
+        cl = 0;
+      }
+      if (cl > 0) chunk[cl++] = '\n';
+      memcpy(chunk + cl, body + i, lineLen);
+      cl += lineLen;
+      i = (le < end) ? le + 1 : le;
     }
-  } else {
-    broadcastOutput(content);
+    if (cl > 0) {
+      chunk[cl] = '\0';
+      broadcastOutput(chunk);
+    }
+  }
+  free(body);
+
+  if (page < pageCount) {
+    cliHintf("next: fileview \"%s\" %d", path.c_str(), page + 1);
+  } else if (pg.truncated) {
+    cliHintf("view stops at the %u B read cap — use fileread for raw ranges", (unsigned)kReadCap);
   }
 
   return "[FS] File displayed";
@@ -919,7 +1004,7 @@ const char* cmd_filewrite(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!filesystemReady) return "Error: LittleFS not ready";
 
-  static char respBuf[192];
+  EXT_RAM_BSS_ATTR static char respBuf[192];
   CommandArgs a(argsInput);
   String path;
   if (requireQuotedPath(a, 0, path) != nullptr)
@@ -1011,7 +1096,7 @@ static AuthContext s_pendingFiledeleteCtx;  // captured by VALUE so it survives 
 // callback and the one-shot `filedelete <path> confirm` path. Returns a static
 // buffer (the dispatcher copies it before the next command runs).
 static const char* doFiledelete(const String& path, const AuthContext& ctx) {
-  static char respBuf[256];
+  EXT_RAM_BSS_ATTR static char respBuf[256];
 
   if (!filesystemReady) return "Error: LittleFS not ready";
 
@@ -1044,7 +1129,7 @@ static const char* filedelete_confirmed(void* /*userData*/) {
 
 static const char* filedelete_cancelled(void* /*userData*/) {
   // Static buffer so the response survives until the dispatcher reads it.
-  static char respBuf[160];
+  EXT_RAM_BSS_ATTR static char respBuf[160];
   snprintf(respBuf, sizeof(respBuf), "Cancelled. %s not deleted.",
            s_pendingFiledeletePath.c_str());
   return respBuf;
@@ -1184,7 +1269,7 @@ const CommandEntry filesystemCommands[] = {
   { "mkdir", "Create directory: \"<path>\"", true, cmd_mkdir, "Usage: mkdir \"<path>\"" },
   { "rmdir", "Remove directory: \"<path>\"", true, cmd_rmdir, "Usage: rmdir \"<path>\"" },
   { "filecreate", "Create file: \"<path>\"", true, cmd_filecreate, "Usage: filecreate \"<path>\"" },
-  { "fileview", "View file: \"<path>\"", true, cmd_fileview, "Usage: fileview \"<path>\"" },
+  { "fileview", "View file (paged): \"<path>\" [page]", true, cmd_fileview, "Usage: fileview \"<path>\" [page]  (pages are ~3.5KB, split at line boundaries)" },
   { "fileread", "Read file chunk as JSON: \"<path>\" [offset] [len] [b64|bin]", true, cmd_fileread,
     "fileread \"<path>\" [offset] [len] [b64|bin] - Chunked permission-guarded read (app/BLE).\n"
     "Returns {success,size,offset,len,eof,enc,data}; loop offset until eof.\n"
@@ -1207,9 +1292,12 @@ const size_t filesystemCommandsCount = sizeof(filesystemCommands) / sizeof(files
 // File Permissions — Table-Driven, Role-Aware
 // ============================================================================
 //
-// Three roles, three perm columns per rule:
-//   USER    — authenticated non-admin
+// Path rules expose three perm columns (user / admin / system). Effective
+// roles at check time:
+//   USER    — authenticated non-admin, non-guest
+//   GUEST   — authenticated guest; uses userPerms masked to PERM_READ
 //   ADMIN   — authenticated user where isAdminUser(ctx.user) == true
+//   SUPER   — superadmin / bond-admin (unrestricted; no column)
 //   SYSTEM  — internal trusted code (transport==SOURCE_INTERNAL && user=="system")
 //
 // Anonymous (empty ctx.user) callers are denied EVERYTHING regardless of
@@ -1289,8 +1377,12 @@ static const PathRule sPathRules[] = {
   // ---- General system paths: admin read-only; system full ----
   {"/system/",                          0,         PERM_READ,                                          PERM_ALL,  false, false},
 
-  // ---- Logging captures: admin can read + delete; system full ----
-  {"/logging_captures/",                0,         PERM_READ | PERM_DELETE,                            PERM_ALL,  false, false},
+  // ---- Logging captures: admin gets full run of the tree; system full ----
+  // This is user CAPTURE data, not system config: admins could already read and
+  // DELETE here but not CREATE, which is an incoherent gap — it is why
+  // GPSTrackManager::saveTrack has to impersonate system just to write a track,
+  // and why an admin could not hand-make a folder to drop a file into.
+  {"/logging_captures/",                0,         PERM_READ | PERM_WRITE | PERM_DELETE | PERM_RENAME | PERM_CREATE | PERM_IMPORT, PERM_ALL, false, false},
 
   // ---- ESP-NOW data: user can read+write+delete; admin same; system full ----
   {"/espnow/",                          PERM_READ | PERM_WRITE | PERM_DELETE,
@@ -1327,7 +1419,7 @@ static bool hasSensitiveExtension(const String& path) {
   lower.toLowerCase();
 
   // Block specific extensions (suffix match).
-  static const char* kBlockedSuffixes[] = {
+  static const char* const kBlockedSuffixes[] = {
     ".key",  ".pem",  ".crt",  ".cert",  ".cer",   // TLS / cryptographic material
     ".credentials",                                 // generic credential file
     ".bin",  ".hex",  ".elf",                       // firmware images / executables
@@ -1443,21 +1535,45 @@ String quotePath(const String& path) {
 
 // Forward decl from System_User.cpp.
 extern bool isAdminUser(const String& who);
+extern bool isGuestUser(const String& who);
 
-enum class FsRole : uint8_t { ANON, USER, ADMIN, SYSTEM };
+enum class FsRole : uint8_t { ANON, GUEST, USER, ADMIN, SUPER, SYSTEM };
+
+// SUPER and SYSTEM are the unrestricted roles: the path rules and the
+// extension/image guards below do not apply to them. Everything that used to
+// read "role is not SYSTEM" asks this instead, so the two stay in step.
+static inline bool isUnrestrictedRole(FsRole r) {
+  return r == FsRole::SYSTEM || r == FsRole::SUPER;
+}
 
 static FsRole resolveRole(const AuthContext& ctx) {
   if (ctx.user.length() == 0) return FsRole::ANON;
   if (ctx.transport == SOURCE_INTERNAL && ctx.user == "system") return FsRole::SYSTEM;
+  // Checked BEFORE isAdminUser: a superadmin also satisfies the admin predicate,
+  // so the order is what makes the tier distinguishable at all.
+  //
+  // Deliberate scope, chosen by the device owner: a superadmin has unrestricted
+  // filesystem access on EVERY transport. That includes over the air — the
+  // bonded ESP-NOW master resolves to super for the life of a valid bond
+  // session (see isSuperAdminUser), so a bond peer gets the same unrestricted
+  // read/write/delete across /system, certs, users and models that the local
+  // web UI does. Narrowing this to local transports means gating on
+  // ctx.transport here.
+  if (isSuperAdminUser(ctx.user)) return FsRole::SUPER;
   if (isAdminUser(ctx.user)) return FsRole::ADMIN;
+  // Guest shares the user path-rule column but is masked to PERM_READ in
+  // permsForRole — view-only surface, no separate PathRule column needed.
+  if (isGuestUser(ctx.user)) return FsRole::GUEST;
   return FsRole::USER;
 }
 
 static const char* roleName(FsRole r) {
   switch (r) {
     case FsRole::ANON:   return "anon";
+    case FsRole::GUEST:  return "guest";
     case FsRole::USER:   return "user";
     case FsRole::ADMIN:  return "admin";
+    case FsRole::SUPER:  return "super";
     case FsRole::SYSTEM: return "system";
   }
   return "?";
@@ -1466,8 +1582,14 @@ static const char* roleName(FsRole r) {
 static uint8_t permsForRole(const PathRule& rule, FsRole r) {
   switch (r) {
     case FsRole::ANON:   return 0;
+    case FsRole::GUEST:  return (uint8_t)(rule.userPerms & PERM_READ);
     case FsRole::USER:   return rule.userPerms;
     case FsRole::ADMIN:  return rule.adminPerms;
+    // Unrestricted by design: the path rules do not constrain super at all, so
+    // this ignores the matched rule rather than reading a column from it. There
+    // is deliberately no superPerms column — adding one would invite per-path
+    // exceptions to creep back in and make "free rein" quietly untrue.
+    case FsRole::SUPER:  return PERM_ALL;
     case FsRole::SYSTEM: return rule.systemPerms;
   }
   return 0;
@@ -1505,9 +1627,9 @@ static bool checkPerm(const String& path, const AuthContext& ctx,
   // and must not be caught by the blanket sensitive-extension guard.
   const PathRule& rule = lookupRule(path);
   bool sensitiveBlocked = sensitiveExtensionApplies && !rule.exemptSensitiveExt
-                          && hasSensitiveExtension(path) && role != FsRole::SYSTEM;
+                          && hasSensitiveExtension(path) && !isUnrestrictedRole(role);
   if (sensitiveBlocked) return false;
-  if (imageEditApplies && isImageFile(path) && role != FsRole::SYSTEM) return false;
+  if (imageEditApplies && isImageFile(path) && !isUnrestrictedRole(role)) return false;
   uint8_t granted = permsForRole(lookupRule(path), role);
   return (granted & needed) == needed;
 }
@@ -1567,12 +1689,12 @@ void logFsAccessDeny(const String& path, const AuthContext& ctx,
   const PathRule& rule = lookupRule(path);
   bool sensitiveApplies = (needed & (PERM_READ | PERM_WRITE)) != 0;
   bool imageEditApplies = (needed == PERM_WRITE);
-  if (sensitiveApplies && !rule.exemptSensitiveExt && hasSensitiveExtension(path) && role != FsRole::SYSTEM) {
+  if (sensitiveApplies && !rule.exemptSensitiveExt && hasSensitiveExtension(path) && !isUnrestrictedRole(role)) {
     DEBUG_STORAGEF("[PERM] DENY %s '%s' role=%s reason=sensitive-extension",
                    op, path.c_str(), roleName(role));
     return;
   }
-  if (imageEditApplies && isImageFile(path) && role != FsRole::SYSTEM) {
+  if (imageEditApplies && isImageFile(path) && !isUnrestrictedRole(role)) {
     DEBUG_STORAGEF("[PERM] DENY %s '%s' role=%s reason=image-not-editable",
                    op, path.c_str(), roleName(role));
     return;
@@ -1602,10 +1724,11 @@ uint8_t getPermissions(const String& path, const AuthContext& ctx) {
   //     unaffected — you can still delete a .key file you can't read.
   //   - isImageFile blocks PERM_WRITE only (used by canEdit). Reading,
   //     deleting, renaming an image stays allowed.
-  // SYSTEM identity is exempt from both — internal code can read certs etc.
+  // SYSTEM and SUPER are exempt from both — internal code can read certs, and a
+  // superadmin has unrestricted access by design (see resolveRole).
   // Paths with exemptSensitiveExt=true (e.g. /system/llm/, /system/certs/)
   // are also exempt — they intentionally contain .bin/.pem/etc. files.
-  if (role != FsRole::SYSTEM) {
+  if (!isUnrestrictedRole(role)) {
     if (!rule.exemptSensitiveExt && hasSensitiveExtension(path)) granted &= ~(PERM_READ | PERM_WRITE);
     if (isImageFile(path))                                        granted &= ~PERM_WRITE;
   }

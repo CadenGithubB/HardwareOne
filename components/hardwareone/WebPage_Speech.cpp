@@ -8,6 +8,9 @@
 #include "WebServer_Server.h"
 #include "WebServer_Utils.h"
 #include "System_User.h"
+#if ENABLE_ESP_SR
+#include "System_ESPSR.h"
+#endif
 
 static void streamSpeechContent(httpd_req_t* req, const String& username) {
   streamBeginHtml(req, "Speech", false, username, "speech");
@@ -23,14 +26,36 @@ esp_err_t handleSpeechPage(httpd_req_t* req) {
   return ESP_OK;
 }
 
+// GET /api/speech/status — same JSON as CLI `srstatus` (buildESPSRStatusJson).
+static esp_err_t handleSpeechStatus(httpd_req_t* req) {
+  WEB_AUTH_OR_RETURN(req, ctx);
+#if ENABLE_ESP_SR
+  String json;
+  buildESPSRStatusJson(json);
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_send(req, json.c_str(), json.length());
+#else
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_send(req, "{\"enabled\":false,\"running\":false}", HTTPD_RESP_USE_STRLEN);
+#endif
+  return ESP_OK;
+}
+
 void registerSpeechPageHandlers(httpd_handle_t server) {
-  static httpd_uri_t speechPage = { 
+  static const httpd_uri_t speechPage = { 
     .uri = "/speech", 
     .method = HTTP_GET, 
     .handler = handleSpeechPage, 
     .user_ctx = NULL 
   };
   httpd_register_uri_handler(server, &speechPage);
+  static const httpd_uri_t speechStatus = {
+    .uri = "/api/speech/status",
+    .method = HTTP_GET,
+    .handler = handleSpeechStatus,
+    .user_ctx = NULL
+  };
+  httpd_register_uri_handler(server, &speechStatus);
 }
 
 #endif // ENABLE_HTTP_SERVER

@@ -34,6 +34,14 @@
 // settings are loaded and applied (same set the pre-256-bit mask enabled as
 // its "lower 32 bits"). Sensor and feature sub-flags stay off for cleaner
 // output.
+//
+// Deliberately HAND-WRITTEN, not generated (C2 defaults audit): this mask is
+// a SECOND default policy, intentionally different from the registry's — 29
+// of these flags have registry intDefault 0, and the registry default is
+// what persists once applyRegisteredDefaults() runs. No per-row dflt column
+// could express both without inventing a bootDefault column nothing else
+// reads; one expression over the frozen DEBUG_* spellings is cheaper and
+// cannot drift structurally (an unknown symbol is a compile error).
 static constexpr DebugFlagMask kBootDefaultDebugFlags =
     DEBUG_AUTH | DEBUG_HTTP | DEBUG_SSE | DEBUG_CLI |
     DEBUG_CMD_FLOW | DEBUG_COMMAND_SYSTEM | DEBUG_USERS | DEBUG_SYSTEM |
@@ -525,13 +533,14 @@ void initDebugSystem() {
 
   // Create debug output task
   if (!gDebugOutputTaskHandle) {
-    BaseType_t result = xTaskCreate(
+    BaseType_t result = xTaskCreatePinnedToCore(
       debugOutputTask,
       "debug_out",
       DEBUG_OUT_STACK_WORDS,  // ~14KB stack — see System_TaskUtils.h for sizing rationale
       nullptr,
       TASK_PRIORITY_LOW,
-      &gDebugOutputTaskHandle
+      &gDebugOutputTaskHandle,
+      PRO_CORE  // serial/log I/O drain — belongs with the I/O sinks on Core 0
     );
     if (result != pdPASS) {
       if (gOutputFlags & MSG_ROUTE_SERIAL) {
@@ -657,8 +666,10 @@ void debugQueuePrintf(DebugFlagMask flag, const char* fmt, ...) {
   if (currentTask == gFmRadioTaskHandle && !gFmRadioEnabled) return;
 
   // Format into a stack line, then hand to the shared enqueue primitive
-  // (ISR-safe; centralizes slot grab / send / drop + [CUT]). DEBUG_*F is
-  // single-line, so it uses enqueueChunk directly rather than the split layer.
+  // (ISR-safe; centralizes slot grab / send / drop + [CUT]). There is no split
+  // layer — by design, see the note at the enqueueChunk call in
+  // broadcastOutputCore: callers prove their line fits 255 B and pack multiple
+  // lines with '\n' themselves. Nothing splits at runtime.
   char line[DEBUG_MSG_SIZE];
   va_list args;
   va_start(args, fmt);
@@ -1013,37 +1024,6 @@ void streamDebugFlush() {
 // Debug Command Handlers
 // ============================================================================
 
-const char* cmd_outdisplay(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  // Syntax:
-  //   outdisplay <0|1> [persist|temp]
-  //   outdisplay [persist|temp] <0|1>
-  CommandArgs ca(argsInput);
-  String t1 = ca.arg(0);
-  String t2 = ca.arg(1);
-  bool modeTemp = false;  // default persist
-  int v = -1;
-  if (t1.length() && (t1 == "temp" || t1 == "persist")) {
-    modeTemp = (t1 == "temp");
-    if (t2.length()) v = t2.toInt();
-  } else {
-    if (t1.length()) v = t1.toInt();
-    if (t2.length()) { modeTemp = (t2 == "temp"); }
-  }
-  if (v != 0) v = 1;
-  if (v < 0) return "Error: invalid arguments — Usage: outdisplay <0|1> [persist|temp]";
-  if (modeTemp) {
-    if (v) gOutputFlags |= MSG_ROUTE_OLED;
-    else gOutputFlags &= ~MSG_ROUTE_OLED;
-    return v ? "outDisplay (runtime) set to 1" : "outDisplay (runtime) set to 0";
-  } else {
-    setSetting(gSettings.outDisplay, (bool)(v != 0));
-    if (v) gOutputFlags |= MSG_ROUTE_OLED;
-    else gOutputFlags &= ~MSG_ROUTE_OLED;
-    return gSettings.outDisplay ? "outDisplay (persisted) set to 1" : "outDisplay (persisted) set to 0";
-  }
-}
-
 const char* cmd_outg2(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
@@ -1059,7 +1039,7 @@ const char* cmd_outg2(const String& argsInput) {
     // Show current status
     bool enabled = (gOutputFlags & MSG_ROUTE_G2) != 0;
     bool connected = isG2Connected();
-    static char buf[128];
+    EXT_RAM_BSS_ATTR static char buf[128];
     snprintf(buf, sizeof(buf), "G2 output: %s, G2 connected: %s",
              enabled ? "yes" : "no", connected ? "yes" : "no");
     return buf;
@@ -1090,7 +1070,7 @@ const char* cmd_outble(const String& argsInput) {
     bool enabled = (gOutputFlags & MSG_ROUTE_BLE) != 0;
     bool connected = isBLEConnected();
     bool authed = bleHasAuthenticatedSession();
-    static char buf[160];
+    EXT_RAM_BSS_ATTR static char buf[160];
     snprintf(buf, sizeof(buf), "BLE output: %s, BLE connected: %s, authenticated: %s",
              enabled ? "yes" : "no", connected ? "yes" : "no", authed ? "yes" : "no");
     return buf;
@@ -1107,15 +1087,6 @@ const char* cmd_outble(const String& argsInput) {
   #endif
 }
 
-// Forward decl: helper defined below. Used by parent-flag handlers (here) and
-// sub-flag handlers (further down).
-static const char* cmd_debugsubflag_impl(const String& argsInput, bool* settingPtr,
-                                         DebugFlagMask flagBit, const char* name);
-
-const char* cmd_debughttp(const String& a) {
-  return cmd_debugsubflag_impl(a, &gSettings.debugHttp, DEBUG_HTTP, "debugHttp");
-}
-
 // Set the ESP-IDF log level for the TLS/HTTPS framework tags. These emit a
 // flood of benign noise when a browser hits a self-signed cert (handshake
 // rejects, connection resets, per-chunk write errors) — much of it at ERROR
@@ -1129,225 +1100,6 @@ void applyHttpsLogLevels(bool verbose) {
   esp_log_level_set("httpd_txrx", lvl);
 }
 
-const char* cmd_debughttps(const String& a) {
-  const char* r = cmd_debugsubflag_impl(a, &gSettings.debugHttps, DEBUG_HTTPS, "debugHttps");
-  // Skip the side effect during the CLI validation pass (cmd_debugsubflag_impl
-  // returns "VALID" without mutating state when gCLIValidateOnly is set).
-  extern bool gCLIValidateOnly;
-  if (!gCLIValidateOnly) applyHttpsLogLevels(isDebugFlagSet(DEBUG_HTTPS));
-  return r;
-}
-
-const char* cmd_debugsse(const String& a) {
-  return cmd_debugsubflag_impl(a, &gSettings.debugSse, DEBUG_SSE, "debugSse");
-}
-
-const char* cmd_debugcli(const String& a) {
-  return cmd_debugsubflag_impl(a, &gSettings.debugCli, DEBUG_CLI, "debugCli");
-}
-
-// Generic single-flag handler shared by parent and sub-flag debug commands.
-// Toggles the bool setting + the bit, optional persist/temp mode. Sub-flag
-// handlers pass child DEBUG_* bits; parent handlers pass parent DEBUG_*.
-// Does NOT aggregate to a parent flag -- granular sub-toggles let users
-// light up "Capture only" without dragging in unrelated noise. The
-// DEBUG_<feature>_*F macros gate on `DEBUG_<parent> | DEBUG_<sub>`, so
-// the parent toggle still acts as a master switch when desired.
-static const char* cmd_debugsubflag_impl(const String& argsInput, bool* settingPtr,
-                                         DebugFlagMask flagBit, const char* name) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  static char buf[96];
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  if (modeTemp) {
-    if (v) setDebugFlag(flagBit);
-    else clearDebugFlag(flagBit);
-    snprintf(buf, sizeof(buf), "%s %s (runtime only)", name, v ? "enabled" : "disabled");
-    return buf;
-  }
-  setDebugSetting(*settingPtr, (bool)(v != 0));
-  if (v) setDebugFlag(flagBit);
-  else clearDebugFlag(flagBit);
-  snprintf(buf, sizeof(buf), "%s %s (persistent)", name, *settingPtr ? "enabled" : "disabled");
-  return buf;
-}
-
-const char* cmd_debugcamera(const String& a) {
-  return cmd_debugsubflag_impl(a, &gSettings.debugCamera, DEBUG_CAMERA, "debugCamera");
-}
-
-const char* cmd_debugcameralifecycle(const String& a) {
-  return cmd_debugsubflag_impl(a, &gSettings.debugCameraLifecycle, DEBUG_CAMERA_LIFECYCLE, "debugCameraLifecycle");
-}
-const char* cmd_debugcameracapture(const String& a) {
-  return cmd_debugsubflag_impl(a, &gSettings.debugCameraCapture, DEBUG_CAMERA_CAPTURE, "debugCameraCapture");
-}
-const char* cmd_debugcamerasettings(const String& a) {
-  return cmd_debugsubflag_impl(a, &gSettings.debugCameraSettings, DEBUG_CAMERA_SETTINGS, "debugCameraSettings");
-}
-const char* cmd_debugcameravideo(const String& a) {
-  return cmd_debugsubflag_impl(a, &gSettings.debugCameraVideo, DEBUG_CAMERA_VIDEO, "debugCameraVideo");
-}
-
-const char* cmd_debugmqtt(const String& a) {
-  return cmd_debugsubflag_impl(a, &gSettings.debugMqtt, DEBUG_MQTT, "debugMqtt");
-}
-const char* cmd_debugmqttconnection(const String& a) {
-  return cmd_debugsubflag_impl(a, &gSettings.debugMqttConnection, DEBUG_MQTT_CONNECTION, "debugMqttConnection");
-}
-const char* cmd_debugmqttpubsub(const String& a) {
-  return cmd_debugsubflag_impl(a, &gSettings.debugMqttPubsub, DEBUG_MQTT_PUBSUB, "debugMqttPubsub");
-}
-const char* cmd_debugmqttdiscovery(const String& a) {
-  return cmd_debugsubflag_impl(a, &gSettings.debugMqttDiscovery, DEBUG_MQTT_DISCOVERY, "debugMqttDiscovery");
-}
-const char* cmd_debugmqttcommands(const String& a) {
-  return cmd_debugsubflag_impl(a, &gSettings.debugMqttCommands, DEBUG_MQTT_COMMANDS, "debugMqttCommands");
-}
-
-const char* cmd_debugdisplay(const String& a) {
-  return cmd_debugsubflag_impl(a, &gSettings.debugDisplay, DEBUG_DISPLAY, "debugDisplay");
-}
-
-const char* cmd_debugnotifications(const String& a) {
-  return cmd_debugsubflag_impl(a, &gSettings.debugNotifications, DEBUG_NOTIFICATIONS, "debugNotifications");
-}
-
-const char* cmd_debugmicrophone(const String& a) {
-  return cmd_debugsubflag_impl(a, &gSettings.debugMicrophone, DEBUG_MICROPHONE, "debugMicrophone");
-}
-
-const char* cmd_debugi2c(const String& a) {
-  return cmd_debugsubflag_impl(a, &gSettings.debugI2C, DEBUG_I2C, "debugI2C");
-}
-
-const char* cmd_debugi2cbus(const String& a) {
-  return cmd_debugsubflag_impl(a, &gSettings.debugI2CBus, DEBUG_I2C_BUS, "debugI2CBus");
-}
-const char* cmd_debugi2cdiscovery(const String& a) {
-  return cmd_debugsubflag_impl(a, &gSettings.debugI2CDiscovery, DEBUG_I2C_DISCOVERY, "debugI2CDiscovery");
-}
-const char* cmd_debugi2cautostart(const String& a) {
-  return cmd_debugsubflag_impl(a, &gSettings.debugI2CAutoStart, DEBUG_I2C_AUTOSTART, "debugI2CAutoStart");
-}
-
-const char* cmd_debugwifi(const String& a) {
-  return cmd_debugsubflag_impl(a, &gSettings.debugWifi, DEBUG_WIFI, "debugWifi");
-}
-
-const char* cmd_debugstorage(const String& a) {
-  return cmd_debugsubflag_impl(a, &gSettings.debugStorage, DEBUG_STORAGE, "debugStorage");
-}
-
-const char* cmd_debuglogger(const String& a) {
-  return cmd_debugsubflag_impl(a, &gSettings.debugLogger, DEBUG_LOGGER, "debugLogger");
-}
-
-const char* cmd_debugautomations(const String& a) {
-  return cmd_debugsubflag_impl(a, &gSettings.debugAutomations, DEBUG_AUTOMATIONS, "debugAutomations");
-}
-
-const char* cmd_debugperformance(const String& a) {
-  return cmd_debugsubflag_impl(a, &gSettings.debugPerformance, DEBUG_PERFORMANCE, "debugPerformance");
-}
-
-const char* cmd_debugauth(const String& a) {
-  return cmd_debugsubflag_impl(a, &gSettings.debugAuth, DEBUG_AUTH, "debugAuth");
-}
-
-const char* cmd_debugespnow(const String& a) {
-  return cmd_debugsubflag_impl(a, &gSettings.debugEspNow, DEBUG_ESPNOW_CORE, "debugEspNow");
-}
-
-static void syncBluetoothParentFlag() {
-  const DebugFlagMask runtime = getDebugFlags();
-  const bool runtimeChild = (runtime & (DEBUG_BLUETOOTH_CORE | DEBUG_BLUETOOTH_GATT | DEBUG_BLUETOOTH_DATA)) != (DebugFlagMask)0;
-  const bool any = gSettings.debugBluetooth ||
-                   gSettings.debugBluetoothCore ||
-                   gSettings.debugBluetoothGatt ||
-                   gSettings.debugBluetoothData ||
-                   runtimeChild;
-  updateParentDebugFlag(DEBUG_BLUETOOTH, any);
-}
-
-const char* cmd_debugbluetooth(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  if (v != 0 && v != 1) return "Error: invalid arguments — Usage: debugbluetooth <0|1> [temp|runtime]";
-  if (!modeTemp) setDebugSetting(gSettings.debugBluetooth, (bool)(v == 1));
-  if (v) setDebugFlag(DEBUG_BLUETOOTH);
-  else clearDebugFlag(DEBUG_BLUETOOTH);
-  syncBluetoothParentFlag();
-  if (modeTemp) return v ? "debugBluetooth enabled (runtime only)" : "debugBluetooth disabled (runtime only)";
-  return gSettings.debugBluetooth ? "debugBluetooth enabled (persistent)" : "debugBluetooth disabled (persistent)";
-}
-
-const char* cmd_debugbluetoothcore(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  if (v != 0 && v != 1) return "Error: invalid arguments — Usage: debugbluetoothcore <0|1> [temp|runtime]";
-  if (!modeTemp) setDebugSetting(gSettings.debugBluetoothCore, (bool)(v == 1));
-  if (v) setDebugFlag(DEBUG_BLUETOOTH_CORE);
-  else clearDebugFlag(DEBUG_BLUETOOTH_CORE);
-  syncBluetoothParentFlag();
-  if (modeTemp) return v ? "debugBluetoothCore enabled (runtime only)" : "debugBluetoothCore disabled (runtime only)";
-  return gSettings.debugBluetoothCore ? "debugBluetoothCore enabled (persistent)" : "debugBluetoothCore disabled (persistent)";
-}
-
-const char* cmd_debugbluetoothgatt(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  if (v != 0 && v != 1) return "Error: invalid arguments — Usage: debugbluetoothgatt <0|1> [temp|runtime]";
-  if (!modeTemp) setDebugSetting(gSettings.debugBluetoothGatt, (bool)(v == 1));
-  if (v) setDebugFlag(DEBUG_BLUETOOTH_GATT);
-  else clearDebugFlag(DEBUG_BLUETOOTH_GATT);
-  syncBluetoothParentFlag();
-  if (modeTemp) return v ? "debugBluetoothGatt enabled (runtime only)" : "debugBluetoothGatt disabled (runtime only)";
-  return gSettings.debugBluetoothGatt ? "debugBluetoothGatt enabled (persistent)" : "debugBluetoothGatt disabled (persistent)";
-}
-
-const char* cmd_debugbluetoothdata(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  if (v != 0 && v != 1) return "Error: invalid arguments — Usage: debugbluetoothdata <0|1> [temp|runtime]";
-  if (!modeTemp) setDebugSetting(gSettings.debugBluetoothData, (bool)(v == 1));
-  if (v) setDebugFlag(DEBUG_BLUETOOTH_DATA);
-  else clearDebugFlag(DEBUG_BLUETOOTH_DATA);
-  syncBluetoothParentFlag();
-  if (modeTemp) return v ? "debugBluetoothData enabled (runtime only)" : "debugBluetoothData disabled (runtime only)";
-  return gSettings.debugBluetoothData ? "debugBluetoothData enabled (persistent)" : "debugBluetoothData disabled (persistent)";
-}
-
-const char* cmd_debugdatetime(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  if (modeTemp) {
-    if (v) setDebugFlag(DEBUG_NTP); else clearDebugFlag(DEBUG_NTP);
-    return v ? "debugDateTime enabled (runtime only)" : "debugDateTime disabled (runtime only)";
-  } else {
-    setDebugSetting(gSettings.debugDateTime, (bool)(v != 0));
-    if (v) setDebugFlag(DEBUG_NTP); else clearDebugFlag(DEBUG_NTP);
-    return gSettings.debugDateTime ? "debugDateTime enabled (persistent)" : "debugDateTime disabled (persistent)";
-  }
-}
-
 const char* cmd_debugverbose(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   CommandArgs ca(argsInput);
@@ -1358,27 +1110,6 @@ const char* cmd_debugverbose(const String& argsInput) {
   return gDebugVerbose ? "debugVerbose enabled" : "debugVerbose disabled";
 }
 
-const char* cmd_debugcommandsystem(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  if (v != 0 && v != 1) {
-    return "Error: invalid arguments — Usage: debugcommandsystem <0|1> [temp|runtime]";
-  }
-  if (!modeTemp) {
-    setDebugSetting(gSettings.debugCommandSystem, (bool)(v != 0));
-  }
-  if (v) setDebugFlag(DEBUG_COMMAND_SYSTEM);
-  else clearDebugFlag(DEBUG_COMMAND_SYSTEM);
-  if (modeTemp) {
-    return v ? "debugCommandSystem enabled (runtime only)" : "debugCommandSystem disabled (runtime only)";
-  } else {
-    return gSettings.debugCommandSystem ? "debugCommandSystem enabled (persistent)" : "debugCommandSystem disabled (persistent)";
-  }
-}
-
 const char* cmd_webconsole(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String valStr = argsInput;
@@ -1386,303 +1117,6 @@ const char* cmd_webconsole(const String& argsInput) {
   int v = valStr.toInt();
   setDebugSetting(gSettings.webConsoleDebug, (bool)(v != 0));
   return gSettings.webConsoleDebug ? "webConsole enabled (persistent)" : "webConsole disabled (persistent)";
-}
-
-// Individual I2C sensor debug command handlers
-const char* cmd_debuggps(const String& a) {
-  return cmd_debugsubflag_impl(a, &gSettings.debugGps, DEBUG_GPS, "debugGps");
-}
-
-const char* cmd_debugrtc(const String& a) {
-  return cmd_debugsubflag_impl(a, &gSettings.debugRtc, DEBUG_RTC, "debugRtc");
-}
-
-const char* cmd_debugimu(const String& a) {
-  return cmd_debugsubflag_impl(a, &gSettings.debugImu, DEBUG_IMU, "debugImu");
-}
-
-const char* cmd_debugthermal(const String& a) {
-  return cmd_debugsubflag_impl(a, &gSettings.debugThermal, DEBUG_THERMAL, "debugThermal");
-}
-
-const char* cmd_debugtof(const String& a) {
-  return cmd_debugsubflag_impl(a, &gSettings.debugTof, DEBUG_TOF, "debugTof");
-}
-
-const char* cmd_debuginput(const String& a) {
-  return cmd_debugsubflag_impl(a, &gSettings.debugInput, DEBUG_INPUT, "debugInput");
-}
-
-const char* cmd_debuganoencoder(const String& a) {
-  return cmd_debugsubflag_impl(a, &gSettings.debugAnoEncoder, DEBUG_ANO_ENCODER, "debugAnoEncoder");
-}
-
-const char* cmd_debugapds(const String& a) {
-  return cmd_debugsubflag_impl(a, &gSettings.debugApds, DEBUG_APDS, "debugApds");
-}
-
-const char* cmd_debugpresence(const String& a) {
-  return cmd_debugsubflag_impl(a, &gSettings.debugPresence, DEBUG_PRESENCE, "debugPresence");
-}
-
-// Per-sensor sub-flag handlers (Lifecycle / Polling / Values).
-// All use the shared cmd_debugsubflag_impl helper.
-const char* cmd_debugthermallifecycle(const String& a)  { return cmd_debugsubflag_impl(a, &gSettings.debugThermalLifecycle,  DEBUG_THERMAL_LIFECYCLE,  "debugThermalLifecycle"); }
-const char* cmd_debugthermalpolling(const String& a)    { return cmd_debugsubflag_impl(a, &gSettings.debugThermalPolling,    DEBUG_THERMAL_POLLING,    "debugThermalPolling"); }
-const char* cmd_debugthermalvalues(const String& a)     { return cmd_debugsubflag_impl(a, &gSettings.debugThermalValues,     DEBUG_THERMAL_VALUES,     "debugThermalValues"); }
-const char* cmd_debugtoflifecycle(const String& a)      { return cmd_debugsubflag_impl(a, &gSettings.debugTofLifecycle,      DEBUG_TOF_LIFECYCLE,      "debugTofLifecycle"); }
-const char* cmd_debugtofpolling(const String& a)        { return cmd_debugsubflag_impl(a, &gSettings.debugTofPolling,        DEBUG_TOF_POLLING,        "debugTofPolling"); }
-const char* cmd_debugtofvalues(const String& a)         { return cmd_debugsubflag_impl(a, &gSettings.debugTofValues,         DEBUG_TOF_VALUES,         "debugTofValues"); }
-const char* cmd_debuginputlifecycle(const String& a)  { return cmd_debugsubflag_impl(a, &gSettings.debugInputLifecycle,  DEBUG_INPUT_LIFECYCLE,  "debugInputLifecycle"); }
-const char* cmd_debuginputpolling(const String& a)    { return cmd_debugsubflag_impl(a, &gSettings.debugInputPolling,    DEBUG_INPUT_POLLING,    "debugInputPolling"); }
-const char* cmd_debuginputvalues(const String& a)     { return cmd_debugsubflag_impl(a, &gSettings.debugInputValues,     DEBUG_INPUT_VALUES,     "debugInputValues"); }
-const char* cmd_debuganoencoderlifecycle(const String& a) { return cmd_debugsubflag_impl(a, &gSettings.debugAnoEncoderLifecycle, DEBUG_ANO_ENCODER_LIFECYCLE, "debugAnoEncoderLifecycle"); }
-const char* cmd_debuganoencoderpolling(const String& a)   { return cmd_debugsubflag_impl(a, &gSettings.debugAnoEncoderPolling,   DEBUG_ANO_ENCODER_POLLING,   "debugAnoEncoderPolling"); }
-const char* cmd_debuganoencodervalues(const String& a)    { return cmd_debugsubflag_impl(a, &gSettings.debugAnoEncoderValues,    DEBUG_ANO_ENCODER_VALUES,    "debugAnoEncoderValues"); }
-const char* cmd_debugimulifecycle(const String& a)      { return cmd_debugsubflag_impl(a, &gSettings.debugImuLifecycle,      DEBUG_IMU_LIFECYCLE,      "debugImuLifecycle"); }
-const char* cmd_debugimupolling(const String& a)        { return cmd_debugsubflag_impl(a, &gSettings.debugImuPolling,        DEBUG_IMU_POLLING,        "debugImuPolling"); }
-const char* cmd_debugimuvalues(const String& a)         { return cmd_debugsubflag_impl(a, &gSettings.debugImuValues,         DEBUG_IMU_VALUES,         "debugImuValues"); }
-const char* cmd_debugapdslifecycle(const String& a)     { return cmd_debugsubflag_impl(a, &gSettings.debugApdsLifecycle,     DEBUG_APDS_LIFECYCLE,     "debugApdsLifecycle"); }
-const char* cmd_debugapdspolling(const String& a)       { return cmd_debugsubflag_impl(a, &gSettings.debugApdsPolling,       DEBUG_APDS_POLLING,       "debugApdsPolling"); }
-const char* cmd_debugapdsvalues(const String& a)        { return cmd_debugsubflag_impl(a, &gSettings.debugApdsValues,        DEBUG_APDS_VALUES,        "debugApdsValues"); }
-const char* cmd_debuggpslifecycle(const String& a)      { return cmd_debugsubflag_impl(a, &gSettings.debugGpsLifecycle,      DEBUG_GPS_LIFECYCLE,      "debugGpsLifecycle"); }
-const char* cmd_debuggpspolling(const String& a)        { return cmd_debugsubflag_impl(a, &gSettings.debugGpsPolling,        DEBUG_GPS_POLLING,        "debugGpsPolling"); }
-const char* cmd_debuggpsvalues(const String& a)         { return cmd_debugsubflag_impl(a, &gSettings.debugGpsValues,         DEBUG_GPS_VALUES,         "debugGpsValues"); }
-const char* cmd_debugrtclifecycle(const String& a)      { return cmd_debugsubflag_impl(a, &gSettings.debugRtcLifecycle,      DEBUG_RTC_LIFECYCLE,      "debugRtcLifecycle"); }
-const char* cmd_debugrtcpolling(const String& a)        { return cmd_debugsubflag_impl(a, &gSettings.debugRtcPolling,        DEBUG_RTC_POLLING,        "debugRtcPolling"); }
-const char* cmd_debugrtcvalues(const String& a)         { return cmd_debugsubflag_impl(a, &gSettings.debugRtcValues,         DEBUG_RTC_VALUES,         "debugRtcValues"); }
-const char* cmd_debugfmradiolifecycle(const String& a)  { return cmd_debugsubflag_impl(a, &gSettings.debugFmRadioLifecycle,  DEBUG_FMRADIO_LIFECYCLE,  "debugFmRadioLifecycle"); }
-const char* cmd_debugfmradiopolling(const String& a)    { return cmd_debugsubflag_impl(a, &gSettings.debugFmRadioPolling,    DEBUG_FMRADIO_POLLING,    "debugFmRadioPolling"); }
-const char* cmd_debugfmradiovalues(const String& a)     { return cmd_debugsubflag_impl(a, &gSettings.debugFmRadioValues,     DEBUG_FMRADIO_VALUES,     "debugFmRadioValues"); }
-const char* cmd_debugmiclifecycle(const String& a)      { return cmd_debugsubflag_impl(a, &gSettings.debugMicLifecycle,      DEBUG_MIC_LIFECYCLE,      "debugMicLifecycle"); }
-const char* cmd_debugmicpolling(const String& a)        { return cmd_debugsubflag_impl(a, &gSettings.debugMicPolling,        DEBUG_MIC_POLLING,        "debugMicPolling"); }
-const char* cmd_debugmicvalues(const String& a)         { return cmd_debugsubflag_impl(a, &gSettings.debugMicValues,         DEBUG_MIC_VALUES,         "debugMicValues"); }
-const char* cmd_debugpresencelifecycle(const String& a) { return cmd_debugsubflag_impl(a, &gSettings.debugPresenceLifecycle, DEBUG_PRESENCE_LIFECYCLE, "debugPresenceLifecycle"); }
-const char* cmd_debugpresencepolling(const String& a)   { return cmd_debugsubflag_impl(a, &gSettings.debugPresencePolling,   DEBUG_PRESENCE_POLLING,   "debugPresencePolling"); }
-const char* cmd_debugpresencevalues(const String& a)    { return cmd_debugsubflag_impl(a, &gSettings.debugPresenceValues,    DEBUG_PRESENCE_VALUES,    "debugPresenceValues"); }
-
-const char* cmd_debugmaps(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  if (modeTemp) {
-    if (v) setDebugFlag(DEBUG_MAPS); else clearDebugFlag(DEBUG_MAPS);
-    return v ? "debugMaps enabled (runtime only)" : "debugMaps disabled (runtime only)";
-  } else {
-    setDebugSetting(gSettings.debugMaps, (bool)(v != 0));
-    if (v) setDebugFlag(DEBUG_MAPS); else clearDebugFlag(DEBUG_MAPS);
-    return gSettings.debugMaps ? "debugMaps enabled (persistent)" : "debugMaps disabled (persistent)";
-  }
-}
-
-const char* cmd_debugmapsloading(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  if (modeTemp) {
-    if (v) setDebugFlag(DEBUG_MAPS_LOADING); else clearDebugFlag(DEBUG_MAPS_LOADING);
-    return v ? "debugMapsLoading enabled (runtime only)" : "debugMapsLoading disabled (runtime only)";
-  } else {
-    setDebugSetting(gSettings.debugMapsLoading, (bool)(v != 0));
-    if (v) setDebugFlag(DEBUG_MAPS_LOADING); else clearDebugFlag(DEBUG_MAPS_LOADING);
-    return gSettings.debugMapsLoading ? "debugMapsLoading enabled (persistent)" : "debugMapsLoading disabled (persistent)";
-  }
-}
-
-const char* cmd_debugmapsrendering(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  if (modeTemp) {
-    if (v) setDebugFlag(DEBUG_MAPS_RENDERING); else clearDebugFlag(DEBUG_MAPS_RENDERING);
-    return v ? "debugMapsRendering enabled (runtime only)" : "debugMapsRendering disabled (runtime only)";
-  } else {
-    setDebugSetting(gSettings.debugMapsRendering, (bool)(v != 0));
-    if (v) setDebugFlag(DEBUG_MAPS_RENDERING); else clearDebugFlag(DEBUG_MAPS_RENDERING);
-    return gSettings.debugMapsRendering ? "debugMapsRendering enabled (persistent)" : "debugMapsRendering disabled (persistent)";
-  }
-}
-
-const char* cmd_debugmapsperf(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  if (modeTemp) {
-    if (v) setDebugFlag(DEBUG_MAPS_PERF); else clearDebugFlag(DEBUG_MAPS_PERF);
-    return v ? "debugMapsPerf enabled (runtime only)" : "debugMapsPerf disabled (runtime only)";
-  } else {
-    setDebugSetting(gSettings.debugMapsPerf, (bool)(v != 0));
-    if (v) setDebugFlag(DEBUG_MAPS_PERF); else clearDebugFlag(DEBUG_MAPS_PERF);
-    return gSettings.debugMapsPerf ? "debugMapsPerf enabled (persistent)" : "debugMapsPerf disabled (persistent)";
-  }
-}
-
-#if ENABLE_ONDEVICE_LLM
-static inline void syncLlmParent() {
-  updateParentDebugFlag(DEBUG_LLM,
-                        gSettings.debugLlm ||
-                        gSettings.debugLlmLoad ||
-                        gSettings.debugLlmTokenizer ||
-                        gSettings.debugLlmForward ||
-                        gSettings.debugLlmGenerate ||
-                        gSettings.debugLlmMemory);
-}
-
-static const char* cmd_debugllm_impl(const String& argsInput, bool* settingPtr, DebugFlagMask flagBit, const char* name) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  static char buf[96];
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  if (modeTemp) {
-    if (v) setDebugFlag(flagBit);
-    else clearDebugFlag(flagBit);
-    snprintf(buf, sizeof(buf), "%s %s (runtime only)", name, v ? "enabled" : "disabled");
-    return buf;
-  }
-  setDebugSetting(*settingPtr, (bool)(v != 0));
-  if (v) setDebugFlag(flagBit);
-  else clearDebugFlag(flagBit);
-  syncLlmParent();
-  snprintf(buf, sizeof(buf), "%s %s (persistent)", name, *settingPtr ? "enabled" : "disabled");
-  return buf;
-}
-
-const char* cmd_debugllm(const String& argsInput) {
-  return cmd_debugllm_impl(argsInput, &gSettings.debugLlm, DEBUG_LLM, "debugLlm");
-}
-const char* cmd_debugllmload(const String& argsInput) {
-  return cmd_debugllm_impl(argsInput, &gSettings.debugLlmLoad, DEBUG_LLM_LOAD, "debugLlmLoad");
-}
-const char* cmd_debugllmtokenizer(const String& argsInput) {
-  return cmd_debugllm_impl(argsInput, &gSettings.debugLlmTokenizer, DEBUG_LLM_TOKENIZER, "debugLlmTokenizer");
-}
-const char* cmd_debugllmforward(const String& argsInput) {
-  return cmd_debugllm_impl(argsInput, &gSettings.debugLlmForward, DEBUG_LLM_FORWARD, "debugLlmForward");
-}
-const char* cmd_debugllmgenerate(const String& argsInput) {
-  return cmd_debugllm_impl(argsInput, &gSettings.debugLlmGenerate, DEBUG_LLM_GENERATE, "debugLlmGenerate");
-}
-const char* cmd_debugllmmemory(const String& argsInput) {
-  return cmd_debugllm_impl(argsInput, &gSettings.debugLlmMemory, DEBUG_LLM_MEMORY, "debugLlmMemory");
-}
-#endif
-
-const char* cmd_debugfmradio(const String& a) {
-  return cmd_debugsubflag_impl(a, &gSettings.debugFmRadio, DEBUG_FMRADIO, "debugFmRadio");
-}
-
-#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
-const char* cmd_debugg2(const String& a) {
-  return cmd_debugsubflag_impl(a, &gSettings.debugG2, DEBUG_G2, "debugG2");
-}
-
-const char* cmd_debugg2lifecycle(const String& a) {
-  return cmd_debugsubflag_impl(a, &gSettings.debugG2Lifecycle, DEBUG_G2_LIFECYCLE, "debugG2Lifecycle");
-}
-const char* cmd_debugg2protocol(const String& a) {
-  return cmd_debugsubflag_impl(a, &gSettings.debugG2Protocol, DEBUG_G2_PROTOCOL, "debugG2Protocol");
-}
-const char* cmd_debugg2events(const String& a) {
-  return cmd_debugsubflag_impl(a, &gSettings.debugG2Events, DEBUG_G2_EVENTS, "debugG2Events");
-}
-const char* cmd_debugg2pages(const String& a) {
-  return cmd_debugsubflag_impl(a, &gSettings.debugG2Pages, DEBUG_G2_PAGES, "debugG2Pages");
-}
-const char* cmd_debugg2heartbeat(const String& a) {
-  return cmd_debugsubflag_impl(a, &gSettings.debugG2Heartbeat, DEBUG_G2_HEARTBEAT, "debugG2Heartbeat");
-}
-const char* cmd_debugg2dump(const String& a) {
-  return cmd_debugsubflag_impl(a, &gSettings.debugG2Dump, DEBUG_G2_DUMP, "debugG2Dump");
-}
-#endif
-
-// ESP-SR debug handlers. Parent (debugSr) is the explicit master switch.
-// Sub-flags are independent — they don't aggregate up. Old log sites that
-// check gSrDebugLevel still work because srSyncDebugLevel() derives that
-// integer from these bools after every change.
-const char* cmd_debugsr(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  if (modeTemp) {
-    if (v) setDebugFlag(DEBUG_SR);
-    else clearDebugFlag(DEBUG_SR);
-#if ENABLE_ESP_SR
-    // Runtime-only path: temporarily flip gSettings just long enough for the
-    // sync to see it, then restore. Cheaper than a parallel "effective" mask.
-    bool prev = gSettings.debugSr;
-    gSettings.debugSr = (v != 0);
-    srSyncDebugLevel();
-    gSettings.debugSr = prev;
-#endif
-    return v ? "debugSr enabled (runtime only)" : "debugSr disabled (runtime only)";
-  } else {
-    setDebugSetting(gSettings.debugSr, (bool)(v != 0));
-    if (v) setDebugFlag(DEBUG_SR);
-    else clearDebugFlag(DEBUG_SR);
-#if ENABLE_ESP_SR
-    srSyncDebugLevel();
-#endif
-    return gSettings.debugSr ? "debugSr enabled (persistent)" : "debugSr disabled (persistent)";
-  }
-}
-
-static const char* cmd_debugsrsub_impl(const String& argsInput, bool* settingPtr,
-                                        DebugFlagMask flagBit, const char* name) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  static char buf[96];
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  if (modeTemp) {
-    if (v) setDebugFlag(flagBit);
-    else clearDebugFlag(flagBit);
-#if ENABLE_ESP_SR
-    bool prev = *settingPtr;
-    *settingPtr = (v != 0);
-    srSyncDebugLevel();
-    *settingPtr = prev;
-#endif
-    snprintf(buf, sizeof(buf), "%s %s (runtime only)", name, v ? "enabled" : "disabled");
-    return buf;
-  }
-  setDebugSetting(*settingPtr, (bool)(v != 0));
-  if (v) setDebugFlag(flagBit);
-  else clearDebugFlag(flagBit);
-#if ENABLE_ESP_SR
-  srSyncDebugLevel();
-#endif
-  snprintf(buf, sizeof(buf), "%s %s (persistent)", name, *settingPtr ? "enabled" : "disabled");
-  return buf;
-}
-
-const char* cmd_debugsrwake(const String& a) {
-  return cmd_debugsrsub_impl(a, &gSettings.debugSrWake, DEBUG_SR_WAKE, "debugSrWake");
-}
-const char* cmd_debugsrcommand(const String& a) {
-  return cmd_debugsrsub_impl(a, &gSettings.debugSrCommand, DEBUG_SR_COMMAND, "debugSrCommand");
-}
-const char* cmd_debugsrafe(const String& a) {
-  return cmd_debugsrsub_impl(a, &gSettings.debugSrAfe, DEBUG_SR_AFE, "debugSrAfe");
-}
-const char* cmd_debugsrlifecycle(const String& a) {
-  return cmd_debugsrsub_impl(a, &gSettings.debugSrLifecycle, DEBUG_SR_LIFECYCLE, "debugSrLifecycle");
-}
-const char* cmd_debugsrtuning(const String& a) {
-  return cmd_debugsrsub_impl(a, &gSettings.debugSrTuning, DEBUG_SR_TUNING, "debugSrTuning");
 }
 
 const char* cmd_memorysampleintervalsec(const String& argsInput) {
@@ -1736,116 +1170,47 @@ const char* cmd_debugbuffer(const String& argsInput) {
   return "OK";
 }
 
-const char* cmd_debugcommandflow(const String& argsInput) {
+const char* cmd_debugflags(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  if (modeTemp) {
-    if (v) setDebugFlag(DEBUG_CMD_FLOW); else clearDebugFlag(DEBUG_CMD_FLOW);
-    return v ? "debugCommandFlow enabled (runtime only)" : "debugCommandFlow disabled (runtime only)";
-  } else {
-    setDebugSetting(gSettings.debugCommandFlow, (bool)(v == 1));
-    if (v) setDebugFlag(DEBUG_CMD_FLOW); else clearDebugFlag(DEBUG_CMD_FLOW);
-    return gSettings.debugCommandFlow ? "debugCommandFlow enabled (persistent)" : "debugCommandFlow disabled (persistent)";
-  }
-}
+  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
 
-const char* cmd_debugusers(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  if (modeTemp) {
-    if (v) setDebugFlag(DEBUG_USERS); else clearDebugFlag(DEBUG_USERS);
-    return v ? "debugUsers enabled (runtime only)" : "debugUsers disabled (runtime only)";
-  } else {
-    setDebugSetting(gSettings.debugUsers, (bool)(v == 1));
-    if (v) setDebugFlag(DEBUG_USERS); else clearDebugFlag(DEBUG_USERS);
-    return gSettings.debugUsers ? "debugUsers enabled (persistent)" : "debugUsers disabled (persistent)";
+  // gDebugVerbose short-circuits every gate (see isDebugFlagSet), so the mask
+  // below does not describe what is actually emitting while it is on.
+  if (gDebugVerbose) {
+    BROADCAST_PRINTF("debugVerbose: ON — all debug output is forced regardless of the mask below");
   }
-}
 
-const char* cmd_debugsystem(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  if (modeTemp) {
-    if (v) setDebugFlag(DEBUG_SYSTEM); else clearDebugFlag(DEBUG_SYSTEM);
-    return v ? "debugSystem enabled (runtime only)" : "debugSystem disabled (runtime only)";
-  } else {
-    setDebugSetting(gSettings.debugSystem, (bool)(v == 1));
-    if (v) setDebugFlag(DEBUG_SYSTEM); else clearDebugFlag(DEBUG_SYSTEM);
-    return gSettings.debugSystem ? "debugSystem enabled (persistent)" : "debugSystem disabled (persistent)";
-  }
-}
+  const DebugFlagMask flags = getDebugFlags();
+  BROADCAST_PRINTF("Debug flags: 0x%016llX:%016llX:%016llX:%016llX",
+                   (unsigned long long)(uint64_t)(flags >> 192),
+                   (unsigned long long)(uint64_t)(flags >> 128),
+                   (unsigned long long)(uint64_t)(flags >> 64),
+                   (unsigned long long)(uint64_t)flags);
 
-const char* cmd_debugespnowstream(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  if (modeTemp) {
-    if (v) setDebugFlag(DEBUG_ESPNOW_STREAM); else clearDebugFlag(DEBUG_ESPNOW_STREAM);
-    return v ? "debugEspNowStream enabled (runtime only)" : "debugEspNowStream disabled (runtime only)";
-  } else {
-    setDebugSetting(gSettings.debugEspNowStream, (bool)(v == 1));
-    if (v) setDebugFlag(DEBUG_ESPNOW_STREAM); else clearDebugFlag(DEBUG_ESPNOW_STREAM);
-    return gSettings.debugEspNowStream ? "debugEspNowStream enabled (persistent)" : "debugEspNowStream disabled (persistent)";
+  // Resolve each bit on its own so a set sub-flag reports its own name rather
+  // than the parent's. Bits with no entry in getDebugCategoryName are counted
+  // instead of listed — the hex words above are where to find them.
+  int named = 0;
+  int unnamed = 0;
+  char line[128] = "";
+  size_t used = 0;
+  for (int bit = 0; bit < 256; bit++) {
+    const DebugFlagMask one = DEBUG_BIT(bit);
+    if (!(flags & one)) continue;
+    const char* name = getDebugCategoryName(one);
+    if (strcmp(name, "UNKNOWN") == 0) { unnamed++; continue; }
+    if (used + strlen(name) + 2 > sizeof(line)) {
+      BROADCAST_PRINTF("  %s", line);
+      used = 0;
+    }
+    used += snprintf(line + used, sizeof(line) - used, "%s%s", used ? " " : "", name);
+    named++;
   }
-}
+  if (used > 0) BROADCAST_PRINTF("  %s", line);
 
-const char* cmd_debugespnowcore(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  if (modeTemp) {
-    if (v) setDebugFlag(DEBUG_ESPNOW_CORE); else clearDebugFlag(DEBUG_ESPNOW_CORE);
-    return v ? "debugEspNowCore enabled (runtime only)" : "debugEspNowCore disabled (runtime only)";
-  } else {
-    setDebugSetting(gSettings.debugEspNowCore, (bool)(v == 1));
-    if (v) setDebugFlag(DEBUG_ESPNOW_CORE); else clearDebugFlag(DEBUG_ESPNOW_CORE);
-    return gSettings.debugEspNowCore ? "debugEspNowCore enabled (persistent)" : "debugEspNowCore disabled (persistent)";
-  }
-}
-
-const char* cmd_debugespnowrouter(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  if (modeTemp) {
-    if (v) setDebugFlag(DEBUG_ESPNOW_ROUTER); else clearDebugFlag(DEBUG_ESPNOW_ROUTER);
-    return v ? "debugEspNowRouter enabled (runtime only)" : "debugEspNowRouter disabled (runtime only)";
-  } else {
-    setDebugSetting(gSettings.debugEspNowRouter, (bool)(v == 1));
-    if (v) setDebugFlag(DEBUG_ESPNOW_ROUTER); else clearDebugFlag(DEBUG_ESPNOW_ROUTER);
-    return gSettings.debugEspNowRouter ? "debugEspNowRouter enabled (persistent)" : "debugEspNowRouter disabled (persistent)";
-  }
-}
-
-const char* cmd_debugmemory(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  if (modeTemp) {
-    if (v) setDebugFlag(DEBUG_MEMORY); else clearDebugFlag(DEBUG_MEMORY);
-    return v ? "debugMemory enabled (runtime only)" : "debugMemory disabled (runtime only)";
-  } else {
-    setDebugSetting(gSettings.debugMemory, (bool)(v == 1));
-    if (v) setDebugFlag(DEBUG_MEMORY); else clearDebugFlag(DEBUG_MEMORY);
-    return gSettings.debugMemory ? "debugMemory enabled (persistent)" : "debugMemory disabled (persistent)";
-  }
+  snprintf(gDebugBuffer, 1024, "%d named flag%s set, %d unnamed bit%s",
+           named, named == 1 ? "" : "s", unnamed, unnamed == 1 ? "" : "s");
+  return gDebugBuffer;
 }
 
 // Runtime toggle for the ESP-IDF log bridge (setIdfLogBridge above). Default OFF;
@@ -1869,246 +1234,268 @@ const char* cmd_loglink(const String& argsInput) {
     : "loglink OFF — ESP-IDF logs restored to direct UART";
 }
 
-const char* cmd_debugmemoryheap(const String& a) {
-  return cmd_debugsubflag_impl(a, &gSettings.debugMemoryHeap, DEBUG_MEMORY_HEAP, "debugMemoryHeap");
+// ============================================================================
+// Aggregated-parent recompute — ONE mechanism generated from the tables in
+// System_DebugFlags.h (DBG_AGG_FAMILY_LIST / DBG_SUBBOOL_LIST / the
+// settingsField column), replacing the per-family sync helpers with the
+// same per-family terms. Only the 14 listed families are ever recomputed;
+// every other parent is an explicit master switch owned by its toggle.
+// ============================================================================
+
+// Persistent-layer column: each flag row's gSettings bool, nullptr for the
+// DBG_NO_SETTING control row. Indexed by DbgFlagIdx.
+#define DBG_SETPTR_0(field) &gSettings.field,
+#define DBG_SETPTR_1(field) nullptr,
+#define DBG_X(SYM, bit, BANK, parentBit, tag, field, ...) \
+  DBG_PP_CAT(DBG_SETPTR_, DBG_SF_IS_NONE(field))(field)
+static constexpr bool* kDbgSettingPtr[DBG_FLAG_COUNT] = { DBG_FLAG_LIST(DBG_X) };
+#undef DBG_X
+#undef DBG_SETPTR_1
+#undef DBG_SETPTR_0
+
+// Runtime-layer column: each bitless sub's gDebugSubFlags member. Indexed by
+// DbgSubIdx, parallel to kDbgSubParentIdx.
+#define DBG_S(SYM, subField, settingsField, PARENT_SYM, ...) &gDebugSubFlags.subField,
+static constexpr bool* kDbgSubRuntimePtr[DBG_SUBBOOL_COUNT] = { DBG_SUBBOOL_LIST(DBG_S) };
+#undef DBG_S
+
+// Every aggregated root must have a persisted bool — the SUBBOOLS expression
+// dereferences it unconditionally.
+static constexpr bool dbgAggRootsHaveSettings() {
+  for (int i = 0; i < DBG_FLAG_COUNT; ++i)
+    if (kDbgAggMode.m[i] != DBG_AGG_NONE && kDbgSettingPtr[i] == nullptr) return false;
+  return true;
 }
-const char* cmd_debugmemorystack(const String& a) {
-  return cmd_debugsubflag_impl(a, &gSettings.debugMemoryStack, DEBUG_MEMORY_STACK, "debugMemoryStack");
-}
-const char* cmd_debugmemorybuffers(const String& a) {
-  return cmd_debugsubflag_impl(a, &gSettings.debugMemoryBuffers, DEBUG_MEMORY_BUFFERS, "debugMemoryBuffers");
+static_assert(dbgAggRootsHaveSettings(), "aggregated family root lacks a settingsField");
+
+// True when any of the family's bitless runtime subs is enabled (the layer
+// `temp` toggles write).
+static bool dbgAnyRuntimeSub(DbgFlagIdx root) {
+  for (int i = 0; i < DBG_SUBBOOL_COUNT; ++i)
+    if (kDbgSubParentIdx[i] == root && *kDbgSubRuntimePtr[i]) return true;
+  return false;
 }
 
-const char* cmd_debugespnowmesh(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  if (modeTemp) {
-    if (v) setDebugFlag(DEBUG_ESPNOW_MESH); else clearDebugFlag(DEBUG_ESPNOW_MESH);
-    return v ? "debugEspNowMesh enabled (runtime only)" : "debugEspNowMesh disabled (runtime only)";
-  } else {
-    setDebugSetting(gSettings.debugEspNowMesh, (bool)(v == 1));
-    if (v) setDebugFlag(DEBUG_ESPNOW_MESH); else clearDebugFlag(DEBUG_ESPNOW_MESH);
-    return gSettings.debugEspNowMesh ? "debugEspNowMesh enabled (persistent)" : "debugEspNowMesh disabled (persistent)";
-  }
+// True when any of the family's persisted booleans is set — every flag row
+// in the family's bank, the root's own field included.
+static bool dbgAnyFamilySetting(DbgFlagIdx root) {
+  for (int i = 0; i < DBG_FLAG_COUNT; ++i)
+    if (kDbgBank[i] == kDbgBank[root] && kDbgSettingPtr[i] && *kDbgSettingPtr[i]) return true;
+  return false;
 }
 
-const char* cmd_debugespnowtopo(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  if (modeTemp) {
-    if (v) setDebugFlag(DEBUG_ESPNOW_TOPO); else clearDebugFlag(DEBUG_ESPNOW_TOPO);
-    return v ? "debugEspNowTopo enabled (runtime only)" : "debugEspNowTopo disabled (runtime only)";
-  } else {
-    setDebugSetting(gSettings.debugEspNowTopo, (bool)(v == 1));
-    if (v) setDebugFlag(DEBUG_ESPNOW_TOPO); else clearDebugFlag(DEBUG_ESPNOW_TOPO);
-    return gSettings.debugEspNowTopo ? "debugEspNowTopo enabled (persistent)" : "debugEspNowTopo disabled (persistent)";
+// True when any family-bank bit OTHER than the root's own is up in the live
+// mask — temp-toggled children. Bank membership, not kDbgParentBit: BT/SR
+// sub rows carry no parent link (their macros pass bare sub-bits), yet their
+// temp-set bits must still raise the parent, exactly as the old helpers'
+// hand-written child masks did.
+static bool dbgAnyRuntimeChildBit(DbgFlagIdx root) {
+  const DebugFlagMask flags = getDebugFlags();
+  for (int i = 0; i < DBG_FLAG_COUNT; ++i) {
+    if (i == (int)root || kDbgBank[i] != kDbgBank[root]) continue;
+    if ((flags & kDbgMask[i]) != (DebugFlagMask)0) return true;
   }
+  return false;
 }
 
-const char* cmd_debugespnowmetadata(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  if (modeTemp) {
-    if (v) setDebugFlag(DEBUG_ESPNOW_METADATA); else clearDebugFlag(DEBUG_ESPNOW_METADATA);
-    return v ? "debugEspNowMetadata enabled (runtime only)" : "debugEspNowMetadata disabled (runtime only)";
-  } else {
-    setDebugSetting(gSettings.debugEspNowMetadata, (bool)(v == 1));
-    if (v) setDebugFlag(DEBUG_ESPNOW_METADATA); else clearDebugFlag(DEBUG_ESPNOW_METADATA);
-    return gSettings.debugEspNowMetadata ? "debugEspNowMetadata enabled (persistent)" : "debugEspNowMetadata disabled (persistent)";
+void dbgRecomputeParent(DbgFlagIdx root) {
+  bool any = false;
+  switch (kDbgAggMode.m[root]) {
+    case DBG_AGG_NONE:
+      return;  // not an aggregated family — its bit belongs to its toggle alone
+    case DBG_AGG_SUBBOOLS:       // root setting OR bitless runtime subs
+      any = *kDbgSettingPtr[root] || dbgAnyRuntimeSub(root);
+      break;
+    case DBG_AGG_SETTINGS:       // family settings only (LLM)
+      any = dbgAnyFamilySetting(root);
+      break;
+    case DBG_AGG_SETTINGS_BITS:  // family settings OR temp-set child bits (BT, SR)
+      any = dbgAnyFamilySetting(root) || dbgAnyRuntimeChildBit(root);
+      break;
   }
+  updateParentDebugFlag(kDbgMask[root], any);
 }
 
-const char* cmd_debugautoscheduler(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  if (modeTemp) {
-    if (v) setDebugFlag(DEBUG_AUTO_SCHEDULER); else clearDebugFlag(DEBUG_AUTO_SCHEDULER);
-    return v ? "debugAutoScheduler enabled (runtime only)" : "debugAutoScheduler disabled (runtime only)";
-  } else {
-    setDebugSetting(gSettings.debugAutoScheduler, (bool)(v == 1));
-    if (v) setDebugFlag(DEBUG_AUTO_SCHEDULER); else clearDebugFlag(DEBUG_AUTO_SCHEDULER);
-    return gSettings.debugAutoScheduler ? "debugAutoScheduler enabled (persistent)" : "debugAutoScheduler disabled (persistent)";
-  }
-}
-
-const char* cmd_debugautoexec(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  if (modeTemp) {
-    if (v) setDebugFlag(DEBUG_AUTO_EXEC); else clearDebugFlag(DEBUG_AUTO_EXEC);
-    return v ? "debugAutoExec enabled (runtime only)" : "debugAutoExec disabled (runtime only)";
-  } else {
-    setDebugSetting(gSettings.debugAutoExec, (bool)(v == 1));
-    if (v) setDebugFlag(DEBUG_AUTO_EXEC); else clearDebugFlag(DEBUG_AUTO_EXEC);
-    return gSettings.debugAutoExec ? "debugAutoExec enabled (persistent)" : "debugAutoExec disabled (persistent)";
-  }
-}
-
-const char* cmd_debugautocondition(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  if (modeTemp) {
-    if (v) setDebugFlag(DEBUG_AUTO_CONDITION); else clearDebugFlag(DEBUG_AUTO_CONDITION);
-    return v ? "debugAutoCondition enabled (runtime only)" : "debugAutoCondition disabled (runtime only)";
-  } else {
-    setDebugSetting(gSettings.debugAutoCondition, (bool)(v == 1));
-    if (v) setDebugFlag(DEBUG_AUTO_CONDITION); else clearDebugFlag(DEBUG_AUTO_CONDITION);
-    return gSettings.debugAutoCondition ? "debugAutoCondition enabled (persistent)" : "debugAutoCondition disabled (persistent)";
-  }
-}
-
-const char* cmd_debugautotiming(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  if (modeTemp) {
-    if (v) setDebugFlag(DEBUG_AUTO_TIMING); else clearDebugFlag(DEBUG_AUTO_TIMING);
-    return v ? "debugAutoTiming enabled (runtime only)" : "debugAutoTiming disabled (runtime only)";
-  } else {
-    setDebugSetting(gSettings.debugAutoTiming, (bool)(v == 1));
-    if (v) setDebugFlag(DEBUG_AUTO_TIMING); else clearDebugFlag(DEBUG_AUTO_TIMING);
-    return gSettings.debugAutoTiming ? "debugAutoTiming enabled (persistent)" : "debugAutoTiming disabled (persistent)";
-  }
+void dbgRecomputeAllParents() {
+  for (int i = 0; i < DBG_FLAG_COUNT; ++i)
+    if (kDbgAggMode.m[i] != DBG_AGG_NONE) dbgRecomputeParent((DbgFlagIdx)i);
 }
 
 // ============================================================================
-// Sub-flag parent sync helpers — one per group, called after any sub-flag change
+// Generated CLI debug-command dispatch (C3).
+//
+// The ~156 mechanical flag/sub command handlers are no longer hand-written:
+// each cmd_<name> is a generated thunk (below) forwarding to one of two shared
+// dispatchers. dbgFlagCmd()/dbgSubCmd() reproduce the pre-C3 handler bodies
+// exactly (temp = live mask bit only; persist = gSettings + bit; bitless subs
+// always write their gDebugSubFlags runtime bool and recompute the family
+// parent) with ONE deliberate change: a STRICT 0|1 contract — any other int is
+// rejected with the same error shape the already-strict handlers used. The
+// non-uniform side effects (HTTPS TLS log levels; the SR level-sync; the
+// LLM/SR/Bluetooth family recomputes) live in dbgApplyHook(), keyed by
+// DbgFlagIdx. Bespoke handlers that do something non-mechanical stay
+// hand-written and keep their debugCommands[] rows verbatim.
 // ============================================================================
-static inline void syncAuthParent()    { updateParentDebugFlag(DEBUG_AUTH,        gSettings.debugAuth        || gDebugSubFlags.authSessions   || gDebugSubFlags.authCookies    || gDebugSubFlags.authLogin      || gDebugSubFlags.authBootId); }
-static inline void syncHttpParent()    { updateParentDebugFlag(DEBUG_HTTP,        gSettings.debugHttp        || gDebugSubFlags.httpHandlers   || gDebugSubFlags.httpRequests   || gDebugSubFlags.httpResponses  || gDebugSubFlags.httpStreaming); }
-static inline void syncWifiParent()    { updateParentDebugFlag(DEBUG_WIFI,        gSettings.debugWifi        || gDebugSubFlags.wifiConnection || gDebugSubFlags.wifiConfig     || gDebugSubFlags.wifiScanning   || gDebugSubFlags.wifiDriver); }
-static inline void syncStorageParent() { updateParentDebugFlag(DEBUG_STORAGE,     gSettings.debugStorage     || gDebugSubFlags.storageFiles   || gDebugSubFlags.storageJson    || gDebugSubFlags.storageSettings || gDebugSubFlags.storageMigration || gDebugSubFlags.storagePermissions); }
-static inline void syncSystemParent()  { updateParentDebugFlag(DEBUG_SYSTEM,      gSettings.debugSystem      || gDebugSubFlags.systemBoot     || gDebugSubFlags.systemConfig   || gDebugSubFlags.systemTasks    || gDebugSubFlags.systemHardware); }
-static inline void syncUsersParent()   { updateParentDebugFlag(DEBUG_USERS,       gSettings.debugUsers       || gDebugSubFlags.usersMgmt      || gDebugSubFlags.usersRegister  || gDebugSubFlags.usersQuery); }
-static inline void syncCliParent()     { updateParentDebugFlag(DEBUG_CLI,         gSettings.debugCli         || gDebugSubFlags.cliExecution   || gDebugSubFlags.cliQueue       || gDebugSubFlags.cliValidation); }
-static inline void syncPerfParent()    { updateParentDebugFlag(DEBUG_PERFORMANCE, gSettings.debugPerformance || gDebugSubFlags.perfStack       || gDebugSubFlags.perfHeap       || gDebugSubFlags.perfTiming); }
-static inline void syncSseParent()     { updateParentDebugFlag(DEBUG_SSE,         gSettings.debugSse         || gDebugSubFlags.sseConnection  || gDebugSubFlags.sseEvents      || gDebugSubFlags.sseBroadcast); }
-static inline void syncCmdFlowParent() { updateParentDebugFlag(DEBUG_CMD_FLOW,    gSettings.debugCommandFlow || gDebugSubFlags.cmdflowRouting  || gDebugSubFlags.cmdflowQueue   || gDebugSubFlags.cmdflowContext); }
-static inline void syncNtpParent()     { updateParentDebugFlag(DEBUG_NTP,         gSettings.debugDateTime    || gDebugSubFlags.ntpSync        || gDebugSubFlags.ntpSetup       || gDebugSubFlags.ntpAnchor      || gDebugSubFlags.ntpResolve); }
 
-const char* cmd_debugdatetimesync(const String& argsInput) {
+// Per-flag-row columns, indexed by DbgFlagIdx (parallel to kDbgSettingPtr).
+//   kDbgCmdRetName — camelCase settingsField, used verbatim in the
+//                    "<name> enabled/disabled (…)" reply (e.g. "debugHttp").
+//   kDbgCmdIdent   — CLI token for the strict-usage error (e.g. "debughttp").
+// The ALWAYS control row's entries are never read — it carries no command.
+#define DBG_X(SYM, bit, BANK, parentBit, tag, field, cmdIdent, ...) #field,
+static constexpr const char* kDbgCmdRetName[DBG_FLAG_COUNT] = { DBG_FLAG_LIST(DBG_X) };
+#undef DBG_X
+#define DBG_X(SYM, bit, BANK, parentBit, tag, field, cmdIdent, ...) #cmdIdent,
+static constexpr const char* kDbgCmdIdent[DBG_FLAG_COUNT] = { DBG_FLAG_LIST(DBG_X) };
+#undef DBG_X
+
+// Per-bitless-sub columns, indexed by DbgSubIdx (parallel to kDbgSubRuntimePtr
+// / kDbgSubParentIdx). kDbgSubSettingPtr is the persistent gSettings bool.
+#define DBG_S(SYM, subField, settingsField, PARENT_SYM, cmdIdent, ...) &gSettings.settingsField,
+static constexpr bool* kDbgSubSettingPtr[DBG_SUBBOOL_COUNT] = { DBG_SUBBOOL_LIST(DBG_S) };
+#undef DBG_S
+#define DBG_S(SYM, subField, settingsField, PARENT_SYM, cmdIdent, ...) #settingsField,
+static constexpr const char* kDbgSubRetName[DBG_SUBBOOL_COUNT] = { DBG_SUBBOOL_LIST(DBG_S) };
+#undef DBG_S
+#define DBG_S(SYM, subField, settingsField, PARENT_SYM, cmdIdent, ...) #cmdIdent,
+static constexpr const char* kDbgSubCmdIdent[DBG_SUBBOOL_COUNT] = { DBG_SUBBOOL_LIST(DBG_S) };
+#undef DBG_S
+
+// Non-mechanical per-command side effects, keyed by DbgFlagIdx. Fires on the
+// SAME paths as the pre-C3 handlers: after the mask bit is toggled (temp) or
+// after the bit + gSettings are written (persist). Unlisted rows do nothing.
+static void dbgApplyHook(DbgFlagIdx idx, bool modeTemp, int v, bool* settingPtr) {
+  (void)modeTemp; (void)v; (void)settingPtr;
+  switch (idx) {
+    case DBG_HTTPS: {
+      // Drive ESP-IDF TLS/HTTPS tag verbosity. Skipped during the CLI
+      // validation pass (dbgFlagCmd short-circuits before the hook, so
+      // gCLIValidateOnly is false here — guarded anyway to match pre-C3).
+      extern bool gCLIValidateOnly;
+      if (!gCLIValidateOnly) applyHttpsLogLevels(isDebugFlagSet(DEBUG_HTTPS));
+      break;
+    }
+    case DBG_LLM:
+    case DBG_LLM_LOAD:
+    case DBG_LLM_TOKENIZER:
+    case DBG_LLM_FORWARD:
+    case DBG_LLM_GENERATE:
+    case DBG_LLM_MEMORY:
+      // Persistent path only — temp LLM sub toggles never raise the parent
+      // (SETTINGS family; the DEBUG_LLM_*F macros pass the bare sub-bit).
+      if (!modeTemp) dbgRecomputeParent(DBG_LLM);
+      break;
+    case DBG_SR:
+      // Parent: sync the legacy gSrDebugLevel; NO recompute (owns its bit).
+#if ENABLE_ESP_SR
+      if (modeTemp) { bool prev = *settingPtr; *settingPtr = (v != 0); srSyncDebugLevel(); *settingPtr = prev; }
+      else          { srSyncDebugLevel(); }
+#endif
+      break;
+    case DBG_SR_WAKE:
+    case DBG_SR_COMMAND:
+    case DBG_SR_AFE:
+    case DBG_SR_LIFECYCLE:
+    case DBG_SR_TUNING:
+      // SR subs: level-sync (flip/restore on temp), then recompute DBG_SR on
+      // BOTH paths (the SR output gates test DEBUG_SR alongside the sub-bit).
+#if ENABLE_ESP_SR
+      if (modeTemp) { bool prev = *settingPtr; *settingPtr = (v != 0); srSyncDebugLevel(); *settingPtr = prev; }
+#endif
+      dbgRecomputeParent(DBG_SR);
+#if ENABLE_ESP_SR
+      if (!modeTemp) srSyncDebugLevel();
+#endif
+      break;
+    case DBG_BLUETOOTH_CORE:
+    case DBG_BLUETOOTH_GATT:
+    case DBG_BLUETOOTH_DATA:
+      // Recompute the Bluetooth parent on BOTH paths (SETTINGS_BITS family).
+      dbgRecomputeParent(DBG_BLUETOOTH);
+      break;
+    default:
+      break;
+  }
+}
+
+// Shared dispatcher for every flag-backed debug command (parent or bit-sub).
+// Reproduces cmd_debugsubflag_impl exactly, plus the strict 0|1 contract and
+// the dbgApplyHook side effect.
+static const char* dbgFlagCmd(DbgFlagIdx idx, const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  EXT_RAM_BSS_ATTR static char buf[96];
   CommandArgs ca(argsInput);
   String mode = ca.arg(1);
   bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
   int v = ca.argInt(0, 0);
-  gDebugSubFlags.ntpSync = (v != 0);
-  if (!modeTemp) setDebugSetting(gSettings.debugDatetimeSync, (bool)(v != 0));
-  syncNtpParent();
-  if (modeTemp) return v ? "debugDatetimeSync enabled (runtime only)" : "debugDatetimeSync disabled (runtime only)";
-  return gSettings.debugDatetimeSync ? "debugDatetimeSync enabled (persistent)" : "debugDatetimeSync disabled (persistent)";
+  if (v != 0 && v != 1) {
+    snprintf(buf, sizeof(buf), "Error: invalid arguments — Usage: %s <0|1> [temp|runtime]", kDbgCmdIdent[idx]);
+    return buf;
+  }
+  const DebugFlagMask flagBit = kDbgMask[idx];
+  bool* settingPtr = kDbgSettingPtr[idx];
+  const char* name = kDbgCmdRetName[idx];
+  if (modeTemp) {
+    if (v) setDebugFlag(flagBit); else clearDebugFlag(flagBit);
+    dbgApplyHook(idx, true, v, settingPtr);
+    snprintf(buf, sizeof(buf), "%s %s (runtime only)", name, v ? "enabled" : "disabled");
+    return buf;
+  }
+  setDebugSetting(*settingPtr, (bool)(v != 0));
+  if (v) setDebugFlag(flagBit); else clearDebugFlag(flagBit);
+  dbgApplyHook(idx, false, v, settingPtr);
+  snprintf(buf, sizeof(buf), "%s %s (persistent)", name, *settingPtr ? "enabled" : "disabled");
+  return buf;
 }
 
-const char* cmd_debugdatetimesetup(const String& argsInput) {
+// Shared dispatcher for the 40 bitless subs. The runtime layer
+// (gDebugSubFlags.<subField>) is written UNCONDITIONALLY on both paths — the
+// invariant that lets `temp` diverge runtime from persistent — while gSettings
+// is written on persist only. The family parent recomputes on both paths.
+static const char* dbgSubCmd(DbgSubIdx sidx, const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  EXT_RAM_BSS_ATTR static char buf[96];
   CommandArgs ca(argsInput);
   String mode = ca.arg(1);
   bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
   int v = ca.argInt(0, 0);
-  gDebugSubFlags.ntpSetup = (v != 0);
-  if (!modeTemp) setDebugSetting(gSettings.debugDatetimeSetup, (bool)(v != 0));
-  syncNtpParent();
-  if (modeTemp) return v ? "debugDatetimeSetup enabled (runtime only)" : "debugDatetimeSetup disabled (runtime only)";
-  return gSettings.debugDatetimeSetup ? "debugDatetimeSetup enabled (persistent)" : "debugDatetimeSetup disabled (persistent)";
+  if (v != 0 && v != 1) {
+    snprintf(buf, sizeof(buf), "Error: invalid arguments — Usage: %s <0|1> [temp|runtime]", kDbgSubCmdIdent[sidx]);
+    return buf;
+  }
+  *kDbgSubRuntimePtr[sidx] = (v != 0);
+  if (!modeTemp) setDebugSetting(*kDbgSubSettingPtr[sidx], (bool)(v != 0));
+  dbgRecomputeParent(kDbgSubParentIdx[sidx]);
+  if (modeTemp) {
+    snprintf(buf, sizeof(buf), "%s %s (runtime only)", kDbgSubRetName[sidx], v ? "enabled" : "disabled");
+    return buf;
+  }
+  snprintf(buf, sizeof(buf), "%s %s (persistent)", kDbgSubRetName[sidx], *kDbgSubSettingPtr[sidx] ? "enabled" : "disabled");
+  return buf;
 }
 
-const char* cmd_debugdatetimeanchor(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  gDebugSubFlags.ntpAnchor = (v != 0);
-  if (!modeTemp) setDebugSetting(gSettings.debugDatetimeAnchor, (bool)(v != 0));
-  syncNtpParent();
-  if (modeTemp) return v ? "debugDatetimeAnchor enabled (runtime only)" : "debugDatetimeAnchor disabled (runtime only)";
-  return gSettings.debugDatetimeAnchor ? "debugDatetimeAnchor enabled (persistent)" : "debugDatetimeAnchor disabled (persistent)";
-}
+// --- Generated flag thunks: cmd_<cmdIdent> -> dbgFlagCmd(DBG_<SYM>) ----------
+// The ALWAYS control row (cmdIdent == DBG_NO_CMD) emits no thunk. cmdIdent is
+// re-passed through the skip dispatch (benign token, never an Arduino macro);
+// the index is pasted as DBG_##SYM at the first macro level (C1 paste rule) and
+// forwarded as an already-resolved enumerator token.
+#define DBG_THUNK_EMIT(IDXTOK, cmdIdent) \
+  const char* cmd_##cmdIdent(const String& a) { return dbgFlagCmd(IDXTOK, a); }
+#define DBG_THUNK_0(IDXTOK, cmdIdent) DBG_THUNK_EMIT(IDXTOK, cmdIdent)
+#define DBG_THUNK_1(IDXTOK, cmdIdent) /* control row — no command */
+#define DBG_X(SYM, bit, BANK, parentBit, tag, field, cmdIdent, ...) \
+  DBG_PP_CAT(DBG_THUNK_, DBG_CMD_IS_NONE(cmdIdent))(DBG_##SYM, cmdIdent)
+DBG_FLAG_LIST(DBG_X)
+#undef DBG_X
+#undef DBG_THUNK_1
+#undef DBG_THUNK_0
+#undef DBG_THUNK_EMIT
 
-const char* cmd_debugdatetimeresolve(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  gDebugSubFlags.ntpResolve = (v != 0);
-  if (!modeTemp) setDebugSetting(gSettings.debugDatetimeResolve, (bool)(v != 0));
-  syncNtpParent();
-  if (modeTemp) return v ? "debugDatetimeResolve enabled (runtime only)" : "debugDatetimeResolve disabled (runtime only)";
-  return gSettings.debugDatetimeResolve ? "debugDatetimeResolve enabled (persistent)" : "debugDatetimeResolve disabled (persistent)";
-}
-
-const char* cmd_debugauthsessions(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  gDebugSubFlags.authSessions = (v != 0);
-  if (!modeTemp) setDebugSetting(gSettings.debugAuthSessions, (bool)(v != 0));
-  syncAuthParent();
-  if (modeTemp) return v ? "debugAuthSessions enabled (runtime only)" : "debugAuthSessions disabled (runtime only)";
-  return gSettings.debugAuthSessions ? "debugAuthSessions enabled (persistent)" : "debugAuthSessions disabled (persistent)";
-}
-
-const char* cmd_debugauthcookies(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  gDebugSubFlags.authCookies = (v != 0);
-  if (!modeTemp) setDebugSetting(gSettings.debugAuthCookies, (bool)(v != 0));
-  syncAuthParent();
-  if (modeTemp) return v ? "debugAuthCookies enabled (runtime only)" : "debugAuthCookies disabled (runtime only)";
-  return gSettings.debugAuthCookies ? "debugAuthCookies enabled (persistent)" : "debugAuthCookies disabled (persistent)";
-}
-
-const char* cmd_debugauthlogin(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  gDebugSubFlags.authLogin = (v != 0);
-  if (!modeTemp) setDebugSetting(gSettings.debugAuthLogin, (bool)(v != 0));
-  syncAuthParent();
-  if (modeTemp) return v ? "debugAuthLogin enabled (runtime only)" : "debugAuthLogin disabled (runtime only)";
-  return gSettings.debugAuthLogin ? "debugAuthLogin enabled (persistent)" : "debugAuthLogin disabled (persistent)";
-}
-
-const char* cmd_debugauthbootid(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp") || mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  gDebugSubFlags.authBootId = (v != 0);
-  if (!modeTemp) setDebugSetting(gSettings.debugAuthBootId, (bool)(v != 0));
-  syncAuthParent();
-  if (modeTemp) return v ? "debugAuthBootId enabled (runtime only)" : "debugAuthBootId disabled (runtime only)";
-  return gSettings.debugAuthBootId ? "debugAuthBootId enabled (persistent)" : "debugAuthBootId disabled (persistent)";
-}
+// --- Generated bitless-sub thunks: cmd_<cmdIdent> -> dbgSubCmd(DBG_SUB_<SYM>) -
+#define DBG_S(SYM, subField, settingsField, PARENT_SYM, cmdIdent, ...) \
+  const char* cmd_##cmdIdent(const String& a) { return dbgSubCmd(DBG_SUB_##SYM, a); }
+DBG_SUBBOOL_LIST(DBG_S)
+#undef DBG_S
 
 const char* cmd_commandmodulesummary(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
@@ -2139,124 +1526,22 @@ const char* cmd_settingsmodulesummary(const String& argsInput) {
 // ============================================================================
 
 const char* getDebugCategoryName(DebugFlagMask flag) {
-  // Return the first matching flag name (checked in bit order, low to high)
-  if (flag & DEBUG_AUTH) return "AUTH";
-  if (flag & DEBUG_HTTP) return "HTTP";
-  if (flag & DEBUG_HTTPS) return "HTTPS";
-  if (flag & DEBUG_SSE) return "SSE";
-  if (flag & DEBUG_CLI) return "CLI";
-  if (flag & DEBUG_FMRADIO) return "FMRADIO";
-  if (flag & DEBUG_I2C) return "I2C";
-  if (flag & DEBUG_I2C_BUS)       return "I2C_BUS";
-  if (flag & DEBUG_I2C_DISCOVERY) return "I2C_DISCOVERY";
-  if (flag & DEBUG_I2C_AUTOSTART) return "I2C_AUTOSTART";
-  if (flag & DEBUG_MQTT)            return "MQTT";
-  if (flag & DEBUG_MQTT_CONNECTION) return "MQTT_CONN";
-  if (flag & DEBUG_MQTT_PUBSUB)     return "MQTT_PUBSUB";
-  if (flag & DEBUG_MQTT_DISCOVERY)  return "MQTT_DISCOVERY";
-  if (flag & DEBUG_MQTT_COMMANDS)   return "MQTT_CMD";
-  if (flag & DEBUG_WIFI) return "WIFI";
-  if (flag & DEBUG_PERFORMANCE) return "PERF";
-  if (flag & DEBUG_MICROPHONE) return "MIC";
-  if (flag & DEBUG_CMD_FLOW) return "CMD_FLOW";
-  if (flag & DEBUG_USERS) return "USERS";
-  if (flag & DEBUG_SYSTEM) return "SYSTEM";
-  if (flag & DEBUG_STORAGE) return "STORAGE";
-  if (flag & DEBUG_ESPNOW_CORE) return "ESP-NOW";
-  if (flag & DEBUG_LOGGER) return "LOGGER";
-  if (flag & DEBUG_MEMORY) return "MEMORY";
-  if (flag & DEBUG_MEMORY_HEAP)    return "MEMORY_HEAP";
-  if (flag & DEBUG_MEMORY_STACK)   return "MEMORY_STACK";
-  if (flag & DEBUG_MEMORY_BUFFERS) return "MEMORY_BUFFERS";
-  if (flag & DEBUG_ESPNOW_ROUTER) return "ESPNOW_ROUTER";
-  if (flag & DEBUG_ESPNOW_MESH) return "ESPNOW_MESH";
-  if (flag & DEBUG_ESPNOW_TOPO) return "ESPNOW_TOPO";
-  if (flag & DEBUG_ESPNOW_STREAM) return "ESPNOW_STREAM";
-  if (flag & DEBUG_COMMAND_SYSTEM) return "CMD_SYS";
-  if (flag & DEBUG_AUTO_EXEC) return "AUTO_EXEC";
-  if (flag & DEBUG_AUTO_CONDITION) return "AUTO_COND";
-  if (flag & DEBUG_AUTO_TIMING) return "AUTO_TIME";
-  if (flag & DEBUG_AUTOMATIONS) return "AUTO";
-  if (flag & DEBUG_CAMERA) return "CAMERA";
-  if (flag & DEBUG_CAMERA_LIFECYCLE) return "CAMERA_LIFECYCLE";
-  if (flag & DEBUG_CAMERA_CAPTURE)   return "CAMERA_CAPTURE";
-  if (flag & DEBUG_CAMERA_SETTINGS)  return "CAMERA_SETTINGS";
-  if (flag & DEBUG_CAMERA_VIDEO)     return "CAMERA_VIDEO";
-  if (flag & DEBUG_DISPLAY)          return "DISPLAY";
-  if (flag & DEBUG_NOTIFICATIONS)    return "NOTIF";
-  if (flag & DEBUG_AUTO_SCHEDULER) return "AUTO_SCHED";
-  // Bits 32-39: per-sensor device flags
-  if (flag & DEBUG_GPS) return "GPS";
-  if (flag & DEBUG_RTC) return "RTC";
-  if (flag & DEBUG_IMU) return "IMU";
-  if (flag & DEBUG_THERMAL) return "THERMAL";
-  if (flag & DEBUG_TOF) return "TOF";
-  if (flag & DEBUG_INPUT) return "INPUT";
-  if (flag & DEBUG_ANO_ENCODER) return "ANO";
-  if (flag & DEBUG_APDS) return "APDS";
-  if (flag & DEBUG_PRESENCE) return "PRESENCE";
-  // Bits 40-47: per-sensor frame/data flags
-  // Per-sensor sub-flags (Lifecycle / Polling / Values)
-  if (flag & DEBUG_THERMAL_LIFECYCLE)  return "THERMAL_LIFE";
-  if (flag & DEBUG_THERMAL_POLLING)    return "THERMAL_POLL";
-  if (flag & DEBUG_THERMAL_VALUES)     return "THERMAL_VAL";
-  if (flag & DEBUG_TOF_LIFECYCLE)      return "TOF_LIFE";
-  if (flag & DEBUG_TOF_POLLING)        return "TOF_POLL";
-  if (flag & DEBUG_TOF_VALUES)         return "TOF_VAL";
-  if (flag & DEBUG_INPUT_LIFECYCLE)  return "INPUT_LIFE";
-  if (flag & DEBUG_INPUT_POLLING)    return "INPUT_POLL";
-  if (flag & DEBUG_INPUT_VALUES)     return "INPUT_VAL";
-  if (flag & DEBUG_ANO_ENCODER_LIFECYCLE) return "ANO_LIFE";
-  if (flag & DEBUG_ANO_ENCODER_POLLING)   return "ANO_POLL";
-  if (flag & DEBUG_ANO_ENCODER_VALUES)    return "ANO_VAL";
-  if (flag & DEBUG_IMU_LIFECYCLE)      return "IMU_LIFE";
-  if (flag & DEBUG_IMU_POLLING)        return "IMU_POLL";
-  if (flag & DEBUG_IMU_VALUES)         return "IMU_VAL";
-  if (flag & DEBUG_APDS_LIFECYCLE)     return "APDS_LIFE";
-  if (flag & DEBUG_APDS_POLLING)       return "APDS_POLL";
-  if (flag & DEBUG_APDS_VALUES)        return "APDS_VAL";
-  if (flag & DEBUG_GPS_LIFECYCLE)      return "GPS_LIFE";
-  if (flag & DEBUG_GPS_POLLING)        return "GPS_POLL";
-  if (flag & DEBUG_GPS_VALUES)         return "GPS_VAL";
-  if (flag & DEBUG_RTC_LIFECYCLE)      return "RTC_LIFE";
-  if (flag & DEBUG_RTC_POLLING)        return "RTC_POLL";
-  if (flag & DEBUG_RTC_VALUES)         return "RTC_VAL";
-  if (flag & DEBUG_FMRADIO_LIFECYCLE)  return "FMRADIO_LIFE";
-  if (flag & DEBUG_FMRADIO_POLLING)    return "FMRADIO_POLL";
-  if (flag & DEBUG_FMRADIO_VALUES)     return "FMRADIO_VAL";
-  if (flag & DEBUG_MIC_LIFECYCLE)      return "MIC_LIFE";
-  if (flag & DEBUG_MIC_POLLING)        return "MIC_POLL";
-  if (flag & DEBUG_MIC_VALUES)         return "MIC_VAL";
-  if (flag & DEBUG_PRESENCE_LIFECYCLE) return "PRESENCE_LIFE";
-  if (flag & DEBUG_PRESENCE_POLLING)   return "PRESENCE_POLL";
-  if (flag & DEBUG_PRESENCE_VALUES)    return "PRESENCE_VAL";
-  // Bit 48
-  if (flag & DEBUG_ESPNOW_METADATA) return "ESPNOW_META";
-  // Bits 49-52: Maps
-  if (flag & DEBUG_MAPS) return "MAPS";
-  if (flag & DEBUG_MAPS_LOADING) return "MAPS_LOAD";
-  if (flag & DEBUG_MAPS_RENDERING) return "MAPS_RENDER";
-  if (flag & DEBUG_MAPS_PERF) return "MAPS_PERF";
-#if ENABLE_ONDEVICE_LLM
-  // Bits 57-62: On-device LLM
-  if (flag & DEBUG_LLM) return "LLM";
-  if (flag & DEBUG_LLM_LOAD) return "LLM_LOAD";
-  if (flag & DEBUG_LLM_TOKENIZER) return "LLM_TOK";
-  if (flag & DEBUG_LLM_FORWARD) return "LLM_FWD";
-  if (flag & DEBUG_LLM_GENERATE) return "LLM_GEN";
-  if (flag & DEBUG_LLM_MEMORY) return "LLM_MEM";
-#endif
-  // Bit 63: NTP / DateTime
-  if (flag & DEBUG_NTP) return "NTP";
-  // Bits 64-69: G2 sub-flags. Return the sub name when the sub-bit is
-  // set; the parent DEBUG_G2 alone (no sub) still maps to "G2".
-  if (flag & DEBUG_G2_LIFECYCLE) return "G2_LIFE";
-  if (flag & DEBUG_G2_PROTOCOL)  return "G2_PROTO";
-  if (flag & DEBUG_G2_EVENTS)    return "G2_EVT";
-  if (flag & DEBUG_G2_PAGES)     return "G2_PAGE";
-  if (flag & DEBUG_G2_HEARTBEAT) return "G2_HB";
-  if (flag & DEBUG_G2_DUMP)      return "G2_DUMP";
-  if (flag & DEBUG_G2)           return "G2";
+  // Table walk over the generated rows in System_DebugFlags.h. The DEBUG_*F
+  // macros enqueue `PARENT | SUB`, so pass 1 tests every sub-flag row
+  // (parentBit != 255) and pass 2 every root row — most-specific wins, and a
+  // sub's tag always beats its parent's. Rows with an empty tag are control
+  // bits (DEBUG_ALWAYS): they ride along with the producer's flag and must
+  // never shadow it, so both passes skip them.
+  for (int i = 0; i < DBG_FLAG_COUNT; ++i) {  // pass 1: sub-flags
+    if (kDbgParentBit[i] == 255) continue;
+    if (kDbgTag[i][0] == '\0') continue;
+    if ((flag & kDbgMask[i]) != (DebugFlagMask)0) return kDbgTag[i];
+  }
+  for (int i = 0; i < DBG_FLAG_COUNT; ++i) {  // pass 2: root flags
+    if (kDbgParentBit[i] != 255) continue;
+    if (kDbgTag[i][0] == '\0') continue;
+    if ((flag & kDbgMask[i]) != (DebugFlagMask)0) return kDbgTag[i];
+  }
   return "UNKNOWN";
 }
 
@@ -2266,7 +1551,7 @@ const char* getDebugCategoryName(DebugFlagMask flag) {
 
 // Helper: Generate timestamped filename for system log
 static String generateSystemLogFilename() {
-  String filename = "/logs/system-";
+  String filename = CAPTURE_DIR_SYSTEM "/system-";
   
   // Try to get epoch time
   time_t now = time(nullptr);
@@ -2287,6 +1572,56 @@ static String generateSystemLogFilename() {
   return filename;
 }
 
+// Parse a flags= mask string into a DebugFlagMask. Accepts either a single hex
+// string (up to 64 digits) or colon-separated 64-bit words high-to-low.
+bool parseSystemLogFlags(const String& flagsStr, DebugFlagMask& out) {
+  auto stripHexPrefix = [](const String& s) -> String {
+    return (s.startsWith("0x") || s.startsWith("0X")) ? s.substring(2) : s;
+  };
+  auto parseHex64 = [](const String& s) -> uint64_t {
+    return strtoull(s.c_str(), nullptr, 16);
+  };
+  uint64_t w[4] = {0, 0, 0, 0};  // w[0] = bits 0-63 ... w[3] = bits 192-255
+  if (flagsStr.indexOf(':') >= 0) {
+    String rest = flagsStr;
+    for (int wi = 0; wi < 4 && rest.length() > 0; ++wi) {
+      int colon = rest.lastIndexOf(':');
+      w[wi] = parseHex64(stripHexPrefix(colon >= 0 ? rest.substring(colon + 1) : rest));
+      if (colon < 0) break;
+      rest = rest.substring(0, colon);
+    }
+  } else {
+    String hex = stripHexPrefix(flagsStr);
+    if (hex.length() == 0) return false;
+    for (int wi = 0; wi < 4 && hex.length() > 0; ++wi) {
+      unsigned cut = hex.length() > 16 ? hex.length() - 16 : 0;
+      w[wi] = parseHex64(hex.substring(cut));
+      hex = hex.substring(0, cut);
+    }
+  }
+  out = ((DebugFlagMask)w[3] << 192) | ((DebugFlagMask)w[2] << 128) |
+        ((DebugFlagMask)w[1] << 64)  | (DebugFlagMask)w[0];
+  return true;
+}
+
+String formatSystemLogFlags(DebugFlagMask mask) {
+  char buf[80];
+  snprintf(buf, sizeof(buf), "0x%016llX:%016llX:%016llX:%016llX",
+           (unsigned long long)(uint64_t)(mask >> 192),
+           (unsigned long long)(uint64_t)(mask >> 128),
+           (unsigned long long)(uint64_t)(mask >> 64),
+           (unsigned long long)(uint64_t)mask);
+  return String(buf);
+}
+
+bool systemLogApplyPersistedFlags() {
+  if (gSettings.systemLogFlags.length() == 0) return false;
+  DebugFlagMask restored = (DebugFlagMask)0;
+  if (!parseSystemLogFlags(gSettings.systemLogFlags, restored)) return false;
+  gDebugFlags = restored;
+  return true;
+}
+
 const char* cmd_log(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
@@ -2303,9 +1638,9 @@ const char* cmd_log(const String& argsInput) {
            "  autostart: Toggle auto-start system logging on boot\n"
            "Examples:\n"
            "  log start\n"
-           "  log start /logs/debug.log\n"
+           "  log start /logging_captures/system/debug.log\n"
            "  log start flags=0x15 tags=1\n"
-           "  log start /logs/debug.log flags=0x3F00000000 tags=0\n"
+           "  log start /logging_captures/system/debug.log flags=0x3F00000000 tags=0\n"
            "  log autostart";
   }
   String subCmd = ca.arg(0);
@@ -2394,34 +1729,9 @@ const char* cmd_log(const String& argsInput) {
     for (int i = 1; i < ca.count(); i++) {
       String token = ca.arg(i);
       if (token.startsWith("flags=")) {
-        String flagsStr = token.substring(6);
-        auto stripHexPrefix = [](const String& s) -> String {
-          return (s.startsWith("0x") || s.startsWith("0X")) ? s.substring(2) : s;
-        };
-        auto parseHex64 = [](const String& s) -> uint64_t {
-          return strtoull(s.c_str(), nullptr, 16);
-        };
-        uint64_t w[4] = {0, 0, 0, 0};  // w[0] = bits 0-63 ... w[3] = bits 192-255
-        if (flagsStr.indexOf(':') >= 0) {
-          // Colon form: consume tokens right-to-left, rightmost = lowest word
-          String rest = flagsStr;
-          for (int wi = 0; wi < 4 && rest.length() > 0; ++wi) {
-            int colon = rest.lastIndexOf(':');
-            w[wi] = parseHex64(stripHexPrefix(colon >= 0 ? rest.substring(colon + 1) : rest));
-            if (colon < 0) break;
-            rest = rest.substring(0, colon);
-          }
-        } else {
-          // Single hex string: consume 16 digits per word from the right
-          String hex = stripHexPrefix(flagsStr);
-          for (int wi = 0; wi < 4 && hex.length() > 0; ++wi) {
-            unsigned cut = hex.length() > 16 ? hex.length() - 16 : 0;
-            w[wi] = parseHex64(hex.substring(cut));
-            hex = hex.substring(0, cut);
-          }
+        if (!parseSystemLogFlags(token.substring(6), debugFlags)) {
+          return "Error: invalid flags= mask";
         }
-        debugFlags = ((DebugFlagMask)w[3] << 192) | ((DebugFlagMask)w[2] << 128) |
-                     ((DebugFlagMask)w[1] << 64)  | (DebugFlagMask)w[0];
         flagsSet = true;
       } else if (token.startsWith("tags=")) {
         String tagsStr = token.substring(5);
@@ -2430,7 +1740,7 @@ const char* cmd_log(const String& argsInput) {
         // The log path must be a quoted token (uniform quoted-path rule); a bare
         // token here is almost certainly an unquoted path.
         if (!ca.argWasQuoted(i))
-          return "Error: log path must be in quotes, e.g. log start \"/logs/sys.txt\"";
+          return "Error: log path must be in quotes, e.g. log start \"/logging_captures/system/sys.txt\"";
         filepath = token;
         hasFilepath = true;
       }
@@ -2442,12 +1752,13 @@ const char* cmd_log(const String& argsInput) {
     }
     
     if (filepath.length() == 0 || filepath.charAt(0) != '/') {
-      return "Error: Filepath must start with / (e.g., /logs/system.log)";
+      return "Error: Filepath must start with / (e.g., /logging_captures/system/system.log)";
     }
     
-    // Apply debug flags if specified
+    // Apply debug flags if specified; otherwise restore last-used system-log mask
     if (flagsSet) {
       gDebugFlags = debugFlags;
+      setSetting(gSettings.systemLogFlags, formatSystemLogFlags(debugFlags));
       char flagsMsg[160];
       snprintf(flagsMsg, sizeof(flagsMsg),
                "Debug flags set to: 0x%016llX:%016llX:%016llX:%016llX",
@@ -2456,24 +1767,42 @@ const char* cmd_log(const String& argsInput) {
                (unsigned long long)(uint64_t)(gDebugFlags >> 64),
                (unsigned long long)(uint64_t)gDebugFlags);
       broadcastOutput(flagsMsg);
+    } else if (gSettings.systemLogFlags.length() > 0) {
+      DebugFlagMask restored = (DebugFlagMask)0;
+      if (parseSystemLogFlags(gSettings.systemLogFlags, restored)) {
+        gDebugFlags = restored;
+      }
     }
     
     // Apply category tags setting (arg overrides, otherwise use persisted setting)
     if (categoryTags >= 0) {
       gSystemLogCategoryTags = (categoryTags != 0);
+      setSetting(gSettings.systemLogCategoryTags, gSystemLogCategoryTags);
     } else {
       gSystemLogCategoryTags = gSettings.systemLogCategoryTags;
     }
     
-    // Ensure directory exists
+    // Ensure directory exists. RECURSIVE (matching sensorlog's setup path):
+    // mkdir is single-level, so a nested target like
+    // /logging_captures/system/foo.log — or an SD-overflow mirror at
+    // /sd/logging_captures/system/ — needs each level created in turn. This
+    // used to be one mkdir, which worked only while the parent happened to
+    // exist and would have failed outright once the overflow latch fired.
     int lastSlash = filepath.lastIndexOf('/');
     if (lastSlash > 0) {
       String dir = filepath.substring(0, lastSlash);
       if (!VFS::existsGuarded(dir, VFS::systemAuth("debug.log_setup_mkdir"))) {
         fsLock("log.mkdir");
-        bool created = VFS::mkdirGuarded(dir, VFS::systemAuth("debug.log_setup_mkdir"));
+        for (int i = 1; i <= (int)dir.length(); i++) {
+          if (i == (int)dir.length() || dir.charAt(i) == '/') {
+            String parent = dir.substring(0, i);
+            if (parent.length() > 0 && !VFS::existsGuarded(parent, VFS::systemAuth("debug.log_setup_mkdir"))) {
+              VFS::mkdirGuarded(parent, VFS::systemAuth("debug.log_setup_mkdir"));
+            }
+          }
+        }
         fsUnlock();
-        if (!created) {
+        if (!VFS::existsGuarded(dir, VFS::systemAuth("debug.log_setup_mkdir"))) {
           snprintf(gDebugBuffer, 1024, "Error: Failed to create directory: %s", dir.c_str());
           return gDebugBuffer;
         }
@@ -2528,187 +1857,6 @@ const char* cmd_log(const String& argsInput) {
   return "Error: Unknown subcommand. Use: start, stop, status, or autostart";
 }
 
-// ============================================================================
-// Debug Sub-Flag Commands (merged from System_Debug_SubCommands.cpp)
-// ============================================================================
-
-// HTTP sub-flag commands
-const char* cmd_debughttphandlers(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  gDebugSubFlags.httpHandlers = (v!=0);
-  if (!modeTemp) setDebugSetting(gSettings.debugHttpHandlers, (bool)(v!=0));
-  syncHttpParent();
-  if (modeTemp) return v ? "debugHttpHandlers enabled (runtime only)" : "debugHttpHandlers disabled (runtime only)";
-  return gSettings.debugHttpHandlers ? "debugHttpHandlers enabled (persistent)" : "debugHttpHandlers disabled (persistent)";
-}
-
-const char* cmd_debughttprequests(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  gDebugSubFlags.httpRequests = (v!=0);
-  if (!modeTemp) setDebugSetting(gSettings.debugHttpRequests, (bool)(v!=0));
-  syncHttpParent();
-  if (modeTemp) return v ? "debugHttpRequests enabled (runtime only)" : "debugHttpRequests disabled (runtime only)";
-  return gSettings.debugHttpRequests ? "debugHttpRequests enabled (persistent)" : "debugHttpRequests disabled (persistent)";
-}
-
-const char* cmd_debughttpresponses(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  gDebugSubFlags.httpResponses = (v!=0);
-  if (!modeTemp) setDebugSetting(gSettings.debugHttpResponses, (bool)(v!=0));
-  syncHttpParent();
-  if (modeTemp) return v ? "debugHttpResponses enabled (runtime only)" : "debugHttpResponses disabled (runtime only)";
-  return gSettings.debugHttpResponses ? "debugHttpResponses enabled (persistent)" : "debugHttpResponses disabled (persistent)";
-}
-
-const char* cmd_debughttpstreaming(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  gDebugSubFlags.httpStreaming = (v!=0);
-  if (!modeTemp) setDebugSetting(gSettings.debugHttpStreaming, (bool)(v!=0));
-  syncHttpParent();
-  if (modeTemp) return v ? "debugHttpStreaming enabled (runtime only)" : "debugHttpStreaming disabled (runtime only)";
-  return gSettings.debugHttpStreaming ? "debugHttpStreaming enabled (persistent)" : "debugHttpStreaming disabled (persistent)";
-}
-
-// WiFi sub-flag commands
-const char* cmd_debugwificonnection(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  gDebugSubFlags.wifiConnection = (v!=0);
-  if (!modeTemp) setDebugSetting(gSettings.debugWifiConnection, (bool)(v!=0));
-  syncWifiParent();
-  if (modeTemp) return v ? "debugWifiConnection enabled (runtime only)" : "debugWifiConnection disabled (runtime only)";
-  return gSettings.debugWifiConnection ? "debugWifiConnection enabled (persistent)" : "debugWifiConnection disabled (persistent)";
-}
-
-const char* cmd_debugwificonfig(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  gDebugSubFlags.wifiConfig = (v!=0);
-  if (!modeTemp) setDebugSetting(gSettings.debugWifiConfig, (bool)(v!=0));
-  syncWifiParent();
-  if (modeTemp) return v ? "debugWifiConfig enabled (runtime only)" : "debugWifiConfig disabled (runtime only)";
-  return gSettings.debugWifiConfig ? "debugWifiConfig enabled (persistent)" : "debugWifiConfig disabled (persistent)";
-}
-
-const char* cmd_debugwifiscanning(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  gDebugSubFlags.wifiScanning = (v!=0);
-  if (!modeTemp) setDebugSetting(gSettings.debugWifiScanning, (bool)(v!=0));
-  syncWifiParent();
-  if (modeTemp) return v ? "debugWifiScanning enabled (runtime only)" : "debugWifiScanning disabled (runtime only)";
-  return gSettings.debugWifiScanning ? "debugWifiScanning enabled (persistent)" : "debugWifiScanning disabled (persistent)";
-}
-
-const char* cmd_debugwifidriver(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  gDebugSubFlags.wifiDriver = (v!=0);
-  if (!modeTemp) setDebugSetting(gSettings.debugWifiDriver, (bool)(v!=0));
-  syncWifiParent();
-  if (modeTemp) return v ? "debugWifiDriver enabled (runtime only)" : "debugWifiDriver disabled (runtime only)";
-  return gSettings.debugWifiDriver ? "debugWifiDriver enabled (persistent)" : "debugWifiDriver disabled (persistent)";
-}
-
-// Storage sub-flag commands
-const char* cmd_debugstoragefiles(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  gDebugSubFlags.storageFiles = (v!=0);
-  if (!modeTemp) setDebugSetting(gSettings.debugStorageFiles, (bool)(v!=0));
-  syncStorageParent();
-  if (modeTemp) return v ? "debugStorageFiles enabled (runtime only)" : "debugStorageFiles disabled (runtime only)";
-  return gSettings.debugStorageFiles ? "debugStorageFiles enabled (persistent)" : "debugStorageFiles disabled (persistent)";
-}
-
-const char* cmd_debugstoragejson(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  gDebugSubFlags.storageJson = (v!=0);
-  if (!modeTemp) setDebugSetting(gSettings.debugStorageJson, (bool)(v!=0));
-  syncStorageParent();
-  if (modeTemp) return v ? "debugStorageJson enabled (runtime only)" : "debugStorageJson disabled (runtime only)";
-  return gSettings.debugStorageJson ? "debugStorageJson enabled (persistent)" : "debugStorageJson disabled (persistent)";
-}
-
-const char* cmd_debugstoragesettings(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  gDebugSubFlags.storageSettings = (v!=0);
-  if (!modeTemp) setDebugSetting(gSettings.debugStorageSettings, (bool)(v!=0));
-  syncStorageParent();
-  if (modeTemp) return v ? "debugStorageSettings enabled (runtime only)" : "debugStorageSettings disabled (runtime only)";
-  return gSettings.debugStorageSettings ? "debugStorageSettings enabled (persistent)" : "debugStorageSettings disabled (persistent)";
-}
-
-const char* cmd_debugstoragemigration(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  gDebugSubFlags.storageMigration = (v!=0);
-  if (!modeTemp) setDebugSetting(gSettings.debugStorageMigration, (bool)(v!=0));
-  syncStorageParent();
-  if (modeTemp) return v ? "debugStorageMigration enabled (runtime only)" : "debugStorageMigration disabled (runtime only)";
-  return gSettings.debugStorageMigration ? "debugStorageMigration enabled (persistent)" : "debugStorageMigration disabled (persistent)";
-}
-
-// [PERM] DENY audit toggle. Unlike the other Storage subflags, this one
-// gates an actual log line per call (logFsAccessDeny in System_Filesystem.cpp
-// checks gDebugSubFlags.storagePermissions before emitting). Defaults to
-// true. Mute with `debugstoragepermissions 0` if you want other Storage
-// debug on but don't want the denial audit trail.
-const char* cmd_debugstoragepermissions(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  gDebugSubFlags.storagePermissions = (v!=0);
-  if (!modeTemp) setDebugSetting(gSettings.debugStoragePermissions, (bool)(v!=0));
-  syncStorageParent();
-  if (modeTemp) return v ? "debugStoragePermissions enabled (runtime only)" : "debugStoragePermissions disabled (runtime only)";
-  return gSettings.debugStoragePermissions ? "debugStoragePermissions enabled (persistent)" : "debugStoragePermissions disabled (persistent)";
-}
-
 // Low-level stack/heap trace toggle (bypasses debug queue, writes directly
 // to Serial). Use only while diagnosing stack-overflow / queue-saturation
 // issues — Serial.printf is synchronous and slows heavy paths if left on.
@@ -2728,259 +1876,6 @@ const char* cmd_debugstack(const String& argsInput) {
   return gDebugStackTraceEnabled ? "debugstack is currently ON" : "debugstack is currently OFF";
 }
 
-// System sub-flag commands
-const char* cmd_debugsystemboot(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  gDebugSubFlags.systemBoot = (v!=0);
-  if (!modeTemp) setDebugSetting(gSettings.debugSystemBoot, (bool)(v!=0));
-  syncSystemParent();
-  if (modeTemp) return v ? "debugSystemBoot enabled (runtime only)" : "debugSystemBoot disabled (runtime only)";
-  return gSettings.debugSystemBoot ? "debugSystemBoot enabled (persistent)" : "debugSystemBoot disabled (persistent)";
-}
-
-const char* cmd_debugsystemconfig(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  gDebugSubFlags.systemConfig = (v!=0);
-  if (!modeTemp) setDebugSetting(gSettings.debugSystemConfig, (bool)(v!=0));
-  syncSystemParent();
-  if (modeTemp) return v ? "debugSystemConfig enabled (runtime only)" : "debugSystemConfig disabled (runtime only)";
-  return gSettings.debugSystemConfig ? "debugSystemConfig enabled (persistent)" : "debugSystemConfig disabled (persistent)";
-}
-
-const char* cmd_debugsystemtasks(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  gDebugSubFlags.systemTasks = (v!=0);
-  if (!modeTemp) setDebugSetting(gSettings.debugSystemTasks, (bool)(v!=0));
-  syncSystemParent();
-  if (modeTemp) return v ? "debugSystemTasks enabled (runtime only)" : "debugSystemTasks disabled (runtime only)";
-  return gSettings.debugSystemTasks ? "debugSystemTasks enabled (persistent)" : "debugSystemTasks disabled (persistent)";
-}
-
-const char* cmd_debugsystemhardware(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  gDebugSubFlags.systemHardware = (v!=0);
-  if (!modeTemp) setDebugSetting(gSettings.debugSystemHardware, (bool)(v!=0));
-  syncSystemParent();
-  if (modeTemp) return v ? "debugSystemHardware enabled (runtime only)" : "debugSystemHardware disabled (runtime only)";
-  return gSettings.debugSystemHardware ? "debugSystemHardware enabled (persistent)" : "debugSystemHardware disabled (persistent)";
-}
-
-// Users sub-flag commands
-const char* cmd_debugusersmgmt(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  gDebugSubFlags.usersMgmt = (v!=0);
-  if (!modeTemp) setDebugSetting(gSettings.debugUsersMgmt, (bool)(v!=0));
-  syncUsersParent();
-  if (modeTemp) return v ? "debugUsersMgmt enabled (runtime only)" : "debugUsersMgmt disabled (runtime only)";
-  return gSettings.debugUsersMgmt ? "debugUsersMgmt enabled (persistent)" : "debugUsersMgmt disabled (persistent)";
-}
-
-const char* cmd_debugusersregister(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  gDebugSubFlags.usersRegister = (v!=0);
-  if (!modeTemp) setDebugSetting(gSettings.debugUsersRegister, (bool)(v!=0));
-  syncUsersParent();
-  if (modeTemp) return v ? "debugUsersRegister enabled (runtime only)" : "debugUsersRegister disabled (runtime only)";
-  return gSettings.debugUsersRegister ? "debugUsersRegister enabled (persistent)" : "debugUsersRegister disabled (persistent)";
-}
-
-const char* cmd_debugusersquery(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  gDebugSubFlags.usersQuery = (v!=0);
-  if (!modeTemp) setDebugSetting(gSettings.debugUsersQuery, (bool)(v!=0));
-  syncUsersParent();
-  if (modeTemp) return v ? "debugUsersQuery enabled (runtime only)" : "debugUsersQuery disabled (runtime only)";
-  return gSettings.debugUsersQuery ? "debugUsersQuery enabled (persistent)" : "debugUsersQuery disabled (persistent)";
-}
-
-// CLI sub-flag commands
-const char* cmd_debugcliexecution(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  gDebugSubFlags.cliExecution = (v!=0);
-  if (!modeTemp) setDebugSetting(gSettings.debugCliExecution, (bool)(v!=0));
-  syncCliParent();
-  if (modeTemp) return v ? "debugCliExecution enabled (runtime only)" : "debugCliExecution disabled (runtime only)";
-  return gSettings.debugCliExecution ? "debugCliExecution enabled (persistent)" : "debugCliExecution disabled (persistent)";
-}
-
-const char* cmd_debugcliqueue(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  gDebugSubFlags.cliQueue = (v!=0);
-  if (!modeTemp) setDebugSetting(gSettings.debugCliQueue, (bool)(v!=0));
-  syncCliParent();
-  if (modeTemp) return v ? "debugCliQueue enabled (runtime only)" : "debugCliQueue disabled (runtime only)";
-  return gSettings.debugCliQueue ? "debugCliQueue enabled (persistent)" : "debugCliQueue disabled (persistent)";
-}
-
-const char* cmd_debugclivalidation(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  gDebugSubFlags.cliValidation = (v!=0);
-  if (!modeTemp) setDebugSetting(gSettings.debugCliValidation, (bool)(v!=0));
-  syncCliParent();
-  if (modeTemp) return v ? "debugCliValidation enabled (runtime only)" : "debugCliValidation disabled (runtime only)";
-  return gSettings.debugCliValidation ? "debugCliValidation enabled (persistent)" : "debugCliValidation disabled (persistent)";
-}
-
-// Performance sub-flag commands
-const char* cmd_debugperfstack(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  gDebugSubFlags.perfStack = (v!=0);
-  if (!modeTemp) setDebugSetting(gSettings.debugPerfStack, (bool)(v!=0));
-  syncPerfParent();
-  if (modeTemp) return v ? "debugPerfStack enabled (runtime only)" : "debugPerfStack disabled (runtime only)";
-  return gSettings.debugPerfStack ? "debugPerfStack enabled (persistent)" : "debugPerfStack disabled (persistent)";
-}
-
-const char* cmd_debugperfheap(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  gDebugSubFlags.perfHeap = (v!=0);
-  if (!modeTemp) setDebugSetting(gSettings.debugPerfHeap, (bool)(v!=0));
-  syncPerfParent();
-  if (modeTemp) return v ? "debugPerfHeap enabled (runtime only)" : "debugPerfHeap disabled (runtime only)";
-  return gSettings.debugPerfHeap ? "debugPerfHeap enabled (persistent)" : "debugPerfHeap disabled (persistent)";
-}
-
-const char* cmd_debugperftiming(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  gDebugSubFlags.perfTiming = (v!=0);
-  if (!modeTemp) setDebugSetting(gSettings.debugPerfTiming, (bool)(v!=0));
-  syncPerfParent();
-  if (modeTemp) return v ? "debugPerfTiming enabled (runtime only)" : "debugPerfTiming disabled (runtime only)";
-  return gSettings.debugPerfTiming ? "debugPerfTiming enabled (persistent)" : "debugPerfTiming disabled (persistent)";
-}
-
-// SSE sub-flag commands
-const char* cmd_debugsseconnection(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  gDebugSubFlags.sseConnection = (v!=0);
-  if (!modeTemp) setDebugSetting(gSettings.debugSseConnection, (bool)(v!=0));
-  syncSseParent();
-  if (modeTemp) return v ? "debugSseConnection enabled (runtime only)" : "debugSseConnection disabled (runtime only)";
-  return gSettings.debugSseConnection ? "debugSseConnection enabled (persistent)" : "debugSseConnection disabled (persistent)";
-}
-
-const char* cmd_debugsseevents(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  gDebugSubFlags.sseEvents = (v!=0);
-  if (!modeTemp) setDebugSetting(gSettings.debugSseEvents, (bool)(v!=0));
-  syncSseParent();
-  if (modeTemp) return v ? "debugSseEvents enabled (runtime only)" : "debugSseEvents disabled (runtime only)";
-  return gSettings.debugSseEvents ? "debugSseEvents enabled (persistent)" : "debugSseEvents disabled (persistent)";
-}
-
-const char* cmd_debugssebroadcast(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  gDebugSubFlags.sseBroadcast = (v!=0);
-  if (!modeTemp) setDebugSetting(gSettings.debugSseBroadcast, (bool)(v!=0));
-  syncSseParent();
-  if (modeTemp) return v ? "debugSseBroadcast enabled (runtime only)" : "debugSseBroadcast disabled (runtime only)";
-  return gSettings.debugSseBroadcast ? "debugSseBroadcast enabled (persistent)" : "debugSseBroadcast disabled (persistent)";
-}
-
-// Command Flow sub-flag commands
-const char* cmd_debugcmdflowrouting(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  gDebugSubFlags.cmdflowRouting = (v!=0);
-  if (!modeTemp) setDebugSetting(gSettings.debugCmdflowRouting, (bool)(v!=0));
-  syncCmdFlowParent();
-  if (modeTemp) return v ? "debugCmdflowRouting enabled (runtime only)" : "debugCmdflowRouting disabled (runtime only)";
-  return gSettings.debugCmdflowRouting ? "debugCmdflowRouting enabled (persistent)" : "debugCmdflowRouting disabled (persistent)";
-}
-
-const char* cmd_debugcmdflowqueue(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  gDebugSubFlags.cmdflowQueue = (v!=0);
-  if (!modeTemp) setDebugSetting(gSettings.debugCmdflowQueue, (bool)(v!=0));
-  syncCmdFlowParent();
-  if (modeTemp) return v ? "debugCmdflowQueue enabled (runtime only)" : "debugCmdflowQueue disabled (runtime only)";
-  return gSettings.debugCmdflowQueue ? "debugCmdflowQueue enabled (persistent)" : "debugCmdflowQueue disabled (persistent)";
-}
-
-const char* cmd_debugcmdflowcontext(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String mode = ca.arg(1);
-  bool modeTemp = (mode.equalsIgnoreCase("temp")||mode.equalsIgnoreCase("runtime"));
-  int v = ca.argInt(0, 0);
-  gDebugSubFlags.cmdflowContext = (v!=0);
-  if (!modeTemp) setDebugSetting(gSettings.debugCmdflowContext, (bool)(v!=0));
-  syncCmdFlowParent();
-  if (modeTemp) return v ? "debugCmdflowContext enabled (runtime only)" : "debugCmdflowContext disabled (runtime only)";
-  return gSettings.debugCmdflowContext ? "debugCmdflowContext enabled (persistent)" : "debugCmdflowContext disabled (persistent)";
-}
-
 // ============================================================================
 // Debug Command Registry
 // ============================================================================
@@ -2995,7 +1890,7 @@ const CommandEntry debugCommands[] = {
   { "debugsse", "Debug Server-Sent Events.", true, cmd_debugsse, "Usage: debugsse <0|1> [temp|runtime]" },
   { "debugcli", "Debug CLI processing.", true, cmd_debugcli, "Usage: debugcli <0|1> [temp|runtime]" },
   { "debugauth", "Debug authentication (parent flag).", true, cmd_debugauth, "Usage: debugauth <0|1> [temp|runtime]" },
-  { "debugespnow", "Debug ESP-NOW core messages (alias of debugespnowcore).", true, cmd_debugespnow, "Usage: debugespnow <0|1> [temp|runtime]" },
+  { "debugespnow", "Debug ESP-NOW core messages (alias of debugespnowcore).", true, cmd_debugespnowcore, "Usage: debugespnow <0|1> [temp|runtime]" },
   { "debugbluetooth", "Debug Bluetooth (parent flag).", true, cmd_debugbluetooth, "Usage: debugbluetooth <0|1> [temp|runtime]" },
   { "debugbluetoothcore", "Debug Bluetooth core lifecycle.", true, cmd_debugbluetoothcore, "Usage: debugbluetoothcore <0|1> [temp|runtime]" },
   { "debugbluetoothgatt", "Debug Bluetooth GATT operations.", true, cmd_debugbluetoothgatt, "Usage: debugbluetoothgatt <0|1> [temp|runtime]" },
@@ -3078,6 +1973,7 @@ const CommandEntry debugCommands[] = {
   { "debugdatetimeresolve", "Debug NTP timestamp resolution for users.", true, cmd_debugdatetimeresolve, "Usage: debugdatetimeresolve <0|1> [temp|runtime]" },
   { "debugverbose", "Global debug verbosity override (forces all debug + loglevel=DEBUG).", true, cmd_debugverbose, "Usage: debugverbose <0|1>" },
   { "debugbuffer", "Show debug ring buffer status.", true, cmd_debugbuffer },
+  { "debugflags", "Show the live debug mask (4 hex words) and the flags it has set.", true, cmd_debugflags, "Usage: debugflags" },
   { "debugcommandflow", "Debug command flow.", true, cmd_debugcommandflow, "Usage: debugcommandflow <0|1> [temp|runtime]" },
   { "debugusers", "Debug user management.", true, cmd_debugusers, "Usage: debugusers <0|1> [temp|runtime]" },
   { "debugsystem", "Debug system/boot operations.", true, cmd_debugsystem, "Usage: debugsystem <0|1> [temp|runtime]" },
@@ -3143,7 +2039,6 @@ const CommandEntry debugCommands[] = {
   { "debuglogger", "Debug sensor logger internals.", true, cmd_debuglogger, "Usage: debuglogger <0|1> [temp|runtime]" },
   { "commandmodulesummary", "Show command module summary.", true, cmd_commandmodulesummary },
   { "settingsmodulesummary", "Show settings module summary.", true, cmd_settingsmodulesummary },
-  { "outdisplay", "Enable/disable display output.", true, cmd_outdisplay, "Usage: outdisplay <0|1> [persist|temp]" },
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
   { "outg2", "Enable/disable G2 glasses output.", false, cmd_outg2, "Usage: outg2 <0|1> - streams CLI output to G2 glasses" },
   { "debugg2", "Debug G2 smart glasses BLE operations.", true, cmd_debugg2, "Usage: debugg2 <0|1> [temp|runtime]" },
@@ -3169,6 +2064,35 @@ const CommandEntry debugCommands[] = {
 };
 
 const size_t debugCommandsCount = sizeof(debugCommands) / sizeof(debugCommands[0]);
+
+// C3 drift tripwire. The flag/sub command handlers are generated thunks: 116
+// flag rows (DBG_FLAG_COUNT minus the ALWAYS control row that carries
+// DBG_NO_CMD) + 40 bitless subs = 156. The rows enumerated below stay
+// hand-written. Adding a flag/sub row to the tables, or a hand row here,
+// without reconciling the counts fails this assert. The subtractions track the
+// two feature-gated table spans: 6 LLM flag rows, 7 debugg2* flag rows, and the
+// outg2 hand row.
+static constexpr size_t kDbgHandCmdRows = 15;  // debugespnow(alias), notifstats,
+  // debugverbose, debugbuffer, debugflags, loglink, debugstack,
+  // commandmodulesummary, settingsmodulesummary, outg2, outble,
+  // memorysampleintervalsec, loglevel, log, webconsole
+static constexpr size_t kDbgGenCmdRowsInTable =
+    (size_t)(DBG_FLAG_COUNT - 1) + (size_t)DBG_SUBBOOL_COUNT
+#if !ENABLE_ONDEVICE_LLM
+    - 6
+#endif
+#if !(ENABLE_BLUETOOTH && ENABLE_G2_GLASSES)
+    - 7
+#endif
+    ;
+static constexpr size_t kDbgHandCmdRowsInTable = kDbgHandCmdRows
+#if !(ENABLE_BLUETOOTH && ENABLE_G2_GLASSES)
+    - 1  // outg2 is G2-gated
+#endif
+    ;
+static_assert(sizeof(debugCommands) / sizeof(debugCommands[0])
+                  == kDbgGenCmdRowsInTable + kDbgHandCmdRowsInTable,
+              "debugCommands row count drifted from generated(thunk)+hand expectation");
 
 // Registration handled by gCommandModules[] in System_Utils.cpp
 
@@ -3378,6 +2302,10 @@ void systemLogAutoStart() {
   // Use persisted path if set, otherwise auto-generate
   String filepath = (gSettings.systemLogPath.length() > 0) ? gSettings.systemLogPath : generateSystemLogFilename();
   gSystemLogCategoryTags = gSettings.systemLogCategoryTags;
+
+  // Restore last-used category mask so autostart logs the same categories
+  // that were selected when system logging was last started.
+  systemLogApplyPersistedFlags();
   
   // Ensure any previous file handle is closed (safety check)
   if (gSystemLogFile) {
@@ -3413,10 +2341,64 @@ void systemLogAutoStart() {
 // System Log Settings Module
 // ============================================================================
 
+// Settings-page BitmaskField options for `systemLogFlags`, generated from
+// DBG_FLAG_LIST so EVERY debug flag gets a checkbox (this used to be a
+// hand-kept subset that drifted ~71 flags behind the table). Format is
+// UNCHANGED — the same "bitmask:0x<mask>|Label,..." dialect
+// BitmaskField.parseBits already reads, with "#|<Bank>" separators at each
+// family boundary. Persistence is untouched: the stored systemLogFlags value
+// stays a hex mask string; only this display vocabulary is regenerated.
+//
+// Assembled at init rather than pasted as an adjacent-string literal because a
+// checkbox's value is the MASK (1<<bit) while the table stores only the decimal
+// bit, and the preprocessor cannot turn bit 128 into its 33-hex-digit mask. The
+// mask is built inline: lead hex digit is "1248"[bit&3], then (bit>>2) zeros
+// (1<<0=0x1, 1<<4=0x10, 1<<32=0x100000000, ...).
+static void dbgAppendLogFlagOption(String& s, int bit, DbgBank bank, const char* label,
+                                   bool& first, DbgBank& lastBank) {
+  if (bank == DBG_BANK_CONTROL) return;  // control bits are not subsystems — no checkbox, no header
+  if (bank != lastBank) {                // family boundary → a "#|<Bank>" section separator
+    if (!first) s += ',';
+    s += "#|";
+    s += kDbgBankLabel[bank];
+    first = false;
+    lastBank = bank;
+  }
+  if (!first) s += ',';
+  first = false;
+  s += "0x";
+  char lead = "1248"[bit & 3];
+  s += lead;
+  for (int z = bit >> 2; z > 0; --z) s += '0';
+  s += '|';
+  s += label;
+}
+
+static String buildSystemLogFlagsBitmaskOptions() {
+  String s;
+  s.reserve(5000);
+  s = "bitmask:";
+  bool first = true;
+  DbgBank lastBank = DBG_BANK_COUNT;     // sentinel: no bank emitted yet
+#define DBG_X(SYM, bit, BANK, parentBit, tag, settingsField, cmdIdent, group, jsonKey, label) \
+  dbgAppendLogFlagOption(s, (bit), DBG_BANK_##BANK, (label), first, lastBank);
+  DBG_FLAG_LIST(DBG_X)
+#undef DBG_X
+  return s;
+}
+
+// Built once at static-init from the table above; the SettingEntry below points
+// its `options` at this stable buffer. Regenerated, never deleted — it is LIVE
+// (drives the systemLogFlags BitmaskField grid on the web Settings page).
+static const String gSystemLogFlagsBitmaskOptions = buildSystemLogFlagsBitmaskOptions();
+static const char* kSystemLogFlagsBitmaskOptions = gSystemLogFlagsBitmaskOptions.c_str();
+
 static const SettingEntry systemLogSettingEntries[] = {
   { "systemLogAutoStart",    SETTING_BOOL,   &gSettings.systemLogAutoStart,    0, 0, nullptr, 0, 1, "Auto-start logging after boot", nullptr, false, nullptr, "log autostart" },
   { "systemLogPath", SETTING_STRING, &gSettings.systemLogPath, 0, 0, "", 0, 0, "Log file path (empty = auto-generate)", nullptr, false, nullptr, nullptr },
   { "systemLogCategoryTags", SETTING_BOOL, &gSettings.systemLogCategoryTags, 1, 0, nullptr, 0, 1, "Include category tags", nullptr, false, nullptr, "logcategorytags" },
+  { "systemLogFlags", SETTING_STRING, &gSettings.systemLogFlags, 0, 0, "", 0, 0, "Debug message categories",
+    kSystemLogFlagsBitmaskOptions, false, nullptr, "systemlogflags" },
   { "eventLog", SETTING_BOOL, &gSettings.eventLogEnabled, 1, 0, nullptr, 0, 1, "Structured event history (events.log)", nullptr, false, nullptr, "eventlog" },
 };
 

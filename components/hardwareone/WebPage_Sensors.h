@@ -68,7 +68,7 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username);
 #if ENABLE_CAMERA_SENSOR
 #include "System_Camera_DVP_Web.h"
 #endif
-#if ENABLE_MICROPHONE_SENSOR
+#if ENABLE_MICROPHONE
 #include "System_Microphone_Web.h"
 #endif
 #if ENABLE_EDGE_IMPULSE
@@ -165,7 +165,7 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
 #if ENABLE_CAMERA_SENSOR
   streamCameraSensorCard(req);
 #endif
-#if ENABLE_MICROPHONE_SENSOR
+#if ENABLE_MICROPHONE
   streamMicrophoneSensorCard(req);
 #endif
   // Edge Impulse ML is now integrated into camera card, not a separate sensor
@@ -264,7 +264,7 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
 #if ENABLE_CAMERA_SENSOR
   streamCameraSensorBindButtons(req);
 #endif
-#if ENABLE_MICROPHONE_SENSOR
+#if ENABLE_MICROPHONE
   streamMicrophoneSensorBindButtons(req);
 #endif
 #if ENABLE_EDGE_IMPULSE
@@ -707,7 +707,7 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
 #if ENABLE_CAMERA_SENSOR
   streamCameraSensorJs(req);
 #endif
-#if ENABLE_MICROPHONE_SENSOR
+#if ENABLE_MICROPHONE
   streamMicrophoneSensorJS(req);
 #endif
 #if ENABLE_EDGE_IMPULSE

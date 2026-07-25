@@ -18,7 +18,7 @@
 #include "G2_Glasses.h"
 #include "G2_Page_Common.h"
 #include "G2_Page_Sensors.h"          // g2ShowSensorsMenu (back navigation)
-#include "System_Camera_DVP.h"        // cmd_camera* handlers (inline fallback only)
+#include "System_Camera_DVP.h"        // camera setting accessors for menu rows
 #include "System_Settings.h"          // gSettings
 #include "System_Debug.h"
 #include "G2_HijackCmd.h"             // g2SubmitHijackCommand — Group A migration

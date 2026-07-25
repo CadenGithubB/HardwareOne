@@ -277,7 +277,7 @@ void sensorLogTick() {
 
   // Track format builder — GPS-only compact: time,lat,lon,alt,speed,sats
   auto buildTrackFromSnap = [](const SensorCacheSnapshot& s) -> const char* {
-    static char buf[128];
+    EXT_RAM_BSS_ATTR static char buf[128];
     
     // Format timestamp from GPS time or millis fallback
     char ts[12];
@@ -683,7 +683,7 @@ const char* cmd_sensorlog(const String& argsInput) {
 
     if (!a.has(1)) {
       return "Error: invalid arguments — Usage: sensorlog start <filepath> [interval_ms]\n"
-             "Example: sensorlog start /logs/sensors/sensors.txt 1000";
+             "Example: sensorlog start /logging_captures/sensors/sensors.txt 1000";
     }
 
     String filepath = a.arg(1);
@@ -696,7 +696,7 @@ const char* cmd_sensorlog(const String& argsInput) {
     }
 
     if (filepath.length() == 0 || filepath.charAt(0) != '/') {
-      return "Error: Filepath must start with / (e.g., /logs/sensors/sensors.txt)";
+      return "Error: Filepath must start with / (e.g., /logging_captures/sensors/sensors.txt)";
     }
 
     if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
@@ -869,6 +869,7 @@ const char* cmd_sensorlog(const String& argsInput) {
     if (newSize > 10485760) return "Error: Max size cannot exceed 10485760 bytes (10MB)";
 
     gSensorLogMaxSize = newSize;
+    setSetting(gSettings.sensorLogMaxSize, (int)newSize);
     snprintf(getDebugBuffer(), 1024, "Max log size set to %u bytes (applies to active logging)",
              (unsigned)gSensorLogMaxSize);
     return getDebugBuffer();
@@ -889,6 +890,7 @@ const char* cmd_sensorlog(const String& argsInput) {
     if (count < 0 || count > 9) return "Error: Rotation count must be 0-9";
 
     gSensorLogMaxRotations = (uint8_t)count;
+    setSetting(gSettings.sensorLogMaxRotations, count);
     if (count == 0) {
       return "Rotation disabled - old logs will be deleted";
     } else {
@@ -1039,10 +1041,13 @@ const size_t sensorLoggingCommandsCount = sizeof(sensorLoggingCommands) / sizeof
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry sensorLogSettingEntries[] = {
   { "sensorLogAutoStart",    SETTING_BOOL,   &gSettings.sensorLogAutoStart,    0, 0, nullptr, 0, 1,       "Auto-start logging after boot", nullptr, false, nullptr, "sensorlog autostart" },
-  { "sensorLogPath", SETTING_STRING, &gSettings.sensorLogPath, 0, 0, "/logs/sensors/sensors.txt", 0, 0, "Log file path", nullptr, false, nullptr, "sensorlogpath" },
+  { "sensorLogPath", SETTING_STRING, &gSettings.sensorLogPath, 0, 0, CAPTURE_SENSORLOG_DEFAULT, 0, 0, "Log file path", nullptr, false, nullptr, "sensorlogpath" },
   { "sensorLogIntervalMs", SETTING_INT, &gSettings.sensorLogIntervalMs, 5000, 0, nullptr, 100, 3600000, "Poll interval (ms)", nullptr, false, nullptr, "sensorlog interval" },
-  { "sensorLogMask", SETTING_INT, &gSettings.sensorLogMask, 0, 0, nullptr, 0, 255, "Sensor bitmask", nullptr, false, nullptr, nullptr },
-  { "sensorLogFormat", SETTING_INT, &gSettings.sensorLogFormat, 0, 0, nullptr, 0, 2, "Format (0=text,1=csv,2=track)", "0|Text,1|CSV,2|Track", false, nullptr, nullptr }
+  { "sensorLogMask", SETTING_INT, &gSettings.sensorLogMask, 0, 0, nullptr, 0, 255, "Sensors to log",
+    "bitmask:1|Thermal,2|ToF,4|IMU,8|Gamepad,16|APDS,32|GPS,64|Presence", false, nullptr, "sensorlogmask" },
+  { "sensorLogFormat", SETTING_INT, &gSettings.sensorLogFormat, 0, 0, nullptr, 0, 2, "Format", "0|Text,1|CSV,2|Track", false, nullptr, "sensorlogformat" },
+  { "sensorLogMaxSize", SETTING_INT, &gSettings.sensorLogMaxSize, 256000, 0, nullptr, 10240, 10485760, "Max file size (bytes)", nullptr, false, nullptr, "sensorlog maxsize" },
+  { "sensorLogMaxRotations", SETTING_INT, &gSettings.sensorLogMaxRotations, 3, 0, nullptr, 0, 9, "Rotations (old logs to keep)", nullptr, false, nullptr, "sensorlog rotations" }
 };
 
 // Columns: name, jsonSection, entries, count, isConnected, description
@@ -1067,6 +1072,10 @@ void sensorLogAutoStart() {
   if (gSettings.sensorLogMask > 0) gSensorLogMask = (uint8_t)gSettings.sensorLogMask;
   if (gSettings.sensorLogFormat >= 0 && gSettings.sensorLogFormat <= 2) gSensorLogFormat = (SensorLogFormat)gSettings.sensorLogFormat;
   if (gSettings.sensorLogIntervalMs >= 100) gSensorLogIntervalMs = gSettings.sensorLogIntervalMs;
+  if (gSettings.sensorLogMaxSize >= 10240 && gSettings.sensorLogMaxSize <= 10485760)
+    gSensorLogMaxSize = (size_t)gSettings.sensorLogMaxSize;
+  if (gSettings.sensorLogMaxRotations >= 0 && gSettings.sensorLogMaxRotations <= 9)
+    gSensorLogMaxRotations = (uint8_t)gSettings.sensorLogMaxRotations;
 
   if (gSensorLogMask == 0) {
     broadcastOutput("[sensorlog] Auto-start skipped: no sensors selected");
@@ -1075,14 +1084,14 @@ void sensorLogAutoStart() {
 
   String path = gSettings.sensorLogPath;
   if (path.length() == 0 || path.charAt(0) != '/') {
-    path = "/logs/sensors/sensors.txt";
+    path = CAPTURE_SENSORLOG_DEFAULT;
   }
 
   // Append timestamp to filename to prevent appending to old logs
   // Extract base path and extension
   int lastSlash = path.lastIndexOf('/');
   int lastDot = path.lastIndexOf('.');
-  String dir = (lastSlash >= 0) ? path.substring(0, lastSlash + 1) : "/logs/sensors/";
+  String dir = (lastSlash >= 0) ? path.substring(0, lastSlash + 1) : CAPTURE_DIR_SENSORS "/";
   String baseName = (lastSlash >= 0) ? path.substring(lastSlash + 1) : path;
   String ext = "";
   
@@ -1131,24 +1140,15 @@ void sensorLogAutoStart() {
     snprintf(timestamp, sizeof(timestamp), "boot%lu-%lu", (unsigned long)gBootCounter, millis());
   }
   
-  // Build timestamped path: /logs/sensors/sensors-2026-02-17T14-30-00.txt or /logs/sensors/sensors-boot12345.txt
+  // Build timestamped path, e.g.
+  // /logging_captures/sensors/sensors-2026-02-17T14-30-00.txt (or -boot12345).
   char pathBuf[256];
   snprintf(pathBuf, sizeof(pathBuf), "%s%s-%s%s", dir.c_str(), baseName.c_str(), timestamp, ext.c_str());
   path = pathBuf;
 
-  // Ensure /logs/sensors directory exists before starting (mkdir is non-recursive).
-  // Uses VFS::mkdirGuarded for consistency with the overflow-capable write path.
-  if (!VFS::existsGuarded("/logs", VFS::systemAuth("senlog.autostart_mkdir"))) {
-    VFS::mkdirGuarded("/logs", VFS::systemAuth("senlog.autostart_mkdir"));
-  }
-  if (!VFS::existsGuarded("/logs/sensors", VFS::systemAuth("senlog.autostart_mkdir"))) {
-    if (!VFS::mkdirGuarded("/logs/sensors", VFS::systemAuth("senlog.autostart_mkdir"))) {
-      broadcastOutput("[sensorlog] Auto-start failed: Could not create /logs/sensors directory");
-      logSystemEvent("LOG", "sensor-log autostart FAILED — could not create /logs/sensors directory");
-      return;
-    }
-    broadcastOutput("[sensorlog] Created /logs/sensors directory");
-  }
+  // No mkdir here: this used to hand-create /logs + /logs/sensors, which is
+  // both the wrong tree now and redundant — cmd_sensorlog below creates every
+  // parent recursively, and the boot block already makes the capture tree.
 
   // Build and execute the CLI command so all validation/space checks run
   char cmd[320];

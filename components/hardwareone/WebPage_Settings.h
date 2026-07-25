@@ -28,6 +28,14 @@ window._snapInput = function(el) {
 };
 window._snapshotContainer = function(root) {
   var scope = (root && root.querySelectorAll) ? root : document;
+  // Sync bitmask hidden values from checkbox state before baselining so
+  // subsequent Save diffs compare packed masks, not stale snapshot strings.
+  if (window.BitmaskField) {
+    scope.querySelectorAll('[data-bitmask-field]').forEach(function(wrap) {
+      var hid = wrap.querySelector('input[data-bitmask-snapshot]');
+      if (hid) hid.value = String(window.BitmaskField.packFrom(wrap));
+    });
+  }
   scope.querySelectorAll('input,select,textarea').forEach(function(el) {
     if (el.id && el.type !== 'password') {
       window._settingsBaseline[el.id] = window._snapInput(el);
@@ -142,6 +150,147 @@ window.sendSequential = function(cmds, onDone, onFail) {
 };
 
 // ============================================================================
+// window.BitmaskField — universal schema bitmask checkbox renderer.
+//
+// Any SettingEntry whose `options` starts with "bitmask:" is rendered as a
+// labeled checkbox grid instead of a raw int/hex box. Storage is unchanged:
+//   int/u*  → decimal packed mask
+//   string  → "0x" + hex packed mask (BigInt; supports >64-bit debug flags)
+// Future bitmasks only need the options string; no per-field JS.
+// ============================================================================
+window.BitmaskField = (function(){
+  function isBitmaskOptions(options) {
+    return !!(options && String(options).indexOf('bitmask:') === 0);
+  }
+  function parseBits(options) {
+    var body = String(options).substring(8); // after "bitmask:"
+    var bits = [];
+    body.split(',').forEach(function(tok) {
+      tok = tok.trim();
+      if (!tok) return;
+      var bar = tok.indexOf('|');
+      var v = (bar >= 0 ? tok.substring(0, bar) : tok).trim();
+      var l = (bar >= 0 ? tok.substring(bar + 1) : tok).trim();
+      if (v === '#' || v === 'hdr' || v === 'header') {
+        bits.push({ header: l || v });
+        return;
+      }
+      bits.push({ value: v, label: l || v });
+    });
+    return bits;
+  }
+  function parseValue(val) {
+    if (val === undefined || val === null || val === '') return BigInt(0);
+    if (typeof val === 'bigint') return val;
+    if (typeof val === 'number') return BigInt(Math.trunc(val));
+    var s = String(val).trim();
+    if (!s) return BigInt(0);
+    try {
+      if (s.indexOf(':') >= 0) {
+        var parts = s.split(':');
+        var mask = BigInt(0);
+        for (var i = 0; i < parts.length; i++) {
+          var p = parts[i].replace(/^0x/i, '');
+          mask = (mask << BigInt(64)) | BigInt('0x' + (p || '0'));
+        }
+        return mask;
+      }
+      if (/^0x/i.test(s)) return BigInt(s);
+      if (/^\d+$/.test(s)) return BigInt(s);
+      return BigInt('0x' + s);
+    } catch (_) { return BigInt(0); }
+  }
+  function toBit(bitStr) {
+    var s = String(bitStr).trim();
+    if (/^0x/i.test(s)) return BigInt(s);
+    if (/^\d+$/.test(s)) return BigInt(s);
+    return BigInt('0x' + s);
+  }
+  function formatPacked(mask, type) {
+    if (type === 'string') return '0x' + mask.toString(16);
+    return String(Number(mask));
+  }
+  function render(opts) {
+    var key = opts.key;
+    var id = opts.id;
+    var cmd = opts.cmdKey || key;
+    var type = opts.type || 'int';
+    var disabled = !!opts.disabled;
+    var bits = parseBits(opts.options);
+    var mask = parseValue(opts.value);
+    var disAttr = disabled ? ' disabled' : '';
+    var html = '<div class="bitmask-field" data-bitmask-field="' + key + '" data-cmd="' + cmd +
+               '" data-type="' + type + '" style="grid-column:1/-1;margin-bottom:0.25rem">';
+    html += '<div style="font-weight:500;color:var(--panel-fg);margin-bottom:0.35rem;font-size:0.9em">' +
+            (opts.label || key) + '</div>';
+    html += '<input type="hidden" id="' + id + '" data-bitmask-snapshot="1" value="' +
+            formatPacked(mask, type) + '">';
+    html += '<div style="padding:0.15rem 0;' +
+            'display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:0.25rem 0.75rem">';
+    bits.forEach(function(b) {
+      if (b.header) {
+        html += '<div style="grid-column:1/-1;font-size:0.75rem;font-weight:600;color:var(--panel-fg);' +
+                'text-transform:uppercase;padding:0.35rem 0 0.1rem;border-bottom:1px solid var(--border);' +
+                'margin-top:0.25rem">' + b.header + '</div>';
+        return;
+      }
+      var on = (mask & toBit(b.value)) !== BigInt(0);
+      html += '<label style="display:flex;align-items:center;gap:0.4rem;font-size:0.9em;color:var(--panel-fg);cursor:pointer">' +
+              '<input type="checkbox" data-bit="' + b.value + '"' + (on ? ' checked' : '') + disAttr +
+              ' style="width:auto;flex:0 0 auto;margin:0;padding:0;border:none;background:transparent">' +
+              '<span>' + b.label + '</span></label>';
+    });
+    html += '</div>';
+    if (!disabled) {
+      html += '<div style="margin-top:0.4rem;display:flex;gap:0.5rem">' +
+              '<button type="button" class="btn" style="padding:0.25rem 0.75rem;font-size:0.85rem" ' +
+              'onclick="BitmaskField.setAll(this,true);return false">Select All</button>' +
+              '<button type="button" class="btn" style="padding:0.25rem 0.75rem;font-size:0.85rem" ' +
+              'onclick="BitmaskField.setAll(this,false);return false">Select None</button></div>';
+    }
+    html += '</div>';
+    return html;
+  }
+  function packFrom(wrap) {
+    var type = wrap.getAttribute('data-type') || 'int';
+    var packed = BigInt(0);
+    wrap.querySelectorAll('input[data-bit]').forEach(function(cb) {
+      if (cb.checked) packed |= toBit(cb.getAttribute('data-bit'));
+    });
+    return formatPacked(packed, type);
+  }
+  function collectFrom(root) {
+    if (!root) return [];
+    var out = [];
+    root.querySelectorAll('[data-bitmask-field]').forEach(function(wrap) {
+      var hid = wrap.querySelector('input[data-bitmask-snapshot]');
+      out.push({
+        key: wrap.getAttribute('data-bitmask-field'),
+        cmd: wrap.getAttribute('data-cmd') || wrap.getAttribute('data-bitmask-field'),
+        id: hid ? hid.id : '',
+        val: packFrom(wrap),
+        type: wrap.getAttribute('data-type') || 'int'
+      });
+    });
+    return out;
+  }
+  function setAll(btn, on) {
+    var wrap = btn && btn.closest ? btn.closest('[data-bitmask-field]') : null;
+    if (!wrap) return;
+    wrap.querySelectorAll('input[data-bit]').forEach(function(cb) { cb.checked = !!on; });
+  }
+  return {
+    isBitmaskOptions: isBitmaskOptions,
+    parseBits: parseBits,
+    parseValue: parseValue,
+    render: render,
+    packFrom: packFrom,
+    collectFrom: collectFrom,
+    setAll: setAll
+  };
+})();
+
+// ============================================================================
 // window.SchemaPanel — reusable schema-driven panel renderer.
 //
 // Each settings panel that was previously hand-rolled with bespoke HTML +
@@ -150,8 +299,8 @@ window.sendSequential = function(cmds, onDone, onFail) {
 //   2. Looks up the named module and filters its entries by an optional keys
 //      whitelist (otherwise renders all entries in the module).
 //   3. Renders an input per entry, type-driven (bool→checkbox, int/float→
-//      number, string→text, secret string→password, anything with `options`→
-//      <select>).
+//      number, string→text, secret string→password, bitmask: options→checkbox
+//      grid via BitmaskField, anything else with `options`→ <select>).
 //   4. Wires a single Save button to sendSequential, which produces a
 //      [beginwrite, ...cmds, savesettings] batch through /api/cli/batch.
 //
@@ -224,6 +373,19 @@ window.SchemaPanel = (function(){
       return '<label style="display:flex;flex-direction:column;gap:0.25rem;font-size:0.9em;color:var(--panel-fg)">' + entry.label +
              '<span style="padding:0.5rem;border:1px solid var(--border);border-radius:4px;background:rgba(255,255,255,0.04);color:var(--muted);min-width:140px;display:inline-block">' +
              displayVal + '</span></label>';
+    }
+    // Universal bitmask checkbox grid — options start with "bitmask:"
+    if (window.BitmaskField && window.BitmaskField.isBitmaskOptions(entry.options)) {
+      return window.BitmaskField.render({
+        key: entry.key,
+        id: id,
+        label: entry.label,
+        options: entry.options,
+        value: val,
+        cmdKey: entry.cmdKey,
+        type: entry.type || 'int',
+        disabled: false
+      });
     }
     // Enum picker — `options` is a CSV of "value|label" pairs (label-only OK).
     if (entry.options) {
@@ -323,8 +485,18 @@ window.SchemaPanel = (function(){
       var msg = document.getElementById(msgId);
       var cmds = [];
       var skipped = [];
+      var usedIds = {};
+      if (window.BitmaskField) {
+        window.BitmaskField.collectFrom(cont).forEach(function(item) {
+          if (item.id) usedIds[item.id] = true;
+          if (item.id && !window._isChanged(item.id, item.val)) { skipped.push(item.id); return; }
+          cmds.push(item.cmd + ' ' + item.val);
+        });
+      }
       cont.querySelectorAll('input,select').forEach(function(el){
         if (!el.id) return;
+        if (usedIds[el.id] || el.getAttribute('data-bitmask-snapshot')) return;
+        if (el.getAttribute('data-bit') !== null) return;
         var verb = el.getAttribute('data-cmd');
         if (!verb) return;  // no CLI verb mapped → skip
         var val;
@@ -452,7 +624,7 @@ window.SchemaPanel.render({
   <div id='network-pane' style='display:none;margin-top:1rem;color:var(--panel-fg)'>
     <div class='settings-panel' style='margin:0 0 0.75rem 0'>
       <div style='display:flex;align-items:center;justify-content:space-between'>
-        <div><div style='font-size:1.05rem;font-weight:bold;color:var(--panel-fg)'>WiFi <span id='wifi-status-badge'></span></div><div style='color:var(--panel-fg);font-size:0.85rem;margin-top:0.25rem'>Current network, scan, and saved-credential management.</div></div>
+        <div><div style='font-size:1.05rem;font-weight:bold;color:var(--panel-fg)'>WiFi <span id='wifi-status-badge'></span> <span id='wifi-radio-badge'></span></div><div style='color:var(--panel-fg);font-size:0.85rem;margin-top:0.25rem'>Current network, scan, and saved-credential management.</div></div>
         <button class='btn' id='btn-wifi-toggle' onclick="togglePane('wifi-pane','btn-wifi-toggle')">Expand</button>
       </div>
       <div id='wifi-pane' style='display:none;margin-top:0.75rem'>
@@ -630,25 +802,37 @@ window.SchemaPanel.render({
   
   Promise.all([
     hw.fetchJSON('/api/settings/schema'),
-    hw.fetchJSON('/api/settings')
+    hw.fetchJSON('/api/settings'),
+    hw.fetchJSON('/api/system')
   ]).then(function(results) {
     var schema = results[0];
     var settingsResp = results[1];
+    var sysStatus = results[2] || {};
     var settings = settingsResp.settings || {};
     var container = document.getElementById('network-dynamic-container');
     if (!container) return;
 
-    // Update the static WiFi card's status badge from the schema's wifi module
-    // connected flag (driven by isWifiConnected() server-side).
+    // Two separate axes. CONNECTION badge from the schema's wifi module connected
+    // flag (isWifiConnected() server-side); RADIO-power badge from /api/system
+    // net.radioOn (the radio can be ON while WiFi is Disconnected — ESP-NOW).
     var wifiBadge = document.getElementById('wifi-status-badge');
     if (wifiBadge) {
       var wifiMod = (schema.modules || []).find(function(m) { return m.name === 'wifi'; });
       if (wifiMod && typeof wifiMod.connected === 'boolean') {
         if (wifiMod.connected) {
-          wifiBadge.outerHTML = '<span id="wifi-status-badge" style="background:rgba(102,126,234,0.15);color:var(--accent);border:1px solid rgba(102,126,234,0.3);padding:0.15rem 0.5rem;border-radius:3px;font-size:0.7rem;margin-left:0.5rem;font-weight:500">Enabled</span>';
+          wifiBadge.outerHTML = '<span id="wifi-status-badge" style="background:rgba(102,126,234,0.15);color:var(--accent);border:1px solid rgba(102,126,234,0.3);padding:0.15rem 0.5rem;border-radius:3px;font-size:0.7rem;margin-left:0.5rem;font-weight:500">Connected</span>';
         } else {
-          wifiBadge.outerHTML = '<span id="wifi-status-badge" style="background:rgba(255,152,0,0.15);color:#ff9800;border:1px solid rgba(255,152,0,0.3);padding:0.15rem 0.5rem;border-radius:3px;font-size:0.7rem;margin-left:0.5rem;font-weight:500">Disabled</span>';
+          wifiBadge.outerHTML = '<span id="wifi-status-badge" style="background:rgba(255,152,0,0.15);color:#ff9800;border:1px solid rgba(255,152,0,0.3);padding:0.15rem 0.5rem;border-radius:3px;font-size:0.7rem;margin-left:0.5rem;font-weight:500">Disconnected</span>';
         }
+      }
+    }
+    var radioBadge = document.getElementById('wifi-radio-badge');
+    if (radioBadge && sysStatus.net && typeof sysStatus.net.radioOn === 'boolean') {
+      if (sysStatus.net.radioOn) {
+        var rlabel = sysStatus.net.radioHeldForEspnow ? 'Radio On (ESP-NOW)' : 'Radio On';
+        radioBadge.outerHTML = '<span id="wifi-radio-badge" style="background:rgba(76,175,80,0.15);color:#4caf50;border:1px solid rgba(76,175,80,0.3);padding:0.15rem 0.5rem;border-radius:3px;font-size:0.7rem;margin-left:0.35rem;font-weight:500">' + rlabel + '</span>';
+      } else {
+        radioBadge.outerHTML = '<span id="wifi-radio-badge" style="background:rgba(255,152,0,0.15);color:#ff9800;border:1px solid rgba(255,152,0,0.3);padding:0.15rem 0.5rem;border-radius:3px;font-size:0.7rem;margin-left:0.35rem;font-weight:500">Radio Off</span>';
       }
     }
 
@@ -775,6 +959,18 @@ window.SchemaPanel.render({
     var disAttr = disabled ? ' disabled' : '';
     var grayStyle = disabled ? 'opacity:0.6;cursor:not-allowed;' : '';
     var cmdAttr = e.cmdKey ? ' data-cmd="' + e.cmdKey + '"' : '';
+    if (window.BitmaskField && window.BitmaskField.isBitmaskOptions(e.options)) {
+      return window.BitmaskField.render({
+        key: e.key,
+        id: id,
+        label: e.label,
+        options: e.options,
+        value: val,
+        cmdKey: e.cmdKey,
+        type: e.type || 'int',
+        disabled: !!disabled
+      });
+    }
     if (e.type === 'bool') {
       return '<label style="' + grayStyle + '"><input type="checkbox" id="' + id + '"' + (val ? ' checked' : '') + disAttr + cmdAttr + ' style="margin-right:0.5rem">' + e.label + '</label>';
     } else if (e.type === 'string' && e.secret) {
@@ -787,9 +983,10 @@ window.SchemaPanel.render({
       }).join('');
       return '<label style="' + grayStyle + '">' + e.label + '<br><select id="' + id + '"' + disAttr + cmdAttr + ' style="padding:0.5rem;border:1px solid #ddd;border-radius:4px;width:160px">' + opts + '</select></label>';
     } else if ((e.type === 'int' || e.type === 'float') && e.options) {
-      // Int/float with named options - render as dropdown
+      // Int/float with named options - render as dropdown (supports value|label or value:label)
       var opts = e.options.split(',').map(function(o) {
-        var parts = o.split(':');
+        var bar = o.indexOf('|');
+        var parts = bar >= 0 ? [o.substring(0, bar), o.substring(bar + 1)] : o.split(':');
         var optVal = parts[0];
         var optLabel = parts.length > 1 ? parts[1] : optVal;
         return '<option value="' + optVal + '"' + (parseInt(val) === parseInt(optVal) ? ' selected' : '') + '>' + optLabel + '</option>';
@@ -1191,9 +1388,22 @@ window.SchemaPanel.render({
   window.saveDynamicSettings = function(modName, section) {
     var pane = document.getElementById(modName + '-pane');
     if (!pane) { alert('Settings pane not found for: ' + modName); return; }
+    var cmds = [];
+    var usedIds = {};
+
+    if (window.BitmaskField) {
+      window.BitmaskField.collectFrom(pane).forEach(function(item) {
+        if (item.id) usedIds[item.id] = true;
+        if (item.id && !window._isChanged(item.id, item.val)) return;
+        cmds.push(item.cmd + ' ' + item.val);
+      });
+    }
+
     var inputs = pane.querySelectorAll('[id^="dyn-"]:not([disabled])');
     var updates = {};
     inputs.forEach(function(el) {
+      if (usedIds[el.id] || el.getAttribute('data-bitmask-snapshot')) return;
+      if (el.getAttribute('data-bit') !== null) return;
       var key = el.id.replace('dyn-', '').replace(/-/g, '.');
       var val;
       if (el.type === 'checkbox') val = el.checked ? 1 : 0;
@@ -1206,7 +1416,7 @@ window.SchemaPanel.render({
       if (el.type !== 'password' && !window._isChanged(el.id, val)) return;
       updates[key] = val;
     });
-    
+
     // For camera: if enabling auto-capture and folder is empty, set default and update UI
     if (modName === 'camera' && updates['cameraAutoCapture'] === 1) {
       var folderInput = document.getElementById('dyn-cameraCaptureFolder');
@@ -1216,8 +1426,6 @@ window.SchemaPanel.render({
       }
     }
 
-    
-    var cmds = [];
     for (var k in updates) {
       var el = pane.querySelector('#dyn-' + k.replace(/\./g, '-'));
       var cmd = el && el.getAttribute('data-cmd');
@@ -1322,8 +1530,16 @@ window.SchemaPanel.render({
       <div style='text-align:center;padding:2rem;color:var(--panel-fg)'>Loading notification settings...</div>
     </div>
     <div id='notif-policy-section' style='margin-top:1rem'>
+      <style>
+      .notif-fam-hdr{display:flex;align-items:center;gap:0.5rem;padding:0.4rem 0.55rem;
+        background:var(--crumb-bg);border:1px solid var(--border);border-radius:6px;
+        cursor:pointer;font-weight:600;font-size:0.9rem;color:var(--panel-fg);
+        -webkit-user-select:none;user-select:none}
+      .notif-fam-hdr:hover{border-color:var(--accent)}
+      .notif-fam-set{font-size:0.78rem;padding:1px 4px}
+      </style>
       <div style='font-weight:bold;color:var(--panel-fg);margin-bottom:0.25rem'>Event visibility (device-wide, admin)</div>
-      <div style='color:var(--panel-fg);font-size:0.85rem;margin-bottom:0.5rem'>all = everyone &middot; admin = admin viewers only &middot; off = hidden for everyone</div>
+      <div style='color:var(--panel-fg);font-size:0.85rem;margin-bottom:0.5rem'>all = everyone &middot; admin = admin viewers only &middot; off = hidden for everyone &middot; click a family to expand, or use its dropdown to set the whole group</div>
       <div id='notif-policy-list' style='max-height:300px;overflow-y:auto;border:1px solid var(--border);border-radius:4px;padding:0.5rem;color:var(--panel-fg)'>Loading...</div>
       <button class='btn' style='margin-top:0.5rem' onclick='saveNotifPolicy()'>Save Event Visibility</button>
     </div>
@@ -1331,25 +1547,83 @@ window.SchemaPanel.render({
 </div>
 <script>
 var _notifPolicyBaseline = null;
+function notifFamToggle(gid) {
+  var body = document.getElementById(gid), caret = document.getElementById(gid + '-c');
+  if (!body) return;
+  var open = body.style.display !== 'none';
+  body.style.display = open ? 'none' : '';
+  if (caret) caret.innerHTML = open ? '&#9656;' : '&#9662;';
+}
 function loadNotifPolicy() {
-  hw.postFormText('/api/cli', { cmd: 'notifydevicekind list json' })
-  .then(function(text) {
-    var m = text.match(/\{"kinds":\[[\s\S]*?\]\}/);
-    if (!m) { document.getElementById('notif-policy-list').textContent = 'Not available (admin login required).'; return; }
-    var kinds = JSON.parse(m[0]).kinds;
+  // Two calls: the VOCABULARY (every kind) and the POLICY (non-default levels
+  // only, matching the on-disk shape). A kind absent from the policy is 'all'.
+  // The policy is sparse precisely so it can never outgrow the response buffer.
+  Promise.all([
+    hw.fetchJSON('/api/events/kinds'),
+    hw.postFormText('/api/cli', { cmd: 'notifydevicekind list json' })
+  ])
+  .then(function(res) {
+    if (!res[0] || !Array.isArray(res[0].families)) {
+      throw new Error('no event-kind families in response');
+    }
+    var pm = res[1].match(/\{"kinds":\{[\s\S]*\}\}/);
+    if (!pm) throw new Error('no notification policy in response (' + res[1].length + ' B)');
+    var fams   = res[0].families || [];
+    var levels = JSON.parse(pm[0]).kinds || {};
     _notifPolicyBaseline = {};
-    var html = '';
-    kinds.forEach(function(k) {
-      _notifPolicyBaseline[k.n] = k.l;
-      html += "<div style='display:flex;justify-content:space-between;align-items:center;padding:2px 0'>" +
-              "<span style='font-size:0.85em'>" + k.n + "</span>" +
-              "<select data-kind='" + k.n + "' class='notif-policy-sel'>" +
-              ['all','admin','off'].map(function(l){ return "<option value='" + l + "'" + (l === k.l ? " selected" : "") + ">" + l + "</option>"; }).join('') +
-              "</select></div>";
+    /* Grouped by family, collapsed by default — 134 selects in one flat list is
+       what made this unreadable. The family header sets every kind under it at
+       once, mirroring the debug panel's click-the-group-name behaviour. */
+    var html = '', total = 0;
+    fams.forEach(function(f) {
+      var kinds = f.k || [];
+      if (!kinds.length) return;
+      total += kinds.length;
+      var gid = 'nfam-' + f.n.replace(/[^A-Za-z0-9]/g, '');
+      var rows = '';
+      kinds.forEach(function(name) {
+        var lvl = levels[name] || 'all';
+        _notifPolicyBaseline[name] = lvl;
+        rows += "<div style='display:flex;justify-content:space-between;align-items:center;padding:2px 0 2px 1.2rem'>" +
+                "<span style='font-size:0.85em'>" + name + "</span>" +
+                "<select data-kind='" + name + "' class='notif-policy-sel'>" +
+                ['all','admin','off'].map(function(l){ return "<option value='" + l + "'" + (l === lvl ? " selected" : "") + ">" + l + "</option>"; }).join('') +
+                "</select></div>";
+      });
+      var nonDefault = kinds.filter(function(n){ return (levels[n] || 'all') !== 'all'; }).length;
+      html += "<div style='margin:0.35rem 0'>" +
+                "<div class='notif-fam-hdr' onclick=\"notifFamToggle('" + gid + "')\">" +
+                  "<span id='" + gid + "-c' style='width:1em;flex:none;opacity:0.7'>&#9656;</span>" +
+                  "<span style='flex:1'>" + f.n + " (" + kinds.length +
+                    (nonDefault ? ", " + nonDefault + " changed" : "") + ")</span>" +
+                  "<select class='notif-fam-set' data-fam='" + gid + "' onclick='event.stopPropagation()'>" +
+                    "<option value=''>set all…</option><option value='all'>all</option>" +
+                    "<option value='admin'>admin</option><option value='off'>off</option>" +
+                  "</select>" +
+                "</div>" +
+                "<div id='" + gid + "' style='display:none'>" + rows + "</div>" +
+              "</div>";
     });
+    if (!total) html = "<div style='opacity:0.7;font-style:italic'>No event kinds available.</div>";
     document.getElementById('notif-policy-list').innerHTML = html;
+    document.querySelectorAll('.notif-fam-set').forEach(function(sel) {
+      sel.onchange = function() {
+        var v = sel.value; if (!v) return;
+        document.querySelectorAll('#' + sel.getAttribute('data-fam') + ' .notif-policy-sel')
+          .forEach(function(s) { s.value = v; });
+        sel.value = '';
+      };
+    });
   })
-  .catch(function(e) { document.getElementById('notif-policy-list').textContent = 'Error: ' + e.message; });
+  /* notifydevicekind is admin-gated, so a non-admin legitimately gets 403 —
+     keep the accurate message for THAT case only. The old code showed it for
+     every failure, which is why a real delivery bug read as an auth problem. */
+  .catch(function(e) {
+    var msg = (e && e.message && e.message.indexOf('403') !== -1)
+      ? 'Not available (admin access required).'
+      : 'Error: ' + (e && e.message ? e.message : 'unknown');
+    document.getElementById('notif-policy-list').textContent = msg;
+  });
 }
 function saveNotifPolicy() {
   if (!_notifPolicyBaseline) return;
@@ -1444,13 +1718,12 @@ function saveNotifPolicy() {
     debugstoragesettings:"Logs settings-file load and save cycles.",
     debugstoragemigration:"Logs settings-schema migrations applied during load.",
     // esp-now
-    debugespnow:"Master toggle for ESP-NOW subsystem logs.",
+    debugespnow:"Alias of debugespnowcore — ESP-NOW core messages only.",
     debugespnowstream:"Logs streaming-protocol frames (data, ack, resume).",
     debugespnowcore:"Core driver events: peer add/remove, send status, TX callbacks.",
     debugespnowrouter:"Logs the command router that decides whether an RPC runs locally or forwards to a bonded peer.",
     debugespnowmesh:"Logs mesh/discovery heartbeats and peer table updates.",
     debugespnowtopo:"Logs topology changes — new neighbors, lost peers, link-quality updates.",
-    debugespnowencryption:"Logs LMK/PMK key installation and encrypted peer handshakes.",
     debugespnowmetadata:"Logs metadata-sync frames exchanged between bonded peers.",
     // bluetooth
     debugbluetooth:"Master toggle for BLE debug output (server mode).",
@@ -1772,6 +2045,9 @@ function saveNotifPolicy() {
               <input type='password' id='add-user-pass' class='form-input' autocomplete='new-password'></div>
               <div><label style='display:block;font-size:0.85rem;color:var(--muted);margin-bottom:0.25rem'>Confirm password</label>
               <input type='password' id='add-user-pass2' class='form-input' autocomplete='new-password'></div>
+              <div><label style='display:block;font-size:0.85rem;color:var(--muted);margin-bottom:0.25rem'>Role</label>
+              <select id='add-user-role' class='form-input'></select>
+              <div id='add-user-role-hint' style='font-size:0.78rem;color:var(--muted);margin-top:0.25rem'></div></div>
               <label style='display:flex;align-items:flex-start;gap:0.5rem;cursor:pointer;color:var(--panel-fg);font-size:0.9rem;width:100%;min-width:0;box-sizing:border-box'>
                 <input type='checkbox' id='add-user-mustch' style='margin-top:0.15rem;flex-shrink:0;width:1rem;height:1rem'>
                 <span style='flex:1 1 0;min-width:0;line-height:1.35'>User must set a new password on next login</span>
@@ -2039,10 +2315,16 @@ function saveNotifPolicy() {
 
   window.rebootDevice = async function(){
     if(!await hwConfirm('Reboot the device now?')) return;
+    /* Check the result before destroying the page. `reboot` is admin-gated, and
+       this used to repaint the body unconditionally with no .catch at all — a
+       refused reboot wiped the UI and told the user to wait for a restart that
+       was never going to happen, with the actual reason discarded. */
     postSettingsCli('reboot')
-      .then(function(){
+      .then(function(t){
+        if (t && t.indexOf('Error') >= 0) { alert(t); return; }
         document.body.innerHTML = '<div style="text-align:center;padding:4rem;color:var(--panel-fg)"><h2>Rebooting...</h2><p>The device is restarting. Please wait and then reconnect.</p></div>';
-      });
+      })
+      .catch(function(e){ alert('Error: ' + (e && e.message ? e.message : 'reboot request failed')); });
   };
 })();
 </script>
@@ -2100,11 +2382,12 @@ console.log('[SETTINGS] Part 1: Core init starting...');
     __S.renderSettings = function(s) {
       try {
         console.log('[SETTINGS] renderSettings called with:', s);
-        // WiFi settings are nested under network.wifi after the v0.93 refactor.
-        // Older flat fallbacks (s.wifiSSID etc.) kept defensively in case an
-        // upgrade path leaves stale shapes around.
-        var wifiSect = (s.network && s.network.wifi) || s.wifi || {};
-        __S.state.currentSSID = (s.wifiPrimarySSID || wifiSect.ssid || wifiSect.wifiSSID || '');
+        // WiFi settings are nested under network.wifi. The current SSID is the
+        // runtime-only wifiPrimarySSID field (live WiFi.SSID()); the legacy
+        // wifiSect.ssid / wifiSect.wifiSSID fallbacks are gone with the dead
+        // single-network settings fields (removed 2026-07-20).
+        var wifiSect = (s.network && s.network.wifi) || {};
+        __S.state.currentSSID = (s.wifiPrimarySSID || '');
         $('wifi-ssid').textContent = __S.state.currentSSID;
         var primary = __S.state.currentSSID || '';
         var netList = wifiSect.networks || s.wifiNetworks || [];
@@ -2525,6 +2808,35 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
       if (p) p.value = '';
       if (p2) p2.value = '';
       if (c) c.checked = false;
+      /* Always list every role; DISABLE the ones this viewer can't grant rather
+         than hiding them. Hiding was the first cut and it was wrong: the option
+         simply wasn't there, the select stayed on 'user', and an admin who meant
+         to create a Super Admin got a plain user with nothing explaining why.
+         A disabled row with a reason says "this exists and you can't grant it".
+         __hwRoleRank / __hwRank come from the page renderer (same constants as
+         kRoleRank* in System_User.h). Advisory only — cmd_user_add re-checks. */
+      var sel = $('add-user-role'), hint = $('add-user-role-hint');
+      if (sel) {
+        var R = window.__hwRoleRank || { guest: 0, user: 1, admin: 2, superadmin: 3 };
+        var rank = (typeof window.__hwRank === 'number') ? window.__hwRank : R.admin;
+        var opts = [
+          { v: 'guest',      t: 'Guest - view-only (login/logout only)',          need: R.guest },
+          { v: 'user',       t: 'User - standard access',                        need: R.user },
+          { v: 'admin',      t: 'Admin - manage users, settings and files',      need: R.admin },
+          { v: 'superadmin', t: 'Super Admin - full device and filesystem control', need: R.superadmin }
+        ];
+        sel.innerHTML = opts.map(function(o) {
+          var blocked = rank < o.need;
+          return "<option value='" + o.v + "'" + (blocked ? " disabled" : "") + ">" +
+                 o.t + (blocked ? ' (requires higher role)' : '') + "</option>";
+        }).join('');
+        sel.value = 'user';
+        if (hint) {
+          hint.textContent = (rank >= R.superadmin)
+            ? 'Super Admin bypasses all filesystem permissions, on every transport.'
+            : 'You can only grant a role up to your own - Super Admin requires a Super Admin.';
+        }
+      }
       m.style.display = 'flex';
     };
     window.closeAddUserModal = function() {
@@ -2540,7 +2852,9 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
       if (!username) { hwAlert('Enter a username'); return; }
       if (pass.length < 6) { hwAlert('Password must be at least 6 characters'); return; }
       if (pass !== pass2) { hwAlert('Passwords do not match'); return; }
-      var cmd = 'useradd ' + username + ' ' + pass + ' ' + (mustCh ? '1' : '0');
+      var roleSel = $('add-user-role');
+      var role = (roleSel && roleSel.value) ? roleSel.value : 'user';
+      var cmd = 'useradd ' + username + ' ' + pass + ' ' + (mustCh ? '1' : '0') + ' ' + role;
       postSettingsCli(cmd)
         .then(function(t) {
           if (t && t.indexOf('Error') >= 0) {
@@ -2593,6 +2907,38 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
         .catch(function(e) { hwAlert('Error: ' + (e && e.message ? e.message : String(e))); });
     };
     
+    /* Role rank for a userlist entry. Mirrors userRoleRank() / __hwRoleRank:
+       guest=0, user=1, admin=2, superadmin=3. `role` is authoritative
+       (userlist json copies users.json verbatim); `isAdmin` is a legacy
+       fallback that may not be present. */
+    window.userRankOf = function(u) {
+      var R = window.__hwRoleRank || { guest: 0, user: 1, admin: 2, superadmin: 3 };
+      var r = (u && u.role) ? String(u.role).toLowerCase() : '';
+      if (r === 'superadmin') return R.superadmin;
+      if (r === 'admin' || (u && u.isAdmin === true)) return R.admin;
+      if (r === 'guest') return R.guest;
+      return R.user;
+    };
+    /* Escape usernames before innerHTML — legacy pending_users.json entries
+       may predate the public allowlist. data-* attrs still get the raw value
+       via dataset after the browser parses the attribute. */
+    function escapeUserHtml(s) {
+      return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+    window.userRoleBadge = function(rank) {
+      var R = window.__hwRoleRank || { guest: 0, user: 1, admin: 2, superadmin: 3 };
+      var s = 'font-size:0.8rem;font-weight:600;padding:1px 6px;border-radius:3px;margin-left:6px';
+      if (rank >= R.superadmin) return '<span style="color:#f6ad55;background:rgba(246,173,85,0.18);' + s + '">Super Admin</span>';
+      if (rank >= R.admin) return '<span style="color:var(--accent);background:rgba(102,126,234,0.15);' + s + '">Admin</span>';
+      if (rank >= R.user) return '<span style="color:#a0aec0;background:rgba(160,174,192,0.1);' + s + '">User</span>';
+      return '<span style="color:#718096;background:rgba(113,128,150,0.12);' + s + '">Guest</span>';
+    };
+
     window.refreshUsers = function() {
       var container = $('users-list');
       if (!container) return;
@@ -2648,8 +2994,18 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
         var html = '<div style="display:grid;gap:0.5rem">';
         allUsers.forEach(function(user) {
           var username = user.username || '';
+          var usernameHtml = escapeUserHtml(username);
+          var usernameAttr = escapeUserHtml(username);
           var isPending = user.isPending || false;
-          var isAdmin = (user.role === 'admin') || (user.isAdmin === true);
+          /* Rank, not a boolean. The old `role === 'admin' || isAdmin === true`
+             test made a SUPERADMIN match neither branch, so the device owner
+             rendered as a plain "User" with a Promote button. Mirrors
+             userRoleRank() / __hwRoleRank. `role` is authoritative —
+             userlist json copies users.json verbatim and there may be no
+             isAdmin field at all; it is kept only as a legacy fallback. */
+          var R = window.__hwRoleRank || { guest: 0, user: 1, admin: 2, superadmin: 3 };
+          var rank = userRankOf(user);
+          var isAdmin = rank >= R.admin;
           var isBanned = user.banned || false;
           var userSessions = sessionsByUser[username] || [];
           var sessionCount = userSessions.length;
@@ -2659,14 +3015,14 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
           html += '<div style="margin-bottom:0.25rem;background:var(--panel-bg);border:1px solid var(--border);border-radius:4px;' + rowBorder + '">';
           html += '<div onclick="toggleUserDropdown(\'' + uid + '\')" style="padding:0.5rem;cursor:pointer">';
           if (isPending) {
-            html += '<div style="display:flex;align-items:center;justify-content:space-between"><div><strong>' + username + '</strong> <span style="color:#b8860b;font-size:0.85rem">(Pending Approval)</span></div><div style="font-size:0.8rem;color:var(--panel-fg)">&#9660;</div></div>';
+            html += '<div style="display:flex;align-items:center;justify-content:space-between"><div><strong>' + usernameHtml + '</strong> <span style="color:#b8860b;font-size:0.85rem">(Pending Approval)</span></div><div style="font-size:0.8rem;color:var(--panel-fg)">&#9660;</div></div>';
             if (user.timestamp) { html += '<div style="font-size:0.8rem;color:var(--muted,#888);margin-top:0.25rem">Requested: ' + (typeof user.timestamp === 'string' ? user.timestamp : formatMillisTimestamp(user.timestamp)) + '</div>'; }
           } else {
             // Line 1: username + role badge + banned badge + session count
-            var roleBadge = isAdmin ? '<span style="color:var(--accent);font-size:0.8rem;font-weight:600;background:rgba(102,126,234,0.15);padding:1px 6px;border-radius:3px;margin-left:6px">Admin</span>' : '<span style="color:#a0aec0;font-size:0.8rem;font-weight:600;background:rgba(160,174,192,0.1);padding:1px 6px;border-radius:3px;margin-left:6px">User</span>';
+            var roleBadge = userRoleBadge(rank);
             var bannedBadge = isBanned ? ' <span style="color:#dc3545;font-size:0.8rem;font-weight:600;background:rgba(220,53,69,0.15);padding:1px 6px;border-radius:3px">Banned</span>' : '';
             var sessionBadge = '<span style="color:var(--panel-fg);font-size:0.8rem;margin-left:6px">' + sessionCount + ' session' + (sessionCount !== 1 ? 's' : '') + '</span>';
-            html += '<div style="display:flex;align-items:center;justify-content:space-between"><div><strong>' + username + '</strong>' + roleBadge + bannedBadge + sessionBadge + '</div><div style="font-size:0.8rem;color:var(--panel-fg)">&#9660;</div></div>';
+            html += '<div style="display:flex;align-items:center;justify-content:space-between"><div><strong>' + usernameHtml + '</strong>' + roleBadge + bannedBadge + sessionBadge + '</div><div style="font-size:0.8rem;color:var(--panel-fg)">&#9660;</div></div>';
             // Line 2: metadata summary — rendered inside the dropdown, not here
           }
           html += '</div>';
@@ -2700,33 +3056,57 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
           html += '<div style="display:flex;gap:0.5rem;flex-wrap:wrap">';
           if (isPending) {
             // Pending users only get Approve and Deny
-            html += '<button class="btn" data-user="' + username + '" onclick="approveUserByName(this.dataset.user)" title="Approve this registration request">Approve</button>';
-            html += '<button class="btn" data-user="' + username + '" onclick="denyUserByName(this.dataset.user)" title="Deny and remove this registration request">Deny</button>';
+            html += '<button class="btn" data-user="' + usernameAttr + '" onclick="approveUserByName(this.dataset.user)" title="Approve this registration request">Approve</button>';
+            html += '<button class="btn" data-user="' + usernameAttr + '" onclick="denyUserByName(this.dataset.user)" title="Deny and remove this registration request">Deny</button>';
           } else {
-            if (!isAdmin) {
-              html += '<button class="btn" data-user="' + username + '" onclick="promoteUserByName(this.dataset.user)" title="Promote to admin">Promote</button>';
+            /* The firmware refuses any mutation of a higher-ranked account
+               ("Cannot modify a higher-privileged account"). Rendering those
+               buttons anyway meant an admin got a full row of controls on the
+               owner that every one of which was guaranteed to fail. Show why
+               instead. __hwRank is the viewer's own rank, from the renderer. */
+            var myRank = (typeof window.__hwRank === 'number') ? window.__hwRank : R.admin;
+            if (rank > myRank) {
+              html += '<span style="font-size:0.85rem;color:var(--muted,#888);padding:0.25rem 0">' +
+                      'Higher-privileged account &mdash; no actions available at your role.</span>';
             } else {
-              html += '<button class="btn" data-user="' + username + '" onclick="demoteUserByName(this.dataset.user)" title="Demote from admin">Demote</button>';
+            /* One tier at a time, target named explicitly. Each button says
+               exactly which tier it moves to, and the command is given that
+               tier rather than relying on its default. */
+            if (rank === R.guest) {
+              html += '<button class="btn" data-user="' + usernameAttr + '" onclick="promoteUserByName(this.dataset.user,\'user\')" title="Promote to User">Promote to User</button>';
+            } else if (rank === R.user) {
+              html += '<button class="btn" data-user="' + usernameAttr + '" onclick="promoteUserByName(this.dataset.user,\'admin\')" title="Promote to Admin">Promote to Admin</button>';
+              html += '<button class="btn" data-user="' + usernameAttr + '" onclick="demoteUserByName(this.dataset.user,\'guest\')" title="Demote to Guest - view-only">Demote to Guest</button>';
+            } else if (rank === R.admin) {
+              /* admin -> superadmin: only a superadmin may grant it, and the
+                 firmware refuses otherwise, so only offer it to one. */
+              if (myRank >= R.superadmin) {
+                html += '<button class="btn" data-user="' + usernameAttr + '" onclick="promoteUserByName(this.dataset.user,\'superadmin\')" title="Promote to Super Admin - full device and filesystem control">Promote to Super Admin</button>';
+              }
+              html += '<button class="btn" data-user="' + usernameAttr + '" onclick="demoteUserByName(this.dataset.user,\'user\')" title="Demote to User">Demote to User</button>';
+            } else {
+              html += '<button class="btn" data-user="' + usernameAttr + '" onclick="demoteUserByName(this.dataset.user,\'admin\')" title="Demote to Admin">Demote to Admin</button>';
             }
-            html += '<button class="btn" data-user="' + username + '" onclick="resetUserPassword(this.dataset.user)" title="Reset password for this user">Reset Password</button>';
-            html += '<button class="btn" data-user="' + username + '" onclick="deleteUserByName(this.dataset.user)" title="Delete this user">Delete</button>';
+            html += '<button class="btn" data-user="' + usernameAttr + '" onclick="resetUserPassword(this.dataset.user)" title="Reset password for this user">Reset Password</button>';
+            html += '<button class="btn" data-user="' + usernameAttr + '" onclick="deleteUserByName(this.dataset.user)" title="Delete this user">Delete</button>';
             if (sessionCount > 0) {
-              html += '<button class="btn" data-user="' + username + '" onclick="revokeUserSessions(this.dataset.user)" title="Revoke all sessions for this user">Revoke Sessions</button>';
+              html += '<button class="btn" data-user="' + usernameAttr + '" onclick="revokeUserSessions(this.dataset.user)" title="Revoke all sessions for this user">Revoke Sessions</button>';
             }
             if (isBanned) {
-              html += '<button class="btn" data-user="' + username + '" onclick="unbanUserByName(this.dataset.user)" title="Remove ban and restore access">Unban</button>';
+              html += '<button class="btn" data-user="' + usernameAttr + '" onclick="unbanUserByName(this.dataset.user)" title="Remove ban and restore access">Unban</button>';
             } else {
-              html += '<button class="btn" data-user="' + username + '" onclick="banUserByName(this.dataset.user)" title="Ban this user from all access">Ban</button>';
+              html += '<button class="btn" data-user="' + usernameAttr + '" onclick="banUserByName(this.dataset.user)" title="Ban this user from all access">Ban</button>';
             }
+            }  /* end: viewer outranks this account */
           }
           var hasEspNow = !isPending && (__S && __S.features && __S.features.espnow === true);
           if (hasEspNow) {
-            html += '<button class="btn" data-user="' + username + '" onclick="toggleUserDropdown(\'' + uid + '-sync\')" title="Sync this user to another device over ESP-NOW">Sync via ESP-NOW</button>';
+            html += '<button class="btn" data-user="' + usernameAttr + '" onclick="toggleUserDropdown(\'' + uid + '-sync\')" title="Sync this user to another device over ESP-NOW">Sync via ESP-NOW</button>';
           }
           html += '</div>';
           if (hasEspNow) {
             html += '<div id="dropdown-' + uid + '-sync" style="display:none;margin-top:0.5rem;padding:0.75rem;background:var(--panel-bg);border:1px solid var(--border);border-radius:6px">';
-            html += '<div style="font-weight:bold;font-size:0.9rem;color:var(--panel-fg);margin-bottom:0.5rem">Sync \'' + username + '\' to device</div>';
+            html += '<div style="font-weight:bold;font-size:0.9rem;color:var(--panel-fg);margin-bottom:0.5rem">Sync \'' + usernameHtml + '\' to device</div>';
             html += '<div style="display:grid;grid-template-columns:1fr auto;gap:0.5rem;align-items:end;margin-bottom:0.5rem">';
             html += '<div><label style="display:block;font-size:0.85rem;color:var(--muted);margin-bottom:0.25rem">Target Device</label>';
             html += '<select id="sync-device-' + uid + '" style="width:100%"><option value="">Loading...</option></select></div>';
@@ -2735,7 +3115,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
             html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0.5rem;margin-bottom:0.5rem">';
             html += '<div><label style="display:block;font-size:0.85rem;color:var(--muted);margin-bottom:0.25rem">Your Admin Password</label>';
             html += '<input type="password" id="sync-admin-pass-' + uid + '" placeholder="Admin password" style="width:100%;box-sizing:border-box"></div>';
-            html += '<div><label style="display:block;font-size:0.85rem;color:var(--muted);margin-bottom:0.25rem">Password for ' + username + '</label>';
+            html += '<div><label style="display:block;font-size:0.85rem;color:var(--muted);margin-bottom:0.25rem">Password for ' + usernameHtml + '</label>';
             html += '<input type="password" id="sync-user-pass-' + uid + '" placeholder="User\'s password" style="width:100%;box-sizing:border-box"></div>';
             html += '</div>';
             html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0.5rem;margin-bottom:0.5rem">';
@@ -2744,7 +3124,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
             html += '<div><label style="display:block;font-size:0.85rem;color:var(--muted);margin-bottom:0.25rem">Target Admin Password</label>';
             html += '<input type="password" id="sync-recv-admin-pass-' + uid + '" placeholder="That admin\'s password" style="width:100%;box-sizing:border-box"></div>';
             html += '</div>';
-            html += '<button class="btn" data-uid="' + uid + '" data-user="' + username + '" onclick="syncUserToDeviceFor(this.dataset.uid,this.dataset.user)" title="Send sync">Sync</button>';
+            html += '<button class="btn" data-uid="' + uid + '" data-user="' + usernameAttr + '" onclick="syncUserToDeviceFor(this.dataset.uid,this.dataset.user)" title="Send sync">Sync</button>';
             html += '</div>';
           }
           html += '</div></div>';
@@ -2757,19 +3137,28 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
       });
     };
     
-    window.promoteUserByName = async function(username) {
+    /* Explicit target for the same reason as demote. Also unlocks admin ->
+       superadmin and guest -> user; the command is given the named tier
+       rather than relying on promote/demote defaults. */
+    window.promoteUserByName = async function(username, toRole) {
       if (!username) {
         alert('Username required');
         return;
       }
-      if (!await hwConfirm('Promote user "' + username + '" to admin?')) {
+      var target = toRole || 'admin';
+      var labels = { user: 'User', admin: 'Admin', superadmin: 'Super Admin' };
+      var label = labels[target] || target;
+      var warn = (target === 'superadmin')
+        ? '\n\nSuper Admin bypasses all filesystem permissions, on every transport.'
+        : '';
+      if (!await hwConfirm('Promote "' + username + '" to ' + label + '?' + warn)) {
         return;
       }
-      var cmd = 'userpromote ' + username;
+      var cmd = 'userpromote ' + username + ' ' + target;
       postSettingsCli(cmd)
       .then(function(t) {
         if (t.indexOf('Error') >= 0) {
-          alert('Error: ' + t);
+          alert(t);  /* t already leads with 'Error: ' (uniform return contract) */
         } else {
           alert(t);
           try {
@@ -2794,7 +3183,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
       postSettingsCli(cmd)
       .then(function(t) {
         if (t.indexOf('Error') >= 0) {
-          alert('Error: ' + t);
+          alert(t);  /* t already leads with 'Error: ' (uniform return contract) */
         } else {
           alert(t);
           try {
@@ -2819,7 +3208,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
       postSettingsCli(cmd)
       .then(function(t) {
         if (t.indexOf('Error') >= 0) {
-          alert('Error: ' + t);
+          alert(t);  /* t already leads with 'Error: ' (uniform return contract) */
         } else {
           alert(t);
           try {
@@ -2832,19 +3221,26 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
       });
     };
     
-    window.demoteUserByName = async function(username) {
+    /* `toRole` is REQUIRED, not optional. Bare `userdemote <user>` defaults to
+       "user" (System_User.cpp), so demoting a SUPERADMIN dropped them 2 -> 0 in
+       one click — straight past admin, while the button's own tooltip promised
+       one tier. Naming the target makes the command say what the UI says. */
+    window.demoteUserByName = async function(username, toRole) {
       if (!username) {
         alert('Username required');
         return;
       }
-      if (!await hwConfirm('Demote admin user "' + username + '" to regular user?')) {
+      var target = toRole || 'user';
+      var labels = { guest: 'Guest (view-only)', user: 'regular User', admin: 'Admin' };
+      var label = labels[target] || target;
+      if (!await hwConfirm('Demote "' + username + '" to ' + label + '?')) {
         return;
       }
-      var cmd = 'userdemote ' + username;
+      var cmd = 'userdemote ' + username + ' ' + target;
       postSettingsCli(cmd)
       .then(function(t) {
         if (t.indexOf('Error') >= 0) {
-          alert('Error: ' + t);
+          alert(t);  /* t already leads with 'Error: ' (uniform return contract) */
         } else {
           alert(t);
           try {
@@ -2872,7 +3268,11 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
       try {
         var r = await hw.cliConfirm('userdelete ' + username, prompt, { target: target });
         if (r.cancelled) return;
-        if (!r.ok) { alert('Error: ' + (r.result || 'no response')); return; }
+        /* r.result is the RAW CLI text from hw.cliConfirm, so on a refusal it
+           already reads "Error: ...". Prefixing again gave the same double
+           "Error: Error:" as the four handlers above — missed in that pass
+           because this one branches on !r.ok rather than indexOf('Error'). */
+        if (!r.ok) { alert(r.result || 'Error: no response'); return; }
         alert(r.result);
         try { refreshUsers(); } catch(_) {}
       } catch (e) {
@@ -2886,7 +3286,13 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
       var current = $('usersync-enabled-value') && $('usersync-enabled-value').textContent === 'Enabled';
       var cmd = current ? 'espnowusersync off' : 'espnowusersync on';
       postSettingsCli(cmd)
-      .then(function() {
+      .then(function(t) {
+        /* espnowusersync is SUPERADMIN-gated. The result used to be ignored
+           entirely, so a plain admin clicked Enable, the firmware refused, and
+           the panel reported "Enabled" and opened a sync form for a feature
+           that was still off. A security control must not claim state it
+           doesn't have. */
+        if (t && t.indexOf('Error') >= 0) { alert(t); return; }
         var nowEnabled = !current;
         var el = $('usersync-enabled-value');
         if (el) { el.textContent = nowEnabled ? 'Enabled' : 'Disabled'; el.style.color = 'var(--accent)'; }
@@ -2895,7 +3301,8 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
         var form = $('usersync-form');
         if (form) form.style.display = nowEnabled ? 'block' : 'none';
         if (nowEnabled) { refreshSyncUsers(); refreshSyncPeers(); }
-      });
+      })
+      .catch(function(e) { alert('Error: ' + (e && e.message ? e.message : 'request failed')); });
     };
     
     window.refreshSyncUsers = function() {
@@ -2913,7 +3320,11 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
         users.forEach(function(u) {
           var opt = document.createElement('option');
           opt.value = u.username || '';
-          opt.textContent = (u.username || '') + (u.isAdmin ? ' (Admin)' : ' (User)');
+          /* Was `u.isAdmin ? Admin : User` — a field userlist json may not even
+             emit, and blind to superadmin either way. Rank off `role`. */
+          var r = window.userRankOf(u);
+          opt.textContent = (u.username || '') +
+                            (r >= 2 ? ' (Super Admin)' : r === 1 ? ' (Admin)' : ' (User)');
           sel.appendChild(opt);
         });
       });

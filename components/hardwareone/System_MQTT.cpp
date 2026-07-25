@@ -18,6 +18,7 @@
 #include <LittleFS.h>
 #include "System_VFS.h"   // VFS::*Guarded + systemAuth (Phase 2 perm refactor)
 #include "System_AuthIdentity.h"
+#include "System_CommandTypes.h"  // CMD_RESULT_MAX, executeCommand result cap
 #include <mqtt_client.h>
 #include "System_Settings.h"
 #include "System_Debug.h"
@@ -461,24 +462,32 @@ static void handleMQTTCommand(const char* topic, int topicLen, const char* data,
   }
 #endif
   
-  // Set up auth context for command execution
-  AuthContext ctx;
-  ctx.transport = SOURCE_MQTT;
-  ctx.user = username;
-  ctx.ip = "mqtt:" + gSettings.mqttHost;
-  ctx.path = "/mqtt/command";
-  ctx.opaque = nullptr;
-  
-  // Execute command with auth context
-  static char* cmdResult = nullptr;
-  if (!cmdResult) cmdResult = (char*)ps_alloc(2048, AllocPref::PreferPSRAM, "mqtt.cmdResult");
-  if (!cmdResult) {
-    DEBUG_MQTT_COMMANDSF("Failed to allocate command result buffer");
-    return;
-  }
+  // Route command execution through cmd_exec_task (submitAndExecuteSync) instead of
+  // calling executeCommand() directly on the esp-mqtt event task. This serializes MQTT
+  // commands with every other command source (no concurrent-handler races on shared
+  // state / static response buffers) and runs them on cmd_exec's 8 KB stack. The
+  // mesh-routing path (room:/tag:/device:) above is unchanged.
+  extern bool submitAndExecuteSync(const Command& cmd, String& out);
+  Command uc;
+  uc.line = command;
+  uc.ctx.origin = ORIGIN_MQTT;
+  uc.ctx.auth.transport = SOURCE_MQTT;
+  uc.ctx.auth.user = username;
+  uc.ctx.auth.ip = "mqtt:" + gSettings.mqttHost;
+  uc.ctx.auth.path = "/mqtt/command";
+  uc.ctx.auth.opaque = nullptr;
+  uc.ctx.id = (uint32_t)millis();
+  uc.ctx.timestampMs = (uint32_t)millis();
+  uc.ctx.outputMask = MSG_ROUTE_FILE;  // audit to file log; response is the return value
+  uc.ctx.validateOnly = false;
+  uc.ctx.captureOutput = false;
+  uc.ctx.replyHandle = nullptr;
+  uc.ctx.httpReq = nullptr;
+
   systemEventPost(SYSEVT_REMOTE_CMD_RX, username, command);
-  bool success = executeCommand(ctx, command, cmdResult, 2048);
-  
+  String cmdResult;
+  bool success = submitAndExecuteSync(uc, cmdResult);
+
   // Build and publish response
   PSRAM_JSON_DOC(respDoc);
   respDoc["ok"] = success;
@@ -487,7 +496,7 @@ static void handleMQTTCommand(const char* topic, int topicLen, const char* data,
   if (success) {
     respDoc["result"] = cmdResult;
   } else {
-    respDoc["error"] = strlen(cmdResult) > 0 ? cmdResult : "Command execution failed";
+    respDoc["error"] = cmdResult.length() > 0 ? cmdResult : String("Command execution failed");
   }
   
   String respStr;
@@ -1655,8 +1664,8 @@ MQTT_PUBLISH_CMD(input, mqttPublishInput, "Gamepad")
 const CommandEntry mqttCommands[] = {
   // debugmqtt is registered by the debug module (System_Debug.cpp) — see ODR note above.
   { "mqttclientenabled", "Enable/disable MQTT [0|1]", true, cmd_mqttclientenabled, "Usage: mqttclientenabled [0|1]" },
-  { "openmqtt", "Start MQTT client", false, cmd_openmqtt },
-  { "closemqtt", "Stop MQTT client", false, cmd_closemqtt },
+  { "openmqtt", "Start MQTT client", true, cmd_openmqtt },
+  { "closemqtt", "Stop MQTT client", true, cmd_closemqtt },
   { "mqttstatus", "Show MQTT status (add 'json' for JSON output)", false, cmd_mqttstatus },
   { "mqttautostart", "MQTT auto-start [0|1]", true, cmd_mqttautostart, "Usage: mqttautostart [0|1]" },
   { "mqttHost", "MQTT broker host [hostname]", true, cmd_mqtthost, "Usage: mqttHost [hostname]" },

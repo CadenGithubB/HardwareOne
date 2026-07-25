@@ -135,7 +135,10 @@ static bool isCameraCompiled() {
 }
 
 static bool isMicrophoneCompiled() {
-#if ENABLE_MICROPHONE_SENSOR
+#if ENABLE_MICROPHONE
+  // The mic feature is present if EITHER onboard PDM silicon OR a G2-capable
+  // build — runtime availability (PDM present / glasses connected) is reported
+  // separately by the sensor "connected" callback.
   return true;
 #else
   return false;
@@ -321,7 +324,7 @@ static const FeatureEntry featureRegistry[] = {
   { "microphone", "Microphone", FEATURE_CAT_SENSOR, 4,
     FEATURE_FLAG_RUNTIME_TOGGLE,
     &gSettings.microphoneAutoStart, isMicrophoneCompiled,
-    "ESP32-S3 PDM microphone (XIAO ESP32S3 Sense)" },
+    "Microphone: onboard PDM (XIAO Sense) or G2 glasses mic" },
 
   { "espsr", "Speech Recognition", FEATURE_CAT_SENSOR, 48,
     FEATURE_FLAG_RUNTIME_TOGGLE,
@@ -485,7 +488,10 @@ const char* cmd_features(const String& argsInput) {
       o["toggleable"] = (bool)(f->flags & FEATURE_FLAG_RUNTIME_TOGGLE);
     }
     PSRAM_STATIC_BUF(jbuf, 4096);  // feature list can exceed 2 KB
-    serializeJson(doc, jbuf, jbuf_SIZE);
+    // serializeJson truncates in silence when it runs out of room, producing a
+    // half-sentence that still looks like data. Fail loudly instead.
+    size_t len = serializeJson(doc, jbuf, jbuf_SIZE);
+    if (len == 0 || len >= jbuf_SIZE - 1) return "Error: feature list outgrew the response buffer";
     return jbuf;
   }
 
@@ -609,7 +615,7 @@ const char* cmd_features(const String& argsInput) {
     systemEventPost(SYSEVT_FEATURE_TOGGLED, f->name, enable ? "on" : "off");
   }
 
-  static char result[128];
+  EXT_RAM_BSS_ATTR static char result[128];
   uint32_t freeHeapKB = ESP.getFreeHeap() / 1024;
   
   if (enable && !wasEnabled) {

@@ -91,8 +91,10 @@ enum FilePermission {
 //
 // Every check resolves the caller's effective role:
 //   - SYSTEM   — internal trusted code (transport==SOURCE_INTERNAL && user=="system")
+//   - SUPER    — superadmin / live bond-admin (unrestricted)
 //   - ADMIN    — authenticated user whose username is admin per isAdminUser()
-//   - USER     — authenticated non-admin user
+//   - USER     — authenticated non-admin, non-guest user
+//   - GUEST    — authenticated guest; userPerms masked to PERM_READ only
 //   - ANON     — empty `ctx.user` (no auth). DENIED for every operation.
 //                Reaching this state from FS code is a bug above; the deny
 //                + [PERM] log surfaces the upstream gap.

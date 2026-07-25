@@ -230,10 +230,11 @@ extern const size_t edgeImpulseCommandsCount;
  extern const CommandEntry espsrCommands[];
  extern const size_t espsrCommandsCount;
  #endif
-#if ENABLE_MICROPHONE_SENSOR
+#if ENABLE_MICROPHONE
 extern const CommandEntry micCommands[];
 extern const size_t micCommandsCount;
 extern bool micConnected;
+bool audioAnySourceAvailable();   // HAL_Audio — a mic source (PDM or G2) is reachable
 #endif
 extern const CommandEntry userSystemCommands[];
 extern const size_t userSystemCommandsCount;
@@ -1043,6 +1044,33 @@ namespace {
     return idx;
   }
 
+  // Quote-aware token walk — mirrors CommandArgs: tokens split on spaces,
+  // but a token opening with '"' runs to its closing quote (spaces inside
+  // are token content, not separators). Redaction positions MUST agree with
+  // the parser's argument positions: counting raw spaces let a quoted SSID
+  // containing spaces shift the count, so the PASSWORD in
+  // `wifiadd "My Net" "pass" 1 0` logged UNMASKED. Bare-token lines walk
+  // identically to the old space count. Returns false if the line has fewer
+  // than n tokens; on success start/end bound token n (end is one past).
+  static bool nthTokenBounds(const String& s, int n, int& start, int& end) {
+    int i = 0;
+    const int len = (int)s.length();
+    start = 0; end = 0;
+    for (int t = 0; t < n; t++) {
+      while (i < len && s[i] == ' ') i++;
+      if (i >= len) return false;
+      start = i;
+      if (s[i] == '"') {
+        int close = s.indexOf('"', i + 1);
+        i = (close < 0) ? len : close + 1;
+      } else {
+        while (i < len && s[i] != ' ') i++;
+      }
+      end = i;
+    }
+    return true;
+  }
+
   // Shared handler for peer-credential commands: "<cmd> <target> <username>
   // <password> <rest>..." (espnowremote / espnowbrowse / espnowfetch). Redact
   // ONLY the password — the username is audit-relevant (WHO ran it) and <rest>
@@ -1101,7 +1129,12 @@ namespace {
     // User credential commands — keep <username> visible where present, mask password(s).
     { "userchangepassword ", MASK_AFTER_TOKEN_POS, 1, nullptr },  // <curPass> <newPass> <confirmPass>
     { "userresetpassword ",  MASK_AFTER_TOKEN_POS, 2, nullptr },  // <username> <newPassword> [flag]
-    { "useradd ",            MASK_AFTER_TOKEN_POS, 2, nullptr },  // <username> <password> [flag]
+    // Mask ONLY the password token, not the rest of the line: useradd now grants
+    // a ROLE, and masking everything after the username made "useradd bob *** 0 user"
+    // and "... 0 superadmin" identical in the audit log — the one detail most worth
+    // auditing was the one hidden. Same shape and reasoning as `login <user> <pass>`
+    // above; CommandArgs splits on spaces, so a password can't contain one here.
+    { "useradd ",            MASK_TOKEN_AT_POS,    3, nullptr },  // <username> <password> [0|1] [role]
     // usersync <username> <userPass> <device> <targetAdminUser> <targetAdminPass> <yourAdminPass>
     { "usersync ",           CALL_HANDLER,         0, &redactUserSyncCmd },  // mask pw tokens 3,6,7
   };
@@ -1115,7 +1148,7 @@ namespace {
 // command dispatches.
 
 const char* settingBoolToggle(bool& field, const String& argsInput, const char* label) {
-  static char buf[80];
+  EXT_RAM_BSS_ATTR static char buf[80];
   if (!label) label = "Setting";
 
   String arg = argsInput;
@@ -1155,22 +1188,20 @@ String redactCmdForAudit(const String& argsInput) {
       return r.handler(c);
     }
 
-    // Compute token boundaries (tokens separated by a single space in our CLI)
-    // Token positions are 1-based over the entire line (including the command words)
+    // Compute token boundaries QUOTE-AWARE (nthTokenBounds mirrors
+    // CommandArgs) so a quoted argument containing spaces can't shift the
+    // positions. Token positions are 1-based over the entire line
+    // (including the command words).
     if (r.type == MASK_TOKEN_AT_POS) {
-      int prevSpace = indexOfNthSpace(c, r.param - 1);
-      if (prevSpace < 0) return c;
-      int nextSpace = c.indexOf(' ', prevSpace + 1);
-      String head = c.substring(0, prevSpace + 1);
-      String tail = (nextSpace > 0) ? c.substring(nextSpace) : String();
-      return head + "***" + tail;
+      int start = 0, end = 0;
+      if (!nthTokenBounds(c, r.param, start, end)) return c;
+      return c.substring(0, start) + "***" + c.substring(end);
     }
 
     if (r.type == MASK_AFTER_TOKEN_POS) {
-      int endSpace = indexOfNthSpace(c, r.param);
-      if (endSpace < 0) return c;
-      String head = c.substring(0, endSpace + 1);
-      return head + "***";
+      int start = 0, end = 0;
+      if (!nthTokenBounds(c, r.param, start, end)) return c;
+      return c.substring(0, end) + " ***";
     }
   }
 
@@ -1435,6 +1466,35 @@ const char* cmd_lightsleep(const String& argsInput) {
   return "Woke from light sleep";
 }
 
+// Deep sleep with no wake source — closest ESP32 analogue to "power off".
+// Wake only via the physical reset button. Used by G2 Power Off (and CLI).
+const char* cmd_deepsleep(const String& /*argsInput*/) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+
+  unsigned long cooldownRemain = 0;
+  if (!powerSleepTransitionAllowed(&cooldownRemain)) {
+    snprintf(getDebugBuffer(), 1024,
+             "Deep sleep refused: cooldown active — try again in %lu ms (powercooldown to tune)",
+             cooldownRemain);
+    return getDebugBuffer();
+  }
+
+  BROADCAST_PRINTF("Entering deep sleep (wake via reset button)...");
+  powerSleepTransitionMark();
+  delay(100);
+  // Let any pending UI (G2 lens banner / OLED) paint before the rails drop.
+  delay(700);
+  oledPrepareForSleep();
+  {
+    extern void batteryLogEvent(const char* event);
+    batteryLogEvent("sleep:deep");
+  }
+  // No wake source: ~10 µA until physical reset.
+  esp_deep_sleep_start();
+  return "Deep sleep";  // unreachable
+}
+
 // =========================================================================
 // Core System Commands (moved from .ino)
 // =========================================================================
@@ -1541,6 +1601,19 @@ void buildSystemInfoJson(JsonDocument& doc, bool includeDeviceList) {
 
   // Network info
   JsonObject net = doc["net"].to<JsonObject>();
+  // Two separate axes: WiFi CONNECTION (associated to an AP) and RADIO power
+  // (the radio is up at all — WiFi OR ESP-NOW holding it). Emitted BEFORE the
+  // connection branch so they are ALWAYS present — the radio can be ON while
+  // WiFi is Disconnected (held for ESP-NOW), the case the two indicators exist
+  // to show. Feeds the web dashboard, settings page, and the phone app.
+  net["wifiConnected"] = WiFi.isConnected();
+#if ENABLE_WIFI
+  net["radioOn"] = wifiRadioOn();
+  net["radioHeldForEspnow"] = (wifiRadioState() == WIFI_RADIO_UP_FOR_ESPNOW);
+#else
+  net["radioOn"] = false;
+  net["radioHeldForEspnow"] = false;
+#endif
   if (WiFi.isConnected()) {
     net["ssid"] = WiFi.SSID();
     net["ip"] = WiFi.localIP().toString();
@@ -2091,7 +2164,7 @@ static void factoryreset_doRestart(void* /*arg*/) {
 }
 
 static const char* factoryreset_confirmed(void* /*userData*/) {
-  static char respBuf[200];
+  EXT_RAM_BSS_ATTR static char respBuf[200];
 
   // Use the internal SYSTEM auth to delete users.json. The VFS path-rule
   // table grants admin only PERM_READ over /system/* -- only system auth
@@ -2501,8 +2574,8 @@ const CommandEntry commands[] = {
   { "voltage", "Estimate power draw from active subsystems (not a real voltage measurement; use batterystatus for measured volts). (add 'json' for JSON output)", false, cmd_voltage },
   { "cpufreq", "Get/set CPU frequency (admin).", true, cmd_cpufreq,
     "Usage: cpufreq [80|160|240]" },
-  { "taskstats", "Detailed task statistics.", false, cmd_taskstats },
-  { "perftop", "Live performance snapshot: loop laps/s, period, per-section timing, worst stalls + live task CPU%.", false, cmd_perftop },
+  { "taskstats", "Detailed task statistics (state/prio/stack min-free). (add 'json' for JSON output)", false, cmd_taskstats },
+  { "perftop", "Live performance snapshot: loop laps/s, period, per-section timing, worst stalls + live task CPU%. (add 'json' for loop + per-task CPU% JSON)", false, cmd_perftop },
   { "events", "Show recent system events (the in-memory register that drives automation event triggers).", false, cmd_events,
     "Usage: events [kinds [json]]\n  (bare): show the recent-event ring\n  kinds: list every valid event-kind name (json = machine form)" },
 
@@ -2531,6 +2604,8 @@ const CommandEntry commands[] = {
     "Usage: sleep <ms>  (1..60000)" },
   { "lightsleep", "Enter ESP32 light sleep: lightsleep [seconds] (default 20s).", true, cmd_lightsleep,
     "Usage: lightsleep [seconds]  (1..3600, default 20)" },
+  { "deepsleep", "Power off via deep sleep (no wake source — reset button to wake).", true, cmd_deepsleep,
+    "Usage: deepsleep  (admin; wakes only via physical reset)" },
 };
 
 const size_t commandsCount = sizeof(commands) / sizeof(commands[0]);
@@ -2587,13 +2662,14 @@ static const CommandModule gCommandModules[] = {
     "profiling), fsusage, events (recent system events from the in-memory register "
     "that drives automation event triggers), and the memory tools memsample (snapshot, with memsample "
     "track on|off|reset|status for allocation tracking) and memreport. Control and "
-    "power: reboot, cpufreq [80|160|240] to read or set CPU clock, lightsleep [seconds] "
-    "for ESP32 light sleep, and wait <ms>/sleep <ms> to pause command-script execution. "
+    "power: reboot, ramflush, cpufreq [80|160|240] to read or set CPU clock, lightsleep "
+    "[seconds] for ESP32 light sleep, deepsleep for power-off (reset to wake), and "
+    "wait <ms>/sleep <ms> to pause command-script execution. "
     "timeset sets the clock manually. broadcast <message> pushes a line of text to all "
     "connected output interfaces, and factoryreset deletes the user-accounts file so "
     "the first-boot setup wizard re-runs on next reboot while deliberately preserving "
     "WiFi credentials and other settings. Most mutating commands (timeset, cpufreq, "
-    "reboot, factoryreset, broadcast, lightsleep) require admin.", commands,             commandsCount, 0, nullptr },
+    "reboot, ramflush, factoryreset, broadcast, lightsleep, deepsleep) require admin.", commands,             commandsCount, 0, nullptr },
 #if ENABLE_WIFI
   { "wifi",       "Network management (connect, scan, add/remove networks)", "The WiFi subsystem manages station-mode network connections plus the network "
     "services that ride on top of them: NTP time sync and the on-device HTTP/HTTPS "
@@ -2823,8 +2899,12 @@ static const CommandModule gCommandModules[] = {
     "accepts either MHz (e.g. 103.9) or 10 kHz integer units (e.g. 10390) -- values "
     "under 200 are read as MHz, otherwise as raw units -- and rejects anything outside "
     "76.0-108.0 MHz; tuning clears any decoded RDS station name and text. fmradioseek "
-    "[up|down] hunts for the next station (no band wrap), fmradiovolume <0-15> sets "
-    "output level, and fmradiomute / fmradiounmute toggle audio.", fmRadioCommands,      fmRadioCommandsCount, CMD_MODULE_SENSOR, []() { return isSensorConnected("fmradio"); } },
+    "[up|down] STARTS a hunt for the next station (no band wrap) and returns "
+    "immediately -- the radio task finalizes the result within a few seconds; watch "
+    "'fmradioread' (JSON field \"seeking\") or the OLED FM screen. fmradiovolume <0-15> "
+    "sets output level, and fmradiomute / fmradiounmute toggle audio. The OLED FM "
+    "screen drives all of this from the gamepad: L/R tune, Up/Down seek, A mute, "
+    "Y volume, X power.", fmRadioCommands,      fmRadioCommandsCount, CMD_MODULE_SENSOR, []() { return isSensorConnected("fmradio"); } },
 #endif
 #if ENABLE_RTC_SENSOR
   { "rtc",        "DS3231 precision RTC", "DS3231 precision I2C real-time clock with battery backup and an on-chip "
@@ -2866,8 +2946,8 @@ static const CommandModule gCommandModules[] = {
     "camerasendaftercapture/cameratargetdevice) drive timed capture and optional "
     "ESP-NOW delivery to a named peer.", cameraCommands,       cameraCommandsCount, CMD_MODULE_SENSOR, []() { return cameraConnected; } },
 #endif
-#if ENABLE_MICROPHONE_SENSOR
-  { "microphone", "PDM microphone audio sensor", "Driver and CLI for the on-board PDM microphone. The mic must be started with "
+#if ENABLE_MICROPHONE
+  { "microphone", "Microphone (PDM or G2 glasses)", "Driver and CLI for the microphone — the on-board PDM mic and/or the G2 glasses mic, selected with micsource. The mic must be started with "
     "openmic before reads or recording (closemic stops it); commands that need the "
     "running mic return a use-openmic-first error otherwise. miclevel returns the "
     "current audio level (percent; add json for structured output) and micviz shows a "
@@ -2875,7 +2955,7 @@ static const CommandModule gCommandModules[] = {
     "WAV file, miclist lists saved recordings, and micdelete removes one or all of "
     "them. Audio format is configured with micsamplerate (8000-48000), micgain (0-100), "
     "and micbitdepth (16 or 32), each usable as a getter with no argument; micautostart "
-    "on|off persists whether the mic powers up automatically at boot.", micCommands,          micCommandsCount, CMD_MODULE_SENSOR, []() { return micConnected; } },
+    "on|off persists whether the mic powers up automatically at boot.", micCommands,          micCommandsCount, CMD_MODULE_SENSOR, []() { return audioAnySourceAvailable(); } },
 #endif
 #if ENABLE_EDGE_IMPULSE
   { "edgeimpulse", "Edge Impulse ML inference", "On-device machine-learning image inference using TensorFlow Lite Micro models "
@@ -2906,8 +2986,8 @@ static const CommandModule gCommandModules[] = {
     "family (list/add/del/clear plus save/reload to an SD file and srcmdssync to import "
     "phrases from the CLI registry). Recognition is tuned through srconfidence, "
     "srtimeout, the srtuning* audio controls (gain, AGC, VAD, filters), and srdebug* "
-    "telemetry; setmicsource local|g2 switches the audio feed between the local PDM mic "
-    "and the G2 glasses left-temple mic, and the srsnip* commands capture audio "
+    "telemetry; the mic feed follows the device-wide source (set with `micsource "
+    "auto|pdm|g2` — onboard PDM or the G2 glasses left-temple mic), and the srsnip* commands capture audio "
     "snippets (by default on the wake word) for debugging.", espsrCommands,  espsrCommandsCount, CMD_MODULE_SENSOR, nullptr },
  #endif
 #if ENABLE_I2C_SYSTEM
@@ -2950,7 +3030,7 @@ static const CommandModule gCommandModules[] = {
     "(battery, heap, psram, fsfree, uptime, chiptemp), connectivity (wifi, rssi, peers, "
     "ble), ESP-NOW/bond (espnow, bond_mode, bond_paired, bond_online, bond_synced, "
     "bond_role, bond_rssi, bond_peer_heap, bond_peer_uptime, pairmode, pairmode_secs, "
-    "peersknown, stalestpeerage), location (gps, speed, sats), the on-device model (llm), "
+    "peersknown, stalestpeerage), location (gps, speed, sats, wp_dist:<name>), the on-device model (llm), "
     "and ESP-NOW metadata "
     "(room, zone, tags); numeric variables use the > < = >= <= != operators and "
     "string/enum variables use = != CONTAINS. A true condition fires every time its "
@@ -2982,12 +3062,13 @@ static const CommandModule gCommandModules[] = {
     "as a master switch and any sub-flag also lights its parent. Separate from the "
     "on/off flags, loglevel sets a severity threshold (error|warn|info|debug, "
     "persisted) and debugverbose is a global override. Related commands manage where "
-    "output goes: outserial/outweb/outdisplay/outg2/outble enable individual output "
-    "lanes, log starts/stops system-wide logging to a file, loglink routes ESP-IDF "
+    "output goes: outserial gates the UART lane (persisted), outg2/outble open "
+    "runtime CLI streams to G2 glasses / BLE clients (session-only, reset on "
+    "reboot), log starts/stops system-wide logging to a file, loglink routes ESP-IDF "
     "framework logs through the unified output queue, and debugstack/debugbuffer expose "
     "low-level trace and queue diagnostics.", debugCommands,        debugCommandsCount, 0, nullptr },
   { "settings",   "Device configuration and preferences", "The settings subsystem holds the device persisted configuration and the commands "
-    "that change it. Each setting command (for example outserial, outweb, "
+    "that change it. Each setting command (for example outserial, "
     "serialrequireauth, displayrequireauth, tzoffsetminutes, ntpserver, wifitxpower, "
     "webclihistorysize) sets one value; writes normally go to RAM and are flushed to "
     "the settings JSON on flash. Because flash writes are costly, you can batch them: "
@@ -3076,8 +3157,11 @@ static const CommandModule gCommandModules[] = {
     "main command is power: power alone prints the current mode, CPU clock, display "
     "brightness, and auto-mode state; power mode <perf|balanced|saver|ultra|0-3> "
     "selects one of four preset modes (Performance 240 MHz, Balanced 160 MHz, "
-    "PowerSaver 80 MHz, UltraSaver 40 MHz) which sets both the CPU frequency and the "
-    "display brightness; the chosen mode is persisted. power auto <on|off> enables an "
+    "PowerSaver 80 MHz, UltraSaver 80 MHz interactive) which sets both the CPU frequency "
+    "and the display brightness; the chosen mode is persisted. UltraSaver's headline "
+    "40 MHz is idle-only — it is applied solely when idle power-save blanks the screen "
+    "(40 MHz is too laggy for the live UI) and any input or command restores >=80 MHz; "
+    "so UltraSaver only reaches 40 MHz if powersave is enabled. power auto <on|off> enables an "
     "automatic low-battery downshift gated by power threshold <0-100>. Two related idle "
     "controls are separate commands: powersave <0..1440> sets an idle timeout (minutes; "
     "0 disables) after which the OLED blanks and the CPU downclocks while the radio "
@@ -3959,6 +4043,36 @@ const char* cmd_taskstats(const String& originalCmd) {
 
   UBaseType_t actualCount = uxTaskGetSystemState(taskArray, taskCount, nullptr);
 
+  // JSON form — a single object for the app/web (the OLED Perf "Stack" page
+  // mirror). Serializes into the shared debug buffer (4 KB) like memreport json;
+  // ~30 tasks land well under the ~4 KB BLE reply cap.
+  if (argWantsJson(originalCmd)) {
+    PSRAM_JSON_DOC(doc);
+    doc["schema"] = 1;
+    doc["total"]  = (unsigned)taskCount;
+    JsonArray arr = doc["tasks"].to<JsonArray>();
+    for (UBaseType_t i = 0; i < actualCount; i++) {
+      const char* state;
+      switch (taskArray[i].eCurrentState) {
+        case eRunning:   state = "RUN";   break;
+        case eReady:     state = "READY"; break;
+        case eBlocked:   state = "BLOCK"; break;
+        case eSuspended: state = "SUSP";  break;
+        case eDeleted:   state = "DEL";   break;
+        default:         state = "UNK";   break;
+      }
+      JsonObject t = arr.add<JsonObject>();
+      t["name"]  = taskArray[i].pcTaskName ? taskArray[i].pcTaskName : "?";
+      t["state"] = state;
+      t["prio"]  = (unsigned)taskArray[i].uxCurrentPriority;
+      // usStackHighWaterMark is already BYTES under ESP-IDF — emit raw, never
+      // *4 (see System_TaskUtils.h / feedback_task_stack_bytes_not_words).
+      t["stackFree"] = (unsigned)taskArray[i].usStackHighWaterMark;
+    }
+    serializeJson(doc, getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE);
+    return getDebugBuffer();
+  }
+
   BROADCAST_PRINTF(
     "Task Statistics:\n"
     "=================\n"
@@ -3994,6 +4108,74 @@ const char* cmd_taskstats(const String& originalCmd) {
 // lifetime CPU% column.
 const char* cmd_perftop(const String& originalCmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+
+  // JSON form — the OLED Perf "CPU" page mirror for the app/web: loop-health
+  // strip (struct-read, same source as the OLED) + a fresh per-task CPU% over a
+  // 0.75 s sample. Returns one object; the text path below is unchanged.
+  if (argWantsJson(originalCmd)) {
+    PSRAM_JSON_DOC(doc);
+    doc["schema"] = 1;
+
+    uint32_t lapsPerSec = 0, avgMs = 0, maxMs = 0, stalls5s = 0, totalStalls = 0;
+    bool loopValid = perfGetLoopSnapshot(lapsPerSec, avgMs, maxMs, stalls5s, totalStalls);
+    JsonObject loop = doc["loop"].to<JsonObject>();
+    loop["valid"]       = loopValid;   // false while the first 5 s window fills
+    loop["lapsPerSec"]  = (unsigned long)lapsPerSec;
+    loop["avgMs"]       = (unsigned long)avgMs;
+    loop["maxMs"]       = (unsigned long)maxMs;
+    loop["stalls5s"]    = (unsigned long)stalls5s;
+    loop["totalStalls"] = (unsigned long)totalStalls;
+
+    JsonArray tasks = doc["tasks"].to<JsonArray>();
+    bool cpuValid = false;
+
+    // Two run-time-stat snapshots ~750 ms apart, delta by handle (handle reuse
+    // rejected), identical to the text path. Runs on cmd_exec so the short
+    // sleep never stalls the main loop.
+    UBaseType_t n = uxTaskGetNumberOfTasks() + 6;
+    TaskStatus_t* a = (TaskStatus_t*)ps_alloc(n * sizeof(TaskStatus_t), AllocPref::PreferPSRAM, "perftop.ja");
+    TaskStatus_t* b = (TaskStatus_t*)ps_alloc(n * sizeof(TaskStatus_t), AllocPref::PreferPSRAM, "perftop.jb");
+    if (a && b) {
+      uint32_t totA = 0, totB = 0;
+      UBaseType_t na = uxTaskGetSystemState(a, n, &totA);
+      vTaskDelay(pdMS_TO_TICKS(750));
+      UBaseType_t nb = uxTaskGetSystemState(b, n, &totB);
+      uint32_t totalDelta = totB - totA;
+      if (totalDelta != 0 && na != 0 && nb != 0) {
+        cpuValid = true;
+        for (UBaseType_t i = 0; i < nb; i++) {
+          const char* nm = b[i].pcTaskName;
+          if (!nm) continue;
+          uint32_t prev = 0; bool found = false;
+          for (UBaseType_t j = 0; j < na; j++) {
+            if (a[j].xHandle == b[i].xHandle) { prev = a[j].ulRunTimeCounter; found = true; break; }
+          }
+          if (!found) continue;                            // task new this interval
+          uint32_t d = b[i].ulRunTimeCounter - prev;       // wrap-safe unsigned
+          if (d > totalDelta + totalDelta / 4) continue;   // handle reuse / wrap → skip
+          uint32_t pct = (uint32_t)((uint64_t)d * 100 / totalDelta);
+          if (pct > 100) pct = 100;
+          bool isIdle = (strncmp(nm, "IDLE", 4) == 0);
+          // Keep IDLE rows (per-core headroom) + non-idle >= 1%, dropping the 0%
+          // noise to bound the payload — same filter as the text/OLED CPU page.
+          if (!isIdle && pct < 1) continue;
+          JsonObject t = tasks.add<JsonObject>();
+          t["name"]   = nm;   // TCB-owned pointer; serialized below while a/b alive
+          t["cpuPct"] = (unsigned long)pct;
+          t["idle"]   = isIdle;
+        }
+      }
+    }
+    doc["cpuValid"] = cpuValid;
+
+    // Serialize BEFORE freeing a/b — the task-name pointers linked into `doc`
+    // reference storage that outlives them (TCB), but a task deleted mid-sample
+    // could dangle; serializing first closes that window entirely.
+    serializeJson(doc, getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE);
+    if (a) free(a);
+    if (b) free(b);
+    return getDebugBuffer();
+  }
 
   broadcastOutput("");
   broadcastOutput("========== PERFTOP ==========");
@@ -4099,9 +4281,54 @@ bool adminRequiredForLine(const String& line) {
   return commandRequiresAdmin(line);
 }
 
+// Guest accounts may authenticate, but the command surface is login/logout
+// only. View-only UX lives in web/OLED; this is the CLI chokepoint shared by
+// every transport that funnels through executeCommand.
+static bool commandAllowedForGuest(const String& line) {
+  String lc = line;
+  lc.toLowerCase();
+  lc.trim();
+  int sp = lc.indexOf(' ');
+  String cmd = (sp > 0) ? lc.substring(0, sp) : lc;
+  return cmd == "login" || cmd == "logout";
+}
+
 // Centralized authorization for a command line and context.
 // Returns true if authorized, otherwise writes an error to 'out' and returns false.
 static bool authorizeCommand(const AuthContext& ctx, const String& line, char* out, size_t outSize) {
+  // Trusted internal identity (status REST facades, system FS). Same privilege
+  // model as FsRole::SYSTEM — never a loginable account.
+  if (ctx.transport == SOURCE_INTERNAL && ctx.user == "system") {
+    return true;
+  }
+  // External transports must carry a real username (or AuthBypass when a
+  // transport's require-auth toggle is off). Empty identity used to slip past
+  // guest/admin gates. Exception: the login command itself is pre-auth and
+  // may arrive with an empty user (BLE/web-style credential submit).
+  // SOURCE_INTERNAL may still use an empty owner string for some automation
+  // rows — those keep the old non-admin-only surface below.
+  if (ctx.user.length() == 0 && ctx.transport != SOURCE_INTERNAL) {
+    String cmdName = line;
+    int spacePos = line.indexOf(' ');
+    if (spacePos > 0) cmdName = line.substring(0, spacePos);
+    cmdName.trim();
+    if (!cmdName.equalsIgnoreCase("login")) {
+      snprintf(out, outSize, "Error: Authentication required.");
+      { char auditBuf[180]; snprintf(auditBuf, sizeof(auditBuf), "cmd=%.170s", redactCmdForAudit(line).c_str()); logAuthAttempt(false, ctx.path.c_str(), "(anonymous)", ctx.ip, auditBuf); }
+      return false;
+    }
+  }
+  // Guest: authenticated but view-only. Deny before admin/super checks so a
+  // guest never reaches an admin-gated handler by accident.
+  if (ctx.user.length() > 0 && isGuestUser(ctx.user) && !commandAllowedForGuest(line)) {
+    String cmdName = line;
+    int spacePos = line.indexOf(' ');
+    if (spacePos > 0) cmdName = line.substring(0, spacePos);
+    snprintf(out, outSize, "Error: Guest accounts are view-only. Only login/logout are allowed.");
+    { char auditBuf[180]; snprintf(auditBuf, sizeof(auditBuf), "cmd=%.170s", redactCmdForAudit(line).c_str()); logAuthAttempt(false, ctx.path.c_str(), ctx.user, ctx.ip, auditBuf); }
+    systemEventPost(SYSEVT_COMMAND_DENIED, ctx.user.c_str(), cmdName.c_str());
+    return false;
+  }
   // Super-admin (top-tier) protection. Checked independently of the admin flag
   // so a super-only command is gated even if its table entry is not adminOnly.
   // A bonded session satisfies this (bond == super); a regular mesh/pair
@@ -4469,8 +4696,25 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
     bool modeWasActiveBeforeHandler = cliInModeActive();
 
     const char* result = found->handler(args);
-    strncpy(out, result, outSize - 1);
-    out[outSize - 1] = '\0';
+    // Delivery ceiling — see CMD_RESULT_MAX (System_CommandTypes.h). Every
+    // transport hands us a differently-sized `out`, and this was a silent
+    // strncpy: an over-long result was torn in half and delivered looking like
+    // real data. That is how `events kinds json` reached MQTT as a truncated
+    // fragment and how the web mute editor got a bare "OK". Report it instead.
+    // The "Error" prefix is deliberate — the success test below and
+    // stampOkStatus already treat it as a failure, so this needs no other
+    // plumbing and reaches every transport through the normal path.
+    const size_t resultLen = result ? strlen(result) : 0;
+    if (outSize == 0) {
+      // No buffer to answer into; nothing safe to do.
+    } else if (resultLen >= outSize) {
+      snprintf(out, outSize,
+               "Error: result too large for this transport (%u B, limit %u B)"
+               " - narrow the query or use a dedicated endpoint",
+               (unsigned)resultLen, (unsigned)(outSize - 1));
+    } else {
+      memcpy(out, result ? result : "", resultLen + 1);
+    }
 
     // Command audit logging (always-on, EXCEPT when the handler just
     // entered an interactive mode -- skip the prompt step so the audit
@@ -4521,8 +4765,11 @@ bool submitAndExecuteSync(const Command& cmd, String& out) {
 
   // If executor queue isn't ready (very early boot) fallback to direct call
   if (gCmdExecQ == nullptr) {
-    // Allocate output buffer from PSRAM (2KB matches ExecReq.out size)
-    char* outBuf = (char*)ps_alloc(2048, AllocPref::PreferPSRAM, "cmd.out.direct");
+    // Match the queued path's capacity. The old comment claimed "2KB matches
+    // ExecReq.out size" — it never did (ExecReq::out is CMD_RESULT_MAX), so an
+    // early-boot command silently got half the budget of the same command run
+    // a moment later. Transient PSRAM, freed below.
+    char* outBuf = (char*)ps_alloc(CMD_RESULT_MAX, AllocPref::PreferPSRAM, "cmd.out.direct");
     if (!outBuf) {
       out = "Error: Out of memory for command output";
       return false;
@@ -4532,7 +4779,7 @@ bool submitAndExecuteSync(const Command& cmd, String& out) {
     // current command context pointer is still wired explicitly for the
     // broadcast-output mask plumbing — per-task TLS now (Stage 3).
     setCurrentCommandContext((void*)&cmd.ctx);
-    bool ok = executeCommand((AuthContext&)cmd.ctx.auth, cmd.line.c_str(), outBuf, 2048);
+    bool ok = executeCommand((AuthContext&)cmd.ctx.auth, cmd.line.c_str(), outBuf, CMD_RESULT_MAX);
     clearCurrentCommandContext();
     out = outBuf;
     free(outBuf);
@@ -4981,7 +5228,7 @@ const char* cmd_login(const String& originalCmd) {
   if (loginTransport(transport, username, password)) {
     bool isAdmin = isAdminUser(username);
     systemEventPost(SYSEVT_LOGIN_OK, username.c_str(), transportStr.c_str());
-    static char buf[128];
+    EXT_RAM_BSS_ATTR static char buf[128];
     snprintf(buf, sizeof(buf), "Login successful for '%s' on %s%s",
              username.c_str(), transportStr.c_str(), isAdmin ? " (admin)" : "");
     return buf;
@@ -5022,7 +5269,7 @@ const char* cmd_logout(const String& originalCmd) {
   }
 
   logoutTransport(transport);
-  static char buf[64];
+  EXT_RAM_BSS_ATTR static char buf[64];
   snprintf(buf, sizeof(buf), "Logged out from %s", rest.length() > 0 ? rest.c_str() : "serial");
   return buf;
 }

@@ -89,15 +89,20 @@ static int menuAvailRank(MenuAvailability a) {
 // userData = the descriptor (so the right-pane callback + oledMenuExecuteItem
 // can read targetMode). dropNotBuilt skips compiled-out entries; sortByAvailability
 // orders Ready->Off->No-HW (the sensor-menu behavior). Preserves the cursor.
+// Guests skip modes outside oledModeAllowedForGuest (view-only launcher).
 static void populateMenuScroll(OLEDScrollState* s, const OLEDMenuItem* items, int count,
                                bool sortByAvailability, bool dropNotBuilt) {
   oledScrollClearKeepSelection(s);
 
+  const bool guest = oledIsGuestSession();
   int order[OLED_SCROLL_MAX_ITEMS];
   int n = 0;
   for (int i = 0; i < count && n < OLED_SCROLL_MAX_ITEMS; i++) {
     if (dropNotBuilt &&
         getMenuAvailability(items[i].targetMode, nullptr) == MenuAvailability::NOT_BUILT) {
+      continue;
+    }
+    if (guest && !oledModeAllowedForGuest(items[i].targetMode)) {
       continue;
     }
     order[n++] = i;
@@ -183,13 +188,24 @@ void getCategoryItems(int categoryId, const OLEDMenuItem** outItems, int* outCou
 
 EXT_RAM_BSS_ATTR static OLEDScrollState sMainScroll;
 static bool sMainScrollInit = false;
-static char sCatLabels[8][20];  // "<Category> >" decorated labels (persist for line1 ptrs)
+EXT_RAM_BSS_ATTR static char sCatLabels[8][20];  // "<Category> >" decorated labels (persist for line1 ptrs)
 
 static void mainMenuEnsureInit() {
   if (sMainScrollInit) return;
   oledScrollInit(&sMainScroll, nullptr, 4);
   oledScrollSetSplitPane(&sMainScroll, 68, 74, 32);
   sMainScrollInit = true;
+}
+
+// True if a launcher category has at least one guest-visible item.
+static bool categoryVisibleForGuest(int categoryId) {
+  const OLEDMenuItem* items = nullptr;
+  int count = 0;
+  getCategoryItems(categoryId, &items, &count);
+  for (int i = 0; i < count; i++) {
+    if (oledModeAllowedForGuest(items[i].targetMode)) return true;
+  }
+  return false;
 }
 
 // Rebuild sMainScroll for the current level and sync its cursor from the
@@ -199,10 +215,13 @@ static void mainMenuPopulate() {
 
   if (oledMenuCategorySelected < 0) {
     // Level 0 - categories. Decorate names with " >"; no availability badge.
+    // Guests skip categories that would be empty after item filtering (e.g. Power).
     oledScrollClearKeepSelection(&sMainScroll);
+    const bool guest = oledIsGuestSession();
     int maxLabels = (int)(sizeof(sCatLabels) / sizeof(sCatLabels[0]));
     int n = oledMenuCategoryCount < maxLabels ? oledMenuCategoryCount : maxLabels;
     for (int i = 0; i < n; i++) {
+      if (guest && !categoryVisibleForGuest(i)) continue;
       snprintf(sCatLabels[i], sizeof(sCatLabels[i]), "%s >", oledMenuCategories[i].name);
       oledScrollAddItem(&sMainScroll, sCatLabels[i], nullptr, true, (void*)&oledMenuCategories[i]);
       sMainScroll.items[sMainScroll.itemCount - 1].iconName = oledMenuCategories[i].iconName;
@@ -240,8 +259,15 @@ static bool mainMenuInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyP
   // A - descend into a category, or launch the selected item.
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
     if (oledMenuCategorySelected < 0) {
-      oledMenuSelectedIndex     = sMainScroll.selectedIndex;
-      oledMenuCategorySelected  = sMainScroll.selectedIndex;  // category id == list position
+      OLEDScrollItem* sel = oledScrollGetSelected(&sMainScroll);
+      oledMenuSelectedIndex = sMainScroll.selectedIndex;
+      // Category id lives in targetMode (not list index) so guest filtering
+      // that hides empty categories (e.g. Power) does not remap ids.
+      if (sel && sel->userData) {
+        oledMenuCategorySelected = (int)((const OLEDMenuItem*)sel->userData)->targetMode;
+      } else {
+        oledMenuCategorySelected = sMainScroll.selectedIndex;
+      }
       oledMenuCategoryItemIndex = 0;
     } else {
       OLEDScrollItem* sel = oledScrollGetSelected(&sMainScroll);

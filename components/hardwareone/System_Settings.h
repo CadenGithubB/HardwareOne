@@ -14,23 +14,21 @@ struct CommandEntry;
 struct Settings {
   // Constructor to ensure all String members are initialized
   Settings()
-    : wifiSSID(""),
-      wifiPassword(""),
-      wifiEnabled(true),
+    : wifiEnabled(true),
       wifiAutoReconnect(true),
       webCliHistorySize(10),
       oledCliHistorySize(50),
       ntpServer("pool.ntp.org"),
       tzOffsetMinutes(0),
+      // Must stay identical to the schema default in System_Settings.cpp:
+      // applyRegisteredDefaults() overwrites every value here at boot. Ctor
+      // values are NOT dead — they are live from static init until
+      // settingsDefaults() runs, i.e. early boot before the filesystem.
       outSerial(true),
-      outWeb(false),
-      outDisplay(false),
-#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
-      outG2(false),
-#endif
       notifBanners(true),
       notifToasts(true),
       notifQueue(true),
+      notifG2(true),
       thermalPollingMs(250),
       tofPollingMs(220),
       tofStabilityThreshold(3),
@@ -73,7 +71,6 @@ struct Settings {
       debugSse(false),
       debugCli(false),
       debugAuth(false),
-      debugEspNow(false),
       debugWifi(false),
       debugWifiConnection(false),
       debugWifiConfig(false),
@@ -207,6 +204,7 @@ struct Settings {
       espnowFriendlyName(""),
       espnowStationary(false),
       espnowFirstTimeSetup(false),
+      espnowChannel(0),
       meshRole(0),
       meshMasterMAC(""),
       meshBackupMAC(""),
@@ -221,6 +219,9 @@ struct Settings {
       meshAdaptiveTTL(false),
       meshPeerMax(8),
       sensorBroadcastIntervalMs(1000),
+      espnowAcceptSensorControl(false),
+      espnowMasterFingerprint(""),
+      espnowBackupMasterFingerprint(""),
 #if ENABLE_BONDED_MODE
       bondModeEnabled(false),
       bondRole(0),
@@ -278,20 +279,24 @@ struct Settings {
       presenceAutoStart(false),
       presenceDevicePollMs(100),
       sensorLogAutoStart(false),
-      sensorLogPath("/logs/sensors/sensors.txt"),
+      sensorLogPath(CAPTURE_SENSORLOG_DEFAULT),
       sensorLogIntervalMs(5000),
       sensorLogMask(0),
       sensorLogFormat(0),
+      sensorLogMaxSize(256000),
+      sensorLogMaxRotations(3),
       systemLogAutoStart(false),
       eventLogEnabled(true),
       systemLogPath(""),
       systemLogCategoryTags(true),
+      systemLogFlags(""),
       cameraAutoStart(false),  // Camera does NOT auto-start by default
       microphoneAutoStart(false),  // Microphone does NOT auto-start by default
       llmAutoStart(false),  // On-device LLM does NOT auto-load a model by default
       microphoneSampleRate(16000),
       microphoneGain(70),
       microphoneBitDepth(16),
+      micSource("auto"),  // Mic source preference: "auto" | "pdm" | "g2" (resolved at capture time)
       cameraBrightness(2),
       cameraContrast(2),
       cameraSaturation(2),
@@ -330,7 +335,7 @@ struct Settings {
       sessionIdleSerial(60),
       sessionIdleBle(15),
       sessionIdleDisplay(60),
-      bluetoothAutoStart(true),
+      bluetoothAutoStart(false),  // BLE server is opt-in; the "G2 Companion" archetype (or Advanced setup) enables it
       bluetoothRequireAuth(true),
       bleDeviceName("HardwareOne"),
       bleTxPower(3),
@@ -403,26 +408,27 @@ struct Settings {
     // String members are now initialized in initializer list
   }
 
-  String wifiSSID;
-  String wifiPassword;
+  // wifiSSID / wifiPassword removed 2026-07-20 — dead legacy single-network
+  // fields; saved credentials live in gWifiNetworks[] (network.wifi.networks).
   bool wifiEnabled;        // Enable/disable WiFi at boot (default: true)
   bool wifiAutoReconnect;
   int webCliHistorySize;   // Web CLI history buffer size
   int oledCliHistorySize;  // OLED CLI history buffer size (lines)
   String ntpServer;
   int tzOffsetMinutes;
-  bool outSerial;  // persist output lanes
-  bool outWeb;
-  bool outDisplay;
-#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
-  bool outG2;
-#endif
+  // The one persisted output lane: quiet the UART. The other gOutputFlags
+  // lanes are runtime state (WEB tracks the HTTP server lifecycle, FILE
+  // follows `log start`/`log stop`, BLE/G2 are opt-in per session via
+  // outble/outg2). outWeb/outDisplay/outG2 persisted lanes were removed
+  // pre-1.0: delivery never honored them — see the System_Debug.h charter.
+  bool outSerial;
   // Notification presentation (System_Notifications): per-sink master
   // switches. Per-kind device levels live in /system/notifications.json and
   // per-user mutes in each user's settings file — see System_Notifications.h.
   bool notifBanners;   // OLED transient banners
   bool notifToasts;    // web SSE toasts
   bool notifQueue;     // notification-center queue view
+  bool notifG2;        // G2 lens cards
   // Sensors UI (non-advanced)
   int thermalPollingMs;
   int tofPollingMs;
@@ -475,7 +481,6 @@ struct Settings {
   bool debugSse;
   bool debugCli;
   bool debugAuth;
-  bool debugEspNow;
   bool debugWifi;
   bool debugWifiConnection;
   bool debugWifiConfig;
@@ -672,6 +677,14 @@ struct Settings {
   String espnowFriendlyName;           // Longer display name: "Kitchen Thermal Cam"
   bool espnowStationary;               // true = mounted/fixed, false = mobile/wearable
   bool espnowFirstTimeSetup;           // True if ESP-NOW setup has been completed
+  // Preferred ESP-NOW radio channel. ESP-NOW peers can only hear each other on
+  // the same channel, and on a single-radio ESP32 the STA association owns the
+  // channel. 0 = auto (follow the joined AP; pin the fallback channel when NOT
+  // joined). 1..13 = force this channel whenever the STA is NOT associated, so
+  // two off-grid devices set to the same value deterministically find each
+  // other away from a shared home AP. Ignored while the STA is joined to an AP
+  // (the AP's channel wins — a radio can't be on two channels at once).
+  uint8_t espnowChannel;               // 0=auto, 1-13=preferred channel when offline
   // Mesh role settings
   uint8_t meshRole;                    // 0=worker, 1=master, 2=backup_master
   String meshMasterMAC;                // MAC of current master (empty if this is master)
@@ -687,6 +700,10 @@ struct Settings {
   bool meshAdaptiveTTL;                // Enable adaptive TTL based on peer count
   uint8_t meshPeerMax;                 // Max mesh peer slots (1-16, default: 8, changes on reboot)
   uint16_t sensorBroadcastIntervalMs;  // Sensor broadcast interval in ms (100-10000, default: 1000)
+  // Secure sensor fetcher (worker role) — docs/ESPNOW_SENSOR_FETCHER_DESIGN.md
+  bool   espnowAcceptSensorControl;       // opt-in: honor SENSOR_REQ from master/backup (default false)
+  String espnowMasterFingerprint;         // authorized PRIMARY-master Ed25519 pubkey (64-hex; empty=deny)
+  String espnowBackupMasterFingerprint;   // authorized BACKUP-master Ed25519 pubkey (64-hex; empty=deny)
   // ============================================================================
   // Multi-mesh data model (Phase 2 of docs/ESPNOW_V4_PLAN.md)
   // ============================================================================
@@ -818,24 +835,28 @@ struct Settings {
   int presenceDevicePollMs;     // STHS34PF80 polling interval (default: 100ms)
   // Sensor Logging auto-start settings
   bool sensorLogAutoStart;      // Auto-start sensor logging after boot with last-used parameters
-  String sensorLogPath;         // Last-used log file path (default: /logs/sensors/sensors.txt)
+  String sensorLogPath;         // Last-used log file path (default: CAPTURE_SENSORLOG_DEFAULT)
   int sensorLogIntervalMs;      // Last-used polling interval in ms (default: 5000)
   int sensorLogMask;            // Last-used sensor bitmask (0=none)
   int sensorLogFormat;          // Last-used format (0=text, 1=csv, 2=track)
+  int sensorLogMaxSize;         // Max log file size before rotation (bytes; default: 256000)
+  int sensorLogMaxRotations;    // Old rotated logs to keep (0-9; default: 3)
   // System Logging settings
   bool systemLogAutoStart;      // Auto-start system logging after boot
   bool eventLogEnabled;         // Structured event-ring history → /system/sys_logs/events.log
   String systemLogPath;         // Log file path (empty = auto-generate with timestamp)
   bool systemLogCategoryTags;   // Prefix log lines with [CATEGORY] tags
+  String systemLogFlags;        // Last-used debug flag mask for system log (empty = leave gDebugFlags)
   bool cameraAutoStart;         // Auto-start ESP32-S3 camera after boot
   bool microphoneAutoStart;     // Auto-start ESP32-S3 PDM microphone after boot
   // NOTE: kept OUTSIDE the #if ENABLE_ONDEVICE_LLM block below so the always-
   // compiled feature registry can reference &gSettings.llmAutoStart in any build.
   bool llmAutoStart;            // Auto-load the default LLM model at boot (default: false)
   // Microphone settings
-  int microphoneSampleRate;     // Sample rate in Hz (8000, 16000, 22050, 44100, 48000)
+  int microphoneSampleRate;     // Sample rate in Hz (8000, 16000, 22050, 44100, 48000) — PDM only
   int microphoneGain;           // Software gain 0-100% (default 90)
-  int microphoneBitDepth;       // Bit depth (16 or 32)
+  int microphoneBitDepth;       // Bit depth (cosmetic; HAL/WAV are always 16-bit int)
+  String micSource;             // Preferred mic source: "auto" | "pdm" | "g2" (resolved lazily against availability)
   // Camera image settings (persisted) - use int for settings system compatibility
   // OV3660 ships flat/washed-out, so we default brightness/contrast/saturation
   // to +2 (the API max). User-validated empirically — see camerafx command +
@@ -914,7 +935,7 @@ struct Settings {
   //   bleGlassesLeftMAC, bleGlassesRightMAC, bleRingMAC, blePhoneMAC,
   //   g2AutoConnect, ringAutoConnect
   // Power Management settings
-  uint8_t powerMode;            // 0=Performance(240MHz), 1=Balanced(160MHz), 2=PowerSaver(80MHz), 3=UltraSaver(40MHz)
+  uint8_t powerMode;            // 0=Performance(240MHz), 1=Balanced(160MHz), 2=PowerSaver(80MHz), 3=UltraSaver(80MHz active / 40MHz idle-only)
   bool powerAutoMode;           // Auto-adjust power mode based on battery level
   uint8_t powerBatteryThreshold; // Switch to power saver below this battery % (default: 20)
   uint8_t powerDisplayDimLevel; // Brightness % in power saver modes (0-100, default: 30)
@@ -1010,6 +1031,11 @@ void settingsDefaults();
 void buildSettingsJsonDoc(JsonDocument& doc, bool excludePasswords = false, bool mainFileOnly = false);
 bool readSettingsJson();
 bool writeSettingsJson();
+// Mark this boot's settings state trustworthy for full-array rewrites when
+// there is no settings.json to load (first boot / post-erase). readSettingsJson
+// sets the same flag itself on a successful load; while unset, the save path
+// skips the wifi-networks rebuild so it can't wipe the file after a failed load.
+void settingsMarkLoadedOk();
 bool writeDebugJson();   // persist the debug module to DEBUG_JSON_FILE
 bool readDebugJson();    // load the debug module from DEBUG_JSON_FILE
 
@@ -1181,7 +1207,12 @@ struct SettingEntry {
   int minVal;                 // Min value for int/float validation (0 to skip)
   int maxVal;                 // Max value for int/float validation (0 to skip)
   const char* label;          // Human-readable label for UI display (nullptr = use jsonKey)
-  const char* options;        // Comma-separated options for select fields (nullptr = none)
+  // Select / bitmask UI hints (nullptr = none):
+  //   "0|Text,1|CSV"              → <select> (value|label pairs; ':' also accepted in older UI)
+  //   "bitmask:1|Thermal,2|ToF"   → checkbox grid; values may be decimal or 0xhex.
+  //   Optional headers: "bitmask:#|I2C Sensors,0x1|GPS"
+  // Stored value is unchanged (int mask or hex string) — only the web renderer differs.
+  const char* options;
   bool isSecret = false;      // If true: encrypt on disk, exclude from web API, blank input = unchanged
   const char* group = nullptr;  // Sub-section group for JSON nesting + UI grouping (nullptr = ungrouped)
   const char* cmdKey = nullptr; // CLI command name override (nullptr = use jsonKey as command)

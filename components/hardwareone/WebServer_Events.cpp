@@ -3,6 +3,7 @@
 #if ENABLE_HTTP_SERVER
 
 #include "WebServer_Server.h"
+#include "WebServer_Utils.h"   // webGuestAccessAllowed — guest role HTTP gate
 #include "System_User.h"
 #include "System_Debug.h"
 #include "System_MemUtil.h"
@@ -157,6 +158,7 @@ esp_err_t handleEvents(httpd_req_t* req) {
   if (!tgRequireAuth(ctx)) {
     return ESP_OK;
   }
+  if (!webGuestAccessAllowed(req, ctx)) return ESP_OK;
   u = ctx.user;
   DEBUG_AUTHF("/api/events (SSE) ALLOWED for user: %s from IP: %s", u.c_str(), ip.c_str());
 

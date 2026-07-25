@@ -50,6 +50,7 @@ static void displayRemoteSettingsMode() {
 
 // Input handler for remote settings mode
 static bool handleRemoteSettingsInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed) {
+  if (oledGuestBlocksMutate()) return true;
   extern SettingsEditorContext gSettingsEditor;
 
   // Canonical-signal pattern (matches local handleSettingsEditorInput):

@@ -106,15 +106,15 @@ inline void streamBluetoothInner(httpd_req_t* req) {
   // The mode toggle only makes sense in builds that actually include the G2
   // client — otherwise there's no second role to switch to.
   httpd_resp_send_chunk(req, R"HTML(
-      <button class='btn' id='btn-bt-mode' title='Switch BLE role (server phone-peripheral vs. G2 glasses client)'>Mode: Server</button>
+      <button class='btn' id='btn-bt-mode' title='Switch BLE role (server phone-peripheral vs. G2 glasses client)' data-guest-hide>Mode: Server</button>
 )HTML", HTTPD_RESP_USE_STRLEN);
 #endif
 
   httpd_resp_send_chunk(req, R"HTML(
-      <button class='btn' id='btn-bt-open'>Open</button>
-      <button class='btn' id='btn-bt-close' style='display:none'>Close</button>
-      <button class='btn' id='btn-bt-adv' style='display:none'>Advertise</button>
-      <button class='btn' id='btn-bt-disconnect' style='display:none'>Disconnect</button>
+      <button class='btn' id='btn-bt-open' data-guest-hide>Enable Bluetooth</button>
+      <button class='btn' id='btn-bt-close' style='display:none' data-guest-hide>Disable Bluetooth</button>
+      <button class='btn' id='btn-bt-adv' style='display:none' data-guest-hide>Advertise</button>
+      <button class='btn' id='btn-bt-disconnect' style='display:none' data-guest-hide>Disconnect</button>
       <button class='btn' id='btn-bt-refresh' style='background:none;border-color:var(--border);color:var(--muted)'>↻</button>
     </div>
   </div>
@@ -124,8 +124,8 @@ inline void streamBluetoothInner(httpd_req_t* req) {
 <!-- Not initialized state (copy swapped by JS based on current mode) -->
 <div class='bt-not-init' id='bt-not-init'>
   <h3 id='bt-not-init-title'>Bluetooth is not running</h3>
-  <p id='bt-not-init-body'>Open the BLE server to begin advertising and accept connections from clients.</p>
-  <button class='btn' id='btn-bt-open2'>Open Bluetooth</button>
+  <p id='bt-not-init-body'>Enable the BLE server to begin advertising and accept connections from clients.</p>
+  <button class='btn' id='btn-bt-open2' data-guest-hide>Enable Bluetooth</button>
 </div>
 
 <!-- Initialized panels -->
@@ -151,17 +151,17 @@ inline void streamBluetoothInner(httpd_req_t* req) {
       <div class='bt-card-body'>
         <div class='bt-section-label'>Data Streams</div>
         <div class='bt-stream-grid'>
-          <button class='btn bt-stream-btn' id='btn-stream-on'>All On</button>
-          <button class='btn bt-stream-btn' id='btn-stream-off'>All Off</button>
-          <button class='btn bt-stream-btn' id='btn-stream-sensors'>Sensors</button>
-          <button class='btn bt-stream-btn' id='btn-stream-system'>System</button>
-          <button class='btn bt-stream-btn' id='btn-stream-events'>Events</button>
+          <button class='btn bt-stream-btn' id='btn-stream-on' data-guest-hide>All On</button>
+          <button class='btn bt-stream-btn' id='btn-stream-off' data-guest-hide>All Off</button>
+          <button class='btn bt-stream-btn' id='btn-stream-sensors' data-guest-hide>Sensors</button>
+          <button class='btn bt-stream-btn' id='btn-stream-system' data-guest-hide>System</button>
+          <button class='btn bt-stream-btn' id='btn-stream-events' data-guest-hide>Events</button>
         </div>
         <div class='bt-section-label'>Intervals (ms)</div>
         <div class='bt-field-row'>
-          <input type='number' id='stream-sensor-ms' class='form-control' min='100' value='1000' placeholder='Sensor ms' />
-          <input type='number' id='stream-system-ms' class='form-control' min='100' value='5000' placeholder='System ms' />
-          <button class='btn' id='btn-stream-interval'>Apply</button>
+          <input type='number' id='stream-sensor-ms' class='form-control' min='100' value='1000' placeholder='Sensor ms' data-guest-hide />
+          <input type='number' id='stream-system-ms' class='form-control' min='100' value='5000' placeholder='System ms' data-guest-hide />
+          <button class='btn' id='btn-stream-interval' data-guest-hide>Apply</button>
         </div>
         <div id='bt-stream-status' style='font-size:.82em;color:var(--muted);min-height:1.2em'></div>
       </div>
@@ -181,15 +181,15 @@ inline void streamBluetoothInner(httpd_req_t* req) {
         <div>
           <div class='bt-section-label'>Device Name</div>
           <div class='bt-field-row'>
-            <input type='text' id='bt-cfg-name' class='form-control' maxlength='30' placeholder='e.g. HardwareOne' />
-            <button class='btn' id='btn-bt-savename'>Save</button>
+            <input type='text' id='bt-cfg-name' class='form-control' maxlength='30' placeholder='e.g. HardwareOne' data-guest-hide />
+            <button class='btn' id='btn-bt-savename' data-guest-hide>Save</button>
           </div>
 
           <div class='bt-section-label'>TX Power</div>
           <div class='bt-field-row'>
-            <input type='number' id='bt-cfg-txpower' class='form-control' min='0' max='7' placeholder='0–7' style='max-width:90px' />
+            <input type='number' id='bt-cfg-txpower' class='form-control' min='0' max='7' placeholder='0–7' style='max-width:90px' data-guest-hide />
             <span style='font-size:.82em;color:var(--muted);flex:1'>0 = −12 dBm &nbsp; 7 = +9 dBm</span>
-            <button class='btn' id='btn-bt-savetx'>Save</button>
+            <button class='btn' id='btn-bt-savetx' data-guest-hide>Save</button>
           </div>
         </div>
 
@@ -198,16 +198,16 @@ inline void streamBluetoothInner(httpd_req_t* req) {
           <div class='bt-toggle-row'>
             <div>
               <div class='bt-toggle-label'>Auto-Start on Boot</div>
-              <div class='bt-toggle-sub'>Open Bluetooth automatically after reboot</div>
+              <div class='bt-toggle-sub'>Enable Bluetooth automatically after reboot</div>
             </div>
-            <button class='btn bt-stream-btn' id='btn-bt-autostart' style='min-width:52px'>--</button>
+            <button class='btn bt-stream-btn' id='btn-bt-autostart' style='min-width:52px' data-guest-hide>--</button>
           </div>
           <div class='bt-toggle-row'>
             <div>
               <div class='bt-toggle-label'>Require Authentication</div>
               <div class='bt-toggle-sub'>Clients must authenticate before sending commands</div>
             </div>
-            <button class='btn bt-stream-btn' id='btn-bt-requireauth' style='min-width:52px'>--</button>
+            <button class='btn bt-stream-btn' id='btn-bt-requireauth' style='min-width:52px' data-guest-hide>--</button>
           </div>
         </div>
 
@@ -273,14 +273,14 @@ inline void streamBluetoothInner(httpd_req_t* req) {
 
         <div class='bt-section-label' style='margin-top:14px'>Scan &amp; Connect</div>
         <div class='bt-stream-grid'>
-          <button class='btn bt-stream-btn' id='btn-g2-scan'>Scan</button>
-          <button class='btn bt-stream-btn' id='btn-g2-connect-auto'>Connect Both</button>
-          <button class='btn bt-stream-btn' id='btn-g2-disconnect'>Disconnect</button>
-          <button class='btn bt-stream-btn' id='btn-g2-battery'>Refresh Battery</button>
+          <button class='btn bt-stream-btn' id='btn-g2-scan' data-guest-hide>Scan</button>
+          <button class='btn bt-stream-btn' id='btn-g2-connect-auto' data-guest-hide>Connect Both</button>
+          <button class='btn bt-stream-btn' id='btn-g2-disconnect' data-guest-hide>Disconnect</button>
+          <button class='btn bt-stream-btn' id='btn-g2-battery' data-guest-hide>Refresh Battery</button>
         </div>
         <div id='g2-conn-status' style='font-size:.82em;color:var(--muted);min-height:1.2em;margin-top:8px'></div>
         <label style='display:flex;align-items:center;gap:8px;font-size:.85em;margin-top:10px;cursor:pointer;flex-wrap:wrap;line-height:1.3'
-               title='When enabled, on boot the device reconnects to the saved temple MACs (no scan / no pairing). Pair once via Connect Both first.'>
+               title='When enabled, on boot the device reconnects to the saved temple MACs (no scan / no pairing). Pair once via Connect Both first.' data-guest-hide>
           <input type='checkbox' id='cb-g2-autoconnect' style='flex-shrink:0'>
           <span>Auto-reconnect on boot</span>
         </label>
@@ -314,11 +314,11 @@ inline void streamBluetoothInner(httpd_req_t* req) {
         </div>
         <div class='bt-section-label' style='margin-top:14px'>Connect</div>
         <div class='bt-stream-grid'>
-          <button class='btn bt-stream-btn' id='btn-ring-connect'>Connect</button>
-          <button class='btn bt-stream-btn' id='btn-ring-disconnect'>Disconnect</button>
+          <button class='btn bt-stream-btn' id='btn-ring-connect' data-guest-hide>Connect</button>
+          <button class='btn bt-stream-btn' id='btn-ring-disconnect' data-guest-hide>Disconnect</button>
         </div>
         <label style='display:flex;align-items:center;gap:8px;font-size:.85em;margin-top:10px;cursor:pointer;flex-wrap:wrap;line-height:1.3'
-               title='When enabled, on boot the device reconnects to the saved ring MAC (no scan). Pair once via Connect first.'>
+               title='When enabled, on boot the device reconnects to the saved ring MAC (no scan). Pair once via Connect first.' data-guest-hide>
           <input type='checkbox' id='cb-ring-autoconnect' style='flex-shrink:0'>
           <span>Auto-reconnect on boot</span>
         </label>
@@ -341,13 +341,13 @@ inline void streamBluetoothInner(httpd_req_t* req) {
       <div class='bt-card-body'>
         <div class='bt-section-label'>Show Text (back pane)</div>
         <div class='bt-field-row'>
-          <input type='text' id='g2-text' class='form-control' maxlength='120' placeholder='Text to show on the glasses' />
-          <button class='btn' id='btn-g2-show'>Send</button>
+          <input type='text' id='g2-text' class='form-control' maxlength='120' placeholder='Text to show on the glasses' data-guest-hide />
+          <button class='btn' id='btn-g2-show' data-guest-hide>Send</button>
         </div>
         <div class='bt-section-label' style='margin-top:14px'>AI Reply (front pane)</div>
         <div class='bt-field-row'>
-          <input type='text' id='g2-ai-text' class='form-control' maxlength='250' placeholder='Text to render in the front-pane answer card' />
-          <button class='btn' id='btn-g2-ai'>Send</button>
+          <input type='text' id='g2-ai-text' class='form-control' maxlength='250' placeholder='Text to render in the front-pane answer card' data-guest-hide />
+          <button class='btn' id='btn-g2-ai' data-guest-hide>Send</button>
         </div>
         <div style='font-size:.78em;color:var(--muted);margin-top:4px;line-height:1.4'>
           Pushes a card to the front (closer) focal plane via the Even-AI
@@ -356,9 +356,9 @@ inline void streamBluetoothInner(httpd_req_t* req) {
         </div>
         <div class='bt-section-label' style='margin-top:14px'>Notify (transient)</div>
         <div class='bt-field-row'>
-          <input type='text' id='g2-notify-text' class='form-control' maxlength='120' placeholder='Notification text (auto-clears)' />
-          <input type='number' id='g2-notify-secs' class='form-control' style='max-width:70px' min='1' max='60' value='5' title='Seconds before auto-clear' />
-          <button class='btn' id='btn-g2-notify'>Notify</button>
+          <input type='text' id='g2-notify-text' class='form-control' maxlength='120' placeholder='Notification text (auto-clears)' data-guest-hide />
+          <input type='number' id='g2-notify-secs' class='form-control' style='max-width:70px' min='1' max='60' value='5' title='Seconds before auto-clear' data-guest-hide />
+          <button class='btn' id='btn-g2-notify' data-guest-hide>Notify</button>
         </div>
         <div style='font-size:.78em;color:var(--muted);margin-top:4px;line-height:1.4'>
           Placeholder: uses full-screen text display with an auto-clear timer.
@@ -367,20 +367,20 @@ inline void streamBluetoothInner(httpd_req_t* req) {
         </div>
         <div class='bt-section-label' style='margin-top:14px'>BMP from storage</div>
         <div class='bt-field-row'>
-          <input type='text' id='g2-bmp-path' class='form-control' maxlength='180' placeholder='LittleFS path (e.g. /images/test.bmp)' value='/images/test.bmp' />
-          <input type='number' id='g2-bmp-bright' class='form-control' style='max-width:74px' min='-100' max='100' value='0' title='Brightness -100..100' />
-          <input type='number' id='g2-bmp-contrast' class='form-control' style='max-width:74px' min='-100' max='100' value='0' title='Contrast -100..100' />
-          <input type='number' id='g2-bmp-hold' class='form-control' style='max-width:86px' min='0' max='120' value='3' title='Hold seconds before cleanup' />
-          <button class='btn' id='btn-g2-bmp'>Show BMP</button>
+          <input type='text' id='g2-bmp-path' class='form-control' maxlength='180' placeholder='LittleFS path (e.g. /images/test.bmp)' value='/images/test.bmp' data-guest-hide />
+          <input type='number' id='g2-bmp-bright' class='form-control' style='max-width:74px' min='-100' max='100' value='0' title='Brightness -100..100' data-guest-hide />
+          <input type='number' id='g2-bmp-contrast' class='form-control' style='max-width:74px' min='-100' max='100' value='0' title='Contrast -100..100' data-guest-hide />
+          <input type='number' id='g2-bmp-hold' class='form-control' style='max-width:86px' min='0' max='120' value='3' title='Hold seconds before cleanup' data-guest-hide />
+          <button class='btn' id='btn-g2-bmp' data-guest-hide>Show BMP</button>
         </div>
         <div style='font-size:.78em;color:var(--muted);margin-top:4px;line-height:1.4'>
           Loads a BMP from storage and pushes it via the image pipeline.
           Default is LittleFS; use <code>/sd/...</code> to target SD.
         </div>
         <div class='bt-stream-grid' style='grid-template-columns:1fr 1fr 1fr;margin-top:10px'>
-          <button class='btn bt-stream-btn' id='btn-g2-clear'>Clear Display</button>
-          <button class='btn bt-stream-btn' id='btn-g2-mic-toggle'>Mic: --</button>
-          <button class='btn bt-stream-btn' id='btn-g2-reopen' title='Re-open the hijacked Blocks app after an abnormal exit (lens went dark, tapping Blocks in the menu does nothing). Sends Cmd=18 + CREATE so the firmware accepts a fresh container.'>Re-open Hijack</button>
+          <button class='btn bt-stream-btn' id='btn-g2-clear' data-guest-hide>Clear Display</button>
+          <button class='btn bt-stream-btn' id='btn-g2-mic-toggle' data-guest-hide>Mic: --</button>
+          <button class='btn bt-stream-btn' id='btn-g2-reopen' title='Re-open the hijacked Blocks app after an abnormal exit (lens went dark, tapping Blocks in the menu does nothing). Sends Cmd=18 + CREATE so the firmware accepts a fresh container.' data-guest-hide>Re-open Hijack</button>
         </div>
         <div id='g2-display-status' style='font-size:.82em;color:var(--muted);min-height:1.2em;margin-top:8px'></div>
       </div>
@@ -399,14 +399,14 @@ inline void streamBluetoothInner(httpd_req_t* req) {
           <div class='bt-toggle-label'>Menu Navigation</div>
           <div class='bt-toggle-sub'>Route glasses gestures to the OLED menu (g2nav)</div>
         </div>
-        <button class='btn bt-stream-btn' id='btn-g2-nav' style='min-width:52px'>--</button>
+        <button class='btn bt-stream-btn' id='btn-g2-nav' style='min-width:52px' data-guest-hide>--</button>
       </div>
       <div class='bt-toggle-row'>
         <div>
           <div class='bt-toggle-label'>Verbose Scan Logging</div>
           <div class='bt-toggle-sub'>Log every BLE advert seen while scanning (g2verbose)</div>
         </div>
-        <button class='btn bt-stream-btn' id='btn-g2-verbose' style='min-width:52px'>--</button>
+        <button class='btn bt-stream-btn' id='btn-g2-verbose' style='min-width:52px' data-guest-hide>--</button>
       </div>
     </div>
   </div>
@@ -519,8 +519,8 @@ inline void streamBluetoothInner(httpd_req_t* req) {
       if(ob2) ob2.textContent = 'Initialize G2';
     } else {
       if(nit) nit.textContent = 'Bluetooth is not running';
-      if(nib) nib.textContent = 'Open the BLE server to begin advertising and accept connections from clients.';
-      if(ob2) ob2.textContent = 'Open Bluetooth';
+      if(nib) nib.textContent = 'Enable the BLE server to begin advertising and accept connections from clients.';
+      if(ob2) ob2.textContent = 'Enable Bluetooth';
     }
 
     // The Advertise button is server-only; hide it up-front in client mode
@@ -538,14 +538,18 @@ inline void streamBluetoothInner(httpd_req_t* req) {
     btState = state;
     var dot = el('bt-status-dot');
     var pill = el('bt-state-pill');
-    var isOn = (state === 'advertising' || state === 'connected' || state === 'on');
+    var isOn = (state === 'advertising' || state === 'connected' ||
+                state === 'connecting' || state === 'on');
 
     if(dot) dot.className = 'status-indicator ' + (isOn ? 'status-enabled' : 'status-disabled');
 
     if(pill){
-      pill.className = 'bt-pill ' + (state === 'connected' ? 'connected' : state === 'advertising' ? 'advertising' : 'idle');
+      pill.className = 'bt-pill ' + (state === 'connected' ? 'connected'
+                                   : (state === 'advertising' || state === 'connecting') ? 'advertising'
+                                   : 'idle');
       pill.textContent = state === 'off' ? 'Off' :
                          state === 'advertising' ? 'Advertising' :
+                         state === 'connecting'  ? 'Connecting' :
                          state === 'connected'   ? 'Connected' :
                          state === 'on'          ? 'Running' : '--';
     }
@@ -587,16 +591,20 @@ inline void streamBluetoothInner(httpd_req_t* req) {
 
   // Parse the single-line format produced by getG2Status():
   //   state=<name> L=up|down R=up|down mtu=L244/R244 batt=L82/R75 tx=L12/R9 rx=L3/R1
+  // state=off means the G2 client stack was never initialized (not the same
+  // as idle-after-init). Only idle/scanning/connecting/... count as running.
   function parseG2Status(text){
     var lower = (text || '').toLowerCase();
     if(lower.indexOf('state=') < 0) {
       return { running: false, state: 'off' };
     }
     function grab(re, def){ var m = text.match(re); return m ? m[1] : def; }
+    var state = (grab(/state=(\w+)/i, 'off') || 'off').toLowerCase();
+    var running = (state !== 'off' && state !== 'uninitialized' && state !== 'disabled');
 
     return {
-      running: true,
-      state:   (grab(/state=(\w+)/i, 'idle') || 'idle').toLowerCase(),
+      running: running,
+      state:   state,
       lUp:     /L=up/i.test(text),
       rUp:     /R=up/i.test(text),
       mtuL:    grab(/mtu=L(\d+)\/R\d+/i, '--'),
@@ -610,8 +618,18 @@ inline void streamBluetoothInner(httpd_req_t* req) {
     };
   }
 
+  // Overall G2 "connected" means both temples are up. One side pairing is
+  // still in progress (or a recovery gap) — surface that as connecting.
+  function g2OverallState(status){
+    if (status.lUp && status.rUp) return 'connected';
+    if (status.lUp || status.rUp) return 'connecting';
+    var s = status.state || 'idle';
+    if (s === 'scanning' || s === 'connecting' || s === 'authenticating') return s;
+    return s;
+  }
+
   function renderG2(status){
-    setText('g2-state-summary', 'state: ' + (status.state || '--'));
+    setText('g2-state-summary', 'state: ' + g2OverallState(status));
     function setSide(prefix, up, batt, mtu, tx, rx){
       var stEl = el('g2-' + prefix + '-state');
       if(stEl){
@@ -714,7 +732,7 @@ inline void streamBluetoothInner(httpd_req_t* req) {
         + '<div class="bt-conn-meta">' + since + 's &nbsp;·&nbsp; ' + cmds + ' cmds</div>'
         + '</div>'
         + '<div class="bt-conn-actions">'
-        + '<button class="btn" style="font-size:.78em;padding:3px 8px" onclick="btDisconnect()">Kick</button>'
+        + '<button class="btn" style="font-size:.78em;padding:3px 8px" onclick="btDisconnect()" data-guest-hide>Kick</button>'
         + '</div>'
         + '</div>';
     });
@@ -744,42 +762,38 @@ inline void streamBluetoothInner(httpd_req_t* req) {
   // True "off" comes through a successful response with parsed.running
   // === false; transient errors shouldn't make the UI lie.
   function refresh(){
-    if(bleMode === 'client' && G2_ENABLED){
-      cli('g2status').then(function(out){
+    hw.fetchJSON('/api/ble/status').then(function(d){
+      if(!d) return;
+      if(d.mode) applyMode(d.mode);
+      if(bleMode === 'client' && G2_ENABLED){
+        var out = d.g2Text || '';
         var parsed = parseG2Status(out);
         if(!parsed.running){
           applyState('off');
           showStatusText('');
-          return;
+        } else {
+          var overall = g2OverallState(parsed);
+          applyState(overall === 'connected' ? 'connected'
+                   : (overall === 'connecting' || overall === 'scanning' ||
+                      overall === 'authenticating') ? 'connecting'
+                   : 'on');
+          renderG2(parsed);
+          showStatusText(out);
         }
-        // When a temple is up, treat the whole client as "connected" so the
-        // header pill matches the UX from ESP-NOW / server mode. Otherwise
-        // initialized-but-idle registers as "on" (green dot, "Running" pill).
-        applyState((parsed.lUp || parsed.rUp) ? 'connected' : 'on');
-        renderG2(parsed);
-        showStatusText(out);
-      }).catch(function(){
-        // Transient failure (network blip, rate-limit, etc.) — don't
-        // overwrite the last known state. The next tick will recover.
-      }).then(function(){
-        // Chain ringstatus AFTER g2status resolves. Sequential rather
-        // than parallel keeps both requests clear of the 50 ms /api/cli
-        // rate limiter the server enforces. .then() runs regardless of
-        // whether the first call succeeded or failed (we caught above).
-        return cli('ringstatus');
-      }).then(function(out){
-        renderRing(parseRingStatus(out));
-      }).catch(function(){
-        // Same policy: silent on transient failures. The card just
-        // doesn't update this tick.
-      });
-    } else {
-      // Single structured source: bleinfo json drives the pill, the client
-      // list, the count, and the lifetime line. Zero text parsing — an unauthed
-      // "Unknown" can't be confused with a user named "Unknown".
-      cli('bleinfo json').then(function(j){
-        var info = {};
-        try { info = JSON.parse(j) || {}; } catch(e) {}
+        if(d.ring){
+          renderRing({
+            up: !!d.ring.connected,
+            name: d.ring.name || '--',
+            addr: d.ring.addr || '--',
+            mtu: (d.ring.mtu != null) ? String(d.ring.mtu) : '--',
+            rx: (d.ring.rx != null) ? String(d.ring.rx) : '0',
+            scan: d.ring.scanFound ? 'found' : 'not-found'
+          });
+        } else if(d.ringText){
+          renderRing(parseRingStatus(d.ringText));
+        }
+      } else {
+        var info = d.ble || {};
         applyState(stateFromInfo(info));
         renderConnections(info.clients || []);
         setText('bt-conn-count', (info.connections || 0) + ' / ' + (info.maxConnections || 4));
@@ -787,10 +801,10 @@ inline void streamBluetoothInner(httpd_req_t* req) {
           ? ('Lifetime: ' + (info.totalConnections || 0) + ' connections · ' +
              (info.commandsReceived || 0) + ' commands')
           : '');
-      }).catch(function(){
-        // Transient error — leave the previous state/list rather than flicker.
-      });
-    }
+      }
+    }).catch(function(){
+      // Transient error — leave the previous state/list rather than flicker.
+    });
   }
 
   // ── mode load ─────────────────────────────────────────────────────────────
@@ -799,18 +813,16 @@ inline void streamBluetoothInner(httpd_req_t* req) {
       applyMode('server');   // No G2 compiled in — there's nothing to switch to
       return;
     }
-    cli('blemode').then(function(out){
-      var isClient = (out || '').toLowerCase().indexOf('client') >= 0;
-      applyMode(isClient ? 'client' : 'server');
+    hw.fetchJSON('/api/ble/status').then(function(d){
+      applyMode((d && d.mode === 'client') ? 'client' : 'server');
     }).catch(function(){ applyMode('server'); });
   }
 
   // ── config load (server mode) ─────────────────────────────────────────────
   function loadConfig(){
     setText('bt-cfg-status', 'Loading…');
-    cli('bleinfo json').then(function(j){
-      var info = {};
-      try { info = JSON.parse(j) || {}; } catch(e) {}
+    hw.fetchJSON('/api/ble/status').then(function(d){
+      var info = (d && d.ble) || {};
       var nameInp = el('bt-cfg-name');    if(nameInp) nameInp.value = info.deviceName || '';
       var txInp   = el('bt-cfg-txpower'); if(txInp && info.txPower != null) txInp.value = info.txPower;
       autoStartState   = !!info.autoStart;
@@ -895,15 +907,27 @@ inline void streamBluetoothInner(httpd_req_t* req) {
       var inp = el('bt-cfg-txpower'); if(!inp) return;
       cli('bletxpower ' + inp.value).then(function(o){ setText('bt-cfg-status', o); });
     });
+    /* Both toggles flipped the UI BEFORE the command was sent and never
+       reverted it. blerequireauth is superadmin-gated, so a refused change left
+       a security control displaying the OPPOSITE of the device's real auth
+       posture. Send first, flip only on success, revert on refusal. */
     bind('btn-bt-autostart', function(){
-      autoStartState = !autoStartState;
-      updateToggle('btn-bt-autostart', autoStartState);
-      cli('bleautostart ' + (autoStartState ? 'on' : 'off')).then(function(o){ setText('bt-cfg-status', o); });
+      var want = !autoStartState;
+      cli('bleautostart ' + (want ? 'on' : 'off')).then(function(o){
+        setText('bt-cfg-status', o);
+        if (o && o.indexOf('Error') >= 0) return;   // leave the toggle as-is
+        autoStartState = want;
+        updateToggle('btn-bt-autostart', autoStartState);
+      });
     });
     bind('btn-bt-requireauth', function(){
-      requireAuthState = !requireAuthState;
-      updateToggle('btn-bt-requireauth', requireAuthState);
-      cli('blerequireauth ' + (requireAuthState ? 'on' : 'off')).then(function(o){ setText('bt-cfg-status', o); });
+      var want = !requireAuthState;
+      cli('blerequireauth ' + (want ? 'on' : 'off')).then(function(o){
+        setText('bt-cfg-status', o);
+        if (o && o.indexOf('Error') >= 0) return;
+        requireAuthState = want;
+        updateToggle('btn-bt-requireauth', requireAuthState);
+      });
     });
 
     // G2 actions — only bound when the G2 panel is in the DOM
@@ -1101,8 +1125,8 @@ inline void streamBluetoothInner(httpd_req_t* req) {
 
     function snapshotConnState(){
       // Reading from the DOM that refresh() just rendered. This is the
-      // same source of truth the user sees — if either shows anything
-      // other than a connected/up state, we treat as "in motion."
+      // same source of truth the user sees — if either side is not
+      // "connected", we treat as "in motion" and stay on the fast poll.
       var l = (el('g2-l-state')||{}).textContent || '';
       var r = (el('g2-r-state')||{}).textContent || '';
       return { l: l.trim(), r: r.trim() };
@@ -1110,7 +1134,8 @@ inline void streamBluetoothInner(httpd_req_t* req) {
 
     function pickNextDelay(){
       var s = snapshotConnState();
-      var bothUp = (s.l === 'up' && s.r === 'up');
+      // renderG2 writes "connected" / "idle" into the per-side labels.
+      var bothUp = (s.l === 'connected' && s.r === 'connected');
       if (s.l !== pollLastL || s.r !== pollLastR) {
         // State changed since last tick — kick back into fast mode.
         pollStableCount = 0;

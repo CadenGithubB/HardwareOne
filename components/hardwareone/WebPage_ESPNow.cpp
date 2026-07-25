@@ -547,21 +547,73 @@ static esp_err_t handleEspNowRemoteManifest(httpd_req_t* req) {
 // Register ESP-NOW Handlers
 // =============================================================================
 
+#if ENABLE_ESPNOW
+#include <ArduinoJson.h>
+#include "System_Utils.h"
+#include "System_CommandTypes.h"
+#include "System_MemUtil.h"
+
+static bool espnowRunInternal(const char* cmd, char* out, size_t outSize) {
+  AuthContext sys;
+  sys.transport = SOURCE_INTERNAL;
+  sys.user = "system";
+  sys.ip = "local";
+  sys.path = cmd;
+  out[0] = '\0';
+  return executeCommand(sys, cmd, out, outSize);
+}
+
+// GET /api/espnow/status — same result slots as the old CLI batch, so the
+// page can keep its apply logic. Runs as internal system (not the caller),
+// so guests can load the page without /api/cli.
+static esp_err_t handleEspNowStatus(httpd_req_t* req) {
+  WEB_AUTH_OR_RETURN(req, ctx);
+  httpd_resp_set_type(req, "application/json");
+
+  static const char* CMDS[] = {
+    "espnowstatus",
+    "espnowmode",
+    "bondstatus",
+    "espnowlist",
+    "espnowmeshes listjson",
+    "espnowdeviceinfo",
+    "espnowmeshrole",
+    "espnowmeshstatus",
+  };
+
+  PSRAM_JSON_DOC(doc);
+  doc["success"] = true;
+  JsonArray results = doc["results"].to<JsonArray>();
+  EXT_RAM_BSS_ATTR static char cmdBuf[CMD_RESULT_MAX];
+  for (size_t i = 0; i < sizeof(CMDS) / sizeof(CMDS[0]); i++) {
+    espnowRunInternal(CMDS[i], cmdBuf, sizeof(cmdBuf));
+    results.add(cmdBuf);
+  }
+  String out;
+  serializeJson(doc, out);
+  httpd_resp_send(req, out.c_str(), out.length());
+  return ESP_OK;
+}
+#endif
+
 void registerEspNowHandlers(httpd_handle_t server) {
-  static httpd_uri_t espnowPage = { .uri = "/espnow", .method = HTTP_GET, .handler = handleEspNowPage, .user_ctx = NULL };
+  static const httpd_uri_t espnowPage = { .uri = "/espnow", .method = HTTP_GET, .handler = handleEspNowPage, .user_ctx = NULL };
   httpd_register_uri_handler(server, &espnowPage);
   
 #if ENABLE_ESPNOW
-  static httpd_uri_t espnowMessages = { .uri = "/api/espnow/messages", .method = HTTP_GET, .handler = handleEspNowMessages, .user_ctx = NULL };
+  static const httpd_uri_t espnowStatus = { .uri = "/api/espnow/status", .method = HTTP_GET, .handler = handleEspNowStatus, .user_ctx = NULL };
+  httpd_register_uri_handler(server, &espnowStatus);
+
+  static const httpd_uri_t espnowMessages = { .uri = "/api/espnow/messages", .method = HTTP_GET, .handler = handleEspNowMessages, .user_ctx = NULL };
   httpd_register_uri_handler(server, &espnowMessages);
   
-  static httpd_uri_t espnowRemoteCap = { .uri = "/api/espnow/remotecap", .method = HTTP_GET, .handler = handleEspNowRemoteCap, .user_ctx = NULL };
+  static const httpd_uri_t espnowRemoteCap = { .uri = "/api/espnow/remotecap", .method = HTTP_GET, .handler = handleEspNowRemoteCap, .user_ctx = NULL };
   httpd_register_uri_handler(server, &espnowRemoteCap);
   
-  static httpd_uri_t espnowRemoteManifest = { .uri = "/api/espnow/remotemanifest", .method = HTTP_GET, .handler = handleEspNowRemoteManifest, .user_ctx = NULL };
+  static const httpd_uri_t espnowRemoteManifest = { .uri = "/api/espnow/remotemanifest", .method = HTTP_GET, .handler = handleEspNowRemoteManifest, .user_ctx = NULL };
   httpd_register_uri_handler(server, &espnowRemoteManifest);
   
-  static httpd_uri_t espnowMetadata = { .uri = "/api/espnow/metadata", .method = HTTP_GET, .handler = handleEspNowMetadata, .user_ctx = NULL };
+  static const httpd_uri_t espnowMetadata = { .uri = "/api/espnow/metadata", .method = HTTP_GET, .handler = handleEspNowMetadata, .user_ctx = NULL };
   httpd_register_uri_handler(server, &espnowMetadata);
 #endif
 }

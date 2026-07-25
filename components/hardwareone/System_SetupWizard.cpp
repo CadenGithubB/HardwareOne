@@ -140,7 +140,7 @@ static const size_t logLevelCount = 4;
 // NTP Presets
 // ============================================================================
 
-static const char* ntpPresets[] = {
+static const char* const ntpPresets[] = {
   "pool.ntp.org",
   "us.pool.ntp.org",
   "europe.pool.ntp.org",
@@ -153,7 +153,7 @@ static const size_t ntpPresetCount = sizeof(ntpPresets) / sizeof(ntpPresets[0]);
 // LED Startup Effects
 // ============================================================================
 
-static const char* ledEffects[] = {
+static const char* const ledEffects[] = {
   "none",
   "rainbow",
   "pulse",

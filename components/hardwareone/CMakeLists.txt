@@ -160,6 +160,9 @@ set(hardwareone_srcs
         G2_Page_TextEntry.cpp
         G2_Page_ESPNow.cpp
         G2_Page_Automations.cpp
+        G2_Page_Users.cpp
+        G2_Page_LED.cpp
+        G2_Pet.cpp
         G2_HijackFsm.cpp
         G2_HijackCmd.cpp
         System_Battery.cpp
@@ -204,6 +207,7 @@ set(hardwareone_srcs
         System_SensorStubs.cpp
         System_RamFlush.cpp
         System_Settings.cpp
+        System_SettingsEditorCore.cpp
         System_SetupWizard.cpp
         System_FeatureRegistry.cpp
         System_BootState.cpp
@@ -304,6 +308,7 @@ if(HW_CFG_BUILD_OLED_MODES GREATER 0)
         OLED_Mode_CLIInput.cpp
         OLED_Mode_Logging.cpp
         OLED_Mode_Power.cpp
+        OLED_Mode_LED.cpp
         OLED_Mode_Network.cpp
         OLED_Mode_System.cpp
         OLED_Mode_Sensors.cpp
@@ -317,6 +322,7 @@ if(HW_CFG_BUILD_OLED_MODES GREATER 0)
         OLED_Mode_RemoteSettings.cpp
         OLED_Mode_SetPattern.cpp
         OLED_Mode_ChangePassword.cpp
+        OLED_Mode_UserManager.cpp
         OLED_RemoteSettings.cpp
         OLED_UI.cpp
         OLED_SetupWizard.cpp
@@ -400,6 +406,7 @@ if(HW_CFG_ENABLE_LLM GREATER 0)
     list(APPEND hardwareone_srcs System_LLM_Sampler.cpp)
     list(APPEND hardwareone_srcs System_LLM_Tokenizer.cpp)
     list(APPEND hardwareone_srcs System_LLM_Model.cpp)
+    list(APPEND hardwareone_srcs System_LLM_Menu.cpp)
     list(APPEND hardwareone_srcs System_LLMChat.cpp)
     list(APPEND hardwareone_requires espressif__esp-dsp)
     if(HW_CFG_ENABLE_HTTP_SERVER)

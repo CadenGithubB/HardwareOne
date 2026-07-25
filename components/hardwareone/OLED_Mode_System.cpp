@@ -14,6 +14,7 @@
 
 #if ENABLE_WIFI
 #include <WiFi.h>
+#include "System_WiFi.h"  // wifiRadioOn() — RADIO power axis
 #endif
 
 #if ENABLE_HTTP_SERVER
@@ -364,6 +365,282 @@ void displayMemoryStatsRendered() {
 }
 
 // ============================================================================
+// Live Perf Stats (two-phase rendering, self-refreshing)
+// ============================================================================
+// Top-N task CPU% + stack low-watermarks on 128x64, backed directly by
+// uxTaskGetSystemState (the same raw API taskstats/perftop use — there is no
+// text parsing). CPU% is a NON-BLOCKING interval delta against the previous
+// 500 ms sample (reportAllTaskStacks' RunSample pattern) — never cmd_perftop's
+// vTaskDelay(750) two-snapshot form, which would park the main loop. The
+// baseline is deliberately mode-LOCAL: sharing reportAllTaskStacks' 60 s
+// baseline would corrupt its dCPU column (baselines are per-consumer).
+
+#include "System_TaskUtils.h"
+#include "System_MemUtil.h"
+#include "esp_attr.h"   // EXT_RAM_BSS_ATTR (perf render data lives in PSRAM)
+
+// Full task lists (not top-4): both pages scroll through every task with
+// up/down (the I2C-diag viewport-scroll pattern). ~20 tasks run on this
+// firmware, so 24 slots cover it; anything beyond is dropped (never seen).
+#define PERF_MAX_TASKS 24
+#define PERF_VISIBLE_ROWS 4
+// Live-refresh cadence: re-sample task stats twice a second (2 Hz). Both the
+// CPU% interval delta and the on-screen numbers advance at this rate.
+#define PERF_SAMPLE_MS 500
+
+struct PerfRenderData {
+  // loop-health strip (from perfGetLoopSnapshot)
+  bool     loopValid;
+  uint32_t lapsPerSec, avgMs, maxMs, stalls5s, totalStalls;
+  // all tasks by interval CPU%, sorted descending (IDLE excluded)
+  int      cpuCount;
+  char     cpuName[PERF_MAX_TASKS][11];
+  uint8_t  cpuPct[PERF_MAX_TASKS];
+  // all tasks by stack min-free, sorted ascending (riskiest first; BYTES)
+  int      stkCount;
+  char     stkName[PERF_MAX_TASKS][11];
+  uint32_t stkFree[PERF_MAX_TASKS];
+  bool     valid;
+};
+// ~700 B — PSRAM, written and read on the main loop only (prepare → render).
+EXT_RAM_BSS_ATTR static PerfRenderData perfRenderData;
+static uint8_t sPerfPage  = 0;   // 0 = CPU, 1 = STACK
+static int     sCpuScroll = 0;   // viewport offsets, one per page
+static int     sStkScroll = 0;
+
+// Grow-only sample buffers (cmd_taskstats' ps_alloc cache pattern).
+static TaskStatus_t* sPerfTaskBuf = nullptr;
+static UBaseType_t   sPerfTaskCap = 0;
+// Previous-sample runtime baseline, matched by handle.
+static TaskHandle_t* sPerfPrevHandle = nullptr;
+static uint32_t*     sPerfPrevRun    = nullptr;
+static UBaseType_t   sPerfPrevCount  = 0;
+static uint32_t      sPerfPrevTotal  = 0;
+
+void preparePerfData() {
+  // Expensive sampling at 2 Hz; between samples the cached data re-renders.
+  static uint32_t sSampleStamp = 0;
+  if (!everyMs(&sSampleStamp, PERF_SAMPLE_MS)) return;
+
+  perfRenderData.loopValid = perfGetLoopSnapshot(
+      perfRenderData.lapsPerSec, perfRenderData.avgMs, perfRenderData.maxMs,
+      perfRenderData.stalls5s, perfRenderData.totalStalls);
+
+  UBaseType_t n = uxTaskGetNumberOfTasks();
+  if (n + 4 > sPerfTaskCap) {
+    UBaseType_t cap = n + 4;
+    TaskStatus_t* buf = (TaskStatus_t*)ps_alloc(cap * sizeof(TaskStatus_t),
+                                                AllocPref::PreferPSRAM, "oled.perf.tasks");
+    TaskHandle_t* ph  = (TaskHandle_t*)ps_alloc(cap * sizeof(TaskHandle_t),
+                                                AllocPref::PreferPSRAM, "oled.perf.prevh");
+    uint32_t*     pr  = (uint32_t*)ps_alloc(cap * sizeof(uint32_t),
+                                            AllocPref::PreferPSRAM, "oled.perf.prevr");
+    if (!buf || !ph || !pr) return;  // keep old buffers/data; retry next tick
+    // Grow-only: old buffers stay allocated on the rare regrow (task count is
+    // near-constant after boot); tracking-tagged so the leak-hunt sees them.
+    sPerfTaskBuf = buf; sPerfPrevHandle = ph; sPerfPrevRun = pr;
+    sPerfTaskCap = cap;
+    sPerfPrevCount = 0;  // baseline invalid at the new size — skip one interval
+  }
+
+  uint32_t totalRun = 0;
+  UBaseType_t got = uxTaskGetSystemState(sPerfTaskBuf, sPerfTaskCap, &totalRun);
+  if (got == 0) return;  // capacity race — sample again next second
+
+  // --- CPU page: interval delta vs previous sample, FULL sorted list ------
+  // Prepare and render both run sequentially on the main loop, so inserting
+  // straight into the render arrays is race-free.
+  uint32_t dTotal = totalRun - sPerfPrevTotal;  // unsigned wrap-safe (u32 us counters)
+  perfRenderData.cpuCount = 0;
+  if (sPerfPrevCount > 0 && dTotal > 0) {
+    for (UBaseType_t i = 0; i < got; i++) {
+      const char* nm = sPerfTaskBuf[i].pcTaskName;
+      if (strncmp(nm, "IDLE", 4) == 0) continue;  // idle time isn't load
+      // Find this handle in the previous sample (order can shift).
+      uint32_t prev = 0; bool found = false;
+      for (UBaseType_t j = 0; j < sPerfPrevCount; j++) {
+        if (sPerfPrevHandle[j] == sPerfTaskBuf[i].xHandle) { prev = sPerfPrevRun[j]; found = true; break; }
+      }
+      if (!found) continue;  // new task this interval — no baseline yet
+      uint32_t dRun = sPerfTaskBuf[i].ulRunTimeCounter - prev;
+      uint32_t p = (uint32_t)(((uint64_t)dRun * 100U) / dTotal);
+      if (p > 125) continue;  // handle reuse artifact (taskstats' rejection rule)
+      if (p > 100) p = 100;
+      // Sorted insert (descending pct), capped at PERF_MAX_TASKS.
+      int cnt = perfRenderData.cpuCount;
+      int at = cnt < PERF_MAX_TASKS ? cnt : PERF_MAX_TASKS;
+      while (at > 0 && perfRenderData.cpuPct[at - 1] < p) at--;
+      if (at >= PERF_MAX_TASKS) continue;
+      int last = cnt < PERF_MAX_TASKS ? cnt : PERF_MAX_TASKS - 1;
+      for (int m = last; m > at; m--) {
+        perfRenderData.cpuPct[m] = perfRenderData.cpuPct[m - 1];
+        memcpy(perfRenderData.cpuName[m], perfRenderData.cpuName[m - 1],
+               sizeof(perfRenderData.cpuName[m]));
+      }
+      strncpy(perfRenderData.cpuName[at], nm, 10);
+      perfRenderData.cpuName[at][10] = '\0';
+      perfRenderData.cpuPct[at] = (uint8_t)p;
+      if (cnt < PERF_MAX_TASKS) perfRenderData.cpuCount++;
+    }
+  }
+
+  // --- STACK page: FULL list, lowest free-bytes first (HWM is BYTES) ------
+  perfRenderData.stkCount = 0;
+  for (UBaseType_t i = 0; i < got; i++) {
+    uint32_t f = (uint32_t)sPerfTaskBuf[i].usStackHighWaterMark;
+    int cnt = perfRenderData.stkCount;
+    int at = cnt < PERF_MAX_TASKS ? cnt : PERF_MAX_TASKS;
+    while (at > 0 && perfRenderData.stkFree[at - 1] > f) at--;
+    if (at >= PERF_MAX_TASKS) continue;
+    int last = cnt < PERF_MAX_TASKS ? cnt : PERF_MAX_TASKS - 1;
+    for (int m = last; m > at; m--) {
+      perfRenderData.stkFree[m] = perfRenderData.stkFree[m - 1];
+      memcpy(perfRenderData.stkName[m], perfRenderData.stkName[m - 1],
+             sizeof(perfRenderData.stkName[m]));
+    }
+    strncpy(perfRenderData.stkName[at], sPerfTaskBuf[i].pcTaskName, 10);
+    perfRenderData.stkName[at][10] = '\0';
+    perfRenderData.stkFree[at] = f;
+    if (cnt < PERF_MAX_TASKS) perfRenderData.stkCount++;
+  }
+
+  // Roll the baseline.
+  for (UBaseType_t i = 0; i < got; i++) {
+    sPerfPrevHandle[i] = sPerfTaskBuf[i].xHandle;
+    sPerfPrevRun[i]    = sPerfTaskBuf[i].ulRunTimeCounter;
+  }
+  sPerfPrevCount = got;
+  sPerfPrevTotal = totalRun;
+  perfRenderData.valid = true;
+}
+
+static void displayPerfStatsRendered() {
+  if (!oledDisplay || !oledConnected) return;
+  int y = OLED_CONTENT_START_Y;
+  oledDisplay->setTextSize(1);
+  oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
+
+  if (!perfRenderData.valid) {
+    oledDisplay->setCursor(0, y);
+    oledDisplay->println("Sampling...");
+    oledMarkDirtyUntil(millis() + PERF_SAMPLE_MS);  // keep ticking until data lands
+    return;
+  }
+
+  if (sPerfPage == 0) {
+    // Row 1: loop-health strip — laps/sec through the main loop, average
+    // lap time, and stalls in the last completed 5 s window (a floating
+    // value that rises and falls, not the ever-climbing since-boot total —
+    // matches the other two live metrics on this line).
+    oledDisplay->setCursor(0, y);
+    if (perfRenderData.loopValid) {
+      oledDisplay->printf("Loop %lu/s %lums st%lu",
+                          (unsigned long)perfRenderData.lapsPerSec,
+                          (unsigned long)perfRenderData.avgMs,
+                          (unsigned long)perfRenderData.stalls5s);
+    } else {
+      oledDisplay->print("Loop: warming up");
+    }
+    y += 9;
+
+    if (perfRenderData.cpuCount == 0) {
+      // CPU% is a delta between two 500 ms samples — the first visit needs
+      // ~1 s before rows appear. The final dirty-hold keeps us ticking.
+      oledDisplay->setCursor(0, y);
+      oledDisplay->print("Measuring CPU...");
+    } else {
+      // Scrollable task viewport: name + bar + pct, sorted by CPU%.
+      if (sCpuScroll > perfRenderData.cpuCount - PERF_VISIBLE_ROWS) {
+        sCpuScroll = perfRenderData.cpuCount - PERF_VISIBLE_ROWS;
+      }
+      if (sCpuScroll < 0) sCpuScroll = 0;
+      const int barX = 50, barW = 46, barH = 6;
+      for (int row = 0; row < PERF_VISIBLE_ROWS; row++) {
+        int r = sCpuScroll + row;
+        if (r >= perfRenderData.cpuCount) break;
+        char nm[9];
+        strncpy(nm, perfRenderData.cpuName[r], 8); nm[8] = '\0';
+        oledDisplay->setCursor(0, y);
+        oledDisplay->print(nm);
+        oledDisplay->drawRect(barX, y, barW, barH, DISPLAY_COLOR_WHITE);
+        int fill = (perfRenderData.cpuPct[r] * (barW - 2)) / 100;
+        if (fill > 0) oledDisplay->fillRect(barX + 1, y + 1, fill, barH - 2, DISPLAY_COLOR_WHITE);
+        oledDisplay->setCursor(barX + barW + 2, y);
+        oledDisplay->printf("%u%%", (unsigned)perfRenderData.cpuPct[r]);
+        y += 9;
+      }
+      if (sCpuScroll > 0) {
+        oledDisplay->setCursor(120, OLED_CONTENT_START_Y + 9);
+        oledDisplay->print("\x18");
+      }
+      if (sCpuScroll + PERF_VISIBLE_ROWS < perfRenderData.cpuCount) {
+        oledDisplay->setCursor(120, OLED_CONTENT_START_Y + OLED_CONTENT_HEIGHT - 8);
+        oledDisplay->print("\x19");
+      }
+    }
+  } else {
+    // STACK page: every task, riskiest first — min-free-ever in bytes
+    // (post-4x-fix units — display raw, never *4). '!' = under 512 B free
+    // (note the tiny kernel tasks ipc0/ipc1 always live near their mark).
+    oledDisplay->setCursor(0, y);
+    oledDisplay->printf("Min free stack  %d", perfRenderData.stkCount);
+    y += 9;
+    if (sStkScroll > perfRenderData.stkCount - PERF_VISIBLE_ROWS) {
+      sStkScroll = perfRenderData.stkCount - PERF_VISIBLE_ROWS;
+    }
+    if (sStkScroll < 0) sStkScroll = 0;
+    for (int row = 0; row < PERF_VISIBLE_ROWS; row++) {
+      int r = sStkScroll + row;
+      if (r >= perfRenderData.stkCount) break;
+      oledDisplay->setCursor(0, y);
+      oledDisplay->printf("%-10.10s %5lu%s", perfRenderData.stkName[r],
+                          (unsigned long)perfRenderData.stkFree[r],
+                          perfRenderData.stkFree[r] < 512 ? "!" : "");
+      y += 9;
+    }
+    if (sStkScroll > 0) {
+      oledDisplay->setCursor(120, OLED_CONTENT_START_Y + 9);
+      oledDisplay->print("\x18");
+    }
+    if (sStkScroll + PERF_VISIBLE_ROWS < perfRenderData.stkCount) {
+      oledDisplay->setCursor(120, OLED_CONTENT_START_Y + OLED_CONTENT_HEIGHT - 8);
+      oledDisplay->print("\x19");
+    }
+  }
+
+  // Keep re-rendering while this page is active so the 2 Hz sample gate in
+  // preparePerfData refreshes the numbers live. A bare oledMarkDirty() would be
+  // undone by the oledClearDirty() at the tail of the shared render frame, so
+  // use the timed dirty — a separate deadline (oledDirtyUntilMs) that
+  // clearDirty never touches. The hold (one sample interval) comfortably
+  // exceeds the render throttle, so the page never falls clean while shown.
+  oledMarkDirtyUntil(millis() + PERF_SAMPLE_MS);
+}
+
+static bool perfStatsInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed) {
+  if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
+    sPerfPage ^= 1;   // page keeps its own scroll offset
+    oledMarkDirty();
+    return true;
+  }
+  // Up/Down scroll the current page's task viewport.
+  int count = (sPerfPage == 0) ? perfRenderData.cpuCount : perfRenderData.stkCount;
+  int* scroll = (sPerfPage == 0) ? &sCpuScroll : &sStkScroll;
+  if (gNavEvents.down && *scroll + PERF_VISIBLE_ROWS < count) { (*scroll)++; return true; }
+  if (gNavEvents.up   && *scroll > 0)                         { (*scroll)--; return true; }
+  return false;  // B falls through to the central back handler
+}
+
+// Fresh view on forward entry: CPU page first, both viewports at the top.
+// (Back-nav preserves the previous position, matching the menu convention.)
+static void perfOnEnter(bool isForward) {
+  if (!isForward) return;
+  sPerfPage  = 0;
+  sCpuScroll = 0;
+  sStkScroll = 0;
+}
+
+// ============================================================================
 // System Status Rendered (two-phase rendering)
 // ============================================================================
 
@@ -376,7 +653,8 @@ extern bool isUsbPresent();
 
 // Pre-gathered system status data to avoid WiFi/heap operations inside I2C transaction
 struct SystemStatusRenderData {
-  bool wifiConnected;
+  bool wifiConnected;  // CONNECTION axis: associated to an AP
+  bool radioOn;        // RADIO axis: powered up at all (WiFi or ESP-NOW)
   char ssid[16];  // Truncated SSID
   char ip[16];     // IP address string
   uint32_t freeHeap;
@@ -395,7 +673,12 @@ static SystemStatusRenderData systemStatusRenderData = {0};
 void prepareSystemStatusData() {
   // Get WiFi data OUTSIDE I2C transaction
   systemStatusRenderData.wifiConnected = WiFi.isConnected();
-  
+#if ENABLE_WIFI
+  systemStatusRenderData.radioOn = wifiRadioOn();
+#else
+  systemStatusRenderData.radioOn = false;
+#endif
+
   if (systemStatusRenderData.wifiConnected) {
     String ssid = WiFi.SSID();
     if (ssid.length() > 15) ssid = ssid.substring(0, 15);
@@ -469,7 +752,11 @@ void displaySystemStatusRendered() {
 #endif
   oledDisplay->println();
 
-  // WiFi Status
+  // Two separate axes: RADIO power, then WiFi CONNECTION.
+  oledDisplay->print("Radio: ");
+  oledDisplay->println(systemStatusRenderData.radioOn ? "ON" : "OFF");
+
+  // WiFi Status (connection)
   if (systemStatusRenderData.wifiConnected) {
     oledDisplay->print("WiFi: ");
     oledDisplay->println(systemStatusRenderData.ssid);
@@ -498,6 +785,7 @@ static const OLEDModeEntry sSystemModes[] = {
   { OLED_SYSTEM_STATUS, "System",    "settings", displaySystemStatusRendered, nullptr, nullptr, false, -1, "B:Back" },
   { OLED_CUSTOM_TEXT,   "Text",      "text",     displayCustomText,           nullptr, nullptr, false, -1, "B:Back" },
   { OLED_MEMORY_STATS,  "Memory",    "memory",   displayMemoryStatsRendered,  nullptr, nullptr, false, -1, "B:Back" },
+  { OLED_PERF_STATS,    "Perf",      "memory",   displayPerfStatsRendered,    nullptr, perfStatsInputHandler, false, -1, "\x18\x19:Scroll A:Page B:Back", perfOnEnter },
   { OLED_UNAVAILABLE,   "Unavail",   nullptr,    displayUnavailable,          nullptr, nullptr, false, -1, nullptr  },  // dynamic hints
 };
 

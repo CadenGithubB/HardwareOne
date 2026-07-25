@@ -205,8 +205,14 @@ void oledScrollRender(Adafruit_SSD1306* display, OLEDScrollState* state,
 // 16px two-line / split-pane items. Use this for plain single-line text menus
 // so more than one option is visible at a time. Honors scrollOffset/visibleLines
 // and draws a thin scrollbar only when the list overflows.
+//
+// startY: top Y of the list window (default = content top). Pass a lower value
+// to reserve a header/status line above the list (e.g. the file-browser action
+// menu draws the filename on the top line, then renders the list one row down) —
+// the same "status line + scrollable list" shape the Power main menu hand-rolls.
+// Size visibleLines to the reduced window ((OLED_CONTENT_HEIGHT - reserved)/8).
 void oledScrollRenderSimple(Adafruit_SSD1306* display, OLEDScrollState* state,
-                            bool showSelection = true);
+                            bool showSelection = true, int startY = OLED_CONTENT_START_Y);
 int oledScrollCalculateVisibleLines(int displayHeight, int textSize, bool hasTitle = false, bool hasFooter = false);
 
 // Generic list-menu navigation helper using centralized gNavEvents.
@@ -227,9 +233,18 @@ enum OLEDKeyboardMode {
   KEYBOARD_MODE_LOWERCASE = 0,
   KEYBOARD_MODE_UPPERCASE = 1,
   KEYBOARD_MODE_NUMBERS = 2,
-  KEYBOARD_MODE_PATTERN = 3,
-  KEYBOARD_MODE_COUNT = 4
+  KEYBOARD_MODE_SYMBOLS = 3,
+  KEYBOARD_MODE_PATTERN = 4,
+  KEYBOARD_MODE_COUNT = 5
 };
+
+// The MODE key (SELECT / in-grid '*') cycles through every mode in enum order:
+// lowercase -> uppercase -> numbers -> symbols -> pattern -> lowercase. PATTERN
+// stays in the rotation on purpose: the OLED login screen accepts a gamepad
+// pattern in place of a text password (isValidUser() checks both hashes), so the
+// login keyboard MUST be able to reach it via SELECT. Keep PATTERN last so it
+// sits just before the wrap back to lowercase, exactly as it did before the
+// SYMBOLS page was inserted ahead of it.
 
 // Autocomplete provider callback types
 // Returns number of suggestions found, fills results array (up to maxResults)
@@ -261,6 +276,7 @@ struct OLEDKeyboardState {
 extern const char OLED_KEYBOARD_CHARS_UPPER[OLED_KEYBOARD_ROWS][OLED_KEYBOARD_COLS];
 extern const char OLED_KEYBOARD_CHARS_LOWER[OLED_KEYBOARD_ROWS][OLED_KEYBOARD_COLS];
 extern const char OLED_KEYBOARD_CHARS_NUMBERS[OLED_KEYBOARD_ROWS][OLED_KEYBOARD_COLS];
+extern const char OLED_KEYBOARD_CHARS_SYMBOLS[OLED_KEYBOARD_ROWS][OLED_KEYBOARD_COLS];
 extern OLEDKeyboardState gOledKeyboardState;
 
 void oledKeyboardInit(const char* title = nullptr, const char* initialText = nullptr, int maxLength = OLED_KEYBOARD_MAX_LENGTH);
@@ -303,8 +319,13 @@ bool oledKeyboardShowingSuggestions();
 void oledDrawBackArrowIcon(Adafruit_SSD1306* display, int footerY);
 
 typedef void (*OLEDConfirmCallback)(void* userData);
-bool oledConfirmRequest(const char* line1, const char* line2, OLEDConfirmCallback onYes, void* userData, bool defaultYes = true);
+// onNo (optional) fires when the user picks No or cancels (B). Existing callers
+// that omit it keep today's behavior (cancel just dismisses).
+bool oledConfirmRequest(const char* line1, const char* line2, OLEDConfirmCallback onYes, void* userData, bool defaultYes = true, OLEDConfirmCallback onNo = nullptr);
 bool oledConfirmIsActive();
+// Poll for an incoming ESP-NOW pair request and pop the shared accept/reject
+// dialog (defined in OLED_ESPNow.cpp; called from oledUpdate each tick).
+void oledEspNowPollPairRequest();
 
 // ============= Shared Command Execution =============
 // Execute a CLI command with OLED display authentication context

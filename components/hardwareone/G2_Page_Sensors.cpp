@@ -80,9 +80,12 @@ extern bool gOledEnabled;
 #include "System_Camera_DVP.h"     // initCamera, stopCamera, gCameraEnabled
 #include "G2_Page_CameraSettings.h" // g2ShowCameraSettingsMenu
 #endif
-#if ENABLE_MICROPHONE_SENSOR
-#include "System_Microphone.h"     // initMicrophone, stopMicrophone, gMicEnabled
+#if ENABLE_MICROPHONE
+#include "System_Microphone.h"     // gMicEnabled (status rows)
 #endif
+#include "HAL_Audio.h"             // audio source availability + selector (PDM/G2)
+#include "System_Settings.h"       // gSettings.micSource (source selector)
+#include "G2_Page_LED.h"           // g2ShowLedMenu — Sensors → LED drill-in
 
 // -----------------------------------------------------------------------------
 // Per-sensor "current value" formatters
@@ -275,6 +278,16 @@ static void fmG2FormatValue(char* out, size_t cap) {
 // gXCache symbols not existing (it's compile-gated by the same flag).
 typedef void (*G2SensorFormatter)(char* out, size_t cap);
 
+// LED "value": brightness percent. The NeoPixel driver is write-only (no
+// readable current-color state — see the LED-as-device audit), so brightness
+// is the one live number the row can honestly show. Plain int read from
+// gSettings — no cache mutex involved.
+#if defined(NEOPIXEL_PIN_DEFAULT) && (NEOPIXEL_PIN_DEFAULT >= 0)
+static void ledG2FormatValue(char* out, size_t cap) {
+  snprintf(out, cap, "%d%%", gSettings.ledBrightness);
+}
+#endif
+
 struct G2SensorRow {
   const char* label;            // 5-char short identifier (e.g. "IMU", "THERM")
   const char* hardware;         // canonical part name (e.g. "BNO055")
@@ -370,8 +383,19 @@ static void buildRows(G2SensorRow* rows, size_t maxRows, size_t* outCount,
   add("CAM",   "DVP",      "camera",     false, false, false,                         nullptr);
 #endif
 
-#if ENABLE_MICROPHONE_SENSOR
-  add("MIC",   "PDM",      "microphone", true,  gMicEnabled,      micConnected,      nullptr);
+#if ENABLE_MICROPHONE
+  {
+    // Available at runtime iff a source is actually reachable (onboard PDM OR G2
+    // glasses connected) — so on a PDM-less board the row appears only while the
+    // glasses are up, and disappears when they drop. Sub-label tracks the source.
+    const bool micAvail = audioAnySourceAvailable();
+    const char* micSub = (audioGetSource() == AUDIO_SRC_G2_LEFT)   ? "G2"
+                       : (audioGetSource() == AUDIO_SRC_LOCAL_PDM)  ? "PDM"
+                       : audioSourceAvailable(AUDIO_SRC_LOCAL_PDM)  ? "PDM"
+                       : audioSourceAvailable(AUDIO_SRC_G2_LEFT)    ? "G2"
+                                                                    : "—";
+    add("MIC", micSub, "microphone", micAvail, gMicEnabled, micAvail, nullptr);
+  }
 #else
   add("MIC",   "PDM",      "microphone", false, false, false,                         nullptr);
 #endif
@@ -380,6 +404,18 @@ static void buildRows(G2SensorRow* rows, size_t maxRows, size_t* outCount,
   add("OLED",  "SSD1306",  "oled",     true,  gOledEnabled,     gOledEnabled,      nullptr);
 #else
   add("OLED",  "SSD1306",  "oled",     false, false, false,                         nullptr);
+#endif
+
+  // LED-as-device row (same decision that put it on the OLED's Sensors
+  // submenu). Presence = the board pin — there is no ENABLE_NEOPIXEL macro,
+  // and a soldered LED has no probeable "connected" signal, so compiled-in
+  // means present. The value column shows brightness (the driver is
+  // write-only — no readable color state); tapping drills into the LED
+  // control sub-page (G2_Page_LED.cpp) instead of the generic sensor detail.
+#if defined(NEOPIXEL_PIN_DEFAULT) && (NEOPIXEL_PIN_DEFAULT >= 0)
+  add("LED",   "NeoPixel", "led",      true,  true,             true,              ledG2FormatValue);
+#else
+  add("LED",   "NeoPixel", "led",      false, false, false,                         nullptr);
 #endif
 
   if (outCount) *outCount = i;
@@ -598,7 +634,7 @@ static void showSensorDetail(const G2SensorRow& r) {
     gSensorsLevel = SENSORS_LEVEL_DETAIL;  // fall through to static render
   }
   size_t out = 0;
-  strncpy(gSensorsRows[out], "<- Sensors", SENSORS_ROW_LEN - 1);
+  strncpy(gSensorsRows[out], "<- Hardware", SENSORS_ROW_LEN - 1);
   gSensorsRows[out][SENSORS_ROW_LEN - 1] = '\0';
   gSensorsRowPtrs[out] = gSensorsRows[out];
   out++;
@@ -624,7 +660,7 @@ static void showSensorDetail(const G2SensorRow& r) {
   // expect the toggle to take effect immediately on those.
   bool labelAsLiveState = isCamera;
   bool isMic            = false;
-#if ENABLE_MICROPHONE_SENSOR
+#if ENABLE_MICROPHONE
   isMic = (strcmp(r.featureId, "microphone") == 0);
   if (isMic) labelAsLiveState = true;
 #endif
@@ -739,12 +775,14 @@ static const FeatureEntry* sensorFeature(const char* featureId) {
 }
 
 // Build a sensor's runtime start/stop CLI command. Most i2c sensors use
-// open<id>/close<id>; the input device is the exception (openinput/closeinput),
-// and FM radio uses open/closefm.
+// open<id>/close<id>; the input device is the exception (openinput/closeinput).
+// NOTE: FM used to be special-cased to open/closefm — commands that do NOT
+// exist (the registered names are openfmradio/closefmradio, which the generic
+// form below produces). Never hit on hardware because ENABLE_FM_RADIO builds
+// hadn't shipped; the FM row now drills into the tuner page anyway.
 static void sensorRuntimeCmd(const char* featureId, bool open, char* out, size_t cap) {
   const char* verb = open ? "open" : "close";
   if (strcmp(featureId, "gamepad") == 0)       snprintf(out, cap, "%sinput", verb);
-  else if (strcmp(featureId, "fmradio") == 0)  snprintf(out, cap, "%sfm", verb);
   else                                         snprintf(out, cap, "%s%s", verb, featureId);
 }
 
@@ -1124,6 +1162,10 @@ void g2BuildSensorReadout(char* out, size_t cap) {
 //   idx 0 = <- Sensors (back)
 //   idx 1 = Run: ON/OFF        (runtime start/stop — reflects live state)
 //   idx 2 = Auto Start: ON/OFF (persisted boot preference)
+//   idx 3 = Sync clock         (RTC ONLY — pull RTC time into the system clock)
+// The RTC row makes the count VARIABLE (3 for most sensors, 4 for RTC); the
+// featureId=="rtc" guard here MUST match the one in the tap handler, or a
+// non-RTC sensor grows a bogus row / the index map shifts.
 // Pointers reference the shared gSensorsRows buffers — valid until the next
 // call. Returns the row count. Consumed by renderSensorDetailLive().
 size_t g2BuildSensorLiveList(const char** outRows, size_t maxRows) {
@@ -1136,7 +1178,7 @@ size_t g2BuildSensorLiveList(const char** outRows, size_t maxRows) {
   const G2SensorRow* r = (gSensorsDetailIdx < count) ? &rows[gSensorsDetailIdx]
                                                      : nullptr;
 
-  strncpy(gSensorsRows[0], "<- Sensors", SENSORS_ROW_LEN - 1);
+  strncpy(gSensorsRows[0], "<- Hardware", SENSORS_ROW_LEN - 1);
   gSensorsRows[0][SENSORS_ROW_LEN - 1] = '\0';
   outRows[n++] = gSensorsRows[0];
 
@@ -1154,6 +1196,19 @@ size_t g2BuildSensorLiveList(const char** outRows, size_t maxRows) {
     else         snprintf(gSensorsRows[2], SENSORS_ROW_LEN, "Auto Start: n/a");
     outRows[n++] = gSensorsRows[2];
   }
+
+  if (n < maxRows && r && strcmp(r->featureId, "rtc") == 0) {  // idx 3 — RTC only
+    snprintf(gSensorsRows[3], SENSORS_ROW_LEN, "Sync clock");
+    outRows[n++] = gSensorsRows[3];
+  }
+#if ENABLE_MICROPHONE
+  // idx 3 — microphone only: source selector. Tap cycles the preference among
+  // auto + currently-available sources (see the SENSORS_LEVEL_LIVE tap handler).
+  if (n < maxRows && r && strcmp(r->featureId, "microphone") == 0) {
+    snprintf(gSensorsRows[3], SENSORS_ROW_LEN, "Source: %s", gSettings.micSource.c_str());
+    outRows[n++] = gSensorsRows[3];
+  }
+#endif
   return n;
 }
 
@@ -1170,6 +1225,38 @@ void g2ReshowSensorsDetail() {
   }
   showSensorDetail(rows[gSensorsDetailIdx]);
 }
+
+#if ENABLE_MICROPHONE
+// After openmic/closemic: persist micautostart only if runtime succeeded,
+// then redraw so Auto Start / Run rows match gMicEnabled.
+// userData = (uintptr_t)1 if we wanted ON, else 0.
+static void onMicAutostartRuntimeDone(bool ok, const char* result,
+                                      const G2CmdCookie& cookie,
+                                      void* userData) {
+  const bool wantOn = ((uintptr_t)userData) != 0;
+  bool runtimeOk = ok;
+  if (result && (strncmp(result, "Error", 5) == 0 ||
+                 strncmp(result, "ERROR", 5) == 0)) {
+    runtimeOk = false;
+  }
+
+  if (runtimeOk) {
+    char line[32];
+    snprintf(line, sizeof(line), "micautostart %s", wantOn ? "on" : "off");
+    if (!g2SubmitHijackCommand(line, cookie, nullptr, nullptr)) {
+      DEBUG_G2F("[G2] Sensors: %s submit FAILED after runtime ok", line);
+    }
+  } else {
+    DEBUG_G2F("[G2] Sensors: mic runtime failed — skip micautostart "
+              "(wantOn=%d result='%s')",
+              wantOn ? 1 : 0, result ? result : "");
+  }
+
+  if (g2GetHijackPage() == G2_HIJACK_PAGE_SENSORS) {
+    g2ReshowSensorsDetail();
+  }
+}
+#endif
 
 void g2SensorsHandleTap(uint32_t idx) {
   if (gSensorsLevel == SENSORS_LEVEL_LIST) {
@@ -1217,7 +1304,7 @@ void g2SensorsHandleTap(uint32_t idx) {
       return;
     }
     gSensorsDetailIdx = pos;
-#if ENABLE_MICROPHONE_SENSOR
+#if ENABLE_MICROPHONE
     // MIC drills into a dedicated compound page (list + live-readout
     // text widget) instead of the generic list-only detail. Provides
     // a per-tick UPDATE_TEXT readout (level, sample rate, recording)
@@ -1228,6 +1315,22 @@ void g2SensorsHandleTap(uint32_t idx) {
       if (g2ShowMicDetail()) return;
       DEBUG_G2F("[G2] Sensors: MIC detail compound start failed — "
                 "falling back to generic showSensorDetail");
+    }
+#endif
+    // LED drills into its dedicated control sub-page (color / effect /
+    // brightness — G2_Page_LED.cpp) instead of the generic detail, whose
+    // Run/Auto-Start rows map to open/close commands the LED doesn't have.
+    if (strcmp(rows[pos].featureId, "led") == 0) {
+      g2ShowLedMenu();
+      return;
+    }
+#if ENABLE_FM_RADIO
+    // FM drills into the tuner compound page (seek / volume / mute / power
+    // action rows + live readout — inline in G2_Glasses.cpp) instead of the
+    // generic sensor-live detail.
+    if (strcmp(rows[pos].featureId, "fmradio") == 0) {
+      if (g2ShowFmTunerPage()) return;
+      DEBUG_G2F("[G2] Sensors: FM tuner start failed — falling back to generic detail");
     }
 #endif
     showSensorDetail(rows[pos]);
@@ -1283,6 +1386,40 @@ void g2SensorsHandleTap(uint32_t idx) {
       showSensorDetail(r);
       return;
     }
+    if (idx == 3 && strcmp(r.featureId, "rtc") == 0) {
+      // RTC → system clock. Bare `rtcsync` is the SAFE direction: it writes
+      // only the volatile system clock, never the battery-backed DS3231 (the
+      // `from` direction, which we deliberately don't expose on a tap). Admin-
+      // gated, so a non-admin paired wearer gets a silent denial — matches the
+      // fire-and-forget Run/AutoStart rows above.
+      BROADCAST_PRINTF("[G2] Sensors: rtcsync (RTC->system) from glasses");
+      (void)g2SubmitHijackCommand("rtcsync", cookie, nullptr, nullptr);
+      showSensorDetail(r);
+      return;
+    }
+#if ENABLE_MICROPHONE
+    if (idx == 3 && strcmp(r.featureId, "microphone") == 0) {
+      // Cycle the mic source PREFERENCE among "auto" + currently-available
+      // sources. If the mic is running, `micsource` applies it live
+      // (stop → set → start). Only offers sources that are actually reachable.
+      const char* opts[3];
+      int nOpt = 0;
+      opts[nOpt++] = "auto";
+      if (audioSourceAvailable(AUDIO_SRC_LOCAL_PDM)) opts[nOpt++] = "pdm";
+      if (audioSourceAvailable(AUDIO_SRC_G2_LEFT))   opts[nOpt++] = "g2";
+      int cur = 0;
+      for (int i = 0; i < nOpt; i++) {
+        if (gSettings.micSource == opts[i]) { cur = i; break; }
+      }
+      const char* next = opts[(cur + 1) % nOpt];
+      char cmd[24];
+      snprintf(cmd, sizeof(cmd), "micsource %s", next);
+      BROADCAST_PRINTF("[G2] Sensors: mic source -> %s (from glasses)", next);
+      (void)g2SubmitHijackCommand(cmd, cookie, nullptr, nullptr);
+      showSensorDetail(r);
+      return;
+    }
+#endif
     return;
   }
 
@@ -1328,18 +1465,11 @@ void g2SensorsHandleTap(uint32_t idx) {
                      r.label, prev ? "ON" : "OFF",
                      next ? "ON" : "OFF");
 
-    // Runtime apply for hardware that supports hot start/stop is kept
-    // INLINE on tap_disp rather than routed through cmd_exec. Two
-    // reasons:
-    //   (a) `cmd_camerastart` / `opencamera` is the SYNC variant
-    //       (cameraPowerRequestStartSync, 60-s timeout) — running it on
-    //       cmd_exec would stall the whole command queue. The inline
-    //       `cameraPowerRequestStartAsync` returns instantly.
-    //   (b) UX feedback. The redraw below depends on the new gXEnabled
-    //       flag; doing it inline gives immediate visual confirmation.
-    // The AUTHORITATIVE write — flipping the persisted auto-start flag
-    // — IS routed through cmd_exec further down (the `*autostart` CLI
-    // commands), so the auth check still gates persistence.
+    // Camera runtime apply stays INLINE on tap_disp: `opencamera` is the
+    // SYNC variant (cameraPowerRequestStartSync, 60-s timeout) and would
+    // stall cmd_exec. Async queue returns instantly; persist still goes
+    // through cameraautostart on cmd_exec below. Mic uses openmic/closemic
+    // via submit (not a sync stall).
     bool skipImmediateRedraw = false;
     bool runtimeApplyOk      = true;
 #if ENABLE_CAMERA_SENSOR
@@ -1364,17 +1494,11 @@ void g2SensorsHandleTap(uint32_t idx) {
       }
     }
 #endif
-#if ENABLE_MICROPHONE_SENSOR
+#if ENABLE_MICROPHONE
+    // Mic runtime is async on cmd_exec — redraw only after openmic/closemic
+    // completes (see onMicAutostartRuntimeDone).
     if (strcmp(r.featureId, "microphone") == 0) {
-      if (next && !gMicEnabled) {
-        BROADCAST_PRINTF("[G2] Sensors: starting microphone...");
-        if (!initMicrophone()) {
-          BROADCAST_PRINTF("[G2] Sensors: microphone init FAILED");
-        }
-      } else if (!next && gMicEnabled) {
-        BROADCAST_PRINTF("[G2] Sensors: stopping microphone...");
-        stopMicrophone();
-      }
+      skipImmediateRedraw = true;
     }
 #endif
 
@@ -1403,11 +1527,28 @@ void g2SensorsHandleTap(uint32_t idx) {
       return;
     }
 
+    G2CmdCookie cookie{};
+    cookie.targetPage   = g2GetHijackPage();
+    cookie.targetNetSub = 0;
+
+#if ENABLE_MICROPHONE
+    // Mic: open/close first; micautostart only on success (callback).
+    // executeCommand returns ok=true even for "Error: …" handler strings,
+    // so the callback also inspects the result text.
+    if (strcmp(r.featureId, "microphone") == 0) {
+      const char* runtime = next ? "openmic" : "closemic";
+      if (!g2SubmitHijackCommand(runtime, cookie, onMicAutostartRuntimeDone,
+                                 (void*)(uintptr_t)(next ? 1 : 0))) {
+        DEBUG_G2F("[G2] Sensors: %s submit FAILED — no inline mutate", runtime);
+        g2ReshowSensorsDetail();
+      }
+      return;
+    }
+#endif
+
     char line[80];
     if (strcmp(r.featureId, "camera") == 0) {
       snprintf(line, sizeof(line), "cameraautostart %s", next ? "on" : "off");
-    } else if (strcmp(r.featureId, "microphone") == 0) {
-      snprintf(line, sizeof(line), "micautostart %s", next ? "on" : "off");
     } else {
       // Falls through to the generic per-sensor command, which covers
       // thermal/tof/imu/gps/fmradio/apds/gamepad. Unknown featureIds will
@@ -1417,16 +1558,13 @@ void g2SensorsHandleTap(uint32_t idx) {
                r.featureId, next ? "on" : "off");
     }
 
-    G2CmdCookie cookie{};
-    cookie.targetPage   = g2GetHijackPage();
-    cookie.targetNetSub = 0;
     // No completion callback — the inline showSensorDetail() above
     // already re-rendered (or the cam_pwr-done hook will). Persistence
-    // is fire-and-forget; if the submit fails we fall back inline so
-    // the flag still flips even if cmd_exec is wedged.
+    // is fire-and-forget via cmd_exec only — never setSetting on the
+    // tap/BLE task (wrong stack + skips auth). Optimistic UI may lie
+    // until the next refresh if submit fails.
     if (!g2SubmitHijackCommand(line, cookie, nullptr, nullptr)) {
-      DEBUG_G2F("[G2] Sensors: %s submit FAILED — inline setSetting fallback", line);
-      setSetting(*feat->enabledSetting, next);
+      DEBUG_G2F("[G2] Sensors: %s submit FAILED — no inline mutate", line);
     }
     return;
   }

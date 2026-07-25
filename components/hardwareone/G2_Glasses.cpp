@@ -8,6 +8,7 @@
 
 #include "G2_Glasses.h"
 #include "System_Events.h"  // systemEventPost — event register producer
+#include "System_SensorLogging.h"  // gSensorLoggingEnabled/gSensorLogMask/LOG_* — G2 Logging app
 
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 
@@ -34,6 +35,7 @@
 #include "System_VFS.h"
 #include "System_Battery.h"   // BatteryState + getBatteryPercentage etc — for ESP corner widget
 #include "System_Microphone.h"  // gMicEnabled, micConnected, getAudioLevel, etc — for MIC detail page
+#include "HAL_Audio.h"          // audioGetSource/audioCaptureActive/audioCaptureStop — G2 as a mic source
 #include "System_PollPause.h"   // PollPauseGuard — pause sensor polling during BLE connect/discovery
 #include "G2_HijackCmd.h"   // g2BumpMenuGen() — called from g2SetHijackPage
 #include "System_AuthIdentity.h"  // ExecIdentityGuard + currentAuthContext
@@ -45,7 +47,7 @@ extern "C" {
 #include "BLE_Events.h"        // CompactJson + blePushEvent
 #include "BLE_Peers.h"         // peer registry + saved-MAC reconnect
 #include "G2_Ring.h"  // g2RingInit (eager registration in initG2Client)
-#include "G2_Page_Common.h"    // G2TextPager + paging ops (g2TextPagerRender)
+#include "G2_Page_Common.h"    // TextPager + paging ops (g2TextPagerRender)
 #include "G2_Page_Sensors.h"   // g2ShowSensorList() (per-page module)
 #include "G2_Page_Network.h"   // g2ShowNetworkMenu / g2NetworkHandleTap
 #include "G2_Page_Settings.h"  // g2ShowSettingsMenu / g2SettingsHandleTap
@@ -53,16 +55,23 @@ extern "C" {
 #include "G2_Page_Power.h"     // g2ShowPowerMenu / g2PowerHandleTap
 #include "G2_Page_CameraSettings.h"  // g2ShowCameraSettingsMenu / g2CameraSettingsHandleTap
 #include "G2_Page_TestSuite.h" // g2ShowTestSuiteMenu / g2TestSuiteHandleTap
+#include "G2_Page_Users.h"     // g2ShowUsersMenu / g2UsersHandleTap — admin user manager
 #include "G2_Page_TextEntry.h" // generic on-glasses text-entry overlay
+#if ENABLE_FM_RADIO
+#include "i2csensor_rda5807.h" // gFmRadioCache + lifecycle globals — FM tuner page
+#endif
 #include "G2_Page_ESPNow.h"    // g2ShowESPNowAppMenu / g2ESPNowAppHandleTap
 #include "G2_Page_Automations.h" // g2ShowAutomationsMenu / g2AutomationsHandleTap
+#include "G2_Page_LED.h"       // g2ShowLedMenu / g2LedHandleTap (Sensors → LED)
+#include "G2_Pet.h"            // Apps → Pet: virtual-creature sim + tile renderer
 #include "G2_HijackFsm.h"      // shadow FSM tracking page-swap / hijack lifecycle
 #if ENABLE_MAPS
 #include "System_Maps.h"       // MapCore/OffscreenMapRenderer — g2map renders the offline map to the lens
 #include "System_TaskUtils.h"  // MAP_RENDER_STACK_WORDS — size the g2map worker like the OLED render task
-#if ENABLE_ONDEVICE_LLM
-#include "System_LLMChat.h"    // chat turns + streaming reads for the read-only G2 LLM viewer
 #endif
+#if ENABLE_ONDEVICE_LLM
+#include "System_LLM.h"        // llmGetStatus / model load status for Select Model
+#include "System_LLMChat.h"    // chat turns + streaming reads for the read-only G2 LLM viewer
 #endif
 #include "System_Settings.h"
 #include "System_Clock.h"  // Clock::tzOffsetQuarterHours() — explicit-unit tz accessor (defeats minutes/quarter-hours swap footgun)
@@ -79,6 +88,15 @@ extern "C" {
 #include <freertos/semphr.h>
 #include <ctype.h>
 #include <string.h>
+#include <time.h>          // localtime_r for the native-notification 'date' field
+
+// r1Crc32 (System_R1_Protocol.cpp) is the EXACT Even File Service fileDataCrc32
+// — CRC-32C, poly 0x1EDC6F41, init 0, MSB-first, no final XOR (a byte-for-byte
+// port of docs/FlutterApp-main/lib/src/core/crc.dart). It shares this file's
+// compile gate, so it is always linked when G2 is. Declared locally to avoid
+// pulling the whole R1 header; the native-notification path is its second
+// consumer. See docs/G2_NATIVE_NOTIFICATION_PLAN.md §3.
+extern uint32_t r1Crc32(const uint8_t* data, size_t len);
 
 // =============================================================================
 // Constants
@@ -806,6 +824,10 @@ static volatile bool     gCamStreamActive     = false;
 static volatile uint32_t gMapPagePendingTap = 0;
 static volatile bool     gMapPageActive     = false;
 #endif
+// Pet page (g2PetPageWorker) — same list-tap bitfield + active gate. Rows:
+//   0 Back · 1 Feed · 2 Play · 3 Clean · 4 Sleep.
+static volatile uint32_t gPetPagePendingTap = 0;
+static volatile bool     gPetPageActive     = false;
 #if ENABLE_ONDEVICE_LLM
 // Read-only LLM viewer (g2LlmPageWorker) — same list-tap-bitfield + active
 // gate pattern as the map/camera self-driving workers. Defined near the top
@@ -1201,6 +1223,11 @@ class G2ScanCallbacks : public BLEAdvertisedDeviceCallbacks {
 // Client callbacks (per temple)
 // =============================================================================
 
+// Mic-capture teardown when the LEFT temple (the audio arm) drops — defined
+// below, after the mic-ring statics. Called from onDisconnect (BLE host task
+// context), so it must not block.
+static void g2MicOnLeftDisconnect();
+
 class TempleClientCallbacks : public BLEClientCallbacks {
 public:
   explicit TempleClientCallbacks(G2Temple* t) : temple(t) {}
@@ -1225,6 +1252,13 @@ public:
     // Container is tied to the plugin task — task dies with the BLE link,
     // so force a fresh CREATE on reconnect.
     temple->containerReady = false;
+    // LEFT temple is the audio arm. On an unexpected drop, tear down any live
+    // mic capture — this is the ONLY place that can release the AFE feed + HAL
+    // capture lease on a mid-session disconnect, otherwise a consumer (SR /
+    // recorder) spins on read-zero forever and availability never flips.
+    if (temple->side == 'L' && wasConnected) {
+      g2MicOnLeftDisconnect();
+    }
     if (temple->side == 'R' && wasConnected) {
       // Display arm lost — any in-memory list swap cache is invalid.
       resetHijackListSwapCache();
@@ -1313,6 +1347,11 @@ struct G2MicProbe {
 };
 static G2MicProbe gMicL{}, gMicR{};
 static volatile bool gMicProbeActive = false;
+// Set true by g2MicStreamEnable(true) once AudioCtrCmd{en=1} is sent on the LEFT
+// arm. Makes stream enable/disable idempotent (prevents a stray double-send when
+// a manual g2micon and a HAL capture overlap) and is cleared on disconnect so a
+// reconnect re-arms the stream.
+static volatile bool gMicStreamOn = false;
 static volatile bool gMicProbeVerbose = false;  // log every frame at INFO when true
 
 // Mic-to-SD recorder state. When gMicRecFile is non-null, every audio
@@ -1606,6 +1645,50 @@ size_t g2MicReadPcmSamples(int16_t* out, size_t capSamples, uint32_t timeoutMs) 
 
 size_t   g2MicAfeRingDepth()    { return gMicAfeRingCount; }
 uint32_t g2MicAfeOverrunCount() { return gMicAfeOverruns; }
+
+// Turn the glasses' LC3 audio stream on/off by sending AudioCtrCmd{AudoFuncEn}
+// on the LEFT temple only (the sole arm that emits audio on FW 2.2.0.24 — never
+// sendToBoth). Idempotent via gMicStreamOn to avoid a stray double-send when a
+// manual g2micon and a HAL capture overlap. Returns false if the LEFT arm is
+// down or the envelope send fails (writeMutex timeout / link drop), so the HAL
+// treats "armed but not enabled" as a hard failure rather than a dead mic.
+bool g2MicStreamEnable(bool on) {
+  if (!gL.connected) return false;
+  if (on == gMicStreamOn) return true;   // already in the requested state
+  uint8_t buf[64];
+  size_t n = g2BuildAudioCtrl(allocSeq(), G2_MAGIC_AUDIO_CTRL, on, buf, sizeof(buf));
+  if (!n) return false;
+  if (!sendEnvelope(gL, buf, n)) return false;
+  gMicStreamOn    = on;
+  gMicProbeActive = on;   // keep the g2micstats "stream ON/OFF" readout coherent
+  return true;
+}
+
+// LEFT-temple mic teardown on an unexpected disconnect. Runs in the BLE host
+// task context, so file closes use NON-BLOCKING mutex takes (a portMAX_DELAY
+// wait here could stall the BLE stack). Disarms the ring/decoder and releases
+// the HAL capture lease so a consumer sees an explicit stop, not read-zero
+// forever.
+static void g2MicOnLeftDisconnect() {
+  gMicProbeActive = false;
+  gMicStreamOn    = false;              // reset so a reconnect re-arms the stream
+  g2MicSetAfeFeedActive(false);         // disarm ring + decoder (local, safe)
+  if (gMicRecMutex && xSemaphoreTake(gMicRecMutex, 0) == pdTRUE) {
+    micRecCloseLocked("left temple disconnect");
+    xSemaphoreGive(gMicRecMutex);
+  }
+  if (gMicWavMutex && xSemaphoreTake(gMicWavMutex, 0) == pdTRUE) {
+    micWavCloseLocked("left temple disconnect");
+    xSemaphoreGive(gMicWavMutex);
+  }
+#if ENABLE_MICROPHONE
+  // Release the capture lease iff the mic was actually using G2 — don't tear
+  // down a live PDM capture on a XIAO just because the glasses dropped.
+  if (audioGetSource() == AUDIO_SRC_G2_LEFT && audioCaptureActive()) {
+    audioCaptureStop(nullptr);
+  }
+#endif
+}
 
 // Decode one BLE packet's worth of audio (200 B = 5 LC3 frames) into
 // 800 int16 samples and append to the WAV. Caller must already hold
@@ -2385,6 +2468,20 @@ static void handleDevEvent(G2Temple& t, const uint8_t* devBody, size_t devLen) {
         }
         return;
       }
+      // Pet page list dispatch (container 'lstPet'). Rows: 0 Back · 1 Feed ·
+      // 2 Play · 3 Clean · 4 Sleep. Set the row's bit; the worker drains
+      // gPetPagePendingTap each loop. Only while gPetPageActive so late echoes
+      // after teardown are ignored. Refresh the 60 s hijack safety-timeout on
+      // every real tap (same rationale as the camera/map/'app' paths) — never
+      // from the frame pushes, which would defeat the stuck-hijack watchdog.
+      if (etype == 0 && strcmp(cname, "lstPet") == 0) {
+        if (gPetPageActive && idx < 32) {
+          if (g2FsmHijackActive()) gHijackStartedMs = millis();
+          gPetPagePendingTap |= (1u << idx);
+          DEBUG_G2F("[G2] PetPage tap: idx=%u", (unsigned)idx);
+        }
+        return;
+      }
 #if ENABLE_MAPS
       // Interactive Maps page list dispatch (container 'lstMap'). Rows:
       //   0 Back · 1 Zoom In · 2 Zoom Out · 3 Reset View · 4 Recenter.
@@ -2695,7 +2792,7 @@ static void handleDevEvent(G2Temple& t, const uint8_t* devBody, size_t devLen) {
         }
         if (gTextViewExitFn) {
           // Compound pages with their own list child for navigation
-          // (MIC detail's "<- Sensors" + toggle row, future similar
+          // (MIC detail's "<- Hardware" + toggle row, future similar
           // pages) register a custom handleTap. For those, the
           // ListEvent CLICK path owns the tap — firing the exit
           // handler here would race ahead and flip gHijackPage to
@@ -2912,7 +3009,7 @@ static void dispatchEventPayload(char side, const uint8_t* payload, size_t len) 
     } else if (gTextViewExitFn) {
       // Same race guard as the SysEvent CLICK / TextEvent CLICK
       // branches: pages with their own list child for navigation
-      // (MIC detail's "<- Sensors" + toggle row, future similar
+      // (MIC detail's "<- Hardware" + toggle row, future similar
       // pages) own the tap via their custom handleTap. Wake-word /
       // tap USER_ACTIVITY shouldn't fire the exit shortcut and
       // bounce the user back to MAIN — observed 2026-05-09: after
@@ -3613,7 +3710,12 @@ static void buildG2StatusMeter(char* out, size_t cap) {
 // at startup; the hijack dispatcher and the templated CLI handler iterate
 // the table.
 
-#define G2_PAGE_REGISTRY_MAX 16
+// A full board (LLM + camera + FM) registers 19 pages today; the two menu-
+// reorg launchers (System, Config) make 21. Headroom to 22 so a future page
+// doesn't silently drop at the register cap. NOTE: verify on an all-features
+// build, not just feathers3 — a green feathers3 build hides the overflow
+// (FM/camera pages are compiled out there).
+#define G2_PAGE_REGISTRY_MAX 22
 static const G2PageModule* gPageRegistry[G2_PAGE_REGISTRY_MAX] = { nullptr };
 static size_t              gPageRegistryCount = 0;
 
@@ -3700,27 +3802,35 @@ const G2PageModule* g2FindPageByHijackPage(G2HijackPage page) {
 // Forward decl — Status' custom render hook is defined alongside the
 // live-text worker further down. Page configs need its address here.
 static bool renderStatusCompound();
+// Status' back-row tap handler (idx 0 → System launcher). Defined with the
+// System launcher below; declared here so kStatusPage can take its address.
+static void g2StatusHandleTap(uint32_t idx);
 
 static const G2PageModule kStatusPage = {
-  "status", "Status",
+  "status", nullptr,   // hidden from the main menu — reached via the System launcher
   "Show G2 status snapshot on the lens",
   buildG2StatusSnapshot,          // already file-local in this same .cpp
   /*showMenu=*/  nullptr,         // read-only — uses live-page renderer
-  /*handleTap=*/ nullptr,
-  G2_HIJACK_PAGE_TEXT_VIEW,
-  // 5 s auto-refresh. TEXT widgets don't surface single-tap SysEvents
-  // (only DOUBLE_CLICK, which is reserved for exit), so manual-refresh
-  // via tap isn't reachable from the lens — periodic ticking is the
-  // only update path. REBUILD-text snaps content in place so the tick
-  // doesn't lose scroll position the way REBUILD-list would.
+  // The compound renders a tappable "<- System" back row; its tap (idx 0)
+  // routes to the System launcher via this handler. Double-click still exits
+  // to MAIN (platform-wide live-text behavior), same as SysEvents/Ring.
+  /*handleTap=*/ g2StatusHandleTap,
+  // Own id (not the shared TEXT_VIEW) so the back-row tap can reach the
+  // System launcher without capturing generic text views.
+  G2_HIJACK_PAGE_STATUS,
+  // 5 s auto-refresh. Content updates come only from periodic ticking (single
+  // taps are consumed by the back row; REBUILD-text snaps content in place so
+  // the tick doesn't lose scroll position the way REBUILD-list would).
   /*liveIntervalMs=*/ 5000,
-  /*backLabel=*/    "<- Main Menu",
+  /*backLabel=*/    "<- System",
   /*prefersTextWidget=*/ true,    // long content; text REBUILD avoids cycling
   /*liveRender=*/    renderStatusCompound,  // body + top-right batt corner
 };
 
 static const G2PageModule kSensorsPage = {
-  "sensors", "Sensors",
+  // Top-level row relabeled "Sensors" → "Hardware" (menu reorg — mirrors the
+  // OLED's "Hardware" category over the mixed peripheral list, incl. LED/CAM).
+  "sensors", "Hardware",
   "Show device sensor list on the lens",
   g2BuildSensorList,
   g2ShowSensorsMenu,
@@ -3737,7 +3847,9 @@ static const G2PageModule kSensorsPage = {
 };
 
 static const G2PageModule kNetworkPage = {
-  "network", "Network",
+  // Top-level row relabeled "Network" → "Connect" (menu reorg — mirrors the
+  // OLED's "Connect" category over the WiFi + Bluetooth submenus).
+  "network", "Connect",
   "Show Network info page on the lens",
   g2BuildNetworkInfo,
   g2ShowNetworkMenu,
@@ -3765,7 +3877,7 @@ static const G2PageModule kFilesPage = {
 static const G2PageModule kSettingsPage = {
   // CLI suffix is "settingspage" not "settings" — `g2settings` already
   // exists for the protocol-debug verbose toggle (see cmd_g2settings).
-  "settingspage", "Settings",
+  "settingspage", nullptr,   // hidden from the main menu — reached via the Config launcher
   "Show Settings inspector on the lens",
   g2BuildSettingsInfo,
   g2ShowSettingsMenu,
@@ -3779,7 +3891,7 @@ static const G2PageModule kSettingsPage = {
 
 static const G2PageModule kPowerPage = {
   "power", "Power",
-  "Show Power menu (restart / power off) on the lens",
+  "Show Power menu (CPU presets / restart / power off) on the lens",
   g2BuildPowerInfo,
   g2ShowPowerMenu,
   g2PowerHandleTap,
@@ -3809,6 +3921,21 @@ static const G2PageModule kEspNowAppPage = {
   /*liveRender=*/    nullptr,
 };
 
+// LED control sub-page — hidden (reached via Sensors → LED, the same drill-in
+// pattern as Camera Settings). showMenu / handleTap live in G2_Page_LED.cpp.
+static const G2PageModule kLedG2Page = {
+  "ledpage", nullptr,   // hidden from the main menu — reached via Sensors
+  "Show the LED control page (color / effect / brightness) on the lens",
+  g2BuildLedInfo,
+  g2ShowLedMenu,
+  g2LedHandleTap,
+  G2_HIJACK_PAGE_LED,
+  /*liveIntervalMs=*/ 0,
+  /*backLabel=*/    "<- Hardware",
+  /*prefersTextWidget=*/ false,   // own showMenu — flag is irrelevant
+  /*liveRender=*/    nullptr,
+};
+
 // Automations App page — hidden (reached via the Apps launcher). showMenu /
 // handleTap live in G2_Page_Automations.cpp; the launcher forwards to
 // g2ShowAutomationsMenu(), which flips gHijackPage to _AUTOMATIONS itself.
@@ -3825,6 +3952,19 @@ static const G2PageModule kAutomationsPage = {
   /*liveRender=*/    nullptr,
 };
 
+static const G2PageModule kUsersPage = {
+  "users", nullptr,   // hidden from the main menu — reached via the Apps submenu (admin only)
+  "Show the User manager (list / add / delete / role) on the lens",
+  g2BuildUsersInfo,
+  g2ShowUsersMenu,
+  g2UsersHandleTap,
+  G2_HIJACK_PAGE_USERS,
+  /*liveIntervalMs=*/ 0,
+  /*backLabel=*/    "<- Apps",
+  /*prefersTextWidget=*/ false,   // own showMenu — flag is irrelevant
+  /*liveRender=*/    nullptr,
+};
+
 // ─────────────────────────────────────────────────────────────────────
 // Apps launcher — a top-level submenu that groups the "app" pages
 // (ESP-NOW App, Files, Automations, Ring) plus the Maps viewer and LLM
@@ -3835,13 +3975,27 @@ static const G2PageModule kAutomationsPage = {
 // routing to their handleTap still works; they're just no longer
 // top-level rows.
 // ─────────────────────────────────────────────────────────────────────
+static bool g2ShowPetPage(void (*onDone)());   // Apps → Pet: list+animated-creature page, defined below
 #if ENABLE_MAPS
 static bool g2ShowMapPage(void (*onDone)());   // interactive list+image Maps page, defined below
 #endif
 #if ENABLE_ONDEVICE_LLM
 static bool g2ShowLlmPage(void (*onDone)());   // read-only streaming LLM viewer, defined below
+static void g2ShowLlmMenu();                   // LLM submenu (chat / guided / re-run / model), defined below
 #endif
 static bool g2ShowRingPage();                  // read-only live R1 ring dashboard, defined below
+static bool g2ShowSysEventsPage();             // read-only live system-event viewer, defined below
+static void g2ShowLoggingMenu();               // sensor-logging control list, defined below
+
+// Menu-reorg category launchers (mirror the OLED's System/Config categories).
+// Non-static: sub-pages in their own TUs (Settings, Tests, Users) return to
+// these on Back via a local `extern` decl, exactly like g2ShowAppsMenu.
+void g2ShowSystemMenu();                        // System launcher (Status/System Events/Logging/Tests), defined below
+void g2ShowConfigMenu();                        // Config launcher (Settings/Users/OLED Login), defined below
+// invokePageFromMain is defined much further down (with the tap dispatcher);
+// the System launcher reuses it to open the Status live-text page (Status has
+// no show*Menu of its own).
+static void invokePageFromMain(const G2PageModule& p);
 
 // Apps launcher rows. A single builder emits {label, id} pairs under the
 // compile-flag guards so g2ShowAppsMenu (renders labels) and g2AppsHandleTap
@@ -3856,10 +4010,13 @@ enum G2AppRow : uint8_t {
   APP_ROW_LLM,
   APP_ROW_AUTOMATIONS,
   APP_ROW_RING,
+  APP_ROW_PET,
+  // System Events + Logging moved to the System launcher; Users + OLED Login
+  // moved to the Config launcher (menu reorg — mirrors the OLED categories).
 };
 
-// Max rows = Back + ESPNow + Files + Maps + LLM + Automations + Ring.
-#define G2_APPS_MAX_ROWS 7
+// Max rows = Back + ESPNow + Files + Maps + LLM + Automations + Ring + Pet.
+#define G2_APPS_MAX_ROWS 8
 
 static size_t g2AppsBuildRows(const char** labels, G2AppRow* ids, size_t cap) {
   size_t n = 0;
@@ -3886,6 +4043,11 @@ static size_t g2AppsBuildRows(const char** labels, G2AppRow* ids, size_t cap) {
 #endif
   add("Automations", APP_ROW_AUTOMATIONS);
   add("Ring",        APP_ROW_RING);
+  add("Pet",         APP_ROW_PET);
+  // Menu reorg: System Events + Logging now live under the System launcher,
+  // and Users + OLED Login under the Config launcher (see g2SystemBuildRows /
+  // g2ConfigBuildRows). Apps keeps only the app-like tools, mirroring the
+  // OLED's "Apps" category.
   return n;
 }
 
@@ -3915,6 +4077,75 @@ void g2ShowAppsMenu() {
   }
 }
 
+#if ENABLE_OLED_DISPLAY
+// --- OLED login flow (Config -> OLED Login) ---------------------------------
+// Collect username + password on the lens keyboard and dispatch the EXISTING
+// `login <user> <pass> display` command, so the on-device OLED logs in with a
+// real credential check (no new command, no password-less handoff). The G2
+// hijack path runs on cmd_exec and is NOT the phone-app characteristic handler,
+// so the `display` transport is NOT rewritten to `bluetooth`.
+static char gOledLoginUser[33] = {0};
+
+// Completion on cmd_exec: show the login result ("Login successful for 'x' on
+// display (admin)" / "Error: Authentication failed"), then re-assert Config.
+static void onOledLoginCmdDone(bool ok, const char* result,
+                               const G2CmdCookie& /*cookie*/, void* /*userData*/) {
+  const char* msg = (result && result[0]) ? result : (ok ? "Login sent" : "Login failed");
+  if (strncmp(msg, "Error: ", 7) == 0) msg += 7;
+  char banner[80];
+  snprintf(banner, sizeof(banner), "%.76s", msg);
+  g2ShowText(banner);
+  vTaskDelay(pdMS_TO_TICKS(1800));
+  g2ShowConfigMenu();   // re-render + re-assert G2_HIJACK_PAGE_CONFIG after the banner
+}
+
+static void oledLoginCancel() { g2ShowConfigMenu(); }
+
+// Password entered -> dispatch `login "<user>" "<pass>" display`. The keyboard
+// charset can't produce a double-quote, so wrapping both args is always safe
+// (handles spaces in either field).
+static void oledLoginPassCommit(const char* text) {
+  if (!text || text[0] == '\0') { g2ShowConfigMenu(); return; }  // empty = cancel
+  String line = String("login \"") + gOledLoginUser + "\" \"" + text + "\" display";
+  g2ShowText("Logging in...");
+  G2CmdCookie cookie{};
+  cookie.targetPage = g2GetHijackPage();
+  if (!g2SubmitHijackCommand(line.c_str(), cookie, onOledLoginCmdDone, nullptr)) {
+    g2ShowText("Busy - try again");
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    g2ShowConfigMenu();
+  }
+}
+
+// Username entered -> ask for the password.
+static void oledLoginUserCommit(const char* text) {
+  if (!text || text[0] == '\0') { g2ShowConfigMenu(); return; }
+  strncpy(gOledLoginUser, text, sizeof(gOledLoginUser) - 1);
+  gOledLoginUser[sizeof(gOledLoginUser) - 1] = '\0';
+  TextEntryConfig cfg = {};
+  cfg.prompt   = "OLED Password";
+  cfg.initial  = "";
+  cfg.maxLen   = 32;
+  cfg.onCommit = oledLoginPassCommit;
+  cfg.onCancel = oledLoginCancel;
+  if (!g2BeginTextEntry(cfg)) g2ShowConfigMenu();
+}
+
+static void beginOledLogin() {
+  // Pre-fill the username with the paired wearer as a convenience: accept it to
+  // log in as yourself, or edit it to log in as anyone.
+  const String& wearer = g2HijackAuthContext().user;
+  const bool realWearer = (wearer.length() > 0 && !isGuestUser(wearer));
+  TextEntryConfig cfg = {};
+  cfg.prompt   = "OLED Username";
+  cfg.initial  = realWearer ? wearer.c_str() : "";
+  cfg.maxLen   = 32;
+  cfg.onCommit = oledLoginUserCommit;
+  cfg.onCancel = oledLoginCancel;
+  if (!g2BeginTextEntry(cfg)) g2ShowConfigMenu();
+}
+#endif  // ENABLE_OLED_DISPLAY
+
 static void g2AppsHandleTap(uint32_t idx) {
   const char* labels[G2_APPS_MAX_ROWS];
   G2AppRow    ids[G2_APPS_MAX_ROWS];
@@ -3933,10 +4164,13 @@ static void g2AppsHandleTap(uint32_t idx) {
     case APP_ROW_MAPS:   g2ShowMapPage(&g2ShowAppsMenu); return;   // Back → Apps
 #endif
 #if ENABLE_ONDEVICE_LLM
-    case APP_ROW_LLM:    g2ShowLlmPage(&g2ShowAppsMenu); return;   // Back → Apps
+    case APP_ROW_LLM:    g2ShowLlmMenu(); return;   // opens the LLM submenu (chat / guided / re-run / model)
 #endif
     case APP_ROW_AUTOMATIONS: g2ShowAutomationsMenu(); return;     // Back → Apps (own TU)
     case APP_ROW_RING:        g2ShowRingPage();        return;     // Back → Apps
+    case APP_ROW_PET:         g2ShowPetPage(&g2ShowAppsMenu); return;   // Back → Apps
+    // System Events / Logging / Users / OLED Login moved to the System &
+    // Config launchers (menu reorg) — no longer dispatched from Apps.
     default: return;
   }
 }
@@ -3953,6 +4187,182 @@ static const G2PageModule kAppsPage = {
   g2ShowAppsMenu,
   g2AppsHandleTap,
   G2_HIJACK_PAGE_APPS,
+  /*liveIntervalMs=*/ 0,
+  /*backLabel=*/    "<- Main Menu",
+  /*prefersTextWidget=*/ false,   // own showMenu — flag is irrelevant
+  /*liveRender=*/    nullptr,
+};
+
+// ─────────────────────────────────────────────────────────────────────
+// System launcher (menu reorg) — mirrors the OLED's "System" category.
+// Groups Status + System Events + Logging + Tests under one top-level row.
+// Same shape as the Apps launcher: a {label,id} builder keeps the renderer
+// and the tap dispatch in lockstep. Rows forward to existing entry points;
+// Status has no show*Menu of its own so it reuses invokePageFromMain (the
+// exact path a MAIN tap would take), which starts its live-text page.
+// ─────────────────────────────────────────────────────────────────────
+enum G2SystemRow : uint8_t {
+  SYS_ROW_BACK = 0,
+  SYS_ROW_STATUS,
+  SYS_ROW_SYSEVENTS,
+  SYS_ROW_LOGGING,
+  SYS_ROW_TESTS,
+};
+#define G2_SYSTEM_MAX_ROWS 5
+
+static size_t g2SystemBuildRows(const char** labels, G2SystemRow* ids, size_t cap) {
+  size_t n = 0;
+  auto add = [&](const char* label, G2SystemRow id) {
+    if (n < cap) { labels[n] = label; ids[n] = id; n++; }
+  };
+  add("<- Main Menu",  SYS_ROW_BACK);
+  add("Status",        SYS_ROW_STATUS);
+  add("System Events", SYS_ROW_SYSEVENTS);
+  add("Logging",       SYS_ROW_LOGGING);
+  add("Tests",         SYS_ROW_TESTS);
+  return n;
+}
+
+static void g2BuildSystemInfo(char* out, size_t cap) {
+  if (!out || cap == 0) return;
+  snprintf(out, cap, "System\nStatus\nSystem Events\nLogging\nTests");
+}
+
+// Non-static: sub-pages in their own TUs (Tests) return here on Back.
+void g2ShowSystemMenu() {
+  const char* labels[G2_SYSTEM_MAX_ROWS];
+  G2SystemRow ids[G2_SYSTEM_MAX_ROWS];
+  const size_t n = g2SystemBuildRows(labels, ids, G2_SYSTEM_MAX_ROWS);
+  if (g2ShowListPage(labels, n)) {
+    g2SetHijackPage(G2_HIJACK_PAGE_SYSTEM);
+    DEBUG_G2F("[G2] System menu shown (%u items)", (unsigned)n);
+  } else {
+    DEBUG_G2F("[G2] System menu show FAILED");
+  }
+}
+
+static void g2SystemHandleTap(uint32_t idx) {
+  const char* labels[G2_SYSTEM_MAX_ROWS];
+  G2SystemRow ids[G2_SYSTEM_MAX_ROWS];
+  const size_t n = g2SystemBuildRows(labels, ids, G2_SYSTEM_MAX_ROWS);
+  if (idx >= n) return;
+  switch (ids[idx]) {
+    case SYS_ROW_BACK: {  // <- back to the root hijack menu
+      g2SetHijackPage(G2_HIJACK_PAGE_MAIN);
+      extern void g2RedrawHijackMainMenu();
+      g2RedrawHijackMainMenu();
+      return;
+    }
+    // Status opens via the same path a MAIN tap would take (live-text page,
+    // own hijackPage G2_HIJACK_PAGE_STATUS). Its back row routes back to
+    // System via g2StatusHandleTap; double-click exits to MAIN.
+    case SYS_ROW_STATUS:    invokePageFromMain(kStatusPage); return;
+    case SYS_ROW_SYSEVENTS: g2ShowSysEventsPage();           return;  // Back → System
+    case SYS_ROW_LOGGING:   g2ShowLoggingMenu();             return;  // Back → System
+    case SYS_ROW_TESTS:     g2ShowTestSuiteMenu();           return;  // Back → System (own TU)
+    default: return;
+  }
+}
+
+// Status' back-row tap (idx 0 = "<- System"). Declared up by kStatusPage.
+static void g2StatusHandleTap(uint32_t idx) {
+  if (idx == 0) { g2ShowSystemMenu(); return; }
+}
+
+static const G2PageModule kSystemPage = {
+  "system", "System",
+  "Show the System launcher (Status / System Events / Logging / Tests) on the lens",
+  g2BuildSystemInfo,
+  g2ShowSystemMenu,
+  g2SystemHandleTap,
+  G2_HIJACK_PAGE_SYSTEM,
+  /*liveIntervalMs=*/ 0,
+  /*backLabel=*/    "<- Main Menu",
+  /*prefersTextWidget=*/ false,   // own showMenu — flag is irrelevant
+  /*liveRender=*/    nullptr,
+};
+
+// ─────────────────────────────────────────────────────────────────────
+// Config launcher (menu reorg) — mirrors the OLED's "Config" category.
+// Groups Settings + Users (admin) + OLED Login. Users is admin-gated in the
+// builder (the command layer is the backstop); OLED Login is board-gated.
+// ─────────────────────────────────────────────────────────────────────
+enum G2ConfigRow : uint8_t {
+  CFG_ROW_BACK = 0,
+  CFG_ROW_SETTINGS,
+  CFG_ROW_USERS,
+  CFG_ROW_OLED_LOGIN,
+};
+#define G2_CONFIG_MAX_ROWS 4
+
+static size_t g2ConfigBuildRows(const char** labels, G2ConfigRow* ids, size_t cap) {
+  size_t n = 0;
+  auto add = [&](const char* label, G2ConfigRow id) {
+    if (n < cap) { labels[n] = label; ids[n] = id; n++; }
+  };
+  add("<- Main Menu", CFG_ROW_BACK);
+  add("Settings",     CFG_ROW_SETTINGS);
+  // Admin-only, same gate as the old Apps → Users row.
+  if (isAdminUser(g2HijackAuthContext().user)) add("Users", CFG_ROW_USERS);
+#if ENABLE_OLED_DISPLAY
+  add("OLED Login",   CFG_ROW_OLED_LOGIN);
+#endif
+  return n;
+}
+
+static void g2BuildConfigInfo(char* out, size_t cap) {
+  if (!out || cap == 0) return;
+  const char* labels[G2_CONFIG_MAX_ROWS];
+  G2ConfigRow ids[G2_CONFIG_MAX_ROWS];
+  const size_t n = g2ConfigBuildRows(labels, ids, G2_CONFIG_MAX_ROWS);
+  size_t off = 0;
+  off += snprintf(out + off, cap - off, "Config");
+  for (size_t i = 1; i < n && off < cap; i++) {   // skip the Back row
+    off += snprintf(out + off, cap - off, "\n%s", labels[i]);
+  }
+}
+
+// Non-static: sub-pages in their own TUs (Settings, Users) return here on Back.
+void g2ShowConfigMenu() {
+  const char* labels[G2_CONFIG_MAX_ROWS];
+  G2ConfigRow ids[G2_CONFIG_MAX_ROWS];
+  const size_t n = g2ConfigBuildRows(labels, ids, G2_CONFIG_MAX_ROWS);
+  if (g2ShowListPage(labels, n)) {
+    g2SetHijackPage(G2_HIJACK_PAGE_CONFIG);
+    DEBUG_G2F("[G2] Config menu shown (%u items)", (unsigned)n);
+  } else {
+    DEBUG_G2F("[G2] Config menu show FAILED");
+  }
+}
+
+static void g2ConfigHandleTap(uint32_t idx) {
+  const char* labels[G2_CONFIG_MAX_ROWS];
+  G2ConfigRow ids[G2_CONFIG_MAX_ROWS];
+  const size_t n = g2ConfigBuildRows(labels, ids, G2_CONFIG_MAX_ROWS);
+  if (idx >= n) return;
+  switch (ids[idx]) {
+    case CFG_ROW_BACK: {  // <- back to the root hijack menu
+      g2SetHijackPage(G2_HIJACK_PAGE_MAIN);
+      extern void g2RedrawHijackMainMenu();
+      g2RedrawHijackMainMenu();
+      return;
+    }
+    case CFG_ROW_SETTINGS: g2ShowSettingsMenu(); return;   // Back → Config
+    case CFG_ROW_USERS:    g2ShowUsersMenu();    return;   // Back → Config (own TU)
+#if ENABLE_OLED_DISPLAY
+    case CFG_ROW_OLED_LOGIN: beginOledLogin();   return;   // keyboard → login … display, Back → Config
+#endif
+    default: return;
+  }
+}
+
+static const G2PageModule kConfigPage = {
+  "config", "Config",
+  "Show the Config launcher (Settings / Users / OLED Login) on the lens",
+  g2BuildConfigInfo,
+  g2ShowConfigMenu,
+  g2ConfigHandleTap,
+  G2_HIJACK_PAGE_CONFIG,
   /*liveIntervalMs=*/ 0,
   /*backLabel=*/    "<- Main Menu",
   /*prefersTextWidget=*/ false,   // own showMenu — flag is irrelevant
@@ -4030,19 +4440,23 @@ static char gMicDetailLastReadout[80] = {0};
 // readout's 200 px width × firmware near-monospace font.
 static void buildMicReadoutText(char* out, size_t cap) {
   if (!out || cap == 0) return;
-#if ENABLE_MICROPHONE_SENSOR
+#if ENABLE_MICROPHONE
+  // Source-honest config: the G2 mic is always 16 kHz/16-bit; only PDM honors
+  // micSampleRate. The HAL delivers int16 for every source, so bits is always 16.
+  const bool g2 = (audioGetSource() == AUDIO_SRC_G2_LEFT);
+  const int hz  = g2 ? 16000 : micSampleRate;
   if (!gMicEnabled) {
     // I2S engine off: no level to read. Print the static config so the
     // page doesn't go visually empty when the user toggles off.
     snprintf(out, cap,
-             "Lvl: --%%\n%dHz %db %dch\nidle",
-             micSampleRate, micBitDepth, micChannels);
+             "Lvl: --%%\n%dHz 16b %dch\nidle",
+             hz, micChannels);
     return;
   }
   const int level = getAudioLevel();
   snprintf(out, cap,
-           "Lvl: %d%%\n%dHz %db %dch\n%s",
-           level, micSampleRate, micBitDepth, micChannels,
+           "Lvl: %d%%\n%dHz 16b %dch\n%s",
+           level, hz, micChannels,
            micRecording ? "rec" : "idle");
 #else
   snprintf(out, cap, "MIC unavailable");
@@ -4083,10 +4497,34 @@ static bool renderMicDetailLive() {
     snprintf(toggleRow, sizeof(toggleRow),
              "MIC: %s",
              en ? "On" : "Off");
-    const char* listItems[3] = {
-      "<- Sensors",
+    // Record row (idx 2) — recording needs the mic on, so it reads "mic off"
+    // and no-ops until then; otherwise it is a start/stop toggle keyed on
+    // micRecording (auto-names rec_<ms>.wav, 60 s cap). List rows can't
+    // UPDATE_TEXT, so the tap forces a re-CREATE to flip the label.
+    char recRow[40];
+    if (!en)                 snprintf(recRow, sizeof(recRow), "Rec: mic off");
+    else if (micRecording)   snprintf(recRow, sizeof(recRow), "Stop recording");
+    else                     snprintf(recRow, sizeof(recRow), "Record 60s");
+    // Source selector row (idx 3) — tap cycles the preference among "auto" plus
+    // whatever sources are actually connected (see g2MicDetailHandleTap). Shows
+    // the preference, and the resolved active source when it differs.
+    char srcRow[40];
+    {
+      const char* pref = gSettings.micSource.c_str();
+      const char* active = (audioGetSource() == AUDIO_SRC_G2_LEFT)  ? "g2"
+                         : (audioGetSource() == AUDIO_SRC_LOCAL_PDM) ? "pdm"
+                                                                     : "none";
+      if (en && strcmp(pref, active) != 0) {
+        snprintf(srcRow, sizeof(srcRow), "Src: %s (%s)", pref, active);
+      } else {
+        snprintf(srcRow, sizeof(srcRow), "Src: %s", pref);
+      }
+    }
+    const char* listItems[4] = {
+      "<- Hardware",
       toggleRow,
-      "HW: PDM",
+      recRow,
+      srcRow,
     };
     G2TextChildSpec textChild = {};
     textChild.containerName = kMicDetailReadoutName;
@@ -4096,7 +4534,7 @@ static bool renderMicDetailLive() {
     textChild.eventCapture  = false;
     bool ok = sendCreateMixedListMultiTextAndWait(
         *arm,
-        listItems, 3, kMicDetailListGeom,
+        listItems, 4, kMicDetailListGeom,
         &textChild, 1,
         BLOCKS_WIDGET_ID);
     if (!ok) {
@@ -4157,7 +4595,7 @@ static const G2PageModule kMicDetailPage = {
   // UPDATE_TEXT, no fragmenting). Bump down (200–500 ms) if the user
   // wants more responsive level updates.
   /*liveIntervalMs=*/ 1000,
-  /*backLabel=*/      "<- Sensors",
+  /*backLabel=*/      "<- Hardware",
   /*prefersTextWidget=*/ true,    // routes through g2StartLiveTextPage
   /*liveRender=*/     renderMicDetailLive,
 };
@@ -4183,6 +4621,83 @@ bool g2ShowMicDetail() {
   return true;
 }
 
+#if ENABLE_MICROPHONE
+// openmic/closemic done — persist only on success, then re-CREATE so the
+// toggle row reads gMicEnabled (list rows can't UPDATE_TEXT).
+// userData = (uintptr_t)1 if we wanted ON, else 0.
+static void onMicDetailRuntimeDone(bool ok, const char* result,
+                                   const G2CmdCookie& cookie,
+                                   void* userData) {
+  const bool wantOn = ((uintptr_t)userData) != 0;
+  bool runtimeOk = ok;
+  if (result && (strncmp(result, "Error", 5) == 0 ||
+                 strncmp(result, "ERROR", 5) == 0)) {
+    runtimeOk = false;
+  }
+
+  if (runtimeOk) {
+    char line[32];
+    snprintf(line, sizeof(line), "micautostart %s", wantOn ? "on" : "off");
+    if (!g2SubmitHijackCommand(line, cookie, nullptr, nullptr)) {
+      DEBUG_G2F("[G2] MIC detail: %s submit FAILED after runtime ok", line);
+    }
+  } else {
+    DEBUG_G2F("[G2] MIC detail: runtime failed — skip micautostart "
+              "(wantOn=%d result='%s')",
+              wantOn ? 1 : 0, result ? result : "");
+  }
+
+  // Force a fresh CREATE. REBUILD-list on a compound blanks the sibling
+  // text child (verified 2026-04-24 against firmware 2.2.0.24).
+  // tearDownActiveContainer sends Shutdown on the wire first — local
+  // clear alone leaves the firmware thinking the old compound is live
+  // ("container not primed", verified 2026-05-08).
+  if (g2GetHijackPage() != G2_HIJACK_PAGE_MIC_DETAIL) return;
+  G2Temple* arm = (gR.connected && !gR.pluginDead) ? &gR
+                : (gL.connected && !gL.pluginDead) ? &gL
+                                                   : nullptr;
+  if (arm) {
+    tearDownActiveContainer(*arm);
+  } else {
+    g2LensClearContainer();
+  }
+  liveTextKickRefresh();
+}
+
+// micrecord start/stop done — re-CREATE so the Record row label flips
+// (list rows can't UPDATE_TEXT). No micautostart chaining — recording is a
+// one-shot, not a boot preference. The ~1 s worst-case flush on `stop` (WAV
+// header) runs on cmd_exec_task, not here.
+static void onMicDetailRecordDone(bool ok, const char* result,
+                                  const G2CmdCookie& /*cookie*/, void* /*userData*/) {
+  if (!ok || (result && strncmp(result, "Error", 5) == 0)) {
+    DEBUG_G2F("[G2] MIC detail: record cmd result '%s'", result ? result : "");
+  }
+  if (g2GetHijackPage() != G2_HIJACK_PAGE_MIC_DETAIL) return;
+  G2Temple* arm = (gR.connected && !gR.pluginDead) ? &gR
+                : (gL.connected && !gL.pluginDead) ? &gL
+                                                   : nullptr;
+  if (arm) tearDownActiveContainer(*arm);
+  else     g2LensClearContainer();
+  liveTextKickRefresh();
+}
+#endif
+
+// Redraw-only callback for the source-selector tap. `micsource` may restart the
+// mic (stop→set→start) or just persist the preference; either way the "Src:" row
+// label must refresh, and list rows can't UPDATE_TEXT — so force a fresh CREATE
+// (the same teardown the toggle uses, without the micautostart write).
+static void onMicDetailSourceDone(bool /*ok*/, const char* /*result*/,
+                                  const G2CmdCookie& /*cookie*/, void* /*userData*/) {
+  if (g2GetHijackPage() != G2_HIJACK_PAGE_MIC_DETAIL) return;
+  G2Temple* arm = (gR.connected && !gR.pluginDead) ? &gR
+                : (gL.connected && !gL.pluginDead) ? &gL
+                                                   : nullptr;
+  if (arm) tearDownActiveContainer(*arm);
+  else     g2LensClearContainer();
+  liveTextKickRefresh();
+}
+
 void g2MicDetailHandleTap(uint32_t idx) {
   if (idx == 0) {
     // Back to Sensors landing list. The live-text worker will see
@@ -4193,64 +4708,72 @@ void g2MicDetailHandleTap(uint32_t idx) {
     return;
   }
   if (idx == 1) {
-#if ENABLE_MICROPHONE_SENSOR
-    // Toggle row — same start/stop helpers Sensors-detail uses, plus
-    // the same persisted-flag flip via the existing CLI command path.
+#if ENABLE_MICROPHONE
+    // Toggle — open/close via cmd_exec; persist + redraw in callback
+    // after gMicEnabled has actually changed (never race the CREATE).
     const bool prev = gMicEnabled;
     const bool next = !prev;
     BROADCAST_PRINTF("[G2] MIC detail: toggle %s -> %s",
                      prev ? "ON" : "OFF",
                      next ? "ON" : "OFF");
-    if (next) initMicrophone(); else stopMicrophone();
-    // Persist the auto-start preference via the same hijack-command
-    // submit path that Sensors-detail uses (G2_Page_Sensors.cpp:912).
-    // Cookie just carries our active page so any completion logging
-    // attributes correctly; we don't need a callback because the
-    // forced re-CREATE below will redraw the row regardless.
-    char line[32];
-    snprintf(line, sizeof(line), "micautostart %s", next ? "on" : "off");
     G2CmdCookie cookie{};
     cookie.targetPage   = g2GetHijackPage();
     cookie.targetNetSub = 0;
-    (void)g2SubmitHijackCommand(line, cookie, nullptr, nullptr);
-    // Force a fresh CREATE on next tick. The list row content needs to
-    // change to reflect the new toggle state, and the only way to update
-    // a list row is REBUILD or CREATE. REBUILD-list on a compound blanks
-    // the sibling text child (verified 2026-04-24 against firmware
-    // 2.2.0.24), so re-CREATE is the only safe option.
-    //
-    // Critical: re-CREATE requires a Shutdown on the wire FIRST, not
-    // just a local-state clear. g2LensClearContainer() only flips our
-    // FSM mirror — the firmware still thinks the old compound is live,
-    // and the next CREATE for the same widgetId times out because the
-    // firmware ignores it ("container not primed", verified
-    // 2026-05-08). tearDownActiveContainer sends an actual Shutdown
-    // envelope, waits 500 ms for the firmware to settle, then clears
-    // both the per-temple and lens-level state — same path the worker
-    // runs in its own startup prologue.
-    G2Temple* arm = (gR.connected && !gR.pluginDead) ? &gR
-                  : (gL.connected && !gL.pluginDead) ? &gL
-                                                     : nullptr;
-    if (arm) {
-      tearDownActiveContainer(*arm);
-    } else {
-      // Fallback — at least drop the local mirror so the worker
-      // tries CREATE on its next tick. Likely to fail without a real
-      // wire Shutdown but better than getting stuck on the old view.
-      g2LensClearContainer();
+    const char* runtime = next ? "openmic" : "closemic";
+    if (!g2SubmitHijackCommand(runtime, cookie, onMicDetailRuntimeDone,
+                               (void*)(uintptr_t)(next ? 1 : 0))) {
+      DEBUG_G2F("[G2] MIC detail: %s submit FAILED — no inline mutate", runtime);
     }
-    // Kick the live-text worker so the re-CREATE fires immediately
-    // instead of after the remainder of the 1 s tick interval.
-    // Without this, the toggle row appears unchanged for up to a
-    // second after the user tapped, which feels broken.
-    // liveTextKickRefresh gives the worker's wait semaphore so it
-    // bails out of vTaskDelay early.
-    liveTextKickRefresh();
 #endif
     return;
   }
-  // idx 2 (HW row) is info-only — no action.
-  DEBUG_G2F("[G2] MIC detail: tap idx=%u (info row, no action)", (unsigned)idx);
+  if (idx == 2) {
+#if ENABLE_MICROPHONE
+    // Record toggle. Recording requires the mic on (micrecord errors
+    // otherwise) — no-op the tap so the row's "mic off" label is honest.
+    if (!gMicEnabled) {
+      DEBUG_G2F("[G2] MIC detail: record tapped but mic off — no-op");
+      return;
+    }
+    G2CmdCookie cookie{};
+    cookie.targetPage   = g2GetHijackPage();
+    cookie.targetNetSub = 0;
+    const char* line = micRecording ? "micrecord stop" : "micrecord start";
+    BROADCAST_PRINTF("[G2] MIC detail: %s", line);
+    if (!g2SubmitHijackCommand(line, cookie, onMicDetailRecordDone, nullptr)) {
+      DEBUG_G2F("[G2] MIC detail: '%s' submit FAILED — no inline mutate", line);
+    }
+#endif
+    return;
+  }
+  if (idx == 3) {
+#if ENABLE_MICROPHONE
+    // Source selector — cycle the preference among "auto" plus the sources that
+    // are actually connected right now (so a PDM-less board only offers auto/g2).
+    // `micsource` applies it live if the mic is running (stop→set→start).
+    const char* opts[3];
+    int nOpt = 0;
+    opts[nOpt++] = "auto";
+    if (audioSourceAvailable(AUDIO_SRC_LOCAL_PDM)) opts[nOpt++] = "pdm";
+    if (audioSourceAvailable(AUDIO_SRC_G2_LEFT))   opts[nOpt++] = "g2";
+    int cur = 0;
+    for (int i = 0; i < nOpt; i++) {
+      if (gSettings.micSource == opts[i]) { cur = i; break; }
+    }
+    const char* next = opts[(cur + 1) % nOpt];
+    G2CmdCookie cookie{};
+    cookie.targetPage   = g2GetHijackPage();
+    cookie.targetNetSub = 0;
+    char line[24];
+    snprintf(line, sizeof(line), "micsource %s", next);
+    BROADCAST_PRINTF("[G2] MIC detail: source -> %s", next);
+    if (!g2SubmitHijackCommand(line, cookie, onMicDetailSourceDone, nullptr)) {
+      DEBUG_G2F("[G2] MIC detail: 'micsource' submit FAILED — no inline mutate");
+    }
+#endif
+    return;
+  }
+  DEBUG_G2F("[G2] MIC detail: tap idx=%u (no action)", (unsigned)idx);
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -4266,7 +4789,19 @@ static constexpr G2ContainerGeom kRingListGeom    = {   8,   8, 340, 270 };
 static constexpr G2ContainerGeom kRingReadoutGeom = { 360,  80, 210, 200 };
 static constexpr uint32_t        kRingReadoutCid  = 2;
 static const char* const         kRingReadoutName = "ringLive";
-static char gRingLastReadout[96] = {0};
+EXT_RAM_BSS_ATTR static char gRingLastReadout[96];
+
+// Entry-poll sequencer. The ring only volunteers point samples every few
+// minutes, so a freshly opened dashboard would sit on stale values (or "--")
+// until the next push. On page entry (and on a ring connect while the page is
+// open) we actively poll all four vitals — but the ring needs >=700 ms
+// between queries to respond, and blocking the tap dispatcher for the whole
+// burst (or spawning a one-shot task) is off the table. Instead the page's
+// own live tick paces the burst: one query per tick (0=HR, 1=HRV, 2=SpO2,
+// 3=battery), then idle at 4. Replies arrive via notify into the telemetry
+// cache and the following ticks render them.
+static uint8_t gRingPollCursor    = 4;   // 4 = burst done / idle
+static bool    gRingWasConnected  = false;
 
 // Build the readout text. Four short lines (HR / HRV / SpO2 / Battery), or
 // a hint when the ring isn't paired. *Valid=false → "--" (a real 0 never
@@ -4297,6 +4832,18 @@ static bool renderRingLive() {
   if (!arm) {
     DEBUG_G2F("[G2] ring: no eligible temple");
     return false;
+  }
+
+  // Entry-poll burst: one vitals query per tick until all four are out.
+  // Also (re)starts the burst when the ring connects while the page is open.
+  {
+    const bool conn = g2RingIsConnected();
+    if (conn && !gRingWasConnected) gRingPollCursor = 0;
+    gRingWasConnected = conn;
+    if (conn && gRingPollCursor < 4) {
+      (void)g2RingPollVital(gRingPollCursor);
+      gRingPollCursor++;
+    }
   }
 
   char readout[96];
@@ -4351,9 +4898,10 @@ static const G2PageModule kRingPage = {
   /*showMenu=*/   nullptr,
   /*handleTap=*/  g2RingHandleTap,
   G2_HIJACK_PAGE_RING,
-  // Vitals update minute-scale (the ring emits point samples every few
-  // minutes); a 2 s tick is plenty and keeps the diff-cache short-circuiting.
-  /*liveIntervalMs=*/ 2000,
+  // 1 s tick: paces the entry-poll burst (one query per tick, ring needs
+  // >=700 ms between queries) and renders poll replies promptly. Steady-state
+  // ticks are cheap — the byte-identical diff cache skips the wire write.
+  /*liveIntervalMs=*/ 1000,
   /*backLabel=*/      "<- Apps",
   /*prefersTextWidget=*/ true,    // routes through g2StartLiveTextPage
   /*liveRender=*/     renderRingLive,
@@ -4368,7 +4916,12 @@ static bool g2ShowRingPage() {
   }
   g2SetHijackPage(G2_HIJACK_PAGE_RING);
   gRingLastReadout[0] = '\0';   // fresh readout on entry, don't suppress first tick
-  BROADCAST_PRINTF("[G2] Hijack: Ring dashboard opened (live vitals)");
+  // Kick the entry-poll burst (no-op path if the ring isn't connected; the
+  // rising-edge check in renderRingLive re-kicks if it connects later).
+  gRingPollCursor   = g2RingIsConnected() ? 0 : 4;
+  gRingWasConnected = g2RingIsConnected();
+  BROADCAST_PRINTF("[G2] Hijack: Ring dashboard opened (live vitals%s)",
+                   gRingPollCursor == 0 ? ", polling" : "");
   return true;
 }
 
@@ -4378,6 +4931,1221 @@ static void g2RingHandleTap(uint32_t idx) {
     return;
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// System Events viewer — read-only live list of the device's typed event
+// ring (the same 48-entry ring the `events` CLI and the OLED notification
+// view read). Reached from the Apps launcher. Same live-text compound
+// shape as the Ring dashboard: a one-row "<- Apps" list on the left + a
+// live text child refreshed via UPDATE_TEXT (no REBUILD, so the Back row
+// never blanks). Events are walked newest-first via systemEventGetBySeq
+// (copies one event by seq, no cursor mutation — safe to re-render every
+// tick); the file sink and cursor-drain consumers are untouched.
+// NOTE: this is the ESP32-side typed event ring, NOT the G2's own native
+// firmware notification system (a separate, deferred effort).
+// ─────────────────────────────────────────────────────────────────────
+static constexpr G2ContainerGeom kSysEvListGeom    = {   8,   8, 150, 270 };
+static constexpr G2ContainerGeom kSysEvReadoutGeom = { 166,   8, 404, 270 };
+static constexpr uint32_t        kSysEvReadoutCid  = 2;
+static const char* const         kSysEvReadoutName = "sysEvLive";
+EXT_RAM_BSS_ATTR static char gSysEvLastReadout[512];
+
+// Copy printable ASCII only. Event who/subject/detail can carry remote-origin
+// bytes (e.g. ESP-NOW chat text in a text_rx detail) and embedded newlines
+// that would corrupt the lens text widget — the events.log file sink
+// sanitizes the same way before writing.
+static void g2SanitizeEventField(const char* in, char* out, size_t cap) {
+  size_t o = 0;
+  for (size_t i = 0; in && in[i] && o + 1 < cap; i++) {
+    unsigned char c = (unsigned char)in[i];
+    out[o++] = (c >= 0x20 && c < 0x7F) ? (char)c : ' ';
+  }
+  if (cap) out[o] = '\0';
+}
+
+// Build the readout: the newest events, one compact line each
+// ("<age> <kind> <subject>"), newest at the top. The walk stops at the first
+// seq that has fallen off the 48-entry ring. Full detail/attribution lives on
+// the `events` CLI and the web log viewer — the lens is a glanceable summary.
+static void buildSysEventsReadoutText(char* out, size_t cap) {
+  if (!out || cap == 0) return;
+  const uint32_t latest = systemEventLatestSeq();
+  if (latest == 0) { snprintf(out, cap, "No events yet"); return; }
+  const uint32_t nowMs = millis();
+  const int kMaxShown = 8;          // ~28px/line into the 270px-tall readout
+  size_t off = 0;
+  int shown = 0;
+  SystemEvent e;
+  for (uint32_t seq = latest; seq > 0 && shown < kMaxShown && off + 1 < cap; seq--) {
+    if (!systemEventGetBySeq(seq, &e)) break;   // fell off the ring
+    const uint32_t ageS = (nowMs - e.tsMs) / 1000;
+    char age[8];
+    if (ageS < 60)        snprintf(age, sizeof(age), "%lus", (unsigned long)ageS);
+    else if (ageS < 3600) snprintf(age, sizeof(age), "%lum", (unsigned long)(ageS / 60));
+    else                  snprintf(age, sizeof(age), "%luh", (unsigned long)(ageS / 3600));
+    char subj[28];
+    g2SanitizeEventField(e.subject, subj, sizeof(subj));
+    char line[52];
+    int m = snprintf(line, sizeof(line), "%-3s %s %s", age, systemEventKindName(e.kind), subj);
+    if (m > 33) line[33] = '\0';    // keep each event to one visual line on the lens
+    off += snprintf(out + off, cap - off, "%s%s", shown ? "\n" : "", line);
+    shown++;
+  }
+  if (shown == 0) snprintf(out, cap, "No events yet");
+}
+
+// Live render fn driven by liveTextWorker. First call: CREATE the compound
+// (1 list row + 1 text child). Subsequent ticks: UPDATE_TEXT on the readout
+// child only, gated by a byte-identical cache. Mirrors renderRingLive.
+static bool renderSysEventsLive() {
+  G2Temple* arm = (gR.connected && !gR.pluginDead) ? &gR
+                : (gL.connected && !gL.pluginDead) ? &gL
+                                                   : nullptr;
+  if (!arm) {
+    DEBUG_G2F("[G2] sysevents: no eligible temple");
+    return false;
+  }
+
+  char readout[512];
+  buildSysEventsReadoutText(readout, sizeof(readout));
+
+  if (!g2LensGetState().containerReady) {
+    const char* listItems[1] = { "<- System" };
+    G2TextChildSpec textChild = {};
+    textChild.containerName = kSysEvReadoutName;
+    textChild.containerId   = kSysEvReadoutCid;
+    textChild.content       = readout;
+    textChild.geom          = kSysEvReadoutGeom;
+    textChild.eventCapture  = false;
+    bool ok = sendCreateMixedListMultiTextAndWait(
+        *arm, listItems, 1, kSysEvListGeom, &textChild, 1, BLOCKS_WIDGET_ID);
+    if (!ok) {
+      DEBUG_G2F("[G2] sysevents: CREATE-list+text failed");
+      return false;
+    }
+    g2NoteCreateSuccess(*arm, /*isList*/ false, BLOCKS_WIDGET_ID);
+    strncpy(gSysEvLastReadout, readout, sizeof(gSysEvLastReadout) - 1);
+    gSysEvLastReadout[sizeof(gSysEvLastReadout) - 1] = '\0';
+    return true;
+  }
+
+  if (strcmp(readout, gSysEvLastReadout) == 0) {
+    return true;  // quiet tick, no wire I/O
+  }
+  bool ok = sendUpdateTextNamed(*arm, kSysEvReadoutName, kSysEvReadoutCid, readout);
+  if (ok) {
+    strncpy(gSysEvLastReadout, readout, sizeof(gSysEvLastReadout) - 1);
+    gSysEvLastReadout[sizeof(gSysEvLastReadout) - 1] = '\0';
+  }
+  return ok;
+}
+
+static void g2SysEventsHandleTap(uint32_t idx);
+
+// Stub buildText for the registry's required-field check (hidden live pages
+// have no CLI text view; the live data path is on the lens — and the full
+// event list is already the `events` CLI command).
+static void g2BuildSysEventsInfo(char* out, size_t cap) {
+  if (!out || cap == 0) return;
+  snprintf(out, cap, "System Events viewer (live event ring on lens; 'events' for the CLI list)");
+}
+
+static const G2PageModule kSysEventsPage = {
+  // Hidden — hijackLabel=nullptr keeps it out of the main menu; the only
+  // entry is g2ShowSysEventsPage() from the System launcher.
+  "sysevents", nullptr,
+  "System Events viewer (live event ring on lens; 'events' for the CLI list)",
+  /*buildText=*/  g2BuildSysEventsInfo,
+  /*showMenu=*/   nullptr,
+  /*handleTap=*/  g2SysEventsHandleTap,
+  G2_HIJACK_PAGE_SYSEVENTS,
+  // 1 s tick: refreshes ages and picks up newly-posted events promptly.
+  // Steady-state ticks are cheap — the byte-identical diff cache skips the
+  // wire write when nothing changed.
+  /*liveIntervalMs=*/ 1000,
+  /*backLabel=*/      "<- System",
+  /*prefersTextWidget=*/ true,    // routes through g2StartLiveTextPage
+  /*liveRender=*/     renderSysEventsLive,
+};
+
+static bool g2ShowSysEventsPage() {
+  if (!g2StartLiveTextPage(/*buildText=*/ nullptr,
+                           kSysEventsPage.liveIntervalMs,
+                           kSysEventsPage.liveRender)) {
+    DEBUG_G2F("[G2] sysevents: live-text spawn failed");
+    return false;
+  }
+  g2SetHijackPage(G2_HIJACK_PAGE_SYSEVENTS);
+  gSysEvLastReadout[0] = '\0';   // fresh readout on entry, don't suppress first tick
+  BROADCAST_PRINTF("[G2] Hijack: System Events viewer opened");
+  return true;
+}
+
+static void g2SysEventsHandleTap(uint32_t idx) {
+  if (idx == 0) {   // <- System
+    g2ShowSystemMenu();
+    return;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Logging app — start/stop the sensor logger + pick which sensors it
+// captures. Reached from the Apps launcher. sensorlog is device-wide (a
+// mask of sensors → one file), which is why it lives here as its own app
+// rather than as a per-sensor row. Plain list page (own showMenu); each
+// action dispatches a real sensorlog command via cmd_exec, and the
+// completion callback re-renders the list so the [x] markers / Start/Stop
+// label reflect the new state. NOTE: `sensorlog sensors <list>` sets the
+// mask to EXACTLY the list, so a per-sensor toggle rebuilds the whole list
+// with one bit flipped (same idiom as the OLED notif-mute toggle).
+// ─────────────────────────────────────────────────────────────────────
+static const struct { uint8_t bit; const char* name; const char* label; } kLogSensors[] = {
+  { LOG_THERMAL,  "thermal",  "Thermal"  },
+  { LOG_TOF,      "tof",      "ToF"      },
+  { LOG_IMU,      "imu",      "IMU"      },
+  { LOG_GAMEPAD,  "gamepad",  "Gamepad"  },
+  { LOG_APDS,     "apds",     "APDS"     },
+  { LOG_GPS,      "gps",      "GPS"      },
+  { LOG_PRESENCE, "presence", "Presence" },
+};
+static constexpr size_t kLogSensorCount = sizeof(kLogSensors) / sizeof(kLogSensors[0]);
+
+#define G2_LOG_ROW_LEN 24
+EXT_RAM_BSS_ATTR static char        gLogRows[2 + kLogSensorCount][G2_LOG_ROW_LEN];
+static const char* gLogRowPtrs[2 + kLogSensorCount];
+
+// Rows: 0="<- System", 1=Start/Stop (live state), 2..N=[x] sensor toggles.
+static size_t g2BuildLoggingRows() {
+  snprintf(gLogRows[0], G2_LOG_ROW_LEN, "<- System");
+  snprintf(gLogRows[1], G2_LOG_ROW_LEN, "%s",
+           gSensorLoggingEnabled ? "Stop logging" : "Start logging");
+  for (size_t i = 0; i < kLogSensorCount; i++) {
+    snprintf(gLogRows[2 + i], G2_LOG_ROW_LEN, "[%c] %s",
+             (gSensorLogMask & kLogSensors[i].bit) ? 'x' : ' ',
+             kLogSensors[i].label);
+  }
+  for (size_t i = 0; i < (2 + kLogSensorCount); i++) gLogRowPtrs[i] = gLogRows[i];
+  return 2 + kLogSensorCount;
+}
+
+static void g2ShowLoggingMenu() {
+  size_t n = g2BuildLoggingRows();
+  if (g2ShowListPage(gLogRowPtrs, n)) {
+    g2SetHijackPage(G2_HIJACK_PAGE_LOGGING);
+    DEBUG_G2F("[G2] Logging menu shown (%u rows, %s)", (unsigned)n,
+              gSensorLoggingEnabled ? "running" : "stopped");
+  } else {
+    DEBUG_G2F("[G2] Logging menu show FAILED");
+  }
+}
+
+// Completion on cmd_exec_task — re-render so Start/Stop + [x] markers reflect
+// the now-updated gSensorLoggingEnabled / gSensorLogMask. Direct list draw
+// from the callback is the established Power-page pattern.
+static void onLoggingCmdDone(bool ok, const char* result,
+                             const G2CmdCookie& /*cookie*/, void* /*userData*/) {
+  if (!ok || (result && strncmp(result, "Error", 5) == 0)) {
+    DEBUG_G2F("[G2] Logging: cmd result '%s'", result ? result : "");
+  }
+  if (g2GetHijackPage() != G2_HIJACK_PAGE_LOGGING) return;
+  size_t n = g2BuildLoggingRows();
+  g2ShowListPage(gLogRowPtrs, n);
+  g2SetHijackPage(G2_HIJACK_PAGE_LOGGING);
+}
+
+static void g2BuildLoggingInfo(char* out, size_t cap) {
+  if (!out || cap == 0) return;
+  snprintf(out, cap,
+           "Logging (%s) - start/stop + sensor select on lens; 'sensorlog' for CLI",
+           gSensorLoggingEnabled ? "running" : "stopped");
+}
+
+static void g2LoggingHandleTap(uint32_t idx) {
+  if (idx == 0) { g2ShowSystemMenu(); return; }   // <- System
+
+  G2CmdCookie cookie{};
+  cookie.targetPage   = g2GetHijackPage();
+  cookie.targetNetSub = 0;
+
+  if (idx == 1) {   // Start / Stop
+    if (gSensorLoggingEnabled) {
+      (void)g2SubmitHijackCommand("sensorlog stop", cookie, onLoggingCmdDone, nullptr);
+    } else if (gSensorLogMask == 0) {
+      // A bare start with no sensors selected succeeds but logs only
+      // timestamps — nudge the user to pick a sensor instead.
+      g2ShowText("Pick a sensor first");
+      vTaskDelay(pdMS_TO_TICKS(1200));
+      size_t n = g2BuildLoggingRows();
+      g2ShowListPage(gLogRowPtrs, n);
+      g2SetHijackPage(G2_HIJACK_PAGE_LOGGING);
+    } else {
+      // Default path from settings; quote it in case it ever holds a space.
+      String line = String("sensorlog start \"") + gSettings.sensorLogPath + "\"";
+      (void)g2SubmitHijackCommand(line.c_str(), cookie, onLoggingCmdDone, nullptr);
+    }
+    return;
+  }
+
+  size_t si = idx - 2;
+  if (si < kLogSensorCount) {
+    // Toggle one sensor: rebuild the full comma-list with this bit flipped
+    // ('none' when it empties), since `sensorlog sensors` is replace-not-add.
+    uint8_t newMask = gSensorLogMask ^ kLogSensors[si].bit;
+    String line = "sensorlog sensors ";
+    if (newMask == 0) {
+      line += "none";
+    } else {
+      bool first = true;
+      for (size_t i = 0; i < kLogSensorCount; i++) {
+        if (newMask & kLogSensors[i].bit) {
+          if (!first) line += ",";
+          line += kLogSensors[i].name;
+          first = false;
+        }
+      }
+    }
+    (void)g2SubmitHijackCommand(line.c_str(), cookie, onLoggingCmdDone, nullptr);
+    return;
+  }
+}
+
+static const G2PageModule kLoggingPage = {
+  // Hidden — reached via the System launcher (g2ShowLoggingMenu).
+  "logging", nullptr,
+  "Sensor logging (start/stop + sensor select on lens; 'sensorlog' for CLI)",
+  /*buildText=*/  g2BuildLoggingInfo,
+  /*showMenu=*/   g2ShowLoggingMenu,
+  /*handleTap=*/  g2LoggingHandleTap,
+  G2_HIJACK_PAGE_LOGGING,
+  /*liveIntervalMs=*/ 0,
+  /*backLabel=*/      "<- System",
+  /*prefersTextWidget=*/ false,   // own showMenu — plain list, not live-text
+  /*liveRender=*/     nullptr,
+};
+
+#if ENABLE_FM_RADIO
+// ─────────────────────────────────────────────────────────────────────
+// FM radio tuner — action rows beside a live radio readout. Reached by
+// tapping the FM row on the Sensors page (which intercepts before the
+// generic sensor-live detail, LED-precedent). Same live-text compound
+// shape as the Ring dashboard / sensor-live pages: a multi-row action
+// list on the left + a text child refreshed via UPDATE_TEXT on the
+// right, so tapping rows never disturbs the readout and vice versa.
+// Row labels are STATIC by design (list rows can't UPDATE_TEXT and a
+// REBUILD blanks the sibling text child) — all state (frequency or seek
+// progress, RDS, volume/mute, signal) lives in the readout. Actions
+// dispatch the real fmradio* commands (all non-admin) via cmd_exec;
+// the async-seek core means every command returns in milliseconds.
+// ─────────────────────────────────────────────────────────────────────
+static constexpr G2ContainerGeom kFmListGeom    = {   8,   8, 200, 270 };
+static constexpr G2ContainerGeom kFmReadoutGeom = { 216,   8, 352, 270 };
+static constexpr uint32_t        kFmReadoutCid  = 2;
+static const char* const         kFmReadoutName = "fmLive";
+static char gFmLastReadout[160] = {0};
+
+static const char* const kFmTunerRows[] = {
+  "<- Hardware", "Seek Up", "Seek Down", "Vol +", "Vol -", "Mute", "Power",
+};
+static constexpr size_t kFmTunerRowCount =
+    sizeof(kFmTunerRows) / sizeof(kFmTunerRows[0]);
+
+static bool fmTunerRadioOn() { return gFmRadioConnected && gRadioInitialized; }
+
+// Build the readout. Radio-off shows a hint instead of stale numbers; the
+// cache mutex may not even exist yet in that state (created by the fmRadio
+// task), so check the lifecycle globals BEFORE touching the cache.
+static void buildFmTunerReadout(char* out, size_t cap) {
+  if (!out || cap == 0) return;
+  if (!fmTunerRadioOn()) {
+    snprintf(out, cap, "Radio off\nTap Power\nto start");
+    return;
+  }
+  FMRadioCache snap;
+  if (gFmRadioCache.mutex &&
+      xSemaphoreTake(gFmRadioCache.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+    snap = gFmRadioCache;
+    xSemaphoreGive(gFmRadioCache.mutex);
+  } else {
+    snap = gFmRadioCache;  // best-effort (strings may tear, values stay sane)
+  }
+  char freq[20];
+  if (snap.seekInProgress) {
+    snprintf(freq, sizeof(freq), "Seeking %s...", snap.seekDirUp ? "up" : "down");
+  } else {
+    snprintf(freq, sizeof(freq), "%.1f MHz", snap.frequency / 100.0);
+  }
+  char vol[20];
+  if (snap.muted) {
+    snprintf(vol, sizeof(vol), "Muted");
+  } else {
+    snprintf(vol, sizeof(vol), "Vol:%u %s", (unsigned)snap.volume,
+             snap.stereo ? "Stereo" : "Mono");
+  }
+  snprintf(out, cap, "%s\nRDS: %s\n%s\nRSSI:%u SNR:%u",
+           freq,
+           snap.stationName[0] ? snap.stationName : "--",
+           vol,
+           (unsigned)snap.rssi, (unsigned)snap.snr);
+}
+
+// Live render fn driven by liveTextWorker. First call: CREATE the compound
+// (7-row action list + 1 text child). Subsequent ticks: UPDATE_TEXT on the
+// readout child only, gated by a byte-identical cache. Mirrors renderRingLive.
+static bool renderFmTunerLive() {
+  G2Temple* arm = (gR.connected && !gR.pluginDead) ? &gR
+                : (gL.connected && !gL.pluginDead) ? &gL
+                                                   : nullptr;
+  if (!arm) {
+    DEBUG_G2F("[G2] fmtuner: no eligible temple");
+    return false;
+  }
+
+  char readout[160];
+  buildFmTunerReadout(readout, sizeof(readout));
+
+  if (!g2LensGetState().containerReady) {
+    G2TextChildSpec textChild = {};
+    textChild.containerName = kFmReadoutName;
+    textChild.containerId   = kFmReadoutCid;
+    textChild.content       = readout;
+    textChild.geom          = kFmReadoutGeom;
+    textChild.eventCapture  = false;
+    bool ok = sendCreateMixedListMultiTextAndWait(
+        *arm, kFmTunerRows, kFmTunerRowCount, kFmListGeom, &textChild, 1,
+        BLOCKS_WIDGET_ID);
+    if (!ok) {
+      DEBUG_G2F("[G2] fmtuner: CREATE-list+text failed");
+      return false;
+    }
+    g2NoteCreateSuccess(*arm, /*isList*/ false, BLOCKS_WIDGET_ID);
+    strncpy(gFmLastReadout, readout, sizeof(gFmLastReadout) - 1);
+    gFmLastReadout[sizeof(gFmLastReadout) - 1] = '\0';
+    return true;
+  }
+
+  if (strcmp(readout, gFmLastReadout) == 0) {
+    return true;  // quiet tick, no wire I/O
+  }
+  bool ok = sendUpdateTextNamed(*arm, kFmReadoutName, kFmReadoutCid, readout);
+  if (ok) {
+    strncpy(gFmLastReadout, readout, sizeof(gFmLastReadout) - 1);
+    gFmLastReadout[sizeof(gFmLastReadout) - 1] = '\0';
+  }
+  return ok;
+}
+
+// Command completion — just kick an immediate re-render so the readout
+// reflects the action within ~100 ms instead of waiting out the 1 s tick
+// (the cache is already updated by the time the handler returns; seek shows
+// its progress flag the same way). Semaphore give is safe from cmd_exec.
+static void onFmTunerCmdDone(bool ok, const char* result,
+                             const G2CmdCookie& /*cookie*/, void* /*userData*/) {
+  DEBUG_G2F("[G2] fmtuner cmd done: ok=%d result='%s'", (int)ok,
+            result ? result : "");
+  liveTextKickRefresh();
+}
+
+static void g2FmTunerSubmit(const char* line) {
+  G2CmdCookie cookie{};
+  cookie.targetPage = g2GetHijackPage();
+  if (!g2SubmitHijackCommand(line, cookie, onFmTunerCmdDone, nullptr)) {
+    DEBUG_G2F("[G2] fmtuner: submit FAILED for '%s'", line);
+  }
+}
+
+static void g2FmTunerHandleTap(uint32_t idx) {
+  if (idx == 0) {   // <- Sensors
+    g2ShowSensorsMenu();
+    return;
+  }
+  const bool on = fmTunerRadioOn();
+  if (idx == 6) {   // Power toggle — the only action valid while off
+    g2FmTunerSubmit(on ? "closefmradio" : "openfmradio");
+    return;
+  }
+  if (!on) return;  // seek/vol/mute are no-ops until the radio runs
+
+  switch (idx) {
+    case 1:   // Seek Up
+    case 2: { // Seek Down
+      if (gFmRadioCache.seekInProgress) return;  // one seek at a time
+      g2FmTunerSubmit(idx == 1 ? "fmradioseek up" : "fmradioseek down");
+      return;
+    }
+    case 3:   // Vol +
+    case 4: { // Vol -
+      // Single-byte cache reads are atomic; ±3 steps keep tap counts sane
+      // across the 0-15 range (mirrors the OLED's preset-ladder spirit).
+      int v = (int)gFmRadioCache.volume + (idx == 3 ? 3 : -3);
+      if (v < 0) v = 0;
+      if (v > 15) v = 15;
+      char cmd[24];
+      snprintf(cmd, sizeof(cmd), "fmradiovolume %d", v);
+      g2FmTunerSubmit(cmd);
+      return;
+    }
+    case 5:   // Mute toggle — static label, conditional dispatch
+      g2FmTunerSubmit(gFmRadioCache.muted ? "fmradiounmute" : "fmradiomute");
+      return;
+    default:
+      return;
+  }
+}
+
+// Stub buildText for the registry's required-field check (hidden live pages
+// have no CLI text view; `fmradioread` is the CLI form).
+static void g2BuildFmTunerInfo(char* out, size_t cap) {
+  if (!out || cap == 0) return;
+  snprintf(out, cap, "FM tuner (live controls on lens; 'fmradioread' for CLI)");
+}
+
+static const G2PageModule kFmTunerPage = {
+  // Hidden — hijackLabel=nullptr keeps it out of the main menu; the only
+  // entry is g2ShowFmTunerPage() from the Sensors page FM row.
+  "fmtuner", nullptr,
+  "FM tuner (live controls on lens; 'fmradioread' for CLI)",
+  /*buildText=*/  g2BuildFmTunerInfo,
+  /*showMenu=*/   nullptr,
+  /*handleTap=*/  g2FmTunerHandleTap,
+  G2_HIJACK_PAGE_FMRADIO,
+  // 1 s tick: the fmRadio task polls the chip every 250 ms, so seek
+  // progress and RDS updates render promptly; quiet ticks are free via
+  // the byte-identical diff cache. Taps kick an immediate refresh.
+  /*liveIntervalMs=*/ 1000,
+  /*backLabel=*/      "<- Hardware",
+  /*prefersTextWidget=*/ true,    // routes through g2StartLiveTextPage
+  /*liveRender=*/     renderFmTunerLive,
+};
+
+bool g2ShowFmTunerPage() {
+  if (!g2StartLiveTextPage(/*buildText=*/ nullptr,
+                           kFmTunerPage.liveIntervalMs,
+                           kFmTunerPage.liveRender)) {
+    DEBUG_G2F("[G2] fmtuner: live-text spawn failed");
+    return false;
+  }
+  g2SetHijackPage(G2_HIJACK_PAGE_FMRADIO);
+  gFmLastReadout[0] = '\0';   // fresh readout on entry, don't suppress first tick
+  BROADCAST_PRINTF("[G2] Hijack: FM tuner opened");
+  return true;
+}
+#endif  // ENABLE_FM_RADIO
+
+#if ENABLE_ONDEVICE_LLM
+// ─────────────────────────────────────────────────────────────────────
+// LLM guided-input menu — on-lens picker for the tiny on-device model
+// (LLM_GUIDED_MENU_SPEC §9). Apps → LLM opens a small submenu
+// (Open chat / Ask (guided) / Re-run last); "Ask (guided)" drills through
+// group → template → (alpha bucket) → entity as ORDINARY hijack list pages
+// and composes the question ON-DEVICE via `llmask json <gen> <g> <t> <e>`,
+// then hands the streaming answer to the existing read-only viewer
+// (g2ShowLlmPage, unchanged) below.
+//
+// Why ordinary list pages: they ride the "app" container tap path
+// (handleDevEvent → tapDispatcherEnqueue → g2_tap_disp → handleHijackMenuTap
+// → this page's handleTap), so every genuine tap already stamps
+// gHijackStartedMs (the watchdog refresh) — nothing new is fed from acks.
+// Picker state lives in file statics so a 60 s watchdog force-exit resumes
+// at the last level on re-entry (Apps → LLM → Ask). All picker/compose work
+// stays off BTC_TASK: the terminal `llmask` runs on cmd_exec_task via
+// g2SubmitHijackCommand, and its completion opens the viewer (or a
+// busy/stale message) on the lens-applier context.
+//
+// This page's hijack-page identity is G2_HIJACK_PAGE_LLM_MENU, declared with
+// the rest of the enum in G2_Glasses.h. It used to be minted here as a local
+// `(G2HijackPage)14` cast; the menu reorg then grew the enum past 13, so 14
+// became G2_HIJACK_PAGE_LED and this page's taps were resolved to the LED
+// module instead (g2FindPageByHijackPage returns the first id match, and LED
+// registers first). Keep the id in the header.
+// ─────────────────────────────────────────────────────────────────────
+
+// Picker levels. HOME is the submenu; GROUP..ENTITY are the guided drill-down
+// list pages; MODELS is Select Model / Unload; MSG is a transient
+// busy/stale/error/loading page that any tap dismisses back to the submenu.
+enum LlmMenuLevel : uint8_t {
+  LLM_MENU_HOME = 0,
+  LLM_MENU_GROUP,
+  LLM_MENU_TEMPLATE,
+  LLM_MENU_BUCKET,
+  LLM_MENU_ENTITY,
+  LLM_MENU_MODELS,
+  LLM_MENU_MSG,
+};
+
+// Submenu row actions (row count varies — "Ask (guided)" is hidden when the
+// model has no menu — so taps map through a per-row action table, mirroring
+// g2AppsBuildRows).
+enum LlmHomeAction : uint8_t {
+  LLM_HOME_BACK = 0,   // <- Apps launcher
+  LLM_HOME_OPEN,       // Open chat  → g2ShowLlmPage (today's viewer)
+  LLM_HOME_ASK,        // Ask (guided) → start/resume the picker
+  LLM_HOME_RERUN,      // Re-run last → guided-branch retry, then the viewer
+  LLM_HOME_MODEL,      // Select Model → unload / pick a .bin via llmload
+};
+
+#define LLM_MENU_ROW_LEN         52   // wide enough for a ≤48 B entity + NUL
+#define LLM_MENU_VIS_ROWS        10   // picker items per page (>10 → paginator chrome)
+#define LLM_MENU_MAX_ROWS        (1 + LLM_MENU_VIS_ROWS + 2)  // back + items + prev + next
+#define LLM_MENU_BUCKET_THRESH   40   // ent_count over this inserts the alpha-bucket level
+#define LLM_MENU_MAX_BUCKETS     8    // alpha buckets are reachable in one screen (no chrome)
+#define LLM_MENU_MAX_BUCKET_ENTS 1024 // == the §2 per-group entity cap (a bucket never exceeds it)
+#define LLM_MODEL_MAX            24   // .bin files listed on Select Model (paginated)
+#define LLM_MODEL_NAME_LEN       40   // display name (basename, truncated)
+#define LLM_MODEL_PATH_LEN       96   // full VFS path for llmload
+
+// Row buffers shared by every level (one page is on screen at a time;
+// g2ShowListPage deep-copies immediately, so reuse between renders is safe).
+EXT_RAM_BSS_ATTR static char        sLlmRows[LLM_MENU_MAX_ROWS][LLM_MENU_ROW_LEN];
+EXT_RAM_BSS_ATTR static const char* sLlmRowPtrs[LLM_MENU_MAX_ROWS];
+
+// Picker state — persisted across a watchdog force-exit so Ask can resume.
+static LlmMenuLevel sLlmLevel   = LLM_MENU_HOME;   // level currently on screen (drives handleTap)
+static LlmMenuLevel sLlmResume  = LLM_MENU_HOME;   // level to resume on next Ask (HOME = fresh)
+static uint16_t     sLlmGen     = 0;               // menuGeneration cached when the pick started
+static uint8_t      sLlmGroup   = 0;               // selected group index
+static uint16_t     sLlmTpl     = 0;               // selected template index
+static uint8_t      sLlmBucket  = 0;               // selected alpha-bucket index
+static uint8_t      sLlmBucketCount = 0;           // active buckets (0 = direct entity list)
+static size_t       sLlmPage    = 0;               // pagination page of the current list
+
+// Per-page layout captured by the renderer so the tap handler maps rows
+// without re-deriving the layout (mirrors G2_Page_Settings' gPage* hooks).
+static int          sLlmPrevRow      = -1;
+static int          sLlmNextRow      = -1;
+static size_t       sLlmFirstItemRow = 1;
+static size_t       sLlmItemsOnPage  = 0;
+static size_t       sLlmPageStartIdx = 0;
+
+// Alpha-bucket boundaries (letter-class ranges) + the entity indices that
+// fall in the selected bucket. Class 0 = '#'/non-alpha, 1..26 = A..Z.
+static uint8_t      sLlmBucketLo[LLM_MENU_MAX_BUCKETS];
+static uint8_t      sLlmBucketHi[LLM_MENU_MAX_BUCKETS];
+EXT_RAM_BSS_ATTR static uint16_t sLlmEntIdx[LLM_MENU_MAX_BUCKET_ENTS];
+static uint16_t     sLlmEntIdxCount = 0;
+
+// Submenu row→action map + transient message text.
+static uint8_t      sLlmHomeAct[LLM_MENU_MAX_ROWS];
+static uint8_t      sLlmHomeActCount = 0;
+static char         sLlmMsg[40] = {0};
+
+// Select Model cache — filled once when the page opens (tap task), then
+// paginated. Paths are full VFS paths so llmload is unambiguous if the same
+// basename exists on both internal and SD.
+EXT_RAM_BSS_ATTR static char sLlmModelNames[LLM_MODEL_MAX][LLM_MODEL_NAME_LEN];
+EXT_RAM_BSS_ATTR static char sLlmModelPaths[LLM_MODEL_MAX][LLM_MODEL_PATH_LEN];
+static uint8_t sLlmModelCount = 0;
+
+// Show functions used before their definitions (forward decls keep the
+// natural top-down reading order below).
+static void llmMenuShowGroups();
+static void llmMenuShowTemplates();
+static void llmMenuShowBuckets();
+static void llmMenuShowEntities();
+static void llmMenuShowModels();
+
+// --- alpha-bucket helpers -------------------------------------------------
+
+// Map an entity's first byte to a sortable letter class: 0 = '#'/non-alpha,
+// 1..26 = A..Z (case-folded).
+static uint8_t llmMenuLetterClass(char c) {
+  if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
+  if (c >= 'A' && c <= 'Z') return (uint8_t)(c - 'A' + 1);
+  return 0;
+}
+
+// Render a bucket label ("A", "#", or "A-D") for a class range.
+static void llmMenuClassLabel(uint8_t lo, uint8_t hi, char* out, size_t cap) {
+  auto ch = [](uint8_t cl) -> char { return cl == 0 ? '#' : (char)('A' + cl - 1); };
+  if (lo == hi) snprintf(out, cap, "%c", ch(lo));
+  else          snprintf(out, cap, "%c-%c", ch(lo), ch(hi));
+}
+
+// Partition the group's entities into ≤8 alpha buckets balanced by count,
+// computed from the ACTUAL first letters present. Returns the bucket count
+// (fills sLlmBucketLo/Hi). Reads each entity's first byte via the copy-out
+// API (µs lock per call; runs once on the g2_tap_disp tap, not a hot loop).
+static uint8_t llmMenuComputeBuckets(uint8_t g, uint16_t entCount) {
+  uint16_t cnt[27] = {0};
+  char eb[8];
+  for (uint16_t e = 0; e < entCount; e++) {
+    if (llmMenuEntity(g, e, eb, sizeof(eb)) < 0) continue;
+    cnt[llmMenuLetterClass(eb[0])]++;
+  }
+  uint32_t total = 0;
+  int lastNon = -1;
+  for (int c = 0; c < 27; c++) { total += cnt[c]; if (cnt[c]) lastNon = c; }
+  if (total == 0) return 0;
+
+  const uint32_t target = (total + LLM_MENU_MAX_BUCKETS - 1) / LLM_MENU_MAX_BUCKETS;  // ceil
+  uint8_t  nb = 0;
+  int      curLo = -1;
+  uint32_t curCount = 0;
+  for (int c = 0; c <= lastNon; c++) {
+    if (!cnt[c]) continue;
+    if (curLo < 0) curLo = c;
+    curCount += cnt[c];
+    // Close a bucket when it reaches the target — but reserve the LAST slot
+    // for whatever remains so we never exceed LLM_MENU_MAX_BUCKETS buckets.
+    const bool isLast = (c == lastNon);
+    if ((curCount >= target && nb < LLM_MENU_MAX_BUCKETS - 1) || isLast) {
+      sLlmBucketLo[nb] = (uint8_t)curLo;
+      sLlmBucketHi[nb] = (uint8_t)c;
+      nb++;
+      curLo = -1;
+      curCount = 0;
+    }
+  }
+  return nb;
+}
+
+// Build the selected bucket's entity-index list into sLlmEntIdx (original
+// menu indices, so the composed `llmask` sees the right entity).
+static void llmMenuBuildFilter(uint8_t g, uint16_t entCount) {
+  sLlmEntIdxCount = 0;
+  if (sLlmBucketCount == 0 || sLlmBucket >= sLlmBucketCount) return;
+  const uint8_t lo = sLlmBucketLo[sLlmBucket];
+  const uint8_t hi = sLlmBucketHi[sLlmBucket];
+  char eb[8];
+  for (uint16_t e = 0; e < entCount && sLlmEntIdxCount < LLM_MENU_MAX_BUCKET_ENTS; e++) {
+    if (llmMenuEntity(g, e, eb, sizeof(eb)) < 0) continue;
+    const uint8_t cl = llmMenuLetterClass(eb[0]);
+    if (cl >= lo && cl <= hi) sLlmEntIdx[sLlmEntIdxCount++] = e;
+  }
+}
+
+// --- generic list renderer ------------------------------------------------
+
+// Fill one display row for source item `globalIdx` at level `lvl`.
+static void llmMenuFillItem(LlmMenuLevel lvl, size_t globalIdx, char* out, size_t cap) {
+  out[0] = '\0';
+  switch (lvl) {
+    case LLM_MENU_GROUP: {
+      LLMMenuGroupInfo gi;
+      if (llmMenuGroupInfo((uint8_t)globalIdx, &gi)) snprintf(out, cap, "%s", gi.name);
+      break;
+    }
+    case LLM_MENU_TEMPLATE:
+      llmMenuTemplate(sLlmGroup, (uint16_t)globalIdx, out, cap, nullptr);  // 0x1F → "{}"
+      break;
+    case LLM_MENU_BUCKET:
+      if (globalIdx < sLlmBucketCount)
+        llmMenuClassLabel(sLlmBucketLo[globalIdx], sLlmBucketHi[globalIdx], out, cap);
+      break;
+    case LLM_MENU_ENTITY: {
+      const uint16_t e = (sLlmBucketCount > 0) ? sLlmEntIdx[globalIdx] : (uint16_t)globalIdx;
+      llmMenuEntity(sLlmGroup, e, out, cap);
+      break;
+    }
+    case LLM_MENU_MODELS: {
+      // Item 0 is always Unload; 1..N are cached model basenames. Mark the
+      // currently loaded path with a leading '*' so the user can see which
+      // row is active without a separate status page.
+      if (globalIdx == 0) {
+        snprintf(out, cap, "Unload model");
+        break;
+      }
+      const size_t mi = globalIdx - 1;
+      if (mi >= sLlmModelCount) break;
+      LLMStatus st = llmGetStatus();
+      const bool cur = (st.state == LLMState::READY &&
+                        st.modelPath[0] &&
+                        strcmp(st.modelPath, sLlmModelPaths[mi]) == 0);
+      snprintf(out, cap, "%s%s", cur ? "* " : "", sLlmModelNames[mi]);
+      break;
+    }
+    default: break;
+  }
+  if (out[0] == '\0') snprintf(out, cap, "?");   // defensive: never a blank row
+}
+
+// Render a paginated picker list: back row + items on sLlmPage + prev/next
+// chrome (only when the source outgrows one page). Captures the layout for
+// the tap handler and flips gHijackPage's menu-gen on a level change so a
+// stale in-flight `llmask` redraw is dropped if the user navigates away.
+static void llmMenuRenderList(LlmMenuLevel lvl, size_t itemCount, const char* backLabel) {
+  G2Paginator p = g2PaginatorPrepare(itemCount, LLM_MENU_VIS_ROWS, sLlmPage);
+
+  snprintf(sLlmRows[0], LLM_MENU_ROW_LEN, "%s", backLabel ? backLabel : "<- Back");
+  sLlmRowPtrs[0] = sLlmRows[0];
+
+  size_t row = 1;
+  for (size_t i = p.startIdx; i < p.endIdx && row < LLM_MENU_MAX_ROWS - 2; i++) {
+    llmMenuFillItem(lvl, i, sLlmRows[row], LLM_MENU_ROW_LEN);
+    sLlmRowPtrs[row] = sLlmRows[row];
+    row++;
+  }
+  sLlmFirstItemRow = 1;
+  sLlmItemsOnPage  = row - 1;
+  sLlmPageStartIdx = p.startIdx;
+
+  row = g2PaginatorWriteChrome(p, sLlmPage, row, LLM_MENU_MAX_ROWS,
+                               &sLlmRows[0][0], LLM_MENU_ROW_LEN, sLlmRowPtrs);
+  sLlmPrevRow = p.prevRow;
+  sLlmNextRow = p.nextRow;
+
+  if (sLlmLevel != lvl) { sLlmLevel = lvl; g2BumpMenuGen(); }
+  g2ShowListPage(sLlmRowPtrs, row);
+}
+
+// --- per-level show helpers (render at the current sLlmPage) --------------
+
+static void llmMenuShowGroups() {
+  llmMenuRenderList(LLM_MENU_GROUP, llmMenuGroupCount(), "<- Back");
+}
+
+static void llmMenuShowTemplates() {
+  LLMMenuGroupInfo gi;
+  const size_t n = llmMenuGroupInfo(sLlmGroup, &gi) ? gi.tplCount : 0;
+  llmMenuRenderList(LLM_MENU_TEMPLATE, n, "<- Groups");
+}
+
+static void llmMenuShowBuckets() {
+  llmMenuRenderList(LLM_MENU_BUCKET, sLlmBucketCount, "<- Templates");
+}
+
+static void llmMenuShowEntities() {
+  size_t      count;
+  const char* back;
+  if (sLlmBucketCount > 0) {           // bucketed: filtered index list
+    count = sLlmEntIdxCount;
+    back  = "<- Buckets";
+  } else {                             // direct: entity indices 0..entCount-1
+    LLMMenuGroupInfo gi;
+    count = llmMenuGroupInfo(sLlmGroup, &gi) ? gi.entCount : 0;
+    back  = "<- Templates";
+  }
+  llmMenuRenderList(LLM_MENU_ENTITY, count, back);
+}
+
+// Scan /system/llm (+ /sd/llm when mounted) for *.bin into the Select Model
+// cache. Same locations as llmListModels(), but fixed buffers — no Arduino
+// String / JSON on the tap path. Called once when the page opens.
+static void llmMenuScanModels() {
+  sLlmModelCount = 0;
+  auto scanDir = [&](const char* dirPath) {
+    File dir = VFS::openGuarded(dirPath, FILE_READ, VFS::systemAuth("g2.llm.list_models"));
+    if (!dir || !dir.isDirectory()) return;
+    File entry;
+    while ((entry = dir.openNextFile()) && sLlmModelCount < LLM_MODEL_MAX) {
+      const char* raw = entry.name();
+      if (!raw || !raw[0]) { entry.close(); continue; }
+      const char* base = strrchr(raw, '/');
+      base = base ? base + 1 : raw;
+      const size_t len = strlen(base);
+      if (len >= 4 && strcasecmp(base + len - 4, ".bin") == 0) {
+        const uint8_t i = sLlmModelCount;
+        strlcpy(sLlmModelNames[i], base, LLM_MODEL_NAME_LEN);
+        snprintf(sLlmModelPaths[i], LLM_MODEL_PATH_LEN, "%s/%s", dirPath, base);
+        sLlmModelCount++;
+      }
+      entry.close();
+    }
+    dir.close();
+  };
+  scanDir("/system/llm");
+  if (VFS::isSDAvailable()) scanDir("/sd/llm");
+}
+
+static void llmMenuShowModels() {
+  llmMenuRenderList(LLM_MENU_MODELS, 1u + (size_t)sLlmModelCount, "<- Back");
+}
+
+static void llmMenuOpenModels() {
+  llmMenuScanModels();
+  sLlmPage = 0;
+  llmMenuShowModels();
+}
+
+static void llmMenuRerenderCurrent() {
+  switch (sLlmLevel) {
+    case LLM_MENU_GROUP:    llmMenuShowGroups();    break;
+    case LLM_MENU_TEMPLATE: llmMenuShowTemplates(); break;
+    case LLM_MENU_BUCKET:   llmMenuShowBuckets();   break;
+    case LLM_MENU_ENTITY:   llmMenuShowEntities();  break;
+    case LLM_MENU_MODELS:   llmMenuShowModels();    break;
+    default: break;
+  }
+}
+
+// True (and re-renders) when idx is a prev/next chrome row.
+static bool llmMenuHandlePaging(uint32_t idx) {
+  if (sLlmPrevRow >= 0 && (int)idx == sLlmPrevRow) {
+    if (sLlmPage > 0) sLlmPage--;
+    llmMenuRerenderCurrent();
+    return true;
+  }
+  if (sLlmNextRow >= 0 && (int)idx == sLlmNextRow) {
+    sLlmPage++;                          // g2PaginatorPrepare clamps on render
+    llmMenuRerenderCurrent();
+    return true;
+  }
+  return false;
+}
+
+// Map a tapped row to its source item index, or -1 for a non-item row.
+static int llmMenuItemIdx(uint32_t idx) {
+  if (idx < sLlmFirstItemRow) return -1;
+  const size_t pos = idx - sLlmFirstItemRow;
+  if (pos >= sLlmItemsOnPage) return -1;
+  return (int)(sLlmPageStartIdx + pos);
+}
+
+// --- transient message page ----------------------------------------------
+
+static void llmMenuMsgRender() {
+  const char* items[2] = { "<- Back", sLlmMsg };
+  sLlmLevel = LLM_MENU_MSG;
+  if (g2ShowListPage(items, 2)) g2SetHijackPage(G2_HIJACK_PAGE_LLM_MENU);
+}
+
+static void llmMenuShowMsg(const char* line) {
+  snprintf(sLlmMsg, sizeof(sLlmMsg), "%s", line ? line : "");
+  llmMenuMsgRender();
+}
+
+// --- terminal ask (submit → viewer, or busy/stale message) ----------------
+
+// Runs on the lens-applier context (see enqueueLlmRedraw): spawn the
+// read-only viewer to stream the answer. Back returns to the submenu.
+static void llmMenuOpenViewerRender() {
+  if (!g2ShowLlmPage(g2ShowLlmMenu))
+    DEBUG_G2F("[G2-LLM] guided ask: viewer spawn declined (low RAM)");
+}
+
+// Marshal a post-command render onto the lens applier from a cmd_exec
+// completion callback (same shape as G2_Page_Automations' helper). The
+// applier's Redraw gen-guard drops it if the user has navigated away.
+static void enqueueLlmRedraw(const G2CmdCookie& cookie, void (*renderFn)(), const char* tag) {
+  RedrawSpec* spec = new (std::nothrow) RedrawSpec{};
+  if (!spec) { DEBUG_G2F("[G2-LLM] %s: RedrawSpec alloc failed", tag); return; }
+  spec->render = renderFn;
+  LensUiJob* job = new (std::nothrow) LensUiJob{};
+  if (!job) { DEBUG_G2F("[G2-LLM] %s: LensUiJob alloc failed", tag); delete spec; return; }
+  job->kind           = LensJobKind::Redraw;
+  job->submitMenuGen  = cookie.menuGen;
+  job->cmdSeq         = cookie.seq;
+  job->targetPage     = cookie.targetPage;
+  job->targetNetSub   = cookie.targetNetSub;
+  job->payload.redraw = spec;
+  if (!g2EnqueueLensJob(job)) {
+    DEBUG_G2F("[G2-LLM] %s: lens job enqueue FAILED", tag);
+    delete spec; delete job;
+  }
+}
+
+// cmd_exec completion for `llmask json ...`. executeCommand returns true even
+// for a busy/stale reply (the JSON payload is exempt from OK:/Error: stamping),
+// so classify off the reply's own {"ok":...} field.
+static void llmMenuAskDone(bool ok, const char* result, const G2CmdCookie& c, void* /*ud*/) {
+  if (ok && result && strstr(result, "\"ok\":true")) {
+    enqueueLlmRedraw(c, llmMenuOpenViewerRender, "ask-ok");     // stream the answer
+    return;
+  }
+  const bool stale = result && strstr(result, "menu changed");
+  snprintf(sLlmMsg, sizeof(sLlmMsg), "%s", stale ? "Menu changed - reopen" : "Busy - try again");
+  enqueueLlmRedraw(c, llmMenuMsgRender, "ask-msg");
+}
+
+// Compose + submit on cmd_exec_task under the paired user's auth. entityIdx < 0
+// for a slotless ("canned") template. The gen is the one cached when the pick
+// started; a raced model swap fails cleanly (llmask → stale → message).
+static void llmMenuSubmit(int entityIdx) {
+  char line[64];
+  if (entityIdx >= 0)
+    snprintf(line, sizeof(line), "llmask json %u %u %u %d",
+             (unsigned)sLlmGen, (unsigned)sLlmGroup, (unsigned)sLlmTpl, entityIdx);
+  else
+    snprintf(line, sizeof(line), "llmask json %u %u %u",
+             (unsigned)sLlmGen, (unsigned)sLlmGroup, (unsigned)sLlmTpl);
+  G2CmdCookie cookie{};
+  cookie.targetPage   = g2GetHijackPage();
+  cookie.targetNetSub = (uint8_t)sLlmLevel;
+  DEBUG_G2F("[G2-LLM] submit '%s'", line);
+  if (!g2SubmitHijackCommand(line, cookie, llmMenuAskDone, nullptr)) {
+    DEBUG_G2F("[G2-LLM] ask submit failed (queue full)");
+    llmMenuShowMsg("Busy - try again");
+  }
+}
+
+// cmd_exec completion for llmload / llmunload. Same JSON {"ok":...} shape as
+// the web / CLI; admin denial is an Error: line (executeCommand returns false).
+static void llmMenuModelCmdDone(bool ok, const char* result, const G2CmdCookie& c, void* /*ud*/) {
+  if (ok && result && strstr(result, "\"ok\":true")) {
+    sLlmResume = LLM_MENU_HOME;   // guided resume is stale after a model swap
+    enqueueLlmRedraw(c, g2ShowLlmMenu, "model-ok");
+    return;
+  }
+  if (result && (strstr(result, "Admin") || strstr(result, "admin")))
+    snprintf(sLlmMsg, sizeof(sLlmMsg), "Admin required");
+  else if (result && strstr(result, "\"ok\":false"))
+    snprintf(sLlmMsg, sizeof(sLlmMsg), "Load failed");
+  else
+    snprintf(sLlmMsg, sizeof(sLlmMsg), "Command failed");
+  enqueueLlmRedraw(c, llmMenuMsgRender, "model-err");
+}
+
+// Show a wait message, then run llmload/llmunload on cmd_exec (never call
+// llmLoadModel inline — it blocks for seconds on the tap task).
+static void llmMenuSubmitModelCmd(const char* line, const char* waitMsg) {
+  llmMenuShowMsg(waitMsg ? waitMsg : "Working...");
+  G2CmdCookie cookie{};
+  cookie.targetPage   = g2GetHijackPage();
+  cookie.targetNetSub = (uint8_t)LLM_MENU_MODELS;
+  DEBUG_G2F("[G2-LLM] model cmd '%s'", line);
+  if (!g2SubmitHijackCommand(line, cookie, llmMenuModelCmdDone, nullptr)) {
+    DEBUG_G2F("[G2-LLM] model submit failed (queue full)");
+    llmMenuShowMsg("Busy - try again");
+  }
+}
+
+static void llmMenuModelTap(uint32_t idx) {
+  if (idx == 0) { g2ShowLlmMenu(); return; }          // <- Back to submenu
+  if (llmMenuHandlePaging(idx)) return;
+  const int item = llmMenuItemIdx(idx);
+  if (item < 0) return;
+  if (item == 0) {
+    llmMenuSubmitModelCmd("llmunload", "Unloading...");
+    return;
+  }
+  const size_t mi = (size_t)item - 1;
+  if (mi >= sLlmModelCount) return;
+  char line[112];
+  snprintf(line, sizeof(line), "llmload %s", sLlmModelPaths[mi]);
+  llmMenuSubmitModelCmd(line, "Loading model...");
+}
+
+// --- per-level tap handlers -----------------------------------------------
+
+static void llmMenuGroupTap(uint32_t idx) {
+  if (idx == 0) { g2ShowLlmMenu(); return; }          // <- Back to submenu
+  if (llmMenuHandlePaging(idx)) return;
+  const int g = llmMenuItemIdx(idx);
+  if (g < 0) return;
+  sLlmGroup = (uint8_t)g;
+  sLlmPage  = 0;
+  llmMenuShowTemplates();
+}
+
+static void llmMenuTemplateTap(uint32_t idx) {
+  if (idx == 0) { sLlmPage = 0; llmMenuShowGroups(); return; }   // <- Groups
+  if (llmMenuHandlePaging(idx)) return;
+  const int t = llmMenuItemIdx(idx);
+  if (t < 0) return;
+
+  bool slot = false;
+  char tb[LLM_MENU_ROW_LEN];
+  llmMenuTemplate(sLlmGroup, (uint16_t)t, tb, sizeof(tb), &slot);
+  sLlmTpl = (uint16_t)t;
+
+  if (!slot) { llmMenuSubmit(-1); return; }           // slotless / canned → ask now
+
+  LLMMenuGroupInfo gi;
+  if (!llmMenuGroupInfo(sLlmGroup, &gi) || gi.entCount == 0) {
+    llmMenuShowMsg("No entities for this group");      // slotted but empty (shouldn't happen)
+    return;
+  }
+  // Alpha-bucket level only pays off past the threshold AND when it actually
+  // splits into ≥2 reachable buckets; otherwise go straight to the entity list.
+  if (gi.entCount > LLM_MENU_BUCKET_THRESH) {
+    const uint8_t nb = llmMenuComputeBuckets(sLlmGroup, gi.entCount);
+    if (nb >= 2) {
+      sLlmBucketCount = nb;
+      sLlmBucket      = 0;
+      sLlmPage        = 0;
+      llmMenuShowBuckets();
+      return;
+    }
+  }
+  sLlmBucketCount = 0;
+  sLlmEntIdxCount = 0;
+  sLlmPage        = 0;
+  llmMenuShowEntities();
+}
+
+static void llmMenuBucketTap(uint32_t idx) {
+  if (idx == 0) { sLlmPage = 0; llmMenuShowTemplates(); return; }  // <- Templates
+  if (llmMenuHandlePaging(idx)) return;                            // ≤8 buckets → no chrome
+  const int b = llmMenuItemIdx(idx);
+  if (b < 0 || b >= (int)sLlmBucketCount) return;
+  sLlmBucket = (uint8_t)b;
+  sLlmPage   = 0;
+  LLMMenuGroupInfo gi;
+  if (!llmMenuGroupInfo(sLlmGroup, &gi)) { llmMenuShowTemplates(); return; }
+  llmMenuBuildFilter(sLlmGroup, gi.entCount);
+  llmMenuShowEntities();
+}
+
+static void llmMenuEntityTap(uint32_t idx) {
+  if (idx == 0) {                                     // <- back one level
+    sLlmPage = 0;
+    if (sLlmBucketCount > 0) llmMenuShowBuckets();
+    else                     llmMenuShowTemplates();
+    return;
+  }
+  if (llmMenuHandlePaging(idx)) return;
+  const int ei = llmMenuItemIdx(idx);
+  if (ei < 0) return;
+  const uint16_t e = (sLlmBucketCount > 0) ? sLlmEntIdx[ei] : (uint16_t)ei;
+  llmMenuSubmit((int)e);
+}
+
+// Start (or resume) the guided pick. A watchdog force-exit leaves the picker
+// statics intact, so if the menu hasn't changed since, resume at the level
+// the user abandoned; otherwise reset to a fresh group pick.
+static void llmMenuStartAsk() {
+  const uint16_t curGen = llmMenuGeneration();
+  const uint8_t  gc     = llmMenuGroupCount();
+  if (gc == 0) { g2ShowLlmMenu(); return; }           // defensive — Ask row is hidden when 0
+
+  if (sLlmResume >= LLM_MENU_GROUP && sLlmResume <= LLM_MENU_ENTITY &&
+      sLlmGen == curGen && sLlmGroup < gc) {
+    DEBUG_G2F("[G2-LLM] Ask: resuming at level %u", (unsigned)sLlmResume);
+    switch (sLlmResume) {
+      case LLM_MENU_TEMPLATE: llmMenuShowTemplates(); return;
+      case LLM_MENU_BUCKET:   llmMenuShowBuckets();   return;
+      case LLM_MENU_ENTITY:   llmMenuShowEntities();  return;
+      default:                llmMenuShowGroups();    return;
+    }
+  }
+
+  sLlmGen         = curGen;
+  sLlmGroup       = 0;
+  sLlmTpl         = 0;
+  sLlmBucket      = 0;
+  sLlmBucketCount = 0;
+  sLlmEntIdxCount = 0;
+  sLlmPage        = 0;
+  llmMenuShowGroups();
+}
+
+// Re-run the last question. Every G2-originated LLM turn is guided (the lens has
+// no free-text input), so a guided last-ask existing means the last question was
+// guided → re-ask PLAIN via llmMenuRepeatLast (no suppress); else only a foreign
+// free-text turn exists → chatRetryLast. Do NOT gate on chatGetSessionId(): it
+// reads 0 the instant a turn finishes, and this row is reached only AFTER the
+// answer streamed, so that comparison always fell through to chatRetryLast —
+// banning the memorized-correct answer, the exact anti-pattern §5 forbids. Then
+// open the viewer to stream the reply. (LLM_GUIDED_MENU_SPEC §5.)
+static void llmMenuRerunLast() {
+  int guidedSess = 0;
+  if (llmMenuLastAskInfo(&guidedSess))
+    (void)llmMenuRepeatLast();
+  else
+    (void)chatRetryLast(nullptr);
+  g2ShowLlmPage(g2ShowLlmMenu);
+}
+
+static void llmMenuHomeTap(uint32_t idx) {
+  if (idx >= sLlmHomeActCount) return;
+  switch (sLlmHomeAct[idx]) {
+    case LLM_HOME_BACK:  g2ShowAppsMenu();            return;
+    case LLM_HOME_OPEN:  g2ShowLlmPage(g2ShowLlmMenu); return;
+    case LLM_HOME_ASK:   llmMenuStartAsk();           return;
+    case LLM_HOME_RERUN: llmMenuRerunLast();          return;
+    case LLM_HOME_MODEL: llmMenuOpenModels();         return;
+    default: return;
+  }
+}
+
+static void g2LlmMenuHandleTap(uint32_t idx) {
+  switch (sLlmLevel) {
+    case LLM_MENU_HOME:     llmMenuHomeTap(idx);     return;
+    case LLM_MENU_GROUP:    llmMenuGroupTap(idx);    return;
+    case LLM_MENU_TEMPLATE: llmMenuTemplateTap(idx); return;
+    case LLM_MENU_BUCKET:   llmMenuBucketTap(idx);   return;
+    case LLM_MENU_ENTITY:   llmMenuEntityTap(idx);   return;
+    case LLM_MENU_MODELS:   llmMenuModelTap(idx);    return;
+    case LLM_MENU_MSG:      g2ShowLlmMenu();         return;   // any tap dismisses to submenu
+    default: return;
+  }
+}
+
+// Stub CLI text view (required by g2RegisterPage; the page is hidden and
+// its real surface is on the lens).
+static void g2BuildLlmMenuInfo(char* out, size_t cap) {
+  if (!out || cap == 0) return;
+  snprintf(out, cap, "LLM (open chat / guided ask / re-run / select model on lens)");
+}
+
+static const G2PageModule kLlmMenuPage = {
+  // Hidden — hijackLabel=nullptr keeps it out of the main menu; the only
+  // entry is g2ShowLlmMenu() from the Apps launcher (Apps → LLM).
+  "llmapp", nullptr,
+  "LLM guided-input picker (chat / guided ask / re-run / select model on lens)",
+  /*buildText=*/  g2BuildLlmMenuInfo,
+  /*showMenu=*/   nullptr,
+  /*handleTap=*/  g2LlmMenuHandleTap,
+  G2_HIJACK_PAGE_LLM_MENU,
+  /*liveIntervalMs=*/ 0,
+  /*backLabel=*/    "<- Apps",
+  /*prefersTextWidget=*/ false,   // own list layout — flag is irrelevant
+  /*liveRender=*/    nullptr,
+};
+
+// Entry point — the LLM submenu (Apps → LLM). Rows: Open chat / Ask (guided,
+// hidden when the model has no menu) / Re-run last / Select Model. Re-showing
+// it after a picker (Back, or the viewer's onDone) captures the abandoned
+// guided level so the next Ask can resume there.
+static void g2ShowLlmMenu() {
+  if (sLlmLevel >= LLM_MENU_GROUP && sLlmLevel <= LLM_MENU_ENTITY)
+    sLlmResume = sLlmLevel;
+  else
+    sLlmResume = LLM_MENU_HOME;
+
+  const bool haveMenu = (llmMenuGroupCount() > 0);
+  size_t n = 0;
+  auto add = [&](const char* label, LlmHomeAction act) {
+    if (n < LLM_MENU_MAX_ROWS) {
+      snprintf(sLlmRows[n], LLM_MENU_ROW_LEN, "%s", label);
+      sLlmRowPtrs[n]  = sLlmRows[n];
+      sLlmHomeAct[n]  = (uint8_t)act;
+      n++;
+    }
+  };
+  add("<- Back",      LLM_HOME_BACK);
+  add("Open chat",    LLM_HOME_OPEN);
+  if (haveMenu) add("Ask (guided)", LLM_HOME_ASK);
+  add("Re-run last",  LLM_HOME_RERUN);
+
+  // Select Model row — label reflects the loaded basename (Maps-style) so the
+  // glasses can show which weights are active before opening the picker.
+  {
+    char modelRow[LLM_MENU_ROW_LEN];
+    LLMStatus st = llmGetStatus();
+    if (st.state == LLMState::READY && st.modelPath[0]) {
+      const char* base = strrchr(st.modelPath, '/');
+      base = base ? base + 1 : st.modelPath;
+      snprintf(modelRow, sizeof(modelRow), "Model: %s", base);
+    } else {
+      snprintf(modelRow, sizeof(modelRow), "Select Model");
+    }
+    add(modelRow, LLM_HOME_MODEL);
+  }
+
+  // Degraded-context warning row (PSRAM was low at model load → ctx auto-fit
+  // unusably small; answers truncate). Tapping it opens the model picker, since
+  // reloading the model is one of the fixes (a device restart is the other).
+  {
+    int llmCtx = 0;
+    if (llmContextDegraded(&llmCtx, nullptr)) {
+      char warnRow[LLM_MENU_ROW_LEN];
+      snprintf(warnRow, sizeof(warnRow), "! ctx %d low - restart", llmCtx);
+      add(warnRow, LLM_HOME_MODEL);
+    }
+  }
+  sLlmHomeActCount = (uint8_t)n;
+
+  sLlmLevel = LLM_MENU_HOME;
+  g2BumpMenuGen();                 // navigation invalidates any in-flight ask redraw
+  if (g2ShowListPage(sLlmRowPtrs, n)) {
+    g2SetHijackPage(G2_HIJACK_PAGE_LLM_MENU);
+    DEBUG_G2F("[G2-LLM] submenu shown (%u rows, menu=%s)",
+              (unsigned)n, haveMenu ? "yes" : "no");
+  } else {
+    DEBUG_G2F("[G2-LLM] submenu show FAILED");
+  }
+}
+#endif // ENABLE_ONDEVICE_LLM
 
 // ---------------------------------------------------------------------------
 // Generic sensor-detail LIVE compound (all non-camera sensors)
@@ -4396,7 +6164,7 @@ static constexpr G2ContainerGeom kSensorLiveListGeom    = {   8,   8, 200, 270 }
 static constexpr G2ContainerGeom kSensorLiveReadoutGeom = { 216,   8, 352, 270 };
 static constexpr uint32_t        kSensorLiveReadoutCid  = 2;
 static const char* const         kSensorLiveReadoutName = "snsLive";
-static char gSensorLiveLastReadout[224] = {0};
+EXT_RAM_BSS_ATTR static char gSensorLiveLastReadout[224];
 
 static bool renderSensorDetailLive() {
   G2Temple* arm = (gR.connected && !gR.pluginDead) ? &gR
@@ -4454,7 +6222,7 @@ bool g2ShowSensorLive() {
 }
 
 static const G2PageModule kTestSuitePage = {
-  "tests", "Tests",
+  "tests", nullptr,   // hidden from the main menu — reached via the System launcher
   "Show on-glasses transport test bench",
   g2BuildTestSuiteInfo,
   g2ShowTestSuiteMenu,
@@ -4467,28 +6235,46 @@ static const G2PageModule kTestSuitePage = {
 };
 
 static void registerG2Pages(void) {
-  // Order = menu order in the hijack list.
-  // Status now covers the merged Status+System view — the unique System
-  // bits (PSRAM, WiFi RSSI, device battery V/%) were folded into
-  // buildG2StatusSnapshot. The standalone System page module is gone.
-  g2RegisterPage(kStatusPage);
-  g2RegisterPage(kSensorsPage);
-  g2RegisterPage(kNetworkPage);
-  g2RegisterPage(kAppsPage);       // Apps launcher — rows come from g2AppsBuildRows()
-  g2RegisterPage(kSettingsPage);
-  g2RegisterPage(kPowerPage);
-  g2RegisterPage(kTestSuitePage);
-  // Files + ESP-NOW App are registered but hijackLabel=nullptr, so they no
-  // longer appear as top-level rows — they live under Apps. Kept registered
-  // so the tap dispatcher can still route to g2FilesHandleTap /
-  // g2ESPNowAppHandleTap when those pages are active (lookup keys on
-  // hijackPage, not on menu visibility).
-  g2RegisterPage(kFilesPage);
-  g2RegisterPage(kEspNowAppPage);
-  g2RegisterPage(kAutomationsPage);      // hidden — reached via the Apps launcher
-  g2RegisterPage(kRingPage);             // hidden — reached via the Apps launcher
+  // Order = menu order in the hijack list. Menu reorg (mirrors the OLED's 6
+  // categories): the six visible rows are System, Config, Connect (Network),
+  // Hardware (Sensors), Apps, Power. Status / Settings / Tests are now hidden
+  // and reached via the System/Config launchers.
+  g2RegisterPage(kSystemPage);     // "System" — Status / System Events / Logging / Tests
+  g2RegisterPage(kConfigPage);     // "Config" — Settings / Users / OLED Login
+  g2RegisterPage(kNetworkPage);    // "Connect" — WiFi / Bluetooth (relabeled)
+  g2RegisterPage(kSensorsPage);    // "Hardware" — sensor list (relabeled)
+  g2RegisterPage(kAppsPage);       // "Apps" — rows come from g2AppsBuildRows()
+  g2RegisterPage(kPowerPage);      // "Power"
+  // Hidden pages (hijackLabel=nullptr): kept registered so the tap dispatcher
+  // can still route to their handleTap when active (lookup keys on hijackPage,
+  // not on menu visibility). Each is reached via a category launcher.
+  g2RegisterPage(kStatusPage);           // hidden — reached via System
+  g2RegisterPage(kSettingsPage);         // hidden — reached via Config
+  g2RegisterPage(kTestSuitePage);        // hidden — reached via System
+  g2RegisterPage(kFilesPage);            // hidden — reached via Apps
+  g2RegisterPage(kEspNowAppPage);        // hidden — reached via Apps
+  g2RegisterPage(kAutomationsPage);      // hidden — reached via Apps
+  g2RegisterPage(kUsersPage);            // hidden — reached via Config (admin)
+  g2RegisterPage(kRingPage);             // hidden — reached via Apps
+  g2RegisterPage(kSysEventsPage);        // hidden — reached via System
+  g2RegisterPage(kLoggingPage);          // hidden — reached via System
+  g2RegisterPage(kLedG2Page);            // hidden — reached via Hardware → LED
+#if ENABLE_FM_RADIO
+  g2RegisterPage(kFmTunerPage);          // hidden — reached via Hardware → FM
+#endif
+#if ENABLE_ONDEVICE_LLM
+  g2RegisterPage(kLlmMenuPage);          // hidden — reached via Apps → LLM (guided-input picker)
+#endif
 #if ENABLE_CAMERA_SENSOR
   g2RegisterPage(kCameraSettingsPage);   // hidden — see kCameraSettingsPage above
+#endif
+// Mic detail tracks ENABLE_MICROPHONE, the same flag as its drill-in row on
+// the Hardware page (G2_Page_Sensors.cpp) — NOT the camera flag it used to
+// share this block with. On a board with glasses but no camera (feathers3)
+// the row opened a page that was never in the registry, so the tap dispatcher
+// found no module and fell through to the read-only TEXT_VIEW default: every
+// action row was a silent no-op and a tap ejected the wearer from the page.
+#if ENABLE_MICROPHONE
   g2RegisterPage(kMicDetailPage);        // hidden — see kMicDetailPage above
 #endif
 }
@@ -6297,9 +8083,9 @@ static void startHeartbeatTimer() {
       gBeatTaskHandle = nullptr;
       return;
     }
-    BaseType_t rc = xTaskCreate(heartbeatWorkerTask, "g2_hb_worker",
+    BaseType_t rc = xTaskCreatePinnedToCore(heartbeatWorkerTask, "g2_hb_worker",
                                 stackBytes, nullptr,
-                                /*prio*/ 5, &gBeatTaskHandle);
+                                /*prio*/ 5, &gBeatTaskHandle, APP_CORE);
     if (rc != pdPASS) {
       DEBUG_G2F("[G2] heartbeat: worker task create failed (stack=%u internal=%u)",
                 (unsigned)stackBytes, (unsigned)internalFree);
@@ -6397,6 +8183,36 @@ static void g2AutoTimeSyncIfReady(G2Temple& t) {
   }
   DEBUG_G2F("[G2-R] Auto time-sync sent: epoch=%lu tzQ=%ld (tzMin=%d)",
             (unsigned long)now, (long)tzQ, gSettings.tzOffsetMinutes);
+}
+
+// Prime the native notification subsystem on the RIGHT temple: enable
+// notification display (NotificationControl) + turn OFF per-app whitelist
+// filtering (NotificationWhitelistCtrl). Without this, firmware whose
+// notification whitelist is enforced-and-empty (any device never configured by
+// the official Even app) silently DROPS every native card BEFORE it even
+// parses the EFS file — the zero-RX / no-START_ERR symptom chased in
+// docs/G2_NATIVE_NOTIFICATION_PLAN.md §12. HW-verified 2026-07-21: this pair on
+// sid 0x04 is THE gate, and auth is NOT a prerequisite. Idempotent and harmless
+// (firmware acks both on sid 0x04). Sent once per connect, right arm only.
+static void g2AutoNotifPrimeIfReady(G2Temple& t) {
+  if (t.side != 'R') return;          // notifications render off the right arm
+  if (!t.connected || t.pluginDead) return;
+
+  uint8_t env[64];
+  size_t n = g2BuildNotifCtrlEnable(allocSeq(), G2_MAGIC_NOTIF_CTRL,
+                                    env, sizeof(env));
+  if (n == 0 || !sendEnvelope(t, env, n)) {
+    DEBUG_G2F("[G2-R] Notif-prime: enable send failed");
+    return;
+  }
+  vTaskDelay(pdMS_TO_TICKS(60));
+  n = g2BuildNotifWhitelistDisable(allocSeq(), G2_MAGIC_NOTIF_WHITELIST,
+                                   env, sizeof(env));
+  if (n == 0 || !sendEnvelope(t, env, n)) {
+    DEBUG_G2F("[G2-R] Notif-prime: whitelist-disable send failed");
+    return;
+  }
+  DEBUG_G2F("[G2-R] Notif-prime sent (enable + whitelist-disable) — native notifications armed");
 }
 
 // =============================================================================
@@ -6598,6 +8414,15 @@ static bool connectTemple(G2Temple& t) {
   t.heartbeatMissed  = 0;
   t.pluginDead       = false;
 
+#if ENABLE_MICROPHONE
+  // If a G2 mic capture is active and this is the audio (LEFT) arm reconnecting,
+  // re-assert the stream: subscribeAudioNotify re-subscribed 6402 above, but the
+  // glasses need a fresh AudioCtrCmd{en=1} or the reconnected mic stays silent.
+  if (t.side == 'L' && audioGetSource() == AUDIO_SRC_G2_LEFT && audioCaptureActive()) {
+    g2MicStreamEnable(true);
+  }
+#endif
+
   DEBUG_G2F("[G2-%c] Running session prelude (AppLaunch)", t.side);
   if (!runSessionPrelude(t)) {
     DEBUG_G2F("[G2-%c] Prelude failed; disconnecting", t.side);
@@ -6609,6 +8434,11 @@ static bool connectTemple(G2Temple& t) {
   // Auto-push our NTP-synced time to the glasses' RTC. Only the right
   // arm goes through here (g2AutoTimeSyncIfReady is a no-op on left).
   g2AutoTimeSyncIfReady(t);
+
+  // Arm native EFS notifications: enable + whitelist-disable on sid 0x04.
+  // Right arm only; the gate that makes g2nativenotify / the notification
+  // pipeline actually render cards. See §12.10 of the plan doc.
+  g2AutoNotifPrimeIfReady(t);
 
   DEBUG_G2F("[G2-%c] Ready (heap=%u internal=%u)", t.side,
             (unsigned)ESP.getFreeHeap(),
@@ -6985,9 +8815,9 @@ static void bleConnectInit() {
   // ~9.4 KB. 5120 words = 20 KB leaves ~10 KB headroom and reclaims
   // 4 KB DRAM. Don't go lower — connect-time service discovery has
   // genuinely unbounded depth on certain failure paths.
-  if (xTaskCreate(bleConnectWorkerLoop, "g2_ble_connect",
+  if (xTaskCreatePinnedToCore(bleConnectWorkerLoop, "g2_ble_connect",
                   /*stack bytes*/ 5120, nullptr,
-                  /*prio*/  5,         &gBleConnectTaskH) != pdPASS) {
+                  /*prio*/  5,         &gBleConnectTaskH, APP_CORE) != pdPASS) {
     DEBUG_G2F("[G2] ble-connect: worker xTaskCreate FAILED");
     vQueueDelete(gBleConnectQueue);
     gBleConnectQueue = nullptr;
@@ -7101,6 +8931,9 @@ static bool g2ConnectSavedSync() {
 // Public API: non-blocking auto-reconnect from saved MACs. Used by the
 // boot hook; safe to call from any context.
 bool g2ConnectSaved() {
+  // Pairing-intent / heal stamp before the ANON BLE worker runs. No-op when
+  // already owned; otherwise homes to OLED/serial session or device founder.
+  bleStampPairedByIfBlank(BLE_PEER_G2_GLASSES);
   if (gConnectTaskActive) {
     DEBUG_G2F("[G2] g2ConnectSaved: connect already in progress");
     return false;
@@ -7155,6 +8988,13 @@ bool isG2Connected() {
 
 bool g2BothConnected() {
   return gL.connected && gR.connected;
+}
+
+// Mic-availability predicate: LEFT temple linked AND its audio-notify char
+// subscribed. NOT isG2Connected() (OR-of-temples → false-positive on RIGHT-only)
+// nor g2BothConnected(). See HAL_Audio audioSourceAvailable(AUDIO_SRC_G2_LEFT).
+bool g2LeftConnected() {
+  return gL.connected && gL.audioNotifyChar != nullptr;
 }
 
 // (G2_CONN_INT_* defined near the top of this file, alongside the forward
@@ -7233,12 +9073,22 @@ G2State getG2State() {
 }
 
 const char* getG2StateString() {
+  // Uninitialized client must not report "idle" — the Bluetooth web page
+  // (and anything else polling g2status) treated that as "stack is up",
+  // so opening the page looked like an auto-start.
+  if (!gG2State || !gG2State->initialized) return "off";
   switch (getG2State()) {
     case G2_STATE_IDLE:           return "idle";
     case G2_STATE_SCANNING:       return "scanning";
     case G2_STATE_CONNECTING:     return "connecting";
     case G2_STATE_AUTHENTICATING: return "authenticating";
-    case G2_STATE_CONNECTED:      return "connected";
+    case G2_STATE_CONNECTED:
+      // Internal FSM may stay CONNECTED while one temple is up (heartbeat
+      // + missing-arm recovery). Surface "connected" only when both sides
+      // are paired — one temple is still "connecting".
+      if (gL.connected && gR.connected) return "connected";
+      if (gL.connected || gR.connected) return "connecting";
+      return "idle";
     case G2_STATE_DISCONNECTING:  return "disconnecting";
     default:                      return "error";
   }
@@ -8644,6 +10494,146 @@ static QueueHandle_t gPageSwapQueue   = nullptr;   // holds LensUiJob*
 static TaskHandle_t  gPageSwapTaskH   = nullptr;
 static const size_t  kPageSwapQueueDepth = 8;
 
+// =============================================================================
+// Native G2 notification (Even File Service) — Phase 1 send path
+// =============================================================================
+// Pushes a TRUE firmware-native notification card to the lens instead of the
+// full-screen g2notify placeholder. The firmware renders its own card,
+// auto-wakes the display, and applies its own silent/DND. Wire format reversed
+// from docs/FlutterApp-main/.../g2_manager.dart::sendAndroidNotification and
+// fully specified in docs/G2_NATIVE_NOTIFICATION_PLAN.md.
+//
+// Transport: 4 fire-and-forget frames on the standard AA-21 envelope —
+//   1. START (77B)   on sid 0xC4 (FILE_CMD)
+//   2. DATA-announce [0x01] on sid 0xC4
+//   3. RAW json      on sid 0xC5 (FILE_RAW), fragmented if >232B
+//   4. RESULT_CHECK  [0x02] on sid 0xC4
+// All four use flag byte 0x00 (reserveFlag=false) — NOT G2_FLAG_REQUEST(0x20).
+// Runs ONLY on the lens-applier worker (blocking + inter-frame delays); never
+// call inline from the main loop or the BLE notify task.
+
+// Flag byte for EFS frames: reserveFlag=false → 0x00 (the reference app sends
+// the file-service frames this way; it is NOT the 0x20 request flag the
+// EvenCore/image paths use). See G2_NATIVE_NOTIFICATION_PLAN.md §2.
+static constexpr uint8_t G2_EFS_FLAG = 0x00;
+// Literal path the reference embeds in the START frame for notifications
+// (fileType=1). Replicated verbatim; the firmware appears to ignore it for
+// notification pushes but it must be present + zero-padded to 64 bytes.
+static const char kEfsNotifyPath[] = "user/notify_whitelist.json";
+
+// Append `s` to `out` with minimal JSON string escaping. Bytes >= 0x20
+// (including UTF-8 continuation bytes) pass through unchanged, so plain text
+// is byte-identical to the reference encoder.
+static void g2JsonAppendEscaped(String& out, const char* s) {
+  if (!s) return;
+  for (const char* p = s; *p; ++p) {
+    unsigned char c = (unsigned char)*p;
+    switch (c) {
+      case '"':  out += "\\\""; break;
+      case '\\': out += "\\\\"; break;
+      case '\n': out += "\\n";  break;
+      case '\r': out += "\\r";  break;
+      case '\t': out += "\\t";  break;
+      default:
+        if (c < 0x20) { char b[8]; snprintf(b, sizeof(b), "\\u%04x", c); out += b; }
+        else          { out += (char)c; }
+    }
+  }
+}
+
+// Build the exact `android_notification` JSON the firmware's EFS notification
+// parser expects. Field order/format is byte-stable (the START frame's
+// fileDataCrc32 is computed over these exact bytes). `date` is LOCAL time in
+// compact "YYYYMMDDThhmmss" form.
+static String g2BuildNotifyJson(uint32_t msgId, const char* appId,
+                                const char* displayName, const char* title,
+                                const char* subtitle, const char* body,
+                                time_t epoch) {
+  struct tm lt;
+  localtime_r(&epoch, &lt);
+  char dateBuf[20];
+  snprintf(dateBuf, sizeof(dateBuf), "%04d%02d%02dT%02d%02d%02d",
+           lt.tm_year + 1900, lt.tm_mon + 1, lt.tm_mday,
+           lt.tm_hour, lt.tm_min, lt.tm_sec);
+
+  String s;
+  s.reserve(320);
+  s  = "{\"android_notification\":{\"msg_id\":";
+  s += msgId;
+  s += ",\"action\":0,\"app_identifier\":\"";
+  g2JsonAppendEscaped(s, appId);
+  s += "\",\"title\":\"";
+  g2JsonAppendEscaped(s, title);
+  s += "\",\"subtitle\":\"";
+  g2JsonAppendEscaped(s, subtitle);
+  s += "\",\"message\":\"";
+  g2JsonAppendEscaped(s, body);
+  s += "\",\"time_s\":";
+  s += (uint32_t)epoch;
+  s += ",\"date\":\"";
+  s += dateBuf;
+  s += "\",\"display_name\":\"";
+  g2JsonAppendEscaped(s, displayName);
+  s += "\"}}";
+  return s;
+}
+
+// Worker-side orchestrator: the blocking 4-frame EFS send. Fire-and-forget
+// (the reference does not wait for acks). MUST run on the lens-applier worker.
+static bool g2SendNativeNotification(const char* appId, const char* displayName,
+                                     const char* title, const char* subtitle,
+                                     const char* body) {
+  // Send to the RIGHT temple (the async-event owner; the left is silent).
+  // Fall back to left only if right is down (best effort).
+  G2Temple& arm = gR.connected ? gR : gL;
+  if (!arm.connected || !arm.writeChar || !arm.writeMutex) {
+    DEBUG_G2F("[G2] native-notify: no connected arm");
+    return false;
+  }
+
+  static uint32_t sMsgId = 0;
+  const uint32_t msgId = ++sMsgId;
+
+  const time_t epoch = Clock::epochSeconds();
+  String json = g2BuildNotifyJson(msgId, appId, displayName, title, subtitle, body, epoch);
+  const uint8_t* jbytes = (const uint8_t*)json.c_str();
+  const size_t   jlen   = json.length();
+  const uint32_t crc    = r1Crc32(jbytes, jlen);
+
+  // ---- Frame 1: START (77 bytes) ----
+  uint8_t start[77];
+  size_t p = 0;
+  start[p++] = 0x00;                                  // sub-cmd SEND_START
+  start[p++] = 0x01; start[p++] = 0; start[p++] = 0; start[p++] = 0;  // fileType=1 (ANDROID_MSG_JSON_NOTIFICATION) u32LE
+  start[p++] = (uint8_t)(jlen);                       // dataLength u32LE
+  start[p++] = (uint8_t)(jlen >> 8);
+  start[p++] = (uint8_t)(jlen >> 16);
+  start[p++] = (uint8_t)(jlen >> 24);
+  start[p++] = (uint8_t)(crc);                        // fileDataCrc32 u32LE
+  start[p++] = (uint8_t)(crc >> 8);
+  start[p++] = (uint8_t)(crc >> 16);
+  start[p++] = (uint8_t)(crc >> 24);
+  memset(start + p, 0, 64);                           // 64-byte zero-padded path
+  memcpy(start + p, kEfsNotifyPath, sizeof(kEfsNotifyPath) - 1);
+  p += 64;
+  // p == 77
+
+  bool ok = true;
+  ok &= sendPbFragmented(arm, allocSeq(), G2_SID_FILE_CMD, G2_EFS_FLAG, start, sizeof(start));
+  vTaskDelay(pdMS_TO_TICKS(20));
+  const uint8_t dataAnnounce = 0x01;
+  ok &= sendPbFragmented(arm, allocSeq(), G2_SID_FILE_CMD, G2_EFS_FLAG, &dataAnnounce, 1);
+  vTaskDelay(pdMS_TO_TICKS(20));
+  ok &= sendPbFragmented(arm, allocSeq(), G2_SID_FILE_RAW, G2_EFS_FLAG, jbytes, jlen);
+  vTaskDelay(pdMS_TO_TICKS(20));
+  const uint8_t resultCheck = 0x02;
+  ok &= sendPbFragmented(arm, allocSeq(), G2_SID_FILE_CMD, G2_EFS_FLAG, &resultCheck, 1);
+
+  DEBUG_G2F("[G2] native-notify sent (arm=%c msgId=%u jlen=%u crc=%08x ok=%d)",
+            arm.side, (unsigned)msgId, (unsigned)jlen, (unsigned)crc, (int)ok);
+  return ok;
+}
+
 static void pageSwapWorkerLoop(void* /*arg*/) {
   for (;;) {
     LensUiJob* job = nullptr;
@@ -8724,6 +10714,19 @@ static void pageSwapWorkerLoop(void* /*arg*/) {
         break;
       }
 
+      case LensJobKind::NativeNotif: {
+        // Firmware-native EFS notification card. Runs the blocking 4-frame
+        // send off the BLE notify task. NOT gen-guarded — an OS-style
+        // notification is not tied to the interactive menu page.
+        NativeNotifSpec* spec = job->payload.nativeNotif;
+        if (spec) {
+          g2SendNativeNotification(spec->app, spec->displayName, spec->title,
+                                   spec->subtitle, spec->body);
+        }
+        delete spec;
+        break;
+      }
+
       // Step 6+ will populate this.
       case LensJobKind::Toast:
         DEBUG_G2F("[lens.applier] kind=%d not implemented — dropping job",
@@ -8751,10 +10754,10 @@ static void pageSwapInit() {
   // Measured HWM ~6.2 KB with glasses connected → ~7.8 KB headroom. This is
   // the ONLY xTaskCreate on the page-swap path now — all
   // navigation re-uses this worker via the queue.
-  BaseType_t rc = xTaskCreate(pageSwapWorkerLoop, "g2_page_swap_w",
+  BaseType_t rc = xTaskCreatePinnedToCore(pageSwapWorkerLoop, "g2_page_swap_w",
                               /*stack bytes*/ 3584, nullptr,
                               /*prio*/  tskIDLE_PRIORITY + 2,
-                              &gPageSwapTaskH);
+                              &gPageSwapTaskH, APP_CORE);
   if (rc != pdPASS) {
     DEBUG_G2F("[G2] page-swap: worker xTaskCreate FAILED (rc=%d)", (int)rc);
     vQueueDelete(gPageSwapQueue);
@@ -8944,10 +10947,10 @@ static void tapDispatcherWorkerLoop(void* /*arg*/) {
   // Now that all those paths are migrated to cmd_exec_task, observed
   // peak usage is ~11.5 KB. 6400 words = 25 KB leaves ~13 KB headroom
   // and reclaims 55 KB of DRAM.
-  BaseType_t rc = xTaskCreate(tapDispatcherWorkerLoop, "g2_tap_disp",
+  BaseType_t rc = xTaskCreatePinnedToCore(tapDispatcherWorkerLoop, "g2_tap_disp",
                               /*stack bytes*/ 6400, nullptr,
                               /*prio*/  tskIDLE_PRIORITY + 2,
-                              &gTapTaskHandle);
+                              &gTapTaskHandle, APP_CORE);
   if (rc != pdPASS) {
     DEBUG_G2F("[G2] tap-dispatch: worker xTaskCreate FAILED (rc=%d)", (int)rc);
     vQueueDelete(gTapQueue);
@@ -9129,13 +11132,13 @@ bool g2ShowTextPage(const char* content, const G2ContainerGeom& geom,
   return true;
 }
 
-// Shared paged-text render for G2TextPager (see G2_Page_Common.h). Composes the
+// Shared paged-text render for TextPager (see G2_Page_Common.h). Composes the
 // header line ("title [n/m] hint"), an optional separator, and the current page
 // slice into caller-owned `pageBuf`, then hands it to g2ShowTextPage. Keeping
 // this beside g2ShowTextPage lets the three consumers (Files, Settings JSON,
 // ESPNow chat) share one render body while owning only their tiny chrome +
 // exit/nav trampolines.
-bool g2TextPagerRender(G2TextPager& p, char* pageBuf, size_t cap,
+bool g2TextPagerRender(TextPager& p, char* pageBuf, size_t cap,
                        const G2TextPageChrome& chrome,
                        const G2ContainerGeom& geom,
                        void (*exitFn)(), G2TapFn navFn) {
@@ -9479,7 +11482,7 @@ bool g2ShowMixedListText(const char* const* items, size_t itemCount,
 // G2_ASSERT_NOT_NOTIFY_TASK guard catches a misuse from the BLE notify
 // task.
 const char* g2ProbeRebuildTextChild() {
-  static char result[96];
+  EXT_RAM_BSS_ATTR static char result[96];
   result[0] = '\0';
 
   G2Temple* arm = nullptr;
@@ -9878,8 +11881,8 @@ bool g2StartLiveListPage(G2LivePageBuildFn buildFn, uint32_t intervalMs,
   // 4 KB stack is enough — the worker uses heap-allocated buffers for
   // the row storage and text buffer, so the stack only carries the
   // worker's local frames + sendRebuildListAndWait's small pb buffer.
-  if (xTaskCreate(livePageWorker, "g2_live_page", 4096, nullptr,
-                  /*prio*/ 5, nullptr) != pdPASS) {
+  if (xTaskCreatePinnedToCore(livePageWorker, "g2_live_page", 4096, nullptr,
+                  /*prio*/ 5, nullptr, APP_CORE) != pdPASS) {
     DEBUG_G2F("[G2] live-page: xTaskCreate failed");
     gLivePageActive = false;
     gLivePageBuildFn = nullptr;
@@ -10093,7 +12096,7 @@ static constexpr G2ContainerGeom kStatusMeterGeom = { 318, 224, 250,  56 };
 // below (which does CREATE and resets the cache).
 static char gStatusLastBattStr[64]   = {0};
 static EXT_RAM_BSS_ATTR char gStatusLastBodyStr[2048];
-static char gStatusLastMeterStr[128] = {0};
+EXT_RAM_BSS_ATTR static char gStatusLastMeterStr[128];
 static char gStatusLastR1Str[32]     = {0};
 static char gStatusLastEspStr[32]    = {0};
 
@@ -10187,8 +12190,9 @@ static bool renderStatusCompound() {
   // Tap routing: the list child is named CONTAINER_NAME ("app") with
   // eventCapture=1, so a tap on its single row emits ListEvent CLICK
   // container='app' idx=0 — caught by the existing dispatcher
-  // (handleHijackMenuTap) which, for a TEXT_VIEW page with idx=0,
-  // routes back to MAIN. No new tap-handling code needed.
+  // (handleHijackMenuTap), which routes it to kStatusPage's handleTap
+  // (g2StatusHandleTap) since Status owns G2_HIJACK_PAGE_STATUS. That
+  // returns to the System launcher (the "<- System" back row below).
   //
   // Per-child REBUILD asymmetry experiment: we only REBUILD the 3
   // text children on subsequent ticks (see REBUILD branch below). The
@@ -10199,7 +12203,7 @@ static bool renderStatusCompound() {
   // disappear after the first tick and we'll need to either rebuild
   // the list every tick too or fall back to a different layout.
   if (!g2LensGetState().containerReady) {
-    static const char* kBackItems[] = { "<- Main Menu" };
+    static const char* kBackItems[] = { "<- System" };
     G2TextChildSpec textChildren[kStatusTextChildCount];
     const size_t nTextChildren = buildStatusTextChildren(
         textChildren, bodyBuf, battStr, r1Str, espStr, meterStr);
@@ -10274,7 +12278,7 @@ static bool renderStatusCompound() {
     return true;
   }
 
-  static const char* kBackItems[] = { "<- Main Menu" };
+  static const char* kBackItems[] = { "<- System" };
   // Same child set the CREATE shipped — the multi-child REBUILD semantic is
   // "render exactly this set" (unmentioned siblings blank), so both paths MUST
   // use the identical builder or the ESP row would blank/reappear per tick.
@@ -10563,8 +12567,8 @@ bool g2StartLiveTextPage(G2LivePageBuildFn buildFn, uint32_t intervalMs,
   // 4 KB stack — same as livePageWorker. Heap-allocated text buffer
   // keeps the on-stack pressure to local frames + g2ShowText's pb
   // builder (also heap-backed via ps_alloc).
-  if (xTaskCreate(liveTextWorker, "g2_live_text", 4096, nullptr,
-                  /*prio*/ 5, nullptr) != pdPASS) {
+  if (xTaskCreatePinnedToCore(liveTextWorker, "g2_live_text", 4096, nullptr,
+                  /*prio*/ 5, nullptr, APP_CORE) != pdPASS) {
     DEBUG_G2F("[G2] live-text: xTaskCreate failed");
     gLiveTextActive   = false;
     gLiveTextBuildFn  = nullptr;
@@ -10980,9 +12984,6 @@ static const char* cmd_g2connect(const String& argsInput) {
   CommandArgs ca(argsInput);
   String arg = ca.arg(0);
   arg.toLowerCase();
-  G2Eye eye = G2_EYE_AUTO;
-  if (arg == "left")       eye = G2_EYE_LEFT;
-  else if (arg == "right") eye = G2_EYE_RIGHT;
 
   // Pair-intent stamp from the CALLING task's identity. `openg2` from a
   // logged-in CLI session IS the natural pairing gesture — the user is
@@ -10995,6 +12996,21 @@ static const char* cmd_g2connect(const String& argsInput) {
   // Stamping eagerly means even if the actual BLE connect fails, we've
   // captured intent. Idempotent: helper no-ops if already owned.
   bleStampPairedByIfBlank(BLE_PEER_G2_GLASSES);
+
+  // `openg2 saved` — boot/glasses "Reconnect G2" path: connect by persisted
+  // peer MACs (no name scan). Same as g2ConnectSaved() used at boot.
+  if (arg == "saved" || arg == "mac") {
+    if (!g2ConnectSaved()) {
+      return gConnectTaskActive
+             ? "G2: connect already in progress — wait or use closeg2"
+             : "Error: G2: saved-MAC connect failed (no MACs / worker busy)";
+    }
+    return "G2: saved-MAC connect started in background — use g2status to watch";
+  }
+
+  G2Eye eye = G2_EYE_AUTO;
+  if (arg == "left")       eye = G2_EYE_LEFT;
+  else if (arg == "right") eye = G2_EYE_RIGHT;
 
   if (!g2Connect(eye)) {
     return gConnectTaskActive
@@ -11112,7 +13128,7 @@ static volatile bool gG2LiveLoopKeepAlive = false;
 // the slower path (avoids missing RebuildResp on some navigations).
 static const char* cmd_g2listrebuild(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  static char out[120];
+  EXT_RAM_BSS_ATTR static char out[120];
   CommandArgs ca(argsInput);
   String v = ca.arg(0); v.toLowerCase();
   if (v == "on" || v == "1" || v == "true") {
@@ -11135,7 +13151,7 @@ static const char* cmd_g2listrebuild(const String& argsInput) {
 
 static const char* cmd_g2liverate(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  static char out[80];
+  EXT_RAM_BSS_ATTR static char out[80];
   CommandArgs ca(argsInput);
   String v = ca.arg(0);
   if (v.length() == 0) {
@@ -11161,7 +13177,7 @@ static const char* cmd_g2liverate(const String& argsInput) {
 // idle timeout; user double-tap still wins over keep-alive.
 static const char* cmd_g2liveloop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  static char out[120];
+  EXT_RAM_BSS_ATTR static char out[120];
   CommandArgs ca(argsInput);
   String sub = ca.arg(0); sub.toLowerCase();
   String val = ca.arg(1); val.toLowerCase();
@@ -11422,7 +13438,7 @@ static const char* cmd_g2protostats(const String& argsInput) {
     BROADCAST_PRINTF(" ");
     BROADCAST_PRINTF("Use 'g2protostats verbose' for the full sid + cmd reference.");
   }
-  static char ret[80];
+  EXT_RAM_BSS_ATTR static char ret[80];
   snprintf(ret, sizeof(ret),
            "G2 protostats: %u sid%s tracked",
            (unsigned)n, n == 1 ? "" : "s");
@@ -11457,7 +13473,7 @@ static size_t parseHexBytes(const char* s, uint8_t* out, size_t outCap) {
 
 static const char* cmd_g2probe(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  static char ret[160];
+  EXT_RAM_BSS_ATTR static char ret[160];
   CommandArgs ca(argsInput);
   if (ca.count() < 2) {
     return "Error: invalid arguments — Usage: g2probe <sid_hex> <cmd_dec> [body_hex]\n"
@@ -11530,7 +13546,7 @@ static const char* cmd_g2probe(const String& argsInput) {
 // resulting envelope length so the user can confirm the wire shape.
 static const char* cmd_g2devcfg(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  static char ret[200];
+  EXT_RAM_BSS_ATTR static char ret[200];
   CommandArgs ca(argsInput);
   if (ca.count() < 1) {
     return "Error: invalid arguments — Usage: g2devcfg <heartbeat|auth|role|time|ring> [args]\n"
@@ -11609,6 +13625,40 @@ static const char* cmd_g2devcfg(const String& argsInput) {
   return ret;
 }
 
+// EXPERIMENT (docs/G2_NATIVE_NOTIFICATION_PLAN.md §12): prime the native
+// notification subsystem on sid 0x04 before an EFS notification push. Sends
+// NotificationControl{notifEnable=1, autoDispEnable=1} then
+// NotificationWhitelistCtrl{whitelistDisable=1} (turn OFF per-app filtering so
+// any app renders). Hypothesis: on a device never configured by the official
+// Even app the whitelist is empty+enforced, filtering every card before EFS is
+// even parsed — matching our zero-RX/no-START_ERR symptom. Watch for an RX on
+// sid=0x04 (a NOTIFICATION_COMM_RSP ack there, where 0xC4/0xC5 was silent, would
+// confirm the gate). Then run `g2nativenotify <title>|<body>`.
+static const char* cmd_g2notifenable(const String& /*argsInput*/) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  EXT_RAM_BSS_ATTR static char ret[160];
+  if (!isG2Connected()) return "Error: G2: not connected";
+  G2Temple* arm = (gR.connected && !gR.pluginDead) ? &gR : nullptr;
+  if (!arm) return "Error: G2 notifenable: right arm not connected";
+
+  uint8_t env[64];
+  size_t n = g2BuildNotifCtrlEnable(allocSeq(), G2_MAGIC_NOTIF_CTRL,
+                                    env, sizeof(env));
+  if (n == 0 || !sendEnvelope(*arm, env, n))
+    return "Error: G2 notifenable: enable (NOTIF_CTRL) send failed";
+  vTaskDelay(pdMS_TO_TICKS(60));
+
+  n = g2BuildNotifWhitelistDisable(allocSeq(), G2_MAGIC_NOTIF_WHITELIST,
+                                   env, sizeof(env));
+  if (n == 0 || !sendEnvelope(*arm, env, n))
+    return "Error: G2 notifenable: whitelist-disable send failed";
+
+  snprintf(ret, sizeof(ret),
+           "G2 notifenable: sid=0x04 NOTIF_CTRL(enable)+WHITELIST_CTRL(disable) sent to right — "
+           "watch for sid=0x04 RX, then run g2nativenotify");
+  return ret;
+}
+
 // Image-streaming wire-path probe. Builds an EvenCore Cmd=3
 // (UPDATE_IMAGE_RAW_DATA) body carrying `<size>` bytes of test pattern
 // and ships it via the multi-fragment sender. We do NOT issue a
@@ -11628,7 +13678,7 @@ static const char* cmd_g2devcfg(const String& argsInput) {
 // that won't be optimised away by any zero-padding reassembly trick.
 static const char* cmd_g2imgprobe(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  static char ret[200];
+  EXT_RAM_BSS_ATTR static char ret[200];
   CommandArgs ca(argsInput);
 
   size_t sizeBytes = 1024;
@@ -11716,7 +13766,7 @@ static G2Temple* pickMicArm(const char* tag, bool preferLeft) {
 
 static const char* cmd_g2micon(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  static char ret[200];
+  EXT_RAM_BSS_ATTR static char ret[200];
   CommandArgs ca(argsInput);
   String armArg = ca.count() > 0 ? ca.arg(0) : String("");
   char first = armArg.length() > 0 ? armArg.charAt(0) : '\0';
@@ -11740,7 +13790,7 @@ static const char* cmd_g2micon(const String& argsInput) {
 
 static const char* cmd_g2micoff(const String& /*argsInput*/) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  static char ret[160];
+  EXT_RAM_BSS_ATTR static char ret[160];
   G2Temple* arm = pickMicArm("g2micoff", true);
   if (!arm) return "Error: G2 mic: no reachable temple";
   uint8_t buf[64];
@@ -11784,7 +13834,7 @@ static const char* cmd_g2micreset(const String& /*argsInput*/) {
 
 static const char* cmd_g2micverbose(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  static char ret[80];
+  EXT_RAM_BSS_ATTR static char ret[80];
   CommandArgs ca(argsInput);
   if (ca.count() > 0) {
     String v = ca.arg(0);
@@ -11816,7 +13866,7 @@ static const char* cmd_g2micverbose(const String& argsInput) {
 // 2.2.0.24 emits zero frames on RIGHT's 6402 (verified empirically).
 static const char* cmd_g2micrec(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  static char ret[240];
+  EXT_RAM_BSS_ATTR static char ret[240];
   CommandArgs ca(argsInput);
   String sub = ca.count() > 0 ? ca.arg(0) : String("");
   sub.toLowerCase();
@@ -12066,7 +14116,7 @@ static const char* cmd_g2micwav(const String& argsInput) {
 // guessed a field number wrong.
 static const char* cmd_g2aiconfig(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  static char ret[160];
+  EXT_RAM_BSS_ATTR static char ret[160];
   CommandArgs ca(argsInput);
 
   uint64_t voiceSwitch = UINT64_MAX;  // sentinel = omit
@@ -12134,7 +14184,7 @@ static const char* cmd_g2aih(const String& argsInput) {
 // Used by all the per-page CLI commands below. New pages get a one-line
 // command shim; the common logic stays here.
 static const char* cmd_g2page_run(const char* pageName) {
-  static char buf[80];
+  EXT_RAM_BSS_ATTR static char buf[80];
   const G2PageModule* p = g2FindPageByName(pageName);
   if (!p) {
     snprintf(buf, sizeof(buf), "[G2] Page '%s' not registered", pageName);
@@ -12169,6 +14219,96 @@ G2_PAGE_CMD(files,        "files")
 // NB: `g2settings` is taken by the protocol-debug verbose toggle. Use
 // `g2settingspage` for the on-glasses settings inspector.
 G2_PAGE_CMD(settingspage, "settingspage")
+
+// Public enqueue wrapper — callable from any context (CLI, web, event system).
+// Copies the fields into a heap NativeNotifSpec + LensUiJob and hands them to
+// the lens applier; the blocking EFS send runs on the worker, never inline.
+// Frees both on enqueue failure per the g2EnqueueLensJob ownership contract.
+bool g2SendNativeNotificationAsync(const char* appId, const char* displayName,
+                                   const char* title, const char* subtitle,
+                                   const char* body) {
+  if (!isG2Connected()) return false;
+
+  NativeNotifSpec* spec = new (std::nothrow) NativeNotifSpec();
+  if (!spec) return false;
+  snprintf(spec->app,         sizeof(spec->app),         "%s", appId       ? appId       : "");
+  snprintf(spec->displayName, sizeof(spec->displayName), "%s", displayName ? displayName : "");
+  snprintf(spec->title,       sizeof(spec->title),       "%s", title       ? title       : "");
+  snprintf(spec->subtitle,    sizeof(spec->subtitle),    "%s", subtitle    ? subtitle    : "");
+  snprintf(spec->body,        sizeof(spec->body),        "%s", body        ? body        : "");
+
+  LensUiJob* job = new (std::nothrow) LensUiJob();
+  if (!job) { delete spec; return false; }
+  job->kind          = LensJobKind::NativeNotif;
+  job->submitMenuGen = g2CurrentMenuGen();
+  job->cmdSeq        = 0;
+  job->targetPage    = g2GetHijackPage();
+  job->targetNetSub  = 0;
+  job->payload.nativeNotif = spec;
+
+  if (!g2EnqueueLensJob(job)) {
+    delete spec;
+    delete job;
+    return false;
+  }
+  return true;
+}
+
+// CLI: push a native EFS notification card (admin-only). Distinct from the
+// full-screen g2notify placeholder — the firmware renders its own card and
+// auto-wakes. See docs/G2_NATIVE_NOTIFICATION_PLAN.md.
+//   g2nativenotify selftest              → validate the CRC-32C golden vector
+//   g2nativenotify <title>|<body>        → send (default app identity)
+//   g2nativenotify <name>|<title>|<body> → send with an explicit display name
+static const char* cmd_g2nativenotify(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String args = argsInput;
+  args.trim();
+  if (args.length() == 0)
+    return "Error: Usage: g2nativenotify selftest | <title>|<body> | <name>|<title>|<body>";
+
+  if (args.equalsIgnoreCase("selftest")) {
+    // Golden vector from docs/FlutterApp-main/test/core/crc_test.dart — proves
+    // r1Crc32 is the exact EFS fileDataCrc32 before we trust it on the wire.
+    static const char kGolden[] =
+      "{\"android_notification\":{\"msg_id\":1,\"action\":0,\"app_identifier\":"
+      "\"com.google.android.apps.dynamite\",\"title\":\"Kimberly Cummins\","
+      "\"subtitle\":\"\",\"message\":\"Bubeeee\",\"time_s\":1773627504,"
+      "\"date\":\"20260315T221824\",\"display_name\":\"Chat\"}}";
+    uint32_t got = r1Crc32((const uint8_t*)kGolden, sizeof(kGolden) - 1);
+    return (got == 1910672472UL)
+      ? "G2 native-notify selftest: CRC OK (1910672472)"
+      : "Error: G2 native-notify selftest: CRC MISMATCH — do not trust the send path";
+  }
+
+  if (!isG2Connected()) return "Error: G2: not connected";
+
+  int p1 = args.indexOf('|');
+  if (p1 < 0)
+    return "Error: fields are pipe-delimited — g2nativenotify <title>|<body>";
+  String f1 = args.substring(0, p1); f1.trim();
+  String rest = args.substring(p1 + 1);
+  int p2 = rest.indexOf('|');
+
+  String displayName = "HardwareOne";
+  String title, body;
+  if (p2 < 0) {
+    title = f1;
+    body  = rest; body.trim();
+  } else {
+    displayName = f1;
+    title = rest.substring(0, p2); title.trim();
+    body  = rest.substring(p2 + 1); body.trim();
+  }
+  if (title.length() == 0 || body.length() == 0)
+    return "Error: both title and body are required";
+
+  // Single app_identifier for now (Phase 1 test); per-family packages come later.
+  bool ok = g2SendNativeNotificationAsync("one.hardware", displayName.c_str(),
+                                          title.c_str(), "", body.c_str());
+  return ok ? "G2 native-notify: queued (native card)"
+            : "Error: G2 native-notify: enqueue failed";
+}
 
 // Placeholder notification: shows text for a fixed duration then clears.
 // Format: `g2notify [<seconds>] <text>`
@@ -12247,32 +14387,18 @@ static const char* cmd_g2battery(const String& /*argsInput*/) {
                                           buf, sizeof(buf));
     if (n) sendEnvelope(gR, buf, n);
   }
-  static char out[64];
+  EXT_RAM_BSS_ATTR static char out[64];
   snprintf(out, sizeof(out), "G2 battery: L=%s R=%s (refresh in progress)",
            gBatteryL < 0 ? "?" : String(gBatteryL).c_str(),
            gBatteryR < 0 ? "?" : String(gBatteryR).c_str());
   return out;
 }
 
-static const char* cmd_g2mic(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!isG2Connected()) return "Error: G2: not connected";
-  CommandArgs ca(argsInput);
-  String a = ca.arg(0); a.toLowerCase();
-  bool enable = (a == "on" || a == "start" || a == "1");
-  uint8_t buf[64];
-  uint8_t seq = allocSeq();
-  size_t n = g2BuildAudioCtrl(seq, G2_MAGIC_AUDIO_CTRL, enable,
-                              buf, sizeof(buf));
-  if (n == 0 || !sendToBoth(buf, n)) return "Error: G2 mic: send failed";
-  // NOTE: audio frames are delivered on the left temple's render-notify
-  // (…e6402), not on the command-notify (…e5402) we currently subscribe
-  // to. Enabling the mic here is harmless but no audio will arrive until
-  // a future phase subscribes to the render-notify characteristic and
-  // ports an LC3 decoder.
-  return enable ? "G2 mic: requested ON (LC3 decode not yet wired)"
-                : "G2 mic: requested OFF";
-}
+// (cmd_g2mic retired — its "LC3 decode not yet wired" text was stale and it
+// sprayed AudioCtrCmd to BOTH temples. The mic is now a first-class source via
+// the Sensors mic page / `micsource`; the LEFT-only stream toggle lives in
+// g2MicStreamEnable(), driven by HAL_Audio capture start/stop. Low-level probing
+// stays available via g2micon/g2micoff/g2micstats.)
 
 // Stream dims live in gSettings.g2StreamWidth/Height (persisted across
 // reboots, set via this CLI command or via the Camera Settings lens page).
@@ -12281,7 +14407,7 @@ static const char* cmd_g2mic(const String& argsInput) {
 
 static const char* cmd_g2streamres(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  static char ret[160];
+  EXT_RAM_BSS_ATTR static char ret[160];
   String s = argsInput; s.trim();
   if (s.length() == 0) {
     snprintf(ret, sizeof(ret),
@@ -12320,7 +14446,7 @@ static const char* cmd_g2streamres(const String& argsInput) {
 // time dominates and the cap is effectively ignored.
 static const char* cmd_g2packrate(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  static char ret[160];
+  EXT_RAM_BSS_ATTR static char ret[160];
   String s = argsInput; s.trim();
   if (s.length() == 0) {
     snprintf(ret, sizeof(ret),
@@ -12348,7 +14474,7 @@ static const char* cmd_g2packrate(const String& argsInput) {
 // no stream restart needed.
 static const char* cmd_g2streamtonemap(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  static char ret[140];
+  EXT_RAM_BSS_ATTR static char ret[140];
   String s = argsInput; s.trim();
   if (s.length() == 0) {
     snprintf(ret, sizeof(ret),
@@ -12457,6 +14583,7 @@ static const char* cmd_g2dumpframes(const String& /*argsInput*/) {
 }
 
 static const char* cmd_g2bmp(const String& argsInput);
+static const char* cmd_g2pet(const String& argsInput);
 #if ENABLE_MAPS
 static const char* cmd_g2map(const String& argsInput);
 #endif
@@ -12465,8 +14592,8 @@ static const char* cmd_g2map(const String& argsInput);
 // refers to them as `extern const ...` — without it, C++ gives file-scope
 // const objects internal linkage and the link fails.
 extern const CommandEntry g2Commands[] = {
-  { "openg2",       "Connect to G2 glasses: openg2 [left|right|auto]", false, cmd_g2connect, "Usage: openg2 [left|right|auto]  (default auto)" },
-  { "closeg2",      "Disconnect G2 glasses [full=also free ~30KB GATT cache].", false, cmd_g2disconnect, "Usage: closeg2 [full]" },
+  { "openg2",       "Connect to G2 glasses: openg2 [left|right|auto|saved]", true, cmd_g2connect, "Usage: openg2 [left|right|auto|saved]  (default auto; saved = peer MACs)" },
+  { "closeg2",      "Disconnect G2 glasses [full=also free ~30KB GATT cache].", true, cmd_g2disconnect, "Usage: closeg2 [full]" },
   { "g2status",     "Show G2 connection status",                       false, cmd_g2status },
   { "g2info",       "Dump device info (firmware, MAC, battery, etc.)",  false, cmd_g2info },
   { "g2settings",   "Settings debug: g2settings verbose [on|off]",     false, cmd_g2settings, "Usage: g2settings verbose [<on|off>]  (bare verbose = toggle)" },
@@ -12490,11 +14617,14 @@ extern const CommandEntry g2Commands[] = {
   { "g2protostats", "Show G2 protocol stats per sid: g2protostats [verbose]",      false, cmd_g2protostats, "Usage: g2protostats [verbose]" },
   { "g2probe",      "Fire arbitrary pb cmd: g2probe <sid_hex> <cmd_dec> [body_hex]", false, cmd_g2probe, "Usage: g2probe <sid_hex> <cmd_dec> [body_hex]  (sid=0x80 blocked)" },
   { "g2devcfg",     "Typed sid=0x80 sender: g2devcfg <heartbeat|auth|role|time|ring> [args]", false, cmd_g2devcfg, "Usage: g2devcfg <heartbeat|auth|role <both|right|left>|time [tzQuarterHours]|ring <mac> <name>>" },
+  { "g2notifenable","Prime native notifications on sid 0x04 (enable + whitelist-disable) before g2nativenotify", true, cmd_g2notifenable, "Usage: g2notifenable  (sends NOTIF_CTRL enable + WHITELIST_CTRL disable to the right arm)" },
   { "g2notify",     "Transient text (placeholder): g2notify [secs] <text>", false, cmd_g2notify, "Usage: g2notify [<seconds>] <text>  (seconds 1..599, default 5)" },
+  { "g2nativenotify","Native EFS notification card (real overlay, admin): g2nativenotify selftest | <title>|<body>", true, cmd_g2nativenotify, "Usage: g2nativenotify selftest | <title>|<body> | <name>|<title>|<body>" },
   { "g2bmp",        "Display BMP: g2bmp </path.bmp> [brightness -100..100] [contrast -100..100] [holdSeconds 0..120]", false, cmd_g2bmp, "Usage: g2bmp </path/to/file.bmp> [brightness -100..100] [contrast -100..100] [holdSeconds 0..120]" },
 #if ENABLE_MAPS
   { "g2map",        "Render the offline map on the G2 lens (288x144)",  false, cmd_g2map, "Usage: g2map   (renders the current map view; double-tap the lens to dismiss)" },
 #endif
+  { "g2pet",        "Open the Pet (virtual creature) app on the G2 lens", false, cmd_g2pet, "Usage: g2pet   (Feed/Play/Clean/Sleep on the lens; Back to exit)" },
   { "g2sensors",    "Show device's sensor list on the G2 lens",        false, cmd_g2sensors },
   { "g2network",    "Show Network info page on the G2 lens",           false, cmd_g2network },
   { "g2settingspage","Show Settings inspector page on the G2 lens",    false, cmd_g2settingspage },
@@ -12508,7 +14638,6 @@ extern const CommandEntry g2Commands[] = {
   { "g2streamtonemap", "Lens stream auto-levels: g2streamtonemap [on|off] (bare = report state)", false, cmd_g2streamtonemap, "Usage: g2streamtonemap [<on|off>]  (bare = report state)" },
   { "g2packrate",   "SD-pack animation cadence: g2packrate [<ms>] (range 20..2000, default 80)", false, cmd_g2packrate, "Usage: g2packrate [<ms>]  (20..2000; bare = report)" },
   { "g2battery",    "Query G2 battery % on connected temples",         false, cmd_g2battery },
-  { "g2mic",        "Enable/disable G2 mic capture: g2mic <on|off>",   false, cmd_g2mic, "Usage: g2mic <on|off>" },
   { "g2verbose",    "Scan-verbose logging: g2verbose [on|off|toggle] (bare = report state)", false, cmd_g2verbose, "Usage: g2verbose [on|off|toggle]  (bare = report state)" },
   { "g2hijacktest", "Simulate a Blocks tap (status-page hijack)",      false, cmd_g2hijacktest },
   { "g2reopen",     "Re-open the hijacked Blocks app after an abnormal exit", false, cmd_g2reopen },
@@ -13062,7 +15191,7 @@ static void probeFooter(const char* probe, unsigned okCount, unsigned total) {
 // we need a different reverse-engineering angle (HCI snoop the phone
 // app's image push to see what widgetId/Cmd=17 sequence it uses).
 const char* g2ProbeImageQ4Lifecycle() {
-  static char ret[200];
+  EXT_RAM_BSS_ATTR static char ret[200];
 
   G2Temple* arm = pickEvenAIArm("imgQ4");
   if (!arm) return "Img Q4: no reachable temple";
@@ -13424,7 +15553,7 @@ static bool sendImageBmpMultiFragment(G2Temple& arm,
 // Each Cmd=3 has ~50 B of pb overhead on top of MapRawData; G2_IMG_MAPRAW_CHUNK_BYTES
 // keeps the full Cmd=3 pb body under the ~4 KB firmware reassembly cap.
 const char* g2ProbeImageQ6BmpMultiFragment() {
-  static char ret[220];
+  EXT_RAM_BSS_ATTR static char ret[220];
 
   G2Temple* arm = pickEvenAIArm("imgQ6");
   if (!arm) return "Img Q6: no reachable temple";
@@ -13496,7 +15625,7 @@ const char* g2ProbeImageQ6BmpMultiFragment() {
 // 2.2.0.24: hold ends on SysEvent DOUBLE_CLICK(3) (single CLICK does
 // not fire while a pure image is on-lens) or 60 s safety cap.
 const char* g2ProbeImageQ6bBmpTapDismiss() {
-  static char ret[220];
+  EXT_RAM_BSS_ATTR static char ret[220];
 
   G2Temple* arm = pickEvenAIArm("imgQ6b");
   if (!arm) return "Img Q6b: no reachable temple";
@@ -13600,7 +15729,7 @@ static void bmpDrawRect4bpp(uint8_t* pixelRows, int32_t imgW, int32_t imgH,
 }
 
 const char* g2ProbeImageQ9FrameBuilder() {
-  static char ret[220];
+  EXT_RAM_BSS_ATTR static char ret[220];
 
   G2Temple* arm = pickEvenAIArm("imgQ9");
   if (!arm) return "Img Q9: no reachable temple";
@@ -13801,7 +15930,7 @@ static bool sendImageBmpFragmentsNoCreate(G2Temple& arm,
 // ~3 s (with re-CREATE) to ~2.5 s (push-only).
 // ─────────────────────────────────────────────────────────────────────
 const char* g2ProbeImageQ11SimpleSwap() {
-  static char ret[240];
+  EXT_RAM_BSS_ATTR static char ret[240];
 
   G2Temple* arm = pickEvenAIArm("imgQ11");
   if (!arm) return "Img Q11: no reachable temple";
@@ -14024,7 +16153,7 @@ static bool readBmpFromVfs(const String& rawPath,
 }
 
 // Q25: directory path for frame_XX.bmp sequence (set before worker spawn).
-static char s_q25PackDir[128];
+EXT_RAM_BSS_ATTR static char s_q25PackDir[128];
 
 bool g2ReadBmp4bppFromVfs(const char* vfsPath, uint8_t** outData, size_t* outLen,
                           int32_t* outW, int32_t* outH, const char** outErr) {
@@ -14217,7 +16346,7 @@ static const char* cmd_g2bmp(const String& argsInput) {
   int32_t bmpW = 0;
   int32_t bmpH = 0;
   if (!readBmpFromVfs(path, &bmp, &bmpLen, &bmpW, &bmpH, &loadErr)) {
-    static char err[160];
+    EXT_RAM_BSS_ATTR static char err[160];
     snprintf(err, sizeof(err), "G2 BMP: %s", loadErr ? loadErr : "failed to load BMP");
     return err;
   }
@@ -14249,7 +16378,7 @@ static const char* cmd_g2bmp(const String& argsInput) {
   vTaskDelay(pdMS_TO_TICKS((uint32_t)holdSeconds * 1000U));
   probePostProbeShutdown(*arm);
 
-  static char out[220];
+  EXT_RAM_BSS_ATTR static char out[220];
   if (!ok) {
     snprintf(out, sizeof(out),
              "G2 BMP: push incomplete (%u/%u fragments, bright=%d contrast=%d hold=%ds)",
@@ -14363,8 +16492,8 @@ bool g2ShowBmpFile(const char* path, void (*onDone)()) {
   }
   // 6 KB stack — readBmpFromVfs heap-allocates the BMP, so the worker
   // mainly carries small probe-state buffers on the stack.
-  if (xTaskCreate(g2BmpViewerWorker, "g2_bmp_view", 6144, a,
-                  tskIDLE_PRIORITY + 2, nullptr) != pdPASS) {
+  if (xTaskCreatePinnedToCore(g2BmpViewerWorker, "g2_bmp_view", 6144, a,
+                  tskIDLE_PRIORITY + 2, nullptr, APP_CORE) != pdPASS) {
     DEBUG_G2F("[G2] BMP viewer: xTaskCreate failed");
     free(a->path);
     delete a;
@@ -14692,8 +16821,8 @@ static bool g2ShowMapPage(void (*onDone)()) {
   auto* a = new MapPageArgs;
   if (!a) return false;
   a->onDone = onDone;
-  if (xTaskCreate(g2MapPageWorker, "g2_map_page", MAP_RENDER_STACK_WORDS, a,
-                  tskIDLE_PRIORITY + 2, nullptr) != pdPASS) {
+  if (xTaskCreatePinnedToCore(g2MapPageWorker, "g2_map_page", MAP_RENDER_STACK_WORDS, a,
+                  tskIDLE_PRIORITY + 2, nullptr, APP_CORE) != pdPASS) {
     DEBUG_G2F("[G2] map page: xTaskCreate failed");
     delete a;
     return false;
@@ -14709,6 +16838,174 @@ static const char* cmd_g2map(const String& argsInput) {
   return "G2 map: opening interactive map page — tap a control on the lens; Back to exit.";
 }
 #endif // ENABLE_MAPS
+
+// ─────────────────────────────────────────────────────────────────────
+// Pet page (g2PetPageWorker) — the "Tamagotchi" app. Same list+image
+// compound as the camera-stream / Maps pages: a fixed action list on the
+// LEFT ("lstPet") and an animated 80x80 creature tile on the RIGHT
+// ("imgPet"). Each loop advances the sim + animation (G2_Pet.cpp), renders
+// the tile, and re-pushes it via Cmd=3 — never a re-CREATE or a REBUILD-list,
+// either of which drops the image child. The pet's stats live in
+// /system/pet.json and decay in real time, so it ages / gets hungry while the
+// page is closed; the page itself is a bounded interaction window (the 60 s
+// hijack watchdog closes an untapped page). See G2_Pet.h.
+// ─────────────────────────────────────────────────────────────────────
+struct PetPageArgs {
+  void (*onDone)();
+};
+
+static void g2PetPageWorker(void* arg) {
+  // Paired-user identity + G2 notify source so pet.json FS reads/writes work.
+  G2HijackCtxGuard ctxGuard;
+  auto* a = (PetPageArgs*)arg;
+
+  // Layout: action list on the LEFT, 80x80 creature centered in the RIGHT.
+  const G2ContainerGeom kListGeom = { 8, 8, 360, 272 };
+  G2ImageTile imgTile = {};
+  imgTile.x = 388;              // right-of-center (388..468), even
+  imgTile.y = 104;             // vertically centered ((288-80)/2)
+  imgTile.w = PET_TILE_W;
+  imgTile.h = PET_TILE_H;
+  imgTile.containerId   = 2;
+  imgTile.containerName = "imgPet";
+
+  const uint32_t kCreateMagic   = G2_MAGIC_IMAGE_BASE + 0x20;  // 242
+  const uint32_t kPushMagicBase = G2_MAGIC_IMAGE_BASE + 0x21;  // 243 (1 frag/frame)
+
+  // (Re)build the list+image compound with the CURRENT row labels (the Sleep
+  // row reads "Wake" while the pet is asleep). The firmware can't REBUILD a
+  // single list row without dropping the image child, so a label change means
+  // a full SHUTDOWN + CREATE — done once at entry and again on each sleep flip.
+  auto createPetCompound = [&](G2Temple& arm) -> bool {
+    EXT_RAM_BSS_ATTR static uint8_t createBuf[1024];
+    size_t rowCount = 0;
+    const char* const* rows = g2PetMenuRows(&rowCount);
+    const size_t createLen = g2BuildCreateMixedListImage(
+        allocSeq(), kCreateMagic, /*listName*/ "lstPet",
+        rows, rowCount, kListGeom, imgTile, BLOCKS_WIDGET_ID,
+        createBuf, sizeof(createBuf));
+    if (createLen == 0) { DEBUG_G2F("[G2] pet page: CREATE build failed"); return false; }
+    probePrepImageCreateAck(kCreateMagic);
+    if (!sendEnvelope(arm, createBuf, createLen)) {
+      DEBUG_G2F("[G2] pet page: CREATE TX failed"); return false;
+    }
+    if (!probeWaitImageCreateAck(kCreateMagic, kImgCreateAckTimeoutMs)) {
+      DEBUG_G2F("[G2] pet page: CREATE ack timeout"); return false;
+    }
+    return true;
+  };
+
+  do {
+    G2Temple* arm = pickEvenAIArm("petPage");
+    if (!arm) { DEBUG_G2F("[G2] pet page: no eligible arm"); break; }
+
+    // Tear down the Apps list, then CREATE the list+image compound once.
+    if (!probeTearDownActiveContainer(*arm)) {
+      DEBUG_G2F("[G2] pet page: pre-page SHUTDOWN failed");
+      break;
+    }
+    // Clear stale image-probe state so a leftover flag can't terminate us.
+    gImgProbeHoldTapPending = false;
+    gImgProbeAbort          = false;
+    gImgProbeHoldActive     = false;
+    gPetPagePendingTap      = 0;
+
+    // Load state + apply the real-time decay accrued while the page was closed.
+    g2PetOpen();
+
+    if (!createPetCompound(*arm)) { probePostProbeShutdown(*arm); break; }
+    DEBUG_G2F("[G2] pet page: created (list@'lstPet' + image@'imgPet' %dx%d)",
+              PET_TILE_W, PET_TILE_H);
+
+    gPetPageActive = true;   // BLE handler now routes lstPet taps to us
+    uint32_t shownMenu = g2PetMenuVersion();
+
+    // Per-frame BMP staging in PSRAM (tile dims are fixed → alloc once, reuse).
+    const size_t bmpCap = g2PetBmpCap();
+    uint8_t* bmp = (uint8_t*)ps_alloc(bmpCap, AllocPref::PreferPSRAM, "g2.pet.bmp");
+    if (!bmp) DEBUG_G2F("[G2] pet page: BMP alloc failed (%u B)", (unsigned)bmpCap);
+
+    while (bmp) {
+      if (!gLens.hijackActive) { DEBUG_G2F("[G2] pet page: hijack ended"); break; }
+      if (gImgProbeAbort)      { DEBUG_G2F("[G2] pet page: abort flag set"); break; }
+
+      // Drain control taps (bit == row index). Back (bit 0) exits immediately.
+      const uint32_t taps = gPetPagePendingTap;
+      gPetPagePendingTap = 0;
+      if (taps & (1u << 0)) { DEBUG_G2F("[G2] pet page: Back → exit"); break; }
+      for (uint32_t r = 1; r < 8; r++) if (taps & (1u << r)) g2PetAction(r);
+
+      g2PetTick();   // decay + growth + sickness/death + animation
+
+      // Action-menu changed (sleep<->wake, alive<->dead) → re-CREATE the
+      // compound so the row labels match (can't hot-swap a single list row).
+      if (g2PetMenuVersion() != shownMenu) {
+        if (probeTearDownActiveContainer(*arm) && createPetCompound(*arm)) {
+          shownMenu = g2PetMenuVersion();
+        } else {
+          DEBUG_G2F("[G2] pet page: menu re-CREATE failed → exit");
+          break;
+        }
+      }
+
+      // Render the tile, push it into the image child (no re-CREATE).
+      const size_t bmpLen = g2RenderPetBmp(bmp, bmpCap);
+      if (bmpLen > 0) {
+        unsigned okFrags = 0, totalFrags = 0;
+        (void)sendImageBmpFragmentsNoCreate(*arm, "petPage",
+                                            kPushMagicBase,
+                                            imgTile.containerId, imgTile.containerName,
+                                            bmp, bmpLen, &okFrags, &totalFrags,
+                                            /*tolerateMissedAcks*/ 0);
+      }
+      vTaskDelay(pdMS_TO_TICKS(90));   // tap-poll gap; the blocking push paces the rest
+    }
+
+    if (bmp) free(bmp);
+    g2PetSave();               // persist the decay/age accrued while open
+    gPetPageActive     = false;
+    gPetPagePendingTap = 0;
+    probePostProbeShutdown(*arm);
+  } while (0);
+
+  if (a->onDone) a->onDone();
+  delete a;
+  vTaskDelete(nullptr);
+}
+
+// Public entry — spawn the pet-page worker. The renderer is light (a PSRAM
+// grid + a single-fragment BMP), so a modest stack from contiguous internal
+// DRAM suffices; gate on the LARGEST free block (this config is DRAM-
+// fragmented) so the page DECLINES cleanly rather than crashing mid-spawn.
+static constexpr uint32_t PET_STACK_BYTES = 6144;
+static bool g2ShowPetPage(void (*onDone)()) {
+  const size_t kNeeded  = PET_STACK_BYTES + 4 * 1024;   // stack + TCB/TX margin
+  const size_t kLargest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  if (kLargest < kNeeded) {
+    DEBUG_G2F("[G2] pet page: declining — need ~%u KB contiguous internal DRAM, largest free %u KB",
+              (unsigned)(kNeeded / 1024), (unsigned)(kLargest / 1024));
+    return false;
+  }
+  auto* a = new PetPageArgs;
+  if (!a) return false;
+  a->onDone = onDone;
+  if (xTaskCreatePinnedToCore(g2PetPageWorker, "g2_pet_page", PET_STACK_BYTES, a,
+                  tskIDLE_PRIORITY + 2, nullptr, APP_CORE) != pdPASS) {
+    DEBUG_G2F("[G2] pet page: xTaskCreate failed");
+    delete a;
+    return false;
+  }
+  return true;
+}
+
+static const char* cmd_g2pet(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  (void)argsInput;
+  if (!isG2Connected()) return "Error: G2 pet: not connected";
+  if (!g2ShowPetPage(nullptr))
+    return "Error: G2 pet: not enough free internal RAM or busy — free memory by disconnecting BLE/G2 or disabling unused features, then retry";
+  return "G2 pet: opening — Feed/Play/Clean/Sleep on the lens; tap Back to exit.";
+}
 
 #if ENABLE_ONDEVICE_LLM
 // ─────────────────────────────────────────────────────────────────────
@@ -14875,7 +17172,15 @@ static void g2LlmPageWorker(void* arg) {
       const uint32_t taps = gLlmPagePendingTap;
       gLlmPagePendingTap = 0;
       if (taps & (1u << 0)) { DEBUG_G2F("[G2] LLM page: Back"); break; }
-      if (taps & (1u << 1)) { (void)chatRetryLast(nullptr); }  // Re-run last
+      if (taps & (1u << 1)) {   // Re-run last: a guided ask can land in this very
+        // viewer (llmMenuAskDone → open viewer), so branch like the submenu row —
+        // guided-last → repeat PLAIN (no suppress); else chatRetryLast. Existence
+        // suffices (the lens originates only guided turns) and chatGetSessionId()
+        // would read 0 post-stream and wrongly fall through. (§5)
+        int gs = 0;
+        if (llmMenuLastAskInfo(&gs)) (void)llmMenuRepeatLast();
+        else                         (void)chatRetryLast(nullptr);
+      }
 
       // Keep the page alive while the engine is ACTIVELY generating — an
       // authoritative device-side signal bounded by the hard-cap/sentence
@@ -14921,8 +17226,8 @@ static bool g2ShowLlmPage(void (*onDone)()) {
   auto* a = new LlmPageArgs;
   if (!a) return false;
   a->onDone = onDone;
-  if (xTaskCreate(g2LlmPageWorker, "g2_llm_page", LLM_VIEW_STACK_WORDS, a,
-                  tskIDLE_PRIORITY + 2, nullptr) != pdPASS) {
+  if (xTaskCreatePinnedToCore(g2LlmPageWorker, "g2_llm_page", LLM_VIEW_STACK_WORDS, a,
+                  tskIDLE_PRIORITY + 2, nullptr, APP_CORE) != pdPASS) {
     DEBUG_G2F("[G2] LLM page: xTaskCreate failed");
     delete a;
     return false;
@@ -15299,8 +17604,8 @@ bool g2ShowCameraViewer(void (*onDone)()) {
   a->onDone = onDone;
   // 6 KB stack — heavy buffers all live in PSRAM, the worker carries
   // probe state + small locals only.
-  if (xTaskCreate(g2CameraViewerWorker, "g2_cam_view", 6144, a,
-                  tskIDLE_PRIORITY + 2, nullptr) != pdPASS) {
+  if (xTaskCreatePinnedToCore(g2CameraViewerWorker, "g2_cam_view", 6144, a,
+                  tskIDLE_PRIORITY + 2, nullptr, APP_CORE) != pdPASS) {
     DEBUG_G2F("[G2] Camera viewer: xTaskCreate failed");
     delete a;
     return false;
@@ -15744,8 +18049,8 @@ bool g2ShowCameraStream(void (*onDone)()) {
   auto* a = new CameraStreamArgs;
   if (!a) return false;
   a->onDone = onDone;
-  if (xTaskCreate(g2CameraStreamWorker, "g2_cam_stream", 6144, a,
-                  tskIDLE_PRIORITY + 2, nullptr) != pdPASS) {
+  if (xTaskCreatePinnedToCore(g2CameraStreamWorker, "g2_cam_stream", 6144, a,
+                  tskIDLE_PRIORITY + 2, nullptr, APP_CORE) != pdPASS) {
     DEBUG_G2F("[G2] Camera stream: xTaskCreate failed");
     delete a;
     return false;
@@ -16058,8 +18363,8 @@ bool g2ShowBmpFileFullScreen(const char* path, void (*onDone)()) {
   // 8 KB stack — 4-tile burst nests several helper calls (probe ack,
   // mutex take, fragment build) so we run a slightly larger stack
   // than the single-image viewer's 6 KB.
-  if (xTaskCreate(g2BmpFullViewerWorker, "g2_bmp_full", 8192, a,
-                  tskIDLE_PRIORITY + 2, nullptr) != pdPASS) {
+  if (xTaskCreatePinnedToCore(g2BmpFullViewerWorker, "g2_bmp_full", 8192, a,
+                  tskIDLE_PRIORITY + 2, nullptr, APP_CORE) != pdPASS) {
     DEBUG_G2F("[G2] BMP full-viewer: xTaskCreate failed");
     free(a->path);
     delete a;
@@ -16342,8 +18647,8 @@ bool g2ShowJpgFile(const char* path, void (*onDone)()) {
     delete a;
     return false;
   }
-  if (xTaskCreate(g2JpgViewerWorker, "g2_jpg_view", 6144, a,
-                  tskIDLE_PRIORITY + 2, nullptr) != pdPASS) {
+  if (xTaskCreatePinnedToCore(g2JpgViewerWorker, "g2_jpg_view", 6144, a,
+                  tskIDLE_PRIORITY + 2, nullptr, APP_CORE) != pdPASS) {
     DEBUG_G2F("[G2] JPG viewer: xTaskCreate failed");
     free(a->path);
     delete a;
@@ -16465,8 +18770,8 @@ bool g2ShowJpgFileFullScreen(const char* path, void (*onDone)()) {
     delete a;
     return false;
   }
-  if (xTaskCreate(g2JpgFullViewerWorker, "g2_jpg_full", 8192, a,
-                  tskIDLE_PRIORITY + 2, nullptr) != pdPASS) {
+  if (xTaskCreatePinnedToCore(g2JpgFullViewerWorker, "g2_jpg_full", 8192, a,
+                  tskIDLE_PRIORITY + 2, nullptr, APP_CORE) != pdPASS) {
     DEBUG_G2F("[G2] JPG full-viewer: xTaskCreate failed");
     free(a->path);
     delete a;
@@ -16484,7 +18789,7 @@ bool g2ShowJpgFileFullScreen(const char* path, void (*onDone)()) {
 // image canary on the Static Tests sub-menu.
 // ─────────────────────────────────────────────────────────────────────
 const char* g2ProbeImageQGlizzy() {
-  static char ret[220];
+  EXT_RAM_BSS_ATTR static char ret[220];
 
   G2Temple* arm = pickEvenAIArm("imgQGlizzy");
   if (!arm) return "Img QGlizzy: no reachable temple";
@@ -17286,7 +19591,7 @@ const char* g2ProbeImageQ18MixedIcon() {
 // be ~550 ms (order-of-magnitude; BLE pacing dominates).
 // ─────────────────────────────────────────────────────────────────────
 const char* g2ProbeImageQ19SmallSolo() {
-  static char ret[220];
+  EXT_RAM_BSS_ATTR static char ret[220];
 
   G2Temple* arm = pickEvenAIArm("imgQ19");
   if (!arm) return "Img Q19: no reachable temple";
@@ -17357,7 +19662,7 @@ const char* g2ProbeImageQ19SmallSolo() {
 // works, expected wall-clock ≈ 500 ms vs ~770 ms at 4-bpp.
 // ─────────────────────────────────────────────────────────────────────
 const char* g2ProbeImageQ29Bmp2bppSolo() {
-  static char ret[240];
+  EXT_RAM_BSS_ATTR static char ret[240];
 
   G2Temple* arm = pickEvenAIArm("imgQ29");
   if (!arm) return "Img Q29: no reachable temple";
@@ -17661,7 +19966,7 @@ const char* g2ProbeImageQ27LiveTile144() {
 // ─────────────────────────────────────────────────────────────────────
 const char* g2ProbeImageQ25SdFrameAnimation() {
   EXT_RAM_BSS_ATTR static char ret[320];
-  static char pathBuf[192];
+  EXT_RAM_BSS_ATTR static char pathBuf[192];
 
   G2Temple* arm = pickEvenAIArm("imgQ25");
   if (!arm) {

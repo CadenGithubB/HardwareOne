@@ -32,9 +32,33 @@
 
 // Auto-fit: firmware automatically reduces context to fit available PSRAM.
 // This is just the upper bound — the actual context used may be lower.
+// NOTE: currently READ BY NOTHING. The comment on llmLoadModel below says
+// "0 = use compile-time LLM_MAX_CONTEXT_LEN", but maxCtx==0 actually means
+// "don't cap" — System_LLM_Model.cpp only applies requestedMaxCtx when it is
+// > 0, so a model's own config.seq_len wins. Left in place rather than deleted
+// because it is #ifndef-guarded for per-board override; treat the comment as
+// aspirational, not as a description of current behaviour.
 #ifndef LLM_MAX_CONTEXT_LEN
 #define LLM_MAX_CONTEXT_LEN       1024
 #endif
+
+// Upper bound the llmmaxcontext SETTING accepts, in TOKENS. Not related to
+// CMD_RESULT_MAX (4096 BYTES) — same number, unrelated concept, do not unify.
+// One definition for the schema bound, the CLI usage text and the web loader's
+// clamp; those were three hand-typed numbers that had already drifted (the web
+// silently halved every load to 2048). The effective context is still
+// min(model config.seq_len, this), then reduced further by PSRAM auto-fit —
+// raising this cannot over-allocate, it only stops capping below the model.
+#define LLM_SETTING_MAX_CONTEXT   4096
+
+// Minimum runtime context (TOKENS) considered usable for a real Q&A. Below this,
+// PSRAM auto-fit has shrunk the KV window so far that a typical prompt fills it
+// and generation stalls immediately (the "ctx=6/6, 0-1 tokens" failure). When
+// the fitted context drops under this AND it was cut below what the caller asked
+// for (i.e. PSRAM starvation, not an intentional small-model/llmMaxContext cap),
+// llmContextDegraded() reports true so every surface can warn the user to reload
+// the model or restart. Not a hard floor on loading — the model still loads.
+#define LLM_MIN_USABLE_CONTEXT      24
 
 // Generation defaults
 #define LLM_DEFAULT_MAX_TOKENS      256
@@ -113,6 +137,20 @@ struct LLMStatus {
   int lastConfTokens;         // Phase 2: # tokens that contributed to lastMeanLogprob
   char errorMsg[128];         // Last error message
 };
+
+// Degraded-context detection — single source of truth for every LLM surface
+// (CLI, web page + /api/llm, OLED, G2). Returns true when a model is loaded but
+// PSRAM auto-fit shrank its context below LLM_MIN_USABLE_CONTEXT AND below what
+// was requested (so an intentionally small model or a deliberate llmMaxContext
+// cap does NOT trip it). outCtx/outModelSeq, when non-null, receive the active
+// context and the model's native seq_len even when not degraded.
+bool llmContextDegraded(int* outCtx = nullptr, int* outModelSeq = nullptr);
+
+// Formats the one-line, human-readable degraded-context warning into buf (always
+// NUL-terminates). Returns the string length, or 0 when not degraded (buf set to
+// ""). Same wording on every surface — the caller supplies the buffer so it is
+// task-safe (no shared state). Recommend cap >= 160.
+size_t llmContextWarning(char* buf, size_t cap);
 
 // Token callback: called for each generated token string.
 // Return false to stop generation early.
@@ -232,6 +270,69 @@ int llmTokenize(const char* text, int* outTokens, int maxTokens);
 // Returns JSON array: [{"name":"model.bin","size":1048576,"path":"/sd/llm/model.bin","storage":"sd"}, ...]
 // storage field is "internal" (LittleFS /system/llm/) or "sd" (/sd/llm/)
 String llmListModels();
+
+// ============================================================================
+// Guided-input menu API (System_LLM_Menu.cpp)
+// ============================================================================
+// A model's info block may carry a MENU section: curated, corpus-exact question
+// templates ("What type is {}?") + entity rosters ("Bulbasaur", ...). Surfaces
+// (web/OLED/G2/CLI) present pickers and submit integer indices; composition
+// happens once, on-device, and the composed question feeds the existing chat
+// pipeline unchanged. All accessors are thread-safe (internal sMenuLock) and
+// COPY OUT — no pointer into the menu blob ever escapes. See
+// LLM_GUIDED_MENU_SPEC §5. ChatParamOverride is from System_LLMChat.h.
+struct ChatParamOverride;
+
+// Menu generation counter — bumped on every model load and unload. A surface
+// caches it, and treats any change as "the menu may have changed, refetch".
+uint16_t llmMenuGeneration(void);
+
+// Number of guided-input groups (0 = this model has no menu; hide guided UI).
+uint8_t  llmMenuGroupCount(void);
+
+// Copied-out snapshot of one group's header (name + counts + flags).
+struct LLMMenuGroupInfo {
+  char     name[33];   // NUL-terminated (<=32 chars)
+  uint8_t  flags;      // bit0 = Do-mode
+  uint16_t tplCount;
+  uint16_t entCount;
+};
+bool llmMenuGroupInfo(uint8_t g, LLMMenuGroupInfo* out);
+
+// Copy the display form of template t in group g into buf (NUL-terminated). The
+// slot marker (0x1F) is rendered as "{}". *hasSlot (if non-null) reports whether
+// the template has an entity slot. Returns bytes written, or -1 on bad index.
+int  llmMenuTemplate(uint8_t g, uint16_t t, char* buf, size_t cap, bool* hasSlot);
+
+// Copy entity e of group g into buf (NUL-terminated). Returns bytes written, -1 bad index.
+int  llmMenuEntity(uint8_t g, uint16_t e, char* buf, size_t cap);
+
+// Compose the final question for (group g, template t, entity e) into buf. Pass
+// e = -1 for a slotless template. Returns composed length, or <0 on error
+// (-2 bad index, -3 no menu).
+int  llmMenuCompose(uint8_t g, uint16_t t, int e, char* buf, size_t cap);
+
+// Compose and submit a guided question to the chat pipeline. `gen` must match the
+// current menuGeneration (guards against composing against a swapped model).
+// Do-mode groups get the "do: " scaffold + hardCap=4/sentenceLimit=0 (suggestion
+// only — never auto-executed). Returns:
+//   >0 = chat session id;  0 = busy (generation in flight);
+//   -1 = stale generation;  -2 = bad index;  -3 = no menu.
+int  llmMenuAsk(uint16_t gen, uint8_t g, uint16_t t, int e, const ChatParamOverride* ov);
+
+// Re-ask the last guided question PLAIN (a fresh generation with NO suppress list
+// — chatRetryLast would ban the memorized-correct answer, which is wrong for a
+// guided ask). Same return codes as llmMenuAsk.
+int  llmMenuRepeatLast(void);
+
+// True iff a guided last-ask exists; *sessionOut (if non-null) receives its chat
+// session id. Retry branch (spec §5): guided-last -> llmMenuRepeatLast(), else ->
+// chatRetryLast(). Do NOT gate on chatGetSessionId() — it reads 0 the instant a
+// turn finishes, so post-completion the comparison always fails and wrongly falls
+// through to chatRetryLast (which bans the memorized-correct answer). A surface
+// that also accepts free-text tracks "was my last turn guided" locally and matches
+// this session id (OLED); a guided-only surface (G2 lens) branches on existence.
+bool llmMenuLastAskInfo(int* sessionOut);
 
 // Command table (registered with CommandSystem)
 struct CommandEntry;

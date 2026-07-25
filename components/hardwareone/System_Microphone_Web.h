@@ -9,7 +9,7 @@
 
 #include "System_BuildConfig.h"
 
-#if ENABLE_WEB_SENSORS && ENABLE_MICROPHONE_SENSOR
+#if ENABLE_WEB_SENSORS && ENABLE_MICROPHONE
 
 #include <esp_http_server.h>
 
@@ -248,7 +248,7 @@ inline void streamMicrophoneSensorJS(httpd_req_t* req) {
 
 // Dashboard definition for microphone sensor
 inline void streamMicrophoneDashboardDef(httpd_req_t* req) {
-  httpd_resp_send_chunk(req, "window.__dashSensorDefs.push({device:'PDM',key:'mic',name:'Microphone (PDM)',desc:'ESP32-S3 PDM Microphone'});", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "window.__dashSensorDefs.push({device:'Mic',key:'mic',name:'Microphone',desc:'Onboard PDM or G2 glasses mic'});", HTTPD_RESP_USE_STRLEN);
 }
 
 // Stream microphone CSS
@@ -329,6 +329,6 @@ inline void streamMicrophoneSensorCSS(httpd_req_t* req) {
 )rawliteral", HTTPD_RESP_USE_STRLEN);
 }
 
-#endif // ENABLE_MICROPHONE_SENSOR
+#endif // ENABLE_MICROPHONE
 
 #endif // SYSTEM_MICROPHONE_WEB_H

@@ -33,9 +33,24 @@ enum EffectType {
   EFFECT_STROBE = 5
 };
 
-// 64-color palette (defined in neopixel_led.cpp)
+// 75-color palette (PROGMEM; enumerate via memcpy_P per entry — the name
+// pointers reference flash string literals and are program-lifetime).
 extern const ColorEntry colorTable[];
 extern const int numColors;
+
+// Effect-name table — the single source of truth shared by the cmd_ledeffect
+// parser and every UI that offers an effect picker (OLED LED screen, G2 LED
+// page). "off" is NOT in the table (it's a cancel, not an effect) — pickers
+// append their own Off row.
+extern const char* const ledEffectNames[];
+extern const int ledEffectNameCount;
+// Name -> EFFECT_* code (case-insensitive); EFFECT_NONE (0) if unknown.
+int ledEffectCodeForName(const String& name);
+
+// Brightness preset ladder shared by the OLED/G2 "tap to cycle" rows:
+// 10 -> 25 -> 50 -> 75 -> 100 -> 10; an off-ladder value lands on the next
+// step up.
+int ledBrightnessNextPreset(int cur);
 
 // Global NeoPixel instance
 extern Adafruit_NeoPixel pixels;
@@ -43,7 +58,16 @@ extern Adafruit_NeoPixel pixels;
 // LED control functions
 void initNeoPixelLED();
 void setLEDColor(RGB color);
+// Blocking effect runner — boot-time startup effect only (spins the async
+// engine below until done). Runtime paths use the non-blocking API.
 void runLEDEffect(int effectType, RGB startColor, RGB endColor, unsigned long duration);
+// Non-blocking effect engine: start returns immediately; frames are advanced
+// by ledEffectTick() from the main loop. Starting a new effect replaces the
+// running one; ledcolor/ledclear/`ledeffect off` cancel via ledEffectStop.
+void ledEffectStart(int effectType, RGB startColor, RGB endColor, unsigned long duration);
+void ledEffectStop(bool clearLed);
+bool ledEffectActive();
+void ledEffectTick();
 bool getRGBFromName(const String& colorName, RGB& color);
 
 // Color utility functions

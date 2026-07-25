@@ -436,7 +436,31 @@ void updateFMRadio() {
       gFmRadioCache.rssi = ri.rssi;
       gFmRadioCache.stereo = ri.stereo;
       gFmRadioCache.snr = ri.snr;
-      
+
+      // Finalize a pending async seek (started by cmd_fmradio_seek). The
+      // 300 ms arm delay keeps the first poll from trusting a stale
+      // ri.tuned=true before the chip has actually dropped it; 6 s is the
+      // failsafe for a band edge with no station (seekUp(false) = no wrap).
+      if (gFmRadioCache.seekInProgress) {
+        unsigned long sinceStart = millis() - gFmRadioCache.seekStartMs;
+        bool armed    = sinceStart >= 300;
+        bool timedOut = sinceStart > 6000;
+        if ((armed && ri.tuned) || timedOut) {
+          gFmRadioCache.frequency = radio.getFrequency();
+          // RDS was cleared at seek start; clear again in case a late
+          // callback for the old station landed mid-seek.
+          memset(gFmRadioCache.stationName, 0, sizeof(gFmRadioCache.stationName));
+          memset(gFmRadioCache.stationText, 0, sizeof(gFmRadioCache.stationText));
+          gFmRadioCache.seekInProgress = false;
+          char mhz[12];
+          snprintf(mhz, sizeof(mhz), "%.1f", gFmRadioCache.frequency / 100.0);
+          systemEventPost(SYSEVT_FM_TUNED, mhz, timedOut ? "seek timeout" : "seek");
+          DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] Seek finalized at %s MHz%s",
+                                   mhz, timedOut ? " (timeout)" : "");
+        }
+      }
+
+
       // Only log when signal changes significantly (reduces flood)
       unsigned long now = millis();
       if (abs(gFmRadioCache.rssi - lastRSSI) >= 2 || gFmRadioCache.stereo != lastStereo || (now - lastUpdateLog > 30000)) {
@@ -596,38 +620,41 @@ const char* cmd_fmradio_seek(const String& argsInput) {
   }
   
   bool seekUp = true;  // Default seek up
-  
+
   String dir = argsInput;
   dir.trim();
   dir.toLowerCase();
   if (dir == "down") {
     seekUp = false;
   }
-  
-  i2cDeviceTransactionVoid((uint8_t)gSettings.fmRadioBus, I2C_ADDR_FM_RADIO, FM_RADIO_I2C_CLOCK, 6000, [&]() {
-    // mathertel library seek methods
+
+  if (gFmRadioCache.seekInProgress) {
+    return "Error: [FM Radio] Seek already in progress";
+  }
+
+  // Start-and-return: the hardware seek is just register writes. The old code
+  // busy-waited ri.tuned up to 5 s INSIDE one 6000 ms transaction — holding
+  // the per-bus mutex the whole time, which starved the gamepad poll and OLED
+  // render on the shared bus (and parked whichever task ran the command).
+  // Completion is finalized by updateFMRadio()'s 250 ms poll (ri.tuned, 6 s
+  // failsafe), which commits the frequency, clears RDS, and posts
+  // SYSEVT_FM_TUNED. Callers watch cache.seekInProgress / "seeking" in JSON.
+  i2cDeviceTransactionVoid((uint8_t)gSettings.fmRadioBus, I2C_ADDR_FM_RADIO, FM_RADIO_I2C_CLOCK, 500, [&]() {
     if (seekUp) {
       radio.seekUp(false);  // false = don't wrap
     } else {
       radio.seekDown(false);
     }
-    
-    // Wait for seek to complete (with timeout)
-    unsigned long start = millis();
-    RADIO_INFO ri;
-    do {
-      vTaskDelay(pdMS_TO_TICKS(100));
-      radio.getRadioInfo(&ri);
-    } while (!ri.tuned && (millis() - start) < 5000);
-    
-    gFmRadioCache.frequency = radio.getFrequency();
-    
-    // Clear RDS data on frequency change
-    memset(gFmRadioCache.stationName, 0, sizeof(gFmRadioCache.stationName));
-    memset(gFmRadioCache.stationText, 0, sizeof(gFmRadioCache.stationText));
   });
-  
-  BROADCAST_PRINTF("Seeked %s to %.1f MHz", seekUp ? "up" : "down", gFmRadioCache.frequency / 100.0);
+
+  // Stale RDS from the old station would linger on displays during the seek.
+  memset(gFmRadioCache.stationName, 0, sizeof(gFmRadioCache.stationName));
+  memset(gFmRadioCache.stationText, 0, sizeof(gFmRadioCache.stationText));
+  gFmRadioCache.seekDirUp      = seekUp;
+  gFmRadioCache.seekStartMs    = millis();
+  gFmRadioCache.seekInProgress = true;
+
+  BROADCAST_PRINTF("Seeking %s from %.1f MHz...", seekUp ? "up" : "down", gFmRadioCache.frequency / 100.0);
   return "OK";
 }
 
@@ -781,13 +808,14 @@ int fmRadioBuildDataJSON(char* buf, size_t bufSize) {
   if (pos == 0) return 0;
   int n = snprintf(buf + pos, bufSize - pos,
     ",\"frequency\":%.1f,\"volume\":%d,"
-    "\"muted\":%s,\"stereo\":%s,\"rssi\":%d,\"headphones\":%s,\"station\":\"%s\",\"radioText\":\"%s\"}",
+    "\"muted\":%s,\"stereo\":%s,\"rssi\":%d,\"headphones\":%s,\"seeking\":%s,\"station\":\"%s\",\"radioText\":\"%s\"}",
     snap.frequency / 100.0,
     snap.volume,
     snap.muted ? "true" : "false",
     snap.stereo ? "true" : "false",
     snap.rssi,
     snap.headphonesConnected ? "true" : "false",
+    snap.seekInProgress ? "true" : "false",
     snap.stationName,
     snap.stationText);
   if (n < 0 || (size_t)n >= bufSize - pos) return 0;
@@ -822,7 +850,7 @@ const CommandEntry fmRadioCommands[] = {
   { "closefmradio", "Stop FM Radio sensor.", false, cmd_fmradio_stop, nullptr, "sensor", "radio", "close" },
   { "fmradioread", "Read FM Radio status. (add 'json' for JSON output)", false, cmd_fmradio_status },
   { "fmradiotune", "Tune to frequency: <freq>", false, cmd_fmradio_tune, "Usage: fmradiotune <frequency> (e.g., 103.9 or 10390)" },
-  { "fmradioseek", "Seek next station [up|down]", false, cmd_fmradio_seek, "Usage: fmradioseek [up|down]" },
+  { "fmradioseek", "Start seeking the next station [up|down] (async; 'fmradioread' shows the result)", false, cmd_fmradio_seek, "Usage: fmradioseek [up|down]" },
   { "fmradiovolume", "Set volume: <0-15>", false, cmd_fmradio_volume, "Usage: fmradiovolume <0-15>" },
   { "fmradiomute", "Mute audio", false, cmd_fmradio_mute },
   { "fmradiounmute", "Unmute audio", false, cmd_fmradio_unmute },

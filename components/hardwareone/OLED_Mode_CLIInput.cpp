@@ -118,6 +118,7 @@ static void displayCLIInput() {
 // ============================================================================
 
 static bool handleCLIInputInput(int deltaX, int deltaY, uint32_t newlyPressed) {
+  if (oledGuestBlocksMutate()) return true;
   // Result screen: A/X/START runs another command; B falls through to the
   // global handler, which turns it into oledMenuBack().
   if (sShowingResult) {

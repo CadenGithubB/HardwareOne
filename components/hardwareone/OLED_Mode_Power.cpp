@@ -24,9 +24,13 @@ static bool sPowerScrollInitialized = false;
 
 static void initPowerScrollStates() {
   if (sPowerScrollInitialized) return;
-  oledScrollInit(&sPowerMainScroll, nullptr, 4);
-  oledScrollInit(&sPowerCpuScroll, nullptr, 4);
-  oledScrollInit(&sPowerSleepScroll, nullptr, 4);
+  // Single-line (8px) rows — same math as Network / LLM. Main menu leaves one
+  // line for the live CPU status above the list.
+  const int fullVis = OLED_CONTENT_HEIGHT / 8;
+  const int mainVis = (OLED_CONTENT_HEIGHT - 8) / 8;
+  oledScrollInit(&sPowerMainScroll, nullptr, mainVis > 0 ? mainVis : 1);
+  oledScrollInit(&sPowerCpuScroll, nullptr, fullVis > 0 ? fullVis : 1);
+  oledScrollInit(&sPowerSleepScroll, nullptr, fullVis > 0 ? fullVis : 1);
   sPowerScrollInitialized = true;
 }
 
@@ -36,6 +40,7 @@ static void populatePowerMainMenu() {
   oledScrollAddItem(&sPowerMainScroll, "Adjust CPU Power");
   oledScrollAddItem(&sPowerMainScroll, "Sleep Settings");
   oledScrollAddItem(&sPowerMainScroll, "Restart Device");
+  oledScrollAddItem(&sPowerMainScroll, "RAM Flush");
   oledScrollClampSelection(&sPowerMainScroll);
 }
 
@@ -45,7 +50,8 @@ static void populatePowerCpuMenu() {
   oledScrollAddItem(&sPowerCpuScroll, "Performance 240MHz");
   oledScrollAddItem(&sPowerCpuScroll, "Balanced 160MHz");
   oledScrollAddItem(&sPowerCpuScroll, "PowerSaver 80MHz");
-  oledScrollAddItem(&sPowerCpuScroll, "UltraSaver 40MHz");
+  // 80 MHz interactive, 40 MHz only once idle power-save blanks the screen.
+  oledScrollAddItem(&sPowerCpuScroll, "UltraSaver 80/40MHz");
   oledScrollClampSelection(&sPowerCpuScroll);
 }
 
@@ -73,63 +79,79 @@ static void populatePowerSleepMenu() {
 // Power Menu Display Functions
 // ============================================================================
 
+// Main Power keeps a 1-line status above the menu. oledScrollRenderSimple always
+// starts at OLED_CONTENT_START_Y, so this is the same single-line window +
+// scrollbar math, offset one row (matches the ESP-NOW status+list pattern).
+static void renderPowerMainList() {
+  oledScrollClampSelection(&sPowerMainScroll);
+
+  const int lineHeight = 8;
+  const int listStartY = OLED_CONTENT_START_Y + lineHeight;
+  const int visibleStart = sPowerMainScroll.scrollOffset;
+  const int visibleEnd = min(sPowerMainScroll.itemCount,
+                             sPowerMainScroll.scrollOffset + sPowerMainScroll.visibleLines);
+
+  int yPos = listStartY;
+  for (int i = visibleStart; i < visibleEnd; i++) {
+    oledDisplay->setCursor(0, yPos);
+    oledDisplay->print(i == sPowerMainScroll.selectedIndex ? "> " : "  ");
+    if (sPowerMainScroll.items[i].line1) oledDisplay->print(sPowerMainScroll.items[i].line1);
+    yPos += lineHeight;
+  }
+
+  if (sPowerMainScroll.itemCount > sPowerMainScroll.visibleLines) {
+    const int scrollbarX = SCREEN_WIDTH - 1;
+    const int barH = sPowerMainScroll.visibleLines * lineHeight;
+    oledDisplay->drawFastVLine(scrollbarX, listStartY, barH, DISPLAY_COLOR_WHITE);
+    const int thumbH = max(4, (barH * sPowerMainScroll.visibleLines) / sPowerMainScroll.itemCount);
+    const int thumbY = listStartY +
+                       (barH - thumbH) * sPowerMainScroll.scrollOffset /
+                           max(1, sPowerMainScroll.itemCount - sPowerMainScroll.visibleLines);
+    oledDisplay->fillRect(scrollbarX - 1, thumbY, 3, thumbH, DISPLAY_COLOR_WHITE);
+  }
+}
+
 void displayPower() {
   if (!oledDisplay || !oledConnected) return;
   populatePowerMainMenu();
-  
+
   oledDisplay->setTextSize(1);
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
   oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
   oledDisplay->print(getPowerModeName(gSettings.powerMode));
   oledDisplay->print(": ");
   oledDisplay->print(getCpuFrequencyMhz());
-  oledDisplay->println("MHz");
-  oledDisplay->println();
-  
-  for (int i = 0; i < sPowerMainScroll.itemCount; i++) {
-    oledDisplay->print(i == sPowerMainScroll.selectedIndex ? "> " : "  ");
-    oledDisplay->println(sPowerMainScroll.items[i].line1);
-  }
+  oledDisplay->print("MHz");
+
+  renderPowerMainList();
 }
 
 void displayPowerCPU() {
   if (!oledDisplay || !oledConnected) return;
   populatePowerCpuMenu();
-  
-  oledDisplay->setTextSize(1);
-  oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-  oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
-  
-  for (int i = 0; i < sPowerCpuScroll.itemCount; i++) {
-    oledDisplay->print(i == sPowerCpuScroll.selectedIndex ? "> " : "  ");
-    oledDisplay->println(sPowerCpuScroll.items[i].line1);
-  }
+  oledScrollRenderSimple(oledDisplay, &sPowerCpuScroll);
 }
 
 void displayPowerSleep() {
   if (!oledDisplay || !oledConnected) return;
   populatePowerSleepMenu();
-  
-  oledDisplay->setTextSize(1);
-  oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-  oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
-  
-  for (int i = 0; i < sPowerSleepScroll.itemCount; i++) {
-    oledDisplay->print(i == sPowerSleepScroll.selectedIndex ? "> " : "  ");
-    oledDisplay->println(sPowerSleepScroll.items[i].line1);
-  }
+  oledScrollRenderSimple(oledDisplay, &sPowerSleepScroll);
 }
 
 // ============================================================================
 // Power Menu Actions
 // ============================================================================
 
-// Confirm-dialog callback: fired only when the user picks "Yes" on the reboot
-// prompt. Routed through the command system (same path as the old Sleep-menu
-// entry) so it gets a normal [CMD] audit-log entry.
+// Confirm-dialog callbacks: fired only when the user picks "Yes". Routed
+// through the command system so they get a normal [CMD] audit-log entry.
 static void powerRebootConfirmed(void* /*userData*/) {
   DEBUG_SYSTEMF("[POWER_OLED] Reboot confirmed - restarting device");
   executeOLEDCommand("reboot");
+}
+
+static void powerRamFlushConfirmed(void* /*userData*/) {
+  DEBUG_SYSTEMF("[POWER_OLED] RAM flush confirmed - capturing features and restarting");
+  executeOLEDCommand("ramflush");
 }
 
 static void executePowerAction() {
@@ -142,6 +164,9 @@ static void executePowerAction() {
     // Guard the reboot behind a confirmation, defaulting to "No", so a stray
     // A/X press can't restart the device.
     oledConfirmRequest("Restart device?", nullptr, powerRebootConfirmed, nullptr, false);
+  } else if (sel == 3) {
+    // Same confirmation pattern as Restart — ramflush also reboots.
+    oledConfirmRequest("RAM flush restart?", nullptr, powerRamFlushConfirmed, nullptr, false);
   }
 }
 
@@ -180,6 +205,7 @@ static void executePowerSleepAction() {
 // ============================================================================
 
 static bool powerMainInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
+  if (oledGuestBlocksMutate()) return true;
   initPowerScrollStates();
   if (oledScrollHandleNav(&sPowerMainScroll)) return true;
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
@@ -193,6 +219,7 @@ static bool powerMainInputHandler(int deltaX, int deltaY, uint32_t newlyPressed)
 }
 
 static bool powerCpuInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
+  if (oledGuestBlocksMutate()) return true;
   initPowerScrollStates();
   if (oledScrollHandleNav(&sPowerCpuScroll)) return true;
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
@@ -206,6 +233,7 @@ static bool powerCpuInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) 
 }
 
 static bool powerSleepInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
+  if (oledGuestBlocksMutate()) return true;
   initPowerScrollStates();
   if (oledScrollHandleNav(&sPowerSleepScroll)) return true;
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {

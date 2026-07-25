@@ -553,6 +553,9 @@ void firstTimeSetupIfNeeded() {
       broadcastOutput("Instead, use the HardwareOne Migration Tool broswer application");
       broadcastOutput("to send your .hwbackup file to this IP address.");
       broadcastOutput("");
+      broadcastOutput("After the tool uploads the backup, confirm on this device");
+      broadcastOutput("(OLED Yes/No, or type 'yes' / 'no' on serial) before files are written.");
+      broadcastOutput("");
       broadcastOutput("Download Migration Tool:");
       broadcastOutput("  https://github.com/CadenGithubB/HardwareOne-Migration-Tool");
       broadcastOutput("");
@@ -566,7 +569,7 @@ void firstTimeSetupIfNeeded() {
       // (above) shows the whole thing at once. Pages are rendered in the wait loop.
       String rtitles[3] = { "Restore Mode", "Device IP", "Get the Tool" };
       String rbodies[3];
-      rbodies[0] = "Send a .hwbackup to this device using the HardwareOne Migration Tool.";
+      rbodies[0] = "Send a .hwbackup via Migration Tool, then confirm on OLED/serial.";
       rbodies[1] = "  " + ipStr + "\n\nPoint the Migration Tool at this address.";
       rbodies[2] = "github.com/\nCadenGithubB/\nHardwareOne-\nMigration-Tool";
       const int RPAGES = 3;
@@ -574,12 +577,49 @@ void firstTimeSetupIfNeeded() {
       int lastRpage = -1;
 #endif
 
-      // Step 5: Poll until restore completes or user presses B / types 'back'
+      // Step 5: Poll until restore completes or user presses B / types 'back'.
+      // Upload only stages the backup; OLED/serial confirm applies it.
 #if ENABLE_GAMEPAD_SENSOR
       uint32_t lastBtnState = 0xFFFFFFFF;
       bool btnStateInit = false;
 #endif
       while (!gRestoreComplete && !goBack) {
+        if (migrationRestoreAwaitingConfirm()) {
+          broadcastOutput("");
+          broadcastOutput("Backup staged. Confirm to write files and reboot.");
+#if ENABLE_OLED_DISPLAY
+          // Default No — LAN upload alone must not apply. Serial y/n also works
+          // inside getOLEDYesNoPrompt (OLED path listens to serial too).
+          bool confirmed = getOLEDYesNoPrompt("Apply backup?\nWrites files\n& reboots", false);
+#else
+          broadcastOutput("Type 'yes' to apply, or 'no' to discard: ");
+          String line = waitForSerialInputBlocking();
+          line.trim();
+          line.toLowerCase();
+          bool confirmed = (line == "y" || line == "yes");
+#endif
+          if (confirmed) {
+            broadcastOutput("Applying restore...");
+#if ENABLE_OLED_DISPLAY
+            showOLEDMessage("Applying\nrestore...", false);
+#endif
+            if (!applyStagedMigrationRestore()) {
+              broadcastOutput("Restore apply failed. Waiting for another backup...");
+#if ENABLE_OLED_DISPLAY
+              lastRpage = -1;  // force help page redraw
+#endif
+            }
+          } else {
+            discardStagedMigrationRestore();
+            broadcastOutput("Restore discarded. Waiting for another backup...");
+#if ENABLE_OLED_DISPLAY
+            showOLEDMessage("Restore\ndiscarded", true);
+            lastRpage = -1;
+#endif
+          }
+          continue;
+        }
+
 #if ENABLE_OLED_DISPLAY
         // Render the current help page (only when it changes, to avoid flicker)
         if (rpage != lastRpage) {

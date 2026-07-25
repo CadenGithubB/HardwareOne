@@ -12,7 +12,8 @@
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 
 #include "G2_Glasses.h"
-#include "G2_Ring.h"   // g2RingConnect/Disconnect/IsConnected
+#include "System_TaskUtils.h"  // APP_CORE / PRO_CORE task-placement constants
+#include "G2_Ring.h"   // g2RingIsConnected (R1 menu status)
 #include "Bluetooth.h"
 #include "BLE_Peers.h"       // gBlePeerData — G2 AutoConnect in Bluetooth → G2
 #include "System_Settings.h" // setSetting — peer autoConnect + bluetoothAutoStart
@@ -35,8 +36,6 @@
 #if ENABLE_HTTP_SERVER
 #include <esp_http_server.h>
 extern bool gServerIsHttps;
-extern const char* cmd_httpstart(const String&);
-extern const char* cmd_httpstop(const String&);
 #endif
 
 // -----------------------------------------------------------------------------
@@ -100,6 +99,15 @@ static size_t   gScanCacheCount = 0;
 static volatile uint32_t gWifiPendingDeadlineMs = 0;
 static volatile bool     gWifiPendingTaskActive = false;
 
+// Same "Pending..." treatment for the R1 ring connect (see showBluetoothR1Menu /
+// handleBluetoothR1Tap). `ringconnect` returns OK the instant the connect is
+// KICKED, but the scan+connect+auth finishes ~5-8 s later with no completion
+// event — so the immediate menu re-render showed "disconnected" and never
+// updated. While pending, showBluetoothR1Menu() renders "Ring: connecting..."
+// and a watchdog polls g2RingIsConnected() until it flips (or the deadline).
+static volatile uint32_t gRingPendingDeadlineMs = 0;
+static volatile bool     gRingPendingTaskActive = false;
+
 // -----------------------------------------------------------------------------
 // Info text (used by the CLI direct-invocation path)
 // -----------------------------------------------------------------------------
@@ -113,6 +121,12 @@ void g2BuildNetworkInfo(char* out, size_t cap) {
   s += "Network\n";
 
 #if ENABLE_WIFI
+  {
+    // RADIO power axis, then WiFi CONNECTION axis below.
+    char rl[24];
+    snprintf(rl, sizeof(rl), "Radio: %s\n", wifiRadioOn() ? "ON" : "OFF");
+    s += rl;
+  }
   if (WiFi.isConnected()) {
     char line[80];
     String ssid = WiFi.SSID();
@@ -196,38 +210,41 @@ void g2ShowNetworkMenu() {
 
 static void showWiFiMenu() {
   setNetSub(NET_SUB_WIFI);
+  static char radioLine[24];  // "Radio: ON/OFF" — whole-radio power (airplane mode)
   static char wifiLine[64];
   static char autoLine[32];   // "Auto Start: ON/OFF" — boot-time auto-connect
   static char httpLine[40];
   static char espnowLine[40];
 
 #if ENABLE_WIFI
+  // Two separate axes shown as two rows: RADIO power vs WiFi CONNECTION.
+  snprintf(radioLine, sizeof(radioLine), "Radio: %s", wifiRadioOn() ? "ON" : "OFF");
   bool connected = WiFi.isConnected();
   const bool pending = !connected && gWifiPendingDeadlineMs > 0 &&
                        (int32_t)(millis() - gWifiPendingDeadlineMs) < 0;
   if (connected) {
     String ssid = WiFi.SSID();
-    // Truncate long SSIDs so the "WiFi: ON | …" prefix still fits the
-    // ~32-char visible row width.
-    String shown = (ssid.length() > 14) ? (ssid.substring(0, 14) + "~") : ssid;
-    snprintf(wifiLine, sizeof(wifiLine), "WiFi: ON | %s", shown.c_str());
+    // Truncate long SSIDs so the row still fits the ~32-char visible width.
+    String shown = (ssid.length() > 16) ? (ssid.substring(0, 16) + "~") : ssid;
+    snprintf(wifiLine, sizeof(wifiLine), "WiFi: %s", shown.c_str());
   } else if (pending) {
     snprintf(wifiLine, sizeof(wifiLine), "WiFi: Pending...");
   } else {
-    snprintf(wifiLine, sizeof(wifiLine), "WiFi: OFF");
+    snprintf(wifiLine, sizeof(wifiLine), "WiFi: Disconnected");
   }
 #else
   bool connected = false;
+  snprintf(radioLine, sizeof(radioLine), "Radio: n/a");
   snprintf(wifiLine, sizeof(wifiLine), "WiFi: not compiled");
 #endif
 
   snprintf(autoLine, sizeof(autoLine), "Auto Start: %s",
            gSettings.wifiAutoReconnect ? "ON" : "OFF");
 
-  // HTTP(S) and ESP-NOW nest under WiFi because they ride the WiFi radio.
-  // The "(WiFi req.)" tag makes the dependency visible when WiFi is OFF;
-  // the underlying tap still fires (better to surface a real error than
-  // silently no-op).
+  // HTTP(S) and ESP-NOW nest under WiFi because they ride the radio. HTTP needs
+  // an actual network connection (an IP) → tag on `connected`. ESP-NOW only needs
+  // the radio powered → tag on wifiRadioOn(). The underlying tap still fires
+  // (better to surface a real error than silently no-op).
 #if ENABLE_HTTP_SERVER
   snprintf(httpLine, sizeof(httpLine), "HTTP(S) >>%s",
            connected ? "" : " (WiFi req.)");
@@ -236,22 +253,23 @@ static void showWiFiMenu() {
 #endif
 #if ENABLE_ESPNOW
   snprintf(espnowLine, sizeof(espnowLine), "ESP-NOW >>%s",
-           connected ? "" : " (WiFi req.)");
+           wifiRadioOn() ? "" : " (radio off)");
 #else
   snprintf(espnowLine, sizeof(espnowLine), "ESP-NOW: n/a");
 #endif
 
-  // Item indices match dispatch in handleWiFiTap.
+  // Item indices MUST match the dispatch switch in handleWiFiTap.
   const char* items[] = {
-    "<- Network",      // 0 — back to Network top-level chooser
-    wifiLine,          // 1 (toggle: tap = connect best / disconnect)
-    "Disconnect",      // 2 — explicit disconnect (works while Pending too)
-    "Status",          // 3 (drill into detailed info dump)
-    "Scan Networks",   // 4
-    "List Saved",      // 5
-    autoLine,          // 6 (toggle wifiAutoReconnect — boot-time)
-    httpLine,          // 7 — opens HTTP(S) submenu
-    espnowLine,        // 8 — opens ESP-NOW submenu
+    "<- Connect",      // 0 — back to Network top-level chooser
+    radioLine,         // 1 (toggle: radio power on/off — airplane mode)
+    wifiLine,          // 2 (toggle: tap = connect best / disconnect)
+    "Disconnect",      // 3 — explicit disconnect (works while Pending too)
+    "Status",          // 4 (drill into detailed info dump)
+    "Scan Networks",   // 5
+    "List Saved",      // 6
+    autoLine,          // 7 (toggle wifiAutoReconnect — boot-time)
+    httpLine,          // 8 — opens HTTP(S) submenu
+    espnowLine,        // 9 — opens ESP-NOW submenu
   };
   g2ShowListPage(items, sizeof(items) / sizeof(items[0]));
   DEBUG_G2F("[G2] WiFi submenu shown (connected=%d, auto=%d)",
@@ -271,6 +289,9 @@ static void showWiFiStatusPage() {
   size_t n = 0;
 
   strcpy(rows[n], "<- WiFi"); ptrs[n] = rows[n]; n++;
+  // Two separate axes: RADIO power, then WiFi connection State.
+  snprintf(rows[n], sizeof(rows[n]), "Radio: %s", wifiRadioOn() ? "ON" : "OFF");
+  ptrs[n] = rows[n]; n++;
   bool connected = WiFi.isConnected();
   snprintf(rows[n], sizeof(rows[n]), "State: %s",
            connected ? "connected" : "offline");
@@ -501,63 +522,6 @@ static void showEspNowDevices() {
 // Bluetooth submenu
 // -----------------------------------------------------------------------------
 
-// R1 Ring connect — relocated here from the Test Suite so it sits next
-// to the rest of the BLE-peripheral controls. Identical heap-low guard
-// and disconnect-then-connect sequence as the original; the Arduino BLE
-// stack leaks ~30 KB per server↔client reconnect cycle, so a long
-// session can run DRAM low enough that spawning the ring connect task
-// AND the page-swap worker back-to-back triggers an xTaskCreate
-// failure followed seconds later by a BLE-stack assert-and-reboot
-// (observed 2026-04-25 at heap ~2.5 KB). 16 KB is "enough for both
-// tasks plus pb buffer plus a margin"; below that we abort with a
-// clear log and recovery instructions.
-static void triggerRingReconnect() {
-  const uint32_t freeNow = ESP.getFreeHeap();
-  if (freeNow < 16 * 1024) {
-    DEBUG_G2F("[G2] Reconnect Ring: ABORTED — DRAM free %u B < 16 KB safety "
-              "threshold. Reboot or disconnect/reconnect via web UI to "
-              "recover heap (Arduino BLE leak per reconnect cycle is the "
-              "usual cause).",
-              (unsigned)freeNow);
-    return;
-  }
-
-  // Force-disconnect first to give the BLE stack a clean slate.
-  const bool wasUp = g2RingIsConnected();
-  if (wasUp) {
-    DEBUG_G2F("[G2] Reconnect Ring: dropping current connection first "
-              "(heap=%u)", (unsigned)freeNow);
-    g2RingDisconnect();
-    vTaskDelay(pdMS_TO_TICKS(500));
-  } else {
-    DEBUG_G2F("[G2] Reconnect Ring: ring already disconnected, "
-              "skipping disconnect step (heap=%u)", (unsigned)freeNow);
-  }
-
-  if (g2RingConnect()) {
-    DEBUG_G2F("[G2] Reconnect Ring: connect task started — "
-              "watch ringstatus for completion");
-  } else {
-    DEBUG_G2F("[G2] Reconnect Ring: g2RingConnect() returned false — "
-              "run a Temples Scan first to populate ring advertisement");
-  }
-  // Caller is responsible for re-rendering the menu; this helper just
-  // kicks off the ring work.
-}
-
-// Force-disconnect the ring without re-connecting. Mirror of
-// triggerRingReconnect's first half. No heap guard — disconnect doesn't
-// allocate; only connect does.
-static void triggerRingDisconnect() {
-  if (!g2RingIsConnected()) {
-    DEBUG_G2F("[G2] Disconnect Ring: already disconnected — no-op");
-    return;
-  }
-  DEBUG_G2F("[G2] Disconnect Ring: dropping connection (heap=%u)",
-            (unsigned)ESP.getFreeHeap());
-  g2RingDisconnect();
-}
-
 // G2-specific rows (mode/conn, boot AutoConnect, saved-MAC reconnect,
 // disconnect) live here so the parent Bluetooth list stays short. Parent
 // keeps BLE on/off, Auto Start, and R1 ring rows only.
@@ -611,9 +575,13 @@ static void showBluetoothR1Menu() {
 
   const bool active = bleSubsystemActive();
   const bool ringUp = g2RingIsConnected();
+  // "connecting..." while a fresh connect is in flight (async, no completion
+  // event) so the user gets feedback instead of a stale "disconnected".
+  const bool pending = !ringUp && gRingPendingDeadlineMs > 0 &&
+                       (int32_t)(millis() - gRingPendingDeadlineMs) < 0;
   if (active) {
     snprintf(connLine, sizeof(connLine), "Ring: %s",
-             ringUp ? "connected" : "disconnected");
+             pending ? "connecting..." : (ringUp ? "connected" : "disconnected"));
   } else {
     snprintf(connLine, sizeof(connLine), "BLE: stopped");
   }
@@ -694,7 +662,7 @@ static void showBluetoothMenu() {
       // Ring) moved into the R1 submenu 2026-05-09 alongside this
       // restructure.
       const char* items[] = {
-        "<- Network",      // 0
+        "<- Connect",      // 0
         stateLine,         // 1 (toggle = stop client)
         modeLine,          // 2 (toggle — server↔client)
         "G2 >>",           // 3
@@ -705,7 +673,7 @@ static void showBluetoothMenu() {
     } else {
       // Server mode (legacy layout, plus Mode toggle slotted in).
       const char* items[] = {
-        "<- Network",      // 0
+        "<- Connect",      // 0
         stateLine,         // 1 (toggle = stop server)
         modeLine,          // 2 (toggle — server↔client)
         connLine,          // 3 (info)
@@ -721,7 +689,7 @@ static void showBluetoothMenu() {
     snprintf(stateLine, sizeof(stateLine), "BLE: OFF");
     if (isClient) {
       const char* items[] = {
-        "<- Network",      // 0
+        "<- Connect",      // 0
         stateLine,         // 1 (toggle — starts G2 client)
         modeLine,          // 2 (toggle — server↔client)
         "G2 >>",           // 3 (AutoConnect + reconnect when BLE up)
@@ -731,7 +699,7 @@ static void showBluetoothMenu() {
       g2ShowListPage(items, sizeof(items) / sizeof(items[0]));
     } else {
       const char* items[] = {
-        "<- Network",      // 0
+        "<- Connect",      // 0
         stateLine,         // 1 (toggle — starts server)
         modeLine,          // 2 (toggle — server↔client)
         autoLine,          // 3 (toggle bluetoothAutoStart)
@@ -847,8 +815,8 @@ static void spawnNetworkScanWorker() {
   // 4 KB stack: WiFi.scanNetworks itself uses ~1 KB, EvenAI builders
   // need ~400 B for the pb buffer, plus FreeRTOS overhead. Same budget
   // as the AI test worker.
-  if (xTaskCreate(networkScanWorker, "g2_net_scan", 4096, nullptr,
-                  /*prio*/ 5, nullptr) != pdPASS) {
+  if (xTaskCreatePinnedToCore(networkScanWorker, "g2_net_scan", 4096, nullptr,
+                  /*prio*/ 5, nullptr, APP_CORE) != pdPASS) {
     DEBUG_G2F("[G2] Network: scan worker xTaskCreate failed — "
               "running scan inline (BLE will stall briefly)");
     runNetworkScanFlow();  // safe — no vTaskDelete in the body
@@ -1009,7 +977,7 @@ static void onEspNowMenuRefreshDone(bool ok,
 // ESP-NOW (need ~40KB DRAM ...)" when WiFi + HTTP + G2 are all up, or a captured
 // initEspNow() reason. The old path discarded `result` and just re-rendered the
 // menu back to "OFF", so a failed start looked like the button did nothing.
-static char sEspNowOpenMsg[128];
+EXT_RAM_BSS_ATTR static char sEspNowOpenMsg[128];
 static void showEspNowOpenMsg() { g2ShowText(sEspNowOpenMsg); }
 
 static void onEspNowOpenDone(bool ok,
@@ -1052,6 +1020,36 @@ static void onBluetoothG2MenuRefreshDone(bool ok,
   enqueueWifiRedrawFromCallback(cookie, &showBluetoothG2Menu, "Bluetooth-G2-menu refresh");
 }
 
+// Watchdog for the R1 ring connect — mirror of wifiPendingWatchdogTask. Polls
+// g2RingIsConnected() every 500 ms and re-renders the R1 submenu the moment the
+// ring actually connects (scan+connect+auth completes well after `ringconnect`
+// returns OK), or once more when the deadline expires so "connecting..." drops
+// back to "disconnected" instead of getting stuck. Runs on its own task (the
+// poll yields with vTaskDelay); g2ShowListPage off the tap dispatcher is fine —
+// the BLE write path is mutex-guarded (same rationale as the WiFi watchdog).
+static void ringPendingWatchdogTask(void* /*arg*/) {
+  bool rerendered = false;
+  while (gRingPendingDeadlineMs > 0 &&
+         (int32_t)(millis() - gRingPendingDeadlineMs) < 0) {
+    vTaskDelay(pdMS_TO_TICKS(500));
+    if (g2RingIsConnected()) {
+      gRingPendingDeadlineMs = 0;
+      // Only repaint if the user is still on the R1 submenu — otherwise we'd
+      // clobber whatever they navigated to.
+      if (gNetSub == NET_SUB_BLUETOOTH_R1) { showBluetoothR1Menu(); rerendered = true; }
+      break;
+    }
+  }
+  if (!rerendered && gNetSub == NET_SUB_BLUETOOTH_R1) {
+    gRingPendingDeadlineMs = 0;
+    showBluetoothR1Menu();   // deadline expired → drop "connecting..." overlay
+  } else {
+    gRingPendingDeadlineMs = 0;
+  }
+  gRingPendingTaskActive = false;
+  vTaskDelete(nullptr);
+}
+
 // R1 ring submenu refresh — same pattern as the G2 callback above.
 // Called by handleBluetoothR1Tap after R1 AutoConnect cmd_exec completes
 // so the row repaints with the new ON/OFF state. Signature matches the
@@ -1073,7 +1071,22 @@ static void handleWiFiTap(uint32_t idx) {
       g2ShowNetworkMenu();
       break;
 
-    case 1: {  // WiFi: ON|… / WiFi: OFF — toggle. Group A: routed via cmd_exec.
+    case 1: {  // Radio power toggle (airplane mode) — routed via cmd_exec.
+#if ENABLE_WIFI
+      G2CmdCookie cookie{};
+      cookie.targetPage   = g2GetHijackPage();
+      cookie.targetNetSub = (uint8_t)gNetSub;
+      const char* rcmd = wifiRadioOn() ? "radiopower off" : "radiopower on";
+      DEBUG_G2F("[G2] Radio toggle: %s via cmd_exec", rcmd);
+      gWifiPendingDeadlineMs = 0;   // radio power is not the WiFi "Pending" overlay
+      if (!g2SubmitHijackCommand(rcmd, cookie, onWifiMenuRefreshDone, nullptr)) {
+        DEBUG_G2F("[G2] Radio toggle: submit FAILED — no inline mutate");
+      }
+#endif
+      break;
+    }
+
+    case 2: {  // WiFi: connect best / disconnect — toggle. Group A: routed via cmd_exec.
 #if ENABLE_WIFI
       bool connected = WiFi.isConnected();
       G2CmdCookie cookie{};
@@ -1090,9 +1103,9 @@ static void handleWiFiTap(uint32_t idx) {
         gWifiPendingDeadlineMs = 0;   // clear stale pending overlay
         if (!g2SubmitHijackCommand("closewifi", cookie,
                                    onWifiMenuRefreshDone, nullptr)) {
-          DEBUG_G2F("[G2] WiFi toggle: closewifi submit FAILED — inline fallback");
-          WiFi.disconnect(false);
-          showWiFiMenu();
+          // Never mutate WiFi on the tap/BLE task — queue full / OOM /
+          // blank pairedByUser. UI stays as-is; user can retry.
+          DEBUG_G2F("[G2] WiFi toggle: closewifi submit FAILED — no inline mutate");
         }
       } else {
         // Connect path. Optimistic UI: arm the "Pending..." deadline +
@@ -1111,16 +1124,15 @@ static void handleWiFiTap(uint32_t idx) {
 
         if (!g2SubmitHijackCommand("openwifi", cookie,
                                    onWifiMenuRefreshDone, nullptr)) {
-          DEBUG_G2F("[G2] WiFi toggle: openwifi submit FAILED — inline fallback");
-          connectToBestWiFiNetwork();
-        }
-
-        // Watchdog as before — only one alive at a time; subsequent taps
-        // re-arm gWifiPendingDeadlineMs and the running watchdog observes.
-        if (!gWifiPendingTaskActive) {
+          DEBUG_G2F("[G2] WiFi toggle: openwifi submit FAILED — no inline mutate");
+          gWifiPendingDeadlineMs = 0;
+          showWiFiMenu();
+        } else if (!gWifiPendingTaskActive) {
+          // Watchdog only when the kick actually queued — only one alive
+          // at a time; subsequent taps re-arm gWifiPendingDeadlineMs.
           gWifiPendingTaskActive = true;
-          if (xTaskCreate(wifiPendingWatchdogTask, "g2_wifi_pending",
-                          4096, nullptr, /*prio*/ 5, nullptr) != pdPASS) {
+          if (xTaskCreatePinnedToCore(wifiPendingWatchdogTask, "g2_wifi_pending",
+                          4096, nullptr, /*prio*/ 5, nullptr, APP_CORE) != pdPASS) {
             DEBUG_G2F("[G2] WiFi pending: xTaskCreate failed — "
                       "menu won't auto-refresh on connect");
             gWifiPendingTaskActive = false;
@@ -1133,7 +1145,7 @@ static void handleWiFiTap(uint32_t idx) {
       break;
     }
 
-    case 2: {  // Disconnect from the AP but KEEP the radio on, so you can scan /
+    case 3: {  // Disconnect from the AP but KEEP the radio on, so you can scan /
                // reconnect to another network without re-enabling WiFi. Routed
                // through the `wifidisconnect` command (cmd_exec) like every other
                // action — this is deliberately NOT `closewifi`, which also stops
@@ -1146,18 +1158,17 @@ static void handleWiFiTap(uint32_t idx) {
       gWifiPendingDeadlineMs = 0;   // cancel any pending overlay
       DEBUG_G2F("[G2] WiFi: Disconnect (radio stays on) via cmd_exec");
       if (!g2SubmitHijackCommand("wifidisconnect", cookie, onWifiMenuRefreshDone, nullptr)) {
-        WiFi.disconnect(false);
-        showWiFiMenu();
+        DEBUG_G2F("[G2] WiFi: wifidisconnect submit FAILED — no inline mutate");
       }
 #endif
       break;
     }
 
-    case 3:  // Status — drill into detailed info
+    case 4:  // Status — drill into detailed info
       showWiFiStatusPage();
       break;
 
-    case 4: {  // Scan Networks
+    case 5: {  // Scan Networks
 #if ENABLE_WIFI
       DEBUG_G2F("[G2] WiFi: scan triggered from glasses");
       spawnNetworkScanWorker();
@@ -1165,12 +1176,12 @@ static void handleWiFiTap(uint32_t idx) {
       break;
     }
 
-    case 5: {  // List Saved
+    case 6: {  // List Saved
       showWiFiSavedList();
       break;
     }
 
-    case 6: {  // Auto Start toggle — first hijack tap routed through cmd_exec.
+    case 7: {  // Auto Start toggle — first hijack tap routed through cmd_exec.
                // Submits the existing `wifiautoreconnect <0|1>` CLI command
                // via g2SubmitHijackCommand. The completion callback enqueues
                // a Redraw job that the lens applier guards by menuGen and
@@ -1191,22 +1202,17 @@ static void handleWiFiTap(uint32_t idx) {
         BROADCAST_PRINTF("[G2] WiFi: Auto Start toggle %s→%s submitted via cmd_exec",
                          prev ? "ON" : "OFF", prev ? "OFF" : "ON");
       } else {
-        // Submission failed (cmd queue full or alloc OOM) — fall back to the
-        // legacy inline path so the toggle still works. Loud log so we
-        // notice if this fires often (would mean cmd_exec is wedged).
-        BROADCAST_PRINTF("[G2] WiFi: Auto Start submitCommandAsync FAILED — inline fallback");
-        setSetting(gSettings.wifiAutoReconnect, !prev);
-        showWiFiMenu();
+        DEBUG_G2F("[G2] WiFi: Auto Start submit FAILED — no inline mutate");
       }
       break;
     }
 
-    case 7:  // HTTP(S) >> — opens the HTTP submenu (server start/stop, HTTPS
+    case 8:  // HTTP(S) >> — opens the HTTP submenu (server start/stop, HTTPS
              //              mode, auto-start, URL display).
       showHttpMenu();
       break;
 
-    case 8:  // ESP-NOW >> — opens the ESP-NOW submenu (peer list, role, etc.)
+    case 9:  // ESP-NOW >> — opens the ESP-NOW submenu (peer list, role, etc.)
       showEspNowMenu();
       break;
 
@@ -1221,19 +1227,91 @@ static void handleWiFiStatusTap(uint32_t /*idx*/) {
   showWiFiMenu();
 }
 
+// --- Join-a-scanned-AP flow -------------------------------------------------
+// Tap a scanned network → (secured) on-lens char-picker keyboard for the
+// password → `wifiadd "<ssid>" "<pass>" 1 0` through cmd_exec (auth + audit,
+// wifiadd is admin-gated so a non-admin pairer sees the denial text) → the
+// command's result text on the lens. Open APs skip the keyboard and save with
+// a quoted empty password. Accepted v1 limits: keyboard maxLen 32 (< the
+// 63-char PSK ceiling — longer PSKs need the web UI) and password renders
+// unmasked on the wearer-private lens.
+static char sWifiAddSsid[33];
+EXT_RAM_BSS_ATTR static char sWifiAddMsg[128];
+static void showWifiAddMsg() { g2ShowText(sWifiAddMsg); }
+
+static void onWifiAddDone(bool ok, const char* result,
+                          const G2CmdCookie& cookie, void* /*userData*/) {
+  DEBUG_G2F("[G2] wifiadd done: ok=%d result='%s'", (int)ok, result ? result : "");
+  // Show the command's own text — success ("Saved network 'X' ...") and
+  // failures (admin denial, list full) both belong on the lens, not just in
+  // the log (the old stub's silence is exactly what we're fixing).
+  strncpy(sWifiAddMsg,
+          (result && result[0]) ? result : (ok ? "Network saved" : "Add failed"),
+          sizeof(sWifiAddMsg) - 1);
+  sWifiAddMsg[sizeof(sWifiAddMsg) - 1] = '\0';
+  enqueueWifiRedrawFromCallback(cookie, &showWifiAddMsg, "wifiadd done");
+}
+
+// Build + submit from the snapshot SSID and a password. Runs on the BLE
+// notify task (keyboard commit) — String build + submit only, no inline
+// mutate (wrong stack + skips auth). The keyboard charset cannot produce a
+// double-quote, so the password is always safe to quote verbatim.
+static void wifiAddSubmit(const char* pass) {
+  String line = String("wifiadd \"") + sWifiAddSsid + "\" \"" + (pass ? pass : "") + "\" 1 0";
+  G2CmdCookie cookie{};
+  cookie.targetPage   = g2GetHijackPage();
+  cookie.targetNetSub = (uint8_t)gNetSub;
+  if (!g2SubmitHijackCommand(line.c_str(), cookie, onWifiAddDone, nullptr)) {
+    DEBUG_G2F("[G2] wifiadd: submit FAILED — no inline mutate");
+    showScanResults();
+  }
+}
+
+static void wifiAddPassCommit(const char* text) {
+  if (!text || text[0] == '\0') {
+    DEBUG_G2F("[G2] wifiadd: empty password — treated as cancel");
+    showScanResults();
+    return;
+  }
+  wifiAddSubmit(text);
+}
+
+static void wifiAddPassCancel() {
+  DEBUG_G2F("[G2] wifiadd: password entry cancelled");
+  showScanResults();
+}
+
 static void handleWiFiScanTap(uint32_t idx) {
   if (idx == 0) { showWiFiMenu(); return; }
-  // Tapping an AP — without keyboard we can't enter a password, just log
-  // the SSID for the operator. Open APs could be auto-connected via a
-  // future enhancement.
   size_t apIdx = idx - 1;
-  if (apIdx < gScanCacheCount) {
-    const CachedAp& ap = gScanCache[apIdx];
-    DEBUG_G2F("[G2] WiFi: SSID '%s' tapped — secured=%d. G2 has no "
-              "keyboard; use the web UI or CLI 'wifiadd' to save creds.",
-              ap.ssid.c_str(), ap.secured ? 1 : 0);
-    BROADCAST_PRINTF("[G2] WiFi: tapped '%s' — use web UI to add",
-                     ap.ssid.c_str());
+  if (apIdx >= gScanCacheCount) return;
+  const CachedAp& ap = gScanCache[apIdx];
+  // Hidden APs scan with an empty SSID — nothing to add. An SSID containing a
+  // double-quote can't survive the quoted command line (CommandArgs has no
+  // escape support) — refuse rather than mangle it.
+  if (ap.ssid.length() == 0 || ap.ssid.indexOf('"') >= 0) {
+    DEBUG_G2F("[G2] WiFi: tapped hidden/unquotable SSID — ignored");
+    return;
+  }
+  // Snapshot at tap time: the keyboard overlay blocks page taps but NOT the
+  // scan worker, so this gScanCache entry can be rewritten while the
+  // keyboard is open.
+  strncpy(sWifiAddSsid, ap.ssid.c_str(), sizeof(sWifiAddSsid) - 1);
+  sWifiAddSsid[sizeof(sWifiAddSsid) - 1] = '\0';
+  if (!ap.secured) {
+    DEBUG_G2F("[G2] WiFi: open AP '%s' — saving without password", sWifiAddSsid);
+    wifiAddSubmit("");
+    return;
+  }
+  DEBUG_G2F("[G2] WiFi: secured AP '%s' — opening password entry", sWifiAddSsid);
+  TextEntryConfig cfg = {};
+  cfg.prompt   = "WiFi Password";
+  cfg.initial  = "";
+  cfg.maxLen   = 32;   // keyboard cap; >32-char PSKs need the web UI
+  cfg.onCommit = wifiAddPassCommit;
+  cfg.onCancel = wifiAddPassCancel;
+  if (!g2BeginTextEntry(cfg)) {
+    DEBUG_G2F("[G2] WiFi: text-entry failed to start");
   }
 }
 
@@ -1278,8 +1356,8 @@ static void handleWiFiSavedActionTap(uint32_t idx) {
       showWiFiMenu();
     } else if (!gWifiPendingTaskActive) {
       gWifiPendingTaskActive = true;
-      if (xTaskCreate(wifiPendingWatchdogTask, "g2_wifi_pending",
-                      4096, nullptr, /*prio*/ 5, nullptr) != pdPASS) {
+      if (xTaskCreatePinnedToCore(wifiPendingWatchdogTask, "g2_wifi_pending",
+                      4096, nullptr, /*prio*/ 5, nullptr, APP_CORE) != pdPASS) {
         gWifiPendingTaskActive = false;
         gWifiPendingDeadlineMs = 0;
       }
@@ -1290,9 +1368,7 @@ static void handleWiFiSavedActionTap(uint32_t idx) {
     DEBUG_G2F("[G2] WiFi: Forget saved '%s' via cmd_exec", ssid.c_str());
     if (!g2SubmitHijackCommand(line.c_str(), cookie,
                                onWifiSavedListRefreshDone, nullptr)) {
-      extern const char* cmd_wifirm(const String& originalCmd);
-      cmd_wifirm(line);
-      showWiFiSavedList();
+      DEBUG_G2F("[G2] WiFi: Forget saved submit FAILED — no inline mutate");
     }
   }
 #endif
@@ -1304,8 +1380,8 @@ static void handleWiFiSavedActionTap(uint32_t idx) {
 // through the same auth+log path as the CLI form. Completion callback
 // re-renders the ESPNow submenu so the "Name:" row reflects the new
 // value. Empty input is rejected before submit (Cancel covers the
-// "I changed my mind" case). Submit failure falls back to the inline
-// setSetting so the UX still works if cmd_exec is wedged.
+// "I changed my mind" case). Submit failure is a no-op — never setSetting
+// on the tap/BLE task (wrong stack + skips auth).
 static void espnowNameCommit(const char* text) {
   if (!text || text[0] == '\0') {
     DEBUG_G2F("[G2] ESP-NOW Set Name: empty input — keeping previous");
@@ -1318,11 +1394,7 @@ static void espnowNameCommit(const char* text) {
   cookie.targetNetSub = (uint8_t)gNetSub;
   if (!g2SubmitHijackCommand(line.c_str(), cookie,
                              onEspNowMenuRefreshDone, nullptr)) {
-    DEBUG_G2F("[G2] ESP-NOW Set Name: submit FAILED — inline fallback");
-    String old = gSettings.espnowDeviceName;
-    setSetting(gSettings.espnowDeviceName, String(text));
-    BROADCAST_PRINTF("[G2] ESP-NOW name: '%s' -> '%s' (inline fallback)",
-                     old.c_str(), text);
+    DEBUG_G2F("[G2] ESP-NOW Set Name: submit FAILED — no inline mutate");
     showEspNowMenu();
   }
 }
@@ -1357,15 +1429,7 @@ static void handleEspNowTap(uint32_t idx) {
     cookie.targetNetSub = (uint8_t)gNetSub;
     DEBUG_G2F("[G2] ESP-NOW toggle: %s via cmd_exec", line);
     if (!g2SubmitHijackCommand(line, cookie, cb, nullptr)) {
-      DEBUG_G2F("[G2] ESP-NOW toggle: %s submit FAILED — inline fallback", line);
-      extern const char* cmd_espnow_init(const String&);
-      extern const char* cmd_espnow_deinit(const String&);
-      const char* result = running ? cmd_espnow_deinit(String(""))
-                                   : cmd_espnow_init(String(""));
-      BROADCAST_PRINTF("[G2] ESP-NOW: %s → %s (inline fallback)",
-                       running ? "stop" : "start",
-                       result ? result : "(no result)");
-      showEspNowMenu();
+      DEBUG_G2F("[G2] ESP-NOW toggle: %s submit FAILED — no inline mutate", line);
     }
 #else
     DEBUG_G2F("[G2] ESP-NOW: not compiled in");
@@ -1408,9 +1472,7 @@ static void handleEspNowTap(uint32_t idx) {
       BROADCAST_PRINTF("[G2] ESP-NOW: Auto Start toggle %s→%s submitted via cmd_exec",
                        prev ? "ON" : "OFF", prev ? "OFF" : "ON");
     } else {
-      BROADCAST_PRINTF("[G2] ESP-NOW: Auto Start submit FAILED — inline fallback");
-      setSetting(gSettings.espnowenabled, !prev);
-      showEspNowMenu();
+      DEBUG_G2F("[G2] ESP-NOW: Auto Start submit FAILED — no inline mutate");
     }
     return;
   }
@@ -1438,8 +1500,7 @@ static void handleEspNowDevsTap(uint32_t idx) {
 // Toggle the persisted Bluetooth auto-start flag via the `bleautostart`
 // CLI command (routed through cmd_exec → runs as the paired-by user).
 // Hoisted out so every branch of handleBluetoothTap can call it without
-// copy-pasting the submit + cookie + fallback boilerplate. Submit failure
-// falls back to the legacy inline setSetting so the UX still works.
+// copy-pasting the submit boilerplate. Submit failure is a no-op.
 static void bluetoothToggleAutoStart() {
   const bool prev = gSettings.bluetoothAutoStart;
   const char* arg = prev ? "off" : "on";
@@ -1452,9 +1513,7 @@ static void bluetoothToggleAutoStart() {
     BROADCAST_PRINTF("[G2] Bluetooth: Auto Start toggle %s→%s submitted via cmd_exec",
                      prev ? "ON" : "OFF", prev ? "OFF" : "ON");
   } else {
-    BROADCAST_PRINTF("[G2] Bluetooth: Auto Start submit FAILED — inline fallback");
-    setSetting(gSettings.bluetoothAutoStart, !prev);
-    showBluetoothMenu();
+    DEBUG_G2F("[G2] Bluetooth: Auto Start submit FAILED — no inline mutate");
   }
 }
 
@@ -1479,7 +1538,7 @@ static void handleBluetoothG2Tap(uint32_t idx) {
     // glasses become "owned by themselves" the first time you flip this
     // ON from a freshly-paired set — which is fine, since the very first
     // flip would have come from a real admin via the web UI or CLI to
-    // pair them in the first place. Fallback path skips the stamp.
+    // pair them in the first place.
     const bool prev = gBlePeerData[BLE_PEER_G2_GLASSES].autoConnect;
     const char* arg = prev ? "off" : "on";
     char line[64];
@@ -1491,10 +1550,7 @@ static void handleBluetoothG2Tap(uint32_t idx) {
       BROADCAST_PRINTF("[G2] G2 AutoConnect %s→%s submitted via cmd_exec",
                        prev ? "ON" : "OFF", prev ? "OFF" : "ON");
     } else {
-      BROADCAST_PRINTF("[G2] G2 AutoConnect submit FAILED — inline fallback");
-      BlePeerData& d = gBlePeerData[BLE_PEER_G2_GLASSES];
-      setSetting(d.autoConnect, !prev);
-      showBluetoothG2Menu();
+      DEBUG_G2F("[G2] G2 AutoConnect submit FAILED — no inline mutate");
     }
     return;
   }
@@ -1503,16 +1559,28 @@ static void handleBluetoothG2Tap(uint32_t idx) {
     return;
   }
   if (idx == 3) {
-    const bool ok = g2ConnectSaved();
-    BROADCAST_PRINTF("[G2] Reconnect G2 (saved MACs) → %s",
-                     ok ? "started" : "skipped (no MACs or busy)");
-    showBluetoothG2Menu();
+    // Saved-MAC reconnect — same as boot path. Must go through cmd_exec
+    // (auth + stack); never call g2ConnectSaved() on the tap task.
+    G2CmdCookie cookie{};
+    cookie.targetPage   = g2GetHijackPage();
+    cookie.targetNetSub = (uint8_t)gNetSub;
+    DEBUG_G2F("[G2] Reconnect G2 via cmd_exec (openg2 saved)");
+    if (!g2SubmitHijackCommand("openg2 saved", cookie,
+                               onBluetoothG2MenuRefreshDone, nullptr)) {
+      DEBUG_G2F("[G2] Reconnect G2 submit FAILED — no inline mutate");
+    }
     return;
   }
   if (idx == 4) {
-    deinitG2Client();
-    BROADCAST_PRINTF("[G2] Bluetooth: G2 disconnect requested from glasses");
-    showBluetoothG2Menu();
+    // Soft disconnect (keep GATT cache). Full teardown is g2deinit / closeg2 full.
+    G2CmdCookie cookie{};
+    cookie.targetPage   = g2GetHijackPage();
+    cookie.targetNetSub = (uint8_t)gNetSub;
+    DEBUG_G2F("[G2] Disconnect G2 via cmd_exec (closeg2)");
+    if (!g2SubmitHijackCommand("closeg2", cookie,
+                               onBluetoothG2MenuRefreshDone, nullptr)) {
+      DEBUG_G2F("[G2] Disconnect G2 submit FAILED — no inline mutate");
+    }
     return;
   }
   DEBUG_G2F("[G2] Bluetooth → G2: unknown idx=%u", (unsigned)idx);
@@ -1555,10 +1623,7 @@ static void handleBluetoothR1Tap(uint32_t idx) {
       BROADCAST_PRINTF("[G2] R1 AutoConnect %s→%s submitted via cmd_exec",
                        prev ? "ON" : "OFF", prev ? "OFF" : "ON");
     } else {
-      BROADCAST_PRINTF("[G2] R1 AutoConnect submit FAILED — inline fallback");
-      BlePeerData& d = gBlePeerData[BLE_PEER_R1_RING];
-      setSetting(d.autoConnect, !prev);
-      showBluetoothR1Menu();
+      DEBUG_G2F("[G2] R1 AutoConnect submit FAILED — no inline mutate");
     }
     return;
   }
@@ -1567,20 +1632,50 @@ static void handleBluetoothR1Tap(uint32_t idx) {
     return;
   }
   if (idx == 3) {
-    // ringUp → "Reconnect Ring", !ringUp → "Connect Ring". Both use
-    // the same triggerRingReconnect() entry point (the function
-    // handles "already disconnected, skip the disconnect step"
-    // internally, see the ring-bridge log path).
-    BROADCAST_PRINTF("[G2] Bluetooth: %s Ring requested from glasses (R1 submenu)",
+    // ringUp → reconnect (drop + settle + connect on cmd_exec); else connect.
+    // Heap guard + 500 ms settle live inside `ringconnect reconnect`.
+    const char* line = ringUp ? "ringconnect reconnect" : "ringconnect";
+    G2CmdCookie cookie{};
+    cookie.targetPage   = g2GetHijackPage();
+    cookie.targetNetSub = (uint8_t)gNetSub;
+    BROADCAST_PRINTF("[G2] Bluetooth: %s Ring via cmd_exec",
                      ringUp ? "Reconnect" : "Connect");
-    triggerRingReconnect();
-    showBluetoothR1Menu();
+    // Fresh connect: `ringconnect` returns OK on kick-off, but scan+connect+auth
+    // finishes ~5-8 s later with no completion event. Arm the "connecting..."
+    // overlay + watchdog so the menu flips to "connected" when it actually is,
+    // instead of staying stuck on "disconnected". (Reconnect keeps ringUp true,
+    // so its menu already reads right — no overlay needed.) Mirrors WiFi connect.
+    if (!ringUp) {
+      gRingPendingDeadlineMs = millis() + 12000;
+      showBluetoothR1Menu();            // immediate "Ring: connecting..." render
+      vTaskDelay(pdMS_TO_TICKS(150));   // let the REBUILD hit the air before the scan storms BLE
+    }
+    if (!g2SubmitHijackCommand(line, cookie,
+                               onBluetoothR1MenuRefreshDone, nullptr)) {
+      DEBUG_G2F("[G2] R1 %s submit FAILED — no inline mutate",
+                ringUp ? "reconnect" : "connect");
+      gRingPendingDeadlineMs = 0;
+      if (!ringUp) showBluetoothR1Menu();
+    } else if (!ringUp && !gRingPendingTaskActive) {
+      gRingPendingTaskActive = true;
+      if (xTaskCreatePinnedToCore(ringPendingWatchdogTask, "g2_ring_pending",
+                      4096, nullptr, /*prio*/ 5, nullptr, APP_CORE) != pdPASS) {
+        DEBUG_G2F("[G2] Ring pending: xTaskCreate failed — menu won't auto-refresh on connect");
+        gRingPendingTaskActive = false;
+        gRingPendingDeadlineMs = 0;
+      }
+    }
     return;
   }
   if (ringUp && idx == 4) {
-    BROADCAST_PRINTF("[G2] Bluetooth: Disconnect Ring requested from glasses (R1 submenu)");
-    triggerRingDisconnect();
-    showBluetoothR1Menu();
+    G2CmdCookie cookie{};
+    cookie.targetPage   = g2GetHijackPage();
+    cookie.targetNetSub = (uint8_t)gNetSub;
+    BROADCAST_PRINTF("[G2] Bluetooth: Disconnect Ring via cmd_exec");
+    if (!g2SubmitHijackCommand("ringdisconnect", cookie,
+                               onBluetoothR1MenuRefreshDone, nullptr)) {
+      DEBUG_G2F("[G2] R1 disconnect submit FAILED — no inline mutate");
+    }
     return;
   }
   DEBUG_G2F("[G2] Bluetooth → R1: unknown idx=%u (ringUp=%d)",
@@ -1619,16 +1714,7 @@ static void handleBluetoothTap(uint32_t idx) {
     DEBUG_G2F("[G2] Bluetooth toggle: %s via cmd_exec", line);
     if (!g2SubmitHijackCommand(line, cookie,
                                onBluetoothMenuRefreshDone, nullptr)) {
-      DEBUG_G2F("[G2] Bluetooth toggle: %s submit FAILED — inline fallback", line);
-      if (active) {
-        if (isClient) { deinitG2Client(); BROADCAST_PRINTF("[G2] Bluetooth: G2 client stopped (inline fallback)"); }
-        else          { deinitBluetooth(); BROADCAST_PRINTF("[G2] Bluetooth: server stopped (inline fallback)"); }
-      } else {
-        bool ok = isClient ? initG2Client() : initBluetooth();
-        BROADCAST_PRINTF("[G2] Bluetooth: %s start → %s (inline fallback)",
-                         isClient ? "client" : "server", ok ? "ok" : "failed");
-      }
-      showBluetoothMenu();
+      DEBUG_G2F("[G2] Bluetooth toggle: %s submit FAILED — no inline mutate", line);
     }
     return;
   }
@@ -1650,23 +1736,7 @@ static void handleBluetoothTap(uint32_t idx) {
     DEBUG_G2F("[G2] Bluetooth Mode toggle: %s via cmd_exec", line);
     if (!g2SubmitHijackCommand(line, cookie,
                                onBluetoothMenuRefreshDone, nullptr)) {
-      DEBUG_G2F("[G2] Bluetooth Mode toggle: submit FAILED — inline fallback");
-      // Inline fallback: replicate cmd_blemode's destructive-then-set
-      // sequence. Order matters — tear down current mode FIRST, then
-      // flip the setting. setSetting persists.
-      if (isClient) {
-#if ENABLE_G2_GLASSES
-        if (isG2ClientInitialized()) deinitG2Client();
-#endif
-        setSetting(gSettings.bleMode, (int)BLE_MODE_SERVER);
-      } else {
-#if ENABLE_G2_GLASSES
-        if (gBLEState && gBLEState->initialized) deinitBluetooth();
-        setSetting(gSettings.bleMode, (int)BLE_MODE_G2_CLIENT);
-#endif
-      }
-      BROADCAST_PRINTF("[G2] Bluetooth: Mode → %s (inline fallback)", arg);
-      showBluetoothMenu();
+      DEBUG_G2F("[G2] Bluetooth Mode toggle: submit FAILED — no inline mutate");
     }
     return;
   }
@@ -1708,15 +1778,7 @@ static void handleBluetoothTap(uint32_t idx) {
       cookie.targetNetSub = (uint8_t)gNetSub;
       if (!g2SubmitHijackCommand("bleadv toggle", cookie,
                                  onBluetoothMenuRefreshDone, nullptr)) {
-        DEBUG_G2F("[G2] Bluetooth: bleadv toggle submit FAILED — inline fallback");
-        bool started = startBLEAdvertising();
-        if (!started) {
-          stopBLEAdvertising();
-          BROADCAST_PRINTF("[G2] Bluetooth: advertising stopped (inline fallback)");
-        } else {
-          BROADCAST_PRINTF("[G2] Bluetooth: advertising started (inline fallback)");
-        }
-        showBluetoothMenu();
+        DEBUG_G2F("[G2] Bluetooth: bleadv toggle submit FAILED — no inline mutate");
       }
       break;
     }
@@ -1732,10 +1794,7 @@ static void handleBluetoothTap(uint32_t idx) {
       cookie.targetNetSub = (uint8_t)gNetSub;
       if (!g2SubmitHijackCommand("bledisconnect", cookie,
                                  onBluetoothMenuRefreshDone, nullptr)) {
-        DEBUG_G2F("[G2] Bluetooth: bledisconnect submit FAILED — inline fallback");
-        disconnectBLE();
-        BROADCAST_PRINTF("[G2] Bluetooth: disconnect requested (inline fallback)");
-        showBluetoothMenu();
+        DEBUG_G2F("[G2] Bluetooth: bledisconnect submit FAILED — no inline mutate");
       }
       break;
     }
@@ -1868,10 +1927,7 @@ static void handleHttpTap(uint32_t idx) {
       const char* line = wasRunning ? "closehttp" : "openhttp";
       DEBUG_G2F("[G2] HTTP toggle: %s via cmd_exec", line);
       if (!g2SubmitHijackCommand(line, cookie, onHttpMenuRefreshDone, nullptr)) {
-        DEBUG_G2F("[G2] HTTP toggle: %s submit FAILED — inline fallback", line);
-        if (wasRunning) cmd_httpstop(String(""));
-        else            cmd_httpstart(String(""));
-        showHttpMenu();
+        DEBUG_G2F("[G2] HTTP toggle: %s submit FAILED — no inline mutate", line);
       }
       break;
     }
@@ -1884,9 +1940,7 @@ static void handleHttpTap(uint32_t idx) {
         BROADCAST_PRINTF("[G2] HTTPS mode toggle %s→%s submitted (reboot to apply)",
                          prev ? "ON" : "OFF", prev ? "OFF" : "ON");
       } else {
-        BROADCAST_PRINTF("[G2] HTTPS mode submit FAILED — inline fallback");
-        setSetting(gSettings.httpsEnabled, !prev);
-        showHttpMenu();
+        DEBUG_G2F("[G2] HTTPS mode submit FAILED — no inline mutate");
       }
       break;
     }
@@ -1899,9 +1953,7 @@ static void handleHttpTap(uint32_t idx) {
         BROADCAST_PRINTF("[G2] HTTP Auto Start toggle %s→%s submitted",
                          prev ? "ON" : "OFF", prev ? "OFF" : "ON");
       } else {
-        BROADCAST_PRINTF("[G2] HTTP Auto Start submit FAILED — inline fallback");
-        setSetting(gSettings.httpAutoStart, !prev);
-        showHttpMenu();
+        DEBUG_G2F("[G2] HTTP Auto Start submit FAILED — no inline mutate");
       }
       break;
     }

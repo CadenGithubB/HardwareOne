@@ -15,7 +15,8 @@
 //
 //   FTS restore-only server (ENABLE_MIGRATION_TOOL):
 //     - GET  /                  (restore-mode splash, no auth)
-//     - POST /api/restore       (unauthenticated, CORS) - import during FTS only
+//     - POST /api/restore       (unauthenticated, CORS) - stages import during FTS;
+//                               apply requires on-device OLED/serial confirm
 //     - OPTIONS+POST /api/ping  (CORS preflight + connection test)
 
 #if ENABLE_HTTP_SERVER
@@ -38,6 +39,17 @@ void startRestoreOnlyHttpServer();
 
 // Stop the restore-only HTTP server after restore completes.
 void stopRestoreOnlyHttpServer();
+
+// True after POST /api/restore staged a valid backup and is waiting for
+// physical confirm (OLED/serial). LAN alone cannot finish the restore.
+bool migrationRestoreAwaitingConfirm();
+
+// Write staged backup files to flash. Sets gRestoreComplete on success.
+// Returns false if nothing was staged or the write failed.
+bool applyStagedMigrationRestore();
+
+// Discard a staged backup without writing (user cancelled on OLED/serial).
+void discardStagedMigrationRestore();
 
 #endif // ENABLE_MIGRATION_TOOL
 

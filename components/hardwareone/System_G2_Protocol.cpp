@@ -1722,6 +1722,45 @@ size_t g2BuildDevCfgRingConnect(uint8_t seq, uint32_t magic,
 }
 
 // =============================================================================
+// Notification-control builders — sid=0x04 (see header §12 note). Same shape
+// as the DevCfg builders: reuse G2_WRAP_F_CMD/G2_WRAP_F_MAGIC, one nested
+// sub-message, ship as a G2_FLAG_REQUEST envelope.
+size_t g2BuildNotifCtrlEnable(uint8_t seq, uint32_t magic,
+                              uint8_t* out, size_t outCap) {
+  uint8_t pb[24];
+  size_t pos = 0;
+  if (!g2PbWriteUint32(pb, sizeof(pb), &pos, G2_WRAP_F_CMD,
+                       G2_NOTIF_CMD_CTRL)) return 0;
+  if (!g2PbWriteUint32(pb, sizeof(pb), &pos, G2_WRAP_F_MAGIC, magic)) return 0;
+  size_t inner;
+  if (!g2PbBeginNested(pb, sizeof(pb), &pos,
+                       G2_NOTIF_WRAP_F_CTRL, &inner)) return 0;
+  if (!g2PbWriteUint32(pb, sizeof(pb), &pos,
+                       G2_NOTIF_CTRL_F_NOTIF_ENABLE, 1)) return 0;
+  if (!g2PbWriteUint32(pb, sizeof(pb), &pos,
+                       G2_NOTIF_CTRL_F_AUTODISP_EN, 1)) return 0;
+  if (!g2PbEndNested(pb, sizeof(pb), &pos, inner)) return 0;
+  return g2BuildEnvelope(seq, G2_SID_NOTIFICATION, G2_FLAG_REQUEST,
+                         pb, pos, out, outCap);
+}
+
+size_t g2BuildNotifWhitelistDisable(uint8_t seq, uint32_t magic,
+                                    uint8_t* out, size_t outCap) {
+  uint8_t pb[24];
+  size_t pos = 0;
+  if (!g2PbWriteUint32(pb, sizeof(pb), &pos, G2_WRAP_F_CMD,
+                       G2_NOTIF_CMD_WHITELIST_CTRL)) return 0;
+  if (!g2PbWriteUint32(pb, sizeof(pb), &pos, G2_WRAP_F_MAGIC, magic)) return 0;
+  size_t inner;
+  if (!g2PbBeginNested(pb, sizeof(pb), &pos,
+                       G2_NOTIF_WRAP_F_WHITELIST, &inner)) return 0;
+  if (!g2PbWriteUint32(pb, sizeof(pb), &pos,
+                       G2_NOTIF_WHITELIST_F_DISABLE, 1)) return 0;
+  if (!g2PbEndNested(pb, sizeof(pb), &pos, inner)) return 0;
+  return g2BuildEnvelope(seq, G2_SID_NOTIFICATION, G2_FLAG_REQUEST,
+                         pb, pos, out, outCap);
+}
+
 // g2BuildRingRawDataPush — synthesise a sid=0x90 RingDataPackage frame
 // =============================================================================
 // Field tag numbers for RingRawData (encoded as field<<3 | wire-type=0 for

@@ -5,9 +5,11 @@
 #include <ArduinoJson.h>
 
 #include "OLED_Display.h"
+#include "System_AuthIdentity.h"      // currentAuthContext() — D1 local-console-only gate
 #include "System_Command.h"
 #include "System_Debug.h"
 #include "System_ESPNow.h"
+#include "System_ESPNow_Identity.h"   // peerIdentityFindByMac / espnowIdentityFormatPubHex — fingerprint auth
 #include "System_MemUtil.h"
 #include "System_Settings.h"
 #include "System_TaskUtils.h"
@@ -42,7 +44,7 @@
 #if ENABLE_CAMERA_SENSOR
 #include "System_Camera_DVP.h"
 #endif
-#if ENABLE_MICROPHONE_SENSOR
+#if ENABLE_MICROPHONE
 #include "System_Microphone.h"
 #endif
 
@@ -65,11 +67,36 @@ static bool gSensorStreamingEnabled[REMOTE_SENSOR_MAX] = {false};
 
 // Broadcaster task state
 static TaskHandle_t gSensorBroadcasterTask = nullptr;
+// Serializes claiming the broadcaster handle for deletion so an external teardown
+// (stopSensorBroadcaster, core 0) and the in-task lease-lapse self-teardown (core 1)
+// can never both vTaskDelete the same handle (BUG-2 double-free fix).
+static portMUX_TYPE gSensorBcastTaskMux = portMUX_INITIALIZER_UNLOCKED;
+// Atomically take the handle: exactly one caller gets it (non-null) and owns the
+// vTaskDelete; every other caller gets nullptr and must not delete.
+static TaskHandle_t claimBroadcasterForDelete() {
+  taskENTER_CRITICAL(&gSensorBcastTaskMux);
+  TaskHandle_t h = gSensorBroadcasterTask;
+  gSensorBroadcasterTask = nullptr;
+  taskEXIT_CRITICAL(&gSensorBcastTaskMux);
+  return h;
+}
 
 // Per-sensor "last transmit" timestamps so each sensor paces independently.
 // Reset to 0 in startSensorDataStreaming() so the first tick after enable
 // always satisfies the interval check (no separate force-send flag needed).
 static unsigned long gLastTxMs[REMOTE_SENSOR_MAX] = {0};
+
+// ---- Secure sensor fetcher lease state (worker) ----
+// Per-sensor lease deadline (millis). 0 = no lease: manual/local streaming that
+// never auto-expires. >0 = a leased subscription that self-stops in the broadcaster
+// task once millis() passes it (docs/ESPNOW_SENSOR_FETCHER_DESIGN.md, H3 fix).
+static uint32_t gSensorLeaseExpiresAt[REMOTE_SENSOR_MAX] = {0};
+// Per-sensor requested cadence (ms) from the leasing controller. 0 = use the global
+// gSettings.sensorBroadcastIntervalMs. The broadcaster floors both at spec.minIntervalMs.
+static uint32_t gSensorReqIntervalMs[REMOTE_SENSOR_MAX] = {0};
+// The authorized controller's MAC: the encrypted-unicast SENSOR_ENVELOPE reply target.
+// All-zero = no controller set → leased/manual streaming emits nothing on the air (D2).
+static uint8_t gSensorControllerMac[6] = {0};
 
 // ==========================
 // Sensor JSON builder dispatch
@@ -442,6 +469,63 @@ void stopSensorDataStreaming(RemoteSensorType sensorType) {
  }
 
 // ==========================
+// Secure sensor fetcher — authorization + subscription apply (worker side)
+// ==========================
+
+// L4: a configured fingerprint matches only if it is EXACTLY 64 hex chars and
+// case-insensitively equals the live 64-hex pubkey. Empty/malformed → never match.
+static bool sensorFingerprintMatches(const char* configured, const char* liveHex64) {
+  if (!configured || strlen(configured) != 64) return false;
+  return strcasecmp(configured, liveHex64) == 0;
+}
+
+bool espnowSensorControlAuthorized(const uint8_t mac[6]) {
+  const PeerIdentity* id = peerIdentityFindByMac(mac);
+  if (!id) return false;  // not a securely-paired peer
+  char liveHex[65];
+  espnowIdentityFormatPubHex(id->longTermPub, liveHex, sizeof(liveHex));
+  if (sensorFingerprintMatches(gSettings.espnowMasterFingerprint.c_str(), liveHex))       return true;
+  if (sensorFingerprintMatches(gSettings.espnowBackupMasterFingerprint.c_str(), liveHex)) return true;
+  return false;
+}
+
+void espnowApplySensorSubscription(uint8_t mode, uint32_t sensorMask,
+                                   uint32_t intervalMs, uint32_t leaseMs,
+                                   const uint8_t* controllerMac) {
+  if (mode > SENSOR_REQ_ONESHOT) {  // reject unknown/out-of-range modes (3..255)
+    DEBUG_ESPNOW_STREAMF("[SENSOR_SUB] ignoring unknown mode %u", mode);
+    return;
+  }
+  // subscribe/oneshot record the controller as the encrypted-reply target.
+  if ((mode == SENSOR_REQ_SUBSCRIBE || mode == SENSOR_REQ_ONESHOT) && controllerMac) {
+    memcpy(gSensorControllerMac, controllerMac, 6);
+  }
+  for (int i = 0; i < REMOTE_SENSOR_MAX; i++) {
+    if (!(sensorMask & (1u << i))) continue;
+    RemoteSensorType t = (RemoteSensorType)i;
+    if (mode == SENSOR_REQ_UNSUBSCRIBE) {
+      gSensorLeaseExpiresAt[i] = 0;
+      gSensorReqIntervalMs[i]  = 0;
+      // Safe here: we run on espnow_task (super-loop), NOT the broadcaster task, so
+      // stopSensorDataStreaming's task-teardown deletes a *different* handle (H3).
+      stopSensorDataStreaming(t);
+    } else {
+      // subscribe or oneshot: start streaming and stamp the lease.
+      startSensorDataStreaming(t);
+      gSensorReqIntervalMs[i] = intervalMs;
+      uint32_t leaseFor = (mode == SENSOR_REQ_ONESHOT)
+                            ? (uint32_t)(intervalMs ? intervalMs : 500)  // ~one push then expire
+                            : (uint32_t)leaseMs;
+      uint32_t exp = (uint32_t)millis() + leaseFor;
+      if (exp == 0) exp = 1;  // 0 is reserved for "manual / no lease"
+      gSensorLeaseExpiresAt[i] = exp;
+    }
+  }
+  DEBUG_ESPNOW_STREAMF("[SENSOR_SUB] applied mode=%u mask=0x%lx interval=%u lease=%u",
+                       mode, (unsigned long)sensorMask, intervalMs, leaseMs);
+}
+
+// ==========================
 // Sensor Broadcast Control
 // ==========================
 
@@ -459,9 +543,12 @@ static void transmitSensorData(RemoteSensorType sensorType, const char* jsonData
   DEBUG_ESPNOW_STREAMF("[SENSOR_TX] type=%s len=%u", sensorTypeToString(sensorType), jsonLen);
   
   
-  // Send via V4 binary protocol (both bond and mesh modes)
-  extern bool v4_broadcast_sensor_data(RemoteSensorType sensorType, const char* jsonData, uint16_t jsonLen, int* outAttempted);
-  
+  // Send via V4 binary protocol (both bond and mesh modes).
+  // D2: mesh streaming is now an encrypted UNICAST (SENSOR_ENVELOPE) to the leasing
+  // controller — the plaintext broadcast path (v4_broadcast_sensor_data) is retired.
+  extern bool v4_send_sensor_envelope(const uint8_t* dstMac, RemoteSensorType sensorType,
+                                      const char* jsonData, uint16_t jsonLen);
+
 #if ENABLE_BONDED_MODE
   // Check for bond mode first
   if (gSettings.bondModeEnabled && isBondWorker()) {
@@ -508,20 +595,22 @@ static void transmitSensorData(RemoteSensorType sensorType, const char* jsonData
     return;
   }
   
-  // Mesh mode - send via V4 binary protocol
-  DEBUG_ESPNOW_STREAMF("%s", "[SENSOR_DATA_TX] Using V4 binary protocol for mesh broadcast");
-  
-  int attempted = 0;
-  bool sent = v4_broadcast_sensor_data(sensorType, jsonData, jsonLen, &attempted);
+  // D2: encrypted UNICAST to the leasing controller — no plaintext broadcast. With no
+  // controller set (no active/prior lease), a manual local toggle is a no-op on the air.
+  bool haveController = false;
+  for (int b = 0; b < 6; b++) { if (gSensorControllerMac[b] != 0) { haveController = true; break; } }
+  if (!haveController) {
+    DEBUG_ESPNOW_STREAMF("%s", "[SENSOR_DATA_TX] SKIP: no leasing controller — nothing on-air (D2)");
+    return;
+  }
+  DEBUG_ESPNOW_STREAMF("%s", "[SENSOR_DATA_TX] Sending encrypted SENSOR_ENVELOPE to controller");
+  bool sent = v4_send_sensor_envelope(gSensorControllerMac, sensorType, jsonData, jsonLen);
   if (sent) {
-    DEBUG_ESPNOW_STREAMF("[SENSOR_TX] SUCCESS: Broadcast %s data (mesh)", sensorTypeToString(sensorType));
-  } else if (attempted == 0) {
-    // No live mesh peers to send to (e.g. peer rebooting/offline). Not a fault —
-    // nobody is subscribed/present, so there is nothing to transmit.
-    DEBUG_ESPNOW_STREAMF("[SENSOR_TX] no live mesh peers for %s data (nothing to send)", sensorTypeToString(sensorType));
+    DEBUG_ESPNOW_STREAMF("[SENSOR_TX] SUCCESS: encrypted %s reading to controller", sensorTypeToString(sensorType));
   } else {
-    // Peers were present and we attempted a send, but every frame failed.
-    DEBUG_ESPNOW_STREAMF("[SENSOR_TX] ERROR: Failed to broadcast %s data", sensorTypeToString(sensorType));
+    // No live session to the controller (or send failed). Encrypt-or-fail — never a
+    // plaintext fallback (D2). The master's next lease renewal re-warms the session.
+    DEBUG_ESPNOW_STREAMF("[SENSOR_TX] %s reading not sent (no session to controller?)", sensorTypeToString(sensorType));
   }
 }
 
@@ -610,16 +699,29 @@ static void sensorBroadcasterTask(void* param) {
 
     for (int i = 0; i < REMOTE_SENSOR_MAX; i++) {
       if (!gSensorStreamingEnabled[i]) continue;
+
+      // Lease expiry (secure fetcher, H3): if this sensor's lease has lapsed, clear
+      // ONLY the flags here — never call stopSensorDataStreaming/stopSensorBroadcaster
+      // from inside this task (that self-vTaskDeletes our own handle and wedges the
+      // worker until reboot). The self-teardown after the loop handles task exit.
+      if (gSensorLeaseExpiresAt[i] != 0 && (uint32_t)now >= gSensorLeaseExpiresAt[i]) {
+        gSensorLeaseExpiresAt[i]   = 0;
+        gSensorReqIntervalMs[i]    = 0;
+        gSensorStreamingEnabled[i] = false;
+        broadcastSensorStatus((RemoteSensorType)i, false);
+        continue;
+      }
+
       const SensorBroadcastSpec& spec = gSensorSpecs[i];
       if (!spec.builder) continue;  // sensor not compiled in
 
-      // Honor BOTH the per-sensor minimum and the user-tunable global setting,
-      // taking whichever is slower so the user can throttle but never speed up
-      // past a sensor's native cadence.
+      // Honor BOTH the per-sensor minimum and the applicable cadence — the leasing
+      // controller's requested interval if set, else the user-tunable global — taking
+      // whichever is slower so we throttle but never exceed a sensor's native cadence.
       unsigned long interval = spec.minIntervalMs;
-      if (gSettings.sensorBroadcastIntervalMs > interval) {
-        interval = gSettings.sensorBroadcastIntervalMs;
-      }
+      unsigned long requested = gSensorReqIntervalMs[i] ? gSensorReqIntervalMs[i]
+                                                        : gSettings.sensorBroadcastIntervalMs;
+      if (requested > interval) interval = requested;
       if (now - gLastTxMs[i] < interval) continue;
 
       // Buffer is shared across all sensors and was sized at task start to fit
@@ -631,6 +733,29 @@ static void sensorBroadcasterTask(void* param) {
       DEBUG_ESPNOW_STREAMF("[BCAST_TX] %s len=%d", sensorTypeToString((RemoteSensorType)i), len);
       transmitSensorData((RemoteSensorType)i, gBroadcasterBuf, (uint16_t)len);
       gLastTxMs[i] = now;
+    }
+
+    // H3: if every sensor has stopped (e.g. all leases lapsed above), tear the task
+    // down cleanly — NULL our own handle FIRST, then vTaskDelete(nullptr) (which never
+    // returns). Never vTaskDelete our own cached handle, or the global keeps a stale
+    // pointer and startSensorBroadcaster() can never recreate the task until reboot.
+    bool anyStillEnabled = false;
+    for (int i = 0; i < REMOTE_SENSOR_MAX; i++) {
+      if (gSensorStreamingEnabled[i]) { anyStillEnabled = true; break; }
+    }
+    if (!anyStillEnabled) {
+      // H3 + BUG-2: claim the handle atomically. If we win, self-delete. If an external
+      // stopSensorBroadcaster already claimed our handle it will delete us, so we must
+      // stop running WITHOUT self-deleting (a second vTaskDelete on the same task would
+      // fault) — park until that delete lands.
+      TaskHandle_t self = claimBroadcasterForDelete();
+      DEBUGF(DEBUG_ESPNOW_CORE, "[SENSOR_BCAST_TASK] all sensors stopped — self-teardown (won=%d)",
+             (int)(self != nullptr));
+      if (self) {
+        vTaskDelete(nullptr);  // we own the claim — never returns
+      } else {
+        for (;;) vTaskDelay(portMAX_DELAY);  // external stop holds our handle; it deletes us
+      }
     }
 
     vTaskDelay(pdMS_TO_TICKS(50));
@@ -678,9 +803,11 @@ static bool startSensorBroadcaster() {
 
 // Stop the broadcaster task
 static void stopSensorBroadcaster() {
-  if (gSensorBroadcasterTask) {
-    vTaskDelete(gSensorBroadcasterTask);
-    gSensorBroadcasterTask = nullptr;
+  // Race-safe (BUG-2): claim the handle atomically. If another task — or the broadcaster's
+  // own lease-lapse self-teardown — already claimed it, h is nullptr and we do nothing.
+  TaskHandle_t h = claimBroadcasterForDelete();
+  if (h) {
+    vTaskDelete(h);
     DEBUGF(DEBUG_ESPNOW_CORE, "[SENSOR_BROADCASTER] Task stopped");
   }
 }
@@ -888,7 +1015,16 @@ int buildThermalDataJSONInteger(char* buf, size_t bufSize) {
 
 const char* cmd_espnow_sensorstream(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  
+
+  // D1: sensor-stream control is LOCAL-CONSOLE-ONLY. The only remote path to control a
+  // worker's streaming is the fingerprint-gated SENSOR_REQ opcode — the generic
+  // credentialed remote-exec route (espnowremote … espnowsensorstream …) must not be
+  // able to drive a worker's sensors. See docs/ESPNOW_SENSOR_FETCHER_DESIGN.md.
+  if (currentAuthContext().transport == SOURCE_ESPNOW) {
+    return "Error: espnowsensorstream is local-console-only. Remote sensor control is via "
+           "the secure fetcher (SENSOR_REQ), not remote command execution.";
+  }
+
   DEBUG_ESPNOW_STREAMF("[SENSOR_STREAM_CMD] Command received: '%s'", argsInput.c_str());
   
   // Parse: <sensor> <on|off>  (dispatcher strips "espnow sensorstream" prefix)

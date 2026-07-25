@@ -19,6 +19,7 @@
 #include "G2_Glasses.h"  // g2MicSetAfeFeedActive / g2MicReadPcmSamples (Phase 2B)
 #include "HAL_Audio.h"   // single PDM/I2S capture owner (audioCaptureStart/audioReadPcm)
 #include "System_Command.h"
+#include "System_CommandTypes.h"  // Command / ORIGIN_VOICE — voice cmds route through cmd_exec
 #include "System_CLI.h"
 #include "System_User.h"
 #include "System_AuthIdentity.h"  // currentAuthContext (voice arm captures caller identity)
@@ -42,12 +43,15 @@
 #include "model_path.h"
 #include "driver/i2s_pdm.h"
 
-// Debug tags - use DEBUG_MICROPHONE flag and system logging macros
+// Debug tags - SR output gates on the DEBUG_SR bank, not DEBUG_MICROPHONE.
+// DEBUG_SR is the master ("all SR"); each gate ORs it with the one sub-flag
+// naming that output's family, mirroring DEBUG_G2_*F.
 #define TAG_SR "ESP_SR"
-#define DEBUG_SRF(fmt, ...) DEBUG_MICF("[%s] " fmt, TAG_SR, ##__VA_ARGS__)
-#define INFO_SRF(fmt, ...)  do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(0xFFFFFFFF, "[INFO][SYS] [SR] " fmt, ##__VA_ARGS__); } while (0)
-#define WARN_SRF(fmt, ...)  WARN_SYSTEMF("[SR] " fmt, ##__VA_ARGS__)
-#define ERROR_SRF(fmt, ...) ERROR_SYSTEMF("[SR] " fmt, ##__VA_ARGS__)
+#define DEBUG_SRF(fmt, ...)       DEBUGF_QUEUE_DEBUG(DEBUG_SR | DEBUG_SR_LIFECYCLE, "[%s] " fmt, TAG_SR, ##__VA_ARGS__)
+#define DEBUG_SR_AUDIOF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_SR | DEBUG_SR_AFE,       "[%s] " fmt, TAG_SR, ##__VA_ARGS__)
+#define INFO_SRF(fmt, ...)  do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_SR, "[INFO][SR] " fmt, ##__VA_ARGS__); } while (0)
+#define WARN_SRF(fmt, ...)  do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_SR, "[WARN][SR] " fmt, ##__VA_ARGS__); } while (0)
+#define ERROR_SRF(fmt, ...) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_SR, "[ERROR][SR] " fmt, ##__VA_ARGS__)
 
 // I2S PDM Configuration for microphone (XIAO ESP32S3 Sense uses PDM mic)
 #define I2S_SR_NUM          I2S_NUM_0
@@ -84,17 +88,12 @@ static esp_afe_sr_iface_t* gAFE = nullptr;
 static char gWnModelName[64] = {0};
 static char gMnModelName[64] = {0};
 
-// Phase 2B: runtime mic source switch. The SR feed loop reads from
-// either the local PDM mic via I2S (default) or the G2 left-temple
-// mic via the BLE-driven LC3 → PCM ring buffer in G2_Glasses.
-// `setmicsource g2|local` flips this; switching to G2 also arms the
-// ring buffer / decoder and assumes the caller has already issued
-// `g2micon` (which itself requires an active hijack page).
-enum SrMicSource : uint8_t {
-  SR_MIC_SOURCE_LOCAL_PDM = 0,
-  SR_MIC_SOURCE_G2_LEFT   = 1,
-};
-static volatile SrMicSource gSrMicSource = SR_MIC_SOURCE_LOCAL_PDM;
+// Mic source is UNIFIED in HAL_Audio — there is no separate SR-local source of
+// truth. The device-wide `micsource` command sets the preference (audioSetSource);
+// the SR feed loop pulls through audioReadPcm(), which dispatches PDM vs the G2
+// LC3→PCM ring internally, and initI2SMicrophone() leases capture via
+// audioCaptureStart("sr") which arms whichever source resolves + (for G2) enables
+// the glasses stream. Kept only for telemetry on the G2 path:
 static uint64_t gSrG2BytesOk = 0;
 static uint32_t gSrG2ReadZero = 0;
 static esp_afe_sr_data_t* gAFEData = nullptr;
@@ -181,15 +180,33 @@ static bool executeVoiceCommandAsArmedUser(const char* cliCmd, char* out, size_t
     return false;
   }
 
-  AuthContext vctx;
-  vctx.transport = SOURCE_VOICE;
-  vctx.user = user;
-  vctx.ip = "voice";
-  vctx.path = "/voice";
-  vctx.sid = "";
-  vctx.opaque = nullptr;
+  // Route through cmd_exec_task (submitAndExecuteSync) instead of calling
+  // executeCommand() directly on the SR task. This serializes voice commands with
+  // every other command source (no concurrent-handler races on shared state /
+  // static response buffers) and runs them on cmd_exec's 8 KB stack, not ours.
+  extern bool submitAndExecuteSync(const Command& cmd, String& out);
+  Command uc;
+  uc.line = cliCmd;
+  uc.ctx.origin = ORIGIN_VOICE;
+  uc.ctx.auth.transport = SOURCE_VOICE;
+  uc.ctx.auth.user = user;
+  uc.ctx.auth.ip = "voice";
+  uc.ctx.auth.path = "/voice";
+  uc.ctx.auth.sid = "";
+  uc.ctx.auth.opaque = nullptr;
+  uc.ctx.id = (uint32_t)millis();
+  uc.ctx.timestampMs = (uint32_t)millis();
+  uc.ctx.outputMask = MSG_ROUTE_FILE;  // audit to file log; response is the return value
+  uc.ctx.validateOnly = false;
+  uc.ctx.captureOutput = false;
+  uc.ctx.replyHandle = nullptr;
+  uc.ctx.httpReq = nullptr;
 
-  return executeCommand(vctx, cliCmd, out, outSize);
+  String result;
+  bool ok = submitAndExecuteSync(uc, result);
+  strncpy(out, result.c_str(), outSize - 1);
+  out[outSize - 1] = '\0';
+  return ok;
 }
 static uint32_t gLastWakeMs = 0;
 static String gLastCommand = "";
@@ -280,7 +297,16 @@ static uint32_t gSrAutoTuneStartMs = 0;
 static uint32_t gSrAutoTuneStepStartMs = 0;
 static const uint32_t kAutoTuneStepDurationMs = 8000;  // 8 seconds per config
 
-#define SR_DBG_L(lvl, fmt, ...) do { if (gSrDebugLevel >= (lvl)) { DEBUG_SRF(fmt, ##__VA_ARGS__); } } while (0)
+// Tiers 1-2 carry session/lifecycle plumbing, tiers 3-4 the audio chain, so a
+// tier routes to the gate for its family. gSrDebugLevel picks the verbosity,
+// the mask picks the family; both derive from the same six flags.
+#define SR_DBG_L(lvl, fmt, ...) \
+  do { \
+    if (gSrDebugLevel >= (lvl)) { \
+      if ((lvl) >= 3) { DEBUG_SR_AUDIOF(fmt, ##__VA_ARGS__); } \
+      else            { DEBUG_SRF(fmt, ##__VA_ARGS__); } \
+    } \
+  } while (0)
 #define SR_INFO_L(lvl, fmt, ...) do { if (gSrDebugLevel >= (lvl)) { INFO_SRF(fmt, ##__VA_ARGS__); } } while (0)
 
 // Map the new bool-flag debug system to the legacy integer level so existing
@@ -1415,37 +1441,37 @@ static void srDebugPrintTelemetry() {
   
   uint32_t uptimeMs = millis();
   // Use WARN level so telemetry always prints (INFO requires DEBUG_SYSTEM flag)
-  WARN_SYSTEMF("[SR] === SR Telemetry ===");
-  WARN_SYSTEMF("[SR] Uptime: %u ms, Running: %s", (unsigned)uptimeMs, gESPSRRunning ? "yes" : "no");
+  WARN_SRF("=== SR Telemetry ===");
+  WARN_SRF("Uptime: %u ms, Running: %s", (unsigned)uptimeMs, gESPSRRunning ? "yes" : "no");
   
   // Show raw mode and auto-tune status
   if (gSrRawOutputEnabled || gSrAutoTuneActive) {
-    WARN_SYSTEMF("[SR] Raw=%s AutoTune=%s (step %d/%d)", 
+    WARN_SRF("Raw=%s AutoTune=%s (step %d/%d)", 
                  gSrRawOutputEnabled ? "ON" : "OFF",
                  gSrAutoTuneActive ? "ACTIVE" : "off",
                  gSrAutoTuneStep + 1, (int)kAutoTuneConfigCount);
   }
-  WARN_SYSTEMF("[SR] I2S: reads_ok=%u, reads_err=%u, reads_zero=%u, bytes_ok=%llu",
+  WARN_SRF("I2S: reads_ok=%u, reads_err=%u, reads_zero=%u, bytes_ok=%llu",
            (unsigned)gSrI2SReadOk, (unsigned)gSrI2SReadErr, (unsigned)gSrI2SReadZero, (unsigned long long)gSrI2SBytesOk);
-  WARN_SYSTEMF("[SR] I2S: est_rate=%.1f Hz", gSrEstSampleRateHz);
-  WARN_SYSTEMF("[SR] PCM: min=%d, max=%d, abs_avg=%.1f",
+  WARN_SRF("I2S: est_rate=%.1f Hz", gSrEstSampleRateHz);
+  WARN_SRF("PCM: min=%d, max=%d, abs_avg=%.1f",
            (int)gSrLastPcmMin, (int)gSrLastPcmMax, gSrLastPcmAbsAvg);
-  WARN_SYSTEMF("[SR] AFE: feed_chunk=%d, fetch_chunk=%d", gSrAfeFeedChunk, gSrAfeFetchChunk);
-  WARN_SYSTEMF("[SR] AFE: feeds=%u, fetches=%u, last_vol=%.1f dB, last_vad=%d, last_ret=%d",
+  WARN_SRF("AFE: feed_chunk=%d, fetch_chunk=%d", gSrAfeFeedChunk, gSrAfeFetchChunk);
+  WARN_SRF("AFE: feeds=%u, fetches=%u, last_vol=%.1f dB, last_vad=%d, last_ret=%d",
            (unsigned)gSrAfeFeedOk, (unsigned)gSrAfeFetchOk, gSrLastVolumeDb, gSrLastVadState, gSrLastAfeRetValue);
-  WARN_SYSTEMF("[SR] Wake: count=%u, last_ms=%u, last_idx=%d, last_model=%d",
+  WARN_SRF("Wake: count=%u, last_ms=%u, last_idx=%d, last_model=%d",
            (unsigned)gWakeWordCount, (unsigned)gLastWakeMs, gSrLastWakeWordIndex, gSrLastWakeNetModelIndex);
-  WARN_SYSTEMF("[SR] MN: detect_calls=%u, detected=%u, accepted=%u, last_cmd='%s'",
+  WARN_SRF("MN: detect_calls=%u, detected=%u, accepted=%u, last_cmd='%s'",
            (unsigned)gSrMnDetectCalls, (unsigned)gSrMnDetected, (unsigned)gCommandCount, gLastCommand.c_str());
-  WARN_SYSTEMF("[SR] Accept: gap_enabled=%d floor=%.2f gap=%.2f require_speech=%d gap_accepts=%u rejects=%u",
+  WARN_SRF("Accept: gap_enabled=%d floor=%.2f gap=%.2f require_speech=%d gap_accepts=%u rejects=%u",
            gSrGapAcceptEnabled ? 1 : 0, gSrGapAcceptFloor, gSrGapAcceptGap,
            gSrTargetRequireSpeech ? 1 : 0, (unsigned)gSrGapAccepts, (unsigned)gSrLowConfidenceRejects);
-  WARN_SYSTEMF("[SR] DynGain: enabled=%d cur=%.2f min=%.2f max=%.2f target_peak=%.0f alpha=%.2f applied=%u bypassed=%u",
+  WARN_SRF("DynGain: enabled=%d cur=%.2f min=%.2f max=%.2f target_peak=%.0f alpha=%.2f applied=%u bypassed=%u",
            gSrDynGainEnabled ? 1 : 0, gSrDynGainCurrent, gSrDynGainMin, gSrDynGainMax,
            gSrDynGainTargetPeak, gSrDynGainAlpha, (unsigned)gSrDynGainApplied, (unsigned)gSrDynGainBypassed);
-  WARN_SYSTEMF("[SR] Snip: enabled=%d, session_active=%d, ring_samples=%u",
+  WARN_SRF("Snip: enabled=%d, session_active=%d, ring_samples=%u",
            gSrSnipEnabled ? 1 : 0, gSrSnipSessionActive ? 1 : 0, (unsigned)gSrSnipRingSamples);
-  WARN_SYSTEMF("[SR] ====================");
+  WARN_SRF("====================");
 }
 
 static void srDebugResetCounters() {
@@ -1466,7 +1492,7 @@ static void srDebugResetCounters() {
 }
 
 static void restoreMicrophoneAfterSRIfNeeded() {
-#if ENABLE_MICROPHONE_SENSOR
+#if ENABLE_MICROPHONE
   if (!gRestoreMicAfterSR) return;
   gRestoreMicAfterSR = false;
 
@@ -1604,21 +1630,26 @@ static bool saveCommandsFileLocked(size_t& outSaved) {
 // ============================================================================
 
 static bool initI2SMicrophone() {
-#if ENABLE_MICROPHONE_SENSOR
-  // HAL_Audio owns the PDM I2S channel; lease it for SR.
+#if ENABLE_MICROPHONE
+  // Honor the device-wide source preference (same one the mic sensor uses), then
+  // lease capture for SR. audioCaptureStart resolves the source (PDM-first if the
+  // preference is unavailable) and, for G2, arms the ring + enables the glasses
+  // stream — so SR runs off the glasses mic on a PDM-less board too.
+  if (gSettings.micSource == "pdm" && audioSourceAvailable(AUDIO_SRC_LOCAL_PDM)) {
+    audioSetSource(AUDIO_SRC_LOCAL_PDM);
+  } else if (gSettings.micSource == "g2" && audioSourceAvailable(AUDIO_SRC_G2_LEFT)) {
+    audioSetSource(AUDIO_SRC_G2_LEFT);
+  }
   return audioCaptureStart("sr", I2S_SR_SAMPLE_RATE);
 #else
-  // No local PDM mic in this build — SR can only use a remote (G2) source.
-  return false;
-#endif  // ENABLE_MICROPHONE_SENSOR
+  return false;   // no mic subsystem compiled in this build
+#endif  // ENABLE_MICROPHONE
 }
 
 static void deinitI2SMicrophone() {
-#if ENABLE_MICROPHONE_SENSOR
-  audioCaptureStop("sr");          // HAL_Audio owns I2S — release SR's lease.
-#else
-  // No local PDM mic in this build — nothing to release.
-#endif  // ENABLE_MICROPHONE_SENSOR
+#if ENABLE_MICROPHONE
+  audioCaptureStop("sr");          // release SR's capture lease (PDM or G2)
+#endif  // ENABLE_MICROPHONE
 }
 
 // ============================================================================
@@ -2019,34 +2050,27 @@ static void srTask(void* param) {
     size_t bytesRead = 0;
     uint32_t readStartMs = millis();
     esp_err_t err = ESP_OK;
-    if (gSrMicSource == SR_MIC_SOURCE_G2_LEFT) {
-      // Phase 2B: drain the G2 mic ring buffer instead of I2S. Block
-      // up to 100 ms for samples — at 16 kHz the BLE pipe should
-      // refill the ring well within that. Treat short reads as
-      // success: the existing intermediate ring buffer downstream
-      // smooths the cadence into 160-sample AFE chunks.
-      size_t got = g2MicReadPcmSamples(
-          (int16_t*)i2sReadBuf,
-          i2sReadBytes / sizeof(int16_t),
-          /*timeoutMs*/ 100);
-      bytesRead = got * sizeof(int16_t);
-      if (bytesRead > 0) gSrG2BytesOk += bytesRead;
-      else               gSrG2ReadZero++;
-    } else {
-#if ENABLE_MICROPHONE_SENSOR
-      // Local PDM read via HAL_Audio (single I2S owner); errors -> 0 samples.
-      size_t got = audioReadPcm((int16_t*)i2sReadBuf, i2sReadBytes / sizeof(int16_t), 100);
+    {
+      // Unified pull — HAL_Audio dispatches PDM vs the G2 LC3→PCM ring by the
+      // active source; short reads are fine (the downstream ring re-chunks into
+      // 160-sample AFE frames). For G2, block up to 100 ms for the BLE pipe.
+#if ENABLE_MICROPHONE
+      size_t got = audioReadPcm((int16_t*)i2sReadBuf, i2sReadBytes / sizeof(int16_t), /*timeoutMs*/ 100);
       bytesRead = got * sizeof(int16_t);
 #else
-      bytesRead = 0;  // No local PDM mic — local source yields no audio.
+      bytesRead = 0;   // no mic subsystem compiled in this build
 #endif
+      if (audioGetSource() == AUDIO_SRC_G2_LEFT) {
+        if (bytesRead > 0) gSrG2BytesOk += bytesRead;
+        else               gSrG2ReadZero++;
+      }
     }
     uint32_t readDurationMs = millis() - readStartMs;
 
     if (doDetailedLog) {
       WARN_SYSTEMF("[SR_LOOP] Loop %u: %s_read took %u ms, err=0x%x (%s), bytesRead=%u",
                    (unsigned)loopCount,
-                   gSrMicSource == SR_MIC_SOURCE_G2_LEFT ? "g2_mic" : "i2s",
+                   audioGetSource() == AUDIO_SRC_G2_LEFT ? "g2_mic" : "i2s",
                    (unsigned)readDurationMs, err, esp_err_to_name(err), (unsigned)bytesRead);
     }
 
@@ -2063,11 +2087,11 @@ static void srTask(void* param) {
       gSrI2SReadZero++;
       if (loopCount <= 10) {
         WARN_SYSTEMF("[SR_LOOP] %s READ ZERO BYTES at loop %u",
-                     gSrMicSource == SR_MIC_SOURCE_G2_LEFT ? "G2-MIC" : "I2S",
+                     audioGetSource() == AUDIO_SRC_G2_LEFT ? "G2-MIC" : "I2S",
                      (unsigned)loopCount);
       }
       SR_DBG_L(3, "read zero bytes (loop=%u, source=%u)",
-               (unsigned)loopCount, (unsigned)gSrMicSource);
+               (unsigned)loopCount, (unsigned)audioGetSource());
       vTaskDelay(pdMS_TO_TICKS(10));
       continue;
     }
@@ -2420,7 +2444,7 @@ static void srTask(void* param) {
                 
                 if (!accepted) {
                   gSrLowConfidenceRejects++;
-                  WARN_SYSTEMF("[SR] Rejected command: id=%d prob=%.3f (need>=%.2f or gap floor=%.2f gap=%.2f) (rejects=%lu)",
+                  WARN_SRF("Rejected command: id=%d prob=%.3f (need>=%.2f or gap floor=%.2f gap=%.2f) (rejects=%lu)",
                                cmdId, cmdProb, requiredConfidence, gSrGapAcceptFloor, gSrGapAcceptGap, (unsigned long)gSrLowConfidenceRejects);
                   if (isCategoryStage) {
                     broadcastOutput(String("[Voice] I heard '") + normalizePhrase(cmdPhraseCopy) + "'... can you say it again?");
@@ -2564,7 +2588,7 @@ bool startESPSR() {
   
   INFO_SRF("Starting ESP-SR pipeline...");
 
-#if ENABLE_MICROPHONE_SENSOR
+#if ENABLE_MICROPHONE
   WARN_SYSTEMF("[SR_START] Checking microphone sensor: gMicEnabled=%d", gMicEnabled ? 1 : 0);
   if (gMicEnabled) {
     gRestoreMicAfterSR = true;
@@ -3156,33 +3180,10 @@ static const char* cmd_sr_cmds_sync(const String& argsInput) {
 // having a hijack page active and `g2micon` started — without those
 // the firmware sends no audio and the SR loop will see "read zero"
 // every iteration.
-static const char* cmd_setmicsource(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  static char out[200];
-  CommandArgs ca(argsInput);
-  String v = ca.arg(0); v.toLowerCase();
-  if (v.length() == 0) {
-    snprintf(out, sizeof(out),
-             "mic source: %s | g2 ring depth=%u samples, overruns=%u",
-             gSrMicSource == SR_MIC_SOURCE_G2_LEFT ? "g2" : "local",
-             (unsigned)g2MicAfeRingDepth(),
-             (unsigned)g2MicAfeOverrunCount());
-    return out;
-  }
-  if (v == "g2" || v == "g2_left" || v == "left") {
-    if (!g2MicSetAfeFeedActive(true)) {
-      return "Error: mic source: failed to arm G2 feed (alloc/decoder error)";
-    }
-    gSrMicSource = SR_MIC_SOURCE_G2_LEFT;
-    return "mic source: g2_left — also run `g2micon` from a hijack page";
-  }
-  if (v == "local" || v == "pdm" || v == "i2s") {
-    gSrMicSource = SR_MIC_SOURCE_LOCAL_PDM;
-    g2MicSetAfeFeedActive(false);
-    return "mic source: local PDM (I2S)";
-  }
-  return "Error: invalid arguments — Usage: setmicsource [local|g2]";
-}
+// (cmd_setmicsource removed — the mic source is unified device-wide. Use the
+// `micsource [auto|pdm|g2]` command (System_Microphone), which sets the single
+// preference that BOTH the mic sensor and this SR feed loop honor. The G2 ring
+// depth / overrun telemetry that lived here is available via `srstats`.)
 
 static const char* cmd_sr_debug(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
@@ -3615,7 +3616,7 @@ static const char* cmd_sr_tuning_swgain(const String& argsInput) {
   if (mg < 0) mg = 0;
   if (mg > 100) mg = 100;
   setSetting(gSettings.microphoneGain, mg);
-#if ENABLE_MICROPHONE_SENSOR
+#if ENABLE_MICROPHONE
   micGain = mg;
 #endif
   float actualSwgain = 24.0f * ((float)mg / 50.0f);
@@ -3882,7 +3883,6 @@ const CommandEntry espsrCommands[] = {
   { "srraw", "Toggle raw output mode (shows all MultiNet hypotheses).", false, cmd_sr_raw, "Usage: srraw [on|off]" },
   { "srautotune", "Auto-cycle through gain configurations to find best settings.", false, cmd_sr_autotune, "Usage: srautotune [start|stop|status]" },
   { "srtimeout", "Get/set command listening timeout.", false, cmd_sr_timeout, "Usage: srtimeout [1000-30000]" },
-  { "setmicsource", "Switch SR feed source (local PDM / G2 left temple).", false, cmd_setmicsource, "Usage: setmicsource [local|g2]" },
   { "srtuning", "Show/set audio tuning parameters.", false, cmd_sr_tuning, "Usage: srtuning [<gain|agc|vad|swgain|filters> <value>]  (bare = show status)" },
   { "srtuningswgain", "Set software gain (1.0-50.0) by updating shared micgain.", false, cmd_sr_tuning_swgain, "Usage: srtuningswgain <1.0-50.0>" },
   { "srtuninggain", "Set AFE linear gain (0.1-10.0).", false, cmd_sr_tuning_gain, "Usage: srtuninggain <0.1-10.0>" },

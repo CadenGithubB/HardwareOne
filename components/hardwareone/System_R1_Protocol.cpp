@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#include <array>
 
 // =============================================================================
 // CRC16 — CCITT-XMODEM-like with the magic-shift form used by the ring.
@@ -59,32 +60,30 @@ uint16_t r1ModelCrc16(const uint8_t* model, size_t modelLen) {
 // NOT zlib CRC32. Don't substitute esp_crc32_le; it uses a different
 // polynomial AND reflection convention.
 
-static uint32_t* sCrc32Table = nullptr;
-
-static void r1Crc32EnsureTable() {
-  if (sCrc32Table) return;
-  static uint32_t table[256];
+// Table built at COMPILE TIME (constexpr) so the 1 KB of lookup data lives in
+// flash .rodata instead of a runtime-initialized internal-DRAM .bss buffer.
+// Same algorithm as the previous runtime builder (poly 0x1EDC6F41, MSB-first,
+// non-reflected) evaluated by the compiler → byte-identical output.
+static constexpr std::array<uint32_t, 256> r1BuildCrc32Table() {
+  std::array<uint32_t, 256> table{};
   const uint32_t poly = 0x1EDC6F41u;
   for (int v = 0; v < 256; v++) {
     uint32_t crc = (uint32_t)v << 24;
     for (int i = 0; i < 8; i++) {
-      if (crc & 0x80000000u) {
-        crc = (crc << 1) ^ poly;
-      } else {
-        crc <<= 1;
-      }
+      crc = (crc & 0x80000000u) ? (uint32_t)((crc << 1) ^ poly)
+                                : (uint32_t)(crc << 1);
     }
     table[v] = crc;
   }
-  sCrc32Table = table;
+  return table;
 }
+static constexpr std::array<uint32_t, 256> kR1Crc32Table = r1BuildCrc32Table();
 
 uint32_t r1Crc32(const uint8_t* data, size_t len) {
-  r1Crc32EnsureTable();
   uint32_t crc = 0;
   for (size_t i = 0; i < len; i++) {
     uint8_t idx = (uint8_t)(data[i] ^ ((crc >> 24) & 0xFF));
-    crc = (crc << 8) ^ sCrc32Table[idx];
+    crc = (crc << 8) ^ kR1Crc32Table[idx];
   }
   return crc;
 }

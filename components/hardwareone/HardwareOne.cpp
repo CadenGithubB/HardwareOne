@@ -250,7 +250,6 @@ bool appendLineWithCap(const char* path, const String& line, size_t capBytes);
 String setSession(httpd_req_t* req, const String& u);
 String getCookieSID(httpd_req_t* req);
 void buildAllSessionsJson(const String& currentSid, JsonArray& sessions);
-void broadcastWithOrigin(const String& channel, const String& user, const String& origin, const String& message);
 
 #ifndef DEBUGF
 // Debug macros - only emit if flag is set (uses accessor functions)
@@ -514,81 +513,6 @@ static String originPrefix(const char* source, const String& user, const String&
   return String(buf);
 }
 
-#if ENABLE_HTTP_SERVER
-static inline void broadcastWithOrigin(const char* source, const String& user, const String& ip, const String& msg) {
-  DEBUG_SSEF("broadcastWithOrigin called: source='%s' user='%s' ip='%s' msg='%s'",
-             source ? source : "NULL", user.c_str(), ip.c_str(), msg.c_str());
-
-  // Debug: Show all active sessions
-  DEBUG_SSEF("Active sessions count: %d", MAX_SESSIONS);
-  for (int i = 0; i < MAX_SESSIONS; i++) {
-    if (gSessions[i].user.length() > 0) {
-      DEBUG_SSEF("  [%d] user='%s' sid='%s' sockfd=%d expires=%lu ip='%s'",
-                 i, gSessions[i].user.c_str(), gSessions[i].sid.c_str(),
-                 gSessions[i].sockfd, gSessions[i].expiresAt, gSessions[i].ip.c_str());
-    }
-  }
-
-  // Check if this is a targeted message (ip parameter contains username instead of IP)
-  bool isTargetedMessage = false;
-  String targetUser = "";
-
-  // If ip doesn't contain ":" or "." it's likely a username, not an IP
-  if (ip.length() > 0 && ip.indexOf(':') == -1 && ip.indexOf('.') == -1) {
-    isTargetedMessage = true;
-    targetUser = ip;
-    DEBUG_SSEF("Detected targeted message to user: '%s'", targetUser.c_str());
-  }
-
-  if (isTargetedMessage) {
-    // Find the target user's session
-    bool userFound = false;
-    for (int i = 0; i < MAX_SESSIONS; i++) {
-      if (gSessions[i].user.length() > 0 && gSessions[i].user == targetUser) {
-        DEBUG_SSEF("Found target user session [%d] - sending targeted message", i);
-
-        // Create the message with proper prefix
-        String targetedMsg = originPrefix(source ? source : "system", user, targetUser);
-        targetedMsg += msg;
-
-        // Send message directly to this specific session's notice queue
-        DEBUG_SSEF("Sending to session: sockfd=%d sid='%s'", gSessions[i].sockfd, gSessions[i].sid.c_str());
-        sseEnqueueNotice(gSessions[i], targetedMsg);
-        DEBUG_SSEF("Message queued for user '%s' (qCount=%d)", targetUser.c_str(), gSessions[i].nqCount);
-
-        userFound = true;
-        break;
-      }
-    }
-
-    if (!userFound) {
-      DEBUG_SSEF("Target user '%s' not found in active sessions", targetUser.c_str());
-      {
-        char errBuf[80];
-        snprintf(errBuf, sizeof(errBuf), "[ERROR] User '%s' not found or not logged in", targetUser.c_str());
-        broadcastOutput(errBuf);
-      }
-    }
-  } else {
-    // Regular broadcast to all users
-    DEBUG_SSEF("Regular broadcast to all users");
-
-    // Session-only: if origin is serial and serial sink is disabled, enable for this session
-    if (source && strcmp(source, "serial") == 0) {
-      if (!(gOutputFlags & MSG_ROUTE_SERIAL)) {
-        gOutputFlags |= MSG_ROUTE_SERIAL;  // session-only; do not modify persisted settings
-      }
-    }
-    // Prefix and broadcast via simple sinks
-    {
-      String prefixed = originPrefix(source ? source : "system", user, ip);
-      prefixed += msg;
-      broadcastOutput(prefixed);
-    }
-  }
-}
-#endif // ENABLE_HTTP_SERVER
-
 // applySettings() moved to settings.cpp
 
 // ==========================
@@ -840,6 +764,8 @@ void broadcastOutput(const String& s, const CommandContext& ctx) {
     case ORIGIN_G2_HIJACK: source = "g2"; break;
     case ORIGIN_ESPNOW: source = "espnow"; break;
     case ORIGIN_LOCAL_DISPLAY: source = "oled"; break;
+    case ORIGIN_MQTT: source = "mqtt"; break;
+    case ORIGIN_VOICE: source = "voice"; break;
     case ORIGIN_SYSTEM:
     default: source = "system"; break;
   }
@@ -861,14 +787,8 @@ void broadcastOutput(const String& s, const CommandContext& ctx) {
   // have to compute the correct route instead.
   extern void broadcastOutputCore_Routed(const char* text, size_t len, uint8_t route);
   broadcastOutputCore_Routed(prefixed.c_str(), prefixed.length(), route);
-
-  // Ensure web mirror is populated even when MSG_ROUTE_WEB is off in gOutputFlags
-  // (e.g. WiFi down). The circular buffer is always allocated.
-  if (!(gOutputFlags & MSG_ROUTE_WEB) && (route & MSG_ROUTE_WEB) && gWebMirror.buf) {
-    char fmtBuf[DEBUG_MSG_SIZE + 32];
-    int n = snprintf(fmtBuf, sizeof(fmtBuf), "[%lu] %s", (unsigned long)millis(), prefixed.c_str());
-    if (n > 0) gWebMirror.appendDirect(fmtBuf, (size_t)n, true);
-  }
+  // (No web-mirror backfill here: the drain appends WEB-routed messages to
+  // the mirror unconditionally, so a backfill would double-append.)
 
   // Targeted BLE response (direct send to originating connection, not via queue)
   if (ctx.outputMask & MSG_ROUTE_BLE) {
@@ -1095,10 +1015,28 @@ void perfPrintLoopHealth() {
   }
 }
 
+// Struct-read accessor for the loop-health snapshot — the OLED perf screen
+// renders from this instead of parsing perfPrintLoopHealth's text. Returns
+// false while the first 5 s window is still accumulating.
+bool perfGetLoopSnapshot(uint32_t& lapsPerSec, uint32_t& avgMs, uint32_t& maxMs,
+                         uint32_t& stalls5s, uint32_t& totalStalls) {
+  if (!gLoopPerf.snapValid) return false;
+  lapsPerSec  = gLoopPerf.snapLapsPerSec;
+  avgMs       = gLoopPerf.snapAvgMs;
+  maxMs       = gLoopPerf.snapMaxMs;
+  stalls5s    = gLoopPerf.snapStalls;
+  totalStalls = gLoopPerf.totalStalls;
+  return true;
+}
+
 static String exitHelpAndExecute(const String& originalCmd) {
   String banner = exitToNormalBanner() + "\n";
   AuthContext ctx = currentAuthContext();
   ctx.path = "/help/exit";
+  // Deliberately BELOW CMD_RESULT_MAX: this is a stack array, and internal
+  // stack is the scarce resource here — 4 KB in this frame is not worth it for
+  // the help-exit path. A result that doesn't fit now reports that explicitly
+  // (executeCommand's ceiling check) instead of being silently halved.
   char out[2048];
   (void)executeCommand(ctx, originalCmd.c_str(), out, sizeof(out));
   banner += out;
@@ -1272,6 +1210,7 @@ void hardwareone_setup() {
   } else if (filesystemReady) {
     Serial.println("[Settings] No file found, writing defaults");
     logSystemEvent("SETTINGS", "no settings.json — writing defaults");
+    settingsMarkLoadedOk();  // nothing on disk to protect — RAM is the truth
     writeSettingsJson();
   }
 
@@ -1532,7 +1471,10 @@ void hardwareone_setup() {
 #if ENABLE_I2C_SYSTEM
   if (gSettings.i2cBusEnabled && !queueProcessorTask) {
     const uint32_t queueStackWords = SENSOR_QUEUE_STACK_WORDS;
-    if (xTaskCreateLogged(sensorQueueProcessorTask, "sensor_queue_task", queueStackWords, nullptr, TASK_PRIORITY_LOW, &queueProcessorTask, "sensor.queue") != pdPASS) {
+    // Pin to Core 1 (I2C_SENSOR_CORE): this task runs the I2C device-init
+    // transactions, so it carries the same starve-mid-transaction → bus-storm →
+    // panic(4) hazard as the sensor pollers. Must not float onto Wi-Fi-saturated Core 0.
+    if (xTaskCreateLogged(sensorQueueProcessorTask, "sensor_queue_task", queueStackWords, nullptr, TASK_PRIORITY_LOW, &queueProcessorTask, "sensor.queue", I2C_SENSOR_CORE) != pdPASS) {
       ERROR_SYSTEMF("FATAL: Failed to create sensor queue processor task");
       while (1) vTaskDelay(pdMS_TO_TICKS(1000));
     }
@@ -1799,8 +1741,11 @@ void hardwareone_setup() {
   }
 #endif
 
-#if ENABLE_MICROPHONE_SENSOR
-  // Microphone / ESP-SR auto-start
+#if ENABLE_MICROPHONE
+  // Microphone / ESP-SR auto-start. openmic self-guards on availability
+  // (initMicrophone refuses when no source is present), so on a PDM-less board
+  // with the glasses not yet connected this is a graceful no-op; the wearer can
+  // start the mic once the glasses are up (or leave micautostart off).
   // If ESP-SR is enabled, it takes over the microphone - don't start mic separately
   #if ENABLE_ESP_SR
   // Resolve both through this same if/else — SR takes the mic, so resolving them
@@ -2103,12 +2048,17 @@ static void powerSaveTick() {
   // Wake: restore the CPU clock (only if we lowered it), then bring the panel
   // back. Centralized so every wake path stays in sync.
   auto wake = [&]() {
-    if (savedCpuMhz > 80) {
+    // Restore the interactive clock iff idle-enter actually lowered it. Compare
+    // to the LIVE clock rather than a fixed ">80" test: UltraSaver's interactive
+    // floor is exactly 80 MHz yet it sinks to 40 MHz while asleep, so a ">80"
+    // test would strand it at 40 after wake. savedCpuMhz holds the pre-idle
+    // (interactive) clock; 0 means "we never lowered".
+    if (savedCpuMhz != 0 && getCpuFrequencyMhz() < savedCpuMhz) {
       // Same hazard as the enter path below: switching the CPU clock while
       // any I2C task is mid-transaction panics the chip (reset=panic(4)).
       setCpuFrequencyDrained(savedCpuMhz);
-      savedCpuMhz = 0;
     }
+    savedCpuMhz = 0;
     gOledEnabled = true;
     oledResumeFromSleep();
     oledMarkDirty();
@@ -2167,17 +2117,25 @@ static void powerSaveTick() {
   powerSleepTransitionMark();
   oledPrepareForSleep();   // DISPLAYOFF (+ LDO2 cut on FeatherS3); board-aware
   gOledEnabled = false;    // updateOLEDDisplay() now early-returns → refresh stops
-  // Drop to the 80 MHz WiFi floor — radio stays up so HTTP/ESP-NOW remain
-  // reachable; we only shed dynamic core power. Skip if already at/below 80
-  // (e.g. UltraSaver's 40 MHz) so power-save never raises the clock.
+  // Downclock to the current mode's IDLE floor. Every mode holds the 80 MHz
+  // Wi-Fi floor while asleep — radio stays up so HTTP/ESP-NOW remain reachable;
+  // we only shed dynamic core power. UltraSaver is the exception: it sinks all
+  // the way to 40 MHz here (its headline deep-save clock), which is safe ONLY
+  // because the panel is blanked and idle — 40 MHz makes the interactive UI
+  // unusably laggy, so it's confined to this asleep state and any input
+  // (gInputCache.seq) or command wakes it back to >=80 via wake() above. Only
+  // switch if the floor is actually below the live clock (never raise here).
   savedCpuMhz = getCpuFrequencyMhz();
-  if (savedCpuMhz > 80) {
+  const uint32_t idleFloorMhz = getPowerModeIdleCpuFreq(gSettings.powerMode);
+  if (idleFloorMhz < savedCpuMhz) {
     // Guard the clock switch. setCpuFrequencyMhz() swaps the CPU clock and
     // fires clock-change callbacks; unguarded, doing that while gps_task was
     // mid-I2C transaction panic-rebooted the device on every idle power-save
     // entry (reset=panic(4) every ~10 min whenever it was left alone with a
     // GPS fix — the whole 2026-07-17 crash-loop day).
-    setCpuFrequencyDrained(80);
+    setCpuFrequencyDrained(idleFloorMhz);
+  } else {
+    savedCpuMhz = 0;  // nothing lowered → wake() must not "restore" a raise
   }
   asleep = true;
   batteryLogEvent("powersave:enter");
@@ -2306,6 +2264,11 @@ void hardwareone_loop() {
   // 4. NETWORK MAINTENANCE
   // ========================================================================
 
+  // Emit the [EVENT][WIFI] connection-lost line + SYSEVT for a disconnect
+  // snapshotted on the arduino_events task (kept tiny-frame there; the
+  // 256 B log line + SystemEvent local stack HERE instead).
+  wifiEventLogDrain();
+
   perfMarkSection(3);  // section 4: NETWORK MAINTENANCE
 
   // ========================================================================
@@ -2317,6 +2280,10 @@ void hardwareone_loop() {
 #endif
 
   oledUpdate();
+
+  // Advance a running (non-blocking) LED effect one frame. Cheap no-op while
+  // idle; ~20 ms pacing while active. See ledEffectStart in System_NeoPixel.
+  ledEffectTick();
 
 #if ENABLE_OLED_DISPLAY
   powerSaveTick();

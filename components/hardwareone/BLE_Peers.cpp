@@ -139,6 +139,40 @@ const BlePeerSpec* bleRegisteredPeerAt(size_t i) {
 // account doesn't silently transfer ownership. To re-assign, clear the
 // peer first (e.g. via bondrm or settings edit). This avoids surprise
 // privilege swaps if a non-admin briefly handles the device.
+// Resolve who should own a peer when stamping. Prefer the calling task's
+// TLS identity, then live serial/OLED sessions, then the device founder.
+// Never returns guests or synthetic names (AuthBypass / bond-admin).
+static String bleResolveStampUsername(BlePeerKind kind) {
+  extern bool gSerialAuthed;
+  extern String gSerialUser;
+
+  String who = currentAuthContext().user;
+  auto usable = [](const String& u) -> bool {
+    if (u.length() == 0) return false;
+    if (u.equalsIgnoreCase("AuthBypass")) return false;
+    if (u.equalsIgnoreCase(kBondAdminUser)) return false;
+    if (isGuestUser(u)) return false;
+    return true;
+  };
+
+  if (usable(who)) return who;
+
+  if (gLocalDisplayAuthed && usable(gLocalDisplayUser)) {
+    return gLocalDisplayUser;
+  }
+  if (gSerialAuthed && usable(gSerialUser)) {
+    return gSerialUser;
+  }
+
+  // Boot auto-reconnect / anonymous worker / stuck-stamp heal: home the
+  // peer to the device owner so mac+autoConnect can never leave G2 (or
+  // other peers) permanently unowned.
+  (void)kind;
+  String owner = getDeviceOwnerUsername();
+  if (usable(owner)) return owner;
+  return String();
+}
+
 void bleStampPairedByIfBlank(BlePeerKind kind) {
   if (kind >= BLE_PEER_MAX) return;
   BlePeerData& d = gBlePeerData[kind];
@@ -153,34 +187,22 @@ void bleStampPairedByIfBlank(BlePeerKind kind) {
     return;
   }
 
-  // CASE B — no current user installed in the calling task's TLS slot.
-  // Previously a silent no-op; that silent failure is exactly how peers
-  // ended up with mac1/mac2/autoConnect=true persisted but pairedByUser
-  // missing — auto-reconnect at boot runs as ANON, and any hijack-menu
-  // toggle of `bleautoconnect ... on` re-enters this path with
-  // cmd.ctx.auth.user already empty (chicken-and-egg). Both paths fall
-  // through here and the peer ends up unowned permanently until an
-  // authenticated CLI session re-runs `bleautoconnect <peer> on`.
-  //
-  // Make it loud. The WARN is the audit signal — if this fires after
-  // a successful BLE connect, that's the trap being sprung; you've
-  // got 5 seconds to fix it before downstream code cares.
-  const String& who = currentAuthContext().user;
+  // CASE B — resolve an owner (TLS → live session → device founder).
+  // Historically TLS-empty paths (boot reconnect workers, G2 stuck-stamp)
+  // silently skipped and left mac/autoConnect without pairedByUser.
+  String who = bleResolveStampUsername(kind);
   if (who.length() == 0) {
-    // Split across multiple queue entries — each WARN line is capped at
-    // DEBUG_MSG_SIZE (256B) in the debug queue, so a single long line
-    // gets truncated mid-recovery-instruction. Same task, sequential
-    // submission → lines land in order.
-    WARN_BLUETOOTHF("stamp '%s' SKIPPED: pairedByUser blank AND task '%s' has no user identity in TLS.",
+    WARN_BLUETOOTHF("stamp '%s' SKIPPED: no usable owner (task='%s', no TLS/session/founder).",
                     name, task ? task : "?");
-    WARN_BLUETOOTHF("  Effect: peer '%s' remains UNOWNED — every hijack command runs anonymously and admin checks will fail.",
+    WARN_BLUETOOTHF("  Effect: peer '%s' remains UNOWNED until a real user pairs it.",
                     name);
-    WARN_BLUETOOTHF("  Recovery: from a web/serial CLI logged in as admin, run `bleautoconnect %s on`.",
+    WARN_BLUETOOTHF("  Recovery: log in (web/serial/OLED) and run `bleautoconnect %s on` or `openg2`.",
                     name);
     return;
   }
 
   // CASE C — stamping happens here.
+  const bool fromTls = (currentAuthContext().user == who);
   setSetting(d.pairedByUser, who);
 #if ENABLE_HTTP_SERVER
   // One-time security-audit record — G2 only. The glasses have no credential
@@ -189,7 +211,8 @@ void bleStampPairedByIfBlank(BlePeerKind kind) {
   // audited here: pairing them isn't a login and doesn't grant command rights.
   if (kind == BLE_PEER_G2_GLASSES) {
     extern void logAuthAttempt(bool, const char*, const String&, const String&, const String&);
-    logAuthAttempt(true, "g2/pair", who, String("ble"), "G2 glasses paired");
+    logAuthAttempt(true, "g2/pair", who, String("ble"),
+                   fromTls ? "G2 glasses paired" : "G2 glasses owner healed");
   }
 #endif
   // Bump the identity generation: a previously-unowned peer just acquired
@@ -197,8 +220,9 @@ void bleStampPairedByIfBlank(BlePeerKind kind) {
   // hijack identity is X" needs to re-fill. See System_AuthIdentity.h
   // (the canonical doc block for the gen-counter protocol).
   bumpIdentityGeneration("ble.stamp.pairedByUser");
-  DEBUG_G2F("[BLE-Peers] stamp '%s': pairedByUser='%s' (from task='%s')",
-            name, who.c_str(), task ? task : "?");
+  DEBUG_G2F("[BLE-Peers] stamp '%s': pairedByUser='%s' (from task='%s'%s)",
+            name, who.c_str(), task ? task : "?",
+            fromTls ? "" : ", healed/fallback");
 }
 
 void bleSavePeerMac(BlePeerKind kind, const String& mac1, const String& mac2) {
@@ -214,10 +238,8 @@ void bleSavePeerMac(BlePeerKind kind, const String& mac1, const String& mac2) {
   // every successful connect is cheap (no flash churn).
   if (mac1.length() > 0) setSetting(gBlePeerData[kind].mac1, mac1);
   if (mac2.length() > 0) setSetting(gBlePeerData[kind].mac2, mac2);
-  // Capture paired-by identity from whoever ran the connect command (if
-  // any). On boot auto-reconnect the current task's identity is ANON and
-  // the helper no-ops — the pairedByUser field will already be populated
-  // from the original pairing in that case.
+  // Capture / heal paired-by identity. Boot ANON workers fall through to
+  // the device-founder fallback when the field is still blank.
   bleStampPairedByIfBlank(kind);
   // Don't auto-flip autoConnect — that's an explicit user opt-in. Pairing
   // saves the MAC; turning on auto-reconnect is a separate gesture.
@@ -252,6 +274,14 @@ bool bleAnyPeerWantsAutoConnect(void) {
 }
 
 void bleBootReconnect(void) {
+  // Persist any RAM-only heals from blePeersReadJson (or heal now if load
+  // left pairedByUser blank). Safe here — settings load has finished.
+  for (size_t i = 0; i < BLE_PEER_MAX; i++) {
+    if (gBlePeerData[i].mac1.length() > 0 && gBlePeerData[i].pairedByUser.length() == 0) {
+      bleStampPairedByIfBlank((BlePeerKind)i);
+    }
+  }
+
   // Pace 2 s between kicks so the BLE radio isn't doing concurrent scans
   // for two peers. Each peer's connectSaved spawns its own background
   // task — this loop just orders the kick-offs.
@@ -290,7 +320,7 @@ void bleBootReconnect(void) {
 
 const char* cmd_bleautoconnect(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  static char buf[160];
+  EXT_RAM_BSS_ATTR static char buf[160];
 
   // Parse "<name> [on|off]". Empty arg → list all peers' state.
   String arg = argsInput;
@@ -343,7 +373,20 @@ const char* cmd_bleautoconnect(const String& argsInput) {
   // the strongest pairing-intent signal we have — the user is taking
   // ownership of the peer. The helper no-ops if pairedByUser is
   // already set, so flipping on/off in a session won't churn ownership.
-  if (on) bleStampPairedByIfBlank(p->kind);
+  if (on) {
+    bleStampPairedByIfBlank(p->kind);
+    // Never leave autoConnect on for an unowned peer — that is the stuck
+    // state (MAC reconnects, hijack submits reject). Roll back if stamp
+    // still failed (no founder / no session yet).
+    if (d.pairedByUser.length() == 0) {
+      setSetting(d.autoConnect, false);
+      snprintf(buf, sizeof(buf),
+               "[BLE] %s auto-reconnect NOT enabled — pairedByUser is blank "
+               "(log in and retry, or create the device owner first)",
+               p->displayName ? p->displayName : p->name);
+      return buf;
+    }
+  }
   snprintf(buf, sizeof(buf),
            "[BLE] %s auto-reconnect %s%s",
            p->displayName ? p->displayName : p->name,
@@ -409,6 +452,21 @@ void blePeersReadJson(JsonDocument& doc) {
     if (!e["mac2"].isNull())         d.mac2         = e["mac2"].as<const char*>();
     if (!e["autoConnect"].isNull())  d.autoConnect  = e["autoConnect"].as<bool>();
     if (!e["pairedByUser"].isNull()) d.pairedByUser = e["pairedByUser"].as<const char*>();
+  }
+  // Legacy / wiped-stamp heal (RAM only — do NOT setSetting here; we are still
+  // inside readSettingsJson and a flash write would re-enter settings I/O).
+  // Persist happens on the next stamp/save path (bleBootReconnect heals again
+  // via bleStampPairedByIfBlank once load is finished).
+  for (const auto& row : kPeerJsonTable) {
+    BlePeerData& d = gBlePeerData[row.kind];
+    if (d.mac1.length() > 0 && d.pairedByUser.length() == 0) {
+      String owner = getDeviceOwnerUsername();
+      if (owner.length() > 0 && !isGuestUser(owner)) {
+        d.pairedByUser = owner;
+        DEBUG_G2F("[BLE-Peers] readJson heal '%s': pairedByUser='%s' (RAM; persist on next save)",
+                  row.name, owner.c_str());
+      }
+    }
   }
 }
 

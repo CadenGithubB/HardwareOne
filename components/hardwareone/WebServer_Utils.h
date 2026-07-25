@@ -54,13 +54,25 @@ inline esp_err_t sendJsonResponse(httpd_req_t* req, const char* body, ssize_t le
   return httpd_resp_send(req, body, len);
 }
 
+// Guest role HTTP gate. After auth succeeds: guests may only hit an allowlist
+// of status/list GET APIs, HTML view pages, and logout. Everything else
+// (CLI, files, mutate POSTs, camera capture, admin, …) gets 403.
+// Non-guests always pass. Returns false after sending the 403 response.
+// Forward-declared here (defined in System_User.h) so this header parses
+// without pulling in the full user subsystem; the reference param only needs
+// the incomplete type. Callers that expand WEB_AUTH_OR_RETURN already have
+// the complete type in scope.
+struct AuthContext;
+bool webGuestAccessAllowed(httpd_req_t* req, const AuthContext& ctx);
+
 // Authenticate the request and return ESP_OK (unauthenticated) if auth fails.
 // Usage:  WEB_AUTH_OR_RETURN(req, ctx);
 //         ... use ctx.user, ctx.ip etc below ...
 // The ctx variable name is a macro parameter so callers can choose it.
 #define WEB_AUTH_OR_RETURN(req, ctx) \
   AuthContext ctx = makeWebAuthCtx(req); \
-  if (!tgRequireAuth(ctx)) return ESP_OK
+  if (!tgRequireAuth(ctx)) return ESP_OK; \
+  if (!webGuestAccessAllowed(req, ctx)) return ESP_OK
 
 // JSON-response variant: auth + set Content-Type: application/json in one
 // step. Equivalent to WEB_AUTH_OR_RETURN followed by httpd_resp_set_type,
@@ -69,6 +81,7 @@ inline esp_err_t sendJsonResponse(httpd_req_t* req, const char* body, ssize_t le
 #define WEB_AUTH_JSON_OR_RETURN(req, ctx) \
   AuthContext ctx = makeWebAuthCtx(req); \
   if (!tgRequireAuth(ctx)) return ESP_OK; \
+  if (!webGuestAccessAllowed(req, ctx)) return ESP_OK; \
   httpd_resp_set_type(req, "application/json")
 
 // ============================================================================
@@ -401,7 +414,14 @@ inline String getFileBrowserScript() {
           if (!data.success || !data.files) {
             var msg = 'Error loading directory';
             var color = 'var(--danger)';
-            if ((data.__httpStatus === 403) || (data.error && ('' + data.error).toLowerCase().indexOf('admin') >= 0)) {
+            var errStr = ('' + (data.error || '')).toLowerCase();
+            if (errStr.indexOf('guest') >= 0) {
+              // Guest gate (webGuestSendForbidden -> error:"guest_forbidden"):
+              // the whole files surface is off-limits to view-only guests, not
+              // an admin-vs-user thing — say so instead of "Admin required".
+              msg = 'File browsing is not available in a view-only guest session';
+              color = 'var(--muted)';
+            } else if ((data.__httpStatus === 403) || errStr.indexOf('admin') >= 0) {
               msg = 'Admin access required to view this directory';
               color = 'var(--muted)';
             } else if (data.error) {
@@ -557,7 +577,7 @@ inline String getFileBrowserScript() {
         hw.postFormText('/api/cli', { cmd: 'rmdir "' + filePath + '"' })
         .then(function(txt) {
           if (txt.indexOf('Error') >= 0 || txt.indexOf('Failed') >= 0) {
-            alert('Delete failed: ' + txt);
+            alert(txt);  /* txt already leads with its own status word */
           } else {
             loadDirectory(currentPath);
           }
@@ -571,7 +591,7 @@ inline String getFileBrowserScript() {
       // File path: two-step confirm flow.
       hw.cliConfirm('filedelete "' + filePath + '"', confirmMsg).then(function(r) {
         if (r.cancelled) return;
-        if (!r.ok) { alert('Delete failed: ' + (r.result || 'no response')); return; }
+        if (!r.ok) { alert(r.result || 'Error: no response'); return; }
         loadDirectory(currentPath);
       }).catch(function(e) {
         alert('Delete error: ' + e.message);
@@ -1220,10 +1240,10 @@ void streamChunk(httpd_req_t* req, const char* str);
 // have only this to go on, so they must render the right colours server-side.
 const char* resolveUserThemePref(const String& username);
 
-// Stream text into an HTML context with &, <, > and " escaped (the " makes it
-// safe inside a double-quoted attribute too). Required for any file content
-// emitted inside <pre>: unescaped, a file containing "</pre><script>" runs
-// against the viewing user's session.
+// Stream text into an HTML context with &, <, >, ", and ' escaped (attribute-
+// safe in both quote styles). Required for any file content emitted inside
+// <pre>: unescaped, a file containing "</pre><script>" runs against the
+// viewing user's session.
 void streamHtmlEscaped(httpd_req_t* req, const char* buf, size_t len);
 
 // Begin HTML page with standard structure (doctype, head, nav, content wrapper)

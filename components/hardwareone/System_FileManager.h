@@ -33,6 +33,11 @@ struct FileEntry {
   bool isFolder;
   uint32_t size;
   uint8_t permissions;      // Bitmask from FilePermission enum
+  // For folders: number of direct children (capped), populated during
+  // loadDirectory() ONLY when the owning FileManager opted in via
+  // setCountFolderChildren(). 0 for files and when counting is off. Drives the
+  // G2 file explorer's "[#]" item-count badge.
+  uint16_t childCount = 0;
 };
 
 // Pre-rendered file browser data (shared between OLED_Mode_FileBrowser and OLED_Utils)
@@ -64,6 +69,9 @@ public:
   // Without this, an early permission-denied navigate() leaves the
   // cache at totalItems=0 for the rest of the boot.
   bool refresh();
+  // Unconditional re-scan (refresh() is identity-generation-gated and skips
+  // after a plain file delete/rename). Call after mutating the directory.
+  bool forceRescan();
   
   // Selection
   void moveUp();
@@ -108,6 +116,13 @@ public:
   using VisibilityFilter = bool (*)(const FileEntry& entry);
   void setVisibilityFilter(VisibilityFilter filter);
 
+  // Opt in to counting each folder's direct children during loadDirectory()
+  // (result cached in FileEntry.childCount, capped). OFF by default so callers
+  // that don't need it (e.g. the OLED browser) don't pay the extra per-folder
+  // VFS open. The G2 file explorer turns it on to render a "[#]" item-count
+  // badge on folder rows. Toggling it forces a re-scan so the cache reflects it.
+  void setCountFolderChildren(bool on);
+
 private:
   FileManagerState state;
   
@@ -136,6 +151,10 @@ private:
   // Visibility filter for picker-mode browsing. nullptr = no filter
   // (default — viewer behavior).
   VisibilityFilter visibilityFilter_ = nullptr;
+
+  // When true, loadDirectory() counts each folder's children into
+  // FileEntry.childCount. Off by default — see setCountFolderChildren().
+  bool countFolderChildren_ = false;
 
   bool loadDirectory();
   void ensureValidSelection();

@@ -926,7 +926,7 @@ AuthContext systemAuth(const char* scope, const char* reason) {
 // ============================================================================
 
 static const char* cmd_sdmount(const String& argsInput) {
-  static char buf[128];
+  EXT_RAM_BSS_ATTR static char buf[128];
   
 #if !defined(SD_CS_PIN)
   snprintf(buf, sizeof(buf), "ERROR: SD card not supported on this board (no SD_CS_PIN defined)");
@@ -953,7 +953,7 @@ static const char* cmd_sdmount(const String& argsInput) {
 }
 
 static const char* cmd_sdunmount(const String& argsInput) {
-  static char buf[128];
+  EXT_RAM_BSS_ATTR static char buf[128];
   
 #if !defined(SD_CS_PIN)
   snprintf(buf, sizeof(buf), "ERROR: SD card not supported on this board");

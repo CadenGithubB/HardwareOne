@@ -31,7 +31,7 @@
   #if ENABLE_CAMERA_SENSOR
   #include "System_Camera_DVP_Web.h"
   #endif
-  #if ENABLE_MICROPHONE_SENSOR
+  #if ENABLE_MICROPHONE
   #include "System_Microphone_Web.h"
   #endif
   #if ENABLE_GPS_SENSOR
@@ -188,7 +188,7 @@ inline void streamDashboardInner(httpd_req_t* req, const String& username) {
   streamCameraDashboardDef(req);
   httpd_resp_send_chunk(req, "</script>", HTTPD_RESP_USE_STRLEN);
  #endif
- #if ENABLE_MICROPHONE_SENSOR
+ #if ENABLE_MICROPHONE
   httpd_resp_send_chunk(req, "<script>", HTTPD_RESP_USE_STRLEN);
   streamMicrophoneDashboardDef(req);
   httpd_resp_send_chunk(req, "</script>", HTTPD_RESP_USE_STRLEN);
@@ -204,7 +204,7 @@ inline void streamDashboardInner(httpd_req_t* req, const String& username) {
   httpd_resp_send_chunk(req, "<div style='margin:2rem 0'>", HTTPD_RESP_USE_STRLEN);
 
   // Sensor Status Overview
-  httpd_resp_send_chunk(req, "<div style='display:flex;align-items:center;gap:0.75rem'><h3 style='margin:0'>Sensor Status</h3><button onclick='window.Dash.openLayoutEditor(\"sensor-grid\")' style='background:none;border:1px solid var(--border);color:var(--muted);border-radius:4px;padding:2px 8px;font-size:0.75rem;cursor:pointer'>Customize</button><button onclick='window.Dash.openNotifEditor()' style='background:none;border:1px solid var(--border);color:var(--muted);border-radius:4px;padding:2px 8px;font-size:0.75rem;cursor:pointer'>Customize notifications</button></div>", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "<div style='display:flex;align-items:center;gap:0.75rem'><h3 style='margin:0'>Sensor Status</h3><button data-guest-hide onclick='window.Dash.openLayoutEditor(\"sensor-grid\")' style='background:none;border:1px solid var(--border);color:var(--muted);border-radius:4px;padding:2px 8px;font-size:0.75rem;cursor:pointer'>Customize</button><button data-guest-hide onclick='window.Dash.openNotifEditor()' style='background:none;border:1px solid var(--border);color:var(--muted);border-radius:4px;padding:2px 8px;font-size:0.75rem;cursor:pointer'>Customize notifications</button></div>", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "<div id='sensor-loading' style='text-align:center;padding:2rem;color:#87ceeb'>", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "<div style='font-size:1.1rem;margin-bottom:0.5rem'>Loading sensor status...</div>", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "<div style='font-size:0.9rem;opacity:0.7'>Checking connected sensors</div>", HTTPD_RESP_USE_STRLEN);
@@ -213,7 +213,7 @@ inline void streamDashboardInner(httpd_req_t* req, const String& username) {
   httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
 
   // System Stats Section (within same panel)
-  httpd_resp_send_chunk(req, "<div style='display:flex;align-items:center;gap:0.75rem;margin-top:2rem'><h3 style='margin:0'>System Status</h3><button onclick='window.Dash.openLayoutEditor(\"system-grid\")' style='background:none;border:1px solid var(--border);color:var(--muted);border-radius:4px;padding:2px 8px;font-size:0.75rem;cursor:pointer'>Customize</button></div>", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "<div style='display:flex;align-items:center;gap:0.75rem;margin-top:2rem'><h3 style='margin:0'>System Status</h3><button data-guest-hide onclick='window.Dash.openLayoutEditor(\"system-grid\")' style='background:none;border:1px solid var(--border);color:var(--muted);border-radius:4px;padding:2px 8px;font-size:0.75rem;cursor:pointer'>Customize</button></div>", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "<div class='system-grid' id='system-grid' style='display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:1rem;margin:1rem 0;visibility:hidden'>", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req,
     "<div class='sys-card sys-card-tall' data-panel='time'>"
@@ -248,7 +248,7 @@ inline void streamDashboardInner(httpd_req_t* req, const String& username) {
   httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN); // end system-grid
 
 #if ENABLE_WIFI || ENABLE_ESPNOW || (ENABLE_WIFI && ENABLE_MQTT) || ENABLE_BLUETOOTH || ENABLE_ONDEVICE_LLM
-  httpd_resp_send_chunk(req, "<div style='display:flex;align-items:center;gap:0.75rem;margin-top:2rem'><h3 style='margin:0'>Connectivity Status</h3><button onclick='window.Dash.openLayoutEditor(\"conn-grid\")' style='background:none;border:1px solid var(--border);color:var(--muted);border-radius:4px;padding:2px 8px;font-size:0.75rem;cursor:pointer'>Customize</button></div>", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "<div style='display:flex;align-items:center;gap:0.75rem;margin-top:2rem'><h3 style='margin:0'>Connectivity Status</h3><button data-guest-hide onclick='window.Dash.openLayoutEditor(\"conn-grid\")' style='background:none;border:1px solid var(--border);color:var(--muted);border-radius:4px;padding:2px 8px;font-size:0.75rem;cursor:pointer'>Customize</button></div>", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "<div id='conn-grid' style='display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:1rem;margin:1rem 0;visibility:hidden'>", HTTPD_RESP_USE_STRLEN);
 
 #if ENABLE_WIFI
@@ -256,6 +256,7 @@ inline void streamDashboardInner(httpd_req_t* req, const String& username) {
     "<div class='sys-card sys-card-tall' id='conn-wifi-card' data-panel='wifi'>"
     "<div style='font-weight:bold;margin-bottom:0.5rem;color:rgba(255,255,255,0.9);display:flex;align-items:center;gap:0.5rem'>"
     "<span class='status-indicator status-disabled' id='conn-wifi-dot'></span>WiFi</div>"
+    "<div class='sys-card-row'><span>Radio:</span><strong id='conn-wifi-radio'>--</strong></div>"
     "<div class='sys-card-row'><span>SSID:</span><strong id='sys-ssid'>--</strong></div>"
     "<div class='sys-card-row'><span>IP:</span><strong id='sys-ip'>--</strong></div>"
     "<div class='sys-card-row'><span>Channel:</span><strong id='conn-wifi-channel'>--</strong></div>"
@@ -377,7 +378,7 @@ inline void streamDashboardInner(httpd_req_t* req, const String& username) {
         "try{"
           "if(!d||!d.connectivity)return;"
           "var c=d.connectivity;"
-          "if(d.net){var wifiUp=!!(d.net.ip&&d.net.ip!='0.0.0.0');window.Dash.setIndicator('conn-wifi-dot',wifiUp);if(d.net.channel)window.Dash.setText('conn-wifi-channel',d.net.channel);if(d.net.mac)window.Dash.setText('conn-wifi-mac',d.net.mac);var badge=document.getElementById('https-badge');if(badge){badge.style.display=(location.protocol==='https:')?'inline-block':'none';}}"
+          "if(d.net){var wifiUp=(d.net.wifiConnected!=null)?!!d.net.wifiConnected:!!(d.net.ip&&d.net.ip!='0.0.0.0');window.Dash.setIndicator('conn-wifi-dot',wifiUp);if(d.net.radioOn!=null)window.Dash.setText('conn-wifi-radio',d.net.radioOn?(d.net.radioHeldForEspnow?'On (ESP-NOW)':'On'):'Off');if(d.net.channel)window.Dash.setText('conn-wifi-channel',d.net.channel);if(d.net.mac)window.Dash.setText('conn-wifi-mac',d.net.mac);var badge=document.getElementById('https-badge');if(badge){badge.style.display=(location.protocol==='https:')?'inline-block':'none';}}"
           "if(c.espnow){"
             "var en=c.espnow;"
             "window.Dash.setIndicator('conn-espnow-dot',!!en.running);"
@@ -481,6 +482,11 @@ inline void streamDashboardInner(httpd_req_t* req, const String& username) {
     "#dash-notif-modal.open{display:flex}"
     "#dash-notif-inner{background:var(--panel-bg);color:var(--panel-fg);border:1px solid var(--border);border-radius:8px;padding:1.5rem;min-width:320px;max-width:480px;width:90vw;box-shadow:0 8px 32px rgba(0,0,0,0.4)}"
     "#dash-notif-inner h4{margin:0 0 0.5rem 0;font-size:1.1rem;color:var(--panel-fg)}"
+    ".notif-fam{margin:0.35rem 0}"
+    ".notif-fam-hdr{display:flex;align-items:center;gap:0.5rem;padding:0.45rem 0.6rem;"
+    "background:var(--crumb-bg);border:1px solid var(--border);border-radius:6px;"
+    "cursor:pointer;font-weight:600;font-size:0.9rem;color:var(--panel-fg);-webkit-user-select:none;user-select:none}"
+    ".notif-fam-hdr:hover{border-color:var(--accent)}"
     "</style>"
     "<div id='dash-notif-modal'><div id='dash-notif-inner'>"
     "<h4>My notifications</h4>"
@@ -493,34 +499,71 @@ inline void streamDashboardInner(httpd_req_t* req, const String& username) {
     "</div></div></div>"
     "<script>"
     "(function(){"
-    "var _kinds=null,_muted={};"
+    "var _fams=null,_muted={};"
+    /* Grouped by family (from the device — the taxonomy is not duplicated here).
+       Collapsed by default: 134 rows in one scroll is what made this unusable. */
+    "var _open={};"
     "function renderNotifEditor(){"
     "var list=document.getElementById('dash-notif-list');"
-    "if(!list||!_kinds)return;"
+    "if(!list||!_fams)return;"
     "list.innerHTML='';"
-    "_kinds.forEach(function(k){"
+    "var total=0;"
+    "_fams.forEach(function(f){"
+    "var kinds=f.k||[];if(!kinds.length)return;"
+    "total+=kinds.length;"
+    "var mutedN=0;kinds.forEach(function(k){if(_muted[k])mutedN++;});"
+    "var card=document.createElement('div');card.className='notif-fam';"
+    "var hdr=document.createElement('div');hdr.className='notif-fam-hdr';"
+    "var caret=document.createElement('span');caret.textContent=_open[f.n]?'\\u25BE':'\\u25B8';"
+    "caret.style.cssText='width:1em;flex:none;opacity:0.7';"
+    "var ttl=document.createElement('span');ttl.style.flex='1';"
+    "ttl.textContent=f.n+'  ('+(mutedN?mutedN+' of '+kinds.length+' muted':kinds.length)+')';"
+    "if(mutedN===kinds.length)ttl.style.opacity='0.5';"
+    "hdr.appendChild(caret);hdr.appendChild(ttl);"
+    "hdr.onclick=function(){_open[f.n]=!_open[f.n];renderNotifEditor();};"
+    /* Family-level bulk action — the whole point of grouping. Muting a family
+       is one click instead of one per kind. */
+    "var bulk=document.createElement('button');bulk.className='btn';"
+    "var allMuted=(mutedN===kinds.length);"
+    "bulk.textContent=allMuted?'Unmute all':'Mute all';"
+    "bulk.style.cssText='width:auto;padding:2px 10px;font-size:0.75rem';"
+    "bulk.onclick=function(ev){ev.stopPropagation();"
+    "kinds.forEach(function(k){_muted[k]=!allMuted;});renderNotifEditor();};"
+    "hdr.appendChild(bulk);"
+    "card.appendChild(hdr);"
+    "if(_open[f.n]){"
+    "kinds.forEach(function(k){"
     "var div=document.createElement('div');div.className='layout-item';"
+    "div.style.margin='0.2rem 0 0.2rem 1.2rem';"
     "var sp=document.createElement('span');sp.textContent=k;"
     "if(_muted[k])sp.className='layout-hidden';"
     "div.appendChild(sp);"
     "var b=document.createElement('button');b.className='btn';"
     "b.textContent=_muted[k]?'Unmute':'Mute';"
-    "b.style.width='auto';b.style.padding='2px 10px';b.style.fontSize='0.8rem';"
+    "b.style.cssText='width:auto;padding:2px 10px;font-size:0.8rem';"
     "b.onclick=function(){_muted[k]=!_muted[k];renderNotifEditor();};"
     "div.appendChild(b);"
-    "list.appendChild(div);"
+    "card.appendChild(div);"
     "});"
+    "}"
+    "list.appendChild(card);"
+    "});"
+    /* An empty array is truthy, so a failed fetch used to render as silent
+       blankness — indistinguishable from "no kinds exist". Say so out loud. */
+    "if(!total){"
+    "list.innerHTML=\"<div style='opacity:0.7;font-style:italic;padding:0.6rem 0'>No event kinds available.</div>\";"
+    "}"
     "}"
     "window.Dash=window.Dash||{};"
     "window.Dash.openNotifEditor=function(){"
     "document.getElementById('dash-notif-modal').classList.add('open');"
     "document.getElementById('dash-notif-list').textContent='Loading...';"
     "Promise.all(["
-    "hw.postFormText('/api/cli',{cmd:'events kinds json'}),"
+    "hw.fetchJSON('/api/events/kinds'),"
     "hw.fetchJSON('/api/user/settings')"
     "]).then(function(res){"
-    "var m=res[0].match(/\\{\"kinds\":\\[[\\s\\S]*?\\]\\}/);"
-    "_kinds=m?JSON.parse(m[0]).kinds:[];"
+    "if(!res[0]||!Array.isArray(res[0].families))throw new Error('no event-kind families in response');"
+    "_fams=res[0].families||[];"
     "_muted={};"
     "var arr=(res[1]&&res[1].settings&&Array.isArray(res[1].settings.notificationMuted))?res[1].settings.notificationMuted:[];"
     "arr.forEach(function(n){_muted[n]=true;});"
@@ -528,7 +571,8 @@ inline void streamDashboardInner(httpd_req_t* req, const String& username) {
     "}).catch(function(e){document.getElementById('dash-notif-list').textContent='Error: '+e.message;});"
     "};"
     "window.Dash.closeNotifEditor=function(){document.getElementById('dash-notif-modal').classList.remove('open');};"
-    "window.Dash.notifMuteAll=function(v){if(!_kinds)return;_kinds.forEach(function(k){_muted[k]=v;});renderNotifEditor();};"
+    "window.Dash.notifMuteAll=function(v){if(!_fams)return;"
+    "_fams.forEach(function(f){(f.k||[]).forEach(function(k){_muted[k]=v;});});renderNotifEditor();};"
     "window.Dash.saveNotifPrefs=function(){"
     /* Save through the notifyusermute COMMAND (not the raw user-settings POST) so
        every interface shares one validated write path. */

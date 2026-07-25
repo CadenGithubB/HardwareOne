@@ -387,6 +387,125 @@ bool sensorDataInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
 }
 
 // ============================================================================
+// I2C Bus Scan — hardware diagnostics (Hardware menu, under Sensors)
+// ============================================================================
+// Scan-on-demand: A runs the scan, results list the found addresses + their
+// identified names, per bus. Reuses the same probe primitives as the CLI
+// `i2cscan` (i2cPingAddress + i2cConfirmPresent + identifySensor) — no logic
+// duplicated. The scan is a blocking bus sweep (~a few hundred ms), so it runs
+// in the pre-render prepare hook (outside the display I2C transaction) after a
+// one-frame "Scanning..." paint, never in the render or the input task.
+
+#if ENABLE_I2C_SYSTEM
+
+#define I2C_DIAG_MAX 20
+struct I2cDiagEntry { uint8_t bus; uint8_t addr; char name[18]; };
+EXT_RAM_BSS_ATTR static I2cDiagEntry sI2cDiagResults[I2C_DIAG_MAX];
+static int     sI2cDiagCount  = 0;
+static int     sI2cDiagScroll = 0;
+// 0=idle (prompt), 1=requested (paint "Scanning" next frame), 2=running
+// (scan this prepare), 3=done (results). The two-step 1→2 gives the
+// "Scanning..." frame time to paint before the blocking sweep.
+static uint8_t sI2cDiagPhase  = 0;
+
+static void i2cDiagRunScan() {
+  sI2cDiagCount = 0;
+  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  if (!mgr) return;
+  for (uint8_t bus = 0; bus < 2; bus++) {
+    if (!mgr->isBusInitialized(bus)) continue;
+    for (uint8_t addr = 1; addr < 127 && sI2cDiagCount < I2C_DIAG_MAX; addr++) {
+      if (i2cPingAddress(addr, 100000, 50, bus) &&
+          i2cConfirmPresent(addr, 100000, 50, bus)) {
+        I2cDiagEntry& e = sI2cDiagResults[sI2cDiagCount++];
+        e.bus  = bus;
+        e.addr = addr;
+        String id = identifySensor(addr);
+        strncpy(e.name, id.c_str(), sizeof(e.name) - 1);
+        e.name[sizeof(e.name) - 1] = '\0';
+      }
+    }
+  }
+}
+
+// Pre-render hook (registered in the updateOLEDDisplay switch). Advances the
+// scan phase; the actual sweep runs here, off the render transaction.
+void prepareI2cDiagData() {
+  if (sI2cDiagPhase == 1) { sI2cDiagPhase = 2; return; }  // let "Scanning" paint
+  if (sI2cDiagPhase == 2) {
+    i2cDiagRunScan();
+    sI2cDiagScroll = 0;
+    sI2cDiagPhase  = 3;
+  }
+}
+
+static void displayI2cDiag() {
+  if (!oledDisplay || !oledConnected) return;
+  int y = OLED_CONTENT_START_Y;
+  oledDisplay->setTextSize(1);
+  oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
+
+  if (sI2cDiagPhase == 0) {
+    oledDisplay->setCursor(0, y);
+    oledDisplay->println("I2C bus scan");
+    oledDisplay->setCursor(0, y + 14);
+    oledDisplay->print("A: Scan");
+    return;
+  }
+  if (sI2cDiagPhase == 1 || sI2cDiagPhase == 2) {
+    oledDisplay->setCursor(0, y);
+    oledDisplay->print("Scanning...");
+    oledMarkDirty();  // keep rendering until prepare advances to results
+    return;
+  }
+
+  // Results.
+  oledDisplay->setCursor(0, y);
+  oledDisplay->printf("Found %d   A:rescan", sI2cDiagCount);
+  y += 11;
+  if (sI2cDiagCount == 0) {
+    oledDisplay->setCursor(0, y);
+    oledDisplay->print("No devices found");
+    return;
+  }
+  const int rowH = 9;
+  const int visible = 4;
+  for (int i = 0; i < visible; i++) {
+    int idx = sI2cDiagScroll + i;
+    if (idx >= sI2cDiagCount) break;
+    const I2cDiagEntry& e = sI2cDiagResults[idx];
+    oledDisplay->setCursor(0, y);
+    oledDisplay->printf("0x%02X b%u %.11s", e.addr, (unsigned)e.bus, e.name);
+    y += rowH;
+  }
+  if (sI2cDiagScroll + visible < sI2cDiagCount) {
+    oledDisplay->setCursor(122, OLED_CONTENT_START_Y + OLED_CONTENT_HEIGHT - 8);
+    oledDisplay->print("v");
+  }
+}
+
+static bool i2cDiagInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed) {
+  if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
+    sI2cDiagPhase = 1;   // request a scan (paints "Scanning" next frame)
+    oledMarkDirty();
+    return true;
+  }
+  if (sI2cDiagPhase == 3) {
+    if (gNavEvents.down && sI2cDiagScroll + 4 < sI2cDiagCount) { sI2cDiagScroll++; return true; }
+    if (gNavEvents.up   && sI2cDiagScroll > 0)                 { sI2cDiagScroll--; return true; }
+  }
+  return false;  // B falls through to the central back handler
+}
+
+// Reset to the prompt on forward entry so re-opening the screen doesn't show
+// a stale result set from a previous visit.
+static void i2cDiagOnEnter(bool isForward) {
+  if (isForward) { sI2cDiagPhase = 0; sI2cDiagCount = 0; sI2cDiagScroll = 0; }
+}
+
+#endif  // ENABLE_I2C_SYSTEM
+
+// ============================================================================
 // Mode Registration
 // ============================================================================
 
@@ -394,6 +513,9 @@ static const OLEDModeEntry sSensorModes[] = {
   { OLED_SENSOR_DATA,  "Sensor Data", "notify_sensor", displaySensorData,              nullptr, sensorDataInputHandler, false, -1, "B:Back" },
   { OLED_SENSOR_LIST,  "Sensor List", "notify_sensor", displayConnectedSensorsRendered, nullptr, nullptr,               false, -1, "B:Back" },
   { OLED_BOOT_SENSORS, "Boot",        "notify_sensor", displayConnectedSensorsRendered, nullptr, nullptr,               false, -1, "B:Back" },
+#if ENABLE_I2C_SYSTEM
+  { OLED_I2C_DIAG,     "I2C Scan",    "notify_sensor", displayI2cDiag,                  nullptr, i2cDiagInputHandler,   false, -1, "A:Scan B:Back", i2cDiagOnEnter },
+#endif
 };
 
 REGISTER_OLED_MODE_MODULE(sSensorModes, sizeof(sSensorModes) / sizeof(sSensorModes[0]), "Sensors");

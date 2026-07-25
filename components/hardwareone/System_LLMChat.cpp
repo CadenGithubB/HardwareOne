@@ -40,7 +40,7 @@ struct InternalTurn {
   uint16_t     tokensPerSecX10;   // ASSISTANT only
 };
 
-static InternalTurn sTurns[LLM_CHAT_MAX_TURNS];
+EXT_RAM_BSS_ATTR static InternalTurn sTurns[LLM_CHAT_MAX_TURNS];
 static uint8_t sTurnHead  = 0;    // index of OLDEST valid turn (ring start)
 static uint8_t sTurnCount = 0;    // 0..LLM_CHAT_MAX_TURNS
 

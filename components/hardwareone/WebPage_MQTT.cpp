@@ -34,8 +34,8 @@ void streamMqttInner(httpd_req_t* req) {
 <h3 style='margin-top:0;color:var(--panel-fg)'>Service Status</h3>
 <div style='display:flex;align-items:center;gap:1rem;flex-wrap:wrap'>
   <button class='btn' id='btn-mqtt-refresh-svc'>Refresh Status</button>
-  <button class='btn' id='btn-mqtt-enable-svc' style='display:none'>Enable MQTT</button>
-  <button class='btn' id='btn-mqtt-disable-svc' style='display:none'>Disable MQTT</button>
+  <button class='btn' id='btn-mqtt-enable-svc' style='display:none' data-guest-hide>Enable MQTT</button>
+  <button class='btn' id='btn-mqtt-disable-svc' style='display:none' data-guest-hide>Disable MQTT</button>
   <span style='display:inline-flex;align-items:center;gap:0.5rem'>
     <span class='status-indicator status-disabled' id='mqtt-svc-dot'></span>
     <span id='mqtt-svc-text'>Checking...</span>
@@ -69,8 +69,8 @@ void streamMqttInner(httpd_req_t* req) {
   httpd_resp_send_chunk(req,
     "</span></div>"
     "<div class=\"btn-row\">"
-    "<button class=\"btn\" id=\"btn-connect\" onclick=\"mqttConnect()\">Connect</button>"
-    "<button class=\"btn\" id=\"btn-disconnect\" onclick=\"mqttDisconnect()\">Disconnect</button>"
+    "<button class=\"btn\" id=\"btn-connect\" onclick=\"mqttConnect()\" data-guest-hide>Connect</button>"
+    "<button class=\"btn\" id=\"btn-disconnect\" onclick=\"mqttDisconnect()\" data-guest-hide>Disconnect</button>"
     "<button class=\"btn\" onclick=\"mqttRefresh()\">Refresh Status</button>"
     "</div></div>", HTTPD_RESP_USE_STRLEN);
 
@@ -357,10 +357,21 @@ function mqttApplySvcState(enabled) {
 }
 
 window.refreshMqttSvcStatus = function() {
-  hw.postForm('/api/cli', {cmd: 'mqttclientenabled'})
-    .then(r => r.text())
-    .then(out => {
-      mqttApplySvcState(out.indexOf('MQTT client: enabled') >= 0);
+  hw.fetchJSON('/api/mqtt/status')
+    .then(d => {
+      mqttApplySvcState(!!(d && d.enabled));
+      // Keep connection pill in sync from the same payload.
+      var dot = document.querySelector('.status-dot');
+      var txt = document.getElementById('mqtt-status');
+      if (dot && txt) {
+        if (d && d.connected) {
+          dot.className = 'status-dot status-active';
+          txt.textContent = 'Connected';
+        } else {
+          dot.className = 'status-dot status-inactive';
+          txt.textContent = 'Disconnected';
+        }
+      }
     })
     .catch(e => {
       document.getElementById('mqtt-svc-text').textContent = 'Error: ' + e.message;
@@ -449,15 +460,19 @@ static esp_err_t handleMqttPage(httpd_req_t* req) {
   return ESP_OK;
 }
 
-// API endpoint for MQTT status
+// API endpoint for MQTT status (service enable + broker connection).
 static esp_err_t handleMqttStatus(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
 
   bool connected = isMqttConnected();
-  
-  char json[64];
-  snprintf(json, sizeof(json), "{\"connected\":%s}", connected ? "true" : "false");
-  
+  bool enabled = gSettings.mqttClientEnabled;
+
+  char json[128];
+  snprintf(json, sizeof(json),
+           "{\"schema\":1,\"enabled\":%s,\"connected\":%s}",
+           enabled ? "true" : "false",
+           connected ? "true" : "false");
+
   httpd_resp_set_type(req, "application/json");
   httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
   return ESP_OK;
@@ -465,14 +480,14 @@ static esp_err_t handleMqttStatus(httpd_req_t* req) {
 
 // Register handlers
 void registerMqttHandlers(httpd_handle_t server) {
-  static httpd_uri_t mqttPage = {
+  static const httpd_uri_t mqttPage = {
     .uri = "/mqtt",
     .method = HTTP_GET,
     .handler = handleMqttPage,
     .user_ctx = NULL
   };
   
-  static httpd_uri_t mqttStatusApi = {
+  static const httpd_uri_t mqttStatusApi = {
     .uri = "/api/mqtt/status",
     .method = HTTP_GET,
     .handler = handleMqttStatus,

@@ -541,14 +541,22 @@ bool peerIdentityWantsEvent(const uint8_t mac[6], uint32_t category) {
 
 bool peerIdentityForget(const uint8_t mac[6]) {
   int idx = findSlotByMac(mac);
-  // Always try to remove the file even if we didn't have the slot cached,
-  // so manual flash editing or a stale file gets cleaned up.
+  auto auth = VFS::systemAuth("espnow.peer_identity_forget");
+  // Remove the identity file(s) even if the slot wasn't cached, so manual flash
+  // editing or a stale file gets cleaned up.
   char path[80];
-  if (buildPeerPath(mac, "identity.json", path, sizeof(path))) {
-    auto auth = VFS::systemAuth("espnow.peer_identity_forget");
-    if (VFS::existsGuarded(path, auth)) {
-      VFS::removeGuarded(path, auth);
-    }
+  if (buildPeerPath(mac, "identity.json", path, sizeof(path)) && VFS::existsGuarded(path, auth)) {
+    VFS::removeGuarded(path, auth);
+  }
+  if (buildPeerPath(mac, "identity.tmp", path, sizeof(path)) && VFS::existsGuarded(path, auth)) {
+    VFS::removeGuarded(path, auth);   // stray temp from an interrupted write
+  }
+  // Remove the now-empty per-peer directory so it doesn't linger in `files` listings.
+  char dir[64], macHex[13];
+  formatMacNoSep(mac, macHex);
+  snprintf(dir, sizeof(dir), "%s/%s", kPeersDir, macHex);
+  if (VFS::existsGuarded(dir, auth)) {
+    VFS::rmdirGuarded(dir, auth);
   }
   if (idx >= 0) {
     gPeerIdentities[idx] = PeerIdentity{};

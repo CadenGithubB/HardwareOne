@@ -42,8 +42,11 @@ enum AutoSub : uint8_t { AUTO_SUB_LIST = 0, AUTO_SUB_DETAIL = 1 };
 static AutoSub gSub = AUTO_SUB_LIST;
 
 #define G2_AUTO_MAX 16
-struct G2AutoRow { long id; bool enabled; char name[28]; };
-static G2AutoRow gAutos[G2_AUTO_MAX];
+// trig = human trigger summary built at load ("on peer_online" / "every 5m" /
+// "daily 07:30" / "delay 10s" / "boot"), so the DETAIL view can show WHAT
+// fires the automation — the event subsystem tie-in the page lacked.
+struct G2AutoRow { long id; bool enabled; char name[28]; char trig[34]; };
+EXT_RAM_BSS_ATTR static G2AutoRow gAutos[G2_AUTO_MAX];
 static size_t    gAutoCount = 0;
 static int       gSelected  = -1;   // index into gAutos while in DETAIL
 
@@ -54,7 +57,7 @@ static int  gPendingToggleIdx = -1;
 static bool gPendingToggleTo  = false;
 
 // Last Run result text, shown on the lens by showRunResult().
-static char gRunResult[96] = {0};
+EXT_RAM_BSS_ATTR static char gRunResult[96];
 
 static void showListMenu();
 static void showDetailMenu();
@@ -115,6 +118,36 @@ static void loadAutomations() {
     const char* nm = a["name"] | "";
     if (nm[0] == '\0') snprintf(r.name, sizeof(r.name), "#%ld", r.id);
     else { strncpy(r.name, nm, sizeof(r.name) - 1); r.name[sizeof(r.name) - 1] = '\0'; }
+
+    // Trigger summary from the primary trigger (Phase 1 = one primary; extra
+    // triggers show as "+N"). Event triggers carry the SYSEVT kind in "on".
+    r.trig[0] = '\0';
+    JsonArrayConst trigs = a["triggers"].as<JsonArrayConst>();
+    if (!trigs.isNull() && trigs.size() > 0) {
+      JsonObjectConst t = trigs[0].as<JsonObjectConst>();
+      const char* tt = t["type"] | "";
+      if (strcmp(tt, "event") == 0) {
+        snprintf(r.trig, sizeof(r.trig), "on %s", (const char*)(t["on"] | "?"));
+      } else if (strcmp(tt, "interval") == 0) {
+        long ms = t["intervalMs"] | 0L;
+        if (ms >= 3600000)      snprintf(r.trig, sizeof(r.trig), "every %ldh", ms / 3600000);
+        else if (ms >= 60000)   snprintf(r.trig, sizeof(r.trig), "every %ldm", ms / 60000);
+        else                    snprintf(r.trig, sizeof(r.trig), "every %lds", ms / 1000);
+      } else if (strcmp(tt, "time") == 0 || strcmp(tt, "atTime") == 0) {
+        snprintf(r.trig, sizeof(r.trig), "daily %s", (const char*)(t["time"] | "?"));
+      } else if (strcmp(tt, "afterDelay") == 0 || strcmp(tt, "manual") == 0) {
+        long ms = t["delayMs"] | 0L;
+        if (ms >= 60000) snprintf(r.trig, sizeof(r.trig), "delay %ldm", ms / 60000);
+        else             snprintf(r.trig, sizeof(r.trig), "delay %lds", ms / 1000);
+      } else if (tt[0]) {
+        strncpy(r.trig, tt, sizeof(r.trig) - 1);
+        r.trig[sizeof(r.trig) - 1] = '\0';
+      }
+      if (trigs.size() > 1 && r.trig[0]) {
+        size_t len = strlen(r.trig);
+        snprintf(r.trig + len, sizeof(r.trig) - len, " +%u", (unsigned)(trigs.size() - 1));
+      }
+    }
     gAutoCount++;
   }
 }
@@ -129,7 +162,7 @@ static void showListMenu() {
   gSelected = -1;
   loadAutomations();
 
-  static char rows[1 + G2_AUTO_MAX][40];
+  EXT_RAM_BSS_ATTR static char rows[1 + G2_AUTO_MAX][40];
   const char* ptrs[1 + G2_AUTO_MAX];
   strcpy(rows[0], "<- Apps");
   ptrs[0] = rows[0];
@@ -157,12 +190,18 @@ static void showDetailMenu() {
   const G2AutoRow& r = gAutos[gSelected];
   static char backRow[40];
   snprintf(backRow, sizeof(backRow), "<- %.28s", r.name);
+  // Inert trigger row: WHAT fires this automation ("on peer_online",
+  // "every 5m", "daily 07:30", ...). Tap is a no-op (detailHandleTap
+  // ignores idx 1) — it's information, not an action.
+  static char trigRow[40];
+  snprintf(trigRow, sizeof(trigRow), "%.36s", r.trig[0] ? r.trig : "(no trigger)");
   const char* items[] = {
     backRow,                            // 0 — back to list
-    "Run now",                          // 1
-    r.enabled ? "Disable" : "Enable",   // 2
+    trigRow,                            // 1 — inert trigger summary
+    "Run now",                          // 2
+    r.enabled ? "Disable" : "Enable",   // 3
   };
-  g2ShowListPage(items, 3);
+  g2ShowListPage(items, 4);
 }
 
 // Dump the OK/Error text from a Run onto the lens. g2ShowTextAsList flips the
@@ -208,13 +247,14 @@ static void detailHandleTap(uint32_t idx) {
   const G2AutoRow& r = gAutos[gSelected];
   char line[56];
   G2CmdCookie cookie = buildCookie();
-  if (idx == 1) {                         // Run now
+  if (idx == 1) return;                   // inert trigger-summary row
+  if (idx == 2) {                         // Run now
     snprintf(line, sizeof(line), "automation run id=%ld", r.id);
     if (!g2SubmitHijackCommand(line, cookie, autoRunDone, nullptr))
       DEBUG_G2F("[G2-AUTO] run submit failed (queue full)");
     return;
   }
-  if (idx == 2) {                         // Enable / Disable
+  if (idx == 3) {                         // Enable / Disable
     const bool target = !r.enabled;
     gPendingToggleIdx = gSelected;
     gPendingToggleTo  = target;

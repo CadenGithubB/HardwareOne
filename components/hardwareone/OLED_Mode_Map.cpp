@@ -136,7 +136,7 @@ enum MapMenuCategory {
   MENU_CAT_COUNT
 };
 
-static const char* gMapMainMenuItems[] = {
+static const char* const gMapMainMenuItems[] = {
   "View >",
   "Maps >",
 #if ENABLE_GPS_SENSOR
@@ -156,40 +156,40 @@ static const int gMapMainMenuItemCount = 7;
 #endif
 
 // Submenu items
-static const char* gViewSubmenu[] = {
+static const char* const gViewSubmenu[] = {
   "Zoom In", "Zoom Out", "Reset Zoom",
   "Rotate Left", "Rotate Right", "Reset Rotation",
   "< Back"
 };
 static const int gViewSubmenuCount = 7;
 
-static const char* gMapsSubmenu[] = {
+static const char* const gMapsSubmenu[] = {
   "Select Map", "Next Map", "Previous Map", "Recenter",
   "< Back"
 };
 static const int gMapsSubmenuCount = 5;
 
 #if ENABLE_GPS_SENSOR
-static const char* gGpsSubmenu[] = {
+static const char* const gGpsSubmenu[] = {
   "Center on GPS", "Toggle GPS",
   "< Back"
 };
 static const int gGpsSubmenuCount = 3;
 #endif
 
-static const char* gWaypointsSubmenu[] = {
+static const char* const gWaypointsSubmenu[] = {
   "Mark Waypoint", "Goto Waypoint", "Clear Nav", "Delete Waypoint",
   "< Back"
 };
 static const int gWaypointsSubmenuCount = 5;
 
-static const char* gTracksSubmenu[] = {
+static const char* const gTracksSubmenu[] = {
   "Load Track", "Clear Track", "Track Status", "Delete Track",
   "Live Track", "Save Track", "< Back"
 };
 static const int gTracksSubmenuCount = 7;
 
-static const char* gInfoSubmenu[] = {
+static const char* const gInfoSubmenu[] = {
   "Map Info", "Features", "Search Names", "Transit Routes",
   "< Back"
 };
@@ -202,7 +202,7 @@ static int gWaypointSelectIdx = 0;
 // Track file selection state
 static int gTrackSelectMode = 0;  // 0=none, 1=load, 2=delete
 static int gTrackFileIdx = 0;
-static char gTrackFiles[8][64];
+EXT_RAM_BSS_ATTR static char gTrackFiles[8][64];
 static int gTrackFileCount = 0;
 
 // Track status overlay
@@ -258,7 +258,7 @@ struct SearchResultCoord {
   float lat;
   float lon;
 };
-static SearchResultCoord gSearchResultCoords[32];  // Coordinates of matches
+EXT_RAM_BSS_ATTR static SearchResultCoord gSearchResultCoords[32];  // Coordinates of matches
 static int gSearchResultCount = 0;
 static int gSearchResultCurrent = 0;
 static bool gSearchResultsActive = false;  // True when viewing search results
@@ -677,7 +677,7 @@ static void drawTrackSelect() {
 }
 
 // Dynamic buffers for the Layers submenu (rebuilt each draw to show current on/off state)
-static char       gLayersMenuBuf[11][20];
+EXT_RAM_BSS_ATTR static char       gLayersMenuBuf[11][20];
 static const char* gLayersMenuPtrs[11];
 static int        gLayersMenuCount = 0;
 
@@ -704,7 +704,7 @@ static void buildLayersMenuItems() {
 }
 
 // Dynamic buffers for the subtype sub-submenu
-static char       gSubtypeMenuBuf[7][20];
+EXT_RAM_BSS_ATTR static char       gSubtypeMenuBuf[7][20];
 static const char* gSubtypeMenuPtrs[7];
 static int        gSubtypeMenuCount = 0;
 
@@ -793,7 +793,7 @@ static void drawMapMenu() {
   oledDisplay->setCursor(14, 8);
   
   // Get current menu items based on submenu level
-  const char** menuItems;
+  const char* const* menuItems;
   int menuItemCount;
   const char* menuTitle;
   
@@ -925,7 +925,8 @@ static void initAsyncMapRenderer() {
   // Create render task (8KB stack in PSRAM, low priority). No core affinity:
   // prio-LOW on Core 0 was getting starved by WiFi/BT/esp_timer; let the
   // scheduler place it wherever there's actual slack.
-  xTaskCreatePinnedToCore(mapRenderTask, "mapRender", MAP_RENDER_STACK_WORDS, nullptr, TASK_PRIORITY_LOW, &sRenderTaskHandle, tskNO_AFFINITY);
+  // APP_CORE: offscreen map raster is pure compute; keep it off the Wi-Fi/BLE core.
+  xTaskCreatePinnedToCore(mapRenderTask, "mapRender", MAP_RENDER_STACK_WORDS, nullptr, TASK_PRIORITY_LOW, &sRenderTaskHandle, APP_CORE);
   
   DEBUG_MAPSF("[MAP_ASYNC] Async renderer initialized (double-buffer + render task)");
 }
@@ -1325,6 +1326,14 @@ static void goBackToMainMenu() {
 
 // Execute submenu action based on current submenu type and selection
 static void executeSubmenuAction(int submenuType, int action) {
+  // Guests may pan/zoom/view; GPS toggle, waypoints, and track logging mutate.
+  bool guestMutate = (submenuType == MENU_CAT_WAYPOINTS || submenuType == MENU_CAT_TRACKS);
+#if ENABLE_GPS_SENSOR
+  guestMutate = guestMutate || (submenuType == MENU_CAT_GPS);
+#endif
+  if (guestMutate && oledGuestBlocksMutate()) {
+    return;
+  }
   char maps[8][96];
   int mapCount;
   int currentIdx;

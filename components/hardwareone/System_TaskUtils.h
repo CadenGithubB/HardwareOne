@@ -129,6 +129,48 @@ constexpr UBaseType_t TASK_PRIORITY_NORMAL = 3;
 constexpr UBaseType_t TASK_PRIORITY_HIGH   = 5;
 constexpr UBaseType_t SR_TASK_PRIORITY_LEVEL = TASK_PRIORITY_HIGH;  // kept for backward compat
 
+// Named cores for the placement policy documented below.
+//   PRO_CORE (0) — Wi-Fi / BLE / ESP-NOW radio + I/O paths live here.
+//   APP_CORE (1) — Arduino loop, compute/render, and all I2C work run here.
+constexpr BaseType_t PRO_CORE = 0;
+constexpr BaseType_t APP_CORE = 1;
+
+// Core that every I2C-touching task pins to (APP core). Core 0 is saturated by
+// the Wi-Fi stack + ESP-NOW; a task that floats onto Core 0 and gets starved
+// mid-I2C-transaction lets the legacy driver's bus-recovery path storm the bus →
+// panic(4) / INT-WDT. Core 1 is near-idle so the transaction finishes before its
+// timeout. Full rationale (and the FeatherS3 out-and-about crash loop it fixed,
+// docs/NewCapture 2026-07-22) is at the sensor tasks in System_TaskUtils.cpp.
+// Shared here so the sensor-queue processor — created in HardwareOne.cpp /
+// System_I2C.cpp, and which runs the I2C device-init transactions — pins too.
+constexpr BaseType_t I2C_SENSOR_CORE = APP_CORE;
+
+// ============================================================================
+// TASK CORE-PLACEMENT POLICY  (ESP32-S3, dual core — read before creating tasks)
+// ============================================================================
+// Core 0 (PRO) is saturated by the Wi-Fi stack, the BLE controller, and the
+// ESP-NOW callback/heartbeat. Core 1 (APP) runs the Arduino loop and is
+// otherwise near-idle. Placement rule by task class:
+//
+//   Core 1 (APP) — pin here:
+//     * ANY task that touches the shared I2C/Wire bus (use I2C_SENSOR_CORE).
+//       This is the hard rule — no exceptions. An unpinned I2C task that floats
+//       onto the saturated Core 0 and is preempted mid-transaction storms the
+//       bus → panic(4). This is what crash-looped the FeatherS3 out-and-about.
+//     * CPU-bound compute/render (SR inference, map/image render) — keep it off
+//       the radio core so it can't crowd Wi-Fi/BLE.
+//   Core 0 (PRO) — pin here:
+//     * BLE-reply / command I/O (cmd_exec) and serial/log I/O, and the ESP-NOW
+//       real-time path — they belong with the radio + I/O they serve.
+//   Float (tskNO_AFFINITY) — allowed ONLY for short-lived workers that touch no
+//     shared bus and aren't latency-sensitive, AND only as a *documented* choice.
+//
+// Verifying placement/load: `perftop` prints per-core headroom as the IDLE0 /
+// IDLE1 rows (Core N load ≈ 100 − IDLEn%) plus per-task CPU%. Measure the worst
+// case (offline + GPS + logging + camera/BLE) before and after any change; keep
+// comfortable IDLE1 headroom so pinned I2C work on Core 1 can't itself starve.
+// ============================================================================
+
 // ============================================================================
 // FreeRTOS Task Creation with Memory Logging
 // ============================================================================
@@ -192,5 +234,11 @@ void reportAllTaskStacks();
 // worst-N stalls) gathered by loopHealthTick() in HardwareOne.cpp. Used by the
 // `perftop` command. Implemented in HardwareOne.cpp.
 void perfPrintLoopHealth();
+
+// Struct-read form of the same snapshot for on-device renderers (OLED perf
+// screen) — no text parsing. False while the first 5 s window accumulates.
+// Implemented in HardwareOne.cpp.
+bool perfGetLoopSnapshot(uint32_t& lapsPerSec, uint32_t& avgMs, uint32_t& maxMs,
+                         uint32_t& stalls5s, uint32_t& totalStalls);
 
 #endif // SYSTEM_TASKUTILS_H

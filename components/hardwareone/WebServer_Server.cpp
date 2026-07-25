@@ -1546,6 +1546,24 @@ void streamDashboardContent(httpd_req_t* req, const String& username) {
 // Streaming content for Settings page (moved from .ino)
 void streamSettingsContent(httpd_req_t* req, const String& username) {
   streamBeginHtml(req, "Settings", false, username, "settings");
+  // Tell the page who it is serving, plus the shared rank constants so JS
+  // never hardcodes 0/1/2/3. The Add-User role picker needs the viewer's own
+  // rank to avoid offering a role the firmware will refuse ("cannot grant a
+  // role above your own"). Advisory only — cmd_user_add re-checks.
+  {
+    String s = "<script>window.__hwRoleRank={guest:";
+    s += kRoleRankGuest;
+    s += ",user:";
+    s += kRoleRankUser;
+    s += ",admin:";
+    s += kRoleRankAdmin;
+    s += ",superadmin:";
+    s += kRoleRankSuperAdmin;
+    s += "};window.__hwRank=";
+    s += userAccountRank(username);
+    s += ";</script>";
+    httpd_resp_send_chunk(req, s.c_str(), HTTPD_RESP_USE_STRLEN);
+  }
   httpd_resp_send_chunk(req, "<div class='card'>", HTTPD_RESP_USE_STRLEN);
   streamSettingsInner(req);
   httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
@@ -1624,7 +1642,12 @@ esp_err_t handleFileRead(httpd_req_t* req) {
   if (!tgRequireAuth(ctx)) {
     pollResume();
     return ESP_OK;
-  }  DEBUG_STORAGEF("[handleFileRead] Auth SUCCESS for user: %s", ctx.user.c_str());
+  }
+  if (!webGuestAccessAllowed(req, ctx)) {
+    pollResume();
+    return ESP_OK;
+  }
+  DEBUG_STORAGEF("[handleFileRead] Auth SUCCESS for user: %s", ctx.user.c_str());
 
   if (!filesystemReady) {
     ERROR_STORAGEF("Filesystem not ready");
@@ -1718,7 +1741,9 @@ esp_err_t handleFileWrite(httpd_req_t* req) {
   DEBUG_STORAGEF("[handleFileWrite] Auth check for user from IP: %s", ctx.ip.c_str());
   if (!tgRequireAuth(ctx)) {
     return ESP_OK;
-  }  DEBUG_STORAGEF("[handleFileWrite] Auth SUCCESS for user: %s", ctx.user.c_str());
+  }
+  if (!webGuestAccessAllowed(req, ctx)) return ESP_OK;
+  DEBUG_STORAGEF("[handleFileWrite] Auth SUCCESS for user: %s", ctx.user.c_str());
 
   if (!filesystemReady) {
     ERROR_STORAGEF("Filesystem not ready");
@@ -1877,6 +1902,10 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
   AuthContext ctx = makeWebAuthCtx(req);
   DEBUG_STORAGEF("[handleFileUpload] Auth check for user from IP: %s", ctx.ip.c_str());
   if (!tgRequireAuth(ctx)) {
+    pollResume();
+    return ESP_OK;
+  }
+  if (!webGuestAccessAllowed(req, ctx)) {
     pollResume();
     return ESP_OK;
   }
@@ -2500,6 +2529,8 @@ esp_err_t handleSettingsGet(httpd_req_t* req) {
   JsonObject user = response["user"].to<JsonObject>();
   user["username"] = ctx.user;
   user["isAdmin"] = isAdminUser(ctx.user);
+  user["isGuest"] = isGuestUser(ctx.user);
+  user["roleRank"] = userAccountRank(ctx.user);
   
   // Add features
   JsonObject features = response["features"].to<JsonObject>();
@@ -2749,7 +2780,7 @@ esp_err_t handleBuildConfig(httpd_req_t* req) {
     "\"tof\":%s,\"gamepad\":%s,\"apds\":%s,\"fmradio\":%s,"
     "\"rtc\":%s,\"presence\":%s}",
     ENABLE_CAMERA_SENSOR    ? "true" : "false",
-    ENABLE_MICROPHONE_SENSOR? "true" : "false",
+    ENABLE_MICROPHONE? "true" : "false",
     ENABLE_BLUETOOTH        ? "true" : "false",
     ENABLE_G2_GLASSES       ? "true" : "false",
     ENABLE_MQTT             ? "true" : "false",
@@ -2816,89 +2847,6 @@ esp_err_t handleAdminSessionsList(httpd_req_t* req) {
   return ESP_OK;
 }
 
-// GET /api/output -> returns persisted (gSettings) and runtime (gOutputFlags) for serial/web/display/g2
-esp_err_t handleOutputGet(httpd_req_t* req) {
-  WEB_AUTH_OR_RETURN(req, ctx);
-  int rtSerial = (gOutputFlags & MSG_ROUTE_SERIAL) ? 1 : 0;
-  int rtWeb = (gOutputFlags & MSG_ROUTE_WEB) ? 1 : 0;
-  int rtDisplay = (gOutputFlags & MSG_ROUTE_OLED) ? 1 : 0;
-  int rtG2 = (gOutputFlags & MSG_ROUTE_G2) ? 1 : 0;
-  
-  char json[320];
-  snprintf(json, sizeof(json),
-           "{\"success\":true,\"persisted\":{\"serial\":%d,\"web\":%d,\"display\":%d,\"g2\":%d},\"runtime\":{\"serial\":%d,\"web\":%d,\"display\":%d,\"g2\":%d}}",
-           gSettings.outSerial ? 1 : 0,
-           gSettings.outWeb ? 1 : 0,
-           gSettings.outDisplay ? 1 : 0,
-#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
-           gSettings.outG2 ? 1 : 0,
-#else
-           0,
-#endif
-           rtSerial, rtWeb, rtDisplay, rtG2);
-  
-  sendJsonResponse(req, json);
-  return ESP_OK;
-}
-
-// POST /api/output/temp (x-www-form-urlencoded): serial=0/1&web=0/1&display=0/1
-esp_err_t handleOutputTemp(httpd_req_t* req) {
-  WEB_AUTH_OR_RETURN(req, ctx);
-
-  // Read form body
-  char buf[256];
-  int total = 0;
-  int remaining = req->content_len;
-  while (remaining > 0 && total < (int)sizeof(buf) - 1) {
-    int toRead = remaining;
-    if (toRead > (int)sizeof(buf) - 1 - total) toRead = (int)sizeof(buf) - 1 - total;
-    int r = httpd_req_recv(req, buf + total, toRead);
-    if (r <= 0) break;
-    total += r;
-    remaining -= r;
-  }
-  buf[total] = '\0';
-
-  // Parse values
-  auto getVal = [&](const char* key) -> int {
-    char val[8];
-    if (httpd_query_key_value(buf, key, val, sizeof(val)) == ESP_OK) {
-      return atoi(val);
-    }
-    return -1;  // not provided
-  };
-  int vSerial = getVal("serial");
-  int vWeb = getVal("web");
-  int vDisplay = getVal("display");
-
-  // Route each change through the unified command system for auditability.
-  // Use "outserial/outweb/outdisplay <0|1> temp" — the "temp" flag makes changes
-  // runtime-only (not persisted), matching the original direct gOutputFlags mutation.
-  String cmdOut;
-  if (vSerial == 0 || vSerial == 1) {
-    executeUnifiedWebCommand(req, ctx, "outserial " + String(vSerial) + " temp", cmdOut);
-  }
-  if (vWeb == 0 || vWeb == 1) {
-    executeUnifiedWebCommand(req, ctx, "outweb " + String(vWeb) + " temp", cmdOut);
-  }
-  if (vDisplay == 0 || vDisplay == 1) {
-    executeUnifiedWebCommand(req, ctx, "outdisplay " + String(vDisplay) + " temp", cmdOut);
-  }
-
-  // Respond with updated runtime snapshot
-  int rtSerial = (gOutputFlags & MSG_ROUTE_SERIAL) ? 1 : 0;
-  int rtWeb = (gOutputFlags & MSG_ROUTE_WEB) ? 1 : 0;
-  int rtDisplay = (gOutputFlags & MSG_ROUTE_OLED) ? 1 : 0;
-
-  char json[128];
-  snprintf(json, sizeof(json),
-           "{\"success\":true,\"runtime\":{\"serial\":%d,\"web\":%d,\"display\":%d}}",
-           rtSerial, rtWeb, rtDisplay);
-
-  sendJsonResponse(req, json);
-  return ESP_OK;
-}
-
 // Notice endpoint: returns and clears per-session notice
 esp_err_t handleNotice(httpd_req_t* req) {
   httpd_resp_set_type(req, "application/json");
@@ -2944,6 +2892,7 @@ esp_err_t handleLogs(httpd_req_t* req) {
   if (!tgRequireAuth(ctx)) {
     return ESP_OK;
   }
+  if (!webGuestAccessAllowed(req, ctx)) return ESP_OK;
   DEBUG_HTTPF("[LOGS_DEBUG] Auth OK for user '%s'", ctx.user.c_str());
   httpd_resp_set_type(req, "text/plain");
   if (!gWebMirror.buf) {
@@ -3033,6 +2982,192 @@ esp_err_t handleSystemStatus(httpd_req_t* req) {
   return ESP_OK;
 }
 
+// Run a read-only status command under the internal system identity so guest
+// (and admin-gated status) pages can use dedicated GET endpoints instead of
+// /api/cli. Mutations must never go through this helper.
+static bool runInternalStatusCmd(const char* cmd, char* out, size_t outSize) {
+  if (!cmd || !out || outSize == 0) return false;
+  AuthContext sys;
+  sys.transport = SOURCE_INTERNAL;
+  sys.user = "system";
+  sys.ip = "local";
+  sys.path = cmd;
+  out[0] = '\0';
+  return executeCommand(sys, cmd, out, outSize);
+}
+
+// GET /api/events/kinds — vocabulary for notif/automation editors (was CLI
+// `events kinds json`). Guests may read it; mutation stays on CLI.
+static esp_err_t handleEventsKinds(httpd_req_t* req) {
+  WEB_AUTH_OR_RETURN(req, ctx);
+  httpd_resp_set_type(req, "application/json");
+  PSRAM_JSON_DOC(doc);
+  JsonArray fams = doc["families"].to<JsonArray>();
+  for (int f = 0; f < SYSEVT_FAM_COUNT; f++) {
+    JsonObject fo = fams.add<JsonObject>();
+    fo["n"] = systemEventFamilyName((uint8_t)f);
+    JsonArray fk = fo["k"].to<JsonArray>();
+    for (int k = SYSEVT_NONE + 1; k < SYSEVT_COUNT; k++) {
+      if (systemEventKindFamily((uint8_t)k) == f) fk.add(systemEventKindName((uint8_t)k));
+    }
+  }
+  EXT_RAM_BSS_ATTR static char buf[CMD_RESULT_MAX];
+  size_t n = serializeJson(doc, buf, sizeof(buf));
+  if (n == 0 || n >= sizeof(buf) - 1) {
+    httpd_resp_send(req, "{\"error\":\"event-kind list outgrew buffer\"}", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
+  httpd_resp_send(req, buf, n);
+  return ESP_OK;
+}
+
+// GET /api/debug/flags — read-only reflection of the generated debug-flag
+// taxonomy (System_DebugFlags.h, reached via System_Debug.h). Emits ONE JSON
+// array of the whole debug vocabulary: every bit-bearing producer flag first
+// (DbgFlagIdx order), then every bitless sub-flag (DbgSubIdx order). Lets the
+// Logging-page flag pane and the Settings-page BitmaskField render from the
+// single-source table instead of hand-maintained HTML / options strings.
+// Admin-gated like the other config/admin surfaces; all mutation stays on the
+// CLI (`log start flags=`, the `debug*` commands) — this endpoint only reads.
+//
+// The header already exposes bit / parentBit / bank / tag as parallel kDbg*
+// columns keyed by DbgFlagIdx, but NOT the settings-registry string columns
+// (jsonKey / group / label / cmdIdent). Regenerate just those four here from
+// the same DBG_FLAG_LIST / DBG_SUBBOOL_LIST rows so they stay in lockstep with
+// the numeric columns. Only string literals are emitted and cmdIdent is
+// #stringized at this first macro level — SYM/BANK (which collide with Arduino
+// macros like INPUT) are consumed but never emitted or re-pasted here, per the
+// X-macro paste rule.
+#define DBG_WEB_FLAG_KEY(SYM, bit, BANK, parentBit, tag, settingsField, cmdIdent, group, jsonKey, label)   jsonKey,
+#define DBG_WEB_FLAG_GROUP(SYM, bit, BANK, parentBit, tag, settingsField, cmdIdent, group, jsonKey, label) group,
+#define DBG_WEB_FLAG_LABEL(SYM, bit, BANK, parentBit, tag, settingsField, cmdIdent, group, jsonKey, label) label,
+#define DBG_WEB_FLAG_CMD(SYM, bit, BANK, parentBit, tag, settingsField, cmdIdent, group, jsonKey, label)   #cmdIdent,
+static const char* const kDbgWebFlagKey[DBG_FLAG_COUNT]   = { DBG_FLAG_LIST(DBG_WEB_FLAG_KEY) };
+static const char* const kDbgWebFlagGroup[DBG_FLAG_COUNT] = { DBG_FLAG_LIST(DBG_WEB_FLAG_GROUP) };
+static const char* const kDbgWebFlagLabel[DBG_FLAG_COUNT] = { DBG_FLAG_LIST(DBG_WEB_FLAG_LABEL) };
+static const char* const kDbgWebFlagCmd[DBG_FLAG_COUNT]   = { DBG_FLAG_LIST(DBG_WEB_FLAG_CMD) };
+#undef DBG_WEB_FLAG_KEY
+#undef DBG_WEB_FLAG_GROUP
+#undef DBG_WEB_FLAG_LABEL
+#undef DBG_WEB_FLAG_CMD
+
+#define DBG_WEB_SUB_KEY(SYM, subField, settingsField, PARENT_SYM, cmdIdent, group, jsonKey, label)   jsonKey,
+#define DBG_WEB_SUB_GROUP(SYM, subField, settingsField, PARENT_SYM, cmdIdent, group, jsonKey, label) group,
+#define DBG_WEB_SUB_LABEL(SYM, subField, settingsField, PARENT_SYM, cmdIdent, group, jsonKey, label) label,
+#define DBG_WEB_SUB_CMD(SYM, subField, settingsField, PARENT_SYM, cmdIdent, group, jsonKey, label)   #cmdIdent,
+static const char* const kDbgWebSubKey[DBG_SUBBOOL_COUNT]   = { DBG_SUBBOOL_LIST(DBG_WEB_SUB_KEY) };
+static const char* const kDbgWebSubGroup[DBG_SUBBOOL_COUNT] = { DBG_SUBBOOL_LIST(DBG_WEB_SUB_GROUP) };
+static const char* const kDbgWebSubLabel[DBG_SUBBOOL_COUNT] = { DBG_SUBBOOL_LIST(DBG_WEB_SUB_LABEL) };
+static const char* const kDbgWebSubCmd[DBG_SUBBOOL_COUNT]   = { DBG_SUBBOOL_LIST(DBG_WEB_SUB_CMD) };
+#undef DBG_WEB_SUB_KEY
+#undef DBG_WEB_SUB_GROUP
+#undef DBG_WEB_SUB_LABEL
+#undef DBG_WEB_SUB_CMD
+
+static esp_err_t handleDebugFlags(httpd_req_t* req) {
+  WEB_AUTH_OR_RETURN(req, ctx);
+  if (!isAdminUser(ctx.user)) {
+    sendJsonResponse(req, "{\"error\":\"Admin access required\"}");
+    return ESP_OK;
+  }
+  httpd_resp_set_type(req, "application/json");
+  PSRAM_JSON_DOC(doc);
+  JsonArray arr = doc.to<JsonArray>();
+
+  // Bit-bearing producer flags (DbgFlagIdx order). Skip control/tagless rows
+  // (the single ALWAYS row, bit 255) — they name no producer and carry no mask,
+  // so the flag-checkbox pane never wants them.
+  for (int i = 0; i < DBG_FLAG_COUNT; i++) {
+    if (kDbgTag[i][0] == '\0') continue;   // control bit — never a producer
+    JsonObject o = arr.add<JsonObject>();
+    o["key"]       = kDbgWebFlagKey[i];
+    o["group"]     = kDbgWebFlagGroup[i];
+    o["label"]     = kDbgWebFlagLabel[i];
+    o["cmd"]       = kDbgWebFlagCmd[i];
+    o["bit"]       = kDbgBit[i];
+    o["bank"]      = kDbgBankLabel[kDbgBank[i]];
+    o["parentBit"] = kDbgParentBit[i];     // 255 = root (no parent)
+    o["tag"]       = kDbgTag[i];
+  }
+
+  // Bitless sub-flags (DbgSubIdx order). No bit/mask of their own; they OR up
+  // into their parent's bit, so carry the parent's bit + bank (+ tag) for
+  // grouping and a "sub":true marker so mask-checkbox consumers can skip them.
+  for (int i = 0; i < DBG_SUBBOOL_COUNT; i++) {
+    const int p = kDbgSubParentIdx[i];     // parent flag's DbgFlagIdx
+    JsonObject o = arr.add<JsonObject>();
+    o["key"]       = kDbgWebSubKey[i];
+    o["group"]     = kDbgWebSubGroup[i];
+    o["label"]     = kDbgWebSubLabel[i];
+    o["cmd"]       = kDbgWebSubCmd[i];
+    o["sub"]       = true;
+    o["parentBit"] = kDbgBit[p];
+    o["bank"]      = kDbgBankLabel[kDbgBank[p]];
+    o["tag"]       = kDbgTag[p];
+  }
+
+  // Dedicated right-sized PSRAM buffer, off the shared 64 KB schema mutex.
+  // 116 producer flags + 40 sub-flags serialize to ~20-23 KB (pathological
+  // all-columns-maxed upper bound ~28.5 KB), so 32 KB clears it with headroom;
+  // the overflow guard (copied verbatim from handleEventsKinds) is the backstop.
+  EXT_RAM_BSS_ATTR static char buf[32768];
+  size_t n = serializeJson(doc, buf, sizeof(buf));
+  if (n == 0 || n >= sizeof(buf) - 1) {
+    httpd_resp_send(req, "{\"error\":\"debug-flag vocabulary outgrew buffer\"}", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
+  httpd_resp_send(req, buf, n);
+  return ESP_OK;
+}
+
+// GET /api/logging/status — page-load status formerly fetched via CLI batch.
+static esp_err_t handleLoggingStatus(httpd_req_t* req) {
+  WEB_AUTH_OR_RETURN(req, ctx);
+  httpd_resp_set_type(req, "application/json");
+
+  EXT_RAM_BSS_ATTR static char timeBuf[CMD_RESULT_MAX];
+  EXT_RAM_BSS_ATTR static char sensorBuf[CMD_RESULT_MAX];
+  runInternalStatusCmd("time", timeBuf, sizeof(timeBuf));
+  runInternalStatusCmd("sensorlog status", sensorBuf, sizeof(sensorBuf));
+
+  // `log status` is admin-gated on the CLI; build the same text from globals
+  // so guests/users can still see the Logging page surface.
+  char logBuf[512];
+  if (gSystemLogEnabled && (gOutputFlags & MSG_ROUTE_FILE)) {
+    unsigned long ageSeconds = (millis() - gSystemLogLastWrite) / 1000;
+    snprintf(logBuf, sizeof(logBuf),
+             "System logging ACTIVE\n"
+             "  File: %s\n"
+             "  Last write: %lus ago\n"
+             "  Output flags: 0x%02X\n"
+             "  Auto-start: %s",
+             gSystemLogPath.c_str(), ageSeconds, (unsigned)gOutputFlags,
+             gSettings.systemLogAutoStart ? "ON" : "OFF");
+  } else if (gSystemLogEnabled) {
+    snprintf(logBuf, sizeof(logBuf),
+             "System logging CONFIGURED but MSG_ROUTE_FILE flag not set\n"
+             "  File: %s\n"
+             "  Use 'log start' to enable\n"
+             "  Auto-start: %s",
+             gSystemLogPath.c_str(),
+             gSettings.systemLogAutoStart ? "ON" : "OFF");
+  } else {
+    snprintf(logBuf, sizeof(logBuf), "System logging is INACTIVE\n  Auto-start: %s",
+             gSettings.systemLogAutoStart ? "ON" : "OFF");
+  }
+
+  PSRAM_JSON_DOC(doc);
+  doc["success"] = true;
+  JsonArray results = doc["results"].to<JsonArray>();
+  results.add(timeBuf);
+  results.add(sensorBuf);
+  results.add(logBuf);
+  String out;
+  serializeJson(doc, out);
+  httpd_resp_send(req, out.c_str(), out.length());
+  return ESP_OK;
+}
+
 esp_err_t handleCLICommand(httpd_req_t* req) {
   AuthContext ctx = makeWebAuthCtx(req);
   DEBUG_CMD_FLOWF("[web.cli] enter ip=%s content_len=%d", ctx.ip.c_str(), (int)req->content_len);
@@ -3041,6 +3176,7 @@ esp_err_t handleCLICommand(httpd_req_t* req) {
     logAuthAttempt(false, "/api/cli", String(), ctx.ip, "unauthorized");
     return ESP_OK;  // 401 already sent
   }
+  if (!webGuestAccessAllowed(req, ctx)) return ESP_OK;
 
   // Rate limiting: prevent rapid command execution to avoid stack overflow
   static unsigned long lastCmdTime = 0;
@@ -3164,6 +3300,21 @@ esp_err_t handleCLICommand(httpd_req_t* req) {
 esp_err_t handleCLIPage(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
 
+  // Guests are view-only — the free CLI page is not part of that surface.
+  if (isGuestUser(ctx.user)) {
+    streamBeginHtml(req, "Command Line", false, ctx.user, "cli");
+    httpd_resp_send_chunk(req,
+      "<div class='card'><div class='panel' style='padding:1.5rem'>"
+      "<h2 style='margin-top:0'>View only</h2>"
+      "<p>Guest accounts cannot use the command line. "
+      "Ask an administrator if you need a full user account.</p>"
+      "<a class='btn' href='/dashboard'>Back to Dashboard</a>"
+      "</div></div>",
+      HTTPD_RESP_USE_STRLEN);
+    streamEndHtml(req);
+    return ESP_OK;
+  }
+
   DEBUG_HTTPF("handler enter uri=%s user=%s page=%s", ctx.path.c_str(), ctx.user.c_str(), "cli");
   streamPageWithContent(req, "cli", ctx.user, streamCLIContent);
   return ESP_OK;
@@ -3178,21 +3329,35 @@ esp_err_t handleAutomationsPage(httpd_req_t* req) {
   return ESP_OK;
 }
 
-// GET /api/automations: return raw automations.json
+// GET /api/automations: automations.json plus `systemEnabled` (folded in so
+// the page no longer needs CLI `automation system status` on load).
 esp_err_t handleAutomationsGet(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
 
   httpd_resp_set_type(req, "application/json");
-  String json;
-  if (!readText(AUTOMATIONS_JSON_FILE, json)) {
-    httpd_resp_send(req, "{\"success\":false,\"error\":\"Failed to read automations.json\"}", HTTPD_RESP_USE_STRLEN);
+  String body;
+  if (!readText(AUTOMATIONS_JSON_FILE, body)) {
+    httpd_resp_send(req,
+      "{\"success\":false,\"systemEnabled\":false,\"error\":\"Failed to read automations.json\"}",
+      HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
   }
   // Sanitize duplicate IDs if any and persist back
-  if (sanitizeAutomationsJson(json)) {
-    writeAutomationsJsonAtomic(json);  // best-effort writeback
+  if (sanitizeAutomationsJson(body)) {
+    writeAutomationsJsonAtomic(body);  // best-effort writeback
   }
-  httpd_resp_send(req, json.c_str(), HTTPD_RESP_USE_STRLEN);
+
+  PSRAM_JSON_DOC(doc);
+  DeserializationError err = deserializeJson(doc, body);
+  if (err) {
+    // Preserve prior contract: emit the raw file text if it isn't JSON.
+    httpd_resp_send(req, body.c_str(), body.length());
+    return ESP_OK;
+  }
+  doc["systemEnabled"] = gSettings.automationsEnabled;
+  String out;
+  serializeJson(doc, out);
+  httpd_resp_send(req, out.c_str(), out.length());
   return ESP_OK;
 }
 #endif
@@ -3231,24 +3396,31 @@ esp_err_t handlePing(httpd_req_t* req) {
   httpd_resp_set_type(req, "application/json");
 
   String fp = getDeviceFingerprint();
-  char json[448];
+  char json[512];
+#if ENABLE_MIGRATION_TOOL
+  const char* pendingConfirm = migrationRestoreAwaitingConfirm() ? "true" : "false";
+#else
+  const char* pendingConfirm = "false";
+#endif
 #if ENABLE_HTTPS
   snprintf(json, sizeof(json),
-    "{\"ok\":true,\"hostname\":\"%s\",\"mac\":\"%s\",\"fingerprint\":\"%s\",\"firmwareVersion\":\"%s\",\"acceptingRestore\":%s,\"https\":%s}",
+    "{\"ok\":true,\"hostname\":\"%s\",\"mac\":\"%s\",\"fingerprint\":\"%s\",\"firmwareVersion\":\"%s\",\"acceptingRestore\":%s,\"pendingConfirm\":%s,\"https\":%s}",
     WiFi.getHostname(),
     SelfDevice::macString().c_str(),
     fp.c_str(),
     SelfDevice::firmwareVersion(),
     gAcceptingRestore ? "true" : "false",
+    pendingConfirm,
     gSettings.httpsEnabled ? "true" : "false");
 #else
   snprintf(json, sizeof(json),
-    "{\"ok\":true,\"hostname\":\"%s\",\"mac\":\"%s\",\"fingerprint\":\"%s\",\"firmwareVersion\":\"%s\",\"acceptingRestore\":%s}",
+    "{\"ok\":true,\"hostname\":\"%s\",\"mac\":\"%s\",\"fingerprint\":\"%s\",\"firmwareVersion\":\"%s\",\"acceptingRestore\":%s,\"pendingConfirm\":%s}",
     WiFi.getHostname(),
     SelfDevice::macString().c_str(),
     fp.c_str(),
     SelfDevice::firmwareVersion(),
-    gAcceptingRestore ? "true" : "false");
+    gAcceptingRestore ? "true" : "false",
+    pendingConfirm);
 #endif
   httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
   return ESP_OK;
@@ -3306,10 +3478,14 @@ esp_err_t handleLogin(httpd_req_t* req) {
     streamEndHtml(req);
     return ESP_OK;
   }
-  // POST
+  // POST — cap body so a giant payload cannot pin PSRAM / stall the HTTP task.
   int total_len = req->content_len;
   if (total_len <= 0) {
     httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No body");
+    return ESP_FAIL;
+  }
+  if (total_len > 2048) {
+    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Body too large");
     return ESP_FAIL;
   }
   std::unique_ptr<char, void (*)(void*)> buf((char*)ps_alloc(total_len + 1, AllocPref::PreferPSRAM, "http.login"), free);
@@ -3326,6 +3502,11 @@ esp_err_t handleLogin(httpd_req_t* req) {
   String body(buf.get());
   String u = urlDecode(extractFormField(body, "username"));
   String p = urlDecode(extractFormField(body, "password"));
+  u.trim();
+  // Echo-safe copy for the form; auth still uses the full submitted username
+  // so pre-allowlist accounts are not locked out. Register intake is capped
+  // separately at kPublicUsernameMaxLen / kPublicPasswordMaxLen.
+  String uEcho = (u.length() > kPublicUsernameMaxLen) ? String() : u;
   BROADCAST_PRINTF("[login] POST attempt: username='%s', password_len=%u", u.c_str(), (unsigned)p.length());
 
   // --- Brute-force lockout check ---
@@ -3343,7 +3524,7 @@ esp_err_t handleLogin(httpd_req_t* req) {
       httpd_resp_set_type(req, "text/html");
       streamBeginHtml(req, "Sign In", /*isPublic=*/true, "", "login");
       String logoutReason = getLogoutReason(ip);
-      streamLoginInner(req, u, lockMsg, logoutReason);
+      streamLoginInner(req, uEcho, lockMsg, logoutReason);
       streamEndHtml(req);
       return ESP_OK;
     }
@@ -3387,7 +3568,7 @@ esp_err_t handleLogin(httpd_req_t* req) {
     httpd_resp_set_type(req, "text/html");
     streamBeginHtml(req, "Sign In", /*isPublic=*/true, "", "login");
     String logoutReason = getLogoutReason(ip);
-    streamLoginInner(req, u, errorMsg, logoutReason);
+    streamLoginInner(req, uEcho, errorMsg, logoutReason);
     streamEndHtml(req);
     return ESP_OK;
   }
@@ -3517,15 +3698,15 @@ esp_err_t handleRegisterPage(httpd_req_t* req) {
   <form method='POST' action='/register/submit'>
     <div class='form-field'>
       <label for='username'>Username</label>
-      <input type='text' id='username' name='username' class='form-input' required autofocus>
+      <input type='text' id='username' name='username' class='form-input' required autofocus maxlength='64' pattern='[A-Za-z0-9._-]{1,64}' title='Letters, numbers, ".", "_" or "-" (max 64)' autocomplete='username'>
     </div>
     <div class='form-field'>
       <label for='password'>Password</label>
-      <input type='password' id='password' name='password' class='form-input' required>
+      <input type='password' id='password' name='password' class='form-input' required minlength='6' maxlength='64' autocomplete='new-password'>
     </div>
     <div class='form-field'>
       <label for='confirm_password'>Confirm Password</label>
-      <input type='password' id='confirm_password' name='confirm_password' class='form-input' required>
+      <input type='password' id='confirm_password' name='confirm_password' class='form-input' required minlength='6' maxlength='64' autocomplete='new-password'>
     </div>
     <div class='btn-row space-top-md'>
       <button class='btn btn-primary' type='submit'>Submit Request</button>
@@ -3540,85 +3721,138 @@ esp_err_t handleRegisterPage(httpd_req_t* req) {
   return ESP_OK;
 }
 
+// Fixed register failure page — never splice command output / usernames into HTML.
+static esp_err_t sendRegisterFailPage(httpd_req_t* req, const char* message) {
+  httpd_resp_set_type(req, "text/html");
+  streamBeginHtml(req, "Registration Failed", /*isPublic=*/true, "", "register");
+  httpd_resp_send_chunk(req, "<div class='card'>", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, R"REGERR(
+<div class='panel container-narrow text-center pad-xl'>
+  <h2 style='color:#dc3545'>Registration Failed</h2>
+  <div class='form-error' style='background:#f8d7da;border:1px solid #f5c6cb;color:#721c24;padding:1rem;border-radius:8px;margin:1rem 0'>
+    <p style='margin:0'>)REGERR",
+                        HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, message, HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, R"REGERR2(</p>
+  </div>
+  <div class='btn-row' style='justify-content:center'>
+    <a class='btn' href='/register'>Try Again</a>
+  </div>
+</div>
+)REGERR2",
+                        HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
+  streamEndHtml(req);
+  return ESP_OK;
+}
+
 // Registration submit: use unified CLI command for consistency
 esp_err_t handleRegisterSubmit(httpd_req_t* req) {
-  // Parse form fields (reuse login parsing pattern)
-  String body;
-  int total_len = req->content_len;
-  if (total_len > 0) {
-    std::unique_ptr<char, void (*)(void*)> buf((char*)ps_alloc(total_len + 1, AllocPref::PreferPSRAM, "http.reg.post"), free);
-    if (buf) {
-      int received = 0;
-      while (received < total_len) {
-        int ret = httpd_req_recv(req, buf.get() + received, total_len - received);
-        if (ret <= 0) break;
-        received += ret;
-      }
-      buf.get()[received] = '\0';
-      body = String(buf.get());
+  String ip;
+  getClientIP(req, ip);
+  {
+    char banIpBuf[64];
+    getClientIP(req, banIpBuf, sizeof(banIpBuf));
+    if (isIpBanned(banIpBuf)) {
+      httpd_resp_set_status(req, "403 Forbidden");
+      httpd_resp_set_type(req, "text/plain");
+      httpd_resp_send(req, "403 Forbidden", HTTPD_RESP_USE_STRLEN);
+      return ESP_OK;
     }
   }
+  {
+    unsigned long remainingMs = 0;
+    if (isLoginLocked(ip.c_str(), &remainingMs)) {
+      unsigned long remainingSec = (remainingMs + 999UL) / 1000UL;
+      char lockMsg[96];
+      snprintf(lockMsg, sizeof(lockMsg),
+               "Too many attempts. Try again in %lu second%s.",
+               remainingSec, remainingSec == 1 ? "" : "s");
+      return sendRegisterFailPage(req, lockMsg);
+    }
+  }
+
+  int total_len = req->content_len;
+  if (total_len <= 0) {
+    recordFailedLogin(ip.c_str());
+    return sendRegisterFailPage(req, "All fields are required.");
+  }
+  if (total_len > 2048) {
+    recordFailedLogin(ip.c_str());
+    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Body too large");
+    return ESP_FAIL;
+  }
+
+  String body;
+  {
+    std::unique_ptr<char, void (*)(void*)> buf((char*)ps_alloc(total_len + 1, AllocPref::PreferPSRAM, "http.reg.post"), free);
+    if (!buf) {
+      recordFailedLogin(ip.c_str());
+      return sendRegisterFailPage(req, "Unable to process request.");
+    }
+    int received = 0;
+    while (received < total_len) {
+      int ret = httpd_req_recv(req, buf.get() + received, total_len - received);
+      if (ret <= 0) break;
+      received += ret;
+    }
+    buf.get()[received] = '\0';
+    body = String(buf.get());
+  }
+
   String username = urlDecode(extractFormField(body, "username"));
-  String password = extractFormField(body, "password");
-  String confirmPassword = extractFormField(body, "confirm_password");
+  String password = urlDecode(extractFormField(body, "password"));
+  String confirmPassword = urlDecode(extractFormField(body, "confirm_password"));
+  username.trim();
 
   if (username.length() == 0 || password.length() == 0 || confirmPassword.length() == 0) {
-    httpd_resp_set_type(req, "text/html");
-    streamBeginHtml(req, "Registration Failed", /*isPublic=*/true, "", "register");
-    httpd_resp_send_chunk(req, "<div class='card'>", HTTPD_RESP_USE_STRLEN);
-    httpd_resp_send_chunk(req, R"REGERR(
-<div class='panel container-narrow text-center pad-xl'>
-  <h2 style='color:#dc3545'>Registration Failed</h2>
-  <div class='form-error' style='background:#f8d7da;border:1px solid #f5c6cb;color:#721c24;padding:1rem;border-radius:8px;margin:1rem 0'>
-    <p style='margin:0'>All fields are required.</p>
-  </div>
-  <div class='btn-row' style='justify-content:center'>
-    <a class='btn' href='/register'>Try Again</a>
-  </div>
-</div>
-)REGERR",
-                          HTTPD_RESP_USE_STRLEN);
-    httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
-    streamEndHtml(req);
-    return ESP_OK;
+    recordFailedLogin(ip.c_str());
+    return sendRegisterFailPage(req, "All fields are required.");
   }
-
   if (password != confirmPassword) {
-    httpd_resp_set_type(req, "text/html");
-    streamBeginHtml(req, "Registration Failed", /*isPublic=*/true, "", "register");
-    httpd_resp_send_chunk(req, "<div class='card'>", HTTPD_RESP_USE_STRLEN);
-    httpd_resp_send_chunk(req, R"REGERR(
-<div class='panel container-narrow text-center pad-xl'>
-  <h2 style='color:#dc3545'>Registration Failed</h2>
-  <div class='form-error' style='background:#f8d7da;border:1px solid #f5c6cb;color:#721c24;padding:1rem;border-radius:8px;margin:1rem 0'>
-    <p style='margin:0'>Passwords do not match. Please try again.</p>
-  </div>
-  <div class='btn-row' style='justify-content:center'>
-    <a class='btn' href='/register'>Try Again</a>
-  </div>
-</div>
-)REGERR",
-                          HTTPD_RESP_USE_STRLEN);
-    httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
-    streamEndHtml(req);
-    return ESP_OK;
+    recordFailedLogin(ip.c_str());
+    return sendRegisterFailPage(req, "Passwords do not match. Please try again.");
+  }
+  if (!isValidPublicUsername(username, nullptr)) {
+    recordFailedLogin(ip.c_str());
+    return sendRegisterFailPage(req, "Invalid username. Use 1–64 letters, numbers, '.', '_' or '-'.");
+  }
+  if (!isValidPublicPassword(password, nullptr)) {
+    recordFailedLogin(ip.c_str());
+    return sendRegisterFailPage(
+        req, (password.length() < kPublicPasswordMinLen)
+                 ? "Password must be at least 6 characters."
+                 : "Password is too long (max 64 characters).");
   }
 
-  // Execute the built-in command via unified pipeline so it is logged/audited
+  // Execute via unified pipeline so it is logged/audited. Username/password are
+  // allowlisted/length-capped above, so they fit cmdBuf safely.
   AuthContext ctx = makeWebAuthCtx(req);
   char cmdBuf[256];
-  snprintf(cmdBuf, sizeof(cmdBuf), "userrequest %s %s %s", username.c_str(), password.c_str(), confirmPassword.c_str());
-  String cmdline = cmdBuf;
+  snprintf(cmdBuf, sizeof(cmdBuf), "userrequest %s %s %s",
+           username.c_str(), password.c_str(), confirmPassword.c_str());
   String out;
-  bool ok = executeUnifiedWebCommand(req, ctx, cmdline, out);
-  // Some commands always return true; also check textual success marker
+  bool ok = executeUnifiedWebCommand(req, ctx, String(cmdBuf), out);
   ok = ok || (out.indexOf("Request submitted for") >= 0);
 
+  if (!ok) {
+    recordFailedLogin(ip.c_str());
+    // Map known command errors to fixed public strings — never echo `out`.
+    const char* msg = "Unable to submit request. Please try again later.";
+    if (out.indexOf("already pending") >= 0) {
+      msg = "That username is already pending approval.";
+    } else if (out.indexOf("Too many pending") >= 0) {
+      msg = "Too many pending requests. Please try again later.";
+    } else if (out.indexOf("LittleFS") >= 0 || out.indexOf("pending list") >= 0) {
+      msg = "Unable to submit request. Please try again later.";
+    }
+    return sendRegisterFailPage(req, msg);
+  }
+
   httpd_resp_set_type(req, "text/html");
-  if (ok) {
-    streamBeginHtml(req, "Request Submitted", /*isPublic=*/true, "", "register");
-    httpd_resp_send_chunk(req, "<div class='card'>", HTTPD_RESP_USE_STRLEN);
-    httpd_resp_send_chunk(req, R"REGSUCCESS(
+  streamBeginHtml(req, "Request Submitted", /*isPublic=*/true, "", "register");
+  httpd_resp_send_chunk(req, "<div class='card'>", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, R"REGSUCCESS(
 <div class='panel container-narrow text-center pad-xl'>
   <h2 style='color:#28a745'>Request Submitted</h2>
   <div style='background:#d4edda;border:1px solid #c3e6cb;border-radius:8px;padding:1.5rem;margin:1rem 0'>
@@ -3630,30 +3864,9 @@ esp_err_t handleRegisterSubmit(httpd_req_t* req) {
   </div>
 </div>
 )REGSUCCESS",
-                          HTTPD_RESP_USE_STRLEN);
-    httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
-    streamEndHtml(req);
-  } else {
-    streamBeginHtml(req, "Registration Failed", /*isPublic=*/true, "", "register");
-    httpd_resp_send_chunk(req, "<div class='card'>", HTTPD_RESP_USE_STRLEN);
-    httpd_resp_send_chunk(req, R"REGERR(
-<div class='panel container-narrow text-center pad-xl'>
-  <h2 style='color:#dc3545'>Registration Failed</h2>
-  <div class='form-error' style='background:#f8d7da;border:1px solid #f5c6cb;color:#721c24;padding:1rem;border-radius:8px;margin:1rem 0'>
-    <p style='margin:0'>)REGERR",
-                          HTTPD_RESP_USE_STRLEN);
-    httpd_resp_send_chunk(req, out.length() ? out.c_str() : "An error occurred.", HTTPD_RESP_USE_STRLEN);
-    httpd_resp_send_chunk(req, R"REGERR2(</p>
-  </div>
-  <div class='btn-row' style='justify-content:center'>
-    <a class='btn' href='/register'>Try Again</a>
-  </div>
-</div>
-)REGERR2",
-                          HTTPD_RESP_USE_STRLEN);
-    httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
-    streamEndHtml(req);
-  }
+                        HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
+  streamEndHtml(req);
   return ESP_OK;
 }
 
@@ -3897,6 +4110,10 @@ esp_err_t handleFileView(httpd_req_t* req) {
 
   AuthContext ctx = makeWebAuthCtx(req);
   if (!tgRequireAuth(ctx)) {
+    pollResume();
+    return ESP_OK;
+  }
+  if (!webGuestAccessAllowed(req, ctx)) {
     pollResume();
     return ESP_OK;
   }
@@ -4810,6 +5027,7 @@ esp_err_t handleCliBatch(httpd_req_t* req) {
     logAuthAttempt(false, "/api/cli/batch", String(), ctx.ip, "unauthorized");
     return ESP_OK;
   }
+  if (!webGuestAccessAllowed(req, ctx)) return ESP_OK;
 
   if (req->content_len == 0 || req->content_len > 32768) {
     httpd_resp_set_type(req, "application/json");
@@ -4942,7 +5160,11 @@ void startHttpServer() {
 
     if (certsOk) {
       httpd_ssl_config_t sslConfig = HTTPD_SSL_CONFIG_DEFAULT();
-      sslConfig.httpd.max_uri_handlers = 100;
+      // Full feature builds register ~110 URI handlers (pages + APIs + CORS
+      // preflights). The default 100 silently drops later registrations —
+      // historically that meant /api/backup OPTIONS never attached and the
+      // migration tool's CORS preflight got 405 Method Not Allowed.
+      sslConfig.httpd.max_uri_handlers = 160;
       sslConfig.httpd.lru_purge_enable = true;
       // Stack arg is in WORDS (see sizing notes on the plain HTTP
       // path below). 11059 words = 44 KB. Peak under HTTPS load
@@ -5025,7 +5247,8 @@ void startHttpServer() {
   // Plain HTTP fallback (or HTTPS not enabled)
   {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.max_uri_handlers = 100;
+    // See HTTPS path comment above — keep both servers at the same budget.
+    config.max_uri_handlers = 160;
     config.lru_purge_enable = true;
     // Stack arg is in WORDS (4 bytes) — NOT bytes, despite what the
     // ESP-IDF docs imply. The historical "11059 ≈ 11KB" comment was
@@ -5060,61 +5283,62 @@ register_handlers:
 #endif
 
   // Define URIs
-  static httpd_uri_t root = { .uri = "/", .method = HTTP_GET, .handler = handleRoot, .user_ctx = NULL };
-  static httpd_uri_t loginGet = { .uri = "/login", .method = HTTP_GET, .handler = handleLogin, .user_ctx = NULL };
-  static httpd_uri_t loginPost = { .uri = "/login", .method = HTTP_POST, .handler = handleLogin, .user_ctx = NULL };
-  static httpd_uri_t loginSetSess = { .uri = "/login/setsession", .method = HTTP_GET, .handler = handleLoginSetSession, .user_ctx = NULL };
-  static httpd_uri_t logout = { .uri = "/logout", .method = HTTP_GET, .handler = handleLogout, .user_ctx = NULL };
-  static httpd_uri_t ping = { .uri = "/api/ping", .method = HTTP_GET, .handler = handlePing, .user_ctx = NULL };
-  static httpd_uri_t dash = { .uri = "/dashboard", .method = HTTP_GET, .handler = handleDashboard, .user_ctx = NULL };
-  static httpd_uri_t passwordChangeGet = { .uri = "/account/password-change", .method = HTTP_GET, .handler = handlePasswordChangePage, .user_ctx = NULL };
-  static httpd_uri_t passwordChangePost = { .uri = "/account/password-change", .method = HTTP_POST, .handler = handlePasswordChangePage, .user_ctx = NULL };
-  static httpd_uri_t settingsPage = { .uri = "/settings", .method = HTTP_GET, .handler = handleSettingsPage, .user_ctx = NULL };
-  static httpd_uri_t settingsGet = { .uri = "/api/settings", .method = HTTP_GET, .handler = handleSettingsGet, .user_ctx = NULL };
-  static httpd_uri_t settingsSchema = { .uri = "/api/settings/schema", .method = HTTP_GET, .handler = handleSettingsSchema, .user_ctx = NULL };
-  static httpd_uri_t userSettingsGet = { .uri = "/api/user/settings", .method = HTTP_GET, .handler = handleUserSettingsGet, .user_ctx = NULL };
-  static httpd_uri_t userSettingsSet = { .uri = "/api/user/settings", .method = HTTP_POST, .handler = handleUserSettingsSet, .user_ctx = NULL };
-  static httpd_uri_t devicesGet = { .uri = "/api/devices", .method = HTTP_GET, .handler = handleDeviceRegistryGet, .user_ctx = NULL };
-  static httpd_uri_t buildConfig = { .uri = "/api/buildconfig", .method = HTTP_GET, .handler = handleBuildConfig, .user_ctx = NULL };
-  static httpd_uri_t apiNotice = { .uri = "/api/notice", .method = HTTP_GET, .handler = handleNotice, .user_ctx = NULL };
-  static httpd_uri_t apiEvents = { .uri = "/api/events", .method = HTTP_GET, .handler = handleEvents, .user_ctx = NULL };
-  static httpd_uri_t filesPage = { .uri = "/files", .method = HTTP_GET, .handler = handleFilesPage, .user_ctx = NULL };
-  static httpd_uri_t filesList = { .uri = "/api/files/list", .method = HTTP_GET, .handler = handleFilesList, .user_ctx = NULL };
-  static httpd_uri_t filesStats = { .uri = "/api/files/stats", .method = HTTP_GET, .handler = handleFilesStats, .user_ctx = NULL };
-  static httpd_uri_t filesCreate = { .uri = "/api/files/create", .method = HTTP_POST, .handler = handleFilesCreate, .user_ctx = NULL };
-  static httpd_uri_t filesView = { .uri = "/api/files/view", .method = HTTP_GET, .handler = handleFileView, .user_ctx = NULL };
-  static httpd_uri_t filesRead = { .uri = "/api/files/read", .method = HTTP_GET, .handler = handleFileRead, .user_ctx = NULL };
-  static httpd_uri_t filesWrite = { .uri = "/api/files/write", .method = HTTP_POST, .handler = handleFileWrite, .user_ctx = NULL };
-  static httpd_uri_t filesUpload = { .uri = "/api/files/upload", .method = HTTP_POST, .handler = handleFileUpload, .user_ctx = NULL };
-  static httpd_uri_t iconGet = { .uri = "/api/icon", .method = HTTP_GET, .handler = handleIconGet, .user_ctx = NULL };
-  static httpd_uri_t iconTestPage = { .uri = "/icons/test", .method = HTTP_GET, .handler = handleIconTestPage, .user_ctx = NULL };
-  static httpd_uri_t loggingPage = { .uri = "/logging", .method = HTTP_GET, .handler = handleLoggingPage, .user_ctx = NULL };
-  static httpd_uri_t cliPage = { .uri = "/cli", .method = HTTP_GET, .handler = handleCLIPage, .user_ctx = NULL };
-  static httpd_uri_t cliCmd = { .uri = "/api/cli", .method = HTTP_POST, .handler = handleCLICommand, .user_ctx = NULL };
-  static httpd_uri_t cliBatch = { .uri = "/api/cli/batch", .method = HTTP_POST, .handler = handleCliBatch, .user_ctx = NULL };
-  static httpd_uri_t logsGet = { .uri = "/api/cli/logs", .method = HTTP_GET, .handler = handleLogs, .user_ctx = NULL };
+  static const httpd_uri_t root = { .uri = "/", .method = HTTP_GET, .handler = handleRoot, .user_ctx = NULL };
+  static const httpd_uri_t loginGet = { .uri = "/login", .method = HTTP_GET, .handler = handleLogin, .user_ctx = NULL };
+  static const httpd_uri_t loginPost = { .uri = "/login", .method = HTTP_POST, .handler = handleLogin, .user_ctx = NULL };
+  static const httpd_uri_t loginSetSess = { .uri = "/login/setsession", .method = HTTP_GET, .handler = handleLoginSetSession, .user_ctx = NULL };
+  static const httpd_uri_t logout = { .uri = "/logout", .method = HTTP_GET, .handler = handleLogout, .user_ctx = NULL };
+  static const httpd_uri_t ping = { .uri = "/api/ping", .method = HTTP_GET, .handler = handlePing, .user_ctx = NULL };
+  static const httpd_uri_t dash = { .uri = "/dashboard", .method = HTTP_GET, .handler = handleDashboard, .user_ctx = NULL };
+  static const httpd_uri_t passwordChangeGet = { .uri = "/account/password-change", .method = HTTP_GET, .handler = handlePasswordChangePage, .user_ctx = NULL };
+  static const httpd_uri_t passwordChangePost = { .uri = "/account/password-change", .method = HTTP_POST, .handler = handlePasswordChangePage, .user_ctx = NULL };
+  static const httpd_uri_t settingsPage = { .uri = "/settings", .method = HTTP_GET, .handler = handleSettingsPage, .user_ctx = NULL };
+  static const httpd_uri_t settingsGet = { .uri = "/api/settings", .method = HTTP_GET, .handler = handleSettingsGet, .user_ctx = NULL };
+  static const httpd_uri_t settingsSchema = { .uri = "/api/settings/schema", .method = HTTP_GET, .handler = handleSettingsSchema, .user_ctx = NULL };
+  static const httpd_uri_t userSettingsGet = { .uri = "/api/user/settings", .method = HTTP_GET, .handler = handleUserSettingsGet, .user_ctx = NULL };
+  static const httpd_uri_t userSettingsSet = { .uri = "/api/user/settings", .method = HTTP_POST, .handler = handleUserSettingsSet, .user_ctx = NULL };
+  static const httpd_uri_t devicesGet = { .uri = "/api/devices", .method = HTTP_GET, .handler = handleDeviceRegistryGet, .user_ctx = NULL };
+  static const httpd_uri_t buildConfig = { .uri = "/api/buildconfig", .method = HTTP_GET, .handler = handleBuildConfig, .user_ctx = NULL };
+  static const httpd_uri_t apiNotice = { .uri = "/api/notice", .method = HTTP_GET, .handler = handleNotice, .user_ctx = NULL };
+  static const httpd_uri_t apiEvents = { .uri = "/api/events", .method = HTTP_GET, .handler = handleEvents, .user_ctx = NULL };
+  static const httpd_uri_t apiEventsKinds = { .uri = "/api/events/kinds", .method = HTTP_GET, .handler = handleEventsKinds, .user_ctx = NULL };
+  static const httpd_uri_t apiLoggingStatus = { .uri = "/api/logging/status", .method = HTTP_GET, .handler = handleLoggingStatus, .user_ctx = NULL };
+  static const httpd_uri_t apiDebugFlags = { .uri = "/api/debug/flags", .method = HTTP_GET, .handler = handleDebugFlags, .user_ctx = NULL };
+  static const httpd_uri_t filesPage = { .uri = "/files", .method = HTTP_GET, .handler = handleFilesPage, .user_ctx = NULL };
+  static const httpd_uri_t filesList = { .uri = "/api/files/list", .method = HTTP_GET, .handler = handleFilesList, .user_ctx = NULL };
+  static const httpd_uri_t filesStats = { .uri = "/api/files/stats", .method = HTTP_GET, .handler = handleFilesStats, .user_ctx = NULL };
+  static const httpd_uri_t filesCreate = { .uri = "/api/files/create", .method = HTTP_POST, .handler = handleFilesCreate, .user_ctx = NULL };
+  static const httpd_uri_t filesView = { .uri = "/api/files/view", .method = HTTP_GET, .handler = handleFileView, .user_ctx = NULL };
+  static const httpd_uri_t filesRead = { .uri = "/api/files/read", .method = HTTP_GET, .handler = handleFileRead, .user_ctx = NULL };
+  static const httpd_uri_t filesWrite = { .uri = "/api/files/write", .method = HTTP_POST, .handler = handleFileWrite, .user_ctx = NULL };
+  static const httpd_uri_t filesUpload = { .uri = "/api/files/upload", .method = HTTP_POST, .handler = handleFileUpload, .user_ctx = NULL };
+  static const httpd_uri_t iconGet = { .uri = "/api/icon", .method = HTTP_GET, .handler = handleIconGet, .user_ctx = NULL };
+  static const httpd_uri_t iconTestPage = { .uri = "/icons/test", .method = HTTP_GET, .handler = handleIconTestPage, .user_ctx = NULL };
+  static const httpd_uri_t loggingPage = { .uri = "/logging", .method = HTTP_GET, .handler = handleLoggingPage, .user_ctx = NULL };
+  static const httpd_uri_t cliPage = { .uri = "/cli", .method = HTTP_GET, .handler = handleCLIPage, .user_ctx = NULL };
+  static const httpd_uri_t cliCmd = { .uri = "/api/cli", .method = HTTP_POST, .handler = handleCLICommand, .user_ctx = NULL };
+  static const httpd_uri_t cliBatch = { .uri = "/api/cli/batch", .method = HTTP_POST, .handler = handleCliBatch, .user_ctx = NULL };
+  static const httpd_uri_t logsGet = { .uri = "/api/cli/logs", .method = HTTP_GET, .handler = handleLogs, .user_ctx = NULL };
 #if ENABLE_AUTOMATION
-  static httpd_uri_t automationsPage = { .uri = "/automations", .method = HTTP_GET, .handler = handleAutomationsPage, .user_ctx = NULL };
+  static const httpd_uri_t automationsPage = { .uri = "/automations", .method = HTTP_GET, .handler = handleAutomationsPage, .user_ctx = NULL };
 #endif
-  static httpd_uri_t systemStatus = { .uri = "/api/system", .method = HTTP_GET, .handler = handleSystemStatus, .user_ctx = NULL };
+  static const httpd_uri_t systemStatus = { .uri = "/api/system", .method = HTTP_GET, .handler = handleSystemStatus, .user_ctx = NULL };
   // Sessions (admin)
-  static httpd_uri_t sessionsList = { .uri = "/api/sessions", .method = HTTP_GET, .handler = handleSessionsList, .user_ctx = NULL };
-  static httpd_uri_t adminSessionsList = { .uri = "/api/admin/sessions", .method = HTTP_GET, .handler = handleAdminSessionsList, .user_ctx = NULL };
+  static const httpd_uri_t sessionsList = { .uri = "/api/sessions", .method = HTTP_GET, .handler = handleSessionsList, .user_ctx = NULL };
+  static const httpd_uri_t adminSessionsList = { .uri = "/api/admin/sessions", .method = HTTP_GET, .handler = handleAdminSessionsList, .user_ctx = NULL };
 #if ENABLE_AUTOMATION
-  static httpd_uri_t automationsGet = { .uri = "/api/automations", .method = HTTP_GET, .handler = handleAutomationsGet, .user_ctx = NULL };
-  static httpd_uri_t automationsExport = { .uri = "/api/automations/export", .method = HTTP_GET, .handler = handleAutomationsExport, .user_ctx = NULL };
+  static const httpd_uri_t automationsGet = { .uri = "/api/automations", .method = HTTP_GET, .handler = handleAutomationsGet, .user_ctx = NULL };
+  static const httpd_uri_t automationsExport = { .uri = "/api/automations/export", .method = HTTP_GET, .handler = handleAutomationsExport, .user_ctx = NULL };
 #endif
-  static httpd_uri_t outputGet = { .uri = "/api/output", .method = HTTP_GET, .handler = handleOutputGet, .user_ctx = NULL };
-  static httpd_uri_t outputTemp = { .uri = "/api/output/temp", .method = HTTP_POST, .handler = handleOutputTemp, .user_ctx = NULL };
-  static httpd_uri_t regPage = { .uri = "/register", .method = HTTP_GET, .handler = handleRegisterPage, .user_ctx = NULL };
-  static httpd_uri_t regSubmit = { .uri = "/register/submit", .method = HTTP_POST, .handler = handleRegisterSubmit, .user_ctx = NULL };
-  static httpd_uri_t adminPending = { .uri = "/api/admin/pending", .method = HTTP_GET, .handler = handleAdminPending, .user_ctx = NULL };
-  static httpd_uri_t adminApprove = { .uri = "/api/admin/approve", .method = HTTP_POST, .handler = handleAdminApproveUser, .user_ctx = NULL };
-  static httpd_uri_t adminDeny = { .uri = "/api/admin/reject", .method = HTTP_POST, .handler = handleAdminDenyUser, .user_ctx = NULL };
+  static const httpd_uri_t regPage = { .uri = "/register", .method = HTTP_GET, .handler = handleRegisterPage, .user_ctx = NULL };
+  static const httpd_uri_t regSubmit = { .uri = "/register/submit", .method = HTTP_POST, .handler = handleRegisterSubmit, .user_ctx = NULL };
+  static const httpd_uri_t adminPending = { .uri = "/api/admin/pending", .method = HTTP_GET, .handler = handleAdminPending, .user_ctx = NULL };
+  static const httpd_uri_t adminApprove = { .uri = "/api/admin/approve", .method = HTTP_POST, .handler = handleAdminApproveUser, .user_ctx = NULL };
+  static const httpd_uri_t adminDeny = { .uri = "/api/admin/reject", .method = HTTP_POST, .handler = handleAdminDenyUser, .user_ctx = NULL };
   // Browser icon handlers (silence 404 warnings)
-  static httpd_uri_t favicon = { .uri = "/favicon.ico", .method = HTTP_GET, .handler = handleBrowserIcon, .user_ctx = NULL };
-  static httpd_uri_t appleTouchIcon = { .uri = "/apple-touch-icon.png", .method = HTTP_GET, .handler = handleBrowserIcon, .user_ctx = NULL };
-  static httpd_uri_t appleTouchIconPre = { .uri = "/apple-touch-icon-precomposed.png", .method = HTTP_GET, .handler = handleBrowserIcon, .user_ctx = NULL };
+  static const httpd_uri_t favicon = { .uri = "/favicon.ico", .method = HTTP_GET, .handler = handleBrowserIcon, .user_ctx = NULL };
+  static const httpd_uri_t appleTouchIcon = { .uri = "/apple-touch-icon.png", .method = HTTP_GET, .handler = handleBrowserIcon, .user_ctx = NULL };
+  static const httpd_uri_t appleTouchIconPre = { .uri = "/apple-touch-icon-precomposed.png", .method = HTTP_GET, .handler = handleBrowserIcon, .user_ctx = NULL };
 
   // Register
   httpd_register_uri_handler(server, &favicon);
@@ -5126,6 +5350,13 @@ register_handlers:
   httpd_register_uri_handler(server, &loginSetSess);
   httpd_register_uri_handler(server, &logout);
   httpd_register_uri_handler(server, &ping);
+  // Migration CORS/backup early — these must not lose slots to later page
+  // handlers, or the browser preflight (OPTIONS /api/backup) 405s and the
+  // migration tool reports a CORS error.
+#if ENABLE_MIGRATION_TOOL
+  registerMigrationBackupHandler(server);
+  registerPingOptionsHandler(server);
+#endif
   httpd_register_uri_handler(server, &dash);
   httpd_register_uri_handler(server, &passwordChangeGet);
   httpd_register_uri_handler(server, &passwordChangePost);
@@ -5162,7 +5393,7 @@ register_handlers:
   registerSensorHandlers(server);
  #else
   // Sensors not compiled — register stub so dashboard gets 200 + sensorsDisabled:true instead of 404
-  static httpd_uri_t sensorsStatusStub = { .uri = "/api/sensors/status", .method = HTTP_GET, .handler = handleSensorsStatusStub, .user_ctx = NULL };
+  static const httpd_uri_t sensorsStatusStub = { .uri = "/api/sensors/status", .method = HTTP_GET, .handler = handleSensorsStatusStub, .user_ctx = NULL };
   httpd_register_uri_handler(server, &sensorsStatusStub);
  #endif
  #if ENABLE_WEB_BLUETOOTH
@@ -5195,6 +5426,9 @@ register_handlers:
   
   // SSE events endpoint for server-driven notices
   httpd_register_uri_handler(server, &apiEvents);
+  httpd_register_uri_handler(server, &apiEventsKinds);
+  httpd_register_uri_handler(server, &apiLoggingStatus);
+  httpd_register_uri_handler(server, &apiDebugFlags);
   httpd_register_uri_handler(server, &systemStatus);
   // Sessions endpoints
   httpd_register_uri_handler(server, &sessionsList);
@@ -5204,8 +5438,6 @@ register_handlers:
   httpd_register_uri_handler(server, &automationsGet);
   httpd_register_uri_handler(server, &automationsExport);
 #endif
-  httpd_register_uri_handler(server, &outputGet);
-  httpd_register_uri_handler(server, &outputTemp);
   httpd_register_uri_handler(server, &regPage);
   httpd_register_uri_handler(server, &regSubmit);
   httpd_register_uri_handler(server, &adminPending);
@@ -5213,14 +5445,9 @@ register_handlers:
   httpd_register_uri_handler(server, &adminDeny);
   httpd_register_uri_handler(server, &cliBatch);
 
-  // Migration tool endpoints (CORS-enabled)
-  // /api/backup (authenticated) + OPTIONS preflight for /api/ping and /api/backup
-  // Note: /api/restore is NOT registered here — it's only registered dynamically
-  // during first-time setup when the user selects "Import from Backup"
-#if ENABLE_MIGRATION_TOOL
-  registerMigrationBackupHandler(server);
-  registerPingOptionsHandler(server);
-#endif
+  // Migration tool endpoints are registered earlier (with /api/ping) so their
+  // OPTIONS CORS preflights always get URI slots. /api/restore is still only
+  // registered dynamically during FTS "Import from Backup".
   
   // Enable web output when server starts
   gOutputFlags |= MSG_ROUTE_WEB;

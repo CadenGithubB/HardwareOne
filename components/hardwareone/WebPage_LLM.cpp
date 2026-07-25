@@ -61,7 +61,11 @@ static esp_err_t handleLLMStatus(httpd_req_t* req) {
   DEBUG_HTTPF("[LLM-API] GET /api/llm/status from user=%s", ctx.user.c_str());
 
   LLMStatus st = llmGetStatus();
-  char json[448];
+  // Guided-menu presence + generation so the chat page can show/hide the guided
+  // strip and refetch it when a model swap changes the menu (LLM_GUIDED_MENU_SPEC §7).
+  uint8_t  menuGroups = llmMenuGroupCount();
+  uint16_t menuGen    = llmMenuGeneration();
+  char json[896];   // headroom for the optional ctxWarning fragment + a long error
   const char* stateStr = "UNLOADED";
   switch (st.state) {
     case LLMState::LOADING:    stateStr = "LOADING"; break;
@@ -74,18 +78,31 @@ static esp_err_t handleLLMStatus(httpd_req_t* req) {
   const char* archStr = (st.config.arch_type == 1) ? "GPT-2" : "Llama";
   const char* quantStr = (st.config.quant_type == 1) ? "INT8" : "FP32";
 
+  // Degraded-context warning fragment (shared helper — same text as CLI/OLED/G2).
+  // The message has no quotes/backslashes, so it needs no JSON escaping.
+  char ctxWarnFrag[208];
+  {
+    char w[176];
+    if (llmContextWarning(w, sizeof(w)) > 0)
+      snprintf(ctxWarnFrag, sizeof(ctxWarnFrag), ",\"ctxWarn\":true,\"ctxWarning\":\"%s\"", w);
+    else
+      snprintf(ctxWarnFrag, sizeof(ctxWarnFrag), ",\"ctxWarn\":false");
+  }
+
   snprintf(json, sizeof(json),
     "{\"state\":\"%s\",\"model\":\"%s\",\"params\":\"%dx%dx%d\","
     "\"psramKB\":%u,\"tokPerSec\":%.1f,\"lastTokens\":%d,\"error\":\"%s\","
     "\"dim\":%d,\"layers\":%d,\"heads\":%d,\"kvHeads\":%d,\"vocab\":%d,\"seqLen\":%d,"
-    "\"ctxUsed\":%d,\"ctxMax\":%d,\"arch\":\"%s\",\"quant\":\"%s\"}",
+    "\"ctxUsed\":%d,\"ctxMax\":%d,\"arch\":\"%s\",\"quant\":\"%s\","
+    "\"menu\":{\"groups\":%u,\"gen\":%u}%s}",
     stateStr, st.modelPath,
     st.config.dim, st.config.n_layers, st.config.n_heads,
     (unsigned)(st.totalPsramUsed / 1024),
     st.lastTokensPerSec, st.lastTokenCount, st.errorMsg,
     st.config.dim, st.config.n_layers, st.config.n_heads,
     st.config.n_kv_heads, st.config.vocab_size, st.config.seq_len,
-    st.lastContextUsed, st.lastContextMax, archStr, quantStr);
+    st.lastContextUsed, st.lastContextMax, archStr, quantStr,
+    (unsigned)menuGroups, (unsigned)menuGen, ctxWarnFrag);
 
   return sendJsonResponse(req, json);
 }
@@ -100,6 +117,76 @@ static esp_err_t handleLLMModels(httpd_req_t* req) {
   String models = llmListModels();
   DEBUG_HTTPF("[LLM-API] models response: %s", models.c_str());
   return sendJsonResponse(req, models.c_str());
+}
+
+// ============================================================================
+// GET /api/llm/menu?kind=groups|tpl|ent&g=<g>&off=<off>
+// Guided-input menu, served straight from the shared System_LLM_Menu API (NOT
+// via /api/cli, so replies aren't clipped at the 4095 B CLI cap). JSON shapes
+// mirror `llmmenu json` (LLM_GUIDED_MENU_SPEC §6/§7):
+//   kind=groups → {"schema":1,"gen":G,"groups":[{"i":,"name":,"mode":,"templates":,"entities":},...]}
+//   kind=tpl|ent → {"schema":1,"gen":G,"g":,"off":,"total":,"items":[...]}   (paged)
+// All accessors copy out under sMenuLock; the page pages with `off` until
+// off+items.length >= total.
+// ============================================================================
+static esp_err_t handleLLMMenu(httpd_req_t* req) {
+  WEB_AUTH_OR_RETURN(req, ctx);
+
+  size_t qlen = httpd_req_get_url_query_len(req);
+  char   query[96] = {};
+  if (qlen > 0 && qlen < sizeof(query)) httpd_req_get_url_query_str(req, query, sizeof(query));
+
+  char kind[8] = {};
+  char param[16];
+  if (httpd_query_key_value(query, "kind", kind, sizeof(kind)) != ESP_OK)
+    strlcpy(kind, "groups", sizeof(kind));
+  int g = 0, off = 0;
+  if (httpd_query_key_value(query, "g",   param, sizeof(param)) == ESP_OK) g   = atoi(param);
+  if (httpd_query_key_value(query, "off", param, sizeof(param)) == ESP_OK) off = atoi(param);
+
+  const uint16_t gen = llmMenuGeneration();
+  const uint8_t  gc  = llmMenuGroupCount();
+
+  PSRAM_JSON_DOC(doc);
+  doc["schema"] = 1;
+  doc["gen"]    = gen;
+
+  if (strcmp(kind, "groups") == 0) {
+    JsonArray groups = doc["groups"].to<JsonArray>();
+    for (uint8_t i = 0; i < gc; i++) {
+      LLMMenuGroupInfo gi;
+      if (!llmMenuGroupInfo(i, &gi)) continue;
+      JsonObject o = groups.add<JsonObject>();
+      o["i"]         = i;
+      o["name"]      = gi.name;                       // char[33] → copied into the doc pool
+      o["mode"]      = (gi.flags & 0x01) ? "do" : "ask";
+      o["templates"] = gi.tplCount;
+      o["entities"]  = gi.entCount;
+    }
+  } else {
+    const bool wantTpl = (strcmp(kind, "tpl") == 0);
+    LLMMenuGroupInfo gi;
+    if (g < 0 || off < 0 || gc == 0 || g >= (int)gc || !llmMenuGroupInfo((uint8_t)g, &gi))
+      return sendJsonResponse(req, "{\"schema\":1,\"error\":\"bad group\"}");
+    const int total = wantTpl ? (int)gi.tplCount : (int)gi.entCount;
+    const int PAGE  = wantTpl ? 32 : 64;              // bigger than the CLI pages — no 4095 B cap here
+    doc["g"]     = g;
+    doc["off"]   = off;
+    doc["total"] = total;
+    JsonArray items = doc["items"].to<JsonArray>();
+    char item[136];
+    for (int i = off; i < total && i < off + PAGE; i++) {
+      int n = wantTpl
+                ? llmMenuTemplate((uint8_t)g, (uint16_t)i, item, sizeof(item), nullptr)
+                : llmMenuEntity((uint8_t)g, (uint16_t)i, item, sizeof(item));
+      if (n < 0) break;
+      items.add(item);                                // char[] → copied into the doc pool
+    }
+  }
+
+  String resp;
+  serializeJson(doc, resp);
+  return sendJsonResponse(req, resp.c_str());
 }
 
 // ============================================================================
@@ -126,7 +213,10 @@ static esp_err_t handleLLMLoad(httpd_req_t* req) {
 
   int maxCtx = doc["max_ctx"] | gSettings.llmMaxContext;  // 0 = use compile-time default
   if (maxCtx < 0) maxCtx = 0;
-  if (maxCtx > 2048) maxCtx = 2048;
+  // Was a hand-typed 2048 while the schema accepted 4096, so every web load
+  // silently halved the configured context — and this is the ONLY surface that
+  // reads llmMaxContext at all (cmd_llm_load takes no context argument).
+  if (maxCtx > LLM_SETTING_MAX_CONTEXT) maxCtx = LLM_SETTING_MAX_CONTEXT;
 
   DEBUG_HTTPF("[LLM-API] POST /api/llm/load: model='%s' max_ctx=%d", modelName, maxCtx);
 
@@ -397,21 +487,23 @@ static esp_err_t handleLLMPage(httpd_req_t* req) {
 // Handler Registration
 // ============================================================================
 void registerLLMHandlers(httpd_handle_t server) {
-  static httpd_uri_t llmPage = { .uri = "/llm", .method = HTTP_GET, .handler = handleLLMPage, .user_ctx = NULL };
-  static httpd_uri_t llmStatus = { .uri = "/api/llm/status", .method = HTTP_GET, .handler = handleLLMStatus, .user_ctx = NULL };
-  static httpd_uri_t llmModels = { .uri = "/api/llm/models", .method = HTTP_GET, .handler = handleLLMModels, .user_ctx = NULL };
-  static httpd_uri_t llmLoad = { .uri = "/api/llm/load", .method = HTTP_POST, .handler = handleLLMLoad, .user_ctx = NULL };
-  static httpd_uri_t llmUnload = { .uri = "/api/llm/unload", .method = HTTP_POST, .handler = handleLLMUnload, .user_ctx = NULL };
-  static httpd_uri_t llmGenerate = { .uri = "/api/llm/generate", .method = HTTP_POST, .handler = handleLLMGenerate, .user_ctx = NULL };
-  static httpd_uri_t llmStop    = { .uri = "/api/llm/stop",     .method = HTTP_POST, .handler = handleLLMStop,     .user_ctx = NULL };
-  static httpd_uri_t llmPoll    = { .uri = "/api/llm/result",   .method = HTTP_GET,  .handler = handleLLMPoll,     .user_ctx = NULL };
-  static httpd_uri_t llmChatTurns = { .uri = "/api/llm/chat/turns", .method = HTTP_GET,  .handler = handleLLMChatTurns, .user_ctx = NULL };
-  static httpd_uri_t llmChatRetry = { .uri = "/api/llm/chat/retry", .method = HTTP_POST, .handler = handleLLMChatRetry, .user_ctx = NULL };
-  static httpd_uri_t llmChatClear = { .uri = "/api/llm/chat/clear", .method = HTTP_POST, .handler = handleLLMChatClear, .user_ctx = NULL };
+  static const httpd_uri_t llmPage = { .uri = "/llm", .method = HTTP_GET, .handler = handleLLMPage, .user_ctx = NULL };
+  static const httpd_uri_t llmStatus = { .uri = "/api/llm/status", .method = HTTP_GET, .handler = handleLLMStatus, .user_ctx = NULL };
+  static const httpd_uri_t llmModels = { .uri = "/api/llm/models", .method = HTTP_GET, .handler = handleLLMModels, .user_ctx = NULL };
+  static const httpd_uri_t llmMenu = { .uri = "/api/llm/menu", .method = HTTP_GET, .handler = handleLLMMenu, .user_ctx = NULL };
+  static const httpd_uri_t llmLoad = { .uri = "/api/llm/load", .method = HTTP_POST, .handler = handleLLMLoad, .user_ctx = NULL };
+  static const httpd_uri_t llmUnload = { .uri = "/api/llm/unload", .method = HTTP_POST, .handler = handleLLMUnload, .user_ctx = NULL };
+  static const httpd_uri_t llmGenerate = { .uri = "/api/llm/generate", .method = HTTP_POST, .handler = handleLLMGenerate, .user_ctx = NULL };
+  static const httpd_uri_t llmStop    = { .uri = "/api/llm/stop",     .method = HTTP_POST, .handler = handleLLMStop,     .user_ctx = NULL };
+  static const httpd_uri_t llmPoll    = { .uri = "/api/llm/result",   .method = HTTP_GET,  .handler = handleLLMPoll,     .user_ctx = NULL };
+  static const httpd_uri_t llmChatTurns = { .uri = "/api/llm/chat/turns", .method = HTTP_GET,  .handler = handleLLMChatTurns, .user_ctx = NULL };
+  static const httpd_uri_t llmChatRetry = { .uri = "/api/llm/chat/retry", .method = HTTP_POST, .handler = handleLLMChatRetry, .user_ctx = NULL };
+  static const httpd_uri_t llmChatClear = { .uri = "/api/llm/chat/clear", .method = HTTP_POST, .handler = handleLLMChatClear, .user_ctx = NULL };
 
   httpd_register_uri_handler(server, &llmPage);
   httpd_register_uri_handler(server, &llmStatus);
   httpd_register_uri_handler(server, &llmModels);
+  httpd_register_uri_handler(server, &llmMenu);
   httpd_register_uri_handler(server, &llmLoad);
   httpd_register_uri_handler(server, &llmUnload);
   httpd_register_uri_handler(server, &llmGenerate);

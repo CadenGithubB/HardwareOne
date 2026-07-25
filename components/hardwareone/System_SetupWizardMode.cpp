@@ -794,9 +794,9 @@ static void wizardMode_onEnter(void* /*ud*/) {
 
 // External WiFi save helpers (definitions in System_WiFi.cpp). Mirror the
 // approach used by runAndApplyFeatureWizard in System_SetupWizard.cpp:
-// the wizard's WiFi credentials go through the saved-networks list, not
-// the legacy single-SSID gSettings.wifiSSID field, so the runtime
-// connect-prefer-saved logic finds them on next boot.
+// the wizard's WiFi credentials go through the saved-networks list
+// (network.wifi.networks[] in settings.json), which the runtime
+// connect-prefer-saved logic reads on next boot.
 extern bool upsertWiFiNetwork(const String& ssid, const String& password,
                               int priority, bool hidden);
 extern void sortWiFiByPriority();
@@ -822,9 +822,8 @@ static void wizardMode_onExit(void* /*ud*/) {
     if (sWizard.result.wifiConfigured && sWizard.result.wifiSSID.length() > 0) {
       // Use the saved-networks list, matching runAndApplyFeatureWizard:
       // upsert the entry, re-sort by priority, persist to disk. This
-      // populates /system/wifi_networks.json which the runtime
-      // connect-saved-networks loop reads. Setting gSettings.wifiSSID
-      // alone (an older legacy field) wouldn't be enough.
+      // writes network.wifi.networks[] in settings.json, which the runtime
+      // connect-saved-networks loop reads.
       upsertWiFiNetwork(sWizard.result.wifiSSID, sWizard.result.wifiPassword,
                         /*priority=*/1, /*hidden=*/false);
       sortWiFiByPriority();

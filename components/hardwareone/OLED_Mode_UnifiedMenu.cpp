@@ -529,6 +529,7 @@ void displayUnifiedMenu() {
 // ==========================
 
 bool handleUnifiedMenuInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed) {
+  if (oledGuestBlocksMutate()) return true;
   // Canonical-signal pattern. Two simultaneous problems fixed here:
   //
   //   (1) Old code did `if (deltaY < -10) …` — that's a magic threshold that

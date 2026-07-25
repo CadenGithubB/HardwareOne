@@ -88,7 +88,9 @@
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 
 #include "G2_Glasses.h"
+#include "HAL_Audio.h"   // audioCaptureActive/Owner — guard the diagnostic ring probe against a real capture
 #include "System_Debug.h"
+#include "System_TaskUtils.h"  // APP_CORE / PRO_CORE task-placement constants
 #include "System_MemUtil.h"   // ps_alloc
 #include "G2_Page_Common.h"
 #include "System_VFS.h"
@@ -517,7 +519,7 @@ static void spawnAIWorker(AIWorkerKind kind, const char* heading, const char* bo
   } else {
     a->body[0] = '\0';
   }
-  if (xTaskCreate(aiWorker, "g2_ai_test", 4096, a, 5, nullptr) != pdPASS) {
+  if (xTaskCreatePinnedToCore(aiWorker, "g2_ai_test", 4096, a, 5, nullptr, APP_CORE) != pdPASS) {
     DEBUG_G2F("[G2] AI test: xTaskCreate failed (kind=%u)", (unsigned)kind);
     free(a);
   }
@@ -720,7 +722,7 @@ static void writeBackRow(const char* label) {
 
 // ROOT: category list
 static size_t buildRootRows() {
-  writeBackRow("<- Main Menu");
+  writeBackRow("<- System");   // menu reorg: Tests lives under the System launcher
   size_t row = 1;
   snprintf(gRows[row], TEST_ROW_LEN, "BLE Tests >>");
   gRowPtrs[row] = gRows[row]; row++;
@@ -1053,8 +1055,8 @@ static bool spawnImgProbeWorker(ImgProbeFn fn) {
   // G2 + WiFi leaves too little contiguous internal heap, xTaskCreate fails
   // and we fall back to an 8 KB stack in PSRAM (sdkconfig:
   // CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y) via xTaskCreateStatic.
-  if (xTaskCreate(imgProbeWorkerInternalStack, "g2_img_probe", kStackWords,
-                  reinterpret_cast<void*>(fn), 5, nullptr) == pdPASS) {
+  if (xTaskCreatePinnedToCore(imgProbeWorkerInternalStack, "g2_img_probe", kStackWords,
+                  reinterpret_cast<void*>(fn), 5, nullptr, APP_CORE) == pdPASS) {
     return true;
   }
 
@@ -1073,8 +1075,8 @@ static bool spawnImgProbeWorker(ImgProbeFn fn) {
       sizeof(StaticTask_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
 
   if (ctx->stack && ctx->tcb) {
-    TaskHandle_t h = xTaskCreateStatic(imgProbeWorker, "g2_img_probe", kStackWords,
-                                       ctx, 5, ctx->stack, ctx->tcb);
+    TaskHandle_t h = xTaskCreateStaticPinnedToCore(imgProbeWorker, "g2_img_probe", kStackWords,
+                                       ctx, 5, ctx->stack, ctx->tcb, APP_CORE);
     if (h) {
       DEBUG_G2F("[G2] Image probe: using PSRAM stack (internal xTaskCreate failed)");
       return true;
@@ -2009,10 +2011,10 @@ void g2TestSuiteHandleTap(uint32_t idx) {
 
     case TEST_LEVEL_ROOT: {
       if (idx == 0) {
-        // <- Back: out of Test Suite, back to root hijack menu.
-        g2SetHijackPage(G2_HIJACK_PAGE_MAIN);
-        extern void g2RedrawHijackMainMenu();
-        g2RedrawHijackMainMenu();
+        // <- Back: out of Test Suite, back to the System launcher (menu reorg —
+        // Tests now lives under System, not as a top-level hijack row).
+        extern void g2ShowSystemMenu();
+        g2ShowSystemMenu();
         return;
       }
       if (idx == 1) {
@@ -2897,6 +2899,16 @@ static void actionHideAICard() {
 // turned this on" with "samples are arriving" without leaving the
 // glasses. Doesn't redraw the menu — log-only.
 static void actionToggleMicFeed() {
+#if ENABLE_MICROPHONE
+  // The AFE ring is a destructive single-drainer shared with HAL_Audio. If a real
+  // capture (mic sensor or SR) owns the source, arming/disarming it here would
+  // corrupt that capture — refuse and point at the proper path.
+  if (audioCaptureActive()) {
+    DEBUG_G2F("[G2] Toggle Mic Feed: refused — capture owned by '%s' (use micsource/openmic)",
+              audioCaptureOwner());
+    return;
+  }
+#endif
   const bool wasOn = g2MicAfeFeedIsActive();
   const bool turnOn = !wasOn;
   const bool ok = g2MicSetAfeFeedActive(turnOn);

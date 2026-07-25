@@ -48,6 +48,21 @@ uint32_t getPowerModeCpuFreq(uint8_t mode) {
   return gPowerModes[mode].cpuFreqMhz;
 }
 
+// Interactive clock = nominal clamped UP to the floor. UltraSaver (40) -> 80;
+// all faster modes are returned unchanged.
+uint32_t getPowerModeActiveCpuFreq(uint8_t mode) {
+  uint32_t f = getPowerModeCpuFreq(mode);
+  return f < POWER_INTERACTIVE_FLOOR_MHZ ? POWER_INTERACTIVE_FLOOR_MHZ : f;
+}
+
+// Idle clock = nominal clamped DOWN to the floor. UltraSaver (40) -> 40;
+// every faster mode -> 80 (the radio-reachable idle floor the power-save path
+// already used). i.e. min(nominal, floor).
+uint32_t getPowerModeIdleCpuFreq(uint8_t mode) {
+  uint32_t f = getPowerModeCpuFreq(mode);
+  return f < POWER_INTERACTIVE_FLOOR_MHZ ? f : POWER_INTERACTIVE_FLOOR_MHZ;
+}
+
 uint8_t getPowerModeDisplayBrightness(uint8_t mode) {
   if (mode >= POWER_MODE_COUNT) {
     return 100;  // Default to full brightness
@@ -64,18 +79,26 @@ void applyPowerMode(uint8_t mode) {
   }
   
   const PowerModeConfig& config = gPowerModes[mode];
-  DEBUG_SYSTEMF("[POWER] Config: name=%s cpuFreq=%lu displayBright=%d", 
-                config.name, (unsigned long)config.cpuFreqMhz, config.displayBrightnessPercent);
-  
+  // Apply the INTERACTIVE clock, not the nominal table value. For UltraSaver
+  // that means 80 MHz, never a raw jump to 40: 40 MHz makes the UI unusably
+  // laggy, so it is reserved for the idle/asleep state and applied only by the
+  // (drain-guarded) idle power-save path in powerSaveTick(). Consequence: this
+  // function now never switches TO 40 MHz, so the old raw-setCpuFrequencyMhz
+  // hazard here only ever targets >=80 MHz (same as PowerSaver always did).
+  const uint32_t targetFreq = getPowerModeActiveCpuFreq(mode);
+  DEBUG_SYSTEMF("[POWER] Config: name=%s nominal=%lu active=%lu displayBright=%d",
+                config.name, (unsigned long)config.cpuFreqMhz,
+                (unsigned long)targetFreq, config.displayBrightnessPercent);
+
   // Apply CPU frequency
   uint32_t currentFreq = getCpuFrequencyMhz();
-  DEBUG_SYSTEMF("[POWER] Current CPU freq: %lu MHz, target: %lu MHz", 
-                (unsigned long)currentFreq, (unsigned long)config.cpuFreqMhz);
-  if (currentFreq != config.cpuFreqMhz) {
-    INFO_SYSTEMF("Changing CPU frequency: %lu MHz -> %lu MHz", 
-                 (unsigned long)currentFreq, (unsigned long)config.cpuFreqMhz);
-    setCpuFrequencyMhz(config.cpuFreqMhz);
-    DEBUG_SYSTEMF("[POWER] After setCpuFrequencyMhz, actual freq: %lu MHz", 
+  DEBUG_SYSTEMF("[POWER] Current CPU freq: %lu MHz, target: %lu MHz",
+                (unsigned long)currentFreq, (unsigned long)targetFreq);
+  if (currentFreq != targetFreq) {
+    INFO_SYSTEMF("Changing CPU frequency: %lu MHz -> %lu MHz",
+                 (unsigned long)currentFreq, (unsigned long)targetFreq);
+    setCpuFrequencyMhz(targetFreq);
+    DEBUG_SYSTEMF("[POWER] After setCpuFrequencyMhz, actual freq: %lu MHz",
                   (unsigned long)getCpuFrequencyMhz());
   } else {
     DEBUG_SYSTEMF("[POWER] CPU frequency already at target, skipping");
@@ -98,7 +121,7 @@ void applyPowerMode(uint8_t mode) {
   }
   
   INFO_SYSTEMF("Power mode applied: %s (CPU: %lu MHz, Display: %d%%)",
-               config.name, (unsigned long)config.cpuFreqMhz, config.displayBrightnessPercent);
+               config.name, (unsigned long)targetFreq, config.displayBrightnessPercent);
 
   systemEventPost(SYSEVT_POWER_MODE_CHANGED, config.name);
 
@@ -106,7 +129,7 @@ void applyPowerMode(uint8_t mode) {
   {
     extern void batteryLogEvent(const char* event);
     char ev[40];
-    snprintf(ev, sizeof(ev), "powermode:%s:%luMHz", config.name, (unsigned long)config.cpuFreqMhz);
+    snprintf(ev, sizeof(ev), "powermode:%s:%luMHz", config.name, (unsigned long)targetFreq);
     batteryLogEvent(ev);
   }
 }
@@ -160,11 +183,22 @@ const char* cmd_power(const String& argsInput) {
     }
     broadcastOutput("\nAvailable modes:");
     for (uint8_t i = 0; i < POWER_MODE_COUNT; i++) {
-      BROADCAST_PRINTF("  %d: %s (CPU: %lu MHz, Display: %d%%)",
-                       i, gPowerModes[i].name, 
-                       (unsigned long)gPowerModes[i].cpuFreqMhz,
-                       gPowerModes[i].displayBrightnessPercent);
+      const uint32_t act  = getPowerModeActiveCpuFreq(i);
+      const uint32_t idle = getPowerModeIdleCpuFreq(i);
+      if (idle < act) {
+        // UltraSaver: active clock plus its idle-only deep floor.
+        BROADCAST_PRINTF("  %d: %s (CPU: %lu MHz, %lu MHz idle, Display: %d%%)",
+                         i, gPowerModes[i].name,
+                         (unsigned long)act, (unsigned long)idle,
+                         gPowerModes[i].displayBrightnessPercent);
+      } else {
+        BROADCAST_PRINTF("  %d: %s (CPU: %lu MHz, Display: %d%%)",
+                         i, gPowerModes[i].name,
+                         (unsigned long)act,
+                         gPowerModes[i].displayBrightnessPercent);
+      }
     }
+    broadcastOutput("  (UltraSaver's 40 MHz applies only once idle power-save blanks the screen; see 'powersave')");
     return "[Power] Status displayed";
   }
   

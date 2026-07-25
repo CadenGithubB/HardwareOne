@@ -33,6 +33,14 @@ struct FMRadioCache {
   bool headphonesConnected = false;
   char stationName[9] = {0};     // 8 chars + null (RDS station name)
   char stationText[65] = {0};    // 64 chars + null (RDS radio text)
+  // Async seek state — cmd_fmradio_seek starts the hardware seek in a short
+  // I2C transaction and returns immediately (it used to busy-wait ~5 s while
+  // HOLDING the bus mutex, freezing the gamepad + OLED on the shared bus).
+  // fmRadioTask's 250 ms updateFMRadio() poll finalizes via ri.tuned (6 s
+  // failsafe). OLED/web render a "Seeking" indicator from seekInProgress.
+  bool seekInProgress = false;
+  bool seekDirUp = true;           // direction of the pending seek
+  unsigned long seekStartMs = 0;   // millis() at seek start (arm delay + failsafe)
 };
 
 #if ENABLE_FM_RADIO

@@ -36,13 +36,16 @@ static const char* cameraValidTasks[] = { SENSOR_TASK_STREAMING, nullptr };
 // Microphone Sensor Callbacks
 // ============================================================================
 
-#if ENABLE_MICROPHONE_SENSOR
+#if ENABLE_MICROPHONE
+#include "HAL_Audio.h"   // audioAnySourceAvailable — "connected" = a mic source is reachable
 extern bool gMicEnabled;
 extern bool micConnected;
 extern bool micRecording;
 
 static bool getMicConnected() {
-  return micConnected;
+  // "Connected" = a source is actually available right now (PDM present OR G2
+  // glasses connected), independent of whether capture is running.
+  return audioAnySourceAvailable();
 }
 
 static bool getMicEnabled() {
@@ -55,7 +58,7 @@ static const char* getMicTask() {
 }
 
 static const char* micValidTasks[] = { SENSOR_TASK_RECORDING, nullptr };
-#endif
+#endif // ENABLE_MICROPHONE
 
 // ============================================================================
 // Non-I2C Sensor Registry
@@ -74,10 +77,10 @@ const NonI2CSensorEntry nonI2CSensors[] = {
     "edgeimpulse"  // Associated ML settings module
   },
 #endif
-#if ENABLE_MICROPHONE_SENSOR
+#if ENABLE_MICROPHONE
   {
     "microphone",
-    "Microphone (PDM)",
+    "Microphone (PDM/G2)",
     SENSOR_CATEGORY_AUDIO,
     micValidTasks,
     getMicConnected,

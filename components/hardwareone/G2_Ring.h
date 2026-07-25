@@ -143,6 +143,15 @@ struct G2RingTelemetry {
 };
 void g2RingGetTelemetry(G2RingTelemetry& out);
 
+// Send ONE vitals point-query to the ring: 0=HR, 1=HRV, 2=SpO2, 3=battery
+// (deviceStatus). Fire-and-forget write-no-response; the reply arrives via
+// notify and lands in the telemetry cache above. Returns false when not
+// connected or `which` is out of range. Callers wanting a full refresh send
+// 0..3 spaced >=700 ms apart (the ring needs response time between queries —
+// same cadence the spoof-push poller uses); the G2 Ring dashboard does this
+// one query per live tick on page entry.
+bool g2RingPollVital(uint8_t which);
+
 // Bridge-progress hook. Called by parseSid80Rx() when a RING_CONNECT_INFO
 // poll arrives from either temple. We mirror the most recent connRet /
 // connectRing values so `ringbridge status` can show "scanning" / "fail" /
@@ -198,6 +207,7 @@ struct G2RingTelemetry {
   uint8_t  battery;  bool batteryValid;
 };
 inline void g2RingGetTelemetry(G2RingTelemetry& out) { out = G2RingTelemetry{}; }
+inline bool g2RingPollVital(uint8_t) { return false; }
 inline void g2RingNoteForwardedTelemetry(const uint8_t*, size_t) {}
 inline void g2RingNoteBridgePoll(uint64_t, bool, uint64_t, bool) {}
 

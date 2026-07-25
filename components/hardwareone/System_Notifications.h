@@ -29,7 +29,25 @@ enum : uint8_t {
   NSINK_BANNER = 1 << 0,  // transient OLED banner/ribbon
   NSINK_QUEUE  = 1 << 1,  // persistent notification-center view (ring-backed)
   NSINK_TOAST  = 1 << 2,  // web toast via SSE
+  NSINK_G2     = 1 << 3,  // native notification card on the G2 lens (EFS push)
 };
+
+// The "interrupt" surfaces — transient pop-ups that grab attention. The per-user
+// importance floor gates these three UNIFORMLY (banner/toast/G2 fire on the same
+// kinds for a given user). QUEUE is silent history and is never floor-gated.
+constexpr uint8_t NSINK_INTERRUPT = NSINK_BANNER | NSINK_TOAST | NSINK_G2;
+
+// Cross-cutting importance tiers — orthogonal to event family, and the axis
+// users actually tune. A per-user "minimum tier" (NotifViewer.minTier) decides
+// which interrupt surfaces fire, identically across every interface. Tag a
+// kind's tier in notifKindTier(); the default floor keeps the everyday load
+// small without hard-coding what any one surface (e.g. the glasses) may show.
+enum : uint8_t {
+  NTIER_VERBOSE  = 0,  // chatty/info — opt-in (setting changes, sensor start/stop, gestures)
+  NTIER_STANDARD = 1,  // genuinely useful — the default floor (presence, inbound, wifi, battery low)
+  NTIER_ALERT    = 2,  // must-know — security, safety, faults
+};
+constexpr uint8_t NTIER_DEFAULT = NTIER_STANDARD;
 
 struct NotifRule {
   uint8_t sinks;       // NSINK_* mask
@@ -46,16 +64,19 @@ struct NotifRule {
 //   2. device policy      — per-kind level from /system/notifications.json:
 //                           all (default) / admin (admin viewers only) /
 //                           off (hidden for everyone)
-//   3. sink masters       — gSettings.notifBanners/notifToasts/notifQueue
-//   4. personal mutes     — the viewer's notificationMuted array in their
-//                           per-user settings file (the same store the web
-//                           dashboard layout preferences live in)
+//   3. sink masters       — gSettings.notifBanners/notifToasts/notifQueue/notifG2
+//   4. personal prefs     — the viewer's importance floor (interrupt only
+//                           at/above minTier) plus per-kind force-on/force-off,
+//                           from their per-user settings file. This one
+//                           preference applies IDENTICALLY on every interface.
 // None of it touches the event ring or automations — display only.
 
 struct NotifViewer {
   bool known;            // false = anonymous surface (no login): non-admin view
   bool isAdmin;
-  uint32_t muteMask[4];  // viewer's personal muted kinds (bit index = kind)
+  uint8_t minTier;       // personal importance floor (NTIER_*); default NTIER_DEFAULT
+  uint32_t muteMask[4];  // force-OFF: kinds this viewer never wants (any sink)
+  uint32_t forceMask[4]; // force-ON: interrupt even for kinds below minTier
 };
 
 // Resolve a viewer once per render pass. Per-user prefs come from a small
@@ -74,6 +95,12 @@ void notifPolicyLoad();
 // change — cache key for viewer-dependent views (OLED queue rebuild).
 uint32_t notifPrefsGeneration();
 
+// Device-wide per-kind level for config screens: 0=all, 1=admin, 2=off.
+// notifLevelToken maps a level to the exact token cmd_notifydevicekind
+// accepts ("all"/"admin"/"off") — display it and you can send it back.
+uint8_t notifDeviceKindLevel(uint8_t kind);
+const char* notifLevelToken(uint8_t level);
+
 // Flush the per-user prefs cache. Hooked into saveUserSettings() so every
 // write path (web /api/user/settings, notifyusermute, password ops) invalidates.
 void notifUserPrefsInvalidate();
@@ -83,6 +110,8 @@ void notifUserPrefsInvalidate();
 //   notifyusermute — any logged-in user: personal mute list for the EXECUTING user
 const char* cmd_notifydevicekind(const String& argsInput);
 const char* cmd_notifyusermute(const String& argsInput);
+const char* cmd_notifyusershow(const String& argsInput);
+const char* cmd_notifylevel(const String& argsInput);
 
 // `notifstats` diagnostics command (registered in the debug command table):
 // pipeline loss/suppression/saturation counters; 'reset' zeroes them.

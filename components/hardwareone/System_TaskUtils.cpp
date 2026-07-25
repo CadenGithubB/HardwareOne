@@ -207,6 +207,19 @@ bool createInputTask() {
   return true;  // Task created successfully or already exists
 }
 
+// All I2C sensor polling tasks are pinned to Core 1 (APP core). Core 0 is
+// saturated by the Wi-Fi stack + ESP-NOW; an unpinned sensor poll that floats
+// onto Core 0 and gets starved mid-I2C-transaction lets the legacy I2C driver's
+// bus-recovery path storm the bus → panic(4) / INT-WDT. Core 1 is near-idle so
+// the transaction completes before its timeout. This is the same reason the
+// input task is pinned (see createInputTask). GPS — the busiest poller (a read
+// every ~10 ms) — was the one left unpinned, and it crash-looped the FeatherS3
+// on every out-and-about boot (docs/NewCapture, 2026-07-22): offline, the Wi-Fi
+// stack thrashes to reach the absent home AP and saturates Core 0 harder, so the
+// starve trips in seconds. Pinning every I2C poller closes the whole class.
+// I2C_SENSOR_CORE now lives in System_TaskUtils.h so the sensor-queue processor
+// (created in HardwareOne.cpp / System_I2C.cpp) can pin to the same core.
+
 bool createThermalTask() {
   // Check for stale task handle (task deleted itself but handle not cleared)
   if (gThermalTaskHandle != nullptr) {
@@ -217,7 +230,7 @@ bool createThermalTask() {
   }
   if (gThermalTaskHandle == nullptr) {
     const uint32_t thermalStack = THERMAL_STACK_WORDS;  // words; ~24KB (16KB was too tight on ESP32-classic — overflowed on failed-read retry storm + debug logging)
-    if (xTaskCreateLogged(thermalTask, "thermal_task", thermalStack, nullptr, TASK_PRIORITY_LOW, &gThermalTaskHandle, "thermal") != pdPASS) {
+    if (xTaskCreateLogged(thermalTask, "thermal_task", thermalStack, nullptr, TASK_PRIORITY_LOW, &gThermalTaskHandle, "thermal", I2C_SENSOR_CORE) != pdPASS) {
       return false;
     }
   }
@@ -234,7 +247,7 @@ bool createIMUTask() {
   }
   if (gImuTaskHandle == nullptr) {
     const uint32_t imuStack = IMU_STACK_WORDS;  // words; ~16KB (BNO055 init retries need extra stack)
-    if (xTaskCreateLogged(imuTask, "imu_task", imuStack, nullptr, TASK_PRIORITY_LOW, &gImuTaskHandle, "imu") != pdPASS) {
+    if (xTaskCreateLogged(imuTask, "imu_task", imuStack, nullptr, TASK_PRIORITY_LOW, &gImuTaskHandle, "imu", I2C_SENSOR_CORE) != pdPASS) {
       return false;
     }
     DEBUG_CLIF("imustart: IMU task created successfully");
@@ -252,7 +265,7 @@ bool createToFTask() {
   }
   if (gTofTaskHandle == nullptr) {
     const uint32_t tofStack = TOF_STACK_WORDS;  // words; ~12KB
-    if (xTaskCreateLogged(tofTask, "tof_task", tofStack, nullptr, TASK_PRIORITY_LOW, &gTofTaskHandle, "tof") != pdPASS) {
+    if (xTaskCreateLogged(tofTask, "tof_task", tofStack, nullptr, TASK_PRIORITY_LOW, &gTofTaskHandle, "tof", I2C_SENSOR_CORE) != pdPASS) {
       DEBUG_CLIF("tofstart: FAILED to create ToF task");
       return false;
     }
@@ -270,7 +283,7 @@ bool createFMRadioTask() {
   }
   if (gFmRadioTaskHandle == nullptr) {
     const uint32_t fmRadioStack = FMRADIO_STACK_WORDS;  // words; ~18KB
-    if (xTaskCreateLogged(fmRadioTask, "fmradio_task", fmRadioStack, nullptr, TASK_PRIORITY_LOW, &gFmRadioTaskHandle, "fmradio") != pdPASS) {
+    if (xTaskCreateLogged(fmRadioTask, "fmradio_task", fmRadioStack, nullptr, TASK_PRIORITY_LOW, &gFmRadioTaskHandle, "fmradio", I2C_SENSOR_CORE) != pdPASS) {
       DEBUG_CLIF("fmradiostart: FAILED to create FM Radio task");
       return false;
     }
@@ -289,7 +302,7 @@ bool createAPDSTask() {
   }
   if (gApdsTaskHandle == nullptr) {
     const uint32_t apdsStack = APDS_STACK_WORDS;  // words; ~12KB
-    if (xTaskCreateLogged(apdsTask, "apds_task", apdsStack, nullptr, TASK_PRIORITY_LOW, &gApdsTaskHandle, "apds") != pdPASS) {
+    if (xTaskCreateLogged(apdsTask, "apds_task", apdsStack, nullptr, TASK_PRIORITY_LOW, &gApdsTaskHandle, "apds", I2C_SENSOR_CORE) != pdPASS) {
       return false;
     }
     DEBUG_CLIF("APDS task created successfully");
@@ -307,7 +320,7 @@ bool createPresenceTask() {
   }
   if (gPresenceTaskHandle == nullptr) {
     const uint32_t presenceStack = PRESENCE_STACK_WORDS;  // words; ~12KB
-    if (xTaskCreateLogged(presenceTask, "presence_task", presenceStack, nullptr, TASK_PRIORITY_LOW, &gPresenceTaskHandle, "presence") != pdPASS) {
+    if (xTaskCreateLogged(presenceTask, "presence_task", presenceStack, nullptr, TASK_PRIORITY_LOW, &gPresenceTaskHandle, "presence", I2C_SENSOR_CORE) != pdPASS) {
       return false;
     }
     DEBUG_CLIF("Presence task created successfully");
@@ -325,7 +338,7 @@ bool createGPSTask() {
   }
   if (gGpsTaskHandle == nullptr) {
     const uint32_t gpsStack = GPS_STACK_WORDS;  // words; ~12KB
-    if (xTaskCreateLogged(gpsTask, "gps_task", gpsStack, nullptr, TASK_PRIORITY_LOW, &gGpsTaskHandle, "gps") != pdPASS) {
+    if (xTaskCreateLogged(gpsTask, "gps_task", gpsStack, nullptr, TASK_PRIORITY_LOW, &gGpsTaskHandle, "gps", I2C_SENSOR_CORE) != pdPASS) {
       return false;
     }
     DEBUG_CLIF("GPS task created successfully");
@@ -343,7 +356,7 @@ bool createRTCTask() {
   }
   if (gRtcTaskHandle == nullptr) {
     const uint32_t rtcStack = RTC_STACK_WORDS;  // words; ~16KB
-    if (xTaskCreateLogged(rtcTask, "rtc_task", rtcStack, nullptr, TASK_PRIORITY_LOW, &gRtcTaskHandle, "rtc") != pdPASS) {
+    if (xTaskCreateLogged(rtcTask, "rtc_task", rtcStack, nullptr, TASK_PRIORITY_LOW, &gRtcTaskHandle, "rtc", I2C_SENSOR_CORE) != pdPASS) {
       return false;
     }
     DEBUG_CLIF("RTC task created successfully");

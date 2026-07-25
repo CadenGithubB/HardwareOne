@@ -304,10 +304,10 @@ esp_err_t handleWaypointsPage(httpd_req_t* req) {
     "  <div style='margin: 20px 0;'>\n"
     "    <h2>Add Waypoint</h2>\n"
     "    <div style='display: grid; gap: 10px; max-width: 400px;'>\n"
-    "      <input type='text' id='wp-name' placeholder='Waypoint Name' maxlength='11' />\n"
-    "      <input type='number' id='wp-lat' placeholder='Latitude' step='0.000001' />\n"
-    "      <input type='number' id='wp-lon' placeholder='Longitude' step='0.000001' />\n"
-    "      <button onclick='addWaypoint()' style='padding: 10px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer;'>Add Waypoint</button>\n"
+    "      <input type='text' id='wp-name' placeholder='Waypoint Name' maxlength='11' data-guest-hide />\n"
+    "      <input type='number' id='wp-lat' placeholder='Latitude' step='0.000001' data-guest-hide />\n"
+    "      <input type='number' id='wp-lon' placeholder='Longitude' step='0.000001' data-guest-hide />\n"
+    "      <button onclick='addWaypoint()' style='padding: 10px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer;' data-guest-hide>Add Waypoint</button>\n"
     "    </div>\n"
     "  </div>\n"
     "  <div>\n"
@@ -354,12 +354,12 @@ esp_err_t handleWaypointsPage(httpd_req_t* req) {
     "          html += '</td>';\n"
     "          html += '<td style=\"text-align: center;\">';\n"
     "          if (!isTarget) {\n"
-    "            html += '<button onclick=\"gotoWaypoint(' + idx + ')\" style=\"padding: 4px 8px; background: #2196F3; color: white; border: none; border-radius: 3px; cursor: pointer;\">Set Target</button>';\n"
+    "            html += '<button onclick=\"gotoWaypoint(' + idx + ')\" style=\"padding: 4px 8px; background: #2196F3; color: white; border: none; border-radius: 3px; cursor: pointer;\" data-guest-hide>Set Target</button>';\n"
     "          } else {\n"
-    "            html += '<button onclick=\"clearTarget()\" style=\"padding: 4px 8px; background: #FF9800; color: white; border: none; border-radius: 3px; cursor: pointer;\">Clear</button>';\n"
+    "            html += '<button onclick=\"clearTarget()\" style=\"padding: 4px 8px; background: #FF9800; color: white; border: none; border-radius: 3px; cursor: pointer;\" data-guest-hide>Clear</button>';\n"
     "          }\n"
     "          html += '</td>';\n"
-    "          html += '<td style=\"text-align: center;\"><button onclick=\"deleteWaypoint(' + idx + ')\" style=\"padding: 4px 8px; background: #f44336; color: white; border: none; border-radius: 3px; cursor: pointer;\">Delete</button></td>';\n"
+    "          html += '<td style=\"text-align: center;\"><button onclick=\"deleteWaypoint(' + idx + ')\" style=\"padding: 4px 8px; background: #f44336; color: white; border: none; border-radius: 3px; cursor: pointer;\" data-guest-hide>Delete</button></td>';\n"
     "          html += '</tr>';\n"
     "        });\n"
     "        html += '</table>';\n"
@@ -492,11 +492,11 @@ static esp_err_t handleMapsPage(httpd_req_t* req) {
 // =============================================================================
 
 void registerMapsHandlers(httpd_handle_t server) {
-  static httpd_uri_t mapsPage = { .uri = "/maps", .method = HTTP_GET, .handler = handleMapsPage, .user_ctx = NULL };
-  static httpd_uri_t mapFeaturesGet = { .uri = "/api/maps/features", .method = HTTP_GET, .handler = handleMapFeaturesAPI, .user_ctx = NULL };
-  static httpd_uri_t waypointsGet = { .uri = "/api/waypoints", .method = HTTP_GET, .handler = handleWaypointsAPI, .user_ctx = NULL };
-  static httpd_uri_t waypointsPost = { .uri = "/api/waypoints", .method = HTTP_POST, .handler = handleWaypointsAPI, .user_ctx = NULL };
-  static httpd_uri_t gpsTracksGet = { .uri = "/api/gps/tracks", .method = HTTP_GET, .handler = handleGPSTracksAPI, .user_ctx = NULL };
+  static const httpd_uri_t mapsPage = { .uri = "/maps", .method = HTTP_GET, .handler = handleMapsPage, .user_ctx = NULL };
+  static const httpd_uri_t mapFeaturesGet = { .uri = "/api/maps/features", .method = HTTP_GET, .handler = handleMapFeaturesAPI, .user_ctx = NULL };
+  static const httpd_uri_t waypointsGet = { .uri = "/api/waypoints", .method = HTTP_GET, .handler = handleWaypointsAPI, .user_ctx = NULL };
+  static const httpd_uri_t waypointsPost = { .uri = "/api/waypoints", .method = HTTP_POST, .handler = handleWaypointsAPI, .user_ctx = NULL };
+  static const httpd_uri_t gpsTracksGet = { .uri = "/api/gps/tracks", .method = HTTP_GET, .handler = handleGPSTracksAPI, .user_ctx = NULL };
   
   httpd_register_uri_handler(server, &mapsPage);
   httpd_register_uri_handler(server, &mapFeaturesGet);

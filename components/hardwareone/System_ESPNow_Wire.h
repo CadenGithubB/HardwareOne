@@ -68,8 +68,11 @@
 //                           FILE_PROGRESS=114, FILE_NACK=116, FILE_RESUME_OK=117 reserved)
 //   130–149  Events        (SUBSCRIBE_UPDATE live; UNSUBSCRIBE_ALL/EVENT_PUSH/
 //                           SUB_LIST_REQ/SUB_LIST_REPLY reserved 131–134)
-//   150–169  Sensors       (SENSOR_BROADCAST/STATUS live; POWER_STATUS=152 reserved;
-//                           153/154 earmarked SENSOR_REQ/SENSOR_ENVELOPE)
+//   150–169  Sensors       (SENSOR_STATUS live; SENSOR_REQ=153/SENSOR_ENVELOPE=154 live —
+//                           the secure fetcher's leased pull + encrypted reply;
+//                           SENSOR_BROADCAST=150 TX retired (D2: plaintext path removed,
+//                           encrypted ENVELOPE replaces it), RX kept vestigial;
+//                           POWER_STATUS=152 reserved)
 //   170–189  Bond          (BOND_*, MANIFEST_REQ, SETTINGS_REQ, SCHEMA_REQ, plus
 //                           BOND_STREAM_CTRL/BOND_SENSOR_DATA — moved in from
 //                           streaming/sensors because they were always bond-gated)
@@ -111,8 +114,12 @@ enum EspNowV4Type : uint8_t {
   ESPNOW_V4_TYPE_TOPO_START      = 33,
   ESPNOW_V4_TYPE_TOPO_PEER       = 34,
   ESPNOW_V4_TYPE_TIME_SYNC       = 35,
-  ESPNOW_V4_TYPE_PAIR_BEACON     = 36,  // WPS-style pairing beacon — plaintext FF broadcast sent while a pairing window is open
+  ESPNOW_V4_TYPE_PAIR_BEACON     = 36,  // Discovery beacon — BROADCAST_AUTH FF broadcast sent while a discovery window is open
   // 37–39 earmarked CAP_REQ / CAP_RESP / PEER_LIST (mesh capability discovery)
+  // Discover-then-confirm pairing control (BROADCAST_AUTH FF broadcast + V4PayloadPairCtrl.targetMac).
+  ESPNOW_V4_TYPE_PAIR_REQUEST    = 40,  // initiator → target: "I want to pair" (payload carries requester name)
+  ESPNOW_V4_TYPE_PAIR_ACCEPT     = 41,  // target → initiator: user accepted; both sides now run pairsecure
+  ESPNOW_V4_TYPE_PAIR_REJECT     = 42,  // target → initiator: user rejected / not in discovery mode
 
   // --- Application unicast (50–69) ---
   ESPNOW_V4_TYPE_CMD             = 50,
@@ -151,10 +158,12 @@ enum EspNowV4Type : uint8_t {
   // 135 earmarked EVENT_SUB v2 (semantic-kind mask wider than 32 bits)
 
   // --- Sensors (150–169) ---
-  ESPNOW_V4_TYPE_SENSOR_BROADCAST= 150,
+  ESPNOW_V4_TYPE_SENSOR_BROADCAST= 150,  // TX retired (D2 secure fetcher): plaintext broadcast
+                                         //   replaced by encrypted SENSOR_ENVELOPE. RX kept vestigial.
   ESPNOW_V4_TYPE_SENSOR_STATUS   = 151,
   // 152=POWER_STATUS reserved (voltage/charging/USB/heap beacon — mesh report rank 8)
-  // 153/154 earmarked SENSOR_REQ / SENSOR_ENVELOPE (mesh-legal on-demand pull)
+  ESPNOW_V4_TYPE_SENSOR_REQ      = 153,  // master → worker: subscribe/oneshot/unsubscribe (leased pull)
+  ESPNOW_V4_TYPE_SENSOR_ENVELOPE = 154,  // worker → master: session-encrypted unicast sensor reading
 
   // --- Bond (170–189) ---
   ESPNOW_V4_TYPE_BOND_HEARTBEAT  = 170,
@@ -247,6 +256,21 @@ struct __attribute__((packed)) V4PayloadPairBeacon {
 };
 static_assert(sizeof(V4PayloadPairBeacon) == 24, "V4PayloadPairBeacon must be 24 bytes");
 
+// Discover-then-confirm control frame (PAIR_REQUEST / PAIR_ACCEPT / PAIR_REJECT).
+// Sent as a BROADCAST_AUTH FF broadcast — same proven path as the beacon — because
+// the two devices are NOT yet ESP-NOW peers (a unicast esp_now_send would fail,
+// and fingerprintForPeer() of an unknown MAC yields no mesh key so the HMAC would
+// be skipped). `targetMac` addresses the intended recipient; every other same-mesh
+// device that hears the broadcast ignores it. All fields attacker-controllable
+// except targetMac's match against our own MAC (sanitize deviceName).
+struct __attribute__((packed)) V4PayloadPairCtrl {
+  uint8_t targetMac[6];     // intended recipient — receivers drop if != own MAC
+  uint8_t role;             // sender MESH_ROLE_* (informational)
+  uint8_t reserved;         // pad, 0
+  char    deviceName[20];   // sender's espnowDeviceName (display label; not NUL-guaranteed)
+};
+static_assert(sizeof(V4PayloadPairCtrl) == 28, "V4PayloadPairCtrl must be 28 bytes");
+
 // Time sync payload
 struct __attribute__((packed)) V4PayloadTimeSync {
   uint32_t epochTime;     // Unix epoch time
@@ -318,12 +342,28 @@ struct __attribute__((packed)) V4PayloadSensorStatus {
 
 // Sensor broadcast payload (sensor data to mesh)
 // V4: header is 4 bytes, max V4 payload 218 bytes, leaving 214 bytes for JSON data.
+// NOTE (D2 secure fetcher): SENSOR_ENVELOPE=154 reuses THIS layout on the wire — same
+// per-sensor {sensorType,dataLen,data[]} shape — but is sent as a session-encrypted
+// UNICAST to the leasing controller instead of a plaintext broadcast (opcode 150).
 struct __attribute__((packed)) V4PayloadSensorBroadcast {
   uint8_t  sensorType;  // RemoteSensorType enum value
   uint16_t dataLen;     // Length of JSON data that follows
   uint8_t  reserved;    // Padding for alignment
   uint8_t  data[];      // Variable-length JSON data (flexible array member)
 };
+
+// Sensor request payload (master -> worker): the secure fetcher's leased pull.
+// Mesh-legal (NOT bond-gated) — registered REQ_PAIRED|REQ_SESSION_ENC and authorized
+// in-handler by Ed25519 fingerprint against the worker's configured master/backup.
+struct __attribute__((packed)) V4PayloadSensorReq {
+  uint8_t  reqId;       // app-level correlation / renewal generation
+  uint8_t  mode;        // 0=subscribe, 1=unsubscribe, 2=oneshot (see SensorReqMode)
+  uint32_t sensorMask;  // bitmask over RemoteSensorType (bit i = 1u<<i)
+  uint32_t intervalMs;  // desired per-sensor cadence hint (worker floors at spec.minIntervalMs)
+  uint32_t leaseMs;     // lease duration (ms); must exceed the renewal cadence (e.g. 90000 for a 30s tick)
+};
+static_assert(sizeof(V4PayloadSensorReq) <= ESPNOW_V4_MAX_PLAINTEXT,
+              "V4PayloadSensorReq must fit a SESSION_FRAME plaintext budget (202 B)");
 
 // Metadata payload for metadata exchange (REQ/RESP/PUSH)
 // Phase 3.5: trimmed tags 64→54 so the struct fits ESPNOW_V4_MAX_PLAINTEXT

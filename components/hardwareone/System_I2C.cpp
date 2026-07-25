@@ -205,7 +205,7 @@ extern bool gPwmDriverConnected;
 
 // Device Registry Global Variables (definitions)
 // Array of devices detected during I2C scan
-ConnectedDevice connectedDevices[MAX_CONNECTED_DEVICES];
+EXT_RAM_BSS_ATTR ConnectedDevice connectedDevices[MAX_CONNECTED_DEVICES];
 int connectedDeviceCount = 0;
 int discoveryCount = 0;
 
@@ -1538,10 +1538,14 @@ const char* cmd_devices(const String& originalCmd) {
     JsonArray arr = doc["devices"].to<JsonArray>();
     buildI2cDeviceListJson(arr);
     doc["count"] = arr.size();
+    // One constant for the alloc AND the serialize — they used to be two
+    // hand-typed 2048s that had to agree.
+    static const size_t kDevJsonSize = 2048;
     static char* devJsonBuf = nullptr;
-    if (!devJsonBuf) devJsonBuf = (char*)ps_alloc(2048, AllocPref::PreferPSRAM, "devices.json");
+    if (!devJsonBuf) devJsonBuf = (char*)ps_alloc(kDevJsonSize, AllocPref::PreferPSRAM, "devices.json");
     if (!devJsonBuf) return "{\"error\":\"oom\"}";
-    serializeJson(doc, devJsonBuf, 2048);
+    size_t len = serializeJson(doc, devJsonBuf, kDevJsonSize);
+    if (len == 0 || len >= kDevJsonSize - 1) return "Error: device list outgrew the response buffer";
     return devJsonBuf;
   }
 
@@ -1606,10 +1610,17 @@ const char* cmd_devicefile(const String& originalCmd) {
   // Single source of truth (also feeds /api/devices) — no hand-rolled String.
   PSRAM_JSON_DOC(doc);
   buildDeviceRegistryJson(doc);
+  static const size_t kRegBufSize = 4096;
   static char* regBuf = nullptr;
-  if (!regBuf) regBuf = (char*)ps_alloc(4096, AllocPref::PreferPSRAM, "devicefile.json");
+  if (!regBuf) regBuf = (char*)ps_alloc(kRegBufSize, AllocPref::PreferPSRAM, "devicefile.json");
   if (!regBuf) return "Error: [I2C] Out of memory";
-  serializeJson(doc, regBuf, 4096);
+  size_t len = serializeJson(doc, regBuf, kRegBufSize);
+  if (len == 0 || len >= kRegBufSize - 1) return "Error: device registry outgrew the response buffer";
+  // NOTE: this still BROADCASTS the document and returns a human string, so the
+  // JSON is clipped to 255 B ([CUT]) on every sink and no transport gets it as
+  // an addressed reply. Same JSON-contract violation `events kinds json` had —
+  // the fit check above is correct but does not fix that; it needs the same
+  // return-the-document treatment.
   broadcastOutput(regBuf);
   return "[I2C] Registry JSON displayed";
 }
@@ -1769,10 +1780,12 @@ const char* cmd_sensors(const String& argsInput) {
     PSRAM_JSON_DOC(doc);
     buildSensorsJson(doc, !brief);
     doc["hint"] = "battery: run 'batterystatus'; a sensor: 'open<sensor>' then '<sensor>read'";
+    static const size_t kSensorsJsonSize = 4096;
     static char* sensorsJsonBuf = nullptr;
-    if (!sensorsJsonBuf) sensorsJsonBuf = (char*)ps_alloc(4096, AllocPref::PreferPSRAM, "sensors.json");
+    if (!sensorsJsonBuf) sensorsJsonBuf = (char*)ps_alloc(kSensorsJsonSize, AllocPref::PreferPSRAM, "sensors.json");
     if (!sensorsJsonBuf) return "{\"error\":\"oom\"}";
-    serializeJson(doc, sensorsJsonBuf, 4096);
+    size_t len = serializeJson(doc, sensorsJsonBuf, kSensorsJsonSize);
+    if (len == 0 || len >= kSensorsJsonSize - 1) return "Error: sensor list outgrew the response buffer";
     return sensorsJsonBuf;
   }
 
@@ -2050,7 +2063,7 @@ static const char* cmd_sensorautostart(const String& argsInput) {
     }
     writeSettingsJson();
     
-    static char result[128];
+    EXT_RAM_BSS_ATTR static char result[128];
     uint32_t freeHeapKB = ESP.getFreeHeap() / 1024;
     if (enable) {
       snprintf(result, sizeof(result), 
@@ -2070,7 +2083,7 @@ static const char* cmd_sensorautostart(const String& argsInput) {
   *found->autoStartFlag = enable;
   writeSettingsJson();
   
-  static char result[128];
+  EXT_RAM_BSS_ATTR static char result[128];
   uint32_t freeHeapKB = ESP.getFreeHeap() / 1024;
   
   if (enable && !wasEnabled) {
@@ -2169,14 +2182,14 @@ const char* cmd_i2crecover(const String& argsInput) {
   
   I2CDevice* dev = mgr->getDevice(address);
   if (!dev || !dev->isInitialized()) {
-    static char result[64];
+    EXT_RAM_BSS_ATTR static char result[64];
     snprintf(result, sizeof(result), "[I2C] Device 0x%02X not registered", address);
     return result;
   }
   
   dev->attemptRecovery();
   
-  static char result[128];
+  EXT_RAM_BSS_ATTR static char result[128];
   snprintf(result, sizeof(result), 
     "[I2C] Device 0x%02X (%s) degraded state cleared. Retry sensor start command.",
     address, dev->name);
@@ -2501,7 +2514,7 @@ const char* buildSensorStatusJson() {
     doc["sdWritable"]  = sdCardIsWritableForStatus();
   }
 
-#if ENABLE_MICROPHONE_SENSOR
+#if ENABLE_MICROPHONE
   extern bool gMicEnabled;
   extern bool micRecording;
   doc["micEnabled"] = gMicEnabled;
@@ -2983,7 +2996,10 @@ void processAutoStartSensors() {
  #if ENABLE_I2C_SYSTEM
   if (!queueProcessorTask) {
     const uint32_t queueStackWords = SENSOR_QUEUE_STACK_WORDS;
-    if (xTaskCreateLogged(sensorQueueProcessorTask, "sensor_queue_task", queueStackWords, nullptr, TASK_PRIORITY_LOW, &queueProcessorTask, "sensor.queue") != pdPASS) {
+    // Pin to Core 1 (I2C_SENSOR_CORE) — same rationale as the primary create site
+    // in HardwareOne.cpp: this task runs the I2C device-init transactions and must
+    // not float onto Wi-Fi-saturated Core 0 (starve → bus-storm → panic(4)).
+    if (xTaskCreateLogged(sensorQueueProcessorTask, "sensor_queue_task", queueStackWords, nullptr, TASK_PRIORITY_LOW, &queueProcessorTask, "sensor.queue", I2C_SENSOR_CORE) != pdPASS) {
       ERROR_I2CF("[I2C_SENSORS] Failed to create sensor queue processor task (late init)");
       queueProcessorTask = nullptr;
       return;

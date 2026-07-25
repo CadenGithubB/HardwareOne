@@ -228,10 +228,20 @@ endif()
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
-set(PROJECT_VER "0.99.0")
+set(PROJECT_VER "0.99.1")
 project(hardwareone-idf)
 
 # Add board-specific defines based on target (must be AFTER project())
 if(CONFIG_IDF_TARGET_ESP32S3)
     add_compile_definitions(XIAO_ESP32S3_SENSE_ENABLED)
 endif()
+
+# arduino_events task stack, in BYTES (ESP-IDF xTaskCreate takes bytes, not
+# words). The vendored components/arduino is gitignored, so this tracked
+# override is the reviewable source of truth and survives a vendor resync
+# (NetworkEvents.cpp wraps its default in #ifndef). History: a local cut to
+# 2560 believed the unit was words ("2560 words = 10 KB") — the 4x footgun —
+# leaving 2.5 KB, which the disconnect-while-connected handler chain
+# (wifiEventLogger -> logSystemEvent -> systemEventPost) overflowed on every
+# wifi teardown (panic observed 2026-07-20). 4096 restores the upstream size.
+add_compile_definitions(ARDUINO_NETWORK_EVENT_TASK_STACK_SIZE=4096)

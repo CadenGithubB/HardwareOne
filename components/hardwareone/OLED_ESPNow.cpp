@@ -599,6 +599,26 @@ void oledEspNowDisplayRooms(Adafruit_SSD1306* display) {
 }
 
 
+// Selected candidate row on the pairing/discovery screen (shared render+input).
+static int sPairingSel = 0;
+
+// Incoming pair request → the shared confirm dialog (Accept/Reject). Poll-driven
+// from oledUpdate() so it pops no matter which screen is showing. The dialog
+// holds line2 by pointer, so the name buffer is static (stable while it's up).
+static char sPairPromptName[26];
+static void onPairReqAccept(void* /*ud*/) { executeOLEDCommand("espnowaccept"); }
+static void onPairReqReject(void* /*ud*/) { executeOLEDCommand("espnowreject"); }
+
+void oledEspNowPollPairRequest() {
+  if (oledConfirmIsActive()) return;                       // a dialog is already up
+  char reqName[24];
+  if (!espnowGetIncomingPairRequest(reqName, sizeof(reqName))) return;
+  snprintf(sPairPromptName, sizeof(sPairPromptName), "'%s'", reqName);
+  // Default to No so an unattended device never auto-accepts.
+  oledConfirmRequest("Pair request from", sPairPromptName, onPairReqAccept, nullptr,
+                     /*defaultYes=*/false, onPairReqReject);
+}
+
 void oledEspNowDisplayPairing(Adafruit_SSD1306* display) {
   if (!display) return;
 
@@ -606,44 +626,52 @@ void oledEspNowDisplayPairing(Adafruit_SSD1306* display) {
   display->setTextColor(DISPLAY_COLOR_WHITE);
   int y = OLED_CONTENT_START_Y;
 
+  // (An incoming pair request pops the shared confirm dialog globally via
+  // oledEspNowPollPairRequest() — not drawn here.)
+
+  // Discovery window open → live, selectable candidate list.
   if (espnowPairModeActive()) {
-    // Keep re-rendering for the live countdown. Self-extinguishing: a short
-    // window re-armed each frame stops within ~1.2s of the window closing or
-    // the user leaving the view — no fixed multi-minute dirty window.
-    oledMarkDirtyUntil(millis() + 1200);
+    oledMarkDirtyUntil(millis() + 1200);   // live countdown/list
 
     uint32_t remS = espnowPairModeRemainingMs() / 1000;
     char line[22];
-    snprintf(line, sizeof(line), "Pairing ON  %lu:%02lu",
+    snprintf(line, sizeof(line), "Discovery  %lu:%02lu",
              (unsigned long)(remS / 60), (unsigned long)(remS % 60));
     display->setCursor(0, y); display->println(line); y += 11;
-    display->setCursor(0, y); display->println("Searching..."); y += 11;
 
-    // Live list of paired peers — grows as devices pair in during the window.
-    int shown = 0;
-    if (gEspNow) {
-      for (int i = 0; i < gEspNow->deviceCount && shown < 2; i++) {
-        if (isSelfMac(gEspNow->devices[i].mac)) continue;
-        String nm = gEspNow->devices[i].name;
-        display->setCursor(0, y);
-        display->print("+ ");
-        display->println(nm.length() ? nm : String("device"));
-        y += 10; shown++;
-      }
+    int n = espnowGetPairCandidateCount();
+    if (n <= 0) {
+      sPairingSel = 0;
+      display->setCursor(0, y); display->println("Searching...");
+      return;
+    }
+    if (sPairingSel >= n) sPairingSel = n - 1;
+    if (sPairingSel < 0)  sPairingSel = 0;
+
+    display->setCursor(0, y); display->println("Select to pair:"); y += 11;
+    const int maxRows = 3;
+    int start = (sPairingSel >= maxRows) ? sPairingSel - maxRows + 1 : 0;
+    for (int i = start; i < n && i < start + maxRows; i++) {
+      char nm[24]; uint8_t mac[6]; int rssi = 0;
+      if (!espnowGetPairCandidate(i, nm, sizeof(nm), mac, &rssi)) continue;
+      display->setCursor(0, y);
+      display->print(i == sPairingSel ? "> " : "  ");
+      display->println(nm);
+      y += 10;
     }
     return;
   }
 
-  // Window closed.
-  display->setCursor(0, y); display->println("Pairing mode OFF"); y += 12;
+  // 3. Window closed.
+  display->setCursor(0, y); display->println("Discovery OFF"); y += 12;
   if (gEspNow && !gEspNow->encryptionEnabled) {
     display->setCursor(0, y); display->println("Set a mesh"); y += 10;
     display->setCursor(0, y); display->println("passphrase first."); y += 10;
     display->setCursor(0, y); display->println("(Settings)");
   } else {
     display->setCursor(0, y); display->println("Press A to start,"); y += 10;
-    display->setCursor(0, y); display->println("then do the same"); y += 10;
-    display->setCursor(0, y); display->println("on the other one.");
+    display->setCursor(0, y); display->println("then same on the"); y += 10;
+    display->setCursor(0, y); display->println("other device.");
   }
 }
 
@@ -853,19 +881,22 @@ void oledEspNowDisplayDeviceDetail(Adafruit_SSD1306* display) {
 
 void oledEspNowDisplayModeSelect(Adafruit_SSD1306* display) {
   if (!display) return;
-  
-  // Draw semi-transparent background (drop-up menu effect)
-  display->fillRect(20, 16, 88, 38, DISPLAY_COLOR_BLACK);
-  display->drawRect(20, 16, 88, 38, DISPLAY_COLOR_WHITE);
-  
-  // Draw title
+
+  // Popup box within the content region: boxY = OLED_CONTENT_START_Y sits 1px
+  // below the header boundary line (drawn at OLED_HEADER_HEIGHT-1), and
+  // height-2 leaves the matching 1px gap above the footer boundary line (at
+  // OLED_HEADER_HEIGHT+OLED_CONTENT_HEIGHT). Text is anchored off boxY.
+  const int boxY = OLED_CONTENT_START_Y;
+  const int boxH = OLED_CONTENT_HEIGHT - 2;
+  display->fillRect(20, boxY, 88, boxH, DISPLAY_COLOR_BLACK);
+  display->drawRect(20, boxY, 88, boxH, DISPLAY_COLOR_WHITE);
+
   display->setTextSize(1);
   display->setTextColor(DISPLAY_COLOR_WHITE);
-  display->setCursor(24, 18);
+  display->setCursor(24, boxY + 3);
   display->println("Select Mode:");
-  
-  // Draw options
-  display->setCursor(24, 28);
+
+  display->setCursor(24, boxY + 13);
   if (gOledEspNowState.modeSelectorIndex == 0) {
     display->setTextColor(DISPLAY_COLOR_BLACK, DISPLAY_COLOR_WHITE);
     display->print("> Text     ");
@@ -873,8 +904,8 @@ void oledEspNowDisplayModeSelect(Adafruit_SSD1306* display) {
     display->setTextColor(DISPLAY_COLOR_WHITE);
     display->print("  Text     ");
   }
-  
-  display->setCursor(24, 36);
+
+  display->setCursor(24, boxY + 21);
   if (gOledEspNowState.modeSelectorIndex == 1) {
     display->setTextColor(DISPLAY_COLOR_BLACK, DISPLAY_COLOR_WHITE);
     display->print("> Remote   ");
@@ -882,8 +913,8 @@ void oledEspNowDisplayModeSelect(Adafruit_SSD1306* display) {
     display->setTextColor(DISPLAY_COLOR_WHITE);
     display->print("  Remote   ");
   }
-  
-  display->setCursor(24, 44);
+
+  display->setCursor(24, boxY + 29);
   if (gOledEspNowState.modeSelectorIndex == 2) {
     display->setTextColor(DISPLAY_COLOR_BLACK, DISPLAY_COLOR_WHITE);
     display->print("> File     ");
@@ -894,6 +925,7 @@ void oledEspNowDisplayModeSelect(Adafruit_SSD1306* display) {
 }
 
 bool oledEspNowHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
+  if (oledGuestBlocksMutate()) return true;
   // Handle input based on current view
   switch (gOledEspNowState.currentView) {
     case ESPNOW_VIEW_INIT_PROMPT:
@@ -935,14 +967,36 @@ bool oledEspNowHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
       }
       return false;
 
-    case ESPNOW_VIEW_PAIRING:
-      // A toggles the pairing window on/off; B returns to the menu.
+    case ESPNOW_VIEW_PAIRING: {
+      // An incoming request is handled by the global confirm dialog (see
+      // oledEspNowPollPairRequest); its input is intercepted before we get here.
+      // Discovery open → navigate candidates; A requests a pair; B stops + exits.
+      if (espnowPairModeActive()) {
+        int n = espnowGetPairCandidateCount();
+        if (gNavEvents.up && sPairingSel > 0)       { sPairingSel--; return true; }
+        if (gNavEvents.down && sPairingSel < n - 1) { sPairingSel++; return true; }
+        if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
+          uint8_t mac[6]; char nm[24]; int rssi = 0;
+          if (n > 0 && espnowGetPairCandidate(sPairingSel, nm, sizeof(nm), mac, &rssi)) {
+            char cmd[48];
+            snprintf(cmd, sizeof(cmd), "espnowpairrequest %02X:%02X:%02X:%02X:%02X:%02X",
+                     mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+            executeOLEDCommand(cmd);   // waits for the other device to Accept
+          }
+          oledMarkDirty();
+          return true;
+        }
+        if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
+          espnowPairModeClose();       // leaving the screen stops discovery
+          gOledEspNowState.currentView = ESPNOW_VIEW_MAIN_MENU;
+          return true;
+        }
+        return false;
+      }
+      // 3. Window closed → A starts discovery, B back to menu.
       if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
-        if (espnowPairModeActive()) {
-          espnowPairModeClose();
-        } else if (gEspNow && !gEspNow->encryptionEnabled) {
-          // Can't pair without the shared mesh key — no-op; the screen shows why.
-        } else {
+        if (!(gEspNow && !gEspNow->encryptionEnabled)) {   // need a mesh key first (screen says so)
+          sPairingSel = 0;
           espnowPairModeOpen(120);
         }
         oledMarkDirty();
@@ -953,6 +1007,7 @@ bool oledEspNowHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
         return true;
       }
       return false;
+    }
       
     case ESPNOW_VIEW_ROOMS:
       if (!gOledEspNowState.inRoomDeviceList) {
@@ -1863,8 +1918,8 @@ void oledEspNowSendRemoteCommand() {
 // ESP-NOW Settings Menu
 // =============================================================================
 
-// Settings menu items: 0=Name, 1=Room, 2=Zone, 3=Friendly Name, 4=Tags, 5=Stationary, 6=Passphrase, 7=Role, 8=MasterMAC, 9=BackupMAC
-#define ESPNOW_SETTINGS_COUNT 10
+// Settings menu items: 0=Name, 1=Room, 2=Zone, 3=Friendly Name, 4=Tags, 5=Stationary, 6=Passphrase, 7=Role, 8=MasterMAC, 9=BackupMAC, 10=Channel
+#define ESPNOW_SETTINGS_COUNT 11
 
 static const char* espnowSettingsLabels[ESPNOW_SETTINGS_COUNT] = {
   "Device Name",
@@ -1876,7 +1931,8 @@ static const char* espnowSettingsLabels[ESPNOW_SETTINGS_COUNT] = {
   "Passphrase",
   "Role",
   "Master MAC",
-  "Backup MAC"
+  "Backup MAC",
+  "Channel"
 };
 
 void oledEspNowOpenSettings() {
@@ -1960,6 +2016,9 @@ void oledEspNowDisplaySettings(Adafruit_SSD1306* display) {
         value = gSettings.meshBackupMAC;
         if (value.length() == 0) value = "(none)";
         break;
+      case 10: // Channel
+        value = gSettings.espnowChannel == 0 ? "Auto" : String(gSettings.espnowChannel);
+        break;
     }
     
     // Truncate value if needed
@@ -2018,7 +2077,19 @@ bool oledEspNowHandleSettingsInput(int deltaX, int deltaY, uint32_t newlyPressed
       gOledEspNowState.settingsEditField = -1;
       return true;
     }
-    
+
+    // Channel: cycle the useful ladder Auto -> 1 -> 6 -> 11 via command. These
+    // are the non-overlapping 2.4GHz channels plus auto; arbitrary 1-13 values
+    // are settable from the web UI / CLI (espnowchannel <n>). Off-ladder values
+    // set elsewhere snap forward into the ladder on the next press.
+    if (gOledEspNowState.settingsEditField == 10) {
+      uint8_t c = gSettings.espnowChannel;
+      const char* next = (c == 0) ? "1" : (c < 6) ? "6" : (c < 11) ? "11" : "auto";
+      executeOLEDCommand(String("espnowchannel ") + next);
+      gOledEspNowState.settingsEditField = -1;
+      return true;
+    }
+
     // For other fields, open keyboard
     const char* prompt = espnowSettingsLabels[gOledEspNowState.settingsEditField];
     String initialValue = "";

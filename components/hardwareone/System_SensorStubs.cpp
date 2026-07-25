@@ -154,8 +154,11 @@ const struct CommandEntry servoCommands[] = {};
 const size_t servoCommandsCount = 0;
 #endif
 
-#if !ENABLE_MICROPHONE_SENSOR
-// Microphone stub variables (global definitions)
+#if !ENABLE_MICROPHONE
+// Microphone stub variables (global definitions). Gated on ENABLE_MICROPHONE
+// (not ..._SENSOR) in lockstep with System_Microphone.cpp: whenever the real mic
+// module compiles (PDM board OR G2-capable board), these stubs MUST be absent or
+// the linker sees duplicate definitions of all 9 globals + micCommands[].
 bool gMicEnabled = false;
 bool micConnected = false;
 bool micRecording = false;

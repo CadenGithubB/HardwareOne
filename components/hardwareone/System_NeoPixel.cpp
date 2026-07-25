@@ -254,68 +254,121 @@ String getClosestColorName(uint16_t r, uint16_t g, uint16_t b, RGB& closestRGB) 
   return closestName;
 }
 
-void runLEDEffect(int effectType, RGB startColor, RGB endColor, unsigned long duration) {
-  unsigned long startTime = millis();
-  
-  switch (effectType) {
-    case EFFECT_FADE:  // 1
-      while (millis() - startTime < duration) {
-        float progress = (float)(millis() - startTime) / duration;
-        RGB currentColor = {
-          (uint8_t)(startColor.r + (endColor.r - startColor.r) * progress),
-          (uint8_t)(startColor.g + (endColor.g - startColor.g) * progress),
-          (uint8_t)(startColor.b + (endColor.b - startColor.b) * progress)
-        };
-        setLEDColor(currentColor);
-        delay(50);
-      }
-      break;
-      
-    case EFFECT_PULSE:  // 2
-      while (millis() - startTime < duration) {
-        float progress = (float)(millis() - startTime) / 1000.0;
-        int brightness = (int)(127.5 + 127.5 * sin(progress * 3.14159 * 2));
-        RGB currentColor = {
-          (uint8_t)(startColor.r * brightness / 255),
-          (uint8_t)(startColor.g * brightness / 255),
-          (uint8_t)(startColor.b * brightness / 255)
-        };
-        setLEDColor(currentColor);
-        delay(50);
-      }
-      break;
-      
-    case EFFECT_RAINBOW:  // 3
-      {
-        int step = 0;
-        while (millis() - startTime < duration) {
-          setLEDColor(rainbowColor(step, 256));
-          step = (step + 1) % 256;
-          delay(20);
-        }
-      }
-      break;
-      
-    case EFFECT_BLINK:  // 4
-      while (millis() - startTime < duration) {
-        setLEDColor(startColor);
-        delay(250);
-        setLEDColor({0, 0, 0});
-        delay(250);
-      }
-      break;
-      
-    case EFFECT_STROBE:  // 5
-      while (millis() - startTime < duration) {
-        setLEDColor(startColor);
-        delay(50);
-        setLEDColor({0, 0, 0});
-        delay(50);
-      }
-      break;
+// ============================================================================
+// Shared effect-name table + brightness ladder (see System_NeoPixel.h)
+// ============================================================================
+// Order matches the EFFECT_* enum starting at EFFECT_FADE=1, so
+// code = table index + 1. Keep in sync with the EffectType enum.
+const char* const ledEffectNames[] = { "fade", "pulse", "rainbow", "blink", "strobe" };
+const int ledEffectNameCount = (int)(sizeof(ledEffectNames) / sizeof(ledEffectNames[0]));
+
+int ledEffectCodeForName(const String& name) {
+  for (int i = 0; i < ledEffectNameCount; i++) {
+    if (name.equalsIgnoreCase(ledEffectNames[i])) return i + 1;  // EFFECT_FADE=1
   }
-  
-  setLEDColor({0, 0, 0});  // Turn off when done
+  return EFFECT_NONE;
+}
+
+int ledBrightnessNextPreset(int cur) {
+  static const int presets[] = { 10, 25, 50, 75, 100 };
+  const int n = (int)(sizeof(presets) / sizeof(presets[0]));
+  for (int i = 0; i < n; i++) {
+    if (cur < presets[i]) return presets[i];
+  }
+  return presets[0];  // at/above top -> wrap
+}
+
+// ============================================================================
+// Non-blocking effect engine
+// ============================================================================
+// Every effect is a pure function of elapsed time, so instead of the old
+// delay()-loop (which parked cmd_exec — and therefore the OLED UI, which waits
+// on it synchronously — for the whole duration), the engine keeps a tiny state
+// struct and advances one frame per ledEffectTick() call from the main loop.
+// cmd_ledeffect now starts an effect and returns immediately; `ledeffect off`,
+// ledcolor, and ledclear genuinely cancel a running effect (previously
+// impossible — cmd_exec was busy running it).
+
+static struct {
+  bool          active;
+  int           type;
+  RGB           c1, c2;
+  unsigned long startMs;
+  unsigned long durationMs;
+  unsigned long lastFrameMs;
+} gLedFx = {};
+
+// Frame color at `elapsed` ms — the old loop bodies, minus the loops.
+static RGB ledEffectFrame(int effectType, RGB c1, RGB c2,
+                          unsigned long elapsed, unsigned long duration) {
+  switch (effectType) {
+    case EFFECT_FADE: {
+      float progress = (duration > 0) ? (float)elapsed / duration : 1.0f;
+      return { (uint8_t)(c1.r + (c2.r - c1.r) * progress),
+               (uint8_t)(c1.g + (c2.g - c1.g) * progress),
+               (uint8_t)(c1.b + (c2.b - c1.b) * progress) };
+    }
+    case EFFECT_PULSE: {
+      float progress = (float)elapsed / 1000.0f;
+      int brightness = (int)(127.5f + 127.5f * sinf(progress * 3.14159f * 2));
+      return { (uint8_t)(c1.r * brightness / 255),
+               (uint8_t)(c1.g * brightness / 255),
+               (uint8_t)(c1.b * brightness / 255) };
+    }
+    case EFFECT_RAINBOW:
+      return rainbowColor((int)((elapsed / 20) % 256), 256);
+    case EFFECT_BLINK:
+      return ((elapsed / 250) % 2 == 0) ? c1 : RGB{0, 0, 0};
+    case EFFECT_STROBE:
+      return ((elapsed / 50) % 2 == 0) ? c1 : RGB{0, 0, 0};
+    default:
+      return {0, 0, 0};
+  }
+}
+
+void ledEffectStart(int effectType, RGB startColor, RGB endColor, unsigned long duration) {
+  gLedFx.type        = effectType;
+  gLedFx.c1          = startColor;
+  gLedFx.c2          = endColor;
+  gLedFx.durationMs  = duration;
+  gLedFx.startMs     = millis();
+  gLedFx.lastFrameMs = 0;
+  gLedFx.active      = true;
+}
+
+void ledEffectStop(bool clearLed) {
+  if (!gLedFx.active) return;
+  gLedFx.active = false;
+  if (clearLed) setLEDColor({0, 0, 0});  // matches the old end-of-effect clear
+}
+
+bool ledEffectActive() { return gLedFx.active; }
+
+// Main-loop tick. Cheap no-op while idle; ~20 ms frame pacing while active
+// (the fastest cadence the old loops used — strobe/rainbow).
+void ledEffectTick() {
+  if (!gLedFx.active) return;
+  const unsigned long now = millis();
+  const unsigned long elapsed = now - gLedFx.startMs;
+  if (elapsed >= gLedFx.durationMs) {
+    ledEffectStop(true);
+    return;
+  }
+  if (now - gLedFx.lastFrameMs < 20) return;
+  gLedFx.lastFrameMs = now;
+  setLEDColor(ledEffectFrame(gLedFx.type, gLedFx.c1, gLedFx.c2, elapsed, gLedFx.durationMs));
+}
+
+// Blocking wrapper over the same engine — kept for the boot-time startup
+// effect (HardwareOne.cpp), which deliberately runs before the main loop is
+// ticking and where blocking a few seconds of setup() is the intended UX.
+// Runtime paths (cmd_ledeffect) use ledEffectStart instead.
+void runLEDEffect(int effectType, RGB startColor, RGB endColor, unsigned long duration) {
+  ledEffectStart(effectType, startColor, endColor, duration);
+  while (gLedFx.active) {
+    ledEffectTick();
+    delay(10);
+  }
 }
 
 // ============================================================================
@@ -340,7 +393,10 @@ const char* cmd_ledcolor(const String& argsInput) {
     snprintf(getDebugBuffer(), 1024, "Error: Unknown color: %s", colorName.c_str());
     return getDebugBuffer();
   }
-  
+
+  // Cancel any running effect first, or the next tick would repaint over the
+  // user's chosen color within 20 ms.
+  ledEffectStop(false);
   setLEDColor(color);
   snprintf(getDebugBuffer(), 1024, "LED set to %s", colorName.c_str());
   return getDebugBuffer();
@@ -348,6 +404,7 @@ const char* cmd_ledcolor(const String& argsInput) {
 
 const char* cmd_ledclear(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  ledEffectStop(false);  // cancel a running effect too, not just the color
   setLEDColor({0, 0, 0});
   return "LED cleared (turned off)";
 }
@@ -358,6 +415,9 @@ const char* cmd_ledeffect(const String& argsInput) {
   CommandArgs a(argsInput);
 
   if (a.count() == 0 || a.arg(0) == "off" || a.arg(0) == "none") {
+    // Genuinely cancels now — with the old blocking engine this branch could
+    // never run mid-effect because cmd_exec was busy inside the delay loop.
+    ledEffectStop(false);
     setLEDColor({0, 0, 0});
     return "LED effect: off";
   }
@@ -421,20 +481,19 @@ const char* cmd_ledeffect(const String& argsInput) {
 
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
 
-  // Execute effect
-  int effectCode = 0;
-  if (effectType == "fade") effectCode = EFFECT_FADE;
-  else if (effectType == "pulse") effectCode = EFFECT_PULSE;
-  else if (effectType == "blink") effectCode = EFFECT_BLINK;
-  else if (effectType == "rainbow") effectCode = EFFECT_RAINBOW;
-  else if (effectType == "strobe") effectCode = EFFECT_STROBE;
-  else {
+  // Execute effect — parse via the shared name table (same list the OLED and
+  // G2 pickers render, so the surfaces can't drift from the parser).
+  const int effectCode = ledEffectCodeForName(effectType);
+  if (effectCode == EFFECT_NONE) {
     snprintf(getDebugBuffer(), 1024, "Error: Unknown effect: %s. Options: fade, pulse, blink, rainbow, strobe", effectType.c_str());
     return getDebugBuffer();
   }
 
-  runLEDEffect(effectCode, color1, color2, duration);
-  snprintf(getDebugBuffer(), 1024, "%s effect completed (%lums)", effectType.c_str(), duration);
+  // Non-blocking: the main-loop ledEffectTick() drives the frames. The command
+  // (and any UI waiting on it) returns immediately instead of parking cmd_exec
+  // for the whole duration. Starting a new effect replaces a running one.
+  ledEffectStart(effectCode, color1, color2, duration);
+  snprintf(getDebugBuffer(), 1024, "%s effect started (%lums)", effectType.c_str(), duration);
   return getDebugBuffer();
 }
 

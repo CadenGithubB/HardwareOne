@@ -126,7 +126,6 @@ static int findConnectionSlotByConnId(uint16_t connId) {
   return -1;
 }
 
-static const char* kBleIpTag = "ble";
 // BLE idle-logout window now comes from the shared per-transport policy
 // (gSettings.sessionIdleBle via sessionIdleExpired(SOURCE_BLUETOOTH, …) in
 // System_User.cpp). lastActivityMs is stamped only on real inbound commands
@@ -165,6 +164,44 @@ static bool bleIsAuthed(uint16_t connId, String& outUser) {
   outUser = gBLEState->connections[slot].user;
   BLE_DEBUGF(DEBUG_BLE_CORE, "Session authed lookup conn=%u user='%s'", (unsigned)connId, outUser.c_str());
   return outUser.length() > 0;
+}
+
+// Peer MAC for audit `ip` (e.g. "ble:AA:BB:CC:DD:EE:FF"). Falls back to
+// "ble" if the connection slot is gone mid-command.
+static String blePeerIpTag(uint16_t connId) {
+  int slot = findConnectionSlotByConnId(connId);
+  if (slot < 0 || !gBLEState) return String("ble");
+  char macStr[18];
+  macToDisplay(gBLEState->connections[slot].deviceAddr, macStr, sizeof(macStr));
+  char ipBuf[28];
+  snprintf(ipBuf, sizeof(ipBuf), "ble:%s", macStr);
+  return String(ipBuf);
+}
+
+// Identity for BLE-submitted commands. When require-auth is off and nobody
+// has logged in on this conn, stamp reserved "AuthBypass" (same as serial /
+// OLED) so authorizeCommand accepts the line and audit reads
+// AuthBypass@bluetooth with the peer MAC in ip — not a blank user.
+static void bleFillCommandAuth(uint16_t connId, AuthContext& auth, bool forLogin) {
+  auth.transport = SOURCE_BLUETOOTH;
+  auth.path = forLogin ? "/ble/login" : "/ble/cli";
+  auth.ip = blePeerIpTag(connId);
+  auth.sid = String(connId);
+  auth.opaque = nullptr;
+  if (forLogin) {
+    // Pre-auth: empty user is allowed only for the login command itself
+    // (see authorizeCommand). Peer MAC still lands in ip for the attempt log.
+    auth.user = "";
+    return;
+  }
+  String u;
+  if (bleIsAuthed(connId, u)) {
+    auth.user = u;
+  } else if (!gSettings.bluetoothRequireAuth) {
+    auth.user = "AuthBypass";
+  } else {
+    auth.user = "";
+  }
 }
 
 static void bleLogout(uint16_t connId) {
@@ -618,7 +655,7 @@ void bleAddMessageToHistory(const char* msg);
 // Secure Channel — see the gate in processBleCommandLine. The boundary check
 // (NUL or space after the verb) keeps "files" from matching "fileread" etc.
 static bool bleIsFileBrowserCommand(const char* line) {
-  static const char* kVerbs[] = {
+  static const char* const kVerbs[] = {
     "files", "fileread", "filewrite", "fileview", "filecreate",
     "filedelete", "filerename", "mkdir", "rmdir"
   };
@@ -718,12 +755,7 @@ static void processBleCommandLine(uint16_t connId, const char* data, size_t len)
     snprintf(loginCmd, sizeof(loginCmd), "login %s %s bluetooth", u, p);
     ucmd.line = loginCmd;
     ucmd.ctx.origin = ORIGIN_BLUETOOTH;
-    ucmd.ctx.auth.transport = SOURCE_BLUETOOTH;
-    ucmd.ctx.auth.path = "/ble/cli";
-    ucmd.ctx.auth.ip = kBleIpTag;
-    ucmd.ctx.auth.sid = String(connId);
-    ucmd.ctx.auth.opaque = nullptr;
-    ucmd.ctx.auth.user = "";
+    bleFillCommandAuth(connId, ucmd.ctx.auth, /*forLogin=*/true);
     ucmd.ctx.validateOnly = false;
     ucmd.ctx.outputMask = MSG_ROUTE_FILE | MSG_ROUTE_BLE;
     ucmd.ctx.replyHandle = nullptr;
@@ -750,6 +782,9 @@ static void processBleCommandLine(uint16_t connId, const char* data, size_t len)
       char out[80];
       snprintf(out, sizeof(out), "You are %s%s", u.c_str(), isAdminUser(u) ? " (admin)" : "");
       sendBLEResponseToConn(connId, out, strlen(out));
+    } else if (!gSettings.bluetoothRequireAuth) {
+      const char* msg = "You are AuthBypass";
+      sendBLEResponseToConn(connId, msg, strlen(msg));
     } else {
       const char* msg = "You are (unknown)";
       sendBLEResponseToConn(connId, msg, strlen(msg));
@@ -783,18 +818,7 @@ static void processBleCommandLine(uint16_t connId, const char* data, size_t len)
   Command ucmd;
   ucmd.line = cmdStart;
   ucmd.ctx.origin = ORIGIN_BLUETOOTH;
-  ucmd.ctx.auth.transport = SOURCE_BLUETOOTH;
-  ucmd.ctx.auth.path = "/ble/cli";
-  ucmd.ctx.auth.ip = kBleIpTag;
-  ucmd.ctx.auth.sid = String(connId);
-  ucmd.ctx.auth.opaque = nullptr;
-  if (gSettings.bluetoothRequireAuth) {
-    String u;
-    (void)bleIsAuthed(connId, u);
-    ucmd.ctx.auth.user = u;
-  } else {
-    ucmd.ctx.auth.user = "";
-  }
+  bleFillCommandAuth(connId, ucmd.ctx.auth, /*forLogin=*/false);
   ucmd.ctx.validateOnly = false;
   ucmd.ctx.outputMask = MSG_ROUTE_FILE | MSG_ROUTE_BLE;
   ucmd.ctx.replyHandle = nullptr;
@@ -2039,25 +2063,25 @@ static const char* cmd_blemode(const String& argsInput) {
 // Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry bluetoothCommands[] = {
   // Start/Stop (3-level voice: "connection" -> "bluetooth" -> "open/close")
-  { "openble",      "Start Bluetooth LE and begin advertising.", false, cmd_blestart, nullptr, "connection", "bluetooth", "open" },
-  { "closeble",     "Stop Bluetooth LE and deinitialize.",       false, cmd_blestop,  nullptr, "connection", "bluetooth", "close" },
+  { "openble",      "Start Bluetooth LE and begin advertising.", true, cmd_blestart, nullptr, "connection", "bluetooth", "open" },
+  { "closeble",     "Stop Bluetooth LE and deinitialize.",       true, cmd_blestop,  nullptr, "connection", "bluetooth", "close" },
   { "bleread",      "Read Bluetooth connection status. (add 'json' for JSON output)",         false, cmd_blestatus },
   { "blestatus",    "Show Bluetooth connection status. (add 'json' for JSON output)",         false, cmd_blestatus },
   { "bleinfo",      "Show BLE configuration and settings. (add 'json' for JSON output)",      false, cmd_bleinfo },
   { "blename",      "Get/set BLE device name [name].",           false, cmd_blename, "Usage: blename [name]" },
   { "bletxpower",   "Get/set BLE TX power [0-7].",               false, cmd_bletxpower, "Usage: bletxpower [0..7]" },
-  { "bledisconnect","Disconnect current BLE client.",            false, cmd_bledisconnect },
-  { "bleadv",       "Start/stop/toggle BLE advertising [start|stop|toggle].", false, cmd_bleadv, "Usage: bleadv [start|stop|toggle]" },
+  { "bledisconnect","Disconnect current BLE client.",            true, cmd_bledisconnect },
+  { "bleadv",       "Start/stop/toggle BLE advertising [start|stop|toggle].", true, cmd_bleadv, "Usage: bleadv [start|stop|toggle]" },
   { "blesend",      "Send message to BLE client: <message>.",    false, cmd_blesend, "Usage: blesend <message>" },
   { "blestream",    "Control streaming: <on|off|sensors|system|events|interval>.",false, cmd_blestream, "Usage: blestream [on|off|sensors|system|events|interval] | interval <sensor_ms> <system_ms>" },
   { "bleevent",     "Send event to BLE client: <event>.",        false, cmd_bleevent, "Usage: bleevent <message>" },
   
   // Auto-start
-  { "bleautostart",    "Enable/disable BLE auto-start after boot [on|off].",   false, cmd_bleautostart,    "Usage: bleautostart [on|off]" },
+  { "bleautostart",    "Enable/disable BLE auto-start after boot [on|off].",   true, cmd_bleautostart,    "Usage: bleautostart [on|off]" },
   { "blerequireauth", "Enable/disable BLE authentication requirement [on|off].", true, cmd_blerequireauth, "Usage: blerequireauth [on|off]", nullptr, nullptr, /*requiresSuperAdmin=*/true },
 
   // Mode (server vs. G2 client) - mutually exclusive at runtime
-  { "blemode",        "Get/set BLE mode [server|client].",                     false, cmd_blemode,         "Usage: blemode [server|client]" },
+  { "blemode",        "Get/set BLE mode [server|client].",                     true, cmd_blemode,         "Usage: blemode [server|client]" },
 
   // App-layer Secure Channel v1 (X25519+PSK+ChaCha20-Poly1305; no BLE bonding)
   { "blesecret", "Set/clear the BLE Secure Channel passphrase: blesecret <phrase|clear>.", true, cmd_blesecret, "Usage: blesecret <passphrase|clear>", nullptr, nullptr, /*requiresSuperAdmin=*/true },
@@ -2068,10 +2092,10 @@ const CommandEntry bluetoothCommands[] = {
   // flags only control whether boot reconnects automatically. The generic
   // form `bleautoconnect <peer-name> [on|off]` works for any registered
   // peer; the per-peer commands are kept as muscle-memory shims.
-  { "bleautoconnect",  "Per-peer auto-reconnect at boot: bleautoconnect <name> [on|off]. `blepeers` lists names.", false, cmd_bleautoconnect, "Usage: bleautoconnect <peer-name> [on|off]" },
+  { "bleautoconnect",  "Per-peer auto-reconnect at boot: bleautoconnect <name> [on|off]. `blepeers` lists names.", true, cmd_bleautoconnect, "Usage: bleautoconnect <peer-name> [on|off]" },
   { "blepeers",        "List all registered BLE peers and their state.",                                          false, cmd_blepeers,        nullptr },
-  { "g2autoconnect",   "Alias for `bleautoconnect g2-glasses [on|off]`.",                                          false, cmd_g2autoconnect,   "Usage: g2autoconnect [on|off]" },
-  { "ringautoconnect", "Alias for `bleautoconnect r1-ring [on|off]`.",                                             false, cmd_ringautoconnect, "Usage: ringautoconnect [on|off]" },
+  { "g2autoconnect",   "Alias for `bleautoconnect g2-glasses [on|off]`.",                                          true, cmd_g2autoconnect,   "Usage: g2autoconnect [on|off]" },
+  { "ringautoconnect", "Alias for `bleautoconnect r1-ring [on|off]`.",                                             true, cmd_ringautoconnect, "Usage: ringautoconnect [on|off]" },
 };
 
 const size_t bluetoothCommandsCount = sizeof(bluetoothCommands) / sizeof(bluetoothCommands[0]);
@@ -2088,7 +2112,7 @@ const size_t bluetoothCommandsCount = sizeof(bluetoothCommands) / sizeof(bluetoo
 // (see below) so they stay in sync with BLE_Peers.h's BlePeerKind enum. The
 // static rows here cover only the non-peer bluetooth settings.
 const SettingEntry bluetoothSettingsEntries[] = {
-  { "bluetoothAutoStart",    SETTING_BOOL,   &gSettings.bluetoothAutoStart,    true, 0, nullptr, 0, 1, "Auto-start at boot", nullptr, false, nullptr, "bleautostart" },
+  { "bluetoothAutoStart",    SETTING_BOOL,   &gSettings.bluetoothAutoStart,    false, 0, nullptr, 0, 1, "Auto-start at boot", nullptr, false, nullptr, "bleautostart" },
   { "bluetoothRequireAuth",  SETTING_BOOL,   &gSettings.bluetoothRequireAuth,  true, 0, nullptr, 0, 1, "Require Authentication", nullptr, false, nullptr, "blerequireauth" },
   { "bluetoothDeviceName", SETTING_STRING, &gSettings.bleDeviceName, 0, 0, "HardwareOne", 0, 0, "Device Name", nullptr, false, nullptr, "blename" },
   { "bluetoothTxPower",      SETTING_INT,    &gSettings.bleTxPower,            3, 0, nullptr, 0, 7, "TX Power (0-7)", nullptr, false, nullptr, "bletxpower" },

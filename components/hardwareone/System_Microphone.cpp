@@ -9,7 +9,12 @@
 #include "System_Filesystem.h"  // requireQuotedPath (uniform quoted-path rule)
 #include <esp_attr.h>
 
-#if ENABLE_MICROPHONE_SENSOR
+// Gate on the mic SUBSYSTEM (PDM silicon OR a G2-capable build), not on the PDM
+// silicon flag — this module is source-agnostic (all capture flows through
+// HAL_Audio) so it must compile and run on PDM-less boards where the G2 glasses
+// mic is the only source. See System_SensorStubs (gated on !ENABLE_MICROPHONE in
+// lockstep, or these definitions collide).
+#if ENABLE_MICROPHONE
 
 #include <Arduino.h>
 #include "System_VFS.h"
@@ -73,6 +78,42 @@ static char currentRecordingPath[64] = {0};
 
 // Command buffer
 EXT_RAM_BSS_ATTR static char gMicCmdBuffer[512];
+
+// ── Source helpers (unified PDM / G2 mic) ────────────────────────────────────
+// HAL_Audio delivers int16 mono for every source. PDM runs at micSampleRate; the
+// G2 ring is always 16 kHz. Use this for the WAV header + duration math so a G2
+// recording is never mis-stamped.
+static uint32_t micEffectiveSampleRate() {
+  return (audioGetSource() == AUDIO_SRC_G2_LEFT) ? AUDIO_HAL_SAMPLE_RATE
+                                                 : (uint32_t)micSampleRate;
+}
+static const char* micSourceName() {
+  switch (audioGetSource()) {
+    case AUDIO_SRC_LOCAL_PDM: return "pdm";
+    case AUDIO_SRC_G2_LEFT:   return "g2";
+    default:                  return "none";
+  }
+}
+// The DSP chain (DC removal, HPF, pre-emphasis, gain) is tuned for the PDM mic;
+// the G2 feed is already clean decoded LC3 PCM and the SR path consumes it raw,
+// so skip processing for G2 to keep the level meter + recordings consistent with
+// what SR hears.
+static void micProcessForSource(int16_t* buf, size_t n) {
+  if (audioGetSource() == AUDIO_SRC_LOCAL_PDM) applyMicAudioProcessing(buf, n);
+}
+// Reconcile this module's cached flags with the HAL. If the underlying capture
+// vanished (e.g. the G2 dropped mid-session and onDisconnect released the lease),
+// flip enabled/recording off so the UI stops claiming a live mic. micConnected
+// tracks "capture active AND active source still available".
+static void micReconcileState() {
+  const bool active = audioCaptureActive() &&
+                      audioSourceAvailable(audioGetSource());
+  if (gMicEnabled && !active) {
+    gMicEnabled  = false;
+    micRecording = false;
+  }
+  micConnected = active;
+}
 
 // Audio level tracking
 static int lastAudioLevel = 0;
@@ -188,8 +229,8 @@ struct WavHeader {
 static void writeWavHeader(File& f, uint32_t dataSize) {
   WavHeader header;
   header.numChannels = micChannels;
-  header.sampleRate = micSampleRate;
-  header.bitsPerSample = micBitDepth;
+  header.sampleRate = micEffectiveSampleRate();   // G2 is always 16 kHz; PDM uses micSampleRate
+  header.bitsPerSample = 16;   // HAL delivers int16 for every source — micBitDepth is cosmetic; a 32 here corrupts the WAV
   header.blockAlign = header.numChannels * (header.bitsPerSample / 8);
   header.byteRate = header.sampleRate * header.blockAlign;
   header.dataSize = dataSize;
@@ -218,8 +259,8 @@ static void recordingTask(void* param) {
     return;
   }
   
-  uint32_t maxSamples = micSampleRate * MAX_RECORDING_SEC;
-  DEBUG_MIC_LIFECYCLEF("[MIC_REC_TASK] Max samples: %lu (sampleRate=%d, maxSec=%d)", maxSamples, micSampleRate, MAX_RECORDING_SEC);
+  uint32_t maxSamples = micEffectiveSampleRate() * MAX_RECORDING_SEC;
+  DEBUG_MIC_LIFECYCLEF("[MIC_REC_TASK] Max samples: %lu (sampleRate=%u, maxSec=%d)", maxSamples, (unsigned)micEffectiveSampleRate(), MAX_RECORDING_SEC);
   
   uint32_t loopCount = 0;
   while (micRecording && gMicEnabled && recordingSamples < maxSamples) {
@@ -236,7 +277,7 @@ static void recordingTask(void* param) {
         int32_t sum = 0;
         size_t sampleCount = bytesRead / sizeof(int16_t);
 
-        applyMicAudioProcessing(buffer, sampleCount);
+        micProcessForSource(buffer, sampleCount);
 
         for (size_t i = 0; i < sampleCount; i++) {
           int16_t v = buffer[i];
@@ -513,16 +554,31 @@ bool initMicrophone() {
   STACK_TRACEF("initMicrophone.enter rate=%d bitDepth=%d channels=%d",
                micSampleRate, micBitDepth, micChannels);
 
-  // I2S PDM capture is owned by HAL_Audio (the single owner). audioCaptureStart
-  // creates+inits+enables the PDM channel at micSampleRate and runs the warm-up
-  // flush, all under the shared reentrant I2S lock.
+  // Resolve the persisted source PREFERENCE against what is actually connected —
+  // never assume a source exists. 'auto' (or an unavailable preference) falls
+  // through to audioCaptureStart's PDM-first resolution.
+  if (!audioAnySourceAvailable()) {
+    WARN_SYSTEMF("[MIC_INIT] no mic source available (no PDM, no G2 connected) — cannot start");
+    INFO_MIC_LIFECYCLEF("No mic source available");
+    return false;
+  }
+  if (gSettings.micSource == "pdm" && audioSourceAvailable(AUDIO_SRC_LOCAL_PDM)) {
+    audioSetSource(AUDIO_SRC_LOCAL_PDM);
+  } else if (gSettings.micSource == "g2" && audioSourceAvailable(AUDIO_SRC_G2_LEFT)) {
+    audioSetSource(AUDIO_SRC_G2_LEFT);
+  }
+
+  // Capture is owned by HAL_Audio (the single owner). audioCaptureStart resolves
+  // the source (PDM-first if the selection is unavailable), starts the PDM I2S
+  // channel + warm-up flush OR arms the G2 ring and enables the glasses stream.
   if (!audioCaptureStart("mic", (uint32_t)micSampleRate)) {
     WARN_SYSTEMF("[MIC_INIT] *** audioCaptureStart(\"mic\") FAILED at rate=%d Hz ***", micSampleRate);
     INFO_MIC_LIFECYCLEF("Failed to start PDM capture");
     return false;
   }
   gMicEnabled = true;
-  micConnected = true;  // capture started; HAL surfaces no-data at read time
+  micReconcileState();  // set micConnected from live HAL state (source + capture)
+  WARN_SYSTEMF("[MIC_INIT] source=%s", micSourceName());
   sensorStatusBumpWith("openmic");
   systemEventPost(SYSEVT_SENSOR_STARTED, "Microphone");
 
@@ -628,7 +684,7 @@ int16_t* captureAudioSamples(size_t sampleCount, size_t* outLen) {
     return nullptr;
   }
 
-  applyMicAudioProcessing(buffer, bytesRead / sizeof(int16_t));
+  micProcessForSource(buffer, bytesRead / sizeof(int16_t));
 
   // Log sample statistics
   if (bytesRead >= 4) {
@@ -653,14 +709,18 @@ int16_t* captureAudioSamples(size_t sampleCount, size_t* outLen) {
 int getAudioLevel() {
   static uint32_t callCount = 0;
   callCount++;
-  
+
   // Only log every 50th call to avoid spam
   bool shouldLog = (callCount % 50 == 1);
-  
+
   if (shouldLog) {
     DEBUG_MIC_VALUESF("[MIC_LEVEL] getAudioLevel() call #%lu, gMicEnabled=%d", callCount, gMicEnabled);
   }
-  
+
+  // The VU meter is the most-frequent caller — piggyback the HAL reconcile here
+  // so a G2 mid-session disconnect flips the mic off within one poll.
+  micReconcileState();
+
   if (!gMicEnabled) {
     if (shouldLog) DEBUG_MIC_VALUESF("[MIC_LEVEL] Mic not enabled - returning 0");
     return 0;
@@ -705,7 +765,7 @@ int getAudioLevel() {
   }
 
   size_t sampleCount = bytesRead / sizeof(int16_t);
-  applyMicAudioProcessing(samples, sampleCount);
+  micProcessForSource(samples, sampleCount);
 
   // Calculate RMS level
   int32_t sum = 0;
@@ -735,11 +795,15 @@ int getAudioLevel() {
 const char* buildMicrophoneStatusJson() {
   snprintf(gMicCmdBuffer, sizeof(gMicCmdBuffer),
     "{\"enabled\":%s,\"connected\":%s,\"recording\":%s,"
-    "\"sampleRate\":%d,\"bitDepth\":%d,\"channels\":%d,\"level\":%d}",
+    "\"source\":\"%s\",\"pdmAvailable\":%s,\"g2Available\":%s,"
+    "\"sampleRate\":%u,\"bitDepth\":16,\"channels\":%d,\"level\":%d}",
     gMicEnabled ? "true" : "false",
     micConnected ? "true" : "false",
     micRecording ? "true" : "false",
-    micSampleRate, micBitDepth, micChannels,
+    micSourceName(),
+    audioSourceAvailable(AUDIO_SRC_LOCAL_PDM) ? "true" : "false",
+    audioSourceAvailable(AUDIO_SRC_G2_LEFT) ? "true" : "false",
+    (unsigned)micEffectiveSampleRate(), micChannels,
     gMicEnabled ? getAudioLevel() : 0
   );
   return gMicCmdBuffer;
@@ -754,9 +818,13 @@ const char* cmd_mic(const String& argsInput) {
   if (argWantsJson(argsInput)) {
     snprintf(gMicCmdBuffer, sizeof(gMicCmdBuffer),
       "{\"schema\":1,\"enabled\":%s,\"connected\":%s,\"recording\":%s,"
-      "\"sampleRate\":%d,\"bitDepth\":%d,\"channels\":%d,\"level\":%d}",
+      "\"source\":\"%s\",\"pdmAvailable\":%s,\"g2Available\":%s,"
+      "\"sampleRate\":%u,\"bitDepth\":16,\"channels\":%d,\"level\":%d}",
       gMicEnabled ? "true" : "false", micConnected ? "true" : "false", micRecording ? "true" : "false",
-      micSampleRate, micBitDepth, micChannels, gMicEnabled ? getAudioLevel() : 0);
+      micSourceName(),
+      audioSourceAvailable(AUDIO_SRC_LOCAL_PDM) ? "true" : "false",
+      audioSourceAvailable(AUDIO_SRC_G2_LEFT) ? "true" : "false",
+      (unsigned)micEffectiveSampleRate(), micChannels, gMicEnabled ? getAudioLevel() : 0);
     return gMicCmdBuffer;
   }
   snprintf(gMicCmdBuffer, sizeof(gMicCmdBuffer),
@@ -764,14 +832,18 @@ const char* cmd_mic(const String& argsInput) {
     "  Enabled: %s\n"
     "  Connected: %s\n"
     "  Recording: %s\n"
-    "  Sample Rate: %d Hz\n"
-    "  Bit Depth: %d\n"
+    "  Source: %s (pdm:%s g2:%s)\n"
+    "  Sample Rate: %u Hz\n"
+    "  Bit Depth: 16\n"
     "  Channels: %d\n"
     "  Level: %d%%",
     gMicEnabled ? "yes" : "no",
     micConnected ? "yes" : "no",
     micRecording ? "yes" : "no",
-    micSampleRate, micBitDepth, micChannels,
+    micSourceName(),
+    audioSourceAvailable(AUDIO_SRC_LOCAL_PDM) ? "yes" : "no",
+    audioSourceAvailable(AUDIO_SRC_G2_LEFT) ? "yes" : "no",
+    (unsigned)micEffectiveSampleRate(), micChannels,
     gMicEnabled ? getAudioLevel() : 0
   );
   return gMicCmdBuffer;
@@ -972,7 +1044,8 @@ const char* cmd_micsamplerate(const String& argsInput) {
                  ok ? 1 : 0, gMicEnabled);
   }
 
-  snprintf(gMicCmdBuffer, sizeof(gMicCmdBuffer), "Sample rate set to %d Hz (saved)", micSampleRate);
+  snprintf(gMicCmdBuffer, sizeof(gMicCmdBuffer), "Sample rate set to %d Hz (saved)%s", micSampleRate,
+           audioGetSource() == AUDIO_SRC_G2_LEFT ? " (ignored while source=G2 — the glasses mic is fixed 16 kHz)" : "");
   return gMicCmdBuffer;
 }
 
@@ -1037,7 +1110,8 @@ const char* cmd_micbitdepth(const String& argsInput) {
                  ok ? 1 : 0, gMicEnabled);
   }
 
-  snprintf(gMicCmdBuffer, sizeof(gMicCmdBuffer), "Bit depth set to %d-bit (saved)", micBitDepth);
+  snprintf(gMicCmdBuffer, sizeof(gMicCmdBuffer),
+           "Bit depth set to %d-bit (saved) — note: WAV recordings are always 16-bit (HAL canonical format)", micBitDepth);
   return gMicCmdBuffer;
 }
 
@@ -1066,7 +1140,7 @@ static void micVisualizerTaskFunc(void* param) {
     
     if (err == ESP_OK && bytesRead > 0) {
       size_t sampleCount = bytesRead / sizeof(int16_t);
-      applyMicAudioProcessing(samples, sampleCount);
+      micProcessForSource(samples, sampleCount);
       
       // Calculate stats
       int16_t minVal = 32767, maxVal = -32768;
@@ -1132,7 +1206,8 @@ const char* cmd_micviz(const String& argsInput) {
   // No core affinity: NORMAL prio on Core 0 was getting preempted by WiFi/BT.
   // mic_record (Core 1, HIGH) owns the audio buffer; viz is a consumer that
   // can run wherever the scheduler has cycles.
-  xTaskCreatePinnedToCore(micVisualizerTaskFunc, "mic_viz", MIC_VIZ_STACK_WORDS, nullptr, TASK_PRIORITY_NORMAL, &gMicVisualizerTask, tskNO_AFFINITY);
+  // APP_CORE: waveform-render compute; keep it off the Wi-Fi/BLE core.
+  xTaskCreatePinnedToCore(micVisualizerTaskFunc, "mic_viz", MIC_VIZ_STACK_WORDS, nullptr, TASK_PRIORITY_NORMAL, &gMicVisualizerTask, APP_CORE);
   return "Visualizer started (press any key to stop)";
 }
 
@@ -1153,6 +1228,42 @@ const char* cmd_micautostart(const String& argsInput) {
   return "Error: invalid arguments — Usage: micautostart [on|off]";
 }
 
+// Get/set the persisted mic-source PREFERENCE {auto,pdm,g2}. The preference is
+// resolved lazily against runtime availability at capture start — 'g2' is a
+// valid preference even with no glasses connected (it applies when they do). If
+// the mic is running, apply the switch live (stop → set → start) since
+// audioSetSource refuses a source change mid-capture.
+const char* cmd_micsource(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String arg = argsInput; arg.trim(); arg.toLowerCase();
+  if (arg.length() == 0) {
+    snprintf(gMicCmdBuffer, sizeof(gMicCmdBuffer),
+      "Mic source: preference=%s, active=%s (available: pdm=%s g2=%s). Set with: micsource <auto|pdm|g2>",
+      gSettings.micSource.c_str(), micSourceName(),
+      audioSourceAvailable(AUDIO_SRC_LOCAL_PDM) ? "yes" : "no",
+      audioSourceAvailable(AUDIO_SRC_G2_LEFT) ? "yes" : "no");
+    return gMicCmdBuffer;
+  }
+  if (arg != "auto" && arg != "pdm" && arg != "g2") {
+    return "Error: invalid arguments — Usage: micsource <auto|pdm|g2>";
+  }
+  setSetting(gSettings.micSource, arg);
+  const bool wasEnabled = gMicEnabled;
+  if (wasEnabled) {
+    stopMicrophone();     // release the lease so the new preference can resolve
+    initMicrophone();     // re-resolves source from the updated preference
+  }
+  const char* note = "";
+  if (arg == "g2" && !audioSourceAvailable(AUDIO_SRC_G2_LEFT)) {
+    note = " (glasses not connected — applies when they connect)";
+  } else if (arg == "pdm" && !audioSourceAvailable(AUDIO_SRC_LOCAL_PDM)) {
+    note = " (no onboard PDM mic on this board)";
+  }
+  snprintf(gMicCmdBuffer, sizeof(gMicCmdBuffer),
+           "Mic source preference set to '%s'%s (active=%s)", arg.c_str(), note, micSourceName());
+  return gMicCmdBuffer;
+}
+
 // Command registry
 // Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry micCommands[] = {
@@ -1167,7 +1278,8 @@ const CommandEntry micCommands[] = {
   { "micsamplerate", "Get/set sample rate.", false, cmd_micsamplerate, "Usage: micsamplerate [8000-48000]" },
   { "micgain", "Get/set microphone gain.", false, cmd_micgain, "Usage: micgain [0-100]" },
   { "micbitdepth", "Get/set bit depth.", false, cmd_micbitdepth, "Usage: micbitdepth [16|32]" },
-  
+  { "micsource", "Get/set mic source: onboard PDM or G2 glasses.", false, cmd_micsource, "Usage: micsource [auto|pdm|g2]" },
+
   // Auto-start
   { "micautostart", "Enable/disable microphone auto-start after boot [on|off]", false, cmd_micautostart, "Usage: micautostart [on|off]" },
 };
@@ -1178,11 +1290,19 @@ const size_t micCommandsCount = sizeof(micCommands) / sizeof(micCommands[0]);
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry micSettingEntries[] = {
   { "microphoneAutoStart", SETTING_BOOL, &gSettings.microphoneAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, "micautostart" },
+  // Source preference {auto,pdm,g2}. Resolved lazily against availability.
+  { "micSource", SETTING_STRING, &gSettings.micSource, 0, 0, "auto", 0, 0, "Mic source", nullptr, false, nullptr, "micsource" },
+  // These three were previously reported as "(saved)" but never registered, so
+  // they silently reset to defaults on reboot. Registering them fixes that.
+  { "microphoneSampleRate", SETTING_INT, &gSettings.microphoneSampleRate, 16000, 0, nullptr, 8000, 48000, "Sample rate (Hz, PDM only)", nullptr, false, nullptr, "micsamplerate" },
+  { "microphoneGain", SETTING_INT, &gSettings.microphoneGain, 70, 0, nullptr, 0, 100, "Software gain (%)", nullptr, false, nullptr, "micgain" },
+  { "microphoneBitDepth", SETTING_INT, &gSettings.microphoneBitDepth, 16, 0, nullptr, 16, 32, "Bit depth (cosmetic; WAV is always 16-bit)", nullptr, false, nullptr, "micbitdepth" },
 };
 
+// Module "connected" = a mic source is actually available (onboard PDM present
+// OR G2 glasses connected). Drives whether the settings module is shown/active.
 static bool isMicConnected() {
-  if (!gMicEnabled) return true;
-  return micConnected;
+  return audioAnySourceAvailable();
 }
 
 // Columns: name, jsonSection, entries, count, isConnected, description
@@ -1192,9 +1312,9 @@ extern const SettingsModule micSettingsModule = {
   micSettingEntries,
   sizeof(micSettingEntries) / sizeof(micSettingEntries[0]),
   isMicConnected,
-  "ESP32-S3 PDM microphone"
+  "Microphone (onboard PDM or G2 glasses)"
 };
 
 // Registration handled by gCommandModules[] in System_Utils.cpp
 
-#endif // ENABLE_MICROPHONE_SENSOR
+#endif // ENABLE_MICROPHONE

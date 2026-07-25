@@ -2576,33 +2576,45 @@ void WaypointManager::selectTarget(int index) {
   saveWaypoints();
 }
 
-bool WaypointManager::getDistanceBearing(float fromLat, float fromLon,
-                                          float& distanceM, float& bearingDeg) {
-  if (_selectedTarget < 0 || !_waypoints[_selectedTarget].active) {
+bool WaypointManager::getDistanceBearingToIndex(int index, float fromLat, float fromLon,
+                                                 float& distanceM, float& bearingDeg) {
+  if (index < 0 || index >= MAX_WAYPOINTS || !_waypoints[index].active) {
     return false;
   }
-  
-  const Waypoint& wp = _waypoints[_selectedTarget];
-  
+
+  const Waypoint& wp = _waypoints[index];
+
   // Haversine distance
   const float R = 6371000.0f;  // Earth radius in meters
   float lat1 = fromLat * PI / 180.0f;
   float lat2 = wp.lat * PI / 180.0f;
   float dLat = (wp.lat - fromLat) * PI / 180.0f;
   float dLon = (wp.lon - fromLon) * PI / 180.0f;
-  
+
   float a = sinf(dLat/2) * sinf(dLat/2) +
             cosf(lat1) * cosf(lat2) * sinf(dLon/2) * sinf(dLon/2);
   float c = 2 * atan2f(sqrtf(a), sqrtf(1-a));
   distanceM = R * c;
-  
+
   // Bearing
   float y = sinf(dLon) * cosf(lat2);
   float x = cosf(lat1) * sinf(lat2) - sinf(lat1) * cosf(lat2) * cosf(dLon);
   bearingDeg = atan2f(y, x) * 180.0f / PI;
   if (bearingDeg < 0) bearingDeg += 360.0f;
-  
+
   return true;
+}
+
+bool WaypointManager::getDistanceBearing(float fromLat, float fromLon,
+                                          float& distanceM, float& bearingDeg) {
+  return getDistanceBearingToIndex(_selectedTarget, fromLat, fromLon, distanceM, bearingDeg);
+}
+
+bool WaypointManager::getDistanceBearingToName(const char* name, float fromLat, float fromLon,
+                                               float& distanceM, float& bearingDeg) {
+  int index = findWaypointByName(name);
+  if (index < 0) return false;
+  return getDistanceBearingToIndex(index, fromLat, fromLon, distanceM, bearingDeg);
 }
 
 void WaypointManager::renderWaypoints(MapRenderer* renderer,
@@ -3022,7 +3034,7 @@ TrackValidation GPSTrackManager::validateTrack(float& coveragePercent) {
 }
 
 const char* GPSTrackManager::getValidationMessage(TrackValidation result, float coverage) {
-  static char msg[128];
+  EXT_RAM_BSS_ATTR static char msg[128];
   
   switch (result) {
     case TRACK_VALID:

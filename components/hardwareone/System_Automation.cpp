@@ -69,7 +69,10 @@
 #include <WiFi.h>                  // WIFI / RSSI: WiFi.isConnected() / WiFi.RSSI()
 #endif
 #if ENABLE_GPS_SENSOR
-#include "i2csensor_pa1010d.h"     // GPS / SPEED / SATS: gpsCacheSnapshot()
+#include "i2csensor_pa1010d.h"     // GPS / SPEED / SATS / WP_DIST: gpsCacheSnapshot()
+#endif
+#if ENABLE_MAPS
+#include "System_Maps.h"           // WP_DIST:<name>: WaypointManager::getDistanceBearingToName()
 #endif
 
 // External dependencies from .ino
@@ -1009,7 +1012,7 @@ const char* cmd_automation_add(const String& argsInput) {
     String wrapped = "IF " + condition + " THEN _";
     const char* conditionError = validateConditionSyntax(wrapped.c_str());
     if (conditionError && conditionError[0] != '\0') {
-      static char errorBuf[192];
+      EXT_RAM_BSS_ATTR static char errorBuf[192];
       snprintf(errorBuf, sizeof(errorBuf), "Error: Invalid condition expression - %s", conditionError);
       broadcastOutput(errorBuf);
       return errorBuf;
@@ -2827,6 +2830,23 @@ bool evaluateCondition(const char* condition) {
  #else
     return false;
  #endif
+  } else if (strncmp(sensor, "WP_DIST:", 8) == 0 || strcmp(sensor, "WP_DIST") == 0) {
+    // Meters from current GPS fix to a named waypoint (wp_dist:<name>).
+    // Fail closed when maps/GPS are off, no fix, empty name, or waypoint missing.
+ #if ENABLE_MAPS && ENABLE_GPS_SENSOR
+    const char* wpName = (strncmp(sensor, "WP_DIST:", 8) == 0) ? (sensor + 8) : "";
+    if (!wpName[0]) return false;
+    GPSCache gps;
+    if (!gpsCacheSnapshot(gps) || !gps.hasFix) return false;
+    float distM = 0, bearingDeg = 0;
+    if (!WaypointManager::getDistanceBearingToName(wpName, gps.latitude, gps.longitude,
+                                                   distM, bearingDeg)) {
+      return false;
+    }
+    currentValue = distM;
+ #else
+    return false;
+ #endif
   } else if (strcmp(sensor, "PEERS") == 0) {
     // Count of live ESP-NOW mesh peers (V3 heartbeat within 30s, excluding self)
  #if ENABLE_ESPNOW
@@ -3243,7 +3263,7 @@ const char* evaluateConditionalChain(const char* chainStr, char* outBuf, size_t 
 // `owner` is the automation's createdBy user, forwarded into every queued sub-command.
 // `autoName` is the automation's display name for autolog COMMAND/OUTPUT attribution.
 const char* executeConditionalCommand(const char* command, const char* owner, const char* autoName) {
-  static char errorBuf[128];  // Static buffer for error messages
+  EXT_RAM_BSS_ATTR static char errorBuf[128];  // Static buffer for error messages
   const char* cmdStr = command;
   size_t cmdLen = strlen(command);
   

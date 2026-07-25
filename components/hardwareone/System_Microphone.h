@@ -11,7 +11,7 @@
 #include <Arduino.h>
 #include "System_BuildConfig.h"
 
-#if ENABLE_MICROPHONE_SENSOR
+#if ENABLE_MICROPHONE
 
 // Microphone sensor state
 extern bool gMicEnabled;
@@ -65,12 +65,13 @@ const char* cmd_micdelete(const String& argsInput);
 const char* cmd_micsamplerate(const String& argsInput);
 const char* cmd_micgain(const String& argsInput);
 const char* cmd_micbitdepth(const String& argsInput);
+const char* cmd_micsource(const String& argsInput);   // get/set source pref {auto,pdm,g2}
 
 // Command registry
 struct CommandEntry;
 extern const CommandEntry micCommands[];
 extern const size_t micCommandsCount;
 
-#endif // ENABLE_MICROPHONE_SENSOR
+#endif // ENABLE_MICROPHONE
 
 #endif // SYSTEM_MICROPHONE_H

@@ -25,8 +25,8 @@
 //
 // Overflow is OPT-IN, via `resolveOverflowPath` + a normal `VFS::open` on
 // the resolved path. When LittleFS free space drops below a threshold, that
-// function rewrites primary paths like "/logs/foo.csv" to their SD mirror
-// "/sd/logs/foo.csv". The rewrite is latched until reboot so a single log
+// function rewrites primary paths like "/logging_captures/foo.csv" to their SD mirror
+// "/sd/logging_captures/foo.csv". The rewrite is latched until reboot so a single log
 // stream doesn't split across tiers mid-session.
 //
 // Convention for callers:

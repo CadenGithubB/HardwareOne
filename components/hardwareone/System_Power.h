@@ -16,12 +16,28 @@
 #define POWER_MODE_POWERSAVER   2
 #define POWER_MODE_ULTRASAVER   3
 
+// Never run the interactive UI below this clock. 40 MHz renders the OLED/nav
+// loop ~6x slower (render + once-per-frame input consume balloon together),
+// which reads as "very unresponsive" input. So UltraSaver's headline 40 MHz is
+// reserved for the idle/asleep state (nobody's looking at the blanked panel);
+// while actively used, every mode holds at least this floor. 80 MHz is also the
+// established Wi-Fi/PSRAM-safe floor (see cmd_cpufreq, powerSaveTick).
+#define POWER_INTERACTIVE_FLOOR_MHZ  80
+
 // ============================================================================
 // Power Mode Management Functions
 // ============================================================================
 
 const char* getPowerModeName(uint8_t mode);
+// Nominal (table) clock for the mode — UltraSaver's is 40. This is the DEEP
+// value; use the active/idle accessors below for what actually gets applied.
 uint32_t getPowerModeCpuFreq(uint8_t mode);
+// Clock applied while the device is actively used: max(nominal, floor). For
+// UltraSaver this is 80, not 40 (see POWER_INTERACTIVE_FLOOR_MHZ).
+uint32_t getPowerModeActiveCpuFreq(uint8_t mode);
+// Clock the idle power-save drops to when this mode is active: min(nominal,
+// floor). UltraSaver -> 40; every other mode -> 80 (radio-reachable floor).
+uint32_t getPowerModeIdleCpuFreq(uint8_t mode);
 uint8_t getPowerModeDisplayBrightness(uint8_t mode);
 
 void applyPowerMode(uint8_t mode);

@@ -4,21 +4,21 @@
 // =============================================================================
 // G2 glasses — "Power" page
 // =============================================================================
-// Two actions, both destructive enough to warrant a confirmation step:
+// Three actions, each destructive enough to warrant a confirmation step:
 //
 //   Level 1 — actions:
 //     <- Main Menu
 //     Restart
+//     RAM Flush
 //     Power Off
 //
 //   Level 2 — confirm prompt for the chosen action:
 //     <- Cancel
-//     Confirm Restart       (or "Confirm Power Off")
+//     Confirm Restart / Confirm RAM Flush / Confirm Power Off
 //
-// Restart calls esp_restart() — clean reboot, BLE drops naturally.
-// Power Off calls esp_deep_sleep_start() with no wake source configured,
-// which is the closest thing the ESP32 has to "off" (~10 µA quiescent).
-// The chip can be brought back by pressing the reset button.
+// Confirm submits admin-gated CLI commands via g2SubmitHijackCommand:
+//   Restart → reboot, RAM Flush → ramflush, Power Off → deepsleep.
+// (Same authorizeCommand path as OLED Power / serial CLI.)
 //
 // We intentionally don't try to keep BLE alive across either action —
 // dropping the link is the correct behaviour for both restart and

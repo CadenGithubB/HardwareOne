@@ -12,8 +12,8 @@ static void streamAutomationsInner(httpd_req_t* req) {
 <h3 style='margin-top:0;color:var(--panel-fg)'>System Status</h3>
 <div style='display:flex;align-items:center;gap:1rem;flex-wrap:wrap'>
   <button class='btn' id='btn-auto-refresh-status'>Refresh Status</button>
-  <button class='btn' id='btn-auto-enable-system' style='display:none'>Enable Automation System</button>
-  <button class='btn' id='btn-auto-disable-system' style='display:none'>Disable Automation System</button>
+  <button class='btn' id='btn-auto-enable-system' style='display:none' data-guest-hide>Enable Automation System</button>
+  <button class='btn' id='btn-auto-disable-system' style='display:none' data-guest-hide>Disable Automation System</button>
   <span id='auto-status-indicator' style='display:inline-flex;align-items:center;gap:0.5rem'>
     <span class='status-indicator status-disabled' id='auto-status-dot'></span>
     <span id='auto-status-text'>Click 'Refresh Status' to check system status...</span>
@@ -193,7 +193,8 @@ static void streamAutomationsInner(httpd_req_t* req) {
     <div style='margin-top:0.5rem'>
       <label style='font-size:0.9em;color:var(--panel-fg);margin-bottom:0.25rem;display:block'>Fire when (optional sensor condition):</label>
       <div class='row-inline' style='gap:0.3rem;align-items:center;flex-wrap:wrap'>
-        <select id='a_cond_var' class='input-tall'><option value=''>— none —</option><optgroup label="Sensors"><option value="temp">Temperature</option><option value="distance">Distance</option><option value="light">Light</option><option value="motion">Motion</option></optgroup><optgroup label="Time"><option value="time">Time of day</option><option value="hour">Hour (0-23)</option><option value="day">Day of week</option><option value="ntp">Clock synced</option></optgroup><optgroup label="System"><option value="battery">Battery %</option><option value="heap">Free heap KB</option><option value="psram">Free PSRAM KB</option><option value="fsfree">Free storage KB</option><option value="uptime">Uptime min</option><option value="chiptemp">Chip temp C</option></optgroup><optgroup label="Network"><option value="wifi">WiFi state</option><option value="rssi">WiFi RSSI dBm</option><option value="peers">ESP-NOW peers</option><option value="ble">BLE state</option></optgroup><optgroup label="Location"><option value="gps">GPS fix</option><option value="speed">GPS speed kn</option><option value="sats">GPS satellites</option></optgroup><optgroup label="AI"><option value="llm">LLM state</option></optgroup><optgroup label="ESP-NOW / Bond"><option value="espnow">ESP-NOW up</option><option value="bond_mode">Bond mode</option><option value="bond_role">Bond role</option><option value="bond_paired">Bond paired</option><option value="bond_online">Bond online</option><option value="bond_synced">Bond synced</option><option value="bond_rssi">Bond RSSI dBm</option><option value="bond_peer_heap">Bond peer heap KB</option><option value="bond_peer_uptime">Bond peer uptime min</option><option value="pairmode">Pairing mode</option><option value="pairmode_secs">Pairing secs left</option><option value="peersknown">Peers known</option><option value="stalestpeerage">Stalest peer age s</option></optgroup><optgroup label="ESP-NOW metadata"><option value="room">Room</option><option value="zone">Zone</option><option value="tags">Tags</option></optgroup></select>
+        <select id='a_cond_var' class='input-tall' onchange='updateFireWhenWpName()'><option value=''>— none —</option><optgroup label="Sensors"><option value="temp">Temperature</option><option value="distance">Distance</option><option value="light">Light</option><option value="motion">Motion</option></optgroup><optgroup label="Time"><option value="time">Time of day</option><option value="hour">Hour (0-23)</option><option value="day">Day of week</option><option value="ntp">Clock synced</option></optgroup><optgroup label="System"><option value="battery">Battery %</option><option value="heap">Free heap KB</option><option value="psram">Free PSRAM KB</option><option value="fsfree">Free storage KB</option><option value="uptime">Uptime min</option><option value="chiptemp">Chip temp C</option></optgroup><optgroup label="Network"><option value="wifi">WiFi state</option><option value="rssi">WiFi RSSI dBm</option><option value="peers">ESP-NOW peers</option><option value="ble">BLE state</option></optgroup><optgroup label="Location"><option value="gps">GPS fix</option><option value="speed">GPS speed kn</option><option value="sats">GPS satellites</option><option value="wp_dist">Dist to waypoint (m)</option></optgroup><optgroup label="AI"><option value="llm">LLM state</option></optgroup><optgroup label="ESP-NOW / Bond"><option value="espnow">ESP-NOW up</option><option value="bond_mode">Bond mode</option><option value="bond_role">Bond role</option><option value="bond_paired">Bond paired</option><option value="bond_online">Bond online</option><option value="bond_synced">Bond synced</option><option value="bond_rssi">Bond RSSI dBm</option><option value="bond_peer_heap">Bond peer heap KB</option><option value="bond_peer_uptime">Bond peer uptime min</option><option value="pairmode">Pairing mode</option><option value="pairmode_secs">Pairing secs left</option><option value="peersknown">Peers known</option><option value="stalestpeerage">Stalest peer age s</option></optgroup><optgroup label="ESP-NOW metadata"><option value="room">Room</option><option value="zone">Zone</option><option value="tags">Tags</option></optgroup></select>
+        <input id='a_cond_wpname' class='input-tall' maxlength='11' placeholder='Home' style='width:90px;display:none' title='Waypoint name'>
         <select id='a_cond_op' class='input-tall'><option value=">">&gt;</option><option value="<">&lt;</option><option value="=">=</option><option value=">=">&gt;=</option><option value="<=">&lt;=</option><option value="!=">!=</option><option value="CONTAINS">CONTAINS</option></select>
         <input id='a_cond_val' class='input-tall' placeholder='value' style='width:90px'>
       </div>
@@ -231,7 +232,7 @@ static void streamAutomationsInner(httpd_req_t* req) {
 <h3 style='margin-top:0;color:var(--panel-fg)'>Import Automation</h3>
 <p style='margin:0.5rem 0;color:var(--panel-fg);font-size:0.9em'>Import from a local JSON file:</p>
 <div style='display:flex;gap:0.5rem;align-items:center;margin-bottom:0.5rem;flex-wrap:wrap'>
-<label class='btn' style='padding:0.4rem 0.8rem;cursor:pointer;font-size:0.9em'>
+<label class='btn' style='padding:0.4rem 0.8rem;cursor:pointer;font-size:0.9em' data-guest-hide>
   Choose File
   <input type='file' id='import_file' accept='.json' onchange='importFromFile(this)' style='display:none'>
 </label>
@@ -240,11 +241,11 @@ static void streamAutomationsInner(httpd_req_t* req) {
 <div id='import_file_status' style='font-size:0.8em;margin-bottom:0.75rem'></div>
 <p style='margin:0.5rem 0;color:var(--panel-fg);font-size:0.9em'>Or import from a GitHub URL:</p>
 <div style='margin-bottom:0.5rem'>
-<input type='text' id='github_url' placeholder='https://github.com/user/repo/blob/main/automation.json' style='width:100%;padding:0.5rem;border:1px solid var(--border);border-radius:4px;font-size:0.9em;box-sizing:border-box;background:var(--input-bg,var(--panel-bg));color:var(--panel-fg)'>
+<input type='text' id='github_url' placeholder='https://github.com/user/repo/blob/main/automation.json' style='width:100%;padding:0.5rem;border:1px solid var(--border);border-radius:4px;font-size:0.9em;box-sizing:border-box;background:var(--input-bg,var(--panel-bg));color:var(--panel-fg)' data-guest-hide>
 </div>
 <div style='display:flex;gap:0.5rem;align-items:stretch;flex-wrap:wrap;margin-bottom:0.5rem'>
-<input type='text' id='github_name' placeholder='Custom name (optional)' style='flex:1;min-width:150px;padding:0.5rem;border:1px solid var(--border);border-radius:4px;font-size:0.9em;height:auto;background:var(--input-bg,var(--panel-bg));color:var(--panel-fg)'>
-<button onclick='downloadFromGitHub()' class='btn' style='padding:0.5rem 1rem;height:auto'>Import</button>
+<input type='text' id='github_name' placeholder='Custom name (optional)' style='flex:1;min-width:150px;padding:0.5rem;border:1px solid var(--border);border-radius:4px;font-size:0.9em;height:auto;background:var(--input-bg,var(--panel-bg));color:var(--panel-fg)' data-guest-hide>
+<button onclick='downloadFromGitHub()' class='btn' style='padding:0.5rem 1rem;height:auto' data-guest-hide>Import</button>
 </div>
 <div id='download_status' style='font-size:0.8em'></div>
 </div>
@@ -277,36 +278,34 @@ static void streamAutomationsInner(httpd_req_t* req) {
   httpd_resp_send_chunk(req, R"AUTOPART2B(<script>
 console.log('[AUTOMATIONS] System status check starting...');
 window.refreshAutomationSystemStatus = function() {
-  hw.postFormText('/api/cli', { cmd: 'automation system status' })
-  .then(output => {
-    console.log('[AUTOMATIONS] System status response:', output);
+  hw.fetchJSON('/api/automations')
+  .then(data => {
+    console.log('[AUTOMATIONS] System status response:', data);
     const statusDot = document.getElementById('auto-status-dot');
     const statusText = document.getElementById('auto-status-text');
     const enableBtn = document.getElementById('btn-auto-enable-system');
     const warningDiv = document.getElementById('auto-system-warning');
     const autoForm = document.getElementById('auto_form');
     const autosList = document.getElementById('autos_list');
-    
-    const isEnabled = output.includes('Automation system: enabled');
-    
     const disableBtn = document.getElementById('btn-auto-disable-system');
-    
+
+    const isEnabled = !!(data && data.systemEnabled);
+
     if (isEnabled) {
       statusDot.className = 'status-indicator status-enabled';
       statusText.textContent = 'Automation system is enabled and running';
       enableBtn.style.display = 'none';
-      disableBtn.style.display = 'inline-block';
+      disableBtn.style.display = hw.isGuest() ? 'none' : 'inline-block';
       warningDiv.style.display = 'none';
-      autoForm.style.display = 'block';
+      autoForm.style.display = hw.isGuest() ? 'none' : 'block';
       if (autosList) autosList.style.display = 'block';
-      // Load automations list
       if (typeof loadAutos === 'function') {
         loadAutos();
       }
     } else {
       statusDot.className = 'status-indicator status-disabled';
       statusText.textContent = 'Automation system is disabled';
-      enableBtn.style.display = 'inline-block';
+      enableBtn.style.display = hw.isGuest() ? 'none' : 'inline-block';
       disableBtn.style.display = 'none';
       warningDiv.style.display = 'block';
       autoForm.style.display = 'none';
@@ -688,8 +687,15 @@ function addLogicField(){
   const varSelect = document.createElement('select'); 
   varSelect.className = 'logic-var input-tall'; 
   varSelect.style.cssText = 'height:32px'; 
-  varSelect.innerHTML = '<optgroup label="Sensors"><option value="temp">Temperature</option><option value="distance">Distance</option><option value="light">Light</option><option value="motion">Motion</option></optgroup><optgroup label="Time"><option value="time">Time of day</option><option value="hour">Hour (0-23)</option><option value="day">Day of week</option><option value="ntp">Clock synced</option></optgroup><optgroup label="System"><option value="battery">Battery %</option><option value="heap">Free heap KB</option><option value="psram">Free PSRAM KB</option><option value="fsfree">Free storage KB</option><option value="uptime">Uptime min</option><option value="chiptemp">Chip temp C</option></optgroup><optgroup label="Network"><option value="wifi">WiFi state</option><option value="rssi">WiFi RSSI dBm</option><option value="peers">ESP-NOW peers</option><option value="ble">BLE state</option></optgroup><optgroup label="Location"><option value="gps">GPS fix</option><option value="speed">GPS speed kn</option><option value="sats">GPS satellites</option></optgroup><optgroup label="AI"><option value="llm">LLM state</option></optgroup><optgroup label="ESP-NOW / Bond"><option value="espnow">ESP-NOW up</option><option value="bond_mode">Bond mode</option><option value="bond_role">Bond role</option><option value="bond_paired">Bond paired</option><option value="bond_online">Bond online</option><option value="bond_synced">Bond synced</option><option value="bond_rssi">Bond RSSI dBm</option><option value="bond_peer_heap">Bond peer heap KB</option><option value="bond_peer_uptime">Bond peer uptime min</option><option value="pairmode">Pairing mode</option><option value="pairmode_secs">Pairing secs left</option><option value="peersknown">Peers known</option><option value="stalestpeerage">Stalest peer age s</option></optgroup><optgroup label="ESP-NOW metadata"><option value="room">Room</option><option value="zone">Zone</option><option value="tags">Tags</option></optgroup>';
-  varSelect.onchange = function() { updateValuePlaceholder(this); };
+  varSelect.innerHTML = '<optgroup label="Sensors"><option value="temp">Temperature</option><option value="distance">Distance</option><option value="light">Light</option><option value="motion">Motion</option></optgroup><optgroup label="Time"><option value="time">Time of day</option><option value="hour">Hour (0-23)</option><option value="day">Day of week</option><option value="ntp">Clock synced</option></optgroup><optgroup label="System"><option value="battery">Battery %</option><option value="heap">Free heap KB</option><option value="psram">Free PSRAM KB</option><option value="fsfree">Free storage KB</option><option value="uptime">Uptime min</option><option value="chiptemp">Chip temp C</option></optgroup><optgroup label="Network"><option value="wifi">WiFi state</option><option value="rssi">WiFi RSSI dBm</option><option value="peers">ESP-NOW peers</option><option value="ble">BLE state</option></optgroup><optgroup label="Location"><option value="gps">GPS fix</option><option value="speed">GPS speed kn</option><option value="sats">GPS satellites</option><option value="wp_dist">Dist to waypoint (m)</option></optgroup><optgroup label="AI"><option value="llm">LLM state</option></optgroup><optgroup label="ESP-NOW / Bond"><option value="espnow">ESP-NOW up</option><option value="bond_mode">Bond mode</option><option value="bond_role">Bond role</option><option value="bond_paired">Bond paired</option><option value="bond_online">Bond online</option><option value="bond_synced">Bond synced</option><option value="bond_rssi">Bond RSSI dBm</option><option value="bond_peer_heap">Bond peer heap KB</option><option value="bond_peer_uptime">Bond peer uptime min</option><option value="pairmode">Pairing mode</option><option value="pairmode_secs">Pairing secs left</option><option value="peersknown">Peers known</option><option value="stalestpeerage">Stalest peer age s</option></optgroup><optgroup label="ESP-NOW metadata"><option value="room">Room</option><option value="zone">Zone</option><option value="tags">Tags</option></optgroup>';
+  varSelect.onchange = function() { updateValuePlaceholder(this); updateLogicWpName(this); };
+  const wpNameInput = document.createElement('input');
+  wpNameInput.type = 'text';
+  wpNameInput.className = 'logic-wpname input-tall';
+  wpNameInput.maxLength = 11;
+  wpNameInput.placeholder = 'Home';
+  wpNameInput.title = 'Waypoint name';
+  wpNameInput.style.cssText = 'width:90px;height:32px;display:none';
   const opSelect = document.createElement('select'); 
   opSelect.className = 'logic-operator input-tall'; 
   opSelect.style.cssText = 'height:32px;width:60px'; 
@@ -716,6 +722,7 @@ function addLogicField(){
   removeBtn.onclick = function() { removeLogicField(this); }; 
   newField.appendChild(typeSelect); 
   newField.appendChild(varSelect); 
+  newField.appendChild(wpNameInput);
   newField.appendChild(opSelect); 
   newField.appendChild(valueInput); 
   newField.appendChild(thenSpan); 
@@ -751,6 +758,7 @@ function updateValuePlaceholder(varSelect){
     else if(varType==='peers') valueInput.placeholder='1';
     else if(varType==='speed') valueInput.placeholder='10';
     else if(varType==='sats') valueInput.placeholder='6';
+    else if(varType==='wp_dist') valueInput.placeholder='200';
     else if(varType==='bond_online') valueInput.placeholder='OFFLINE';
     else if(varType==='bond_synced') valueInput.placeholder='SYNCED';
     else if(varType==='bond_paired') valueInput.placeholder='PAIRED';
@@ -767,16 +775,40 @@ function updateValuePlaceholder(varSelect){
     console.error('updateValuePlaceholder error:', e); 
   } 
 }
+function updateFireWhenWpName(){
+  try {
+    const cv=document.getElementById('a_cond_var');
+    const wn=document.getElementById('a_cond_wpname');
+    const vv=document.getElementById('a_cond_val');
+    if(!cv||!wn) return;
+    const show=(cv.value==='wp_dist');
+    wn.style.display=show?'inline-block':'none';
+    if(!show) wn.value='';
+    if(show&&vv) vv.placeholder='200';
+  } catch(e) { console.error('updateFireWhenWpName error:', e); }
+}
+function updateLogicWpName(varSelect){
+  try {
+    const field=varSelect.parentElement;
+    const wn=field.querySelector('.logic-wpname');
+    if(!wn) return;
+    const show=(varSelect.value==='wp_dist' && varSelect.style.display!=='none');
+    wn.style.display=show?'inline-block':'none';
+    if(!show) wn.value='';
+  } catch(e) { console.error('updateLogicWpName error:', e); }
+}
 function updateLogicField(selectElement){ 
   try { 
     const field=selectElement.parentElement; 
     const logicType=selectElement.value; 
     const varSelect=field.querySelector('.logic-var'); 
+    const wpNameInput=field.querySelector('.logic-wpname');
     const operatorSelect=field.querySelector('.logic-operator'); 
     const valueInput=field.querySelector('.logic-value'); 
     const thenText=field.querySelector('.then-text'); 
     if(logicType==='ELSE'){ 
       varSelect.style.display='none'; 
+      if(wpNameInput) wpNameInput.style.display='none';
       operatorSelect.style.display='none'; 
       valueInput.style.display='none'; 
       thenText.style.display='none'; 
@@ -785,6 +817,7 @@ function updateLogicField(selectElement){
       operatorSelect.style.display='inline-block'; 
       valueInput.style.display='inline-block'; 
       thenText.style.display='inline-block'; 
+      if(varSelect) updateLogicWpName(varSelect);
     } 
   } catch(e) { 
     console.error('updateLogicField error:', e); 
@@ -997,16 +1030,16 @@ function renderAutos(json) {
         let btns = '';
         if (id !== '') {
           if (a.enabled === true) {
-            btns += '<button class="btn" onclick="autoToggle(' + id + ',0)" style="margin-right:0.3rem">Disable</button>';
+            btns += '<button class="btn" data-guest-hide onclick="autoToggle(' + id + ',0)" style="margin-right:0.3rem">Disable</button>';
           } else {
-            btns += '<button class="btn" onclick="autoToggle(' + id + ',1)" style="margin-right:0.3rem">Enable</button>';
+            btns += '<button class="btn" data-guest-hide onclick="autoToggle(' + id + ',1)" style="margin-right:0.3rem">Enable</button>';
           }
-          btns += '<button class="btn" onclick="autoRun(' + id + ')" style="margin-right:0.3rem">Run Now</button>';
+          btns += '<button class="btn" data-guest-hide onclick="autoRun(' + id + ')" style="margin-right:0.3rem">Run Now</button>';
           if (t === 'afterdelay') {
-            btns += '<button class="btn" onclick="autoTrigger(' + id + ')" style="margin-right:0.3rem">Trigger</button>';
+            btns += '<button class="btn" data-guest-hide onclick="autoTrigger(' + id + ')" style="margin-right:0.3rem">Trigger</button>';
           }
-          btns += '<button class="btn" onclick="autoEdit(' + id + ')" style="margin-right:0.3rem">Edit</button>';
-          btns += '<button class="btn" onclick="autoDelete(' + id + ')" style="margin-right:0.3rem;color:var(--danger)">Delete</button>';
+          btns += '<button class="btn" data-guest-hide onclick="autoEdit(' + id + ')" style="margin-right:0.3rem">Edit</button>';
+          btns += '<button class="btn" data-guest-hide onclick="autoDelete(' + id + ')" style="margin-right:0.3rem;color:var(--danger)">Delete</button>';
           btns += '<button class="btn" onclick="exportSingleAutomation(' + id + ')">Export</button>';
         }
         html += '<tr style="border-bottom:1px solid var(--border)">';
@@ -1278,6 +1311,7 @@ async function createAutomation(){
   logicFields.forEach(field=>{ 
     const typeSelect=field.querySelector('.logic-type'); 
     const varSelect=field.querySelector('.logic-var'); 
+    const wpNameInput=field.querySelector('.logic-wpname');
     const operatorSelect=field.querySelector('.logic-operator'); 
     const value=field.querySelector('.logic-value'); 
     const action=field.querySelector('.logic-action'); 
@@ -1291,14 +1325,17 @@ async function createAutomation(){
           const varVal=varSelect.value; 
           const opVal=operatorSelect.value; 
           const valVal=value.value.trim(); 
-          if(varVal && opVal && valVal && actVal){ 
-            conditionalChain.push(typeVal+' '+varVal+opVal+valVal+' THEN '+actVal); 
+          const wpName=((wpNameInput&&wpNameInput.value)||'').trim();
+          if(varVal==='wp_dist' && !wpName){ logicError=true; }
+          else if(varVal && opVal && valVal && actVal){ 
+            const sensorTok=(varVal==='wp_dist')?(varVal+':'+wpName):varVal;
+            conditionalChain.push(typeVal+' '+sensorTok+opVal+valVal+' THEN '+actVal); 
           } else { logicError=true; }
         } 
       } 
     } 
   }); 
-  if(logicError){ document.getElementById('a_error').textContent='Logic field incomplete: all fields (variable, operator, value, action) are required.'; document.getElementById('a_error').style.display='block'; return; }
+  if(logicError){ document.getElementById('a_error').textContent='Logic field incomplete: all fields (variable, operator, value, action) are required. Dist to waypoint also needs a waypoint name.'; document.getElementById('a_error').style.display='block'; return; }
   if(conditionalChain.length>0){ 
     cmds.push(conditionalChain.join(' ')); 
   } 
@@ -1355,7 +1392,9 @@ async function createAutomation(){
     parts.push('enabled='+(en?1:0));
     // Option 2: top-level "Fire when" condition gate.
     { const cv=(document.getElementById('a_cond_var')||{}).value||''; const co=(document.getElementById('a_cond_op')||{}).value||'>'; const cval=((document.getElementById('a_cond_val')||{}).value||'').trim();
-      if(cv && cval){ parts.push('condition="'+(cv+co+cval).replace(/"/g,'\\"')+'"'); } }
+      const cwn=((document.getElementById('a_cond_wpname')||{}).value||'').trim();
+      if(cv==='wp_dist' && !cwn){ document.getElementById('a_error').textContent='Dist to waypoint requires a waypoint name.'; document.getElementById('a_error').style.display='block'; throw new Error('wp_dist name'); }
+      if(cv && cval){ const sensorTok=(cv==='wp_dist')?(cv+':'+cwn):cv; parts.push('condition="'+(sensorTok+co+cval).replace(/"/g,'\\"')+'"'); } }
     if(runAtBoot) parts.push('runatboot=1');
     // Secondary triggers: append as a JSON array via the `secondarytriggers`
     // arg. The backend merges these with the primary trigger + runAtBoot boot
@@ -1414,7 +1453,7 @@ async function createAutomation(){
       document.getElementById('a_interval').value='';
       var elEvMatch=document.getElementById('a_event_match'); if(elEvMatch) elEvMatch.value='';
       var elRunBoot=document.getElementById('a_runatboot'); if(elRunBoot) elRunBoot.checked=false;
-      { var cvr=document.getElementById('a_cond_var'); if(cvr) cvr.value=''; var cvv=document.getElementById('a_cond_val'); if(cvv) cvv.value=''; } 
+      { var cvr=document.getElementById('a_cond_var'); if(cvr) cvr.value=''; var cvv=document.getElementById('a_cond_val'); if(cvv) cvv.value=''; var cwn=document.getElementById('a_cond_wpname'); if(cwn){ cwn.value=''; cwn.style.display='none'; } } 
       const cwrap=document.getElementById('command_fields'); 
       if(cwrap){ 
         cwrap.innerHTML='<div id="command_buttons" class="row-inline" style="gap:0.5rem;margin-top:0.5rem"><button id="btn_add_cmd" type="button" class="btn btn-small" onclick="addCommandField()" title="Add another command to execute (e.g., ledcolor red, status, broadcast message)">+ Add Command</button><button id="btn_add_print" type="button" class="btn btn-small" onclick="addPrintField()" title="Add a print/broadcast message statement">+ Add Print</button><button id="btn_add_logic" type="button" class="btn btn-small" onclick="addLogicField()" title="Add conditional logic (IF/THEN statements for sensor-based automation)">+ Add Logic</button><button id="btn_add_wait" type="button" class="btn btn-small" onclick="addWaitField()" title="Add a wait/pause command with dropdown timing">+ Add Wait</button></div>'; 
@@ -1526,10 +1565,10 @@ function autoEdit(id){
       const em=document.getElementById('a_event_match'); if(em) em.value=sched.match||'';
     }
     // Option 2: populate the "Fire when" condition from the record.
-    { var cvr=document.getElementById('a_cond_var'); var cor=document.getElementById('a_cond_op'); var cvv=document.getElementById('a_cond_val');
-      if(cvr&&cor&&cvv){ cvr.value='';cor.value='>';cvv.value='';
+    { var cvr=document.getElementById('a_cond_var'); var cor=document.getElementById('a_cond_op'); var cvv=document.getElementById('a_cond_val'); var cwn=document.getElementById('a_cond_wpname');
+      if(cvr&&cor&&cvv){ cvr.value='';cor.value='>';cvv.value=''; if(cwn){ cwn.value=''; cwn.style.display='none'; }
         var cond=(a.condition||'').trim();
-        if(cond){ var ops=['CONTAINS','>=','<=','!=','>','<','=']; for(var oi=0;oi<ops.length;oi++){ var ix=cond.indexOf(ops[oi]); if(ix>0){ cvr.value=cond.substring(0,ix).trim().toLowerCase(); cor.value=ops[oi]; cvv.value=cond.substring(ix+ops[oi].length).trim(); break; } } } }
+        if(cond){ var ops=['CONTAINS','>=','<=','!=','>','<','=']; for(var oi=0;oi<ops.length;oi++){ var ix=cond.indexOf(ops[oi]); if(ix>0){ var left=cond.substring(0,ix).trim().toLowerCase(); var colon=left.indexOf(':'); if(colon>0&&left.substring(0,colon)==='wp_dist'){ cvr.value='wp_dist'; if(cwn){ cwn.value=left.substring(colon+1); cwn.style.display='inline-block'; } } else { cvr.value=left; } cor.value=ops[oi]; cvv.value=cond.substring(ix+ops[oi].length).trim(); break; } } } }
       }
     const commands=Array.isArray(a.commands)?a.commands:(a.command?[a.command]:[]);
     const cwrap=document.getElementById('command_fields');

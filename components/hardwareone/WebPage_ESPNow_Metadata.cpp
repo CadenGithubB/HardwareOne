@@ -18,7 +18,7 @@ extern MeshPeerMeta* gMeshPeerMeta;
 extern int gMeshPeerSlots;
 
 /**
- * @brief Get device metadata (smart home info) for a specific MAC address
+ * @brief Get device metadata (friendly name, room, zone, tags) for a specific MAC address
  * @param req HTTP request with ?mac=XX:XX:XX:XX:XX:XX query parameter
  * @return ESP_OK
  * 
