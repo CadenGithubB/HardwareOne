@@ -529,7 +529,7 @@ const char* cmd_capture(const String& argsInput) {
   String result = gImageManager.captureAndSave(location);
   
   if (result.length() > 0) {
-    static char buf[128];
+    EXT_RAM_BSS_ATTR static char buf[128];
     snprintf(buf, sizeof(buf), "Captured: %s", result.c_str());
     return buf;
   }
@@ -640,13 +640,13 @@ const char* cmd_imagesend(const String& argsInput) {
   // Use ESP-NOW file send (stubs return false when ESP-NOW disabled)
   uint8_t mac[6];
   if (!resolveDeviceNameOrMac(device, mac)) {
-    static char errBuf[128];
+    EXT_RAM_BSS_ATTR static char errBuf[128];
     snprintf(errBuf, sizeof(errBuf), "Error: Device '%s' not found", device.c_str());
     return errBuf;
   }
   
   if (sendFileToMac(mac, path)) {
-    static char buf[128];
+    EXT_RAM_BSS_ATTR static char buf[128];
     snprintf(buf, sizeof(buf), "Sending %s to %s", path.c_str(), device.c_str());
     cliHint("send is asynchronous — the image lands in the peer's /espnow/received/ inbox; no completion status returns here");
     return buf;

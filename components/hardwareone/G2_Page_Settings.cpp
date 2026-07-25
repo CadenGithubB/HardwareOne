@@ -34,8 +34,12 @@
 // page-creation path.) See docs/G2_PROTOCOL.md "Hijack page-swap
 // lifecycle" for the test evidence.
 //
-// We deliberately don't try to support editing — the G2 lens has no
-// keyboard or dial, so read-only is the honest contract.
+// The INTERACTIVE view (formerly "Pretty") is a live editor. Modules whose
+// settings carry groups (e.g. debug) drill module -> group -> entries;
+// tapping an entry flips a boolean, opens an enum pick-list, or launches the
+// character keyboard, committing through the real per-setting CLI command
+// (the same mechanism the OLED settings editor uses, via the shared
+// System_SettingsEditorCore helpers). The JSON view stays read-only.
 
 #include "G2_Page_Settings.h"
 
@@ -43,11 +47,16 @@
 
 #include "G2_Glasses.h"
 #include "System_Settings.h"
+#include "System_SettingsEditorCore.h"   // shared visibility/editability/enum/value helpers
 #include "System_Debug.h"
 #include "System_MemUtil.h"   // PSRAM_JSON_DOC
 #include "G2_Page_Common.h"
+#include "G2_HijackCmd.h"      // g2SubmitHijackCommand / G2CmdCookie
+#include "G2_Page_TextEntry.h" // g2BeginTextEntry (string / numeric editing)
 #include <ArduinoJson.h>
 #include "esp_attr.h"   // EXT_RAM_BSS_ATTR
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"     // vTaskDelay (result banners)
 
 // -----------------------------------------------------------------------------
 // Navigation + view state
@@ -55,38 +64,70 @@
 
 enum SettingsLevel : uint8_t {
   SET_LEVEL_MODULES = 0,    // module-list view (root)
-  SET_LEVEL_ENTRIES = 1,    // inside a module, rendered per gView
+  SET_LEVEL_GROUPS  = 1,    // group list for a module whose settings are grouped
+  SET_LEVEL_ENTRIES = 2,    // entry list (all entries, or one group), rendered per gView
+  SET_LEVEL_PICK    = 3,    // enum pick-list while editing one entry
 };
 
 enum SettingsView : uint8_t {
-  SET_VIEW_PRETTY = 0,      // key=value rows
-  SET_VIEW_JSON   = 1,      // serialized JSON, chunked
+  SET_VIEW_INTERACTIVE = 0, // label=value rows, tappable to edit
+  SET_VIEW_JSON        = 1, // serialized JSON, chunked (read-only)
 };
 
 static SettingsLevel gLevel        = SET_LEVEL_MODULES;
-static SettingsView  gView         = SET_VIEW_PRETTY;   // persists across drill-in/out
-static int           gActiveModule = -1;                // registry index when in LEVEL_ENTRIES
+static SettingsView  gView         = SET_VIEW_INTERACTIVE;  // persists across drill-in/out
+static int           gActiveModule = -1;                // registry index once past the module list
 static size_t        gModulePage   = 0;                 // 0-based page index for module list
 static size_t        gEntryPage    = 0;                 // 0-based page index for entries view
 
 // -----------------------------------------------------------------------------
+// Interactive-editor drill-down state
+// -----------------------------------------------------------------------------
+// Sentinels for the entry-view group filter (compared by pointer identity):
+//   kGroupAll        — flat module: show every entry (no group level)
+//   kGroupUngrouped  — the synthetic "(General)" bucket inside a grouped module
+// Any other value is a real SettingEntry.group string pointer.
+static const char kGroupAll[]       = "\x01" "ALL";
+static const char kGroupUngrouped[] = "\x01" "UNGROUPED";
+
+static const char*         gActiveGroup     = kGroupAll;  // active entry-view filter
+static bool                gModuleHasGroups = false;      // entries reached via a group level?
+static size_t              gGroupPage       = 0;          // 0-based page index for group list
+static size_t              gPickPage        = 0;          // 0-based page index for pick-list
+static const SettingEntry* gEditEntry       = nullptr;    // entry being edited (pick-list/keyboard)
+
+// Display generation — bumped on every settings list re-render. A commit
+// captures it at submit time (passed as the callback userData); if it differs
+// by completion, the settings display changed (the user navigated between the
+// four sub-levels, which all share the single SETTINGS hijack page, or another
+// render ran) and the stale redraw is dropped. Localised twin of the g2MenuGen
+// staleness pattern, which cannot see intra-Settings navigation.
+static uint32_t            gNavGen          = 0;
+
+// Group buckets for the active module (built on drill-in). Each is kGroupUngrouped
+// or a SettingEntry.group pointer.
+#define SET_MAX_BUCKETS 48
+EXT_RAM_BSS_ATTR static const char* gBuckets[SET_MAX_BUCKETS];
+static size_t      gBucketCount = 0;
+
+// -----------------------------------------------------------------------------
 // Row buffer + per-page caps
 // -----------------------------------------------------------------------------
-// Single-fragment ceiling on encoded pb body is 253 B. Each list row
-// costs ~3 B pb overhead (item-name tag + length varint) on top of its
-// content; container metadata costs ~50 B.
+// Single-fragment ceiling on encoded pb body is 253 B; the firmware does not
+// reassemble multi-fragment CREATE, so every list page must fit one fragment.
+// Empirically 13 total rows (back + up to ~10 content + prev/next) is the
+// proven-safe budget.
 //
-// Module list rows include the entry count: "[modulename] (NN)" — about
-// 14 chars average. The cap below is "what fits single-frag with that
-// format, plus the back row, plus the view-toggle row, plus a possible
-// +N-more trailer." If the registry grows past the visible cap, the
-// trailer points the user to the web UI for the rest.
-//
-// Entry rows ("key=value") are typically shorter; the entry cap is set
-// by what fits visually, not pb size.
-#define SET_VISIBLE_MODULE_ROWS  10  // module rows on Level-1 page
-#define SET_VISIBLE_ENTRY_ROWS   10  // entry rows on Level-2 PRETTY page
-#define SET_TOTAL_MODULES_ROWS   13  // back + toggle + 10 modules + prev/next
+// The MODULE list is the tightest page: it also carries the "View:" toggle
+// row, so its worst case is back + toggle + N modules + prev + next = N + 4.
+// To stay within the 13-row budget the module page shows at most 9 modules
+// (9 + 4 = 13) — this is what lets a middle page render BOTH prev and next, so
+// every module page is reachable. (With 10 modules the 14th row was silently
+// dropped, hiding later pages.) Group / entry / pick pages have no toggle row,
+// so they can show 10 items (back + 10 + prev + next = 13).
+#define SET_VISIBLE_MODULE_ROWS  9   // module rows on the module list page
+#define SET_VISIBLE_ENTRY_ROWS   10  // items per page on group / entry / pick pages
+#define SET_TOTAL_MODULES_ROWS   13  // buffer height (proven single-fragment budget)
 #define SET_ROW_LEN              40
 
 // Buffer sized for the largest list-mode view. JSON view doesn't use
@@ -94,6 +135,14 @@ static size_t        gEntryPage    = 0;                 // 0-based page index fo
 // String built on the heap. PSRAM-resident — no DMA / ISR access.
 EXT_RAM_BSS_ATTR static char        gRows[SET_TOTAL_MODULES_ROWS][SET_ROW_LEN];
 EXT_RAM_BSS_ATTR static const char* gRowPtrs[SET_TOTAL_MODULES_ROWS];
+
+// Action tables: map a rendered row index to the semantic item it represents,
+// so tap dispatch never re-derives layout (the fragile pattern the Files page
+// abandoned). Rebuilt by each build*Rows() call.
+static int         gModuleRowItem[SET_TOTAL_MODULES_ROWS]; // registry module index per row (-1 = none)
+static const char* gGroupRowItem[SET_TOTAL_MODULES_ROWS];  // group bucket per row (nullptr = none)
+static int         gEntryRowItem[SET_TOTAL_MODULES_ROWS];  // module-entry index per row (-1 = none)
+static int         gPickRowItem[SET_TOTAL_MODULES_ROWS];   // enum option index per row (-1 = none)
 
 // -----------------------------------------------------------------------------
 // Helpers
@@ -111,7 +160,7 @@ static void writeViewToggleRow(size_t row) {
   // showing "tap to switch to JSON" — users glance at the row and see
   // what mode they're in right now.
   snprintf(gRows[row], SET_ROW_LEN, "View: %s",
-           gView == SET_VIEW_PRETTY ? "PRETTY" : "JSON");
+           gView == SET_VIEW_INTERACTIVE ? "INTERACTIVE" : "JSON");
   gRowPtrs[row] = gRows[row];
 }
 
@@ -191,8 +240,9 @@ static int    gPageNextRow        = -1;    // row idx of "Next >>" if shown, els
 static size_t gPageStartIdx       = 0;     // registry index of first module on this page
 
 static size_t buildModuleRows() {
-  writeBackRow("<- Main Menu");    // row 0 — out of Settings to hijack root
+  writeBackRow("<- Config");       // row 0 — out of Settings to the Config launcher
   writeViewToggleRow(1);           // row 1 — view switcher
+  for (size_t i = 0; i < SET_TOTAL_MODULES_ROWS; i++) gModuleRowItem[i] = -1;
 
   size_t modCount = 0;
   const SettingsModule** mods = getSettingsModules(modCount);
@@ -209,6 +259,7 @@ static size_t buildModuleRows() {
     snprintf(gRows[row], SET_ROW_LEN, "[%s] (%u)",
              m->name, (unsigned)m->count);
     gRowPtrs[row] = gRows[row];
+    gModuleRowItem[row] = (int)mi;
     row++;
     shown++;
   }
@@ -231,58 +282,375 @@ static size_t buildModuleRows() {
 // Convert a Level-1 tap idx to a registry module index. Returns -1 if
 // the tap is on a non-module row (back, toggle, prev/next page).
 static int moduleIdxFromTap(uint32_t idx) {
-  if ((int)idx == gPagePrevRow) return -1;
-  if ((int)idx == gPageNextRow) return -1;
-  if (idx < gPageFirstModuleRow) return -1;
-  const size_t pos = idx - gPageFirstModuleRow;
-  if (pos >= gPageModuleCount) return -1;
-  return (int)(gPageStartIdx + pos);
+  // Action-table lookup (buildModuleRows records the registry index per row) —
+  // robust even if a null/nameless module were skipped mid-page, which the old
+  // linear reconstruction would have mis-mapped.
+  if (idx >= SET_TOTAL_MODULES_ROWS) return -1;
+  return gModuleRowItem[idx];
 }
 
 // -----------------------------------------------------------------------------
-// Level 2 PRETTY — entries of one module as key=value rows
+// Interactive editor — group / entry / pick-list builders + edit machinery
 // -----------------------------------------------------------------------------
 
-static size_t buildEntryRowsPretty(int moduleIdx) {
-  writeBackRow("<- Settings");    // back to module list
+// True if entry `e` belongs to the active group filter (see kGroupAll /
+// kGroupUngrouped sentinels).
+static bool settingsEntryInGroup(const SettingEntry& e, const char* group) {
+  if (group == kGroupAll) return true;
+  if (group == kGroupUngrouped) return (!e.group || !e.group[0]);
+  return (e.group && group && strcmp(e.group, group) == 0);
+}
+
+// Display name for a group bucket row.
+static const char* settingsBucketLabel(const char* group) {
+  if (group == kGroupUngrouped) return "General";
+  return group ? group : "?";
+}
+
+// Count visible entries in a bucket (for the "[group] (N)" row).
+static size_t settingsBucketCount(const SettingsModule* m, const char* group) {
+  size_t n = 0;
+  for (size_t ei = 0; ei < m->count; ei++) {
+    const SettingEntry& e = m->entries[ei];
+    if (!settingsEditorIsVisible(&e)) continue;
+    if (settingsEntryInGroup(e, group)) n++;
+  }
+  return n;
+}
+
+// Populate gBuckets/gBucketCount/gModuleHasGroups for a module. A module gets a
+// group level only when it has >=2 buckets (distinct named groups plus a
+// synthetic "General" bucket for any ungrouped entries). Otherwise it is flat.
+static void settingsBuildBuckets(const SettingsModule* m) {
+  gBucketCount = 0;
+  gModuleHasGroups = false;
+  if (!m || !m->entries) return;
+
+  bool sawUngrouped = false;
+  for (size_t ei = 0; ei < m->count; ei++) {
+    const SettingEntry& e = m->entries[ei];
+    if (!settingsEditorIsVisible(&e)) continue;
+    const char* g = e.group;
+    if (!g || !g[0]) { sawUngrouped = true; continue; }
+    bool seen = false;
+    for (size_t b = 0; b < gBucketCount; b++) {
+      if (gBuckets[b] != kGroupUngrouped && strcmp(gBuckets[b], g) == 0) { seen = true; break; }
+    }
+    if (!seen && gBucketCount < SET_MAX_BUCKETS) gBuckets[gBucketCount++] = g;
+  }
+
+  const size_t total = gBucketCount + (sawUngrouped ? 1 : 0);
+  gModuleHasGroups = (total >= 2);
+  if (gModuleHasGroups && sawUngrouped && gBucketCount < SET_MAX_BUCKETS) {
+    // Prepend the synthetic "General" bucket for the ungrouped entries.
+    for (size_t b = gBucketCount; b > 0; b--) gBuckets[b] = gBuckets[b - 1];
+    gBuckets[0] = kGroupUngrouped;
+    gBucketCount++;
+  }
+}
+
+// Level 2a — group list for a grouped module.
+static size_t buildGroupRows(int moduleIdx) {
+  writeBackRow("<- Settings");
+  for (size_t i = 0; i < SET_TOTAL_MODULES_ROWS; i++) gGroupRowItem[i] = nullptr;
 
   size_t modCount = 0;
   const SettingsModule** mods = getSettingsModules(modCount);
-  if (moduleIdx < 0 || (size_t)moduleIdx >= modCount) {
-    strncpy(gRows[1], "(invalid)", SET_ROW_LEN);
-    gRows[1][SET_ROW_LEN - 1] = '\0';
+  const SettingsModule* m = (moduleIdx >= 0 && (size_t)moduleIdx < modCount) ? mods[moduleIdx] : nullptr;
+  if (!m) {
+    snprintf(gRows[1], SET_ROW_LEN, "(invalid)");
     gRowPtrs[1] = gRows[1];
     return 2;
   }
 
-  const SettingsModule* m = mods[moduleIdx];
+  G2Paginator p = g2PaginatorPrepare(gBucketCount, SET_VISIBLE_ENTRY_ROWS, gGroupPage);
+  size_t row = 1;
+  for (size_t bi = p.startIdx; bi < p.endIdx && row < SET_TOTAL_MODULES_ROWS; bi++) {
+    const char* g = gBuckets[bi];
+    snprintf(gRows[row], SET_ROW_LEN, "[%s] (%u)",
+             settingsBucketLabel(g), (unsigned)settingsBucketCount(m, g));
+    gRowPtrs[row] = gRows[row];
+    gGroupRowItem[row] = g;
+    row++;
+  }
+  row = g2PaginatorWriteChrome(p, gGroupPage, row, SET_TOTAL_MODULES_ROWS,
+                                &gRows[0][0], SET_ROW_LEN, gRowPtrs);
+  gPagePrevRow = p.prevRow;
+  gPageNextRow = p.nextRow;
+  return row;
+}
+
+// Level 2b — entries of one module, filtered by the active group. Two passes
+// over the (possibly non-contiguous) filtered set so pagination is exact; the
+// row->entry map is recorded for tap dispatch.
+static size_t buildEntryRows(int moduleIdx, const char* group) {
+  writeBackRow(gModuleHasGroups ? "<- Groups" : "<- Settings");
+  for (size_t i = 0; i < SET_TOTAL_MODULES_ROWS; i++) gEntryRowItem[i] = -1;
+
+  size_t modCount = 0;
+  const SettingsModule** mods = getSettingsModules(modCount);
+  const SettingsModule* m = (moduleIdx >= 0 && (size_t)moduleIdx < modCount) ? mods[moduleIdx] : nullptr;
   if (!m || !m->entries || m->count == 0) {
     snprintf(gRows[1], SET_ROW_LEN, "(empty: %s)", m && m->name ? m->name : "?");
     gRowPtrs[1] = gRows[1];
     return 2;
   }
 
-  // Same paginator as Level 1, just over the module's entry array.
-  G2Paginator p = g2PaginatorPrepare(m->count, SET_VISIBLE_ENTRY_ROWS, gEntryPage);
-
-  size_t row = 1;
-  for (size_t ei = p.startIdx; ei < p.endIdx && row < SET_TOTAL_MODULES_ROWS; ei++) {
+  // Pass 1 — count matches (visible + in group).
+  size_t matchCount = 0;
+  for (size_t ei = 0; ei < m->count; ei++) {
     const SettingEntry& e = m->entries[ei];
+    if (!settingsEditorIsVisible(&e)) continue;
+    if (!settingsEntryInGroup(e, group)) continue;
+    matchCount++;
+  }
+
+  G2Paginator p = g2PaginatorPrepare(matchCount, SET_VISIBLE_ENTRY_ROWS, gEntryPage);
+
+  // Pass 2 — render the [startIdx, endIdx) slice of the filtered set.
+  size_t row = 1;
+  size_t mi = 0;
+  for (size_t ei = 0; ei < m->count && row < SET_TOTAL_MODULES_ROWS; ei++) {
+    const SettingEntry& e = m->entries[ei];
+    if (!settingsEditorIsVisible(&e)) continue;
+    if (!settingsEntryInGroup(e, group)) continue;
+    if (mi < p.startIdx) { mi++; continue; }
+    if (mi >= p.endIdx) break;
     char val[20];
     formatSettingValue(e, val, sizeof(val));
-    const char* key = e.jsonKey ? e.jsonKey : "?";
+    // Prefer the human label — debug entries all share jsonKey "enabled", so
+    // jsonKey alone would render every row identically.
+    const char* key = e.label ? e.label : (e.jsonKey ? e.jsonKey : "?");
     snprintf(gRows[row], SET_ROW_LEN, "%s=%s", key, val);
     gRowPtrs[row] = gRows[row];
+    gEntryRowItem[row] = (int)ei;
     row++;
+    mi++;
   }
 
   row = g2PaginatorWriteChrome(p, gEntryPage, row, SET_TOTAL_MODULES_ROWS,
                                 &gRows[0][0], SET_ROW_LEN, gRowPtrs);
-  // Reuse the same dispatcher hooks as Level 1 — the SET_LEVEL_ENTRIES
-  // case below detects prev/next via gPagePrevRow / gPageNextRow.
   gPagePrevRow = p.prevRow;
   gPageNextRow = p.nextRow;
   return row;
+}
+
+// Level 3 — enum pick-list for the entry being edited. "[X]" marks the option
+// matching the current value.
+static size_t buildPickRows(const SettingEntry* e) {
+  writeBackRow("<- Cancel");
+  for (size_t i = 0; i < SET_TOTAL_MODULES_ROWS; i++) gPickRowItem[i] = -1;
+  if (!e || !e->options) {
+    snprintf(gRows[1], SET_ROW_LEN, "(no options)");
+    gRowPtrs[1] = gRows[1];
+    return 2;
+  }
+
+  const int n = settingsEditorEnumCount(e->options);
+  const int curIdx = settingsEditorEnumIndexForCurrent(e);
+  G2Paginator p = g2PaginatorPrepare((size_t)n, SET_VISIBLE_ENTRY_ROWS, gPickPage);
+  size_t row = 1;
+  for (size_t oi = p.startIdx; oi < p.endIdx && row < SET_TOTAL_MODULES_ROWS; oi++) {
+    char lab[32];
+    if (!settingsEditorEnumAt(e->options, (int)oi, nullptr, 0, lab, sizeof(lab))) continue;
+    snprintf(gRows[row], SET_ROW_LEN, "%s %s", ((int)oi == curIdx) ? "[X]" : "[ ]", lab);
+    gRowPtrs[row] = gRows[row];
+    gPickRowItem[row] = (int)oi;
+    row++;
+  }
+  row = g2PaginatorWriteChrome(p, gPickPage, row, SET_TOTAL_MODULES_ROWS,
+                                &gRows[0][0], SET_ROW_LEN, gRowPtrs);
+  gPagePrevRow = p.prevRow;
+  gPageNextRow = p.nextRow;
+  return row;
+}
+
+// Format an entry's current value into an editable string for keyboard prefill.
+static void settingsFormatValueForEdit(const SettingEntry* e, char* out, size_t cap) {
+  if (!out || cap == 0) return;
+  out[0] = '\0';
+  switch (e->type) {
+    case SETTING_FLOAT: snprintf(out, cap, "%.3f", (double)*(float*)e->valuePtr); break;
+    case SETTING_U32:   snprintf(out, cap, "%lu", (unsigned long)*(uint32_t*)e->valuePtr); break;
+    case SETTING_INT:
+    case SETTING_U8:
+    case SETTING_U16:   snprintf(out, cap, "%d", settingsEditorCurrentValue(e)); break;
+    default:            break;  // STRING handled by the caller
+  }
+}
+
+// --- Render helpers. Each (a) bumps gNavGen so any in-flight commit's redraw
+// becomes stale once the display changes, and (b) re-asserts the hijack page,
+// since a preceding keyboard session leaves it at TEXT_VIEW and g2ShowListPage
+// never sets it. ---
+
+static void settingsShowModules() {
+  gNavGen++;
+  size_t n = buildModuleRows();
+  g2SetHijackPage(G2_HIJACK_PAGE_SETTINGS);
+  g2ShowListPage(gRowPtrs, n);
+}
+
+static void settingsRenderGroups() {
+  gNavGen++;
+  size_t n = buildGroupRows(gActiveModule);
+  g2SetHijackPage(G2_HIJACK_PAGE_SETTINGS);
+  g2ShowListPage(gRowPtrs, n);
+}
+
+static void settingsRenderEntries() {
+  gNavGen++;
+  size_t n = buildEntryRows(gActiveModule, gActiveGroup);
+  g2SetHijackPage(G2_HIJACK_PAGE_SETTINGS);
+  g2ShowListPage(gRowPtrs, n);
+}
+
+static void settingsRenderPick() {
+  gNavGen++;
+  size_t n = buildPickRows(gEditEntry);
+  g2SetHijackPage(G2_HIJACK_PAGE_SETTINGS);
+  g2ShowListPage(gRowPtrs, n);
+}
+
+// Flash a short message, then return to the entry list. Runs on whatever task
+// called it (cmd_exec completion for errors, g2_tap_disp for pre-flight
+// refusals / busy) — both tolerate the vTaskDelay.
+static void settingsShowBannerThenEntries(const char* msg) {
+  g2ShowText(msg);
+  vTaskDelay(pdMS_TO_TICKS(1300));
+  settingsRenderEntries();
+}
+
+// cmd_exec completion callback for a setting mutation. userData carries the
+// gNavGen captured at submit time.
+static void onSettingsCommitDone(bool ok, const char* result,
+                                 const G2CmdCookie& cookie, void* userData) {
+  (void)ok; (void)cookie;
+  // Only touch the lens if the user is still on the settings page.
+  if (g2GetHijackPage() != G2_HIJACK_PAGE_SETTINGS) return;
+  // Drop the redraw if the display changed since submit — the user navigated
+  // between sub-levels (all share the SETTINGS hijack page, so the page guard
+  // above can't catch it) or a newer render ran. The write already happened;
+  // only its stale UI refresh is discarded.
+  if ((uint32_t)(uintptr_t)userData != gNavGen) return;
+  // A pick-list commit is submitted while still at SET_LEVEL_PICK (so a tap in
+  // the in-flight window re-picks rather than falling through to the entries
+  // edit handler); land back on entries here once the write completes.
+  gLevel = SET_LEVEL_ENTRIES;
+  // The ok flag is unreliable (a handler "Error:" and even "Unknown command:"
+  // return ok=true); judge success by the positive "OK" stamp.
+  const bool success = (result && strncmp(result, "OK", 2) == 0);
+  if (success) {
+    settingsRenderEntries();  // value re-reads live from valuePtr
+  } else {
+    const char* msg = (result && result[0]) ? result : "Save failed";
+    if (strncmp(msg, "Error: ", 7) == 0) msg += 7;
+    settingsShowBannerThenEntries(msg);
+  }
+}
+
+// Build "<command> <value>" and submit through cmd_exec (auth + audit as the
+// paired user). The hijack page must already be SETTINGS before this is called
+// (the keyboard path re-asserts it first) so the completion guard passes.
+static void settingsCommit(const SettingEntry* e, const char* value) {
+  const char* cmdName = settingsEditorCommandName(e);
+  if (!cmdName || !cmdName[0]) { settingsShowBannerThenEntries("No command"); return; }
+  // Empty args mean "show current value" to the command handler — a no-op that
+  // stamps "OK" and would read as a successful save. Refuse it (covers an empty
+  // enum value token; the keyboard path also refuses empty input up front).
+  if (!value || !value[0]) { settingsShowBannerThenEntries("Empty - not saved"); return; }
+  char line[96];
+  snprintf(line, sizeof(line), "%s %s", cmdName, value);
+  G2CmdCookie cookie = { 0, 0, g2GetHijackPage(), 0 };
+  if (!g2SubmitHijackCommand(line, cookie, onSettingsCommitDone,
+                             (void*)(uintptr_t)gNavGen)) {
+    settingsShowBannerThenEntries("Busy - try again");
+  }
+}
+
+// Keyboard commit/cancel (run on g2_tap_disp). The keyboard teardown leaves the
+// hijack page at TEXT_VIEW, so both re-assert SETTINGS before doing anything.
+static void onSettingsKeyboardCommit(const char* text) {
+  g2SetHijackPage(G2_HIJACK_PAGE_SETTINGS);
+  gLevel = SET_LEVEL_ENTRIES;
+  if (!gEditEntry) { settingsRenderEntries(); return; }
+
+  char buf[40];
+  snprintf(buf, sizeof(buf), "%s", text ? text : "");
+  char* s = buf;
+  while (*s == ' ') s++;
+  size_t len = strlen(s);
+  while (len > 0 && s[len - 1] == ' ') s[--len] = '\0';
+  if (len == 0) {
+    // Empty args mean "show current value" to the command handler, so an empty
+    // commit is a silent no-op — refuse it (strings cannot be cleared here).
+    settingsShowBannerThenEntries("Empty - not saved");
+    return;
+  }
+  settingsCommit(gEditEntry, s);
+}
+
+static void onSettingsKeyboardCancel(void) {
+  g2SetHijackPage(G2_HIJACK_PAGE_SETTINGS);
+  gLevel = SET_LEVEL_ENTRIES;
+  settingsRenderEntries();
+}
+
+// Launch the character keyboard prefilled with the entry's current value.
+static void settingsLaunchKeyboard(const SettingEntry* e) {
+  char cur[40];
+  if (e->type == SETTING_STRING) {
+    const String& s = *((String*)e->valuePtr);
+    if (s.length() > 32) { settingsShowBannerThenEntries("Too long - edit on web"); return; }
+    if (s.indexOf('"') >= 0) { settingsShowBannerThenEntries("Has quote - edit on web"); return; }
+    snprintf(cur, sizeof(cur), "%s", s.c_str());
+  } else {
+    settingsFormatValueForEdit(e, cur, sizeof(cur));
+  }
+
+  TextEntryConfig cfg;
+  cfg.prompt   = e->label ? e->label : (e->jsonKey ? e->jsonKey : "value");
+  cfg.initial  = cur;
+  cfg.maxLen   = 32;
+  cfg.onCommit = onSettingsKeyboardCommit;
+  cfg.onCancel = onSettingsKeyboardCancel;
+  if (!g2BeginTextEntry(cfg)) {
+    settingsShowBannerThenEntries("Keyboard busy");
+  }
+}
+
+// Decide how to edit a tapped entry: refuse the non-editable kinds, flip a
+// boolean, open an enum pick-list, or launch the keyboard.
+static void settingsEditEntry(int moduleIdx, int entryIdx) {
+  size_t modCount = 0;
+  const SettingsModule** mods = getSettingsModules(modCount);
+  if (moduleIdx < 0 || (size_t)moduleIdx >= modCount) return;
+  const SettingsModule* m = mods[moduleIdx];
+  if (!m || entryIdx < 0 || (size_t)entryIdx >= m->count) return;
+  const SettingEntry& e = m->entries[entryIdx];
+
+  if (e.readOnly) { settingsShowBannerThenEntries("Read-only"); return; }
+  if (e.isSecret) { settingsShowBannerThenEntries("Secret - edit on web"); return; }
+  if (e.options && strncmp(e.options, "bitmask:", 8) == 0) {
+    settingsShowBannerThenEntries("Bitmask - edit on web");
+    return;
+  }
+  if (!settingsEditorHasCommand(&e)) { settingsShowBannerThenEntries("No command"); return; }
+
+  gEditEntry = &e;
+
+  if (e.type == SETTING_BOOL) {
+    const int cur = settingsEditorCurrentValue(&e);
+    settingsCommit(&e, cur ? "0" : "1");   // page already SETTINGS; stays on entries
+    return;
+  }
+  if (settingsEditorHasEnumOptions(&e)) {
+    gLevel = SET_LEVEL_PICK;
+    gPickPage = 0;
+    settingsRenderPick();
+    return;
+  }
+  settingsLaunchKeyboard(&e);
 }
 
 // -----------------------------------------------------------------------------
@@ -329,7 +697,7 @@ static size_t buildEntryRowsPretty(int moduleIdx) {
 #define JSON_PAGE_BUDGET   176   // < 180 proven-safe single-fragment body
 #define JSON_BODY_CAP      (JSON_MAX_PAGES * JSON_PAGE_BUDGET + 128)
 
-// Shared G2TextPager engine (see G2_Page_Common.h) — one flat PSRAM body buffer
+// Shared TextPager engine (see G2_Page_Common.h) — one flat PSRAM body buffer
 // + offset table, hard-wrapped so long JSON string values flow across lens
 // lines instead of being clipped at the page budget. Built once per drill-in,
 // cleared by the exit fn. gJsonModuleName is the per-page header title.
@@ -337,7 +705,7 @@ EXT_RAM_BSS_ATTR static char gJsonBody[JSON_BODY_CAP];            // wrapped bod
 static uint16_t              gJsonPageOff[JSON_MAX_PAGES + 1];     // page offsets
 EXT_RAM_BSS_ATTR static char gJsonPageBuf[JSON_PAGE_BUDGET + 128]; // render scratch
 static char     gJsonModuleName[24] = {0};
-static G2TextPager gJsonPager = {
+static TextPager gJsonPager = {
     gJsonBody, gJsonPageOff, JSON_MAX_PAGES, JSON_PAGE_BUDGET,
     /*pageCount=*/0, /*curPage=*/0, /*truncated=*/false };
 
@@ -393,7 +761,7 @@ static bool settingsRenderJsonPage() {
 // Page navigation. NEXT (lens tap / ring scroll-down) advances, PREV
 // (scroll-up) goes back; both wrap at the ends so the user can cycle.
 static void settingsJsonNav(G2TapKind kind) {
-  g2TextNavPage(gJsonPager, kind != G2_TAP_PAGE_PREV);
+  textNavPage(gJsonPager, kind != G2_TAP_PAGE_PREV);
   DEBUG_G2F("[G2] Settings JSON: %s → page %d/%d",
             kind == G2_TAP_PAGE_PREV ? "prev" : "next",
             gJsonPager.curPage + 1, gJsonPager.pageCount);
@@ -459,12 +827,12 @@ static bool showModuleJsonViaTextWidget(int moduleIdx) {
   // Wrap into the shared body buffer (soft-wraps long JSON values, marks
   // truncation if the section outgrows the displayable body), then page it.
   bool wrapTrunc = false;
-  size_t bodyLen = g2TextWrapInto(gJsonBody, sizeof(gJsonBody), s.c_str(),
+  size_t bodyLen = textWrapInto(gJsonBody, sizeof(gJsonBody), s.c_str(),
                                   G2_TEXT_DEFAULT_COLS, /*contIndent=*/0,
                                   /*stripCtrl=*/true, &wrapTrunc);
   gJsonPager.curPage   = 0;
   gJsonPager.truncated = wrapTrunc;
-  g2TextSplitPages(gJsonPager, bodyLen);
+  textSplitPages(gJsonPager, bodyLen);
   if (gJsonPager.pageCount == 0) {
     DEBUG_G2F("[G2] Settings JSON: split produced zero pages "
               "(module='%s', src=%u B)",
@@ -521,14 +889,19 @@ void g2ShowSettingsMenu() {
   // Entry from MAIN always lands at the module list. View persists
   // across hijack sessions intentionally — a user who prefers JSON
   // shouldn't have to re-pick it every time.
-  gLevel        = SET_LEVEL_MODULES;
-  gActiveModule = -1;
+  gLevel           = SET_LEVEL_MODULES;
+  gActiveModule    = -1;
+  gActiveGroup     = kGroupAll;
+  gModuleHasGroups = false;
+  gGroupPage       = 0;
+  gPickPage        = 0;
+  gEditEntry       = nullptr;
 
   size_t n = buildModuleRows();
   if (g2ShowListPage(gRowPtrs, n)) {
     g2SetHijackPage(G2_HIJACK_PAGE_SETTINGS);
     DEBUG_G2F("[G2] Settings menu shown (modules, view=%s, rows=%u)",
-              gView == SET_VIEW_PRETTY ? "PRETTY" : "JSON", (unsigned)n);
+              gView == SET_VIEW_INTERACTIVE ? "INTERACTIVE" : "JSON", (unsigned)n);
   } else {
     DEBUG_G2F("[G2] Settings menu show FAILED");
   }
@@ -539,38 +912,33 @@ void g2SettingsHandleTap(uint32_t idx) {
 
     case SET_LEVEL_MODULES: {
       if (idx == 0) {
-        // <- Back: out of Settings, back to root hijack menu.
+        // <- Back: out of Settings, back to the Config launcher (menu reorg —
+        // Settings now lives under Config, not as a top-level hijack row).
         // Reset to page 0 so the next entry to Settings starts fresh.
         gModulePage = 0;
-        g2SetHijackPage(G2_HIJACK_PAGE_MAIN);
-        extern void g2RedrawHijackMainMenu();
-        g2RedrawHijackMainMenu();
+        extern void g2ShowConfigMenu();
+        g2ShowConfigMenu();
         return;
       }
       if (idx == 1) {
-        // View toggle. Flip and redraw the module list — current view
-        // is shown on the toggle row itself, so no other row changes.
-        gView = (gView == SET_VIEW_PRETTY) ? SET_VIEW_JSON : SET_VIEW_PRETTY;
+        // View toggle (INTERACTIVE <-> JSON). The current view name is on the
+        // toggle row itself, so no other row changes.
+        gView = (gView == SET_VIEW_INTERACTIVE) ? SET_VIEW_JSON : SET_VIEW_INTERACTIVE;
         DEBUG_G2F("[G2] Settings: view → %s",
-                  gView == SET_VIEW_PRETTY ? "PRETTY" : "JSON");
-        size_t n = buildModuleRows();
-        g2ShowListPage(gRowPtrs, n);
+                  gView == SET_VIEW_INTERACTIVE ? "INTERACTIVE" : "JSON");
+        settingsShowModules();
         return;
       }
       // Pagination: prev/next page rows. Detect via stored row indices
       // so we don't have to re-derive layout here.
       if ((int)idx == gPagePrevRow) {
         if (gModulePage > 0) gModulePage--;
-        DEBUG_G2F("[G2] Settings: prev page → %u", (unsigned)gModulePage);
-        size_t n = buildModuleRows();
-        g2ShowListPage(gRowPtrs, n);
+        settingsShowModules();
         return;
       }
       if ((int)idx == gPageNextRow) {
         gModulePage++;
-        DEBUG_G2F("[G2] Settings: next page → %u", (unsigned)gModulePage);
-        size_t n = buildModuleRows();
-        g2ShowListPage(gRowPtrs, n);
+        settingsShowModules();
         return;
       }
       const int modIdx = moduleIdxFromTap(idx);
@@ -579,76 +947,109 @@ void g2SettingsHandleTap(uint32_t idx) {
                   (unsigned)idx);
         return;
       }
-      gLevel        = SET_LEVEL_ENTRIES;
       gActiveModule = modIdx;
       gEntryPage    = 0;   // entering a new module always lands at page 0
 
       size_t modCount = 0;
       const SettingsModule** mods = getSettingsModules(modCount);
-      const char* modName = (mods[modIdx] && mods[modIdx]->name)
-                              ? mods[modIdx]->name : "?";
+      const SettingsModule* m = ((size_t)modIdx < modCount) ? mods[modIdx] : nullptr;
+      const char* modName = (m && m->name) ? m->name : "?";
 
-      bool ok = false;
       if (gView == SET_VIEW_JSON) {
-        // TEXT widget render — no list chrome, content flows.
-        ok = showModuleJsonViaTextWidget(gActiveModule);
-        if (ok) {
-          DEBUG_G2F("[G2] Settings: drilled into '%s' (JSON view, TEXT widget)",
-                    modName);
+        // Read-only JSON: TEXT widget, no group level.
+        gLevel           = SET_LEVEL_ENTRIES;
+        gModuleHasGroups = false;
+        gActiveGroup     = kGroupAll;
+        if (showModuleJsonViaTextWidget(gActiveModule)) {
+          DEBUG_G2F("[G2] Settings: drilled into '%s' (JSON view)", modName);
+        } else {
+          DEBUG_G2F("[G2] Settings: JSON drill into '%s' FAILED", modName);
+          gLevel        = SET_LEVEL_MODULES;
+          gActiveModule = -1;
         }
-      } else {
-        // PRETTY: key=value rows in a list widget.
-        size_t n = buildEntryRowsPretty(gActiveModule);
-        ok = g2ShowListPage(gRowPtrs, n);
-        if (ok) {
-          DEBUG_G2F("[G2] Settings: drilled into '%s' (PRETTY view, rows=%u)",
-                    modName, (unsigned)n);
-        }
+        return;
       }
 
-      if (!ok) {
-        DEBUG_G2F("[G2] Settings: drill into '%s' FAILED — reverting to module list",
-                  modName);
+      // INTERACTIVE: group level if the module has grouped settings, else flat.
+      settingsBuildBuckets(m);
+      gGroupPage = 0;
+      if (gModuleHasGroups) {
+        gLevel = SET_LEVEL_GROUPS;
+        settingsRenderGroups();
+        DEBUG_G2F("[G2] Settings: '%s' → groups (%u buckets)",
+                  modName, (unsigned)gBucketCount);
+      } else {
+        gActiveGroup = kGroupAll;
+        gLevel       = SET_LEVEL_ENTRIES;
+        settingsRenderEntries();
+        DEBUG_G2F("[G2] Settings: '%s' → entries (flat)", modName);
+      }
+      return;
+    }
+
+    case SET_LEVEL_GROUPS: {
+      if (idx == 0) {
         gLevel        = SET_LEVEL_MODULES;
         gActiveModule = -1;
+        settingsShowModules();
+        return;
+      }
+      if ((int)idx == gPagePrevRow) { if (gGroupPage > 0) gGroupPage--; settingsRenderGroups(); return; }
+      if ((int)idx == gPageNextRow) { gGroupPage++; settingsRenderGroups(); return; }
+      if (idx < SET_TOTAL_MODULES_ROWS && gGroupRowItem[idx]) {
+        gActiveGroup = gGroupRowItem[idx];
+        gLevel       = SET_LEVEL_ENTRIES;
+        gEntryPage   = 0;
+        settingsRenderEntries();
       }
       return;
     }
 
     case SET_LEVEL_ENTRIES: {
+      // JSON view drives its own TEXT-widget nav (exit/nav hooks), so list
+      // taps here only ever fire in the INTERACTIVE view.
+      if (gView == SET_VIEW_JSON) return;
+
       if (idx == 0) {
-        // <- Back: up one level to the module list.
-        gLevel        = SET_LEVEL_MODULES;
-        gActiveModule = -1;
-        gEntryPage    = 0;
-        size_t n = buildModuleRows();
-        if (g2ShowListPage(gRowPtrs, n)) {
-          DEBUG_G2F("[G2] Settings: back to module list (rows=%u)",
-                    (unsigned)n);
+        // Back: up to the group list (grouped module) or the module list.
+        if (gModuleHasGroups) {
+          gLevel = SET_LEVEL_GROUPS;
+          settingsRenderGroups();
+        } else {
+          gLevel        = SET_LEVEL_MODULES;
+          gActiveModule = -1;
+          gEntryPage    = 0;
+          settingsShowModules();
         }
         return;
       }
-      // Pagination — same row-index detection as Level 1. JSON view
-      // doesn't paginate (it uses a TEXT widget with chunked rows
-      // built by showModuleJsonViaTextWidget), so prev/next only fire
-      // in PRETTY view where buildEntryRowsPretty set these.
-      if ((int)idx == gPagePrevRow) {
-        if (gEntryPage > 0) gEntryPage--;
-        DEBUG_G2F("[G2] Settings: entries prev page → %u", (unsigned)gEntryPage);
-        size_t n = buildEntryRowsPretty(gActiveModule);
-        g2ShowListPage(gRowPtrs, n);
+      if ((int)idx == gPagePrevRow) { if (gEntryPage > 0) gEntryPage--; settingsRenderEntries(); return; }
+      if ((int)idx == gPageNextRow) { gEntryPage++; settingsRenderEntries(); return; }
+      if (idx < SET_TOTAL_MODULES_ROWS && gEntryRowItem[idx] >= 0) {
+        settingsEditEntry(gActiveModule, gEntryRowItem[idx]);
+      }
+      return;
+    }
+
+    case SET_LEVEL_PICK: {
+      if (idx == 0) {
+        // Cancel: back to the entry list, no change.
+        gLevel = SET_LEVEL_ENTRIES;
+        settingsRenderEntries();
         return;
       }
-      if ((int)idx == gPageNextRow) {
-        gEntryPage++;
-        DEBUG_G2F("[G2] Settings: entries next page → %u", (unsigned)gEntryPage);
-        size_t n = buildEntryRowsPretty(gActiveModule);
-        g2ShowListPage(gRowPtrs, n);
-        return;
+      if ((int)idx == gPagePrevRow) { if (gPickPage > 0) gPickPage--; settingsRenderPick(); return; }
+      if ((int)idx == gPageNextRow) { gPickPage++; settingsRenderPick(); return; }
+      if (idx < SET_TOTAL_MODULES_ROWS && gPickRowItem[idx] >= 0 && gEditEntry) {
+        char val[48];
+        if (settingsEditorEnumAt(gEditEntry->options, gPickRowItem[idx],
+                                 val, sizeof(val), nullptr, 0)) {
+          // Stay at SET_LEVEL_PICK; onSettingsCommitDone lands on entries once
+          // the write completes. This keeps a tap in the in-flight window routed
+          // as a re-pick rather than an edit against the stale entry row-map.
+          settingsCommit(gEditEntry, val);
+        }
       }
-      // Tapping a setting row is a no-op (read-only). Log for visibility.
-      DEBUG_G2F("[G2] Settings: tapped entry idx=%u in module %d (read-only)",
-                (unsigned)idx, gActiveModule);
       return;
     }
   }

@@ -24,7 +24,7 @@ esp_err_t handleGamesPage(httpd_req_t* req) {
 }
 
 void registerGamesHandlers(httpd_handle_t server) {
-  static httpd_uri_t gamesPage = { .uri = "/games", .method = HTTP_GET, .handler = handleGamesPage, .user_ctx = NULL };
+  static const httpd_uri_t gamesPage = { .uri = "/games", .method = HTTP_GET, .handler = handleGamesPage, .user_ctx = NULL };
   httpd_register_uri_handler(server, &gamesPage);
 }
 

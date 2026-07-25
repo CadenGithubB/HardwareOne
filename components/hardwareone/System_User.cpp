@@ -256,8 +256,31 @@ bool tgRequireAuth(AuthContext& ctx) {
 }
 #endif // ENABLE_HTTP_SERVER
 
+String getDeviceOwnerUsername() {
+  if (!filesystemReady) return String();
+  FsLockGuard _g("user.deviceOwner");
+  if (!VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth("user.deviceOwner"))) {
+    return String();
+  }
+  String json;
+  if (!readText(USERS_JSON_FILE, json)) return String();
+  int usersIdx = json.indexOf("\"users\"");
+  if (usersIdx < 0) return String();
+  int firstUKey = json.indexOf("\"username\"", usersIdx);
+  if (firstUKey < 0) return String();
+  int uq1 = json.indexOf('"', json.indexOf(':', firstUKey) + 1);
+  int uq2 = json.indexOf('"', uq1 + 1);
+  if (uq1 <= 0 || uq2 <= uq1) return String();
+  return json.substring(uq1 + 1, uq2);
+}
+
 // Determine if the given username is admin (any user with role == admin)
 bool isAdminUser(const String& who) {
+  // An empty identity is nobody — never admin. Checked before anything else so the
+  // invariant holds regardless of how the roster parses below: a users.json with no
+  // "username" key leaves firstUser empty, and "" == "" would otherwise satisfy the
+  // first-user fallback. resolveRole() and isGuestUser() already guard the same way.
+  if (who.length() == 0) return false;
 #if ENABLE_BONDED_MODE
   // A bonded master that presented a valid bond session token runs commands under
   // kBondAdminUser. Grant admin for the lifetime of the live bond session only.
@@ -280,13 +303,20 @@ bool isAdminUser(const String& who) {
     int usersIdx = json.indexOf("\"users\"");
     if (usersIdx < 0) return false;
     int firstUKey = json.indexOf("\"username\"", usersIdx);
+    // No account in the roster at all — nobody is admin. Bail rather than fall
+    // through with an empty firstUser, matching getDeviceOwnerUsername()'s
+    // discipline directly above.
+    if (firstUKey < 0) return false;
     String firstUser = "";
-    if (firstUKey >= 0) {
+    {
       int uq1 = json.indexOf('"', json.indexOf(':', firstUKey) + 1);
       int uq2 = json.indexOf('"', uq1 + 1);
       if (uq1 > 0 && uq2 > uq1) firstUser = json.substring(uq1 + 1, uq2);
     }
-    // Search for target user and role
+    if (firstUser.length() == 0) return false;  // unparseable owner — fail closed
+    // Search for target user and role. An explicit role always wins — never
+    // elevate via the first-user fallback when role is user/guest/etc.
+    bool firstUserHasRole = false;
     int pos = usersIdx;
     while (true) {
       int uKey = json.indexOf("\"username\"", pos);
@@ -298,17 +328,22 @@ bool isAdminUser(const String& who) {
       int rKey = json.indexOf("\"role\"", uKey);
       int nextU = json.indexOf("\"username\"", uKey + 1);
       if (rKey > 0 && (nextU < 0 || rKey < nextU)) {
+        if (uname == firstUser) firstUserHasRole = true;
         int rq1 = json.indexOf('"', json.indexOf(':', rKey) + 1);
         int rq2 = json.indexOf('"', rq1 + 1);
         String role = (rq1 > 0 && rq2 > rq1) ? json.substring(rq1 + 1, rq2) : String("");
-        // superadmin is a strict superset of admin — it satisfies every
-        // admin-gated command too.
-        if (uname == who && (role == "admin" || role == "superadmin")) return true;
+        if (uname == who) {
+          // superadmin is a strict superset of admin — it satisfies every
+          // admin-gated command too.
+          return (role == "admin" || role == "superadmin");
+        }
       }
       pos = uq2 + 1;
     }
-    // Fallback: first user without role is admin
-    return (who == firstUser);
+    // Fallback: first user with no role field is admin (pre-role backups).
+    // Matches isSuperAdminUser's "only elevate when the roster lacks the
+    // explicit tier" spirit — never override an explicit non-admin role.
+    return (who == firstUser && !firstUserHasRole);
   }
   return false;
 }
@@ -321,6 +356,9 @@ bool isAdminUser(const String& who) {
 // channel and is intentionally the *only* over-the-air path to super (a
 // regular mesh/pair account gets only its stored role, never elevated here).
 bool isSuperAdminUser(const String& who) {
+  // An empty identity is nobody — never super. See isAdminUser() for why this
+  // guards the first-user fallback below.
+  if (who.length() == 0) return false;
 #if ENABLE_BONDED_MODE
   if (who == kBondAdminUser) {
     extern bool isBondSessionTokenValid();
@@ -340,12 +378,14 @@ bool isSuperAdminUser(const String& who) {
   String firstUser = "";
   {
     int fk = json.indexOf("\"username\"", usersIdx);
-    if (fk >= 0) {
-      int q1 = json.indexOf('"', json.indexOf(':', fk) + 1);
-      int q2 = json.indexOf('"', q1 + 1);
-      if (q1 > 0 && q2 > q1) firstUser = json.substring(q1 + 1, q2);
-    }
+    // No account in the roster at all — nobody is super. Bail rather than fall
+    // through with an empty firstUser (see isAdminUser()).
+    if (fk < 0) return false;
+    int q1 = json.indexOf('"', json.indexOf(':', fk) + 1);
+    int q2 = json.indexOf('"', q1 + 1);
+    if (q1 > 0 && q2 > q1) firstUser = json.substring(q1 + 1, q2);
   }
+  if (firstUser.length() == 0) return false;  // unparseable owner — fail closed
   bool anyExplicitSuper = false;
   int pos = usersIdx;
   while (true) {
@@ -378,13 +418,18 @@ bool isSuperAdminUser(const String& who) {
   return (!anyExplicitSuper && who == firstUser);
 }
 
-// Privilege rank for target-protection comparisons: user=0, admin=1,
-// superadmin=2. A caller may not demote/ban/delete a target of higher rank,
-// nor grant a role above its own (enforced in the user-mutation handlers).
+// Privilege rank for a role *name*. See kRoleRank* in System_User.h.
+// A caller may not demote/ban/delete a target of higher rank, nor grant a
+// role above its own (enforced in the user-mutation handlers).
 int userRoleRank(const String& role) {
-  if (role == "superadmin") return 2;
-  if (role == "admin") return 1;
-  return 0;
+  if (role == "superadmin") return kRoleRankSuperAdmin;
+  if (role == "admin")      return kRoleRankAdmin;
+  if (role == "guest")      return kRoleRankGuest;
+  return kRoleRankUser;  // "user" and unrecognised names
+}
+
+bool isKnownUserRole(const String& role) {
+  return role == "guest" || role == "user" || role == "admin" || role == "superadmin";
 }
 
 // ============================================================================
@@ -468,11 +513,12 @@ void logoutTransport(CommandSource transport) {
       break;
 
     case SOURCE_G2_GLASSES:
-      // Clear pair-time stamp. The G2 stays paired (MAC + autoConnect
-      // preserved) but commands from the lens will be denied until
-      // someone runs `bleautoconnect g2-glasses on` from an authenticated
-      // CLI session to re-stamp pairedByUser.
+      // Clear the previous pair stamp, then immediately re-home to the
+      // device owner so MAC/autoConnect never leave the lens unowned.
       g2PairedUserClear();
+#if ENABLE_BLUETOOTH
+      bleStampPairedByIfBlank(BLE_PEER_G2_GLASSES);
+#endif
       break;
 
     case SOURCE_BLUETOOTH:
@@ -562,6 +608,10 @@ int revokeUserSessions(const String& username,
   // able to act as this user until re-stamp via `bleautoconnect g2-glasses on`.
   if (exceptTransport != SOURCE_G2_GLASSES && g2PairedUserMatches(username)) {
     g2PairedUserClear();
+#if ENABLE_BLUETOOTH
+    // Re-home to founder so ban/delete of the pairer doesn't leave stuck blank.
+    bleStampPairedByIfBlank(BLE_PEER_G2_GLASSES);
+#endif
     revoked++;
   }
 
@@ -733,8 +783,47 @@ bool userMustChangePassword(const String& username) {
   return settings["mustChangePassword"] == true;
 }
 
+bool isValidPublicUsername(const String& username, String* errorOut) {
+  String u = username;
+  u.trim();
+  if (u.length() == 0 || u.length() > kPublicUsernameMaxLen) {
+    if (errorOut) *errorOut = "Invalid username";
+    return false;
+  }
+  for (size_t i = 0; i < u.length(); ++i) {
+    const unsigned char c = (unsigned char)u[i];
+    const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                    (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
+    if (!ok) {
+      if (errorOut) *errorOut = "Invalid username";
+      return false;
+    }
+  }
+  // Reserved names — audit/dispatch sentinels. Case-insensitive.
+  static const char* kReserved[] = { "system", "AuthBypass", kBondAdminUser };
+  for (const char* r : kReserved) {
+    if (strcasecmp(u.c_str(), r) == 0) {
+      if (errorOut) *errorOut = "Invalid username";
+      return false;
+    }
+  }
+  return true;
+}
+
+bool isValidPublicPassword(const String& password, String* errorOut) {
+  if (password.length() < kPublicPasswordMinLen) {
+    if (errorOut) *errorOut = "Password must be at least 6 characters";
+    return false;
+  }
+  if (password.length() > kPublicPasswordMaxLen) {
+    if (errorOut) *errorOut = "Password is too long";
+    return false;
+  }
+  return true;
+}
+
 bool adminCreateUser(const String& username, const String& plainPassword, bool mustChangeOnLogin,
-                     const String& createdBy, String& errorOut) {
+                     const String& createdBy, String& errorOut, const String& role) {
   errorOut = "";
   if (!filesystemReady) {
     errorOut = "LittleFS not ready";
@@ -742,31 +831,10 @@ bool adminCreateUser(const String& username, const String& plainPassword, bool m
   }
   String u = username;
   u.trim();
-  if (u.length() == 0 || u.length() > 64) {
-    errorOut = "Invalid username";
+  if (!isValidPublicUsername(u, &errorOut)) {
     return false;
   }
-  for (size_t i = 0; i < u.length(); ++i) {
-    if (u[i] <= ' ') {
-      errorOut = "Username may not contain whitespace";
-      return false;
-    }
-  }
-  // Reserved names — used by the audit-log/dispatch layer as identity
-  // sentinels. Allowing a user to claim one would let their commands be
-  // mistaken for system or anonymous-local activity in the audit trail.
-  // Case-insensitive so "authbypass" / "AUTHBYPASS" don't sneak through.
-  {
-    static const char* kReserved[] = { "system", "AuthBypass", kBondAdminUser };
-    for (const char* r : kReserved) {
-      if (strcasecmp(u.c_str(), r) == 0) {
-        errorOut = String("Username \"") + r + "\" is reserved";
-        return false;
-      }
-    }
-  }
-  if (plainPassword.length() < 6) {
-    errorOut = "Password must be at least 6 characters";
+  if (!isValidPublicPassword(plainPassword, &errorOut)) {
     return false;
   }
 
@@ -829,7 +897,10 @@ bool adminCreateUser(const String& username, const String& plainPassword, bool m
     JsonObject newUser = users.add<JsonObject>();
     newUser["id"] = nextId;
     newUser["username"] = u;
-    newUser["role"] = "user";
+    // Unrecognised values collapse to "user" rather than being written through —
+    // an unknown string would otherwise look like a real tier in users.json
+    // while rating as kRoleRankUser everywhere else.
+    newUser["role"] = isKnownUserRole(role) ? role.c_str() : "user";
     newUser["createdAt"] = (const char*)nullptr;
     newUser["createdBy"] = createdBy.length() ? createdBy.c_str() : "admin";
     newUser["createdAtSource"] = "pending";  // createdAt resolved lazily via boot anchor
@@ -994,11 +1065,13 @@ static const char* setUserBanInternal(const String& username, bool ban, const St
       gLocalDisplayAuthed = false;
       gLocalDisplayUser   = String();
     }
-    // Clear G2 pair-time stamp if the deleted user paired the lens.
-    // Same recovery path as the admin force-logout: re-stamp via
-    // `bleautoconnect g2-glasses on` from another authenticated CLI.
+    // Clear G2 pair-time stamp if the banned user paired the lens, then
+    // re-home to the device owner (same heal as revokeUserSessions).
     if (g2PairedUserMatches(username)) {
       g2PairedUserClear();
+#if ENABLE_BLUETOOTH
+      bleStampPairedByIfBlank(BLE_PEER_G2_GLASSES);
+#endif
     }
     // Revoke Bluetooth sessions for this user
     (void)bleRevokeUserSessions(username);
@@ -1155,6 +1228,22 @@ bool getUserRole(const String& username, String& outRole) {
   }
 
   return false;
+}
+
+// Effective privilege rank for a username. Bond/owner fallbacks live in
+// isSuperAdminUser/isAdminUser — use those first so a restored-backup owner
+// rates the same whether you ask about the caller or the target. Guest is
+// only reachable when those predicates are false and users.json says so.
+int userAccountRank(const String& username) {
+  if (isSuperAdminUser(username)) return kRoleRankSuperAdmin;
+  if (isAdminUser(username))      return kRoleRankAdmin;
+  String role;
+  if (getUserRole(username, role) && role == "guest") return kRoleRankGuest;
+  return kRoleRankUser;
+}
+
+bool isGuestUser(const String& who) {
+  return who.length() > 0 && userAccountRank(who) == kRoleRankGuest;
 }
 
 // findSessionIndexBySID moved to web_server.cpp
@@ -1458,35 +1547,34 @@ bool denyPendingUserInternal(const String& username, String& errorOut) {
 //       (a regular admin cannot demote/ban/delete a super-admin);
 //   (2) a caller may not grant a role above its own rank
 //       (only a super-admin can create or raise another super-admin).
-// newRoleRank is the rank being granted, or -1 for delete/ban (no grant).
+// newRoleRank is the rank being granted, or kRoleRankNoGrant for delete/ban.
 // Caller identity is the per-task exec identity (currentExecUser()); a live
 // bond session resolves to kBondAdminUser which isSuperAdminUser() rates super.
-// Both caller AND target rank come from isSuperAdminUser()/isAdminUser() (NOT
-// getUserRole) so the owner-fallback and any future rank logic apply uniformly
-// — otherwise a restored-backup owner reads as super for the caller but only
-// admin for the target. The founder (id==1) also has hard protection inside the
-// mutators as a second layer.
+// Both caller AND target rank come from userAccountRank() so the owner/bond
+// fallbacks and guest detection apply uniformly — otherwise a restored-backup
+// owner can read as super for the caller but only admin for the target. The
+// founder (id==1) also has hard protection inside the mutators as a second layer.
 static bool userMutationAllowed(const String& targetUser, int newRoleRank, String& errOut) {
   const String caller = currentExecUser();
-  const int callerRank = isSuperAdminUser(caller)     ? 2 : (isAdminUser(caller)     ? 1 : 0);
-  const int targetRank = isSuperAdminUser(targetUser) ? 2 : (isAdminUser(targetUser) ? 1 : 0);
+  const int callerRank = userAccountRank(caller);
+  const int targetRank = userAccountRank(targetUser);
   if (targetRank > callerRank) {
     errOut = "Cannot modify a higher-privileged account";
     return false;
   }
-  if (newRoleRank > callerRank) {
+  if (newRoleRank != kRoleRankNoGrant && newRoleRank > callerRank) {
     errOut = "Cannot grant a role above your own";
     return false;
   }
   return true;
 }
 
-// Set a user's role to an arbitrary value ("user"/"admin"/"superadmin") in
-// users.json. Pure data mutation: founder (id==1) protection, role replace or
-// insert, and an identity-generation bump. Direction-specific behavior (which
-// event to post, session revocation on downgrade, user-facing messaging) lives
-// in the promote/demote handlers. Authorization is the caller's responsibility
-// via userMutationAllowed() BEFORE invoking this.
+// Set a user's role to an arbitrary value ("guest"/"user"/"admin"/"superadmin")
+// in users.json. Pure data mutation: founder (id==1) protection, role replace
+// or insert, and an identity-generation bump. Direction-specific behavior
+// (which event to post, session revocation on downgrade, user-facing messaging)
+// lives in the promote/demote handlers. Authorization is the caller's
+// responsibility via userMutationAllowed() BEFORE invoking this.
 static bool setUserRoleInternal(const String& username, const char* newRole, String& errorOut) {
   DEBUG_USERSF("[users] setrole internal username=%s role=%s", username.c_str(), newRole);
   if (username.length() == 0) {
@@ -1789,12 +1877,14 @@ const char* cmd_user_promote(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!filesystemReady) return "Error: LittleFS not ready";
   CommandArgs a(argsInput);
-  if (!a.hasMinArgs(1)) return "Error: invalid arguments — Usage: userpromote <username> [admin|superadmin]";
+  if (!a.hasMinArgs(1)) return "Error: invalid arguments — Usage: userpromote <username> [user|admin|superadmin]";
   String username = a.arg(0);
   String role = a.has(1) ? a.arg(1) : String("admin");
   role.toLowerCase();
-  if (role != "admin" && role != "superadmin")
-    return "Error: role must be 'admin' or 'superadmin'";
+  // Promote steps up: guest→user, user→admin, admin→superadmin. "guest" is
+  // demote-only (use userdemote).
+  if (role != "user" && role != "admin" && role != "superadmin")
+    return "Error: role must be 'user', 'admin', or 'superadmin'";
   DEBUG_USERSF("[users] CLI promote username=%s role=%s", username.c_str(), role.c_str());
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   char* buf = getDebugBuffer();
@@ -1821,12 +1911,12 @@ const char* cmd_user_demote(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!filesystemReady) return "Error: LittleFS not ready";
   CommandArgs a(argsInput);
-  if (!a.hasMinArgs(1)) return "Error: invalid arguments — Usage: userdemote <username> [admin|user]";
+  if (!a.hasMinArgs(1)) return "Error: invalid arguments — Usage: userdemote <username> [admin|user|guest]";
   String username = a.arg(0);
   String role = a.has(1) ? a.arg(1) : String("user");
   role.toLowerCase();
-  if (role != "admin" && role != "user")
-    return "Error: role must be 'admin' or 'user'";
+  if (role != "admin" && role != "user" && role != "guest")
+    return "Error: role must be 'admin', 'user', or 'guest'";
   DEBUG_USERSF("[users] CLI demote username=%s role=%s", username.c_str(), role.c_str());
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   char* buf = getDebugBuffer();
@@ -1858,7 +1948,7 @@ const char* cmd_user_demote(const String& argsInput) {
 static String s_pendingUserDeleteName;
 
 static const char* user_delete_confirmed(void* /*userData*/) {
-  static char respBuf[160];
+  EXT_RAM_BSS_ATTR static char respBuf[160];
   if (!filesystemReady) return "Error: LittleFS not ready";
 
   DEBUG_USERSF("[users] CLI delete (confirmed) username=%s",
@@ -1867,7 +1957,7 @@ static const char* user_delete_confirmed(void* /*userData*/) {
   // the target could have been elevated between the prompt and the 'yes'.
   {
     String merr;
-    if (!userMutationAllowed(s_pendingUserDeleteName, -1, merr)) {
+    if (!userMutationAllowed(s_pendingUserDeleteName, kRoleRankNoGrant, merr)) {
       snprintf(respBuf, sizeof(respBuf), "Error: %s", merr.c_str());
       return respBuf;
     }
@@ -1883,7 +1973,7 @@ static const char* user_delete_confirmed(void* /*userData*/) {
 }
 
 static const char* user_delete_cancelled(void* /*userData*/) {
-  static char respBuf[120];
+  EXT_RAM_BSS_ATTR static char respBuf[120];
   snprintf(respBuf, sizeof(respBuf), "Cancelled. User '%s' not deleted.",
            s_pendingUserDeleteName.c_str());
   return respBuf;
@@ -1894,15 +1984,49 @@ const char* cmd_user_delete(const String& argsInput) {
   if (!filesystemReady) return "Error: LittleFS not ready";
   String username = argsInput;
   username.trim();
-  if (username.length() == 0) return "Error: invalid arguments — Usage: user delete <username>";
-  DEBUG_USERSF("[users] CLI delete (prompt) username=%s", username.c_str());
+  if (username.length() == 0) return "Error: invalid arguments — Usage: user delete <username> [confirm]";
+
+  // One-shot bypass token: `userdelete <username> confirm` (or yes/--yes/-y)
+  // deletes immediately, skipping the interactive prompt. This is the form the
+  // tap UIs (OLED/G2 user manager) dispatch AFTER their own on-screen confirm —
+  // the interactive cliRequestConfirm mode can't be answered from a tap.
+  // Mirrors filedelete's one-shot token. The trailing token is the delimiter,
+  // so it's stripped before the name is resolved.
+  bool oneShot = false;
+  {
+    int sp = username.lastIndexOf(' ');
+    if (sp > 0) {
+      String tail = username.substring(sp + 1);
+      tail.trim();
+      if (tail.equalsIgnoreCase("confirm") || tail.equalsIgnoreCase("yes") ||
+          tail == "--yes" || tail == "-y") {
+        oneShot = true;
+        username = username.substring(0, sp);
+        username.trim();
+      }
+    }
+  }
+  if (username.length() == 0) return "Error: invalid arguments — Usage: user delete <username> [confirm]";
+
+  // The tap UIs (OLED/G2 user manager) wrap the name in quotes so names with
+  // spaces survive dispatch: `userdelete "b" confirm`. We hand-parse here
+  // instead of routing through CommandArgs, so strip the surrounding quotes
+  // ourselves — otherwise the literal quote chars leak into the name and no
+  // stored user ever matches (useradd de-quotes via CommandArgs, so it stored
+  // `b`, not `"b"`).
+  if (username.length() >= 2 && username[0] == '"' && username[username.length() - 1] == '"') {
+    username = username.substring(1, username.length() - 1);
+    username.trim();
+    if (username.length() == 0) return "Error: invalid arguments — Usage: user delete <username> [confirm]";
+  }
+  DEBUG_USERSF("[users] CLI delete (%s) username=%s", oneShot ? "one-shot" : "prompt", username.c_str());
 
   // Rank check up front (fail fast, before prompting): a regular admin cannot
   // delete a super-admin. Founder (id==1) is additionally protected in the
   // deleter itself.
   {
     String merr;
-    if (!userMutationAllowed(username, -1, merr)) {
+    if (!userMutationAllowed(username, kRoleRankNoGrant, merr)) {
       if (!ensureDebugBuffer()) return "Error: denied";
       snprintf(getDebugBuffer(), 1024, "Error: %s", merr.c_str());
       return getDebugBuffer();
@@ -1914,6 +2038,11 @@ const char* cmd_user_delete(const String& argsInput) {
   // it has internal permission logic. (Compare to filedelete which uses
   // VFS::removeGuarded(path, ctx).)
   s_pendingUserDeleteName = username;
+
+  // One-shot: run the confirmed path now (it re-checks rank + deletes).
+  if (oneShot) {
+    return user_delete_confirmed(nullptr);
+  }
 
   String prompt = "Confirm delete of user '" + username +
                   "'? All sessions for this user will be revoked.";
@@ -2036,7 +2165,7 @@ const char* cmd_user_resetpassword(const String& argsInput) {
     if (getUserIdByUsername(username, targetId) && targetId == 1)
       return "Error: the owner account manages its own password (use 'changepassword')";
     String merr;
-    if (!userMutationAllowed(username, -1, merr)) {
+    if (!userMutationAllowed(username, kRoleRankNoGrant, merr)) {
       if (!ensureDebugBuffer()) return "Error: denied";
       snprintf(getDebugBuffer(), 1024, "Error: %s", merr.c_str());
       return getDebugBuffer();
@@ -2067,22 +2196,57 @@ const char* cmd_user_resetpassword(const String& argsInput) {
   return getDebugBuffer();
 }
 
-// Create user immediately (admin). Args: "<username> <password> [0|1]" — optional trailing 1 = must change password on next login.
+// Create user immediately (admin).
+// Args: "<username> <password> [0|1] [guest|user|admin|superadmin]"
+// The two optional tokens are order-independent: a bare 0/1 is the
+// must-change-password flag, a role name is the role. They can't be confused
+// with each other (no role is named "0"), so `useradd bob secret admin` does
+// what it looks like instead of silently creating a plain user — which is what
+// a strictly-positional third argument would have done.
 const char* cmd_user_add(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!filesystemReady) return "Error: LittleFS not ready";
 
   CommandArgs a(argsInput);
   if (!a.hasMinArgs(2)) {
-    return "Error: invalid arguments — Usage: user add <username> <password> [0|1]\n(optional last arg: 1 = require new password on next login)";
+    return "Error: invalid arguments — Usage: useradd <username> <password> [0|1] [guest|user|admin|superadmin]\n"
+           "  0|1: 1 = require a new password on next login\n"
+           "  role: defaults to user; you cannot grant a role above your own";
   }
 
   String username = a.arg(0);
   String rest = a.arg(1);
-  bool mustChange = a.argBool(2, false);
+
+  bool mustChange = false;
+  String role = "user";
+  for (int i = 2; i <= 3; i++) {
+    String t = a.arg(i);
+    if (t.length() == 0) continue;
+    t.toLowerCase();
+    if (t == "0" || t == "1")        mustChange = (t == "1");
+    else if (isKnownUserRole(t))     role = t;
+    else {
+      if (!ensureDebugBuffer()) return "Error: unrecognised argument";
+      snprintf(getDebugBuffer(), 1024,
+               "Error: unrecognised argument '%s' - expected 0|1 or guest|user|admin|superadmin",
+               t.c_str());
+      return getDebugBuffer();
+    }
+  }
 
   if (rest.length() < 6) {
     return "Error: Password must be at least 6 characters";
+  }
+
+  // Same gate promote/demote use: you cannot create an account ranked above
+  // yourself. Checked BEFORE the account exists, so a rejected request leaves
+  // nothing behind — the alternative (create-then-promote) would strand a
+  // half-made user at the wrong tier if the second step failed.
+  String rankErr;
+  if (!userMutationAllowed(username, userRoleRank(role), rankErr)) {
+    if (!ensureDebugBuffer()) return "Error: Cannot grant that role";
+    snprintf(getDebugBuffer(), 1024, "Error: %s", rankErr.c_str());
+    return getDebugBuffer();
   }
 
   String createdBy = currentAuthContext().user;
@@ -2091,14 +2255,14 @@ const char* cmd_user_add(const String& argsInput) {
   }
 
   String err;
-  if (!adminCreateUser(username, rest, mustChange, createdBy, err)) {
+  if (!adminCreateUser(username, rest, mustChange, createdBy, err, role)) {
     if (!ensureDebugBuffer()) return "Error: Failed to create user";
     snprintf(getDebugBuffer(), 1024, "Error: %s", err.c_str());
     return getDebugBuffer();
   }
 
   if (!ensureDebugBuffer()) return "User created";
-  snprintf(getDebugBuffer(), 1024, "Created user '%s'%s", username.c_str(),
+  snprintf(getDebugBuffer(), 1024, "Created user '%s' as %s%s", username.c_str(), role.c_str(),
            mustChange ? " (must change password on next login)" : "");
   return getDebugBuffer();
 }
@@ -2425,7 +2589,7 @@ const char* cmd_ban(const String& argsInput) {
   }
 
   if (banIp(ip.c_str(), reason.length() ? reason.c_str() : nullptr)) {
-    static char buf[140];
+    EXT_RAM_BSS_ATTR static char buf[140];
     if (reason.length()) snprintf(buf, sizeof(buf), "Banned %s — %s", ip.c_str(), reason.c_str());
     else                 snprintf(buf, sizeof(buf), "Banned %s", ip.c_str());
     return buf;
@@ -2440,7 +2604,7 @@ const char* cmd_unban(const String& argsInput) {
   if (ip.length() == 0) return "Error: invalid arguments — Usage: unban <ip>";
 
   if (unbanIp(ip.c_str())) {
-    static char buf[80];
+    EXT_RAM_BSS_ATTR static char buf[80];
     snprintf(buf, sizeof(buf), "Unbanned %s", ip.c_str());
     return buf;
   }
@@ -2466,8 +2630,8 @@ const char* cmd_banuser(const String& argsInput) {
   // protected in setUserBanInternal).
   {
     String merr;
-    if (!userMutationAllowed(username, -1, merr)) {
-      static char ebuf[160];
+    if (!userMutationAllowed(username, kRoleRankNoGrant, merr)) {
+      EXT_RAM_BSS_ATTR static char ebuf[160];
       snprintf(ebuf, sizeof(ebuf), "Error: %s", merr.c_str());
       return ebuf;
     }
@@ -2476,7 +2640,7 @@ const char* cmd_banuser(const String& argsInput) {
   const char* err = setUserBanInternal(username, true, reason);
   if (err) return err;
 
-  static char buf[160];
+  EXT_RAM_BSS_ATTR static char buf[160];
   if (reason.length()) snprintf(buf, sizeof(buf), "Banned user '%s' — %s", username.c_str(), reason.c_str());
   else                 snprintf(buf, sizeof(buf), "Banned user '%s'", username.c_str());
   return buf;
@@ -2491,7 +2655,7 @@ const char* cmd_unbanuser(const String& argsInput) {
   const char* err = setUserBanInternal(username, false, "");
   if (err) return err;
 
-  static char buf[80];
+  EXT_RAM_BSS_ATTR static char buf[80];
   snprintf(buf, sizeof(buf), "Unbanned user '%s'", username.c_str());
   return buf;
 }
@@ -2539,61 +2703,72 @@ const char* cmd_user_request(const String& argsInput) {
   if (!a.hasMinArgs(2)) return "Error: invalid arguments — Usage: user request <username> <password> [confirmPassword]";
 
   String username = a.arg(0);
+  username.trim();
   String password = a.arg(1);
   String confirm = a.arg(2);  // empty if not provided
   if (confirm.length() && confirm != password) return "Error: passwords do not match";
-  // Add to pending_users.json in JSON format
+
+  String verr;
+  if (!isValidPublicUsername(username, &verr)) return "Error: Invalid username";
+  if (!isValidPublicPassword(password, &verr)) {
+    return (password.length() < kPublicPasswordMinLen)
+             ? "Error: Password must be at least 6 characters"
+             : "Error: Password is too long";
+  }
+
   DEBUG_CMD_FLOWF("[users] Adding user to pending_users.json, filesystemReady=%d", filesystemReady ? 1 : 0);
 
-  String json = "[]";
+  PSRAM_JSON_DOC(doc);
   if (VFS::existsGuarded(PENDING_USERS_FILE, VFS::systemAuth("user.request"))) {
+    String json;
     if (!readText(PENDING_USERS_FILE, json)) {
       DEBUG_CMD_FLOWF("[users] ERROR: Failed to read existing /system/pending_users.json");
       return "Error: could not read pending list";
     }
+    if (json.length() >= 2 && json.startsWith("[")) {
+      if (deserializeJson(doc, json)) {
+        doc.clear();
+        doc.to<JsonArray>();
+      }
+    } else {
+      doc.to<JsonArray>();
+    }
+  } else {
+    doc.to<JsonArray>();
   }
 
-  // Parse existing JSON array or create new one
-  if (json.length() < 2 || !json.startsWith("[")) json = "[]";
-
-  // Create new user entry with hashed password
-  String hashedPassword = hashUserPassword(password);
-  char entryBuf[256];
-  snprintf(entryBuf, sizeof(entryBuf), "{\"username\":\"%s\",\"password\":\"%s\",\"timestamp\":%lu}",
-           username.c_str(), hashedPassword.c_str(), (unsigned long)millis());
-  String userEntry = entryBuf;
-
-  // Insert into array
-  if (json == "[]") {
-    json = "[" + userEntry + "]";
-  } else {
-    // Insert before closing bracket
-    int lastBracket = json.lastIndexOf(']');
-    if (lastBracket > 0) {
-      String insert = json.substring(1, lastBracket).length() > 0 ? "," + userEntry : userEntry;
-      json = json.substring(0, lastBracket) + insert + "]";
+  JsonArray arr = doc.as<JsonArray>();
+  if (!arr) {
+    doc.clear();
+    arr = doc.to<JsonArray>();
+  }
+  // Cap spam even if rate-limit is bypassed (CLI / other transports).
+  if (arr.size() >= 32) {
+    return "Error: Too many pending requests";
+  }
+  for (JsonObject pu : arr) {
+    const char* existing = pu["username"] | "";
+    if (existing[0] && strcasecmp(existing, username.c_str()) == 0) {
+      return "Error: Username already pending approval";
     }
   }
 
-  // Attempt atomic write with debug details
-  DEBUG_USERSF("[users] Attempting to write /system/pending_users.json (%d bytes)", (int)json.length());
-  bool okWrite = writeTextAtomic(PENDING_USERS_FILE, json);
-  if (!okWrite) {
+  JsonObject entry = arr.add<JsonObject>();
+  entry["username"] = username;
+  entry["password"] = hashUserPassword(password);
+  entry["timestamp"] = (unsigned long)millis();
+
+  String outJson;
+  serializeJson(doc, outJson);
+  DEBUG_USERSF("[users] Attempting to write /system/pending_users.json (%d bytes)", (int)outJson.length());
+  if (!writeTextAtomic(PENDING_USERS_FILE, outJson)) {
     ERROR_STORAGEF("writeText failed when writing pending_users.json");
     broadcastOutput("[users] ERROR: writeText failed for /system/pending_users.json");
     return "Error: could not write pending list";
   }
-  size_t fsz = 0;
-  File dbgFile = VFS::openGuarded(PENDING_USERS_FILE, "r", VFS::systemAuth("user.request"));
-  if (dbgFile) {
-    fsz = dbgFile.size();
-    dbgFile.close();
-  }
-  DEBUG_USERSF("[users] writeText success; file size=%d bytes", (int)fsz);
 
   DEBUG_CMD_FLOWF("[users] CLI request username=%s", username.c_str());
   BROADCAST_PRINTF("[register] New user request: %s", username.c_str());
-  // Without an event, requests sit invisible until an admin runs pendinglist.
   systemEventPost(SYSEVT_USER_REQUEST, username.c_str());
 
   if (!ensureDebugBuffer()) return "Request submitted (buffer unavailable)";
@@ -3212,13 +3387,17 @@ const CommandEntry userSystemCommands[] = {
   // User management commands
   { "userapprove", "Approve pending request: <username>", true, cmd_user_approve, "Usage: userapprove <username>" },
   { "userdeny", "Deny pending request: <username>", true, cmd_user_deny, "Usage: userdeny <username>" },
-  { "userpromote", "Promote a user: <username> [admin|superadmin]", true, cmd_user_promote, "Usage: userpromote <username> [admin|superadmin]  (default admin; granting superadmin requires a super-admin caller)" },
-  { "userdemote", "Lower a user's role: <username> [admin|user]", true, cmd_user_demote, "Usage: userdemote <username> [admin|user]  (default user; demoting a super-admin requires a super-admin caller)" },
+  { "userpromote", "Promote a user: <username> [user|admin|superadmin]", true, cmd_user_promote, "Usage: userpromote <username> [user|admin|superadmin]  (default admin; granting superadmin requires a super-admin caller)" },
+  { "userdemote", "Lower a user's role: <username> [admin|user|guest]", true, cmd_user_demote, "Usage: userdemote <username> [admin|user|guest]  (default user; demoting a super-admin requires a super-admin caller)" },
   { "userdelete", "Delete user: <username>", true, cmd_user_delete, "Usage: userdelete <username>" },
   { "userchangepassword", "Change own password: <currentPass> <newPass> <confirmPass>", false, cmd_user_changepassword, "Usage: userchangepassword <currentPassword> <newPassword> <confirmPassword>" },
   { "userresetpassword", "Reset user password: <username> <newPassword> [0|1]", true, cmd_user_resetpassword,
     "Usage: userresetpassword <username> <newPassword> [0|1]\nOptional: 1 = require password change on next login" },
-  { "useradd", "Create user: <username> <password> [0|1]", true, cmd_user_add, "Usage: useradd <username> <password> [0|1]\nOptional: 1 = require new password on next login, 0 = omit" },
+  { "useradd", "Create user: <username> <password> [0|1] [role]", true, cmd_user_add,
+    "Usage: useradd <username> <password> [0|1] [guest|user|admin|superadmin]\n"
+    "  0|1:  1 = require a new password on next login (default 0)\n"
+    "  role: defaults to user; you cannot grant a role above your own\n"
+    "  The two optional tokens may appear in either order" },
   { "userlist", "List all users. (add 'json' for JSON output)", true, cmd_user_list },
   { "userrequest", "Request account: <user> <pass> [confirm]", false, cmd_user_request, "Usage: userrequest <username> <password> [confirmPassword]" },
   { "usersync", "Sync a user to another device over ESP-NOW. (async; result only on the target device - check its userlist)", true, cmd_user_sync,

@@ -2,14 +2,26 @@
 // Bits 0-5 name the sinks; bit 6 is a modifier. Three masks share these
 // positions (same bit = same sink everywhere, no translation layers):
 //   msg->routing   (DebugMessage)    — which sinks this message targets
-//   gOutputFlags   (global)          — which lanes are currently open.
-//                    SERIAL/OLED/WEB/G2 are persisted lanes (outSerial etc.,
-//                    applied in applySettings); FILE and BLE are runtime
-//                    lanes (opened by `log start` / a BLE client connecting).
+//   gOutputFlags   (global)          — which lanes are currently open:
+//                    SERIAL is the one persisted lane (outSerial, applied in
+//                    applySettings); WEB tracks the HTTP server lifecycle
+//                    (raised in startHttpServer, cleared by httpstop/
+//                    closewifi); FILE follows `log start`/`log stop`; BLE
+//                    and G2 are per-session opt-in streams (outble/outg2).
+//                    OLED is never set here — see below.
 //   ctx.outputMask (CommandContext)  — which sinks a command's output
 //                    targets; passed through to routing in broadcastOutput.
-// A message reaches a sink only when BOTH masks have its bit:
+// Delivery: the drain requires BOTH masks for SERIAL, FILE, BLE and G2:
 //   (msg->routing & MSG_ROUTE_X) && (gOutputFlags & MSG_ROUTE_X)
+// Two sinks are deliberately routing-gated only (no gOutputFlags check):
+//   WEB  — the web CLI mirror is always populated while the buffer exists,
+//          so history is there whenever a browser attaches. The WEB bit in
+//          gOutputFlags only feeds the BROADCAST_PRINTF early-out below.
+//   OLED — the OLED console screen is its own opt-in (the user must open
+//          it), so command output is always routed there (broadcastOutput
+//          force-adds OLED|G2 to command routes).
+// Persisted web/display/g2 lane settings were removed pre-1.0 once an audit
+// showed delivery had never honored them.
 #define MSG_ROUTE_SERIAL  0x01
 #define MSG_ROUTE_WEB     0x02
 #define MSG_ROUTE_FILE    0x04
@@ -97,226 +109,14 @@ struct DebugFlagMask {
 #define DEBUG_BIT(n)          (((DebugFlagMask)1) << (n))
 
 // ============================================================================
-// Debug flag map — 256 bits, one 8-bit bank per family (16 for the fast
-// growers), each bank starting on a byte boundary so a printed hex mask
-// reads family-per-byte. Spare bits belong to the bank they sit in — add
-// new sub-flags there instead of appending at the end.
-//
-// Bit positions are internal-only: settings persist as per-flag booleans
-// and are rebuilt by name in System_Settings.cpp, so renumbering only
-// invalidates raw `log start flags=0x...` masks.
-//
-// Sub-flag convention: parent bit first, subs behind it. The parent is the
-// master switch; DEBUG_*F macros gate on parent-OR-sub.
+// Debug flags — generated from the X-macro table in System_DebugFlags.h.
+// That table is the single source of truth for every flag's bit, bank,
+// parent link, and writer-side tag: it emits the DEBUG_* mask constants,
+// the DbgBank/DbgFlagIdx index enums, the kDbg* parallel columns, and the
+// static_asserts that hold the map's invariants. It is a fragment of THIS
+// header — it needs DEBUG_BIT above and must never be included directly.
 // ============================================================================
-
-// ---- Word 0 (bits 0-63): core system --------------------------------------
-
-// Bits 0-15: core singles (bank full — new subsystems get their own bank)
-#define DEBUG_AUTH            DEBUG_BIT(0)
-// bit 1 free (was DEBUG_SECURITY — removed pre-1.0: never gated on anywhere)
-#define DEBUG_HTTP            DEBUG_BIT(2)   // Firmware's own request/handler logs
-#define DEBUG_HTTPS           DEBUG_BIT(3)   // ESP-IDF TLS/server tag verbosity (esp-tls-mbedtls,
-                                             // esp_https_server, httpd*) via applyHttpsLogLevels().
-                                             // OFF silences the benign handshake-reject/conn-reset
-                                             // flood browsers produce against a self-signed cert;
-                                             // ON surfaces full TLS handshake detail.
-#define DEBUG_SSE             DEBUG_BIT(4)
-#define DEBUG_CLI             DEBUG_BIT(5)
-#define DEBUG_CMD_FLOW        DEBUG_BIT(6)
-#define DEBUG_COMMAND_SYSTEM  DEBUG_BIT(7)   // Modular command registry operations
-#define DEBUG_USERS           DEBUG_BIT(8)
-#define DEBUG_SYSTEM          DEBUG_BIT(9)
-#define DEBUG_STORAGE         DEBUG_BIT(10)  // File operations
-#define DEBUG_LOGGER          DEBUG_BIT(11)  // Sensor logger internals
-#define DEBUG_PERFORMANCE     DEBUG_BIT(12)
-#define DEBUG_WIFI            DEBUG_BIT(13)
-#define DEBUG_NTP             DEBUG_BIT(14)  // NTP sync, setup, anchors, timestamp resolution
-#define DEBUG_DISPLAY         DEBUG_BIT(15)  // OLED init/probe/boot-animation/mode-transitions
-#define DEBUG_NOTIFICATIONS   DEBUG_BIT(16)  // Notification pipeline diagnostics: ring lag/skips,
-                                             // stale/cooldown drops, SSE toast-queue saturation
-                                             // (periodic [NOTIF] line + `notifstats` CLI)
-// Bits 17-23: spare (future core singles)
-
-// Bits 24-31: Memory. Mirrors the Performance group's Stack/Heap/Timing
-// split — isolates per-task heap noise from stack watermarks from
-// buffer-sizing logs.
-#define DEBUG_MEMORY          DEBUG_BIT(24)  // Parent
-#define DEBUG_MEMORY_HEAP     DEBUG_BIT(25)  // [HEAP] per-task free/min/largest, [HEAP_MONITOR] DRAM low watermarks
-#define DEBUG_MEMORY_STACK    DEBUG_BIT(26)  // [STACK] per-task watermark + peak reports
-#define DEBUG_MEMORY_BUFFERS  DEBUG_BIT(27)  // [JSON_RESP_BUF], [COOKIE_BUF] sizing diagnostics
-// Bits 28-31: spare (Memory)
-
-// Bits 32-47: ESP-NOW (double-width bank — the mesh roadmap will grow it)
-#define DEBUG_ESPNOW_CORE       DEBUG_BIT(32)
-#define DEBUG_ESPNOW_ROUTER     DEBUG_BIT(33)
-#define DEBUG_ESPNOW_MESH       DEBUG_BIT(34)
-#define DEBUG_ESPNOW_TOPO       DEBUG_BIT(35)
-#define DEBUG_ESPNOW_STREAM     DEBUG_BIT(36)
-// bit 37 free (was DEBUG_ESPNOW_ENCRYPTION — removed pre-1.0: no producer ever gated on it)
-#define DEBUG_ESPNOW_METADATA   DEBUG_BIT(38)  // Metadata exchange (REQ/RESP/PUSH/store)
-// Bits 39-47: spare (ESP-NOW)
-
-// Bits 48-55: MQTT
-#define DEBUG_MQTT            DEBUG_BIT(48)  // Parent
-#define DEBUG_MQTT_CONNECTION DEBUG_BIT(49)  // connect/disconnect, TLS config, broker errors, client init
-#define DEBUG_MQTT_PUBSUB     DEBUG_BIT(50)  // subscribe events, publish results, JSON buffer alloc, received messages
-#define DEBUG_MQTT_DISCOVERY  DEBUG_BIT(51)  // Home Assistant auto-discovery configs, base topic generation
-#define DEBUG_MQTT_COMMANDS   DEBUG_BIT(52)  // inbound MQTT command parsing, auth, response
-// Bits 53-55: spare (MQTT)
-
-// Bits 56-63: Automations
-#define DEBUG_AUTOMATIONS     DEBUG_BIT(56)  // Parent
-#define DEBUG_AUTO_EXEC       DEBUG_BIT(57)
-#define DEBUG_AUTO_CONDITION  DEBUG_BIT(58)
-#define DEBUG_AUTO_TIMING     DEBUG_BIT(59)
-#define DEBUG_AUTO_SCHEDULER  DEBUG_BIT(60)
-// Bits 61-63: spare (Automations)
-
-// ---- Word 1 (bits 64-127): connectivity & features -------------------------
-
-// Bits 64-71: Bluetooth
-#define DEBUG_BLUETOOTH       DEBUG_BIT(64)  // Parent
-#define DEBUG_BLUETOOTH_CORE  DEBUG_BIT(65)  // BLE core lifecycle (init/connect/disconnect)
-#define DEBUG_BLUETOOTH_GATT  DEBUG_BIT(66)  // BLE GATT operations (read/write/notify)
-#define DEBUG_BLUETOOTH_DATA  DEBUG_BIT(67)  // BLE command/data transfer
-// Bits 68-71: spare (Bluetooth)
-
-// Bits 72-87: G2 smart glasses (double-width bank — fastest-growing family).
-// All gated through DEBUG_G2_*F macros so the parent toggle still works
-// as a master switch — sub-flags refine *which* G2 noise gets through.
-#define DEBUG_G2              DEBUG_BIT(72)  // Parent (BLE link to glasses)
-#define DEBUG_G2_LIFECYCLE    DEBUG_BIT(73)  // Scan, BLE connect/disconnect, MTU, service enumeration
-#define DEBUG_G2_PROTOCOL     DEBUG_BIT(74)  // Envelope TX/RX, CRC, fragmentation, parse errors
-#define DEBUG_G2_EVENTS       DEBUG_BIT(75)  // DevEvents, ListEvents, SysEvents, gestures, taps
-#define DEBUG_G2_PAGES        DEBUG_BIT(76)  // Page-swap worker, hijack, CREATE-list/text, lens state
-#define DEBUG_G2_HEARTBEAT    DEBUG_BIT(77)  // Heartbeat TX + HeartbeatAck (every ~5s; loud)
-#define DEBUG_G2_DUMP         DEBUG_BIT(78)  // [G2-DUMP] diagnostic ring buffer dumps on errors
-// Bits 79-87: spare (G2)
-
-// Bits 88-95: ESP-SR speech recognition. DEBUG_SR alone matches the legacy
-// gSrDebugLevel "level 1" (lifecycle + wake + commands); the sub-flags add
-// selective verbosity that previously required raising the global level
-// (which dragged in unrelated noise).
-#define DEBUG_SR              DEBUG_BIT(88)  // Parent: any SR debug
-#define DEBUG_SR_WAKE         DEBUG_BIT(89)  // Wake word detection events
-#define DEBUG_SR_COMMAND      DEBUG_BIT(90)  // Command recognition + matching
-#define DEBUG_SR_AFE          DEBUG_BIT(91)  // AFE/audio chain (VAD, noise, gain)
-#define DEBUG_SR_LIFECYCLE    DEBUG_BIT(92)  // init / start / stop verbose
-#define DEBUG_SR_TUNING       DEBUG_BIT(93)  // Auto-tune + confidence threshold
-// Bits 94-95: spare (SR)
-
-// Bits 96-103: On-device LLM (llama2.c / System_LLM)
-#define DEBUG_LLM             DEBUG_BIT(96)   // Parent (all LLM debug)
-#define DEBUG_LLM_LOAD        DEBUG_BIT(97)   // checkpoint load, header validation, weight mapping
-#define DEBUG_LLM_TOKENIZER   DEBUG_BIT(98)   // tokenizer file, BPE encode/decode
-#define DEBUG_LLM_FORWARD     DEBUG_BIT(99)   // transformer forward (per-step; use sparingly)
-#define DEBUG_LLM_GENERATE    DEBUG_BIT(100)  // generation loop, sampling, throughput
-#define DEBUG_LLM_MEMORY      DEBUG_BIT(101)  // PSRAM estimates, context cap, allocations
-// Bits 102-103: spare (LLM)
-
-// Bits 104-111: Maps
-#define DEBUG_MAPS            DEBUG_BIT(104)  // Parent
-#define DEBUG_MAPS_LOADING    DEBUG_BIT(105)  // Map file loading, tile directory parsing
-#define DEBUG_MAPS_RENDERING  DEBUG_BIT(106)  // Map render pipeline, feature drawing, viewport
-#define DEBUG_MAPS_PERF       DEBUG_BIT(107)  // Performance timing (render ms, tile I/O, cache, FPS)
-// Bits 108-111: spare (Maps)
-
-// Bits 112-119: Camera. All gated through DEBUG_CAMERA_*F macros with
-// `DEBUG_CAMERA | DEBUG_CAMERA_<sub>`, so the parent toggle still works as
-// a master switch and sub-flags refine *which* camera noise gets through.
-#define DEBUG_CAMERA           DEBUG_BIT(112)  // Parent
-#define DEBUG_CAMERA_LIFECYCLE DEBUG_BIT(113)  // initCamera(), stopCamera(), PWDN/RESET sequencing, GPIO state
-#define DEBUG_CAMERA_CAPTURE   DEBUG_BIT(114)  // captureFrame(), JPEG validation, frame buffer, recovery path
-#define DEBUG_CAMERA_SETTINGS  DEBUG_BIT(115)  // Runtime resolution / quality / sensor register changes
-#define DEBUG_CAMERA_VIDEO     DEBUG_BIT(116)  // Video recording start/finalize, frame writing, encoder state
-// Bits 117-119: spare (Camera)
-
-// Bits 120-127: I2C bus. Bus enable/disable + sensor auto-start happen at
-// runtime, not just boot, so each is independently silenceable.
-#define DEBUG_I2C             DEBUG_BIT(120)  // Parent: bus operations, transactions, clock changes, mutex
-#define DEBUG_I2C_BUS         DEBUG_BIT(121)  // [I2C] bus lifecycle, polling pause/resume, status bumps, raw transactions
-#define DEBUG_I2C_DISCOVERY   DEBUG_BIT(122)  // [Discovery] / [I2C_REGISTRY] / [I2C_SENSORS] — probing, registration, scans
-#define DEBUG_I2C_AUTOSTART   DEBUG_BIT(123)  // [AutoStart] sensor auto-start orchestration + per-sensor init results
-// Bits 124-127: spare (I2C)
-
-// ---- Words 2-3 (bits 128-255): sensors — one byte each ---------------------
-// Uniform per-sensor layout: parent, then LIFECYCLE / POLLING / VALUES,
-// then 4 spare bits. Macros gate on parent-OR-sub like every other family.
-//   LIFECYCLE — init, connect/disconnect, recovery, error retries
-//   POLLING   — poll/sample cadence, capture timing, FPS, frame events
-//   VALUES    — parsed readings, value-change events, data processing
-
-// Bits 128-135: GPS (PA1010D)
-#define DEBUG_GPS             DEBUG_BIT(128)
-#define DEBUG_GPS_LIFECYCLE   DEBUG_BIT(129)
-#define DEBUG_GPS_POLLING     DEBUG_BIT(130)
-#define DEBUG_GPS_VALUES      DEBUG_BIT(131)
-
-// Bits 136-143: RTC (DS3231)
-#define DEBUG_RTC             DEBUG_BIT(136)
-#define DEBUG_RTC_LIFECYCLE   DEBUG_BIT(137)
-#define DEBUG_RTC_POLLING     DEBUG_BIT(138)
-#define DEBUG_RTC_VALUES      DEBUG_BIT(139)
-
-// Bits 144-151: IMU (BNO055)
-#define DEBUG_IMU             DEBUG_BIT(144)
-#define DEBUG_IMU_LIFECYCLE   DEBUG_BIT(145)
-#define DEBUG_IMU_POLLING     DEBUG_BIT(146)  // frame timing, cache operations
-#define DEBUG_IMU_VALUES      DEBUG_BIT(147)  // data updates
-
-// Bits 152-159: Thermal (MLX90640)
-#define DEBUG_THERMAL           DEBUG_BIT(152)
-#define DEBUG_THERMAL_LIFECYCLE DEBUG_BIT(153)
-#define DEBUG_THERMAL_POLLING   DEBUG_BIT(154)  // frame timing, capture, FPS
-#define DEBUG_THERMAL_VALUES    DEBUG_BIT(155)  // interpolation, processing
-
-// Bits 160-167: ToF (VL53L4CX)
-#define DEBUG_TOF             DEBUG_BIT(160)
-#define DEBUG_TOF_LIFECYCLE   DEBUG_BIT(161)
-#define DEBUG_TOF_POLLING     DEBUG_BIT(162)  // frame capture, object detection
-#define DEBUG_TOF_VALUES      DEBUG_BIT(163)
-
-// Bits 168-175: Gamepad (Seesaw) — the shared input-abstraction layer
-#define DEBUG_INPUT           DEBUG_BIT(168)
-#define DEBUG_INPUT_LIFECYCLE DEBUG_BIT(169)
-#define DEBUG_INPUT_POLLING   DEBUG_BIT(170)  // frame timing, connection
-#define DEBUG_INPUT_VALUES    DEBUG_BIT(171)  // button press/release events
-
-// Bits 176-183: APDS (APDS9960)
-#define DEBUG_APDS            DEBUG_BIT(176)
-#define DEBUG_APDS_LIFECYCLE  DEBUG_BIT(177)
-#define DEBUG_APDS_POLLING    DEBUG_BIT(178)  // frame timing, connection
-#define DEBUG_APDS_VALUES     DEBUG_BIT(179)
-
-// Bits 184-191: Presence (STHS34PF80)
-#define DEBUG_PRESENCE           DEBUG_BIT(184)
-#define DEBUG_PRESENCE_LIFECYCLE DEBUG_BIT(185)
-#define DEBUG_PRESENCE_POLLING   DEBUG_BIT(186)
-#define DEBUG_PRESENCE_VALUES    DEBUG_BIT(187)
-
-// Bits 192-199: FM Radio (RDA5807)
-#define DEBUG_FMRADIO           DEBUG_BIT(192)  // Parent: operations + I2C debugging
-#define DEBUG_FMRADIO_LIFECYCLE DEBUG_BIT(193)
-#define DEBUG_FMRADIO_POLLING   DEBUG_BIT(194)
-#define DEBUG_FMRADIO_VALUES    DEBUG_BIT(195)
-
-// Bits 200-207: Microphone
-#define DEBUG_MICROPHONE      DEBUG_BIT(200)  // Parent
-#define DEBUG_MIC_LIFECYCLE   DEBUG_BIT(201)
-#define DEBUG_MIC_POLLING     DEBUG_BIT(202)
-#define DEBUG_MIC_VALUES      DEBUG_BIT(203)
-
-// Bits 208-215: ANO rotary encoder. Separate from DEBUG_INPUT* (which gates
-// the shared input-abstraction layer) and from the seesaw gamepad's flags —
-// these only affect the ANO driver's internal logs (init, polling, chord
-// state machine, axis toggle).
-#define DEBUG_ANO_ENCODER           DEBUG_BIT(208)
-#define DEBUG_ANO_ENCODER_LIFECYCLE DEBUG_BIT(209)
-#define DEBUG_ANO_ENCODER_POLLING   DEBUG_BIT(210)
-#define DEBUG_ANO_ENCODER_VALUES    DEBUG_BIT(211)
-
-// Bits 216-255: spare (five whole banks for future sensors/subsystems)
+#include "System_DebugFlags.h"
 
 // Debug sub-flags structure for granular control
 // The parent flags (DEBUG_AUTH, DEBUG_HTTP, etc.) are set when ANY child is enabled
@@ -452,14 +252,20 @@ extern DebugFlagMask gDebugFlags;  // 128-bit debug flags
 extern DebugSubFlags gDebugSubFlags;
 extern char* gDebugBuffer;
 // gDebugBuffer is the shared scratch space for cmd_* return strings.
-// 1 KB is plenty: any single return string is capped at DEBUG_MSG_SIZE
-// (256 B) by the message-queue pipeline anyway, so commands that need
-// long output stream line-by-line via broadcastOutput() and return a
-// short status string (see cmd_taskstats). The
-// existing snprintf(gDebugBuffer, 1024, ...) callsites all produce
-// status strings under 256 B in practice — the 1024 cap was already
-// a no-op upper bound.
-constexpr size_t GLOBAL_DEBUG_BUFFER_SIZE = 1024;
+// Two classes of user: (1) short status strings that stream long output
+// line-by-line via broadcastOutput() (capped at DEBUG_MSG_SIZE 256 B) and
+// return a one-liner — the historical case, for which 1 KB was already a
+// no-op upper bound; (2) commands that return a single machine-readable JSON
+// object DIRECTLY as the result (memreport/taskstats/perftop json, etc.),
+// which is NOT subject to the 256 B broadcast cap — it flows through the
+// command result path up to the transport's own limit (~4 KB over BLE).
+// Sized 4096 to hold a full task-table JSON snapshot in one object; this
+// matches the ~4 KB BLE reply ceiling, so a larger buffer wouldn't help over
+// BLE anyway. Only PSRAM (lazy ps_alloc), never a stack array — grep confirms
+// no `char x[GLOBAL_DEBUG_BUFFER_SIZE]` exists — so the bump costs nothing on
+// any task stack. Existing `snprintf(gDebugBuffer, 1024, ...)` callsites stay
+// correct (self-capping); only the JSON producers pass the full size.
+constexpr size_t GLOBAL_DEBUG_BUFFER_SIZE = 4096;
 extern QueueHandle_t gDebugOutputQueue;
 extern QueueHandle_t gDebugFreeQueue;
 
@@ -523,6 +329,24 @@ inline void updateParentDebugFlag(DebugFlagMask parentFlag, bool anyChildEnabled
   if (anyChildEnabled) setDebugFlag(parentFlag);
   else clearDebugFlag(parentFlag);
 }
+
+// Recompute ONE aggregated family's parent bit from its charter terms
+// (DBG_AGG_FAMILY_LIST / DBG_SUBBOOL_LIST / the settingsField column — see
+// System_Debug.cpp). Structural no-op for every flag outside the agg list:
+// explicit master switches (G2, MQTT, sensors, ...) are never rederived.
+// CLI handlers must call this single-family form only — a cross-family sweep
+// would clobber temp-set parent bits in unrelated families. Family PARENT
+// handlers must not call it either (SR arrangement): the terms exclude the
+// runtime parent bit, so a recompute would immediately undo a temp parent
+// toggle. Sub handlers recompute; parent handlers own their bit outright.
+void dbgRecomputeParent(DbgFlagIdx root);
+
+// Recompute every aggregated family. applySettings()-only: the full sweep is
+// safe there and only there because the mask was just rebuilt from gSettings,
+// so no temp-set bits exist to clobber — and bit==setting for every mapped
+// row, which is what reduces the SETTINGS_BITS runtime terms (BT/SR child
+// bits) to the settings-only expressions the boot path historically used.
+void dbgRecomputeAllParents();
 // Direct global reads — same rationale as getDebugFlags()/getLogLevel() above.
 // The DebugManager getters are pure pass-throughs (return gDebugOutputQueue etc.),
 // so routing through the singleton only adds an un-inlinable cross-TU hop. This
@@ -594,9 +418,11 @@ inline uint8_t getLogLevel() { return gDebugVerbose ? LOG_LEVEL_DEBUG : gLogLeve
 // CRITICAL: Do NOT call from sensor tasks when disabled - causes crashes
 // OPTIMIZED: Allocates DebugMessage on heap instead of stack (saves 256 bytes per call)
 // PERFORMANCE: Lazy evaluation - check flag BEFORE evaluating expensive arguments
+// DEBUG_ALWAYS anywhere in the mask emits unconditionally; the producer's own
+// flag rides along so the message still tags as its real subsystem.
 #define DEBUGF_QUEUE(flag, fmt, ...) \
   do { \
-    if ((flag) == 0xFFFFFFFF || isDebugFlagSet(flag)) { \
+    if (((flag) & DEBUG_ALWAYS) != (DebugFlagMask)0 || isDebugFlagSet(flag)) { \
       debugQueuePrintf(flag, fmt, ##__VA_ARGS__); \
     } \
   } while (0)
@@ -742,59 +568,59 @@ inline uint8_t getLogLevel() { return gDebugVerbose ? LOG_LEVEL_DEBUG : gLogLeve
 // ============================================================================
 
 // ERROR macros - Always visible (cannot be disabled)
-#define ERROR_I2CF(fmt, ...) DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][I2C] " fmt, ##__VA_ARGS__)
-#define ERROR_ESPNOWF(fmt, ...) DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][ESP-NOW] " fmt, ##__VA_ARGS__)
-#define ERROR_AUTOMATIONF(fmt, ...) DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][AUTO] " fmt, ##__VA_ARGS__)
-#define ERROR_SESSIONF(fmt, ...) DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][SESSION] " fmt, ##__VA_ARGS__)
-#define ERROR_USERF(fmt, ...) DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][USER] " fmt, ##__VA_ARGS__)
-#define ERROR_LOGGINGF(fmt, ...) DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][LOG] " fmt, ##__VA_ARGS__)
-#define ERROR_WEBF(fmt, ...) DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][WEB] " fmt, ##__VA_ARGS__)
-#define ERROR_COMMANDF(fmt, ...) DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][CMD] " fmt, ##__VA_ARGS__)
-#define ERROR_SYSTEMF(fmt, ...) DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][SYS] " fmt, ##__VA_ARGS__)
-#define ERROR_STORAGEF(fmt, ...) DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][STORAGE] " fmt, ##__VA_ARGS__)
-#define ERROR_WIFIF(fmt, ...) DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][WIFI] " fmt, ##__VA_ARGS__)
-#define ERROR_MEMORYF(fmt, ...) DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][MEM] " fmt, ##__VA_ARGS__)
-#define ERROR_LLMF(fmt, ...) DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][LLM] " fmt, ##__VA_ARGS__)
-// Per-sensor / display ERROR macros — always visible (gate=0xFFFFFFFF).
+#define ERROR_I2CF(fmt, ...) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_I2C, "[ERROR][I2C] " fmt, ##__VA_ARGS__)
+#define ERROR_ESPNOWF(fmt, ...) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_ESPNOW_CORE, "[ERROR][ESP-NOW] " fmt, ##__VA_ARGS__)
+#define ERROR_AUTOMATIONF(fmt, ...) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_AUTOMATIONS, "[ERROR][AUTO] " fmt, ##__VA_ARGS__)
+#define ERROR_SESSIONF(fmt, ...) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_AUTH, "[ERROR][SESSION] " fmt, ##__VA_ARGS__)
+#define ERROR_USERF(fmt, ...) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_USERS, "[ERROR][USER] " fmt, ##__VA_ARGS__)
+#define ERROR_LOGGINGF(fmt, ...) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_LOGGER, "[ERROR][LOG] " fmt, ##__VA_ARGS__)
+#define ERROR_WEBF(fmt, ...) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_HTTP, "[ERROR][WEB] " fmt, ##__VA_ARGS__)
+#define ERROR_COMMANDF(fmt, ...) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_CLI, "[ERROR][CMD] " fmt, ##__VA_ARGS__)
+#define ERROR_SYSTEMF(fmt, ...) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_SYSTEM, "[ERROR][SYS] " fmt, ##__VA_ARGS__)
+#define ERROR_STORAGEF(fmt, ...) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_STORAGE, "[ERROR][STORAGE] " fmt, ##__VA_ARGS__)
+#define ERROR_WIFIF(fmt, ...) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_WIFI, "[ERROR][WIFI] " fmt, ##__VA_ARGS__)
+#define ERROR_MEMORYF(fmt, ...) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_MEMORY, "[ERROR][MEM] " fmt, ##__VA_ARGS__)
+#define ERROR_LLMF(fmt, ...) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_LLM, "[ERROR][LLM] " fmt, ##__VA_ARGS__)
+// Per-sensor / display ERROR macros — always visible (DEBUG_ALWAYS).
 // Added during DEBUG_SENSORS umbrella removal so error tags match their
 // actual subsystem instead of all reading "[ERROR][SENSORS]".
-#define ERROR_CAMERAF(fmt, ...)   DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][CAMERA] "   fmt, ##__VA_ARGS__)
-#define ERROR_THERMALF(fmt, ...)  DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][THERMAL] "  fmt, ##__VA_ARGS__)
-#define ERROR_TOFF(fmt, ...)      DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][TOF] "      fmt, ##__VA_ARGS__)
-#define ERROR_IMUF(fmt, ...)      DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][IMU] "      fmt, ##__VA_ARGS__)
-#define ERROR_INPUTF(fmt, ...)  DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][INPUT] "  fmt, ##__VA_ARGS__)
-#define ERROR_ANO_ENCODERF(fmt, ...)  DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][ANO] "  fmt, ##__VA_ARGS__)
-#define ERROR_APDSF(fmt, ...)     DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][APDS] "     fmt, ##__VA_ARGS__)
-#define ERROR_PRESENCEF(fmt, ...) DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][PRESENCE] " fmt, ##__VA_ARGS__)
-#define ERROR_GPSF(fmt, ...)      DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][GPS] "      fmt, ##__VA_ARGS__)
-#define ERROR_RTCF(fmt, ...)      DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][RTC] "      fmt, ##__VA_ARGS__)
-#define ERROR_FMRADIOF(fmt, ...)  DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][FMRADIO] "  fmt, ##__VA_ARGS__)
-#define ERROR_MAPSF(fmt, ...)     DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][MAPS] "     fmt, ##__VA_ARGS__)
-#define ERROR_MICF(fmt, ...)      DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][MIC] "      fmt, ##__VA_ARGS__)
-#define ERROR_DISPLAYF(fmt, ...)  DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][DISPLAY] "  fmt, ##__VA_ARGS__)
-#define ERROR_MQTTF(fmt, ...)     DEBUGF_QUEUE(0xFFFFFFFF, "[ERROR][MQTT] "     fmt, ##__VA_ARGS__)
+#define ERROR_CAMERAF(fmt, ...)       DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_CAMERA,       "[ERROR][CAMERA] "    fmt, ##__VA_ARGS__)
+#define ERROR_THERMALF(fmt, ...)      DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_THERMAL,      "[ERROR][THERMAL] "   fmt, ##__VA_ARGS__)
+#define ERROR_TOFF(fmt, ...)          DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_TOF,          "[ERROR][TOF] "       fmt, ##__VA_ARGS__)
+#define ERROR_IMUF(fmt, ...)          DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_IMU,          "[ERROR][IMU] "       fmt, ##__VA_ARGS__)
+#define ERROR_INPUTF(fmt, ...)        DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_INPUT,        "[ERROR][INPUT] "     fmt, ##__VA_ARGS__)
+#define ERROR_ANO_ENCODERF(fmt, ...)  DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_ANO_ENCODER,  "[ERROR][ANO] "       fmt, ##__VA_ARGS__)
+#define ERROR_APDSF(fmt, ...)         DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_APDS,         "[ERROR][APDS] "      fmt, ##__VA_ARGS__)
+#define ERROR_PRESENCEF(fmt, ...)     DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_PRESENCE,     "[ERROR][PRESENCE] "  fmt, ##__VA_ARGS__)
+#define ERROR_GPSF(fmt, ...)          DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_GPS,          "[ERROR][GPS] "       fmt, ##__VA_ARGS__)
+#define ERROR_RTCF(fmt, ...)          DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_RTC,          "[ERROR][RTC] "       fmt, ##__VA_ARGS__)
+#define ERROR_FMRADIOF(fmt, ...)      DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_FMRADIO,      "[ERROR][FMRADIO] "   fmt, ##__VA_ARGS__)
+#define ERROR_MAPSF(fmt, ...)         DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_MAPS,         "[ERROR][MAPS] "      fmt, ##__VA_ARGS__)
+#define ERROR_MICF(fmt, ...)          DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_MICROPHONE,   "[ERROR][MIC] "       fmt, ##__VA_ARGS__)
+#define ERROR_DISPLAYF(fmt, ...)      DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_DISPLAY,      "[ERROR][DISPLAY] "   fmt, ##__VA_ARGS__)
+#define ERROR_MQTTF(fmt, ...)         DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_MQTT,         "[ERROR][MQTT] "      fmt, ##__VA_ARGS__)
 
 // WARN macros - Always visible (cannot be disabled)
-#define WARN_I2CF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(0xFFFFFFFF, "[WARN][I2C] " fmt, ##__VA_ARGS__); } while (0)
-#define WARN_ESPNOWF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(0xFFFFFFFF, "[WARN][ESP-NOW] " fmt, ##__VA_ARGS__); } while (0)
-#define WARN_AUTOMATIONF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(0xFFFFFFFF, "[WARN][AUTO] " fmt, ##__VA_ARGS__); } while (0)
-#define WARN_SESSIONF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(0xFFFFFFFF, "[WARN][SESSION] " fmt, ##__VA_ARGS__); } while (0)
-#define WARN_USERF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(0xFFFFFFFF, "[WARN][USER] " fmt, ##__VA_ARGS__); } while (0)
-#define WARN_LOGGINGF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(0xFFFFFFFF, "[WARN][LOG] " fmt, ##__VA_ARGS__); } while (0)
-#define WARN_WEBF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(0xFFFFFFFF, "[WARN][WEB] " fmt, ##__VA_ARGS__); } while (0)
-#define WARN_COMMANDF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(0xFFFFFFFF, "[WARN][CMD] " fmt, ##__VA_ARGS__); } while (0)
-#define WARN_SYSTEMF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(0xFFFFFFFF, "[WARN][SYS] " fmt, ##__VA_ARGS__); } while (0)
-#define WARN_STORAGEF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(0xFFFFFFFF, "[WARN][STORAGE] " fmt, ##__VA_ARGS__); } while (0)
-#define WARN_WIFIF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(0xFFFFFFFF, "[WARN][WIFI] " fmt, ##__VA_ARGS__); } while (0)
-#define WARN_MEMORYF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(0xFFFFFFFF, "[WARN][MEM] " fmt, ##__VA_ARGS__); } while (0)
+#define WARN_I2CF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_I2C, "[WARN][I2C] " fmt, ##__VA_ARGS__); } while (0)
+#define WARN_ESPNOWF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_ESPNOW_CORE, "[WARN][ESP-NOW] " fmt, ##__VA_ARGS__); } while (0)
+#define WARN_AUTOMATIONF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_AUTOMATIONS, "[WARN][AUTO] " fmt, ##__VA_ARGS__); } while (0)
+#define WARN_SESSIONF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_AUTH, "[WARN][SESSION] " fmt, ##__VA_ARGS__); } while (0)
+#define WARN_USERF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_USERS, "[WARN][USER] " fmt, ##__VA_ARGS__); } while (0)
+#define WARN_LOGGINGF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_LOGGER, "[WARN][LOG] " fmt, ##__VA_ARGS__); } while (0)
+#define WARN_WEBF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_HTTP, "[WARN][WEB] " fmt, ##__VA_ARGS__); } while (0)
+#define WARN_COMMANDF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_CLI, "[WARN][CMD] " fmt, ##__VA_ARGS__); } while (0)
+#define WARN_SYSTEMF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_SYSTEM, "[WARN][SYS] " fmt, ##__VA_ARGS__); } while (0)
+#define WARN_STORAGEF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_STORAGE, "[WARN][STORAGE] " fmt, ##__VA_ARGS__); } while (0)
+#define WARN_WIFIF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_WIFI, "[WARN][WIFI] " fmt, ##__VA_ARGS__); } while (0)
+#define WARN_MEMORYF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_MEMORY, "[WARN][MEM] " fmt, ##__VA_ARGS__); } while (0)
 // Per-sensor WARN macros — added during DEBUG_SENSORS umbrella removal.
 // Only added for subsystems that actually use WARN_SENSORSF today.
-#define WARN_INPUTF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(0xFFFFFFFF, "[WARN][INPUT] " fmt, ##__VA_ARGS__); } while (0)
-#define WARN_ANO_ENCODERF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(0xFFFFFFFF, "[WARN][ANO] " fmt, ##__VA_ARGS__); } while (0)
-#define WARN_MAPSF(fmt, ...)    do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(0xFFFFFFFF, "[WARN][MAPS] "    fmt, ##__VA_ARGS__); } while (0)
-#define WARN_IMUF(fmt, ...)     do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(0xFFFFFFFF, "[WARN][IMU] "     fmt, ##__VA_ARGS__); } while (0)
-#define WARN_MQTTF(fmt, ...)    do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(0xFFFFFFFF, "[WARN][MQTT] "    fmt, ##__VA_ARGS__); } while (0)
-#define WARN_BLUETOOTHF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(0xFFFFFFFF, "[WARN][BT] " fmt, ##__VA_ARGS__); } while (0)
+#define WARN_INPUTF(fmt, ...)        do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_INPUT,        "[WARN][INPUT] "  fmt, ##__VA_ARGS__); } while (0)
+#define WARN_ANO_ENCODERF(fmt, ...)  do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_ANO_ENCODER,  "[WARN][ANO] "    fmt, ##__VA_ARGS__); } while (0)
+#define WARN_MAPSF(fmt, ...)         do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_MAPS,         "[WARN][MAPS] "   fmt, ##__VA_ARGS__); } while (0)
+#define WARN_IMUF(fmt, ...)          do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_IMU,          "[WARN][IMU] "    fmt, ##__VA_ARGS__); } while (0)
+#define WARN_MQTTF(fmt, ...)         do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_MQTT,         "[WARN][MQTT] "   fmt, ##__VA_ARGS__); } while (0)
+#define WARN_BLUETOOTHF(fmt, ...)    do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_BLUETOOTH,    "[WARN][BT] "     fmt, ##__VA_ARGS__); } while (0)
 
 // INFO macros - Optional (controlled by debug flags)
 #define INFO_CAMERAF(fmt, ...)       do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_CAMERA | DEBUG_CAMERA_LIFECYCLE, "[INFO][CAMERA] " fmt, ##__VA_ARGS__); } while (0)
@@ -946,7 +772,6 @@ extern const size_t debugCommandsCount;
 // Debug Command Handlers (implemented in debug_system.cpp)
 // ============================================================================
 
-const char* cmd_outdisplay(const String& argsInput);
 const char* cmd_debugauthcookies(const String& argsInput);
 const char* cmd_debughttp(const String& argsInput);
 const char* cmd_debugsse(const String& argsInput);
@@ -964,7 +789,6 @@ const char* cmd_debuglogger(const String& argsInput);
 const char* cmd_debugautomations(const String& argsInput);
 const char* cmd_debugperformance(const String& argsInput);
 const char* cmd_debugauth(const String& argsInput);
-const char* cmd_debugespnow(const String& argsInput);
 const char* cmd_debugdatetime(const String& argsInput);
 const char* cmd_debugdatetimesync(const String& argsInput);
 const char* cmd_debugdatetimesetup(const String& argsInput);
@@ -980,6 +804,7 @@ const char* cmd_debugapds(const String& argsInput);
 const char* cmd_debugpresence(const String& argsInput);
 const char* cmd_debugverbose(const String& argsInput);
 const char* cmd_debugbuffer(const String& argsInput);
+const char* cmd_debugflags(const String& argsInput);
 const char* cmd_debugcommandflow(const String& argsInput);
 const char* cmd_debugusers(const String& argsInput);
 const char* cmd_debugsystem(const String& argsInput);
@@ -1061,6 +886,11 @@ const char* cmd_log(const String& argsInput);
 
 // System log auto-start (called from boot)
 void systemLogAutoStart();
+
+// Parse / format the persisted systemLogFlags hex mask (also used by Settings UI save).
+bool parseSystemLogFlags(const String& flagsStr, DebugFlagMask& out);
+String formatSystemLogFlags(DebugFlagMask mask);
+bool systemLogApplyPersistedFlags();  // gSettings.systemLogFlags → gDebugFlags
 
 // Helper: Get category name from debug flag
 const char* getDebugCategoryName(DebugFlagMask flag);

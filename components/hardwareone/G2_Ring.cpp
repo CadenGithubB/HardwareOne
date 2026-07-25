@@ -17,6 +17,7 @@
 
 #include "System_Debug.h"
 #include "System_Command.h"
+#include "System_TaskUtils.h"  // APP_CORE / PRO_CORE task-placement constants
 #include "System_Utils.h"
 #include "System_MemUtil.h"
 #include "WebServer_Server.h"  // broadcastEventToAllSessions() for SSE push
@@ -994,6 +995,25 @@ bool g2RingIsConnected() {
   return gRing.connected;
 }
 
+bool g2RingPollVital(uint8_t which) {
+  if (!gRing.connected || !gRing.writeChar) return false;
+  R1Frame q = {};
+  const char* tag = "?";
+  switch (which) {
+    case 0: q = gR1Encoder.buildHealthQuery(R1_CMD_HEARTRATE, R1_SUB_POINT); tag = "hrPoint";   break;
+    case 1: q = gR1Encoder.buildHealthQuery(R1_CMD_HRV,       R1_SUB_POINT); tag = "hrvPoint";  break;
+    case 2: q = gR1Encoder.buildHealthQuery(R1_CMD_SPO2,      R1_SUB_POINT); tag = "spo2Point"; break;
+    case 3: q = gR1Encoder.buildGenericQuery(R1_MODULE_SYSTEM, R1_CMD_SYSTEM,
+                                             R1_SUB_DEVICE_STATUS);          tag = "devStatus"; break;
+    default: return false;
+  }
+  if (q.length == 0 || !gRing.writeChar) return false;
+  gRing.writeChar->writeValue(q.bytes, q.length, false);
+  gRing.packetsSent++;
+  DEBUG_G2F("[RING] page poll: TX %s ser=%u", tag, (unsigned)q.serial);
+  return true;
+}
+
 void g2RingGetTelemetry(G2RingTelemetry& out) {
   // gR1Cache is written from the BLE notify task; telemetry updates are
   // minute-scale, so a plain field copy is fine for a read-only dashboard
@@ -1165,9 +1185,9 @@ static bool ringSpoofStart(uint32_t intervalSec) {
   if (intervalSec > 600) intervalSec = 600;
   gSpoofIntervalSec = intervalSec;
   gSpoofEnabled     = true;
-  BaseType_t rc = xTaskCreate(ringSpoofTaskBody, "ring_spoof",
+  BaseType_t rc = xTaskCreatePinnedToCore(ringSpoofTaskBody, "ring_spoof",
                               /*stack*/ 4096, nullptr,
-                              /*prio*/  4,    &gSpoofTaskHandle);
+                              /*prio*/  4,    &gSpoofTaskHandle, APP_CORE);
   if (rc != pdPASS) {
     DEBUG_G2F("[RING] spoof task: xTaskCreate failed (rc=%d)", (int)rc);
     gSpoofEnabled    = false;
@@ -1222,12 +1242,35 @@ static const char* cmd_ringstatus(const String& args) {
 static const char* cmd_ringconnect(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   CommandArgs ca(args);
+  String a0 = ca.arg(0);
+  a0.toLowerCase();
+
+  // `ringconnect reconnect` — glasses R1 "Reconnect Ring" path. Same heap
+  // guard + disconnect settle as the old tap-inline helper; runs on
+  // cmd_exec (which can afford the 500 ms delay) instead of g2_tap_disp.
+  if (a0 == "reconnect") {
+    const uint32_t freeNow = ESP.getFreeHeap();
+    if (freeNow < 16 * 1024) {
+      return "Error: RING: reconnect aborted — DRAM free < 16 KB "
+             "(reboot or recover heap; Arduino BLE leak per reconnect)";
+    }
+    if (g2RingIsConnected()) {
+      g2RingDisconnect();
+      vTaskDelay(pdMS_TO_TICKS(500));
+    }
+    if (!g2RingConnect()) {
+      return g2RingIsConnected() ? "RING: already connected"
+                                 : "Error: RING: reconnect failed to start connect task";
+    }
+    return "RING: reconnect started — use ringstatus to watch";
+  }
+
   if (ca.count() >= 1) {
     String mac = ca.arg(0);
     if (!g2RingConnectMac(mac)) {
       return "Error: RING: direct-MAC connect failed (already running? MAC format?)";
     }
-    static char buf[200];
+    EXT_RAM_BSS_ATTR static char buf[200];
     snprintf(buf, sizeof(buf),
              "RING: direct-connect to %s started (no scan) — watch ringstatus / log",
              mac.c_str());
@@ -1270,7 +1313,7 @@ static const char* cmd_ringscan(const String& args) {
     long n = ca.argInt(0, 30);
     if (n > 0 && n <= 300) seconds = (uint32_t)n;
   }
-  static char buf[200];
+  EXT_RAM_BSS_ATTR static char buf[200];
   if (g2RingScan(seconds)) {
     snprintf(buf, sizeof(buf),
              "RING: scan found %s @ %s — run 'ringconnect' to connect",
@@ -1305,7 +1348,7 @@ static const char* cmd_ringscan(const String& args) {
 //            you'll see that in the decoded log)
 static const char* cmd_ringquery(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  static char ret[200];
+  EXT_RAM_BSS_ATTR static char ret[200];
   if (!gRing.connected || !gRing.writeChar) {
     return "Error: RING: not connected (run 'ringconnect' first)";
   }
@@ -1626,9 +1669,9 @@ static void ringBridgeHeartbeatBody(void* /*arg*/) {
 static bool ringBridgeHeartbeatStart() {
   if (gBridgeHbEnabled) return true;
   gBridgeHbEnabled = true;
-  BaseType_t rc = xTaskCreate(ringBridgeHeartbeatBody, "ring_bridge_hb",
+  BaseType_t rc = xTaskCreatePinnedToCore(ringBridgeHeartbeatBody, "ring_bridge_hb",
                               /*stack*/ 3072, nullptr,
-                              /*prio*/  3,    &gBridgeHbTaskHandle);
+                              /*prio*/  3,    &gBridgeHbTaskHandle, APP_CORE);
   if (rc != pdPASS) {
     DEBUG_G2F("[RING] bridge-heartbeat: xTaskCreate failed (rc=%d)", (int)rc);
     gBridgeHbEnabled    = false;
@@ -1897,8 +1940,8 @@ static const char* cmd_ringbridge(const String& args) {
 extern const CommandEntry g2RingCommands[] = {
   { "ringstatus",     "Show R1 ring connection status",            false, cmd_ringstatus     },
   { "ringscan",       "Scan for the R1 ring: ringscan [seconds] (default 30, max 300)", false, cmd_ringscan, "Usage: ringscan [seconds] (1..300, default 30)" },
-  { "ringconnect",    "Connect to the R1 ring: ringconnect [mac] (auto-scans if no mac; bypasses scan with mac)", false, cmd_ringconnect, "Usage: ringconnect [mac]  (no mac = scan-then-connect; mac = direct connect, no scan)" },
-  { "ringdisconnect", "Disconnect from the R1 ring",               false, cmd_ringdisconnect },
+  { "ringconnect",    "Connect to the R1 ring: ringconnect [mac|reconnect]", true, cmd_ringconnect, "Usage: ringconnect [mac|reconnect]  (no arg = scan-then-connect; mac = direct; reconnect = drop+settle+connect)" },
+  { "ringdisconnect", "Disconnect from the R1 ring",               true, cmd_ringdisconnect },
   { "ringverbose",    "Toggle full hex dump of ring notify frames", false, cmd_ringverbose, "Usage: ringverbose [<on|off>]  (bare = toggle)" },
   { "ringquery",      "Send an R1 health/status request: ringquery <wear|health|hr|hrv|spo2|temp|activity|sleep|report|raw> [type] [hex_payload]", false, cmd_ringquery, "Usage: ringquery <wear|health|hr|hrv|spo2|temp|activity|sleep|report|raw> [args] | <hr|hrv|spo2|temp|activity|sleep> [daily|point|measure] | report <on|off|0xNN> | raw <module> <cmd> <subCmd> [hex_payload] [status=NN]" },
   // NOTE: `ringtoglasses` and `ringbridge` are UNREGISTERED on purpose.

@@ -65,8 +65,8 @@
 | 19 | GET | [`/api/buildconfig`](#get-api-buildconfig) | System, Dashboard & Core | api | session | mature |
 | 20 | GET | [`/api/devices`](#get-api-devices) | System, Dashboard & Core | api | session | adequate |
 | 21 | GET | [`/api/events`](#get-api-events) | System, Dashboard & Core | stream | session | adequate |
-| 22 | GET | [`/api/output`](#get-api-output) | System, Dashboard & Core | api | session | adequate |
-| 23 | POST | [`/api/output/temp`](#post-api-output-temp) | System, Dashboard & Core | api | session | barebones |
+| 22 | GET | [`/api/output`](#get-api-output) | System, Dashboard & Core | api | session | **REMOVED 2026-07-19** |
+| 23 | POST | [`/api/output/temp`](#post-api-output-temp) | System, Dashboard & Core | api | session | **REMOVED 2026-07-19** |
 | 24 | GET | [`/api/icon`](#get-api-icon) | System, Dashboard & Core | asset | public | adequate |
 | 25 | GET | [`/icons/test`](#get-icons-test) | System, Dashboard & Core | page | session | barebones |
 | 26 | GET | [`/favicon.ico`](#get-faviconico) | System, Dashboard & Core | asset | public | mature |
@@ -502,6 +502,8 @@ Real-time Server-Sent Events (SSE) stream for live updates to dashboard and othe
 
 #### `GET /api/output`
 
+**REMOVED 2026-07-19** with the output-channels trim: no first-party consumer existed (settings UI uses the schema/command path; companion app has no references), and the persisted web/display/g2 lanes it reported were removed after an audit showed delivery never honored them. Historical description follows.
+
 **Handler:** `handleOutputGet` · **Source:** `components/hardwareone/WebServer_Server.cpp:2788` · **Kind:** api · **Auth:** session · **Maturity:** adequate
 
 Query current output routing configuration—both persisted settings and current runtime state. Distinguishes between stored preferences and temporary overrides.
@@ -515,6 +517,8 @@ Query current output routing configuration—both persisted settings and current
 <a id="post-api-output-temp"></a>
 
 #### `POST /api/output/temp`
+
+**REMOVED 2026-07-19** with the output-channels trim: no first-party consumer, and two of the three commands it issued (outweb/outdisplay) were removed as decorative. Runtime lane control remains available via the CLI (`outserial ... temp`, `outg2`, `outble`). Historical description follows.
 
 **Handler:** `handleOutputTemp` · **Source:** `components/hardwareone/WebServer_Server.cpp:2813` · **Kind:** api · **Auth:** session · **Maturity:** barebones
 

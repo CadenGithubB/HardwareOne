@@ -44,9 +44,9 @@ static esp_err_t handleDarkRoomPage(httpd_req_t* req) {
 }
 
 void registerDarkRoomHandlers(httpd_handle_t server) {
-  static httpd_uri_t gamesPage = { .uri = "/games", .method = HTTP_GET, .handler = handleGamesLauncherPage, .user_ctx = NULL };
+  static const httpd_uri_t gamesPage = { .uri = "/games", .method = HTTP_GET, .handler = handleGamesLauncherPage, .user_ctx = NULL };
   httpd_register_uri_handler(server, &gamesPage);
-  static httpd_uri_t darkroomPage = { .uri = "/darkroom", .method = HTTP_GET, .handler = handleDarkRoomPage, .user_ctx = NULL };
+  static const httpd_uri_t darkroomPage = { .uri = "/darkroom", .method = HTTP_GET, .handler = handleDarkRoomPage, .user_ctx = NULL };
   httpd_register_uri_handler(server, &darkroomPage);
 }
 

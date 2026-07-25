@@ -85,6 +85,12 @@
 #define G2_SID_APP_LAUNCH   0x01  // UI_BACKGROUND_DASHBOARD_APP_ID — but used by us
                                   // as "app launch prelude". Carries dashboard
                                   // protobuf in normal flow.
+#define G2_SID_NOTIFICATION 0x04  // UI_FOREGROUND_NOTIFICATION_ID — the native
+                                  // phone-notification CONTROL service. Gates
+                                  // whether EFS (0xC4/0xC5) notification files
+                                  // actually render (enable + per-app whitelist).
+                                  // `notification.proto`. See §12 experiment in
+                                  // docs/G2_NATIVE_NOTIFICATION_PLAN.md.
 #define G2_SID_TRANSLATE    0x05  // UI_TRANSLATE_APP_ID — front-pane translate
                                   // overlay. `translate_pb.ts`. Reachable; CTRL=1
                                   // with empty body returns errorCode=7.
@@ -985,6 +991,47 @@ size_t g2BuildDevCfgRingConnect(uint8_t seq, uint32_t magic,
                                 const uint8_t* ringMacBleOrder,
                                 const char* ringName,
                                 uint8_t* out, size_t outCap);
+
+// =============================================================================
+// Notification-control builders — sid=0x04 (UI_FOREGROUND_NOTIFICATION_ID)
+// =============================================================================
+// EXPERIMENT (see docs/G2_NATIVE_NOTIFICATION_PLAN.md §12). The native
+// phone-notification subsystem is CONTROLLED on sid 0x04 — a different service
+// from the EFS file channel (0xC4/0xC5) that only ships the JSON bytes. Whether
+// a card is allowed to render is gated here: a global enable + a per-app
+// whitelist. Schema: notification.proto (Commute773/g2-r1-re-tools-and-guide;
+// mirrors FlutterApp-main's generated bindings). Neither the reference app nor
+// we have ever written this service — the hypothesis is that on a device never
+// configured by the official Even app the whitelist is empty AND enforced, so
+// every card is filtered before EFS is even parsed (matches our zero-RX /
+// no-START_ERR symptom). NotificationDataPackage reuses the EvenCore wrapper
+// tags: field 1 = commandId, field 2 = magicRandom.
+
+// eNotificationCommandId
+#define G2_NOTIF_CMD_CTRL              1   // NOTIFICATION_CTRL
+#define G2_NOTIF_CMD_WHITELIST_CTRL    3   // NOTIFICATION_WHITELIST_CTRL
+// NotificationDataPackage sub-message field tags
+#define G2_NOTIF_WRAP_F_CTRL           3   // ctrl (NotificationControl)
+#define G2_NOTIF_WRAP_F_WHITELIST      6   // whitelistCtrl (NotificationWhitelistCtrl)
+// NotificationControl fields
+#define G2_NOTIF_CTRL_F_NOTIF_ENABLE   1
+#define G2_NOTIF_CTRL_F_AUTODISP_EN    2
+// NotificationWhitelistCtrl fields (INVERTED: 1 = disable filtering = allow all)
+#define G2_NOTIF_WHITELIST_F_DISABLE   1
+// Magic-correlation constants (distinct from the DevCfg/Ring set above)
+#define G2_MAGIC_NOTIF_CTRL            226
+#define G2_MAGIC_NOTIF_WHITELIST       227
+
+// NotificationDataPackage{ commandId=NOTIFICATION_CTRL, ctrl:{ notifEnable=1,
+// autoDispEnable=1 } } — ask the firmware to enable + auto-display notifications.
+size_t g2BuildNotifCtrlEnable(uint8_t seq, uint32_t magic,
+                              uint8_t* out, size_t outCap);
+
+// NotificationDataPackage{ commandId=NOTIFICATION_WHITELIST_CTRL,
+// whitelistCtrl:{ whitelistDisable=1 } } — turn OFF per-app whitelist filtering
+// so ANY app's card renders (bypasses an empty/unconfigured whitelist).
+size_t g2BuildNotifWhitelistDisable(uint8_t seq, uint32_t magic,
+                                    uint8_t* out, size_t outCap);
 
 // =============================================================================
 // Ring data push (sid=0x90 UX_RING_ROW_DATA_ID)

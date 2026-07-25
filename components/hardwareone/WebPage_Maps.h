@@ -57,7 +57,7 @@ inline void streamMapsInner(httpd_req_t* req) {
     <div class='map-bar-h' style='position:absolute;bottom:36px;left:10px;z-index:10'>
       <button class='btn map-ctrl map-ctrl-wide' onclick='centerOnGPS()' title='Centre on GPS'>GPS</button>
       <button class='btn map-ctrl map-ctrl-wide' onclick='showSearchDialog()' title='Search'>Search</button>
-      <button class='btn map-ctrl' id='btn-add-waypoint' onclick='toggleWaypointMode()' title='Add waypoint'><svg width='16' height='16' viewBox='0 0 16 16' fill='currentColor'><path d='M8 1a4.5 4.5 0 0 1 4.5 4.5c0 3-4.5 9.5-4.5 9.5S3.5 8.5 3.5 5.5A4.5 4.5 0 0 1 8 1zm0 2.5a2 2 0 1 0 0 4 2 2 0 0 0 0-4z'/></svg></button>
+      <button class='btn map-ctrl' id='btn-add-waypoint' onclick='toggleWaypointMode()' title='Add waypoint' data-guest-hide><svg width='16' height='16' viewBox='0 0 16 16' fill='currentColor'><path d='M8 1a4.5 4.5 0 0 1 4.5 4.5c0 3-4.5 9.5-4.5 9.5S3.5 8.5 3.5 5.5A4.5 4.5 0 0 1 8 1zm0 2.5a2 2 0 1 0 0 4 2 2 0 0 0 0-4z'/></svg></button>
       <button class='btn map-ctrl map-ctrl-wide' id='btn-maps-panel' onclick='toggleMapsPanel()' title='Browse maps'>Maps</button>
       <button class='btn map-ctrl map-ctrl-wide' id='btn-layers-panel' onclick='toggleLayersPanel()' title='Toggle layers'>Layers</button>
     </div>
@@ -72,8 +72,8 @@ inline void streamMapsInner(httpd_req_t* req) {
     <div id='maps-panel' style='display:none;position:absolute;bottom:84px;left:10px;min-width:320px;max-width:min(480px,calc(100% - 20px));background:var(--menu-item-bg);color:var(--menu-item-fg);border:1px solid var(--border);border-radius:8px;box-shadow:0 4px 24px rgba(0,0,0,.5);z-index:20;overflow:hidden'>
       <div style='padding:8px 12px;border-bottom:1px solid var(--border);display:flex;gap:8px;align-items:center'>
         <span style='font-size:0.85rem;font-weight:600;flex:1'>Maps</span>
-        <button class='btn' onclick='document.getElementById("maps-upload-input").click()' style='padding:4px 8px;font-size:0.8rem'>Upload</button>
-        <button class='btn' onclick='unloadDeviceMap()' title='Free map cache on device (PSRAM)' style='padding:4px 8px;font-size:0.8rem'>Unload device</button>
+        <button class='btn' onclick='document.getElementById("maps-upload-input").click()' style='padding:4px 8px;font-size:0.8rem' data-guest-hide>Upload</button>
+        <button class='btn' onclick='unloadDeviceMap()' title='Free map cache on device (PSRAM)' style='padding:4px 8px;font-size:0.8rem' data-guest-hide>Unload Map</button>
         <input type='file' id='maps-upload-input' accept='.hwmap' style='display:none' onchange='uploadMapFile(this)'>
         <button class='btn' onclick='toggleMapsPanel()' style='padding:4px 8px;min-height:unset'>✕</button>
       </div>
@@ -172,7 +172,7 @@ inline void streamMapsInner(httpd_req_t* req) {
   <div style='display:flex;gap:8px;margin-bottom:0.5rem;align-items:center'>
     <button class='btn' onclick='loadGPSTrack()' style='padding:6px 12px'>Load</button>
     <button class='btn' onclick='clearGPSTrack()' style='padding:6px 12px'>Clear</button>
-    <button class='btn' id='btn-live-track' onclick='toggleLiveTrack()' style='padding:6px 12px'>Live</button>
+    <button class='btn' id='btn-live-track' onclick='toggleLiveTrack()' style='padding:6px 12px' data-guest-hide>Live</button>
   </div>
   <div style='display:flex;gap:8px;margin-bottom:0.5rem;align-items:center'>
     <span style='font-size:0.85rem;color:var(--panel-fg)'>Track Color:</span>
@@ -194,8 +194,8 @@ inline void streamMapsInner(httpd_req_t* req) {
     </div>
     <div id='stitch-list' style='font-size:0.8rem;color:var(--panel-fg);margin-bottom:0.35rem'></div>
     <div style='display:flex;gap:6px;align-items:center;flex-wrap:wrap'>
-      <input id='stitch-name' type='text' placeholder='output name (optional)' style='flex:1;min-width:110px;padding:5px;background:var(--crumb-bg);border:1px solid var(--border);border-radius:4px;color:var(--panel-fg);font-size:0.8rem' />
-      <button class='btn' onclick='doStitch()' style='padding:5px 12px;font-size:0.8rem'>Stitch &amp; Load</button>
+      <input id='stitch-name' type='text' placeholder='output name (optional)' style='flex:1;min-width:110px;padding:5px;background:var(--crumb-bg);border:1px solid var(--border);border-radius:4px;color:var(--panel-fg);font-size:0.8rem' data-guest-hide />
+      <button class='btn' onclick='doStitch()' style='padding:5px 12px;font-size:0.8rem' data-guest-hide>Stitch &amp; Load</button>
     </div>
     <div id='stitch-status' style='font-size:0.8rem;margin-top:0.35rem;color:var(--panel-fg)'></div>
   </div>
@@ -211,16 +211,16 @@ inline void streamMapsInner(httpd_req_t* req) {
   <h3 style='margin:0 0 0.5rem 0;color:var(--panel-fg)'>Waypoints</h3>
   <div id='waypoint-status' style='margin-bottom:0.5rem;padding:6px 8px;background:var(--crumb-bg);border-radius:4px;font-size:0.82rem'></div>
   <div style='display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:6px;margin-bottom:0.4rem;align-items:center;min-width:0'>
-    <input type='text' id='wp-name' placeholder='Name' maxlength='11' style='padding:6px;background:var(--crumb-bg);border:1px solid var(--border);border-radius:4px;color:var(--panel-fg)' />
-    <input type='number' id='wp-lat' placeholder='Latitude' step='0.000001' style='padding:6px;background:var(--crumb-bg);border:1px solid var(--border);border-radius:4px;color:var(--panel-fg)' />
-    <input type='number' id='wp-lon' placeholder='Longitude' step='0.000001' style='padding:6px;background:var(--crumb-bg);border:1px solid var(--border);border-radius:4px;color:var(--panel-fg)' />
-    <button class='btn' onclick='addWaypoint()' style='padding:6px 12px'>Add</button>
+    <input type='text' id='wp-name' placeholder='Name' maxlength='11' style='padding:6px;background:var(--crumb-bg);border:1px solid var(--border);border-radius:4px;color:var(--panel-fg)' data-guest-hide />
+    <input type='number' id='wp-lat' placeholder='Latitude' step='0.000001' style='padding:6px;background:var(--crumb-bg);border:1px solid var(--border);border-radius:4px;color:var(--panel-fg)' data-guest-hide />
+    <input type='number' id='wp-lon' placeholder='Longitude' step='0.000001' style='padding:6px;background:var(--crumb-bg);border:1px solid var(--border);border-radius:4px;color:var(--panel-fg)' data-guest-hide />
+    <button class='btn' onclick='addWaypoint()' style='padding:6px 12px' data-guest-hide>Add</button>
   </div>
-  <input type='text' id='wp-notes' placeholder='Notes (optional)' maxlength='255' style='width:100%;padding:6px;background:var(--crumb-bg);border:1px solid var(--border);border-radius:4px;color:var(--panel-fg);margin-bottom:0.4rem;box-sizing:border-box' />
+  <input type='text' id='wp-notes' placeholder='Notes (optional)' maxlength='255' style='width:100%;padding:6px;background:var(--crumb-bg);border:1px solid var(--border);border-radius:4px;color:var(--panel-fg);margin-bottom:0.4rem;box-sizing:border-box' data-guest-hide />
   <div style='display:flex;gap:6px;margin-bottom:0.4rem'>
     <button class='btn' onclick='exportWaypoints()' style='padding:6px 10px'>Export</button>
-    <button class='btn' onclick='importWaypoints()' style='padding:6px 10px'>Import</button>
-    <button class='btn' onclick='clearAllWaypoints()' style='padding:6px 10px'>Clear</button>
+    <button class='btn' onclick='importWaypoints()' style='padding:6px 10px' data-guest-hide>Import</button>
+    <button class='btn' onclick='clearAllWaypoints()' style='padding:6px 10px' data-guest-hide>Clear</button>
   </div>
   <div id='waypoint-list' style='flex:1;overflow-y:auto'></div>
 </div>
@@ -1843,13 +1843,13 @@ function showWaypointPopup(idx) {
     </div>
     ${hasNotes ? `<div style="margin:0.5rem 0;padding:0.5rem;background:var(--input-bg);border-radius:4px;font-size:0.85rem;color:var(--panel-fg)">${escapeHtml(wp.notes)}</div>` : ''}
     <div style="display:flex;gap:0.5rem;margin-top:0.75rem;flex-wrap:wrap">
-      ${!isTarget ? `<button onclick="gotoWaypoint(${idx});closeWaypointPopup()" class="btn" style="flex:1;padding:6px 10px;font-size:0.85rem">Set Target</button>` : `<button onclick="clearTarget();closeWaypointPopup()" class="btn" style="flex:1;padding:6px 10px;font-size:0.85rem">Clear Target</button>`}
+      ${!isTarget ? `<button onclick="gotoWaypoint(${idx});closeWaypointPopup()" class="btn" data-guest-hide style="flex:1;padding:6px 10px;font-size:0.85rem">Set Target</button>` : `<button onclick="clearTarget();closeWaypointPopup()" class="btn" data-guest-hide style="flex:1;padding:6px 10px;font-size:0.85rem">Clear Target</button>`}
       <button onclick="centerOnWaypoint(${idx})" class="btn" style="flex:1;padding:6px 10px;font-size:0.85rem">Center</button>
     </div>
     <div style="display:flex;gap:0.5rem;margin-top:0.5rem;flex-wrap:wrap">
-      <button onclick="renameWaypoint(${idx});closeWaypointPopup()" class="btn" style="flex:1;padding:6px 10px;font-size:0.85rem">Rename</button>
-      <button onclick="editWaypointNotes(${idx});closeWaypointPopup()" class="btn" style="flex:1;padding:6px 10px;font-size:0.85rem">Notes</button>
-      <button onclick="deleteWaypoint(${idx});closeWaypointPopup()" class="btn" style="flex:1;padding:6px 10px;font-size:0.85rem;background:#f44336;color:#fff;border:none">Delete</button>
+      <button onclick="renameWaypoint(${idx});closeWaypointPopup()" class="btn" data-guest-hide style="flex:1;padding:6px 10px;font-size:0.85rem">Rename</button>
+      <button onclick="editWaypointNotes(${idx});closeWaypointPopup()" class="btn" data-guest-hide style="flex:1;padding:6px 10px;font-size:0.85rem">Notes</button>
+      <button onclick="deleteWaypoint(${idx});closeWaypointPopup()" class="btn" data-guest-hide style="flex:1;padding:6px 10px;font-size:0.85rem;background:#f44336;color:#fff;border:none">Delete</button>
     </div>
   `;
   
@@ -2101,13 +2101,13 @@ async function loadWaypoints() {
           html += `<td style="text-align:center">${wp.lon.toFixed(5)}</td>`;
           html += '<td style="text-align:center">';
           if (!isTarget) {
-            html += `<button onclick="gotoWaypoint(${idx})" class="btn" style="padding:2px 6px;margin:0 2px;font-size:0.75rem">Target</button>`;
+            html += `<button onclick="gotoWaypoint(${idx})" class="btn" data-guest-hide style="padding:2px 6px;margin:0 2px;font-size:0.75rem">Target</button>`;
           } else {
-            html += `<button onclick="clearTarget()" class="btn" style="padding:2px 6px;margin:0 2px;font-size:0.75rem">Clear</button>`;
+            html += `<button onclick="clearTarget()" class="btn" data-guest-hide style="padding:2px 6px;margin:0 2px;font-size:0.75rem">Clear</button>`;
           }
-          html += `<button onclick="renameWaypoint(${idx})" class="btn" style="padding:2px 6px;margin:0 2px;font-size:0.75rem">Rename</button>`;
-          html += `<button onclick="editWaypointNotes(${idx})" class="btn" style="padding:2px 6px;margin:0 2px;font-size:0.75rem">Notes</button>`;
-          html += `<button onclick="deleteWaypoint(${idx})" class="btn" style="padding:2px 6px;margin:0 2px;background:#f44336;color:#fff;border:none;border-radius:3px;cursor:pointer;font-size:0.75rem">Del</button>`;
+          html += `<button onclick="renameWaypoint(${idx})" class="btn" data-guest-hide style="padding:2px 6px;margin:0 2px;font-size:0.75rem">Rename</button>`;
+          html += `<button onclick="editWaypointNotes(${idx})" class="btn" data-guest-hide style="padding:2px 6px;margin:0 2px;font-size:0.75rem">Notes</button>`;
+          html += `<button onclick="deleteWaypoint(${idx})" class="btn" data-guest-hide style="padding:2px 6px;margin:0 2px;background:#f44336;color:#fff;border:none;border-radius:3px;cursor:pointer;font-size:0.75rem">Del</button>`;
           html += '</td></tr>';
         });
         html += '</table>';

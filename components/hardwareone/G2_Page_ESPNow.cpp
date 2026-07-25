@@ -13,7 +13,7 @@
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 
 #include "G2_Glasses.h"
-#include "G2_Page_Common.h"       // G2TextPager + paging ops (shared text viewer)
+#include "G2_Page_Common.h"       // TextPager + paging ops (shared text viewer)
 #include "G2_Page_Network.h"      // g2ShowNetworkMenu — used by "Radio Off" jump
 #include "G2_Page_TextEntry.h"    // on-glasses keyboard for typed messages
 #include "G2_HijackCmd.h"         // G2CmdCookie / g2SubmitHijackCommand / g2BumpMenuGen
@@ -60,6 +60,11 @@ static inline void setSub(ESPNowAppSub s) {
 // a row in the peers list; consulted by showPeerDetail / handlers below.
 // -1 means "no peer selected" (peer-detail not reachable).
 static int gSelectedPeer = -1;
+
+// Row index of the tappable "Channel" row on the Stats page. Recorded when the
+// page is built (its position varies with what's shown) so handleStatsTap can
+// tell the channel row from the info-only rows. -1 = not present this render.
+static int gStatsChannelRow = -1;
 
 #if ENABLE_ESPNOW
 // Bonded Device view — identity of the remote sensor the user drilled into.
@@ -488,6 +493,7 @@ static void showBroadcastMenu() {
 
 static void showStatsMenu() {
   setSub(ESPN_APP_SUB_STATS);
+  gStatsChannelRow = -1;
 
 #if ENABLE_ESPNOW
   static EXT_RAM_BSS_ATTR char rows[10][40];  // PSRAM: deep-copied by g2ShowListPage
@@ -512,8 +518,16 @@ static void showStatsMenu() {
     snprintf(rows[n], sizeof(rows[n]), "Failed: %lu",
              (unsigned long)gEspNow->routerMetrics.messagesFailed);
     ptrs[n] = rows[n]; n++;
-    snprintf(rows[n], sizeof(rows[n]), "Channel: %u",
-             (unsigned)gEspNow->channel);
+    // Tappable: cycles the preferred channel (Auto/1/6/11). Show the pinned
+    // preference alongside the live radio channel when they differ.
+    gStatsChannelRow = (int)n;
+    if (gSettings.espnowChannel == 0) {
+      snprintf(rows[n], sizeof(rows[n]), "Channel: %u (Auto) *",
+               (unsigned)gEspNow->channel);
+    } else {
+      snprintf(rows[n], sizeof(rows[n]), "Channel: %u (pin %u) *",
+               (unsigned)gEspNow->channel, (unsigned)gSettings.espnowChannel);
+    }
     ptrs[n] = rows[n]; n++;
   }
 
@@ -617,7 +631,7 @@ static void showBondDetailMenu() {
   }
 
   static char hdr[40];
-  static char body[200];
+  EXT_RAM_BSS_ATTR static char body[200];
   const char* dn = (e->deviceName[0]) ? e->deviceName : "?";
   snprintf(hdr, sizeof(hdr), "%s - %s", dn, sensorTypeToString(e->sensorType));
 
@@ -694,7 +708,7 @@ static void   (*gChatExitFn)() = nullptr;
 // Shared paged-text engine (see G2_Page_Common.h) — this chat view pioneered
 // the flat-buffer + offset-table + wrap model; Files + Settings JSON now share
 // it too. gChatBuf is the body; gChatPageOff the offsets.
-static G2TextPager gChatPager = {
+static TextPager gChatPager = {
     gChatBuf, gChatPageOff, CHAT_MAX_PAGES, CHAT_PAGE_BUDGET,
     /*pageCount=*/0, /*curPage=*/0, /*truncated=*/false };
 #endif  // ENABLE_ESPNOW
@@ -740,14 +754,14 @@ static void chatBuildPages(int rc) {
     chatLogicalLine(gChatLogical, sizeof(gChatLogical), gInboxRefs[i]);
     // Wrap the labelled line into gChatBuf (continuation indent 2), then a
     // separating newline between messages — matches the pre-refactor layout.
-    g2TextWrapAppend(gChatBuf, CHAT_BUF_SIZE, pos, gChatLogical, kChatCols,
+    textWrapAppend(gChatBuf, CHAT_BUF_SIZE, pos, gChatLogical, kChatCols,
                      /*contIndent=*/2, /*stripCtrl=*/true, &wrapTrunc);
     if (pos + 1 < CHAT_BUF_SIZE) gChatBuf[pos++] = '\n';
   }
   gChatBuf[(pos < CHAT_BUF_SIZE) ? pos : (CHAT_BUF_SIZE - 1)] = '\0';
   gChatPager.curPage   = 0;
   gChatPager.truncated = wrapTrunc;
-  g2TextSplitPages(gChatPager, pos);
+  textSplitPages(gChatPager, pos);
   // Leave the view on the newest (last) page.
   gChatPager.curPage = (gChatPager.pageCount > 0) ? (gChatPager.pageCount - 1) : 0;
 }
@@ -769,7 +783,7 @@ static void chatRenderPage(G2TapFn navFn) {
 // Scroll/tap page navigation: scroll-up (PREV) = older, scroll-down/tap (NEXT) =
 // newer. Wraps around, matching the JSON viewer.
 static void chatNavPage(G2TapKind kind) {
-  g2TextNavPage(gChatPager, kind != G2_TAP_PAGE_PREV);
+  textNavPage(gChatPager, kind != G2_TAP_PAGE_PREV);
   chatRenderPage(chatNavPage);
 }
 #endif  // ENABLE_ESPNOW
@@ -850,6 +864,15 @@ static void onBroadcastRedrawDone(bool ok,
   DEBUG_G2F("[G2-ESP-NOW-APP] broadcast redraw cmd done: ok=%d result='%s'",
             (int)ok, result ? result : "");
   enqueueRedrawFromCallback(cookie, &showBroadcastMenu, "broadcast redraw");
+}
+
+static void onStatsRedrawDone(bool ok,
+                              const char* result,
+                              const G2CmdCookie& cookie,
+                              void* /*userData*/) {
+  DEBUG_G2F("[G2-ESP-NOW-APP] stats redraw cmd done: ok=%d result='%s'",
+            (int)ok, result ? result : "");
+  enqueueRedrawFromCallback(cookie, &showStatsMenu, "stats redraw");
 }
 
 // -----------------------------------------------------------------------------
@@ -933,6 +956,23 @@ static void submitToggleEspNow(bool running) {
     return;
   }
   BROADCAST_PRINTF("[G2-ESP-NOW-APP] toggle: %s", line);
+}
+
+// Cycle the preferred channel through the useful ladder Auto -> 1 -> 6 -> 11 via
+// `espnowchannel`, then re-render Stats. The full 1-13 range is available from
+// the web UI / CLI; off-ladder values snap forward into the ladder here.
+static void submitCycleChannel() {
+  uint8_t c = gSettings.espnowChannel;
+  const char* next = (c == 0) ? "1" : (c < 6) ? "6" : (c < 11) ? "11" : "auto";
+  char line[24];
+  snprintf(line, sizeof(line), "espnowchannel %s", next);
+  G2CmdCookie cookie = buildCookie();
+  if (!g2SubmitHijackCommand(line, cookie, onStatsRedrawDone, nullptr)) {
+    DEBUG_G2F("[G2-ESP-NOW-APP] channel submit FAILED — '%s'", line);
+    showStatsMenu();
+    return;
+  }
+  BROADCAST_PRINTF("[G2-ESP-NOW-APP] channel -> %s", next);
 }
 #endif  // ENABLE_ESPNOW
 
@@ -1115,7 +1155,14 @@ static void handleBroadcastTap(uint32_t idx) {
 }
 
 static void handleStatsTap(uint32_t idx) {
-  // Info-only — every row returns to main.
+#if ENABLE_ESPNOW
+  // The Channel row is tappable: cycle the preferred channel and re-render Stats.
+  if (gStatsChannelRow >= 0 && idx == (uint32_t)gStatsChannelRow) {
+    submitCycleChannel();
+    return;
+  }
+#endif
+  // All other rows are info-only — return to main.
   (void)idx;
   showMainMenu();
 }

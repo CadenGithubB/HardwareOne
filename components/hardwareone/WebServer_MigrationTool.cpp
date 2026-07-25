@@ -11,9 +11,11 @@
  *
  *   2. FTS restore-only server (requires ENABLE_MIGRATION_TOOL)
  *      GET  /                  - Plain-text splash explaining restore mode.
- *      POST /api/restore       - Unauthenticated import, triple-gated to
+ *      POST /api/restore       - Unauthenticated staging, triple-gated to
  *                                first-time setup only (gFirstTimeSetupState
  *                                + gAcceptingRestore + handler unregister).
+ *                                Does NOT write flash until the operator
+ *                                confirms on OLED or serial.
  *      OPTIONS+POST /api/ping  - Connection test + CORS preflight.
  *      Spun up by FTS "Import from Backup", torn down on completion or
  *      user abort. Self-contained — no dependency on WebServer_Server.cpp.
@@ -47,6 +49,7 @@
 #include "System_Events.h"  // systemEventPost — SYSEVT_BACKUP_CREATED/RESTORED producer
 #if ENABLE_HTTP_SERVER
 #include "WebServer_Server.h"  // auth helpers (makeWebAuthCtx, tgRequireAuth) for backup endpoint
+#include "WebServer_Utils.h"   // webGuestAccessAllowed — guest role HTTP gate
 #endif
 #include "WebServer_MigrationTool.h"
 
@@ -92,6 +95,28 @@ static bool isCertFile(const String& path) {
   return path.endsWith(".pem") || path.endsWith(".crt") || path.endsWith(".key");
 }
 
+// Cross-device restore: blank any device-AES ciphertext (AES:…) so we don't
+// persist dead blobs (BLE secret, mesh passphrase, ESP-NOW encrypted MACs, …).
+// WiFi networks are handled separately by overlaying THIS device's creds.
+static void stripAesCiphertextValues(JsonVariant v, int depth = 0) {
+  if (depth > 12) return;
+  if (v.is<JsonObject>()) {
+    JsonObject obj = v.as<JsonObject>();
+    for (JsonPair kv : obj) {
+      if (kv.value().is<const char*>()) {
+        const char* s = kv.value().as<const char*>();
+        if (s && strncmp(s, "AES:", 4) == 0) obj[kv.key()] = "";
+      } else {
+        stripAesCiphertextValues(kv.value(), depth + 1);
+      }
+    }
+  } else if (v.is<JsonArray>()) {
+    for (JsonVariant el : v.as<JsonArray>()) {
+      stripAesCiphertextValues(el, depth + 1);
+    }
+  }
+}
+
 // ============================================================================
 // BACKUP EXPORT (authenticated; requires ENABLE_HTTP_SERVER for auth helpers)
 // ============================================================================
@@ -100,6 +125,75 @@ static bool isCertFile(const String& path) {
 // WebServer_Server.h. In a (HTTP=0, MIG=1) build, the backup endpoint is
 // silently omitted but the restore-only server below remains available.
 #if ENABLE_HTTP_SERVER
+
+// Walk bundled backup content and record every device-AES ciphertext (AES:…)
+// plus user password hashes. encryptedFields used to be a hardcoded stub
+// ("wifiNetworks[].password") that drifted from the nested settings schema
+// and missed other secrets (BLE secure channel, mesh passphrase, certs, …).
+static void collectAesEncryptedFields(JsonVariantConst v, const char* filePath,
+                                      String& pathBuf, JsonArray& encFields, int depth = 0) {
+  if (depth > 12) return;
+  if (v.is<JsonObjectConst>()) {
+    for (JsonPairConst kv : v.as<JsonObjectConst>()) {
+      size_t mark = pathBuf.length();
+      if (mark > 0) pathBuf += '.';
+      pathBuf += kv.key().c_str();
+      collectAesEncryptedFields(kv.value(), filePath, pathBuf, encFields, depth + 1);
+      pathBuf.remove(mark);
+    }
+  } else if (v.is<JsonArrayConst>()) {
+    size_t i = 0;
+    for (JsonVariantConst el : v.as<JsonArrayConst>()) {
+      size_t mark = pathBuf.length();
+      char idx[16];
+      snprintf(idx, sizeof(idx), "[%u]", (unsigned)i);
+      pathBuf += idx;
+      collectAesEncryptedFields(el, filePath, pathBuf, encFields, depth + 1);
+      pathBuf.remove(mark);
+      ++i;
+    }
+  } else if (v.is<const char*>()) {
+    const char* s = v.as<const char*>();
+    if (s && strncmp(s, "AES:", 4) == 0) {
+      char entry[256];
+      snprintf(entry, sizeof(entry), "%s:%s", filePath, pathBuf.c_str());
+      encFields.add(entry);
+    }
+  }
+}
+
+static void collectEncryptedFieldsFromFiles(JsonObject files, JsonArray encFields) {
+  for (JsonPair kv : files) {
+    const char* filePath = kv.key().c_str();
+    JsonVariant v = kv.value();
+    if (v.is<const char*>()) {
+      const char* s = v.as<const char*>();
+      // Whole-file ciphertext (certs/keys encrypted at export time)
+      if (s && strncmp(s, "AES:", 4) == 0) encFields.add(filePath);
+      continue;
+    }
+    String pathBuf;
+    pathBuf.reserve(96);
+    collectAesEncryptedFields(v, filePath, pathBuf, encFields);
+  }
+
+  // User passwords are PBKDF2 hashes (not AES:), but still credential material
+  // the migration tool treats as device-bound — list concrete paths when present.
+  for (JsonPair kv : files) {
+    const char* filePath = kv.key().c_str();
+    if (!strstr(filePath, "/user_settings/") || !strstr(filePath, ".json")) continue;
+    if (!kv.value().is<JsonObject>()) continue;
+    JsonVariantConst pwVar = kv.value()["password"];
+    if (pwVar.is<const char*>()) {
+      const char* pw = pwVar.as<const char*>();
+      if (pw && pw[0]) {
+        char entry[160];
+        snprintf(entry, sizeof(entry), "%s:password", filePath);
+        encFields.add(entry);
+      }
+    }
+  }
+}
 
 // ============================================================================
 // Helper: Add a file to the backup JSON if it exists
@@ -128,7 +222,7 @@ static void addFileToBackup(JsonObject& files, JsonArray& warnings, const char* 
 // Helper: Recursively add all files from a directory
 // ============================================================================
 
-static void addDirectoryToBackup(JsonObject& files, JsonArray& warnings, JsonArray& encFields, const char* dirPath, const AuthContext& ctx, int depth = 0) {
+static void addDirectoryToBackup(JsonObject& files, JsonArray& warnings, const char* dirPath, const AuthContext& ctx, int depth = 0) {
   if (!filesystemReady || depth > 3) return;
 
   File dir = VFS::openGuarded(dirPath, "r", ctx);
@@ -153,7 +247,7 @@ static void addDirectoryToBackup(JsonObject& files, JsonArray& warnings, JsonArr
     if (!path.startsWith("/")) { char pBuf[128]; snprintf(pBuf, sizeof(pBuf), "%s/%s", dirPath, path.c_str()); path = pBuf; }
 
     if (entry.isDirectory()) {
-      addDirectoryToBackup(files, warnings, encFields, path.c_str(), ctx, depth + 1);
+      addDirectoryToBackup(files, warnings, path.c_str(), ctx, depth + 1);
     } else {
       // Include .hwmap, .json, and certificate files
       if (path.endsWith(".hwmap") || path.endsWith(".json") ||
@@ -175,7 +269,6 @@ static void addDirectoryToBackup(JsonObject& files, JsonArray& warnings, JsonArr
             String encrypted = encryptString(content);
             if (encrypted.length() > 0) {
               files[path] = encrypted;
-              encFields.add(path);
             } else {
               char warn[128];
               snprintf(warn, sizeof(warn), "Failed to encrypt %s, skipped", path.c_str());
@@ -223,6 +316,7 @@ static esp_err_t handleBackup(httpd_req_t* req) {
   if (!tgRequireAuth(ctx)) {
     return ESP_OK;
   }
+  if (!webGuestAccessAllowed(req, ctx)) return ESP_OK;
   DEBUG_HTTPF("[Backup] Authentication successful, user=%s", ctx.user.c_str());
 
   // Backup exports whole-device configuration — every user's settings, TLS
@@ -309,10 +403,6 @@ static esp_err_t handleBackup(httpd_req_t* req) {
   JsonArray warnings = doc["warnings"].to<JsonArray>();
   JsonArray encFields = doc["encryptedFields"].to<JsonArray>();
 
-  // Track well-known encrypted fields in settings (WiFi passwords, MQTT password, etc.)
-  encFields.add("wifiNetworks[].password");
-  encFields.add("/system/users/user_settings/*.json:password");
-
   if (wantSettings) {
     addFileToBackup(files, warnings, SETTINGS_FILE);
     addFileToBackup(files, warnings, DEBUG_FILE);  // debug flags live in their own file now — bundle with "settings"
@@ -320,15 +410,18 @@ static esp_err_t handleBackup(httpd_req_t* req) {
   if (wantUsers) {
     addFileToBackup(files, warnings, USERS_FILE);
     addFileToBackup(files, warnings, BOOT_ANCHORS_FILE);  // so pending-user timestamps stay resolvable after restore
-    addDirectoryToBackup(files, warnings, encFields, USER_SETTINGS_DIR, ctx);
+    addDirectoryToBackup(files, warnings, USER_SETTINGS_DIR, ctx);
   }
   if (wantAutomations) addFileToBackup(files, warnings, AUTOMATIONS_FILE);
   if (wantEspnow) {
     addFileToBackup(files, warnings, ESPNOW_DEVICES);
     addFileToBackup(files, warnings, ESPNOW_MESH_PEERS);
   }
-  if (wantMaps) addDirectoryToBackup(files, warnings, encFields, MAPS_DIR, ctx);
-  if (wantCerts) addDirectoryToBackup(files, warnings, encFields, "/system/certs", ctx);
+  if (wantMaps) addDirectoryToBackup(files, warnings, MAPS_DIR, ctx);
+  if (wantCerts) addDirectoryToBackup(files, warnings, "/system/certs", ctx);
+
+  // Discover secrets from actual bundled content (AES: blobs + user password hashes)
+  collectEncryptedFieldsFromFiles(files, encFields);
 
   // Serialize and send
   httpd_resp_set_type(req, "application/json");
@@ -377,8 +470,155 @@ static esp_err_t handleBackup(httpd_req_t* req) {
 #endif // ENABLE_HTTP_SERVER  (end of backup-export block)
 
 // ============================================================================
-// POST /api/restore - Unauthenticated, CORS-enabled, triple-gated
+// POST /api/restore - Unauthenticated staging, CORS-enabled, triple-gated
+// Flash writes happen only after OLED/serial confirm (applyStagedMigrationRestore).
 // ============================================================================
+
+static char* sStagedRestoreBuf = nullptr;
+static size_t sStagedRestoreLen = 0;
+static bool sStagedRestoreCompatible = true;
+static volatile bool sRestoreAwaitingConfirm = false;
+
+bool migrationRestoreAwaitingConfirm() {
+  return sRestoreAwaitingConfirm;
+}
+
+void discardStagedMigrationRestore() {
+  sRestoreAwaitingConfirm = false;
+  if (sStagedRestoreBuf) {
+    free(sStagedRestoreBuf);
+    sStagedRestoreBuf = nullptr;
+  }
+  sStagedRestoreLen = 0;
+  sStagedRestoreCompatible = true;
+}
+
+// Apply a validated HWBACKUP JsonDocument to flash. Used by applyStagedMigrationRestore.
+static bool writeRestoreFilesFromDoc(JsonDocument& doc, bool compatible,
+                                     int* outWritten, int* outErrored) {
+  // Cross-device restore: preserve the WiFi network the user entered during Import.
+  // The source device's wifiNetworks (under network.wifi.networks) carry passwords
+  // encrypted with the source's device key and won't decrypt here, so we keep THIS
+  // device's current creds instead of overwriting them with useless ones.
+  PSRAM_JSON_DOC(deviceSettingsDoc);
+  bool haveDeviceWifi = false;
+  if (!compatible) {
+    String curSettings;
+    if (readText(SETTINGS_FILE, curSettings)) {
+      DeserializationError derr = deserializeJson(deviceSettingsDoc, curSettings);
+      if (!derr && deviceSettingsDoc["network"]["wifi"]["networks"].is<JsonArray>()) {
+        haveDeviceWifi = true;
+      }
+    }
+  }
+
+  JsonObject files = doc["files"].as<JsonObject>();
+  int filesWritten = 0;
+  int filesErrored = 0;
+
+  for (JsonPair kv : files) {
+    const char* path = kv.key().c_str();
+    if (!path || path[0] != '/') {
+      filesErrored++;
+      continue;
+    }
+
+    String pathStr = String(path);
+
+    // On different device: skip user credential files and encrypted cert files
+    if (!compatible) {
+      if (pathStr.startsWith("/system/users/")) {
+        continue;
+      }
+      if (isCertFile(pathStr)) {
+        continue;
+      }
+    }
+
+    int lastSlash = pathStr.lastIndexOf('/');
+    if (lastSlash > 0) {
+      String dir = pathStr.substring(0, lastSlash);
+      VFS::mkdirGuarded(dir, VFS::systemAuth("migration.restore_mkdir"));
+    }
+
+    String content;
+    if (!compatible && !kv.value().is<const char*>()) {
+      PSRAM_JSON_DOC(mergedDoc);
+      mergedDoc.set(kv.value());
+      stripAesCiphertextValues(mergedDoc.as<JsonVariant>());
+      if (haveDeviceWifi && pathStr == SETTINGS_FILE) {
+        mergedDoc["network"]["wifi"]["networks"] = deviceSettingsDoc["network"]["wifi"]["networks"];
+        mergedDoc["network"]["wifi"]["autoReconnect"] = true;
+      }
+      serializeJsonPretty(mergedDoc, content);
+    } else if (kv.value().is<const char*>()) {
+      content = kv.value().as<String>();
+    } else {
+      serializeJsonPretty(kv.value(), content);
+    }
+
+    if (compatible && isCertFile(pathStr) && content.startsWith("AES:")) {
+      String decrypted = decryptString(content);
+      if (decrypted.length() > 0) {
+        content = decrypted;
+      } else {
+        filesErrored++;
+        continue;
+      }
+    }
+
+    if (writeTextAtomic(path, content)) {
+      filesWritten++;
+    } else {
+      filesErrored++;
+    }
+  }
+
+  if (!compatible) {
+    // Next boot: streamlined credential-only flow (admin login), not full FTS menu.
+    writeText(PENDING_CRED_SETUP_FILE, "1");
+  }
+
+  if (outWritten) *outWritten = filesWritten;
+  if (outErrored) *outErrored = filesErrored;
+  return filesWritten > 0 || filesErrored == 0;
+}
+
+bool applyStagedMigrationRestore() {
+  if (!sRestoreAwaitingConfirm || !sStagedRestoreBuf || sStagedRestoreLen == 0) {
+    return false;
+  }
+
+  PSRAM_JSON_DOC(doc);
+  DeserializationError err = deserializeJson(doc, sStagedRestoreBuf, sStagedRestoreLen);
+  if (err) {
+    DEBUG_HTTPF("[Restore] Staged payload re-parse failed: %s", err.c_str());
+    discardStagedMigrationRestore();
+    return false;
+  }
+
+  const bool compatible = sStagedRestoreCompatible;
+  int filesWritten = 0;
+  int filesErrored = 0;
+  bool ok = writeRestoreFilesFromDoc(doc, compatible, &filesWritten, &filesErrored);
+
+  discardStagedMigrationRestore();
+
+  if (!ok) {
+    broadcastOutput("Restore failed: no files were written.");
+    return false;
+  }
+
+  gAcceptingRestore = false;
+  gRestoreComplete = true;
+
+  char detBuf[80];
+  snprintf(detBuf, sizeof(detBuf), "%d file(s) written, %d errored%s",
+           filesWritten, filesErrored, compatible ? "" : " (cross-device)");
+  systemEventPost(SYSEVT_BACKUP_RESTORED, "all", detBuf);
+  broadcastOutput(String("Restore applied: ") + detBuf);
+  return true;
+}
 
 static esp_err_t handleRestore(httpd_req_t* req) {
   setCorsHeaders(req);
@@ -388,6 +628,17 @@ static esp_err_t handleRestore(httpd_req_t* req) {
     httpd_resp_set_status(req, "403 Forbidden");
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, "{\"error\":\"Restore not available. Device must be in first-time setup with Import from Backup selected.\"}", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
+
+  if (sRestoreAwaitingConfirm) {
+    httpd_resp_set_status(req, "409 Conflict");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req,
+      "{\"error\":\"Confirm pending\",\"pendingConfirm\":true,"
+      "\"message\":\"A backup is already staged. Confirm or cancel on the device "
+      "(OLED or serial) before sending another.\"}",
+      HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
   }
 
@@ -405,7 +656,7 @@ static esp_err_t handleRestore(httpd_req_t* req) {
     return ESP_OK;
   }
 
-  // Allocate buffer for the payload (prefer PSRAM)
+  // Allocate buffer for the payload (prefer PSRAM) — kept until confirm/discard
   char* buf = (char*)heap_caps_calloc(req->content_len + 1, 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (!buf) {
     buf = (char*)heap_caps_calloc(req->content_len + 1, 1, MALLOC_CAP_DEFAULT);
@@ -417,7 +668,6 @@ static esp_err_t handleRestore(httpd_req_t* req) {
     return ESP_OK;
   }
 
-  // Receive the full body
   int totalReceived = 0;
   while (totalReceived < (int)req->content_len) {
     int ret = httpd_req_recv(req, buf + totalReceived, req->content_len - totalReceived);
@@ -432,12 +682,11 @@ static esp_err_t handleRestore(httpd_req_t* req) {
   }
   buf[totalReceived] = '\0';
 
-  // Parse the backup JSON
+  // Validate without writing — parse a temporary doc, keep raw buffer staged
   PSRAM_JSON_DOC(doc);
   DeserializationError err = deserializeJson(doc, buf, totalReceived);
-  free(buf);
-
   if (err) {
+    free(buf);
     httpd_resp_set_status(req, "400 Bad Request");
     httpd_resp_set_type(req, "application/json");
     char errMsg[128];
@@ -446,16 +695,15 @@ static esp_err_t handleRestore(httpd_req_t* req) {
     return ESP_OK;
   }
 
-  // Validate magic header
   const char* magic = doc["magic"];
   if (!magic || strcmp(magic, "HWBACKUP") != 0) {
+    free(buf);
     httpd_resp_set_status(req, "400 Bad Request");
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, "{\"error\":\"Not a valid HWBACKUP file\"}", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
   }
 
-  // Check device fingerprint compatibility
   bool compatible = true;
   const char* backupFingerprint = doc["device"]["fingerprint"];
   if (backupFingerprint && strlen(backupFingerprint) > 0) {
@@ -463,12 +711,10 @@ static esp_err_t handleRestore(httpd_req_t* req) {
     compatible = (deviceFp == backupFingerprint);
   }
 
-  // Check if force flag is set (allows restore to different device)
-  bool forceRestore = false;
-  forceRestore = doc["force"] | false;
+  bool forceRestore = doc["force"] | false;
 
-  // If not compatible and not forced, reject with compatibility info
   if (!compatible && !forceRestore) {
+    free(buf);
     httpd_resp_set_status(req, "409 Conflict");
     httpd_resp_set_type(req, "application/json");
     const char* resp = "{\"error\":\"Device mismatch\","
@@ -482,137 +728,32 @@ static esp_err_t handleRestore(httpd_req_t* req) {
     return ESP_OK;
   }
 
-  // Cross-device restore: preserve the WiFi network the user entered during Import.
-  // The source device's wifiNetworks (under network.wifi.networks) carry passwords
-  // encrypted with the source's device key and won't decrypt here, so we keep THIS
-  // device's current creds instead of overwriting them with useless ones.
-  PSRAM_JSON_DOC(deviceSettingsDoc);
-  bool haveDeviceWifi = false;
-  if (!compatible) {
-    String curSettings;
-    if (readText(SETTINGS_FILE, curSettings)) {
-      DeserializationError derr = deserializeJson(deviceSettingsDoc, curSettings);
-      if (!derr && deviceSettingsDoc["network"]["wifi"]["networks"].is<JsonArray>()) {
-        haveDeviceWifi = true;
-      }
-    }
-  }
+  // Stage for on-device confirm (OLED / serial). Do not touch flash yet.
+  discardStagedMigrationRestore();  // clear any stale state
+  sStagedRestoreBuf = buf;
+  sStagedRestoreLen = (size_t)totalReceived;
+  sStagedRestoreCompatible = compatible;
+  sRestoreAwaitingConfirm = true;
 
-  // Write each file from the backup
-  JsonObject files = doc["files"].as<JsonObject>();
-  int filesWritten = 0;
-  int filesErrored = 0;
-  PSRAM_JSON_DOC(resultDoc);
-  JsonArray warnings = resultDoc["warnings"].to<JsonArray>();
+  broadcastOutput("");
+  broadcastOutput("========================================");
+  broadcastOutput("  BACKUP RECEIVED — CONFIRM ON DEVICE");
+  broadcastOutput("========================================");
+  broadcastOutput(compatible
+    ? "Same-device backup staged. Confirm to write files and reboot."
+    : "Cross-device backup staged (credentials will be skipped).");
+  broadcastOutput("OLED: Yes/No prompt  |  Serial: type yes or no");
+  broadcastOutput("========================================");
 
-  for (JsonPair kv : files) {
-    const char* path = kv.key().c_str();
-    if (!path || path[0] != '/') {
-      char warn[128];
-      snprintf(warn, sizeof(warn), "Skipped invalid path: %s", path ? path : "(null)");
-      warnings.add(warn);
-      filesErrored++;
-      continue;
-    }
-
-    String pathStr = String(path);
-
-    // On different device: skip user credential files and encrypted cert files
-    if (!compatible) {
-      if (pathStr.startsWith("/system/users/")) {
-        char warn[128];
-        snprintf(warn, sizeof(warn), "Skipped (different device): %s", path);
-        warnings.add(warn);
-        continue;
-      }
-      // Skip cert files — they were encrypted with the source device's key
-      if (isCertFile(pathStr)) {
-        char warn[128];
-        snprintf(warn, sizeof(warn), "Skipped encrypted cert (different device): %s", path);
-        warnings.add(warn);
-        continue;
-      }
-    }
-
-    // Ensure parent directories exist
-    int lastSlash = pathStr.lastIndexOf('/');
-    if (lastSlash > 0) {
-      String dir = pathStr.substring(0, lastSlash);
-      // trusted: first-time-setup restore creates parent dirs for system files
-      VFS::mkdirGuarded(dir, VFS::systemAuth("migration.restore_mkdir"));
-    }
-
-    // Serialize the value to a string for writing
-    String content;
-    if (!compatible && haveDeviceWifi && pathStr == SETTINGS_FILE) {
-      // Merge restored (source) settings with THIS device's WiFi creds so the device
-      // can reconnect after a cross-device restore, and force auto-reconnect on.
-      PSRAM_JSON_DOC(mergedDoc);
-      mergedDoc.set(kv.value());
-      mergedDoc["network"]["wifi"]["networks"] = deviceSettingsDoc["network"]["wifi"]["networks"];
-      mergedDoc["network"]["wifi"]["autoReconnect"] = true;
-      serializeJsonPretty(mergedDoc, content);
-    } else if (kv.value().is<const char*>()) {
-      content = kv.value().as<String>();
-    } else {
-      serializeJsonPretty(kv.value(), content);
-    }
-
-    // Decrypt cert files back to plain text before writing to disk
-    // (they were AES-encrypted during backup export)
-    if (compatible && isCertFile(pathStr) && content.startsWith("AES:")) {
-      String decrypted = decryptString(content);
-      if (decrypted.length() > 0) {
-        content = decrypted;
-      } else {
-        char warn[128];
-        snprintf(warn, sizeof(warn), "Failed to decrypt %s, skipped", path);
-        warnings.add(warn);
-        filesErrored++;
-        continue;
-      }
-    }
-
-    if (writeTextAtomic(path, content)) {
-      filesWritten++;
-    } else {
-      char warn[128];
-      snprintf(warn, sizeof(warn), "Failed to write: %s", path);
-      warnings.add(warn);
-      filesErrored++;
-    }
-  }
-
-  // Build response
-  resultDoc["success"] = true;
-  resultDoc["compatible"] = compatible;
-  resultDoc["filesWritten"] = filesWritten;
-  resultDoc["filesErrored"] = filesErrored;
-  if (!compatible) {
-    resultDoc["credentialsSkipped"] = true;
-    resultDoc["message"] = "Non-sensitive data restored. Device will reboot into a guided login setup.";
-    // Tell the next boot to run the streamlined credential-only flow (create just the
-    // admin login) instead of the full first-time-setup menu.
-    writeText(PENDING_CRED_SETUP_FILE, "1");
-  }
-
+  httpd_resp_set_status(req, "202 Accepted");
   httpd_resp_set_type(req, "application/json");
-  String response;
-  serializeJson(resultDoc, response);
-  httpd_resp_send(req, response.c_str(), response.length());
-
-  // Signal that restore is complete (the setup flow will handle reboot)
-  gAcceptingRestore = false;
-  gRestoreComplete = true;
-
-  // Restore finished — surface how many files landed.
-  {
-    char detBuf[80];
-    snprintf(detBuf, sizeof(detBuf), "%d file(s) written, %d errored%s",
-             filesWritten, filesErrored, compatible ? "" : " (cross-device)");
-    systemEventPost(SYSEVT_BACKUP_RESTORED, "all", detBuf);
-  }
-
+  const char* resp = compatible
+    ? "{\"success\":true,\"pendingConfirm\":true,\"compatible\":true,"
+      "\"message\":\"Backup staged. Confirm on the device OLED or serial console to apply.\"}"
+    : "{\"success\":true,\"pendingConfirm\":true,\"compatible\":false,\"credentialsSkipped\":true,"
+      "\"message\":\"Cross-device backup staged. Confirm on the device OLED or serial console to apply. "
+      "Credentials will be skipped; guided login setup runs after reboot.\"}";
+  httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);
   return ESP_OK;
 }
 
@@ -625,42 +766,51 @@ static esp_err_t handleRestore(httpd_req_t* req) {
 // from WebServer_Server.cpp's startup path. Both depend on the main web
 // UI being compiled in.
 void registerMigrationBackupHandler(httpd_handle_t server) {
-  static httpd_uri_t backupPost = {
+  static const httpd_uri_t backupPost = {
     .uri = "/api/backup",
     .method = HTTP_POST,
     .handler = handleBackup,
     .user_ctx = NULL
   };
-  static httpd_uri_t backupOptions = {
+  static const httpd_uri_t backupOptions = {
     .uri = "/api/backup",
     .method = HTTP_OPTIONS,
     .handler = handleCorsOptions,
     .user_ctx = NULL
   };
-  httpd_register_uri_handler(server, &backupPost);
-  httpd_register_uri_handler(server, &backupOptions);
+  esp_err_t postErr = httpd_register_uri_handler(server, &backupPost);
+  esp_err_t optErr = httpd_register_uri_handler(server, &backupOptions);
+  if (postErr != ESP_OK || optErr != ESP_OK) {
+    DEBUG_HTTPF("[Migration] /api/backup register failed (POST=%s OPTIONS=%s) — "
+                "URI handler table full? Increase max_uri_handlers.",
+                esp_err_to_name(postErr), esp_err_to_name(optErr));
+    broadcastOutput("[Migration] WARNING: /api/backup CORS preflight failed to register");
+  }
 }
 
 void registerPingOptionsHandler(httpd_handle_t server) {
-  static httpd_uri_t pingOptions = {
+  static const httpd_uri_t pingOptions = {
     .uri = "/api/ping",
     .method = HTTP_OPTIONS,
     .handler = handleCorsOptions,
     .user_ctx = NULL
   };
-  httpd_register_uri_handler(server, &pingOptions);
+  esp_err_t err = httpd_register_uri_handler(server, &pingOptions);
+  if (err != ESP_OK) {
+    DEBUG_HTTPF("[Migration] /api/ping OPTIONS register failed: %s", esp_err_to_name(err));
+  }
 }
 #endif // ENABLE_HTTP_SERVER  (end of backup-registration block)
 
 // Gate 1: Only register /api/restore when user selects "Import from Backup"
 void registerMigrationRestoreHandler(httpd_handle_t server) {
-  static httpd_uri_t restorePost = {
+  static const httpd_uri_t restorePost = {
     .uri = "/api/restore",
     .method = HTTP_POST,
     .handler = handleRestore,
     .user_ctx = NULL
   };
-  static httpd_uri_t restoreOptions = {
+  static const httpd_uri_t restoreOptions = {
     .uri = "/api/restore",
     .method = HTTP_OPTIONS,
     .handler = handleCorsOptions,
@@ -683,22 +833,32 @@ void unregisterMigrationRestoreHandler(httpd_handle_t server) {
 
 static esp_err_t handleRestoreSplash(httpd_req_t* req) {
   httpd_resp_set_type(req, "text/plain; charset=utf-8");
-  const char* body =
-    "HardwareOne Restore Mode\n"
-    "\n"
-    "This device is waiting for a backup restore.\n"
-    "\n"
-    "Do not use the normal web interface during this step.\n"
-    "Do not try to configure this device from this page.\n"
-    "\n"
-    "Use the HardwareOne Migration Tool browser application\n"
-    "on another device to send your .hwbackup file here.\n"
-    "\n"
-    "Migration Tool repository:\n"
-    "CadenGithubB/HardwareOne-Migration-Tool\n"
-    "\n"
-    "If you are the device owner and need to exit restore mode,\n"
-    "use the serial console command 'back' or press B on the gamepad.\n";
+  const char* body = sRestoreAwaitingConfirm
+    ? "HardwareOne Restore Mode\n"
+      "\n"
+      "A backup has been received and is waiting for confirmation.\n"
+      "\n"
+      "Confirm on the device OLED (Yes/No) or type 'yes' / 'no'\n"
+      "on the serial console. Files are not written until then.\n"
+      "\n"
+      "If you are the device owner and need to exit restore mode,\n"
+      "cancel the confirm prompt, then use serial 'back' or gamepad B.\n"
+    : "HardwareOne Restore Mode\n"
+      "\n"
+      "This device is waiting for a backup restore.\n"
+      "\n"
+      "Do not use the normal web interface during this step.\n"
+      "Do not try to configure this device from this page.\n"
+      "\n"
+      "Use the HardwareOne Migration Tool browser application\n"
+      "on another device to send your .hwbackup file here.\n"
+      "After upload, confirm on the device OLED or serial console.\n"
+      "\n"
+      "Migration Tool repository:\n"
+      "CadenGithubB/HardwareOne-Migration-Tool\n"
+      "\n"
+      "If you are the device owner and need to exit restore mode,\n"
+      "use the serial console command 'back' or press B on the gamepad.\n";
   httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
   return ESP_OK;
 }
@@ -709,7 +869,8 @@ static esp_err_t handlePingRestore(httpd_req_t* req) {
 
   // Include device fingerprint so the migration tool can pre-check compatibility
   String fp = getDeviceFingerprint();
-  String resp = "{\"ok\":true,\"mode\":\"restore\",\"fingerprint\":\"" + fp + "\"}";
+  String resp = "{\"ok\":true,\"mode\":\"restore\",\"fingerprint\":\"" + fp +
+                "\",\"pendingConfirm\":" + (sRestoreAwaitingConfirm ? "true" : "false") + "}";
   httpd_resp_send(req, resp.c_str(), resp.length());
   return ESP_OK;
 }
@@ -784,31 +945,31 @@ void startRestoreOnlyHttpServer() {
 restore_register:
 #endif
 
-  static httpd_uri_t splashGet = {
+  static const httpd_uri_t splashGet = {
     .uri = "/",
     .method = HTTP_GET,
     .handler = handleRestoreSplash,
     .user_ctx = NULL
   };
-  static httpd_uri_t pingGet = {
+  static const httpd_uri_t pingGet = {
     .uri = "/api/ping",
     .method = HTTP_GET,
     .handler = handlePingRestore,
     .user_ctx = NULL
   };
-  static httpd_uri_t pingOptions = {
+  static const httpd_uri_t pingOptions = {
     .uri = "/api/ping",
     .method = HTTP_OPTIONS,
     .handler = handleCorsOptions,
     .user_ctx = NULL
   };
-  static httpd_uri_t restorePost = {
+  static const httpd_uri_t restorePost = {
     .uri = "/api/restore",
     .method = HTTP_POST,
     .handler = handleRestore,
     .user_ctx = NULL
   };
-  static httpd_uri_t restoreOptions = {
+  static const httpd_uri_t restoreOptions = {
     .uri = "/api/restore",
     .method = HTTP_OPTIONS,
     .handler = handleCorsOptions,
@@ -823,6 +984,7 @@ restore_register:
 }
 
 void stopRestoreOnlyHttpServer() {
+  discardStagedMigrationRestore();
   if (server) {
 #if ENABLE_HTTPS
     if (sRestoreUsedHttps) {

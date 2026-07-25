@@ -80,11 +80,37 @@ inline constexpr const char* kBondAdminUser = "bond-admin";
 // Transport-generic authentication functions
 bool tgRequireAuth(AuthContext& ctx);
 bool isAdminUser(const String& who);
+
+// Founder / first users.json username (FTS creates id=1 as the first entry).
+// Empty if users.json is missing or unreadable. Used as a recovery identity
+// when G2 pairedByUser was never stamped or was cleared (ban/logout).
+String getDeviceOwnerUsername();
 // Top tier — role=="superadmin" (or a live bonded session). Gates the
 // identity/crypto/destructive/auth-posture command set; see commandRequiresSuperAdmin.
 bool isSuperAdminUser(const String& who);
-// Privilege rank for target-protection: user=0, admin=1, superadmin=2.
+// Bottom tier — role=="guest". Authenticated view-only: login/logout only
+// for commands; filesystem reads use the user column masked to PERM_READ.
+bool isGuestUser(const String& who);
+
+// Privilege ranks — single source of truth for C++ comparisons. The settings
+// page mirrors these as window.__hwRoleRank (injected from the same values).
+// Accounts store role *names* in users.json, never these integers.
+constexpr int kRoleRankGuest      = 0;
+constexpr int kRoleRankUser       = 1;
+constexpr int kRoleRankAdmin      = 2;
+constexpr int kRoleRankSuperAdmin = 3;
+// Sentinel for userMutationAllowed when the mutation grants no role (delete/ban).
+constexpr int kRoleRankNoGrant    = -1;
+
+// Map a role name ("guest"|"user"|"admin"|"superadmin") to a rank.
+// Unrecognised names collapse to kRoleRankUser.
 int userRoleRank(const String& role);
+// Effective rank for a live account — applies bond/owner fallbacks via
+// isSuperAdminUser/isAdminUser, then guest detection. Prefer this over
+// hand-decoding admin/super booleans when comparing privileges.
+int userAccountRank(const String& username);
+// True for the four grantable role names (caller should lowercase first).
+bool isKnownUserRole(const String& role);
 
 // Centralized transport authentication management
 bool loginTransport(CommandSource transport, const String& username, const String& password);
@@ -128,10 +154,22 @@ bool setUserPassword(const String& username, const String& newPasswordRaw, bool 
 // True when per-user settings has mustChangePassword (user must set a new password after login).
 bool userMustChangePassword(const String& username);
 
-// Admin: create a new account immediately (not pending). Regular user role. Password is hashed into per-user settings.
+// Public username/password intake rules (register + admin create). Username:
+// 1..64 chars of [A-Za-z0-9._-], not a reserved sentinel. Password: 6..64 chars.
+// errorOut (optional) gets a short fixed reason string — safe to show on public pages.
+bool isValidPublicUsername(const String& username, String* errorOut = nullptr);
+bool isValidPublicPassword(const String& password, String* errorOut = nullptr);
+static constexpr size_t kPublicUsernameMaxLen = 64;
+static constexpr size_t kPublicPasswordMaxLen = 64;
+static constexpr size_t kPublicPasswordMinLen = 6;
+
+// Admin: create a new account immediately (not pending). Password is hashed into per-user settings.
 // If mustChangeOnLogin is true, userMustChangePassword stays set until they change password via setUserPassword.
+// `role` is "user" (default), "admin", or "superadmin". CALLERS MUST RANK-CHECK
+// FIRST — this is a data mutator and does not enforce "cannot grant a role above
+// your own"; cmd_user_add does that via userMutationAllowed().
 bool adminCreateUser(const String& username, const String& plainPassword, bool mustChangeOnLogin,
-                     const String& createdBy, String& errorOut);
+                     const String& createdBy, String& errorOut, const String& role = "user");
 
 // Update a user's gamepad pattern password (stores hashed, separate from text password)
 bool setUserGamepadPassword(const String& username, const String& newPatternRaw);

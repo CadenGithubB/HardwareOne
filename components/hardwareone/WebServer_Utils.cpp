@@ -339,6 +339,103 @@ String makeSessToken() {
 }
 
 // ============================================================================
+// Guest HTTP access gate
+// ============================================================================
+
+static void webGuestSendForbidden(httpd_req_t* req) {
+  httpd_resp_set_status(req, "403 Forbidden");
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_sendstr(req,
+    "{\"success\":false,\"error\":\"guest_forbidden\","
+    "\"message\":\"Guest accounts are view-only\"}");
+}
+
+// Surface-level status / list APIs guests may poll. Not files, CLI, camera
+// capture, bond FS, admin, or other deep/control surfaces.
+static bool webGuestApiAllowed(const char* path) {
+  static const char* const kAllow[] = {
+    "/api/ping",
+    "/api/notice",
+    "/api/buildconfig",
+    "/api/system",
+    "/api/devices",
+    "/api/sessions",
+    "/api/settings",
+    "/api/settings/schema",
+    "/api/user/settings",
+    "/api/events",
+    "/api/events/kinds",
+    "/api/logging/status",
+    "/api/espnow/status",
+    "/api/espnow/messages",
+    "/api/espnow/metadata",
+    "/api/ble/status",
+    "/api/speech/status",
+    "/api/mqtt/status",
+    "/api/automations",
+    "/api/battery/status",
+    "/api/sensors",
+    "/api/sensors/status",
+    "/api/sensors/remote",
+    "/api/sensors/camera/status",
+    "/api/llm/status",
+    "/api/llm/models",
+    "/api/llm/menu",
+    "/api/llm/result",
+    "/api/llm/chat/turns",
+    "/api/bond/status",
+    "/api/bond/paired-devices",
+    "/api/maps/features",
+    "/api/waypoints",
+    "/api/gps/tracks",
+    "/api/icon",
+  };
+  for (const char* allow : kAllow) {
+    if (strcmp(path, allow) == 0) return true;
+  }
+  return false;
+}
+
+bool webGuestAccessAllowed(httpd_req_t* req, const AuthContext& ctx) {
+  if (!req) return false;
+  if (ctx.user.length() == 0 || !isGuestUser(ctx.user)) return true;
+
+  // CORS preflight — never a mutate.
+  if (req->method == HTTP_OPTIONS) return true;
+
+  // Path without query string. httpd_req_t::uri is a fixed-size char array,
+  // never NULL, so no null-guard (a ternary here trips -Werror=address).
+  const char* uri = req->uri;
+  char path[128];
+  size_t n = 0;
+  while (uri[n] && uri[n] != '?' && n + 1 < sizeof(path)) {
+    path[n] = uri[n];
+    n++;
+  }
+  path[n] = '\0';
+
+  if (req->method != HTTP_GET && req->method != HTTP_HEAD) {
+    webGuestSendForbidden(req);
+    return false;
+  }
+
+  // HTML view pages + logout + browser chrome. Block CLI and session minting.
+  if (strncmp(path, "/api/", 5) != 0) {
+    if (strcmp(path, "/cli") == 0 || strcmp(path, "/login/setsession") == 0) {
+      webGuestSendForbidden(req);
+      return false;
+    }
+    return true;
+  }
+
+  if (!webGuestApiAllowed(path)) {
+    webGuestSendForbidden(req);
+    return false;
+  }
+  return true;
+}
+
+// ============================================================================
 // Navigation HTML Generation
 // ============================================================================
 
@@ -366,8 +463,12 @@ String generateNavigation(const String& activePage, const String& username, cons
     nav += text;
     nav += "</a>";
   };
+  const bool guestRole = username.length() > 0 && isGuestUser(username);
   link("/dashboard", "dashboard", "Dashboard");
-  link("/cli", "cli", "Command Line");
+  // Guests are view-only — free-form CLI is not part of that surface.
+  if (!guestRole) {
+    link("/cli", "cli", "Command Line");
+  }
 #if ENABLE_WEB_SENSORS
   link("/sensors", "sensors", "Sensors");
 #endif
@@ -495,7 +596,8 @@ void streamHtmlEscaped(httpd_req_t* req, const char* buf, size_t len) {
       case '&': rep = "&amp;"; break;
       case '<': rep = "&lt;"; break;
       case '>': rep = "&gt;"; break;
-      case '"': rep = "&quot;"; break;  // also makes this safe inside an attribute
+      case '"': rep = "&quot;"; break;  // safe inside double-quoted attributes
+      case '\'': rep = "&#39;"; break;  // safe inside single-quoted attributes
       default: continue;                // extend the run
     }
     if (i > run) put(buf + run, i - run);
@@ -574,7 +676,52 @@ void streamBeginHtml(httpd_req_t* req,
 
   // Shared lightweight client helpers (available as window.hw)
   if (!isPublic) {
-    streamChunkC(req, "<script>(function(w){'use strict';var hw=w.hw||(w.hw={});function sysTheme(){try{return (w.matchMedia&&w.matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light'}catch(_){return 'light'}}function dbg(){try{return !!(w.localStorage&&w.localStorage.getItem('hwDebugTheme')==='1')}catch(_){return false}}function log(){try{if(dbg())console.log.apply(console,arguments)}catch(_){}}hw.updateThemeIcon=function(){var btn=document.getElementById('theme-toggle-icon');if(btn){var t=document.documentElement.dataset.theme||'light';btn.textContent=(t==='dark')?'🌙':'☀️'}};hw.applyTheme=function(pref){var v=(pref==='system'||!pref)?sysTheme():pref;document.documentElement.dataset.theme=v;hw._themePref=pref||'light';if(document.body){document.body.style.background=(v==='dark')?'linear-gradient(135deg,#07070b 0%,#151520 100%)':'linear-gradient(135deg,#667eea 0%,#764ba2 100%)'}hw.updateThemeIcon();log('[theme] apply pref=',pref,'->',v)};hw.loadThemePref=function(){log('[theme] load pref from /api/user/settings');return (hw.fetchJSON?hw.fetchJSON('/api/user/settings') : fetch('/api/user/settings',{credentials:'include',cache:'no-store',headers:{'Accept':'application/json'}}).then(function(r){return r.json()})).then(function(d){var pref=(d&&d.settings&&d.settings.theme)?d.settings.theme:'light';log('[theme] loaded',pref,'raw=',d);return pref}).catch(function(e){log('[theme] load failed',e);return 'light'})};hw.saveThemePref=function(pref){var body={theme:pref};log('[theme] save',body);return (hw.postJSON?hw.postJSON('/api/user/settings',body) : fetch('/api/user/settings',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json','Accept':'application/json'},body:JSON.stringify(body)}).then(function(r){return r.json()})).then(function(d){log('[theme] save resp',d);return d}).catch(function(e){log('[theme] save failed',e);return null})};hw.initTheme=function(){var initial=document.documentElement.dataset.theme||'light';document.documentElement.dataset.theme=initial;log('[theme] init initial=',initial);hw.loadThemePref().then(function(pref){hw.applyTheme(pref)});try{var mq=w.matchMedia('(prefers-color-scheme: dark)');if(mq&&mq.addEventListener){mq.addEventListener('change',function(){if(hw._themePref==='system')hw.applyTheme('system')})}}catch(_){}};hw.cycleTheme=function(){var cur=hw._themePref||'light';var next=(cur==='light')?'dark':((cur==='dark')?'system':'light');hw.applyTheme(next);hw.saveThemePref(next)};try{hw.initTheme();}catch(_){}})(window);</script>");
+    // Role snapshot for every authenticated page (mirrors /api/settings user.*).
+    // Pages use hw.isGuest() / [data-guest-hide] instead of re-fetching settings.
+    {
+      const bool isAdm = username.length() > 0 && isAdminUser(username);
+      const bool isGst = username.length() > 0 && isGuestUser(username);
+      const int rank = username.length() > 0 ? userAccountRank(username) : kRoleRankUser;
+      String s = "<script>window.__hwRoleRank={guest:";
+      s += kRoleRankGuest;
+      s += ",user:";
+      s += kRoleRankUser;
+      s += ",admin:";
+      s += kRoleRankAdmin;
+      s += ",superadmin:";
+      s += kRoleRankSuperAdmin;
+      s += "};window.__hwRank=";
+      s += rank;
+      s += ";window.__hwUser={username:";
+      // Minimal JSON string escape for username
+      s += "\"";
+      for (size_t i = 0; i < username.length(); ++i) {
+        char c = username[i];
+        if (c == '"' || c == '\\') s += '\\';
+        s += c;
+      }
+      s += "\",isAdmin:";
+      s += isAdm ? "true" : "false";
+      s += ",isGuest:";
+      s += isGst ? "true" : "false";
+      s += ",roleRank:";
+      s += rank;
+      s += "};</script>";
+      httpd_resp_send_chunk(req, s.c_str(), s.length());
+    }
+    streamChunkC(req,
+      "<style>.guest-view [data-guest-hide]{display:none!important}"
+      ".guest-view .guest-banner{display:block!important}</style>");
+    streamChunkC(req, "<script>(function(w){'use strict';var hw=w.hw||(w.hw={});function sysTheme(){try{return (w.matchMedia&&w.matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light'}catch(_){return 'light'}}function dbg(){try{return !!(w.localStorage&&w.localStorage.getItem('hwDebugTheme')==='1')}catch(_){return false}}function log(){try{if(dbg())console.log.apply(console,arguments)}catch(_){}}hw.updateThemeIcon=function(){var btn=document.getElementById('theme-toggle-icon');if(btn){var t=document.documentElement.dataset.theme||'light';btn.textContent=(t==='dark')?'🌙':'☀️'}};hw.applyTheme=function(pref){var v=(pref==='system'||!pref)?sysTheme():pref;document.documentElement.dataset.theme=v;hw._themePref=pref||'light';if(document.body){document.body.style.background=(v==='dark')?'linear-gradient(135deg,#07070b 0%,#151520 100%)':'linear-gradient(135deg,#667eea 0%,#764ba2 100%)'}hw.updateThemeIcon();log('[theme] apply pref=',pref,'->',v)};hw.loadThemePref=function(){log('[theme] load pref from /api/user/settings');return (hw.fetchJSON?hw.fetchJSON('/api/user/settings') : fetch('/api/user/settings',{credentials:'include',cache:'no-store',headers:{'Accept':'application/json'}}).then(function(r){return r.json()})).then(function(d){var pref=(d&&d.settings&&d.settings.theme)?d.settings.theme:'light';log('[theme] loaded',pref,'raw=',d);return pref}).catch(function(e){log('[theme] load failed',e);return 'light'})};hw.saveThemePref=function(pref){var body={theme:pref};log('[theme] save',body);return (hw.postJSON?hw.postJSON('/api/user/settings',body) : fetch('/api/user/settings',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json','Accept':'application/json'},body:JSON.stringify(body)}).then(function(r){return r.json()})).then(function(d){log('[theme] save resp',d);return d}).catch(function(e){log('[theme] save failed',e);return null})};hw.initTheme=function(){var initial=document.documentElement.dataset.theme||'light';document.documentElement.dataset.theme=initial;log('[theme] init initial=',initial);hw.loadThemePref().then(function(pref){hw.applyTheme(pref)});try{var mq=w.matchMedia('(prefers-color-scheme: dark)');if(mq&&mq.addEventListener){mq.addEventListener('change',function(){if(hw._themePref==='system')hw.applyTheme('system')})}}catch(_){}};hw.cycleTheme=function(){var cur=hw._themePref||'light';var next=(cur==='light')?'dark':((cur==='dark')?'system':'light');hw.applyTheme(next);hw.saveThemePref(next)};hw.isGuest=function(){return !!(w.__hwUser&&w.__hwUser.isGuest)};hw.isAdmin=function(){return !!(w.__hwUser&&w.__hwUser.isAdmin)};hw.applyGuestViewOnly=function(){if(!hw.isGuest())return;try{document.documentElement.classList.add('guest-view');var nodes=document.querySelectorAll('[data-guest-hide]');for(var i=0;i<nodes.length;i++){nodes[i].style.display='none'}var ban=document.getElementById('hw-guest-banner');if(ban)ban.style.display='block'}catch(_){}};try{hw.initTheme();}catch(_){}})(window);</script>");
+    streamChunkC(req,
+      "<div id=\"hw-guest-banner\" class=\"guest-banner\" style=\"display:none;margin:0.75rem 1rem 0;padding:0.6rem 0.9rem;"
+      "background:rgba(113,128,150,0.15);border:1px solid var(--border);border-radius:6px;color:var(--panel-fg);font-size:0.9rem\">"
+      "View-only guest session — settings and commands that change the device are unavailable."
+      "</div>");
+    streamChunkC(req,
+      "<script>document.addEventListener('DOMContentLoaded',function(){"
+      "try{if(window.hw&&hw.applyGuestViewOnly)hw.applyGuestViewOnly()}catch(_){}"
+      "});</script>");
   }
   streamChunkC(req, "<script>(function(w){'use strict';var hw=w.hw||(w.hw={});hw.qs=function(s,c){return (c||document).querySelector(s)};hw.qsa=function(s,c){return (c||document).querySelectorAll(s)};hw.on=function(e,v,f){if(e)e.addEventListener(v,f)};hw._ge=function(x){return typeof x==='string'?document.getElementById(x):x};hw.setText=function(x,t){var el=hw._ge(x);if(el)el.textContent=t};hw.setHTML=function(x,h){var el=hw._ge(x);if(el)el.innerHTML=h};hw.show=function(x){var el=hw._ge(x);if(el)el.style.display=''};hw.hide=function(x){var el=hw._ge(x);if(el)el.style.display='none'};hw.toggle=function(x,sh){(sh?hw.show:hw.hide)(x)};hw._auth401=function(r){if(r.status!==401)return r;return r.json().then(function(d){if(d&&d.error==='auth_required'&&d.reload){w.location.href='/login'}throw new Error('auth_required')}).catch(function(){w.location.href='/login';throw new Error('auth_required')})};hw.fetchJSON=function(u,o){o=o||{};if(!o.credentials)o.credentials='include';if(!o.cache)o.cache='no-store';if(!o.headers)o.headers={};o.headers['Accept']='application/json';return fetch(u,o).then(hw._auth401).then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json()})};hw.postJSON=function(u,b,o){o=o||{};o.method='POST';o.headers=Object.assign({'Content-Type':'application/json'},o.headers||{});o.body=JSON.stringify(b||{});return hw.fetchJSON(u,o)};hw.postForm=function(u,form,o){o=o||{};o.method='POST';o.headers=Object.assign({'Content-Type':'application/x-www-form-urlencoded'},o.headers||{});var b=[];for(var k in (form||{})){if(Object.prototype.hasOwnProperty.call(form,k)){b.push(encodeURIComponent(k)+'='+encodeURIComponent(form[k]))}};o.body=b.join('&');if(!o.credentials)o.credentials='include';if(!o.cache)o.cache='no-store';return fetch(u,o).then(hw._auth401)};hw.fetchText=function(u,o){o=o||{};if(!o.credentials)o.credentials='include';if(!o.cache)o.cache='no-store';return fetch(u,o).then(hw._auth401).then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.text()})};hw.postFormText=function(u,form,o){return hw.postForm(u,form,o).then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.text()})};hw.cliConfirm=function(cliCmd,userPrompt,opts){opts=opts||{};var url=(opts.target==='bond')?'/api/bond/cli/batch':'/api/cli/batch';var ask=(typeof w.hwConfirm==='function')?w.hwConfirm(userPrompt):Promise.resolve(w.confirm(userPrompt));return ask.then(function(ok){if(!ok)return {cancelled:true,ok:false,result:''};return hw.postJSON(url,{commands:[cliCmd,'yes']}).then(function(data){var rs=(data&&data.results)||[];var result=rs[1]||'';var failed=!result||/Error|Failed|Cancelled/.test(result);return {cancelled:false,ok:!failed,result:result};});});};try{console.log('[HW] helpers ready');}catch(_){} })(window);</script>");
   streamChunkC(req, "<script>(function(w){var hw=w.hw||(w.hw={});hw.pollJSON=function(u,ms,cb){try{cb=cb||function(){};ms=ms||1000;var h=setInterval(function(){hw.fetchJSON(u).then(cb).catch(function(e){if(e&&e.message==='auth_required'){clearInterval(h)}})},ms);return function(){clearInterval(h)};}catch(_){return function(){}}};try{console.log('[HW] page=\"");

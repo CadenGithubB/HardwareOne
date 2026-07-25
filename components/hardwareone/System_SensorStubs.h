@@ -208,8 +208,12 @@
   inline const char* buildCameraStatusJson() { return "{}"; }
 #endif
 
-#if !ENABLE_MICROPHONE_SENSOR
-  // Microphone stubs when disabled
+#if !ENABLE_MICROPHONE
+  // Microphone stubs when the mic subsystem is absent entirely (no PDM AND no
+  // G2-capable build). Gated on ENABLE_MICROPHONE in lockstep with
+  // System_Microphone.{h,cpp} and System_SensorStubs.cpp — otherwise a PDM-less
+  // but G2-capable board (FeatherS3) compiles both these inline stubs and the
+  // real prototypes/definitions → ODR + duplicate-symbol link errors.
   extern bool gMicEnabled;
   extern bool micConnected;
   extern bool micRecording;
@@ -253,6 +257,7 @@
   inline bool upsertWiFiNetwork(const String& ssid, const String& password, int priority, bool enabled) { return false; }
   inline void sortWiFiByPriority() {}
   inline bool saveWiFiNetworks() { return false; }
+  inline void wifiEventLogDrain() {}
   inline const char* cmd_wifitxpower(const String& argsInput) { return "WiFi disabled"; }
   inline const char* cmd_wifiautoreconnect(const String& argsInput) { return "WiFi disabled"; }
   // WiFi class stub

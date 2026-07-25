@@ -85,8 +85,8 @@ inline void streamSpeechInner(httpd_req_t* req) {
         ESP-SR wake word detection and command recognition. Say the wake word to activate, then speak a command.
       </div>
       <div class='sr-controls'>
-        <button class='btn' id='btn-sr-start'>Start SR</button>
-        <button class='btn' id='btn-sr-stop' style='display:none'>Stop SR</button>
+        <button class='btn' id='btn-sr-start' data-guest-hide>Start SR</button>
+        <button class='btn' id='btn-sr-stop' style='display:none' data-guest-hide>Stop SR</button>
         <button class='btn' id='btn-sr-refresh'>Refresh Status</button>
       </div>
       <div class='sr-status' id='sr-status-box'>Click "Refresh Status" to query speech recognition state...</div>
@@ -147,7 +147,7 @@ inline void streamSpeechInner(httpd_req_t* req) {
   </div>
   
   <!-- Debug & Tuning Card -->
-  <div class='sr-card' style='margin-top:20px'>
+  <div class='sr-card' style='margin-top:20px' data-guest-hide>
     <div class='sr-title'>Debug & Tuning</div>
     <div class='sr-description'>
       Audio gain settings and debug options to improve recognition accuracy.
@@ -220,11 +220,11 @@ inline void streamSpeechInner(httpd_req_t* req) {
     <div id='sr-files-section' style='display:none;margin-top:10px;padding:15px;background:var(--crumb-bg);border:1px solid var(--border);border-radius:8px'>
       <div style='margin-bottom:12px'>
         <label style='display:block;margin-bottom:6px;font-size:0.9em;color:var(--panel-fg)'>Model Directory:</label>
-        <select id='sr-model-select' style='width:100%;padding:8px;border-radius:4px;border:1px solid var(--border);background:var(--panel-bg);color:var(--panel-fg)'>
+        <select id='sr-model-select' style='width:100%;padding:8px;border-radius:4px;border:1px solid var(--border);background:var(--panel-bg);color:var(--panel-fg)' data-guest-hide>
           <option value=''>-- Select Model File --</option>
         </select>
         <div style='display:flex;gap:8px;margin-top:8px;flex-wrap:wrap'>
-          <button class='btn' id='btn-sr-load-model'>Load</button>
+          <button class='btn' id='btn-sr-load-model' data-guest-hide>Load</button>
           <button class='btn' id='btn-sr-refresh-models'>Refresh</button>
           <button class='btn' id='btn-sr-open-folder'>Open Folder</button>
         </div>
@@ -242,8 +242,8 @@ inline void streamSpeechInner(httpd_req_t* req) {
       <!-- Upload Section -->
       <div style='margin-top:15px;padding-top:12px;border-top:1px solid var(--border)'>
         <label style='display:block;margin-bottom:6px;font-size:0.9em;color:var(--panel-fg)'>Upload Model File:</label>
-        <input type='file' id='sr-model-file' accept='.wn,.bin,.txt' style='width:100%;margin-bottom:8px;color:var(--panel-fg)'>
-        <button class='btn' id='btn-sr-upload-model' style='width:100%'>Upload Model</button>
+        <input type='file' id='sr-model-file' accept='.wn,.bin,.txt' style='width:100%;margin-bottom:8px;color:var(--panel-fg)' data-guest-hide>
+        <button class='btn' id='btn-sr-upload-model' style='width:100%' data-guest-hide>Upload Model</button>
         <div id='sr-upload-status' style='font-size:0.85em;margin-top:6px;color:var(--panel-fg)'></div>
       </div>
       
@@ -426,8 +426,8 @@ inline void streamSpeechInner(httpd_req_t* req) {
   var lastCmdCount = 0;
   
   function refreshStatus(){
-    postCli('srstatus').then(function(out){
-      var data = parseStatus(out);
+    hw.fetchJSON('/api/speech/status').then(function(obj){
+      var data = parseStatus(JSON.stringify(obj || {}));
       if(data){
         // Check for new detections
         if(data.wakeCount > lastWakeCount){
@@ -504,9 +504,19 @@ inline void streamSpeechInner(httpd_req_t* req) {
       
       // Parse file entries
       var files = [];
+      /* The guard below tested uppercase 'ERROR', but the uniform return
+         contract emits "Error: ". So an error line was NOT skipped — it was
+         split on whitespace and its last token pushed as a filename:
+         "Error: Permission denied" became a selectable model called "denied",
+         reported as "Found 1 file(s)", and fed straight into `sr loadwake`.
+         Bail on a failed response instead of parsing it as a listing. */
+      if(out && /^\s*(Error|ERROR)\b/.test(out)){
+        setFileStatus(out.trim());
+        return;
+      }
       for(var i=0; i<lines.length; i++){
         var line = lines[i].trim();
-        if(line.indexOf('ERROR') >= 0 || line.indexOf('not found') >= 0) continue;
+        if(/^(Error|ERROR)\b/.test(line) || line.indexOf('not found') >= 0) continue;
         // Extract filename from ls output (format varies)
         var parts = line.split(/\s+/);
         var fname = parts[parts.length - 1];
@@ -677,12 +687,9 @@ inline void streamSpeechInner(httpd_req_t* req) {
   updateTuningStatus();
   
   // Start polling if already running
-  postCli('srstatus').then(function(out){
-    try {
-      var data = JSON.parse(out);
-      if(data.running) startPolling();
-    } catch(e){}
-  });
+  hw.fetchJSON('/api/speech/status').then(function(data){
+    if(data && data.running) startPolling();
+  }).catch(function(){});
 })();
 </script>
 )JS", HTTPD_RESP_USE_STRLEN);

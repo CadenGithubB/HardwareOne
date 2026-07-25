@@ -877,13 +877,110 @@ static bool buildLayerTensors() {
   return true;
 }
 
-// Read the optional info block (description + icon) that sits between the 64-byte
-// header and the tokenizer when the header's info_len (offset 24) is non-zero.
-// Best effort: a malformed/oversized field is skipped rather than failing the
-// load. ALWAYS leaves the file cursor at infoStart + infoLen — i.e. the first
-// byte of the tokenizer block — so downstream reads (which key off the live
-// f.position()) stay correct regardless of any parse drift. infoLen==0 is a
-// no-op, leaving the cursor at the header end exactly as before this feature.
+// Validate a MENU section payload (already read into `b`, `n` bytes) strictly per
+// LLM_GUIDED_MENU_SPEC §4 and fill `outGroups`/`outCount`. ONE walk: every
+// length-prefixed item must land inside the payload, all counts within caps, and
+// <=1 slot byte (0x1F) per template. Returns true only for a fully valid menu.
+// menu_ver!=1 or group_count outside 1..8 → false (the section is skipped, which
+// is a first-class "no menu" state, not a load error). Descriptor offsets are
+// byte offsets from the start of `b`.
+static bool validateMenuBlob(const uint8_t* b, size_t n,
+                             LLMMenuGroupDesc* outGroups, uint8_t* outCount) {
+  if (n < 4) return false;                        // menu_ver + group_count + reserved
+  if (b[0] != 1) return false;                    // menu_ver != 1 → skip section
+  uint8_t groupCount = b[1];
+  if (groupCount < 1 || groupCount > 8) return false;
+  // b[2..3] = reserved u16 (must be 0 per spec; ignored on read).
+  size_t pos = 4;
+  for (uint8_t g = 0; g < groupCount; g++) {
+    if (pos + 1 > n) return false;
+    uint8_t flags = b[pos++];
+    if (pos + 1 > n) return false;
+    uint8_t nameLen = b[pos++];
+    if (nameLen > 32) return false;
+    if (pos + nameLen > n) return false;
+    uint32_t nameOff = (uint32_t)pos;
+    pos += nameLen;
+    if (pos + 2 > n) return false;
+    uint16_t tplCount = (uint16_t)(b[pos] | (b[pos + 1] << 8)); pos += 2;
+    if (tplCount > 64) return false;
+    if (pos + 2 > n) return false;
+    uint16_t entCount = (uint16_t)(b[pos] | (b[pos + 1] << 8)); pos += 2;
+    if (entCount > 1024) return false;
+    uint32_t tplOff = (uint32_t)pos;
+    for (uint16_t t = 0; t < tplCount; t++) {
+      if (pos + 1 > n) return false;
+      uint8_t len = b[pos++];
+      if (len > 120) return false;
+      if (pos + len > n) return false;
+      uint8_t slots = 0;
+      for (uint8_t k = 0; k < len; k++) if (b[pos + k] == 0x1F) slots++;
+      if (slots > 1) return false;                // <=1 slot per template
+      pos += len;
+    }
+    uint32_t entOff = (uint32_t)pos;
+    for (uint16_t e = 0; e < entCount; e++) {
+      if (pos + 1 > n) return false;
+      uint8_t len = b[pos++];
+      if (len > 48) return false;
+      if (pos + len > n) return false;
+      pos += len;
+    }
+    outGroups[g].nameOff  = nameOff;
+    outGroups[g].tplOff   = tplOff;
+    outGroups[g].entOff   = entOff;
+    outGroups[g].tplCount = tplCount;
+    outGroups[g].entCount = entCount;
+    outGroups[g].flags    = flags;
+    outGroups[g].nameLen  = nameLen;
+  }
+  *outCount = groupCount;
+  return true;
+}
+
+// MENU section (id 4): read the payload into a PSRAM blob, validate strictly, and
+// publish it (transferring ownership) or free it. The menu was already cleared by
+// loadInfoBlockFromFile, so any failure path simply leaves guided input absent.
+static void parseMenuSection(File& f, size_t payloadStart, uint32_t slen) {
+  // Encoded MENU section is capped at 32768 B (spec §2); anything else is malformed.
+  if (slen < 4 || slen > 32768) {
+    DEBUG_LLM_LOADF("[LLM] menu: section size %u out of range — guided input disabled",
+                    (unsigned)slen);
+    return;
+  }
+  uint8_t* blob = (uint8_t*)llmPsramAlloc(slen, "llm.menu");
+  if (!blob) {
+    DEBUG_LLM_LOADF("[LLM] menu: OOM allocating %u B — guided input disabled", (unsigned)slen);
+    return;
+  }
+  f.seek(payloadStart);
+  if (f.read(blob, slen) != (int)slen) {
+    DEBUG_LLM_LOADF("[LLM] menu: short read — guided input disabled");
+    llmPsramFree((void**)&blob);
+    return;
+  }
+  LLMMenuGroupDesc groups[8];
+  uint8_t count = 0;
+  if (!validateMenuBlob(blob, slen, groups, &count)) {
+    DEBUG_LLM_LOADF("[LLM] menu: malformed MENU section — guided input disabled");
+    llmPsramFree((void**)&blob);
+    return;
+  }
+  llmMenuPublish(blob, slen, groups, count);      // takes ownership of blob
+  DEBUG_LLM_LOADF("[LLM] menu: %u group(s) published (%u B)", (unsigned)count, (unsigned)slen);
+}
+
+// Read the optional info block (v2 TLV: description + icon + domain gate + guided
+// menu) that sits between the 64-byte header and the tokenizer when the header's
+// info_len (offset 24) is non-zero. Best effort: a malformed/oversized field is
+// skipped rather than failing the load. ALWAYS leaves the file cursor at
+// infoStart + infoLen — i.e. the first byte of the tokenizer block — so downstream
+// reads (which key off the live f.position()) stay correct regardless of any parse
+// drift. infoLen==0 is a no-op, leaving the cursor at the header end.
+//
+// A legacy v1 block (no 0x4932 sentinel) can't be read positionally by this
+// parser — its metadata is wiped and the cursor seeks past (the model still
+// loads). See LLM_GUIDED_MENU_SPEC §3.
 static void loadInfoBlockFromFile(File& f, uint32_t infoLen) {
   gLLM.modelDesc[0]  = '\0';
   gLLM.modelHasIcon  = false;
@@ -893,69 +990,101 @@ static void loadInfoBlockFromFile(File& f, uint32_t infoLen) {
   if (gLLM.domainVocab) llmPsramFree((void**)&gLLM.domainVocab);
   gLLM.domainVocabCount = 0;
   gLLM.domainVocabBytes = 0;
+  // Menu is published/cleared through the locked helpers so a reader on another
+  // task never observes a torn state. Clear first; a valid MENU section republishes.
+  llmMenuClear();
+
   if (infoLen == 0) return;
 
   const size_t infoStart = f.position();
+  const size_t infoEnd   = infoStart + infoLen;
 
-  // Description: uint16 length prefix + UTF-8 bytes (truncated to our buffer).
-  uint16_t descLen = 0;
-  if (f.read((uint8_t*)&descLen, 2) == 2 && descLen > 0) {
-    size_t copyLen = (descLen < sizeof(gLLM.modelDesc)) ? descLen
-                                                        : sizeof(gLLM.modelDesc) - 1;
-    if (copyLen > 0) f.read((uint8_t*)gLLM.modelDesc, copyLen);
-    gLLM.modelDesc[copyLen] = '\0';
+  // Info block v2 opens with a u16LE sentinel = 0x4932. A legacy v1 block starts
+  // with desc_len (<=255, high byte 0), so any value >=0x0100 is unambiguously v2.
+  uint16_t sentinel = 0;
+  if (f.read((uint8_t*)&sentinel, 2) != 2 || sentinel != 0x4932) {
+    f.seek(infoEnd);   // legacy/unreadable — metadata already wiped, model still loads
+    return;
   }
 
-  // Icon: fmt(u8) + w(u8) + h(u8) + uint16 len + packed 1bpp bitmap (MSB-first).
-  uint8_t iconFmt = 0, iconW = 0, iconH = 0;
-  uint16_t iconLen = 0;
-  if (f.read(&iconFmt, 1) == 1 && f.read(&iconW, 1) == 1 &&
-      f.read(&iconH, 1) == 1 && f.read((uint8_t*)&iconLen, 2) == 2) {
-    const size_t expect = (size_t)((iconW + 7) / 8) * iconH;
-    if (iconFmt == 1 && iconW > 0 && iconW <= 32 && iconH > 0 && iconH <= 32 &&
-        iconLen == expect && iconLen <= sizeof(gLLM.modelIcon)) {
-      if (f.read(gLLM.modelIcon, iconLen) == (int)iconLen) {
-        gLLM.modelIconW   = iconW;
-        gLLM.modelIconH   = iconH;
-        gLLM.modelHasIcon = true;
+  uint8_t sectionCount = 0;
+  if (f.read(&sectionCount, 1) != 1) { f.seek(infoEnd); return; }
+
+  // TLV walk. Inner section encodings are preserved from v1 so the field parsers
+  // below match the pre-TLV layout (icon fmt/w/h/len; domain refusal + vocab).
+  for (uint8_t s = 0; s < sectionCount; s++) {
+    if (f.position() + 5 > infoEnd) break;         // no room for id(1)+len(4)
+    uint8_t  sid  = 0;
+    uint32_t slen = 0;
+    if (f.read(&sid, 1) != 1) break;
+    if (f.read((uint8_t*)&slen, 4) != 4) break;
+    const size_t payloadStart = f.position();
+    if (slen > infoEnd - payloadStart) break;      // declared length overruns the block
+
+    switch (sid) {
+      case 1: {  // DESC — raw UTF-8, whole payload (converter caps at 255 B)
+        size_t copyLen = (slen < sizeof(gLLM.modelDesc)) ? slen : sizeof(gLLM.modelDesc) - 1;
+        if (copyLen > 0) f.read((uint8_t*)gLLM.modelDesc, copyLen);
+        gLLM.modelDesc[copyLen] = '\0';
+        break;
       }
-    }
-  }
-
-  const size_t infoEnd = infoStart + infoLen;
-
-  // Refusal string (optional appended section): uint16 length prefix + UTF-8 bytes.
-  if (f.position() + 2 <= infoEnd) {
-    uint16_t refLen = 0;
-    if (f.read((uint8_t*)&refLen, 2) == 2 && refLen > 0) {
-      const size_t refEnd = f.position() + refLen;
-      if (refEnd <= infoEnd) {
-        size_t copyLen = (refLen < sizeof(gLLM.modelRefusal)) ? refLen
-                                                              : sizeof(gLLM.modelRefusal) - 1;
-        if (copyLen > 0) f.read((uint8_t*)gLLM.modelRefusal, copyLen);
-        gLLM.modelRefusal[copyLen] = '\0';
-        f.seek(refEnd);  // realign past any truncated tail so the vocab section stays aligned
-      }
-    }
-  }
-
-  // Domain vocab (optional): uint16 count, then a packed [u8 len][word] blob to infoEnd.
-  if (f.position() + 2 <= infoEnd) {
-    uint16_t vcount = 0;
-    if (f.read((uint8_t*)&vcount, 2) == 2 && vcount > 0) {
-      const size_t blobLen = infoEnd - f.position();
-      if (blobLen > 0) {
-        gLLM.domainVocab = (uint8_t*)llmPsramAlloc(blobLen, "llm.domainvocab");
-        if (gLLM.domainVocab && f.read(gLLM.domainVocab, blobLen) == (int)blobLen) {
-          gLLM.domainVocabCount = vcount;
-          gLLM.domainVocabBytes = blobLen;
-        } else {
-          if (gLLM.domainVocab) llmPsramFree((void**)&gLLM.domainVocab);
-          gLLM.domainVocabCount = 0;
-          gLLM.domainVocabBytes = 0;
+      case 2: {  // ICON — fmt(u8)+w(u8)+h(u8)+u16 len+packed 1bpp bitmap (MSB-first)
+        uint8_t iconFmt = 0, iconW = 0, iconH = 0;
+        uint16_t iconLen = 0;
+        if (f.read(&iconFmt, 1) == 1 && f.read(&iconW, 1) == 1 &&
+            f.read(&iconH, 1) == 1 && f.read((uint8_t*)&iconLen, 2) == 2) {
+          const size_t expect = (size_t)((iconW + 7) / 8) * iconH;
+          if (iconFmt == 1 && iconW > 0 && iconW <= 32 && iconH > 0 && iconH <= 32 &&
+              iconLen == expect && iconLen <= sizeof(gLLM.modelIcon) &&
+              (size_t)f.position() + iconLen <= payloadStart + slen) {
+            if (f.read(gLLM.modelIcon, iconLen) == (int)iconLen) {
+              gLLM.modelIconW   = iconW;
+              gLLM.modelIconH   = iconH;
+              gLLM.modelHasIcon = true;
+            }
+          }
         }
+        break;
       }
+      case 3: {  // DOMAIN — u16 refusal_len + refusal + u16 vocab_count + [u8 len][word]...
+        const size_t domEnd = payloadStart + slen;
+        uint16_t refLen = 0;
+        if (f.read((uint8_t*)&refLen, 2) == 2 && refLen > 0 &&
+            f.position() + refLen <= domEnd) {
+          size_t copyLen = (refLen < sizeof(gLLM.modelRefusal)) ? refLen
+                                                                : sizeof(gLLM.modelRefusal) - 1;
+          if (copyLen > 0) f.read((uint8_t*)gLLM.modelRefusal, copyLen);
+          gLLM.modelRefusal[copyLen] = '\0';
+          f.seek(payloadStart + 2 + refLen);   // realign past any truncated refusal tail
+        }
+        if (f.position() + 2 <= domEnd) {
+          uint16_t vcount = 0;
+          if (f.read((uint8_t*)&vcount, 2) == 2 && vcount > 0) {
+            const size_t blobLen = domEnd - f.position();
+            if (blobLen > 0) {
+              gLLM.domainVocab = (uint8_t*)llmPsramAlloc(blobLen, "llm.domainvocab");
+              if (gLLM.domainVocab && f.read(gLLM.domainVocab, blobLen) == (int)blobLen) {
+                gLLM.domainVocabCount = vcount;
+                gLLM.domainVocabBytes = blobLen;
+              } else {
+                if (gLLM.domainVocab) llmPsramFree((void**)&gLLM.domainVocab);
+                gLLM.domainVocabCount = 0;
+                gLLM.domainVocabBytes = 0;
+              }
+            }
+          }
+        }
+        break;
+      }
+      case 4:    // MENU — validated + published into a PSRAM blob
+        parseMenuSection(f, payloadStart, slen);
+        break;
+      default:   // unknown section id → skip
+        break;
     }
+
+    // Realign to the next section start regardless of what the parser above did.
+    f.seek(payloadStart + slen);
   }
 
   // Land exactly at the tokenizer, whatever we did (or failed to do) above.

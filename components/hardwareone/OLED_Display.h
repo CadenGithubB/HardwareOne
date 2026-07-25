@@ -147,8 +147,20 @@ enum OLEDMode {
   OLED_SPEECH_STATUS,     // ESP-SR live status detail (pushed from OLED_SPEECH)
   OLED_BLUETOOTH_STATUS,  // BT status detail (pushed from OLED_BLUETOOTH)
   OLED_BLUETOOTH_G2,      // G2 glasses submenu (pushed from OLED_BLUETOOTH)
-  OLED_BLUETOOTH_G2_STATUS // G2 glasses status detail (pushed from OLED_BLUETOOTH_G2)
+  OLED_BLUETOOTH_G2_STATUS,// G2 glasses status detail (pushed from OLED_BLUETOOTH_G2)
+  OLED_LED,                // NeoPixel LED control (color / effect / brightness)
+  OLED_PERF_STATS,         // Live task CPU% / stack profiler (System & Diag)
+  OLED_I2C_DIAG,           // I2C bus scan — hardware diagnostics (Hardware menu)
+  OLED_BLUETOOTH_R1,       // R1 ring submenu — vitals + connect (pushed from OLED_BLUETOOTH)
+  OLED_USER_MANAGER        // Admin user manager — list / add / delete / role (Config menu)
 };
+
+// Guest OLED session helpers (view-only UX). Allowlist drives menu filter +
+// requestOLEDMode gate; oledGuestBlocksMutate covers direct-API mutates.
+bool oledIsGuestSession();
+bool oledModeAllowedForGuest(OLEDMode mode);
+// True if guest — toast shown; callers should no-op the mutate.
+bool oledGuestBlocksMutate();
 
 // Menu item structure for OLED menu (legacy - kept for compatibility)
 struct OLEDMenuItem {
@@ -470,6 +482,7 @@ void resetOLEDMenu();
 // Mode stack navigation (for submenus and back navigation)
 void pushOLEDMode(OLEDMode mode);
 OLEDMode popOLEDMode();
+void clearOLEDModeStack();
 
 // Input helper functions (for OLED UI components)
 void updateInputState();

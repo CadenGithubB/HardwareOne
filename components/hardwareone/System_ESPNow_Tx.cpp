@@ -150,10 +150,13 @@ bool init() {
     return false;
   }
 
+  // Pin to Core 0 (PRO_CORE): the RF send path belongs with the Wi-Fi/ESP-NOW
+  // stack it feeds (esp_now_send runs in the Wi-Fi task on Core 0). HIGH prio so
+  // it won't starve there; keeps it off the compute core.
   BaseType_t rc = xTaskCreateLogged(txTask, "espnow_tx",
                                     ESPNOW_TX_STACK_WORDS, nullptr,
                                     TASK_PRIORITY_HIGH, &sTxTaskHandle,
-                                    "espnow.tx");
+                                    "espnow.tx", PRO_CORE);
   if (rc != pdPASS) {
     DEBUGF(DEBUG_ESPNOW_CORE, "[ESPNOW_TX] FAIL: xTaskCreateLogged rc=%d", (int)rc);
     vQueueDelete(sJobQueue);

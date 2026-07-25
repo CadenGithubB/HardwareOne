@@ -31,12 +31,11 @@ extern bool submitCommandAsync(const Command& cmd,
 // taps, regular user pairs → regular taps. No synthetic auth bypass,
 // no separate enum, no special case in tgRequireAuth.
 //
-// If pairedByUser is blank, the tap command will be submitted with an
-// empty user string. Downstream tgRequireAuth will reject it and the
-// command fails gracefully with an auth error. To recover, re-run
-// `bleautoconnect g2-glasses on` (or any pair gesture that triggers
-// bleSavePeerMac) — that stamps pairedByUser from the caller's
-// currentAuthContext().user.
+// If pairedByUser is blank, g2SubmitHijackCommand refuses to queue (and
+// authorizeCommand would also deny empty non-INTERNAL identities). The
+// stuck-stamp warning below still fires once per boot. To recover, re-run
+// `bleautoconnect g2-glasses on` from an authenticated CLI — that stamps
+// pairedByUser from the caller's currentAuthContext().user.
 // =============================================================================
 
 // =============================================================================
@@ -92,6 +91,16 @@ bool g2SubmitHijackCommand(const char* line,
     return false;
   }
 
+  // Fail closed before queueing — same identity source as cmd.ctx.auth below.
+  // Blank pairedByUser is the stuck-stamp state; do not let anonymous taps
+  // reach cmd_exec. Callers must treat false as a hard no-op (no inline
+  // WiFi/settings mutate on the tap/BLE task — wrong stack + no auth).
+  AuthContext hijackAuth = g2HijackAuthContext();
+  if (hijackAuth.user.length() == 0) {
+    WARN_COMMANDF("g2.hijack.cmd: reject blank pairedByUser line='%s'", line);
+    return false;
+  }
+
   HijackCallContext* ctx = new (std::nothrow) HijackCallContext{};
   if (!ctx) {
     ERROR_MEMORYF("g2.hijack.cmd: alloc failed line='%s'", line);
@@ -117,7 +126,7 @@ bool g2SubmitHijackCommand(const char* line,
   // "alice@display" while sync direct-FS work logged as "alice@g2"). Using
   // the helper for both paths means future identity changes (path tweak,
   // ip rename, new field) land in one place.
-  cmd.ctx.auth         = g2HijackAuthContext();
+  cmd.ctx.auth         = hijackAuth;
   cmd.ctx.id           = (uint32_t)millis();
   cmd.ctx.timestampMs  = (uint32_t)millis();
   cmd.ctx.outputMask   = MSG_ROUTE_FILE;
@@ -174,29 +183,20 @@ AuthContext g2HijackAuthContext() {
   ctx.sid       = "";
   ctx.opaque    = nullptr;
 
-  // Stuck-state detector — fires once per boot. If macs + autoConnect
-  // are persisted but pairedByUser is blank, every hijack command and
-  // direct-FS hijack op will run with empty user, all admin checks
-  // will fail, and `bleStampPairedByIfBlank` can't self-heal because
-  // it has no current user to read either (CASE B inside
-  // bleStampPairedByIfBlank — see BLE_Peers.cpp). The only recovery is
-  // running `bleautoconnect g2-glasses on` from an authenticated
-  // web/serial CLI session — that path has the user identity in TLS
-  // and stamps the field. After stamping, this warning never fires
-  // again on this boot.
+  // Stuck-state detector — should be rare now (boot/load heal + founder
+  // fallback). If it still fires, attempt one heal then warn.
   static bool warnedStuck = false;
   if (!warnedStuck
       && ctx.user.length() == 0
-      && gBlePeerData[BLE_PEER_G2_GLASSES].mac1.length() > 0
-      && gBlePeerData[BLE_PEER_G2_GLASSES].autoConnect) {
-    warnedStuck = true;
-    // Split across multiple queue entries — each WARN line is capped at
-    // DEBUG_MSG_SIZE (256B), so a single long line gets truncated mid-
-    // recovery-instruction. Same task, sequential submission → ordered.
-    WARN_BLUETOOTHF("g2-glasses peer is in STUCK state: mac1='%s' autoConnect=true but pairedByUser is BLANK in settings.",
-                    gBlePeerData[BLE_PEER_G2_GLASSES].mac1.c_str());
-    WARN_BLUETOOTHF("  Effect: all hijack commands run anonymously and admin checks will fail.");
-    WARN_BLUETOOTHF("  Recovery: from an admin web/serial CLI, run `bleautoconnect g2-glasses on` — stamps pairedByUser from your session identity.");
+      && gBlePeerData[BLE_PEER_G2_GLASSES].mac1.length() > 0) {
+    bleStampPairedByIfBlank(BLE_PEER_G2_GLASSES);
+    ctx.user = gBlePeerData[BLE_PEER_G2_GLASSES].pairedByUser;
+    if (ctx.user.length() == 0) {
+      warnedStuck = true;
+      WARN_BLUETOOTHF("g2-glasses peer STUCK: mac1='%s' but pairedByUser blank (no device owner yet?).",
+                      gBlePeerData[BLE_PEER_G2_GLASSES].mac1.c_str());
+      WARN_BLUETOOTHF("  Recovery: finish first-time setup / create owner, then `bleautoconnect g2-glasses on`.");
+    }
   }
 
   return ctx;

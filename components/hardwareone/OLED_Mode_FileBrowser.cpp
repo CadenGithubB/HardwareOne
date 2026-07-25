@@ -9,9 +9,12 @@
 #if ENABLE_OLED_DISPLAY
 
 #include <Adafruit_SSD1306.h>
+#include <esp_attr.h>               // EXT_RAM_BSS_ATTR — PSRAM viewer buffer
+#include <cstring>                  // strrchr — extension detection
 #include "HAL_Input.h"
 #include "System_FileManager.h"
 #include "System_Icons.h"
+#include "System_TextPager.h"       // textWrapInto — shared wrap/sanitize core
 #include "System_AuthIdentity.h"    // CommandIdentityScope — composed identity + notif install
 #include "System_User.h"            // AuthContext, SOURCE_LOCAL_DISPLAY
 #include "System_Settings.h"        // gSettings (for displayRequireAuth via globals)
@@ -30,6 +33,7 @@ extern bool   gLocalDisplayAuthed;
 #include "System_ESPNow_FsList.h"   // fsListSendRequest / fsGetSendRequest / fsListCancel
 #include "System_BondedPeer.h"      // BondedPeer::isPaired, peerMacBytes
 #include "System_MemUtil.h"         // ps_alloc / ps_free for the peer entry cache
+#include <new>                       // placement-new: gOledFileManager lives in PSRAM
 #include "System_CommandTypes.h"    // ExecReq::DeferredFn (submitDeferredToCmdExec)
 // Externs into System_ESPNow.cpp (avoid including the heavy System_ESPNow.h here,
 // which redeclares drawIcon and clashes with this file's local extern).
@@ -84,14 +88,118 @@ extern String formatFileSize(size_t bytes);
 // File Browser State
 // ============================================================================
 
-// Pending action enum for deferred filesystem operations
+// Pending action enum for deferred filesystem operations. FS I/O and mutations
+// may ONLY run in prepareFileBrowserData() (under OLEDFileBrowserCtxGuard);
+// input/confirm callbacks set these flags and prepare executes them next frame.
 enum class FileBrowserPendingAction {
   NONE,
   NAVIGATE_INTO,
   NAVIGATE_UP,
-  NAVIGATE_BACK
+  NAVIGATE_BACK,
+  LOAD_VIEW,        // read the selected file into the text viewer
+  DELETE_SELECTED   // delete the selected file (set only by the confirm dialog)
 };
 static FileBrowserPendingAction fileBrowserPendingAction = FileBrowserPendingAction::NONE;
+
+// ============================================================================
+// Per-file action menu + text viewer (LOCAL source only)
+// ============================================================================
+// Pressing A on a regular file opens an action menu (View / Rename / Delete)
+// instead of the old silent no-op. .hwmap still auto-loads into the map, and
+// picker mode still fires its callback — both take precedence. PEER (remote)
+// files never reach this code: the input handler and renderer branch on
+// FsSource::PEER first, and the wire protocol has no read/rename opcode.
+enum class FbLevel : uint8_t { LIST = 0, ACTION_MENU = 1, VIEW = 2 };
+static FbLevel sFbLevel = FbLevel::LIST;
+
+// Snapshot of the file the action menu / viewer is acting on. FileManager
+// mutations (rename/delete/read) all act on the CURRENT SELECTION with no path
+// arg, and selection can't move while a level/overlay owns input — so the
+// snapshot is only for display + the extension check.
+static char     sFbActionName[FILE_MANAGER_MAX_NAME] = {0};
+static bool     sFbActionViewable = false;
+static bool     sFbRenameActive = false;         // keyboard open for a rename
+static char     sFbDeletePrompt[40] = {0};       // outlives the confirm dialog (raw ptr)
+
+// The per-file action menu (View/Rename/Delete/Back) renders through the shared
+// OLEDScrollState scrolling system — the same primitive Power/Network/LED use —
+// instead of the old fixed 4-row layout, whose last row ("< Back") spilled under
+// the global footer with no way to reach it. The filename occupies one header
+// line above the list, so this is the Power main menu's "status line + scrollable
+// list" shape: the list window is offset one row (OLED_CONTENT_START_Y + 8) and
+// visibleLines is sized to the remaining content height.
+EXT_RAM_BSS_ATTR static OLEDScrollState sFbActionScroll;
+static bool     sFbActionScrollInited = false;
+
+static void fbInitActionScroll() {
+  if (sFbActionScrollInited) return;
+  // 8px single-line rows; reserve the top line for the filename header.
+  const int vis = (OLED_CONTENT_HEIGHT - 8) / 8;
+  oledScrollInit(&sFbActionScroll, nullptr, vis > 0 ? vis : 1);
+  sFbActionScroll.wrapAround = true;   // preserve the action menu's wrap feel
+  sFbActionScrollInited = true;
+}
+
+// Rebuild the action rows into the shared scroll state from the single-source
+// fbBuildActionRows(), so display / navigation / dispatch can never disagree.
+// KeepSelection preserves the cursor across the per-frame rebuild; the string
+// literals stored by oledScrollAddItem() have program lifetime.
+static int fbBuildActionRows(const char* labels[4]);  // defined below
+static void fbPopulateActionScroll() {
+  fbInitActionScroll();
+  oledScrollClearKeepSelection(&sFbActionScroll);
+  const char* rows[4];
+  const int n = fbBuildActionRows(rows);
+  for (int i = 0; i < n; i++) oledScrollAddItem(&sFbActionScroll, rows[i]);
+  oledScrollClampSelection(&sFbActionScroll);
+}
+
+// Text viewer: whole (capped) file wrapped at OLED width into a PSRAM buffer,
+// scrolled a line at a time (the OLED_Mode_CLI cliScrollOffset model). Reads
+// go through FileManager::readFile which pulls the WHOLE file byte-at-a-time
+// into a String (hot-path fragmentation offender), so refuse large files and
+// point the user at serial `fileview` (paged) instead.
+static constexpr size_t   FB_VIEW_MAX_FILE = 10240;   // refuse-above (entry.size)
+static constexpr int      FB_VIEW_COLS     = 20;       // 21-char rows at textSize 1
+static EXT_RAM_BSS_ATTR char sFbViewBody[12288];       // wrapped body (grows vs raw)
+EXT_RAM_BSS_ATTR static uint16_t           sFbViewLineOff[640];         // start offset per line
+static int                sFbViewLineCount = 0;
+static int                sFbViewScroll = 0;
+static bool               sFbViewTruncated = false;
+
+// Exposed to the central footer-hint switch (OLED_Utils.cpp) so it can show the
+// right hints per level without reaching into these statics.
+int oledFileBrowserActiveLevel() { return (int)sFbLevel; }
+
+static int fbViewVisibleLines() {
+  const int v = OLED_CONTENT_HEIGHT / 10;
+  return v > 0 ? v : 1;
+}
+
+// Text-ish extensions the viewer offers "View" for. Everything else gets only
+// Rename/Delete (a binary/image on a mono OLED is not worth rendering; jpg
+// lives on G2/web).
+static bool fbIsViewableExt(const char* name) {
+  const char* dot = strrchr(name, '.');
+  if (!dot) return false;
+  String e(dot);
+  e.toLowerCase();
+  return e == ".txt" || e == ".csv" || e == ".json" || e == ".log" ||
+         e == ".md"  || e == ".ini" || e == ".cfg"  || e == ".conf" ||
+         e == ".yaml"|| e == ".yml" || e == ".xml"  || e == ".html" ||
+         e == ".js"  || e == ".c"   || e == ".h"    || e == ".cpp";
+}
+
+// The action-menu rows, built in one place so render / count / dispatch agree.
+// Returns the row count; fills labels[] (cap 4).
+static int fbBuildActionRows(const char* labels[4]) {
+  int n = 0;
+  if (sFbActionViewable) labels[n++] = "View";
+  labels[n++] = "Rename";
+  labels[n++] = "Delete";
+  labels[n++] = "< Back";
+  return n;
+}
 
 // Pre-rendered file browser data to avoid filesystem I/O inside I2C transaction
 // (struct defined in System_FileManager.h)
@@ -515,10 +623,14 @@ void oledFileBrowserStartEspnowSend(const uint8_t mac[6]) {
  */
 static bool initFileBrowser() {
   if (gOledFileManager == nullptr) {
-    gOledFileManager = new FileManager();
-    if (gOledFileManager == nullptr) {
+    // PSRAM placement-new: FileManager's ~5 KB is an inline cachedEntries[64] POD
+    // array (FileEntry has no String), so the whole object moves off internal DRAM.
+    // Pair with ps_delete in resetOLEDFileBrowser() — never `delete`.
+    void* fmBuf = ps_alloc(sizeof(FileManager), AllocPref::PreferPSRAM, "oled.filemgr");
+    if (fmBuf == nullptr) {
       return false;
     }
+    gOledFileManager = new (fmBuf) FileManager();
   }
 
 #if ENABLE_ESPNOW
@@ -624,6 +736,31 @@ void prepareFileBrowserData() {
       return;
     }
   }
+
+  // Rename-keyboard completion poll. While the keyboard is up, all input is
+  // centrally intercepted (the mode's inputFunc is never called); once the
+  // user completes/cancels we land here on the next prepare pass — INSIDE the
+  // identity guard, which renameItem's guarded VFS call requires.
+  if (sFbRenameActive) {
+    if (oledKeyboardIsCompleted()) {
+      String newName = oledKeyboardGetText();
+      newName.trim();
+      oledKeyboardReset();
+      sFbRenameActive = false;
+      if (newName.length() == 0) {
+        oledToastShow("Empty name - kept", 2500);
+      } else if (gOledFileManager->renameItem(newName.c_str())) {
+        oledToastShow("Renamed", 2000);
+      } else {
+        oledToastShow("Rename failed", 2500);
+      }
+      sFbLevel = FbLevel::LIST;
+    } else if (oledKeyboardIsCancelled()) {
+      oledKeyboardReset();
+      sFbRenameActive = false;
+      sFbLevel = FbLevel::ACTION_MENU;   // back to the menu, nothing changed
+    }
+  }
   
   // Process pending navigation actions (filesystem I/O happens here, OUTSIDE I2C transaction)
   if (fileBrowserPendingAction != FileBrowserPendingAction::NONE) {
@@ -661,10 +798,72 @@ void prepareFileBrowserData() {
                 gMapCenterSet = false;
                 gMapManuallyPanned = false;
               }
+              break;   // .hwmap handled — don't also open the action menu
             }
 #endif
+            // Regular file: open the per-file action menu (View/Rename/
+            // Delete). Replaces the old silent no-op. Snapshot the name for
+            // display; the actual ops act on the current selection, which
+            // can't move while a menu/overlay owns input.
+            strncpy(sFbActionName, entry.name, sizeof(sFbActionName) - 1);
+            sFbActionName[sizeof(sFbActionName) - 1] = '\0';
+            sFbActionViewable = fbIsViewableExt(entry.name);
+            // Fresh entry: start the shared action menu at the top row.
+            fbInitActionScroll();
+            sFbActionScroll.selectedIndex = 0;
+            sFbActionScroll.scrollOffset = 0;
+            sFbLevel = FbLevel::ACTION_MENU;
           }
         }
+        break;
+      }
+      case FileBrowserPendingAction::LOAD_VIEW: {
+        FileEntry entry;
+        if (gOledFileManager->getCurrentItem(entry) && !entry.isFolder) {
+          if (entry.size > FB_VIEW_MAX_FILE) {
+            // FileManager::readFile pulls the whole file byte-at-a-time into
+            // a String — refuse big files here; serial `fileview` pages them.
+            oledToastShow("Too big - use fileview", 3000);
+            sFbLevel = FbLevel::LIST;
+            break;
+          }
+          String content;
+          if (gOledFileManager->readFile(entry.name, content)) {
+            bool trunc = false;
+            const size_t len = textWrapInto(sFbViewBody, sizeof(sFbViewBody),
+                                            content.c_str(), FB_VIEW_COLS,
+                                            /*contIndent=*/0, /*stripCtrl=*/true,
+                                            &trunc);
+            // Line-start offsets for the scroll window (CLI-viewer model).
+            constexpr int kMaxLines = (int)(sizeof(sFbViewLineOff) / sizeof(sFbViewLineOff[0]));
+            int lc = 0;
+            sFbViewLineOff[lc++] = 0;
+            for (size_t i = 0; i + 1 < len && lc < kMaxLines; i++) {
+              if (sFbViewBody[i] == '\n') sFbViewLineOff[lc++] = (uint16_t)(i + 1);
+            }
+            sFbViewLineCount = lc;
+            sFbViewScroll    = 0;
+            sFbViewTruncated = trunc;
+            sFbLevel = FbLevel::VIEW;
+          } else {
+            oledToastShow("Read failed", 2500);
+            sFbLevel = FbLevel::LIST;
+          }
+        } else {
+          sFbLevel = FbLevel::LIST;
+        }
+        break;
+      }
+      case FileBrowserPendingAction::DELETE_SELECTED: {
+        // Set ONLY by the confirm dialog's Yes callback (which runs on the
+        // input path with no identity guard — the delete itself must happen
+        // here, under ctxGuard, or removeGuarded denies/mis-attributes).
+        if (gOledFileManager->deleteItem()) {
+          oledToastShow("Deleted", 2000);
+        } else {
+          oledToastShow("Delete failed", 2500);
+        }
+        sFbLevel = FbLevel::LIST;
         break;
       }
       case FileBrowserPendingAction::NAVIGATE_UP:
@@ -829,6 +1028,63 @@ void displayFileBrowserRendered() {
     return;
   }
 #endif // ENABLE_ESPNOW
+
+  // Rename keyboard owns the whole content area while active.
+  if (oledKeyboardDrawIfActive(oledDisplay)) return;
+
+  // Per-file action menu (View / Rename / Delete / Back) — shared scrolling list
+  // (OLEDScrollState) with the filename on a one-line header above it, so the
+  // options fit the content area and scroll instead of spilling under the footer.
+  if (sFbLevel == FbLevel::ACTION_MENU) {
+    fbPopulateActionScroll();
+    oledDisplay->setTextSize(1);
+    oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
+    // Filename header (clipped to one row).
+    char nameRow[22];
+    snprintf(nameRow, sizeof(nameRow), "%s", sFbActionName);
+    oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
+    oledDisplay->print(nameRow);
+    // List rendered one row below the header via the shared single-line renderer.
+    oledScrollRenderSimple(oledDisplay, &sFbActionScroll, /*showSelection=*/true,
+                           OLED_CONTENT_START_Y + 8);
+    return;
+  }
+
+  // Text viewer: line-scrolled wrapped body (CLI-viewer window model).
+  if (sFbLevel == FbLevel::VIEW) {
+    oledDisplay->setTextSize(1);
+    oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
+    const int visible = fbViewVisibleLines();
+    const int maxScroll = (sFbViewLineCount > visible) ? (sFbViewLineCount - visible) : 0;
+    if (sFbViewScroll > maxScroll) sFbViewScroll = maxScroll;
+    int y = OLED_CONTENT_START_Y;
+    for (int i = 0; i < visible && (sFbViewScroll + i) < sFbViewLineCount; i++) {
+      const uint16_t off = sFbViewLineOff[sFbViewScroll + i];
+      char line[FB_VIEW_COLS + 2];
+      size_t l = 0;
+      for (const char* p = sFbViewBody + off;
+           *p && *p != '\n' && l < (size_t)FB_VIEW_COLS + 1; ++p) {
+        line[l++] = *p;
+      }
+      line[l] = '\0';
+      oledDisplay->setCursor(0, y);
+      oledDisplay->print(line);
+      y += 10;
+    }
+    // Scroll indicators + truncation marker on the right edge.
+    if (sFbViewScroll > 0) {
+      oledDisplay->setCursor(122, OLED_CONTENT_START_Y);
+      oledDisplay->print("\x18");
+    }
+    if (sFbViewScroll < maxScroll) {
+      oledDisplay->setCursor(122, OLED_CONTENT_START_Y + (visible - 1) * 10);
+      oledDisplay->print("\x19");
+    } else if (sFbViewTruncated) {
+      oledDisplay->setCursor(0, OLED_CONTENT_START_Y + (visible - 1) * 10);
+      oledDisplay->print("[truncated]");
+    }
+    return;
+  }
 
   if (!fileBrowserRenderData.valid) {
     oledDisplay->setTextSize(1);
@@ -1072,6 +1328,64 @@ static bool fileBrowserInputHandler(int deltaX, int deltaY, uint32_t newlyPresse
   }
 #endif // ENABLE_ESPNOW
 
+  // Per-file action menu level: joystick moves the selection, A dispatches,
+  // B backs out to the list. No FS I/O here — every op defers to the guarded
+  // prepare pass via pending flags / overlays.
+  if (sFbLevel == FbLevel::ACTION_MENU) {
+    // Rebuild first so itemCount/labels are current for nav-clamping + dispatch,
+    // then let the shared scroll helper consume up/down (with wrap).
+    fbPopulateActionScroll();
+    const char* rows[4];
+    const int n = fbBuildActionRows(rows);
+    if (oledScrollHandleNav(&sFbActionScroll)) return true;
+    if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
+      int sel = sFbActionScroll.selectedIndex;
+      if (sel < 0 || sel >= n) sel = 0;
+      const char* pick = rows[sel];
+      if (strcmp(pick, "View") == 0) {
+        fileBrowserPendingAction = FileBrowserPendingAction::LOAD_VIEW;
+      } else if (strcmp(pick, "Rename") == 0) {
+        if (!oledGuestBlocksMutate()) {
+          sFbRenameActive = true;
+          oledKeyboardInit("Rename:", sFbActionName, OLED_KEYBOARD_MAX_LENGTH);
+        }
+      } else if (strcmp(pick, "Delete") == 0) {
+        if (!oledGuestBlocksMutate()) {
+          snprintf(sFbDeletePrompt, sizeof(sFbDeletePrompt), "Delete %.28s?", sFbActionName);
+          // onYes runs on the input path with NO identity guard — it only
+          // sets the pending flag; the delete itself executes in prepare.
+          // defaultYes=false so a stray A can't destroy a file.
+          oledConfirmRequest(sFbDeletePrompt, nullptr,
+                             [](void*) {
+                               fileBrowserPendingAction = FileBrowserPendingAction::DELETE_SELECTED;
+                             },
+                             nullptr, /*defaultYes=*/false);
+        }
+      } else {  // "< Back"
+        sFbLevel = FbLevel::LIST;
+      }
+      return true;
+    }
+    if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
+      sFbLevel = FbLevel::LIST;
+      return true;
+    }
+    return true;  // swallow everything else while the menu is up
+  }
+
+  // Viewer level: line scrolling only. B returns to the action menu.
+  if (sFbLevel == FbLevel::VIEW) {
+    const int visible = fbViewVisibleLines();
+    const int maxScroll = (sFbViewLineCount > visible) ? (sFbViewLineCount - visible) : 0;
+    if (gNavEvents.up)   { if (sFbViewScroll > 0)         sFbViewScroll--; return true; }
+    if (gNavEvents.down) { if (sFbViewScroll < maxScroll) sFbViewScroll++; return true; }
+    if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
+      sFbLevel = FbLevel::ACTION_MENU;
+      return true;
+    }
+    return true;  // swallow everything else while viewing
+  }
+
   // X cycles the source (only when no picker is active — pickers are scoped
   // to their own startPath and shouldn't get yanked elsewhere).
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_X) && !sPickerActive) {
@@ -1106,7 +1420,15 @@ extern void displayFileBrowserRendered();
 // next render) and gate on isForward so back-navigation keeps your folder/scroll
 // position instead of snapping to root.
 static void fileBrowserOnEnter(bool isForward) {
-  if (isForward) oledFileBrowserNeedsInit = true;
+  if (isForward) {
+    oledFileBrowserNeedsInit = true;
+    // A Home-button escape mid-view/menu must not leak the level into the
+    // next entry (same stale-context class the sEspnowCtxPending dance
+    // guards against).
+    sFbLevel = FbLevel::LIST;
+    sFbRenameActive = false;
+    sFbViewScroll = 0;
+  }
 }
 
 // Columns: mode, name, iconName, displayFunc, availFunc, inputFunc, showInMenu, menuOrder, hints, onEnter
@@ -1122,7 +1444,7 @@ REGISTER_OLED_MODE_MODULE(sFileBrowserModes, sizeof(sFileBrowserModes) / sizeof(
 void resetOLEDFileBrowser() {
   // Clean up existing manager
   if (gOledFileManager) {
-    delete gOledFileManager;
+    ps_delete(gOledFileManager);
     gOledFileManager = nullptr;
   }
 #if ENABLE_ESPNOW

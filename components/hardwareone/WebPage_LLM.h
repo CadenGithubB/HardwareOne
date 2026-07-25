@@ -107,6 +107,17 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
 .qa-input-row textarea:focus{outline:none;border-color:var(--link)}
 .qa-input-row textarea:disabled{opacity:.5}
 
+/* ── Guided-ask strip ── */
+.qa-guided {
+  display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+  margin-bottom:8px;font-size:.82em;color:var(--muted);
+}
+.qa-guided-lbl{font-weight:600;color:var(--panel-fg);flex-shrink:0}
+.qa-guided select {
+  background:var(--panel-bg);color:var(--panel-fg);border:1px solid var(--border);
+  border-radius:5px;padding:3px 6px;font-size:1em;max-width:260px;
+}
+
 /* ── Retry button ── */
 .qa-retry{display:block;margin-left:28px;margin-top:4px;font-size:.85em;padding:4px 10px;width:fit-content}
 .qa-a-old{opacity:.45;font-size:.88em;border-left:2px solid var(--border);padding-left:8px;margin-top:2px}
@@ -157,10 +168,10 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
     <span class='qa-bar-dot dot-off' id='qa-dot'></span>
     <span class='qa-bar-state' id='qa-state'>Connecting...</span>
     <span class='qa-bar-meta' id='qa-meta'></span>
-    <select id='qa-model'><option value=''>Loading...</option></select>
-    <button class='btn' onclick='qaLoadModel()'>Load</button>
-    <button class='btn' onclick='qaUnloadModel()'>Unload</button>
-    <button class='btn' id='qa-adv-btn' onclick='qaToggleAdv()'>Advanced</button>
+    <select id='qa-model' data-guest-hide><option value=''>Loading...</option></select>
+    <button class='btn' onclick='qaLoadModel()' data-guest-hide>Load</button>
+    <button class='btn' onclick='qaUnloadModel()' data-guest-hide>Unload</button>
+    <button class='btn' id='qa-adv-btn' onclick='qaToggleAdv()' data-guest-hide>Advanced</button>
   </div>
 
   <div class='qa-list' id='qa-list'>
@@ -168,14 +179,20 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
   </div>
 
   <div class='qa-input-wrap'>
+    <div class='qa-guided' id='qa-guided' style='display:none' data-guest-hide>
+      <span class='qa-guided-lbl'>Guided:</span>
+      <select id='qa-group' title='Question group'></select>
+      <select id='qa-tpl' title='Question template'></select>
+      <select id='qa-ent' title='Subject' style='display:none'></select>
+    </div>
     <div class='qa-input-row'>
       <span class='qa-q-prefix'>Q:</span>
       <textarea id='qa-input' rows='2'
-        placeholder='Ask about Hardware One...' disabled></textarea>
-      <button id='qa-ask' class='btn' disabled onclick='qaAsk()'>Ask</button>
-      <button id='qa-stop' class='btn' style='display:none' onclick='qaStop()'>Stop</button>
+        placeholder='Ask about Hardware One...' disabled data-guest-hide></textarea>
+      <button id='qa-ask' class='btn' disabled onclick='qaAsk()' data-guest-hide>Ask</button>
+      <button id='qa-stop' class='btn' style='display:none' onclick='qaStop()' data-guest-hide>Stop</button>
     </div>
-    <div class='qa-adv-body' id='qa-adv-body'>
+    <div class='qa-adv-body' id='qa-adv-body' data-guest-hide>
       <label title='Temperature override — blank uses the saved llmtemperature setting'>Temp:<input type='number' id='qa-temp' placeholder='saved' min='0' max='2' step='0.05'></label>
       <label title='Sentence-limit override — blank uses the saved llmsentencelimit setting'>Sentences:<input type='number' id='qa-sentlimit' placeholder='saved' min='0' max='20'></label>
       <label title='Rep-penalty override — blank uses the saved llmreppenalty setting'>Rep:<input type='number' id='qa-repen' placeholder='saved' min='1' max='5' step='0.05'></label>
@@ -258,6 +275,9 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
             var msg = 'Model loaded: ' + modelName;
             if (details.length > 0) msg += ' (' + details.join(' · ') + ')';
             addSys(msg);
+            // Degraded context (PSRAM was low at load): call it out prominently on
+            // its own line — the details parenthetical above is too easy to miss.
+            if (j.ctxWarn && j.ctxWarning) addSys('⚠ ' + j.ctxWarning);
           }
         } else if (j.state === 'GENERATING') {
           setDot('dot-busy');
@@ -289,6 +309,10 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
             addSys('Load failed' + specStr + ': ' + j.error);
           }
         }
+
+        // Show/hide the guided-ask strip and refetch its menu when the model's
+        // menu generation changes (model load/unload). See LLM_GUIDED_MENU_SPEC §7.
+        menuSync(j.menu);
 
         // Append per-answer stats if we just finished generating
         if (afterGen && metaEl2 && (j.lastTokens > 0 || j.tokPerSec > 0)) {
@@ -472,7 +496,10 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
         ctx.retryBtn.innerHTML = '&#8635; Retry';
         ctx.retryBtn.onclick = function() {
           var curAnswer = ctx.aText.textContent.trim();
-          if (curAnswer) ctx.prevAnswers.push(curAnswer);
+          // Guided asks re-ask the SAME composed question plain: pushing the prior
+          // answer into prevAnswers would send it as suppress[], banning the
+          // memorized-correct answer (LLM_GUIDED_MENU_SPEC §7 guided-retry fix).
+          if (curAnswer && !ctx.isGuided) ctx.prevAnswers.push(curAnswer);
 
           // Dim the old answer row + meta instead of clearing
           ctx.aText.classList.add('qa-a-old');
@@ -637,6 +664,156 @@ inline void streamLLMInner(httpd_req_t* req, const String& username) {
   inputEl.addEventListener('keydown', function(e){
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); qaAsk(); }
   });
+
+  // ── Guided-ask strip (menu-driven input) ────────────────────────────────
+  // A model may carry a MENU: curated corpus-exact templates ("What type is {}?")
+  // + entity rosters. Three chained selects compose a corpus-exact question
+  // straight into the free-text box; the untouched qaAsk() then submits it
+  // through the normal generate pipeline. See LLM_GUIDED_MENU_SPEC §7.
+  var guidedStrip  = document.getElementById('qa-guided');
+  var groupSel     = document.getElementById('qa-group');
+  var tplSel       = document.getElementById('qa-tpl');
+  var entSel       = document.getElementById('qa-ent');
+  var guidedGen    = -1;              // cached menu generation (from /api/llm/status)
+  var guidedGroups = [];             // [{i,name,mode,templates,entities}]
+  var curGroup     = null;           // selected group object
+  var curTemplates = [];             // display strings for the selected group
+  var curEntities  = [];             // entity strings currently in #qa-ent
+  var entCacheG    = -1;             // group whose entities are cached in curEntities
+  var guidedComposedActive = false;  // input currently holds a strip-composed question
+
+  function findGroup(i) {
+    for (var k = 0; k < guidedGroups.length; k++) if (guidedGroups[k].i === i) return guidedGroups[k];
+    return null;
+  }
+
+  // Page through /api/llm/menu (tpl/ent are windowed; groups come in one shot)
+  // and hand the fully-accumulated list to done(gen, items).
+  function menuFetchAll(kind, g, done) {
+    var acc = [];
+    (function step(off) {
+      var url = '/api/llm/menu?kind=' + kind + (kind === 'groups' ? '' : '&g=' + g + '&off=' + off);
+      hw.fetchJSON(url)
+        .then(function(j) {
+          if (kind === 'groups') { done(j.gen, j.groups || []); return; }
+          var items = j.items || [];
+          for (var i = 0; i < items.length; i++) acc.push(items[i]);
+          var next = j.off + items.length;
+          if (items.length > 0 && next < j.total) step(next);
+          else done(j.gen, acc);
+        })
+        .catch(function() { done(-1, acc); });
+    })(0);
+  }
+
+  function loadGuided() {
+    menuFetchAll('groups', 0, function(gen, groups) {
+      guidedGen = gen;
+      guidedGroups = groups;
+      entCacheG = -1;
+      if (!groups.length) { guidedStrip.style.display = 'none'; return; }
+      groupSel.innerHTML = '';
+      for (var i = 0; i < groups.length; i++) {
+        var o = document.createElement('option');
+        o.value = groups[i].i;
+        o.textContent = groups[i].name;
+        groupSel.appendChild(o);
+      }
+      guidedStrip.style.display = '';
+      loadTemplates(groups[0].i);
+    });
+  }
+
+  function loadTemplates(g) {
+    curGroup = findGroup(g);
+    menuFetchAll('tpl', g, function(gen, tpls) {
+      curTemplates = tpls;
+      tplSel.innerHTML = '';
+      for (var i = 0; i < tpls.length; i++) {
+        var o = document.createElement('option');
+        o.value = i;
+        o.textContent = tpls[i];   // display form, slot shown as "{}"
+        tplSel.appendChild(o);
+      }
+      onTplChange();
+    });
+  }
+
+  function loadEntities(g, cb) {
+    if (entCacheG === g) { cb(curEntities); return; }
+    menuFetchAll('ent', g, function(gen, ents) {
+      entCacheG = g;
+      curEntities = ents;
+      cb(ents);
+    });
+  }
+
+  function onTplChange() {
+    var g   = parseInt(groupSel.value, 10);
+    var t   = parseInt(tplSel.value, 10);
+    var tpl = curTemplates[t] || '';
+    if (tpl.indexOf('{}') >= 0) {          // slot present → offer the entity picker
+      loadEntities(g, function(ents) {
+        entSel.innerHTML = '';
+        for (var i = 0; i < ents.length; i++) {
+          var o = document.createElement('option');
+          o.value = i;
+          o.textContent = ents[i];
+          entSel.appendChild(o);
+        }
+        entSel.style.display = ents.length ? '' : 'none';
+        compose();
+      });
+    } else {                                // slotless (canned) → entity pick skipped
+      entSel.style.display = 'none';
+      compose();
+    }
+  }
+
+  function compose() {
+    var t   = parseInt(tplSel.value, 10);
+    var tpl = curTemplates[t];
+    if (tpl == null) return;
+    var q;
+    if (tpl.indexOf('{}') >= 0) {
+      var e   = parseInt(entSel.value, 10);
+      var ent = curEntities[e] || '';
+      q = tpl.split('{}').join(ent);       // split/join avoids String.replace $-patterns
+    } else {
+      q = tpl;
+    }
+    if (curGroup && curGroup.mode === 'do') q = 'do: ' + q;
+    inputEl.value = q;                     // programmatic set: fires no 'input' event...
+    guidedComposedActive = true;           // ...so this flag survives until the user types
+  }
+
+  // Refetch/hide the strip when the menu generation changes (model load/unload).
+  function menuSync(menu) {
+    var groups = (menu && menu.groups) || 0;
+    var gen    = (menu && menu.gen) || 0;
+    if (groups <= 0) { guidedStrip.style.display = 'none'; guidedGen = -1; return; }
+    if (gen !== guidedGen) { guidedGen = gen; loadGuided(); }
+  }
+
+  groupSel.addEventListener('change', function() { loadTemplates(parseInt(groupSel.value, 10)); });
+  tplSel.addEventListener('change', onTplChange);
+  entSel.addEventListener('change', compose);
+  // A manual keystroke clears the guided flag so a hand-typed question retries
+  // normally (with suppress[]); a strip-composed one retries plain (see above).
+  inputEl.addEventListener('input', function() { guidedComposedActive = false; });
+
+  // Tag the Q&A pair qaAsk() just created as "guided" WITHOUT touching qaAsk
+  // itself — the retry branch reads ctx.isGuided to skip suppress[].
+  var _qaAskOrig = window.qaAsk;
+  window.qaAsk = function() {
+    var wasGuided = guidedComposedActive;
+    var prevCtx   = currentCtx;
+    _qaAskOrig();
+    if (currentCtx && currentCtx !== prevCtx) {   // an ask actually started (not an empty/busy no-op)
+      guidedComposedActive = false;
+      if (wasGuided) currentCtx.isGuided = true;
+    }
+  };
 
   fetchStatus(false, null);
   fetchModels();

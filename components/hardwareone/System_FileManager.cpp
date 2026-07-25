@@ -17,6 +17,11 @@
 // an identity before invoking the FileManager API. If a future caller wants
 // per-instance identity, this should grow into a member field.
 
+// Counts a folder's direct children (capped) for the "[#]" badge — defined
+// below loadDirectory(); forward-declared so getItem()'s uncached fallback can
+// use it too.
+static uint16_t countFolderEntries(const String& fullPath, const AuthContext& ctx);
+
 // Global instance (optional)
 FileManager* gFileManager = nullptr;
 
@@ -84,6 +89,17 @@ bool FileManager::refresh() {
   const uint32_t curGen =
       gIdentityGeneration.load(std::memory_order_acquire);
   if (loadedAtGen_ != 0 && loadedAtGen_ == curGen) return true;
+  cacheValid = false;
+  state.dirty = true;
+  return loadDirectory();
+}
+
+// Unconditional re-scan of the current directory. refresh() above is
+// generation-gated and a file delete/rename does NOT bump the identity
+// generation — a caller that just mutated the directory must use this or
+// the stale cache keeps showing the old listing. Selection is preserved
+// (clamped by loadDirectory if the entry count shrank).
+bool FileManager::forceRescan() {
   cacheValid = false;
   state.dirty = true;
   return loadDirectory();
@@ -218,6 +234,10 @@ bool FileManager::getItem(int index, FileEntry& entry) {
       // context allows).
       String fullPath = formatPath(state.currentPath, entry.name);
       entry.permissions = getPermissions(fullPath, ctx);
+      // Cheap here (one subfolder open for the single found entry), so the
+      // uncached >64-item path still gets a correct badge.
+      entry.childCount = (countFolderChildren_ && entry.isFolder)
+                             ? countFolderEntries(fullPath, ctx) : 0;
 
       file.close();
       dir.close();
@@ -378,6 +398,25 @@ bool FileManager::getStorageStats(uint32_t& total, uint32_t& used, uint32_t& fre
   return true;
 }
 
+// Count a folder's direct children (capped) for the "[#]" badge. Uses the same
+// VFS::openGuarded + openNextFile walk as buildFilesListing()'s `count` field so
+// the on-lens badge matches the web/app numbers. Bounded by kFolderCountCap so a
+// pathological directory can't stall the scan; the UI renders "<cap>+" there.
+static constexpr uint16_t kFolderCountCap = 99;
+static uint16_t countFolderEntries(const String& fullPath, const AuthContext& ctx) {
+  uint16_t n = 0;
+  File sub = VFS::openGuarded(fullPath, "r", ctx);
+  if (sub && sub.isDirectory()) {
+    File child = sub.openNextFile();
+    while (child) {
+      if (++n >= kFolderCountCap) break;   // cap the walk; UI shows "<cap>+"
+      child = sub.openNextFile();
+    }
+  }
+  if (sub) sub.close();
+  return n;
+}
+
 bool FileManager::loadDirectory() {
   // Pause sensor polling during directory scan (RAII — resumes on every return).
   PollPauseGuard pollGuard;
@@ -425,6 +464,8 @@ bool FileManager::loadDirectory() {
       cachedEntries[cachedCount].size = 0;
       String fullPath = formatPath(state.currentPath, virtuals[v].name);
       cachedEntries[cachedCount].permissions = getPermissions(fullPath, ctx);
+      cachedEntries[cachedCount].childCount =
+          (countFolderChildren_ && virtuals[v].isFolder) ? countFolderEntries(fullPath, ctx) : 0;
       cachedCount++;
       state.totalItems++;
     }
@@ -471,6 +512,9 @@ bool FileManager::loadDirectory() {
       // enable/disable in the UI per actual identity.
       String fullPath = formatPath(state.currentPath, cachedEntries[cachedCount].name);
       cachedEntries[cachedCount].permissions = getPermissions(fullPath, ctx);
+      cachedEntries[cachedCount].childCount =
+          (countFolderChildren_ && cachedEntries[cachedCount].isFolder)
+              ? countFolderEntries(fullPath, ctx) : 0;
 
       cachedCount++;
     }
@@ -518,6 +562,17 @@ void FileManager::setVisibilityFilter(VisibilityFilter filter) {
   cacheValid = false;
   loadedAtGen_ = 0;  // bypass the gen-versioned refresh fast path
   loadDirectory();
+}
+
+void FileManager::setCountFolderChildren(bool on) {
+  if (countFolderChildren_ == on) return;
+  countFolderChildren_ = on;
+  // The cache was filled without (or with stale) child counts — force a
+  // re-scan so folder rows get their badge. Cheap when called at init before
+  // the first navigate (cache is empty / never loaded).
+  cacheValid = false;
+  loadedAtGen_ = 0;  // bypass the gen-versioned refresh fast path
+  if (state.currentPath[0]) loadDirectory();
 }
 
 void FileManager::ensureValidSelection() {

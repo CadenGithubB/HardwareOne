@@ -1,4 +1,4 @@
-# Hardware One v0.99.0 - User Guide
+# Hardware One v0.99.1 - User Guide
 
 This is the full reference for Hardware One. It covers every subsystem, all CLI commands, configuration options, and how the major features work. For initial setup, see the [Quick Start Guide](QUICKSTART.md).
 
@@ -267,6 +267,7 @@ Numeric variables compare with `>`, `<`, `=`, `>=`, `<=`, `!=`. String/enum vari
 | Network | `PEERS` | numeric | live ESP-NOW mesh peers (heartbeat within 30s) |
 | Location | `GPS` | enum | `FIX` / `NOFIX` |
 | Location | `SPEED` `SATS` | numeric | GPS ground speed (knots) / satellites in view |
+| Location | `WP_DIST:<name>` | numeric | meters from current GPS fix to a named map waypoint (case-insensitive name; fail-closed if no fix, maps off, or waypoint missing) |
 | AI | `LLM` | enum | `READY` / `BUSY` / `NONE` |
 | Mesh/Bond | `ESPNOW` | enum | `ACTIVE` / `NONE` (radio stack up) |
 | Mesh/Bond | `BOND_MODE` `BOND_PAIRED` `BOND_ONLINE` `BOND_SYNCED` | enum | bond config + link state |
@@ -278,6 +279,14 @@ Numeric variables compare with `>`, `<`, `=`, `>=`, `<=`, `!=`. String/enum vari
 | ESP-NOW | `ROOM` `ZONE` `TAGS` | string | THIS device's metadata (`gSettings.espnowRoom/Zone/Tags`); `NONE` if unset |
 
 A variable whose subsystem is disabled or absent evaluates to false, so the condition simply never matches.
+
+Example - leave-home radio power save (create a map waypoint named `Home` first; keep GPS on and that map loaded):
+
+```
+IF WP_DIST:Home > 200 THEN closewifi
+```
+
+Pair with an Interval trigger (e.g. every 60s) as the Fire when gate, and a companion automation (or ELSE IF) with a lower threshold such as `WP_DIST:Home < 150` that runs `openwifi` / `openespnow` so the radios come back near home without chattering at the boundary.
 
 ### PRINT command
 ```
@@ -373,7 +382,7 @@ Available debug modules (type `help debug` on device for full list):
 | ------- | -------- |
 | `debughttp` | HTTP request/response logging |
 | `debugwifi` | WiFi connection events |
-| `debugespnow` | ESP-NOW general |
+| `debugespnow` | Alias of `debugespnowcore` - ESP-NOW core messages |
 | `debugespnowcore` | ESP-NOW V3 frame layer |
 | `debugespnowmesh` | Mesh peer management |
 | `debugespnowrouter` | Message routing |

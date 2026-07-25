@@ -16,10 +16,12 @@
 #include "System_Debug.h"  // For DEBUG_WIFIF and BROADCAST_PRINTF macros
 #include "System_Utils.h"  // For RETURN_VALID_IF_VALIDATE_CSTR macro + argWantsJson
 #include "System_MemUtil.h"  // PSRAM_JSON_DOC
+#include "System_CommandTypes.h"  // CMD_RESULT_MAX — json branch returns the document
 #include <ArduinoJson.h>
 #include "System_Command.h"
 #include "System_Notifications.h"
 #include "System_Filesystem.h"  // filesystemReady
+#include "System_I2C_Manager.h"  // I2CDeviceManager — pause polling around WiFi mode changes
 #include <WiFi.h>
 #include <esp_wifi.h>
 #if ENABLE_HTTP_SERVER
@@ -65,7 +67,7 @@ int findWiFiNetwork(const String& ssid);
 void sortWiFiByPriority();
 bool upsertWiFiNetwork(const String& ssid, const String& password, int priority, bool hidden);
 bool removeWiFiNetwork(const String& ssid);
-void saveWiFiNetworks();
+bool saveWiFiNetworks();
 bool connectWiFiIndex(int index0based, unsigned long timeoutMs, bool showPriority = false);
 bool connectWiFiSSID(const String& ssid, unsigned long timeoutMs);
 
@@ -95,12 +97,20 @@ const char* cmd_wifiinfo(const String& argsInput) {
       doc["ip"]   = WiFi.localIP().toString();
       doc["rssi"] = WiFi.RSSI();
     } else {
-      doc["savedSsid"] = gSettings.wifiSSID;
+      // Top-priority saved network (array is priority-sorted). The old
+      // gSettings.wifiSSID here was a dead legacy field frozen at "" — it
+      // showed a blank even with networks saved.
+      doc["savedSsid"] = (gWifiNetworks && gWifiNetworkCount > 0) ? gWifiNetworks[0].ssid : String("");
     }
+    doc["radioOn"] = wifiRadioOn();  // RADIO axis (power) — separate from `connected` (association)
+    doc["radioHeldForEspnow"] = (wifiRadioState() == WIFI_RADIO_UP_FOR_ESPNOW);
     doc["mac"] = WiFi.macAddress();
     serializeJson(doc, getDebugBuffer(), 1024);
     return getDebugBuffer();
   }
+
+  // Two separate axes, always shown: RADIO power, then WiFi connection.
+  broadcastOutput(wifiRadioOn() ? "Radio: ON" : "Radio: OFF");
 
   if (WiFi.isConnected()) {
     broadcastOutput("WiFi Status:");
@@ -113,8 +123,11 @@ const char* cmd_wifiinfo(const String& argsInput) {
     snprintf(getDebugBuffer(), 1024, "  MAC: %s", WiFi.macAddress().c_str());
     broadcastOutput(getDebugBuffer());
   } else {
-    broadcastOutput("WiFi: Not connected");
-    snprintf(getDebugBuffer(), 1024, "  Saved SSID: %s", gSettings.wifiSSID.c_str());
+    broadcastOutput(wifiRadioState() == WIFI_RADIO_UP_FOR_ESPNOW
+                      ? "WiFi: Not connected (radio up, held for ESP-NOW)"
+                      : "WiFi: Not connected");
+    snprintf(getDebugBuffer(), 1024, "  Saved SSID: %s",
+             (gWifiNetworks && gWifiNetworkCount > 0) ? gWifiNetworks[0].ssid.c_str() : "(none)");
     broadcastOutput(getDebugBuffer());
     snprintf(getDebugBuffer(), 1024, "  MAC: %s", WiFi.macAddress().c_str());
     broadcastOutput(getDebugBuffer());
@@ -188,12 +201,23 @@ const char* cmd_wifiadd(const String& originalCmd) {
   int pri = a.argInt(2, 0);
   if (pri <= 0 && a.has(2)) pri = 1;
   bool hid = a.argBool(3, ssid.length() == 0);
-  // Networks already in memory from settings.json
+  // Networks already in memory from settings.json. upsert fails for exactly
+  // two reasons — distinguish them, or a full list shows the blank-SSID text
+  // (the real "list full" line only went to broadcastOutput, which G2/web
+  // callers reading the return value never see).
   if (!upsertWiFiNetwork(ssid, pass, pri, hid)) {
-    return "Error: cannot add a WiFi network with a blank SSID";
+    if (ssid.length() == 0) return "Error: cannot add a WiFi network with a blank SSID";
+    snprintf(getDebugBuffer(), 1024,
+             "Error: saved-network list is full (%d) — remove one with wifirm first", MAX_WIFI_NETWORKS);
+    return getDebugBuffer();
   }
   sortWiFiByPriority();
-  saveWiFiNetworks();
+  if (!saveWiFiNetworks()) {
+    snprintf(getDebugBuffer(), 1024,
+             "Error: '%s' added in memory but saving settings.json FAILED — it will be lost on reboot",
+             ssid.c_str());
+    return getDebugBuffer();
+  }
   systemEventPost(SYSEVT_WIFI_NET_ADDED, ssid.c_str());
   snprintf(getDebugBuffer(), 1024, "Saved network '%s' with priority %d%s",
            ssid.c_str(), pri == 0 ? 1 : pri, hid ? " (hidden)" : "");
@@ -210,7 +234,14 @@ const char* cmd_wifirm(const String& originalCmd) {
   // Networks already in memory from settings.json
   bool ok = removeWiFiNetwork(ssid);
   if (ok) {
-    saveWiFiNetworks();
+    if (!saveWiFiNetworks()) {
+      // RAM is already mutated; without the file write the network resurrects
+      // on reboot — say so instead of lying with an OK.
+      snprintf(getDebugBuffer(), 1024,
+               "Error: removed '%s' from memory but saving settings.json FAILED — it will return after a reboot",
+               ssid.c_str());
+      return getDebugBuffer();
+    }
     systemEventPost(SYSEVT_WIFI_NET_REMOVED, ssid.c_str());
     snprintf(getDebugBuffer(), 1024, "Removed network '%s'", ssid.c_str());
     return getDebugBuffer();
@@ -238,7 +269,11 @@ const char* cmd_wifipromote(const String& originalCmd) {
   }
   gWifiNetworks[idx].priority = newPri;
   sortWiFiByPriority();
-  saveWiFiNetworks();
+  if (!saveWiFiNetworks()) {
+    snprintf(getDebugBuffer(), 1024,
+             "Error: priority updated in memory but saving settings.json FAILED — it will revert on reboot");
+    return getDebugBuffer();
+  }
   snprintf(getDebugBuffer(), 1024, "Priority updated for '%s' -> %d", ssid.c_str(), newPri);
   return getDebugBuffer();
 }
@@ -250,13 +285,13 @@ bool connectToBestWiFiNetwork() {
     return false;
   }
 
-  // Defensively re-arm STA mode. If the caller previously did
-  // WiFi.disconnect(true) or some other path put the driver into
-  // WIFI_OFF, WiFi.status() will report WL_STOPPED (254) for the
-  // entire 12-s timeout because the Arduino layer thinks the radio
-  // is down. Setting STA mode here is a no-op when already in STA
-  // and a recovery when not — cheap insurance against any caller.
-  WiFi.mode(WIFI_STA);
+  // Defensively re-arm the STA interface. If a caller previously did
+  // WiFi.disconnect(true) / WIFI_OFF, WiFi.status() would report WL_STOPPED for
+  // the whole timeout. When ESP-NOW owns the radio it is already up in
+  // WIFI_AP_STA — keep that (WIFI_STA would drop the hidden AP that parks the
+  // ESP-NOW channel); otherwise ensure STA.
+  extern bool isEspNowInitialized();
+  WiFi.mode(isEspNowInitialized() ? WIFI_AP_STA : WIFI_STA);
 
   sortWiFiByPriority();
   gWifiUserCancelled = false;
@@ -285,6 +320,15 @@ bool connectToBestWiFiNetwork() {
   return connected;
 }
 
+// Runtime-only radio-power (airplane mode) state. NEVER persisted; reset every
+// boot. gRadioForcedOff is true ONLY while a `radiopower off` power-down is in
+// effect — it is cleared the instant the radio is brought back up by ANY path
+// (radiopower on, openwifi below) so a later `radiopower on` can never replay a
+// snapshot that predates an unrelated radio-down (closewifi/closeespnow).
+static bool gRadioForcedOff  = false;
+static bool gRadioPrevEspNow = false;  // ESP-NOW was up when we powered off
+static bool gRadioPrevWifi   = false;  // WiFi was active (connected OR auto-reconnecting) when we powered off
+
 const char* cmd_wificonnect(const String& originalCmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
@@ -292,7 +336,12 @@ const char* cmd_wificonnect(const String& originalCmd) {
   if (!ensureWiFiInitialized()) {
     return "ERROR: Failed to initialize WiFi";
   }
-  
+
+  // Re-arm the runtime reconnect hunt that closewifi disables. (Runtime only —
+  // independent of the boot-autostart setting.)
+  WiFi.setAutoReconnect(true);
+  gRadioForcedOff = false;  // radio is coming up — invalidate any stale radiopower-off snapshot
+
   CommandArgs a(originalCmd);
   String prevSSID = WiFi.isConnected() ? WiFi.SSID() : String("");
   bool connected = false;
@@ -361,18 +410,178 @@ const char* cmd_wifidisconnect(const String& argsInput) {
     server = NULL;
     systemEventPost(SYSEVT_HTTP_SERVER_STOPPED, "http");
   }
-  // Disable web output flag
+  // Close the runtime web lane — it tracks the server lifecycle. (This used
+  // to also persist outWeb=false, silently rewriting a saved preference from
+  // a teardown command; the persisted web lane has been removed.)
   gOutputFlags &= ~MSG_ROUTE_WEB;
-  setSetting(gSettings.outWeb, false);
  #endif
   // Note: Web mirror buffer clearing removed - handled by debug_system.cpp
-  WiFi.disconnect();
+
+  // Stop the RUNTIME reconnect hunt so the driver stops scanning for the lost AP.
+  // On a single radio that scan hops channels and can knock a pinned ESP-NOW
+  // channel off the air. This is a runtime flag ONLY — it is not persisted and
+  // does NOT change boot autostart (gSettings.wifiAutoReconnect); a reboot brings
+  // WiFi back exactly as configured. openwifi re-arms it.
+  WiFi.setAutoReconnect(false);
+
+  extern bool isEspNowInitialized();
+  if (isEspNowInitialized()) {
+    // ESP-NOW owns the radio — drop the association but KEEP the radio up (mode,
+    // driver, PS untouched). The WIFI_STA_DISCONNECTED event re-pins the ESP-NOW
+    // channel on espnow_task.
+    WiFi.disconnect();   // association drop only
+    systemEventPost(SYSEVT_WIFI_DISCONNECTED);
+ #if ENABLE_HTTP_SERVER
+    return "WiFi disconnected (radio held for ESP-NOW). HTTP server stopped, web output off.";
+ #else
+    return "WiFi disconnected (radio held for ESP-NOW).";
+ #endif
+  }
+
+  // Nothing else needs the radio — power it down fully.
+  WiFi.disconnect(true);   // true = also power down the radio
   systemEventPost(SYSEVT_WIFI_DISCONNECTED);
  #if ENABLE_HTTP_SERVER
-  return "WiFi disconnected. HTTP server stopped and web output disabled to free heap.";
+  return "WiFi off. HTTP server stopped and web output disabled to free heap.";
  #else
-  return "WiFi disconnected.";
+  return "WiFi off.";
  #endif
+}
+
+// Single source of truth for WiFi radio state (see System_WiFi.h). Derived from
+// live radio/association state only — no persisted flag.
+WifiRadioState wifiRadioState() {
+  if (WiFi.isConnected()) return WIFI_RADIO_CONNECTED;
+  wifi_mode_t mode = WIFI_MODE_NULL;
+  if (esp_wifi_get_mode(&mode) != ESP_OK) mode = WIFI_MODE_NULL;
+  extern bool isEspNowInitialized();
+  if (mode != WIFI_MODE_NULL && isEspNowInitialized()) return WIFI_RADIO_UP_FOR_ESPNOW;
+  return WIFI_RADIO_OFF;
+}
+
+// True whenever the 2.4GHz radio is powered up at all — connected to an AP,
+// OR up-but-unassociated because ESP-NOW holds it. False ONLY when the radio is
+// fully powered down. This is the RADIO axis; WiFi.isConnected() is the separate
+// CONNECTION axis. Every surface shows the two side by side.
+bool wifiRadioOn() { return wifiRadioState() != WIFI_RADIO_OFF; }
+
+// ---------------------------------------------------------------------------
+// Radio power toggle (airplane mode). RUNTIME ONLY: these never persist and
+// never touch gSettings autostart flags — turning the radio off once must never
+// disable radio-on-boot (same discipline as closewifi's WiFi.setAutoReconnect).
+// Because ESP-NOW owns the radio, powering off must tear ESP-NOW down too. Power
+// on restores what was running IF we are the ones who powered it off (gRadioForcedOff
+// latch, declared above near cmd_wificonnect); otherwise it brings up the
+// configured default without resurrecting a manually-stopped subsystem.
+// ---------------------------------------------------------------------------
+#if ENABLE_ESPNOW
+extern bool isEspNowInitialized();
+extern const char* cmd_espnow_init(const String&);
+extern const char* cmd_espnow_deinit(const String&);
+#endif
+
+// Fully power the radio DOWN: drop WiFi, tear ESP-NOW down (it holds the radio),
+// and WIFI_OFF so even ESP-NOW's parked hidden AP stops transmitting.
+static void radioPowerOff() {
+  // Capture WiFi INTENT, not just association: an armed auto-reconnect means WiFi
+  // is "active" even while out of range (the out-and-about case), so it must be
+  // restored on power-on — otherwise the device would never rejoin home range.
+  gRadioPrevWifi = WiFi.isConnected() || WiFi.getAutoReconnect();
+#if ENABLE_ESPNOW
+  gRadioPrevEspNow = isEspNowInitialized();
+#else
+  gRadioPrevEspNow = false;
+#endif
+  gRadioForcedOff = true;  // we own this power-down — radioPowerOn will restore the snapshot
+
+  // Stop the runtime reconnect hunt (runtime-only; boot autostart untouched).
+  WiFi.setAutoReconnect(false);
+
+  // The radio is going away — tear down HTTP + web output exactly like closewifi.
+ #if ENABLE_HTTP_SERVER
+  if (server != NULL) {
+    httpd_stop(server);
+    server = NULL;
+    systemEventPost(SYSEVT_HTTP_SERVER_STOPPED, "http");
+  }
+  gOutputFlags &= ~MSG_ROUTE_WEB;
+ #endif
+
+#if ENABLE_ESPNOW
+  // Stop ESP-NOW FIRST — it parks the radio in AP_STA. deinit leaves the radio
+  // in AP_STA, so we still have to power it down explicitly below.
+  if (gRadioPrevEspNow) cmd_espnow_deinit("");
+#endif
+
+  // Power the radio fully down. WiFi.mode(WIFI_OFF) is required (not just
+  // disconnect) so ESP-NOW's hidden AP also stops. A WiFi mode change disables
+  // Core-0 interrupts, so pause I2C polling exactly like initEspNow does.
+  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  if (mgr) mgr->pausePolling();
+  vTaskDelay(pdMS_TO_TICKS(50));  // let in-flight I2C transactions complete
+  WiFi.disconnect(true);          // drop association + power down the STA
+  WiFi.mode(WIFI_OFF);            // NULL mode — kills the hidden AP too
+  if (mgr) mgr->resumePolling();
+
+  systemEventPost(SYSEVT_WIFI_DISCONNECTED);
+}
+
+// Bring the radio back UP. If WE powered it off (gRadioForcedOff), restore exactly
+// what was running; otherwise the radio reached OFF by another path and there is no
+// trustworthy snapshot, so bring up the configured default.
+static void radioPowerOn() {
+  const bool ownedOff = gRadioForcedOff;   // did radiopower off cause this off-state?
+  gRadioForcedOff = false;
+
+  if (ownedOff) {
+    // Restore exactly what was torn down. ESP-NOW first: cmd_espnow_init sets
+    // WIFI_AP_STA + PS_NONE + re-inits the mesh itself (no prior WiFi connect
+    // needed); identity/keys survive in RAM so no re-provision is required.
+#if ENABLE_ESPNOW
+    if (gRadioPrevEspNow && !isEspNowInitialized()) cmd_espnow_init("");
+#endif
+    if (gRadioPrevWifi) {
+      WiFi.setAutoReconnect(true);  // re-arm even if it wasn't associated (out-and-about)
+      setupWiFi();                  // sets mode (AP_STA if ESP-NOW up, else STA), re-associates
+    }
+    return;
+  }
+
+  // The radio was off for some OTHER reason (closewifi/closeespnow, or boot-idle),
+  // so there is no reliable "what was running" snapshot. Bring WiFi up to the
+  // CONFIGURED default (network connectivity is the expected "Radio ON" result),
+  // but do NOT auto-start ESP-NOW — that sensitive auth/RCE channel must be started
+  // explicitly (openespnow), never silently resurrected. Reads gSettings only;
+  // never ramFlushResolve, never writes settings (boot autostart stays independent).
+  if (gSettings.wifiAutoReconnect) {
+    WiFi.setAutoReconnect(true);
+    setupWiFi();
+  }
+}
+
+// `radiopower [on|off|toggle]` — the airplane-mode switch. Distinct from
+// closewifi (which only drops the AP): this powers the WHOLE radio, ESP-NOW
+// included. Runtime only — the radio returns to its configured state on reboot.
+const char* cmd_radiopower(const String& originalCmd) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  CommandArgs a(originalCmd);
+  String arg = a.arg(0);
+  arg.toLowerCase();
+
+  bool wantOn;
+  if (arg == "on")                                wantOn = true;
+  else if (arg == "off")                          wantOn = false;
+  else if (arg == "toggle" || arg.length() == 0)  wantOn = !wifiRadioOn();
+  else return "Usage: radiopower [on|off|toggle]";
+
+  if (wantOn) {
+    if (wifiRadioOn()) return "Radio already on.";
+    radioPowerOn();
+    return "Radio on (runtime only).";
+  }
+  if (!wifiRadioOn()) return "Radio already off.";
+  radioPowerOff();
+  return "Radio off — WiFi + ESP-NOW powered down (runtime only; radio returns on next boot).";
 }
 
 // Drop the current AP association but KEEP the radio (STA mode) on, and leave
@@ -405,20 +614,36 @@ const char* cmd_wifiscan(const String& argsInput) {
   if (n < 0) return "Error: WiFi scan failed";
 
   if (json) {
-    // Build {"v":1,"networks":[...]} object (the array is carried under a key so
-    // it conforms to the object-only JSON contract; web/app read .networks).
-    static String jsonResult;
-    jsonResult = "{\"schema\":1,\"networks\":[";
+    // Build {"schema":1,"networks":[...]} (array under a key, per the
+    // object-only JSON contract; web/app read .networks).
+    //
+    // Built with ArduinoJson rather than snprintf'd by hand. The old form
+    // pasted the SSID in raw with %s between two quote characters, so ANY
+    // network whose name contained a " or \ terminated the string early and
+    // corrupted the whole document — for every caller, at any network count,
+    // and triggerable by anyone in radio range simply by naming their AP.
+    // It also grew a static String without bound, so a dense area silently
+    // overflowed the response buffer.
+    PSRAM_JSON_DOC(doc);
+    doc["schema"] = 1;
+    JsonArray nets = doc["networks"].to<JsonArray>();
     for (int i = 0; i < n; ++i) {
-      if (i > 0) jsonResult += ",";
-      char entry[256];
-      snprintf(entry, sizeof(entry), "{\"ssid\":\"%s\",\"rssi\":%ld,\"bssid\":\"%s\",\"channel\":%ld,\"auth\":\"%d\"}",
-               WiFi.SSID(i).c_str(), (long)WiFi.RSSI(i), WiFi.BSSIDstr(i).c_str(),
-               (long)WiFi.channel(i), (int)WiFi.encryptionType(i));
-      jsonResult += entry;
+      JsonObject o = nets.add<JsonObject>();
+      o["ssid"]    = WiFi.SSID(i);          // escaped by the serializer
+      o["rssi"]    = (long)WiFi.RSSI(i);
+      o["bssid"]   = WiFi.BSSIDstr(i);
+      o["channel"] = (long)WiFi.channel(i);
+      o["auth"]    = String((int)WiFi.encryptionType(i));  // string, as before
     }
-    jsonResult += "]}";
-    return jsonResult.c_str();
+    PSRAM_STATIC_BUF(jbuf, CMD_RESULT_MAX);
+    // Trim the array to fit BEFORE serializing the wrapper. The reserve covers
+    // {"schema":1,"networks":} plus the "dropped" field added below.
+    const size_t kWrapperReserve = 64;
+    int dropped = serializeJsonArrayWithRepair(nets, jbuf, jbuf_SIZE - kWrapperReserve, "wifiscan");
+    if (dropped > 0) doc["dropped"] = dropped;   // say so rather than truncate in silence
+    size_t len = serializeJson(doc, jbuf, jbuf_SIZE);
+    if (len == 0 || len >= jbuf_SIZE - 1) return "Error: wifi scan result outgrew the response buffer";
+    return jbuf;
   } else {
     snprintf(getDebugBuffer(), 1024, "%d networks found:", n);
     broadcastOutput(getDebugBuffer());
@@ -603,12 +828,16 @@ static void normalizeWiFiPriorities() {
   }
 }
 
-void saveWiFiNetworks() {
-  if (!filesystemReady) return;
+// Returns false when the persist did not happen (filesystem not ready, or
+// writeSettingsJson failed) — callers must not report success on false, or a
+// RAM-only change silently reverts on reboot. Matches the extern decls in the
+// setup wizards and the ENABLE_WIFI=0 stub, which were already `bool`.
+bool saveWiFiNetworks() {
+  if (!filesystemReady) return false;
   sortWiFiByPriority();
   normalizeWiFiPriorities();
   // Persist via unified settings.json only
-  writeSettingsJson();
+  return writeSettingsJson();
 }
 
 // Connect to a saved network by index (0-based). Update lastConnected on success.
@@ -656,24 +885,36 @@ bool connectWiFiIndex(int index0based, unsigned long timeoutMs, bool showPriorit
   DEBUG_WIFIF("[connectWiFiIndex] Current WiFi mode before reset: %d", WiFi.getMode());
   DEBUG_WIFIF("[connectWiFiIndex] Using ESP-IDF WiFi API for connection...");
 
+  extern bool isEspNowInitialized();
+  const bool espnowHoldsRadio = isEspNowInitialized();
+
   // Step 1: Stop any existing connection
   esp_err_t err = esp_wifi_disconnect();
   DEBUG_WIFIF("[connectWiFiIndex] esp_wifi_disconnect() returned: %d", err);
   delay(100);
 
-  // Step 2: Stop WiFi completely
-  err = esp_wifi_stop();
-  DEBUG_WIFIF("[connectWiFiIndex] esp_wifi_stop() returned: %d", err);
-  delay(200);  // Longer delay for full stop
-
-  // Step 3: Set WiFi mode to STA
-  err = esp_wifi_set_mode(WIFI_MODE_STA);
-  DEBUG_WIFIF("[connectWiFiIndex] esp_wifi_set_mode(STA) returned: %d", err);
-
-  // Step 4: Start WiFi
-  err = esp_wifi_start();
-  DEBUG_WIFIF("[connectWiFiIndex] esp_wifi_start() returned: %d", err);
-  delay(300);  // Longer delay for WiFi radio to initialize
+  if (!espnowHoldsRadio) {
+    // Steps 2-4: full driver restart to STA — a workaround for an Arduino begin()
+    // state-machine bug. Only safe when ESP-NOW is NOT on the radio: esp_wifi_stop
+    // + set_mode(STA) would black out the mesh (peers ride WIFI_IF_STA) and drop
+    // the hidden AP that parks the ESP-NOW channel, and AP_STA would never be
+    // restored afterward.
+    err = esp_wifi_stop();
+    DEBUG_WIFIF("[connectWiFiIndex] esp_wifi_stop() returned: %d", err);
+    delay(200);  // Longer delay for full stop
+    err = esp_wifi_set_mode(WIFI_MODE_STA);
+    DEBUG_WIFIF("[connectWiFiIndex] esp_wifi_set_mode(STA) returned: %d", err);
+    err = esp_wifi_start();
+    DEBUG_WIFIF("[connectWiFiIndex] esp_wifi_start() returned: %d", err);
+    delay(300);  // Longer delay for WiFi radio to initialize
+  } else {
+    // ESP-NOW owns the radio (AP_STA, already started). Keep it — the STA
+    // interface is live; we reconfigure + connect on it below. The AP follows the
+    // STA to the joined channel, and the STA GOT_IP event re-syncs the ESP-NOW
+    // channel (espnowNoteWifiChannelMayHaveChanged).
+    DEBUG_WIFIF("[connectWiFiIndex] ESP-NOW holds radio — keeping AP_STA, skipping stop/restart");
+    delay(50);
+  }
 
   // Step 5: Configure WiFi credentials using ESP-IDF
   wifi_config_t wifi_config = {};
@@ -766,40 +1007,53 @@ bool connectWiFiIndex(int index0based, unsigned long timeoutMs, bool showPriorit
         DEBUG_WIFIF("[connectWiFiIndex] ⚠ ESP32 IDLE BUG DETECTED - stuck in IDLE for %lums",
                     millis() - firstIdleTime);
 
-        // NUCLEAR OPTION: Complete WiFi deinit/reinit
-        DEBUG_WIFIF("[connectWiFiIndex] Doing COMPLETE WiFi deinit/reinit...");
+        if (espnowHoldsRadio) {
+          // Cannot nuke the driver: ESP-NOW is registered against it, so
+          // esp_wifi_deinit() would wedge the mesh (left registered against a
+          // destroyed driver). Fall back to a soft retry on the live driver.
+          DEBUG_WIFIF("[connectWiFiIndex] IDLE bug with ESP-NOW up — skipping deinit, soft-retrying connect");
+          esp_wifi_disconnect();
+          delay(50);
+          esp_wifi_connect();
+          delay(500);
+          start = millis();
+          statusCheckCount = 0;
+        } else {
+          // NUCLEAR OPTION: Complete WiFi deinit/reinit
+          DEBUG_WIFIF("[connectWiFiIndex] Doing COMPLETE WiFi deinit/reinit...");
 
-        esp_wifi_disconnect();
-        delay(50);
-        esp_wifi_stop();
-        delay(50);
-        esp_wifi_deinit();  // Complete deinit
-        delay(500);         // Wait for full cleanup
+          esp_wifi_disconnect();
+          delay(50);
+          esp_wifi_stop();
+          delay(50);
+          esp_wifi_deinit();  // Complete deinit
+          delay(500);         // Wait for full cleanup
 
-        DEBUG_WIFIF("[connectWiFiIndex] Re-initializing WiFi subsystem...");
-        wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-        err = esp_wifi_init(&cfg);
-        DEBUG_WIFIF("[connectWiFiIndex] esp_wifi_init() returned: %d", err);
+          DEBUG_WIFIF("[connectWiFiIndex] Re-initializing WiFi subsystem...");
+          wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+          err = esp_wifi_init(&cfg);
+          DEBUG_WIFIF("[connectWiFiIndex] esp_wifi_init() returned: %d", err);
 
-        err = esp_wifi_set_mode(WIFI_MODE_STA);
-        DEBUG_WIFIF("[connectWiFiIndex] esp_wifi_set_mode(STA) returned: %d", err);
+          err = esp_wifi_set_mode(WIFI_MODE_STA);
+          DEBUG_WIFIF("[connectWiFiIndex] esp_wifi_set_mode(STA) returned: %d", err);
 
-        err = esp_wifi_start();
-        DEBUG_WIFIF("[connectWiFiIndex] esp_wifi_start() returned: %d", err);
-        delay(200);
+          err = esp_wifi_start();
+          DEBUG_WIFIF("[connectWiFiIndex] esp_wifi_start() returned: %d", err);
+          delay(200);
 
-        // Reconfigure credentials
-        err = esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
-        DEBUG_WIFIF("[connectWiFiIndex] esp_wifi_set_config() returned: %d", err);
+          // Reconfigure credentials
+          err = esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
+          DEBUG_WIFIF("[connectWiFiIndex] esp_wifi_set_config() returned: %d", err);
 
-        // Try connecting again
-        err = esp_wifi_connect();
-        DEBUG_WIFIF("[connectWiFiIndex] Retry esp_wifi_connect() returned: %d", err);
-        delay(500);
+          // Try connecting again
+          err = esp_wifi_connect();
+          DEBUG_WIFIF("[connectWiFiIndex] Retry esp_wifi_connect() returned: %d", err);
+          delay(500);
 
-        // Reset the timer so we get full timeout for the retry
-        start = millis();
-        statusCheckCount = 0;
+          // Reset the timer so we get full timeout for the retry
+          start = millis();
+          statusCheckCount = 0;
+        }
       }
 
       // Log every 2 seconds OR when status changes
@@ -1330,10 +1584,11 @@ const CommandEntry wifiCommands[] = {
   { "wifirm", "Remove WiFi network: <ssid>", true, cmd_wifirm, "Usage: wifirm <ssid>" },
   { "wifipromote", "Promote WiFi to top priority: <ssid> [newPriority]", true, cmd_wifipromote, "Usage: wifipromote <ssid> [newPriority]" },
   
-  // Connection Control
-  { "openwifi", "Connect to WiFi: [--best | --index <N>] (default: best)", false, cmd_wificonnect, "Usage: openwifi [--best | --index <1..N>]" },
-  { "closewifi", "Disconnect from WiFi (also stops HTTP server + web output to free heap).", false, cmd_wifidisconnect },
-  { "wifidisconnect", "Disconnect from the current network but keep the radio on (HTTP/web stay up).", false, cmd_wifidrop },
+  // Connection Control — lifecycle open/close is admin-only (status/scan stay open)
+  { "openwifi", "Connect to WiFi: [--best | --index <N>] (default: best)", true, cmd_wificonnect, "Usage: openwifi [--best | --index <1..N>]" },
+  { "closewifi", "Disconnect from WiFi (also stops HTTP server + web output to free heap).", true, cmd_wifidisconnect },
+  { "wifidisconnect", "Disconnect from the current network but keep the radio on (HTTP/web stay up).", true, cmd_wifidrop },
+  { "radiopower", "Power the whole 2.4GHz radio on/off (airplane mode; also stops/restores ESP-NOW; runtime only, not persisted): [on|off|toggle]", true, cmd_radiopower, "Usage: radiopower [on|off|toggle]", "wifi", "radio" },
   { "wifiscan", "Scan for available WiFi networks. (add 'json' for JSON output)", false, cmd_wifiscan, nullptr, "wifi", "scan" },
   { "wifigettxpower", "Set WiFi TX power: <dBm> (alias of wifitxpower; admin)", true, cmd_wifitxpower, "Usage: wifigettxpower <dBm>  (sets TX power; clamps to ~2..21 dBm)" },
   
@@ -1341,8 +1596,8 @@ const CommandEntry wifiCommands[] = {
   { "ntpsync",   "Sync time with NTP server.",               false, cmd_ntpsync },
   { "ntpstatus", "Show NTP configuration and sync state.",   false, cmd_ntpstatus },
 #if ENABLE_HTTP_SERVER
-  { "openhttp", "Start HTTP server.", false, cmd_httpstart },
-  { "closehttp", "Stop HTTP server.", false, cmd_httpstop },
+  { "openhttp", "Start HTTP server.", true, cmd_httpstart },
+  { "closehttp", "Stop HTTP server.", true, cmd_httpstop },
   { "httpread", "Read HTTP server status. (add 'json' for JSON output)", false, cmd_httpstatus },
   { "httpstatus", "Show HTTP server status. (add 'json' for JSON output)", false, cmd_httpstatus },
 #endif
@@ -1363,33 +1618,63 @@ const size_t wifiCommandsCount = sizeof(wifiCommands) / sizeof(wifiCommands[0]);
 
 // Log-only WiFi event handler: emits exactly one [EVENT][WIFI] line per lost
 // association. Edge-gated via sWasConnected so driver-level retry storms of
-// ARDUINO_EVENT_WIFI_STA_DISCONNECTED don't repeat the line. Runs on the
-// WiFi/event task; logSystemEvent is queue-based and safe there. No reconnect
+// ARDUINO_EVENT_WIFI_STA_DISCONNECTED don't repeat the line. No reconnect
 // logic here — observation only.
+//
+// Runs on the arduino_events task, whose stack is deliberately small — and
+// whose deepest code path this handler WAS: logSystemEvent stacks a 256 B
+// line buffer plus vsnprintf frames, systemEventPost a ~164 B SystemEvent
+// local, which overflowed the (then 4x-undersized) stack on every
+// disconnect-while-connected. So the handler only snapshots the event into a
+// single-slot pending struct; wifiEventLogDrain() on the main loop does the
+// heavy logging (same defer-off-the-tiny-task pattern as the BTC-task
+// tapDispatcherEnqueue* fix). Single slot is enough: the sWasConnected edge
+// gate yields at most one snapshot per association.
+static volatile bool sWifiDiscPending = false;
+static char          sWifiDiscSsid[33];
+static int           sWifiDiscReason = 0;
+static uint32_t      sWifiDiscConnSecs = 0;
+
+// Defined in System_ESPNow.cpp — forward-declared here to avoid pulling the
+// heavy ESP-NOW header into the WiFi TU. Just sets a volatile flag; the actual
+// channel re-derive/re-pin runs on espnow_task (single-radio: the ESP-NOW
+// channel follows the STA association, so it must re-sync on any join/drop).
+extern void espnowNoteWifiChannelMayHaveChanged();
+
 static void wifiEventLogger(arduino_event_id_t event, arduino_event_info_t info) {
   static bool sWasConnected = false;
   static uint32_t sConnectedAtMs = 0;
   if (event == ARDUINO_EVENT_WIFI_STA_GOT_IP) {
     sWasConnected = true;
     sConnectedAtMs = millis();
+    espnowNoteWifiChannelMayHaveChanged();  // radio just moved to the AP's channel
   } else if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
+    espnowNoteWifiChannelMayHaveChanged();  // left the AP — re-pin the preferred channel offline
     if (sWasConnected) {
       sWasConnected = false;
-      char ssid[33];
       uint8_t len = info.wifi_sta_disconnected.ssid_len;
       if (len > 32) len = 32;
-      memcpy(ssid, info.wifi_sta_disconnected.ssid, len);
-      ssid[len] = '\0';
-      logSystemEvent("WIFI", "connection lost: '%s' reason=%d (connected %lus)",
-                     ssid, (int)info.wifi_sta_disconnected.reason,
-                     (unsigned long)((millis() - sConnectedAtMs) / 1000));
-      char det[48];
-      snprintf(det, sizeof(det), "reason=%d (connected %lus)",
-               (int)info.wifi_sta_disconnected.reason,
-               (unsigned long)((millis() - sConnectedAtMs) / 1000));
-      systemEventPost(SYSEVT_WIFI_DISCONNECTED, ssid, det);
+      memcpy(sWifiDiscSsid, info.wifi_sta_disconnected.ssid, len);
+      sWifiDiscSsid[len] = '\0';
+      sWifiDiscReason   = (int)info.wifi_sta_disconnected.reason;
+      sWifiDiscConnSecs = (millis() - sConnectedAtMs) / 1000;
+      sWifiDiscPending  = true;  // set last — drain reads fields after seeing it
     }
   }
+}
+
+// Main-loop drain for the snapshot above. A disconnect during shutdown may
+// never get drained (esp_restart preempts the loop) — acceptable: that
+// teardown is commanded, and the reboot itself is already logged.
+void wifiEventLogDrain() {
+  if (!sWifiDiscPending) return;
+  sWifiDiscPending = false;
+  logSystemEvent("WIFI", "connection lost: '%s' reason=%d (connected %lus)",
+                 sWifiDiscSsid, sWifiDiscReason, (unsigned long)sWifiDiscConnSecs);
+  char det[48];
+  snprintf(det, sizeof(det), "reason=%d (connected %lus)",
+           sWifiDiscReason, (unsigned long)sWifiDiscConnSecs);
+  systemEventPost(SYSEVT_WIFI_DISCONNECTED, sWifiDiscSsid, det);
 }
 
 // Ensure WiFi is initialized (lazy initialization to save ~32KB at boot)
@@ -1408,10 +1693,14 @@ bool ensureWiFiInitialized() {
     WiFi.onEvent(wifiEventLogger, ARDUINO_EVENT_WIFI_STA_GOT_IP);
     WiFi.onEvent(wifiEventLogger, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
   }
-  WiFi.mode(WIFI_STA);
-  DEBUG_WIFIF("[WiFi] Mode set to WIFI_STA");
+  // When ESP-NOW already brought the radio up (WIFI_AP_STA), keep that mode —
+  // WIFI_STA would drop the hidden AP that parks the ESP-NOW channel. This lazy
+  // init only owns the STA-side event handler + latch in that case.
+  extern bool isEspNowInitialized();
+  WiFi.mode(isEspNowInitialized() ? WIFI_AP_STA : WIFI_STA);
+  DEBUG_WIFIF("[WiFi] Mode set to %s", isEspNowInitialized() ? "WIFI_AP_STA (ESP-NOW up)" : "WIFI_STA");
   wifiInitialized = true;
-  
+
   broadcastOutput("WiFi subsystem initialized");
   return true;
 }
@@ -1485,8 +1774,11 @@ void setupWiFi() {
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry wifiSettingsEntries[] = {
   { "enabled",            SETTING_BOOL,   &gSettings.wifiEnabled,       true, 0, nullptr, 0, 1, "WiFi Enabled", nullptr, false, nullptr, nullptr, true },
-  { "ssid",               SETTING_STRING, &gSettings.wifiSSID,          0, 0, "", 0, 0, "WiFi SSID", nullptr, false, nullptr, nullptr, true },
-  { "password",           SETTING_STRING, &gSettings.wifiPassword,      0, 0, "", 0, 0, "WiFi Password", nullptr, true, nullptr, nullptr, true },
+  // The legacy single-network "ssid"/"password" rows are gone (removed
+  // 2026-07-20): they were frozen at "" for the device's whole life — no
+  // command could reach them (cmdKey=nullptr + readOnly) and real credentials
+  // live in network.wifi.networks[]. Their only visible effect was a confusing
+  // empty "WiFi SSID" row on every settings surface.
   { "autoReconnect",      SETTING_BOOL,   &gSettings.wifiAutoReconnect, true, 0, nullptr, 0, 1, "Auto-reconnect", nullptr, false, nullptr, "wifiautoreconnect" },
   { "ntpServer",          SETTING_STRING, &gSettings.ntpServer,         0, 0, "pool.ntp.org", 0, 0, "NTP Server", nullptr, false, nullptr, "ntpserver" },
   // Timezone offsets as "minutes|label" pairs — the schema renderer's enum

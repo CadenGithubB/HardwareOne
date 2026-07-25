@@ -224,6 +224,13 @@ struct MeshPeerMeta {
   bool stationary;         // From espnowStationary
   uint32_t sensorMask;     // From CapabilitySummary or workerStatus
   uint32_t lastMetaUpdate; // millis() when metadata last received
+  // Per-peer heartbeat backoff timing. Lives here (not in MeshPeerHealth)
+  // because a dead peer's health slot is memset on every 5 s bootstrap, so it
+  // can't hold state; this meta slot is durable. See meshHeartbeatMinInterval.
+  uint32_t hbLastHeardMs;  // millis() of last received mesh HEARTBEAT, seeded to
+                           // slot birth so a never-heard peer still ages. Any
+                           // received heartbeat resets it -> full rate resumes.
+  uint32_t hbLastSentMs;   // millis() we last sent a heartbeat to this peer (cadence gate)
   bool isActive;           // true if this slot is in use
 
   void clear() {
@@ -236,6 +243,8 @@ struct MeshPeerMeta {
     stationary = false;
     sensorMask = 0;
     lastMetaUpdate = 0;
+    hbLastHeardMs = 0;
+    hbLastSentMs = 0;
     isActive = false;
   }
 };
@@ -774,6 +783,17 @@ struct EspNowState {
   
   bool bondNeedsMetadataResponse;   // flag to send metadata response (deferred from callback)
   uint8_t metadataPendingResponseMac[6]; // Dedicated MAC for metadata response (separate from bond exchanges)
+
+  // Secure sensor fetcher — deferred SENSOR_REQ apply (mesh-legal, NOT bond-gated).
+  // v4h_sensor_req stashes here on the RX task; the super-loop (block 9f3) applies it
+  // off the critical path because startSensorDataStreaming creates a task/mutex.
+  // docs/ESPNOW_SENSOR_FETCHER_DESIGN.md
+  bool     meshSensorReqPending;      // SENSOR_REQ received + authorized, awaiting apply
+  uint8_t  meshSensorReqMode;         // 0=subscribe, 1=unsubscribe, 2=oneshot
+  uint32_t meshSensorReqMask;         // bitmask over RemoteSensorType
+  uint32_t meshSensorReqIntervalMs;   // requested per-sensor cadence hint (ms)
+  uint32_t meshSensorReqLeaseMs;      // lease duration (ms)
+  uint8_t  meshSensorReqSrcMac[6];    // authorized controller MAC (encrypted-reply target)
   
   // Deferred metadata processing (set in callback, handled in task)
   bool deferredMetadataPending;
@@ -806,12 +826,11 @@ struct EspNowState {
   bool deferredCmdRespPending;
   uint8_t deferredCmdRespSrcMac[6];
   char deferredCmdRespDeviceName[32];
-  char* deferredCmdRespResult;  // PSRAM-allocated at init: 6144 B, i.e. 6143 chars + NUL. This does NOT
-                                // match the fragmentation budget — V4_FRAG_MAX × V4_MAX_FRAGMENT_PAYLOAD
-                                // is 6400, so a fully reassembled CMD_RESP can be 256 B LARGER than this
-                                // buffer. v4h_cmd_resp clamps the copy to 6143, silently truncating a
-                                // maximal result. That clamp is derived from THIS allocation, not from the
-                                // wire limit: raising it toward 6400 without growing the alloc overflows.
+  char* deferredCmdRespResult;  // PSRAM-allocated at init to V4_REASM_MAX_MSG + 1 (the fragmentation
+                                // budget V4_FRAG_MAX × V4_MAX_FRAGMENT_PAYLOAD, plus the NUL). Alloc and
+                                // clamp both derive from that one constant, so a maximal reassembled
+                                // CMD_RESP now fits exactly. Sized from the WIRE, not from CMD_RESULT_MAX:
+                                // the sender is a remote peer whose output limit is not ours to assume.
   bool deferredCmdRespSuccess;
   uint32_t deferredCmdRespReqId; // Correlation id — the request's msgId, echoed in the CMD_RESP frame header
   
@@ -917,6 +936,11 @@ struct EspNowState {
     bondSendWaitDeadlineMs(0),
 #endif
     bondNeedsMetadataResponse(false),
+    meshSensorReqPending(false),
+    meshSensorReqMode(0),
+    meshSensorReqMask(0),
+    meshSensorReqIntervalMs(0),
+    meshSensorReqLeaseMs(0),
     deferredMetadataPending(false),
     textQueueHead(0),
     textQueueTail(0),
@@ -940,6 +964,7 @@ struct EspNowState {
     memset(&bondPeerStatus, 0, sizeof(bondPeerStatus));
 #endif
     memset(metadataPendingResponseMac, 0, 6);
+    memset(meshSensorReqSrcMac, 0, 6);
     // Initialize deferred message buffers
     memset(textQueue, 0, sizeof(textQueue));
     memset(deferredMetadataSrcMac, 0, 6);
@@ -985,6 +1010,7 @@ const char* cmd_espnow_stats(const String& argsInput);
 const char* cmd_espnow_routerstats(const String& argsInput);
 const char* cmd_espnow_resetstats(const String& argsInput);
 const char* cmd_espnow_init(const String& argsInput);
+const char* cmd_espnow_deinit(const String& argsInput);  // stop ESP-NOW (used by radiopower off)
 const char* cmd_espnow_pair(const String& argsInput);
 const char* cmd_espnow_unpair(const String& argsInput);
 const char* cmd_espnow_list(const String& argsInput);
@@ -1147,6 +1173,15 @@ void espnowMeshesReadJson(JsonDocument& doc);
 // Mesh heartbeat processing (FreeRTOS task)
 extern bool gMeshActivitySuspended;  // Suspend mesh during HTTP requests
 void processMeshHeartbeats();  // Internal worker function (called by task)
+// Flag an ESP-NOW channel re-sync after a WiFi association change. Called from
+// the WiFi event handler (System_WiFi.cpp); the actual re-derive + re-pin runs
+// on espnow_task in processMeshHeartbeats. Cheap/ISR-safe: sets a volatile flag.
+void espnowNoteWifiChannelMayHaveChanged();
+
+// Discover-then-confirm pairing — read accessors for the OLED/G2/web UI.
+int  espnowGetPairCandidateCount();                                              // pruned live count
+bool espnowGetPairCandidate(int idx, char* name, size_t nameCap, uint8_t mac[6], int* rssi);
+bool espnowGetIncomingPairRequest(char* name, size_t nameCap);                   // pending accept/reject
 bool startEspNowTask();        // Start ESP-NOW heartbeat task
 void stopEspNowTask();         // Stop ESP-NOW heartbeat task
 TaskHandle_t getEspNowTaskHandle();  // Get task handle for stack monitoring

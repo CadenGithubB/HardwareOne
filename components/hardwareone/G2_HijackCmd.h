@@ -85,9 +85,10 @@ typedef void (*G2HijackCmdCallback)(bool ok,
 // `userData` : opaque pointer forwarded to the callback. Lifetime is the
 //              caller's responsibility.
 //
-// Returns true if the request was queued. False means the cmd_exec queue was
-// full or allocation failed; the caller should surface this on the lens (e.g.
-// a toast) rather than retry silently.
+// Returns true if the request was queued. False means blank pairedByUser,
+// cmd_exec queue full, or allocation failed. Callers must treat false as a
+// hard no-op — never run the mutation inline on the tap/BLE task (wrong
+// stack sizing + skips authorizeCommand). Optional: show a "busy" toast.
 bool g2SubmitHijackCommand(const char* line,
                            const G2CmdCookie& cookie,
                            G2HijackCmdCallback callback,
@@ -178,6 +179,23 @@ struct CustomSpec {
   void (*run)();
 };
 
+// Native-notification payload — the fields for one G2 firmware-NATIVE
+// notification card, pushed over the Even File Service (EFS). Unlike the
+// full-screen g2notify placeholder, the firmware renders its own card,
+// auto-wakes the display, and applies its own silent/DND. The lens applier
+// runs the blocking 4-frame EFS send (g2SendNativeNotification) off the BLE
+// notify task and deletes the spec afterward. Not gen-guarded — an OS-style
+// notification is not tied to the interactive menu page. Fixed inline buffers
+// (no heap-owned strings) so the queue message stays a single allocation.
+// See docs/G2_NATIVE_NOTIFICATION_PLAN.md.
+struct NativeNotifSpec {
+  char app[64];          // app_identifier (package)
+  char displayName[48];  // display_name
+  char title[64];
+  char subtitle[48];
+  char body[192];        // message
+};
+
 // Notify payload — fires when a notification's auto-clear timer expires.
 // Carries the gNotifyGen value captured when the notification was shown so
 // the lens applier can drop the clear if a newer notification has replaced
@@ -205,6 +223,7 @@ enum class LensJobKind : uint8_t {
   Toast,          // transient overlay on the lens (step 4+)
   Notify,         // notification + clear-timer (step 5 — subsumes notifyClearTaskBody)
   Custom,         // typed one-off (BMP push, camera frame — step 6+)
+  NativeNotif,    // firmware-native EFS notification card (docs/G2_NATIVE_NOTIFICATION_PLAN.md)
 };
 
 struct LensUiJob {
@@ -219,6 +238,7 @@ struct LensUiJob {
     ToastSpec*    toast;
     NotifySpec*   notify;
     CustomSpec*   custom;
+    NativeNotifSpec* nativeNotif;
   } payload;
 };
 

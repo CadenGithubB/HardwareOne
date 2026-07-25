@@ -31,6 +31,7 @@
 #include "System_Events.h"  // systemEventPost — mesh/bond semantic events for the bus
 #include "System_Debug.h"
 #include "System_ESPNow.h"
+#include "System_CommandTypes.h"  // CMD_RESULT_MAX — the V4 fragment budget derives from it
 #include "System_ESPNow_Wire.h"      // V3 wire schema (Phase 0 extraction)
 #include "System_ESPNow_Crypto.h"    // Phase 3.0: libsodium init / RNG / Ed25519 keygen
 #include "System_ESPNow_Files.h"    // Phase 4: concurrent file-transfer slot table
@@ -69,7 +70,6 @@
 extern bool isValidUser(const String& username, const String& password);
 extern bool isAdminUser(const String& username);
 extern void printToSerial(const String& s);
-extern volatile uint32_t gOutputFlags;
 extern bool gCLIValidateOnly;
 
 // Forward declaration — definition is further down near onEspNowRawRecv. Used
@@ -109,9 +109,37 @@ static void onEspNowRawRecv(const esp_now_recv_info* recv_info, const uint8_t* d
 // interleave through the same reassembly buffer pool — the receiver decides
 // per frame whether the inner is wrapped (type=32 SESSION_FRAME) or raw.
 #define V4_MAX_FRAGMENT_PAYLOAD 200   // Max payload bytes per fragment
-#define V4_FRAG_MAX             32    // Max fragments per message (max msg = 6400 bytes)
-                                       // Cost: ~12.6 KB PSRAM (2 reassembly slots × 32 × 200 B + overhead).
+
+// Fragment budget, DERIVED from the outbound ceiling rather than hand-picked.
+// CMD_RESP is the only type that meaningfully fragments (STREAM is clamped to a
+// single frame at its send sites; METADATA is a small fixed struct;
+// METADATA_PUSH is never TX'd), and a CMD_RESP carries at most CMD_RESULT_MAX
+// plus the 1 success byte. Every peer is ours and reflashed together, so the
+// receiver need not accommodate a stranger's larger ceiling.
+// Was a flat 32 (6400 B) chosen independently of CMD_RESULT_MAX — that mismatch
+// is exactly how the alloc and its clamp drifted to 6144/6143.
+#define V4_FRAG_MAX ((CMD_RESULT_MAX + 1 + V4_MAX_FRAGMENT_PAYLOAD - 1) / V4_MAX_FRAGMENT_PAYLOAD)  // 21
+                                       // Cost: ~8.4 KB PSRAM (2 reassembly slots × 21 × 200 B + overhead).
                                        // DRAM impact: zero — gV4Reasm is ps_alloc'd.
+// Largest fully-reassembled message the wire can deliver. Every buffer holding a
+// reassembled payload derives from this instead of hand-typing a number.
+#define V4_REASM_MAX_MSG (V4_FRAG_MAX * V4_MAX_FRAGMENT_PAYLOAD)  // 4200 B
+
+// The invariants the two constants above exist to satisfy. If CMD_RESULT_MAX
+// ever grows, this fails at compile time instead of silently truncating a
+// maximal CMD_RESP on the wire.
+static_assert(V4_REASM_MAX_MSG >= CMD_RESULT_MAX + 1,
+              "V4 reassembly budget must hold a maximal CMD_RESP (result + success byte)");
+
+// CMD_RESP is not the only fragmenting sender: a full FS_LIST_REPLY is
+// 2572 B (header + 32 × 76 B) and takes 13 fragments. It fits comfortably
+// today, but the budget above is derived from CMD_RESULT_MAX and knows nothing
+// about FS_LIST — so raising FS_LIST_ENTRIES_PER_REPLY could silently exceed
+// what the receiver can reassemble. Make that a build break, not a field bug.
+static_assert(sizeof(V4PayloadFsListReplyHeader)
+                + FS_LIST_ENTRIES_PER_REPLY * sizeof(V4PayloadFsEntry) <= V4_REASM_MAX_MSG,
+              "a full FS_LIST_REPLY must fit the V4 reassembly budget");
+
 #define V4_REASM_MAX            2     // Max concurrent reassembly contexts
 #define V4_REASM_TIMEOUT_MS     5000  // Reassembly context GC timeout (ms)
 #define V4_FRAG_ACK_WAIT_MAX    8     // Max concurrent fragment ACK waiters
@@ -132,7 +160,7 @@ struct V4ReasmEntry {
   uint32_t lastUpdateMs;
 };
 
-static V4ReasmEntry* gV4Reasm = nullptr;  // Allocated in PSRAM at init (~12.6 KB — V4_REASM_MAX entries of ~6.4 KB each)
+static V4ReasmEntry* gV4Reasm = nullptr;  // Allocated in PSRAM at init (~8.4 KB — V4_REASM_MAX entries of ~4.2 KB each)
 
 static void v4_reasm_reset(V4ReasmEntry& e) {
   e.active   = false;
@@ -265,7 +293,10 @@ bool v4_send_command_response(const uint8_t* dst, uint32_t cmdMsgId, bool succes
 bool v4_send_text(const uint8_t* dst, const char* text, uint16_t textLen);
 bool v4_broadcast_text(const char* text, uint16_t textLen);
 bool v4_broadcast_sensor_status(RemoteSensorType sensorType, bool enabled);
-bool v4_broadcast_sensor_data(RemoteSensorType sensorType, const char* jsonData, uint16_t jsonLen, int* outAttempted = nullptr);
+// v4_broadcast_sensor_data (plaintext sensor broadcast) removed — D2 secure fetcher:
+// sensor data now travels only as encrypted-unicast SENSOR_ENVELOPE (v4_send_sensor_envelope).
+bool v4_send_sensor_envelope(const uint8_t* dstMac, RemoteSensorType sensorType,
+                             const char* jsonData, uint16_t jsonLen);
 bool v4_send_user_sync(const uint8_t* dst, const char* jsonPayload, uint16_t jsonLen);
 
 // MAC address formatting (stack buffer version to reduce heap churn)
@@ -860,7 +891,11 @@ static bool addEspNowPeerWithEncryption(const uint8_t* mac, bool /*useEncryption
 
   esp_now_peer_info_t peerInfo = {};
   memcpy(peerInfo.peer_addr, mac, 6);
-  peerInfo.channel = gEspNow->channel;
+  // channel 0 = "send on whatever channel the radio is currently on". This is
+  // self-correcting: if the STA later roams to a different-channel AP, TX
+  // follows the radio automatically instead of desyncing to a frozen value.
+  // (See espnowApplyChannel / the WiFi-event re-sync in processMeshHeartbeats.)
+  peerInfo.channel = 0;
   peerInfo.ifidx   = WIFI_IF_STA;
   peerInfo.encrypt = false;  // LMK removed — confidentiality via SESSION_FRAME
 
@@ -873,6 +908,66 @@ static bool addEspNowPeerWithEncryption(const uint8_t* mac, bool /*useEncryption
     return false;
   }
   return true;
+}
+
+// ============================================================================
+// ESP-NOW channel selection (field-reliability)
+// ============================================================================
+// ESP-NOW is single-radio: peers only hear each other on the same channel, and
+// while the STA is joined to an AP the AP owns the channel. So:
+//   - STA joined  -> follow the AP's channel (pinned preference is moot).
+//   - STA offline -> pin gSettings.espnowChannel (1..13), or the derived
+//                    fallback when 0/auto, via esp_wifi_set_channel so two
+//                    off-grid devices set to the same value meet deterministically.
+// Set by the WiFi event handler (System_WiFi.cpp) when an association changes;
+// drained in processMeshHeartbeats() on espnow_task (safe context, not the tiny
+// arduino_events stack). Also re-checked periodically as a cheap safety net.
+static volatile bool gEspNowChannelResyncPending = false;
+
+// Decide the effective ESP-NOW channel for the current WiFi state.
+static uint8_t espnowComputeChannel() {
+  wifi_config_t conf;
+  memset(&conf, 0, sizeof(conf));
+  esp_wifi_get_config(WIFI_IF_STA, &conf);
+  uint8_t staCh = conf.sta.channel;
+  if (staCh == 0 || staCh > 13) {
+    int wc = WiFi.channel();
+    staCh = (wc >= 1 && wc <= 13) ? (uint8_t)wc : 0;
+  }
+
+  bool associated = (WiFi.status() == WL_CONNECTED) && staCh >= 1 && staCh <= 13;
+  if (associated) return staCh;  // follow the AP; a radio can't be on two channels
+
+  uint8_t pinned = gSettings.espnowChannel;
+  if (pinned >= 1 && pinned <= 13) return pinned;   // user-forced field channel
+  return (staCh >= 1 && staCh <= 13) ? staCh : 1;   // auto: last-known, else fallback 1
+}
+
+// Apply `ch` as gEspNow->channel, and — only when the STA is NOT associated —
+// pin the radio to it. Pinning is skipped while joined because it would fight
+// the active STA link (and the AP channel wins anyway). Peers use channel 0 so
+// they follow whatever the radio lands on. When offline we set BOTH the hidden
+// soft-AP's channel (the governing value in AP+STA while the STA is idle) and
+// esp_wifi_set_channel — belt-and-suspenders, since which one holds depends on
+// driver state. (Exact behavior warrants a bench check on real hardware.)
+static void espnowApplyChannel(uint8_t ch) {
+  if (!gEspNow || ch < 1 || ch > 13) return;
+  gEspNow->channel = ch;
+  if (WiFi.status() != WL_CONNECTED) {
+    wifi_config_t ap_config;
+    memset(&ap_config, 0, sizeof(ap_config));
+    if (esp_wifi_get_config(WIFI_IF_AP, &ap_config) == ESP_OK && ap_config.ap.channel != ch) {
+      ap_config.ap.channel = ch;
+      esp_wifi_set_config(WIFI_IF_AP, &ap_config);
+    }
+    esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+  }
+}
+
+// Called from the WiFi event handler (any association change) — snapshot only,
+// the real work runs on espnow_task. Cheap enough for the small event stack.
+void espnowNoteWifiChannelMayHaveChanged() {
+  gEspNowChannelResyncPending = true;
 }
 
 // Send ESP-NOW response via router (v2 JSON RESPONSE messages)
@@ -1851,12 +1946,29 @@ bool v4_broadcast(uint8_t type, uint16_t flags, uint32_t msgId, const uint8_t* p
 // Designed as an additive wrapper so existing v4_broadcast callsites stay
 // untouched. As callers migrate to category-aware broadcasts, traffic to
 // uninterested peers drops out.
+
+// Per-peer heartbeat backoff schedule. A peer we've stopped hearing from gets
+// heartbeats less and less often (ramping the 5 s base up toward 30 s) so a
+// long-gone peer stops eating airtime and log lines — WITHOUT slowing the
+// heartbeat to healthy peers, which stay at the full 5 s rate. `silentMs` is the
+// time since that peer's last mesh HEARTBEAT (seeded from slot birth for peers
+// we've never heard). Any received heartbeat resets it, so recovery is automatic
+// (a returning peer is back at full rate within one slow interval, <= 30 s).
+// Returns the minimum ms between heartbeats to this peer; 0 = full rate (no throttle).
+static uint32_t meshHeartbeatMinInterval(uint32_t silentMs) {
+  if (silentMs < MESH_PEER_TIMEOUT_MS) return 0;      // < 30 s: alive, or the grace window
+  if (silentMs < 2u * 60u * 1000u)     return 10000;  // 30 s – 2 min
+  if (silentMs < 5u * 60u * 1000u)     return 20000;  // 2 min – 5 min
+  return 30000;                                        // > 5 min
+}
+
 bool v4_broadcast_category(uint8_t type, uint16_t flags, uint32_t msgId,
                            const uint8_t* payload, uint16_t payloadLen, uint8_t ttl,
                            uint32_t category, int* outAttempted) {
   if (outAttempted) *outAttempted = 0;
   if (!gEspNow || !gEspNow->initialized) return false;
 
+  const uint32_t now = (uint32_t)millis();
   bool anySuccess = false;
   int sentCount = 0;
   int skippedCount = 0;
@@ -1867,7 +1979,7 @@ bool v4_broadcast_category(uint8_t type, uint16_t flags, uint32_t msgId,
     tracker = broadcast_tracker_alloc();
     if (tracker) {
       tracker->msgId = msgId;
-      tracker->startMs = millis();
+      tracker->startMs = now;
       tracker->expectedCount = 0;
       tracker->receivedCount = 0;
       tracker->active = true;
@@ -1884,6 +1996,23 @@ bool v4_broadcast_category(uint8_t type, uint16_t flags, uint32_t msgId,
     if (!peerIdentityWantsEvent(gMeshPeers[i].mac, category)) {
       skippedCount++;
       continue;
+    }
+    // Per-peer heartbeat backoff: throttle the periodic HEARTBEAT to peers we've
+    // long stopped hearing from (ramps 5 s -> 30 s). Only HEARTBEAT is gated, so
+    // data/command categories still reach every peer, and healthy peers (silent
+    // < 30 s -> interval 0) always send. State lives in the durable meta slot
+    // because this peer's health slot is memset every 5 s tick while it's offline.
+    if (type == ESPNOW_V4_TYPE_HEARTBEAT) {
+      MeshPeerMeta* hbMeta = getMeshPeerMeta(gMeshPeers[i].mac, false);
+      if (hbMeta) {
+        uint32_t silent = hbMeta->hbLastHeardMs ? (now - hbMeta->hbLastHeardMs) : 0;
+        uint32_t iv = meshHeartbeatMinInterval(silent);
+        if (iv != 0 && (uint32_t)(now - hbMeta->hbLastSentMs) < iv) {
+          skippedCount++;
+          continue;  // backed off — not due to this peer this tick
+        }
+        hbMeta->hbLastSentMs = now;
+      }
     }
     attemptedCount++;
     bool sent = v4_send_frame(gMeshPeers[i].mac, type, flagsAuthed, msgId,
@@ -1940,13 +2069,13 @@ bool v4_send_encrypted_chunked(const uint8_t dst[6], uint8_t type, uint16_t base
                                    payload, payloadLen, ttl, err, sizeof(err));
   }
 
-  // fragIndex/fragCount are uint8_t in the header, so the wire would allow 255
-  // fragments × 200 plaintext bytes = ~51 KB — but the RECEIVER is the real
-  // ceiling: v4_reasm_find_or_alloc clamps fragCount to V4_FRAG_MAX (32) and
-  // sizes its buffer from the clamped value, so a 33+ fragment message can
-  // never reassemble. The operative cap is 32 × 200 = 6400 B; the 255 guard
-  // below only catches the absurd. CMD_RESP / STREAM / METADATA_PUSH are the
-  // realistic callers — they should be well under 6400 B.
+  // fragIndex/fragCount are uint8_t so the wire would allow 255 fragments, but
+  // the RECEIVER is the real ceiling: v4_reasm_find_or_alloc clamps fragCount to
+  // V4_FRAG_MAX and sizes its buffer from the clamped value, so an over-budget
+  // message can never reassemble. This used to guard only against >255, which
+  // meant a 33..255-fragment send left the wire looking healthy while the peer
+  // silently failed to rebuild it. Guard the REAL cap and fail loudly instead —
+  // same rule as the CMD_RESULT_MAX ceiling on the delivery side.
   //
   // Important: fragSize must equal V4_MAX_FRAGMENT_PAYLOAD (200) — the
   // existing reassembler uses that stride to compute buffer offsets.
@@ -1954,9 +2083,9 @@ bool v4_send_encrypted_chunked(const uint8_t dst[6], uint8_t type, uint16_t base
   // and the wire cipher is fragSize + 16 (AEAD tag) = 216 ≤ MAX_PAYLOAD (218).
   uint16_t fragSize = V4_MAX_FRAGMENT_PAYLOAD;
   uint32_t fragCountU = (payloadLen + fragSize - 1) / fragSize;
-  if (fragCountU > 255) {
-    WARN_ESPNOWF("[V4_ENC_FRAG_TX] payload too large: %u bytes requires %u frags (max 255)",
-                 payloadLen, (unsigned)fragCountU);
+  if (fragCountU > V4_FRAG_MAX) {
+    WARN_ESPNOWF("[V4_ENC_FRAG_TX] payload too large: %u bytes needs %u frags (receiver reassembles at most %u = %u B)",
+                 payloadLen, (unsigned)fragCountU, (unsigned)V4_FRAG_MAX, (unsigned)V4_REASM_MAX_MSG);
     return false;
   }
   uint8_t fragCount = (uint8_t)fragCountU;
@@ -2174,13 +2303,13 @@ static bool v4_send_ack(const uint8_t* dst, uint32_t ackFor) {
 // Phase 4: tell a sender that a file transfer it started will not complete.
 // The sender is fire-and-forget (it returns "sent" once frames are handed off,
 // without waiting for completion), so this is a post-hoc failure notice keyed
-// by the original transfer's msgId (echoed in the header). Plaintext control
-// frame, mirroring v4_send_ack — it reveals only "a transfer failed" + reason.
+// by the original transfer's msgId (echoed in the header). Same session AEAD
+// path as FILE_START/DATA/END — RX requires REQ_SESSION_ENC.
 static bool v4_send_file_cancel(const uint8_t* dst, uint32_t msgId, uint8_t reason) {
   V4PayloadFileCancel p;
   p.reason = reason;
-  return v4_send_frame(dst, ESPNOW_V4_TYPE_FILE_CANCEL, 0, msgId,
-                       (const uint8_t*)&p, sizeof(p), 1);
+  return v4_send_payload_smart(dst, ESPNOW_V4_TYPE_FILE_CANCEL, 0, msgId,
+                               (const uint8_t*)&p, sizeof(p), 1);
 }
 
 // Send ACK for a specific fragment
@@ -2448,37 +2577,30 @@ bool v4_broadcast_sensor_status(RemoteSensorType sensorType, bool enabled) {
   return result;
 }
 
-// Broadcast sensor data to all mesh peers
-bool v4_broadcast_sensor_data(RemoteSensorType sensorType, const char* jsonData, uint16_t jsonLen, int* outAttempted) {
-  if (outAttempted) *outAttempted = 0;
-  if (!jsonData || jsonLen == 0 || jsonLen > 200) {
-    DEBUGF(DEBUG_ESPNOW_MESH, "[V4_BROADCAST_SENSOR_DATA] ERROR: Invalid params (jsonData=%p len=%u)",
-           jsonData, jsonLen);
+// (v4_broadcast_sensor_data — the plaintext sensor-data broadcast — was removed here as
+//  part of the D2 secure-fetcher change. Sensor data now travels only as encrypted-unicast
+//  SENSOR_ENVELOPE. The RX handler v4h_sensor_broadcast is kept vestigial to absorb any
+//  straggler frame from an un-reflashed peer.)
+
+// SENSOR_ENVELOPE (154) — the secure fetcher's data reply (D2): a session-encrypted
+// UNICAST of ONE sensor reading to the leasing controller. Replaces the retired plaintext
+// v4_broadcast_sensor_data for mesh sensor streaming. sendAead is encrypt-or-fail (never a
+// plaintext fallback) and RX-safe from any task, including the sensor broadcaster task.
+bool v4_send_sensor_envelope(const uint8_t* dstMac, RemoteSensorType sensorType,
+                             const char* jsonData, uint16_t jsonLen) {
+  if (!dstMac || !jsonData || jsonLen == 0 || jsonLen > 200) {
+    DEBUGF(DEBUG_ESPNOW_MESH, "[V4_TX_SENSOR_ENVELOPE] invalid params (len=%u)", jsonLen);
     return false;
   }
-  
-  // Build payload: struct + JSON data
   uint8_t buffer[256];
   V4PayloadSensorBroadcast* payload = (V4PayloadSensorBroadcast*)buffer;
   payload->sensorType = (uint8_t)sensorType;
-  payload->dataLen = jsonLen;
+  payload->dataLen    = jsonLen;
+  payload->reserved   = 0;
   memcpy(payload->data, jsonData, jsonLen);
-  
   uint16_t totalLen = sizeof(V4PayloadSensorBroadcast) + jsonLen;
   uint32_t msgId = generateMessageId();
-  extern const char* sensorTypeToString(RemoteSensorType type);
-  DEBUGF(DEBUG_ESPNOW_MESH, "[V4_BROADCAST_SENSOR_DATA] Broadcasting msgId=%lu", (unsigned long)msgId);
-  DEBUGF(DEBUG_ESPNOW_MESH, "[V4_BROADCAST_SENSOR_DATA] sensor=%s jsonLen=%u totalLen=%u",
-         sensorTypeToString(sensorType), jsonLen, totalLen);
-  DEBUGF(DEBUG_ESPNOW_MESH, "[V4_BROADCAST_SENSOR_DATA] JSON (first 80 chars): %.80s", jsonData);
-  // Phase 5: gate on per-peer SENSOR subscription.
-  int attempted = 0;
-  bool result = v4_broadcast_category(ESPNOW_V4_TYPE_SENSOR_BROADCAST, 0, msgId,
-                                       buffer, totalLen, 2, ESPNOW_EVT_SENSOR, &attempted);
-  if (outAttempted) *outAttempted = attempted;
-  DEBUGF(DEBUG_ESPNOW_MESH, "[V4_BROADCAST_SENSOR_DATA] Result: %s",
-         result ? "SUCCESS" : (attempted == 0 ? "NO LIVE PEERS" : "FAILED"));
-  return result;
+  return espnowtx::sendAead(dstMac, ESPNOW_V4_TYPE_SENSOR_ENVELOPE, 0, msgId, buffer, totalLen, 1);
 }
 
 // Send user sync to specific device (JSON payload)
@@ -2784,14 +2906,11 @@ static void v4h_cmd_resp(const V4RxCtx& ctx) {
   if (ctx.payloadLen >= 1 && gEspNow) {
     const V4PayloadCmdResp* resp = (const V4PayloadCmdResp*)ctx.payload;
     size_t resultLen = ctx.payloadLen - 1;
-    // 6143 is BUFFER-derived, not budget-derived: deferredCmdRespResult is a
-    // 6144-byte ps_alloc, and the line below writes the NUL at [resultLen], so
-    // 6143 is the largest safe copy. Do NOT "correct" this to 6399 to match the
-    // 6400 B fragmentation budget (V4_FRAG_MAX × V4_MAX_FRAGMENT_PAYLOAD) — the
-    // budget EXCEEDS the buffer by 256 B, so that change overflows the heap
-    // block. A 6400 B response is truncated here by design; growing the alloc is
-    // the only safe way to raise this.
-    if (resultLen > 6143) resultLen = 6143;
+    // Clamp and allocation now BOTH derive from V4_REASM_MAX_MSG, so they can
+    // no longer drift apart (they used to read 6143 against a 6144 alloc while
+    // the wire could deliver 6400 — a maximal response lost 256 B in silence).
+    // The alloc is V4_REASM_MAX_MSG + 1 for the NUL written below.
+    if (resultLen > V4_REASM_MAX_MSG) resultLen = V4_REASM_MAX_MSG;
     if (!gEspNow->deferredCmdRespResult) { gEspNow->deferredCmdRespPending = false; return; }
     memcpy(gEspNow->deferredCmdRespResult, resp->result, resultLen);
     gEspNow->deferredCmdRespResult[resultLen] = '\0';
@@ -2818,7 +2937,7 @@ static void v4h_cmd_resp(const V4RxCtx& ctx) {
 static constexpr uint8_t  kSessionPrewarmMaxFails   = 3;
 static constexpr uint32_t kSessionPrewarmCooldownMs = 60000;
 struct SessionPrewarm { uint8_t mac[6]; uint8_t fails; uint32_t cooldownUntilMs; bool used; };
-static SessionPrewarm gSessionPrewarm[6] = {};
+EXT_RAM_BSS_ATTR static SessionPrewarm gSessionPrewarm[6];
 
 static SessionPrewarm* sessionPrewarmSlot(const uint8_t mac[6]) {
   int idx = -1, oldest = 0;
@@ -2956,45 +3075,85 @@ static void v4h_sensor_status(const V4RxCtx& ctx) {
   }
 }
 
-// SENSOR_BROADCAST — remote sensor data broadcast to mesh; cache to remote-sensor table.
-static void v4h_sensor_broadcast(const V4RxCtx& ctx) {
-  DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_SENSOR_BROADCAST] Received from %s msgId=%lu payloadLen=%u",
-         ctx.deviceName, (unsigned long)ctx.h->msgId, ctx.payloadLen);
-  if (ctx.payloadLen >= sizeof(V4PayloadSensorBroadcast)) {
-    const V4PayloadSensorBroadcast* sb = (const V4PayloadSensorBroadcast*)ctx.payload;
-    RemoteSensorType sensorType = (RemoteSensorType)sb->sensorType;
-    uint16_t dataLen = sb->dataLen;
-    DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_SENSOR_BROADCAST] sensor=%s dataLen=%u",
-           sensorTypeToString(sensorType), dataLen);
-
-    if (dataLen > 0 && ctx.payloadLen >= (sizeof(V4PayloadSensorBroadcast) + dataLen)) {
-      const char* jsonData = (const char*)sb->data;
-      DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_SENSOR_BROADCAST] JSON (%u bytes): %.*s", (unsigned)dataLen, (int)dataLen, jsonData);
-
-      DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_SENSOR_BROADCAST] Caching sensor data");
-      RemoteSensorData* entry = findOrCreateCacheEntry(ctx.recv_info->src_addr, ctx.deviceName, sensorType);
-      if (entry) {
-        size_t copyLen = (dataLen < REMOTE_SENSOR_BUFFER_SIZE - 1) ? dataLen : REMOTE_SENSOR_BUFFER_SIZE - 1;
-        memcpy(entry->jsonData, jsonData, copyLen);
-        entry->jsonData[copyLen] = '\0';
-        entry->jsonLength = (uint16_t)copyLen;
-        entry->lastUpdate = millis();
-        entry->lastSeen = entry->lastUpdate;
-        entry->valid = true;
-        entry->enabled = true;     // live data implies the sensor is running
-        entry->connected = true;
-        DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_SENSOR_BROADCAST] Data cached successfully (%u bytes)", (unsigned)copyLen);
-      } else {
-        DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_SENSOR_BROADCAST] ERROR: Failed to allocate cache entry");
-      }
-    } else {
-      DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_SENSOR_BROADCAST] ERROR: Invalid data length (%u) or truncated payload",
-             dataLen);
-    }
-  } else {
-    DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_SENSOR_BROADCAST] ERROR: Payload too small (%u < %u)",
-           ctx.payloadLen, (unsigned)sizeof(V4PayloadSensorBroadcast));
+// Shared ingest for a per-sensor reading frame (V4PayloadSensorBroadcast wire layout).
+// Used by BOTH the encrypted-unicast SENSOR_ENVELOPE path (the secure fetcher, D2) and
+// the vestigial plaintext SENSOR_BROADCAST RX (D2 removed its TX; RX kept harmless so a
+// straggler frame from an un-reflashed peer still caches rather than erroring).
+static void v4_ingest_sensor_reading(const V4RxCtx& ctx, const char* tag) {
+  if (ctx.payloadLen < sizeof(V4PayloadSensorBroadcast)) {
+    DEBUGF(DEBUG_ESPNOW_MESH, "[%s] ERROR: Payload too small (%u < %u)",
+           tag, ctx.payloadLen, (unsigned)sizeof(V4PayloadSensorBroadcast));
+    return;
   }
+  const V4PayloadSensorBroadcast* sb = (const V4PayloadSensorBroadcast*)ctx.payload;
+  RemoteSensorType sensorType = (RemoteSensorType)sb->sensorType;
+  uint16_t dataLen = sb->dataLen;
+  if (dataLen == 0 || ctx.payloadLen < (sizeof(V4PayloadSensorBroadcast) + dataLen)) {
+    DEBUGF(DEBUG_ESPNOW_MESH, "[%s] ERROR: Invalid data length (%u) or truncated payload", tag, dataLen);
+    return;
+  }
+  const char* jsonData = (const char*)sb->data;
+  RemoteSensorData* entry = findOrCreateCacheEntry(ctx.recv_info->src_addr, ctx.deviceName, sensorType);
+  if (!entry) {
+    DEBUGF(DEBUG_ESPNOW_MESH, "[%s] ERROR: Failed to allocate cache entry", tag);
+    return;
+  }
+  size_t copyLen = (dataLen < REMOTE_SENSOR_BUFFER_SIZE - 1) ? dataLen : REMOTE_SENSOR_BUFFER_SIZE - 1;
+  memcpy(entry->jsonData, jsonData, copyLen);
+  entry->jsonData[copyLen] = '\0';
+  entry->jsonLength = (uint16_t)copyLen;
+  entry->lastUpdate = millis();
+  entry->lastSeen = entry->lastUpdate;
+  entry->valid = true;
+  entry->enabled = true;     // live data implies the sensor is running
+  entry->connected = true;
+  DEBUGF(DEBUG_ESPNOW_MESH, "[%s] cached %s data (%u bytes)",
+         tag, sensorTypeToString(sensorType), (unsigned)copyLen);
+}
+
+// SENSOR_BROADCAST — vestigial plaintext RX (D2: TX path removed). Kept so a frame from
+// an un-reflashed peer still caches. No worker in this build transmits opcode 150.
+static void v4h_sensor_broadcast(const V4RxCtx& ctx) {
+  v4_ingest_sensor_reading(ctx, "V4_RX_SENSOR_BROADCAST");
+}
+
+// SENSOR_ENVELOPE — the secure fetcher's data reply (D2). Encrypted-unicast per-sensor
+// reading from a leased worker. Dispatch flags (REQ_PAIRED|REQ_SESSION_ENC) guarantee this
+// arrived AEAD-confidential from a paired peer before we reach here; same cache ingest.
+static void v4h_sensor_envelope(const V4RxCtx& ctx) {
+  v4_ingest_sensor_reading(ctx, "V4_RX_SENSOR_ENVELOPE");
+}
+
+// SENSOR_REQ — worker RX: a master/backup asks this worker to (un)subscribe/one-shot a
+// sensor set under a lease. Dispatch flags already guaranteed REQ_PAIRED|REQ_SESSION_ENC.
+// Add the mandatory NARROW authorization (opt-in + Ed25519 fingerprint == master/backup),
+// then defer the apply to the super-loop (startSensorDataStreaming creates a task/mutex —
+// unsafe on the RX task). This handler never reaches executeCommand: no RCE (D1/scope).
+static void v4h_sensor_req(const V4RxCtx& ctx) {
+  if (!gSettings.espnowAcceptSensorControl) {
+    DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_SENSOR_REQ] drop: acceptSensorControl is off");
+    return;
+  }
+  if (ctx.payloadLen < sizeof(V4PayloadSensorReq)) {
+    DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_SENSOR_REQ] drop: short payload (%u)", ctx.payloadLen);
+    return;
+  }
+  if (!espnowSensorControlAuthorized(ctx.recv_info->src_addr)) {
+    DEBUGF(DEBUG_ESPNOW_MESH,
+           "[V4_RX_SENSOR_REQ] drop: %s not an authorized controller (fingerprint mismatch)",
+           ctx.deviceName);
+    return;
+  }
+  if (!gEspNow) return;
+  const V4PayloadSensorReq* rq = (const V4PayloadSensorReq*)ctx.payload;
+  gEspNow->meshSensorReqMode       = rq->mode;
+  gEspNow->meshSensorReqMask       = rq->sensorMask;
+  gEspNow->meshSensorReqIntervalMs = rq->intervalMs;
+  gEspNow->meshSensorReqLeaseMs    = rq->leaseMs;
+  memcpy(gEspNow->meshSensorReqSrcMac, ctx.recv_info->src_addr, 6);
+  gEspNow->meshSensorReqPending    = true;
+  DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_SENSOR_REQ] queued mode=%u mask=0x%lx interval=%u lease=%u from %s",
+         rq->mode, (unsigned long)rq->sensorMask, rq->intervalMs, rq->leaseMs, ctx.deviceName);
 }
 
 #if ENABLE_BONDED_MODE
@@ -3858,6 +4017,8 @@ static void v4h_stream(const V4RxCtx& ctx) {
 // gActiveFileTransfer pointer + gFileTransferLocked flag are gone; up to
 // kFileSlots concurrent transfers from distinct (peerMac, msgId) pairs.
 // Same-destination-path conflict rejected here via fileSlotsAllocate.
+// RX gated REQ_PAIRED|REQ_SESSION_ENC (dispatch table) — MAC pairing alone is
+// not enough; TX already encrypt-or-fails via v4_send_payload_smart.
 static void v4h_file_start(const V4RxCtx& ctx) {
   if (ctx.payloadLen < sizeof(V4PayloadFileStart)) return;
   const V4PayloadFileStart* fs = (const V4PayloadFileStart*)ctx.payload;
@@ -3886,8 +4047,7 @@ static void v4h_file_start(const V4RxCtx& ctx) {
 }
 
 // FILE_DATA — route the chunk to its owning slot in the multi-slot table.
-// Original branch had inline `if (!isPaired) return true;` — using REQ_PAIRED
-// flag yields identical behavior (silent drop for unpaired senders).
+// Pairing + session AEAD enforced by dispatch flags (see FILE_START note).
 static void v4h_file_data(const V4RxCtx& ctx) {
   if (ctx.payloadLen < 3) return;
   FileTransferSlot* slot = fileSlotsFindByMsg(ctx.recv_info->src_addr, ctx.h->msgId);
@@ -3995,6 +4155,26 @@ static void fileWriterFinalizeJob(void* arg) {
   fileSlotsRelease(slot);
 }
 
+#if ENABLE_BONDED_MODE
+// Bond magic filenames (_settings_out.json, etc.) are accepted only from the
+// configured bond peer while bond mode is on and the peer is online. Session
+// AEAD is already required by the FILE_* dispatch flags; this blocks a
+// different paired+session mesh peer from poisoning the bond settings cache.
+static bool v4FileBondMagicAllowed(const uint8_t* sndMac, const char* filename) {
+  if (!sndMac || !filename) return false;
+  if (!gSettings.bondModeEnabled || !gEspNow || !gEspNow->bondPeerOnline) {
+    WARN_ESPNOWF("[V4_FILE] Rejected bond file '%s': bond mode inactive or peer offline", filename);
+    return false;
+  }
+  uint8_t bondMac[6];
+  if (!parseMacAddress(gSettings.bondPeerMac, bondMac) || memcmp(bondMac, sndMac, 6) != 0) {
+    WARN_ESPNOWF("[V4_FILE] Rejected bond file '%s' from non-bond peer", filename);
+    return false;
+  }
+  return true;
+}
+#endif
+
 // FILE_END — finalize the slot's transfer; route manifest/settings to bond
 // processors, otherwise write to filesystem. Sends ACK back; releases slot.
 // Slot identity: (peerMac, msgId) — the FILE_START's msgId is the transferId
@@ -4068,21 +4248,31 @@ static void v4h_file_end(const V4RxCtx& ctx) {
 
   if (fe->success && dataBuf) {
 #if ENABLE_BONDED_MODE
-    if (strcmp(filename, "_manifest_out.json") == 0) {
-      String manifestStr((char*)dataBuf, recvBytes);
-      processBondModeManifestResp((uint8_t*)sndMac, senderMacStr, manifestStr);
-      BROADCAST_PRINTF("[V4_FILE] Manifest processed: %lu bytes", (unsigned long)recvBytes);
-    } else if (strcmp(filename, "_settings_out.json") == 0) {
-      DEBUG_ESPNOWF("[FILE_END] Detected settings file: %s (%lu bytes)", filename, (unsigned long)recvBytes);
-      String settingsStr((char*)dataBuf, recvBytes);
-      DEBUG_ESPNOWF("[FILE_END] Calling processBondSettings (settingsStr len=%d)", settingsStr.length());
-      processBondSettings((uint8_t*)sndMac, senderMacStr, settingsStr);
-      BROADCAST_PRINTF("[V4_FILE] Settings processed: %lu bytes", (unsigned long)recvBytes);
-    } else if (strcmp(filename, "_schema_out.json") == 0) {
-      DEBUG_ESPNOWF("[FILE_END] Detected schema file: %s (%lu bytes)", filename, (unsigned long)recvBytes);
-      String schemaStr((char*)dataBuf, recvBytes);
-      processBondSchema((uint8_t*)sndMac, senderMacStr, schemaStr);
-      BROADCAST_PRINTF("[V4_FILE] Schema processed: %lu bytes", (unsigned long)recvBytes);
+    if (strcmp(filename, "_manifest_out.json") == 0 ||
+        strcmp(filename, "_settings_out.json") == 0 ||
+        strcmp(filename, "_schema_out.json") == 0) {
+      if (!v4FileBondMagicAllowed(sndMac, filename)) {
+        v4_send_file_cancel(sndMac, ctx.h->msgId, FILE_CANCEL_WRITE_FAILED);
+        logFileTransferEvent((uint8_t*)sndMac, senderMacStr.c_str(), filename, MSG_FILE_RECV_FAILED);
+        fileSlotsRelease(slot);
+        return;
+      }
+      if (strcmp(filename, "_manifest_out.json") == 0) {
+        String manifestStr((char*)dataBuf, recvBytes);
+        processBondModeManifestResp((uint8_t*)sndMac, senderMacStr, manifestStr);
+        BROADCAST_PRINTF("[V4_FILE] Manifest processed: %lu bytes", (unsigned long)recvBytes);
+      } else if (strcmp(filename, "_settings_out.json") == 0) {
+        DEBUG_ESPNOWF("[FILE_END] Detected settings file: %s (%lu bytes)", filename, (unsigned long)recvBytes);
+        String settingsStr((char*)dataBuf, recvBytes);
+        DEBUG_ESPNOWF("[FILE_END] Calling processBondSettings (settingsStr len=%d)", settingsStr.length());
+        processBondSettings((uint8_t*)sndMac, senderMacStr, settingsStr);
+        BROADCAST_PRINTF("[V4_FILE] Settings processed: %lu bytes", (unsigned long)recvBytes);
+      } else {
+        DEBUG_ESPNOWF("[FILE_END] Detected schema file: %s (%lu bytes)", filename, (unsigned long)recvBytes);
+        String schemaStr((char*)dataBuf, recvBytes);
+        processBondSchema((uint8_t*)sndMac, senderMacStr, schemaStr);
+        BROADCAST_PRINTF("[V4_FILE] Schema processed: %lu bytes", (unsigned long)recvBytes);
+      }
     } else
 #endif // ENABLE_BONDED_MODE
     {
@@ -4269,6 +4459,7 @@ void espnowPairModeClose() {
   // sweep in processMeshHeartbeats.
   if (espnowPairModeActive()) systemEventPost(SYSEVT_PAIR_WINDOW_CLOSED);
   gPairModeUntilMs = 0;
+  if (gEspNow) gEspNow->unpairedDeviceCount = 0;  // discovered candidates are window-scoped
 }
 bool espnowPairModeActive() {
   return gPairModeUntilMs != 0 && (int32_t)(gPairModeUntilMs - (uint32_t)millis()) > 0;
@@ -4331,46 +4522,88 @@ static void pairModeMarkSeen(const uint8_t* mac) {
   gAutoPairSeenAt[slot] = (now == 0) ? 1 : now;
 }
 
-// Deferred to cmd_exec_task (threading invariant: no FS/crypto inline on
-// espnow_task). Reuses cmd_espnow_pairsecure wholesale — the sole security gate
-// is our own precheck, so log the event here for the audit trail.
-struct PairModeJob { uint8_t mac[6]; char name[24]; };
-static void runDeferredPairModePair(void* arg) {
-  PairModeJob* w = static_cast<PairModeJob*>(arg);
-  if (espnowPairModeActive() && !pairModeIsPaired(w->mac)) {
-    char macStr[18];
-    formatMacAddressBuf(w->mac, macStr, sizeof(macStr));
-    String args = String(macStr) + " " + w->name;
-    const char* res = cmd_espnow_pairsecure(args);
-    BROADCAST_PRINTF("[PAIRMODE] auto-pair %s (%s): %s", w->name, macStr, res ? res : "(null)");
-    logSystemEvent("ESPNOW", "pair-mode auto-paired %s (%s)", macStr, w->name);
-    // SYSEVT_PEER_PAIRED is posted inside cmd_espnow_pairsecure (called above),
-    // so it is NOT re-posted here — that would double-fire the event on every
-    // pairing-mode auto-pair.
+// ---------------------------------------------------------------------------
+// Discovered-candidate list (discover-then-confirm pairing)
+// ---------------------------------------------------------------------------
+// A device in discovery mode records every same-mesh peer whose PAIR_BEACON it
+// hears into gEspNow->unpairedDevices[] — it does NOT pair automatically (the
+// old WPS instant auto-pair is removed). The user then explicitly requests a
+// pair from that list, and the peer being paired with shows an accept screen
+// (Stage 2/3). Entries expire CANDIDATE_TTL_MS after their last beacon; the
+// whole list is cleared when our window closes.
+static const uint32_t CANDIDATE_TTL_MS = 15000;  // ~10 missed 1.5s beacons
+
+// Drop candidates not heard within CANDIDATE_TTL_MS. Compacts in place.
+static void pruneStaleCandidates(uint32_t now) {
+  if (!gEspNow) return;
+  int w = 0;
+  for (int r = 0; r < gEspNow->unpairedDeviceCount; r++) {
+    if ((uint32_t)(now - gEspNow->unpairedDevices[r].lastSeenMs) <= CANDIDATE_TTL_MS) {
+      if (w != r) gEspNow->unpairedDevices[w] = gEspNow->unpairedDevices[r];
+      w++;
+    }
   }
-  free(w);
+  gEspNow->unpairedDeviceCount = w;
 }
 
-// RX handler for PAIR_BEACON. Inline on espnow_task — must stay cheap; the heavy
-// pair is deferred. All beacon fields are untrusted.
+// Clear the whole candidate list (window close / manual flush).
+static void clearCandidates() {
+  if (!gEspNow) return;
+  gEspNow->unpairedDeviceCount = 0;
+}
+
+// Add or refresh a discovered candidate. Update-by-MAC; append if new; LRU-evict
+// (oldest lastSeenMs) when the 16-slot table is full. Cheap + allocation-light,
+// so it is safe inline on espnow_task per the handler threading rule.
+static void addOrUpdateCandidate(const uint8_t* mac, const char* name, int rssi, uint32_t now) {
+  if (!gEspNow) return;
+  pruneStaleCandidates(now);
+  for (int i = 0; i < gEspNow->unpairedDeviceCount; i++) {
+    if (memcmp(gEspNow->unpairedDevices[i].mac, mac, 6) == 0) {
+      gEspNow->unpairedDevices[i].name       = name;
+      gEspNow->unpairedDevices[i].rssi       = rssi;
+      gEspNow->unpairedDevices[i].lastSeenMs = now;
+      gEspNow->unpairedDevices[i].heartbeatCount++;
+      return;
+    }
+  }
+  int slot;
+  if (gEspNow->unpairedDeviceCount < MAX_UNPAIRED_DEVICES) {
+    slot = gEspNow->unpairedDeviceCount++;
+  } else {
+    slot = 0;  // table full — evict the oldest
+    for (int i = 1; i < gEspNow->unpairedDeviceCount; i++) {
+      if (gEspNow->unpairedDevices[i].lastSeenMs < gEspNow->unpairedDevices[slot].lastSeenMs) slot = i;
+    }
+  }
+  memcpy(gEspNow->unpairedDevices[slot].mac, mac, 6);
+  gEspNow->unpairedDevices[slot].name           = name;
+  gEspNow->unpairedDevices[slot].rssi           = rssi;
+  gEspNow->unpairedDevices[slot].lastSeenMs     = now;
+  gEspNow->unpairedDevices[slot].heartbeatCount = 1;
+}
+
+// RX handler for PAIR_BEACON. Inline on espnow_task — cheap only; all beacon
+// fields are untrusted. Discover-then-confirm: record the sender as an available
+// candidate; NEVER auto-pair (removed). The recentlySeen throttle bounds how
+// often we refresh a candidate to the flood-guard window.
 static void v4h_pair_beacon(const V4RxCtx& ctx) {
   if (ctx.payloadLen < sizeof(V4PayloadPairBeacon)) return;
-  if (!espnowPairModeActive()) return;              // mutual WPS gate: OUR window must be open too
+  if (!espnowPairModeActive()) return;              // our discovery window must be open
   const uint8_t* mac = ctx.recv_info->src_addr;
   if (isSelfMac(mac)) return;
-  if (pairModeIsPaired(mac)) return;                // only auto-pair UNKNOWN peers (no OTA rename of known ones)
-  if (pairModeRecentlySeen(mac)) return;            // rate-limit repeat beacons
+  if (pairModeIsPaired(mac)) return;                // already-paired peers are not candidates
+  if (pairModeRecentlySeen(mac)) return;            // throttle candidate refresh
   pairModeMarkSeen(mac);
 
   const V4PayloadPairBeacon* b = (const V4PayloadPairBeacon*)ctx.payload;
-  PairModeJob* w = (PairModeJob*)ps_alloc(sizeof(PairModeJob), AllocPref::PreferPSRAM, "espnow.pairmode");
-  if (!w) return;
-  memcpy(w->mac, mac, 6);
-  pairModeSanitizeName(b->deviceName, w->name, sizeof(w->name));
-  if (w->name[0] == '\0') {
-    snprintf(w->name, sizeof(w->name), "peer_%02X%02X%02X", mac[3], mac[4], mac[5]);
+  char name[24];
+  pairModeSanitizeName(b->deviceName, name, sizeof(name));   // attacker-controlled → sanitize before storing
+  if (name[0] == '\0') {
+    snprintf(name, sizeof(name), "peer_%02X%02X%02X", mac[3], mac[4], mac[5]);
   }
-  if (!submitDeferredToCmdExec(runDeferredPairModePair, w)) free(w);
+  int rssi = (ctx.recv_info && ctx.recv_info->rx_ctrl) ? ctx.recv_info->rx_ctrl->rssi : 0;
+  addOrUpdateCandidate(mac, name, rssi, (uint32_t)millis());
 }
 
 // Broadcast one pairing beacon to FF. BROADCAST_AUTH appends a mesh-group-key
@@ -4386,6 +4619,143 @@ static void sendPairBeacon() {
   uint8_t bcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
   v4_send_frame(bcast, ESPNOW_V4_TYPE_PAIR_BEACON, ESPNOW_V4_FLAG_BROADCAST_AUTH,
                 generateMessageId(), (const uint8_t*)&beacon, sizeof(beacon), 1);
+}
+
+// ---------------------------------------------------------------------------
+// Discover-then-confirm: request → accept/reject state machine
+// ---------------------------------------------------------------------------
+// The initiator (A) sends PAIR_REQUEST to a discovered candidate and waits. The
+// target (B) — only while ITS discovery window is open — records the incoming
+// request and surfaces it (Stage 2: CLI 'espnowaccept'/'espnowreject'; Stage 3:
+// on-screen prompt). On accept BOTH sides run cmd_espnow_pairsecure (which
+// writes each device's own authorization registry + drives KEY_EX), so the
+// human Accept is the consent that authorizes the second-side registry write.
+static const uint32_t PAIR_REQUEST_TTL_MS = 45000;  // pending request lifetime
+
+struct PendingPairReq { bool active; uint8_t mac[6]; char name[24]; uint32_t atMs; };
+static PendingPairReq gPendingPairIn  = {};   // on the target: an incoming request awaiting accept/reject
+static PendingPairReq gPendingPairOut = {};   // on the initiator: our outgoing request awaiting their answer
+
+// Send a pairing control frame (REQUEST/ACCEPT/REJECT) addressed to `dst`. Sent
+// as a BROADCAST_AUTH FF broadcast (NOT unicast): the two devices aren't ESP-NOW
+// peers yet, so a unicast esp_now_send would fail and an unknown-MAC fingerprint
+// would skip the auth HMAC. `dst` travels in the payload; non-target hearers drop
+// it. This reuses the exact path the discovery beacon uses.
+static void sendPairCtrl(const uint8_t* dst, uint8_t type) {
+  V4PayloadPairCtrl p = {};
+  memcpy(p.targetMac, dst, 6);
+  p.role = gSettings.meshRole;
+  strncpy(p.deviceName, gSettings.espnowDeviceName.c_str(), sizeof(p.deviceName) - 1);
+  uint8_t bcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+  v4_send_frame(bcast, type, ESPNOW_V4_FLAG_BROADCAST_AUTH,
+                generateMessageId(), (const uint8_t*)&p, sizeof(p), 1);
+}
+
+// Extract the real sender MAC + sanitized name from a pair-control frame, and
+// confirm it is addressed to us. Returns false (drop) if malformed or not ours.
+static bool pairCtrlForUs(const V4RxCtx& ctx, uint8_t senderMac[6], char* nameOut, size_t nameCap) {
+  if (ctx.payloadLen < sizeof(V4PayloadPairCtrl)) return false;
+  const V4PayloadPairCtrl* p = (const V4PayloadPairCtrl*)ctx.payload;
+  uint8_t myMac[6];
+  esp_wifi_get_mac(WIFI_IF_STA, myMac);
+  if (memcmp(p->targetMac, myMac, 6) != 0) return false;   // addressed to someone else
+  memcpy(senderMac, ctx.recv_info->src_addr, 6);
+  if (isSelfMac(senderMac)) return false;
+  pairModeSanitizeName(p->deviceName, nameOut, nameCap);
+  if (nameOut[0] == '\0') {
+    snprintf(nameOut, nameCap, "peer_%02X%02X%02X", senderMac[3], senderMac[4], senderMac[5]);
+  }
+  return true;
+}
+
+// Deferred to cmd_exec_task — cmd_espnow_pairsecure does FS + crypto. Reused by
+// the initiator's PAIR_ACCEPT handler (the target pairs inline from its CLI).
+struct PairCompleteJob { uint8_t mac[6]; char name[24]; };
+static void runDeferredPairComplete(void* arg) {
+  PairCompleteJob* w = static_cast<PairCompleteJob*>(arg);
+  char macStr[18];
+  formatMacAddressBuf(w->mac, macStr, sizeof(macStr));
+  String args = String(macStr) + " " + w->name;
+  const char* res = cmd_espnow_pairsecure(args);
+  BROADCAST_PRINTF("[PAIR] paired with %s (%s): %s", w->name, macStr, res ? res : "(null)");
+  logSystemEvent("ESPNOW", "confirmed-pair completed with %s (%s)", macStr, w->name);
+  free(w);
+}
+
+// RX: incoming pair request (on the target). Gated REQ_AUTHENTICATED (same-mesh
+// HMAC) by the table; here we additionally require OUR discovery window to be
+// open (user decision: no unsolicited accept prompts). Records a single pending
+// request; a newer request replaces an older un-answered one.
+static void v4h_pair_request(const V4RxCtx& ctx) {
+  uint8_t mac[6];
+  char name[24];
+  if (!pairCtrlForUs(ctx, mac, name, sizeof(name))) return;   // not addressed to us / malformed
+  if (pairModeIsPaired(mac)) { sendPairCtrl(mac, ESPNOW_V4_TYPE_PAIR_REJECT); return; }  // already paired
+  if (!espnowPairModeActive()) {
+    sendPairCtrl(mac, ESPNOW_V4_TYPE_PAIR_REJECT);   // not in discovery → tell initiator to stop waiting
+    return;
+  }
+  gPendingPairIn.active = true;
+  memcpy(gPendingPairIn.mac, mac, 6);
+  strncpy(gPendingPairIn.name, name, sizeof(gPendingPairIn.name) - 1);
+  gPendingPairIn.name[sizeof(gPendingPairIn.name) - 1] = '\0';
+  gPendingPairIn.atMs = (uint32_t)millis();
+  char macStr[18];
+  formatMacAddressBuf(mac, macStr, sizeof(macStr));
+  BROADCAST_PRINTF("[PAIR] '%s' (%s) wants to pair — run 'espnowaccept' or 'espnowreject'.",
+                   gPendingPairIn.name, macStr);
+  // Stage 3/4 will fire an on-screen accept prompt here (SYSEVT_PEER_PAIR_REQUEST).
+}
+
+// RX: the target accepted (on the initiator). Only honored if it matches OUR
+// outstanding outgoing request. We then run pairsecure to write our own registry.
+static void v4h_pair_accept(const V4RxCtx& ctx) {
+  uint8_t mac[6];
+  char name[24];
+  if (!pairCtrlForUs(ctx, mac, name, sizeof(name))) return;
+  if (!gPendingPairOut.active || !macEqual6(gPendingPairOut.mac, mac)) return;
+  PairCompleteJob* w = (PairCompleteJob*)ps_alloc(sizeof(PairCompleteJob), AllocPref::PreferPSRAM, "espnow.paircomplete");
+  if (!w) return;
+  memcpy(w->mac, mac, 6);
+  strncpy(w->name, gPendingPairOut.name, sizeof(w->name) - 1);
+  w->name[sizeof(w->name) - 1] = '\0';
+  gPendingPairOut.active = false;
+  BROADCAST_PRINTF("[PAIR] '%s' accepted — completing pairing.", w->name);
+  if (!submitDeferredToCmdExec(runDeferredPairComplete, w)) free(w);
+}
+
+// RX: the target rejected / isn't in discovery mode (on the initiator).
+static void v4h_pair_reject(const V4RxCtx& ctx) {
+  uint8_t mac[6];
+  char name[24];
+  if (!pairCtrlForUs(ctx, mac, name, sizeof(name))) return;
+  if (!gPendingPairOut.active || !macEqual6(gPendingPairOut.mac, mac)) return;
+  BROADCAST_PRINTF("[PAIR] '%s' declined the pair request (or isn't in discovery mode).",
+                   gPendingPairOut.name);
+  gPendingPairOut.active = false;
+}
+
+// -------- Public read accessors for the discover-then-confirm UI (OLED/G2/web) --------
+// Prunes stale candidates, then returns the live count.
+int espnowGetPairCandidateCount() {
+  if (!gEspNow) return 0;
+  pruneStaleCandidates((uint32_t)millis());
+  return gEspNow->unpairedDeviceCount;
+}
+// Read candidate `idx` (name/mac/rssi). Returns false if out of range.
+bool espnowGetPairCandidate(int idx, char* name, size_t nameCap, uint8_t mac[6], int* rssi) {
+  if (!gEspNow || idx < 0 || idx >= gEspNow->unpairedDeviceCount) return false;
+  const UnpairedDevice& d = gEspNow->unpairedDevices[idx];
+  if (name && nameCap) { strncpy(name, d.name.c_str(), nameCap - 1); name[nameCap - 1] = '\0'; }
+  if (mac) memcpy(mac, d.mac, 6);
+  if (rssi) *rssi = d.rssi;
+  return true;
+}
+// True + fills `name` if there is an incoming pair request awaiting accept/reject.
+bool espnowGetIncomingPairRequest(char* name, size_t nameCap) {
+  if (!gPendingPairIn.active) return false;
+  if (name && nameCap) { strncpy(name, gPendingPairIn.name, nameCap - 1); name[nameCap - 1] = '\0'; }
+  return true;
 }
 
 static const V4OpcodeEntry kV4HandlerTable[] = {
@@ -4418,8 +4788,20 @@ static const V4OpcodeEntry kV4HandlerTable[] = {
   // forge a beacon to pollute our registry. NOT REQ_PAIRED — the sender is unpaired by
   // definition (pairing is what this establishes).
   { ESPNOW_V4_TYPE_PAIR_BEACON,      V4_OPC_FLAG_REQ_AUTHENTICATED,                        v4h_pair_beacon       },
+  // Discover-then-confirm control. REQ_AUTHENTICATED (same-mesh HMAC), NOT
+  // REQ_PAIRED — these run before pairing exists. Handlers add their own gates
+  // (target must be in discovery mode; answers must match an outstanding request).
+  { ESPNOW_V4_TYPE_PAIR_REQUEST,     V4_OPC_FLAG_REQ_AUTHENTICATED,                        v4h_pair_request      },
+  { ESPNOW_V4_TYPE_PAIR_ACCEPT,      V4_OPC_FLAG_REQ_AUTHENTICATED,                        v4h_pair_accept       },
+  { ESPNOW_V4_TYPE_PAIR_REJECT,      V4_OPC_FLAG_REQ_AUTHENTICATED,                        v4h_pair_reject       },
   { ESPNOW_V4_TYPE_SENSOR_STATUS,    0,                                                    v4h_sensor_status     },
   { ESPNOW_V4_TYPE_SENSOR_BROADCAST, 0,                                                    v4h_sensor_broadcast  },
+  // Secure sensor fetcher (D1/D2): mesh-legal leased pull + encrypted reply. NOT bond-gated —
+  // REQ_PAIRED|REQ_SESSION_ENC only; the worker's v4h_sensor_req adds the Ed25519 fingerprint
+  // check (master/backup) so only designated controllers can drive streaming. SENSOR_ENVELOPE
+  // is the encrypted-unicast data reply replacing the retired plaintext SENSOR_BROADCAST TX.
+  { ESPNOW_V4_TYPE_SENSOR_REQ,       V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC,  v4h_sensor_req        },
+  { ESPNOW_V4_TYPE_SENSOR_ENVELOPE,  V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC,  v4h_sensor_envelope   },
   { ESPNOW_V4_TYPE_TOPO_REQ,         0,                                                    v4h_topo_req          },
   { ESPNOW_V4_TYPE_TOPO_START,       0,                                                    v4h_topo_start        },
   { ESPNOW_V4_TYPE_TOPO_PEER,        0,                                                    v4h_topo_peer         },
@@ -4428,10 +4810,13 @@ static const V4OpcodeEntry kV4HandlerTable[] = {
   { ESPNOW_V4_TYPE_METADATA_RESP,    0,                                                    v4h_metadata_resp_push},
   { ESPNOW_V4_TYPE_METADATA_PUSH,    0,                                                    v4h_metadata_resp_push},
   { ESPNOW_V4_TYPE_STREAM,           0,                                                    v4h_stream            },
-  { ESPNOW_V4_TYPE_FILE_START,       V4_OPC_FLAG_REQ_PAIRED,                               v4h_file_start        },
-  { ESPNOW_V4_TYPE_FILE_DATA,        V4_OPC_FLAG_REQ_PAIRED,                               v4h_file_data         },
-  { ESPNOW_V4_TYPE_FILE_END,         V4_OPC_FLAG_REQ_PAIRED,                               v4h_file_end          },
-  { ESPNOW_V4_TYPE_FILE_CANCEL,      V4_OPC_FLAG_REQ_PAIRED,                               v4h_file_cancel       },
+  // FILE_*: TX encrypt-or-fails via v4_send_payload_smart; RX requires matching
+  // session AEAD so a spoofed paired MAC cannot inject plaintext transfers
+  // (including bond magic filenames on FILE_END) or forged cancel notices.
+  { ESPNOW_V4_TYPE_FILE_START,       V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, v4h_file_start        },
+  { ESPNOW_V4_TYPE_FILE_DATA,        V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, v4h_file_data         },
+  { ESPNOW_V4_TYPE_FILE_END,         V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, v4h_file_end          },
+  { ESPNOW_V4_TYPE_FILE_CANCEL,      V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, v4h_file_cancel       },
   // Phase 5: SUBSCRIBE_UPDATE — peer tells us which event categories they
   // want from us. REQ_PAIRED so unknown peers can't pollute our broadcast
   // gating (and to ensure peerIdentitySetSubscriptions finds the slot).
@@ -4523,9 +4908,10 @@ static bool v4_dispatch_table_try(const esp_now_recv_info* recv_info, const EspN
     return true;
   }
   if ((e->flags & V4_OPC_FLAG_REQ_SESSION_ENC) && !isSessionEncrypted) {
-    // Bond opcode that arrived plaintext (or only BROADCAST_AUTH). All bond
-    // traffic must ride a SESSION_FRAME — drop loudly. A legitimate sender uses
-    // bondSendEncryptedAsync, so this only fires on spoofed/downgraded frames.
+    // Opcode that arrived plaintext (or only BROADCAST_AUTH). Bond + FILE + FS
+    // rows require a SESSION_FRAME — drop loudly. Legitimate senders use
+    // bondSendEncryptedAsync / v4_send_payload_smart (encrypt-or-fail), so this
+    // only fires on spoofed/downgraded frames.
     WARN_ESPNOWF("[V4_RX] type=%u from %02X:%02X:%02X:%02X:%02X:%02X dropped: "
                  "REQ_SESSION_ENC set but frame was not session-encrypted",
                  h->type,
@@ -5087,12 +5473,14 @@ static void v4CmdResultCallback(bool ok, const char* result, void* userData) {
   const char* resultText = (result && resultLen > 0) ? result : 
                            (ctx->cmdName[0] ? ctx->cmdName : (ok ? "OK" : "FAIL"));
   size_t textLen = strlen(resultText);
-  // Cap at 6KB — within V4 fragmentation budget (32 frags × 200 B = 6400 B,
-  // minus 1 success byte + 1 null = 6398 B usable; rounded to 6143 for margin).
-  // ExecReq.out is 4KB so the handler bottleneck moves there for results
-  // larger than 4KB (but those rarely happen; see Phase 1 plan for the
-  // streaming alternative if ever needed).
-  if (textLen > 6143) textLen = 6143;
+  // Transmit bound, derived rather than hand-typed. In practice CMD_RESULT_MAX
+  // binds first — `result` is ExecReq::out, so textLen is already <= 4095 and
+  // this never fires — but it stays as the defensive statement of what the wire
+  // can actually carry: the fragmentation budget less the success byte and NUL.
+  // The old 6143 was neither: it was copied from the RX buffer's size and
+  // described as a "margin" against a budget it had no relationship to.
+  const size_t kMaxSendText = V4_REASM_MAX_MSG - 2;  // 1 success byte + 1 NUL
+  if (textLen > kMaxSendText) textLen = kMaxSendText;
   
   // Allocate payload: 1 byte success + result text + null terminator
   size_t payloadLen = 1 + textLen + 1;
@@ -5688,7 +6076,7 @@ static void buildCapabilitySummary(CapabilitySummary& cap) {
 #if ENABLE_CAMERA_SENSOR
   cap.featureMask |= CAP_FEATURE_CAMERA;
 #endif
-#if ENABLE_MICROPHONE_SENSOR
+#if ENABLE_MICROPHONE
   cap.featureMask |= CAP_FEATURE_MICROPHONE;
 #endif
 #if ENABLE_ESP_SR
@@ -7433,6 +7821,10 @@ MeshPeerMeta* getMeshPeerMeta(const uint8_t mac[6], bool createIfMissing) {
       gMeshPeerMeta[i].clear();
       memcpy(gMeshPeerMeta[i].mac, mac, 6);
       gMeshPeerMeta[i].isActive = true;
+      // Seed heartbeat-backoff aging from slot birth so a peer we never actually
+      // hear from (e.g. wrong channel since boot) still ramps down to the slow
+      // cadence instead of blasting the full 5 s rate forever.
+      gMeshPeerMeta[i].hbLastHeardMs = (uint32_t)millis();
       return &gMeshPeerMeta[i];
     }
   }
@@ -7480,6 +7872,14 @@ void noteMeshPeerRxActivity(const uint8_t* mac, EspNowMeshRxKind kind, int8_t hb
       break;
   }
   peer->isActive = true;
+  // Mirror positive HEARTBEAT contact into the durable meta slot so per-peer
+  // heartbeat backoff resets to full rate on contact. The health slot above is
+  // memset on every 5 s bootstrap for an offline peer, so it can't carry this.
+  if (kind == EspNowMeshRxKind::MeshHeartbeat ||
+      kind == EspNowMeshRxKind::BootstrapLiveness) {
+    MeshPeerMeta* m = getMeshPeerMeta(mac, false);
+    if (m) m->hbLastHeardMs = t;
+  }
 }
 
 // Check if a mesh peer is considered alive (mesh V3 HEARTBEAT within timeout window)
@@ -7805,6 +8205,57 @@ static bool bondSendReadyOrDeferred(const uint8_t* mac) {
 //   for infrequent heavy handlers — but never defer a session-blocking wait to
 //   cmd_exec, which serializes against runDeferredSessionConfirm.
 void processMeshHeartbeats() {
+  // 0. WiFi-association channel re-sync. A single-radio ESP32's channel follows
+  // the STA association; when it changes (join / roam / drop) the WiFi event
+  // handler flags gEspNowChannelResyncPending so the actual re-derive + re-pin
+  // runs here on espnow_task, not on the tiny arduino_events stack. Also re-run
+  // on a slow timer as a safety net for drift we got no event for. Logs only on
+  // an actual change (rare), same cadence as the peer online/offline lines below.
+  {
+    static uint32_t sLastChannelCheckMs = 0;
+    static uint8_t  sDriftStrikes = 0;
+    uint32_t nowCh = (uint32_t)millis();
+    if (gEspNowChannelResyncPending || (nowCh - sLastChannelCheckMs >= 15000)) {
+      gEspNowChannelResyncPending = false;
+      sLastChannelCheckMs = nowCh;
+      if (gEspNow && gEspNow->initialized) {
+        uint8_t prev = gEspNow->channel;
+        uint8_t want = espnowComputeChannel();
+        if (want != prev) {
+          espnowApplyChannel(want);
+          logSystemEvent("ESPNOW", "channel re-synced %u -> %u (%s)",
+                         (unsigned)prev, (unsigned)want,
+                         WiFi.status() == WL_CONNECTED ? "following AP" : "pinned offline");
+        }
+        // Cheap drift self-heal: when the user has deliberately pinned a channel
+        // (setting 1-13) and the STA isn't associated, verify the ACTUAL radio
+        // channel and re-pin if it wandered off (a partial apply, a driver move
+        // we got no event for). Gated two ways so it never fights a WiFi connect:
+        //   (1) only when a channel is explicitly pinned — auto mode has no fixed
+        //       target worth defending, and a real connect re-syncs via GOT_IP;
+        //   (2) only after the mismatch is stable across two checks, so the brief
+        //       window where a connecting STA sits on the AP channel (resolves in
+        //       < 15 s) never trips it.
+        if (gSettings.espnowChannel >= 1 && gSettings.espnowChannel <= 13 &&
+            WiFi.status() != WL_CONNECTED) {
+          uint8_t hwCh = 0; wifi_second_chan_t drs;
+          if (esp_wifi_get_channel(&hwCh, &drs) == ESP_OK && hwCh != 0 && hwCh != want) {
+            if (++sDriftStrikes >= 2) {
+              sDriftStrikes = 0;
+              espnowApplyChannel(want);
+              logSystemEvent("ESPNOW", "channel drift corrected: radio %u -> pinned %u",
+                             (unsigned)hwCh, (unsigned)want);
+            }
+          } else {
+            sDriftStrikes = 0;
+          }
+        } else {
+          sDriftStrikes = 0;
+        }
+      }
+    }
+  }
+
   // 1. Drain the inbound RX ring buffer. Skipped entirely when the ring was
   // never allocated (ESP-NOW not started, or the init alloc failed) — head and
   // tail can't diverge in that case, but the guard keeps the deref honest.
@@ -7923,6 +8374,17 @@ void processMeshHeartbeats() {
   if (gPairModeUntilMs != 0 && !espnowPairModeActive()) {
     gPairModeUntilMs = 0;
     systemEventPost(SYSEVT_PAIR_WINDOW_CLOSED, nullptr, "expired");
+    if (gEspNow) gEspNow->unpairedDeviceCount = 0;  // clear window-scoped candidates
+  }
+
+  // 2c. Expire stale confirm-pairing requests so a never-answered request
+  // doesn't wedge the initiator's "waiting" state or a stale accept prompt.
+  if (gPendingPairIn.active && (uint32_t)(now - gPendingPairIn.atMs) > PAIR_REQUEST_TTL_MS) {
+    gPendingPairIn.active = false;
+  }
+  if (gPendingPairOut.active && (uint32_t)(now - gPendingPairOut.atMs) > PAIR_REQUEST_TTL_MS) {
+    BROADCAST_PRINTF("[PAIR] request to '%s' timed out (no response).", gPendingPairOut.name);
+    gPendingPairOut.active = false;
   }
 
   if (now - gLastHeartbeatSentMs >= HB_INTERVAL_MS) {
@@ -7963,11 +8425,14 @@ void processMeshHeartbeats() {
       strncpy(hb.deviceName, gSettings.espnowDeviceName.c_str(), sizeof(hb.deviceName) - 1);
       // Phase 5: gate on per-peer HEARTBEAT subscription. Peers default to
       // subscribed-to-all, so this is invisible until a peer opts out.
-      v4_broadcast_category(ESPNOW_V4_TYPE_HEARTBEAT, ESPNOW_V4_FLAG_ACK_REQ,
-                            generateMessageId(),
-                            (const uint8_t*)&hb, (uint16_t)sizeof(hb), 1,
-                            ESPNOW_EVT_HEARTBEAT);
-      gEspNow->heartbeatsSent++;
+      // With per-peer backoff a tick can legitimately reach nobody (every peer
+      // backed off), so only count ticks that actually put a heartbeat on air.
+      if (v4_broadcast_category(ESPNOW_V4_TYPE_HEARTBEAT, ESPNOW_V4_FLAG_ACK_REQ,
+                                generateMessageId(),
+                                (const uint8_t*)&hb, (uint16_t)sizeof(hb), 1,
+                                ESPNOW_EVT_HEARTBEAT)) {
+        gEspNow->heartbeatsSent++;
+      }
     }
   }
 
@@ -8489,6 +8954,16 @@ void processMeshHeartbeats() {
     }
   }
 
+  // 9f3. Mesh secure fetcher: deferred SENSOR_REQ — worker applies the leased
+  // subscription off the RX critical path (startSensorDataStreaming creates a task).
+  // Authorization already happened in v4h_sensor_req; this only applies it.
+  if (gEspNow->meshSensorReqPending) {
+    gEspNow->meshSensorReqPending = false;
+    espnowApplySensorSubscription(gEspNow->meshSensorReqMode, gEspNow->meshSensorReqMask,
+                                  gEspNow->meshSensorReqIntervalMs, gEspNow->meshSensorReqLeaseMs,
+                                  gEspNow->meshSensorReqSrcMac);
+  }
+
   // 9h. Bond: log any unpaired rejection events (deferred from ISR context)
   {
     static uint32_t sLastReportedRejectCount = 0;
@@ -8799,7 +9274,7 @@ void espnowAppPingClear() {
 // CLI/UI caller sees the *actual* cause rather than a generic "failed"
 // string. Static char buffer (not String) — keeps this off the heap and
 // usable from any context. Cleared on each new init attempt.
-static char gLastInitErrorReason[96] = {0};
+EXT_RAM_BSS_ATTR static char gLastInitErrorReason[96];
 
 // Helper: Initialize ESP-NOW subsystem (static - internal use only)
 static bool initEspNow() {
@@ -8885,9 +9360,11 @@ static bool initEspNow() {
     } else {
       BROADCAST_PRINTF("[ESP-NOW] WARNING: Failed to allocate listBuffer");
     }
-    gEspNow->deferredCmdRespResult = (char*)ps_alloc(6144, AllocPref::PreferPSRAM, "espnow.cmdResp");
+    // +1 for the NUL v4h_cmd_resp writes at [resultLen]. Sized from the wire
+    // budget, not from CMD_RESULT_MAX — see V4_REASM_MAX_MSG.
+    gEspNow->deferredCmdRespResult = (char*)ps_alloc(V4_REASM_MAX_MSG + 1, AllocPref::PreferPSRAM, "espnow.cmdResp");
     if (gEspNow->deferredCmdRespResult) {
-      memset(gEspNow->deferredCmdRespResult, 0, 6144);
+      memset(gEspNow->deferredCmdRespResult, 0, V4_REASM_MAX_MSG + 1);
     } else {
       BROADCAST_PRINTF("[ESP-NOW] WARNING: Failed to allocate deferredCmdRespResult");
     }
@@ -8999,28 +9476,36 @@ static bool initEspNow() {
 
   if (mgr) mgr->resumePolling();
 
+  // Keep the radio awake whenever ESP-NOW is up. The default WIFI_PS_MIN_MODEM
+  // sleeps the modem between beacons, which silently drops asynchronous ESP-NOW
+  // RX — and it stays in effect on a device that never associates (out and
+  // about, home SSID absent), the exact case where the mesh must stay
+  // reachable. System_WiFi.cpp only sets WIFI_PS_NONE on a successful join, so
+  // set it here too so it also holds while unassociated.
+  esp_wifi_set_ps(WIFI_PS_NONE);
+
+  // Decide the ESP-NOW channel: follow the joined AP, else the user's preferred
+  // channel (gSettings.espnowChannel) or the derived fallback. See espnowComputeChannel.
+  uint8_t effectiveChannel = espnowComputeChannel();
+
   // Hide the soft AP so it doesn't broadcast an SSID (ESP_XXXXXX) in WiFi scans.
-  // ESP-NOW requires AP mode but we don't want devices appearing as access points.
+  // ESP-NOW requires AP mode but we don't want devices appearing as access
+  // points. Park the hidden AP on the effective channel so the shared radio
+  // sits there while the STA is not associated.
   {
     wifi_config_t ap_config;
     memset(&ap_config, 0, sizeof(ap_config));
     esp_wifi_get_config(WIFI_IF_AP, &ap_config);
     ap_config.ap.ssid_hidden = 1;       // Hide SSID from scan results
     ap_config.ap.max_connection = 0;     // Reject all STA connections
+    ap_config.ap.channel = effectiveChannel;  // park radio here when STA offline
     esp_wifi_set_config(WIFI_IF_AP, &ap_config);
   }
 
-  // Get current WiFi channel and use it for ESP-NOW
-  wifi_config_t conf;
-  esp_wifi_get_config(WIFI_IF_STA, &conf);
-  gEspNow->channel = conf.sta.channel;
-  if (gEspNow->channel == 0) {
-    // Fallback: get channel from WiFi status
-    gEspNow->channel = WiFi.channel();
-  }
-  if (gEspNow->channel == 0) {
-    gEspNow->channel = 1;  // Final fallback
-  }
+  // Set gEspNow->channel and pin the radio when the STA is offline (no-op while
+  // joined — the AP owns the channel). Peers are added with channel 0 so they
+  // follow whatever the radio lands on.
+  espnowApplyChannel(effectiveChannel);
 
   // Initialize ESP-NOW. Translate the esp_err_t into a plain-English
   // explanation of what's actually wrong so the user doesn't have to look
@@ -9167,7 +9652,7 @@ static bool initEspNow() {
   esp_now_peer_info_t broadcastPeer;
   memset(&broadcastPeer, 0, sizeof(broadcastPeer));
   memset(broadcastPeer.peer_addr, 0xFF, 6);  // FF:FF:FF:FF:FF:FF
-  broadcastPeer.channel = gEspNow->channel;
+  broadcastPeer.channel = 0;  // 0 = current radio channel (self-correcting, see addEspNowPeerWithEncryption)
   broadcastPeer.encrypt = false;
   
   esp_err_t addStatus = esp_now_add_peer(&broadcastPeer);
@@ -9326,7 +9811,7 @@ const char* cmd_espnow_init(const String& argsInput) {
   // "failed" string. cmd_exec returns this via the result field; the lens
   // ESP-NOW App page logs it in onMainRedrawDone so the user can see what
   // went wrong without digging through serial broadcasts.
-  static char fullMsg[128];
+  EXT_RAM_BSS_ATTR static char fullMsg[128];
   if (gLastInitErrorReason[0]) {
     snprintf(fullMsg, sizeof(fullMsg), "Error: Cannot start ESP-NOW: %s",
              gLastInitErrorReason);
@@ -9436,6 +9921,7 @@ const char* cmd_espnow_status(const String& argsInput) {
     else {
       doc["initialized"] = gEspNow->initialized;
       doc["channel"]     = gEspNow->channel;
+      doc["channelPref"] = gSettings.espnowChannel;  // 0=auto, 1-13=pinned when offline
       if (gEspNow->initialized) {
         uint8_t mac[6]; WiFi.macAddress(mac);
         char macStr[18];
@@ -9462,7 +9948,12 @@ const char* cmd_espnow_status(const String& argsInput) {
   p += n;
   remaining -= n;
 
-  n = snprintf(p, remaining, "  Channel: %d\n", gEspNow->channel);
+  if (gSettings.espnowChannel == 0) {
+    n = snprintf(p, remaining, "  Channel: %d (pref: auto)\n", gEspNow->channel);
+  } else {
+    n = snprintf(p, remaining, "  Channel: %d (pref: %u pinned when offline)\n",
+                 gEspNow->channel, (unsigned)gSettings.espnowChannel);
+  }
   p += n;
   remaining -= n;
 
@@ -10449,6 +10940,111 @@ const char* cmd_espnow_meshttl(const String& argsInput) {
   setSetting(gSettings.meshAdaptiveTTL, false);
   
   snprintf(getDebugBuffer(), 1024, "Mesh TTL set to %d (adaptive mode disabled)", gSettings.meshTTL);
+  return getDebugBuffer();
+}
+
+// Get/set the preferred ESP-NOW radio channel. This is the field-reliability
+// lever: two devices only hear each other on the same channel, and the channel
+// follows the STA association. 0 = auto (follow the joined AP; pin the fallback
+// when offline). 1..13 = force this channel whenever the STA is not associated.
+// Custom (not the ESPNOW_SETTING_CMD macro) because it must apply the pin live.
+// The SAME value must be set on both devices to meet away from a shared AP.
+const char* cmd_espnow_channel(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  CommandArgs a(argsInput);
+
+  int radioCh = (gEspNow && gEspNow->initialized) ? (int)gEspNow->channel : (int)WiFi.channel();
+  bool joined = (WiFi.status() == WL_CONNECTED);
+
+  if (a.count() == 0) {
+    if (!ensureDebugBuffer()) return "Error";
+    char prefStr[16];
+    if (gSettings.espnowChannel == 0) snprintf(prefStr, sizeof(prefStr), "auto");
+    else snprintf(prefStr, sizeof(prefStr), "%u", (unsigned)gSettings.espnowChannel);
+    // Checker: read the ACTUAL radio channel and compare it to what it should be
+    // for the current WiFi state, so silent drift or a missed re-sync is visible
+    // instead of trusting our cached value. Expected = follow-AP while joined,
+    // else the pinned setting, else the auto fallback (espnowComputeChannel).
+    uint8_t hwCh = 0; wifi_second_chan_t sec2;
+    if (esp_wifi_get_channel(&hwCh, &sec2) != ESP_OK) hwCh = 0;
+    uint8_t expected = (gEspNow && gEspNow->initialized) ? espnowComputeChannel() : 0;
+    const char* source = joined ? "following the joined AP"
+                                : ((gSettings.espnowChannel >= 1 && gSettings.espnowChannel <= 13)
+                                     ? "pinned from the setting (offline)"
+                                     : "auto fallback (offline, no setting)");
+    const char* verdict = (expected != 0 && hwCh == expected)
+                            ? "OK — radio matches expected"
+                            : "MISMATCH — run 'espnowchannel resync' to re-pin";
+    snprintf(getDebugBuffer(), 1024,
+             "ESP-NOW channel preference: %s\n"
+             "Radio channel (actual): %u\n"
+             "Expected right now:      %u  (%s)\n"
+             "Checker: %s\n"
+             "WiFi: %s\n"
+             "Set the SAME value on both devices (espnowchannel <1-13>) to pair off-grid.",
+             prefStr, (unsigned)hwCh, (unsigned)expected, source, verdict,
+             joined ? "joined — the AP owns the channel (preference applies when offline)"
+                    : "not joined — the preference pins the radio");
+    return getDebugBuffer();
+  }
+
+  String arg = a.arg(0);
+  arg.trim();
+  arg.toLowerCase();
+
+  // Manual checker: force the radio back onto the correct channel for the
+  // current WiFi state (follow the AP while joined, else the pinned setting)
+  // without changing the saved preference. This is the deliberate, on-demand
+  // version of drift-correction — we don't auto-yank the radio every tick
+  // because that would fight the driver's background WiFi (re)connect attempts.
+  if (arg == "resync" || arg == "recheck" || arg == "check") {
+    if (!(gEspNow && gEspNow->initialized))
+      return "Error: ESP-NOW not running (run 'openespnow' first)";
+    uint8_t want = espnowComputeChannel();
+    espnowApplyChannel(want);
+    uint8_t hwCh = 0; wifi_second_chan_t sec2;
+    if (esp_wifi_get_channel(&hwCh, &sec2) != ESP_OK) hwCh = 0;
+    if (!ensureDebugBuffer()) return "Error";
+    snprintf(getDebugBuffer(), 1024,
+             "Channel re-sync: radio now %u (expected %u, %s). %s",
+             (unsigned)hwCh, (unsigned)want,
+             joined ? "following AP" : "pinned offline",
+             (hwCh == want) ? "OK."
+                            : "Radio still differs — likely mid-connect; retry when settled.");
+    return getDebugBuffer();
+  }
+
+  int ch;
+  if (arg == "auto" || arg == "off") {
+    ch = 0;
+  } else {
+    ch = a.argInt(0, -1);
+    if (ch < 1 || ch > 13) {
+      return "Error: channel must be 1..13, or 'auto' to follow WiFi";
+    }
+  }
+
+  setSetting(gSettings.espnowChannel, (uint8_t)ch);
+
+  // Apply live so the change takes effect without a re-init.
+  if (gEspNow && gEspNow->initialized) {
+    espnowApplyChannel(espnowComputeChannel());
+    radioCh = (int)gEspNow->channel;
+  }
+
+  if (!ensureDebugBuffer()) return "Error";
+  if (ch == 0) {
+    snprintf(getDebugBuffer(), 1024,
+             "ESP-NOW channel set to auto (radio now %d). "
+             "Both devices should match for off-grid pairing.", radioCh);
+  } else {
+    snprintf(getDebugBuffer(), 1024,
+             "ESP-NOW channel preference set to %d (radio now %d).%s "
+             "Set the SAME value on the other device.",
+             ch, radioCh,
+             joined ? " While joined to WiFi the AP's channel is used; the preference applies offline."
+                    : "");
+  }
   return getDebugBuffer();
 }
 
@@ -12211,7 +12807,11 @@ const char* cmd_espnow_unpair(const String& argsInput) {
   // Peer + crypto identity are gone — announce the unpair.
   systemEventPost(SYSEVT_PEER_UNPAIRED, deviceName.c_str(), formatMacAddress(mac).c_str());
 
-  if (meshEnabled()) {
+  // Clear the peer's mesh-liveness slot regardless of mode. gMeshPeers slots are
+  // bootstrapped for paired devices even in DIRECT mode (and the OLED/G2 "online"
+  // count reads them), so gating this on meshEnabled() left a stale "online" entry
+  // after a direct-mode unpair.
+  if (gMeshPeers) {
     for (int i = 0; i < gMeshPeerSlots; i++) {
       if (gMeshPeers[i].isActive && macEqual6(gMeshPeers[i].mac, mac)) {
         gMeshPeers[i].isActive = false;
@@ -12219,7 +12819,6 @@ const char* cmd_espnow_unpair(const String& argsInput) {
         break;
       }
     }
-    saveMeshPeers();
   }
 
   bool peersOk   = saveMeshPeers();
@@ -12424,9 +13023,8 @@ bool sendFileToMac(const uint8_t* mac, const String& localPath) {
   // the struct's declared bounds (UB in C++). The 200 + 2 (chunkIndex) =
   // 202 bytes plaintext fits ESPNOW_V4_MAX_PLAINTEXT, so once wrapped in
   // SESSION_FRAME each chunk's 202 + 16 (AEAD tag) = 218 hits the wire
-  // payload budget exactly. 2026-05-19: FILE_START/DATA/END now go through
-  // v4_send_payload_smart (encrypted single-frame when a session is up,
-  // plaintext fallback otherwise) — the task #51-era "ready to flip" plan.
+  // payload budget exactly. FILE_START/DATA/END go through v4_send_payload_smart
+  // (strict encrypt-or-fail / queue-and-handshake). RX requires REQ_SESSION_ENC.
   const uint16_t v4ChunkSize = ESPNOW_V4_MAX_PLAINTEXT - 2;  // 200 bytes
   uint32_t maxFileSize = 65535 * v4ChunkSize;  // 16-bit chunk count max
   if (fileSize > maxFileSize) {
@@ -14568,6 +15166,11 @@ const char* cmd_espnow_heartbeatbroadcast(const String&);
 const char* cmd_espnow_meshadaptivettl(const String&);
 const char* cmd_espnow_meshpeermax(const String&);
 const char* cmd_espnow_sensorbroadcastinterval(const String&);
+// Secure sensor fetcher (docs/ESPNOW_SENSOR_FETCHER_DESIGN.md)
+const char* cmd_espnow_acceptsensorcontrol(const String&);
+const char* cmd_espnow_masterfingerprint(const String&);
+const char* cmd_espnow_backupfingerprint(const String&);
+const char* cmd_espnow_sensorreq(const String&);  // Phase 1b test harness
 #if ENABLE_BONDED_MODE
 const char* cmd_espnow_bondmodeenabled(const String&);
 const char* cmd_espnow_bondpeermac(const String&);
@@ -14658,6 +15261,144 @@ const char* cmd_espnow_messages(const String& argsInput) {
 
 // WPS-style pairing mode: open a timed window on BOTH same-mesh devices and they
 // auto secure-pair. Requires a mesh passphrase (encryption). Runtime-only.
+// List devices discovered during the current discovery window (populated by
+// v4h_pair_beacon). 'espnowdiscovered clear' flushes the list. The pair action
+// is the existing 'espnowpairsecure <mac> <name>' built from a listed row.
+const char* cmd_espnow_discovered(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!gEspNow || !gEspNow->initialized) {
+    return "Error: ESP-NOW not initialized. Run 'openespnow' first.";
+  }
+  CommandArgs a(argsInput);
+  String sub = a.count() > 0 ? a.arg(0) : "";
+  sub.toLowerCase();
+  if (sub == "clear") {
+    clearCandidates();
+    return "Discovered candidate list cleared.";
+  }
+
+  uint32_t now = (uint32_t)millis();
+  pruneStaleCandidates(now);
+  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+  char* p = getDebugBuffer();
+  const int cap = GLOBAL_DEBUG_BUFFER_SIZE;
+
+  if (gEspNow->unpairedDeviceCount == 0) {
+    snprintf(p, cap,
+             "No devices discovered.%s Open discovery on BOTH devices with 'espnowpairmode', wait a few seconds.",
+             espnowPairModeActive() ? "" : " (Your discovery window is CLOSED — run 'espnowpairmode' first.)");
+    return p;
+  }
+
+  int n = snprintf(p, cap,
+                   "Discovered (%d) — pair with 'espnowpairsecure <mac> <name>':\n",
+                   gEspNow->unpairedDeviceCount);
+  for (int i = 0; i < gEspNow->unpairedDeviceCount && n < cap - 96; i++) {
+    UnpairedDevice& d = gEspNow->unpairedDevices[i];
+    char macStr[18];
+    formatMacAddressBuf(d.mac, macStr, sizeof(macStr));
+    n += snprintf(p + n, cap - n, "  %s  %s  rssi=%d  age=%lus\n",
+                  macStr, d.name.c_str(), d.rssi,
+                  (unsigned long)((now - d.lastSeenMs) / 1000));
+  }
+  return p;
+}
+
+// Initiator: request a pair with a discovered device. Sends PAIR_REQUEST and
+// waits for the target's Accept/Reject (the target must have discovery open).
+const char* cmd_espnow_pairrequest(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!gEspNow || !gEspNow->initialized) return "Error: ESP-NOW not initialized. Run 'openespnow' first.";
+  if (!gEspNow->encryptionEnabled) return "Error: Set a mesh passphrase first (espnowsetpassphrase).";
+  CommandArgs a(argsInput);
+  if (!a.hasMinArgs(1)) return "Error: Usage: espnowpairrequest <mac_or_name>  (name/MAC from 'espnowdiscovered')";
+  String target = a.arg(0);
+
+  uint32_t now = (uint32_t)millis();
+  pruneStaleCandidates(now);
+  uint8_t tmpMac[6];
+  bool haveMac = parseMacAddress(target, tmpMac);
+  int found = -1;
+  for (int i = 0; i < gEspNow->unpairedDeviceCount; i++) {
+    if ((haveMac && memcmp(gEspNow->unpairedDevices[i].mac, tmpMac, 6) == 0) ||
+        (!haveMac && gEspNow->unpairedDevices[i].name.equalsIgnoreCase(target))) {
+      found = i; break;
+    }
+  }
+  uint8_t mac[6];
+  char name[24];
+  if (found >= 0) {
+    memcpy(mac, gEspNow->unpairedDevices[found].mac, 6);
+    pairModeSanitizeName(gEspNow->unpairedDevices[found].name.c_str(), name, sizeof(name));
+  } else if (haveMac) {
+    memcpy(mac, tmpMac, 6);
+    name[0] = '\0';
+  } else {
+    return "Error: not in the discovered list. Run 'espnowdiscovered' (both devices need discovery open).";
+  }
+  if (name[0] == '\0') snprintf(name, sizeof(name), "peer_%02X%02X%02X", mac[3], mac[4], mac[5]);
+
+  sendPairCtrl(mac, ESPNOW_V4_TYPE_PAIR_REQUEST);
+  gPendingPairOut.active = true;
+  memcpy(gPendingPairOut.mac, mac, 6);
+  strncpy(gPendingPairOut.name, name, sizeof(gPendingPairOut.name) - 1);
+  gPendingPairOut.name[sizeof(gPendingPairOut.name) - 1] = '\0';
+  gPendingPairOut.atMs = now;
+
+  if (!ensureDebugBuffer()) return "Error";
+  snprintf(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE,
+           "Pair request sent to '%s'. Waiting for them to Accept (they need discovery open)...", name);
+  return getDebugBuffer();
+}
+
+// Shared arg-match for accept/reject against the single pending incoming request.
+static bool pendingInMatchesArg(const String& argsInput) {
+  CommandArgs a(argsInput);
+  if (a.count() == 0) return true;  // no arg → the sole pending request
+  String t = a.arg(0);
+  uint8_t m[6];
+  if (parseMacAddress(t, m)) return macEqual6(m, gPendingPairIn.mac);
+  return t.equalsIgnoreCase(gPendingPairIn.name);
+}
+
+// Target: accept the pending incoming request. Tells the initiator, then pairs
+// locally (cmd_espnow_pairsecure writes OUR registry + drives KEY_EX).
+const char* cmd_espnow_accept(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!gEspNow || !gEspNow->initialized) return "Error: ESP-NOW not initialized.";
+  if (!gPendingPairIn.active) return "No pending pair request. (Open discovery with 'espnowpairmode' on both.)";
+  if (!pendingInMatchesArg(argsInput)) return "Error: that name/MAC doesn't match the pending request.";
+
+  uint8_t mac[6]; memcpy(mac, gPendingPairIn.mac, 6);
+  char name[24]; strncpy(name, gPendingPairIn.name, sizeof(name) - 1); name[sizeof(name) - 1] = '\0';
+  gPendingPairIn.active = false;
+
+  sendPairCtrl(mac, ESPNOW_V4_TYPE_PAIR_ACCEPT);
+  char macStr[18]; formatMacAddressBuf(mac, macStr, sizeof(macStr));
+  String pairArgs = String(macStr) + " " + name;
+  String resCopy = cmd_espnow_pairsecure(pairArgs);  // copy: pairsecure may reuse the debug buffer
+  if (!ensureDebugBuffer()) return "Error";
+  snprintf(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE, "Accepted '%s'. %s", name, resCopy.c_str());
+  return getDebugBuffer();
+}
+
+// Target: reject the pending incoming request.
+const char* cmd_espnow_reject(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!gEspNow || !gEspNow->initialized) return "Error: ESP-NOW not initialized.";
+  if (!gPendingPairIn.active) return "No pending pair request.";
+  if (!pendingInMatchesArg(argsInput)) return "Error: that name/MAC doesn't match the pending request.";
+
+  uint8_t mac[6]; memcpy(mac, gPendingPairIn.mac, 6);
+  char name[24]; strncpy(name, gPendingPairIn.name, sizeof(name) - 1); name[sizeof(name) - 1] = '\0';
+  gPendingPairIn.active = false;
+  sendPairCtrl(mac, ESPNOW_V4_TYPE_PAIR_REJECT);
+
+  if (!ensureDebugBuffer()) return "Error";
+  snprintf(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE, "Rejected pair request from '%s'.", name);
+  return getDebugBuffer();
+}
+
 const char* cmd_espnow_pairmode(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gEspNow || !gEspNow->initialized) {
@@ -14673,14 +15414,26 @@ const char* cmd_espnow_pairmode(const String& argsInput) {
   }
   if (sub == "status") {
     if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+    char* p = getDebugBuffer();
+    int n;
     if (espnowPairModeActive()) {
-      snprintf(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE,
-               "Pairing mode ON (%lus left).",
-               (unsigned long)(espnowPairModeRemainingMs() / 1000));
+      n = snprintf(p, GLOBAL_DEBUG_BUFFER_SIZE,
+                   "Discovery ON (%lus left). Radio channel: %u.",
+                   (unsigned long)(espnowPairModeRemainingMs() / 1000),
+                   (unsigned)gEspNow->channel);
     } else {
-      snprintf(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE, "Pairing mode off.");
+      n = snprintf(p, GLOBAL_DEBUG_BUFFER_SIZE,
+                   "Discovery off. Radio channel: %u.", (unsigned)gEspNow->channel);
     }
-    return getDebugBuffer();
+    if (gPendingPairIn.active) {
+      n += snprintf(p + n, GLOBAL_DEBUG_BUFFER_SIZE - n,
+                    "\nIncoming request from '%s' — 'espnowaccept' or 'espnowreject'.", gPendingPairIn.name);
+    }
+    if (gPendingPairOut.active) {
+      n += snprintf(p + n, GLOBAL_DEBUG_BUFFER_SIZE - n,
+                    "\nWaiting on '%s' to accept our request.", gPendingPairOut.name);
+    }
+    return p;
   }
 
   // Open the window. Pairing rides KEY_EX (mesh-passphrase HMAC), so a passphrase
@@ -14697,8 +15450,10 @@ const char* cmd_espnow_pairmode(const String& argsInput) {
   espnowPairModeOpen(secs);
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   snprintf(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE,
-           "Pairing mode ON for %lus. Open pairing on the other device too (same mesh).",
-           (unsigned long)secs);
+           "Discovery ON for %lus on channel %u. Open discovery on the other device too "
+           "(same mesh, same channel), then run 'espnowdiscovered' to see it and pair. "
+           "Devices no longer auto-pair.",
+           (unsigned long)secs, (unsigned)gEspNow->channel);
   return getDebugBuffer();
 }
 
@@ -14741,6 +15496,7 @@ extern const CommandEntry espNowCommands[] = {
   { "espnowmeshes", "Manage multi-mesh slots: 'espnowmeshes [list|add|remove|enable|setdefault|rename|setpassphrase] ...'.", true, cmd_espnow_meshes, "Usage: espnowmeshes list\n       espnowmeshes add <label>          (then set passphrase via 'espnowsetpassphrase <label> <pw>')\n       espnowmeshes remove <label>       (alias: disable)\n       espnowmeshes enable <label>\n       espnowmeshes setdefault <label>\n       espnowmeshes setpassphrase <label> <passphrase>\n       espnowmeshes rename <oldLabel> <newLabel>" },
   { "espnowmode", "Get/set ESP-NOW mode: 'espnowmode [direct|mesh]'.", true, cmd_espnow_mode, "Usage: espnowmode [direct|mesh]" },
   { "espnowmeshttl", "Get/set mesh TTL: 'espnowmeshttl [1-10|adaptive]'.", false, cmd_espnow_meshttl, "Usage: espnowmeshttl [<1..10>|adaptive]" },
+  { "espnowchannel", "Get/set preferred ESP-NOW channel: 'espnowchannel [1-13|auto|resync]'. No arg shows a checker (actual vs expected). Set the SAME value on both devices to pair off-grid.", true, cmd_espnow_channel, "Usage: espnowchannel [<1..13>|auto|resync]\n       (no arg) = show preference, actual radio channel, expected, and an OK/MISMATCH check.\n       auto (0) = follow WiFi, pin fallback when offline. 1-13 = force this channel when not joined to WiFi.\n       resync   = force the radio back onto the correct channel now (no setting change).\n       Two devices only hear each other on the same channel — set both the same for field use." },
   { "espnowsetname", "Get/set device name: 'espnowsetname [name]'.", true, cmd_espnow_setname, "Usage: espnowsetname [<name>]   (<=20 chars; letters, numbers, - and _ only)" },
   { "espnowhbmode", "Get/set heartbeat mode: 'espnowhbmode [public|private]'.", false, cmd_espnow_hbmode, "Usage: espnowhbmode [public|private]" },
   { "espnowmeshrole", "Get/set mesh role: 'espnowmeshrole [worker|master|backup]'.", true, cmd_espnow_meshrole, "Usage: espnowmeshrole [worker|master|backup]" },
@@ -14781,6 +15537,11 @@ extern const CommandEntry espNowCommands[] = {
   { "espnowsensorstream", "Enable/disable sensor data streaming to master (worker only): 'espnowsensorstream <sensor> <on|off>'. (local toggle; streamed data lands on the master's espnowsensorstatus)", false, cmd_espnow_sensorstream, "Usage: espnowsensorstream <thermal|tof|imu|gps|input|fmradio|camera|microphone|rtc|presence|apds> <on|off>\n       Local on/off toggle; the worker then streams to the master, viewable there via 'espnowsensorstatus' / GET /api/sensors/remote." },
   { "espnowsensorstatus", "Show remote sensor cache (master) or worker streaming status (worker).", false, cmd_espnow_sensorstatus },
   { "espnowsensorbroadcast", "Enable/disable all sensor ESP-NOW communication: 'espnowsensorbroadcast <on|off>'.", false, cmd_espnow_sensorbroadcast, "Usage: espnowsensorbroadcast [on|off]" },
+  // Secure sensor fetcher (worker settings + Phase 1b test harness) — docs/ESPNOW_SENSOR_FETCHER_DESIGN.md
+  { "espnowacceptsensorcontrol", "Worker: opt in to honor SENSOR_REQ from the configured master/backup: 'espnowacceptsensorcontrol <on|off>'.", true, cmd_espnow_acceptsensorcontrol, "Usage: espnowacceptsensorcontrol <on|off>" },
+  { "espnowmasterfingerprint", "Worker: set the authorized PRIMARY-master Ed25519 fingerprint (64-hex; empty=deny).", true, cmd_espnow_masterfingerprint, "Usage: espnowmasterfingerprint <64-hex-pubkey>" },
+  { "espnowbackupfingerprint", "Worker: set the authorized BACKUP-master Ed25519 fingerprint (64-hex; empty=deny).", true, cmd_espnow_backupfingerprint, "Usage: espnowbackupfingerprint <64-hex-pubkey>" },
+  { "espnowsensorreq", "TEST (Phase 1b): hand-send a SENSOR_REQ to a paired worker.", true, cmd_espnow_sensorreq, "Usage: espnowsensorreq <MAC|name> <mask> <mode 0=sub|1=unsub|2=oneshot> <intervalMs> <leaseMs>" },
   { "espnowusersync", "Enable/disable user credential sync: 'espnowusersync [on|off]'.", true, cmd_espnow_usersync, "Usage: espnowusersync [on|off]", nullptr, nullptr, /*requiresSuperAdmin=*/true },
   { "espnowrequestmeta", "Request metadata from peer: 'espnowrequestmeta <name_or_mac>'. (async - updates cache; view with espnowdevices)", false, cmd_espnow_requestmeta, "Usage: espnowrequestmeta <name_or_mac>\n       Returns OK on delivery; the peer's name/room/zone/tags arrive later and update the local peer cache shown by 'espnowdevices' / 'espnowrooms' / 'espnowfind'." },
   
@@ -14806,7 +15567,11 @@ extern const CommandEntry espNowCommands[] = {
   { "espnowsetpassphrase", "Set encryption passphrase on a mesh: 'espnowsetpassphrase <mesh> <phrase>'.", true, cmd_espnow_setpassphrase, "Usage: espnowsetpassphrase <mesh> <passphrase>\n       espnowsetpassphrase <mesh> clear", nullptr, nullptr, /*requiresSuperAdmin=*/true },
   { "espnowencstatus", "Show ESP-NOW encryption status and key fingerprint.", true, cmd_espnow_encstatus },
   { "espnowpairsecure", "Pair device with encryption: 'espnowpairsecure <mac> <name> [mesh]'. (local pair is synchronous; secure channel completes async - see espnowsessions)", true, cmd_espnow_pairsecure, "Usage: espnowpairsecure <mac_address> <device_name> [mesh]\n       Requires a mesh passphrase first - run 'espnowsetpassphrase <mesh> <passphrase>'.\n       The device is added synchronously; KEY_EX then runs asynchronously (~100ms) so the encrypted channel becomes usable shortly after - inspect with 'espnowsessions' / 'espnowencstatus'." },
-  { "espnowpairmode", "WPS-style pairing: 'espnowpairmode [seconds|off|status]'. Open the window on BOTH same-mesh devices and they auto secure-pair.", true, cmd_espnow_pairmode, "Usage: espnowpairmode [<seconds>|off|status]\n       Default 120s, max 600. Requires a mesh passphrase set on both devices (same mesh).\n       While open, the device broadcasts a discovery beacon and auto-pairs any\n       other device whose window is also open. Pairing only, never bonding." },
+  { "espnowpairmode", "Open the discovery window: 'espnowpairmode [seconds|off|status]'. Open on BOTH same-mesh devices, then 'espnowdiscovered' to see + pair. No auto-pair.", true, cmd_espnow_pairmode, "Usage: espnowpairmode [<seconds>|off|status]\n       Default 120s, max 600. Requires a mesh passphrase set on both devices (same mesh).\n       While open, the device broadcasts a discovery beacon and RECORDS other same-mesh\n       devices it hears (see 'espnowdiscovered') — it no longer auto-pairs. Pair from the\n       list with 'espnowpairsecure <mac> <name>'." },
+  { "espnowdiscovered", "List devices found during discovery: 'espnowdiscovered [clear]'. Pair one with 'espnowpairrequest <mac_or_name>'.", true, cmd_espnow_discovered, "Usage: espnowdiscovered [clear]\n       Lists same-mesh devices heard while your discovery window ('espnowpairmode') is open." },
+  { "espnowpairrequest", "Request a pair with a discovered device: 'espnowpairrequest <mac_or_name>'. The other device must Accept.", true, cmd_espnow_pairrequest, "Usage: espnowpairrequest <mac_or_name>  (name/MAC from 'espnowdiscovered')\n       Sends a request; the target shows an Accept prompt (or run 'espnowaccept' there)." },
+  { "espnowaccept", "Accept a pending incoming pair request: 'espnowaccept [<mac_or_name>]'.", true, cmd_espnow_accept, "Usage: espnowaccept [<mac_or_name>]  (no arg = the sole pending request)" },
+  { "espnowreject", "Reject a pending incoming pair request: 'espnowreject [<mac_or_name>]'.", true, cmd_espnow_reject, "Usage: espnowreject [<mac_or_name>]" },
   
   // ---- ESP-NOW Testing Commands ----
   { "teststreams", "Test topology stream management functions.", false, cmd_test_streams },
@@ -14878,9 +15643,16 @@ static const SettingEntry espnowSettingEntries[] = {
   { "topoAutoRefresh", SETTING_BOOL, &gSettings.meshTopoAutoRefresh, false, 0, nullptr, 0, 1, "Auto Refresh Topology", nullptr, false, "mesh", "espnowtopoautorefresh" },
   { "heartbeatBroadcast", SETTING_BOOL, &gSettings.meshHeartbeatBroadcast, true, 0, nullptr, 0, 1, "Heartbeat Broadcast", nullptr, false, "mesh", "espnowheartbeatbroadcast" },
   { "meshTTL", SETTING_U8, &gSettings.meshTTL, 3, 0, nullptr, 1, 10, "TTL", nullptr, false, "mesh", "espnowmeshttl" },
+  // Preferred radio channel (0=auto, 1-13). U8 range 0..13. cmdKey routes the
+  // settings editor to the custom cmd_espnow_channel so a change applies live.
+  { "channel", SETTING_U8, &gSettings.espnowChannel, 0, 0, nullptr, 0, 13, "Preferred Channel (0=auto)", nullptr, false, nullptr, "espnowchannel" },
   { "meshAdaptiveTTL", SETTING_BOOL, &gSettings.meshAdaptiveTTL, false, 0, nullptr, 0, 1, "Adaptive TTL", nullptr, false, "mesh", "espnowmeshadaptivettl" },
   { "meshPeerMax", SETTING_U8, &gSettings.meshPeerMax, 8, 0, nullptr, 1, 16, "Max Peer Slots (reboot)", nullptr, false, "mesh", "espnowmeshpeermax" },
   { "sensorBroadcastIntervalMs", SETTING_U16, &gSettings.sensorBroadcastIntervalMs, 1000, 0, nullptr, 100, 10000, "Sensor Broadcast Interval (ms)", nullptr, false, "mesh", "espnowsensorbroadcastinterval" },
+  // Secure sensor fetcher (worker role) — fingerprints are PUBLIC identifiers (isSecret=false).
+  { "acceptSensorControl", SETTING_BOOL, &gSettings.espnowAcceptSensorControl, 0, 0, nullptr, 0, 0, "Accept Sensor Control", nullptr, false, "mesh", "espnowacceptsensorcontrol" },
+  { "masterFingerprint", SETTING_STRING, &gSettings.espnowMasterFingerprint, 0, 0, "", 0, 0, "Master Fingerprint", nullptr, false, "mesh", "espnowmasterfingerprint" },
+  { "backupMasterFingerprint", SETTING_STRING, &gSettings.espnowBackupMasterFingerprint, 0, 0, "", 0, 0, "Backup Master Fingerprint", nullptr, false, "mesh", "espnowbackupfingerprint" },
 #if ENABLE_BONDED_MODE
   { "bondModeEnabled", SETTING_BOOL, &gSettings.bondModeEnabled, false, 0, nullptr, 0, 1, "Bond Mode Enabled", nullptr, false, "bond", "espnowbondmodeenabled" },
   { "bondRole", SETTING_U8, &gSettings.bondRole, 0, 0, nullptr, 0, 1, "Bond Role", "0:Worker (compute/network),1:Master (display/gamepad)", false, "bond", "bondrole" },
@@ -14921,6 +15693,38 @@ ESPNOW_SETTING_CMD(cmd_espnow_heartbeatbroadcast, "heartbeatBroadcast")
 ESPNOW_SETTING_CMD(cmd_espnow_meshadaptivettl, "meshAdaptiveTTL")
 ESPNOW_SETTING_CMD(cmd_espnow_meshpeermax, "meshPeerMax")
 ESPNOW_SETTING_CMD(cmd_espnow_sensorbroadcastinterval, "sensorBroadcastIntervalMs")
+// Secure sensor fetcher (worker settings) — persist via real per-setting commands.
+ESPNOW_SETTING_CMD(cmd_espnow_acceptsensorcontrol, "acceptSensorControl")
+ESPNOW_SETTING_CMD(cmd_espnow_masterfingerprint, "masterFingerprint")
+ESPNOW_SETTING_CMD(cmd_espnow_backupfingerprint, "backupMasterFingerprint")
+
+// Phase 1b test harness: hand-send a SENSOR_REQ to a paired worker so the worker path
+// (fingerprint auth → lease → encrypted SENSOR_ENVELOPE reply) is exercisable before the
+// master auto-fetch tick (Phase 2) exists. Admin-gated; removed/kept as a diagnostic later.
+const char* cmd_espnow_sensorreq(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  CommandArgs a(argsInput);
+  if (!a.hasMinArgs(5)) {
+    return "Usage: espnowsensorreq <MAC|name> <mask> <mode 0=sub|1=unsub|2=oneshot> <intervalMs> <leaseMs>";
+  }
+  uint8_t mac[6];
+  if (!resolveDeviceNameOrMac(a.arg(0), mac)) {
+    return "Error: peer not found (must be securely paired — try espnowpairsecure)";
+  }
+  V4PayloadSensorReq rq;
+  rq.reqId      = (uint8_t)(generateMessageId() & 0xFF);
+  rq.mode       = (uint8_t)a.arg(2).toInt();
+  rq.sensorMask = (uint32_t)strtoul(a.arg(1).c_str(), nullptr, 0);  // accepts 0x.. or decimal
+  rq.intervalMs = (uint32_t)a.arg(3).toInt();
+  rq.leaseMs    = (uint32_t)a.arg(4).toInt();
+  uint32_t msgId = generateMessageId();
+  // cmd_exec task (NOT espnow_task) — sendAeadSync is safe here. encrypt-or-fail.
+  bool sent = espnowtx::sendAeadSync(mac, ESPNOW_V4_TYPE_SENSOR_REQ, 0, msgId,
+                                     (const uint8_t*)&rq, sizeof(rq), 1, 3000);
+  return sent ? "OK: SENSOR_REQ sent (wire-delivered; watch the worker's stream/logs)"
+              : "Error: send failed (no live session? not paired? peer offline?)";
+}
+
 #if ENABLE_BONDED_MODE
 ESPNOW_SETTING_CMD(cmd_espnow_bondmodeenabled, "bondModeEnabled")
 ESPNOW_SETTING_CMD(cmd_espnow_bondpeermac, "bondPeerMac")

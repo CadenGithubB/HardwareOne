@@ -118,6 +118,11 @@
 // Set to DISABLED for the XIAO ESP32S3 Sense build (camera + mic only,
 // no breakout sensors, no OLED) — the Sense expansion has no I2C
 // breakouts wired and no on-board display.
+//
+// CURRENT: FeatherS3 (CUSTOM). Set to 0 (DISABLED) for the XIAO ESP32S3 Sense
+// build (camera + mic only) — level 0 also zeroes ENABLE_OLED_DISPLAY and every
+// ENABLE_*_SENSOR below (see the level table further down), so the screen and the
+// sensor drivers fall out on their own.
 #define I2C_FEATURE_LEVEL       4
 
 #if I2C_FEATURE_LEVEL == 4
@@ -138,6 +143,11 @@
 // Display: hardware display selection. 0 forces all OLED_*.cpp out of the
 // build via the CMakeLists DISPLAY_TYPE gate.
 //   0 = NONE, 1 = SSD1306 (OLED), 2 = ST7789 (TFT), 3 = ILI9341 (TFT)
+//
+// CURRENT: SSD1306 (OLED) for the FeatherS3. Set to 0 (NONE) for the XIAO — no
+// on-board display. HAL_Display.cpp compiles unconditionally and switches on
+// DISPLAY_TYPE, so a screenless build must set 0 here even though
+// I2C_FEATURE_LEVEL 0 already zeroes ENABLE_OLED_DISPLAY.
 #define DISPLAY_TYPE            1
 
 // Input device: which physical input controller is wired to the I2C bus.
@@ -147,7 +157,22 @@
 //   0 = NONE             (no input device)
 //   1 = SEESAW_GAMEPAD   (Adafruit Mini I2C Gamepad, 0x50)
 //   2 = ANO_ENCODER      (Adafruit ANO Rotary Encoder breakout, 0x49)
+//
+// CURRENT: SEESAW_GAMEPAD for the FeatherS3. Set to 0 (NONE) for the XIAO —
+// both options hang off the I2C bus a level-0 build doesn't have.
 #define INPUT_DEVICE_TYPE       1
+
+// XIAO ESP32S3 Sense expansion: camera + PDM mic + microSD. The base XIAO and the
+// Sense share one Arduino variant (CONFIG_ARDUINO_VARIANT="XIAO_ESP32S3"), so this
+// define is the only thing that tells the board chain below which of the two is
+// actually wired up — see docs/BOARD_SWITCHING.md. Defined here rather than as a
+// -D compiler flag because menuconfig's extra-flags field is wiped by the
+// `fullclean` that switching boards requires anyway.
+//
+// Harmless to leave set on other boards: every site that reads it is already
+// nested inside `defined(ARDUINO_XIAO_ESP32S3_DEV)`, so it goes inert on the
+// FeatherS3 rather than needing to be flipped back.
+#define XIAO_ESP32S3_SENSE_ENABLED 1
 
 // Camera: ESP32-S3 DVP camera (OV2640/OV3660/OV5640). PICO board has none.
 // Auto-enabled on the XIAO ESP32S3 Sense, which ships with an OV2640 on its
@@ -205,6 +230,50 @@
 // Keeps pack data off LittleFS; requires SD mounted (web + lens picker use VFS).
 #define G2_ICON_ANIMATIONS_VFS_PATH "/sd/g2_icon_animations"
 
+// Microphone SUBSYSTEM present — the mic feature exists if EITHER the onboard
+// PDM silicon is present (ENABLE_MICROPHONE_SENSOR) OR a G2 that can supply
+// audio over BLE could be connected. ENABLE_MICROPHONE_SENSOR stays strictly
+// "onboard PDM silicon present" (I2S pins, PDM driver); ENABLE_MICROPHONE gates
+// the source-agnostic layer (HAL_Audio, System_Microphone, the mic feature/UI/
+// status), which must survive on PDM-less boards like the FeatherS3 so the G2
+// glasses mic is usable there.
+//
+// NB: ENABLE_G2_GLASSES is literally `#define 1` and is never #undef'd — its
+// "auto-disabled when BT off" behaviour lives at compound use-sites
+// (`#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES`). So we MUST AND-in ENABLE_BLUETOOTH
+// here; a bare `|| ENABLE_G2_GLASSES` would evaluate 1 on every board (incl.
+// BT-off and non-S3 boards with only G2 stubs), compiling a mic feature that has
+// no usable source. Keep this a plain literal expression — CMakeLists greps
+// `#define NAME <int>` and cannot evaluate `(A || B)`.
+#define ENABLE_MICROPHONE       (ENABLE_MICROPHONE_SENSOR || (ENABLE_BLUETOOTH && ENABLE_G2_GLASSES))
+
+// ---------------------------------------------------------------------------
+// Capture tree — user-facing log/capture output
+// ---------------------------------------------------------------------------
+// ONE place naming the capture tree. These paths were hand-typed at ~18 sites
+// and had drifted into TWO parallel trees: the web wrote to /logging_captures
+// while the CLI defaults and sensor-log autostart wrote to /logs. Same features,
+// different destinations — and the Logging page only browses /logging_captures,
+// so anything captured from the CLI side was written correctly and then was
+// invisible in the UI.
+//
+// The whole tree is created at boot (System_Filesystem.cpp) so writers never
+// depend on a parent existing by luck — mkdir is non-recursive.
+//
+// NOT to be confused with /system/sys_logs: that is the protected system EVENT
+// log, not user captures, and is deliberately a separate tree.
+//
+// The web page's JS builds these paths as literals inside raw string blocks
+// (WebPage_Logging.h) and cannot see these macros — keep the two in step.
+#define CAPTURE_DIR          "/logging_captures"
+#define CAPTURE_DIR_SENSORS  CAPTURE_DIR "/sensors"
+#define CAPTURE_DIR_SYSTEM   CAPTURE_DIR "/system"
+#define CAPTURE_DIR_TRACKS   CAPTURE_DIR "/tracks"
+// Default target for `sensorlog` when no path is given. Single definition — the
+// settings-struct default and the schema default both derive from it; they used
+// to be two hand-typed copies that had to agree.
+#define CAPTURE_SENSORLOG_DEFAULT CAPTURE_DIR_SENSORS "/sensors.txt"
+
 
 // =============================================================================
 // 4. ON-DEVICE SUBSYSTEMS  —  Inference, voice, scheduling
@@ -222,6 +291,11 @@
 // On-device LLM: tiny transformer inference (Llama + GPT-2 architectures).
 // Requires ESP32-S3 + PSRAM. Models load from LittleFS or SD. FP32 / INT8.
 // Typical PSRAM usage: 1–4 MB at runtime.
+//
+// CURRENT: on for the FeatherS3. Set to 0 for the XIAO camera build. Keep this
+// a plain literal — CMakeLists regex-greps this exact line to decide whether to
+// compile System_LLM*.cpp, and it does not evaluate the preprocessor, so wrapping
+// it in an #if would desync the build from the compiler and break the link.
 #define ENABLE_ONDEVICE_LLM     1
 #if ENABLE_ONDEVICE_LLM
 // Max KV / attention context in tokens (0 = use checkpoint's seq_len only).

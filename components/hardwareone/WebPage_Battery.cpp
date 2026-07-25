@@ -62,8 +62,8 @@ static void streamBatteryContent(httpd_req_t* req, const String& username) {
     <button class='btn' id='bat-refresh'>Refresh log</button>
     <span id='bat-log-info' style='margin-left:.5rem;opacity:.8'></span>
   </div>
-  <div style='overflow:auto;max-height:340px'>
-    <table id='bat-table' style='border-collapse:collapse;font-family:monospace;font-size:.85rem'></table>
+  <div id='bat-table-wrap' style='overflow-x:hidden;overflow-y:auto;max-height:340px'>
+    <table id='bat-table' style='border-collapse:separate;border-spacing:0;font-family:monospace;font-size:.8rem;width:100%;table-layout:fixed'></table>
   </div>
 </div>
 )HTML", HTTPD_RESP_USE_STRLEN);
@@ -102,9 +102,14 @@ static void streamBatteryContent(httpd_req_t* req, const String& username) {
   function col(hdr,name){for(var i=0;i<hdr.length;i++){if(hdr[i].replace(/\[.*\]/,'').trim()===name)return i;}return -1;}
   function renderTable(d){
     var t=hw._ge('bat-table');if(!t)return;
-    var h='<tr>';for(var i=0;i<d.hdr.length;i++){h+='<th style="text-align:left;padding:2px 10px;border-bottom:1px solid #555">'+d.hdr[i]+'</th>';}h+='</tr>';
+    var cell='padding:2px 4px;overflow:hidden;text-overflow:ellipsis;word-break:break-word;vertical-align:top';
+    // Sticky header: needs border-collapse:separate on the table (set in HTML)
+    // and an opaque background so scrolling rows don't bleed through.
+    var th='text-align:left;position:sticky;top:0;z-index:2;background:var(--panel-bg,#1e1e1e);box-shadow:inset 0 -1px 0 #555;'+cell;
+    var h='<thead><tr>';for(var i=0;i<d.hdr.length;i++){h+='<th style="'+th+'">'+d.hdr[i]+'</th>';}h+='</tr></thead><tbody>';
     var rows=d.rows.slice(-60);
-    for(var r=0;r<rows.length;r++){h+='<tr>';for(var c=0;c<rows[r].length;c++){h+='<td style="padding:1px 10px;white-space:nowrap">'+(rows[r][c]||'')+'</td>';}h+='</tr>';}
+    for(var r=0;r<rows.length;r++){h+='<tr>';for(var c=0;c<rows[r].length;c++){h+='<td style="'+cell+'">'+(rows[r][c]||'')+'</td>';}h+='</tr>';}
+    h+='</tbody>';
     t.innerHTML=h;
   }
   function drawChart(d){
@@ -148,9 +153,9 @@ esp_err_t handleBatteryPage(httpd_req_t* req) {
 }
 
 void registerBatteryHandlers(httpd_handle_t server) {
-  static httpd_uri_t batteryPage = { .uri = "/battery", .method = HTTP_GET, .handler = handleBatteryPage, .user_ctx = NULL };
+  static const httpd_uri_t batteryPage = { .uri = "/battery", .method = HTTP_GET, .handler = handleBatteryPage, .user_ctx = NULL };
   httpd_register_uri_handler(server, &batteryPage);
-  static httpd_uri_t batteryStatus = { .uri = "/api/battery/status", .method = HTTP_GET, .handler = handleBatteryStatus, .user_ctx = NULL };
+  static const httpd_uri_t batteryStatus = { .uri = "/api/battery/status", .method = HTTP_GET, .handler = handleBatteryStatus, .user_ctx = NULL };
   httpd_register_uri_handler(server, &batteryStatus);
 }
 

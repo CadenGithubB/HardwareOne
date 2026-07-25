@@ -5,6 +5,7 @@
 
 #include <Adafruit_SSD1306.h>
 #include <cstring>
+#include <strings.h>  // strcasecmp (pick-list current-value match)
 
 #include "i2csensor_seesaw.h"
 #include "OLED_Display.h"
@@ -12,6 +13,7 @@
 #include "System_Debug.h"
 #include "System_I2C.h"
 #include "System_Settings.h"
+#include "System_SettingsEditorCore.h"
 #include "System_Utils.h"
 
 // gThermalConnected / gTofConnected come from the sensor headers.
@@ -22,29 +24,38 @@
 #include "i2csensor_vl53l4cx.h"
 #endif
 
-// Check if a setting entry should be visible (used for conditional I2C clock settings)
+// ---------------------------------------------------------------------------
+// Thin wrappers over the shared settings-editor core
+// (System_SettingsEditorCore). The visibility / editability / enum-options /
+// current-value logic moved there so the G2 lens — present on boards that have
+// no OLED — can share the exact same code. These wrappers keep the OLED
+// editor's original names and semantics so its call sites are unchanged. OLED
+// edits INT/BOOL/STRING only (its value path is a single int + slider), which
+// is expressed here as SETTINGS_EDIT_MASK_OLED.
 static bool isSettingVisible(const SettingEntry* entry) {
-  if (!entry || !entry->jsonKey) return true;
-  
-  // Hide Thermal I2C clock if thermal sensor not compiled or not connected
-  if (strcmp(entry->jsonKey, "i2cClockThermalHz") == 0) {
-#if ENABLE_THERMAL_SENSOR
-    return gThermalConnected;
-#else
-    return false;
-#endif
-  }
-  
-  // Hide ToF I2C clock if ToF sensor not compiled or not connected
-  if (strcmp(entry->jsonKey, "i2cClockToFHz") == 0) {
-#if ENABLE_TOF_SENSOR
-    return gTofConnected;
-#else
-    return false;
-#endif
-  }
-  
-  return true;
+  return settingsEditorIsVisible(entry);
+}
+
+static bool isEditableEntry(const SettingEntry* entry) {
+  return settingsEditorIsEditable(entry, SETTINGS_EDIT_MASK_OLED);
+}
+
+static bool entryHasEnumOptions(const SettingEntry* entry) {
+  return settingsEditorHasEnumOptions(entry);
+}
+
+static int enumOptionCount(const char* options) {
+  return settingsEditorEnumCount(options);
+}
+
+static bool enumOptionAt(const char* options, int idx,
+                         char* valueOut, size_t valueCap,
+                         char* labelOut, size_t labelCap) {
+  return settingsEditorEnumAt(options, idx, valueOut, valueCap, labelOut, labelCap);
+}
+
+static int enumOptionIndexForCurrent(const SettingEntry* entry) {
+  return settingsEditorEnumIndexForCurrent(entry);
 }
 
 // Global settings editor context
@@ -65,7 +76,11 @@ void initSettingsEditor() {
   gSettingsEditor.currentEntry = nullptr;
   gSettingsEditor.errorMessage = "";
   gSettingsEditor.errorDisplayUntil = 0;
-  
+  gSettingsEditor.editKind = SETTINGS_EDIT_SLIDER;
+  gSettingsEditor.optionIndex = 0;
+  gSettingsEditor.optionCount = 0;
+  gSettingsEditor.optionScroll = 0;
+
   // Verify settings modules are registered
   size_t moduleCount = 0;
   const SettingsModule** modules = getSettingsModules(moduleCount);
@@ -130,21 +145,11 @@ void drawSettingsSlider(Adafruit_SSD1306* display, int y, int minVal, int maxVal
   display->print(currentVal);
 }
 
-// Get current value from setting entry — width-correct read. Reading 4 bytes
-// through a uint8_t pointer (the old `*((int*)valuePtr)` formulation) caused
-// the 2026-05-18 heap-corruption crash, see System_Settings.h's SettingType
-// enum comment.
+// Width-correct current-value read — implementation moved to
+// System_SettingsEditorCore (settingsEditorCurrentValue). Kept under this name
+// (non-static) for the OLED editor's existing call sites.
 int getSettingCurrentValue(const SettingEntry* entry) {
-  if (!entry || !entry->valuePtr) return 0;
-
-  switch (entry->type) {
-    case SETTING_INT:  return *((int*)entry->valuePtr);
-    case SETTING_U8:   return (int)*((uint8_t*)entry->valuePtr);
-    case SETTING_U16:  return (int)*((uint16_t*)entry->valuePtr);
-    case SETTING_U32:  return (int)*((uint32_t*)entry->valuePtr);
-    case SETTING_BOOL: return *((bool*)entry->valuePtr) ? 1 : 0;
-    default:           return 0;
-  }
+  return settingsEditorCurrentValue(entry);
 }
 
 // Set value to setting entry — routes through command system for audit logging
@@ -155,6 +160,24 @@ void setSettingValue(const SettingEntry* entry, int value) {
   const char* cmdName = entry->cmdKey ? entry->cmdKey : entry->jsonKey;
   String cmd = String(cmdName) + " " + String(value);
   executeOLEDCommand(cmd);
+}
+
+// String twin of setSettingValue — same cmdKey-or-jsonKey resolution, same
+// cmd_exec path (handleSettingCommand's SETTING_STRING case assigns the whole
+// trimmed args string, so multi-word values survive). Uses the WithResult
+// variant so an "Error:" reply surfaces via the editor's toast instead of
+// vanishing into the log. Returns false when the command reported failure.
+static bool setSettingValueStr(const SettingEntry* entry, const String& value) {
+  if (!entry || !entry->jsonKey) return false;
+  const char* cmdName = entry->cmdKey ? entry->cmdKey : entry->jsonKey;
+  char out[128];
+  bool ok = executeOLEDCommandWithResult(String(cmdName) + " " + value, out, sizeof(out));
+  if (!ok || strncmp(out, "Error", 5) == 0) {
+    gSettingsEditor.errorMessage = (out[0] != '\0') ? String(out) : String("Save failed");
+    gSettingsEditor.errorDisplayUntil = millis() + 2500;
+    return false;
+  }
+  return true;
 }
 
 // Validate value against min/max
@@ -185,6 +208,11 @@ void displaySettingsEditor() {
     return;
   }
   
+  // Keyboard-edit overlay: while a STRING edit's keyboard is up it owns the
+  // whole content area (the global header is suppressed by the keyboard
+  // subsystem itself). Draw it and skip the editor chrome entirely.
+  if (oledKeyboardDrawIfActive(oledDisplay)) return;
+
   // Don't call clearDisplay() - the main update loop already cleared the content area
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
   
@@ -274,7 +302,7 @@ void displaySettingsEditor() {
       // Count visible items and find current visible index
       for (size_t i = 0; i < gSettingsEditor.currentModule->count; i++) {
         const SettingEntry* entry = &gSettingsEditor.currentModule->entries[i];
-        if ((entry->type == SETTING_INT || entry->type == SETTING_BOOL) && isSettingVisible(entry)) {
+        if (isEditableEntry(entry)) {
           if (i == (size_t)gSettingsEditor.itemIndex) {
             visibleIndex = visibleCount;
           }
@@ -302,9 +330,9 @@ void displaySettingsEditor() {
       for (size_t i = 0; i < gSettingsEditor.currentModule->count && displayedCount < maxVisibleItems; i++) {
         const SettingEntry* entry = &gSettingsEditor.currentModule->entries[i];
         
-        // Skip non-int/bool settings and hidden settings
-        if (entry->type != SETTING_INT && entry->type != SETTING_BOOL) continue;
-        if (!isSettingVisible(entry)) continue;
+        // Skip non-editable settings (type, secrets, readOnly, hidden) — the
+        // SAME predicate navigation uses, so display and cursor can't desync.
+        if (!isEditableEntry(entry)) continue;
         
         // Skip items before scroll offset
         if (currentVisibleIdx < itemScrollOffset) {
@@ -324,17 +352,26 @@ void displaySettingsEditor() {
         oledDisplay->setCursor(2, y);
         // Show label and current value - truncate to prevent wrapping
         String label = entry->label ? entry->label : entry->jsonKey;
-        int currentVal = getSettingCurrentValue(entry);
-        
+
         // Truncate label if too long (max ~15 chars to leave room for value)
         if (label.length() > 15) {
           label = label.substring(0, 14); label += '~';
         }
-        
+
         // Use print instead of println to prevent wrapping
         oledDisplay->print(label);
         oledDisplay->print(":");
-        oledDisplay->print(currentVal);
+        if (entry->type == SETTING_STRING) {
+          // String value, clipped so the row never wraps (21 cols total).
+          String val = *((String*)entry->valuePtr);
+          const int room = 20 - (int)label.length() - 1;
+          if ((int)val.length() > room && room > 1) {
+            val = val.substring(0, room - 1); val += '~';
+          }
+          oledDisplay->print(val);
+        } else {
+          oledDisplay->print(getSettingCurrentValue(entry));
+        }
         
         displayedCount++;
         currentVisibleIdx++;
@@ -356,28 +393,74 @@ void displaySettingsEditor() {
     }
     
     case SETTINGS_VALUE_EDIT: {
-      // Show value editor with slider
+      // Show value editor: slider (INT/BOOL), pick-list (enum options), or
+      // nothing (keyboard edits early-returned above while active).
       // Header breadcrumb already shows "Set>moduleName"
       if (!gSettingsEditor.currentEntry) break;
-      
+
       oledDisplay->setTextSize(1);
       oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
       String label = gSettingsEditor.currentEntry->label ? gSettingsEditor.currentEntry->label : gSettingsEditor.currentEntry->jsonKey;
       oledDisplay->println(label);
-      
+
+      if (gSettingsEditor.editKind == SETTINGS_EDIT_PICKLIST) {
+        // Option rows below the label — same invert-bar + arrow chrome as the
+        // category list, one row per parsed option label. Scroll offset lives
+        // in the context (not a static local) so it can't leak across entries.
+        const int lineHeight = 10;
+        const int listStartY = OLED_CONTENT_START_Y + lineHeight;
+        const int maxVisible = (OLED_CONTENT_HEIGHT - lineHeight) / lineHeight;  // 3 rows
+
+        if (gSettingsEditor.optionIndex < gSettingsEditor.optionScroll) {
+          gSettingsEditor.optionScroll = gSettingsEditor.optionIndex;
+        } else if (gSettingsEditor.optionIndex >= gSettingsEditor.optionScroll + maxVisible) {
+          gSettingsEditor.optionScroll = gSettingsEditor.optionIndex - maxVisible + 1;
+        }
+
+        char optLabel[24];
+        int y = listStartY;
+        for (int i = 0; i < maxVisible &&
+                        (gSettingsEditor.optionScroll + i) < gSettingsEditor.optionCount; i++) {
+          const int idx = gSettingsEditor.optionScroll + i;
+          if (!enumOptionAt(gSettingsEditor.currentEntry->options, idx,
+                            nullptr, 0, optLabel, sizeof(optLabel))) {
+            break;
+          }
+          if (idx == gSettingsEditor.optionIndex) {
+            oledDisplay->fillRect(0, y, 128, 10, DISPLAY_COLOR_WHITE);
+            oledDisplay->setTextColor(DISPLAY_COLOR_BLACK, DISPLAY_COLOR_WHITE);
+          } else {
+            oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
+          }
+          oledDisplay->setCursor(2, y + 1);
+          oledDisplay->print(optLabel);
+          y += lineHeight;
+        }
+        oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
+        if (gSettingsEditor.optionScroll > 0) {
+          oledDisplay->setCursor(120, listStartY);
+          oledDisplay->print("\x18");
+        }
+        if (gSettingsEditor.optionScroll + maxVisible < gSettingsEditor.optionCount) {
+          oledDisplay->setCursor(120, listStartY + (maxVisible - 1) * lineHeight);
+          oledDisplay->print("\x19");
+        }
+        break;
+      }
+
       // Draw slider
       bool isBool = (gSettingsEditor.currentEntry->type == SETTING_BOOL);
       int minVal = gSettingsEditor.currentEntry->minVal;
       int maxVal = gSettingsEditor.currentEntry->maxVal;
-      
+
       drawSettingsSlider(oledDisplay, OLED_CONTENT_START_Y + 14, minVal, maxVal, gSettingsEditor.editValue, isBool);
-      
+
       // Show change indicator
       if (gSettingsEditor.hasChanges) {
         oledDisplay->setCursor(0, OLED_CONTENT_START_Y + OLED_CONTENT_HEIGHT - 10);
         oledDisplay->print("* Modified");
       }
-      
+
       break;
     }
   }
@@ -390,6 +473,39 @@ void displaySettingsEditor() {
 // ============================================================================
 
 bool handleSettingsEditorInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed) {
+  if (oledGuestBlocksMutate()) return true;
+
+  // ---- Keyboard-edit completion poll (CLIInput idiom) ----
+  // While the keyboard overlay is ACTIVE this handler is never invoked (the
+  // central dispatch in OLED_Utils.cpp consumes all input). Once X/START
+  // completes or B cancels, active goes false and the NEXT event lands here.
+  if (gSettingsEditor.state == SETTINGS_VALUE_EDIT &&
+      gSettingsEditor.editKind == SETTINGS_EDIT_KEYBOARD) {
+    if (oledKeyboardIsCompleted()) {
+      String text = oledKeyboardGetText();
+      text.trim();
+      oledKeyboardReset();
+      if (text.length() == 0) {
+        // Committing "" would send "<cmd>" with empty args, which SHOWS the
+        // current value instead of clearing it — a silent no-op. Refuse.
+        gSettingsEditor.errorMessage = "Empty - not saved";
+        gSettingsEditor.errorDisplayUntil = millis() + 2000;
+      } else if (setSettingValueStr(gSettingsEditor.currentEntry, text)) {
+        DEBUG_SYSTEMF("[SettingsEditor] Saved %s = \"%s\" (keyboard)",
+                      gSettingsEditor.currentEntry->jsonKey, text.c_str());
+      }
+      gSettingsEditor.state = SETTINGS_ITEM_SELECT;
+      gSettingsEditor.editKind = SETTINGS_EDIT_SLIDER;
+      return true;
+    }
+    if (oledKeyboardIsCancelled()) {
+      oledKeyboardReset();
+      gSettingsEditor.state = SETTINGS_ITEM_SELECT;
+      gSettingsEditor.editKind = SETTINGS_EDIT_SLIDER;
+      return true;
+    }
+    return false;  // keyboard still active — central dispatch owns input
+  }
   // Canonical-signal pattern: read gNavEvents.up/down/left/right (set by the
   // input layer for ALL devices — joystick threshold-crossings with built-in
   // auto-repeat, ANO wheel sign, ANO dpad edges). Don't do our own deadzone +
@@ -418,7 +534,18 @@ bool handleSettingsEditorInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPre
   // for B-back. Without the compile-time gate, ANO LEFT would decrement the
   // value AND exit edit mode in the same tick, persisting an unwanted
   // mutation. Gating on !ENABLE_ANO_ENCODER keeps both backends clean.
-  if (gSettingsEditor.state == SETTINGS_VALUE_EDIT) {
+  if (gSettingsEditor.state == SETTINGS_VALUE_EDIT &&
+      gSettingsEditor.editKind == SETTINGS_EDIT_PICKLIST &&
+      gNavEvents.wheelDelta != 0) {
+    // ANO wheel moves the pick-list cursor (same canonical signal the slider
+    // uses for value adjust). Gamepad users navigate with up/down.
+    if (gNavEvents.wheelDelta > 0) settingsEditorDown();
+    else                           settingsEditorUp();
+    handled = true;
+  }
+
+  if (gSettingsEditor.state == SETTINGS_VALUE_EDIT &&
+      gSettingsEditor.editKind == SETTINGS_EDIT_SLIDER) {
     int adjust = 0;
 #if !ENABLE_ANO_ENCODER
     if (gNavEvents.right)             adjust = +1;
@@ -484,7 +611,7 @@ void settingsEditorUp() {
       // Find previous INT/BOOL visible setting
       for (int i = gSettingsEditor.itemIndex - 1; i >= 0; i--) {
         const SettingEntry* entry = &gSettingsEditor.currentModule->entries[i];
-        if ((entry->type == SETTING_INT || entry->type == SETTING_BOOL) && isSettingVisible(entry)) {
+        if (isEditableEntry(entry)) {
           gSettingsEditor.itemIndex = i;
           return;
         }
@@ -493,15 +620,22 @@ void settingsEditorUp() {
       // Wrap to last INT/BOOL visible setting
       for (int i = gSettingsEditor.currentModule->count - 1; i >= 0; i--) {
         const SettingEntry* entry = &gSettingsEditor.currentModule->entries[i];
-        if ((entry->type == SETTING_INT || entry->type == SETTING_BOOL) && isSettingVisible(entry)) {
+        if (isEditableEntry(entry)) {
           gSettingsEditor.itemIndex = i;
           return;
         }
       }
       break;
-      
+
     case SETTINGS_VALUE_EDIT:
-      // No up/down in edit mode (use left/right for value)
+      // Pick-list: up moves the option cursor (wraps). Slider keeps the
+      // original left/right-only convention; keyboard never reaches here.
+      if (gSettingsEditor.editKind == SETTINGS_EDIT_PICKLIST &&
+          gSettingsEditor.optionCount > 0) {
+        gSettingsEditor.optionIndex =
+            (gSettingsEditor.optionIndex == 0) ? gSettingsEditor.optionCount - 1
+                                               : gSettingsEditor.optionIndex - 1;
+      }
       break;
   }
 }
@@ -525,7 +659,7 @@ void settingsEditorDown() {
       // Find next INT/BOOL visible setting
       for (size_t i = gSettingsEditor.itemIndex + 1; i < gSettingsEditor.currentModule->count; i++) {
         const SettingEntry* entry = &gSettingsEditor.currentModule->entries[i];
-        if ((entry->type == SETTING_INT || entry->type == SETTING_BOOL) && isSettingVisible(entry)) {
+        if (isEditableEntry(entry)) {
           gSettingsEditor.itemIndex = i;
           return;
         }
@@ -534,15 +668,20 @@ void settingsEditorDown() {
       // Wrap to first INT/BOOL visible setting
       for (size_t i = 0; i < gSettingsEditor.currentModule->count; i++) {
         const SettingEntry* entry = &gSettingsEditor.currentModule->entries[i];
-        if ((entry->type == SETTING_INT || entry->type == SETTING_BOOL) && isSettingVisible(entry)) {
+        if (isEditableEntry(entry)) {
           gSettingsEditor.itemIndex = i;
           return;
         }
       }
       break;
-      
+
     case SETTINGS_VALUE_EDIT:
-      // No up/down in edit mode (use left/right for value)
+      // Pick-list: down moves the option cursor (wraps).
+      if (gSettingsEditor.editKind == SETTINGS_EDIT_PICKLIST &&
+          gSettingsEditor.optionCount > 0) {
+        gSettingsEditor.optionIndex =
+            (gSettingsEditor.optionIndex + 1) % gSettingsEditor.optionCount;
+      }
       break;
   }
 }
@@ -558,10 +697,12 @@ void settingsEditorSelect() {
         gSettingsEditor.currentModule = modules[gSettingsEditor.categoryIndex];
         gSettingsEditor.itemIndex = 0;
         
-        // Find first INT/BOOL setting
+        // Find first editable setting (this scan previously used a bare
+        // INT/BOOL test WITHOUT isSettingVisible — the shared predicate also
+        // fixes that latent desync).
         for (size_t i = 0; i < gSettingsEditor.currentModule->count; i++) {
           const SettingEntry* entry = &gSettingsEditor.currentModule->entries[i];
-          if (entry->type == SETTING_INT || entry->type == SETTING_BOOL) {
+          if (isEditableEntry(entry)) {
             gSettingsEditor.itemIndex = i;
             break;
           }
@@ -577,42 +718,103 @@ void settingsEditorSelect() {
       if (gSettingsEditor.itemIndex >= (int)gSettingsEditor.currentModule->count) break;
       
       gSettingsEditor.currentEntry = &gSettingsEditor.currentModule->entries[gSettingsEditor.itemIndex];
-      
-      // Only allow INT and BOOL editing
-      if (gSettingsEditor.currentEntry->type != SETTING_INT && 
-          gSettingsEditor.currentEntry->type != SETTING_BOOL) {
-        gSettingsEditor.errorMessage = "Only int/bool editable";
+
+      // Defense in depth — navigation should never land here on a
+      // non-editable entry now that everything shares isEditableEntry.
+      if (!isEditableEntry(gSettingsEditor.currentEntry)) {
+        gSettingsEditor.errorMessage = "Not editable";
         gSettingsEditor.errorDisplayUntil = millis() + 2000;
         break;
       }
-      
-      gSettingsEditor.editValue = getSettingCurrentValue(gSettingsEditor.currentEntry);
-      gSettingsEditor.hasChanges = false;
-      gSettingsEditor.state = SETTINGS_VALUE_EDIT;
+
+      // Dispatch on edit kind: enum pick-list (INT or STRING with an options
+      // string), keyboard (plain STRING), or the original slider (INT/BOOL).
+      if (entryHasEnumOptions(gSettingsEditor.currentEntry) &&
+          gSettingsEditor.currentEntry->type != SETTING_BOOL) {
+        gSettingsEditor.editKind = SETTINGS_EDIT_PICKLIST;
+        gSettingsEditor.optionCount = enumOptionCount(gSettingsEditor.currentEntry->options);
+        gSettingsEditor.optionIndex = enumOptionIndexForCurrent(gSettingsEditor.currentEntry);
+        gSettingsEditor.optionScroll = 0;
+        gSettingsEditor.hasChanges = false;
+        gSettingsEditor.state = SETTINGS_VALUE_EDIT;
+      } else if (gSettingsEditor.currentEntry->type == SETTING_STRING) {
+        const String& cur = *((String*)gSettingsEditor.currentEntry->valuePtr);
+        if ((int)cur.length() > OLED_KEYBOARD_MAX_LENGTH) {
+          // The keyboard buffer would silently clip the prefill and a save
+          // would corrupt the value — refuse rather than truncate.
+          gSettingsEditor.errorMessage = "Too long for OLED edit";
+          gSettingsEditor.errorDisplayUntil = millis() + 2500;
+          break;
+        }
+        gSettingsEditor.editKind = SETTINGS_EDIT_KEYBOARD;
+        const char* label = gSettingsEditor.currentEntry->label
+                                ? gSettingsEditor.currentEntry->label
+                                : gSettingsEditor.currentEntry->jsonKey;
+        oledKeyboardInit(label, cur.c_str(), OLED_KEYBOARD_MAX_LENGTH);
+        gSettingsEditor.hasChanges = false;
+        gSettingsEditor.state = SETTINGS_VALUE_EDIT;
+      } else {
+        gSettingsEditor.editKind = SETTINGS_EDIT_SLIDER;
+        gSettingsEditor.editValue = getSettingCurrentValue(gSettingsEditor.currentEntry);
+        gSettingsEditor.hasChanges = false;
+        gSettingsEditor.state = SETTINGS_VALUE_EDIT;
+      }
       break;
       
-    case SETTINGS_VALUE_EDIT:
+    case SETTINGS_VALUE_EDIT: {
       // Save value
       if (!gSettingsEditor.currentEntry) break;
-      
-      // Validate
+
+      if (gSettingsEditor.editKind == SETTINGS_EDIT_PICKLIST) {
+        // Commit the highlighted option's VALUE token (never the label).
+        char val[48];
+        if (!enumOptionAt(gSettingsEditor.currentEntry->options,
+                          gSettingsEditor.optionIndex, val, sizeof(val),
+                          nullptr, 0)) {
+          break;
+        }
+        bool ok;
+        if (gSettingsEditor.currentEntry->type == SETTING_STRING) {
+          ok = setSettingValueStr(gSettingsEditor.currentEntry, String(val));
+        } else {
+          setSettingValue(gSettingsEditor.currentEntry, atoi(val));
+          ok = true;
+        }
+        if (ok) {
+          DEBUG_SYSTEMF("[SettingsEditor] Saved %s = %s (pick-list)",
+                        gSettingsEditor.currentEntry->jsonKey, val);
+          gSettingsEditor.state = SETTINGS_ITEM_SELECT;
+        }
+        break;
+      }
+
+      if (gSettingsEditor.editKind == SETTINGS_EDIT_KEYBOARD) {
+        // A never reaches here while the keyboard is up (central dispatch
+        // consumes all input); commit happens in handleSettingsEditorInput's
+        // completion poll. If we somehow land here, just bail to the list.
+        gSettingsEditor.state = SETTINGS_ITEM_SELECT;
+        break;
+      }
+
+      // Slider (INT/BOOL) — original path.
       String errorMsg;
       if (!validateSettingValue(gSettingsEditor.currentEntry, gSettingsEditor.editValue, errorMsg)) {
         gSettingsEditor.errorMessage = errorMsg;
         gSettingsEditor.errorDisplayUntil = millis() + 2000;
         break;
       }
-      
+
       // Apply via command system — generates [CMD] audit line and persists
       setSettingValue(gSettingsEditor.currentEntry, gSettingsEditor.editValue);
 
       DEBUG_SYSTEMF("[SettingsEditor] Saved %s = %d",
                     gSettingsEditor.currentEntry->jsonKey, gSettingsEditor.editValue);
-      
+
       // Return to item select
       gSettingsEditor.state = SETTINGS_ITEM_SELECT;
       gSettingsEditor.hasChanges = false;
       break;
+    }
   }
 }
 
@@ -636,7 +838,11 @@ bool openSettingsEditorForModule(const char* moduleName) {
       gSettingsEditor.currentEntry = nullptr;
       gSettingsEditor.errorMessage = "";
       gSettingsEditor.errorDisplayUntil = 0;
-      
+      gSettingsEditor.editKind = SETTINGS_EDIT_SLIDER;
+      gSettingsEditor.optionIndex = 0;
+      gSettingsEditor.optionCount = 0;
+      gSettingsEditor.optionScroll = 0;
+
       DEBUG_SYSTEMF("[SettingsEditor] Opened module: %s", moduleName);
       return true;
     }
@@ -659,9 +865,11 @@ void settingsEditorBack() {
       break;
       
     case SETTINGS_VALUE_EDIT:
-      // Cancel edit and return to item select
+      // Cancel edit and return to item select. (Keyboard edits cancel via the
+      // keyboard's own B handling + the completion poll, not through here.)
       gSettingsEditor.state = SETTINGS_ITEM_SELECT;
       gSettingsEditor.hasChanges = false;
+      gSettingsEditor.editKind = SETTINGS_EDIT_SLIDER;
       break;
   }
 }
@@ -760,7 +968,7 @@ struct QuickSettingsItem {
 };
 
 #define MAX_QUICK_ITEMS 8
-static QuickSettingsItem quickItems[MAX_QUICK_ITEMS];
+EXT_RAM_BSS_ATTR static QuickSettingsItem quickItems[MAX_QUICK_ITEMS];
 static int quickItemCount = 0;
 static bool quickItemsInitialized = false;
 
@@ -782,13 +990,44 @@ static void addQuickItem(const char* name, QuickGetStateFunc getState, QuickTogg
   }
 }
 
+// --- Radio power (airplane mode) ---
+// The RADIO axis: whether the 2.4GHz radio is powered up at all (ON whenever
+// WiFi is connecting/connected OR ESP-NOW holds it). Separate from the WiFi
+// CONNECTION row below. Toggling off powers the whole radio down (ESP-NOW too);
+// runtime only — the radio returns to its configured state on the next boot.
+#if ENABLE_WIFI
+static bool getQuickRadioState() {
+  extern bool wifiRadioOn();
+  return wifiRadioOn();
+}
+static void toggleQuickRadio() {
+  extern bool wifiRadioOn();
+  if (wifiRadioOn()) {
+    setQuickStatus("Radio OFF");
+    executeOLEDCommand("radiopower off");
+  } else {
+    setQuickStatus("Radio ON");
+    executeOLEDCommand("radiopower on");
+  }
+}
+#endif
+
 // --- WiFi ---
 #if ENABLE_WIFI
+// State reflects the CONNECTION, not the radio mode: ESP-NOW holds the radio in
+// WIFI_AP_STA (mode never NULL), so keying on getMode() left this stuck ON.
 static bool getQuickWiFiState() {
-  return (WiFi.getMode() != WIFI_MODE_NULL);
+  return WiFi.isConnected();
 }
 static void toggleQuickWiFi() {
-  if (WiFi.getMode() != WIFI_MODE_NULL) {
+  extern bool wifiRadioOn();
+  // Can't connect a network with the radio powered down — mirror the HTTP row's
+  // "Need WiFi first!" refusal instead of firing openwifi against a dead radio.
+  if (!wifiRadioOn()) {
+    setQuickStatus("Radio off!");
+    return;
+  }
+  if (WiFi.isConnected()) {
     setQuickStatus("WiFi OFF");
     executeOLEDCommand("closewifi");
   } else {
@@ -862,7 +1101,8 @@ static void initQuickItems() {
   quickItemsInitialized = true;
   quickItemCount = 0;
 #if ENABLE_WIFI
-  addQuickItem("WiFi", getQuickWiFiState, toggleQuickWiFi);
+  addQuickItem("Radio", getQuickRadioState, toggleQuickRadio);  // radio power (airplane mode) — above WiFi
+  addQuickItem("WiFi", getQuickWiFiState, toggleQuickWiFi);      // network connection
 #endif
 #if ENABLE_BLUETOOTH
   addQuickItem("Bluetooth", getQuickBluetoothState, toggleQuickBluetooth);
@@ -879,33 +1119,42 @@ void displayQuickSettings() {
   
   oledDisplay->setTextSize(1);
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-  
-  // Title is shown in header, draw separator line only
-  oledDisplay->drawLine(0, OLED_CONTENT_START_Y, 128, OLED_CONTENT_START_Y, DISPLAY_COLOR_WHITE);
-  
+
+  // No separator line here: the header already draws its own boundary line
+  // (OLED_HEADER_HEIGHT-1); a second line at OLED_CONTENT_START_Y rendered as a
+  // doubled edge right under it.
+
   if (quickItemCount == 0) {
     oledDisplay->setCursor(4, OLED_CONTENT_START_Y + 14);
     oledDisplay->print("No toggles available");
   } else {
-    int yPos = OLED_CONTENT_START_Y + 6;
+    // Layout adapts to the row count so it always fits the 43px content area.
+    // <=3 toggles keep the original +5/step-13/12px-highlight look (last
+    // highlight Y=40..51, 1px above the footer boundary). 4+ toggles (Radio +
+    // WiFi + Bluetooth + HTTP) shrink the step/highlight to stay on the 64px
+    // panel: step = (CONTENT_HEIGHT-3)/count (e.g. 10 for 4 rows).
+    const bool tight = (quickItemCount > 3);
+    const int stepPx  = tight ? ((OLED_CONTENT_HEIGHT - 3) / quickItemCount) : 13;
+    const int hiliteH = tight ? (stepPx - 1) : 12;
+    int yPos = OLED_CONTENT_START_Y + (tight ? 3 : 5);
     for (int i = 0; i < quickItemCount; i++) {
       bool isSelected = (i == quickSelectedItem);
       bool isEnabled = quickItems[i].getState ? quickItems[i].getState() : false;
-      
+
       if (isSelected) {
-        oledDisplay->fillRect(0, yPos - 2, 128, 12, DISPLAY_COLOR_WHITE);
+        oledDisplay->fillRect(0, yPos - 2, 128, hiliteH, DISPLAY_COLOR_WHITE);
         oledDisplay->setTextColor(DISPLAY_COLOR_BLACK);
       } else {
         oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
       }
-      
+
       oledDisplay->setCursor(4, yPos);
       oledDisplay->print(quickItems[i].name);
-      
+
       oledDisplay->setCursor(90, yPos);
       oledDisplay->print(isEnabled ? "[ON]" : "[OFF]");
-      
-      yPos += 14;
+
+      yPos += stepPx;
     }
   }
   
@@ -921,6 +1170,7 @@ void displayQuickSettings() {
 
 // Input handler
 bool quickSettingsInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
+  if (oledGuestBlocksMutate()) return true;
   initQuickItems();
   if (quickItemCount == 0) {
     if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {

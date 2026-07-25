@@ -60,6 +60,12 @@ enum class LLMUIState : uint8_t {
   LOADING,
   READY,
   GENERATING,
+  // Guided-input menu pickers (LLM_GUIDED_MENU_SPEC §8) — nested sub-states
+  // entered with X from READY when the loaded model ships a menu. Back (B) pops
+  // one level: ENTITY -> TEMPLATE -> GROUP -> READY.
+  PICK_GROUP,
+  PICK_TEMPLATE,
+  PICK_ENTITY,
 };
 
 static LLMUIState sUIState = LLMUIState::NO_MODEL;
@@ -73,8 +79,63 @@ struct WrappedLine {
   char text[LLM_CHARS + 1];
   bool isUserPrompt;   // affects rendering (prepended ">" for user turns)
 };
-static WrappedLine sRenderLines[LLM_RENDER_LINES];
+EXT_RAM_BSS_ATTR static WrappedLine sRenderLines[LLM_RENDER_LINES];
 static int sRenderLineCount = 0;
+
+// ============================================================================
+// Guided-input menu picker state (LLM_GUIDED_MENU_SPEC §8)
+// ============================================================================
+// Three nested sub-states, each an OLEDScrollState (the per-mode picker pattern;
+// the generic modal picker was deliberately removed — not recreated here). The
+// shared System_LLM_Menu API composes + fires the question by integer index, then
+// the normal GENERATING view streams the answer.
+
+// Entities can number in the thousands, so the entity picker shows a windowed
+// page of up to this many rows plus '< Prev' / 'Next >' edge rows (total <= 32,
+// the OLEDScrollState item cap). Groups (<=8) and templates fit directly and just
+// scroll within one list.
+static const int LLM_ENT_PAGE = 29;
+
+// OLEDScrollState stores string POINTERS (no copy), so each row's text must live
+// in stable backing storage while its list is on screen. Rows are truncated to
+// LLM_CHARS (display only — selection is by index). Kept in PSRAM: DRAM is tight
+// and menu data is not secret.
+EXT_RAM_BSS_ATTR static OLEDScrollState sGroupScroll;
+EXT_RAM_BSS_ATTR static OLEDScrollState sTplScroll;
+EXT_RAM_BSS_ATTR static OLEDScrollState sEntScroll;
+static bool sPickScrollInit = false;
+
+EXT_RAM_BSS_ATTR static char sGroupRows[8][LLM_CHARS + 1];
+EXT_RAM_BSS_ATTR static char sTplRows[OLED_SCROLL_MAX_ITEMS][LLM_CHARS + 1];
+EXT_RAM_BSS_ATTR static char sEntRows[LLM_ENT_PAGE][LLM_CHARS + 1];
+
+// Generation stamped when the picker opens; every frame re-checks it so a model
+// unload/swap (which bumps menuGeneration) pops us straight back out.
+static uint16_t sPickGen   = 0;
+static uint8_t  sPickGroup = 0;   // chosen group (valid in TEMPLATE/ENTITY)
+static uint16_t sPickTpl   = 0;   // chosen template (valid in ENTITY)
+static uint16_t sEntWindow = 0;   // index of the first entity on the current page
+static uint16_t sEntTotal  = 0;   // entity count of the chosen group
+
+// Transient status shown in the footer after a submit that couldn't start (busy).
+// Cleared on the next navigation / selection. A string literal, so no backing buf.
+static const char* sPickStatus = nullptr;
+
+// Entity-list userData sentinels for the '< Prev' / 'Next >' edge rows. Entity
+// rows carry (void*)(uintptr_t)(entityIndex + ENT_ROW_BASE) so they never collide
+// with these or with a nullptr default.
+static void* const ENT_ROW_PREV = (void*)1;
+static void* const ENT_ROW_NEXT = (void*)2;
+static const uintptr_t ENT_ROW_BASE = 3;
+
+// Retry branching (spec §5): a guided ask must be re-run PLAIN via
+// llmMenuRepeatLast() — chatRetryLast() would ban the memorized-correct answer.
+// chatGetSessionId() reads 0 the instant a turn finishes, so "was the last turn
+// guided?" can't be recovered from the chat module alone; track it locally. Set
+// true on a guided submit, false on a free-text (keyboard) submit. The session id
+// guards against another surface's guided ask having replaced the stored question.
+static bool sLastTurnGuided   = false;
+static int  sGuidedAskSession = 0;
 
 // ============================================================================
 // State transitions
@@ -86,6 +147,26 @@ static void syncStateFromEngine() {
   if (sKeyboardActive) return;  // keyboard owns the UI
 
   LLMStatus st = llmGetStatus();
+
+  // Guided-menu pickers own the UI while active (spec §8). They leave only on an
+  // explicit button — a submit sets GENERATING, B pops a level — or when the model
+  // or its menu vanishes underneath us: an unload/swap bumps menuGeneration, and an
+  // unload drops the engine out of READY. Checked before the generic transitions so
+  // a background generation (another surface) or the reflect-engine branch below
+  // can't yank the user out of the picker mid-selection.
+  if (sUIState == LLMUIState::PICK_GROUP ||
+      sUIState == LLMUIState::PICK_TEMPLATE ||
+      sUIState == LLMUIState::PICK_ENTITY) {
+    if (st.state != LLMState::READY ||
+        llmMenuGroupCount() == 0 ||
+        llmMenuGeneration() != sPickGen) {
+      // Model unloaded / swapped / menu gone — drop back to the chat view (which
+      // itself renders the NO_MODEL screen when the model is truly gone).
+      sUIState = (st.state == LLMState::READY) ? LLMUIState::READY : LLMUIState::NO_MODEL;
+      sPickStatus = nullptr;
+    }
+    return;
+  }
 
   // Generation overrides everything else
   if (chatIsGenerating()) {
@@ -166,6 +247,153 @@ static void openModelPicker() {
   req.requesterMode = OLED_LLM;
   if (oledFilePickerPush(req)) {
     requestOLEDMode(OLED_FILE_BROWSER, "llm.pickModel", true);
+  }
+}
+
+// ============================================================================
+// Guided-input menu pickers — build/refill lists from the shared C API
+// ============================================================================
+
+static void ensurePickScrollInit() {
+  if (sPickScrollInit) return;
+  int vis = OLED_CONTENT_HEIGHT / 8;   // single-line (8px) rows in the content area
+  if (vis < 1) vis = 1;
+  oledScrollInit(&sGroupScroll, nullptr, vis);
+  oledScrollInit(&sTplScroll,   nullptr, vis);
+  oledScrollInit(&sEntScroll,   nullptr, vis);
+  sPickScrollInit = true;
+}
+
+// Copy a template's display form into `out` (<= LLM_CHARS), collapsing the "{}"
+// slot marker to a single '_' (spec §8: "slot renders as _"). llmMenuTemplate()
+// is the only accessor and renders the 0x1F slot byte as "{}", so that two-char
+// sequence is the sole slot source here.
+static void tplDisplayRow(uint8_t g, uint16_t t, char* out, size_t cap, bool* hasSlot) {
+  if (!out || cap == 0) return;
+  char tmp[128];
+  int n = llmMenuTemplate(g, t, tmp, sizeof(tmp), hasSlot);
+  if (n < 0) { out[0] = '\0'; return; }
+  size_t oi = 0;
+  for (size_t i = 0; tmp[i] && oi + 1 < cap; i++) {
+    if (tmp[i] == '{' && tmp[i + 1] == '}') {
+      out[oi++] = '_';
+      i++;                 // consume the '}' too
+    } else {
+      out[oi++] = tmp[i];
+    }
+  }
+  out[oi] = '\0';
+}
+
+// Rebuilt every frame (oledScrollClearKeepSelection preserves the cursor). All
+// row text is copied into stable backing storage because OLEDScrollState stores
+// pointers, not copies.
+static void populateGroupPicker() {
+  ensurePickScrollInit();
+  oledScrollClearKeepSelection(&sGroupScroll);
+  uint8_t n = llmMenuGroupCount();
+  if (n > 8) n = 8;                    // format cap; sGroupRows is sized to match
+  for (uint8_t i = 0; i < n; i++) {
+    LLMMenuGroupInfo gi;
+    if (llmMenuGroupInfo(i, &gi)) {
+      strlcpy(sGroupRows[i], gi.name, sizeof(sGroupRows[i]));   // 21-char truncation
+    } else {
+      sGroupRows[i][0] = '\0';
+    }
+    oledScrollAddItem(&sGroupScroll, sGroupRows[i]);
+  }
+  oledScrollClampSelection(&sGroupScroll);
+}
+
+static void populateTemplatePicker() {
+  ensurePickScrollInit();
+  oledScrollClearKeepSelection(&sTplScroll);
+  LLMMenuGroupInfo gi;
+  uint16_t n = llmMenuGroupInfo(sPickGroup, &gi) ? gi.tplCount : 0;
+  // Curation targets 5-15 templates/group; the format allows up to 64. One
+  // OLEDScrollState scrolls up to OLED_SCROLL_MAX_ITEMS, which comfortably covers
+  // the curated range — cap here so a rogue overlong list can't overflow.
+  if (n > OLED_SCROLL_MAX_ITEMS) n = OLED_SCROLL_MAX_ITEMS;
+  for (uint16_t t = 0; t < n; t++) {
+    bool hs = false;
+    tplDisplayRow(sPickGroup, t, sTplRows[t], sizeof(sTplRows[t]), &hs);
+    oledScrollAddItem(&sTplScroll, sTplRows[t]);
+  }
+  oledScrollClampSelection(&sTplScroll);
+}
+
+// Windowed entity page: an optional '< Prev' row, up to LLM_ENT_PAGE entity rows,
+// then an optional 'Next >' row — refilled each frame from sEntWindow.
+static void populateEntityPicker() {
+  ensurePickScrollInit();
+  oledScrollClearKeepSelection(&sEntScroll);
+
+  if (sEntWindow >= sEntTotal) sEntWindow = 0;   // defensive re-clamp
+  bool     hasPrev   = (sEntWindow > 0);
+  uint16_t remaining = (sEntTotal > sEntWindow) ? (uint16_t)(sEntTotal - sEntWindow) : 0;
+  uint16_t pageCount = remaining < LLM_ENT_PAGE ? remaining : (uint16_t)LLM_ENT_PAGE;
+  bool     hasNext   = ((uint32_t)sEntWindow + pageCount) < sEntTotal;
+
+  if (hasPrev) oledScrollAddItem(&sEntScroll, "< Prev", nullptr, true, ENT_ROW_PREV);
+  for (uint16_t i = 0; i < pageCount; i++) {
+    uint16_t entIdx = (uint16_t)(sEntWindow + i);
+    if (llmMenuEntity(sPickGroup, entIdx, sEntRows[i], sizeof(sEntRows[i])) < 0) {
+      sEntRows[i][0] = '\0';
+    }
+    oledScrollAddItem(&sEntScroll, sEntRows[i], nullptr, true,
+                      (void*)(uintptr_t)(entIdx + ENT_ROW_BASE));
+  }
+  if (hasNext) oledScrollAddItem(&sEntScroll, "Next >", nullptr, true, ENT_ROW_NEXT);
+  oledScrollClampSelection(&sEntScroll);
+}
+
+// Level entry helpers — reset the cursor to the top of the level being entered.
+static void enterPickGroup() {
+  ensurePickScrollInit();
+  sPickGen    = llmMenuGeneration();
+  sPickStatus = nullptr;
+  sGroupScroll.selectedIndex = 0;
+  sGroupScroll.scrollOffset  = 0;
+  sUIState = LLMUIState::PICK_GROUP;
+}
+
+static void enterPickTemplate(uint8_t g) {
+  sPickGroup  = g;
+  sPickStatus = nullptr;
+  sTplScroll.selectedIndex = 0;
+  sTplScroll.scrollOffset  = 0;
+  sUIState = LLMUIState::PICK_TEMPLATE;
+}
+
+static void enterPickEntity(uint16_t t) {
+  sPickTpl    = t;
+  sPickStatus = nullptr;
+  LLMMenuGroupInfo gi;
+  sEntTotal   = llmMenuGroupInfo(sPickGroup, &gi) ? gi.entCount : 0;
+  sEntWindow  = 0;
+  sEntScroll.selectedIndex = 0;
+  sEntScroll.scrollOffset  = 0;
+  sUIState = LLMUIState::PICK_ENTITY;
+}
+
+// Compose + submit the chosen (group, template, entity). e = -1 for a slotless
+// (canned) template.
+static void submitGuided(int entityIndex) {
+  int rc = llmMenuAsk(sPickGen, sPickGroup, sPickTpl, entityIndex, nullptr);
+  if (rc > 0) {
+    sLastTurnGuided   = true;
+    sGuidedAskSession = rc;
+    sPickStatus       = nullptr;
+    sScrollOffset     = 0;
+    sUIState          = LLMUIState::GENERATING;   // stream the answer (existing view)
+  } else if (rc == 0) {
+    // Busy — a generation is already in flight. Stay in the picker; show status.
+    sPickStatus = "Busy: answer in progress";
+  } else {
+    // -1 stale gen (model swapped) / -2 bad index / -3 no menu — bail to READY;
+    // syncStateFromEngine reflects NO_MODEL from there if the model is truly gone.
+    sPickStatus = nullptr;
+    sUIState    = LLMUIState::READY;
   }
 }
 
@@ -374,14 +602,41 @@ static void displayLLM_chat(bool generating) {
     oledDisplay->print("v");
   }
 
-  // Footer
-  if (generating) {
+  // Footer — a PSRAM-starved context (ctx auto-fit unusably low) makes every
+  // answer garbage, so when it's degraded override the key-hints with the
+  // warning + the fix (restart). Same condition every other surface uses.
+  int llmCtx = 0;
+  if (llmContextDegraded(&llmCtx, nullptr)) {
+    char f[24];
+    snprintf(f, sizeof(f), "!ctx %d low-restart", llmCtx);
+    drawFooter(f);
+  } else if (generating) {
     drawFooter("B: stop");
   } else if (chatGetTurnCount() > 0) {
     drawFooter("A: ask  Y: retry");
   } else {
     drawFooter("A: ask");
   }
+}
+
+// Guided-menu picker views — refill the level's list, render it single-line, and
+// footer the standard picker hints (or a transient busy status).
+static void displayLLM_pickGroup() {
+  populateGroupPicker();
+  oledScrollRenderSimple(oledDisplay, &sGroupScroll);
+  drawFooter(sPickStatus ? sPickStatus : "A: pick  B: back");
+}
+
+static void displayLLM_pickTemplate() {
+  populateTemplatePicker();
+  oledScrollRenderSimple(oledDisplay, &sTplScroll);
+  drawFooter(sPickStatus ? sPickStatus : "A: pick  B: back");
+}
+
+static void displayLLM_pickEntity() {
+  populateEntityPicker();
+  oledScrollRenderSimple(oledDisplay, &sEntScroll);
+  drawFooter(sPickStatus ? sPickStatus : "A: pick  B: back");
 }
 
 static void displayLLM() {
@@ -398,10 +653,13 @@ static void displayLLM() {
   syncStateFromEngine();
 
   switch (sUIState) {
-    case LLMUIState::NO_MODEL:   displayLLM_noModel(); break;
-    case LLMUIState::LOADING:    displayLLM_loading(); break;
-    case LLMUIState::READY:      displayLLM_chat(false); break;
-    case LLMUIState::GENERATING: displayLLM_chat(true);  break;
+    case LLMUIState::NO_MODEL:      displayLLM_noModel();      break;
+    case LLMUIState::LOADING:       displayLLM_loading();      break;
+    case LLMUIState::READY:         displayLLM_chat(false);    break;
+    case LLMUIState::GENERATING:    displayLLM_chat(true);     break;
+    case LLMUIState::PICK_GROUP:    displayLLM_pickGroup();    break;
+    case LLMUIState::PICK_TEMPLATE: displayLLM_pickTemplate(); break;
+    case LLMUIState::PICK_ENTITY:   displayLLM_pickEntity();   break;
   }
 }
 
@@ -410,6 +668,7 @@ static void displayLLM() {
 // ============================================================================
 
 static bool handleLLMInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed) {
+  if (oledGuestBlocksMutate()) return true;
   // Keyboard active: confirm/cancel are routed here; navigation handled internally.
   if (sKeyboardActive) {
     if (oledKeyboardIsCompleted()) {
@@ -419,6 +678,7 @@ static bool handleLLMInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
       sKeyboardActive = false;
       if (prompt.length() > 0) {
         chatBeginTurn(prompt.c_str(), nullptr);
+        sLastTurnGuided = false;   // free-text turn — Y retry uses chatRetryLast
       }
       return true;
     }
@@ -432,10 +692,11 @@ static bool handleLLMInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
 
   switch (sUIState) {
     case LLMUIState::NO_MODEL: {
-      if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
+      if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
         // Push the shared file picker scoped to /system/llm with *.bin filter.
         // The callback (onLLMModelPicked) handles the actual model load when
-        // the file browser pops back here.
+        // the file browser pops back here. (X no longer aliases A — it is now the
+        // guided-menu button, inert here since no model means no menu.)
         openModelPicker();
         return true;
       }
@@ -466,15 +727,34 @@ static bool handleLLMInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
     }
 
     case LLMUIState::READY: {
-      if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
+      if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
         oledKeyboardInit("Prompt:", nullptr, OLED_KEYBOARD_MAX_LENGTH);
         sKeyboardActive = true;
         return true;
       }
+      if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
+        // X opens the guided-input menu (spec §8) — only when the loaded model
+        // ships one. Otherwise X is inert (it used to alias A; that alias is gone).
+        if (llmMenuGroupCount() > 0) enterPickGroup();
+        return true;
+      }
       if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_Y)) {
-        // Retry — re-runs the last user prompt with the prior answer's tokens
-        // as suppress. No effect if there's nothing to retry.
-        chatRetryLast(nullptr);
+        // Retry. A guided ask must be re-run PLAIN via llmMenuRepeatLast() —
+        // chatRetryLast() suppresses the previous answer's tokens, which bans the
+        // memorized-correct answer for a guided question (spec §5). Branch on
+        // whether our last submission was guided and the menu module still holds
+        // that same session; otherwise fall back to a normal free-text retry.
+        int gs = 0;
+        if (sLastTurnGuided && llmMenuLastAskInfo(&gs) && gs == sGuidedAskSession) {
+          // llmMenuRepeatLast advances the module's last-ask session to the new
+          // turn; track it locally so a SECOND consecutive retry still matches
+          // (otherwise gs != sGuidedAskSession and it falls through to
+          // chatRetryLast, banning the memorized-correct answer). (spec §5)
+          int sid = llmMenuRepeatLast();
+          if (sid > 0) sGuidedAskSession = sid;
+        } else {
+          chatRetryLast(nullptr);
+        }
         return true;
       }
       if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
@@ -483,6 +763,76 @@ static bool handleLLMInput(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
       if (gNavEvents.up)   { sScrollOffset++; return true; }
       if (gNavEvents.down) { if (sScrollOffset > 0) sScrollOffset--; return true; }
       return false;
+    }
+
+    case LLMUIState::PICK_GROUP: {
+      if (oledScrollHandleNav(&sGroupScroll)) { sPickStatus = nullptr; return true; }
+      if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
+        enterPickTemplate((uint8_t)sGroupScroll.selectedIndex);
+        return true;
+      }
+      if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
+        sUIState = LLMUIState::READY;   // back one level
+        sPickStatus = nullptr;
+        return true;
+      }
+      return true;  // picker is modal — don't leak other keys to global handlers
+    }
+
+    case LLMUIState::PICK_TEMPLATE: {
+      if (oledScrollHandleNav(&sTplScroll)) { sPickStatus = nullptr; return true; }
+      if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
+        uint16_t t = (uint16_t)sTplScroll.selectedIndex;
+        sPickTpl = t;
+        // Slotless (canned) templates skip the entity level and submit with e=-1;
+        // a slotted template needs an entity, so descend into the entity picker.
+        bool hasSlot = false;
+        char probe[8];
+        llmMenuTemplate(sPickGroup, t, probe, sizeof(probe), &hasSlot);
+        LLMMenuGroupInfo gi;
+        uint16_t entCount = llmMenuGroupInfo(sPickGroup, &gi) ? gi.entCount : 0;
+        if (hasSlot && entCount > 0) enterPickEntity(t);
+        else                        submitGuided(-1);
+        return true;
+      }
+      if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
+        sUIState = LLMUIState::PICK_GROUP;   // back one level
+        sPickStatus = nullptr;
+        return true;
+      }
+      return true;
+    }
+
+    case LLMUIState::PICK_ENTITY: {
+      if (oledScrollHandleNav(&sEntScroll)) { sPickStatus = nullptr; return true; }
+      if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
+        OLEDScrollItem* sel = oledScrollGetSelected(&sEntScroll);
+        if (!sel) return true;
+        void* ud = sel->userData;
+        if (ud == ENT_ROW_PREV) {
+          sEntWindow = (sEntWindow >= LLM_ENT_PAGE) ? (uint16_t)(sEntWindow - LLM_ENT_PAGE) : 0;
+          // Land on the first entity row (index 1 when a '< Prev' row precedes it).
+          sEntScroll.selectedIndex = (sEntWindow > 0) ? 1 : 0;
+          sEntScroll.scrollOffset  = 0;
+          sPickStatus = nullptr;
+        } else if (ud == ENT_ROW_NEXT) {
+          uint32_t next = (uint32_t)sEntWindow + LLM_ENT_PAGE;
+          if (next < sEntTotal) sEntWindow = (uint16_t)next;
+          // New page always has a '< Prev' row, so the first entity is at index 1.
+          sEntScroll.selectedIndex = 1;
+          sEntScroll.scrollOffset  = 0;
+          sPickStatus = nullptr;
+        } else {
+          submitGuided((int)((uintptr_t)ud) - (int)ENT_ROW_BASE);
+        }
+        return true;
+      }
+      if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
+        sUIState = LLMUIState::PICK_TEMPLATE;   // back one level
+        sPickStatus = nullptr;
+        return true;
+      }
+      return true;
     }
   }
   return false;
@@ -505,6 +855,7 @@ void resetLLMOLEDState() {
     oledKeyboardReset();
     sKeyboardActive = false;
   }
+  sPickStatus = nullptr;   // drop any stale guided-picker busy status
   // Snap state to whatever the engine is actually doing right now.
   LLMStatus st = llmGetStatus();
   if (chatIsGenerating())                                sUIState = LLMUIState::GENERATING;

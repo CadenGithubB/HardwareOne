@@ -117,9 +117,9 @@ inline void streamEspNowInner(httpd_req_t* req) {
 <span class='en-header-title'>ESP-NOW</span>
 </div>
 <div class='en-header-right'>
-<button class='btn' id='btn-espnow-toggle-mode' style='display:none'>Mode: Direct</button>
-<button class='btn' id='btn-espnow-init' style='display:none'>Initialize</button>
-<button class='btn' id='btn-espnow-disable' style='display:none'>Disable</button>
+<button class='btn' id='btn-espnow-toggle-mode' style='display:none' data-guest-hide>Mode: Direct</button>
+<button class='btn' id='btn-espnow-init' style='display:none' data-guest-hide>Initialize</button>
+<button class='btn' id='btn-espnow-disable' style='display:none' data-guest-hide>Disable</button>
 <button class='btn' id='btn-espnow-refresh'>Refresh</button>
 </div>
 </div>
@@ -138,10 +138,10 @@ inline void streamEspNowInner(httpd_req_t* req) {
 </div>
 <div id='devices-pane' style='display:none' class='en-pane-content'>
 <div style='display:flex;justify-content:flex-end;gap:8px;margin-bottom:8px'>
-<button class='btn' onclick="openBroadcastPanel()">Broadcast</button>
+<button class='btn' onclick="openBroadcastPanel()" data-guest-hide>Broadcast</button>
 <button class='btn' id='btn-add-device-toggle' onclick="(function(){var p=document.getElementById('add-device-pane');var b=document.getElementById('btn-add-device-toggle');var show=p.style.display==='none'||!p.style.display;p.style.display=show?'block':'none';b.textContent=show?'Cancel':'+ Add Device';})()" >+ Add Device</button>
 </div>
-<div id='add-device-pane' style='display:none'>
+<div id='add-device-pane' style='display:none' data-guest-hide>
 <div class='en-pair-inputs'>
 <input type='text' id='pair-mac' class='mac-input' placeholder='XX:XX:XX:XX:XX:XX' maxlength='17'>
 <input type='text' id='pair-name' placeholder='Device Name'>
@@ -168,7 +168,7 @@ inline void streamEspNowInner(httpd_req_t* req) {
 </div>
 <div style='display:flex;gap:6px'>
 <button class='btn' id='btn-refresh-mesh'>Refresh</button>
-<button class='btn' id='btn-auto-topology'>Auto-Discover: OFF</button>
+<button class='btn' id='btn-auto-topology' data-guest-hide>Auto-Discover: OFF</button>
 </div>
 </div>
 <div id='mesh-view-topology' style='display:none'>
@@ -190,8 +190,8 @@ inline void streamEspNowInner(httpd_req_t* req) {
 <button class='btn' id='btn-settings-toggle' onclick="togglePane('settings-pane','btn-settings-toggle')">Expand</button>
 </div>
 <div id='settings-pane' style='display:none' class='en-pane-content'>
-<div id='smarthome-card' style='margin-bottom:16px;padding-bottom:16px;border-bottom:1px solid var(--border)'>
-<div style='font-size:1rem;font-weight:600;color:var(--panel-fg);margin-bottom:8px'>Smart Home Metadata</div>
+<div id='device-metadata-card' style='margin-bottom:16px;padding-bottom:16px;border-bottom:1px solid var(--border)' data-guest-hide>
+<div style='font-size:1rem;font-weight:600;color:var(--panel-fg);margin-bottom:8px'>Device Metadata</div>
 <div style='color:var(--muted);font-size:.82em;margin-bottom:10px'>Device identity for home automation and mesh discovery.</div>
 <div class='en-form-row'>
 <input type='text' id='friendly-name' placeholder='Friendly Name (e.g., Living Room Light)' maxlength='47'>
@@ -214,6 +214,15 @@ inline void streamEspNowInner(httpd_req_t* req) {
 <span style='color:var(--panel-fg);font-size:.9em'>Stationary Device</span>
 </label>
 </div>
+<div id='channel-card' style='margin-bottom:16px;padding-bottom:16px;border-bottom:1px solid var(--border)'>
+<div style='font-size:1rem;font-weight:600;color:var(--panel-fg);margin-bottom:8px'>Radio Channel</div>
+<div style='color:var(--muted);font-size:.82em;margin-bottom:10px'>Two devices only find each other on the same channel. <b>Auto</b> follows your Wi-Fi; a fixed channel is pinned whenever the device is off Wi-Fi &mdash; set the <b>same</b> value on both devices for off-grid pairing. (While joined to Wi-Fi the network's channel is used.)</div>
+<div id='channel-status' style='background:var(--crumb-bg);border-radius:8px;padding:10px;font-size:.85em;color:var(--panel-fg);border:1px solid var(--border);margin-bottom:10px'>Loading channel&hellip;</div>
+<div class='en-form-row'>
+<select id='channel-select' data-guest-hide></select>
+<button class='btn' id='btn-set-channel' data-guest-hide>Set Channel</button>
+</div>
+</div>
 <div id='meshes-card' style='margin-bottom:16px'>
 <div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;flex-wrap:wrap;gap:8px'>
 <div style='font-size:1rem;font-weight:600;color:var(--panel-fg)'>Meshes</div>
@@ -223,7 +232,7 @@ inline void streamEspNowInner(httpd_req_t* req) {
 <div id='meshes-table' style='display:flex;flex-direction:column;gap:6px;margin-bottom:10px'>
 <div style='color:var(--muted);font-size:.85em;padding:8px 0' id='meshes-loading'>Loading meshes&hellip;</div>
 </div>
-<div id='meshes-add-row' class='en-form-row' style='display:none'>
+<div id='meshes-add-row' class='en-form-row' style='display:none' data-guest-hide>
 <input type='text' id='mesh-add-label' placeholder='New mesh label (e.g., lab2)' maxlength='16'>
 <button class='btn' id='btn-mesh-add'>Add Mesh</button>
 </div>
@@ -233,22 +242,22 @@ inline void streamEspNowInner(httpd_req_t* req) {
 <div style='font-size:1rem;font-weight:600;color:var(--panel-fg);margin-bottom:8px'>Mesh Role Configuration</div>
 <div style='background:var(--crumb-bg);border-radius:8px;padding:10px;font-size:.85em;color:var(--panel-fg);border:1px solid var(--border);margin-bottom:12px' id='mesh-role-status'>Loading role configuration...</div>
 <div style='display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap'>
-<button class='btn' id='btn-role-worker'>Worker</button>
-<button class='btn' id='btn-role-master'>Master</button>
-<button class='btn' id='btn-role-backup'>Backup</button>
-<button class='btn' id='btn-mesh-topo'>Discover Topology</button>
+<button class='btn' id='btn-role-worker' data-guest-hide>Worker</button>
+<button class='btn' id='btn-role-master' data-guest-hide>Master</button>
+<button class='btn' id='btn-role-backup' data-guest-hide>Backup</button>
+<button class='btn' id='btn-mesh-topo' data-guest-hide>Discover Topology</button>
 </div>
 <div class='en-form-row'>
-<input type='text' id='master-mac' class='mac-input' placeholder='Master MAC (XX:XX:XX:XX:XX:XX)' maxlength='17'>
-<button class='btn' id='btn-set-master-mac'>Set Master</button>
+<input type='text' id='master-mac' class='mac-input' placeholder='Master MAC (XX:XX:XX:XX:XX:XX)' maxlength='17' data-guest-hide>
+<button class='btn' id='btn-set-master-mac' data-guest-hide>Set Master</button>
 </div>
-<label style='display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:8px'>
+<label style='display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:8px' data-guest-hide>
 <input type='checkbox' id='backup-master-enabled' style='width:auto;margin:0'>
 <span style='color:var(--panel-fg);font-size:.9em'>Enable Backup Master</span>
 </label>
 <div id='backup-mac-group' class='en-form-row' style='display:none;margin-top:8px'>
-<input type='text' id='backup-mac' class='mac-input' placeholder='Backup MAC (XX:XX:XX:XX:XX:XX)' maxlength='17'>
-<button class='btn' id='btn-set-backup-mac'>Set Backup</button>
+<input type='text' id='backup-mac' class='mac-input' placeholder='Backup MAC (XX:XX:XX:XX:XX:XX)' maxlength='17' data-guest-hide>
+<button class='btn' id='btn-set-backup-mac' data-guest-hide>Set Backup</button>
 </div>
 <div style='background:var(--crumb-bg);border-radius:8px;padding:10px;font-size:.85em;color:var(--panel-fg);border:1px solid var(--border);margin-top:12px;display:none' id='mesh-topology-data'>
 <div style='font-weight:bold;margin-bottom:8px'>Topology Discovery Results:</div>
@@ -272,10 +281,10 @@ inline void streamEspNowInner(httpd_req_t* req) {
 </ul>
 </div>
 <div class='setup-modal-error' id='setup-error'></div>
-<input type='text' id='setup-device-name' class='setup-modal-input' placeholder='Enter device name (e.g., darkblue)' maxlength='20' autocomplete='off'>
+<input type='text' id='setup-device-name' class='setup-modal-input' placeholder='Enter device name (e.g., darkblue)' maxlength='20' autocomplete='off' data-guest-hide>
 <div class='setup-modal-buttons'>
 <button class='btn' id='btn-setup-cancel'>Cancel</button>
-<button class='btn' id='btn-setup-save'>Set Name & Initialize</button>
+<button class='btn' id='btn-setup-save' data-guest-hide>Set Name & Initialize</button>
 </div>
 </div>
 </div>
@@ -389,8 +398,10 @@ window.togglePane = function(paneId, btnId) {
           try { if (typeof listDevices === 'function') { listDevices(); } } catch(e) { console.warn('[ESP-NOW] listDevices not defined yet'); }
           /* Load meshes now that ESP-NOW is initialized */
           try { if (typeof window.loadMeshes === 'function') { window.loadMeshes(); } } catch(e) { console.warn('[ESP-NOW] loadMeshes call error:', e); }
-          /* Load smart home metadata */
-          try { if (typeof window.loadSmartHomeMetadata === 'function') { window.loadSmartHomeMetadata(); } } catch(e) { console.warn('[ESP-NOW] loadSmartHomeMetadata call error:', e); }
+          /* Load device metadata */
+          try { if (typeof window.loadLocalDeviceMetadata === 'function') { window.loadLocalDeviceMetadata(); } } catch(e) { console.warn('[ESP-NOW] loadLocalDeviceMetadata call error:', e); }
+          /* Load preferred radio channel */
+          try { if (typeof window.refreshChannel === 'function') { window.refreshChannel(); } } catch(e) { console.warn('[ESP-NOW] refreshChannel call error:', e); }
           /* Start message polling now that ESP-NOW is initialized */
           if (typeof window.espnowStartPolling === 'function') { window.espnowStartPolling(); }
         } else {
@@ -469,10 +480,10 @@ window.togglePane = function(paneId, btnId) {
         'espnowmeshrole',        // 6
         'espnowmeshstatus'       // 7
       ];
-      hw.postJSON('/api/cli/batch', { commands: CMDS })
+      hw.fetchJSON('/api/espnow/status')
       .then(data => {
         if (!data || !Array.isArray(data.results) || data.results.length < 2) {
-          console.warn('[ESP-NOW] Batch response invalid, falling back to individual requests');
+          console.warn('[ESP-NOW] Status response invalid, falling back to individual requests');
           refreshStatus();
           return;
         }
@@ -529,7 +540,7 @@ window.togglePane = function(paneId, btnId) {
         if (isInitialized) {
           try { if (typeof listDevices === 'function') listDevices(results[2], results[3]); } catch(e) { console.warn('[ESP-NOW] Batch listDevices error:', e); }
           try { if (typeof window.loadMeshes === 'function') window.loadMeshes(results[4]); } catch(e) { console.warn('[ESP-NOW] Batch loadMeshes error:', e); }
-          try { if (typeof window.loadSmartHomeMetadata === 'function') window.loadSmartHomeMetadata(results[5]); } catch(e) { console.warn('[ESP-NOW] Batch deviceinfo error:', e); }
+          try { if (typeof window.loadLocalDeviceMetadata === 'function') window.loadLocalDeviceMetadata(results[5]); } catch(e) { console.warn('[ESP-NOW] Batch deviceinfo error:', e); }
           var isMeshInit = window.espnowIsMesh;
           if (isMeshInit) {
             try { if (typeof window.refreshMeshRole === 'function') window.refreshMeshRole(results[6]); } catch(e) { console.warn('[ESP-NOW] Batch meshrole error:', e); }
@@ -684,7 +695,7 @@ window.togglePane = function(paneId, btnId) {
         html += '</div>';
         html += '<div class="device-actions">';
         html += '<button class="btn btn-small" onclick="toggleDevicePanel(\'' + mac + '\',\'message\')">Interact</button>';
-        html += '<button class="btn btn-small" onclick="unpairDevice(\'' + mac + '\')">Unpair</button>';
+        html += '<button class="btn btn-small" data-guest-hide onclick="unpairDevice(\'' + mac + '\')">Unpair</button>';
         html += '</div>';
         html += '</div>';
       }
@@ -755,7 +766,7 @@ window.togglePane = function(paneId, btnId) {
             html += ' • Last: ' + ud.secondsSinceLastSeen + 's ago</div>';
             html += '</div>';
             html += '<div class="device-actions">';
-            html += '<button class="btn btn-small" onclick="pairUnpairedDevice(\'' + umac + '\',\'' + uname.replace(/'/g, "\\'") + '\')">Pair</button>';
+            html += '<button class="btn btn-small" data-guest-hide onclick="pairUnpairedDevice(\'' + umac + '\',\'' + uname.replace(/'/g, "\\'") + '\')">Pair</button>';
             html += '</div>';
             html += '</div>';
           }
@@ -869,7 +880,7 @@ window.togglePane = function(paneId, btnId) {
           + '</div>'
           + '<div>'
           + '<div class="message-log" id="log-' + mac + '" style="margin-bottom:12px;max-height:300px;overflow-y:auto"><div class="message-empty">No messages yet. Start a conversation!</div></div>'
-          + '<div id="text-input-' + mac + '" style="display:block">'
+          + '<div id="text-input-' + mac + '" style="display:block" data-guest-hide>'
           + '<div style="display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap">'
           + '<textarea id="msg-' + mac + '" maxlength="1024" oninput="var c=document.getElementById(this.id.replace(\'msg-\',\'msg-count-\'));if(c)c.textContent=(1024-this.value.length)+\' characters left\';" placeholder="Message to send" style="flex:1;min-width:220px;min-height:60px;resize:vertical;font-family:inherit;padding:8px;border:1px solid var(--border);border-radius:4px;background:var(--panel-bg);color:var(--panel-fg)"></textarea>'
           + '<button class="btn message-action-btn" onclick="doSendMessage(\'' + mac + '\')" style="align-self:flex-start">Send</button>'
@@ -877,7 +888,7 @@ window.togglePane = function(paneId, btnId) {
           + '<div id="msg-count-' + mac + '" style="font-size:.78em;color:var(--muted);margin-top:5px">1024 characters left</div>'
           + '<div style="font-size:.72em;color:var(--muted);margin-top:2px">Longer messages are auto-split. For large content, use the File tab.</div>'
           + '</div>'
-          + '<div id="remote-input-' + mac + '" style="display:none">'
+          + '<div id="remote-input-' + mac + '" style="display:none" data-guest-hide>'
           + '<div class="input-group" style="margin-bottom:8px">'
           + '<input type="text" id="ru-' + mac + '" placeholder="Username" style="flex:1">'
           + '<input type="password" id="rp-' + mac + '" placeholder="Password" style="flex:1">'
@@ -887,7 +898,7 @@ window.togglePane = function(paneId, btnId) {
           + '<button class="btn message-action-btn" onclick="doRemoteExec(\'' + mac + '\')" style="align-self:flex-start">Execute</button>'
           + '</div>'
           + '</div>'
-          + '<div id="file-input-' + mac + '" style="display:none">'
+          + '<div id="file-input-' + mac + '" style="display:none" data-guest-hide>'
           + '<div style="display:flex;gap:8px;margin-bottom:12px">'
           + '<button class="btn message-action-btn" id="btn-file-send-' + mac + '" onclick="toggleFileMode(\'' + mac + '\', \'send\')" style="flex:1">Send File</button>'
           + '<button class="btn message-action-btn" id="btn-file-receive-' + mac + '" onclick="toggleFileMode(\'' + mac + '\', \'receive\')" style="flex:1">Receive File</button>'
@@ -925,14 +936,14 @@ window.togglePane = function(paneId, btnId) {
           + '</div>'
           + '<div id="metadata-' + mac + '" style="display:none;padding:12px;background:var(--crumb-bg);border-radius:8px;min-height:200px">'
           + '<div style="margin-bottom:10px;text-align:right">'
-          + '<button class="btn" onclick="syncMetadata(\'' + mac + '\')">Sync Metadata</button>'
+          + '<button class="btn" data-guest-hide onclick="syncMetadata(\'' + mac + '\')">Sync Metadata</button>'
           + '</div>'
           + '<div id="metadata-content-' + mac + '"><div style="text-align:center;color:var(--panel-fg);padding:20px">No metadata available. Click Sync Metadata to request from device.</div></div>'
           + '</div>'
-          + '<div id="automations-input-' + mac + '" style="display:none">'
+          + '<div id="automations-input-' + mac + '" style="display:none" data-guest-hide>'
           + automationsInnerHtml(mac)
           + '</div>'
-          + '<div id="sensors-input-' + mac + '" style="display:none;padding:12px;background:var(--crumb-bg);border-radius:8px;min-height:200px">'
+          + '<div id="sensors-input-' + mac + '" style="display:none;padding:12px;background:var(--crumb-bg);border-radius:8px;min-height:200px" data-guest-hide>'
           + '<p style="color:var(--panel-fg);font-size:0.9em;margin:0 0 10px 0">Select which sensors should stream, then apply the changes. Credentials are required.</p>'
           + '<div class="input-group" style="margin-bottom:12px">'
           + '<input type="text" id="su-' + mac + '" placeholder="Username" style="flex:1">'
@@ -1295,7 +1306,7 @@ window.togglePane = function(paneId, btnId) {
         if (messageLog) messageLog.style.display = 'none';
         if (btnMetadata) btnMetadata.classList.add('interact-tab-active');
         // Load cached metadata if available; don't auto-request from device
-        window.loadDeviceMetadata(mac);
+        window.loadPeerMetadata(mac);
       } else if (type === 'automations') {
         if (automationsInput) automationsInput.style.display = 'block';
         if (messageLog) messageLog.style.display = 'none';
@@ -1771,7 +1782,10 @@ window.togglePane = function(paneId, btnId) {
         });
       }
     };
-    window.loadDeviceMetadata = function(mac) {
+    // Fetch and render a REMOTE/paired peer's cached metadata (by MAC) into that
+    // peer's interact-panel Metadata tab. Distinct from loadLocalDeviceMetadata,
+    // which loads THIS device's own metadata into the settings form.
+    window.loadPeerMetadata = function(mac) {
       const container = document.getElementById('metadata-content-' + mac)
                      || document.getElementById('metadata-' + mac);
       if (!container) return;
@@ -1853,7 +1867,7 @@ window.togglePane = function(paneId, btnId) {
               .then(function(data) {
                 if (data.found) {
                   clearInterval(metaPollInterval);
-                  window.loadDeviceMetadata(mac);
+                  window.loadPeerMetadata(mac);
                 }
               })
               .catch(function() {});
@@ -2858,31 +2872,35 @@ window.togglePane = function(paneId, btnId) {
       _on('btn-set-backup-mac','click', function() { window.setBackupMAC(); });
       _on('btn-mesh-topo','click', function() { window.discoverTopology(); });
       _on('backup-master-enabled','change', function() { window.toggleBackupMaster(this.checked); });
-      /* Smart home metadata button handlers */
+      /* Device metadata button handlers */
       _on('btn-set-friendly','click', function() {
         const val = document.getElementById('friendly-name').value;
         hw.postFormText('/api/cli', { cmd: 'espnowfriendlyname "'+val+'"' })
-          .then(t=>{ var el=document.getElementById('smarthome-status'); if(el)el.textContent=t; if(typeof window.loadSmartHomeMetadata==='function')window.loadSmartHomeMetadata(); });
+          .then(t=>{ var el=document.getElementById('device-metadata-status'); if(el)el.textContent=t; if(typeof window.loadLocalDeviceMetadata==='function')window.loadLocalDeviceMetadata(); });
       });
       _on('btn-set-room','click', function() {
         const val = document.getElementById('room-name').value;
         hw.postFormText('/api/cli', { cmd: 'espnowroom "'+val+'"' })
-          .then(t=>{ var el=document.getElementById('smarthome-status'); if(el)el.textContent=t; if(typeof window.loadSmartHomeMetadata==='function')window.loadSmartHomeMetadata(); });
+          .then(t=>{ var el=document.getElementById('device-metadata-status'); if(el)el.textContent=t; if(typeof window.loadLocalDeviceMetadata==='function')window.loadLocalDeviceMetadata(); });
       });
       _on('btn-set-zone','click', function() {
         const val = document.getElementById('zone-name').value;
         hw.postFormText('/api/cli', { cmd: 'espnowzone "'+val+'"' })
-          .then(t=>{ var el=document.getElementById('smarthome-status'); if(el)el.textContent=t; if(typeof window.loadSmartHomeMetadata==='function')window.loadSmartHomeMetadata(); });
+          .then(t=>{ var el=document.getElementById('device-metadata-status'); if(el)el.textContent=t; if(typeof window.loadLocalDeviceMetadata==='function')window.loadLocalDeviceMetadata(); });
       });
       _on('btn-set-tags','click', function() {
         const val = document.getElementById('tags-input').value;
         hw.postFormText('/api/cli', { cmd: 'espnowtags "'+val+'"' })
-          .then(t=>{ var el=document.getElementById('smarthome-status'); if(el)el.textContent=t; if(typeof window.loadSmartHomeMetadata==='function')window.loadSmartHomeMetadata(); });
+          .then(t=>{ var el=document.getElementById('device-metadata-status'); if(el)el.textContent=t; if(typeof window.loadLocalDeviceMetadata==='function')window.loadLocalDeviceMetadata(); });
       });
       _on('stationary-checkbox','change', function() {
         const checked = document.getElementById('stationary-checkbox').checked;
         hw.postFormText('/api/cli', { cmd: 'espnowstationary '+(checked?'on':'off') })
-          .then(t=>{ var el=document.getElementById('smarthome-status'); if(el)el.textContent=t; if(typeof window.loadSmartHomeMetadata==='function')window.loadSmartHomeMetadata(); });
+          .then(t=>{ var el=document.getElementById('device-metadata-status'); if(el)el.textContent=t; if(typeof window.loadLocalDeviceMetadata==='function')window.loadLocalDeviceMetadata(); });
+      });
+      _on('btn-set-channel','click', function() {
+        var sel = document.getElementById('channel-select');
+        if (sel && typeof window.setChannel === 'function') window.setChannel(sel.value);
       });
       // NOTE: The old single-passphrase Encryption card was replaced by the
       // Meshes card. Per-row action handlers (set passphrase, clear, rename,
@@ -3094,10 +3112,10 @@ window.togglePane = function(paneId, btnId) {
 <script>
 (function() {
   try {
-    console.log('[ESP-NOW] Chunk 5c: Smart home metadata functions');
-    window.loadSmartHomeMetadata = function(preloadedText) {
+    console.log('[ESP-NOW] Chunk 5c: Device metadata functions');
+    window.loadLocalDeviceMetadata = function(preloadedText) {
       function applyMetadata(text) {
-        const statusDiv = document.getElementById('smarthome-status');
+        const statusDiv = document.getElementById('device-metadata-status');
         if (statusDiv) statusDiv.textContent = text;
         const friendlyMatch = text.match(/Friendly Name:\s*(.+)/);
         const roomMatch = text.match(/Room:\s*(.+)/);
@@ -3137,10 +3155,50 @@ window.togglePane = function(paneId, btnId) {
       hw.postFormText('/api/cli', { cmd: 'espnowdeviceinfo' })
       .then(applyMetadata)
       .catch(error => {
-        console.error('[ESP-NOW] Error loading smart home metadata:', error);
+        console.error('[ESP-NOW] Error loading device metadata:', error);
       });
     };
-    console.log('[ESP-NOW] Chunk 5c: Smart home metadata functions ready');
+
+    /* Preferred ESP-NOW radio channel: read via 'espnowchannel' (no arg) and
+       populate the select + status. The select is filled once (Auto + 1-13). */
+    window.refreshChannel = function() {
+      var sel = document.getElementById('channel-select');
+      if (sel && sel.options.length === 0) {
+        var opts = '<option value="auto">Auto (follow Wi-Fi)</option>';
+        for (var c = 1; c <= 13; c++) opts += '<option value="' + c + '">Channel ' + c + '</option>';
+        sel.innerHTML = opts;
+      }
+      hw.postFormText('/api/cli', { cmd: 'espnowchannel' })
+      .then(function(text) {
+        var statusDiv = document.getElementById('channel-status');
+        var prefMatch = text.match(/channel preference:\s*(auto|\d+)/i);
+        var radioMatch = text.match(/Radio channel now:\s*(\d+)/i);
+        var pref = prefMatch ? prefMatch[1].toLowerCase() : 'auto';
+        if (sel) sel.value = (pref === 'auto') ? 'auto' : pref;
+        if (statusDiv) {
+          var radio = radioMatch ? radioMatch[1] : '?';
+          statusDiv.innerHTML =
+            '<strong>Preference:</strong> ' + (pref === 'auto' ? 'Auto (follow Wi-Fi)' : ('Channel ' + pref)) +
+            '<br><strong>Radio now:</strong> channel ' + radio +
+            '<br><span style="color:var(--muted)">Set the same value on both devices to pair off-grid.</span>';
+        }
+      })
+      .catch(function(error) {
+        var statusDiv = document.getElementById('channel-status');
+        if (statusDiv) statusDiv.innerHTML = '<span style="color:var(--danger);">Error: ' + error + '</span>';
+      });
+    };
+
+    window.setChannel = function(val) {
+      console.log('[ESP-NOW] Setting channel to:', val);
+      hw.postFormText('/api/cli', { cmd: 'espnowchannel ' + val })
+      .then(function(output) {
+        alert(output);
+        window.refreshChannel();
+      })
+      .catch(function(error) { alert('Error setting channel: ' + error); });
+    };
+    console.log('[ESP-NOW] Chunk 5c: Device metadata functions ready');
   } catch(e) { console.error('[ESP-NOW] Chunk 5c error:', e); }
 })();
 </script>
@@ -3222,8 +3280,8 @@ window.togglePane = function(paneId, btnId) {
         // Prominent Enable button when disabled (per UX decision); the
         // catch-all action menu lives behind the ⋯ button for the rest.
         var primaryAction = m.enabled
-          ? '<button class="btn btn-mesh-actions" data-slot="' + m.slot + '" data-label="' + label + '" style="font-size:.82em;padding:4px 10px">⋯</button>'
-          : '<button class="btn btn-mesh-enable" data-slot="' + m.slot + '" data-label="' + label + '" style="font-size:.82em;padding:4px 10px">Enable</button>';
+          ? '<button class="btn btn-mesh-actions" data-guest-hide data-slot="' + m.slot + '" data-label="' + label + '" style="font-size:.82em;padding:4px 10px">⋯</button>'
+          : '<button class="btn btn-mesh-enable" data-guest-hide data-slot="' + m.slot + '" data-label="' + label + '" style="font-size:.82em;padding:4px 10px">Enable</button>';
 
         html += '<div class="mesh-row" data-slot="' + m.slot + '" data-label="' + label + '" style="display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:8px;background:var(--crumb-bg);border:1px solid var(--border);flex-wrap:wrap">' +
           '<span style="font-weight:600;color:var(--panel-fg);min-width:80px">' + label + '</span>' +

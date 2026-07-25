@@ -24,14 +24,16 @@ int loggingMenuSelection = 0;
 static int loggingSensorConfigSelection = 0;
 EXT_RAM_BSS_ATTR static OLEDScrollState loggingConfigScroll;
 
-// Menu items
+// Menu items — the Auto-Start toggles moved to Config > Settings (modules
+// "sensorlog" / "systemlog", entries sensorLogAutoStart / systemLogAutoStart,
+// saved via the real `sensorlog autostart` / `log autostart` commands).
+// These menus are runtime start/stop controls only.
 static const char* loggingMainMenuItems[] = {
   "Sensor Logging",
   "System Logging",
-  "Auto-Start",
   "Back"
 };
-static const int loggingMainMenuCount = 4;
+static const int loggingMainMenuCount = 3;
 
 static const char* loggingSensorMenuItems[] = {
   "Start Logging",
@@ -96,13 +98,7 @@ static void displayLoggingMode() {
     case LOG_MENU_MAIN: {
       int startY = OLED_CONTENT_START_Y;
       for (int i = 0; i < loggingMainMenuCount; i++) {
-        char itemText[32];
-        if (i == 2) {
-          snprintf(itemText, sizeof(itemText), "Auto-Start: %s", gSettings.sensorLogAutoStart ? "ON" : "OFF");
-          drawLoggingMenuItem(startY + (i * 10), itemText, i == loggingMenuSelection);
-        } else {
-          drawLoggingMenuItem(startY + (i * 10), loggingMainMenuItems[i], i == loggingMenuSelection);
-        }
+        drawLoggingMenuItem(startY + (i * 10), loggingMainMenuItems[i], i == loggingMenuSelection);
       }
       break;
     }
@@ -138,14 +134,13 @@ static void displayLoggingMode() {
         bool enabled = true;
         if (i == 0 && gSystemLogEnabled) enabled = false;
         if (i == 1 && !gSystemLogEnabled) enabled = false;
-        
         drawLoggingMenuItem(startY + (i * 10), loggingSystemMenuItems[i], i == loggingMenuSelection, enabled);
       }
       break;
     }
     
     case LOG_MENU_SENSOR_CONFIG: {
-      static char sCfgBuf[9][24];
+      EXT_RAM_BSS_ATTR static char sCfgBuf[9][24];
       const uint8_t masks[6] = {LOG_THERMAL, LOG_TOF, LOG_IMU, LOG_GAMEPAD, LOG_APDS, LOG_GPS};
       for (int i = 0; i < 6; i++) {
         snprintf(sCfgBuf[i], 24, "%s: %s", loggingSensorConfigItems[i], (gSensorLogMask & masks[i]) ? "ON" : "OFF");
@@ -183,6 +178,7 @@ static void displayLoggingMode() {
 
 // Logging input handler
 static bool handleLoggingModeInput(int deltaX, int deltaY, uint32_t newlyPressed) {
+  if (oledGuestBlocksMutate()) return true;
   bool handled = false;
   
   // Use centralized navigation events for proper debounce/auto-repeat
@@ -220,8 +216,6 @@ static bool handleLoggingModeInput(int deltaX, int deltaY, uint32_t newlyPressed
         loggingCurrentState = LOG_MENU_SYSTEM;
         loggingMenuSelection = 0;
       } else if (loggingMenuSelection == 2) {
-        executeOLEDCommand("sensorlog autostart");
-      } else if (loggingMenuSelection == 3) {
         return false;
       }
     } else if (loggingCurrentState == LOG_MENU_SENSOR) {

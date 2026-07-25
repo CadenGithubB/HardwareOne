@@ -88,6 +88,26 @@ void stopSensorDataStreaming(RemoteSensorType sensorType);
 
 bool isSensorDataStreamingEnabled(RemoteSensorType sensorType);
 
+// ---- Secure sensor fetcher (docs/ESPNOW_SENSOR_FETCHER_DESIGN.md) ----
+// Sensor-request modes carried in V4PayloadSensorReq.mode.
+enum SensorReqMode : uint8_t {
+  SENSOR_REQ_SUBSCRIBE   = 0,  // start streaming {mask} under a lease
+  SENSOR_REQ_UNSUBSCRIBE = 1,  // stop streaming {mask}
+  SENSOR_REQ_ONESHOT     = 2,  // one immediate push per {mask} bit, short self-expiring lease
+};
+
+// True iff `mac` is a securely-paired peer whose Ed25519 fingerprint matches this
+// worker's configured master OR backup-master fingerprint. This is the SOLE on-wire
+// authorization for sensor control. Empty/malformed configured fingerprints never match.
+bool espnowSensorControlAuthorized(const uint8_t mac[6]);
+
+// Apply a (previously authorized) SENSOR_REQ off the RX critical path: start/stop
+// streaming per mask, stamp the lease, and record the controller MAC as the
+// encrypted-unicast reply target. Called from the espnow_task super-loop (block 9f3).
+void espnowApplySensorSubscription(uint8_t mode, uint32_t sensorMask,
+                                   uint32_t intervalMs, uint32_t leaseMs,
+                                   const uint8_t* controllerMac);
+
 // Get remote sensor data for web API
 String getRemoteSensorDataJSON(const uint8_t* deviceMac, RemoteSensorType sensorType);
 

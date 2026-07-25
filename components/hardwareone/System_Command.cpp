@@ -24,7 +24,7 @@ String exitToNormalBanner();
 // Static storage for all commands (avoid dynamic allocation on embedded systems).
 // MAX_COMMANDS lives in the header — bump it there if `gCommandRegistryDropped`
 // fires (see initializeCommandSystem boot WARN).
-static const CommandEntry* commandRegistry[MAX_COMMANDS];
+EXT_RAM_BSS_ATTR static const CommandEntry* commandRegistry[MAX_COMMANDS];
 static size_t commandRegistrySize = 0;
 
 // Count of registerCommand() calls that were dropped because the registry was

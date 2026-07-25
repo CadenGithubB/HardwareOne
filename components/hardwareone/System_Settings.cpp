@@ -17,6 +17,7 @@
 #include "System_Notifications.h"
 #include "System_ESPSR.h"  // srSyncDebugLevel() — derive legacy gSrDebugLevel from flags
 #include "System_SelfDevice.h"  // SelfDevice::firmwareVersion() — Stage 1 consolidation
+#include "System_SensorLogging.h"  // gSensorLogMask / gSensorLogFormat sync from settings editors
 #include <LittleFS.h>
 #include "System_VFS.h"      // VFS::*Guarded + systemAuth (Phase 2 perm refactor)
 #include <esp_system.h>
@@ -150,16 +151,27 @@ const char* cmd_outserial(const String& argsInput) {
   String t1 = ca.arg(0);
   String t2 = ca.arg(1);
   bool modeTemp = false;
+  // "0" -> 0, any other integer -> 1, non-numeric/missing -> -1 (error)
+  auto parseBit = [](const String& s) -> int {
+    if (s == "0") return 0;
+    return s.toInt() != 0 ? 1 : -1;
+  };
   int v = -1;
   if (t1.length() && (t1 == "temp" || t1 == "persist")) {
     modeTemp = (t1 == "temp");
-    if (t2.length()) v = t2.toInt();
+    if (t2.length()) v = parseBit(t2);
   } else {
-    if (t1.length()) v = t1.toInt();
+    if (t1.length()) v = parseBit(t1);
     if (t2.length()) { modeTemp = (t2 == "temp"); }
   }
-  if (v != 0) v = 1;
   if (v < 0) return "Error: invalid arguments — Usage: outserial <0|1> [persist|temp]";
+  if (!v) {
+    // The drain gates the UART on this bit, so once it clears, the command's
+    // own reply can no longer reach a serial console. Print the confirmation
+    // directly first so the console's last line explains why it went quiet.
+    Serial.println(modeTemp ? "outSerial (runtime) set to 0"
+                            : "outSerial (persisted) set to 0");
+  }
   if (modeTemp) {
     if (v) gOutputFlags |= MSG_ROUTE_SERIAL;
     else gOutputFlags &= ~MSG_ROUTE_SERIAL;
@@ -169,34 +181,6 @@ const char* cmd_outserial(const String& argsInput) {
     if (v) gOutputFlags |= MSG_ROUTE_SERIAL;
     else gOutputFlags &= ~MSG_ROUTE_SERIAL;
     return gSettings.outSerial ? "outSerial (persisted) set to 1" : "outSerial (persisted) set to 0";
-  }
-}
-
-const char* cmd_outweb(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs ca(argsInput);
-  String t1 = ca.arg(0);
-  String t2 = ca.arg(1);
-  bool modeTemp = false;
-  int v = -1;
-  if (t1.length() && (t1 == "temp" || t1 == "persist")) {
-    modeTemp = (t1 == "temp");
-    if (t2.length()) v = t2.toInt();
-  } else {
-    if (t1.length()) v = t1.toInt();
-    if (t2.length()) { modeTemp = (t2 == "temp"); }
-  }
-  if (v != 0) v = 1;
-  if (v < 0) return "Error: invalid arguments — Usage: outweb <0|1> [persist|temp]";
-  if (modeTemp) {
-    if (v) gOutputFlags |= MSG_ROUTE_WEB;
-    else gOutputFlags &= ~MSG_ROUTE_WEB;
-    return v ? "outWeb (runtime) set to 1" : "outWeb (runtime) set to 0";
-  } else {
-    setSetting(gSettings.outWeb, (bool)(v != 0));
-    if (v) gOutputFlags |= MSG_ROUTE_WEB;
-    else gOutputFlags &= ~MSG_ROUTE_WEB;
-    return gSettings.outWeb ? "outWeb (persisted) set to 1" : "outWeb (persisted) set to 0";
   }
 }
 
@@ -253,7 +237,6 @@ const CommandEntry settingsCommands[] = {
 
   // ---- Output Settings ----
   { "outserial",          "Set serial output: <0|1> [persist|temp]", true, cmd_outserial, "Usage: outserial <0|1> [persist|temp]" },
-  { "outweb",             "Set web output: <0|1> [persist|temp]", true, cmd_outweb, "Usage: outweb <0|1> [persist|temp]" },
   { "serialrequireauth",  "Require auth for serial: <0|1>", true, cmd_serialrequireauth, "Usage: serialrequireauth <0|1>", nullptr, nullptr, /*requiresSuperAdmin=*/true },
   { "displayrequireauth", "Require auth for display: <0|1>", true, cmd_displayrequireauth, "Usage: displayrequireauth <0|1>", nullptr, nullptr, /*requiresSuperAdmin=*/true },
 
@@ -579,6 +562,16 @@ static int gSecretLoadFailures = 0;
 
 int secretLoadFailureCount() { return gSecretLoadFailures; }
 
+// True once this boot's settings state is trustworthy as the source of truth
+// for full-array rewrites: either readSettingsJson() completed, or there was
+// no settings.json to load (first boot / post-erase — HardwareOne.cpp calls
+// settingsMarkLoadedOk before writing defaults). While false (load FAILED
+// mid-way), buildSettingsJsonDoc skips the wifi-networks rebuild so a save
+// can't wipe the on-disk list with a half-loaded RAM copy.
+static bool gSettingsLoadedOk = false;
+
+void settingsMarkLoadedOk() { gSettingsLoadedOk = true; }
+
 // Guarded secret write: never replaces a stored "AES:" blob with "" after a
 // damaged load, and never persists an empty result from a FAILED encryption
 // of a non-empty value (encryptString returns "" on alloc/mbedtls errors).
@@ -688,7 +681,7 @@ void settingsDefaults() {
   // - espnow (System_ESPNow.cpp): enabled, mesh, userSync, device, mesh role/timing
   // - automation (System_Automation.cpp): enabled
   // - debug (System_Settings.cpp): all debug flags
-  // - output (System_Settings.cpp): outSerial, outWeb, outDisplay
+  // - output (System_Settings.cpp): outSerial
   // - i2c (System_I2C.cpp): bus settings, clock speeds
   // - thermal (i2csensor_mlx90640.cpp): autoStart, polling, interpolation, EWMA, rotation
   // - tof (i2csensor_vl53l4cx.cpp): autoStart, polling, stability, transition
@@ -709,145 +702,67 @@ void settingsDefaults() {
 // Apply Settings to Runtime Flags
 // ============================================================================
 
+// Settings→flag map — generated from DBG_FLAG_LIST (System_DebugFlags.h).
+// Every row bearing a settingsField expands to { offsetof(Settings, field),
+// DEBUG_<SYM> }, compiler-verified against the struct; the DBG_NO_SETTING
+// sentinel (control bits) expands to nothing. Fields that raise a flag a
+// prior row already carries live in DBG_FLAG_EXTRA_SETTINGS (debugAuthCookies
+// also raises DEBUG_AUTH). Deliberately unconditional: feature-gated flags
+// (LLM) keep their rows on every build — zero conditional compilation inside
+// generated tables, so one green build proves the whole map.
+struct DebugFlagMapping { size_t settingOffset; DebugFlagMask flag; };
+// DEBUG_##SYM is pasted HERE, at the first macro level, before SYM is ever
+// re-scanned as a plain argument — several row symbols (INPUT, ...) collide
+// with Arduino core macros and would otherwise expand to their pin-mode
+// values inside the deferred call.
+#define DBG_MAP_ROW_0(constName, field) { offsetof(Settings, field), constName },
+#define DBG_MAP_ROW_1(constName, field)
+#define DBG_MAP(SYM, bit, BANK, parentBit, tag, field, ...) \
+  DBG_PP_CAT(DBG_MAP_ROW_, DBG_SF_IS_NONE(field))(DEBUG_##SYM, field)
+#define DBG_MAP_EXTRA(field, SYM) { offsetof(Settings, field), DEBUG_##SYM },
+static constexpr DebugFlagMapping kDebugMappings[] = {
+  DBG_FLAG_LIST(DBG_MAP)
+  DBG_FLAG_EXTRA_SETTINGS(DBG_MAP_EXTRA)
+};
+#undef DBG_MAP_EXTRA
+#undef DBG_MAP
+#undef DBG_MAP_ROW_1
+#undef DBG_MAP_ROW_0
+static constexpr size_t kDebugMappingCount = sizeof(kDebugMappings) / sizeof(kDebugMappings[0]);
+
+// 117 = 116 settings-bearing flag rows + 1 extra; the ALWAYS control row
+// contributes nothing. Row-for-row the hand table this replaces.
+static_assert(kDebugMappingCount == 117,
+              "settings→flag map row count changed — reconcile the settingsField column and DBG_FLAG_EXTRA_SETTINGS");
+
+// Two rows mapping one Settings field means a transposed settingsField
+// column or a duplicated extras row — multiple fields per flag are fine,
+// multiple rows per field are not.
+static constexpr bool dbgMapFieldsDistinct() {
+  for (size_t i = 0; i < kDebugMappingCount; ++i)
+    for (size_t j = i + 1; j < kDebugMappingCount; ++j)
+      if (kDebugMappings[i].settingOffset == kDebugMappings[j].settingOffset) return false;
+  return true;
+}
+static_assert(dbgMapFieldsDistinct(), "two settings→flag map rows claim the same Settings field");
+
 void applySettings() {
   DEBUG_SYSTEMF("[applySettings] START");
 
-  // Apply persisted output lanes
-  uint8_t flags = 0;
-  if (gSettings.outSerial) flags |= MSG_ROUTE_SERIAL;
-  if (gSettings.outDisplay) flags |= MSG_ROUTE_OLED;
-  if (gSettings.outWeb) flags |= MSG_ROUTE_WEB;
-#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
-  if (gSettings.outG2) flags |= MSG_ROUTE_G2;
-#endif
-  // FILE and BLE are runtime lanes, not persisted settings — FILE opens and
-  // closes with `log start`/`log stop`, BLE with client connect/disconnect.
-  // Preserve them so re-running applySettings (setup wizard, first-time
-  // setup) doesn't silently close an active log file or BLE mirror.
-  gOutputFlags = (gOutputFlags & (MSG_ROUTE_FILE | MSG_ROUTE_BLE)) | flags;
+  // Apply the one persisted output lane (SERIAL). Every other lane is
+  // runtime state and must survive applySettings re-runs (setup wizard,
+  // first-time setup): WEB tracks the HTTP server lifecycle (raised in
+  // startHttpServer, cleared by httpstop/closewifi), FILE opens and closes
+  // with `log start`/`log stop`, BLE and G2 are per-session opt-in streams
+  // (outble/outg2). OLED is deliberately absent: the OLED console is gated
+  // by msg->routing only — see the System_Debug.h charter.
+  gOutputFlags = (gOutputFlags & (MSG_ROUTE_WEB | MSG_ROUTE_FILE | MSG_ROUTE_BLE | MSG_ROUTE_G2))
+               | (gSettings.outSerial ? MSG_ROUTE_SERIAL : 0);
 
-  // Apply debug settings to runtime flags using table-driven loop.
-  // Each entry maps a bool field in gSettings to the runtime debug flag it enables.
-  // Multiple settings can map to the same flag (e.g. debugAuth and debugAuthCookies both → DEBUG_AUTH).
-  struct DebugFlagMapping { size_t settingOffset; DebugFlagMask flag; };
-  #define DBG_MAP(field, flag) { offsetof(Settings, field), flag }
-  static const DebugFlagMapping kDebugMappings[] = {
-    // Core debug flags
-    DBG_MAP(debugAuth,             DEBUG_AUTH),
-    DBG_MAP(debugAuthCookies,      DEBUG_AUTH),
-    DBG_MAP(debugHttp,             DEBUG_HTTP),
-    DBG_MAP(debugHttps,            DEBUG_HTTPS),
-    DBG_MAP(debugSse,              DEBUG_SSE),
-    DBG_MAP(debugCli,              DEBUG_CLI),
-    DBG_MAP(debugCamera,           DEBUG_CAMERA),
-    DBG_MAP(debugCameraLifecycle,  DEBUG_CAMERA_LIFECYCLE),
-    DBG_MAP(debugCameraCapture,    DEBUG_CAMERA_CAPTURE),
-    DBG_MAP(debugCameraSettings,   DEBUG_CAMERA_SETTINGS),
-    DBG_MAP(debugCameraVideo,      DEBUG_CAMERA_VIDEO),
-    DBG_MAP(debugDisplay,          DEBUG_DISPLAY),
-    DBG_MAP(debugNotifications,    DEBUG_NOTIFICATIONS),
-    DBG_MAP(debugMicrophone,       DEBUG_MICROPHONE),
-    DBG_MAP(debugWifi,             DEBUG_WIFI),
-    DBG_MAP(debugStorage,          DEBUG_STORAGE),
-    DBG_MAP(debugPerformance,      DEBUG_PERFORMANCE),
-    DBG_MAP(debugDateTime,         DEBUG_NTP),
-    DBG_MAP(debugCommandFlow,      DEBUG_CMD_FLOW),
-    DBG_MAP(debugUsers,            DEBUG_USERS),
-    DBG_MAP(debugSystem,           DEBUG_SYSTEM),
-    DBG_MAP(debugAutomations,      DEBUG_AUTOMATIONS),
-    DBG_MAP(debugLogger,           DEBUG_LOGGER),
-    DBG_MAP(debugMemory,           DEBUG_MEMORY),
-    DBG_MAP(debugMemoryHeap,       DEBUG_MEMORY_HEAP),
-    DBG_MAP(debugMemoryStack,      DEBUG_MEMORY_STACK),
-    DBG_MAP(debugMemoryBuffers,    DEBUG_MEMORY_BUFFERS),
-    DBG_MAP(debugCommandSystem,    DEBUG_COMMAND_SYSTEM),
-    DBG_MAP(debugBluetooth,        DEBUG_BLUETOOTH),
-    DBG_MAP(debugBluetoothCore,    DEBUG_BLUETOOTH_CORE),
-    DBG_MAP(debugBluetoothGatt,    DEBUG_BLUETOOTH_GATT),
-    DBG_MAP(debugBluetoothData,    DEBUG_BLUETOOTH_DATA),
-    DBG_MAP(debugG2Lifecycle,      DEBUG_G2_LIFECYCLE),
-    DBG_MAP(debugG2Protocol,       DEBUG_G2_PROTOCOL),
-    DBG_MAP(debugG2Events,         DEBUG_G2_EVENTS),
-    DBG_MAP(debugG2Pages,          DEBUG_G2_PAGES),
-    DBG_MAP(debugG2Heartbeat,      DEBUG_G2_HEARTBEAT),
-    DBG_MAP(debugG2Dump,           DEBUG_G2_DUMP),
-    DBG_MAP(debugEspNow,           DEBUG_ESPNOW_CORE),
-    DBG_MAP(debugEspNowStream,     DEBUG_ESPNOW_STREAM),
-    DBG_MAP(debugEspNowCore,       DEBUG_ESPNOW_CORE),
-    DBG_MAP(debugEspNowRouter,     DEBUG_ESPNOW_ROUTER),
-    DBG_MAP(debugEspNowMesh,       DEBUG_ESPNOW_MESH),
-    DBG_MAP(debugEspNowTopo,       DEBUG_ESPNOW_TOPO),
-    DBG_MAP(debugEspNowMetadata,   DEBUG_ESPNOW_METADATA),
-    DBG_MAP(debugAutoScheduler,    DEBUG_AUTO_SCHEDULER),
-    DBG_MAP(debugAutoExec,         DEBUG_AUTO_EXEC),
-    DBG_MAP(debugAutoCondition,    DEBUG_AUTO_CONDITION),
-    DBG_MAP(debugAutoTiming,       DEBUG_AUTO_TIMING),
-    DBG_MAP(debugFmRadio,          DEBUG_FMRADIO),
-    DBG_MAP(debugG2,               DEBUG_G2),
-    DBG_MAP(debugI2C,              DEBUG_I2C),
-    DBG_MAP(debugI2CBus,           DEBUG_I2C_BUS),
-    DBG_MAP(debugI2CDiscovery,     DEBUG_I2C_DISCOVERY),
-    DBG_MAP(debugI2CAutoStart,     DEBUG_I2C_AUTOSTART),
-    // Per-sensor sub-flags (Lifecycle / Polling / Values)
-    DBG_MAP(debugThermalLifecycle,   DEBUG_THERMAL_LIFECYCLE),
-    DBG_MAP(debugThermalPolling,     DEBUG_THERMAL_POLLING),
-    DBG_MAP(debugThermalValues,      DEBUG_THERMAL_VALUES),
-    DBG_MAP(debugTofLifecycle,       DEBUG_TOF_LIFECYCLE),
-    DBG_MAP(debugTofPolling,         DEBUG_TOF_POLLING),
-    DBG_MAP(debugTofValues,          DEBUG_TOF_VALUES),
-    DBG_MAP(debugInputLifecycle,   DEBUG_INPUT_LIFECYCLE),
-    DBG_MAP(debugInputPolling,     DEBUG_INPUT_POLLING),
-    DBG_MAP(debugInputValues,      DEBUG_INPUT_VALUES),
-    DBG_MAP(debugImuLifecycle,       DEBUG_IMU_LIFECYCLE),
-    DBG_MAP(debugImuPolling,         DEBUG_IMU_POLLING),
-    DBG_MAP(debugImuValues,          DEBUG_IMU_VALUES),
-    DBG_MAP(debugApdsLifecycle,      DEBUG_APDS_LIFECYCLE),
-    DBG_MAP(debugApdsPolling,        DEBUG_APDS_POLLING),
-    DBG_MAP(debugApdsValues,         DEBUG_APDS_VALUES),
-    DBG_MAP(debugGpsLifecycle,       DEBUG_GPS_LIFECYCLE),
-    DBG_MAP(debugGpsPolling,         DEBUG_GPS_POLLING),
-    DBG_MAP(debugGpsValues,          DEBUG_GPS_VALUES),
-    DBG_MAP(debugRtcLifecycle,       DEBUG_RTC_LIFECYCLE),
-    DBG_MAP(debugRtcPolling,         DEBUG_RTC_POLLING),
-    DBG_MAP(debugRtcValues,          DEBUG_RTC_VALUES),
-    DBG_MAP(debugFmRadioLifecycle,   DEBUG_FMRADIO_LIFECYCLE),
-    DBG_MAP(debugFmRadioPolling,     DEBUG_FMRADIO_POLLING),
-    DBG_MAP(debugFmRadioValues,      DEBUG_FMRADIO_VALUES),
-    DBG_MAP(debugMicLifecycle,       DEBUG_MIC_LIFECYCLE),
-    DBG_MAP(debugMicPolling,         DEBUG_MIC_POLLING),
-    DBG_MAP(debugMicValues,          DEBUG_MIC_VALUES),
-    DBG_MAP(debugPresenceLifecycle,  DEBUG_PRESENCE_LIFECYCLE),
-    DBG_MAP(debugPresencePolling,    DEBUG_PRESENCE_POLLING),
-    DBG_MAP(debugPresenceValues,     DEBUG_PRESENCE_VALUES),
-    // Maps flags
-    DBG_MAP(debugMaps,             DEBUG_MAPS),
-    DBG_MAP(debugMapsLoading,      DEBUG_MAPS_LOADING),
-    DBG_MAP(debugMapsRendering,    DEBUG_MAPS_RENDERING),
-    DBG_MAP(debugMapsPerf,         DEBUG_MAPS_PERF),
-#if ENABLE_ONDEVICE_LLM
-    DBG_MAP(debugLlm,              DEBUG_LLM),
-    DBG_MAP(debugLlmLoad,          DEBUG_LLM_LOAD),
-    DBG_MAP(debugLlmTokenizer,     DEBUG_LLM_TOKENIZER),
-    DBG_MAP(debugLlmForward,       DEBUG_LLM_FORWARD),
-    DBG_MAP(debugLlmGenerate,      DEBUG_LLM_GENERATE),
-    DBG_MAP(debugLlmMemory,        DEBUG_LLM_MEMORY),
-#endif
-    // ESP-SR (parent + 5 sub-flags). Wired the same way as G2 — sub-flags
-    // are independent; parent debugSr is the explicit master switch.
-    DBG_MAP(debugSr,               DEBUG_SR),
-    DBG_MAP(debugSrWake,           DEBUG_SR_WAKE),
-    DBG_MAP(debugSrCommand,        DEBUG_SR_COMMAND),
-    DBG_MAP(debugSrAfe,            DEBUG_SR_AFE),
-    DBG_MAP(debugSrLifecycle,      DEBUG_SR_LIFECYCLE),
-    DBG_MAP(debugSrTuning,         DEBUG_SR_TUNING),
-    DBG_MAP(debugMqtt,             DEBUG_MQTT),
-    DBG_MAP(debugMqttConnection,   DEBUG_MQTT_CONNECTION),
-    DBG_MAP(debugMqttPubsub,       DEBUG_MQTT_PUBSUB),
-    DBG_MAP(debugMqttDiscovery,    DEBUG_MQTT_DISCOVERY),
-    DBG_MAP(debugMqttCommands,     DEBUG_MQTT_COMMANDS),
-  };
-  #undef DBG_MAP
-
+  // Apply debug settings to runtime flags using the generated map above.
+  // Multiple settings can map to the same flag (debugAuth and
+  // debugAuthCookies both → DEBUG_AUTH); the loop only ever ORs bits in,
+  // so row order is immaterial.
   setDebugFlags(0);  // Start with no flags, then enable based on settings
   const uint8_t* base = reinterpret_cast<const uint8_t*>(&gSettings);
   for (const auto& m : kDebugMappings) {
@@ -856,111 +771,30 @@ void applySettings() {
     }
   }
 
-  // Apply debug sub-flags to gDebugSubFlags and update parent flags
-  // Auth sub-flags
-  gDebugSubFlags.authSessions = gSettings.debugAuthSessions;
-  gDebugSubFlags.authCookies = gSettings.debugAuthCookies;
-  gDebugSubFlags.authLogin = gSettings.debugAuthLogin;
-  gDebugSubFlags.authBootId = gSettings.debugAuthBootId;
-  updateParentDebugFlag(DEBUG_AUTH, gSettings.debugAuth || gDebugSubFlags.authSessions || gDebugSubFlags.authCookies || gDebugSubFlags.authLogin || gDebugSubFlags.authBootId);
-  
-  // HTTP sub-flags
-  gDebugSubFlags.httpHandlers = gSettings.debugHttpHandlers;
-  gDebugSubFlags.httpRequests = gSettings.debugHttpRequests;
-  gDebugSubFlags.httpResponses = gSettings.debugHttpResponses;
-  gDebugSubFlags.httpStreaming = gSettings.debugHttpStreaming;
-  updateParentDebugFlag(DEBUG_HTTP, gSettings.debugHttp || gDebugSubFlags.httpHandlers || gDebugSubFlags.httpRequests || gDebugSubFlags.httpResponses || gDebugSubFlags.httpStreaming);
-  
-  // WiFi sub-flags
-  gDebugSubFlags.wifiConnection = gSettings.debugWifiConnection;
-  gDebugSubFlags.wifiConfig = gSettings.debugWifiConfig;
-  gDebugSubFlags.wifiScanning = gSettings.debugWifiScanning;
-  gDebugSubFlags.wifiDriver = gSettings.debugWifiDriver;
-  updateParentDebugFlag(DEBUG_WIFI, gSettings.debugWifi || gDebugSubFlags.wifiConnection || gDebugSubFlags.wifiConfig || gDebugSubFlags.wifiScanning || gDebugSubFlags.wifiDriver);
-  
-  // Storage sub-flags
-  gDebugSubFlags.storageFiles = gSettings.debugStorageFiles;
-  gDebugSubFlags.storageJson = gSettings.debugStorageJson;
-  gDebugSubFlags.storageSettings = gSettings.debugStorageSettings;
-  gDebugSubFlags.storageMigration = gSettings.debugStorageMigration;
-  gDebugSubFlags.storagePermissions = gSettings.debugStoragePermissions;
-  updateParentDebugFlag(DEBUG_STORAGE, gSettings.debugStorage || gDebugSubFlags.storageFiles || gDebugSubFlags.storageJson || gDebugSubFlags.storageSettings || gDebugSubFlags.storageMigration || gDebugSubFlags.storagePermissions);
-  
-  // System sub-flags
-  gDebugSubFlags.systemBoot = gSettings.debugSystemBoot;
-  gDebugSubFlags.systemConfig = gSettings.debugSystemConfig;
-  gDebugSubFlags.systemTasks = gSettings.debugSystemTasks;
-  gDebugSubFlags.systemHardware = gSettings.debugSystemHardware;
-  updateParentDebugFlag(DEBUG_SYSTEM, gSettings.debugSystem || gDebugSubFlags.systemBoot || gDebugSubFlags.systemConfig || gDebugSubFlags.systemTasks || gDebugSubFlags.systemHardware);
-  
-  // Users sub-flags
-  gDebugSubFlags.usersMgmt = gSettings.debugUsersMgmt;
-  gDebugSubFlags.usersRegister = gSettings.debugUsersRegister;
-  gDebugSubFlags.usersQuery = gSettings.debugUsersQuery;
-  updateParentDebugFlag(DEBUG_USERS, gSettings.debugUsers || gDebugSubFlags.usersMgmt || gDebugSubFlags.usersRegister || gDebugSubFlags.usersQuery);
+  // Mirror every bitless sub-flag from the persistent layer (gSettings) into
+  // the runtime layer (gDebugSubFlags). The layers are distinct on purpose —
+  // `temp` toggles write only the runtime member — and boot is the one point
+  // where they must agree. Generated from DBG_SUBBOOL_LIST.
+#define DBG_SUB_MIRROR(SYM, subField, settingsField, PARENT_SYM, ...) \
+  gDebugSubFlags.subField = gSettings.settingsField;
+  DBG_SUBBOOL_LIST(DBG_SUB_MIRROR)
+#undef DBG_SUB_MIRROR
 
-  // NTP / DateTime sub-flags
-  gDebugSubFlags.ntpSync    = gSettings.debugDatetimeSync;
-  gDebugSubFlags.ntpSetup   = gSettings.debugDatetimeSetup;
-  gDebugSubFlags.ntpAnchor  = gSettings.debugDatetimeAnchor;
-  gDebugSubFlags.ntpResolve = gSettings.debugDatetimeResolve;
-  updateParentDebugFlag(DEBUG_NTP, gSettings.debugDateTime || gDebugSubFlags.ntpSync || gDebugSubFlags.ntpSetup || gDebugSubFlags.ntpAnchor || gDebugSubFlags.ntpResolve);
-
-  // CLI sub-flags
-  gDebugSubFlags.cliExecution = gSettings.debugCliExecution;
-  gDebugSubFlags.cliQueue = gSettings.debugCliQueue;
-  gDebugSubFlags.cliValidation = gSettings.debugCliValidation;
-  updateParentDebugFlag(DEBUG_CLI, gSettings.debugCli || gDebugSubFlags.cliExecution || gDebugSubFlags.cliQueue || gDebugSubFlags.cliValidation);
-  
-  // Performance sub-flags
-  gDebugSubFlags.perfStack = gSettings.debugPerfStack;
-  gDebugSubFlags.perfHeap = gSettings.debugPerfHeap;
-  gDebugSubFlags.perfTiming = gSettings.debugPerfTiming;
-  updateParentDebugFlag(DEBUG_PERFORMANCE, gSettings.debugPerformance || gDebugSubFlags.perfStack || gDebugSubFlags.perfHeap || gDebugSubFlags.perfTiming);
-  
-  // SSE sub-flags
-  gDebugSubFlags.sseConnection = gSettings.debugSseConnection;
-  gDebugSubFlags.sseEvents = gSettings.debugSseEvents;
-  gDebugSubFlags.sseBroadcast = gSettings.debugSseBroadcast;
-  updateParentDebugFlag(DEBUG_SSE, gSettings.debugSse || gDebugSubFlags.sseConnection || gDebugSubFlags.sseEvents || gDebugSubFlags.sseBroadcast);
-  
-  // Command Flow sub-flags
-  gDebugSubFlags.cmdflowRouting = gSettings.debugCmdflowRouting;
-  gDebugSubFlags.cmdflowQueue = gSettings.debugCmdflowQueue;
-  gDebugSubFlags.cmdflowContext = gSettings.debugCmdflowContext;
-  updateParentDebugFlag(DEBUG_CMD_FLOW, gSettings.debugCommandFlow || gDebugSubFlags.cmdflowRouting || gDebugSubFlags.cmdflowQueue || gDebugSubFlags.cmdflowContext);
-
-#if ENABLE_ONDEVICE_LLM
-  updateParentDebugFlag(DEBUG_LLM,
-                        gSettings.debugLlm ||
-                        gSettings.debugLlmLoad ||
-                        gSettings.debugLlmTokenizer ||
-                        gSettings.debugLlmForward ||
-                        gSettings.debugLlmGenerate ||
-                        gSettings.debugLlmMemory);
-#endif
-
-  // Bluetooth parent flag
-  updateParentDebugFlag(DEBUG_BLUETOOTH,
-                        gSettings.debugBluetooth ||
-                        gSettings.debugBluetoothCore ||
-                        gSettings.debugBluetoothGatt ||
-                        gSettings.debugBluetoothData);
-
-  // ESP-SR sub-flags + parent. Mirror to gDebugSubFlags so System_ESPSR
-  // can read them without re-touching gSettings on every audio frame.
+  // ESP-SR mirrors — bit-backed subs, deliberately NOT in DBG_SUBBOOL_LIST
+  // (each has its own bit and map row). Mirrored so fast paths can read
+  // gDebugSubFlags without re-touching gSettings on every audio frame.
   gDebugSubFlags.srWake      = gSettings.debugSrWake;
   gDebugSubFlags.srCommand   = gSettings.debugSrCommand;
   gDebugSubFlags.srAfe       = gSettings.debugSrAfe;
   gDebugSubFlags.srLifecycle = gSettings.debugSrLifecycle;
   gDebugSubFlags.srTuning    = gSettings.debugSrTuning;
-  updateParentDebugFlag(DEBUG_SR,
-                        gSettings.debugSr ||
-                        gDebugSubFlags.srWake ||
-                        gDebugSubFlags.srCommand ||
-                        gDebugSubFlags.srAfe ||
-                        gDebugSubFlags.srLifecycle ||
-                        gDebugSubFlags.srTuning);
+
+  // Recompute every aggregated parent bit (DBG_AGG_FAMILY_LIST). The full
+  // sweep is safe here and only here: the mask was just rebuilt from
+  // gSettings, so no temp-set bits exist to clobber — and bit==setting for
+  // every mapped row, which reduces the BT/SR runtime child-bit terms to the
+  // settings-only expressions this block previously spelled out per family.
+  dbgRecomputeAllParents();
 #if ENABLE_ESP_SR
   // Sync the legacy integer level from the new bool flags so existing
   // SR_DBG_L / SR_INFO_L call sites in System_ESPSR keep producing output.
@@ -1047,8 +881,9 @@ void buildSettingsJsonDoc(JsonDocument& doc, bool excludePasswords, bool mainFil
   }
 #endif
 
-  // NOTE: ntpServer, tzOffsetMinutes, wifiSSID, wifiPassword, wifiAutoReconnect
-  //       are owned by the wifi module (written under "wifi" section).
+  // NOTE: ntpServer, tzOffsetMinutes, wifiAutoReconnect are owned by the wifi
+  //       module (written under "wifi" section). The legacy single-network
+  //       wifiSSID/wifiPassword fields are gone (removed 2026-07-20).
   // NOTE: automationsEnabled is owned by the automation module.
   // NOTE: power{} is owned by the power module.
 
@@ -1110,7 +945,18 @@ void buildSettingsJsonDoc(JsonDocument& doc, bool excludePasswords, bool mainFil
 #endif
 
   // WiFi networks array - now nested under network.wifi.networks
-  if (gWifiNetworks && gWifiNetworkCount > 0) {
+  //
+  // Rebuild from RAM whenever the array exists AND this boot's settings load
+  // completed (or there was no file to load). The old `gWifiNetworkCount > 0`
+  // gate skipped the rebuild when the LAST network was removed, so the
+  // merge-read's stale entries were serialized straight back — wifirm of the
+  // final network never persisted and it resurrected on reboot (the
+  // SETTINGS_LIFECYCLE_AUDIT "empty-list resurrect", observed live 2026-07-20).
+  // gSettingsLoadedOk keeps the one thing that gate accidentally protected:
+  // a save issued after a FAILED load cannot wipe the on-disk list. The
+  // null-check stays for ENABLE_WIFI=0 builds, where gWifiNetworks is never
+  // allocated (a failed alloc halts boot, so null here can't mean that).
+  if (gWifiNetworks && gSettingsLoadedOk) {
     // Capture the merge-read's on-disk password blobs BEFORE to<JsonArray>()
     // clears the array, so the guarded write below can keep a still-recoverable
     // blob when the RAM password is empty after a damaged load.
@@ -1589,6 +1435,7 @@ bool readSettingsJson() {
 #endif
 
   DEBUG_STORAGEF("[Settings] Load complete");
+  gSettingsLoadedOk = true;  // full-array rewrites (wifi networks) now trusted
   pollResume();
   return true;
 }
@@ -1728,91 +1575,154 @@ const char* cmd_httpsEnabled(const String& argsInput) {
 // ============================================================================
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
-static const SettingEntry debugSettingEntries[] = {
+//
+// Generated from the X-macro tables in System_DebugFlags.h (C2). Two row
+// pools hold one SettingEntry per settings-backed table row, in TABLE order
+// (indexed by DbgFlagIdx / DbgSubIdx); debugSettingEntries then PICKS rows in
+// the pre-C2 hand-table order, which is a UI property in its own right
+// (esp-now lists stream first, automations scheduler-first, sensor groups sit
+// in card order — none of it derivable from bit order, so the order lives in
+// the pick list, not the tables). The three rows that are not flag/sub-backed
+// (memorysampleintervalsec, webconsole, loglevel) stay hand-written, verbatim,
+// in their historical positions.
+//
+// Registry strings (group, jsonKey, label, cmdKey) are VERBATIM transcriptions
+// carried in the table columns — never computed from symbols (NTP ↔ group
+// "datetime", DISPLAY ↔ group "oled"); renaming one renames persisted
+// debug.json keys.
+//
+// Deliberately unconditional (zero conditional compilation inside generated
+// tables): the former ENABLE_ONDEVICE_LLM and ENABLE_BLUETOOTH+ENABLE_G2_GLASSES
+// gates around the llm and g2 groups are gone, so gated-off builds carry their
+// 13 keys as inert-but-present settings — plan-sanctioned
+// (docs/DEBUG_FLAG_XMACRO_PLAN.md §3), and one green build proves the whole
+// registry.
+//
+// intDefault is the constant 0 for every generated row — the C2 defaults audit
+// found registry-0 is the effective persisted default for all 156 bools
+// (applyRegisteredDefaults() stomps every field with the registry default at
+// each boot before debug.json loads). The one dissenter, debugStoragePermissions'
+// NSDMI {true} (System_Settings.h), already loses to the registry every boot
+// and keeps losing — resolved in favor of registry-0. kBootDefaultDebugFlags
+// (System_Debug.cpp) encodes a SECOND, intentionally different early-boot
+// default policy for 29 flags and therefore stays hand-written — no dflt
+// column exists.
+
+// Row pools — every DBG_FLAG_LIST row bearing a settingsField and every
+// DBG_SUBBOOL_LIST row becomes one SettingEntry; the ALWAYS control row
+// (DBG_NO_SETTING) leaves a zeroed placeholder that nothing picks. The C1
+// paste rule holds: cmdIdent is stringized and the string columns consumed at
+// the FIRST macro level — the only non-string token reaching the deferred
+// call is the settings field name (safe: same exposure as DBG_MAP above).
+#define DBG_REG_ROW_0(field, cmdStr, group, jsonKey, label) \
+  { jsonKey, SETTING_BOOL, &gSettings.field, 0, 0, nullptr, 0, 1, label, nullptr, false, group, cmdStr },
+#define DBG_REG_ROW_1(field, cmdStr, group, jsonKey, label) {},
+#define DBG_REG(SYM, bit, BANK, parentBit, tag, field, cmdIdent, group, jsonKey, label) \
+  DBG_PP_CAT(DBG_REG_ROW_, DBG_SF_IS_NONE(field))(field, #cmdIdent, group, jsonKey, label)
+static constexpr SettingEntry kDbgFlagRegEntry[DBG_FLAG_COUNT] = {
+  DBG_FLAG_LIST(DBG_REG)
+};
+#undef DBG_REG
+#undef DBG_REG_ROW_1
+#undef DBG_REG_ROW_0
+
+#define DBG_REG_SUB(SYM, subField, field, PARENT_SYM, cmdIdent, group, jsonKey, label) \
+  { jsonKey, SETTING_BOOL, &gSettings.field, 0, 0, nullptr, 0, 1, label, nullptr, false, group, #cmdIdent },
+static constexpr SettingEntry kDbgSubRegEntry[DBG_SUBBOOL_COUNT] = {
+  DBG_SUBBOOL_LIST(DBG_REG_SUB)
+};
+#undef DBG_REG_SUB
+
+// Pickers — SYM is pasted into its dense index at the FIRST macro level (the
+// C1 lesson: row symbols like INPUT collide with core macros if a bare SYM is
+// ever re-scanned inside a deferred call).
+#define DBG_ROW(SYM)    kDbgFlagRegEntry[DBG_##SYM]
+#define DBG_SUBROW(SYM) kDbgSubRegEntry[DBG_SUB_##SYM]
+
+static constexpr SettingEntry debugSettingEntries[] = {
   // --- authentication group ---
-  { "enabled",    SETTING_BOOL, &gSettings.debugAuth,          0, 0, nullptr, 0, 1, "All Authentication",  nullptr, false, "authentication", "debugauth" },
-  { "sessions",   SETTING_BOOL, &gSettings.debugAuthSessions,  0, 0, nullptr, 0, 1, "Sessions",            nullptr, false, "authentication", "debugauthsessions" },
-  { "cookies",    SETTING_BOOL, &gSettings.debugAuthCookies,   0, 0, nullptr, 0, 1, "Cookies",             nullptr, false, "authentication", "debugauthcookies" },
-  { "login",      SETTING_BOOL, &gSettings.debugAuthLogin,     0, 0, nullptr, 0, 1, "Login",               nullptr, false, "authentication", "debugauthlogin" },
-  { "bootId",     SETTING_BOOL, &gSettings.debugAuthBootId,    0, 0, nullptr, 0, 1, "Boot ID",             nullptr, false, "authentication", "debugauthbootid" },
+  DBG_ROW(AUTH),
+  DBG_SUBROW(AUTH_SESSIONS),
+  DBG_SUBROW(AUTH_COOKIES),
+  DBG_SUBROW(AUTH_LOGIN),
+  DBG_SUBROW(AUTH_BOOTID),
   // --- http group ---
-  { "enabled",    SETTING_BOOL, &gSettings.debugHttp,          0, 0, nullptr, 0, 1, "All HTTP",            nullptr, false, "http", "debughttp" },
-  { "handlers",   SETTING_BOOL, &gSettings.debugHttpHandlers,  0, 0, nullptr, 0, 1, "Handlers",            nullptr, false, "http", "debughttphandlers" },
-  { "requests",   SETTING_BOOL, &gSettings.debugHttpRequests,  0, 0, nullptr, 0, 1, "Requests",            nullptr, false, "http", "debughttprequests" },
-  { "responses",  SETTING_BOOL, &gSettings.debugHttpResponses, 0, 0, nullptr, 0, 1, "Responses",           nullptr, false, "http", "debughttpresponses" },
-  { "streaming",  SETTING_BOOL, &gSettings.debugHttpStreaming,  0, 0, nullptr, 0, 1, "Streaming",           nullptr, false, "http", "debughttpstreaming" },
+  DBG_ROW(HTTP),
+  DBG_SUBROW(HTTP_HANDLERS),
+  DBG_SUBROW(HTTP_REQUESTS),
+  DBG_SUBROW(HTTP_RESPONSES),
+  DBG_SUBROW(HTTP_STREAMING),
   // --- https group (TLS handshake + connection-error noise from ESP-IDF) ---
-  { "enabled",    SETTING_BOOL, &gSettings.debugHttps,         0, 0, nullptr, 0, 1, "All HTTPS/TLS",       nullptr, false, "https", "debughttps" },
+  DBG_ROW(HTTPS),
   // --- sse group ---
-  { "enabled",    SETTING_BOOL, &gSettings.debugSse,           0, 0, nullptr, 0, 1, "All SSE",             nullptr, false, "sse", "debugsse" },
-  { "connection", SETTING_BOOL, &gSettings.debugSseConnection, 0, 0, nullptr, 0, 1, "Connection",          nullptr, false, "sse", "debugsseconnection" },
-  { "events",     SETTING_BOOL, &gSettings.debugSseEvents,     0, 0, nullptr, 0, 1, "Events",              nullptr, false, "sse", "debugsseevents" },
-  { "broadcast",  SETTING_BOOL, &gSettings.debugSseBroadcast,  0, 0, nullptr, 0, 1, "Broadcast",           nullptr, false, "sse", "debugssebroadcast" },
+  DBG_ROW(SSE),
+  DBG_SUBROW(SSE_CONNECTION),
+  DBG_SUBROW(SSE_EVENTS),
+  DBG_SUBROW(SSE_BROADCAST),
   // --- wifi group ---
-  { "enabled",    SETTING_BOOL, &gSettings.debugWifi,           0, 0, nullptr, 0, 1, "All WiFi",            nullptr, false, "wifi", "debugwifi" },
-  { "connection", SETTING_BOOL, &gSettings.debugWifiConnection, 0, 0, nullptr, 0, 1, "Connection",          nullptr, false, "wifi", "debugwificonnection" },
-  { "config",     SETTING_BOOL, &gSettings.debugWifiConfig,     0, 0, nullptr, 0, 1, "Config",              nullptr, false, "wifi", "debugwificonfig" },
-  { "scanning",   SETTING_BOOL, &gSettings.debugWifiScanning,   0, 0, nullptr, 0, 1, "Scanning",            nullptr, false, "wifi", "debugwifiscanning" },
-  { "driver",     SETTING_BOOL, &gSettings.debugWifiDriver,     0, 0, nullptr, 0, 1, "Driver",              nullptr, false, "wifi", "debugwifidriver" },
+  DBG_ROW(WIFI),
+  DBG_SUBROW(WIFI_CONNECTION),
+  DBG_SUBROW(WIFI_CONFIG),
+  DBG_SUBROW(WIFI_SCANNING),
+  DBG_SUBROW(WIFI_DRIVER),
   // --- storage group ---
-  { "enabled",    SETTING_BOOL, &gSettings.debugStorage,          0, 0, nullptr, 0, 1, "All Storage",       nullptr, false, "storage", "debugstorage" },
-  { "files",       SETTING_BOOL, &gSettings.debugStorageFiles,       0, 0, nullptr, 0, 1, "Files",       nullptr, false, "storage", "debugstoragefiles" },
-  { "json",        SETTING_BOOL, &gSettings.debugStorageJson,        0, 0, nullptr, 0, 1, "JSON",        nullptr, false, "storage", "debugstoragejson" },
-  { "settings",    SETTING_BOOL, &gSettings.debugStorageSettings,    0, 0, nullptr, 0, 1, "Settings",    nullptr, false, "storage", "debugstoragesettings" },
-  { "migration",   SETTING_BOOL, &gSettings.debugStorageMigration,   0, 0, nullptr, 0, 1, "Migration",   nullptr, false, "storage", "debugstoragemigration" },
-  { "permissions", SETTING_BOOL, &gSettings.debugStoragePermissions, 0, 0, nullptr, 0, 1, "Permissions", nullptr, false, "storage", "debugstoragepermissions" },
+  DBG_ROW(STORAGE),
+  DBG_SUBROW(STORAGE_FILES),
+  DBG_SUBROW(STORAGE_JSON),
+  DBG_SUBROW(STORAGE_SETTINGS),
+  DBG_SUBROW(STORAGE_MIGRATION),
+  DBG_SUBROW(STORAGE_PERMISSIONS),
   // --- esp-now group ---
-  { "enabled",    SETTING_BOOL, &gSettings.debugEspNow,           0, 0, nullptr, 0, 1, "All ESP-NOW",       nullptr, false, "esp-now", "debugespnow" },
-  { "stream",     SETTING_BOOL, &gSettings.debugEspNowStream,     0, 0, nullptr, 0, 1, "Stream",            nullptr, false, "esp-now", "debugespnowstream" },
-  { "core",       SETTING_BOOL, &gSettings.debugEspNowCore,       0, 0, nullptr, 0, 1, "Core",              nullptr, false, "esp-now", "debugespnowcore" },
-  { "router",     SETTING_BOOL, &gSettings.debugEspNowRouter,     0, 0, nullptr, 0, 1, "Router",            nullptr, false, "esp-now", "debugespnowrouter" },
-  { "mesh",       SETTING_BOOL, &gSettings.debugEspNowMesh,       0, 0, nullptr, 0, 1, "Mesh",              nullptr, false, "esp-now", "debugespnowmesh" },
-  { "topology",   SETTING_BOOL, &gSettings.debugEspNowTopo,       0, 0, nullptr, 0, 1, "Topology",          nullptr, false, "esp-now", "debugespnowtopo" },
-  { "metadata",   SETTING_BOOL, &gSettings.debugEspNowMetadata,   0, 0, nullptr, 0, 1, "Metadata",          nullptr, false, "esp-now", "debugespnowmetadata" },
+  DBG_ROW(ESPNOW_STREAM),
+  DBG_ROW(ESPNOW_CORE),
+  DBG_ROW(ESPNOW_ROUTER),
+  DBG_ROW(ESPNOW_MESH),
+  DBG_ROW(ESPNOW_TOPO),
+  DBG_ROW(ESPNOW_METADATA),
   // --- bluetooth group ---
-  { "enabled",    SETTING_BOOL, &gSettings.debugBluetooth,        0, 0, nullptr, 0, 1, "All Bluetooth",     nullptr, false, "bluetooth", "debugbluetooth" },
-  { "core",       SETTING_BOOL, &gSettings.debugBluetoothCore,    0, 0, nullptr, 0, 1, "Core",              nullptr, false, "bluetooth", "debugbluetoothcore" },
-  { "gatt",       SETTING_BOOL, &gSettings.debugBluetoothGatt,    0, 0, nullptr, 0, 1, "GATT",              nullptr, false, "bluetooth", "debugbluetoothgatt" },
-  { "data",       SETTING_BOOL, &gSettings.debugBluetoothData,    0, 0, nullptr, 0, 1, "Data",              nullptr, false, "bluetooth", "debugbluetoothdata" },
+  DBG_ROW(BLUETOOTH),
+  DBG_ROW(BLUETOOTH_CORE),
+  DBG_ROW(BLUETOOTH_GATT),
+  DBG_ROW(BLUETOOTH_DATA),
   // --- system group ---
-  { "enabled",    SETTING_BOOL, &gSettings.debugSystem,         0, 0, nullptr, 0, 1, "All System",          nullptr, false, "system", "debugsystem" },
-  { "boot",       SETTING_BOOL, &gSettings.debugSystemBoot,     0, 0, nullptr, 0, 1, "Boot",                nullptr, false, "system", "debugsystemboot" },
-  { "config",     SETTING_BOOL, &gSettings.debugSystemConfig,   0, 0, nullptr, 0, 1, "Config",              nullptr, false, "system", "debugsystemconfig" },
-  { "tasks",      SETTING_BOOL, &gSettings.debugSystemTasks,    0, 0, nullptr, 0, 1, "Tasks",               nullptr, false, "system", "debugsystemtasks" },
-  { "hardware",   SETTING_BOOL, &gSettings.debugSystemHardware, 0, 0, nullptr, 0, 1, "Hardware",            nullptr, false, "system", "debugsystemhardware" },
+  DBG_ROW(SYSTEM),
+  DBG_SUBROW(SYSTEM_BOOT),
+  DBG_SUBROW(SYSTEM_CONFIG),
+  DBG_SUBROW(SYSTEM_TASKS),
+  DBG_SUBROW(SYSTEM_HARDWARE),
   // --- users group ---
-  { "enabled",      SETTING_BOOL, &gSettings.debugUsers,         0, 0, nullptr, 0, 1, "All Users",           nullptr, false, "users", "debugusers" },
-  { "management",   SETTING_BOOL, &gSettings.debugUsersMgmt,     0, 0, nullptr, 0, 1, "Management",          nullptr, false, "users", "debugusersmgmt" },
-  { "registration", SETTING_BOOL, &gSettings.debugUsersRegister, 0, 0, nullptr, 0, 1, "Registration",        nullptr, false, "users", "debugusersregister" },
-  { "query",        SETTING_BOOL, &gSettings.debugUsersQuery,    0, 0, nullptr, 0, 1, "Query",               nullptr, false, "users", "debugusersquery" },
+  DBG_ROW(USERS),
+  DBG_SUBROW(USERS_MGMT),
+  DBG_SUBROW(USERS_REGISTER),
+  DBG_SUBROW(USERS_QUERY),
   // --- cli group ---
-  { "enabled",    SETTING_BOOL, &gSettings.debugCli,            0, 0, nullptr, 0, 1, "All CLI",             nullptr, false, "cli", "debugcli" },
-  { "execution",  SETTING_BOOL, &gSettings.debugCliExecution,   0, 0, nullptr, 0, 1, "Execution",           nullptr, false, "cli", "debugcliexecution" },
-  { "queue",      SETTING_BOOL, &gSettings.debugCliQueue,       0, 0, nullptr, 0, 1, "Queue",               nullptr, false, "cli", "debugcliqueue" },
-  { "validation", SETTING_BOOL, &gSettings.debugCliValidation,  0, 0, nullptr, 0, 1, "Validation",          nullptr, false, "cli", "debugclivalidation" },
+  DBG_ROW(CLI),
+  DBG_SUBROW(CLI_EXECUTION),
+  DBG_SUBROW(CLI_QUEUE),
+  DBG_SUBROW(CLI_VALIDATION),
   // --- commands group (merged command-flow + command system) ---
-  { "enabled",    SETTING_BOOL, &gSettings.debugCommandFlow,     0, 0, nullptr, 0, 1, "All Commands",        nullptr, false, "commands", "debugcommandflow" },
-  { "system",     SETTING_BOOL, &gSettings.debugCommandSystem,   0, 0, nullptr, 0, 1, "System",              nullptr, false, "commands", "debugcommandsystem" },
-  { "routing",    SETTING_BOOL, &gSettings.debugCmdflowRouting,  0, 0, nullptr, 0, 1, "Routing",             nullptr, false, "commands", "debugcmdflowrouting" },
-  { "queue",      SETTING_BOOL, &gSettings.debugCmdflowQueue,   0, 0, nullptr, 0, 1, "Queue",               nullptr, false, "commands", "debugcmdflowqueue" },
-  { "context",    SETTING_BOOL, &gSettings.debugCmdflowContext,  0, 0, nullptr, 0, 1, "Context",             nullptr, false, "commands", "debugcmdflowcontext" },
+  DBG_ROW(CMD_FLOW),
+  DBG_ROW(COMMAND_SYSTEM),
+  DBG_SUBROW(CMDFLOW_ROUTING),
+  DBG_SUBROW(CMDFLOW_QUEUE),
+  DBG_SUBROW(CMDFLOW_CONTEXT),
   // --- performance group ---
-  { "enabled",    SETTING_BOOL, &gSettings.debugPerformance,    0, 0, nullptr, 0, 1, "All Performance",     nullptr, false, "performance", "debugperformance" },
-  { "stack",      SETTING_BOOL, &gSettings.debugPerfStack,      0, 0, nullptr, 0, 1, "Stack",               nullptr, false, "performance", "debugperfstack" },
-  { "heap",       SETTING_BOOL, &gSettings.debugPerfHeap,       0, 0, nullptr, 0, 1, "Heap",                nullptr, false, "performance", "debugperfheap" },
-  { "timing",     SETTING_BOOL, &gSettings.debugPerfTiming,     0, 0, nullptr, 0, 1, "Timing",              nullptr, false, "performance", "debugperftiming" },
+  DBG_ROW(PERFORMANCE),
+  DBG_SUBROW(PERF_STACK),
+  DBG_SUBROW(PERF_HEAP),
+  DBG_SUBROW(PERF_TIMING),
   // --- automations group ---
-  { "enabled",    SETTING_BOOL, &gSettings.debugAutomations,    0, 0, nullptr, 0, 1, "All Automations",     nullptr, false, "automations", "debugautomations" },
-  { "scheduler",  SETTING_BOOL, &gSettings.debugAutoScheduler,  0, 0, nullptr, 0, 1, "Scheduler",           nullptr, false, "automations", "debugautoscheduler" },
-  { "execution",  SETTING_BOOL, &gSettings.debugAutoExec,       0, 0, nullptr, 0, 1, "Execution",           nullptr, false, "automations", "debugautoexec" },
-  { "condition",  SETTING_BOOL, &gSettings.debugAutoCondition,  0, 0, nullptr, 0, 1, "Condition",           nullptr, false, "automations", "debugautocondition" },
-  { "timing",     SETTING_BOOL, &gSettings.debugAutoTiming,     0, 0, nullptr, 0, 1, "Timing",              nullptr, false, "automations", "debugautotiming" },
+  DBG_ROW(AUTOMATIONS),
+  DBG_ROW(AUTO_SCHEDULER),
+  DBG_ROW(AUTO_EXEC),
+  DBG_ROW(AUTO_CONDITION),
+  DBG_ROW(AUTO_TIMING),
   // --- per-sensor groups (each sensor gets its own card in the debug UI) ---
-  { "enabled",    SETTING_BOOL, &gSettings.debugCamera,          0, 0, nullptr, 0, 1, "All Camera",          nullptr, false, "camera",      "debugcamera" },
-  { "lifecycle",  SETTING_BOOL, &gSettings.debugCameraLifecycle, 0, 0, nullptr, 0, 1, "Lifecycle",           nullptr, false, "camera",      "debugcameralifecycle" },
-  { "capture",    SETTING_BOOL, &gSettings.debugCameraCapture,   0, 0, nullptr, 0, 1, "Capture",             nullptr, false, "camera",      "debugcameracapture" },
-  { "settings",   SETTING_BOOL, &gSettings.debugCameraSettings,  0, 0, nullptr, 0, 1, "Settings",            nullptr, false, "camera",      "debugcamerasettings" },
-  { "video",      SETTING_BOOL, &gSettings.debugCameraVideo,     0, 0, nullptr, 0, 1, "Video",               nullptr, false, "camera",      "debugcameravideo" },
+  DBG_ROW(CAMERA),
+  DBG_ROW(CAMERA_LIFECYCLE),
+  DBG_ROW(CAMERA_CAPTURE),
+  DBG_ROW(CAMERA_SETTINGS),
+  DBG_ROW(CAMERA_VIDEO),
   // DEBUG_DISPLAY now catches every OLED-internal log line (~106 callsites
   // across OLED_Utils.cpp): keyboard input, mode transitions + entry hooks,
   // menu construction, gamepad input handling on OLED, render dispatch, I2C
@@ -1825,116 +1735,112 @@ static const SettingEntry debugSettingEntries[] = {
   // map rendering = MAPS). Those still log through their owner flag — grep
   // `[CMD] *@oled:` in command-audit.log if you want every OLED-triggered
   // command regardless of the underlying event type.
-  { "enabled",    SETTING_BOOL, &gSettings.debugDisplay,         0, 0, nullptr, 0, 1, "All OLED",            nullptr, false, "oled",        "debugdisplay" },
-  { "enabled",    SETTING_BOOL, &gSettings.debugNotifications,   0, 0, nullptr, 0, 1, "All Notifications",   nullptr, false, "notifications", "debugnotifications" },
+  DBG_ROW(DISPLAY),
+  DBG_ROW(NOTIFICATIONS),
   // --- microphone group ---
-  { "enabled",    SETTING_BOOL, &gSettings.debugMicrophone,      0, 0, nullptr, 0, 1, "All Microphone",      nullptr, false, "microphone",  "debugmicrophone" },
-  { "lifecycle",  SETTING_BOOL, &gSettings.debugMicLifecycle,    0, 0, nullptr, 0, 1, "Lifecycle",           nullptr, false, "microphone",  "debugmiclifecycle" },
-  { "polling",    SETTING_BOOL, &gSettings.debugMicPolling,      0, 0, nullptr, 0, 1, "Polling",             nullptr, false, "microphone",  "debugmicpolling" },
-  { "values",     SETTING_BOOL, &gSettings.debugMicValues,       0, 0, nullptr, 0, 1, "Values",              nullptr, false, "microphone",  "debugmicvalues" },
+  DBG_ROW(MICROPHONE),
+  DBG_ROW(MIC_LIFECYCLE),
+  DBG_ROW(MIC_POLLING),
+  DBG_ROW(MIC_VALUES),
   // --- gps group ---
-  { "enabled",    SETTING_BOOL, &gSettings.debugGps,             0, 0, nullptr, 0, 1, "All GPS",             nullptr, false, "gps",         "debuggps" },
-  { "lifecycle",  SETTING_BOOL, &gSettings.debugGpsLifecycle,    0, 0, nullptr, 0, 1, "Lifecycle",           nullptr, false, "gps",         "debuggpslifecycle" },
-  { "polling",    SETTING_BOOL, &gSettings.debugGpsPolling,      0, 0, nullptr, 0, 1, "Polling",             nullptr, false, "gps",         "debuggpspolling" },
-  { "values",     SETTING_BOOL, &gSettings.debugGpsValues,       0, 0, nullptr, 0, 1, "Values",              nullptr, false, "gps",         "debuggpsvalues" },
+  DBG_ROW(GPS),
+  DBG_ROW(GPS_LIFECYCLE),
+  DBG_ROW(GPS_POLLING),
+  DBG_ROW(GPS_VALUES),
   // --- rtc group ---
-  { "enabled",    SETTING_BOOL, &gSettings.debugRtc,             0, 0, nullptr, 0, 1, "All RTC",             nullptr, false, "rtc",         "debugrtc" },
-  { "lifecycle",  SETTING_BOOL, &gSettings.debugRtcLifecycle,    0, 0, nullptr, 0, 1, "Lifecycle",           nullptr, false, "rtc",         "debugrtclifecycle" },
-  { "polling",    SETTING_BOOL, &gSettings.debugRtcPolling,      0, 0, nullptr, 0, 1, "Polling",             nullptr, false, "rtc",         "debugrtcpolling" },
-  { "values",     SETTING_BOOL, &gSettings.debugRtcValues,       0, 0, nullptr, 0, 1, "Values",              nullptr, false, "rtc",         "debugrtcvalues" },
+  DBG_ROW(RTC),
+  DBG_ROW(RTC_LIFECYCLE),
+  DBG_ROW(RTC_POLLING),
+  DBG_ROW(RTC_VALUES),
   // --- presence group ---
-  { "enabled",    SETTING_BOOL, &gSettings.debugPresence,        0, 0, nullptr, 0, 1, "All Presence",        nullptr, false, "presence",    "debugpresence" },
-  { "lifecycle",  SETTING_BOOL, &gSettings.debugPresenceLifecycle, 0, 0, nullptr, 0, 1, "Lifecycle",         nullptr, false, "presence",    "debugpresencelifecycle" },
-  { "polling",    SETTING_BOOL, &gSettings.debugPresencePolling, 0, 0, nullptr, 0, 1, "Polling",             nullptr, false, "presence",    "debugpresencepolling" },
-  { "values",     SETTING_BOOL, &gSettings.debugPresenceValues,  0, 0, nullptr, 0, 1, "Values",              nullptr, false, "presence",    "debugpresencevalues" },
+  DBG_ROW(PRESENCE),
+  DBG_ROW(PRESENCE_LIFECYCLE),
+  DBG_ROW(PRESENCE_POLLING),
+  DBG_ROW(PRESENCE_VALUES),
   // --- fm radio group ---
-  { "enabled",    SETTING_BOOL, &gSettings.debugFmRadio,         0, 0, nullptr, 0, 1, "All FM Radio",        nullptr, false, "fmradio",     "debugfmradio" },
-  { "lifecycle",  SETTING_BOOL, &gSettings.debugFmRadioLifecycle, 0, 0, nullptr, 0, 1, "Lifecycle",          nullptr, false, "fmradio",     "debugfmradiolifecycle" },
-  { "polling",    SETTING_BOOL, &gSettings.debugFmRadioPolling,  0, 0, nullptr, 0, 1, "Polling",             nullptr, false, "fmradio",     "debugfmradiopolling" },
-  { "values",     SETTING_BOOL, &gSettings.debugFmRadioValues,   0, 0, nullptr, 0, 1, "Values",              nullptr, false, "fmradio",     "debugfmradiovalues" },
+  DBG_ROW(FMRADIO),
+  DBG_ROW(FMRADIO_LIFECYCLE),
+  DBG_ROW(FMRADIO_POLLING),
+  DBG_ROW(FMRADIO_VALUES),
   // --- thermal group ---
-  { "enabled",    SETTING_BOOL, &gSettings.debugThermal,         0, 0, nullptr, 0, 1, "All Thermal",         nullptr, false, "thermal",     "debugthermal" },
-  { "lifecycle",  SETTING_BOOL, &gSettings.debugThermalLifecycle, 0, 0, nullptr, 0, 1, "Lifecycle",          nullptr, false, "thermal",     "debugthermallifecycle" },
-  { "polling",    SETTING_BOOL, &gSettings.debugThermalPolling,  0, 0, nullptr, 0, 1, "Polling",             nullptr, false, "thermal",     "debugthermalpolling" },
-  { "values",     SETTING_BOOL, &gSettings.debugThermalValues,   0, 0, nullptr, 0, 1, "Values",              nullptr, false, "thermal",     "debugthermalvalues" },
+  DBG_ROW(THERMAL),
+  DBG_ROW(THERMAL_LIFECYCLE),
+  DBG_ROW(THERMAL_POLLING),
+  DBG_ROW(THERMAL_VALUES),
   // --- imu group ---
-  { "enabled",    SETTING_BOOL, &gSettings.debugImu,             0, 0, nullptr, 0, 1, "All IMU",             nullptr, false, "imu",         "debugimu" },
-  { "lifecycle",  SETTING_BOOL, &gSettings.debugImuLifecycle,    0, 0, nullptr, 0, 1, "Lifecycle",           nullptr, false, "imu",         "debugimulifecycle" },
-  { "polling",    SETTING_BOOL, &gSettings.debugImuPolling,      0, 0, nullptr, 0, 1, "Polling",             nullptr, false, "imu",         "debugimupolling" },
-  { "values",     SETTING_BOOL, &gSettings.debugImuValues,       0, 0, nullptr, 0, 1, "Values",              nullptr, false, "imu",         "debugimuvalues" },
+  DBG_ROW(IMU),
+  DBG_ROW(IMU_LIFECYCLE),
+  DBG_ROW(IMU_POLLING),
+  DBG_ROW(IMU_VALUES),
   // --- input abstraction group (HAL_Input + OLED input dispatch) ---
-  { "enabled",    SETTING_BOOL, &gSettings.debugInput,          0, 0, nullptr, 0, 1, "All Input",           nullptr, false, "input",       "debuginput" },
-  { "lifecycle",  SETTING_BOOL, &gSettings.debugInputLifecycle, 0, 0, nullptr, 0, 1, "Lifecycle",           nullptr, false, "input",       "debuginputlifecycle" },
-  { "polling",    SETTING_BOOL, &gSettings.debugInputPolling,   0, 0, nullptr, 0, 1, "Polling",             nullptr, false, "input",       "debuginputpolling" },
-  { "values",     SETTING_BOOL, &gSettings.debugInputValues,    0, 0, nullptr, 0, 1, "Values",              nullptr, false, "input",       "debuginputvalues" },
+  DBG_ROW(INPUT),
+  DBG_ROW(INPUT_LIFECYCLE),
+  DBG_ROW(INPUT_POLLING),
+  DBG_ROW(INPUT_VALUES),
   // --- ANO encoder driver-specific group ---
-  { "enabled",    SETTING_BOOL, &gSettings.debugAnoEncoder,          0, 0, nullptr, 0, 1, "All ANO Encoder", nullptr, false, "anoencoder",  "debuganoencoder" },
-  { "lifecycle",  SETTING_BOOL, &gSettings.debugAnoEncoderLifecycle, 0, 0, nullptr, 0, 1, "Lifecycle",       nullptr, false, "anoencoder",  "debuganoencoderlifecycle" },
-  { "polling",    SETTING_BOOL, &gSettings.debugAnoEncoderPolling,   0, 0, nullptr, 0, 1, "Polling",         nullptr, false, "anoencoder",  "debuganoencoderpolling" },
-  { "values",     SETTING_BOOL, &gSettings.debugAnoEncoderValues,    0, 0, nullptr, 0, 1, "Values",          nullptr, false, "anoencoder",  "debuganoencodervalues" },
+  DBG_ROW(ANO_ENCODER),
+  DBG_ROW(ANO_ENCODER_LIFECYCLE),
+  DBG_ROW(ANO_ENCODER_POLLING),
+  DBG_ROW(ANO_ENCODER_VALUES),
   // --- tof group ---
-  { "enabled",    SETTING_BOOL, &gSettings.debugTof,             0, 0, nullptr, 0, 1, "All ToF",             nullptr, false, "tof",         "debugtof" },
-  { "lifecycle",  SETTING_BOOL, &gSettings.debugTofLifecycle,    0, 0, nullptr, 0, 1, "Lifecycle",           nullptr, false, "tof",         "debugtoflifecycle" },
-  { "polling",    SETTING_BOOL, &gSettings.debugTofPolling,      0, 0, nullptr, 0, 1, "Polling",             nullptr, false, "tof",         "debugtofpolling" },
-  { "values",     SETTING_BOOL, &gSettings.debugTofValues,       0, 0, nullptr, 0, 1, "Values",              nullptr, false, "tof",         "debugtofvalues" },
+  DBG_ROW(TOF),
+  DBG_ROW(TOF_LIFECYCLE),
+  DBG_ROW(TOF_POLLING),
+  DBG_ROW(TOF_VALUES),
   // --- apds group ---
-  { "enabled",    SETTING_BOOL, &gSettings.debugApds,            0, 0, nullptr, 0, 1, "All APDS",            nullptr, false, "apds",        "debugapds" },
-  { "lifecycle",  SETTING_BOOL, &gSettings.debugApdsLifecycle,   0, 0, nullptr, 0, 1, "Lifecycle",           nullptr, false, "apds",        "debugapdslifecycle" },
-  { "polling",    SETTING_BOOL, &gSettings.debugApdsPolling,     0, 0, nullptr, 0, 1, "Polling",             nullptr, false, "apds",        "debugapdspolling" },
-  { "values",     SETTING_BOOL, &gSettings.debugApdsValues,      0, 0, nullptr, 0, 1, "Values",              nullptr, false, "apds",        "debugapdsvalues" },
+  DBG_ROW(APDS),
+  DBG_ROW(APDS_LIFECYCLE),
+  DBG_ROW(APDS_POLLING),
+  DBG_ROW(APDS_VALUES),
   // --- maps group ---
-  { "enabled",    SETTING_BOOL, &gSettings.debugMaps,            0, 0, nullptr, 0, 1, "All Maps",            nullptr, false, "maps", "debugmaps" },
-  { "loading",    SETTING_BOOL, &gSettings.debugMapsLoading,     0, 0, nullptr, 0, 1, "Loading",             nullptr, false, "maps", "debugmapsloading" },
-  { "rendering",  SETTING_BOOL, &gSettings.debugMapsRendering,   0, 0, nullptr, 0, 1, "Rendering",           nullptr, false, "maps", "debugmapsrendering" },
-  { "perf",       SETTING_BOOL, &gSettings.debugMapsPerf,       0, 0, nullptr, 0, 1, "Performance",         nullptr, false, "maps", "debugmapsperf" },
-#if ENABLE_ONDEVICE_LLM
+  DBG_ROW(MAPS),
+  DBG_ROW(MAPS_LOADING),
+  DBG_ROW(MAPS_RENDERING),
+  DBG_ROW(MAPS_PERF),
   // --- llm group (on-device LLM) ---
-  { "enabled",    SETTING_BOOL, &gSettings.debugLlm,             0, 0, nullptr, 0, 1, "All LLM",             nullptr, false, "llm", "debugllm" },
-  { "load",       SETTING_BOOL, &gSettings.debugLlmLoad,         0, 0, nullptr, 0, 1, "Load / checkpoint",   nullptr, false, "llm", "debugllmload" },
-  { "tokenizer",  SETTING_BOOL, &gSettings.debugLlmTokenizer,  0, 0, nullptr, 0, 1, "Tokenizer",           nullptr, false, "llm", "debugllmtokenizer" },
-  { "forward",    SETTING_BOOL, &gSettings.debugLlmForward,      0, 0, nullptr, 0, 1, "Forward",             nullptr, false, "llm", "debugllmforward" },
-  { "generate",   SETTING_BOOL, &gSettings.debugLlmGenerate,     0, 0, nullptr, 0, 1, "Generate",            nullptr, false, "llm", "debugllmgenerate" },
-  { "memory",     SETTING_BOOL, &gSettings.debugLlmMemory,       0, 0, nullptr, 0, 1, "Memory / PSRAM",      nullptr, false, "llm", "debugllmmemory" },
-#endif
+  DBG_ROW(LLM),
+  DBG_ROW(LLM_LOAD),
+  DBG_ROW(LLM_TOKENIZER),
+  DBG_ROW(LLM_FORWARD),
+  DBG_ROW(LLM_GENERATE),
+  DBG_ROW(LLM_MEMORY),
   // --- NTP / DateTime group ---
-  { "enabled",   SETTING_BOOL, &gSettings.debugDateTime,       0, 0, nullptr, 0, 1, "All NTP/DateTime",      nullptr, false, "datetime", "debugdatetime" },
-  { "sync",      SETTING_BOOL, &gSettings.debugDatetimeSync,   0, 0, nullptr, 0, 1, "Sync loop",             nullptr, false, "datetime", "debugdatetimesync" },
-  { "setup",     SETTING_BOOL, &gSettings.debugDatetimeSetup,  0, 0, nullptr, 0, 1, "Setup/configTime",      nullptr, false, "datetime", "debugdatetimesetup" },
-  { "anchor",    SETTING_BOOL, &gSettings.debugDatetimeAnchor, 0, 0, nullptr, 0, 1, "Boot anchors",          nullptr, false, "datetime", "debugdatetimeanchor" },
-  { "resolve",   SETTING_BOOL, &gSettings.debugDatetimeResolve,0, 0, nullptr, 0, 1, "Timestamp resolution",  nullptr, false, "datetime", "debugdatetimeresolve" },
+  DBG_ROW(NTP),
+  DBG_SUBROW(NTP_SYNC),
+  DBG_SUBROW(NTP_SETUP),
+  DBG_SUBROW(NTP_ANCHOR),
+  DBG_SUBROW(NTP_RESOLVE),
   // --- standalone (no group) ---
-  { "enabled",    SETTING_BOOL, &gSettings.debugLogger,         0, 0, nullptr, 0, 1, "Enabled",     nullptr, false, "logger", "debuglogger" },
-  { "enabled",    SETTING_BOOL, &gSettings.debugMemory,         0, 0, nullptr, 0, 1, "All Memory",  nullptr, false, "memory", "debugmemory" },
-  { "heap",       SETTING_BOOL, &gSettings.debugMemoryHeap,     0, 0, nullptr, 0, 1, "Heap",        nullptr, false, "memory", "debugmemoryheap" },
-  { "stack",      SETTING_BOOL, &gSettings.debugMemoryStack,    0, 0, nullptr, 0, 1, "Stack",       nullptr, false, "memory", "debugmemorystack" },
-  { "buffers",    SETTING_BOOL, &gSettings.debugMemoryBuffers,  0, 0, nullptr, 0, 1, "Buffers",     nullptr, false, "memory", "debugmemorybuffers" },
+  DBG_ROW(LOGGER),
+  DBG_ROW(MEMORY),
+  DBG_ROW(MEMORY_HEAP),
+  DBG_ROW(MEMORY_STACK),
+  DBG_ROW(MEMORY_BUFFERS),
   { "sampleIntervalSec", SETTING_INT, &gSettings.memorySampleIntervalSec, 30, 0, nullptr, 0, 300, "Sample Interval (sec)", nullptr, false, "memory", "memorysampleintervalsec" },
-#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
   // --- g2 group (Even Realities G2 glasses) ---
-  { "enabled",    SETTING_BOOL, &gSettings.debugG2,           0, 0, nullptr, 0, 1, "All G2",            nullptr, false, "g2", "debugg2" },
-  { "lifecycle",  SETTING_BOOL, &gSettings.debugG2Lifecycle,  0, 0, nullptr, 0, 1, "Lifecycle",         nullptr, false, "g2", "debugg2lifecycle" },
-  { "protocol",   SETTING_BOOL, &gSettings.debugG2Protocol,   0, 0, nullptr, 0, 1, "Protocol",          nullptr, false, "g2", "debugg2protocol" },
-  { "events",     SETTING_BOOL, &gSettings.debugG2Events,     0, 0, nullptr, 0, 1, "Events",            nullptr, false, "g2", "debugg2events" },
-  { "pages",      SETTING_BOOL, &gSettings.debugG2Pages,      0, 0, nullptr, 0, 1, "Pages",             nullptr, false, "g2", "debugg2pages" },
-  { "heartbeat",  SETTING_BOOL, &gSettings.debugG2Heartbeat,  0, 0, nullptr, 0, 1, "Heartbeat",         nullptr, false, "g2", "debugg2heartbeat" },
-  { "dump",       SETTING_BOOL, &gSettings.debugG2Dump,       0, 0, nullptr, 0, 1, "Dump",              nullptr, false, "g2", "debugg2dump" },
-#endif
+  DBG_ROW(G2),
+  DBG_ROW(G2_LIFECYCLE),
+  DBG_ROW(G2_PROTOCOL),
+  DBG_ROW(G2_EVENTS),
+  DBG_ROW(G2_PAGES),
+  DBG_ROW(G2_HEARTBEAT),
+  DBG_ROW(G2_DUMP),
   // --- espsr group (ESP-SR speech recognition) ---
-  { "enabled",    SETTING_BOOL, &gSettings.debugSr,           0, 0, nullptr, 0, 1, "All SR",            nullptr, false, "espsr", "debugsr" },
-  { "wake",       SETTING_BOOL, &gSettings.debugSrWake,       0, 0, nullptr, 0, 1, "Wake word",         nullptr, false, "espsr", "debugsrwake" },
-  { "command",    SETTING_BOOL, &gSettings.debugSrCommand,    0, 0, nullptr, 0, 1, "Command match",     nullptr, false, "espsr", "debugsrcommand" },
-  { "afe",        SETTING_BOOL, &gSettings.debugSrAfe,        0, 0, nullptr, 0, 1, "AFE / VAD",         nullptr, false, "espsr", "debugsrafe" },
-  { "lifecycle",  SETTING_BOOL, &gSettings.debugSrLifecycle,  0, 0, nullptr, 0, 1, "Lifecycle",         nullptr, false, "espsr", "debugsrlifecycle" },
-  { "tuning",     SETTING_BOOL, &gSettings.debugSrTuning,     0, 0, nullptr, 0, 1, "Tuning / threshold",nullptr, false, "espsr", "debugsrtuning" },
-  { "enabled",    SETTING_BOOL, &gSettings.debugI2C,            0, 0, nullptr, 0, 1, "All I2C",     nullptr, false, "i2c", "debugi2c" },
-  { "bus",        SETTING_BOOL, &gSettings.debugI2CBus,         0, 0, nullptr, 0, 1, "Bus",         nullptr, false, "i2c", "debugi2cbus" },
-  { "discovery",  SETTING_BOOL, &gSettings.debugI2CDiscovery,   0, 0, nullptr, 0, 1, "Discovery",   nullptr, false, "i2c", "debugi2cdiscovery" },
-  { "autoStart",  SETTING_BOOL, &gSettings.debugI2CAutoStart,   0, 0, nullptr, 0, 1, "AutoStart",   nullptr, false, "i2c", "debugi2cautostart" },
-  { "enabled",    SETTING_BOOL, &gSettings.debugMqtt,           0, 0, nullptr, 0, 1, "All MQTT",   nullptr, false, "mqtt", "debugmqtt" },
-  { "connection", SETTING_BOOL, &gSettings.debugMqttConnection, 0, 0, nullptr, 0, 1, "Connection", nullptr, false, "mqtt", "debugmqttconnection" },
-  { "pubsub",     SETTING_BOOL, &gSettings.debugMqttPubsub,     0, 0, nullptr, 0, 1, "Pub/Sub",    nullptr, false, "mqtt", "debugmqttpubsub" },
-  { "discovery",  SETTING_BOOL, &gSettings.debugMqttDiscovery,  0, 0, nullptr, 0, 1, "Discovery",  nullptr, false, "mqtt", "debugmqttdiscovery" },
-  { "commands",   SETTING_BOOL, &gSettings.debugMqttCommands,   0, 0, nullptr, 0, 1, "Commands",   nullptr, false, "mqtt", "debugmqttcommands" },
+  DBG_ROW(SR),
+  DBG_ROW(SR_WAKE),
+  DBG_ROW(SR_COMMAND),
+  DBG_ROW(SR_AFE),
+  DBG_ROW(SR_LIFECYCLE),
+  DBG_ROW(SR_TUNING),
+  DBG_ROW(I2C),
+  DBG_ROW(I2C_BUS),
+  DBG_ROW(I2C_DISCOVERY),
+  DBG_ROW(I2C_AUTOSTART),
+  DBG_ROW(MQTT),
+  DBG_ROW(MQTT_CONNECTION),
+  DBG_ROW(MQTT_PUBSUB),
+  DBG_ROW(MQTT_DISCOVERY),
+  DBG_ROW(MQTT_COMMANDS),
   // --- page group: developer-facing toggles for the served web pages ---
   // webConsole was previously in the output module's "channels" group, which
   // mislabelled it as a fourth output destination. It's actually just a flag
@@ -1945,6 +1851,83 @@ static const SettingEntry debugSettingEntries[] = {
   { "webConsole", SETTING_BOOL, &gSettings.webConsoleDebug,     0, 0, nullptr, 0, 1, "Allow page console.log", nullptr, false, "page", "webconsole" },
   { "logLevel",         SETTING_INT,  &gSettings.logLevel,            3, 0, nullptr, 0, 3, "Log Level",            "0:error,1:warn,2:info,3:debug", false, nullptr, "loglevel" },
 };
+#undef DBG_SUBROW
+#undef DBG_ROW
+
+// Row accounting, pinned: 159 = 116 flag-backed + 40 bitless-sub + 3 hand rows.
+static constexpr size_t kDbgRegGeneratedRows = (DBG_FLAG_COUNT - 1) + DBG_SUBBOOL_COUNT;  // ALWAYS emits no row
+static constexpr size_t kDbgRegHandRows = 3;  // memorysampleintervalsec, webconsole, loglevel
+static_assert(sizeof(debugSettingEntries) / sizeof(debugSettingEntries[0])
+                  == kDbgRegGeneratedRows + kDbgRegHandRows,
+              "debug registry row count drifted — a pick or table row changed without the other (or a hand row came/went without updating kDbgRegHandRows)");
+
+// Every pool row is picked exactly once — a forgotten or doubled DBG_ROW /
+// DBG_SUBROW is a build error, not a silently missing checkbox. Matching is
+// by valuePtr (every pool pointer lands inside gSettings, so constexpr
+// equality is well-defined); hand rows live in neither pool and are outside
+// the check.
+static constexpr bool dbgRegRowsPickedOnce() {
+  for (int i = 0; i < DBG_FLAG_COUNT; ++i) {
+    if (kDbgFlagRegEntry[i].valuePtr == nullptr) continue;  // ALWAYS placeholder
+    int n = 0;
+    for (const auto& e : debugSettingEntries)
+      if (e.valuePtr == kDbgFlagRegEntry[i].valuePtr) ++n;
+    if (n != 1) return false;
+  }
+  for (int i = 0; i < DBG_SUBBOOL_COUNT; ++i) {
+    int n = 0;
+    for (const auto& e : debugSettingEntries)
+      if (e.valuePtr == kDbgSubRegEntry[i].valuePtr) ++n;
+    if (n != 1) return false;
+  }
+  return true;
+}
+static_assert(dbgRegRowsPickedOnce(),
+              "a generated registry row is missing from (or duplicated in) debugSettingEntries — reconcile the pick list with the tables");
+
+// Generated rows carry non-empty registry strings. The logLevel hand row is
+// deliberately OUTSIDE this check — its group is a null pointer (ungrouped/
+// root), and a constexpr string walk over it would be a compile error, not a
+// passing check.
+static constexpr bool dbgRegColumnsPresent() {
+  for (int i = 0; i < DBG_FLAG_COUNT; ++i) {
+    const SettingEntry& e = kDbgFlagRegEntry[i];
+    if (e.valuePtr == nullptr) continue;  // ALWAYS placeholder
+    if (e.jsonKey == nullptr || e.jsonKey[0] == '\0') return false;
+    if (e.group   == nullptr || e.group[0]   == '\0') return false;
+    if (e.label   == nullptr || e.label[0]   == '\0') return false;
+    if (e.cmdKey  == nullptr || e.cmdKey[0]  == '\0') return false;
+  }
+  for (int i = 0; i < DBG_SUBBOOL_COUNT; ++i) {
+    const SettingEntry& e = kDbgSubRegEntry[i];
+    if (e.jsonKey == nullptr || e.jsonKey[0] == '\0') return false;
+    if (e.group   == nullptr || e.group[0]   == '\0') return false;
+    if (e.label   == nullptr || e.label[0]   == '\0') return false;
+    if (e.cmdKey  == nullptr || e.cmdKey[0]  == '\0') return false;
+  }
+  return true;
+}
+static_assert(dbgRegColumnsPresent(),
+              "a generated registry row has a null/empty group, jsonKey, label, or cmdKey column");
+
+// No two generated rows share (group, jsonKey) — that pair is the JSON
+// nesting identity under "system.debug" (jsonKey alone repeats across ~30
+// groups by design), so a transposed column would silently merge two
+// settings into one persisted key.
+static constexpr bool dbgRegGroupKeysUnique() {
+  constexpr int nf = DBG_FLAG_COUNT, ns = DBG_SUBBOOL_COUNT;
+  for (int i = 0; i < nf + ns; ++i) {
+    const SettingEntry& a = (i < nf) ? kDbgFlagRegEntry[i] : kDbgSubRegEntry[i - nf];
+    if (a.valuePtr == nullptr) continue;  // ALWAYS placeholder
+    for (int j = i + 1; j < nf + ns; ++j) {
+      const SettingEntry& b = (j < nf) ? kDbgFlagRegEntry[j] : kDbgSubRegEntry[j - nf];
+      if (b.valuePtr == nullptr) continue;
+      if (dbgStrEq(a.group, b.group) && dbgStrEq(a.jsonKey, b.jsonKey)) return false;
+    }
+  }
+  return true;
+}
+static_assert(dbgRegGroupKeysUnique(), "two generated registry rows share (group, jsonKey)");
 
 // Columns: name, jsonSection, entries, count, isConnected, description
 static const SettingsModule debugSettingsModule = {
@@ -1963,19 +1946,13 @@ static const SettingsModule debugSettingsModule = {
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry outputSettingEntries[] = {
-  // --- channels: where firmware output is routed ---
+  // --- channels: the one persisted output lane ---
+  // The group used to hold web/display/g2 rows too (plus webConsole, evicted
+  // earlier for the same reason). All three were removed pre-1.0: delivery
+  // never honored the web/display bits, and the g2 row's command (outg2)
+  // never persisted, so the toggles were decorative. The surviving runtime
+  // lanes are session/lifecycle-managed — see the System_Debug.h charter.
   { "serial",     SETTING_BOOL, &gSettings.outSerial,           1, 0, nullptr, 0, 1, "Serial Output",     nullptr, false, "channels", "outserial" },
-  { "web",        SETTING_BOOL, &gSettings.outWeb,              1, 0, nullptr, 0, 1, "Web Output",        nullptr, false, "channels", "outweb" },
-  { "display",    SETTING_BOOL, &gSettings.outDisplay,          0, 0, nullptr, 0, 1, "Display Output",    nullptr, false, "channels", "outdisplay" },
-  // NOTE: `webConsole` (gSettings.webConsoleDebug) used to live here. It was
-  // mis-categorized as a fourth output channel — but the flag only controls
-  // whether the served HTML page suppresses its own JS console.log calls
-  // (WebServer_Utils.cpp:515). It does NOT route firmware broadcastOutput
-  // anywhere. Moved to the debug module under group "page" with a more
-  // honest label. The CLI command `webconsole 0|1` is unchanged.
-#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
-  { "g2",         SETTING_BOOL, &gSettings.outG2,               0, 0, nullptr, 0, 1, "G2 Glasses Output", nullptr, false, "channels", "outg2" },
-#endif
   // --- auth: per-channel access gates ---
   { "serialRequireAuth",  SETTING_BOOL, &gSettings.serialRequireAuth,       1, 0, nullptr, 0, 1, "Serial Require Auth",  nullptr, false, "auth", "serialrequireauth" },
   { "displayRequireAuth", SETTING_BOOL, &gSettings.localDisplayRequireAuth, 1, 0, nullptr, 0, 1, "Display Require Auth", nullptr, false, "auth", "displayrequireauth" },
@@ -2035,7 +2012,7 @@ static const SettingsModule crashSettingsModule = {
 };
 
 // Registry storage
-static const SettingsModule* gSettingsModules[MAX_SETTINGS_MODULES] = {nullptr};
+EXT_RAM_BSS_ATTR static const SettingsModule* gSettingsModules[MAX_SETTINGS_MODULES];
 static size_t gSettingsModuleCount = 0;
 static bool gSettingsModulesRegistered = false;
 
@@ -2119,7 +2096,7 @@ extern const SettingsModule presenceSettingsModule;
 #if ENABLE_CAMERA_SENSOR
 extern const SettingsModule cameraSettingsModule;
 #endif
-#if ENABLE_MICROPHONE_SENSOR
+#if ENABLE_MICROPHONE
 extern const SettingsModule micSettingsModule;
 #endif
 #if ENABLE_EDGE_IMPULSE
@@ -2209,7 +2186,7 @@ void registerAllSettingsModules() {
 #if ENABLE_CAMERA_SENSOR
   registerSettingsModule(&cameraSettingsModule);
 #endif
-#if ENABLE_MICROPHONE_SENSOR
+#if ENABLE_MICROPHONE
   registerSettingsModule(&micSettingsModule);
 #endif
 #if ENABLE_EDGE_IMPULSE
@@ -2559,7 +2536,7 @@ const char* handleSettingCommand(const SettingEntry* entry, const String& argsIn
   valStr.trim();
   if (valStr.length() == 0) {
     // No argument - show current value
-    static char buf[128];
+    EXT_RAM_BSS_ATTR static char buf[128];
     switch (entry->type) {
       case SETTING_INT:
         snprintf(buf, sizeof(buf), "%s = %d", entry->jsonKey, *((int*)entry->valuePtr));
@@ -2601,7 +2578,7 @@ const char* handleSettingCommand(const SettingEntry* entry, const String& argsIn
       int v = atoi(p);
       if (entry->minVal != 0 || entry->maxVal != 0) {
         if (v < entry->minVal || v > entry->maxVal) {
-          static char errBuf[128];
+          EXT_RAM_BSS_ATTR static char errBuf[128];
           snprintf(errBuf, sizeof(errBuf), "Error: %s must be %d..%d", entry->jsonKey, entry->minVal, entry->maxVal);
           return errBuf;
         }
@@ -2625,7 +2602,7 @@ const char* handleSettingCommand(const SettingEntry* entry, const String& argsIn
       float f = strtof(p, nullptr);
       if (entry->minVal != 0 || entry->maxVal != 0) {
         if (f < (float)entry->minVal || f > (float)entry->maxVal) {
-          static char errBuf[128];
+          EXT_RAM_BSS_ATTR static char errBuf[128];
           snprintf(errBuf, sizeof(errBuf), "Error: %s must be %d..%d", entry->jsonKey, entry->minVal, entry->maxVal);
           return errBuf;
         }
@@ -2715,6 +2692,35 @@ SETTING_EDITOR_CMD(cmd_set_eventlog,            "eventlog")
 SETTING_EDITOR_CMD(cmd_set_notifydevicebanners,        "notifydevicebanners")
 SETTING_EDITOR_CMD(cmd_set_notifydevicetoasts,         "notifydevicetoasts")
 SETTING_EDITOR_CMD(cmd_set_notifydevicequeue,          "notifydevicequeue")
+SETTING_EDITOR_CMD(cmd_set_notifydeviceg2,             "notifydeviceg2")
+
+// Bitmask / format editors — persist via SettingEntry, then sync live globals
+// so Settings-page saves affect the next logging session without reboot.
+static const char* cmd_set_sensorlogmask(const String& a) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  const SettingEntry* e = findSettingByCmdKey("sensorlogmask");
+  if (!e) return "Error: setting not found for this command";
+  const char* r = handleSettingCommand(e, a);
+  gSensorLogMask = (uint8_t)(gSettings.sensorLogMask & 0xFF);
+  return r;
+}
+static const char* cmd_set_sensorlogformat(const String& a) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  const SettingEntry* e = findSettingByCmdKey("sensorlogformat");
+  if (!e) return "Error: setting not found for this command";
+  const char* r = handleSettingCommand(e, a);
+  if (gSettings.sensorLogFormat >= 0 && gSettings.sensorLogFormat <= 2)
+    gSensorLogFormat = (SensorLogFormat)gSettings.sensorLogFormat;
+  return r;
+}
+static const char* cmd_set_systemlogflags(const String& a) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  const SettingEntry* e = findSettingByCmdKey("systemlogflags");
+  if (!e) return "Error: setting not found for this command";
+  const char* r = handleSettingCommand(e, a);
+  systemLogApplyPersistedFlags();
+  return r;
+}
 
 const CommandEntry settingEditorCommands[] = {
   { "sessionidleweb",      "Set web CLI session idle-logout (min)",      true, cmd_set_sessionidleweb,      "Usage: sessionidleweb <0-1440>" },
@@ -2729,6 +2735,9 @@ const CommandEntry settingEditorCommands[] = {
   { "fmradiodevicepollms", "Set FM radio poll interval (ms)",            true, cmd_set_fmradiodevicepollms, "Usage: fmradiodevicepollms <value>" },
   { "gpsdevicepollms",     "Set GPS poll interval (ms)",                 true, cmd_set_gpsdevicepollms,     "Usage: gpsdevicepollms <value>" },
   { "sensorlogpath",       "Set default sensor-log file path",           true, cmd_set_sensorlogpath,       "Usage: sensorlogpath <\"/path\">" },
+  { "sensorlogmask",       "Set sensor-log sensor bitmask",              true, cmd_set_sensorlogmask,       "Usage: sensorlogmask <0-255>" },
+  { "sensorlogformat",     "Set sensor-log format (0=text,1=csv,2=track)", true, cmd_set_sensorlogformat,   "Usage: sensorlogformat <0|1|2>" },
+  { "systemlogflags",      "Set system-log debug category mask (hex)",   true, cmd_set_systemlogflags,      "Usage: systemlogflags <0x...>" },
   { "eirequirelabels",     "Set Edge Impulse require-labels flag",       true, cmd_set_eirequirelabels,     "Usage: eirequirelabels <0|1>" },
   { "eimaxdetections",     "Set Edge Impulse max detections",            true, cmd_set_eimaxdetections,     "Usage: eimaxdetections <value>" },
   { "eiinputsize",         "Set Edge Impulse input size",                true, cmd_set_eiinputsize,         "Usage: eiinputsize <value>" },
@@ -2740,10 +2749,15 @@ const CommandEntry settingEditorCommands[] = {
   { "notifydevicebanners",        "Enable/disable OLED notification banners",   true, cmd_set_notifydevicebanners,        "Usage: notifydevicebanners <0|1>" },
   { "notifydevicetoasts",         "Enable/disable web notification toasts",     true, cmd_set_notifydevicetoasts,         "Usage: notifydevicetoasts <0|1>" },
   { "notifydevicequeue",          "Enable/disable the notification-center queue", true, cmd_set_notifydevicequeue,        "Usage: notifydevicequeue <0|1>" },
+  { "notifydeviceg2",             "Enable/disable G2 lens notification cards",  true, cmd_set_notifydeviceg2,             "Usage: notifydeviceg2 <0|1>" },
   { "notifydevicekind",           "Set per-event notification visibility (device-wide)", true, cmd_notifydevicekind,
     "Usage: notifydevicekind [list [json]] | <kind> [all|admin|off]\n  Bare: show non-default kinds; list: show every kind (json = machine form)\n  <kind> alone shows its level; with a level, sets and persists it\n  admin: only admin viewers see it; off: hidden for everyone\n  Levels affect banners/toasts/queue only - events and automations still fire" },
   { "notifyusermute",           "Mute event kinds from notifications for YOUR user", false, cmd_notifyusermute,
     "Usage: notifyusermute [<kind,kind,...>|none]\n  Bare: show your muted kinds; none: clear\n  Applies only to the logged-in user (stored with your dashboard preferences)\n  List valid kinds with 'events kinds'" },
+  { "notifyusershow",           "Force event kinds through YOUR importance floor", false, cmd_notifyusershow,
+    "Usage: notifyusershow [<kind,kind,...>|none]\n  Bare: show your forced kinds; none: clear\n  Opposite of notifyusermute: these interrupt even below your notifylevel\n  List valid kinds with 'events kinds'" },
+  { "notifylevel",              "Set YOUR notification importance floor",     false, cmd_notifylevel,
+    "Usage: notifylevel [verbose|standard|alert]\n  Bare: show your current floor (default: standard)\n  verbose: everything; standard: skip routine chatter; alert: security/safety only\n  Nothing is lost - filtered kinds still reach the notification center and automations" },
 };
 const size_t settingEditorCommandsCount = sizeof(settingEditorCommands) / sizeof(settingEditorCommands[0]);
 

@@ -17,6 +17,7 @@
 // verifyFlags / HijackFsmFlags machinery — the legacy globals it
 // compared against (gPageSwapActive / gHijackActive) no longer exist.
 #include "G2_HijackFsm.h"
+#include "System_TaskUtils.h"  // APP_CORE / PRO_CORE task-placement constants
 
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 
@@ -316,9 +317,9 @@ void hijackFsmInit() {
   // "observed peak ~4.2 KB" cited here cannot be true against a 2560 B stack;
   // it came from the reporter while it multiplied HWM by 4 (real peak ~1.05 KB).
   // Re-measure before resizing.
-  const BaseType_t ok = xTaskCreate(fsmWorkerTask, "g2-fsm",
+  const BaseType_t ok = xTaskCreatePinnedToCore(fsmWorkerTask, "g2-fsm",
                                     /*stack bytes*/ 2560,
-                                    nullptr, 5, &gFsmTaskHandle);
+                                    nullptr, 5, &gFsmTaskHandle, APP_CORE);
   if (ok != pdPASS) {
     DEBUG_G2F("[FSM] worker task create failed — dispatches will apply inline");
     vQueueDelete(gFsmQueue);

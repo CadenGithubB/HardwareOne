@@ -174,9 +174,19 @@ bool loadRemoteSettingsModules() {
     return false;
   }
 
-  // Allocate flat arrays sized exactly to the counts.
-  gRemoteModules = new SettingsModule[moduleCount];
-  gRemoteEntries = new SettingEntry[totalEntries];
+  // Allocate the flat arrays in PSRAM. ps_calloc (zero-init) is equivalent to the
+  // former new[] here: both structs are trivially-destructible and their only
+  // in-class defaults are false/nullptr (= zero), which calloc supplies;
+  // buildNodesRecursive populates the rest. Freed via free() (NOT delete[]) in
+  // freeRemoteSettingsModules().
+  gRemoteModules = (SettingsModule*)ps_calloc(moduleCount, sizeof(SettingsModule), AllocPref::PreferPSRAM);
+  gRemoteEntries = (SettingEntry*)ps_calloc(totalEntries, sizeof(SettingEntry), AllocPref::PreferPSRAM);
+  if (!gRemoteModules || !gRemoteEntries) {
+    if (gRemoteModules) { free(gRemoteModules); gRemoteModules = nullptr; }
+    if (gRemoteEntries) { free(gRemoteEntries); gRemoteEntries = nullptr; }
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[RemoteSettings] alloc failed (%zu mods, %zu entries)", moduleCount, totalEntries);
+    return false;
+  }
 
   // Pass 2: populate. The root object's display name is "Device" so its
   // direct-leaf children (firmwareVersion, etc.) get a sensible header.
@@ -203,7 +213,7 @@ void freeRemoteSettingsModules() {
       if (gRemoteEntries[i].jsonKey) free((void*)gRemoteEntries[i].jsonKey);
       if (gRemoteEntries[i].label) free((void*)gRemoteEntries[i].label);
     }
-    delete[] gRemoteEntries;
+    free(gRemoteEntries);   // ps_calloc'd — must free(), not delete[]
     gRemoteEntries = nullptr;
   }
   
@@ -214,7 +224,7 @@ void freeRemoteSettingsModules() {
       if (gRemoteModules[i].name)        free((void*)gRemoteModules[i].name);
       if (gRemoteModules[i].jsonSection) free((void*)gRemoteModules[i].jsonSection);
     }
-    delete[] gRemoteModules;
+    free(gRemoteModules);   // ps_calloc'd — must free(), not delete[]
     gRemoteModules = nullptr;
   }
   

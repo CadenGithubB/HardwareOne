@@ -234,7 +234,7 @@ void streamBondInner(httpd_req_t* req) {
     if (hint) {
       html += '<div class="bond-progress-hint">' + hint + '</div>';
     }
-    html += '<div class="bond-progress-actions">';
+    html += '<div class="bond-progress-actions" data-guest-hide>';
     html += '<button class="btn" onclick="window.forceBondResync()" style="font-size:0.85em;padding:6px 14px;margin-right:8px">Force Re-sync</button>';
     html += '<button class="btn" onclick="window.unbondDevice()" style="font-size:0.85em;padding:6px 14px">Cancel / Unbond</button>';
     html += '</div>';
@@ -285,7 +285,7 @@ void streamBondInner(httpd_req_t* req) {
       html += '</select>';
       html += '</div>';
       html += '<div style="margin-top:15px;display:flex;gap:10px">';
-      html += '<button class="btn" onclick="window.connectBondDevice()" id="btn-bond-connect">Connect</button>';
+      html += '<button class="btn" onclick="window.connectBondDevice()" id="btn-bond-connect" data-guest-hide>Connect</button>';
       html += '<button class="btn" onclick="window.refreshBondDevices()">Refresh List</button>';
       html += '</div>';
       html += '<div id="bond-config-status" style="margin-top:10px;padding:10px;border-radius:6px;display:none"></div>';
@@ -327,12 +327,12 @@ void streamBondInner(httpd_req_t* req) {
     // previously split across two separate "Bonded Device" cards. The Remote
     // Command Execution box is intentionally kept as its own separate card below.
     html += '<div class="remote-card" style="position:relative">';
-    html += '<button class="btn refresh-btn" onclick="window.forceBondResync()" title="Force the device to re-fetch capabilities/manifest/settings/schema from the bonded peer">Refresh</button>';
+    html += '<button class="btn refresh-btn" onclick="window.forceBondResync()" title="Force the device to re-fetch capabilities/manifest/settings/schema from the bonded peer" data-guest-hide>Refresh</button>';
     html += '<div class="remote-title"><span class="status-dot ' + statusClass + '"></span>Bonded Device</div>';
     const localRole = data.role === 1 ? 'Master' : 'Worker';
     const remoteRole = data.role === 1 ? 'Worker' : 'Master';
     html += '<div class="remote-description">This device: ' + localRole + ' · Bonded device: ' + (data.peerName || 'Unknown') + ' (' + remoteRole + ')</div>';
-    html += '<div style="margin:8px 0;display:flex;gap:8px;flex-wrap:wrap"><button class="btn" onclick="window.swapRoles()" style="font-size:0.8em;padding:4px 12px">Swap Roles</button><button class="btn" onclick="window.unbondDevice()" style="font-size:0.8em;padding:4px 12px">Unbond</button></div>';
+    html += '<div style="margin:8px 0;display:flex;gap:8px;flex-wrap:wrap" data-guest-hide><button class="btn" onclick="window.swapRoles()" style="font-size:0.8em;padding:4px 12px">Swap Roles</button><button class="btn" onclick="window.unbondDevice()" style="font-size:0.8em;padding:4px 12px">Unbond</button></div>';
 
     // Rows are grouped by concern, separated by a thin divider. Each group
     // emits only the fields whose underlying data is available; if a whole
@@ -483,7 +483,7 @@ void streamBondInner(httpd_req_t* req) {
       // pure noise (every toggle disabled), and the peer's sensor state is already
       // shown read-only in the "Bonded Device" card — so render it master-only.
       if (isMaster && visible.length > 0) {
-        html += '<div class="remote-card">';
+        html += '<div class="remote-card" data-guest-hide>';
         html += '<div class="remote-title">Remote Sensors</div>';
         if (!synced) {
           html += '<div class="remote-description" style="color:var(--muted)">Waiting for bond sync to complete...</div>';
@@ -587,7 +587,7 @@ void streamBondInner(httpd_req_t* req) {
     // status — was merged into the unified Bonded Device card above.)
 
     // Remote CLI Card
-    html += '<div class="remote-card" style="grid-column: 1 / -1">';
+    html += '<div class="remote-card" style="grid-column: 1 / -1" data-guest-hide>';
     html += '<div class="remote-title">Remote Command Execution</div>';
     html += '<div class="remote-description">Execute CLI commands on the bonded device</div>';
     html += '<div class="cli-input">';
@@ -1078,7 +1078,7 @@ static esp_err_t handleBondStatus(httpd_req_t* req) {
 #if ENABLE_CAMERA_SENSOR
     localFeatures |= CAP_FEATURE_CAMERA;
 #endif
-#if ENABLE_MICROPHONE_SENSOR
+#if ENABLE_MICROPHONE
     localFeatures |= CAP_FEATURE_MICROPHONE;
 #endif
 #if ENABLE_ESP_SR
@@ -2137,48 +2137,48 @@ static esp_err_t handleBondFsGet(httpd_req_t* req) {
 
 void registerBondHandlers(httpd_handle_t server) {
 #if ENABLE_BONDED_MODE
-  static httpd_uri_t bondPage = { .uri = "/bond", .method = HTTP_GET, .handler = handleBondPage, .user_ctx = NULL };
+  static const httpd_uri_t bondPage = { .uri = "/bond", .method = HTTP_GET, .handler = handleBondPage, .user_ctx = NULL };
   httpd_register_uri_handler(server, &bondPage);
   
-  static httpd_uri_t bondStatus = { .uri = "/api/bond/status", .method = HTTP_GET, .handler = handleBondStatus, .user_ctx = NULL };
+  static const httpd_uri_t bondStatus = { .uri = "/api/bond/status", .method = HTTP_GET, .handler = handleBondStatus, .user_ctx = NULL };
   httpd_register_uri_handler(server, &bondStatus);
   
-  static httpd_uri_t bondStream = { .uri = "/api/bond/stream", .method = HTTP_POST, .handler = handleBondStream, .user_ctx = NULL };
+  static const httpd_uri_t bondStream = { .uri = "/api/bond/stream", .method = HTTP_POST, .handler = handleBondStream, .user_ctx = NULL };
   httpd_register_uri_handler(server, &bondStream);
   
-  static httpd_uri_t bondExec = { .uri = "/api/bond/exec", .method = HTTP_POST, .handler = handleBondExec, .user_ctx = NULL };
+  static const httpd_uri_t bondExec = { .uri = "/api/bond/exec", .method = HTTP_POST, .handler = handleBondExec, .user_ctx = NULL };
   httpd_register_uri_handler(server, &bondExec);
   
-  static httpd_uri_t bondRole = { .uri = "/api/bond/role", .method = HTTP_POST, .handler = handleBondRole, .user_ctx = NULL };
+  static const httpd_uri_t bondRole = { .uri = "/api/bond/role", .method = HTTP_POST, .handler = handleBondRole, .user_ctx = NULL };
   httpd_register_uri_handler(server, &bondRole);
 
-  static httpd_uri_t bondCliBatch = { .uri = "/api/bond/cli/batch", .method = HTTP_POST, .handler = handleBondCliBatch, .user_ctx = NULL };
+  static const httpd_uri_t bondCliBatch = { .uri = "/api/bond/cli/batch", .method = HTTP_POST, .handler = handleBondCliBatch, .user_ctx = NULL };
   httpd_register_uri_handler(server, &bondCliBatch);
 
-  static httpd_uri_t bondSettingsSync = { .uri = "/api/bond/settings/sync", .method = HTTP_POST, .handler = handleBondSettingsSync, .user_ctx = NULL };
+  static const httpd_uri_t bondSettingsSync = { .uri = "/api/bond/settings/sync", .method = HTTP_POST, .handler = handleBondSettingsSync, .user_ctx = NULL };
   httpd_register_uri_handler(server, &bondSettingsSync);
 
-  static httpd_uri_t bondSettingsSchema = { .uri = "/api/bond/settings/schema", .method = HTTP_GET, .handler = handleBondSettingsSchema, .user_ctx = NULL };
+  static const httpd_uri_t bondSettingsSchema = { .uri = "/api/bond/settings/schema", .method = HTTP_GET, .handler = handleBondSettingsSchema, .user_ctx = NULL };
   httpd_register_uri_handler(server, &bondSettingsSchema);
 
-  static httpd_uri_t bondSettingsSchemaSync = { .uri = "/api/bond/settings/schema/sync", .method = HTTP_POST, .handler = handleBondSettingsSchemaSync, .user_ctx = NULL };
+  static const httpd_uri_t bondSettingsSchemaSync = { .uri = "/api/bond/settings/schema/sync", .method = HTTP_POST, .handler = handleBondSettingsSchemaSync, .user_ctx = NULL };
   httpd_register_uri_handler(server, &bondSettingsSchemaSync);
 
-  static httpd_uri_t bondSettings = { .uri = "/api/bond/settings", .method = HTTP_GET, .handler = handleBondSettings, .user_ctx = NULL };
+  static const httpd_uri_t bondSettings = { .uri = "/api/bond/settings", .method = HTTP_GET, .handler = handleBondSettings, .user_ctx = NULL };
   httpd_register_uri_handler(server, &bondSettings);
 
-  static httpd_uri_t bondPairedDevices = { .uri = "/api/bond/paired-devices", .method = HTTP_GET, .handler = handleBondPairedDevices, .user_ctx = NULL };
+  static const httpd_uri_t bondPairedDevices = { .uri = "/api/bond/paired-devices", .method = HTTP_GET, .handler = handleBondPairedDevices, .user_ctx = NULL };
   httpd_register_uri_handler(server, &bondPairedDevices);
 
   // Structured peer-FS endpoints — see handle* above. All three replace
   // CLI-scrape paths that previously rode the bonded `remote:` command
   // pipeline and parsed text output. Now they're typed RPCs over the
   // FS_LIST / FS_STAT / FS_GET opcode pairs.
-  static httpd_uri_t bondFsList = { .uri = "/api/bond/fs/list", .method = HTTP_GET, .handler = handleBondFsList, .user_ctx = NULL };
+  static const httpd_uri_t bondFsList = { .uri = "/api/bond/fs/list", .method = HTTP_GET, .handler = handleBondFsList, .user_ctx = NULL };
   httpd_register_uri_handler(server, &bondFsList);
-  static httpd_uri_t bondFsStat = { .uri = "/api/bond/fs/stat", .method = HTTP_GET, .handler = handleBondFsStat, .user_ctx = NULL };
+  static const httpd_uri_t bondFsStat = { .uri = "/api/bond/fs/stat", .method = HTTP_GET, .handler = handleBondFsStat, .user_ctx = NULL };
   httpd_register_uri_handler(server, &bondFsStat);
-  static httpd_uri_t bondFsGet  = { .uri = "/api/bond/fs/get",  .method = HTTP_GET, .handler = handleBondFsGet,  .user_ctx = NULL };
+  static const httpd_uri_t bondFsGet  = { .uri = "/api/bond/fs/get",  .method = HTTP_GET, .handler = handleBondFsGet,  .user_ctx = NULL };
   httpd_register_uri_handler(server, &bondFsGet);
 #else
   (void)server;  // Suppress unused parameter warning

@@ -37,18 +37,21 @@ static TextEntryState gTE = {};
 
 // 13 chars per group keeps each row short (single-char) and the total
 // row count under 20 — comfortable for the firmware's list pagination.
-// Symbol set is intentionally small: just enough for hostnames and BLE
-// peer names. Add more groups (punctuation, brackets) if a future caller
-// needs them.
+// The symbols group exists for WiFi passwords (real-world PSKs lean on
+// !@#$ etc.); the double-quote is deliberately ABSENT from every group so
+// text-entry output is always safe to wrap in a quoted CLI argument
+// (CommandArgs has no escape support). Add more groups if a caller needs
+// the remaining punctuation (:;'<>[]{}|~\/).
 static const char* const kGroupChars[] = {
   "abcdefghijklm",
   "nopqrstuvwxyz",
   "ABCDEFGHIJKLM",
   "NOPQRSTUVWXYZ",
   "0123456789._-",
+  "!@#$%^&*()+=?",
 };
 static const char* const kGroupName[] = {
-  "a-m", "n-z", "A-M", "N-Z", "0-9 . _ -",
+  "a-m", "n-z", "A-M", "N-Z", "0-9 . _ -", "!@# sym",
 };
 static constexpr size_t kGroupCount =
     sizeof(kGroupChars) / sizeof(kGroupChars[0]);

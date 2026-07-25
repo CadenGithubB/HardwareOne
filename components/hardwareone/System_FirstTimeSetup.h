@@ -42,9 +42,9 @@ extern bool gFirstTimeSetupPerformed;
 
 // Migration tool restore flags
 // gAcceptingRestore: set true when user selects "Import from Backup" during setup,
-//   cleared after restore completes. Gate 2 of the triple-gated /api/restore endpoint.
-// gRestoreComplete: set true by /api/restore handler after files are written,
-//   polled by the setup flow to know when to proceed.
+//   cleared after restore is applied. Gate 2 of the triple-gated /api/restore endpoint.
+// gRestoreComplete: set true after OLED/serial confirm applies the staged backup
+//   (POST /api/restore only stages; it does not write flash by itself).
 extern volatile bool gAcceptingRestore;
 extern volatile bool gRestoreComplete;
 

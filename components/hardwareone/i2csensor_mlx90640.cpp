@@ -15,6 +15,7 @@
 #include "System_Debug.h"
 #include "System_I2C.h"
 #include "System_MemUtil.h"
+#include <new>                 // placement-new: gMLX90640 lives in PSRAM (ps_alloc)
 #include "System_Settings.h"
 #include "System_TaskUtils.h"
 #if ENABLE_ESPNOW
@@ -523,12 +524,17 @@ bool thermalInit() {
     // Wire1 is configured centrally with runtime-configurable pins
     i2cSetDefaultWire1Clock();
     
-    // Allocate sensor and begin at safe I2C speed
-    gMLX90640 = new Adafruit_MLX90640();
-    if (!gMLX90640) return false;
-    
+    // Allocate the sensor object in PSRAM via placement-new. Its ~4.7 KB is an
+    // inline paramsMLX90640 calibration struct (alpha/offset/kta/kv[768]), so the
+    // whole shell moves off scarce internal DRAM. MUST be torn down with ps_delete
+    // (both sites below) — a plain `delete` would free a ps_alloc block via the
+    // wrong allocator.
+    void* mlxBuf = ps_alloc(sizeof(Adafruit_MLX90640), AllocPref::PreferPSRAM, "thermal.obj");
+    if (!mlxBuf) return false;
+    gMLX90640 = new (mlxBuf) Adafruit_MLX90640();
+
     if (!gMLX90640->begin(MLX90640_I2CADDR_DEFAULT, &Wire1)) {
-      delete gMLX90640;
+      ps_delete(gMLX90640);
       gMLX90640 = nullptr;
       return false;
     }
@@ -1459,7 +1465,7 @@ void thermalTask(void* parameter) {
     if (!gThermalEnabled) {
       gThermalConnected = false;
       if (gMLX90640 != nullptr) {
-        delete gMLX90640;
+        ps_delete(gMLX90640);
         gMLX90640 = nullptr;
       }
       gThermalCache.thermalDataValid = false;

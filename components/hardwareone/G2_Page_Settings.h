@@ -4,19 +4,17 @@
 // =============================================================================
 // G2 glasses — "Settings" page
 // =============================================================================
-// Read-only settings inspector. The OLED Settings mode is interactive (cycle
-// through entries with the dial, edit values), but the G2 has no keyboard or
-// dial — so the port is "look but don't touch".
-//
-// Two view modes, toggled by tapping the first list item:
-//   • PRETTY — one row per setting: "module.key=value"  (default)
-//   • JSON   — serialized full settings JSON, line-wrapped for the lens
+// Two view modes, toggled by tapping the "View:" list item:
+//   • INTERACTIVE — drill module -> (group ->) entries; tap an entry to edit it
+//                   (boolean flip / enum pick-list / character keyboard),
+//                   committing through the real per-setting CLI command — the
+//                   same mechanism the OLED settings editor uses.  (default)
+//   • JSON        — serialized settings JSON, line-wrapped for the lens
+//                   (read-only)
 //
 // Both modes share the same registry source (registered SettingsModule list),
-// so additions to the settings registry show up automatically here. We cap
-// the total row count to avoid blowing up the list widget — the lens scrolls
-// natively so a long list is fine, but unbounded growth would fragment the
-// row buffer.
+// so additions to the settings registry show up automatically here. Each list
+// page is capped to a single BLE fragment (the lens scrolls natively).
 
 #include "System_BuildConfig.h"
 #include <Arduino.h>
@@ -34,10 +32,9 @@ bool g2ShowSettingsPage();
 // route here.
 void g2ShowSettingsMenu();
 
-// Tap dispatch from handleHijackMenuTap when gHijackPage == SETTINGS.
-//   idx == 0 → back to main menu
-//   idx == 1 → toggle view mode (PRETTY ↔ JSON), redraw
-//   idx >= 2 → no-op (read-only entries)
+// Tap dispatch from handleHijackMenuTap when gHijackPage == SETTINGS. Drives
+// the module / group / entry / pick-list navigation and the edit actions; see
+// the per-level state machine in G2_Page_Settings.cpp.
 void g2SettingsHandleTap(uint32_t idx);
 
 #else

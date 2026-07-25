@@ -193,6 +193,20 @@ struct TokenizerState {
 // Module State — the single engine runtime singleton (defined in System_LLM.cpp)
 // ============================================================================
 
+// One guided-menu group's location inside gLLM.menuBlob. Offsets are byte
+// offsets into the blob; the template/entity lists are consecutive
+// length-prefixed items ([u8 len][UTF-8]) walked on demand. See
+// LLM_GUIDED_MENU_SPEC §5 and System_LLM_Menu.cpp.
+struct LLMMenuGroupDesc {
+  uint32_t nameOff;   // offset of the group name bytes (nameLen bytes)
+  uint32_t tplOff;    // offset of the first template item
+  uint32_t entOff;    // offset of the first entity item
+  uint16_t tplCount;  // number of templates (<=64)
+  uint16_t entCount;  // number of entities (<=1024)
+  uint8_t  flags;     // bit0 = Do-mode; bits1-7 reserved 0
+  uint8_t  nameLen;   // group name length (<=32)
+};
+
 struct LLMRuntime {
   LLMConfig config;
   TransformerWeights weights;
@@ -241,6 +255,20 @@ struct LLMRuntime {
   uint16_t domainVocabCount;   // number of words (0 = gate inactive)
   size_t   domainVocabBytes;   // valid packed length in domainVocab (bounds the matcher walk)
 
+  // Guided-input menu (optional MENU section in the info block v2). Parsed at
+  // load into one PSRAM blob; the descriptors below index into it. Mutated ONLY
+  // under System_LLM_Menu.cpp's sMenuLock — readers run on the OLED loop, httpd,
+  // g2_tap_disp and cmd_exec while llmUnload can free the blob from another task,
+  // so every accessor copies out under the lock (no interior pointer escapes).
+  // menuGeneration bumps on EVERY load and unload so a surface can detect a model
+  // swap and refetch. Absence of a menu (menuGroupCount==0) is a first-class
+  // state, never an error. See LLM_GUIDED_MENU_SPEC §4-5.
+  uint8_t*         menuBlob;        // PSRAM via llmPsramAlloc("llm.menu"); nullptr if none
+  size_t           menuBytes;       // valid length of menuBlob
+  uint8_t          menuGroupCount;  // 0 = no guided input
+  LLMMenuGroupDesc menuGroups[8];
+  uint16_t         menuGeneration;  // bumped on EVERY llmLoadModel AND llmUnload
+
   // Effective context for KV cache (<= config.seq_len); may be capped by requestedMaxCtx
   int seq_ctx;
   int requestedMaxCtx;   // set by llmLoadModel before loadWeights is called
@@ -285,3 +313,27 @@ void  setLlmError(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 // the config is unusable — in that case only a full reload can recover.
 // Defined in System_LLM_Model.cpp.
 bool  llmBindRunState();
+
+// ============================================================================
+// Guided-menu lifecycle hooks (defined in System_LLM_Menu.cpp)
+// ============================================================================
+// These perform the LOCKED mutation of the menu state above. loadInfoBlockFromFile
+// (model loader) publishes a freshly parsed blob; llmUnload clears it. Both take
+// sMenuLock and bump menuGeneration so concurrent readers never see a torn state.
+
+// Create sMenuLock (idempotent). Called from llmInit.
+void llmMenuInit(void);
+
+// Install a validated menu blob + descriptors as the live menu, taking ownership
+// of `blob` (PSRAM). Frees any previous blob, bumps menuGeneration. count==0 with
+// blob==nullptr is equivalent to llmMenuClear().
+void llmMenuPublish(uint8_t* blob, size_t bytes,
+                    const LLMMenuGroupDesc* groups, uint8_t count);
+
+// Free the menu blob, zero the descriptors/count, bump menuGeneration.
+void llmMenuClear(void);
+
+// Guided-menu command handlers (defined in System_LLM_Menu.cpp; registered
+// NON-admin in llmCommands[] in System_LLM.cpp).
+const char* cmd_llm_menu(const String& args);
+const char* cmd_llm_ask(const String& args);

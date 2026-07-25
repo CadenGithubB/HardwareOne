@@ -100,7 +100,7 @@ static void renderSpinnerAnimation() {
 }
 
 static void renderMatrixAnimation() {
-  static uint8_t columns[128];
+  EXT_RAM_BSS_ATTR static uint8_t columns[128];
   static bool initialized = false;
 
   if (!initialized) {
@@ -125,7 +125,7 @@ static void renderMatrixAnimation() {
 }
 
 static void renderStarfieldAnimation() {
-  static int stars[40][3];
+  EXT_RAM_BSS_ATTR static int stars[40][3];
   static bool initialized = false;
 
   if (!initialized) {
@@ -169,7 +169,7 @@ static void renderPlasmaAnimation() {
 }
 
 static void renderFireAnimation() {
-  static uint8_t fire[128];
+  EXT_RAM_BSS_ATTR static uint8_t fire[128];
   static bool initialized = false;
 
   if (!initialized) {
@@ -285,7 +285,7 @@ static void renderRadarAnimation() {
 }
 
 static void renderWaveformAnimation() {
-  static int waveform[128];
+  EXT_RAM_BSS_ATTR static int waveform[128];
   static bool initialized = false;
 
   if (!initialized || animationFrame % 3 == 0) {

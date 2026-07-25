@@ -9,6 +9,7 @@
 #include "System_ESPNow.h"
 #include "System_BondedPeer.h"
 #include "HAL_Input.h"
+#include "System_MemUtil.h"   // ps_alloc — bond-picker scroll/labels live in PSRAM
 
 #if ENABLE_OLED_DISPLAY && ENABLE_ESPNOW && ENABLE_BONDED_MODE
 
@@ -282,13 +283,13 @@ void displayRemoteMode() {
 
     // Init scroll state and label buffer on first use (heap to save ~800 bytes DRAM BSS)
     if (!bondPickerScroll) {
-      bondPickerScroll = (OLEDScrollState*)malloc(sizeof(OLEDScrollState));
+      bondPickerScroll = (OLEDScrollState*)ps_alloc(sizeof(OLEDScrollState), AllocPref::PreferPSRAM, "oled.bondpicker");
       if (!bondPickerScroll) return;
       oledScrollInit(bondPickerScroll, nullptr, 4);
       oledScrollSetSplitPane(bondPickerScroll, 128, 0, 0);
     }
     if (!pickerLabels) {
-      pickerLabels = (char (*)[24])malloc(16 * 24);
+      pickerLabels = (char (*)[24])ps_alloc(16 * 24, AllocPref::PreferPSRAM, "oled.pickerlabels");
     }
     if (!pickerLabels) return;
 
@@ -520,6 +521,7 @@ static void bondMenuBack() {
 // =============================================================================
 
 bool bondModeInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
+  if (oledGuestBlocksMutate()) return true;
   // Device picker (not yet bonded)
   if (!gSettings.bondModeEnabled || gSettings.bondPeerMac.length() == 0) {
     handlePickerInput(newlyPressed);

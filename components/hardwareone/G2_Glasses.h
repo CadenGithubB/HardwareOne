@@ -194,6 +194,13 @@ const char* getG2StateString();
 // activity).
 bool g2BothConnected();
 
+// True iff the LEFT temple — the audio arm — has an active BLE link AND its
+// audio-notify char (6402) is subscribed. This is the microphone-availability
+// predicate for HAL_Audio (the G2 mic is LEFT-temple only on FW 2.2.0.24).
+// Deliberately NOT isG2Connected() (OR-of-temples → false-positive when only
+// RIGHT is up) nor g2BothConnected() (false-negative when RIGHT is absent).
+bool g2LeftConnected();
+
 // Block the calling task until g2BothConnected() returns true, or until
 // `timeoutMs` elapses. Returns true on success, false on timeout. Polls
 // every 100 ms — coarse but adequate for boot-time sequencing where
@@ -338,12 +345,12 @@ bool g2ShowTextPage(const char* content,
                     G2TapFn tapFn = nullptr);
 
 // -----------------------------------------------------------------------------
-// Shared paged-text render — pairs with G2TextPager + the pure paging ops in
+// Shared paged-text render — pairs with TextPager + the pure paging ops in
 // G2_Page_Common.h. This is the one piece of that pager that touches the wire
 // API (g2ShowTextPage), so it lives here rather than in the dependency-free
 // common header. Used by Files, Settings JSON, and ESPNow chat.
 // -----------------------------------------------------------------------------
-struct G2TextPager;  // defined in G2_Page_Common.h
+struct TextPager;  // defined in G2_Page_Common.h
 
 struct G2TextPageChrome {
   const char* title;       // heading text (e.g. "Pretty foo.json", "Inbox")
@@ -358,7 +365,7 @@ struct G2TextPageChrome {
 // forwarded only when the pager has >1 page (single-page views exit on any
 // gesture). A "...[truncated]" marker is appended on the final page when
 // pager.truncated is set. Returns g2ShowTextPage's result.
-bool g2TextPagerRender(struct G2TextPager& pager, char* pageBuf, size_t pageBufCap,
+bool g2TextPagerRender(struct TextPager& pager, char* pageBuf, size_t pageBufCap,
                        const G2TextPageChrome& chrome,
                        const G2ContainerGeom& geom,
                        void (*exitFn)(), G2TapFn navFn);
@@ -577,6 +584,11 @@ void g2StopLiveTextPage();
 // firmware won't send audio.
 bool g2MicSetAfeFeedActive(bool on);
 bool g2MicAfeFeedIsActive();
+// Turn the glasses' LC3 audio stream on/off (AudioCtrCmd{AudoFuncEn}) on the
+// LEFT temple only. Idempotent; returns false if the LEFT arm is down or the
+// send fails, so a caller can treat "armed but no enable" as a hard failure
+// instead of a silent dead mic. HAL_Audio drives this from capture start/stop.
+bool g2MicStreamEnable(bool on);
 // Drains up to `capSamples` samples into `out`. Returns number of
 // samples actually read (0 on timeout). Blocks up to `timeoutMs` if
 // the ring is empty.
@@ -596,11 +608,14 @@ enum G2HijackPage : uint8_t {
   G2_HIJACK_PAGE_FILES     = 1,
   G2_HIJACK_PAGE_SETTINGS  = 2,
   G2_HIJACK_PAGE_NETWORK   = 3,
-  // Read-only text views (Status / Sensors / System). Rendered as a list
-  // with "<- Back" at idx 0 and one line per item — never as a TEXT
-  // widget — because REBUILDing a TEXT widget into a container that was
-  // CREATEd as a LIST widget makes the firmware bail out with its
-  // generic "lost connection" overlay.
+  // Generic read-only text views (e.g. a command result shown as text).
+  // Rendered as a list with "<- Back" at idx 0 and one line per item —
+  // never as a TEXT widget — because REBUILDing a TEXT widget into a
+  // container that was CREATEd as a LIST widget makes the firmware bail out
+  // with its generic "lost connection" overlay. No registered page owns this
+  // id, so a tap at idx 0 falls back to MAIN (see handleHijackMenuTap).
+  // (Status used to share this id; it now has G2_HIJACK_PAGE_STATUS so its
+  // back row can route to the System launcher.)
   G2_HIJACK_PAGE_TEXT_VIEW = 4,
   // On-glasses test suite for transport / lens experiments. Stateful page
   // with size-bracket items ("Send 1 KB", etc.) so we can validate the
@@ -649,9 +664,63 @@ enum G2HijackPage : uint8_t {
   // of the paired Even Realities ring. Reached via the Apps launcher.
   // Live-text page (mirrors kMicDetailPage); impl inline in G2_Glasses.cpp.
   G2_HIJACK_PAGE_RING            = 13,
+  // LED control sub-page (color / effect / brightness). Reached by drilling
+  // from Sensors -> LED, mirroring the Camera Settings pattern (hidden from
+  // the main hijack menu). Impl in G2_Page_LED.cpp.
+  G2_HIJACK_PAGE_LED             = 14,
+  // System Events viewer — read-only live list of the device's typed event
+  // ring (kind / subject / age). Reached via the Apps launcher (hidden from
+  // the main hijack menu). Live-text page mirroring kRingPage; impl inline in
+  // G2_Glasses.cpp. NOTE: this is the ESP32-side event ring, NOT the G2's own
+  // native firmware notification system (a separate, deferred effort).
+  G2_HIJACK_PAGE_SYSEVENTS       = 15,
+  // FM radio tuner — action rows (seek/volume/mute/power) beside a live
+  // readout (freq or seek progress, RDS, volume, signal). Reached by tapping
+  // the FM row on the Sensors page (hidden from the main hijack menu).
+  // Live-text compound mirroring the Ring/sensor-live pattern; impl inline
+  // in G2_Glasses.cpp under #if ENABLE_FM_RADIO.
+  G2_HIJACK_PAGE_FMRADIO         = 16,
+  // Sensor-logging control — start/stop + a per-sensor selection list.
+  // Reached via the Apps launcher (hidden from the main menu). Plain list
+  // page; impl inline in G2_Glasses.cpp.
+  G2_HIJACK_PAGE_LOGGING         = 17,
+  // User manager (admin) — list / add / delete / role change. Reached via the
+  // Config launcher (row shown only for an admin pairer; hidden from the main
+  // menu). Impl in G2_Page_Users.cpp.
+  G2_HIJACK_PAGE_USERS           = 18,
+  // System launcher — groups the status/diagnostics pages (Status, System
+  // Events, Logging, Tests) under one top-level menu entry, mirroring the
+  // OLED's "System" category. Stateless: each row forwards to another page's
+  // show*Menu() / live-page start. Impl inline in G2_Glasses.cpp.
+  G2_HIJACK_PAGE_SYSTEM          = 19,
+  // Config launcher — groups the configuration pages (Settings, Users, OLED
+  // Login) under one top-level menu entry, mirroring the OLED's "Config"
+  // category. Stateless. Impl inline in G2_Glasses.cpp.
+  G2_HIJACK_PAGE_CONFIG          = 20,
+  // Status dashboard — live-text compound (body + battery corner). Given its
+  // own id (rather than the shared TEXT_VIEW) by the menu reorg so its back
+  // row can route to the System launcher it now lives under, without also
+  // capturing generic TEXT_VIEW views (which still fall back to MAIN).
+  G2_HIJACK_PAGE_STATUS          = 21,
+  // LLM guided-input submenu (Apps -> LLM): Open chat / Ask (guided) /
+  // Re-run last / Model select. Reached via the Apps launcher (hidden from
+  // the main menu). Impl inline in G2_Glasses.cpp under
+  // #if ENABLE_ONDEVICE_LLM. NOTE: this id must live here, not as a local
+  // cast in the .cpp — a local `(G2HijackPage)N` silently aliases whichever
+  // real member owns N once the enum grows, and the tap dispatcher resolves
+  // pages by id (first match wins), so the collision hands this page's taps
+  // to the other module.
+  G2_HIJACK_PAGE_LLM_MENU        = 22,
 };
 G2HijackPage g2GetHijackPage();
 void         g2SetHijackPage(G2HijackPage p);
+
+#if ENABLE_FM_RADIO
+// Open the FM tuner compound page (Sensors → FM). Defined in G2_Glasses.cpp.
+bool g2ShowFmTunerPage();
+#else
+inline bool g2ShowFmTunerPage() { return false; }
+#endif
 
 // =============================================================================
 // G2 lens-state struct
@@ -849,6 +918,16 @@ inline bool g2LensInOverlay() {
 // swaps under the same API. `durationMs` is the clear-after time; 0
 // means "don't auto-clear" (manual g2clear required).
 bool g2ShowNotification(const char* text, uint32_t durationMs = 5000);
+
+// Push a TRUE firmware-native notification card to the G2 (Even File Service).
+// Unlike g2ShowNotification (full-screen placeholder), the firmware renders its
+// own card, auto-wakes the display, and applies its own silent/DND. Enqueues
+// onto the lens-applier worker — never sends BLE inline, so it is safe to call
+// from any context. Returns false if no G2 is connected or the enqueue fails.
+// See docs/G2_NATIVE_NOTIFICATION_PLAN.md.
+bool g2SendNativeNotificationAsync(const char* appId, const char* displayName,
+                                   const char* title, const char* subtitle,
+                                   const char* body);
 bool g2ShowMultiLine(const char* lines[], size_t lineCount);
 bool g2ClearDisplay();
 
@@ -1058,6 +1137,7 @@ inline bool g2Connect(G2Eye eye = G2_EYE_LEFT) { return false; }
 inline bool g2ConnectSaved() { return false; }
 inline void g2Disconnect() {}
 inline bool isG2Connected() { return false; }
+inline bool g2LeftConnected() { return false; }
 inline G2State getG2State() { return G2_STATE_IDLE; }
 inline const char* getG2StateString() { return "disabled"; }
 inline bool g2StartScan(uint32_t durationMs = 10000) { return false; }
@@ -1081,6 +1161,7 @@ inline bool g2StartLiveTextPage(G2LivePageBuildFn, uint32_t,
 inline void g2StopLiveTextPage() {}
 inline bool g2MicSetAfeFeedActive(bool) { return false; }
 inline bool g2MicAfeFeedIsActive() { return false; }
+inline bool g2MicStreamEnable(bool) { return false; }
 inline size_t g2MicReadPcmSamples(int16_t*, size_t, uint32_t) { return 0; }
 inline size_t g2MicAfeRingDepth() { return 0; }
 inline uint32_t g2MicAfeOverrunCount() { return 0; }
@@ -1102,7 +1183,7 @@ struct G2TextPageChrome {
 };
 // Geom param omitted here (like the g2ShowTextPage stub above): G2ContainerGeom
 // isn't declared in the G2-disabled build. Nothing calls this stub anyway.
-inline bool g2TextPagerRender(struct G2TextPager&, char*, size_t,
+inline bool g2TextPagerRender(struct TextPager&, char*, size_t,
                               const G2TextPageChrome&,
                               void (*)(), G2TapFn) { return false; }
 inline bool g2ShowMultiTextPage(const void*, size_t,
@@ -1111,6 +1192,8 @@ inline bool g2ShowMultiTextPage(const void*, size_t,
 inline bool g2ShowMixedListText(const char* const*, size_t) { return false; }
 inline const char* g2ProbeRebuildTextChild() { return "G2 disabled"; }
 inline bool g2ShowNotification(const char* text, uint32_t durationMs = 5000) { return false; }
+inline bool g2SendNativeNotificationAsync(const char*, const char*, const char*,
+                                          const char*, const char*) { return false; }
 inline bool g2ShowMultiLine(const char* lines[], size_t lineCount) { return false; }
 inline bool g2ClearDisplay() { return false; }
 inline void g2SetEventCallback(G2EventCallback callback) {}

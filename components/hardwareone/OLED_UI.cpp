@@ -499,6 +499,58 @@ static const int RIBBON_ICON_SIZE = 16; // Icon size in the ribbon (0.5x of 32x3
 static const int RIBBON_MIN_SIZE = 18; // Minimized indicator size (fits the 16px icon)
 static const int RIBBON_ANIM_DURATION_MS = 500; // Total time for slide in/out animation (~5 frames at 10 FPS)
 
+// Marquee scroll speed for long banner text. The panel redraws ~10 FPS, so we
+// advance this many pixels per 100ms frame; 2 px ≈ 20 px/s (2x the old 1 px).
+// Faster scroll also clears each banner sooner, shrinking the queue backlog.
+static const int RIBBON_SCROLL_PX_PER_FRAME = 2;
+
+// ── Notification banner queue ──────────────────────────────────────────────
+// The ribbon is a single animated slot, so back-to-back notifications used to
+// clobber each other. oledNotificationBannerShow() enqueues when the ribbon is
+// busy; oledBannerQueuePump() shows the next one the moment it returns to idle.
+// Retention isn't the point (the notification center holds full history) — this
+// just paces transient pop-ups so each shows for its full duration. Overflow
+// drops the OLDEST pending (favour recency; the record is still in history).
+static const uint8_t BANNER_QUEUE_MAX = 12;
+struct BannerQueueEntry {
+  char message[128];
+  PairingRibbonIcon icon;
+  uint32_t visibleMs;
+  bool blink;
+};
+EXT_RAM_BSS_ATTR static BannerQueueEntry sBannerQueue[BANNER_QUEUE_MAX];
+static uint8_t  sBannerQHead = 0;
+static uint8_t  sBannerQCount = 0;
+static uint32_t sBannerQDropped = 0;   // overflow drops (visible via bannerqueue diag if wanted)
+
+static void oledBannerQueuePush(const char* message, PairingRibbonIcon icon,
+                                uint32_t visibleMs, bool blink) {
+  if (sBannerQCount >= BANNER_QUEUE_MAX) {          // full — drop oldest pending
+    sBannerQHead = (uint8_t)((sBannerQHead + 1) % BANNER_QUEUE_MAX);
+    sBannerQCount--;
+    sBannerQDropped++;
+  }
+  uint8_t tail = (uint8_t)((sBannerQHead + sBannerQCount) % BANNER_QUEUE_MAX);
+  BannerQueueEntry& e = sBannerQueue[tail];
+  strncpy(e.message, message, sizeof(e.message) - 1);
+  e.message[sizeof(e.message) - 1] = '\0';
+  e.icon = icon;
+  e.visibleMs = visibleMs;
+  e.blink = blink;
+  sBannerQCount++;
+}
+
+// Show the next queued banner if the ribbon is idle. Called every update tick.
+static void oledBannerQueuePump() {
+  if (oledBootModeActive) return;
+  if (sBannerQCount == 0) return;
+  if (gOledPairingRibbon.state != PairingRibbonState::HIDDEN) return;
+  const BannerQueueEntry& e = sBannerQueue[sBannerQHead];
+  oledPairingRibbonShow(e.message, e.icon, e.visibleMs, e.blink);
+  sBannerQHead = (uint8_t)((sBannerQHead + 1) % BANNER_QUEUE_MAX);
+  sBannerQCount--;
+}
+
 void oledPairingRibbonShow(const char* message, PairingRibbonIcon icon, uint32_t visibleMs, bool blink) {
   strncpy(gOledPairingRibbon.message, message, sizeof(gOledPairingRibbon.message) - 1);
   gOledPairingRibbon.message[sizeof(gOledPairingRibbon.message) - 1] = '\0';
@@ -510,9 +562,9 @@ void oledPairingRibbonShow(const char* message, PairingRibbonIcon icon, uint32_t
   int fullTextWidth = msgLen * 6;     // Total pixel width of message
   if (fullTextWidth > textWidth) {
     // Message needs scrolling - calculate time for one full scroll cycle
-    // Scroll speed: 1 pixel per frame (100ms at 10 FPS), plus pauses at each end
+    // Scroll time budget: RIBBON_SCROLL_PX_PER_FRAME px per 100ms frame + end pauses.
     int pixelsToScroll = fullTextWidth - textWidth;
-    uint32_t scrollTimeMs = (pixelsToScroll * 100) + 2000;  // scroll time + pauses
+    uint32_t scrollTimeMs = (pixelsToScroll * 100 / RIBBON_SCROLL_PX_PER_FRAME) + 2000;
     // Use the longer of: provided duration or scroll duration, but cap at 15 seconds
     gOledPairingRibbon.visibleDurationMs = min(max(visibleMs, scrollTimeMs), (uint32_t)15000);
   } else {
@@ -546,7 +598,10 @@ bool oledPairingRibbonActive() {
 }
 
 void oledPairingRibbonUpdate() {
-  if (gOledPairingRibbon.state == PairingRibbonState::HIDDEN) return;
+  if (gOledPairingRibbon.state == PairingRibbonState::HIDDEN) {
+    oledBannerQueuePump();  // idle — show the next queued notification banner, if any
+    return;
+  }
   
   uint32_t now = millis();
   uint32_t elapsed = now - gOledPairingRibbon.stateStartMs;
@@ -577,14 +632,14 @@ void oledPairingRibbonUpdate() {
           gOledPairingRibbon.blinkCount--;
         }
       }
-      // Update horizontal pixel scroll for long text (1 pixel per frame at 10 FPS)
+      // Update horizontal pixel scroll for long text (RIBBON_SCROLL_PX_PER_FRAME px / 100ms frame)
       if (now - gOledPairingRibbon.lastScrollMs >= 100) {
         gOledPairingRibbon.lastScrollMs = now;
         int msgLen = strlen(gOledPairingRibbon.message);
         int textWidth = RIBBON_WIDTH - 22;
         int fullTextWidth = msgLen * 6;
         if (fullTextWidth > textWidth) {
-          gOledPairingRibbon.scrollOffset++;
+          gOledPairingRibbon.scrollOffset += RIBBON_SCROLL_PX_PER_FRAME;
           int maxScroll = fullTextWidth - textWidth;
           if (gOledPairingRibbon.scrollOffset > maxScroll + 12) {
             gOledPairingRibbon.scrollOffset = -12;  // Reset with brief pause (12px ~ 2 chars)
@@ -678,6 +733,13 @@ void oledNotificationBannerShow(const char* message, PairingRibbonIcon icon,
                                 uint32_t visibleMs, bool blink) {
   // Suppress notifications during boot animation - they overlay the progress screen
   if (oledBootModeActive) return;
+  // If the ribbon is already busy (a prior banner still animating, or a pairing
+  // ribbon), queue this one instead of clobbering it — the ribbon pumps the
+  // queue when it returns to idle. Show immediately only when idle.
+  if (gOledPairingRibbon.state != PairingRibbonState::HIDDEN) {
+    oledBannerQueuePush(message, icon, visibleMs, blink);
+    return;
+  }
   oledPairingRibbonShow(message, icon, visibleMs, blink);
 }
 
@@ -713,7 +775,7 @@ void oledNotificationBannerUpdate(const char* message, PairingRibbonIcon icon,
   int fullTextWidth = msgLen * 6;
   if (fullTextWidth > textWidthBanner) {
     int pixelsToScroll = fullTextWidth - textWidthBanner;
-    uint32_t scrollTimeMs = (pixelsToScroll * 100) + 2000;  // 1 pixel per frame + pauses
+    uint32_t scrollTimeMs = (pixelsToScroll * 100 / RIBBON_SCROLL_PX_PER_FRAME) + 2000;
     gOledPairingRibbon.visibleDurationMs = min(max(extraMs, scrollTimeMs), (uint32_t)15000);
   } else {
     gOledPairingRibbon.visibleDurationMs = extraMs;

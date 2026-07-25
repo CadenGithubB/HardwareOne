@@ -175,6 +175,7 @@ void displaySpeechInfo() {
 // ============================================================================
 
 bool speechInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed) {
+  if (oledGuestBlocksMutate()) return true;
   if (oledScrollHandleNav(&sSpeechMenuScroll)) return true;
 
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {

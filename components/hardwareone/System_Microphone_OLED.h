@@ -4,7 +4,7 @@
 
 #include "System_BuildConfig.h"
 
-#if ENABLE_MICROPHONE_SENSOR && ENABLE_OLED_DISPLAY
+#if ENABLE_MICROPHONE && ENABLE_OLED_DISPLAY
 
 #include "OLED_Display.h"
 #include "OLED_Utils.h"
@@ -103,7 +103,10 @@ static bool microphoneInputHandler(int deltaX, int deltaY, uint32_t newlyPressed
       DEBUG_MICF("[MICROPHONE] Y button: Starting mic first...");
       initMicrophone();
     }
-    micRecording = !micRecording;
+    // Use the real record path (opens the WAV + spawns the record task) — a bare
+    // `micRecording = !micRecording` toggled the flag without any of that.
+    if (micRecording) stopRecording();
+    else              startRecording();
     DEBUG_MICF("[MICROPHONE] Y button: Recording %s", micRecording ? "started" : "stopped");
     return true;
   }
@@ -130,6 +133,6 @@ static const OLEDModeEntry microphoneOLEDModes[] = {
 // Auto-register Microphone OLED mode
 REGISTER_OLED_MODE_MODULE(microphoneOLEDModes, sizeof(microphoneOLEDModes) / sizeof(microphoneOLEDModes[0]), "Microphone");
 
-#endif // ENABLE_MICROPHONE_SENSOR && ENABLE_OLED_DISPLAY
+#endif // ENABLE_MICROPHONE && ENABLE_OLED_DISPLAY
 
 #endif // SYSTEM_MICROPHONE_OLED_H

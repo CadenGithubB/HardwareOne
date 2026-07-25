@@ -287,8 +287,6 @@ esp_err_t handleUserSettingsSet(httpd_req_t* req);
 esp_err_t handleDeviceRegistryGet(httpd_req_t* req);
 esp_err_t handleSessionsList(httpd_req_t* req);
 esp_err_t handleAdminSessionsList(httpd_req_t* req);
-esp_err_t handleOutputGet(httpd_req_t* req);
-esp_err_t handleOutputTemp(httpd_req_t* req);
 esp_err_t handleNotice(httpd_req_t* req);
 esp_err_t handleLogs(httpd_req_t* req);
 esp_err_t handleSensorsStatusWithUpdates(httpd_req_t* req);

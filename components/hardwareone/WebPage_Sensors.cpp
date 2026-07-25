@@ -310,7 +310,7 @@ esp_err_t handleSensorData(httpd_req_t* req) {
         return ESP_OK;
 #endif
       } else if (sensorType == "microphone") {
-#if ENABLE_MICROPHONE_SENSOR
+#if ENABLE_MICROPHONE
         extern const char* buildMicrophoneStatusJson();
         const char* json = buildMicrophoneStatusJson();
         sendJsonResponse(req, json);
@@ -551,6 +551,7 @@ esp_err_t handleSensorsStatus(httpd_req_t* req) {
   if (!tgRequireAuth(ctx)) {
     return ESP_OK;
   }
+  if (!webGuestAccessAllowed(req, ctx)) return ESP_OK;
   DEBUG_STORAGEF("[handleSensorsStatus] Auth SUCCESS for user: %s", ctx.user.c_str());
 
   httpd_resp_set_type(req, "application/json");
@@ -663,6 +664,7 @@ esp_err_t handleCameraFrame(httpd_req_t* req) {
     DEBUG_HTTPF("/api/camera/frame auth failed ip=%s", ctx.ip.c_str());
     return ESP_OK;
   }
+  if (!webGuestAccessAllowed(req, ctx)) return ESP_OK;
 
 #if ENABLE_CAMERA_SENSOR
   extern bool gCameraEnabled;
@@ -850,7 +852,7 @@ esp_err_t handleCameraStream(httpd_req_t* req) {
 esp_err_t handleMicRecordingsList(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
 
-#if ENABLE_MICROPHONE_SENSOR
+#if ENABLE_MICROPHONE
   extern int getRecordingCount();
   extern String getRecordingsList();
 
@@ -904,7 +906,7 @@ esp_err_t handleMicRecordingsList(httpd_req_t* req) {
 esp_err_t handleMicRecordingFile(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
 
-#if ENABLE_MICROPHONE_SENSOR
+#if ENABLE_MICROPHONE
   // Get filename from query string
   char query[128];
   char filename[64] = {0};
@@ -994,32 +996,32 @@ esp_err_t handleMicRecordingFile(httpd_req_t* req) {
 // Register all sensor-related URI handlers
 void registerSensorHandlers(httpd_handle_t server) {
   // Sensors page
-  static httpd_uri_t sensorsPage = { .uri = "/sensors", .method = HTTP_GET, .handler = handleSensorsPage, .user_ctx = NULL };
+  static const httpd_uri_t sensorsPage = { .uri = "/sensors", .method = HTTP_GET, .handler = handleSensorsPage, .user_ctx = NULL };
   httpd_register_uri_handler(server, &sensorsPage);
   
   // Sensor data API
-  static httpd_uri_t sensorData = { .uri = "/api/sensors", .method = HTTP_GET, .handler = handleSensorData, .user_ctx = NULL };
+  static const httpd_uri_t sensorData = { .uri = "/api/sensors", .method = HTTP_GET, .handler = handleSensorData, .user_ctx = NULL };
   httpd_register_uri_handler(server, &sensorData);
   
   // Sensor status API
-  static httpd_uri_t sensorsStatus = { .uri = "/api/sensors/status", .method = HTTP_GET, .handler = handleSensorsStatusWithUpdates, .user_ctx = NULL };
+  static const httpd_uri_t sensorsStatus = { .uri = "/api/sensors/status", .method = HTTP_GET, .handler = handleSensorsStatusWithUpdates, .user_ctx = NULL };
   httpd_register_uri_handler(server, &sensorsStatus);
   
   // Remote sensors API
-  static httpd_uri_t remoteSensors = { .uri = "/api/sensors/remote", .method = HTTP_GET, .handler = handleRemoteSensors, .user_ctx = NULL };
+  static const httpd_uri_t remoteSensors = { .uri = "/api/sensors/remote", .method = HTTP_GET, .handler = handleRemoteSensors, .user_ctx = NULL };
   httpd_register_uri_handler(server, &remoteSensors);
   
   // Camera endpoints
-  static httpd_uri_t cameraStatus = { .uri = "/api/sensors/camera/status", .method = HTTP_GET, .handler = handleCameraStatus, .user_ctx = NULL };
-  static httpd_uri_t cameraFrame = { .uri = "/api/sensors/camera/frame", .method = HTTP_GET, .handler = handleCameraFrame, .user_ctx = NULL };
-  static httpd_uri_t cameraStream = { .uri = "/api/sensors/camera/stream", .method = HTTP_GET, .handler = handleCameraStream, .user_ctx = NULL };
+  static const httpd_uri_t cameraStatus = { .uri = "/api/sensors/camera/status", .method = HTTP_GET, .handler = handleCameraStatus, .user_ctx = NULL };
+  static const httpd_uri_t cameraFrame = { .uri = "/api/sensors/camera/frame", .method = HTTP_GET, .handler = handleCameraFrame, .user_ctx = NULL };
+  static const httpd_uri_t cameraStream = { .uri = "/api/sensors/camera/stream", .method = HTTP_GET, .handler = handleCameraStream, .user_ctx = NULL };
   httpd_register_uri_handler(server, &cameraStatus);
   httpd_register_uri_handler(server, &cameraFrame);
   httpd_register_uri_handler(server, &cameraStream);
   
   // Microphone recording endpoints
-  static httpd_uri_t micRecordings = { .uri = "/api/recordings", .method = HTTP_GET, .handler = handleMicRecordingsList, .user_ctx = NULL };
-  static httpd_uri_t micRecordingFile = { .uri = "/api/recordings/file", .method = HTTP_GET, .handler = handleMicRecordingFile, .user_ctx = NULL };
+  static const httpd_uri_t micRecordings = { .uri = "/api/recordings", .method = HTTP_GET, .handler = handleMicRecordingsList, .user_ctx = NULL };
+  static const httpd_uri_t micRecordingFile = { .uri = "/api/recordings/file", .method = HTTP_GET, .handler = handleMicRecordingFile, .user_ctx = NULL };
   httpd_register_uri_handler(server, &micRecordings);
   httpd_register_uri_handler(server, &micRecordingFile);
 
@@ -1030,8 +1032,8 @@ void registerSensorHandlers(httpd_handle_t server) {
   // an empty list / "SD unavailable" when there's no SD card.)
   extern esp_err_t handleVideoRecordingsList(httpd_req_t* req);
   extern esp_err_t handleVideoRecordingFile(httpd_req_t* req);
-  static httpd_uri_t vidList = { .uri = "/api/videos", .method = HTTP_GET, .handler = handleVideoRecordingsList, .user_ctx = NULL };
-  static httpd_uri_t vidFile = { .uri = "/api/videos/file", .method = HTTP_GET, .handler = handleVideoRecordingFile, .user_ctx = NULL };
+  static const httpd_uri_t vidList = { .uri = "/api/videos", .method = HTTP_GET, .handler = handleVideoRecordingsList, .user_ctx = NULL };
+  static const httpd_uri_t vidFile = { .uri = "/api/videos/file", .method = HTTP_GET, .handler = handleVideoRecordingFile, .user_ctx = NULL };
   httpd_register_uri_handler(server, &vidList);
   httpd_register_uri_handler(server, &vidFile);
 }

@@ -60,10 +60,10 @@
 #if ENABLE_BLUETOOTH
 #include "Bluetooth.h"
 #endif
-#if ENABLE_LLM
+#if ENABLE_ONDEVICE_LLM
 #include "System_LLM.h"
 #endif
-#if ENABLE_CAMERA
+#if ENABLE_CAMERA_SENSOR
 #include "System_Camera_DVP.h"
 #endif
 #if ENABLE_MICROPHONE
@@ -140,7 +140,7 @@ static bool ramFlushReadLive(RamFlushFeatureId f) {
     case RF_RTC:        return gRtcEnabled;
     case RF_PRESENCE:   return gPresenceEnabled;
 
-#if ENABLE_CAMERA
+#if ENABLE_CAMERA_SENSOR
     case RF_CAMERA:     return gCameraEnabled;
 #else
     case RF_CAMERA:     return false;
@@ -160,11 +160,11 @@ static bool ramFlushReadLive(RamFlushFeatureId f) {
 
     case RF_HTTP:       return isHttpServerRunning();
 
-#if ENABLE_LLM
+#if ENABLE_ONDEVICE_LLM
     // READY alone is insufficient: GENERATING is a distinct state, so a capture
     // taken mid-generation would read a loaded model as unloaded.
     case RF_LLM: {
-      LLMState s = llmGetStatus();
+      LLMState s = llmGetStatus().state;   // llmGetStatus() returns LLMStatus{ state, ... }
       return (s == LLMState::READY || s == LLMState::GENERATING);
     }
 #else

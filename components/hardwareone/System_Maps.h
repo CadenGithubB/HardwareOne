@@ -817,9 +817,13 @@ public:
   static void selectTarget(int index);
   static int getSelectedTarget() { return _selectedTarget; }
   
-  // Calculate distance (meters) and bearing (degrees) from position to target
+  // Calculate distance (meters) and bearing (degrees) from position to selected target
   static bool getDistanceBearing(float fromLat, float fromLon, 
                                   float& distanceM, float& bearingDeg);
+
+  // Same, but look up waypoint by name (case-insensitive). Does not change selected target.
+  static bool getDistanceBearingToName(const char* name, float fromLat, float fromLon,
+                                       float& distanceM, float& bearingDeg);
   
   // Render waypoints on map
   static void renderWaypoints(MapRenderer* renderer, 
@@ -829,6 +833,10 @@ public:
 private:
   static Waypoint _waypoints[MAX_WAYPOINTS];
   static int _selectedTarget;  // -1 = none
+
+  // Haversine distance/bearing to an active waypoint index
+  static bool getDistanceBearingToIndex(int index, float fromLat, float fromLon,
+                                        float& distanceM, float& bearingDeg);
 };
 
 // =============================================================================

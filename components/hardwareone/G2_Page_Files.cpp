@@ -31,10 +31,13 @@
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 
 #include "G2_Glasses.h"
-#include "G2_Page_Common.h"      // G2TextPager + paging ops (shared text viewer)
+#include "G2_Page_Common.h"      // TextPager + paging ops (shared text viewer)
 #include "G2_HijackCmd.h"        // G2HijackCtxGuard — installs pairedByUser identity
+#include "G2_Page_TextEntry.h"   // on-lens keyboard for Rename
 #include "System_FileManager.h"
 #include "System_Filesystem.h"
+#include "System_MemUtil.h"   // ps_alloc — gFilesFm lives in PSRAM (placement-new)
+#include <new>                // placement-new
 #include "System_Debug.h"
 #include "System_AuthIdentity.h"
 
@@ -100,12 +103,43 @@ enum FilesChooserKind : uint8_t {
                           //   transport as the BMP viewers).
   FILE_CHOOSER_TEXT = 3,  // .txt / .csv — one raw paged view + Info (no
                           //  pretty-parse). Shares the JSON viewer's engine
-                          //  (readTextLimited → wrap → G2TextPager). Its
-                          //  chooser is 4 rows, so Info sits at idx 3.
+                          //  (readTextLimited → wrap → TextPager).
+  FILE_CHOOSER_OTHER = 4, // any other file type — no viewer, but Info /
+                          //  Rename / Delete must still be reachable (the old
+                          //  direct-to-info-overlay path made mutation
+                          //  impossible for most file types).
 };
 static FilesChooserKind gFilesChooserKind = FILE_CHOOSER_BMP;
 
-// Paged text viewer (JSON pretty/raw, .txt, .csv). Shares the G2TextPager
+// Per-row action table for the chooser. showFileChooser fills rows[] and
+// this table in ONE place so render and dispatch can never drift — the old
+// fixed-index-per-kind dispatch was already fragile at three kinds and two
+// more rows (Rename/Delete) across five kinds would have guaranteed a bug.
+enum FilesAction : uint8_t {
+  FACT_BACK = 0,    // <- Files
+  FACT_HEADER,      // filename header — inert
+  FACT_VIEW,        // image native / text raw / json pretty
+  FACT_VIEW_FULL,   // image 2x upscale
+  FACT_JSON_RAW,    // json raw view
+  FACT_INFO,        // metadata overlay
+  FACT_RENAME,      // keyboard → filerename
+  FACT_DELETE,      // confirm  → filedelete
+};
+#define FILES_CHOOSER_MAX_ROWS 8
+static FilesAction gFilesChooserAct[FILES_CHOOSER_MAX_ROWS];
+static uint8_t     gFilesChooserRowN = 0;
+
+// Mutation target snapshot + state. The chooser entry is a single-slot static
+// cleared by every list redraw, so the absolute path and basename are copied
+// here the moment a Rename/Delete action is tapped — the keyboard/confirm
+// flows that follow must not depend on the chooser slot surviving.
+EXT_RAM_BSS_ATTR static char gFilesActionPath[FILE_MANAGER_MAX_PATH + 32];
+static char gFilesActionName[FILE_MANAGER_MAX_NAME];
+static bool gFilesConfirmActive = false;   // delete-confirm list is up
+static char gFilesConfirmRow[FILE_MANAGER_MAX_NAME + 12];
+EXT_RAM_BSS_ATTR static char gFilesMutateMsg[112];          // result banner text
+
+// Paged text viewer (JSON pretty/raw, .txt, .csv). Shares the TextPager
 // engine in G2_Page_Common.h with Settings JSON + ESPNow chat: one flat PSRAM
 // body buffer + offset table, hard-wrapped so long CSV rows / JSON values flow
 // across lens lines instead of being clipped. tap/scroll advance, double-tap
@@ -121,7 +155,7 @@ EXT_RAM_BSS_ATTR static char gFilesTextBody[FILES_TEXT_BODY_CAP];        // wrap
 static uint16_t              gFilesTextPageOff[FILES_TEXT_MAX_PAGES + 1]; // page offsets
 EXT_RAM_BSS_ATTR static char gFilesTextPageBuf[FILES_TEXT_PAGE_BUDGET + 128]; // render scratch
 static char                  gFilesTextTitle[FILES_ROW_LEN] = {0};
-static G2TextPager gFilesPager = {
+static TextPager gFilesPager = {
     gFilesTextBody, gFilesTextPageOff, FILES_TEXT_MAX_PAGES,
     FILES_TEXT_PAGE_BUDGET, /*pageCount=*/0, /*curPage=*/0, /*truncated=*/false };
 
@@ -136,7 +170,16 @@ static bool filesRenderTextPage();
 
 static FileManager* ensureFm() {
   if (!gFilesFm) {
-    gFilesFm = new FileManager();
+    // PSRAM placement-new: FileManager's ~5 KB is an inline cachedEntries[64] POD
+    // array, so the whole object moves off internal DRAM. This lens FileManager is
+    // create-once-keep (no delete site anywhere) → no ps_delete pair; it persists
+    // for the session. The `if (gFilesFm)` guards below handle an alloc failure.
+    void* fmBuf = ps_alloc(sizeof(FileManager), AllocPref::PreferPSRAM, "g2.filemgr");
+    gFilesFm = fmBuf ? new (fmBuf) FileManager() : nullptr;
+    // Show a "[#]" item-count badge on folder rows (opt-in so only this lens
+    // explorer pays the per-folder count; the OLED browser stays untouched).
+    // Set BEFORE the first navigate so the initial load populates counts.
+    if (gFilesFm) gFilesFm->setCountFolderChildren(true);
     if (gFilesFm) gFilesFm->navigate("/");
     // First-time init: register our overlay-expired callback so the
     // lens-state tick auto-redraws our list when the file-info flash
@@ -211,9 +254,17 @@ static size_t buildRows() {
     FileEntry entry;
     if (!fm->getItem(i, entry)) continue;
     if (entry.isFolder) {
+      // "[#]" item-count badge (matches the web/app folder counts). Capped at
+      // 99 by the FileManager → show "99+" so an empty folder reads "[0]" and
+      // a full one never overflows the row.
+      char badge[8];
+      if (entry.childCount >= 99) snprintf(badge, sizeof(badge), "[99+]");
+      else                        snprintf(badge, sizeof(badge), "[%u]", (unsigned)entry.childCount);
       char nm[FILES_ROW_LEN];
-      truncateInto(nm, sizeof(nm), entry.name, FILES_ROW_LEN - 4);
-      snprintf(gFilesRows[row], FILES_ROW_LEN, "/ %s", nm);
+      // Reserve "/ " (2) + " " (1) + badge for the name column.
+      const int reserve = 3 + (int)strlen(badge);
+      truncateInto(nm, sizeof(nm), entry.name, FILES_ROW_LEN - reserve);
+      snprintf(gFilesRows[row], FILES_ROW_LEN, "/ %s %s", nm, badge);
     } else {
       // Compact size: B / K / M
       uint32_t sz = entry.size;
@@ -364,6 +415,79 @@ static void buildChooserPath(char* out, size_t cap) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Rename / Delete flows. Both dispatch the REAL commands through cmd_exec
+// (auth + [CMD] audit as the paired user — deliberately stricter than the
+// OLED's direct-FileManager ops): `filerename "<old>" "<new>"` and the
+// ONE-SHOT `filedelete "<path>" confirm` (the bare form arms an interactive
+// CLI confirm no tap UI can answer). /system config stays protected below
+// us at the VFS layer.
+// ---------------------------------------------------------------------------
+
+// Completion on cmd_exec_task. The Power page proves direct lens draws +
+// vTaskDelay are accepted practice here (onPowerCmdDone precedent). Success
+// forces a directory re-scan — FileManager::refresh() is generation-gated
+// and would keep showing the deleted/old name.
+static void onFilesMutateDone(bool ok, const char* result,
+                              const G2CmdCookie& /*cookie*/, void* /*userData*/) {
+  // executeCommand reports ok=true even for handler "Error: ..." strings —
+  // judge by the result prefix, not the flag.
+  const bool success = ok && result && strncmp(result, "OK", 2) == 0;
+  const char* msg = (result && result[0]) ? result : (ok ? "Done" : "Failed");
+  if (strncmp(msg, "OK: ", 4) == 0) msg += 4;  // banner brevity
+  strncpy(gFilesMutateMsg, msg, sizeof(gFilesMutateMsg) - 1);
+  gFilesMutateMsg[sizeof(gFilesMutateMsg) - 1] = '\0';
+  DEBUG_G2F("[G2] Files: mutate done ok=%d success=%d '%s'",
+            (int)ok, (int)success, gFilesMutateMsg);
+
+  if (g2GetHijackPage() != G2_HIJACK_PAGE_FILES) return;  // user navigated away
+
+  g2ShowText(gFilesMutateMsg);
+  vTaskDelay(pdMS_TO_TICKS(1300));
+  if (success) {
+    FileManager* fm = ensureFm();
+    if (fm) fm->forceRescan();
+  }
+  if (g2GetHijackPage() == G2_HIJACK_PAGE_FILES) g2ShowFilesMenu();
+}
+
+static void filesSubmitMutate(const char* line) {
+  G2CmdCookie cookie{};
+  cookie.targetPage = g2GetHijackPage();
+  if (!g2SubmitHijackCommand(line, cookie, onFilesMutateDone, nullptr)) {
+    DEBUG_G2F("[G2] Files: mutate submit FAILED — no inline fallback");
+    g2ShowFilesMenu();
+  }
+}
+
+// Keyboard callbacks (BLE notify task — String build + submit only; the
+// list redraw on cancel is cache-hot, no FS scan).
+static void filesRenameCommit(const char* text) {
+  if (!text || text[0] == '\0' || strcmp(text, gFilesActionName) == 0) {
+    DEBUG_G2F("[G2] Files: rename empty/unchanged — cancelled");
+    g2ShowFilesMenu();
+    return;
+  }
+  String line = String("filerename \"") + gFilesActionPath + "\" \"" + text + "\"";
+  filesSubmitMutate(line.c_str());
+}
+
+static void filesRenameCancel() {
+  DEBUG_G2F("[G2] Files: rename cancelled");
+  g2ShowFilesMenu();
+}
+
+// Delete confirm — Power-page two-level pattern: Cancel row, inert
+// "Delete <name>?" header, explicit Confirm row.
+static void showDeleteConfirm() {
+  gFilesConfirmActive = true;
+  snprintf(gFilesConfirmRow, sizeof(gFilesConfirmRow), "Delete %.56s?", gFilesActionName);
+  const char* rows[] = { "<- Cancel", gFilesConfirmRow, "Confirm Delete" };
+  g2ShowListPage(rows, 3);
+  g2LensClearOverlay();
+  DEBUG_G2F("[G2] Files: delete confirm for '%s'", gFilesActionPath);
+}
+
 // Show the View / View Full / Info chooser for a previewable file.
 // Stays in the FILES hijack page so g2FilesHandleTap routes the
 // chooser taps; the gFilesChooserActive flag tells the dispatcher to
@@ -379,40 +503,38 @@ static void showFileChooser(const FileEntry& e, FilesChooserKind kind) {
 
   static char title[FILES_ROW_LEN];
   snprintf(title, sizeof(title), "%s", e.name);
+
+  // Build rows + the action table in lockstep (see FilesAction).
+  static const char* rows[FILES_CHOOSER_MAX_ROWS];
+  gFilesChooserRowN = 0;
+  auto add = [&](const char* label, FilesAction act) {
+    if (gFilesChooserRowN < FILES_CHOOSER_MAX_ROWS) {
+      rows[gFilesChooserRowN] = label;
+      gFilesChooserAct[gFilesChooserRowN] = act;
+      gFilesChooserRowN++;
+    }
+  };
+  add("<- Files", FACT_BACK);
+  add(title,      FACT_HEADER);   // header line so the user knows which file
   if (kind == FILE_CHOOSER_BMP || kind == FILE_CHOOSER_JPG) {
-    static const char* rows[5];
-    rows[0] = "<- Files";
-    rows[1] = title;       // header line so the user knows which file
-    rows[2] = "View";
-    rows[3] = "View Full"; // 2x upscale -> 4-tile full-canvas
-    rows[4] = "Info";
-    g2ShowListPage(rows, 5);
+    add("View",      FACT_VIEW);
+    add("View Full", FACT_VIEW_FULL);  // 2x upscale -> 4-tile full-canvas
   } else if (kind == FILE_CHOOSER_TEXT) {
-    // .txt / .csv — one raw paged view + metadata. No pretty-parse, so this
-    // is a 4-row list with Info at idx 3 (g2FilesHandleTap keys off the
-    // chooser kind to route idx 2/3 correctly).
-    static const char* rows[4];
-    rows[0] = "<- Files";
-    rows[1] = title;
-    rows[2] = "View";
-    rows[3] = "Info";
-    g2ShowListPage(rows, 4);
-  } else {
-    static const char* rows[5];
-    rows[0] = "<- Files";
-    rows[1] = title;
-    rows[2] = "Pretty View";
-    rows[3] = "JSON View";
-    rows[4] = "Info";
-    g2ShowListPage(rows, 5);
+    add("View", FACT_VIEW);
+  } else if (kind == FILE_CHOOSER_JSON) {
+    add("Pretty View", FACT_VIEW);
+    add("JSON View",   FACT_JSON_RAW);
   }
+  // FILE_CHOOSER_OTHER adds no view rows — Info/Rename/Delete only.
+  add("Info",   FACT_INFO);
+  add("Rename", FACT_RENAME);
+  add("Delete", FACT_DELETE);
+  g2ShowListPage(rows, gFilesChooserRowN);
+
   // No overlay — chooser is a deliberate stop, not a flash.
   g2LensClearOverlay();
-  const char* kindStr = (kind == FILE_CHOOSER_BMP)  ? "bmp"
-                      : (kind == FILE_CHOOSER_JPG)  ? "jpg"
-                      : (kind == FILE_CHOOSER_TEXT) ? "text"
-                                                    : "json";
-  DEBUG_G2F("[G2] Files: chooser shown for '%s' (%s)", e.name, kindStr);
+  DEBUG_G2F("[G2] Files: chooser shown for '%s' (kind=%d, %u rows)",
+            e.name, (int)kind, (unsigned)gFilesChooserRowN);
 }
 
 // Render the pager's current page. The chrome (title buffer, hints, separator)
@@ -434,7 +556,7 @@ static bool filesRenderTextPage() {
 // tap/scroll page navigation. NEXT (tap / scroll-down) advances; PREV
 // (scroll-up) goes back; both wrap. Re-renders after moving.
 static void filesTextNav(G2TapKind kind) {
-  g2TextNavPage(gFilesPager, kind != G2_TAP_PAGE_PREV);
+  textNavPage(gFilesPager, kind != G2_TAP_PAGE_PREV);
   filesRenderTextPage();
 }
 
@@ -447,7 +569,7 @@ static void exitTextViewBackToFiles() {
 }
 
 // Read the chooser entry, optionally JSON-pretty-print it, wrap it, and page it
-// onto the lens via the shared G2TextPager. `pretty` only applies to JSON;
+// onto the lens via the shared TextPager. `pretty` only applies to JSON;
 // .txt/.csv always call with pretty=false. Returns false if the swap couldn't
 // be shown (caller falls back to the file list).
 static bool showTextFileViaWidget(bool pretty) {
@@ -498,13 +620,13 @@ static bool showTextFileViaWidget(bool pretty) {
   // long lines at the lens column width (so wide CSV rows stay legible), and
   // flags truncation when the source outgrows the displayable body.
   bool wrapTrunc = false;
-  size_t bodyLen = g2TextWrapInto(gFilesTextBody, sizeof(gFilesTextBody),
+  size_t bodyLen = textWrapInto(gFilesTextBody, sizeof(gFilesTextBody),
                                   display.c_str(), G2_TEXT_DEFAULT_COLS,
                                   /*contIndent=*/0, /*stripCtrl=*/true,
                                   &wrapTrunc);
   gFilesPager.curPage   = 0;
   gFilesPager.truncated = (hitReadCap || wrapTrunc);
-  g2TextSplitPages(gFilesPager, bodyLen);
+  textSplitPages(gFilesPager, bodyLen);
   if (gFilesPager.pageCount == 0) {
     // Empty (or all-control-byte) file — show a single "(empty file)" page.
     gFilesPager.pageCount = 1;
@@ -625,11 +747,12 @@ void g2ShowFilesMenu() {
     fmRefresh->refresh();
   }
 
-  // Whenever the real file list comes back up, the chooser is
-  // unconditionally gone — covers the View/Info → Back path, the
-  // post-BMP-dismiss callback, and any "redraw Files from main menu"
-  // entry, all without each call site having to remember.
+  // Whenever the real file list comes back up, the chooser and the
+  // delete-confirm are unconditionally gone — covers the View/Info → Back
+  // path, the post-BMP-dismiss callback, and any "redraw Files from main
+  // menu" entry, all without each call site having to remember.
   gFilesChooserActive = false;
+  gFilesConfirmActive = false;
   size_t n = buildRows();
   const char* path = "/";
   FileManager* fmMenu = ensureFm();
@@ -655,90 +778,139 @@ void g2FilesHandleTap(uint32_t idx) {
   // file, or invoke the JSON viewer, all of which hit guarded VFS.
   G2HijackCtxGuard ctxGuard;
 
-  // Chooser dispatcher — runs ahead of every other path so the chooser
-  // is the only consumer of taps while it's up. Rows: 0=<- Files,
-  // 1=filename header (no-op), 2/3 action rows, 4=Info.
-  if (gFilesChooserActive) {
-    FileEntry cached = gFilesChooserEntry;
+  // Delete-confirm dispatcher — highest priority while up. Rows:
+  // 0=<- Cancel, 1=inert "Delete <name>?", 2=Confirm Delete.
+  if (gFilesConfirmActive) {
     if (idx == 0) {
-      gFilesChooserActive = false;
-      DEBUG_G2F("[G2] Files: chooser back → file list");
+      gFilesConfirmActive = false;
+      DEBUG_G2F("[G2] Files: delete cancelled");
       g2ShowFilesMenu();
       return;
     }
     if (idx == 2) {
-      if (gFilesChooserKind == FILE_CHOOSER_BMP ||
-          gFilesChooserKind == FILE_CHOOSER_JPG) {
-        // View -> push at native 288×144. BMP path uses the file
-        // bytes directly; JPG path decodes via fmt2rgb888 first then
-        // shares the same wire transport.
-        char path[FILE_MANAGER_MAX_PATH + 32];
-        buildChooserPath(path, sizeof(path));
-        const bool isJpg = (gFilesChooserKind == FILE_CHOOSER_JPG);
-        gFilesChooserActive = false;
-        DEBUG_G2F("[G2] Files: chooser View -> '%s' (%s)",
-                  path, isJpg ? "JPG" : "BMP");
-        const bool ok = isJpg ? g2ShowJpgFile(path, &g2ShowFilesMenu)
-                              : g2ShowBmpFile(path, &g2ShowFilesMenu);
-        if (!ok) {
-          DEBUG_G2F("[G2] Files: View dispatch failed — falling back to list");
-          g2ShowFilesMenu();
-        }
-      } else if (gFilesChooserKind == FILE_CHOOSER_TEXT) {
-        // .txt / .csv — single raw paged view.
-        gFilesChooserActive = false;
-        DEBUG_G2F("[G2] Files: chooser text View -> '%s'", cached.name);
-        if (!showTextFileViaWidget(/*pretty=*/false)) {
-          g2ShowFilesMenu();
-        }
-      } else {
-        gFilesChooserActive = false;
-        DEBUG_G2F("[G2] Files: chooser Pretty View -> '%s'", cached.name);
-        if (!showTextFileViaWidget(/*pretty=*/true)) {
-          g2ShowFilesMenu();
-        }
-      }
+      gFilesConfirmActive = false;
+      // ONE-SHOT confirm token (bare, unquoted) — the interactive two-step
+      // flow can't be answered from a tap UI.
+      String line = String("filedelete \"") + gFilesActionPath + "\" confirm";
+      DEBUG_G2F("[G2] Files: delete confirmed -> '%s'", gFilesActionPath);
+      filesSubmitMutate(line.c_str());
       return;
     }
-    if (idx == 3) {
-      if (gFilesChooserKind == FILE_CHOOSER_BMP ||
-          gFilesChooserKind == FILE_CHOOSER_JPG) {
-        // View Full -> 2× upscale to 576×288 via 4-tile push. Same
-        // fork as View above.
+    return;  // header row / unexpected — leave confirm up
+  }
+
+  // Chooser dispatcher — runs ahead of every other path so the chooser
+  // is the only consumer of taps while it's up. Row meaning comes from
+  // the action table filled by showFileChooser (never from fixed indices).
+  if (gFilesChooserActive) {
+    FileEntry cached = gFilesChooserEntry;
+    if (idx >= gFilesChooserRowN) {
+      DEBUG_G2F("[G2] Files: chooser tap idx=%u out of range", (unsigned)idx);
+      return;
+    }
+    const FilesAction act = gFilesChooserAct[idx];
+    const bool isImage = (gFilesChooserKind == FILE_CHOOSER_BMP ||
+                          gFilesChooserKind == FILE_CHOOSER_JPG);
+    switch (act) {
+      case FACT_BACK:
+        gFilesChooserActive = false;
+        DEBUG_G2F("[G2] Files: chooser back → file list");
+        g2ShowFilesMenu();
+        return;
+
+      case FACT_HEADER:
+        return;  // inert filename row — leave chooser up
+
+      case FACT_VIEW: {
+        if (isImage) {
+          // View -> push at native 288×144. BMP path uses the file bytes
+          // directly; JPG decodes via fmt2rgb888 then shares the transport.
+          char path[FILE_MANAGER_MAX_PATH + 32];
+          buildChooserPath(path, sizeof(path));
+          const bool isJpg = (gFilesChooserKind == FILE_CHOOSER_JPG);
+          gFilesChooserActive = false;
+          DEBUG_G2F("[G2] Files: chooser View -> '%s' (%s)", path, isJpg ? "JPG" : "BMP");
+          const bool ok = isJpg ? g2ShowJpgFile(path, &g2ShowFilesMenu)
+                                : g2ShowBmpFile(path, &g2ShowFilesMenu);
+          if (!ok) g2ShowFilesMenu();
+        } else {
+          // TEXT = raw paged view; JSON's "Pretty View" = pretty-parsed.
+          const bool pretty = (gFilesChooserKind == FILE_CHOOSER_JSON);
+          gFilesChooserActive = false;
+          DEBUG_G2F("[G2] Files: chooser View -> '%s' (pretty=%d)", cached.name, (int)pretty);
+          if (!showTextFileViaWidget(pretty)) g2ShowFilesMenu();
+        }
+        return;
+      }
+
+      case FACT_VIEW_FULL: {
+        // View Full -> 2× upscale to 576×288 via 4-tile push.
         char path[FILE_MANAGER_MAX_PATH + 32];
         buildChooserPath(path, sizeof(path));
         const bool isJpg = (gFilesChooserKind == FILE_CHOOSER_JPG);
         gFilesChooserActive = false;
-        DEBUG_G2F("[G2] Files: chooser View Full -> '%s' (%s)",
-                  path, isJpg ? "JPG" : "BMP");
+        DEBUG_G2F("[G2] Files: chooser View Full -> '%s' (%s)", path, isJpg ? "JPG" : "BMP");
         const bool ok = isJpg ? g2ShowJpgFileFullScreen(path, &g2ShowFilesMenu)
                               : g2ShowBmpFileFullScreen(path, &g2ShowFilesMenu);
-        if (!ok) {
-          DEBUG_G2F("[G2] Files: View Full dispatch failed — falling back to list");
-          g2ShowFilesMenu();
-        }
-      } else if (gFilesChooserKind == FILE_CHOOSER_TEXT) {
-        // Text chooser row 3 is Info (metadata), not a second view mode.
-        gFilesChooserActive = false;
-        DEBUG_G2F("[G2] Files: chooser text Info -> '%s'", cached.name);
-        showFileInfo(cached);
-      } else {
+        if (!ok) g2ShowFilesMenu();
+        return;
+      }
+
+      case FACT_JSON_RAW:
         gFilesChooserActive = false;
         DEBUG_G2F("[G2] Files: chooser JSON View -> '%s'", cached.name);
-        if (!showTextFileViaWidget(/*pretty=*/false)) {
+        if (!showTextFileViaWidget(/*pretty=*/false)) g2ShowFilesMenu();
+        return;
+
+      case FACT_INFO:
+        gFilesChooserActive = false;
+        DEBUG_G2F("[G2] Files: chooser Info → '%s'", cached.name);
+        showFileInfo(cached);
+        return;
+
+      case FACT_RENAME: {
+        // Snapshot the target NOW — the chooser slot is cleared by list
+        // redraws and the keyboard doesn't block the scan worker.
+        buildChooserPath(gFilesActionPath, sizeof(gFilesActionPath));
+        strncpy(gFilesActionName, cached.name, sizeof(gFilesActionName) - 1);
+        gFilesActionName[sizeof(gFilesActionName) - 1] = '\0';
+        gFilesChooserActive = false;
+        if (strchr(gFilesActionPath, '"')) {
+          // CommandArgs has no escapes — an embedded quote breaks the line.
+          g2ShowTextAsList("Name has a quote char - rename on web", "<- Back");
+          return;
+        }
+        if (strlen(gFilesActionName) > 32) {
+          // Keyboard cap is 32 and the pre-fill silently truncates — an
+          // unguarded Done would rename to the 32-char prefix.
+          g2ShowTextAsList("Name too long - rename on web", "<- Back");
+          return;
+        }
+        TextEntryConfig cfg = {};
+        cfg.prompt   = "Rename";
+        cfg.initial  = gFilesActionName;
+        cfg.maxLen   = 32;
+        cfg.onCommit = filesRenameCommit;
+        cfg.onCancel = filesRenameCancel;
+        if (!g2BeginTextEntry(cfg)) {
+          DEBUG_G2F("[G2] Files: rename text-entry failed to start");
           g2ShowFilesMenu();
         }
+        return;
       }
-      return;
+
+      case FACT_DELETE:
+        buildChooserPath(gFilesActionPath, sizeof(gFilesActionPath));
+        strncpy(gFilesActionName, cached.name, sizeof(gFilesActionName) - 1);
+        gFilesActionName[sizeof(gFilesActionName) - 1] = '\0';
+        gFilesChooserActive = false;
+        if (strchr(gFilesActionPath, '"')) {
+          g2ShowTextAsList("Name has a quote char - delete on web", "<- Back");
+          return;
+        }
+        showDeleteConfirm();
+        return;
     }
-    if (idx == 4) {
-      gFilesChooserActive = false;
-      DEBUG_G2F("[G2] Files: chooser Info → '%s'", cached.name);
-      showFileInfo(cached);
-      return;
-    }
-    // idx 1 (filename header) and any unexpected row — leave chooser up.
-    DEBUG_G2F("[G2] Files: chooser tap idx=%u — no-op", (unsigned)idx);
     return;
   }
 
@@ -814,7 +986,10 @@ void g2FilesHandleTap(uint32_t idx) {
     } else if (isTxtFilename(e.name) || isCsvFilename(e.name)) {
       showFileChooser(e, FILE_CHOOSER_TEXT);
     } else {
-      showFileInfo(e);
+      // No viewer for this type, but Info / Rename / Delete must still be
+      // reachable — the old direct-to-info path made mutation impossible
+      // for every non-previewable file.
+      showFileChooser(e, FILE_CHOOSER_OTHER);
     }
   }
 }

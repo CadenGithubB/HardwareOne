@@ -5,6 +5,7 @@
  */
 
 #include "System_Camera_DVP.h"
+#include "System_TaskUtils.h"  // I2C_SENSOR_CORE (cam_pwr does a shared-Wire I2C scan in initCamera)
 #include "System_Events.h"  // sensor_started/stopped parity for the camera
 #include "System_Filesystem.h"  // requireQuotedPath (uniform quoted-path rule)
 #include <esp_attr.h>
@@ -996,8 +997,11 @@ void cameraPowerWorkerEnsureStarted() {
     return;
   }
   const BaseType_t ok =
-      xTaskCreate(cameraPwrWorker, "cam_pwr", kStack, nullptr,
-                  tskIDLE_PRIORITY + 2, &sCamPwrTask);
+      // Pin to Core 1 (I2C_SENSOR_CORE): initCamera() does a shared-Wire I2C scan
+      // before handing the bus to the camera driver, so this worker carries the
+      // starve-mid-transaction → bus-storm → panic(4) hazard. Off the saturated Core 0.
+      xTaskCreatePinnedToCore(cameraPwrWorker, "cam_pwr", kStack, nullptr,
+                  tskIDLE_PRIORITY + 2, &sCamPwrTask, I2C_SENSOR_CORE);
   if (ok != pdPASS) {
     ERROR_CAMERAF("[CAM_PWR] worker task create failed");
     vQueueDelete(sCamPwrQueue);

@@ -1883,7 +1883,7 @@ bool startContinuousInference() {
     nullptr,
     1,
     &gEIContinuousTask,
-    tskNO_AFFINITY
+    APP_CORE   // inference compute — keep off the Wi-Fi/BLE core
   );
   
   if (result != pdPASS) {
@@ -2518,8 +2518,8 @@ const size_t edgeImpulseCommandsCount = sizeof(edgeImpulseCommands) / sizeof(edg
 // =============================================================================
 
 void registerEdgeImpulseHandlers(httpd_handle_t server) {
-  static httpd_uri_t eiOrganizePost = { .uri = "/api/ei/organize", .method = HTTP_POST, .handler = handleEIOrganize, .user_ctx = NULL };
-  static httpd_uri_t edgeImpulseDetect = { .uri = "/api/edgeimpulse/detect", .method = HTTP_GET, .handler = handleEdgeImpulseDetect, .user_ctx = NULL };
+  static const httpd_uri_t eiOrganizePost = { .uri = "/api/ei/organize", .method = HTTP_POST, .handler = handleEIOrganize, .user_ctx = NULL };
+  static const httpd_uri_t edgeImpulseDetect = { .uri = "/api/edgeimpulse/detect", .method = HTTP_GET, .handler = handleEdgeImpulseDetect, .user_ctx = NULL };
   httpd_register_uri_handler(server, &eiOrganizePost);
   httpd_register_uri_handler(server, &edgeImpulseDetect);
 }

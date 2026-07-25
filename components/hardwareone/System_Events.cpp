@@ -18,7 +18,9 @@
 #include "System_Debug.h"       // cliHint, debugQueueLine, MSG_ROUTE_*
 #include "System_Settings.h"    // gSettings.eventLogEnabled
 #include "System_Filesystem.h"  // filesystemReady
-#include "System_Utils.h"       // everyMs
+#include "System_Utils.h"       // everyMs, argWantsJson
+#include "System_MemUtil.h"     // PSRAM_JSON_DOC / PSRAM_STATIC_BUF — json branch returns the document
+#include "System_CommandTypes.h"  // CMD_RESULT_MAX — the json branch's ceiling
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/idf_additions.h"  // vTaskSetThreadLocalStoragePointerAndDelCallback
@@ -127,10 +129,36 @@ static portMUX_TYPE gEventMux = portMUX_INITIALIZER_UNLOCKED;
 // their "on" field; keep them stable (see System_Events.h).
 static const char* const kEventKindNames[SYSEVT_COUNT] = {
     "none",
-#define SYSEVT_X(sym, name) name,
+#define SYSEVT_X(sym, name, fam) name,
     SYSEVT_KIND_LIST(SYSEVT_X)
 #undef SYSEVT_X
 };
+
+// Family per kind — same X-macro, so a kind can never carry a family that
+// disagrees with its declaration. Index 0 (SYSEVT_NONE) is a filler.
+static const uint8_t kEventKindFamily[SYSEVT_COUNT] = {
+    SYSEVT_FAM_SYSTEM,
+#define SYSEVT_X(sym, name, fam) fam,
+    SYSEVT_KIND_LIST(SYSEVT_X)
+#undef SYSEVT_X
+};
+
+// Family display labels, generated from SYSEVT_FAMILY_LIST.
+static const char* const kEventFamilyNames[SYSEVT_FAM_COUNT] = {
+#define SYSEVT_FAM_X(sym, label) label,
+    SYSEVT_FAMILY_LIST(SYSEVT_FAM_X)
+#undef SYSEVT_FAM_X
+};
+
+const char* systemEventFamilyName(uint8_t family) {
+  if (family >= SYSEVT_FAM_COUNT) return "?";
+  return kEventFamilyNames[family];
+}
+
+uint8_t systemEventKindFamily(uint8_t kind) {
+  if (kind >= SYSEVT_COUNT) return SYSEVT_FAM_SYSTEM;
+  return kEventKindFamily[kind];
+}
 
 const char* systemEventKindName(uint8_t kind) {
   if (kind >= SYSEVT_COUNT) return "?";
@@ -304,32 +332,69 @@ const char* cmd_events(const String& argsInput) {
     // List every valid kind name — the vocabulary for automation event
     // triggers ("on="), notifydevicekind levels, and notifyusermute lists. The json
     // form feeds the web editors.
-    if (sub.indexOf("json") >= 0) {
-      String out;
-      out.reserve(SYSEVT_COUNT * 20);
-      out = "{\"kinds\":[";
-      for (int k = SYSEVT_NONE + 1; k < SYSEVT_COUNT; k++) {
-        if (k > SYSEVT_NONE + 1) out += ',';
-        out += '"';
-        out += systemEventKindName((uint8_t)k);
-        out += '"';
+    if (argWantsJson(sub)) {
+      // The whole document goes in the RETURN VALUE and nothing is broadcast —
+      // see the JSON contract in System_Utils.cpp. Broadcasting it meant the
+      // addressed reply on every transport was a bare "OK", since only the
+      // return value reaches those.
+      // Per-transport reality for the ~2.2 KB payload, so nobody re-derives it:
+      //   web /api/cli, BLE  — ExecReq::out[4096], full document. OK.
+      //   ESP-NOW            — 6143 B fragmenting. OK.
+      //   MQTT               — TRUNCATED. System_MQTT.cpp hands executeCommand a
+      //                        2048 B buffer and System_Utils.cpp strncpy's into
+      //                        it silently, so MQTT gets a torn 2047 B fragment.
+      //                        Fix belongs in that buffer, not here.
+      //   serial console     — still [CUT]. The return value is echoed via
+      //                        broadcastOutput(), which clamps a line to 255 B.
+      //                        Platform line limit, not this command's bug.
+      // GROUPED ONLY — one shape, not two. Emitting a flat `kinds` array
+      // alongside the grouped copy would repeat all 134 names and land near
+      // 4.8 KB, over CMD_RESULT_MAX. A consumer that only wants the flat
+      // vocabulary flattens the groups in one line, so the second copy would
+      // buy nothing and cost the whole headroom.
+      // Grouped total is ~2.6 KB: the names (~2.2 KB) plus 11 family wrappers.
+      PSRAM_JSON_DOC(doc);
+      JsonArray fams = doc["families"].to<JsonArray>();
+      for (int f = 0; f < SYSEVT_FAM_COUNT; f++) {
+        JsonObject fo = fams.add<JsonObject>();
+        fo["n"] = systemEventFamilyName((uint8_t)f);
+        JsonArray fk = fo["k"].to<JsonArray>();
+        for (int k = SYSEVT_NONE + 1; k < SYSEVT_COUNT; k++) {
+          // static tables — ArduinoJson stores const char* by pointer, no copy
+          if (systemEventKindFamily((uint8_t)k) == f) fk.add(systemEventKindName((uint8_t)k));
+        }
       }
-      out += "]}";
-      broadcastOutput(out);
-      return "OK";
+      PSRAM_STATIC_BUF(jbuf, CMD_RESULT_MAX);
+      size_t n = serializeJson(doc, jbuf, jbuf_SIZE);
+      // serializeJson truncates silently when it runs out of room; a short list
+      // would look like a real answer, so fail loudly instead.
+      if (n == 0 || n >= jbuf_SIZE - 1) return "Error: event-kind list outgrew the response buffer";
+      return jbuf;
     }
-    BROADCAST_PRINTF("OK: %d event kinds:", (int)SYSEVT_COUNT - 1);
+    BROADCAST_PRINTF("OK: %d event kinds in %d families:",
+                     (int)SYSEVT_COUNT - 1, (int)SYSEVT_FAM_COUNT);
+    // One family per section, names packed into <=255 B lines at the call site
+    // (there is no runtime splitter — see System_Debug.cpp).
     char line[120];
-    int len = 0;
-    for (int k = SYSEVT_NONE + 1; k < SYSEVT_COUNT; k++) {
-      const char* n = systemEventKindName((uint8_t)k);
-      if (len > 0 && len + 1 + (int)strlen(n) > (int)sizeof(line) - 1) {
-        broadcastOutput(line);
-        len = 0;
+    for (int f = 0; f < SYSEVT_FAM_COUNT; f++) {
+      int count = 0;
+      for (int k = SYSEVT_NONE + 1; k < SYSEVT_COUNT; k++) {
+        if (systemEventKindFamily((uint8_t)k) == f) count++;
       }
-      len += snprintf(line + len, sizeof(line) - len, len ? " %s" : "  %s", n);
+      if (count == 0) continue;
+      BROADCAST_PRINTF("  %s (%d):", systemEventFamilyName((uint8_t)f), count);
+      int len = 0;
+      for (int k = SYSEVT_NONE + 1; k < SYSEVT_COUNT; k++) {
+        if (systemEventKindFamily((uint8_t)k) != f) continue;
+        const char* n = systemEventKindName((uint8_t)k);
+        if (len > 0 && len + 1 + (int)strlen(n) > (int)sizeof(line) - 1) {
+          broadcastOutput(line);
+          len = 0;
+        }
+        len += snprintf(line + len, sizeof(line) - len, len ? " %s" : "    %s", n);
+      }
+      if (len > 0) broadcastOutput(line);
     }
-    if (len > 0) broadcastOutput(line);
     cliHint("drive automations with 'automation add ... type=event on=<kind>' or mute notifications with 'notifyusermute <kind,...>'");
     return "OK";
   }

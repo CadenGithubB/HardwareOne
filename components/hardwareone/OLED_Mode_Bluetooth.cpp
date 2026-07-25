@@ -14,7 +14,6 @@
 //  file-local in Bluetooth.cpp behind bleGetRecentMessages().)
 
 #include "OLED_Display.h"
-#include "System_PollPause.h"   // PollPauseGuard — quiesce sensor polling during BLE init
 #include "System_BuildConfig.h"
 
 #if ENABLE_OLED_DISPLAY && ENABLE_BLUETOOTH
@@ -27,6 +26,8 @@
 #include "OLED_SettingsEditor.h"  // openSettingsEditorForModule
 #if ENABLE_G2_GLASSES
 #include "G2_Glasses.h"
+#include "G2_Ring.h"      // R1 ring telemetry + poll (submenu below, mirrors G2)
+#include "BLE_Peers.h"    // gBlePeerData[BLE_PEER_R1_RING].autoConnect
 #endif
 
 // ---- Main menu model -------------------------------------------------------
@@ -35,25 +36,22 @@ enum BtAction {
   BT_ACT_SETTINGS,
   BT_ACT_TOGGLE,
   BT_ACT_G2,
+  BT_ACT_R1,
   BT_ACT_ADVERTISING,
   BT_ACT_DISCONNECT,
 };
 EXT_RAM_BSS_ATTR static OLEDScrollState sBtMenuScroll;
 static bool sBtMenuInit = false;
-static BtAction sBtActions[OLED_SCROLL_MAX_ITEMS];
+EXT_RAM_BSS_ATTR static BtAction sBtActions[OLED_SCROLL_MAX_ITEMS];
 
-// Confirmation callback for Bluetooth Start/Stop
+// Confirmation callback for Bluetooth Start/Stop — admin-gated via cmd_exec
+// (openble / closeble). Never init/deinit Bluetooth on the OLED input task.
 static void bluetoothToggleConfirmedMenu(void* userData) {
   (void)userData;
   if (gBLEState && gBLEState->initialized) {
-    deinitBluetooth();
+    executeOLEDCommand("closeble");
   } else {
-    // Pause sensor polling during BLE init to avoid interrupt contention (RAII,
-    // scoped to this else block).
-    PollPauseGuard pollGuard;
-    vTaskDelay(pdMS_TO_TICKS(50));
-    initBluetooth();
-    startBLEAdvertising();
+    executeOLEDCommand("openble");
   }
 }
 
@@ -80,6 +78,7 @@ static void populateBtMenu() {
   addBtItem("Start/Stop", BT_ACT_TOGGLE);
 #if ENABLE_G2_GLASSES
   addBtItem("G2 Glasses >>", BT_ACT_G2);
+  addBtItem("R1 Ring >>",    BT_ACT_R1);   // Even Realities ring — same BLE-client subsystem
 #endif
   if (inited)    addBtItem("Advertising", BT_ACT_ADVERTISING);  // only when BT is up
   if (connected) addBtItem("Disconnect", BT_ACT_DISCONNECT);    // only when a client is connected
@@ -203,6 +202,9 @@ static void displayBluetoothStatus() {
       case BT_ACT_G2:
         if (isG2Connected()) oledDisplay->print(" *");
         break;
+      case BT_ACT_R1:
+        if (g2RingIsConnected()) oledDisplay->print(" *");
+        break;
 #endif
       case BT_ACT_ADVERTISING:
         if (gBLEState && gBLEState->connectionState == BLE_STATE_ADVERTISING) oledDisplay->print(" *");
@@ -224,6 +226,7 @@ static void displayBluetoothStatus() {
 }
 
 static bool bluetoothInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed) {
+  if (oledGuestBlocksMutate()) return true;
   if (oledScrollHandleNav(&sBtMenuScroll)) return true;
 
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
@@ -249,17 +252,19 @@ static bool bluetoothInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newly
       case BT_ACT_G2:
         requestOLEDMode(OLED_BLUETOOTH_G2, "bluetooth.g2");
         break;
+      case BT_ACT_R1:
+        requestOLEDMode(OLED_BLUETOOTH_R1, "bluetooth.r1");
+        break;
 #endif
       case BT_ACT_ADVERTISING:
         if (gBLEState && gBLEState->initialized) {
-          if (gBLEState->connectionState == BLE_STATE_ADVERTISING) stopBLEAdvertising();
-          else startBLEAdvertising();
+          executeOLEDCommand("bleadv toggle");
         }
         break;
       case BT_ACT_DISCONNECT:
         if (gBLEState && gBLEState->initialized &&
             gBLEState->connectionState == BLE_STATE_CONNECTED) {
-          disconnectBLE();
+          executeOLEDCommand("bledisconnect");
         }
         break;
       default:
@@ -329,18 +334,20 @@ static void displayG2Menu() {
 }
 
 static bool g2InputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed) {
+  if (oledGuestBlocksMutate()) return true;
   if (oledScrollHandleNav(&sG2MenuScroll)) return true;
 
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
     switch (sG2MenuScroll.selectedIndex) {
-      case 0:  // Connect
+      case 0:  // Connect — admin-gated via cmd_exec (cmd_g2connect stamps)
         if (!isG2Connected()) {
-          if (!isG2ClientInitialized()) initG2Client();
-          g2Connect(G2_EYE_AUTO);
+          executeOLEDCommand("openg2");
         }
         break;
-      case 1:  // Disconnect
-        if (isG2Connected()) g2Disconnect();
+      case 1:  // Disconnect — admin-gated via cmd_exec
+        if (isG2Connected()) {
+          executeOLEDCommand("closeg2");
+        }
         break;
       case 2:  // Status
         requestOLEDMode(OLED_BLUETOOTH_G2_STATUS, "bluetooth.g2.status");
@@ -383,6 +390,107 @@ static void displayG2StatusDetail() {
     oledDisplay->println("pair glasses.");
   }
 }
+
+// ---- OLED_BLUETOOTH_R1: R1 ring submenu -----------------------------------
+// Mirrors the G2 Apps→Ring dashboard on the OLED, sitting beside the G2
+// submenu under Bluetooth (the ring rides the same BLE-client subsystem).
+// Live HR/HRV/SpO2/battery readout from the notify-updated telemetry cache
+// (g2RingGetTelemetry — a lock-free field copy, "--" when no sample yet),
+// plus an entry-poll burst (g2RingPollVital, one vital per ~800 ms since the
+// ring needs >=700 ms between queries) and Connect/Disconnect/AutoConnect
+// actions dispatched as the same CLI commands the G2 lens flow uses.
+static int      sR1Sel          = 0;   // 0 Connect, 1 Disconnect, 2 AutoConnect
+static uint8_t  sR1PollCursor   = 4;   // 4 = burst done/idle; 0..3 = HR/HRV/SpO2/batt
+static bool     sR1WasConnected = false;
+static uint32_t sR1LastPollMs   = 0;
+
+static void r1OnEnter(bool isForward) {
+  if (!isForward) return;
+  sR1Sel          = 0;
+  sR1PollCursor   = g2RingIsConnected() ? 0 : 4;   // kick a vitals burst on entry
+  sR1WasConnected = g2RingIsConnected();
+  sR1LastPollMs   = 0;
+}
+
+static void displayR1Ring() {
+  if (!oledDisplay) return;
+  oledDisplay->setTextSize(1);
+  oledDisplay->setTextColor(SSD1306_WHITE);
+
+  // Entry-poll burst — one point-query per ~800 ms while connected, restarting
+  // on a disconnected→connected edge. Fire-and-forget BLE write (non-blocking,
+  // not the OLED I2C bus); replies land in the cache via notify.
+  const bool conn = g2RingIsConnected();
+  if (conn && !sR1WasConnected) sR1PollCursor = 0;
+  sR1WasConnected = conn;
+  if (conn && sR1PollCursor < 4) {
+    uint32_t now = millis();
+    if (sR1LastPollMs == 0 || now - sR1LastPollMs >= 800) {
+      g2RingPollVital(sR1PollCursor++);
+      sR1LastPollMs = now;
+    }
+  }
+
+  // Header
+  oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
+  oledDisplay->print("R1 RING ");
+  if (!bleSubsystemActive()) oledDisplay->println("[BLE off]");
+  else if (conn)             oledDisplay->println("[OK]");
+  else                       oledDisplay->println("[--]");
+
+  // Vitals readout (two rows, two columns). *Valid=false → "--", never 0.
+  G2RingTelemetry t;
+  g2RingGetTelemetry(t);
+  char v[16];
+  const int r1 = OLED_CONTENT_START_Y + 9;
+  const int r2 = OLED_CONTENT_START_Y + 18;
+  oledDisplay->setCursor(0, r1);
+  if (t.hrValid)  { snprintf(v, sizeof(v), "HR %u", (unsigned)t.hr); oledDisplay->print(v); } else oledDisplay->print("HR --");
+  oledDisplay->setCursor(64, r1);
+  if (t.hrvValid) { snprintf(v, sizeof(v), "HRV %d", (int)t.hrv);    oledDisplay->print(v); } else oledDisplay->print("HRV --");
+  oledDisplay->setCursor(0, r2);
+  if (t.spo2Valid){ snprintf(v, sizeof(v), "O2 %u%%", (unsigned)t.spo2); oledDisplay->print(v); } else oledDisplay->print("O2 --");
+  oledDisplay->setCursor(64, r2);
+  if (t.batteryValid){ snprintf(v, sizeof(v), "Bat %u%%", (unsigned)t.battery); oledDisplay->print(v); } else oledDisplay->print("Bat --");
+
+  // Action rows: 0 = Connect (dot when linked), 1 = Disconnect,
+  // 2 = AutoConnect toggle (shows current state).
+  const int a0 = OLED_CONTENT_START_Y + 29;
+  for (int i = 0; i < 3; i++) {
+    oledDisplay->setCursor(0, a0 + i * 8);
+    oledDisplay->print(i == sR1Sel ? "> " : "  ");
+    if (i == 0)      { oledDisplay->print("Connect"); if (conn) oledDisplay->print(" *"); }
+    else if (i == 1) oledDisplay->print("Disconnect");
+    else             { oledDisplay->print("AutoConn "); oledDisplay->print(gBlePeerData[BLE_PEER_R1_RING].autoConnect ? "ON" : "OFF"); }
+  }
+
+  // Keep re-rendering so the vitals + poll burst stay live (telemetry arrives
+  // via BLE notify, not a sensor-seq bump, so nothing else marks us dirty).
+  oledMarkDirty();
+}
+
+static bool r1InputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed) {
+  if (oledGuestBlocksMutate()) return true;
+  if (gNavEvents.up   && sR1Sel > 0) { sR1Sel--; return true; }
+  if (gNavEvents.down && sR1Sel < 2) { sR1Sel++; return true; }
+  if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
+    switch (sR1Sel) {
+      case 0:  // Connect — async, self-scans; admin-gated on cmd_exec
+        if (!g2RingIsConnected()) executeOLEDCommand("ringconnect");
+        break;
+      case 1:  // Disconnect — async, admin-gated
+        if (g2RingIsConnected()) executeOLEDCommand("ringdisconnect");
+        break;
+      case 2:  // AutoConnect toggle — dispatch the opposite of the current state
+        executeOLEDCommand(gBlePeerData[BLE_PEER_R1_RING].autoConnect
+                           ? "bleautoconnect r1-ring off"
+                           : "bleautoconnect r1-ring on");
+        break;
+    }
+    return true;
+  }
+  return false;  // B: global pop back to the Bluetooth menu
+}
 #endif // ENABLE_G2_GLASSES
 
 // Availability check for Bluetooth OLED mode
@@ -402,6 +510,8 @@ static const OLEDModeEntry bluetoothOLEDModes[] = {
     nullptr, g2InputHandler,                           false, -1, "A:Select B:Back" },
   { OLED_BLUETOOTH_G2_STATUS, "G2 Status", "bt_idle", displayG2StatusDetail,
     nullptr, nullptr,                                  false, -1, "B:Back" },
+  { OLED_BLUETOOTH_R1,        "R1 Ring",   "bt_idle", displayR1Ring,
+    nullptr, r1InputHandler,                           false, -1, "A:Select B:Back", r1OnEnter },
 #endif
 };
 

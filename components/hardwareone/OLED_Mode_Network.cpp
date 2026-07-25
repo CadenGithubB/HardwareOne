@@ -73,7 +73,8 @@ extern String getEspNowDeviceName(const uint8_t* mac);
 // menu and the OLED_NETWORK_STATUS detail screen.
 
 struct NetworkRenderData {
-  bool wifiConnected;
+  bool wifiConnected;  // CONNECTION axis: associated to an AP
+  bool radioOn;        // RADIO axis: powered up at all (WiFi or ESP-NOW)
   char ssid[16];
   char ip[16];
   int rssi;
@@ -84,6 +85,7 @@ static NetworkRenderData networkRenderData = {};
 void prepareNetworkData() {
 #if ENABLE_WIFI
   networkRenderData.wifiConnected = WiFi.isConnected();
+  networkRenderData.radioOn = wifiRadioOn();
 
   if (networkRenderData.wifiConnected) {
     String ssid = WiFi.SSID();
@@ -100,6 +102,7 @@ void prepareNetworkData() {
   networkRenderData.valid = true;
 #else
   networkRenderData.wifiConnected = false;
+  networkRenderData.radioOn = false;
   networkRenderData.valid = true;
 #endif
 }
@@ -122,7 +125,7 @@ enum NetworkMainAction {
 };
 
 EXT_RAM_BSS_ATTR static OLEDScrollState sNetworkMainScroll;
-static NetworkMainAction sNetworkMainActions[OLED_SCROLL_MAX_ITEMS];
+EXT_RAM_BSS_ATTR static NetworkMainAction sNetworkMainActions[OLED_SCROLL_MAX_ITEMS];
 static bool sNetworkMainInitialized = false;
 
 static void initNetworkMainScroll() {
@@ -190,12 +193,15 @@ void displayNetworkInfoRendered() {
   oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
 
 #if ENABLE_WIFI
-  // Status banner row
+  // Status banner row — distinguishes radio power from network connection
+  // (the old "(off)" meant merely disconnected, which read as radio-off).
   if (networkRenderData.wifiConnected) {
     oledDisplay->print(networkRenderData.rssi);
     oledDisplay->println("dBm");
+  } else if (networkRenderData.radioOn) {
+    oledDisplay->println("No WiFi");   // radio up (e.g. ESP-NOW), no network
   } else {
-    oledDisplay->println("(off)");
+    oledDisplay->println("Radio off");
   }
 
   // Power-style decorated rendering: read items from the scroll state.
@@ -233,6 +239,7 @@ static void httpStopConfirmedNetwork(void* userData) {
 }
 
 static bool networkMainInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed) {
+  if (oledGuestBlocksMutate()) return true;
   initNetworkMainScroll();
   if (oledScrollHandleNav(&sNetworkMainScroll)) return true;
 
@@ -290,6 +297,9 @@ static void displayNetworkStatusRendered() {
   }
 
 #if ENABLE_WIFI
+  // Two separate axes: RADIO power, then WiFi CONNECTION.
+  oledDisplay->print("Radio: ");
+  oledDisplay->println(networkRenderData.radioOn ? "ON" : "OFF");
   if (networkRenderData.wifiConnected) {
     oledDisplay->print("SSID: ");
     oledDisplay->println(networkRenderData.ssid);
@@ -340,7 +350,7 @@ static bool sWifiScanInitialized = false;
 
 // Scan results: bare SSID (for connect/add) + display label with signal bars.
 // Kept in stable storage because OLEDScrollState items store pointers, not copies.
-static char sWifiScanSSIDs[16][33];
+EXT_RAM_BSS_ATTR static char sWifiScanSSIDs[16][33];
 EXT_RAM_BSS_ATTR static char sWifiScanLabels[16][40];
 static int  sWifiScanCount = 0;
 
@@ -476,6 +486,7 @@ static void displaySavedNetworksRendered() {
 }
 
 static bool networkWifiListInputHandler(int /*dx*/, int /*dy*/, uint32_t newlyPressed) {
+  if (oledGuestBlocksMutate()) return true;
   if (oledScrollHandleNav(&sSavedNetScroll)) return true;
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
     int sel = sSavedNetScroll.selectedIndex;
@@ -496,6 +507,7 @@ static void onWifiRemoveConfirmed(void* /*ud*/) {
 }
 
 static bool networkWifiRemoveInputHandler(int /*dx*/, int /*dy*/, uint32_t newlyPressed) {
+  if (oledGuestBlocksMutate()) return true;
   if (oledScrollHandleNav(&sSavedNetScroll)) return true;
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
     int sel = sSavedNetScroll.selectedIndex;
@@ -541,6 +553,7 @@ static void displayNetworkWifiScanRendered() {
 }
 
 static bool networkWifiScanInputHandler(int /*dx*/, int /*dy*/, uint32_t newlyPressed) {
+  if (oledGuestBlocksMutate()) return true;
   // Password keyboard flow (shared with manual Add) runs first.
   bool kbHandled;
   if (wifiAddKeyboardTick(&kbHandled)) return kbHandled;
@@ -596,6 +609,7 @@ static void startWifiScan() {
 }
 
 static bool networkWifiMenuInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed) {
+  if (oledGuestBlocksMutate()) return true;
   // --- Multi-step Add-WiFi keyboard flow (shared with scan-pick) ---
   bool kbHandled;
   if (wifiAddKeyboardTick(&kbHandled)) return kbHandled;

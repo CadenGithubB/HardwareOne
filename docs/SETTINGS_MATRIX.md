@@ -280,7 +280,6 @@ _hand-edit; re-run after changes to the settings registry._
 |  | Setup/configTime | `setup` | `debugdatetimesetup` | BOOL |
 |  | Sync loop | `sync` | `debugdatetimesync` | BOOL |
 |  | Timestamp resolution | `resolve` | `debugdatetimeresolve` | BOOL |
-| ESP-NOW (`esp-now`) | All ESP-NOW | `enabled` | `debugespnow` | BOOL |
 |  | Core | `core` | `debugespnowcore` | BOOL |
 |  | Encryption | `encryption` | `debugespnowencryption` | BOOL |
 |  | Mesh | `mesh` | `debugespnowmesh` | BOOL |

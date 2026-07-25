@@ -22,6 +22,11 @@
 #include "System_UserSettings.h"  // loadUserSettings / mergeAndSaveUserSettings
 #include "System_AuthIdentity.h"  // currentExecUser (notifyusermute acts on the caller)
 #include "System_MemUtil.h"       // PSRAM_JSON_DOC
+#include "System_CommandTypes.h"  // CMD_RESULT_MAX — json branch returns the document
+#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
+#include "G2_Glasses.h"    // g2SendNativeNotificationAsync / isG2Connected — native-card sink
+#include "G2_HijackCmd.h"  // g2HijackAuthContext — G2 lens viewer identity
+#endif
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -134,6 +139,22 @@ static inline void maskSet(volatile uint32_t* m, uint8_t kind, bool on) {
   else    m[kind >> 5] &= ~(1UL << (kind & 31));
 }
 
+// Read-side accessors for on-device config screens (the masks are file-static
+// and cmd_notifydevicekind's show path prints via broadcast, so a renderer
+// can't screen-scrape it). Level: 0=all, 1=admin, 2=off. No locking — same
+// volatile word-read discipline as notifDeviceRuleFor. The token form is
+// exactly the argument cmd_notifydevicekind accepts, so displayed text ==
+// command argument (single vocabulary).
+uint8_t notifDeviceKindLevel(uint8_t kind) {
+  if (maskTest(gNotifOffMask, kind)) return 2;
+  if (maskTest(gNotifAdminMask, kind)) return 1;
+  return 0;
+}
+
+const char* notifLevelToken(uint8_t level) {
+  return level == 2 ? "off" : level == 1 ? "admin" : "all";
+}
+
 uint32_t notifPrefsGeneration() { return gNotifPrefsGen; }
 
 void notifPolicyLoad() {
@@ -179,6 +200,8 @@ static bool notifPolicySave() {
 struct UserPrefsCacheEntry {
   String username;
   uint32_t muteMask[4];
+  uint32_t forceMask[4];
+  uint8_t  minTier;
   bool valid;
 };
 static UserPrefsCacheEntry gUserPrefsCache[4];
@@ -191,15 +214,10 @@ void notifUserPrefsInvalidate() {
   if (gUserPrefsMutex) xSemaphoreGive(gUserPrefsMutex);
 }
 
-// Load a user's notificationMuted array into a mask. Missing file / missing
-// key / unknown names all resolve to "nothing muted".
-static void loadUserMuteMask(const char* username, uint32_t out[4]) {
+// Turn a kind-name array under `key` into a 4x32 mask (bit index = kind).
+static void loadKindMaskFromDoc(JsonDocument& doc, const char* key, uint32_t out[4]) {
   memset(out, 0, 4 * sizeof(uint32_t));
-  uint32_t uid = 0;
-  if (!getUserIdByUsername(String(username), uid)) return;
-  PSRAM_JSON_DOC(doc);
-  if (!loadUserSettings(uid, doc)) return;
-  JsonArrayConst arr = doc["notificationMuted"].as<JsonArrayConst>();
+  JsonArrayConst arr = doc[key].as<JsonArrayConst>();
   if (arr.isNull()) return;
   for (JsonVariantConst v : arr) {
     const char* n = v.as<const char*>();
@@ -209,11 +227,34 @@ static void loadUserMuteMask(const char* username, uint32_t out[4]) {
   }
 }
 
+// Load a user's notification prefs: the force-off (notificationMuted) + force-on
+// (notificationForced) kind masks and the importance floor (notifyLevel).
+// Missing file / keys resolve to the defaults (nothing muted/forced, floor =
+// NTIER_DEFAULT). One flash read serves all three.
+static void loadUserNotifPrefs(const char* username, uint32_t mute[4],
+                               uint32_t force[4], uint8_t* minTier) {
+  memset(mute, 0, 4 * sizeof(uint32_t));
+  memset(force, 0, 4 * sizeof(uint32_t));
+  *minTier = NTIER_DEFAULT;
+  uint32_t uid = 0;
+  if (!getUserIdByUsername(String(username), uid)) return;
+  PSRAM_JSON_DOC(doc);
+  if (!loadUserSettings(uid, doc)) return;
+  loadKindMaskFromDoc(doc, "notificationMuted", mute);
+  loadKindMaskFromDoc(doc, "notificationForced", force);
+  if (doc["notifyLevel"].is<int>()) {
+    int lv = doc["notifyLevel"].as<int>();
+    if (lv >= (int)NTIER_VERBOSE && lv <= (int)NTIER_ALERT) *minTier = (uint8_t)lv;
+  }
+}
+
 void notifViewerResolve(const char* username, NotifViewer& out) {
   memset(out.muteMask, 0, sizeof(out.muteMask));
+  memset(out.forceMask, 0, sizeof(out.forceMask));
+  out.minTier = NTIER_DEFAULT;
   out.known = false;
   out.isAdmin = false;
-  if (!username || !username[0]) return;  // anonymous surface
+  if (!username || !username[0]) return;  // anonymous surface (default floor)
   out.known = true;
   out.isAdmin = isAdminUser(String(username));  // live — roles change mid-session
 
@@ -221,6 +262,8 @@ void notifViewerResolve(const char* username, NotifViewer& out) {
   for (auto& e : gUserPrefsCache) {
     if (e.valid && e.username.equals(username)) {
       memcpy(out.muteMask, e.muteMask, sizeof(out.muteMask));
+      memcpy(out.forceMask, e.forceMask, sizeof(out.forceMask));
+      out.minTier = e.minTier;
       if (gUserPrefsMutex) xSemaphoreGive(gUserPrefsMutex);
       return;
     }
@@ -228,16 +271,68 @@ void notifViewerResolve(const char* username, NotifViewer& out) {
   if (gUserPrefsMutex) xSemaphoreGive(gUserPrefsMutex);
 
   // Miss: load outside the lock (flash read), then publish.
-  uint32_t mask[4];
-  loadUserMuteMask(username, mask);
+  uint32_t mute[4], force[4];
+  uint8_t minTier;
+  loadUserNotifPrefs(username, mute, force, &minTier);
   if (gUserPrefsMutex) xSemaphoreTake(gUserPrefsMutex, portMAX_DELAY);
   UserPrefsCacheEntry& slot = gUserPrefsCache[gUserPrefsCacheNext];
   gUserPrefsCacheNext = (uint8_t)((gUserPrefsCacheNext + 1) % 4);
   slot.username = username;
-  memcpy(slot.muteMask, mask, sizeof(slot.muteMask));
+  memcpy(slot.muteMask, mute, sizeof(slot.muteMask));
+  memcpy(slot.forceMask, force, sizeof(slot.forceMask));
+  slot.minTier = minTier;
   slot.valid = true;
   if (gUserPrefsMutex) xSemaphoreGive(gUserPrefsMutex);
-  memcpy(out.muteMask, mask, sizeof(out.muteMask));
+  memcpy(out.muteMask, mute, sizeof(out.muteMask));
+  memcpy(out.forceMask, force, sizeof(out.forceMask));
+  out.minTier = minTier;
+}
+
+// Cross-cutting importance tier for a kind (NTIER_*) — orthogonal to family,
+// and the axis the per-user floor tunes. Every kind that surfaces (has a sink
+// in notifDefaultRuleFor) is tagged here; unlisted → NTIER_STANDARD. This is
+// what keeps the everyday interrupt load small WITHOUT hard-limiting any one
+// surface: raise your floor to cut noise, lower it (or force-on a kind) to see
+// more — identically on OLED, web, and the glasses.
+static uint8_t notifKindTier(uint8_t kind) {
+  switch (kind) {
+    // ALERT — security, safety, data-integrity faults. Always interrupts.
+    case SYSEVT_BATTERY_CRITICAL:
+    case SYSEVT_THERMAL_HOT_ALERT:
+    case SYSEVT_LOGIN_FAIL:
+    case SYSEVT_LOGIN_LOCKED:
+    case SYSEVT_USER_BANNED:
+    case SYSEVT_IP_BANNED:
+    case SYSEVT_CRASH:
+    case SYSEVT_STORAGE_FORMATTED:
+    case SYSEVT_FACTORY_RESET:
+    case SYSEVT_CONFIG_FILE_CORRUPT:
+    case SYSEVT_AUTH_DB_FAULT:
+    case SYSEVT_SECRET_DECRYPT_FAILED:
+      return NTIER_ALERT;
+    // VERBOSE — chatty/info; opt-in (stay in history unless you lower your floor
+    // or force them on).
+    case SYSEVT_PEER_PAIRED:
+    case SYSEVT_WIFI_NET_ADDED:
+    case SYSEVT_WIFI_NET_REMOVED:
+    case SYSEVT_ESPNOW_ON:
+    case SYSEVT_ESPNOW_OFF:
+    case SYSEVT_USB_ON:
+    case SYSEVT_USB_OFF:
+    case SYSEVT_LOGIN_OK:
+    case SYSEVT_SETTING_CHANGED:
+    case SYSEVT_SENSOR_STARTED:
+    case SYSEVT_SENSOR_STOPPED:
+    case SYSEVT_FILE_DELETED:
+    case SYSEVT_VOICE_WAKE:
+    case SYSEVT_VOICE_COMMAND:
+    case SYSEVT_BATTERY_FULL:
+      return NTIER_VERBOSE;
+    // STANDARD (default) — everything else that surfaces: presence, inbound,
+    // connectivity, battery-low, service faults. The default user floor.
+    default:
+      return NTIER_STANDARD;
+  }
 }
 
 // Device layers only: compiled default, then off-level, then sink masters.
@@ -246,18 +341,50 @@ void notifViewerResolve(const char* username, NotifViewer& out) {
 static NotifRule notifDeviceRuleFor(uint8_t kind) {
   NotifRule r = notifDefaultRuleFor(kind);
   if (r.sinks == NSINK_NONE) return r;
+  // The G2 lens is an interrupt surface: grant it wherever the kind already
+  // interrupts (OLED banner or web toast), so banner/toast/G2 fire on the same
+  // kinds. The per-user importance floor (notifRuleForViewer) then curates all
+  // three uniformly — nothing here hard-limits what the glasses may show.
+  if (r.sinks & (NSINK_BANNER | NSINK_TOAST)) r.sinks |= NSINK_G2;
   if (maskTest(gNotifOffMask, kind)) { r.sinks = NSINK_NONE; return r; }
   if (!gSettings.notifBanners) r.sinks &= (uint8_t)~NSINK_BANNER;
   if (!gSettings.notifToasts)  r.sinks &= (uint8_t)~NSINK_TOAST;
   if (!gSettings.notifQueue)   r.sinks &= (uint8_t)~NSINK_QUEUE;
+  if (!gSettings.notifG2)      r.sinks &= (uint8_t)~NSINK_G2;
   return r;
+}
+
+// The interrupt sinks enabled device-wide right now (sink masters applied).
+// force-on grants these; a device that turned off a whole surface still wins.
+static uint8_t notifDeviceInterruptSinks() {
+  uint8_t s = NSINK_INTERRUPT;
+  if (!gSettings.notifBanners) s &= (uint8_t)~NSINK_BANNER;
+  if (!gSettings.notifToasts)  s &= (uint8_t)~NSINK_TOAST;
+  if (!gSettings.notifG2)      s &= (uint8_t)~NSINK_G2;
+  return s;
 }
 
 NotifRule notifRuleForViewer(uint8_t kind, const NotifViewer& v) {
   NotifRule r = notifDeviceRuleFor(kind);
+  // Event-only kinds and device-"off" kinds (NONE here) can't be resurrected by
+  // a user preference — force-on only promotes real NOTIFICATION kinds.
   if (r.sinks == NSINK_NONE) return r;
   if (maskTest(gNotifAdminMask, kind) && !v.isAdmin) { r.sinks = NSINK_NONE; return r; }
-  if (v.known && maskTest(v.muteMask, kind)) r.sinks = NSINK_NONE;
+  // Force-off (personal mute): the viewer never wants this kind, on any surface.
+  if (v.known && maskTest(v.muteMask, kind)) { r.sinks = NSINK_NONE; return r; }
+
+  const uint8_t floor    = v.known ? v.minTier : NTIER_DEFAULT;
+  const bool    forcedOn = v.known && maskTest(v.forceMask, kind);
+  if (forcedOn) {
+    // "Always show me this" — promote to every device-enabled interrupt surface,
+    // even for kinds that are queue-only (history-only) by default. Overrides
+    // both the tier floor and the compiled per-sink default.
+    r.sinks |= notifDeviceInterruptSinks();
+  } else if (notifKindTier(kind) < floor) {
+    // Importance floor: interrupt surfaces fire only at/above the viewer's tier.
+    // QUEUE (history) is never floor-gated — nothing is lost, it just doesn't pop.
+    r.sinks &= (uint8_t)~NSINK_INTERRUPT;
+  }
   return r;
 }
 
@@ -268,6 +395,7 @@ static const SettingEntry notifSettingEntries[] = {
   { "notifBanners", SETTING_BOOL, &gSettings.notifBanners, 1, 0, nullptr, 0, 1, "OLED banners", nullptr, false, nullptr, "notifydevicebanners" },
   { "notifToasts",  SETTING_BOOL, &gSettings.notifToasts,  1, 0, nullptr, 0, 1, "Web toasts", nullptr, false, nullptr, "notifydevicetoasts" },
   { "notifQueue",   SETTING_BOOL, &gSettings.notifQueue,   1, 0, nullptr, 0, 1, "Notification center", nullptr, false, nullptr, "notifydevicequeue" },
+  { "notifG2",      SETTING_BOOL, &gSettings.notifG2,      1, 0, nullptr, 0, 1, "G2 lens cards", nullptr, false, nullptr, "notifydeviceg2" },
 };
 extern const SettingsModule notifSettingsModule = {
   "notifications", "system.notifications", notifSettingEntries,
@@ -285,22 +413,29 @@ const char* cmd_notifydevicekind(const String& argsInput) {
   // kinds; list shows every kind; json is the machine form the web uses.
   if (args.length() == 0 || args.equalsIgnoreCase("list") || args.equalsIgnoreCase("list json")) {
     bool all = args.length() > 0;
-    if (args.indexOf("json") >= 0) {
-      String out;
-      out.reserve(SYSEVT_COUNT * 28);
-      out = "{\"kinds\":[";
+    String argsLower = args;
+    argsLower.toLowerCase();  // the outer guard is case-insensitive; match it
+    if (argWantsJson(argsLower)) {
+      // SPARSE — non-default kinds only, byte-identical to what notifPolicySave()
+      // writes to the policy file. "all" is the default, so a kind's ABSENCE
+      // means "all"; the client merges this over the full vocabulary from
+      // `events kinds json`. One shape for the file and the wire, not two.
+      //
+      // The old form listed every kind as {"n":..,"l":..} and reached 4362 B —
+      // over CMD_RESULT_MAX, so it could not be delivered on ANY transport and
+      // the settings page had been dead behind a bogus "admin login required".
+      // Worst case here (every one of 134 kinds non-default) is ~3290 B; the
+      // realistic case is a handful of entries.
+      PSRAM_JSON_DOC(doc);
+      JsonObject kinds = doc["kinds"].to<JsonObject>();
       for (int k = SYSEVT_NONE + 1; k < SYSEVT_COUNT; k++) {
-        if (k > SYSEVT_NONE + 1) out += ',';
-        out += "{\"n\":\"";
-        out += systemEventKindName((uint8_t)k);
-        out += "\",\"l\":\"";
-        out += maskTest(gNotifOffMask, (uint8_t)k) ? "off"
-             : maskTest(gNotifAdminMask, (uint8_t)k) ? "admin" : "all";
-        out += "\"}";
+        if (maskTest(gNotifOffMask, (uint8_t)k))        kinds[systemEventKindName((uint8_t)k)] = "off";
+        else if (maskTest(gNotifAdminMask, (uint8_t)k)) kinds[systemEventKindName((uint8_t)k)] = "admin";
       }
-      out += "]}";
-      broadcastOutput(out);
-      return "OK";
+      PSRAM_STATIC_BUF(jbuf, CMD_RESULT_MAX);
+      size_t n = serializeJson(doc, jbuf, jbuf_SIZE);
+      if (n == 0 || n >= jbuf_SIZE - 1) return "Error: notification policy outgrew the response buffer";
+      return jbuf;
     }
     int shown = 0;
     for (int k = SYSEVT_NONE + 1; k < SYSEVT_COUNT; k++) {
@@ -357,14 +492,17 @@ const char* cmd_notifydevicekind(const String& argsInput) {
 // notifyusermute — personal mute list for the EXECUTING user (per-task identity),
 // stored as a JSON array in the user's settings file next to the dashboard
 // layout prefs. Bare = show, 'none' = clear, else a validated kind list.
-const char* cmd_notifyusermute(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
+// Shared body for the per-user kind-list prefs. `key` is the user-settings JSON
+// array (notificationMuted = force-off, notificationForced = force-on); `noun`
+// labels the output; `hint` shows on the bare/list form. Both lists apply
+// uniformly on every interface. Bare = show; "none" = clear; else set.
+static const char* notifUserKindListCmd(const String& argsInput, const char* key,
+                                        const char* noun, const char* hint) {
   const String& user = currentExecUser();
   uint32_t uid = 0;
   if (user.length() == 0 || !getUserIdByUsername(user, uid)) {
-    return "Error: no logged-in user - personal mutes need a user identity";
+    return "Error: no logged-in user - personal notification prefs need a user identity";
   }
-
   String args = argsInput;
   args.trim();
 
@@ -372,7 +510,7 @@ const char* cmd_notifyusermute(const String& argsInput) {
     PSRAM_JSON_DOC(doc);
     String cur;
     if (loadUserSettings(uid, doc)) {
-      JsonArrayConst arr = doc["notificationMuted"].as<JsonArrayConst>();
+      JsonArrayConst arr = doc[key].as<JsonArrayConst>();
       if (!arr.isNull()) {
         for (JsonVariantConst v : arr) {
           const char* n = v.as<const char*>();
@@ -382,13 +520,13 @@ const char* cmd_notifyusermute(const String& argsInput) {
         }
       }
     }
-    BROADCAST_PRINTF("%s's muted kinds: %s", user.c_str(), cur.length() ? cur.c_str() : "(none)");
-    cliHint("mute with 'notifyusermute <kind,kind,...>', clear with 'notifyusermute none' - list valid kinds with 'events kinds'");
+    BROADCAST_PRINTF("%s's %s kinds: %s", user.c_str(), noun, cur.length() ? cur.c_str() : "(none)");
+    cliHint(hint);
     return "OK";
   }
 
   PSRAM_JSON_DOC(patch);
-  JsonArray arr = patch["notificationMuted"].to<JsonArray>();
+  JsonArray arr = patch[key].to<JsonArray>();
   if (!args.equalsIgnoreCase("none")) {
     bool seen[SYSEVT_COUNT] = {false};
     int start = 0;
@@ -419,8 +557,65 @@ const char* cmd_notifyusermute(const String& argsInput) {
 
   if (!mergeAndSaveUserSettings(uid, patch)) return "Error: failed to save user settings";
   // saveUserSettings() flushed the prefs cache via notifUserPrefsInvalidate().
-  systemEventPost(SYSEVT_SETTING_CHANGED, "notificationMuted", user.c_str());
-  BROADCAST_PRINTF("%s's muted kinds updated (%d muted)", user.c_str(), (int)arr.size());
+  systemEventPost(SYSEVT_SETTING_CHANGED, key, user.c_str());
+  BROADCAST_PRINTF("%s's %s kinds updated (%d)", user.c_str(), noun, (int)arr.size());
+  return "[Settings] Configuration updated";
+}
+
+// Force-OFF: kinds this user never wants notified, on any surface.
+const char* cmd_notifyusermute(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  return notifUserKindListCmd(argsInput, "notificationMuted", "muted",
+      "mute with 'notifyusermute <kind,...>', clear with 'notifyusermute none' - list kinds with 'events kinds'");
+}
+
+// Force-ON: kinds this user always wants to interrupt them, even below their
+// notifylevel floor (the complement of a mute).
+const char* cmd_notifyusershow(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  return notifUserKindListCmd(argsInput, "notificationForced", "always-show",
+      "always-show with 'notifyusershow <kind,...>' (overrides your notifylevel), clear with 'notifyusershow none'");
+}
+
+// Per-user importance floor — the ONE knob that decides what interrupts you
+// (banner/toast/G2), applied identically on every interface. Lower tiers still
+// land in the notification-center history. Bare = show current.
+const char* cmd_notifylevel(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  const String& user = currentExecUser();
+  uint32_t uid = 0;
+  if (user.length() == 0 || !getUserIdByUsername(user, uid)) {
+    return "Error: no logged-in user - notifylevel is per-user";
+  }
+  static const char* kNames[] = { "verbose", "standard", "alert" };
+  String a = argsInput;
+  a.trim();
+  a.toLowerCase();
+
+  if (a.length() == 0) {
+    PSRAM_JSON_DOC(doc);
+    uint8_t lv = NTIER_DEFAULT;
+    if (loadUserSettings(uid, doc) && doc["notifyLevel"].is<int>()) {
+      int v = doc["notifyLevel"].as<int>();
+      if (v >= (int)NTIER_VERBOSE && v <= (int)NTIER_ALERT) lv = (uint8_t)v;
+    }
+    BROADCAST_PRINTF("%s's notification level: %s (interrupts at this tier and above; "
+                     "lower tiers stay in history)", user.c_str(), kNames[lv]);
+    cliHint("set with 'notifylevel <verbose|standard|alert>'; per-kind exceptions via notifyusershow / notifyusermute");
+    return "OK";
+  }
+
+  int lv = -1;
+  if (a == "verbose"  || a == "0") lv = NTIER_VERBOSE;
+  else if (a == "standard" || a == "1") lv = NTIER_STANDARD;
+  else if (a == "alert"    || a == "2") lv = NTIER_ALERT;
+  else return "Error: level must be verbose | standard | alert";
+
+  PSRAM_JSON_DOC(patch);
+  patch["notifyLevel"] = lv;
+  if (!mergeAndSaveUserSettings(uid, patch)) return "Error: failed to save user settings";
+  systemEventPost(SYSEVT_SETTING_CHANGED, "notifyLevel", user.c_str());
+  BROADCAST_PRINTF("%s's notification level set to %s", user.c_str(), kNames[lv]);
   return "[Settings] Configuration updated";
 }
 
@@ -505,6 +700,9 @@ struct NotifPipeStats {
   uint32_t bannersFiltered;  // viewer rule denied the banner (policy/mute)
   uint32_t toastsBroadcast;  // events offered to the SSE layer
   uint32_t toastsFiltered;   // per-session denials by the toast predicate
+  uint32_t g2Pushed;         // native G2 cards enqueued to the lens worker
+  uint32_t g2Filtered;       // G2 viewer rule denied the card (policy/mute)
+  uint32_t g2Dropped;        // enqueue failed (worker queue full / disconnect race)
   uint32_t staleDropped;     // waited >10s in the ring; transient render skipped
   uint32_t cooldownSupp;     // suppressed by per-kind cooldown
   uint32_t ringSkipped;      // ring overwrote events before the tick read them
@@ -544,16 +742,19 @@ const char* cmd_notifstats(const String& argsInput) {
                    (unsigned long)systemEventRingSkippedTotal());
   BROADCAST_PRINTF("  Tick: fetched=%lu, slowest drain %lu us",
                    (unsigned long)gNotifPipe.fetched, (unsigned long)gNotifPipe.drainMaxUs);
-  BROADCAST_PRINTF("  Rendered: banners=%lu toasts=%lu (toast events offered to web sessions)",
-                   (unsigned long)gNotifPipe.bannersShown, (unsigned long)gNotifPipe.toastsBroadcast);
+  BROADCAST_PRINTF("  Rendered: banners=%lu toasts=%lu (toast events offered to web sessions) g2-cards=%lu",
+                   (unsigned long)gNotifPipe.bannersShown, (unsigned long)gNotifPipe.toastsBroadcast,
+                   (unsigned long)gNotifPipe.g2Pushed);
   BROADCAST_PRINTF("  LOSS: ring_skip=%lu stale=%lu sse_drop=%lu (sse = current sessions)",
                    (unsigned long)gNotifPipe.ringSkipped,
                    (unsigned long)gNotifPipe.staleDropped,
                    (unsigned long)sseEventDropsTotal());
-  BROADCAST_PRINTF("  Suppressed (benign): cooldown=%lu | Filtered (policy/mutes, intentional): banner=%lu toast-sessions=%lu",
+  BROADCAST_PRINTF("  Suppressed (benign): cooldown=%lu | Filtered (policy/mutes, intentional): banner=%lu toast-sessions=%lu g2=%lu | g2-drop(enqueue-fail)=%lu",
                    (unsigned long)gNotifPipe.cooldownSupp,
                    (unsigned long)gNotifPipe.bannersFiltered,
-                   (unsigned long)gNotifPipe.toastsFiltered);
+                   (unsigned long)gNotifPipe.toastsFiltered,
+                   (unsigned long)gNotifPipe.g2Filtered,
+                   (unsigned long)gNotifPipe.g2Dropped);
   cliHint("watch these live with 'debugnotifications 1' (one [NOTIF] line per 10s); zero them with 'notifstats reset'");
   return "OK";
 }
@@ -565,7 +766,7 @@ void systemEventsNotifyTick() {
   // directly and is unaffected by this cursor.
   static uint32_t sCursor = 0;
   // Per-kind last-render stamp for cooldowns (0 = never rendered).
-  static uint32_t sKindLastShownMs[SYSEVT_COUNT] = {};
+  EXT_RAM_BSS_ATTR static uint32_t sKindLastShownMs[SYSEVT_COUNT];
 
   SystemEvent evs[8];
   int n;
@@ -574,6 +775,14 @@ void systemEventsNotifyTick() {
   // Resolved lazily once per tick, only if a bannerable event shows up.
   bool oledViewerResolved = false;
   NotifViewer oledViewer;
+#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
+  // The G2 sink's viewer is the glasses' paired owner (g2HijackAuthContext),
+  // resolved lazily once per tick like the OLED viewer. isG2Connected() is a
+  // cheap flag read, taken once so absent glasses cost nothing per event.
+  const bool g2Connected = isG2Connected();
+  bool g2ViewerResolved = false;
+  NotifViewer g2Viewer;
+#endif
   // Diagnostics: timing starts lazily on the first non-empty fetch, so idle
   // main-loop laps (the overwhelmingly common case) pay nothing.
   uint32_t drainedThisTick = 0;
@@ -588,7 +797,10 @@ void systemEventsNotifyTick() {
       // Device layers only (default + off-level + masters) — cheap early-out
       // before any viewer resolution. Admin-level kinds pass through here.
       NotifRule r = notifDeviceRuleFor(e.kind);
-      if (!(r.sinks & (NSINK_BANNER | NSINK_TOAST))) continue;
+      // Any NOTIFICATION kind (≥1 sink) proceeds — a user's force-on can promote
+      // even a queue-only kind to an interrupt surface below. Pure event-only /
+      // device-"off" kinds (NONE) are skipped cheaply here.
+      if (r.sinks == NSINK_NONE) continue;
       if (nowMs - e.tsMs > 10000UL) {  // stale — transient sinks only
         gNotifPipe.staleDropped++;
         continue;
@@ -605,8 +817,12 @@ void systemEventsNotifyTick() {
       char msg[64];
       notifFormatEvent(e, msg, sizeof(msg));
 
+      // Each interrupt surface is decided by ITS viewer's effective rule
+      // (notifRuleForViewer = device policy + tier floor + per-user force/mute),
+      // NOT the device rule — so force-on works even where the compiled default
+      // grants no interrupt sink. Viewers resolve lazily, once per tick.
       #if ENABLE_OLED_DISPLAY
-      if (r.sinks & NSINK_BANNER) {
+      {
         if (!oledViewerResolved) {
           notifViewerResolve(gLocalDisplayAuthed ? gLocalDisplayUser.c_str() : "", oledViewer);
           oledViewerResolved = true;
@@ -614,21 +830,47 @@ void systemEventsNotifyTick() {
         if (notifRuleForViewer(e.kind, oledViewer).sinks & NSINK_BANNER) {
           oledNotificationBannerShow(msg, levelIcon(r.level), r.durMs, r.level >= 3);
           gNotifPipe.bannersShown++;
-        } else {
-          gNotifPipe.bannersFiltered++;
+        } else if (r.sinks & NSINK_BANNER) {
+          gNotifPipe.bannersFiltered++;  // device offered a banner; viewer denied
         }
       }
       #endif
 
-      if (r.sinks & NSINK_TOAST) {
+      // Web toasts: broadcast whenever the surface is enabled device-wide and
+      // let each session's viewer decide (the predicate applies floor/force/mute).
+      if (gSettings.notifToasts) {
         char json[128];
         snprintf(json, sizeof(json), "{\"level\":\"%s\",\"msg\":\"%s\",\"ms\":%u}",
                  levelName(r.level), msg, (unsigned)r.durMs);
-        // Per-session delivery: each web session's viewer decides.
         broadcastEventToSessionsIf("notification", json, notifToastAllowedFor,
                                    (void*)(uintptr_t)e.kind);
         gNotifPipe.toastsBroadcast++;
       }
+
+      #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
+      if (g2Connected) {
+        // Viewer = the glasses' paired owner, so admin gating + that user's
+        // floor/force/mute decide the lens exactly like the OLED/web sinks.
+        if (!g2ViewerResolved) {
+          const AuthContext g2ctx = g2HijackAuthContext();
+          notifViewerResolve(g2ctx.user.c_str(), g2Viewer);
+          g2ViewerResolved = true;
+        }
+        if (notifRuleForViewer(e.kind, g2Viewer).sinks & NSINK_G2) {
+          // Title = event family (grouping); body = the shared one-liner.
+          // Fire-and-forget enqueue onto the lens worker — never sends BLE here.
+          const char* title = systemEventFamilyName(systemEventKindFamily(e.kind));
+          if (g2SendNativeNotificationAsync("one.hardware", "HardwareOne",
+                                            title, "", msg)) {
+            gNotifPipe.g2Pushed++;
+          } else {
+            gNotifPipe.g2Dropped++;
+          }
+        } else if (r.sinks & NSINK_G2) {
+          gNotifPipe.g2Filtered++;  // device offered G2; viewer denied
+        }
+      }
+      #endif
     }
     if (n < 8) break;  // ring drained
   }
@@ -646,17 +888,20 @@ void systemEventsNotifyTick() {
     static uint32_t sReportMs = 0;
     if (everyMs(&sReportMs, 10000)) {
       DEBUG_NOTIFICATIONSF(
-          "[NOTIF] fetched=%lu banner=%lu toast=%lu | LOSS ring_skip=%lu stale=%lu sse_drop=%lu"
-          " | supp cooldown=%lu filtered=b%lu/t%lu | lag_hwm=%lu/%d (%s) drain_max=%luus",
+          "[NOTIF] fetched=%lu banner=%lu toast=%lu g2=%lu | LOSS ring_skip=%lu stale=%lu sse_drop=%lu"
+          " | supp cooldown=%lu filtered=b%lu/t%lu/g%lu g2_drop=%lu | lag_hwm=%lu/%d (%s) drain_max=%luus",
           (unsigned long)gNotifPipe.fetched,
           (unsigned long)gNotifPipe.bannersShown,
           (unsigned long)gNotifPipe.toastsBroadcast,
+          (unsigned long)gNotifPipe.g2Pushed,
           (unsigned long)gNotifPipe.ringSkipped,
           (unsigned long)gNotifPipe.staleDropped,
           (unsigned long)sseEventDropsTotal(),
           (unsigned long)gNotifPipe.cooldownSupp,
           (unsigned long)gNotifPipe.bannersFiltered,
           (unsigned long)gNotifPipe.toastsFiltered,
+          (unsigned long)gNotifPipe.g2Filtered,
+          (unsigned long)gNotifPipe.g2Dropped,
           (unsigned long)gNotifPipe.ringLagHwm, SYSEVT_RING_SIZE,
           saturationLabel(gNotifPipe.ringLagHwm, SYSEVT_RING_SIZE),
           (unsigned long)gNotifPipe.drainMaxUs);

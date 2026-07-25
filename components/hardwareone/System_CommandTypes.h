@@ -32,9 +32,15 @@ enum CommandOrigin {
                       // user (ctx.auth.user), NOT system — origin is audit-only.
                       // Split from ORIGIN_SYSTEM so remote command execution is
                       // attributable in the audit trail.
-  ORIGIN_LOCAL_DISPLAY // command issued from the on-device OLED + gamepad UI
+  ORIGIN_LOCAL_DISPLAY, // command issued from the on-device OLED + gamepad UI
                        // (transport SOURCE_LOCAL_DISPLAY). Split from ORIGIN_SYSTEM
                        // for the same audit-attribution reason.
+  ORIGIN_MQTT,         // command received over MQTT (transport SOURCE_MQTT), run as the
+                       // authenticated MQTT user. Routed through cmd_exec_task via
+                       // submitAndExecuteSync so it serializes with all other commands
+                       // instead of racing them on the esp-mqtt event task.
+  ORIGIN_VOICE         // command issued by on-device voice recognition (SOURCE_VOICE),
+                       // armed-user identity. Also routed through cmd_exec_task.
 };
 
 // Per-command output routing uses the MSG_ROUTE_* sink bits directly
@@ -67,6 +73,29 @@ struct Command {
   CommandContext ctx;
 };
 
+// ---------------------------------------------------------------------------
+// Command result ceiling — the OUTBOUND contract
+// ---------------------------------------------------------------------------
+// The largest result a command handler may return. This is the delivery-side
+// twin of broadcastOutput()'s 255 B per-line rule (System_Debug.h DEBUG_MSG_SIZE):
+// there, a caller proves its line fits and an over-long one is marked [CUT];
+// here, a handler proves its result fits and an over-long one becomes an
+// explicit error at the executeCommand chokepoint (System_Utils.cpp).
+//
+// Transports size their own `out` buffer and may declare LESS than this — the
+// effective limit is min(CMD_RESULT_MAX, that buffer). What is uniform is not
+// the number but the BEHAVIOUR: the limit is always knowable and exceeding it
+// always fails loudly. Known capacities:
+//   ExecReq::out (web, BLE, ESP-NOW, serial)  CMD_RESULT_MAX
+//   MQTT (System_MQTT.cpp), voice (System_ESPSR.cpp)  CMD_RESULT_MAX
+//   help-exit (HardwareOne.cpp)  2048 — a STACK array; deliberately not raised
+//
+// A handler that cannot fit its document belongs behind a dedicated endpoint
+// (see /api/devices -> buildDeviceRegistryJson) rather than the CLI channel.
+// This is NOT an inbound limit: ESP-NOW reassembly is sized from the wire
+// budget instead, because a remote peer's output is not ours to bound.
+#define CMD_RESULT_MAX 4096
+
 // Async callback type for fire-and-forget command execution
 // Called on cmd_exec task with result - caller must NOT block
 typedef void (*ExecAsyncCallback)(bool ok, const char* result, void* userData);
@@ -75,7 +104,7 @@ typedef void (*ExecAsyncCallback)(bool ok, const char* result, void* userData);
 struct ExecReq {
   char line[2048];         // Command string (full size for ESP-NOW chunking)
   CommandContext ctx;      // Full execution context
-  char out[4096];          // Result buffer (4KB)
+  char out[CMD_RESULT_MAX];  // Result buffer — the reference capacity
   SemaphoreHandle_t done;  // Signals completion (NULL for async mode)
   bool ok;                 // Success flag from executeCommand()
 

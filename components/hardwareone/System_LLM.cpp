@@ -915,6 +915,7 @@ void llmInit() {
   memset(&gLLM, 0, sizeof(gLLM));
   gLLM.runState = LLMState::UNLOADED;
   gLLM.mutex = xSemaphoreCreateMutex();
+  llmMenuInit();   // create the guided-menu lock (System_LLM_Menu.cpp)
 }
 
 bool llmLoadModel(const char* modelPath, int maxCtx) {
@@ -978,6 +979,22 @@ bool llmLoadModel(const char* modelPath, int maxCtx) {
                   (unsigned)((gLLM.weightsSize + gLLM.weightsQ8Size) / 1024),
                   (unsigned)(gLLM.stateSize / 1024),
                   gLLM.seq_ctx, gLLM.config.seq_len);
+  // Load-time guard: if PSRAM auto-fit shrank the context below usable, this was
+  // previously silent — the model loaded and then produced 0-1 tokens with no
+  // explanation. Flag it loudly at the source (ERROR_LLMF is always-on, unlike
+  // the DEBUG_LLM_LOAD lines above) and record a system event, so it surfaces in
+  // the serial log, event history and notifications the moment it happens. Every
+  // interactive surface warns too, via llmContextDegraded(). Model stays loaded.
+  {
+    int degCtx = 0, degSeq = 0;
+    if (llmContextDegraded(&degCtx, &degSeq)) {
+      ERROR_LLMF("Context auto-fit to %d tokens (model seq=%d) - PSRAM was low at load; "
+                 "answers will truncate. Reload the model or restart the device.",
+                 degCtx, degSeq);
+      logSystemEvent("LLM", "context degraded: only %d tokens (model supports %d) - "
+                     "PSRAM low at load; reload/restart recommended", degCtx, degSeq);
+    }
+  }
   // Post-load budgeting line: KV precision + headroom left for fact tables /
   // bigger models. Compare kvPrec=FP16 vs FP32 across two loads to see the win.
   DEBUG_LLM_LOADF("[LLM] Model ready. kvPrec=%s  PSRAM free after load: %uKB (largest block %uKB)",
@@ -1061,6 +1078,11 @@ void llmUnload() {
   gLLM.domainVocabCount = 0;
   gLLM.domainVocabBytes = 0;
 
+  // Drop the guided-input menu (frees the PSRAM blob + bumps menuGeneration under
+  // sMenuLock so a reader on another task can't touch a freed blob). See
+  // LLM_GUIDED_MENU_SPEC §5.
+  llmMenuClear();
+
   if (hadModel) {
     const char* base = gLLM.modelPath;
     const char* slash = strrchr(gLLM.modelPath, '/');
@@ -1071,6 +1093,34 @@ void llmUnload() {
 
 bool llmIsReady() {
   return gLLM.runState == LLMState::READY;
+}
+
+bool llmContextDegraded(int* outCtx, int* outModelSeq) {
+  const int ctx      = gLLM.seq_ctx;          // 0 when no model is loaded
+  const int modelSeq = gLLM.config.seq_len;
+  if (outCtx)      *outCtx = ctx;
+  if (outModelSeq) *outModelSeq = modelSeq;
+  if (ctx <= 0) return false;                 // no model → nothing to warn about
+  // "requested" is the ceiling we tried to fit: the explicit llmMaxContext
+  // (requestedMaxCtx) when set, else the model's own seq_len. If the fitted ctx
+  // equals that, PSRAM did NOT cut it — a small value is then intentional, not a
+  // fault, so we stay quiet. Only warn when auto-fit shrank it below both the
+  // request AND the usable floor.
+  const int requested = (gLLM.requestedMaxCtx > 0) ? gLLM.requestedMaxCtx : modelSeq;
+  const bool shrunk   = ctx < requested;
+  const bool unusable = ctx < LLM_MIN_USABLE_CONTEXT;
+  return shrunk && unusable;
+}
+
+size_t llmContextWarning(char* buf, size_t cap) {
+  if (!buf || cap == 0) return 0;
+  int ctx = 0, modelSeq = 0;
+  if (!llmContextDegraded(&ctx, &modelSeq)) { buf[0] = '\0'; return 0; }
+  int len = snprintf(buf, cap,
+    "LLM context is only %d tokens (model supports %d) - PSRAM was low when the "
+    "model loaded, so answers get truncated. Reload the model or restart the device.",
+    ctx, modelSeq);
+  return (len < 0) ? 0 : ((size_t)len < cap ? (size_t)len : cap - 1);
 }
 
 LLMStatus llmGetStatus() {
@@ -1248,6 +1298,14 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
   // Ordered longest-first so "Can you tell me how to" matches before "Can you".
   // Only strip phrases where the remainder IS the topic — never strip words that
   // change meaning (Can I, Is the, Does it, Which, Who, Where, When).
+  //
+  // GUIDED-MENU CONTRACT (LLM_GUIDED_MENU_SPEC §12.4): this list is detect-only —
+  // it must NOT strip. Guided-menu questions are corpus-EXACT templates (e.g.
+  // "Tell me about {}") whose leading words ARE the trained phrasing; re-enabling
+  // stripping here would mutate the composed prompt and break the memorized
+  // answer. Composed questions also rely on the title-case + vocab-aware recasing
+  // below being non-destructive to already-correct casing (templates ship
+  // capitalized, entities corpus-cased). Keep both passes read-only-shaping.
   static const char* const FILLER_PREFIXES[] = {
     // Polite/indirect frames
     "Can you tell me how to ",    "Could you tell me how to ",
@@ -2349,16 +2407,16 @@ int llmGenerate(const char* prompt, LLMTokenCallback tokenCb,
     #define _PROF_MS(v)  ((long)(((v) + 500) / 1000))
     #define _PROF_PCT(v) ((int)(((v) * 100 + wall / 2) / wall))
     #define _PROF_US_PER(v) ((long)((v) / gProf.tokens))
-    DEBUGF_QUEUE(0xFFFFFFFF,
+    DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_LLM,
       "[LLM][PROF] %d fwd | profiled %ldms of %ldms wall (%d%%) | matmul %ldms(%d%%) attn %ldms(%d%%)",
       gProf.tokens, _PROF_MS(prof), _PROF_MS(wall), _PROF_PCT(prof),
       _PROF_MS(mm), _PROF_PCT(mm), _PROF_MS(gProf.attn), _PROF_PCT(gProf.attn));
-    DEBUGF_QUEUE(0xFFFFFFFF,
+    DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_LLM,
       "[LLM][PROF]   matmul: qkv=%ld out=%ld ffnUp=%ld ffnDown=%ld cls=%ld | kvpack=%ld act=%ld norm=%ld (ms)",
       _PROF_MS(gProf.qkv), _PROF_MS(gProf.attnOut), _PROF_MS(gProf.ffnUp),
       _PROF_MS(gProf.ffnDown), _PROF_MS(gProf.cls),
       _PROF_MS(gProf.kvpack), _PROF_MS(gProf.act), _PROF_MS(gProf.norm));
-    DEBUGF_QUEUE(0xFFFFFFFF,
+    DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_LLM,
       "[LLM][PROF]   per-fwd µs: qkv=%ld attn=%ld out=%ld ffnUp=%ld ffnDown=%ld cls=%ld kvpack=%ld act=%ld norm=%ld",
       _PROF_US_PER(gProf.qkv), _PROF_US_PER(gProf.attn), _PROF_US_PER(gProf.attnOut),
       _PROF_US_PER(gProf.ffnUp), _PROF_US_PER(gProf.ffnDown), _PROF_US_PER(gProf.cls),
@@ -2546,6 +2604,10 @@ static const char* cmd_llm_status(const String& argsInput) {
     const char* slash = strrchr(st.modelPath, '/');
     if (slash) model = slash + 1;            // filename only, per contract
     PSRAM_JSON_DOC(doc);
+    // Degraded-context warning (shared helper — same text every surface uses).
+    // char[] so ArduinoJson copies it into the doc pool (safe past this scope).
+    char ctxWarnBuf[192];
+    const bool ctxDeg = llmContextWarning(ctxWarnBuf, sizeof(ctxWarnBuf)) > 0;
     doc["schema"]           = 1;
     doc["state"]       = stateStr;
     doc["model"]       = model;
@@ -2557,20 +2619,35 @@ static const char* cmd_llm_status(const String& argsInput) {
     doc["tokens"]      = st.lastTokenCount;
     doc["meanLogprob"] = st.lastMeanLogprob;   // Phase 2 confidence (0 = no signal)
     doc["confTokens"]  = st.lastConfTokens;
+    doc["ctxWarn"]     = ctxDeg;               // true → context auto-shrunk unusably low
+    if (ctxDeg) doc["ctxWarning"] = ctxWarnBuf;
+    // Guided-input menu: presence + generation so a surface can show/hide the
+    // guided picker and detect a model swap (refetch on gen change).
+    JsonObject menu = doc["menu"].to<JsonObject>();
+    menu["groups"] = llmMenuGroupCount();
+    menu["gen"]    = llmMenuGeneration();
     static char* jbuf = nullptr;
-    if (!jbuf) jbuf = (char*)ps_alloc(512, AllocPref::PreferPSRAM, "llmstatus.json");
+    if (!jbuf) jbuf = (char*)ps_alloc(640, AllocPref::PreferPSRAM, "llmstatus.json");
     if (!jbuf) return "{\"error\":\"oom\"}";
-    serializeJson(doc, jbuf, 512);
+    serializeJson(doc, jbuf, 640);
     return jbuf;
   }
 
+  char ctxWarnLine[224];
+  {
+    char w[192];
+    if (llmContextWarning(w, sizeof(w)) > 0)
+      snprintf(ctxWarnLine, sizeof(ctxWarnLine), "WARNING: %s\n", w);
+    else
+      ctxWarnLine[0] = '\0';
+  }
   snprintf(llmCmdBuf, sizeof(llmCmdBuf),
     "LLM State: %s\n"
     "Model: %s\n"
     "Config: dim=%d layers=%d heads=%d vocab=%d seq=%d ctx=%d\n"
     "PSRAM: %uKB (weights=%uKB runtime=%uKB)\n"
     "Last: %d tokens @ %.1f tok/s\n"
-    "%s%s",
+    "%s%s%s",
     stateStr, st.modelPath,
     st.config.dim, st.config.n_layers, st.config.n_heads,
     st.config.vocab_size, st.config.seq_len, st.lastContextMax,
@@ -2578,6 +2655,7 @@ static const char* cmd_llm_status(const String& argsInput) {
     (unsigned)(st.modelSizeBytes / 1024),
     (unsigned)(st.runtimeSizeBytes / 1024),
     st.lastTokenCount, st.lastTokensPerSec,
+    ctxWarnLine,
     st.errorMsg[0] ? "Error: " : "",
     st.errorMsg[0] ? st.errorMsg : "");
   return llmCmdBuf;
@@ -2904,7 +2982,7 @@ static const SettingEntry llmSettingEntries[] = {
   { "hardCap",       SETTING_INT,    &gSettings.llmHardCap,       80, 0,    nullptr,    0,  512, "Hard Cap",             nullptr, false, nullptr, "llmhardcap"       },
   { "repPenalty",    SETTING_FLOAT,  &gSettings.llmRepPenalty,    0,  1.3f, nullptr,    1,    3, "Rep Penalty",          nullptr, false, nullptr, "llmreppenalty"    },
   { "repWindow",     SETTING_INT,    &gSettings.llmRepWindow,     32, 0,    nullptr,    1, LLM_DEFAULT_REP_WINDOW, "Rep Window", nullptr, false, nullptr, "llmrepwindow" },  // max = ring size; higher values were silently truncated
-  { "maxContext",    SETTING_INT,    &gSettings.llmMaxContext,     0, 0,    nullptr,    0, 4096, "Max Context (0=auto)", nullptr, false, nullptr, "llmmaxcontext"    },
+  { "maxContext",    SETTING_INT,    &gSettings.llmMaxContext,     0, 0,    nullptr,    0, LLM_SETTING_MAX_CONTEXT, "Max Context (0=auto)", nullptr, false, nullptr, "llmmaxcontext"    },
   { "defaultModel",  SETTING_STRING, &gSettings.llmDefaultModel,  0, 0,    "model.bin",0,    0, "Default Model",        nullptr, false, nullptr, "llmdefaultmodel"  },
   // ── APPEND-ONLY below this line ───────────────────────────────────────────
   // The CLI setting commands (LLM_SETTING_CMD) map to this table by INDEX, so
@@ -2966,6 +3044,8 @@ const CommandEntry llmCommands[] = {
   { "llmclear",         "Reset the LLM conversation",           false, cmd_llm_clear },
   { "llmretry",         "Regenerate the last reply (JSON)",     false, cmd_llm_retry },
   { "llmturns",         "Read a conversation turn (JSON)",      false, cmd_llm_turns,        "Usage: llmturns json <index>" },
+  { "llmmenu",          "Guided-input menu status/listing (add 'json')",  false, cmd_llm_menu, "Usage: llmmenu  |  llmmenu json  |  llmmenu json tpl <g> <off>  |  llmmenu json ent <g> <off>\nLists this model's guided question templates + entity rosters (empty if the model ships none)." },
+  { "llmask",           "Ask a guided question by index",       false, cmd_llm_ask,          "Usage: llmask <group> <template> [entity]  |  llmask json <gen> <g> <t> [e]  |  llmask repeat\nComposes the question on-device from 'llmmenu' indices and streams the answer (read it with 'llmresult json 0')." },
   { "llmtemperature",   "Set default sampling temperature",     true,  cmd_llm_temperature,  "Usage: llmtemperature <0.0-2.0>" },
   { "llmtopp",          "Set default Top-P threshold",          true,  cmd_llm_topp,         "Usage: llmtopp <0.0-1.0>" },
   { "llmmaxtokens",     "Set default max tokens per reply",     true,  cmd_llm_maxtokens,    "Usage: llmmaxtokens <1-512>" },
