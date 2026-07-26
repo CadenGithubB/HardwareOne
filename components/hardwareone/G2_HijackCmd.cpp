@@ -34,7 +34,7 @@ extern bool submitCommandAsync(const Command& cmd,
 // If pairedByUser is blank, g2SubmitHijackCommand refuses to queue (and
 // authorizeCommand would also deny empty non-INTERNAL identities). The
 // stuck-stamp warning below still fires once per boot. To recover, re-run
-// `bleautoconnect g2-glasses on` from an authenticated CLI — that stamps
+// `bleautoreconnect g2-glasses on` from an authenticated CLI — that stamps
 // pairedByUser from the caller's currentAuthContext().user.
 // =============================================================================
 
@@ -195,7 +195,7 @@ AuthContext g2HijackAuthContext() {
       warnedStuck = true;
       WARN_BLUETOOTHF("g2-glasses peer STUCK: mac1='%s' but pairedByUser blank (no device owner yet?).",
                       gBlePeerData[BLE_PEER_G2_GLASSES].mac1.c_str());
-      WARN_BLUETOOTHF("  Recovery: finish first-time setup / create owner, then `bleautoconnect g2-glasses on`.");
+      WARN_BLUETOOTHF("  Recovery: finish first-time setup / create owner, then `bleautoreconnect g2-glasses on`.");
     }
   }
 

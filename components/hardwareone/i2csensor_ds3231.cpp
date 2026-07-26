@@ -31,7 +31,7 @@ RTCCache gRtcCache = {nullptr, {0}, 0.0f, false, 0};
 
 // Resolve which I2C bus + TwoWire* the DS3231 is on, from settings. Returns
 // false (with outputs unchanged) if the requested bus isn't initialized —
-// e.g., user set rtcBus=1 but i2c2BusEnabled=false. Each I2C function below
+// e.g., user set rtcBus=1 but i2c2Enabled=false. Each I2C function below
 // calls this and bails on failure rather than silently using Wire1, so a
 // misconfigured rtcBus surfaces as "RTC not connected" instead of writing
 // to the wrong bus. Reading gSettings.rtcBus on every call is fine — it's a
@@ -46,7 +46,7 @@ static bool rtcResolveBus(uint8_t* outBus, TwoWire** outWire) {
 }
 
 // Sensor state
-bool gRtcEnabled = false;
+bool gRtcRunning = false;
 bool gRtcConnected = false;
 unsigned long gRtcLastStopTime = 0;
 TaskHandle_t gRtcTaskHandle = nullptr;
@@ -472,7 +472,7 @@ void rtcTask(void* pvParameters) {
   unsigned long lastCacheUpdate = millis();
   rtcReadAndCacheOnce(lastCacheUpdate);
 
-  while (gRtcEnabled) {
+  while (gRtcRunning) {
     unsigned long now = millis();
 
     // Respect global polling pause (I2C bus recovery, scans, file I/O, etc.)
@@ -502,7 +502,7 @@ void rtcTask(void* pvParameters) {
       static uint32_t sRtcSafetyCounter = 0;
       if (++sRtcSafetyCounter >= 100) {
         sRtcSafetyCounter = 0;
-        if (checkTaskStackSafety("rtc", RTC_STACK_WORDS, &gRtcEnabled)) break;
+        if (checkTaskStackSafety("rtc", RTC_STACK_WORDS, &gRtcRunning)) break;
       }
     }
     
@@ -556,7 +556,7 @@ bool rtcInit() {
 // createRTCTask() is now defined in System_TaskUtils.cpp (centralized helper).
 
 void rtcStop() {
-  // Note: gRtcEnabled is set to false by handleDeviceStopped() before this is called
+  // Note: gRtcRunning is set to false by handleDeviceStopped() before this is called
   
   // Wait for task to exit
   int timeout = 50;
@@ -575,7 +575,7 @@ void rtcStop() {
 
 // Internal start function for sensor queue processor
 bool rtcStartInternal() {
-  if (gRtcEnabled && gRtcConnected) {
+  if (gRtcRunning && gRtcConnected) {
     DEBUG_RTC_LIFECYCLEF("[RTC] Already running");
     return true;
   }
@@ -602,14 +602,14 @@ bool rtcStartInternal() {
     return false;
   }
 
-  gRtcEnabled = true;  // Set this BEFORE task creation — the task's main loop
-                       // is `while (gRtcEnabled)`, so flipping this after
+  gRtcRunning = true;  // Set this BEFORE task creation — the task's main loop
+                       // is `while (gRtcRunning)`, so flipping this after
                        // createRTCTask() races and the task exits immediately
                        // (web UI then shows "RTC Closed" despite a successful
                        // openrtc command). Matches IMU/Thermal pattern.
   if (!createRTCTask()) {
     DEBUG_RTC_LIFECYCLEF("[RTC] Failed to create task");
-    gRtcEnabled = false;
+    gRtcRunning = false;
     return false;
   }
 
@@ -794,13 +794,13 @@ const char* cmd_rtcstart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   (void)argsInput;
 
-  if (gRtcEnabled && gRtcConnected) {
+  if (gRtcRunning && gRtcConnected) {
     return "[RTC] Already running";
   }
 
   // Delegate to rtcStartInternal() rather than re-rolling init + task creation:
-  // it sets gRtcEnabled before createRTCTask(), which the task's `while
-  // (gRtcEnabled)` loop requires. Open-coding the sequence here skipped that and
+  // it sets gRtcRunning before createRTCTask(), which the task's `while
+  // (gRtcRunning)` loop requires. Open-coding the sequence here skipped that and
   // the task exited immediately — the exact race rtcStartInternal() documents.
   if (!rtcStartInternal()) {
     return "Error: [RTC] Failed to start - check wiring";
@@ -813,7 +813,7 @@ const char* cmd_rtcstop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   (void)argsInput;
   
-  if (!gRtcEnabled) {
+  if (!gRtcRunning) {
     return "Error: [RTC] Not running";
   }
 
@@ -870,8 +870,9 @@ float rtcGetTemperature() {
 // RTC settings entries
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry rtcSettingEntries[] = {
-  { "rtcAutoStart", SETTING_BOOL, &gSettings.rtcAutoStart, 1, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, nullptr },
-  { "rtcTimeHasBeenSet", SETTING_BOOL, &gSettings.rtcTimeHasBeenSet, 0, 0, nullptr, 0, 1, "RTC time has been set (NTP/manual)", nullptr, false, nullptr, nullptr, true }
+  { "rtcEnabled", SETTING_BOOL, &gSettings.rtcEnabled, 1, 0, nullptr, 0, 1, "Enabled", nullptr, false, nullptr, "rtcenabled" },
+  { "rtcAutoStart", SETTING_BOOL, &gSettings.rtcAutoStart, 1, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, "rtcautostart" },
+  { "rtcTimeHasBeenSet", SETTING_BOOL, &gSettings.rtcTimeHasBeenSet, 0, 0, nullptr, 0, 1, "RTC time has been set (NTP/manual)", nullptr, false, nullptr, nullptr, true },
 };
 
 static bool isRTCConnectedSetting() {

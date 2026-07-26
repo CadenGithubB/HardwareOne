@@ -11,7 +11,7 @@
 //
 //   * Boot-time auto-reconnect (bleBootReconnect)
 //   * MAC auto-save on first successful connect (bleSavePeerMac)
-//   * The generic `bleautoconnect` / `blepeers` CLI commands
+//   * The generic `bleautoreconnect` / `blepeers` CLI commands
 //   * Settings serialization (the `peers` object under bluetooth.* in
 //     settings.json)
 //
@@ -25,17 +25,12 @@
 //   "bluetooth": {
 //     ...
 //     "peers": {
-//       "g2-glasses": { "mac1": "...", "mac2": "...", "autoConnect": true },
-//       "r1-ring":    { "mac1": "...",                 "autoConnect": false },
+//       "g2-glasses": { "mac1": "...", "mac2": "...", "autoReconnect": true },
+//       "r1-ring":    { "mac1": "...",                 "autoReconnect": false },
 //       "phone":      { "mac1": "" }
 //     }
 //   }
 //
-// HARD MIGRATION: this replaces the old flat keys
-// (bluetoothGlassesLeftMAC, bluetoothGlassesRightMAC, bluetoothRingMAC,
-// bluetoothPhoneMAC, g2AutoConnect, ringAutoConnect). Existing
-// settings.json files won't carry over — flash users must wipe.
-
 #include "System_BuildConfig.h"
 #include <Arduino.h>
 
@@ -88,8 +83,8 @@ struct BlePeerSpec {
 struct BlePeerData {
   String mac1;
   String mac2;        // empty unless macCount==2
-  bool   autoConnect;
-  // Username of whoever first paired this peer (turned autoConnect on
+  bool   autoReconnect;
+  // Username of whoever first paired this peer (turned autoReconnect on
   // or saved the MAC). Used by callers that act *on behalf of* the
   // peer — most notably G2_HijackCmd, which needs an AuthContext.user
   // when submitting tap-driven commands through cmd_exec. Stamped once
@@ -146,35 +141,55 @@ void bleSavePeerMac(BlePeerKind kind,
 //   3) device founder (first users.json username)
 // Idempotent when already owned. Only WARNs when no usable owner exists
 // at all (pre-FTS). Call from pairing-intent sites (`openg2`,
-// `bleautoconnect on`, OLED connect, boot reconnect heal).
+// `bleautoreconnect on`, OLED connect, boot reconnect heal).
 void bleStampPairedByIfBlank(BlePeerKind kind);
 
 // -----------------------------------------------------------------------------
-// Boot reconnect orchestrator
+// Boot + runtime reconnect orchestrator
 // -----------------------------------------------------------------------------
 
 // True if any registered peer wants auto-reconnect at boot AND has a
 // saved MAC to reconnect to. Used by HardwareOne.cpp to decide whether
-// to bring up the BLE central stack at boot when bluetoothAutoStart is
+// to bring up the BLE central stack at boot when bleAutoStart is
 // off but a peer wants to come up.
-bool bleAnyPeerWantsAutoConnect(void);
+bool bleAnyPeerWantsAutoReconnect(void);
 
 // Iterate the registry and trigger connectSaved() for every peer whose
-// autoConnect flag is set AND that has a saved mac1. Each connect is
+// autoReconnect flag is set AND that has a saved mac1. Each connect is
 // non-blocking (spawns its own task), but we pace them so multiple
 // peers don't fight the same BLE radio for scan windows: 2 s stagger
 // between kicks. Call AFTER initG2Client() so peer modules have
 // registered.
 void bleBootReconnect(void);
 
+// Mid-session drop recovery (when autoReconnect is on + saved MAC):
+//   blePeerNoteUserDisconnect — call from intentional disconnect paths
+//     (ringdisconnect / closeg2) so we do NOT reseek after a user tear-down.
+//   blePeerNoteLinkLost — call from BLE onDisconnect when the link was up;
+//     schedules a reconnect attempt if autoReconnect is on and the drop was
+//     not user-initiated.
+//   blePeerNoteLinkUp — call on connect success; clears backoff / user flag.
+//   bleAutoReconnectTick — call from the main loop; fires due reconnects
+//     with exponential backoff (5s → ~3 min).
+void blePeerNoteUserDisconnect(BlePeerKind kind);
+void blePeerNoteLinkLost(BlePeerKind kind);
+void blePeerNoteLinkUp(BlePeerKind kind);
+void bleAutoReconnectTick(void);
+
+// One-shot / schedule a reseek even when autoReconnect is off (e.g. Health
+// Track mine due while the ring is down). No-ops if the user intentionally
+// disconnected, there is no saved MAC, or the peer is already linked.
+// Non-blocking — the next bleAutoReconnectTick fires connectSaved.
+void blePeerRequestReseek(BlePeerKind kind);
+
 // -----------------------------------------------------------------------------
 // CLI handlers
 // -----------------------------------------------------------------------------
 
-// `bleautoconnect <peer-name> [on|off]`
+// `bleautoreconnect <peer-name> [on|off]`
 //   no [on|off] → print the peer's current state + saved MACs.
-//   with        → set autoConnect flag, persist, return confirmation.
-const char* cmd_bleautoconnect(const String& argsInput);
+//   with        → set autoReconnect flag, persist, return confirmation.
+const char* cmd_bleautoreconnect(const String& argsInput);
 
 // `blepeers` — print one line per registered peer:
 //   <name> connect=<yes|no> auto=<on|off> mac1=<...> [mac2=<...>]
@@ -184,7 +199,7 @@ const char* cmd_blepeers(const String& argsInput);
 // Settings JSON serialization
 // -----------------------------------------------------------------------------
 // The peers section nests one level deeper than the SettingsModule registry
-// supports cleanly (bluetooth.peers.<name>.{mac1,mac2,autoConnect}), so
+// supports cleanly (bluetooth.peers.<name>.{mac1,mac2,autoReconnect}), so
 // BLE_Peers handles its own load/save. Called inline from
 // buildSettingsJsonDoc / readSettingsJson (see System_Settings.cpp).
 #include <ArduinoJson.h>
@@ -195,9 +210,14 @@ void blePeersReadJson(JsonDocument& doc);
 
 // Stubs so callers in non-BLE builds compile cleanly.
 inline bool bleRegisterPeer(const struct BlePeerSpec&) { return false; }
-inline bool bleAnyPeerWantsAutoConnect(void)            { return false; }
+inline bool bleAnyPeerWantsAutoReconnect(void)            { return false; }
 inline void bleBootReconnect(void)                      {}
 inline void bleSavePeerMac(int, const String&, const String& = String()) {}
+inline void blePeerNoteUserDisconnect(int)              {}
+inline void blePeerNoteLinkLost(int)                    {}
+inline void blePeerNoteLinkUp(int)                      {}
+inline void bleAutoReconnectTick(void)                  {}
+inline void blePeerRequestReseek(int)                   {}
 
 #endif  // ENABLE_BLUETOOTH
 #endif  // BLE_PEERS_H

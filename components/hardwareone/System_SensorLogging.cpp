@@ -20,6 +20,8 @@
 #include "System_Settings.h"
 #include "System_Filesystem.h"
 #include "System_VFS.h"
+#include "System_Mutex.h"         // FsLockGuard
+#include "System_AuthIdentity.h"  // currentAuthContext
 #include <LittleFS.h>
 
 // Conditional sensor includes (same approach as main .ino)
@@ -34,7 +36,7 @@
   #include "i2csensor_vl53l4cx.h"
 #endif
 #if ENABLE_OLED_INPUT
-  #include "HAL_Input.h"   // gInputCache, gInputEnabled/Connected — populated by either driver
+  #include "HAL_Input.h"   // gInputCache, gInputRunning/Connected — populated by either driver
 #endif
 #if ENABLE_APDS_SENSOR
   #include "i2csensor_apds9960.h"
@@ -45,6 +47,14 @@
 #endif
 #if ENABLE_PRESENCE_SENSOR
   #include "i2csensor_sths34pf80.h"
+#endif
+#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
+  #include "G2_Ring.h"
+  #include "BLE_Peers.h"   // blePeerRequestReseek — Health Track mine when ring down
+#endif
+#if ENABLE_R1_HEALTH
+  #include "G2_Health.h"   // g2HealthPageIsActive — don't race page poll bursts
+  #include "BLE_Events.h"  // CompactJson for healthstatus json
 #endif
 #include "System_SensorStubs.h"  // Provides stubs for disabled sensors
 
@@ -57,7 +67,7 @@ extern void getTimestampPrefixMsCached(char* out, size_t outSize);
 // Sensor Logging State Variables
 // ============================================================================
 
-bool gSensorLoggingEnabled = false;
+bool gSensorLoggingRunning = false;
 String gSensorLogPath = "";
 unsigned long gSensorLogLastWrite = 0;
 uint32_t gSensorLogIntervalMs = 5000;
@@ -70,13 +80,48 @@ uint8_t gSensorLogMask = 0x00;
 // Sensor Logging Tick (called from main loop — no dedicated task needed)
 // ============================================================================
 
+static volatile bool sForceSample = false;
+static volatile bool sBypassR1Dedup = false;
+
+void sensorLogRequestSample(bool bypassR1Dedup) {
+  if (!gSensorLoggingRunning) return;
+  if ((gSensorLogMask & LOG_R1) == 0 && !bypassR1Dedup) {
+    // Still allow forced writes for mixed logs; bypass flag is mainly for R1.
+  }
+  sForceSample = true;
+  sBypassR1Dedup = bypassR1Dedup;
+}
+
 void sensorLogTick() {
-  if (!gSensorLoggingEnabled) return;
+  // Health Track mine runs even between sensorlog intervals (and while Track
+  // is on). Must be called before the early-return below.
+  healthTrackTick();
+
+  if (!gSensorLoggingRunning) return;
 
   static unsigned long lastTickMs = 0;
   unsigned long nowMs = millis();
-  if (lastTickMs != 0 && (long)(nowMs - lastTickMs) < (long)gSensorLogIntervalMs) return;
+  const bool forced = sForceSample;
+
+  // Health Track owns R1-only sessions: samples come only from the mine
+  // interval / Poll Now / page refresh (forced). Suppress the normal
+  // sensorlog cadence and the 5 s "ring down" timestamp heartbeats that
+  // were filling health-*.csv with empty lines.
+  const bool healthOwnedR1Only =
+      gSettings.healthTrackingEnabled &&
+      (gSensorLogMask & LOG_R1) != 0 &&
+      (gSensorLogMask & (uint8_t)~LOG_R1) == 0;
+
+  if (healthOwnedR1Only) {
+    if (!forced) return;
+  } else {
+    if (!forced && lastTickMs != 0 && (long)(nowMs - lastTickMs) < (long)gSensorLogIntervalMs) return;
+  }
+
+  if (forced) sForceSample = false;
   lastTickMs = nowMs;
+  const bool bypassR1Dedup = sBypassR1Dedup;
+  sBypassR1Dedup = false;
 
   // Diagnostics counters
   static uint32_t log_writes = 0;
@@ -108,7 +153,7 @@ void sensorLogTick() {
     remaining -= written;
 
     // Thermal (only if enabled in mask)
-    if ((gSensorLogMask & LOG_THERMAL) && s.gThermalEnabled && s.gThermalConnected && s.thermalValid && remaining > 0) {
+    if ((gSensorLogMask & LOG_THERMAL) && s.gThermalRunning && s.gThermalConnected && s.thermalValid && remaining > 0) {
       written = snprintf(pos, remaining, "thermal: min=%dC avg=%dC max=%dC | ",
                          (int)s.thermalMin, (int)s.thermalAvg, (int)s.thermalMax);
       pos += written;
@@ -116,7 +161,7 @@ void sensorLogTick() {
     }
 
     // ToF (only if enabled in mask)
-    if ((gSensorLogMask & LOG_TOF) && s.gTofEnabled && s.gTofConnected && s.tofValid && remaining > 0) {
+    if ((gSensorLogMask & LOG_TOF) && s.gTofRunning && s.gTofConnected && s.tofValid && remaining > 0) {
       written = snprintf(pos, remaining, "tof: ");
       pos += written;
       remaining -= written;
@@ -135,7 +180,7 @@ void sensorLogTick() {
     }
 
     // IMU (only if enabled in mask)
-    if ((gSensorLogMask & LOG_IMU) && s.gImuEnabled && s.gImuConnected && remaining > 0) {
+    if ((gSensorLogMask & LOG_IMU) && s.gImuRunning && s.gImuConnected && remaining > 0) {
       written = snprintf(pos, remaining, "imu: yaw=%.1f pitch=%.1f roll=%.1f accel=(%.2f,%.2f,%.2f) temp=%.1fC | ",
                          s.yaw, s.pitch, s.roll, s.ax, s.ay, s.az, s.imuTemp);
       pos += written;
@@ -145,7 +190,7 @@ void sensorLogTick() {
     // Input device (only if enabled in mask). The "input:" prefix is generic
     // because the source could be either a gamepad joystick or the ANO encoder's
     // synthesized state — the format is the same shape either way.
-    if ((gSensorLogMask & LOG_GAMEPAD) && s.gInputEnabled && s.gInputConnected && s.inputValid && remaining > 0) {
+    if ((gSensorLogMask & LOG_GAMEPAD) && s.gInputRunning && s.gInputConnected && s.inputValid && remaining > 0) {
       written = snprintf(pos, remaining, "input: x=%d y=%d btns=0x%lX | ",
                          s.joyX, s.joyY, (unsigned long)s.buttons);
       pos += written;
@@ -161,7 +206,7 @@ void sensorLogTick() {
     }
 
     // GPS (only if enabled in mask)
-    if ((gSensorLogMask & LOG_GPS) && s.gGpsEnabled && s.gGpsConnected && remaining > 0) {
+    if ((gSensorLogMask & LOG_GPS) && s.gGpsRunning && s.gGpsConnected && remaining > 0) {
       if (s.gpsFix) {
         written = snprintf(pos, remaining, "gps: lat=%.6f lon=%.6f alt=%.1fm speed=%.1fkn sats=%d q=%d | ",
                            s.gpsLatitude, s.gpsLongitude, s.gpsAltitude, s.gpsSpeed,
@@ -175,12 +220,36 @@ void sensorLogTick() {
     }
 
     // Presence (only if enabled in mask)
-    if ((gSensorLogMask & LOG_PRESENCE) && s.gPresenceEnabled && s.gPresenceConnected && remaining > 0) {
+    if ((gSensorLogMask & LOG_PRESENCE) && s.gPresenceRunning && s.gPresenceConnected && remaining > 0) {
       written = snprintf(pos, remaining, "presence: amb=%.1fC pres=%d%s mot=%d%s | ",
                          s.presenceAmbientTemp, (int)s.presenceValue,
                          s.presenceDetected ? "[DET]" : "",
                          (int)s.motionValue,
                          s.motionDetected ? "[DET]" : "");
+      pos += written;
+      remaining -= written;
+    }
+
+    // R1 ring vitals
+    if ((gSensorLogMask & LOG_R1) && s.r1Connected && remaining > 0) {
+      char hr[12], hrv[12], spo2[12], temp[12], bat[12], wear[8];
+      if (s.r1HrValid)      snprintf(hr, sizeof(hr), "%u", (unsigned)s.r1Hr); else strcpy(hr, "--");
+      if (s.r1HrvValid)     snprintf(hrv, sizeof(hrv), "%d", (int)s.r1Hrv); else strcpy(hrv, "--");
+      if (s.r1Spo2Valid)    snprintf(spo2, sizeof(spo2), "%u", (unsigned)s.r1Spo2); else strcpy(spo2, "--");
+      if (s.r1TempValid)    snprintf(temp, sizeof(temp), "%d.%d",
+                                    (int)(s.r1TempTenths / 10),
+                                    (int)(s.r1TempTenths < 0 ? -(s.r1TempTenths % 10)
+                                                             : (s.r1TempTenths % 10)));
+      else strcpy(temp, "--");
+      if (s.r1BatteryValid) snprintf(bat, sizeof(bat), "%u", (unsigned)s.r1Battery); else strcpy(bat, "--");
+      if (s.r1WearValid) {
+        if (s.r1Wear == 2) strcpy(wear, "on");
+        else if (s.r1Wear == 1) strcpy(wear, "off");
+        else strcpy(wear, "?");
+      } else strcpy(wear, "--");
+      written = snprintf(pos, remaining,
+                         "r1: hr=%s hrv=%s spo2=%s temp=%s bat=%s wear=%s | ",
+                         hr, hrv, spo2, temp, bat, wear);
       pos += written;
       remaining -= written;
     }
@@ -268,6 +337,24 @@ void sensorLogTick() {
       remaining -= written;
     }
 
+    if ((gSensorLogMask & LOG_R1) && remaining > 0) {
+      // Empty fields when invalid so CSV stays column-aligned.
+      char hr[8] = "", hrv[8] = "", spo2[8] = "", temp[8] = "", bat[8] = "", wear[4] = "";
+      if (s.r1HrValid) snprintf(hr, sizeof(hr), "%u", (unsigned)s.r1Hr);
+      if (s.r1HrvValid) snprintf(hrv, sizeof(hrv), "%d", (int)s.r1Hrv);
+      if (s.r1Spo2Valid) snprintf(spo2, sizeof(spo2), "%u", (unsigned)s.r1Spo2);
+      if (s.r1TempValid) snprintf(temp, sizeof(temp), "%d.%d",
+                                  (int)(s.r1TempTenths / 10),
+                                  (int)(s.r1TempTenths < 0 ? -(s.r1TempTenths % 10)
+                                                           : (s.r1TempTenths % 10)));
+      if (s.r1BatteryValid) snprintf(bat, sizeof(bat), "%u", (unsigned)s.r1Battery);
+      if (s.r1WearValid) snprintf(wear, sizeof(wear), "%u", (unsigned)s.r1Wear);
+      written = snprintf(pos, remaining, ",%d,%s,%s,%s,%s,%s,%s",
+                         s.r1Connected ? 1 : 0, hr, hrv, spo2, temp, bat, wear);
+      pos += written;
+      remaining -= written;
+    }
+
     return buf;
   };
 
@@ -328,7 +415,7 @@ void sensorLogTick() {
     // Only lock caches for sensors selected in the mask
     if (mask & LOG_THERMAL) {
       if (lockThermalCache(pdMS_TO_TICKS(10))) {
-        snap.gThermalEnabled = gThermalEnabled;
+        snap.gThermalRunning = gThermalRunning;
         snap.gThermalConnected = gThermalConnected;
         snap.thermalValid = gThermalCache.thermalDataValid;
         snap.thermalMin = gThermalCache.thermalMinTemp;
@@ -342,7 +429,7 @@ void sensorLogTick() {
     if (mask & LOG_TOF) {
       SensorCacheGuard g(gTofCache.mutex, pdMS_TO_TICKS(10), "sensorLog.tofSnapshot");
       if (g.held) {
-        snap.gTofEnabled = gTofEnabled;
+        snap.gTofRunning = gTofRunning;
         snap.gTofConnected = gTofConnected;
         snap.tofValid = gTofCache.tofDataValid;
         snap.tofTotal = gTofCache.tofTotalObjects;
@@ -360,7 +447,7 @@ void sensorLogTick() {
     if (mask & LOG_IMU) {
       SensorCacheGuard g(gImuCache.mutex, pdMS_TO_TICKS(10), "sensorLog.imuSnapshot");
       if (g.held) {
-        snap.gImuEnabled = gImuEnabled;
+        snap.gImuRunning = gImuRunning;
         snap.gImuConnected = gImuConnected;
         snap.yaw = gImuCache.oriYaw;
         snap.pitch = gImuCache.oriPitch;
@@ -380,7 +467,7 @@ void sensorLogTick() {
     if (mask & LOG_GAMEPAD) {
       SensorCacheGuard g(gInputCache.mutex, pdMS_TO_TICKS(10), "sensorLog.inputSnapshot");
       if (g.held) {
-        snap.gInputEnabled = gInputEnabled;
+        snap.gInputRunning = gInputRunning;
         snap.gInputConnected = gInputConnected;
         snap.inputValid = gInputCache.dataValid;
         // Stored in the cache's native bit layout (per-device, active-low).
@@ -397,9 +484,9 @@ void sensorLogTick() {
     if (mask & LOG_APDS) {
       SensorCacheGuard g(gApdsCache.mutex, pdMS_TO_TICKS(10), "sensorLog.apdsSnapshot");
       if (g.held) {
-        snap.gApdsColorEnabled = gApdsColorEnabled;
-        snap.gApdsProximityEnabled = gApdsProximityEnabled;
-        snap.gApdsGestureEnabled = gApdsGestureEnabled;
+        snap.gApdsColorRunning = gApdsColorRunning;
+        snap.gApdsProximityRunning = gApdsProximityRunning;
+        snap.gApdsGestureRunning = gApdsGestureRunning;
         snap.gApdsConnected = gApdsConnected;
         snap.apdsValid = gApdsCache.apdsDataValid;
         snap.apdsRed = gApdsCache.apdsRed;
@@ -414,7 +501,7 @@ void sensorLogTick() {
 
 #if ENABLE_GPS_SENSOR
     if (mask & LOG_GPS) {
-      snap.gGpsEnabled = gGpsEnabled;
+      snap.gGpsRunning = gGpsRunning;
       snap.gGpsConnected = gGpsConnected;
       SensorCacheGuard g(gGpsCache.mutex, pdMS_TO_TICKS(10), "sensorLog.gpsSnapshot");
       if (g.held) {
@@ -440,7 +527,7 @@ void sensorLogTick() {
 
 #if ENABLE_PRESENCE_SENSOR
     if (mask & LOG_PRESENCE) {
-      snap.gPresenceEnabled = gPresenceEnabled;
+      snap.gPresenceRunning = gPresenceRunning;
       snap.gPresenceConnected = gPresenceConnected;
       SensorCacheGuard g(gPresenceCache.mutex, pdMS_TO_TICKS(10), "sensorLog.presenceSnapshot");
       if (g.held) {
@@ -453,15 +540,76 @@ void sensorLogTick() {
     }
 #endif
 
+#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
+    if (mask & LOG_R1) {
+      // Keep the ring cache warm while logging even if Health page is closed.
+      // Skip while Health page owns a poll burst — racing two cursors doubles
+      // TX and makes Poll Now look flaky.
+#if ENABLE_R1_HEALTH
+      if (!g2HealthPageIsActive())
+#endif
+        g2RingPollVitalForLogging();
+      G2RingTelemetry t;
+      g2RingGetTelemetry(t);
+      snap.r1Connected    = t.connected;
+      snap.r1HrValid      = t.hrValid;
+      snap.r1HrvValid     = t.hrvValid;
+      snap.r1Spo2Valid    = t.spo2Valid;
+      snap.r1TempValid    = t.tempValid;
+      snap.r1BatteryValid = t.batteryValid;
+      snap.r1WearValid    = t.wearValid;
+      snap.r1Hr           = t.hr;
+      snap.r1Hrv          = t.hrv;
+      snap.r1Spo2         = t.spo2;
+      snap.r1TempTenths   = t.tempTenths;
+      snap.r1Battery      = t.battery;
+      snap.r1Wear         = t.wear;
+    }
+#endif
+
     // Check if any selected sensor has active data
     bool hasSelectedData = false;
-    if ((gSensorLogMask & LOG_THERMAL) && snap.gThermalEnabled && snap.gThermalConnected) hasSelectedData = true;
-    if ((gSensorLogMask & LOG_TOF) && snap.gTofEnabled && snap.gTofConnected) hasSelectedData = true;
-    if ((gSensorLogMask & LOG_IMU) && snap.gImuEnabled && snap.gImuConnected) hasSelectedData = true;
-    if ((gSensorLogMask & LOG_GAMEPAD) && snap.gInputEnabled && snap.gInputConnected) hasSelectedData = true;
+    if ((gSensorLogMask & LOG_THERMAL) && snap.gThermalRunning && snap.gThermalConnected) hasSelectedData = true;
+    if ((gSensorLogMask & LOG_TOF) && snap.gTofRunning && snap.gTofConnected) hasSelectedData = true;
+    if ((gSensorLogMask & LOG_IMU) && snap.gImuRunning && snap.gImuConnected) hasSelectedData = true;
+    if ((gSensorLogMask & LOG_GAMEPAD) && snap.gInputRunning && snap.gInputConnected) hasSelectedData = true;
     if ((gSensorLogMask & LOG_APDS) && snap.gApdsConnected) hasSelectedData = true;
-    if ((gSensorLogMask & LOG_GPS) && snap.gGpsEnabled && snap.gGpsConnected) hasSelectedData = true;
-    if ((gSensorLogMask & LOG_PRESENCE) && snap.gPresenceEnabled && snap.gPresenceConnected) hasSelectedData = true;
+    if ((gSensorLogMask & LOG_GPS) && snap.gGpsRunning && snap.gGpsConnected) hasSelectedData = true;
+    if ((gSensorLogMask & LOG_PRESENCE) && snap.gPresenceRunning && snap.gPresenceConnected) hasSelectedData = true;
+    if ((gSensorLogMask & LOG_R1) && snap.r1Connected) hasSelectedData = true;
+
+    // Health Track R1-only: never write empty timestamp rows (ring down /
+    // no cache yet). Forced mine/Poll samples only land when connected.
+    if (healthOwnedR1Only && !hasSelectedData) return;
+
+    // R1-only change-dedup: ring points update on minute scale — skip identical
+    // rows when LOG_R1 is the sole selected sensor (or the only one with data).
+    // Forced samples from Health Track mines / page refresh bypass this.
+    static uint8_t  lastR1Hr = 0, lastR1Spo2 = 0, lastR1Bat = 0, lastR1Wear = 0;
+    static int16_t  lastR1Hrv = 0, lastR1Temp = 0;
+    static uint8_t  lastR1Flags = 0;
+    if ((gSensorLogMask & LOG_R1) && snap.r1Connected) {
+      const uint8_t flags = (snap.r1HrValid ? 1 : 0) | (snap.r1HrvValid ? 2 : 0) |
+                            (snap.r1Spo2Valid ? 4 : 0) | (snap.r1BatteryValid ? 8 : 0) |
+                            (snap.r1TempValid ? 16 : 0) | (snap.r1WearValid ? 32 : 0);
+      const bool r1Changed = (flags != lastR1Flags) ||
+                             (snap.r1HrValid && snap.r1Hr != lastR1Hr) ||
+                             (snap.r1HrvValid && snap.r1Hrv != lastR1Hrv) ||
+                             (snap.r1Spo2Valid && snap.r1Spo2 != lastR1Spo2) ||
+                             (snap.r1TempValid && snap.r1TempTenths != lastR1Temp) ||
+                             (snap.r1BatteryValid && snap.r1Battery != lastR1Bat) ||
+                             (snap.r1WearValid && snap.r1Wear != lastR1Wear);
+      const uint8_t others = (uint8_t)(gSensorLogMask & (uint8_t)~LOG_R1);
+      if (!bypassR1Dedup && !r1Changed && others == 0) {
+        return;  // nothing new to write
+      }
+      if (r1Changed || bypassR1Dedup) {
+        lastR1Flags = flags;
+        lastR1Hr = snap.r1Hr; lastR1Hrv = snap.r1Hrv;
+        lastR1Spo2 = snap.r1Spo2; lastR1Temp = snap.r1TempTenths;
+        lastR1Bat = snap.r1Battery; lastR1Wear = snap.r1Wear;
+      }
+    }
 
     // Suppress idle lines when no selected sensor has data
     static unsigned long lastHeartbeatMs = 0;
@@ -605,7 +753,7 @@ const char* cmd_sensorlog(const String& argsInput) {
            "    track = GPS-only compact format with signal loss dedup\n"
            "  maxsize <bytes>: Set max file size before rotation (default: 256000)\n"
            "  rotations <count>: Set number of old logs to keep (0-9, default: 3)\n"
-           "  sensors <thermal|tof|imu|gamepad|apds|gps|presence|all|none>: Select sensors to log\n"
+           "  sensors <thermal|tof|imu|gamepad|apds|gps|presence|r1|all|none>: Select sensors to log\n"
            "  autostart [on|off]: Auto-start logging on boot with last-used parameters";
   }
   String subCmd = a.arg(0);
@@ -623,12 +771,13 @@ const char* cmd_sensorlog(const String& argsInput) {
     if (gSensorLogMask & LOG_APDS) sensors += "apds ";
     if (gSensorLogMask & LOG_GPS) sensors += "gps ";
     if (gSensorLogMask & LOG_PRESENCE) sensors += "presence ";
+    if (gSensorLogMask & LOG_R1) sensors += "r1 ";
     if (sensors.length() == 0) sensors = "(none)";
     
     const char* fmtName = (gSensorLogFormat == SENSOR_LOG_CSV) ? "CSV" :
                            (gSensorLogFormat == SENSOR_LOG_TRACK) ? "TRACK" : "TEXT";
     char* buf = getDebugBuffer();
-    if (gSensorLoggingEnabled) {
+    if (gSensorLoggingRunning) {
       snprintf(buf, 1024,
         "Sensor logging ACTIVE\n"
         "  File: %s\n"
@@ -666,10 +815,10 @@ const char* cmd_sensorlog(const String& argsInput) {
 
   // Handle 'stop' subcommand
   if (subCmd == "stop") {
-    if (!gSensorLoggingEnabled) {
+    if (!gSensorLoggingRunning) {
       return "Error: Sensor logging is not running";
     }
-    gSensorLoggingEnabled = false;
+    gSensorLoggingRunning = false;
     systemEventPost(SYSEVT_SENSOR_STOPPED, "Logging");
     broadcastOutput("Sensor logging stop requested; will stop safely");
     return "SUCCESS: Sensor logging stop requested; will stop safely";
@@ -677,7 +826,15 @@ const char* cmd_sensorlog(const String& argsInput) {
 
   // Handle 'start' subcommand
   if (subCmd == "start") {
-    if (gSensorLoggingEnabled) {
+    // Master switch. Checked here rather than at each caller because sensor
+    // logging is startable from several places that are not obviously "start
+    // logging" - notably the OLED Map screen, which begins a GPS track log as a
+    // side effect of opening it. Without this, "never write logs on this device"
+    // was not expressible.
+    if (!gSettings.sensorLogEnabled) {
+      return "Error: sensor logging is disabled - run 'sensorlogenabled 1' first";
+    }
+    if (gSensorLoggingRunning) {
       return "Error: Sensor logging already running. Use 'sensorlog stop' first.";
     }
 
@@ -751,6 +908,12 @@ const char* cmd_sensorlog(const String& argsInput) {
         if (gSensorLogMask & LOG_APDS) csvHeader += ",apds_red,apds_green,apds_blue,apds_clear,apds_proximity,apds_gesture";
         if (gSensorLogMask & LOG_GPS) csvHeader += ",gps_fix,gps_lat,gps_lon,gps_alt,gps_speed,gps_sats,gps_quality";
         if (gSensorLogMask & LOG_PRESENCE) csvHeader += ",presence_ambient,presence_value,presence_detected,motion_value,motion_detected";
+        // Order must track the row builder in buildCSVFromSnap: connected, hr,
+        // hrv, spo2, temp, battery, wear. r1_temp sits BETWEEN spo2 and battery
+        // — appending the two missing names at the end would keep the count
+        // right and silently mislabel the columns. r1_wear is the raw code
+        // (0 unknown / 1 not worn / 2 worn), not the on/off words TEXT logs use.
+        if (gSensorLogMask & LOG_R1) csvHeader += ",r1_connected,r1_hr,r1_hrv,r1_spo2,r1_temp,r1_battery,r1_wear";
         csvHeader += "\n";
         f.write((const uint8_t*)csvHeader.c_str(), csvHeader.length());
       } else if (gSensorLogFormat == SENSOR_LOG_TRACK) {
@@ -801,7 +964,7 @@ const char* cmd_sensorlog(const String& argsInput) {
 
     gSensorLogPath = filepath;
     gSensorLogIntervalMs = interval;
-    gSensorLoggingEnabled = true;
+    gSensorLoggingRunning = true;
     gSensorLogLastWrite = millis();
 
     // Persist last-used parameters for auto-start
@@ -923,7 +1086,9 @@ const char* cmd_sensorlog(const String& argsInput) {
       p += n; remaining -= n;
       n = snprintf(p, remaining, "  %s Presence\n", (gSensorLogMask & LOG_PRESENCE) ? "☑" : "☐");
       p += n; remaining -= n;
-      snprintf(p, remaining, "\nUsage: sensorlog sensors <thermal|tof|imu|gamepad|apds|gps|presence|all|none>");
+      n = snprintf(p, remaining, "  %s R1 Health\n", (gSensorLogMask & LOG_R1) ? "☑" : "☐");
+      p += n; remaining -= n;
+      snprintf(p, remaining, "\nUsage: sensorlog sensors <thermal|tof|imu|gamepad|apds|gps|presence|r1|all|none>");
       return getDebugBuffer();
     }
 
@@ -931,7 +1096,7 @@ const char* cmd_sensorlog(const String& argsInput) {
     sensorList.toLowerCase();
 
     if (sensorList == "all") {
-      gSensorLogMask = LOG_THERMAL | LOG_TOF | LOG_IMU | LOG_GAMEPAD | LOG_APDS | LOG_GPS | LOG_PRESENCE;
+      gSensorLogMask = LOG_THERMAL | LOG_TOF | LOG_IMU | LOG_GAMEPAD | LOG_APDS | LOG_GPS | LOG_PRESENCE | LOG_R1;
       setSetting(gSettings.sensorLogMask, (int)gSensorLogMask);
       return "All sensors enabled for logging";
     }
@@ -956,6 +1121,7 @@ const char* cmd_sensorlog(const String& argsInput) {
       else if (sensor == "apds") gSensorLogMask |= LOG_APDS;
       else if (sensor == "gps") gSensorLogMask |= LOG_GPS;
       else if (sensor == "presence") gSensorLogMask |= LOG_PRESENCE;
+      else if (sensor == "r1" || sensor == "health" || sensor == "ring") gSensorLogMask |= LOG_R1;
       else {
         snprintf(getDebugBuffer(), 1024, "Error: Unknown sensor '%s'", sensor.c_str());
         return getDebugBuffer();
@@ -966,14 +1132,15 @@ const char* cmd_sensorlog(const String& argsInput) {
     }
 
     setSetting(gSettings.sensorLogMask, (int)gSensorLogMask);
-    snprintf(getDebugBuffer(), 1024, "Logging enabled for: %s%s%s%s%s%s%s",
+    snprintf(getDebugBuffer(), 1024, "Logging enabled for: %s%s%s%s%s%s%s%s",
              (gSensorLogMask & LOG_THERMAL) ? "thermal " : "",
              (gSensorLogMask & LOG_TOF) ? "tof " : "",
              (gSensorLogMask & LOG_IMU) ? "imu " : "",
              (gSensorLogMask & LOG_GAMEPAD) ? "gamepad " : "",
              (gSensorLogMask & LOG_APDS) ? "apds " : "",
              (gSensorLogMask & LOG_GPS) ? "gps " : "",
-             (gSensorLogMask & LOG_PRESENCE) ? "presence " : "");
+             (gSensorLogMask & LOG_PRESENCE) ? "presence " : "",
+             (gSensorLogMask & LOG_R1) ? "r1 " : "");
     return getDebugBuffer();
   }
 
@@ -1011,6 +1178,498 @@ const char* cmd_sensorlog(const String& argsInput) {
 }
 
 // ============================================================================
+// R1 Health Track (kick off durable vitals capture from the Health feature)
+// ============================================================================
+
+#ifndef CAPTURE_HEALTHLOG_DEFAULT
+#define CAPTURE_HEALTHLOG_DEFAULT CAPTURE_DIR_SENSORS "/health.csv"
+#endif
+
+bool healthTrackIsActive() {
+  return gSettings.healthTrackingEnabled &&
+         (gSensorLogMask & LOG_R1) != 0 &&
+         gSensorLoggingRunning;
+}
+
+// Health Track mine state — polls all four vitals, waits for notifies, logs.
+enum : uint8_t { HT_MINE_IDLE = 0, HT_MINE_POLLING, HT_MINE_SETTLE };
+static uint8_t  sHtMineState = HT_MINE_IDLE;
+static uint8_t  sHtMineCursor = 0;
+static uint32_t sHtMineLastMs = 0;
+static uint32_t sHtMineLastBurstMs = 0;
+static bool     sHtPageRefreshPending = false;
+static uint32_t sHtPageRefreshDueMs = 0;
+
+static uint32_t healthTrackIntervalMs() {
+  int sec = gSettings.healthTrackPollIntervalSec;
+  if (sec < 60) sec = 60;
+  if (sec > 86400) sec = 86400;
+  return (uint32_t)sec * 1000u;
+}
+
+void healthTrackNotePageRefresh() {
+  // Give notify replies ~1.5 s to land, then force a log line.
+  sHtPageRefreshPending = true;
+  sHtPageRefreshDueMs = millis() + 1500;
+}
+
+#if ENABLE_R1_HEALTH
+// On-demand poll burst (healthstatus poll / web Poll Now) — independent of Track.
+enum : uint8_t { HT_OD_IDLE = 0, HT_OD_POLLING, HT_OD_SETTLE };
+static uint8_t  sHtOdState = HT_OD_IDLE;
+static uint8_t  sHtOdCursor = 0;
+static uint32_t sHtOdLastMs = 0;
+#endif
+
+bool healthStartPollBurst(void) {
+#if ENABLE_R1_HEALTH
+  if (!g2RingIsConnected()) return false;
+  sHtOdState = HT_OD_POLLING;
+  sHtOdCursor = 0;
+  sHtOdLastMs = 0;
+  return true;
+#else
+  return false;
+#endif
+}
+
+const char* buildHealthStatusJson(char* buf, size_t cap) {
+  if (!buf || cap < 3) return "{}";
+#if ENABLE_R1_HEALTH
+  G2RingTelemetry t;
+  g2RingGetTelemetry(t);
+  CompactJson j(buf, cap);
+  j.kv("schema", 2)
+   .kv("connected", (bool)t.connected)
+   .kv("hrValid", (bool)t.hrValid)
+   .kv("hr", (unsigned)t.hr)
+   .kv("hrAgeSec", (int)t.hrAgeSec)
+   .kv("hrvValid", (bool)t.hrvValid)
+   .kv("hrv", (int)t.hrv)
+   .kv("hrvAgeSec", (int)t.hrvAgeSec)
+   .kv("spo2Valid", (bool)t.spo2Valid)
+   .kv("spo2", (unsigned)t.spo2)
+   .kv("spo2AgeSec", (int)t.spo2AgeSec)
+   .kv("tempValid", (bool)t.tempValid)
+   .kv("tempTenths", (int)t.tempTenths)
+   .kv("tempAgeSec", (int)t.tempAgeSec)
+   .kv("batteryValid", (bool)t.batteryValid)
+   .kv("battery", (unsigned)t.battery)
+   .kv("batteryAgeSec", (int)t.batteryAgeSec)
+   .kv("wearValid", (bool)t.wearValid)
+   .kv("wear", (unsigned)t.wear)
+   .kv("wearAgeSec", (int)t.wearAgeSec)
+   .kv("trackActive", healthTrackIsActive())
+   .kv("trackEnabled", (bool)gSettings.healthTrackingEnabled)
+   .kv("pollIntervalSec", (unsigned)gSettings.healthTrackPollIntervalSec)
+   .kv("r1Mask", (bool)((gSensorLogMask & LOG_R1) != 0))
+   .kv("logging", (bool)gSensorLoggingRunning);
+  return j.c_str();
+#else
+  snprintf(buf, cap, "{\"schema\":1,\"enabled\":false}");
+  return buf;
+#endif
+}
+
+const char* cmd_healthstatus(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+#if !ENABLE_R1_HEALTH
+  (void)argsInput;
+  return "Error: R1 Health requires ENABLE_R1_HEALTH in this build";
+#else
+  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+  CommandArgs a(argsInput);
+  String sub = a.has(0) ? a.arg(0) : String();
+  sub.toLowerCase();
+
+  if (sub == "poll") {
+    if (!healthStartPollBurst()) return "Error: ring not connected — connect via Bluetooth → R1 Ring";
+    return "SUCCESS: R1 Health poll burst started (HR/HRV/SpO2/temp/battery)";
+  }
+
+  if (argWantsJson(argsInput) || sub == "json") {
+    return buildHealthStatusJson(getDebugBuffer(), 1024);
+  }
+
+  G2RingTelemetry t;
+  g2RingGetTelemetry(t);
+  char hr[8], hrv[8], spo2[8], temp[12], bat[8], wear[8];
+  if (t.hrValid) snprintf(hr, sizeof(hr), "%u", (unsigned)t.hr); else snprintf(hr, sizeof(hr), "--");
+  if (t.hrvValid) snprintf(hrv, sizeof(hrv), "%d", (int)t.hrv); else snprintf(hrv, sizeof(hrv), "--");
+  if (t.spo2Valid) snprintf(spo2, sizeof(spo2), "%u%%", (unsigned)t.spo2); else snprintf(spo2, sizeof(spo2), "--");
+  if (t.tempValid) snprintf(temp, sizeof(temp), "%d.%dC",
+                            (int)(t.tempTenths / 10),
+                            (int)(t.tempTenths < 0 ? -(t.tempTenths % 10) : (t.tempTenths % 10)));
+  else snprintf(temp, sizeof(temp), "--");
+  if (t.batteryValid) snprintf(bat, sizeof(bat), "%u%%", (unsigned)t.battery); else snprintf(bat, sizeof(bat), "--");
+  if (!t.wearValid) snprintf(wear, sizeof(wear), "--");
+  else if (t.wear == 2) snprintf(wear, sizeof(wear), "on");
+  else if (t.wear == 1) snprintf(wear, sizeof(wear), "off");
+  else snprintf(wear, sizeof(wear), "?");
+  snprintf(getDebugBuffer(), 1024,
+           "R1 Health: ring=%s  HR=%s  HRV=%s  SpO2=%s  T=%s  Bat=%s  Wear=%s\n"
+           "  ages(s): hr=%d hrv=%d spo2=%d temp=%d bat=%d wear=%d\n"
+           "  Track=%s (setting=%s, r1_mask=%s, logging=%s, poll=%us)\n"
+           "Usage: healthstatus [json|poll]",
+           t.connected ? "up" : "down", hr, hrv, spo2, temp, bat, wear,
+           (int)t.hrAgeSec, (int)t.hrvAgeSec, (int)t.spo2AgeSec,
+           (int)t.tempAgeSec, (int)t.batteryAgeSec, (int)t.wearAgeSec,
+           healthTrackIsActive() ? "ACTIVE" : "inactive",
+           gSettings.healthTrackingEnabled ? "on" : "off",
+           (gSensorLogMask & LOG_R1) ? "yes" : "no",
+           gSensorLoggingRunning ? "running" : "stopped",
+           (unsigned)gSettings.healthTrackPollIntervalSec);
+  return getDebugBuffer();
+#endif
+}
+
+void healthTrackTick() {
+#if ENABLE_R1_HEALTH
+  const uint32_t now = millis();
+
+  // On-demand Health-page refresh → log whenever R1 sensorlog is running
+  // (Track or manual `sensorlog sensors r1`), not only on the timed mine.
+  if (sHtPageRefreshPending && (long)(now - sHtPageRefreshDueMs) >= 0) {
+    sHtPageRefreshPending = false;
+    if (gSensorLoggingRunning && (gSensorLogMask & LOG_R1)) {
+      sensorLogRequestSample(/*bypassR1Dedup*/ true);
+      if (isDebugFlagSet(DEBUG_LOGGER)) {
+        DEBUG_LOGGERF("healthtrack: page refresh → sensorlog sample");
+      }
+    }
+  }
+
+  // On-demand poll burst (CLI/web/OLED can also poll locally).
+  // Yield the ring TX while the Health page owns Poll Now / entry burst.
+  if (sHtOdState == HT_OD_POLLING) {
+    if (!g2RingIsConnected()) {
+      sHtOdState = HT_OD_IDLE;
+    } else if (g2HealthPageIsActive()) {
+      // Pause — resume next tick when page closes.
+    } else if (sHtOdLastMs == 0 || (long)(now - sHtOdLastMs) >= 700) {
+      (void)g2RingPollVital(sHtOdCursor);
+      sHtOdCursor++;
+      sHtOdLastMs = now;
+      if (sHtOdCursor >= G2_RING_POLL_VITAL_COUNT) {
+        sHtOdState = HT_OD_SETTLE;
+        sHtOdLastMs = now;
+      }
+    }
+  } else if (sHtOdState == HT_OD_SETTLE) {
+    if ((long)(now - sHtOdLastMs) >= 1500) {
+      sHtOdState = HT_OD_IDLE;
+      healthTrackNotePageRefresh();
+    }
+  }
+
+  if (!gSettings.healthTrackingEnabled) {
+    sHtMineState = HT_MINE_IDLE;
+    return;
+  }
+
+  // Mine cadence gate — used both when connected (poll vitals) and when
+  // down (nudge BLE once per interval instead of spinning every loop).
+  const bool mineDue = (sHtMineLastBurstMs == 0 ||
+      (long)(now - sHtMineLastBurstMs) >= (long)healthTrackIntervalMs());
+
+  if (!g2RingIsConnected()) {
+    sHtMineState = HT_MINE_IDLE;
+    if (mineDue) {
+      // Advance the mine clock so we only nudge once per interval.
+      sHtMineLastBurstMs = now;
+      // Non-blocking: schedules connectSaved on the next bleAutoReconnectTick.
+      // Respects user ringdisconnect; works even if bleautoreconnect is off
+      // (one-shot). With autoReconnect on, drop recovery continues via backoff.
+      blePeerRequestReseek(BLE_PEER_R1_RING);
+      if (isDebugFlagSet(DEBUG_LOGGER)) {
+        DEBUG_LOGGERF("healthtrack: mine due but ring down — requested BLE reseek");
+      }
+    }
+    return;
+  }
+
+  if (g2HealthPageIsActive()) {
+    // Don't start/continue timed mine over the lens poller.
+    return;
+  }
+
+  if (sHtMineState == HT_MINE_IDLE) {
+    if (mineDue) {
+      sHtMineState = HT_MINE_POLLING;
+      sHtMineCursor = 0;
+      sHtMineLastMs = 0;
+      if (isDebugFlagSet(DEBUG_LOGGER)) {
+        DEBUG_LOGGERF("healthtrack: timed mine start (interval=%us)",
+                      (unsigned)gSettings.healthTrackPollIntervalSec);
+      }
+    }
+    return;
+  }
+
+  if (sHtMineState == HT_MINE_POLLING) {
+    if (sHtMineLastMs == 0 || (long)(now - sHtMineLastMs) >= 700) {
+      (void)g2RingPollVital(sHtMineCursor);
+      sHtMineCursor++;
+      sHtMineLastMs = now;
+      if (sHtMineCursor >= 4) {
+        sHtMineState = HT_MINE_SETTLE;
+        sHtMineLastMs = now;
+      }
+    }
+    return;
+  }
+
+  if (sHtMineState == HT_MINE_SETTLE) {
+    if ((long)(now - sHtMineLastMs) >= 1500) {
+      sHtMineLastBurstMs = now;
+      sHtMineState = HT_MINE_IDLE;
+      if (gSensorLoggingRunning && (gSensorLogMask & LOG_R1)) {
+        sensorLogRequestSample(/*bypassR1Dedup*/ true);
+        if (isDebugFlagSet(DEBUG_LOGGER)) {
+          DEBUG_LOGGERF("healthtrack: timed mine → sensorlog sample");
+        }
+      }
+    }
+  }
+#else
+  (void)0;
+#endif
+}
+
+static const char* healthTrackRestartWithCurrentMask() {
+  // Stop then start so CSV headers match the new mask.
+  if (gSensorLoggingRunning) {
+    gSensorLoggingRunning = false;
+  }
+  String path = gSettings.sensorLogPath;
+  if (path.length() == 0 || path.charAt(0) != '/') path = CAPTURE_HEALTHLOG_DEFAULT;
+  uint32_t interval = gSensorLogIntervalMs;
+  if (interval < 100) interval = 5000;
+  char cmd[320];
+  snprintf(cmd, sizeof(cmd), "start \"%s\" %lu", path.c_str(), (unsigned long)interval);
+  return cmd_sensorlog(String(cmd));
+}
+
+const char* healthTrackSet(bool on) {
+  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+
+  if (on) {
+    if (!gSettings.sensorLogEnabled) {
+      return "Error: sensor logging is disabled — run 'sensorlogenabled 1' first";
+    }
+#if !ENABLE_R1_HEALTH
+    return "Error: R1 Health Track requires ENABLE_R1_HEALTH in this build";
+#else
+    setSetting(gSettings.healthTrackingEnabled, true);
+    gSensorLogMask = (uint8_t)(gSensorLogMask | LOG_R1);
+    setSetting(gSettings.sensorLogMask, (int)gSensorLogMask);
+
+    // Track format is GPS-only — health needs TEXT/CSV columns.
+    if (gSensorLogFormat == SENSOR_LOG_TRACK) {
+      gSensorLogFormat = SENSOR_LOG_CSV;
+      setSetting(gSettings.sensorLogFormat, (int)SENSOR_LOG_CSV);
+    }
+
+    // Prefer the health capture path when starting a health-owned session.
+    if (gSettings.sensorLogPath.length() == 0 ||
+        gSettings.sensorLogPath.indexOf("health") < 0) {
+      setSetting(gSettings.sensorLogPath, String(CAPTURE_HEALTHLOG_DEFAULT));
+    }
+
+    // Resume after reboot.
+    setSetting(gSettings.sensorLogAutoStart, true);
+
+    // Kick an immediate mine burst (don't wait a full poll interval).
+    sHtMineLastBurstMs = 0;
+    sHtMineState = HT_MINE_IDLE;
+
+    if (gSensorLoggingRunning && (gSensorLogMask & LOG_R1)) {
+      // Already logging with R1 in the mask — nothing more to do.
+      snprintf(getDebugBuffer(), 1024,
+               "SUCCESS: Health Track ON (already logging → %s)",
+               gSensorLogPath.c_str());
+      return getDebugBuffer();
+    }
+
+    const char* result = healthTrackRestartWithCurrentMask();
+    if (result && strncmp(result, "SUCCESS", 7) == 0) {
+      snprintf(getDebugBuffer(), 1024,
+               "SUCCESS: Health Track ON — logging R1 vitals to %s",
+               gSensorLogPath.c_str());
+      return getDebugBuffer();
+    }
+    return result ? result : "Error: Health Track failed to start sensorlog";
+#endif
+  }
+
+  // Off
+  setSetting(gSettings.healthTrackingEnabled, false);
+  gSensorLogMask = (uint8_t)(gSensorLogMask & (uint8_t)~LOG_R1);
+  setSetting(gSettings.sensorLogMask, (int)gSensorLogMask);
+  sHtMineState = HT_MINE_IDLE;
+  sHtPageRefreshPending = false;
+
+  if (!gSensorLoggingRunning) {
+    return "SUCCESS: Health Track OFF";
+  }
+
+  if (gSensorLogMask == 0) {
+    gSensorLoggingRunning = false;
+    setSetting(gSettings.sensorLogAutoStart, false);
+    systemEventPost(SYSEVT_SENSOR_STOPPED, "Logging");
+    return "SUCCESS: Health Track OFF — sensor logging stopped";
+  }
+
+  // Other sensors still selected — restart so CSV headers drop R1 columns.
+  const char* result = healthTrackRestartWithCurrentMask();
+  if (result && strncmp(result, "SUCCESS", 7) == 0) {
+    return "SUCCESS: Health Track OFF — R1 removed; other sensors still logging";
+  }
+  return result ? result : "SUCCESS: Health Track OFF";
+}
+
+const char* cmd_healthtrack(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+  CommandArgs a(argsInput);
+  if (!a.has(0)) {
+    snprintf(getDebugBuffer(), 1024,
+             "Health Track: %s\n"
+             "  logging=%s  mask_r1=%s  setting=%s  poll=%us\n"
+             "Usage: healthtrack <on|off|toggle|status|interval [sec]>",
+             healthTrackIsActive() ? "ACTIVE" : "inactive",
+             gSensorLoggingRunning ? "running" : "stopped",
+             (gSensorLogMask & LOG_R1) ? "yes" : "no",
+             gSettings.healthTrackingEnabled ? "on" : "off",
+             (unsigned)gSettings.healthTrackPollIntervalSec);
+    return getDebugBuffer();
+  }
+  String sub = a.arg(0); sub.toLowerCase();
+  if (sub == "status") {
+    snprintf(getDebugBuffer(), 1024,
+             "Health Track: %s (setting=%s, r1_mask=%s, logging=%s, poll=%us, path=%s)",
+             healthTrackIsActive() ? "ACTIVE" : "inactive",
+             gSettings.healthTrackingEnabled ? "on" : "off",
+             (gSensorLogMask & LOG_R1) ? "yes" : "no",
+             gSensorLoggingRunning ? "running" : "stopped",
+             (unsigned)gSettings.healthTrackPollIntervalSec,
+             gSensorLogPath.length() ? gSensorLogPath.c_str() : "(none)");
+    return getDebugBuffer();
+  }
+  if (sub == "interval") {
+    if (!a.has(1)) {
+      snprintf(getDebugBuffer(), 1024,
+               "Health Track poll interval: %u sec (min 60, max 86400)\n"
+               "Usage: healthtrack interval <seconds>",
+               (unsigned)gSettings.healthTrackPollIntervalSec);
+      return getDebugBuffer();
+    }
+    int sec = a.argInt(1, 0);
+    if (sec < 60 || sec > 86400) {
+      return "Error: healthtrack interval must be 60..86400 seconds";
+    }
+    setSetting(gSettings.healthTrackPollIntervalSec, sec);
+    // Reschedule next mine from now so a shorter interval takes effect promptly.
+    sHtMineLastBurstMs = millis();
+    snprintf(getDebugBuffer(), 1024,
+             "SUCCESS: Health Track poll interval set to %d sec (%d min)",
+             sec, sec / 60);
+    return getDebugBuffer();
+  }
+  if (sub == "on" || sub == "1" || sub == "true")  return healthTrackSet(true);
+  if (sub == "off" || sub == "0" || sub == "false") return healthTrackSet(false);
+  if (sub == "toggle") return healthTrackSet(!gSettings.healthTrackingEnabled);
+  return "Error: Usage: healthtrack <on|off|toggle|status|interval [sec]>";
+}
+
+// Stitch several health/sensor TEXT captures into one file (gpstrackmerge twin).
+// Args: "<output>" "<in1>" "<in2>" ... — bare output names land under
+// /logging_captures/sensors/. Newline boundary after each input.
+const char* cmd_healthlogmerge(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+  char* buf = getDebugBuffer();
+
+  CommandArgs a(argsInput);
+  if (a.count() < 2) {
+    return "Error: invalid arguments — Usage: healthlogmerge \"<output>\" \"<in1>\" \"<in2>\" [...] "
+           "(output first, then inputs in stitch order; max 9 inputs)";
+  }
+  if (a.count() > 10) {  // 1 output + 9 inputs
+    return "Error: too many inputs — max 9 files";
+  }
+
+  String outName;
+  const char* qerr = requireQuotedToken(a, 0, outName);
+  if (qerr) return qerr;
+  String outPath = outName;
+  if (!outPath.startsWith("/")) outPath = String(CAPTURE_DIR_SENSORS) + "/" + outPath;
+  if (!(outPath.endsWith(".csv") || outPath.endsWith(".log") || outPath.endsWith(".txt")))
+    outPath += ".csv";
+
+  const AuthContext& ctx    = currentAuthContext();
+  const AuthContext  sysCtx = VFS::systemAuth("health.stitch");
+  FsLockGuard fsGuard("healthlogmerge");
+
+  for (int i = 1; i < a.count(); i++) {
+    String in;
+    const char* e = requireQuotedPath(a, i, in);
+    if (e) return e;
+    if (in == outPath) return "Error: an input file is the same as the output";
+    if (!VFS::existsGuarded(in, ctx)) {
+      snprintf(buf, 1024, "Error: input not found: %s", in.c_str());
+      return buf;
+    }
+  }
+
+  VFS::mkdirGuarded("/logging_captures", sysCtx);
+  VFS::mkdirGuarded(CAPTURE_DIR_SENSORS, sysCtx);
+
+  File out = VFS::openGuarded(outPath, "w", sysCtx, true);
+  if (!out) {
+    snprintf(buf, 1024, "Error: cannot create output: %s", outPath.c_str());
+    return buf;
+  }
+
+  uint8_t chunk[512];
+  unsigned long totalBytes = 0;
+  int filesDone = 0;
+  for (int i = 1; i < a.count(); i++) {
+    String in;
+    requireQuotedPath(a, i, in);
+    File f = VFS::openGuarded(in, "r", ctx);
+    if (!f) {
+      out.close();
+      snprintf(buf, 1024, "Error: cannot open input: %s", in.c_str());
+      return buf;
+    }
+    uint8_t lastByte = (uint8_t)'\n';
+    while (f.available()) {
+      int n = f.read(chunk, sizeof(chunk));
+      if (n <= 0) break;
+      if (out.write(chunk, (size_t)n) != (size_t)n) {
+        f.close();
+        out.close();
+        snprintf(buf, 1024, "Error: write failed (filesystem full?) after %lu bytes to %s",
+                 totalBytes, outPath.c_str());
+        return buf;
+      }
+      totalBytes += (unsigned long)n;
+      lastByte = chunk[n - 1];
+    }
+    f.close();
+    if (lastByte != (uint8_t)'\n') { out.write((uint8_t)'\n'); totalBytes++; }
+    filesDone++;
+  }
+  out.close();
+
+  snprintf(buf, 1024,
+           "Stitched %d files into %s (%lu bytes)",
+           filesDone, outPath.c_str(), totalBytes);
+  return buf;
+}
+
+// ============================================================================
 // Command Registry
 // ============================================================================
 
@@ -1025,9 +1684,23 @@ const CommandEntry sensorLoggingCommands[] = {
     "    track = GPS-only compact format with signal loss dedup\n"
     "  maxsize <bytes>: Set max file size before rotation (default: 256000)\n"
     "  rotations <count>: Set number of old logs to keep (0-9, default: 3)\n"
-    "  sensors <thermal|tof|imu|gamepad|apds|gps|presence|all|none>: Select sensors to log\n"
+    "  sensors <thermal|tof|imu|gamepad|apds|gps|presence|r1|all|none>: Select sensors to log\n"
     "  interval <ms>: Set poll interval 100-3600000 (default 5000)\n"
     "  autostart [on|off]: Auto-start logging on boot (bare = toggle)" },
+  { "healthtrack", "Start/stop R1 Health Track (enables r1 sensorlog + starts capture)", false, cmd_healthtrack,
+    "Usage: healthtrack <on|off|toggle|status|interval [sec]>\n"
+    "  on: enable LOG_R1, start sensorlog to /logging_captures/sensors/health.csv, persist for boot\n"
+    "  off: remove LOG_R1; stop logging if no other sensors remain\n"
+    "  interval <sec>: how often to poll/mine the ring while Track is on (default 900 = 15 min)\n"
+    "  R1-only Track sessions write ONLY on that mine (and Poll Now) — no 5s empty heartbeats\n"
+    "  Also: Apps → Health → Toggle Track on the G2 lens; OLED/Web R1 Health" },
+  { "healthstatus", "R1 Health vitals + Track snapshot (text or json); poll starts a 4-vital burst", false, cmd_healthstatus,
+    "Usage: healthstatus [json|poll]\n"
+    "  bare/json: connected, HR/HRV/SpO2/battery (+valid), Track state\n"
+    "  poll: kick HR→HRV→SpO2→battery point queries (replies via notify)\n"
+    "  BLE App / Web use healthstatus json; connect via ringconnect / Bluetooth page" },
+  { "healthlogmerge", "Stitch health/sensor TEXT logs in order: \"<out>\" \"<in1>\" \"<in2>\" ...", true, cmd_healthlogmerge,
+    "Usage: healthlogmerge \"<output>\" \"<in1>\" \"<in2>\" [...]  (output first, then inputs in stitch order; max 9 inputs; bare names → /logging_captures/sensors/)" },
 };
 
 const size_t sensorLoggingCommandsCount = sizeof(sensorLoggingCommands) / sizeof(sensorLoggingCommands[0]);
@@ -1040,11 +1713,16 @@ const size_t sensorLoggingCommandsCount = sizeof(sensorLoggingCommands) / sizeof
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry sensorLogSettingEntries[] = {
+  { "sensorLogEnabled", SETTING_BOOL, &gSettings.sensorLogEnabled, 1, 0, nullptr, 0, 1, "Enabled", nullptr, false, nullptr, "sensorlogenabled" },
   { "sensorLogAutoStart",    SETTING_BOOL,   &gSettings.sensorLogAutoStart,    0, 0, nullptr, 0, 1,       "Auto-start logging after boot", nullptr, false, nullptr, "sensorlog autostart" },
+#if ENABLE_R1_HEALTH
+  { "healthTrackingEnabled", SETTING_BOOL, &gSettings.healthTrackingEnabled, 0, 0, nullptr, 0, 1, "R1 Health Track", nullptr, false, nullptr, "healthtrack" },
+  { "healthTrackPollIntervalSec", SETTING_INT, &gSettings.healthTrackPollIntervalSec, 900, 0, nullptr, 60, 86400, "R1 Health poll interval (sec)", nullptr, false, nullptr, "healthtrack interval" },
+#endif
   { "sensorLogPath", SETTING_STRING, &gSettings.sensorLogPath, 0, 0, CAPTURE_SENSORLOG_DEFAULT, 0, 0, "Log file path", nullptr, false, nullptr, "sensorlogpath" },
   { "sensorLogIntervalMs", SETTING_INT, &gSettings.sensorLogIntervalMs, 5000, 0, nullptr, 100, 3600000, "Poll interval (ms)", nullptr, false, nullptr, "sensorlog interval" },
   { "sensorLogMask", SETTING_INT, &gSettings.sensorLogMask, 0, 0, nullptr, 0, 255, "Sensors to log",
-    "bitmask:1|Thermal,2|ToF,4|IMU,8|Gamepad,16|APDS,32|GPS,64|Presence", false, nullptr, "sensorlogmask" },
+    "bitmask:1|Thermal,2|ToF,4|IMU,8|Gamepad,16|APDS,32|GPS,64|Presence,128|R1 Health", false, nullptr, "sensorlogmask" },
   { "sensorLogFormat", SETTING_INT, &gSettings.sensorLogFormat, 0, 0, nullptr, 0, 2, "Format", "0|Text,1|CSV,2|Track", false, nullptr, "sensorlogformat" },
   { "sensorLogMaxSize", SETTING_INT, &gSettings.sensorLogMaxSize, 256000, 0, nullptr, 10240, 10485760, "Max file size (bytes)", nullptr, false, nullptr, "sensorlog maxsize" },
   { "sensorLogMaxRotations", SETTING_INT, &gSettings.sensorLogMaxRotations, 3, 0, nullptr, 0, 9, "Rotations (old logs to keep)", nullptr, false, nullptr, "sensorlog rotations" }
@@ -1065,8 +1743,10 @@ extern const SettingsModule sensorLogSettingsModule = {
 // ============================================================================
 
 void sensorLogAutoStart() {
-  if (!gSettings.sensorLogAutoStart) return;
-  if (gSensorLoggingEnabled) return;  // Already running
+  // Health Track alone is enough to resume capture at boot (it also sets
+  // sensorLogAutoStart when enabled, but honor the setting either way).
+  if (!gSettings.sensorLogAutoStart && !gSettings.healthTrackingEnabled) return;
+  if (gSensorLoggingRunning) return;  // Already running
 
   // Restore persisted parameters
   if (gSettings.sensorLogMask > 0) gSensorLogMask = (uint8_t)gSettings.sensorLogMask;
@@ -1076,6 +1756,15 @@ void sensorLogAutoStart() {
     gSensorLogMaxSize = (size_t)gSettings.sensorLogMaxSize;
   if (gSettings.sensorLogMaxRotations >= 0 && gSettings.sensorLogMaxRotations <= 9)
     gSensorLogMaxRotations = (uint8_t)gSettings.sensorLogMaxRotations;
+
+  if (gSettings.healthTrackingEnabled) {
+    gSensorLogMask = (uint8_t)(gSensorLogMask | LOG_R1);
+    if (gSensorLogFormat == SENSOR_LOG_TRACK) gSensorLogFormat = SENSOR_LOG_CSV;
+    if (gSettings.sensorLogPath.length() == 0 || gSettings.sensorLogPath.indexOf("health") < 0) {
+      // Keep a stable health path for resumed sessions (timestamp appended below).
+      gSettings.sensorLogPath = CAPTURE_HEALTHLOG_DEFAULT;
+    }
+  }
 
   if (gSensorLogMask == 0) {
     broadcastOutput("[sensorlog] Auto-start skipped: no sensors selected");

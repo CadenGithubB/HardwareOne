@@ -89,7 +89,7 @@ inline void streamDS3231RtcSensorJs(httpd_req_t* req) {
     "          el.textContent = 'RTC error: not_compiled';\n"
     "          return 'not_compiled';\n"
     "        }\n"
-    "        if (!status.rtcEnabled) {\n"
+    "        if (!status.rtcRunning) {\n"
     "          stopTick(); rtcState.valid = false;\n"
     "          el.innerHTML = '<div style=\"padding:1rem;text-align:center;color:var(--panel-fg)\"><p style=\"margin:0;font-size:1.1em\">RTC Closed</p><p style=\"margin:0.5rem 0 0 0;font-size:0.9em\">Click \"Open\" to begin</p></div>';\n"
     "          return 'stopped';\n"

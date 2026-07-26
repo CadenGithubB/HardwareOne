@@ -1209,7 +1209,11 @@ window.togglePane = function(paneId, btnId) {
       
       hw.postFormText('/api/cli', { cmd: 'espnowsendfile ' + mac + ' "' + path + '"' })
         .then(t=>{
-          const success = t.toLowerCase().indexOf('success') >= 0 || t.toLowerCase().indexOf('sent') >= 0;
+          // An explicit "Error:" prefix always wins: several failure strings
+          // legitimately contain the word "sent" (e.g. "...; not sent"), which
+          // this substring sniff would otherwise paint as success.
+          const success = t.indexOf('Error') !== 0 &&
+                          (t.toLowerCase().indexOf('success') >= 0 || t.toLowerCase().indexOf('sent') >= 0);
           
           if (statDiv) {
             if (success) {
@@ -1728,7 +1732,13 @@ window.togglePane = function(paneId, btnId) {
               var msgs = Array.isArray(msgs_data) ? msgs_data : (msgs_data.messages || []);
               for (var i = msgs.length - 1; i >= 0; i--) {
                 var m = (msgs[i].msg || '');
-                if (m.includes('File sent successfully') && m.includes(filename)) {
+                // Match what actually lands in peer history: logFileTransferEvent
+                // writes "Received file: <name>" / "Failed to receive: <name>".
+                // (This used to test 'File sent successfully', a string the
+                // requester never sees — the sending side is the remote peer's
+                // FS_GET handler, not a CLI command — so both branches were dead
+                // and every fetch fell through to the 15-poll timeout.)
+                if (m.indexOf('Received file') >= 0 && m.includes(filename)) {
                   clearInterval(poll);
                   if (statusDiv) {
                     statusDiv.style.background = '#d4edda';
@@ -1738,7 +1748,8 @@ window.togglePane = function(paneId, btnId) {
                   appendLogLine('log-' + mac, 'RECEIVED', 'File received: ' + filename, null);
                   return;
                 }
-                if ((m.includes('failed') || m.includes('error') || m.includes('Error')) && m.includes(filename)) {
+                var ml = m.toLowerCase();
+                if ((ml.indexOf('failed') >= 0 || ml.indexOf('error') >= 0) && m.includes(filename)) {
                   clearInterval(poll);
                   if (statusDiv) {
                     statusDiv.style.background = '#f8d7da';

@@ -548,7 +548,14 @@ static bool writeRestoreFilesFromDoc(JsonDocument& doc, bool compatible,
       stripAesCiphertextValues(mergedDoc.as<JsonVariant>());
       if (haveDeviceWifi && pathStr == SETTINGS_FILE) {
         mergedDoc["network"]["wifi"]["networks"] = deviceSettingsDoc["network"]["wifi"]["networks"];
-        mergedDoc["network"]["wifi"]["autoReconnect"] = true;
+        // Force this device back online after a cross-device restore. WiFi is
+        // three independent axes now, and ALL of them have to be on or the
+        // guarantee is hollow: enabled (may it run), autoStart (connect at
+        // boot), autoReconnect (keep trying after a drop). This used to be the
+        // single key "autoReconnect", which no longer exists.
+        mergedDoc["network"]["wifi"]["wifiEnabled"]       = true;
+        mergedDoc["network"]["wifi"]["wifiAutoStart"]     = true;
+        mergedDoc["network"]["wifi"]["wifiAutoReconnect"] = true;
       }
       serializeJsonPretty(mergedDoc, content);
     } else if (kv.value().is<const char*>()) {

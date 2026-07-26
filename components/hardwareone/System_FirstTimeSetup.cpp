@@ -147,7 +147,7 @@ const char* getSetupProgressMessage(SetupProgressStage stage) {
 
 static void clearOledIfActive() {
 #if ENABLE_OLED_DISPLAY
-  if (gDisplay && oledConnected && gOledEnabled) {
+  if (gDisplay && oledConnected && gOledRunning) {
     displayClear();
     displayUpdate();
   }
@@ -313,7 +313,7 @@ static bool runPostRestoreCredentialSetup() {
   broadcastOutput("This device needs its own admin login.");
   broadcastOutput("");
 #if ENABLE_OLED_DISPLAY
-  if (gOledEnabled && oledConnected) {
+  if (gOledRunning && oledConnected) {
     showOLEDMessage("Restore done!\n\nCreate your\nadmin login", false);
   }
 #endif
@@ -323,7 +323,7 @@ static bool runPostRestoreCredentialSetup() {
   String u = "";
   while (u.length() == 0) {
 #if ENABLE_OLED_DISPLAY
-    if (gOledEnabled && oledConnected) {
+    if (gOledRunning && oledConnected) {
       bool cancelled = false;
       u = getOLEDTextInput("Admin Username:", false, "", 32, &cancelled, false);
       if (cancelled) return false;
@@ -342,7 +342,7 @@ static bool runPostRestoreCredentialSetup() {
   String p = "";
   while (p.length() == 0) {
 #if ENABLE_OLED_DISPLAY
-    if (gOledEnabled && oledConnected) {
+    if (gOledRunning && oledConnected) {
       bool cancelled = false;
       p = getOLEDTextInput("Admin Password:", true, "", 32, &cancelled, false);
       if (cancelled) return false;
@@ -409,7 +409,7 @@ void firstTimeSetupIfNeeded() {
   
 #if ENABLE_OLED_DISPLAY
   // Use OLED selection if available
-  if (gOledEnabled && oledConnected) {
+  if (gOledRunning && oledConnected) {
     getOLEDSetupModeSelection(setupMode);
   } else {
 #endif
@@ -480,7 +480,7 @@ void firstTimeSetupIfNeeded() {
       // Password entry (B goes back to network list)
       bool passwordCancelled = false;
 #if ENABLE_OLED_DISPLAY
-      if (gOledEnabled && oledConnected) {
+      if (gOledRunning && oledConnected) {
         restorePass = getOLEDTextInput("WiFi Password:", true, "", 64, &passwordCancelled);
       } else {
 #endif
@@ -520,7 +520,7 @@ void firstTimeSetupIfNeeded() {
     upsertWiFiNetwork(restoreSSID, restorePass, 1, false);
     sortWiFiByPriority();
     saveWiFiNetworks();
-    gSettings.wifiAutoReconnect = true;
+    gSettings.wifiAutoStart = true;
 
     // Use the project's standard WiFi connection (ESP-IDF API internally)
     setupWiFi();
@@ -711,7 +711,7 @@ void firstTimeSetupIfNeeded() {
   if (setupMode == 0) {
     int archIdx = 0;
 #if ENABLE_OLED_DISPLAY
-    if (gOledEnabled && oledConnected) {
+    if (gOledRunning && oledConnected) {
       archIdx = getOLEDArchetypeSelection();   // index, or -1 = back
     } else {
 #endif
@@ -753,7 +753,7 @@ void firstTimeSetupIfNeeded() {
   
   // Username stage ('b' on serial / B button on OLED goes back to the menu)
   setSetupProgressStage(SETUP_PROMPT_USERNAME);
-  if (!(gOledEnabled && oledConnected)) {
+  if (!(gOledRunning && oledConnected)) {
     broadcastOutput("Enter admin username ('b' to go back): ");
   }
   String u = "";
@@ -770,7 +770,7 @@ void firstTimeSetupIfNeeded() {
 #endif
     u.trim();
     if (u.length() == 0) {
-      if (!(gOledEnabled && oledConnected)) {
+      if (!(gOledRunning && oledConnected)) {
         broadcastOutput("Username cannot be blank ('b' to go back): ");
       }
 #if ENABLE_OLED_DISPLAY
@@ -785,7 +785,7 @@ void firstTimeSetupIfNeeded() {
   String p = "";
   setupBack = false;
   while (p.length() == 0) {
-    if (!(gOledEnabled && oledConnected)) {
+    if (!(gOledRunning && oledConnected)) {
       broadcastOutput("Enter admin password ('b' to go back): ");
     }
 #if ENABLE_OLED_DISPLAY
@@ -799,7 +799,7 @@ void firstTimeSetupIfNeeded() {
 #endif
     p.trim();
     if (p.length() == 0) {
-      if (!(gOledEnabled && oledConnected)) {
+      if (!(gOledRunning && oledConnected)) {
         broadcastOutput("Password cannot be blank ('b' to go back): ");
       }
 #if ENABLE_OLED_DISPLAY
@@ -830,7 +830,7 @@ void firstTimeSetupIfNeeded() {
     // Basic setup - use sensible defaults
     broadcastOutput("");
     broadcastOutput("Using default settings (Basic mode)");
-    gSettings.wifiAutoReconnect = true;
+    gSettings.wifiAutoStart = true;
     gSettings.httpAutoStart = true;
   }
 
@@ -853,7 +853,7 @@ void firstTimeSetupIfNeeded() {
 #if ENABLE_OLED_DISPLAY
   extern bool getOLEDThemeSelection(bool& darkMode);
   bool darkSelected = false;
-  if (gOledEnabled && oledConnected && getOLEDThemeSelection(darkSelected)) {
+  if (gOledRunning && oledConnected && getOLEDThemeSelection(darkSelected)) {
     themeInput = darkSelected ? "2" : "1";
   } else {
     themeInput = waitForSerialInputBlocking();
@@ -870,12 +870,12 @@ void firstTimeSetupIfNeeded() {
   // When not configured, ensure auto-reconnect is off so the device doesn't
   // attempt to connect with no stored credentials.
   if (!wifiConfigured) {
-    gSettings.wifiAutoReconnect = false;
+    gSettings.wifiAutoStart = false;
     broadcastOutput("WiFi setup skipped");
   }
   
   // Check if I2C was disabled via wizard
-  bool i2cDisabledByUser = !gSettings.i2cBusEnabled;
+  bool i2cDisabledByUser = !gSettings.i2cEnabled;
   
   // Saving configuration stage
   setSetupProgressStage(SETUP_SAVING_CONFIG);
@@ -956,7 +956,7 @@ void firstTimeSetupIfNeeded() {
   // Always save settings after wizard completes
   
   // Debug: Print sensor auto-start values before saving
-  INFO_SYSTEMF("[FTS] Before save: i2cBus=%d", gSettings.i2cBusEnabled ? 1 : 0);
+  INFO_SYSTEMF("[FTS] Before save: i2cBus=%d", gSettings.i2cEnabled ? 1 : 0);
   INFO_SYSTEMF("[FTS] Sensors: thermal=%d tof=%d imu=%d gps=%d fmradio=%d apds=%d gamepad=%d rtc=%d presence=%d",
                 gSettings.thermalAutoStart ? 1 : 0,
                 gSettings.tofAutoStart ? 1 : 0,
@@ -1004,7 +1004,7 @@ void firstTimeSetupIfNeeded() {
   }
 #endif
 #if ENABLE_GAMEPAD_SENSOR
-  if (gInputEnabled && !gSettings.inputAutoStart) {
+  if (gInputRunning && !gSettings.inputAutoStart) {
     needsRebootForHardware = true;
   }
 #endif

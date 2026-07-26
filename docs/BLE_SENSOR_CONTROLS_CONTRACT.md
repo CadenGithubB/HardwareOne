@@ -45,8 +45,10 @@ is corrected via offset settings (§3). Use the exact tokens below.
   field is the live value (§2). (Note: sending a setting command with *no*
   argument returns its usage text, **not** the value — so always read current
   state from `controls json`, never by running the bare command.)
-- **Set:** **`<key> <value>`** — the entry's `key` is the command (matching is
-  case-insensitive), validated against `min`/`max`; out-of-range is rejected.
+- **Set:** **`<cmd> <value>`** — use the entry's **`cmd`** field, which is the
+  exact set-command. Validated against `min`/`max`; out-of-range is rejected.
+  An entry with **no `cmd` field is not settable** — render it read-only.
+  **Never derive a command from `key`.** See the warning under §4.
 
 So the app needs no hand-maintained per-setting list — it reads `controls json`
 for each module and drives every knob from `key` + `value` + `min`/`max`/
@@ -83,9 +85,21 @@ opens that sensor's control panel.
 
 - **`value`** = the live current value — bind the control to it directly (no
   second call, no parsing the human reply).
-- **`key`** is *also the set command* — command matching is case-insensitive, so
-  the camelCase key works verbatim: **`<key> <value>`** (e.g. `imuPollingMs 500`,
-  `imuAutoStart on`). Validated against `min`/`max`; out-of-range is rejected.
+- **`key`** identifies the setting. It is **NOT** the set command.
+- **`cmd`** is the exact set command: **`<cmd> <value>`** (e.g. `imupollingms 500`,
+  `imuautostart on`). Matching is case-insensitive. Validated against `min`/`max`;
+  out-of-range is rejected. **An entry with no `cmd` is not settable** — render it
+  read-only rather than guessing.
+
+  > **Do not fall back to `key`.** An earlier version of this contract said `key`
+  > doubled as the set command. It does not, and building on that assumption is
+  > what broke the app's write path: an audit of all 407 controls
+  > (`docs/CONTROLS_WRITE_INTEGRITY.md`) found **243 DEAD** (key resolves to no
+  > command, write silently discarded) and **6 MISFIRE** (key resolves to a
+  > *different, real* command). The worst misfire: the debug module's `capture`
+  > key resolves to the camera's `capture` verb, so toggling a log flag **took a
+  > real photo and wrote it to storage**. A misfire is worse than a dead write
+  > because nothing looks wrong. Only ~82 of 407 keys ever worked by coincidence.
 - Secrets are never emitted. Unknown module → `{ "error":"unknown module" }`.
 
 **Control mapping (app):**

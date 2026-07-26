@@ -660,19 +660,19 @@ enum G2HijackPage : uint8_t {
   // launcher (hidden from the main hijack menu). Impl in
   // G2_Page_Automations.cpp.
   G2_HIJACK_PAGE_AUTOMATIONS     = 12,
-  // R1 Ring dashboard — read-only live readout (HR / HRV / SpO2 / battery)
-  // of the paired Even Realities ring. Reached via the Apps launcher.
-  // Live-text page (mirrors kMicDetailPage); impl inline in G2_Glasses.cpp.
+  // Apps → Health — Overview list+text; metric rows list+image graphs.
+  // G2_HIJACK_PAGE_RING is a retired alias for the old live-text ringdash.
+  G2_HIJACK_PAGE_HEALTH          = 13,
   G2_HIJACK_PAGE_RING            = 13,
   // LED control sub-page (color / effect / brightness). Reached by drilling
   // from Sensors -> LED, mirroring the Camera Settings pattern (hidden from
   // the main hijack menu). Impl in G2_Page_LED.cpp.
   G2_HIJACK_PAGE_LED             = 14,
   // System Events viewer — read-only live list of the device's typed event
-  // ring (kind / subject / age). Reached via the Apps launcher (hidden from
-  // the main hijack menu). Live-text page mirroring kRingPage; impl inline in
-  // G2_Glasses.cpp. NOTE: this is the ESP32-side event ring, NOT the G2's own
-  // native firmware notification system (a separate, deferred effort).
+  // ring (kind / subject / age). Reached via the System launcher (hidden from
+  // the main hijack menu). Live-text page; impl inline in G2_Glasses.cpp.
+  // NOTE: this is the ESP32-side event ring, NOT the G2's own native firmware
+  // notification system (a separate, deferred effort).
   G2_HIJACK_PAGE_SYSEVENTS       = 15,
   // FM radio tuner — action rows (seek/volume/mute/power) beside a live
   // readout (freq or seek progress, RDS, volume, signal). Reached by tapping
@@ -1112,6 +1112,14 @@ const char* g2ProbeImageQ28MixedImageTextLive();
 // a workaround for caption-style use cases.
 const char* g2ProbeImageQ28LMixedListImageLive();
 
+// Q30 family — unproven 3-pane list+text+image CREATE (ContainerTotalNum=3).
+// Q30: Health geometry, wire order list→text→image.
+// Q30b: same geom, wire order list→image→text.
+// Q30c: Health list/text + Q28L-sized 96×96 image (conservative paint path).
+const char* g2ProbeImageQ30ListTextImageHealthGeom();
+const char* g2ProbeImageQ30bListImageTextOrder();
+const char* g2ProbeImageQ30cListTextSmallImage();
+
 // Load a single-tile 4bpp uncompressed BMP from VFS (any size up to 288×144).
 // Caller must free(*outData) with free() on success.
 bool g2ReadBmp4bppFromVfs(const char* vfsPath, uint8_t** outData, size_t* outLen,
@@ -1226,6 +1234,9 @@ inline void        g2ProbeImageQ25SetPackPath(const char*) {}
 inline const char* g2ProbeImageQ25SdFrameAnimation() { return "G2 disabled"; }
 inline const char* g2ProbeImageQ28MixedImageTextLive() { return "G2 disabled"; }
 inline const char* g2ProbeImageQ28LMixedListImageLive() { return "G2 disabled"; }
+inline const char* g2ProbeImageQ30ListTextImageHealthGeom() { return "G2 disabled"; }
+inline const char* g2ProbeImageQ30bListImageTextOrder() { return "G2 disabled"; }
+inline const char* g2ProbeImageQ30cListTextSmallImage() { return "G2 disabled"; }
 inline bool g2ReadBmp4bppFromVfs(const char*, uint8_t**, size_t*, int32_t*, int32_t*,
                                  const char**) {
   return false;

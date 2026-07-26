@@ -14,7 +14,7 @@
 #if ENABLE_CAMERA_SENSOR
 
 // Camera sensor state
-extern bool gCameraEnabled;
+extern bool gCameraRunning;
 extern bool cameraConnected;
 extern bool cameraStreaming;
 

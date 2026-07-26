@@ -140,7 +140,7 @@ inline void streamSeesawGamepadDashboardDef(httpd_req_t* req) {
   // key='input' so both gamepad and ANO builds share the same status key.
   // The user-facing `name` differs ("Gamepad (Seesaw)" vs "ANO Encoder (Seesaw)")
   // — that's the only thing that needs to be per-build. The dashboard JS uses
-  // the key to look up status fields (inputEnabled) and DOM ids (dash-input-*).
+  // the key to look up status fields (inputRunning) and DOM ids (dash-input-*).
   httpd_resp_send_chunk(req, "window.__dashSensorDefs.push({device:'Seesaw',key:'input',name:'Gamepad (Seesaw)',desc:'Joystick & Buttons'});", HTTPD_RESP_USE_STRLEN);
 }
 

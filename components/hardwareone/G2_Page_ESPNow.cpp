@@ -562,6 +562,7 @@ static constexpr size_t kBondSensorDisplayMax = 15;
 // Collect valid cache indices in a stable order shared by renderer + tap
 // handler, so row N maps to the same entry in both. Returns count collected.
 static size_t collectBondSensorIdx(int* out, size_t maxN) {
+  if (!gRemoteSensorCache || !out) return 0;
   size_t n = 0;
   unsigned long now = millis();
   for (int i = 0; i < MAX_REMOTE_DEVICES * MAX_SENSORS_PER_DEVICE && n < maxN; i++) {
@@ -577,6 +578,7 @@ static size_t collectBondSensorIdx(int* out, size_t maxN) {
 
 // Re-find a cached entry by MAC+type (the detail view's stored identity).
 static RemoteSensorData* findBondSensorEntry(const uint8_t* mac, RemoteSensorType type) {
+  if (!gRemoteSensorCache || !mac) return nullptr;
   for (int i = 0; i < MAX_REMOTE_DEVICES * MAX_SENSORS_PER_DEVICE; i++) {
     RemoteSensorData& e = gRemoteSensorCache[i];
     if (e.connected && e.sensorType == type && memcmp(e.deviceMac, mac, 6) == 0) return &e;

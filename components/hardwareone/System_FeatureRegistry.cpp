@@ -232,17 +232,17 @@ static const FeatureEntry featureRegistry[] = {
     
   { "bluetooth", "Bluetooth", FEATURE_CAT_NETWORK, 12,
     FEATURE_FLAG_RUNTIME_TOGGLE,
-    &gSettings.bluetoothAutoStart, isBluetoothCompiled,
+    &gSettings.bleAutoStart, isBluetoothCompiled,
     "BLE server for remote control" },
     
   { "espnow", "ESP-NOW", FEATURE_CAT_NETWORK, 8,
     FEATURE_FLAG_RUNTIME_TOGGLE,
-    &gSettings.espnowenabled, isEspNowCompiled,
+    &gSettings.espnowEnabled, isEspNowCompiled,
     "Device-to-device mesh communication" },
     
   { "mqtt", "MQTT", FEATURE_CAT_NETWORK, 6,
     FEATURE_FLAG_RUNTIME_TOGGLE,
-    &gSettings.mqttClientEnabled, isMqttCompiled,
+    &gSettings.mqttEnabled, isMqttCompiled,
     "Home Assistant integration via MQTT broker" },
 
   // === DISPLAY FEATURES ===
@@ -323,7 +323,7 @@ static const FeatureEntry featureRegistry[] = {
 
   { "microphone", "Microphone", FEATURE_CAT_SENSOR, 4,
     FEATURE_FLAG_RUNTIME_TOGGLE,
-    &gSettings.microphoneAutoStart, isMicrophoneCompiled,
+    &gSettings.micAutoStart, isMicrophoneCompiled,
     "Microphone: onboard PDM (XIAO Sense) or G2 glasses mic" },
 
   { "espsr", "Speech Recognition", FEATURE_CAT_SENSOR, 48,
@@ -333,7 +333,7 @@ static const FeatureEntry featureRegistry[] = {
 
   { "edgeimpulse", "Edge Impulse ML", FEATURE_CAT_SENSOR, 32,
     FEATURE_FLAG_RUNTIME_TOGGLE,
-    &gSettings.edgeImpulseEnabled, isEdgeImpulseCompiled,
+    &gSettings.eiEnabled, isEdgeImpulseCompiled,
     "ML inference for object detection (requires camera)" },
 
   // On-device LLM is pure compute (no device/sensor), so it's filed under
@@ -350,13 +350,13 @@ static const FeatureEntry featureRegistry[] = {
   // === HARDWARE FEATURES (shown on first page) ===
   { "i2c", "I2C Bus", FEATURE_CAT_NETWORK, 4,
     FEATURE_FLAG_REQUIRES_REBOOT,
-    &gSettings.i2cBusEnabled, isI2CCompiled,
+    &gSettings.i2cEnabled, isI2CCompiled,
     "I2C hardware bus (required for OLED and sensors)" },
     
 #if ENABLE_AUTOMATION
   { "automation", "Automations", FEATURE_CAT_SYSTEM, 8,
     FEATURE_FLAG_RUNTIME_TOGGLE,
-    &gSettings.automationsEnabled, isAutomationCompiled,
+    &gSettings.automationEnabled, isAutomationCompiled,
     "Scheduled tasks and conditional logic" },
 #endif
 };

@@ -337,9 +337,11 @@ const char* cmd_wificonnect(const String& originalCmd) {
     return "ERROR: Failed to initialize WiFi";
   }
 
-  // Re-arm the runtime reconnect hunt that closewifi disables. (Runtime only —
-  // independent of the boot-autostart setting.)
-  WiFi.setAutoReconnect(true);
+  // Re-arm the runtime reconnect hunt that closewifi disables, if the user
+  // wants it. Independent of the boot-autostart setting: wifiAutoStart decides
+  // whether we connect at boot, wifiAutoReconnect decides whether we keep
+  // hunting after an unexpected drop.
+  WiFi.setAutoReconnect(gSettings.wifiAutoReconnect);
   gRadioForcedOff = false;  // radio is coming up — invalidate any stale radiopower-off snapshot
 
   CommandArgs a(originalCmd);
@@ -420,7 +422,7 @@ const char* cmd_wifidisconnect(const String& argsInput) {
   // Stop the RUNTIME reconnect hunt so the driver stops scanning for the lost AP.
   // On a single radio that scan hops channels and can knock a pinned ESP-NOW
   // channel off the air. This is a runtime flag ONLY — it is not persisted and
-  // does NOT change boot autostart (gSettings.wifiAutoReconnect); a reboot brings
+  // does NOT change boot autostart (gSettings.wifiAutoStart); a reboot brings
   // WiFi back exactly as configured. openwifi re-arms it.
   WiFi.setAutoReconnect(false);
 
@@ -541,7 +543,7 @@ static void radioPowerOn() {
     if (gRadioPrevEspNow && !isEspNowInitialized()) cmd_espnow_init("");
 #endif
     if (gRadioPrevWifi) {
-      WiFi.setAutoReconnect(true);  // re-arm even if it wasn't associated (out-and-about)
+      WiFi.setAutoReconnect(gSettings.wifiAutoReconnect);  // honour the user's hunt preference
       setupWiFi();                  // sets mode (AP_STA if ESP-NOW up, else STA), re-associates
     }
     return;
@@ -553,8 +555,8 @@ static void radioPowerOn() {
   // but do NOT auto-start ESP-NOW — that sensitive auth/RCE channel must be started
   // explicitly (openespnow), never silently resurrected. Reads gSettings only;
   // never ramFlushResolve, never writes settings (boot autostart stays independent).
-  if (gSettings.wifiAutoReconnect) {
-    WiFi.setAutoReconnect(true);
+  if (gSettings.wifiEnabled && gSettings.wifiAutoStart) {
+    WiFi.setAutoReconnect(gSettings.wifiAutoReconnect);
     setupWiFi();
   }
 }
@@ -700,6 +702,14 @@ const char* cmd_wifiautoreconnect(const String& argsInput) {
   valStr.trim();
   int v = valStr.toInt();
   setSetting(gSettings.wifiAutoReconnect, (bool)(v != 0));
+
+  // Push into the driver when STA is live or the hunt is already armed.
+  // After closewifi (disconnected + hunt off) we only persist — openwifi /
+  // setupWiFi re-arm from the setting. Re-arming here would undo closewifi.
+  if (wifiInitialized && (WiFi.isConnected() || WiFi.getAutoReconnect())) {
+    WiFi.setAutoReconnect(gSettings.wifiAutoReconnect);
+  }
+
   return gSettings.wifiAutoReconnect ? "wifiAutoReconnect set to 1" : "wifiAutoReconnect set to 0";
 }
 
@@ -1229,6 +1239,10 @@ const char* cmd_ntpstatus(const String& argsInput) {
 const char* cmd_httpstart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
+  if (!gSettings.httpEnabled) {
+    return "ERROR: HTTP server is disabled - run 'httpenabled 1' first";
+  }
+
   if (!WiFi.isConnected()) {
     cliHint("to connect, run 'openwifi'; check the result with 'wifistatus'");
     return "ERROR: WiFi not connected. Connect to WiFi before starting HTTP server.";
@@ -1679,6 +1693,15 @@ void wifiEventLogDrain() {
 
 // Ensure WiFi is initialized (lazy initialization to save ~32KB at boot)
 bool ensureWiFiInitialized() {
+  // Master switch. This is the single chokepoint for every STA entry path
+  // (cmd_wificonnect, cmd_wifiscan, the OLED network page), so one check here
+  // covers them all. Deliberately does NOT affect ESP-NOW: it shares the radio
+  // but never calls this, so `wifienabled 0` disables WiFi without taking the
+  // mesh down with it.
+  if (!gSettings.wifiEnabled) {
+    WARN_SYSTEMF("[WiFi] refused: WiFi is disabled - run 'wifienabled 1' first");
+    return false;
+  }
   if (wifiInitialized) {
     DEBUG_WIFIF("[WiFi] Already initialized");
     return true;
@@ -1715,6 +1738,11 @@ void setupWiFi() {
     broadcastOutput("ERROR: Failed to initialize WiFi");
     return;
   }
+
+  // Same as openwifi: arm/disarm the driver hunt from the persisted setting.
+  // Boot used to skip this, so wifiautoreconnect 0 was ignored until a later
+  // openwifi/closewifi cycle (Arduino default is typically reconnect-on).
+  WiFi.setAutoReconnect(gSettings.wifiAutoReconnect);
   
   DEBUG_WIFIF("[WiFi Setup] Starting WiFi connection");
 
@@ -1773,13 +1801,14 @@ void setupWiFi() {
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry wifiSettingsEntries[] = {
-  { "enabled",            SETTING_BOOL,   &gSettings.wifiEnabled,       true, 0, nullptr, 0, 1, "WiFi Enabled", nullptr, false, nullptr, nullptr, true },
+  { "wifiEnabled",        SETTING_BOOL,   &gSettings.wifiEnabled,       true, 0, nullptr, 0, 1, "Enabled", nullptr, false, nullptr, "wifienabled" },
+  { "wifiAutoStart",      SETTING_BOOL,   &gSettings.wifiAutoStart,     true, 0, nullptr, 0, 1, "Connect at boot", nullptr, false, nullptr, "wifiautostart" },
+  { "wifiAutoReconnect",  SETTING_BOOL,   &gSettings.wifiAutoReconnect, true, 0, nullptr, 0, 1, "Auto-reconnect after drop", nullptr, false, nullptr, "wifiautoreconnect" },
   // The legacy single-network "ssid"/"password" rows are gone (removed
   // 2026-07-20): they were frozen at "" for the device's whole life — no
   // command could reach them (cmdKey=nullptr + readOnly) and real credentials
   // live in network.wifi.networks[]. Their only visible effect was a confusing
   // empty "WiFi SSID" row on every settings surface.
-  { "autoReconnect",      SETTING_BOOL,   &gSettings.wifiAutoReconnect, true, 0, nullptr, 0, 1, "Auto-reconnect", nullptr, false, nullptr, "wifiautoreconnect" },
   { "ntpServer",          SETTING_STRING, &gSettings.ntpServer,         0, 0, "pool.ntp.org", 0, 0, "NTP Server", nullptr, false, nullptr, "ntpserver" },
   // Timezone offsets as "minutes|label" pairs — the schema renderer's enum
   // widget reads this and produces a select dropdown. CLI verb stays "tz".
@@ -1835,9 +1864,10 @@ extern const SettingsModule wifiSettingsModule = {
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry httpSettingsEntries[] = {
-  { "httpAutoStart", SETTING_BOOL, &gSettings.httpAutoStart, true, 0, nullptr, 0, 1, "Auto-start at boot", nullptr, false, nullptr, nullptr },
+  { "httpEnabled", SETTING_BOOL, &gSettings.httpEnabled, 1, 0, nullptr, 0, 1, "Enabled", nullptr, false, nullptr, "httpenabled" },
+  { "httpAutoStart", SETTING_BOOL, &gSettings.httpAutoStart, true, 0, nullptr, 0, 1, "Auto-start at boot", nullptr, false, nullptr, "httpAutoStart" },
 #if ENABLE_HTTPS
-  { "httpsEnabled", SETTING_BOOL, &gSettings.httpsEnabled, false, 0, nullptr, 0, 1, "Enable HTTPS (requires certs + reboot)", nullptr, false, nullptr, nullptr },
+  { "httpsEnabled", SETTING_BOOL, &gSettings.httpsEnabled, false, 0, nullptr, 0, 1, "Enable HTTPS (requires certs + reboot)", nullptr, false, nullptr, "httpsEnabled" },
 #endif
   { "webCliHistorySize", SETTING_INT, &gSettings.webCliHistorySize, 10, 0, nullptr, 1, 100, "Web CLI history size", nullptr, false, nullptr, "webclihistorysize" },
 };

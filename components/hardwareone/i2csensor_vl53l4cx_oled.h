@@ -13,7 +13,7 @@ static void displayToFData() {
   int y = OLED_CONTENT_START_Y;
   oledDisplay->setTextSize(1);
 
-  if (!gTofConnected || !gTofEnabled) {
+  if (!gTofConnected || !gTofRunning) {
     oledDisplay->setCursor(0, y);
     oledDisplay->println("ToF not active");
     oledDisplay->println();
@@ -59,7 +59,7 @@ static bool tofOLEDModeAvailable(String* outReason) {
 
 static void tofToggleConfirmed(void* userData) {
   (void)userData;
-  if (gTofEnabled && gTofConnected) {
+  if (gTofRunning && gTofConnected) {
     executeOLEDCommand("closetof");
   } else {
     executeOLEDCommand("opentof");
@@ -69,7 +69,7 @@ static void tofToggleConfirmed(void* userData) {
 // Input handler for ToF OLED mode - X button toggles sensor
 static bool tofInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
-    if (gTofEnabled && gTofConnected) {
+    if (gTofRunning && gTofConnected) {
       oledConfirmRequest("Close ToF?", nullptr, tofToggleConfirmed, nullptr, false);
     } else {
       oledConfirmRequest("Open ToF?", nullptr, tofToggleConfirmed, nullptr);

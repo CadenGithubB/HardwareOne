@@ -35,9 +35,9 @@ bool gAnoEncoderConnected = false;
 // Gamepad-shaped proxies: the OLED input pipeline reads these. When ANO is the
 // active driver (this .cpp compiled, i2csensor_seesaw.cpp excluded by CMake),
 // the ANO task populates gInputCache with synthesized state so processGamepad-
-// MenuInput keeps working unchanged. gInputEnabled/gInputConnected mirror
+// MenuInput keeps working unchanged. gInputRunning/gInputConnected mirror
 // gAnoEncoderEnabled/gAnoEncoderConnected.
-bool gInputEnabled = false;
+bool gInputRunning = false;
 bool gInputConnected = false;
 InputCache gInputCache;
 
@@ -242,15 +242,15 @@ bool inputStartInternal() {
     return false;
   }
 
-  bool prev = gInputEnabled;
+  bool prev = gInputRunning;
   gAnoEncoderEnabled = true;
-  gInputEnabled = true;       // keep proxy in sync for OLED-side checks
-  DEBUG_ANO_ENCODER_LIFECYCLEF("[ANO] inputStartInternal: gInputEnabled=true (was %d) gInputConnected=%d",
+  gInputRunning = true;       // keep proxy in sync for OLED-side checks
+  DEBUG_ANO_ENCODER_LIFECYCLEF("[ANO] inputStartInternal: gInputRunning=true (was %d) gInputConnected=%d",
                                prev, gInputConnected);
   // Bump the sensor-status sequence so the SSE event fires and the web UI
   // refreshes its connected/enabled indicators immediately. Without this the
   // dot can stay red until the next polling tick.
-  if (gInputEnabled != prev) sensorStatusBumpWith("openinput@enabled");
+  if (gInputRunning != prev) sensorStatusBumpWith("openinput@enabled");
 
   // Broadcast sensor status to ESP-NOW master so paired peers see the change.
 #if ENABLE_ESPNOW
@@ -475,7 +475,7 @@ void inputTask(void* parameter) {
     if (!gAnoEncoderEnabled) {
       gAnoEncoderConnected = false;
       gAnoEncoderCache.dataValid = false;
-      gInputEnabled = false;
+      gInputRunning = false;
       gInputConnected = false;
       gInputCache.dataValid = false;
       SENSOR_TASK_EXIT(INPUT);

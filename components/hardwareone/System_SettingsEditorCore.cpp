@@ -149,10 +149,18 @@ int settingsEditorEnumIndexForCurrent(const SettingEntry* entry) {
 // -----------------------------------------------------------------------------
 // Command resolution
 // -----------------------------------------------------------------------------
+// cmdKey ONLY — never fall back to jsonKey. The fallback used to make a row
+// "editable" by firing whatever command happened to share its jsonKey, which is
+// how a debug row keyed "capture" fired the camera's `capture` verb and took a
+// real photo. An audit of all 407 controls found 243 writes silently discarded
+// and 6 firing the wrong command (docs/CONTROLS_WRITE_INTEGRITY.md).
+//
+// Returning nullptr here is the SAFE answer: callers render "No command" and the
+// row becomes read-only, instead of doing something unrelated. A row that should
+// be editable earns it by declaring a real cmdKey.
 const char* settingsEditorCommandName(const SettingEntry* entry) {
   if (!entry) return nullptr;
-  if (entry->cmdKey) return entry->cmdKey;
-  return entry->jsonKey;
+  return entry->cmdKey;
 }
 
 bool settingsEditorHasCommand(const SettingEntry* entry) {

@@ -195,12 +195,12 @@ bool tgRequireAuth(AuthContext& ctx) {
   } else if (ctx.transport == SOURCE_G2_GLASSES) {
     // G2 lens — auth IS pairing. pairedByUser is the captured identity from
     // pair-time (set by bleStampPairedByIfBlank when an authenticated CLI
-    // ran `bleautoconnect g2-glasses on`). Blank means "paired-but-stamp-lost"
+    // ran `bleautoreconnect g2-glasses on`). Blank means "paired-but-stamp-lost"
     // — refuse the command and tell the user how to recover (re-stamp via
-    // bleautoconnect from an authenticated CLI session).
+    // bleautoreconnect from an authenticated CLI session).
     String g2User = g2PairedUserGet();
     if (g2User.length() == 0) {
-      broadcastOutput("ERROR: G2 pairedByUser blank — run 'bleautoconnect g2-glasses on' from authenticated CLI to re-stamp");
+      broadcastOutput("ERROR: G2 pairedByUser blank — run 'bleautoreconnect g2-glasses on' from authenticated CLI to re-stamp");
       return false;
     }
     ctx.user = g2User;
@@ -245,7 +245,7 @@ bool tgRequireAuth(AuthContext& ctx) {
   } else if (ctx.transport == SOURCE_G2_GLASSES) {
     String g2User = g2PairedUserGet();
     if (g2User.length() == 0) {
-      broadcastOutput("ERROR: G2 pairedByUser blank — run 'bleautoconnect g2-glasses on' from authenticated CLI to re-stamp");
+      broadcastOutput("ERROR: G2 pairedByUser blank — run 'bleautoreconnect g2-glasses on' from authenticated CLI to re-stamp");
       return false;
     }
     ctx.user = g2User;
@@ -488,7 +488,7 @@ bool loginTransport(CommandSource transport, const String& username, const Strin
 
     case SOURCE_G2_GLASSES:
       // G2 doesn't use credential login. Identity is captured at pair time
-      // by bleStampPairedByIfBlank, called from `bleautoconnect g2-glasses on`
+      // by bleStampPairedByIfBlank, called from `bleautoreconnect g2-glasses on`
       // executed under an already-authenticated CLI session. No code path
       // should be calling loginTransport(SOURCE_G2_GLASSES) — return false
       // so it surfaces clearly if one ever does.
@@ -514,7 +514,7 @@ void logoutTransport(CommandSource transport) {
 
     case SOURCE_G2_GLASSES:
       // Clear the previous pair stamp, then immediately re-home to the
-      // device owner so MAC/autoConnect never leave the lens unowned.
+      // device owner so MAC/autoReconnect never leave the lens unowned.
       g2PairedUserClear();
 #if ENABLE_BLUETOOTH
       bleStampPairedByIfBlank(BLE_PEER_G2_GLASSES);
@@ -604,8 +604,8 @@ int revokeUserSessions(const String& username,
   }
 
   // G2 glasses (BLE-attached lens; pair-time identity).
-  // The pair stays valid (MAC + autoConnect kept) but the lens stops being
-  // able to act as this user until re-stamp via `bleautoconnect g2-glasses on`.
+  // The pair stays valid (MAC + autoReconnect kept) but the lens stops being
+  // able to act as this user until re-stamp via `bleautoreconnect g2-glasses on`.
   if (exceptTransport != SOURCE_G2_GLASSES && g2PairedUserMatches(username)) {
     g2PairedUserClear();
 #if ENABLE_BLUETOOTH

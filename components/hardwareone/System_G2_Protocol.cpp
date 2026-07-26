@@ -1217,6 +1217,77 @@ size_t g2BuildCreateMixedListText(uint8_t seq, uint32_t magic,
                          payload, pbLen, out, outCap);
 }
 
+static bool writeImageTileObject(uint8_t* pbOut, size_t pbCap, size_t* pos,
+                                 const G2ImageTile& imageTile) {
+  size_t imgStart;
+  if (!g2PbBeginNested(pbOut, pbCap, pos, /*F_IMAGE_OBJ*/4, &imgStart)) return false;
+  if (!g2PbWriteUint32(pbOut, pbCap, pos, 1, imageTile.x)) return false;
+  if (!g2PbWriteUint32(pbOut, pbCap, pos, 2, imageTile.y)) return false;
+  if (!g2PbWriteUint32(pbOut, pbCap, pos, 3, imageTile.w)) return false;
+  if (!g2PbWriteUint32(pbOut, pbCap, pos, 4, imageTile.h)) return false;
+  if (!g2PbWriteUint32(pbOut, pbCap, pos, 5, imageTile.containerId)) return false;
+  if (!g2PbWriteString(pbOut, pbCap, pos, 6, imageTile.containerName)) return false;
+  return g2PbEndNested(pbOut, pbCap, pos, imgStart);
+}
+
+// 3-pane CREATE: list + text + image. See header for schema-risk notes.
+size_t g2BuildCreateMixedListTextImagePb(uint32_t magic,
+                                         const char* listName,
+                                         const char* const* listItems,
+                                         size_t listItemCount,
+                                         const G2ContainerGeom& listGeom,
+                                         const G2TextChildSpec& textChild,
+                                         const G2ImageTile& imageTile,
+                                         uint32_t widgetId,
+                                         G2ListTextImageOrder order,
+                                         uint8_t* pbOut, size_t pbCap) {
+  if (!pbOut || pbCap == 0) return 0;
+  if (!listName || !listItems || listItemCount == 0) return 0;
+  if (!imageTile.containerName) return 0;
+
+  size_t pos = 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_WRAP_F_CMD,   G2_CMD_CREATE_STARTUP)) return 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_WRAP_F_MAGIC, magic)) return 0;
+  size_t pageStart;
+  if (!g2PbBeginNested(pbOut, pbCap, &pos, G2_WRAP_F_CREATE, &pageStart)) return 0;
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_PAGE_F_TOTAL, 3)) return 0;
+
+  if (!writeListObjectWithItems(pbOut, pbCap, &pos,
+                                listName, listItems, listItemCount,
+                                listGeom)) return 0;
+
+  if (order == G2_LTI_ORDER_LIST_IMAGE_TEXT) {
+    if (!writeImageTileObject(pbOut, pbCap, &pos, imageTile)) return 0;
+    if (!writeTextChildSpec(pbOut, pbCap, &pos, textChild)) return 0;
+  } else {
+    if (!writeTextChildSpec(pbOut, pbCap, &pos, textChild)) return 0;
+    if (!writeImageTileObject(pbOut, pbCap, &pos, imageTile)) return 0;
+  }
+
+  if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_PAGE_F_WIDGET_ID, widgetId)) return 0;
+  if (!g2PbEndNested(pbOut, pbCap, &pos, pageStart)) return 0;
+  return pos;
+}
+
+size_t g2BuildCreateMixedListTextImage(uint8_t seq, uint32_t magic,
+                                       const char* listName,
+                                       const char* const* listItems,
+                                       size_t listItemCount,
+                                       const G2ContainerGeom& listGeom,
+                                       const G2TextChildSpec& textChild,
+                                       const G2ImageTile& imageTile,
+                                       uint32_t widgetId,
+                                       G2ListTextImageOrder order,
+                                       uint8_t* out, size_t outCap) {
+  uint8_t payload[1280];
+  size_t pbLen = g2BuildCreateMixedListTextImagePb(
+      magic, listName, listItems, listItemCount, listGeom,
+      textChild, imageTile, widgetId, order, payload, sizeof(payload));
+  if (pbLen == 0) return 0;
+  return g2BuildEnvelope(seq, G2_SID_EVEN_CORE, G2_FLAG_REQUEST,
+                         payload, pbLen, out, outCap);
+}
+
 bool g2DecodeHeartbeatAckTail(const uint8_t* pb, size_t pbLen,
                               uint64_t* seq, uint64_t* echo) {
   if (!pb || pbLen == 0) return false;

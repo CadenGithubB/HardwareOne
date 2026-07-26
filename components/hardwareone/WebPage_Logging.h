@@ -173,7 +173,15 @@ inline void streamLoggingInner(httpd_req_t* req) {
           </label>
 )HTML", HTTPD_RESP_USE_STRLEN);
 #endif
-#if !ENABLE_THERMAL_SENSOR && !ENABLE_TOF_SENSOR && !ENABLE_IMU_SENSOR && !ENABLE_GAMEPAD_SENSOR && !ENABLE_APDS_SENSOR && !ENABLE_GPS_SENSOR && !ENABLE_PRESENCE_SENSOR
+#if ENABLE_R1_HEALTH
+  httpd_resp_send_chunk(req, R"HTML(
+          <label style='display:flex;align-items:center;gap:0.25rem;margin:0.5rem 0;cursor:pointer'>
+            <input type='checkbox' id='sensor-r1' value='r1' style='margin:0;padding:0;vertical-align:middle;width:16px;height:16px' data-guest-hide>
+            <span style='font-size:0.9em;color:var(--panel-fg)'>R1 Health (HR, HRV, SpO2, battery)</span>
+          </label>
+)HTML", HTTPD_RESP_USE_STRLEN);
+#endif
+#if !ENABLE_THERMAL_SENSOR && !ENABLE_TOF_SENSOR && !ENABLE_IMU_SENSOR && !ENABLE_GAMEPAD_SENSOR && !ENABLE_APDS_SENSOR && !ENABLE_GPS_SENSOR && !ENABLE_PRESENCE_SENSOR && !ENABLE_R1_HEALTH
   httpd_resp_send_chunk(req, R"HTML(
         <div style='color:var(--panel-fg);opacity:0.6;font-size:0.9em;font-style:italic;margin:0.5rem 0 0.75rem'>
           No loggable sensors are compiled into this firmware. To enable sensors, adjust

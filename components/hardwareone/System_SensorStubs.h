@@ -19,7 +19,7 @@
 #if !ENABLE_THERMAL_SENSOR
   #include "i2csensor_mlx90640.h"  // Provides ThermalCache struct
   extern ThermalCache gThermalCache;
-  extern bool gThermalEnabled;
+  extern bool gThermalRunning;
   extern bool gThermalConnected;
   extern unsigned long gThermalLastStopTime;
   extern TaskHandle_t gThermalTaskHandle;
@@ -35,7 +35,7 @@
 #if !ENABLE_TOF_SENSOR
   #include "i2csensor_vl53l4cx.h"  // Provides TofCache struct
   extern TofCache gTofCache;
-  extern bool gTofEnabled;
+  extern bool gTofRunning;
   extern bool gTofConnected;
   extern uint32_t gTofLastStopTime;
   extern TaskHandle_t gTofTaskHandle;
@@ -51,7 +51,7 @@
 #if !ENABLE_IMU_SENSOR
   #include "i2csensor_bno055.h"  // Provides ImuCache and IMUActionState structs
   extern ImuCache gImuCache;
-  extern bool gImuEnabled;
+  extern bool gImuRunning;
   extern bool gImuConnected;
   extern unsigned long gImuLastStopTime;
   extern TaskHandle_t gImuTaskHandle;
@@ -68,7 +68,7 @@
 #if !ENABLE_GAMEPAD_SENSOR
   #include "i2csensor_seesaw.h"  // Provides InputCache struct
   extern InputCache gInputCache;
-  extern bool gInputEnabled;
+  extern bool gInputRunning;
   extern bool gInputConnected;
   extern unsigned long gGamepadLastStopTime;
   extern TaskHandle_t gInputTaskHandle;
@@ -85,7 +85,7 @@
 
 #if !ENABLE_OLED_DISPLAY
   // Only the most basic OLED stubs - variables referenced externally
-  extern bool gOledEnabled;
+  extern bool gOledRunning;
   extern bool oledConnected;
   extern class Adafruit_SSD1306* oledDisplay;
   // Minimal stub functions for initialization calls
@@ -101,9 +101,9 @@
   #include "i2csensor_apds9960.h"  // Provides APDSCache struct
   extern APDSCache gApdsCache;
   extern bool gApdsConnected;
-  extern bool gApdsColorEnabled;
-  extern bool gApdsProximityEnabled;
-  extern bool gApdsGestureEnabled;
+  extern bool gApdsColorRunning;
+  extern bool gApdsProximityRunning;
+  extern bool gApdsGestureRunning;
   extern unsigned long gApdsLastStopTime;
   extern TaskHandle_t gApdsTaskHandle;
   extern const struct CommandEntry apdsCommands[];
@@ -115,7 +115,7 @@
 #if !ENABLE_GPS_SENSOR
   #include "i2csensor_pa1010d.h"  // Provides GPSCache struct
   extern GPSCache gGpsCache;
-  extern bool gGpsEnabled;
+  extern bool gGpsRunning;
   extern bool gGpsConnected;
   extern unsigned long gGpsLastStopTime;
   extern class Adafruit_GPS* gPA1010D;
@@ -129,7 +129,7 @@
 #if !ENABLE_FM_RADIO
   // FM Radio stubs when disabled
   #include "i2csensor_rda5807.h"  // Provides FMRadioCache struct
-  extern bool gFmRadioEnabled;
+  extern bool gFmRadioRunning;
   extern bool gFmRadioConnected;
   extern unsigned long gFmRadioLastStopTime;
   extern bool gRadioInitialized;
@@ -147,7 +147,7 @@
 #if !ENABLE_PRESENCE_SENSOR
   #include "i2csensor_sths34pf80.h"  // Provides PresenceCache struct
   extern PresenceCache gPresenceCache;
-  extern bool gPresenceEnabled;
+  extern bool gPresenceRunning;
   extern bool gPresenceConnected;
   extern unsigned long gPresenceLastStopTime;
   extern TaskHandle_t gPresenceTaskHandle;
@@ -163,7 +163,7 @@
 #if !ENABLE_RTC_SENSOR
   #include "i2csensor_ds3231.h"  // Provides RTCDateTime and RTCCache structs
   extern RTCCache gRtcCache;
-  extern bool gRtcEnabled;
+  extern bool gRtcRunning;
   extern bool gRtcConnected;
   extern unsigned long gRtcLastStopTime;
   extern TaskHandle_t gRtcTaskHandle;
@@ -194,7 +194,7 @@
 
 #if !ENABLE_CAMERA_SENSOR
   // Camera stubs when disabled
-  extern bool gCameraEnabled;
+  extern bool gCameraRunning;
   extern bool cameraConnected;
   extern bool cameraStreaming;
   extern const char* cameraModel;
@@ -214,7 +214,7 @@
   // System_Microphone.{h,cpp} and System_SensorStubs.cpp — otherwise a PDM-less
   // but G2-capable board (FeatherS3) compiles both these inline stubs and the
   // real prototypes/definitions → ODR + duplicate-symbol link errors.
-  extern bool gMicEnabled;
+  extern bool gMicRunning;
   extern bool micConnected;
   extern bool micRecording;
   extern int micSampleRate;

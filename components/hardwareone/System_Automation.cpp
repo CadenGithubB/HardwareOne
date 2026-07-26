@@ -166,8 +166,8 @@ static bool isAutoInternalResult(const char* r) {
 }
 
 // Automation state variables (defined here, used by .ino and this file)
-bool gAutoLogActive = false;
-String gAutoLogFile = "";
+bool gAutomationLogActive = false;
+String gAutomationLogFile = "";
 
 // Captured AuthContext of the user who started automation logging. Each
 // automation log line is written via VFS::openGuarded with this context, so
@@ -189,7 +189,7 @@ String gAutoLogFile = "";
 // This is the first long-lived AuthContext in the codebase. If you find
 // yourself adding a second (e.g. for scheduled commands), consider
 // generalising the pattern instead of growing per-feature globals.
-AuthContext gAutoLogOwnerCtx;
+AuthContext gAutomationLogOwnerCtx;
 
 // Forward declarations for functions implemented in this file
 bool updateAutomationNextAt(long automationId, time_t newNextAt);
@@ -220,10 +220,10 @@ extern const char* AUTOMATIONS_JSON_FILE;  // Defined in .ino as "/system/automa
 // System_Mutex.h (consolidated by 71bcd2c); the stale local copy was removed.
 
 // Global automation state
-long* gAutoMemoId = nullptr;
-time_t* gAutoMemoNextAt = nullptr;
-int gAutoMemoCount = 0;
-bool gAutosDirty = false;
+long* gAutomationsMemoId = nullptr;
+time_t* gAutomationsMemoNextAt = nullptr;
+int gAutomationsMemoCount = 0;
+bool gAutomationsDirty = false;
 
 // Forward declarations for internal functions
 static bool extractJsonString(const char* json, const char* key, char* out, size_t outSize);
@@ -487,57 +487,82 @@ bool sanitizeAutomationsJson(String& jsonRef) {
 // writeAutomationsJsonAtomic) or explicit notifyAutomationScheduler(). Rebuilt
 // at the end of each schedulerTickMinute, which already reads+parses the file.
 
-struct AutoCacheEntry {
+struct AutomationsCacheEntry {
   long id;
   time_t nextAt;
   bool enabled;
 };
 
-static constexpr int AUTO_CACHE_MAX = 64;
-static AutoCacheEntry gAutoCache[AUTO_CACHE_MAX];
-static volatile int gAutoCacheCount = 0;
-static volatile bool gAutoCacheValid = false;
+static constexpr int AUTOMATIONS_CACHE_MAX = 64;
+static AutomationsCacheEntry* gAutomationsCache = nullptr;
+static volatile int gAutomationsCacheCount = 0;
+static volatile bool gAutomationsCacheValid = false;
 
 // Which SystemEventKind bits any ENABLED automation subscribes to via an
 // event trigger. 256-bit mask stored as 8x32-bit words (word = kind >> 5,
 // bit = kind & 31). Rebuilt with the cache; consulted by systemEventPost
 // (via automationOnSystemEvent) so unsubscribed events never force a tick.
-static volatile uint32_t gAutoEventKindMask[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+static volatile uint32_t gAutomationEventKindMask[8] = {0, 0, 0, 0, 0, 0, 0, 0};
 // Set when a subscribed event was posted; cleared when the tick drains.
-static volatile bool gAutoEventsPending = false;
+static volatile bool gAutomationEventsPending = false;
 
 void automationOnSystemEvent(uint8_t kind) {
   if (kind >= SYSEVT_COUNT) return;
   // Cache invalid = subscriptions unknown; be conservative and wake.
-  if (!gAutoCacheValid || (gAutoEventKindMask[kind >> 5] & (1UL << (kind & 31)))) {
-    gAutoEventsPending = true;
+  if (!gAutomationsCacheValid || (gAutomationEventKindMask[kind >> 5] & (1UL << (kind & 31)))) {
+    gAutomationEventsPending = true;
   }
 }
 
-bool automationEventsPending() { return gAutoEventsPending; }
+bool automationEventsPending() { return gAutomationEventsPending; }
+
+static bool ensureAutomationsCache() {
+  if (gAutomationsCache) return true;
+  gAutomationsCache = (AutomationsCacheEntry*)heap_caps_calloc(
+      AUTOMATIONS_CACHE_MAX, sizeof(AutomationsCacheEntry), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  if (!gAutomationsCache) {
+    ERROR_SYSTEMF("[automations] Failed to allocate scheduler cache (%u bytes)",
+                  (unsigned)(AUTOMATIONS_CACHE_MAX * sizeof(AutomationsCacheEntry)));
+    gAutomationsCacheCount = 0;
+    gAutomationsCacheValid = false;
+    return false;
+  }
+  return true;
+}
+
+static void releaseAutomationsCache() {
+  if (gAutomationsCache) {
+    heap_caps_free(gAutomationsCache);
+    gAutomationsCache = nullptr;
+  }
+  gAutomationsCacheCount = 0;
+  gAutomationsCacheValid = false;
+  for (int w = 0; w < 8; w++) gAutomationEventKindMask[w] = 0;
+}
 
 // Re-read automations.json and refill the cache. Called at the end of the
 // full tick so post-fire nextAt updates are captured on the same pass.
-static void rebuildAutoCache() {
+static void rebuildAutomationsCache() {
+  if (!ensureAutomationsCache()) return;
   String json;
   if (!readText(AUTOMATIONS_JSON_FILE, json)) {
-    gAutoCacheCount = 0;
-    gAutoCacheValid = true;
+    gAutomationsCacheCount = 0;
+    gAutomationsCacheValid = true;
     return;
   }
   PSRAM_JSON_DOC(doc);
   if (deserializeJson(doc, json)) {
-    gAutoCacheCount = 0;
-    gAutoCacheValid = true;
+    gAutomationsCacheCount = 0;
+    gAutomationsCacheValid = true;
     return;
   }
   JsonArrayConst autos = doc["automations"].as<JsonArrayConst>();
   int n = 0;
   uint32_t evtMask[8] = {0, 0, 0, 0, 0, 0, 0, 0};
   for (JsonObjectConst a : autos) {
-    if (n >= AUTO_CACHE_MAX) break;
-    gAutoCache[n].id = a["id"].as<long>();
-    gAutoCache[n].enabled = a["enabled"] | false;
+    if (n >= AUTOMATIONS_CACHE_MAX) break;
+    gAutomationsCache[n].id = a["id"].as<long>();
+    gAutomationsCache[n].enabled = a["enabled"] | false;
     // Cache the min nextAt across the automation's triggers. 0 means nothing
     // is scheduled (all manual/boot/event, or unset). Also collect the event
     // kinds enabled automations subscribe to (for the fast wake mask).
@@ -555,27 +580,28 @@ static void rebuildAutoCache() {
           time_t na = (time_t)raw;
           if (na > 0 && (minAt == 0 || na < minAt)) minAt = na;
         }
-        if (gAutoCache[n].enabled && isEventTrig) {
+        if (gAutomationsCache[n].enabled && isEventTrig) {
           int kind = systemEventKindFromName(t["on"] | "");
           if (kind > 0 && kind < (int)SYSEVT_COUNT) evtMask[kind >> 5] |= (1UL << (kind & 31));
         }
       }
     }
-    gAutoCache[n].nextAt = minAt;
+    gAutomationsCache[n].nextAt = minAt;
     n++;
   }
-  gAutoCacheCount = n;
-  for (int w = 0; w < 8; w++) gAutoEventKindMask[w] = evtMask[w];
-  gAutoCacheValid = true;
+  gAutomationsCacheCount = n;
+  for (int w = 0; w < 8; w++) gAutomationEventKindMask[w] = evtMask[w];
+  gAutomationsCacheValid = true;
 }
 
 // Fast in-RAM check: is any enabled automation's nextAt at or before `now`?
 // Called from the main loop every iteration. Returns true if the full tick
 // must run (something is due, or the cache is stale).
 bool automationsAnyDue(time_t now) {
-  if (!gAutoCacheValid) return true;  // force a full tick to rebuild
-  for (int i = 0; i < gAutoCacheCount; i++) {
-    if (gAutoCache[i].enabled && gAutoCache[i].nextAt > 0 && now >= gAutoCache[i].nextAt) {
+  if (!gAutomationsCache) return true;       // force a full tick to allocate/rebuild
+  if (!gAutomationsCacheValid) return true;  // force a full tick to rebuild
+  for (int i = 0; i < gAutomationsCacheCount; i++) {
+    if (gAutomationsCache[i].enabled && gAutomationsCache[i].nextAt > 0 && now >= gAutomationsCache[i].nextAt) {
       return true;
     }
   }
@@ -585,7 +611,7 @@ bool automationsAnyDue(time_t now) {
 // Atomic writer for automations.json. Invalidates the cache on every write
 // so the next main-loop iteration rebuilds it.
 bool writeAutomationsJsonAtomic(const String& json) {
-  gAutoCacheValid = false;
+  gAutomationsCacheValid = false;
   return writeTextAtomic(AUTOMATIONS_JSON_FILE, json);
 }
 
@@ -835,7 +861,7 @@ void runAutomationsOnBoot() {
       DEBUGF(DEBUG_AUTOMATIONS, "[automations] id=%ld boot condition='%s' result=%s",
              id, condition.c_str(), conditionMet ? "TRUE" : "FALSE");
       if (!conditionMet) {
-        if (gAutoLogActive) {
+        if (gAutomationLogActive) {
           char skipMsg[256];
           snprintf(skipMsg, sizeof(skipMsg), "Boot automation skipped: ID=%ld Name=%s Condition not met: %s",
                    id, autoName.c_str(), condition.c_str());
@@ -857,7 +883,7 @@ void runAutomationsOnBoot() {
     char _createdByBuf[64];
     extractJsonString(obj.c_str(), "\"createdBy\"", _createdByBuf, sizeof(_createdByBuf));
 
-    if (gAutoLogActive) {
+    if (gAutomationLogActive) {
       char startMsg[256];
       snprintf(startMsg, sizeof(startMsg), "Boot automation started: ID=%ld Name=%s User=%s",
                id, autoName.c_str(), _createdByBuf);
@@ -883,7 +909,7 @@ void runAutomationsOnBoot() {
       free(cmdsList[ci]);
     }
 
-    if (gAutoLogActive) {
+    if (gAutomationLogActive) {
       char endMsg[256];
       snprintf(endMsg, sizeof(endMsg), "Boot automation completed: ID=%ld Name=%s Commands=%d",
                id, autoName.c_str(), cmdsCount);
@@ -906,16 +932,16 @@ void runAutomationsOnBoot() {
 // Initialize automation system
 bool initAutomationSystem() {
   // Allocate memo buffers if not already allocated
-  if (!gAutoMemoId) {
-    gAutoMemoId = (long*)ps_alloc(kAutoMemoCap * sizeof(long), AllocPref::PreferPSRAM, "auto.memo.id");
-    if (!gAutoMemoId) return false;
+  if (!gAutomationsMemoId) {
+    gAutomationsMemoId = (long*)ps_alloc(kAutomationsMemoCap * sizeof(long), AllocPref::PreferPSRAM, "auto.memo.id");
+    if (!gAutomationsMemoId) return false;
   }
-  if (!gAutoMemoNextAt) {
-    gAutoMemoNextAt = (time_t*)ps_alloc(kAutoMemoCap * sizeof(time_t), AllocPref::PreferPSRAM, "auto.memo.nextat");
-    if (!gAutoMemoNextAt) return false;
+  if (!gAutomationsMemoNextAt) {
+    gAutomationsMemoNextAt = (time_t*)ps_alloc(kAutomationsMemoCap * sizeof(time_t), AllocPref::PreferPSRAM, "auto.memo.nextat");
+    if (!gAutomationsMemoNextAt) return false;
   }
   
-  gAutoMemoCount = 0;
+  gAutomationsMemoCount = 0;
   DEBUGF(DEBUG_AUTOMATIONS, "[automations] System initialized");
   
   // Start the automation scheduler
@@ -1390,7 +1416,7 @@ const char* cmd_automation_add(const String& argsInput) {
   
   DEBUGF(DEBUG_AUTOMATIONS, "[autos add] wrote automations.json (len=%d) id=%lu", json.length(), id);
   
-  gAutosDirty = true;
+  gAutomationsDirty = true;
   DEBUGF(DEBUG_AUTOMATIONS, "[autos add] scheduler refresh queued (type=%s)", typeNorm.c_str());
   
   // SYSTEM-EVENT: a new automation was created and persisted. Edits (id= reuse)
@@ -1476,7 +1502,7 @@ const char* cmd_automation_enable_disable(const String& argsInput, bool enable) 
     return "ERROR";
   }
   
-  gAutosDirty = true;
+  gAutomationsDirty = true;
   
   BROADCAST_PRINTF("%s automation id=%s", enable ? "Enabled" : "Disabled", idStr.c_str());
   return "OK";
@@ -1586,7 +1612,7 @@ const char* cmd_automation_delete(const String& argsInput) {
     return "ERROR";
   }
   
-  gAutosDirty = true;
+  gAutomationsDirty = true;
 
   // SYSTEM-EVENT: automation removed and the change persisted.
   systemEventPost(SYSEVT_AUTOMATION_DELETED, deletedNameBuf);
@@ -1660,7 +1686,7 @@ const char* cmd_automation_run(const String& argsInput) {
   }
   
   // Log automation start if logging is active
-  if (gAutoLogActive) {
+  if (gAutomationLogActive) {
     char startBuf[256];
     snprintf(startBuf, sizeof(startBuf), "Automation started: ID=%s Name=%s User=%s", idStr.c_str(), autoName.c_str(), currentExecUser().c_str());
     appendAutoLogEntry("AUTO_START", startBuf);
@@ -1766,7 +1792,7 @@ const char* cmd_automation_run(const String& argsInput) {
     DEBUGF(DEBUG_AUTOMATIONS, "[autos run] id=%s condition='%s' result=%s",
            idStr.c_str(), condition.c_str(), conditionMet ? "TRUE" : "FALSE");
     if (!conditionMet) {
-      if (gAutoLogActive) {
+      if (gAutomationLogActive) {
         char skipBuf[256];
         snprintf(skipBuf, sizeof(skipBuf), "Automation skipped: ID=%s Name=%s Condition not met: %s", idStr.c_str(), autoName.c_str(), condition.c_str());
         appendAutoLogEntry("AUTO_SKIP", skipBuf);
@@ -1831,7 +1857,7 @@ const char* cmd_automation_run(const String& argsInput) {
   }
   
   // Log automation end if logging is active
-  if (gAutoLogActive) {
+  if (gAutomationLogActive) {
     char endBuf[256];
     snprintf(endBuf, sizeof(endBuf), "Automation completed: ID=%s Name=%s Commands=%d", idStr.c_str(), autoName.c_str(), cmdsCount);
     appendAutoLogEntry("AUTO_END", endBuf);
@@ -1961,11 +1987,18 @@ const char* cmd_automation(const String& argsInput) {
 
     bool en;
     if (action == "enable") {
-      setSetting(gSettings.automationsEnabled, true);  en = true;
+      setSetting(gSettings.automationEnabled, true);
+      if (!startAutomationScheduler()) {
+        setSetting(gSettings.automationEnabled, false);
+        return "Error: failed to allocate automation scheduler cache";
+      }
+      en = true;
     } else if (action == "disable") {
-      setSetting(gSettings.automationsEnabled, false); en = false;
+      setSetting(gSettings.automationEnabled, false);
+      stopAutomationScheduler();
+      en = false;
     } else if (action == "status") {
-      en = gSettings.automationsEnabled;
+      en = gSettings.automationEnabled;
     } else {
       return "Error: invalid arguments — Usage: automation system <enable|disable|status> [json]";
     }
@@ -1996,7 +2029,7 @@ const char* cmd_automation(const String& argsInput) {
     if (!readText(AUTOMATIONS_JSON_FILE, json)) return "Error: failed to read automations.json";
     if (sanitizeAutomationsJson(json)) {
       if (!writeAutomationsJsonAtomic(json)) return "Error: failed to write automations.json";
-      gAutosDirty = true;
+      gAutomationsDirty = true;
       DEBUGF(DEBUG_AUTOMATIONS, "[autos] CLI sanitize: fixed duplicate IDs; scheduler refresh queued");
       return "Sanitized automations.json: fixed duplicate IDs";
     } else {
@@ -2065,7 +2098,7 @@ const char* cmd_automation(const String& argsInput) {
     }
     
     if (modified) {
-      gAutosDirty = true;
+      gAutomationsDirty = true;
       DEBUGF(DEBUG_AUTOMATIONS, "[autos recompute] scheduler refresh queued");
     }
     
@@ -3531,19 +3564,19 @@ const char* cmd_autolog(const String& argsInput) {
     String filename = a.arg(1);
     if (filename.length() == 0) return "Error: invalid arguments — Usage: autolog start <filename>";
 
-    // Capture the starter's identity BEFORE flipping gAutoLogActive — every
+    // Capture the starter's identity BEFORE flipping gAutomationLogActive — every
     // subsequent appendAutoLogEntry write is gated on this ctx via
     // VFS::openGuarded. If the caller can't write the path, the LOG_START
     // line below fails and we roll back cleanly.
-    gAutoLogOwnerCtx = currentAuthContext();
+    gAutomationLogOwnerCtx = currentAuthContext();
 
-    gAutoLogActive = true;
-    gAutoLogFile = filename;
+    gAutomationLogActive = true;
+    gAutomationLogFile = filename;
 
     if (!appendAutoLogEntry("LOG_START", "Automation logging started")) {
-      gAutoLogActive = false;
-      gAutoLogFile = "";
-      gAutoLogOwnerCtx = AuthContext{};  // clear captured identity on failure
+      gAutomationLogActive = false;
+      gAutomationLogFile = "";
+      gAutomationLogOwnerCtx = AuthContext{};  // clear captured identity on failure
       snprintf(getDebugBuffer(), 1024, "Error: Failed to create log file: %s", filename.c_str());
       return getDebugBuffer();
     }
@@ -3552,20 +3585,20 @@ const char* cmd_autolog(const String& argsInput) {
     return getDebugBuffer();
 
   } else if (subcmd == "stop") {
-    if (!gAutoLogActive) return "Error: Automation logging is not active";
+    if (!gAutomationLogActive) return "Error: Automation logging is not active";
 
     appendAutoLogEntry("LOG_STOP", "Automation logging stopped");
 
-    snprintf(getDebugBuffer(), 1024, "Automation logging stopped: %s", gAutoLogFile.c_str());
-    gAutoLogActive = false;
-    gAutoLogFile = "";
-    gAutoLogOwnerCtx = AuthContext{};  // clear captured identity
+    snprintf(getDebugBuffer(), 1024, "Automation logging stopped: %s", gAutomationLogFile.c_str());
+    gAutomationLogActive = false;
+    gAutomationLogFile = "";
+    gAutomationLogOwnerCtx = AuthContext{};  // clear captured identity
 
     return getDebugBuffer();
 
   } else if (subcmd == "status") {
-    if (gAutoLogActive) {
-      snprintf(getDebugBuffer(), 1024, "Automation logging ACTIVE: %s", gAutoLogFile.c_str());
+    if (gAutomationLogActive) {
+      snprintf(getDebugBuffer(), 1024, "Automation logging ACTIVE: %s", gAutomationLogFile.c_str());
       return getDebugBuffer();
     } else {
       return "Automation logging INACTIVE";
@@ -3599,8 +3632,8 @@ const char* cmd_validate_conditions(const String& argsInput) {
 // Notify the automation scheduler to run on next main loop iteration and
 // invalidate the in-RAM cache so it gets rebuilt from the file.
 void notifyAutomationScheduler() {
-  gAutosDirty = true;
-  gAutoCacheValid = false;
+  gAutomationsDirty = true;
+  gAutomationsCacheValid = false;
 }
 
 // True when any of the automation's event triggers matches any drained bus
@@ -3627,7 +3660,7 @@ static bool automationEventTriggersMatch(const char* automationJson, const Syste
 // Scratch space for the event drain in schedulerTickMinute(). Sized off the
 // ring (48 x ~164 B), so it is too big to reserve at link time on behalf of the
 // many devices that never turn automations on — the only caller gates on
-// gSettings.automationsEnabled, so a disabled device never runs a tick and
+// gSettings.automationEnabled, so a disabled device never runs a tick and
 // never pays for this.
 //
 // INTERNAL, not PSRAM, for two independent reasons. systemEventFetchSince fills
@@ -3639,7 +3672,7 @@ static bool automationEventTriggersMatch(const char* automationJson, const Syste
 // ESP-NOW/MQTT would land in plaintext on a probeable chip (flash encryption is
 // off).
 //
-// Deliberately never freed. cmd_automation flips automationsEnabled from the
+// Deliberately never freed. cmd_automation flips automationEnabled from the
 // command tasks (cmd_exec/web, core 0) while a tick may be mid-scan on the loop
 // task (core 1), so releasing it on disable would hand a live reader a dangling
 // pointer. Allocate-on-first-use-and-keep buys back the DRAM for anyone who
@@ -3657,7 +3690,7 @@ void schedulerTickMinute() {
   // on minute-old edges after a re-enable would surprise the user.
   static uint32_t sEventCursor = UINT32_MAX;  // UINT32_MAX = start "from now"
   static uint32_t sEventRingSkipped = 0;  // ring overwrote events before we read them
-  gAutoEventsPending = false;  // posts after this point re-set it for the next tick
+  gAutomationEventsPending = false;  // posts after this point re-set it for the next tick
   if (!sEventBuf) {
     // heap_caps_calloc, not ps_alloc(PreferInternal): the latter degrades to
     // plain malloc(), which lands in PSRAM once an allocation clears
@@ -3702,7 +3735,7 @@ void schedulerTickMinute() {
     // deref a null buffer. The cursor is still UINT32_MAX (this branch can only
     // be reached before the first successful alloc), so a later tick that does
     // get memory starts "from now" and reports no bogus skip gap. Clearing
-    // gAutoEventsPending above means we wait for the next posted event or the
+    // gAutomationEventsPending above means we wait for the next posted event or the
     // 60 s safety tick to retry, instead of re-reading and re-parsing
     // automations.json every 250 ms while the heap is already exhausted.
     // The alloc site above already warned; this branch is only ever reached on
@@ -3782,7 +3815,7 @@ void schedulerTickMinute() {
     // top-level field and triggers are never sorted, so the first occurrence is
     // always triggers[0] (the primary). Gating on triggers[0] alone meant an
     // additional trigger scheduled sooner than the primary never fired on its own
-    // cadence, and disagreed with the min-based due cache (rebuildAutoCache) --
+    // cadence, and disagreed with the min-based due cache (rebuildAutomationsCache) --
     // busy-spinning the full tick every main-loop pass until the primary came due.
     // rescheduleAfterFire (below) then advances each trigger that was due, so the
     // min moves forward and the cache/fire-check agree again.
@@ -3815,7 +3848,7 @@ void schedulerTickMinute() {
       if (slot >= 0 && (nowMs - sEvtFireMs[slot]) < EVT_COOLDOWN_MS) {
         eventDue = false;
         DEBUGF(DEBUG_AUTOMATIONS, "[autos] id=%ld event fire suppressed (cooldown)", id);
-        if (gAutoLogActive) {
+        if (gAutomationLogActive) {
           char cdBuf[128];
           snprintf(cdBuf, sizeof(cdBuf), "Event automation skipped: ID=%ld event cooldown (2s)", id);
           appendAutoLogEntry("AUTO_SKIP", cdBuf);
@@ -3948,7 +3981,7 @@ void schedulerTickMinute() {
           DEBUGF(DEBUG_AUTOMATIONS, "[autos] id=%ld condition='%s' result=%s",
                  id, condition.c_str(), conditionMet ? "TRUE" : "FALSE");
           if (!conditionMet) {
-            if (gAutoLogActive) {
+            if (gAutomationLogActive) {
               char skipBuf[256];
               snprintf(skipBuf, sizeof(skipBuf), "%s automation skipped: ID=%ld Name=%s Condition not met: %s", fireLabel, id, autoName.c_str(), condition.c_str());
               appendAutoLogEntry("AUTO_SKIP", skipBuf);
@@ -3963,7 +3996,7 @@ void schedulerTickMinute() {
         extractJsonString(obj.c_str(), "\"createdBy\"", _createdByBuf, sizeof(_createdByBuf));
 
         // Log scheduled automation start if logging is active
-        if (gAutoLogActive) {
+        if (gAutomationLogActive) {
           char startBuf[256];
           if (eventDue && !clockDue) {
             snprintf(startBuf, sizeof(startBuf), "Event automation started: ID=%ld Name=%s User=%s Trigger=%s", id, autoName.c_str(), _createdByBuf, evKindName ? evKindName : "?");
@@ -4001,7 +4034,7 @@ void schedulerTickMinute() {
         }
 
         // Log scheduled automation end if logging is active
-        if (gAutoLogActive) {
+        if (gAutomationLogActive) {
           char endBuf[256];
           snprintf(endBuf, sizeof(endBuf), "%s automation completed: ID=%ld Name=%s Commands=%d", fireLabel, id, autoName.c_str(), cmdsCount);
           appendAutoLogEntry("AUTO_END", endBuf);
@@ -4031,7 +4064,7 @@ void schedulerTickMinute() {
       if (readText(AUTOMATIONS_JSON_FILE, fix)) {
         if (sanitizeAutomationsJson(fix)) {
           writeAutomationsJsonAtomic(fix);
-          gAutosDirty = true;
+          gAutomationsDirty = true;
           DEBUGF(DEBUG_AUTOMATIONS, "[autos] Runtime sanitize applied after duplicate detection; scheduler refresh queued");
         } else {
           DEBUGF(DEBUG_AUTOMATIONS, "[autos] Runtime sanitize: no changes needed");
@@ -4045,17 +4078,31 @@ void schedulerTickMinute() {
 
   // Rebuild the in-RAM cache from the (possibly post-fire updated) file so the
   // fast due-check in the main loop can skip a rescan until something changes.
-  rebuildAutoCache();
+  rebuildAutomationsCache();
 }
+
+// Is the scheduler actually up right now? Distinct from gSettings.automationEnabled
+// (permission) and from automationAutoStart (boot intent). The main-loop tick reads
+// this, because the boot gate alone cannot hold: automationsAnyDue() returns true
+// whenever gAutomationsCache is null, and the resulting schedulerTickMinute() calls
+// rebuildAutomationsCache(), so a skipped boot init would silently re-allocate and run on
+// the next pass. Set at the two chokepoints below, which BOTH the boot path
+// (initAutomationSystem) and the runtime `automation system enable` path go through
+// — so enabling at runtime after an autostart-off boot still starts ticking.
+bool gAutomationSchedulerRunning = false;
 
 // Start the automation scheduler (now runs from main loop, no dedicated task)
 bool startAutomationScheduler() {
+  if (!ensureAutomationsCache()) return false;
+  gAutomationSchedulerRunning = true;
   DEBUGF(DEBUG_AUTOMATIONS, "[automations] Scheduler enabled (runs from main loop)");
   return true;
 }
 
-// Stop the automation scheduler (no-op, runs from main loop)
+// Stop the automation scheduler and release its due-check cache.
 void stopAutomationScheduler() {
+  gAutomationSchedulerRunning = false;
+  releaseAutomationsCache();
   DEBUGF(DEBUG_AUTOMATIONS, "[automations] Scheduler disabled");
 }
 
@@ -4108,7 +4155,9 @@ const size_t automationCommandsCount = sizeof(automationCommands) / sizeof(autom
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry automationSettingEntries[] = {
-  { "automationsEnabled", SETTING_BOOL, &gSettings.automationsEnabled, true, 0, nullptr, 0, 1, "Automations Enabled", nullptr, false, nullptr, nullptr }
+  { "automationsEnabled", SETTING_BOOL, &gSettings.automationEnabled, true, 0, nullptr, 0, 1, "Automations Enabled", nullptr, false, nullptr, nullptr },
+  { "automationAutoStart", SETTING_BOOL, &gSettings.automationAutoStart, 1, 0, nullptr, 0, 1, "Auto-start at boot", nullptr, false, nullptr, "automationautostart" },
+
 };
 
 // Columns: name, jsonSection, entries, count, isConnected, description

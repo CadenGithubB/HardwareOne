@@ -624,16 +624,37 @@ window.SchemaPanel.render({
   <div id='network-pane' style='display:none;margin-top:1rem;color:var(--panel-fg)'>
     <div class='settings-panel' style='margin:0 0 0.75rem 0'>
       <div style='display:flex;align-items:center;justify-content:space-between'>
-        <div><div style='font-size:1.05rem;font-weight:bold;color:var(--panel-fg)'>WiFi <span id='wifi-status-badge'></span> <span id='wifi-radio-badge'></span></div><div style='color:var(--panel-fg);font-size:0.85rem;margin-top:0.25rem'>Current network, scan, and saved-credential management.</div></div>
+        <div><div style='font-size:1.05rem;font-weight:bold;color:var(--panel-fg)'>Radio <span id='radio-status-badge'></span></div><div style='color:var(--panel-fg);font-size:0.85rem;margin-top:0.25rem'>The 2.4 GHz radio, shared by WiFi and ESP-NOW. Runtime only - a reboot restores your configured state.</div></div>
+        <button class='btn' id='btn-radio-toggle' onclick="togglePane('radio-pane','btn-radio-toggle')">Expand</button>
+      </div>
+      <div id='radio-pane' style='display:none;margin-top:0.75rem'>
+        <div style='margin-bottom:1rem;color:var(--panel-fg)' id='radio-detail'>-</div>
+        <div style='display:flex;align-items:center;gap:1rem;flex-wrap:wrap'>
+          <button class='btn' onclick='radioPower(1)' title='Power the 2.4 GHz radio on and restore whatever was running'>Radio On</button>
+          <button class='btn' onclick='radioPower(0)' title='Airplane mode: power the whole radio down, WiFi and ESP-NOW together'>Radio Off</button>
+        </div>
+      </div>
+    </div>
+    <div class='settings-panel' style='margin:0 0 0.75rem 0'>
+      <div style='display:flex;align-items:center;justify-content:space-between'>
+        <div><div style='font-size:1.05rem;font-weight:bold;color:var(--panel-fg)'>WiFi <span id='wifi-status-badge'></span></div><div style='color:var(--panel-fg);font-size:0.85rem;margin-top:0.25rem'>Current network, scan, and saved-credential management.</div></div>
         <button class='btn' id='btn-wifi-toggle' onclick="togglePane('wifi-pane','btn-wifi-toggle')">Expand</button>
       </div>
       <div id='wifi-pane' style='display:none;margin-top:0.75rem'>
         <div style='margin-bottom:1rem'>
           <span style='color:var(--panel-fg)'>SSID: <span style='font-weight:bold;color:var(--accent)' id='wifi-ssid'>-</span></span>
         </div>
+        <div style='display:flex;align-items:center;gap:1rem;margin-bottom:0.6rem;flex-wrap:wrap'>
+          <span style='color:var(--panel-fg)' title='Master switch. Off means nothing can bring WiFi up - not boot, not connect, not scan. ESP-NOW is unaffected.'>Enabled: <span style='font-weight:bold;color:var(--accent)' id='wifi-enabled-value'>-</span></span>
+          <button class='btn' onclick='wifiSetFlag("wifienabled")' id='wifi-enabled-btn'>Toggle</button>
+        </div>
+        <div style='display:flex;align-items:center;gap:1rem;margin-bottom:0.6rem;flex-wrap:wrap'>
+          <span style='color:var(--panel-fg)' title='Connect to a saved network automatically at boot.'>Connect at boot: <span style='font-weight:bold;color:var(--accent)' id='wifi-autostart-value'>-</span></span>
+          <button class='btn' onclick='wifiSetFlag("wifiautostart")' id='wifi-autostart-btn'>Toggle</button>
+        </div>
         <div style='display:flex;align-items:center;gap:1rem;margin-bottom:1rem;flex-wrap:wrap'>
-          <span style='color:var(--panel-fg)' title='Automatically reconnect to saved WiFi networks after power loss or disconnection'>Auto-Reconnect: <span style='font-weight:bold;color:var(--accent)' id='wifi-value'>-</span></span>
-          <button class='btn' onclick='toggleWifi()' id='wifi-btn' title='Enable/disable automatic WiFi reconnection on boot'>Toggle</button>
+          <span style='color:var(--panel-fg)' title='Keep hunting for the access point after an unexpected drop. Independent of connecting at boot - useful on a device you expect to stay online.'>Auto-Reconnect: <span style='font-weight:bold;color:var(--accent)' id='wifi-value'>-</span></span>
+          <button class='btn' onclick='wifiSetFlag("wifiautoreconnect")' id='wifi-btn'>Toggle</button>
         </div>
         <div style='display:flex;align-items:center;gap:1rem;flex-wrap:wrap'>
           <button class='btn' onclick='disconnectWifi()' title='Disconnect from current WiFi network (may lose connection to device)'>Disconnect WiFi</button>
@@ -826,13 +847,56 @@ window.SchemaPanel.render({
         }
       }
     }
-    var radioBadge = document.getElementById('wifi-radio-badge');
-    if (radioBadge && sysStatus.net && typeof sysStatus.net.radioOn === 'boolean') {
-      if (sysStatus.net.radioOn) {
-        var rlabel = sysStatus.net.radioHeldForEspnow ? 'Radio On (ESP-NOW)' : 'Radio On';
-        radioBadge.outerHTML = '<span id="wifi-radio-badge" style="background:rgba(76,175,80,0.15);color:#4caf50;border:1px solid rgba(76,175,80,0.3);padding:0.15rem 0.5rem;border-radius:3px;font-size:0.7rem;margin-left:0.35rem;font-weight:500">' + rlabel + '</span>';
-      } else {
-        radioBadge.outerHTML = '<span id="wifi-radio-badge" style="background:rgba(255,152,0,0.15);color:#ff9800;border:1px solid rgba(255,152,0,0.3);padding:0.15rem 0.5rem;border-radius:3px;font-size:0.7rem;margin-left:0.35rem;font-weight:500">Radio Off</span>';
+    // Radio power is its OWN section, not a WiFi property: the radio can be on
+    // with WiFi disconnected because ESP-NOW is holding it up, which is exactly
+    // why this used to need a "(ESP-NOW)" suffix on the WiFi card to make sense.
+    var radioBadge = document.getElementById('radio-status-badge');
+    var radioDetail = document.getElementById('radio-detail');
+    if (sysStatus.net && typeof sysStatus.net.radioOn === 'boolean') {
+      var rOn = sysStatus.net.radioOn;
+      var heldForEspnow = !!sysStatus.net.radioHeldForEspnow;
+      if (radioBadge) {
+        var rlabel = rOn ? (heldForEspnow ? 'On (ESP-NOW)' : 'On') : 'Off';
+        var rstyle = rOn
+          ? 'background:rgba(76,175,80,0.15);color:#4caf50;border:1px solid rgba(76,175,80,0.3)'
+          : 'background:rgba(255,152,0,0.15);color:#ff9800;border:1px solid rgba(255,152,0,0.3)';
+        radioBadge.outerHTML = '<span id="radio-status-badge" style="' + rstyle +
+          ';padding:0.15rem 0.5rem;border-radius:3px;font-size:0.7rem;margin-left:0.5rem;font-weight:500">' +
+          rlabel + '</span>';
+      }
+      if (radioDetail) {
+        // Say WHY it is on - "radio on, WiFi disconnected" is confusing without it.
+        var now;
+        if (!rOn) {
+          now = 'Powered down. WiFi and ESP-NOW cannot run until the radio is back on.';
+        } else if (heldForEspnow) {
+          now = 'Powered on, held up by ESP-NOW. WiFi does not need to be connected for this.';
+        } else {
+          now = 'Powered on.';
+        }
+
+        // There is deliberately no "start radio at boot" setting: the radio has
+        // no consumer of its own, so it comes up if and only if something that
+        // NEEDS it starts. Rather than leave that as an unexplained hole in the
+        // card, derive the answer from the two flags that actually decide it
+        // (HardwareOne.cpp gates setupWiFi and cmd_espnow_init on exactly these).
+        var net = (settings && settings.network) || {};
+        var w = net.wifi || {}, en = net.espnow || {};
+        // ESP-NOW's master switch is still the BARE jsonKey "enabled" - it only
+        // becomes "espnowEnabled" in the Phase 4 rename. Accept either so this
+        // keeps working across that change instead of silently reading
+        // undefined and always reporting "off".
+        var espnowOn = (en.espnowEnabled !== undefined) ? en.espnowEnabled : en.enabled;
+        var wifiAtBoot   = !!w.wifiEnabled && !!w.wifiAutoStart;
+        var espnowAtBoot = !!espnowOn && !!en.espnowAutoStart;
+        var why = [];
+        if (wifiAtBoot)   why.push('WiFi connects at boot');
+        if (espnowAtBoot) why.push('ESP-NOW starts at boot');
+        var atBoot = why.length
+          ? 'At next boot: ON - ' + why.join(' and ') + '.'
+          : 'At next boot: OFF - nothing is set to start that needs the radio. '
+            + 'Turn on WiFi "Connect at boot" or ESP-NOW auto-start to change that.';
+        radioDetail.textContent = now + '  ' + atBoot;
       }
     }
 
@@ -2397,11 +2461,22 @@ console.log('[SETTINGS] Part 1: Core init starting...');
         __S.state.savedSSIDs = [];
         if (primary) __S.state.savedSSIDs.push(primary);
         if (list && list.length) __S.state.savedSSIDs = __S.state.savedSSIDs.concat(list);
-        var wifiAutoReconnect = (wifiSect.autoReconnect !== undefined ? wifiSect.autoReconnect
-                              : (wifiSect.wifiAutoReconnect !== undefined ? wifiSect.wifiAutoReconnect
-                              : (s.wifiAutoReconnect || false)));
-        $('wifi-value').textContent = wifiAutoReconnect ? 'Enabled' : 'Disabled';
-        $('wifi-btn').textContent = wifiAutoReconnect ? 'Disable' : 'Enable';
+        // Three independent WiFi axes. `autoReconnect` used to be the jsonKey for
+        // the BOOT flag, which is why that toggle was mislabelled; the keys are
+        // now one-to-one with what they do.
+        var wifiFlags = [
+          ['wifiEnabled',       'wifi-enabled-value',   'wifi-enabled-btn'],
+          ['wifiAutoStart',     'wifi-autostart-value', 'wifi-autostart-btn'],
+          ['wifiAutoReconnect', 'wifi-value',           'wifi-btn']
+        ];
+        for (var wi = 0; wi < wifiFlags.length; wi++) {
+          var wkey = wifiFlags[wi][0];
+          var on = (wifiSect[wkey] !== undefined) ? !!wifiSect[wkey] : !!s[wkey];
+          var vEl = $(wifiFlags[wi][1]);
+          var bEl = $(wifiFlags[wi][2]);
+          if (vEl) vEl.textContent = on ? 'Enabled' : 'Disabled';
+          if (bEl) bEl.textContent = on ? 'Disable' : 'Enable';
+        }
         // Timezone + NTP are now schema-driven (System Time panel is rendered
         // from /api/settings/schema by the IIFE near the top of the page).
         // refreshSettings no longer pokes their DOM directly.
@@ -2434,7 +2509,7 @@ console.log('[SETTINGS] Part 1: Core init starting...');
             var el;
             el = document.getElementById('auth-serial');    if (el) el.checked = outAuthSect.serialRequireAuth  !== false;
             el = document.getElementById('auth-display');   if (el) el.checked = outAuthSect.displayRequireAuth !== false;
-            el = document.getElementById('auth-bluetooth'); if (el) el.checked = btSect.bluetoothRequireAuth !== false;
+            el = document.getElementById('auth-bluetooth'); if (el) el.checked = btSect.bleRequireAuth !== false;
             // Hide bluetooth row if module not present in settings
             var btPresent = (s.network && s.network.bluetooth !== undefined) || (s.bluetooth !== undefined);
             var btWrap = document.getElementById('auth-bluetooth-wrap');
@@ -2517,26 +2592,25 @@ console.log('[SETTINGS] Part 2: API helpers starting...');
     console.log('[SETTINGS] refreshSettings defined');
     
     // Toggle WiFi auto-reconnect
-    window.toggleWifi = function() {
-      console.log('[SETTINGS] toggleWifi called');
-      var cur = ($('wifi-value').textContent === 'Enabled') ? 1 : 0;
-      var v = cur ? 0 : 1;
-      console.log('[SETTINGS] toggleWifi - current:', cur, 'new:', v);
-      var cmd = 'wifiautoreconnect ' + v;
-      postSettingsCli(cmd)
+    // One handler for all three WiFi flags. Reads current state off the button
+    // label so it stays correct after a refresh, and re-reads from the device
+    // afterwards rather than assuming the write landed.
+    window.wifiSetFlag = function(cmd) {
+      var map = { wifienabled: 'wifi-enabled-btn', wifiautostart: 'wifi-autostart-btn', wifiautoreconnect: 'wifi-btn' };
+      var btn = $(map[cmd]);
+      var v = (btn && btn.textContent === 'Disable') ? 0 : 1;
+      if (cmd === 'wifienabled' && v === 0) {
+        // Disabling the master switch stops connect AND scan, so say so.
+        if (!confirm('Disable WiFi entirely? Nothing will be able to bring it up - not boot, not connect, not scan - until you re-enable it. ESP-NOW is not affected.')) return;
+      }
+      postSettingsCli(cmd + ' ' + v)
       .then(function(t) {
-        console.log('[SETTINGS] toggleWifi result:', t);
-        if (t.indexOf('Error') >= 0) {
-          alert(t);
-        }
+        if (t && t.indexOf('Error') >= 0) alert(t);
         refreshSettings();
       })
-      .catch(function(e) {
-        console.error('[SETTINGS] toggleWifi error:', e);
-        alert('Error: ' + e.message);
-      });
+      .catch(function(e) { alert('Error: ' + e.message); });
     };
-    console.log('[SETTINGS] toggleWifi defined');
+    console.log('[SETTINGS] wifiSetFlag defined');
     
     // Toggle bond mode
     window.toggleBondMode = function() {
@@ -2580,6 +2654,27 @@ console.log('[SETTINGS] Part 2: API helpers starting...');
           alert('Error: ' + e.message);
         });
       }
+    };
+
+    // Radio power (airplane mode). Runtime only - never persisted, so a reboot
+    // always brings the radio back to whatever the autostart settings say. That
+    // recovery guarantee is deliberate; do not "fix" it by persisting this.
+    window.radioPower = async function(on) {
+      if (!on) {
+        // Powering the radio down kills WiFi AND ESP-NOW, which means this page
+        // if you are reading it over WiFi. Warn before, not after.
+        if (!await hwConfirm('Power the whole 2.4 GHz radio down? This stops WiFi and ESP-NOW together, and you will lose this web session if you are connected over WiFi. Recover from serial, the display, or by rebooting.')) {
+          return;
+        }
+      }
+      postSettingsCli('radiopower ' + (on ? 'on' : 'off'))
+      .then(function(t) {
+        alert(t || (on ? 'Radio on' : 'Radio off'));
+        if (typeof refreshSettings === 'function') refreshSettings();
+      })
+      .catch(function(e) {
+        alert('Error: ' + e.message);
+      });
     };
     
     

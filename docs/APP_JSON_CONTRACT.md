@@ -93,7 +93,7 @@ Note: read the global on/off via `automation system status json`, not from
 | `voltage` | `{"schema":1,"measured":false,"estimatedCurrentMa","estimatedPowerW","note"}` — estimate only; use `batterystatus json` for measured power |
 | `i2chealth` | `{"schema":1,"deviceCount","devices":[{"address","name","consecutiveErrors","totalErrors","degraded","nack","timeout","busError","adaptiveTimeoutMs"}]}` |
 | `i2cmetrics` | `{"schema":1,"uptimeSec","totalTransactions","mutexTimeouts","busContentions","totalBytes"}` |
-| `blepeers` | `{"schema":1,"peers":[{"name","displayName","connectable","connected","autoConnect","mac1","mac2"?,"pairedBy"}],"count"}` |
+| `blepeers` | `{"schema":1,"peers":[{"name","displayName","connectable","connected","autoReconnect","mac1","mac2"?,"pairedBy"}],"count"}` |
 | `banlist` | `{"schema":1,"bans":[{"ip","reason"}],"count"}` (stub: `available:false`). IP bans are web-only. |
 
 ---

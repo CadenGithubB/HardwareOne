@@ -256,9 +256,23 @@ void applyEvent(const FsmEvent& e) {
     case HijackEvent::ContainerCleared:
       g2LensApplyContainer(false, false, 0);
       break;
+    case HijackEvent::PageSwapEnd:
+    case HijackEvent::ImageProbeEnd:
+      // Safety-timeout / DISPLAY_OFF exit via HijackExit, which clears
+      // gLens.hijackActive. The Health (etc.) onDone path then rebuilds
+      // Apps with PageSwapBegin from Idle → PageSwapEnd → Hijacked.
+      // Without restoring the lens mirror here, page workers that gate
+      // on gLens.hijackActive CREATE successfully then abort on their
+      // first loop tick ("hijack ended") — flash of Health then bounce
+      // to Apps. ImageProbeEnd → Hijacked gets the same restore for
+      // symmetry (idempotent when the mirror is already true).
+      if (after == HijackState::Hijacked) {
+        g2LensApplyHijackActive(true);
+      }
+      break;
     default:
-      // PageSwapBegin/End, ShutdownSent, ImageProbeBegin/End: no
-      // lens-mirror side effects.
+      // PageSwapBegin, ShutdownSent, ImageProbeBegin: no lens-mirror
+      // side effects.
       break;
   }
 }
@@ -329,6 +343,7 @@ void hijackFsmInit() {
 }
 
 void hijackFsmDispatch(HijackEvent ev, const char* tag) {
+  if (!gFsmQueue) hijackFsmInit();
   FsmEvent e = {};
   e.ev = ev;
   e.hasPayload = false;
@@ -338,6 +353,7 @@ void hijackFsmDispatch(HijackEvent ev, const char* tag) {
 
 void hijackFsmDispatch(HijackEvent ev, const char* tag,
                        const HijackEventPayload& payload) {
+  if (!gFsmQueue) hijackFsmInit();
   FsmEvent e = {};
   e.ev = ev;
   e.payload = payload;

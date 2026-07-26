@@ -15,16 +15,20 @@
 // Live-state getters. Each include is the one that owns the flag we read; see the
 // per-feature rulings in docs/RAMFLUSH_IMPLEMENTATION_MAP.md §1.7 — several of the
 // obvious-looking getters are wrong and were pinned deliberately.
+#include "System_Automation.h"
 #include "System_I2C.h"
 #include "System_SensorStubs.h"
 #include "WebServer_Handle.h"
+#if ENABLE_OLED_DISPLAY
+#include "OLED_Display.h"
+#endif
 
 // Per-sensor enabled-flag externs. System_SensorStubs.h above only supplies the
 // flags for sensors compiled OUT; the real declarations live in each sensor's own
 // header (gated on its ENABLE_*). Without these the file builds only on configs
 // where every sensor happens to be disabled — e.g. the XIAO Sense
 // (I2C_FEATURE_LEVEL 0) it was developed against — and fails the moment a sensor
-// is turned on (FeatherS3 → gThermalEnabled/gGpsEnabled/gRtcEnabled undeclared).
+// is turned on (FeatherS3 → gThermalRunning/gGpsRunning/gRtcRunning undeclared).
 // Same include block System_TaskUtils.cpp uses for the same reason.
 #if ENABLE_GAMEPAD_SENSOR
 #include "i2csensor_seesaw.h"
@@ -89,7 +93,7 @@ RTC_NOINIT_ATTR static uint32_t rtcRfDivergeMask;  // bit i => feature i diverge
 RTC_NOINIT_ATTR static uint32_t rtcRfLiveMask;     // bit i => its observed live value
 
 static const uint32_t RAMFLUSH_OVERLAY_MAGIC  = 0x52414D46;  // 'RAMF'
-static const uint16_t RAMFLUSH_LAYOUT_VERSION = 1;           // bump on ANY enum change
+static const uint16_t RAMFLUSH_LAYOUT_VERSION = 2;           // bump on ANY enum change
 
 static_assert(RF_FEATURE_COUNT <= 32, "RamFlushFeatureId overflows the uint32_t masks");
 
@@ -121,27 +125,27 @@ static uint16_t ramFlushCrc(uint32_t diverge, uint32_t live, uint16_t layout) {
 // that is likewise false, so they never diverge and never enter the overlay.
 static bool ramFlushReadLive(RamFlushFeatureId f) {
   switch (f) {
-    case RF_THERMAL:    return gThermalEnabled;
-    case RF_TOF:        return gTofEnabled;
-    case RF_IMU:        return gImuEnabled;
-    case RF_GPS:        return gGpsEnabled;
-    case RF_FMRADIO:    return gFmRadioEnabled;
+    case RF_THERMAL:    return gThermalRunning;
+    case RF_TOF:        return gTofRunning;
+    case RF_IMU:        return gImuRunning;
+    case RF_GPS:        return gGpsRunning;
+    case RF_FMRADIO:    return gFmRadioRunning;
 
-    // NEVER gApdsEnabled — it is defined and externed but never assigned true, so
+    // NEVER gApdsRunning — it is defined and externed but never assigned true, so
     // it would read false forever and record a spurious "user turned APDS off" on
     // every capture. The sub-flags are the ones actually maintained.
 #if ENABLE_APDS_SENSOR
-    case RF_APDS:       return (gApdsColorEnabled || gApdsProximityEnabled || gApdsGestureEnabled);
+    case RF_APDS:       return (gApdsColorRunning || gApdsProximityRunning || gApdsGestureRunning);
 #else
     case RF_APDS:       return false;
 #endif
 
-    case RF_INPUT:      return gInputEnabled;
-    case RF_RTC:        return gRtcEnabled;
-    case RF_PRESENCE:   return gPresenceEnabled;
+    case RF_INPUT:      return gInputRunning;
+    case RF_RTC:        return gRtcRunning;
+    case RF_PRESENCE:   return gPresenceRunning;
 
 #if ENABLE_CAMERA_SENSOR
-    case RF_CAMERA:     return gCameraEnabled;
+    case RF_CAMERA:     return gCameraRunning;
 #else
     case RF_CAMERA:     return false;
 #endif
@@ -153,7 +157,7 @@ static bool ramFlushReadLive(RamFlushFeatureId f) {
 #endif
 
 #if ENABLE_MICROPHONE
-    case RF_MICROPHONE: return gMicEnabled;
+    case RF_MICROPHONE: return gMicRunning;
 #else
     case RF_MICROPHONE: return false;
 #endif
@@ -181,17 +185,17 @@ static bool ramFlushReadLive(RamFlushFeatureId f) {
 
 #if ENABLE_BLUETOOTH
     // NEVER isBLERunning(): it deliberately reports true for bare controller
-    // activity, so a G2/ring client auto-reconnect (bluetoothAutoStart == false)
+    // activity, so a G2/ring client auto-reconnect (bleAutoStart == false)
     // would look like divergence and the next boot would replay SERVER init,
     // silently changing the user's BLE role. gBLEState->initialized is
-    // server-mode-only, which is what bluetoothAutoStart actually controls.
+    // server-mode-only, which is what bleAutoStart actually controls.
     case RF_BLUETOOTH:  return (gBLEState && gBLEState->initialized);
 #else
     case RF_BLUETOOTH:  return false;
 #endif
 
-    case RF_SENSORLOG:  return gSensorLoggingEnabled;
-    case RF_SYSTEMLOG:  return gSystemLogEnabled;
+    case RF_SENSORLOG:  return gSensorLoggingRunning;
+    case RF_SYSTEMLOG:  return gSystemLogRunning;
 
 #if ENABLE_ESPNOW
     case RF_ESPNOW:     return isEspNowInitialized();
@@ -201,14 +205,32 @@ static bool ramFlushReadLive(RamFlushFeatureId f) {
 
     case RF_WIFI:       return WiFi.isConnected();
 
+#if ENABLE_OLED_DISPLAY
+    // gOledRunning, not oledConnected: the latter is "a panel answered on I2C",
+    // which stays true after oledstop. gOledRunning is what oledAutoStart
+    // actually controls.
+    case RF_OLED:       return gOledRunning;
+#else
+    case RF_OLED:       return false;
+#endif
+
+#if ENABLE_AUTOMATION
+    // The scheduler's own runtime flag, not automationEnabled: the setting is
+    // the permission, this is whether the cache is live and the loop is
+    // ticking — which is what automationAutoStart controls.
+    case RF_AUTOMATION: return gAutomationSchedulerRunning;
+#else
+    case RF_AUTOMATION: return false;
+#endif
+
     default:            return false;
   }
 }
 
 // The intent each feature's live state is diffed against. For most this is the
-// *AutoStart flag; WiFi is keyed to wifiAutoReconnect because wifiEnabled is inert
+// *AutoStart flag; WiFi is keyed to wifiAutoStart because wifiEnabled is inert
 // (persisted and read back, but nothing applies it — boot gates on
-// wifiAutoReconnect at HardwareOne.cpp:1606), and espnow is a master-enable.
+// wifiAutoStart at HardwareOne.cpp:1606), and espnow is a master-enable.
 static bool ramFlushReadIntent(RamFlushFeatureId f) {
   switch (f) {
     case RF_THERMAL:    return gSettings.thermalAutoStart;
@@ -222,15 +244,17 @@ static bool ramFlushReadIntent(RamFlushFeatureId f) {
     case RF_PRESENCE:   return gSettings.presenceAutoStart;
     case RF_CAMERA:     return gSettings.cameraAutoStart;
     case RF_SR:         return gSettings.srAutoStart;
-    case RF_MICROPHONE: return gSettings.microphoneAutoStart;
+    case RF_MICROPHONE: return gSettings.micAutoStart;
     case RF_HTTP:       return gSettings.httpAutoStart;
     case RF_LLM:        return gSettings.llmAutoStart;
     case RF_MQTT:       return gSettings.mqttAutoStart;
-    case RF_BLUETOOTH:  return gSettings.bluetoothAutoStart;
+    case RF_BLUETOOTH:  return gSettings.bleAutoStart;
     case RF_SENSORLOG:  return gSettings.sensorLogAutoStart;
     case RF_SYSTEMLOG:  return gSettings.systemLogAutoStart;
-    case RF_ESPNOW:     return gSettings.espnowenabled;
-    case RF_WIFI:       return gSettings.wifiAutoReconnect;
+    case RF_ESPNOW:     return gSettings.espnowEnabled;
+    case RF_WIFI:       return gSettings.wifiAutoStart;
+    case RF_OLED:       return gSettings.oledAutoStart;
+    case RF_AUTOMATION: return gSettings.automationAutoStart;
     default:            return false;
   }
 }
@@ -257,6 +281,8 @@ static const char* ramFlushFeatureName(RamFlushFeatureId f) {
     case RF_SYSTEMLOG:  return "systemlog";
     case RF_ESPNOW:     return "espnow";
     case RF_WIFI:       return "wifi";
+    case RF_OLED:       return "oled";
+    case RF_AUTOMATION: return "automation";
     default:            return "?";
   }
 }

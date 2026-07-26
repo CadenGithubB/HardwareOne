@@ -299,7 +299,7 @@ Running log of **measured** build points. Append a row whenever a config materia
 > **Note on R1 link drops:** a ring disconnect with HCI `rsn=0x8` is a BLE **supervision
 > timeout** (link went silent), not an ESP fault or a connection-limit issue — the R1 (battery
 > wearable, incompletely paired by a 3rd-party host) sleeps/lapses the link. Mitigate with
-> `bleautoconnect r1-ring on`; real fix is implementing the R1 keep-alive/pairing flow.
+> `bleautoreconnect r1-ring on`; real fix is implementing the R1 keep-alive/pairing flow.
 
 ### Per-feature deltas (measured where noted)
 

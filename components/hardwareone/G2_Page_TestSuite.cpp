@@ -17,7 +17,7 @@
 //     Hide AI Card
 //     Toggle Mic Feed
 //     Heap Snapshot (log) / Lens State Dump (log)
-//     (G2 boot AutoConnect, saved-MAC reconnect, and disconnect live under
+//     (G2 boot AutoReconnect, saved-MAC reconnect, and disconnect live under
 //      Network → Bluetooth → G2 >>. R1 Ring connect/disconnect stays on the
 //      Bluetooth menu — see G2_Page_Network.cpp.)
 //
@@ -822,6 +822,7 @@ static size_t buildImageStreamingSingleRows() {
 // rendering 2026-04 onward); Q28 is the text+image counterpart and is
 // the reference probe for the empirical finding that text+image
 // compounds ack but the image half doesn't paint on this firmware.
+// Q30* try unproven list+text+image (ContainerTotalNum=3).
 static size_t buildImageStreamingCompoundRows() {
   writeBackRow("<- Streaming");
   size_t row = 1;
@@ -830,6 +831,9 @@ static size_t buildImageStreamingCompoundRows() {
   snprintf(gRows[row], TEST_ROW_LEN, "Q18: mixed list+icon (80x80)");       gRowPtrs[row] = gRows[row]; row++;
   snprintf(gRows[row], TEST_ROW_LEN, "Q28: img+text live (indep. rates)");  gRowPtrs[row] = gRows[row]; row++;
   snprintf(gRows[row], TEST_ROW_LEN, "Q28L: img+list live (Q28 ctrl)");     gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "Q30: list+text+img Health geom");     gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "Q30b: list+img+text wire order");     gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "Q30c: list+text+img 96x96");          gRowPtrs[row] = gRows[row]; row++;
   return row;
 }
 
@@ -2472,7 +2476,8 @@ void g2TestSuiteHandleTap(uint32_t idx) {
 
     case TEST_LEVEL_IMAGE_STREAM_COMPOUND: {
       // Compound layouts — Q16/Q17/Q18 list+image (verified-rendering),
-      // Q28 text+image (image half currently fails to paint — diagnostic).
+      // Q28 text+image (image half currently fails to paint — diagnostic),
+      // Q30* unproven list+text+image 3-pane.
       if (idx == 0) {
         gTestLevel = TEST_LEVEL_IMAGE_STREAMING;
         size_t n = buildImageStreamingRows();
@@ -2481,11 +2486,14 @@ void g2TestSuiteHandleTap(uint32_t idx) {
       }
       ImgProbeFn fn = nullptr;
       switch (idx) {
-        case 1: fn = g2ProbeImageQ16MixedSideBySide;     break;
-        case 2: fn = g2ProbeImageQ17MixedOverlap;        break;
-        case 3: fn = g2ProbeImageQ18MixedIcon;           break;
-        case 4: fn = g2ProbeImageQ28MixedImageTextLive;  break;
-        case 5: fn = g2ProbeImageQ28LMixedListImageLive; break;
+        case 1: fn = g2ProbeImageQ16MixedSideBySide;          break;
+        case 2: fn = g2ProbeImageQ17MixedOverlap;             break;
+        case 3: fn = g2ProbeImageQ18MixedIcon;                break;
+        case 4: fn = g2ProbeImageQ28MixedImageTextLive;       break;
+        case 5: fn = g2ProbeImageQ28LMixedListImageLive;      break;
+        case 6: fn = g2ProbeImageQ30ListTextImageHealthGeom;  break;
+        case 7: fn = g2ProbeImageQ30bListImageTextOrder;      break;
+        case 8: fn = g2ProbeImageQ30cListTextSmallImage;      break;
         default:
           DEBUG_G2F("[G2] Test suite IMAGE/Stream/Compound: tap idx=%u out of range",
                     (unsigned)idx);

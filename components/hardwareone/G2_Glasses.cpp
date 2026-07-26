@@ -8,7 +8,7 @@
 
 #include "G2_Glasses.h"
 #include "System_Events.h"  // systemEventPost — event register producer
-#include "System_SensorLogging.h"  // gSensorLoggingEnabled/gSensorLogMask/LOG_* — G2 Logging app
+#include "System_SensorLogging.h"  // gSensorLoggingRunning/gSensorLogMask/LOG_* — G2 Logging app
 
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 
@@ -34,7 +34,7 @@
 #include "System_MemUtil.h"
 #include "System_VFS.h"
 #include "System_Battery.h"   // BatteryState + getBatteryPercentage etc — for ESP corner widget
-#include "System_Microphone.h"  // gMicEnabled, micConnected, getAudioLevel, etc — for MIC detail page
+#include "System_Microphone.h"  // gMicRunning, micConnected, getAudioLevel, etc — for MIC detail page
 #include "HAL_Audio.h"          // audioGetSource/audioCaptureActive/audioCaptureStop — G2 as a mic source
 #include "System_PollPause.h"   // PollPauseGuard — pause sensor polling during BLE connect/discovery
 #include "G2_HijackCmd.h"   // g2BumpMenuGen() — called from g2SetHijackPage
@@ -46,6 +46,7 @@ extern "C" {
 #include "WebServer_Server.h"  // broadcastEventToAllSessions() for SSE push
 #include "BLE_Events.h"        // CompactJson + blePushEvent
 #include "BLE_Peers.h"         // peer registry + saved-MAC reconnect
+#include "BLE_CentralTx.h"     // controller-level TX gate (G2 L/R + R1)
 #include "G2_Ring.h"  // g2RingInit (eager registration in initG2Client)
 #include "G2_Page_Common.h"    // TextPager + paging ops (g2TextPagerRender)
 #include "G2_Page_Sensors.h"   // g2ShowSensorList() (per-page module)
@@ -64,10 +65,11 @@ extern "C" {
 #include "G2_Page_Automations.h" // g2ShowAutomationsMenu / g2AutomationsHandleTap
 #include "G2_Page_LED.h"       // g2ShowLedMenu / g2LedHandleTap (Sensors → LED)
 #include "G2_Pet.h"            // Apps → Pet: virtual-creature sim + tile renderer
+#include "G2_Health.h"         // Apps → Health: R1 vitals + sparkline tile
 #include "G2_HijackFsm.h"      // shadow FSM tracking page-swap / hijack lifecycle
 #if ENABLE_MAPS
 #include "System_Maps.h"       // MapCore/OffscreenMapRenderer — g2map renders the offline map to the lens
-#include "System_TaskUtils.h"  // MAP_RENDER_STACK_WORDS — size the g2map worker like the OLED render task
+#include "System_TaskUtils.h"  // APP_CORE / task priority helpers used by G2 workers
 #endif
 #if ENABLE_ONDEVICE_LLM
 #include "System_LLM.h"        // llmGetStatus / model load status for Select Model
@@ -144,24 +146,35 @@ static constexpr const char* CHAR_AUDIO_NOTIFY = "00002760-08c2-11e1-9073-0e8ac7
 // 5 s gives headroom without hammering the radio.
 static constexpr uint32_t HEARTBEAT_PERIOD_MS = 5000;
 
-// Mutex wait for sendEnvelope (heartbeats, single-packet commands). Image
-// bursts hold writeMutex for ~0.3–1.0 s; a stuck esp_ble_gattc_write_char
-// can exceed 500 ms without the peripheral being dead. Too short a wait makes
-// heartbeats "miss" and trips G2_TX_STUCK_DISCONNECT_BEATS prematurely.
+// Mutex wait for sendEnvelope (heartbeats, single-packet commands).
+// Fragmented sends take writeMutex per envelope only (not the whole
+// burst). A stuck esp_ble_gattc_write_char can still exceed 500 ms
+// without the peripheral being dead — too short a wait makes heartbeats
+// "miss" and trips G2_TX_STUCK_DISCONNECT_BEATS prematurely.
 static constexpr uint32_t G2_SEND_ENVELOPE_MUTEX_MS = 1500;
 
-// Mutex wait for sendPbFragmented to *begin* a burst. Another writer may
-// hold writeMutex for a full multi-envelope Cmd=3 send (many BLE chunks ×
-// stepped write retries). Must exceed realistic worst-case burst duration
-// so the next tile does not abort with "mutex timeout" while the link is
-// merely slow — not dead. (Previously 2 s; too tight vs. G2_SEND_ENVELOPE
-// tuning and rc=-1 recovery.)
-static constexpr uint32_t G2_SENDPB_BURST_MUTEX_MS = 5000;
+// Controller-level TX gate (bleCentralTx) waits. Fragmented sends take
+// per envelope (same as single-envelope); heartbeats use a short take
+// and skip cleanly when the gate is busy (glasses tolerate ≥10 s silence).
+static constexpr uint32_t G2_CENTRAL_TX_ENVELOPE_MS = 1500;
+static constexpr uint32_t G2_CENTRAL_TX_HEARTBEAT_MS = 50;
+
+// After esp_ble_gattc_write_char rc=-1, delay this long before failing the
+// envelope (caller may retry the whole fragment out-of-lock). Not an
+// in-lock writeValue retry — that path can wedge on m_semaphoreWriteCharEvt
+// (see sendEnvelopeNoMutex). Longer when R1 is up — three HIGH links drain
+// the TX buffer slower.
+static constexpr uint32_t G2_WRITE_RC_RETRY_COOLDOWN_MS = 100;
+static constexpr uint32_t G2_WRITE_RC_RETRY_COOLDOWN_RING_MS = 200;
 
 // Heartbeat consecutive send failures (mutex timeout or write failure) before
 // forcing disconnect. At 5 s cadence, 5 misses ≈ 25 s — enough for BLE
 // controller recovery without leaving a truly dead link up indefinitely.
 static constexpr uint8_t G2_TX_STUCK_DISCONNECT_BEATS = 5;
+
+// sendEnvelope result — Busy means the controller gate / peer mutex was
+// contended and the caller should not treat it as a TX wedge.
+enum class G2SendResult : uint8_t { Ok = 0, Busy, Fail };
 
 // Primary text container name. Fixed per-session; rebuild semantics depend
 // on reusing the same name. Keep ≤14 chars, case-sensitive.
@@ -269,8 +282,12 @@ struct G2Temple {
 // pointed to directly because g2Connect/g2Disconnect take/return G2-
 // specific types) to the registry's plain function-pointer slots.
 static bool g2PeerConnectSavedThunk() { return g2ConnectSaved(); }
-static void g2PeerDisconnectThunk()   { g2Disconnect(); }
-static bool g2PeerIsConnectedThunk()  { return isG2Connected(); }
+static void g2PeerDisconnectThunk() {
+  blePeerNoteUserDisconnect(BLE_PEER_G2_GLASSES);
+  g2Disconnect();
+}
+// Peer registry "linked" means both temples — auto-reseek if either drops.
+static bool g2PeerIsConnectedThunk()  { return g2BothConnected(); }
 static const BlePeerOps g2PeerOps = {
   g2PeerConnectSavedThunk,
   g2PeerDisconnectThunk,
@@ -325,7 +342,7 @@ struct G2FrameEvent {
 };
 
 static constexpr size_t G2_FRAME_RING_CAP = 32;
-static G2FrameEvent gFrameRing[G2_FRAME_RING_CAP];
+EXT_RAM_BSS_ATTR static G2FrameEvent gFrameRing[G2_FRAME_RING_CAP];
 static size_t       gFrameRingHead  = 0;     // next write slot
 static size_t       gFrameRingCount = 0;     // saturates at CAP
 
@@ -623,7 +640,7 @@ static inline void pageSwapEnd() {
 static inline bool pageSwapInFlight() { return g2FsmPageSwapping(); }
 
 // Forward decl — defined further down with the persistent page-swap worker
-// infrastructure. Called from initG2Client() to spin up the queue + task.
+// infrastructure. Created lazily on first page/lens job enqueue.
 static void pageSwapInit();
 
 // Forward decls — tap dispatcher. Defers handleHijackMenuTap() AND the
@@ -828,6 +845,19 @@ static volatile bool     gMapPageActive     = false;
 //   0 Back · 1 Feed · 2 Play · 3 Clean · 4 Sleep.
 static volatile uint32_t gPetPagePendingTap = 0;
 static volatile bool     gPetPageActive     = false;
+#if ENABLE_R1_HEALTH
+// Health page (g2HealthPageWorker) — list+image R1 vitals/graphs. Rows:
+//   0 Back · 1 Overview · 2 HR · 3 HRV · 4 SpO2 · 5 Battery · 6 Poll · 7 Track.
+static volatile uint32_t gHealthPagePendingTap = 0;
+static volatile bool     gHealthPageActive     = false;
+// Bumped each Health open so a timed-out worker's deferred onDone
+// (→ Apps) cannot clobber a newer Health session that already started.
+static volatile uint32_t gHealthPageGen        = 0;
+// Set on EvenCore TextFailed while Health is open — stop UPDATE_TEXT
+// against a dying container (avoids dump spam + radio pressure that
+// can accelerate the firmware "connection lost" teardown).
+static volatile bool     gHealthTextDead       = false;
+#endif
 #if ENABLE_ONDEVICE_LLM
 // Read-only LLM viewer (g2LlmPageWorker) — same list-tap-bitfield + active
 // gate pattern as the map/camera self-driving workers. Defined near the top
@@ -1284,6 +1314,10 @@ public:
                        temple->side == 'L' ? "LEFT" : "RIGHT");
       systemEventPost(SYSEVT_G2_DISCONNECTED, temple->side == 'L' ? "LEFT" : "RIGHT",
                       (!gL.connected && !gR.connected) ? "none left" : "one side up");
+      // Schedule mid-session reseek when autoReconnect is on (either temple
+      // gone → not "fully linked"). Intentional closeg2 stamps user-disconnect
+      // first so this becomes a no-op.
+      if (!g2BothConnected()) blePeerNoteLinkLost(BLE_PEER_G2_GLASSES);
     }
 
     // If neither temple is connected, roll back global state so the
@@ -1662,6 +1696,29 @@ bool g2MicStreamEnable(bool on) {
   gMicStreamOn    = on;
   gMicProbeActive = on;   // keep the g2micstats "stream ON/OFF" readout coherent
   return true;
+}
+
+// The glasses auto-stop the LC3 mic stream whenever the lens container is torn
+// down — Shutdown on the wire, DISPLAY_OFF, hijack exit (docs/G2_PROTOCOL.md
+// "The stream auto-stops when the StartUpPage tears down"). Nothing tells us;
+// the frames simply stop.
+//
+// That matters because the MIC detail page tears the container down after EVERY
+// action (toggle / record / source) to relabel a list row, since list rows can't
+// UPDATE_TEXT. Without this, gMicStreamOn stayed true, so g2MicStreamEnable()'s
+// idempotency check refused to re-send AudioCtrCmd{en=1} and the mic read
+// silence for the rest of the session — while g2micstats still cheerfully
+// reported "(stream ON)". Observed on hardware 2026-07-24: turning the mic on
+// from the lens yielded exactly 2 frames + 1 gap (~150 ms at the documented
+// ~20 pkt/s) before the toggle's own redraw killed it.
+//
+// Call this from the container-teardown chokepoint so the flag tracks the
+// glasses' real state; renderMicDetailLive re-asserts on its next tick.
+static void g2MicNoteStreamStoppedByTeardown() {
+  if (!gMicStreamOn) return;
+  gMicStreamOn    = false;
+  gMicProbeActive = false;
+  DEBUG_G2F("[G2-MIC] container teardown stopped the stream — will re-assert");
 }
 
 // LEFT-temple mic teardown on an unexpected disconnect. Runs in the BLE host
@@ -2482,6 +2539,22 @@ static void handleDevEvent(G2Temple& t, const uint8_t* devBody, size_t devLen) {
         }
         return;
       }
+#if ENABLE_R1_HEALTH
+      // Health page list dispatch (container 'lstHealth').
+      // Any ListEvent (CLICK or scroll) counts as user input for the
+      // 60 s safety watchdog — otherwise scrolling the metric list
+      // without selecting a row still trips Hijack exit (safety-timeout).
+      if (strcmp(cname, "lstHealth") == 0) {
+        if (gHealthPageActive) {
+          if (g2FsmHijackActive()) gHijackStartedMs = millis();
+          if (etype == 0 && idx < 32) {
+            gHealthPagePendingTap |= (1u << idx);
+            DEBUG_G2F("[G2] HealthPage tap: idx=%u", (unsigned)idx);
+          }
+        }
+        return;
+      }
+#endif
 #if ENABLE_MAPS
       // Interactive Maps page list dispatch (container 'lstMap'). Rows:
       //   0 Back · 1 Zoom In · 2 Zoom Out · 3 Reset View · 4 Recenter.
@@ -2840,7 +2913,13 @@ static void handleDevEvent(G2Temple& t, const uint8_t* devBody, size_t devLen) {
         // CREATE a fresh widget with new content. Don't clear state.
         // Phase 2: predicate is FSM-state-aware (state==PageSwapping)
         // OR'd with the legacy 2 s wall-clock as a fallback.
-        if (isExpectedEchoWindow("sysExit")) {
+        //
+        // reason=0 is NEVER an echo of our SHUTDOWN (those land as
+        // reason=1). It is the firmware's "connection lost / unexpected
+        // BT" teardown. Health used to stay in ImageProbing for the
+        // whole session, so reason=0 was swallowed as fsm-only echo and
+        // UPDATE_TEXT kept hammering a dead container (TextFailed spam).
+        if (reason != 0 && isExpectedEchoWindow("sysExit")) {
           DEBUG_G2F("[G2-%c] SYSTEM_EXIT during our own page-swap "
                     "(reason=%u) — ignoring, hijack stays active",
                     t.side, (unsigned)reason);
@@ -3506,46 +3585,19 @@ buildG2StatusSnapshot(char* out, size_t cap) {
   //  buildG2StatusBattery + renderStatusCompound below. Only the ring
   //  block stays in the body.)
 
-  // Ring status. We currently run the ring in info-only mode — we have
-  // a live BLE link and we're subscribed to its notify char, but we
-  // don't decode the notify frames yet (just hex-dump them at debug
-  // level). That means battery percentage, heart rate, HRV, etc. are
-  // all reachable in principle (the ring pushes them on the notify
-  // stream) but require a frame decoder we haven't written. They also
-  // may require completing the pairAuth handshake — the reference
-  // suggests health pushes only start after auth, but we haven't
-  // verified that empirically.
-  //
-  // What we CAN show now from the BLE-layer state alone:
-  //   * connected up/down
-  //   * MTU
-  //   * packets received since connect (proxy for "is data flowing?")
-  //   * connection age (how long the link has been up)
-  //
-  // When the frame decoder lands, swap "Ring N rx" for an actual
-  // "Ring batt %d%% - HR %d" line. Tracked under (Future) tasks.
-  // Two distinct ring states; both are useful to know:
-  //   1. Direct BLE — our ESP32 has its own BLE link to the ring on
-  //      service bae80001. Future home for pairAuth + health-data
-  //      decoding (battery, HR, HRV). Currently info-only.
-  //   2. Linked-to-glasses — the Even app has paired the ring with
-  //      the glasses (linkToGlasses handshake), so ring gestures
-  //      flow through the glasses' BLE connection as SysEvent src=2.
-  //      We can only OBSERVE this state, not control it. Detected
-  //      by tracking the last SysEvent with src=2 (see
-  //      gRingViaGlassesLastSeenMs in handleDevEvent).
-  // The two are independent: a ring can be linked to glasses without
-  // being directly connected to us, and vice versa.
-  //
-  // Status-page body is exactly 4 lines (any 5th line overflows the
-  // bottom-aligned text box):
+  // Ring: two independent paths.
+  //   1. Direct BLE — ESP32 ↔ ring (bae80001). We pairAuth, poll vitals,
+  //      decode notify/telemetry into the R1 cache (Apps → Health, OLED,
+  //      corner R1 batt). Queued via bleCentralTx when glasses TX is busy.
+  //   2. Linked-to-glasses — ring gestures via glasses SysEvent src=2
+  //      (observe only; gRingViaGlassesLastSeenMs in handleDevEvent).
+  // Status-page body is exactly 4 lines (5th overflows the text box):
   //   1. device name
   //   2. Up XhYm - NC
   //   3. IP: ... (or "WiFi off")
   //   4. ESPNow: Np (or "ESPNow off")
-  // Ring status reports through the corner R1 row, not the body. The
-  // (rxCount, tap-seen-Ns) ring telemetry is available via the
-  // ringstatus CLI command for diagnostics.
+  // R1 battery is the corner widget (buildR1StatusBattery); ringstatus CLI
+  // has fuller diagnostics.
 #endif
 
   // Trim trailing newline. Each line above ends with '\n' for clarity
@@ -3585,7 +3637,7 @@ static void buildG2StatusBattery(char* out, size_t cap) {
 
 // Top-right corner R1 battery widget. Same "NAME: value" shape as G2/ESP.
 // Reads the ring telemetry cache via g2RingGetTelemetry() — same API the
-// Apps → Ring dashboard uses. "--%" when no sample has been seen yet.
+// Apps → Health / OLED R1 panel use. "--%" when no sample has been seen yet.
 static void buildR1StatusBattery(char* out, size_t cap) {
   if (!out || cap == 0) return;
   G2RingTelemetry t;
@@ -3983,7 +4035,9 @@ static bool g2ShowMapPage(void (*onDone)());   // interactive list+image Maps pa
 static bool g2ShowLlmPage(void (*onDone)());   // read-only streaming LLM viewer, defined below
 static void g2ShowLlmMenu();                   // LLM submenu (chat / guided / re-run / model), defined below
 #endif
-static bool g2ShowRingPage();                  // read-only live R1 ring dashboard, defined below
+#if ENABLE_R1_HEALTH
+static bool g2ShowHealthPage(void (*onDone)()); // Apps → Health: list+graph R1 vitals, defined below
+#endif
 static bool g2ShowSysEventsPage();             // read-only live system-event viewer, defined below
 static void g2ShowLoggingMenu();               // sensor-logging control list, defined below
 
@@ -4000,8 +4054,8 @@ static void invokePageFromMain(const G2PageModule& p);
 // Apps launcher rows. A single builder emits {label, id} pairs under the
 // compile-flag guards so g2ShowAppsMenu (renders labels) and g2AppsHandleTap
 // (dispatches on id) stay in lockstep — the always-present rows (Automations,
-// Ring) then get stable ids regardless of which optional apps (Maps, LLM) are
-// compiled in. g2BuildAppsInfo reuses it too so the CLI text view can't drift.
+// Health, Pet) then get stable ids regardless of which optional apps (Maps, LLM)
+// are compiled in. g2BuildAppsInfo reuses it too so the CLI text view can't drift.
 enum G2AppRow : uint8_t {
   APP_ROW_BACK = 0,
   APP_ROW_ESPNOW,
@@ -4009,13 +4063,13 @@ enum G2AppRow : uint8_t {
   APP_ROW_MAPS,
   APP_ROW_LLM,
   APP_ROW_AUTOMATIONS,
-  APP_ROW_RING,
+  APP_ROW_HEALTH,
   APP_ROW_PET,
   // System Events + Logging moved to the System launcher; Users + OLED Login
   // moved to the Config launcher (menu reorg — mirrors the OLED categories).
 };
 
-// Max rows = Back + ESPNow + Files + Maps + LLM + Automations + Ring + Pet.
+// Max rows = Back + ESPNow + Files + Maps + LLM + Automations + Health + Pet.
 #define G2_APPS_MAX_ROWS 8
 
 static size_t g2AppsBuildRows(const char** labels, G2AppRow* ids, size_t cap) {
@@ -4025,7 +4079,7 @@ static size_t g2AppsBuildRows(const char** labels, G2AppRow* ids, size_t cap) {
   };
   add("<- Main Menu", APP_ROW_BACK);
   // Row label is just "ESP-NOW" — the "App" suffix was redundant next to the
-  // other rows (Files / Maps / LLM / Automations / Ring), which don't carry it.
+  // other rows (Files / Maps / LLM / Automations / Health), which don't carry it.
   // The page itself is still the "ESP-NOW App" module internally (kEspNowAppPage,
   // name="espnowapp"), distinct from Network -> ESP-NOW, which owns settings.
   add("ESP-NOW",      APP_ROW_ESPNOW);
@@ -4042,7 +4096,9 @@ static size_t g2AppsBuildRows(const char** labels, G2AppRow* ids, size_t cap) {
   add("LLM", APP_ROW_LLM);
 #endif
   add("Automations", APP_ROW_AUTOMATIONS);
-  add("Ring",        APP_ROW_RING);
+#if ENABLE_R1_HEALTH
+  add("Health",      APP_ROW_HEALTH);
+#endif
   add("Pet",         APP_ROW_PET);
   // Menu reorg: System Events + Logging now live under the System launcher,
   // and Users + OLED Login under the Config launcher (see g2SystemBuildRows /
@@ -4167,7 +4223,9 @@ static void g2AppsHandleTap(uint32_t idx) {
     case APP_ROW_LLM:    g2ShowLlmMenu(); return;   // opens the LLM submenu (chat / guided / re-run / model)
 #endif
     case APP_ROW_AUTOMATIONS: g2ShowAutomationsMenu(); return;     // Back → Apps (own TU)
-    case APP_ROW_RING:        g2ShowRingPage();        return;     // Back → Apps
+#if ENABLE_R1_HEALTH
+    case APP_ROW_HEALTH:      g2ShowHealthPage(&g2ShowAppsMenu); return; // Back → Apps
+#endif
     case APP_ROW_PET:         g2ShowPetPage(&g2ShowAppsMenu); return;   // Back → Apps
     // System Events / Logging / Users / OLED Login moved to the System &
     // Config launchers (menu reorg) — no longer dispatched from Apps.
@@ -4445,7 +4503,7 @@ static void buildMicReadoutText(char* out, size_t cap) {
   // micSampleRate. The HAL delivers int16 for every source, so bits is always 16.
   const bool g2 = (audioGetSource() == AUDIO_SRC_G2_LEFT);
   const int hz  = g2 ? 16000 : micSampleRate;
-  if (!gMicEnabled) {
+  if (!gMicRunning) {
     // I2S engine off: no level to read. Print the static config so the
     // page doesn't go visually empty when the user toggles off.
     snprintf(out, cap,
@@ -4478,6 +4536,30 @@ static bool renderMicDetailLive() {
     return false;
   }
 
+#if ENABLE_MICROPHONE
+  // Re-assert the glasses' LC3 stream if a container teardown stopped it (see
+  // g2MicNoteStreamStoppedByTeardown). This page tears the container down after
+  // every action to relabel its list rows, and each teardown silently kills the
+  // mic — so without this the level meter and any recording read zeros forever.
+  //
+  // Done here rather than at the CREATE chokepoint on purpose: liveTextWorker is
+  // a plain task context where a BLE send is safe, whereas g2NoteCreateSuccess
+  // can run under the notify path where sending risks stalling the stack. Cost
+  // of the polling approach is at most one tick (1 s) of audio per redraw.
+  // containerReady is load-bearing: the firmware only emits audio while a page
+  // is up, so arming during the CREATE tick (when it is still false) would send
+  // AudioCtrCmd{en=1} into a torn-down lens, set gMicStreamOn, and then the
+  // idempotency check would suppress the re-arm that would actually have stuck.
+  // Waiting one tick for the container costs a second and always lands.
+  if (gL.connected && g2LensGetState().containerReady &&
+      audioGetSource() == AUDIO_SRC_G2_LEFT &&
+      audioCaptureActive() && !gMicStreamOn) {
+    if (g2MicStreamEnable(true)) {
+      DEBUG_G2F("[G2-MIC] stream re-asserted after container re-CREATE");
+    }
+  }
+#endif
+
   // Build readout text fresh every tick (cheap — getAudioLevel() reads a
   // small sample window, not a full DMA buffer).
   char readout[80];
@@ -4493,7 +4575,7 @@ static bool renderMicDetailLive() {
     // (no chip ID, no I2C address). See G2_Page_Sensors.cpp's
     // isMic branch for the same rationale.
     char toggleRow[40];
-    const bool en = gMicEnabled;
+    const bool en = gMicRunning;
     snprintf(toggleRow, sizeof(toggleRow),
              "MIC: %s",
              en ? "On" : "Off");
@@ -4623,7 +4705,7 @@ bool g2ShowMicDetail() {
 
 #if ENABLE_MICROPHONE
 // openmic/closemic done — persist only on success, then re-CREATE so the
-// toggle row reads gMicEnabled (list rows can't UPDATE_TEXT).
+// toggle row reads gMicRunning (list rows can't UPDATE_TEXT).
 // userData = (uintptr_t)1 if we wanted ON, else 0.
 static void onMicDetailRuntimeDone(bool ok, const char* result,
                                    const G2CmdCookie& cookie,
@@ -4710,8 +4792,8 @@ void g2MicDetailHandleTap(uint32_t idx) {
   if (idx == 1) {
 #if ENABLE_MICROPHONE
     // Toggle — open/close via cmd_exec; persist + redraw in callback
-    // after gMicEnabled has actually changed (never race the CREATE).
-    const bool prev = gMicEnabled;
+    // after gMicRunning has actually changed (never race the CREATE).
+    const bool prev = gMicRunning;
     const bool next = !prev;
     BROADCAST_PRINTF("[G2] MIC detail: toggle %s -> %s",
                      prev ? "ON" : "OFF",
@@ -4731,7 +4813,7 @@ void g2MicDetailHandleTap(uint32_t idx) {
 #if ENABLE_MICROPHONE
     // Record toggle. Recording requires the mic on (micrecord errors
     // otherwise) — no-op the tap so the row's "mic off" label is honest.
-    if (!gMicEnabled) {
+    if (!gMicRunning) {
       DEBUG_G2F("[G2] MIC detail: record tapped but mic off — no-op");
       return;
     }
@@ -4776,167 +4858,14 @@ void g2MicDetailHandleTap(uint32_t idx) {
   DEBUG_G2F("[G2] MIC detail: tap idx=%u (no action)", (unsigned)idx);
 }
 
-// ─────────────────────────────────────────────────────────────────────
-// Ring dashboard — read-only live readout of the paired R1 ring's vitals
-// (HR / HRV / SpO2 / battery). Reached from the Apps launcher. Same
-// live-text compound shape as the MIC detail page: a one-row "<- Apps"
-// list on the left + a live text child refreshed via UPDATE_TEXT (no
-// REBUILD, so the Back row never blanks). Vitals come from the
-// push-updated cache in G2_Ring.cpp via g2RingGetTelemetry(); a *Valid
-// flag of false renders "--" (see buildRingReadoutText).
-// ─────────────────────────────────────────────────────────────────────
-static constexpr G2ContainerGeom kRingListGeom    = {   8,   8, 340, 270 };
-static constexpr G2ContainerGeom kRingReadoutGeom = { 360,  80, 210, 200 };
-static constexpr uint32_t        kRingReadoutCid  = 2;
-static const char* const         kRingReadoutName = "ringLive";
-EXT_RAM_BSS_ATTR static char gRingLastReadout[96];
-
-// Entry-poll sequencer. The ring only volunteers point samples every few
-// minutes, so a freshly opened dashboard would sit on stale values (or "--")
-// until the next push. On page entry (and on a ring connect while the page is
-// open) we actively poll all four vitals — but the ring needs >=700 ms
-// between queries to respond, and blocking the tap dispatcher for the whole
-// burst (or spawning a one-shot task) is off the table. Instead the page's
-// own live tick paces the burst: one query per tick (0=HR, 1=HRV, 2=SpO2,
-// 3=battery), then idle at 4. Replies arrive via notify into the telemetry
-// cache and the following ticks render them.
-static uint8_t gRingPollCursor    = 4;   // 4 = burst done / idle
-static bool    gRingWasConnected  = false;
-
-// Build the readout text. Four short lines (HR / HRV / SpO2 / Battery), or
-// a hint when the ring isn't paired. *Valid=false → "--" (a real 0 never
-// passes the cache's range gates, so this is unambiguous).
-static void buildRingReadoutText(char* out, size_t cap) {
-  if (!out || cap == 0) return;
-  G2RingTelemetry t;
-  g2RingGetTelemetry(t);
-  if (!t.connected) {
-    snprintf(out, cap, "Ring offline\nPair via\nNetwork>BT>R1");
-    return;
-  }
-  char hr[12], hrv[12], spo2[12], bat[12];
-  if (t.hrValid)      snprintf(hr,  sizeof(hr),  "%u bpm", (unsigned)t.hr);      else strcpy(hr,  "--");
-  if (t.hrvValid)     snprintf(hrv, sizeof(hrv), "%d ms",  (int)t.hrv);          else strcpy(hrv, "--");
-  if (t.spo2Valid)    snprintf(spo2,sizeof(spo2),"%u%%",   (unsigned)t.spo2);    else strcpy(spo2,"--");
-  if (t.batteryValid) snprintf(bat, sizeof(bat), "%u%%",   (unsigned)t.battery); else strcpy(bat, "--");
-  snprintf(out, cap, "HR   %s\nHRV  %s\nSpO2 %s\nBat  %s", hr, hrv, spo2, bat);
-}
-
-// Live render fn driven by liveTextWorker. First call: CREATE the compound
-// (1 list row + 1 text child). Subsequent ticks: UPDATE_TEXT on the readout
-// child only, gated by a byte-identical cache. Mirrors renderMicDetailLive.
-static bool renderRingLive() {
-  G2Temple* arm = (gR.connected && !gR.pluginDead) ? &gR
-                : (gL.connected && !gL.pluginDead) ? &gL
-                                                   : nullptr;
-  if (!arm) {
-    DEBUG_G2F("[G2] ring: no eligible temple");
-    return false;
-  }
-
-  // Entry-poll burst: one vitals query per tick until all four are out.
-  // Also (re)starts the burst when the ring connects while the page is open.
-  {
-    const bool conn = g2RingIsConnected();
-    if (conn && !gRingWasConnected) gRingPollCursor = 0;
-    gRingWasConnected = conn;
-    if (conn && gRingPollCursor < 4) {
-      (void)g2RingPollVital(gRingPollCursor);
-      gRingPollCursor++;
-    }
-  }
-
-  char readout[96];
-  buildRingReadoutText(readout, sizeof(readout));
-
-  if (!g2LensGetState().containerReady) {
-    const char* listItems[1] = { "<- Apps" };
-    G2TextChildSpec textChild = {};
-    textChild.containerName = kRingReadoutName;
-    textChild.containerId   = kRingReadoutCid;
-    textChild.content       = readout;
-    textChild.geom          = kRingReadoutGeom;
-    textChild.eventCapture  = false;
-    bool ok = sendCreateMixedListMultiTextAndWait(
-        *arm, listItems, 1, kRingListGeom, &textChild, 1, BLOCKS_WIDGET_ID);
-    if (!ok) {
-      DEBUG_G2F("[G2] ring: CREATE-list+text failed");
-      return false;
-    }
-    g2NoteCreateSuccess(*arm, /*isList*/ false, BLOCKS_WIDGET_ID);
-    strncpy(gRingLastReadout, readout, sizeof(gRingLastReadout) - 1);
-    gRingLastReadout[sizeof(gRingLastReadout) - 1] = '\0';
-    return true;
-  }
-
-  if (strcmp(readout, gRingLastReadout) == 0) {
-    return true;  // quiet tick, no wire I/O
-  }
-  bool ok = sendUpdateTextNamed(*arm, kRingReadoutName, kRingReadoutCid, readout);
-  if (ok) {
-    strncpy(gRingLastReadout, readout, sizeof(gRingLastReadout) - 1);
-    gRingLastReadout[sizeof(gRingLastReadout) - 1] = '\0';
-  }
-  return ok;
-}
-
-static void g2RingHandleTap(uint32_t idx);
-
-// Stub buildText for the registry's required-field check (hidden live pages
-// have no CLI text view; the live data path is on the lens).
-static void g2BuildRingInfo(char* out, size_t cap) {
-  if (!out || cap == 0) return;
-  snprintf(out, cap, "Ring dashboard (live vitals on lens; CLI view not implemented)");
-}
-
-static const G2PageModule kRingPage = {
-  // Hidden — hijackLabel=nullptr keeps it out of the main menu; the only
-  // entry is g2ShowRingPage() from the Apps launcher.
-  "ringdash", nullptr,
-  "R1 ring dashboard (live vitals on lens; CLI view not implemented)",
-  /*buildText=*/  g2BuildRingInfo,
-  /*showMenu=*/   nullptr,
-  /*handleTap=*/  g2RingHandleTap,
-  G2_HIJACK_PAGE_RING,
-  // 1 s tick: paces the entry-poll burst (one query per tick, ring needs
-  // >=700 ms between queries) and renders poll replies promptly. Steady-state
-  // ticks are cheap — the byte-identical diff cache skips the wire write.
-  /*liveIntervalMs=*/ 1000,
-  /*backLabel=*/      "<- Apps",
-  /*prefersTextWidget=*/ true,    // routes through g2StartLiveTextPage
-  /*liveRender=*/     renderRingLive,
-};
-
-static bool g2ShowRingPage() {
-  if (!g2StartLiveTextPage(/*buildText=*/ nullptr,
-                           kRingPage.liveIntervalMs,
-                           kRingPage.liveRender)) {
-    DEBUG_G2F("[G2] ring: live-text spawn failed");
-    return false;
-  }
-  g2SetHijackPage(G2_HIJACK_PAGE_RING);
-  gRingLastReadout[0] = '\0';   // fresh readout on entry, don't suppress first tick
-  // Kick the entry-poll burst (no-op path if the ring isn't connected; the
-  // rising-edge check in renderRingLive re-kicks if it connects later).
-  gRingPollCursor   = g2RingIsConnected() ? 0 : 4;
-  gRingWasConnected = g2RingIsConnected();
-  BROADCAST_PRINTF("[G2] Hijack: Ring dashboard opened (live vitals%s)",
-                   gRingPollCursor == 0 ? ", polling" : "");
-  return true;
-}
-
-static void g2RingHandleTap(uint32_t idx) {
-  if (idx == 0) {   // <- Apps
-    g2ShowAppsMenu();
-    return;
-  }
-}
+// Apps → Ring live-text dashboard retired — replaced by Apps → Health
+// (list+image sparklines; see g2HealthPageWorker near the Pet page).
 
 // ─────────────────────────────────────────────────────────────────────
 // System Events viewer — read-only live list of the device's typed event
 // ring (the same 48-entry ring the `events` CLI and the OLED notification
-// view read). Reached from the Apps launcher. Same live-text compound
-// shape as the Ring dashboard: a one-row "<- Apps" list on the left + a
+// view read). Reached from the System launcher. Same live-text compound
+// shape as other live readouts: a one-row "<- System" list on the left + a
 // live text child refreshed via UPDATE_TEXT (no REBUILD, so the Back row
 // never blanks). Events are walked newest-first via systemEventGetBySeq
 // (copies one event by seq, no cursor mutation — safe to re-render every
@@ -4996,7 +4925,7 @@ static void buildSysEventsReadoutText(char* out, size_t cap) {
 
 // Live render fn driven by liveTextWorker. First call: CREATE the compound
 // (1 list row + 1 text child). Subsequent ticks: UPDATE_TEXT on the readout
-// child only, gated by a byte-identical cache. Mirrors renderRingLive.
+// child only, gated by a byte-identical cache. Mirrors other live-text pages.
 static bool renderSysEventsLive() {
   G2Temple* arm = (gR.connected && !gR.pluginDead) ? &gR
                 : (gL.connected && !gL.pluginDead) ? &gL
@@ -5107,6 +5036,7 @@ static const struct { uint8_t bit; const char* name; const char* label; } kLogSe
   { LOG_APDS,     "apds",     "APDS"     },
   { LOG_GPS,      "gps",      "GPS"      },
   { LOG_PRESENCE, "presence", "Presence" },
+  { LOG_R1,       "r1",       "R1 Health"},
 };
 static constexpr size_t kLogSensorCount = sizeof(kLogSensors) / sizeof(kLogSensors[0]);
 
@@ -5118,7 +5048,7 @@ static const char* gLogRowPtrs[2 + kLogSensorCount];
 static size_t g2BuildLoggingRows() {
   snprintf(gLogRows[0], G2_LOG_ROW_LEN, "<- System");
   snprintf(gLogRows[1], G2_LOG_ROW_LEN, "%s",
-           gSensorLoggingEnabled ? "Stop logging" : "Start logging");
+           gSensorLoggingRunning ? "Stop logging" : "Start logging");
   for (size_t i = 0; i < kLogSensorCount; i++) {
     snprintf(gLogRows[2 + i], G2_LOG_ROW_LEN, "[%c] %s",
              (gSensorLogMask & kLogSensors[i].bit) ? 'x' : ' ',
@@ -5133,14 +5063,14 @@ static void g2ShowLoggingMenu() {
   if (g2ShowListPage(gLogRowPtrs, n)) {
     g2SetHijackPage(G2_HIJACK_PAGE_LOGGING);
     DEBUG_G2F("[G2] Logging menu shown (%u rows, %s)", (unsigned)n,
-              gSensorLoggingEnabled ? "running" : "stopped");
+              gSensorLoggingRunning ? "running" : "stopped");
   } else {
     DEBUG_G2F("[G2] Logging menu show FAILED");
   }
 }
 
 // Completion on cmd_exec_task — re-render so Start/Stop + [x] markers reflect
-// the now-updated gSensorLoggingEnabled / gSensorLogMask. Direct list draw
+// the now-updated gSensorLoggingRunning / gSensorLogMask. Direct list draw
 // from the callback is the established Power-page pattern.
 static void onLoggingCmdDone(bool ok, const char* result,
                              const G2CmdCookie& /*cookie*/, void* /*userData*/) {
@@ -5157,7 +5087,7 @@ static void g2BuildLoggingInfo(char* out, size_t cap) {
   if (!out || cap == 0) return;
   snprintf(out, cap,
            "Logging (%s) - start/stop + sensor select on lens; 'sensorlog' for CLI",
-           gSensorLoggingEnabled ? "running" : "stopped");
+           gSensorLoggingRunning ? "running" : "stopped");
 }
 
 static void g2LoggingHandleTap(uint32_t idx) {
@@ -5168,7 +5098,7 @@ static void g2LoggingHandleTap(uint32_t idx) {
   cookie.targetNetSub = 0;
 
   if (idx == 1) {   // Start / Stop
-    if (gSensorLoggingEnabled) {
+    if (gSensorLoggingRunning) {
       (void)g2SubmitHijackCommand("sensorlog stop", cookie, onLoggingCmdDone, nullptr);
     } else if (gSensorLogMask == 0) {
       // A bare start with no sensors selected succeeds but logs only
@@ -5290,7 +5220,7 @@ static void buildFmTunerReadout(char* out, size_t cap) {
 
 // Live render fn driven by liveTextWorker. First call: CREATE the compound
 // (7-row action list + 1 text child). Subsequent ticks: UPDATE_TEXT on the
-// readout child only, gated by a byte-identical cache. Mirrors renderRingLive.
+// readout child only, gated by a byte-identical cache. Mirrors other live-text pages.
 static bool renderFmTunerLive() {
   G2Temple* arm = (gR.connected && !gR.pluginDead) ? &gR
                 : (gL.connected && !gL.pluginDead) ? &gL
@@ -6255,7 +6185,8 @@ static void registerG2Pages(void) {
   g2RegisterPage(kEspNowAppPage);        // hidden — reached via Apps
   g2RegisterPage(kAutomationsPage);      // hidden — reached via Apps
   g2RegisterPage(kUsersPage);            // hidden — reached via Config (admin)
-  g2RegisterPage(kRingPage);             // hidden — reached via Apps
+  // Health page is a self-driving list+image worker (not a G2PageModule);
+  // reached via Apps → Health → g2ShowHealthPage (same pattern as Pet/Maps).
   g2RegisterPage(kSysEventsPage);        // hidden — reached via System
   g2RegisterPage(kLoggingPage);          // hidden — reached via System
   g2RegisterPage(kLedG2Page);            // hidden — reached via Hardware → LED
@@ -7006,12 +6937,31 @@ static void handleEnvelope(G2Temple& t, const G2EnvelopeView& env) {
           // ShutdownSuccess=10, HeartbeatSuccess=12 etc. were firing
           // spurious dumps.
           if (evenCoreResIsFailure(res)) {
-            char reason[64];
-            snprintf(reason, sizeof(reason),
-                     "EvenCore %s res=%u (%s)",
-                     evenCoreCmdName(cmd), (unsigned)res,
-                     evenCoreResCode(res));
-            g2RingDump(reason);
+#if ENABLE_R1_HEALTH
+            // Health metric pane: TextFailed after a heavy image push
+            // usually means the plugin is dying. Stop further Cmd=5 and
+            // rate-limit dumps (every failure used to dump 32 frames).
+            if (cmd == 6 && res == 9 && gHealthPageActive) {
+              gHealthTextDead = true;
+            }
+#endif
+            static uint32_t sLastFailDumpMs = 0;
+            const uint32_t nowDump = millis();
+            // TextFailed can arrive every ~2 s while a worker retries;
+            // one dump per 5 s is enough to diagnose.
+            const bool throttleTextFail =
+                (cmd == 6 && res == 9 &&
+                 sLastFailDumpMs != 0 &&
+                 (long)(nowDump - sLastFailDumpMs) < 5000);
+            if (!throttleTextFail) {
+              char reasonBuf[64];
+              snprintf(reasonBuf, sizeof(reasonBuf),
+                       "EvenCore %s res=%u (%s)",
+                       evenCoreCmdName(cmd), (unsigned)res,
+                       evenCoreResCode(res));
+              g2RingDump(reasonBuf);
+              if (cmd == 6 && res == 9) sLastFailDumpMs = nowDump;
+            }
           }
           // Signal the CREATE ack waiter in g2ShowText if this is the
           // response we've blocked on. Cmd=1 is OS_RESPONSE_CREATE_STARTUP;
@@ -7408,12 +7358,9 @@ static void handleEnvelope(G2Temple& t, const G2EnvelopeView& env) {
 // =============================================================================
 
 // MTU-chunk and write the envelope. Caller MUST already hold
-// `t.writeMutex`. Split out from sendEnvelope so multi-fragment senders
-// can hold the mutex once across an entire burst (heartbeats and other
-// writers wait until the burst finishes), preventing the
-// `esp_ble_gattc_write_char rc=-1` queue-saturation cascade observed
-// when the heartbeat task slipped between fragments of a 16-frag image
-// push and overflowed the BLE controller's pending-write queue.
+// `t.writeMutex` (and bleCentralTx — lock order: central → peer).
+// One envelope only; sendPbFragmented releases both between fragments
+// so heartbeats / ring TX can use the paced inter-fragment gaps.
 //
 // Returns true if every MTU-chunk was accepted by the GATT client.
 static bool sendEnvelopeNoMutex(G2Temple& t, const uint8_t* data, size_t len) {
@@ -7461,39 +7408,25 @@ static bool sendEnvelopeNoMutex(G2Temple& t, const uint8_t* data, size_t len) {
     bool wrote = t.writeChar->writeValue(const_cast<uint8_t*>(data + off),
                                          take, false);
     if (!wrote) {
-      // `esp_ble_gattc_write_char rc=-1` — controller TX queue momentarily
-      // refused the write at the GATT API boundary. We used to retry 3×
-      // here with stepped backoff (50/100/100 ms) on the theory that the
-      // queue would drain and the second attempt would land. That worked
-      // for the typical brief-stall case at 96×96 (2 chunks per frame, ~34
-      // envelopes), where the rc=-1 was rare and isolated.
+      // `esp_ble_gattc_write_char rc=-1` — controller TX queue refused the
+      // write at the GATT API boundary (common mid Health/Q30 burst under
+      // 3-link load right after a prior push).
       //
-      // Wedge observed 2026-05-10 during sustained 288×144 streaming
-      // (~96 envelopes per frame, ~3× the rc=-1 surface area): the FIRST
-      // writeValue returned false at the rc=-1 fast path inside
-      // BLERemoteCharacteristic::writeValue (esp_ble_gattc_write_char
-      // rejected synchronously, no semaphore wait). The retry path then
-      // called writeValue() AGAIN, but this time the write was accepted
-      // by esp_ble_gattc_write_char and the call dropped into the
-      // GATT-event semaphore wait (m_semaphoreWriteCharEvt) — which
-      // never got given because the underlying GATT was still in a
-      // degraded state from the first failure. The retry's writeValue
-      // call blocked indefinitely with t.writeMutex held → heartbeats
-      // started failing with "Write mutex timeout" → the 25 s TX-wedged
-      // watchdog forced a disconnect to recover. Frame 21 onward of the
-      // stream was lost AND the entire BLE link had to be re-established.
-      //
-      // New policy: on rc=-1, abort the burst immediately. Don't retry.
-      // The caller (sendImageBmpFragmentsNoCreate or similar) sees ok=false,
-      // breaks its frame loop, releases the mutex, and the next frame's
-      // first envelope is a fresh start. We lose one frame instead of
-      // the whole link. If rc=-1 transients become frequent enough to
-      // notice in practice (frequent stream stutters), the right fix is
-      // a controller-level cooldown / backpressure signal, not a blind
-      // retry that can wedge the worker.
-      DEBUG_G2F("[G2-%c] writeValue rc=-1 at offset %u/%u — aborting burst "
-                "(no retry; retry path can wedge on GATT semaphore — see comment)",
-                t.side, (unsigned)off, (unsigned)len);
+      // DO NOT retry writeValue here. Empirically (2026-05-10 stream, and
+      // 2026-07-26 Health re-entry): the first call fails on the sync
+      // rc=-1 fast path; a second call is often accepted by
+      // esp_ble_gattc_write_char then blocks forever on
+      // m_semaphoreWriteCharEvt while GATT is still degraded — with
+      // bleCentralTx + writeMutex held → heartbeats stuck on
+      // "central TX busy" until reboot. Abort, release locks, let the
+      // caller retry the whole push on a later tick after a drain.
+      const uint32_t cooldownMs = g2RingIsConnected()
+                                      ? G2_WRITE_RC_RETRY_COOLDOWN_RING_MS
+                                      : G2_WRITE_RC_RETRY_COOLDOWN_MS;
+      DEBUG_G2F("[G2-%c] writeValue rc=-1 at offset %u/%u — abort burst, "
+                "drain %u ms (no in-lock retry — retry can hang forever)",
+                t.side, (unsigned)off, (unsigned)len, (unsigned)cooldownMs);
+      vTaskDelay(pdMS_TO_TICKS(cooldownMs));
     }
     ok = wrote;
     off += take;
@@ -7516,26 +7449,37 @@ static bool sendEnvelopeNoMutex(G2Temple& t, const uint8_t* data, size_t len) {
   return ok;
 }
 
-// Public single-envelope send. Acquires `t.writeMutex`, calls the
-// no-mutex variant, releases. Used by every code path that ships a
-// single envelope (heartbeats, single-frag CREATE, settings query, …).
-// Multi-fragment senders should call sendEnvelopeNoMutex directly with
-// the mutex held across the whole burst — see sendPbFragmented.
-static bool sendEnvelope(G2Temple& t, const uint8_t* data, size_t len) {
+// Single-envelope send. Lock order: bleCentralTx → t.writeMutex (never
+// reverse). Multi-fragment senders take the same pair per envelope — see
+// sendPbFragmented. Heartbeats pass a short centralTimeoutMs and treat
+// Busy as a clean skip (not a TX wedge).
+static G2SendResult sendEnvelopeEx(G2Temple& t, const uint8_t* data, size_t len,
+                                   uint32_t centralTimeoutMs) {
   if (!t.connected || !t.writeChar) {
     DEBUG_G2F("[G2-%c] sendEnvelope: not ready (connected=%d writeChar=%p)",
               t.side, t.connected ? 1 : 0, t.writeChar);
-    return false;
+    return G2SendResult::Fail;
   }
-  if (!t.writeMutex) return false;
+  if (!t.writeMutex) return G2SendResult::Fail;
+  if (!bleCentralTxTake(centralTimeoutMs)) {
+    DEBUG_G2F("[G2-%c] Central TX busy; envelope deferred", t.side);
+    return G2SendResult::Busy;
+  }
   if (xSemaphoreTake(t.writeMutex, pdMS_TO_TICKS(G2_SEND_ENVELOPE_MUTEX_MS)) !=
       pdTRUE) {
     DEBUG_G2F("[G2-%c] Write mutex timeout; envelope dropped", t.side);
-    return false;
+    bleCentralTxGive();
+    return G2SendResult::Busy;
   }
   bool ok = sendEnvelopeNoMutex(t, data, len);
   xSemaphoreGive(t.writeMutex);
-  return ok;
+  bleCentralTxGive();
+  return ok ? G2SendResult::Ok : G2SendResult::Fail;
+}
+
+static bool sendEnvelope(G2Temple& t, const uint8_t* data, size_t len) {
+  return sendEnvelopeEx(t, data, len, G2_CENTRAL_TX_ENVELOPE_MS) ==
+         G2SendResult::Ok;
 }
 
 static bool sendToBoth(const uint8_t* data, size_t len) {
@@ -7558,27 +7502,13 @@ static bool sendToBoth(const uint8_t* data, size_t len) {
 //   * `totFrags` and `fragIdx` (1-based) are populated identically across
 //     each fragment of the message group.
 //
-// Mutex policy: hold writeMutex for the WHOLE burst. Earlier we acquired
-// per-fragment, releasing between each, on the theory that heartbeats
-// or unrelated sends could safely interleave (firmware groups by seq, so
-// reassembly is unaffected by interleave). In practice that opened a
-// failure window: a heartbeat tick coinciding with a long burst (e.g.
-// a multi-fragment 3800 B image push) acquired the mutex between our
-// fragments, fired writeValue, and got `esp_ble_gattc_write_char rc=-1`
-// because the BLE controller's pending-write queue was already saturated
-// by our in-flight chunks. From there every subsequent acquire timed out
-// for ~30 s ("Write mutex timeout; envelope dropped" cascade) until the
-// firmware gave up on the half-complete reassembly and the controller
-// drained, by which time we'd lost the hijack.
-//
-// Holding the mutex across the burst means heartbeats wait at the
-// xSemaphoreTake site (G2_SEND_ENVELOPE_MUTEX_MS — drops the beat if a
-// fragment write blocks longer than that; firmware tolerates ≥10 s of
-// beat silence before tearing down).
-// The 20 ms inter-fragment delay was already empirically tuned for the
-// single-writer case (reference's TypeScript event-loop pacing), so
-// serialising all writers behind the burst's pacing is correct without
-// further tuning.
+// Mutex policy: take bleCentralTx THEN writeMutex for ONE envelope, then
+// release both before the inter-fragment delay. Holding the central gate
+// for a whole multi-second image burst starved heartbeats (glasses
+// SYSTEM_EXIT reason=0 / Connection lost). Still one writer at a time —
+// never concurrent writeValue — but keepalives and queued ring TX can
+// use the paced gaps. Never hold writeMutex across a bleCentralTx
+// re-take (deadlock vs heartbeat: central → peer lock order).
 // One-shot inter-fragment delay override. Defaults to 0 (use the 20 ms
 // baseline). Test bench writes via g2DebugSetNextBurstFragDelay() to
 // verify whether firmware reassembly is timing-sensitive. Consumed
@@ -7613,14 +7543,6 @@ static bool sendPbFragmented(G2Temple& arm, uint8_t seq, uint8_t sid, uint8_t fl
   const size_t   totalWithCrc = pbLen + G2_ENVELOPE_CRC_LEN;
   uint8_t totFrags = (uint8_t)((totalWithCrc + chunkSize - 1) / chunkSize);
   if (totFrags == 0) totFrags = 1;
-
-  // Take mutex ONCE for the whole burst — see G2_SENDPB_BURST_MUTEX_MS.
-  if (xSemaphoreTake(arm.writeMutex, pdMS_TO_TICKS(G2_SENDPB_BURST_MUTEX_MS)) !=
-      pdTRUE) {
-    DEBUG_G2F("[G2-%c] sendPbFragmented: mutex timeout (burst aborted)",
-              arm.side);
-    return false;
-  }
 
   // Per-frame stack buffer: header (8) + chunk (≤232) + CRC (2 on last).
   // Keep on stack — comfortably under the 4 KB worker stack and saves a
@@ -7657,12 +7579,37 @@ static bool sendPbFragmented(G2Temple& arm, uint8_t seq, uint8_t sid, uint8_t fl
     }
     off += pbChunk;
 
-    if (!sendEnvelopeNoMutex(arm, frame, G2_ENVELOPE_HDR_LEN + chunkLen)) {
-      DEBUG_G2F("[G2-%c] sendPbFragmented: write failed at frag %u/%u",
+    // Per-envelope locks (same as sendEnvelopeEx).
+    if (!bleCentralTxTake(G2_CENTRAL_TX_ENVELOPE_MS)) {
+      DEBUG_G2F("[G2-%c] sendPbFragmented: central TX timeout at frag %u/%u",
                 arm.side, (unsigned)(i + 1), (unsigned)totFrags);
       ok = false;
       break;
     }
+    if (xSemaphoreTake(arm.writeMutex,
+                       pdMS_TO_TICKS(G2_SEND_ENVELOPE_MUTEX_MS)) != pdTRUE) {
+      DEBUG_G2F("[G2-%c] sendPbFragmented: mutex timeout at frag %u/%u",
+                arm.side, (unsigned)(i + 1), (unsigned)totFrags);
+      bleCentralTxGive();
+      ok = false;
+      break;
+    }
+    if (!arm.connected || !arm.writeChar) {
+      xSemaphoreGive(arm.writeMutex);
+      bleCentralTxGive();
+      ok = false;
+      break;
+    }
+    if (!sendEnvelopeNoMutex(arm, frame, G2_ENVELOPE_HDR_LEN + chunkLen)) {
+      DEBUG_G2F("[G2-%c] sendPbFragmented: write failed at frag %u/%u",
+                arm.side, (unsigned)(i + 1), (unsigned)totFrags);
+      ok = false;
+    }
+    xSemaphoreGive(arm.writeMutex);
+    bleCentralTxGive();
+    // Opportunistic ring drain in the gap we just opened.
+    g2RingTryDrainPendingTx();
+    if (!ok) break;
 
     // Inter-fragment breathing room. Empirically, sending the 5 fragments
     // of a 935 B Settings CREATE within ~5 ms got radio silence from the
@@ -7681,11 +7628,10 @@ static bool sendPbFragmented(G2Temple& arm, uint8_t seq, uint8_t sid, uint8_t fl
     // per-widget reassembly ceiling moves with timing. Override is a
     // one-shot — read into burstDelayMs at the top of this function and
     // cleared, so it only applies to a single sendPbFragmented call.
+    // Gap runs with locks released so heartbeats / ring pending can TX.
     if (i + 1 < totFrags) vTaskDelay(pdMS_TO_TICKS(burstDelayMs));
   }
-  xSemaphoreGive(arm.writeMutex);
-  if (!ok) return false;
-  return true;
+  return ok;
 }
 
 // =============================================================================
@@ -7731,6 +7677,20 @@ static volatile bool     gBeatTaskStop   = false;
 static void beatOne(G2Temple& t) {
   if (!t.connected) return;
 
+  // Skip cleanly while another peer holds the controller TX gate (one
+  // image envelope, ring TX, …). Gaps between envelopes release the gate
+  // so this is usually brief. Do not count as a TX wedge or plugin-silent
+  // miss — glasses tolerate ≥10 s.
+  if (bleCentralTxIsHeldByOther()) {
+    static uint32_t sLastSkipLogMs = 0;
+    const uint32_t now = millis();
+    if (now - sLastSkipLogMs >= 2000) {
+      sLastSkipLogMs = now;
+      DEBUG_G2F("[G2-%c] Heartbeat skipped — central TX busy", t.side);
+    }
+    return;
+  }
+
   uint8_t buf[64];
   uint8_t seq = allocSeq();
   size_t n = g2BuildHeartbeat(seq, G2_MAGIC_HEARTBEAT,
@@ -7738,12 +7698,22 @@ static void beatOne(G2Temple& t) {
   DEBUG_G2F("[G2-%c] Heartbeat #%lu seq=0x%02X (%u bytes)",
             t.side, (unsigned long)t.heartbeatCounter, seq, (unsigned)n);
 
-  // TX-stuck watchdog. sendEnvelope returns false when it can't acquire
-  // writeMutex within G2_SEND_ENVELOPE_MUTEX_MS, or the write path fails.
-  // We allow several consecutive misses (long bursts + BLE stalls) before
-  // forcing disconnect. See txStuckBeats on G2Temple.
-  const bool sent = (n != 0) && sendEnvelope(t, buf, n);
-  if (sent) {
+  // Short central take: Busy = skip (same as held-by-other). Fail after
+  // we acquired the gate still counts toward the TX-stuck watchdog.
+  if (n == 0) return;
+  const G2SendResult sent =
+      sendEnvelopeEx(t, buf, n, G2_CENTRAL_TX_HEARTBEAT_MS);
+  if (sent == G2SendResult::Busy) {
+    static uint32_t sLastBusyLogMs = 0;
+    const uint32_t now = millis();
+    if (now - sLastBusyLogMs >= 2000) {
+      sLastBusyLogMs = now;
+      DEBUG_G2F("[G2-%c] Heartbeat skipped — central TX take timed out",
+                t.side);
+    }
+    return;
+  }
+  if (sent == G2SendResult::Ok) {
     t.txStuckBeats = 0;
   } else {
     if (t.txStuckBeats < 0xFF) t.txStuckBeats++;
@@ -8223,9 +8193,26 @@ static void templeInit(G2Temple& t, char side) {
   memset(&t, 0, sizeof(t));
   t.side = side;
   t.rxCap = RX_ASSEMBLY_CAP;
-  t.rxBuf = (uint8_t*)ps_alloc(t.rxCap, AllocPref::PreferPSRAM, "g2.rxbuf");
-  t.writeMutex = xSemaphoreCreateMutex();
   t.mtu = 23;  // default until negotiated
+}
+
+static bool ensureTempleRuntime(G2Temple& t) {
+  if (!t.rxBuf) {
+    t.rxBuf = (uint8_t*)ps_alloc(t.rxCap, AllocPref::PreferPSRAM, "g2.rxbuf");
+    if (!t.rxBuf) {
+      DEBUG_G2F("[G2-%c] Failed to allocate %u-byte RX buffer",
+                t.side, (unsigned)t.rxCap);
+      return false;
+    }
+  }
+  if (!t.writeMutex) {
+    t.writeMutex = xSemaphoreCreateMutex();
+    if (!t.writeMutex) {
+      DEBUG_G2F("[G2-%c] Failed to create write mutex", t.side);
+      return false;
+    }
+  }
+  return true;
 }
 
 static void templeReset(G2Temple& t) {
@@ -8268,6 +8255,8 @@ static bool connectTemple(G2Temple& t) {
   DEBUG_G2F("[G2-%c] Connecting to %s @ %s (heap=%u)",
             t.side, t.deviceName.c_str(), t.deviceAddress.c_str(),
             (unsigned)ESP.getFreeHeap());
+  if (!ensureTempleRuntime(t)) return false;
+
   // Fresh session — reset the TX-stuck counter so the watchdog doesn't
   // carry forward state from a previous wedged-then-disconnected
   // session.
@@ -8472,12 +8461,22 @@ static void disconnectTemple(G2Temple& t) {
 // are themselves above the worker definitions in the file.
 static void bleConnectInit();
 static void bleConnectShutdown();
+// Persistent G2 session worker (Health/Map/LLM/viewers/live pages).
+static void g2SessionEnsureWorker();
+static void g2SessionShutdown();
 
 bool initG2Client() {
   if (gG2State && gG2State->initialized) return true;
+  if (!gSettings.bleEnabled) {
+    broadcastOutput("[G2] Bluetooth disabled - run 'bleenabled 1' first");
+    return false;
+  }
 
   DEBUG_G2F("[G2] Initializing client mode");
   broadcastOutput("[G2] Initializing client mode");
+
+  // Controller-level TX gate shared with R1 ring writes.
+  bleCentralTxInit();
 
   // BLE server mode (phone profile) uses the same controller and won't
   // coexist with client scanning. Tear it down if it's running.
@@ -8555,33 +8554,6 @@ bool initG2Client() {
   // bleBootReconnect at boot.
   g2RingInit();
 
-  // Stand up the FSM worker task + queue so subsequent
-  // hijackFsmDispatch() calls run async (Phase 4). Idempotent.
-  hijackFsmInit();
-
-  // Persistent page-swap worker. One long-lived task fed by a queue
-  // replaces the previous "xTaskCreate per UI action" pattern, which
-  // was burning a fresh 4 KB internal-DRAM stack on every
-  // navigation step and fragmenting the heap. Spawning at boot
-  // means the 4 KB allocation lands while DRAM headroom is largest.
-  pageSwapInit();
-
-  // Persistent tap-dispatcher worker. handleDevEvent (on the BLE notify
-  // task) enqueues the tap idx; this worker drains the queue and runs
-  // handleHijackMenuTap() from a safe task context so allocations and
-  // xTaskCreate inside the page handlers never run inside Bluedroid
-  // spinlock contexts. Cures the spinlock_acquire(lock->count==0) assert
-  // seen on the Blocks-hijack menu-tap path. Spawned alongside the
-  // page-swap worker while DRAM headroom is largest. Stack is ~20 KB so
-  // settings JSON writes and sensor UI fit comfortably.
-  tapDispatcherInit();
-
-  // Group B: persistent BLE-connect worker. Replaces 5 transient
-  // xTaskCreate paths (g2 connect/saved + ring connect/saved/mac) with
-  // one queue-fed worker. 6 KB stack paid here at G2 init time, when DRAM
-  // headroom is largest, instead of transiently per connect.
-  bleConnectInit();
-
 #if ENABLE_CAMERA_SENSOR
   g2RegisterSensorsCameraPowerHook();
 #endif
@@ -8591,6 +8563,11 @@ bool initG2Client() {
   // Adding a new page is a single g2RegisterPage() call here (or in the
   // owning module's init function — the registry is global).
   registerG2Pages();
+
+  // One permanent 8 KB INTERNAL stack for long-lived G2 UI sessions
+  // (Health/Map/viewers/…). Paid early while DRAM is still contiguous;
+  // entry points enqueue instead of xTaskCreate per Apps tap.
+  g2SessionEnsureWorker();
 
   DEBUG_G2F("[G2] Client initialized");
   return true;
@@ -8606,6 +8583,7 @@ void deinitG2Client() {
   // stack so subsequent BT-mode toggles don't pile up workers. A fresh
   // initG2Client respawns it.
   bleConnectShutdown();
+  g2SessionShutdown();
   free(gG2State);
   gG2State = nullptr;
   gScan = nullptr;
@@ -8715,11 +8693,12 @@ static bool g2ConnectSync(G2Eye eye) {
   // Persist temple MACs for boot-time auto-reconnect. bleSavePeerMac is
   // a no-op when the values match what's already stored, so calling on
   // every successful connect is cheap. Auto-reconnect is gated separately
-  // by the peer's autoConnect flag (gBlePeerData[BLE_PEER_G2_GLASSES]) —
+  // by the peer's autoReconnect flag (gBlePeerData[BLE_PEER_G2_GLASSES]) —
   // saving the MAC here is just bookkeeping.
   bleSavePeerMac(BLE_PEER_G2_GLASSES,
                  gL.connected ? gL.deviceAddress : String(),
                  gR.connected ? gR.deviceAddress : String());
+  if (g2BothConnected()) blePeerNoteLinkUp(BLE_PEER_G2_GLASSES);
   return true;
 }
 
@@ -8797,8 +8776,8 @@ static void bleConnectWorkerLoop(void* /*arg*/) {
 }
 
 // Idempotent — first call creates the queue + spawns the worker, subsequent
-// calls are no-ops. Called from initG2Client() so the worker only exists
-// when G2 client mode is active (BT off ⇒ no connect worker stack pinned).
+// calls are no-ops. Called from g2SubmitBleConnect(), so plain G2 client init
+// does not pin this stack before a connect or reconnect is requested.
 static void bleConnectInit() {
   if (gBleConnectQueue) return;
   gBleConnectQueue = xQueueCreate(kBleConnectQueueDepth, sizeof(BleConnectJob*));
@@ -8808,8 +8787,8 @@ static void bleConnectInit() {
     return;
   }
   // 6 KB matches the largest of the retired transient stacks (g2 connect
-  // was 6 KB, ring was 5 KB). Spawned here at G2-init time, when internal
-  // DRAM is largest, instead of transiently per connect when it's tight.
+  // was 6 KB, ring was 5 KB). Spawned on first connect submission and reused
+  // across G2/Ring connect jobs.
   // Stack in WORDS (4 bytes). Historical 6144 was 24 KB. Observed peak
   // during dual-temple connect (deepest BLE callstack we ever hit) is
   // ~9.4 KB. 5120 words = 20 KB leaves ~10 KB headroom and reclaims
@@ -8849,7 +8828,10 @@ static void bleConnectShutdown() {
 
 bool g2SubmitBleConnect(const BleConnectJob& job) {
   if (!gBleConnectQueue) {
-    DEBUG_G2F("[G2] g2SubmitBleConnect: queue not init'd — call initG2Client first");
+    bleConnectInit();
+  }
+  if (!gBleConnectQueue) {
+    DEBUG_G2F("[G2] g2SubmitBleConnect: worker unavailable");
     return false;
   }
   BleConnectJob* heap = new (std::nothrow) BleConnectJob(job);
@@ -10422,6 +10404,7 @@ static void pageSwapJobBody(PageSwapArgs* args) {
         gLastHijackListPageShape = HijackListPageShape::PureList;
         g2SetHijackPage(G2_HIJACK_PAGE_MAIN);
         g2TextViewDisarm();
+        createOk = true;  // recovery landed a live list → PageSwapEnd
         DEBUG_G2F("[G2] page-swap: auto-recovery succeeded — back at root menu");
       } else {
         DEBUG_G2F("[G2] page-swap: auto-recovery FAILED — user must hit "
@@ -10452,7 +10435,16 @@ cleanup:
     free(args->titleContent);
   }
   delete args;
-  pageSwapEnd();
+  // PageSwapEnd always lands in Hijacked and re-arms the lens mirror.
+  // Only do that when a container actually came up — otherwise a failed
+  // CREATE (e.g. Health safety-timeout → Apps onDone race) would leave a
+  // phantom hijack with no widget, then hang BLE on the next Shutdown.
+  if (createOk) {
+    pageSwapEnd();
+  } else if (g2FsmPageSwapping()) {
+    DEBUG_G2F("[G2] page-swap: CREATE failed — leaving Idle (no phantom hijack)");
+    hijackFsmDispatch(HijackEvent::HijackExit, "pageSwapCreateFail");
+  }
   // No vTaskDelete — caller (pageSwapWorkerLoop) owns the task and
   // will return to xQueueReceive() to pick up the next job.
 }
@@ -10737,10 +10729,8 @@ static void pageSwapWorkerLoop(void* /*arg*/) {
   }
 }
 
-// Idempotent — safe to call multiple times. The first call creates
-// the queue + spawns the worker (the only `xTaskCreate` for the
-// page-swap path that runs at boot, when DRAM headroom is largest);
-// subsequent calls are no-ops.
+// Idempotent — safe to call multiple times. The first page/lens job creates
+// the queue + spawns the worker; subsequent calls are no-ops.
 static void pageSwapInit() {
   if (gPageSwapQueue) return;
   gPageSwapQueue = xQueueCreate(kPageSwapQueueDepth, sizeof(LensUiJob*));
@@ -10786,7 +10776,10 @@ static void pageSwapInit() {
 // 5 producer sites in this file therefore stay unchanged.
 static bool pageSwapEnqueue(PageSwapArgs* args) {
   if (!gPageSwapQueue) {
-    DEBUG_G2F("[G2] page-swap enqueue: queue not initialised — call pageSwapInit() first");
+    pageSwapInit();
+  }
+  if (!gPageSwapQueue) {
+    DEBUG_G2F("[G2] page-swap enqueue: worker unavailable");
     return false;
   }
   LensUiJob* job = new (std::nothrow) LensUiJob{};
@@ -10817,7 +10810,10 @@ static bool pageSwapEnqueue(PageSwapArgs* args) {
 bool g2EnqueueLensJob(LensUiJob* job) {
   if (!job) return false;
   if (!gPageSwapQueue) {
-    DEBUG_G2F("[lens.applier] g2EnqueueLensJob: queue not initialised");
+    pageSwapInit();
+  }
+  if (!gPageSwapQueue) {
+    DEBUG_G2F("[lens.applier] g2EnqueueLensJob: worker unavailable");
     return false;
   }
   if (xQueueSend(gPageSwapQueue, &job, pdMS_TO_TICKS(50)) != pdTRUE) {
@@ -10848,8 +10844,8 @@ bool g2EnqueueLensJob(LensUiJob* job) {
 //   task context where the allocator can take its locks safely.
 //
 // Lifecycle:
-//   * Spawned at boot from initG2Client() alongside pageSwapInit() and
-//     hijackFsmInit() — DRAM headroom is largest there.
+//   * Spawned lazily on first tap dispatch, after the glasses are connected
+//     and the hijack UI is actually being used.
 //   * Persistent: never torn down. With G2 off / disconnected the queue
 //     is empty and the worker just sleeps on the receive — costs only
 //     its 4 KB stack + queue (8 × uint32_t = 32 B). Cheap insurance.
@@ -10973,7 +10969,10 @@ static void tapDispatcherWorkerLoop(void* /*arg*/) {
 // allocates belongs on the worker side, not here.
 static bool tapDispatcherEnqueue(uint32_t idx, const char* iname) {
   if (!gTapQueue) {
-    DEBUG_G2F("[G2] tap-dispatch: queue not initialised — tap idx=%u dropped",
+    tapDispatcherInit();
+  }
+  if (!gTapQueue) {
+    DEBUG_G2F("[G2] tap-dispatch: worker unavailable — tap idx=%u dropped",
               (unsigned)idx);
     return false;
   }
@@ -11012,7 +11011,10 @@ static bool tapDispatcherEnqueue(uint32_t idx, const char* iname) {
 static bool tapDispatcherEnqueueExit(void (*fn)()) {
   if (!fn) return false;
   if (!gTapQueue) {
-    DEBUG_G2F("[G2] tap-dispatch: queue not initialised — exit-fn dropped");
+    tapDispatcherInit();
+  }
+  if (!gTapQueue) {
+    DEBUG_G2F("[G2] tap-dispatch: worker unavailable — exit-fn dropped");
     return false;
   }
   TapDispatchEntry e{};
@@ -11696,10 +11698,19 @@ static const char*         gLivePageBackLabel = nullptr;
 // to wire it post-hoc is exactly the kind of regression the captured
 // pattern prevents.
 //
-// Same lifecycle shape as gAutoLogOwnerCtx (System_Automation.cpp): set on
+// Same lifecycle shape as gAutomationLogOwnerCtx (System_Automation.cpp): set on
 // open, used per tick, replaced on the next open. Never explicitly
 // cleared — once the worker exits there's no consumer.
 static AuthContext         gLivePageOwnerCtx;
+
+// Persistent session worker (defined after live-text globals — needs both
+// stop flags). Forward decls so live-list start can enqueue before the
+// full implementation appears in the file.
+static void g2SessionEnsureWorker();
+static void g2SessionShutdown();
+static bool g2SessionSubmit(void (*run)(void*), void* payload,
+                            void (*drop)(void*), const char* tag);
+static uint8_t* g2SessionScratchAcquire(size_t need);
 
 // Render `text` into the same row-shape g2ShowTextAsList uses (back row
 // prepended, newline-split). Caller owns the row storage. `backLabel`
@@ -11749,7 +11760,6 @@ static void livePageWorker(void* /*arg*/) {
     if (ptrs)    free(ptrs);
     if (textBuf) free(textBuf);
     gLivePageActive = false;
-    vTaskDelete(nullptr);
     return;
   }
 
@@ -11825,7 +11835,6 @@ static void livePageWorker(void* /*arg*/) {
   gLivePageStopFlag = false;
   gLivePageBuildFn  = nullptr;
   DEBUG_G2F("[G2] live-page: worker exited");
-  vTaskDelete(nullptr);
 }
 
 // Public API — start a live list page.
@@ -11878,12 +11887,9 @@ bool g2StartLiveListPage(G2LivePageBuildFn buildFn, uint32_t intervalMs,
   gLivePageStopFlag   = false;
   gLivePageActive     = true;
 
-  // 4 KB stack is enough — the worker uses heap-allocated buffers for
-  // the row storage and text buffer, so the stack only carries the
-  // worker's local frames + sendRebuildListAndWait's small pb buffer.
-  if (xTaskCreatePinnedToCore(livePageWorker, "g2_live_page", 4096, nullptr,
-                  /*prio*/ 5, nullptr, APP_CORE) != pdPASS) {
-    DEBUG_G2F("[G2] live-page: xTaskCreate failed");
+  // Runs on persistent g2_session_w (8 KB). Heap buffers keep stack pressure low.
+  if (!g2SessionSubmit(livePageWorker, nullptr, nullptr, "live_page")) {
+    DEBUG_G2F("[G2] live-page: session enqueue failed");
     gLivePageActive = false;
     gLivePageBuildFn = nullptr;
     return false;
@@ -11899,8 +11905,7 @@ void g2StopLiveListPage() {
   // Kick the refresh sem so the worker wakes immediately and notices
   // the stop flag rather than waiting out the full interval.
   if (gLivePageRefreshSem) xSemaphoreGive(gLivePageRefreshSem);
-  // Worker self-deletes; we don't join. Spin-wait briefly so the
-  // worker's cleanup ordering is observable to the next caller.
+  // Session job returns to g2_session_w idle; spin so cleanup is observable.
   for (int i = 0; i < 30 && gLivePageActive; i++) {
     vTaskDelay(pdMS_TO_TICKS(10));
   }
@@ -11961,6 +11966,192 @@ static SemaphoreHandle_t   gLiveTextRefreshSem = nullptr;
 // can't have both up at once but they can interleave via different page
 // types.
 static AuthContext         gLiveTextOwnerCtx;
+
+// =============================================================================
+// G2 session worker — one long-lived 8 KB INTERNAL stack for hijack UI
+// sessions (Health/Map/LLM/Pet/viewers/live pages). Sibling to
+// g2_page_swap_w (lens applier stays ~3.5 KB and responsive). Single-flight:
+// a new enqueue aborts the current session, waits for idle, then runs.
+// =============================================================================
+
+struct G2SessionJob {
+  void (*run)(void*);       // owns/frees payload on success path
+  void (*drop)(void*);      // free payload if job never runs (queue drain)
+  void* payload;
+  const char* tag;
+};
+
+static constexpr UBaseType_t kG2SessionQueueDepth = 4;
+static constexpr uint32_t    kG2SessionStackBytes = 8192;  // covers map + full BMP/JPG
+
+static QueueHandle_t     gSessionQueue   = nullptr;
+static TaskHandle_t      gSessionTaskH   = nullptr;
+static volatile bool     gSessionBusy    = false;
+static uint8_t*          gSessionScratch = nullptr;
+static size_t            gSessionScratchCap = 0;
+
+static uint8_t* g2SessionScratchAcquire(size_t need) {
+  if (need == 0) return nullptr;
+  if (gSessionScratch && gSessionScratchCap >= need) return gSessionScratch;
+  if (gSessionScratch) {
+    free(gSessionScratch);
+    gSessionScratch = nullptr;
+    gSessionScratchCap = 0;
+  }
+  gSessionScratch = (uint8_t*)ps_alloc(need, AllocPref::PreferPSRAM, "g2.session.scratch");
+  gSessionScratchCap = gSessionScratch ? need : 0;
+  return gSessionScratch;
+}
+
+static void g2SessionScratchShutdown() {
+  if (gSessionScratch) {
+    free(gSessionScratch);
+    gSessionScratch = nullptr;
+    gSessionScratchCap = 0;
+  }
+}
+
+// Kick every cooperative session abort path. Live pages use stop flags;
+// image/session pages observe gImgProbeAbort.
+static void g2SessionRequestAbort() {
+  gImgProbeAbort = true;
+  if (gLivePageActive) {
+    gLivePageStopFlag = true;
+    if (gLivePageRefreshSem) xSemaphoreGive(gLivePageRefreshSem);
+  }
+  if (gLiveTextActive) {
+    gLiveTextStopFlag = true;
+    if (gLiveTextRefreshSem) xSemaphoreGive(gLiveTextRefreshSem);
+  }
+}
+
+static void g2SessionDrainQueue() {
+  if (!gSessionQueue) return;
+  G2SessionJob* job = nullptr;
+  while (xQueueReceive(gSessionQueue, &job, 0) == pdTRUE) {
+    if (!job) continue;
+    DEBUG_G2F("[G2] session: drop pending '%s'", job->tag ? job->tag : "?");
+    if (job->drop && job->payload) job->drop(job->payload);
+    delete job;
+  }
+}
+
+static void g2SessionWaitIdle(uint32_t timeoutMs) {
+  const uint32_t t0 = millis();
+  while (gSessionBusy) {
+    if ((uint32_t)(millis() - t0) >= timeoutMs) {
+      DEBUG_G2F("[G2] session: wait-idle timed out (%u ms) busy=1",
+                (unsigned)timeoutMs);
+      break;
+    }
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+}
+
+static void g2SessionWorkerLoop(void* /*arg*/) {
+  DEBUG_G2F("[G2] session: worker started (stack=%u B)",
+            (unsigned)kG2SessionStackBytes);
+  for (;;) {
+    G2SessionJob* job = nullptr;
+    if (xQueueReceive(gSessionQueue, &job, portMAX_DELAY) != pdTRUE) continue;
+    if (!job) continue;
+    gSessionBusy = true;
+    DEBUG_G2F("[G2] session: run '%s'", job->tag ? job->tag : "?");
+    if (job->run) {
+      job->run(job->payload);  // run owns/frees payload
+    } else if (job->drop && job->payload) {
+      job->drop(job->payload);
+    }
+    delete job;
+    gSessionBusy = false;
+  }
+}
+
+static void g2SessionEnsureWorker() {
+  if (gSessionQueue) return;
+  gSessionQueue = xQueueCreate(kG2SessionQueueDepth, sizeof(G2SessionJob*));
+  if (!gSessionQueue) {
+    DEBUG_G2F("[G2] session: queue create FAILED");
+    return;
+  }
+  BaseType_t rc = xTaskCreatePinnedToCore(
+      g2SessionWorkerLoop, "g2_session_w",
+      /*stack bytes*/ kG2SessionStackBytes, nullptr,
+      /*prio*/ tskIDLE_PRIORITY + 2,
+      &gSessionTaskH, APP_CORE);
+  if (rc != pdPASS) {
+    DEBUG_G2F("[G2] session: xTaskCreate FAILED (rc=%d)", (int)rc);
+    vQueueDelete(gSessionQueue);
+    gSessionQueue = nullptr;
+    gSessionTaskH = nullptr;
+  } else {
+    DEBUG_G2F("[G2] session: persistent worker ready (queue depth=%u)",
+              (unsigned)kG2SessionQueueDepth);
+  }
+}
+
+static void g2SessionShutdown() {
+  if (!gSessionQueue && !gSessionTaskH) {
+    g2SessionScratchShutdown();
+    return;
+  }
+  g2SessionRequestAbort();
+  g2SessionWaitIdle(3000);
+  g2SessionDrainQueue();
+  if (gSessionTaskH) {
+    vTaskDelete(gSessionTaskH);
+    gSessionTaskH = nullptr;
+  }
+  if (gSessionQueue) {
+    vQueueDelete(gSessionQueue);
+    gSessionQueue = nullptr;
+  }
+  gSessionBusy = false;
+  g2SessionScratchShutdown();
+  DEBUG_G2F("[G2] session: worker shut down");
+}
+
+// Enqueue a session job. Aborts any in-flight session first. On success the
+// worker owns payload (via run); on failure the caller must drop payload.
+static bool g2SessionSubmit(void (*run)(void*), void* payload,
+                            void (*drop)(void*), const char* tag) {
+  if (!run) return false;
+  g2SessionEnsureWorker();
+  if (!gSessionQueue) return false;
+
+  // Only abort when a session is actually running. Callers often arm
+  // live-page active/stop flags before enqueue; RequestAbort must not
+  // cancel that fresh session.
+  if (gSessionBusy) {
+    g2SessionRequestAbort();
+    g2SessionWaitIdle(3000);
+    if (gSessionBusy) {
+      DEBUG_G2F("[G2] session: still busy after abort — refuse '%s'",
+                tag ? tag : "?");
+      return false;
+    }
+  }
+  g2SessionDrainQueue();
+  // New job must not inherit the previous session's abort/stop bits.
+  gImgProbeAbort = false;
+  gLivePageStopFlag = false;
+  gLiveTextStopFlag = false;
+
+  auto* job = new G2SessionJob;
+  if (!job) return false;
+  job->run = run;
+  job->drop = drop;
+  job->payload = payload;
+  job->tag = tag ? tag : "session";
+
+  if (xQueueSend(gSessionQueue, &job, 0) != pdTRUE) {
+    DEBUG_G2F("[G2] session: queue full — drop '%s'", job->tag);
+    delete job;
+    return false;
+  }
+  DEBUG_G2F("[G2] session: enqueued '%s'", job->tag);
+  return true;
+}
 
 static bool liveTextIsActive() {
   return gLiveTextActive;
@@ -12161,7 +12352,7 @@ static bool renderStatusCompound() {
   char meterStr[128];
   buildG2StatusMeter(meterStr, sizeof(meterStr));
 
-  // R1 row — same g2RingGetTelemetry() source as Apps → Ring.
+  // R1 row — same g2RingGetTelemetry() source as Apps → Health.
   char r1Str[32];
   buildR1StatusBattery(r1Str, sizeof(r1Str));
 
@@ -12333,7 +12524,6 @@ static void liveTextWorker(void* /*arg*/) {
       gLiveTextActive   = false;
       gLiveTextBuildFn  = nullptr;
       gLiveTextRenderFn = nullptr;
-      vTaskDelete(nullptr);
       return;
     }
   }
@@ -12355,7 +12545,6 @@ static void liveTextWorker(void* /*arg*/) {
     gLiveTextActive   = false;
     gLiveTextBuildFn  = nullptr;
     gLiveTextRenderFn = nullptr;
-    vTaskDelete(nullptr);
     return;
   }
 
@@ -12370,7 +12559,6 @@ static void liveTextWorker(void* /*arg*/) {
     gLiveTextActive   = false;
     gLiveTextBuildFn  = nullptr;
     gLiveTextRenderFn = nullptr;
-    vTaskDelete(nullptr);
     return;
   }
 
@@ -12404,7 +12592,6 @@ static void liveTextWorker(void* /*arg*/) {
     // Don't try to re-show the hijack menu from here — the BLE write
     // path is in an unknown state and we'd just compound the
     // failure. Next user tap on Blocks will start a fresh hijack.
-    vTaskDelete(nullptr);
     return;
   }
 
@@ -12511,7 +12698,7 @@ static void liveTextWorker(void* /*arg*/) {
     gTextViewTapFn  = nullptr;
   }
   DEBUG_G2F("[G2] live-text: worker exited");
-  vTaskDelete(nullptr);
+
 }
 
 bool g2StartLiveTextPage(G2LivePageBuildFn buildFn, uint32_t intervalMs,
@@ -12564,12 +12751,9 @@ bool g2StartLiveTextPage(G2LivePageBuildFn buildFn, uint32_t intervalMs,
   // the Shutdown→CREATE window can't trip our exit handler before
   // the widget exists.
 
-  // 4 KB stack — same as livePageWorker. Heap-allocated text buffer
-  // keeps the on-stack pressure to local frames + g2ShowText's pb
-  // builder (also heap-backed via ps_alloc).
-  if (xTaskCreatePinnedToCore(liveTextWorker, "g2_live_text", 4096, nullptr,
-                  /*prio*/ 5, nullptr, APP_CORE) != pdPASS) {
-    DEBUG_G2F("[G2] live-text: xTaskCreate failed");
+  // Runs on persistent g2_session_w (same stack as other hijack sessions).
+  if (!g2SessionSubmit(liveTextWorker, nullptr, nullptr, "live_text")) {
+    DEBUG_G2F("[G2] live-text: session enqueue failed");
     gLiveTextActive   = false;
     gLiveTextBuildFn  = nullptr;
     gLiveTextRenderFn = nullptr;
@@ -12584,8 +12768,7 @@ void g2StopLiveTextPage() {
   if (!gLiveTextActive) return;
   gLiveTextStopFlag = true;
   if (gLiveTextRefreshSem) xSemaphoreGive(gLiveTextRefreshSem);
-  // Worker self-deletes; spin briefly so cleanup ordering is observable
-  // to the next caller. Mirrors g2StopLiveListPage.
+  // Session job returns to g2_session_w idle; spin so cleanup is observable.
   for (int i = 0; i < 30 && gLiveTextActive; i++) {
     vTaskDelay(pdMS_TO_TICKS(10));
   }
@@ -12650,6 +12833,10 @@ G2LensState g2LensGetState() {
 // helpers.
 
 void g2LensApplyHijackActive(bool active) {
+  // Idempotent: PageSwapEnd / ImageProbeEnd re-arm the mirror whenever
+  // they land in Hijacked. Skip no-ops so every page-swap doesn't look
+  // like a fresh HijackEnter in the log / restart the lens timestamp.
+  if (gLens.hijackActive == active) return;
   gLens.hijackActive = active;
   if (active) gLens.hijackStartedMs = millis();
   else        gLens.hijackStartedMs = 0;
@@ -12714,6 +12901,11 @@ void g2LensClearContainer() {
   // tracker reflects "where the user was" and the next CREATE will reset
   // it to MAIN explicitly. (gLens.hijackPage is not part of the
   // container-mirror state and is left to its own setter.)
+  //
+  // Every teardown path funnels through here (tearDownActiveContainer and
+  // g2NoteContainerCleared both call it), which makes it the one place that
+  // knows the glasses just dropped the mic stream.
+  g2MicNoteStreamStoppedByTeardown();
   hijackFsmDispatch(HijackEvent::ContainerCleared, "g2LensClearContainer");
 }
 
@@ -13036,6 +13228,7 @@ static const char* cmd_g2disconnect(const String& argsInput) {
   //                    pressure.
   String arg = argsInput; arg.trim(); arg.toLowerCase();
   const bool fullReset = (arg == "full");
+  blePeerNoteUserDisconnect(BLE_PEER_G2_GLASSES);
   g2Disconnect();
   if (fullReset) {
     templeReset(gL);
@@ -14584,6 +14777,9 @@ static const char* cmd_g2dumpframes(const String& /*argsInput*/) {
 
 static const char* cmd_g2bmp(const String& argsInput);
 static const char* cmd_g2pet(const String& argsInput);
+#if ENABLE_R1_HEALTH
+static const char* cmd_g2health(const String& argsInput);
+#endif
 #if ENABLE_MAPS
 static const char* cmd_g2map(const String& argsInput);
 #endif
@@ -14625,6 +14821,9 @@ extern const CommandEntry g2Commands[] = {
   { "g2map",        "Render the offline map on the G2 lens (288x144)",  false, cmd_g2map, "Usage: g2map   (renders the current map view; double-tap the lens to dismiss)" },
 #endif
   { "g2pet",        "Open the Pet (virtual creature) app on the G2 lens", false, cmd_g2pet, "Usage: g2pet   (Feed/Play/Clean/Sleep on the lens; Back to exit)" },
+#if ENABLE_R1_HEALTH
+  { "g2health",     "Open the Health (R1 vitals + graphs) app on the G2 lens", false, cmd_g2health, "Usage: g2health   (Overview/HR/HRV/SpO2/Battery on the lens; Back to exit)" },
+#endif
   { "g2sensors",    "Show device's sensor list on the G2 lens",        false, cmd_g2sensors },
   { "g2network",    "Show Network info page on the G2 lens",           false, cmd_g2network },
   { "g2settingspage","Show Settings inspector page on the G2 lens",    false, cmd_g2settingspage },
@@ -14892,11 +15091,9 @@ static constexpr uint32_t kImgCreateAckTimeoutMs = 3000;
 static constexpr uint32_t kImgPushAckTimeoutMs = 7000;
 
 // Inter-fragment gap during a Cmd=3 burst (between sendPbFragmented calls).
-// kImgInFlightCap=3: 10 ms keeps ~2 frags in flight on a healthy link
-// (lowered from 15 ms 2026-05-10 to reclaim per-frame ms in the camera
-// stream — small win, but cheap to revert if rc=-1 spikes return).
-// Tune up (e.g. 30) if rc=-1 spikes return under transient queue pressure
-// (pairs with stepped write retries in sendEnvelopeNoMutex).
+// With kImgInFlightCap=4 (g2-kit default), 10 ms keeps ~2 frags in flight
+// on a healthy link. Tune up (e.g. 30) if rc=-1 spikes return under
+// transient queue pressure (pairs with bleCentralTx + out-of-lock retry).
 static constexpr uint32_t kImgFragGapMs = 10;
 
 // In-burst envelope gap (within a single sendPbFragmented call) for
@@ -14912,15 +15109,11 @@ static constexpr uint32_t kImgFragGapMs = 10;
 // Tuning history:
 //   25 ms — original safe value, ~120 ms/frame overhead
 //   20 ms (2026-05-08) — reclaimed ~110 ms/frame, envelope 15 at ~280 ms
-//   15 ms (2026-05-10) — pushed lower after sendEnvelopeNoMutex got the
-//                        rc=-1 50ms-retry path; the rare transient now
-//                        recovers in-line instead of stranding the mutex.
-//                        Cleared 57 frames at 96×96 with 0 phantom-acks
-//                        and 0 retry log lines, so the steady-state push
-//                        stream tolerates 15 ms even though compound
-//                        CREATE was the original failure case (only 1
-//                        compound CREATE per stream session, vs N×17
-//                        envelopes per frame).
+//   15 ms (2026-05-10) — tried with an in-lock rc=-1 writeValue retry;
+//                        that retry path was later removed (can hang on
+//                        m_semaphoreWriteCharEvt). Steady-state small
+//                        frames still tolerate 15 ms; failures abort the
+//                        envelope and retry out-of-lock (sendImgCmd3WithRetry).
 //   tiered (2026-05-12) — 15 ms still fails on larger frames (spinning_earth
 //                        animation pack at 3800 B/fragment → envelope 17/17
 //                        rc=-1, ImageRawResp timeout). Root cause is shared
@@ -14930,6 +15123,9 @@ static constexpr uint32_t kImgFragGapMs = 10;
 //                        the gap per-fragment from `pbLen` keeps slime-sized
 //                        pushes at full speed and only slows down on
 //                        fragments large enough to stress the buffer.
+//   per-envelope central TX (2026-07-26) — release bleCentralTx between
+//                        envelopes so heartbeats / queued ring TX can run
+//                        in these gaps (was: hold for whole burst).
 //
 // Selection: pickImgEnvelopeGapMs(pbLen) — see below. Image-push paths set
 // this via gFragNextBurstDelayMs before each sendPbFragmented call so
@@ -14937,6 +15133,24 @@ static constexpr uint32_t kImgFragGapMs = 10;
 static constexpr uint32_t kImgEnvGapMs_Small  = 15;   // ≤ ~6 envelopes
 static constexpr uint32_t kImgEnvGapMs_Medium = 20;   // 7-12 envelopes
 static constexpr uint32_t kImgEnvGapMs_Large  = 25;   // 13+ envelopes
+// When R1 is also connected, three HIGH-priority links slow controller
+// TX drain enough that 25 ms still hits rc=-1 around envelope 15/17 of a
+// 3800 B fragment (Health sparkline / Q30 under load). Widen further.
+// ESP32-host issue (GATT TX queue), not a firmware sliding-window rule —
+// g2-kit keeps window=4; we keep that and only pace envelopes slower.
+static constexpr uint32_t kImgEnvGapMs_MediumRing = 35;
+static constexpr uint32_t kImgEnvGapMs_LargeRing  = 60;
+// Per-Cmd=3 TX retries after sendPbFragmented fails (rc=-1 mid-envelope).
+// ESP32 adaptation of G2_PROTOCOL "retry transient write" — in-lock
+// writeValue retry can hang forever on m_semaphoreWriteCharEvt, so we
+// drain with bleCentralTx released then re-enter sendPbFragmented.
+// Incomplete envelopes use a new seq; firmware drops the stale half-message.
+static constexpr unsigned kImgFragTxAttempts = 3;
+static constexpr uint32_t kImgFragTxRetryDrainMs     = 150;
+static constexpr uint32_t kImgFragTxRetryDrainRingMs = 350;
+// g2-kit-unofficial ImageStreamer default (ble/docs/images.md): tolerate
+// up to ~3 consecutive Cmd=3 ack misses — fragment often landed anyway.
+static constexpr unsigned kImgAckMissTolerance = 3;
 static constexpr size_t   kImgFragSizeSmallMaxB  = 1500;  // bytes ≈ 6 env @ MTU 244
 static constexpr size_t   kImgFragSizeMediumMaxB = 3000;  // bytes ≈ 12 env
 
@@ -14950,13 +15164,78 @@ static constexpr uint32_t kImgInBurstEnvelopeGapMs = kImgEnvGapMs_Small;
 // gap. Larger fragments sustain pressure long enough across many
 // connection events that the buffer drain rate (shared with the other two
 // connections) can't keep up at 15 ms; bump to 20/25 ms to widen the
-// window. Failure mode at undersize gap: rc=-1 from writeValue mid-burst,
+// window. With the ring up, bump medium/large further (see *Ring constants).
+// Failure mode at undersize gap: rc=-1 from writeValue mid-burst,
 // ImageRawResp never arrives, the next burst inherits the wedge.
 static uint32_t pickImgEnvelopeGapMs(size_t pbLen) {
+  const bool ringUp = g2RingIsConnected();
   if (pbLen <= kImgFragSizeSmallMaxB)  return kImgEnvGapMs_Small;
-  if (pbLen <= kImgFragSizeMediumMaxB) return kImgEnvGapMs_Medium;
-  return kImgEnvGapMs_Large;
+  if (pbLen <= kImgFragSizeMediumMaxB) {
+    return ringUp ? kImgEnvGapMs_MediumRing : kImgEnvGapMs_Medium;
+  }
+  return ringUp ? kImgEnvGapMs_LargeRing : kImgEnvGapMs_Large;
 }
+
+// MapSessionId counter — g2-kit bumps per stream; on abort bumps by 2
+// so a re-CREATE does not inherit a stuck MapSession (ble/docs/gotchas.md).
+static uint8_t gImgMapSessionId = 1;
+static uint8_t allocImgMapSessionId() {
+  const uint8_t id = gImgMapSessionId;
+  gImgMapSessionId = (uint8_t)(gImgMapSessionId + 1);
+  if (gImgMapSessionId == 0) gImgMapSessionId = 1;
+  return id;
+}
+static void bumpImgMapSessionAfterAbort() {
+  gImgMapSessionId = (uint8_t)(gImgMapSessionId + 2);
+  if (gImgMapSessionId == 0) gImgMapSessionId = 1;
+}
+
+// Send one Cmd=3 image fragment with out-of-lock retries. In-lock
+// writeValue retries can hang forever on m_semaphoreWriteCharEvt; we
+// only re-enter sendPbFragmented after releasing bleCentralTx.
+static bool sendImgCmd3WithRetry(G2Temple& arm, const char* tag,
+                                 unsigned frag1Based, unsigned totalFrags,
+                                 const uint8_t* pb, size_t pbLen) {
+  const unsigned attempts = kImgFragTxAttempts;
+  const uint32_t drainMs = g2RingIsConnected()
+                               ? kImgFragTxRetryDrainRingMs
+                               : kImgFragTxRetryDrainMs;
+  for (unsigned attempt = 1; attempt <= attempts; attempt++) {
+    if (gImgProbeAbort) return false;
+    g2DebugSetNextBurstFragDelay(pickImgEnvelopeGapMs(pbLen));
+    if (sendPbFragmented(arm, allocSeq(), G2_SID_EVEN_CORE,
+                         G2_FLAG_REQUEST, pb, pbLen)) {
+      return true;
+    }
+    if (attempt >= attempts || gImgProbeAbort) break;
+    DEBUG_G2F("[ImgProbe] %s frag %u/%u TX failed — drain %u ms, "
+              "retry %u/%u",
+              tag, frag1Based, totalFrags, (unsigned)drainMs,
+              attempt + 1, attempts);
+    vTaskDelay(pdMS_TO_TICKS(drainMs));
+  }
+  return false;
+}
+
+// Drop glasses to BALANCED for a large image push while the ring is up —
+// same radio-courtesy pattern as ringconnect. Restored on every exit path.
+struct ImgPushRadioGuard {
+  bool dropped;
+  ImgPushRadioGuard() : dropped(false) {
+    if (!g2RingIsConnected()) return;
+    const int n = g2SetAllTemplesConnPriority(/*high=*/false);
+    if (n > 0) {
+      dropped = true;
+      DEBUG_G2F("[G2] Image push: dropped %d temple(s) to BALANCED (ring up)",
+                n);
+    }
+  }
+  ~ImgPushRadioGuard() {
+    if (!dropped) return;
+    const int n = g2SetAllTemplesConnPriority(/*high=*/true);
+    DEBUG_G2F("[G2] Image push: restored %d temple(s) to HIGH", n);
+  }
+};
 
 // Hold the image visible after the last fragment, before SHUTDOWN.
 // The lens's 4-tile sync settles for ~2 s post-last-frag (per the
@@ -14971,14 +15250,11 @@ static constexpr uint32_t kImgPostFragHoldMs = 3000;
 // resync containerReady state.
 static constexpr uint32_t kImgShutdownSettleMs = 500;
 
-// Firmware reassembly window: max number of Cmd=3 push fragments we
-// can have in flight (sent but unacked) at once. Faceclaw and
-// g2-kit-unofficial both establish 3 as the hard ceiling — sending a
-// 4th unacked fragment risks silent drops on the firmware side. With
-// kImgFragGapMs=15 the in-flight count actually pipelines (frag N+1
-// goes out before frag N's ack arrives), so the cap now bounds real
-// work rather than just being a safety net.
-static constexpr unsigned kImgInFlightCap = 3;
+// Firmware reassembly window: max Cmd=3 fragments in flight (sent but
+// unacked). g2-kit-unofficial ImageStreamer default is 4 (ble/docs/images.md
+// "sliding-window pipeline"); we match that known-good value. Ack RTT is
+// usually shorter than a 3800 B send, so steady-state peaks ~2.
+static constexpr unsigned kImgInFlightCap = 4;
 
 // Plain SHUTDOWN+settle of the active container — no FSM events fired.
 // Use when the caller is NOT a probe (e.g. live-text page setup needs
@@ -15286,7 +15562,9 @@ const char* g2ProbeImageDocSummary() {
   DEBUG_G2F("[ImgProbe]   App-layer ack disabled by setting magic=0 in the wrapper.");
   DEBUG_G2F("[ImgProbe]     WARNING: combining magic=0 with rapid sends overflows the");
   DEBUG_G2F("[ImgProbe]     headset buffer and DROPS the BLE connection.");
-  DEBUG_G2F("[ImgProbe]   First image after CREATE silently dropped (warmup needed).");
+  DEBUG_G2F("[ImgProbe]   g2-kit docs: first image after CREATE may need a");
+  DEBUG_G2F("[ImgProbe]     sacrificial warmup — on FW 2.2.4.34 the first stream");
+  DEBUG_G2F("[ImgProbe]     already paints; Health/UI skips the double-push.");
   DEBUG_G2F("[ImgProbe]   Observed ceiling ~2.5 s for full 4-tile update — firmware");
   DEBUG_G2F("[ImgProbe]     bottleneck is the post-fragment ack delay (lens sync).");
   DEBUG_G2F("[ImgProbe]   All-black images ack faster than non-zero patterns.");
@@ -15373,6 +15651,10 @@ static bool sendImageBmpMultiFragment(G2Temple& arm,
   if (outTotalFrags) *outTotalFrags = 0;
   if (!bmp || bmpLen == 0) return false;
 
+  // Exclusive TX gate alone is not enough under 3 HIGH links — give the
+  // controller more idle airtime for the whole push (Q30/Health).
+  ImgPushRadioGuard radioGuard;
+
   const uint32_t kCID        = 2;
   const char*    kCName      = "imgQ4";
   const int32_t  kImgW       = imgW;
@@ -15409,10 +15691,12 @@ static bool sendImageBmpMultiFragment(G2Temple& arm,
   size_t off = 0;
   const uint32_t burstStartMs = millis();
   bool aborted = false;
+  const unsigned inFlightCap = kImgInFlightCap;  // g2-kit window=4
+  const uint8_t mapSessionId = allocImgMapSessionId();
   // Stuck-throttle threshold. Strict mode (tolerateMissedAcks=0): wait
   // kImgPushAckTimeoutMs*2 (see constant) then abort. Tolerant mode
-  // (tolerateMissedAcks>0): 500 ms then phantom-ack and continue, so a
-  // streaming caller doesn't stall a frame waiting for one stray ack.
+  // (tolerateMissedAcks>0): 500 ms then phantom-ack and continue — matches
+  // g2-kit ack-miss tolerance (~3 consecutive).
   const uint32_t stuckTimeoutMs = (tolerateMissedAcks > 0) ? 500 : (kImgPushAckTimeoutMs * 2);
   for (unsigned i = 0; i < kFrags && !aborted; i++) {
     // Honour user dismiss mid-burst. Without this, a Q13 frame in
@@ -15425,11 +15709,10 @@ static bool sendImageBmpMultiFragment(G2Temple& arm,
       aborted = true;
       break;
     }
-    // Sliding-window throttle. Hold off if we'd exceed the firmware's
-    // reassembly window of kImgInFlightCap unacked fragments.
+    // Sliding-window throttle (g2-kit ImageStreamer windowSize=4).
     // In-flight count = (fragments sent so far) - (acks received + phantom-acks).
     uint32_t throttleStartMs = millis();
-    while (i > (gImgPushAcked + acksMissed + kImgInFlightCap - 1u)) {
+    while (i > (gImgPushAcked + acksMissed + inFlightCap - 1u)) {
       if (gImgProbeAbort) {
         DEBUG_G2F("[ImgProbe] %s aborted in throttle at %u acked / %u sent",
                   tag, (unsigned)gImgPushAcked, i);
@@ -15458,24 +15741,17 @@ static bool sendImageBmpMultiFragment(G2Temple& arm,
     const uint32_t magic = pushMagicBase + i;
     const size_t pbLen = g2BuildImageRawBody(
         magic, kCID, kCName,
-        /*sessionId*/ 1, /*totalSize*/ (uint32_t)bmpLen,
+        /*sessionId*/ mapSessionId, /*totalSize*/ (uint32_t)bmpLen,
         /*fragIndex*/ i, bmp + off, chunk,
         pbBuf, kChunkBytes + 96);
     if (pbLen == 0) break;
 
     noteOurShutdownSent();
-    DEBUG_G2F("[ImgProbe] %s frag %u/%u magic=%u fragIdx=%u packet=%u (offset=%u/%u, in-flight=%u)",
+    DEBUG_G2F("[ImgProbe] %s frag %u/%u magic=%u fragIdx=%u packet=%u (offset=%u/%u, in-flight=%u sid=%u)",
               tag, i + 1, kFrags, (unsigned)magic, i,
               (unsigned)chunk, (unsigned)off, (unsigned)bmpLen,
-              (unsigned)(i + 1u - gImgPushAcked));
-    // Pace this burst's envelopes based on fragment size — see the
-    // tier picker comment above kImgEnvGapMs_*. Small fragments keep
-    // the fast 15 ms cadence; large fragments (animation packs etc.)
-    // get 20-25 ms so the controller TX buffer has time to drain
-    // between submissions.
-    g2DebugSetNextBurstFragDelay(pickImgEnvelopeGapMs(pbLen));
-    if (!sendPbFragmented(arm, allocSeq(), G2_SID_EVEN_CORE,
-                          G2_FLAG_REQUEST, pbBuf, pbLen)) {
+              (unsigned)(i + 1u - gImgPushAcked), (unsigned)mapSessionId);
+    if (!sendImgCmd3WithRetry(arm, tag, i + 1, kFrags, pbBuf, pbLen)) {
       break;
     }
     okFrags++;
@@ -15522,7 +15798,9 @@ static bool sendImageBmpMultiFragment(G2Temple& arm,
   DEBUG_G2F("[ImgProbe] %s push complete: %u/%u sent, %u/%u acked (+%u phantom) in %u ms (%s)",
             tag, okFrags, kFrags, ackedCount, ackTarget,
             acksMissed, (unsigned)burstMs, status);
-  return okFrags == kFrags && sufficientlyAcked;
+  const bool ok = (okFrags == kFrags && sufficientlyAcked);
+  if (!ok) bumpImgMapSessionAfterAbort();
+  return ok;
 }
 
 // Q5/Q7/Q8 REMOVED 2026-04-27. All three pushed sub-tile BMPs (32×32)
@@ -15793,7 +16071,10 @@ const char* g2ProbeImageQ9FrameBuilder() {
 // container without re-CREATE. Returns true if all fragments acked.
 // Used by Q10 and Q11 for the second/third frames after Q6's CREATE.
 // ─────────────────────────────────────────────────────────────────────
-// tolerateMissedAcks: see sendImageBmpMultiFragment for semantics.
+// tolerateMissedAcks: g2-kit ack-miss tolerance (use kImgAckMissTolerance=3
+// for live UI). inFlightCapOverride: 0 = kImgInFlightCap (4); pass 1 to
+// serialize (g2-kit warmup mode). Live Health/UI does not send a warmup
+// frame on FW 2.2.4.34 — first stream already paints.
 static bool sendImageBmpFragmentsNoCreate(G2Temple& arm,
                                           const char* tag,
                                           uint32_t pushMagicBase,
@@ -15802,10 +16083,14 @@ static bool sendImageBmpFragmentsNoCreate(G2Temple& arm,
                                           const uint8_t* bmp, size_t bmpLen,
                                           unsigned* outOkFrags,
                                           unsigned* outTotalFrags,
-                                          unsigned tolerateMissedAcks = 0) {
+                                          unsigned tolerateMissedAcks = 0,
+                                          unsigned inFlightCapOverride = 0) {
   if (outOkFrags) *outOkFrags = 0;
   if (outTotalFrags) *outTotalFrags = 0;
   if (!bmp || bmpLen == 0 || !cname) return false;
+
+  // Health / Pet / Maps image path — same 3-link courtesy as MultiFragment.
+  ImgPushRadioGuard radioGuard;
 
   const uint32_t kCID    = cid;
   const char*    kCName  = cname;
@@ -15827,6 +16112,9 @@ static bool sendImageBmpFragmentsNoCreate(G2Temple& arm,
   size_t off = 0;
   const uint32_t burstStartMs = millis();
   bool aborted = false;
+  const unsigned inFlightCap =
+      (inFlightCapOverride > 0) ? inFlightCapOverride : kImgInFlightCap;
+  const uint8_t mapSessionId = allocImgMapSessionId();
   const uint32_t stuckTimeoutMs = (tolerateMissedAcks > 0) ? 500 : (kImgPushAckTimeoutMs * 2);
   for (unsigned i = 0; i < kFrags && !aborted; i++) {
     // Mid-burst dismiss check; see sendImageBmpMultiFragment for rationale.
@@ -15839,7 +16127,7 @@ static bool sendImageBmpFragmentsNoCreate(G2Temple& arm,
     // Same sliding-window throttle + phantom-ack mechanism as
     // sendImageBmpMultiFragment — see there for rationale.
     uint32_t throttleStartMs = millis();
-    while (i > (gImgPushAcked + acksMissed + kImgInFlightCap - 1u)) {
+    while (i > (gImgPushAcked + acksMissed + inFlightCap - 1u)) {
       if (gImgProbeAbort) {
         DEBUG_G2F("[ImgProbe] %s aborted in throttle at %u acked / %u sent",
                   tag, (unsigned)gImgPushAcked, i);
@@ -15868,23 +16156,16 @@ static bool sendImageBmpFragmentsNoCreate(G2Temple& arm,
     const uint32_t magic = pushMagicBase + i;
     const size_t pbLen = g2BuildImageRawBody(
         magic, kCID, kCName,
-        /*sessionId*/ 1, /*totalSize*/ (uint32_t)bmpLen,
+        /*sessionId*/ mapSessionId, /*totalSize*/ (uint32_t)bmpLen,
         /*fragIndex*/ i, bmp + off, chunk,
         pbBuf, kChunkBytes + 96);
     if (pbLen == 0) break;
     noteOurShutdownSent();
-    DEBUG_G2F("[ImgProbe] %s frag %u/%u magic=%u fragIdx=%u packet=%u (offset=%u/%u, in-flight=%u)",
+    DEBUG_G2F("[ImgProbe] %s frag %u/%u magic=%u fragIdx=%u packet=%u (offset=%u/%u, in-flight=%u sid=%u)",
               tag, i + 1, kFrags, (unsigned)magic, i,
               (unsigned)chunk, (unsigned)off, (unsigned)bmpLen,
-              (unsigned)(i + 1u - gImgPushAcked));
-    // Pace this burst's envelopes based on fragment size — see the
-    // tier picker comment above kImgEnvGapMs_*. Small fragments keep
-    // the fast 15 ms cadence; large fragments (animation packs etc.)
-    // get 20-25 ms so the controller TX buffer has time to drain
-    // between submissions.
-    g2DebugSetNextBurstFragDelay(pickImgEnvelopeGapMs(pbLen));
-    if (!sendPbFragmented(arm, allocSeq(), G2_SID_EVEN_CORE,
-                          G2_FLAG_REQUEST, pbBuf, pbLen)) {
+              (unsigned)(i + 1u - gImgPushAcked), (unsigned)mapSessionId);
+    if (!sendImgCmd3WithRetry(arm, tag, i + 1, kFrags, pbBuf, pbLen)) {
       break;
     }
     okFrags++;
@@ -15920,7 +16201,9 @@ static bool sendImageBmpFragmentsNoCreate(G2Temple& arm,
   DEBUG_G2F("[ImgProbe] %s push complete: %u/%u sent, %u/%u acked (+%u phantom) in %u ms (%s)",
             tag, okFrags, kFrags, ackedCount, ackTarget,
             acksMissed, (unsigned)burstMs, status);
-  return okFrags == kFrags && sufficientlyAcked;
+  const bool ok = (okFrags == kFrags && sufficientlyAcked);
+  if (!ok) bumpImgMapSessionAfterAbort();
+  return ok;
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -16469,14 +16752,19 @@ static void g2BmpViewerWorker(void* arg) {
   if (a->onDone) a->onDone();
   free(a->path);
   delete a;
-  vTaskDelete(nullptr);
+
+}
+
+static void g2BmpViewerDrop(void* p) {
+  auto* a = (BmpViewerArgs*)p;
+  if (!a) return;
+  free(a->path);
+  delete a;
 }
 
 bool g2ShowBmpFile(const char* path, void (*onDone)()) {
   if (!path || !*path) return false;
-  // Heap-low guard — the worker stack and the BMP buffer together can
-  // run a couple of tens of KB. Decline if internal heap is already
-  // tight rather than reboot mid-push.
+  // Heap-low guard — BMP decode buffer can be tens of KB (stack is on g2_session_w).
   if (ESP.getFreeHeap() < 16 * 1024) {
     DEBUG_G2F("[G2] BMP viewer: declining — heap low (%u B free)",
               (unsigned)ESP.getFreeHeap());
@@ -16490,13 +16778,9 @@ bool g2ShowBmpFile(const char* path, void (*onDone)()) {
     delete a;
     return false;
   }
-  // 6 KB stack — readBmpFromVfs heap-allocates the BMP, so the worker
-  // mainly carries small probe-state buffers on the stack.
-  if (xTaskCreatePinnedToCore(g2BmpViewerWorker, "g2_bmp_view", 6144, a,
-                  tskIDLE_PRIORITY + 2, nullptr, APP_CORE) != pdPASS) {
-    DEBUG_G2F("[G2] BMP viewer: xTaskCreate failed");
-    free(a->path);
-    delete a;
+  if (!g2SessionSubmit(g2BmpViewerWorker, a, g2BmpViewerDrop, "bmp_view")) {
+    DEBUG_G2F("[G2] BMP viewer: session enqueue failed");
+    g2BmpViewerDrop(a);
     return false;
   }
   return true;
@@ -16761,7 +17045,7 @@ static void g2MapPageWorker(void* arg) {
 
       if (dirty) {
         const size_t bmpCap = 14 + 40 + 64 + (288 / 2) * 144 + 64;
-        uint8_t* bmp = (uint8_t*)ps_alloc(bmpCap, AllocPref::PreferPSRAM, "g2.map.bmp");
+        uint8_t* bmp = g2SessionScratchAcquire(bmpCap);
         if (bmp) {
           const size_t bmpLen = g2RenderCurrentMapBmp(bmp, bmpCap);
           if (bmpLen > 0) {
@@ -16778,7 +17062,6 @@ static void g2MapPageWorker(void* arg) {
           } else {
             DEBUG_G2F("[G2] map page: render failed (no valid map?)");
           }
-          free(bmp);
         }
         dirty = false;
       }
@@ -16793,25 +17076,17 @@ static void g2MapPageWorker(void* arg) {
 
   if (a->onDone) a->onDone();
   delete a;
-  vTaskDelete(nullptr);
+
 }
 
-// Public entry — spawn the interactive map-page worker. Stack matches the
-// OLED map render task (renderMap is the stack-heavy step; the image push
-// runs after it returns each frame, so max-not-sum).
+static void g2MapPageDrop(void* p) { delete (MapPageArgs*)p; }
+
+// Public entry — enqueue on g2_session_w (8 KB stack paid at G2 init).
 static bool g2ShowMapPage(void (*onDone)()) {
-  // Honest heap guard. The render worker's task stack + its tile-read staging
-  // must come from CONTIGUOUS internal DRAM, so gate on the LARGEST free block,
-  // NOT total free — same as g2ShowLlmPage. This config is DRAM-fragmented
-  // (largest ~9 KB with a model loaded even when total free is ~29-39 KB). A
-  // total-free check passes in that state and then the worker crashes: renderMap
-  // → loadTileData → File::read → an internal read-staging malloc returns null,
-  // unchecked, and memcpy null-derefs (observed: Cache/MMU fault, EXCVADDR=0).
-  // Gating on largest-block makes the page DECLINE cleanly instead — the LLM page
-  // already did this correctly, which is why it declined while Maps crashed.
-  const size_t kStackBytes = (size_t)MAP_RENDER_STACK_WORDS * sizeof(StackType_t);
-  const size_t kNeeded     = kStackBytes + 8 * 1024;  // stack + tile-read/TX/TCB margin
-  const size_t kLargest    = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  // Tile-read staging still needs contiguous internal DRAM; stack does not
+  // (session worker already owns 8 KB). Gate on largest free for the margin only.
+  const size_t kNeeded  = 8 * 1024;
+  const size_t kLargest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
   if (kLargest < kNeeded) {
     DEBUG_G2F("[G2] map page: declining — need ~%u KB contiguous internal DRAM, largest free %u KB "
               "(free RAM by disconnecting BLE/G2 or disabling unused features)",
@@ -16821,10 +17096,9 @@ static bool g2ShowMapPage(void (*onDone)()) {
   auto* a = new MapPageArgs;
   if (!a) return false;
   a->onDone = onDone;
-  if (xTaskCreatePinnedToCore(g2MapPageWorker, "g2_map_page", MAP_RENDER_STACK_WORDS, a,
-                  tskIDLE_PRIORITY + 2, nullptr, APP_CORE) != pdPASS) {
-    DEBUG_G2F("[G2] map page: xTaskCreate failed");
-    delete a;
+  if (!g2SessionSubmit(g2MapPageWorker, a, g2MapPageDrop, "map_page")) {
+    DEBUG_G2F("[G2] map page: session enqueue failed");
+    g2MapPageDrop(a);
     return false;
   }
   return true;
@@ -16834,7 +17108,7 @@ static const char* cmd_g2map(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   (void)argsInput;
   if (!isG2Connected()) return "Error: G2 map: not connected";
-  if (!g2ShowMapPage(nullptr)) return "Error: G2 map: not enough free internal RAM (needs ~40 KB) or busy — free memory by disconnecting BLE/G2 or disabling unused features, then retry";
+  if (!g2ShowMapPage(nullptr)) return "Error: G2 map: not enough free internal RAM for tile staging or session busy — free memory then retry";
   return "G2 map: opening interactive map page — tap a control on the lens; Back to exit.";
 }
 #endif // ENABLE_MAPS
@@ -16922,8 +17196,8 @@ static void g2PetPageWorker(void* arg) {
 
     // Per-frame BMP staging in PSRAM (tile dims are fixed → alloc once, reuse).
     const size_t bmpCap = g2PetBmpCap();
-    uint8_t* bmp = (uint8_t*)ps_alloc(bmpCap, AllocPref::PreferPSRAM, "g2.pet.bmp");
-    if (!bmp) DEBUG_G2F("[G2] pet page: BMP alloc failed (%u B)", (unsigned)bmpCap);
+    uint8_t* bmp = g2SessionScratchAcquire(bmpCap);
+    if (!bmp) DEBUG_G2F("[G2] pet page: BMP scratch alloc failed (%u B)", (unsigned)bmpCap);
 
     while (bmp) {
       if (!gLens.hijackActive) { DEBUG_G2F("[G2] pet page: hijack ended"); break; }
@@ -16961,7 +17235,7 @@ static void g2PetPageWorker(void* arg) {
       vTaskDelay(pdMS_TO_TICKS(90));   // tap-poll gap; the blocking push paces the rest
     }
 
-    if (bmp) free(bmp);
+    // bmp is session scratch — retained across jobs; do not free.
     g2PetSave();               // persist the decay/age accrued while open
     gPetPageActive     = false;
     gPetPagePendingTap = 0;
@@ -16970,29 +17244,19 @@ static void g2PetPageWorker(void* arg) {
 
   if (a->onDone) a->onDone();
   delete a;
-  vTaskDelete(nullptr);
+
 }
 
-// Public entry — spawn the pet-page worker. The renderer is light (a PSRAM
-// grid + a single-fragment BMP), so a modest stack from contiguous internal
-// DRAM suffices; gate on the LARGEST free block (this config is DRAM-
-// fragmented) so the page DECLINES cleanly rather than crashing mid-spawn.
-static constexpr uint32_t PET_STACK_BYTES = 6144;
+static void g2PetPageDrop(void* p) { delete (PetPageArgs*)p; }
+
+// Public entry — enqueue on g2_session_w (stack paid at G2 init).
 static bool g2ShowPetPage(void (*onDone)()) {
-  const size_t kNeeded  = PET_STACK_BYTES + 4 * 1024;   // stack + TCB/TX margin
-  const size_t kLargest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-  if (kLargest < kNeeded) {
-    DEBUG_G2F("[G2] pet page: declining — need ~%u KB contiguous internal DRAM, largest free %u KB",
-              (unsigned)(kNeeded / 1024), (unsigned)(kLargest / 1024));
-    return false;
-  }
   auto* a = new PetPageArgs;
   if (!a) return false;
   a->onDone = onDone;
-  if (xTaskCreatePinnedToCore(g2PetPageWorker, "g2_pet_page", PET_STACK_BYTES, a,
-                  tskIDLE_PRIORITY + 2, nullptr, APP_CORE) != pdPASS) {
-    DEBUG_G2F("[G2] pet page: xTaskCreate failed");
-    delete a;
+  if (!g2SessionSubmit(g2PetPageWorker, a, g2PetPageDrop, "pet_page")) {
+    DEBUG_G2F("[G2] pet page: session enqueue failed");
+    g2PetPageDrop(a);
     return false;
   }
   return true;
@@ -17003,9 +17267,433 @@ static const char* cmd_g2pet(const String& argsInput) {
   (void)argsInput;
   if (!isG2Connected()) return "Error: G2 pet: not connected";
   if (!g2ShowPetPage(nullptr))
-    return "Error: G2 pet: not enough free internal RAM or busy — free memory by disconnecting BLE/G2 or disabling unused features, then retry";
+    return "Error: G2 pet: session busy or enqueue failed — retry";
   return "G2 pet: opening — Feed/Play/Clean/Sleep on the lens; tap Back to exit.";
 }
+
+#if ENABLE_R1_HEALTH
+// ─────────────────────────────────────────────────────────────────────
+// Health page (g2HealthPageWorker) — mode-switch compound:
+//   Overview → list + native text vitals
+//   HR/HRV/SpO2/Battery → list + text (title/value) + graph-only image
+//   (Q30-proven 3-pane geometry). Shape change = SHUTDOWN + CREATE.
+// ─────────────────────────────────────────────────────────────────────
+struct HealthPageArgs {
+  void (*onDone)();
+  uint32_t gen;
+};
+
+static void g2HealthPageWorker(void* arg) {
+  G2HijackCtxGuard ctxGuard;
+  auto* a = (HealthPageArgs*)arg;
+  const uint32_t myGen = a->gen;
+
+  const G2ContainerGeom kListGeom = { 8, 8, 264, 272 };
+  // Overview: full right column for vitals.
+  const G2ContainerGeom kOverviewTextGeom = { 280, 8, 288, 272 };
+  // Metric: Q30-proven tall text above graph-only image.
+  const G2ContainerGeom kMetricTextGeom = { 280, 8, 288, 112 };
+  static const char* const kTxtName = "txtHealth";
+  static constexpr uint32_t kTxtCid = 2;
+
+  G2ImageTile imgTile = {};
+  imgTile.x = 280;
+  imgTile.y = 128;
+  imgTile.w = HEALTH_TILE_W;
+  imgTile.h = HEALTH_TILE_H;
+  imgTile.containerId   = 3;  // distinct from text cid=2 (3-pane)
+  imgTile.containerName = "imgHealth";
+
+  // CREATE + every push magic must fit in uint8 (≤255). Reuse Pet/Maps'
+  // 242/243 band — only one compound page runs at a time.
+  const uint32_t kCreateMagic   = G2_MAGIC_IMAGE_BASE + 0x20;  // 242
+  const uint32_t kPushMagicBase = G2_MAGIC_IMAGE_BASE + 0x21;  // 243..~248
+
+  auto createHealthOverview = [&](G2Temple& arm, const char* readout) -> bool {
+    size_t rowCount = 0;
+    const char* const* rows = g2HealthMenuRows(&rowCount);
+    G2TextChildSpec text = {};
+    text.containerName = kTxtName;
+    text.content       = readout ? readout : "";
+    text.containerId   = kTxtCid;
+    text.geom          = kOverviewTextGeom;
+    text.eventCapture  = false;
+    if (!armCreateSlot("CREATE-health-ov")) return false;
+    uint8_t* pb = (uint8_t*)ps_alloc(1024, AllocPref::PreferPSRAM, "g2.pb.health-ov");
+    if (!pb) return false;
+    size_t pbLen = g2BuildCreateMixedListTextPb(
+        G2_MAGIC_CREATE, "lstHealth", rows, rowCount, kListGeom, text,
+        BLOCKS_WIDGET_ID, pb, 1024);
+    bool sent = pbLen && sendPbFragmented(arm, allocSeq(), G2_SID_EVEN_CORE,
+                                          G2_FLAG_REQUEST, pb, pbLen);
+    free(pb);
+    if (!sent) return false;
+    if (!waitCreateAck("CREATE-health-ov", BLOCKS_WIDGET_ID)) return false;
+    // Load-bearing: tearDownActiveContainer skips SHUTDOWN when
+    // containerReady is false. Without this, Overview→metric CREATE
+    // lands on a still-live list+text and times out / kicks to Apps.
+    g2NoteCreateSuccess(arm, /*isList*/ false, BLOCKS_WIDGET_ID);
+    return true;
+  };
+
+  auto createHealthMetric = [&](G2Temple& arm, const char* readout) -> bool {
+    // Must use sendPbFragmented — a single-fragment envelope over ~240 B
+    // is rejected by the glasses firmware with an 8-byte error
+    // (seq match, len=0, flag=0x02) and CreateResp never arrives.
+    // Two-col metric text + "Tap Poll Now" routinely pushes the CREATE
+    // past that ceiling (observed 248 B → timeout; 231 B Overview-era
+    // CREATE worked). Overview already fragments; metric must too.
+    size_t rowCount = 0;
+    const char* const* rows = g2HealthMenuRows(&rowCount);
+    G2TextChildSpec text = {};
+    text.containerName = kTxtName;
+    text.content       = readout ? readout : "";
+    text.containerId   = kTxtCid;
+    text.geom          = kMetricTextGeom;
+    text.eventCapture  = false;
+    uint8_t* pb = (uint8_t*)ps_alloc(1400, AllocPref::PreferPSRAM, "g2.pb.health-m");
+    if (!pb) {
+      BROADCAST_PRINTF("[G2] health page: CREATE-3pane alloc failed");
+      return false;
+    }
+    const size_t pbLen = g2BuildCreateMixedListTextImagePb(
+        kCreateMagic, /*listName*/ "lstHealth",
+        rows, rowCount, kListGeom, text, imgTile, BLOCKS_WIDGET_ID,
+        G2_LTI_ORDER_LIST_TEXT_IMAGE, pb, 1400);
+    if (pbLen == 0) {
+      free(pb);
+      BROADCAST_PRINTF("[G2] health page: CREATE-3pane build failed");
+      return false;
+    }
+    probePrepImageCreateAck(kCreateMagic);
+    const bool sent = sendPbFragmented(arm, allocSeq(), G2_SID_EVEN_CORE,
+                                       G2_FLAG_REQUEST, pb, pbLen);
+    free(pb);
+    if (!sent) {
+      BROADCAST_PRINTF("[G2] health page: CREATE-3pane TX failed");
+      return false;
+    }
+    if (!probeWaitImageCreateAck(kCreateMagic, kImgCreateAckTimeoutMs)) {
+      BROADCAST_PRINTF("[G2] health page: CREATE-3pane ack timeout");
+      return false;
+    }
+    g2NoteCreateSuccess(arm, /*isList*/ false, BLOCKS_WIDGET_ID);
+    return true;
+  };
+
+  do {
+    G2Temple* arm = pickEvenAIArm("healthPage");
+    if (!arm) { DEBUG_G2F("[G2] health page: no eligible arm"); break; }
+
+    if (!probeTearDownActiveContainer(*arm)) {
+      DEBUG_G2F("[G2] health page: pre-page SHUTDOWN failed");
+      break;
+    }
+    gImgProbeHoldTapPending = false;
+    gImgProbeAbort          = false;
+    gImgProbeHoldActive     = false;
+    gHealthPagePendingTap   = 0;
+
+    g2HealthOpen();
+    g2SetHijackPage(G2_HIJACK_PAGE_HEALTH);
+
+    char readout[160];
+    char lastReadout[160];
+    lastReadout[0] = '\0';
+    g2HealthBuildOverviewText(readout, sizeof(readout));
+
+    bool shapeOverview = true;
+    if (!createHealthOverview(*arm, readout)) {
+      probePostProbeShutdown(*arm);
+      break;
+    }
+    strncpy(lastReadout, readout, sizeof(lastReadout) - 1);
+    lastReadout[sizeof(lastReadout) - 1] = '\0';
+    DEBUG_G2F("[G2] health page: created Overview (list@'lstHealth' + text@'%s')",
+              kTxtName);
+    // Leave ImageProbing once Overview is live — staying in that state
+    // for the whole Health session swallowed SYSTEM_EXIT reason=0
+    // (connection lost) as a page-swap echo.
+    imageProbeEnd();
+    gHealthTextDead = false;
+
+    gHealthPageActive = true;
+    g2HealthSetPageActive(true);
+    BROADCAST_PRINTF("[G2] Hijack: Health opened (Overview text / metric graphs)");
+
+    const size_t bmpCap = g2HealthBmpCap();
+    uint8_t* bmp = g2SessionScratchAcquire(bmpCap);
+    if (!bmp) DEBUG_G2F("[G2] health page: BMP scratch alloc failed (%u B)", (unsigned)bmpCap);
+
+    uint8_t pollCursor = G2_RING_POLL_VITAL_COUNT;
+    uint32_t lastPollMs = 0;
+    uint32_t lastDailyMs = 0;
+    uint32_t menuGen = g2HealthMenuGeneration();
+
+    auto buildHealthText = [&](char* buf, size_t cap) {
+      if (g2HealthWantTextOnlyShape()) {
+        if (g2HealthInTrendsNav()) g2HealthBuildTrendsOverviewText(buf, cap);
+        else                      g2HealthBuildOverviewText(buf, cap);
+      } else {
+        g2HealthBuildMetricText(buf, cap);
+      }
+    };
+
+    while (true) {
+      if (!gLens.hijackActive) { DEBUG_G2F("[G2] health page: hijack ended"); break; }
+      if (gImgProbeAbort)      { DEBUG_G2F("[G2] health page: abort flag set"); break; }
+
+      // Worker still servicing the page ⇒ not a stuck hijack. Tap-only
+      // refresh previously force-exited ~60 s into a passive graph watch
+      // (safety-timeout), then dual-Shutdown raced Apps CREATE and hung
+      // bleCentralTx. Mirror camera-stream: live page activity feeds the
+      // window; a dead worker stops feeding and the watchdog can still fire.
+      gHijackStartedMs = millis();
+
+      const uint32_t taps = gHealthPagePendingTap;
+      gHealthPagePendingTap = 0;
+      if (taps & (1u << 0)) {
+        // Trends submenu Back returns to MAIN Overview; MAIN Back exits.
+        if (g2HealthInTrendsNav()) {
+          g2HealthAction(0);
+          DEBUG_G2F("[G2] health page: Trends Back → main");
+        } else {
+          DEBUG_G2F("[G2] health page: Back → exit");
+          break;
+        }
+      }
+      // MAIN has 10 rows (0..9); Trends submenu has 5 (0..4).
+      for (uint32_t r = 1; r < 11; r++) if (taps & (1u << r)) g2HealthAction(r);
+
+      if (g2HealthConsumePollRequest()) {
+        if (g2RingIsConnected()) {
+          pollCursor = 0;
+          lastPollMs = 0;
+          g2HealthNotePollStarted();
+          lastReadout[0] = '\0';  // force UPDATE_TEXT → "Polling..."
+          DEBUG_G2F("[G2] health page: poll burst start");
+        } else {
+          pollCursor = G2_RING_POLL_VITAL_COUNT;
+          DEBUG_G2F("[G2] health page: Poll Now ignored (ring offline)");
+        }
+      }
+
+      g2HealthTick();
+
+      const uint32_t now = millis();
+      // Pace daily queries (≥700 ms) — Trends Refresh queues HR→HRV→SpO2.
+      if (lastDailyMs == 0 || (long)(now - lastDailyMs) >= 700) {
+        uint8_t dailyCmd = 0;
+        if (g2HealthConsumeDailyRequest(&dailyCmd)) {
+          (void)g2RingQueryDaily(dailyCmd);
+          lastDailyMs = now;
+        }
+      }
+      if (pollCursor < G2_RING_POLL_VITAL_COUNT && g2RingIsConnected() &&
+          (lastPollMs == 0 || (long)(now - lastPollMs) >= 700)) {
+        (void)g2RingPollVital(pollCursor);
+        pollCursor++;
+        lastPollMs = now;
+        if (pollCursor >= G2_RING_POLL_VITAL_COUNT) {
+          healthTrackNotePageRefresh();
+          g2HealthNotePollFinished();
+          lastReadout[0] = '\0';  // force UPDATE_TEXT → "Updated"
+          DEBUG_G2F("[G2] health page: poll burst done");
+        }
+      }
+
+      // Menu set change (MAIN ↔ Trends) or Overview ↔ metric shape →
+      // SHUTDOWN + CREATE. Re-enter ImageProbing for the swap so
+      // DISPLAY_OFF / SYSTEM_EXIT reason=1 echoes are suppressed, then
+      // leave ImageProbing once the new shape (and any graph push) is live.
+      const uint32_t curMenuGen = g2HealthMenuGeneration();
+      const bool wantOverview = g2HealthWantTextOnlyShape();
+      const bool menuChanged = (curMenuGen != menuGen);
+      if (menuChanged || wantOverview != shapeOverview) {
+        if (!probeTearDownActiveContainer(*arm)) {
+          BROADCAST_PRINTF("[G2] health page: shape SHUTDOWN failed");
+          // Keep selection but don't exit — retry next loop.
+        } else if (wantOverview) {
+          buildHealthText(readout, sizeof(readout));
+          if (!createHealthOverview(*arm, readout)) {
+            BROADCAST_PRINTF("[G2] health page: Overview re-CREATE failed — retrying");
+          } else {
+            strncpy(lastReadout, readout, sizeof(lastReadout) - 1);
+            lastReadout[sizeof(lastReadout) - 1] = '\0';
+            shapeOverview = true;
+            menuGen = curMenuGen;
+            g2HealthClearGraphPush();
+            gHealthTextDead = false;
+            imageProbeEnd();
+            DEBUG_G2F("[G2] health page: shape → text-only (nav=%u gen=%u)",
+                      (unsigned)g2HealthNav(), (unsigned)menuGen);
+          }
+        } else if (!bmp) {
+          BROADCAST_PRINTF("[G2] health page: no BMP buffer for metric shape");
+          imageProbeEnd();
+        } else {
+          buildHealthText(readout, sizeof(readout));
+          if (!createHealthMetric(*arm, readout)) {
+            // Recover Overview so the user isn't left on a blank lens.
+            BROADCAST_PRINTF("[G2] health page: metric CREATE failed — restoring Overview");
+            if (g2HealthInTrendsNav()) g2HealthAction(0);
+            else                      g2HealthAction(1);  // MAIN Overview
+            buildHealthText(readout, sizeof(readout));
+            if (createHealthOverview(*arm, readout)) {
+              strncpy(lastReadout, readout, sizeof(lastReadout) - 1);
+              lastReadout[sizeof(lastReadout) - 1] = '\0';
+              shapeOverview = true;
+              menuGen = g2HealthMenuGeneration();
+              gHealthTextDead = false;
+            }
+            imageProbeEnd();
+          } else {
+            strncpy(lastReadout, readout, sizeof(lastReadout) - 1);
+            lastReadout[sizeof(lastReadout) - 1] = '\0';
+            shapeOverview = false;
+            menuGen = curMenuGen;
+            gHealthTextDead = false;
+            // Action already armed a delayed one-shot push; ensure one
+            // is scheduled if we got here without a tap arm.
+            g2HealthArmGraphPush(400);
+            DEBUG_G2F("[G2] health page: shape → metric/trends (list+text+image)");
+            // Stay in ImageProbing until the graph push finishes.
+          }
+        }
+      }
+
+      if (shapeOverview) {
+        buildHealthText(readout, sizeof(readout));
+        if (!gHealthTextDead && strcmp(readout, lastReadout) != 0) {
+          if (sendUpdateTextNamed(*arm, kTxtName, kTxtCid, readout)) {
+            strncpy(lastReadout, readout, sizeof(lastReadout) - 1);
+            lastReadout[sizeof(lastReadout) - 1] = '\0';
+            // Live vitals refresh = page is healthy (same idea as camera
+            // frame pushes). Tap-only refresh kicked users out ~60 s into
+            // a passive graph watch.
+            if (g2FsmHijackActive()) gHijackStartedMs = millis();
+          }
+        }
+      } else {
+        // Metric / Trends 3-pane: native text updates live; graph is one-shot
+        // (metric enter / Poll Now / Trends Refresh) — not every 1 Hz sample.
+        buildHealthText(readout, sizeof(readout));
+        if (!gHealthTextDead && strcmp(readout, lastReadout) != 0) {
+          if (sendUpdateTextNamed(*arm, kTxtName, kTxtCid, readout)) {
+            strncpy(lastReadout, readout, sizeof(lastReadout) - 1);
+            lastReadout[sizeof(lastReadout) - 1] = '\0';
+            if (g2FsmHijackActive()) gHijackStartedMs = millis();
+          }
+        }
+        if (bmp && g2HealthConsumeGraphPush()) {
+          const size_t bmpLen = g2RenderHealthBmp(bmp, bmpCap);
+          if (bmpLen > 0) {
+            // Re-enter ImageProbing for the burst if we already left it
+            // (Poll Now / Refresh after the first graph).
+            if (hijackFsmState() != HijackState::ImageProbing) {
+              imageProbeBegin();
+            }
+            // Single push only. g2-kit documents a sacrificial warmup for
+            // "first stream after CREATE is dropped", but on FW 2.2.4.34
+            // the first ~20 KB stream already paints — a second identical
+            // push doubles radio load (L+R+ring) and trips
+            // esp_ble_gattc_write_char rc=-1 mid-burst / connection-lost.
+            // If a future FW drops the first frame, Poll Now re-pushes.
+            unsigned okFrags = 0, totalFrags = 0;
+            bool pushed = sendImageBmpFragmentsNoCreate(
+                *arm, "healthPage",
+                kPushMagicBase,
+                imgTile.containerId, imgTile.containerName,
+                bmp, bmpLen, &okFrags, &totalFrags,
+                kImgAckMissTolerance);
+            // ESP32 rc=-1 mid-burst: one full-push retry after drain
+            // (g2-kit desktop BLE does not hit this path).
+            if (!pushed && gLens.hijackActive && !gImgProbeAbort) {
+              DEBUG_G2F("[G2] health page: graph push failed — retry in 400 ms");
+              vTaskDelay(pdMS_TO_TICKS(400));
+              if (gLens.hijackActive && !gImgProbeAbort) {
+                okFrags = totalFrags = 0;
+                pushed = sendImageBmpFragmentsNoCreate(
+                    *arm, "healthPage",
+                    kPushMagicBase,
+                    imgTile.containerId, imgTile.containerName,
+                    bmp, bmpLen, &okFrags, &totalFrags,
+                    kImgAckMissTolerance);
+              }
+            }
+            // Brief settle before UPDATE_TEXT — large Cmd=3 bursts leave
+            // the plugin tender on ESP32 + ring.
+            vTaskDelay(pdMS_TO_TICKS(400));
+            imageProbeEnd();
+            if (pushed && g2FsmHijackActive()) gHijackStartedMs = millis();
+            else if (!pushed) {
+              DEBUG_G2F("[G2] health page: graph push failed (retry via Poll/Refresh)");
+            }
+          }
+        }
+      }
+      vTaskDelay(pdMS_TO_TICKS(200));
+    }
+
+    // bmp is session scratch — retained across jobs; do not free.
+    gHealthPageActive     = false;
+    gHealthPagePendingTap = 0;
+    g2HealthSetPageActive(false);
+    g2HealthClearGraphPush();
+    // Safety-timeout / DISPLAY_OFF already tore hijack down (Idle +
+    // Shutdown). Re-running probePostProbeShutdown races a second
+    // Shutdown into Apps onDone CREATE and can wedge bleCentralTx.
+    if (gLens.hijackActive) {
+      probePostProbeShutdown(*arm);
+    } else {
+      DEBUG_G2F("[G2] health page: hijack already cleared — skip post-probe Shutdown");
+      // Benign if already Idle (HijackExit beat us); cleans ImageProbing
+      // if only the abort flag flipped.
+      imageProbeEnd();
+    }
+  } while (0);
+
+  // Skip onDone if a newer Health session already started (timeout race:
+  // old worker finishes teardown and would otherwise g2ShowAppsMenu over
+  // the fresh Health page ~1 s after open).
+  // Also skip when hijack is already gone — force-exit (safety-timeout)
+  // left Idle; bouncing to Apps CREATE from there is what phantom-
+  // rearmed Hijacked and hung BLE TX after the dual-Shutdown race.
+  if (a->onDone && myGen == gHealthPageGen && gLens.hijackActive) a->onDone();
+  else if (a->onDone && myGen != gHealthPageGen) {
+    DEBUG_G2F("[G2] health page: stale worker gen=%u (current=%u) — skip onDone",
+              (unsigned)myGen, (unsigned)gHealthPageGen);
+  } else if (a->onDone && !gLens.hijackActive) {
+    DEBUG_G2F("[G2] health page: hijack inactive — skip Apps rebuild onDone");
+  }
+  delete a;
+}
+
+static void g2HealthPageDrop(void* p) { delete (HealthPageArgs*)p; }
+
+static bool g2ShowHealthPage(void (*onDone)()) {
+  // Session worker aborts any prior job (incl. Health) before running.
+  auto* a = new HealthPageArgs;
+  if (!a) return false;
+  a->onDone = onDone;
+  a->gen = ++gHealthPageGen;
+  if (!g2SessionSubmit(g2HealthPageWorker, a, g2HealthPageDrop, "health_page")) {
+    DEBUG_G2F("[G2] health page: session enqueue failed");
+    g2HealthPageDrop(a);
+    return false;
+  }
+  return true;
+}
+
+static const char* cmd_g2health(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  (void)argsInput;
+  if (!isG2Connected()) return "Error: G2 health: not connected";
+  if (!g2ShowHealthPage(nullptr))
+    return "Error: G2 health: session busy or enqueue failed — retry";
+  return "G2 health: opening — Overview/HR/HRV/SpO2/Battery; Toggle Track starts logging; Back to exit.";
+}
+#endif  // ENABLE_R1_HEALTH
 
 #if ENABLE_ONDEVICE_LLM
 // ─────────────────────────────────────────────────────────────────────
@@ -17167,6 +17855,7 @@ static void g2LlmPageWorker(void* arg) {
 
     while (true) {
       if (!gLens.hijackActive) { DEBUG_G2F("[G2] LLM page: hijack ended"); break; }
+      if (gImgProbeAbort)      { DEBUG_G2F("[G2] LLM page: abort flag set"); break; }
       if (millis() - startMs > kLlmSafetyCapMs) { DEBUG_G2F("[G2] LLM page: safety cap"); break; }
 
       const uint32_t taps = gLlmPagePendingTap;
@@ -17203,33 +17892,19 @@ static void g2LlmPageWorker(void* arg) {
 
   if (a->onDone) a->onDone();
   delete a;
-  vTaskDelete(nullptr);
+
 }
 
-// Public entry — spawn the LLM viewer worker. Heap-guarded like the map
-// page: the worker stack is internal DRAM (the chat buffers are PSRAM).
+static void g2LlmPageDrop(void* p) { delete (LlmPageArgs*)p; }
+
+// Public entry — enqueue on g2_session_w (chat buffers stay in PSRAM).
 static bool g2ShowLlmPage(void (*onDone)()) {
-  // xTaskCreate needs a CONTIGUOUS internal-DRAM block for the stack, so gate on
-  // the largest free block, NOT total free — this config is DRAM-fragmented
-  // (largest ~31 KB, frag ~65%) and a total-free check would pass and then crash
-  // on alloc. The stack (LLM_VIEW_STACK_WORDS) must cover the return-to-Apps
-  // onDone (g2ShowAppsMenu → FS scan + deep logging, ~16-18 KB); that's why the
-  // original 16 KB worker overflowed on Back.
-  const size_t kStackBytes = (size_t)LLM_VIEW_STACK_WORDS * sizeof(StackType_t);
-  const size_t kLargest    = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-  if (kLargest < kStackBytes + 4 * 1024) {
-    DEBUG_G2F("[G2] LLM page: declining — need ~%u KB contiguous internal DRAM, largest free %u KB "
-              "(free RAM by disabling unused features)",
-              (unsigned)((kStackBytes + 4 * 1024) / 1024), (unsigned)(kLargest / 1024));
-    return false;
-  }
   auto* a = new LlmPageArgs;
   if (!a) return false;
   a->onDone = onDone;
-  if (xTaskCreatePinnedToCore(g2LlmPageWorker, "g2_llm_page", LLM_VIEW_STACK_WORDS, a,
-                  tskIDLE_PRIORITY + 2, nullptr, APP_CORE) != pdPASS) {
-    DEBUG_G2F("[G2] LLM page: xTaskCreate failed");
-    delete a;
+  if (!g2SessionSubmit(g2LlmPageWorker, a, g2LlmPageDrop, "llm_page")) {
+    DEBUG_G2F("[G2] LLM page: session enqueue failed");
+    g2LlmPageDrop(a);
     return false;
   }
   return true;
@@ -17476,7 +18151,7 @@ static size_t buildBmp4bppFromRgb888(uint8_t* out, size_t outCap,
 
 #if ENABLE_CAMERA_SENSOR
 #include "esp_camera.h"
-#include "System_Camera_DVP.h"   // captureFrame, cameraWidth, cameraHeight, gCameraEnabled
+#include "System_Camera_DVP.h"   // captureFrame, cameraWidth, cameraHeight, gCameraRunning
 
 struct CameraViewerArgs {
   void (*onDone)();
@@ -17489,7 +18164,7 @@ static void g2CameraViewerWorker(void* arg) {
   uint8_t* bmpBuf  = nullptr;
 
   do {
-    if (!gCameraEnabled) {
+    if (!gCameraRunning) {
       DEBUG_G2F("[G2] Camera viewer: camera not enabled — abort");
       break;
     }
@@ -17586,11 +18261,13 @@ static void g2CameraViewerWorker(void* arg) {
 
   if (a && a->onDone) a->onDone();
   delete a;
-  vTaskDelete(nullptr);
+
 }
 
+static void g2CameraViewerDrop(void* p) { delete (CameraViewerArgs*)p; }
+
 bool g2ShowCameraViewer(void (*onDone)()) {
-  if (!gCameraEnabled) {
+  if (!gCameraRunning) {
     DEBUG_G2F("[G2] Camera viewer: declining — camera not enabled");
     return false;
   }
@@ -17602,12 +18279,9 @@ bool g2ShowCameraViewer(void (*onDone)()) {
   auto* a = new CameraViewerArgs;
   if (!a) return false;
   a->onDone = onDone;
-  // 6 KB stack — heavy buffers all live in PSRAM, the worker carries
-  // probe state + small locals only.
-  if (xTaskCreatePinnedToCore(g2CameraViewerWorker, "g2_cam_view", 6144, a,
-                  tskIDLE_PRIORITY + 2, nullptr, APP_CORE) != pdPASS) {
-    DEBUG_G2F("[G2] Camera viewer: xTaskCreate failed");
-    delete a;
+  if (!g2SessionSubmit(g2CameraViewerWorker, a, g2CameraViewerDrop, "cam_view")) {
+    DEBUG_G2F("[G2] Camera viewer: session enqueue failed");
+    g2CameraViewerDrop(a);
     return false;
   }
   return true;
@@ -17653,7 +18327,7 @@ static void g2CameraStreamWorker(void* arg) {
   bool exitToSettings = false;
 
   do {
-    if (!gCameraEnabled) {
+    if (!gCameraRunning) {
       DEBUG_G2F("[G2] Camera stream: camera not enabled — abort");
       break;
     }
@@ -18033,11 +18707,13 @@ static void g2CameraStreamWorker(void* arg) {
     a->onDone();
   }
   delete a;
-  vTaskDelete(nullptr);
+
 }
 
+static void g2CameraStreamDrop(void* p) { delete (CameraStreamArgs*)p; }
+
 bool g2ShowCameraStream(void (*onDone)()) {
-  if (!gCameraEnabled) {
+  if (!gCameraRunning) {
     DEBUG_G2F("[G2] Camera stream: declining — camera not enabled");
     return false;
   }
@@ -18049,10 +18725,9 @@ bool g2ShowCameraStream(void (*onDone)()) {
   auto* a = new CameraStreamArgs;
   if (!a) return false;
   a->onDone = onDone;
-  if (xTaskCreatePinnedToCore(g2CameraStreamWorker, "g2_cam_stream", 6144, a,
-                  tskIDLE_PRIORITY + 2, nullptr, APP_CORE) != pdPASS) {
-    DEBUG_G2F("[G2] Camera stream: xTaskCreate failed");
-    delete a;
+  if (!g2SessionSubmit(g2CameraStreamWorker, a, g2CameraStreamDrop, "cam_stream")) {
+    DEBUG_G2F("[G2] Camera stream: session enqueue failed");
+    g2CameraStreamDrop(a);
     return false;
   }
   return true;
@@ -18283,10 +18958,9 @@ static void g2BmpFullViewerWorker(void* arg) {
 
     // ── Per-tile build + push ──
     const size_t kTileBmpCap = 24 * 1024;
-    uint8_t* tileBmp = (uint8_t*)ps_alloc(kTileBmpCap, AllocPref::PreferPSRAM,
-                                          "g2.bmpFull.tile");
+    uint8_t* tileBmp = g2SessionScratchAcquire(kTileBmpCap);
     if (!tileBmp) {
-      DEBUG_G2F("[G2] BMP full-viewer: tile-buf alloc failed");
+      DEBUG_G2F("[G2] BMP full-viewer: tile scratch alloc failed");
       free(src);
       probePostProbeShutdown(*arm);
       break;
@@ -18316,7 +18990,6 @@ static void g2BmpFullViewerWorker(void* arg) {
       // drains before the next push begins (same pattern as Q12).
       vTaskDelay(pdMS_TO_TICKS(50));
     }
-    free(tileBmp);
     free(src);
 
     if (anyTileFailed) {
@@ -18336,17 +19009,19 @@ static void g2BmpFullViewerWorker(void* arg) {
   if (a->onDone) a->onDone();
   free(a->path);
   delete a;
-  vTaskDelete(nullptr);
+
+}
+
+static void g2BmpFullViewerDrop(void* p) {
+  auto* a = (BmpFullViewerArgs*)p;
+  if (!a) return;
+  free(a->path);
+  delete a;
 }
 
 bool g2ShowBmpFileFullScreen(const char* path, void (*onDone)()) {
   if (!path || !*path) return false;
-  // Heap-low guard. Both the source BMP (~21 KB) and the per-tile
-  // staging buffer (~24 KB) are PSRAM allocations (ps_alloc /
-  // PreferPSRAM), so they don't draw on internal DRAM. The only
-  // DRAM cost is the 8 KB worker stack + small local variables
-  // (~1 KB). Gate at 16 KB — same as the single-tile viewer which
-  // uses a 6 KB stack and passes this check fine with ~23 KB free.
+  // Heap-low guard — source + tile staging are PSRAM; stack is on g2_session_w.
   if (ESP.getFreeHeap() < 16 * 1024) {
     DEBUG_G2F("[G2] BMP full-viewer: declining — heap low (%u B free)",
               (unsigned)ESP.getFreeHeap());
@@ -18360,14 +19035,9 @@ bool g2ShowBmpFileFullScreen(const char* path, void (*onDone)()) {
     delete a;
     return false;
   }
-  // 8 KB stack — 4-tile burst nests several helper calls (probe ack,
-  // mutex take, fragment build) so we run a slightly larger stack
-  // than the single-image viewer's 6 KB.
-  if (xTaskCreatePinnedToCore(g2BmpFullViewerWorker, "g2_bmp_full", 8192, a,
-                  tskIDLE_PRIORITY + 2, nullptr, APP_CORE) != pdPASS) {
-    DEBUG_G2F("[G2] BMP full-viewer: xTaskCreate failed");
-    free(a->path);
-    delete a;
+  if (!g2SessionSubmit(g2BmpFullViewerWorker, a, g2BmpFullViewerDrop, "bmp_full")) {
+    DEBUG_G2F("[G2] BMP full-viewer: session enqueue failed");
+    g2BmpFullViewerDrop(a);
     return false;
   }
   return true;
@@ -18629,7 +19299,14 @@ static void g2JpgViewerWorker(void* arg) {
   if (a->onDone) a->onDone();
   free(a->path);
   delete a;
-  vTaskDelete(nullptr);
+
+}
+
+static void g2JpgViewerDrop(void* p) {
+  auto* a = (JpgViewerArgs*)p;
+  if (!a) return;
+  free(a->path);
+  delete a;
 }
 
 bool g2ShowJpgFile(const char* path, void (*onDone)()) {
@@ -18647,11 +19324,9 @@ bool g2ShowJpgFile(const char* path, void (*onDone)()) {
     delete a;
     return false;
   }
-  if (xTaskCreatePinnedToCore(g2JpgViewerWorker, "g2_jpg_view", 6144, a,
-                  tskIDLE_PRIORITY + 2, nullptr, APP_CORE) != pdPASS) {
-    DEBUG_G2F("[G2] JPG viewer: xTaskCreate failed");
-    free(a->path);
-    delete a;
+  if (!g2SessionSubmit(g2JpgViewerWorker, a, g2JpgViewerDrop, "jpg_view")) {
+    DEBUG_G2F("[G2] JPG viewer: session enqueue failed");
+    g2JpgViewerDrop(a);
     return false;
   }
   return true;
@@ -18686,12 +19361,11 @@ static void g2JpgFullViewerWorker(void* arg) {
       break;
     }
 
-    // Per-tile staging buffer reused across the 4 pushes. Same size
-    // budget as the BMP full-viewer's (header + 144*144 px-bytes).
+    // Per-tile staging via session scratch (same budget as BMP full-viewer).
     const size_t kTileCap = 14 + 40 + 64 + 144 * 144 + 64;
-    uint8_t* tile = (uint8_t*)ps_alloc(kTileCap, AllocPref::PreferPSRAM, "g2.jpg.tile");
+    uint8_t* tile = g2SessionScratchAcquire(kTileCap);
     if (!tile) {
-      DEBUG_G2F("[G2] JPG full-viewer: tile alloc failed (%u B)",
+      DEBUG_G2F("[G2] JPG full-viewer: tile scratch alloc failed (%u B)",
                 (unsigned)kTileCap);
       free(src);
       break;
@@ -18700,7 +19374,6 @@ static void g2JpgFullViewerWorker(void* arg) {
     if (!probeTearDownActiveContainer(*arm)) {
       DEBUG_G2F("[G2] JPG full-viewer: pre-push SHUTDOWN failed");
       free(src);
-      free(tile);
       break;
     }
 
@@ -18738,7 +19411,6 @@ static void g2JpgFullViewerWorker(void* arg) {
       vTaskDelay(pdMS_TO_TICKS(50));
     }
     free(src);
-    free(tile);
 
     DEBUG_G2F("[G2] JPG full-viewer: image up (%u/%u frags total) — "
               "double-tap to dismiss (60 s cap)", totalOk, totalSent);
@@ -18752,7 +19424,14 @@ static void g2JpgFullViewerWorker(void* arg) {
   if (a->onDone) a->onDone();
   free(a->path);
   delete a;
-  vTaskDelete(nullptr);
+
+}
+
+static void g2JpgFullViewerDrop(void* p) {
+  auto* a = (JpgFullViewerArgs*)p;
+  if (!a) return;
+  free(a->path);
+  delete a;
 }
 
 bool g2ShowJpgFileFullScreen(const char* path, void (*onDone)()) {
@@ -18770,11 +19449,9 @@ bool g2ShowJpgFileFullScreen(const char* path, void (*onDone)()) {
     delete a;
     return false;
   }
-  if (xTaskCreatePinnedToCore(g2JpgFullViewerWorker, "g2_jpg_full", 8192, a,
-                  tskIDLE_PRIORITY + 2, nullptr, APP_CORE) != pdPASS) {
-    DEBUG_G2F("[G2] JPG full-viewer: xTaskCreate failed");
-    free(a->path);
-    delete a;
+  if (!g2SessionSubmit(g2JpgFullViewerWorker, a, g2JpgFullViewerDrop, "jpg_full")) {
+    DEBUG_G2F("[G2] JPG full-viewer: session enqueue failed");
+    g2JpgFullViewerDrop(a);
     return false;
   }
   return true;
@@ -20580,6 +21257,267 @@ const char* g2ProbeImageQ28LMixedListImageLive() {
            (unsigned)totalMs,
            aborted ? "user dismiss" : "all frames");
   return ret;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Q30 family — 3-pane list+text+image CREATE (unproven schema).
+// Evidence so far: list+image paints (Q16/Q28L); list+text paints;
+// image+text often blanks (Q28). These probes keep a List sibling and
+// add Text+Image with Health-shaped geometry (or Q28L small image).
+// ─────────────────────────────────────────────────────────────────────
+struct Q30GeomSpec {
+  const char* tag;                 // "Q30" / "Q30b" / "Q30c"
+  G2ListTextImageOrder order;
+  G2ContainerGeom listGeom;
+  G2ContainerGeom textGeom;
+  int32_t imgX, imgY, imgW, imgH;
+  const char* bannerDetail;
+};
+
+static const char* runQ30ListTextImageProbe(const Q30GeomSpec& g) {
+  EXT_RAM_BSS_ATTR static char ret[320];
+  G2Temple* arm = pickEvenAIArm(g.tag);
+  if (!arm) {
+    snprintf(ret, sizeof(ret), "Img %s: no reachable temple", g.tag);
+    return ret;
+  }
+
+  // Stay in uint8 magic band (≤255). Create 226; pushes 227..254.
+  static constexpr uint32_t kCreateMagic   = G2_MAGIC_IMAGE_BASE + 0x10;  // 226
+  static constexpr uint32_t kPushSlotStart = G2_MAGIC_IMAGE_BASE + 0x11;  // 227
+  static constexpr uint32_t kMaxPushMagic  = 254;
+  static constexpr unsigned kFrames        = 24;
+  static constexpr uint32_t kPaceMs        = 750;
+
+  char listName[16], txtName[16], imgName[16];
+  snprintf(listName, sizeof(listName), "lst%s", g.tag);
+  snprintf(txtName, sizeof(txtName), "txt%s", g.tag);
+  snprintf(imgName, sizeof(imgName), "img%s", g.tag);
+
+  // Frag estimate for magic cycling (4bpp row stride).
+  const unsigned rowStride = (unsigned)(((g.imgW * 4 + 31) / 32) * 4);
+  const unsigned pixelBytes = rowStride * (unsigned)g.imgH;
+  const unsigned bmpBytes = 14 + 40 + 64 + pixelBytes;
+  const unsigned fragsPerFrame = (bmpBytes + G2_IMG_MAPRAW_CHUNK_BYTES - 1) /
+                                 G2_IMG_MAPRAW_CHUNK_BYTES;
+  const unsigned pushAvailable = (unsigned)(kMaxPushMagic - kPushSlotStart + 1);
+  const unsigned numSlots =
+      (fragsPerFrame > 0) ? (pushAvailable / fragsPerFrame) : 1;
+  if (numSlots < 1) {
+    snprintf(ret, sizeof(ret),
+             "Img %s: image %dx%d needs %u frags — exceeds uint8 magic room",
+             g.tag, (int)g.imgW, (int)g.imgH, fragsPerFrame);
+    return ret;
+  }
+
+  probeBanner(g.tag, kCreateMagic, kMaxPushMagic, g.bannerDetail);
+
+  if (!probeTearDownActiveContainer(*arm)) {
+    snprintf(ret, sizeof(ret), "Img %s: pre-burst SHUTDOWN failed", g.tag);
+    return ret;
+  }
+
+  // Row 0 is the escape hatch. With a List focused, temple/ring input
+  // drives the list — SysEvent double-tap never fires. Any ListEvent
+  // CLICK while gImgProbeHoldActive is treated as dismiss (see notify
+  // handler); labeling row 0 makes that discoverable.
+  const char* listItems[] = {
+    "<- Back (exit)",
+    "3-pane list+text+img",
+    "stable stripes image",
+    "text updates live",
+    "tap any row to exit",
+  };
+  const size_t listItemCount = sizeof(listItems) / sizeof(listItems[0]);
+
+  G2TextChildSpec textChild = {};
+  textChild.containerId   = 2;
+  textChild.containerName = txtName;
+  textChild.eventCapture  = false;
+  textChild.content       = "Q30 starting...\nTap Back to exit";
+  textChild.geom          = g.textGeom;
+
+  G2ImageTile imgTile = {};
+  imgTile.x = (uint32_t)g.imgX;
+  imgTile.y = (uint32_t)g.imgY;
+  imgTile.w = (uint32_t)g.imgW;
+  imgTile.h = (uint32_t)g.imgH;
+  imgTile.containerId   = 3;
+  imgTile.containerName = imgName;
+
+  uint8_t createBuf[1400];
+  size_t createLen = g2BuildCreateMixedListTextImage(
+      allocSeq(), kCreateMagic,
+      listName, listItems, listItemCount, g.listGeom,
+      textChild, imgTile, BLOCKS_WIDGET_ID, g.order,
+      createBuf, sizeof(createBuf));
+  if (createLen == 0) {
+    snprintf(ret, sizeof(ret), "Img %s: CREATE-3pane build failed", g.tag);
+    return ret;
+  }
+
+  probePrepImageCreateAck(kCreateMagic);
+  if (!sendEnvelope(*arm, createBuf, createLen)) {
+    snprintf(ret, sizeof(ret), "Img %s: CREATE-3pane TX failed", g.tag);
+    return ret;
+  }
+  if (!probeWaitImageCreateAck(kCreateMagic, kImgCreateAckTimeoutMs)) {
+    probePostProbeShutdown(*arm);
+    snprintf(ret, sizeof(ret),
+             "Img %s: CREATE-3pane ack timeout — firmware may reject "
+             "list+text+image (ContainerTotalNum=3)",
+             g.tag);
+    return ret;
+  }
+  DEBUG_G2F("[ImgProbe] %s CREATE-3pane acked (order=%u, img %dx%d)",
+            g.tag, (unsigned)g.order, (int)g.imgW, (int)g.imgH);
+
+  // Arm list-tap dismiss for the whole live window (not only a post-hold).
+  gImgProbeHoldTapPending = false;
+  gImgProbeAbort          = false;
+  gImgProbeHoldActive     = true;
+
+  const size_t kBmpCap = (size_t)bmpBytes + 256;
+  uint8_t* bmp = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPSRAM, "g2.q30.bmp");
+  if (!bmp) {
+    gImgProbeHoldActive = false;
+    probePostProbeShutdown(*arm);
+    snprintf(ret, sizeof(ret), "Img %s: BMP heap alloc failed", g.tag);
+    return ret;
+  }
+  // Stable stripes only — alternating stripes/black every 750 ms was a
+  // drop-detection trick and looked like a broken flash to operators.
+  size_t bmpLen = buildBmp4bpp(bmp, kBmpCap, g.imgW, -g.imgH, BMP_PAT_STRIPES);
+  if (bmpLen == 0) {
+    free(bmp);
+    gImgProbeHoldActive = false;
+    probePostProbeShutdown(*arm);
+    snprintf(ret, sizeof(ret), "Img %s: BMP build failed", g.tag);
+    return ret;
+  }
+
+  unsigned framesPushed = 0, framesFailed = 0;
+  unsigned textOk = 0, textFail = 0;
+  const uint32_t startMs = millis();
+
+  // Push the image once up front, then refresh TEXT on a cadence. Re-push
+  // the same stripes every ~5 s as a keep-alive (not a pattern flip).
+  {
+    unsigned okFrags = 0, totalFrags = 0;
+    bool pushed = sendImageBmpFragmentsNoCreate(
+        *arm, g.tag, kPushSlotStart,
+        imgTile.containerId, imgName,
+        bmp, bmpLen, &okFrags, &totalFrags,
+        /*tolerateMissedAcks*/ 3);
+    if (pushed) framesPushed++;
+    else framesFailed++;
+  }
+
+  for (unsigned i = 0; i < kFrames && !gImgProbeAbort; i++) {
+    const uint32_t frameStartMs = millis();
+
+    char caption[96];
+    snprintf(caption, sizeof(caption),
+             "%s live\n"
+             "tick %u\n"
+             "list+text+image\n"
+             "stable stripes\n"
+             "Tap Back to exit",
+             g.tag, i);
+    if (sendUpdateTextNamed(*arm, txtName, textChild.containerId, caption))
+      textOk++;
+    else
+      textFail++;
+
+    // Occasional identical image re-push (keep-alive), not a flash pattern.
+    if (i > 0 && (i % 6) == 0) {
+      const uint32_t pushMagic =
+          kPushSlotStart + ((uint32_t)((i / 6) % numSlots)) * (uint32_t)fragsPerFrame;
+      unsigned okFrags = 0, totalFrags = 0;
+      bool pushed = sendImageBmpFragmentsNoCreate(
+          *arm, g.tag, pushMagic,
+          imgTile.containerId, imgName,
+          bmp, bmpLen, &okFrags, &totalFrags,
+          /*tolerateMissedAcks*/ 3);
+      if (pushed) framesPushed++;
+      else framesFailed++;
+    }
+
+    const uint32_t consumedMs = millis() - frameStartMs;
+    if (consumedMs < kPaceMs) {
+      const uint32_t remainingMs = kPaceMs - consumedMs;
+      const uint32_t kSliceMs = 50;
+      const uint32_t sliceEndMs = millis() + remainingMs;
+      while (millis() < sliceEndMs && !gImgProbeAbort) {
+        const uint32_t leftMs = sliceEndMs - millis();
+        const uint32_t thisMs = leftMs < kSliceMs ? leftMs : kSliceMs;
+        vTaskDelay(pdMS_TO_TICKS(thisMs));
+      }
+    }
+  }
+
+  // If the live window finished without a tap, hold so the operator can
+  // inspect the final frame and dismiss via any list row.
+  if (!gImgProbeAbort) {
+    (void)probeHoldUntilTapOrTimeout(60000);
+  }
+
+  const bool aborted = gImgProbeAbort;
+  gImgProbeHoldActive = false;
+  free(bmp);
+  probePostProbeShutdown(*arm);
+  probeFooter(g.tag, framesPushed, kFrames > 0 ? kFrames : 1);
+
+  const uint32_t totalMs = millis() - startMs;
+  snprintf(ret, sizeof(ret),
+           "Img %s: CREATE ok; img pushes %u (%u fail); text %u ok/%u fail; "
+           "%u ms (%s) — list+text+img visible?",
+           g.tag, framesPushed, framesFailed, textOk, textFail,
+           (unsigned)totalMs, aborted ? "user dismiss" : "timeout");
+  return ret;
+}
+
+const char* g2ProbeImageQ30ListTextImageHealthGeom() {
+  // Lens 576×288. Text taller (~5–6 native lines); image sits below it.
+  // text y=8 h=112 → ends 120; image y=128 h=144 → ends 272 (16 px margin).
+  static const Q30GeomSpec g = {
+    /*tag*/ "Q30",
+    /*order*/ G2_LTI_ORDER_LIST_TEXT_IMAGE,
+    /*listGeom*/ { 8, 8, 264, 272 },
+    /*textGeom*/ { 280, 8, 288, 112 },
+    /*img*/ 280, 128, 288, 144,
+    /*banner*/ "3-pane Health geom: list left, tall text top-right (h=112), "
+               "image 288x144 @ y=128. Wire order list→text→image. "
+               "Stable stripes + live UPDATE_TEXT. Tap any list row to exit.",
+  };
+  return runQ30ListTextImageProbe(g);
+}
+
+const char* g2ProbeImageQ30bListImageTextOrder() {
+  static const Q30GeomSpec g = {
+    /*tag*/ "Q30b",
+    /*order*/ G2_LTI_ORDER_LIST_IMAGE_TEXT,
+    /*listGeom*/ { 8, 8, 264, 272 },
+    /*textGeom*/ { 280, 8, 288, 112 },
+    /*img*/ 280, 128, 288, 144,
+    /*banner*/ "Same Health geom as Q30 (tall text + image @ y=128) but wire "
+               "order list→image→text. Tap any list row to exit.",
+  };
+  return runQ30ListTextImageProbe(g);
+}
+
+const char* g2ProbeImageQ30cListTextSmallImage() {
+  static const Q30GeomSpec g = {
+    /*tag*/ "Q30c",
+    /*order*/ G2_LTI_ORDER_LIST_TEXT_IMAGE,
+    /*listGeom*/ { 8, 8, 264, 272 },
+    /*textGeom*/ { 280, 8, 288, 112 },
+    /*img*/ 280, 140, 96, 96,  // under taller text; Q28L-sized tile
+    /*banner*/ "3-pane with tall text + 96x96 image @ (280,140). "
+               "Falls back if Q30 large tile fails under ContainerTotalNum=3. "
+               "Tap any list row to exit.",
+  };
+  return runQ30ListTextImageProbe(g);
 }
 
 // ─────────────────────────────────────────────────────────────────────

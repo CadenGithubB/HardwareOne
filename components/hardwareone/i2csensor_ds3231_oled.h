@@ -20,7 +20,7 @@ static void displayRTCData() {
   int y = OLED_CONTENT_START_Y;
   oledDisplay->setTextSize(1);
   
-  if (!gRtcConnected || !gRtcEnabled) {
+  if (!gRtcConnected || !gRtcRunning) {
     oledDisplay->setCursor(0, y);
     oledDisplay->println("RTC not active");
     oledDisplay->println();
@@ -92,7 +92,7 @@ static void displayRTCData() {
 // Availability check for RTC OLED mode
 static bool rtcOLEDModeAvailable(String* outReason) {
   // Check if RTC is running
-  if (gRtcConnected && gRtcEnabled) {
+  if (gRtcConnected && gRtcRunning) {
     return true;
   }
   // Check if hardware was detected during I2C scan (address 0x68)
@@ -111,7 +111,7 @@ static bool rtcOLEDModeAvailable(String* outReason) {
 static void rtcToggleConfirmed(void* userData) {
   (void)userData;
 
-  if (gRtcEnabled && gRtcConnected) {
+  if (gRtcRunning && gRtcConnected) {
     DEBUG_RTCF("[RTC] Confirmed: Stopping RTC...");
     executeOLEDCommand("closertc");
   } else {
@@ -133,7 +133,7 @@ static bool rtcInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   (void)deltaY;
   
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
-    if (gRtcEnabled && gRtcConnected) {
+    if (gRtcRunning && gRtcConnected) {
       oledConfirmRequest("Close RTC?", nullptr, rtcToggleConfirmed, nullptr, false);
     } else {
       oledConfirmRequest("Open RTC?", nullptr, rtcToggleConfirmed, nullptr);

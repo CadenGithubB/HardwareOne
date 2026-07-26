@@ -62,7 +62,7 @@ volatile UBaseType_t gImuWatermarkNow = (UBaseType_t)0;
 // Queue system functions now in System_I2C.h
 
 // IMU sensor state (definitions)
-bool gImuEnabled = false;
+bool gImuRunning = false;
 bool gImuConnected = false;
 unsigned long gImuLastStopTime = 0;
 TaskHandle_t gImuTaskHandle = nullptr;
@@ -83,7 +83,7 @@ const char* cmd_imu(const String& argsInput) {
     return (n > 0) ? getDebugBuffer() : "{\"valid\":false}";
   }
 
-  if (!gImuConnected || !gImuEnabled) {
+  if (!gImuConnected || !gImuRunning) {
     broadcastOutput("IMU sensor not connected or not started. Use 'openimu' first.");
     return "ERROR";
   }
@@ -160,9 +160,9 @@ bool imuStartInternal() {
   }
 
   // CRITICAL: Enable flag BEFORE creating task to prevent race condition
-  // Task checks gImuEnabled first thing and will delete itself if false
-  bool prev = gImuEnabled;
-  gImuEnabled = true;  // Set this BEFORE task creation
+  // Task checks gImuRunning first thing and will delete itself if false
+  bool prev = gImuRunning;
+  gImuRunning = true;  // Set this BEFORE task creation
 
   // Defer initialization to imuTask; wait briefly for result
   if (gBNO055 == nullptr || !gImuConnected) {
@@ -171,13 +171,13 @@ bool imuStartInternal() {
     gImuInitRequested = true;
   }
 
-  // Create IMU task lazily (after setting gImuEnabled=true)
+  // Create IMU task lazily (after setting gImuRunning=true)
   if (!createIMUTask()) {
     DEBUG_CLIF("Failed to create IMU task (insufficient memory or resources)");
-    gImuEnabled = false;  // Reset flag on failure
+    gImuRunning = false;  // Reset flag on failure
     return false;
   }
-  if (gImuEnabled != prev) {
+  if (gImuRunning != prev) {
     sensorStatusBumpWith("openimu@queue");
   }
 
@@ -188,12 +188,12 @@ bool imuStartInternal() {
       delay(10);
     }
     if (!gImuInitDone) {
-      gImuEnabled = false;
+      gImuRunning = false;
       DEBUG_CLIF("Failed to initialize IMU sensor (timeout after 3s)");
       return false;
     }
     if (!gImuInitResult) {
-      gImuEnabled = false;
+      gImuRunning = false;
       DEBUG_CLIF("Failed to initialize IMU sensor (initialization failed)");
       return false;
     }
@@ -213,7 +213,7 @@ const char* cmd_imustart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   // Check if already enabled or queued
-  if (gImuEnabled) {
+  if (gImuRunning) {
     return "Error: [IMU] Already running";
   }
   if (isInQueue(I2C_DEVICE_IMU)) {
@@ -247,7 +247,7 @@ const char* cmd_imustop(const String& argsInput) {
 const char* cmd_imuactions(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
-  if (!gImuEnabled || !gImuConnected) {
+  if (!gImuRunning || !gImuConnected) {
     broadcastOutput("Error: [IMU] Not enabled. Use 'openimu' first.");
     return "ERROR";
   }
@@ -522,10 +522,10 @@ void imuApplyOrientationCorrection(float& pitch, float& roll, float& yaw) {
 }
 
 void imuPoll() {
-  if (!gImuEnabled || !gImuConnected || gBNO055 == nullptr) {
+  if (!gImuRunning || !gImuConnected || gBNO055 == nullptr) {
     if (!gImuConnected) {
       broadcastOutput("Error: [IMU] Not connected. Check wiring.");
-    } else if (!gImuEnabled) {
+    } else if (!gImuRunning) {
       broadcastOutput("Error: [IMU] Not started - use 'openimu' first");
     } else {
       broadcastOutput("Error: [IMU] Failed to initialize BNO055 sensor");
@@ -625,7 +625,7 @@ static bool gWasWalking = false;
 
 // Update all IMU action detections
 void imuUpdateActions(bool postEvents) {
-  if (!gImuEnabled || !gImuConnected || !gImuCache.imuDataValid) return;
+  if (!gImuRunning || !gImuConnected || !gImuCache.imuDataValid) return;
 
   unsigned long now = millis();
 
@@ -1100,11 +1100,11 @@ const size_t imuCommandsCount = sizeof(imuCommands) / sizeof(imuCommands[0]);
 // ============================================================================
 // Purpose: Continuously reads 9-DOF orientation data from BNO055 IMU sensor
 // Stack: 4096 BYTES (4 KB) | Priority: 1 | Core: Any
-// Lifecycle: Created by cmd_imustart, deleted when gImuEnabled=false
+// Lifecycle: Created by cmd_imustart, deleted when gImuRunning=false
 // Polling: Configurable via imuDevicePollMs (default 200ms) | I2C Clock: 100kHz
 //
 // Cleanup Strategy:
-//   1. Check gImuEnabled flag at loop start
+//   1. Check gImuRunning flag at loop start
 //   2. Acquire bus mutex via I2CDeviceManager to prevent race conditions during cleanup
 //   3. Delete sensor object and invalidate cache
 //   4. Release mutex and delete task
@@ -1120,7 +1120,7 @@ void imuTask(void* parameter) {
   unsigned long lastStackLog = 0;
   while (true) {
     // CRITICAL: Check enabled flag FIRST for graceful shutdown
-    if (!gImuEnabled) {
+    if (!gImuRunning) {
       gImuConnected = false;
       if (gBNO055 != nullptr) {
         delete gBNO055;
@@ -1149,27 +1149,27 @@ void imuTask(void* parameter) {
       // 'continue' (not 'break') so the top-of-loop shutdown runs the clean
       // SENSOR_TASK_EXIT (vTaskDelete) path instead of returning from the task
       // function with a near-overflowed stack (IllegalInstruction panic).
-      if (checkTaskStackSafety("imu", IMU_STACK_WORDS, &gImuEnabled)) continue;
+      if (checkTaskStackSafety("imu", IMU_STACK_WORDS, &gImuRunning)) continue;
       // CRITICAL: Check enabled flag again before debug output (prevent crash during shutdown)
-      if (gImuEnabled) {
+      if (gImuRunning) {
         DEBUG_PERFORMANCEF("[STACK] imu_task watermark_now=%u min=%u words", (unsigned)gImuWatermarkNow, (unsigned)gImuWatermarkMin);
         DEBUG_MEMORY_HEAPF("[HEAP] imu_task: free=%u min=%u", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
       }
     }
     // Handle deferred IMU initialization on task stack
-    if (gImuEnabled && (!gImuConnected || gBNO055 == nullptr)) {
+    if (gImuRunning && (!gImuConnected || gBNO055 == nullptr)) {
       if (gImuInitRequested) {
         bool ok = imuInit();
         gImuInitResult = ok;
         gImuInitDone = true;
         gImuInitRequested = false;
         if (!ok) {
-          gImuEnabled = false;
+          gImuRunning = false;
         }
       }
     }
 
-    if (gImuEnabled && gImuConnected && gBNO055 != nullptr && !pollPaused(0 /* legacy Wire1 = bus 0 */)) {
+    if (gImuRunning && gImuConnected && gBNO055 != nullptr && !pollPaused(0 /* legacy Wire1 = bus 0 */)) {
       unsigned long imuPollMs = (gSettings.imuDevicePollMs > 0) ? (unsigned long)gSettings.imuDevicePollMs : 200;
       unsigned long nowMs = millis();
       if (nowMs - lastIMURead >= imuPollMs) {
@@ -1194,7 +1194,7 @@ void imuTask(void* parameter) {
         if (!result) {
           if (i2cShouldAutoDisable(I2C_ADDR_IMU)) {
             ERROR_IMUF("Too many consecutive IMU failures - auto-disabling");
-            gImuEnabled = false;
+            gImuRunning = false;
             sensorStatusBumpWith("imu@auto_disabled");
             logSystemEvent("SENSOR", "IMU auto-disabled after too many consecutive I2C failures");
             systemEventPost(SYSEVT_SENSOR_FAULT, "IMU", "consecutive I2C failures");
@@ -1216,17 +1216,18 @@ void imuTask(void* parameter) {
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry imuSettingEntries[] = {
-  { "imuAutoStart", SETTING_BOOL, &gSettings.imuAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, nullptr },
-  { "imuPollingMs", SETTING_INT, &gSettings.imuPollingMs, 200, 0, nullptr, 50, 2000, "Polling (ms)", nullptr, false, "timing", nullptr },
-  { "imuEWMAFactor", SETTING_FLOAT, &gSettings.imuEWMAFactor, 0, 0.1f, nullptr, 0, 1, "EWMA Factor", nullptr, false, "timing", nullptr },
-  { "imuTransitionMs", SETTING_INT, &gSettings.imuTransitionMs, 100, 0, nullptr, 0, 1000, "Transition (ms)", nullptr, false, "timing", nullptr },
-  { "imuWebMaxFps", SETTING_INT, &gSettings.imuWebMaxFps, 15, 0, nullptr, 1, 30, "Web Max FPS", nullptr, false, "timing", nullptr },
+  { "imuEnabled", SETTING_BOOL, &gSettings.imuEnabled, 1, 0, nullptr, 0, 1, "Enabled", nullptr, false, nullptr, "imuenabled" },
+  { "imuAutoStart", SETTING_BOOL, &gSettings.imuAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, "imuautostart" },
+  { "imuPollingMs", SETTING_INT, &gSettings.imuPollingMs, 200, 0, nullptr, 50, 2000, "Polling (ms)", nullptr, false, "timing", "imupollingms" },
+  { "imuEWMAFactor", SETTING_FLOAT, &gSettings.imuEWMAFactor, 0, 0.1f, nullptr, 0, 1, "EWMA Factor", nullptr, false, "timing", "imuewmafactor" },
+  { "imuTransitionMs", SETTING_INT, &gSettings.imuTransitionMs, 100, 0, nullptr, 0, 1000, "Transition (ms)", nullptr, false, "timing", "imutransitionms" },
+  { "imuWebMaxFps", SETTING_INT, &gSettings.imuWebMaxFps, 15, 0, nullptr, 1, 30, "Web Max FPS", nullptr, false, "timing", "imuwebmaxfps" },
   { "imuDevicePollMs", SETTING_INT, &gSettings.imuDevicePollMs, 200, 0, nullptr, 50, 1000, "Poll Interval (ms)", nullptr, false, "timing", "imudevicepollms" },
   { "imuOrientationMode", SETTING_INT, &gSettings.imuOrientationMode, 8, 0, nullptr, 0, 8, "Orientation Mode", "0:Normal,1:Flip Pitch,2:Flip Roll,3:Flip Yaw,4:Flip Pitch+Roll,5:Roll 180 Fix,6:Rotate 90 CCW,7:Alt Extreme Pitch,8:Upside Down", false, "orientation", "imuorientationmode" },
   { "imuOrientationCorrectionEnabled", SETTING_BOOL, &gSettings.imuOrientationCorrectionEnabled, true, 0, nullptr, 0, 1, "Orientation Correction", nullptr, false, "orientation", "imuorientationcorrection" },
-  { "imuPitchOffset", SETTING_FLOAT, &gSettings.imuPitchOffset, 0, 0.0f, nullptr, -180, 180, "Pitch Offset", nullptr, false, "orientation", nullptr },
-  { "imuRollOffset", SETTING_FLOAT, &gSettings.imuRollOffset, 0, 0.0f, nullptr, -180, 180, "Roll Offset", nullptr, false, "orientation", nullptr },
-  { "imuYawOffset", SETTING_FLOAT, &gSettings.imuYawOffset, 0, 0.0f, nullptr, -180, 180, "Yaw Offset", nullptr, false, "orientation", nullptr }
+  { "imuPitchOffset", SETTING_FLOAT, &gSettings.imuPitchOffset, 0, 0.0f, nullptr, -180, 180, "Pitch Offset", nullptr, false, "orientation", "imupitchoffset" },
+  { "imuRollOffset", SETTING_FLOAT, &gSettings.imuRollOffset, 0, 0.0f, nullptr, -180, 180, "Roll Offset", nullptr, false, "orientation", "imurolloffset" },
+  { "imuYawOffset", SETTING_FLOAT, &gSettings.imuYawOffset, 0, 0.0f, nullptr, -180, 180, "Yaw Offset", nullptr, false, "orientation", "imuyawoffset" },
 };
 
 static bool isIMUConnected() {

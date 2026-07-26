@@ -2662,6 +2662,9 @@ static const char* cmd_llm_status(const String& argsInput) {
 }
 
 static const char* cmd_llm_load(const String& args) {
+  if (!gSettings.llmEnabled) {
+    return "{\"schema\":1,\"ok\":false,\"error\":\"LLM disabled - run llmenabled 1 first\"}";
+  }
   CommandArgs ca(args);
   String a = ca.arg(0);  // optional model filename
 
@@ -2975,6 +2978,8 @@ static const char* cmd_llm_turns(const String& args) {
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options, isSecret, group, cmdKey
 static const SettingEntry llmSettingEntries[] = {
+  { "llmEnabled", SETTING_BOOL, &gSettings.llmEnabled, 1, 0, nullptr, 0, 1, "Enabled", nullptr, false, nullptr, "llmenabled" },
+  { "autoStart",     SETTING_BOOL,   &gSettings.llmAutoStart,     0, 0,    nullptr,    0,    1, "Auto-start at boot",   nullptr, false, nullptr, "llmautostart" },  // idx 1
   { "temperature",   SETTING_FLOAT,  &gSettings.llmTemperature,  0,   0.5f, nullptr,    0,    0, "Temperature",          nullptr, false, nullptr, "llmtemperature"   },
   { "topP",          SETTING_FLOAT,  &gSettings.llmTopP,         0,   0.8f, nullptr,    0,    1, "Top-P",                nullptr, false, nullptr, "llmtopp"          },
   { "maxTokens",     SETTING_INT,    &gSettings.llmMaxTokens,    256, 0,    nullptr,    1,  512, "Max Tokens",           nullptr, false, nullptr, "llmmaxtokens"     },
@@ -2990,14 +2995,13 @@ static const SettingEntry llmSettingEntries[] = {
   // New settings go HERE, at the end, with a matching macro+command index below.
   // (Mirostat + dynTemp rows were removed 2026-07-10; the whole table + macros
   //  were renumbered in one verified pass — the sanctioned append-only break.)
-  { "minP",          SETTING_FLOAT,  &gSettings.llmMinP,          0, 0.0f, nullptr,    0,    1, "Min-P (0=off)",        nullptr, false, nullptr, "llmminp"   },  // idx 9
-  { "kvPrecision",   SETTING_INT,    &gSettings.llmKvPrecision,   1, 0,    nullptr,    0,    2, "KV Cache (0=FP32,1=FP16,2=INT8, reload to apply)", "0:FP32,1:FP16,2:INT8", false, nullptr, "llmkvprec" },  // idx 10 (default FP16: 2x ctx, ~lossless)
-  { "autoStart",     SETTING_BOOL,   &gSettings.llmAutoStart,     0, 0,    nullptr,    0,    1, "Auto-start at boot",   nullptr, false, nullptr, "llmautostart" },  // idx 11
-  { "noRepeatNgram", SETTING_INT,    &gSettings.llmNoRepeatNgram, 0, 0,    nullptr,    0,    8, "No-repeat n-gram (0=off)", nullptr, false, nullptr, "llmnorepeatngram" },  // idx 12 (shipped off per user; 3 typical)
-  { "confThreshold", SETTING_FLOAT,  &gSettings.llmConfThreshold, 0, -1.0f, nullptr,  -8,    0, "Confidence gate mean-logprob (0=off)", nullptr, false, nullptr, "llmconfthreshold" },  // idx 13
-  { "contentBoost",  SETTING_FLOAT,  &gSettings.llmContentBoost,  0, 1.5f, nullptr,    0,    4, "Content boost (0=off)", nullptr, false, nullptr, "llmcontentboost" },  // idx 14 (on-topic logit bonus; co-tune w/ repPenalty)
-  { "domainGate",    SETTING_BOOL,   &gSettings.llmDomainGate,    1, 0,    nullptr,    0,    1, "Domain gate (refuse off-topic)", nullptr, false, nullptr, "llmdomaingate" },  // idx 15 (refuse prompts outside the .bin's embedded domain vocab)
-  { "profile",       SETTING_BOOL,   &gSettings.llmProfile,       0, 0,    nullptr,    0,    1, "Profiler (per-section fwd timing)", nullptr, false, nullptr, "llmprofile" },  // idx 16 (diagnostic; dumps a breakdown after each generation)
+  { "minP",          SETTING_FLOAT,  &gSettings.llmMinP,          0, 0.0f, nullptr,    0,    1, "Min-P (0=off)",        nullptr, false, nullptr, "llmminp"   },  // idx 11
+  { "kvPrecision",   SETTING_INT,    &gSettings.llmKvPrecision,   1, 0,    nullptr,    0,    2, "KV Cache (0=FP32,1=FP16,2=INT8, reload to apply)", "0:FP32,1:FP16,2:INT8", false, nullptr, "llmkvprec" },  // idx 12 (default FP16: 2x ctx, ~lossless)
+  { "noRepeatNgram", SETTING_INT,    &gSettings.llmNoRepeatNgram, 0, 0,    nullptr,    0,    8, "No-repeat n-gram (0=off)", nullptr, false, nullptr, "llmnorepeatngram" },  // idx 13 (shipped off per user; 3 typical)
+  { "confThreshold", SETTING_FLOAT,  &gSettings.llmConfThreshold, 0, -1.0f, nullptr,  -8,    0, "Confidence gate mean-logprob (0=off)", nullptr, false, nullptr, "llmconfthreshold" },  // idx 14
+  { "contentBoost",  SETTING_FLOAT,  &gSettings.llmContentBoost,  0, 1.5f, nullptr,    0,    4, "Content boost (0=off)", nullptr, false, nullptr, "llmcontentboost" },  // idx 15 (on-topic logit bonus; co-tune w/ repPenalty)
+  { "domainGate",    SETTING_BOOL,   &gSettings.llmDomainGate,    1, 0,    nullptr,    0,    1, "Domain gate (refuse off-topic)", nullptr, false, nullptr, "llmdomaingate" },  // idx 16 (refuse prompts outside the .bin's embedded domain vocab)
+  { "profile",       SETTING_BOOL,   &gSettings.llmProfile,       0, 0,    nullptr,    0,    1, "Profiler (per-section fwd timing)", nullptr, false, nullptr, "llmprofile" },  // idx 17 (diagnostic; dumps a breakdown after each generation)
 };
 
 extern const SettingsModule llmSettingsModule = {

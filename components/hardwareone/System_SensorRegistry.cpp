@@ -12,7 +12,7 @@
 // ============================================================================
 
 #if ENABLE_CAMERA_SENSOR
-extern bool gCameraEnabled;
+extern bool gCameraRunning;
 extern bool cameraConnected;
 
 static bool getCameraConnected() {
@@ -20,7 +20,7 @@ static bool getCameraConnected() {
 }
 
 static bool getCameraEnabled() {
-  return gCameraEnabled;
+  return gCameraRunning;
 }
 
 static const char* getCameraTask() {
@@ -38,7 +38,7 @@ static const char* cameraValidTasks[] = { SENSOR_TASK_STREAMING, nullptr };
 
 #if ENABLE_MICROPHONE
 #include "HAL_Audio.h"   // audioAnySourceAvailable — "connected" = a mic source is reachable
-extern bool gMicEnabled;
+extern bool gMicRunning;
 extern bool micConnected;
 extern bool micRecording;
 
@@ -49,7 +49,7 @@ static bool getMicConnected() {
 }
 
 static bool getMicEnabled() {
-  return gMicEnabled;
+  return gMicRunning;
 }
 
 static const char* getMicTask() {

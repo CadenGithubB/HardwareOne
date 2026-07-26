@@ -83,10 +83,8 @@ struct HijackEventPayload {
 const char* hijackStateName(HijackState s);
 const char* hijackEventName(HijackEvent e);
 
-// Lazily create the event queue + worker task. Call once during G2 init
-// (idempotent). Dispatches that occur before the queue is up apply
-// in-line — the device is still single-threaded at that point so the
-// behaviour matches the post-init worker.
+// Lazily create the event queue + worker task. Dispatch calls ensure this on
+// first use; if queue/task allocation fails, events apply inline.
 void hijackFsmInit();
 
 // Read current state. Single-writer model: only the FSM worker task

@@ -170,9 +170,9 @@ void initI2CManager() {
                 I2CDeviceManager::MAX_DEVICES - compiledCount);
 }
 
-// Global I2C bus enabled flag (mirrors gSettings.i2cBusEnabled)
+// Global I2C bus enabled flag (mirrors gSettings.i2cEnabled)
 // Defaults to false; set correctly inside initI2CBuses() before any transactions run
-bool gI2CBusEnabled = false;
+bool gI2CBusRunning = false;
 
 // The sensor-polling pause primitive (gSensorPollingPaused mirror + the
 // reference-counted pollPause/pollResume / sensorPolling* ops) moved to its own
@@ -289,7 +289,7 @@ void initSensorQueue() {
 // Queued Sensor Start Commands (moved from .ino)
 // =========================================================================
 
-// gThermalEnabled / gTofEnabled / gImuEnabled provided by their i2csensor_*.h headers
+// gThermalRunning / gTofRunning / gImuRunning provided by their i2csensor_*.h headers
 
 // Map I2CDeviceType → I2C address for pre-start hardware presence checks.
 // Returns 0 if the device type has no single fixed address (or should skip the check).
@@ -320,7 +320,7 @@ const char* cmd_sensorstart_queued(I2CDeviceType sensor, const char* displayName
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
 
   // Reject immediately if the I2C bus is disabled at runtime (distinct from hardware not connected)
-  if (!gI2CBusEnabled) {
+  if (!gI2CBusRunning) {
     snprintf(getDebugBuffer(), 1024, "[%s] I2C bus is disabled — enable it in settings and reboot", displayName);
     return getDebugBuffer();
   }
@@ -356,22 +356,22 @@ const char* cmd_sensorstart_queued(I2CDeviceType sensor, const char* displayName
 
 const char* cmd_thermalstart_queued(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return cmd_sensorstart_queued(I2C_DEVICE_THERMAL, "Thermal", gThermalEnabled, "openthermal@enqueue");
+  return cmd_sensorstart_queued(I2C_DEVICE_THERMAL, "Thermal", gThermalRunning, "openthermal@enqueue");
 }
 
 const char* cmd_tofstart_queued(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return cmd_sensorstart_queued(I2C_DEVICE_TOF, "ToF", gTofEnabled, "opentof@enqueue");
+  return cmd_sensorstart_queued(I2C_DEVICE_TOF, "ToF", gTofRunning, "opentof@enqueue");
 }
 
 const char* cmd_imustart_queued(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return cmd_sensorstart_queued(I2C_DEVICE_IMU, "IMU", gImuEnabled, "openimu@enqueue");
+  return cmd_sensorstart_queued(I2C_DEVICE_IMU, "IMU", gImuRunning, "openimu@enqueue");
 }
 
 const char* cmd_apdsstart_queued(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return cmd_sensorstart_queued(I2C_DEVICE_APDS, "APDS", gApdsColorEnabled || gApdsProximityEnabled || gApdsGestureEnabled, "openapds@enqueue");
+  return cmd_sensorstart_queued(I2C_DEVICE_APDS, "APDS", gApdsColorRunning || gApdsProximityRunning || gApdsGestureRunning, "openapds@enqueue");
 }
 
 // cmd_openinput (in HAL_Input.cpp) handles the input device's queued start —
@@ -391,15 +391,15 @@ void initI2CBuses() {
   bool forceForSetup = isFirstTimeSetup();
   
   if (forceForSetup) {
-    gI2CBusEnabled = true;
+    gI2CBusRunning = true;
     INFO_I2C_BUSF("[I2C] Force-enabling for first-time setup wizard");
   } else {
     // Copy setting to global flag
-    gI2CBusEnabled = gSettings.i2cBusEnabled;
+    gI2CBusRunning = gSettings.i2cEnabled;
   }
   
   // Early exit if I2C bus is disabled via settings (and not first-time setup)
-  if (!gI2CBusEnabled) {
+  if (!gI2CBusRunning) {
     if (!gI2CBusDisabledLogged) {
       INFO_I2C_BUSF("[I2C] Bus disabled via settings - skipping initialization");
       INFO_I2C_BUSF("[I2C] OLED display and I2C sensors will not be available");
@@ -655,7 +655,7 @@ const char* cmd_i2cbusenabled(const String& argsInput) {
   valStr.trim();
   if (valStr.length() == 0) return "Error: invalid arguments — Usage: i2cBusEnabled <0|1> (reboot required)";
   bool v = (valStr.toInt() != 0);
-  setSetting(gSettings.i2cBusEnabled, v);
+  setSetting(gSettings.i2cEnabled, v);
   snprintf(getDebugBuffer(), 1024, "i2cBusEnabled set to %d (reboot required)", (int)v);
   return getDebugBuffer();
 }
@@ -699,7 +699,7 @@ const char* cmd_i2c2busenabled(const String& argsInput) {
   valStr.trim();
   if (valStr.length() == 0) return "Error: invalid arguments — Usage: i2c2BusEnabled <0|1> (reboot required)";
   bool v = (valStr.toInt() != 0);
-  setSetting(gSettings.i2c2BusEnabled, v);
+  setSetting(gSettings.i2c2Enabled, v);
   snprintf(getDebugBuffer(), 1024, "i2c2BusEnabled set to %d (reboot required)", (int)v);
   return getDebugBuffer();
 }
@@ -829,7 +829,7 @@ const char* cmd_i2cscan(const String& originalCmd) {
       broadcastOutput("  No devices found");
     }
     totalCount += count;
-  } else if (gSettings.i2c2BusEnabled) {
+  } else if (gSettings.i2c2Enabled) {
     // User asked for bus 1 but it didn't initialize (probably bad pins).
     broadcastOutput("");
     broadcastOutput("I2C2 / Wire (bus 1): NOT INITIALIZED — check i2c2SdaPin/i2c2SclPin settings");
@@ -898,11 +898,11 @@ const char* cmd_i2cstats(const String& originalCmd) {
 // ========== End I2C Infrastructure Commands ==========
 
 #if ENABLE_TOF_SENSOR
-// gTofEnabled / gTofConnected / gTofTaskHandle / gVL53L4CX provided by i2csensor_vl53l4cx.h
+// gTofRunning / gTofConnected / gTofTaskHandle / gVL53L4CX provided by i2csensor_vl53l4cx.h
 extern bool tofPoll();
 #endif
 // i2cOledTransactionVoid/i2cOledTransaction and i2cDeviceTransaction are template functions in System_I2C.h
-// gThermalEnabled provided by i2csensor_mlx90640.h
+// gThermalRunning provided by i2csensor_mlx90640.h
 
 // SensorCache struct is now defined in i2c_system.h
 
@@ -1013,8 +1013,8 @@ static void addDiscoveredDevice(uint8_t address, uint8_t bus) {
 void detectHardware(DetectionResult& out) {
   out = DetectionResult();
 
-  extern bool gI2CBusEnabled;
-  if (!gI2CBusEnabled) { out.busDisabled = true; return; }
+  extern bool gI2CBusRunning;
+  if (!gI2CBusRunning) { out.busDisabled = true; return; }
 
   const size_t n = i2cSensorsCount;
   static const size_t MAXSENS = 32;             // table is ~14; guard caps the rest
@@ -1321,7 +1321,7 @@ static void scanBusForDevicesSmart(uint8_t busNumber, const uint8_t* addresses, 
 
 void discoverI2CDevices() {
   // Early exit if I2C bus is disabled
-  if (!gI2CBusEnabled) {
+  if (!gI2CBusRunning) {
     INFO_I2C_DISCOVERYF("Device discovery skipped - bus disabled");
     return;
   }
@@ -1390,9 +1390,9 @@ void discoverI2CDevices() {
 
   // Bus 1 (I2C2, Wire) — scan only when the user has enabled the secondary
   // bus AND its pins are configured. Boards without a second port (XIAO,
-  // QT Py, Feather V2) keep i2c2BusEnabled=false by default and skip this.
+  // QT Py, Feather V2) keep i2c2Enabled=false by default and skip this.
   I2CDeviceManager* mgrForScan = I2CDeviceManager::getInstance();
-  if (gSettings.i2c2BusEnabled && mgrForScan && mgrForScan->isBusInitialized(1)) {
+  if (gSettings.i2c2Enabled && mgrForScan && mgrForScan->isBusInitialized(1)) {
     INFO_I2C_DISCOVERYF("[Discovery] Smart scan: %d addresses on I2C2 (bus 1, SDA=%d SCL=%d)",
               scanCount, gSettings.i2c2SdaPin, gSettings.i2c2SclPin);
     scanBusForDevicesSmart(1, scanAddresses, scanCount);
@@ -1732,36 +1732,36 @@ static void buildSensorsJson(JsonDocument& doc, bool includeData = true) {
   doc["brief"] = !includeData;
   JsonArray arr = doc["sensors"].to<JsonArray>();
 #if ENABLE_PRESENCE_SENSOR
-  addSensorEntry(arr, "presence", "STHS34PF80 presence",    "scalar", gPresenceEnabled, isSensorConnected("presence"), includeData ? presenceBuildDataJSON : nullptr);
+  addSensorEntry(arr, "presence", "STHS34PF80 presence",    "scalar", gPresenceRunning, isSensorConnected("presence"), includeData ? presenceBuildDataJSON : nullptr);
 #endif
 #if ENABLE_TOF_SENSOR
-  addSensorEntry(arr, "tof",      "VL53L4CX distance",      "vector", gTofEnabled, isSensorConnected("tof"), includeData ? tofBuildDataJSON : nullptr);
+  addSensorEntry(arr, "tof",      "VL53L4CX distance",      "vector", gTofRunning, isSensorConnected("tof"), includeData ? tofBuildDataJSON : nullptr);
 #endif
 #if ENABLE_IMU_SENSOR
-  addSensorEntry(arr, "imu",      "BNO055 orientation",     "vector", gImuEnabled, isSensorConnected("imu"), includeData ? imuBuildDataJSON : nullptr);
+  addSensorEntry(arr, "imu",      "BNO055 orientation",     "vector", gImuRunning, isSensorConnected("imu"), includeData ? imuBuildDataJSON : nullptr);
 #endif
 #if ENABLE_GPS_SENSOR
-  addSensorEntry(arr, "gps",      "PA1010D GPS",            "vector", gGpsEnabled, isSensorConnected("gps"), includeData ? gpsBuildDataJSON : nullptr);
+  addSensorEntry(arr, "gps",      "PA1010D GPS",            "vector", gGpsRunning, isSensorConnected("gps"), includeData ? gpsBuildDataJSON : nullptr);
 #endif
 #if ENABLE_FM_RADIO
-  addSensorEntry(arr, "fmradio",  "RDA5807 FM radio",       "scalar", gFmRadioEnabled, isSensorConnected("fmradio"), includeData ? fmRadioBuildDataJSON : nullptr);
+  addSensorEntry(arr, "fmradio",  "RDA5807 FM radio",       "scalar", gFmRadioRunning, isSensorConnected("fmradio"), includeData ? fmRadioBuildDataJSON : nullptr);
 #endif
 #if ENABLE_RTC_SENSOR
-  addSensorEntry(arr, "rtc",      "DS3231 RTC",             "scalar", gRtcEnabled, isSensorConnected("rtc"), includeData ? rtcBuildDataJSON : nullptr);
+  addSensorEntry(arr, "rtc",      "DS3231 RTC",             "scalar", gRtcRunning, isSensorConnected("rtc"), includeData ? rtcBuildDataJSON : nullptr);
 #endif
 #if ENABLE_APDS_SENSOR
   addSensorEntry(arr, "apds",     "APDS9960 gesture/color", "scalar",
-                 (gApdsColorEnabled || gApdsProximityEnabled || gApdsGestureEnabled),
+                 (gApdsColorRunning || gApdsProximityRunning || gApdsGestureRunning),
                  isSensorConnected("apds"), includeData ? apdsBuildDataJSON : nullptr);
 #endif
 #if ENABLE_GAMEPAD_SENSOR
   // id is "input" — the canonical, unified module name (Seesaw gamepad OR ANO
   // encoder). Matches controls json / open<id>/close<id> / sensorautostart /
   // the I2C DB moduleName, so the app correlates on one name with no overrides.
-  addSensorEntry(arr, "input",    "Seesaw gamepad",         "scalar", gInputEnabled, gInputConnected, includeData ? gamepadBuildDataJSON : nullptr);
+  addSensorEntry(arr, "input",    "Seesaw gamepad",         "scalar", gInputRunning, gInputConnected, includeData ? gamepadBuildDataJSON : nullptr);
 #endif
 #if ENABLE_THERMAL_SENSOR
-  addSensorEntry(arr, "thermal",  "MLX90640 thermal",       "stream", gThermalEnabled, isSensorConnected("thermal"), includeData ? thermalBuildSummaryJSON : nullptr);
+  addSensorEntry(arr, "thermal",  "MLX90640 thermal",       "stream", gThermalRunning, isSensorConnected("thermal"), includeData ? thermalBuildSummaryJSON : nullptr);
 #endif
 }
 
@@ -2295,57 +2295,57 @@ void handleDeviceStopped(I2CDeviceType sensor) {
   switch (sensor) {
     case I2C_DEVICE_THERMAL:
 #if ENABLE_THERMAL_SENSOR
-      gThermalEnabled = false;
+      gThermalRunning = false;
       gThermalLastStopTime = millis();
 #endif
       break;
     case I2C_DEVICE_TOF:
 #if ENABLE_TOF_SENSOR
-      gTofEnabled = false;
+      gTofRunning = false;
       gTofLastStopTime = millis();
 #endif
       break;
     case I2C_DEVICE_IMU:
 #if ENABLE_IMU_SENSOR
-      gImuEnabled = false;
+      gImuRunning = false;
       gImuLastStopTime = millis();
 #endif
       break;
     case I2C_DEVICE_INPUT:
 #if ENABLE_GAMEPAD_SENSOR
-      gInputEnabled = false;
+      gInputRunning = false;
       gGamepadLastStopTime = millis();
 #endif
       break;
     case I2C_DEVICE_GPS:
 #if ENABLE_GPS_SENSOR
-      gGpsEnabled = false;
+      gGpsRunning = false;
       gGpsLastStopTime = millis();
 #endif
       break;
     case I2C_DEVICE_FMRADIO:
 #if ENABLE_FM_RADIO
-      gFmRadioEnabled = false;
+      gFmRadioRunning = false;
       gFmRadioLastStopTime = millis();
 #endif
       break;
     case I2C_DEVICE_APDS:
 #if ENABLE_APDS_SENSOR
-      gApdsColorEnabled = false;
-      gApdsProximityEnabled = false;
-      gApdsGestureEnabled = false;
+      gApdsColorRunning = false;
+      gApdsProximityRunning = false;
+      gApdsGestureRunning = false;
       gApdsLastStopTime = millis();
 #endif
       break;
     case I2C_DEVICE_RTC:
 #if ENABLE_RTC_SENSOR
-      gRtcEnabled = false;
+      gRtcRunning = false;
       gRtcLastStopTime = millis();
 #endif
       break;
     case I2C_DEVICE_PRESENCE:
 #if ENABLE_PRESENCE_SENSOR
-      gPresenceEnabled = false;
+      gPresenceRunning = false;
       gPresenceLastStopTime = millis();
 #endif
       break;
@@ -2399,31 +2399,31 @@ const char* buildSensorStatusJson() {
   
   // Basic sensor enable flags
   doc["seq"] = gSensorStatusSeq;
-  doc["thermalEnabled"] = gThermalEnabled;
-  doc["tofEnabled"] = gTofEnabled;
-  doc["imuEnabled"] = gImuEnabled;
-  doc["apdsColorEnabled"] = gApdsColorEnabled;
-  doc["apdsProximityEnabled"] = gApdsProximityEnabled;
-  doc["apdsGestureEnabled"] = gApdsGestureEnabled;
-  doc["inputEnabled"] = gInputEnabled;
+  doc["thermalRunning"] = gThermalRunning;
+  doc["tofRunning"] = gTofRunning;
+  doc["imuRunning"] = gImuRunning;
+  doc["apdsColorRunning"] = gApdsColorRunning;
+  doc["apdsProximityRunning"] = gApdsProximityRunning;
+  doc["apdsGestureRunning"] = gApdsGestureRunning;
+  doc["inputRunning"] = gInputRunning;
 #if ENABLE_SERVO
   doc["pwmDriverConnected"] = gPwmDriverConnected;
 #else
   doc["pwmDriverConnected"] = false;
 #endif
-  doc["gpsEnabled"] = gGpsEnabled;
-  doc["fmRadioEnabled"] = gFmRadioEnabled;
+  doc["gpsRunning"] = gGpsRunning;
+  doc["fmRadioRunning"] = gFmRadioRunning;
 #if ENABLE_RTC_SENSOR
-  doc["rtcEnabled"] = gRtcEnabled;
+  doc["rtcRunning"] = gRtcRunning;
 #else
-  doc["rtcEnabled"] = false;
+  doc["rtcRunning"] = false;
 #endif
   
 #if ENABLE_PRESENCE_SENSOR
-  extern bool gPresenceEnabled;
-  doc["presenceEnabled"] = gPresenceEnabled;
+  extern bool gPresenceRunning;
+  doc["presenceRunning"] = gPresenceRunning;
 #else
-  doc["presenceEnabled"] = false;
+  doc["presenceRunning"] = false;
 #endif
 
   // Compile-time capabilities (module compiled into firmware)
@@ -2487,15 +2487,15 @@ const char* buildSensorStatusJson() {
 #endif
 
 #if ENABLE_CAMERA_SENSOR
-  extern bool gCameraEnabled;
+  extern bool gCameraRunning;
   extern bool cameraStreaming;
   extern bool videoRecording;
-  doc["cameraEnabled"] = gCameraEnabled;
+  doc["cameraRunning"] = gCameraRunning;
   doc["cameraStreaming"] = cameraStreaming;
   doc["cameraRecording"] = videoRecording;
   doc["cameraCompiled"] = true;
 #else
-  doc["cameraEnabled"] = false;
+  doc["cameraRunning"] = false;
   doc["cameraStreaming"] = false;
   doc["cameraRecording"] = false;
   doc["cameraCompiled"] = false;
@@ -2515,20 +2515,20 @@ const char* buildSensorStatusJson() {
   }
 
 #if ENABLE_MICROPHONE
-  extern bool gMicEnabled;
+  extern bool gMicRunning;
   extern bool micRecording;
-  doc["micEnabled"] = gMicEnabled;
+  doc["micRunning"] = gMicRunning;
   doc["micRecording"] = micRecording;
   doc["micCompiled"] = true;
 #else
-  doc["micEnabled"] = false;
+  doc["micRunning"] = false;
   doc["micRecording"] = false;
   doc["micCompiled"] = false;
 #endif
 
 #if ENABLE_EDGE_IMPULSE
   extern bool isEdgeImpulseModelLoaded();
-  doc["eiEnabled"] = gSettings.edgeImpulseEnabled;
+  doc["eiEnabled"] = gSettings.eiEnabled;
   doc["eiModelLoaded"] = isEdgeImpulseModelLoaded();
   doc["eiCompiled"] = true;
 #else
@@ -2552,7 +2552,7 @@ const char* buildSensorStatusJson() {
   
   // I2C bus runtime state — lets the web UI know whether the bus is active,
   // distinct from compile-time flags and individual sensor enable flags
-  doc["i2cBusEnabled"] = gI2CBusEnabled;
+  doc["i2cBusRunning"] = gI2CBusRunning;
 #if ENABLE_I2C_SYSTEM
   doc["i2cSystemCompiled"] = true;
 #else
@@ -2721,35 +2721,35 @@ void sensorQueueProcessorTask(void* param) {
       bool alreadyRunning = false;
       switch (req.device) {
         case I2C_DEVICE_THERMAL:
-          alreadyRunning = gThermalEnabled;
+          alreadyRunning = gThermalRunning;
           break;
         case I2C_DEVICE_TOF:
-          alreadyRunning = gTofEnabled;
+          alreadyRunning = gTofRunning;
           break;
         case I2C_DEVICE_IMU:
-          alreadyRunning = gImuEnabled;
+          alreadyRunning = gImuRunning;
           break;
         case I2C_DEVICE_INPUT:
-          alreadyRunning = gInputEnabled;
+          alreadyRunning = gInputRunning;
           break;
         case I2C_DEVICE_APDS:
-          alreadyRunning = gApdsColorEnabled || gApdsProximityEnabled || gApdsGestureEnabled;
+          alreadyRunning = gApdsColorRunning || gApdsProximityRunning || gApdsGestureRunning;
           break;
         case I2C_DEVICE_GPS:
-          alreadyRunning = gGpsEnabled;
+          alreadyRunning = gGpsRunning;
           break;
         case I2C_DEVICE_FMRADIO:
-          alreadyRunning = gFmRadioEnabled;
+          alreadyRunning = gFmRadioRunning;
           break;
         case I2C_DEVICE_RTC:
 #if ENABLE_RTC_SENSOR
-          alreadyRunning = gRtcEnabled;
+          alreadyRunning = gRtcRunning;
 #endif
           break;
         case I2C_DEVICE_PRESENCE:
 #if ENABLE_PRESENCE_SENSOR
-          { extern bool gPresenceEnabled;
-          alreadyRunning = gPresenceEnabled; }
+          { extern bool gPresenceRunning;
+          alreadyRunning = gPresenceRunning; }
 #endif
           break;
       }
@@ -2773,18 +2773,18 @@ void sensorQueueProcessorTask(void* param) {
       switch (req.device) {
         case I2C_DEVICE_THERMAL:
           thermalStartInternal();
-          INFO_I2C_AUTOSTARTF("Thermal: %s", gThermalEnabled ? "SUCCESS" : "FAILED");
-          announceSensorStart("Thermal", gThermalEnabled);
+          INFO_I2C_AUTOSTARTF("Thermal: %s", gThermalRunning ? "SUCCESS" : "FAILED");
+          announceSensorStart("Thermal", gThermalRunning);
           break;
         case I2C_DEVICE_TOF:
           tofStartInternal();
-          INFO_I2C_AUTOSTARTF("ToF: %s", gTofEnabled ? "SUCCESS" : "FAILED");
-          announceSensorStart("ToF", gTofEnabled);
+          INFO_I2C_AUTOSTARTF("ToF: %s", gTofRunning ? "SUCCESS" : "FAILED");
+          announceSensorStart("ToF", gTofRunning);
           break;
         case I2C_DEVICE_IMU:
           imuStartInternal();
-          INFO_I2C_AUTOSTARTF("IMU: %s", gImuEnabled ? "SUCCESS" : "FAILED");
-          announceSensorStart("IMU", gImuEnabled);
+          INFO_I2C_AUTOSTARTF("IMU: %s", gImuRunning ? "SUCCESS" : "FAILED");
+          announceSensorStart("IMU", gImuRunning);
           break;
         case I2C_DEVICE_INPUT:
           // I2C_DEVICE_INPUT is the shared input-device slot — under ANO
@@ -2792,20 +2792,20 @@ void sensorQueueProcessorTask(void* param) {
           // reflects whichever input device is compiled in.
           inputStartInternal();
 #if ENABLE_ANO_ENCODER
-          INFO_I2C_AUTOSTARTF("ANO Encoder: %s", gInputEnabled ? "SUCCESS" : "FAILED");
-          announceSensorStart("ANO Encoder", gInputEnabled);
+          INFO_I2C_AUTOSTARTF("ANO Encoder: %s", gInputRunning ? "SUCCESS" : "FAILED");
+          announceSensorStart("ANO Encoder", gInputRunning);
 #else
-          INFO_I2C_AUTOSTARTF("Gamepad: %s", gInputEnabled ? "SUCCESS" : "FAILED");
-          announceSensorStart("Gamepad", gInputEnabled);
+          INFO_I2C_AUTOSTARTF("Gamepad: %s", gInputRunning ? "SUCCESS" : "FAILED");
+          announceSensorStart("Gamepad", gInputRunning);
 #endif
           break;
         case I2C_DEVICE_APDS:
 #if ENABLE_APDS_SENSOR
           apdsStartInternal();
-          { bool apdsOk = gApdsColorEnabled || gApdsProximityEnabled || gApdsGestureEnabled;
+          { bool apdsOk = gApdsColorRunning || gApdsProximityRunning || gApdsGestureRunning;
           INFO_I2C_AUTOSTARTF("APDS: %s (color=%d prox=%d gest=%d)",
                         apdsOk ? "SUCCESS" : "FAILED",
-                        gApdsColorEnabled ? 1 : 0, gApdsProximityEnabled ? 1 : 0, gApdsGestureEnabled ? 1 : 0);
+                        gApdsColorRunning ? 1 : 0, gApdsProximityRunning ? 1 : 0, gApdsGestureRunning ? 1 : 0);
           announceSensorStart("APDS", apdsOk); }
 #else
           INFO_I2C_AUTOSTARTF("APDS: skipped (not compiled)");
@@ -2813,14 +2813,14 @@ void sensorQueueProcessorTask(void* param) {
           break;
         case I2C_DEVICE_GPS:
           gpsStartInternal();
-          INFO_I2C_AUTOSTARTF("GPS: %s", gGpsEnabled ? "SUCCESS" : "FAILED");
-          announceSensorStart("GPS", gGpsEnabled);
+          INFO_I2C_AUTOSTARTF("GPS: %s", gGpsRunning ? "SUCCESS" : "FAILED");
+          announceSensorStart("GPS", gGpsRunning);
           break;
         case I2C_DEVICE_FMRADIO:
 #if ENABLE_FM_RADIO
           fmRadioStartInternal();
-          INFO_I2C_AUTOSTARTF("FM Radio: %s", gFmRadioEnabled ? "SUCCESS" : "FAILED");
-          announceSensorStart("FM Radio", gFmRadioEnabled);
+          INFO_I2C_AUTOSTARTF("FM Radio: %s", gFmRadioRunning ? "SUCCESS" : "FAILED");
+          announceSensorStart("FM Radio", gFmRadioRunning);
 #else
           INFO_I2C_AUTOSTARTF("FM Radio: skipped (not compiled)");
 #endif
@@ -2828,8 +2828,8 @@ void sensorQueueProcessorTask(void* param) {
         case I2C_DEVICE_RTC:
 #if ENABLE_RTC_SENSOR
           rtcStartInternal();
-          INFO_I2C_AUTOSTARTF("RTC: %s", gRtcEnabled ? "SUCCESS" : "FAILED");
-          announceSensorStart("RTC", gRtcEnabled);
+          INFO_I2C_AUTOSTARTF("RTC: %s", gRtcRunning ? "SUCCESS" : "FAILED");
+          announceSensorStart("RTC", gRtcRunning);
 #else
           INFO_I2C_AUTOSTARTF("RTC: skipped (not compiled)");
 #endif
@@ -2837,10 +2837,10 @@ void sensorQueueProcessorTask(void* param) {
         case I2C_DEVICE_PRESENCE:
 #if ENABLE_PRESENCE_SENSOR
           extern bool presenceStartInternal();
-          extern bool gPresenceEnabled;
+          extern bool gPresenceRunning;
           presenceStartInternal();
-          INFO_I2C_AUTOSTARTF("Presence: %s", gPresenceEnabled ? "SUCCESS" : "FAILED");
-          announceSensorStart("Presence", gPresenceEnabled);
+          INFO_I2C_AUTOSTARTF("Presence: %s", gPresenceRunning ? "SUCCESS" : "FAILED");
+          announceSensorStart("Presence", gPresenceRunning);
 #else
           INFO_I2C_AUTOSTARTF("Presence: skipped (not compiled)");
 #endif
@@ -2909,12 +2909,12 @@ void sensorQueueProcessorTask(void* param) {
 // on bus 0) allows the "unavailable" sentinel -1 to round-trip through settings save.
 // HW_GPIO_MAX (defined above) is the SoC's highest GPIO, so the bound tracks the board.
 static const SettingEntry i2cSettingEntries[] = {
-  { "i2cBusEnabled", SETTING_BOOL, &gSettings.i2cBusEnabled, 1, 0, nullptr, 0, 1, "I2C1 Bus Enabled (reboot required)", nullptr, false, nullptr, "i2cbusenabled" },
+  { "i2cBusEnabled", SETTING_BOOL, &gSettings.i2cEnabled, 1, 0, nullptr, 0, 1, "I2C1 Bus Enabled (reboot required)", nullptr, false, nullptr, "i2cbusenabled" },
   { "i2cSdaPin", SETTING_INT, &gSettings.i2cSdaPin, I2C_SDA_PIN_DEFAULT,
     0, nullptr, 0, HW_GPIO_MAX, "I2C1 SDA Pin (reboot required)", nullptr, false, nullptr, "i2csdapin" },
   { "i2cSclPin", SETTING_INT, &gSettings.i2cSclPin, I2C_SCL_PIN_DEFAULT,
     0, nullptr, 0, HW_GPIO_MAX, "I2C1 SCL Pin (reboot required)", nullptr, false, nullptr, "i2csclpin" },
-  { "i2c2BusEnabled", SETTING_BOOL, &gSettings.i2c2BusEnabled, I2C2_BUS_ENABLED_DEFAULT, 0, nullptr, 0, 1, "I2C2 Bus Enabled (reboot required)", nullptr, false, nullptr, "i2c2busenabled" },
+  { "i2c2BusEnabled", SETTING_BOOL, &gSettings.i2c2Enabled, I2C2_BUS_ENABLED_DEFAULT, 0, nullptr, 0, 1, "I2C2 Bus Enabled (reboot required)", nullptr, false, nullptr, "i2c2busenabled" },
   { "i2c2SdaPin", SETTING_INT, &gSettings.i2c2SdaPin, I2C2_SDA_PIN_DEFAULT,
     0, nullptr, -1, HW_GPIO_MAX, "I2C2 SDA Pin (reboot required, -1=unavailable)", nullptr, false, nullptr, "i2c2sdapin" },
   { "i2c2SclPin", SETTING_INT, &gSettings.i2c2SclPin, I2C2_SCL_PIN_DEFAULT,
@@ -2986,9 +2986,9 @@ static bool isSensorAvailableForAutoStart(const char* moduleName, I2CDeviceType 
 
 void processAutoStartSensors() {
   // Debug: Print I2C flags to diagnose auto-start issues
-  DEBUG_I2C_AUTOSTARTF("[AutoStart] I2C check: i2cBus=%d", gSettings.i2cBusEnabled ? 1 : 0);
+  DEBUG_I2C_AUTOSTARTF("[AutoStart] I2C check: i2cBus=%d", gSettings.i2cEnabled ? 1 : 0);
   
-  if (!gSettings.i2cBusEnabled) {
+  if (!gSettings.i2cEnabled) {
     INFO_I2C_AUTOSTARTF("[AutoStart] I2C bus disabled, skipping sensor auto-start");
     return;
   }
@@ -3022,7 +3022,7 @@ void processAutoStartSensors() {
   int autoStartQueued = 0;
   
   #if ENABLE_THERMAL_SENSOR
-  if (ramFlushResolve(RF_THERMAL, gSettings.thermalAutoStart)) {
+  if (gSettings.thermalEnabled && ramFlushResolve(RF_THERMAL, gSettings.thermalAutoStart)) {
     if (isSensorAvailableForAutoStart("thermal", I2C_DEVICE_THERMAL)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing thermal sensor");
       enqueueDeviceStart(I2C_DEVICE_THERMAL); autoStartQueued++;
@@ -3033,7 +3033,7 @@ void processAutoStartSensors() {
   #endif
   
   #if ENABLE_TOF_SENSOR
-  if (ramFlushResolve(RF_TOF, gSettings.tofAutoStart)) {
+  if (gSettings.tofEnabled && ramFlushResolve(RF_TOF, gSettings.tofAutoStart)) {
     if (isSensorAvailableForAutoStart("tof", I2C_DEVICE_TOF)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing ToF sensor");
       enqueueDeviceStart(I2C_DEVICE_TOF); autoStartQueued++;
@@ -3044,7 +3044,7 @@ void processAutoStartSensors() {
   #endif
   
   #if ENABLE_IMU_SENSOR
-  if (ramFlushResolve(RF_IMU, gSettings.imuAutoStart)) {
+  if (gSettings.imuEnabled && ramFlushResolve(RF_IMU, gSettings.imuAutoStart)) {
     if (isSensorAvailableForAutoStart("imu", I2C_DEVICE_IMU)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing IMU sensor");
       enqueueDeviceStart(I2C_DEVICE_IMU); autoStartQueued++;
@@ -3055,7 +3055,7 @@ void processAutoStartSensors() {
   #endif
   
   #if ENABLE_GPS_SENSOR
-  if (ramFlushResolve(RF_GPS, gSettings.gpsAutoStart)) {
+  if (gSettings.gpsEnabled && ramFlushResolve(RF_GPS, gSettings.gpsAutoStart)) {
     if (isSensorAvailableForAutoStart("gps", I2C_DEVICE_GPS)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing GPS sensor");
       enqueueDeviceStart(I2C_DEVICE_GPS); autoStartQueued++;
@@ -3066,7 +3066,7 @@ void processAutoStartSensors() {
   #endif
   
   #if ENABLE_FM_RADIO
-  if (ramFlushResolve(RF_FMRADIO, gSettings.fmRadioAutoStart)) {
+  if (gSettings.fmRadioEnabled && ramFlushResolve(RF_FMRADIO, gSettings.fmRadioAutoStart)) {
     if (isSensorAvailableForAutoStart("fmradio", I2C_DEVICE_FMRADIO)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing FM Radio sensor");
       enqueueDeviceStart(I2C_DEVICE_FMRADIO); autoStartQueued++;
@@ -3077,7 +3077,7 @@ void processAutoStartSensors() {
   #endif
   
   #if ENABLE_APDS_SENSOR
-  if (ramFlushResolve(RF_APDS, gSettings.apdsAutoStart)) {
+  if (gSettings.apdsEnabled && ramFlushResolve(RF_APDS, gSettings.apdsAutoStart)) {
     if (isSensorAvailableForAutoStart("apds", I2C_DEVICE_APDS)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing APDS sensor");
       enqueueDeviceStart(I2C_DEVICE_APDS); autoStartQueued++;
@@ -3088,7 +3088,7 @@ void processAutoStartSensors() {
   #endif
   
   #if ENABLE_GAMEPAD_SENSOR
-  if (ramFlushResolve(RF_INPUT, gSettings.inputAutoStart)) {
+  if (gSettings.inputEnabled && ramFlushResolve(RF_INPUT, gSettings.inputAutoStart)) {
     if (isSensorAvailableForAutoStart("gamepad", I2C_DEVICE_INPUT)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing Gamepad sensor");
       enqueueDeviceStart(I2C_DEVICE_INPUT); autoStartQueued++;
@@ -3099,7 +3099,7 @@ void processAutoStartSensors() {
   #endif
   
   #if ENABLE_RTC_SENSOR
-  if (ramFlushResolve(RF_RTC, gSettings.rtcAutoStart)) {
+  if (gSettings.rtcEnabled && ramFlushResolve(RF_RTC, gSettings.rtcAutoStart)) {
     if (isSensorAvailableForAutoStart("rtc", I2C_DEVICE_RTC)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing RTC sensor");
       enqueueDeviceStart(I2C_DEVICE_RTC); autoStartQueued++;
@@ -3110,7 +3110,7 @@ void processAutoStartSensors() {
   #endif
   
   #if ENABLE_PRESENCE_SENSOR
-  if (ramFlushResolve(RF_PRESENCE, gSettings.presenceAutoStart)) {
+  if (gSettings.presenceEnabled && ramFlushResolve(RF_PRESENCE, gSettings.presenceAutoStart)) {
     if (isSensorAvailableForAutoStart("presence", I2C_DEVICE_PRESENCE)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing Presence sensor");
       enqueueDeviceStart(I2C_DEVICE_PRESENCE); autoStartQueued++;

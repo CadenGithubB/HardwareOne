@@ -16,7 +16,7 @@ void displayAPDSData() {
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
   oledDisplay->setCursor(0, 0);
   
-  if (!gApdsConnected || (!gApdsColorEnabled && !gApdsProximityEnabled)) {
+  if (!gApdsConnected || (!gApdsColorRunning && !gApdsProximityRunning)) {
     oledDisplay->println("== APDS SENSOR ==");
     oledDisplay->println();
     oledDisplay->println("Not active");
@@ -51,7 +51,7 @@ static bool apdsOLEDModeAvailable(String* outReason) {
 
 static void apdsToggleConfirmed(void* userData) {
   (void)userData;
-  if (gApdsColorEnabled || gApdsProximityEnabled) {
+  if (gApdsColorRunning || gApdsProximityRunning) {
     executeOLEDCommand("closeapds");
   } else {
     executeOLEDCommand("openapds");
@@ -61,7 +61,7 @@ static void apdsToggleConfirmed(void* userData) {
 // Input handler for APDS OLED mode - X button toggles sensor
 static bool apdsInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
-    if (gApdsColorEnabled || gApdsProximityEnabled) {
+    if (gApdsColorRunning || gApdsProximityRunning) {
       oledConfirmRequest("Close APDS?", nullptr, apdsToggleConfirmed, nullptr, false);
     } else {
       oledConfirmRequest("Open APDS?", nullptr, apdsToggleConfirmed, nullptr);

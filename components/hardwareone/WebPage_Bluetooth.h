@@ -280,16 +280,16 @@ inline void streamBluetoothInner(httpd_req_t* req) {
         </div>
         <div id='g2-conn-status' style='font-size:.82em;color:var(--muted);min-height:1.2em;margin-top:8px'></div>
         <label style='display:flex;align-items:center;gap:8px;font-size:.85em;margin-top:10px;cursor:pointer;flex-wrap:wrap;line-height:1.3'
-               title='When enabled, on boot the device reconnects to the saved temple MACs (no scan / no pairing). Pair once via Connect Both first.' data-guest-hide>
-          <input type='checkbox' id='cb-g2-autoconnect' style='flex-shrink:0'>
-          <span>Auto-reconnect on boot</span>
+               title='When enabled, reconnects to saved temple MACs at boot and after unexpected drops (no scan). Pair once via Connect Both first.' data-guest-hide>
+          <input type='checkbox' id='cb-g2-autoreconnect' style='flex-shrink:0'>
+          <span>Auto-reconnect</span>
         </label>
       </div>
     </div>
 
-    <!-- R1 Ring (third BLE peripheral — info-only / Path 1) -->
+    <!-- R1 Ring (third BLE peripheral; vitals UI on /r1-health) -->
     <!-- Note: ring card uses the same auto-reconnect label pattern as Temples,
-         see id='cb-ring-autoconnect' below for the duplicate. -->
+         see id='cb-ring-autoreconnect' below for the duplicate. -->
     <div class='bt-card'>
       <div class='bt-card-header'>
         <span class='bt-card-title'>R1 Ring</span>
@@ -318,14 +318,13 @@ inline void streamBluetoothInner(httpd_req_t* req) {
           <button class='btn bt-stream-btn' id='btn-ring-disconnect' data-guest-hide>Disconnect</button>
         </div>
         <label style='display:flex;align-items:center;gap:8px;font-size:.85em;margin-top:10px;cursor:pointer;flex-wrap:wrap;line-height:1.3'
-               title='When enabled, on boot the device reconnects to the saved ring MAC (no scan). Pair once via Connect first.' data-guest-hide>
-          <input type='checkbox' id='cb-ring-autoconnect' style='flex-shrink:0'>
-          <span>Auto-reconnect on boot</span>
+               title='When enabled, reconnects to the saved ring MAC at boot and after unexpected drops (no scan). Pair once via Connect first.' data-guest-hide>
+          <input type='checkbox' id='cb-ring-autoreconnect' style='flex-shrink:0'>
+          <span>Auto-reconnect</span>
         </label>
         <div style='font-size:.78em;color:var(--muted);margin-top:8px;line-height:1.4'>
-          Info-only mode: subscribes to ring notify channel and logs health
-          pushes (heart rate, activity). Ring gesture relay to glasses
-          needs server-issued pkey auth — not yet implemented.
+          Connect / Auto-reconnect for the ring. Live vitals and Health Track
+          live on the <a href='/r1-health'>R1 Health</a> page (when compiled in).
           Run the Temples <b>Scan</b> first with the ring in range; its
           advert is stashed during the G2 scan.
         </div>
@@ -1038,11 +1037,8 @@ inline void streamBluetoothInner(httpd_req_t* req) {
           cb.checked = /enabled/i.test(o || '');
         });
       }
-      // Use the generic `bleautoconnect <peer-name>` form. The per-peer
-      // shims (g2autoconnect, ringautoconnect) still work but the generic
-      // form is the canonical name and doesn't need a per-peer alias.
-      bindAutoToggle('cb-g2-autoconnect',   'bleautoconnect g2-glasses');
-      bindAutoToggle('cb-ring-autoconnect', 'bleautoconnect r1-ring');
+      bindAutoToggle('cb-g2-autoreconnect',   'bleautoreconnect g2-glasses');
+      bindAutoToggle('cb-ring-autoreconnect', 'bleautoreconnect r1-ring');
       bind('btn-g2-mic-toggle', function(){
         micState = !micState;
         var btn = el('btn-g2-mic-toggle');

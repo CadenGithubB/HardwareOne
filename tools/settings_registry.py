@@ -385,21 +385,213 @@ def cmd_upgrade(_args) -> int:
 # Entry point
 # ============================================================================
 
+# ============================================================================
+# `check` subcommand — the settings/command binding guard rail
+# ============================================================================
+#
+# WHY THIS EXISTS. A SettingEntry is only editable if its `cmdKey` names a real
+# command. Nothing in C++ enforces that: cmdKey is a string literal the compiler
+# never validates, so a typo, a renamed command, or a deleted one turns a control
+# into a silent no-op. An audit of all 407 controls found 243 writes silently
+# discarded and 6 firing a DIFFERENT, real command — the debug row keyed
+# "capture" fired the camera's `capture` verb and took a real photo.
+#
+# The jsonKey fallback that caused the misfires is now deleted in C++
+# (settingsEditorCommandName returns cmdKey only), so a broken cmdKey is now
+# merely dead rather than dangerous. This check keeps it from going dead
+# unnoticed — run it in CI or before a commit that renames commands.
+
+# A CommandEntry row: { "name", <help>, <bool admin>, handler, ... }
+#
+# <help> is NOT always one string literal. Several rows build it by concatenating
+# literals with a macro, e.g.
+#     { "i2csdapin", "Set I2C1 SDA pin: <0.." HW_GPIO_MAX_STR "> (max)", true, ... }
+# An earlier version of this regex required a single literal there and so missed
+# four real commands, reporting their settings rows as DEAD. Accept any run of
+# string literals and/or bare identifiers before the admin bool.
+CMD_ENTRY_RE = re.compile(
+    r'\{\s*"([A-Za-z0-9_ ]+)"\s*,\s*'
+    r'(?:"[^"]*"|[A-Za-z_]\w*)(?:\s*(?:"[^"]*"|[A-Za-z_]\w*))*'
+    r'\s*,\s*(?:true|false)\s*,\s*[A-Za-z_]'
+)
+# Debug commands are emitted from the X-macro table, not literal CommandEntry
+# rows, so they must be harvested separately or every debug row reads as DEAD.
+DEBUG_CMD_RE = re.compile(r'"(debug[a-z0-9]+)"')
+
+
+def collect_command_names() -> set[str]:
+    """Every command name the firmware registers, lowercased."""
+    names: set[str] = set()
+    for src in list(COMPONENTS.glob("*.cpp")) + list(COMPONENTS.glob("*.h")):
+        text = src.read_text(errors="ignore")
+        for m in CMD_ENTRY_RE.finditer(text):
+            names.add(m.group(1).lower())
+        if src.name == "System_DebugFlags.h":
+            for m in DEBUG_CMD_RE.finditer(text):
+                names.add(m.group(1).lower())
+    return names
+
+
+def command_resolves(cmd_key: str, names: set[str]) -> bool:
+    """Mirror findCommand(): case-insensitive, whole-word longest-prefix.
+
+    A two-word cmdKey such as "sensorlog autostart" is legitimate — it resolves
+    to the `sensorlog` command with "autostart" as its first argument.
+    """
+    k = cmd_key.strip().lower()
+    if not k:
+        return False
+    return k in names or k.split()[0] in names
+
+
+# A settings-tree access written as a literal bracket chain, e.g.
+#     mergedDoc["network"]["wifi"]["autoReconnect"] = true;
+# The compiler cannot see these, so renaming a jsonKey silently turns them into
+# writes nobody reads. That is not hypothetical: the cross-device restore in
+# WebServer_MigrationTool.cpp forced WiFi back on via ["network"]["wifi"]
+# ["autoReconnect"], and a jsonKey rename left a restored device unable to
+# rejoin the network, with no error anywhere.
+#
+# We only flag a chain whose LEADING segments match a real module jsonSection.
+# That keeps status documents (doc["enabled"] = gCameraRunning) out of it -
+# those are a different document with their own vocabulary.
+CHAIN_RE = re.compile(r'((?:\[\s*"[A-Za-z0-9_]+"\s*\]){2,})')
+SEG_RE = re.compile(r'\[\s*"([A-Za-z0-9_]+)"\s*\]')
+
+# Structured data that lives in the settings tree but is NOT a scalar
+# SettingEntry, so it legitimately has no jsonKey. These are managed by their
+# own code (the saved-network list, the BLE peer registry) and are not part of
+# the rename surface. Keep this list SHORT - every entry is a hole in the check.
+NON_ENTRY_SUBTREES = {"networks", "peers"}
+
+
+def check_settings_tree_literals(modules_by_section: dict) -> list[str]:
+    """Find literal settings-tree accesses whose final key is not a real jsonKey."""
+    problems: list[str] = []
+    for src in sorted(list(COMPONENTS.glob("*.cpp")) + list(COMPONENTS.glob("*.h"))):
+        for lineno, line in enumerate(src.read_text(errors="ignore").splitlines(), 1):
+            if "SETTING_" in line:      # the registry rows themselves
+                continue
+            for chain in CHAIN_RE.findall(line):
+                segs = SEG_RE.findall(chain)
+                if len(segs) < 2:
+                    continue
+                key = segs[-1]
+                if key in NON_ENTRY_SUBTREES:
+                    continue
+                # Try progressively shorter prefixes as the section path.
+                for cut in range(len(segs) - 1, 0, -1):
+                    section = ".".join(segs[:cut])
+                    mod = modules_by_section.get(section)
+                    if not mod:
+                        continue
+                    if key not in mod["keys"]:
+                        problems.append(
+                            f"{src.name}:{lineno} -> [\"{section.replace('.', '\"][\"')}\"][\"{key}\"] "
+                            f"(module '{mod['name']}' has no jsonKey '{key}')"
+                        )
+                    break
+    return problems
+
+
+def cmd_check(args) -> int:
+    names = collect_command_names()
+    unbound, dead, dupes = [], [], []
+    seen: dict[str, str] = {}
+    total = 0
+
+    for cpp in sorted(list(COMPONENTS.glob("*.cpp")) + list(COMPONENTS.glob("*.h"))):
+        text = cpp.read_text(errors="ignore")
+        for name, body in parse_entries_array_bodies(text).items():
+            for row in parse_rows(body):
+                total += 1
+                key, ck = row["jsonKey"], row["cmdKey"]
+                where = f"{cpp.name}::{name}::{key}"
+                if not ck:
+                    unbound.append(where)
+                    continue
+                if not command_resolves(ck, names):
+                    dead.append(f"{where} -> '{ck}' (no such command)")
+                prev = seen.get(ck.lower())
+                if prev and prev != where:
+                    dupes.append(f"'{ck}' claimed by both {prev} and {where}")
+                seen.setdefault(ck.lower(), where)
+
+    # Build section -> {name, keys} so the settings-tree literal check can
+    # validate the final key of a bracket chain against the right module.
+    modules_by_section = {}
+    for cpp in sorted(list(COMPONENTS.glob("*.cpp")) + list(COMPONENTS.glob("*.h"))):
+        text = cpp.read_text(errors="ignore")
+        mods = parse_modules(text)
+        bodies = parse_entries_array_bodies(text)
+        for arr, meta in mods.items():
+            keys = {r["jsonKey"] for r in parse_rows(bodies.get(arr, ""))}
+            modules_by_section[meta["jsonSection"]] = {"name": meta["name"], "keys": keys}
+    tree_problems = check_settings_tree_literals(modules_by_section)
+
+    print(f"registered commands : {len(names)}")
+    print(f"setting rows        : {total}")
+    print(f"bound to a command  : {total - len(unbound)} "
+          f"({100 * (total - len(unbound)) // max(total, 1)}%)")
+    print(f"unbound (read-only) : {len(unbound)}")
+    print(f"DEAD cmdKeys        : {len(dead)}")
+    print(f"duplicate cmdKeys   : {len(dupes)}")
+    print(f"settings modules    : {len(modules_by_section)}")
+    print(f"bad tree literals   : {len(tree_problems)}")
+
+    if args.verbose and unbound:
+        print("\n-- unbound rows (render read-only; not an error) --")
+        for u in unbound:
+            print(f"   {u}")
+    if dead:
+        print("\n-- DEAD: cmdKey names a command that does not exist --")
+        for d in dead:
+            print(f"   {d}")
+    if dupes:
+        print("\n-- DUPLICATE: two settings share one command --")
+        for d in dupes:
+            print(f"   {d}")
+
+    if tree_problems:
+        print("\n-- BAD SETTINGS-TREE LITERAL: code touches a jsonKey that does not exist --")
+        for t in tree_problems:
+            print(f"   {t}")
+
+    if dead or dupes or tree_problems:
+        print("\nFAIL: fix the rows above, or set cmdKey to nullptr to make the "
+              "row honestly read-only.")
+        return 1
+    print("\nOK")
+    return 0
+
+
+# ============================================================================
+# Entry point
+# ============================================================================
+
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Settings registry tool: dump matrix or upgrade entry rows.",
+        description="Settings registry tool: check bindings, dump matrix, or upgrade rows.",
     )
     sub = parser.add_subparsers(dest="cmd")
-    sub.add_parser("matrix", help="Regenerate docs/SETTINGS_MATRIX.md")
-    sub.add_parser("upgrade", help="Expand short-form SettingEntry rows to long form")
+    sub.add_parser("matrix", help="Regenerate docs/SETTINGS_MATRIX.md (WRITES)")
+    sub.add_parser("upgrade", help="Expand short-form SettingEntry rows to long form (WRITES)")
+    chk = sub.add_parser("check", help="Verify every cmdKey resolves to a real command (read-only)")
+    chk.add_argument("-v", "--verbose", action="store_true", help="list unbound rows too")
     args = parser.parse_args()
 
-    cmd = args.cmd or "matrix"   # default to `matrix` for the legacy invocation
-    if cmd == "matrix":
+    # No default subcommand: `matrix` and `upgrade` REWRITE tracked files, and
+    # defaulting to one of them means an exploratory run silently edits the repo.
+    if not args.cmd:
+        parser.print_help()
+        return 2
+    if args.cmd == "matrix":
         return cmd_matrix(args)
-    if cmd == "upgrade":
+    if args.cmd == "upgrade":
         return cmd_upgrade(args)
-    parser.error(f"unknown subcommand: {cmd}")
+    if args.cmd == "check":
+        return cmd_check(args)
+    parser.error(f"unknown subcommand: {args.cmd}")
     return 2
 
 

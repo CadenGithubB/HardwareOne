@@ -151,7 +151,8 @@ enum OLEDMode {
   OLED_LED,                // NeoPixel LED control (color / effect / brightness)
   OLED_PERF_STATS,         // Live task CPU% / stack profiler (System & Diag)
   OLED_I2C_DIAG,           // I2C bus scan — hardware diagnostics (Hardware menu)
-  OLED_BLUETOOTH_R1,       // R1 ring submenu — vitals + connect (pushed from OLED_BLUETOOTH)
+  OLED_BLUETOOTH_R1,       // R1 ring submenu — connect only (pushed from OLED_BLUETOOTH)
+  OLED_R1_HEALTH,          // R1 Health — vitals / Poll / Track (ENABLE_R1_HEALTH)
   OLED_USER_MANAGER        // Admin user manager — list / add / delete / role (Config menu)
 };
 
@@ -367,7 +368,7 @@ MenuAvailability getMenuAvailability(OLEDMode mode, String* outReason);
 // Legacy alias: oledDisplay is defined as gDisplay in Display_HAL.h
 // extern Adafruit_SSD1306* oledDisplay;  // Removed - use gDisplay from Display_HAL.h
 extern bool oledConnected;
-extern bool gOledEnabled;
+extern bool gOledRunning;
 
 // OLED State Variables (defined in oled_display.cpp)
 extern OLEDMode currentOLEDMode;

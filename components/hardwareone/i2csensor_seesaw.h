@@ -22,7 +22,7 @@ struct InputCache {
 // (when ENABLE_ANO_ENCODER). The ANO driver populates gInputCache with
 // synthesized values (buttons in active-low layout matching the gamepad's
 // semantics) so the OLED input pipeline doesn't care which driver is live.
-extern bool gInputEnabled;
+extern bool gInputRunning;
 extern bool gInputConnected;
 extern InputCache gInputCache;
 

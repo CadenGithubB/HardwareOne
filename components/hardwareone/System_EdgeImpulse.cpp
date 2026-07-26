@@ -382,13 +382,14 @@ void buildStateChangeJson(String& output) {
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry edgeImpulseSettingEntries[] = {
-  { "enabled", SETTING_BOOL, &gSettings.edgeImpulseEnabled, 0, 0, nullptr, 0, 1, "Enable Inference", nullptr, false, nullptr, "eienable" },
+  { "eiAutoStart", SETTING_BOOL, &gSettings.eiAutoStart, 1, 0, nullptr, 0, 1, "Auto-start at boot", nullptr, false, nullptr, "eiautostart" },
+  { "enabled", SETTING_BOOL, &gSettings.eiEnabled, 0, 0, nullptr, 0, 1, "Enable Inference", nullptr, false, nullptr, "eienable" },
   { "requireLabels", SETTING_BOOL, &gSettings.edgeImpulseRequireLabels, 1, 0, nullptr, 0, 1, "Require Labels", nullptr, false, nullptr, "eirequirelabels" },
   { "minConfidence", SETTING_FLOAT, &gSettings.edgeImpulseMinConfidence, 0, 0.6f, nullptr, 0, 1, "Min Confidence", nullptr, false, nullptr, "eiconfidence" },
   { "maxDetections", SETTING_INT, &gSettings.edgeImpulseMaxDetections, 5, 0, nullptr, 1, 10, "Max Detections", nullptr, false, nullptr, "eimaxdetections" },
   { "inputSize", SETTING_INT, &gSettings.edgeImpulseInputSize, 96, 0, nullptr, 48, 320, "Input Size", nullptr, false, nullptr, "eiinputsize" },
   { "continuous", SETTING_BOOL, &gSettings.edgeImpulseContinuous, 0, 0, nullptr, 0, 1, "Continuous Mode", nullptr, false, nullptr, "eicontinuous" },
-  { "intervalMs", SETTING_INT, &gSettings.edgeImpulseIntervalMs, 1000, 0, nullptr, 100, 10000, "Interval (ms)", nullptr, false, nullptr, "eiinterval" }
+  { "intervalMs", SETTING_INT, &gSettings.edgeImpulseIntervalMs, 1000, 0, nullptr, 100, 10000, "Interval (ms)", nullptr, false, nullptr, "eiinterval" },
 };
 
 // Columns: name, jsonSection, entries, count, isConnected, description
@@ -990,7 +991,7 @@ EIResults runEdgeImpulseInference() {
     return results;
   }
   
-  if (!gSettings.edgeImpulseEnabled) {
+  if (!gSettings.eiEnabled) {
     DEBUG_SYSTEMF("[EI_DEBUG] ABORT: Disabled in settings");
     results.errorMessage = "Edge Impulse disabled";
     return results;
@@ -1009,7 +1010,7 @@ EIResults runEdgeImpulseInference() {
     return results;
   }
 
-  if (!gCameraEnabled) {
+  if (!gCameraRunning) {
     DEBUG_SYSTEMF("[EI_DEBUG] ABORT: Camera not started");
     results.errorMessage = "Camera not started";
     return results;
@@ -1809,7 +1810,7 @@ static void continuousInferenceTask(void* param) {
   uint32_t taskStartTime = millis();
   
   while (gEIContinuousRunning) {
-    if (gSettings.edgeImpulseEnabled && gEIModelLoaded) {
+    if (gSettings.eiEnabled && gEIModelLoaded) {
       inferenceCount++;
       EIResults results = runEdgeImpulseInference();
       
@@ -1837,7 +1838,7 @@ static void continuousInferenceTask(void* param) {
       }
     } else {
       DEBUG_SYSTEMF("[EI_DEBUG] [Continuous] Skipping - enabled=%d modelLoaded=%d",
-                    gSettings.edgeImpulseEnabled, gEIModelLoaded);
+                    gSettings.eiEnabled, gEIModelLoaded);
     }
     
     vTaskDelay(pdMS_TO_TICKS(gSettings.edgeImpulseIntervalMs));
@@ -2141,21 +2142,25 @@ const char* cmd_ei_enable(const String& argsInput) {
   
   if (trimmed.length() == 0) {
     snprintf(gEICmdBuffer, sizeof(gEICmdBuffer), "Edge Impulse: %s", 
-      gSettings.edgeImpulseEnabled ? "enabled" : "disabled");
+      gSettings.eiEnabled ? "enabled" : "disabled");
     return gEICmdBuffer;
   }
   
   int val = trimmed.toInt();
-  setSetting(gSettings.edgeImpulseEnabled, (bool)(val != 0));
-  
-  if (gSettings.edgeImpulseEnabled && !gEIInitialized) {
+  setSetting(gSettings.eiEnabled, (bool)(val != 0));
+
+  if (gSettings.eiEnabled && !gEIInitialized) {
     initEdgeImpulse();
+  } else if (!gSettings.eiEnabled) {
+    // Stop live inference + unload model so Enabled off frees the subsystem.
+    (void)executeCommandThroughRegistry("eicontinuous 0");
+    (void)executeCommandThroughRegistry("eimodelunload");
   }
-  
-  sensorStatusBumpWith(gSettings.edgeImpulseEnabled ? "ei_enable" : "ei_disable");
+
+  sensorStatusBumpWith(gSettings.eiEnabled ? "ei_enable" : "ei_disable");
   
   snprintf(gEICmdBuffer, sizeof(gEICmdBuffer), "Edge Impulse %s", 
-    gSettings.edgeImpulseEnabled ? "enabled" : "disabled");
+    gSettings.eiEnabled ? "enabled" : "disabled");
   return gEICmdBuffer;
 }
 
@@ -2278,7 +2283,7 @@ const char* cmd_ei_status(const String& argsInput) {
     gEIInitialized ? "yes" : "no",
     gEIModelLoaded ? "yes" : "no",
     gLoadedModelPath.length() > 0 ? gLoadedModelPath.c_str() : "(none)",
-    gSettings.edgeImpulseEnabled ? "yes" : "no",
+    gSettings.eiEnabled ? "yes" : "no",
     gEIContinuousRunning ? "running" : "stopped",
     gSettings.edgeImpulseMinConfidence,
     gModelInputWidth, gModelInputHeight,

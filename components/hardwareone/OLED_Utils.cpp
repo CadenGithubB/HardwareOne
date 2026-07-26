@@ -14,6 +14,7 @@
 #include "System_Utils.h"  // For AuthContext
 #include "System_CommandTypes.h"  // For Command, CommandContext
 #include "System_FirstTimeSetup.h"
+#include "OLED_ConsoleBuffer.h"
 
 // Forward declaration for memory stats display
 void displayMemoryStats();
@@ -92,7 +93,7 @@ bool shouldBlockForDisplayAuth() {
 #include "i2csensor_ds3231.h"
 #endif
 #if ENABLE_GPS_SENSOR
-#include "i2csensor_pa1010d.h"  // gGpsEnabled, gGpsConnected
+#include "i2csensor_pa1010d.h"  // gGpsRunning, gGpsConnected
 #endif
 
 #if ENABLE_WIFI || ENABLE_ESPNOW
@@ -2764,9 +2765,9 @@ void drawOLEDFooter() {
     case OLED_RTC_DATA:
 #if ENABLE_RTC_SENSOR
       {
-        extern bool gRtcEnabled;
+        extern bool gRtcRunning;
         extern bool gRtcConnected;
-        hints = (gRtcEnabled && gRtcConnected) ? "X:Stop B:Back" : "X:Start B:Back";
+        hints = (gRtcRunning && gRtcConnected) ? "X:Stop B:Back" : "X:Start B:Back";
       }
 #else
       hints = "B:Back";
@@ -2776,9 +2777,9 @@ void drawOLEDFooter() {
     case OLED_PRESENCE_DATA:
 #if ENABLE_PRESENCE_SENSOR
       {
-        extern bool gPresenceEnabled;
+        extern bool gPresenceRunning;
         extern bool gPresenceConnected;
-        hints = (gPresenceEnabled && gPresenceConnected) ? "X:Stop B:Back" : "X:Start B:Back";
+        hints = (gPresenceRunning && gPresenceConnected) ? "X:Stop B:Back" : "X:Start B:Back";
       }
 #else
       hints = "B:Back";
@@ -2930,6 +2931,7 @@ bool oledModeAllowedForGuest(OLEDMode mode) {
     case OLED_SPEECH_STATUS:
     case OLED_BLUETOOTH_STATUS:
     case OLED_BLUETOOTH_G2_STATUS:
+    case OLED_R1_HEALTH:
     case OLED_REMOTE_SENSORS:
     // Sensor views
     case OLED_SENSOR_DATA:
@@ -3102,7 +3104,7 @@ void oledSetAlwaysDirty(bool always) {
 // Note: oledDisplay is now an alias for gDisplay (defined in Display_HAL.h)
 // The actual display object is managed by Display_HAL.cpp
 bool oledConnected = false;
-bool gOledEnabled = false;
+bool gOledRunning = false;
 
 // ESP-NOW mesh functions from .ino
 // gMeshPeers, gMeshPeerSlots declared in System_ESPNow.h (pointer, not array)
@@ -3344,6 +3346,9 @@ extern void oledMenuModeInit();   // Menu / Logo / Sensor-menu registrars (OLED_
 #if ENABLE_BLUETOOTH
 extern void oledBluetoothModeInit();   // OLED_Mode_Bluetooth.cpp
 #endif
+#if ENABLE_R1_HEALTH
+extern void oledR1HealthModeInit();    // OLED_Mode_R1_Health.cpp
+#endif
 #if ENABLE_ESPNOW && ENABLE_BONDED_MODE
 extern void oledRemoteSettingsModeInit();   // OLED_Mode_RemoteSettings.cpp
 #endif
@@ -3366,6 +3371,9 @@ void printRegisteredOLEDModes() {
   oledMenuModeInit();   // keep OLED_Mode_Menu.cpp (Menu/Logo/Sensor-menu) from being GC'd
 #if ENABLE_BLUETOOTH
   oledBluetoothModeInit();   // keep OLED_Mode_Bluetooth.cpp from being GC'd
+#endif
+#if ENABLE_R1_HEALTH
+  oledR1HealthModeInit();    // keep OLED_Mode_R1_Health.cpp from being GC'd
 #endif
 #if ENABLE_ESPNOW && ENABLE_BONDED_MODE
   oledRemoteSettingsModeInit();   // keep OLED_Mode_RemoteSettings.cpp from being GC'd
@@ -3462,6 +3470,7 @@ extern void imuUpdateActions();
 
 bool initOLEDDisplay() {
   if (gDisplay != nullptr) {
+    gOledConsole.init();
     broadcastOutput("OLED display already initialized");
     return true;
   }
@@ -3473,7 +3482,8 @@ bool initOLEDDisplay() {
   
   if (success) {
     oledConnected = true;
-    gOledEnabled = true;
+    gOledRunning = true;
+    gOledConsole.init();
     
     broadcastOutput("Display initialized successfully");
     INFO_SYSTEMF("Display initialized: %s (%dx%d)", DISPLAY_NAME, DISPLAY_WIDTH, DISPLAY_HEIGHT);
@@ -3529,7 +3539,7 @@ void stopOLEDDisplay() {
 #endif
 
   oledConnected = false;
-  gOledEnabled = false;
+  gOledRunning = false;
 
   DEBUG_DISPLAYF("Display stopped");
 }
@@ -3604,7 +3614,7 @@ void updateOLEDDisplay() {
   // animationLastUpdate, animationFrame, animationFPS are now defined at top of file
   extern void displayAnimation();
   
-  if (!gOledEnabled || !oledConnected || oledDisplay == nullptr) {
+  if (!gOledRunning || !oledConnected || oledDisplay == nullptr) {
     return;
   }
 
@@ -3855,7 +3865,7 @@ const char* cmd_oled_enabled(const String& argsInput) {
         return "ERROR";
       }
     } else {
-      gOledEnabled = true;
+      gOledRunning = true;
     }
 
     String defaultMode = gSettings.oledDefaultMode;
@@ -3870,12 +3880,11 @@ const char* cmd_oled_enabled(const String& argsInput) {
     updateOLEDDisplay();
     snprintf(getDebugBuffer(), 1024, "OLED display enabled (mode: %s)", gSettings.oledDefaultMode.c_str());
   } else {
+    // Full teardown (same as closeoled), not just blanking the panel.
     if (oledConnected) {
-      gOledEnabled = false;
-      i2cOledTransactionVoid(400000, 500, [&]() {
-        oledDisplay->clearDisplay();
-        oledDisplay->display();
-      });
+      stopOLEDDisplay();
+    } else {
+      gOledRunning = false;
     }
     snprintf(getDebugBuffer(), 1024, "OLED display disabled");
   }
@@ -4199,7 +4208,7 @@ const char* cmd_oledstatus(const String& argsInput) {
       doc["address"] = OLED_I2C_ADDRESS;
       doc["width"]   = SCREEN_WIDTH;
       doc["height"]  = SCREEN_HEIGHT;
-      doc["enabled"] = gOledEnabled;
+      doc["enabled"] = gOledRunning;
       const char* modeStr;
       switch (currentOLEDMode) {
         case OLED_SYSTEM_STATUS:  modeStr = "System Status"; break;
@@ -4234,7 +4243,7 @@ const char* cmd_oledstatus(const String& argsInput) {
     broadcastOutput(getDebugBuffer());
     snprintf(getDebugBuffer(), 1024, "Resolution: %dx%d", SCREEN_WIDTH, SCREEN_HEIGHT);
     broadcastOutput(getDebugBuffer());
-    snprintf(getDebugBuffer(), 1024, "Enabled: %s", gOledEnabled ? "Yes" : "No");
+    snprintf(getDebugBuffer(), 1024, "Enabled: %s", gOledRunning ? "Yes" : "No");
     broadcastOutput(getDebugBuffer());
 
     String modeStr;
@@ -4377,6 +4386,7 @@ static const char* getOLEDModeName(OLEDMode mode) {
     case OLED_BLUETOOTH_G2: return "G2";
     case OLED_BLUETOOTH_G2_STATUS: return "G2 Status";
     case OLED_BLUETOOTH_R1: return "R1 Ring";
+    case OLED_R1_HEALTH: return "R1 Health";
     case OLED_USER_MANAGER: return "Users";
     case OLED_REMOTE_SENSORS: return "Remote";
     case OLED_MEMORY_STATS: return "Memory";
@@ -4432,6 +4442,7 @@ OLEDMode modeFromSlug(const String& slug) {
   if (slug == "led") return OLED_LED;
   if (slug == "gamepad" || slug == "gpad") return OLED_GAMEPAD_VISUAL;
   if (slug == "bluetooth") return OLED_BLUETOOTH;
+  if (slug == "r1health") return OLED_R1_HEALTH;
   if (slug == "remote") return OLED_REMOTE_SENSORS;
   if (slug == "memory" || slug == "mem") return OLED_MEMORY_STATS;
   if (slug == "perf") return OLED_PERF_STATS;
@@ -4486,6 +4497,7 @@ const char* slugFromMode(OLEDMode mode) {
     case OLED_BLUETOOTH_G2:     return "g2";
     case OLED_BLUETOOTH_G2_STATUS: return "g2status";
     case OLED_BLUETOOTH_R1:     return "r1ring";
+    case OLED_R1_HEALTH:        return "r1health";
     case OLED_USER_MANAGER:     return "users";
     case OLED_REMOTE_SENSORS:  return "remote";
     case OLED_MEMORY_STATS:    return "memory";
@@ -4562,10 +4574,10 @@ extern ConnectedDevice connectedDevices[];
 // Returns true if OLED was detected and initialized
 bool earlyOLEDInit() {
   // Early exit if I2C bus is disabled
-  if (!gI2CBusEnabled) {
+  if (!gI2CBusRunning) {
     DEBUG_DISPLAYF("OLED init skipped - I2C bus disabled");
     oledConnected = false;
-    gOledEnabled = false;
+    gOledRunning = false;
     return false;
   }
 
@@ -4575,7 +4587,21 @@ bool earlyOLEDInit() {
   if (!inFirstTimeSetup) {
     if (!gSettings.oledEnabled) {
       oledConnected = false;
-      gOledEnabled = false;
+      gOledRunning = false;
+      return false;
+    }
+    // Boot intent, separate from the permission above: oledAutoStart decides
+    // whether the display comes up on its own. ramFlushResolve lets a
+    // reboot-and-resume session carry the live state across instead.
+    //
+    // A dark screen is indistinguishable from a dead device, and first-time
+    // setup does NOT re-trigger on a configured board — so the console line is
+    // the only breadcrumb pointing at the cause. Worth one unconditional line.
+    if (!ramFlushResolve(RF_OLED, gSettings.oledAutoStart)) {
+      oledConnected = false;
+      gOledRunning = false;
+      broadcastOutput("[OLED] Display not started: oledautostart is off. "
+                      "Run 'oledstart' for this session, or 'oledautostart 1' and reboot.");
       return false;
     }
   }
@@ -4630,7 +4656,8 @@ bool earlyOLEDInit() {
     });
     if (beginOk) {
       oledConnected = true;
-      gOledEnabled = true;
+      gOledRunning = true;
+      gOledConsole.init();
 
       // Set rotation (0 = normal, 2 = 180 degrees) — persisted via oledFlipped
       oledDisplay->setRotation(gSettings.oledFlipped ? 2 : 0);
@@ -4685,7 +4712,7 @@ bool earlyOLEDInit() {
 // Process boot sequence phase transitions in loop()
 // Call this from loop() when oledBootModeActive is true
 void processOLEDBootSequence() {
-  if (!oledBootModeActive || !oledConnected || !gOledEnabled) {
+  if (!oledBootModeActive || !oledConnected || !gOledRunning) {
     return;
   }
 
@@ -4744,7 +4771,7 @@ void processOLEDBootSequence() {
           }
           
           // Auto-start gamepad if setting is enabled and I2C bus is enabled
-          if (ramFlushResolve(RF_INPUT, gSettings.inputAutoStart) && gSettings.i2cBusEnabled) {
+          if (gSettings.inputEnabled && ramFlushResolve(RF_INPUT, gSettings.inputAutoStart) && gSettings.i2cEnabled) {
             tryAutoStartInputForMenu();
           }
         }
@@ -4857,9 +4884,10 @@ const OLEDMenuItem oledMenuCategory3[] = {
 const int oledMenuCategory3Count = sizeof(oledMenuCategory3) / sizeof(oledMenuCategory3[0]);
 
 // Apps category items — the on-device programs, mirroring the G2 Apps
-// launcher order (ESP-NOW / Files / Maps / LLM / Automations). Renamed from
-// "Tools"; ESP-NOW pulled in from Connect and Maps from Hardware so every
-// program lives in one place, matching the glasses.
+// launcher order (ESP-NOW / Files / Maps / LLM / Automations / Health).
+// Renamed from "Tools"; ESP-NOW pulled in from Connect and Maps from Hardware
+// so every program lives in one place, matching the glasses. Pet is G2-only —
+// it has no OLED mode, so the lens launcher has one row this menu does not.
 const OLEDMenuItem oledMenuCategory4[] = {
 #if ENABLE_ESPNOW
   { "ESP-NOW",    "notify_espnow",     OLED_ESPNOW },
@@ -4878,6 +4906,12 @@ const OLEDMenuItem oledMenuCategory4[] = {
 #endif
 #if ENABLE_AUTOMATION
   { "Automations","notify_automation", OLED_AUTOMATIONS },
+#endif
+#if ENABLE_R1_HEALTH
+  // R1 vitals + Poll Now + Health Track. The mode renders its own [BLE]/[--]
+  // state when the ring is down, so the row stays visible and useful whether
+  // or not a ring is connected — same reasoning as LLM Chat above.
+  { "Health",     "bt_idle",           OLED_R1_HEALTH },
 #endif
 };
 const int oledMenuCategory4Count = sizeof(oledMenuCategory4) / sizeof(oledMenuCategory4[0]);
@@ -5264,7 +5298,7 @@ MenuAvailability getMenuAvailability(OLEDMode mode, String* outReason) {
 #endif
 #if ENABLE_AUTOMATION
     case OLED_AUTOMATIONS:
-      if (!gSettings.automationsEnabled) {
+      if (!gSettings.automationEnabled) {
         if (outReason) *outReason = "Disabled\nRun: automation system enable";
         return MenuAvailability::FEATURE_DISABLED;
       }
@@ -5282,7 +5316,7 @@ MenuAvailability getMenuAvailability(OLEDMode mode, String* outReason) {
         return MenuAvailability::AVAILABLE;
       }
       // If enabled but not initialized, show as unavailable with setup instructions
-      if (gSettings.espnowenabled) {
+      if (gSettings.espnowEnabled) {
         if (outReason) *outReason = "Not initialized\nPress X to setup";
         return MenuAvailability::FEATURE_DISABLED;
       }
@@ -5345,7 +5379,7 @@ MenuAvailability getMenuAvailability(OLEDMode mode, String* outReason) {
         return MenuAvailability::NOT_BUILT;
 #else
       // Check if GPS is running
-      if (gGpsConnected && gGpsEnabled) {
+      if (gGpsConnected && gGpsRunning) {
         return MenuAvailability::AVAILABLE;
       }
       // Check if hardware was detected during I2C scan (address 0x10)
@@ -5914,14 +5948,14 @@ bool processOLEDInput() {
   bool shouldDebug = (now - lastGamepadDebugTime >= GAMEPAD_DEBUG_INTERVAL);
   
   // Check gamepad enabled/connected - silent exit when disabled (no spam)
-  if (!gInputEnabled) {
+  if (!gInputRunning) {
     return false;
   }
   
   // Read from gamepad cache (thread-safe)
   if (!gInputCache.mutex) {
     if (shouldDebug) {
-      DEBUG_DISPLAYF("[GAMEPAD_MENU] Exit: gInputCache.mutex is NULL addrs &en=%p &conn=%p &cache=%p\n", (void*)&gInputEnabled, (void*)&gInputConnected, (void*)&gInputCache);
+      DEBUG_DISPLAYF("[GAMEPAD_MENU] Exit: gInputCache.mutex is NULL addrs &en=%p &conn=%p &cache=%p\n", (void*)&gInputRunning, (void*)&gInputConnected, (void*)&gInputCache);
       lastGamepadDebugTime = now;
     }
     return false;
@@ -6388,8 +6422,8 @@ bool processOLEDInput() {
  * Try to auto-start gamepad when entering menu mode
  */
 void tryAutoStartInputForMenu() {
-  DEBUG_DISPLAYF("[GAMEPAD_AUTO] tryAutoStartInputForMenu: enabled=%d connected=%d\n", gInputEnabled, gInputConnected);
-  if (gInputEnabled && gInputConnected) {
+  DEBUG_DISPLAYF("[GAMEPAD_AUTO] tryAutoStartInputForMenu: enabled=%d connected=%d\n", gInputRunning, gInputConnected);
+  if (gInputRunning && gInputConnected) {
     DEBUG_DISPLAYF("[GAMEPAD_AUTO] Already running, skipping");
     return;  // Already running
   }
@@ -6400,8 +6434,9 @@ void tryAutoStartInputForMenu() {
     // Resolved through ramflush because this runs on every menu entry and login,
     // long after boot — reading the setting directly would resurrect input that a
     // RAM-flush resume deliberately left off.
-    bool autoStart = ramFlushResolve(RF_INPUT, gSettings.inputAutoStart);
-    if (!autoStart || !gSettings.i2cBusEnabled) {
+    bool autoStart = gSettings.inputEnabled &&
+                     ramFlushResolve(RF_INPUT, gSettings.inputAutoStart);
+    if (!autoStart || !gSettings.i2cEnabled) {
       return;
     }
   }
@@ -6516,7 +6551,7 @@ void oledSetBootProgress(int percent, const char* label) {
 #if ENABLE_OLED_DISPLAY
   bootProgressPercent = percent;
   bootProgressLabel = label;
-  if (gOledEnabled && oledConnected) {
+  if (gOledRunning && oledConnected) {
     updateOLEDDisplay();
   }
 #endif
@@ -6524,7 +6559,7 @@ void oledSetBootProgress(int percent, const char* label) {
 
 void oledUpdate() {
 #if ENABLE_OLED_DISPLAY
-  if (gOledEnabled && oledConnected) {
+  if (gOledRunning && oledConnected) {
 #if ENABLE_ESPNOW
     oledEspNowPollPairRequest();   // pop the accept/reject dialog on an incoming pair request
 #endif
@@ -6542,7 +6577,7 @@ void oledEarlyInit() {
 
 void applyOLEDBrightness() {
 #if ENABLE_OLED_DISPLAY
-  if (oledConnected && gOledEnabled) {
+  if (oledConnected && gOledRunning) {
     if (gSettings.oledBrightness >= 0 && gSettings.oledBrightness <= 255) {
       i2cDeviceTransactionVoid((uint8_t)gSettings.oledBus, I2C_ADDR_OLED, 400000, 200, [&]() {
         oledDisplay->ssd1306_command(SSD1306_SETCONTRAST);
@@ -6560,7 +6595,7 @@ void applyOLEDBrightness() {
 // frame. The next normal mode tick repaints in the new orientation.
 void applyOLEDRotation() {
 #if ENABLE_OLED_DISPLAY
-  if (!oledConnected || !gOledEnabled || !gDisplay) return;
+  if (!oledConnected || !gOledRunning || !gDisplay) return;
   uint8_t rot = gSettings.oledFlipped ? 2 : 0;
   gDisplay->setRotation(rot);
   gDisplay->clearDisplay();
@@ -6570,7 +6605,7 @@ void applyOLEDRotation() {
 
 void oledApplySettings() {
 #if ENABLE_OLED_DISPLAY
-  if (oledConnected && gOledEnabled) {
+  if (oledConnected && gOledRunning) {
     applyOLEDBrightness();
     applyOLEDRotation();
     DEBUG_SYSTEMF("OLED settings applied - boot animation running");
@@ -6617,7 +6652,7 @@ void localDisplaySessionTick() {
 
 void oledNotifyLocalDisplayAuthChanged() {
 #if ENABLE_OLED_DISPLAY
-  if (!gOledEnabled || !oledConnected) {
+  if (!gOledRunning || !oledConnected) {
     return;
   }
 

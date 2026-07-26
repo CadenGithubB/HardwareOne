@@ -16,7 +16,7 @@ static void displayGamepadVisual() {
   
   oledDisplay->setTextSize(1);
   
-  if (!gInputEnabled || !gInputConnected) {
+  if (!gInputRunning || !gInputConnected) {
     oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
     oledDisplay->println("Gamepad not active");
     oledDisplay->println();
@@ -143,7 +143,7 @@ static bool gamepadOLEDModeAvailable(String* outReason) {
 
 static void gamepadToggleConfirmed(void* userData) {
   (void)userData;
-  if (gInputEnabled && gInputConnected) {
+  if (gInputRunning && gInputConnected) {
     executeOLEDCommand("closegamepad");
   } else {
     executeOLEDCommand("opengamepad");
@@ -153,7 +153,7 @@ static void gamepadToggleConfirmed(void* userData) {
 // Input handler for Gamepad OLED mode - X button toggles gamepad
 static bool gamepadInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
-    if (gInputEnabled && gInputConnected) {
+    if (gInputRunning && gInputConnected) {
       oledConfirmRequest("Close gamepad?", "This disables input", gamepadToggleConfirmed, nullptr, false);
     } else {
       oledConfirmRequest("Open gamepad?", nullptr, gamepadToggleConfirmed, nullptr);

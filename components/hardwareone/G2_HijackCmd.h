@@ -126,7 +126,7 @@ bool g2SubmitHijackCommand(const char* line,
 // reads, regular user pairs → user-level reads. If pairedByUser is blank
 // (legacy peer paired before this field existed), the guard installs an
 // empty user → all guarded reads fail. To recover, re-run
-// `bleautoconnect g2-glasses on` which stamps pairedByUser from the
+// `bleautoreconnect g2-glasses on` which stamps pairedByUser from the
 // caller's currentAuthContext().user via bleSavePeerMac.
 // =============================================================================
 AuthContext g2HijackAuthContext();

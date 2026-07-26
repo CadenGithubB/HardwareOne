@@ -56,8 +56,8 @@
 template<typename Func>
 auto i2cDeviceTransaction(uint8_t address, uint32_t clockHz, uint32_t timeoutMs, Func&& operation)
     -> decltype(operation()) {
-  extern bool gI2CBusEnabled;
-  if (!gI2CBusEnabled) return decltype(operation())();
+  extern bool gI2CBusRunning;
+  if (!gI2CBusRunning) return decltype(operation())();
 
   I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
   if (!mgr) return decltype(operation())();
@@ -73,8 +73,8 @@ auto i2cDeviceTransaction(uint8_t address, uint32_t clockHz, uint32_t timeoutMs,
 
 template<typename Func>
 void i2cDeviceTransactionVoid(uint8_t address, uint32_t clockHz, uint32_t timeoutMs, Func&& operation) {
-  extern bool gI2CBusEnabled;
-  if (!gI2CBusEnabled) return;
+  extern bool gI2CBusRunning;
+  if (!gI2CBusRunning) return;
 
   I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
   if (!mgr) return;
@@ -96,8 +96,8 @@ template<typename Func>
 auto i2cDeviceTransaction(uint8_t bus, uint8_t address, uint32_t clockHz,
                           uint32_t timeoutMs, Func&& operation)
     -> decltype(operation()) {
-  extern bool gI2CBusEnabled;
-  if (!gI2CBusEnabled) return decltype(operation())();
+  extern bool gI2CBusRunning;
+  if (!gI2CBusRunning) return decltype(operation())();
 
   I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
   if (!mgr) return decltype(operation())();
@@ -112,8 +112,8 @@ auto i2cDeviceTransaction(uint8_t bus, uint8_t address, uint32_t clockHz,
 template<typename Func>
 void i2cDeviceTransactionVoid(uint8_t bus, uint8_t address, uint32_t clockHz,
                               uint32_t timeoutMs, Func&& operation) {
-  extern bool gI2CBusEnabled;
-  if (!gI2CBusEnabled) return;
+  extern bool gI2CBusRunning;
+  if (!gI2CBusRunning) return;
 
   I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
   if (!mgr) return;
@@ -169,8 +169,8 @@ auto i2cOledTransaction(uint32_t clockHz, uint32_t timeoutMs, Func&& operation)
 
 template<typename Func>
 void i2cTransactionNACKTolerant(uint8_t address, uint32_t clockHz, uint32_t timeoutMs, Func&& operation) {
-  extern bool gI2CBusEnabled;
-  if (!gI2CBusEnabled) return;
+  extern bool gI2CBusRunning;
+  if (!gI2CBusRunning) return;
 
   I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
   if (!mgr) return;
@@ -187,8 +187,8 @@ void i2cTransactionNACKTolerant(uint8_t address, uint32_t clockHz, uint32_t time
 template<typename Func>
 void i2cTransactionNACKTolerant(uint8_t bus, uint8_t address, uint32_t clockHz,
                                 uint32_t timeoutMs, Func&& operation) {
-  extern bool gI2CBusEnabled;
-  if (!gI2CBusEnabled) return;
+  extern bool gI2CBusRunning;
+  if (!gI2CBusRunning) return;
 
   I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
   if (!mgr) return;
@@ -234,8 +234,8 @@ inline bool checkTaskStackSafety(const char* sensorName, uint32_t totalStackWord
 // (probes are used by the scanner / wizards to check existence, not to set
 // devices up for ongoing use). `bus` defaults to 0 so legacy callers work.
 inline uint8_t i2cProbeAddress(uint8_t address, uint32_t clockHz, uint32_t timeoutMs, uint8_t bus = 0) {
-  extern bool gI2CBusEnabled;
-  if (!gI2CBusEnabled) return 4;
+  extern bool gI2CBusRunning;
+  if (!gI2CBusRunning) return 4;
 
   I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
   if (!mgr) return 4;
@@ -267,8 +267,8 @@ inline bool i2cPingAddress(uint8_t address, uint32_t clockHz, uint32_t timeoutMs
 // true only if a byte actually came back. NOTE: write-only devices (the SSD1306
 // OLED) NAK reads — use i2cConfirmPresent(), which exempts them, not this raw call.
 inline bool i2cConfirmRead(uint8_t address, uint32_t clockHz, uint32_t timeoutMs, uint8_t bus = 0) {
-  extern bool gI2CBusEnabled;
-  if (!gI2CBusEnabled) return false;
+  extern bool gI2CBusRunning;
+  if (!gI2CBusRunning) return false;
 
   I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
   if (!mgr) return false;
@@ -407,7 +407,7 @@ inline bool i2cBusRecovery() {
 // ============================================================================
 // Global Flags and Configuration
 // ============================================================================
-extern bool gI2CBusEnabled;
+extern bool gI2CBusRunning;
 
 // The reference-counted "pause sensor polling" primitive (pollPause/pollResume/
 // PollPauseGuard, the legacy sensorPolling* aliases, and the gSensorPollingPaused

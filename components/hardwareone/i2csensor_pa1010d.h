@@ -35,7 +35,7 @@ class Adafruit_GPS;
 
 extern Adafruit_GPS* gPA1010D;
 
-extern bool gGpsEnabled;
+extern bool gGpsRunning;
 extern bool gGpsConnected;
 extern unsigned long gGpsLastStopTime;
 extern TaskHandle_t gGpsTaskHandle;

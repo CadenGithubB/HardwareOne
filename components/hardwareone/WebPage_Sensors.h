@@ -273,10 +273,10 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
   httpd_resp_send_chunk(req, "console.log('[SENSORS] Button bindings complete');", HTTPD_RESP_USE_STRLEN);
 
   // Status poller - also toggle button visibility based on enabled state
-  httpd_resp_send_chunk(req, "console.log('[SENSORS] Setting up status poller');var apply=function(s){console.log('[SENSORS] Status update:',s);try{setClass('gyro-status-indicator',!!s.imuEnabled);setClass('thermal-status-indicator',!!s.thermalEnabled);setClass('tof-status-indicator',!!s.tofEnabled);setClass('gamepad-status-indicator',!!s.inputEnabled);setClass('ano-status-indicator',!!s.inputEnabled);setClass('gps-status-indicator',!!s.gpsEnabled);setClass('rtc-status-indicator',!!s.rtcEnabled);setClass('presence-status-indicator',!!s.presenceEnabled);setClass('fmradio-status-indicator',!!s.fmRadioEnabled);setClass('servo-status-indicator',!!s.pwmDriverConnected);setClass('camera-status-indicator',!!s.cameraEnabled);setClass('camera-streaming-indicator',!!s.cameraStreaming);setClass('camera-ml-indicator',!!s.eiEnabled);setClass('mic-status-indicator',!!s.micEnabled);setClass('ei-status-indicator',!!s.eiEnabled);var rec=hw._ge('mic-recording-indicator');if(rec){var cls=(s.micRecording?'status-indicator status-recording':'status-indicator status-disabled');if(rec.className!==cls)rec.className=cls}", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "console.log('[SENSORS] Setting up status poller');var apply=function(s){console.log('[SENSORS] Status update:',s);try{setClass('gyro-status-indicator',!!s.imuRunning);setClass('thermal-status-indicator',!!s.thermalRunning);setClass('tof-status-indicator',!!s.tofRunning);setClass('gamepad-status-indicator',!!s.inputRunning);setClass('ano-status-indicator',!!s.inputRunning);setClass('gps-status-indicator',!!s.gpsRunning);setClass('rtc-status-indicator',!!s.rtcRunning);setClass('presence-status-indicator',!!s.presenceRunning);setClass('fmradio-status-indicator',!!s.fmRadioRunning);setClass('servo-status-indicator',!!s.pwmDriverConnected);setClass('camera-status-indicator',!!s.cameraRunning);setClass('camera-streaming-indicator',!!s.cameraStreaming);setClass('camera-ml-indicator',!!s.eiEnabled);setClass('mic-status-indicator',!!s.micRunning);setClass('ei-status-indicator',!!s.eiEnabled);var rec=hw._ge('mic-recording-indicator');if(rec){var cls=(s.micRecording?'status-indicator status-recording':'status-indicator status-disabled');if(rec.className!==cls)rec.className=cls}", HTTPD_RESP_USE_STRLEN);
   // Button visibility toggling
-  httpd_resp_send_chunk(req, "var toggleBtns=function(startId,stopId,isOn){var startBtn=hw._ge(startId);var stopBtn=hw._ge(stopId);if(startBtn)startBtn.style.display=isOn?'none':'inline-block';if(stopBtn)stopBtn.style.display=isOn?'inline-block':'none';};toggleBtns('btn-gamepad-start','btn-gamepad-stop',!!s.inputEnabled);toggleBtns('btn-ano-start','btn-ano-stop',!!s.inputEnabled);toggleBtns('btn-gps-start','btn-gps-stop',!!s.gpsEnabled);toggleBtns('btn-rtc-start','btn-rtc-stop',!!s.rtcEnabled);toggleBtns('btn-presence-start','btn-presence-stop',!!s.presenceEnabled);toggleBtns('btn-imu-start','btn-imu-stop',!!s.imuEnabled);toggleBtns('btn-thermal-start','btn-thermal-stop',!!s.thermalEnabled);toggleBtns('btn-tof-start','btn-tof-stop',!!s.tofEnabled);toggleBtns('btn-camera-start','btn-camera-stop',!!s.cameraEnabled);toggleBtns('btn-mic-start','btn-mic-stop',!!s.micEnabled);toggleBtns('btn-ei-enable','btn-ei-disable',!!s.eiEnabled);var camRec=hw._ge('btn-camera-record');var camRecStop=hw._ge('btn-camera-record-stop');var camRecHint=hw._ge('camera-record-hint');if(camRec){camRec.style.display=(s.cameraEnabled&&!s.cameraRecording)?'inline-block':'none';camRec.disabled=!s.sdWritable;if(camRec.title){if(s.sdWritable)camRec.title='Record stream to SD card as MJPEG AVI';else if(s.sdAvailable)camRec.title='SD mounted but writes are failing (card may be flaky)';else camRec.title='Requires SD card';}}if(camRecStop){camRecStop.style.display=(s.cameraEnabled&&s.cameraRecording)?'inline-block':'none';}if(camRecHint){if(s.cameraEnabled&&!s.sdWritable){camRecHint.style.display='block';camRecHint.textContent=s.sdAvailable?'SD card is mounted but writes are failing — card may be flaky, full, or write-protected.':'SD card required to record video.';}else{camRecHint.style.display='none';}}", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, "if(s.fmRadioEnabled){if(typeof startFMRadioPolling==='function')startFMRadioPolling()}else{if(typeof stopFMRadioPolling==='function')stopFMRadioPolling()}var servoStatus=hw._ge('servo-connection-status');if(servoStatus){servoStatus.textContent=s.pwmDriverConnected?'Initialized & ready':'Not initialized (use servo command to start)';servoStatus.style.color=s.pwmDriverConnected?'#28a745':'#ffc107';}}catch(_){}};", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "var toggleBtns=function(startId,stopId,isOn){var startBtn=hw._ge(startId);var stopBtn=hw._ge(stopId);if(startBtn)startBtn.style.display=isOn?'none':'inline-block';if(stopBtn)stopBtn.style.display=isOn?'inline-block':'none';};toggleBtns('btn-gamepad-start','btn-gamepad-stop',!!s.inputRunning);toggleBtns('btn-ano-start','btn-ano-stop',!!s.inputRunning);toggleBtns('btn-gps-start','btn-gps-stop',!!s.gpsRunning);toggleBtns('btn-rtc-start','btn-rtc-stop',!!s.rtcRunning);toggleBtns('btn-presence-start','btn-presence-stop',!!s.presenceRunning);toggleBtns('btn-imu-start','btn-imu-stop',!!s.imuRunning);toggleBtns('btn-thermal-start','btn-thermal-stop',!!s.thermalRunning);toggleBtns('btn-tof-start','btn-tof-stop',!!s.tofRunning);toggleBtns('btn-camera-start','btn-camera-stop',!!s.cameraRunning);toggleBtns('btn-mic-start','btn-mic-stop',!!s.micRunning);toggleBtns('btn-ei-enable','btn-ei-disable',!!s.eiEnabled);var camRec=hw._ge('btn-camera-record');var camRecStop=hw._ge('btn-camera-record-stop');var camRecHint=hw._ge('camera-record-hint');if(camRec){camRec.style.display=(s.cameraRunning&&!s.cameraRecording)?'inline-block':'none';camRec.disabled=!s.sdWritable;if(camRec.title){if(s.sdWritable)camRec.title='Record stream to SD card as MJPEG AVI';else if(s.sdAvailable)camRec.title='SD mounted but writes are failing (card may be flaky)';else camRec.title='Requires SD card';}}if(camRecStop){camRecStop.style.display=(s.cameraRunning&&s.cameraRecording)?'inline-block':'none';}if(camRecHint){if(s.cameraRunning&&!s.sdWritable){camRecHint.style.display='block';camRecHint.textContent=s.sdAvailable?'SD card is mounted but writes are failing — card may be flaky, full, or write-protected.':'SD card required to record video.';}else{camRecHint.style.display='none';}}", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "if(s.fmRadioRunning){if(typeof startFMRadioPolling==='function')startFMRadioPolling()}else{if(typeof stopFMRadioPolling==='function')stopFMRadioPolling()}var servoStatus=hw._ge('servo-connection-status');if(servoStatus){servoStatus.textContent=s.pwmDriverConnected?'Initialized & ready':'Not initialized (use servo command to start)';servoStatus.style.color=s.pwmDriverConnected?'#28a745':'#ffc107';}}catch(_){}};", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "hw.fetchJSON('/api/sensors/status').then(apply).catch(function(e){console.error('[SENSORS] Status fetch error:',e);})", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, ";hw.pollJSON('/api/sensors/status',1000,apply);console.log('[SENSORS] Status poller started');", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "}catch(e){console.error('[SENSORS] Init error:',e);}})();", HTTPD_RESP_USE_STRLEN);
@@ -416,42 +416,42 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
     "    }\n"
     "  });\n"
     "  try {\n"
-    "    if (status.imuCompiled && status.imuEnabled) {\n"
+    "    if (status.imuCompiled && status.imuRunning) {\n"
     "      startSensorPolling('imu');\n"
     "    } else {\n"
     "      stopSensorPolling('imu');\n"
     "    }\n"
-    "    if (status.inputCompiled && status.inputEnabled) {\n"
+    "    if (status.inputCompiled && status.inputRunning) {\n"
     "      startSensorPolling('gamepad');\n"
     "      startSensorPolling('anoencoder');\n"
     "    } else {\n"
     "      stopSensorPolling('gamepad');\n"
     "      stopSensorPolling('anoencoder');\n"
     "    }\n"
-    "    if (status.gpsCompiled && status.gpsEnabled) {\n"
+    "    if (status.gpsCompiled && status.gpsRunning) {\n"
     "      startSensorPolling('gps');\n"
     "    } else {\n"
     "      stopSensorPolling('gps');\n"
     "    }\n"
-    "    if (status.thermalCompiled && status.thermalEnabled) {\n"
+    "    if (status.thermalCompiled && status.thermalRunning) {\n"
     "      if (typeof startThermalPolling === 'function') startThermalPolling();\n"
     "    } else {\n"
     "      if (typeof stopThermalPolling === 'function') stopThermalPolling();\n"
     "    }\n"
-    "    if (status.tofCompiled && status.tofEnabled) {\n"
+    "    if (status.tofCompiled && status.tofRunning) {\n"
     "      if (typeof startToFPolling === 'function') startToFPolling();\n"
     "    } else {\n"
     "      if (typeof stopToFPolling === 'function') stopToFPolling();\n"
     "    }\n"
-    "    if (window._lastFmRadioEnabled !== status.fmRadioEnabled) {\n"
-    "      if (status.fmRadioEnabled) {\n"
+    "    if (window._lastFmRadioEnabled !== status.fmRadioRunning) {\n"
+    "      if (status.fmRadioRunning) {\n"
     "        if (typeof startFMRadioPolling === 'function') startFMRadioPolling();\n"
     "      } else {\n"
     "        if (typeof stopFMRadioPolling === 'function') stopFMRadioPolling();\n"
     "      }\n"
-    "      window._lastFmRadioEnabled = status.fmRadioEnabled;\n"
+    "      window._lastFmRadioEnabled = status.fmRadioRunning;\n"
     "    }\n"
-    "    if (status.micCompiled && status.micEnabled) {\n"
+    "    if (status.micCompiled && status.micRunning) {\n"
     "      startSensorPolling('microphone');\n"
     "    } else if (status.micCompiled) {\n"
     "      stopSensorPolling('microphone');\n"
@@ -469,12 +469,12 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
     "      }\n"
     "      window._lastMicRecording = isRecording;\n"
     "    }\n"
-    "    if (status.presenceCompiled && status.presenceEnabled) {\n"
+    "    if (status.presenceCompiled && status.presenceRunning) {\n"
     "      startSensorPolling('presence');\n"
     "    } else if (status.presenceCompiled) {\n"
     "      stopSensorPolling('presence');\n"
     "    }\n"
-    "    if (status.cameraCompiled && status.cameraEnabled) {\n"
+    "    if (status.cameraCompiled && status.cameraRunning) {\n"
     "      startSensorPolling('camera');\n"
     "    } else if (status.cameraCompiled) {\n"
     "      stopSensorPolling('camera');\n"
@@ -488,7 +488,7 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
     "    }\n"
     "  } catch (_) {}\n"
     "};\n", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, "function updateStatusIndicators(status){if(!status){console.warn('[Sensors] updateStatusIndicators called with null/undefined status');return}var t=document.getElementById('thermal-status-indicator');var f=document.getElementById('tof-status-indicator');var i=document.getElementById('gyro-status-indicator');var g=document.getElementById('gamepad-status-indicator');var r=document.getElementById('fmradio-status-indicator');var c=document.getElementById('camera-status-indicator');if(t){t.className=status.thermalEnabled?'status-indicator status-enabled':'status-indicator status-disabled'}if(f){f.className=status.tofEnabled?'status-indicator status-enabled':'status-indicator status-disabled'}if(i){i.className=status.imuEnabled?'status-indicator status-enabled':'status-indicator status-disabled'}if(g){g.className=status.inputEnabled?'status-indicator status-enabled':'status-indicator status-disabled'}var g2=document.getElementById('ano-status-indicator');if(g2){g2.className=status.inputEnabled?'status-indicator status-enabled':'status-indicator status-disabled'}if(r){r.className=status.fmRadioEnabled?'status-indicator status-enabled':'status-indicator status-disabled'}if(c){c.className=status.cameraEnabled?'status-indicator status-enabled':'status-indicator status-disabled'}var cs=document.getElementById('camera-streaming-indicator');if(cs){cs.className=status.cameraStreaming?'status-indicator status-recording':'status-indicator status-disabled'}var cml=document.getElementById('camera-ml-indicator');if(cml){cml.className=status.eiEnabled?'status-indicator status-enabled':'status-indicator status-disabled'}var m=document.getElementById('mic-status-indicator');if(m){m.className=status.micEnabled?'status-indicator status-enabled':'status-indicator status-disabled'}var mr=document.getElementById('mic-recording-indicator');if(mr){mr.className=status.micRecording?'status-indicator status-recording':'status-indicator status-disabled'}var ei=document.getElementById('ei-status-indicator');if(ei){ei.className=status.eiEnabled?'status-indicator status-enabled':'status-indicator status-disabled'}}", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "function updateStatusIndicators(status){if(!status){console.warn('[Sensors] updateStatusIndicators called with null/undefined status');return}var t=document.getElementById('thermal-status-indicator');var f=document.getElementById('tof-status-indicator');var i=document.getElementById('gyro-status-indicator');var g=document.getElementById('gamepad-status-indicator');var r=document.getElementById('fmradio-status-indicator');var c=document.getElementById('camera-status-indicator');if(t){t.className=status.thermalRunning?'status-indicator status-enabled':'status-indicator status-disabled'}if(f){f.className=status.tofRunning?'status-indicator status-enabled':'status-indicator status-disabled'}if(i){i.className=status.imuRunning?'status-indicator status-enabled':'status-indicator status-disabled'}if(g){g.className=status.inputRunning?'status-indicator status-enabled':'status-indicator status-disabled'}var g2=document.getElementById('ano-status-indicator');if(g2){g2.className=status.inputRunning?'status-indicator status-enabled':'status-indicator status-disabled'}if(r){r.className=status.fmRadioRunning?'status-indicator status-enabled':'status-indicator status-disabled'}if(c){c.className=status.cameraRunning?'status-indicator status-enabled':'status-indicator status-disabled'}var cs=document.getElementById('camera-streaming-indicator');if(cs){cs.className=status.cameraStreaming?'status-indicator status-recording':'status-indicator status-disabled'}var cml=document.getElementById('camera-ml-indicator');if(cml){cml.className=status.eiEnabled?'status-indicator status-enabled':'status-indicator status-disabled'}var m=document.getElementById('mic-status-indicator');if(m){m.className=status.micRunning?'status-indicator status-enabled':'status-indicator status-disabled'}var mr=document.getElementById('mic-recording-indicator');if(mr){mr.className=status.micRecording?'status-indicator status-recording':'status-indicator status-disabled'}var ei=document.getElementById('ei-status-indicator');if(ei){ei.className=status.eiEnabled?'status-indicator status-enabled':'status-indicator status-disabled'}}", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req,
     "function checkAlreadyActiveSensors() {\n"
     "  console.log('[Sensors] Checking for already-active sensors...');\n"
@@ -504,18 +504,18 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
     "    var devices = devicesData.devices || [];\n"
     "    devices.forEach(function(device) {\n"
     "      var map = {\n"
-    "        'BNO055': {type: 'imu', enabledKey: 'imuEnabled', compiledKey: 'imuCompiled', indicatorId: 'gyro-status-indicator'},\n"
-    "        'MLX90640': {type: 'thermal', enabledKey: 'thermalEnabled', compiledKey: 'thermalCompiled', indicatorId: 'thermal-status-indicator'},\n"
-    "        'VL53L4CX': {type: 'tof', enabledKey: 'tofEnabled', compiledKey: 'tofCompiled', indicatorId: 'tof-status-indicator'},\n"
-    "        'PA1010D': {type: 'gps', enabledKey: 'gpsEnabled', compiledKey: 'gpsCompiled', indicatorId: 'gps-status-indicator'},\n"
-    "        'RDA5807': {type: 'fmradio', enabledKey: 'fmRadioEnabled', compiledKey: 'fmradioCompiled', indicatorId: 'fmradio-status-indicator'},\n"
+    "        'BNO055': {type: 'imu', enabledKey: 'imuRunning', compiledKey: 'imuCompiled', indicatorId: 'gyro-status-indicator'},\n"
+    "        'MLX90640': {type: 'thermal', enabledKey: 'thermalRunning', compiledKey: 'thermalCompiled', indicatorId: 'thermal-status-indicator'},\n"
+    "        'VL53L4CX': {type: 'tof', enabledKey: 'tofRunning', compiledKey: 'tofCompiled', indicatorId: 'tof-status-indicator'},\n"
+    "        'PA1010D': {type: 'gps', enabledKey: 'gpsRunning', compiledKey: 'gpsCompiled', indicatorId: 'gps-status-indicator'},\n"
+    "        'RDA5807': {type: 'fmradio', enabledKey: 'fmRadioRunning', compiledKey: 'fmradioCompiled', indicatorId: 'fmradio-status-indicator'},\n"
 #if ENABLE_ANO_ENCODER
-    "        'Seesaw': {type: 'anoencoder', enabledKey: 'inputEnabled', compiledKey: 'inputCompiled', indicatorId: 'ano-status-indicator', address: 0x49},\n"
+    "        'Seesaw': {type: 'anoencoder', enabledKey: 'inputRunning', compiledKey: 'inputCompiled', indicatorId: 'ano-status-indicator', address: 0x49},\n"
 #else
-    "        'Seesaw': {type: 'gamepad', enabledKey: 'inputEnabled', compiledKey: 'inputCompiled', indicatorId: 'gamepad-status-indicator', address: 0x50},\n"
+    "        'Seesaw': {type: 'gamepad', enabledKey: 'inputRunning', compiledKey: 'inputCompiled', indicatorId: 'gamepad-status-indicator', address: 0x50},\n"
 #endif
-    "        'DS3231': {type: 'rtc', enabledKey: 'rtcEnabled', compiledKey: 'rtcCompiled', indicatorId: 'rtc-status-indicator'},\n"
-    "        'STHS34PF80': {type: 'presence', enabledKey: 'presenceEnabled', compiledKey: 'presenceCompiled', indicatorId: 'presence-status-indicator'}\n"
+    "        'DS3231': {type: 'rtc', enabledKey: 'rtcRunning', compiledKey: 'rtcCompiled', indicatorId: 'rtc-status-indicator'},\n"
+    "        'STHS34PF80': {type: 'presence', enabledKey: 'presenceRunning', compiledKey: 'presenceCompiled', indicatorId: 'presence-status-indicator'}\n"
     "      }[device.name];\n"
     "      if (!map) {\n"
     "        if (device && (device.name === 'SSD1306')) return;\n"

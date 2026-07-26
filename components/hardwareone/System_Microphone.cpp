@@ -59,7 +59,7 @@ static String micPrimaryRecordingsFolder() {
 }
 
 // Microphone state
-bool gMicEnabled = false;
+bool gMicRunning = false;
 bool micConnected = false;
 bool micRecording = false;
 
@@ -108,8 +108,8 @@ static void micProcessForSource(int16_t* buf, size_t n) {
 static void micReconcileState() {
   const bool active = audioCaptureActive() &&
                       audioSourceAvailable(audioGetSource());
-  if (gMicEnabled && !active) {
-    gMicEnabled  = false;
+  if (gMicRunning && !active) {
+    gMicRunning  = false;
     micRecording = false;
   }
   micConnected = active;
@@ -263,7 +263,7 @@ static void recordingTask(void* param) {
   DEBUG_MIC_LIFECYCLEF("[MIC_REC_TASK] Max samples: %lu (sampleRate=%u, maxSec=%d)", maxSamples, (unsigned)micEffectiveSampleRate(), MAX_RECORDING_SEC);
   
   uint32_t loopCount = 0;
-  while (micRecording && gMicEnabled && recordingSamples < maxSamples) {
+  while (micRecording && gMicRunning && recordingSamples < maxSamples) {
     size_t bytesRead = 0;
     esp_err_t err = ESP_OK;
     {
@@ -312,8 +312,8 @@ static void recordingTask(void* param) {
     taskYIELD();
   }
   
-  DEBUG_MIC_LIFECYCLEF("[MIC_REC_TASK] Recording loop ended: micRecording=%d gMicEnabled=%d samples=%lu",
-             micRecording, gMicEnabled, recordingSamples);
+  DEBUG_MIC_LIFECYCLEF("[MIC_REC_TASK] Recording loop ended: micRecording=%d gMicRunning=%d samples=%lu",
+             micRecording, gMicRunning, recordingSamples);
   
   free(buffer);
   DEBUG_MIC_LIFECYCLEF("[MIC_REC_TASK] Buffer freed");
@@ -345,10 +345,10 @@ static void recordingTask(void* param) {
 
 bool startRecording() {
   DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] ========== startRecording() ENTRY ==========");
-  DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] gMicEnabled=%d micRecording=%d", gMicEnabled, micRecording);
+  DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] gMicRunning=%d micRecording=%d", gMicRunning, micRecording);
   DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] Heap: %u, PSRAM: %u", esp_get_free_heap_size(), heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 
-  if (!gMicEnabled) {
+  if (!gMicRunning) {
     DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] FAILED: mic not enabled");
     INFO_MIC_LIFECYCLEF("Cannot record - mic not enabled");
     return false;
@@ -522,14 +522,14 @@ bool initMicrophone() {
   WARN_SYSTEMF("[MIC_INIT] Heap: free=%u, PSRAM_free=%u", 
                (unsigned)esp_get_free_heap_size(), 
                (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
-  WARN_SYSTEMF("[MIC_INIT] Current state: gMicEnabled=%d, micConnected=%d", gMicEnabled, micConnected);
+  WARN_SYSTEMF("[MIC_INIT] Current state: gMicRunning=%d, micConnected=%d", gMicRunning, micConnected);
 
   gMicDcOffset = 0;
   gMicDcOffsetInitialized = false;
 
   I2sMicLockGuard i2sGuard("mic.init");
   
-  if (gMicEnabled) {
+  if (gMicRunning) {
     WARN_SYSTEMF("[MIC_INIT] Already initialized - returning true");
     INFO_MIC_LIFECYCLEF("Already initialized");
     return true;
@@ -576,14 +576,14 @@ bool initMicrophone() {
     INFO_MIC_LIFECYCLEF("Failed to start PDM capture");
     return false;
   }
-  gMicEnabled = true;
+  gMicRunning = true;
   micReconcileState();  // set micConnected from live HAL state (source + capture)
   WARN_SYSTEMF("[MIC_INIT] source=%s", micSourceName());
   sensorStatusBumpWith("openmic");
   systemEventPost(SYSEVT_SENSOR_STARTED, "Microphone");
 
   WARN_SYSTEMF("[MIC_INIT] ########## initMicrophone() SUCCESS ##########");
-  WARN_SYSTEMF("[MIC_INIT] gMicEnabled=%d, micConnected=%d", gMicEnabled, micConnected);
+  WARN_SYSTEMF("[MIC_INIT] gMicRunning=%d, micConnected=%d", gMicRunning, micConnected);
   WARN_SYSTEMF("[MIC_INIT] Final heap: free=%u, PSRAM_free=%u", 
                (unsigned)esp_get_free_heap_size(), 
                (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
@@ -593,26 +593,26 @@ bool initMicrophone() {
 }
 
 void stopMicrophone() {
-  STACK_TRACEF("stopMicrophone.enter gMicEnabled=%d micRecording=%d",
-               gMicEnabled, micRecording);
+  STACK_TRACEF("stopMicrophone.enter gMicRunning=%d micRecording=%d",
+               gMicRunning, micRecording);
   WARN_SYSTEMF("[MIC_STOP] ########## stopMicrophone() BEGIN ##########");
-  WARN_SYSTEMF("[MIC_STOP] Current state: gMicEnabled=%d", gMicEnabled);
+  WARN_SYSTEMF("[MIC_STOP] Current state: gMicRunning=%d", gMicRunning);
 
   STACK_TRACEF("stopMicrophone.before_mutex");
   I2sMicLockGuard i2sGuard("mic.stop");
   STACK_TRACEF("stopMicrophone.got_mutex");
 
-  if (!gMicEnabled) {
+  if (!gMicRunning) {
     WARN_SYSTEMF("[MIC_STOP] Already stopped - returning");
     INFO_MIC_LIFECYCLEF("Already stopped");
     STACK_TRACEF("stopMicrophone.exit_already_stopped");
     return;
   }
 
-  // Clear gMicEnabled BEFORE the I2S teardown so any concurrent caller that
+  // Clear gMicRunning BEFORE the I2S teardown so any concurrent caller that
   // only does a null-check-on-rx_handle (without taking the mutex) will see
   // us going down.
-  gMicEnabled = false;
+  gMicRunning = false;
   STACK_TRACEF("stopMicrophone.cleared_gMicEnabled");
 
   WARN_SYSTEMF("[MIC_STOP] Heap before stop: free=%u, PSRAM_free=%u",
@@ -622,7 +622,7 @@ void stopMicrophone() {
   // HAL_Audio owns the I2S channel — release our capture lease.
   audioCaptureStop("mic");
 
-  gMicEnabled = false;
+  gMicRunning = false;
   micRecording = false;
   sensorStatusBumpWith("closemic");
   systemEventPost(SYSEVT_SENSOR_STOPPED, "Microphone");
@@ -636,9 +636,9 @@ void stopMicrophone() {
 
 int16_t* captureAudioSamples(size_t sampleCount, size_t* outLen) {
   WARN_SYSTEMF("[MIC_CAPTURE] captureAudioSamples(count=%u) called", (unsigned)sampleCount);
-  WARN_SYSTEMF("[MIC_CAPTURE] gMicEnabled=%d", gMicEnabled);
+  WARN_SYSTEMF("[MIC_CAPTURE] gMicRunning=%d", gMicRunning);
   
-  if (!gMicEnabled) {
+  if (!gMicRunning) {
     WARN_SYSTEMF("[MIC_CAPTURE] Mic not enabled - returning NULL");
     if (outLen) *outLen = 0;
     return nullptr;
@@ -714,14 +714,14 @@ int getAudioLevel() {
   bool shouldLog = (callCount % 50 == 1);
 
   if (shouldLog) {
-    DEBUG_MIC_VALUESF("[MIC_LEVEL] getAudioLevel() call #%lu, gMicEnabled=%d", callCount, gMicEnabled);
+    DEBUG_MIC_VALUESF("[MIC_LEVEL] getAudioLevel() call #%lu, gMicRunning=%d", callCount, gMicRunning);
   }
 
   // The VU meter is the most-frequent caller — piggyback the HAL reconcile here
   // so a G2 mid-session disconnect flips the mic off within one poll.
   micReconcileState();
 
-  if (!gMicEnabled) {
+  if (!gMicRunning) {
     if (shouldLog) DEBUG_MIC_VALUESF("[MIC_LEVEL] Mic not enabled - returning 0");
     return 0;
   }
@@ -797,14 +797,14 @@ const char* buildMicrophoneStatusJson() {
     "{\"enabled\":%s,\"connected\":%s,\"recording\":%s,"
     "\"source\":\"%s\",\"pdmAvailable\":%s,\"g2Available\":%s,"
     "\"sampleRate\":%u,\"bitDepth\":16,\"channels\":%d,\"level\":%d}",
-    gMicEnabled ? "true" : "false",
+    gMicRunning ? "true" : "false",
     micConnected ? "true" : "false",
     micRecording ? "true" : "false",
     micSourceName(),
     audioSourceAvailable(AUDIO_SRC_LOCAL_PDM) ? "true" : "false",
     audioSourceAvailable(AUDIO_SRC_G2_LEFT) ? "true" : "false",
     (unsigned)micEffectiveSampleRate(), micChannels,
-    gMicEnabled ? getAudioLevel() : 0
+    gMicRunning ? getAudioLevel() : 0
   );
   return gMicCmdBuffer;
 }
@@ -820,11 +820,11 @@ const char* cmd_mic(const String& argsInput) {
       "{\"schema\":1,\"enabled\":%s,\"connected\":%s,\"recording\":%s,"
       "\"source\":\"%s\",\"pdmAvailable\":%s,\"g2Available\":%s,"
       "\"sampleRate\":%u,\"bitDepth\":16,\"channels\":%d,\"level\":%d}",
-      gMicEnabled ? "true" : "false", micConnected ? "true" : "false", micRecording ? "true" : "false",
+      gMicRunning ? "true" : "false", micConnected ? "true" : "false", micRecording ? "true" : "false",
       micSourceName(),
       audioSourceAvailable(AUDIO_SRC_LOCAL_PDM) ? "true" : "false",
       audioSourceAvailable(AUDIO_SRC_G2_LEFT) ? "true" : "false",
-      (unsigned)micEffectiveSampleRate(), micChannels, gMicEnabled ? getAudioLevel() : 0);
+      (unsigned)micEffectiveSampleRate(), micChannels, gMicRunning ? getAudioLevel() : 0);
     return gMicCmdBuffer;
   }
   snprintf(gMicCmdBuffer, sizeof(gMicCmdBuffer),
@@ -837,20 +837,23 @@ const char* cmd_mic(const String& argsInput) {
     "  Bit Depth: 16\n"
     "  Channels: %d\n"
     "  Level: %d%%",
-    gMicEnabled ? "yes" : "no",
+    gMicRunning ? "yes" : "no",
     micConnected ? "yes" : "no",
     micRecording ? "yes" : "no",
     micSourceName(),
     audioSourceAvailable(AUDIO_SRC_LOCAL_PDM) ? "yes" : "no",
     audioSourceAvailable(AUDIO_SRC_G2_LEFT) ? "yes" : "no",
     (unsigned)micEffectiveSampleRate(), micChannels,
-    gMicEnabled ? getAudioLevel() : 0
+    gMicRunning ? getAudioLevel() : 0
   );
   return gMicCmdBuffer;
 }
 
 const char* cmd_micstart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!gSettings.micEnabled) {
+    return "ERROR: Microphone is disabled - run 'micenabled 1' first";
+  }
   if (initMicrophone()) {
     return "Microphone started successfully";
   }
@@ -867,10 +870,10 @@ const char* cmd_miclevel(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (argWantsJson(argsInput)) {
     snprintf(gMicCmdBuffer, sizeof(gMicCmdBuffer), "{\"schema\":1,\"enabled\":%s,\"level\":%d}",
-      gMicEnabled ? "true" : "false", gMicEnabled ? getAudioLevel() : 0);
+      gMicRunning ? "true" : "false", gMicRunning ? getAudioLevel() : 0);
     return gMicCmdBuffer;
   }
-  if (!gMicEnabled) {
+  if (!gMicRunning) {
     return "Error: Microphone not enabled";
   }
   int level = getAudioLevel();
@@ -881,7 +884,7 @@ const char* cmd_miclevel(const String& argsInput) {
 const char* cmd_micrecord(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  if (!gMicEnabled) {
+  if (!gMicRunning) {
     return "Error: Microphone not enabled. Use 'openmic' first.";
   }
 
@@ -1022,11 +1025,11 @@ const char* cmd_micsamplerate(const String& argsInput) {
     return "Error: Sample rate must be 8000-48000 Hz";
   }
 
-  STACK_TRACEF("cmd_micsamplerate.enter requested=%d current=%d gMicEnabled=%d",
-               rate, micSampleRate, gMicEnabled);
+  STACK_TRACEF("cmd_micsamplerate.enter requested=%d current=%d gMicRunning=%d",
+               rate, micSampleRate, gMicRunning);
 
   // Need to reinitialize if already running
-  bool wasEnabled = gMicEnabled;
+  bool wasEnabled = gMicRunning;
   if (wasEnabled) {
     STACK_TRACEF("cmd_micsamplerate.before_stop");
     stopMicrophone();
@@ -1040,8 +1043,8 @@ const char* cmd_micsamplerate(const String& argsInput) {
   if (wasEnabled) {
     STACK_TRACEF("cmd_micsamplerate.before_reinit");
     bool ok = initMicrophone();
-    STACK_TRACEF("cmd_micsamplerate.after_reinit ok=%d gMicEnabled=%d",
-                 ok ? 1 : 0, gMicEnabled);
+    STACK_TRACEF("cmd_micsamplerate.after_reinit ok=%d gMicRunning=%d",
+                 ok ? 1 : 0, gMicRunning);
   }
 
   snprintf(gMicCmdBuffer, sizeof(gMicCmdBuffer), "Sample rate set to %d Hz (saved)%s", micSampleRate,
@@ -1088,11 +1091,11 @@ const char* cmd_micbitdepth(const String& argsInput) {
     return "Error: Bit depth must be 16 or 32";
   }
 
-  STACK_TRACEF("cmd_micbitdepth.enter requested=%d current=%d gMicEnabled=%d",
-               depth, micBitDepth, gMicEnabled);
+  STACK_TRACEF("cmd_micbitdepth.enter requested=%d current=%d gMicRunning=%d",
+               depth, micBitDepth, gMicRunning);
 
   // Need to reinitialize if already running
-  bool wasEnabled = gMicEnabled;
+  bool wasEnabled = gMicRunning;
   if (wasEnabled) {
     STACK_TRACEF("cmd_micbitdepth.before_stop");
     stopMicrophone();
@@ -1106,8 +1109,8 @@ const char* cmd_micbitdepth(const String& argsInput) {
   if (wasEnabled) {
     STACK_TRACEF("cmd_micbitdepth.before_reinit");
     bool ok = initMicrophone();
-    STACK_TRACEF("cmd_micbitdepth.after_reinit ok=%d gMicEnabled=%d",
-                 ok ? 1 : 0, gMicEnabled);
+    STACK_TRACEF("cmd_micbitdepth.after_reinit ok=%d gMicRunning=%d",
+                 ok ? 1 : 0, gMicRunning);
   }
 
   snprintf(gMicCmdBuffer, sizeof(gMicCmdBuffer),
@@ -1132,7 +1135,7 @@ static void micVisualizerTaskFunc(void* param) {
   Serial.println("\n=== AUDIO VISUALIZER (press any key to stop) ===");
   Serial.println("Level: [--------------------] Peak | Min/Max samples");
   
-  while (gMicVisualizerRunning && gMicEnabled) {
+  while (gMicVisualizerRunning && gMicRunning) {
     size_t bytesRead = 0;
     size_t got = audioReadPcm(samples, bufSize, 100);
     bytesRead = got * sizeof(int16_t);
@@ -1193,7 +1196,7 @@ static void micVisualizerTaskFunc(void* param) {
 const char* cmd_micviz(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  if (!gMicEnabled) {
+  if (!gMicRunning) {
     return "Error: Microphone not enabled. Use 'openmic' first.";
   }
   
@@ -1215,14 +1218,14 @@ const char* cmd_micautostart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String arg = argsInput; arg.trim();
   if (arg.length() == 0) {
-    return gSettings.microphoneAutoStart ? "[Mic] Auto-start: enabled" : "[Mic] Auto-start: disabled";
+    return gSettings.micAutoStart ? "[Mic] Auto-start: enabled" : "[Mic] Auto-start: disabled";
   }
   arg.toLowerCase();
   if (arg == "on" || arg == "true" || arg == "1") {
-    setSetting(gSettings.microphoneAutoStart, true);
+    setSetting(gSettings.micAutoStart, true);
     return "[Mic] Auto-start enabled";
   } else if (arg == "off" || arg == "false" || arg == "0") {
-    setSetting(gSettings.microphoneAutoStart, false);
+    setSetting(gSettings.micAutoStart, false);
     return "[Mic] Auto-start disabled";
   }
   return "Error: invalid arguments — Usage: micautostart [on|off]";
@@ -1248,7 +1251,7 @@ const char* cmd_micsource(const String& argsInput) {
     return "Error: invalid arguments — Usage: micsource <auto|pdm|g2>";
   }
   setSetting(gSettings.micSource, arg);
-  const bool wasEnabled = gMicEnabled;
+  const bool wasEnabled = gMicRunning;
   if (wasEnabled) {
     stopMicrophone();     // release the lease so the new preference can resolve
     initMicrophone();     // re-resolves source from the updated preference
@@ -1289,7 +1292,8 @@ const size_t micCommandsCount = sizeof(micCommands) / sizeof(micCommands[0]);
 // Settings module registration
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry micSettingEntries[] = {
-  { "microphoneAutoStart", SETTING_BOOL, &gSettings.microphoneAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, "micautostart" },
+  { "micEnabled", SETTING_BOOL, &gSettings.micEnabled, 1, 0, nullptr, 0, 1, "Enabled", nullptr, false, nullptr, "micenabled" },
+  { "microphoneAutoStart", SETTING_BOOL, &gSettings.micAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, "micautostart" },
   // Source preference {auto,pdm,g2}. Resolved lazily against availability.
   { "micSource", SETTING_STRING, &gSettings.micSource, 0, 0, "auto", 0, 0, "Mic source", nullptr, false, nullptr, "micsource" },
   // These three were previously reported as "(saved)" but never registered, so

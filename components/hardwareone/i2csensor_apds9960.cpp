@@ -29,10 +29,10 @@ Adafruit_APDS9960* gAPDS9960 = nullptr;
 APDSCache gApdsCache;
 
 // APDS sensor state (definitions - matching pattern of thermal/tof/imu/gamepad sensors)
-bool gApdsEnabled = false;
-bool gApdsColorEnabled = false;
-bool gApdsProximityEnabled = false;
-bool gApdsGestureEnabled = false;
+bool gApdsRunning = false;
+bool gApdsColorRunning = false;
+bool gApdsProximityRunning = false;
+bool gApdsGestureRunning = false;
 bool gApdsConnected = false;
 unsigned long gApdsLastStopTime = 0;
 TaskHandle_t gApdsTaskHandle = nullptr;
@@ -46,8 +46,9 @@ TaskHandle_t gApdsTaskHandle = nullptr;
 // APDS settings entries
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry apdsSettingEntries[] = {
-  { "apdsAutoStart", SETTING_BOOL, &gSettings.apdsAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, nullptr },
-  { "apdsDevicePollMs", SETTING_INT, &gSettings.apdsDevicePollMs, 200, 0, nullptr, 50, 5000, "Poll Interval (ms)", nullptr, false, nullptr, "apdsdevicepollms" }
+  { "apdsEnabled", SETTING_BOOL, &gSettings.apdsEnabled, 1, 0, nullptr, 0, 1, "Enabled", nullptr, false, nullptr, "apdsenabled" },
+  { "apdsAutoStart", SETTING_BOOL, &gSettings.apdsAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, "apdsautostart" },
+  { "apdsDevicePollMs", SETTING_INT, &gSettings.apdsDevicePollMs, 200, 0, nullptr, 50, 5000, "Poll Interval (ms)", nullptr, false, nullptr, "apdsdevicepollms" },
 };
 
 static bool isAPDSConnected() {
@@ -129,7 +130,7 @@ const char* cmd_apdsread(const String& argsInput) {
     return (n > 0) ? getDebugBuffer() : "{\"valid\":false}";
   }
 
-  bool anyEnabled = gApdsColorEnabled || gApdsProximityEnabled || gApdsGestureEnabled;
+  bool anyEnabled = gApdsColorRunning || gApdsProximityRunning || gApdsGestureRunning;
   if (!anyEnabled) {
     return "Error: [APDS] Not running. Use 'openapds' to start.";
   }
@@ -143,17 +144,17 @@ const char* cmd_apdsread(const String& argsInput) {
   buf += n; remaining -= n;
 
   n = snprintf(buf, remaining, "  Color: %s  Proximity: %s  Gesture: %s\n",
-               gApdsColorEnabled ? "ON" : "OFF",
-               gApdsProximityEnabled ? "ON" : "OFF",
-               gApdsGestureEnabled ? "ON" : "OFF");
+               gApdsColorRunning ? "ON" : "OFF",
+               gApdsProximityRunning ? "ON" : "OFF",
+               gApdsGestureRunning ? "ON" : "OFF");
   buf += n; remaining -= n;
 
-  if (gApdsColorEnabled) {
+  if (gApdsColorRunning) {
     n = snprintf(buf, remaining, "  RGBC: R=%u G=%u B=%u C=%u\n",
                  gApdsCache.apdsRed, gApdsCache.apdsGreen, gApdsCache.apdsBlue, gApdsCache.apdsClear);
     buf += n; remaining -= n;
   }
-  if (gApdsProximityEnabled) {
+  if (gApdsProximityRunning) {
     n = snprintf(buf, remaining, "  Proximity: %u\n", gApdsCache.apdsProximity);
     buf += n; remaining -= n;
   }
@@ -165,7 +166,7 @@ const char* cmd_apdsread(const String& argsInput) {
 const char* cmd_apdsstart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  bool anyEnabled = gApdsColorEnabled || gApdsProximityEnabled || gApdsGestureEnabled;
+  bool anyEnabled = gApdsColorRunning || gApdsProximityRunning || gApdsGestureRunning;
   if (anyEnabled) {
     return "Error: [APDS] Already running";
   }
@@ -196,7 +197,7 @@ const char* cmd_apdsstart(const String& argsInput) {
 const char* cmd_apdsstop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  bool anyEnabled = gApdsColorEnabled || gApdsProximityEnabled || gApdsGestureEnabled;
+  bool anyEnabled = gApdsColorRunning || gApdsProximityRunning || gApdsGestureRunning;
   if (!anyEnabled) {
     return "Error: [APDS] Not running";
   }
@@ -220,9 +221,9 @@ const char* cmd_apdsmode(const String& argsInput) {
   if (a.count() == 0) {
     if (!ensureDebugBuffer()) return "Error: [APDS] Debug buffer unavailable";
     snprintf(getDebugBuffer(), 1024, "[APDS] Modes: color=%s proximity=%s gesture=%s",
-             gApdsColorEnabled ? "on" : "off",
-             gApdsProximityEnabled ? "on" : "off",
-             gApdsGestureEnabled ? "on" : "off");
+             gApdsColorRunning ? "on" : "off",
+             gApdsProximityRunning ? "on" : "off",
+             gApdsGestureRunning ? "on" : "off");
     return getDebugBuffer();
   }
 
@@ -232,12 +233,12 @@ const char* cmd_apdsmode(const String& argsInput) {
   
   if (mode == "color") {
     gAPDS9960->enableColor(enable);
-    gApdsColorEnabled = enable;
+    gApdsColorRunning = enable;
     sensorStatusBumpWith(enable ? "apdsmode color on" : "apdsmode color off");
     return enable ? "[APDS] Color mode enabled" : "[APDS] Color mode disabled";
   } else if (mode == "proximity" || mode == "prox") {
     gAPDS9960->enableProximity(enable);
-    gApdsProximityEnabled = enable;
+    gApdsProximityRunning = enable;
     sensorStatusBumpWith(enable ? "apdsmode proximity on" : "apdsmode proximity off");
     return enable ? "[APDS] Proximity mode enabled" : "[APDS] Proximity mode disabled";
   } else if (mode == "gesture") {
@@ -248,7 +249,7 @@ const char* cmd_apdsmode(const String& argsInput) {
       gAPDS9960->enableGesture(false);
       gAPDS9960->enableProximity(false);
     }
-    gApdsGestureEnabled = enable;
+    gApdsGestureRunning = enable;
     sensorStatusBumpWith(enable ? "apdsmode gesture on" : "apdsmode gesture off");
     return enable ? "[APDS] Gesture mode enabled" : "[APDS] Gesture mode disabled";
   }
@@ -303,13 +304,13 @@ bool apdsStartInternal() {
 
   // Enable color mode by default (user can change with apdsmode command)
   gAPDS9960->enableColor(true);
-  gApdsColorEnabled = true;
+  gApdsColorRunning = true;
   INFO_APDS_LIFECYCLEF("Color mode enabled by default");
 
   // Create APDS task
   if (!createAPDSTask()) {
     ERROR_APDSF("Error: Failed to create APDS task");
-    gApdsColorEnabled = false;
+    gApdsColorRunning = false;
     return false;
   }
 
@@ -346,7 +347,7 @@ void apdsColorPoll() {
     return;
   }
 
-  if (!gApdsColorEnabled) {
+  if (!gApdsColorRunning) {
     broadcastOutput("Color sensing not enabled. Use 'openapds' or 'apdsmode color on' first.");
     return;
   }
@@ -376,7 +377,7 @@ void apdsProximityPoll() {
     return;
   }
 
-  if (!gApdsProximityEnabled) {
+  if (!gApdsProximityRunning) {
     broadcastOutput("Proximity sensing not enabled. Use 'openapds' or 'apdsmode proximity on' first.");
     return;
   }
@@ -391,7 +392,7 @@ void apdsGesturePoll() {
     return;
   }
 
-  if (!gApdsGestureEnabled) {
+  if (!gApdsGestureRunning) {
     broadcastOutput("Gesture sensing not enabled. Use 'openapds' or 'apdsmode gesture on' first.");
     return;
   }
@@ -482,7 +483,7 @@ void apdsTask(void* parameter) {
 
   while (true) {
     // CRITICAL: Check if all modes disabled for graceful shutdown
-    bool anyEnabled = gApdsColorEnabled || gApdsProximityEnabled || gApdsGestureEnabled;
+    bool anyEnabled = gApdsColorRunning || gApdsProximityRunning || gApdsGestureRunning;
     if (!anyEnabled) {
       gApdsConnected = false;
       if (gAPDS9960 != nullptr) {
@@ -500,9 +501,9 @@ void apdsTask(void* parameter) {
       // 'continue' (not 'break') so the top-of-loop shutdown runs the clean
       // SENSOR_TASK_EXIT (vTaskDelete) path instead of returning from the task
       // function with a near-overflowed stack (IllegalInstruction panic).
-      if (checkTaskStackSafety("apds", APDS_STACK_WORDS, &gApdsColorEnabled)) {
-        gApdsProximityEnabled = false;
-        gApdsGestureEnabled = false;
+      if (checkTaskStackSafety("apds", APDS_STACK_WORDS, &gApdsColorRunning)) {
+        gApdsProximityRunning = false;
+        gApdsGestureRunning = false;
         continue;
       }
       if (anyEnabled && isDebugFlagSet(DEBUG_PERFORMANCE)) {
@@ -524,13 +525,13 @@ void apdsTask(void* parameter) {
         
         // APDS reads ~5ms at 100kHz; fail fast and retry next poll rather than blocking 1000ms
         bool result = i2cTaskWithTimeout(I2C_ADDR_APDS, 100000, 100, [&]() -> bool {
-          if (gApdsColorEnabled && gAPDS9960->colorDataReady()) {
+          if (gApdsColorRunning && gAPDS9960->colorDataReady()) {
             gAPDS9960->getColorData(&red, &green, &blue, &clear);
           }
-          if (gApdsProximityEnabled) {
+          if (gApdsProximityRunning) {
             proximity = gAPDS9960->readProximity();
           }
-          if (gApdsGestureEnabled) {
+          if (gApdsGestureRunning) {
             gesture = gAPDS9960->readGesture();
           }
           return true;
@@ -555,7 +556,7 @@ void apdsTask(void* parameter) {
           }
           // Bus event per detected swipe. The driver returns nonzero only on
           // the poll where a gesture completed, so post-on-read is edge-safe.
-          if (gApdsGestureEnabled && gesture != 0) {
+          if (gApdsGestureRunning && gesture != 0) {
             const char* dir = (gesture == APDS9960_UP)      ? "UP"
                               : (gesture == APDS9960_DOWN)  ? "DOWN"
                               : (gesture == APDS9960_LEFT)  ? "LEFT"
@@ -565,7 +566,7 @@ void apdsTask(void* parameter) {
           }
           // Proximity presence with hysteresis: arrive above 200, leave below
           // 100 (of 255). Edge-latched so we post once per crossing.
-          if (gApdsProximityEnabled) {
+          if (gApdsProximityRunning) {
             if (!gApdsPresent && proximity > 200) {
               gApdsPresent = true;
               systemEventPost(SYSEVT_PRESENCE_DETECTED, "proximity");
@@ -579,9 +580,9 @@ void apdsTask(void* parameter) {
           // Check centralized health tracking for auto-disable decision
           if (i2cShouldAutoDisable(I2C_ADDR_APDS)) {
             uint8_t errors = i2cGetConsecutiveErrors(I2C_ADDR_APDS);
-            gApdsColorEnabled = false;
-            gApdsProximityEnabled = false;
-            gApdsGestureEnabled = false;
+            gApdsColorRunning = false;
+            gApdsProximityRunning = false;
+            gApdsGestureRunning = false;
             gApdsConnected = false;
             sensorStatusBumpWith("apds@auto_disabled");
             DEBUG_APDS_LIFECYCLEF("APDS auto-disabled after %u consecutive I2C failures", errors);

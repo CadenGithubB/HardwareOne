@@ -28,7 +28,7 @@ struct PresenceCache {
 class String;
 
 extern PresenceCache gPresenceCache;
-extern bool gPresenceEnabled;
+extern bool gPresenceRunning;
 extern bool gPresenceConnected;
 extern unsigned long gPresenceLastStopTime;
 extern TaskHandle_t gPresenceTaskHandle;

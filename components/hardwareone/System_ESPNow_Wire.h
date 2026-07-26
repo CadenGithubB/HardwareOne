@@ -583,18 +583,29 @@ static_assert(sizeof(V4PayloadFileData) <= ESPNOW_V4_MAX_PLAINTEXT,
               "V4PayloadFileData must fit a SESSION_FRAME plaintext budget");
 
 struct __attribute__((packed)) V4PayloadFileEnd {
-  uint32_t crc32;         // CRC32 of entire file
-  uint8_t  success;       // 1=transfer complete, 0=aborted
+  uint32_t crc32;         // CRC32 of the entire file, computed with esp_crc32_le
+                          // (seed 0) on both ends. Receiver REJECTS on mismatch
+                          // (FILE_CANCEL_CRC_MISMATCH). Ignored when success=0.
+                          // Flag day 2026-07: older firmware sent 0 here; both
+                          // peers must run post-CRC firmware or every non-empty
+                          // transfer fails.
+  uint8_t  success;       // 1=transfer complete, 0=sender aborted mid-transfer
 };
 
 // Phase 4: FILE_CANCEL — the receiver tells the sender a transfer it started
 // will not complete. The header's msgId correlates to the original FILE_START.
-// The sender is fire-and-forget (it already reported "sent"), so this is a
-// post-hoc failure notice for the sender's log / UI, not an in-flight abort.
+// Integrity pass: no longer just a post-hoc log notice — the sender matches
+// (peer, msgId) against its in-flight send and ABORTS the chunk loop, so a
+// cancel now stops the remaining airtime spend (see fileSendAbortMsgId).
 enum EspNowFileCancelReason : uint8_t {
   FILE_CANCEL_TIMEOUT      = 1,  // no frame arrived within the slot timeout
   FILE_CANCEL_WRITE_FAILED = 2,  // staging write / rename to flash failed
   FILE_CANCEL_INCOMPLETE   = 3,  // FILE_END arrived but chunks were missing
+  FILE_CANCEL_CRC_MISMATCH = 4,  // all chunks arrived but the whole-file CRC32
+                                 // didn't match FILE_END's declared value
+  FILE_CANCEL_REJECTED     = 5,  // FILE_START rejected (no slot / alloc / too
+                                 // big), or a chunk arrived for an unknown
+                                 // transfer — receiver never had/lost the slot
 };
 struct __attribute__((packed)) V4PayloadFileCancel {
   uint8_t reason;         // EspNowFileCancelReason

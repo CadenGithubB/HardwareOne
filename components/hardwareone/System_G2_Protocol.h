@@ -23,7 +23,7 @@
 // Low-level building blocks for the G2 BLE protocol, matching the reference
 // implementation at https://github.com/Commute773/g2-kit-unofficial .
 //
-// Envelope (single-fragment form — all our messages fit one fragment):
+// Envelope (shown in single-fragment form; large pb bodies use totFrags > 1):
 //
 //   TX: AA 21 <seq> <len> <totFrags> <fragIdx> <sid> <flag> <pb...> <crcLE>
 //   RX: AA 12 <seq> <len> <totFrags> <fragIdx> <sid> <flag> <pb...> <crcLE>
@@ -49,8 +49,9 @@
 //          └── TX preamble 0xAA 0x21, RX preamble 0xAA 0x12.
 //
 // Fragmentation: every BLE write is at most (MTU-3) bytes, default cap 232
-// in the reference. Reassembly is keyed on the seq byte. We currently only
-// emit single-fragment messages (all of ours fit well under 250 B).
+// in the reference. Reassembly is keyed on the seq byte. Short control
+// messages are single-fragment; CREATE/Cmd=3 image bodies use
+// sendPbFragmented (multi-envelope, same seq).
 //
 // Magic: there is NO "magic" field in the transport header. What the earlier
 // docs called "magic" is actually the `MagicRandom` field inside the EvenCore
@@ -782,6 +783,37 @@ size_t g2BuildCreateMixedListText(uint8_t seq, uint32_t magic,
                                   const G2TextChildSpec& textSpec,
                                   uint32_t widgetId,
                                   uint8_t* out, size_t outCap);
+
+// CREATE compound with 1 ListObject + 1 TextObject + 1 ImageObject
+// (ContainerTotalNum=3). Untested schema — Q30 probes exercise it.
+// Wire child order is selectable because firmware may care about f3/f4
+// emission order when a List parent is present (Q28 image+text blanks;
+// Q28L list+image paints).
+enum G2ListTextImageOrder : uint8_t {
+  G2_LTI_ORDER_LIST_TEXT_IMAGE = 0,  // f2 list, f3 text, f4 image
+  G2_LTI_ORDER_LIST_IMAGE_TEXT = 1,  // f2 list, f4 image, f3 text
+};
+
+size_t g2BuildCreateMixedListTextImagePb(uint32_t magic,
+                                         const char* listName,
+                                         const char* const* listItems,
+                                         size_t listItemCount,
+                                         const G2ContainerGeom& listGeom,
+                                         const G2TextChildSpec& textChild,
+                                         const G2ImageTile& imageTile,
+                                         uint32_t widgetId,
+                                         G2ListTextImageOrder order,
+                                         uint8_t* pbOut, size_t pbCap);
+size_t g2BuildCreateMixedListTextImage(uint8_t seq, uint32_t magic,
+                                       const char* listName,
+                                       const char* const* listItems,
+                                       size_t listItemCount,
+                                       const G2ContainerGeom& listGeom,
+                                       const G2TextChildSpec& textChild,
+                                       const G2ImageTile& imageTile,
+                                       uint32_t widgetId,
+                                       G2ListTextImageOrder order,
+                                       uint8_t* out, size_t outCap);
 
 // Decode the trailing field 15 sub-message of a HeartbeatAck pb body.
 // Returns true if the sub-message was found AND both inner fields

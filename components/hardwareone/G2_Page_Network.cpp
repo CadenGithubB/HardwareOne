@@ -15,8 +15,8 @@
 #include "System_TaskUtils.h"  // APP_CORE / PRO_CORE task-placement constants
 #include "G2_Ring.h"   // g2RingIsConnected (R1 menu status)
 #include "Bluetooth.h"
-#include "BLE_Peers.h"       // gBlePeerData — G2 AutoConnect in Bluetooth → G2
-#include "System_Settings.h" // setSetting — peer autoConnect + bluetoothAutoStart
+#include "BLE_Peers.h"       // gBlePeerData — G2 AutoReconnect in Bluetooth → G2
+#include "System_Settings.h" // setSetting — peer autoReconnect + bleAutoStart
 #include "G2_Page_TextEntry.h"   // on-glasses keyboard for "Set Name"
 #include "G2_HijackCmd.h"        // g2BumpMenuGen() for setNetSub navigation tracking
 #include <new>                   // std::nothrow — for LensUiJob/RedrawSpec allocation
@@ -239,7 +239,7 @@ static void showWiFiMenu() {
 #endif
 
   snprintf(autoLine, sizeof(autoLine), "Auto Start: %s",
-           gSettings.wifiAutoReconnect ? "ON" : "OFF");
+           gSettings.wifiAutoStart ? "ON" : "OFF");
 
   // HTTP(S) and ESP-NOW nest under WiFi because they ride the radio. HTTP needs
   // an actual network connection (an IP) → tag on `connected`. ESP-NOW only needs
@@ -267,13 +267,13 @@ static void showWiFiMenu() {
     "Status",          // 4 (drill into detailed info dump)
     "Scan Networks",   // 5
     "List Saved",      // 6
-    autoLine,          // 7 (toggle wifiAutoReconnect — boot-time)
+    autoLine,          // 7 (toggle wifiAutoStart — boot-time)
     httpLine,          // 8 — opens HTTP(S) submenu
     espnowLine,        // 9 — opens ESP-NOW submenu
   };
   g2ShowListPage(items, sizeof(items) / sizeof(items[0]));
   DEBUG_G2F("[G2] WiFi submenu shown (connected=%d, auto=%d)",
-            connected ? 1 : 0, gSettings.wifiAutoReconnect ? 1 : 0);
+            connected ? 1 : 0, gSettings.wifiAutoStart ? 1 : 0);
 }
 
 // Detailed WiFi status — shown when the user taps "Status" on the WiFi
@@ -444,7 +444,7 @@ static void showEspNowMenu() {
                ? gSettings.espnowDeviceName.c_str()
                : "(unset)");
   snprintf(autoLine, sizeof(autoLine), "Auto Start: %s",
-           gSettings.espnowenabled ? "ON" : "OFF");
+           gSettings.espnowEnabled ? "ON" : "OFF");
   bool running = (gEspNow && gEspNow->initialized);
   if (running) {
     snprintf(stateLine, sizeof(stateLine), "ESP-NOW: ON");
@@ -458,7 +458,7 @@ static void showEspNowMenu() {
       devsLine,          // 3 (info)
       "View Devices",    // 4
       nameLine,          // 5 (tap → on-glasses text entry)
-      autoLine,          // 6 (toggle espnowenabled — boot-time)
+      autoLine,          // 6 (toggle espnowEnabled — boot-time)
     };
     g2ShowListPage(items, sizeof(items) / sizeof(items[0]));
   } else {
@@ -470,7 +470,7 @@ static void showEspNowMenu() {
       stateLine,         // 1 (toggle — tap to start)
       "View Devices",    // 2
       nameLine,          // 3 (tap → on-glasses text entry)
-      autoLine,          // 4 (toggle espnowenabled — boot-time)
+      autoLine,          // 4 (toggle espnowEnabled — boot-time)
     };
     g2ShowListPage(items, sizeof(items) / sizeof(items[0]));
   }
@@ -479,7 +479,7 @@ static void showEspNowMenu() {
   g2ShowListPage(na, 2);
 #endif
   DEBUG_G2F("[G2] ESP-NOW submenu shown (auto=%d)",
-            gSettings.espnowenabled ? 1 : 0);
+            gSettings.espnowEnabled ? 1 : 0);
 }
 
 static void showEspNowDevices() {
@@ -522,13 +522,13 @@ static void showEspNowDevices() {
 // Bluetooth submenu
 // -----------------------------------------------------------------------------
 
-// G2-specific rows (mode/conn, boot AutoConnect, saved-MAC reconnect,
+// G2-specific rows (mode/conn, boot AutoReconnect, saved-MAC reconnect,
 // disconnect) live here so the parent Bluetooth list stays short. Parent
 // keeps BLE on/off, Auto Start, and R1 ring rows only.
 static void showBluetoothG2Menu() {
   setNetSub(NET_SUB_BLUETOOTH_G2);
   static char connLine[40];
-  static char autoConnLine[44];
+  static char autoReconnLine[44];
 
   // Mode row used to live here as info-only; promoted to the parent
   // Bluetooth menu as a toggle 2026-05-09 so the user can flip
@@ -541,14 +541,14 @@ static void showBluetoothG2Menu() {
   } else {
     snprintf(connLine, sizeof(connLine), "BLE: stopped");
   }
-  snprintf(autoConnLine, sizeof(autoConnLine), "G2 AutoConnect: %s",
-           gBlePeerData[BLE_PEER_G2_GLASSES].autoConnect ? "ON" : "OFF");
+  snprintf(autoReconnLine, sizeof(autoReconnLine), "G2 AutoReconnect: %s",
+           gBlePeerData[BLE_PEER_G2_GLASSES].autoReconnect ? "ON" : "OFF");
 
   if (active) {
     const char* items[] = {
       "<- Bluetooth",   // 0
       connLine,         // 1 (info)
-      autoConnLine,     // 2 (toggle boot auto-reconnect)
+      autoReconnLine,     // 2 (toggle boot auto-reconnect)
       "Reconnect G2",   // 3 (saved MACs — same as boot path)
       "Disconnect G2",  // 4
     };
@@ -557,7 +557,7 @@ static void showBluetoothG2Menu() {
     const char* items[] = {
       "<- Bluetooth",   // 0
       connLine,         // 1 (info — "BLE: stopped")
-      autoConnLine,     // 2 (toggle boot auto-reconnect)
+      autoReconnLine,     // 2 (toggle boot auto-reconnect)
     };
     g2ShowListPage(items, sizeof(items) / sizeof(items[0]));
   }
@@ -565,13 +565,13 @@ static void showBluetoothG2Menu() {
 }
 
 // R1 ring submenu — mirror of showBluetoothG2Menu. Connect/Disconnect/
-// Reconnect Ring + R1 AutoConnect toggle all live here so the parent
+// Reconnect Ring + R1 AutoReconnect toggle all live here so the parent
 // Bluetooth menu stays short. Added 2026-05-09 alongside the parent-
 // menu R1 >> drill-in.
 static void showBluetoothR1Menu() {
   setNetSub(NET_SUB_BLUETOOTH_R1);
   static char connLine[40];
-  static char autoConnLine[44];
+  static char autoReconnLine[44];
 
   const bool active = bleSubsystemActive();
   const bool ringUp = g2RingIsConnected();
@@ -585,15 +585,15 @@ static void showBluetoothR1Menu() {
   } else {
     snprintf(connLine, sizeof(connLine), "BLE: stopped");
   }
-  snprintf(autoConnLine, sizeof(autoConnLine), "R1 AutoConnect: %s",
-           gBlePeerData[BLE_PEER_R1_RING].autoConnect ? "ON" : "OFF");
+  snprintf(autoReconnLine, sizeof(autoReconnLine), "R1 AutoReconnect: %s",
+           gBlePeerData[BLE_PEER_R1_RING].autoReconnect ? "ON" : "OFF");
 
   if (active) {
     if (ringUp) {
       const char* items[] = {
         "<- Bluetooth",    // 0
         connLine,          // 1 (info)
-        autoConnLine,      // 2 (toggle boot auto-reconnect)
+        autoReconnLine,      // 2 (toggle boot auto-reconnect)
         "Reconnect Ring",  // 3
         "Disconnect Ring", // 4
       };
@@ -602,7 +602,7 @@ static void showBluetoothR1Menu() {
       const char* items[] = {
         "<- Bluetooth",    // 0
         connLine,          // 1 (info)
-        autoConnLine,      // 2 (toggle boot auto-reconnect)
+        autoReconnLine,      // 2 (toggle boot auto-reconnect)
         "Connect Ring",    // 3
       };
       g2ShowListPage(items, sizeof(items) / sizeof(items[0]));
@@ -611,7 +611,7 @@ static void showBluetoothR1Menu() {
     const char* items[] = {
       "<- Bluetooth",      // 0
       connLine,            // 1 (info — "BLE: stopped")
-      autoConnLine,        // 2 (toggle boot auto-reconnect)
+      autoReconnLine,        // 2 (toggle boot auto-reconnect)
     };
     g2ShowListPage(items, sizeof(items) / sizeof(items[0]));
   }
@@ -636,7 +636,7 @@ static void showBluetoothMenu() {
   const bool clientUp = isG2ClientInitialized();
   const bool serverUp = isBLERunning();
   snprintf(autoLine, sizeof(autoLine), "Auto Start: %s",
-           gSettings.bluetoothAutoStart ? "ON" : "OFF");
+           gSettings.bleAutoStart ? "ON" : "OFF");
   // Per-mode "connected" semantics: server cares about phone connection,
   // client cares about whether the temple BLE links are live.
   const bool connected = isClient ? isG2Connected() : isBLEConnected();
@@ -667,7 +667,7 @@ static void showBluetoothMenu() {
         modeLine,          // 2 (toggle — server↔client)
         "G2 >>",           // 3
         "R1 >>",           // 4
-        autoLine,          // 5 (toggle bluetoothAutoStart)
+        autoLine,          // 5 (toggle bleAutoStart)
       };
       g2ShowListPage(items, sizeof(items) / sizeof(items[0]));
     } else {
@@ -679,7 +679,7 @@ static void showBluetoothMenu() {
         connLine,          // 3 (info)
         "Toggle Adv",      // 4
         "Disconnect",      // 5
-        autoLine,          // 6 (toggle bluetoothAutoStart)
+        autoLine,          // 6 (toggle bleAutoStart)
       };
       g2ShowListPage(items, sizeof(items) / sizeof(items[0]));
     }
@@ -692,9 +692,9 @@ static void showBluetoothMenu() {
         "<- Connect",      // 0
         stateLine,         // 1 (toggle — starts G2 client)
         modeLine,          // 2 (toggle — server↔client)
-        "G2 >>",           // 3 (AutoConnect + reconnect when BLE up)
-        "R1 >>",           // 4 (R1 AutoConnect + connect when BLE up)
-        autoLine,          // 5 (toggle bluetoothAutoStart)
+        "G2 >>",           // 3 (AutoReconnect + reconnect when BLE up)
+        "R1 >>",           // 4 (R1 AutoReconnect + connect when BLE up)
+        autoLine,          // 5 (toggle bleAutoStart)
       };
       g2ShowListPage(items, sizeof(items) / sizeof(items[0]));
     } else {
@@ -702,7 +702,7 @@ static void showBluetoothMenu() {
         "<- Connect",      // 0
         stateLine,         // 1 (toggle — starts server)
         modeLine,          // 2 (toggle — server↔client)
-        autoLine,          // 3 (toggle bluetoothAutoStart)
+        autoLine,          // 3 (toggle bleAutoStart)
       };
       g2ShowListPage(items, sizeof(items) / sizeof(items[0]));
     }
@@ -1051,7 +1051,7 @@ static void ringPendingWatchdogTask(void* /*arg*/) {
 }
 
 // R1 ring submenu refresh — same pattern as the G2 callback above.
-// Called by handleBluetoothR1Tap after R1 AutoConnect cmd_exec completes
+// Called by handleBluetoothR1Tap after R1 AutoReconnect cmd_exec completes
 // so the row repaints with the new ON/OFF state. Signature matches the
 // G2HijackCmdCallback typedef in G2_HijackCmd.h: (ok, result, cookie,
 // userData).
@@ -1189,7 +1189,7 @@ static void handleWiFiTap(uint32_t idx) {
                //
                // (HTTP toggle moved to its own Network -> HTTP(S) section;
                // see showHttpMenu / handleHttpTap below.)
-      const bool prev = gSettings.wifiAutoReconnect;
+      const bool prev = gSettings.wifiAutoStart;
       G2CmdCookie cookie{};
       cookie.targetPage   = g2GetHijackPage();
       cookie.targetNetSub = (uint8_t)gNetSub;
@@ -1462,7 +1462,7 @@ static void handleEspNowTap(uint32_t idx) {
   const uint32_t kAutoIdxOn  = 6;
   const uint32_t kAutoIdxOff = 4;
   if ((running && idx == kAutoIdxOn) || (!running && idx == kAutoIdxOff)) {
-    const bool prev = gSettings.espnowenabled;
+    const bool prev = gSettings.espnowEnabled;
     char line[40];
     snprintf(line, sizeof(line), "espnowenabled %d", prev ? 0 : 1);
     G2CmdCookie cookie{};
@@ -1502,7 +1502,7 @@ static void handleEspNowDevsTap(uint32_t idx) {
 // Hoisted out so every branch of handleBluetoothTap can call it without
 // copy-pasting the submit boilerplate. Submit failure is a no-op.
 static void bluetoothToggleAutoStart() {
-  const bool prev = gSettings.bluetoothAutoStart;
+  const bool prev = gSettings.bleAutoStart;
   const char* arg = prev ? "off" : "on";
   char line[32];
   snprintf(line, sizeof(line), "bleautostart %s", arg);
@@ -1519,8 +1519,8 @@ static void bluetoothToggleAutoStart() {
 
 static void handleBluetoothG2Tap(uint32_t idx) {
   // Layout (after 2026-05-09 Mode-row promotion to parent menu):
-  //   active:    0=Back 1=Conn(info) 2=AutoConnect 3=Reconnect 4=Disconnect
-  //   inactive:  0=Back 1=BLE-stopped(info) 2=AutoConnect
+  //   active:    0=Back 1=Conn(info) 2=AutoReconnect 3=Reconnect 4=Disconnect
+  //   inactive:  0=Back 1=BLE-stopped(info) 2=AutoReconnect
   const bool active = bleSubsystemActive();
   if (idx == 0) {
     showBluetoothMenu();
@@ -1531,26 +1531,26 @@ static void handleBluetoothG2Tap(uint32_t idx) {
     return;
   }
   if (idx == 2) {
-    // Route through cmd_exec → `bleautoconnect g2-glasses on|off`. This
-    // is intentional, not just for consistency: cmd_bleautoconnect calls
+    // Route through cmd_exec → `bleautoreconnect g2-glasses on|off`. This
+    // is intentional, not just for consistency: cmd_bleautoreconnect calls
     // bleStampPairedByIfBlank when flipping ON, capturing whoever owns
     // the BT subsystem. With auth.user = pairedByUser, that means the
     // glasses become "owned by themselves" the first time you flip this
     // ON from a freshly-paired set — which is fine, since the very first
     // flip would have come from a real admin via the web UI or CLI to
     // pair them in the first place.
-    const bool prev = gBlePeerData[BLE_PEER_G2_GLASSES].autoConnect;
+    const bool prev = gBlePeerData[BLE_PEER_G2_GLASSES].autoReconnect;
     const char* arg = prev ? "off" : "on";
     char line[64];
-    snprintf(line, sizeof(line), "bleautoconnect g2-glasses %s", arg);
+    snprintf(line, sizeof(line), "bleautoreconnect g2-glasses %s", arg);
     G2CmdCookie cookie{};
     cookie.targetPage   = g2GetHijackPage();
     cookie.targetNetSub = (uint8_t)gNetSub;
     if (g2SubmitHijackCommand(line, cookie, onBluetoothG2MenuRefreshDone, nullptr)) {
-      BROADCAST_PRINTF("[G2] G2 AutoConnect %s→%s submitted via cmd_exec",
+      BROADCAST_PRINTF("[G2] G2 AutoReconnect %s→%s submitted via cmd_exec",
                        prev ? "ON" : "OFF", prev ? "OFF" : "ON");
     } else {
-      DEBUG_G2F("[G2] G2 AutoConnect submit FAILED — no inline mutate");
+      DEBUG_G2F("[G2] G2 AutoReconnect submit FAILED — no inline mutate");
     }
     return;
   }
@@ -1596,9 +1596,9 @@ static void onBluetoothR1MenuRefreshDone(bool ok,
 
 static void handleBluetoothR1Tap(uint32_t idx) {
   // Layout (mirror of handleBluetoothG2Tap):
-  //   active+ringUp:    0=Back 1=Conn 2=AutoConnect 3=Reconnect 4=Disconnect
-  //   active+ringDown:  0=Back 1=Conn 2=AutoConnect 3=Connect
-  //   inactive:         0=Back 1=BLE-stopped 2=AutoConnect
+  //   active+ringUp:    0=Back 1=Conn 2=AutoReconnect 3=Reconnect 4=Disconnect
+  //   active+ringDown:  0=Back 1=Conn 2=AutoReconnect 3=Connect
+  //   inactive:         0=Back 1=BLE-stopped 2=AutoReconnect
   const bool active = bleSubsystemActive();
   const bool ringUp = g2RingIsConnected();
   if (idx == 0) {
@@ -1610,20 +1610,20 @@ static void handleBluetoothR1Tap(uint32_t idx) {
     return;
   }
   if (idx == 2) {
-    // R1 AutoConnect — same cmd_exec pattern as G2 AutoConnect, just
+    // R1 AutoReconnect — same cmd_exec pattern as G2 AutoReconnect, just
     // targeting the r1-ring peer instead of g2-glasses.
-    const bool prev = gBlePeerData[BLE_PEER_R1_RING].autoConnect;
+    const bool prev = gBlePeerData[BLE_PEER_R1_RING].autoReconnect;
     const char* arg = prev ? "off" : "on";
     char line[64];
-    snprintf(line, sizeof(line), "bleautoconnect r1-ring %s", arg);
+    snprintf(line, sizeof(line), "bleautoreconnect r1-ring %s", arg);
     G2CmdCookie cookie{};
     cookie.targetPage   = g2GetHijackPage();
     cookie.targetNetSub = (uint8_t)gNetSub;
     if (g2SubmitHijackCommand(line, cookie, onBluetoothR1MenuRefreshDone, nullptr)) {
-      BROADCAST_PRINTF("[G2] R1 AutoConnect %s→%s submitted via cmd_exec",
+      BROADCAST_PRINTF("[G2] R1 AutoReconnect %s→%s submitted via cmd_exec",
                        prev ? "ON" : "OFF", prev ? "OFF" : "ON");
     } else {
-      DEBUG_G2F("[G2] R1 AutoConnect submit FAILED — no inline mutate");
+      DEBUG_G2F("[G2] R1 AutoReconnect submit FAILED — no inline mutate");
     }
     return;
   }

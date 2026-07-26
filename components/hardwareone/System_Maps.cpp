@@ -2257,8 +2257,21 @@ static void sanitizeWaypointTextCopy(char* dst, size_t dstSize, const char* src,
   }
 }
 
-EXT_RAM_BSS_ATTR Waypoint WaypointManager::_waypoints[MAX_WAYPOINTS];
+Waypoint* WaypointManager::_waypoints = nullptr;
 int WaypointManager::_selectedTarget = -1;
+
+bool WaypointManager::ensureStorage() {
+  if (_waypoints) return true;
+  _waypoints = (Waypoint*)ps_malloc(MAX_WAYPOINTS * sizeof(Waypoint));
+  if (!_waypoints) {
+    ERROR_MAPSF("[WAYPOINTS] Failed to allocate %u-byte waypoint table",
+                (unsigned)(MAX_WAYPOINTS * sizeof(Waypoint)));
+    _selectedTarget = -1;
+    return false;
+  }
+  memset(_waypoints, 0, MAX_WAYPOINTS * sizeof(Waypoint));
+  return true;
+}
 
 bool WaypointManager::loadWaypoints() {
   const LoadedMap& map = MapCore::getCurrentMap();
@@ -2295,7 +2308,7 @@ bool WaypointManager::loadWaypoints() {
     wpPathStr = wpPathStr3;
   } else {
     // No waypoints file for this map — clear any stale data from a previous map
-    memset(_waypoints, 0, sizeof(_waypoints));
+    if (_waypoints) memset(_waypoints, 0, MAX_WAYPOINTS * sizeof(Waypoint));
     _selectedTarget = -1;
     return false;
   }
@@ -2315,8 +2328,10 @@ bool WaypointManager::loadWaypoints() {
     return false;
   }
   
+  if (!ensureStorage()) return false;
+
   // Clear existing
-  memset(_waypoints, 0, sizeof(_waypoints));
+  memset(_waypoints, 0, MAX_WAYPOINTS * sizeof(Waypoint));
   _selectedTarget = -1;
   
   JsonArray arr = doc["waypoints"].as<JsonArray>();
@@ -2364,7 +2379,7 @@ bool WaypointManager::saveWaypoints() {
   PSRAM_JSON_DOC(doc);
   JsonArray arr = doc["waypoints"].to<JsonArray>();
   
-  for (int i = 0; i < MAX_WAYPOINTS; i++) {
+  for (int i = 0; _waypoints && i < MAX_WAYPOINTS; i++) {
     if (_waypoints[i].active) {
       JsonObject wp = arr.add<JsonObject>();
       wp["lat"] = _waypoints[i].lat;
@@ -2415,6 +2430,7 @@ bool WaypointManager::saveWaypoints() {
 }
 
 int WaypointManager::addWaypoint(float lat, float lon, const char* name) {
+  if (!ensureStorage()) return -1;
   for (int i = 0; i < MAX_WAYPOINTS; i++) {
     if (!_waypoints[i].active) {
       _waypoints[i].lat = lat;
@@ -2432,6 +2448,7 @@ int WaypointManager::addWaypoint(float lat, float lon, const char* name) {
 }
 
 int WaypointManager::addWaypoint(float lat, float lon, const char* name, const char* notes) {
+  if (!ensureStorage()) return -1;
   for (int i = 0; i < MAX_WAYPOINTS; i++) {
     if (!_waypoints[i].active) {
       _waypoints[i].lat = lat;
@@ -2449,6 +2466,7 @@ int WaypointManager::addWaypoint(float lat, float lon, const char* name, const c
 }
 
 bool WaypointManager::setNotes(int index, const char* notes) {
+  if (!_waypoints) return false;
   if (index < 0 || index >= MAX_WAYPOINTS) return false;
   if (!_waypoints[index].active) return false;
   sanitizeWaypointTextCopy(_waypoints[index].notes, WAYPOINT_NOTES_LEN, notes ? notes : "", "", true);
@@ -2457,6 +2475,7 @@ bool WaypointManager::setNotes(int index, const char* notes) {
 }
 
 bool WaypointManager::setName(int index, const char* name) {
+  if (!_waypoints) return false;
   if (index < 0 || index >= MAX_WAYPOINTS) return false;
   if (!_waypoints[index].active) return false;
   sanitizeWaypointTextCopy(_waypoints[index].name, WAYPOINT_NAME_LEN, name ? name : "WP", "WP", false);
@@ -2466,6 +2485,7 @@ bool WaypointManager::setName(int index, const char* name) {
 
 // File attachment management methods
 bool WaypointManager::addFile(int waypointIndex, const char* filePath) {
+  if (!_waypoints) return false;
   if (waypointIndex < 0 || waypointIndex >= MAX_WAYPOINTS) return false;
   if (!_waypoints[waypointIndex].active) return false;
   if (!filePath || !filePath[0]) return false;
@@ -2490,6 +2510,7 @@ bool WaypointManager::addFile(int waypointIndex, const char* filePath) {
 }
 
 bool WaypointManager::removeFile(int waypointIndex, int fileIndex) {
+  if (!_waypoints) return false;
   if (waypointIndex < 0 || waypointIndex >= MAX_WAYPOINTS) return false;
   if (!_waypoints[waypointIndex].active) return false;
   if (fileIndex < 0 || fileIndex >= _waypoints[waypointIndex].fileCount) return false;
@@ -2506,12 +2527,14 @@ bool WaypointManager::removeFile(int waypointIndex, int fileIndex) {
 }
 
 int WaypointManager::getFileCount(int waypointIndex) {
+  if (!_waypoints) return 0;
   if (waypointIndex < 0 || waypointIndex >= MAX_WAYPOINTS) return 0;
   if (!_waypoints[waypointIndex].active) return 0;
   return _waypoints[waypointIndex].fileCount;
 }
 
 const char* WaypointManager::getFile(int waypointIndex, int fileIndex) {
+  if (!_waypoints) return nullptr;
   if (waypointIndex < 0 || waypointIndex >= MAX_WAYPOINTS) return nullptr;
   if (!_waypoints[waypointIndex].active) return nullptr;
   if (fileIndex < 0 || fileIndex >= _waypoints[waypointIndex].fileCount) return nullptr;
@@ -2520,6 +2543,7 @@ const char* WaypointManager::getFile(int waypointIndex, int fileIndex) {
 
 int WaypointManager::findWaypointByName(const char* name) {
   if (!name || !name[0]) return -1;
+  if (!_waypoints) return -1;
   for (int i = 0; i < MAX_WAYPOINTS; i++) {
     if (_waypoints[i].active && strcasecmp(_waypoints[i].name, name) == 0) {
       return i;
@@ -2529,6 +2553,10 @@ int WaypointManager::findWaypointByName(const char* name) {
 }
 
 bool WaypointManager::clearAll() {
+  if (!_waypoints) {
+    _selectedTarget = -1;
+    return true;
+  }
   bool hadAny = false;
   for (int i = 0; i < MAX_WAYPOINTS; i++) {
     if (_waypoints[i].active) {
@@ -2542,6 +2570,7 @@ bool WaypointManager::clearAll() {
 }
 
 bool WaypointManager::deleteWaypoint(int index) {
+  if (!_waypoints) return false;
   if (index < 0 || index >= MAX_WAYPOINTS) return false;
   if (!_waypoints[index].active) return false;
   
@@ -2552,12 +2581,14 @@ bool WaypointManager::deleteWaypoint(int index) {
 }
 
 const Waypoint* WaypointManager::getWaypoint(int index) {
+  if (!_waypoints) return nullptr;
   if (index < 0 || index >= MAX_WAYPOINTS) return nullptr;
   if (!_waypoints[index].active) return nullptr;
   return &_waypoints[index];
 }
 
 int WaypointManager::getActiveCount() {
+  if (!_waypoints) return 0;
   int count = 0;
   for (int i = 0; i < MAX_WAYPOINTS; i++) {
     if (_waypoints[i].active) count++;
@@ -2566,6 +2597,10 @@ int WaypointManager::getActiveCount() {
 }
 
 void WaypointManager::selectTarget(int index) {
+  if (!_waypoints) {
+    _selectedTarget = -1;
+    return;
+  }
   if (index < 0 || index >= MAX_WAYPOINTS) {
     _selectedTarget = -1;
   } else if (_waypoints[index].active) {
@@ -2578,6 +2613,7 @@ void WaypointManager::selectTarget(int index) {
 
 bool WaypointManager::getDistanceBearingToIndex(int index, float fromLat, float fromLon,
                                                  float& distanceM, float& bearingDeg) {
+  if (!_waypoints) return false;
   if (index < 0 || index >= MAX_WAYPOINTS || !_waypoints[index].active) {
     return false;
   }
@@ -2620,6 +2656,7 @@ bool WaypointManager::getDistanceBearingToName(const char* name, float fromLat, 
 void WaypointManager::renderWaypoints(MapRenderer* renderer,
                                        float centerLat, float centerLon,
                                        int32_t scaleX, int32_t scaleY) {
+  if (!_waypoints || !renderer) return;
   int viewWidth = renderer->getWidth();
   int viewHeight = renderer->getHeight();
   int32_t centerLatMicro = (int32_t)(centerLat * 1000000);

@@ -31,7 +31,7 @@
 #endif
 
 // External references
-extern bool gOledEnabled;
+extern bool gOledRunning;
 extern String waitForSerialInputBlocking();
 extern void updateOLEDDisplay();
 
@@ -53,7 +53,7 @@ static void drawFTSFooter(const char* text) {
  * Check if OLED is available for interactive input
  */
 static bool isOLEDAvailable() {
-  return oledDisplay && oledConnected && gOledEnabled;
+  return oledDisplay && oledConnected && gOledRunning;
 }
 
 /**

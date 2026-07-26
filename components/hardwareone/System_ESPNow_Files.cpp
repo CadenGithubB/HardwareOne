@@ -7,6 +7,7 @@
 #include <Arduino.h>
 #include <string.h>
 
+#include <esp_crc.h>          // esp_crc32_le — whole-file CRC + filename hash
 #include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
@@ -39,6 +40,11 @@ struct FileTransferSlotImpl {
   uint8_t  peerMac[6];
   uint32_t msgId;
   char     filename[64];
+  uint32_t filenameHash;  // esp_crc32_le over the (bounded) wire filename — the
+                          // stable per-(peer,file) identity: keys the streaming
+                          // .part name and the supersede-conflict check, both of
+                          // which must survive sender retries (fresh msgId) and
+                          // reboots (msgId counter restarts at 1)
   uint32_t totalSize;
   uint32_t receivedBytes;
   uint16_t totalChunks;
@@ -46,6 +52,10 @@ struct FileTransferSlotImpl {
   uint16_t chunkSize;
   uint32_t startedMs;
   uint32_t lastFrameMs;
+  uint32_t runningCrc;    // streaming mode: esp_crc32_le accumulated per accepted
+                          // chunk (strictly in-order, so this is the whole-file
+                          // CRC once complete). RAM mode leaves it 0 and computes
+                          // one-shot at FILE_END (chunks may arrive out of order).
 
   // --- RAM mode (file <= kFileSlotMaxFileSize): whole file buffered in PSRAM,
   //     written once at FILE_END. The original, unchanged path. ---
@@ -73,6 +83,11 @@ struct FileTransferSlotImpl {
   bool     streamOpened;                 // .part opened yet (cmd_exec lazy-opens it)
   uint16_t nextChunk;                    // next expected (strictly sequential) chunk
   bool     streamFailed;                 // gap / write error → transfer fails
+  bool     teardownPending;              // COMPLETING, but its cmd_exec abort job
+                                         // could not be queued (queue full). The
+                                         // timeout sweep retries the submit until
+                                         // it lands — never release such a slot
+                                         // inline from espnow_task.
   char     partPath[80];                 // on-flash staging path for this slot's .part
 };
 
@@ -103,6 +118,11 @@ struct FileSlotsLockGuard {
     if (ok && gFileSlotsMutex) xSemaphoreGive(gFileSlotsMutex);
   }
 };
+
+// Defined in the second anonymous-namespace block below (same unnamed
+// namespace, same TU) — fileSlotsAllocate's supersede path needs it to fail a
+// streaming slot without touching its cmd_exec-owned .part handle.
+void fileSlotsStreamFailLocked(FileTransferSlotImpl& s);
 
 FileTransferSlotImpl* impl(FileTransferSlot* s) {
   return reinterpret_cast<FileTransferSlotImpl*>(s);
@@ -243,29 +263,113 @@ FileTransferSlot* fileSlotsAllocate(const uint8_t peerMac[6],
     return nullptr;
   }
 
-  // First pass: same-path conflict check (Phase 4 plan). Reject if any
-  // active slot is already targeting this filename — prevents two peers
-  // racing the same destination.
+  // Filename identity hash. strnlen-bounded because the wire filename[64] has
+  // no guaranteed NUL from a (hostile) peer; the bound matches the strncpy
+  // below so the hash always describes exactly what the slot stores. This is
+  // the stable per-(peer,file) key: unlike msgId it survives sender retries
+  // (each sendFileToMac call mints a fresh msgId) and reboots (the msgId
+  // counter restarts at 1).
+  const uint32_t nameHash = esp_crc32_le(0, (const uint8_t*)filename,
+      strnlen(filename, sizeof(FileTransferSlotImpl::filename) - 1));
+
+  // Slot scan: find a free slot and resolve conflicts with THIS peer's active
+  // slots. Two distinct match kinds, and conflating them is transfer-fatal:
+  //
+  //   same (peer, msgId)      = a DUPLICATE FILE_START of the transfer already
+  //                             in flight. FILE_* frames are deliberately
+  //                             exempt from the (origin,msgId) dedup ring
+  //                             (multi-frame under one id), so a MAC-layer
+  //                             retransmit of FILE_START reaches us verbatim.
+  //                             Treat it as IDEMPOTENT: hand back the existing
+  //                             slot untouched. Tearing it down here would
+  //                             discard every chunk received so far, and for a
+  //                             streaming slot would transiently leave TWO
+  //                             slots sharing (peer,msgId) — which
+  //                             fileSlotsFindByMsg cannot disambiguate, so the
+  //                             still-arriving chunks would route to the dead
+  //                             one, emit FILE_CANCEL, and (with the abort
+  //                             matcher) kill the sender's healthy transfer.
+  //
+  //   same (peer, nameHash),
+  //   DIFFERENT msgId         = a genuine sender RETRY (every sendFileToMac
+  //                             call mints a fresh msgId), or a CRC32 name
+  //                             collision. Either way the old stream can never
+  //                             complete — SUPERSEDE it. RAM slots release
+  //                             inline (espnow_task owns all their state);
+  //                             streaming slots MUST defer teardown to
+  //                             cmd_exec, which may be mid-write on their
+  //                             .part handle (see the gStreamFile ownership
+  //                             comment), so they fail via
+  //                             fileSlotsStreamFailLocked and the new transfer
+  //                             takes a DIFFERENT free slot.
+  //
+  // Different peers never conflict — the destination inbox is per-peer
+  // (/espnow/received/<mac>/), so the old cross-peer PATH_BUSY rejection was
+  // blocking legitimate same-named transfers for no reason.
+  // Pass 1 — survey only. Nothing is destroyed here: a supersede has to know a
+  // slot will actually be available before it kills the incumbent, or a retry
+  // that arrives with the table full would take out the old transfer AND be
+  // rejected itself (the sender is fire-and-forget; it would not try again).
   int freeIdx = -1;
+  int supersedeIdx = -1;
   for (uint8_t i = 0; i < kFileSlots; i++) {
     FileTransferSlotImpl& s = gFileSlots[i];
     if (s.state == FILE_SLOT_FREE) {
-      if (freeIdx < 0) freeIdx = i;
+      if (freeIdx < 0) freeIdx = (int)i;
       continue;
     }
-    // Same (peer, msgId) — caller is re-sending FILE_START for an existing
-    // transfer (e.g., they timed out and retried). Reset and reuse.
-    if (s.msgId == msgId && memcmp(s.peerMac, peerMac, 6) == 0) {
-      WARN_ESPNOWF("[FileSlots] re-FILE_START for slot %u (msgId=%lu peer match) — resetting",
-                   (unsigned)i, (unsigned long)msgId);
-      releaseLocked(s);
-      freeIdx = (int)i;
-      continue;
+    if (memcmp(s.peerMac, peerMac, 6) != 0) continue;
+    // COMPLETING slots belong to their cmd_exec finalize/abort job. Their
+    // staging file carries the slot index, so it can never be the one this new
+    // transfer is about to open — no interlock needed here.
+    if (s.state != FILE_SLOT_RECEIVING) continue;
+
+    const bool sameId   = (s.msgId == msgId);
+    const bool sameFile = (s.filenameHash == nameHash);
+    if (!sameId && !sameFile) continue;
+
+    // A true duplicate FILE_START must describe the SAME transfer in every
+    // field, not just carry the same msgId. msgId is per-boot (the counter
+    // restarts at 1), so a peer that resets mid-transfer can re-mint an id
+    // whose 30 s slot we still hold — adopting that slot would pour a
+    // different file into the old one's buffer at the old one's offsets and
+    // then report the failure against the WRONG filename.
+    if (sameId && sameFile && s.totalSize == fileSize &&
+        s.totalChunks == chunkCount && s.chunkSize == chunkSize) {
+      DEBUG_ESPNOWF("[FileSlots] duplicate FILE_START for slot %u (msgId=%lu) — reusing, %u/%u chunks so far",
+                    (unsigned)i, (unsigned long)msgId,
+                    (unsigned)s.receivedChunks, (unsigned)s.totalChunks);
+      s.lastFrameMs = (uint32_t)millis();   // don't let the dup age the slot out
+      setErr(nullptr);
+      return reinterpret_cast<FileTransferSlot*>(&s);
     }
-    if (strncmp(s.filename, filename, sizeof(s.filename)) == 0) {
-      WARN_ESPNOWF("[FileSlots] PATH_BUSY: '%s' already targeted by slot %u (msgId=%lu)",
-                   filename, (unsigned)i, (unsigned long)s.msgId);
-      setErr(kFileSlotErrPathBusy);
+    // Otherwise the incumbent is dead: either a genuine sender retry (same
+    // file, fresh msgId — sendFileToMac mints one per call) or a reused id
+    // describing a different file. Either way it can never complete.
+    if (supersedeIdx < 0) supersedeIdx = (int)i;
+  }
+
+  // Pass 2 — act, now that freeIdx is known.
+  if (supersedeIdx >= 0) {
+    FileTransferSlotImpl& old = gFileSlots[supersedeIdx];
+    if (!old.streaming) {
+      WARN_ESPNOWF("[FileSlots] FILE_START supersedes slot %u ('%s', old msgId=%lu, new msgId=%lu) — releasing old",
+                   (unsigned)supersedeIdx, old.filename,
+                   (unsigned long)old.msgId, (unsigned long)msgId);
+      releaseLocked(old);              // RAM slot: espnow_task owns all its state
+      if (freeIdx < 0) freeIdx = supersedeIdx;
+    } else if (freeIdx >= 0) {
+      WARN_ESPNOWF("[FileSlots] FILE_START supersedes slot %u ('%s', old msgId=%lu, new msgId=%lu) — failing old on cmd_exec",
+                   (unsigned)supersedeIdx, old.filename,
+                   (unsigned long)old.msgId, (unsigned long)msgId);
+      fileSlotsStreamFailLocked(old);  // -> COMPLETING; its abort job frees it
+    } else {
+      // Table full and the incumbent is streaming (we cannot reuse its index —
+      // only cmd_exec may free it). Reject the newcomer and leave the old
+      // transfer alone: killing it here would lose both.
+      WARN_ESPNOWF("[FileSlots] BUSY: cannot supersede streaming slot %u with no free slot to move into",
+                   (unsigned)supersedeIdx);
+      setErr(kFileSlotErrBusy);
       return nullptr;
     }
   }
@@ -298,16 +402,29 @@ FileTransferSlot* fileSlotsAllocate(const uint8_t peerMac[6],
       return nullptr;
     }
     s.streamBufCap = kFileStreamBufSize;
-    // Stage path keyed by (peer, msgId) — same identity as the slot. msgId alone
-    // can collide across two senders, and a streaming .part stays OPEN for the
-    // whole (multi-minute) transfer, so a collision would interleave two writers
-    // into one file. The peer MAC makes it unique.
+    // Stage path = (peer, filenameHash, SLOT INDEX).
+    //
+    // The (peer, filenameHash) part is the FILE's identity, replacing the old
+    // msgId suffix which named the ATTEMPT: a retry (fresh msgId) could never
+    // find its predecessor's partial, and the msgId counter restarts at 1 every
+    // boot, so partials would collide across boots and "w"-truncate each other.
+    // A future resume can glob this prefix to find a candidate partial.
+    //
+    // The slot index makes the path unique among LIVE slots, which is load
+    // bearing: a slot whose cmd_exec teardown could not be queued parks in
+    // COMPLETING (teardownPending) still holding its open handle, and a retry
+    // of the same file legitimately allocates a different slot. Without the
+    // index both would name the same file, and the parked slot's eventual
+    // abort — releaseLocked closes the handle and removeGuarded()s partPath —
+    // would delete the file the live transfer is streaming into. The receive
+    // CRC could not catch it either: it is accumulated over bytes as they
+    // arrive, never re-read from flash.
     snprintf(s.partPath, sizeof(s.partPath),
-             "/espnow/received/.part-strm-%02x%02x%02x%02x%02x%02x-%08lx",
+             "/espnow/received/.part-strm-%02x%02x%02x%02x%02x%02x-%08lx-%u",
              peerMac[0], peerMac[1], peerMac[2], peerMac[3], peerMac[4], peerMac[5],
-             (unsigned long)msgId);
+             (unsigned long)nameHash, (unsigned)freeIdx);
     s.streaming = true;
-    INFO_ESPNOWF("[FileSlots] slot %u STREAMING '%s' to %s (%lu bytes)",
+    INFO_ESPNOWF("[FileSlots] slot %u STREAMING '%.63s' to %s (%lu bytes)",
                  (unsigned)freeIdx, filename, s.partPath, (unsigned long)fileSize);
   } else {
     uint32_t allocSize = fileSize > 0 ? fileSize : 1;
@@ -334,6 +451,7 @@ FileTransferSlot* fileSlotsAllocate(const uint8_t peerMac[6],
 
   memcpy(s.peerMac, peerMac, 6);
   s.msgId          = msgId;
+  s.filenameHash   = nameHash;
   strncpy(s.filename, filename, sizeof(s.filename) - 1);
   s.filename[sizeof(s.filename) - 1] = '\0';
   s.totalSize      = fileSize;
@@ -345,7 +463,7 @@ FileTransferSlot* fileSlotsAllocate(const uint8_t peerMac[6],
   s.lastFrameMs    = s.startedMs;
   s.state          = FILE_SLOT_RECEIVING;
 
-  INFO_ESPNOWF("[FileSlots] slot %u allocated for '%s' from %02X:%02X:%02X:%02X:%02X:%02X "
+  INFO_ESPNOWF("[FileSlots] slot %u allocated for '%.63s' from %02X:%02X:%02X:%02X:%02X:%02X "
                "(msgId=%lu, %lu bytes, %u chunks)",
                (unsigned)freeIdx, filename,
                peerMac[0], peerMac[1], peerMac[2], peerMac[3], peerMac[4], peerMac[5],
@@ -432,8 +550,20 @@ void fileSlotsStreamFailLocked(FileTransferSlotImpl& s) {
   s.state = FILE_SLOT_COMPLETING;
   // Hand close/delete/free to cmd_exec so it never races an in-flight write.
   if (!submitDeferredToCmdExec(fileSlotsStreamAbortJob, reinterpret_cast<FileTransferSlot*>(&s))) {
-    // Queue full — fall back to inline teardown (we're already failing; rare).
-    releaseLocked(s);
+    // Queue full. Do NOT release inline: this runs on espnow_task, and a
+    // streaming slot's buffers/.part handle may be in use RIGHT NOW by
+    // streamDrainPending on cmd_exec, which deliberately does its flash write
+    // outside the slot mutex (see the gStreamFile ownership comment). Freeing
+    // streamBuf[] here would hand that write a null pointer — LoadProhibited.
+    // The two conditions are correlated (the queue fills precisely when
+    // cmd_exec is stalled in a slow flash write), so this is not hypothetical.
+    // Instead leave the slot COMPLETING with teardownPending set; the timeout
+    // sweep retries the submit every tick until it lands. COMPLETING slots are
+    // invisible to allocate and to the sweep's expiry logic, so nothing races
+    // it in the meantime — it costs one slot until the queue drains.
+    s.teardownPending = true;
+    WARN_ESPNOWF("[FileSlots] cmd_exec queue full — deferring streaming teardown of slot %u to the sweep",
+                 (unsigned)(&s - gFileSlots));
   }
 }
 
@@ -500,6 +630,13 @@ StreamAppendResult fileSlotsStreamAppend(FileTransferSlot* slot, uint16_t chunkI
   // Abort already in progress from an earlier chunk (streamFailed set, or slot
   // handed to COMPLETING teardown): report ALREADY_FAILED so the caller cancels
   // without emitting another durable RECV_FAILED — the first failing chunk logged it.
+  // Distinguish "this transfer is dying" from "this transfer already finished".
+  // A slot that left RECEIVING WITHOUT streamFailed is finalizing successfully
+  // (FILE_END processed, finalize job queued); a late or MAC-duplicated chunk
+  // arriving now must not make the caller emit a FILE_CANCEL — that cancel
+  // would reach the sender, match its abort slot, and turn a transfer that
+  // actually succeeded into a reported failure.
+  if (s.state != FILE_SLOT_RECEIVING && !s.streamFailed) return STREAM_APPEND_FINALIZING;
   if (s.streamFailed || s.state != FILE_SLOT_RECEIVING) return STREAM_APPEND_ALREADY_FAILED;
 
   if (s.chunkSize == 0 || s.totalChunks == 0 || chunkIdx >= s.totalChunks) {
@@ -546,6 +683,12 @@ StreamAppendResult fileSlotsStreamAppend(FileTransferSlot* slot, uint16_t chunkI
     s.streamFill = 0;
   }
   memcpy(s.streamBuf[act] + s.streamFill, data, dataLen);
+  // Whole-file CRC, accumulated at the accept point only: the dup/gap checks
+  // above guarantee strictly-in-order, exactly-once bytes, so this equals a
+  // one-shot CRC of the finished file. ~200 table lookups per chunk against a
+  // ~21 ms/chunk cadence — noise. Compared against FILE_END's declared value
+  // in v4h_file_end before finalize is allowed to begin.
+  s.runningCrc = esp_crc32_le(s.runningCrc, data, dataLen);
   s.streamFill += dataLen;
   s.nextChunk++;
   s.receivedBytes += dataLen;
@@ -637,6 +780,12 @@ uint16_t fileSlotsGetTotalChunks(const FileTransferSlot* slot) {
 uint32_t fileSlotsGetTotalSize(const FileTransferSlot* slot) {
   return slot ? implC(slot)->totalSize : 0;
 }
+uint32_t fileSlotsGetReceivedCrc(const FileTransferSlot* slot) {
+  return slot ? implC(slot)->runningCrc : 0;
+}
+bool fileSlotsIsReceiving(const FileTransferSlot* slot) {
+  return slot ? (implC(slot)->state == FILE_SLOT_RECEIVING) : false;
+}
 uint32_t fileSlotsGetMsgId(const FileTransferSlot* slot) {
   return slot ? implC(slot)->msgId : 0;
 }
@@ -648,6 +797,17 @@ void fileSlotsRelease(FileTransferSlot* slot) {
   releaseLocked(*impl(slot));
 }
 
+void fileSlotsMarkTeardownPending(FileTransferSlot* slot) {
+  if (!slot) return;
+  FileSlotsLockGuard g;
+  if (!g.ok) return;
+  FileTransferSlotImpl& s = *impl(slot);
+  if (!s.streaming || s.state == FILE_SLOT_FREE) return;
+  s.streamFailed    = true;
+  s.state           = FILE_SLOT_COMPLETING;
+  s.teardownPending = true;
+}
+
 uint8_t fileSlotsTimeoutSweep(uint32_t nowMs, FileSlotExpiry* out, uint8_t outCap) {
   if (!gFileSlots) return 0;
   FileSlotsLockGuard g;
@@ -655,6 +815,28 @@ uint8_t fileSlotsTimeoutSweep(uint32_t nowMs, FileSlotExpiry* out, uint8_t outCa
   uint8_t expired = 0;
   for (uint8_t i = 0; i < kFileSlots; i++) {
     FileTransferSlotImpl& s = gFileSlots[i];
+    // Retry a teardown whose cmd_exec submit failed while the queue was full.
+    // Only cmd_exec may free a streaming slot's buffers/.part handle, so the
+    // slot sits COMPLETING until this lands. Not an expiry — no FILE_CANCEL,
+    // the failing path already sent one.
+    if (s.state == FILE_SLOT_COMPLETING && s.teardownPending) {
+      if (submitDeferredToCmdExec(fileSlotsStreamAbortJob,
+                                  reinterpret_cast<FileTransferSlot*>(&s))) {
+        s.teardownPending = false;
+        INFO_ESPNOWF("[FileSlots] deferred streaming teardown of slot %u queued", (unsigned)i);
+      } else if ((nowMs - s.lastFrameMs) >= kFileSlotTimeoutMs) {
+        // Still stuck a full timeout later. Nothing here can safely force it
+        // (only cmd_exec may free a streaming slot), but a permanently wedged
+        // teardown pins a slot plus two PSRAM buffers plus an open handle, so
+        // make it visible instead of silently degrading the table. Re-armed
+        // each timeout period so it reports periodically, not every 10 ms tick.
+        s.lastFrameMs = nowMs;
+        WARN_ESPNOWF("[FileSlots] slot %u teardown still unqueueable after %lums "
+                     "(cmd_exec queue full / PSRAM exhausted) — slot pinned",
+                     (unsigned)i, (unsigned long)kFileSlotTimeoutMs);
+      }
+      continue;
+    }
     if (s.state != FILE_SLOT_RECEIVING) continue;  // FREE, or COMPLETING (already tearing down)
     if ((nowMs - s.lastFrameMs) < kFileSlotTimeoutMs) continue;
     WARN_ESPNOWF("[FileSlots] slot %u TIMEOUT: '%s' from %02X:%02X:%02X:%02X:%02X:%02X "
@@ -665,17 +847,20 @@ uint8_t fileSlotsTimeoutSweep(uint32_t nowMs, FileSlotExpiry* out, uint8_t outCa
                  (unsigned)s.receivedChunks, (unsigned)s.totalChunks,
                  (unsigned)(nowMs - s.lastFrameMs));
     // Record (peer,msgId) so the caller can FILE_CANCEL(TIMEOUT) the sender
-    // before we wipe the slot.
+    // before we wipe the slot. Count ONLY what is written — the return value
+    // is the number of valid out[] entries (a slot expiring past outCap is
+    // still torn down below, just not reported; previously the unconditional
+    // increment could claim entries that were never written).
     if (out && expired < outCap) {
       memcpy(out[expired].peerMac, s.peerMac, 6);
       out[expired].msgId = s.msgId;
+      expired++;
     }
     // Streaming slots own a .part handle + buffers that cmd_exec may be mid-write
     // on — defer their teardown to cmd_exec (close/delete/free there). RAM slots
     // have no such handoff; release inline.
     if (s.streaming) fileSlotsStreamFailLocked(s);
     else             releaseLocked(s);
-    expired++;
   }
   return expired;
 }

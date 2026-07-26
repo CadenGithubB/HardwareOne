@@ -343,8 +343,8 @@ static void recordingTask(void* /*arg*/) {
 // ── Public API ──────────────────────────────────────────────────────────────
 bool startVideoRecording() {
   STACK_TRACEF("startVideoRecording.enter");
-  extern bool gCameraEnabled;
-  if (!gCameraEnabled) {
+  extern bool gCameraRunning;
+  if (!gCameraRunning) {
     INFO_CAMERA_VIDEOF("Cannot record — camera not enabled");
     STACK_TRACEF("startVideoRecording.camera_disabled_exit");
     return false;

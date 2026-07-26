@@ -22,9 +22,9 @@ struct APDSCache {
 class String;
 
 extern APDSCache gApdsCache;
-extern bool gApdsColorEnabled;
-extern bool gApdsProximityEnabled;
-extern bool gApdsGestureEnabled;
+extern bool gApdsColorRunning;
+extern bool gApdsProximityRunning;
+extern bool gApdsGestureRunning;
 
 // Shared sensor-data JSON builder (apdsread json / sensors json).
 int apdsBuildDataJSON(char* buf, size_t bufSize);
@@ -58,7 +58,7 @@ uint16_t apdsGetColorR();
 uint16_t apdsGetColorG();
 uint16_t apdsGetColorB();
 uint16_t apdsGetColorC();
-extern bool gApdsEnabled;
+extern bool gApdsRunning;
 
 // Command registry (for system_utils.cpp module list)
 struct CommandEntry;

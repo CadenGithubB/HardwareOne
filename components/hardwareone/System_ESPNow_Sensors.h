@@ -65,17 +65,20 @@ struct RemoteSensorData {
 #define REMOTE_SENSOR_TTL_MS 30000  // data-freshness TTL (drives `valid`/fresh)
 #define REMOTE_SENSOR_PRESENCE_TTL_MS 60000  // drop a present-but-silent sensor (device gone) after 60s
 
-// Total cache size: 8 devices * 8 sensors * ~310 bytes = ~20KB (fixed, no heap growth)
+// Total cache size: 8 devices * 8 sensors * ~310 bytes = ~20KB.
+// Allocated in initRemoteSensorSystem(), so builds with ESP-NOW compiled but
+// never started do not reserve the table in PSRAM .bss.
 
 // Remote sensor data cache (master only)
-extern RemoteSensorData gRemoteSensorCache[MAX_REMOTE_DEVICES * MAX_SENSORS_PER_DEVICE];
+extern RemoteSensorData* gRemoteSensorCache;
 
 // ==========================
 // Remote Sensor Functions
 // ==========================
 
-// Initialize remote sensor system (master only)
-void initRemoteSensorSystem();
+// Initialize remote sensor system (master only). Idempotently allocates the
+// cache on first ESP-NOW start and clears it on each subsequent start.
+bool initRemoteSensorSystem();
 
 // Broadcast sensor status change (worker → master)
 void broadcastSensorStatus(RemoteSensorType sensorType, bool enabled);

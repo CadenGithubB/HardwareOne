@@ -35,24 +35,25 @@ extern TwoWire Wire1;
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry thermalSettingEntries[] = {
-  { "thermalAutoStart", SETTING_BOOL, &gSettings.thermalAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, nullptr },
-  { "thermalPollingMs", SETTING_INT, &gSettings.thermalPollingMs, 250, 0, nullptr, 50, 5000, "Polling (ms)", nullptr, false, "timing", nullptr },
-  { "thermalPaletteDefault", SETTING_STRING, &gSettings.thermalPaletteDefault, 0, 0, "grayscale", 0, 0, "Default Palette", "grayscale,iron,rainbow,hot,coolwarm", false, "display", nullptr },
-  { "thermalEWMAFactor", SETTING_FLOAT, &gSettings.thermalEWMAFactor, 0, 0.2f, nullptr, 0, 1, "EWMA Factor", nullptr, false, "filtering", nullptr },
-  { "thermalTransitionMs", SETTING_INT, &gSettings.thermalTransitionMs, 80, 0, nullptr, 0, 5000, "Transition (ms)", nullptr, false, "timing", nullptr },
-  { "thermalWebMaxFps", SETTING_INT, &gSettings.thermalWebMaxFps, 10, 0, nullptr, 1, 30, "Web Max FPS", nullptr, false, "timing", nullptr },
-  { "thermalUpscaleFactor", SETTING_INT, &gSettings.thermalUpscaleFactor, 1, 0, nullptr, 1, 4, "Upscale Factor", nullptr, false, "display", nullptr },
-  { "thermalRollingMinMaxEnabled", SETTING_BOOL, &gSettings.thermalRollingMinMaxEnabled, 1, 0, nullptr, 0, 1, "Rolling Min/Max", nullptr, false, "scale", nullptr },
-  { "thermalRollingMinMaxAlpha", SETTING_FLOAT, &gSettings.thermalRollingMinMaxAlpha, 0, 0.6f, nullptr, 0, 1, "Rolling Alpha", nullptr, false, "scale", nullptr },
-  { "thermalRollingMinMaxGuardC", SETTING_FLOAT, &gSettings.thermalRollingMinMaxGuardC, 0, 0.3f, nullptr, 0, 10, "Guard Celsius", nullptr, false, "scale", nullptr },
-  { "thermalInterpolationEnabled", SETTING_BOOL, &gSettings.thermalInterpolationEnabled, 1, 0, nullptr, 0, 1, "Interpolation", nullptr, false, "interpolation", nullptr },
-  { "thermalInterpolationSteps", SETTING_INT, &gSettings.thermalInterpolationSteps, 5, 0, nullptr, 1, 8, "Interp. Steps", nullptr, false, "interpolation", nullptr },
-  { "thermalInterpolationBufferSize", SETTING_INT, &gSettings.thermalInterpolationBufferSize, 2, 0, nullptr, 1, 10, "Interp. Buffer", nullptr, false, "interpolation", nullptr },
-  { "thermalTargetFps", SETTING_INT, &gSettings.thermalTargetFps, 8, 0, nullptr, 1, 8, "Target FPS", nullptr, false, "timing", nullptr },
-  { "thermalDevicePollMs", SETTING_INT, &gSettings.thermalDevicePollMs, 100, 0, nullptr, 100, 2000, "Poll Interval (ms)", nullptr, false, "timing", nullptr },
-  { "thermalTemporalAlpha", SETTING_FLOAT, &gSettings.thermalTemporalAlpha, 0, 0.5f, nullptr, 0, 1, "Temporal Alpha", nullptr, false, "filtering", nullptr },
-  { "thermalRotation", SETTING_INT, &gSettings.thermalRotation, 0, 0, nullptr, 0, 3, "Rotation (0-3)", nullptr, false, "display", nullptr },
-  { "thermalI2cClockHz", SETTING_INT, &gSettings.i2cClockThermalHz, 400000, 0, nullptr, 100000, 1000000, "I2C Clock (Hz)", nullptr, false, nullptr, nullptr }
+  { "thermalEnabled", SETTING_BOOL, &gSettings.thermalEnabled, 1, 0, nullptr, 0, 1, "Enabled", nullptr, false, nullptr, "thermalenabled" },
+  { "thermalAutoStart", SETTING_BOOL, &gSettings.thermalAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, "thermalautostart" },
+  { "thermalPollingMs", SETTING_INT, &gSettings.thermalPollingMs, 250, 0, nullptr, 50, 5000, "Polling (ms)", nullptr, false, "timing", "thermalpollingms" },
+  { "thermalPaletteDefault", SETTING_STRING, &gSettings.thermalPaletteDefault, 0, 0, "grayscale", 0, 0, "Default Palette", "grayscale,iron,rainbow,hot,coolwarm", false, "display", "thermalpalettedefault" },
+  { "thermalEWMAFactor", SETTING_FLOAT, &gSettings.thermalEWMAFactor, 0, 0.2f, nullptr, 0, 1, "EWMA Factor", nullptr, false, "filtering", "thermalewmafactor" },
+  { "thermalTransitionMs", SETTING_INT, &gSettings.thermalTransitionMs, 80, 0, nullptr, 0, 5000, "Transition (ms)", nullptr, false, "timing", "thermaltransitionms" },
+  { "thermalWebMaxFps", SETTING_INT, &gSettings.thermalWebMaxFps, 10, 0, nullptr, 1, 30, "Web Max FPS", nullptr, false, "timing", "thermalwebmaxfps" },
+  { "thermalUpscaleFactor", SETTING_INT, &gSettings.thermalUpscaleFactor, 1, 0, nullptr, 1, 4, "Upscale Factor", nullptr, false, "display", "thermalupscalefactor" },
+  { "thermalRollingMinMaxEnabled", SETTING_BOOL, &gSettings.thermalRollingMinMaxEnabled, 1, 0, nullptr, 0, 1, "Rolling Min/Max", nullptr, false, "scale", "thermalrollingminmaxenabled" },
+  { "thermalRollingMinMaxAlpha", SETTING_FLOAT, &gSettings.thermalRollingMinMaxAlpha, 0, 0.6f, nullptr, 0, 1, "Rolling Alpha", nullptr, false, "scale", "thermalrollingminmaxalpha" },
+  { "thermalRollingMinMaxGuardC", SETTING_FLOAT, &gSettings.thermalRollingMinMaxGuardC, 0, 0.3f, nullptr, 0, 10, "Guard Celsius", nullptr, false, "scale", "thermalrollingminmaxguardc" },
+  { "thermalInterpolationEnabled", SETTING_BOOL, &gSettings.thermalInterpolationEnabled, 1, 0, nullptr, 0, 1, "Interpolation", nullptr, false, "interpolation", "thermalinterpolationenabled" },
+  { "thermalInterpolationSteps", SETTING_INT, &gSettings.thermalInterpolationSteps, 5, 0, nullptr, 1, 8, "Interp. Steps", nullptr, false, "interpolation", "thermalinterpolationsteps" },
+  { "thermalInterpolationBufferSize", SETTING_INT, &gSettings.thermalInterpolationBufferSize, 2, 0, nullptr, 1, 10, "Interp. Buffer", nullptr, false, "interpolation", "thermalinterpolationbuffersize" },
+  { "thermalTargetFps", SETTING_INT, &gSettings.thermalTargetFps, 8, 0, nullptr, 1, 8, "Target FPS", nullptr, false, "timing", "thermaltargetfps" },
+  { "thermalDevicePollMs", SETTING_INT, &gSettings.thermalDevicePollMs, 100, 0, nullptr, 100, 2000, "Poll Interval (ms)", nullptr, false, "timing", "thermaldevicepollms" },
+  { "thermalTemporalAlpha", SETTING_FLOAT, &gSettings.thermalTemporalAlpha, 0, 0.5f, nullptr, 0, 1, "Temporal Alpha", nullptr, false, "filtering", "thermaltemporalalpha" },
+  { "thermalRotation", SETTING_INT, &gSettings.thermalRotation, 0, 0, nullptr, 0, 3, "Rotation (0-3)", nullptr, false, "display", "thermalrotation" },
+  { "thermalI2cClockHz", SETTING_INT, &gSettings.i2cClockThermalHz, 400000, 0, nullptr, 100000, 1000000, "I2C Clock (Hz)", nullptr, false, nullptr, "thermali2cclockhz" },
 };
 
 static bool isThermalConnected() {
@@ -77,7 +78,7 @@ extern const SettingsModule thermalSettingsModule = {
 ThermalCache gThermalCache;
 
 // Thermal sensor state (definitions)
-bool gThermalEnabled = false;
+bool gThermalRunning = false;
 bool gThermalConnected = false;
 unsigned long gThermalLastStopTime = 0;
 TaskHandle_t gThermalTaskHandle = nullptr;
@@ -126,7 +127,7 @@ extern void i2cSetDefaultWire1Clock();
 bool thermalStartInternal() {
   DEBUG_CLIF("[THERMAL_INTERNAL] Starting thermal sensor initialization");
   DEBUG_CLIF("[THERMAL_INTERNAL] Current state: enabled=%d, connected=%d, heap=%lu", 
-             gThermalEnabled ? 1 : 0, gThermalConnected ? 1 : 0,
+             gThermalRunning ? 1 : 0, gThermalConnected ? 1 : 0,
              (unsigned long)ESP.getFreeHeap());
   
   // Check if too soon after stop (prevent rapid restart crashes)
@@ -191,26 +192,26 @@ bool thermalStartInternal() {
   }
 
   // Enable thermal sensor BEFORE creating task (task checks this flag immediately)
-  bool prev = gThermalEnabled;
-  DEBUG_CLIF("[THERMAL_INTERNAL] Setting gThermalEnabled=true (was %d)", prev ? 1 : 0);
-  gThermalEnabled = true;
+  bool prev = gThermalRunning;
+  DEBUG_CLIF("[THERMAL_INTERNAL] Setting gThermalRunning=true (was %d)", prev ? 1 : 0);
+  gThermalRunning = true;
 
   // Create Thermal task lazily (stale handle detection now in createThermalTask)
   if (gThermalTaskHandle == nullptr) {
     DEBUG_CLIF("[THERMAL_INTERNAL] Creating thermal task (handle is NULL)");
     if (!createThermalTask()) {
       DEBUG_CLIF("[THERMAL_INTERNAL] FAILED to create Thermal task");
-      gThermalEnabled = false;  // Restore on failure
+      gThermalRunning = false;  // Restore on failure
       return false;
     }
     DEBUG_CLIF("[THERMAL_INTERNAL] Thermal task created successfully");
   } else {
     DEBUG_CLIF("[THERMAL_INTERNAL] Thermal task already exists (handle=%p)", gThermalTaskHandle);
   }
-  if (gThermalEnabled != prev) {
+  if (gThermalRunning != prev) {
     sensorStatusBumpWith("openthermal@queue");
   }
-  if (gThermalEnabled && !prev) {
+  if (gThermalRunning && !prev) {
     gThermalPendingFirstFrame = true;
     gThermalArmAtMs = millis() + 150;  // small arming delay to let system settle
     DEBUG_CLIF("[THERMAL_INTERNAL] Set pendingFirstFrame=true, armAt=%lu", gThermalArmAtMs);
@@ -229,7 +230,7 @@ bool thermalStartInternal() {
     
     if (!gThermalInitDone || !gThermalInitResult) {
       // Cleanup flags on failure - no ToF interference, just fail gracefully
-      gThermalEnabled = false;
+      gThermalRunning = false;
       gThermalPendingFirstFrame = false;
       gThermalArmAtMs = 0;
       DEBUG_CLIF("[THERMAL_INTERNAL] FAILED to initialize MLX90640 thermal sensor");
@@ -250,12 +251,16 @@ bool thermalStartInternal() {
 const char* cmd_thermalstart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
+  if (!gSettings.thermalEnabled) {
+    return "ERROR: Thermal camera is disabled - run 'thermalenabled 1' first";
+  }
+
   DEBUG_CLIF("[THERMAL_START] Command called - checking state");
-  DEBUG_CLIF("[THERMAL_START] gThermalEnabled=%d, heap=%lu",
-             gThermalEnabled ? 1 : 0, (unsigned long)ESP.getFreeHeap());
+  DEBUG_CLIF("[THERMAL_START] gThermalRunning=%d, heap=%lu",
+             gThermalRunning ? 1 : 0, (unsigned long)ESP.getFreeHeap());
 
   // Check if already enabled or queued
-  if (gThermalEnabled) {
+  if (gThermalRunning) {
     DEBUG_CLIF("[THERMAL_START] Already running - returning");
     return "[Thermal] Sensor already running";
   }
@@ -331,7 +336,7 @@ const char* cmd_thermalread(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   const bool wantJson = argWantsJson(argsInput);
 
-  if (!gThermalEnabled || !gThermalConnected) {
+  if (!gThermalRunning || !gThermalConnected) {
     return wantJson ? "{\"valid\":false,\"enabled\":false,\"hint\":\"the sensor is not open - run 'openthermal' first\"}"
                     : "Error: [Thermal] Not running. Use 'openthermal' to start.";
   }
@@ -574,7 +579,7 @@ bool thermalPoll() {
     DEBUG_THERMAL_POLLINGF("thermalPoll() exit: sensor null");
     return false;
   }
-  if (!gThermalEnabled) {
+  if (!gThermalRunning) {
     DEBUG_THERMAL_POLLINGF("thermalPoll() exit: disabled");
     return false;
   }
@@ -683,7 +688,7 @@ bool thermalPoll() {
   
   // Detailed pre-capture diagnostics
   DEBUG_THERMAL_POLLINGF("[THERMAL_FRAME] Pre-capture: sensor=%p enabled=%d connected=%d polling_paused=%d",
-                 (void*)gMLX90640, gThermalEnabled ? 1 : 0, gThermalConnected ? 1 : 0, 
+                 (void*)gMLX90640, gThermalRunning ? 1 : 0, gThermalConnected ? 1 : 0, 
                  gSensorPollingPaused ? 1 : 0);
   
   int result = gMLX90640->getFrame(g_tempFrame);
@@ -1267,7 +1272,7 @@ const char* cmd_thermaldiag(const String& argsInput) {
   
   // Current state
   n = snprintf(buf, remaining, "State: enabled=%d connected=%d sensor=%p\n",
-               gThermalEnabled ? 1 : 0, gThermalConnected ? 1 : 0, (void*)gMLX90640);
+               gThermalRunning ? 1 : 0, gThermalConnected ? 1 : 0, (void*)gMLX90640);
   buf += n; remaining -= n;
   
   n = snprintf(buf, remaining, "Task: handle=%p\n", (void*)gThermalTaskHandle);
@@ -1292,7 +1297,7 @@ const char* cmd_thermaldiag(const String& argsInput) {
   }
   
   // Test I2C clock speeds if sensor is stopped
-  if (gThermalEnabled) {
+  if (gThermalRunning) {
     n = snprintf(buf, remaining, "\nSensor running - stop first to test I2C speeds\n");
     buf += n; remaining -= n;
   } else {
@@ -1441,11 +1446,11 @@ const size_t thermalCommandsCount = sizeof(thermalCommands) / sizeof(thermalComm
 // ============================================================================
 // Purpose: Continuously reads 32x24 thermal frame data from MLX90640 sensor
 // Stack: 4096 BYTES (4 KB) | Priority: 1 | Core: Any
-// Lifecycle: Created by cmd_thermalstart, deleted when gThermalEnabled=false
+// Lifecycle: Created by cmd_thermalstart, deleted when gThermalRunning=false
 // Polling: Configurable via thermalDevicePollMs (default 100ms) | I2C Clock: 100-1000kHz
 //
 // Cleanup Strategy:
-//   1. Check gThermalEnabled flag at loop start
+//   1. Check gThermalRunning flag at loop start
 //   2. Acquire bus mutex via I2CDeviceManager to prevent race conditions during cleanup
 //   3. Delete sensor object and invalidate cache
 //   4. Release mutex and delete task
@@ -1462,7 +1467,7 @@ void thermalTask(void* parameter) {
   while (true) {
     // CRITICAL: Check enabled flag FIRST before any debug calls or operations
     // This allows graceful shutdown when thermalstop is called
-    if (!gThermalEnabled) {
+    if (!gThermalRunning) {
       gThermalConnected = false;
       if (gMLX90640 != nullptr) {
         ps_delete(gMLX90640);
@@ -1490,15 +1495,15 @@ void thermalTask(void* parameter) {
       // 'continue' (not 'break') so the top-of-loop shutdown runs the clean
       // SENSOR_TASK_EXIT (vTaskDelete) path instead of returning from the task
       // function with a near-overflowed stack (IllegalInstruction panic).
-      if (checkTaskStackSafety("thermal", THERMAL_STACK_WORDS, &gThermalEnabled)) continue;
+      if (checkTaskStackSafety("thermal", THERMAL_STACK_WORDS, &gThermalRunning)) continue;
       // CRITICAL: Check enabled flag again before debug output (prevent crash during shutdown)
-      if (gThermalEnabled) {
+      if (gThermalRunning) {
         DEBUG_PERFORMANCEF("[STACK] thermal_task watermark_now=%u min=%u words", (unsigned)gThermalWatermarkNow, (unsigned)gThermalWatermarkMin);
         DEBUG_MEMORY_HEAPF("[HEAP] thermal_task: free=%u min=%u", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
       }
     }
     // Handle deferred initialization request
-    if (gThermalEnabled && (!gThermalConnected || gMLX90640 == nullptr)) {
+    if (gThermalRunning && (!gThermalConnected || gMLX90640 == nullptr)) {
       if (gThermalInitRequested) {
         bool ok = thermalInit();
         gThermalInitResult = ok;
@@ -1507,7 +1512,7 @@ void thermalTask(void* parameter) {
       }
     }
 
-    if (gThermalEnabled && gThermalConnected && gMLX90640 != nullptr && !pollPaused(0 /* legacy Wire1 = bus 0 */)) {
+    if (gThermalRunning && gThermalConnected && gMLX90640 != nullptr && !pollPaused(0 /* legacy Wire1 = bus 0 */)) {
       unsigned long nowMs = millis();
       unsigned long pollMs = (gSettings.thermalDevicePollMs > 0) ? (unsigned long)gSettings.thermalDevicePollMs : 100;
       bool ready = true;
@@ -1530,7 +1535,7 @@ void thermalTask(void* parameter) {
         if (!ok) {
           if (i2cShouldAutoDisable(I2C_ADDR_THERMAL)) {
             ERROR_THERMALF("Too many consecutive thermal failures - auto-disabling");
-            gThermalEnabled = false;
+            gThermalRunning = false;
             sensorStatusBumpWith("thermal@auto_disabled");
             logSystemEvent("SENSOR", "Thermal auto-disabled after too many consecutive I2C failures");
             systemEventPost(SYSEVT_SENSOR_FAULT, "Thermal", "consecutive I2C failures");
@@ -1539,7 +1544,7 @@ void thermalTask(void* parameter) {
         }
         
         // SAFE: Debug output AFTER i2cTransaction completes, with enabled check
-        if (gThermalEnabled && gThermalPendingFirstFrame && ok) {
+        if (gThermalRunning && gThermalPendingFirstFrame && ok) {
           gThermalPendingFirstFrame = false;
           DEBUG_THERMAL_LIFECYCLEF("Thermal first frame captured");
         }

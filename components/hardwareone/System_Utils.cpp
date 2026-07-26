@@ -320,8 +320,8 @@ extern const size_t g2RingCommandsCount;
 
 // External dependencies from .ino
 // (filesystemReady is provided by System_Filesystem.h, included above)
-extern bool gAutoLogActive;
-extern String gAutoLogFile;
+extern bool gAutomationLogActive;
+extern String gAutomationLogFile;
 // ============================================================================
 // Base64 Encoding (moved from .ino)
 // ============================================================================
@@ -961,8 +961,8 @@ void logCommandExecution(const AuthContext& ctx, const char* cmd, bool success, 
 
 // Automation logging
 //
-// Writes are gated by gAutoLogOwnerCtx — the AuthContext captured when the
-// user ran `autolog start`. See the comment on gAutoLogOwnerCtx in
+// Writes are gated by gAutomationLogOwnerCtx — the AuthContext captured when the
+// user ran `autolog start`. See the comment on gAutomationLogOwnerCtx in
 // System_Automation.cpp for the design rationale (captured identity vs.
 // reading the current task's identity at write time, which fires from event
 // triggers detached from any CLI session).
@@ -970,10 +970,10 @@ void logCommandExecution(const AuthContext& ctx, const char* cmd, bool success, 
 // If the captured ctx loses permission to the path mid-run (e.g. admin
 // demoted to user), individual writes start failing — that's intentional.
 bool appendAutoLogEntry(const char* type, const String& message) {
-  if (!gAutoLogActive || gAutoLogFile.length() == 0) return false;
+  if (!gAutomationLogActive || gAutomationLogFile.length() == 0) return false;
   if (!filesystemReady) return false;
 
-  extern AuthContext gAutoLogOwnerCtx;
+  extern AuthContext gAutomationLogOwnerCtx;
 
   // Get timestamp in same format as existing logs: [YYYY-MM-DD HH:MM:SS.mmm]
   char tsPrefix[32];
@@ -990,7 +990,7 @@ bool appendAutoLogEntry(const char* type, const String& message) {
 
   // Resolve destination — routes to /sd mirror when LittleFS is full.
   char dest[128];
-  VFS::resolveOverflowPath(gAutoLogFile.c_str(), line.length() + 512,
+  VFS::resolveOverflowPath(gAutomationLogFile.c_str(), line.length() + 512,
                            dest, sizeof(dest));
 
   // Ensure the parent directory exists on whichever FS we're writing to.
@@ -1000,12 +1000,12 @@ bool appendAutoLogEntry(const char* type, const String& message) {
   int lastSlash = destStr.lastIndexOf('/');
   if (lastSlash > 0) {
     String dir = destStr.substring(0, lastSlash);
-    if (!VFS::existsGuarded(dir, gAutoLogOwnerCtx)) {
-      if (!VFS::mkdirGuarded(dir, gAutoLogOwnerCtx)) return false;
+    if (!VFS::existsGuarded(dir, gAutomationLogOwnerCtx)) {
+      if (!VFS::mkdirGuarded(dir, gAutomationLogOwnerCtx)) return false;
     }
   }
 
-  File f = VFS::openGuarded(destStr, "a", gAutoLogOwnerCtx);
+  File f = VFS::openGuarded(destStr, "a", gAutomationLogOwnerCtx);
   if (!f) return false;
 
   size_t written = f.print(line);
@@ -1315,17 +1315,17 @@ const char* cmd_voltage(const String& originalCmd) {
     broadcastOutput("WiFi: Inactive");
   }
 
-  if (gThermalConnected && gThermalEnabled) {
+  if (gThermalConnected && gThermalRunning) {
     estimatedCurrent += 23;  // MLX90640 typical
     broadcastOutput("Thermal Sensor: Active (+23mA)");
   }
 
-  if (gImuConnected && gImuEnabled) {
+  if (gImuConnected && gImuRunning) {
     estimatedCurrent += 12;  // BNO055 typical
     broadcastOutput("IMU Sensor: Active (+12mA)");
   }
 
-  if (gTofConnected && gTofEnabled) {
+  if (gTofConnected && gTofRunning) {
     estimatedCurrent += 20;  // VL53L4CX typical
     broadcastOutput("ToF Sensor: Active (+20mA)");
   }
@@ -1661,7 +1661,7 @@ void buildSystemInfoJson(JsonDocument& doc, bool includeDeviceList) {
 #if ENABLE_ESPNOW
   {
     JsonObject espnow = conn["espnow"].to<JsonObject>();
-    espnow["enabled"] = gSettings.espnowenabled;
+    espnow["enabled"] = gSettings.espnowEnabled;
     espnow["running"] = (gEspNow && gEspNow->initialized);
     espnow["mesh"] = gSettings.espnowmesh;
     espnow["deviceName"] = gSettings.espnowDeviceName;
@@ -1726,7 +1726,7 @@ void buildSystemInfoJson(JsonDocument& doc, bool includeDeviceList) {
   {
     JsonObject i2c = conn["i2c"].to<JsonObject>();
     i2c["compiled"] = true;
-    i2c["enabled"]  = gI2CBusEnabled;
+    i2c["enabled"]  = gI2CBusRunning;
     // Honest, contradiction-proof counts (NOT the manager registry, which
     // drifts via phantom bus-0 pre-registrations + ever-talked accounting):
     //   devices       = compiled sensor TYPES (capability)
@@ -1861,7 +1861,7 @@ const char* cmd_time(const String& argsInput) {
     bool haveTemp = false;
     float temp = 0.0f;
 #if ENABLE_RTC_SENSOR
-    if (gRtcEnabled && gRtcConnected) {
+    if (gRtcRunning && gRtcConnected) {
       RTCDateTime dt;
       if (rtcReadDateTime(&dt)) {
         snprintf(timeBuf, sizeof(timeBuf), "%04d-%02d-%02dT%02d:%02d:%02d",
@@ -1896,7 +1896,7 @@ const char* cmd_time(const String& argsInput) {
   
   // Priority: RTC (primary) -> NTP (fallback)
 #if ENABLE_RTC_SENSOR
-  if (gRtcEnabled && gRtcConnected) {
+  if (gRtcRunning && gRtcConnected) {
     // RTC is primary time source
     RTCDateTime dt;
     if (rtcReadDateTime(&dt)) {
@@ -1972,7 +1972,7 @@ const char* cmd_timeset(const String& argsInput) {
   
   // Also update RTC if available
 #if ENABLE_RTC_SENSOR
-  if (gRtcEnabled && gRtcConnected) {
+  if (gRtcRunning && gRtcConnected) {
     rtcSyncFromSystem();
     broadcastOutput("System time and RTC updated");
     // Mark RTC as calibrated so future boots trust RTC first
@@ -2435,7 +2435,7 @@ bool syncNTPAndResolve() {
     
     // Sync RTC from NTP time to keep RTC accurate
 #if ENABLE_RTC_SENSOR
-    if (gRtcEnabled && gRtcConnected) {
+    if (gRtcRunning && gRtcConnected) {
       if (rtcSyncFromSystem()) {
         broadcastOutput("[OK] RTC updated from NTP time");
         // Mark RTC as calibrated so future boots trust RTC first
@@ -2463,7 +2463,7 @@ bool syncNTPAndResolve() {
     
     // Try RTC as fallback time source
 #if ENABLE_RTC_SENSOR
-    if (gRtcEnabled && gRtcConnected) {
+    if (gRtcRunning && gRtcConnected) {
       if (rtcSyncToSystem()) {
         broadcastOutput("[OK] System time set from RTC (NTP unavailable)");
         if (preSyncTime <= 1704067200) {
@@ -2723,7 +2723,7 @@ static const CommandModule gCommandModules[] = {
     "active connection. An app-layer Secure Channel (X25519 + passphrase + "
     "ChaCha20-Poly1305, independent of BLE bonding) is configured with blesecret and "
     "required with blesecure; both are admin-only, as is blerequireauth. Boot "
-    "reconnection to saved-MAC peers is per-peer via bleautoconnect <name> [on|off] "
+    "reconnection to saved-MAC peers is per-peer via bleautoreconnect <name> [on|off] "
     "(see blepeers for names).", bluetoothCommands, bluetoothCommandsCount, CMD_MODULE_NETWORK, nullptr },
   #endif
   { "filesystem", "File operations and storage management", "Manages files and directories on the device internal LittleFS flash. Browse with "
@@ -3734,13 +3734,13 @@ void printMemoryReport() {
   
   // Sensor Module State Variables
   broadcastOutput("  Sensor Modules (Global State):");
-  size_t thermal_state_bytes = sizeof(gThermalCache) + sizeof(gThermalEnabled) + sizeof(gThermalConnected) + sizeof(gThermalTaskHandle);
-  size_t imu_state_bytes = sizeof(gImuCache) + sizeof(gImuEnabled) + sizeof(gImuConnected) + sizeof(gImuTaskHandle);
-  size_t tof_state_bytes = sizeof(gTofCache) + sizeof(gTofEnabled) + sizeof(gTofConnected) + sizeof(gTofTaskHandle);
-  size_t gamepad_state_bytes = sizeof(gInputCache) + sizeof(gInputEnabled) + sizeof(gInputConnected) + sizeof(gInputTaskHandle);
-  size_t apds_state_bytes = sizeof(gApdsCache) + sizeof(gApdsConnected) + sizeof(gApdsColorEnabled) + sizeof(gApdsProximityEnabled) + sizeof(gApdsGestureEnabled);
-  size_t gps_state_bytes = sizeof(gGpsEnabled) + sizeof(gGpsConnected);
-  size_t oled_state_bytes = sizeof(gOledEnabled) + sizeof(oledConnected);
+  size_t thermal_state_bytes = sizeof(gThermalCache) + sizeof(gThermalRunning) + sizeof(gThermalConnected) + sizeof(gThermalTaskHandle);
+  size_t imu_state_bytes = sizeof(gImuCache) + sizeof(gImuRunning) + sizeof(gImuConnected) + sizeof(gImuTaskHandle);
+  size_t tof_state_bytes = sizeof(gTofCache) + sizeof(gTofRunning) + sizeof(gTofConnected) + sizeof(gTofTaskHandle);
+  size_t gamepad_state_bytes = sizeof(gInputCache) + sizeof(gInputRunning) + sizeof(gInputConnected) + sizeof(gInputTaskHandle);
+  size_t apds_state_bytes = sizeof(gApdsCache) + sizeof(gApdsConnected) + sizeof(gApdsColorRunning) + sizeof(gApdsProximityRunning) + sizeof(gApdsGestureRunning);
+  size_t gps_state_bytes = sizeof(gGpsRunning) + sizeof(gGpsConnected);
+  size_t oled_state_bytes = sizeof(gOledRunning) + sizeof(oledConnected);
 
 #if ENABLE_THERMAL_SENSOR
   BROADCAST_PRINTF("    Thermal Module: %5lu bytes (enabled)", (unsigned long)thermal_state_bytes);
@@ -4248,7 +4248,7 @@ const char* cmd_perftop(const String& originalCmd) {
 // Command Execution Functions - MIGRATED from main .ino
 // ============================================================================
 // External dependencies for command execution
-extern bool gAutoLogActive;
+extern bool gAutomationLogActive;
 extern CLIState gCLIState;
 extern bool gCLIValidateOnly;
 extern QueueHandle_t gCmdExecQ;
@@ -4482,7 +4482,7 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
 
   // Log command execution if automation logging is active and this command
   // carries an automationName (i.e. it was queued as an automation sub-command).
-  if (gAutoLogActive && cmdCtx && cmdCtx->automationName[0]) {
+  if (gAutomationLogActive && cmdCtx && cmdCtx->automationName[0]) {
     char logBuf[300];
     snprintf(logBuf, sizeof(logBuf), "[%s] %s", cmdCtx->automationName, cmd);
     appendAutoLogEntry("COMMAND", logBuf);
@@ -4656,7 +4656,7 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
         snprintf(out, outSize, "%s", commandResult);
 
         // Log output if this is an automation sub-command with logging active.
-        if (gAutoLogActive && cmdCtx && cmdCtx->automationName[0]) {
+        if (gAutomationLogActive && cmdCtx && cmdCtx->automationName[0]) {
           char logBuf[201];
           snprintf(logBuf, sizeof(logBuf), "%.197s%s", out, strlen(out) > 197 ? "..." : "");
           for (char* c = logBuf; *c; c++) { if (*c == '\n' || *c == '\r') *c = ' '; }
@@ -4741,7 +4741,7 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
   // ===== END INLINED REGISTRY LOGIC =====
 
   // Log command output if this is an automation sub-command with logging active.
-  if (gAutoLogActive && cmdCtx && cmdCtx->automationName[0]) {
+  if (gAutomationLogActive && cmdCtx && cmdCtx->automationName[0]) {
     char logBuf[201];
     snprintf(logBuf, sizeof(logBuf), "%.197s%s", out, strlen(out) > 197 ? "..." : "");
     for (char* c = logBuf; *c; c++) { if (*c == '\n' || *c == '\r') *c = ' '; }
@@ -5261,7 +5261,7 @@ const char* cmd_logout(const String& originalCmd) {
       // G2 has no credential login (pairing IS auth), but admins may want
       // to clear pairedByUser without un-pairing the lens. logoutTransport
       // calls g2PairedUserClear(); recovery is a fresh stamp via
-      // `bleautoconnect g2-glasses on` from any authenticated session.
+      // `bleautoreconnect g2-glasses on` from any authenticated session.
       transport = SOURCE_G2_GLASSES;
     } else {
       return "Error: Invalid transport. Use: serial, display, bluetooth, or g2";

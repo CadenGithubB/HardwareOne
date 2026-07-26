@@ -697,7 +697,7 @@ void handleOLEDESPNowPage(SetupWizardResult& result, bool& running) {
       "Optional: ESP-NOW ID");
   if (choice == -1) return; // went back
   if (choice == 0) {        // skip — disable ESP-NOW since it's unconfigured
-    gSettings.espnowenabled = false;
+    gSettings.espnowEnabled = false;
     if (!wizardNextPage(result)) running = false;
     return;
   }

@@ -27,7 +27,7 @@
 #if ENABLE_G2_GLASSES
 #include "G2_Glasses.h"
 #include "G2_Ring.h"      // R1 ring telemetry + poll (submenu below, mirrors G2)
-#include "BLE_Peers.h"    // gBlePeerData[BLE_PEER_R1_RING].autoConnect
+#include "BLE_Peers.h"    // gBlePeerData[BLE_PEER_R1_RING].autoReconnect
 #endif
 
 // ---- Main menu model -------------------------------------------------------
@@ -391,25 +391,14 @@ static void displayG2StatusDetail() {
   }
 }
 
-// ---- OLED_BLUETOOTH_R1: R1 ring submenu -----------------------------------
-// Mirrors the G2 Apps→Ring dashboard on the OLED, sitting beside the G2
-// submenu under Bluetooth (the ring rides the same BLE-client subsystem).
-// Live HR/HRV/SpO2/battery readout from the notify-updated telemetry cache
-// (g2RingGetTelemetry — a lock-free field copy, "--" when no sample yet),
-// plus an entry-poll burst (g2RingPollVital, one vital per ~800 ms since the
-// ring needs >=700 ms between queries) and Connect/Disconnect/AutoConnect
-// actions dispatched as the same CLI commands the G2 lens flow uses.
-static int      sR1Sel          = 0;   // 0 Connect, 1 Disconnect, 2 AutoConnect
-static uint8_t  sR1PollCursor   = 4;   // 4 = burst done/idle; 0..3 = HR/HRV/SpO2/batt
-static bool     sR1WasConnected = false;
-static uint32_t sR1LastPollMs   = 0;
+// ---- OLED_BLUETOOTH_R1: R1 ring connect submenu -----------------------------
+// Connection controls only. Live vitals / Poll / Track live in OLED_R1_HEALTH
+// (ENABLE_R1_HEALTH) so Bluetooth stays the link surface.
+static int sR1Sel = 0;   // 0 Connect, 1 Disconnect, 2 AutoReconnect
 
 static void r1OnEnter(bool isForward) {
   if (!isForward) return;
-  sR1Sel          = 0;
-  sR1PollCursor   = g2RingIsConnected() ? 0 : 4;   // kick a vitals burst on entry
-  sR1WasConnected = g2RingIsConnected();
-  sR1LastPollMs   = 0;
+  sR1Sel = 0;
 }
 
 static void displayR1Ring() {
@@ -417,56 +406,29 @@ static void displayR1Ring() {
   oledDisplay->setTextSize(1);
   oledDisplay->setTextColor(SSD1306_WHITE);
 
-  // Entry-poll burst — one point-query per ~800 ms while connected, restarting
-  // on a disconnected→connected edge. Fire-and-forget BLE write (non-blocking,
-  // not the OLED I2C bus); replies land in the cache via notify.
   const bool conn = g2RingIsConnected();
-  if (conn && !sR1WasConnected) sR1PollCursor = 0;
-  sR1WasConnected = conn;
-  if (conn && sR1PollCursor < 4) {
-    uint32_t now = millis();
-    if (sR1LastPollMs == 0 || now - sR1LastPollMs >= 800) {
-      g2RingPollVital(sR1PollCursor++);
-      sR1LastPollMs = now;
-    }
-  }
 
-  // Header
   oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
   oledDisplay->print("R1 RING ");
   if (!bleSubsystemActive()) oledDisplay->println("[BLE off]");
   else if (conn)             oledDisplay->println("[OK]");
   else                       oledDisplay->println("[--]");
 
-  // Vitals readout (two rows, two columns). *Valid=false → "--", never 0.
-  G2RingTelemetry t;
-  g2RingGetTelemetry(t);
-  char v[16];
-  const int r1 = OLED_CONTENT_START_Y + 9;
-  const int r2 = OLED_CONTENT_START_Y + 18;
-  oledDisplay->setCursor(0, r1);
-  if (t.hrValid)  { snprintf(v, sizeof(v), "HR %u", (unsigned)t.hr); oledDisplay->print(v); } else oledDisplay->print("HR --");
-  oledDisplay->setCursor(64, r1);
-  if (t.hrvValid) { snprintf(v, sizeof(v), "HRV %d", (int)t.hrv);    oledDisplay->print(v); } else oledDisplay->print("HRV --");
-  oledDisplay->setCursor(0, r2);
-  if (t.spo2Valid){ snprintf(v, sizeof(v), "O2 %u%%", (unsigned)t.spo2); oledDisplay->print(v); } else oledDisplay->print("O2 --");
-  oledDisplay->setCursor(64, r2);
-  if (t.batteryValid){ snprintf(v, sizeof(v), "Bat %u%%", (unsigned)t.battery); oledDisplay->print(v); } else oledDisplay->print("Bat --");
+  oledDisplay->setCursor(0, OLED_CONTENT_START_Y + 10);
+#if ENABLE_R1_HEALTH
+  oledDisplay->println("Vitals: R1 Health");
+#else
+  oledDisplay->println("Connect / AutoRecon");
+#endif
 
-  // Action rows: 0 = Connect (dot when linked), 1 = Disconnect,
-  // 2 = AutoConnect toggle (shows current state).
-  const int a0 = OLED_CONTENT_START_Y + 29;
+  const int a0 = OLED_CONTENT_START_Y + 28;
   for (int i = 0; i < 3; i++) {
     oledDisplay->setCursor(0, a0 + i * 8);
     oledDisplay->print(i == sR1Sel ? "> " : "  ");
     if (i == 0)      { oledDisplay->print("Connect"); if (conn) oledDisplay->print(" *"); }
     else if (i == 1) oledDisplay->print("Disconnect");
-    else             { oledDisplay->print("AutoConn "); oledDisplay->print(gBlePeerData[BLE_PEER_R1_RING].autoConnect ? "ON" : "OFF"); }
+    else             { oledDisplay->print("AutoRecon "); oledDisplay->print(gBlePeerData[BLE_PEER_R1_RING].autoReconnect ? "ON" : "OFF"); }
   }
-
-  // Keep re-rendering so the vitals + poll burst stay live (telemetry arrives
-  // via BLE notify, not a sensor-seq bump, so nothing else marks us dirty).
-  oledMarkDirty();
 }
 
 static bool r1InputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed) {
@@ -481,10 +443,10 @@ static bool r1InputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
       case 1:  // Disconnect — async, admin-gated
         if (g2RingIsConnected()) executeOLEDCommand("ringdisconnect");
         break;
-      case 2:  // AutoConnect toggle — dispatch the opposite of the current state
-        executeOLEDCommand(gBlePeerData[BLE_PEER_R1_RING].autoConnect
-                           ? "bleautoconnect r1-ring off"
-                           : "bleautoconnect r1-ring on");
+      case 2:  // AutoReconnect toggle — dispatch the opposite of the current state
+        executeOLEDCommand(gBlePeerData[BLE_PEER_R1_RING].autoReconnect
+                           ? "bleautoreconnect r1-ring off"
+                           : "bleautoreconnect r1-ring on");
         break;
     }
     return true;

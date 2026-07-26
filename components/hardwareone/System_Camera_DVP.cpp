@@ -74,7 +74,7 @@ static const char* cameraErrorToString(esp_err_t err) {
 }
 
 // Camera state
-bool gCameraEnabled = false;
+bool gCameraRunning = false;
 bool cameraConnected = false;
 bool cameraStreaming = false;
 const char* cameraModel = "Unknown";
@@ -170,7 +170,7 @@ static const size_t kStatusBufSize = 512;
 
 bool initCamera(bool isRecovery) {
   DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] ========== initCamera() ENTRY ==========");
-  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] gCameraEnabled=%d cameraConnected=%d", gCameraEnabled, cameraConnected);
+  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] gCameraRunning=%d cameraConnected=%d", gCameraRunning, cameraConnected);
   DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Heap free: %u, PSRAM free: %u", esp_get_free_heap_size(), heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 
   if (!lockCameraMutex(15000)) {
@@ -178,7 +178,7 @@ bool initCamera(bool isRecovery) {
     return false;
   }
   
-  if (gCameraEnabled) {
+  if (gCameraRunning) {
     DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Already initialized - returning true");
     INFO_CAMERAF("Already initialized");
     unlockCameraMutex();
@@ -461,7 +461,7 @@ bool initCamera(bool isRecovery) {
     }
     INFO_CAMERAF("Init failed: 0x%x (%s)", err, cameraErrorToString(err));
     cameraConnected = false;
-    gCameraEnabled = false;
+    gCameraRunning = false;
     unlockCameraMutex();
     logSystemEvent("CAM", "camera init FAILED: 0x%x (%s)", err, cameraErrorToString(err));
     systemEventPost(SYSEVT_SENSOR_START_FAILED, "Camera", cameraErrorToString(err));
@@ -629,11 +629,11 @@ bool initCamera(bool isRecovery) {
   cameraDimsForFramesize(fs, cameraWidth, cameraHeight);
 
   cameraConnected = true;
-  gCameraEnabled = true;
+  gCameraRunning = true;
   sensorStatusBumpWith("opencamera");
 
   DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] ========== initCamera() COMPLETE ==========");
-  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] gCameraEnabled=%d cameraConnected=%d", gCameraEnabled, cameraConnected);
+  DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] gCameraRunning=%d cameraConnected=%d", gCameraRunning, cameraConnected);
   DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Model=%s Resolution=%dx%d", cameraModel, cameraWidth, cameraHeight);
   DEBUG_CAMERA_LIFECYCLEF("[CAM_INIT] Final heap: %u, PSRAM: %u", esp_get_free_heap_size(), heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
   INFO_CAMERAF("Initialized: %s (%dx%d)", cameraModel, cameraWidth, cameraHeight);
@@ -658,8 +658,8 @@ bool initCamera(bool isRecovery) {
 }
 
 void stopCamera(bool isRecovery) {
-  DEBUG_CAMERA_LIFECYCLEF("[CAM_STOP] stopCamera() called, gCameraEnabled=%d", gCameraEnabled);
-  if (!gCameraEnabled) {
+  DEBUG_CAMERA_LIFECYCLEF("[CAM_STOP] stopCamera() called, gCameraRunning=%d", gCameraRunning);
+  if (!gCameraRunning) {
     DEBUG_CAMERA_LIFECYCLEF("[CAM_STOP] Already stopped, returning");
     return;
   }
@@ -676,7 +676,7 @@ void stopCamera(bool isRecovery) {
   esp_camera_deinit();
   DEBUG_CAMERA_LIFECYCLEF("[CAM_STOP] esp_camera_deinit() complete");
   
-  gCameraEnabled = false;
+  gCameraRunning = false;
   cameraStreaming = false;
   sensorStatusBumpWith("closecamera");
   if (!isRecovery) systemEventPost(SYSEVT_SENSOR_STOPPED, "Camera");
@@ -689,12 +689,12 @@ void stopCamera(bool isRecovery) {
 
 uint8_t* captureFrame(size_t* outLen) {
   DEBUG_CAMERA_CAPTUREF("[CAM_CAPTURE] ========== captureFrame() ENTRY ==========");
-  DEBUG_CAMERA_CAPTUREF("[CAM_CAPTURE] gCameraEnabled=%d cameraConnected=%d cameraStreaming=%d",
-                gCameraEnabled, cameraConnected, cameraStreaming);
+  DEBUG_CAMERA_CAPTUREF("[CAM_CAPTURE] gCameraRunning=%d cameraConnected=%d cameraStreaming=%d",
+                gCameraRunning, cameraConnected, cameraStreaming);
   DEBUG_CAMERA_CAPTUREF("[CAM_CAPTURE] Heap: %u, PSRAM: %u",
                 esp_get_free_heap_size(), heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 
-  if (!gCameraEnabled) {
+  if (!gCameraRunning) {
     DEBUG_CAMERA_CAPTUREF("[CAM_CAPTURE] Camera not enabled - returning NULL");
     if (outLen) *outLen = 0;
     return nullptr;
@@ -775,7 +775,7 @@ uint8_t* captureFrame(size_t* outLen) {
 
 // Set camera resolution - useful for ESP-NOW transmission (lower res = smaller files)
 bool setCameraResolution(framesize_t size) {
-  if (!gCameraEnabled) {
+  if (!gCameraRunning) {
     return false;
   }
 
@@ -805,7 +805,7 @@ bool setCameraResolution(framesize_t size) {
 
 // Set JPEG quality (0-63, lower = higher quality, larger file)
 bool setCameraQuality(int quality) {
-  if (!gCameraEnabled) return false;
+  if (!gCameraRunning) return false;
 
   if (!lockCameraMutex(15000)) {
     DEBUG_CAMERA_SETTINGSF("[CAM_SET] ERROR: camera mutex timeout (camera busy)");
@@ -823,7 +823,7 @@ bool setCameraQuality(int quality) {
 
 // Capture frame at specific resolution (for ESP-NOW: use QQVGA 160x120)
 uint8_t* captureFrameAtResolution(framesize_t size, int quality, size_t* outLen) {
-  if (!gCameraEnabled) {
+  if (!gCameraRunning) {
     if (outLen) *outLen = 0;
     return nullptr;
   }
@@ -895,7 +895,7 @@ const char* buildCameraStatusJson() {
   }
 
   PSRAM_JSON_DOC(doc);
-  doc["enabled"] = gCameraEnabled;
+  doc["enabled"] = gCameraRunning;
   doc["connected"] = cameraConnected;
   doc["streaming"] = cameraStreaming;
   doc["model"] = cameraModel;
@@ -937,7 +937,7 @@ static void cameraPwrRunOne(const CameraPwrMsg& m) {
       stopCamera();
       break;
     case CAM_PWR_CMD_START:
-      if (!gCameraEnabled) {
+      if (!gCameraRunning) {
         if (!initCamera()) {
           BROADCAST_PRINTF("[CAM_PWR] initCamera failed — reverting camera auto-start");
           setSetting(gSettings.cameraAutoStart, false);
@@ -949,7 +949,7 @@ static void cameraPwrRunOne(const CameraPwrMsg& m) {
       }
       break;
     case CAM_PWR_CMD_RESTART: {
-      const bool was = gCameraEnabled;
+      const bool was = gCameraRunning;
       if (was) {
         stopCamera();
         vTaskDelay(pdMS_TO_TICKS(100));
@@ -1044,7 +1044,7 @@ bool cameraPowerRequestStartSync(uint32_t waitMs) {
     return false;
   }
   cameraPwrWaitDone(self, waitMs);
-  return gCameraEnabled;
+  return gCameraRunning;
 }
 
 void cameraPowerRequestStopSync(uint32_t waitMs) {
@@ -1066,7 +1066,7 @@ void cameraPowerRequestStopSync(uint32_t waitMs) {
 bool cameraPowerRequestRestartSync(uint32_t waitMs) {
   cameraPowerWorkerEnsureStarted();
   if (!sCamPwrQueue) {
-    const bool was = gCameraEnabled;
+    const bool was = gCameraRunning;
     if (was) {
       stopCamera();
       vTaskDelay(pdMS_TO_TICKS(100));
@@ -1078,7 +1078,7 @@ bool cameraPowerRequestRestartSync(uint32_t waitMs) {
   (void)ulTaskNotifyTake(pdTRUE, 0);
   const CameraPwrMsg m{CAM_PWR_CMD_RESTART, self};
   if (!cameraPwrSend(m, pdMS_TO_TICKS(5000))) {
-    const bool was = gCameraEnabled;
+    const bool was = gCameraRunning;
     if (was) {
       stopCamera();
       vTaskDelay(pdMS_TO_TICKS(100));
@@ -1087,7 +1087,7 @@ bool cameraPowerRequestRestartSync(uint32_t waitMs) {
     return false;
   }
   cameraPwrWaitDone(self, waitMs);
-  return gCameraEnabled;
+  return gCameraRunning;
 }
 
 // Command handlers
@@ -1098,6 +1098,9 @@ const char* cmd_camera(const String& argsInput) {
 
 const char* cmd_camerastart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!gSettings.cameraEnabled) {
+    return "ERROR: Camera is disabled - run 'cameraenabled 1' first";
+  }
   if (cameraPowerRequestStartSync(60000)) {
     return "Camera started successfully";
   }
@@ -1112,7 +1115,7 @@ const char* cmd_camerastop(const String& argsInput) {
 
 const char* cmd_cameracapture(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraEnabled) {
+  if (!gCameraRunning) {
     return "Error: Camera not enabled - run opencamera first";
   }
   
@@ -1168,7 +1171,7 @@ const char* cmd_camerares(const String& argsInput) {
   setSetting(gSettings.cameraFramesize, (int)cameraFramesizeSettingFromEnum(newSize));
   
   // If camera is running, do a full restart for reliable resolution change
-  bool wasEnabled = gCameraEnabled;
+  bool wasEnabled = gCameraRunning;
   bool wasStreaming = cameraStreaming;
   
   if (wasEnabled) {
@@ -1211,7 +1214,7 @@ const char* cmd_cameraframesize(const String& argsInput) {
   setSetting(gSettings.cameraFramesize, newSize);
   
   // If camera is running, restart to apply
-  bool wasEnabled = gCameraEnabled;
+  bool wasEnabled = gCameraRunning;
   if (wasEnabled) {
     (void)cameraPowerRequestRestartSync(60000);
   }
@@ -1244,7 +1247,7 @@ const char* cmd_cameraquality(const String& argsInput) {
   setSetting(gSettings.cameraQuality, quality);
   
   // Apply live if camera is running (quality can be changed without restart)
-  if (gCameraEnabled) {
+  if (gCameraRunning) {
     setCameraQuality(quality);
     static char result[64];
     snprintf(result, sizeof(result), "JPEG quality set to %d (saved, applied live)", quality);
@@ -1258,7 +1261,7 @@ const char* cmd_cameraquality(const String& argsInput) {
 
 const char* cmd_cameratiny(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraEnabled) {
+  if (!gCameraRunning) {
     return "Error: Camera not enabled - run opencamera first";
   }
   
@@ -1277,7 +1280,7 @@ const char* cmd_cameratiny(const String& argsInput) {
 // Helper to apply a camera setting and optionally save
 static bool applyCameraSetting(const char* name, int value, int minVal, int maxVal, 
                                 int (*setter)(sensor_t*, int), int* settingPtr) {
-  if (!gCameraEnabled) return false;
+  if (!gCameraRunning) return false;
   if (value < minVal || value > maxVal) return false;
   
   sensor_t* s = esp_camera_sensor_get();
@@ -1295,7 +1298,7 @@ static bool applyCameraSetting(const char* name, int value, int minVal, int maxV
 
 const char* cmd_camerabrightness(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraEnabled) return "Error: Camera not enabled";
+  if (!gCameraRunning) return "Error: Camera not enabled";
   
   String valStr = argsInput;
   valStr.trim();
@@ -1319,7 +1322,7 @@ const char* cmd_camerabrightness(const String& argsInput) {
 
 const char* cmd_cameracontrast(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraEnabled) return "Error: Camera not enabled";
+  if (!gCameraRunning) return "Error: Camera not enabled";
   
   String valStr = argsInput;
   valStr.trim();
@@ -1343,7 +1346,7 @@ const char* cmd_cameracontrast(const String& argsInput) {
 
 const char* cmd_camerasaturation(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraEnabled) return "Error: Camera not enabled";
+  if (!gCameraRunning) return "Error: Camera not enabled";
   
   String valStr = argsInput;
   valStr.trim();
@@ -1367,7 +1370,7 @@ const char* cmd_camerasaturation(const String& argsInput) {
 
 const char* cmd_camerawb(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraEnabled) return "Error: Camera not enabled";
+  if (!gCameraRunning) return "Error: Camera not enabled";
   
   String valStr = argsInput;
   valStr.trim();
@@ -1393,7 +1396,7 @@ const char* cmd_camerawb(const String& argsInput) {
 
 const char* cmd_camerasharpness(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraEnabled) return "Error: Camera not enabled";
+  if (!gCameraRunning) return "Error: Camera not enabled";
   
   String valStr = argsInput;
   valStr.trim();
@@ -1419,7 +1422,7 @@ const char* cmd_camerasharpness(const String& argsInput) {
 
 const char* cmd_cameradenoise(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraEnabled) return "Error: Camera not enabled";
+  if (!gCameraRunning) return "Error: Camera not enabled";
   
   String valStr = argsInput;
   valStr.trim();
@@ -1445,7 +1448,7 @@ const char* cmd_cameradenoise(const String& argsInput) {
 
 const char* cmd_cameraeffect(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraEnabled) return "Error: Camera not enabled";
+  if (!gCameraRunning) return "Error: Camera not enabled";
   
   String valStr = argsInput;
   valStr.trim();
@@ -1471,7 +1474,7 @@ const char* cmd_cameraeffect(const String& argsInput) {
 
 const char* cmd_cameraexposure(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraEnabled) return "Error: Camera not enabled";
+  if (!gCameraRunning) return "Error: Camera not enabled";
   
   String valStr = argsInput;
   valStr.trim();
@@ -1497,7 +1500,7 @@ const char* cmd_cameraexposure(const String& argsInput) {
 
 const char* cmd_cameraaec(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraEnabled) return "Error: Camera not enabled";
+  if (!gCameraRunning) return "Error: Camera not enabled";
 
   sensor_t* s = esp_camera_sensor_get();
   if (!s) return "Error: Camera sensor not available";
@@ -1542,7 +1545,7 @@ const char* cmd_camerafps(const String& argsInput) {
 
 const char* cmd_cameraaecvalue(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraEnabled) return "Error: Camera not enabled";
+  if (!gCameraRunning) return "Error: Camera not enabled";
 
   String valStr = argsInput;
   valStr.trim();
@@ -1568,7 +1571,7 @@ const char* cmd_cameraaecvalue(const String& argsInput) {
 
 const char* cmd_cameraagc(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraEnabled) return "Error: Camera not enabled";
+  if (!gCameraRunning) return "Error: Camera not enabled";
 
   sensor_t* s = esp_camera_sensor_get();
   if (!s) return "Error: Camera sensor not available";
@@ -1592,7 +1595,7 @@ const char* cmd_cameraagc(const String& argsInput) {
 
 const char* cmd_cameraagcgain(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraEnabled) return "Error: Camera not enabled";
+  if (!gCameraRunning) return "Error: Camera not enabled";
 
   String valStr = argsInput;
   valStr.trim();
@@ -1628,7 +1631,7 @@ const char* cmd_cameraagcgain(const String& argsInput) {
 // gives AEC headroom to actually brighten the image.
 const char* cmd_cameragainceiling(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraEnabled) return "Error: Camera not enabled";
+  if (!gCameraRunning) return "Error: Camera not enabled";
 
   String s = argsInput; s.trim();
   sensor_t* sens = esp_camera_sensor_get();
@@ -1665,7 +1668,7 @@ static const char* cameraBoolToggle(const String& argsInput,
                                     const char* tag,
                                     uint8_t currentVal,
                                     int (*setter)(sensor_t*, int)) {
-  if (!gCameraEnabled) return "Error: Camera not enabled";
+  if (!gCameraRunning) return "Error: Camera not enabled";
   sensor_t* s = esp_camera_sensor_get();
   if (!s || !setter) return "Error: Camera sensor not available";
 
@@ -1759,7 +1762,7 @@ const char* cmd_cameracolorbar(const String& argsInput) {
 // camerareg 0x3824 0x1f 0x04). Format: <addr_hex> <mask_hex> <value_hex>.
 const char* cmd_camerareg(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraEnabled) return "Error: Camera not enabled";
+  if (!gCameraRunning) return "Error: Camera not enabled";
   sensor_t* s = esp_camera_sensor_get();
   if (!s) return "Error: Camera sensor not available";
 
@@ -1793,7 +1796,7 @@ const char* cmd_camerareg(const String& argsInput) {
 // in the hardware register. Use camerafx to set them together.
 const char* cmd_cameradump(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraEnabled) return "Error: Camera not enabled";
+  if (!gCameraRunning) return "Error: Camera not enabled";
   sensor_t* s = esp_camera_sensor_get();
   if (!s) return "Error: Camera sensor not available";
 
@@ -1838,7 +1841,7 @@ const char* cmd_cameradump(const String& argsInput) {
 // Usage: camerafx <bri> <con> <sat>   (each -2..+2)
 const char* cmd_camerafx(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraEnabled) return "Error: Camera not enabled";
+  if (!gCameraRunning) return "Error: Camera not enabled";
   sensor_t* s = esp_camera_sensor_get();
   if (!s) return "Error: Camera sensor not available";
 
@@ -1883,7 +1886,7 @@ const char* cmd_camerafx(const String& argsInput) {
 
 const char* cmd_camerahmirror(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraEnabled) return "Error: Camera not enabled";
+  if (!gCameraRunning) return "Error: Camera not enabled";
   
   String arg = argsInput;
   arg.trim();
@@ -1905,7 +1908,7 @@ const char* cmd_camerahmirror(const String& argsInput) {
 
 const char* cmd_cameravflip(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraEnabled) return "Error: Camera not enabled";
+  if (!gCameraRunning) return "Error: Camera not enabled";
   
   String arg = argsInput;
   arg.trim();
@@ -1927,7 +1930,7 @@ const char* cmd_cameravflip(const String& argsInput) {
 
 const char* cmd_camerarotate(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraEnabled) return "Error: Camera not started";
+  if (!gCameraRunning) return "Error: Camera not started";
   
   String arg = argsInput;
   arg.trim();
@@ -2094,7 +2097,7 @@ extern ImageManager gImageManager;
 
 const char* cmd_camerasave(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraEnabled) {
+  if (!gCameraRunning) {
     return "Error: Camera not enabled - run opencamera first";
   }
   
@@ -2125,7 +2128,7 @@ static char gCameraCmdBuffer[192];
 
 const char* cmd_camerarecord(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gCameraEnabled) return "Error: Camera not enabled - run opencamera first";
+  if (!gCameraRunning) return "Error: Camera not enabled - run opencamera first";
 
   String arg = argsInput;
   arg.trim();
@@ -2251,34 +2254,35 @@ const CommandEntry cameraCommands[] = {
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry cameraSettingEntries[] = {
-  { "cameraAutoStart", SETTING_BOOL, &gSettings.cameraAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, nullptr },
+  { "cameraEnabled", SETTING_BOOL, &gSettings.cameraEnabled, 1, 0, nullptr, 0, 1, "Enabled", nullptr, false, nullptr, "cameraenabled" },
+  { "cameraAutoStart", SETTING_BOOL, &gSettings.cameraAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, "cameraautostart" },
   { "cameraFramesize", SETTING_INT, &gSettings.cameraFramesize, 10, 0, nullptr, 0, 10, "Resolution", "0:320x240 (QVGA),1:640x480 (VGA),2:800x600 (SVGA),3:1024x768 (XGA),4:1280x1024 (SXGA),5:1600x1200 (UXGA),"
     "6:96x96,7:160x120 (QQVGA),8:176x144 (QCIF),9:240x176 (HQVGA),10:240x240", false, "image", nullptr },
-  { "cameraBrightness", SETTING_INT, &gSettings.cameraBrightness, 2, 0, nullptr, -2, 2, "Brightness (-2 to 2)", nullptr, false, "tuning", nullptr },
-  { "cameraContrast", SETTING_INT, &gSettings.cameraContrast, 2, 0, nullptr, -2, 2, "Contrast (-2 to 2)", nullptr, false, "tuning", nullptr },
-  { "cameraSaturation", SETTING_INT, &gSettings.cameraSaturation, 2, 0, nullptr, -2, 2, "Saturation (-2 to 2)", nullptr, false, "tuning", nullptr },
+  { "cameraBrightness", SETTING_INT, &gSettings.cameraBrightness, 2, 0, nullptr, -2, 2, "Brightness (-2 to 2)", nullptr, false, "tuning", "camerabrightness" },
+  { "cameraContrast", SETTING_INT, &gSettings.cameraContrast, 2, 0, nullptr, -2, 2, "Contrast (-2 to 2)", nullptr, false, "tuning", "cameracontrast" },
+  { "cameraSaturation", SETTING_INT, &gSettings.cameraSaturation, 2, 0, nullptr, -2, 2, "Saturation (-2 to 2)", nullptr, false, "tuning", "camerasaturation" },
   { "cameraAELevel", SETTING_INT, &gSettings.cameraAELevel, 0, 0, nullptr, -2, 2, "Exposure Compensation (-2 to 2)", nullptr, false, "tuning", "cameraexposure" },
   { "cameraWBMode", SETTING_INT, &gSettings.cameraWBMode, 0, 0, nullptr, 0, 4, "White Balance", "0:Auto,1:Sunny,2:Cloudy,3:Office,4:Home", false, "tuning", "camerawb" },
-  { "cameraSharpness", SETTING_INT, &gSettings.cameraSharpness, 0, 0, nullptr, -2, 2, "Sharpness (-2 to 2, OV3660)", nullptr, false, "tuning", nullptr },
-  { "cameraDenoise", SETTING_INT, &gSettings.cameraDenoise, 0, 0, nullptr, 0, 8, "Denoise (0-8)", nullptr, false, "tuning", nullptr },
+  { "cameraSharpness", SETTING_INT, &gSettings.cameraSharpness, 0, 0, nullptr, -2, 2, "Sharpness (-2 to 2, OV3660)", nullptr, false, "tuning", "camerasharpness" },
+  { "cameraDenoise", SETTING_INT, &gSettings.cameraDenoise, 0, 0, nullptr, 0, 8, "Denoise (0-8)", nullptr, false, "tuning", "cameradenoise" },
   { "cameraSpecialEffect", SETTING_INT, &gSettings.cameraSpecialEffect, 0, 0, nullptr, 0, 6, "Special Effect", "0:None,1:Negative,2:Grayscale,3:Red Tint,4:Green Tint,5:Blue Tint,6:Sepia", false, "tuning", "cameraeffect" },
-  { "cameraHMirror", SETTING_BOOL, &gSettings.cameraHMirror, 0, 0, nullptr, 0, 1, "Horizontal mirror", nullptr, false, "image", nullptr },
-  { "cameraVFlip", SETTING_BOOL, &gSettings.cameraVFlip, 0, 0, nullptr, 0, 1, "Vertical flip", nullptr, false, "image", nullptr },
-  { "cameraQuality", SETTING_INT, &gSettings.cameraQuality, 12, 0, nullptr, 0, 63, "JPEG quality (0-63, lower=better)", nullptr, false, "image", nullptr },
+  { "cameraHMirror", SETTING_BOOL, &gSettings.cameraHMirror, 0, 0, nullptr, 0, 1, "Horizontal mirror", nullptr, false, "image", "camerahmirror" },
+  { "cameraVFlip", SETTING_BOOL, &gSettings.cameraVFlip, 0, 0, nullptr, 0, 1, "Vertical flip", nullptr, false, "image", "cameravflip" },
+  { "cameraQuality", SETTING_INT, &gSettings.cameraQuality, 12, 0, nullptr, 0, 63, "JPEG quality (0-63, lower=better)", nullptr, false, "image", "cameraquality" },
   { "cameraStreamFps", SETTING_INT, &gSettings.cameraStreamFps, 5, 0, nullptr, 1, 20, "Camera FPS (higher=smoother)", nullptr, false, "image", "camerafps" },
   { "g2StreamToneMap", SETTING_BOOL, &gSettings.g2StreamToneMap, 1, 0, nullptr, 0, 1, "G2 lens auto-levels (stretches washed-out frames to full range)", nullptr, false, "image", "g2streamtonemap" },
   { "g2PackRateMs", SETTING_INT, &gSettings.g2PackRateMs, 80, 0, nullptr, 20, 2000, "G2 SD-pack animation cadence (ms per frame)", nullptr, false, "image", "g2packrate" },
-  { "cameraStorageLocation", SETTING_INT, &gSettings.cameraStorageLocation, 1, 0, nullptr, 0, 2, "Storage Location", "0:LittleFS (Internal),1:SD Card,2:Both", false, "storage", nullptr },
-  { "cameraCaptureFolder", SETTING_STRING, &gSettings.cameraCaptureFolder, 0, 0, "/photos", 0, 0, "Photo folder path", nullptr, false, "storage", nullptr },
-  { "cameraMaxStoredImages", SETTING_INT, &gSettings.cameraMaxStoredImages, 100, 0, nullptr, 0, 1000, "Max images (0=unlimited)", nullptr, false, "storage", nullptr },
-  { "cameraAutoCapture", SETTING_BOOL, &gSettings.cameraAutoCapture, 0, 0, nullptr, 0, 1, "Enable auto-capture", nullptr, false, "autoCapture", nullptr },
-  { "cameraAutoCaptureInterval", SETTING_INT, &gSettings.cameraAutoCaptureIntervalSec, 60, 0, nullptr, 10, 3600, "Auto-capture interval (sec)", nullptr, false, "autoCapture", nullptr },
-  { "cameraSendAfterCapture", SETTING_BOOL, &gSettings.cameraSendAfterCapture, 0, 0, nullptr, 0, 1, "Send to target after capture", nullptr, false, "autoCapture", nullptr },
-  { "cameraTargetDevice", SETTING_STRING, &gSettings.cameraTargetDevice, 0, 0, nullptr, 0, 0, "ESP-NOW target device name", nullptr, false, "autoCapture", nullptr },
+  { "cameraStorageLocation", SETTING_INT, &gSettings.cameraStorageLocation, 1, 0, nullptr, 0, 2, "Storage Location", "0:LittleFS (Internal),1:SD Card,2:Both", false, "storage", "camerastoragelocation" },
+  { "cameraCaptureFolder", SETTING_STRING, &gSettings.cameraCaptureFolder, 0, 0, "/photos", 0, 0, "Photo folder path", nullptr, false, "storage", "cameracapturefolder" },
+  { "cameraMaxStoredImages", SETTING_INT, &gSettings.cameraMaxStoredImages, 100, 0, nullptr, 0, 1000, "Max images (0=unlimited)", nullptr, false, "storage", "cameramaxstoredimages" },
+  { "cameraAutoCapture", SETTING_BOOL, &gSettings.cameraAutoCapture, 0, 0, nullptr, 0, 1, "Enable auto-capture", nullptr, false, "autoCapture", "cameraautocapture" },
+  { "cameraAutoCaptureInterval", SETTING_INT, &gSettings.cameraAutoCaptureIntervalSec, 60, 0, nullptr, 10, 3600, "Auto-capture interval (sec)", nullptr, false, "autoCapture", "cameraautocaptureinterval" },
+  { "cameraSendAfterCapture", SETTING_BOOL, &gSettings.cameraSendAfterCapture, 0, 0, nullptr, 0, 1, "Send to target after capture", nullptr, false, "autoCapture", "camerasendaftercapture" },
+  { "cameraTargetDevice", SETTING_STRING, &gSettings.cameraTargetDevice, 0, 0, nullptr, 0, 0, "ESP-NOW target device name", nullptr, false, "autoCapture", "cameratargetdevice" },
 };
 
 static bool isCameraConnected() {
-  if (!gCameraEnabled) return true;
+  if (!gCameraRunning) return true;
   return cameraConnected;
 }
 
