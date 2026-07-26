@@ -280,11 +280,11 @@ inline int parseBoolArg(const String& arg) {
 const char* settingBoolToggle(bool& field, const String& arg, const char* label);
 
 // One-line CLI handler for a persisted bool. Use like:
-//   BOOL_CMD(bleautostart, gSettings.bluetoothAutoStart, "[BLE] Auto-start")
+//   BOOL_CMD(bleautostart, gSettings.bleAutoStart, "[BLE] Auto-start")
 // expands to:
 //   static const char* cmd_bleautostart(const String& a) {
 //     RETURN_VALID_IF_VALIDATE_CSTR();
-//     return settingBoolToggle(gSettings.bluetoothAutoStart, a, "[BLE] Auto-start");
+//     return settingBoolToggle(gSettings.bleAutoStart, a, "[BLE] Auto-start");
 //   }
 #define BOOL_CMD(cmdname, fieldExpr, label) \
   static const char* cmd_##cmdname(const String& a) { \

@@ -243,7 +243,7 @@ void sampleMemoryState(bool forceFullScan) {
   if (gDebugOutputQueue) {
     int dbgQueued = uxQueueMessagesWaiting(gDebugOutputQueue);
     int dbgFreePool = gDebugFreeQueue ? uxQueueMessagesWaiting(gDebugFreeQueue) : 0;
-    int dbgTotal = gDebugQueueSize;
+    int dbgTotal = gDebugPoolSize;
     int dbgPct = (dbgQueued * 100) / dbgTotal;
     unsigned long dbgDropped = gDebugDropped;
     BROADCAST_PRINTF("[MEMSAMPLE] DebugQ: %d/%d (%d%%) free_pool=%d dropped=%lu%s",
@@ -291,15 +291,15 @@ void sampleMemoryState(bool forceFullScan) {
       espnowHandle != nullptr,                                        // espnow_task
       gCmdExecTaskHandle != nullptr,                                  // cmd_exec_task
       queueProcessorTask != nullptr,                                  // sensor_queue_task
-      gInputEnabled,                                                 // gamepad_task
-      gThermalEnabled,                                                 // thermal_task
-      gImuEnabled,                                                     // imu_task
-      gTofEnabled,                                                     // tof_task
-      gFmRadioEnabled,                                                 // fmradio_task
-      gGpsEnabled,                                                     // gps_task
-      (gApdsColorEnabled || gApdsProximityEnabled || gApdsGestureEnabled), // apds_task
-      gPresenceEnabled,                                                // presence_task
-      gRtcEnabled,                                                     // rtc_task
+      gInputRunning,                                                 // gamepad_task
+      gThermalRunning,                                                 // thermal_task
+      gImuRunning,                                                     // imu_task
+      gTofRunning,                                                     // tof_task
+      gFmRadioRunning,                                                 // fmradio_task
+      gGpsRunning,                                                     // gps_task
+      (gApdsColorRunning || gApdsProximityRunning || gApdsGestureRunning), // apds_task
+      gPresenceRunning,                                                // presence_task
+      gRtcRunning,                                                     // rtc_task
     };
     
     bool anyTask = false;

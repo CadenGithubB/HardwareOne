@@ -164,8 +164,8 @@ private:
 
   // ---- Per-bus state -------------------------------------------------------
   // All hot-path I2C state is indexed by bus id (0 or 1). Bus 0 is always
-  // assumed initialized when gI2CBusEnabled is true; bus 1 only when
-  // gSettings.i2c2BusEnabled and its pins are valid.
+  // assumed initialized when gI2CBusRunning is true; bus 1 only when
+  // gSettings.i2c2Enabled and its pins are valid.
   SemaphoreHandle_t busMutexes[NUM_BUSES];   // one mutex per bus → true parallel ops
   TwoWire*          wires[NUM_BUSES];        // pointers into Arduino's Wire1/Wire
   uint32_t          currentClockHz[NUM_BUSES];
@@ -225,8 +225,8 @@ public:
   }
 
   // Bus operations
-  // initBuses() initializes bus 0 unconditionally (assuming gI2CBusEnabled)
-  // and bus 1 only when gSettings.i2c2BusEnabled is set + its pins are valid.
+  // initBuses() initializes bus 0 unconditionally (assuming gI2CBusRunning)
+  // and bus 1 only when gSettings.i2c2Enabled is set + its pins are valid.
   void initBuses();
   // Initialize a specific bus. Idempotent — safe to call repeatedly; later
   // calls only re-apply the clock + pins on the existing TwoWire.

@@ -679,7 +679,7 @@ void displayEspNow() {
   // Defensive curtain — keyboard is used for device-name entry on first setup.
   if (oledKeyboardDrawIfActive(oledDisplay)) return;
 
-  if (!gSettings.espnowenabled && (!gEspNow || !gEspNow->initialized)) {
+  if (!gSettings.espnowEnabled && (!gEspNow || !gEspNow->initialized)) {
     enterUnavailablePage("ESP-NOW", "Disabled\nRun: espnowenabled 1\nReboot required");
     return;
   }
@@ -951,6 +951,7 @@ EXT_RAM_BSS_ATTR static OLEDScrollState sRemoteSensorScroll;
 static bool sRemoteSensorScrollInitialized = false;
 
 static int collectConnectedRemoteSensors(int* outValidIndices, int maxOut) {
+  if (!gRemoteSensorCache || !outValidIndices || maxOut <= 0) return 0;
   int validCount = 0;
   unsigned long now = millis();
   for (int i = 0; i < MAX_REMOTE_DEVICES * MAX_SENSORS_PER_DEVICE && validCount < maxOut; i++) {

@@ -207,7 +207,8 @@ const CommandEntry settingsCommands[] = {
 #if ENABLE_WIFI
   // ---- WiFi Network Settings ----
   { "wifitxpower", "Set WiFi TX power: <dBm>", true, cmd_wifitxpower, "Usage: wifitxpower <dBm>" },
-  { "wifiautoreconnect", "WiFi auto-reconnect: <0|1>", true, cmd_wifiautoreconnect, "Usage: wifiautoreconnect <0|1>" },
+  { "wifiautoreconnect", "Keep hunting for the AP after an unexpected drop: <0|1>", true, cmd_wifiautoreconnect,
+    "Usage: wifiautoreconnect <0|1>\n  Separate from wifiautostart: this is about recovering a dropped link, not connecting at boot." },
   
   // ---- System Time Settings ----
   { "ntpserver", "Set NTP server: <hostname>", true, cmd_ntpserver, "Usage: ntpserver <host>" },
@@ -881,10 +882,10 @@ void buildSettingsJsonDoc(JsonDocument& doc, bool excludePasswords, bool mainFil
   }
 #endif
 
-  // NOTE: ntpServer, tzOffsetMinutes, wifiAutoReconnect are owned by the wifi
+  // NOTE: ntpServer, tzOffsetMinutes, wifiAutoStart are owned by the wifi
   //       module (written under "wifi" section). The legacy single-network
   //       wifiSSID/wifiPassword fields are gone (removed 2026-07-20).
-  // NOTE: automationsEnabled is owned by the automation module.
+  // NOTE: automationEnabled is owned by the automation module.
   // NOTE: power{} is owned by the power module.
 
   // Debug flags are now handled by modular registry - no manual fallbacks needed
@@ -1531,8 +1532,15 @@ const char* cmd_espnowenabled(const String& argsInput) {
   if (valStr.length() == 0) return "Error: invalid arguments — Usage: espnowenabled <0|1>";
   const char* p = valStr.c_str();
   bool enabled = (*p == '1' || strncasecmp(p, "true", 4) == 0);
-  setSetting(gSettings.espnowenabled, enabled);
-  snprintf(getDebugBuffer(), 1024, "espnowenabled set to %s (takes effect after reboot)", enabled ? "1" : "0");
+  setSetting(gSettings.espnowEnabled, enabled);
+  if (!enabled) {
+#if ENABLE_ESPNOW
+    (void)executeCommandThroughRegistry("closeespnow");
+#endif
+    snprintf(getDebugBuffer(), 1024, "espnowenabled set to 0 (ESP-NOW stopped)");
+  } else {
+    snprintf(getDebugBuffer(), 1024, "espnowenabled set to 1 (use openespnow or reboot with autostart)");
+  }
   return getDebugBuffer();
 }
 
@@ -2529,6 +2537,47 @@ void notifySettingChanged(const void* fieldPtr) {
   }
 }
 
+// When a master *enabled* bool is cleared via handleSettingCommand, tear down
+// any live instance immediately (mqttclientenabled pattern). Autostart flags
+// are intentionally NOT here — those only affect the next boot.
+// Uses executeCommandThroughRegistry (direct handler call, no cmd queue) so
+// this is safe from inside a settings command on cmd_exec_task.
+static void applyMasterEnableDisable(const char* cmdKey) {
+  if (!cmdKey || !cmdKey[0]) return;
+
+  struct Pair { const char* key; const char* stopCmd; };
+  static const Pair kStops[] = {
+    { "wifienabled",       "closewifi" },
+    { "httpenabled",       "closehttp" },
+    { "bleenabled",        "g2deinit" },       // client first
+    { "thermalenabled",    "closethermal" },
+    { "tofenabled",        "closetof" },
+    { "imuenabled",        "closeimu" },
+    { "gpsenabled",        "closegps" },
+    { "fmradioenabled",    "closefmradio" },
+    { "apdsenabled",       "closeapds" },
+    { "rtcenabled",        "closertc" },
+    { "presenceenabled",   "closepresence" },
+    { "inputenabled",      "closeinput" },
+    { "cameraenabled",     "closecamera" },
+    { "micenabled",        "closemic" },
+    { "srenabled",         "srstop" },
+    { "llmenabled",        "llmunload" },
+    { "sensorlogenabled",  "sensorlog stop" },
+    { "systemlogenabled",  "log stop" },
+  };
+
+  for (size_t i = 0; i < sizeof(kStops) / sizeof(kStops[0]); ++i) {
+    if (strcmp(cmdKey, kStops[i].key) != 0) continue;
+    (void)executeCommandThroughRegistry(kStops[i].stopCmd);
+    // BLE: also drop server mode if client teardown left it (or was server-only).
+    if (strcmp(cmdKey, "bleenabled") == 0) {
+      (void)executeCommandThroughRegistry("closeble");
+    }
+    return;
+  }
+}
+
 const char* handleSettingCommand(const SettingEntry* entry, const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
@@ -2617,6 +2666,8 @@ const char* handleSettingCommand(const SettingEntry* entry, const String& argsIn
       bool v = (*p == '1' || strncasecmp(p, "true", 4) == 0);
       *((bool*)entry->valuePtr) = v;
       if (!gDeferWrites) writeSettingsJson();
+      // Master *enabled* off → stop the live subsystem now (not only next boot).
+      if (!v) applyMasterEnableDisable(entry->cmdKey ? entry->cmdKey : entry->jsonKey);
       BROADCAST_PRINTF("%s set to %s", entry->jsonKey, v ? "true" : "false");
       systemEventPost(SYSEVT_SETTING_CHANGED, entry->label ? entry->label : entry->jsonKey, v ? "on" : "off");
       return "[Settings] Configuration updated";
@@ -2693,6 +2744,36 @@ SETTING_EDITOR_CMD(cmd_set_notifydevicebanners,        "notifydevicebanners")
 SETTING_EDITOR_CMD(cmd_set_notifydevicetoasts,         "notifydevicetoasts")
 SETTING_EDITOR_CMD(cmd_set_notifydevicequeue,          "notifydevicequeue")
 SETTING_EDITOR_CMD(cmd_set_notifydeviceg2,             "notifydeviceg2")
+// ESP-NOW frame capture. Both settings are READ by the capture path
+// (System_ESPNow.cpp:5813) but nothing ever wrote them: their SettingEntry rows
+// named these commands and the commands were never added, so the feature could
+// not be switched on from any surface. Found by `settings_registry.py check`.
+SETTING_EDITOR_CMD(cmd_set_espnowcapturetosd,          "espnowcapturetosd")
+SETTING_EDITOR_CMD(cmd_set_espnowcaptureskipheartbeats, "espnowcaptureskipheartbeats")
+SETTING_EDITOR_CMD(cmd_set_wifienabled,   "wifienabled")
+SETTING_EDITOR_CMD(cmd_set_wifiautostart, "wifiautostart")
+SETTING_EDITOR_CMD(cmd_set_sensorlogenabled, "sensorlogenabled")
+SETTING_EDITOR_CMD(cmd_set_systemlogenabled, "systemlogenabled")
+// Two-axis feature control (see the struct comment in System_Settings.h).
+SETTING_EDITOR_CMD(cmd_set_thermalenabled, "thermalenabled")
+SETTING_EDITOR_CMD(cmd_set_tofenabled, "tofenabled")
+SETTING_EDITOR_CMD(cmd_set_imuenabled, "imuenabled")
+SETTING_EDITOR_CMD(cmd_set_gpsenabled, "gpsenabled")
+SETTING_EDITOR_CMD(cmd_set_fmradioenabled, "fmradioenabled")
+SETTING_EDITOR_CMD(cmd_set_apdsenabled, "apdsenabled")
+SETTING_EDITOR_CMD(cmd_set_rtcenabled, "rtcenabled")
+SETTING_EDITOR_CMD(cmd_set_presenceenabled, "presenceenabled")
+SETTING_EDITOR_CMD(cmd_set_inputenabled, "inputenabled")
+SETTING_EDITOR_CMD(cmd_set_cameraenabled, "cameraenabled")
+SETTING_EDITOR_CMD(cmd_set_micenabled, "micenabled")
+SETTING_EDITOR_CMD(cmd_set_srenabled, "srenabled")
+SETTING_EDITOR_CMD(cmd_set_llmenabled, "llmenabled")
+SETTING_EDITOR_CMD(cmd_set_httpenabled, "httpenabled")
+SETTING_EDITOR_CMD(cmd_set_bleenabled, "bleenabled")
+SETTING_EDITOR_CMD(cmd_set_espnowautostart, "espnowautostart")
+SETTING_EDITOR_CMD(cmd_set_oledautostart, "oledautostart")
+SETTING_EDITOR_CMD(cmd_set_eiautostart, "eiautostart")
+SETTING_EDITOR_CMD(cmd_set_automationautostart, "automationautostart")
 
 // Bitmask / format editors — persist via SettingEntry, then sync live globals
 // so Settings-page saves affect the next logging session without reboot.
@@ -2750,6 +2831,31 @@ const CommandEntry settingEditorCommands[] = {
   { "notifydevicetoasts",         "Enable/disable web notification toasts",     true, cmd_set_notifydevicetoasts,         "Usage: notifydevicetoasts <0|1>" },
   { "notifydevicequeue",          "Enable/disable the notification-center queue", true, cmd_set_notifydevicequeue,        "Usage: notifydevicequeue <0|1>" },
   { "notifydeviceg2",             "Enable/disable G2 lens notification cards",  true, cmd_set_notifydeviceg2,             "Usage: notifydeviceg2 <0|1>" },
+  { "espnowcapturetosd",          "Capture ESP-NOW frames to the SD card",      true, cmd_set_espnowcapturetosd,          "Usage: espnowcapturetosd <0|1>\n  Needs an SD card mounted; frames are appended as they arrive." },
+  { "espnowcaptureskipheartbeats", "Omit heartbeat frames from the ESP-NOW capture", true, cmd_set_espnowcaptureskipheartbeats, "Usage: espnowcaptureskipheartbeats <0|1>" },
+  { "wifienabled", "Enable/disable WiFi entirely (ESP-NOW unaffected): <0|1>", true, cmd_set_wifienabled, "Usage: wifienabled <0|1>" },
+  { "wifiautostart", "Connect to a saved WiFi network at boot: <0|1>", true, cmd_set_wifiautostart, "Usage: wifiautostart <0|1>" },
+  { "sensorlogenabled", "Enable/disable sensor logging entirely: <0|1>", true, cmd_set_sensorlogenabled, "Usage: sensorlogenabled <0|1>" },
+  { "systemlogenabled", "Enable/disable system logging entirely: <0|1>", true, cmd_set_systemlogenabled, "Usage: systemlogenabled <0|1>" },
+  { "thermalenabled", "Enable/disable the thermal camera subsystem", true, cmd_set_thermalenabled, "Usage: thermalenabled <0|1>" },
+  { "tofenabled", "Enable/disable the ToF distance sensor subsystem", true, cmd_set_tofenabled, "Usage: tofenabled <0|1>" },
+  { "imuenabled", "Enable/disable the IMU subsystem", true, cmd_set_imuenabled, "Usage: imuenabled <0|1>" },
+  { "gpsenabled", "Enable/disable the GPS subsystem", true, cmd_set_gpsenabled, "Usage: gpsenabled <0|1>" },
+  { "fmradioenabled", "Enable/disable the FM radio subsystem", true, cmd_set_fmradioenabled, "Usage: fmradioenabled <0|1>" },
+  { "apdsenabled", "Enable/disable the APDS gesture sensor subsystem", true, cmd_set_apdsenabled, "Usage: apdsenabled <0|1>" },
+  { "rtcenabled", "Enable/disable the RTC subsystem", true, cmd_set_rtcenabled, "Usage: rtcenabled <0|1>" },
+  { "presenceenabled", "Enable/disable the presence sensor subsystem", true, cmd_set_presenceenabled, "Usage: presenceenabled <0|1>" },
+  { "inputenabled", "Enable/disable the input device subsystem", true, cmd_set_inputenabled, "Usage: inputenabled <0|1>" },
+  { "cameraenabled", "Enable/disable the camera subsystem", true, cmd_set_cameraenabled, "Usage: cameraenabled <0|1>" },
+  { "micenabled", "Enable/disable the microphone subsystem", true, cmd_set_micenabled, "Usage: micenabled <0|1>" },
+  { "srenabled", "Enable/disable the speech-recognition subsystem", true, cmd_set_srenabled, "Usage: srenabled <0|1>" },
+  { "llmenabled", "Enable/disable the on-device LLM subsystem", true, cmd_set_llmenabled, "Usage: llmenabled <0|1>" },
+  { "httpenabled", "Enable/disable the web server subsystem", true, cmd_set_httpenabled, "Usage: httpenabled <0|1>" },
+  { "bleenabled", "Enable/disable the Bluetooth subsystem", true, cmd_set_bleenabled, "Usage: bleenabled <0|1>" },
+  { "espnowautostart", "Start ESP-NOW at boot", true, cmd_set_espnowautostart, "Usage: espnowautostart <0|1>" },
+  { "oledautostart", "Start the OLED display at boot", true, cmd_set_oledautostart, "Usage: oledautostart <0|1>" },
+  { "eiautostart", "Start Edge Impulse inference at boot", true, cmd_set_eiautostart, "Usage: eiautostart <0|1>" },
+  { "automationautostart", "Start the automation scheduler at boot", true, cmd_set_automationautostart, "Usage: automationautostart <0|1>" },
   { "notifydevicekind",           "Set per-event notification visibility (device-wide)", true, cmd_notifydevicekind,
     "Usage: notifydevicekind [list [json]] | <kind> [all|admin|off]\n  Bare: show non-default kinds; list: show every kind (json = machine form)\n  <kind> alone shows its level; with a level, sets and persists it\n  admin: only admin viewers see it; off: hidden for everyone\n  Levels affect banners/toasts/queue only - events and automations still fire" },
   { "notifyusermute",           "Mute event kinds from notifications for YOUR user", false, cmd_notifyusermute,
@@ -2792,7 +2898,16 @@ static void buildModuleControlsJson(JsonDocument& doc, const char* moduleName) {
       const SettingEntry* e = &m->entries[i];
       if (!e || !e->jsonKey || !e->valuePtr || e->isSecret) continue;  // never expose secrets
       JsonObject o = entries.add<JsonObject>();
-      o["key"]   = e->jsonKey;                          // also the set command (case-insensitive)
+      // "key" identifies the setting. It is NOT reliably the set command: the
+      // command is cmdKey, and only ~20% of rows happen to have a jsonKey that
+      // also resolves to a command that writes this setting (audit:
+      // docs/CONTROLS_WRITE_INTEGRITY.md — 243/407 DEAD, 6 MISFIRE). A MISFIRE
+      // is the dangerous case: the debug row jsonKey "capture" resolves to the
+      // camera's `capture` verb, so toggling a log flag took a real photo.
+      // Clients MUST send "cmd" and MUST NOT derive a command from "key".
+      // Rows with no "cmd" are not settable and should render read-only.
+      o["key"]   = e->jsonKey;
+      if (e->cmdKey) o["cmd"] = e->cmdKey;
       o["label"] = e->label ? e->label : e->jsonKey;
       switch (e->type) {
         case SETTING_INT:    o["type"] = "int";    o["value"] = *(int*)e->valuePtr; break;

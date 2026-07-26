@@ -70,7 +70,7 @@
 PresenceCache gPresenceCache;
 
 // Presence sensor state
-bool gPresenceEnabled = false;
+bool gPresenceRunning = false;
 bool gPresenceConnected = false;
 unsigned long gPresenceLastStopTime = 0;
 TaskHandle_t gPresenceTaskHandle = nullptr;
@@ -83,8 +83,9 @@ TaskHandle_t gPresenceTaskHandle = nullptr;
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry presenceSettingEntries[] = {
-  { "presenceAutoStart", SETTING_BOOL, &gSettings.presenceAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, nullptr },
-  { "presenceDevicePollMs", SETTING_INT, &gSettings.presenceDevicePollMs, 100, 0, nullptr, 50, 5000, "Poll Interval (ms)", nullptr, false, nullptr, "presencedevicepollms" }
+  { "presenceEnabled", SETTING_BOOL, &gSettings.presenceEnabled, 1, 0, nullptr, 0, 1, "Enabled", nullptr, false, nullptr, "presenceenabled" },
+  { "presenceAutoStart", SETTING_BOOL, &gSettings.presenceAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, "presenceautostart" },
+  { "presenceDevicePollMs", SETTING_INT, &gSettings.presenceDevicePollMs, 100, 0, nullptr, 50, 5000, "Poll Interval (ms)", nullptr, false, nullptr, "presencedevicepollms" },
 };
 
 static bool isPresenceConnected() {
@@ -172,7 +173,7 @@ static int16_t readInt16(uint8_t regL) {
 const char* cmd_presencestart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  if (gPresenceEnabled) {
+  if (gPresenceRunning) {
     return "Error: [PRESENCE] Already running";
   }
   
@@ -202,7 +203,7 @@ const char* cmd_presencestart(const String& argsInput) {
 const char* cmd_presencestop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  if (!gPresenceEnabled) {
+  if (!gPresenceRunning) {
     return "Error: [PRESENCE] Not running";
   }
   
@@ -220,7 +221,7 @@ const char* cmd_presenceread(const String& argsInput) {
     return (n > 0) ? getDebugBuffer() : "{\"valid\":false}";
   }
 
-  if (!gPresenceConnected || !gPresenceEnabled) {
+  if (!gPresenceConnected || !gPresenceRunning) {
     return "Error: [PRESENCE] Sensor not running - use 'openpresence' first";
   }
   
@@ -258,7 +259,7 @@ const char* cmd_presencestatus(const String& argsInput) {
   
   snprintf(getDebugBuffer(), 1024,
     "[PRESENCE] Status: connected=%d enabled=%d taskHandle=%p dataValid=%d",
-    gPresenceConnected, gPresenceEnabled, (void*)gPresenceTaskHandle,
+    gPresenceConnected, gPresenceRunning, (void*)gPresenceTaskHandle,
     gPresenceCache.dataValid);
   return getDebugBuffer();
 }
@@ -310,13 +311,13 @@ bool presenceStartInternal() {
     }
   }
 
-  // Set enabled BEFORE creating task - task checks gPresenceEnabled on first iteration
+  // Set enabled BEFORE creating task - task checks gPresenceRunning on first iteration
   // and will immediately delete itself if it's still false
-  gPresenceEnabled = true;
+  gPresenceRunning = true;
 
   // Create task
   if (!createPresenceTask()) {
-    gPresenceEnabled = false;
+    gPresenceRunning = false;
     ERROR_PRESENCEF("Error: Failed to create presence task");
     return false;
   }
@@ -559,7 +560,7 @@ void presenceTask(void* parameter) {
 
   while (true) {
     // Check if sensor disabled for graceful shutdown
-    if (!gPresenceEnabled) {
+    if (!gPresenceRunning) {
       gPresenceConnected = false;
       gPresenceCache.dataValid = false;
       SENSOR_TASK_EXIT(PRESENCE);
@@ -572,12 +573,12 @@ void presenceTask(void* parameter) {
       // 'continue' (not 'break') so the top-of-loop shutdown runs the clean
       // SENSOR_TASK_EXIT (vTaskDelete) path instead of returning from the task
       // function with a near-overflowed stack (IllegalInstruction panic).
-      if (checkTaskStackSafety("presence", PRESENCE_STACK_WORDS, &gPresenceEnabled)) continue;
-      if (gPresenceEnabled && isDebugFlagSet(DEBUG_PERFORMANCE)) {
+      if (checkTaskStackSafety("presence", PRESENCE_STACK_WORDS, &gPresenceRunning)) continue;
+      if (gPresenceRunning && isDebugFlagSet(DEBUG_PERFORMANCE)) {
         UBaseType_t watermark = uxTaskGetStackHighWaterMark(nullptr);
         DEBUG_PERFORMANCEF("[STACK] presence_task watermark=%u words", (unsigned)watermark);
       }
-      if (gPresenceEnabled && isDebugFlagSet(DEBUG_MEMORY)) {
+      if (gPresenceRunning && isDebugFlagSet(DEBUG_MEMORY)) {
         DEBUG_MEMORY_HEAPF("[HEAP] presence_task: free=%u min=%u", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
       }
     }
@@ -587,7 +588,7 @@ void presenceTask(void* parameter) {
     // bus 0 (Wire1). Gate on the bus the poll ACTUALLY uses (0), not the
     // presenceBus setting it doesn't honor here. Revisit if the poll is migrated
     // to the 5-arg bus-aware form.
-    if (gPresenceEnabled && gPresenceConnected && !pollPaused(0 /* poll uses legacy bus 0 */)) {
+    if (gPresenceRunning && gPresenceConnected && !pollPaused(0 /* poll uses legacy bus 0 */)) {
       unsigned long presencePollMs = (gSettings.presenceDevicePollMs > 0) ? (unsigned long)gSettings.presenceDevicePollMs : 200;
       
       if ((nowMs - lastPresenceRead) >= presencePollMs) {
@@ -600,7 +601,7 @@ void presenceTask(void* parameter) {
         } else {
           if (i2cShouldAutoDisable(I2C_ADDR_PRESENCE)) {
             uint8_t errors = i2cGetConsecutiveErrors(I2C_ADDR_PRESENCE);
-            gPresenceEnabled = false;
+            gPresenceRunning = false;
             gPresenceConnected = false;
             sensorStatusBumpWith("presence@auto_disabled");
             DEBUG_PRESENCE_LIFECYCLEF("Presence auto-disabled after %u consecutive I2C failures", errors);

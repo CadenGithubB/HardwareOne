@@ -23,6 +23,7 @@ set(HW_CFG_ENABLE_WEB_GAME_MAZE 1)
 set(HW_CFG_ENABLE_WEB_GAME_DARKROOM 0)
 set(HW_CFG_ENABLE_BLUETOOTH 0)
 set(HW_CFG_ENABLE_G2_GLASSES 0)
+set(HW_CFG_ENABLE_R1_HEALTH 0)
 
 if(EXISTS "${hw_cfg_file}")
     file(READ "${hw_cfg_file}" HW_CFG_CONTENT)
@@ -110,6 +111,16 @@ if(EXISTS "${hw_cfg_file}")
     if(CMAKE_MATCH_1)
         set(HW_CFG_ENABLE_G2_GLASSES "${CMAKE_MATCH_1}")
     endif()
+
+    string(REGEX MATCH "#define[ \t]+ENABLE_R1_HEALTH[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
+    if(CMAKE_MATCH_1)
+        set(HW_CFG_ENABLE_R1_HEALTH "${CMAKE_MATCH_1}")
+    endif()
+endif()
+
+# R1 Health needs BT + G2 (matches System_BuildConfig.h derived rule).
+if(NOT (HW_CFG_ENABLE_BLUETOOTH GREATER 0 AND HW_CFG_ENABLE_G2_GLASSES GREATER 0))
+    set(HW_CFG_ENABLE_R1_HEALTH 0)
 endif()
 
 set(HW_CFG_ENABLE_HTTP_SERVER 0)
@@ -148,6 +159,7 @@ set(hardwareone_srcs
         BLE_IDF.cpp
         G2_Glasses.cpp
         G2_Ring.cpp
+        BLE_CentralTx.cpp
         BLE_Events.cpp
         BLE_Peers.cpp
         G2_Page_Sensors.cpp
@@ -163,6 +175,7 @@ set(hardwareone_srcs
         G2_Page_Users.cpp
         G2_Page_LED.cpp
         G2_Pet.cpp
+        G2_Health.cpp
         G2_HijackFsm.cpp
         G2_HijackCmd.cpp
         System_Battery.cpp
@@ -337,6 +350,9 @@ if(HW_CFG_BUILD_OLED_MODES GREATER 0)
     if(HW_CFG_ENABLE_AUTOMATION GREATER 0)
         list(APPEND hardwareone_srcs OLED_Mode_Automations.cpp)
     endif()
+    if(HW_CFG_ENABLE_R1_HEALTH GREATER 0)
+        list(APPEND hardwareone_srcs OLED_Mode_R1_Health.cpp)
+    endif()
     message(STATUS "OLED display modes INCLUDED (DISPLAY_TYPE=${HW_CFG_DISPLAY_TYPE})")
 else()
     message(STATUS "OLED display modes EXCLUDED (DISPLAY_TYPE=0 or I2C_FEATURE_LEVEL=0)")
@@ -386,6 +402,9 @@ if(HW_CFG_ENABLE_HTTP_SERVER)
     # every build.
     if(HW_CFG_ENABLE_MAPS GREATER 0)
         list(APPEND hardwareone_srcs WebPage_Maps.cpp)
+    endif()
+    if(HW_CFG_ENABLE_R1_HEALTH GREATER 0)
+        list(APPEND hardwareone_srcs WebPage_R1_Health.cpp)
     endif()
     if(HW_CFG_ENABLE_GAMES GREATER 0 AND HW_CFG_ENABLE_WEB_GAME_MAZE GREATER 0)
         list(APPEND hardwareone_srcs WebPage_Games.cpp)

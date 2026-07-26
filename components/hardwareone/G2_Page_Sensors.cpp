@@ -39,49 +39,49 @@
 // build doesn't reference the cache symbols.
 
 #if ENABLE_IMU_SENSOR
-#include "i2csensor_bno055.h"     // gImuCache + gImuEnabled / gImuConnected
+#include "i2csensor_bno055.h"     // gImuCache + gImuRunning / gImuConnected
 #endif
 #if ENABLE_TOF_SENSOR
-#include "i2csensor_vl53l4cx.h"   // gTofCache + gTofEnabled / gTofConnected
+#include "i2csensor_vl53l4cx.h"   // gTofCache + gTofRunning / gTofConnected
 #endif
 #if ENABLE_THERMAL_SENSOR
-#include "i2csensor_mlx90640.h"   // gThermalCache + gThermalEnabled / gThermalConnected
+#include "i2csensor_mlx90640.h"   // gThermalCache + gThermalRunning / gThermalConnected
 #endif
 #if ENABLE_GAMEPAD_SENSOR
-#include "i2csensor_seesaw.h"     // gInputCache + gInputEnabled / gInputConnected
+#include "i2csensor_seesaw.h"     // gInputCache + gInputRunning / gInputConnected
 #endif
 #if ENABLE_ANO_ENCODER
 #include "i2csensor_ano_encoder.h" // gAnoEncoderCache + ANO_BTN_* + axis consts
 // The ANO driver defines these gamepad-shaped proxies (kept in sync with
 // gAnoEncoderEnabled/Connected) but, unlike the seesaw header, doesn't export
 // them — declare them here for the input row's enabled/connected state.
-extern bool gInputEnabled;
+extern bool gInputRunning;
 extern bool gInputConnected;
 #endif
 #if ENABLE_APDS_SENSOR
-#include "i2csensor_apds9960.h"   // gApdsCache + gApdsEnabled / gApdsConnected
+#include "i2csensor_apds9960.h"   // gApdsCache + gApdsRunning / gApdsConnected
 #endif
 #if ENABLE_RTC_SENSOR
-#include "i2csensor_ds3231.h"     // gRtcCache + gRtcEnabled / gRtcConnected
+#include "i2csensor_ds3231.h"     // gRtcCache + gRtcRunning / gRtcConnected
 #endif
 #if ENABLE_FM_RADIO
-#include "i2csensor_rda5807.h"    // gFmRadioCache + gFmRadioEnabled / gFmRadioConnected
+#include "i2csensor_rda5807.h"    // gFmRadioCache + gFmRadioRunning / gFmRadioConnected
 #endif
 #if ENABLE_GPS_SENSOR
-#include "i2csensor_pa1010d.h"    // gGpsCache + gGpsEnabled / gGpsConnected
+#include "i2csensor_pa1010d.h"    // gGpsCache + gGpsRunning / gGpsConnected
 #endif
 #if ENABLE_PRESENCE_SENSOR
-#include "i2csensor_sths34pf80.h" // gPresenceCache + gPresenceEnabled / gPresenceConnected
+#include "i2csensor_sths34pf80.h" // gPresenceCache + gPresenceRunning / gPresenceConnected
 #endif
 #if ENABLE_OLED_DISPLAY
-extern bool gOledEnabled;
+extern bool gOledRunning;
 #endif
 #if ENABLE_CAMERA_SENSOR
-#include "System_Camera_DVP.h"     // initCamera, stopCamera, gCameraEnabled
+#include "System_Camera_DVP.h"     // initCamera, stopCamera, gCameraRunning
 #include "G2_Page_CameraSettings.h" // g2ShowCameraSettingsMenu
 #endif
 #if ENABLE_MICROPHONE
-#include "System_Microphone.h"     // gMicEnabled (status rows)
+#include "System_Microphone.h"     // gMicRunning (status rows)
 #endif
 #include "HAL_Audio.h"             // audio source availability + selector (PDM/G2)
 #include "System_Settings.h"       // gSettings.micSource (source selector)
@@ -319,66 +319,66 @@ static void buildRows(G2SensorRow* rows, size_t maxRows, size_t* outCount,
   };
 
 #if ENABLE_IMU_SENSOR
-  add("IMU",   "BNO055",   "imu",      true,  gImuEnabled,      gImuConnected,     imuG2FormatValue);
+  add("IMU",   "BNO055",   "imu",      true,  gImuRunning,      gImuConnected,     imuG2FormatValue);
 #else
   add("IMU",   "BNO055",   "imu",      false, false, false,                         nullptr);
 #endif
 
 #if ENABLE_TOF_SENSOR
-  add("TOF",   "VL53L4CX", "tof",      true,  gTofEnabled,      gTofConnected,     tofG2FormatValue);
+  add("TOF",   "VL53L4CX", "tof",      true,  gTofRunning,      gTofConnected,     tofG2FormatValue);
 #else
   add("TOF",   "VL53L4CX", "tof",      false, false, false,                         nullptr);
 #endif
 
 #if ENABLE_THERMAL_SENSOR
-  add("THERM", "MLX90640", "thermal",  true,  gThermalEnabled,  gThermalConnected, thermalG2FormatValue);
+  add("THERM", "MLX90640", "thermal",  true,  gThermalRunning,  gThermalConnected, thermalG2FormatValue);
 #else
   add("THERM", "MLX90640", "thermal",  false, false, false,                         nullptr);
 #endif
 
 #if ENABLE_APDS_SENSOR
-  add("APDS",  "APDS9960", "apds",     true,  gApdsEnabled,     gApdsConnected,    apdsG2FormatValue);
+  add("APDS",  "APDS9960", "apds",     true,  gApdsRunning,     gApdsConnected,    apdsG2FormatValue);
 #else
   add("APDS",  "APDS9960", "apds",     false, false, false,                         nullptr);
 #endif
 
 #if ENABLE_GAMEPAD_SENSOR
-  add("GAMEP", "Seesaw",   "gamepad",  true,  gInputEnabled,  gInputConnected, gamepadG2FormatValue);
+  add("GAMEP", "Seesaw",   "gamepad",  true,  gInputRunning,  gInputConnected, gamepadG2FormatValue);
 #elif ENABLE_ANO_ENCODER
   // Same row id ("gamepad") so the unified input commands (openinput /
   // inputautostart) and the registry remap to "input" keep working; only the
   // label, hardware name, formatter and live readout differ for the ANO.
-  add("ANO",   "Encoder",  "gamepad",  true,  gInputEnabled,  gInputConnected, anoG2FormatValue);
+  add("ANO",   "Encoder",  "gamepad",  true,  gInputRunning,  gInputConnected, anoG2FormatValue);
 #else
   add("GAMEP", "Seesaw",   "gamepad",  false, false, false,                         nullptr);
 #endif
 
 #if ENABLE_RTC_SENSOR
-  add("RTC",   "DS3231",   "rtc",      true,  gRtcEnabled,      gRtcConnected,     rtcG2FormatValue);
+  add("RTC",   "DS3231",   "rtc",      true,  gRtcRunning,      gRtcConnected,     rtcG2FormatValue);
 #else
   add("RTC",   "DS3231",   "rtc",      false, false, false,                         nullptr);
 #endif
 
 #if ENABLE_GPS_SENSOR
-  add("GPS",   "PA1010D",  "gps",      true,  gGpsEnabled,      gGpsConnected,     gpsG2FormatValue);
+  add("GPS",   "PA1010D",  "gps",      true,  gGpsRunning,      gGpsConnected,     gpsG2FormatValue);
 #else
   add("GPS",   "PA1010D",  "gps",      false, false, false,                         nullptr);
 #endif
 
 #if ENABLE_PRESENCE_SENSOR
-  add("PRES",  "STHS34",   "presence", true,  gPresenceEnabled, gPresenceConnected, presenceG2FormatValue);
+  add("PRES",  "STHS34",   "presence", true,  gPresenceRunning, gPresenceConnected, presenceG2FormatValue);
 #else
   add("PRES",  "STHS34",   "presence", false, false, false,                         nullptr);
 #endif
 
 #if ENABLE_FM_RADIO
-  add("FM",    "RDA5807",  "fmradio",  true,  gFmRadioEnabled,  gFmRadioConnected, fmG2FormatValue);
+  add("FM",    "RDA5807",  "fmradio",  true,  gFmRadioRunning,  gFmRadioConnected, fmG2FormatValue);
 #else
   add("FM",    "RDA5807",  "fmradio",  false, false, false,                         nullptr);
 #endif
 
 #if ENABLE_CAMERA_SENSOR
-  add("CAM",   "DVP",      "camera",     true,  gCameraEnabled,   gCameraEnabled,    nullptr);
+  add("CAM",   "DVP",      "camera",     true,  gCameraRunning,   gCameraRunning,    nullptr);
 #else
   add("CAM",   "DVP",      "camera",     false, false, false,                         nullptr);
 #endif
@@ -394,14 +394,14 @@ static void buildRows(G2SensorRow* rows, size_t maxRows, size_t* outCount,
                        : audioSourceAvailable(AUDIO_SRC_LOCAL_PDM)  ? "PDM"
                        : audioSourceAvailable(AUDIO_SRC_G2_LEFT)    ? "G2"
                                                                     : "—";
-    add("MIC", micSub, "microphone", micAvail, gMicEnabled, micAvail, nullptr);
+    add("MIC", micSub, "microphone", micAvail, gMicRunning, micAvail, nullptr);
   }
 #else
   add("MIC",   "PDM",      "microphone", false, false, false,                         nullptr);
 #endif
 
 #if ENABLE_OLED_DISPLAY
-  add("OLED",  "SSD1306",  "oled",     true,  gOledEnabled,     gOledEnabled,      nullptr);
+  add("OLED",  "SSD1306",  "oled",     true,  gOledRunning,     gOledRunning,      nullptr);
 #else
   add("OLED",  "SSD1306",  "oled",     false, false, false,                         nullptr);
 #endif
@@ -681,7 +681,7 @@ static void showSensorDetail(const G2SensorRow& r) {
                "MIC: %s",
                r.enabled ? "On" : "Off");
     } else if (labelAsLiveState) {
-      // Show live state (r.enabled = gCameraEnabled / gMicEnabled),
+      // Show live state (r.enabled = gCameraRunning / gMicRunning),
       // not the auto-start preference. The toggle action flips both
       // the live state AND the boot preference, so the visible row
       // also reflects starts/stops triggered from the web UI, the
@@ -1228,7 +1228,7 @@ void g2ReshowSensorsDetail() {
 
 #if ENABLE_MICROPHONE
 // After openmic/closemic: persist micautostart only if runtime succeeded,
-// then redraw so Auto Start / Run rows match gMicEnabled.
+// then redraw so Auto Start / Run rows match gMicRunning.
 // userData = (uintptr_t)1 if we wanted ON, else 0.
 static void onMicAutostartRuntimeDone(bool ok, const char* result,
                                       const G2CmdCookie& cookie,
@@ -1474,7 +1474,7 @@ void g2SensorsHandleTap(uint32_t idx) {
     bool runtimeApplyOk      = true;
 #if ENABLE_CAMERA_SENSOR
     if (strcmp(r.featureId, "camera") == 0) {
-      if (next && !gCameraEnabled) {
+      if (next && !gCameraRunning) {
         BROADCAST_PRINTF("[G2] Sensors: starting camera (queued)...");
         if (cameraPowerRequestStartAsync()) {
           skipImmediateRedraw = true;
@@ -1483,7 +1483,7 @@ void g2SensorsHandleTap(uint32_t idx) {
           BROADCAST_PRINTF("[G2] Sensors: camera start queue full — abort persist");
           runtimeApplyOk = false;
         }
-      } else if (!next && gCameraEnabled) {
+      } else if (!next && gCameraRunning) {
         BROADCAST_PRINTF("[G2] Sensors: stopping camera (queued)...");
         if (cameraPowerRequestStopAsync()) {
           skipImmediateRedraw = true;

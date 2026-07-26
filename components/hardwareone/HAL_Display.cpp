@@ -40,7 +40,7 @@ bool displayInit() {
   const uint8_t oledBus = (uint8_t)gSettings.oledBus;
   TwoWire* oledWire = i2c() ? i2c()->getWire(oledBus) : nullptr;
   if (!oledWire) {
-    // bus not initialized (e.g. user set oledBus=1 but i2c2BusEnabled=false)
+    // bus not initialized (e.g. user set oledBus=1 but i2c2Enabled=false)
     return false;
   }
 

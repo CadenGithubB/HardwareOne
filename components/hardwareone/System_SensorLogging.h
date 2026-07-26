@@ -21,24 +21,25 @@
 #define LOG_APDS     (1 << 4)
 #define LOG_GPS      (1 << 5)
 #define LOG_PRESENCE (1 << 6)
+#define LOG_R1       (1 << 7)   // Even R1 ring vitals (HR/HRV/SpO2/temp/battery/wear)
 
 // Snapshot of sensor cache and flags for logging
 struct SensorCacheSnapshot {
   // flags
-  bool gThermalEnabled;
+  bool gThermalRunning;
   bool gThermalConnected;
   bool thermalValid;
-  bool gTofEnabled;
+  bool gTofRunning;
   bool gTofConnected;
   bool tofValid;
-  bool gImuEnabled;
+  bool gImuRunning;
   bool gImuConnected;
-  bool gInputEnabled;
+  bool gInputRunning;
   bool gInputConnected;
   bool inputValid;
-  bool gApdsColorEnabled;
-  bool gApdsProximityEnabled;
-  bool gApdsGestureEnabled;
+  bool gApdsColorRunning;
+  bool gApdsProximityRunning;
+  bool gApdsGestureRunning;
   bool gApdsConnected;
   bool apdsValid;
   // thermal summary
@@ -66,7 +67,7 @@ struct SensorCacheSnapshot {
   uint8_t apdsProximity;
   uint8_t apdsGesture;
   // gps
-  bool gGpsEnabled;
+  bool gGpsRunning;
   bool gGpsConnected;
   bool gpsFix;
   float gpsLatitude;
@@ -80,13 +81,27 @@ struct SensorCacheSnapshot {
   uint8_t gpsSecond;
   bool gpsHasTime;
   // presence
-  bool gPresenceEnabled;
+  bool gPresenceRunning;
   bool gPresenceConnected;
   float presenceAmbientTemp;
   int16_t presenceValue;
   int16_t motionValue;
   bool presenceDetected;
   bool motionDetected;
+  // R1 ring vitals (BLE cache snapshot)
+  bool r1Connected;
+  bool r1HrValid;
+  bool r1HrvValid;
+  bool r1Spo2Valid;
+  bool r1TempValid;
+  bool r1BatteryValid;
+  bool r1WearValid;
+  uint8_t r1Hr;
+  int16_t r1Hrv;
+  uint8_t r1Spo2;
+  int16_t r1TempTenths;  // °C × 10
+  uint8_t r1Battery;
+  uint8_t r1Wear;        // 0=unknown 1=notWear 2=wear
 };
 
 // Sensor log format options
@@ -97,7 +112,7 @@ enum SensorLogFormat {
 };
 
 // Sensor logging state (extern for access from other modules)
-extern bool gSensorLoggingEnabled;
+extern bool gSensorLoggingRunning;
 extern String gSensorLogPath;
 extern uint32_t gSensorLogIntervalMs;
 extern size_t gSensorLogMaxSize;
@@ -109,6 +124,39 @@ void sensorLogTick();
 
 // Auto-start logging with persisted parameters (called from boot)
 void sensorLogAutoStart();
+
+// R1 Health Track — product-facing kickoff for durable vitals capture.
+// Turns LOG_R1 on, starts the sensor logger (CSV under /logging_captures/sensors/health.csv),
+// and persists healthTrackingEnabled (+ sensorlog autostart) so boot resumes.
+// Off removes LOG_R1; stops logging when no other sensors remain.
+bool healthTrackIsActive();
+const char* healthTrackSet(bool on);   // returns SUCCESS:/Error: message (static/debug buf)
+const char* cmd_healthtrack(const String& argsInput);
+const char* cmd_healthstatus(const String& argsInput);
+// Stitch health/sensor TEXT logs (same pattern as gpstrackmerge).
+const char* cmd_healthlogmerge(const String& argsInput);
+
+// Snapshot vitals + Track into buf (JSON object). Returns buf, or "{}" on failure.
+// Shared by `healthstatus json` CLI/BLE and GET /api/health/status.
+const char* buildHealthStatusJson(char* buf, size_t cap);
+
+// Kick a one-shot 4-vital poll burst (HR/HRV/SpO2/battery). Advances in
+// healthTrackTick; returns false if ring not connected or Health off in build.
+bool healthStartPollBurst(void);
+
+// Main-loop tick: when Health Track is on, periodically mines the R1
+// (HR/HRV/SpO2/battery poll burst) at healthTrackPollIntervalSec and forces
+// a sensorlog sample after replies settle. Also advances on-demand poll bursts.
+void healthTrackTick();
+
+// Call after a Health-page vitals refresh (entry / Poll Now burst completes).
+// Schedules a log sample once notify replies have had time to land — so
+// on-demand checks are persisted, not only the timed mine.
+void healthTrackNotePageRefresh();
+
+// Request an immediate sensorlog write on the next sensorLogTick (bypasses
+// the normal interval). bypassR1Dedup=true writes even if R1 values are unchanged.
+void sensorLogRequestSample(bool bypassR1Dedup);
 
 // Command handler
 const char* cmd_sensorlog(const String& originalCmd);

@@ -14,8 +14,9 @@
 #include "System_Events.h"  // systemEventPost — event register producer
 #include "System_PollPause.h"   // PollPauseGuard — quiesce sensor polling during BLE init
 #include "G2_Glasses.h"  // Header provides stubs when ENABLE_G2_GLASSES=0, so blemode CLI compiles either way
+#include "G2_Ring.h"     // g2RingInvalidateLink before BLEDevice::deinit
 #include "System_Utils.h"
-#include "BLE_Peers.h"        // peer registry + cmd_bleautoconnect / cmd_blepeers
+#include "BLE_Peers.h"        // peer registry + cmd_bleautoreconnect / cmd_blepeers
 
 #if ENABLE_BLUETOOTH
 
@@ -38,13 +39,13 @@
 // imuTemp as "heading", never sent roll, and gated validity on a millis() byte).
 // System_SensorStubs.h supplies the types/globals when a sensor is compiled out.
 #if ENABLE_THERMAL_SENSOR
-  #include "i2csensor_mlx90640.h"   // ThermalCache, gThermalCache, gThermalEnabled/Connected
+  #include "i2csensor_mlx90640.h"   // ThermalCache, gThermalCache, gThermalRunning/Connected
 #endif
 #if ENABLE_TOF_SENSOR
-  #include "i2csensor_vl53l4cx.h"   // TofCache, gTofCache, gTofEnabled/Connected
+  #include "i2csensor_vl53l4cx.h"   // TofCache, gTofCache, gTofRunning/Connected
 #endif
 #if ENABLE_IMU_SENSOR
-  #include "i2csensor_bno055.h"     // ImuCache, gImuCache, gImuEnabled/Connected
+  #include "i2csensor_bno055.h"     // ImuCache, gImuCache, gImuRunning/Connected
 #endif
 #include "System_SensorStubs.h"     // stubs for disabled sensors
 #include "System_SelfDevice.h"  // SelfDevice::firmwareVersion() for the Device Info BLE characteristic
@@ -197,7 +198,7 @@ static void bleFillCommandAuth(uint16_t connId, AuthContext& auth, bool forLogin
   String u;
   if (bleIsAuthed(connId, u)) {
     auth.user = u;
-  } else if (!gSettings.bluetoothRequireAuth) {
+  } else if (!gSettings.bleRequireAuth) {
     auth.user = "AuthBypass";
   } else {
     auth.user = "";
@@ -782,7 +783,7 @@ static void processBleCommandLine(uint16_t connId, const char* data, size_t len)
       char out[80];
       snprintf(out, sizeof(out), "You are %s%s", u.c_str(), isAdminUser(u) ? " (admin)" : "");
       sendBLEResponseToConn(connId, out, strlen(out));
-    } else if (!gSettings.bluetoothRequireAuth) {
+    } else if (!gSettings.bleRequireAuth) {
       const char* msg = "You are AuthBypass";
       sendBLEResponseToConn(connId, msg, strlen(msg));
     } else {
@@ -793,7 +794,7 @@ static void processBleCommandLine(uint16_t connId, const char* data, size_t len)
   }
 
   // Auth gate
-  if (gSettings.bluetoothRequireAuth) {
+  if (gSettings.bleRequireAuth) {
     String u;
     if (!bleIsAuthed(connId, u)) {
       bleSendAuthRequired(connId);
@@ -1093,6 +1094,11 @@ void deinitBluetooth() {
   BLE_DEBUGF(DEBUG_BLE_CORE, "Deinitializing Bluetooth...");
   
   stopBLEAdvertising();
+
+  // Drop R1 GATT pointers before the stack dies. openg2 often deinit's
+  // server mode while ringconnect left a live client; without this,
+  // Health polls write through a freed characteristic → LoadProhibited.
+  g2RingInvalidateLink();
   
   // ESP32 BLE doesn't have a clean disconnect API like NimBLE
   // Just deinit the device
@@ -1446,6 +1452,9 @@ void bleApplySettings() {
 // =============================================================================
 
 static const char* cmd_blestart(const String& argsInput) {
+  if (!gSettings.bleEnabled) {
+    return "ERROR: Bluetooth is disabled - run 'bleenabled 1' first";
+  }
   // Pause sensor polling during BLE init to avoid interrupt contention (RAII —
   // resumes on every return path; the trailing string checks do no I2C work).
   PollPauseGuard pollGuard;
@@ -1624,7 +1633,7 @@ static const char* cmd_blesecure(const String& argsInput) {
 // Printed as the last lines of boot so the operator can't miss it. No-op once a secret
 // is set, or if the user explicitly opted into plaintext (blesecure off), or in G2 mode.
 void bleSecurityBootNotice() {
-  if (!gSettings.bluetoothAutoStart) return;                    // BT not running
+  if (!gSettings.bleAutoStart) return;                    // BT not running
   if (gSettings.bleMode != BLE_MODE_SERVER) return;             // G2 client mode: N/A
   if (!gSettings.bleRequireSecureChannel) return;               // user chose plaintext
   if (gSettings.bleSecureChannelSecret.length() > 0) return;    // already provisioned
@@ -1899,8 +1908,8 @@ static const char* cmd_bleinfo(const String& argsInput) {
     doc["schema"]              = 1;
     doc["deviceName"]     = gSettings.bleDeviceName;
     doc["txPower"]        = gSettings.bleTxPower;
-    doc["autoStart"]      = gSettings.bluetoothAutoStart;
-    doc["requireAuth"]    = gSettings.bluetoothRequireAuth;
+    doc["autoStart"]      = gSettings.bleAutoStart;
+    doc["requireAuth"]    = gSettings.bleRequireAuth;
     doc["secureChannelRequired"] = bleScRequired();
     doc["initialized"]    = init;
     doc["state"]          = getBLEStateString();
@@ -1943,8 +1952,8 @@ static const char* cmd_bleinfo(const String& argsInput) {
   w = snprintf(buf + pos, rem, "=== BLE Configuration ===\n"); if (w > 0) { pos += w; rem -= w; }
   w = snprintf(buf + pos, rem, "Device Name:  %s\n", gSettings.bleDeviceName.c_str());                    if (w > 0) { pos += w; rem -= w; }
   w = snprintf(buf + pos, rem, "TX Power:     %d (0=min/-12dBm, 7=max/+9dBm)\n", gSettings.bleTxPower);  if (w > 0) { pos += w; rem -= w; }
-  w = snprintf(buf + pos, rem, "Auto-Start:   %s\n", gSettings.bluetoothAutoStart  ? "Yes" : "No");       if (w > 0) { pos += w; rem -= w; }
-  w = snprintf(buf + pos, rem, "Require Auth: %s\n", gSettings.bluetoothRequireAuth ? "Yes" : "No");      if (w > 0) { pos += w; rem -= w; }
+  w = snprintf(buf + pos, rem, "Auto-Start:   %s\n", gSettings.bleAutoStart  ? "Yes" : "No");       if (w > 0) { pos += w; rem -= w; }
+  w = snprintf(buf + pos, rem, "Require Auth: %s\n", gSettings.bleRequireAuth ? "Yes" : "No");      if (w > 0) { pos += w; rem -= w; }
 
   if (gBLEState && gBLEState->initialized) {
     w = snprintf(buf + pos, rem, "Status:       %s\n", getBLEStateString());                              if (w > 0) { pos += w; rem -= w; }
@@ -1959,25 +1968,9 @@ static const char* cmd_bleinfo(const String& argsInput) {
 // Migrated to BOOL_CMD — see System_Utils.h. Equivalent to the previous
 // 12-line on/off handler. Output strings preserved verbatim so external
 // matchers (web UI, tests) keep working.
-BOOL_CMD(bleautostart, gSettings.bluetoothAutoStart, "[BLE] Auto-start")
+BOOL_CMD(bleautostart, gSettings.bleAutoStart, "[BLE] Auto-start")
 
-// Backward-compat shims. Both forward to the generic `bleautoconnect <name>`
-// in BLE_Peers.cpp. Kept so existing muscle memory + the BT web panel's
-// checkboxes keep working without a string change.
-static const char* cmd_g2autoconnect(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  String forwarded = String("g2-glasses ") + argsInput;
-  forwarded.trim();
-  return cmd_bleautoconnect(forwarded);
-}
-static const char* cmd_ringautoconnect(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  String forwarded = String("r1-ring ") + argsInput;
-  forwarded.trim();
-  return cmd_bleautoconnect(forwarded);
-}
-
-BOOL_CMD(blerequireauth, gSettings.bluetoothRequireAuth, "[BLE] Require auth")
+BOOL_CMD(blerequireauth, gSettings.bleRequireAuth, "[BLE] Require auth")
 
 // -----------------------------------------------------------------------------
 // Mode (server vs. G2 client)
@@ -2087,15 +2080,11 @@ const CommandEntry bluetoothCommands[] = {
   { "blesecret", "Set/clear the BLE Secure Channel passphrase: blesecret <phrase|clear>.", true, cmd_blesecret, "Usage: blesecret <passphrase|clear>", nullptr, nullptr, /*requiresSuperAdmin=*/true },
   { "blesecure", "Require app-layer BLE encryption [on|off].",                            true, cmd_blesecure, "Usage: blesecure [on|off]" },
 
-  // Auto-reconnect at boot to saved-MAC peers (no scan fallback). Pairing is
-  // separate (`openg2 auto`, `ringconnect`) and always saves the MAC; these
-  // flags only control whether boot reconnects automatically. The generic
-  // form `bleautoconnect <peer-name> [on|off]` works for any registered
-  // peer; the per-peer commands are kept as muscle-memory shims.
-  { "bleautoconnect",  "Per-peer auto-reconnect at boot: bleautoconnect <name> [on|off]. `blepeers` lists names.", true, cmd_bleautoconnect, "Usage: bleautoconnect <peer-name> [on|off]" },
+  // Auto-reconnect (boot + mid-session drop) to saved-MAC peers. Pairing is
+  // separate (`openg2 auto`, `ringconnect`) and always saves the MAC; this
+  // flag controls whether reconnect runs automatically.
+  { "bleautoreconnect",  "Per-peer auto-reconnect (boot + mid-session drop): bleautoreconnect <name> [on|off]. `blepeers` lists names.", true, cmd_bleautoreconnect, "Usage: bleautoreconnect <peer-name> [on|off]\n  on: reconnect at boot and reseek after unexpected drops (not after ringdisconnect/closeg2)" },
   { "blepeers",        "List all registered BLE peers and their state.",                                          false, cmd_blepeers,        nullptr },
-  { "g2autoconnect",   "Alias for `bleautoconnect g2-glasses [on|off]`.",                                          true, cmd_g2autoconnect,   "Usage: g2autoconnect [on|off]" },
-  { "ringautoconnect", "Alias for `bleautoconnect r1-ring [on|off]`.",                                             true, cmd_ringautoconnect, "Usage: ringautoconnect [on|off]" },
 };
 
 const size_t bluetoothCommandsCount = sizeof(bluetoothCommands) / sizeof(bluetoothCommands[0]);
@@ -2112,13 +2101,14 @@ const size_t bluetoothCommandsCount = sizeof(bluetoothCommands) / sizeof(bluetoo
 // (see below) so they stay in sync with BLE_Peers.h's BlePeerKind enum. The
 // static rows here cover only the non-peer bluetooth settings.
 const SettingEntry bluetoothSettingsEntries[] = {
-  { "bluetoothAutoStart",    SETTING_BOOL,   &gSettings.bluetoothAutoStart,    false, 0, nullptr, 0, 1, "Auto-start at boot", nullptr, false, nullptr, "bleautostart" },
-  { "bluetoothRequireAuth",  SETTING_BOOL,   &gSettings.bluetoothRequireAuth,  true, 0, nullptr, 0, 1, "Require Authentication", nullptr, false, nullptr, "blerequireauth" },
+  { "bleEnabled", SETTING_BOOL, &gSettings.bleEnabled, 1, 0, nullptr, 0, 1, "Enabled", nullptr, false, nullptr, "bleenabled" },
+  { "bluetoothAutoStart",    SETTING_BOOL,   &gSettings.bleAutoStart,    false, 0, nullptr, 0, 1, "Auto-start at boot", nullptr, false, nullptr, "bleautostart" },
+  { "bluetoothRequireAuth",  SETTING_BOOL,   &gSettings.bleRequireAuth,  true, 0, nullptr, 0, 1, "Require Authentication", nullptr, false, nullptr, "blerequireauth" },
   { "bluetoothDeviceName", SETTING_STRING, &gSettings.bleDeviceName, 0, 0, "HardwareOne", 0, 0, "Device Name", nullptr, false, nullptr, "blename" },
   { "bluetoothTxPower",      SETTING_INT,    &gSettings.bleTxPower,            3, 0, nullptr, 0, 7, "TX Power (0-7)", nullptr, false, nullptr, "bletxpower" },
   { "bluetoothMode",         SETTING_INT,    &gSettings.bleMode,               0,    0, nullptr, 0, 1, "Mode (0=server, 1=g2)", "0|Server,1|Client (G2)", false, nullptr, "blemode" },
   { "bleRequireSecureChannel", SETTING_BOOL, &gSettings.bleRequireSecureChannel, true, 0, nullptr, 0, 1, "Require Secure Channel", nullptr, false, nullptr, "blesecure" },
-  { "bleSecureChannelSecret",  SETTING_STRING, &gSettings.bleSecureChannelSecret, 0, 0, "", 0, 0, "Secure Channel Secret", nullptr, true, nullptr, "blesecret" }
+  { "bleSecureChannelSecret",  SETTING_STRING, &gSettings.bleSecureChannelSecret, 0, 0, "", 0, 0, "Secure Channel Secret", nullptr, true, nullptr, "blesecret" },
 };
 
 const size_t bluetoothSettingsCount = sizeof(bluetoothSettingsEntries) / sizeof(bluetoothSettingsEntries[0]);
@@ -2279,7 +2269,7 @@ static void buildSensorDataJSON(char* buf, size_t bufSize) {
   int pos = snprintf(buf, bufSize, "{\"sensors\":{");
   
   #if ENABLE_THERMAL_SENSOR
-  if (gThermalEnabled && gThermalConnected) {
+  if (gThermalRunning && gThermalConnected) {
     SensorCacheGuard g(gThermalCache.mutex, pdMS_TO_TICKS(10), "ble.thermalStream");
     if (g.held && gThermalCache.thermalDataValid) {
       // "avg" (was "center"): ThermalCache has no center field — the old local
@@ -2296,7 +2286,7 @@ static void buildSensorDataJSON(char* buf, size_t bufSize) {
   #endif
   
   #if ENABLE_TOF_SENSOR
-  if (gTofEnabled && gTofConnected) {
+  if (gTofRunning && gTofConnected) {
     SensorCacheGuard g(gTofCache.mutex, pdMS_TO_TICKS(10), "ble.tofStream");
     if (g.held && gTofCache.tofDataValid && gTofCache.tofTotalObjects > 0) {
       pos += snprintf(buf + pos, bufSize - pos,
@@ -2307,7 +2297,7 @@ static void buildSensorDataJSON(char* buf, size_t bufSize) {
   #endif
   
   #if ENABLE_IMU_SENSOR
-  if (gImuEnabled && gImuConnected) {
+  if (gImuRunning && gImuConnected) {
     SensorCacheGuard g(gImuCache.mutex, pdMS_TO_TICKS(10), "ble.imuStream");
     if (g.held && gImuCache.imuDataValid) {
       // Real field names are oriYaw/oriPitch/oriRoll. The old local struct omitted

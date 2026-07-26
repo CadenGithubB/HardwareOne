@@ -55,7 +55,7 @@ const char* cmd_tofstabilitythreshold(const String& argsInput);
 const char* cmd_tofdevicepollms(const String& argsInput);
 
 // ToF sensor state and control
-extern bool gTofEnabled;
+extern bool gTofRunning;
 extern bool gTofConnected;
 extern uint32_t gTofLastStopTime;
 extern TaskHandle_t gTofTaskHandle;

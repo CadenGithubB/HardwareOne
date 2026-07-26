@@ -32,7 +32,7 @@ class String;
 extern ThermalCache gThermalCache;
 
 // Thermal sensor state and control
-extern bool gThermalEnabled;
+extern bool gThermalRunning;
 extern bool gThermalConnected;
 extern unsigned long gThermalLastStopTime;
 extern TaskHandle_t gThermalTaskHandle;

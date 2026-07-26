@@ -195,10 +195,14 @@ struct DebugSubFlags {
 // Debug output queue configuration
 #define DEBUG_QUEUE_SIZE_MIN 64    // Minimum queue size (internal RAM only)
 #define DEBUG_QUEUE_SIZE_MAX 192   // Maximum queue size (with PSRAM)
+#define DEBUG_POOL_SIZE_INITIAL_PSRAM 96  // Grow to DEBUG_QUEUE_SIZE_MAX under pressure
 #define DEBUG_MSG_SIZE 256         // Max size of each debug message
 
-// Runtime queue size (set during init based on PSRAM availability)
+// Queue capacity and currently allocated message slots. On PSRAM builds the
+// queues keep full capacity while the expensive message pool starts at 96 and
+// grows once to 192 before pressure can exhaust it.
 extern int gDebugQueueSize;
+extern int gDebugPoolSize;
 
 // Debug message structure
 struct DebugMessage {
@@ -216,7 +220,7 @@ extern volatile uint32_t gOutputFlags;
 
 // System logging state
 extern String gSystemLogPath;
-extern bool gSystemLogEnabled;
+extern bool gSystemLogRunning;
 extern unsigned long gSystemLogLastWrite;
 extern bool gSystemLogCategoryTags;  // Enable/disable category tags in log output
 
@@ -273,7 +277,12 @@ extern QueueHandle_t gDebugFreeQueue;
 // above `minFree` slots (bounded by `maxWaitMs`). Prevents a producer loop from
 // overflowing the pool and dropping the tail of large boot dumps. No-op when
 // the pool is already healthy, so it's free when nothing is being emitted.
-void debugQueueBackpressure(int minFree = 96, uint32_t maxWaitMs = 200);
+void debugQueueBackpressure(int minFree = 32, uint32_t maxWaitMs = 200);
+
+// Bounded wait for the output queue itself to drain to empty. Used by the
+// serial result writer so a directly-written command result cannot overtake
+// lines the command streamed through the queue during execution.
+void debugWaitOutputDrained(uint32_t maxWaitMs);
 extern volatile unsigned long gDebugDropped;
 extern volatile bool gDebugVerbose;
 
@@ -379,6 +388,14 @@ bool logCooldownOk(uint32_t& lastMs, uint32_t windowMs);
 // Forward declaration for CommandContext (defined in main .ino)
 struct CommandContext;
 void broadcastOutput(const String& s, const CommandContext& ctx);
+
+// Transport-completion delivery for a command's return value (OUTPUT CONTRACT
+// channel 2). Serial-origin results are written to the console directly —
+// byte-exact, no [origin] decoration, no 256 B chunking — and every other
+// sink keeps the queued mirror it gets today. Non-serial origins fall through
+// to broadcastOutput(s, ctx) unchanged. Completion sites should call this,
+// not broadcastOutput, with the return blob.
+void deliverCommandResult(const String& result, const CommandContext& ctx);
 
 // Output capture is now per-task (System_AuthIdentity.h). Use
 // setCaptureBuffer() / clearCaptureBuffer() / currentCaptureState() instead

@@ -20,6 +20,7 @@
 #include "System_AuthIdentity.h"
 #include "System_CommandTypes.h"  // CMD_RESULT_MAX, executeCommand result cap
 #include <mqtt_client.h>
+#include <new>
 #include "System_Settings.h"
 #include "System_Debug.h"
 #include "System_Command.h"
@@ -76,7 +77,7 @@ extern const char* cmd_espnow_remote(const String& argsInput);
 // MQTT state
 static esp_mqtt_client_handle_t mqttClient = nullptr;
 static bool mqttTofConnected = false;
-static bool mqttEnabled = false;
+static bool mqttClientRunning = false;
 static unsigned long lastPublishTime = 0;
 static String lastError = "";
 
@@ -92,23 +93,67 @@ struct ExternalSensor {
 };
 
 static const int MAX_EXTERNAL_SENSORS = 32;
-static ExternalSensor externalSensors[MAX_EXTERNAL_SENSORS];
+static ExternalSensor* externalSensors = nullptr;
 static int externalSensorCount = 0;
 static SemaphoreHandle_t externalSensorMutex = nullptr;
 
-static void initExternalSensorStorage() {
+static bool initExternalSensorStorage() {
   if (!externalSensorMutex) {
     externalSensorMutex = xSemaphoreCreateMutex();
+  }
+  if (!externalSensorMutex) return false;
+
+  if (externalSensors) return true;
+
+  void* storage = ps_malloc(sizeof(ExternalSensor) * MAX_EXTERNAL_SENSORS);
+  if (!storage) {
+    ERROR_MQTTF("Failed to allocate external sensor table (%u bytes)",
+                (unsigned)(sizeof(ExternalSensor) * MAX_EXTERNAL_SENSORS));
+    return false;
+  }
+
+  ExternalSensor* sensors = (ExternalSensor*)storage;
+  for (int i = 0; i < MAX_EXTERNAL_SENSORS; i++) {
+    new (&sensors[i]) ExternalSensor();
+  }
+  externalSensors = sensors;
+  externalSensorCount = 0;
+  return true;
+}
+
+static void releaseExternalSensorStorage() {
+  if (!externalSensorMutex) return;
+
+  ExternalSensor* sensors = nullptr;
+  if (xSemaphoreTake(externalSensorMutex, pdMS_TO_TICKS(250)) == pdTRUE) {
+    sensors = externalSensors;
+    externalSensors = nullptr;
+    externalSensorCount = 0;
+    xSemaphoreGive(externalSensorMutex);
+  } else {
+    WARN_MQTTF("External sensor storage release skipped: mutex timeout");
+    return;
+  }
+
+  if (sensors) {
+    for (int i = 0; i < MAX_EXTERNAL_SENSORS; i++) {
+      sensors[i].~ExternalSensor();
+    }
+    free(sensors);
   }
 }
 
 static void updateExternalSensor(const char* topic, int topicLen, const char* data, int dataLen) {
-  if (!externalSensorMutex) return;
+  if (!externalSensorMutex || !externalSensors) return;
   
   String topicStr = String(topic).substring(0, topicLen);
   String dataStr = String(data).substring(0, dataLen);
   
   if (xSemaphoreTake(externalSensorMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    if (!externalSensors) {
+      xSemaphoreGive(externalSensorMutex);
+      return;
+    }
     // Look for existing sensor
     for (int i = 0; i < externalSensorCount; i++) {
       if (externalSensors[i].topic == topicStr) {
@@ -171,19 +216,29 @@ bool isMqttConnected() {
 
 // Check if the MQTT client is started (not necessarily connected to the broker)
 bool isMqttStarted() {
-  return mqttEnabled;
+  return mqttClientRunning;
 }
 
 // Get external sensor count
 int getExternalSensorCount() {
-  return externalSensorCount;
+  if (!externalSensorMutex || !externalSensors) return 0;
+  int count = 0;
+  if (xSemaphoreTake(externalSensorMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+    count = externalSensorCount;
+    xSemaphoreGive(externalSensorMutex);
+  }
+  return count;
 }
 
 // Get external sensor data (thread-safe)
 bool getExternalSensor(int index, String& topic, String& name, String& value, unsigned long& lastUpdate) {
-  if (!externalSensorMutex || index < 0 || index >= externalSensorCount) return false;
+  if (!externalSensorMutex || !externalSensors || index < 0) return false;
   
   if (xSemaphoreTake(externalSensorMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+    if (!externalSensors || index >= externalSensorCount) {
+      xSemaphoreGive(externalSensorMutex);
+      return false;
+    }
     topic = externalSensors[index].topic;
     name = externalSensors[index].name;
     value = externalSensors[index].value;
@@ -200,29 +255,29 @@ bool getExternalSensor(int index, String& topic, String& name, String& value, un
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry mqttSettingEntries[] = {
-  { "mqttClientEnabled", SETTING_BOOL, &gSettings.mqttClientEnabled, false, 0, nullptr, 0, 1, "MQTT Enabled", nullptr, false, nullptr, nullptr },
-  { "mqttAutoStart", SETTING_BOOL, &gSettings.mqttAutoStart, false, 0, nullptr, 0, 1, "Auto-start at boot", nullptr, false, "broker", nullptr },
-  { "mqttHost", SETTING_STRING, &gSettings.mqttHost, 0, 0, "", 0, 0, "Broker Host", nullptr, false, "broker", nullptr },
-  { "mqttPort", SETTING_INT, &gSettings.mqttPort, 1883, 0, nullptr, 1, 65535, "Broker Port", nullptr, false, "broker", nullptr },
-  { "mqttTLSMode", SETTING_INT, &gSettings.mqttTLSMode, 0, 0, nullptr, 0, 2, "TLS Mode (0=None, 1=TLS, 2=TLS+Verify)", "0:None,1:TLS,2:TLS+Verify", false, "broker", nullptr },
-  { "mqttCACertPath", SETTING_STRING, &gSettings.mqttCACertPath, 0, 0, "/system/certs/mqtt_ca.crt", 0, 0, "CA certificate path", nullptr, false, "broker", nullptr },
-  { "mqttSubscribeExternal", SETTING_BOOL, &gSettings.mqttSubscribeExternal, false, 0, nullptr, 0, 1, "Subscribe to external topics", nullptr, false, "topics", nullptr },
-  { "mqttSubscribeTopics", SETTING_STRING, &gSettings.mqttSubscribeTopics, 0, 0, "", 0, 0, "Topics (comma-separated)", nullptr, false, "topics", nullptr },
-  { "mqttUser", SETTING_STRING, &gSettings.mqttUser, 0, 0, "", 0, 0, "Username", nullptr, false, "broker", nullptr },
-  { "mqttPassword", SETTING_STRING, &gSettings.mqttPassword, 0, 0, "", 0, 0, "Password", nullptr, true, "broker", nullptr },
-  { "mqttBaseTopic", SETTING_STRING, &gSettings.mqttBaseTopic, 0, 0, "", 0, 0, "Base Topic", nullptr, false, "topics", nullptr },
-  { "mqttDiscoveryPrefix", SETTING_STRING, &gSettings.mqttDiscoveryPrefix, 0, 0, "homeassistant", 0, 0, "Discovery Prefix", nullptr, false, "topics", nullptr },
-  { "mqttPublishIntervalMs", SETTING_INT, &gSettings.mqttPublishIntervalMs, 10000, 0, nullptr, 1000, 300000, "Publish Interval (ms)", nullptr, false, "publish", nullptr },
-  { "mqttPublishWiFi", SETTING_BOOL, &gSettings.mqttPublishWiFi, false, 0, nullptr, 0, 1, "Publish WiFi info", nullptr, false, "publish", nullptr },
-  { "mqttPublishSystem", SETTING_BOOL, &gSettings.mqttPublishSystem, false, 0, nullptr, 0, 1, "Publish system info", nullptr, false, "publish", nullptr },
-  { "mqttPublishThermal", SETTING_BOOL, &gSettings.mqttPublishThermal, false, 0, nullptr, 0, 1, "Publish thermal data", nullptr, false, "publish", nullptr },
-  { "mqttPublishToF", SETTING_BOOL, &gSettings.mqttPublishToF, false, 0, nullptr, 0, 1, "Publish ToF data", nullptr, false, "publish", nullptr },
-  { "mqttPublishIMU", SETTING_BOOL, &gSettings.mqttPublishIMU, false, 0, nullptr, 0, 1, "Publish IMU data", nullptr, false, "publish", nullptr },
-  { "mqttPublishPresence", SETTING_BOOL, &gSettings.mqttPublishPresence, false, 0, nullptr, 0, 1, "Publish presence data", nullptr, false, "publish", nullptr },
-  { "mqttPublishGPS", SETTING_BOOL, &gSettings.mqttPublishGPS, false, 0, nullptr, 0, 1, "Publish GPS data", nullptr, false, "publish", nullptr },
-  { "mqttPublishAPDS", SETTING_BOOL, &gSettings.mqttPublishAPDS, false, 0, nullptr, 0, 1, "Publish APDS data", nullptr, false, "publish", nullptr },
-  { "mqttPublishRTC", SETTING_BOOL, &gSettings.mqttPublishRTC, false, 0, nullptr, 0, 1, "Publish RTC time", nullptr, false, "publish", nullptr },
-  { "mqttPublishInput", SETTING_BOOL, &gSettings.mqttPublishInput, false, 0, nullptr, 0, 1, "Publish input device data", nullptr, false, "publish", nullptr }
+  { "mqttClientEnabled", SETTING_BOOL, &gSettings.mqttEnabled, false, 0, nullptr, 0, 1, "MQTT Enabled", nullptr, false, nullptr, "mqttclientenabled" },
+  { "mqttAutoStart", SETTING_BOOL, &gSettings.mqttAutoStart, false, 0, nullptr, 0, 1, "Auto-start at boot", nullptr, false, "broker", "mqttautostart" },
+  { "mqttHost", SETTING_STRING, &gSettings.mqttHost, 0, 0, "", 0, 0, "Broker Host", nullptr, false, "broker", "mqttHost" },
+  { "mqttPort", SETTING_INT, &gSettings.mqttPort, 1883, 0, nullptr, 1, 65535, "Broker Port", nullptr, false, "broker", "mqttPort" },
+  { "mqttTLSMode", SETTING_INT, &gSettings.mqttTLSMode, 0, 0, nullptr, 0, 2, "TLS Mode (0=None, 1=TLS, 2=TLS+Verify)", "0:None,1:TLS,2:TLS+Verify", false, "broker", "mqttTLSMode" },
+  { "mqttCACertPath", SETTING_STRING, &gSettings.mqttCACertPath, 0, 0, "/system/certs/mqtt_ca.crt", 0, 0, "CA certificate path", nullptr, false, "broker", "mqttCACertPath" },
+  { "mqttSubscribeExternal", SETTING_BOOL, &gSettings.mqttSubscribeExternal, false, 0, nullptr, 0, 1, "Subscribe to external topics", nullptr, false, "topics", "mqttSubscribeExternal" },
+  { "mqttSubscribeTopics", SETTING_STRING, &gSettings.mqttSubscribeTopics, 0, 0, "", 0, 0, "Topics (comma-separated)", nullptr, false, "topics", "mqttSubscribeTopics" },
+  { "mqttUser", SETTING_STRING, &gSettings.mqttUser, 0, 0, "", 0, 0, "Username", nullptr, false, "broker", "mqttUser" },
+  { "mqttPassword", SETTING_STRING, &gSettings.mqttPassword, 0, 0, "", 0, 0, "Password", nullptr, true, "broker", "mqttPassword" },
+  { "mqttBaseTopic", SETTING_STRING, &gSettings.mqttBaseTopic, 0, 0, "", 0, 0, "Base Topic", nullptr, false, "topics", "mqttBaseTopic" },
+  { "mqttDiscoveryPrefix", SETTING_STRING, &gSettings.mqttDiscoveryPrefix, 0, 0, "homeassistant", 0, 0, "Discovery Prefix", nullptr, false, "topics", "mqttDiscoveryPrefix" },
+  { "mqttPublishIntervalMs", SETTING_INT, &gSettings.mqttPublishIntervalMs, 10000, 0, nullptr, 1000, 300000, "Publish Interval (ms)", nullptr, false, "publish", "mqttPublishIntervalMs" },
+  { "mqttPublishWiFi", SETTING_BOOL, &gSettings.mqttPublishWiFi, false, 0, nullptr, 0, 1, "Publish WiFi info", nullptr, false, "publish", "mqttPublishWiFi" },
+  { "mqttPublishSystem", SETTING_BOOL, &gSettings.mqttPublishSystem, false, 0, nullptr, 0, 1, "Publish system info", nullptr, false, "publish", "mqttPublishSystem" },
+  { "mqttPublishThermal", SETTING_BOOL, &gSettings.mqttPublishThermal, false, 0, nullptr, 0, 1, "Publish thermal data", nullptr, false, "publish", "mqttPublishThermal" },
+  { "mqttPublishToF", SETTING_BOOL, &gSettings.mqttPublishToF, false, 0, nullptr, 0, 1, "Publish ToF data", nullptr, false, "publish", "mqttPublishToF" },
+  { "mqttPublishIMU", SETTING_BOOL, &gSettings.mqttPublishIMU, false, 0, nullptr, 0, 1, "Publish IMU data", nullptr, false, "publish", "mqttPublishIMU" },
+  { "mqttPublishPresence", SETTING_BOOL, &gSettings.mqttPublishPresence, false, 0, nullptr, 0, 1, "Publish presence data", nullptr, false, "publish", "mqttPublishPresence" },
+  { "mqttPublishGPS", SETTING_BOOL, &gSettings.mqttPublishGPS, false, 0, nullptr, 0, 1, "Publish GPS data", nullptr, false, "publish", "mqttPublishGPS" },
+  { "mqttPublishAPDS", SETTING_BOOL, &gSettings.mqttPublishAPDS, false, 0, nullptr, 0, 1, "Publish APDS data", nullptr, false, "publish", "mqttPublishAPDS" },
+  { "mqttPublishRTC", SETTING_BOOL, &gSettings.mqttPublishRTC, false, 0, nullptr, 0, 1, "Publish RTC time", nullptr, false, "publish", "mqttPublishRTC" },
+  { "mqttPublishInput", SETTING_BOOL, &gSettings.mqttPublishInput, false, 0, nullptr, 0, 1, "Publish input device data", nullptr, false, "publish", "mqttPublishInput" }
 };
 
 static bool isMqttAvailable() {
@@ -749,6 +804,7 @@ static void publishMeshPeerSensorData() {
   if (!mqttClient || !mqttTofConnected) return;
   if (gSettings.meshRole != MESH_ROLE_MASTER) return;
   if (!gMeshPeerMeta) return;  // Not yet allocated
+  if (!gRemoteSensorCache) return;  // ESP-NOW runtime has not initialized
 
   for (int i = 0; i < gMeshPeerSlots; i++) {
     if (!gMeshPeerMeta[i].isActive) continue;
@@ -909,18 +965,15 @@ static void mqtt_event_handler(void* handler_args, esp_event_base_t base, int32_
 // ============================================================================
 
 bool startMQTT() {
-  if (mqttEnabled) {
+  if (mqttClientRunning) {
     return true;
   }
 
-  if (!gSettings.mqttClientEnabled) {
+  if (!gSettings.mqttEnabled) {
     lastError = "MQTT disabled (mqttClientEnabled=false)";
     // No event: MQTT being disabled by config is a no-op, not a start failure.
     return false;
   }
-  
-  // Initialize external sensor storage
-  initExternalSensorStorage();
   
   if (!WiFi.isConnected()) {
     lastError = "WiFi not connected";
@@ -1001,19 +1054,26 @@ bool startMQTT() {
   mqtt_cfg.session.last_will.msg = "offline";
   mqtt_cfg.session.last_will.qos = 1;
   mqtt_cfg.session.last_will.retain = true;
+
+  if (!initExternalSensorStorage()) {
+    lastError = "Failed to allocate external sensor storage";
+    systemEventPost(SYSEVT_MQTT_START_FAILED, "external sensor storage OOM");
+    return false;
+  }
   
   mqttClient = esp_mqtt_client_init(&mqtt_cfg);
   if (!mqttClient) {
     lastError = "Failed to initialize MQTT client";
     ERROR_MQTTF("Client init failed");
     systemEventPost(SYSEVT_MQTT_START_FAILED, "client init failed");
+    releaseExternalSensorStorage();
     return false;
   }
   
   esp_mqtt_client_register_event(mqttClient, MQTT_EVENT_ANY, mqtt_event_handler, nullptr);
   esp_mqtt_client_start(mqttClient);
   
-  mqttEnabled = true;
+  mqttClientRunning = true;
   lastError = "";
   broadcastOutput("[MQTT] Client started");
   INFO_MQTT_CONNECTIONF("Connecting to %s://%s:%d", (gSettings.mqttTLSMode > 0) ? "mqtts" : "mqtt", 
@@ -1023,7 +1083,8 @@ bool startMQTT() {
 }
 
 void stopMQTT() {
-  if (!mqttEnabled) {
+  if (!mqttClientRunning) {
+    releaseExternalSensorStorage();
     return;
   }
   
@@ -1042,8 +1103,9 @@ void stopMQTT() {
     mqttClient = nullptr;
   }
   
-  mqttEnabled = false;
+  mqttClientRunning = false;
   mqttTofConnected = false;
+  releaseExternalSensorStorage();
   broadcastOutput("[MQTT] Client stopped");
 }
 
@@ -1086,7 +1148,7 @@ void publishMQTTSensorData() {
   
   // Add sensor data from caches (only if sensors are enabled and configured to publish)
 #if ENABLE_THERMAL_SENSOR
-  if (gSettings.mqttPublishThermal && gThermalEnabled) {
+  if (gSettings.mqttPublishThermal && gThermalRunning) {
     char thermalJson[2048];
     int len = thermalBuildDataJSON(thermalJson, sizeof(thermalJson));
     if (len > 0) {
@@ -1096,7 +1158,7 @@ void publishMQTTSensorData() {
 #endif
 
 #if ENABLE_TOF_SENSOR
-  if (gSettings.mqttPublishToF && gTofEnabled) {
+  if (gSettings.mqttPublishToF && gTofRunning) {
     char tofJson[1024];
     int len = tofBuildDataJSON(tofJson, sizeof(tofJson));
     if (len > 0) {
@@ -1106,7 +1168,7 @@ void publishMQTTSensorData() {
 #endif
 
 #if ENABLE_IMU_SENSOR
-  if (gSettings.mqttPublishIMU && gImuEnabled) {
+  if (gSettings.mqttPublishIMU && gImuRunning) {
     char imuJson[1024];
     int len = imuBuildDataJSON(imuJson, sizeof(imuJson));
     if (len > 0) {
@@ -1116,7 +1178,7 @@ void publishMQTTSensorData() {
 #endif
 
 #if ENABLE_PRESENCE_SENSOR
-  if (gSettings.mqttPublishPresence && gPresenceEnabled && gPresenceCache.dataValid) {
+  if (gSettings.mqttPublishPresence && gPresenceRunning && gPresenceCache.dataValid) {
     pos += snprintf(jsonBuf + pos, 16384 - pos, 
       ",\"presence\":{\"detected\":%s,\"motion\":%s,\"presence_raw\":%d,\"motion_raw\":%d,\"ambient_temp\":%.1f,\"object_temp\":%d}",
       gPresenceCache.presenceDetected ? "true" : "false",
@@ -1127,7 +1189,7 @@ void publishMQTTSensorData() {
 #endif
 
 #if ENABLE_GPS_SENSOR
-  if (gSettings.mqttPublishGPS && gGpsEnabled && gGpsConnected && gPA1010D) {
+  if (gSettings.mqttPublishGPS && gGpsRunning && gGpsConnected && gPA1010D) {
     if (gGpsCache.hasFix) {
       pos += snprintf(jsonBuf + pos, 16384 - pos,
         ",\"gps\":{\"lat\":%.6f,\"lon\":%.6f,\"alt\":%.1f,\"speed\":%.1f,\"satellites\":%d}",
@@ -1139,7 +1201,7 @@ void publishMQTTSensorData() {
 #endif
 
 #if ENABLE_APDS_SENSOR
-  if (gSettings.mqttPublishAPDS && gApdsColorEnabled && gApdsConnected) {
+  if (gSettings.mqttPublishAPDS && gApdsColorRunning && gApdsConnected) {
     pos += snprintf(jsonBuf + pos, 16384 - pos,
       ",\"apds\":{\"proximity\":%u,\"color\":{\"r\":%u,\"g\":%u,\"b\":%u,\"c\":%u}}",
       apdsGetProximity(), apdsGetColorR(), apdsGetColorG(), apdsGetColorB(), apdsGetColorC());
@@ -1147,7 +1209,7 @@ void publishMQTTSensorData() {
 #endif
 
 #if ENABLE_RTC_SENSOR
-  if (gSettings.mqttPublishRTC && gRtcEnabled && gRtcConnected) {
+  if (gSettings.mqttPublishRTC && gRtcRunning && gRtcConnected) {
     char timeBuf[32];
     snprintf(timeBuf, sizeof(timeBuf), "%04d-%02d-%02dT%02d:%02d:%02d",
              rtcGetYear(), rtcGetMonth(), rtcGetDay(),
@@ -1159,7 +1221,7 @@ void publishMQTTSensorData() {
 #endif
 
 #if ENABLE_OLED_INPUT  // gamepad OR ANO encoder — same JSON shape, same wire schema
-  if (gSettings.mqttPublishInput && gInputEnabled && gInputConnected) {
+  if (gSettings.mqttPublishInput && gInputRunning && gInputConnected) {
     // inputGetButtonsLogical() emits the canonical bit layout (bit 0=A, 1=B,
     // 2=X, 3=Y, 4=START, 5=SELECT) so HA / downstream consumers see the same
     // bits regardless of the underlying physical device.
@@ -1191,7 +1253,7 @@ void publishMQTTSensorData() {
 }
 
 void mqttTick() {
-  if (!mqttEnabled || !mqttClient) {
+  if (!mqttClientRunning || !mqttClient) {
     return;
   }
   
@@ -1210,7 +1272,7 @@ void mqttTick() {
 const char* cmd_openmqtt(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  if (mqttEnabled) {
+  if (mqttClientRunning) {
     return "[MQTT] Already running";
   }
   
@@ -1230,7 +1292,7 @@ const char* cmd_openmqtt(const String& argsInput) {
 const char* cmd_closemqtt(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  if (!mqttEnabled) {
+  if (!mqttClientRunning) {
     return "[MQTT] Not running";
   }
   
@@ -1245,7 +1307,7 @@ const char* cmd_mqttstatus(const String& argsInput) {
   if (argWantsJson(argsInput)) {
     PSRAM_JSON_DOC(doc);
     doc["schema"] = 1;
-    doc["enabled"] = mqttEnabled;
+    doc["enabled"] = mqttClientRunning;
     doc["connected"] = mqttTofConnected;
     doc["host"] = gSettings.mqttHost;
     doc["port"] = gSettings.mqttPort;
@@ -1259,7 +1321,7 @@ const char* cmd_mqttstatus(const String& argsInput) {
 
   // Output each line separately to avoid DEBUG_MSG_SIZE (256 byte) truncation
   broadcastOutput("=== MQTT STATUS ===");
-  BROADCAST_PRINTF("Enabled: %s", mqttEnabled ? "Yes" : "No");
+  BROADCAST_PRINTF("Enabled: %s", mqttClientRunning ? "Yes" : "No");
   BROADCAST_PRINTF("Connected: %s", mqttTofConnected ? "Yes" : "No");
   BROADCAST_PRINTF("Broker: %s:%d", gSettings.mqttHost.c_str(), gSettings.mqttPort);
   BROADCAST_PRINTF("User: %s", gSettings.mqttUser.length() > 0 ? gSettings.mqttUser.c_str() : "(none)");
@@ -1288,10 +1350,10 @@ const char* cmd_mqttclientenabled(const String& argsInput) {
   String arg = argsInput;
   arg.trim();
   if (arg.length() == 0) {
-    return gSettings.mqttClientEnabled ? "MQTT client: enabled" : "MQTT client: disabled";
+    return gSettings.mqttEnabled ? "MQTT client: enabled" : "MQTT client: disabled";
   }
   bool enable = (arg == "1" || arg.equalsIgnoreCase("on") || arg.equalsIgnoreCase("true") || arg.equalsIgnoreCase("enable"));
-  setSetting(gSettings.mqttClientEnabled, enable);
+  setSetting(gSettings.mqttEnabled, enable);
   if (!enable) {
     stopMQTT();
     return "MQTT client disabled";
@@ -1583,14 +1645,16 @@ const char* cmd_mqttexternalsensors(const String& argsInput) {
     PSRAM_JSON_DOC(doc);
     doc["schema"] = 1;
     JsonArray arr = doc["sensors"].to<JsonArray>();
-    if (externalSensorMutex && externalSensorCount > 0 &&
+    if (externalSensorMutex &&
         xSemaphoreTake(externalSensorMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-      unsigned long now = millis();
-      for (int i = 0; i < externalSensorCount; i++) {
-        JsonObject o = arr.add<JsonObject>();
-        o["name"]   = externalSensors[i].name;
-        o["value"]  = externalSensors[i].value.substring(0, 64);  // ArduinoJson escapes untrusted MQTT data
-        o["ageSec"] = (unsigned long)((now - externalSensors[i].lastUpdate) / 1000);
+      if (externalSensors && externalSensorCount > 0) {
+        unsigned long now = millis();
+        for (int i = 0; i < externalSensorCount; i++) {
+          JsonObject o = arr.add<JsonObject>();
+          o["name"]   = externalSensors[i].name;
+          o["value"]  = externalSensors[i].value.substring(0, 64);  // ArduinoJson escapes untrusted MQTT data
+          o["ageSec"] = (unsigned long)((now - externalSensors[i].lastUpdate) / 1000);
+        }
       }
       xSemaphoreGive(externalSensorMutex);
     }
@@ -1603,11 +1667,15 @@ const char* cmd_mqttexternalsensors(const String& argsInput) {
   char* buf = getDebugBuffer();
   int pos = 0;
 
-  if (!externalSensorMutex || externalSensorCount == 0) {
+  if (!externalSensorMutex || !externalSensors) {
     return "No external sensors received";
   }
   
   if (xSemaphoreTake(externalSensorMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    if (!externalSensors || externalSensorCount == 0) {
+      xSemaphoreGive(externalSensorMutex);
+      return "No external sensors received";
+    }
     pos += snprintf(buf + pos, 1024 - pos, "External Sensors (%d):\n", externalSensorCount);
     
     unsigned long now = millis();

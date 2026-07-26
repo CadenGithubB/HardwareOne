@@ -104,7 +104,7 @@ const char* cmd_imurolloffset(const String& argsInput);
 const char* cmd_imuyawoffset(const String& argsInput);
 
 // IMU sensor state and control
-extern bool gImuEnabled;
+extern bool gImuRunning;
 extern bool gImuConnected;
 extern unsigned long gImuLastStopTime;
 extern TaskHandle_t gImuTaskHandle;

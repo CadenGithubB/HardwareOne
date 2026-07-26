@@ -1,4 +1,4 @@
-# Hardware One v0.99.1 - User Guide
+# Hardware One v0.99.3 - User Guide
 
 This is the full reference for Hardware One. It covers every subsystem, all CLI commands, configuration options, and how the major features work. For initial setup, see the [Quick Start Guide](QUICKSTART.md).
 
@@ -30,7 +30,8 @@ All feature flags live in one file: `components/hardwareone/System_BuildConfig.h
 | `WEB_FEATURE_LEVEL` | `4` (Custom) | `0`=disabled, `1`=core UI, `2`=standard modules, `3`=all modules, `4`=custom |
 | `DISPLAY_TYPE` | `1` (SSD1306) | `0`=none, `1`=SSD1306 OLED, `2`=ST7789 TFT, `3`=ILI9341 TFT |
 | `ENABLE_BLUETOOTH` | `0` | BLE server with GATT services |
-| `ENABLE_G2_GLASSES` | `0` | Even Realities G2 BLE client (requires `ENABLE_BLUETOOTH=1`) - **planned, not yet working** |
+| `ENABLE_G2_GLASSES` | `0` | Even Realities G2 BLE client (requires `ENABLE_BLUETOOTH=1`) |
+| `ENABLE_R1_HEALTH` | `1` | R1 Health vitals UI (G2 Apps→Health, OLED, Web `/r1-health`) + Health Track. Requires Bluetooth + G2; auto-off if either is off. Ring connect stays under `ENABLE_G2_GLASSES`. |
 | `ENABLE_MQTT` | `1` | Home Assistant MQTT integration |
 | `ENABLE_AUTOMATION` | `1` | Scheduled tasks and conditional commands |
 | `ENABLE_CAMERA_SENSOR` | `0` | ESP32-S3 DVP camera (OV2640/OV5640) |
@@ -761,15 +762,44 @@ See [Debug Flags](#debug-flags) section for the full flag list.
 <details>
 <summary><strong>sensorlog - Sensor data logging</strong></summary>
 
+One device-wide logger writes a single file at a chosen interval. Sensors are
+selected with a bitmask (`sensorlog sensors`), not started one-at-a-time.
+
 ```
-sensorlog start <sensor>        - Start logging sensor data to CSV on LittleFS
-sensorlog stop <sensor>         - Stop logging
-sensorlog status                - Show active log files
-sensorlog format <sensor>       - Set log format
-sensorlog maxsize <sensor>      - Set max log file size
-sensorlog rotations <sensor>    - Set number of rotation files kept
-sensorlog sensors               - List loggable sensors
+sensorlog start <filepath> [interval_ms]  - Begin logging (path required; default interval 5000 ms)
+sensorlog stop                            - Stop logging
+sensorlog status                          - Show path, interval, format, selected sensors
+sensorlog format <text|csv|track>         - text/csv for multi-sensor; track = GPS-only
+sensorlog maxsize <bytes>                 - Max file size before rotation
+sensorlog rotations <count>               - Old logs to keep (0-9)
+sensorlog sensors <list|all|none>         - Replace mask: thermal,tof,imu,gamepad,apds,gps,presence,r1
+sensorlog interval <ms>                   - Poll interval (100-3600000)
+sensorlog autostart [on|off]              - Auto-start on boot with last-used path/mask
 ```
+
+**R1 Health Track (preferred):** `healthtrack on` (or Apps → Health / OLED R1 Health /
+Web R1 Health → Track) enables R1 in the sensorlog mask, starts capture at
+`/logging_captures/sensors/health.csv`, and persists so boot resumes.
+While Track is on, the ring is polled/mined on a timer (default **900 s / 15 min**)
+and **only those mines write rows** (plus Poll Now / opening Health). There are no
+5 s empty timestamp heartbeats in R1-only Track sessions. Adjust with
+`healthtrack interval <sec>` or setting `healthTrackPollIntervalSec` (60–86400).
+`healthtrack off` removes R1; stops logging if nothing else is selected.
+Settings: `logging.sensorlog` → **R1 Health Track** / **R1 Health poll interval (sec)**.
+
+**Surfaces** (requires `ENABLE_R1_HEALTH`): G2 Apps → Health (graphs), OLED **R1 Health**,
+Web **`/r1-health`**. Ring connect remains under Bluetooth (OLED / Web). Snapshot CLI
+for Web and a future Bluetooth App: `healthstatus` / `healthstatus json` / `healthstatus poll`.
+Stitch split captures: `healthlogmerge "<out>" "<in1>" "<in2>" …` (same idea as `gpstrackmerge`).
+
+**Keep the ring up:** `bleautoreconnect r1-ring on` reconnects at boot **and** reseeks after
+unexpected drops (backoff). While Health Track is on, each due mine (default 15 min)
+also nudges a ring reseek if the link is down (one non-blocking connect attempt;
+not a continuous scan). `ringdisconnect` / `closeg2` do not reseek.
+
+You can still use raw `sensorlog sensors r1` + `sensorlog start …` if you want
+manual control without the Health Track product switch (that path still uses the
+normal sensorlog interval / heartbeats).
 </details>
 
 <details>
@@ -837,7 +867,7 @@ battery calibrate               - Recalibrate ADC voltage readings
 capture [littlefs|sd|both]      - Capture and save an image
 images [littlefs|sd]            - List saved images
 imagedelete "<path>"            - Delete an image
-imagesend <device> ["<path>"]   - Send image to a peer via ESP-NOW
+imagesend <device> "<path>"     - Send image to a peer via ESP-NOW (blocks; fails if the receiver cancels)
 ```
 </details>
 
@@ -951,12 +981,7 @@ srdebugreset                    - Reset SR counters
 </details>
 
 <details>
-<summary><strong>g2 - Even Realities G2 glasses (requires ENABLE_G2_GLASSES) - ⚠️ planned, not yet working</strong></summary>
-
-> **Status: not functional yet.** These commands compile and the scaffolding is
-> in place, but the G2 BLE client is a work-in-progress goal - connection,
-> display, and gesture handling are not reliable. Documented here as the
-> intended command surface once the feature lands.
+<summary><strong>g2 - Even Realities G2 glasses (requires ENABLE_G2_GLASSES)</strong></summary>
 
 ```
 openg2 [left|right|auto]        - Connect to G2 glasses
@@ -969,7 +994,24 @@ g2init                          - Initialize G2 client mode (disables BLE server
 g2deinit                        - Deinitialize G2 client mode
 g2nav [on|off]                  - Map G2 gestures to OLED menu navigation
 g2verbose [on|off]              - Toggle verbose packet logging
+g2health                        - Open Apps → Health (R1 vitals + graphs) on the lens (ENABLE_R1_HEALTH)
+g2pet                           - Open Apps → Pet on the lens
 ```
+
+**Apps → Health** (lens, `ENABLE_R1_HEALTH`): left list (Overview / Trends / Heart Rate / HRV /
+SpO2 / Temperature / Battery / Poll Now / Toggle Track). **Overview** shows native-text
+vitals (wear + one shared recentness on the status line); live metric rows show
+title/value/age above a line graph. **Trends** opens a submenu (HR/HRV/SpO2 today +
+Refresh) that graphs the ring’s daily-history payload separately from the live
+sparklines (weekly aggregation later).
+**Toggle Track** starts Health Track logging (`healthtrack on`); while on, the ring is
+mined every `healthTrackPollIntervalSec` (default 15 min). Opening the page or **Poll Now**
+also logs a sample when R1 logging is active. Pair the R1 under Bluetooth → R1 Ring;
+vitals also on OLED **R1 Health** and Web **`/r1-health`**.
+Ring/Health CLI: `ringconnect`, `ringstatus`, `ringquery hr|temp|wear`,
+`healthstatus [json|poll]`, `healthtrack status|interval`. A Bluetooth App can call the
+same commands over GATT (no dedicated phone UI yet).
+3-pane list+text+image experiments: Tests → Image → Streaming → Compound → Q30*.
 </details>
 
 <details>
@@ -1173,13 +1215,10 @@ NMEA output parsed for lat/lon/speed/heading. Track logging to LittleFS. Offline
 ### FM Radio (RDA5807)
 Tune, seek up/down, set volume, mute. `fmradio tune <MHz>` - e.g., `fmradio tune 101.5`.
 
-### Even Realities G2 Glasses *(planned - not yet working)*
-> **Status: work in progress.** This is a goal feature, not a working one yet.
-> The intention is a BLE client that connects to G2 glasses, sends display text
-> via their teleprompter protocol, and maps glasses gestures to OLED menu
-> navigation - mutually exclusive with phone BLE server mode at runtime. The
-> CLI commands exist as placeholders but the underlying protocol is still being
-> developed. Do not expect this to work on a current build.
+### Even Realities G2 Glasses
+BLE client for Even G2 temples (`openg2` / hijack menus / Apps → Health). Requires
+`ENABLE_G2_GLASSES`. See the `g2` / `g2health` / `ring*` command sections above.
+R1 ring connect and vitals share the same Bluetooth central stack.
 
 ---
 

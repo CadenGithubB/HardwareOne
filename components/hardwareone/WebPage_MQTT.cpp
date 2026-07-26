@@ -22,7 +22,7 @@ extern void streamEndHtml(httpd_req_t* req);
 // Stream MQTT page inner content
 void streamMqttInner(httpd_req_t* req) {
   // Get current MQTT status
-  bool clientEnabled = gSettings.mqttClientEnabled;
+  bool clientEnabled = gSettings.mqttEnabled;
   bool connected = isMqttConnected();
   const char* statusText = connected ? "Connected" : "Disconnected";
   const char* statusClass = connected ? "status-active" : "status-inactive";
@@ -465,7 +465,7 @@ static esp_err_t handleMqttStatus(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
 
   bool connected = isMqttConnected();
-  bool enabled = gSettings.mqttClientEnabled;
+  bool enabled = gSettings.mqttEnabled;
 
   char json[128];
   snprintf(json, sizeof(json),

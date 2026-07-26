@@ -17,7 +17,7 @@
 //     ESP-NOW          status info / Mode / Start-Stop / View Devices
 //       ESPNOW_DEVS   paired-device list (info only)
 //     BLUETOOTH       BLE on-off, Auto Start, ring controls; client mode
-//                     also has G2 >> (AutoConnect, reconnect, disconnect)
+//                     also has G2 >> (AutoReconnect, reconnect, disconnect)
 //     BLUETOOTH_G2    G2 client-only controls (drill from Bluetooth)
 //
 // The page-mode tracker in G2_Glasses.h tracks which top-level

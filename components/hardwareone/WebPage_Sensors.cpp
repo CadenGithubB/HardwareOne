@@ -29,7 +29,7 @@
   #include "i2csensor_bno055.h"         // imuBuildDataJSON
 #endif
 #if ENABLE_GAMEPAD_SENSOR
-  #include "i2csensor_seesaw.h"     // gInputEnabled, gInputConnected (gamepad build)
+  #include "i2csensor_seesaw.h"     // gInputRunning, gInputConnected (gamepad build)
 #endif
 #if ENABLE_ANO_ENCODER
   #include "i2csensor_ano_encoder.h"  // anoEncoderBuildDataJSON + gAnoEncoder*
@@ -216,7 +216,7 @@ esp_err_t handleSensorData(httpd_req_t* req) {
         return ESP_OK;
 #endif
         // Gamepad now follows queued start paradigm; read from shared state only
-        if (!gInputEnabled || !gInputConnected) {
+        if (!gInputRunning || !gInputConnected) {
           sendJsonResponse(req, "{\"val\":0, \"error\":\"not_connected\"}");
           return ESP_OK;
         }
@@ -277,7 +277,7 @@ esp_err_t handleSensorData(httpd_req_t* req) {
       } else if (sensorType == "fmradio") {
 #if ENABLE_FM_RADIO
         // FM radio data - use stack-allocated buffer
-        if (!gFmRadioEnabled || !gRadioInitialized) {
+        if (!gFmRadioRunning || !gRadioInitialized) {
           sendJsonResponse(req, "{\"schema\":1,\"ok\":false, \"error\":\"not_enabled\"}");
           return ESP_OK;
         }
@@ -321,11 +321,11 @@ esp_err_t handleSensorData(httpd_req_t* req) {
 #endif
       } else if (sensorType == "presence") {
 #if ENABLE_PRESENCE_SENSOR
-        extern bool gPresenceEnabled;
+        extern bool gPresenceRunning;
         extern bool gPresenceConnected;
         extern PresenceCache gPresenceCache;
         
-        if (!gPresenceEnabled || !gPresenceConnected) {
+        if (!gPresenceRunning || !gPresenceConnected) {
           sendJsonResponse(req, "{\"error\":\"not_enabled\"}");
           return ESP_OK;
         }
@@ -368,11 +368,11 @@ esp_err_t handleSensorData(httpd_req_t* req) {
 #endif
       } else if (sensorType == "gps") {
 #if ENABLE_GPS_SENSOR
-        extern bool gGpsEnabled;
+        extern bool gGpsRunning;
         extern bool gGpsConnected;
         extern GPSCache gGpsCache;
         
-        if (!gGpsEnabled || !gGpsConnected) {
+        if (!gGpsRunning || !gGpsConnected) {
           sendJsonResponse(req, "{\"error\":\"not_enabled\"}");
           return ESP_OK;
         }
@@ -425,11 +425,11 @@ esp_err_t handleSensorData(httpd_req_t* req) {
 #endif
       } else if (sensorType == "rtc") {
 #if ENABLE_RTC_SENSOR
-        extern bool gRtcEnabled;
+        extern bool gRtcRunning;
         extern bool gRtcConnected;
         extern RTCCache gRtcCache;
         
-        if (!gRtcEnabled || !gRtcConnected) {
+        if (!gRtcRunning || !gRtcConnected) {
           sendJsonResponse(req, "{\"error\":\"not_enabled\"}");
           return ESP_OK;
         }
@@ -667,10 +667,10 @@ esp_err_t handleCameraFrame(httpd_req_t* req) {
   if (!webGuestAccessAllowed(req, ctx)) return ESP_OK;
 
 #if ENABLE_CAMERA_SENSOR
-  extern bool gCameraEnabled;
+  extern bool gCameraRunning;
   extern uint8_t* captureFrame(size_t* outLen);
 
-  if (!gCameraEnabled) {
+  if (!gCameraRunning) {
     DEBUG_CAMERAF("/api/camera/frame: camera not enabled, returning 503");
     httpd_resp_set_status(req, "503 Service Unavailable");
     httpd_resp_set_type(req, "text/plain");
@@ -707,13 +707,13 @@ esp_err_t handleCameraStream(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
 
 #if ENABLE_CAMERA_SENSOR
-  extern bool gCameraEnabled;
+  extern bool gCameraRunning;
   extern bool cameraStreaming;
   extern uint8_t* captureFrame(size_t* outLen);
   extern Settings gSettings;
   extern String getCookieSID(httpd_req_t* req);
   
-  if (!gCameraEnabled) {
+  if (!gCameraRunning) {
     httpd_resp_set_status(req, "503 Service Unavailable");
     httpd_resp_set_type(req, "text/plain");
     httpd_resp_send(req, "Camera not enabled", HTTPD_RESP_USE_STRLEN);
@@ -767,7 +767,7 @@ esp_err_t handleCameraStream(httpd_req_t* req) {
     }
 
     // If camera is stopped while a client is streaming, end stream promptly.
-    if (!gCameraEnabled) {
+    if (!gCameraRunning) {
       break;
     }
 

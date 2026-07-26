@@ -505,8 +505,8 @@ CLI commands (scraped via `/api/cli`):
 - `g2reopen` — Re-open hijacked Blocks app on G2 after abnormal exit
 - `ringconnect` — Connect to R1 ring (spawns background task, returns immediately)
 - `ringdisconnect` — Disconnect from R1 ring
-- `bleautoconnect g2-glasses on\|off` — Enable/disable auto-reconnect to G2 temples on device boot
-- `bleautoconnect r1-ring on\|off` — Enable/disable auto-reconnect to R1 ring on device boot
+- `bleautoreconnect g2-glasses on\|off` — Enable/disable auto-reconnect to G2 temples on device boot
+- `bleautoreconnect r1-ring on\|off` — Enable/disable auto-reconnect to R1 ring on device boot
 - `g2mic on\|off` — Enable/disable G2 microphone
 - `g2nav on\|off` — Enable/disable menu navigation via G2 gestures (g2nav toggle)
 - `g2verbose on\|off` — Enable/disable verbose BLE scan logging (logs every advert seen)

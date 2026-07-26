@@ -48,7 +48,7 @@
 extern TwoWire Wire1;
 
 // Resolve which bus the FM radio is on. Returns false if unavailable
-// (e.g., fmRadioBus=1 but i2c2BusEnabled=false).
+// (e.g., fmRadioBus=1 but i2c2Enabled=false).
 static bool fmRadioResolveBus(uint8_t* outBus, TwoWire** outWire) {
   const uint8_t bus = (uint8_t)gSettings.fmRadioBus;
   TwoWire* w = i2c() ? i2c()->getWire(bus) : nullptr;
@@ -73,7 +73,7 @@ static const uint32_t FM_RADIO_I2C_CLOCK = 100000;
 // FM Radio State (Global Variables)
 // ============================================================================
 
-bool gFmRadioEnabled = false;
+bool gFmRadioRunning = false;
 bool gFmRadioConnected = false;
 TaskHandle_t gFmRadioTaskHandle = nullptr;
 unsigned long gFmRadioLastStopTime = 0;
@@ -220,7 +220,7 @@ void fmRadioDeinit() {
   DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] Resetting all state variables");
   gRadioInitialized = false;
   gFmRadioConnected = false;
-  gFmRadioEnabled = false;
+  gFmRadioRunning = false;
   gFmRadioCache.dataValid = false;  // stale on shutdown → envelope reports valid:false
   memset(gFmRadioCache.stationName, 0, sizeof(gFmRadioCache.stationName));
   memset(gFmRadioCache.stationText, 0, sizeof(gFmRadioCache.stationText));
@@ -241,7 +241,7 @@ void fmRadioTask(void* parameter) {
     loopCount++;
 
     // Deferred initialization on the FM radio task stack (keeps sensor_queue stack safe)
-    if (gFmRadioEnabled && !gRadioInitialized && fmRadioInitRequested) {
+    if (gFmRadioRunning && !gRadioInitialized && fmRadioInitRequested) {
       INFO_FMRADIO_LIFECYCLEF("Performing deferred FM Radio init on task stack");
       bool ok = fmRadioInit();
       fmRadioInitResult = ok;
@@ -252,7 +252,7 @@ void fmRadioTask(void* parameter) {
         ERROR_FMRADIOF("FM Radio fmRadioInit() failed");
         broadcastOutput("FM Radio init failed");
         sensorStatusBumpWith("fmradio@init_failed");
-        gFmRadioEnabled = false;
+        gFmRadioRunning = false;
         // Loop will delete the task on next iteration
         vTaskDelay(pdMS_TO_TICKS(50));
         continue;
@@ -288,7 +288,7 @@ void fmRadioTask(void* parameter) {
     }
     
     // Check if radio is disabled - delete task if so
-    if (!gFmRadioEnabled) {
+    if (!gFmRadioRunning) {
       DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO_TASK] Radio disabled, deleting task (loop %lu)", loopCount);
       // NOTE: Do NOT clear gFmRadioTaskHandle here - let create function use eTaskGetState()
       // to detect stale handles. Clearing here creates a race condition window.
@@ -319,7 +319,7 @@ void fmRadioTask(void* parameter) {
       // 'continue' (not 'break') so the top-of-loop shutdown runs the clean
       // vTaskDelete path instead of returning from the task function with a
       // near-overflowed stack (IllegalInstruction panic).
-      if (checkTaskStackSafety("fmradio", FMRADIO_STACK_WORDS, &gFmRadioEnabled)) continue;
+      if (checkTaskStackSafety("fmradio", FMRADIO_STACK_WORDS, &gFmRadioRunning)) continue;
       if (isDebugFlagSet(DEBUG_FMRADIO)) {
         const uint32_t fmRadioStackBytes = FMRADIO_STACK_WORDS;  // BYTES (misnomer name); single source of truth
         UBaseType_t watermark = uxTaskGetStackHighWaterMark(nullptr);
@@ -340,9 +340,9 @@ void fmRadioTask(void* parameter) {
 // ============================================================================
 
 bool fmRadioStartInternal() {
-  DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] fmRadioStartInternal() called - gFmRadioEnabled=%s", gFmRadioEnabled ? "true" : "false");
+  DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] fmRadioStartInternal() called - gFmRadioRunning=%s", gFmRadioRunning ? "true" : "false");
 
-  if (gFmRadioEnabled) {
+  if (gFmRadioRunning) {
     DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] Already enabled, skipping initialization");
     return true;
   }
@@ -364,7 +364,7 @@ bool fmRadioStartInternal() {
   }
 
   // Enable first, then let fmradio_task perform initialization on its own stack
-  gFmRadioEnabled = true;
+  gFmRadioRunning = true;
   fmRadioInitRequested = true;
   fmRadioInitDone = false;
   fmRadioInitResult = false;
@@ -375,7 +375,7 @@ bool fmRadioStartInternal() {
     DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] Creating FM Radio task...");
     if (!createFMRadioTask()) {
       DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] ERROR: Failed to create FM Radio task");
-      gFmRadioEnabled = false;
+      gFmRadioRunning = false;
       return false;
     }
     DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] FM Radio task created successfully (handle=%p)", gFmRadioTaskHandle);
@@ -386,7 +386,7 @@ bool fmRadioStartInternal() {
 }
 
 void fmRadioStopInternal() {
-  // Note: gFmRadioEnabled is set to false by handleDeviceStopped() before this is called
+  // Note: gFmRadioRunning is set to false by handleDeviceStopped() before this is called
   DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] fmRadioStopInternal() called - hardware cleanup");
   
   // Properly deinitialize the radio hardware
@@ -412,7 +412,7 @@ void updateFMRadio() {
   static int lastRSSI = -999;
   static bool lastStereo = false;
   
-  if (!gRadioInitialized || !gFmRadioEnabled) {
+  if (!gRadioInitialized || !gFmRadioRunning) {
     DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] Skipping update - radio not ready");
     return;
   }
@@ -529,7 +529,7 @@ const char* cmd_fmradio(const String& argsInput) {
 const char* cmd_fmradio_start(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  if (gFmRadioEnabled) {
+  if (gFmRadioRunning) {
     return "FM Radio already running";
   }
 
@@ -551,7 +551,7 @@ const char* cmd_fmradio_start(const String& argsInput) {
 const char* cmd_fmradio_stop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  if (!gFmRadioEnabled) {
+  if (!gFmRadioRunning) {
     return "Error: FM Radio not running";
   }
 
@@ -752,7 +752,7 @@ const char* cmd_fmradio_status(const String& argsInput) {
   // Output each line separately to avoid DEBUG_MSG_SIZE (256 byte) truncation
   broadcastOutput("FM Radio Status:");
   BROADCAST_PRINTF("  Connected: %s", gFmRadioConnected ? "Yes" : "No");
-  BROADCAST_PRINTF("  Enabled: %s", gFmRadioEnabled ? "Yes" : "No");
+  BROADCAST_PRINTF("  Enabled: %s", gFmRadioRunning ? "Yes" : "No");
   
   if (!gFmRadioConnected) {
     BROADCAST_PRINTF("  Stored Frequency: %.1f MHz", gFmRadioCache.frequency / 100.0);
@@ -870,8 +870,9 @@ const size_t fmRadioCommandsCount = sizeof(fmRadioCommands) / sizeof(fmRadioComm
 // FM Radio settings entries
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry fmRadioSettingEntries[] = {
-  { "fmRadioAutoStart", SETTING_BOOL, &gSettings.fmRadioAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, nullptr },
-  { "fmRadioDevicePollMs", SETTING_INT, &gSettings.fmRadioDevicePollMs, 250, 0, nullptr, 100, 5000, "Poll Interval (ms)", nullptr, false, nullptr, "fmradiodevicepollms" }
+  { "fmRadioEnabled", SETTING_BOOL, &gSettings.fmRadioEnabled, 1, 0, nullptr, 0, 1, "Enabled", nullptr, false, nullptr, "fmradioenabled" },
+  { "fmRadioAutoStart", SETTING_BOOL, &gSettings.fmRadioAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, "fmradioautostart" },
+  { "fmRadioDevicePollMs", SETTING_INT, &gSettings.fmRadioDevicePollMs, 250, 0, nullptr, 100, 5000, "Poll Interval (ms)", nullptr, false, nullptr, "fmradiodevicepollms" },
 };
 
 static bool isFMRadioConnected() {

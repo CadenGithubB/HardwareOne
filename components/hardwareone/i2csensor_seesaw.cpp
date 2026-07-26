@@ -54,7 +54,7 @@ static bool gamepadResolveBus(uint8_t* outBus, TwoWire** outWire) {
 InputCache gInputCache;
 
 // Gamepad sensor state (definitions)
-bool gInputEnabled = false;
+bool gInputRunning = false;
 bool gInputConnected = false;
 unsigned long gGamepadLastStopTime = 0;
 
@@ -149,11 +149,11 @@ bool inputStartInternal() {
    gamepadLogHeap("start.after_init");
 
   // Mark enabled BEFORE task creation to avoid startup race where the task can self-delete
-  // if it runs before gInputEnabled is set.
-  bool prev = gInputEnabled;
-  gInputEnabled = true;
-  DEBUG_INPUT_LIFECYCLEF("[GAMEPAD] inputStartInternal: Set gInputEnabled=true (was %d), gInputConnected=%d", prev, gInputConnected);
-  if (gInputEnabled != prev) sensorStatusBumpWith("opengamepad@enabled");
+  // if it runs before gInputRunning is set.
+  bool prev = gInputRunning;
+  gInputRunning = true;
+  DEBUG_INPUT_LIFECYCLEF("[GAMEPAD] inputStartInternal: Set gInputRunning=true (was %d), gInputConnected=%d", prev, gInputConnected);
+  if (gInputRunning != prev) sensorStatusBumpWith("opengamepad@enabled");
 
   // Broadcast sensor status to ESP-NOW master
 #if ENABLE_ESPNOW
@@ -247,8 +247,8 @@ bool gamepadInit() {
   // Set gInputConnected OUTSIDE the lambda (like IMU pattern)
   if (initSuccess) {
     gInputConnected = true;
-    DEBUG_INPUT_LIFECYCLEF("[GAMEPAD] SUCCESS: gInputConnected=%d gInputEnabled=%d &enabled=%p &connected=%p &cache=%p",
-                  gInputConnected, gInputEnabled, (void*)&gInputEnabled, (void*)&gInputConnected, (void*)&gInputCache);
+    DEBUG_INPUT_LIFECYCLEF("[GAMEPAD] SUCCESS: gInputConnected=%d gInputRunning=%d &enabled=%p &connected=%p &cache=%p",
+                  gInputConnected, gInputRunning, (void*)&gInputRunning, (void*)&gInputConnected, (void*)&gInputCache);
     broadcastOutput("Gamepad (Seesaw) initialized");
   } else {
     ERROR_INPUTF("FAILED: gamepadInit returning false");
@@ -338,9 +338,9 @@ bool gamepadInitConnection() {
         (void)gGamepadSeesaw->analogRead(15);
       });
 
-      gInputEnabled = true;
+      gInputRunning = true;
       gInputConnected = true;
-      DEBUG_INPUT_LIFECYCLEF("[GAMEPAD_DEBUG] gamepadInitConnection: &enabled=%p &connected=%p &gInputCache=%p", (void*)&gInputEnabled, (void*)&gInputConnected, (void*)&gInputCache);
+      DEBUG_INPUT_LIFECYCLEF("[GAMEPAD_DEBUG] gamepadInitConnection: &enabled=%p &connected=%p &gInputCache=%p", (void*)&gInputRunning, (void*)&gInputConnected, (void*)&gInputCache);
       
       INFO_INPUT_LIFECYCLEF("Gamepad connected on attempt %d", attempt);
       snprintf(msg, sizeof(msg), "Gamepad: re-init success (attempt %d)", attempt);
@@ -400,11 +400,11 @@ const size_t gamepadCommandsCount = sizeof(gamepadCommands) / sizeof(gamepadComm
 // ============================================================================
 // Purpose: Continuously reads button and joystick state from Seesaw gamepad
 // Stack: 4096 words (~16KB) | Priority: 1 | Core: Any
-// Lifecycle: Created by cmd_gamepadstart, deleted when gInputEnabled=false
+// Lifecycle: Created by cmd_gamepadstart, deleted when gInputRunning=false
 // Polling: Fixed 50ms interval | I2C Clock: 100kHz
 //
 // Cleanup Strategy:
-//   1. Check gInputEnabled flag at loop start
+//   1. Check gInputRunning flag at loop start
 //   2. Acquire bus mutex via I2CDeviceManager to prevent race conditions during cleanup
 //   3. Invalidate cache (no sensor object to delete)
 //   4. Release mutex and delete task
@@ -440,7 +440,7 @@ void inputTask(void* parameter) {
                 (void*)xTaskGetCurrentTaskHandle(), 
                 (unsigned)uxTaskGetStackHighWaterMark(nullptr));
   INFO_INPUT_LIFECYCLEF("[MODULAR] inputTask() running from i2csensor_seesaw.cpp");
-  DEBUG_INPUT_LIFECYCLEF("[GAMEPAD_TASK] Initial state: enabled=%d connected=%d", gInputEnabled, gInputConnected);
+  DEBUG_INPUT_LIFECYCLEF("[GAMEPAD_TASK] Initial state: enabled=%d connected=%d", gInputRunning, gInputConnected);
   gamepadLogHeap("task.entry");
   unsigned long lastGamepadRead = 0;
   unsigned long lastStackLog = 0;
@@ -457,7 +457,7 @@ void inputTask(void* parameter) {
 
   while (true) {
     // CRITICAL: Check enabled flag FIRST for graceful shutdown
-    if (!gInputEnabled) {
+    if (!gInputRunning) {
       gInputConnected = false;
       gInputCache.dataValid = false;
       SENSOR_TASK_EXIT(INPUT);
@@ -470,7 +470,7 @@ void inputTask(void* parameter) {
       // 'continue' (not 'break') so the top-of-loop shutdown runs the clean
       // SENSOR_TASK_EXIT (vTaskDelete) path instead of returning from the task
       // function with a near-overflowed stack (IllegalInstruction panic).
-      if (checkTaskStackSafety("gamepad", INPUT_STACK_WORDS, &gInputEnabled)) continue;
+      if (checkTaskStackSafety("gamepad", INPUT_STACK_WORDS, &gInputRunning)) continue;
       if (isDebugFlagSet(DEBUG_PERFORMANCE)) {
         UBaseType_t watermark = uxTaskGetStackHighWaterMark(nullptr);
         gGamepadWatermarkNow = watermark;
@@ -488,10 +488,10 @@ void inputTask(void* parameter) {
     if ((nowMs - lastStateLog) >= 60000) {
       lastStateLog = nowMs;
       DEBUG_INPUT_POLLINGF("[GAMEPAD_TASK] State: enabled=%d connected=%d paused=%d dataValid=%d",
-                    gInputEnabled, gInputConnected, gSensorPollingPaused, gInputCache.dataValid);
+                    gInputRunning, gInputConnected, gSensorPollingPaused, gInputCache.dataValid);
     }
 
-    if (gInputEnabled && gInputConnected && !pollPaused((uint8_t)gSettings.inputBus)) {
+    if (gInputRunning && gInputConnected && !pollPaused((uint8_t)gSettings.inputBus)) {
       unsigned long gamepadPollMs = (gSettings.inputDevicePollMs > 0) ? (unsigned long)gSettings.inputDevicePollMs : 90;
       if ((nowMs - lastGamepadRead) >= gamepadPollMs) {
         bool readSuccess = false;

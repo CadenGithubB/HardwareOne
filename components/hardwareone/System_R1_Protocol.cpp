@@ -664,6 +664,27 @@ static size_t annotateHealthPoint(uint8_t cmd, const uint8_t* p, size_t len,
 //   * spo2       ◯   no capture yet on our firmware — record[0] guess is %
 //   * hrv        ◯   no capture yet — record[0] guess is RMSSD ms (low byte)
 //   * temperature ✗  ring rejects all temperature opcodes on our firmware
+bool r1ParseHealthDaily(const uint8_t* p, size_t len, R1DailyResult& out) {
+  out = R1DailyResult{};
+  if (!p || len < 11) return false;
+  uint8_t count = p[0];
+  uint32_t startTs = readU32LE(p + 3);
+  uint32_t endTs   = readU32LE(p + 7);
+  size_t recordsStart = 11;
+  size_t expectedLen  = recordsStart + (size_t)count * 4 + 1;
+  if (expectedLen != len) return false;
+  out.ok = true;
+  out.count = count;
+  out.startTs = startTs;
+  out.endTs = endTs;
+  const size_t n = count < 64 ? count : 64;
+  for (size_t i = 0; i < n; i++) {
+    out.values[i] = p[recordsStart + i * 4];
+  }
+  out.count = (uint8_t)n;
+  return true;
+}
+
 static size_t annotateGenericDaily(uint8_t cmd, const uint8_t* p, size_t len,
                                    char* out, size_t cap) {
   if (len < 11) return 0;

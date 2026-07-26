@@ -705,6 +705,19 @@ struct EspNowState {
   volatile bool fileSendInProgress;
   uint8_t       fileSendPeer[6];
   uint32_t      fileSendStartedMs;
+  // Abort channel for the in-flight send (integrity pass). fileSendMsgId is
+  // the transferId published by FileSendActiveGuard; v4h_file_cancel (on
+  // espnow_task) stores that id into fileSendAbortMsgId when a FILE_CANCEL
+  // matches (inProgress && peer && msgId), and the sendFileToMac chunk loop
+  // (cmd_exec_task) compares fileSendAbortMsgId against its OWN transferId.
+  // Carrying the msgId instead of a bool makes the one theoretical stale-store
+  // race harmless: a late store of transfer A's id can never equal transfer
+  // B's id, so B ignores it. NOTE: this single-slot design (like
+  // fileSendInProgress itself) assumes all sendFileToMac callers run
+  // serialized on cmd_exec_task — re-audit if the planned Step 4 move of the
+  // chunk loop onto espnow_tx ever lands.
+  volatile uint32_t fileSendMsgId;
+  volatile uint32_t fileSendAbortMsgId;
 
   unsigned long lastResetTime;
 
@@ -892,6 +905,8 @@ struct EspNowState {
     fileSendInProgress(false),
     fileSendPeer{},
     fileSendStartedMs(0),
+    fileSendMsgId(0),
+    fileSendAbortMsgId(0),
     lastResetTime(0),
     deviceName(""),
     lastRemoteCapValid(false),

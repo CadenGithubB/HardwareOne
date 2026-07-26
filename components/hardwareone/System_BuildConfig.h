@@ -91,6 +91,7 @@
   #define CUSTOM_ENABLE_WEB_GAMES      0
   #define CUSTOM_ENABLE_WEB_MAPS       1
   #define CUSTOM_ENABLE_WEB_BATTERY    1
+  #define CUSTOM_ENABLE_WEB_R1_HEALTH  1
 #endif
 
 // HTTPS: TLS-encrypted HTTP. Self-signed or uploaded certs in /system/certs/.
@@ -225,6 +226,12 @@
 // ESP32 acts as BLE central; mutually exclusive with phone BLE at runtime.
 // Auto-disabled if ENABLE_BLUETOOTH=0.
 #define ENABLE_G2_GLASSES       1
+
+// R1 Health: vitals UI (G2 Apps→Health, OLED R1 Health, Web /r1-health) +
+// Health Track logging. Requires Bluetooth + G2 (R1 rides the G2 BLE-client
+// stack). Plain 0/1 for CMake grep; auto-forced off in DERIVED rules when
+// BT or G2 is off. Ring connect stays under ENABLE_G2_GLASSES.
+#define ENABLE_R1_HEALTH        1
 
 // VFS root for G2 animated icon packs (BMP frames): SD card (`/sd/...`).
 // Keeps pack data off LittleFS; requires SD mounted (web + lens picker use VFS).
@@ -556,6 +563,7 @@
   #define ENABLE_WEB_GAMES      0
   #define ENABLE_WEB_MAPS       0
   #define ENABLE_WEB_BATTERY    0
+  #define ENABLE_WEB_R1_HEALTH  0
 #elif WEB_FEATURE_LEVEL == WEB_LEVEL_CORE
   #define ENABLE_WEB_SENSORS    0
   #define ENABLE_WEB_BLUETOOTH  0
@@ -566,6 +574,7 @@
   #define ENABLE_WEB_GAMES      0
   #define ENABLE_WEB_MAPS       0
   #define ENABLE_WEB_BATTERY    0
+  #define ENABLE_WEB_R1_HEALTH  0
 #elif WEB_FEATURE_LEVEL == WEB_LEVEL_STANDARD
   #define ENABLE_WEB_SENSORS    1
   #define ENABLE_WEB_BLUETOOTH  0
@@ -576,6 +585,7 @@
   #define ENABLE_WEB_GAMES      0
   #define ENABLE_WEB_MAPS       0
   #define ENABLE_WEB_BATTERY    1
+  #define ENABLE_WEB_R1_HEALTH  0
 #elif WEB_FEATURE_LEVEL == WEB_LEVEL_FULL
   #define ENABLE_WEB_SENSORS    1
   #define ENABLE_WEB_BLUETOOTH  1
@@ -586,6 +596,7 @@
   #define ENABLE_WEB_GAMES      1
   #define ENABLE_WEB_MAPS       1
   #define ENABLE_WEB_BATTERY    1
+  #define ENABLE_WEB_R1_HEALTH  1
 #else // WEB_LEVEL_CUSTOM
   #define ENABLE_WEB_SENSORS    CUSTOM_ENABLE_WEB_SENSORS
   #define ENABLE_WEB_BLUETOOTH  CUSTOM_ENABLE_WEB_BLUETOOTH
@@ -596,6 +607,7 @@
   #define ENABLE_WEB_GAMES      CUSTOM_ENABLE_WEB_GAMES
   #define ENABLE_WEB_MAPS       CUSTOM_ENABLE_WEB_MAPS
   #define ENABLE_WEB_BATTERY    CUSTOM_ENABLE_WEB_BATTERY
+  #define ENABLE_WEB_R1_HEALTH  CUSTOM_ENABLE_WEB_R1_HEALTH
 #endif
 
 // =============================================================================
@@ -621,6 +633,7 @@
   #undef ENABLE_WEB_GAMES
   #undef ENABLE_WEB_MAPS
   #undef ENABLE_WEB_BATTERY
+  #undef ENABLE_WEB_R1_HEALTH
   #define ENABLE_WEB_SENSORS    0
   #define ENABLE_WEB_BLUETOOTH  0
   #define ENABLE_WEB_SPEECH     0
@@ -630,6 +643,7 @@
   #define ENABLE_WEB_GAMES      0
   #define ENABLE_WEB_MAPS       0
   #define ENABLE_WEB_BATTERY    0
+  #define ENABLE_WEB_R1_HEALTH  0
 #endif
 
 // HTTPS rides on top of HTTP server.
@@ -685,6 +699,18 @@
 #if !ENABLE_MAPS
   #undef ENABLE_WEB_MAPS
   #define ENABLE_WEB_MAPS 0
+#endif
+
+// R1 Health needs BT + G2 (ring transport). Force feature + web page off
+// when either prerequisite is missing. ENABLE_R1_HEALTH is a plain literal
+// above so CMake can grep it; this is the runtime/compile truth for TUs.
+#if !(ENABLE_BLUETOOTH && ENABLE_G2_GLASSES)
+  #undef ENABLE_R1_HEALTH
+  #define ENABLE_R1_HEALTH 0
+#endif
+#if !ENABLE_R1_HEALTH
+  #undef ENABLE_WEB_R1_HEALTH
+  #define ENABLE_WEB_R1_HEALTH 0
 #endif
 
 // MQTT subsystem itself requires WiFi (broker is over TCP).
@@ -905,7 +931,7 @@
 
   // Second I2C bus — the FeatherS3[D] exposes the vertical STEMMA QT
   // connector on its own GPIO pair, powered via LDO2. Used by the dual-bus
-  // I2C system (see System_I2C_Manager.h) when gSettings.i2c2BusEnabled
+  // I2C system (see System_I2C_Manager.h) when gSettings.i2c2Enabled
   // is set. LDO2 enable pin is GPIO39 (same as NEOPIXEL_POWER_PIN above —
   // driving GPIO39 HIGH powers both the RGB LED and I2C2).
   //
@@ -1029,7 +1055,7 @@
   #define I2C2_SCL_PIN_DEFAULT  -1
 #endif
 
-// Default state for i2c2BusEnabled. Derived from pin availability so the
+// Default state for i2c2Enabled. Derived from pin availability so the
 // secondary bus auto-enables on boards that physically have it (FeatherS3[D]
 // and equivalents) while staying off on boards without a second I2C port —
 // no risk of a stray init on -1 pins, no misleading "enabled" toggle in the

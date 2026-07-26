@@ -288,7 +288,7 @@ namespace {
 
 // Slot count: matches the existing peer-table cap. Each slot is ~56 B → ~900 B.
 // PSRAM .bss, parallel to gEspNow->devices[16]: peerIdentityLoadAll runs at boot
-// unconditionally (the identity block is deliberately outside the espnowenabled
+// unconditionally (the identity block is deliberately outside the espnowEnabled
 // gate, for recovery), so this table cannot be made lazy — devices with ESP-NOW
 // switched off would still pay for it in internal DRAM. The tradeoff is a
 // 16-slot linear scan of PSRAM per RX dispatch, which is noise next to the

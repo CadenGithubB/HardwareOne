@@ -55,11 +55,13 @@ static const char* loggingSensorConfigItems[] = {
   "Gamepad",
   "APDS",
   "GPS",
+  "Presence",
+  "R1 Health",
   "Interval",
   "Format",
   "Back"
 };
-static const int loggingSensorConfigCount = 9;
+static const int loggingSensorConfigCount = 11;
 
 // Helper to draw menu items
 static void drawLoggingMenuItem(int y, const char* text, bool selected, bool enabled = true) {
@@ -105,7 +107,7 @@ static void displayLoggingMode() {
     
     case LOG_MENU_SENSOR: {
       oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
-      if (gSensorLoggingEnabled) {
+      if (gSensorLoggingRunning) {
         oledDisplay->print("Status: ACTIVE");
       } else {
         oledDisplay->print("Status: STOPPED");
@@ -114,8 +116,8 @@ static void displayLoggingMode() {
       int startY = 22;
       for (int i = 0; i < loggingSensorMenuCount; i++) {
         bool enabled = true;
-        if (i == 0 && gSensorLoggingEnabled) enabled = false;
-        if (i == 1 && !gSensorLoggingEnabled) enabled = false;
+        if (i == 0 && gSensorLoggingRunning) enabled = false;
+        if (i == 1 && !gSensorLoggingRunning) enabled = false;
         drawLoggingMenuItem(startY + (i * 10), loggingSensorMenuItems[i], i == loggingMenuSelection, enabled);
       }
       break;
@@ -123,7 +125,7 @@ static void displayLoggingMode() {
     
     case LOG_MENU_SYSTEM: {
       oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
-      if (gSystemLogEnabled) {
+      if (gSystemLogRunning) {
         oledDisplay->print("Status: ACTIVE");
       } else {
         oledDisplay->print("Status: STOPPED");
@@ -132,24 +134,26 @@ static void displayLoggingMode() {
       int startY = 22;
       for (int i = 0; i < loggingSystemMenuCount; i++) {
         bool enabled = true;
-        if (i == 0 && gSystemLogEnabled) enabled = false;
-        if (i == 1 && !gSystemLogEnabled) enabled = false;
+        if (i == 0 && gSystemLogRunning) enabled = false;
+        if (i == 1 && !gSystemLogRunning) enabled = false;
         drawLoggingMenuItem(startY + (i * 10), loggingSystemMenuItems[i], i == loggingMenuSelection, enabled);
       }
       break;
     }
     
     case LOG_MENU_SENSOR_CONFIG: {
-      EXT_RAM_BSS_ATTR static char sCfgBuf[9][24];
-      const uint8_t masks[6] = {LOG_THERMAL, LOG_TOF, LOG_IMU, LOG_GAMEPAD, LOG_APDS, LOG_GPS};
-      for (int i = 0; i < 6; i++) {
+      EXT_RAM_BSS_ATTR static char sCfgBuf[11][24];
+      const uint8_t masks[8] = {
+        LOG_THERMAL, LOG_TOF, LOG_IMU, LOG_GAMEPAD, LOG_APDS, LOG_GPS, LOG_PRESENCE, LOG_R1
+      };
+      for (int i = 0; i < 8; i++) {
         snprintf(sCfgBuf[i], 24, "%s: %s", loggingSensorConfigItems[i], (gSensorLogMask & masks[i]) ? "ON" : "OFF");
       }
-      snprintf(sCfgBuf[6], 24, "Int: %lums", gSensorLogIntervalMs);
+      snprintf(sCfgBuf[8], 24, "Int: %lums", gSensorLogIntervalMs);
       const char* fmtName = (gSensorLogFormat == SENSOR_LOG_CSV) ? "CSV" :
                             (gSensorLogFormat == SENSOR_LOG_TRACK) ? "TRK" : "TXT";
-      snprintf(sCfgBuf[7], 24, "Fmt: %s", fmtName);
-      snprintf(sCfgBuf[8], 24, "%s", loggingSensorConfigItems[8]);
+      snprintf(sCfgBuf[9], 24, "Fmt: %s", fmtName);
+      snprintf(sCfgBuf[10], 24, "%s", loggingSensorConfigItems[10]);
       
       int savedSel = loggingSensorConfigSelection;
       int savedOff = loggingConfigScroll.scrollOffset;
@@ -219,9 +223,10 @@ static bool handleLoggingModeInput(int deltaX, int deltaY, uint32_t newlyPressed
         return false;
       }
     } else if (loggingCurrentState == LOG_MENU_SENSOR) {
-      if (loggingMenuSelection == 0 && !gSensorLoggingEnabled) {
-        executeOLEDCommand("sensorlog start");
-      } else if (loggingMenuSelection == 1 && gSensorLoggingEnabled) {
+      if (loggingMenuSelection == 0 && !gSensorLoggingRunning) {
+        String startCmd = String("sensorlog start \"") + gSettings.sensorLogPath + "\"";
+        executeOLEDCommand(startCmd);
+      } else if (loggingMenuSelection == 1 && gSensorLoggingRunning) {
         executeOLEDCommand("sensorlog stop");
       } else if (loggingMenuSelection == 2) {
         loggingCurrentState = LOG_MENU_SENSOR_CONFIG;
@@ -230,22 +235,17 @@ static bool handleLoggingModeInput(int deltaX, int deltaY, uint32_t newlyPressed
         oledScrollSetSplitPane(&loggingConfigScroll, 128, 0, 0);
       }
     } else if (loggingCurrentState == LOG_MENU_SYSTEM) {
-      if (loggingMenuSelection == 0 && !gSystemLogEnabled) {
+      if (loggingMenuSelection == 0 && !gSystemLogRunning) {
         executeOLEDCommand("log start");
-      } else if (loggingMenuSelection == 1 && gSystemLogEnabled) {
+      } else if (loggingMenuSelection == 1 && gSystemLogRunning) {
         executeOLEDCommand("log stop");
       }
     } else if (loggingCurrentState == LOG_MENU_SENSOR_CONFIG) {
-      if (loggingSensorConfigSelection < 6) {
-        uint8_t mask = 0;
-        if (loggingSensorConfigSelection == 0) mask = LOG_THERMAL;
-        else if (loggingSensorConfigSelection == 1) mask = LOG_TOF;
-        else if (loggingSensorConfigSelection == 2) mask = LOG_IMU;
-        else if (loggingSensorConfigSelection == 3) mask = LOG_GAMEPAD;
-        else if (loggingSensorConfigSelection == 4) mask = LOG_APDS;
-        else if (loggingSensorConfigSelection == 5) mask = LOG_GPS;
-        
-        uint8_t newMask = gSensorLogMask ^ mask;
+      if (loggingSensorConfigSelection < 8) {
+        const uint8_t masks[8] = {
+          LOG_THERMAL, LOG_TOF, LOG_IMU, LOG_GAMEPAD, LOG_APDS, LOG_GPS, LOG_PRESENCE, LOG_R1
+        };
+        uint8_t newMask = gSensorLogMask ^ masks[loggingSensorConfigSelection];
         String sensorList = "";
         if (newMask & LOG_THERMAL)  sensorList += "thermal,";
         if (newMask & LOG_TOF)      sensorList += "tof,";
@@ -253,10 +253,12 @@ static bool handleLoggingModeInput(int deltaX, int deltaY, uint32_t newlyPressed
         if (newMask & LOG_GAMEPAD)  sensorList += "gamepad,";
         if (newMask & LOG_APDS)     sensorList += "apds,";
         if (newMask & LOG_GPS)      sensorList += "gps,";
+        if (newMask & LOG_PRESENCE) sensorList += "presence,";
+        if (newMask & LOG_R1)       sensorList += "r1,";
         if (sensorList.endsWith(",")) sensorList.remove(sensorList.length() - 1);
         if (sensorList.isEmpty()) sensorList = "none";
         executeOLEDCommand("sensorlog sensors " + sensorList);
-      } else if (loggingSensorConfigSelection == 6) {
+      } else if (loggingSensorConfigSelection == 8) {
         uint32_t newInterval;
         if (gSensorLogIntervalMs == 1000) newInterval = 5000;
         else if (gSensorLogIntervalMs == 5000) newInterval = 10000;
@@ -264,13 +266,13 @@ static bool handleLoggingModeInput(int deltaX, int deltaY, uint32_t newlyPressed
         else if (gSensorLogIntervalMs == 30000) newInterval = 60000;
         else newInterval = 1000;
         executeOLEDCommand("sensorlog interval " + String(newInterval));
-      } else if (loggingSensorConfigSelection == 7) {
+      } else if (loggingSensorConfigSelection == 9) {
         const char* newFmt;
         if (gSensorLogFormat == SENSOR_LOG_TEXT) newFmt = "csv";
         else if (gSensorLogFormat == SENSOR_LOG_CSV) newFmt = "track";
         else newFmt = "text";
         executeOLEDCommand(String("sensorlog format ") + newFmt);
-      } else if (loggingSensorConfigSelection == 8) {
+      } else if (loggingSensorConfigSelection == 10) {
         loggingCurrentState = LOG_MENU_SENSOR;
         loggingMenuSelection = 2;
       }

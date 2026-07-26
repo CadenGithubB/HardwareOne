@@ -22,7 +22,7 @@ void fsLock(const char* reason);
 void fsUnlock();
 
 // Automation system constants
-#define kAutoMemoCap 128
+#define kAutomationsMemoCap 128
 
 // Automation callback type
 typedef bool (*AutomationCallback)(const char* autoJson, size_t jsonLen, void* userData);
@@ -36,6 +36,12 @@ void runAutomationsOnBoot();
 // Automation scheduler functions (runs from main loop, no dedicated task)
 bool startAutomationScheduler();
 void stopAutomationScheduler();
+
+// True while the scheduler cache is live and the main-loop tick should run.
+// Not the same as gSettings.automationEnabled (permission) or
+// automationAutoStart (boot intent) — see the definition for why the tick
+// cannot be gated on either of those alone.
+extern bool gAutomationSchedulerRunning;
 void notifyAutomationScheduler();
 // Fast in-RAM check used by the main loop to decide whether to run the
 // expensive schedulerTickMinute. Returns true if any enabled automation's
@@ -86,14 +92,14 @@ bool evaluateCondition(const char* condition);
 const char* validateConditionalHierarchy(const char* conditions);
 
 // Global automation state
-extern long* gAutoMemoId;
-extern time_t* gAutoMemoNextAt;
-extern int gAutoMemoCount;
-extern bool gAutosDirty;
+extern long* gAutomationsMemoId;
+extern time_t* gAutomationsMemoNextAt;
+extern int gAutomationsMemoCount;
+extern bool gAutomationsDirty;
 
 // Automation logging state (defined in System_Automation.cpp)
-extern bool gAutoLogActive;
-extern String gAutoLogFile;
+extern bool gAutomationLogActive;
+extern String gAutomationLogFile;
 
 #else // !ENABLE_AUTOMATION
 
@@ -104,6 +110,7 @@ inline void resumeAutomationSystem() {}
 inline void runAutomationsOnBoot() {}
 inline bool startAutomationScheduler() { return false; }
 inline void stopAutomationScheduler() {}
+const bool gAutomationSchedulerRunning = false;
 inline void notifyAutomationScheduler() {}
 inline bool automationsAnyDue(time_t) { return false; }
 inline void automationOnSystemEvent(uint8_t) {}
@@ -115,8 +122,8 @@ inline const char* executeConditionalCommand(const char*, const char*) { return 
 inline bool evaluateCondition(const char*) { return false; }
 
 // Global state stubs
-static bool gAutosDirty = false;
-static bool gAutoLogActive = false;
+static bool gAutomationsDirty = false;
+static bool gAutomationLogActive = false;
 
 #endif // ENABLE_AUTOMATION
 

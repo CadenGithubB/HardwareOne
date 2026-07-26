@@ -19,19 +19,19 @@
 #endif
 
 #if ENABLE_IMU_SENSOR
-#include "i2csensor_bno055.h"     // gImuEnabled / gImuConnected
+#include "i2csensor_bno055.h"     // gImuRunning / gImuConnected
 #endif
 #if ENABLE_TOF_SENSOR
-#include "i2csensor_vl53l4cx.h"   // gTofEnabled / gTofConnected
+#include "i2csensor_vl53l4cx.h"   // gTofRunning / gTofConnected
 #endif
 #if ENABLE_THERMAL_SENSOR
-#include "i2csensor_mlx90640.h"   // gThermalEnabled / gThermalConnected
+#include "i2csensor_mlx90640.h"   // gThermalRunning / gThermalConnected
 #endif
 #if ENABLE_GPS_SENSOR
-#include "i2csensor_pa1010d.h"    // gGpsEnabled / gGpsConnected
+#include "i2csensor_pa1010d.h"    // gGpsRunning / gGpsConnected
 #endif
 #if ENABLE_GAMEPAD_SENSOR
-#include "i2csensor_seesaw.h"     // gInputEnabled / gInputConnected
+#include "i2csensor_seesaw.h"     // gInputRunning / gInputConnected
 #endif
 #if ENABLE_APDS_SENSOR
 #include "i2csensor_apds9960.h"   // gApdsConnected
@@ -200,7 +200,7 @@ void displaySensorData() {
 #if ENABLE_THERMAL_SENSOR
   totalCount++;
   oledDisplay->print("Thermal: ");
-  if (gThermalConnected && gThermalEnabled) {
+  if (gThermalConnected && gThermalRunning) {
     oledDisplay->println("ON");
     activeCount++;
   } else {
@@ -212,7 +212,7 @@ void displaySensorData() {
 #if ENABLE_TOF_SENSOR
   totalCount++;
   oledDisplay->print("ToF:     ");
-  if (gTofConnected && gTofEnabled) {
+  if (gTofConnected && gTofRunning) {
     oledDisplay->println("ON");
     activeCount++;
   } else {
@@ -224,7 +224,7 @@ void displaySensorData() {
 #if ENABLE_IMU_SENSOR
   totalCount++;
   oledDisplay->print("IMU:     ");
-  if (gImuConnected && gImuEnabled) {
+  if (gImuConnected && gImuRunning) {
     oledDisplay->println("ON");
     activeCount++;
   } else {
@@ -236,7 +236,7 @@ void displaySensorData() {
 #if ENABLE_GPS_SENSOR
   totalCount++;
   oledDisplay->print("GPS:     ");
-  if (gGpsConnected && gGpsEnabled) {
+  if (gGpsConnected && gGpsRunning) {
     oledDisplay->println("ON");
     activeCount++;
   } else {
@@ -247,10 +247,10 @@ void displaySensorData() {
   // APDS sensor status
 #if ENABLE_APDS_SENSOR
   {
-    extern bool gApdsColorEnabled;
+    extern bool gApdsColorRunning;
     totalCount++;
     oledDisplay->print("APDS:    ");
-    if (gApdsColorEnabled) {
+    if (gApdsColorRunning) {
       oledDisplay->println("ON");
       activeCount++;
     } else {
@@ -263,7 +263,7 @@ void displaySensorData() {
 #if ENABLE_GAMEPAD_SENSOR
   totalCount++;
   oledDisplay->print("Gamepad: ");
-  if (gInputConnected && gInputEnabled) {
+  if (gInputConnected && gInputRunning) {
     oledDisplay->println("ON");
     activeCount++;
   } else {
@@ -275,7 +275,7 @@ void displaySensorData() {
 #if ENABLE_RTC_SENSOR
   totalCount++;
   oledDisplay->print("RTC:     ");
-  if (gRtcConnected && gRtcEnabled) {
+  if (gRtcConnected && gRtcRunning) {
     oledDisplay->println("ON");
     activeCount++;
   } else {
@@ -287,7 +287,7 @@ void displaySensorData() {
 #if ENABLE_PRESENCE_SENSOR
   totalCount++;
   oledDisplay->print("Presence:");
-  if (gPresenceConnected && gPresenceEnabled) {
+  if (gPresenceConnected && gPresenceRunning) {
     oledDisplay->println(" ON");
     activeCount++;
   } else {

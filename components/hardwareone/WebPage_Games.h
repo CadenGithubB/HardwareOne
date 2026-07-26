@@ -1057,9 +1057,9 @@ function getDirIndex(enemyFacing, camAngle) {
 // SENSOR HARDWARE STATE
 // =============================================
 var i2cEnabled = false;
-var imuEnabled = false;
+var imuRunning = false;
 var imuCompiled = false;
-var inputEnabled = false;
+var inputRunning = false;
 var inputCompiled = false;
 
 // =============================================
@@ -9720,14 +9720,14 @@ async function checkSensorAvailability() {
     }
     var sensData = await hw.fetchJSON('/api/sensors/status');
     imuCompiled = (sensData.imuCompiled === true);
-    imuEnabled = (sensData.imuEnabled === true);
+    imuRunning = (sensData.imuRunning === true);
     inputCompiled = (sensData.inputCompiled === true);
-    inputEnabled = (sensData.inputEnabled === true);
-    console.log('[GAMES] Sensor status: i2c=' + i2cEnabled + ' imuCompiled=' + imuCompiled + ' imuEnabled=' + imuEnabled + ' inputCompiled=' + inputCompiled + ' inputEnabled=' + inputEnabled);
+    inputRunning = (sensData.inputRunning === true);
+    console.log('[GAMES] Sensor status: i2c=' + i2cEnabled + ' imuCompiled=' + imuCompiled + ' imuRunning=' + imuRunning + ' inputCompiled=' + inputCompiled + ' inputRunning=' + inputRunning);
   } catch (e) {
     console.error('[GAMES] Failed to check sensor availability:', e);
-    i2cEnabled = false; imuEnabled = false; imuCompiled = false;
-    inputEnabled = false; inputCompiled = false;
+    i2cEnabled = false; imuRunning = false; imuCompiled = false;
+    inputRunning = false; inputCompiled = false;
   }
 }
 
@@ -21993,7 +21993,7 @@ function startGame() {
     // Trigger the terrain selector change handler which does the full cave test setup
     _tSel.dispatchEvent(new Event('change'));
     // Still need to start the game loop
-    var useHardware = !USE_KEYBOARD && !USE_MOUSE && i2cEnabled && imuCompiled && imuEnabled && inputEnabled;
+    var useHardware = !USE_KEYBOARD && !USE_MOUSE && i2cEnabled && imuCompiled && imuRunning && inputRunning;
     hasBaseline = true;
     calibrating = false;
     lastUpdate = 0;
@@ -22017,7 +22017,7 @@ function startGame() {
     return;
   }
 
-  var useHardware = !USE_KEYBOARD && !USE_MOUSE && i2cEnabled && imuCompiled && imuEnabled && inputEnabled;
+  var useHardware = !USE_KEYBOARD && !USE_MOUSE && i2cEnabled && imuCompiled && imuRunning && inputRunning;
   gameOverState = false;
   running = true;
   ENDLESS_MODE = false;

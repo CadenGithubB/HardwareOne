@@ -48,6 +48,7 @@
 #include "WebPage_LoginRequired.h"
 #include "WebPage_Logging.h"
 #include "WebPage_Battery.h"
+#include "WebPage_R1_Health.h"
 #include "WebPage_Settings.h"
 #include "System_EdgeImpulse.h"
 #include "System_ESPSR.h"
@@ -1103,7 +1104,7 @@ extern void* ps_alloc(size_t size, AllocPref pref, const char* tag);
 extern bool sanitizeAutomationsJson(String& json);
 extern void writeAutomationsJsonAtomic(const String& json);
 extern const char* AUTOMATIONS_JSON_FILE;
-extern bool gAutosDirty;
+extern bool gAutomationsDirty;
 #endif
 extern bool readText(const char* path, String& out);
 extern const char* buildSensorStatusJson();
@@ -3133,7 +3134,7 @@ static esp_err_t handleLoggingStatus(httpd_req_t* req) {
   // `log status` is admin-gated on the CLI; build the same text from globals
   // so guests/users can still see the Logging page surface.
   char logBuf[512];
-  if (gSystemLogEnabled && (gOutputFlags & MSG_ROUTE_FILE)) {
+  if (gSystemLogRunning && (gOutputFlags & MSG_ROUTE_FILE)) {
     unsigned long ageSeconds = (millis() - gSystemLogLastWrite) / 1000;
     snprintf(logBuf, sizeof(logBuf),
              "System logging ACTIVE\n"
@@ -3143,7 +3144,7 @@ static esp_err_t handleLoggingStatus(httpd_req_t* req) {
              "  Auto-start: %s",
              gSystemLogPath.c_str(), ageSeconds, (unsigned)gOutputFlags,
              gSettings.systemLogAutoStart ? "ON" : "OFF");
-  } else if (gSystemLogEnabled) {
+  } else if (gSystemLogRunning) {
     snprintf(logBuf, sizeof(logBuf),
              "System logging CONFIGURED but MSG_ROUTE_FILE flag not set\n"
              "  File: %s\n"
@@ -3354,7 +3355,7 @@ esp_err_t handleAutomationsGet(httpd_req_t* req) {
     httpd_resp_send(req, body.c_str(), body.length());
     return ESP_OK;
   }
-  doc["systemEnabled"] = gSettings.automationsEnabled;
+  doc["systemEnabled"] = gSettings.automationEnabled;
   String out;
   serializeJson(doc, out);
   httpd_resp_send(req, out.c_str(), out.length());
@@ -5130,7 +5131,44 @@ static String sHttpsCertData;
 static String sHttpsKeyData;
 #endif
 
+static bool ensureWebRuntimeBuffers() {
+  if (!gJsonResponseMutex) {
+    gJsonResponseMutex = xSemaphoreCreateMutex();
+  }
+  if (!gJsonResponseMutex) {
+    ERROR_WEBF("Cannot start HTTP server: JSON response mutex allocation failed");
+    return false;
+  }
+
+  if (!gJsonResponseBuffer) {
+    gJsonResponseBuffer =
+        (char*)ps_alloc(JSON_RESPONSE_SIZE, AllocPref::PreferPSRAM, "json.resp.buf");
+  }
+  if (!gJsonResponseBuffer) {
+    ERROR_WEBF("Cannot start HTTP server: %u-byte JSON response buffer allocation failed",
+               (unsigned)JSON_RESPONSE_SIZE);
+    return false;
+  }
+
+  // The log mirror is optional: all pages and APIs except the live CLI history
+  // remain useful if this smaller allocation fails.
+  if (!gWebMirror.buf && gWebMirrorCap > 0) {
+    gWebMirror.init(gWebMirrorCap);
+    if (!gWebMirror.buf) {
+      WARN_WEBF("Web CLI history disabled: %u-byte mirror allocation failed",
+                (unsigned)gWebMirrorCap);
+    }
+  }
+  return true;
+}
+
 void startHttpServer() {
+  // Claim the large shared response buffer only when the server is requested.
+  // Compiled-but-disabled HTTP builds therefore keep the 64 KB available.
+  if (!ensureWebRuntimeBuffers()) {
+    return;
+  }
+
   // Load persistent IP ban list before accepting any connections
   loadIpBans();
 
@@ -5413,6 +5451,9 @@ register_handlers:
  #endif
  #if ENABLE_WEB_BATTERY
   registerBatteryHandlers(server);
+ #endif
+ #if ENABLE_WEB_R1_HEALTH
+  registerR1HealthHandlers(server);
  #endif
  #if ENABLE_WEB_GAME_MAZE
   registerGamesHandlers(server);

@@ -1,5 +1,6 @@
 #include "Arduino.h"
 #include <esp_app_desc.h>
+#include <esp_attr.h>
 #include <esp_system.h>
 // Forward declarations to satisfy Arduino's auto-generated prototypes
 #include "System_CommandTypes.h"
@@ -190,7 +191,7 @@ size_t gAllocPsBefore = 0;
 
 // AllocEntry struct defined in System_MemUtil.h
 extern const int MAX_ALLOC_ENTRIES = 64;
-AllocEntry gAllocTracker[MAX_ALLOC_ENTRIES];
+EXT_RAM_BSS_ATTR AllocEntry gAllocTracker[MAX_ALLOC_ENTRIES];
 int gAllocTrackerCount = 0;
 bool gAllocTrackerEnabled = false;
 
@@ -350,7 +351,7 @@ void sensorStatusBump() {
   gSensorStatusSeq = s;
   DEBUG_ESPNOW_METADATAF("[STATUS_BUMP] seq=%lu cause='%s' | thermal=%d tof=%d imu=%d gamepad=%d",
                  (unsigned long)gSensorStatusSeq, gLastStatusCause,
-                 gThermalEnabled ? 1 : 0, gTofEnabled ? 1 : 0, gImuEnabled ? 1 : 0, gInputEnabled ? 1 : 0);
+                 gThermalRunning ? 1 : 0, gTofRunning ? 1 : 0, gImuRunning ? 1 : 0, gInputRunning ? 1 : 0);
   DEBUG_SSEF("sensorStatusBump: seq now %lu | cause=%s (debounced)", (unsigned long)gSensorStatusSeq, gLastStatusCause);
   // Mark dirty and schedule debounced broadcast
   gSensorStatusDirty = true;
@@ -511,6 +512,66 @@ static String originPrefix(const char* source, const String& user, const String&
     snprintf(buf, sizeof(buf), "[%s] ", source);
   }
   return String(buf);
+}
+
+static void broadcastCommandResultQueued(const String& prefix, const String& body, uint8_t route) {
+  extern void broadcastOutputCore_Routed(const char* text, size_t len, uint8_t route);
+
+  const size_t maxFrameLen = DEBUG_MSG_SIZE - 1;  // leave room for NUL in DebugMessage::text
+  const size_t prefixLen = prefix.length();
+  const size_t bodyLen = body.length();
+
+  if (prefixLen + bodyLen <= maxFrameLen) {
+    String line = prefix;
+    line += body;
+    broadcastOutputCore_Routed(line.c_str(), line.length(), route);
+    return;
+  }
+
+  // Command return values may be up to CMD_RESULT_MAX (4096), but the debug
+  // fan-out queue is intentionally line-sized. Split only the queued display
+  // copy; the caller's return buffer and targeted BLE reply stay intact.
+  char frame[DEBUG_MSG_SIZE];
+  const char* prefixC = prefix.c_str();
+  const char* bodyC = body.c_str();
+
+  size_t prefixCopy = prefixLen < maxFrameLen ? prefixLen : maxFrameLen;
+  size_t payloadCap = maxFrameLen - prefixCopy;
+  if (payloadCap == 0) {
+    // Pathological username/IP/source prefix: emit the clipped prefix first,
+    // then continue with body-only chunks rather than dropping the result.
+    memcpy(frame, prefixC, maxFrameLen);
+    frame[maxFrameLen] = '\0';
+    broadcastOutputCore_Routed(frame, maxFrameLen, route);
+    prefixCopy = 0;
+    payloadCap = maxFrameLen;
+  }
+
+  const uint32_t paceStartMs = millis();
+  for (size_t off = 0; off < bodyLen; off += payloadCap) {
+    // Pace the burst against the single drain task: a 4 KB result is ~17
+    // frames against a 96-slot pool, and enqueueChunk drops (never blocks)
+    // when the free list is exhausted — without pacing, a busy queue turns
+    // the tail of the result into silent "[output] N line(s) dropped".
+    // The TOTAL pacing cost is budgeted: this runs on loopTask for serial
+    // results and on httpd tasks for web, and a wedged drain must not hold
+    // the caller for 17 × 50 ms. Past the budget, frames fall back to
+    // drop-with-marker — the pre-pacing behavior.
+    if ((uint32_t)(millis() - paceStartMs) < 250) debugQueueBackpressure(8, 50);
+
+    size_t n = bodyLen - off;
+    if (n > payloadCap) n = payloadCap;
+
+    size_t pos = 0;
+    if (prefixCopy > 0) {
+      memcpy(frame, prefixC, prefixCopy);
+      pos = prefixCopy;
+    }
+    memcpy(frame + pos, bodyC + off, n);
+    pos += n;
+    frame[pos] = '\0';
+    broadcastOutputCore_Routed(frame, pos, route);
+  }
 }
 
 // applySettings() moved to settings.cpp
@@ -770,8 +831,7 @@ void broadcastOutput(const String& s, const CommandContext& ctx) {
     default: source = "system"; break;
   }
 
-  String prefixed = originPrefix(source, ctx.auth.user, ctx.auth.ip);
-  prefixed += s;
+  String prefix = originPrefix(source, ctx.auth.user, ctx.auth.ip);
   DEBUG_CMD_FLOWF("[BROADCAST_CTX] origin=%s user=%s mask=0x%02lX msg='%.50s'",
                   source, ctx.auth.user.c_str(),
                   (unsigned long)ctx.outputMask, s.c_str());
@@ -781,17 +841,20 @@ void broadcastOutput(const String& s, const CommandContext& ctx) {
   uint8_t route = (uint8_t)(ctx.outputMask & (MSG_ROUTE_SERIAL | MSG_ROUTE_WEB | MSG_ROUTE_FILE | MSG_ROUTE_BLE))
                 | MSG_ROUTE_OLED | MSG_ROUTE_G2;
 
-  // Pass explicit route to broadcastOutputCore — this runs AFTER the
-  // command's per-task currentCommandContext has been cleared, so the
-  // implicit fallback would be MSG_ROUTE_ALL. Use the ctx we already
-  // have to compute the correct route instead.
-  extern void broadcastOutputCore_Routed(const char* text, size_t len, uint8_t route);
-  broadcastOutputCore_Routed(prefixed.c_str(), prefixed.length(), route);
+  // Pass explicit route to the queued command-result fan-out. This runs AFTER
+  // the command's per-task currentCommandContext has been cleared, so the
+  // implicit fallback would be MSG_ROUTE_ALL. Use the ctx we already have to
+  // compute the correct route instead. Long results are split here because
+  // command handlers can return up to CMD_RESULT_MAX while DebugMessage::text
+  // remains a deliberately small line-sized envelope.
+  broadcastCommandResultQueued(prefix, s, route);
   // (No web-mirror backfill here: the drain appends WEB-routed messages to
   // the mirror unconditionally, so a backfill would double-append.)
 
   // Targeted BLE response (direct send to originating connection, not via queue)
   if (ctx.outputMask & MSG_ROUTE_BLE) {
+    String prefixed = prefix;
+    prefixed += s;
     uint16_t targetConnId = 0;
     if (ctx.auth.sid.length() > 0) {
       targetConnId = (uint16_t)ctx.auth.sid.toInt();
@@ -804,6 +867,83 @@ void broadcastOutput(const String& s, const CommandContext& ctx) {
   }
 
   DEBUG_CMD_FLOWF("[broadcast] route=0x%02X len=%d", route, s.length());
+}
+
+// Transport-completion delivery for the command return value (OUTPUT CONTRACT
+// channel 2). Serial is the one origin with no reply channel of its own — web
+// answers in the HTTP body, BLE in a targeted notify — so its result used to
+// be pushed through the 256 B line queue in ~17 decorated chunks. Here the
+// serial-origin blob is written to the console directly instead: byte-exact,
+// copy-pasteable, prompt printed after it by the caller. All other sinks
+// (file log, OLED console, web mirror) keep the queued chunked copy they get
+// today, so nothing else changes shape. Non-serial origins pass through to
+// broadcastOutput(s, ctx) untouched.
+void deliverCommandResult(const String& result, const CommandContext& ctx) {
+  const bool serialDirect = (ctx.origin == ORIGIN_SERIAL) && (ctx.outputMask & MSG_ROUTE_SERIAL);
+  if (!serialDirect) {
+    broadcastOutput(result, ctx);
+    return;
+  }
+
+  // The direct write bypasses the queue pipeline, so it must re-ask the
+  // pipeline's own gates: validate-only suppression (per-command
+  // ctx.validateOnly — the race-free equivalent of the gCLIValidateOnly
+  // global broadcastOutputCore checks, which cmd_exec may already have
+  // re-set for its NEXT queued command by the time we run), help-mode
+  // suppression (step 3 — the mirror call below records the suppressed
+  // line, so no double bookkeeping here), and the outSerial kill-switch
+  // the drain applies per line (System_Debug.cpp serial sink).
+  const bool writeSerial = result.length() > 0
+                        && !ctx.validateOnly
+                        && (gOutputFlags & MSG_ROUTE_SERIAL)
+                        && (gCLIState == CLI_NORMAL || gInHelpRender);
+
+  if (writeSerial) {
+    // Let lines the command streamed during execution drain first, so the
+    // result can't overtake them on the console. Bounded: a jammed queue
+    // delays the reply, never blocks it. Queue-empty still leaves at most
+    // one in-flight line racing us, and the CDC/UART driver's per-write
+    // lock keeps that whole-line — it can never splice inside the blob.
+    debugWaitOutputDrained(120);
+
+    // Blob + trailing newline in ONE write() call == one locked CDC/UART
+    // transaction, atomic against debug_out's per-line printf: a debug line
+    // can land before or after this write, never inside it. (Two separate
+    // writes would let a line glue itself between the blob and its newline.)
+    // USB-CDC short-writes when the host stops draining (100 ms window) —
+    // surface that rather than lose the tail silently. Classic-UART boards
+    // (QT Py / Feather V2) instead block until fully sent (~350 ms for 4 KB
+    // at 115200) while holding the UART lock, pausing the drain for that
+    // window — accepted cost on those secondary targets.
+    String framed;
+    framed.reserve(result.length() + 1);
+    framed = result;
+    framed += '\n';
+    if (framed.length() == result.length() + 1) {
+      const size_t wrote = Serial.write((const uint8_t*)framed.c_str(), framed.length());
+      if (wrote < framed.length()) {
+        BROADCAST_PRINTF("[serial] result short-write %u/%u B (host stopped draining?)",
+                         (unsigned)wrote, (unsigned)framed.length());
+      }
+    } else {
+      // OOM building the framed copy — fall back to two writes. Worst case a
+      // racing debug line lands between blob and newline; the bytes still
+      // arrive intact.
+      size_t wrote = Serial.write((const uint8_t*)result.c_str(), result.length());
+      wrote += Serial.write((uint8_t)'\n');
+      if (wrote < result.length() + 1) {
+        BROADCAST_PRINTF("[serial] result short-write %u/%u B (host stopped draining?)",
+                         (unsigned)wrote, (unsigned)(result.length() + 1));
+      }
+    }
+  }
+
+  // Mirror to the remaining sinks (file/OLED/G2, plus web when masked)
+  // exactly as before; the queued serial copy is replaced by the direct
+  // write above.
+  CommandContext mirrorCtx = ctx;
+  mirrorCtx.outputMask &= ~(uint32_t)MSG_ROUTE_SERIAL;
+  broadcastOutput(result, mirrorCtx);
 }
 
 char* gFileReadBuf = nullptr;
@@ -1327,7 +1467,7 @@ void hardwareone_setup() {
   // Global mutexes (gFsMutex, gJsonResponseMutex, gMeshRetryMutex, etc.)
   initMutexes();
 
-  if (gSettings.i2cBusEnabled) {
+  if (gSettings.i2cEnabled) {
     initSensorQueue();
   }
 
@@ -1339,27 +1479,20 @@ void hardwareone_setup() {
   notifPolicyLoad();
   heapLogSummary("boot.after_debugbuf");
 
-  // Initialize shared JSON response buffer for handlers
-#if ENABLE_HTTP_SERVER
-  if (!gJsonResponseBuffer) {
-    gJsonResponseBuffer = (char*)ps_alloc(JSON_RESPONSE_SIZE, AllocPref::PreferPSRAM, "json.resp.buf");
-    if (!gJsonResponseBuffer) {
-      ERROR_SYSTEMF("FATAL: Failed to allocate JSON response buffer");
-      while (1) delay(1000);
-    }
-  }
-#endif
-
 #if ENABLE_AUTOMATION
-  // Initialize automation system at boot (only if enabled in settings)
-  if (gSettings.automationsEnabled) {
+  // Both axes: automationEnabled is permission, automationAutoStart is boot
+  // intent. The scheduler can still be brought up later with
+  // `automation system enable`, which sets gAutomationSchedulerRunning itself.
+  if (gSettings.automationEnabled && ramFlushResolve(RF_AUTOMATION, gSettings.automationAutoStart)) {
     if (!initAutomationSystem()) {
       ERROR_SYSTEMF("FATAL: Failed to initialize automation system");
       while (1) delay(1000);
     }
     DEBUG_SYSTEMF("Automation system initialized at boot");
-  } else {
+  } else if (!gSettings.automationEnabled) {
     DEBUG_SYSTEMF("Automation system disabled - skipping initialization");
+  } else {
+    DEBUG_SYSTEMF("Automation autostart off - scheduler idle until 'automation system enable'");
   }
 #endif
 
@@ -1469,7 +1602,7 @@ void hardwareone_setup() {
   oledEarlyInit();
 
 #if ENABLE_I2C_SYSTEM
-  if (gSettings.i2cBusEnabled && !queueProcessorTask) {
+  if (gSettings.i2cEnabled && !queueProcessorTask) {
     const uint32_t queueStackWords = SENSOR_QUEUE_STACK_WORDS;
     // Pin to Core 1 (I2C_SENSOR_CORE): this task runs the I2C device-init
     // transactions, so it carries the same starve-mid-transaction → bus-storm →
@@ -1523,7 +1656,7 @@ void hardwareone_setup() {
 #if ENABLE_OLED_DISPLAY && ENABLE_OLED_INPUT
     // Start the input device (gamepad or ANO encoder) before first-time setup
     // so the OLED keyboard can receive input.
-    if (oledConnected && gOledEnabled) {
+    if (oledConnected && gOledRunning) {
       DEBUG_SYSTEMF("[Boot] Starting input device for OLED first-time setup");
       bool ok = inputStartInternal();  // Properly initializes hardware and creates task
       DEBUG_INPUTF("[Boot] Input device init result: %s", ok ? "SUCCESS" : "FAILED");
@@ -1562,8 +1695,8 @@ void hardwareone_setup() {
   oledSetBootProgress(30, "Connecting WiFi");
 
   bool wifiConnected = false;
-  // Always attempt WiFi connection if credentials exist (controlled by wifiAutoReconnect setting)
-  if (ramFlushResolve(RF_WIFI, gSettings.wifiAutoReconnect)) {  // Controlled by first-time setup or settings
+  // Always attempt WiFi connection if credentials exist (controlled by wifiAutoStart setting)
+  if (gSettings.wifiEnabled && ramFlushResolve(RF_WIFI, gSettings.wifiAutoStart)) {  // Controlled by first-time setup or settings
     // Skip NTP sync in wificonnect so we can show it separately in boot progress
     gSkipNTPInWifiConnect = true;
     setupWiFi();
@@ -1652,21 +1785,21 @@ void hardwareone_setup() {
 
   // Bluetooth - auto-start if enabled in settings.
   // Two triggers can bring up BT at boot:
-  //   1. bluetoothAutoStart=true   → start whichever mode bleMode says
+  //   1. bleAutoStart=true   → start whichever mode bleMode says
   //   2. Any registered peer wants auto-reconnect AND has a saved MAC
   //      → start client mode (even if (1) is off and bleMode=server)
   // Trigger 2 only ever starts the *client* role; if you want server mode
-  // at boot, flip bluetoothAutoStart explicitly. Boot reconnect itself is
+  // at boot, flip bleAutoStart explicitly. Boot reconnect itself is
   // delegated to BLE_Peers' bleBootReconnect() which iterates the peer
   // registry — adding a new peer doesn't require touching this block.
 #if ENABLE_BLUETOOTH
   // Make sure built-in metadata-only peers (phone) are registered so
-  // bleAnyPeerWantsAutoConnect can see them. Real peer modules register
+  // bleAnyPeerWantsAutoReconnect can see them. Real peer modules register
   // themselves from initG2Client / g2RingInit further down.
   bleRegisterBuiltinPeers();
 
 #if ENABLE_G2_GLASSES
-  const bool wantClientForAutoReconnect = bleAnyPeerWantsAutoConnect();
+  const bool wantClientForAutoReconnect = bleAnyPeerWantsAutoReconnect();
 #else
   const bool wantClientForAutoReconnect = false;
 #endif
@@ -1678,8 +1811,13 @@ void hardwareone_setup() {
       : gSettings.bleMode;
 
   // Substitute only the setting read, not the whole condition: a G2/ring peer
-  // brings the radio up in client mode independently of bluetoothAutoStart.
-  if (ramFlushResolve(RF_BLUETOOTH, gSettings.bluetoothAutoStart) || wantClientForAutoReconnect) {
+  // brings the radio up in client mode independently of bleAutoStart.
+  // NOTE the parentheses: bleEnabled gates BOTH reasons to come up. Without
+  // them this reads `(enabled && autostart) || wantClient`, so a peer set to
+  // auto-reconnect would start the radio on a device where Bluetooth is
+  // explicitly disabled. Disabled has to mean disabled.
+  if (gSettings.bleEnabled &&
+      (ramFlushResolve(RF_BLUETOOTH, gSettings.bleAutoStart) || wantClientForAutoReconnect)) {
     oledSetBootProgress(85, "Starting Bluetooth");
 
     // Pause sensor polling during BLE init to avoid interrupt contention
@@ -1706,7 +1844,7 @@ void hardwareone_setup() {
       }
     } else
 #endif
-    if (ramFlushResolve(RF_BLUETOOTH, gSettings.bluetoothAutoStart)) {
+    if (ramFlushResolve(RF_BLUETOOTH, gSettings.bleAutoStart)) {
       // Server-mode path only runs when the user *explicitly* asked for BT
       // at boot. We never coerce to server from auto-reconnect flags.
       extern bool initBluetooth();
@@ -1736,7 +1874,7 @@ void hardwareone_setup() {
 
 #if ENABLE_CAMERA_SENSOR
   // Camera auto-start (independent of I2C sensor queue)
-  if (ramFlushResolve(RF_CAMERA, snapCameraAutoStart)) {
+  if (gSettings.cameraEnabled && ramFlushResolve(RF_CAMERA, snapCameraAutoStart)) {
     runUnifiedSystemCommand("opencamera");
   }
 #endif
@@ -1750,15 +1888,15 @@ void hardwareone_setup() {
   #if ENABLE_ESP_SR
   // Resolve both through this same if/else — SR takes the mic, so resolving them
   // independently would double-claim the I2S channel.
-  if (ramFlushResolve(RF_SR, gSettings.srAutoStart)) {
+  if (gSettings.srEnabled && ramFlushResolve(RF_SR, gSettings.srAutoStart)) {
     broadcastOutput("Starting ESP-SR speech recognition...");
     runUnifiedSystemCommand("srstart");
-  } else if (ramFlushResolve(RF_MICROPHONE, gSettings.microphoneAutoStart)) {
+  } else if (gSettings.micEnabled && ramFlushResolve(RF_MICROPHONE, gSettings.micAutoStart)) {
     broadcastOutput("Starting microphone sensor...");
     runUnifiedSystemCommand("openmic");
   }
   #else
-  if (ramFlushResolve(RF_MICROPHONE, gSettings.microphoneAutoStart)) {
+  if (gSettings.micEnabled && ramFlushResolve(RF_MICROPHONE, gSettings.micAutoStart)) {
     broadcastOutput("Starting microphone sensor...");
     runUnifiedSystemCommand("openmic");
   }
@@ -1769,7 +1907,7 @@ void hardwareone_setup() {
 #if ENABLE_HTTP_SERVER
   oledSetBootProgress(90, "Starting HTTP");
 
-  const bool httpWanted = ramFlushResolve(RF_HTTP, gSettings.httpAutoStart);
+  const bool httpWanted = gSettings.httpEnabled && ramFlushResolve(RF_HTTP, gSettings.httpAutoStart);
   if (httpWanted && WiFi.isConnected()) {
     runUnifiedSystemCommand("openhttp");
     BROADCAST_PRINTF("%s%s", gServerIsHttps ? "HTTPS server started. Try: https://" : "HTTP server started. Try: http://", WiFi.localIP().toString().c_str());
@@ -1786,7 +1924,7 @@ void hardwareone_setup() {
   // Mirrors the sensor/SR auto-start pattern (gSettings.<x>AutoStart -> runtime
   // start command). Loading is heavy (PSRAM + time), so it's opt-in (default off).
 #if ENABLE_ONDEVICE_LLM
-  if (ramFlushResolve(RF_LLM, gSettings.llmAutoStart)) {
+  if (gSettings.llmEnabled && ramFlushResolve(RF_LLM, gSettings.llmAutoStart)) {
     broadcastOutput("Auto-loading on-device LLM model...");
     String llmAutoCmd = "llmload " + gSettings.llmDefaultModel;
     runUnifiedSystemCommand(llmAutoCmd);
@@ -1795,9 +1933,9 @@ void hardwareone_setup() {
 
   // MQTT client - auto-start if enabled in settings and WiFi is connected
 #if ENABLE_MQTT
-  // mqttClientEnabled stays a hard master gate — the overlay resolves the
+  // mqttEnabled stays a hard master gate — the overlay resolves the
   // autostart intent, it does not override whether MQTT is configured at all.
-  if (gSettings.mqttClientEnabled && ramFlushResolve(RF_MQTT, gSettings.mqttAutoStart)) {
+  if (gSettings.mqttEnabled && ramFlushResolve(RF_MQTT, gSettings.mqttAutoStart)) {
     oledSetBootProgress(92, "Starting MQTT");
     if (WiFi.isConnected()) {
       runUnifiedSystemCommand("openmqtt");
@@ -1862,7 +2000,13 @@ void hardwareone_setup() {
 #endif
 
 #if ENABLE_AUTOMATION
-  runAutomationsOnBoot();
+  // Gate on the scheduler actually being up. Previously unconditional, so
+  // BOOT-trigger automations fired even with automations switched off —
+  // runAutomationsOnBoot() itself only checks a once-per-boot latch and the
+  // filesystem, never the setting.
+  if (gAutomationSchedulerRunning) {
+    runAutomationsOnBoot();
+  }
 #endif
 
 #if ENABLE_ESPNOW
@@ -1928,7 +2072,10 @@ void hardwareone_setup() {
     fsListInit();
   }
 
-  if (ramFlushResolve(RF_ESPNOW, gSettings.espnowenabled) && identityOk) {
+  // espnowEnabled used to serve as BOTH the master switch and the boot flag.
+  // It is now the master switch only; espnowAutoStart is the boot flag.
+  if (gSettings.espnowEnabled &&
+      ramFlushResolve(RF_ESPNOW, gSettings.espnowAutoStart) && identityOk) {
     broadcastOutput("[ESP-NOW] Auto-initialization enabled in settings");
     const char* setupError = checkEspNowFirstTimeSetup();
     if (setupError && strlen(setupError) > 0) {
@@ -1970,8 +2117,8 @@ void hardwareone_setup() {
   printMemoryReport();
   // Gated at the call site: both helpers read their own autostart flag internally,
   // so the overlay has to decide here rather than inside them.
-  if (ramFlushResolve(RF_SENSORLOG, gSettings.sensorLogAutoStart)) sensorLogAutoStart();
-  if (ramFlushResolve(RF_SYSTEMLOG, gSettings.systemLogAutoStart)) systemLogAutoStart();
+  if (gSettings.sensorLogEnabled && ramFlushResolve(RF_SENSORLOG, gSettings.sensorLogAutoStart)) sensorLogAutoStart();
+  if (gSettings.systemLogEnabled && ramFlushResolve(RF_SYSTEMLOG, gSettings.systemLogAutoStart)) systemLogAutoStart();
 
   broadcastOutput("[Boot] Setup complete");
 
@@ -2059,7 +2206,7 @@ static void powerSaveTick() {
       setCpuFrequencyDrained(savedCpuMhz);
     }
     savedCpuMhz = 0;
-    gOledEnabled = true;
+    gOledRunning = true;
     oledResumeFromSleep();
     oledMarkDirty();
     asleep = false;
@@ -2116,7 +2263,7 @@ static void powerSaveTick() {
   if (!powerSleepTransitionAllowed(nullptr)) return;
   powerSleepTransitionMark();
   oledPrepareForSleep();   // DISPLAYOFF (+ LDO2 cut on FeatherS3); board-aware
-  gOledEnabled = false;    // updateOLEDDisplay() now early-returns → refresh stops
+  gOledRunning = false;    // updateOLEDDisplay() now early-returns → refresh stops
   // Downclock to the current mode's IDLE floor. Every mode holds the 80 MHz
   // Wi-Fi floor while asleep — radio stays up so HTTP/ESP-NOW remain reachable;
   // we only shed dynamic core power. UltraSaver is the exception: it sinks all
@@ -2181,6 +2328,9 @@ void hardwareone_loop() {
   // ========================================================================
 
   sensorLogTick();
+#if ENABLE_BLUETOOTH
+  bleAutoReconnectTick();
+#endif
 
 #if ENABLE_BATTERY_MONITOR
   {
@@ -2215,8 +2365,8 @@ void hardwareone_loop() {
     if (gNextSensorStatusBroadcastDue != 0 && (long)(nowMs - gNextSensorStatusBroadcastDue) >= 0) {
       DEBUG_SSEF("[SSE_BROADCAST] SENDING | seq=%lu thermal=%d tof=%d imu=%d gamepad=%d apdsColor=%d apdsProx=%d apdsGest=%d",
                      (unsigned long)gSensorStatusSeq,
-                     gThermalEnabled ? 1 : 0, gTofEnabled ? 1 : 0, gImuEnabled ? 1 : 0, gInputEnabled ? 1 : 0,
-                     gApdsColorEnabled ? 1 : 0, gApdsProximityEnabled ? 1 : 0, gApdsGestureEnabled ? 1 : 0);
+                     gThermalRunning ? 1 : 0, gTofRunning ? 1 : 0, gImuRunning ? 1 : 0, gInputRunning ? 1 : 0,
+                     gApdsColorRunning ? 1 : 0, gApdsProximityRunning ? 1 : 0, gApdsGestureRunning ? 1 : 0);
       broadcastSensorStatusToAllSessions();
       DEBUG_SSEF("[SSE_BROADCAST] SENT successfully");
       gSensorStatusDirty = false;
@@ -2225,7 +2375,12 @@ void hardwareone_loop() {
   }
 
 #if ENABLE_AUTOMATION
-  if (gSettings.automationsEnabled) {
+  // gAutomationSchedulerRunning, not automationAutoStart: autostart is boot
+  // intent only, and gating the tick on it would leave a runtime
+  // `automation system enable` enabled-but-never-ticking. The flag is also what
+  // makes the boot gate hold — without it, automationsAnyDue() would report due
+  // on a null cache and schedulerTickMinute() would rebuild and run anyway.
+  if (gSettings.automationEnabled && gAutomationSchedulerRunning) {
     static unsigned long lastAutoCheck = 0;
     unsigned long nowAuto = millis();
     time_t nowT = time(nullptr);
@@ -2236,12 +2391,12 @@ void hardwareone_loop() {
     // are rate-limited to one per 250ms so a chatty subscribed source
     // (gesture waving, text spam) can't degenerate the loop into a full
     // file-read+parse every pass — events buffer in the ring meanwhile.
-    bool needFullTick = gAutosDirty ||
+    bool needFullTick = gAutomationsDirty ||
                         automationsAnyDue(nowT) ||
                         (automationEventsPending() && (nowAuto - lastAutoCheck >= 250)) ||
                         (nowAuto - lastAutoCheck >= 60000);
     if (needFullTick) {
-      gAutosDirty = false;
+      gAutomationsDirty = false;
       schedulerTickMinute();
       lastAutoCheck = nowAuto;
     }
@@ -2429,7 +2584,7 @@ void hardwareone_loop() {
 
           String out;
           (void)submitAndExecuteSync(uc, out);
-          broadcastOutput(out, uc.ctx);
+          deliverCommandResult(out, uc.ctx);
         }
       }
       // Every serial line is a real keystroke-driven interaction; refresh the

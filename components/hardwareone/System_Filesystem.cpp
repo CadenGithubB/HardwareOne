@@ -34,7 +34,7 @@ extern bool sanitizeAutomationsJson(String& json);
 extern time_t computeNextRunTime(const char* automationJson, time_t currentTime);
 extern void writeAutomationsJsonAtomic(const String& json);
 extern void notifyAutomationScheduler();
-extern bool gAutosDirty;
+extern bool gAutomationsDirty;
 
 // External constants
 extern const char* AUTOMATIONS_JSON_FILE;
@@ -204,7 +204,7 @@ bool initFilesystem() {
   // Skip if automation system is disabled
   DebugFlagMask _dbgSaved = getDebugFlags();
   setDebugFlag(DEBUG_AUTO_SCHEDULER);
-  if (gSettings.automationsEnabled && VFS::existsGuarded(AUTOMATIONS_JSON_FILE, VFS::systemAuth("fs.init.automations_check"))) {
+  if (gSettings.automationEnabled && VFS::existsGuarded(AUTOMATIONS_JSON_FILE, VFS::systemAuth("fs.init.automations_check"))) {
     String json;
     if (readText(AUTOMATIONS_JSON_FILE, json)) {
       bool modified = false;
@@ -220,7 +220,7 @@ bool initFilesystem() {
       // Write back if any changes were made
       if (modified) {
         writeAutomationsJsonAtomic(json);
-        gAutosDirty = true;
+        gAutomationsDirty = true;
         notifyAutomationScheduler();
         DEBUGF(DEBUG_AUTO_SCHEDULER, "[autos] Boot: wrote updated automations.json; scheduler refresh queued");
       }
@@ -534,7 +534,7 @@ void runFileWritePostSaveHooks(const String& path) {
     String json;
     if (readText(AUTOMATIONS_JSON_FILE, json) && sanitizeAutomationsJson(json)) {
       writeAutomationsJsonAtomic(json);  // best-effort atomic writeback
-      gAutosDirty = true;                // ensure scheduler refreshes
+      gAutomationsDirty = true;                // ensure scheduler refreshes
     }
   }
 #else

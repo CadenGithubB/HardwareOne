@@ -35,7 +35,7 @@ struct RTCCache {
 
 // State variables
 extern RTCCache gRtcCache;
-extern bool gRtcEnabled;
+extern bool gRtcRunning;
 extern bool gRtcConnected;
 extern unsigned long gRtcLastStopTime;
 extern TaskHandle_t gRtcTaskHandle;

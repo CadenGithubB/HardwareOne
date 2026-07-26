@@ -1,10 +1,8 @@
 // =============================================================================
-// Even Realities R1 Ring — BLE central (info-only / Path 1)
+// Even Realities R1 Ring — BLE central
 // =============================================================================
-// See G2_Ring.h for the what-and-why. In short: connect, subscribe
-// to notify, dump everything the ring pushes so we can inventory what's
-// available without the server-pkey auth dance. No commands are sent to the
-// ring — we are strictly a listener in this first implementation.
+// See G2_Ring.h. Connect, pairAuth / time / advStart, subscribe to notify,
+// poll vitals, decode into the R1 cache. Shares bleCentralTx with G2 temples.
 
 #include "G2_Ring.h"
 #include <esp_attr.h>
@@ -24,9 +22,11 @@
 #include "System_Settings.h"   // gSettings + setSetting() for MAC persistence
 #include "BLE_Events.h"        // CompactJson + blePushEvent
 #include "BLE_Peers.h"         // peer registry
+#include "BLE_CentralTx.h"     // controller-level TX gate (shared with G2)
 #include "G2_Glasses.h"        // g2SetAllTemplesConnPriority, g2WaitForBothConnected
 #include "System_R1_Protocol.h"  // R1Encoder + decoder (real wire format)
 #include "System_G2_Protocol.h"  // g2BuildRingRawDataPush + G2RingPushFields
+#include "G2_Health.h"           // history append + daily backfill
 
 #include <freertos/FreeRTOS.h>
 #include <time.h>
@@ -52,7 +52,11 @@ volatile bool        gRingScanFound       = false;
 // BLE peer registry binding
 // =============================================================================
 static bool ringPeerConnectSavedThunk() { return g2RingConnectSaved(); }
-static void ringPeerDisconnectThunk()   { g2RingDisconnect(); }
+static void ringPeerDisconnectThunk() {
+  // Intentional tear-down (registry / CLI paths that use ops->disconnect).
+  blePeerNoteUserDisconnect(BLE_PEER_R1_RING);
+  g2RingDisconnect();
+}
 static bool ringPeerIsConnectedThunk()  { return g2RingIsConnected(); }
 static const BlePeerOps ringPeerOps = {
   ringPeerConnectSavedThunk,
@@ -87,6 +91,168 @@ struct G2RingState {
 };
 static G2RingState gRing;
 
+// Short central take — if the glasses hold the gate for an envelope, we
+// enqueue rather than block for seconds (or drop into the ether).
+static constexpr uint32_t RING_CENTRAL_TX_MS = 50;
+static constexpr uint32_t RING_WRITE_MUTEX_MS = 1500;
+
+// Pending TX while bleCentralTx is busy (image envelopes, heartbeats, …).
+// coalesceKey != 0 → replace any queued frame with the same key (polls).
+// coalesceKey == 0 → FIFO; if full, drop the oldest non-coalesced slot.
+static constexpr size_t RING_TXQ_DEPTH = 8;
+struct RingTxPending {
+  uint8_t  bytes[R1_MAX_FRAME];
+  uint16_t len;
+  uint8_t  coalesceKey;  // 0 = unique; 1.. = replace same key
+};
+static RingTxPending gRingTxQ[RING_TXQ_DEPTH];
+static uint8_t       gRingTxQCount = 0;
+static portMUX_TYPE  gRingTxQMux = portMUX_INITIALIZER_UNLOCKED;
+
+// Lock order: bleCentralTx → gRing.writeMutex (never reverse). All ring
+// GATT writes go through here so image bursts on the glasses cannot race
+// ring polls into the shared BT controller queue.
+static void ringClearGattPointers() {
+  gRing.connected  = false;
+  gRing.writeChar  = nullptr;
+  gRing.notifyChar = nullptr;
+  gRing.client     = nullptr;
+  gRing.clientStale = true;
+}
+
+static void ringTxQClear() {
+  portENTER_CRITICAL(&gRingTxQMux);
+  gRingTxQCount = 0;
+  portEXIT_CRITICAL(&gRingTxQMux);
+}
+
+// Returns true if the frame was stored (or replaced a same-key entry).
+static bool ringTxQEnqueue(const uint8_t* data, size_t len, uint8_t coalesceKey) {
+  if (!data || len == 0 || len > R1_MAX_FRAME) return false;
+  portENTER_CRITICAL(&gRingTxQMux);
+  if (coalesceKey != 0) {
+    for (uint8_t i = 0; i < gRingTxQCount; i++) {
+      if (gRingTxQ[i].coalesceKey == coalesceKey) {
+        memcpy(gRingTxQ[i].bytes, data, len);
+        gRingTxQ[i].len = (uint16_t)len;
+        portEXIT_CRITICAL(&gRingTxQMux);
+        return true;
+      }
+    }
+  }
+  bool droppedOldest = false;
+  if (gRingTxQCount >= RING_TXQ_DEPTH) {
+    // Drop oldest; shift left.
+    for (uint8_t i = 1; i < RING_TXQ_DEPTH; i++) gRingTxQ[i - 1] = gRingTxQ[i];
+    gRingTxQCount = RING_TXQ_DEPTH - 1;
+    droppedOldest = true;
+  }
+  RingTxPending& slot = gRingTxQ[gRingTxQCount++];
+  memcpy(slot.bytes, data, len);
+  slot.len = (uint16_t)len;
+  slot.coalesceKey = coalesceKey;
+  portEXIT_CRITICAL(&gRingTxQMux);
+  if (droppedOldest) {
+    DEBUG_G2F("[RING] TX queue full — dropped oldest pending");
+  }
+  return true;
+}
+
+// Pop front into out; returns false if empty. out must be R1_MAX_FRAME.
+static bool ringTxQPop(uint8_t* out, uint16_t* outLen) {
+  portENTER_CRITICAL(&gRingTxQMux);
+  if (gRingTxQCount == 0) {
+    portEXIT_CRITICAL(&gRingTxQMux);
+    return false;
+  }
+  memcpy(out, gRingTxQ[0].bytes, gRingTxQ[0].len);
+  *outLen = gRingTxQ[0].len;
+  for (uint8_t i = 1; i < gRingTxQCount; i++) gRingTxQ[i - 1] = gRingTxQ[i];
+  gRingTxQCount--;
+  portEXIT_CRITICAL(&gRingTxQMux);
+  return true;
+}
+
+static bool ringTxQPushFront(const uint8_t* data, size_t len, uint8_t coalesceKey) {
+  if (!data || len == 0 || len > R1_MAX_FRAME) return false;
+  portENTER_CRITICAL(&gRingTxQMux);
+  if (gRingTxQCount >= RING_TXQ_DEPTH) {
+    gRingTxQCount = RING_TXQ_DEPTH - 1;  // drop newest at end
+  }
+  for (uint8_t i = gRingTxQCount; i > 0; i--) gRingTxQ[i] = gRingTxQ[i - 1];
+  memcpy(gRingTxQ[0].bytes, data, len);
+  gRingTxQ[0].len = (uint16_t)len;
+  gRingTxQ[0].coalesceKey = coalesceKey;
+  gRingTxQCount++;
+  portEXIT_CRITICAL(&gRingTxQMux);
+  return true;
+}
+
+// Caller holds bleCentralTx. Sends one GATT write under writeMutex.
+static bool ringWriteLocked(const uint8_t* data, size_t len) {
+  if (!data || len == 0 || !gRing.connected || !gRing.writeChar) return false;
+  if (!gRing.writeMutex || gRing.clientStale) return false;
+  if (xSemaphoreTake(gRing.writeMutex, pdMS_TO_TICKS(RING_WRITE_MUTEX_MS)) !=
+      pdTRUE) {
+    DEBUG_G2F("[RING] Write mutex timeout; write dropped (%u B)", (unsigned)len);
+    return false;
+  }
+  if (!gRing.connected || !gRing.writeChar || gRing.clientStale) {
+    xSemaphoreGive(gRing.writeMutex);
+    return false;
+  }
+  const bool ok =
+      gRing.writeChar->writeValue(const_cast<uint8_t*>(data), len, false);
+  if (ok) gRing.packetsSent++;
+  xSemaphoreGive(gRing.writeMutex);
+  return ok;
+}
+
+// Drain while holding bleCentralTx. Stops on first GATT failure and
+// restores that frame to the front of the queue.
+static void ringDrainPendingLocked() {
+  uint8_t  buf[R1_MAX_FRAME];
+  uint16_t len = 0;
+  while (ringTxQPop(buf, &len)) {
+    if (!ringWriteLocked(buf, len)) {
+      (void)ringTxQPushFront(buf, len, /*coalesceKey=*/0);
+      break;
+    }
+  }
+}
+
+void g2RingTryDrainPendingTx() {
+  if (!gRing.connected || !gRing.writeChar || gRing.clientStale) {
+    ringTxQClear();
+    return;
+  }
+  if (!bleCentralTxTake(0)) return;
+  ringDrainPendingLocked();
+  bleCentralTxGive();
+}
+
+// coalesceKey: 0 = FIFO unique; non-zero = replace same key if already queued.
+static bool ringWrite(const uint8_t* data, size_t len, uint8_t coalesceKey = 0) {
+  // Do not call methods on writeChar to "probe" liveness — after
+  // BLEDevice::deinit the pointer is dangling. Callers must
+  // g2RingInvalidateLink() before tearing down the stack.
+  if (!data || len == 0 || !gRing.connected || !gRing.writeChar) return false;
+  if (!gRing.writeMutex || gRing.clientStale) return false;
+  if (!bleCentralTxTake(RING_CENTRAL_TX_MS)) {
+    if (ringTxQEnqueue(data, len, coalesceKey)) {
+      DEBUG_G2F("[RING] Central TX busy; write queued (%u B key=%u)",
+                (unsigned)len, (unsigned)coalesceKey);
+      return true;
+    }
+    DEBUG_G2F("[RING] Central TX busy; write dropped (%u B)", (unsigned)len);
+    return false;
+  }
+  ringDrainPendingLocked();
+  const bool ok = ringWriteLocked(data, len);
+  bleCentralTxGive();
+  return ok;
+}
+
 // Runtime verbose flag — toggle with `ringverbose on/off` if we ever need
 // to silence the byte-dump once we've characterised the stream. Default is
 // on because we're still learning what the ring emits.
@@ -107,12 +273,30 @@ static R1Encoder gR1Encoder;
 // so a partial cache (e.g. HR known but HRV not yet seen) translates into
 // a partial proto frame that omits the missing fields.
 struct R1TelemetryCache {
-  uint8_t  hr;          uint32_t hrTs;       bool hrValid;
-  int16_t  hrv;         uint32_t hrvTs;      bool hrvValid;
-  uint8_t  spo2;        uint32_t spo2Ts;     bool spo2Valid;
-  uint8_t  battery;                          bool batteryValid;
+  uint8_t  hr;           uint32_t hrTs;        uint32_t hrRxMs;       bool hrValid;
+  int16_t  hrv;          uint32_t hrvTs;       uint32_t hrvRxMs;      bool hrvValid;
+  uint8_t  spo2;         uint32_t spo2Ts;      uint32_t spo2RxMs;     bool spo2Valid;
+  int16_t  tempTenths;   uint32_t tempTs;      uint32_t tempRxMs;     bool tempValid;
+  uint8_t  battery;                            uint32_t batteryRxMs;  bool batteryValid;
+  uint8_t  wear;                               uint32_t wearRxMs;     bool wearValid;
 };
 static R1TelemetryCache gR1Cache;
+
+// Age in seconds for UI/JSON. Prefer ring epoch when wall clock looks synced
+// (≥ 2020-09); else millis since local receive. −1 = unknown.
+static int32_t ringSampleAgeSec(uint32_t ringTs, uint32_t rxMs) {
+  const time_t now = time(nullptr);
+  if (ringTs >= 1600000000u && (uint32_t)now >= 1600000000u) {
+    int64_t a = (int64_t)now - (int64_t)ringTs;
+    if (a < 0) a = 0;
+    if (a > 0x7fffffffLL) a = 0x7fffffffLL;
+    return (int32_t)a;
+  }
+  if (rxMs != 0) {
+    return (int32_t)((millis() - rxMs) / 1000u);
+  }
+  return -1;
+}
 
 // Spoof-push task state. The task wakes every `gSpoofIntervalSec` seconds,
 // polls the ring for fresh point samples, and synthesises a sid=0x90
@@ -195,12 +379,15 @@ static void ringExtractTelemetryCache(const R1Decoded& d) {
       hasExtra = true;
     }
 
+    const uint32_t rx = millis();
     switch (d.cmd) {
       case R1_CMD_HEARTRATE:
         if (hasExtra && extra > 0 && extra < 250) {
           gR1Cache.hr      = (uint8_t)extra;
           gR1Cache.hrTs    = ts;
+          gR1Cache.hrRxMs  = rx;
           gR1Cache.hrValid = true;
+          g2HealthNoteSample(HEALTH_METRIC_HR, (int16_t)extra, ts);
         }
         break;
       case R1_CMD_HRV:
@@ -209,11 +396,15 @@ static void ringExtractTelemetryCache(const R1Decoded& d) {
         if (hasExtra && extra > 0 && extra < 1000) {
           gR1Cache.hrv      = (int16_t)extra;
           gR1Cache.hrvTs    = ts;
+          gR1Cache.hrvRxMs  = rx;
           gR1Cache.hrvValid = true;
+          g2HealthNoteSample(HEALTH_METRIC_HRV, (int16_t)extra, ts);
         } else if (value > 0 && value < 1000) {
           gR1Cache.hrv      = value;
           gR1Cache.hrvTs    = ts;
+          gR1Cache.hrvRxMs  = rx;
           gR1Cache.hrvValid = true;
+          g2HealthNoteSample(HEALTH_METRIC_HRV, value, ts);
         }
         break;
       case R1_CMD_SPO2:
@@ -221,11 +412,25 @@ static void ringExtractTelemetryCache(const R1Decoded& d) {
         if (hasExtra && extra >= 70 && extra <= 100) {
           gR1Cache.spo2      = (uint8_t)extra;
           gR1Cache.spo2Ts    = ts;
+          gR1Cache.spo2RxMs  = rx;
           gR1Cache.spo2Valid = true;
+          g2HealthNoteSample(HEALTH_METRIC_SPO2, (int16_t)extra, ts);
         } else if (value >= 70 && value <= 100) {
           gR1Cache.spo2      = (uint8_t)value;
           gR1Cache.spo2Ts    = ts;
+          gR1Cache.spo2RxMs  = rx;
           gR1Cache.spo2Valid = true;
+          g2HealthNoteSample(HEALTH_METRIC_SPO2, (int16_t)value, ts);
+        }
+        break;
+      case R1_CMD_TEMPERATURE:
+        // Primary `value` is °C × 10 (codec hypothesis). Accept skin/body band.
+        if (value >= 150 && value <= 450) {
+          gR1Cache.tempTenths = value;
+          gR1Cache.tempTs     = ts;
+          gR1Cache.tempRxMs   = rx;
+          gR1Cache.tempValid  = true;
+          g2HealthNoteSample(HEALTH_METRIC_TEMP, value, ts);
         }
         break;
       default:
@@ -234,17 +439,53 @@ static void ringExtractTelemetryCache(const R1Decoded& d) {
     return;
   }
 
+  // Daily history → Trends day series + thin live sparkline backfill.
+  if (d.module == R1_MODULE_HEALTH && d.subCmd == R1_SUB_DAILY &&
+      (d.cmd == R1_CMD_HEARTRATE || d.cmd == R1_CMD_HRV || d.cmd == R1_CMD_SPO2 ||
+       d.cmd == R1_CMD_TEMPERATURE)) {
+    R1DailyResult daily;
+    if (r1ParseHealthDaily(d.payload, d.payloadLength, daily) && daily.count > 0) {
+      G2HealthMetric m = HEALTH_METRIC_HR;
+      if (d.cmd == R1_CMD_HRV) m = HEALTH_METRIC_HRV;
+      else if (d.cmd == R1_CMD_SPO2) m = HEALTH_METRIC_SPO2;
+      else if (d.cmd == R1_CMD_TEMPERATURE) m = HEALTH_METRIC_TEMP;
+      // Trends owns HR/HRV/SpO2 daily as a replaceable day series.
+      if (m == HEALTH_METRIC_HR || m == HEALTH_METRIC_HRV || m == HEALTH_METRIC_SPO2) {
+        g2HealthApplyTrendDaily(m, daily.values, daily.count, daily.startTs, daily.endTs);
+      }
+      g2HealthApplyDailyBackfill(m, daily.values, daily.count, daily.startTs, daily.endTs);
+    }
+    return;
+  }
+
   // system/system/{deviceStatus, heartbeatPack} — byte 0 is the (likely)
-  // battery percent. Stable within session, drifts down across days — strong
-  // battery hypothesis, see annotateDeviceStatus comments.
+  // battery percent; byte 1 is wear (0/1/2). See annotateDeviceStatus.
   if (d.module == R1_MODULE_SYSTEM && d.cmd == R1_CMD_SYSTEM &&
       (d.subCmd == R1_SUB_DEVICE_STATUS || d.subCmd == R1_SUB_HEARTBEAT) &&
       d.payloadLength >= 1) {
+    const uint32_t rx = millis();
     uint8_t b = d.payload[0];
     if (b > 0 && b <= 100) {
       gR1Cache.battery      = b;
+      gR1Cache.batteryRxMs  = rx;
       gR1Cache.batteryValid = true;
+      g2HealthNoteSample(HEALTH_METRIC_BATTERY, (int16_t)b, 0);
     }
+    if (d.payloadLength >= 2 && d.payload[1] <= 2) {
+      gR1Cache.wear      = d.payload[1];
+      gR1Cache.wearRxMs  = rx;
+      gR1Cache.wearValid = true;
+    }
+    return;
+  }
+
+  // system/system/wearStatus — dedicated 1-byte wear probe.
+  if (d.module == R1_MODULE_SYSTEM && d.cmd == R1_CMD_SYSTEM &&
+      d.subCmd == R1_SUB_WEAR_STATUS && d.payloadLength >= 1 &&
+      d.payload[0] <= 2) {
+    gR1Cache.wear      = d.payload[0];
+    gR1Cache.wearRxMs  = millis();
+    gR1Cache.wearValid = true;
   }
 }
 
@@ -311,17 +552,22 @@ void g2RingNoteForwardedTelemetry(const uint8_t* pb, size_t pbLen) {
     }
     if (!g2PbReadVarint(raw, rawLen, &p, &v)) return;
     long sv = (long)(int32_t)v;  // RingRawData fields are int32
+    const uint32_t rx = millis();
     switch (f) {
       case 1:  // battery
         if (sv > 0 && sv <= 100) {
           gR1Cache.battery      = (uint8_t)sv;
+          gR1Cache.batteryRxMs  = rx;
           gR1Cache.batteryValid = true;
+          g2HealthNoteSample(HEALTH_METRIC_BATTERY, (int16_t)sv, 0);
         }
         break;
       case 3:  // hr
         if (sv > 0 && sv < 250) {
           gR1Cache.hr      = (uint8_t)sv;
+          gR1Cache.hrRxMs  = rx;
           gR1Cache.hrValid = true;
+          g2HealthNoteSample(HEALTH_METRIC_HR, (int16_t)sv, now);
         }
         break;
       case 4:  // hrTs
@@ -330,7 +576,9 @@ void g2RingNoteForwardedTelemetry(const uint8_t* pb, size_t pbLen) {
       case 5:  // spo2
         if (sv >= 70 && sv <= 100) {
           gR1Cache.spo2      = (uint8_t)sv;
+          gR1Cache.spo2RxMs  = rx;
           gR1Cache.spo2Valid = true;
+          g2HealthNoteSample(HEALTH_METRIC_SPO2, (int16_t)sv, now);
         }
         break;
       case 6:  // spo2Ts
@@ -339,22 +587,36 @@ void g2RingNoteForwardedTelemetry(const uint8_t* pb, size_t pbLen) {
       case 7:  // hrv
         if (sv > 0 && sv < 1000) {
           gR1Cache.hrv      = (int16_t)sv;
+          gR1Cache.hrvRxMs  = rx;
           gR1Cache.hrvValid = true;
+          g2HealthNoteSample(HEALTH_METRIC_HRV, (int16_t)sv, now);
         }
         break;
       case 8:  // hrvTs
         if (gR1Cache.hrvValid) gR1Cache.hrvTs = (sv > 0) ? (uint32_t)sv : now;
         break;
+      case 9:  // temp (°C × 10 in RingRawData)
+        if (sv >= 150 && sv <= 450) {
+          gR1Cache.tempTenths = (int16_t)sv;
+          gR1Cache.tempRxMs   = rx;
+          gR1Cache.tempValid  = true;
+          g2HealthNoteSample(HEALTH_METRIC_TEMP, (int16_t)sv, now);
+        }
+        break;
+      case 10:  // tempTs
+        if (gR1Cache.tempValid) gR1Cache.tempTs = (sv > 0) ? (uint32_t)sv : now;
+        break;
       default:
-        break;  // chargeStates / temp / kcal / steps not cached today
+        break;  // chargeStates / kcal / steps not cached today
     }
   }
 
-  DEBUG_G2F("[RING] cache (forwarded) batt=%s%u hr=%s%u hrv=%s%d spo2=%s%u",
+  DEBUG_G2F("[RING] cache (forwarded) batt=%s%u hr=%s%u hrv=%s%d spo2=%s%u temp=%s%d",
             gR1Cache.batteryValid ? "" : "?", (unsigned)gR1Cache.battery,
             gR1Cache.hrValid      ? "" : "?", (unsigned)gR1Cache.hr,
             gR1Cache.hrvValid     ? "" : "?", (int)gR1Cache.hrv,
-            gR1Cache.spo2Valid    ? "" : "?", (unsigned)gR1Cache.spo2);
+            gR1Cache.spo2Valid    ? "" : "?", (unsigned)gR1Cache.spo2,
+            gR1Cache.tempValid    ? "" : "?", (int)gR1Cache.tempTenths);
 }
 
 // =============================================================================
@@ -507,8 +769,10 @@ static bool ringRunStandardSetup() {
     DEBUG_G2F("[RING] standard setup: failed to encode pairAuth");
     return false;
   }
-  gRing.writeChar->writeValue(auth.bytes, auth.length, false);
-  gRing.packetsSent++;
+  if (!ringWrite(auth.bytes, auth.length)) {
+    DEBUG_G2F("[RING] standard setup: pairAuth write failed");
+    return false;
+  }
   DEBUG_G2F("[RING] TX pairAuth ser=%u (%u B) — unlocking notify stream",
             (unsigned)auth.serial, (unsigned)auth.length);
   vTaskDelay(pdMS_TO_TICKS(1000));
@@ -523,10 +787,10 @@ static bool ringRunStandardSetup() {
   time_t now = time(nullptr);
   R1Frame timeFrame = gR1Encoder.buildSyncTime(0, (uint32_t)now);
   if (timeFrame.length > 0) {
-    gRing.writeChar->writeValue(timeFrame.bytes, timeFrame.length, false);
-    gRing.packetsSent++;
-    DEBUG_G2F("[RING] TX systemTime ser=%u tz=0min epoch=%lu",
-              (unsigned)timeFrame.serial, (unsigned long)now);
+    if (ringWrite(timeFrame.bytes, timeFrame.length)) {
+      DEBUG_G2F("[RING] TX systemTime ser=%u tz=0min epoch=%lu",
+                (unsigned)timeFrame.serial, (unsigned long)now);
+    }
   }
   vTaskDelay(pdMS_TO_TICKS(200));
 
@@ -546,10 +810,10 @@ static bool ringRunStandardSetup() {
   }
   R1Frame advFrame = gR1Encoder.buildAdvStart(mac);
   if (advFrame.length > 0) {
-    gRing.writeChar->writeValue(advFrame.bytes, advFrame.length, false);
-    gRing.packetsSent++;
-    DEBUG_G2F("[RING] TX advStart ser=%u (%u B)",
-              (unsigned)advFrame.serial, (unsigned)advFrame.length);
+    if (ringWrite(advFrame.bytes, advFrame.length)) {
+      DEBUG_G2F("[RING] TX advStart ser=%u (%u B)",
+                (unsigned)advFrame.serial, (unsigned)advFrame.length);
+    }
   }
   vTaskDelay(pdMS_TO_TICKS(200));
 
@@ -569,6 +833,8 @@ class RingClientCallbacks : public BLEClientCallbacks {
   void onDisconnect(BLEClient* /*c*/) override {
     const bool wasConnected = gRing.connected;
     DEBUG_G2F("[RING] BLE onDisconnect — connected-was=%d", wasConnected ? 1 : 0);
+    // Drop all GATT handles; client object may still exist until reconnect
+    // replaces it, but must not be used for writes after this.
     gRing.connected   = false;
     gRing.writeChar   = nullptr;
     gRing.notifyChar  = nullptr;
@@ -577,6 +843,7 @@ class RingClientCallbacks : public BLEClientCallbacks {
     if (wasConnected) {
       BROADCAST_PRINTF("[RING] Dropped BLE link — ring is no longer connected");
       ringPushStatusEvent("disconnect");
+      blePeerNoteLinkLost(BLE_PEER_R1_RING);
     }
   }
 };
@@ -804,9 +1071,8 @@ bool ringPerformConnect(const String& savedMac /* = String() */) {
   }
   DEBUG_G2F("[RING] BLE connect OK in %u ms", (unsigned)(millis() - t0));
 
-  // Bump MTU. The HRV init packet is 29 bytes, so a default 23-byte MTU
-  // would fragment it; we negotiate higher to keep writes single-packet.
-  // (Moot for Path 1 since we never write, but cheap and future-proof.)
+  // Bump MTU. Health queries / setup frames exceed the default 23-byte
+  // ATT payload; negotiate higher to keep writes single-packet.
   gRing.client->setMTU(64);
   gRing.mtu = gRing.client->getMTU();
   DEBUG_G2F("[RING] MTU negotiated to %u", (unsigned)gRing.mtu);
@@ -858,10 +1124,8 @@ bool ringPerformConnect(const String& savedMac /* = String() */) {
   gRing.connected      = true;
   gRing.connectedSince = millis();
 
-  // Run the R1 standard setup sequence (pairAuth → systemTime → advStart).
-  // This unlocks the ring's telemetry stream — without pairAuth the notify
-  // char stays muted, which is what we observed in earlier "info-only"
-  // tests that wired up the BLE link but sent no commands.
+  // pairAuth → systemTime → advStart unlocks the notify/telemetry stream
+  // (a bare subscribe without pairAuth stays muted).
   ringRunStandardSetup();
 
   BROADCAST_PRINTF("[RING] Connected to %s (auth + time sync sent)",
@@ -870,9 +1134,10 @@ bool ringPerformConnect(const String& savedMac /* = String() */) {
 
   // Persist ring MAC into the BLE peer registry. bleSavePeerMac is a
   // no-op when the value already matches — auto-reconnect is gated
-  // separately by the peer's autoConnect flag.
+  // separately by the peer's autoReconnect flag.
   if (gRingDeviceAddress.length() > 0) {
     bleSavePeerMac(BLE_PEER_R1_RING, gRingDeviceAddress);
+    blePeerNoteLinkUp(BLE_PEER_R1_RING);
   }
   return true;
 }
@@ -894,6 +1159,7 @@ bool ringPerformConnect(const String& savedMac /* = String() */) {
 
 bool g2RingInit() {
   if (gRing.initialized) return true;
+  bleCentralTxInit();
   if (!gRing.writeMutex) {
     gRing.writeMutex = xSemaphoreCreateMutex();
   }
@@ -983,12 +1249,28 @@ bool g2RingConnectMac(const String& mac) {
   return true;
 }
 
-void g2RingDisconnect() {
-  if (gRing.client && gRing.client->isConnected()) {
-    DEBUG_G2F("[RING] Disconnecting");
-    gRing.client->disconnect();
+void g2RingInvalidateLink() {
+  // No GATT calls — stack may already be dead.
+  const bool wasConnected = gRing.connected;
+  ringTxQClear();
+  ringClearGattPointers();
+  gR1Encoder.resetSerial();
+  if (wasConnected) {
+    DEBUG_G2F("[RING] Link invalidated (BLE stack teardown)");
+    ringPushStatusEvent("disconnect");
+    blePeerNoteLinkLost(BLE_PEER_R1_RING);
   }
-  gRing.connected = false;
+}
+
+void g2RingDisconnect() {
+  // After BLEDevice::deinit the client pointer is dangling — never touch it.
+  if (gRing.client && !gRing.clientStale && gRing.connected) {
+    DEBUG_G2F("[RING] Disconnecting");
+    gRing.client->disconnect();  // onDisconnect clears chars when stack is live
+  }
+  ringTxQClear();
+  ringClearGattPointers();
+  gR1Encoder.resetSerial();
 }
 
 bool g2RingIsConnected() {
@@ -1003,26 +1285,59 @@ bool g2RingPollVital(uint8_t which) {
     case 0: q = gR1Encoder.buildHealthQuery(R1_CMD_HEARTRATE, R1_SUB_POINT); tag = "hrPoint";   break;
     case 1: q = gR1Encoder.buildHealthQuery(R1_CMD_HRV,       R1_SUB_POINT); tag = "hrvPoint";  break;
     case 2: q = gR1Encoder.buildHealthQuery(R1_CMD_SPO2,      R1_SUB_POINT); tag = "spo2Point"; break;
-    case 3: q = gR1Encoder.buildGenericQuery(R1_MODULE_SYSTEM, R1_CMD_SYSTEM,
+    case 3: q = gR1Encoder.buildHealthQuery(R1_CMD_TEMPERATURE, R1_SUB_POINT); tag = "tempPoint"; break;
+    case 4: q = gR1Encoder.buildGenericQuery(R1_MODULE_SYSTEM, R1_CMD_SYSTEM,
                                              R1_SUB_DEVICE_STATUS);          tag = "devStatus"; break;
     default: return false;
   }
   if (q.length == 0 || !gRing.writeChar) return false;
-  gRing.writeChar->writeValue(q.bytes, q.length, false);
-  gRing.packetsSent++;
+  // Coalesce key 1..5: repeated Poll Now / Track mines replace in-queue.
+  if (!ringWrite(q.bytes, q.length, (uint8_t)(which + 1))) return false;
   DEBUG_G2F("[RING] page poll: TX %s ser=%u", tag, (unsigned)q.serial);
   return true;
+}
+
+bool g2RingQueryDaily(uint8_t cmd) {
+  if (!gRing.connected || !gRing.writeChar) return false;
+  if (cmd != R1_CMD_HEARTRATE && cmd != R1_CMD_HRV && cmd != R1_CMD_SPO2 &&
+      cmd != R1_CMD_TEMPERATURE && cmd != R1_CMD_ACTIVITY && cmd != R1_CMD_SLEEP) {
+    return false;
+  }
+  R1Frame q = gR1Encoder.buildHealthQuery(cmd, R1_SUB_DAILY);
+  if (q.length == 0) return false;
+  if (!ringWrite(q.bytes, q.length, (uint8_t)(0x20 + cmd))) return false;
+  DEBUG_G2F("[RING] daily query: TX cmd=0x%02X ser=%u", (unsigned)cmd, (unsigned)q.serial);
+  return true;
+}
+
+void g2RingPollVitalForLogging(void) {
+  if (!gRing.connected || !gRing.writeChar) return;
+  static uint8_t cursor = 0;
+  static uint32_t lastMs = 0;
+  const uint32_t now = millis();
+  if (lastMs != 0 && (long)(now - lastMs) < 700) return;
+  (void)g2RingPollVital(cursor);
+  cursor = (uint8_t)((cursor + 1) % G2_RING_POLL_VITAL_COUNT);
+  lastMs = now;
 }
 
 void g2RingGetTelemetry(G2RingTelemetry& out) {
   // gR1Cache is written from the BLE notify task; telemetry updates are
   // minute-scale, so a plain field copy is fine for a read-only dashboard
   // (no lock; worst case is one stale tick, corrected on the next).
-  out.connected    = gRing.connected;
-  out.hr           = gR1Cache.hr;       out.hrValid      = gR1Cache.hrValid;
-  out.hrv          = gR1Cache.hrv;      out.hrvValid     = gR1Cache.hrvValid;
-  out.spo2         = gR1Cache.spo2;     out.spo2Valid    = gR1Cache.spo2Valid;
-  out.battery      = gR1Cache.battery;  out.batteryValid = gR1Cache.batteryValid;
+  out.connected     = gRing.connected;
+  out.hr            = gR1Cache.hr;          out.hrValid      = gR1Cache.hrValid;
+  out.hrv           = gR1Cache.hrv;         out.hrvValid     = gR1Cache.hrvValid;
+  out.spo2          = gR1Cache.spo2;        out.spo2Valid    = gR1Cache.spo2Valid;
+  out.tempTenths    = gR1Cache.tempTenths;  out.tempValid    = gR1Cache.tempValid;
+  out.battery       = gR1Cache.battery;     out.batteryValid = gR1Cache.batteryValid;
+  out.wear          = gR1Cache.wear;        out.wearValid    = gR1Cache.wearValid;
+  out.hrAgeSec      = gR1Cache.hrValid      ? ringSampleAgeSec(gR1Cache.hrTs, gR1Cache.hrRxMs) : -1;
+  out.hrvAgeSec     = gR1Cache.hrvValid     ? ringSampleAgeSec(gR1Cache.hrvTs, gR1Cache.hrvRxMs) : -1;
+  out.spo2AgeSec    = gR1Cache.spo2Valid    ? ringSampleAgeSec(gR1Cache.spo2Ts, gR1Cache.spo2RxMs) : -1;
+  out.tempAgeSec    = gR1Cache.tempValid    ? ringSampleAgeSec(gR1Cache.tempTs, gR1Cache.tempRxMs) : -1;
+  out.batteryAgeSec = gR1Cache.batteryValid ? ringSampleAgeSec(0, gR1Cache.batteryRxMs) : -1;
+  out.wearAgeSec    = gR1Cache.wearValid    ? ringSampleAgeSec(0, gR1Cache.wearRxMs) : -1;
 }
 
 void g2RingGetStatus(char* buf, size_t cap) {
@@ -1128,28 +1443,26 @@ static void ringSpoofTaskBody(void* /*arg*/) {
     if (gRing.connected && gRing.writeChar) {
       // Poll each metric. Ignore encode failures — cache simply won't
       // refresh for that metric this cycle.
-      auto sendQ = [](uint8_t cmd, uint8_t sub, const char* tag) {
+      auto sendQ = [](uint8_t cmd, uint8_t sub, uint8_t ckey, const char* tag) {
         R1Frame q = gR1Encoder.buildHealthQuery(cmd, sub);
-        if (q.length > 0 && gRing.writeChar) {
-          gRing.writeChar->writeValue(q.bytes, q.length, false);
-          gRing.packetsSent++;
+        if (q.length > 0 && gRing.writeChar &&
+            ringWrite(q.bytes, q.length, ckey)) {
           DEBUG_G2F("[RING] spoof poll: TX %s ser=%u", tag, (unsigned)q.serial);
         }
       };
-      sendQ(R1_CMD_HEARTRATE, R1_SUB_POINT, "hrPoint");
+      sendQ(R1_CMD_HEARTRATE, R1_SUB_POINT, 1, "hrPoint");
       vTaskDelay(pdMS_TO_TICKS(700));
-      sendQ(R1_CMD_HRV,       R1_SUB_POINT, "hrvPoint");
+      sendQ(R1_CMD_HRV,       R1_SUB_POINT, 2, "hrvPoint");
       vTaskDelay(pdMS_TO_TICKS(700));
-      sendQ(R1_CMD_SPO2,      R1_SUB_POINT, "spo2Point");
+      sendQ(R1_CMD_SPO2,      R1_SUB_POINT, 3, "spo2Point");
       vTaskDelay(pdMS_TO_TICKS(700));
 
       // Battery comes from deviceStatus — generic system-module probe.
       {
         R1Frame q = gR1Encoder.buildGenericQuery(R1_MODULE_SYSTEM, R1_CMD_SYSTEM,
                                                  R1_SUB_DEVICE_STATUS);
-        if (q.length > 0 && gRing.writeChar) {
-          gRing.writeChar->writeValue(q.bytes, q.length, false);
-          gRing.packetsSent++;
+        if (q.length > 0 && gRing.writeChar &&
+            ringWrite(q.bytes, q.length, /*coalesceKey=*/5)) {
           DEBUG_G2F("[RING] spoof poll: TX deviceStatus ser=%u", (unsigned)q.serial);
         }
       }
@@ -1285,6 +1598,7 @@ static const char* cmd_ringconnect(const String& args) {
 
 static const char* cmd_ringdisconnect(const String& /*args*/) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  blePeerNoteUserDisconnect(BLE_PEER_R1_RING);
   g2RingDisconnect();
   return "RING: disconnect requested";
 }
@@ -1403,9 +1717,10 @@ static const char* cmd_ringquery(const String& args) {
     }
     uint8_t mask = (uint8_t)maskInt;
     f = gR1Encoder.buildHealthReportEnable(mask);
+    if (!ringWrite(f.bytes, f.length)) {
+      return "Error: RING: report enable write failed";
+    }
     snprintf(ret, sizeof(ret), "RING: report enable=0x%02X sent (set/SET/ok). Watch for ack.", mask);
-    gRing.writeChar->writeValue(f.bytes, f.length, false);
-    gRing.packetsSent++;
     DEBUG_G2F("[RING] TX healthReportEnable ser=%u mask=0x%02X (%u B)",
               (unsigned)f.serial, mask, (unsigned)f.length);
     return ret;
@@ -1548,8 +1863,9 @@ static const char* cmd_ringquery(const String& args) {
     return "Error: RING: failed to encode query frame";
   }
 
-  gRing.writeChar->writeValue(f.bytes, f.length, false);
-  gRing.packetsSent++;
+  if (!ringWrite(f.bytes, f.length)) {
+    return "Error: RING: query write failed";
+  }
   DEBUG_G2F("[RING] TX query '%s' ser=%u (%u B) — watch logs for response",
             tag, (unsigned)f.serial, (unsigned)f.length);
   snprintf(ret, sizeof(ret),
@@ -1740,7 +2056,7 @@ void g2RingNoteBridgePoll(uint64_t connRet, bool hasConnRet,
 // `status` reports the current mode + cache state.
 //
 // We persist the mode in `gBridgeRequested` (RAM-only — survives the rest
-// of the session but a reboot returns to the bleautoconnect default).
+// of the session but a reboot returns to the bleautoreconnect default).
 static volatile bool gBridgeRequested = false;
 
 // DEPRECATED: unregistered from g2RingCommands — see registry table for why.
@@ -1770,11 +2086,11 @@ static const char* cmd_ringbridge(const String& args) {
       snprintf(ageBuf, sizeof(ageBuf), " %us-ago", (unsigned)(ageMs / 1000));
     }
     snprintf(ret, sizeof(ret),
-             "ringbridge: mode=%s autoConnect=%s ring-link=%s heartbeat=%s "
+             "ringbridge: mode=%s autoReconnect=%s ring-link=%s heartbeat=%s "
              "tempStatus: connectRing=%s%u connRet=%u(%s)%s "
              "fwd-cache: hr=%s%u hrv=%s%d spo2=%s%u batt=%s%u",
              gBridgeRequested ? "BRIDGE (temple owns ring)" : "DIRECT (we own ring)",
-             gBlePeerData[BLE_PEER_R1_RING].autoConnect ? "on" : "off",
+             gBlePeerData[BLE_PEER_R1_RING].autoReconnect ? "on" : "off",
              gRing.connected ? "up" : "down",
              gBridgeHbEnabled ? "on" : "off",
              gBridgeProgress.hasConnectRing ? "" : "?",
@@ -1854,9 +2170,12 @@ static const char* cmd_ringbridge(const String& args) {
                   templeMac[3], templeMac[4], templeMac[5]);
         R1Frame advStart = gR1Encoder.buildAdvStart(templeMac);
         if (advStart.length > 0) {
-          gRing.writeChar->writeValue(advStart.bytes, advStart.length, false);
-          gRing.packetsSent++;
-          vTaskDelay(pdMS_TO_TICKS(250));  // let the write land on the ring
+          if (ringWrite(advStart.bytes, advStart.length)) {
+            vTaskDelay(pdMS_TO_TICKS(250));  // let the write land on the ring
+          } else {
+            DEBUG_G2F("[RING] ringbridge: WARN advStart write failed; "
+                      "trigger will go without advStart refresh");
+          }
         } else {
           DEBUG_G2F("[RING] ringbridge: WARN advStart frame build failed; "
                     "trigger will go without advStart refresh");

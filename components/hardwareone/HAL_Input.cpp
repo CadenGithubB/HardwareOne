@@ -260,7 +260,7 @@ extern const char* cmd_sensorstart_queued(I2CDeviceType sensor, const char* disp
 static const char* cmd_openinput(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   const char* result = cmd_sensorstart_queued(I2C_DEVICE_INPUT, inputDeviceLabel(),
-                                              gInputEnabled, "openinput@enqueue");
+                                              gInputRunning, "openinput@enqueue");
   // The device starts asynchronously and this command returns no button state —
   // point at the driver read command so the next step is to read live input.
 #if ENABLE_ANO_ENCODER
@@ -324,8 +324,9 @@ const size_t inputCommandsCount = sizeof(inputCommands) / sizeof(inputCommands[0
 // settings. Driver-specific entries (anoEncoderI2cAddr, anoEncoderInvert)
 // live in anoEncoderSettingsModule.
 static const SettingEntry inputSettingEntries[] = {
-  { "inputDevicePollMs", SETTING_INT,  &gSettings.inputDevicePollMs, 90, 0, nullptr, 10, 1000, "Poll Interval (ms)",   nullptr, false, nullptr, nullptr },
-  { "inputAutoStart",    SETTING_BOOL, &gSettings.inputAutoStart,     0, 0, nullptr, 0,  1,    "Auto-start after boot", nullptr, false, nullptr, nullptr },
+  { "inputEnabled", SETTING_BOOL, &gSettings.inputEnabled, 1, 0, nullptr, 0, 1, "Enabled", nullptr, false, nullptr, "inputenabled" },
+  { "inputAutoStart",    SETTING_BOOL, &gSettings.inputAutoStart,     0, 0, nullptr, 0,  1,    "Auto-start after boot", nullptr, false, nullptr, "inputautostart" },
+  { "inputDevicePollMs", SETTING_INT,  &gSettings.inputDevicePollMs, 90, 0, nullptr, 10, 1000, "Poll Interval (ms)",   nullptr, false, nullptr, "inputdevicepollms" },
 };
 
 static bool isInputConnected() { return gInputConnected; }

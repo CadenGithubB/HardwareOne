@@ -475,7 +475,7 @@ void rebuildNetworkSettingsPage() {
     const FeatureEntry* wifiFeature = getFeatureById("wifi");
     if (wifiFeature && isFeatureCompiled(wifiFeature)) {
       networkPage[networkPageCount].label = "WiFi auto-connect";
-      networkPage[networkPageCount].boolSetting = &gSettings.wifiAutoReconnect;
+      networkPage[networkPageCount].boolSetting = &gSettings.wifiAutoStart;
       networkPage[networkPageCount].isBool = true;
       networkPageCount++;
     }
@@ -483,7 +483,7 @@ void rebuildNetworkSettingsPage() {
 #endif
 
   // NOTE: "HTTP auto-start" and "BT auto-start" rows used to live here, but
-  // they bound to the very same flags (httpAutoStart / bluetoothAutoStart) that
+  // they bound to the very same flags (httpAutoStart / bleAutoStart) that
   // the "Web Interface" / "Bluetooth" toggles on the Features page already set
   // — a confusing duplicate. Enable now lives on the Features page; the
   // HTTP/HTTPS and Server/G2 *mode* is chosen on the dedicated WEBMODE/BTMODE
@@ -645,7 +645,7 @@ bool wizardShouldShowWebMode() {
 
 bool wizardShouldShowBtMode() {
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
-  return gSettings.bluetoothAutoStart && wizardModeMenuForFeature("bluetooth") != nullptr;
+  return gSettings.bleAutoStart && wizardModeMenuForFeature("bluetooth") != nullptr;
 #else
   return false;
 #endif
@@ -1099,7 +1099,7 @@ static void handleSerialESPNowPage(SetupWizardResult& result, bool& running) {
   if (introChoice.equalsIgnoreCase("n") || introChoice.equalsIgnoreCase("next") || introChoice.length() == 0) {
     // Explicit skip (or blank/Enter) — disable ESP-NOW since it's unconfigured;
     // it can't start without a name.
-    gSettings.espnowenabled = false;
+    gSettings.espnowEnabled = false;
     if (!wizardNextPage(result)) running = false;
     return;
   }
@@ -1774,7 +1774,7 @@ SetupWizardResult runAndApplyFeatureWizard(unsigned long idleTimeoutMs) {
     upsertWiFiNetwork(result.wifiSSID, result.wifiPassword, 1, false);
     sortWiFiByPriority();
     saveWiFiNetworks();
-    setSetting(gSettings.wifiAutoReconnect, true);
+    setSetting(gSettings.wifiAutoStart, true);
     broadcastOutput("WiFi credentials saved: " + result.wifiSSID);
   }
 #endif

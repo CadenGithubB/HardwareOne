@@ -16,7 +16,7 @@ static void displayIMUActions() {
   int y = OLED_CONTENT_START_Y;
   oledDisplay->setTextSize(1);
 
-  if (!gImuConnected || !gImuEnabled) {
+  if (!gImuConnected || !gImuRunning) {
     oledDisplay->setCursor(0, y);
     oledDisplay->println("IMU not active");
     oledDisplay->println();
@@ -69,7 +69,7 @@ static bool imuOLEDModeAvailable(String* outReason) {
 
 static void imuToggleConfirmed(void* userData) {
   (void)userData;
-  if (gImuEnabled && gImuConnected) {
+  if (gImuRunning && gImuConnected) {
     executeOLEDCommand("closeimu");
   } else {
     executeOLEDCommand("openimu");
@@ -79,7 +79,7 @@ static void imuToggleConfirmed(void* userData) {
 // Input handler for IMU OLED mode - X button toggles sensor
 static bool imuInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
-    if (gImuEnabled && gImuConnected) {
+    if (gImuRunning && gImuConnected) {
       oledConfirmRequest("Close IMU?", nullptr, imuToggleConfirmed, nullptr);
     } else {
       oledConfirmRequest("Open IMU?", nullptr, imuToggleConfirmed, nullptr);

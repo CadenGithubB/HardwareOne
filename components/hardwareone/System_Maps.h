@@ -831,8 +831,12 @@ public:
                                int32_t scaleX, int32_t scaleY);
   
 private:
-  static Waypoint _waypoints[MAX_WAYPOINTS];
+  static Waypoint* _waypoints;
   static int _selectedTarget;  // -1 = none
+
+  // Allocate the waypoint table on first map/waypoint use. Read-only paths
+  // treat a null table as "no waypoints loaded".
+  static bool ensureStorage();
 
   // Haversine distance/bearing to an active waypoint index
   static bool getDistanceBearingToIndex(int index, float fromLat, float fromLon,

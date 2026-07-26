@@ -2589,8 +2589,8 @@ bool startESPSR() {
   INFO_SRF("Starting ESP-SR pipeline...");
 
 #if ENABLE_MICROPHONE
-  WARN_SYSTEMF("[SR_START] Checking microphone sensor: gMicEnabled=%d", gMicEnabled ? 1 : 0);
-  if (gMicEnabled) {
+  WARN_SYSTEMF("[SR_START] Checking microphone sensor: gMicRunning=%d", gMicRunning ? 1 : 0);
+  if (gMicRunning) {
     gRestoreMicAfterSR = true;
     INFO_SRF("Microphone sensor is running; stopping it to start SR");
     if (micRecording) {
@@ -2791,6 +2791,9 @@ const char* cmd_sr_enable(const String& argsInput) {
 const char* cmd_sr_start(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   (void)argsInput;
+  if (!gSettings.srEnabled) {
+    return "ERROR: Speech recognition is disabled - run 'srenabled 1' first";
+  }
   bool ok = startESPSR();
   if (!ok) return "Error: failed to start";
 
@@ -3915,9 +3918,10 @@ static bool isESPSRConnected() {
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry espsrSettingsEntries[] = {
+  { "srEnabled", SETTING_BOOL, &gSettings.srEnabled, 1, 0, nullptr, 0, 1, "Enabled", nullptr, false, nullptr, "srenabled" },
   { "srAutoStart", SETTING_BOOL, &gSettings.srAutoStart, 0, 0, nullptr, 0, 1, "Auto-start at boot", nullptr, false, nullptr, "srautostart" },
   { "srModelSource", SETTING_INT, &gSettings.srModelSource, 0, 0, nullptr, 0, 2, "Model source (0=partition, 1=SD, 2=LittleFS)", "0|Partition,1|SD,2|LittleFS", false, nullptr, "srmodelsource" },
-  { "srCommandTimeout", SETTING_INT, &gSettings.srCommandTimeout, 6000, 0, nullptr, 1000, 30000, "Command timeout (ms)", nullptr, false, nullptr, "srtimeout" }
+  { "srCommandTimeout", SETTING_INT, &gSettings.srCommandTimeout, 6000, 0, nullptr, 1000, 30000, "Command timeout (ms)", nullptr, false, nullptr, "srtimeout" },
 };
 
 // Columns: name, jsonSection, entries, count, isConnected, description

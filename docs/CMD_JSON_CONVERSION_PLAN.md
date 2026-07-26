@@ -115,7 +115,7 @@ Status/getter commands whose JSON envelope lets an entire bespoke status endpoin
 
 **Endpoints retired by this wave:** `/api/mqtt/status`, `/api/sensors/remote`
 
-**Commands (26):** `bleadv`, `bleautostart`, `bledisconnect`, `blename`, `bletxpower`, `bleautoconnect`, `blemode`, `blestream`, `bondresync`, `bondrole`, `bondstream`, `ei`, `ei model`, `ei model info`, `ei status`, `ei track`, `ei track status`, `espnowmeshmaster`, `espnowmeshbackup`, `g2battery`, `g2status`, `ledbrightness`, `ledcolor`, `mqttclientenabled`, `srdyngain`, `srtuning`
+**Commands (26):** `bleadv`, `bleautostart`, `bledisconnect`, `blename`, `bletxpower`, `bleautoreconnect`, `blemode`, `blestream`, `bondresync`, `bondrole`, `bondstream`, `ei`, `ei model`, `ei model info`, `ei status`, `ei track`, `ei track status`, `espnowmeshmaster`, `espnowmeshbackup`, `g2battery`, `g2status`, `ledbrightness`, `ledcolor`, `mqttclientenabled`, `srdyngain`, `srtuning`
 
 ### Wave 3 — Action commands with side effects (open/close/start, file ops, espnow mutations)
 
@@ -307,7 +307,7 @@ All commands sorted by **ease** (lower = simpler + more feasible = do first). `e
 | 164 | 1 | `usersync` | /settings | action | low | high | none |  | State-changing/async: syncs user account to remote device via ESP-NOW. Returns text ack on sender;… |
 | 165 | 1 | `wifiadd` | /settings | action | low | high | small |  | Mutating action: adds WiFi network to in-memory array (gWifiNetworks) and persists to settings.json… |
 | 166 | 1 | `wifidisconnect` | /settings | action | low | high | none |  | Stateful action (disconnects WiFi, optionally stops HTTP server). Handler builds text response in g… |
-| 167 | 2 | `bleautoconnect` | /bluetooth | status | medium | high | small |  | Multi-peer command: bleautoconnect <peer-name> [on\|off]. No arg forwards to cmd_blepeers. Uses sta… |
+| 167 | 2 | `bleautoreconnect` | /bluetooth | status | medium | high | small |  | Multi-peer command: bleautoreconnect <peer-name> [on\|off]. No arg forwards to cmd_blepeers. Uses sta… |
 | 168 | 2 | `blemode` | /bluetooth | status | medium | high | small |  | Gets/sets BLE mode (server vs G2 client). Currently returns plain text only. Uses shared debug buff… |
 | 169 | 2 | `blestream` | /bluetooth | status | medium | high | small |  | Multi-subcommand: no-arg (show status), 'on'/'off' (toggle all streams), 'sensors'/'system'/'events… |
 | 170 | 2 | `bondrole` | /bond | setter | medium | high | small |  | Mutation: parses master\|worker\|0\|1 argument, sets bondRole via setSetting(), resets handshake if… |

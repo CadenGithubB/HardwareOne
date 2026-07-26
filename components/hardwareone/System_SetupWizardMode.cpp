@@ -529,7 +529,7 @@ static CLIModeInputResult dispatchESPNow(const String& line,
       if (isNext || raw.length() == 0) {
         // Explicit skip (or blank/Enter) — disable ESP-NOW since it's
         // unconfigured; it can't start without a name.
-        gSettings.espnowenabled = false;
+        gSettings.espnowEnabled = false;
         goNextPage();
         appendPromptTo(out, outSize);
         return (sWizard.subMode == WizardSubMode::DONE) ? CLI_MODE_HANDLED_AND_EXIT
@@ -828,7 +828,7 @@ static void wizardMode_onExit(void* /*ud*/) {
                         /*priority=*/1, /*hidden=*/false);
       sortWiFiByPriority();
       saveWiFiNetworks();
-      setSetting(gSettings.wifiAutoReconnect, true);
+      setSetting(gSettings.wifiAutoStart, true);
       broadcastOutput("WiFi credentials saved: " + sWizard.result.wifiSSID);
     }
 #endif

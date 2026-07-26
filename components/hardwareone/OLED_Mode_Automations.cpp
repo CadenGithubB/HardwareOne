@@ -634,7 +634,7 @@ static bool autoGatherCallback(const char* autoJson, size_t jsonLen, void* userD
 // ============================================================================
 
 void prepareAutomationData() {
-  if (!gSettings.automationsEnabled) {
+  if (!gSettings.automationEnabled) {
     autoRenderData.valid = false;
     autoRenderData.count = 0;
     return;
@@ -678,7 +678,7 @@ void displayAutomations() {
   if (oledKeyboardDrawIfActive(oledDisplay)) return;
   if (sWizStep != AW_NONE) { wizDraw(); return; }
 
-  if (!gSettings.automationsEnabled) {
+  if (!gSettings.automationEnabled) {
     oledDisplay->setTextSize(1);
     oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
     oledDisplay->setCursor(4, OLED_CONTENT_START_Y + 8);
@@ -987,7 +987,7 @@ static bool automationsInputHandler(int deltaX, int deltaY, uint32_t newlyPresse
 
   // A = Run selected automation, or start the create wizard on the "+ New" row.
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
-    if (gSettings.automationsEnabled && autoRenderData.selectedIdx == autoRenderData.count) {
+    if (gSettings.automationEnabled && autoRenderData.selectedIdx == autoRenderData.count) {
       wizResetAll();
       wizStartKeyboard(AW_NAME, "Name:", false);
       return true;
@@ -997,7 +997,7 @@ static bool automationsInputHandler(int deltaX, int deltaY, uint32_t newlyPresse
   }
   // X = Enable system if disabled, or toggle selected automation
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
-    if (!gSettings.automationsEnabled) {
+    if (!gSettings.automationEnabled) {
       executeOLEDCommand("automation system enable");
       autoForceRefresh = true;
       return true;
@@ -1007,7 +1007,7 @@ static bool automationsInputHandler(int deltaX, int deltaY, uint32_t newlyPresse
   }
   // Y = Delete selected automation (guarded by the global confirm overlay)
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_Y)) {
-    if (gSettings.automationsEnabled && autoRenderData.count > 0 &&
+    if (gSettings.automationEnabled && autoRenderData.count > 0 &&
         autoRenderData.selectedIdx < autoRenderData.count) {
       AutoListItem& sel = autoRenderData.items[autoRenderData.selectedIdx];
       sPendingDeleteId = sel.id;

@@ -15,7 +15,7 @@ struct Settings {
   // Constructor to ensure all String members are initialized
   Settings()
     : wifiEnabled(true),
-      wifiAutoReconnect(true),
+      wifiAutoStart(true),
       webCliHistorySize(10),
       oledCliHistorySize(50),
       ntpServer("pool.ntp.org"),
@@ -192,7 +192,7 @@ struct Settings {
       debugSrTuning(false),
       logLevel(3),                    // Default: LOG_LEVEL_DEBUG (show everything)
       memorySampleIntervalSec(30),
-      espnowenabled(false),
+      espnowEnabled(false),
       espnowmesh(false),
       espnowUserSyncEnabled(false),
       espnowCaptureToSd(false),
@@ -236,10 +236,10 @@ struct Settings {
       bondStreamPresence(false),
 #endif
 #if ENABLE_AUTOMATION
-      automationsEnabled(true),
+      automationEnabled(true),
 #endif
-      i2cBusEnabled(true),
-      i2c2BusEnabled(I2C2_BUS_ENABLED_DEFAULT),  // auto-on for boards with valid I2C2 pins
+      i2cEnabled(true),
+      i2c2Enabled(I2C2_BUS_ENABLED_DEFAULT),  // auto-on for boards with valid I2C2 pins
       // Per-device bus assignments — all default to bus 0 (primary), so an
       // existing single-bus config is unchanged. Bumped to bus 1 only when
       // the user explicitly moves a device to the secondary STEMMA QT port.
@@ -278,7 +278,33 @@ struct Settings {
       rtcTimeHasBeenSet(false),  // Track if RTC time has been set by NTP or manual
       presenceAutoStart(false),
       presenceDevicePollMs(100),
+      // Two-axis pairs — all TRUE so `enabled && autostart` reproduces the
+      // single pre-existing flag exactly. See the struct comment.
+      thermalEnabled(true),
+      tofEnabled(true),
+      imuEnabled(true),
+      gpsEnabled(true),
+      fmRadioEnabled(true),
+      apdsEnabled(true),
+      rtcEnabled(true),
+      presenceEnabled(true),
+      inputEnabled(true),
+      cameraEnabled(true),
+      micEnabled(true),
+      srEnabled(true),
+      llmEnabled(true),
+      httpEnabled(true),
+      bleEnabled(true),
+      sensorLogEnabled(true),
+      systemLogEnabled(true),
+      wifiAutoReconnect(true),
+      espnowAutoStart(true),
+      oledAutoStart(true),
+      eiAutoStart(true),
+      automationAutoStart(true),
       sensorLogAutoStart(false),
+      healthTrackingEnabled(false),
+      healthTrackPollIntervalSec(900),  // 15 min — R1 vitals mine cadence while Track is on
       sensorLogPath(CAPTURE_SENSORLOG_DEFAULT),
       sensorLogIntervalMs(5000),
       sensorLogMask(0),
@@ -291,7 +317,7 @@ struct Settings {
       systemLogCategoryTags(true),
       systemLogFlags(""),
       cameraAutoStart(false),  // Camera does NOT auto-start by default
-      microphoneAutoStart(false),  // Microphone does NOT auto-start by default
+      micAutoStart(false),  // Microphone does NOT auto-start by default
       llmAutoStart(false),  // On-device LLM does NOT auto-load a model by default
       microphoneSampleRate(16000),
       microphoneGain(70),
@@ -321,7 +347,7 @@ struct Settings {
       cameraMaxStoredImages(100),
       cameraSendAfterCapture(false),
       cameraTargetDevice(""),
-      edgeImpulseEnabled(false),
+      eiEnabled(false),
       edgeImpulseRequireLabels(true),
       edgeImpulseMinConfidence(0.6f),
       edgeImpulseMaxDetections(5),
@@ -335,8 +361,8 @@ struct Settings {
       sessionIdleSerial(60),
       sessionIdleBle(15),
       sessionIdleDisplay(60),
-      bluetoothAutoStart(false),  // BLE server is opt-in; the "G2 Companion" archetype (or Advanced setup) enables it
-      bluetoothRequireAuth(true),
+      bleAutoStart(false),  // BLE server is opt-in; the "G2 Companion" archetype (or Advanced setup) enables it
+      bleRequireAuth(true),
       bleDeviceName("HardwareOne"),
       bleTxPower(3),
       bleMode(0),
@@ -357,7 +383,7 @@ struct Settings {
       srAfeGain(1.0f),
       srAgcMode(2),
       srVadMode(3),
-      mqttClientEnabled(false),
+      mqttEnabled(false),
       mqttAutoStart(false),
       mqttHost(""),
       mqttPort(1883),
@@ -411,7 +437,7 @@ struct Settings {
   // wifiSSID / wifiPassword removed 2026-07-20 — dead legacy single-network
   // fields; saved credentials live in gWifiNetworks[] (network.wifi.networks).
   bool wifiEnabled;        // Enable/disable WiFi at boot (default: true)
-  bool wifiAutoReconnect;
+  bool wifiAutoStart;
   int webCliHistorySize;   // Web CLI history buffer size
   int oledCliHistorySize;  // OLED CLI history buffer size (lines)
   String ntpServer;
@@ -660,7 +686,7 @@ struct Settings {
   int logLevel;                        // Severity-based logging level (0=error, 1=warn, 2=info, 3=debug)
   int memorySampleIntervalSec;  // Periodic memory sampling interval in seconds (0=disabled, default: 30)
   // ESP-NOW settings
-  bool espnowenabled;
+  bool espnowEnabled;
   bool espnowmesh;
   bool espnowUserSyncEnabled;          // Enable user credential sync across devices (default: false, admin-only)
   // Capture incoming + outgoing ESP-NOW frames to /sd/espnow/capture-*.log when
@@ -762,24 +788,24 @@ struct Settings {
 #endif
   // ESP-NOW buffer size settings (runtime tuning)
 #if ENABLE_AUTOMATION
-  bool automationsEnabled;  // Enable/disable automation scheduler (runs from main loop)
+  bool automationEnabled;  // Enable/disable automation scheduler (runs from main loop)
 #endif
   // I2C Hardware system
   // bus 0 = primary STEMMA QT — Wire1 internally, "I2C1" in the UI.
-  bool i2cBusEnabled;       // Enable/disable bus 0 hardware (Wire1 init and transactions)
+  bool i2cEnabled;       // Enable/disable bus 0 hardware (Wire1 init and transactions)
   int i2cSdaPin = I2C_SDA_PIN_DEFAULT;  // bus 0 SDA pin (board-specific, see System_BuildConfig.h)
   int i2cSclPin = I2C_SCL_PIN_DEFAULT;  // bus 0 SCL pin (board-specific, see System_BuildConfig.h)
   // bus 1 = secondary STEMMA QT — Wire internally, "I2C2" in the UI. Only the
   // FeatherS3[D] currently has a second port wired. On boards without one,
-  // I2C2_*_PIN_DEFAULT is -1, i2c2BusEnabled stays false, and the dual-bus
+  // I2C2_*_PIN_DEFAULT is -1, i2c2Enabled stays false, and the dual-bus
   // system in System_I2C_Manager.cpp skips bus 1 init / scans / transactions.
-  bool i2c2BusEnabled;      // Enable/disable bus 1 hardware (Wire init and transactions)
+  bool i2c2Enabled;      // Enable/disable bus 1 hardware (Wire init and transactions)
   int i2c2SdaPin = I2C2_SDA_PIN_DEFAULT;  // bus 1 SDA pin (-1 = unavailable on this board)
   int i2c2SclPin = I2C2_SCL_PIN_DEFAULT;  // bus 1 SCL pin (-1 = unavailable on this board)
   // Per-device bus assignment (0 = I2C1 / Wire1 / primary STEMMA QT;
   //                            1 = I2C2 / Wire / secondary STEMMA QT).
   // All default to 0 so existing single-bus configurations work unchanged.
-  // Setting any of these to 1 requires (a) i2c2BusEnabled = true and (b) the
+  // Setting any of these to 1 requires (a) i2c2Enabled = true and (b) the
   // board to have valid I2C2 pins. Reboot required after change — sensor
   // tasks cache their bus assignment at init time and the underlying
   // TwoWire / library object is bound at construction.
@@ -833,8 +859,64 @@ struct Settings {
   bool rtcTimeHasBeenSet;       // Has RTC time been set by NTP or manual? (false = trust NTP first at boot)
   bool presenceAutoStart;       // Auto-start STHS34PF80 presence/motion sensor after boot
   int presenceDevicePollMs;     // STHS34PF80 polling interval (default: 100ms)
+
+  // ---------------------------------------------------------------------
+  // Two-axis feature control. See docs/AUTOSTART_NAMING_UNIFICATION_PLAN.md.
+  //
+  // Every feature gets an independent pair:
+  //   <thing>Enabled    admission control - may ANYTHING start this at all?
+  //   <thing>AutoStart  does it start itself at boot?
+  //
+  // Boot is gated on BOTH:
+  //   if (xEnabled && ramFlushResolve(RF_X, xAutoStart)) startX();
+  // which is the shape MQTT has shipped with since it grew a second flag
+  // (HardwareOne.cpp:1800). Before this there was a single PERSISTED setting per
+  // feature and it WAS the boot flag, so `features <id> off` and the settings
+  // toggle could not express "keep this available, just do not start it on its
+  // own". Note the runtime open/close commands were always separate from the
+  // boot setting and are unchanged - closewifi, for one, says so explicitly
+  // (System_WiFi.cpp: "a reboot brings WiFi back exactly as configured").
+  //
+  // EVERY new flag below defaults TRUE on purpose: `enabled && autostart` then
+  // collapses to exactly the single flag that already existed, so behaviour is
+  // unchanged until a user deliberately splits them.
+  // ---------------------------------------------------------------------
+  bool thermalEnabled;          // Master enable (pairs with thermalAutoStart)
+  bool tofEnabled;              // Master enable (pairs with tofAutoStart)
+  bool imuEnabled;              // Master enable (pairs with imuAutoStart)
+  bool gpsEnabled;              // Master enable (pairs with gpsAutoStart)
+  bool fmRadioEnabled;          // Master enable (pairs with fmRadioAutoStart)
+  bool apdsEnabled;             // Master enable (pairs with apdsAutoStart)
+  bool rtcEnabled;              // Master enable (pairs with rtcAutoStart)
+  bool presenceEnabled;         // Master enable (pairs with presenceAutoStart)
+  bool inputEnabled;            // Master enable (pairs with inputAutoStart)
+  bool cameraEnabled;           // Master enable (pairs with cameraAutoStart)
+  bool micEnabled;              // Master enable (pairs with micAutoStart)
+  bool srEnabled;               // Master enable (pairs with srAutoStart)
+  bool llmEnabled;              // Master enable (pairs with llmAutoStart)
+  bool httpEnabled;             // Master enable (pairs with httpAutoStart)
+  bool bleEnabled;              // Master enable (pairs with bleAutoStart)
+  // Counterparts for features that had only a master switch:
+  // WiFi is the one subsystem with a THIRD axis, and it earns it: "connect at
+  // boot" and "keep retrying after a drop" are genuinely different intents. A
+  // field device you expect to stay online wants reconnect ON even if you start
+  // it by hand; a device you only occasionally join wants the opposite.
+  //   wifiEnabled       - may WiFi run at all
+  //   wifiAutoStart     - connect at boot
+  //   wifiAutoReconnect - keep hunting for the AP after an unexpected drop
+  // Defaults true: WiFi.setAutoReconnect(true) was hardcoded on every connect
+  // path before this existed, so true reproduces the old behaviour exactly.
+  bool sensorLogEnabled;        // Master enable (pairs with sensorLogAutoStart)
+  bool systemLogEnabled;        // Master enable (pairs with systemLogAutoStart)
+  bool wifiAutoReconnect;
+  bool espnowAutoStart;         // Boot flag (pairs with espnowEnabled)
+  bool oledAutoStart;           // Boot flag (pairs with oledEnabled)
+  bool eiAutoStart;             // Boot flag (pairs with eiEnabled)
+  bool automationAutoStart;     // Boot flag (pairs with automationEnabled)
   // Sensor Logging auto-start settings
   bool sensorLogAutoStart;      // Auto-start sensor logging after boot with last-used parameters
+  bool healthTrackingEnabled;   // R1 Health Track: keep LOG_R1 on and resume logging at boot
+  int  healthTrackPollIntervalSec; // How often to poll/mine R1 vitals while Track is on (default 900 = 15 min)
   String sensorLogPath;         // Last-used log file path (default: CAPTURE_SENSORLOG_DEFAULT)
   int sensorLogIntervalMs;      // Last-used polling interval in ms (default: 5000)
   int sensorLogMask;            // Last-used sensor bitmask (0=none)
@@ -848,7 +930,7 @@ struct Settings {
   bool systemLogCategoryTags;   // Prefix log lines with [CATEGORY] tags
   String systemLogFlags;        // Last-used debug flag mask for system log (empty = leave gDebugFlags)
   bool cameraAutoStart;         // Auto-start ESP32-S3 camera after boot
-  bool microphoneAutoStart;     // Auto-start ESP32-S3 PDM microphone after boot
+  bool micAutoStart;     // Auto-start ESP32-S3 PDM microphone after boot
   // NOTE: kept OUTSIDE the #if ENABLE_ONDEVICE_LLM block below so the always-
   // compiled feature registry can reference &gSettings.llmAutoStart in any build.
   bool llmAutoStart;            // Auto-load the default LLM model at boot (default: false)
@@ -903,7 +985,7 @@ struct Settings {
   bool cameraSendAfterCapture;  // Auto-send to target device after capture
   String cameraTargetDevice;    // ESP-NOW name/MAC of target device for auto-send
   // Edge Impulse ML settings
-  bool edgeImpulseEnabled;      // Enable Edge Impulse inference
+  bool eiEnabled;      // Enable Edge Impulse inference
   bool edgeImpulseRequireLabels;
   float edgeImpulseMinConfidence; // Minimum confidence threshold (0.0-1.0)
   int edgeImpulseMaxDetections; // Max objects to report per frame (1-10)
@@ -922,8 +1004,8 @@ struct Settings {
   uint32_t sessionIdleBle;      // BLE per-connection idle window (default 15)
   uint32_t sessionIdleDisplay;  // OLED/local-display session idle window (default 60)
   // Bluetooth settings
-  bool bluetoothAutoStart;      // Auto-start Bluetooth at boot (enables BLE server)
-  bool bluetoothRequireAuth;    // Require login before accepting BLE commands (always required, per-connection)
+  bool bleAutoStart;      // Auto-start Bluetooth at boot (enables BLE server)
+  bool bleRequireAuth;    // Require login before accepting BLE commands (always required, per-connection)
   String bleDeviceName;         // BLE advertised device name (default: "HardwareOne")
   int bleTxPower;               // BLE TX power level 0-7 (0=min, 7=max, default: 3)
   int bleMode;                  // BLE role: 0=server (phone peripheral), 1=G2 client (central). Mutually exclusive at runtime.
@@ -933,7 +1015,7 @@ struct Settings {
   // gBlePeerData[BLE_PEER_MAX] array, persisted under "bluetooth.peers"
   // in settings.json. See BLE_Peers.h. Removed flat keys:
   //   bleGlassesLeftMAC, bleGlassesRightMAC, bleRingMAC, blePhoneMAC,
-  //   g2AutoConnect, ringAutoConnect
+  //   g2AutoReconnect, ringAutoReconnect
   // Power Management settings
   uint8_t powerMode;            // 0=Performance(240MHz), 1=Balanced(160MHz), 2=PowerSaver(80MHz), 3=UltraSaver(80MHz active / 40MHz idle-only)
   bool powerAutoMode;           // Auto-adjust power mode based on battery level
@@ -951,7 +1033,7 @@ struct Settings {
   int srAgcMode;                // AGC mode: 0=off, 1=-9dB, 2=-6dB, 3=-3dB (default: 2)
   int srVadMode;                // VAD sensitivity: 0-4, higher=more sensitive (default: 3)
   // MQTT Home Assistant Integration settings
-  bool mqttClientEnabled;       // Master enable/disable for MQTT subsystem (default: false)
+  bool mqttEnabled;       // Master enable/disable for MQTT subsystem (default: false)
   bool mqttAutoStart;           // Auto-start MQTT client at boot if WiFi connected (default: false)
   String mqttHost;              // MQTT broker hostname or IP (default: "")
   int mqttPort;                 // MQTT broker port (default: 1883, 8883 for TLS)

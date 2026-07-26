@@ -46,7 +46,7 @@ struct FMRadioCache {
 #if ENABLE_FM_RADIO
 
 // FM Radio lifecycle state (not cached — read/written only on fmRadio task)
-extern bool gFmRadioEnabled;
+extern bool gFmRadioRunning;
 extern bool gFmRadioConnected;
 extern unsigned long gFmRadioLastStopTime;
 extern bool gRadioInitialized;      // Radio hardware initialization status

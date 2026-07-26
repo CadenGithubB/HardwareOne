@@ -18,6 +18,12 @@ output*.bmp
 size.json
 sizefiles.txt
 
+# Raw data pulled off hardware during testing. Never publish: the health
+# captures are real biometric readings (heart rate / SpO2) and the device
+# logs carry usernames, command history and network detail.
+docs/HealthCapture/
+docs/NewCapture/
+
 # Ad-hoc per-board firmware build outputs copied to the repo root for flashing
 # (e.g. hardwareone-idf-gamepad-step2.bin). Build products, not source.
 *.elf

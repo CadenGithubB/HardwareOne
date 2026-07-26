@@ -59,6 +59,20 @@ QueueHandle_t gDebugOutputQueue = nullptr;
 QueueHandle_t gDebugFreeQueue = nullptr;
 volatile unsigned long gDebugDropped = 0;
 int gDebugQueueSize = DEBUG_QUEUE_SIZE_MIN; // Runtime queue size (set in initDebugSystem)
+int gDebugPoolSize = 0;                     // Allocated DebugMessage slots
+
+static DebugMessage* gDebugPoolPrimary = nullptr;
+static DebugMessage* gDebugPoolExtra = nullptr;
+static portMUX_TYPE gDebugPoolMux = portMUX_INITIALIZER_UNLOCKED;
+static volatile bool gDebugPoolGrowthRequested = false;
+enum DebugPoolGrowthState : uint8_t {
+  DEBUG_POOL_SMALL = 0,
+  DEBUG_POOL_GROWING,
+  DEBUG_POOL_FULL,
+  DEBUG_POOL_GROW_FAILED,
+};
+static DebugPoolGrowthState gDebugPoolGrowthState = DEBUG_POOL_FULL;
+static constexpr int DEBUG_POOL_GROW_THRESHOLD = 24;
 
 volatile bool gDebugVerbose = false;
 
@@ -71,7 +85,7 @@ uint8_t gLogLevel = LOG_LEVEL_DEBUG;
 
 // System logging state
 String gSystemLogPath = "";
-bool gSystemLogEnabled = false;
+bool gSystemLogRunning = false;
 unsigned long gSystemLogLastWrite = 0;
 bool gSystemLogCategoryTags = true;  // Default: enabled
 
@@ -88,6 +102,7 @@ static volatile unsigned long gHelpSuppressedCount = 0;
 // BLE broadcast output buffer (accumulates messages for periodic send to authenticated BLE clients)
 #if ENABLE_BLUETOOTH
 static String gBLEOutputBuffer;
+static bool gBLEOutputBufferReserved = false;
 static unsigned long gBLELastFlush = 0;
 static const uint32_t BLE_OUTPUT_FLUSH_INTERVAL_MS = 150;   // Flush to BLE every 150ms (snappier; sendBLEResponse fragments)
 static const size_t BLE_OUTPUT_BUFFER_MAX = 1024;          // Coalesce up to ~1KB per flush (fragmented by the secure channel)
@@ -170,6 +185,7 @@ static String buildTimestampPrefix();
 
 // Forward declaration (definition with logSystemEvent below)
 static void flushPreInitEvents();
+static bool growDebugPoolIfNeeded(bool force);
 
 // Debug output task - single writer for all debug messages
 static TaskHandle_t gDebugOutputTaskHandle = nullptr;
@@ -178,6 +194,9 @@ void debugOutputTask(void* parameter) {
   while (true) {
     DebugMessage* msg = nullptr;
     if (xQueueReceive(gDebugOutputQueue, &msg, portMAX_DELAY) == pdTRUE && msg) {
+      if (gDebugPoolGrowthRequested) {
+        (void)growDebugPoolIfNeeded(true);
+      }
       // Help-mode gating for queued messages (allow security/auth/error)
       if (gCLIState != CLI_NORMAL && !gInHelpRender) {
         if ((msg->routing & MSG_ROUTE_ALLOW_IN_HELP) == 0 &&
@@ -233,7 +252,7 @@ void debugOutputTask(void* parameter) {
       }
       // File output (system log)
       if ((msg->routing & MSG_ROUTE_FILE) && (gOutputFlags & MSG_ROUTE_FILE) &&
-          gSystemLogEnabled && gSystemLogPath.length() > 0) {
+          gSystemLogRunning && gSystemLogPath.length() > 0) {
         fsLock("debug.log");
         if (!gSystemLogFile) {
           gSystemLogFile = VFS::openGuarded(gSystemLogPath, "a", VFS::systemAuth("debug.system_log_append"), true);
@@ -324,6 +343,9 @@ void debugOutputTask(void* parameter) {
       #if ENABLE_BLUETOOTH
       if ((msg->routing & MSG_ROUTE_BLE) && (gOutputFlags & MSG_ROUTE_BLE) &&
           isBLEConnected() && bleHasAuthenticatedSession()) {
+        if (!gBLEOutputBufferReserved) {
+          gBLEOutputBufferReserved = gBLEOutputBuffer.reserve(BLE_OUTPUT_BUFFER_MAX);
+        }
         size_t msgLen = strlen(msg->text);   // <= DEBUG_MSG_SIZE (256) < BLE_OUTPUT_BUFFER_MAX
         if (gBLEOutputBuffer.length() + msgLen + 2 < BLE_OUTPUT_BUFFER_MAX) {
           gBLEOutputBuffer += msg->text;
@@ -375,6 +397,79 @@ void debugOutputTask(void* parameter) {
   }
 }
 
+// Add the second half of the PSRAM-backed message pool before the initial
+// 96 slots are exhausted. Queue capacities are fixed at 192 from boot, so
+// growth only allocates messages and seeds their pointers; no FreeRTOS queue
+// replacement or consumer handoff is required.
+static bool growDebugPoolIfNeeded(bool force) {
+  if (gDebugPoolGrowthState == DEBUG_POOL_GROW_FAILED) {
+    gDebugPoolGrowthRequested = false;
+    return false;
+  }
+  if (!gDebugFreeQueue || gDebugQueueSize <= gDebugPoolSize ||
+      gDebugPoolGrowthState == DEBUG_POOL_FULL) {
+    gDebugPoolGrowthRequested = false;
+    return true;
+  }
+
+  if (xPortInIsrContext()) {
+    // Heap allocation is forbidden in ISR context. The consumer task sees this
+    // request while draining the message that caused the low-water condition.
+    gDebugPoolGrowthRequested = true;
+    return false;
+  }
+
+  int freeSlots = (int)uxQueueMessagesWaiting(gDebugFreeQueue);
+  if (!force && freeSlots > DEBUG_POOL_GROW_THRESHOLD) return true;
+
+  taskENTER_CRITICAL(&gDebugPoolMux);
+  if (gDebugPoolGrowthState != DEBUG_POOL_SMALL) {
+    bool ready = (gDebugPoolGrowthState == DEBUG_POOL_FULL);
+    taskEXIT_CRITICAL(&gDebugPoolMux);
+    return ready;
+  }
+  gDebugPoolGrowthState = DEBUG_POOL_GROWING;
+  taskEXIT_CRITICAL(&gDebugPoolMux);
+
+  const int addCount = gDebugQueueSize - gDebugPoolSize;
+  // Expansion is optional and must never spill ~28 KB into scarce internal
+  // DRAM if PSRAM is fragmented. In that case retain the 96-slot pool and let
+  // the existing drop accounting surface any later saturation.
+  DebugMessage* extra = (DebugMessage*)heap_caps_malloc(
+      (size_t)addCount * sizeof(DebugMessage), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!extra) {
+    taskENTER_CRITICAL(&gDebugPoolMux);
+    gDebugPoolGrowthState = DEBUG_POOL_GROW_FAILED;
+    gDebugPoolGrowthRequested = false;
+    taskEXIT_CRITICAL(&gDebugPoolMux);
+    if (gOutputFlags & MSG_ROUTE_SERIAL) {
+      Serial.printf("[DEBUG] Pool growth failed; remaining at %d slots\n",
+                    gDebugPoolSize);
+    }
+    return false;
+  }
+
+  int seeded = 0;
+  for (; seeded < addCount; seeded++) {
+    DebugMessage* p = &extra[seeded];
+    if (xQueueSend(gDebugFreeQueue, &p, 0) != pdTRUE) break;
+  }
+
+  taskENTER_CRITICAL(&gDebugPoolMux);
+  gDebugPoolExtra = extra;
+  gDebugPoolSize += seeded;
+  gDebugPoolGrowthState =
+      (gDebugPoolSize >= gDebugQueueSize) ? DEBUG_POOL_FULL : DEBUG_POOL_GROW_FAILED;
+  gDebugPoolGrowthRequested = false;
+  taskEXIT_CRITICAL(&gDebugPoolMux);
+
+  if (gOutputFlags & MSG_ROUTE_SERIAL) {
+    Serial.printf("[DEBUG] Pool grew to %d slots before saturation\n",
+                  gDebugPoolSize);
+  }
+  return gDebugPoolGrowthState == DEBUG_POOL_FULL;
+}
+
 // Boot-time backpressure for bursty debug output. When a tight loop emits a
 // long run of lines (e.g. the command-registry dump of 500+ commands), the
 // producer can outrun the single debugOutputTask and overflow the free-list
@@ -387,6 +482,25 @@ void debugQueueBackpressure(int minFree, uint32_t maxWaitMs) {
   if (!gDebugFreeQueue) return;
   uint32_t start = millis();
   while ((int)uxQueueMessagesWaiting(gDebugFreeQueue) < minFree) {
+    if ((uint32_t)(millis() - start) >= maxWaitMs) break;
+    vTaskDelay(pdMS_TO_TICKS(2));
+  }
+}
+
+// Bounded wait for the line queue to fully drain. Used by the serial result
+// writer (deliverCommandResult) so a directly-written result blob doesn't
+// overtake lines the command streamed through the queue during execution.
+// Two caveats, both accepted: (1) queue-empty is not a hard "last byte
+// reached the UART" guarantee — the drain may still be printing the message
+// it just popped — but the UART/CDC driver's per-write lock keeps that
+// residual race whole-line, never a mid-line splice. (2) On the TIMEOUT
+// exit (queue still non-empty after maxWaitMs) the remaining lines print
+// after the blob instead of before it — bounded delay is deliberately
+// chosen over blocking the caller on a wedged drain.
+void debugWaitOutputDrained(uint32_t maxWaitMs) {
+  if (!gDebugOutputQueue) return;
+  uint32_t start = millis();
+  while (uxQueueMessagesWaiting(gDebugOutputQueue) > 0) {
     if ((uint32_t)(millis() - start) >= maxWaitMs) break;
     vTaskDelay(pdMS_TO_TICKS(2));
   }
@@ -469,15 +583,19 @@ void initDebugSystem() {
   // IMPORTANT: Do not call DebugManager::initialize() here (it delegates back to initDebugSystem()).
   (void)DebugManager::getInstance();
 
-  // Determine queue size based on PSRAM availability
-  // PSRAM available: 128 slots in PSRAM, otherwise 64 slots in internal RAM
+  // Keep queue capacity at the proven 192-slot burst ceiling on PSRAM builds,
+  // but initially allocate only 96 expensive DebugMessage objects. The pool
+  // grows once, before exhaustion, when producers cross the low-water mark.
   size_t psramSize = ESP.getPsramSize();
   bool hasPsram = (psramSize > 0);
   gDebugQueueSize = hasPsram ? DEBUG_QUEUE_SIZE_MAX : DEBUG_QUEUE_SIZE_MIN;
+  const int initialPoolSize =
+      hasPsram ? DEBUG_POOL_SIZE_INITIAL_PSRAM : DEBUG_QUEUE_SIZE_MIN;
   
   if (gOutputFlags & MSG_ROUTE_SERIAL) {
-    Serial.printf("[DEBUG] Queue size: %d slots (%s)\n", gDebugQueueSize, 
-                  hasPsram ? "PSRAM" : "internal RAM");
+    Serial.printf("[DEBUG] Queue capacity: %d, initial pool: %d slots (%s)\n",
+                  gDebugQueueSize, initialPoolSize,
+                  hasPsram ? "PSRAM, adaptive" : "internal RAM");
   }
 
   // Allocate debug buffer in PSRAM
@@ -503,17 +621,22 @@ void initDebugSystem() {
 
     // Pre-allocate the pool itself (prefer PSRAM if available)
     AllocPref allocPref = hasPsram ? AllocPref::PreferPSRAM : AllocPref::PreferInternal;
-    DebugMessage* pool = (DebugMessage*)ps_alloc(gDebugQueueSize * sizeof(DebugMessage), allocPref, "debug.pool");
-    if (!pool) {
+    gDebugPoolPrimary = (DebugMessage*)ps_alloc(
+        (size_t)initialPoolSize * sizeof(DebugMessage), allocPref, "debug.pool");
+    if (!gDebugPoolPrimary) {
       if (gOutputFlags & MSG_ROUTE_SERIAL) {
         Serial.println("FATAL: Failed to allocate debug message pool");
       }
       while (1) delay(1000);
     }
+    gDebugPoolSize = initialPoolSize;
+    gDebugPoolGrowthState =
+        hasPsram ? DEBUG_POOL_SMALL : DEBUG_POOL_FULL;
+    gDebugPoolGrowthRequested = false;
 
     // Seed free queue with pointers into the pool
-    for (int i = 0; i < gDebugQueueSize; ++i) {
-      DebugMessage* p = &pool[i];
+    for (int i = 0; i < initialPoolSize; ++i) {
+      DebugMessage* p = &gDebugPoolPrimary[i];
       xQueueSend(gDebugFreeQueue, &p, 0);
     }
   }
@@ -527,7 +650,8 @@ void initDebugSystem() {
       }
       while (1) delay(1000);
     }
-    DEBUG_SYSTEMF("Debug output queue created (%d messages in %s)", gDebugQueueSize,
+    DEBUG_SYSTEMF("Debug output queue created (capacity=%d, pool=%d in %s)",
+                  gDebugQueueSize, gDebugPoolSize,
                   hasPsram ? "PSRAM" : "internal RAM");
   }
 
@@ -554,27 +678,12 @@ void initDebugSystem() {
   // NOTE: Do NOT reset gDebugFlags here - applySettings() may have already set them
   // The flags are managed by applySettings() in settings.cpp
   
-  // Preallocate BLE output buffer to prevent incremental reallocation
-  #if ENABLE_BLUETOOTH
-  gBLEOutputBuffer.reserve(BLE_OUTPUT_BUFFER_MAX);
-  #endif
+  // BLE and OLED output buffers are lazy. They are claimed only once the
+  // corresponding runtime feature is active, so compiled-but-disabled
+  // Bluetooth/OLED builds do not pay their idle heap/DRAM cost.
   
-  // Initialize OLED console buffer
-  #if ENABLE_OLED_DISPLAY
-  gOledConsole.init();
-  #endif
-  
-  // Initialize web mirror buffer for CLI history
-  if (!gWebMirror.buf && gWebMirrorCap > 0) {
-    gWebMirror.init(gWebMirrorCap);
-    if (gWebMirror.buf) {
-      DEBUG_SYSTEMF("Web mirror buffer allocated (%u bytes)", (unsigned)gWebMirrorCap);
-    } else {
-      if (gOutputFlags & MSG_ROUTE_SERIAL) {
-        Serial.println("WARNING: Failed to allocate web mirror buffer - web CLI will be empty");
-      }
-    }
-  }
+  // The web/CLI mirror is intentionally lazy. startHttpServer() claims it for
+  // the web console, while the CLI help/clear paths claim it on first use.
   
   // Flush system events recorded before the queue existed (early boot:
   // filesystem init, settings load) so they reach LOG_EVENTS_FILE.
@@ -628,6 +737,17 @@ static bool enqueueChunk(const char* text, size_t len, uint8_t routing,
   if (!gDebugOutputQueue || !gDebugFreeQueue) return false;
   const bool isr = xPortInIsrContext();
 
+  // Grow while there is still headroom, not after a frame has already been
+  // lost. Normal tasks perform the one-time allocation synchronously; ISR
+  // producers only request it for the consumer task.
+  int freeSlots = isr
+      ? (int)uxQueueMessagesWaitingFromISR(gDebugFreeQueue)
+      : (int)uxQueueMessagesWaiting(gDebugFreeQueue);
+  if (freeSlots <= DEBUG_POOL_GROW_THRESHOLD) {
+    if (isr) gDebugPoolGrowthRequested = true;
+    else     (void)growDebugPoolIfNeeded(false);
+  }
+
   DebugMessage* msg = nullptr;
   BaseType_t got = isr ? xQueueReceiveFromISR(gDebugFreeQueue, &msg, NULL)
                        : xQueueReceive(gDebugFreeQueue, &msg, 0);
@@ -657,13 +777,13 @@ void debugQueuePrintf(DebugFlagMask flag, const char* fmt, ...) {
   if (!getDebugQueue() || !getDebugFreeQueue()) return;
 
   // CRITICAL: Check if we're in a sensor task that's shutting down
-  extern bool gThermalEnabled, gImuEnabled, gTofEnabled, gFmRadioEnabled;
+  extern bool gThermalRunning, gImuRunning, gTofRunning, gFmRadioRunning;
   extern TaskHandle_t gThermalTaskHandle, gImuTaskHandle, gTofTaskHandle, gFmRadioTaskHandle;
   TaskHandle_t currentTask = xTaskGetCurrentTaskHandle();
-  if (currentTask == gThermalTaskHandle && !gThermalEnabled) return;
-  if (currentTask == gImuTaskHandle && !gImuEnabled) return;
-  if (currentTask == gTofTaskHandle && !gTofEnabled) return;
-  if (currentTask == gFmRadioTaskHandle && !gFmRadioEnabled) return;
+  if (currentTask == gThermalTaskHandle && !gThermalRunning) return;
+  if (currentTask == gImuTaskHandle && !gImuRunning) return;
+  if (currentTask == gTofTaskHandle && !gTofRunning) return;
+  if (currentTask == gFmRadioTaskHandle && !gFmRadioRunning) return;
 
   // Format into a stack line, then hand to the shared enqueue primitive
   // (ISR-safe; centralizes slot grab / send / drop + [CUT]). There is no split
@@ -811,12 +931,12 @@ static void broadcastOutputCore(const char* text, size_t len, uint8_t routeOverr
   }
 
   // 4. Skip output if current task is a sensor task that's been disabled
-  extern bool gThermalEnabled, gImuEnabled, gTofEnabled;
+  extern bool gThermalRunning, gImuRunning, gTofRunning;
   TaskHandle_t currentTask = xTaskGetCurrentTaskHandle();
   extern TaskHandle_t gThermalTaskHandle, gImuTaskHandle, gTofTaskHandle;
-  if (currentTask == gThermalTaskHandle && !gThermalEnabled) return;
-  if (currentTask == gImuTaskHandle && !gImuEnabled) return;
-  if (currentTask == gTofTaskHandle && !gTofEnabled) return;
+  if (currentTask == gThermalTaskHandle && !gThermalRunning) return;
+  if (currentTask == gImuTaskHandle && !gImuRunning) return;
+  if (currentTask == gTofTaskHandle && !gTofRunning) return;
 
   // 5. Compute per-message route mask
   uint8_t route;
@@ -1143,8 +1263,8 @@ const char* cmd_debugbuffer(const String& argsInput) {
   }
 
   int depth = gDebugOutputQueue ? uxQueueMessagesWaiting(gDebugOutputQueue) : 0;
-  int free = gDebugOutputQueue ? uxQueueSpacesAvailable(gDebugOutputQueue) : 0;
-  int total = gDebugQueueSize;
+  int free = gDebugFreeQueue ? uxQueueMessagesWaiting(gDebugFreeQueue) : 0;
+  int total = gDebugPoolSize;
   int pct = (depth * 100) / total;
   unsigned long dropped = gDebugDropped;
 
@@ -1161,7 +1281,7 @@ const char* cmd_debugbuffer(const String& argsInput) {
 
   // Output each line separately to avoid DEBUG_MSG_SIZE (256 byte) truncation
   broadcastOutput("Debug Output Queue Status:");
-  BROADCAST_PRINTF("  Size: %d messages", total);
+  BROADCAST_PRINTF("  Pool: %d/%d messages", total, gDebugQueueSize);
   BROADCAST_PRINTF("  Queued: %d (%d%%)", depth, pct);
   BROADCAST_PRINTF("  Free: %d messages", free);
   BROADCAST_PRINTF("  Dropped: %lu (queue full)", dropped);
@@ -1650,7 +1770,7 @@ const char* cmd_log(const String& argsInput) {
   
   // Handle 'status' subcommand
   if (subCmd == "status") {
-    if (gSystemLogEnabled && (gOutputFlags & MSG_ROUTE_FILE)) {
+    if (gSystemLogRunning && (gOutputFlags & MSG_ROUTE_FILE)) {
       unsigned long ageSeconds = (millis() - gSystemLogLastWrite) / 1000;
       snprintf(gDebugBuffer, 1024,
                "System logging ACTIVE\n"
@@ -1660,7 +1780,7 @@ const char* cmd_log(const String& argsInput) {
                "  Auto-start: %s",
                gSystemLogPath.c_str(), ageSeconds, (unsigned)gOutputFlags,
                gSettings.systemLogAutoStart ? "ON" : "OFF");
-    } else if (gSystemLogEnabled) {
+    } else if (gSystemLogRunning) {
       snprintf(gDebugBuffer, 1024,
                "System logging CONFIGURED but MSG_ROUTE_FILE flag not set\n"
                "  File: %s\n"
@@ -1677,7 +1797,7 @@ const char* cmd_log(const String& argsInput) {
   
   // Handle 'stop' subcommand
   if (subCmd == "stop") {
-    if (!gSystemLogEnabled) {
+    if (!gSystemLogRunning) {
       return "Error: System logging is not running";
     }
     
@@ -1691,7 +1811,7 @@ const char* cmd_log(const String& argsInput) {
       fsUnlock();
     }
     
-    gSystemLogEnabled = false;
+    gSystemLogRunning = false;
     gOutputFlags &= ~MSG_ROUTE_FILE;
     String msg = "System logging stopped. Log saved to: " + gSystemLogPath;
     gSystemLogPath = "";
@@ -1701,7 +1821,11 @@ const char* cmd_log(const String& argsInput) {
   
   // Handle 'start' subcommand
   if (subCmd == "start") {
-    if (gSystemLogEnabled) {
+    // Master switch - see the matching gate in cmd_sensorlog.
+    if (!gSettings.systemLogEnabled) {
+      return "Error: system logging is disabled - run 'systemlogenabled 1' first";
+    }
+    if (gSystemLogRunning) {
       return "System logging already running. Use 'log stop' first.";
     }
     
@@ -1825,7 +1949,7 @@ const char* cmd_log(const String& argsInput) {
     fsUnlock();
     
     gSystemLogPath = filepath;
-    gSystemLogEnabled = true;
+    gSystemLogRunning = true;
     gSystemLogLastWrite = millis();
     gOutputFlags |= MSG_ROUTE_FILE;
     setSetting(gSettings.systemLogPath, filepath);
@@ -2148,8 +2272,8 @@ DebugFlagMask DebugManager::getDebugFlags() const { return gDebugFlags; }
 void DebugManager::setLogLevel(uint8_t level) { gLogLevel = level; }
 uint8_t DebugManager::getLogLevel() const { return gLogLevel; }
 
-void DebugManager::setSystemLogEnabled(bool enabled) { gSystemLogEnabled = enabled; }
-bool DebugManager::isSystemLogEnabled() const { return gSystemLogEnabled; }
+void DebugManager::setSystemLogEnabled(bool enabled) { gSystemLogRunning = enabled; }
+bool DebugManager::isSystemLogEnabled() const { return gSystemLogRunning; }
 
 void DebugManager::setLogCategoryTags(bool enabled) { gSystemLogCategoryTags = enabled; }
 bool DebugManager::getLogCategoryTags() const { return gSystemLogCategoryTags; }
@@ -2297,7 +2421,7 @@ void logI2CRecovery(uint8_t address, const char* deviceName, int totalErrors) {
 
 void systemLogAutoStart() {
   if (!gSettings.systemLogAutoStart) return;
-  if (gSystemLogEnabled) return;  // Already running
+  if (gSystemLogRunning) return;  // Already running
   
   // Use persisted path if set, otherwise auto-generate
   String filepath = (gSettings.systemLogPath.length() > 0) ? gSettings.systemLogPath : generateSystemLogFilename();
@@ -2329,7 +2453,7 @@ void systemLogAutoStart() {
   fsUnlock();
   
   gSystemLogPath = filepath;
-  gSystemLogEnabled = true;
+  gSystemLogRunning = true;
   gSystemLogLastWrite = millis();
   gOutputFlags |= MSG_ROUTE_FILE;
 
@@ -2394,6 +2518,7 @@ static const String gSystemLogFlagsBitmaskOptions = buildSystemLogFlagsBitmaskOp
 static const char* kSystemLogFlagsBitmaskOptions = gSystemLogFlagsBitmaskOptions.c_str();
 
 static const SettingEntry systemLogSettingEntries[] = {
+  { "systemLogEnabled", SETTING_BOOL, &gSettings.systemLogEnabled, 1, 0, nullptr, 0, 1, "Enabled", nullptr, false, nullptr, "systemlogenabled" },
   { "systemLogAutoStart",    SETTING_BOOL,   &gSettings.systemLogAutoStart,    0, 0, nullptr, 0, 1, "Auto-start logging after boot", nullptr, false, nullptr, "log autostart" },
   { "systemLogPath", SETTING_STRING, &gSettings.systemLogPath, 0, 0, "", 0, 0, "Log file path (empty = auto-generate)", nullptr, false, nullptr, nullptr },
   { "systemLogCategoryTags", SETTING_BOOL, &gSettings.systemLogCategoryTags, 1, 0, nullptr, 0, 1, "Include category tags", nullptr, false, nullptr, "logcategorytags" },

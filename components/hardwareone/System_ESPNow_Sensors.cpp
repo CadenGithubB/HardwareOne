@@ -56,7 +56,7 @@ extern String macToHexString(const uint8_t* mac);
 // Remote Sensor Data Cache
 // ==========================
 
-EXT_RAM_BSS_ATTR RemoteSensorData gRemoteSensorCache[MAX_REMOTE_DEVICES * MAX_SENSORS_PER_DEVICE];
+RemoteSensorData* gRemoteSensorCache = nullptr;
 
 // Master flag to enable/disable all sensor ESP-NOW communication (status + data)
 // Must be explicitly enabled before any sensor broadcasts will be sent
@@ -193,24 +193,27 @@ static size_t gBroadcasterBufSize = 0;
 // Initialization
 // ==========================
 
-void initRemoteSensorSystem() {
+bool initRemoteSensorSystem() {
+  constexpr size_t kCacheEntries = MAX_REMOTE_DEVICES * MAX_SENSORS_PER_DEVICE;
+  const size_t cacheBytes = kCacheEntries * sizeof(RemoteSensorData);
+  if (!gRemoteSensorCache) {
+    gRemoteSensorCache = (RemoteSensorData*)ps_alloc(
+        cacheBytes, AllocPref::PreferPSRAM, "espnow.remoteSensors");
+    if (!gRemoteSensorCache) {
+      ERROR_SYSTEMF("[REMOTE_SENSORS] Failed to allocate %u-byte cache",
+                    (unsigned)cacheBytes);
+      return false;
+    }
+  }
+
   // Initialize master-side remote-sensor cache (the cache of OTHER devices' data
   // we've received). The worker-side wire cache is gone — sensors are read on
   // demand by the broadcaster, so there's no chalkboard to keep in sync.
-  for (int i = 0; i < MAX_REMOTE_DEVICES * MAX_SENSORS_PER_DEVICE; i++) {
-    memset(gRemoteSensorCache[i].deviceMac, 0, 6);
-    gRemoteSensorCache[i].deviceName[0] = '\0';
-    gRemoteSensorCache[i].sensorType = REMOTE_SENSOR_THERMAL;
-    gRemoteSensorCache[i].jsonData[0] = '\0';
-    gRemoteSensorCache[i].jsonLength = 0;
-    gRemoteSensorCache[i].lastUpdate = 0;
-    gRemoteSensorCache[i].lastSeen = 0;
-    gRemoteSensorCache[i].connected = false;
-    gRemoteSensorCache[i].enabled = false;
-    gRemoteSensorCache[i].valid = false;
-  }
+  memset(gRemoteSensorCache, 0, cacheBytes);
 
-  DEBUGF(DEBUG_ESPNOW_CORE, "[REMOTE_SENSORS] System initialized");
+  DEBUGF(DEBUG_ESPNOW_CORE, "[REMOTE_SENSORS] System initialized (%u bytes)",
+         (unsigned)cacheBytes);
+  return true;
 }
 
 // ==========================
@@ -251,6 +254,7 @@ RemoteSensorType stringToSensorType(const char* str) {
 
 // Find cache entry for device+sensor
 static RemoteSensorData* findCacheEntry(const uint8_t* deviceMac, RemoteSensorType sensorType) {
+  if (!gRemoteSensorCache || !deviceMac) return nullptr;
   for (int i = 0; i < MAX_REMOTE_DEVICES * MAX_SENSORS_PER_DEVICE; i++) {
     if (gRemoteSensorCache[i].connected &&
         memcmp(gRemoteSensorCache[i].deviceMac, deviceMac, 6) == 0 &&
@@ -263,6 +267,7 @@ static RemoteSensorData* findCacheEntry(const uint8_t* deviceMac, RemoteSensorTy
 
 // Find or create cache entry
 RemoteSensorData* findOrCreateCacheEntry(const uint8_t* deviceMac, const char* deviceName, RemoteSensorType sensorType) {
+  if (!gRemoteSensorCache || !deviceMac || !deviceName) return nullptr;
   // Try to find existing entry
   RemoteSensorData* entry = findCacheEntry(deviceMac, sensorType);
   if (entry) return entry;
@@ -888,6 +893,11 @@ int formatRemoteSensorReadable(const char* json, char* out, size_t outSize, int 
 String getRemoteDevicesListJSON() {
   PSRAM_JSON_DOC(doc);
   JsonArray devices = doc["devices"].to<JsonArray>();
+  if (!gRemoteSensorCache) {
+    String result;
+    serializeJson(doc, result);
+    return result;
+  }
   
   // List every CONNECTED (present) remote sensor — including disabled ones, so the
   // web shows them as red cards instead of dropping them. Each sensor carries its
@@ -1177,6 +1187,7 @@ bool getRemoteGPSData(RemoteGPSData* outData) {
   
   memset(outData, 0, sizeof(RemoteGPSData));
   outData->valid = false;
+  if (!gRemoteSensorCache) return false;
   
   unsigned long now = millis();
   RemoteSensorData* bestEntry = nullptr;

@@ -156,8 +156,15 @@ int getSettingCurrentValue(const SettingEntry* entry) {
 void setSettingValue(const SettingEntry* entry, int value) {
   if (!entry || !entry->jsonKey) return;
 
-  // Use cmdKey if set, otherwise jsonKey is the CLI command name
-  const char* cmdName = entry->cmdKey ? entry->cmdKey : entry->jsonKey;
+  // cmdKey ONLY — see settingsEditorCommandName() for why the jsonKey fallback
+  // was removed. No cmdKey means this setting has no set-command, so do nothing
+  // rather than firing an unrelated one.
+  const char* cmdName = entry->cmdKey;
+  if (!cmdName || !cmdName[0]) {
+    gSettingsEditor.errorMessage = String("Not editable here");
+    gSettingsEditor.errorDisplayUntil = millis() + 2500;
+    return;
+  }
   String cmd = String(cmdName) + " " + String(value);
   executeOLEDCommand(cmd);
 }
@@ -169,7 +176,12 @@ void setSettingValue(const SettingEntry* entry, int value) {
 // vanishing into the log. Returns false when the command reported failure.
 static bool setSettingValueStr(const SettingEntry* entry, const String& value) {
   if (!entry || !entry->jsonKey) return false;
-  const char* cmdName = entry->cmdKey ? entry->cmdKey : entry->jsonKey;
+  const char* cmdName = entry->cmdKey;   // cmdKey ONLY — no jsonKey fallback
+  if (!cmdName || !cmdName[0]) {
+    gSettingsEditor.errorMessage = String("Not editable here");
+    gSettingsEditor.errorDisplayUntil = millis() + 2500;
+    return false;
+  }
   char out[128];
   bool ok = executeOLEDCommandWithResult(String(cmdName) + " " + value, out, sizeof(out));
   if (!ok || strncmp(out, "Error", 5) == 0) {

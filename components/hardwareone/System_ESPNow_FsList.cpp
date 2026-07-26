@@ -879,11 +879,19 @@ send_ack: ;
                 ack.reqId, ack.status, ack.fileSize);
 
   // Initiate the actual file transfer if the ACK was OK. sendFileToMac is
-  // synchronous-ish (pumps FILE_START/DATA/END with per-fragment ACK waits),
-  // so this can take several seconds for large files. Now runs on
-  // cmd_exec_task (deferred from espnow_task via submitDeferredToCmdExec
-  // — see runDeferredFsOpOnCmdExec) which leaves espnow_task free to drain
-  // RX so the per-fragment ACKs we're waiting for can come in.
+  // synchronous: it pumps FILE_START/DATA/END with fixed pacing delays (no
+  // per-frame ACK waits — MAC-layer ack/retry is the only delivery signal),
+  // so this blocks for several seconds on large files. Runs on cmd_exec_task
+  // (deferred from espnow_task via submitDeferredToCmdExec — see
+  // runDeferredFsOpOnCmdExec) which leaves espnow_task free to drain RX —
+  // including any FILE_CANCEL that aborts this very send. A false result here
+  // is NOT propagated to the requesting peer, and its FS_GET pending slot was
+  // already cleared when the ACK arrived (fsGetOnAckReceived), so fsListTick's
+  // sweep does NOT cover this — it only covers a lost ACK. Requester-side
+  // recovery is its own message poller (the setInterval inside the web ESP-NOW
+  // page's fetchRemoteFile), which watches peer history for the receive result
+  // and otherwise gives up after ~15 polls; the OLED just leaves its
+  // "Downloading..." banner up.
   if (ack.status == FS_LIST_STATUS_OK) {
     SYSTEM_IDENTITY_SCOPE("espnow.fs_get_send");
     String filePath = VFS::normalize(req.path);

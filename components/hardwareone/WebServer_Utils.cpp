@@ -29,6 +29,7 @@ WebMirrorBuf::WebMirrorBuf()
 
 // Initialize buffer with given capacity
 void WebMirrorBuf::init(size_t capacity) {
+  if (buf || capacity == 0) return;
   cap = capacity;
   len = 0;
   buf = (char*)ps_alloc(cap, AllocPref::PreferPSRAM, "gWebMirror.buf");
@@ -374,6 +375,7 @@ static bool webGuestApiAllowed(const char* path) {
     "/api/mqtt/status",
     "/api/automations",
     "/api/battery/status",
+    "/api/health/status",
     "/api/sensors",
     "/api/sensors/status",
     "/api/sensors/remote",
@@ -480,6 +482,9 @@ String generateNavigation(const String& activePage, const String& username, cons
 #endif
 #if ENABLE_WEB_BLUETOOTH
   link("/bluetooth", "bluetooth", "Bluetooth");
+#endif
+#if ENABLE_WEB_R1_HEALTH
+  link("/r1-health", "r1-health", "R1 Health");
 #endif
 #if ENABLE_WEB_ESPNOW
   link("/espnow", "espnow", "ESP-NOW");

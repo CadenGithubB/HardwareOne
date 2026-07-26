@@ -330,5 +330,18 @@ const char* r1StatusAckName(uint8_t ack);
 // Anything else returns 0 and the caller falls back to raw hex.
 size_t r1AnnotatePayload(const R1Decoded& d, char* out, size_t cap);
 
+// Structured parse of health/{hr,spo2,hrv,temp}/daily payloads (11-byte
+// header + count×4-byte records + 1 trailing). Returns false on size
+// mismatch or empty input. `values[]` receives record[0] (primary metric
+// byte — BPM for HR; speculative for siblings). Cap is the values array size.
+struct R1DailyResult {
+  bool     ok;
+  uint8_t  count;
+  uint32_t startTs;
+  uint32_t endTs;
+  uint8_t  values[64];
+};
+bool r1ParseHealthDaily(const uint8_t* p, size_t len, R1DailyResult& out);
+
 #endif  // ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 #endif  // SYSTEM_R1_PROTOCOL_H

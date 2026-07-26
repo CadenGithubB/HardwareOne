@@ -16,10 +16,9 @@
  * mode), so the ring routinely holds plaintext credentials. PSRAM is externally
  * probeable with flash encryption off, which rules it out here.
  *
- * init() runs unconditionally from initDebugSystem, so a device that never
- * lights up an OLED still pays for the ring — gating the allocation on display
- * detection would need the runtime `oledstart` / `oledenabled 1` paths to
- * ensure-init too, and is left for a separate change.
+ * init() runs only after OLED display initialization succeeds. Devices with
+ * OLED disabled in settings, or without a detected display, keep this ring
+ * unallocated.
  */
 
 #ifndef OLED_CONSOLEBUFFER_H

@@ -285,7 +285,7 @@ void I2CDeviceManager::initBus(uint8_t busIdx, int sdaPin, int sclPin, uint32_t 
 
 void I2CDeviceManager::initBuses() {
   // Bus 0 (primary) — always initialized when I2C is enabled. The caller
-  // (initI2CBuses in System_I2C.cpp) already gated on gI2CBusEnabled.
+  // (initI2CBuses in System_I2C.cpp) already gated on gI2CBusRunning.
   int sda0, scl0;
   if (busPinsFromSettings(0, &sda0, &scl0)) {
     initBus(0, sda0, scl0, I2C_WIRE1_DEFAULT_FREQ);
@@ -298,7 +298,7 @@ void I2CDeviceManager::initBuses() {
 
   // Bus 1 (secondary) — only when the user explicitly enabled it AND the
   // board defines valid pins. Skips silently otherwise (no error spam).
-  if (gSettings.i2c2BusEnabled) {
+  if (gSettings.i2c2Enabled) {
     int sda1, scl1;
     if (busPinsFromSettings(1, &sda1, &scl1)) {
       initBus(1, sda1, scl1, I2C_WIRE1_DEFAULT_FREQ);
@@ -521,8 +521,8 @@ void I2CDeviceManager::updateHistogram(uint8_t bus, uint32_t txDurationUs) {
 
 bool I2CDeviceManager::enqueueDeviceStart(I2CDeviceType sensor) {
   // Refuse to enqueue if the bus is disabled — nothing will drain the queue
-  extern bool gI2CBusEnabled;
-  if (!gI2CBusEnabled) return false;
+  extern bool gI2CBusRunning;
+  if (!gI2CBusRunning) return false;
 
   if (!queueMutex) return false;
   

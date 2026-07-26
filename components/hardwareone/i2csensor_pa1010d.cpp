@@ -49,7 +49,7 @@ static void gpsDestroyObject() {
 // sensorStatusBumpWith, gSensorPollingPaused, drainDebugRing
 
 // GPS sensor state (definition - matching pattern of thermal/tof/imu/gamepad sensors)
-bool gGpsEnabled = false;
+bool gGpsRunning = false;
 bool gGpsConnected = false;
 unsigned long gGpsLastStopTime = 0;
 
@@ -79,7 +79,7 @@ GPSCache gGpsCache = {
 bool gpsStartInternal() {
   INFO_GPS_LIFECYCLEF("Starting GPS initialization...");
 
-  if (gGpsEnabled) {
+  if (gGpsRunning) {
     DEBUG_GPS_LIFECYCLEF("[GPS_INIT] GPS already started (enabled=1)");
     return true;
   }
@@ -183,13 +183,13 @@ bool gpsStartInternal() {
 
   }
   
-  gGpsEnabled = true;
-  DEBUG_GPS_LIFECYCLEF("[GPS_INIT] gGpsEnabled set to true");
+  gGpsRunning = true;
+  DEBUG_GPS_LIFECYCLEF("[GPS_INIT] gGpsRunning set to true");
   
   // Create GPS task using centralized helper
   if (!createGPSTask()) {
     ERROR_GPSF("Failed to create GPS task");
-    gGpsEnabled = false;
+    gGpsRunning = false;
     gGpsConnected = false;
     gpsDestroyObject();
     return false;
@@ -212,7 +212,7 @@ bool gpsStartInternal() {
 const char* cmd_gpsstart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  if (gGpsEnabled) {
+  if (gGpsRunning) {
     return "[GPS] Sensor already running";
   }
   
@@ -242,7 +242,7 @@ const char* cmd_gpsstart(const String& argsInput) {
 const char* cmd_gpsstop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
-  DEBUG_GPS_LIFECYCLEF("[GPS_STOP] GPS stop command called (current enabled=%d)", gGpsEnabled ? 1 : 0);
+  DEBUG_GPS_LIFECYCLEF("[GPS_STOP] GPS stop command called (current enabled=%d)", gGpsRunning ? 1 : 0);
   
   handleDeviceStopped(I2C_DEVICE_GPS);
   return "[GPS] Close requested; cleanup will complete asynchronously";
@@ -258,7 +258,7 @@ const char* cmd_gps(const String& argsInput) {
   }
 
   DEBUG_GPS_POLLINGF("[GPS_CMD] Reading GPS data (enabled=%d, task=%p)...",
-                 gGpsEnabled ? 1 : 0, gGpsTaskHandle);
+                 gGpsRunning ? 1 : 0, gGpsTaskHandle);
   
   if (!gGpsConnected || gPA1010D == nullptr) {
     cliHint("the GPS is not open - run 'opengps' first");
@@ -330,11 +330,11 @@ const char* cmd_gps(const String& argsInput) {
 // ============================================================================
 // Purpose: Continuously reads NMEA data from PA1010D GPS module
 // Stack: GPS_STACK_WORDS = 3072 BYTES (3 KB) | Priority: low | Core: Any
-// Lifecycle: Created by cmd_gpsstart, deleted when gGpsEnabled=false
+// Lifecycle: Created by cmd_gpsstart, deleted when gGpsRunning=false
 // Polling: Configurable via gpsDevicePollMs (default 200ms) | I2C Clock: 100kHz
 //
 // Cleanup Strategy:
-//   1. Check gGpsEnabled flag at loop start
+//   1. Check gGpsRunning flag at loop start
 //   2. Acquire bus mutex via I2CDeviceManager to prevent race conditions during cleanup
 //   3. Delete GPS module object
 //   4. Release mutex and delete task
@@ -425,7 +425,7 @@ void gpsTask(void* parameter) {
   
   while (true) {
     // CRITICAL: Check enabled flag FIRST for graceful shutdown
-    if (!gGpsEnabled) {
+    if (!gGpsRunning) {
       gGpsConnected = false;
       gpsDestroyObject();
       SENSOR_TASK_EXIT(GPS);
@@ -435,20 +435,20 @@ void gpsTask(void* parameter) {
     unsigned long nowMs = millis();
     if ((nowMs - lastStackLog) >= 30000) {
       lastStackLog = nowMs;
-      // Stack-safety bailout clears gGpsEnabled; 'continue' (not 'break') so the
+      // Stack-safety bailout clears gGpsRunning; 'continue' (not 'break') so the
       // top-of-loop shutdown path runs SENSOR_TASK_EXIT (clean vTaskDelete)
       // instead of returning from the task function with a corrupt stack.
-      if (checkTaskStackSafety("gps", GPS_STACK_WORDS, &gGpsEnabled)) continue;
-      if (gGpsEnabled && isDebugFlagSet(DEBUG_PERFORMANCE)) {
+      if (checkTaskStackSafety("gps", GPS_STACK_WORDS, &gGpsRunning)) continue;
+      if (gGpsRunning && isDebugFlagSet(DEBUG_PERFORMANCE)) {
         UBaseType_t watermark = uxTaskGetStackHighWaterMark(nullptr);
         DEBUG_PERFORMANCEF("[STACK] gps_task watermark=%u words", (unsigned)watermark);
       }
-      if (gGpsEnabled && isDebugFlagSet(DEBUG_MEMORY)) {
+      if (gGpsRunning && isDebugFlagSet(DEBUG_MEMORY)) {
         DEBUG_MEMORY_HEAPF("[HEAP] gps_task: free=%u min=%u", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
       }
     }
     
-    if (gGpsEnabled && gGpsConnected && gPA1010D != nullptr && !pollPaused((uint8_t)gSettings.gpsBus)) {
+    if (gGpsRunning && gGpsConnected && gPA1010D != nullptr && !pollPaused((uint8_t)gSettings.gpsBus)) {
       // gpsPollMs gates only the I2C health probe — NOT the NMEA read.
       // Adafruit_GPS is designed for read() to be called once per loop iteration
       // (~1ms cadence ideally). Our 10ms vTaskDelay approximates that.
@@ -480,7 +480,7 @@ void gpsTask(void* parameter) {
         if (!probeResult) {
           if (i2cShouldAutoDisable(I2C_ADDR_GPS)) {
             ERROR_GPSF("Too many consecutive GPS failures - auto-disabling");
-            gGpsEnabled = false;
+            gGpsRunning = false;
             sensorStatusBumpWith("gps@auto_disabled");
             logSystemEvent("SENSOR", "GPS auto-disabled after too many consecutive I2C failures");
             systemEventPost(SYSEVT_SENSOR_FAULT, "GPS", "consecutive I2C failures");
@@ -568,7 +568,7 @@ void gpsTask(void* parameter) {
       vTaskDelay(pdMS_TO_TICKS(10));
       drainDebugRing();
     } else {
-      if (wasPolling && (!gGpsEnabled || !gGpsConnected || gPA1010D == nullptr)) {
+      if (wasPolling && (!gGpsRunning || !gGpsConnected || gPA1010D == nullptr)) {
         // Only log stop when sensor is actually disabled/disconnected,
         // not for brief gSensorPollingPaused toggles from web requests
         DEBUG_GPS_LIFECYCLEF("[GPS_TASK] Stopped active polling - entering idle mode");
@@ -629,8 +629,9 @@ int getGPSSatellites() {
 // GPS settings entries
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry gpsSettingEntries[] = {
-  { "gpsAutoStart", SETTING_BOOL, &gSettings.gpsAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, nullptr },
-  { "gpsDevicePollMs", SETTING_INT, &gSettings.gpsDevicePollMs, 200, 0, nullptr, 50, 10000, "Poll Interval (ms)", nullptr, false, nullptr, "gpsdevicepollms" }
+  { "gpsEnabled", SETTING_BOOL, &gSettings.gpsEnabled, 1, 0, nullptr, 0, 1, "Enabled", nullptr, false, nullptr, "gpsenabled" },
+  { "gpsAutoStart", SETTING_BOOL, &gSettings.gpsAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, "gpsautostart" },
+  { "gpsDevicePollMs", SETTING_INT, &gSettings.gpsDevicePollMs, 200, 0, nullptr, 50, 10000, "Poll Interval (ms)", nullptr, false, nullptr, "gpsdevicepollms" },
 };
 
 static bool isGPSConnected() {
@@ -705,7 +706,7 @@ const char* cmd_gpslog(const String& argsInput) {
   gSensorLogIntervalMs = intervalMs;
 
   // ── 2. Start GPS sensor now if not already running ───────────────────────
-  bool gpsWasRunning = gGpsEnabled;
+  bool gpsWasRunning = gGpsRunning;
   if (!gpsWasRunning) {
     cmd_gpsstart("");
   }
@@ -714,7 +715,7 @@ const char* cmd_gpslog(const String& argsInput) {
   // sensorLogAutoStart() creates the timestamped file + directories and
   // calls cmd_sensorlog("start ...") internally — identical to what would
   // happen on the next boot automatically.
-  if (!gSensorLoggingEnabled) {
+  if (!gSensorLoggingRunning) {
     sensorLogAutoStart();
   }
 
@@ -725,7 +726,7 @@ const char* cmd_gpslog(const String& argsInput) {
     "  Log:    %s",
     (unsigned long)intervalMs,
     gpsWasRunning ? "was already running" : "started now",
-    gSensorLoggingEnabled ? gSensorLogPath.c_str() : "FAILED to start — check serial output"
+    gSensorLoggingRunning ? gSensorLogPath.c_str() : "FAILED to start — check serial output"
   );
   return result;
 }

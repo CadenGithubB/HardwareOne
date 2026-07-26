@@ -19,7 +19,7 @@ size_t gWebMirrorCap = 0;
 #if !ENABLE_THERMAL_SENSOR
 // Thermal stub variables (global definitions)
 ThermalCache gThermalCache;
-bool gThermalEnabled = false;
+bool gThermalRunning = false;
 bool gThermalConnected = false;
 unsigned long gThermalLastStopTime = 0;
 TaskHandle_t gThermalTaskHandle = nullptr;
@@ -32,7 +32,7 @@ const size_t thermalCommandsCount = 0;
 #if !ENABLE_TOF_SENSOR
 // ToF stub variables (global definitions)
 TofCache gTofCache;
-bool gTofEnabled = false;
+bool gTofRunning = false;
 bool gTofConnected = false;
 uint32_t gTofLastStopTime = 0;
 TaskHandle_t gTofTaskHandle = nullptr;
@@ -45,7 +45,7 @@ const size_t tofCommandsCount = 0;
 #if !ENABLE_IMU_SENSOR
 // IMU stub variables (global definitions)
 ImuCache gImuCache;
-bool gImuEnabled = false;
+bool gImuRunning = false;
 bool gImuConnected = false;
 unsigned long gImuLastStopTime = 0;
 TaskHandle_t gImuTaskHandle = nullptr;
@@ -60,12 +60,12 @@ void imuUpdateActions() {
 
 #if !ENABLE_GAMEPAD_SENSOR
 // Gamepad stub variables. Only the symbols NOT supplied by the ANO encoder
-// driver get stubbed here — gInputEnabled/gInputConnected/gInputCache
+// driver get stubbed here — gInputRunning/gInputConnected/gInputCache
 // are populated live by the ANO task when ENABLE_ANO_ENCODER is on, so the
 // OLED input pipeline sees real state instead of zeros.
 #if !ENABLE_ANO_ENCODER
 InputCache gInputCache;
-bool gInputEnabled = false;
+bool gInputRunning = false;
 bool gInputConnected = false;
 #endif
 unsigned long gGamepadLastStopTime = 0;
@@ -80,9 +80,9 @@ const size_t gamepadCommandsCount = 0;
 // APDS stub variables (global definitions)
 APDSCache gApdsCache;
 bool gApdsConnected = false;
-bool gApdsColorEnabled = false;
-bool gApdsProximityEnabled = false;
-bool gApdsGestureEnabled = false;
+bool gApdsColorRunning = false;
+bool gApdsProximityRunning = false;
+bool gApdsGestureRunning = false;
 unsigned long gApdsLastStopTime = 0;
 TaskHandle_t gApdsTaskHandle = nullptr;
 const struct CommandEntry apdsCommands[] = {};
@@ -92,7 +92,7 @@ const size_t apdsCommandsCount = 0;
 #if !ENABLE_GPS_SENSOR
 // GPS stub variables (global definitions)
 GPSCache gGpsCache;
-bool gGpsEnabled = false;
+bool gGpsRunning = false;
 bool gGpsConnected = false;
 unsigned long gGpsLastStopTime = 0;
 Adafruit_GPS* gPA1010D = nullptr;
@@ -104,7 +104,7 @@ const size_t gpsCommandsCount = 0;
 #if !ENABLE_PRESENCE_SENSOR
 // Presence sensor stub variables (global definitions)
 PresenceCache gPresenceCache;
-bool gPresenceEnabled = false;
+bool gPresenceRunning = false;
 bool gPresenceConnected = false;
 unsigned long gPresenceLastStopTime = 0;
 TaskHandle_t gPresenceTaskHandle = nullptr;
@@ -114,7 +114,7 @@ const size_t presenceCommandsCount = 0;
 
 #if !ENABLE_OLED_DISPLAY
 // OLED stub variables (global definitions)
-bool gOledEnabled = false;
+bool gOledRunning = false;
 bool oledConnected = false;
 Adafruit_SSD1306* oledDisplay = nullptr;
 const struct CommandEntry oledCommands[] = {};
@@ -123,7 +123,7 @@ const size_t oledCommandsCount = 0;
 
 #if !ENABLE_FM_RADIO
 // FM Radio stub variables (global definitions)
-bool gFmRadioEnabled = false;
+bool gFmRadioRunning = false;
 bool gFmRadioConnected = false;
 unsigned long gFmRadioLastStopTime = 0;
 bool gRadioInitialized = false;
@@ -137,7 +137,7 @@ const size_t fmRadioCommandsCount = 0;
 // RTC stub variables (global definitions)
 // Types are defined in System_SensorStubs.h when disabled
 RTCCache gRtcCache = {nullptr, {0, 0, 0, 0, 0, 0, 0}, 0.0f, false, 0};
-bool gRtcEnabled = false;
+bool gRtcRunning = false;
 bool gRtcConnected = false;
 unsigned long gRtcLastStopTime = 0;
 TaskHandle_t gRtcTaskHandle = nullptr;
@@ -159,7 +159,7 @@ const size_t servoCommandsCount = 0;
 // (not ..._SENSOR) in lockstep with System_Microphone.cpp: whenever the real mic
 // module compiles (PDM board OR G2-capable board), these stubs MUST be absent or
 // the linker sees duplicate definitions of all 9 globals + micCommands[].
-bool gMicEnabled = false;
+bool gMicRunning = false;
 bool micConnected = false;
 bool micRecording = false;
 int micSampleRate = 0;
@@ -172,7 +172,7 @@ const size_t micCommandsCount = 0;
 
 #if !ENABLE_CAMERA_SENSOR
 // Camera stub variables (global definitions)
-bool gCameraEnabled = false;
+bool gCameraRunning = false;
 bool cameraConnected = false;
 bool cameraStreaming = false;
 const char* cameraModel = "None";

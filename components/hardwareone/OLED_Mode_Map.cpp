@@ -1048,7 +1048,7 @@ static void displayGPSMap() {
   // Use cached GPS data (gps_task continuously polls and updates the cache).
   // Read the cache struct, never gPA1010D directly — the cache lat/lon are
   // already signed (S/W negative).
-  if (gGpsConnected && gGpsEnabled) {
+  if (gGpsConnected && gGpsRunning) {
     GPSCache g;
     if (gpsCacheSnapshot(g)) {
       satellites = (int)g.satellites;
@@ -1258,7 +1258,7 @@ static void displayGPSMap() {
     gOledMapRenderer->drawOverlayText(100, 0, overlayBuf, true);
   }
 #if ENABLE_GPS_SENSOR
-  else if (gGpsEnabled) {
+  else if (gGpsRunning) {
     // Local GPS enabled but no fix - show searching indicator
     snprintf(overlayBuf, sizeof(overlayBuf), " %dS ", satellites);
     gOledMapRenderer->drawOverlayText(100, 0, overlayBuf, true);
@@ -1435,7 +1435,7 @@ static void executeSubmenuAction(int submenuType, int action) {
           break;
         case 1:  // Toggle GPS
           {
-            if (gGpsEnabled) executeOLEDCommand("closegps");
+            if (gGpsRunning) executeOLEDCommand("closegps");
             else executeOLEDCommand("opengps");
           }
           break;
@@ -1508,7 +1508,7 @@ static void executeSubmenuAction(int submenuType, int action) {
               executeOLEDCommand("sensorlog stop");
             } else {
               // Auto-start GPS sensor if not running
-              if (!gGpsEnabled) {
+              if (!gGpsRunning) {
                 executeOLEDCommand("opengps");
               }
               GPSTrackManager::clearTrack();
