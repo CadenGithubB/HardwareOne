@@ -1017,7 +1017,7 @@ struct Settings {
   //   bleGlassesLeftMAC, bleGlassesRightMAC, bleRingMAC, blePhoneMAC,
   //   g2AutoReconnect, ringAutoReconnect
   // Power Management settings
-  uint8_t powerMode;            // 0=Performance(240MHz), 1=Balanced(160MHz), 2=PowerSaver(80MHz), 3=UltraSaver(80MHz active / 40MHz idle-only)
+  uint8_t powerMode;            // 0=Performance(240/80), 1=Balanced(160/80), 2=PowerSaver(80), 3=UltraSaver(80 active / 40 idle), 4=Locked(240 always)
   bool powerAutoMode;           // Auto-adjust power mode based on battery level
   uint8_t powerBatteryThreshold; // Switch to power saver below this battery % (default: 20)
   uint8_t powerDisplayDimLevel; // Brightness % in power saver modes (0-100, default: 30)

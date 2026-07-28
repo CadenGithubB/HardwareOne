@@ -44,6 +44,12 @@ bool isSynced();
 // data read from peers or settings files.
 bool isValidEpoch(time_t t);
 
+// Milliseconds since UNIX epoch (gettimeofday). Meaningful only when
+// isSynced(); callers that can run pre-sync must gate on that themselves
+// (e.g. the sensor-log CSV row stamp falls back to millis()). 64-bit —
+// epoch-ms (~1.75e12) silently truncates in any 32-bit type.
+int64_t epochMillis();
+
 // ----- Timezone (unit names baked in) -------------------------------------
 
 // Stored offset in MINUTES. This is gSettings.tzOffsetMinutes directly.

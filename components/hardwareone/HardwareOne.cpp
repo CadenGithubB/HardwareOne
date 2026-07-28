@@ -331,6 +331,7 @@ esp_err_t handleSensorsStatus(httpd_req_t* req);
 // HardwareOne sees the declaration via System_I2C.h.
 
 #include "System_SensorLogging.h"
+#include "System_TimeAnchors.h"
 
 // Global sensor-status sequence for SSE fanout
 volatile unsigned long gSensorStatusSeq = 1;
@@ -2264,14 +2265,16 @@ static void powerSaveTick() {
   powerSleepTransitionMark();
   oledPrepareForSleep();   // DISPLAYOFF (+ LDO2 cut on FeatherS3); board-aware
   gOledRunning = false;    // updateOLEDDisplay() now early-returns → refresh stops
-  // Downclock to the current mode's IDLE floor. Every mode holds the 80 MHz
-  // Wi-Fi floor while asleep — radio stays up so HTTP/ESP-NOW remain reachable;
-  // we only shed dynamic core power. UltraSaver is the exception: it sinks all
-  // the way to 40 MHz here (its headline deep-save clock), which is safe ONLY
-  // because the panel is blanked and idle — 40 MHz makes the interactive UI
-  // unusably laggy, so it's confined to this asleep state and any input
-  // (gInputCache.seq) or command wakes it back to >=80 via wake() above. Only
-  // switch if the floor is actually below the live clock (never raise here).
+  // Downclock to the current mode's IDLE floor. Locked keeps 240 through idle
+  // (OLED blanks, core stays hot). Performance/Balanced/PowerSaver hold the
+  // 80 MHz Wi-Fi floor while asleep — radio stays up so HTTP/ESP-NOW remain
+  // reachable; we only shed dynamic core power. UltraSaver is the exception:
+  // it sinks all the way to 40 MHz here (its headline deep-save clock), which
+  // is safe ONLY because the panel is blanked and idle — 40 MHz makes the
+  // interactive UI unusably laggy, so it's confined to this asleep state and
+  // any input (gInputCache.seq) or command wakes it back to >=80 via wake()
+  // above. Only switch if the floor is actually below the live clock (never
+  // raise here).
   savedCpuMhz = getCpuFrequencyMhz();
   const uint32_t idleFloorMhz = getPowerModeIdleCpuFreq(gSettings.powerMode);
   if (idleFloorMhz < savedCpuMhz) {
@@ -2328,6 +2331,7 @@ void hardwareone_loop() {
   // ========================================================================
 
   sensorLogTick();
+  timeAnchorsTick();   // retro-date boot-named captures once the clock syncs
 #if ENABLE_BLUETOOTH
   bleAutoReconnectTick();
 #endif

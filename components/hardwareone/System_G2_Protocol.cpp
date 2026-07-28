@@ -799,6 +799,39 @@ size_t g2BuildCreateImage(uint8_t seq, uint32_t magic,
                          payload, pbLen, out, outCap);
 }
 
+size_t g2BuildRebuildImage(uint8_t seq, uint32_t magic,
+                           const char* containerName, uint32_t containerId,
+                           uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                           uint8_t* out, size_t outCap) {
+  if (!containerName) return 0;
+
+  // Identical body to g2BuildCreateImagePb except: Cmd=7 REBUILD_PAGE,
+  // wrapper field G2_WRAP_F_REBUILD, and no WidgetId (a REBUILD targets the
+  // page that is already live). Field numbers inside ImageContainerProperty
+  // are unchanged — 1=X 2=Y 3=W 4=H 5=ContainerID 6=ContainerName.
+  uint8_t payload[256];
+  size_t pos = 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_WRAP_F_CMD, G2_CMD_REBUILD_PAGE)) return 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_WRAP_F_MAGIC, magic)) return 0;
+  size_t pageStart;
+  if (!g2PbBeginNested(payload, sizeof(payload), &pos, G2_WRAP_F_REBUILD, &pageStart)) return 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_PAGE_F_TOTAL, 1)) return 0;
+
+  size_t imgStart;
+  if (!g2PbBeginNested(payload, sizeof(payload), &pos, /*F_IMAGE_OBJ*/4, &imgStart)) return 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, 1, x)) return 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, 2, y)) return 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, 3, w)) return 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, 4, h)) return 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, 5, containerId)) return 0;
+  if (!g2PbWriteString(payload, sizeof(payload), &pos, 6, containerName)) return 0;
+  if (!g2PbEndNested(payload, sizeof(payload), &pos, imgStart)) return 0;
+
+  if (!g2PbEndNested(payload, sizeof(payload), &pos, pageStart)) return 0;
+  return g2BuildEnvelope(seq, G2_SID_EVEN_CORE, G2_FLAG_REQUEST,
+                         payload, pos, out, outCap);
+}
+
 size_t g2BuildCreateImageMultiPb(uint32_t magic,
                                  const G2ImageTile* tiles, size_t tileCount,
                                  uint32_t widgetId,

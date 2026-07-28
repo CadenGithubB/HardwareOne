@@ -606,6 +606,31 @@ struct G2ImageTile {
   const char* containerName;
 };
 
+// REBUILD_PAGE (Cmd=7) carrying a single ImageObject — the untested
+// counterpart to g2BuildRebuildList/g2BuildRebuildText. Exists to answer one
+// question: can an already-CREATEd image container be MOVED (new x/y, same
+// w/h and ContainerID/Name) without a SHUTDOWN+CREATE?
+//
+// Why this is open: docs/G2_PROTOCOL.md:1665 says Cmd=7 is the command for
+// "change the container's geometry", but the empirical note on
+// g2BuildRebuildList above says the firmware IGNORES geom changes on the
+// REBUILD path (list case), and REBUILD-text on this firmware fails outright
+// (docs/G2_PROTOCOL.md:1821). The image case has never been tried, so the
+// three plausible outcomes are: moves (best), acks-but-ignores-geom (likely,
+// matching the list note), or wedges the EvenCore plugin task (worst — see
+// docs/G2_PROTOCOL.md:1813; recovery is a BLE reconnect).
+//
+// Wire shape mirrors g2BuildCreateImagePb exactly except Cmd/wrapper field
+// and no WidgetId (REBUILD targets the live page). Magic MUST be
+// G2_MAGIC_REBUILD — armRebuildSlot()/waitRebuildAck() hardcode it.
+//
+// Exercised only by g2ProbeImageQ31RebuildMove(). Do NOT wire into feature
+// code until the probe says which outcome is real.
+size_t g2BuildRebuildImage(uint8_t seq, uint32_t magic,
+                           const char* containerName, uint32_t containerId,
+                           uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                           uint8_t* out, size_t outCap);
+
 size_t g2BuildCreateImageMultiPb(uint32_t magic,
                                  const G2ImageTile* tiles, size_t tileCount,
                                  uint32_t widgetId,

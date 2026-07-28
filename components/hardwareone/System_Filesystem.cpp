@@ -22,9 +22,9 @@
 #include "System_Events.h"        // systemEventPost — SYSEVT_STORAGE_FORMATTED producer
 #include "System_AuthIdentity.h"  // currentAuthContext — CLI handlers' per-task identity
 #include "System_CLIConfirm.h"    // cliRequestConfirm — yes/no gate for destructive filedelete
+#include "System_TextPager.h"     // sanitize + page-split core — paged fileview (CLI, not BT-gated)
 #if ENABLE_BLUETOOTH
 #include "System_BleSecureChannel.h"  // bleScSendEncrypted/bleScEstablished — raw-binary `fileread ... bin`
-#include "System_TextPager.h"     // sanitize + page-split core — paged fileview
 #endif
 
 // External dependencies

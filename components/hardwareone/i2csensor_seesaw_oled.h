@@ -143,10 +143,13 @@ static bool gamepadOLEDModeAvailable(String* outReason) {
 
 static void gamepadToggleConfirmed(void* userData) {
   (void)userData;
+  // Device-agnostic input commands — `opengamepad`/`closegamepad` were removed
+  // when the Seesaw gamepad and ANO encoder moved behind the shared HAL_Input
+  // layer; they no longer resolve, so this toggle silently did nothing.
   if (gInputRunning && gInputConnected) {
-    executeOLEDCommand("closegamepad");
+    executeOLEDCommand("closeinput");
   } else {
-    executeOLEDCommand("opengamepad");
+    executeOLEDCommand("openinput");
   }
 }
 

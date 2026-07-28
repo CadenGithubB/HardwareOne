@@ -17,7 +17,7 @@
 //
 //   Level 3 (CPU presets — mirrors the OLED "Adjust CPU Power" menu):
 //     [0] <- Back
-//     [1..4] [X] Performance/Balanced/PowerSaver/UltraSaver <MHz>
+//     [1..5] [X] Performance/Balanced/PowerSaver/UltraSaver/Locked <MHz>
 //
 // Presets apply DIRECTLY (non-destructive, no confirm — matching the OLED CPU
 // menu and Camera Settings). Everything dispatches through g2SubmitHijackCommand
@@ -55,17 +55,19 @@ enum PowerLevel : uint8_t {
   POWER_LEVEL_CPU     = 2,   // CPU-freq / power-mode preset picker
 };
 
-// The four presets, in gSettings.powerMode order, and the command each
+// The five presets, in gSettings.powerMode order, and the command each
 // dispatches. `power mode X` (not raw `cpufreq N`) is the OLED-established
 // path — it also sets display brightness and selects UltraSaver, whose
 // idle-only 40 MHz floor `cpufreq` (80/160/240) cannot express. (UltraSaver's
 // ACTIVE clock is 80 MHz; the 40 MHz kicks in only when idle power-save
-// blanks the screen — see powerSaveTick in HardwareOne.cpp.)
-static const char* const kPowerModeCmds[4] = {
+// blanks the screen — see powerSaveTick in HardwareOne.cpp. Locked alone
+// keeps 240 through that idle path; Performance is 240/80.)
+static const char* const kPowerModeCmds[POWER_MODE_COUNT] = {
   "power mode perf",      // POWER_MODE_PERFORMANCE
   "power mode balanced",  // POWER_MODE_BALANCED
   "power mode saver",     // POWER_MODE_POWERSAVER
   "power mode ultra",     // POWER_MODE_ULTRASAVER
+  "power mode locked",    // POWER_MODE_LOCKED
 };
 
 enum PowerAction : uint8_t {
@@ -79,7 +81,7 @@ static PowerLevel  gLevel   = POWER_LEVEL_ACTIONS;
 static PowerAction gPending = POWER_ACTION_NONE;
 
 #define POWER_ROW_LEN  24
-#define POWER_MAX_ROWS  6
+#define POWER_MAX_ROWS  6   // back + POWER_MODE_COUNT
 
 EXT_RAM_BSS_ATTR static char        gRows[POWER_MAX_ROWS][POWER_ROW_LEN];
 static const char* gRowPtrs[POWER_MAX_ROWS];
@@ -107,9 +109,10 @@ static size_t buildActionRows() {
 // gSettings.powerMode (picker precedent from Camera Settings' resolution list).
 // Modes show their interactive clock; UltraSaver shows "80/40" because it runs
 // at the 80 MHz floor while used and only sinks to 40 MHz once idle/asleep.
+// Performance/Balanced show "240/80" and "160/80". Locked shows a single 240.
 static size_t buildCpuRows() {
   snprintf(gRows[0], POWER_ROW_LEN, "<- Back");
-  for (uint8_t m = 0; m < 4; m++) {
+  for (uint8_t m = 0; m < POWER_MODE_COUNT; m++) {
     const char* mark = (m == gSettings.powerMode) ? "[X]" : "[ ]";
     const unsigned act  = (unsigned)getPowerModeActiveCpuFreq(m);
     const unsigned idle = (unsigned)getPowerModeIdleCpuFreq(m);
@@ -121,8 +124,8 @@ static size_t buildCpuRows() {
                mark, getPowerModeName(m), act);
     }
   }
-  for (size_t i = 0; i < 5; i++) gRowPtrs[i] = gRows[i];
-  return 5;
+  for (size_t i = 0; i < 1 + POWER_MODE_COUNT; i++) gRowPtrs[i] = gRows[i];
+  return 1 + POWER_MODE_COUNT;
 }
 
 static const char* confirmLabel(PowerAction action) {
@@ -158,7 +161,7 @@ void g2BuildPowerInfo(char* out, size_t cap) {
   if (!out || cap == 0) return;
   snprintf(out, cap,
            "Power - %s %uMHz\n"
-           "CPU Power  pick a mode (Perf/Bal/Saver/Ultra)\n"
+           "CPU Power  pick a mode (Perf/Bal/Saver/Ultra/Locked)\n"
            "Restart    reboot the device\n"
            "RAM Flush  reboot, restore running features\n"
            "Power Off  enter deep sleep",
@@ -341,8 +344,8 @@ void g2PowerHandleTap(uint32_t idx) {
         g2ShowListPage(gRowPtrs, n);
         return;
       }
-      if (idx >= 1 && idx <= 4) {
-        submitPowerPreset(kPowerModeCmds[idx - 1]);   // rows 1..4 → modes 0..3
+      if (idx >= 1 && idx <= POWER_MODE_COUNT) {
+        submitPowerPreset(kPowerModeCmds[idx - 1]);   // rows 1..N → modes 0..N-1
       }
       return;
     }

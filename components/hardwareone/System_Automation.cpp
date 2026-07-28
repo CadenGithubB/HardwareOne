@@ -2959,13 +2959,21 @@ bool evaluateCondition(const char* condition) {
   } else if (strcmp(sensor, "BOND_MODE") == 0) {
     // Bond mode enabled in config -> ACTIVE / NONE
     isNumeric = false;
+ #if ENABLE_BONDED_MODE
     strncpy(currentStringValue, gSettings.bondModeEnabled ? "ACTIVE" : "NONE", sizeof(currentStringValue) - 1);
     currentStringValue[sizeof(currentStringValue) - 1] = '\0';
+ #else
+    return false;
+ #endif
   } else if (strcmp(sensor, "BOND_ROLE") == 0) {
     // This device's bond role -> MASTER / WORKER
     isNumeric = false;
+ #if ENABLE_BONDED_MODE
     strncpy(currentStringValue, isBondMaster() ? "MASTER" : "WORKER", sizeof(currentStringValue) - 1);
     currentStringValue[sizeof(currentStringValue) - 1] = '\0';
+ #else
+    return false;
+ #endif
   } else if (strcmp(sensor, "BOND_PAIRED") == 0) {
     // A bonded partner is configured -> PAIRED / NONE
     isNumeric = false;
@@ -2978,13 +2986,21 @@ bool evaluateCondition(const char* condition) {
   } else if (strcmp(sensor, "BOND_ONLINE") == 0) {
     // Bonded peer currently reachable -> ONLINE / OFFLINE
     isNumeric = false;
+ #if ENABLE_BONDED_MODE
     strncpy(currentStringValue, isBondModeOnline() ? "ONLINE" : "OFFLINE", sizeof(currentStringValue) - 1);
     currentStringValue[sizeof(currentStringValue) - 1] = '\0';
+ #else
+    return false;
+ #endif
   } else if (strcmp(sensor, "BOND_SYNCED") == 0) {
     // Bonded peer online AND config-synced -> SYNCED / NONE
     isNumeric = false;
+ #if ENABLE_BONDED_MODE
     strncpy(currentStringValue, isBondSynced() ? "SYNCED" : "NONE", sizeof(currentStringValue) - 1);
     currentStringValue[sizeof(currentStringValue) - 1] = '\0';
+ #else
+    return false;
+ #endif
   } else if (strcmp(sensor, "PAIRMODE") == 0) {
     // WPS-style pairing window open -> ACTIVE / NONE
     isNumeric = false;
@@ -3003,7 +3019,7 @@ bool evaluateCondition(const char* condition) {
  #endif
   } else if (strcmp(sensor, "BOND_RSSI") == 0) {
     // Link RSSI (dBm) of the last bond heartbeat; only meaningful while online
- #if ENABLE_ESPNOW
+ #if ENABLE_ESPNOW && ENABLE_BONDED_MODE
     if (!gEspNow || !isBondModeOnline()) return false;
     currentValue = (float)gEspNow->bondRssiLast;
  #else
@@ -3011,7 +3027,7 @@ bool evaluateCondition(const char* condition) {
  #endif
   } else if (strcmp(sensor, "BOND_PEER_HEAP") == 0) {
     // Bonded peer's reported free heap in KB (from the ~30s status snapshot)
- #if ENABLE_ESPNOW
+ #if ENABLE_ESPNOW && ENABLE_BONDED_MODE
     if (!gEspNow || !gEspNow->bondPeerStatusValid) return false;
     currentValue = (float)(gEspNow->bondPeerStatus.freeHeap / 1024);
  #else
@@ -3019,7 +3035,7 @@ bool evaluateCondition(const char* condition) {
  #endif
   } else if (strcmp(sensor, "BOND_PEER_UPTIME") == 0) {
     // Bonded peer's reported uptime in minutes (peer-reboot detection)
- #if ENABLE_ESPNOW
+ #if ENABLE_ESPNOW && ENABLE_BONDED_MODE
     if (!gEspNow || !gEspNow->bondPeerStatusValid) return false;
     currentValue = (float)(gEspNow->bondPeerStatus.uptimeSec / 60);
  #else

@@ -1310,6 +1310,7 @@ static void handleWiFiScanTap(uint32_t idx) {
   cfg.maxLen   = 32;   // keyboard cap; >32-char PSKs need the web UI
   cfg.onCommit = wifiAddPassCommit;
   cfg.onCancel = wifiAddPassCancel;
+  cfg.isSecret = true;   // PSK — keep out of debug logs
   if (!g2BeginTextEntry(cfg)) {
     DEBUG_G2F("[G2] WiFi: text-entry failed to start");
   }
@@ -1375,7 +1376,7 @@ static void handleWiFiSavedActionTap(uint32_t idx) {
 }
 
 #if ENABLE_ESPNOW
-// onCommit for the ESPNow name editor — submits `espnowsetname <name>`
+// onCommit for the ESPNow name editor — submits `espnowsetname "<name>"`
 // through cmd_exec so the rename runs as the paired-by user and goes
 // through the same auth+log path as the CLI form. Completion callback
 // re-renders the ESPNow submenu so the "Name:" row reflects the new
@@ -1388,7 +1389,10 @@ static void espnowNameCommit(const char* text) {
     showEspNowMenu();
     return;
   }
-  String line = String("espnowsetname ") + text;
+  // Quoted like the login/filerename submits: the keyboard has a Space row
+  // but no double-quote, so wrapping keeps a spaced name as one arg (the
+  // handler then rejects it with its charset error instead of mangling).
+  String line = String("espnowsetname \"") + text + "\"";
   G2CmdCookie cookie{};
   cookie.targetPage   = g2GetHijackPage();
   cookie.targetNetSub = (uint8_t)gNetSub;

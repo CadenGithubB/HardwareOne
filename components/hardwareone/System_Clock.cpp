@@ -2,6 +2,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <sys/time.h>  // gettimeofday — epochMillis()
 
 #include "System_Settings.h"  // gSettings.tzOffsetMinutes
 
@@ -26,6 +27,12 @@ bool isValidEpoch(time_t t) {
   struct tm tminfo;
   if (!gmtime_r(&t, &tminfo)) return false;
   return tminfo.tm_year >= kSyncedTmYearThreshold;
+}
+
+int64_t epochMillis() {
+  struct timeval tv;
+  if (gettimeofday(&tv, nullptr) != 0) return 0;
+  return (int64_t)tv.tv_sec * 1000LL + (int64_t)(tv.tv_usec / 1000);
 }
 
 int tzOffsetMinutes() {

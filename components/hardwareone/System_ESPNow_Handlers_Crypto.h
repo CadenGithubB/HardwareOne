@@ -10,8 +10,8 @@
 //
 // The handlers themselves are exposed for registration in the V4 dispatch
 // table (see kV4HandlerTable in System_ESPNow.cpp). The struct V4RxCtx
-// signature lives in System_ESPNow.cpp; the handler functions take it by
-// reference and we keep the surface area here narrow.
+// definition lives in the shared System_ESPNow_RxCtx.h; the handler functions
+// take it by reference and we keep the surface area here narrow.
 // ============================================================================
 
 #include "System_BuildConfig.h"
@@ -20,7 +20,7 @@
 
 #include <stdint.h>
 
-struct V4RxCtx;  // defined in System_ESPNow.cpp
+struct V4RxCtx;  // defined in System_ESPNow_RxCtx.h (shared; forward-decl is enough here)
 
 // Receive-side handlers. Each:
 //   - Validates the payload struct size.

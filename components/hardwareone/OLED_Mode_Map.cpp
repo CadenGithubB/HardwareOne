@@ -599,14 +599,40 @@ static bool isGPSDataLine(const String& line) {
   return false;
 }
 
-// Scan for GPS track files in /logging_captures and /logging_captures/tracks
+// Probe one candidate file's head for GPS data; record it in gTrackFiles if
+// it qualifies. Shared by the top-level scan and the subfolder descent.
+static void probeTrackFile(File& file) {
+  if (gTrackFileCount >= 8) return;
+  File check = VFS::openGuarded(file.path(), "r", VFS::systemAuth("oled.map.scan_tracks"));
+  if (!check) return;
+  bool hasGPS = false;
+  for (int i = 0; i < 15 && check.available(); i++) {
+    String line = check.readStringUntil('\n');
+    if (isGPSDataLine(line)) {
+      hasGPS = true;
+      break;
+    }
+  }
+  check.close();
+  if (hasGPS) {
+    strlcpy(gTrackFiles[gTrackFileCount], file.path(), 64);
+    gTrackFileCount++;
+  }
+}
+
+// Scan for GPS track files in the capture dirs. Session shaping places logs
+// one level down in YYYY-MM-DD/ and boot-N/ subfolders of /sensors (see
+// shapeSessionPath in System_SensorLogging.cpp), so the scan descends exactly
+// one directory level — a flat-only scan misses every shaped track.
 static void scanTrackFiles() {
   gTrackFileCount = 0;
-  
-  // Scan directories
-  const char* dirs[] = {"/logging_captures", "/logging_captures/tracks"};
-  
-  for (int d = 0; d < 2 && gTrackFileCount < 8; d++) {
+
+  // Scan directories (sensors included: autostart-resumed TRACK sessions
+  // land there, shaped into session subfolders).
+  const char* dirs[] = {"/logging_captures", "/logging_captures/tracks",
+                        "/logging_captures/sensors"};
+
+  for (int d = 0; d < 3 && gTrackFileCount < 8; d++) {
     // trusted: OLED-local scan of logging captures for the track-picker UI.
     // No per-user identity exists at the physical-display layer.
     File root = VFS::openGuarded(dirs[d], "r", VFS::systemAuth("oled.map.scan_tracks"));
@@ -615,24 +641,18 @@ static void scanTrackFiles() {
     File file = root.openNextFile();
     while (file && gTrackFileCount < 8) {
       if (!file.isDirectory()) {
-        // Check if file has GPS data
-        File check = VFS::openGuarded(file.path(), "r", VFS::systemAuth("oled.map.scan_tracks"));
-        if (check) {
-          bool hasGPS = false;
-          for (int i = 0; i < 15 && check.available(); i++) {
-            String line = check.readStringUntil('\n');
-            if (isGPSDataLine(line)) {
-              hasGPS = true;
-              break;
-            }
-          }
-          check.close();
-          
-          if (hasGPS) {
-            strlcpy(gTrackFiles[gTrackFileCount], file.path(), 64);
-            gTrackFileCount++;
+        probeTrackFile(file);
+      } else {
+        // One level down: session subfolders (dated / boot-N).
+        File sub = VFS::openGuarded(file.path(), "r", VFS::systemAuth("oled.map.scan_tracks"));
+        if (sub && sub.isDirectory()) {
+          File child = sub.openNextFile();
+          while (child && gTrackFileCount < 8) {
+            if (!child.isDirectory()) probeTrackFile(child);
+            child = sub.openNextFile();
           }
         }
+        if (sub) sub.close();
       }
       file = root.openNextFile();
     }

@@ -6,7 +6,7 @@
   <img alt="Hardware One logo" src="assets/logo-black.svg" width="140">
 </picture>
 
-# Hardware One v0.99.3
+# Hardware One v0.99.4
 
 **Hardware One is a modular ESP32 firmware that works like a distributed operating system for cheap microcontrollers.**
 
@@ -35,9 +35,15 @@ Hardware One can be used in several different ways depending on the hardware you
 - Can still expose data over web, CLI, automations, MQTT, and ESP-NOW like the barebones / headless node.
 
 ### 3) Hardware One (Standard Handheld)
-- The intended full build: board + SSD1306 OLED + Seesaw gamepad + a selection of I2C sensors.
+- The intended full build: board + SSD1306 OLED + Seesaw gamepad (or ANO rotary encoder) + a selection of I2C sensors.
 - Can be used from USB power or as a battery-powered handheld.
 - Best fit when you want both the local OLED/gamepad UI and the web UI.
+
+### 5) Wearable Companion
+- Board + Bluetooth, paired with Even Realities G2 smart glasses and/or an R1 smart ring.
+- The firmware drives the G2 lens directly as a full six-category UI - not a notification mirror - so the device in your pocket is operable without taking out a phone.
+- With an R1 ring, adds health vitals (heart rate, HRV, SpO2, temperature) with on-lens graphs and background Health Track logging.
+- Composes with any of the above: the glasses are another interface onto the same command system, not a separate build.
 
 ### 4) Bonded Microcontrollers
 - Control features unique to one device you flash while another device is flashed with other features - effectively removing the limit of software features that is faced due to iram constrictions on the ESP32.
@@ -54,6 +60,8 @@ Hardware One can be used in several different ways depending on the hardware you
 
 > All features can be enabled or disabled via `System_BuildConfig.h` to match your hardware and use case.
 
+> The **Wearable Companion** configuration is not a column here - the G2 glasses and R1 ring are interfaces that compose with any of the four builds below.
+
 | Feature | Barebones | Sensor Appliance | Standard Handheld | Bonded |
 | ------- | :-------: | :--------------: | :---------------: | :----: |
 | Serial CLI with full command system | ✅ | ✅ | ✅ | ✅&nbsp;+&nbsp;✅ |
@@ -61,12 +69,16 @@ Hardware One can be used in several different ways depending on the hardware you
 | Data logging (CSV export to LittleFS) | ⚙️ | ⚙️ | ⚙️ | ✅&nbsp;+&nbsp;✅ |
 | WiFi (connect, auto-reconnect, AP scan) | ✅ | ✅ | ✅ | ✅&nbsp;+&nbsp;⚙️ |
 | Web UI (browser-based control & monitoring) | ✅ | ✅ | ✅ | ✅&nbsp;+&nbsp;⚙️ |
-| Authentication (user accounts, permissions, settings) | ✅ | ✅ | ✅ | ✅&nbsp;+&nbsp;✅ |
+| Authentication (4 role tiers: guest / user / admin / super admin) | ✅ | ✅ | ✅ | ✅&nbsp;+&nbsp;✅ |
+| HTTPS (TLS web server, self-signed or uploaded certs) | ⚙️ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
+| Notifications (OLED banners, web toasts, G2 cards, notification center) | ✅ | ✅ | ✅ | ✅&nbsp;+&nbsp;✅ |
+| Backup & restore (`.hwbackup` migration between devices) | ⚙️ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
 | ESP-NOW V3 (peer discovery, pairing, bonding) | ✅ | ✅ | ✅ | ✅&nbsp;+&nbsp;✅ |
 | ESP-NOW metadata sync & file transfer | ✅ | ✅ | ✅ | ✅&nbsp;+&nbsp;✅ |
 | MQTT (Home Assistant integration) | ✅ | ✅ | ✅ | ✅&nbsp;+&nbsp;⚙️ |
 | Automations (scheduled & conditional commands) | ✅ | ✅ | ✅ | ⚙️&nbsp;+&nbsp;✅ |
 | Seesaw gamepad input | ❌ | ❌ | ✅ | ✅&nbsp;+&nbsp;⚙️ |
+| ANO rotary encoder input (alternative to the gamepad) | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
 | OLED display for onboard visuals | ❌ | ⚙️ | ✅ | ✅&nbsp;+&nbsp;⚙️ |
 | BNO055 IMU (9-DoF orientation) | ❌ | ⚙️ | ⚙️ | ✅&nbsp;+&nbsp;⚙️ |
 | VL53L4CX Time-of-Flight distance sensor | ❌ | ⚙️ | ⚙️ | ✅&nbsp;+&nbsp;⚙️ |
@@ -80,6 +92,9 @@ Hardware One can be used in several different ways depending on the hardware you
 | TEA5767 FM Radio receiver | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
 | ESP-SR voice commands (wake word + command recognition) | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;✅ |
 | BLE server + Even Realities G2 glasses client | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
+| R1 smart ring - health vitals, graphs, Health Track logging | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
+| Offline maps + waypoints | ⚙️ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
+| Browser games (Tilt Maze or A Dark Room - one per build) | ⚙️ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
 | On-device LLM inference (ESP32-S3 + PSRAM only) | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
 | Edge Impulse ML inference | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
 | Battery monitoring (LiPo voltage via ADC) | ⚙️ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
@@ -112,6 +127,7 @@ These connect via Stemma QT (or standard I2C) and work the same on any supported
 | ---------- | ---- |
 | SSD1306 OLED display | [ID: 326](https://www.adafruit.com/product/326) |
 | Adafruit Seesaw Gamepad | [ID: 5743](https://www.adafruit.com/product/5743) |
+| Adafruit ANO Rotary Encoder breakout (seesaw-based, I2C `0x49`) - alternative to the gamepad, pick one | — |
 | BNO055 9-DoF IMU | [ID: 4646](https://www.adafruit.com/product/4646) |
 | VL53L4CX Time-of-Flight sensor | [ID: 5425](https://www.adafruit.com/product/5425) |
 | MLX90640 32×24 Thermal Camera | [ID: 4407](https://www.adafruit.com/product/4407) |
@@ -154,3 +170,5 @@ All user-configurable options (which sensors, which web modules, which network f
 > ## Get up and running quickly: [Quick Start Guide](docs/QUICKSTART.md)
 
 > ## Full reference, commands, and configuration: [User Guide](docs/USERGUIDE.md)
+
+> ## Every command, generated from source: [Command Reference](docs/COMMAND_REFERENCE.md)

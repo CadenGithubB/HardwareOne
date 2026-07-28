@@ -47,11 +47,13 @@ static void populatePowerMainMenu() {
 static void populatePowerCpuMenu() {
   initPowerScrollStates();
   oledScrollClearKeepSelection(&sPowerCpuScroll);
-  oledScrollAddItem(&sPowerCpuScroll, "Performance 240MHz");
-  oledScrollAddItem(&sPowerCpuScroll, "Balanced 160MHz");
+  oledScrollAddItem(&sPowerCpuScroll, "Performance 240/80MHz");
+  oledScrollAddItem(&sPowerCpuScroll, "Balanced 160/80MHz");
   oledScrollAddItem(&sPowerCpuScroll, "PowerSaver 80MHz");
   // 80 MHz interactive, 40 MHz only once idle power-save blanks the screen.
   oledScrollAddItem(&sPowerCpuScroll, "UltraSaver 80/40MHz");
+  // Always-240 — idle power-save blanks OLED but does not downclock.
+  oledScrollAddItem(&sPowerCpuScroll, "Locked 240MHz");
   oledScrollClampSelection(&sPowerCpuScroll);
 }
 
@@ -171,9 +173,15 @@ static void executePowerAction() {
 }
 
 static void executePowerCpuAction() {
-  const char* cmds[] = { "power mode perf", "power mode balanced", "power mode saver", "power mode ultra" };
+  const char* cmds[] = {
+    "power mode perf",
+    "power mode balanced",
+    "power mode saver",
+    "power mode ultra",
+    "power mode locked",
+  };
   int sel = sPowerCpuScroll.selectedIndex;
-  if (sel >= 0 && sel < 4) {
+  if (sel >= 0 && sel < (int)(sizeof(cmds) / sizeof(cmds[0]))) {
     DEBUG_SYSTEMF("[POWER_OLED] Executing: %s (selection=%d)", cmds[sel], sel);
     DEBUG_SYSTEMF("[POWER_OLED] Current CPU freq before command: %lu MHz", (unsigned long)getCpuFrequencyMhz());
     executeOLEDCommand(cmds[sel]);

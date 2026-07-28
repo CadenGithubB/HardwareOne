@@ -15,7 +15,12 @@
 #define FILE_MANAGER_PAGE_SIZE 4
 #define FILE_MANAGER_MAX_PATH 128
 #define FILE_MANAGER_MAX_NAME 64
-#define FILE_MANAGER_MAX_CACHED_ITEMS 64  // Cache up to 64 directory entries
+// Directory-entry cache. Raised 64 → 256 for big capture folders (months of
+// accumulated health-*.csv in /logging_captures/sensors). Both FileManager
+// instances (G2 lens + OLED) are PSRAM placement-new'd, so the ~19 KB
+// cachedEntries[] array costs PSRAM, not internal DRAM. Directories beyond
+// the cache stay reachable via getItem()'s per-index rescan fallback.
+#define FILE_MANAGER_MAX_CACHED_ITEMS 256
 
 // File manager state
 struct FileManagerState {

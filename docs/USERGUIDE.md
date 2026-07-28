@@ -1,4 +1,4 @@
-# Hardware One v0.99.3 - User Guide
+# Hardware One v0.99.4 - User Guide
 
 This is the full reference for Hardware One. It covers every subsystem, all CLI commands, configuration options, and how the major features work. For initial setup, see the [Quick Start Guide](QUICKSTART.md).
 
@@ -8,12 +8,16 @@ This is the full reference for Hardware One. It covers every subsystem, all CLI 
 - [Board Reference](#board-reference)
 - [Web UI](#web-ui)
 - [OLED Interface](#oled-interface)
+- [G2 Lens Interface](#g2-lens-interface)
+- [Users, Roles & Access](#users-roles--access)
+- [Notifications](#notifications)
+- [Backup & Restore](#backup--restore)
 - [ESP-NOW Mesh](#esp-now-mesh)
 - [Automations](#automations)
 - [MQTT](#mqtt)
 - [On-Device LLM](#on-device-llm)
 - [Debug Flags](#debug-flags)
-- [Command Reference](#command-reference)
+- [Command Reference](#command-reference) — common commands; full generated list in [COMMAND_REFERENCE.md](COMMAND_REFERENCE.md)
 - [Per-Module Notes](#per-module-notes)
 - [License](#license)
 
@@ -28,7 +32,12 @@ All feature flags live in one file: `components/hardwareone/System_BuildConfig.h
 | `I2C_FEATURE_LEVEL` | `4` (Custom) | `0`=disabled, `1`=OLED only, `2`=OLED+gamepad, `3`=all sensors, `4`=custom selection |
 | `NETWORK_FEATURE_LEVEL` | `4` (Custom) | `0`=disabled, `1`=WiFi only, `2`=WiFi+HTTP, `3`=WiFi+HTTP+ESP-NOW, `4`=custom |
 | `WEB_FEATURE_LEVEL` | `4` (Custom) | `0`=disabled, `1`=core UI, `2`=standard modules, `3`=all modules, `4`=custom |
-| `DISPLAY_TYPE` | `1` (SSD1306) | `0`=none, `1`=SSD1306 OLED, `2`=ST7789 TFT, `3`=ILI9341 TFT |
+| `DISPLAY_TYPE` | `1` (SSD1306) | `0`=none, `1`=SSD1306 OLED, `2`=ST7789 TFT, `3`=ILI9341 TFT. SSD1306 is the tested path; the TFT branches exist in `HAL_Display.cpp` but ILI9341 is a placeholder and the `OLED_Mode_*` UI is SSD1306-shaped |
+| `INPUT_DEVICE_TYPE` | `1` (gamepad) | Physical input controller, mutually exclusive: `0`=none, `1`=Seesaw gamepad, `2`=ANO rotary encoder |
+| `ENABLE_HTTPS` | `1` | TLS for the web server; certs in `/system/certs/`. Runtime toggle: `httpsEnabled` |
+| `ENABLE_MAPS` | `1` | Offline maps and waypoints |
+| `ENABLE_GAMES` | `0` | Browser games page. Pick exactly one game: `ENABLE_WEB_GAME_MAZE` or `ENABLE_WEB_GAME_DARKROOM` - both at once overflows the app partition and is rejected at build time |
+| `ENABLE_ESP_SR` | `0` | ESP-SR voice: WakeNet wake word + MultiNet command grammar |
 | `ENABLE_BLUETOOTH` | `0` | BLE server with GATT services |
 | `ENABLE_G2_GLASSES` | `0` | Even Realities G2 BLE client (requires `ENABLE_BLUETOOTH=1`) |
 | `ENABLE_R1_HEALTH` | `1` | R1 Health vitals UI (G2 Apps→Health, OLED, Web `/r1-health`) + Health Track. Requires Bluetooth + G2; auto-off if either is off. Ring connect stays under `ENABLE_G2_GLASSES`. |
@@ -63,49 +72,300 @@ When `I2C_FEATURE_LEVEL = 4`, individual sensors are controlled by `CUSTOM_ENABL
 
 ## Board Reference
 
-See [BOARD_SWITCHING.md](BOARD_SWITCHING.md) for full menuconfig tables. Key differences:
+See [BOARD_SWITCHING.md](BOARD_SWITCHING.md) for full menuconfig tables.
 
-| | ESP32 (QT PY, Feather) | ESP32-S3 (XIAO, QT PY S3) |
-| - | ---------------------- | ------------------------- |
-| PSRAM | Quad SPI, 40 MHz | Octal SPI, 80 MHz |
+### Per chip family
+
+Set by `sdkconfig.defaults.<target>`, selected automatically by `set-target`:
+
+| | ESP32 (QT Py, Feather V2) | ESP32-S3 (XIAO, FeatherS3) |
+| - | ------------------------- | -------------------------- |
+| PSRAM speed | 40 MHz | 80 MHz |
+| Flash mode | `DIO` | `QIO` |
 | Bluetooth | Classic BT + BLE 4.2 | BLE 5.0 only |
 | Camera/Mic | No | Yes (S3 only) |
 | USB | UART bridge (`usbserial`) | Native USB (`usbmodem`) |
 | `set-target` | `esp32` | `esp32s3` |
 
-When switching between chip families: `idf.py fullclean` then `idf.py set-target <chip>`. Wrong PSRAM mode = boot failure.
+### Per board
+
+Set by `boards/<name>.defaults`, layered on top of the family file. PSRAM
+**mode**, the Arduino pin variant, flash size, and the partition table are all
+board properties, not chip-family properties:
+
+| Board | Board file | Arduino variant | PSRAM mode | Flash |
+| ----- | ---------- | --------------- | :--------: | :---: |
+| Unexpected Maker FeatherS3 | `feathers3` | `um_feathers3` | **Quad** | 16 MB |
+| Seeed XIAO ESP32-S3 | `xiao_s3` | `XIAO_ESP32S3` | **Octal** | 8 MB |
+| Adafruit QT Py ESP32 | `qtpy_esp32` | `adafruit_qtpy_esp32` | **Quad** | 8 MB |
+| Adafruit Feather ESP32 V2 | `feather_esp32_v2` | `adafruit_feather_esp32_v2` | **Quad** | 8 MB |
+
+> **Do not infer PSRAM mode from the chip family.** The two ESP32-S3 boards above
+> disagree - the XIAO is octal, the FeatherS3 is quad. A wrong mode is a *silent*
+> failure: the device boots and reports 0 KB PSRAM, and the first thing you notice
+> is the LLM, large web responses, or ESP-NOW buffers OOMing at runtime.
+
+When switching between chip families: `idf.py fullclean`, then
+`idf.py set-target <chip>`.
 
 ---
 
 ## Web UI
 
-Navigate to the device's IP address in a browser. The web server must be running (`webstart` or `webauto on`).
+Navigate to the device's IP address in a browser. The web server must be running - start it for this session with `openhttp`, or set `httpAutoStart 1` to bring it up on every boot.
 
-- **Sensors** - live sensor data, start/stop individual sensors, logging controls
-- **ESP-NOW** - peer list, pairing, bonding, metadata sync, file transfer, mesh status
-- **Pair** - guided pairing/bonding wizard for connecting two devices
-- **Maps** - offline map viewer, waypoint management, GPS track logging (requires `ENABLE_MAPS`)
-- **Bluetooth** - BLE connection status and controls (requires `ENABLE_BLUETOOTH`)
-- **MQTT** - broker configuration, topic preview, Home Assistant status (requires `ENABLE_MQTT`)
-- **Settings** - all device settings, debug flags, user management
-- **LLM** - on-device language model chat interface: load/unload model, ask questions, adjust temperature and sampling settings (requires `ENABLE_ONDEVICE_LLM`)
-- **CLI** - full command interface in the browser, with history
+Which pages exist depends on the per-page compile gates (`CUSTOM_ENABLE_WEB_*` when `WEB_FEATURE_LEVEL = 4`); a page whose gate is off is not in the binary and cannot be enabled at runtime.
 
-Authentication is required. Default credentials are set on first boot via the setup wizard or the `users` CLI commands.
+| Page | Route | Gate | What it does |
+| ---- | ----- | ---- | ------------ |
+| **Dashboard** | `/dashboard` | core | Landing page - device status, quick links |
+| **Sensors** | `/sensors` | `WEB_SENSORS` | Live sensor data, start/stop individual sensors, camera stream |
+| **ESP-NOW** | `/espnow` | `WEB_ESPNOW` | Peer list, pairing, metadata sync, file transfer, mesh status |
+| **Bond** | `/bond` | `WEB_BOND` | Remote tab for the bonded peer's features (requires `ENABLE_BONDED_MODE`) |
+| **Automations** | `/automations` | `ENABLE_AUTOMATION` | Create, edit, enable, and run automations |
+| **Files** | `/files` | core | File manager - browse, view, upload, create, delete on LittleFS and SD |
+| **Logging** | `/logging` | core | Browse the capture tree (`/logging_captures`), sensor logs, GPS tracks |
+| **Maps** | `/maps` | `WEB_MAPS` | Offline map viewer, waypoints, GPS track logging (requires `ENABLE_MAPS`) |
+| **Bluetooth** | `/bluetooth` | `WEB_BLUETOOTH` | BLE status and controls, G2 and R1 ring connect (requires `ENABLE_BLUETOOTH`) |
+| **R1 Health** | `/r1-health` | `WEB_R1_HEALTH` | Ring vitals, graphs, Health Track (requires `ENABLE_R1_HEALTH`) |
+| **Battery** | `/battery` | `WEB_BATTERY` | Voltage, charge level, battery log |
+| **MQTT** | `/mqtt` | `WEB_MQTT` | Broker config, topic preview, Home Assistant status (requires `ENABLE_MQTT`) |
+| **Speech** | `/speech` | `WEB_SPEECH` | ESP-SR status and tuning (requires `ENABLE_ESP_SR`) |
+| **LLM** | `/llm` | `ENABLE_ONDEVICE_LLM` | On-device model chat - load/unload, ask, temperature and sampling |
+| **Games** | `/games` or `/darkroom` | `WEB_GAMES` | Browser game (requires `ENABLE_GAMES`; exactly one game per build) |
+| **Settings** | `/settings` | core | All device settings, debug flags, user management |
+| **CLI** | `/cli` | core | Full command interface in the browser, with history |
+
+Authentication is required; `/login` and `/register` are the unauthenticated entry points. Credentials are created on first boot via the setup wizard, or later with the `users` CLI commands.
+
+> There is no **Pair** page. Pairing and bonding are run from the ESP-NOW page.
 
 ---
 
 ## OLED Interface
 
-The OLED displays a menu system navigated with the Seesaw gamepad (joystick + buttons). On first boot a setup wizard runs to configure WiFi, device name, room, and zone. After that it goes to the main menu.
+The OLED displays a menu system navigated with the input device - Seesaw gamepad or ANO rotary encoder, whichever `INPUT_DEVICE_TYPE` selects. On first boot the setup wizard runs here as well as on serial (see the [Quick Start](QUICKSTART.md#first-time-use)). After that it lands on the main menu.
 
-Main menu sections:
-- **Network** - WiFi status, ESP-NOW peer list, connect/disconnect
-- **Sensors** - per-sensor live readout and start/stop
-- **System** - memory, uptime, IP address, reboot
-- **Settings** - brightness, display timeout, output routing
-- **Logging** - view recent log entries
-- **Power** - battery level (if enabled), sleep controls
+The main menu is six categories. Rows inside each are compile-gated, so a build without (say) ESP-NOW or an LLM simply shows fewer entries. The G2 lens mirrors this layout - see [G2 Lens Interface](#g2-lens-interface).
+
+| Category | Rows |
+| -------- | ---- |
+| **System** | Status, Memory, Perf, Notifications, CLI Output, CLI Input, Logging |
+| **Config** | Settings, Login, Logout, Change PW, Users (admin), Gamepad PW |
+| **Connect** | Network, Bluetooth, Bond, Web |
+| **Hardware** | Sensors, Microphone, Speech, I2C Scan, LED |
+| **Apps** | ESP-NOW, Files, Maps, LLM Chat, Automations, Health |
+| **Power** | Power |
+
+Notes on placement, which changed in the menu reorg:
+
+- **ESP-NOW** lives under **Apps**, not Connect - it is treated as a messaging program, and unlike the G2 the OLED bundles the ESP-NOW *settings* into the same mode.
+- **Maps** lives under **Apps** and needs both `ENABLE_GPS_SENSOR` and `ENABLE_MAPS`.
+- **Sensors** is a submenu: Data, List, then one row per compiled sensor (Thermal, ToF, IMU, APDS, GPS, Gamepad, FM Radio, RTC, Presence, Camera).
+- **Users** is hidden for non-admins, and the mode refuses to open without an admin session.
+- **Health** (R1 ring vitals, Poll Now, Health Track) requires `ENABLE_R1_HEALTH`. Ring *pairing* is under Connect → Bluetooth.
+- **Pet** is G2-only - it has no OLED mode, so the lens Apps launcher has one row this menu does not.
+
+---
+
+## G2 Lens Interface
+
+Requires `ENABLE_BLUETOOTH=1` and `ENABLE_G2_GLASSES=1`. The ESP32 acts as BLE
+central and drives the Even Realities G2 temples directly - the firmware
+"hijacks" the lens to render its own pages, so this is a full on-glasses UI, not
+a notification mirror. Connect with `openg2`; navigate by tapping the temple.
+
+The main menu mirrors the OLED's six categories:
+
+| Category | Rows |
+| -------- | ---- |
+| **System** | Status, System Events, Logging, Tests |
+| **Config** | Settings, Users (admin only), OLED Login |
+| **Connect** | WiFi >>, Bluetooth >>, ESP-NOW >> |
+| **Hardware** | Sensor list (one row per compiled sensor), LED, FM tuner |
+| **Apps** | ESP-NOW, Files, Maps, LLM, Automations, Health, Pet |
+| **Power** | CPU presets, restart, power off |
+
+Sub-pages are registered but hidden from the top level - they are reached
+through their category, and every page has a `<- Back` row. A few sit one level
+deeper still: **Camera settings** is reached from Hardware → sensor list → `CAM`
+→ `Settings >`, and **Mic detail** from the `MIC` row the same way.
+
+### Apps
+
+| App | Notes |
+| --- | ----- |
+| **ESP-NOW** | Peer messaging. Distinct from Connect → ESP-NOW, which owns the settings |
+| **Files** | Browse, view, rename, delete. Folders carry an item-count badge |
+| **Maps** | Pan/zoom offline map viewer. Row reads `Maps (none)` when no map files are present (requires `ENABLE_MAPS`) |
+| **LLM** | Read-only streaming viewer plus a guided-input picker (requires `ENABLE_ONDEVICE_LLM`) |
+| **Automations** | List, view, and run automations |
+| **Health** | R1 ring vitals + sparkline graphs (requires `ENABLE_R1_HEALTH`) - see below |
+| **Pet** | Virtual-creature app with an animated tile renderer |
+
+### Apps → Health
+
+Left column is a metric list, right side a 288×144 graph: Overview, Trends,
+Heart Rate, HRV, SpO2, Temperature, Battery, Poll Now, Toggle Track.
+
+- **Overview** - native-text vitals with wear state and one shared recentness figure on the status line.
+- **Trends** - submenu graphing the ring's daily-history payload (HR / HRV / SpO2 today + Refresh), kept separate from the live sparklines.
+- **Toggle Track** - starts Health Track logging (`healthtrack on`). While on, the ring is mined every `healthTrackPollIntervalSec` (default 15 min). Opening the page or **Poll Now** also logs a sample when R1 logging is active.
+
+Pair the ring under Connect → Bluetooth. The same vitals appear on the OLED
+(**Apps → Health**) and the web (**`/r1-health`**).
+
+### Text entry
+
+Pages that need input (WiFi join, file rename, login) open an on-lens keyboard.
+Two things to know: it deliberately has **no double-quote key**, and a
+pre-filled value longer than 32 characters is silently truncated.
+
+### CLI
+
+Most lens pages have a CLI equivalent - `g2status`, `g2show`, `g2clear`,
+`g2nav`, `g2health`, `g2pet`, `g2map`, `g2files`, `g2sensors`, `g2settings`,
+`g2network`, `g2battery`, and the `g2ai*` / `g2mic*` / `g2notify*` families.
+Run `help g2` on the device for the full list.
+
+> `openg2` and `ringconnect` return OK when the connection is *kicked off*, not
+> when it completes. A menu that reads the link state immediately after may
+> still show "disconnected".
+
+---
+
+## Users, Roles & Access
+
+One account database (`users.json`) governs every interface. The same command
+run over serial, the web CLI, the OLED, BLE, voice, or an ESP-NOW peer goes
+through the same permission check.
+
+### Role tiers
+
+Four ranks, lowest to highest. Accounts store the role *name*; the ranks below
+are what comparisons use.
+
+| Role | Rank | Can do |
+| ---- | :--: | ------ |
+| `guest` | 0 | Authenticated but view-only. `login` / `logout` only for commands; filesystem access is masked to read |
+| `user` | 1 | Ordinary commands; not admin-gated ones |
+| `admin` | 2 | Admin commands - user management, most settings, device control |
+| `superadmin` | 3 | Additionally the identity / crypto / destructive / auth-posture command set |
+
+Rules that hold everywhere:
+
+- **You cannot grant a role above your own.** Granting or removing `superadmin` requires a super-admin caller.
+- A command marked super-admin-only is refused for an ordinary admin - `blerequireauth`, `serialrequireauth`, and `displayrequireauth` are examples, since they change whether the device demands a login at all.
+- An unrecognised role name collapses to `user`.
+
+Set roles with `useradd … [role]`, `userpromote`, and `userdemote` - see the
+[users command block](#command-reference).
+
+### Per-transport authentication
+
+Each way in has its own switch for whether a login is required, and its own
+idle-logout timer. All the `*requireauth` switches are super-admin-only.
+
+```
+serialrequireauth <0|1>         - Require login on the serial console
+displayrequireauth <0|1>        - Require login on the display
+oledrequireauth <0|1>           - Require login for the OLED menu
+blerequireauth [on|off]         - Require login for BLE access
+
+sessionidleserial <0-1440>      - Serial idle-logout, minutes (0 = never)
+sessionidleweb <0-1440>         - Web CLI idle-logout
+sessionidledisplay <0-1440>     - OLED idle-logout
+sessionidleble <0-1440>         - BLE idle-logout
+```
+
+Sessions and bans are managed with `sessionlist`, `sessionrevoke`, `ban` /
+`unban` / `banlist` (by IP) and `banuser` / `unbanuser` (by account).
+
+### Account recovery
+
+`factoryreset` wipes user accounts and reboots into the setup wizard. It is the
+intended way back in if you lose admin credentials - device settings and files
+are not the target of the wipe, accounts are.
+
+---
+
+## Notifications
+
+System events feed a single notification pipeline. Whether a given event
+becomes a pop-up depends on three layers that are evaluated in order.
+
+### Sinks
+
+Where a notification can render:
+
+| Sink | Surface |
+| ---- | ------- |
+| `BANNER` | Transient OLED banner/ribbon |
+| `TOAST` | Web toast, pushed over SSE |
+| `G2` | Native notification card on the G2 lens |
+| `QUEUE` | Persistent notification-center list (silent history) |
+
+`BANNER`, `TOAST`, and `G2` are the **interrupt** surfaces - they grab
+attention, and the per-user importance floor gates all three identically.
+`QUEUE` is history and is never floor-gated, so the notification center keeps a
+record even of events that never popped up.
+
+### Importance tiers
+
+Every event kind carries a tier, orthogonal to which subsystem it came from:
+
+| Tier | Meaning | Examples |
+| ---- | ------- | -------- |
+| `VERBOSE` | Chatty/info, opt-in | setting changes, sensor start/stop, gestures |
+| `STANDARD` | Genuinely useful - **the default floor** | presence, inbound messages, WiFi, battery low |
+| `ALERT` | Must-know | security, safety, faults |
+
+### The three layers
+
+1. **Compiled default** - which sinks a kind can render to at all.
+2. **Device policy** - per-kind visibility for the whole device, from `/system/notifications.json`. Admin-set.
+3. **Per-user preference** - each viewer's importance floor, plus per-kind force-on and force-off masks.
+
+So a kind must survive its device policy *and* clear the viewer's floor (or be
+explicitly forced on) before an interrupt surface fires.
+
+### Commands
+
+```
+--- Device-wide (admin) ---
+notifydevicebanners <0|1>       - Enable/disable OLED banners
+notifydevicetoasts <0|1>        - Enable/disable web toasts
+notifydeviceg2 <0|1>            - Enable/disable G2 lens cards
+notifydevicequeue <0|1>         - Enable/disable the notification-center queue
+notifydevicekind <kind> <all|admin|off>  - Per-event visibility, device-wide
+
+--- Per-user ---
+notifylevel <tier>              - Your importance floor
+notifyusermute <kinds>          - Kinds you never want, on any sink
+notifyusershow <kinds>          - Kinds that punch through your floor
+
+--- Diagnostics ---
+notifstats [reset]              - Pipeline counters: loss, suppression, ring lag, SSE drops
+```
+
+The event kinds are the same ones listed in the
+[Automations event-trigger table](#event-triggers) - `events` in the CLI shows
+them live, which is the quickest way to find the exact kind name to tune.
+
+---
+
+## Backup & Restore
+
+The migration tool exports the device's configuration to a `.hwbackup` file and
+imports it onto another device. Requires WiFi and the HTTP server
+(`ENABLE_MIGRATION_TOOL` follows `ENABLE_HTTP_SERVER`).
+
+- **Export** - `/api/backup` from the web UI.
+- **Import** - `/api/restore`, or choose **Import from Backup** at first boot. In the first-boot flow the device brings up WiFi, prints its IP, and waits for you to send the `.hwbackup` from another device's migration tool; you then confirm on the OLED or serial.
+
+This is the fastest way to stand up a replacement board with an existing
+device's settings, and the reason a factory reset is not a catastrophe if you
+have a recent export.
 
 ---
 
@@ -114,7 +374,7 @@ Main menu sections:
 ESP-NOW V3 is Hardware One's inter-device wireless protocol. Devices pair with a shared passphrase and form an encrypted mesh.
 
 ### Pairing
-1. On both devices, go to the **Pair** tab in the web UI (or use `espnow pair` CLI).
+1. On both devices, open the **ESP-NOW** page in the web UI (pairing lives there — there is no separate Pair page) or use the `espnowpair` CLI.
 2. Set the same passphrase on both devices.
 3. One device initiates - the other accepts.
 4. Once paired, devices appear in each other's peer list.
@@ -123,13 +383,17 @@ ESP-NOW V3 is Hardware One's inter-device wireless protocol. Devices pair with a
 With `ENABLE_BONDED_MODE=1`, two devices can bond into a master/worker pair. The master gains a **Remote** tab in its web UI showing the worker's features, even if those features aren't compiled into the master.
 
 ### Metadata Sync
-Each device has a name, room, zone, and tags set in settings. The **Metadata** tab lets you pull this information from any peer. Set your own device metadata with:
+Each device has a name, room, zone, and tags set in settings. The **Metadata** tab lets you pull this information from any peer. Set your own device metadata with (note: single words, no space after `espnow`):
 ```
-espnow setname <name>
-espnow setroom <room>
-espnow setzone <zone>
-espnow settags <tags>
+espnowsetname [name]            - Device name (<=20 chars; letters, numbers, - and _)
+espnowroom [name]               - Room, e.g. Kitchen. 'espnowroom clear' to unset
+espnowzone [name]               - Zone, e.g. Counter. 'espnowzone clear' to unset
+espnowtags [tag1,tag2,...]      - Tags. 'espnowtags clear' to unset
+espnowfriendlyname [name]       - Display name (<=47 chars); 'clear' to unset
+espnowstationary [on|off|0|1]   - Mark the device fixed or mobile
+espnowdeviceinfo                - Show all local metadata
 ```
+Called with no argument, each of these prints the current value.
 
 ### File Transfer
 Files can be transferred between paired devices via the web UI or CLI (`espnow sendfile`). Used for syncing automations, settings, and manifests.
@@ -195,6 +459,8 @@ setting, regardless of which setting it was.
 | `ble_connected` / `ble_disconnected` | companion BLE device connected / dropped | device type / MAC |
 | `g2_connected` / `g2_disconnected` | glasses link up / temple dropped | sides / side |
 | `g2_worn` / `g2_not_worn` | glasses picked up / set down (plugin heartbeat proxy) | side |
+| `ring_connected` / `ring_disconnected` | R1 ring GATT up (after setup) / link lost | name / MAC |
+| `ring_worn` / `ring_not_worn` | R1 on / off finger (wearStatus edge) | name |
 | `time_synced` | clock first became valid (NTP or RTC) | ntp\|rtc / time |
 | `login_ok` / `login_fail` | login on any transport (web, serial, OLED, BLE, MQTT, ESP-NOW) | username / transport |
 | `usb_on` / `usb_off` | USB power plugged / unplugged (30s debounce) | - |
@@ -416,7 +682,17 @@ Available debug modules (type `help debug` on device for full list):
 
 ## Command Reference
 
+> **This section is a curated tour of the commands you reach for most - it is
+> not the complete list.** The device registers **893 commands across 44
+> modules**. For every command, generated directly from the `CommandEntry`
+> tables, see **[COMMAND_REFERENCE.md](COMMAND_REFERENCE.md)**.
+
 Type `help` on the device to enter the interactive help system. Type a module name to see its commands. Type `help all` to include disconnected sensors.
+
+Two things about lookup that explain most surprises:
+
+- Matching is **case-insensitive**, so `mqttHost` and `mqtthost` are the same command. A few commands are registered in camelCase (the `mqtt*` family and `httpAutoStart` / `httpsEnabled`); the rest are lowercase.
+- Lookup is **longest-prefix**, so `automation list` resolves to the `automation` dispatcher with `list` as an argument rather than needing its own entry. This is why some features appear as one command with subcommands and others as a family of single words.
 
 <details>
 <summary><strong>core - System commands</strong></summary>
@@ -427,6 +703,10 @@ uptime                          - Show device uptime
 time                            - Show current time (uptime + NTP if synced)
 timeset <YYYY-MM-DD HH:MM:SS>   - Set time manually (or unix timestamp)
 reboot                          - Restart the device
+ramflush                        - Reboot to reclaim RAM, restoring the features running right now
+factoryreset                    - Wipe user accounts and reboot into the setup wizard (admin)
+deepsleep                       - Power off via deep sleep (no wake source - reset button to wake)
+bootcount [reset|json]          - Boot count (NVS), crash count, last reset reason
 clear                           - Clear CLI history
 broadcast <message>             - Send message to all users (admin)
 wait <ms>                       - Delay execution for N milliseconds
@@ -437,6 +717,7 @@ voltage                         - Read supply voltage
 cpufreq                         - Get/set CPU frequency
 memsample                       - Memory snapshot with component breakdown
 memreport                       - Comprehensive memory report (Task Manager style)
+perftop                         - Live perf snapshot: loop laps/s, per-section timing, worst stalls, per-task CPU%
 taskstats                       - Detailed FreeRTOS task statistics
 events                          - Recent system events (drives automation event triggers)
 pendinglist                     - List pending user account requests
@@ -722,19 +1003,37 @@ featuresetup                    - Run interactive feature configuration wizard
 <details>
 <summary><strong>users - User management (admin)</strong></summary>
 
+Roles form four tiers, lowest to highest: **guest** (authenticated but
+view-only) → **user** → **admin** → **superadmin**. A handful of commands are
+marked super-admin-only and an ordinary admin cannot run them; granting or
+removing `superadmin` requires a super-admin caller.
+
+> **The `[0|1]` argument is not the admin flag.** On `useradd` and
+> `userresetpassword` it means *require a new password on the next login*
+> (default `0`). Role is a separate, later argument on `useradd`, and is set
+> afterwards with `userpromote` / `userdemote`.
+
+You cannot grant a role above your own. On `useradd` the two optional tokens
+(`[0|1]` and `[role]`) may be given in either order.
+
 ```
 userlist                        - List all users
-useradd <user> <pass> [0|1]     - Create user (1 = admin)
+useradd <user> <pass> [0|1] [role]  - Create user
+                                  [0|1]: 1 = force password change at next login (default 0)
+                                  [role]: guest|user|admin|superadmin (default user)
 userdelete <user>               - Delete user
 userchangepassword <cur> <new> <confirm>  - Change own password
 userresetpassword <user> <pass> [0|1]     - Reset another user's password (admin)
-userpromote <user>              - Grant admin role
-userdemote <user>               - Remove admin role
+                                            1 = force password change at next login
+userpromote <user> [role]       - Raise role: user|admin|superadmin (default admin)
+userdemote <user> [role]        - Lower role: admin|user|guest (default user)
 userrequest <user> <pass>       - Request a new account (self-registration)
 userapprove <user>              - Approve a pending account request (admin)
 userdeny <user>                 - Deny a pending account request (admin)
 pendinglist                     - List pending account requests
-usersync <user> <target>        - Sync user credentials to an ESP-NOW peer (admin)
+usersync <user> <userPass> <device> <targetAdminUser> <targetAdminPass> <yourAdminPass>
+                                - Sync a user to an ESP-NOW peer (admin). Async: OK means
+                                  delivered, not created - verify on the target's userlist
 sessionlist                     - List active sessions
 sessionrevoke <sid|user> [reason]  - Revoke a session
 serialrequireauth [on|off]      - Require login on serial interface
@@ -855,8 +1154,9 @@ power threshold <value>         - Set power threshold
 <summary><strong>battery - Battery monitoring (requires ENABLE_BATTERY_MONITOR)</strong></summary>
 
 ```
-battery status                  - Show voltage, estimated charge level, and status
-battery calibrate               - Recalibrate ADC voltage readings
+batterystatus                   - Show voltage, charge level, and status
+batterycalibrate                - Recalibrate/re-probe the sensor (ADC characterize or fuel-gauge re-probe)
+batterylog [on|off|interval <s>|tail|clear]  - Battery time-series CSV log
 ```
 </details>
 
@@ -929,7 +1229,7 @@ micautostart [on|off]           - Auto-start on boot
 </details>
 
 <details>
-<summary><strong>speech - ESP-SR voice recognition (requires ENABLE_ESPSR)</strong></summary>
+<summary><strong>speech - ESP-SR voice recognition (requires ENABLE_ESP_SR)</strong></summary>
 
 ```
 opensr                          - Start ESP-SR pipeline
@@ -1183,14 +1483,34 @@ servocalibrate <channel>        - Enter calibration mode for a channel
 </details>
 
 <details>
-<summary><strong>gamepad - Seesaw gamepad</strong></summary>
+<summary><strong>input - Gamepad / ANO encoder</strong></summary>
+
+The physical input controller is chosen at build time with `INPUT_DEVICE_TYPE`
+(`0`=none, `1`=Seesaw gamepad, `2`=ANO rotary encoder). The two are mutually
+exclusive - both hang off STEMMA QT and would collide. Start/stop and
+auto-start are device-agnostic; only the read and tuning commands are
+driver-specific.
 
 ```
-opengamepad                     - Start gamepad
-closegamepad                    - Stop gamepad
+openinput                       - Start the input device (gamepad or ANO encoder)
+closeinput                      - Stop the input device
+inputautostart [on|off]         - Auto-start on boot
+inputdevicepollms <10-1000>     - Poll interval
+
+--- Seesaw gamepad (INPUT_DEVICE_TYPE=1) ---
 gamepadread                     - Read joystick axes and button states
-gamepadautostart [on|off]       - Auto-start on boot
+
+--- ANO rotary encoder (INPUT_DEVICE_TYPE=2) ---
+anoencoderread                  - Read encoder position and button state
+anoencoderi2caddr <1-127>       - Set I2C address
+anoencoderinvert [on|off]       - Invert rotation direction
+anoencoderswapud [on|off|toggle]  - Swap UP/DOWN buttons
+anoencoderswaplr [on|off|toggle]  - Swap LEFT/RIGHT buttons
 ```
+
+> `opengamepad`, `closegamepad`, and `gamepadautostart` no longer exist - they
+> were replaced by the device-agnostic `openinput` / `closeinput` /
+> `inputautostart` when the ANO encoder was added.
 </details>
 
 ---

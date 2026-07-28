@@ -15,6 +15,8 @@
 #define POWER_MODE_BALANCED     1
 #define POWER_MODE_POWERSAVER   2
 #define POWER_MODE_ULTRASAVER   3
+#define POWER_MODE_LOCKED       4   // 240 MHz always (idle power-save does not downclock)
+#define POWER_MODE_COUNT        5
 
 // Never run the interactive UI below this clock. 40 MHz renders the OLED/nav
 // loop ~6x slower (render + once-per-frame input consume balloon together),
@@ -35,8 +37,10 @@ uint32_t getPowerModeCpuFreq(uint8_t mode);
 // Clock applied while the device is actively used: max(nominal, floor). For
 // UltraSaver this is 80, not 40 (see POWER_INTERACTIVE_FLOOR_MHZ).
 uint32_t getPowerModeActiveCpuFreq(uint8_t mode);
-// Clock the idle power-save drops to when this mode is active: min(nominal,
-// floor). UltraSaver -> 40; every other mode -> 80 (radio-reachable floor).
+// Clock the idle power-save path may drop to (OLED blanked, radio still up):
+//   Locked → keep active clock (240)
+//   Performance / Balanced / PowerSaver → 80 (Wi-Fi floor)
+//   UltraSaver → 40
 uint32_t getPowerModeIdleCpuFreq(uint8_t mode);
 uint8_t getPowerModeDisplayBrightness(uint8_t mode);
 

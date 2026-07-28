@@ -44,6 +44,7 @@ I2CDeviceManager::I2CDeviceManager()
     currentClockHz[b]     = 0;
     defaultClockHz[b]     = I2C_WIRE1_DEFAULT_FREQ;
     busInitialized[b]     = false;
+    lastRecoveryMs[b]     = 0;
     clockStackDepths[b]   = 0;
     memset(&busMetrics[b], 0, sizeof(busMetrics[b]));
     memset(clockStacks[b], 0, sizeof(clockStacks[b]));
@@ -109,6 +110,13 @@ I2CDevice* I2CDeviceManager::registerDevice(uint8_t addr, const char* name,
         if (strcmp(devices[i].name, "Auto") == 0 && strcmp(name, "Auto") != 0) {
           devices[i].name = name;
           devices[i].clockHz = clockHz;
+          // Set BOTH: this upgrade is the driver declaring the device's real
+          // configured timeout, which is by definition the new base. Setting
+          // only the adaptive value would leave baseTimeoutMs holding the
+          // value from the anonymous auto-registration, and the decay in
+          // recordSuccess() would then drag the timeout back down to that
+          // stale figure on the next successful transaction.
+          devices[i].baseTimeoutMs = timeoutMs;
           devices[i].adaptiveTimeoutMs = timeoutMs;
           INFO_I2CF("Updated device 0x%02X bus=%u: Auto -> %s clock=%luHz timeout=%lums",
                     addr, busIdx, name, (unsigned long)clockHz, (unsigned long)timeoutMs);
@@ -142,6 +150,19 @@ I2CDevice* I2CDeviceManager::getDevice(uint8_t addr, uint8_t busIdx) {
   for (int i = 0; i < deviceCount; i++) {
     if (devices[i].address == addr && devices[i].bus == busIdx) {
       return &devices[i];
+    }
+  }
+  return nullptr;
+}
+
+I2CDevice* I2CDeviceManager::getDeviceAnyBus(uint8_t addr) {
+  // Buses in ascending order so a dual-registered address resolves to bus 0
+  // deterministically (registration order in devices[] is not bus-ordered).
+  for (uint8_t b = 0; b < NUM_BUSES; b++) {
+    for (int i = 0; i < deviceCount; i++) {
+      if (devices[i].address == addr && devices[i].bus == b) {
+        return &devices[i];
+      }
     }
   }
   return nullptr;
@@ -401,30 +422,76 @@ void I2CDeviceManager::performBusRecovery(uint8_t busIdx) {
 
   pollResume(busIdx);
 
+  // Stamp last so the cooldown measures from completion, not from entry.
+  lastRecoveryMs[busIdx] = millis();
+
   INFO_I2CF("Bus %u recovery complete", busIdx);
 }
 
+// Minimum gap between two error-driven recoveries of the same bus. The
+// BUS_ERROR path recovers on a single event with no threshold (unlike the
+// NACK/TIMEOUT paths, which need 3 consecutive failures first), so without a
+// cooldown a genuinely broken bus would recover in a tight loop — each attempt
+// pausing polling, tearing down Wire, and bit-banging 9 clock pulses.
+static const uint32_t BUS_RECOVERY_COOLDOWN_MS = 5000;
+
+bool I2CDeviceManager::busRecoveryThrottled(uint8_t busIdx) const {
+  if (busIdx >= NUM_BUSES) return false;
+  if (lastRecoveryMs[busIdx] == 0) return false;   // never recovered yet
+  return (millis() - lastRecoveryMs[busIdx]) < BUS_RECOVERY_COOLDOWN_MS;
+}
+
+uint8_t I2CDeviceManager::probeDeviceStatus(uint8_t bus, uint8_t addr) {
+  if (bus >= NUM_BUSES || !wires[bus] || !busInitialized[bus]) return 4;
+  // Address-only transaction: 9 clock bits, no payload. Cheap enough to run on
+  // the failure path, and it answers exactly the question the classifier needs
+  // — does this device still ACK its address, or is the bus itself unhappy?
+  wires[bus]->beginTransmission(addr);
+  return wires[bus]->endTransmission(true);
+}
+
 void I2CDeviceManager::checkBusRecoveryNeeded() {
-  // Count degraded devices (called when a device becomes degraded)
-  int degradedCount = 0;
-  for (int i = 0; i < deviceCount; i++) {
-    if (devices[i].isDegraded()) {
-      degradedCount++;
+  // Evaluate each bus independently. Each has its own mutex, Wire instance and
+  // clock stack, so a degradation cascade on one says nothing about the other.
+  // Before this was made bus-aware it counted every device in the registry and
+  // then always recovered bus 0 (performBusRecovery's default arg) — a bus 1
+  // cascade would tear down the healthy primary bus and leave the sick one
+  // untouched.
+  for (uint8_t b = 0; b < NUM_BUSES; b++) {
+    if (!busInitialized[b]) continue;
+
+    int total = 0;
+    int degradedCount = 0;
+    for (int i = 0; i < deviceCount; i++) {
+      if (!devices[i].isInitialized() || devices[i].bus != b) continue;
+      total++;
+      if (devices[i].isDegraded()) degradedCount++;
     }
-  }
-  
-  // Calculate degradation percentage
-  if (deviceCount == 0) return;
-  float degradationPercent = (degradedCount * 100.0f) / deviceCount;
-  
-  // Trigger bus recovery if >66% degraded (2/3 threshold)
-  if (degradationPercent > 66.0f) {
-    ERROR_I2CF("CRITICAL: %d/%d devices degraded (%.1f%%) - triggering bus recovery",
-               degradedCount, deviceCount, degradationPercent);
-    performBusRecovery();
-  } else {
-    INFO_I2CF("Bus health: %d/%d devices degraded (%.1f%%) - recovery threshold not reached",
-              degradedCount, deviceCount, degradationPercent);
+    if (total == 0 || degradedCount == 0) continue;
+
+    float degradationPercent = (degradedCount * 100.0f) / total;
+
+    // Quorum floor. The >66% rule assumes a populated bus: with the registry
+    // now split per bus, a secondary bus holding one or two devices would hit
+    // 100% on a single degraded device and trigger a full bus teardown — far
+    // more trigger-happy than the whole-registry behavior this replaces. A
+    // lone sick device is already covered by its own degrade / 30s-retry
+    // cycle, so require a real quorum before escalating to the bus.
+    if (total < 3 || degradedCount < 2) {
+      INFO_I2CF("Bus %u health: %d/%d degraded (%.1f%%) - below quorum, no bus recovery",
+                b, degradedCount, total, degradationPercent);
+      continue;
+    }
+
+    // Trigger bus recovery if >66% degraded (2/3 threshold)
+    if (degradationPercent > 66.0f) {
+      ERROR_I2CF("CRITICAL: bus %u has %d/%d devices degraded (%.1f%%) - triggering bus recovery",
+                 b, degradedCount, total, degradationPercent);
+      performBusRecovery(b);
+    } else {
+      INFO_I2CF("Bus %u health: %d/%d devices degraded (%.1f%%) - recovery threshold not reached",
+                b, degradedCount, total, degradationPercent);
+    }
   }
 }
 
@@ -642,21 +709,39 @@ void I2CDeviceManager::discoverDevices() {
 // I2CDevice Implementation (merged from System_I2C_Device.cpp)
 // ============================================================================
 
-I2CErrorType classifyI2CError(uint8_t espError) {
-  switch (espError) {
-    case 0x00:
+// Maps a TwoWire::endTransmission() status to an error class.
+//
+// The status set is core-specific, so this table is written against the
+// arduino-esp32 build we actually compile with (IDF >= 5.4, i2c_master
+// driver). Wire.cpp collapses esp_err_t into exactly four values:
+//   ESP_OK                        -> 0
+//   ESP_FAIL / ESP_ERR_NOT_FOUND  -> 2   (no ACK: device absent or silent)
+//   ESP_ERR_TIMEOUT               -> 5   (bus timeout)
+//   anything else                 -> 4   (driver-level failure)
+//
+// The previous table assumed generic Arduino AVR semantics (3 = NACK on data,
+// 4 = buffer overflow) and additionally tried to match raw esp_err_t values
+// 0x103/0x107 through a uint8_t parameter, which can never hold them — the
+// compiler flagged both as unreachable. The practical consequence was that 5,
+// the only timeout this core emits, fell through to `default` and a plain
+// timeout was escalated to BUS_ERROR, which forces an immediate bus recovery.
+I2CErrorType classifyI2CError(uint8_t wireStatus) {
+  switch (wireStatus) {
+    case 0:
       return I2CErrorType::NONE;
-    case 0x02:  // Arduino Wire endTransmission NACK
-      return I2CErrorType::NACK;
-    case 0x03:  // Arduino Wire endTransmission timeout
-    case 0x107: // ESP_ERR_TIMEOUT
-      return I2CErrorType::TIMEOUT;
-    case 0x01:  // ESP_FAIL (generic)
-    case 0x103: // ESP_ERR_INVALID_STATE (arbitration lost / bus stuck)
-      return I2CErrorType::BUS_ERROR;
-    case 0x04:  // Buffer overflow
+    case 1:
+      // "Data too long for buffer" in the Arduino contract. This core never
+      // returns it, but the value is kept mapped for any caller handing us a
+      // status from a stock Arduino Wire implementation.
       return I2CErrorType::BUFFER_OVERFLOW;
+    case 2:
+      return I2CErrorType::NACK;
+    case 5:
+      return I2CErrorType::TIMEOUT;
+    case 4:
     default:
+      // Driver-level failure (bus in a bad state, slave mode, null buffer) —
+      // not a simple device NACK, so treat it as a bus-level problem.
       return I2CErrorType::BUS_ERROR;
   }
 }
@@ -691,7 +776,19 @@ void I2CDevice::init(uint8_t addr, const char* deviceName, uint32_t clock, uint3
 void I2CDevice::recordSuccess() {
   health.consecutiveErrors = 0;
   health.lastSuccessTime = millis();
-  
+
+  // Decay the adaptive timeout back toward its configured base, mirroring the
+  // doubling in recordError()'s TIMEOUT branch. Without this the timeout only
+  // ever ratchets up: a single transient storm leaves the device permanently
+  // holding up to a 5s timeout, and since executeTransaction passes it to
+  // xSemaphoreTake() the calling task then blocks that long on a busy bus —
+  // while every health field still reads OK. Halved rather than snapped back
+  // so a genuinely slow device settles at the timeout it actually needs
+  // instead of oscillating between base and 2x base.
+  if (adaptiveTimeoutMs > baseTimeoutMs) {
+    adaptiveTimeoutMs = max(baseTimeoutMs, adaptiveTimeoutMs / 2);
+  }
+
   if (health.degraded) {
     health.degraded = false;
     INFO_I2CF("Device 0x%02X (%s) recovered", address, name);
@@ -766,7 +863,20 @@ void I2CDevice::recordError(I2CErrorType errorType, uint8_t espError) {
       // Trigger immediate bus recovery on THIS device's bus (was hardcoded
       // to bus 0 before dual-bus). A bus 1 device with a BUS_ERROR now
       // recovers bus 1 only; bus 0 devices keep running uninterrupted.
-      I2CDeviceManager::getInstance()->performBusRecovery(bus);
+      //
+      // Cooldown: this branch escalates on a single event with no consecutive
+      // -failure threshold, so a persistently broken bus would otherwise
+      // recover on every poll. Suppressed attempts are logged rather than
+      // dropped silently, so the pattern is still visible in the log.
+      {
+        I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+        if (mgr->busRecoveryThrottled(bus)) {
+          WARN_I2CF("Device 0x%02X (%s) BUS_ERROR on bus %u - recovery suppressed (cooldown)",
+                    address, name, bus);
+        } else {
+          mgr->performBusRecovery(bus);
+        }
+      }
       break;
       
     case I2CErrorType::BUFFER_OVERFLOW:

@@ -144,9 +144,9 @@ uint32_t fsGetSendRequest(const uint8_t peerMac[6],
 // ============================================================================
 // RX bridge — called from System_ESPNow.cpp's v4 dispatch handlers
 // ============================================================================
-// V4RxCtx is defined in System_ESPNow.cpp (not in any header), so we expose
-// raw-buffer APIs here and let System_ESPNow.cpp's thin v4h_ stubs unpack
-// the fields. This keeps the protocol module standalone — no header cycle.
+// V4RxCtx now lives in System_ESPNow_RxCtx.h, but this module deliberately
+// keeps raw-buffer APIs and lets System_ESPNow.cpp's thin v4h_ stubs unpack
+// the fields — the protocol module stays standalone, no header dependency.
 
 // Record an incoming FS_LIST_REQ into the deferred slot. Called from
 // espnow_task's RX-handler dispatch (6656 B stack, and its job is to drain the

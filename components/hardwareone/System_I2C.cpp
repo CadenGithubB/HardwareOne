@@ -439,7 +439,9 @@ void initI2CBuses() {
 void i2cResetGracePeriod(uint8_t address) {
   I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
   if (!mgr) return;
-  I2CDevice* dev = mgr->getDevice(address);
+  // Address-only, like the health helpers in System_I2C.h — resolve across
+  // buses so a bus 1 sensor's grace period actually gets reset.
+  I2CDevice* dev = mgr->getDeviceAnyBus(address);
   if (dev) dev->resetGracePeriod();
 }
 
@@ -451,7 +453,7 @@ const char* cmd_i2chealth(const String& argsInput) {
 
   if (argWantsJson(argsInput)) {
     PSRAM_JSON_DOC(doc);
-    doc["schema"] = 1;
+    doc["schema"] = 2;   // 2: added per-device "bus" (registry is keyed on address+bus)
     doc["deviceCount"] = mgr->getDeviceCount();
     JsonArray arr = doc["devices"].to<JsonArray>();
     for (int i = 0; i < mgr->getDeviceCount(); i++) {
@@ -459,6 +461,7 @@ const char* cmd_i2chealth(const String& argsInput) {
       if (!dev->isInitialized()) continue;
       const I2CDevice::Health& h = dev->getHealth();
       JsonObject o = arr.add<JsonObject>();
+      o["bus"]                = dev->bus;
       o["address"]            = dev->address;
       o["name"]               = dev->name ? dev->name : "?";
       o["consecutiveErrors"]  = h.consecutiveErrors;
@@ -469,146 +472,191 @@ const char* cmd_i2chealth(const String& argsInput) {
       o["busError"]           = h.busErrorCount;
       o["adaptiveTimeoutMs"]  = (unsigned long)dev->getAdaptiveTimeout();
     }
-    serializeJson(doc, getDebugBuffer(), 1024);
+    // Size against the real buffer (4096), not the stale 1024 literal — 16
+    // devices x ~150 B of JSON overruns 1 KB and serializeJson would emit a
+    // truncated, unparseable document.
+    serializeJson(doc, getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE);
     return getDebugBuffer();
   }
 
   char* p = getDebugBuffer();
-  int remaining = 1024;
+  int remaining = GLOBAL_DEBUG_BUFFER_SIZE;
 
   int deviceCount = mgr->getDeviceCount();
   int n = snprintf(p, remaining, "I2C Device Health (%d devices):\n", deviceCount);
   p += n; remaining -= n;
-  
+
   if (deviceCount == 0) {
     snprintf(p, remaining, "  No devices registered\n");
     return getDebugBuffer();
   }
-  
-  for (int i = 0; i < deviceCount && remaining > 100; i++) {
+
+  // Bus column: the registry is keyed on (address, bus), so the same address
+  // can legitimately appear twice — once per bus — with independent health.
+  // Without this column those rows are indistinguishable.
+  int omitted = 0;
+  for (int i = 0; i < deviceCount; i++) {
     I2CDevice* dev = &mgr->devices[i];
-    if (!dev->isInitialized()) continue;
-    
+    if (!dev->isInitialized()) continue;   // empty slot, not an omission
+
+    if (remaining <= 100) { omitted++; continue; }
+
     const I2CDevice::Health& h = dev->getHealth();
-    
+
     // Device header line
-    n = snprintf(p, remaining, 
-      "  0x%02X %-10s: err=%d/%d %s\n",
-      dev->address, dev->name ? dev->name : "?", 
+    n = snprintf(p, remaining,
+      "  bus%u 0x%02X %-10s: err=%d/%d %s\n",
+      dev->bus, dev->address, dev->name ? dev->name : "?",
       h.consecutiveErrors, h.totalErrors,
       dev->isDegraded() ? "[DEGRADED]" : "OK");
     p += n; remaining -= n;
-    
+
     // Error classification breakdown
     if (h.totalErrors > 0 && remaining > 100) {
       n = snprintf(p, remaining,
-        "       NACK=%d TIMEOUT=%d BUS_ERR=%d | timeout=%lums\n",
+        "            NACK=%d TIMEOUT=%d BUS_ERR=%d | timeout=%lums\n",
         h.nackCount, h.timeoutCount, h.busErrorCount,
         (unsigned long)dev->getAdaptiveTimeout());
       p += n; remaining -= n;
     }
   }
-  
+
+  // Never truncate silently — say so if the buffer ran out mid-table.
+  if (omitted > 0 && remaining > 40) {
+    snprintf(p, remaining, "  ... %d more device(s) not shown (buffer full)\n", omitted);
+  }
+
   return getDebugBuffer();
 }
 
-const char* cmd_i2cmetrics(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  
-  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
-  if (!mgr) return "Error: I2C manager not initialized";
+// Human-readable label for a bus index, matching what i2cscan / i2cstats print.
+static const char* i2cBusLabel(uint8_t bus) {
+  return (bus == 0) ? "I2C1/Wire1" : "I2C2/Wire";
+}
 
-  const I2CBusMetrics& metrics = mgr->getMetrics();
+// Render one bus's metrics block (stats + per-bus warnings) into `p`.
+// Returns bytes written. Each bus is reported independently: they have
+// separate mutexes, clock stacks and metric counters, so a bottleneck on one
+// says nothing about the other.
+static int renderBusMetrics(char* p, int remaining, uint8_t bus,
+                            const I2CBusMetrics& m, unsigned long uptimeSec) {
+  float tps = (uptimeSec > 0) ? (float)m.totalTransactions / uptimeSec : 0.0f;
+  float contentionRate = (m.totalTransactions > 0)
+    ? (float)m.mutexContentions * 100.0f / m.totalTransactions : 0.0f;
+  float timeoutRate = (m.totalTransactions > 0)
+    ? (float)m.mutexTimeouts * 100.0f / m.totalTransactions : 0.0f;
+  float bytesPerSec = (uptimeSec > 0) ? (float)m.totalBytesTransferred / uptimeSec : 0.0f;
+  float pctFast   = m.totalTransactions > 0 ? (float)m.txDuration_0_100us     * 100.0f / m.totalTransactions : 0.0f;
+  float pctNormal = m.totalTransactions > 0 ? (float)m.txDuration_100_500us   * 100.0f / m.totalTransactions : 0.0f;
+  float pctSlow   = m.totalTransactions > 0 ? (float)m.txDuration_500_2000us  * 100.0f / m.totalTransactions : 0.0f;
+  float pctVSlow  = m.totalTransactions > 0 ? (float)m.txDuration_2000plus_us * 100.0f / m.totalTransactions : 0.0f;
 
-  if (argWantsJson(argsInput)) {
-    unsigned long upSec = (millis() - metrics.lastResetMs) / 1000;
-    snprintf(getDebugBuffer(), 1024,
-      "{\"schema\":1,\"uptimeSec\":%lu,\"totalTransactions\":%lu,\"mutexTimeouts\":%lu,"
-      "\"busContentions\":%lu,\"totalBytes\":%lu}",
-      upSec, (unsigned long)metrics.totalTransactions, (unsigned long)metrics.mutexTimeouts,
-      (unsigned long)metrics.mutexContentions, (unsigned long)metrics.totalBytesTransferred);
-    return getDebugBuffer();
-  }
-
-  char* p = getDebugBuffer();
-  int remaining = 1024;
-  
-  // Calculate uptime since last reset
-  unsigned long uptimeMs = millis() - metrics.lastResetMs;
-  unsigned long uptimeSec = uptimeMs / 1000;
-  
-  // Calculate transactions per second
-  float tps = (uptimeSec > 0) ? (float)metrics.totalTransactions / uptimeSec : 0.0f;
-  
-  // Calculate contention rate
-  float contentionRate = (metrics.totalTransactions > 0) 
-    ? (float)metrics.mutexContentions * 100.0f / metrics.totalTransactions 
-    : 0.0f;
-  
-  // Calculate timeout rate
-  float timeoutRate = (metrics.totalTransactions > 0)
-    ? (float)metrics.mutexTimeouts * 100.0f / metrics.totalTransactions
-    : 0.0f;
-  
-  // Calculate bandwidth
-  float bytesPerSec = (uptimeSec > 0) ? (float)metrics.totalBytesTransferred / uptimeSec : 0.0f;
-  
-  int n = snprintf(p, remaining, 
-    "I2C Bus Metrics (uptime: %lu sec):\n"
+  int written = 0;
+  int n = snprintf(p, remaining,
+    "\nBus %u (%s):\n"
     "  Total Transactions:  %lu (%.1f/sec)\n"
     "  Mutex Timeouts:      %lu (%.2f%%)\n"
     "  Bus Contentions:     %lu (%.2f%%)\n"
     "  Avg Wait Time:       %lu us\n"
     "  Peak Wait Time:      %lu us\n"
-    "\n"
-    "Bandwidth Metrics:\n"
     "  Total Bytes:         %lu (%.1f bytes/sec)\n"
     "  Avg TX Duration:     %lu us\n"
     "  Peak TX Duration:    %lu us\n"
-    "\n"
-    "Transaction Duration Distribution:\n"
-    "  0-100us (fast):      %lu (%.1f%%)\n"
-    "  100-500us (normal):  %lu (%.1f%%)\n"
-    "  500-2000us (slow):   %lu (%.1f%%)\n"
-    "  2000+us (very slow): %lu (%.1f%%)\n",
-    (unsigned long)uptimeSec,
-    (unsigned long)metrics.totalTransactions, tps,
-    (unsigned long)metrics.mutexTimeouts, timeoutRate,
-    (unsigned long)metrics.mutexContentions, contentionRate,
-    (unsigned long)metrics.avgWaitTimeUs,
-    (unsigned long)metrics.maxWaitTimeUs,
-    (unsigned long)metrics.totalBytesTransferred, bytesPerSec,
-    (unsigned long)metrics.avgTransactionDurationUs,
-    (unsigned long)metrics.maxTransactionDurationUs,
-    (unsigned long)metrics.txDuration_0_100us,
-    metrics.totalTransactions > 0 ? (float)metrics.txDuration_0_100us * 100.0f / metrics.totalTransactions : 0.0f,
-    (unsigned long)metrics.txDuration_100_500us,
-    metrics.totalTransactions > 0 ? (float)metrics.txDuration_100_500us * 100.0f / metrics.totalTransactions : 0.0f,
-    (unsigned long)metrics.txDuration_500_2000us,
-    metrics.totalTransactions > 0 ? (float)metrics.txDuration_500_2000us * 100.0f / metrics.totalTransactions : 0.0f,
-    (unsigned long)metrics.txDuration_2000plus_us,
-    metrics.totalTransactions > 0 ? (float)metrics.txDuration_2000plus_us * 100.0f / metrics.totalTransactions : 0.0f);
+    "  Duration spread:     %lu fast (%.1f%%) / %lu normal (%.1f%%) / "
+    "%lu slow (%.1f%%) / %lu very slow (%.1f%%)\n",
+    bus, i2cBusLabel(bus),
+    (unsigned long)m.totalTransactions, tps,
+    (unsigned long)m.mutexTimeouts, timeoutRate,
+    (unsigned long)m.mutexContentions, contentionRate,
+    (unsigned long)m.avgWaitTimeUs,
+    (unsigned long)m.maxWaitTimeUs,
+    (unsigned long)m.totalBytesTransferred, bytesPerSec,
+    (unsigned long)m.avgTransactionDurationUs,
+    (unsigned long)m.maxTransactionDurationUs,
+    (unsigned long)m.txDuration_0_100us,     pctFast,
+    (unsigned long)m.txDuration_100_500us,   pctNormal,
+    (unsigned long)m.txDuration_500_2000us,  pctSlow,
+    (unsigned long)m.txDuration_2000plus_us, pctVSlow);
+  if (n < 0 || n >= remaining) return (n < 0) ? 0 : remaining - 1;
+  p += n; remaining -= n; written += n;
+
+  // Health recommendations — scoped to THIS bus.
+  if (m.mutexTimeouts > 0 && remaining > 80) {
+    n = snprintf(p, remaining, "  WARN: %lu mutex timeouts on bus %u - bus overloaded\n",
+                 (unsigned long)m.mutexTimeouts, bus);
+    p += n; remaining -= n; written += n;
+  }
+  if (contentionRate > 50.0f && remaining > 80) {
+    n = snprintf(p, remaining, "  WARN: high contention on bus %u (%.1f%%) - consider reducing polling rates\n",
+                 bus, contentionRate);
+    p += n; remaining -= n; written += n;
+  }
+  if (m.avgWaitTimeUs > 5000 && remaining > 80) {
+    n = snprintf(p, remaining, "  WARN: high avg wait on bus %u (%lu us) - bus bottleneck\n",
+                 bus, (unsigned long)m.avgWaitTimeUs);
+    p += n; remaining -= n; written += n;
+  }
+  return written;
+}
+
+const char* cmd_i2cmetrics(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+
+  I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
+  if (!mgr) return "Error: I2C manager not initialized";
+
+  // Counters are cumulative since boot — nothing clears them at runtime.
+  unsigned long uptimeSec = millis() / 1000;
+
+  if (argWantsJson(argsInput)) {
+    PSRAM_JSON_DOC(doc);
+    doc["schema"] = 2;   // 2: per-bus array (was a single flat bus-0 object)
+    doc["uptimeSec"] = uptimeSec;
+    JsonArray arr = doc["buses"].to<JsonArray>();
+    for (uint8_t b = 0; b < I2CDeviceManager::NUM_BUSES; b++) {
+      if (!mgr->isBusInitialized(b)) continue;
+      const I2CBusMetrics& m = mgr->getMetrics(b);
+      JsonObject o = arr.add<JsonObject>();
+      o["bus"]               = b;
+      o["label"]             = i2cBusLabel(b);
+      o["totalTransactions"] = (unsigned long)m.totalTransactions;
+      o["mutexTimeouts"]     = (unsigned long)m.mutexTimeouts;
+      o["busContentions"]    = (unsigned long)m.mutexContentions;
+      o["avgWaitUs"]         = (unsigned long)m.avgWaitTimeUs;
+      o["maxWaitUs"]         = (unsigned long)m.maxWaitTimeUs;
+      o["totalBytes"]        = (unsigned long)m.totalBytesTransferred;
+      o["avgTxUs"]           = (unsigned long)m.avgTransactionDurationUs;
+      o["maxTxUs"]           = (unsigned long)m.maxTransactionDurationUs;
+      JsonObject hist = o["hist"].to<JsonObject>();
+      hist["us0_100"]    = (unsigned long)m.txDuration_0_100us;
+      hist["us100_500"]  = (unsigned long)m.txDuration_100_500us;
+      hist["us500_2000"] = (unsigned long)m.txDuration_500_2000us;
+      hist["us2000plus"] = (unsigned long)m.txDuration_2000plus_us;
+    }
+    serializeJson(doc, getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE);
+    return getDebugBuffer();
+  }
+
+  char* p = getDebugBuffer();
+  int remaining = GLOBAL_DEBUG_BUFFER_SIZE;
+
+  int n = snprintf(p, remaining, "I2C Bus Metrics (uptime: %lu sec, counters since boot):\n",
+                   uptimeSec);
   p += n; remaining -= n;
-  
-  // Add health check recommendations
-  if (metrics.mutexTimeouts > 0) {
-    n = snprintf(p, remaining, "\n⚠ WARNING: %lu mutex timeouts detected - bus overloaded\n",
-                 (unsigned long)metrics.mutexTimeouts);
+
+  int busesShown = 0;
+  for (uint8_t b = 0; b < I2CDeviceManager::NUM_BUSES; b++) {
+    if (!mgr->isBusInitialized(b)) continue;
+    if (remaining < 400) break;   // leave room rather than emit a half block
+    n = renderBusMetrics(p, remaining, b, mgr->getMetrics(b), uptimeSec);
     p += n; remaining -= n;
+    busesShown++;
   }
-  
-  if (contentionRate > 50.0f) {
-    n = snprintf(p, remaining, "⚠ WARNING: High contention (%.1f%%) - consider reducing polling rates\n",
-                 contentionRate);
-    p += n; remaining -= n;
+
+  if (busesShown == 0) {
+    snprintf(p, remaining, "  No initialized buses\n");
   }
-  
-  if (metrics.avgWaitTimeUs > 5000) {
-    n = snprintf(p, remaining, "⚠ WARNING: High avg wait time (%lu us) - bus bottleneck detected\n",
-                 (unsigned long)metrics.avgWaitTimeUs);
-    p += n; remaining -= n;
-  }
-  
+
   return getDebugBuffer();
 }
 
@@ -2180,19 +2228,21 @@ const char* cmd_i2crecover(const String& argsInput) {
   I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
   if (!mgr) return "Error: I2C manager not initialized";
   
-  I2CDevice* dev = mgr->getDevice(address);
+  // The command takes an address only, so resolve across buses — otherwise
+  // `i2crecover` reports "not registered" for every device on bus 1.
+  I2CDevice* dev = mgr->getDeviceAnyBus(address);
   if (!dev || !dev->isInitialized()) {
     EXT_RAM_BSS_ATTR static char result[64];
     snprintf(result, sizeof(result), "[I2C] Device 0x%02X not registered", address);
     return result;
   }
-  
+
   dev->attemptRecovery();
-  
+
   EXT_RAM_BSS_ATTR static char result[128];
-  snprintf(result, sizeof(result), 
-    "[I2C] Device 0x%02X (%s) degraded state cleared. Retry sensor start command.",
-    address, dev->name);
+  snprintf(result, sizeof(result),
+    "[I2C] Device 0x%02X (%s) on bus %u degraded state cleared. Retry sensor start command.",
+    address, dev->name, dev->bus);
   return result;
 }
 

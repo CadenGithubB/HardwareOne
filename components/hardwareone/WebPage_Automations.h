@@ -478,6 +478,8 @@ const EVENT_KINDS=[
   ['ble_connected','BLE device connected'],['ble_disconnected','BLE device disconnected'],
   ['g2_connected','Glasses connected'],['g2_disconnected','Glasses disconnected'],
   ['g2_worn','Glasses picked up'],['g2_not_worn','Glasses set down'],
+  ['ring_connected','R1 ring connected'],['ring_disconnected','R1 ring disconnected'],
+  ['ring_worn','R1 ring on finger'],['ring_not_worn','R1 ring off finger'],
   ['sd_mounted','SD card mounted'],['sd_unmounted','SD card unmounted'],
   ['sd_write_failed','SD write failed'],['fs_low_space','Flash storage low'],
   ['presence_detected','Presence detected'],['presence_cleared','Presence cleared'],
