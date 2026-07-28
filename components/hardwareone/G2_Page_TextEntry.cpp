@@ -31,6 +31,7 @@ struct TextEntryState {
   TextEntryCommitFn onCommit;
   TextEntryCancelFn onCancel;
   uint8_t           group;       // index into kGroupChars
+  bool              isSecret;    // suppress buf contents in debug logs
 };
 
 static TextEntryState gTE = {};
@@ -154,6 +155,7 @@ bool g2BeginTextEntry(const TextEntryConfig& cfg) {
   gTE.onCommit = cfg.onCommit;
   gTE.onCancel = cfg.onCancel;
   gTE.group    = 0;
+  gTE.isSecret = cfg.isSecret;
 
   if (cfg.prompt) {
     strncpy(gTE.prompt, cfg.prompt, sizeof(gTE.prompt) - 1);
@@ -184,8 +186,13 @@ bool g2BeginTextEntry(const TextEntryConfig& cfg) {
     DEBUG_G2F("[G2] text-entry: live-page start failed");
     return false;
   }
-  DEBUG_G2F("[G2] text-entry: '%s' (max=%u, initial='%s')",
-            gTE.prompt, (unsigned)gTE.maxLen, gTE.buf);
+  if (gTE.isSecret) {
+    DEBUG_G2F("[G2] text-entry: '%s' (max=%u, initial len=%u, secret)",
+              gTE.prompt, (unsigned)gTE.maxLen, (unsigned)gTE.len);
+  } else {
+    DEBUG_G2F("[G2] text-entry: '%s' (max=%u, initial='%s')",
+              gTE.prompt, (unsigned)gTE.maxLen, gTE.buf);
+  }
   return true;
 }
 
@@ -193,7 +200,11 @@ void g2TextEntryHandleTap(uint32_t idx) {
   if (!gTE.active) return;
 
   if (idx == kRowCancel) {
-    DEBUG_G2F("[G2] text-entry: cancelled (buf='%s')", gTE.buf);
+    if (gTE.isSecret) {
+      DEBUG_G2F("[G2] text-entry: cancelled (len=%u, secret)", (unsigned)gTE.len);
+    } else {
+      DEBUG_G2F("[G2] text-entry: cancelled (buf='%s')", gTE.buf);
+    }
     finishCancel();
     return;
   }
@@ -202,7 +213,11 @@ void g2TextEntryHandleTap(uint32_t idx) {
     return;
   }
   if (idx == kRowDone) {
-    DEBUG_G2F("[G2] text-entry: done (buf='%s')", gTE.buf);
+    if (gTE.isSecret) {
+      DEBUG_G2F("[G2] text-entry: done (len=%u, secret)", (unsigned)gTE.len);
+    } else {
+      DEBUG_G2F("[G2] text-entry: done (buf='%s')", gTE.buf);
+    }
     finishCommit();
     return;
   }

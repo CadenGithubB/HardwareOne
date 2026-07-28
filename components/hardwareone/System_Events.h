@@ -160,6 +160,10 @@ uint8_t systemEventKindFamily(uint8_t kind);
   X(SYSEVT_G2_DISCONNECTED,     "g2_disconnected", SYSEVT_FAM_GLASSES)      /* subject=side that dropped */ \
   X(SYSEVT_G2_WORN,             "g2_worn", SYSEVT_FAM_GLASSES)              /* plugin heartbeats resumed (picked up)  subject=side */ \
   X(SYSEVT_G2_NOT_WORN,         "g2_not_worn", SYSEVT_FAM_GLASSES)          /* plugin heartbeats stopped (set down)   subject=side */ \
+  X(SYSEVT_RING_CONNECTED,      "ring_connected", SYSEVT_FAM_GLASSES)       /* R1 ring GATT up after setup  subject=name detail=mac */ \
+  X(SYSEVT_RING_DISCONNECTED,   "ring_disconnected", SYSEVT_FAM_GLASSES)    /* R1 ring link lost  subject=name detail=mac */ \
+  X(SYSEVT_RING_WORN,           "ring_worn", SYSEVT_FAM_GLASSES)            /* R1 wearStatus→wear (on finger)  subject=name */ \
+  X(SYSEVT_RING_NOT_WORN,       "ring_not_worn", SYSEVT_FAM_GLASSES)        /* R1 wearStatus→notWear (off finger)  subject=name */ \
   /* --- Auth / users --- */ \
   X(SYSEVT_LOGIN_OK,            "login_ok", SYSEVT_FAM_AUTH)             /* subject=username detail=transport */ \
   X(SYSEVT_LOGIN_FAIL,          "login_fail", SYSEVT_FAM_AUTH)           /* subject=username detail=transport */ \

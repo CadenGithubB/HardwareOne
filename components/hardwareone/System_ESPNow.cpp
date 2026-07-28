@@ -378,6 +378,13 @@ struct InboundRxItem {
   uint8_t src[6];
   int len;
   int8_t rssi;
+  // Phase 0 relay groundwork: was this frame radio-addressed to FF:FF:FF:FF:FF:FF?
+  // The recv callback used to discard des_addr entirely, so the drain rebuilt
+  // recv_info with an all-zeros destination and RX code could never distinguish
+  // "unicast to me" from "broadcast". The ring can't carry the pointer target,
+  // but this one bit is all that distinction needs (ESP-NOW only ever delivers
+  // frames addressed to us or to broadcast).
+  bool radioDstIsBcast;
   uint8_t data[250];
 };
 // Slot count MUST come from this constant, never sizeof(ring)/sizeof(ring[0]):
@@ -393,6 +400,19 @@ static volatile uint8_t gEspNowRxTail = 0;
 // isn't inside the ring, so this is allocate-once-and-keep.
 static InboundRxItem* gEspNowRxRing = nullptr;
 static volatile uint32_t gEspNowRxDrops = 0;
+
+// DIAGNOSTIC (Phase 0 relay groundwork, docs/ESPNOW_RELAY_RESTORE_PLAN.md):
+// out-of-range emulation. While active, the RX-ring drain discards every frame
+// whose radio source MAC matches — before any parsing, heartbeats included, so
+// the blocked peer goes offline within MESH_PEER_TIMEOUT_MS exactly like real
+// RF loss. RAM-only: reboot or `espnowrelayblock clear` lifts it.
+// Written by cmd_exec_task (the command), read by espnow_task (the drain) —
+// volatile like the ring indices. The command DISARMS (active=false) before
+// rewriting the MAC and re-arms after, so the drain never matches against a
+// half-written MAC of an ACTIVE block — including the re-arm-with-new-MAC case.
+static uint8_t           gRelayBlockMac[6] = {};
+static volatile bool     gRelayBlockActive = false;
+static volatile uint32_t gRelayBlockDrops  = 0;
 MeshSeenEntry gMeshSeen[MESH_DEDUP_SIZE];  // Exported for .ino access
 int gMeshSeenIndex = 0;                     // Exported for .ino access
 int gMeshPeerSlots = 0;  // Runtime slot count — 0 until the peer arrays are allocated at
@@ -792,6 +812,7 @@ static void setEspNowPassphrase(const String& passphrase) {
 // touch it. To read/validate the token, just look up the ACTIVE session with
 // the configured bond peer.
 // ===========================================================================
+#if ENABLE_BONDED_MODE
 static SessionState* bondPeerActiveSession() {
   if (!gEspNow || !gSettings.bondModeEnabled) return nullptr;
   if (gSettings.bondPeerMac.length() == 0) return nullptr;
@@ -875,6 +896,10 @@ String buildBondedCommandPayload(const String& command) {
   DEBUG_ESPNOWF("[BOND_AUTH] buildPayload: token=%.8s... cmd=%s", tokenStr, command.c_str());
   return payload;
 }
+#else
+bool isBondSessionTokenValid() { return false; }
+String buildBondedCommandPayload(const String& /*command*/) { return String(); }
+#endif // ENABLE_BONDED_MODE
 
 // Add ESP-NOW peer with optional encryption
 // Phase 3.5 step 4 — LMK removed. Peers are now ALWAYS added unencrypted at
@@ -1068,14 +1093,19 @@ static void onEspNowDataReceived(const esp_now_recv_info* recv_info, const uint8
   if (!recv_info || !incomingData || len <= 0) return;
   // Ring absent means initEspNow bailed before allocating it, so a frame should
   // not be able to reach us — drop rather than fault on the WiFi task. The bump
-  // is defence-in-depth only: nothing reads gEspNowRxDrops today.
+  // is defence-in-depth; espnowstats surfaces the counter as "RX Ring Drops".
   if (!gEspNowRxRing) { gEspNowRxDrops++; return; }
   uint8_t next = (uint8_t)((gEspNowRxHead + 1) % ESPNOW_RX_RING_SLOTS);
   if (next == gEspNowRxTail) { gEspNowRxDrops++; return; }
   InboundRxItem& it = gEspNowRxRing[gEspNowRxHead];
   memcpy(it.src, recv_info->src_addr, 6);
   it.len = len; if (it.len > 250) it.len = 250; if (it.len < 0) it.len = 0;
-  it.rssi = recv_info->rx_ctrl ? recv_info->rx_ctrl->rssi : (int8_t)-127;
+  // -128 (not -127) on missing rx_ctrl: the drain always rebuilds a non-null
+  // rx_ctrl, so this value flows to noteMeshPeerRxActivity's linkRssi as-is —
+  // and -128 is its "no sample" sentinel, keeping an unknown out of the EWMA.
+  it.rssi = recv_info->rx_ctrl ? recv_info->rx_ctrl->rssi : (int8_t)-128;
+  static const uint8_t kBcastMac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+  it.radioDstIsBcast = recv_info->des_addr && memcmp(recv_info->des_addr, kBcastMac, 6) == 0;
   if (it.len > 0) memcpy(it.data, incomingData, it.len);
   gEspNowRxHead = next;
 }
@@ -2757,27 +2787,10 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
 // That cleanup is centralized in the dispatcher so handlers don't repeat it.
 // ============================================================================
 
-struct V4RxCtx {
-  const esp_now_recv_info* recv_info;
-  const EspNowV4Header*    h;
-  const uint8_t*           payload;
-  uint16_t                 payloadLen;
-  bool                     isPaired;
-  // 2026-05-19: `isAuthenticated` is true when this frame proves the sender
-  // holds either our session key (SESSION_FRAME unwrap succeeded) or the mesh
-  // group key (BROADCAST_AUTH HMAC verified). Plaintext unicast and plain-
-  // broadcast (no BROADCAST_AUTH tag) leave it false. Handlers that mutate
-  // device-level state from the frame (clock, master role, peer identity
-  // claims) MUST gate on this — otherwise anyone in radio range can spoof.
-  bool                     isAuthenticated;
-  // `isSessionEncrypted` is the narrower signal: true ONLY when the frame
-  // arrived AEAD-wrapped in a SESSION_FRAME (confidential). A BROADCAST_AUTH
-  // frame is authenticated-but-plaintext, so it sets isAuthenticated=true but
-  // isSessionEncrypted=false. Use this (not the legacy, now-never-set
-  // ESPNOW_V4_FLAG_ENCRYPTED header bit) for any "was this encrypted?" report.
-  bool                     isSessionEncrypted;
-  const char*              deviceName;
-};
+// V4RxCtx moved to System_ESPNow_RxCtx.h (Phase 0 relay groundwork) so the
+// handlers TU shares the ONE definition instead of carrying an out-of-sync
+// duplicate. Field semantics are documented there.
+#include "System_ESPNow_RxCtx.h"
 
 using V4OpcodeHandler = void (*)(const V4RxCtx& ctx);
 
@@ -2869,7 +2882,8 @@ static void v4h_text(const V4RxCtx& ctx) {
       DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_RX] TEXT message enqueued slot=%d (encrypted=%s)",
              head, slot.encrypted ? "YES" : "NO");
       if (ctx.isPaired && meshEnabled()) {
-        noteMeshPeerRxActivity(ctx.recv_info->src_addr, EspNowMeshRxKind::RxActivity);
+        noteMeshPeerRxActivity(ctx.recv_info->src_addr, EspNowMeshRxKind::RxActivity, -128,
+                               ctx.recv_info->rx_ctrl ? ctx.recv_info->rx_ctrl->rssi : (int8_t)-128);
       }
     } else {
       DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_RX] TEXT queue full, message dropped");
@@ -2964,7 +2978,8 @@ static void sessionPrewarmReset(const uint8_t mac[6]) {
 static void v4h_heartbeat(const V4RxCtx& ctx) {
   if (ctx.payloadLen >= sizeof(V4PayloadHeartbeat)) {
     const V4PayloadHeartbeat* hb = (const V4PayloadHeartbeat*)ctx.payload;
-    noteMeshPeerRxActivity(ctx.recv_info->src_addr, EspNowMeshRxKind::MeshHeartbeat, hb->rssi);
+    noteMeshPeerRxActivity(ctx.recv_info->src_addr, EspNowMeshRxKind::MeshHeartbeat, hb->rssi,
+                           ctx.recv_info->rx_ctrl ? ctx.recv_info->rx_ctrl->rssi : (int8_t)-128);
     if (gEspNow) gEspNow->heartbeatsReceived++;
 
     // Proactive session pre-warm. If this heartbeat is from a peer we've ALREADY
@@ -5049,12 +5064,22 @@ static bool v4_dispatch_table_try(const esp_now_recv_info* recv_info, const EspN
     v4_dispatch_post_cleanup(recv_info, h);
     return true;
   }
+#if ENABLE_BONDED_MODE
   if ((e->flags & V4_OPC_FLAG_REQ_BOND_MODE) && !gSettings.bondModeEnabled) {
     // Bond-mode-only opcodes were gated `&& gSettings.bondModeEnabled` originally.
     // When bond mode is off, drop silently (no other branch handles these types).
     v4_dispatch_post_cleanup(recv_info, h);
     return true;
   }
+#else
+  if (e->flags & V4_OPC_FLAG_REQ_BOND_MODE) {
+    // Bond feature compiled out — drop any bond-gated opcode (none are
+    // registered in kV4HandlerTable when ENABLE_BONDED_MODE=0, but keep the
+    // flag check honest for forward-compat / stale peers).
+    v4_dispatch_post_cleanup(recv_info, h);
+    return true;
+  }
+#endif
   if ((e->flags & V4_OPC_FLAG_REQ_AUTHENTICATED) && !isAuthenticated) {
     // Opcode-handler insists on a cryptographically-authenticated frame
     // (SESSION_FRAME unwrap OR BROADCAST_AUTH HMAC). Plain plaintext from
@@ -5420,7 +5445,8 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
            srcMac, (unsigned long)h->msgId, h->fragIndex, h->fragCount);
     
     // Update peer health ACK tracking
-    noteMeshPeerRxActivity(recv_info->src_addr, EspNowMeshRxKind::Ack);
+    noteMeshPeerRxActivity(recv_info->src_addr, EspNowMeshRxKind::Ack, -128,
+                           recv_info->rx_ctrl ? recv_info->rx_ctrl->rssi : (int8_t)-128);
     
     // Check broadcast tracker
     broadcast_tracker_record_ack(h->msgId, recv_info->src_addr);
@@ -5726,6 +5752,7 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
     return;
   }
 
+#if ENABLE_BONDED_MODE
   if (strncmp(cmdPayload, "@BOND:", 6) == 0) {
     DEBUG_ESPNOWF("[BOND_AUTH] Received bonded command from %s", deviceName);
     size_t tokenLen = secondColon - firstColon - 1;
@@ -5783,7 +5810,22 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
                          msgId, respPayload, 1 + strlen(errMsg) + 1, 1);
       return;
     }
-  } else {
+  } else
+#else
+  // Bond feature compiled out — reject @BOND payloads (would be RCE without
+  // the token validators) and fall through to username:password auth.
+  if (strncmp(cmdPayload, "@BOND:", 6) == 0) {
+    BROADCAST_PRINTF("[ESP-NOW] Rejected bonded command from %s (bond mode not compiled)", deviceName);
+    uint8_t respPayload[48];
+    respPayload[0] = 0;
+    const char* errMsg = "Bond mode not available";
+    memcpy(respPayload + 1, errMsg, strlen(errMsg) + 1);
+    espnowtx::sendAead(srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
+                       msgId, respPayload, 1 + strlen(errMsg) + 1, 1);
+    return;
+  } else
+#endif
+  {
     // Traditional username:password auth
     char password[32];
     size_t userLen = firstColon - cmdPayload;
@@ -6628,11 +6670,6 @@ static volatile bool sSettingsTransferInProgress = false;
 static const uint32_t SETTINGS_DEBOUNCE_MS = 3000;  // 3 second cooldown between requests
 static const uint32_t SETTINGS_MIN_HEAP = 20000;    // Minimum 20KB heap required
 
-// Debouncing state for metadata transfer
-static uint32_t sLastMetadataRequestMs = 0;
-static uint32_t sLastMetadataSendMs = 0;
-static const uint32_t METADATA_DEBOUNCE_MS = 3000;  // 3 second cooldown between requests
-
 /**
  * Request settings from bonded peer (master only).
  * Called from the sync tick — timing/retry is owned by the sync tick.
@@ -7256,6 +7293,11 @@ static String loadManifestFromCache(const uint8_t fwHash[16]) {
 // ==========================
 // Metadata Exchange Functions
 // ==========================
+// Debounce lives with metadata (mesh-wide), not inside the bond-only block above —
+// requestMetadata/sendMetadata are used by plain mesh peers too.
+static uint32_t sLastMetadataRequestMs = 0;
+static uint32_t sLastMetadataSendMs = 0;
+static const uint32_t METADATA_DEBOUNCE_MS = 3000;  // 3 second cooldown between requests
 
 /**
  * Build metadata payload from current settings
@@ -8010,11 +8052,26 @@ int countMeshPeerMetaByRoom(const char* room) {
   return count;
 }
 
-void noteMeshPeerRxActivity(const uint8_t* mac, EspNowMeshRxKind kind, int8_t hbRssi) {
+void noteMeshPeerRxActivity(const uint8_t* mac, EspNowMeshRxKind kind, int8_t hbRssi, int8_t linkRssi) {
   if (!mac || !gMeshPeers) return;
   MeshPeerHealth* peer = getMeshPeerHealth(mac, true);
   if (!peer) return;
   const uint32_t t = millis();
+  // Locally-measured link RSSI EWMA (alpha 1/4), quarter-dB fixed point.
+  // -128 = caller had no radio frame in hand. First sample seeds directly
+  // (slot memset leaves 0 = unset). The signum step keeps small deltas from
+  // truncating to 0 forever — without it the EWMA stalls up to 1 dB out.
+  if (linkRssi != (int8_t)-128) {
+    const int16_t targetQ = (int16_t)linkRssi * 4;
+    if (peer->linkRssiEwma == 0) {
+      peer->linkRssiEwma = targetQ;
+    } else {
+      int16_t diff = targetQ - peer->linkRssiEwma;
+      int16_t step = diff / 4;
+      if (step == 0 && diff != 0) step = (diff > 0) ? 1 : -1;
+      peer->linkRssiEwma = (int16_t)(peer->linkRssiEwma + step);
+    }
+  }
   switch (kind) {
     case EspNowMeshRxKind::MeshHeartbeat:
       peer->lastMeshHeartbeatMs = t;
@@ -8115,6 +8172,8 @@ static void fillMeshStatusPeerJsonObject(JsonObject peer, uint32_t now, const ui
     peer["ackCount"] = ph->ackCount;
     peer["secondsSinceHeartbeat"] = elHb / 1000;
     peer["secondsSinceActivity"] = ph->lastRxActivityMs ? (elAct / 1000) : 0;
+    // Quarter-dB fixed point -> whole dBm, round half away from zero.
+    peer["linkRssi"] = (int)((ph->linkRssiEwma + (ph->linkRssiEwma >= 0 ? 2 : -2)) / 4);
   } else {
     peer["alive"] = false;
     peer["activityAlive"] = false;
@@ -8125,6 +8184,7 @@ static void fillMeshStatusPeerJsonObject(JsonObject peer, uint32_t now, const ui
     peer["ackCount"] = 0;
     peer["secondsSinceHeartbeat"] = 0;
     peer["secondsSinceActivity"] = 0;
+    peer["linkRssi"] = 0;
   }
 }
 
@@ -8426,10 +8486,24 @@ void processMeshHeartbeats() {
   // never allocated (ESP-NOW not started, or the init alloc failed) — head and
   // tail can't diverge in that case, but the guard keeps the deref honest.
   if (gEspNowRxRing) {
+    uint8_t selfMac[6] = {};
+    esp_wifi_get_mac(WIFI_IF_STA, selfMac);  // once per drain pass, for des_addr rebuild
     while (gEspNowRxHead != gEspNowRxTail) {
       uint8_t tail = gEspNowRxTail;
       InboundRxItem& item = gEspNowRxRing[tail];
-      uint8_t dstMac[6] = {};
+      // DIAGNOSTIC out-of-range emulation (espnowrelayblock): discard before
+      // any parsing so the blocked peer looks exactly like RF loss.
+      if (gRelayBlockActive && memcmp(item.src, gRelayBlockMac, 6) == 0) {
+        gRelayBlockDrops++;
+        gEspNowRxTail = (uint8_t)((tail + 1) % ESPNOW_RX_RING_SLOTS);
+        continue;
+      }
+      // Rebuild recv_info truthfully: ESP-NOW only delivers frames addressed
+      // to us or to broadcast, and the ring carries which one this was.
+      // (Formerly all-zeros, which made the distinction unknowable in RX code.)
+      uint8_t dstMac[6];
+      if (item.radioDstIsBcast) memset(dstMac, 0xFF, 6);
+      else                      memcpy(dstMac, selfMac, 6);
       wifi_pkt_rx_ctrl_t rxCtrl = {};
       rxCtrl.rssi = item.rssi;
       esp_now_recv_info_t ri = {};
@@ -10181,6 +10255,7 @@ const char* cmd_espnow_stats(const String& argsInput) {
     doc["streamSent"]       = (unsigned long)gEspNow->streamSentCount;
     doc["streamReceived"]   = (unsigned long)gEspNow->streamReceivedCount;
     doc["streamDropped"]    = (unsigned long)gEspNow->streamDroppedCount;
+    doc["rxRingDrops"]      = (unsigned long)gEspNowRxDrops;
     if (meshEnabled()) {
       doc["heartbeatsSent"]     = (unsigned long)gEspNow->heartbeatsSent;
       doc["heartbeatsReceived"] = (unsigned long)gEspNow->heartbeatsReceived;
@@ -10205,13 +10280,15 @@ const char* cmd_espnow_stats(const String& argsInput) {
     "  Send Failures: %lu\n"
     "  Stream Sent: %lu\n"
     "  Stream Received: %lu\n"
-    "  Stream Dropped: %lu",
+    "  Stream Dropped: %lu\n"
+    "  RX Ring Drops: %lu",
     (unsigned long)gEspNow->routerMetrics.messagesSent,
     (unsigned long)gEspNow->routerMetrics.messagesReceived,
     (unsigned long)gEspNow->routerMetrics.messagesFailed,
     (unsigned long)gEspNow->streamSentCount,
     (unsigned long)gEspNow->streamReceivedCount,
-    (unsigned long)gEspNow->streamDroppedCount);
+    (unsigned long)gEspNow->streamDroppedCount,
+    (unsigned long)gEspNowRxDrops);
 
   if (meshEnabled()) {
     BROADCAST_PRINTF("  Heartbeats Sent: %lu\n  Heartbeats Received: %lu",
@@ -10229,8 +10306,61 @@ const char* cmd_espnow_stats(const String& argsInput) {
   } else {
     BROADCAST_PRINTF("  Uptime: %lus (since boot)", millis() / 1000);
   }
-  
+
   return "OK";
+}
+
+// DIAGNOSTIC (Phase 0 relay groundwork): emulate an out-of-range peer by
+// discarding every inbound frame from one radio source MAC at the RX-ring
+// drain — before any parsing, heartbeats included, so the blocked peer goes
+// offline within MESH_PEER_TIMEOUT_MS exactly like real RF loss. The
+// multi-hop relay HW tests need "A cannot hear C" reproducible on one desk.
+// RAM-only by design: reboot always lifts it, so a forgotten block can't
+// persist into normal operation. See docs/ESPNOW_RELAY_RESTORE_PLAN.md.
+const char* cmd_espnow_relayblock(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String sub = argsInput;
+  sub.trim();
+  if (sub.length() == 0 || sub.equalsIgnoreCase("status")) {
+    if (!gRelayBlockActive) {
+      return "Relay block inactive. Usage: espnowrelayblock <mac|clear|status>";
+    }
+    if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+    char macBuf[18];
+    formatMacAddressBuf(gRelayBlockMac, macBuf, sizeof(macBuf));
+    snprintf(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE,
+             "Relay block ACTIVE for %s — %lu frame(s) dropped so far. "
+             "'espnowrelayblock clear' (or reboot) lifts it.",
+             macBuf, (unsigned long)gRelayBlockDrops);
+    return getDebugBuffer();
+  }
+  if (sub.equalsIgnoreCase("clear")) {
+    if (!gRelayBlockActive) return "OK: relay block was not active";
+    gRelayBlockActive = false;
+    if (!ensureDebugBuffer()) return "OK";
+    snprintf(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE,
+             "OK: relay block cleared (%lu frame(s) were dropped)",
+             (unsigned long)gRelayBlockDrops);
+    return getDebugBuffer();
+  }
+  uint8_t mac[6];
+  if (!parseMacAddress(sub, mac)) {
+    return "Error: expected a MAC (AA:BB:CC:DD:EE:FF), 'clear', or 'status'";
+  }
+  if (isSelfMac(mac)) return "Error: refusing to block our own MAC";
+  // Disarm first: re-arming with a NEW MAC while a block is active must never
+  // let the higher-priority drain (same core) match a half-written MAC.
+  gRelayBlockActive = false;
+  memcpy(gRelayBlockMac, mac, 6);
+  gRelayBlockDrops = 0;
+  gRelayBlockActive = true;
+  if (!ensureDebugBuffer()) return "OK";
+  snprintf(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE,
+           "OK: dropping ALL inbound ESP-NOW frames from %s. The peer will show "
+           "offline within ~30s (heartbeats are dropped too). RAM-only — "
+           "'espnowrelayblock clear' or reboot lifts it.",
+           sub.c_str());
+  return getDebugBuffer();
 }
 
 // ESP-NOW broadcast tracking statistics command
@@ -10372,7 +10502,8 @@ const char* cmd_espnow_resetstats(const String& argsInput) {
   gEspNow->fileTransfersSent = 0;
   gEspNow->fileTransfersReceived = 0;
   gEspNow->lastResetTime = millis();
-  
+  gEspNowRxDrops = 0;  // surfaced by espnowstats since Phase 0, so reset it too
+
   gEspNow->routerMetrics = RouterMetrics();
 
   return "ESP-NOW statistics reset (including router metrics)";
@@ -12538,8 +12669,10 @@ const char* cmd_espnow_meshstatus(const String& argsInput) {
   // Serialize to gDebugBuffer
   if (!ensureDebugBuffer()) return "{\"error\":\"Buffer unavailable\"}";
 
-  size_t len = serializeJson(doc, getDebugBuffer(), 1024);
-  if (len >= 1024) return "{\"error\":\"Response too large\"}";
+  // Full buffer, not 1024: 16 peers × ~260 B of rows (+linkRssi as of Phase 0)
+  // plus unpaired/retry lists overflowed the old cap on larger meshes.
+  size_t len = serializeJson(doc, getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE);
+  if (len >= GLOBAL_DEBUG_BUFFER_SIZE) return "{\"error\":\"Response too large\"}";
 
   return getDebugBuffer();
 }
@@ -15732,6 +15865,7 @@ extern const CommandEntry espNowCommands[] = {
   { "espnowresetstats", "Reset ESP-NOW statistics counters.", true, cmd_espnow_resetstats },
   { "espnowsaturation", "Show ESP-NOW link saturation: frames/sec, stream-queue depth, drops, ACK RTT (rolling 30s).", false, cmd_espnow_saturation },
   { "espnowsaturationreset", "Clear the saturation rolling window (use before a stress test).", false, cmd_espnow_saturationreset },
+  { "espnowrelayblock", "DIAGNOSTIC: drop ALL inbound ESP-NOW frames from one MAC (bench stand-in for an out-of-range peer; relay HW testing). RAM-only - reboot clears it.", true, cmd_espnow_relayblock, "Usage: espnowrelayblock <mac|clear|status>\n       Drops frames at the RX drain before any parsing - heartbeats too, so the peer goes offline within ~30s, like real RF loss." },
 
   // ---- ESP-NOW Cryptographic Identity (Phase 3.0/3.3) ----
   { "espnowidentity", "Show long-term Ed25519 identity (MAC, pub key, createdAtSec, regenCount).", false, cmd_espnow_identity },

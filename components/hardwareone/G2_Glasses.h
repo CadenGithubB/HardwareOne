@@ -218,6 +218,46 @@ bool g2WaitForBothConnected(uint32_t timeoutMs);
 //                existing temple link to supervision-timeout (rsn=0x8).
 int g2SetAllTemplesConnPriority(bool high);
 
+// Connection-priority arbiter. HIGH is the steady state; callers that need the
+// radio to breathe REQUEST BALANCED and release when done. Refcounted, so
+// overlapping requesters compose and whoever leaves first does not drag the
+// links back to HIGH under someone who still needs them down.
+//
+// Prefer these over g2SetAllTemplesConnPriority(). `who` is a short tag for the
+// log line only. Safe to call from any core (portMUX inside).
+//
+//   Usage:  g2ConnPriRequestBalanced("ring-connect");
+//           ... work ...
+//           g2ConnPriReleaseBalanced("ring-connect");
+//   or wrap in an RAII guard (see GlassesPriorityGuard in G2_Ring.cpp).
+void g2ConnPriRequestBalanced(const char* who);
+void g2ConnPriReleaseBalanced(const char* who);
+// Ask for the fast connection interval for the duration of something that
+// genuinely needs the throughput (image bursts, streaming). Refcounted.
+// Releasing asserts NOTHING — the glasses renegotiate to their own preference,
+// and pinning them fast costs ~35x their mandatory radio wakeups because our
+// requests carry latency=0 and theirs carry latency=4. Do not acquire this for
+// menus, text or telemetry.
+void g2ConnPriRequestFast(const char* who);
+void g2ConnPriReleaseFast(const char* who);
+int  g2ConnPriFastDepth();
+
+// RAII: hold the fast interval for a scope. Nesting is FREE — the refcount
+// means an inner guard inside an outer one costs no radio traffic at all, so
+// it is safe to wrap both a whole probe and each individual push within it.
+struct G2FastLinkGuard {
+  explicit G2FastLinkGuard(const char* who) : m_who(who) { g2ConnPriRequestFast(who); }
+  ~G2FastLinkGuard() { g2ConnPriReleaseFast(m_who); }
+  G2FastLinkGuard(const G2FastLinkGuard&) = delete;
+  G2FastLinkGuard& operator=(const G2FastLinkGuard&) = delete;
+ private:
+  const char* m_who;
+};
+int  g2ConnPriBalancedDepth();
+// Re-assert the arbiter's decision on a newly connected temple, which comes up
+// at HIGH regardless of what the arbiter currently wants.
+void g2ConnPriReapply();
+
 // Fill `out` with the 6-byte BLE address of the right (or left) temple in
 // natural high-to-low order (matching the colon-separated string form, e.g.
 // "c8:8d:65:00:97:69" → {0xC8,0x8D,0x65,0x00,0x97,0x69}). Returns true if
@@ -1077,6 +1117,24 @@ const char* g2ProbeImageQ29Bmp2bppSolo();
 // Isolates small-dim sustained refresh vs full-tile BLE cost.
 const char* g2ProbeImageQ20LiveTile96();
 
+// Q31 / Q31b — can an image CONTAINER be repositioned? (Tests → Image →
+// Motion.) Both sweep a 64×64 container rightwards in 64 px steps with a
+// 32×32 block drawn inside it, so the operator can see whether the
+// CONTAINER moved or only its pixels changed.
+//
+// Q31 sends Cmd=7 REBUILD with a fresh ImageObject X/Y. Untested territory:
+// docs/G2_PROTOCOL.md:1665 calls REBUILD the geometry-change command, but the
+// note on g2BuildRebuildList says the firmware ignores geom changes on that
+// path, and REBUILD-text fails outright on this firmware. RISK: a bad image
+// REBUILD may wedge the EvenCore plugin task (docs/G2_PROTOCOL.md:1813) —
+// recovery is a BLE reconnect. Run Q31b first.
+//
+// Q31b re-CREATEs at the new X (SHUTDOWN+CREATE, known-good) and reports
+// ms/step — the number that decides whether position-animation is viable at
+// all, independent of how Q31 turns out.
+const char* g2ProbeImageQ31RebuildMove();
+const char* g2ProbeImageQ31bRecreateMove();
+
 // Probes Q22/Q23 — same live bar pattern as Q20 at 32×32 and 64×64
 // (Animated Icons test menu). Cadence `g2liverate`.
 const char* g2ProbeImageQ22LiveTile32();
@@ -1230,6 +1288,8 @@ inline const char* g2ProbeImageQ22LiveTile32()    { return "G2 disabled"; }
 inline const char* g2ProbeImageQ23LiveTile64()    { return "G2 disabled"; }
 inline const char* g2ProbeImageQ26LiveTile124()  { return "G2 disabled"; }
 inline const char* g2ProbeImageQ27LiveTile144()  { return "G2 disabled"; }
+inline const char* g2ProbeImageQ31RebuildMove()  { return "G2 disabled"; }
+inline const char* g2ProbeImageQ31bRecreateMove() { return "G2 disabled"; }
 inline void        g2ProbeImageQ25SetPackPath(const char*) {}
 inline const char* g2ProbeImageQ25SdFrameAnimation() { return "G2 disabled"; }
 inline const char* g2ProbeImageQ28MixedImageTextLive() { return "G2 disabled"; }

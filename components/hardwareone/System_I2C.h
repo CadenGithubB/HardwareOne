@@ -334,24 +334,31 @@ inline int getQueueDepth() {
 }
 
 // Health functions
+//
+// These are keyed on address alone — every call site passes a compile-time
+// I2C_ADDR_* constant and has no notion of which bus its sensor landed on. So
+// they resolve through getDeviceAnyBus() rather than getDevice(), whose bus
+// parameter defaults to 0: with the default, a sensor registered on bus 1
+// returned nullptr here and every health check silently degraded to a no-op
+// (i2cShouldAutoDisable in particular could never fire on the secondary bus).
 inline bool i2cDeviceIsDegraded(uint8_t address) {
   I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
   if (!mgr) return false;
-  I2CDevice* dev = mgr->getDevice(address);
+  I2CDevice* dev = mgr->getDeviceAnyBus(address);
   return dev ? dev->isDegraded() : false;
 }
 
 inline void i2cDeviceSuccess(uint8_t address) {
   I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
   if (!mgr) return;
-  I2CDevice* dev = mgr->getDevice(address);
+  I2CDevice* dev = mgr->getDeviceAnyBus(address);
   if (dev) dev->recordSuccess();
 }
 
 inline void i2cDeviceError(uint8_t address) {
   I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
   if (!mgr) return;
-  I2CDevice* dev = mgr->getDevice(address);
+  I2CDevice* dev = mgr->getDeviceAnyBus(address);
   if (dev) dev->recordError(I2CErrorType::NACK, 0x02);
 }
 
@@ -360,7 +367,7 @@ inline void i2cDeviceError(uint8_t address) {
 inline bool i2cShouldAutoDisable(uint8_t address, uint8_t maxConsecutiveErrors = 5) {
   I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
   if (!mgr) return false;
-  I2CDevice* dev = mgr->getDevice(address);
+  I2CDevice* dev = mgr->getDeviceAnyBus(address);
   if (!dev) return false;
   return dev->getHealth().consecutiveErrors >= maxConsecutiveErrors;
 }
@@ -369,14 +376,15 @@ inline bool i2cShouldAutoDisable(uint8_t address, uint8_t maxConsecutiveErrors =
 inline uint8_t i2cGetConsecutiveErrors(uint8_t address) {
   I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
   if (!mgr) return 0;
-  I2CDevice* dev = mgr->getDevice(address);
+  I2CDevice* dev = mgr->getDeviceAnyBus(address);
   return dev ? dev->getHealth().consecutiveErrors : 0;
 }
 
-inline bool i2cBusRecovery() {
+// Recover a specific bus, or bus 0 when the caller has no bus context.
+inline bool i2cBusRecovery(uint8_t busIdx = 0) {
   I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
   if (!mgr) return false;
-  mgr->performBusRecovery();
+  mgr->performBusRecovery(busIdx);
   return true;
 }
 

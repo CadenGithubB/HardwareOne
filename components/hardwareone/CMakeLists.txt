@@ -224,6 +224,7 @@ set(hardwareone_srcs
         System_SetupWizard.cpp
         System_FeatureRegistry.cpp
         System_BootState.cpp
+        System_TimeAnchors.cpp
         System_Utils.cpp
         System_TaskUtils.cpp
         System_User.cpp

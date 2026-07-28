@@ -228,6 +228,58 @@ struct G2Temple {
   // heartbeat must not step on a text rebuild in progress.
   SemaphoreHandle_t            writeMutex;
 
+  // Last conn-params we successfully ASKED the controller for (1.25 ms ticks;
+  // 0 = never set / invalidated by a disconnect). Not the negotiated value —
+  // the peer may counter-offer, and the result only shows up in
+  // ESP_GAP_BLE_UPDATE_CONN_PARAMS_EVT, which nothing latches today.
+  //
+  // Purpose is strictly de-duplication: setTempleConnParams() skips the GAP
+  // call when the request matches what we last asked for. Without this, every
+  // image push re-sent an identical update (ImgPushRadioGuard runs per push),
+  // and the stack answered with "L2CA_UpdateBleConnParams connection parameter
+  // already set" — one wasted L2CAP transaction per call, on a path that can
+  // only have one conn-update in flight at a time.
+  uint16_t                     connMinInt;
+  uint16_t                     connMaxInt;
+  // Interval the link is ACTUALLY running at, from
+  // ESP_GAP_BLE_UPDATE_CONN_PARAMS_EVT (0 = not yet observed). Treat
+  // connMinInt/connMaxInt as "what we asked for" and this as "what is".
+  //
+  // Note this is meaningful on BOTH the success and failure paths: when the
+  // update is rejected the event reports the link's unchanged current value,
+  // which is exactly what we want to pace against.
+  uint16_t                     connAppliedInt;
+  // Latency and supervision timeout the link is actually running at. Needed —
+  // not just nice to have — because bluedroid SHORT-CIRCUITS a conn-params
+  // request when max_int/latency/timeout all already match the live values
+  // (L2CA_UpdateBleConnParams, l2c_ble.c:164-186): it logs "connection
+  // parameter already set", fires our callback SYNCHRONOUSLY with status=0,
+  // and never builds an HCI command. Without these two fields that no-op is
+  // indistinguishable from a genuine acceptance.
+  uint16_t                     connAppliedLatency;
+  uint16_t                     connAppliedTimeout;
+  // The range carried BY THE EVENT — not the same thing as connMinInt/Max,
+  // which is what we last asked for. This is how a self-initiated update is
+  // told apart from a peer-initiated one; see connEvtWho.
+  uint16_t                     connEvtMinInt;
+  uint16_t                     connEvtMaxInt;
+  // status from the last conn-params event. esp_bt_status_t, NOT uint8_t:
+  // ESP_BT_STATUS_BASE_FOR_HCI_ERR is 0x0100, so any raw-HCI passthrough
+  // status truncates into an unrelated low-numbered code in a byte.
+  uint16_t                     connLastStatus;
+  // Who asked for the last conn-params change. See connEvtClassify().
+  uint8_t                      connEvtWho;
+  // Split counters. A prober must wait for OUR request's outcome specifically:
+  // the temples renegotiate themselves when idle and those peer-initiated
+  // updates are always accepted, so a single undifferentiated counter lets an
+  // unrelated renegotiation satisfy the wait and be reported as our result.
+  uint32_t                     connEvtSeqSelf;
+  uint32_t                     connEvtSeqPeer;
+  // Peer address captured at connect. The GAP callback uses this to attribute an
+  // event to a temple WITHOUT dereferencing t.client, which templeReset() may be
+  // deleting concurrently on another core.
+  uint8_t                      peerBda[6];
+
   // Monotonic counters.
   uint32_t                     packetsSent;
   uint32_t                     packetsReceived;
@@ -994,16 +1046,56 @@ static bool sendEnvelope(G2Temple& t, const uint8_t* data, size_t len);
 static bool sendToBoth(const uint8_t* data, size_t len);
 static void handleNotify(G2Temple& t, const uint8_t* data, size_t len);
 static esp_err_t setTempleConnParams(G2Temple& t, uint16_t min_int, uint16_t max_int);
+static inline void templeForgetConnParams(G2Temple& t);
+static void g2GapEventHandler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t* param);
+// True when the link is too slow to sustain the fast image pacing. Judged from
+// the MEASURED connection interval, never from ring presence — see the comment
+// on pickImgEnvelopeGapMs. `target` may be null (uses the slowest temple).
+// Defined late, alongside the interval constants it compares against.
+static bool g2LinkIsSlow(const G2Temple* target);
 
 // Connection-priority intervals (units: 1.25 ms per tick).
 //   HIGH     ≈ 11.25-15 ms  → max throughput, default.
 //   BALANCED ≈ 40-60 ms     → 3-4× more BLE radio idle time, used during
 //                             ring connect attempts (see GlassesPriorityGuard
 //                             in G2_Ring.cpp + g2SetAllTemplesConnPriority).
-#define G2_CONN_INT_HIGH_MIN     9
+// FAST = 12-12 (15.15 ms), MEASURED not guessed, 2026-07-27 with all three
+// links up (both temples + R1 ring):
+//   min=9  REFUSED by our own controller (HCI 0x12 on opcode 0x2013)
+//   min=12 ACCEPTED, landed 12
+//   min=16 ACCEPTED, landed 16
+// Same ceiling of 12 in rows 1 and 2, opposite outcomes — admission is gated
+// on the FLOOR and nothing else, and the boundary sits in 9 < min <= 12.
+//
+// Min == max deliberately: this controller grants the range's CEILING, so
+// asking 12-24 lands at 24 (30.30 ms), not 12. Verified — `g2connpri 16 24`
+// landed 24, `16 16` landed 16, `12 12` landed 12.
+#define G2_CONN_INT_HIGH_MIN     12
 #define G2_CONN_INT_HIGH_MAX     12
 #define G2_CONN_INT_BALANCED_MIN 32
 #define G2_CONN_INT_BALANCED_MAX 48
+
+// Runtime-settable HIGH range, so the controller's admission boundary can be
+// MEASURED rather than guessed at. Defaults to the #defines above.
+//
+// Why this is a probe and not just a tuned constant: HIGH (9-12) is accepted
+// with one link up and refused with two or three — the refusal is HCI 0x12 on
+// opcode 0x2013, i.e. our own controller declining to schedule it, and the
+// command never reaches the glasses. The suspected mechanism is CE-length
+// reservation: CONFIG_BT_MULTI_CONNECTION_ENBALE=y makes bluedroid hardcode
+// min_ce_len = max_ce_len = BLE_CE_LEN_MIN = 5 (3.125 ms) into every
+// connection update (bt_target.h:523, l2c_ble.c:570/598), so each link
+// reserves 3.125 ms of guaranteed airtime. At min_int=9 (11.25 ms) that is 28%
+// occupancy for one link, 56% for two, 83% for three; BALANCED at min_int=32
+// (40 ms) is 23% for three. Every observation fits — but the S3 controller is
+// a blob (libbtdm_app.a) so the rule cannot be read, only probed.
+//
+// The open question this exists to answer: is admission gated on min_int (in
+// which case only raising the FLOOR helps) or on the range as a whole (in
+// which case widening the CEILING is enough)? Sweep with `g2connpri` and read
+// the status back.
+static volatile uint16_t gConnIntHighMin = G2_CONN_INT_HIGH_MIN;
+static volatile uint16_t gConnIntHighMax = G2_CONN_INT_HIGH_MAX;
 static void handleEnvelope(G2Temple& t, const G2EnvelopeView& env);
 static void heartbeatTimerCallback(TimerHandle_t xTimer);
 static void startHeartbeatTimer();
@@ -1276,6 +1368,9 @@ public:
     // to it tell us which op it took issue with.
     if (wasConnected) g2RingDump("BLE disconnect");
     temple->connected = false;
+    // Unexpected drop — auto-reconnect will rebuild this link, and its initial
+    // HIGH request must not be skipped as already-applied.
+    templeForgetConnParams(*temple);
     temple->writeChar = nullptr;
     temple->notifyChar = nullptr;
     temple->audioNotifyChar = nullptr;
@@ -4184,6 +4279,7 @@ static void oledLoginUserCommit(const char* text) {
   cfg.maxLen   = 32;
   cfg.onCommit = oledLoginPassCommit;
   cfg.onCancel = oledLoginCancel;
+  cfg.isSecret = true;   // login password — keep out of debug logs
   if (!g2BeginTextEntry(cfg)) g2ShowConfigMenu();
 }
 
@@ -7420,7 +7516,9 @@ static bool sendEnvelopeNoMutex(G2Temple& t, const uint8_t* data, size_t len) {
       // bleCentralTx + writeMutex held → heartbeats stuck on
       // "central TX busy" until reboot. Abort, release locks, let the
       // caller retry the whole push on a later tick after a drain.
-      const uint32_t cooldownMs = g2RingIsConnected()
+      // Drain longer on a slow link — same rule as the envelope gap, keyed off
+      // the measured interval rather than ring presence.
+      const uint32_t cooldownMs = g2LinkIsSlow(&t)
                                       ? G2_WRITE_RC_RETRY_COOLDOWN_RING_MS
                                       : G2_WRITE_RC_RETRY_COOLDOWN_MS;
       DEBUG_G2F("[G2-%c] writeValue rc=-1 at offset %u/%u — abort burst, "
@@ -8236,6 +8334,7 @@ static void templeReset(G2Temple& t) {
   t.audioNotifyChar = nullptr;
   t.connected = false;
   t.containerReady = false;
+  templeForgetConnParams(t);
   // deinit wipes both temples, which invariably drops hijack state too.
   // Fire HijackExit so the FSM ends in Idle; the apply path also clears
   // the lens-mirror container fields.
@@ -8317,20 +8416,33 @@ static bool connectTemple(G2Temple& t) {
   DEBUG_G2F("[G2-%c] Requested MTU %u, got %u",
             t.side, (unsigned)MTU_TARGET, (unsigned)t.mtu);
 
-  // Request a tight connection interval — equivalent to Android's
-  // BluetoothGatt.CONNECTION_PRIORITY_HIGH that faceclaw uses. Default
-  // GAP negotiation yields ~30–50 ms; HIGH brings it to ~11.25–15 ms,
-  // tripling connection events available for TX (matters during
-  // multi-fragment image bursts). Peer may counter-offer; negotiated
-  // values land in ESP_GAP_BLE_UPDATE_CONN_PARAMS_EVT.
+  // Snapshot the peer MAC for the GAP callback to match on. Must be set BEFORE
+  // the conn-params request below, or the resulting event arrives unattributed
+  // and its accept/reject verdict is lost.
+  memcpy(t.peerBda, t.client->getPeerAddress().getNative(), sizeof(t.peerBda));
+
+  // NO unconditional conn-priority request here any more.
   //
-  // We can also flip back to BALANCED dynamically — see
-  // g2SetAllTemplesConnPriority() in this file. Used during ring
-  // connect attempts to free up BLE-controller radio time.
-  esp_err_t ce = setTempleConnParams(t, G2_CONN_INT_HIGH_MIN, G2_CONN_INT_HIGH_MAX);
-  DEBUG_G2F("[G2-%c] Requesting HIGH conn priority "
-            "(min=11.25ms max=15ms latency=0 timeout=5s) → err=%d",
-            t.side, (int)ce);
+  // This used to fire a HIGH request at every link-up. Two measurements from
+  // 2026-07-27 killed it:
+  //
+  //  1. It is refused whenever a second link already exists. The G2 pair is by
+  //     definition two links, so on the RIGHT temple it ALWAYS failed
+  //     (status=19, HCI 0x12) — a guaranteed-to-fail round trip on every
+  //     connect, whose only visible effect was a scary log line.
+  //  2. It was not buying the interval anyway. At boot the right temple was
+  //     ALREADY at int=12 from connection establishment, with our request
+  //     refused. Establishment lands where we wanted to be.
+  //
+  // The interval is now requested only when something needs the throughput —
+  // see g2ConnPriRequestFast / connPriApply — and otherwise left to the
+  // glasses' own power state machine, which idles them to 105 ms with slave
+  // latency 4 and is the reason their battery lasts.
+  //
+  // Still reapply the arbiter: a link that comes up mid-way through someone's
+  // BALANCED (or FAST) window must join it rather than sit on its own. No-op
+  // when nothing is holding, which is the common case.
+  g2ConnPriReapply();
 
   DEBUG_G2F("[G2-%c] Looking up service %s", t.side, SERVICE_UUID);
   BLERemoteService* svc = t.client->getService(BLEUUID(SERVICE_UUID));
@@ -8417,6 +8529,7 @@ static bool connectTemple(G2Temple& t) {
     DEBUG_G2F("[G2-%c] Prelude failed; disconnecting", t.side);
     t.client->disconnect();
     t.connected = false;
+    templeForgetConnParams(t);
     return false;
   }
 
@@ -8444,6 +8557,7 @@ static void disconnectTemple(G2Temple& t) {
   if (n) sendEnvelope(t, buf, n);
   if (t.client && t.client->isConnected()) t.client->disconnect();
   t.connected = false;
+  templeForgetConnParams(t);
   t.containerReady = false;
   // Explicit-disconnect path clears the hijack regardless of which arm —
   // either way, the right-side container we rely on is gone. FSM-side:
@@ -8516,6 +8630,16 @@ bool initG2Client() {
 
   BLEDevice::init("HardwareOne");
   BLEDevice::setMTU(MTU_TARGET);
+  // Make the APPLIED connection interval observable. Until now nothing in the
+  // firmware read `conn_int` — esp_ble_gap_update_conn_params() only REQUESTS,
+  // the peer may counter-offer, and the result was discarded. Every claim about
+  // HIGH vs BALANCED was therefore unverified.
+  //
+  // NB: this must hook Arduino's BLEDevice, not BLE_IDF.cpp. That file has a
+  // GAP handler that logs this event, but its bleIdfInit() is never called —
+  // Arduino's stack owns the single esp_ble_gap_register_callback slot. Arduino
+  // does not handle UPDATE_CONN_PARAMS itself, so it falls through to here.
+  BLEDevice::setCustomGapHandler(g2GapEventHandler);
   gScan = BLEDevice::getScan();
   if (!gScan) {
     free(gG2State); gG2State = nullptr;
@@ -8982,39 +9106,401 @@ bool g2LeftConnected() {
 // (G2_CONN_INT_* defined near the top of this file, alongside the forward
 // decl of setTempleConnParams, so the connectTemple call path can use them.)
 
+// Custom GAP handler installed on Arduino's BLEDevice (see g2InitClient). Its
+// only job today is to report the interval the peer ACTUALLY applied, so the
+// HIGH/BALANCED policy can be reasoned about from measurement rather than from
+// what we requested. conn_int is in 1.25 ms units, same as the request.
+//
+// Who initiated the conn-params change this event reports.
+enum : uint8_t {
+  CONN_EVT_SELF = 0,       // the range we last asked for
+  CONN_EVT_PEER_L2CAP,     // temple asked via an L2CAP Conn Param Update Request
+  CONN_EVT_PEER_LL,        // controller auto-handled an LL request; host never armed
+};
+
+// Classify a conn-params event by the range IT carries.
+//
+// l2c_send_update_conn_params_cb (l2c_ble.c:1410-1430) sets min=max=0 when the
+// host was never armed for this update — i.e. the controller handled a peer LL
+// request by itself. Otherwise it echoes updating_conn_min/max_interval.
+//
+// The trap: those echoed values are NOT necessarily ours. When a temple asks
+// via L2CAP, our own host services the request — it copies the PEER's numbers
+// into waiting_update_conn_* and then into updating_conn_* (l2c_ble.c:770-777,
+// 605-607) — so the event comes back carrying non-zero min/max that belong to
+// the temple. A naive "non-zero means self" test would misattribute exactly the
+// idle renegotiation this classifier exists to catch. Compare against what we
+// actually asked for instead.
+static uint8_t connEvtClassify(const G2Temple& t, uint16_t evMin, uint16_t evMax) {
+  if (evMin == 0 && evMax == 0) return CONN_EVT_PEER_LL;
+  if (evMin == t.connMinInt && evMax == t.connMaxInt) return CONN_EVT_SELF;
+  return CONN_EVT_PEER_L2CAP;
+}
+
+static const char* connEvtWhoName(uint8_t who) {
+  switch (who) {
+    case CONN_EVT_SELF:       return "self";
+    case CONN_EVT_PEER_L2CAP: return "peer(L2CAP)";
+    default:                  return "peer(LL)";
+  }
+}
+
+// Decode an esp_bt_status_t from a conn-params event. These are five DIFFERENT
+// problems that were previously all rendered as "controller rejected".
+static const char* connStatusName(uint16_t st) {
+  switch (st) {
+    case 0:  return "OK";
+    // HCI 0x0C ILLEGAL_COMMAND. Bluedroid emits this from
+    // L2CA_UpdateBleConnParams when L2C_BLE_UPDATE_PARAM_FULL is set: two
+    // conn-param requests in flight on one link. OUR bug, not the radio's.
+    case 13: return "HOST-BUSY(2 requests in flight)";
+    // HCI 0x3B UNACCEPT_CONN_INTERVAL — went on air and the GLASSES said no.
+    case 14: return "PEER-REFUSED(on air)";
+    // Arrives from L2CAP_CMD_BLE_UPDATE_RSP, a path only taken when we are not
+    // master. As a central this should never appear; if it does, something is
+    // wrong with our assumptions about the link role.
+    case 15: return "PARAM-OUT-OF-RANGE(peripheral path?!)";
+    // The L2CAP conn-params timer expired: we asked, nothing ever came back.
+    case 16: return "TIMEOUT(no answer)";
+    // HCI 0x12 Invalid HCI Command Parameters on opcode 0x2013 — OUR OWN
+    // controller declining to schedule it. Never reaches the glasses.
+    case 19: return "CTRL-REFUSED(never sent)";
+    default: return "?";
+  }
+}
+
+// Keep this cheap and non-blocking — it runs on the Bluedroid callback task.
+static void g2GapEventHandler(esp_gap_ble_cb_event_t event,
+                              esp_ble_gap_cb_param_t* param) {
+  if (event != ESP_GAP_BLE_UPDATE_CONN_PARAMS_EVT || !param) return;
+  const auto& p = param->update_conn_params;
+
+  // Attribute to a temple by the MAC captured at connect — never by
+  // dereferencing t.client, which can be deleted concurrently.
+  G2Temple* t = nullptr;
+  if (memcmp(p.bda, gL.peerBda, 6) == 0)      t = &gL;
+  else if (memcmp(p.bda, gR.peerBda, 6) == 0) t = &gR;
+  const char side = t ? t->side : '?';
+
+  // Classify BEFORE latching — connEvtClassify compares the event's range
+  // against the request still sitting in connMinInt/connMaxInt.
+  const uint8_t who = t ? connEvtClassify(*t, p.min_int, p.max_int)
+                        : (uint8_t)CONN_EVT_PEER_LL;
+
+  DEBUG_G2F("[G2-%c] Conn params APPLIED: int=%u (%u.%02u ms) latency=%u "
+            "timeout=%u status=%u %s | by=%s evt-range=%u-%u",
+            side, (unsigned)p.conn_int,
+            (unsigned)(p.conn_int * 5 / 4), (unsigned)((p.conn_int * 125 / 100) % 100),
+            (unsigned)p.latency, (unsigned)p.timeout,
+            (unsigned)p.status, connStatusName((uint16_t)p.status),
+            connEvtWhoName(who),
+            (unsigned)p.min_int, (unsigned)p.max_int);
+  if (!t) return;
+  t->connAppliedInt     = p.conn_int;
+  t->connAppliedLatency = p.latency;
+  t->connAppliedTimeout = p.timeout;
+  t->connEvtMinInt      = p.min_int;
+  t->connEvtMaxInt      = p.max_int;
+  t->connLastStatus     = (uint16_t)p.status;
+  t->connEvtWho         = who;
+  if (who == CONN_EVT_SELF) t->connEvtSeqSelf++;
+  else                      t->connEvtSeqPeer++;
+
+  // THE de-dup correctness rule. esp_ble_gap_update_conn_params() returning
+  // ESP_OK only means "queued for delivery" — whether the peer ACCEPTED it
+  // arrives here, asynchronously. If we leave the cache believing a rejected
+  // request took effect, de-dup suppresses every future attempt to fix it and
+  // the link is stuck at the wrong interval for the rest of the session.
+  //
+  // Observed 2026-07-26: HIGH restore after a ring-connect window came back
+  // status=19 with the link still at 48 (60 ms). The cache said 9/12, so
+  // nothing ever retried, and a later image burst over-submitted into a 60 ms
+  // link and hit rc=-1.
+  //
+  // Two cases invalidate:
+  //   status != 0            → peer/controller refused outright
+  //   applied outside range  → peer counter-offered, or renegotiated on its own
+  const bool refused = (p.status != 0);
+  const bool outOfRange = (t->connMinInt != 0) &&
+                          (p.conn_int < t->connMinInt || p.conn_int > t->connMaxInt);
+  if (refused || outOfRange) {
+    // status != 0 means the LE Connection Update never went on air — our own
+    // controller rejected the command (look for the matching
+    // "btu_hcif_hdl_command_status,opcode:0x2013,status:0x12" warning). The
+    // reported interval is therefore the link's UNCHANGED current value, which
+    // is exactly what connAppliedInt wants, so say "unchanged" rather than
+    // "got" — the old wording read as a contradiction when the current
+    // interval happened to already sit inside the requested range.
+    DEBUG_G2F("[G2-%c] Conn params NOT applied (%s, by=%s; asked %u-%u, link %s at %u) "
+              "— clearing de-dup cache so the next request is re-sent",
+              side,
+              refused ? connStatusName((uint16_t)p.status) : "peer renegotiated",
+              connEvtWhoName(who),
+              (unsigned)t->connMinInt, (unsigned)t->connMaxInt,
+              refused ? "unchanged" : "now",
+              (unsigned)p.conn_int);
+    t->connMinInt = 0;
+    t->connMaxInt = 0;
+  }
+}
+
+// Drop the conn-params de-dup cache. MUST be called on every path that takes a
+// temple out of the connected state, not just templeReset() — a reconnect that
+// inherits a stale cache would have its initial HIGH request skipped as
+// "already applied" and silently run at the peer-negotiated default (~30-50 ms)
+// forever. There are four such paths (onDisconnect callback, prelude failure,
+// disconnectTemple, templeReset); grep this function name to find them.
+static inline void templeForgetConnParams(G2Temple& t) {
+  t.connMinInt = 0;
+  t.connMaxInt = 0;
+  t.connAppliedInt = 0;
+  // Clear the whole observed set, not just the interval — a stale latency or
+  // timeout would make the next connection's no-op predicate (see
+  // setTempleConnParams) fire against a link that no longer exists.
+  t.connAppliedLatency = 0;
+  t.connAppliedTimeout = 0;
+  t.connEvtMinInt = 0;
+  t.connEvtMaxInt = 0;
+  t.connLastStatus = 0;
+  t.connEvtWho = CONN_EVT_PEER_LL;
+  memset(t.peerBda, 0, sizeof(t.peerBda));
+}
+
+// Supervision timeout and latency we always request. Named because the no-op
+// predicate below has to compare against exactly these.
+#define G2_CONN_LATENCY_REQ   0
+#define G2_CONN_TIMEOUT_REQ   500   // × 10 ms = 5 s
+
+// Will bluedroid SHORT-CIRCUIT this request instead of sending it?
+//
+// L2CA_UpdateBleConnParams (l2c_ble.c:164-186) compares the request against the
+// live values and, when max_int / latency / timeout ALL already match, sets
+// status = HCI_SUCCESS, logs "connection parameter already set", invokes our
+// GAP callback SYNCHRONOUSLY and returns — no HCI command is ever built.
+//
+// The result is a status=0 event that looks exactly like an acceptance. This is
+// the difference between "the controller granted 24 ticks" and "nothing
+// happened and the link was already at 24", and it silently contaminated the
+// admission table until 2026-07-27. Callers use this to say so up front rather
+// than reporting a fake acceptance.
+//
+// Returns false when the link's current params have never been observed — we
+// cannot predict a short-circuit we have no data for.
+static bool connReqWouldNoOp(const G2Temple& t, uint16_t max_int) {
+  if (t.connAppliedInt == 0) return false;
+  return max_int == t.connAppliedInt &&
+         t.connAppliedLatency == G2_CONN_LATENCY_REQ &&
+         t.connAppliedTimeout == G2_CONN_TIMEOUT_REQ;
+}
+
 // Internal helper: send CONN_PARAMS update for a temple's peer. Caller is
 // responsible for ensuring the BLE link exists (i.e. t.client is valid).
+//
+// De-duplicating: returns ESP_ERR_INVALID_STATE *without touching the radio*
+// when the request matches t.connMinInt/connMaxInt (what we last asked for).
+// Callers distinguish three outcomes:
+//     ESP_OK                 — update issued
+//     ESP_ERR_INVALID_STATE  — already at these params, nothing sent
+//     anything else          — GAP rejected it
+// The cache is invalidated in templeReset() so a reconnect always re-asks.
 static esp_err_t setTempleConnParams(G2Temple& t, uint16_t min_int, uint16_t max_int) {
   if (!t.client) return ESP_FAIL;
+  if (t.connMinInt == min_int && t.connMaxInt == max_int) {
+    return ESP_ERR_INVALID_STATE;
+  }
   esp_ble_conn_update_params_t p = {};
   esp_bd_addr_t peer;
   memcpy(peer, t.client->getPeerAddress().getNative(), sizeof(esp_bd_addr_t));
   memcpy(p.bda, peer, sizeof(esp_bd_addr_t));
   p.min_int = min_int;
   p.max_int = max_int;
-  p.latency = 0;
-  p.timeout = 500;   // 500 × 10 ms = 5 s supervision timeout
-  return esp_ble_gap_update_conn_params(&p);
+  p.latency = G2_CONN_LATENCY_REQ;
+  p.timeout = G2_CONN_TIMEOUT_REQ;
+  // Publish the in-flight request BEFORE firing it, not after.
+  //
+  // The GAP callback runs on BTC_TASK and, when the controller rejects the
+  // command outright, fires within microseconds — comfortably faster than this
+  // task can reach the line after esp_ble_gap_update_conn_params(). Writing the
+  // cache afterwards let the handler observe the PREVIOUS range (or, from a
+  // g2connpri sweep, a freshly zeroed one) and clear it, only for our own
+  // post-call assignment to immediately overwrite that with the very range the
+  // controller had just refused. Net effect: a REFUSED request cached as
+  // "applied", so every later attempt was de-dup-skipped and the link stayed
+  // stuck — precisely the failure the invalidation exists to prevent.
+  //
+  // Observed 2026-07-27: `g2connpri 9 24` logged "asked 0-0", proving the
+  // handler ran before the assignment.
+  const uint16_t prevMin = t.connMinInt, prevMax = t.connMaxInt;
+  t.connMinInt = min_int;
+  t.connMaxInt = max_int;
+  const esp_err_t rc = esp_ble_gap_update_conn_params(&p);
+  if (rc != ESP_OK) {
+    // Nothing went out, so no event will arrive to invalidate this. Restore, or
+    // the next attempt would be de-dup-skipped against a request never sent.
+    t.connMinInt = prevMin;
+    t.connMaxInt = prevMax;
+  }
+  return rc;
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Connection-priority arbiter
+// ─────────────────────────────────────────────────────────────────────
+// HIGH is the steady state (requested once per temple at link-up). Anything
+// that needs the radio to breathe REQUESTS BALANCED rather than setting it, and
+// the links only return to HIGH when the last requester has released.
+//
+// Why a refcount and not two independent RAII guards setting absolute values:
+// with absolute setters, an image push that started first and finished first
+// would yank both links back to HIGH in the middle of a ring-connect window
+// that still needed BALANCED — silently defeating the guard that was protecting
+// it. Depth counting makes nesting order irrelevant.
+//
+// Cross-core: requesters run on g2_session_w / g2_img_probe / g2_ble_connect
+// (APP_CORE) and cmd_exec_task (PRO_CORE), so the depth needs a portMUX, not a
+// bare volatile. Modelled on System_PollPause, the existing house arbiter.
+static portMUX_TYPE sConnPriMux = portMUX_INITIALIZER_UNLOCKED;
+static volatile int sBalancedDepth = 0;
+static volatile int sFastDepth     = 0;
+
+// THE POLICY, and the reason it has an idle state that asserts nothing.
+//
+// Measured 2026-07-27: the temples run their own two-state power machine and
+// tell us both states outright —
+//     active   request 12-24, latency 0   (we saw them land 24 = 30.30 ms)
+//     idle     request 72-84, latency 4   (landed 84 = 105.05 ms)
+// Slave latency 4 lets them skip four of every five connection events. EVERY
+// request we send carries latency 0, so pinning them fast costs ~7x the event
+// rate AND removes that 5x skip — on the order of 35x more mandatory radio
+// wakeups, on a battery strapped to someone's head. The ESP32 barely notices
+// the same change; the asymmetry is the whole argument.
+//
+// So: assert a fast interval only while something genuinely needs the
+// throughput, and the rest of the time assert NOTHING and let their state
+// machine run. Releasing does not restore anything — measured twice, the
+// glasses pull the interval back themselves within a couple of minutes, so
+// there is nothing for us to do.
+//
+// Precedence: BALANCED outranks FAST. BALANCED exists to free radio time for a
+// ring connect, and a concurrent image push must not defeat it.
+static void connPriApply() {
+  if (sBalancedDepth > 0) {
+    g2SetAllTemplesConnPriority(false);   // BALANCED
+  } else if (sFastDepth > 0) {
+    g2SetAllTemplesConnPriority(true);    // FAST
+  }
+  // else: deliberately nothing. See above.
+}
+
+void g2ConnPriRequestBalanced(const char* who) {
+  portENTER_CRITICAL(&sConnPriMux);
+  const int depth = ++sBalancedDepth;
+  portEXIT_CRITICAL(&sConnPriMux);
+  if (depth == 1) {
+    DEBUG_G2F("[G2] conn-pri: BALANCED requested by %s (depth=1)",
+              who ? who : "?");
+    connPriApply();
+  } else {
+    DEBUG_G2F("[G2] conn-pri: %s joined BALANCED (depth=%d, already down)",
+              who ? who : "?", depth);
+  }
+}
+
+void g2ConnPriReleaseBalanced(const char* who) {
+  portENTER_CRITICAL(&sConnPriMux);
+  if (sBalancedDepth > 0) sBalancedDepth--;
+  const int depth = sBalancedDepth;
+  portEXIT_CRITICAL(&sConnPriMux);
+  if (depth == 0) {
+    DEBUG_G2F("[G2] conn-pri: %s released BALANCED (depth=0) — %s",
+              who ? who : "?",
+              sFastDepth > 0 ? "FAST still held, applying"
+                             : "asserting nothing, glasses own the interval");
+    connPriApply();
+  } else {
+    DEBUG_G2F("[G2] conn-pri: %s released but %d holder(s) remain — staying BALANCED",
+              who ? who : "?", depth);
+  }
+}
+
+// Ask for the fast interval, for the duration of something that actually needs
+// the throughput. Refcounted like BALANCED so nesting order is irrelevant, and
+// so two concurrent pushes cannot have the first one's release yank the
+// interval out from under the second.
+void g2ConnPriRequestFast(const char* who) {
+  portENTER_CRITICAL(&sConnPriMux);
+  const int depth = ++sFastDepth;
+  portEXIT_CRITICAL(&sConnPriMux);
+  if (depth == 1) {
+    DEBUG_G2F("[G2] conn-pri: FAST requested by %s (depth=1)", who ? who : "?");
+    connPriApply();
+  } else {
+    DEBUG_G2F("[G2] conn-pri: %s joined FAST (depth=%d, already fast)",
+              who ? who : "?", depth);
+  }
+}
+
+void g2ConnPriReleaseFast(const char* who) {
+  portENTER_CRITICAL(&sConnPriMux);
+  if (sFastDepth > 0) sFastDepth--;
+  const int depth = sFastDepth;
+  portEXIT_CRITICAL(&sConnPriMux);
+  if (depth == 0) {
+    // Note what we are NOT doing: no restore request. The glasses renegotiate
+    // to their own preference on their own schedule, and racing them there
+    // would just burn a connection-update round trip to land where they were
+    // going anyway.
+    DEBUG_G2F("[G2] conn-pri: %s released FAST (depth=0) — asserting nothing, "
+              "glasses will renegotiate to their own preference",
+              who ? who : "?");
+  } else {
+    DEBUG_G2F("[G2] conn-pri: %s released but %d FAST holder(s) remain",
+              who ? who : "?", depth);
+  }
+}
+
+int g2ConnPriBalancedDepth() { return sBalancedDepth; }
+int g2ConnPriFastDepth()     { return sFastDepth; }
+
+// Re-assert the arbiter's view on a freshly connected temple. connectTemple()
+// requests HIGH unconditionally at link-up; if something is holding BALANCED at
+// that moment the new link would otherwise be the odd one out.
+void g2ConnPriReapply() {
+  if (sBalancedDepth > 0 || sFastDepth > 0) connPriApply();
+}
+
+// Returns the number of temples whose priority ACTUALLY CHANGED. Links already
+// at the requested priority are skipped silently and are not counted. Prefer
+// the request/release pair above — call this directly only from connPriApply()
+// and the link-up path, which have no competing owner.
 int g2SetAllTemplesConnPriority(bool high) {
-  const uint16_t min_int = high ? G2_CONN_INT_HIGH_MIN : G2_CONN_INT_BALANCED_MIN;
-  const uint16_t max_int = high ? G2_CONN_INT_HIGH_MAX : G2_CONN_INT_BALANCED_MAX;
+  const uint16_t min_int = high ? gConnIntHighMin : G2_CONN_INT_BALANCED_MIN;
+  const uint16_t max_int = high ? gConnIntHighMax : G2_CONN_INT_BALANCED_MAX;
   const char* tag = high ? "HIGH" : "BALANCED";
   int count = 0;
-  if (gL.connected) {
-    if (setTempleConnParams(gL, min_int, max_int) == ESP_OK) {
-      DEBUG_G2F("[G2-L] Conn priority → %s (req %u-%u ms)",
-                tag, (unsigned)(min_int * 5 / 4), (unsigned)(max_int * 5 / 4));
+  int skipped = 0;
+  G2Temple* const arms[2] = { &gL, &gR };
+  for (G2Temple* t : arms) {
+    if (!t->connected) continue;
+    const esp_err_t rc = setTempleConnParams(*t, min_int, max_int);
+    if (rc == ESP_OK) {
+      DEBUG_G2F("[G2-%c] Conn priority → %s (req %u-%u ms)",
+                t->side, tag,
+                (unsigned)(min_int * 5 / 4), (unsigned)(max_int * 5 / 4));
       count++;
+    } else if (rc == ESP_ERR_INVALID_STATE) {
+      skipped++;   // already there — no radio traffic, no log line
+    } else {
+      DEBUG_G2F("[G2-%c] Conn priority → %s REJECTED (err=%d)",
+                t->side, tag, (int)rc);
     }
   }
-  if (gR.connected) {
-    if (setTempleConnParams(gR, min_int, max_int) == ESP_OK) {
-      DEBUG_G2F("[G2-R] Conn priority → %s (req %u-%u ms)",
-                tag, (unsigned)(min_int * 5 / 4), (unsigned)(max_int * 5 / 4));
-      count++;
-    }
+  // One line per no-op batch instead of two per-temple lines, and only when
+  // the g2 debug flag is on. Keeps the "nothing happened" case cheap to read
+  // in a log that is already dense during image bursts.
+  if (skipped && !count) {
+    DEBUG_G2F("[G2] Conn priority already %s on %d temple(s) — no update sent",
+              tag, skipped);
   }
   return count;
 }
@@ -14637,6 +15123,10 @@ static const char* cmd_g2streamres(const String& argsInput) {
 // playback speed doesn't interfere with cinematic test cadences.
 // Takes effect on the next pack run. For large frames the BLE push
 // time dominates and the cap is effectively ignored.
+// Defined further down, after the kImgEnvGapMs_* tier constants it reports on.
+static const char* cmd_g2envgap(const String& argsInput);
+static const char* cmd_g2connpri(const String& argsInput);
+
 static const char* cmd_g2packrate(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   EXT_RAM_BSS_ATTR static char ret[160];
@@ -14836,6 +15326,8 @@ extern const CommandEntry g2Commands[] = {
   { "g2streamres",  "Lens stream resolution: g2streamres [<W>x<H>] (bare = report; e.g., 96x96, 160x120, 288x144)", false, cmd_g2streamres, "Usage: g2streamres [<W>x<H>]  (W 16..288, H 16..144; bare = report)" },
   { "g2streamtonemap", "Lens stream auto-levels: g2streamtonemap [on|off] (bare = report state)", false, cmd_g2streamtonemap, "Usage: g2streamtonemap [<on|off>]  (bare = report state)" },
   { "g2packrate",   "SD-pack animation cadence: g2packrate [<ms>] (range 20..2000, default 80)", false, cmd_g2packrate, "Usage: g2packrate [<ms>]  (20..2000; bare = report)" },
+  { "g2envgap",     "Image inter-envelope gap override: g2envgap [<5..500>|auto] (bare = report)", true, cmd_g2envgap, "Usage: g2envgap [<5..500>|auto]  (runtime only; bare = report)" },
+  { "g2connpri",    "Probe the BLE conn-interval admission boundary: g2connpri [<min> <max>|default] (bare = report)", true, cmd_g2connpri, "Usage: g2connpri [<min> <max>|default]  (ticks of 1.25 ms; runtime only; bare = report)" },
   { "g2battery",    "Query G2 battery % on connected temples",         false, cmd_g2battery },
   { "g2verbose",    "Scan-verbose logging: g2verbose [on|off|toggle] (bare = report state)", false, cmd_g2verbose, "Usage: g2verbose [on|off|toggle]  (bare = report state)" },
   { "g2hijacktest", "Simulate a Blocks tap (status-page hijack)",      false, cmd_g2hijacktest },
@@ -15138,8 +15630,19 @@ static constexpr uint32_t kImgEnvGapMs_Large  = 25;   // 13+ envelopes
 // 3800 B fragment (Health sparkline / Q30 under load). Widen further.
 // ESP32-host issue (GATT TX queue), not a firmware sliding-window rule —
 // g2-kit keeps window=4; we keep that and only pace envelopes slower.
-static constexpr uint32_t kImgEnvGapMs_MediumRing = 35;
-static constexpr uint32_t kImgEnvGapMs_LargeRing  = 60;
+static constexpr uint32_t kImgEnvGapMs_MediumSlow = 35;
+static constexpr uint32_t kImgEnvGapMs_LargeSlow  = 60;
+
+// Fast/slow link boundary, in 1.25 ms connection-interval ticks.
+//
+// Measured 2026-07-26 on firmware 2.2.4.34:
+//   12 ticks (15.15 ms) — Q27/Q30 sustain the 25 ms large-fragment gap
+//                         indefinitely (24/24 and repeated 6/6 frames).
+//   24 ticks (30.30 ms) — the 25 ms gap hits rc=-1 at frag 2 of Q30 and
+//                         strands the write mutex; the 60 ms gap completes
+//                         6/6 in 5369 ms, three runs identical.
+// 16 ticks (20 ms) sits between the two observations.
+static constexpr uint16_t kConnIntFastMaxTicks = 16;
 // Per-Cmd=3 TX retries after sendPbFragmented fails (rc=-1 mid-envelope).
 // ESP32 adaptation of G2_PROTOCOL "retry transient write" — in-lock
 // writeValue retry can hang forever on m_semaphoreWriteCharEvt, so we
@@ -15167,13 +15670,292 @@ static constexpr uint32_t kImgInBurstEnvelopeGapMs = kImgEnvGapMs_Small;
 // window. With the ring up, bump medium/large further (see *Ring constants).
 // Failure mode at undersize gap: rc=-1 from writeValue mid-burst,
 // ImageRawResp never arrives, the next burst inherits the wedge.
-static uint32_t pickImgEnvelopeGapMs(size_t pbLen) {
-  const bool ringUp = g2RingIsConnected();
+//
+// Runtime override (`g2envgap <ms>`): 0 = use the table. Exists so the ring
+// tiers can be walked DOWN against real hardware instead of guessed at. They
+// were calibrated while ImgPushRadioGuard was simultaneously dropping both
+// temples to BALANCED — the two shipped in the same commit and were never
+// isolated — so now that priority stays HIGH the ring-up drain is strictly
+// better than when 35/60 were chosen, and they are probably too conservative.
+// Walk 60 → 50 → 40 → 30 → 25 with the ring connected until rc=-1 appears;
+// the breaking point is the measured drain rate.
+static volatile uint32_t gImgEnvGapOverrideMs = 0;
+
+// Connection interval to size the gap against, in 1.25 ms ticks. Prefers the
+// link we are actually pushing to; falls back to the slowest connected temple,
+// then to 0 = "never observed".
+static uint16_t effectiveConnIntTicks(const G2Temple* target) {
+  if (target && target->connected && target->connAppliedInt) {
+    return target->connAppliedInt;
+  }
+  uint16_t worst = 0;
+  if (gL.connected && gL.connAppliedInt > worst) worst = gL.connAppliedInt;
+  if (gR.connected && gR.connAppliedInt > worst) worst = gR.connAppliedInt;
+  return worst;
+}
+
+// Single source of truth for "is this link slow?", shared by the envelope gap,
+// the fragment retry drain, and the rc=-1 recovery cooldown so they can never
+// disagree. Unknown interval counts as slow (conservative).
+static bool g2LinkIsSlow(const G2Temple* target) {
+  const uint16_t ticks = effectiveConnIntTicks(target);
+  return (ticks == 0) || (ticks > kConnIntFastMaxTicks);
+}
+
+// Pick the inter-envelope gap from the MEASURED connection interval, not from
+// whether the ring happens to be connected.
+//
+// The old ring-keyed rule had a hole that bit us: connecting the ring makes the
+// temples slow (our post-ring-window HIGH request is REFUSED — status=19 — so
+// the link sits at 48 ticks and the glasses later settle it near 24), but
+// DISCONNECTING the ring flipped this table back to the fast tier while the
+// link stayed slow. Fast gap + slow link = sustained over-submit → rc=-1 →
+// stranded write mutex. Keying off the interval closes that hole and removes
+// the ring/no-ring disparity entirely: one rule, driven by what the link IS.
+//
+// Small fragments stay unconditional. They are ≤7 envelopes, short enough for
+// the controller's TX buffer to absorb, and the 15 ms gap was already running
+// safely on slow (BALANCED, 48-tick) links under the old ring-up path.
+//
+// Unknown interval (0, no UPDATE_CONN_PARAMS seen yet) is treated as SLOW: the
+// cost of being wrong slow is frame time, the cost of being wrong fast is a
+// wedged burst.
+static uint32_t pickImgEnvelopeGapMs(size_t pbLen, const G2Temple* target = nullptr) {
+  const uint32_t ovr = gImgEnvGapOverrideMs;
+  if (ovr) return ovr;
+
+  const bool slowLink = g2LinkIsSlow(target);
+
   if (pbLen <= kImgFragSizeSmallMaxB)  return kImgEnvGapMs_Small;
   if (pbLen <= kImgFragSizeMediumMaxB) {
-    return ringUp ? kImgEnvGapMs_MediumRing : kImgEnvGapMs_Medium;
+    return slowLink ? kImgEnvGapMs_MediumSlow : kImgEnvGapMs_Medium;
   }
-  return ringUp ? kImgEnvGapMs_LargeRing : kImgEnvGapMs_Large;
+  return slowLink ? kImgEnvGapMs_LargeSlow : kImgEnvGapMs_Large;
+}
+
+// Override the per-envelope image gap, or `auto` to restore the size/ring
+// table. Pairs with the conn-params APPLIED log — set a fixed gap, run the same
+// probe with the ring up and down, and the only variable left is the link.
+// (Declared above the command registry; defined here so it can read the tiers.)
+static const char* cmd_g2envgap(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  EXT_RAM_BSS_ATTR static char ret[192];
+  // argsInput is ALREADY just the arguments — the command word is stripped by
+  // the dispatcher (see cmd_g2packrate). An earlier version here also cut to
+  // the first space, so a single-token arg like "60" became "" and every call
+  // silently fell through to the bare report instead of setting the override.
+  String a = argsInput;
+  a.trim();
+  if (a.length() == 0) {
+    // Always report the measured interval — it is what auto-mode keys off, and
+    // it is the number to walk the gap against.
+    const uint16_t ticks = effectiveConnIntTicks(nullptr);
+    char link[72];
+    if (ticks == 0) {
+      snprintf(link, sizeof(link), "link int=unknown -> assuming SLOW");
+    } else {
+      snprintf(link, sizeof(link), "link int=%u (%u.%02u ms) -> %s",
+               (unsigned)ticks, (unsigned)(ticks * 5 / 4),
+               (unsigned)((ticks * 125 / 100) % 100),
+               (ticks > kConnIntFastMaxTicks) ? "SLOW" : "FAST");
+    }
+    const uint32_t ovr = gImgEnvGapOverrideMs;
+    if (ovr) {
+      snprintf(ret, sizeof(ret), "OK: g2envgap = %u ms (override active); %s",
+               (unsigned)ovr, link);
+    } else {
+      snprintf(ret, sizeof(ret),
+               "OK: g2envgap = auto - fast %u/%u/%u, slow %u/%u/%u by size; %s",
+               (unsigned)kImgEnvGapMs_Small, (unsigned)kImgEnvGapMs_Medium,
+               (unsigned)kImgEnvGapMs_Large,
+               (unsigned)kImgEnvGapMs_Small, (unsigned)kImgEnvGapMs_MediumSlow,
+               (unsigned)kImgEnvGapMs_LargeSlow, link);
+    }
+    return ret;
+  }
+  if (a.equalsIgnoreCase("auto") || a == "0") {
+    gImgEnvGapOverrideMs = 0;
+    return "OK: g2envgap = auto (size/ring table)";
+  }
+  const long ms = a.toInt();
+  if (ms < 5 || ms > 500) {
+    return "Error: invalid arguments - Usage: g2envgap [<5..500>|auto]";
+  }
+  gImgEnvGapOverrideMs = (uint32_t)ms;
+  snprintf(ret, sizeof(ret),
+           "OK: g2envgap = %u ms (runtime only; 'g2envgap auto' restores table)",
+           (unsigned)ms);
+  return ret;
+}
+
+// One temple's line in the g2connpri report.
+static void connPriFormatTemple(const G2Temple& t, char* buf, size_t cap) {
+  if (!t.connected) { snprintf(buf, cap, "%c=down", t.side); return; }
+  const uint16_t iv = t.connAppliedInt;
+  if (iv == 0) { snprintf(buf, cap, "%c=no-event-yet", t.side); return; }
+  // Report latency/timeout too: they are part of the tuple the controller
+  // admits or refuses, and they drive the no-op predicate.
+  snprintf(buf, cap, "%c=%u(%u.%02ums) lat=%u tmo=%u st=%u %s by=%s",
+           t.side, (unsigned)iv,
+           (unsigned)(iv * 5 / 4), (unsigned)((iv * 125 / 100) % 100),
+           (unsigned)t.connAppliedLatency, (unsigned)t.connAppliedTimeout,
+           (unsigned)t.connLastStatus, connStatusName(t.connLastStatus),
+           connEvtWhoName(t.connEvtWho));
+}
+
+// Probe the controller's connection-interval admission boundary.
+//
+//   g2connpri              — report the requested range and what each link got
+//   g2connpri <min> <max>  — set the HIGH range in 1.25 ms ticks, re-request
+//                            it on both temples, settle, and report
+//   g2connpri default      — restore the compiled defaults (9-12) and re-request
+//
+// HOW TO SWEEP. Do it with the ring CONNECTED — that is the state that
+// currently strands both links at 60 ms, and the state where HIGH is refused.
+// Walk the floor upward and watch `st` flip from 19 to 0:
+//
+// MEASURED SO FAR (2026-07-27, firmware 2.2.4.34):
+//   9-12   1 link   ACCEPTED, landed int=12
+//   9-12   2 links  refused
+//   9-12   3 links  refused
+//   9-24   3 links  refused   ← ceiling alone is NOT enough; admission is
+//                               gated on the floor, so only raising min helps
+//   32-48  3 links  ACCEPTED, landed int=48
+//   16-24  2 links  ACCEPTED, landed int=24 (30.30 ms)
+//
+// So at 2 links the floor boundary is somewhere in 9 < min <= 16, and the
+// controller hands back the CEILING of the range, not the floor. Getting the
+// link to the fast tier therefore means constraining max, not just min.
+//
+// Still open: the lowest range that lands at <= kConnIntFastMaxTicks. Try
+// `16 16` (forces 20 ms) and `12 16`, then narrow the floor with `12 12`.
+//
+// Runtime only — nothing here is persisted, and a reconnect re-requests
+// whatever range is currently set.
+static const char* cmd_g2connpri(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  EXT_RAM_BSS_ATTR static char ret[512];
+  char lbuf[128], rbuf[128];
+  String a = argsInput;
+  a.trim();
+
+  const int depth = g2ConnPriBalancedDepth();
+
+  if (a.length() == 0) {
+    connPriFormatTemple(gL, lbuf, sizeof(lbuf));
+    connPriFormatTemple(gR, rbuf, sizeof(rbuf));
+    snprintf(ret, sizeof(ret),
+             "OK: g2connpri HIGH=%u-%u ticks (%u.%02u-%u.%02u ms), "
+             "BALANCED=%u-%u, arbiter depth=%d (%s); links %s %s",
+             (unsigned)gConnIntHighMin, (unsigned)gConnIntHighMax,
+             (unsigned)(gConnIntHighMin * 5 / 4),
+             (unsigned)((gConnIntHighMin * 125 / 100) % 100),
+             (unsigned)(gConnIntHighMax * 5 / 4),
+             (unsigned)((gConnIntHighMax * 125 / 100) % 100),
+             (unsigned)G2_CONN_INT_BALANCED_MIN, (unsigned)G2_CONN_INT_BALANCED_MAX,
+             depth, depth > 0 ? "holding BALANCED" : "HIGH",
+             lbuf, rbuf);
+    return ret;
+  }
+
+  uint16_t wantMin, wantMax;
+  if (a.equalsIgnoreCase("default") || a.equalsIgnoreCase("reset")) {
+    wantMin = G2_CONN_INT_HIGH_MIN;
+    wantMax = G2_CONN_INT_HIGH_MAX;
+  } else {
+    const int sp = a.indexOf(' ');
+    if (sp < 0) {
+      return "Error: invalid arguments - Usage: g2connpri [<min> <max>|default]";
+    }
+    const long mn = a.substring(0, sp).toInt();
+    const long mx = a.substring(sp + 1).toInt();
+    // 6..3200 is the BLE spec range for a connection interval (7.5 ms .. 4 s).
+    if (mn < 6 || mn > 3200 || mx < 6 || mx > 3200 || mn > mx) {
+      return "Error: invalid arguments - min/max are 6..3200 ticks and min <= max";
+    }
+    wantMin = (uint16_t)mn;
+    wantMax = (uint16_t)mx;
+  }
+
+  gConnIntHighMin = wantMin;
+  gConnIntHighMax = wantMax;
+
+  // The arbiter owns the HIGH/BALANCED decision. If something is holding
+  // BALANCED right now, re-requesting HIGH here would both fight it and
+  // measure the wrong thing, so say so instead of producing a bogus reading.
+  if (depth > 0) {
+    snprintf(ret, sizeof(ret),
+             "OK: g2connpri HIGH=%u-%u set, but NOT applied - arbiter is holding "
+             "BALANCED (depth=%d). Re-run once the holder releases.",
+             (unsigned)wantMin, (unsigned)wantMax, depth);
+    return ret;
+  }
+
+  // Predict the short-circuit BEFORE clearing anything — connReqWouldNoOp
+  // reads the LIVE params, which the clear below does not touch, but doing it
+  // here keeps the ordering obvious. If bluedroid is going to answer "already
+  // set" without sending a command, the resulting status=0 is NOT an
+  // acceptance and the row must not go in the admission table.
+  const bool noopL = gL.connected && connReqWouldNoOp(gL, wantMax);
+  const bool noopR = gR.connected && connReqWouldNoOp(gR, wantMax);
+
+  // Drop the de-dup cache so the request is actually re-sent. Only the
+  // "what we asked for" fields — connAppliedInt and peerBda describe the LIVE
+  // link and clearing them would break both pacing and event attribution.
+  gL.connMinInt = gL.connMaxInt = 0;
+  gR.connMinInt = gR.connMaxInt = 0;
+
+  // Snapshot BEFORE firing so we can tell this request's outcome from the last
+  // one's leftovers.
+  const bool waitL = gL.connected, waitR = gR.connected;
+  const uint32_t seqL0 = gL.connEvtSeqSelf, seqR0 = gR.connEvtSeqSelf;
+
+  const uint32_t t0 = millis();
+  const int changed = g2SetAllTemplesConnPriority(true);
+
+  // Wait for OUR request's event, not just any event.
+  //
+  // Two traps this navigates. (1) Latency: a controller refusal comes back in
+  // ~3 ms, but an ACCEPTED update does not report until the link-layer instant,
+  // at least 6 connection intervals out — ~1.6 s on a 105 ms link. A fixed
+  // 700 ms window read stale status and called an accepted `16 24` refused.
+  // (2) Attribution: the temples renegotiate themselves when idle and those
+  // peer-initiated updates are always accepted, so waiting on an
+  // undifferentiated counter let an unrelated renegotiation land inside the
+  // window and be reported as our result. Gate on connEvtSeqSelf.
+  //
+  // Safe against refusals: the 0x12 path leaves updating_param_flag set, so a
+  // refused request still self-attributes and will not time out here.
+  const uint32_t deadlineMs = 5000;
+  while ((millis() - t0) < deadlineMs) {
+    const bool gotL = !waitL || (gL.connEvtSeqSelf != seqL0);
+    const bool gotR = !waitR || (gR.connEvtSeqSelf != seqR0);
+    if (gotL && gotR) break;
+    vTaskDelay(pdMS_TO_TICKS(25));
+  }
+  const uint32_t waitedMs = millis() - t0;
+  const bool timedOut = (waitL && gL.connEvtSeqSelf == seqL0) ||
+                        (waitR && gR.connEvtSeqSelf == seqR0);
+
+  connPriFormatTemple(gL, lbuf, sizeof(lbuf));
+  connPriFormatTemple(gR, rbuf, sizeof(rbuf));
+  // A predicted no-op invalidates the row outright — say so loudly, because a
+  // status=0 from that path is indistinguishable from a real acceptance.
+  const char* noopWarn = (noopL || noopR)
+      ? (noopL && noopR ? " !! NO-OP both (already at these params — nothing sent)"
+                        : (noopL ? " !! NO-OP on L (already at these params)"
+                                 : " !! NO-OP on R (already at these params)"))
+      : "";
+  snprintf(ret, sizeof(ret),
+           "OK: g2connpri HIGH=%u-%u ticks (%u.%02u-%u.%02u ms) on %d link(s), "
+           "settled in %u ms%s%s; %s %s",
+           (unsigned)wantMin, (unsigned)wantMax,
+           (unsigned)(wantMin * 5 / 4), (unsigned)((wantMin * 125 / 100) % 100),
+           (unsigned)(wantMax * 5 / 4), (unsigned)((wantMax * 125 / 100) % 100),
+           changed, (unsigned)waitedMs,
+           timedOut ? " (TIMED OUT - no self-attributed event; values stale)" : "",
+           noopWarn, lbuf, rbuf);
+  return ret;
 }
 
 // MapSessionId counter — g2-kit bumps per stream; on abort bumps by 2
@@ -15197,12 +15979,12 @@ static bool sendImgCmd3WithRetry(G2Temple& arm, const char* tag,
                                  unsigned frag1Based, unsigned totalFrags,
                                  const uint8_t* pb, size_t pbLen) {
   const unsigned attempts = kImgFragTxAttempts;
-  const uint32_t drainMs = g2RingIsConnected()
-                               ? kImgFragTxRetryDrainRingMs
-                               : kImgFragTxRetryDrainMs;
+  // Same rule as the gap: drain longer on a slow link (see pickImgEnvelopeGapMs).
+  const uint32_t drainMs = g2LinkIsSlow(&arm) ? kImgFragTxRetryDrainRingMs
+                                              : kImgFragTxRetryDrainMs;
   for (unsigned attempt = 1; attempt <= attempts; attempt++) {
     if (gImgProbeAbort) return false;
-    g2DebugSetNextBurstFragDelay(pickImgEnvelopeGapMs(pbLen));
+    g2DebugSetNextBurstFragDelay(pickImgEnvelopeGapMs(pbLen, &arm));
     if (sendPbFragmented(arm, allocSeq(), G2_SID_EVEN_CORE,
                          G2_FLAG_REQUEST, pb, pbLen)) {
       return true;
@@ -15219,23 +16001,48 @@ static bool sendImgCmd3WithRetry(G2Temple& arm, const char* tag,
 
 // Drop glasses to BALANCED for a large image push while the ring is up —
 // same radio-courtesy pattern as ringconnect. Restored on every exit path.
-struct ImgPushRadioGuard {
-  bool dropped;
-  ImgPushRadioGuard() : dropped(false) {
-    if (!g2RingIsConnected()) return;
-    const int n = g2SetAllTemplesConnPriority(/*high=*/false);
-    if (n > 0) {
-      dropped = true;
-      DEBUG_G2F("[G2] Image push: dropped %d temple(s) to BALANCED (ring up)",
-                n);
-    }
-  }
-  ~ImgPushRadioGuard() {
-    if (!dropped) return;
-    const int n = g2SetAllTemplesConnPriority(/*high=*/true);
-    DEBUG_G2F("[G2] Image push: restored %d temple(s) to HIGH", n);
-  }
-};
+// Retired: ImgPushRadioGuard
+// ─────────────────────────────────────────────────────────────────────
+// REMOVED 2026-07-26 — was: drop both temples to BALANCED for the duration of
+// every image push whenever the ring was connected.
+//
+// Why it went away, in order of weight:
+//
+//  1. It was never evidenced. Its own first comment line called it "the same
+//     radio-courtesy pattern as ringconnect" — an analogy to GlassesPriorityGuard,
+//     added ~2.5 months later. No capture, probe, or doc in this repo shows a
+//     steady-state ring link degrading because of an image push, and it shipped
+//     bundled with three other ring-conditional pacing constants so its effect
+//     was never isolated.
+//
+//  2. The mechanism points the wrong way. Envelopes are ATT Write Commands, so
+//     the sender never blocks on the radio; the connection interval sets the
+//     DRAIN rate while the inter-envelope gap sets the SUBMIT rate, independently.
+//     Dropping to BALANCED slows the drain 3-4x while submissions keep arriving
+//     on the same schedule — the host queue backs up and L2CAP answers with
+//     ESP_FAIL, which is the `rc=-1` abort that strands the write mutex. The
+//     guard plausibly caused the failure it appeared to prevent.
+//
+//  3. It ran per push, so a sustained loop (camera stream, Pet, Health graphs)
+//     issued four conn-param updates per frame on a stack that permits one in
+//     flight — the "connection parameter already set" / "last connection update
+//     command still pending" storm, ending in that same rc=-1.
+//
+//  4. It made behaviour bimodal on whether the ring happened to be connected,
+//     which is why identical reboots produced different results.
+//
+// Measured baseline it was costing (ring down, so the guard was inert — i.e.
+// this is what HIGH actually does): Q27 47 envelopes, 1040 ms of programmed
+// gap, 1259 ms measured → 4.7 ms/envelope of real radio+CPU. Q30 94 envelopes,
+// 2160 ms programmed, 2519 ms measured → 3.8 ms/envelope. Against an 11.25-15 ms
+// HIGH interval that is ~3 PDUs per connection event, i.e. the link had headroom
+// to spare and the interval was never the constraint.
+//
+// The ring-connect window keeps its guard (GlassesPriorityGuard in G2_Ring.cpp):
+// that one is brief, rare, user-initiated, and about SCANNING for a third link
+// rather than steady-state traffic — a different claim with better support, and
+// it now goes through the refcounted arbiter (g2ConnPriRequestBalanced).
+// ─────────────────────────────────────────────────────────────────────
 
 // Hold the image visible after the last fragment, before SHUTDOWN.
 // The lens's 4-tile sync settles for ~2 s post-last-frag (per the
@@ -15647,13 +16454,16 @@ static bool sendImageBmpMultiFragment(G2Temple& arm,
                                       unsigned tolerateMissedAcks = 0,
                                       int32_t imgW = 288,
                                       int32_t imgH = 144) {
+  // Image bursts are the case the fast interval exists for. No-op cost when an
+  // outer scope (e.g. imgProbeWorkerImpl) already holds it.
+  G2FastLinkGuard fastLink("img-push");
   if (outOkFrags) *outOkFrags = 0;
   if (outTotalFrags) *outTotalFrags = 0;
   if (!bmp || bmpLen == 0) return false;
 
-  // Exclusive TX gate alone is not enough under 3 HIGH links — give the
-  // controller more idle airtime for the whole push (Q30/Health).
-  ImgPushRadioGuard radioGuard;
+  // (No conn-priority drop here — see "Retired: ImgPushRadioGuard" above.
+  // Airtime for 3 links is managed by the per-envelope gap, not by throttling
+  // the link we are pushing on.)
 
   const uint32_t kCID        = 2;
   const char*    kCName      = "imgQ4";
@@ -16085,12 +16895,14 @@ static bool sendImageBmpFragmentsNoCreate(G2Temple& arm,
                                           unsigned* outTotalFrags,
                                           unsigned tolerateMissedAcks = 0,
                                           unsigned inFlightCapOverride = 0) {
+  // Same policy as sendImageBmpMultiFragment — free when nested.
+  G2FastLinkGuard fastLink("img-push-nocreate");
   if (outOkFrags) *outOkFrags = 0;
   if (outTotalFrags) *outTotalFrags = 0;
   if (!bmp || bmpLen == 0 || !cname) return false;
 
-  // Health / Pet / Maps image path — same 3-link courtesy as MultiFragment.
-  ImgPushRadioGuard radioGuard;
+  // Health / Pet / Maps image path — same policy as MultiFragment: pacing only,
+  // no conn-priority drop (see "Retired: ImgPushRadioGuard" above).
 
   const uint32_t kCID    = cid;
   const char*    kCName  = cname;
@@ -20632,6 +21444,348 @@ const char* g2ProbeImageQ27LiveTile144() {
 // (Q24 procedural slime probe removed — replaced operationally by Q25
 // SD-frame BMP packs, which serve the same "loop animated frames"
 // purpose with arbitrary user content.)
+
+
+// ─────────────────────────────────────────────────────────────────────
+// Q31 / Q31b — CAN A SMALL IMAGE CONTAINER BE MOVED?
+//
+// Motivation: sweeping a sprite across the 576×288 canvas by repainting the
+// whole screen is 24 fragments/frame. If the container itself can be
+// repositioned, a 64×64 sprite costs ONE fragment (~2.1 KB) at any position —
+// roughly 20× cheaper. Two candidate mechanisms, one probe each:
+//
+//   Q31  — Cmd=7 REBUILD carrying an ImageObject with new X/Y. Untested.
+//   Q31b — SHUTDOWN+CREATE at the new X/Y. Known to work; cost unknown.
+//
+// They are deliberately SEPARATE rows: Q31 can wedge the EvenCore plugin task
+// (docs/G2_PROTOCOL.md:1813 — one RebuildFailed and every subsequent op is
+// dropped, heartbeats included, until BLE reconnects). Splitting them means a
+// Q31 wedge does not block the Q31b measurement, which is the one guaranteed
+// to produce a usable number.
+//
+// Both draw a 32×32 filled block inside a 64×64 container so the operator can
+// see WHICH pixels moved: if the block marches across the lens the container
+// moved; if the block only shuffles inside a stationary 64×64 window, the
+// geometry was ignored and the pixels are all that changed.
+//
+// NOTE for both: payload is CompressMode=0 raw (this firmware has no LZ4), so
+// per-frame cost is linear in container area and independent of content. A
+// mostly-black frame costs exactly what a noisy one does — do not "optimise"
+// these by blacking pixels out.
+// ─────────────────────────────────────────────────────────────────────
+
+// Shared geometry for the two move probes.
+static constexpr int32_t kMoveTileW    = 64;
+static constexpr int32_t kMoveTileH    = 64;
+static constexpr int32_t kMoveBlockPx  = 32;   // sprite drawn inside the tile
+static constexpr int32_t kMoveStepPx   = 64;   // container X advance per step
+static constexpr int32_t kMoveSteps    = 8;    // 8 × 64 = 512 px of travel
+static constexpr int32_t kMoveOriginY  = 112;  // vertically centred-ish band
+
+// Build the probe frame: 32×32 lit block centred in an otherwise-black
+// 64×64 tile. Returns BMP length, or 0 on failure.
+static size_t buildMoveSpriteBmp(uint8_t* bmp, size_t cap, int32_t phase) {
+  const size_t kPixOffset = 14 + 40 + 16 * 4;
+  size_t len = buildBmp4bpp(bmp, cap, kMoveTileW, -kMoveTileH, BMP_PAT_ALL_BLACK);
+  if (len == 0) return 0;
+  // Nudge the block within the tile each step so a stationary container is
+  // still visibly "alive" — that is exactly how we tell the two outcomes
+  // apart. A moving container shows the block sweeping across the lens; an
+  // ignored-geometry REBUILD shows it jittering in one place.
+  const int32_t inset = (phase & 1) ? (kMoveTileW - kMoveBlockPx) : 0;
+  bmpDrawRect4bpp(bmp + kPixOffset, kMoveTileW, -kMoveTileH,
+                  /*x*/ inset, /*y*/ (kMoveTileH - kMoveBlockPx) / 2,
+                  /*w*/ kMoveBlockPx, /*h*/ kMoveBlockPx, /*idx*/ 15);
+  return len;
+}
+
+// Q31 — REBUILD-image reposition. Answers: does Cmd=7 with a fresh
+// ImageObject X/Y move an existing container?
+const char* g2ProbeImageQ31RebuildMove() {
+  EXT_RAM_BSS_ATTR static char ret[300];
+  G2Temple* arm = pickEvenAIArm("imgQ31");
+  if (!arm) { snprintf(ret, sizeof(ret), "Img Q31: no reachable temple"); return ret; }
+
+  const uint32_t kCreateMagic = G2_MAGIC_IMAGE_BASE + 2;   // 212
+  const uint32_t kPushBase    = G2_MAGIC_IMAGE_BASE + 3;   // 213
+  const uint32_t kCID         = 2;
+  const char*    kCName       = "imgQ4";  // shared helper name, as Q20/Q23 use
+
+  probeBanner("Q31: REBUILD-image reposition",
+              kCreateMagic, G2_MAGIC_REBUILD,
+              "CREATE 64x64 @x=0, then Cmd=7 REBUILD to x=64,128,... and "
+              "re-push after each move. MEASURED 2026-07-27: geometry IS "
+              "honoured (block sweeps right) but a REBUILD BLANKS the "
+              "container, so the re-push is required — ~41 ms move + ~255 ms "
+              "push = ~296 ms/step. WATCH THE LENS: block stuck in one spot = "
+              "geometry ignored; lens dead + 'Connection lost' = plugin "
+              "WEDGED.");
+
+  if (!probeTearDownActiveContainer(*arm)) {
+    snprintf(ret, sizeof(ret), "Img Q31: pre-probe SHUTDOWN failed");
+    return ret;
+  }
+
+  const size_t kBmpCap = bmp4bppFileBytesU32(kMoveTileW, kMoveTileH) + 256;
+  uint8_t* bmp = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPSRAM, "g2.img.q31");
+  if (!bmp) {
+    probePostProbeShutdown(*arm);
+    snprintf(ret, sizeof(ret), "Img Q31: BMP alloc failed");
+    return ret;
+  }
+
+  gImgProbeHoldTapPending = false;
+  gImgProbeAbort          = false;
+  gImgProbeHoldActive     = true;
+
+  // ── Step 0: CREATE at the left edge and paint, so there is something to move.
+  // NB: build the CREATE explicitly rather than via sendImageBmpMultiFragment —
+  // that helper hardcodes the container rect to (0,0), which would make the
+  // first REBUILD a simultaneous X *and* Y change and muddy the result. We want
+  // the container to start at (0, kMoveOriginY) so every REBUILD moves X only.
+  size_t bmpLen = buildMoveSpriteBmp(bmp, kBmpCap, 0);
+  uint8_t cbuf[256];
+  probePrepImageCreateAck(kCreateMagic);
+  size_t cn = g2BuildCreateImage(allocSeq(), kCreateMagic, kCName, kCID,
+                                 /*x*/ 0, (uint32_t)kMoveOriginY,
+                                 (uint32_t)kMoveTileW, (uint32_t)kMoveTileH,
+                                 BLOCKS_WIDGET_ID, cbuf, sizeof(cbuf));
+  if (cn == 0 || !sendEnvelope(*arm, cbuf, cn) ||
+      !probeWaitImageCreateAck(kCreateMagic, 2000)) {
+    free(bmp);
+    gImgProbeHoldActive = false;
+    probePostProbeShutdown(*arm);
+    snprintf(ret, sizeof(ret), "Img Q31: initial CREATE failed — "
+                               "container never established, REBUILD untested");
+    return ret;
+  }
+  unsigned okFrags = 0, totalFrags = 0;
+  if (!sendImageBmpFragmentsNoCreate(*arm, "Q31", kPushBase, kCID, kCName,
+                                     bmp, bmpLen, &okFrags, &totalFrags)) {
+    free(bmp);
+    gImgProbeHoldActive = false;
+    probePostProbeShutdown(*arm);
+    snprintf(ret, sizeof(ret), "Img Q31: initial push failed — "
+                               "nothing on lens to move, REBUILD untested");
+    return ret;
+  }
+  arm->containerReady  = true;
+  arm->containerIsList = false;
+  g2LensSetContainer(true, false, BLOCKS_WIDGET_ID);
+  DEBUG_G2F("[ImgProbe] Q31 base container up at x=0 y=%d (%dx%d)",
+            (int)kMoveOriginY, (int)kMoveTileW, (int)kMoveTileH);
+
+  // ── Steps 1..N: REBUILD to a new X, then re-push pixels.
+  unsigned rebuildOk = 0, rebuildSent = 0, repaintOk = 0;
+  bool noAck = false, rejected = false;
+  uint32_t pushMagic = kPushBase + 1;
+  uint32_t totalRebuildMs = 0;
+
+  for (int32_t step = 1; step <= kMoveSteps && !gImgProbeHoldTapPending; step++) {
+    // Base container sits at x=0, so step 1 moves it to x=64, … step 8 to 512
+    // (512+64 = 576, exactly the right edge).
+    const int32_t newX = kMoveStepPx * step;
+    if (newX + kMoveTileW > 576) break;
+
+    uint8_t env[256];
+    if (!armRebuildSlot("Q31 REBUILD-image")) break;
+    size_t envLen = g2BuildRebuildImage(allocSeq(), G2_MAGIC_REBUILD,
+                                        kCName, kCID,
+                                        (uint32_t)newX, (uint32_t)kMoveOriginY,
+                                        (uint32_t)kMoveTileW, (uint32_t)kMoveTileH,
+                                        env, sizeof(env));
+    if (envLen == 0) { DEBUG_G2F("[ImgProbe] Q31 step %d: build failed", (int)step); break; }
+
+    const uint32_t t0 = millis();
+    if (!sendEnvelope(*arm, env, envLen)) {
+      DEBUG_G2F("[ImgProbe] Q31 step %d: send failed", (int)step);
+      break;
+    }
+    rebuildSent++;
+    const bool acked = waitRebuildAck("Q31 REBUILD-image");
+    const uint32_t dtMs = millis() - t0;
+    totalRebuildMs += dtMs;
+
+    DEBUG_G2F("[ImgProbe] Q31 step %d → x=%d: REBUILD %s in %u ms",
+              (int)step, (int)newX, acked ? "ACKED" : "NO-ACK/REJECTED",
+              (unsigned)dtMs);
+
+    if (!acked) {
+      // Distinguish the two bad outcomes for the operator: a 1500 ms wait
+      // that expired is the silent-drop (wedge) signature; anything faster
+      // came back as an explicit RebuildFailed.
+      if (dtMs >= 1400) { noAck = true; DEBUG_G2F("[ImgProbe] Q31: silent drop — plugin likely WEDGED, aborting"); }
+      else              { rejected = true; DEBUG_G2F("[ImgProbe] Q31: explicit RebuildFailed, aborting"); }
+      break;
+    }
+    rebuildOk++;
+
+    // Re-push pixels. A REBUILD BLANKS THE CONTAINER — this is MEASURED, not
+    // assumed. (It was an unexamined assumption in this probe until
+    // 2026-07-27, when the re-push was made conditional to test it.)
+    //
+    // The test: steps 1-4 REBUILD only, steps 5-8 REBUILD then re-push, with
+    // the second half acting as its own control so "REBUILD blanks it" could
+    // not be confused with "the probe is broken". Result, reproduced across
+    // two consecutive runs at 15.15 ms with all three links up:
+    //
+    //   steps 1-4 (REBUILD only)     → BLANK
+    //   steps 5-8 (REBUILD + push)   → visible
+    //   REBUILD ack itself            → 8/8 RebuildSuccess, avg 43 and 41 ms
+    //
+    // So Cmd=7 DOES move the container — geometry is honoured, the block
+    // sweeps right — but the pixels do not survive the move. Sprite motion
+    // therefore costs REBUILD + full re-push:
+    //
+    //   REBUILD           ~41 ms
+    //   64x64 re-push    ~255 ms   (2166 B, 10 envelopes at the 20 ms tier)
+    //   ────────────────────────
+    //   per step         ~296 ms   → ~3.4 fps
+    //
+    // Still 2.7x better than Q31b's SHUTDOWN+CREATE at 803 ms/step, but the
+    // floor is set by the re-push, not by the move. The remaining lever is the
+    // inter-envelope gap — see g2envgap.
+    bmpLen = buildMoveSpriteBmp(bmp, kBmpCap, step);
+    unsigned o = 0, t = 0;
+    if (pushMagic + 2 > 256) pushMagic = kPushBase + 1;
+    if (sendImageBmpFragmentsNoCreate(*arm, "Q31", pushMagic, kCID, kCName,
+                                      bmp, bmpLen, &o, &t)) repaintOk++;
+    pushMagic += (t ? t : 1);
+    vTaskDelay(pdMS_TO_TICKS(400));  // let the operator SEE each step
+  }
+
+  free(bmp);
+  gImgProbeHoldActive = false;
+  probeFooter("Q31", rebuildOk, rebuildSent);
+  probePostProbeShutdown(*arm);
+
+  if (noAck) {
+    snprintf(ret, sizeof(ret),
+             "Q31: REBUILD-image SILENTLY DROPPED after %u ok — plugin wedged, "
+             "reconnect BLE. Same failure as REBUILD-text. Use SHUTDOWN+CREATE.",
+             rebuildOk);
+  } else if (rejected) {
+    snprintf(ret, sizeof(ret),
+             "Q31: REBUILD-image REJECTED (RebuildFailed) after %u ok. "
+             "Firmware refuses image REBUILD; use Q31b SHUTDOWN+CREATE.",
+             rebuildOk);
+  } else if (rebuildOk == 0) {
+    snprintf(ret, sizeof(ret), "Q31: no REBUILD steps ran (aborted early)");
+  } else {
+    snprintf(ret, sizeof(ret),
+             "Q31: %u/%u REBUILD acked avg %u ms, %u repainted. Move works, "
+             "but REBUILD blanks the container (measured) so the re-push is "
+             "mandatory: ~296 ms/step total. Beats Q31b's 803 ms; the floor "
+             "is now the push, not the move — try a smaller g2envgap.",
+             rebuildOk, rebuildSent,
+             (unsigned)(rebuildOk ? totalRebuildMs / rebuildOk : 0), repaintOk);
+  }
+  return ret;
+}
+
+// Q31b — SHUTDOWN+CREATE reposition benchmark. This path is known to work
+// (it is just a fresh page); the open question is whether it is fast enough
+// to animate with. Produces the ms/step number that decides it.
+const char* g2ProbeImageQ31bRecreateMove() {
+  EXT_RAM_BSS_ATTR static char ret[300];
+  G2Temple* arm = pickEvenAIArm("imgQ31b");
+  if (!arm) { snprintf(ret, sizeof(ret), "Img Q31b: no reachable temple"); return ret; }
+
+  const uint32_t kCreateMagic = G2_MAGIC_IMAGE_BASE + 5;   // 215
+  const uint32_t kPushBase    = G2_MAGIC_IMAGE_BASE + 6;   // 216
+
+  probeBanner("Q31b: SHUTDOWN+CREATE reposition",
+              kCreateMagic, kPushBase + 7,
+              "re-CREATEs a 64x64 container at marching X. Block SHOULD sweep "
+              "right (this path is known-good). The number that matters is "
+              "ms/step in the log — that is your per-frame cost for "
+              "position-animated sprites.");
+
+  if (!probeTearDownActiveContainer(*arm)) {
+    snprintf(ret, sizeof(ret), "Img Q31b: pre-probe SHUTDOWN failed");
+    return ret;
+  }
+
+  const size_t kBmpCap = bmp4bppFileBytesU32(kMoveTileW, kMoveTileH) + 256;
+  uint8_t* bmp = (uint8_t*)ps_alloc(kBmpCap, AllocPref::PreferPSRAM, "g2.img.q31b");
+  if (!bmp) {
+    probePostProbeShutdown(*arm);
+    snprintf(ret, sizeof(ret), "Img Q31b: BMP alloc failed");
+    return ret;
+  }
+
+  gImgProbeHoldTapPending = false;
+  gImgProbeAbort          = false;
+  gImgProbeHoldActive     = true;
+
+  unsigned stepsOk = 0, stepsTried = 0;
+  uint32_t totalMs = 0, worstMs = 0;
+  uint32_t pushMagic = kPushBase;
+
+  for (int32_t step = 0; step < kMoveSteps && !gImgProbeHoldTapPending; step++) {
+    const int32_t newX = kMoveStepPx * step;
+    if (newX + kMoveTileW > 576) break;
+    stepsTried++;
+
+    const uint32_t t0 = millis();
+
+    // Full teardown so the next CREATE lands a container at the new rect.
+    // (This is the SHUTDOWN half of the cost we are measuring.)
+    noteOurShutdownSent();
+    uint8_t sbuf[32];
+    size_t sn = g2BuildShutdown(allocSeq(), G2_MAGIC_SHUTDOWN, 0, sbuf, sizeof(sbuf));
+    if (sn) sendEnvelope(*arm, sbuf, sn);
+    vTaskDelay(pdMS_TO_TICKS(kImgShutdownSettleMs));
+
+    size_t bmpLen = buildMoveSpriteBmp(bmp, kBmpCap, step);
+    uint8_t cbuf[256];
+    probePrepImageCreateAck(kCreateMagic);
+    size_t cn = g2BuildCreateImage(allocSeq(), kCreateMagic, "imgQ4", 2,
+                                   (uint32_t)newX, (uint32_t)kMoveOriginY,
+                                   (uint32_t)kMoveTileW, (uint32_t)kMoveTileH,
+                                   BLOCKS_WIDGET_ID, cbuf, sizeof(cbuf));
+    if (cn == 0 || !sendEnvelope(*arm, cbuf, cn)) {
+      DEBUG_G2F("[ImgProbe] Q31b step %d: CREATE send failed", (int)step);
+      break;
+    }
+    if (!probeWaitImageCreateAck(kCreateMagic, 2000)) {
+      DEBUG_G2F("[ImgProbe] Q31b step %d: CREATE not acked — aborting", (int)step);
+      break;
+    }
+
+    unsigned o = 0, t = 0;
+    if (pushMagic + 2 > 256) pushMagic = kPushBase;
+    const bool pushed = sendImageBmpFragmentsNoCreate(*arm, "Q31b", pushMagic,
+                                                      2, "imgQ4", bmp, bmpLen, &o, &t);
+    pushMagic += (t ? t : 1);
+
+    const uint32_t dtMs = millis() - t0;
+    totalMs += dtMs;
+    if (dtMs > worstMs) worstMs = dtMs;
+    if (pushed) stepsOk++;
+    DEBUG_G2F("[ImgProbe] Q31b step %d → x=%d: %s, %u ms "
+              "(incl. %u ms shutdown settle)",
+              (int)step, (int)newX, pushed ? "OK" : "PUSH FAIL",
+              (unsigned)dtMs, (unsigned)kImgShutdownSettleMs);
+
+    arm->containerReady  = true;
+    arm->containerIsList = false;
+    g2LensSetContainer(true, false, BLOCKS_WIDGET_ID);
+  }
+
+  free(bmp);
+  gImgProbeHoldActive = false;
+  probeFooter("Q31b", stepsOk, stepsTried);
+  probePostProbeShutdown(*arm);
+
+  const unsigned avg = stepsOk ? (unsigned)(totalMs / stepsOk) : 0;
+  snprintf(ret, sizeof(ret),
+           "Q31b: %u/%u steps, avg %u ms/step (worst %u). Settle is %u ms of "
+           "that — drop it to find the floor. <300ms = usable animation.",
+           stepsOk, stepsTried, avg, (unsigned)worstMs,
+           (unsigned)kImgShutdownSettleMs);
+  return ret;
+}
 
 
 // ─────────────────────────────────────────────────────────────────────

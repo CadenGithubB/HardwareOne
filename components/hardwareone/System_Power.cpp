@@ -22,13 +22,15 @@ struct PowerModeConfig {
 };
 
 static const PowerModeConfig gPowerModes[] = {
-  {"Performance", 240, 100},  // 0: Full speed
-  {"Balanced",    160, 80},   // 1: Good balance
+  {"Performance", 240, 100},  // 0: Full speed (idle → 80)
+  {"Balanced",    160, 80},   // 1: Good balance (idle → 80)
   {"PowerSaver",  80,  50},   // 2: Battery focused
-  {"UltraSaver",  40,  30}    // 3: Maximum savings
+  {"UltraSaver",  40,  30},   // 3: Maximum savings (idle → 40)
+  {"Locked",      240, 100}   // 4: Always-240 (idle keeps 240 — no downclock)
 };
 
-static const uint8_t POWER_MODE_COUNT = 4;
+static_assert(sizeof(gPowerModes) / sizeof(gPowerModes[0]) == POWER_MODE_COUNT,
+              "gPowerModes must match POWER_MODE_COUNT");
 
 // ============================================================================
 // Power Mode Management
@@ -55,10 +57,14 @@ uint32_t getPowerModeActiveCpuFreq(uint8_t mode) {
   return f < POWER_INTERACTIVE_FLOOR_MHZ ? POWER_INTERACTIVE_FLOOR_MHZ : f;
 }
 
-// Idle clock = nominal clamped DOWN to the floor. UltraSaver (40) -> 40;
-// every faster mode -> 80 (the radio-reachable idle floor the power-save path
-// already used). i.e. min(nominal, floor).
+// Idle clock while OLED power-save has blanked the panel (radio stays up).
+// Locked alone holds its interactive clock (240) — screen blanks but the core
+// does not downclock. Balanced/Performance/PowerSaver floor to 80. UltraSaver
+// sinks to its nominal 40.
 uint32_t getPowerModeIdleCpuFreq(uint8_t mode) {
+  if (mode == POWER_MODE_LOCKED) {
+    return getPowerModeActiveCpuFreq(mode);
+  }
   uint32_t f = getPowerModeCpuFreq(mode);
   return f < POWER_INTERACTIVE_FLOOR_MHZ ? f : POWER_INTERACTIVE_FLOOR_MHZ;
 }
@@ -198,7 +204,7 @@ const char* cmd_power(const String& argsInput) {
                          gPowerModes[i].displayBrightnessPercent);
       }
     }
-    broadcastOutput("  (UltraSaver's 40 MHz applies only once idle power-save blanks the screen; see 'powersave')");
+    broadcastOutput("  (Locked holds 240 MHz through idle power-save; UltraSaver's 40 MHz applies only once idle power-save blanks the screen; see 'powersave')");
     return "[Power] Status displayed";
   }
   
@@ -208,20 +214,23 @@ const char* cmd_power(const String& argsInput) {
   
   if (subCmd.equalsIgnoreCase("mode")) {
     if (subArgs.length() == 0) {
-      return "Error: invalid arguments — Usage: power mode [perf|balanced|saver|ultra|0-3]";
+      return "Error: invalid arguments — Usage: power mode [perf|balanced|saver|ultra|locked|0-4]";
     }
     
     uint8_t newMode = 255;
     
     // Parse mode name or number
     if (subArgs.equalsIgnoreCase("perf") || subArgs.equalsIgnoreCase("performance")) {
-      newMode = 0;
+      newMode = POWER_MODE_PERFORMANCE;
     } else if (subArgs.equalsIgnoreCase("balanced") || subArgs.equalsIgnoreCase("bal")) {
-      newMode = 1;
+      newMode = POWER_MODE_BALANCED;
     } else if (subArgs.equalsIgnoreCase("saver") || subArgs.equalsIgnoreCase("powersaver")) {
-      newMode = 2;
+      newMode = POWER_MODE_POWERSAVER;
     } else if (subArgs.equalsIgnoreCase("ultra") || subArgs.equalsIgnoreCase("ultrasaver")) {
-      newMode = 3;
+      newMode = POWER_MODE_ULTRASAVER;
+    } else if (subArgs.equalsIgnoreCase("locked") || subArgs.equalsIgnoreCase("lock") ||
+               subArgs.equalsIgnoreCase("max")) {
+      newMode = POWER_MODE_LOCKED;
     } else {
       // Try parsing as number
       int modeNum = subArgs.toInt();
@@ -231,7 +240,7 @@ const char* cmd_power(const String& argsInput) {
     }
     
     if (newMode >= POWER_MODE_COUNT) {
-      return "Error: Invalid mode. Use: perf, balanced, saver, ultra, or 0-3";
+      return "Error: Invalid mode. Use: perf, balanced, saver, ultra, locked, or 0-4";
     }
     
     DEBUG_SYSTEMF("[POWER_CMD] Setting gSettings.powerMode to %d", newMode);
@@ -355,7 +364,7 @@ static const char* cmd_powersave(const String& argsInput) {
              "Power saving: %lu min (%s)",
              (unsigned long)gSettings.powerSaveTimeoutMinutes,
              gSettings.powerSaveTimeoutMinutes == 0 ? "disabled"
-                                                    : "blanks OLED + downclocks when idle");
+                                                    : "blanks OLED; CPU downclock is mode-dependent");
     return getDebugBuffer();
   }
   long v = arg.toInt();
@@ -370,9 +379,9 @@ static const char* cmd_powersave(const String& argsInput) {
 // Command table
 // Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
 const CommandEntry powerCommands[] = {
-  {"power",         "Power management [mode] [auto] [threshold]", true, cmd_power,         "Usage:\n  power - show current power status\n  power mode <perf|balanced|saver|ultra|0-3>\n  power auto <on|off>\n  power threshold <0-100>"},
+  {"power",         "Power management [mode] [auto] [threshold]", true, cmd_power,         "Usage:\n  power - show current power status\n  power mode <perf|balanced|saver|ultra|locked|0-4>\n  power auto <on|off>\n  power threshold <0-100>"},
   {"powercooldown", "Sleep transition cooldown (ms; 0 disables)", true, cmd_powercooldown, "Usage: powercooldown <0..60000>"},
-  {"powersave",     "Idle power-save: OLED off + downclock (0 disables)", true, cmd_powersave, "Usage: powersave <0..1440>"}
+  {"powersave",     "Idle power-save: OLED off + optional downclock (0 disables)", true, cmd_powersave, "Usage: powersave <0..1440>"}
 };
 
 const size_t powerCommandsCount = sizeof(powerCommands) / sizeof(powerCommands[0]);
@@ -390,7 +399,7 @@ static bool isPowerModuleConnected() {
 static const SettingEntry powerSettingEntries[] = {
   // Fields are uint8_t — must use SETTING_U8 to avoid 4-byte-write overflow
   // into adjacent struct members. See System_Settings.h SettingType enum.
-  { "mode", SETTING_U8, &gSettings.powerMode, 0, 0, nullptr, 0, 3, "Power Mode", "Performance,Balanced,PowerSaver,UltraSaver", false, nullptr, "power mode" },
+  { "mode", SETTING_U8, &gSettings.powerMode, 0, 0, nullptr, 0, 4, "Power Mode", "Performance,Balanced,PowerSaver,UltraSaver,Locked", false, nullptr, "power mode" },
   { "autoMode", SETTING_BOOL, &gSettings.powerAutoMode, false, 0, nullptr, 0, 1, "Auto Mode", nullptr, false, nullptr, "power auto" },
   { "batteryThreshold", SETTING_U8, &gSettings.powerBatteryThreshold, 20, 0, nullptr, 0, 100, "Battery Threshold (%)", nullptr, false, nullptr, "power threshold" },
   { "displayDimLevel", SETTING_U8, &gSettings.powerDisplayDimLevel, 30, 0, nullptr, 0, 100, "Display Dim Level (%)", nullptr, false, nullptr, "powerdim" },

@@ -37,12 +37,17 @@
 typedef void (*TextEntryCommitFn)(const char* text);
 typedef void (*TextEntryCancelFn)(void);
 
+// Every field carries a default initializer: at least one caller
+// stack-allocates this bare (no `= {}`), so a defaulted field is the only
+// thing keeping a newly added member from being read uninitialized.
 struct TextEntryConfig {
-  const char*       prompt;     // banner text e.g. "ESPNow Name"
-  const char*       initial;    // pre-fill (may be null/empty)
-  size_t            maxLen;     // chars excluding NUL; capped at 32
-  TextEntryCommitFn onCommit;   // required
-  TextEntryCancelFn onCancel;   // optional, may be null
+  const char*       prompt   = nullptr;  // banner text e.g. "ESPNow Name"
+  const char*       initial  = nullptr;  // pre-fill (may be null/empty)
+  size_t            maxLen   = 0;        // chars excluding NUL; capped at 32
+  TextEntryCommitFn onCommit = nullptr;  // required
+  TextEntryCancelFn onCancel = nullptr;  // optional, may be null
+  bool              isSecret = false;    // true = never log buffer contents
+                                         // (passwords/PSKs); length only
 };
 
 // Begin a text-entry session. Replaces any active one. Returns false on
@@ -66,11 +71,12 @@ typedef void (*TextEntryCommitFn)(const char* text);
 typedef void (*TextEntryCancelFn)(void);
 
 struct TextEntryConfig {
-  const char*       prompt;
-  const char*       initial;
-  size_t            maxLen;
-  TextEntryCommitFn onCommit;
-  TextEntryCancelFn onCancel;
+  const char*       prompt   = nullptr;
+  const char*       initial  = nullptr;
+  size_t            maxLen   = 0;
+  TextEntryCommitFn onCommit = nullptr;
+  TextEntryCancelFn onCancel = nullptr;
+  bool              isSecret = false;
 };
 
 inline bool g2BeginTextEntry(const TextEntryConfig&)  { return false; }

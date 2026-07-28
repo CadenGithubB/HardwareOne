@@ -1,4 +1,4 @@
-# HardwareOne v0.99.3 - Quick Start Guide
+# HardwareOne v0.99.4 - Quick Start Guide
 
 This guide will help you get up and running with Hardware One.
 
@@ -27,7 +27,7 @@ Choose the setup that matches your deployment type. All types use the same Softw
 
 1. Connect your I2C sensors and peripherals via Stemma QT cables and GPIO headers. 
 2. Connect the SSD1306 OLED display via I2C.
-3. Connect the Seesaw Gamepad via Stemma QT.
+3. Connect your input device via Stemma QT - either the Seesaw Gamepad (`INPUT_DEVICE_TYPE=1`, the default) or the ANO rotary encoder (`INPUT_DEVICE_TYPE=2`). Only one: they share the bus and the build compiles exactly one driver.
 4. **Optional battery:** Connect a LiPo battery to the board's JST connector or BFF module if you want the device to run untethered. If you skip this, the board will be powered over USB.
 5. **Optional battery:** Make sure the power switch is in the **Off** position before continuing.
 
@@ -38,6 +38,20 @@ Choose the setup that matches your deployment type. All types use the same Softw
 
 
 
+
+### Wearable Companion (G2 glasses / R1 ring)
+
+Needs no extra wiring - the glasses and ring are BLE peripherals. Build with
+`ENABLE_BLUETOOTH=1` and `ENABLE_G2_GLASSES=1` (and `ENABLE_R1_HEALTH=1`, the
+default, for ring vitals), then after Software Setup:
+
+1. `openg2` to connect the glasses. Tap a temple to open the on-lens menu.
+2. Pair the R1 ring from the OLED (**Connect → Bluetooth → R1 Ring**) or the web **Bluetooth** page, then `ringconnect`.
+3. `bleautoreconnect r1-ring on` makes the ring reconnect at boot and reseek after unexpected drops.
+4. `healthtrack on` starts background vitals logging.
+
+Both return OK when the connection is *started*, not finished - give them a
+moment before expecting status to read connected.
 
 ### Bonded Microcontrollers
 With `ENABLE_BONDED_MODE=1`, two devices can bond into a paired set. One acts as the local controller (typically with OLED + gamepad), the other as the remote endpoint. The controller gains a **Remote** tab in its web UI showing the paired device's features, even if those features aren't compiled into the controller. Command registries are shared between the two, so either device can execute commands on the other transparently.
@@ -105,13 +119,32 @@ idf.py set-target esp32s3    # or esp32
 idf.py -p PORT flash monitor
 ```
 
-The project includes target-specific defaults (`sdkconfig.defaults.esp32` and `sdkconfig.defaults.esp32s3`) that handle the most important differences automatically, including:
+Two layers of defaults are applied for you, and it helps to know which is which.
 
-- **PSRAM mode:** ESP32 uses Quad SPI PSRAM at 40 MHz; ESP32-S3 uses Octal SPI PSRAM at 80 MHz. Using the wrong mode will cause a boot failure or crash.
-- **Flash mode:** ESP32 uses `DIO`; ESP32-S3 can use `QIO`.
+**Per chip family** - `sdkconfig.defaults.esp32` / `sdkconfig.defaults.esp32s3`, picked automatically by `set-target`:
+
+- **PSRAM speed:** ESP32 runs PSRAM at 40 MHz; ESP32-S3 at 80 MHz.
+- **Flash mode:** ESP32 uses `DIO`; ESP32-S3 uses `QIO`.
 - **Bluetooth:** ESP32 supports Classic BT + BLE 4.2; ESP32-S3 is **BLE 5.0 only** - no Classic Bluetooth.
 
-If you need to deviate from the defaults, run `idf.py menuconfig` after `set-target`. See [BOARD_SWITCHING.md](BOARD_SWITCHING.md) for the full per-board menuconfig reference.
+**Per board** - `boards/<name>.defaults`, layered on top of the family file. This is where the Arduino pin variant, flash size, partition table, and **PSRAM mode** come from:
+
+| Board | Board file | PSRAM mode | Flash |
+| ----- | ---------- | :--------: | :---: |
+| Unexpected Maker FeatherS3 | `feathers3` | **Quad** | 16 MB |
+| Seeed XIAO ESP32-S3 | `xiao_s3` | **Octal** | 8 MB |
+| Adafruit QT Py ESP32 | `qtpy_esp32` | **Quad** | 8 MB |
+| Adafruit Feather ESP32 V2 | `feather_esp32_v2` | **Quad** | 8 MB |
+
+> **PSRAM mode is a property of the board, not of the chip family.** Both ESP32-S3
+> boards here use different modes - the XIAO is octal, the FeatherS3 is quad. Do
+> not assume "S3 means octal". Setting the wrong mode does **not** fail loudly:
+> the device boots normally and reports 0 KB PSRAM, so the first symptom is the
+> LLM, large web responses, or ESP-NOW buffers running out of memory at runtime.
+
+You do not normally set any of this by hand - selecting the right board file does
+it. If you do need to deviate, run `idf.py menuconfig` after `set-target`. See
+[BOARD_SWITCHING.md](BOARD_SWITCHING.md) for the full per-board menuconfig reference.
 
 ---
 
@@ -121,10 +154,11 @@ On first boot, the device detects that no users file exists and launches the set
 
 ### Step 1 - Choose setup mode
 
-You'll be prompted to choose:
+You'll be prompted to choose one of three modes:
 
 - **Basic** - creates your admin account and uses default settings for everything else. Quickest way to get running.
-- **Advanced** - runs the full configuration wizard after account creation, letting you configure features, sensors, WiFi, device name, and web UI theme.
+- **Advanced** - runs the full configuration wizard after account creation.
+- **Import from Backup** - restores settings from a `.hwbackup` file instead of configuring by hand. Only offered on builds with WiFi and the migration tool compiled in.
 
 ### Step 2 - Create your admin account
 
@@ -132,19 +166,36 @@ Enter a username and password when prompted. These are your credentials for the 
 
 ### Step 3 - Advanced wizard (Advanced mode only)
 
-The wizard walks through seven pages:
+The wizard has up to nine pages. Five always appear; four are shown only when
+the relevant feature is enabled, so the page count you see (`SETUP 3/6` etc.)
+depends on what you turned on earlier in the wizard.
 
-1. **Features** - enable or disable network features (WiFi, HTTP server, Bluetooth, ESP-NOW)
-2. **Sensors** - enable or disable I2C sensors and display
-3. **Network** - auto-start options and device name
-4. **System** - timezone and log level
-5. **WiFi** - scan for networks and enter credentials. You can select by number, type an SSID directly, rescan, or skip.
-6. **Device name** - sets the name used for Bluetooth and ESP-NOW identity (default: `HardwareOne`)
-7. **Web UI theme** - choose Light or Dark
+| # | Page | Shown when | Contents |
+| - | ---- | ---------- | -------- |
+| 1 | **Features** | always | Enable/disable network features - WiFi, Web Interface, Bluetooth, ESP-NOW - each with a rough heap cost |
+| 2 | **Web Mode** | Web Interface enabled on page 1 | `HTTP` or `HTTPS` (HTTPS costs ~20 KB more RAM; picking it generates a self-signed cert) |
+| 3 | **Bluetooth Mode** | Bluetooth enabled on page 1 | `Server (phone)` or `G2 Glasses` (~10 KB more RAM) |
+| 4 | **Sensors & Display** | always | Enable/disable the display and each I2C sensor |
+| 5 | **Startup & Auto-start** | always | WiFi auto-connect, ESP-NOW mesh, MQTT auto-start, plus per-sensor auto-start |
+| 6 | **System Settings** | always | Timezone, log level, NTP server, LED startup effect |
+| 7 | **ESP-NOW Identity** | ESP-NOW enabled | Device name (used for **both** Bluetooth and ESP-NOW, default `HardwareOne`), room, zone, mobile/stationary. All optional |
+| 8 | **MQTT Broker** | MQTT enabled on page 1 **and** MQTT auto-start on page 5 | Broker host, port, username, password |
+| 9 | **WiFi Setup** | WiFi enabled | Scan and join. Select by number, type an SSID directly, `rescan`, or `skip` |
+
+On any page, `b` / `back` returns to the previous one.
+
+> **Skipping the ESP-NOW Identity page turns ESP-NOW off.** Answering `n` (or
+> pressing Enter) at that page's prompt sets `espnowEnabled = false`, because the
+> mesh cannot start without a device name. If you want ESP-NOW, answer `c` and
+> at minimum accept the default name. You can set it later with `espnowsetname`
+> and re-enable with `espnowenabled 1`.
+
+There is no theme page in the wizard - the web UI theme is chosen later from the
+web **Settings** page.
 
 ### Step 4 - Access the UI
-> If you chose Basic mode or skipped WiFi during the wizard, the web server will not auto-start. This means that the Serial interface and the OLED interface (if connected) are the only ones available. Run `webstart` in the serial console to start it manually, or `webauto on` to enable auto-start on every boot.
-> If you chose Advanced mode and enabled Wifi during the wizard, the device will connect to WiFi and prints its IP address in the serial monitor. Navigate to that address in a browser to access the web UI. Use the username and password entered in the first time setup to login.
+> If you chose Basic mode, or turned the Web Interface off, or skipped WiFi during the wizard, the web server will not come up on its own. The Serial interface and the OLED interface (if connected) are then the only ones available. Run `openhttp` in the serial console to start the server for this session, or `httpAutoStart 1` to have it start on every boot.
+> If you enabled the Web Interface and joined a network during the wizard, the device connects to WiFi and prints its IP address in the serial monitor. Navigate to that address in a browser to reach the web UI, and log in with the username and password you created in Step 2.
 
 Type `help` at any time in the serial console to see all available commands.
 

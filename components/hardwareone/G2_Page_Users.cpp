@@ -220,6 +220,7 @@ static void addUserCommit(const char* text) {
   cfg.maxLen   = 32;
   cfg.onCommit = addPassCommit;
   cfg.onCancel = addUserCancel;
+  cfg.isSecret = true;   // new-user password — keep out of debug logs
   if (!g2BeginTextEntry(cfg)) { DEBUG_G2F("[G2-USERS] password entry failed"); showListMenu(); }
 }
 

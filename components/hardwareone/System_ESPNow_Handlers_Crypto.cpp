@@ -13,7 +13,7 @@
 #include <esp_wifi.h>
 
 #include "System_Debug.h"
-#include "System_ESPNow.h"          // EspNowState (gEspNow), V4RxCtx is in .cpp — see note
+#include "System_ESPNow.h"          // EspNowState (gEspNow); V4RxCtx comes from System_ESPNow_RxCtx.h
 #include "System_ESPNow_Crypto.h"
 #include "System_ESPNow_Identity.h"
 #include "System_ESPNow_MeshKeys.h"
@@ -40,34 +40,11 @@ extern void bondNotifySessionEstablished(const uint8_t* peerMac);
 // handlers below no longer derive it explicitly — it's already in place by the
 // time sessionDeriveAeadKeys returns.
 
-// V4RxCtx is defined in System_ESPNow.cpp as a private struct. To keep handlers
-// in a separate translation unit, we duplicate its declaration here — and the
-// duplicate is CURRENTLY OUT OF SYNC. The original carries two extra bools
-// between isPaired and deviceName:
-//
-//     bool isAuthenticated;     // SESSION_FRAME unwrap OR BROADCAST_AUTH verified
-//     bool isSessionEncrypted;  // AEAD-wrapped SESSION_FRAME specifically
-//
-// This copy has neither, so it describes a shorter object than the one the
-// dispatcher actually passes. That is an ODR violation: both translation units
-// compile and link clean, and nothing diagnoses the disagreement.
-//
-// What that means for code in this file: the layouts agree up to and including
-// isPaired, so recv_info, h, payload, payloadLen and isPaired all read
-// correctly. deviceName does NOT — through this declaration it lands on the
-// bytes the real struct uses for its two auth bools and their padding, so it
-// would silently hand back garbage instead of a string. Any field appended
-// after deviceName is unsafe for the same reason. Use only the fields at or
-// before isPaired here; every handler below does. Adding the two bools back is
-// the fix — until then, a change to either struct must be mirrored in the other.
-struct V4RxCtx {
-  const esp_now_recv_info* recv_info;
-  const EspNowV4Header*    h;
-  const uint8_t*           payload;
-  uint16_t                 payloadLen;
-  bool                     isPaired;
-  const char*              deviceName;
-};
+// V4RxCtx comes from the shared header now (Phase 0 relay groundwork). This
+// TU used to carry a hand-copied duplicate that had drifted out of sync — an
+// ODR violation that made deviceName (and anything after isPaired) read
+// garbage here. With the single shared definition, every field is safe.
+#include "System_ESPNow_RxCtx.h"
 
 // v4_send_frame is a non-static, file-scope function in System_ESPNow.cpp.
 // Phase 3.5 task #32: flags widened uint8_t -> uint16_t to carry the
@@ -123,7 +100,10 @@ bool ensureUnencryptedPeer(const uint8_t mac[6]) {
   if (esp_now_is_peer_exist(mac)) return true;
   esp_now_peer_info_t info = {};
   memcpy(info.peer_addr, mac, 6);
-  info.channel = gEspNow ? gEspNow->channel : 0;
+  // channel 0 = follow-the-radio, matching every other add_peer site. Pinning
+  // gEspNow->channel here froze this peer on the init-time channel, so a later
+  // AP roam / `espnowchannel` change silently broke KEY_EX to it.
+  info.channel = 0;
   info.ifidx   = WIFI_IF_STA;
   info.encrypt = false;
   esp_err_t rc = esp_now_add_peer(&info);

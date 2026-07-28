@@ -29,13 +29,37 @@ static size_t commandRegistrySize = 0;
 
 // Count of registerCommand() calls that were dropped because the registry was
 // full. Bumped silently in the hot path (which runs during early boot before
-// the debug queue is reliably up); a single summary WARN is emitted at the end
+// the debug queue is reliably up); a single summary line is emitted at the end
 // of initializeCommandSystem so the failure mode is loud the next boot but the
 // registration loop itself stays log-free.
+//
+// That summary uses logSystemEvent(), NOT a WARN macro. initializeCommandSystem
+// runs at HardwareOne.cpp:1372 but initDebugSystem() not until :1476, so every
+// DEBUGF/WARN variant here lands in debugQueuePrintf's `if (!getDebugQueue())
+// return;` (System_Debug.cpp:777) and is discarded — the WARN_COMMANDF that used
+// to be here could never have fired, and WARN_COMMANDF is additionally gated on
+// getLogLevel() >= LOG_LEVEL_WARN. logSystemEvent echoes to Serial immediately,
+// replays into the durable event log once the queue exists, and ignores both
+// debug flags and log level.
 static size_t gCommandRegistryDropped = 0;
 
-// Maximum number of command modules we can track for debug summary
-#define MAX_MODULES 32
+// Same idea one table over. Registration itself is NOT affected by this cap —
+// registerCommands() runs before the guard — but a truncated registeredModules[]
+// makes printCommandModuleSummary list fewer modules than exist, while
+// cmd_commandmodulesummary's header still reports the true count from
+// getCommandModules(). A listing that disagrees with its own total is the most
+// confusing shape this failure could take, so count the drops.
+static size_t gModuleSummaryDropped = 0;
+
+// Maximum number of command modules we can track for the debug summary.
+// gCommandModules[] has 44 rows in source (27 compile in the committed FeatherS3
+// config), so 64 is permanent headroom even with every feature turned on. Cost is
+// 12 B per slot — three words — and it lands in PSRAM, not internal DRAM: the
+// array below is EXT_RAM_BSS_ATTR and CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY
+// is set, so 32 -> 64 is +384 B of external RAM and zero DRAM (verified against
+// the ELF: _ZL17registeredModules was 0x180 at 0x3c50d918). Overflow should now
+// be unreachable, but it is still counted rather than dropped in silence.
+#define MAX_MODULES 64
 
 // Module tracking for debug summary
 EXT_RAM_BSS_ATTR static ModuleInfo registeredModules[MAX_MODULES];
@@ -299,19 +323,29 @@ void initializeCommandSystem() {
       registeredModules[registeredModuleCount].commands = modules[i].commands;
       registeredModules[registeredModuleCount].count = modules[i].count;
       registeredModuleCount++;
+    } else {
+      gModuleSummaryDropped++;
     }
   }
 
   DEBUG_COMMAND_SYSTEMF("[REG_INIT] Registry initialized with %d commands", commandRegistrySize);
 
-  // If we hit the cap, surface it loudly — silent drops are how `g2scan`,
-  // all of `even_r1`, and downstream modules vanished from the registry
-  // last time. Bump MAX_COMMANDS in System_Command.h to fix.
+  // If we hit either cap, surface it loudly — silent drops are how `g2scan`,
+  // all of `even_r1`, and downstream modules vanished from the registry last
+  // time. logSystemEvent rather than a WARN macro because the debug queue does
+  // not exist this early in boot; see gCommandRegistryDropped above for why.
   if (gCommandRegistryDropped > 0) {
-    WARN_COMMANDF("[REG_INIT] DROPPED %zu commands: registry full at MAX_COMMANDS=%d. "
-                  "Trailing modules in gCommandModules are partially or fully missing — "
-                  "bump MAX_COMMANDS in System_Command.h.",
-                  gCommandRegistryDropped, (int)MAX_COMMANDS);
+    logSystemEvent("CMDREG", "DROPPED %zu commands: registry full at MAX_COMMANDS=%d. "
+                   "Trailing modules in gCommandModules are partially or fully missing — "
+                   "bump MAX_COMMANDS in System_Command.h.",
+                   gCommandRegistryDropped, (int)MAX_COMMANDS);
+  }
+  if (gModuleSummaryDropped > 0) {
+    logSystemEvent("CMDREG", "DROPPED %zu modules from the summary table at MAX_MODULES=%d. "
+                   "Their commands ARE registered and dispatch normally, but "
+                   "printCommandModuleSummary lists fewer modules than commandmodulesummary "
+                   "counts — bump MAX_MODULES in System_Command.cpp.",
+                   gModuleSummaryDropped, (int)MAX_MODULES);
   }
 
   // Update global pointers

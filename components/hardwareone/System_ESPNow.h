@@ -70,7 +70,10 @@ String base64Encode(const uint8_t* data, size_t len);
 #define PAYLOAD_STATUS "status"
 #define PAYLOAD_TIME_SYNC "timeSync"
 
-// Bond roles (stored as uint8_t in gSettings.bondRole)
+// Bond roles (stored as uint8_t in gSettings.bondRole when ENABLE_BONDED_MODE).
+// When bonded mode is compiled out, helpers are false/"none" stubs so mesh-only
+// builds can still include this header.
+#if ENABLE_BONDED_MODE
 enum BondRole {
   BOND_ROLE_WORKER = 0,   // compute/network device
   BOND_ROLE_MASTER = 1    // display/gamepad device
@@ -78,6 +81,11 @@ enum BondRole {
 inline bool isBondMaster() { return gSettings.bondRole == BOND_ROLE_MASTER; }
 inline bool isBondWorker() { return gSettings.bondRole == BOND_ROLE_WORKER; }
 inline const char* bondRoleStr() { return isBondMaster() ? "master" : "worker"; }
+#else
+inline bool isBondMaster() { return false; }
+inline bool isBondWorker() { return false; }
+inline const char* bondRoleStr() { return "none"; }
+#endif
 
 // Set mesh role at runtime with logging. Does not persist — reboot restores saved role.
 void setMeshRole(MeshRole role, const char* reason);
@@ -198,15 +206,30 @@ struct MeshPeerHealth {
   uint32_t ackCount;             // ACKs received
   uint32_t lastBootCounter;      // Last known boot counter from this peer
   int8_t rssi;                   // Last RSSI from heartbeat payload
+  int16_t linkRssiEwma;          // EWMA (alpha 1/4) of OUR radio's per-frame RSSI for
+                                 // frames from this peer — the true A<->B link quality.
+                                 // `rssi` above is peer-REPORTED (its heartbeat payload,
+                                 // AP-referenced); this one is measured here. QUARTER-dB
+                                 // fixed point (value = dBm * 4): a whole-dB int8 EWMA
+                                 // has a ±3 dB truncation deadband, which would eat the
+                                 // planned route metric's entire hysteresis margin. 0 =
+                                 // no sample yet. Readers report (v + (v>=0?2:-2)) / 4.
+                                 // Phase 0 relay groundwork: later route metrics key on
+                                 // this (docs/ESPNOW_RELAY_RESTORE_PLAN.md).
   bool isActive;                 // true if this slot is in use
 };
 
 // hbRssi: pass RSSI from V4PayloadHeartbeat; use -128 to leave peer->rssi unchanged.
-void noteMeshPeerRxActivity(const uint8_t* mac, EspNowMeshRxKind kind, int8_t hbRssi = -128);
+// linkRssi: OUR radio's RSSI for the frame that triggered this call (from
+// recv_info->rx_ctrl); use -128 when there is no radio frame in hand (e.g.
+// pairing bootstrap). Feeds MeshPeerHealth::linkRssiEwma.
+void noteMeshPeerRxActivity(const uint8_t* mac, EspNowMeshRxKind kind, int8_t hbRssi = -128,
+                            int8_t linkRssi = -128);
 
 // Fills JsonArray for espnow meshstatus: union of active gMeshPeers + paired remotes not yet in slots.
 // JSON keys: mac, name, alive (mesh HB), activityAlive, lastHeartbeat (mesh HB ms), lastRxActivity,
-// lastAck, heartbeatCount, ackCount, secondsSinceHeartbeat, secondsSinceActivity.
+// lastAck, heartbeatCount, ackCount, secondsSinceHeartbeat, secondsSinceActivity,
+// linkRssi (locally-measured per-frame EWMA dBm; 0 = no sample yet).
 void buildMeshStatusPeersJson(JsonArray peers, uint32_t nowMillis, int* outTotalPeers);
 
 // ==========================
@@ -1406,7 +1429,7 @@ inline void sendEspNowStreamMessage(const char* topic, const char* payload) {}
 inline bool isSelfMac(const uint8_t* mac) { return false; }
 inline bool isMeshPeerAlive(const MeshPeerHealth* peer) { return false; }
 inline bool isMeshPeerRecentlyActive(const MeshPeerHealth*) { return false; }
-inline void noteMeshPeerRxActivity(const uint8_t*, EspNowMeshRxKind, int8_t = -128) {}
+inline void noteMeshPeerRxActivity(const uint8_t*, EspNowMeshRxKind, int8_t = -128, int8_t = -128) {}
 inline bool meshEnabled() { return false; }
 inline bool resolveDeviceNameOrMac(const String& nameOrMac, uint8_t* outMac) {
   (void)nameOrMac; (void)outMac;

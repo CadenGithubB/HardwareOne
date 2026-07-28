@@ -27,6 +27,7 @@
 #include "System_R1_Protocol.h"  // R1Encoder + decoder (real wire format)
 #include "System_G2_Protocol.h"  // g2BuildRingRawDataPush + G2RingPushFields
 #include "G2_Health.h"           // history append + daily backfill
+#include "System_Events.h"       // systemEventPost — ring connect/disconnect bus events
 
 #include <freertos/FreeRTOS.h>
 #include <time.h>
@@ -282,6 +283,30 @@ struct R1TelemetryCache {
 };
 static R1TelemetryCache gR1Cache;
 
+// Last wear enum we posted a bus event for (1=notWear, 2=wear). 0 = none yet
+// this link. Unknown (0) samples do not clear this — avoids re-firing on
+// intermittent unknowns. Reset on disconnect so the next session can edge.
+static uint8_t sRingWearPosted = 0;
+
+// Update wear cache + edge-fire ring_worn / ring_not_worn (G2 worn analogue).
+// wear: 0=unknown (ignored for events), 1=notWear, 2=wear.
+static void ringNoteWear(uint8_t wear, uint32_t rxMs) {
+  if (wear > 2) return;
+  gR1Cache.wear      = wear;
+  gR1Cache.wearRxMs  = rxMs;
+  gR1Cache.wearValid = true;  // sample received (0=unknown still counts)
+  if (wear == 0 || wear == sRingWearPosted) return;
+
+  sRingWearPosted = wear;
+  const char* name =
+      gRingDeviceName.length() > 0 ? gRingDeviceName.c_str() : "R1";
+  if (wear == 2) {
+    systemEventPost(SYSEVT_RING_WORN, name);
+  } else {
+    systemEventPost(SYSEVT_RING_NOT_WORN, name);
+  }
+}
+
 // Age in seconds for UI/JSON. Prefer ring epoch when wall clock looks synced
 // (≥ 2020-09); else millis since local receive. −1 = unknown.
 static int32_t ringSampleAgeSec(uint32_t ringTs, uint32_t rxMs) {
@@ -472,9 +497,7 @@ static void ringExtractTelemetryCache(const R1Decoded& d) {
       g2HealthNoteSample(HEALTH_METRIC_BATTERY, (int16_t)b, 0);
     }
     if (d.payloadLength >= 2 && d.payload[1] <= 2) {
-      gR1Cache.wear      = d.payload[1];
-      gR1Cache.wearRxMs  = rx;
-      gR1Cache.wearValid = true;
+      ringNoteWear(d.payload[1], rx);
     }
     return;
   }
@@ -483,9 +506,7 @@ static void ringExtractTelemetryCache(const R1Decoded& d) {
   if (d.module == R1_MODULE_SYSTEM && d.cmd == R1_CMD_SYSTEM &&
       d.subCmd == R1_SUB_WEAR_STATUS && d.payloadLength >= 1 &&
       d.payload[0] <= 2) {
-    gR1Cache.wear      = d.payload[0];
-    gR1Cache.wearRxMs  = millis();
-    gR1Cache.wearValid = true;
+    ringNoteWear(d.payload[0], millis());
   }
 }
 
@@ -843,6 +864,10 @@ class RingClientCallbacks : public BLEClientCallbacks {
     if (wasConnected) {
       BROADCAST_PRINTF("[RING] Dropped BLE link — ring is no longer connected");
       ringPushStatusEvent("disconnect");
+      systemEventPost(SYSEVT_RING_DISCONNECTED,
+                      gRingDeviceName.length() > 0 ? gRingDeviceName.c_str() : "R1",
+                      gRingDeviceAddress.length() > 0 ? gRingDeviceAddress.c_str() : nullptr);
+      sRingWearPosted = 0;
       blePeerNoteLinkLost(BLE_PEER_R1_RING);
     }
   }
@@ -957,22 +982,15 @@ bool g2RingScan(uint32_t timeoutSec) {
 // BALANCED (~50 ms intervals) gives the controller ~4× more idle time
 // to scan and complete the new connection. Restored on every exit path
 // — destructor fires regardless of how ringDoConnect returns.
+// Refcounted: asks the arbiter in G2_Glasses.cpp for BALANCED and releases on
+// every exit path. Nesting-safe — if something else is also holding BALANCED,
+// whichever guard leaves first no longer drags the links back to HIGH under the
+// other one. (That was a real defect while both guards set absolute values.)
 struct GlassesPriorityGuard {
-  bool dropped;
-  GlassesPriorityGuard() : dropped(false) {
-    int n = g2SetAllTemplesConnPriority(/*high=*/false);
-    if (n > 0) {
-      dropped = true;
-      DEBUG_G2F("[RING] Dropped %d glasses link(s) to BALANCED priority "
-                "for ring connect window", n);
-    }
-  }
-  ~GlassesPriorityGuard() {
-    if (dropped) {
-      int n = g2SetAllTemplesConnPriority(/*high=*/true);
-      DEBUG_G2F("[RING] Restored %d glasses link(s) to HIGH priority", n);
-    }
-  }
+  GlassesPriorityGuard()  { g2ConnPriRequestBalanced("ring-connect"); }
+  ~GlassesPriorityGuard() { g2ConnPriReleaseBalanced("ring-connect"); }
+  GlassesPriorityGuard(const GlassesPriorityGuard&) = delete;
+  GlassesPriorityGuard& operator=(const GlassesPriorityGuard&) = delete;
 };
 
 // `savedMac`: when non-empty, do a directed connect to that MAC without
@@ -1131,6 +1149,11 @@ bool ringPerformConnect(const String& savedMac /* = String() */) {
   BROADCAST_PRINTF("[RING] Connected to %s (auth + time sync sent)",
                    gRingDeviceName.c_str());
   ringPushStatusEvent("connect-ok");
+  // Mirror G2_Glasses: SSE status push + typed bus event for automations /
+  // `events` / system_events consumers. subject=name, detail=mac.
+  systemEventPost(SYSEVT_RING_CONNECTED,
+                  gRingDeviceName.length() > 0 ? gRingDeviceName.c_str() : "R1",
+                  gRingDeviceAddress.length() > 0 ? gRingDeviceAddress.c_str() : nullptr);
 
   // Persist ring MAC into the BLE peer registry. bleSavePeerMac is a
   // no-op when the value already matches — auto-reconnect is gated
@@ -1258,6 +1281,10 @@ void g2RingInvalidateLink() {
   if (wasConnected) {
     DEBUG_G2F("[RING] Link invalidated (BLE stack teardown)");
     ringPushStatusEvent("disconnect");
+    systemEventPost(SYSEVT_RING_DISCONNECTED,
+                    gRingDeviceName.length() > 0 ? gRingDeviceName.c_str() : "R1",
+                    gRingDeviceAddress.length() > 0 ? gRingDeviceAddress.c_str() : nullptr);
+    sRingWearPosted = 0;
     blePeerNoteLinkLost(BLE_PEER_R1_RING);
   }
 }

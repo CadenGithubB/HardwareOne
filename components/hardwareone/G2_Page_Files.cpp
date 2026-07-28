@@ -19,12 +19,14 @@
 // calling task's auth identity (VFS::openGuarded permission checks per
 // entry). The cache is invalidated via the identity-generation protocol
 // — see System_AuthIdentity.h for the full doc block. The short version:
-// every time g2ShowFilesMenu runs we call fm->refresh(), which is a
-// no-op when the cache's generation matches gIdentityGeneration and a
-// re-scan otherwise. Producers (pairing, user add/del/promote/demote)
+// while already on the Files page, g2ShowFilesMenu calls fm->refresh(),
+// which is a no-op when the cache's generation matches gIdentityGeneration
+// and a re-scan otherwise. Producers (pairing, user add/del/promote/demote)
 // bump the generation, so the next refresh() picks up the new picture.
-// If you add a new caching subsystem that depends on auth, follow the
-// same pattern.
+// Re-entering Files from another hijack page (or after a safety timeout)
+// uses forceRescan() so sizes / new files written while away are visible
+// without requiring an up-then-down folder hop. If you add a new caching
+// subsystem that depends on auth, follow the same pattern.
 
 #include "G2_Page_Files.h"
 
@@ -50,9 +52,17 @@
 
 static FileManager* gFilesFm = nullptr;
 
-// Row buffer + pointer table for list rendering. Sized to fit a handful of
-// "header" rows (back, ..) plus FILE_MANAGER_MAX_CACHED_ITEMS data rows.
-#define FILES_MAX_ROWS  (FILE_MANAGER_MAX_CACHED_ITEMS + 4)
+// Paginated directory view. The lens can NOT render a whole big directory
+// as one list: the compound CREATE payload caps at 1 KB (~20 filename rows
+// before g2BuildCreateMixedListTextPb runs out of buffer and the page
+// silently fails) and the firmware list widget itself tops out near 20
+// items. Directories that outgrow one screen (e.g. months of accumulated
+// health-*.csv captures in /logging_captures/sensors) page through the
+// shared G2Paginator instead — same chrome as Settings / LED / LLM menu.
+#define FILES_VISIBLE_ENTRIES 12
+// back + ".. (up)" + FILES_VISIBLE_ENTRIES entries + Prev + Next = 16;
+// +2 slack for the "(empty)" marker / min-render padding.
+#define FILES_MAX_ROWS  (FILES_VISIBLE_ENTRIES + 6)
 #define FILES_ROW_LEN   48
 // Keep list placement visually stable across directories with very different
 // item counts. The firmware tends to vertically center short lists in a tall
@@ -60,13 +70,19 @@ static FileManager* gFilesFm = nullptr;
 // the same top-left position as you browse (/photos vs /sd, etc.).
 static constexpr size_t kFilesMinRenderRows = 8;
 
-// Row buffers in PSRAM — ~3.3 KB total. Filled by buildRows() from the
+// Row buffers in PSRAM — ~1 KB total. Filled by buildRows() from the
 // page worker, read by the BLE notify task; both run in regular task
 // context, no DMA / ISR access.
 EXT_RAM_BSS_ATTR static char        gFilesRows[FILES_MAX_ROWS][FILES_ROW_LEN];
 EXT_RAM_BSS_ATTR static const char* gFilesRowPtrs[FILES_MAX_ROWS];
 EXT_RAM_BSS_ATTR static char        gFilesPathTitleBuf[FILES_ROW_LEN];
 static size_t      gFilesRowCount = 0;
+
+// Current paginator page for the directory listing. Reset to 0 on any
+// directory change (navigate in/up, re-entry from outside Files);
+// preserved across in-page redraws (chooser dismiss, overlay expiry) —
+// g2PaginatorPrepare clamps it if the directory shrank meanwhile.
+static size_t      gFilesPage = 0;
 
 // Mixed list+text layout: keep the path in a TextObject at top-right while
 // pinning the list to the top-left quadrant/half (not vertically centered).
@@ -77,7 +93,8 @@ static constexpr G2ContainerGeom kFilesListGeom = G2_GEOM_LEFT_HALF;
 static constexpr G2ContainerGeom kFilesPathGeom = { 280,   8, 288,  40 };
 
 // Indices we keep so taps know what idx → which directory entry. -1 = not a
-// real entry (back / blank); -2 = parent row ".. (up)".
+// real entry (back / blank); -2 = parent row ".. (up)"; -3 = "<< Prev page";
+// -4 = "Next page >>".
 EXT_RAM_BSS_ATTR static int  gFilesEntryForRow[FILES_MAX_ROWS];
 
 // File-info overlay duration. The deadline lives in the centralized
@@ -248,11 +265,17 @@ static size_t buildRows() {
     row++;
   }
 
-  // Then directory entries.
+  // Then one paginator page's worth of directory entries. getItemCount()
+  // is the TRUE directory total (FileManager keeps counting past its
+  // cache), so the "(p/total)" chrome is honest; getItem() falls back to
+  // a per-index rescan for entries beyond the cache, so even directories
+  // larger than the cache stay reachable — just slower per page.
   int total = fm->getItemCount();
-  for (int i = 0; i < total && row < FILES_MAX_ROWS; i++) {
+  G2Paginator pag = g2PaginatorPrepare((size_t)total, FILES_VISIBLE_ENTRIES,
+                                       gFilesPage);
+  for (size_t i = pag.startIdx; i < pag.endIdx && row < FILES_MAX_ROWS; i++) {
     FileEntry entry;
-    if (!fm->getItem(i, entry)) continue;
+    if (!fm->getItem((int)i, entry)) continue;
     if (entry.isFolder) {
       // "[#]" item-count badge (matches the web/app folder counts). Capped at
       // 99 by the FileManager → show "99+" so an empty folder reads "[0]" and
@@ -278,7 +301,7 @@ static size_t buildRows() {
       snprintf(gFilesRows[row], FILES_ROW_LEN, "%s  %s", nm, sizeStr);
     }
     gFilesRowPtrs[row] = gFilesRows[row];
-    gFilesEntryForRow[row] = i;
+    gFilesEntryForRow[row] = (int)i;
     row++;
   }
 
@@ -288,6 +311,15 @@ static size_t buildRows() {
     gFilesRowPtrs[row] = gFilesRows[row];
     row++;
   }
+
+  // "<< Prev page" / "Next page >> (p/total)" chrome — only rendered when
+  // the directory spans multiple pages. Tap routing goes through the
+  // gFilesEntryForRow sentinels, not fixed indices.
+  row = g2PaginatorWriteChrome(pag, gFilesPage, row, FILES_MAX_ROWS,
+                               &gFilesRows[0][0], FILES_ROW_LEN,
+                               gFilesRowPtrs);
+  if (pag.prevRow >= 0) gFilesEntryForRow[pag.prevRow] = -3;  // sentinel: prev page
+  if (pag.nextRow >= 0) gFilesEntryForRow[pag.nextRow] = -4;  // sentinel: next page
 
   // Pad with inert spacer rows so directories with only a few entries don't
   // jump to a different vertical origin than dense directories.
@@ -736,15 +768,25 @@ void g2ShowFilesMenu() {
   // FileManager::navigate() denies every read.
   G2HijackCtxGuard ctxGuard;
 
-  // Re-scan the current directory under the now-installed identity. The
-  // FileManager is a per-boot singleton: its first navigate("/") happens
-  // on the very first Files tap, and if that tap ran with ANON
-  // (pairedByUser blank — pre-pairing or stuck-state — the cache lands
-  // at totalItems=0 and would stay there for the rest of the boot, even
-  // after pairing is fixed. refresh() rebuilds the entry list without
-  // touching scroll/selection state. Cheap, runs once per menu (re-)entry.
+  // Directory cache policy for the per-boot FileManager singleton:
+  //
+  //   • Re-entry from outside Files (Apps → Files, post safety-timeout,
+  //     Main Menu → … → Files): forceRescan(). refresh() is identity-
+  //     generation gated and would keep showing stale sizes / missing
+  //     files written by sensorlog / web / CLI while the user was away.
+  //     Selection is preserved by loadDirectory().
+  //
+  //   • Already on Files (overlay dismiss, viewer callback, folder
+  //     navigate which already loaded): refresh() only. That covers the
+  //     ANON-first-tap → later-paired empty-cache case without paying
+  //     the full VFS permission walk on every in-page redraw.
   if (FileManager* fmRefresh = ensureFm()) {
-    fmRefresh->refresh();
+    if (g2GetHijackPage() != G2_HIJACK_PAGE_FILES) {
+      fmRefresh->forceRescan();
+      gFilesPage = 0;  // re-entry from outside → start at the first page
+    } else {
+      fmRefresh->refresh();
+    }
   }
 
   // Whenever the real file list comes back up, the chooser and the
@@ -947,10 +989,27 @@ void g2FilesHandleTap(uint32_t idx) {
   FileManager* fm = ensureFm();
   if (!fm) return;
 
+  if (entryIdx == -3) {
+    // "<< Prev page"
+    if (gFilesPage > 0) gFilesPage--;
+    DEBUG_G2F("[G2] Files: prev page -> %u", (unsigned)gFilesPage);
+    g2ShowFilesMenu();
+    return;
+  }
+  if (entryIdx == -4) {
+    // "Next page >>" — g2PaginatorPrepare clamps past-the-end, so a stale
+    // tap after the directory shrank lands on the last valid page.
+    gFilesPage++;
+    DEBUG_G2F("[G2] Files: next page -> %u", (unsigned)gFilesPage);
+    g2ShowFilesMenu();
+    return;
+  }
+
   if (entryIdx == -2) {
-    // Parent dir.
+    // Parent dir. Fresh directory → fresh page.
     DEBUG_G2F("[G2] Files: navigateUp from '%s'", fm->getCurrentPath());
     fm->navigateUp();
+    gFilesPage = 0;
     g2ShowFilesMenu();
     return;
   }
@@ -973,6 +1032,7 @@ void g2FilesHandleTap(uint32_t idx) {
     while (fm->getSelectedIndex() > entryIdx) fm->moveUp();
     DEBUG_G2F("[G2] Files: navigateInto '%s'", e.name);
     fm->navigateInto();
+    gFilesPage = 0;  // fresh directory → fresh page
     g2ShowFilesMenu();
   } else {
     // File tap → previewable types get the View/Info chooser; everything

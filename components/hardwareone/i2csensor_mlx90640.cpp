@@ -714,7 +714,7 @@ bool thermalPoll() {
     
     // Check I2C health for this device
     I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
-    I2CDevice* dev = mgr ? mgr->getDevice(I2C_ADDR_THERMAL) : nullptr;
+    I2CDevice* dev = mgr ? mgr->getDeviceAnyBus(I2C_ADDR_THERMAL) : nullptr;
     if (dev) {
       const I2CDevice::Health& h = dev->getHealth();
       ERROR_THERMALF("  I2C Health: degraded=%d consec=%d total=%d NACK=%d TIMEOUT=%d",
@@ -1280,7 +1280,7 @@ const char* cmd_thermaldiag(const String& argsInput) {
   
   // Check I2C device health
   I2CDeviceManager* mgr = I2CDeviceManager::getInstance();
-  I2CDevice* dev = mgr ? mgr->getDevice(I2C_ADDR_THERMAL) : nullptr;
+  I2CDevice* dev = mgr ? mgr->getDeviceAnyBus(I2C_ADDR_THERMAL) : nullptr;
   
   if (dev) {
     const I2CDevice::Health& h = dev->getHealth();

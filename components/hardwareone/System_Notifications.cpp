@@ -634,6 +634,10 @@ void notifFormatEvent(const SystemEvent& e, char* out, size_t outLen) {
     case SYSEVT_BOND_OFFLINE: snprintf(out, outLen, "Bond offline: %s", e.subject); return;
     case SYSEVT_BLE_CONNECTED:    snprintf(out, outLen, "BLE: %s", e.subject[0] ? e.subject : "connected"); return;
     case SYSEVT_BLE_DISCONNECTED: snprintf(out, outLen, "BLE device off"); return;
+    case SYSEVT_RING_CONNECTED:    snprintf(out, outLen, "Ring: %s", e.subject[0] ? e.subject : "connected"); return;
+    case SYSEVT_RING_DISCONNECTED: snprintf(out, outLen, "Ring off"); return;
+    case SYSEVT_RING_WORN:         snprintf(out, outLen, "Ring worn"); return;
+    case SYSEVT_RING_NOT_WORN:     snprintf(out, outLen, "Ring not worn"); return;
     case SYSEVT_WIFI_CONNECTED:    snprintf(out, outLen, "WiFi: %s", e.subject[0] ? e.subject : "connected"); return;
     case SYSEVT_WIFI_DISCONNECTED: snprintf(out, outLen, "WiFi off"); return;
     case SYSEVT_WIFI_NET_ADDED:    snprintf(out, outLen, "WiFi saved: %s", e.subject[0] ? e.subject : "network"); return;

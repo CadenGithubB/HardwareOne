@@ -240,11 +240,40 @@ esp_err_t handleGPSTracksAPI(httpd_req_t* req) {
   httpd_resp_sendstr_chunk(req, "{\"success\":true,\"files\":[");
 
   fsLock("gps.tracks.list");
-  
-  // Scan relevant directories for GPS log files
+
+  // Probe one candidate file's head for GPS content and emit its JSON entry.
+  // Shared by the top-level scan and the one-level session-subfolder descent.
+  auto emitIfGps = [&](File& file, bool& first) {
+    bool hasGPS = false;
+    File check = VFS::openGuarded(file.path(), "r", ctx);
+    if (check) {
+      for (int i = 0; i < 15 && check.available(); i++) {
+        String line = check.readStringUntil('\n');
+        // Check for both sensor log format and CSV format
+        if (line.indexOf("gps:") >= 0 ||
+            (line.length() > 10 && line.charAt(0) != '#' && line.indexOf(',') > 0)) {
+          hasGPS = true;
+          break;
+        }
+      }
+      check.close();
+    }
+    if (hasGPS) {
+      char fileJson[384];
+      snprintf(fileJson, sizeof(fileJson), "%s{\"path\":\"%s\",\"size\":%lu}",
+               first ? "" : ",", file.path(), (unsigned long)file.size());
+      httpd_resp_sendstr_chunk(req, fileJson);
+      first = false;
+    }
+  };
+
+  // Scan relevant directories for GPS log files. Session shaping places logs
+  // one level down in YYYY-MM-DD/ and boot-N/ subfolders (see
+  // shapeSessionPath), so descend exactly one directory level — a flat-only
+  // scan makes every shaped TRACK/CSV log invisible to the picker.
   const char* dirs[] = {"/logging_captures", "/logging_captures/tracks", "/logging_captures/sensors"};
   bool firstFile = true;
-  
+
   for (int d = 0; d < 3; d++) {
     File root = VFS::openGuarded(dirs[d], "r", ctx);
     if (!root || !root.isDirectory()) continue;
@@ -252,28 +281,18 @@ esp_err_t handleGPSTracksAPI(httpd_req_t* req) {
     File file = root.openNextFile();
     while (file) {
       if (!file.isDirectory()) {
-        bool hasGPS = false;
-        File check = VFS::openGuarded(file.path(), "r", ctx);
-        if (check) {
-          for (int i = 0; i < 15 && check.available(); i++) {
-            String line = check.readStringUntil('\n');
-            // Check for both sensor log format and CSV format
-            if (line.indexOf("gps:") >= 0 || 
-                (line.length() > 10 && line.charAt(0) != '#' && line.indexOf(',') > 0)) {
-              hasGPS = true;
-              break;
-            }
+        emitIfGps(file, firstFile);
+      } else {
+        // One level down: session subfolders (dated / boot-N).
+        File sub = VFS::openGuarded(file.path(), "r", ctx);
+        if (sub && sub.isDirectory()) {
+          File child = sub.openNextFile();
+          while (child) {
+            if (!child.isDirectory()) emitIfGps(child, firstFile);
+            child = sub.openNextFile();
           }
-          check.close();
         }
-
-        if (hasGPS) {
-          char fileJson[384];
-          snprintf(fileJson, sizeof(fileJson), "%s{\"path\":\"%s\",\"size\":%lu}",
-                   firstFile ? "" : ",", file.path(), (unsigned long)file.size());
-          httpd_resp_sendstr_chunk(req, fileJson);
-          firstFile = false;
-        }
+        if (sub) sub.close();
       }
       file = root.openNextFile();
     }

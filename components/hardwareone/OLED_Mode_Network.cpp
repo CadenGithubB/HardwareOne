@@ -491,7 +491,9 @@ static bool networkWifiListInputHandler(int /*dx*/, int /*dy*/, uint32_t newlyPr
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
     int sel = sSavedNetScroll.selectedIndex;
     if (sel >= 0 && sel < gWifiNetworkCount) {
-      executeOLEDCommand("wificonnect --index " + String(sel + 1));
+      // Registered command is `openwifi`; `wificonnect` is only the handler's
+      // C function name (cmd_wificonnect) and never resolved here.
+      executeOLEDCommand("openwifi --index " + String(sel + 1));
       oledMenuBack();  // pop back to the WiFi menu after kicking off the connect
     }
     return true;

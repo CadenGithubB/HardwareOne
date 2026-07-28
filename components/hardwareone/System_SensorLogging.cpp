@@ -9,6 +9,7 @@
  */
 
 #include "System_SensorLogging.h"
+#include "System_Clock.h"   // Clock::isSynced — session subfolder/timestamp shaping
 #include "System_Utils.h"
 #include "System_Command.h"
 #include "System_Debug.h"
@@ -92,6 +93,192 @@ void sensorLogRequestSample(bool bypassR1Dedup) {
   sBypassR1Dedup = bypassR1Dedup;
 }
 
+// ============================================================================
+// Per-day append support — see docs/SENSORLOG_PERDAY_APPEND_PLAN.md
+// ============================================================================
+// CSV capture sessions target ONE file per calendar day so a day of health
+// data graphs as a single continuous series. The pieces below keep that safe:
+// path-mode classification (day/boot/manual), a shared CSV-header builder
+// used both to create files and to verify an existing day file is column-
+// compatible before appending, and size seeding so rotation stays honest
+// across restarts.
+
+// Path-shape classification for the ACTIVE session, derived from the path
+// cmd_sensorlog start accepted — so every entry point (autostart, healthtrack,
+// manual CLI) lands in the right mode without threading flags around:
+//   MANUAL      literal user path — never rolled, never re-pointed.
+//   BOOT_SHAPED shaped dark-boot session (…/sensors/boot-N/…) — rolls onto
+//               the day file the moment the clock syncs (CSV only). Without
+//               this, an always-on device that boots before WiFi would write
+//               one boot file forever and never produce a day file.
+//   DAY         shaped dated session (…/sensors/YYYY-MM-DD/…) — rolls quietly
+//               at midnight.
+enum class SensorLogPathMode : uint8_t { MANUAL, BOOT_SHAPED, DAY };
+static SensorLogPathMode gSensorLogPathMode = SensorLogPathMode::MANUAL;
+static char gSensorLogDayStr[11] = {0};  // "YYYY-MM-DD" of a DAY session
+
+// Rotation size accounting. File-scope (not tick-static) so session start and
+// rollover can SEED it from the on-disk size of the target — otherwise
+// appending to an already-large day file under-counts (rotation fires ~one
+// full maxSize late per boot) and a same-boot restart onto a fresh file
+// carries a stale count (rotates early). Written from the cmd_exec task at
+// start and the main-loop tick; both are single-word writes and the worst
+// mis-order costs one slightly-early rotation.
+static size_t gApproxSizeBytes = 0;
+
+static String shapeSessionPath(String path);      // shared shaper (defined below)
+static String stripSessionShaping(String path);   // its inverse (defined below)
+
+// CSV header for `mask` — the single source for file creation, the append-
+// side header-on-create, and the day-file compatibility compare. NO trailing
+// newline (callers append it). Must track buildCSVFromSnap's column order.
+static String buildCsvHeader(uint8_t mask) {
+  String h = "timestamp_ms";
+  if (mask & LOG_THERMAL) h += ",thermal_min,thermal_max,thermal_avg";
+  if (mask & LOG_TOF) {
+    h += ",tof_obj0_dist,tof_obj0_valid,tof_obj0_status";
+    h += ",tof_obj1_dist,tof_obj1_valid,tof_obj1_status";
+    h += ",tof_obj2_dist,tof_obj2_valid,tof_obj2_status";
+    h += ",tof_obj3_dist,tof_obj3_valid,tof_obj3_status";
+  }
+  if (mask & LOG_IMU) {
+    h += ",imu_yaw,imu_pitch,imu_roll";
+    h += ",imu_accel_x,imu_accel_y,imu_accel_z";
+    h += ",imu_gyro_x,imu_gyro_y,imu_gyro_z";
+    h += ",imu_temp";
+  }
+  if (mask & LOG_GAMEPAD) h += ",gamepad_x,gamepad_y,gamepad_buttons";
+  if (mask & LOG_APDS) h += ",apds_red,apds_green,apds_blue,apds_clear,apds_proximity,apds_gesture";
+  if (mask & LOG_GPS) h += ",gps_fix,gps_lat,gps_lon,gps_alt,gps_speed,gps_sats,gps_quality";
+  if (mask & LOG_PRESENCE) h += ",presence_ambient,presence_value,presence_detected,motion_value,motion_detected";
+  // Order must track the row builder in buildCSVFromSnap: connected, hr,
+  // hrv, spo2, temp, battery, wear. r1_temp sits BETWEEN spo2 and battery
+  // — appending the two missing names at the end would keep the count
+  // right and silently mislabel the columns. r1_wear is the raw code
+  // (0 unknown / 1 not worn / 2 worn), not the on/off words TEXT logs use.
+  if (mask & LOG_R1) h += ",r1_connected,r1_hr,r1_hrv,r1_spo2,r1_temp,r1_battery,r1_wear";
+  return h;
+}
+
+// TRACK static header (mask-independent; hoisted from the create block).
+static const char kTrackHeader[] =
+    "# GPS Track Log\n"
+    "# time,lat,lon,alt_m,speed_kn,satellites\n"
+    "# Signal loss: time,---,SIGNAL_LOST\n"
+    "# Signal regained: time,~~~,SIGNAL_REGAINED (lost N intervals)\n";
+
+// Write the format-appropriate header into a freshly-created/empty file.
+// TEXT has no header (rows are self-describing). Returns false on a short
+// write so callers can treat the file as unusable instead of shipping a
+// truncated header that would poison every later compatibility compare.
+static bool writeHeaderChecked(File& f) {
+  if (gSensorLogFormat == SENSOR_LOG_CSV) {
+    String h = buildCsvHeader(gSensorLogMask);
+    h += '\n';
+    return f.write((const uint8_t*)h.c_str(), h.length()) == h.length();
+  }
+  if (gSensorLogFormat == SENSOR_LOG_TRACK) {
+    return f.write((const uint8_t*)kTrackHeader, strlen(kTrackHeader)) ==
+           strlen(kTrackHeader);
+  }
+  return true;  // TEXT: headerless by design
+}
+
+// Classify the accepted session path into gSensorLogPathMode (+ capture the
+// day string for DAY sessions). Called at session start and after a rollover.
+static void sensorLogClassifyActivePath(const char* path) {
+  gSensorLogPathMode = SensorLogPathMode::MANUAL;
+  gSensorLogDayStr[0] = '\0';
+  static const char kPrefix[] = CAPTURE_DIR_SENSORS "/";
+  const size_t prefixLen = sizeof(kPrefix) - 1;
+  if (!path || strncmp(path, kPrefix, prefixLen) != 0) return;
+  const char* comp = path + prefixLen;
+  const char* slash = strchr(comp, '/');
+  if (!slash) return;  // flat file directly in sensors/ → manual
+  const size_t n = (size_t)(slash - comp);
+  if (n == 10 && comp[4] == '-' && comp[7] == '-' &&
+      isdigit((unsigned char)comp[0]) && isdigit((unsigned char)comp[1]) &&
+      isdigit((unsigned char)comp[2]) && isdigit((unsigned char)comp[3])) {
+    gSensorLogPathMode = SensorLogPathMode::DAY;
+    memcpy(gSensorLogDayStr, comp, 10);
+    gSensorLogDayStr[10] = '\0';
+  } else if (n > 5 && strncmp(comp, "boot-", 5) == 0) {
+    gSensorLogPathMode = SensorLogPathMode::BOOT_SHAPED;
+  }
+}
+
+// On-disk size of the overflow-resolved tier for `path` (0 if absent).
+// Used to seed gApproxSizeBytes when (re)pointing at a day file.
+static size_t sensorLogResolvedSize(const String& path) {
+  char resolved[128];
+  VFS::resolveOverflowPath(path.c_str(), (size_t)gSensorLogMaxSize,
+                           resolved, sizeof(resolved));
+  File f = VFS::openGuarded(String(resolved), "r",
+                            VFS::systemAuth("senlog.sizeseed"));
+  if (!f) return 0;
+  size_t sz = f.size();
+  f.close();
+  return sz;
+}
+
+// Pick the actual target for a shaped session path. CSV day files append
+// across sessions, so an existing file is only reused when its first line
+// matches the header the CURRENT mask would write; a mismatch (mask changed
+// since the file was created) probes -2..-9 variants, and if all are taken we
+// fall back to a per-session timestamped name — capture must never refuse to
+// start. Probes run on the OVERFLOW-RESOLVED tier (appends go there; probing
+// the LittleFS path while writes land on /sd would validate the wrong file).
+// Missing or EMPTY candidate = fresh and adopted (a failed/interrupted header
+// write never burns a variant; the header lands via header-on-create in the
+// append path or the start-time create). Returns the UNRESOLVED path — the
+// append path re-resolves per write.
+static String resolveSessionTarget(const String& shaped) {
+  if (gSensorLogFormat != SENSOR_LOG_CSV) return shaped;  // TEXT/TRACK: append-safe
+
+  const String expect = buildCsvHeader(gSensorLogMask);
+  int lastDot = shaped.lastIndexOf('.');
+  int lastSlash = shaped.lastIndexOf('/');
+  String stem = (lastDot > lastSlash) ? shaped.substring(0, lastDot) : shaped;
+  String ext  = (lastDot > lastSlash) ? shaped.substring(lastDot) : String("");
+
+  for (int v = 1; v <= 9; v++) {
+    String candidate = (v == 1) ? shaped : (stem + "-" + String(v) + ext);
+    char resolved[128];
+    VFS::resolveOverflowPath(candidate.c_str(), (size_t)gSensorLogMaxSize,
+                             resolved, sizeof(resolved));
+    File f = VFS::openGuarded(String(resolved), "r",
+                              VFS::systemAuth("senlog.compat"));
+    if (!f) return candidate;                       // missing → fresh
+    if (f.size() == 0) { f.close(); return candidate; }  // empty → adopt
+    // Read the first line (header). 1024-byte buffer: the worst-case header
+    // with every mask bit set is ~640 B — a smaller buffer would silently
+    // truncate and mis-compare. Strip trailing CR/LF/whitespace so a file
+    // that round-tripped through a CRLF editor still matches.
+    char first[1024];
+    size_t fl = 0;
+    while (f.available() && fl + 1 < sizeof(first)) {
+      int c = f.read();
+      if (c < 0 || c == '\n') break;
+      first[fl++] = (char)c;
+    }
+    f.close();
+    while (fl > 0 && (first[fl - 1] == '\r' || first[fl - 1] == ' ' ||
+                      first[fl - 1] == '\t')) fl--;
+    first[fl] = '\0';
+    if (expect == first) return candidate;          // header matches → append
+    // else: column set differs — try the next variant
+  }
+
+  // All variants taken by incompatible masks — per-session timestamped
+  // fallback in the same folder (never refuse to capture).
+  time_t now = time(nullptr);
+  struct tm lt;
+  localtime_r(&now, &lt);
+  char stamp[24];
+  strftime(stamp, sizeof(stamp), "%Y-%m-%dT%H-%M-%S", &lt);
+  return stem + "-" + stamp + ext;
+}
+
 void sensorLogTick() {
   // Health Track mine runs even between sensorlog intervals (and while Track
   // is on). Must be called before the early-return below.
@@ -130,7 +317,8 @@ void sensorLogTick() {
   static uint32_t log_idle_skips = 0;
   static uint32_t log_trunc = 0;
   static unsigned long lastSummaryMs = 0;
-  static size_t approxSizeBytes = 0;
+  // Size accounting lives at file scope (gApproxSizeBytes) so start/rollover
+  // can seed it from the existing day file's on-disk size.
   static unsigned long lastTruncateMs = 0;
   static uint32_t writeCount = 0;
   const unsigned long truncateCooldownMs = 5000;
@@ -269,11 +457,18 @@ void sensorLogTick() {
       if (!buf) return "";
     }
 
-    unsigned long timestamp = millis();
+    // Dual-range stamp, one column: wall-clock epoch-ms when the clock is
+    // synced (13+ digits), millis-since-boot otherwise (≤10 digits — the
+    // ranges can't collide). Epoch stamps make rows from different
+    // sessions/boots continuous inside a per-day file; dark-boot rows stay
+    // boot-relative and are retro-dated at file level by System_TimeAnchors.
+    // int64 is mandatory — epoch-ms truncates silently in 32-bit.
+    const int64_t timestamp =
+        Clock::isSynced() ? Clock::epochMillis() : (int64_t)millis();
     char* pos = buf;
     int remaining = 1024;
 
-    int written = snprintf(pos, remaining, "%lu", timestamp);
+    int written = snprintf(pos, remaining, "%lld", (long long)timestamp);
     pos += written;
     remaining -= written;
 
@@ -611,6 +806,18 @@ void sensorLogTick() {
       }
     }
 
+    // CSV never writes no-data heartbeat rows: a bare-timestamp row is junk
+    // to any grapher and would accumulate at 5 s cadence across a whole
+    // per-day file; epoch-ms stamps make real gaps self-describing. TEXT
+    // keeps its heartbeat lines, and TRACK MUST keep them — the one-shot
+    // SIGNAL_LOST marker is emitted via this path when GPS disconnects
+    // (hasSelectedData goes false, so buildTrackFromSnap is only reached
+    // through the heartbeat allowance).
+    if (!hasSelectedData && gSensorLogFormat == SENSOR_LOG_CSV) {
+      log_idle_skips++;
+      return;
+    }
+
     // Suppress idle lines when no selected sensor has data
     static unsigned long lastHeartbeatMs = 0;
     const unsigned long heartbeatMs = 5000;
@@ -640,7 +847,42 @@ void sensorLogTick() {
       line = buildFromSnap(snap);
     }
     if (line && line[0] != '\0') {
-      fsLock("sensorlog.append");
+      // RAII lock: later branches in this section (rollover, header-on-create)
+      // return/skip early — a manual fsLock/fsUnlock pair here would leak the
+      // FS mutex on any early exit and deadlock all filesystem access. The
+      // nested VFS::*Guarded calls are reentrancy-safe under this guard.
+      // Helpers called inside this scope must never call raw fsUnlock().
+      FsLockGuard appendGuard("sensorlog.append");
+
+      // Quiet rollover — re-point BEFORE this sample lands so no row is ever
+      // written into the wrong day (or into the boot file after the clock
+      // synced). MANUAL (literal-path) sessions never roll. DAY sessions roll
+      // at midnight; BOOT_SHAPED sessions roll the moment the clock syncs —
+      // pre-sync rows stay behind in the boot file (no longer active, so the
+      // time-anchor sweep retro-dates it) and day files stay pure epoch-ms.
+      // One events.log line for auditability; deliberately NO SYSEVT, no
+      // notification, no settings write — a nightly SYSEVT_SENSOR_STARTED
+      // would spam the notification/automation pipeline.
+      if (gSensorLogFormat == SENSOR_LOG_CSV && Clock::isSynced() &&
+          gSensorLogPathMode != SensorLogPathMode::MANUAL) {
+        char today[11];
+        time_t nowT = time(nullptr);
+        struct tm lt;
+        localtime_r(&nowT, &lt);
+        strftime(today, sizeof(today), "%Y-%m-%d", &lt);
+        const bool roll =
+            (gSensorLogPathMode == SensorLogPathMode::BOOT_SHAPED) ||
+            (strcmp(today, gSensorLogDayStr) != 0);
+        if (roll) {
+          String target =
+              resolveSessionTarget(shapeSessionPath(stripSessionShaping(gSensorLogPath)));
+          gSensorLogPath = target;
+          sensorLogClassifyActivePath(target.c_str());
+          gApproxSizeBytes = sensorLogResolvedSize(target);
+          logSystemEvent("SENSOR", "sensor-log rolled to %s", target.c_str());
+        }
+      }
+
       // Route to LittleFS primary, or /sd overflow mirror if flash is full.
       // The active path for this write cycle is resolved per-write so a hot
       // card plug-in can start working immediately, but the overflow latch
@@ -651,6 +893,19 @@ void sensorLogTick() {
                                            activePath, sizeof(activePath));
       File f = VFS::openGuarded(String(activePath), "a", VFS::systemAuth("senlog.append"), true);
       if (f) {
+        // Header-on-create: a fresh/empty file at the ACTIVE tier gets its
+        // header before the first row. One check covers three holes: the
+        // post-rotation recreated base file, a mid-session SD-overflow flip
+        // creating the /sd mirror, and rollover targets created right here.
+        // TEXT is headerless by design (writeHeaderChecked no-ops).
+        if (f.size() == 0 && !writeHeaderChecked(f)) {
+          f.close();
+          log_open_fail++;
+          if (isDebugFlagSet(DEBUG_LOGGER)) {
+            DEBUG_LOGGERF("logger: header write failed on %s", activePath);
+          }
+          return;
+        }
         size_t len = strlen(line);
         f.write((const uint8_t*)line, len);
         f.write('\n');
@@ -658,12 +913,12 @@ void sensorLogTick() {
         gSensorLogLastWrite = millis();
         writeCount++;
         log_writes++;
-        approxSizeBytes += (len + 1);
+        gApproxSizeBytes += (len + 1);
 
         // Handle log rotation. Rotation runs on whichever tier we're writing
         // to. When overflow is active we rotate inside `/sd/...` and the
         // LittleFS copies are preserved (never touched again).
-        if (approxSizeBytes > gSensorLogMaxSize && (lastTruncateMs == 0 || (long)(millis() - lastTruncateMs) >= (long)truncateCooldownMs)) {
+        if (gApproxSizeBytes > gSensorLogMaxSize && (lastTruncateMs == 0 || (long)(millis() - lastTruncateMs) >= (long)truncateCooldownMs)) {
           lastTruncateMs = millis();
           writeCount = 0;
 
@@ -696,7 +951,7 @@ void sensorLogTick() {
             VFS::removeGuarded(String(activePath), VFS::systemAuth("senlog.rotate"));
           }
 
-          approxSizeBytes = 0;
+          gApproxSizeBytes = 0;
           log_trunc++;
           if (isDebugFlagSet(DEBUG_STORAGE)) {
             DEBUGF_BROADCAST(DEBUG_STORAGE, "Sensor log: rotated file on %s (max size=%u bytes)",
@@ -712,7 +967,7 @@ void sensorLogTick() {
           DEBUGF_BROADCAST(DEBUG_STORAGE, "Sensor log: wrote %d bytes", (int)len);
         }
         if (isDebugFlagSet(DEBUG_LOGGER)) {
-          DEBUG_LOGGERF("logger: wrote %dB, approxSize=%uB, writes=%u", (int)len, (unsigned)approxSizeBytes, (unsigned)log_writes);
+          DEBUG_LOGGERF("logger: wrote %dB, approxSize=%uB, writes=%u", (int)len, (unsigned)gApproxSizeBytes, (unsigned)log_writes);
         }
       } else {
         if (isDebugFlagSet(DEBUG_STORAGE)) {
@@ -723,7 +978,6 @@ void sensorLogTick() {
           DEBUG_LOGGERF("logger: open fail #%u", (unsigned)log_open_fail);
         }
       }
-      fsUnlock();
     }
 
     // Periodic summary
@@ -881,47 +1135,29 @@ const char* cmd_sensorlog(const String& argsInput) {
       }
     }
 
-    // Create file if needed
+    // Per-day append: pick the compatible target. Reuses an existing day
+    // file only when its header matches the current mask; a mismatch mints a
+    // -2..-9 variant (timestamped fallback on exhaustion). No-op for
+    // TEXT/TRACK and for non-day paths. See docs/SENSORLOG_PERDAY_APPEND_PLAN.md.
+    filepath = resolveSessionTarget(filepath);
+
+    // Create file if needed. Variants/fallbacks stay in the same directory,
+    // so the parent-mkdir walk above already covers them. The append path
+    // additionally header-on-creates empty files (post-rotation base, /sd
+    // overflow mirror), so a file skipped here is still safe.
     if (!VFS::existsGuarded(filepath, VFS::systemAuth("senlog.setup_create"))) {
       File f = VFS::openGuarded(filepath, "w", VFS::systemAuth("senlog.setup_create"), true);
       if (!f) {
         snprintf(getDebugBuffer(), 1024, "Error: Failed to create file: %s", filepath.c_str());
         return getDebugBuffer();
       }
-
-      if (gSensorLogFormat == SENSOR_LOG_CSV) {
-        String csvHeader = "timestamp_ms";
-        if (gSensorLogMask & LOG_THERMAL) csvHeader += ",thermal_min,thermal_max,thermal_avg";
-        if (gSensorLogMask & LOG_TOF) {
-          csvHeader += ",tof_obj0_dist,tof_obj0_valid,tof_obj0_status";
-          csvHeader += ",tof_obj1_dist,tof_obj1_valid,tof_obj1_status";
-          csvHeader += ",tof_obj2_dist,tof_obj2_valid,tof_obj2_status";
-          csvHeader += ",tof_obj3_dist,tof_obj3_valid,tof_obj3_status";
-        }
-        if (gSensorLogMask & LOG_IMU) {
-          csvHeader += ",imu_yaw,imu_pitch,imu_roll";
-          csvHeader += ",imu_accel_x,imu_accel_y,imu_accel_z";
-          csvHeader += ",imu_gyro_x,imu_gyro_y,imu_gyro_z";
-          csvHeader += ",imu_temp";
-        }
-        if (gSensorLogMask & LOG_GAMEPAD) csvHeader += ",gamepad_x,gamepad_y,gamepad_buttons";
-        if (gSensorLogMask & LOG_APDS) csvHeader += ",apds_red,apds_green,apds_blue,apds_clear,apds_proximity,apds_gesture";
-        if (gSensorLogMask & LOG_GPS) csvHeader += ",gps_fix,gps_lat,gps_lon,gps_alt,gps_speed,gps_sats,gps_quality";
-        if (gSensorLogMask & LOG_PRESENCE) csvHeader += ",presence_ambient,presence_value,presence_detected,motion_value,motion_detected";
-        // Order must track the row builder in buildCSVFromSnap: connected, hr,
-        // hrv, spo2, temp, battery, wear. r1_temp sits BETWEEN spo2 and battery
-        // — appending the two missing names at the end would keep the count
-        // right and silently mislabel the columns. r1_wear is the raw code
-        // (0 unknown / 1 not worn / 2 worn), not the on/off words TEXT logs use.
-        if (gSensorLogMask & LOG_R1) csvHeader += ",r1_connected,r1_hr,r1_hrv,r1_spo2,r1_temp,r1_battery,r1_wear";
-        csvHeader += "\n";
-        f.write((const uint8_t*)csvHeader.c_str(), csvHeader.length());
-      } else if (gSensorLogFormat == SENSOR_LOG_TRACK) {
-        const char* trackHeader = "# GPS Track Log\n"
-                                  "# time,lat,lon,alt_m,speed_kn,satellites\n"
-                                  "# Signal loss: time,---,SIGNAL_LOST\n"
-                                  "# Signal regained: time,~~~,SIGNAL_REGAINED (lost N intervals)\n";
-        f.write((const uint8_t*)trackHeader, strlen(trackHeader));
+      if (!writeHeaderChecked(f)) {
+        // Short write = truncated header that would poison every later
+        // day-file compatibility compare — remove the husk and fail loudly.
+        f.close();
+        VFS::removeGuarded(filepath, VFS::systemAuth("senlog.setup_create"));
+        snprintf(getDebugBuffer(), 1024, "Error: header write failed for %s (flash full?)", filepath.c_str());
+        return getDebugBuffer();
       }
       f.close();
       broadcastOutput("Created log file: " + filepath);
@@ -966,9 +1202,17 @@ const char* cmd_sensorlog(const String& argsInput) {
     gSensorLogIntervalMs = interval;
     gSensorLoggingRunning = true;
     gSensorLogLastWrite = millis();
+    // Day/boot/manual mode + honest rotation accounting for the (possibly
+    // pre-existing, already-large) day file we're appending to.
+    sensorLogClassifyActivePath(filepath.c_str());
+    gApproxSizeBytes = sensorLogResolvedSize(filepath);
 
-    // Persist last-used parameters for auto-start
-    setSetting(gSettings.sensorLogPath, filepath);
+    // Persist last-used parameters for auto-start. The path persists as the
+    // UN-shaped base (strip the session subfolder/stamp/variant): autostart
+    // and healthtrack re-shape fresh each session, and persisting a shaped
+    // path would compound variants / nest day folders. For manual literal
+    // paths the strip is a no-op, so they persist exactly as typed.
+    setSetting(gSettings.sensorLogPath, stripSessionShaping(filepath));
     setSetting(gSettings.sensorLogIntervalMs, (int)interval);
     setSetting(gSettings.sensorLogMask, (int)gSensorLogMask);
     setSetting(gSettings.sensorLogFormat, (int)gSensorLogFormat);
@@ -1090,6 +1334,17 @@ const char* cmd_sensorlog(const String& argsInput) {
       p += n; remaining -= n;
       snprintf(p, remaining, "\nUsage: sensorlog sensors <thermal|tof|imu|gamepad|apds|gps|presence|r1|all|none>");
       return getDebugBuffer();
+    }
+
+    // Mutating form. Refuse while a CSV session runs: this path changes the
+    // column set live with no restart, instantly misaligning every later row
+    // against the file's header and bypassing the day-file compat guard.
+    // (Refusal over auto-restart: the restart path can fail after flipping
+    // the run flag and silently kill capture.) TEXT rows are self-describing
+    // key=value, so live changes stay allowed there.
+    if (gSensorLoggingRunning && gSensorLogFormat == SENSOR_LOG_CSV) {
+      cliHint("run 'sensorlog stop' first, then reselect sensors and restart — or use 'healthtrack' which restarts the session itself");
+      return "Error: can't change the sensor selection while a CSV session is running (rows would stop matching the file's header)";
     }
 
     String sensorList = a.remaining(0);
@@ -1436,6 +1691,135 @@ void healthTrackTick() {
 #endif
 }
 
+// Shape a configured capture path into this session's on-disk path:
+//   1. split dir / basename / extension
+//   2. strip any prior session-timestamp suffix from the basename AND any
+//      prior session subfolder (YYYY-MM-DD/ or boot-N/) from the dir, so a
+//      previously shaped path fed back through settings can't nest
+//   3. pick this session's subfolder under the capture dir: YYYY-MM-DD/
+//      when the clock is synced, boot-NNNNNN/ otherwise (zero-padded so
+//      lexical order = boot order in every file browser)
+//   4. append the per-session stamp: -YYYY-MM-DDTHH-MM-SS, or -bootN-ms —
+//      the (bootN, ms) form is exactly what System_TimeAnchors retro-dates
+//      into a YYYY-MM-DD/ folder once this boot (or a later one) learns
+//      real time.
+// Keeps big capture folders G2-browsable: the lens list pages per folder,
+// and one day (or one dark boot) is one folder instead of one flat pile.
+// Inverse of shapeSessionPath: recover the configured BASE path from a
+// shaped one. Strips the session subfolder (YYYY-MM-DD/ or boot-N/) from the
+// dir and the session stamp (-YYYY-…, -bootN-…, and any -V variant digit —
+// variants always follow the date, so the date strip swallows them) from the
+// basename. A no-op for manual literal paths. Used to persist the base into
+// settings and by the tick rollover to re-shape from scratch.
+static String stripSessionShaping(String path) {
+  // Split dir / basename / extension.
+  int lastSlash = path.lastIndexOf('/');
+  int lastDot = path.lastIndexOf('.');
+  String dir = (lastSlash >= 0) ? path.substring(0, lastSlash + 1) : CAPTURE_DIR_SENSORS "/";
+  String baseName = (lastSlash >= 0) ? path.substring(lastSlash + 1) : path;
+  String ext = "";
+  if (lastDot > lastSlash && lastDot > 0) {
+    ext = path.substring(lastDot);
+    baseName = baseName.substring(0, baseName.lastIndexOf('.'));
+  }
+
+  // Strip a prior session subfolder from the dir (idempotency: a shaped
+  // path fed back in must not nest date-in-date). dir always ends with '/';
+  // look at its last component.
+  if (dir.length() > 1) {
+    int tailStart = dir.lastIndexOf('/', dir.length() - 2);
+    if (tailStart >= 0) {
+      String comp = dir.substring(tailStart + 1, dir.length() - 1);
+      bool isDate = comp.length() == 10 && comp.charAt(4) == '-' &&
+                    comp.charAt(7) == '-' && isdigit(comp.charAt(0)) &&
+                    isdigit(comp.charAt(1)) && isdigit(comp.charAt(2)) &&
+                    isdigit(comp.charAt(3));
+      bool isBoot = comp.startsWith("boot-") && comp.length() > 5;
+      if (isDate || isBoot) dir = dir.substring(0, tailStart + 1);
+    }
+  }
+
+  // Strip any existing timestamp suffixes from baseName to prevent double-timestamping.
+  // Timestamps start with "-YYYY-" (e.g. "-2026-04-04T...") or "-boot".
+  // Scan forward for the first such pattern rather than looking at the last segment,
+  // because the last segment is often just the seconds ("02") which has no T or boot.
+  {
+    int stripAt = -1;
+    for (int i = 0; i < (int)baseName.length() - 5; i++) {
+      if (baseName.charAt(i) == '-') {
+        // Check for "-YYYY-" (4 digits followed by another dash)
+        if (isdigit(baseName.charAt(i+1)) && isdigit(baseName.charAt(i+2)) &&
+            isdigit(baseName.charAt(i+3)) && isdigit(baseName.charAt(i+4)) &&
+            baseName.charAt(i+5) == '-') {
+          stripAt = i;
+          break;
+        }
+        // Check for "-boot"
+        if (baseName.length() > (size_t)(i + 4) &&
+            baseName.charAt(i+1) == 'b' && baseName.charAt(i+2) == 'o' &&
+            baseName.charAt(i+3) == 'o' && baseName.charAt(i+4) == 't') {
+          stripAt = i;
+          break;
+        }
+      }
+    }
+    if (stripAt > 0) baseName = baseName.substring(0, stripAt);
+  }
+
+  return dir + baseName + ext;
+}
+
+static String shapeSessionPath(String path) {
+  // Normalize to the base first so shaping is idempotent for any input.
+  path = stripSessionShaping(path);
+  int lastSlash = path.lastIndexOf('/');
+  int lastDot = path.lastIndexOf('.');
+  String dir = (lastSlash >= 0) ? path.substring(0, lastSlash + 1) : CAPTURE_DIR_SENSORS "/";
+  String baseName = (lastSlash >= 0) ? path.substring(lastSlash + 1) : path;
+  String ext = "";
+  if (lastDot > lastSlash && lastDot > 0) {
+    ext = path.substring(lastDot);
+    baseName = baseName.substring(0, baseName.lastIndexOf('.'));
+  }
+
+  // Session subfolder + filename. Clock::isSynced replaces the old raw
+  // "now > 1609459200" epoch compare (same year>=2020 heuristic, one home).
+  extern uint32_t gBootCounter;
+  char sub[20];
+  char stamp[32];
+  if (Clock::isSynced()) {
+    time_t now = time(nullptr);
+    struct tm timeinfo;
+    localtime_r(&now, &timeinfo);
+    strftime(sub, sizeof(sub), "%Y-%m-%d", &timeinfo);
+    if (gSensorLogFormat == SENSOR_LOG_CSV) {
+      // Per-day file: every CSV session that day appends to the same file so
+      // the day graphs as one continuous series (rows carry epoch-ms).
+      // Header compatibility across sessions is resolveSessionTarget's job.
+      snprintf(stamp, sizeof(stamp), "%s", sub);
+    } else {
+      // TEXT/TRACK stay one-file-per-session: TEXT rows are prose logs and
+      // a TRACK is one GPS journey — day-merging them buys nothing.
+      strftime(stamp, sizeof(stamp), "%Y-%m-%dT%H-%M-%S", &timeinfo);
+    }
+  } else {
+    // No valid time — boot counter + ms keep sessions ordered across power
+    // cycles; System_TimeAnchors promotes these once time is learned, and a
+    // running CSV session rolls onto the day file the moment the clock syncs.
+    snprintf(sub, sizeof(sub), "boot-%06lu", (unsigned long)gBootCounter);
+    snprintf(stamp, sizeof(stamp), "boot%lu-%lu",
+             (unsigned long)gBootCounter, millis());
+  }
+
+  // e.g. /logging_captures/sensors/2026-07-27/health-2026-07-27.csv   (CSV day file)
+  //      /logging_captures/sensors/2026-07-27/sensors-2026-07-27T14-30-00.txt
+  //  or  /logging_captures/sensors/boot-000123/health-boot123-45678.csv
+  char pathBuf[256];
+  snprintf(pathBuf, sizeof(pathBuf), "%s%s/%s-%s%s", dir.c_str(), sub,
+           baseName.c_str(), stamp, ext.c_str());
+  return String(pathBuf);
+}
+
 static const char* healthTrackRestartWithCurrentMask() {
   // Stop then start so CSV headers match the new mask.
   if (gSensorLoggingRunning) {
@@ -1443,6 +1827,10 @@ static const char* healthTrackRestartWithCurrentMask() {
   }
   String path = gSettings.sensorLogPath;
   if (path.length() == 0 || path.charAt(0) != '/') path = CAPTURE_HEALTHLOG_DEFAULT;
+  // Same per-session subfolder + timestamp shaping as sensorLogAutoStart —
+  // previously this start path wrote the bare configured file (health.csv)
+  // with no timestamp at all, diverging from boot-time sessions.
+  path = shapeSessionPath(path);
   uint32_t interval = gSensorLogIntervalMs;
   if (interval < 100) interval = 5000;
   char cmd[320];
@@ -1461,6 +1849,12 @@ const char* healthTrackSet(bool on) {
     return "Error: R1 Health Track requires ENABLE_R1_HEALTH in this build";
 #else
     setSetting(gSettings.healthTrackingEnabled, true);
+    // Capture BEFORE the OR: the "already logging" shortcut below must only
+    // fire when R1 was ALREADY in the mask. Otherwise `healthtrack on` during
+    // a running non-R1 CSV session mutates the mask live and every later row
+    // gains 7 R1 columns under the old header — permanent misalignment inside
+    // a long-lived day file. Newly-added R1 → fall through to the restart.
+    const bool hadR1 = (gSensorLogMask & LOG_R1) != 0;
     gSensorLogMask = (uint8_t)(gSensorLogMask | LOG_R1);
     setSetting(gSettings.sensorLogMask, (int)gSensorLogMask);
 
@@ -1483,8 +1877,10 @@ const char* healthTrackSet(bool on) {
     sHtMineLastBurstMs = 0;
     sHtMineState = HT_MINE_IDLE;
 
-    if (gSensorLoggingRunning && (gSensorLogMask & LOG_R1)) {
-      // Already logging with R1 in the mask — nothing more to do.
+    if (gSensorLoggingRunning && hadR1) {
+      // Already logging WITH R1 already in the mask — nothing more to do.
+      // (If R1 was just added, fall through to the restart so the CSV header
+      // matches the new column set.)
       snprintf(getDebugBuffer(), 1024,
                "SUCCESS: Health Track ON (already logging → %s)",
                gSensorLogPath.c_str());
@@ -1776,64 +2172,8 @@ void sensorLogAutoStart() {
     path = CAPTURE_SENSORLOG_DEFAULT;
   }
 
-  // Append timestamp to filename to prevent appending to old logs
-  // Extract base path and extension
-  int lastSlash = path.lastIndexOf('/');
-  int lastDot = path.lastIndexOf('.');
-  String dir = (lastSlash >= 0) ? path.substring(0, lastSlash + 1) : CAPTURE_DIR_SENSORS "/";
-  String baseName = (lastSlash >= 0) ? path.substring(lastSlash + 1) : path;
-  String ext = "";
-  
-  if (lastDot > lastSlash && lastDot > 0) {
-    ext = path.substring(lastDot);
-    baseName = baseName.substring(0, baseName.lastIndexOf('.'));
-  }
-  
-  // Strip any existing timestamp suffixes from baseName to prevent double-timestamping.
-  // Timestamps start with "-YYYY-" (e.g. "-2026-04-04T...") or "-boot".
-  // Scan forward for the first such pattern rather than looking at the last segment,
-  // because the last segment is often just the seconds ("02") which has no T or boot.
-  {
-    int stripAt = -1;
-    for (int i = 0; i < (int)baseName.length() - 5; i++) {
-      if (baseName.charAt(i) == '-') {
-        // Check for "-YYYY-" (4 digits followed by another dash)
-        if (isdigit(baseName.charAt(i+1)) && isdigit(baseName.charAt(i+2)) &&
-            isdigit(baseName.charAt(i+3)) && isdigit(baseName.charAt(i+4)) &&
-            baseName.charAt(i+5) == '-') {
-          stripAt = i;
-          break;
-        }
-        // Check for "-boot"
-        if (baseName.length() > (size_t)(i + 4) &&
-            baseName.charAt(i+1) == 'b' && baseName.charAt(i+2) == 'o' &&
-            baseName.charAt(i+3) == 'o' && baseName.charAt(i+4) == 't') {
-          stripAt = i;
-          break;
-        }
-      }
-    }
-    if (stripAt > 0) baseName = baseName.substring(0, stripAt);
-  }
-  
-  // Get current time for timestamp (fallback to boot counter + ms if no RTC/NTP)
-  time_t now = time(nullptr);
-  char timestamp[32];
-  extern uint32_t gBootCounter;
-  
-  if (now > 1609459200) {  // Valid if after 2021-01-01 (epoch 1609459200)
-    struct tm* timeinfo = localtime(&now);
-    strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H-%M-%S", timeinfo);
-  } else {
-    // No valid time - use boot counter and milliseconds for tracking power cycles
-    snprintf(timestamp, sizeof(timestamp), "boot%lu-%lu", (unsigned long)gBootCounter, millis());
-  }
-  
-  // Build timestamped path, e.g.
-  // /logging_captures/sensors/sensors-2026-02-17T14-30-00.txt (or -boot12345).
-  char pathBuf[256];
-  snprintf(pathBuf, sizeof(pathBuf), "%s%s-%s%s", dir.c_str(), baseName.c_str(), timestamp, ext.c_str());
-  path = pathBuf;
+  // Session subfolder + timestamp shaping (shared with healthtrack starts).
+  path = shapeSessionPath(path);
 
   // No mkdir here: this used to hand-create /logs + /logs/sensors, which is
   // both the wrong tree now and redundant — cmd_sensorlog below creates every

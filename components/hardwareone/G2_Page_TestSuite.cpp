@@ -658,6 +658,7 @@ enum TestLevel : uint8_t {
   TEST_LEVEL_IMAGE_ANIMATED_CHOOSE     = 24, // SD G2_ICON_ANIMATIONS_VFS_PATH/* packs
   TEST_LEVEL_IMAGE_STREAM_SINGLE       = 25, // Streaming / Single image — Q10/Q11/Q13/Q15/Q21
   TEST_LEVEL_IMAGE_STREAM_COMPOUND     = 26, // Streaming / Compound (list/text + image) — Q16/Q17/Q18/Q28
+  TEST_LEVEL_IMAGE_MOTION              = 27, // Q31/Q31b — can a container be MOVED?
 };
 static TestLevel gTestLevel = TEST_LEVEL_ROOT;
 
@@ -752,6 +753,24 @@ static size_t buildImageRows() {
   snprintf(gRows[row], TEST_ROW_LEN, "Static Tests >>");           gRowPtrs[row] = gRows[row]; row++;
   snprintf(gRows[row], TEST_ROW_LEN, "Animated Icons >>");          gRowPtrs[row] = gRows[row]; row++;
   snprintf(gRows[row], TEST_ROW_LEN, "Streaming Tests >>");        gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "Motion Tests >>");           gRowPtrs[row] = gRows[row]; row++;
+  return row;
+}
+
+// IMAGE / Motion — can an image CONTAINER be repositioned, rather than
+// repainting a bigger tile? Own bucket rather than bolted onto Animated
+// Icons: that list is already 7 rows and the doc records a 9-item REBUILD
+// measuring 258 B against a 240 B single-fragment cap.
+//
+// Q31 is the risky one — a failed image REBUILD may wedge the EvenCore
+// plugin task (docs/G2_PROTOCOL.md:1813), recoverable only by reconnecting
+// BLE. Q31b is the safe known-good path and is what produces the usable
+// ms/step number, so it is listed separately and can be run first.
+static size_t buildImageMotionRows() {
+  writeBackRow("<- Image");
+  size_t row = 1;
+  snprintf(gRows[row], TEST_ROW_LEN, "Q31b: move recreate"); gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "Q31: move REBUILD");   gRowPtrs[row] = gRows[row]; row++;
   return row;
 }
 
@@ -965,6 +984,13 @@ static void imgProbeWorkerImpl(ImgProbeFn fn) {
   // every exit path, including the early return below.
   ExecIdentityGuard identity(gImgProbeOwnerCtx);
 
+  // Hold the fast connection interval for the whole probe. This is the
+  // outermost scope of an image push — Q30 alone is six multi-envelope bursts
+  // — so acquiring here means ONE conn-params round trip for the lot rather
+  // than one per burst. Released automatically on every exit path, after which
+  // the glasses renegotiate back to their own low-power preference.
+  G2FastLinkGuard fastLink("img-probe");
+
   if (fn) {
     const char* result = fn();
     DEBUG_G2F("[G2] Image probe done → %s", result ? result : "(null)");
@@ -1006,8 +1032,14 @@ static void imgProbeWorkerImpl(ImgProbeFn fn) {
     case TEST_LEVEL_IMAGE_STREAM_COMPOUND: n = buildImageStreamingCompoundRows(); break;
     case TEST_LEVEL_IMAGE_ANIMATED_ICONS:  n = buildImageAnimatedIconsRows(); break;
     case TEST_LEVEL_IMAGE_ANIMATED_CHOOSE: n = buildImageAnimatedChooseRows(); break;
+    case TEST_LEVEL_IMAGE_MOTION:        n = buildImageMotionRows();     break;
     case TEST_LEVEL_DISPLAY_COMBO:       n = buildDisplayComboRows();    break;
     case TEST_LEVEL_DISPLAY_SELECT_EDGES: n = buildSelectionEdgesRows(); break;
+    // NB: adding a TEST_LEVEL_* with a probe row REQUIRES a case here. The
+    // default silently draws the Image parent's rows while gTestLevel stays
+    // on the missing level, so the lens shows one menu and the tap dispatcher
+    // runs another — every tap lands out-of-range and the page looks frozen.
+    // (Cost one debugging session on TEST_LEVEL_IMAGE_MOTION.)
     default:                             n = buildImageRows();           break;
   }
   g2ShowListPage(gRowPtrs, n);
@@ -2331,7 +2363,7 @@ void g2TestSuiteHandleTap(uint32_t idx) {
     }
 
     case TEST_LEVEL_IMAGE: {
-      // Parent router: Confirmed, Static, Animated Icons, Streaming.
+      // Parent router: Confirmed, Static, Animated Icons, Streaming, Motion.
       if (idx == 0) {
         gTestLevel = TEST_LEVEL_ROOT;
         size_t n = buildRootRows();
@@ -2344,6 +2376,7 @@ void g2TestSuiteHandleTap(uint32_t idx) {
         case 2: gTestLevel = TEST_LEVEL_IMAGE_STATIC;        n = buildImageStaticRows();        break;
         case 3: gTestLevel = TEST_LEVEL_IMAGE_ANIMATED_ICONS; n = buildImageAnimatedIconsRows(); break;
         case 4: gTestLevel = TEST_LEVEL_IMAGE_STREAMING;      n = buildImageStreamingRows();     break;
+        case 5: gTestLevel = TEST_LEVEL_IMAGE_MOTION;         n = buildImageMotionRows();        break;
         default:
           DEBUG_G2F("[G2] Test suite IMAGE: tap idx=%u out of range",
                     (unsigned)idx);
@@ -2535,6 +2568,31 @@ void g2TestSuiteHandleTap(uint32_t idx) {
       DEBUG_G2F("[G2] Image probe (Animated Icons) idx=%u → spawning worker", (unsigned)idx);
       if (!spawnImgProbeWorker(fn)) {
         size_t n = buildImageAnimatedIconsRows();
+        g2ShowListPage(gRowPtrs, n);
+      }
+      return;
+    }
+
+    case TEST_LEVEL_IMAGE_MOTION: {
+      // Q31b (safe) listed first; Q31 (may wedge the plugin) second.
+      if (idx == 0) {
+        gTestLevel = TEST_LEVEL_IMAGE;
+        size_t n = buildImageRows();
+        g2ShowListPage(gRowPtrs, n);
+        return;
+      }
+      ImgProbeFn fn = nullptr;
+      switch (idx) {
+        case 1: fn = g2ProbeImageQ31bRecreateMove; break;
+        case 2: fn = g2ProbeImageQ31RebuildMove;   break;
+        default:
+          DEBUG_G2F("[G2] Test suite IMAGE/Motion: tap idx=%u out of range",
+                    (unsigned)idx);
+          return;
+      }
+      DEBUG_G2F("[G2] Image probe (Motion) idx=%u → spawning worker", (unsigned)idx);
+      if (!spawnImgProbeWorker(fn)) {
+        size_t n = buildImageMotionRows();
         g2ShowListPage(gRowPtrs, n);
       }
       return;

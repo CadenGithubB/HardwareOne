@@ -458,8 +458,10 @@ static void peerStartRequest() {
     // Driven by the ESP-NOW device-detail view: target the selected peer
     // directly (works without bond mode — FsList is base ESP-NOW now).
     memcpy(mac, sEspnowCtxMac, 6);
+#if ENABLE_BONDED_MODE
   } else if (BondedPeer::isPaired() && BondedPeer::peerMacBytes(mac)) {
     // Legacy bond-mode PEER source reachable by X-cycling the sources.
+#endif
   } else {
     sPeerStatus = PeerListStatus::NOT_BONDED;
     return;

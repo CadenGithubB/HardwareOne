@@ -172,6 +172,7 @@ private:
   uint32_t          defaultClockHz[NUM_BUSES];
   bool              busInitialized[NUM_BUSES];
   I2CBusMetrics     busMetrics[NUM_BUSES];
+  uint32_t          lastRecoveryMs[NUM_BUSES];  // throttles error-driven recovery
 
   // Clock stack for nested transactions — also per-bus, since two tasks on
   // different buses can be mid-transaction simultaneously.
@@ -201,6 +202,11 @@ private:
   void updateMetrics(uint8_t bus, uint32_t waitUs, uint32_t txDurationUs, uint32_t clockHz);
   void updateHistogram(uint8_t bus, uint32_t txDurationUs);
 
+  // Zero-length address probe used to classify a failed transaction. Must be
+  // called with the bus mutex already held (executeTransaction does). Returns
+  // a TwoWire::endTransmission() status for classifyI2CError().
+  uint8_t probeDeviceStatus(uint8_t bus, uint8_t addr);
+
 public:
   // Singleton access
   static I2CDeviceManager* getInstance();
@@ -214,6 +220,14 @@ public:
   // devices (e.g., two DS3231s, one per bus). Default bus=0 preserves legacy
   // single-bus lookup semantics.
   I2CDevice* getDevice(uint8_t addr, uint8_t busIdx = 0);
+  // Address-only lookup across every bus, lowest bus first. For callers that
+  // genuinely don't know their bus — the address-keyed health helpers in
+  // System_I2C.h, whose call sites pass a compile-time I2C_ADDR_* constant.
+  // getDevice(addr) would silently resolve those to bus 0 and return nullptr
+  // for a device living on bus 1, turning every health check into a no-op.
+  // If the same address is registered on both buses this returns the bus 0
+  // entry; use getDevice(addr, bus) when the distinction matters.
+  I2CDevice* getDeviceAnyBus(uint8_t addr);
   I2CDevice* getDeviceByName(const char* name);
   int getDeviceCount() const { return deviceCount; }
   int getActiveDeviceCount() const {
@@ -236,6 +250,10 @@ public:
   // overload is used when the failing device is on bus 1.
   void performBusRecovery(uint8_t busIdx = 0);
   void checkBusRecoveryNeeded();  // Event-driven recovery check (called when device degrades)
+  // True while a bus is inside its cooldown after an error-driven recovery.
+  // Guards the automatic (BUS_ERROR) path only — explicit operator-initiated
+  // recovery via i2creset deliberately ignores this.
+  bool busRecoveryThrottled(uint8_t busIdx) const;
   void discoverDevices();
 
   // I2C device lifecycle
@@ -371,6 +389,39 @@ auto I2CDeviceManager::executeTransaction(I2CDevice* device, Func&& operation,
     ReturnType result = operation();
     uint32_t txDurationUs = micros() - txStartUs;
 
+    // Classify a failure while we still hold the bus, but record it after we
+    // let go. The probe needs the bus; recordError must NOT run under the
+    // mutex because its BUS_ERROR branch calls performBusRecovery(), which
+    // takes this same mutex — classifying and recording together would
+    // self-deadlock. So: probe here, stash, release, then record.
+    //
+    // The lambda only hands back a bool, so the underlying Wire status never
+    // escapes it. Rather than rewrite every sensor driver to plumb the status
+    // out, the manager asks the bus directly: a zero-length address probe
+    // distinguishes the cases that actually drive different responses —
+    // device silent (NACK), bus timing out (TIMEOUT), driver-level fault
+    // (BUS_ERROR). This runs only on the failure path, which is rare by
+    // definition, and it deliberately bypasses the metrics counters since it
+    // is diagnostic traffic rather than real work.
+    I2CErrorType errType = I2CErrorType::NONE;
+    uint8_t wireStatus = 0;
+    if constexpr (std::is_same<ReturnType, bool>::value) {
+      if (!result && mode != I2CDevice::Mode::NACK_TOLERANT) {
+        wireStatus = probeDeviceStatus(bus, device->address);
+        errType = classifyI2CError(wireStatus);
+        if (errType == I2CErrorType::NONE) {
+          // The device ACKs its address, so it is present and the bus is
+          // healthy — the operation failed for a reason neither can report
+          // (bad register, short read, sensor-level rejection). Fall back to
+          // NACK, matching the pre-classification behavior, so that repeated
+          // failures still accumulate toward degraded instead of being
+          // recorded as a non-event.
+          errType = I2CErrorType::NACK;
+          wireStatus = 2;
+        }
+      }
+    }
+
     clockStackPop(bus);
     setBusClock(bus, clockStackTopOrDefault(bus));
     xSemaphoreGive(mutex);
@@ -382,7 +433,7 @@ auto I2CDeviceManager::executeTransaction(I2CDevice* device, Func&& operation,
         if (result) {
           device->recordSuccess();
         } else {
-          device->recordError(I2CErrorType::NACK, 0x02);
+          device->recordError(errType, wireStatus);
         }
       } else {
         device->recordSuccess();
