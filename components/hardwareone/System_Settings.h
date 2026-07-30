@@ -260,7 +260,7 @@ struct Settings {
       oledBootDuration(2000),
       oledUpdateInterval(125),
       oledBrightness(255),
-      oledFlipped(true),          // True keeps the historical hardcoded setRotation(2) behavior
+      oledFlipped(false),         // false → setRotation(0) normal; true → setRotation(2) 180°
       oledThermalScale(2.5f),
       oledThermalColorMode("3level"),
       inputAutoStart(false),
@@ -305,6 +305,7 @@ struct Settings {
       sensorLogAutoStart(false),
       healthTrackingEnabled(false),
       healthTrackPollIntervalSec(900),  // 15 min — R1 vitals mine cadence while Track is on
+      captureEncryptMode(1),            // seal LOG_R1 capture sessions at rest by default
       sensorLogPath(CAPTURE_SENSORLOG_DEFAULT),
       sensorLogIntervalMs(5000),
       sensorLogMask(0),
@@ -917,6 +918,7 @@ struct Settings {
   bool sensorLogAutoStart;      // Auto-start sensor logging after boot with last-used parameters
   bool healthTrackingEnabled;   // R1 Health Track: keep LOG_R1 on and resume logging at boot
   int  healthTrackPollIntervalSec; // How often to poll/mine R1 vitals while Track is on (default 900 = 15 min)
+  int  captureEncryptMode;      // At-rest sealing: 0=off, 1=sessions with LOG_R1, 2=all captures — docs/HEALTH_AT_REST_ENCRYPTION_PLAN.md
   String sensorLogPath;         // Last-used log file path (default: CAPTURE_SENSORLOG_DEFAULT)
   int sensorLogIntervalMs;      // Last-used polling interval in ms (default: 5000)
   int sensorLogMask;            // Last-used sensor bitmask (0=none)

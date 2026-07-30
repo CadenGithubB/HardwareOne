@@ -12,6 +12,7 @@
 #include "System_MemUtil.h"  // PSRAM_JSON_DOC macro
 #include "System_SensorStubs.h" // Network stubs when disabled
 #include "System_Utils.h"    // RETURN_VALID_IF_VALIDATE_CSTR macro
+#include "System_Clock.h"    // Clock::applyTimezone — push tz offset into libc TZ
 #include "BLE_Peers.h"       // bluetooth.peers JSON (de)serialization
 #include "System_Command.h"
 #include "System_Notifications.h"
@@ -750,6 +751,12 @@ static_assert(dbgMapFieldsDistinct(), "two settings→flag map rows claim the sa
 void applySettings() {
   DEBUG_SYSTEMF("[applySettings] START");
 
+  // Make localtime_r()/mktime() honor the configured offset from this point
+  // on. Must happen before anything formats or schedules a local time —
+  // without it the C library defaults to UTC and only setupNTP()'s
+  // configTime() (WiFi-only) would ever correct it. See Clock::applyTimezone.
+  Clock::applyTimezone();
+
   // Apply the one persisted output lane (SERIAL). Every other lane is
   // runtime state and must survive applySettings re-runs (setup wizard,
   // first-time setup): WEB tracks the HTTP server lifecycle (raised in
@@ -1458,6 +1465,7 @@ const char* cmd_tzoffsetminutes(const String& argsInput) {
   // Line Islands at +14). Matches the tzOffsetMinutes setting's min/max.
   if (offset < -720 || offset > 840) return "Error: timezone offset must be between -720 and 840 minutes";
   setSetting(gSettings.tzOffsetMinutes, offset);
+  Clock::applyTimezone();  // takes effect with or without WiFi
 #if ENABLE_WIFI
   setupNTP();
 #endif

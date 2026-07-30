@@ -83,7 +83,6 @@ typedef void (*G2EventCallback)(G2EventType event);
 #define G2_PACKET_MAGIC       0xAA
 #define G2_PACKET_TYPE_CMD    0x21
 #define G2_PACKET_TYPE_RSP    0x12
-#define G2_MTU_TARGET         512
 #define G2_AUTH_PACKET_COUNT  7
 
 #define G2_SVC_AUTH_CTRL_HI   0x80
@@ -140,11 +139,11 @@ bool isG2ClientInitialized();
 // =============================================================================
 // Unified BLE connect worker (Group B, see docs/G2_REFACTOR_PROPOSAL.md)
 // =============================================================================
-// Single persistent task spawned in initG2Client() that drains a small queue
-// of BleConnectJob entries. Replaces the 5 distinct `xTaskCreate(*TaskBody)`
-// patterns (g2 connect/saved + ring connect/saved/mac) with one worker — the
-// 6 KB stack is paid ONCE at G2 init time, not transiently during connect
-// when internal DRAM is already tight.
+// Single persistent task that drains a small queue of BleConnectJob entries.
+// Replaces the 5 distinct `xTaskCreate(*TaskBody)` patterns (g2 connect/saved
+// + ring connect/saved/mac) with one worker. Started lazily by the first
+// g2SubmitBleConnect (via bleConnectInit), then persists — the 5 KB
+// (5120-byte) stack is paid once, not per connect attempt.
 //
 // Public API for callers (g2Connect, g2RingConnect, etc.) stays unchanged;
 // internally those functions now build a BleConnectJob and call
@@ -168,13 +167,26 @@ struct BleConnectJob {
   char           mac[18];    // valid for RING_MAC only ("AA:BB:CC:DD:EE:FF\0")
 };
 
-// Heap-copies the job and pushes onto the BLE-connect queue. Returns false
-// if initG2Client() hasn't been called (queue not yet alive) or the queue
-// is full (some other connect is queued ahead). Caller should set its
+// Heap-copies the job and pushes onto the BLE-connect queue, lazily starting
+// the worker (bleConnectInit) if it isn't running yet. Returns false if the
+// worker can't be started, the heap copy fails, or the queue stays full for
+// 50 ms (some other connect is queued ahead). Caller should set its
 // per-family in-flight flag (gConnectTaskActive / gRingConnectTaskActive)
 // BEFORE calling this and clear it from the worker's dispatch only after
 // the underlying *Sync function returns.
 bool g2SubmitBleConnect(const BleConnectJob& job);
+
+// Local preferred ATT MTU for G2 client mode (temples + ring). Process-global
+// via esp_ble_gatt_set_local_mtu — never lower this for a peer that negotiates
+// a smaller per-link MTU (see bleNegotiateConnMtu).
+static constexpr uint16_t G2_BLE_LOCAL_MTU_PREF = 244;
+
+// Raise-only local preferred MTU, request per-connection exchange, wait for
+// CFG_MTU (or timeout). Returns negotiated MTU for this link (fallback 23).
+// logTag is a short label for the one-line MTU log (e.g. "RING", "G2-L").
+class BLEClient;
+uint16_t bleNegotiateConnMtu(BLEClient* client, uint16_t preferred,
+                             uint32_t timeoutMs, const char* logTag);
 
 // Connection management
 bool g2Connect(G2Eye eye = G2_EYE_LEFT);
@@ -449,6 +461,25 @@ bool g2ShowMultiTextPage(const G2TextChildSpec* children, size_t childCount,
 bool g2ShowMixedListText(const char* const* items, size_t itemCount,
                          const G2ContainerGeom& listGeom,
                          const G2TextChildSpec& title);
+
+// In-place refresh of the LIVE List+Text compound (no SHUTDOWN+CREATE).
+// Multi-child Cmd=7 REBUILD — re-sends the FULL child set (unmentioned
+// children blank; renderStatusCompound is the production precedent).
+// ~80 ms + ack; resets the native list highlight to row 0. For rare
+// list-content changes on a page that stays up (text-entry group switch).
+// Returns false when no live compound is ready or a swap is in flight —
+// caller falls back to g2ShowMixedListText.
+bool g2RelistMixedListText(const char* const* items, size_t itemCount,
+                           const G2ContainerGeom& listGeom,
+                           const G2TextChildSpec& title);
+
+// Fire-and-forget Cmd=5 UPDATE_TEXT to ONE text child of the live
+// compound. Does NOT touch sibling children — the list keeps its rows,
+// focus and scroll (mic-detail / Health production pattern). The
+// per-keystroke path for the text-entry buffer panel; single fragment,
+// no ack wait.
+bool g2UpdateMixedTextChild(const char* containerName, uint32_t containerId,
+                            const char* content);
 
 // REBUILD-text child probe — given a single compound container hosting
 // both a TextObject ("title") and a ListObject (the test R shape), can
@@ -1199,6 +1230,7 @@ const char* g2ProbeImageQ21LiveFullScreenBurst();
 inline bool initG2Client() { return false; }
 inline void deinitG2Client() {}
 inline bool isG2ClientInitialized() { return false; }
+inline uint16_t bleNegotiateConnMtu(class BLEClient*, uint16_t, uint32_t, const char*) { return 23; }
 inline bool g2Connect(G2Eye eye = G2_EYE_LEFT) { return false; }
 inline bool g2ConnectSaved() { return false; }
 inline void g2Disconnect() {}
@@ -1256,6 +1288,9 @@ inline bool g2ShowMultiTextPage(const void*, size_t,
                                 void (*)() = nullptr,
                                 G2TapFn = nullptr) { return false; }
 inline bool g2ShowMixedListText(const char* const*, size_t) { return false; }
+// Geom/spec params dropped (same NB as above — those types are gated out).
+inline bool g2RelistMixedListText(const char* const*, size_t) { return false; }
+inline bool g2UpdateMixedTextChild(const char*, uint32_t, const char*) { return false; }
 inline const char* g2ProbeRebuildTextChild() { return "G2 disabled"; }
 inline bool g2ShowNotification(const char* text, uint32_t durationMs = 5000) { return false; }
 inline bool g2SendNativeNotificationAsync(const char*, const char*, const char*,

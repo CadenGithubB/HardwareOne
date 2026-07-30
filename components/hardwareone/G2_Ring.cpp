@@ -28,9 +28,11 @@
 #include "System_G2_Protocol.h"  // g2BuildRingRawDataPush + G2RingPushFields
 #include "G2_Health.h"           // history append + daily backfill
 #include "System_Events.h"       // systemEventPost — ring connect/disconnect bus events
+#include "System_Clock.h"        // isSynced/isValidEpoch — ring-clock custody gates
 
 #include <freertos/FreeRTOS.h>
 #include <time.h>
+#include <sys/time.h>
 #include <freertos/task.h>
 #include <freertos/semphr.h>
 #include <string.h>
@@ -113,12 +115,22 @@ static portMUX_TYPE  gRingTxQMux = portMUX_INITIALIZER_UNLOCKED;
 // Lock order: bleCentralTx → gRing.writeMutex (never reverse). All ring
 // GATT writes go through here so image bursts on the glasses cannot race
 // ring polls into the shared BT controller queue.
-static void ringClearGattPointers() {
+// dropClientPtr=true only when the underlying object is (about to be) freed
+// by someone else — i.e. before BLEDevice::deinit, which deletes m_pClient.
+// With the BLE stack still live, pass false: deleting here would race the
+// async DISCONNECT_EVT (the object is still registered for events until that
+// handler unregisters it), and nulling without delete leaks the client and
+// its ~10-14 KB GATT cache. Keeping the pointer with clientStale=true lets
+// the next connect's stale-replacement branch reap it safely.
+static void ringClockCustodyReset();  // ring-clock custody state (defined below)
+
+static void ringClearGattPointers(bool dropClientPtr) {
   gRing.connected  = false;
   gRing.writeChar  = nullptr;
   gRing.notifyChar = nullptr;
-  gRing.client     = nullptr;
+  if (dropClientPtr) gRing.client = nullptr;
   gRing.clientStale = true;
+  ringClockCustodyReset();  // defined below — no cross-link state survives
 }
 
 static void ringTxQClear() {
@@ -283,6 +295,15 @@ struct R1TelemetryCache {
 };
 static R1TelemetryCache gR1Cache;
 
+// Freshest ring timestamp SEEN on the wire, independent of the per-metric
+// value gates below — an unworn ring answers an HR point query with hr=0
+// (which the range checks rightly discard) but the frame still carries the
+// ring's clock, and that is all ring-clock custody needs. Written from the
+// BLE notify task (two plain u32 stores), read from the main-loop tick;
+// a torn read only mis-ages the estimate by the gap between frames.
+static volatile uint32_t sRingTsSeen     = 0;
+static volatile uint32_t sRingTsSeenRxMs = 0;
+
 // Last wear enum we posted a bus event for (1=notWear, 2=wear). 0 = none yet
 // this link. Unknown (0) samples do not clear this — avoids re-firing on
 // intermittent unknowns. Reset on disconnect so the next session can edge.
@@ -307,11 +328,11 @@ static void ringNoteWear(uint8_t wear, uint32_t rxMs) {
   }
 }
 
-// Age in seconds for UI/JSON. Prefer ring epoch when wall clock looks synced
-// (≥ 2020-09); else millis since local receive. −1 = unknown.
+// Age in seconds for UI/JSON. Prefer ring epoch when both clocks look
+// synced (Clock::isValidEpoch); else millis since local receive. −1 = unknown.
 static int32_t ringSampleAgeSec(uint32_t ringTs, uint32_t rxMs) {
   const time_t now = time(nullptr);
-  if (ringTs >= 1600000000u && (uint32_t)now >= 1600000000u) {
+  if (Clock::isValidEpoch((time_t)ringTs) && Clock::isValidEpoch(now)) {
     int64_t a = (int64_t)now - (int64_t)ringTs;
     if (a < 0) a = 0;
     if (a > 0x7fffffffLL) a = 0x7fffffffLL;
@@ -321,6 +342,162 @@ static int32_t ringSampleAgeSec(uint32_t ringTs, uint32_t rxMs) {
     return (int32_t)((millis() - rxMs) / 1000u);
   }
   return -1;
+}
+
+// =============================================================================
+// Ring-clock custody
+// =============================================================================
+// The ring keeps its own battery-backed clock and survives our reboots, so
+// after a dark boot (no RTC, no WiFi/NTP) it is often the only component in
+// reach that still knows the real time. Custody, not origination: the ring
+// only ever holds what some synced host once pushed into it — but that is
+// exactly what a DS3231 with a coin cell is, too. Two rules keep the chain
+// alive:
+//   1. NEVER overwrite the ring's clock with a dark epoch. The connect
+//      ritual's systemTime frame is mandatory (RE'd sequence — frames are
+//      not dropped from it), so when the host is dark, setup waits a bounded
+//      window for g2RingTimeSyncTick() to adopt the ring's time first; the
+//      frame then echoes the ring's own clock back at it.
+//   2. Whenever the host clock disagrees with what the ring was last told
+//      by more than 2 minutes, send a corrective systemTime. This covers
+//      the dark push corrected by NTP, an adoption-echo (which carries the
+//      ring's last MEASUREMENT time, stale by minutes) trued up by NTP,
+//      and a manual timeset — one drift rule instead of one-shot flags.
+// sRingSetupDone gates the corrective push so the tick can never inject a
+// frame into the middle of the setup ritual.
+static volatile bool sRingSetupDone        = false;  // standard setup finished this link
+static volatile uint32_t sLastPushedEpoch  = 0;      // epoch of the last systemTime SET (0 = none yet)
+static volatile uint32_t sLastPushedAtMs   = 0;      // millis() when that SET was written
+static volatile uint8_t sDarkProbesSent    = 0;      // post-setup hr/point solicits this link (cap 3)
+// Adoption is once per boot. Without this, a user who deliberately sets a
+// pre-2020 clock (`timeset 1999-…`, which leaves Clock::isSynced() false)
+// would have it silently overwritten by the ring within one 500 ms tick.
+static bool sAdoptedThisBoot = false;
+
+// Drop every per-link custody fact. Called from both teardown paths
+// (ringClearGattPointers) and again at the top of the setup ritual, so a
+// stamp, a push record, or a probe budget from a PREVIOUS link can never be
+// mistaken for this one's. Deliberately does NOT clear sAdoptedThisBoot —
+// that latch is per boot, not per link.
+static void ringClockCustodyReset() {
+  sRingSetupDone   = false;
+  sLastPushedEpoch = 0;
+  sLastPushedAtMs  = 0;
+  sDarkProbesSent  = 0;
+  sRingTsSeen      = 0;
+  sRingTsSeenRxMs  = 0;
+}
+
+// Freshest ring-stamped epoch across the cached point samples, adjusted by
+// time-since-receive so it reads as "now". 0 when no cached sample carries a
+// plausible date — a factory-fresh or fully-drained ring reports ~1970 and
+// must never be adopted. Upper bound mirrors rtcEarlyBootSync's 2099 cap.
+// Longest receive-age we will age-adjust across. A stamp whose rxMs is older
+// than this is not evidence of "now" any more (and a zero/stale rxMs would
+// project by the whole uptime), so we refuse rather than guess.
+static constexpr uint32_t kRingTsMaxAgeMs = 30u * 60u * 1000u;  // 30 min
+
+static time_t ringBestKnownEpoch(void) {
+  uint32_t ts = 0, rx = 0;
+  // Read the volatile pair ONCE into locals: sRingTsSeen is published after
+  // its rxMs, so a non-zero ts here always has its own rxMs already stored.
+  const uint32_t seenTs = sRingTsSeen;
+  const uint32_t seenRx = sRingTsSeenRxMs;
+  if (seenTs != 0)                                { ts = seenTs;          rx = seenRx;            }
+  if (gR1Cache.hrValid   && gR1Cache.hrTs   > ts) { ts = gR1Cache.hrTs;   rx = gR1Cache.hrRxMs;   }
+  if (gR1Cache.hrvValid  && gR1Cache.hrvTs  > ts) { ts = gR1Cache.hrvTs;  rx = gR1Cache.hrvRxMs;  }
+  if (gR1Cache.spo2Valid && gR1Cache.spo2Ts > ts) { ts = gR1Cache.spo2Ts; rx = gR1Cache.spo2RxMs; }
+  if (gR1Cache.tempValid && gR1Cache.tempTs > ts) { ts = gR1Cache.tempTs; rx = gR1Cache.tempRxMs; }
+  if (!Clock::isPlausibleEpoch((time_t)ts)) return 0;
+  if (rx == 0) return 0;  // never received locally — cannot age-adjust it
+
+  const uint32_t ageMs = (uint32_t)millis() - rx;   // unsigned: wrap-safe
+  if (ageMs > kRingTsMaxAgeMs) return 0;            // too stale to call "now"
+
+  const time_t projected = (time_t)ts + (time_t)(ageMs / 1000u);
+  // Bound the RESULT too, not just the raw stamp: the age adjustment is what
+  // could push a sane-looking stamp past the ceiling.
+  if (!Clock::isPlausibleEpoch(projected)) return 0;
+  return projected;
+}
+
+// Adopt the ring's clock when the host has no time source of its own.
+// MAIN-LOOP CONTEXT ONLY: the clock-step chores this triggers include
+// users.json I/O — too heavy for the BLE notify task or the connect
+// worker's small stack, which is why setup WAITS on this instead of
+// calling it directly. All post-step duties (TIME_SYNCED event, boot
+// anchor, pending-user resolve, scheduler wake, RTC write-back) flow
+// through Clock::clockStepped(); the tick that calls us drains them on
+// the next lap via Clock::clockDutiesTick().
+static bool ringAdoptClockIfDark(void) {
+  if (sAdoptedThisBoot) return false;  // once per boot; see the latch's note
+  if (Clock::isSynced()) return false;
+  const time_t adopted = ringBestKnownEpoch();
+  if (adopted == 0) return false;
+  sAdoptedThisBoot = true;
+
+  const time_t before = time(nullptr);  // pre-step, for the duty helper
+  struct timeval tv = { .tv_sec = adopted, .tv_usec = 0 };
+  settimeofday(&tv, nullptr);
+
+  char tsStr[24] = "";
+  struct tm tmNow;
+  if (localtime_r(&adopted, &tmNow)) {
+    strftime(tsStr, sizeof(tsStr), "%Y-%m-%d %H:%M", &tmNow);
+  }
+  BROADCAST_PRINTF("[RING] Adopted ring clock: %s (no local time source)", tsStr);
+
+  Clock::clockStepped(Clock::SYNC_RING, before);
+  return true;
+}
+
+// Main-loop tick (called next to timeAnchorsTick). Two duties: dark-clock
+// adoption from the ring cache, and the one-shot corrective systemTime push
+// once the clock is valid and the setup ritual has finished. Both branches
+// are cheap gated no-ops in the steady state.
+void g2RingTimeSyncTick(void) {
+  static uint32_t sLastMs = 0;
+  if (!everyMs(&sLastMs, 500)) return;
+
+  ringAdoptClockIfDark();
+
+  // Post-setup solicit: still dark with a live link — ask for an HR point
+  // (the response's timestamp feeds sRingTsSeen even when unworn). Capped
+  // per link: if the ring's own clock is dark too, re-asking won't help.
+  if (!Clock::isSynced() && gRing.connected && sRingSetupDone &&
+      sDarkProbesSent < 3) {
+    static uint32_t sProbeMs = 0;
+    if (everyMs(&sProbeMs, 5000) && g2RingPollVital(0)) {
+      sDarkProbesSent = (uint8_t)(sDarkProbesSent + 1);
+      DEBUG_G2F("[RING] dark-clock: TX hr/point solicit %u/3",
+                (unsigned)sDarkProbesSent);
+    }
+  }
+
+  // Corrective push: our clock is valid and disagrees with the projection
+  // of what the ring was last told by >2 min — covers the dark push trued
+  // by NTP, a stale adoption-echo (ring's last MEASUREMENT time) trued by
+  // NTP, and a manual timeset. Self-quenching: drift ≈ 0 after each push.
+  if (gRing.connected && sRingSetupDone && Clock::isSynced()) {
+    const time_t now = time(nullptr);
+    const uint32_t pushedEpoch = sLastPushedEpoch;
+    const uint32_t pushedAtMs  = sLastPushedAtMs;
+    const int64_t expected = (int64_t)pushedEpoch +
+        (int64_t)(((uint32_t)millis() - pushedAtMs) / 1000u);
+    int64_t drift = (int64_t)now - expected;
+    if (drift < 0) drift = -drift;
+    if (pushedEpoch == 0 || drift > 120) {
+      R1Frame f = gR1Encoder.buildSyncTime(0, (uint32_t)now);
+      if (f.length > 0 && ringWrite(f.bytes, f.length)) {
+        sLastPushedEpoch = (uint32_t)now;
+        sLastPushedAtMs  = (uint32_t)millis();
+        BROADCAST_PRINTF("[RING] TX systemTime (corrective) epoch=%lu — ring clock "
+                         "trued up (drift was %llds)",
+                         (unsigned long)now,
+                         (long long)(pushedEpoch == 0 ? 0 : drift));
+      }
+    }
+  }
 }
 
 // Spoof-push task state. The task wakes every `gSpoofIntervalSec` seconds,
@@ -339,17 +516,75 @@ static TaskHandle_t    gSpoofTaskHandle    = nullptr;
 // duplicate submissions. Group B retired the per-call task spawn; the
 // handle that used to track each transient task is gone.
 static volatile bool  gRingConnectTaskActive = false;
+// Stamped whenever the flag flips true, so reject paths can report how long
+// the in-flight attempt has been running — a normal saved-MAC attempt tops
+// out around 53s (20s glasses wait + 3s settle + ~30s connect timeout);
+// anything much past that means the worker is stuck.
+static volatile uint32_t gRingConnectTaskSinceMs = 0;
 
 void g2RingConnectMarkComplete() { gRingConnectTaskActive = false; }
+bool g2RingConnectInFlight()     { return gRingConnectTaskActive; }
 
-// Push a `ring-status` SSE to any open browser so the Bluetooth page's
-// Ring card flips state without a manual refresh. Fired on every
-// meaningful transition: connect-ok, disconnect, scan-found. Compact
-// keys because the SSE queue's data field is capped at 128 chars
-// (EVENT_DATA_MAX in WebServer_Server.h) — the G2 payload hits ~90
-// bytes, so we match that shape.
+// Failed-connect visibility. Every failure broadcasts on regular output, but
+// the persisted bus event is throttled to the first failure of a streak plus
+// one per 10 min — an unreachable ring retries every ≤180s and would
+// otherwise flood events.log. Streak resets on successful connect.
+static uint8_t  sRingConnFailStreak    = 0;
+static uint32_t sRingConnFailLastEvtMs = 0;
+
+static void ringNoteConnectFailure(const char* reason, uint32_t elapsedMs) {
+  if (sRingConnFailStreak < 255) sRingConnFailStreak++;
+  const uint32_t now = millis();
+  if (sRingConnFailStreak > 1 && (now - sRingConnFailLastEvtMs) < 600000UL) return;
+  sRingConnFailLastEvtMs = now;
+  char detail[48];
+  snprintf(detail, sizeof(detail), "%s fail#%u %lus", reason,
+           (unsigned)sRingConnFailStreak, (unsigned long)(elapsedMs / 1000));
+  systemEventPost(SYSEVT_RING_RECONNECT_FAILED,
+                  gRingDeviceName.length() > 0 ? gRingDeviceName.c_str() : "R1",
+                  detail);
+}
+
+// Gate shared by the three public connect entry points. Returns true when
+// clear to submit. Rejects while an attempt is in flight — but past the
+// watchdog bound it assumes the worker lost its completion path, clears the
+// flag loudly, and lets this attempt proceed. 240s is well beyond the worst
+// legitimate job (20s glasses wait + 3s settle + 35s connect + 30s discovery
+// + bounded subscribe/setup ≈ 100s). ringPerformConnect's already-connected
+// guard makes a duplicate queued job harmless; if the worker is genuinely
+// dead the queue backs up at depth 4 and submit failures surface it.
+static bool ringConnectGateOpen() {
+  if (!gRingConnectTaskActive) return true;
+  const uint32_t inflightS = (millis() - gRingConnectTaskSinceMs) / 1000;
+  if (inflightS > 240) {
+    BROADCAST_PRINTF("[RING] WATCHDOG: connect attempt stuck for %lus — "
+                     "clearing in-flight flag and retrying",
+                     (unsigned long)inflightS);
+    char d[40];
+    snprintf(d, sizeof(d), "watchdog clear after %lus",
+             (unsigned long)inflightS);
+    systemEventPost(SYSEVT_RING_RECONNECT_FAILED,
+                    gRingDeviceName.length() > 0 ? gRingDeviceName.c_str() : "R1",
+                    d);
+    gRingConnectTaskActive = false;
+    return true;
+  }
+  BROADCAST_PRINTF("[RING] Connect skipped — attempt already in flight (%lus)",
+                   (unsigned long)inflightS);
+  if (inflightS > 120) ringNoteConnectFailure("stuck", inflightS * 1000);
+  return false;
+}
+
+// Push a `ring-status` SSE on every meaningful transition: connect-ok,
+// disconnect, scan-found. Compact keys because the SSE queue's data field
+// is capped at 128 chars (EVENT_DATA_MAX in WebServer_Server.h) — the G2
+// payload hits ~90 bytes, so we match that shape.
 //
-// Schema (client must match parseRingStatusEvent in WebPage_Bluetooth.h):
+// The Bluetooth web page does NOT listen to this event — it polls
+// /api/ble/status instead (see "Why not pure SSE" in WebPage_Bluetooth.h),
+// so this event's only consumers are external SSE subscribers.
+//
+// Schema:
 //   u  = up     (bool)  — BLE link live
 //   n  = name   (str)   — advert name ("EVEN R1_XXXXXX")
 //   a  = addr   (str)   — MAC
@@ -405,6 +640,14 @@ static void ringExtractTelemetryCache(const R1Decoded& d) {
     }
 
     const uint32_t rx = millis();
+    if (ts != 0) {  // ring-clock custody: any point frame carries the clock
+      // Publish rxMs FIRST: sRingTsSeen is the pair's validity flag, so a
+      // main-loop read that lands between the two stores must see ts==0 (and
+      // skip) rather than a fresh ts paired with a stale/zero rxMs — which
+      // would project the adopted epoch too far ahead.
+      sRingTsSeenRxMs = rx;
+      sRingTsSeen     = ts;
+    }
     switch (d.cmd) {
       case R1_CMD_HEARTRATE:
         if (hasExtra && extra > 0 && extra < 250) {
@@ -470,6 +713,10 @@ static void ringExtractTelemetryCache(const R1Decoded& d) {
        d.cmd == R1_CMD_TEMPERATURE)) {
     R1DailyResult daily;
     if (r1ParseHealthDaily(d.payload, d.payloadLength, daily) && daily.count > 0) {
+      if (daily.endTs != 0) {  // day-window end ≈ ring's clock at last sample
+        sRingTsSeenRxMs = millis();  // rxMs first — see the point-frame note
+        sRingTsSeen     = daily.endTs;
+      }
       G2HealthMetric m = HEALTH_METRIC_HR;
       if (d.cmd == R1_CMD_HRV) m = HEALTH_METRIC_HRV;
       else if (d.cmd == R1_CMD_SPO2) m = HEALTH_METRIC_SPO2;
@@ -592,7 +839,14 @@ void g2RingNoteForwardedTelemetry(const uint8_t* pb, size_t pbLen) {
         }
         break;
       case 4:  // hrTs
-        if (gR1Cache.hrValid) gR1Cache.hrTs = (sv > 0) ? (uint32_t)sv : now;
+        // Re-stamp rxMs with the stamp: proto3 omits zero fields, so a frame
+        // can carry hrTs WITHOUT hr and would otherwise advance the ring
+        // timestamp while leaving rxMs from an older frame — which makes the
+        // age-adjusted projection in ringBestKnownEpoch() read too far ahead.
+        if (gR1Cache.hrValid) {
+          gR1Cache.hrTs   = (sv > 0) ? (uint32_t)sv : now;
+          gR1Cache.hrRxMs = rx;
+        }
         break;
       case 5:  // spo2
         if (sv >= 70 && sv <= 100) {
@@ -602,8 +856,11 @@ void g2RingNoteForwardedTelemetry(const uint8_t* pb, size_t pbLen) {
           g2HealthNoteSample(HEALTH_METRIC_SPO2, (int16_t)sv, now);
         }
         break;
-      case 6:  // spo2Ts
-        if (gR1Cache.spo2Valid) gR1Cache.spo2Ts = (sv > 0) ? (uint32_t)sv : now;
+      case 6:  // spo2Ts — see case 4 on why rxMs moves with the stamp
+        if (gR1Cache.spo2Valid) {
+          gR1Cache.spo2Ts   = (sv > 0) ? (uint32_t)sv : now;
+          gR1Cache.spo2RxMs = rx;
+        }
         break;
       case 7:  // hrv
         if (sv > 0 && sv < 1000) {
@@ -613,8 +870,11 @@ void g2RingNoteForwardedTelemetry(const uint8_t* pb, size_t pbLen) {
           g2HealthNoteSample(HEALTH_METRIC_HRV, (int16_t)sv, now);
         }
         break;
-      case 8:  // hrvTs
-        if (gR1Cache.hrvValid) gR1Cache.hrvTs = (sv > 0) ? (uint32_t)sv : now;
+      case 8:  // hrvTs — see case 4 on why rxMs moves with the stamp
+        if (gR1Cache.hrvValid) {
+          gR1Cache.hrvTs   = (sv > 0) ? (uint32_t)sv : now;
+          gR1Cache.hrvRxMs = rx;
+        }
         break;
       case 9:  // temp (°C × 10 in RingRawData)
         if (sv >= 150 && sv <= 450) {
@@ -624,8 +884,11 @@ void g2RingNoteForwardedTelemetry(const uint8_t* pb, size_t pbLen) {
           g2HealthNoteSample(HEALTH_METRIC_TEMP, (int16_t)sv, now);
         }
         break;
-      case 10:  // tempTs
-        if (gR1Cache.tempValid) gR1Cache.tempTs = (sv > 0) ? (uint32_t)sv : now;
+      case 10:  // tempTs — see case 4 on why rxMs moves with the stamp
+        if (gR1Cache.tempValid) {
+          gR1Cache.tempTs   = (sv > 0) ? (uint32_t)sv : now;
+          gR1Cache.tempRxMs = rx;
+        }
         break;
       default:
         break;  // chargeStates / kcal / steps not cached today
@@ -762,7 +1025,12 @@ static void ringNotifyThunk(BLERemoteCharacteristic* /*c*/, uint8_t* data,
 //                   server-issued pkey is required, despite earlier notes
 //                   in our docs to the contrary.)
 //   2. systemTime — sets the ring clock to the ESP's wall time + tz offset
-//                   in MINUTES (NOT quarter-hours like G2 TIME_SYNC).
+//                   in MINUTES (NOT quarter-hours like G2 TIME_SYNC). When
+//                   the ESP is dark (no NTP/RTC yet) we first wait a bounded
+//                   window for ring-clock adoption (see "Ring-clock custody"
+//                   above) so this frame echoes the ring's own time instead
+//                   of stomping it back to 1970. The frame itself is always
+//                   sent — the RE'd sequence is never thinned.
 //   3. advStart   — payload is the G2 right-temple MAC, byte-reversed. The
 //                   FlutterApp author notes the MAC may not actually
 //                   matter; we send it anyway for parity. Falls back to
@@ -782,6 +1050,10 @@ static bool ringRunStandardSetup() {
   }
 
   gR1Encoder.resetSerial();
+  // Fresh link: drop any custody state a prior link left behind (step 2 below
+  // restamps the push projection). Teardown clears this too, but a connect
+  // that never saw a clean disconnect must not inherit stale facts.
+  ringClockCustodyReset();
 
   // 1. pairAuth — single-byte payload [0x01]. Ring acks then begins
   //    pushing telemetry on the notify char.
@@ -798,19 +1070,54 @@ static bool ringRunStandardSetup() {
             (unsigned)auth.serial, (unsigned)auth.length);
   vTaskDelay(pdMS_TO_TICKS(1000));
 
+  // Dark-clock window: our clock has no real time, but the ring's may — its
+  // battery-backed clock survives our reboots. This ring never volunteers
+  // telemetry unpolled (HW-verified 2026-07-29), so solicit the latest HR
+  // point — a standard query used constantly in normal operation; the
+  // response carries the ring's clock regardless of wear or vitals validity
+  // (sRingTsSeen). g2RingTimeSyncTick() (main loop) adopts the timestamp
+  // and flips Clock::isSynced(); the mandatory systemTime frame below then
+  // echoes the ring's own clock instead of stomping it with a 1970 epoch
+  // (which poisons the ring's daily-history bucketing — the Trends data
+  // source). Lapses silently after ~3 s total: we then send our dark epoch
+  // exactly as we always did, and the tick's corrective push repairs the
+  // ring once real time arrives. The ritual's own frames stay present and
+  // in order; the probe only shifts their serial numbers on dark boots.
+  if (!Clock::isSynced()) {
+    R1Frame probe = gR1Encoder.buildHealthQuery(R1_CMD_HEARTRATE, R1_SUB_POINT);
+    if (probe.length > 0 && ringWrite(probe.bytes, probe.length)) {
+      DEBUG_G2F("[RING] dark-clock window: TX hr/point probe ser=%u",
+                (unsigned)probe.serial);
+    }
+    for (int i = 0; i < 20 && !Clock::isSynced(); i++) {
+      vTaskDelay(pdMS_TO_TICKS(100));
+      if (i == 9 && !Clock::isSynced()) {  // one mid-window retry
+        probe = gR1Encoder.buildHealthQuery(R1_CMD_HEARTRATE, R1_SUB_POINT);
+        if (probe.length > 0) ringWrite(probe.bytes, probe.length);
+      }
+    }
+    DEBUG_G2F("[RING] dark-clock window: %s",
+              Clock::isSynced() ? "adopted ring clock — echoing it back"
+                                : "no dated sample seen — sending dark epoch");
+  }
+
   // 2. systemTime — current epoch, tz=0 (UTC). The ring uses the timezone
   //    field to label its history-mode timestamps; for the live telemetry
   //    stream we care about (HR/HRV/temperature pushes) the timezone is
-  //    irrelevant. The codebase doesn't otherwise persist a local-tz
-  //    offset (setenv("TZ",...) is avoided here — see WebPage_Sensors.cpp
-  //    comment about setenv/tzset triggering a watchdog), so UTC is the
-  //    only honest value we can send.
+  //    irrelevant. We deliberately keep sending 0 even though
+  //    Clock::tzOffsetMinutes() is now available everywhere: the daily
+  //    windows Trends reads (startTs/endTs) are bucketed by the ring using
+  //    this field, so changing it would silently shift every historical
+  //    day boundary. Epoch stays UTC; only the display layer localizes.
   time_t now = time(nullptr);
   R1Frame timeFrame = gR1Encoder.buildSyncTime(0, (uint32_t)now);
   if (timeFrame.length > 0) {
     if (ringWrite(timeFrame.bytes, timeFrame.length)) {
-      DEBUG_G2F("[RING] TX systemTime ser=%u tz=0min epoch=%lu",
-                (unsigned)timeFrame.serial, (unsigned long)now);
+      sLastPushedEpoch = (uint32_t)now;
+      sLastPushedAtMs  = (uint32_t)millis();
+      DEBUG_G2F("[RING] TX systemTime ser=%u tz=0min epoch=%lu%s",
+                (unsigned)timeFrame.serial, (unsigned long)now,
+                Clock::isSynced() ? "" : " (dark — corrective push pending)");
     }
   }
   vTaskDelay(pdMS_TO_TICKS(200));
@@ -840,6 +1147,7 @@ static bool ringRunStandardSetup() {
 
   DEBUG_G2F("[RING] standard setup complete — ring should now emit telemetry "
             "(HR / HRV / temperature / activity) on the notify char");
+  sRingSetupDone = true;  // opens the tick's corrective-push gate
   return true;
 }
 
@@ -861,6 +1169,10 @@ class RingClientCallbacks : public BLEClientCallbacks {
     gRing.notifyChar  = nullptr;
     gRing.clientStale = true;
     gR1Encoder.resetSerial();
+    // No corrective time push into a dead link, and no ring timestamp from
+    // THIS link surviving into the next one (this is the common teardown —
+    // link lost — so it must clear as much as ringClearGattPointers does).
+    ringClockCustodyReset();
     if (wasConnected) {
       BROADCAST_PRINTF("[RING] Dropped BLE link — ring is no longer connected");
       ringPushStatusEvent("disconnect");
@@ -1040,7 +1352,44 @@ bool ringPerformConnect(const String& savedMac /* = String() */) {
   // peer-initiated disconnects.
   if (gRing.client && gRing.clientStale) {
     DEBUG_G2F("[RING] Replacing stale BLEClient from prior drop");
-    gRing.client      = nullptr;
+    // Nulling without delete orphans the client and its cached GATT tree
+    // (measured ~10-14 KB per drop on the glasses path) — but freeing it is
+    // only legal once nothing can still reach it:
+    //
+    // Gate 1 — the library. After a MANUAL ringdisconnect, clientStale was
+    // set by us, not by onDisconnect, so the async DISCONNECT_EVT (which
+    // unregisters the gattc app and pulls the client out of BLEDevice's
+    // routing map) may still be in flight — the R1's power-save conn
+    // interval makes 50-500 ms normal. That same handler drops getGattcIf()
+    // to ESP_GATT_IF_NONE; poll for it, bounded.
+    //
+    // Gate 2 — app tasks. ringWriteLocked holds writeMutex across its
+    // writeChar dereference (the char lives inside this client's GATT
+    // cache); 2 s dwarfs a healthy sender's hold (one writeValue).
+    //
+    // If either gate fails, leak the object rather than free memory the BLE
+    // dispatcher or a wedged writer may still touch.
+    BLEClient* dead = gRing.client;
+    gRing.client    = nullptr;
+    bool libReleased = false;
+    for (uint32_t waited = 0; ; waited += 50) {
+      if (dead->getGattcIf() == ESP_GATT_IF_NONE) { libReleased = true; break; }
+      if (waited >= 3000) break;
+      vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    const bool locked = gRing.writeMutex &&
+        xSemaphoreTake(gRing.writeMutex, pdMS_TO_TICKS(2000)) == pdTRUE;
+    if (libReleased && locked) {
+      // One extra poll interval: gattc_if drops mid-DISCONNECT-case on the
+      // BTC task, a hair before the routing-map removal and onDisconnect
+      // callback finish with the object (cross-core, so genuinely parallel).
+      vTaskDelay(pdMS_TO_TICKS(50));
+      delete dead;
+    } else {
+      DEBUG_G2F("[RING] Stale client NOT freed (libReleased=%d locked=%d) — "
+                "leaked by design", (int)libReleased, (int)locked);
+    }
+    if (locked) xSemaphoreGive(gRing.writeMutex);
     gRing.clientStale = false;
   }
   if (!gRing.client) {
@@ -1049,7 +1398,11 @@ bool ringPerformConnect(const String& savedMac /* = String() */) {
       DEBUG_G2F("[RING] BLEDevice::createClient() returned null");
       return false;
     }
-    gRing.client->setClientCallbacks(new RingClientCallbacks());
+    // Static: the callbacks keep no per-connection state (they write gRing
+    // globals), ~BLEClient never frees this pointer, and a heap `new` per
+    // replacement cycle just leaked alongside the client.
+    static RingClientCallbacks sRingClientCallbacks;
+    gRing.client->setClientCallbacks(&sRingClientCallbacks);
   }
 
   const uint32_t t0 = millis();
@@ -1072,7 +1425,11 @@ bool ringPerformConnect(const String& savedMac /* = String() */) {
         addrType = BLE_ADDR_TYPE_RANDOM;
       }
     }
-    connOk = gRing.client->connect(addr, addrType);
+    // Explicit timeout: the default is portMAX_DELAY, which turned a lost
+    // OPEN event into a forever-wedged connect worker (root-cause candidate
+    // for the 2026-07-28 2h no-reconnect window). 35s clears the ring's
+    // normal ~30s direct-connect timeout with margin.
+    connOk = gRing.client->connect(addr, addrType, 35000);
     if (connOk) {
       // Populate the cached descriptors so subsequent disconnect / status
       // paths print sensible names.
@@ -1080,24 +1437,31 @@ bool ringPerformConnect(const String& savedMac /* = String() */) {
       if (gRingDeviceName.length() == 0) gRingDeviceName = "saved-ring";
     }
   } else {
-    connOk = gRing.client->connect(gRingAdvertisedDevice);
+    // Same 35s bound as the saved-MAC path (the plain connect(device)
+    // overload hardwires the portMAX_DELAY default).
+    connOk = gRing.client->connectTimeout(gRingAdvertisedDevice, 35000);
   }
   if (!connOk) {
-    DEBUG_G2F("[RING] BLE connect FAILED after %u ms",
-              (unsigned)(millis() - t0));
+    const uint32_t dt = millis() - t0;
+    BROADCAST_PRINTF("[RING] BLE connect FAILED after %u ms (%s)",
+                     (unsigned)dt,
+                     useSavedMac ? savedMac.c_str() : "scan target");
+    ringNoteConnectFailure("link", dt);
     return false;
   }
   DEBUG_G2F("[RING] BLE connect OK in %u ms", (unsigned)(millis() - t0));
 
-  // Bump MTU. Health queries / setup frames exceed the default 23-byte
-  // ATT payload; negotiate higher to keep writes single-packet.
-  gRing.client->setMTU(64);
-  gRing.mtu = gRing.client->getMTU();
-  DEBUG_G2F("[RING] MTU negotiated to %u", (unsigned)gRing.mtu);
+  // Prefer the same high local ATT MTU as glasses (G2_BLE_LOCAL_MTU_PREF).
+  // Never setMTU(64) — that lowered the process-global local MTU and broke
+  // subsequent glasses discovery (PDU size: 64). Peer may still negotiate
+  // this link down to ~64; that value lands in gRing.mtu.
+  gRing.mtu = bleNegotiateConnMtu(gRing.client, G2_BLE_LOCAL_MTU_PREF, 1000, "RING");
 
   DEBUG_G2F("[RING] Looking up service %s", G2RING_SERVICE_UUID);
   BLERemoteService* svc = gRing.client->getService(BLEUUID(G2RING_SERVICE_UUID));
   if (!svc) {
+    BROADCAST_PRINTF("[RING] Connect FAILED — ring service not found");
+    ringNoteConnectFailure("service", millis() - t0);
     DEBUG_G2F("[RING] Service %s NOT FOUND (listing all services below)",
               G2RING_SERVICE_UUID);
     auto* services = gRing.client->getServices();
@@ -1116,6 +1480,8 @@ bool ringPerformConnect(const String& savedMac /* = String() */) {
   DEBUG_G2F("[RING] writeChar=%p notifyChar=%p", gRing.writeChar, gRing.notifyChar);
 
   if (!gRing.notifyChar) {
+    BROADCAST_PRINTF("[RING] Connect FAILED — notify characteristic not found");
+    ringNoteConnectFailure("notify-char", millis() - t0);
     DEBUG_G2F("[RING] Notify char %s NOT FOUND (listing all chars):",
               G2RING_CHAR_NOTIFY_UUID);
     auto* chars = svc->getCharacteristics();
@@ -1140,7 +1506,13 @@ bool ringPerformConnect(const String& savedMac /* = String() */) {
   }
 
   gRing.connected      = true;
+  // Belt for the invalidate path: g2RingInvalidateLink nulls the client and
+  // leaves clientStale=true with nothing left to reap, so the fresh-client
+  // branch above never runs the reset — without this line the next connect
+  // would be mute (all TX gates check clientStale).
+  gRing.clientStale    = false;
   gRing.connectedSince = millis();
+  sRingConnFailStreak  = 0;
 
   // pairAuth → systemTime → advStart unlocks the notify/telemetry stream
   // (a bare subscribe without pairAuth stays muted).
@@ -1203,18 +1575,17 @@ bool g2RingInit() {
 
 bool g2RingConnect() {
   if (!g2RingInit()) return false;
-  if (gRingConnectTaskActive) {
-    DEBUG_G2F("[RING] Connect task already running");
-    return false;
-  }
+  if (!ringConnectGateOpen()) return false;
   // Group B: submit to the unified worker. Active flag flips true here so
   // duplicate g2RingConnect* calls reject before we ever hit the queue;
   // the worker's dispatch clears it after ringPerformConnect returns.
   gRingConnectTaskActive = true;
+  gRingConnectTaskSinceMs = millis();
   BleConnectJob job{};
   job.kind = BleConnectKind::RING_SCAN;
   if (!g2SubmitBleConnect(job)) {
-    DEBUG_G2F("[RING] g2SubmitBleConnect(RING_SCAN) failed — queue full or G2 not init'd");
+    BROADCAST_PRINTF("[RING] Connect submit FAILED (scan) — worker queue full or BLE not ready");
+    ringNoteConnectFailure("submit", 0);
     gRingConnectTaskActive = false;
     return false;
   }
@@ -1223,19 +1594,18 @@ bool g2RingConnect() {
 
 bool g2RingConnectSaved() {
   if (!g2RingInit()) return false;
-  if (gRingConnectTaskActive) {
-    DEBUG_G2F("[RING] Connect task already running");
-    return false;
-  }
+  if (!ringConnectGateOpen()) return false;
   if (gBlePeerData[BLE_PEER_R1_RING].mac1.length() == 0) {
     DEBUG_G2F("[RING] g2RingConnectSaved: no saved MAC, skipping");
     return false;
   }
   gRingConnectTaskActive = true;
+  gRingConnectTaskSinceMs = millis();
   BleConnectJob job{};
   job.kind = BleConnectKind::RING_SAVED;
   if (!g2SubmitBleConnect(job)) {
-    DEBUG_G2F("[RING] g2SubmitBleConnect(RING_SAVED) failed — queue full or G2 not init'd");
+    BROADCAST_PRINTF("[RING] Connect submit FAILED (saved) — worker queue full or BLE not ready");
+    ringNoteConnectFailure("submit", 0);
     gRingConnectTaskActive = false;
     return false;
   }
@@ -1244,10 +1614,7 @@ bool g2RingConnectSaved() {
 
 bool g2RingConnectMac(const String& mac) {
   if (!g2RingInit()) return false;
-  if (gRingConnectTaskActive) {
-    DEBUG_G2F("[RING] Connect task already running");
-    return false;
-  }
+  if (!ringConnectGateOpen()) return false;
   String m = mac;
   m.trim();
   // Loose validation — full BLEAddress parsing happens inside ringPerformConnect.
@@ -1259,13 +1626,15 @@ bool g2RingConnectMac(const String& mac) {
     return false;
   }
   gRingConnectTaskActive = true;
+  gRingConnectTaskSinceMs = millis();
   BleConnectJob job{};
   job.kind = BleConnectKind::RING_MAC;
   // 17 chars + NUL fits exactly in the 18-byte mac buffer.
   memcpy(job.mac, m.c_str(), 17);
   job.mac[17] = '\0';
   if (!g2SubmitBleConnect(job)) {
-    DEBUG_G2F("[RING] g2SubmitBleConnect(RING_MAC) failed — queue full or G2 not init'd");
+    BROADCAST_PRINTF("[RING] Connect submit FAILED (mac) — worker queue full or BLE not ready");
+    ringNoteConnectFailure("submit", 0);
     gRingConnectTaskActive = false;
     return false;
   }
@@ -1276,7 +1645,9 @@ void g2RingInvalidateLink() {
   // No GATT calls — stack may already be dead.
   const bool wasConnected = gRing.connected;
   ringTxQClear();
-  ringClearGattPointers();
+  // Drop the pointer: BLEDevice::deinit frees/invalidates the object, so
+  // keeping it for reaping would leave a dangling pointer.
+  ringClearGattPointers(/*dropClientPtr=*/true);
   gR1Encoder.resetSerial();
   if (wasConnected) {
     DEBUG_G2F("[RING] Link invalidated (BLE stack teardown)");
@@ -1296,7 +1667,13 @@ void g2RingDisconnect() {
     gRing.client->disconnect();  // onDisconnect clears chars when stack is live
   }
   ringTxQClear();
-  ringClearGattPointers();
+  // Keep the client object for the next connect's stale-replacement reap:
+  // deleting it here would race the async DISCONNECT_EVT still headed for it,
+  // and the old null-without-delete leaked it (~10-14 KB) AND stranded
+  // clientStale=true forever — the delete branch was the only reset, so a
+  // manual ringdisconnect → ringconnect came up connected-but-mute (every TX
+  // gate checks clientStale).
+  ringClearGattPointers(/*dropClientPtr=*/false);
   gR1Encoder.resetSerial();
 }
 
@@ -1365,6 +1742,13 @@ void g2RingGetTelemetry(G2RingTelemetry& out) {
   out.tempAgeSec    = gR1Cache.tempValid    ? ringSampleAgeSec(gR1Cache.tempTs, gR1Cache.tempRxMs) : -1;
   out.batteryAgeSec = gR1Cache.batteryValid ? ringSampleAgeSec(0, gR1Cache.batteryRxMs) : -1;
   out.wearAgeSec    = gR1Cache.wearValid    ? ringSampleAgeSec(0, gR1Cache.wearRxMs) : -1;
+  // Raw local receive stamps, copied through unprocessed — history consumers
+  // need a monotonic axis that ring-clock custody can't step (see G2_Ring.h).
+  out.hrRxMs        = gR1Cache.hrRxMs;
+  out.hrvRxMs       = gR1Cache.hrvRxMs;
+  out.spo2RxMs      = gR1Cache.spo2RxMs;
+  out.tempRxMs      = gR1Cache.tempRxMs;
+  out.batteryRxMs   = gR1Cache.batteryRxMs;
 }
 
 void g2RingGetStatus(char* buf, size_t cap) {

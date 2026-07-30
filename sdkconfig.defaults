@@ -136,6 +136,15 @@ CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
 # (CONFIG_LWIP_MAX_ACTIVE_TCP already defaults to 16, which covers 8 sockets.)
 CONFIG_LWIP_MAX_SOCKETS=16
 
+# SNTP - make the two backup servers setupNTP() passes actually exist (the
+# default is ONE slot, which silently dropped them), and stop waiting a random
+# 0-5 s before the first request — boot's foreground sync polls for the reply,
+# so the startup delay was pure added latency. Deliberately NOT enabling
+# CONFIG_LWIP_DHCP_GET_NTP_SRV: when armed it wipes the entire static server
+# list, not just slot 0.
+CONFIG_LWIP_SNTP_MAX_SERVERS=3
+CONFIG_LWIP_SNTP_MAXIMUM_STARTUP_DELAY=100
+
 # mbedTLS - allocate TLS buffers from PSRAM instead of internal DRAM
 # Each TLS session needs ~40-50KB; internal DRAM is too scarce for multiple sessions
 # CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC is not set

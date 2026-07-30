@@ -23,15 +23,14 @@
 #include "System_AuthIdentity.h"  // currentAuthContext — CLI handlers' per-task identity
 #include "System_CLIConfirm.h"    // cliRequestConfirm — yes/no gate for destructive filedelete
 #include "System_TextPager.h"     // sanitize + page-split core — paged fileview (CLI, not BT-gated)
+#include "System_CaptureCrypto.h" // reveal sealed captures for display (fileview is a presentation surface)
 #if ENABLE_BLUETOOTH
 #include "System_BleSecureChannel.h"  // bleScSendEncrypted/bleScEstablished — raw-binary `fileread ... bin`
 #endif
 
 // External dependencies
 extern bool readText(const char* path, String& out);
-extern void getTimestampPrefixMsCached(char* buffer, size_t bufferSize);
 extern bool sanitizeAutomationsJson(String& json);
-extern time_t computeNextRunTime(const char* automationJson, time_t currentTime);
 extern void writeAutomationsJsonAtomic(const String& json);
 extern void notifyAutomationScheduler();
 extern bool gAutomationsDirty;
@@ -741,6 +740,14 @@ const char* cmd_fileview(const String& argsInput) {
     return "ERROR";
   }
   const bool readCapHit = (content.length() >= kReadCap);
+
+  // Sealed capture? Reveal in place for display — fileview is a presentation
+  // surface behind requiresAdmin + the existsGuarded canRead above; byte
+  // surfaces (fileread, /api/files/read, ESP-NOW) keep shipping ciphertext.
+  // The '#HW1ENC' first line stays visible as the encrypted-at-rest mark;
+  // unopenable rows (torn tail, another device's key) render as
+  // "[undecryptable row]".
+  captureCryptoRevealText(content);
 
   // Sanitize + wrap into a scratch buffer: CRLF -> LF, tabs -> space, control
   // bytes dropped (a stray binary file no longer sprays escape sequences into

@@ -140,9 +140,9 @@ const char* cmd_tof(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   if (argWantsJson(argsInput)) {
-    if (!ensureDebugBuffer()) return "{\"valid\":false,\"error\":\"buffer\"}";
+    if (!ensureDebugBuffer()) return SENSOR_JSON_NOBUF;
     int n = tofBuildDataJSON(getDebugBuffer(), 1024);  // shared builder (also feeds sensors json / MQTT)
-    return (n > 0) ? getDebugBuffer() : "{\"valid\":false}";
+    return (n > 0) ? getDebugBuffer() : SENSOR_JSON_UNAVAILABLE;
   }
 
   float distance = readToFDistance();

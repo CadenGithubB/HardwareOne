@@ -133,8 +133,12 @@ bool healthTrackIsActive();
 const char* healthTrackSet(bool on);   // returns SUCCESS:/Error: message (static/debug buf)
 const char* cmd_healthtrack(const String& argsInput);
 const char* cmd_healthstatus(const String& argsInput);
-// Stitch health/sensor TEXT logs (same pattern as gpstrackmerge).
+// Byte-concatenate sensor logs in the caller's order (same pattern as
+// gpstrackmerge — and the same defects; see that command's usage text).
+// Not TEXT-only despite the name: an extensionless output gets .csv appended.
 const char* cmd_healthlogmerge(const String& argsInput);
+// At-rest sealing mode/status/export — docs/HEALTH_AT_REST_ENCRYPTION_PLAN.md
+const char* cmd_capturecrypt(const String& argsInput);
 
 // Snapshot vitals + Track into buf (JSON object). Returns buf, or "{}" on failure.
 // Shared by `healthstatus json` CLI/BLE and GET /api/health/status.

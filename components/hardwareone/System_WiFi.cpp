@@ -15,6 +15,7 @@
 #include "System_Settings.h"      // For writeSettingsJson()
 #include "System_Debug.h"  // For DEBUG_WIFIF and BROADCAST_PRINTF macros
 #include "System_Utils.h"  // For RETURN_VALID_IF_VALIDATE_CSTR macro + argWantsJson
+#include "System_Clock.h"  // Clock::syncSource ledger for ntpstatus
 #include "System_MemUtil.h"  // PSRAM_JSON_DOC
 #include "System_CommandTypes.h"  // CMD_RESULT_MAX — json branch returns the document
 #include <ArduinoJson.h>
@@ -44,7 +45,9 @@
 // External dependencies from main .ino
 // WifiNetwork struct and gWifiNetworks are now in wifi_system.h
 extern bool wifiConnected;
-extern bool syncNTPAndResolve();  // Synchronous NTP sync
+// syncNTPAndResolve now comes from System_Utils.h (included below) — its
+// signature grew an NtpSyncOutcome out-param and a mismatched local extern
+// would be a silent link break under C++ mangling.
 #if ENABLE_HTTP_SERVER
 extern bool gServerIsHttps;  // Defined in WebServer_Server.cpp
 #endif
@@ -1184,11 +1187,18 @@ bool connectWiFiSSID(const String& ssid, unsigned long timeoutMs) {
 const char* cmd_ntpsync(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   // Allow any authenticated user to sync NTP
-  bool ok = syncNTPAndResolve();
+  NtpSyncOutcome outcome = NtpSyncOutcome::Failed;
+  bool ok = syncNTPAndResolve(&outcome);
   if (!ok) {
     cliHint("NTP needs an internet connection - check 'wifistatus' and connect with 'openwifi' if offline");
+    return "Error: NTP sync failed";
   }
-  return ok ? "NTP sync complete" : "Error: NTP sync failed";
+  switch (outcome) {
+    case NtpSyncOutcome::Reply:       return "NTP sync complete (server replied)";
+    case NtpSyncOutcome::KeptPrior:   return "No NTP reply yet — clock kept its current time; retrying in background";
+    case NtpSyncOutcome::RtcFallback: return "No NTP reply — time taken from RTC instead";
+    default:                          return "NTP sync complete";
+  }
 }
 
 const char* cmd_ntpstatus(const String& argsInput) {
@@ -1199,19 +1209,20 @@ const char* cmd_ntpstatus(const String& argsInput) {
   extern uint32_t gBootCounter;
   extern bool gTimeSyncedMarkerWritten;
 
-  // Format timezone offset as UTC±HH:MM
+  // Shared tz label (the hand-rolled "UTC%+d:%02d" here lost the sign for
+  // negative sub-hour offsets: -30 min printed as UTC+0:30).
   int tzMin = gSettings.tzOffsetMinutes;
   char tzStr[12];
-  snprintf(tzStr, sizeof(tzStr), "UTC%+d:%02d", tzMin / 60, abs(tzMin % 60));
+  Clock::formatTzOffsetLabel(tzStr, sizeof(tzStr));
 
-  // Get current time
+  // Current time via the one validity vocabulary — the old getLocalTime(10)
+  // call busy-waited up to 10 ms re-checking a clock that doesn't change.
   time_t now = time(nullptr);
-  struct tm timeinfo;
   char timeStr[32] = "Not synced";
-  if (now > 0 && getLocalTime(&timeinfo, 10)) {
-    if (timeinfo.tm_year + 1900 >= 2020) {
-      strftime(timeStr, sizeof(timeStr), "%Y-%m-%d %H:%M:%S", &timeinfo);
-    }
+  if (Clock::isValidEpoch(now)) {
+    struct tm timeinfo;
+    localtime_r(&now, &timeinfo);
+    strftime(timeStr, sizeof(timeStr), "%Y-%m-%d %H:%M:%S", &timeinfo);
   }
 
   snprintf(getDebugBuffer(), 1024,
@@ -1220,6 +1231,7 @@ const char* cmd_ntpstatus(const String& argsInput) {
     "  Backup servers : time.google.com, time.cloudflare.com\n"
     "  Timezone       : %s (%+d min)\n"
     "  Current time   : %s\n"
+    "  Time source    : %s\n"
     "  Synced this boot: %s\n"
     "  Boot anchor ID : %lu\n"
     "  Boot counter   : %lu\n"
@@ -1227,6 +1239,7 @@ const char* cmd_ntpstatus(const String& argsInput) {
     gSettings.ntpServer.c_str(),
     tzStr, tzMin,
     timeStr,
+    Clock::syncSourceName(Clock::syncSource()),
     gTimeSyncedMarkerWritten ? "yes" : "no",
     (unsigned long)gNTPAnchorId,
     (unsigned long)gBootCounter,

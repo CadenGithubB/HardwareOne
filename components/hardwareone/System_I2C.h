@@ -528,15 +528,41 @@ String identifySensor(uint8_t address);
 // Shared sensor-reading envelope: every <x>BuildDataJSON opens its payload with
 // this so all interfaces (BLE/web/OLED/serial/MQTT/ESP-NOW) parse ONE shape.
 // Writes, WITHOUT a closing brace:
-//   {"valid":<bool>,"connected":<bool>,"ts":<lastUpdateMs>[,"age":<now-ts>]
+//   {"valid":<bool>,"connected":<bool>,"ts":<lastUpdateMs>
 // The caller then appends its own value keys (each starting with a comma) and
-// the closing '}'. ts = the cache's lastUpdate (millis; 0 = never sampled);
-// age = millis()-lastUpdate in ms, OMITTED when lastUpdateMs==0. Keys are short
-// on purpose (envelope ~45 B; ESP-NOW RX buffer is 256 B). Returns bytes written
+// the closing '}'. ts = the cache's lastUpdate (millis; 0 = never sampled).
+// There is deliberately NO "age" key: local consumers derive it (millis()-ts,
+// same clock), and remote ones can't use a sender-relative age anyway — they
+// stamp arrival time instead. Dropping it also buys ~10 B toward the 200 B
+// TX gate in v4_send_sensor_envelope (the 256 B RX buffer never binds, the
+// gate rejects first). Returns bytes written
 // (always < bufSize, leaving room for the caller's suffix), or 0 on
 // error/overflow — a 0 return means the caller must NOT append.
 int sensorEnvelopeBegin(char* buf, size_t bufSize, bool valid, bool connected,
                         unsigned long lastUpdateMs);
+
+// Degraded-mode replies for `<x>read json`, for the paths where the builder
+// cannot run at all (scratch-buffer alloc failed, or the builder returned 0).
+// These are envelope-SHAPED on purpose: they used to be bare `{"valid":false}`
+// literals, so a client that read `.connected`/`.ts` got `undefined` from a
+// failure reply but a real value from every success reply — the one place the
+// "every reading is one shape" guarantee broke. ts:0 means "never sampled",
+// exactly as sensorEnvelopeBegin emits it. Keep these in sync with the format
+// string in sensorEnvelopeBegin (System_I2C.cpp).
+#define SENSOR_JSON_UNAVAILABLE "{\"valid\":false,\"connected\":false,\"ts\":0}"
+#define SENSOR_JSON_NOBUF       "{\"valid\":false,\"connected\":false,\"ts\":0,\"error\":\"buffer\"}"
+
+// Fixed `kind` vocabulary for the discovery layer (`sensors json`). Constants
+// rather than bare literals so the vocabulary is greppable and typo-proof — a
+// misspelled literal at a call site would otherwise ship silently, since no
+// firmware consumer validates this field.
+//   scalar — one or a few named values (rtc, gps, apds, fmradio, input, presence)
+//   vector — a structured multi-axis reading (imu, tof)
+//   stream — a large continuous payload whose full form never enters the
+//            envelope; MUST register a compact summary builder (thermal)
+#define SENSOR_KIND_SCALAR "scalar"
+#define SENSOR_KIND_VECTOR "vector"
+#define SENSOR_KIND_STREAM "stream"
 
 // ============================================================================
 // Sensor Task Functions

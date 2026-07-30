@@ -314,13 +314,9 @@ int anoEncoderBuildDataJSON(char* buf, size_t bufSize) {
 // ============================================================================
 const char* cmd_anoencoder(const String& argsInput) {
   if (argWantsJson(argsInput)) {
-    static char jbuf[160];
-    snprintf(jbuf, sizeof(jbuf),
-      "{\"schema\":1,\"connected\":%s,\"position\":%ld,\"axis\":%u,\"buttons\":%lu}",
-      gAnoEncoderConnected ? "true" : "false",
-      (long)gAnoEncoderCache.encoderPosition, (unsigned)gAnoEncoderCache.currentAxis,
-      (unsigned long)gAnoEncoderCache.buttons);
-    return jbuf;
+    if (!ensureDebugBuffer()) return SENSOR_JSON_NOBUF;
+    int n = anoEncoderBuildDataJSON(getDebugBuffer(), 1024);  // shared builder (also feeds web + ESP-NOW)
+    return (n > 0) ? getDebugBuffer() : SENSOR_JSON_UNAVAILABLE;
   }
   if (!gAnoEncoderConnected) {
     if (!anoEncoderInitConnection()) {
@@ -328,11 +324,18 @@ const char* cmd_anoencoder(const String& argsInput) {
       return "Error: [ANO] Not connected - check wiring";
     }
   }
+  long pos; unsigned axis; unsigned long buttons;
+  {
+    SensorCacheGuard g(gAnoEncoderCache.mutex, pdMS_TO_TICKS(50), "ano.read");
+    // On guard timeout this degrades to the pre-guard unlocked read (best-effort
+    // debug output) rather than failing the CLI; each field is word-sized so the
+    // individual reads are atomic — the guard buys cross-field consistency.
+    pos     = (long)gAnoEncoderCache.encoderPosition;
+    axis    = (unsigned)gAnoEncoderCache.currentAxis;
+    buttons = (unsigned long)gAnoEncoderCache.buttons;
+  }
   static char buf[80];
-  snprintf(buf, sizeof(buf), "[ANO] pos=%ld axis=%u buttons=0x%08lX",
-           (long)gAnoEncoderCache.encoderPosition,
-           (unsigned)gAnoEncoderCache.currentAxis,
-           (unsigned long)gAnoEncoderCache.buttons);
+  snprintf(buf, sizeof(buf), "[ANO] pos=%ld axis=%u buttons=0x%08lX", pos, axis, buttons);
   return buf;
 }
 

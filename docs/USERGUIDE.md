@@ -1,4 +1,4 @@
-# Hardware One v0.99.4 - User Guide
+# Hardware One v0.99.5 - User Guide
 
 This is the full reference for Hardware One. It covers every subsystem, all CLI commands, configuration options, and how the major features work. For initial setup, see the [Quick Start Guide](QUICKSTART.md).
 
@@ -17,7 +17,7 @@ This is the full reference for Hardware One. It covers every subsystem, all CLI 
 - [MQTT](#mqtt)
 - [On-Device LLM](#on-device-llm)
 - [Debug Flags](#debug-flags)
-- [Command Reference](#command-reference) — common commands; full generated list in [COMMAND_REFERENCE.md](COMMAND_REFERENCE.md)
+- [Command Reference](#command-reference) - common commands; full generated list in [COMMAND_REFERENCE.md](COMMAND_REFERENCE.md)
 - [Per-Module Notes](#per-module-notes)
 - [License](#license)
 
@@ -40,7 +40,7 @@ All feature flags live in one file: `components/hardwareone/System_BuildConfig.h
 | `ENABLE_ESP_SR` | `0` | ESP-SR voice: WakeNet wake word + MultiNet command grammar |
 | `ENABLE_BLUETOOTH` | `0` | BLE server with GATT services |
 | `ENABLE_G2_GLASSES` | `0` | Even Realities G2 BLE client (requires `ENABLE_BLUETOOTH=1`) |
-| `ENABLE_R1_HEALTH` | `1` | R1 Health vitals UI (G2 Apps→Health, OLED, Web `/r1-health`) + Health Track. Requires Bluetooth + G2; auto-off if either is off. Ring connect stays under `ENABLE_G2_GLASSES`. |
+| `ENABLE_R1_HEALTH` | `1` | R1 Health vitals UI (G2 Apps->Health, OLED, Web `/r1-health`) + Health Track. Requires Bluetooth + G2; auto-off if either is off. Ring connect stays under `ENABLE_G2_GLASSES`. |
 | `ENABLE_MQTT` | `1` | Home Assistant MQTT integration |
 | `ENABLE_AUTOMATION` | `1` | Scheduled tasks and conditional commands |
 | `ENABLE_CAMERA_SENSOR` | `0` | ESP32-S3 DVP camera (OV2640/OV5640) |
@@ -163,7 +163,7 @@ Notes on placement, which changed in the menu reorg:
 - **Maps** lives under **Apps** and needs both `ENABLE_GPS_SENSOR` and `ENABLE_MAPS`.
 - **Sensors** is a submenu: Data, List, then one row per compiled sensor (Thermal, ToF, IMU, APDS, GPS, Gamepad, FM Radio, RTC, Presence, Camera).
 - **Users** is hidden for non-admins, and the mode refuses to open without an admin session.
-- **Health** (R1 ring vitals, Poll Now, Health Track) requires `ENABLE_R1_HEALTH`. Ring *pairing* is under Connect → Bluetooth.
+- **Health** (R1 ring vitals, Poll Now, Health Track) requires `ENABLE_R1_HEALTH`. Ring *pairing* is under Connect -> Bluetooth.
 - **Pet** is G2-only - it has no OLED mode, so the lens Apps launcher has one row this menu does not.
 
 ---
@@ -188,14 +188,14 @@ The main menu mirrors the OLED's six categories:
 
 Sub-pages are registered but hidden from the top level - they are reached
 through their category, and every page has a `<- Back` row. A few sit one level
-deeper still: **Camera settings** is reached from Hardware → sensor list → `CAM`
-→ `Settings >`, and **Mic detail** from the `MIC` row the same way.
+deeper still: **Camera settings** is reached from Hardware -> sensor list -> `CAM`
+-> `Settings >`, and **Mic detail** from the `MIC` row the same way.
 
 ### Apps
 
 | App | Notes |
 | --- | ----- |
-| **ESP-NOW** | Peer messaging. Distinct from Connect → ESP-NOW, which owns the settings |
+| **ESP-NOW** | Peer messaging. Distinct from Connect -> ESP-NOW, which owns the settings |
 | **Files** | Browse, view, rename, delete. Folders carry an item-count badge |
 | **Maps** | Pan/zoom offline map viewer. Row reads `Maps (none)` when no map files are present (requires `ENABLE_MAPS`) |
 | **LLM** | Read-only streaming viewer plus a guided-input picker (requires `ENABLE_ONDEVICE_LLM`) |
@@ -203,17 +203,17 @@ deeper still: **Camera settings** is reached from Hardware → sensor list → `
 | **Health** | R1 ring vitals + sparkline graphs (requires `ENABLE_R1_HEALTH`) - see below |
 | **Pet** | Virtual-creature app with an animated tile renderer |
 
-### Apps → Health
+### Apps -> Health
 
-Left column is a metric list, right side a 288×144 graph: Overview, Trends,
+Left column is a metric list, right side a 288x144 graph: Overview, Trends,
 Heart Rate, HRV, SpO2, Temperature, Battery, Poll Now, Toggle Track.
 
 - **Overview** - native-text vitals with wear state and one shared recentness figure on the status line.
 - **Trends** - submenu graphing the ring's daily-history payload (HR / HRV / SpO2 today + Refresh), kept separate from the live sparklines.
 - **Toggle Track** - starts Health Track logging (`healthtrack on`). While on, the ring is mined every `healthTrackPollIntervalSec` (default 15 min). Opening the page or **Poll Now** also logs a sample when R1 logging is active.
 
-Pair the ring under Connect → Bluetooth. The same vitals appear on the OLED
-(**Apps → Health**) and the web (**`/r1-health`**).
+Pair the ring under Connect -> Bluetooth. The same vitals appear on the OLED
+(**Apps -> Health**) and the web (**`/r1-health`**).
 
 ### Text entry
 
@@ -258,7 +258,7 @@ Rules that hold everywhere:
 - A command marked super-admin-only is refused for an ordinary admin - `blerequireauth`, `serialrequireauth`, and `displayrequireauth` are examples, since they change whether the device demands a login at all.
 - An unrecognised role name collapses to `user`.
 
-Set roles with `useradd … [role]`, `userpromote`, and `userdemote` - see the
+Set roles with `useradd ... [role]`, `userpromote`, and `userdemote` - see the
 [users command block](#command-reference).
 
 ### Per-transport authentication
@@ -374,7 +374,7 @@ have a recent export.
 ESP-NOW V3 is Hardware One's inter-device wireless protocol. Devices pair with a shared passphrase and form an encrypted mesh.
 
 ### Pairing
-1. On both devices, open the **ESP-NOW** page in the web UI (pairing lives there — there is no separate Pair page) or use the `espnowpair` CLI.
+1. On both devices, open the **ESP-NOW** page in the web UI (pairing lives there - there is no separate Pair page) or use the `espnowpair` CLI.
 2. Set the same passphrase on both devices.
 3. One device initiates - the other accepts.
 4. Once paired, devices appear in each other's peer list.
@@ -1004,7 +1004,7 @@ featuresetup                    - Run interactive feature configuration wizard
 <summary><strong>users - User management (admin)</strong></summary>
 
 Roles form four tiers, lowest to highest: **guest** (authenticated but
-view-only) → **user** → **admin** → **superadmin**. A handful of commands are
+view-only) -> **user** -> **admin** -> **superadmin**. A handful of commands are
 marked super-admin-only and an ordinary admin cannot run them; granting or
 removing `superadmin` requires a super-admin caller.
 
@@ -1076,27 +1076,34 @@ sensorlog interval <ms>                   - Poll interval (100-3600000)
 sensorlog autostart [on|off]              - Auto-start on boot with last-used path/mask
 ```
 
-**R1 Health Track (preferred):** `healthtrack on` (or Apps → Health / OLED R1 Health /
-Web R1 Health → Track) enables R1 in the sensorlog mask, starts capture at
-`/logging_captures/sensors/health.csv`, and persists so boot resumes.
+**R1 Health Track (preferred):** `healthtrack on` (or Apps -> Health / OLED R1 Health /
+Web R1 Health -> Track) enables R1 in the sensorlog mask, starts capture under
+`/logging_captures/sensors/`, and persists so boot resumes. The exact path is
+shaped per session: a dated per-day file (`YYYY-MM-DD/health-YYYY-MM-DD.csv`)
+once the clock is set, or a `boot-NNNNNN/` subfolder while it is still dark -
+those are retro-dated automatically when real time arrives.
 While Track is on, the ring is polled/mined on a timer (default **900 s / 15 min**)
 and **only those mines write rows** (plus Poll Now / opening Health). There are no
 5 s empty timestamp heartbeats in R1-only Track sessions. Adjust with
-`healthtrack interval <sec>` or setting `healthTrackPollIntervalSec` (60–86400).
+`healthtrack interval <sec>` or setting `healthTrackPollIntervalSec` (60-86400).
 `healthtrack off` removes R1; stops logging if nothing else is selected.
-Settings: `logging.sensorlog` → **R1 Health Track** / **R1 Health poll interval (sec)**.
+Settings: `logging.sensorlog` -> **R1 Health Track** / **R1 Health poll interval (sec)**.
 
-**Surfaces** (requires `ENABLE_R1_HEALTH`): G2 Apps → Health (graphs), OLED **R1 Health**,
+**Surfaces** (requires `ENABLE_R1_HEALTH`): G2 Apps -> Health (graphs), OLED **R1 Health**,
 Web **`/r1-health`**. Ring connect remains under Bluetooth (OLED / Web). Snapshot CLI
 for Web and a future Bluetooth App: `healthstatus` / `healthstatus json` / `healthstatus poll`.
-Stitch split captures: `healthlogmerge "<out>" "<in1>" "<in2>" …` (same idea as `gpstrackmerge`).
+Stitch split captures: `healthlogmerge "<out>" "<in1>" "<in2>" ...` (same idea as `gpstrackmerge`).
+**Output goes first and is truncated** - passing it last overwrites a real capture. The merge is a
+byte concatenation: it does not reorder rows by time, does not drop the header lines of later CSV
+inputs, and does not check that the inputs share a format or sensor mask. Per-day append means
+same-day sessions already land in one file, so stitching is only for spanning days.
 
 **Keep the ring up:** `bleautoreconnect r1-ring on` reconnects at boot **and** reseeks after
 unexpected drops (backoff). While Health Track is on, each due mine (default 15 min)
 also nudges a ring reseek if the link is down (one non-blocking connect attempt;
 not a continuous scan). `ringdisconnect` / `closeg2` do not reseek.
 
-You can still use raw `sensorlog sensors r1` + `sensorlog start …` if you want
+You can still use raw `sensorlog sensors r1` + `sensorlog start ...` if you want
 manual control without the Health Track product switch (that path still uses the
 normal sensorlog interval / heartbeats).
 </details>
@@ -1192,7 +1199,7 @@ cameraagc <on|off>              - Auto gain
 cameraagcgain <0-30>            - Manual gain
 camerahmirror <on|off>          - Horizontal mirror
 cameravflip <on|off>            - Vertical flip
-camerarotate <on|off>           - Rotate 180°
+camerarotate <on|off>           - Rotate 180
 camerawb <0-4>                  - White balance mode
 cameraeffect <0-6>              - Special effect
 camerasharpness <-2..2>         - Sharpness
@@ -1294,24 +1301,24 @@ g2init                          - Initialize G2 client mode (disables BLE server
 g2deinit                        - Deinitialize G2 client mode
 g2nav [on|off]                  - Map G2 gestures to OLED menu navigation
 g2verbose [on|off]              - Toggle verbose packet logging
-g2health                        - Open Apps → Health (R1 vitals + graphs) on the lens (ENABLE_R1_HEALTH)
-g2pet                           - Open Apps → Pet on the lens
+g2health                        - Open Apps -> Health (R1 vitals + graphs) on the lens (ENABLE_R1_HEALTH)
+g2pet                           - Open Apps -> Pet on the lens
 ```
 
-**Apps → Health** (lens, `ENABLE_R1_HEALTH`): left list (Overview / Trends / Heart Rate / HRV /
+**Apps -> Health** (lens, `ENABLE_R1_HEALTH`): left list (Overview / Trends / Heart Rate / HRV /
 SpO2 / Temperature / Battery / Poll Now / Toggle Track). **Overview** shows native-text
 vitals (wear + one shared recentness on the status line); live metric rows show
 title/value/age above a line graph. **Trends** opens a submenu (HR/HRV/SpO2 today +
-Refresh) that graphs the ring’s daily-history payload separately from the live
+Refresh) that graphs the ring's daily-history payload separately from the live
 sparklines (weekly aggregation later).
 **Toggle Track** starts Health Track logging (`healthtrack on`); while on, the ring is
 mined every `healthTrackPollIntervalSec` (default 15 min). Opening the page or **Poll Now**
-also logs a sample when R1 logging is active. Pair the R1 under Bluetooth → R1 Ring;
+also logs a sample when R1 logging is active. Pair the R1 under Bluetooth -> R1 Ring;
 vitals also on OLED **R1 Health** and Web **`/r1-health`**.
 Ring/Health CLI: `ringconnect`, `ringstatus`, `ringquery hr|temp|wear`,
 `healthstatus [json|poll]`, `healthtrack status|interval`. A Bluetooth App can call the
 same commands over GATT (no dedicated phone UI yet).
-3-pane list+text+image experiments: Tests → Image → Streaming → Compound → Q30*.
+3-pane list+text+image experiments: Tests -> Image -> Streaming -> Compound -> Q30*.
 </details>
 
 <details>
@@ -1349,7 +1356,7 @@ thermalautostart [on|off]       - Auto-start on boot
 thermaldiag                     - Run sensor diagnostics
 thermalpollingms <50-5000>      - UI polling interval
 thermalpalettedefault <name>    - Color palette (grayscale|iron|rainbow|hot|coolwarm)
-thermalrotation <0-3>           - Rotate thermal image (0=0°, 1=90°, 2=180°, 3=270°)
+thermalrotation <0-3>           - Rotate thermal image (0=0, 1=90, 2=180, 3=270)
 thermalinterpolationenabled <0|1>       - Enable interpolated upscaling
 thermalinterpolationsteps <1-8>         - Interpolation steps
 thermalupscalefactor <1-4>              - Display upscale factor
@@ -1521,7 +1528,7 @@ anoencoderswaplr [on|off|toggle]  - Swap LEFT/RIGHT buttons
 Supports up to 4 simultaneous distance measurements. Range up to 6m. Polling rate configurable via settings (`tofPollingMs`, default 220ms).
 
 ### MLX90640 (Thermal)
-32×24 IR thermal camera. Web UI displays interpolated heatmap with HSL color mapping. Configurable palette, interpolation steps, and frame rate. High memory footprint - uses PSRAM.
+32x24 IR thermal camera. Web UI displays interpolated heatmap with HSL color mapping. Configurable palette, interpolation steps, and frame rate. High memory footprint - uses PSRAM.
 
 ### BNO055 (IMU)
 9-DoF orientation (accel + gyro + magnetometer fusion). Orientation correction configurable via settings (`imuOrientationMode`, `imuPitchOffset`, etc.).
@@ -1536,7 +1543,7 @@ NMEA output parsed for lat/lon/speed/heading. Track logging to LittleFS. Offline
 Tune, seek up/down, set volume, mute. `fmradio tune <MHz>` - e.g., `fmradio tune 101.5`.
 
 ### Even Realities G2 Glasses
-BLE client for Even G2 temples (`openg2` / hijack menus / Apps → Health). Requires
+BLE client for Even G2 temples (`openg2` / hijack menus / Apps -> Health). Requires
 `ENABLE_G2_GLASSES`. See the `g2` / `g2health` / `ring*` command sections above.
 R1 ring connect and vitals share the same Bluetooth central stack.
 

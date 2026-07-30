@@ -390,7 +390,7 @@ void streamBondInner(httpd_req_t* req) {
     if (hasCaps) {
       const capSensorMask = data.capabilities.sensorMask || 0;
       const connected = data.sensorConnected || {};
-      const rDefs = [{m:0x01,n:'Thermal',k:'thermal'},{m:0x02,n:'ToF',k:'tof'},{m:0x04,n:'IMU',k:'imu'},{m:0x08,n:'Gamepad',k:'gamepad'},{m:0x10,n:'APDS',k:'apds'},{m:0x20,n:'GPS',k:'gps'},{m:0x40,n:'RTC',k:'rtc'},{m:0x80,n:'Presence',k:'presence'}];
+      const rDefs = [{m:0x01,n:'Thermal',k:'thermal'},{m:0x02,n:'ToF',k:'tof'},{m:0x04,n:'IMU',k:'imu'},{m:0x08,n:'Input',k:'input'},{m:0x10,n:'APDS',k:'apds'},{m:0x20,n:'GPS',k:'gps'},{m:0x40,n:'RTC',k:'rtc'},{m:0x80,n:'Presence',k:'presence'}];
       const rRows = rDefs.filter(function(d){return capSensorMask & d.m;});
       if (rRows.length > 0) {
         html += '<div style="border-top:1px solid var(--panel-border);margin-top:8px;padding-top:8px">';

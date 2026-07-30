@@ -158,6 +158,34 @@ float rtcReadTemperature() {
 // Time Sync Functions
 // ============================================================================
 
+// UTC RTCDateTime -> epoch without timegm(). Pure civil-calendar arithmetic
+// (Howard Hinnant's days_from_civil) — deliberately NOT the old
+// "TZ=UTC0 + mktime + restore" dance: mutating the process-global TZ opens
+// a window in which every other task's localtime_r() silently returns UTC,
+// and the restore-via-saved-getenv-pointer variant was worse (newlib's
+// setenv overwrites the environ string in place, so the saved pointer read
+// back "UTC0" and pinned the device to UTC for the rest of the boot).
+static time_t rtcDateTimeToEpochUtc(const RTCDateTime* dt) {
+  // days_from_civil: days since 1970-01-01 for a proleptic-Gregorian date.
+  int y = dt->year;
+  const int m = dt->month;   // 1..12
+  const int d = dt->day;     // 1..31
+  y -= (m <= 2) ? 1 : 0;
+  const int era = (y >= 0 ? y : y - 399) / 400;
+  const unsigned yoe = (unsigned)(y - era * 400);                        // [0, 399]
+  const unsigned doy = (unsigned)((153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1);  // [0, 365]
+  const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;            // [0, 146096]
+  const long days = (long)era * 146097L + (long)doe - 719468L;
+  return (time_t)days * 86400 + (time_t)dt->hour * 3600 +
+         (time_t)dt->minute * 60 + (time_t)dt->second;
+}
+
+// A DS3231 with a dead/dying coin cell reports 2000-era time; adopting it
+// would step a good clock backwards by decades. One gate, all adopters.
+static inline bool rtcDateTimePlausible(const RTCDateTime* dt) {
+  return dt->year >= 2020 && dt->year <= 2099;
+}
+
 bool rtcEarlyBootSync() {
   // Called early at boot to sync system time from RTC before NTP
   // This works even if the RTC sensor task isn't running yet
@@ -179,36 +207,17 @@ bool rtcEarlyBootSync() {
     return false;
   }
   
-  // Sanity check - make sure RTC has valid time (year >= 2020)
-  if (dt.year < 2020 || dt.year > 2099) {
+  if (!rtcDateTimePlausible(&dt)) {
     DEBUG_RTC_LIFECYCLEF("[RTC] Early boot sync: RTC time invalid (year=%d)", dt.year);
     return false;
   }
-  
-  struct tm timeinfo;
-  timeinfo.tm_year = dt.year - 1900;
-  timeinfo.tm_mon = dt.month - 1;
-  timeinfo.tm_mday = dt.day;
-  timeinfo.tm_hour = dt.hour;
-  timeinfo.tm_min = dt.minute;
-  timeinfo.tm_sec = dt.second;
-  timeinfo.tm_isdst = 0;  // UTC has no DST
-  
-  // RTC stores UTC - use mktime with TZ=UTC workaround (timegm not available on ESP32)
-  char* oldTZ = getenv("TZ");
-  setenv("TZ", "UTC0", 1);
-  tzset();
-  time_t t = mktime(&timeinfo);
-  if (oldTZ) {
-    setenv("TZ", oldTZ, 1);
-  } else {
-    unsetenv("TZ");
-  }
-  tzset();
-  
+
+  const time_t t = rtcDateTimeToEpochUtc(&dt);
+  const time_t before = time(nullptr);
   struct timeval tv = { .tv_sec = t, .tv_usec = 0 };
   settimeofday(&tv, nullptr);
-  
+  Clock::clockStepped(Clock::SYNC_RTC, before);  // duties drain on the first loop lap
+
   INFO_RTC_LIFECYCLEF("Early boot sync: System time set to %s", rtcDateTimeToString(&dt).c_str());
   return true;
 }
@@ -219,31 +228,17 @@ bool rtcSyncToSystem() {
     broadcastOutput("[RTC] Failed to read RTC for sync");
     return false;
   }
-  
-  struct tm timeinfo;
-  timeinfo.tm_year = dt.year - 1900;
-  timeinfo.tm_mon = dt.month - 1;
-  timeinfo.tm_mday = dt.day;
-  timeinfo.tm_hour = dt.hour;
-  timeinfo.tm_min = dt.minute;
-  timeinfo.tm_sec = dt.second;
-  timeinfo.tm_isdst = 0;  // UTC has no DST
-  
-  // RTC stores UTC - timegm() not available on ESP32, use mktime with TZ=UTC workaround
-  char* oldTZ = getenv("TZ");
-  setenv("TZ", "UTC0", 1);
-  tzset();
-  time_t t = mktime(&timeinfo);
-  if (oldTZ) {
-    setenv("TZ", oldTZ, 1);
-  } else {
-    unsetenv("TZ");
+  if (!rtcDateTimePlausible(&dt)) {
+    broadcastOutput("[RTC] RTC time implausible (dead battery?) — not adopting");
+    return false;
   }
-  tzset();
-  
+
+  const time_t t = rtcDateTimeToEpochUtc(&dt);
+  const time_t before = time(nullptr);
   struct timeval tv = { .tv_sec = t, .tv_usec = 0 };
   settimeofday(&tv, nullptr);
-  
+  Clock::clockStepped(Clock::SYNC_RTC, before);
+
   DEBUG_RTC_VALUESF("[RTC] Synced system time from RTC: %s", rtcDateTimeToString(&dt).c_str());
   return true;
 }
@@ -277,27 +272,8 @@ bool rtcSyncFromSystem() {
 // ============================================================================
 
 uint32_t rtcToUnixTime(const RTCDateTime* dt) {
-  struct tm timeinfo;
-  timeinfo.tm_year = dt->year - 1900;
-  timeinfo.tm_mon = dt->month - 1;
-  timeinfo.tm_mday = dt->day;
-  timeinfo.tm_hour = dt->hour;
-  timeinfo.tm_min = dt->minute;
-  timeinfo.tm_sec = dt->second;
-  timeinfo.tm_isdst = 0;  // UTC has no DST
-  
-  // RTC stores UTC - use mktime with TZ=UTC workaround (timegm not available on ESP32)
-  char* oldTZ = getenv("TZ");
-  setenv("TZ", "UTC0", 1);
-  tzset();
-  time_t t = mktime(&timeinfo);
-  if (oldTZ) {
-    setenv("TZ", oldTZ, 1);
-  } else {
-    unsetenv("TZ");
-  }
-  tzset();
-  
+  time_t t = rtcDateTimeToEpochUtc(dt);
+
   return (uint32_t)t;
 }
 
@@ -510,6 +486,10 @@ void rtcTask(void* pvParameters) {
   }
   
   DEBUG_RTC_LIFECYCLEF("[RTC] Task exiting");
+  // Invalidate the cache here as well as in rtcStop(): this tail also runs on the
+  // stack-safety self-exit (checkTaskStackSafety breaks the loop), which rtcStop()
+  // never sees. Direct write — shutdown must not block on a held mutex.
+  gRtcCache.dataValid = false;
   gRtcTaskHandle = nullptr;
   vTaskDelete(nullptr);
 }
@@ -570,6 +550,12 @@ void rtcStop() {
   }
   
   gRtcConnected = false;
+  // Invalidate the cache alongside `connected` (matches fmRadioDeinit and the
+  // other sensors' task-exits). Without this, dataValid stayed true after
+  // `closertc` and the envelope reported valid:true,connected:false with a stale
+  // timestamp until the next start's stale-cache wipe. Covers the case where the
+  // task was never running, so rtcTask's own tail clear didn't fire.
+  gRtcCache.dataValid = false;
   DEBUG_RTC_LIFECYCLEF("[RTC] Sensor stopped");
 }
 
@@ -625,9 +611,9 @@ const char* cmd_rtc(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   if (argWantsJson(argsInput)) {
-    if (!ensureDebugBuffer()) return "{\"valid\":false,\"error\":\"buffer\"}";
+    if (!ensureDebugBuffer()) return SENSOR_JSON_NOBUF;
     int n = rtcBuildDataJSON(getDebugBuffer(), 1024);  // shared builder (also feeds sensors json)
-    return (n > 0) ? getDebugBuffer() : "{\"valid\":false}";
+    return (n > 0) ? getDebugBuffer() : SENSOR_JSON_UNAVAILABLE;
   }
 
   static String response;
@@ -647,19 +633,10 @@ const char* cmd_rtc(const String& argsInput) {
     if (rtcReadDateTime(&utc)) {
       float temp = rtcReadTemperature();
       RTCDateTime local = rtcLocalTime(&utc);
-      int offsetMin = Clock::tzOffsetMinutes();
+      // Shared label helper — the hand-rolled version here lost the sign
+      // for negative sub-hour offsets ((offsetMin/60)*sign truncated to +0).
       char tzBuf[12];
-      if (offsetMin == 0) {
-        snprintf(tzBuf, sizeof(tzBuf), "UTC");
-      } else {
-        int sign = (offsetMin >= 0) ? 1 : -1;
-        int absMin = offsetMin * sign;
-        if (absMin % 60 == 0) {
-          snprintf(tzBuf, sizeof(tzBuf), "UTC%+d", offsetMin / 60);
-        } else {
-          snprintf(tzBuf, sizeof(tzBuf), "UTC%+d:%02d", (offsetMin / 60) * sign, absMin % 60);
-        }
-      }
+      Clock::formatTzOffsetLabel(tzBuf, sizeof(tzBuf));
       response = "[RTC] " + rtcDateTimeToString(&local);
       char tempBuf[64];
       snprintf(tempBuf, sizeof(tempBuf), " %s | Temp: %.1f°C | Unix: %lu",

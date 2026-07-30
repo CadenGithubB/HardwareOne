@@ -88,6 +88,12 @@ bool ringPerformConnect(const String& savedMac = String());
 // the worker's only handle on it.)
 void g2RingConnectMarkComplete();
 
+// True while a ring connect job is queued or running on the BLE-connect
+// worker (producers set the flag before submitting; the worker clears it
+// when the *Sync body returns). Lets teardown paths avoid nulling
+// gRing.client out from under an in-flight connect.
+bool g2RingConnectInFlight();
+
 bool g2RingConnect();
 
 // Dedicated ring-only scan. Watches for "EVEN R1_XXXXXX" adverts and
@@ -160,6 +166,16 @@ struct G2RingTelemetry {
   int32_t  tempAgeSec;
   int32_t  batteryAgeSec;
   int32_t  wearAgeSec;
+  // millis() at local receive, 0 = unknown. Monotonic and immune to
+  // ring-clock custody, unlike *AgeSec which prefers the ring epoch — a
+  // ring stepped forward pins its age at 0 and a ring stepped back parks
+  // the sample hours in the past. History consumers that need a stable
+  // time axis (G2_Health's series) must use these, not *AgeSec.
+  uint32_t hrRxMs;
+  uint32_t hrvRxMs;
+  uint32_t spo2RxMs;
+  uint32_t tempRxMs;
+  uint32_t batteryRxMs;
 };
 void g2RingGetTelemetry(G2RingTelemetry& out);
 
@@ -179,6 +195,14 @@ bool g2RingQueryDaily(uint8_t cmd);
 // (HR→HRV→SpO2→Temp→battery/wear) at most once per call when ≥700 ms have
 // elapsed. No-op when not connected. Used by sensorLogTick when LOG_R1 is on.
 void g2RingPollVitalForLogging(void);
+
+// Main-loop tick: ring-clock custody. When the host clock is dark (no
+// NTP/RTC yet) it adopts the ring's battery-backed time from cached point
+// samples — the ring acts as an external RTC we merely echo. When the host
+// clock first flips valid mid-session it sends one corrective systemTime
+// push so the ring's daily-history bucketing lands on real days. Cheap
+// self-throttled no-op in the steady state. Call next to timeAnchorsTick().
+void g2RingTimeSyncTick(void);
 
 // Bridge-progress hook. Called by parseSid80Rx() when a RING_CONNECT_INFO
 // poll arrives from either temple. We mirror the most recent connRet /
@@ -226,6 +250,7 @@ inline bool g2RingConnectMac(const String& /*mac*/) { return false; }
 inline bool g2RingScan(uint32_t /*timeoutSec*/) { return false; }
 inline void g2RingDisconnect()   {}
 inline void g2RingInvalidateLink() {}
+inline bool g2RingConnectInFlight() { return false; }
 inline void g2RingTryDrainPendingTx() {}
 inline bool g2RingIsConnected()  { return false; }
 inline void g2RingGetStatus(char* buf, size_t cap) {
@@ -245,11 +270,17 @@ struct G2RingTelemetry {
   int32_t  tempAgeSec;
   int32_t  batteryAgeSec;
   int32_t  wearAgeSec;
+  uint32_t hrRxMs;
+  uint32_t hrvRxMs;
+  uint32_t spo2RxMs;
+  uint32_t tempRxMs;
+  uint32_t batteryRxMs;
 };
 inline void g2RingGetTelemetry(G2RingTelemetry& out) { out = G2RingTelemetry{}; }
 inline bool g2RingPollVital(uint8_t) { return false; }
 inline bool g2RingQueryDaily(uint8_t) { return false; }
 inline void g2RingPollVitalForLogging(void) {}
+inline void g2RingTimeSyncTick(void) {}
 inline void g2RingNoteForwardedTelemetry(const uint8_t*, size_t) {}
 inline void g2RingNoteBridgePoll(uint64_t, bool, uint64_t, bool) {}
 

@@ -5,6 +5,7 @@
 #include <esp_log.h>
 
 #include "System_BuildConfig.h"
+#include "System_Clock.h"  // Clock::isValidEpoch — one epoch-validity vocabulary
 #include "System_Filesystem.h"
 #include "System_VFS.h"
 #include "OLED_ConsoleBuffer.h"
@@ -105,7 +106,22 @@ static String gBLEOutputBuffer;
 static bool gBLEOutputBufferReserved = false;
 static unsigned long gBLELastFlush = 0;
 static const uint32_t BLE_OUTPUT_FLUSH_INTERVAL_MS = 150;   // Flush to BLE every 150ms (snappier; sendBLEResponse fragments)
-static const size_t BLE_OUTPUT_BUFFER_MAX = 1024;          // Coalesce up to ~1KB per flush (fragmented by the secure channel)
+// MUST stay <= ESP_GATT_MAX_ATTR_LEN (512). BLECharacteristic::setValue REJECTS
+// any value longer than that — it logs at a level compiled out by default and
+// returns WITHOUT updating the characteristic, after which the caller's notify()
+// re-sends the PREVIOUS payload. So an oversize flush is not truncated, it is
+// silently duplicated.
+//
+// This was 1024, which made every size-triggered flush 768..1023 B (the flush
+// threshold is MAX - DEBUG_MSG_SIZE) — i.e. ALL of them over the limit, so on the
+// plaintext path only the 150 ms timer flushes were getting through. 512 restores
+// the invariant the MTU setup is written against (Bluetooth.cpp: MTU 517 => 514
+// usable "fully covers the 512-byte gBLEOutputBuffer flush"). With 512 the append
+// guard caps length at 511 and flushes run 256..511 B — always deliverable.
+//
+// The Secure-Channel path (bleScSendEncrypted) fragments at 195 B and was never
+// affected; this only ever bit plaintext links (bleRawNotify).
+static const size_t BLE_OUTPUT_BUFFER_MAX = 512;           // Coalesce per flush; hard-capped by setValue's 512 B limit
 #endif
 
 // G2 glasses output buffer (accumulates messages for periodic display)
@@ -1675,11 +1691,12 @@ static String generateSystemLogFilename() {
   
   // Try to get epoch time
   time_t now = time(nullptr);
-  if (now > 0 && now > 1000000000) {  // Valid epoch time (after year 2001)
-    struct tm* timeinfo = localtime(&now);
+  if (Clock::isValidEpoch(now)) {  // was a hand-rolled year-2001 threshold
+    struct tm tmLocal;
+    localtime_r(&now, &tmLocal);
     char timestamp[32];
     // Format: YYYY-MM-DDTHH-MM-SS
-    strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H-%M-%S", timeinfo);
+    strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H-%M-%S", &tmLocal);
     filename += String(timestamp);
   } else {
     // Fallback to uptime
@@ -2286,9 +2303,6 @@ bool DebugManager::getLogCategoryTags() const { return gSystemLogCategoryTags; }
 // External dependencies
 extern bool appendLineWithCap(const char* path, const String& line, size_t capBytes);
 extern void getTimestampPrefixMsCached(char* buf, size_t bufSize);
-extern void timeSyncUpdateBootEpoch();
-extern void writeBootAnchor();
-extern void resolvePendingUserCreationTimes();
 
 // Time sync marker flag
 bool gTimeSyncedMarkerWritten = false;
@@ -2305,19 +2319,20 @@ void logToFile(const char* path, const String& line, size_t capBytes) {
   appendLineWithCap(path, line, capBytes);
 }
 
-// Log a one-time marker when NTP/RTC becomes valid; safe to call anytime.
-void logTimeSyncedMarkerIfReady() {
+// Log a one-time marker when the clock first becomes valid; safe to call
+// anytime. `source` names who supplied the time ("ntp", "rtc", "ring",
+// "manual", "carryover") — the marker line is a forensic breadcrumb, so it
+// should say which custody chain produced this boot's clock.
+void logTimeSyncedMarkerIfReady(const char* source) {
   if (gTimeSyncedMarkerWritten) {
     return;
   }
-  
+
   time_t t = time(nullptr);
   if (t <= 0) {
     return;
   }
-  
-  timeSyncUpdateBootEpoch();
-  
+
   static char* bootTsPrefix = nullptr;
   if (!bootTsPrefix) {
     bootTsPrefix = (char*)ps_alloc(48, AllocPref::PreferPSRAM, "boot.ts");
@@ -2328,7 +2343,8 @@ void logTimeSyncedMarkerIfReady() {
   char fallbackPrefix[48];
   if (!bootTsPrefix[0]) { snprintf(fallbackPrefix, sizeof(fallbackPrefix), "[BOOT ms=%lu] | ", millis()); }
   String prefix = bootTsPrefix[0] ? String(bootTsPrefix) : String(fallbackPrefix);
-  String line = prefix + "Time Synced via NTP";  // distinct from the "Device Powered On" boot anchor
+  String line = prefix + "Time Synced via " +
+                (source && source[0] ? source : "?");  // distinct from the "Device Powered On" boot anchor
   
   appendLineWithCap(LOG_OK_FILE, line, LOG_CAP_BYTES);
   appendLineWithCap(LOG_FAIL_FILE, line, LOG_CAP_BYTES);
@@ -2341,10 +2357,11 @@ void logTimeSyncedMarkerIfReady() {
   }
 
   gTimeSyncedMarkerWritten = true;
-
-  // Write boot anchor and resolve pending user creation timestamps
-  writeBootAnchor();
-  resolvePendingUserCreationTimes();
+  // NOTE: writeBootAnchor()/resolvePendingUserCreationTimes() used to hang
+  // off this one-shot — which meant a boot whose clock arrived via a
+  // non-NTP source (or improved after the marker fired) never re-anchored.
+  // Those duties now flow through Clock::clockStepped()'s pend flags and
+  // run (repeatably, upsert-safe) from Clock::clockDutiesTick().
 }
 
 static String buildTimestampPrefix() {

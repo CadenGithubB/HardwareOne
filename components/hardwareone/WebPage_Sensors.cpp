@@ -187,7 +187,15 @@ esp_err_t handleSensorData(httpd_req_t* req) {
         char tofResponseBuffer[TOF_RESPONSE_SIZE];
         int jsonLen = tofBuildDataJSON(tofResponseBuffer, TOF_RESPONSE_SIZE);
 
-        // Send response
+        // Send response. Guard jsonLen — the builder returns 0 on overflow, and
+        // httpd_resp_send with len 0 ships an EMPTY body under
+        // Content-Type: application/json, which throws in the browser's
+        // JSON.parse rather than surfacing an error. Matches the fmradio and
+        // thermal arms, which already guard.
+        if (jsonLen <= 0) {
+          sendJsonResponse(req, SENSOR_JSON_UNAVAILABLE);
+          return ESP_OK;
+        }
         httpd_resp_set_type(req, "application/json");
         DEBUG_HTTPF("/api/sensors tof json_len=%d", jsonLen);
         httpd_resp_send(req, tofResponseBuffer, jsonLen);
@@ -204,7 +212,11 @@ esp_err_t handleSensorData(httpd_req_t* req) {
         char imuResponseBuffer[IMU_RESPONSE_SIZE];
         int jsonLen = imuBuildDataJSON(imuResponseBuffer, IMU_RESPONSE_SIZE);
 
-        // Send response
+        // Send response — see the tof arm above for why jsonLen is guarded.
+        if (jsonLen <= 0) {
+          sendJsonResponse(req, SENSOR_JSON_UNAVAILABLE);
+          return ESP_OK;
+        }
         httpd_resp_set_type(req, "application/json");
         DEBUG_HTTPF("/api/sensors imu json_len=%d", jsonLen);
         httpd_resp_send(req, imuResponseBuffer, jsonLen);

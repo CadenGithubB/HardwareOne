@@ -327,6 +327,10 @@ static uint8_t notifKindTier(uint8_t kind) {
     case SYSEVT_VOICE_WAKE:
     case SYSEVT_VOICE_COMMAND:
     case SYSEVT_BATTERY_FULL:
+    // Repeats while a ring outage persists (throttled to 10 min); the initial
+    // ring_disconnected already interrupted at STANDARD — this one is for the
+    // history/events.log trail, not for re-interrupting.
+    case SYSEVT_RING_RECONNECT_FAILED:
       return NTIER_VERBOSE;
     // STANDARD (default) — everything else that surfaces: presence, inbound,
     // connectivity, battery-low, service faults. The default user floor.
@@ -638,6 +642,7 @@ void notifFormatEvent(const SystemEvent& e, char* out, size_t outLen) {
     case SYSEVT_RING_DISCONNECTED: snprintf(out, outLen, "Ring off"); return;
     case SYSEVT_RING_WORN:         snprintf(out, outLen, "Ring worn"); return;
     case SYSEVT_RING_NOT_WORN:     snprintf(out, outLen, "Ring not worn"); return;
+    case SYSEVT_RING_RECONNECT_FAILED: snprintf(out, outLen, "Ring reconnect failing (%s)", e.detail[0] ? e.detail : "?"); return;
     case SYSEVT_WIFI_CONNECTED:    snprintf(out, outLen, "WiFi: %s", e.subject[0] ? e.subject : "connected"); return;
     case SYSEVT_WIFI_DISCONNECTED: snprintf(out, outLen, "WiFi off"); return;
     case SYSEVT_WIFI_NET_ADDED:    snprintf(out, outLen, "WiFi saved: %s", e.subject[0] ? e.subject : "network"); return;

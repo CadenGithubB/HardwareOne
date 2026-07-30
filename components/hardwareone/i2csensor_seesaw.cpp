@@ -84,9 +84,9 @@ volatile UBaseType_t gGamepadWatermarkNow = (UBaseType_t)0;
 
 const char* cmd_gamepad(const String& argsInput) {
   if (argWantsJson(argsInput)) {
-    if (!ensureDebugBuffer()) return "{\"valid\":false,\"error\":\"buffer\"}";
+    if (!ensureDebugBuffer()) return SENSOR_JSON_NOBUF;
     int n = gamepadBuildDataJSON(getDebugBuffer(), 1024);  // shared builder (also feeds sensors json)
-    return (n > 0) ? getDebugBuffer() : "{\"valid\":false}";
+    return (n > 0) ? getDebugBuffer() : SENSOR_JSON_UNAVAILABLE;
   }
   if (!gInputConnected) {
     // Attempt on-demand init with retry/backoff

@@ -15,7 +15,7 @@
 //   - START virtual button (synthesized from RIGHT+IN chord)
 //
 // API endpoint: /api/sensors?sensor=anoencoder → JSON from
-// anoEncoderBuildDataJSON() — {"valid":..,"connected":..,"ts":..[,"age":..],"pos":N,"axis":0|1,"buttons":B}
+// anoEncoderBuildDataJSON() — {"valid":..,"connected":..,"ts":..,"pos":N,"axis":0|1,"buttons":B}
 
 inline void streamAnoEncoderSensorCard(httpd_req_t* req) {
   httpd_resp_send_chunk(req, R"HTML(
@@ -60,7 +60,7 @@ inline void streamAnoEncoderSensorBindButtons(httpd_req_t* req) {
 inline void streamAnoEncoderSensorJs(httpd_req_t* req) {
   httpd_resp_send_chunk(req, "<script>", HTTPD_RESP_USE_STRLEN);
 
-  // Renderer: takes ANO JSON {valid,connected,ts,age,pos,axis,buttons} and updates the card UI.
+  // Renderer: takes ANO JSON {valid,connected,ts,pos,axis,buttons} and updates the card UI.
   // Button bit layout matches i2csensor_ano_encoder.h ANO_BTN_* constants:
   //   IN=bit 0, UP=bit 1, DOWN=bit 2, LEFT=bit 3, RIGHT=bit 4
   //   Virtual START=bit 16 (synthesized from RIGHT+IN chord by the driver).

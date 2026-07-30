@@ -58,6 +58,7 @@
   #include "BLE_Events.h"  // CompactJson for healthstatus json
 #endif
 #include "System_SensorStubs.h"  // Provides stubs for disabled sensors
+#include "System_CaptureCrypto.h"  // at-rest sealing of capture files
 
 // External dependencies
 extern void getTimestampPrefixMsCached(char* out, size_t outSize);
@@ -122,9 +123,36 @@ static char gSensorLogDayStr[11] = {0};  // "YYYY-MM-DD" of a DAY session
 // appending to an already-large day file under-counts (rotation fires ~one
 // full maxSize late per boot) and a same-boot restart onto a fresh file
 // carries a stale count (rotates early). Written from the cmd_exec task at
-// start and the main-loop tick; both are single-word writes and the worst
-// mis-order costs one slightly-early rotation.
+// start and the main-loop tick; both are single-word writes.
+//
+// On the mis-order cost: "one slightly-early rotation" holds only because the
+// two losing cases are both benign — when the start target IS the current day
+// file the stale count already equals that file's size, and when it is a fresh
+// variant (or a fresh SD mirror) there are no .1/.2/.3 generations for an
+// early rotation to consume. It is NOT a general guarantee: a spurious
+// rotation on a family that DOES have generations would evict the oldest.
+// Seeding order (resolve size, then set the run flag) is what keeps it benign —
+// don't reorder those without re-checking this.
 static size_t gApproxSizeBytes = 0;
+
+// At-rest sealing (docs/HEALTH_AT_REST_ENCRYPTION_PLAN.md). Derived from
+// captureEncryptMode at session start and re-derived on rollover; sticky per
+// FILE — one file is always all-sealed or all-plain (resolveSessionTarget
+// forks a variant when an existing file's mode doesn't match the session's).
+static bool gSensorLogSealed = false;
+static char* gSealBuf = nullptr;  // PSRAM; sealed-line stage for the append path
+
+static bool sessionWantsSealing(uint8_t mask) {
+  switch (gSettings.captureEncryptMode) {
+    case 2:  return true;                      // all captures
+    case 1:  return (mask & LOG_R1) != 0;      // health: sessions carrying ring vitals
+    default: return false;
+  }
+}
+
+static const char* captureEncryptModeName(int m) {
+  return (m == 2) ? "all" : (m == 1) ? "health" : "off";
+}
 
 static String shapeSessionPath(String path);      // shared shaper (defined below)
 static String stripSessionShaping(String path);   // its inverse (defined below)
@@ -172,6 +200,15 @@ static const char kTrackHeader[] =
 // write so callers can treat the file as unusable instead of shipping a
 // truncated header that would poison every later compatibility compare.
 static bool writeHeaderChecked(File& f) {
+  if (gSensorLogSealed) {
+    // Sealed files carry a plaintext magic first line — the at-rest mark every
+    // viewer and probe keys off. Data rows are sealed; the schema header below
+    // stays plaintext (column names aren't data, and the append-compat compare
+    // must stay readable without the key).
+    static const char kMagic[] = CAPCRYPT_MAGIC_LINE "\n";
+    if (f.write((const uint8_t*)kMagic, sizeof(kMagic) - 1) != sizeof(kMagic) - 1)
+      return false;
+  }
   if (gSensorLogFormat == SENSOR_LOG_CSV) {
     String h = buildCsvHeader(gSensorLogMask);
     h += '\n';
@@ -181,7 +218,7 @@ static bool writeHeaderChecked(File& f) {
     return f.write((const uint8_t*)kTrackHeader, strlen(kTrackHeader)) ==
            strlen(kTrackHeader);
   }
-  return true;  // TEXT: headerless by design
+  return true;  // TEXT: headerless by design (magic line only when sealed)
 }
 
 // Classify the accepted session path into gSensorLogPathMode (+ capture the
@@ -233,9 +270,14 @@ static size_t sensorLogResolvedSize(const String& path) {
 // append path or the start-time create). Returns the UNRESOLVED path — the
 // append path re-resolves per write.
 static String resolveSessionTarget(const String& shaped) {
-  if (gSensorLogFormat != SENSOR_LOG_CSV) return shaped;  // TEXT/TRACK: append-safe
+  const bool wantSealed = sessionWantsSealing(gSensorLogMask);
+  // TEXT/TRACK are per-session files and append-safe — but a sealed/plain
+  // mismatch on a name collision (same-second restart) must still fork, so
+  // they only skip the probe when sealing is off (the pre-sealing behavior).
+  if (gSensorLogFormat != SENSOR_LOG_CSV && !wantSealed) return shaped;
 
-  const String expect = buildCsvHeader(gSensorLogMask);
+  const String expect = (gSensorLogFormat == SENSOR_LOG_CSV)
+                            ? buildCsvHeader(gSensorLogMask) : String();
   int lastDot = shaped.lastIndexOf('.');
   int lastSlash = shaped.lastIndexOf('/');
   String stem = (lastDot > lastSlash) ? shaped.substring(0, lastDot) : shaped;
@@ -250,10 +292,9 @@ static String resolveSessionTarget(const String& shaped) {
                               VFS::systemAuth("senlog.compat"));
     if (!f) return candidate;                       // missing → fresh
     if (f.size() == 0) { f.close(); return candidate; }  // empty → adopt
-    // Read the first line (header). 1024-byte buffer: the worst-case header
-    // with every mask bit set is ~640 B — a smaller buffer would silently
-    // truncate and mis-compare. Strip trailing CR/LF/whitespace so a file
-    // that round-tripped through a CRLF editor still matches.
+    // Read the first line. 1024-byte buffer: the worst-case header with
+    // every mask bit set is ~640 B — a smaller buffer would silently
+    // truncate and mis-compare.
     char first[1024];
     size_t fl = 0;
     while (f.available() && fl + 1 < sizeof(first)) {
@@ -261,7 +302,25 @@ static String resolveSessionTarget(const String& shaped) {
       if (c < 0 || c == '\n') break;
       first[fl++] = (char)c;
     }
+    first[fl] = '\0';
+    // Sealed files put the magic on line 1 and the schema header on line 2.
+    // A mode mismatch (sealed file vs plain session, or vice versa) forks a
+    // variant exactly like a mask mismatch — one file is never mixed-mode.
+    const bool fileSealed = captureCryptoIsMagicLine(first);
+    if (fileSealed != wantSealed) { f.close(); continue; }
+    if (gSensorLogFormat != SENSOR_LOG_CSV) { f.close(); return candidate; }
+    if (fileSealed) {
+      fl = 0;
+      while (f.available() && fl + 1 < sizeof(first)) {
+        int c = f.read();
+        if (c < 0 || c == '\n') break;
+        first[fl++] = (char)c;
+      }
+      first[fl] = '\0';
+    }
     f.close();
+    // Strip trailing CR/LF/whitespace so a file that round-tripped through a
+    // CRLF editor still matches.
     while (fl > 0 && (first[fl - 1] == '\r' || first[fl - 1] == ' ' ||
                       first[fl - 1] == '\t')) fl--;
     first[fl] = '\0';
@@ -313,14 +372,12 @@ void sensorLogTick() {
   // Diagnostics counters
   static uint32_t log_writes = 0;
   static uint32_t log_open_fail = 0;
-  static uint32_t log_lock_fail = 0;
   static uint32_t log_idle_skips = 0;
   static uint32_t log_trunc = 0;
   static unsigned long lastSummaryMs = 0;
   // Size accounting lives at file scope (gApproxSizeBytes) so start/rollover
   // can seed it from the existing day file's on-disk size.
   static unsigned long lastTruncateMs = 0;
-  static uint32_t writeCount = 0;
   const unsigned long truncateCooldownMs = 5000;
 
   // Local builder - respects sensor selection mask
@@ -879,6 +936,11 @@ void sensorLogTick() {
           gSensorLogPath = target;
           sensorLogClassifyActivePath(target.c_str());
           gApproxSizeBytes = sensorLogResolvedSize(target);
+          // Sealing tracks the mode at each file boundary: a capturecrypt
+          // change mid-session takes effect here (or at the next start),
+          // never inside a file. resolveSessionTarget above already probed
+          // with the same sessionWantsSealing() answer.
+          gSensorLogSealed = sessionWantsSealing(gSensorLogMask);
           logSystemEvent("SENSOR", "sensor-log rolled to %s", target.c_str());
         }
       }
@@ -907,11 +969,31 @@ void sensorLogTick() {
           return;
         }
         size_t len = strlen(line);
-        f.write((const uint8_t*)line, len);
+        const uint8_t* rowBytes = (const uint8_t*)line;
+        if (gSensorLogSealed) {
+          // Never write plaintext into a file that carries the magic. A seal
+          // failure (key unavailable, oversize row) drops this one row —
+          // fail closed, matching the session-start key check.
+          if (!gSealBuf)
+            gSealBuf = (char*)ps_alloc(CAPCRYPT_MAX_SEALED,
+                                       AllocPref::PreferPSRAM, "sensor.log.seal");
+          int sl = gSealBuf ? captureCryptoSealLine(line, len, gSealBuf,
+                                                    CAPCRYPT_MAX_SEALED)
+                            : -1;
+          if (sl < 0) {
+            f.close();
+            if (isDebugFlagSet(DEBUG_LOGGER)) {
+              DEBUG_LOGGERF("logger: seal failed, row dropped");
+            }
+            return;
+          }
+          rowBytes = (const uint8_t*)gSealBuf;
+          len = (size_t)sl;
+        }
+        f.write(rowBytes, len);
         f.write('\n');
         f.close();
         gSensorLogLastWrite = millis();
-        writeCount++;
         log_writes++;
         gApproxSizeBytes += (len + 1);
 
@@ -920,7 +1002,6 @@ void sensorLogTick() {
         // LittleFS copies are preserved (never touched again).
         if (gApproxSizeBytes > gSensorLogMaxSize && (lastTruncateMs == 0 || (long)(millis() - lastTruncateMs) >= (long)truncateCooldownMs)) {
           lastTruncateMs = millis();
-          writeCount = 0;
 
           if (gSensorLogMaxRotations > 0) {
             if (gSensorLogMaxRotations > 1) {
@@ -984,8 +1065,8 @@ void sensorLogTick() {
     unsigned long now2 = millis();
     if (isDebugFlagSet(DEBUG_LOGGER) && (lastSummaryMs == 0 || (long)(now2 - lastSummaryMs) >= 5000)) {
       lastSummaryMs = now2;
-      DEBUG_LOGGERF("logger: summary | writes=%u open_fail=%u lock_fail=%u idle_skips=%u trunc=%u",
-                    (unsigned)log_writes, (unsigned)log_open_fail, (unsigned)log_lock_fail,
+      DEBUG_LOGGERF("logger: summary | writes=%u open_fail=%u idle_skips=%u trunc=%u",
+                    (unsigned)log_writes, (unsigned)log_open_fail,
                     (unsigned)log_idle_skips, (unsigned)log_trunc);
     }
 }
@@ -999,15 +1080,18 @@ const char* cmd_sensorlog(const String& argsInput) {
 
   CommandArgs a(argsInput);
   if (a.count() == 0) {
-    return "Error: invalid arguments — Usage: sensorlog <start|stop|status|format|maxsize|rotations|sensors|autostart> [args...]\n"
+    return "Error: invalid arguments — Usage: sensorlog <start|stop|status|format|maxsize|rotations|sensors|interval|autostart> [args...]\n"
            "  start <filepath> [interval_ms]: Begin logging (default 5000ms)\n"
            "  stop: Stop logging\n"
            "  status: Show current logging status\n"
            "  format <text|csv|track>: Set log format (default: text)\n"
-           "    track = GPS-only compact format with signal loss dedup\n"
+           "    track = GPS-only compact format with signal loss dedup;\n"
+           "            NOTE: also OVERWRITES the sensor mask to GPS-only and persists it\n"
            "  maxsize <bytes>: Set max file size before rotation (default: 256000)\n"
-           "  rotations <count>: Set number of old logs to keep (0-9, default: 3)\n"
+           "  rotations <count>: Old generations to keep (1-9). 0 = DELETE the active\n"
+           "                     file at the size cap, losing the current day (default: 3)\n"
            "  sensors <thermal|tof|imu|gamepad|apds|gps|presence|r1|all|none>: Select sensors to log\n"
+           "  interval <ms>: Set poll interval 100-3600000 (default 5000)\n"
            "  autostart [on|off]: Auto-start logging on boot with last-used parameters";
   }
   String subCmd = a.arg(0);
@@ -1141,6 +1225,15 @@ const char* cmd_sensorlog(const String& argsInput) {
     // TEXT/TRACK and for non-day paths. See docs/SENSORLOG_PERDAY_APPEND_PLAN.md.
     filepath = resolveSessionTarget(filepath);
 
+    // Sealing decision for this session — sticky until the next start or day
+    // rollover so a file is never mixed-mode. Fail CLOSED when the key can't
+    // be loaded: a session that promised sealing must not quietly fall back
+    // to plaintext vitals on disk.
+    gSensorLogSealed = sessionWantsSealing(gSensorLogMask);
+    if (gSensorLogSealed && !captureCryptoEnsureKey()) {
+      return "Error: capture encryption key unavailable (NVS) — retry, or 'capturecrypt off' to log unsealed";
+    }
+
     // Create file if needed. Variants/fallbacks stay in the same directory,
     // so the parent-mkdir walk above already covers them. The append path
     // additionally header-on-creates empty files (post-rotation base, /sd
@@ -1234,7 +1327,9 @@ const char* cmd_sensorlog(const String& argsInput) {
       snprintf(getDebugBuffer(), 1024, "Current format: %s\nUsage: sensorlog format <text|csv|track>\n"
                "  text: Human-readable sensor data\n"
                "  csv: Structured CSV data\n"
-               "  track: GPS-only compact track (time,lat,lon,alt,speed,sats) with signal loss dedup",
+               "  track: GPS-only compact track (time,lat,lon,alt,speed,sats) with signal loss dedup\n"
+               "  WARNING: 'track' also OVERWRITES the sensor mask to GPS-only and persists\n"
+               "           it — your previous sensor selection is not recoverable.",
                fmtName);
       return getDebugBuffer();
     }
@@ -1255,7 +1350,9 @@ const char* cmd_sensorlog(const String& argsInput) {
       gSensorLogMask = LOG_GPS;  // Track format is GPS-only
       setSetting(gSettings.sensorLogFormat, (int)SENSOR_LOG_TRACK);
       setSetting(gSettings.sensorLogMask, (int)gSensorLogMask);
-      return "Log format set to TRACK (GPS-only, applies to next 'sensorlog start')";
+      return "Log format set to TRACK — sensor mask REPLACED with GPS-only and persisted "
+             "(prior selection not recoverable). Takes effect immediately, including on a "
+             "session already running.";
     } else {
       return "Error: Format must be 'text', 'csv', or 'track'";
     }
@@ -1429,7 +1526,7 @@ const char* cmd_sensorlog(const String& argsInput) {
     return enable ? "Sensor logging auto-start ENABLED" : "Sensor logging auto-start DISABLED";
   }
 
-  return "Error: Unknown subcommand. Use: start, stop, status, format, maxsize, rotations, sensors, or autostart";
+  return "Error: Unknown subcommand. Use: start, stop, status, format, maxsize, rotations, sensors, interval, or autostart";
 }
 
 // ============================================================================
@@ -1518,7 +1615,11 @@ const char* buildHealthStatusJson(char* buf, size_t cap) {
    .kv("trackEnabled", (bool)gSettings.healthTrackingEnabled)
    .kv("pollIntervalSec", (unsigned)gSettings.healthTrackPollIntervalSec)
    .kv("r1Mask", (bool)((gSensorLogMask & LOG_R1) != 0))
-   .kv("logging", (bool)gSensorLoggingRunning);
+   .kv("logging", (bool)gSensorLoggingRunning)
+   // The product-facing "health data is encrypted at rest" mark — mode plus
+   // whether the ACTIVE session is actually writing sealed rows.
+   .kv("atRestEncryption", captureEncryptModeName(gSettings.captureEncryptMode))
+   .kv("sealedSession", (bool)(gSensorLoggingRunning && gSensorLogSealed));
   return j.c_str();
 #else
   snprintf(buf, cap, "{\"schema\":1,\"enabled\":false}");
@@ -1565,6 +1666,7 @@ const char* cmd_healthstatus(const String& argsInput) {
            "R1 Health: ring=%s  HR=%s  HRV=%s  SpO2=%s  T=%s  Bat=%s  Wear=%s\n"
            "  ages(s): hr=%d hrv=%d spo2=%d temp=%d bat=%d wear=%d\n"
            "  Track=%s (setting=%s, r1_mask=%s, logging=%s, poll=%us)\n"
+           "  At-rest encryption: %s%s\n"
            "Usage: healthstatus [json|poll]",
            t.connected ? "up" : "down", hr, hrv, spo2, temp, bat, wear,
            (int)t.hrAgeSec, (int)t.hrvAgeSec, (int)t.spo2AgeSec,
@@ -1573,7 +1675,9 @@ const char* cmd_healthstatus(const String& argsInput) {
            gSettings.healthTrackingEnabled ? "on" : "off",
            (gSensorLogMask & LOG_R1) ? "yes" : "no",
            gSensorLoggingRunning ? "running" : "stopped",
-           (unsigned)gSettings.healthTrackPollIntervalSec);
+           (unsigned)gSettings.healthTrackPollIntervalSec,
+           captureEncryptModeName(gSettings.captureEncryptMode),
+           (gSensorLoggingRunning && gSensorLogSealed) ? " (active session sealed)" : "");
   return getDebugBuffer();
 #endif
 }
@@ -1691,20 +1795,6 @@ void healthTrackTick() {
 #endif
 }
 
-// Shape a configured capture path into this session's on-disk path:
-//   1. split dir / basename / extension
-//   2. strip any prior session-timestamp suffix from the basename AND any
-//      prior session subfolder (YYYY-MM-DD/ or boot-N/) from the dir, so a
-//      previously shaped path fed back through settings can't nest
-//   3. pick this session's subfolder under the capture dir: YYYY-MM-DD/
-//      when the clock is synced, boot-NNNNNN/ otherwise (zero-padded so
-//      lexical order = boot order in every file browser)
-//   4. append the per-session stamp: -YYYY-MM-DDTHH-MM-SS, or -bootN-ms —
-//      the (bootN, ms) form is exactly what System_TimeAnchors retro-dates
-//      into a YYYY-MM-DD/ folder once this boot (or a later one) learns
-//      real time.
-// Keeps big capture folders G2-browsable: the lens list pages per folder,
-// and one day (or one dark boot) is one folder instead of one flat pile.
 // Inverse of shapeSessionPath: recover the configured BASE path from a
 // shaped one. Strips the session subfolder (YYYY-MM-DD/ or boot-N/) from the
 // dir and the session stamp (-YYYY-…, -bootN-…, and any -V variant digit —
@@ -1769,6 +1859,20 @@ static String stripSessionShaping(String path) {
   return dir + baseName + ext;
 }
 
+// Shape a configured capture path into this session's on-disk path:
+//   1. split dir / basename / extension
+//   2. strip any prior session-timestamp suffix from the basename AND any
+//      prior session subfolder (YYYY-MM-DD/ or boot-N/) from the dir, so a
+//      previously shaped path fed back through settings can't nest
+//   3. pick this session's subfolder under the capture dir: YYYY-MM-DD/
+//      when the clock is synced, boot-NNNNNN/ otherwise (zero-padded so
+//      lexical order = boot order in every file browser)
+//   4. append the per-session stamp: -YYYY-MM-DDTHH-MM-SS, or -bootN-ms —
+//      the (bootN, ms) form is exactly what System_TimeAnchors retro-dates
+//      into a YYYY-MM-DD/ folder once this boot (or a later one) learns
+//      real time.
+// Keeps big capture folders G2-browsable: the lens list pages per folder,
+// and one day (or one dark boot) is one folder instead of one flat pile.
 static String shapeSessionPath(String path) {
   // Normalize to the base first so shaping is idempotent for any input.
   path = stripSessionShaping(path);
@@ -2004,7 +2108,12 @@ const char* cmd_healthlogmerge(const String& argsInput) {
     outPath += ".csv";
 
   const AuthContext& ctx    = currentAuthContext();
-  const AuthContext  sysCtx = VFS::systemAuth("health.stitch");
+  // SCOPED: the unscoped overload leaves ctx.scope empty, pathWithinScope then
+  // returns true unconditionally, and permsForRole hands back rule.systemPerms
+  // — PERM_ALL on /system/sys_logs/ where admins are PERM_READ. This command is
+  // requiresAdmin and coerces .log through untouched, so unscoped it let an
+  // admin truncate command-audit.log and report success.
+  const AuthContext  sysCtx = VFS::systemAuth(VFS::captureScopeFor(outPath), "health.stitch");
   FsLockGuard fsGuard("healthlogmerge");
 
   for (int i = 1; i < a.count(); i++) {
@@ -2018,18 +2127,31 @@ const char* cmd_healthlogmerge(const String& argsInput) {
     }
   }
 
+  // Refuse an out-of-tree output BEFORE the "w" open below truncates it. sysCtx
+  // is scoped to the capture tree so the open would fail regardless, but only
+  // after the damage, and only as a generic "cannot create".
+  if (!VFS::pathInCaptureTree(outPath)) {
+    snprintf(buf, 1024,
+             "Error: output must be inside %s (or its /sd mirror) — got %s",
+             VFS::Scopes::CAPTURES, outPath.c_str());
+    return buf;
+  }
+
   VFS::mkdirGuarded("/logging_captures", sysCtx);
   VFS::mkdirGuarded(CAPTURE_DIR_SENSORS, sysCtx);
 
   File out = VFS::openGuarded(outPath, "w", sysCtx, true);
   if (!out) {
-    snprintf(buf, 1024, "Error: cannot create output: %s", outPath.c_str());
+    snprintf(buf, 1024,
+             "Error: cannot create output: %s (parent missing, filesystem full, "
+             "or path not writable)", outPath.c_str());
     return buf;
   }
 
   uint8_t chunk[512];
   unsigned long totalBytes = 0;
   int filesDone = 0;
+  int sealedState = -1;  // -1 unset; else 0/1 — all inputs must match
   for (int i = 1; i < a.count(); i++) {
     String in;
     requireQuotedPath(a, i, in);
@@ -2037,6 +2159,22 @@ const char* cmd_healthlogmerge(const String& argsInput) {
     if (!f) {
       out.close();
       snprintf(buf, 1024, "Error: cannot open input: %s", in.c_str());
+      return buf;
+    }
+    // Byte-concatenation of SEALED captures is still a valid sealed stream
+    // (rows are independently sealed; viewers tolerate mid-file magic/header
+    // lines). Mixing sealed and plaintext inputs, however, yields a file
+    // whose first line lies about the rest — refuse it.
+    const bool fSealed = captureCryptoLooksSealed(f);
+    if (sealedState < 0) {
+      sealedState = fSealed ? 1 : 0;
+    } else if ((int)fSealed != sealedState) {
+      f.close();
+      out.close();
+      snprintf(buf, 1024,
+               "Error: cannot stitch sealed and plaintext captures together — "
+               "decrypt the sealed input first with capturecrypt export (%s)",
+               in.c_str());
       return buf;
     }
     uint8_t lastByte = (uint8_t)'\n';
@@ -2066,6 +2204,127 @@ const char* cmd_healthlogmerge(const String& argsInput) {
 }
 
 // ============================================================================
+// capturecrypt — at-rest sealing mode, status, and plaintext export
+// (docs/HEALTH_AT_REST_ENCRYPTION_PLAN.md). Deliberately NOT gated on
+// ENABLE_R1_HEALTH: mode "all" seals non-ring captures too.
+// ============================================================================
+const char* cmd_capturecrypt(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+  char* buf = getDebugBuffer();
+
+  CommandArgs a(argsInput);
+  String sub = a.has(0) ? a.arg(0) : String();
+  sub.toLowerCase();
+
+  if (sub.length() == 0 || sub == "status") {
+    snprintf(buf, 1024,
+             "Capture at-rest encryption: %s\n"
+             "  Key: %s\n"
+             "  Active session: %s\n"
+             "  Sealed files keep their names — '#HW1ENC' on line 1 is the mark",
+             captureEncryptModeName(gSettings.captureEncryptMode),
+             captureCryptoKeyReady()
+                 ? "present (NVS)"
+                 : "not yet minted (created on first sealed session)",
+             !gSensorLoggingRunning ? "none"
+                                    : (gSensorLogSealed ? "sealed" : "plaintext"));
+    return buf;
+  }
+
+  // Word forms for humans; bare 0/1/2 is what the OLED/G2/web settings
+  // editors dispatch ("<cmdKey> <int>").
+  if (sub == "off" || sub == "health" || sub == "all" ||
+      sub == "0" || sub == "1" || sub == "2") {
+    const int mode = (sub == "all" || sub == "2")      ? 2
+                     : (sub == "health" || sub == "1") ? 1
+                                                       : 0;
+    setSetting(gSettings.captureEncryptMode, mode);
+    snprintf(buf, 1024, "SUCCESS: capture encryption mode = %s%s",
+             captureEncryptModeName(mode),
+             gSensorLoggingRunning
+                 ? " (applies at the next session or day rollover — the active file keeps its mode)"
+                 : "");
+    return buf;
+  }
+
+  if (sub == "export") {
+    // Decrypt a sealed capture into a plaintext copy — the deliberate escape
+    // hatch for off-device use. Downloads, fileread and ESP-NOW transfers
+    // ship sealed bytes, and a peer device cannot open them (the key never
+    // leaves this device's NVS), so sharing plaintext is an explicit act.
+    if (a.count() < 3)
+      return "Error: Usage: capturecrypt export \"<sealed-in>\" \"<plain-out>\"";
+    String inPath, outName;
+    const char* e1 = requireQuotedPath(a, 1, inPath);
+    if (e1) return e1;
+    const char* e2 = requireQuotedToken(a, 2, outName);
+    if (e2) return e2;
+    String outPath = outName;
+    if (!outPath.startsWith("/")) outPath = String(CAPTURE_DIR_SENSORS) + "/" + outPath;
+    if (inPath == outPath) return "Error: output is the same as the input";
+    if (!VFS::pathInCaptureTree(outPath)) {
+      snprintf(buf, 1024,
+               "Error: output must be inside %s (or its /sd mirror) — got %s",
+               VFS::Scopes::CAPTURES, outPath.c_str());
+      return buf;
+    }
+
+    const AuthContext& ctx = currentAuthContext();
+    const AuthContext sysCtx =
+        VFS::systemAuth(VFS::captureScopeFor(outPath), "capcrypt.export");
+    FsLockGuard fsGuard("capturecrypt.export");
+
+    File in = VFS::openGuarded(inPath, "r", ctx);
+    if (!in) {
+      snprintf(buf, 1024, "Error: cannot open input: %s", inPath.c_str());
+      return buf;
+    }
+    if (!captureCryptoLooksSealed(in)) {
+      in.close();
+      return "Error: input is not a sealed capture (no #HW1ENC magic on line 1)";
+    }
+    File out = VFS::openGuarded(outPath, "w", sysCtx, true);
+    if (!out) {
+      in.close();
+      snprintf(buf, 1024, "Error: cannot create output: %s", outPath.c_str());
+      return buf;
+    }
+
+    unsigned long rows = 0, failedRows = 0, lineNo = 0;
+    while (in.available()) {
+      String lineStr = in.readStringUntil('\n');
+      lineNo++;
+      // The exported copy is PLAINTEXT — dropping the magic line keeps every
+      // probe/viewer from mistaking it for a sealed file.
+      if (captureCryptoIsMagicLine(lineStr.c_str())) continue;
+      if (captureCryptoRevealLine(lineStr)) {
+        rows++;
+        if (lineStr == CAPCRYPT_UNDECRYPTABLE) failedRows++;
+      }
+      if (out.write((const uint8_t*)lineStr.c_str(), lineStr.length()) !=
+              lineStr.length() ||
+          out.write((uint8_t)'\n') != 1) {
+        in.close();
+        out.close();
+        snprintf(buf, 1024,
+                 "Error: write failed (filesystem full?) at line %lu of %s",
+                 lineNo, outPath.c_str());
+        return buf;
+      }
+    }
+    in.close();
+    out.close();
+    snprintf(buf, 1024,
+             "SUCCESS: exported %s -> %s (%lu rows decrypted, %lu undecryptable)",
+             inPath.c_str(), outPath.c_str(), rows - failedRows, failedRows);
+    return buf;
+  }
+
+  return "Error: unknown subcommand — Usage: capturecrypt [status|off|health|all|export \"<in>\" \"<out>\"]";
+}
+
+// ============================================================================
 // Command Registry
 // ============================================================================
 
@@ -2077,15 +2336,18 @@ const CommandEntry sensorLoggingCommands[] = {
     "  stop: Stop logging\n"
     "  status: Show current logging status\n"
     "  format <text|csv|track>: Set log format (default: text)\n"
-    "    track = GPS-only compact format with signal loss dedup\n"
+    "    track = GPS-only compact format with signal loss dedup;\n"
+    "            NOTE: also OVERWRITES the sensor mask to GPS-only and persists it\n"
     "  maxsize <bytes>: Set max file size before rotation (default: 256000)\n"
-    "  rotations <count>: Set number of old logs to keep (0-9, default: 3)\n"
+    "  rotations <count>: Old generations to keep (1-9). 0 = DELETE the active\n"
+    "                     file at the size cap, losing the current day (default: 3)\n"
     "  sensors <thermal|tof|imu|gamepad|apds|gps|presence|r1|all|none>: Select sensors to log\n"
     "  interval <ms>: Set poll interval 100-3600000 (default 5000)\n"
     "  autostart [on|off]: Auto-start logging on boot (bare = toggle)" },
   { "healthtrack", "Start/stop R1 Health Track (enables r1 sensorlog + starts capture)", false, cmd_healthtrack,
     "Usage: healthtrack <on|off|toggle|status|interval [sec]>\n"
-    "  on: enable LOG_R1, start sensorlog to /logging_captures/sensors/health.csv, persist for boot\n"
+    "  on: enable LOG_R1, start sensorlog under /logging_captures/sensors/, persist for boot\n"
+    "      (dated per-day file when the clock is set, boot-<N>/ subfolder when dark)\n"
     "  off: remove LOG_R1; stop logging if no other sensors remain\n"
     "  interval <sec>: how often to poll/mine the ring while Track is on (default 900 = 15 min)\n"
     "  R1-only Track sessions write ONLY on that mine (and Poll Now) — no 5s empty heartbeats\n"
@@ -2095,8 +2357,23 @@ const CommandEntry sensorLoggingCommands[] = {
     "  bare/json: connected, HR/HRV/SpO2/battery (+valid), Track state\n"
     "  poll: kick HR→HRV→SpO2→battery point queries (replies via notify)\n"
     "  BLE App / Web use healthstatus json; connect via ringconnect / Bluetooth page" },
-  { "healthlogmerge", "Stitch health/sensor TEXT logs in order: \"<out>\" \"<in1>\" \"<in2>\" ...", true, cmd_healthlogmerge,
-    "Usage: healthlogmerge \"<output>\" \"<in1>\" \"<in2>\" [...]  (output first, then inputs in stitch order; max 9 inputs; bare names → /logging_captures/sensors/)" },
+  { "healthlogmerge", "Byte-concatenate sensor logs in the given order: \"<out>\" \"<in1>\" \"<in2>\" ...", true, cmd_healthlogmerge,
+    "Usage: healthlogmerge \"<output>\" \"<in1>\" \"<in2>\" [...]\n"
+    "  OUTPUT FIRST — arg 0 is TRUNCATED. Inputs follow, in the order you want them.\n"
+    "  Bare output name → /logging_captures/sensors/; INPUTS need a full path.\n"
+    "  Extensionless output gets .csv appended even for TEXT inputs.\n"
+    "  Concatenation is byte-exact: CSV inputs keep their header lines mid-file,\n"
+    "  rows are NOT time-ordered, and mixing formats/sensor masks yields\n"
+    "  an unparseable result. Max 8 inputs (arg limit)." },
+  { "capturecrypt", "Capture at-rest encryption: status, mode (off/health/all), plaintext export", true, cmd_capturecrypt,
+    "Usage: capturecrypt [status|off|health|all|export \"<in>\" \"<out>\"]\n"
+    "  Sealed sessions write '#HW1ENC' on line 1 + per-row ciphertext; filenames\n"
+    "  don't change. health: seal sessions that include the R1 ring (default).\n"
+    "  all: every capture session. Mode changes apply at the next session or\n"
+    "  day rollover — a single file is never mixed-mode.\n"
+    "  Viewers (fileview, web view, G2/OLED) decrypt for authorized users; raw\n"
+    "  downloads, fileread and ESP-NOW transfers ship sealed bytes.\n"
+    "  export: write a decrypted copy (inside /logging_captures) for sharing." },
 };
 
 const size_t sensorLoggingCommandsCount = sizeof(sensorLoggingCommands) / sizeof(sensorLoggingCommands[0]);
@@ -2114,6 +2391,7 @@ static const SettingEntry sensorLogSettingEntries[] = {
 #if ENABLE_R1_HEALTH
   { "healthTrackingEnabled", SETTING_BOOL, &gSettings.healthTrackingEnabled, 0, 0, nullptr, 0, 1, "R1 Health Track", nullptr, false, nullptr, "healthtrack" },
   { "healthTrackPollIntervalSec", SETTING_INT, &gSettings.healthTrackPollIntervalSec, 900, 0, nullptr, 60, 86400, "R1 Health poll interval (sec)", nullptr, false, nullptr, "healthtrack interval" },
+  { "captureEncryptMode", SETTING_INT, &gSettings.captureEncryptMode, 1, 0, nullptr, 0, 2, "Capture at-rest encryption", "0|Off,1|Health,2|All", false, nullptr, "capturecrypt" },
 #endif
   { "sensorLogPath", SETTING_STRING, &gSettings.sensorLogPath, 0, 0, CAPTURE_SENSORLOG_DEFAULT, 0, 0, "Log file path", nullptr, false, nullptr, "sensorlogpath" },
   { "sensorLogIntervalMs", SETTING_INT, &gSettings.sensorLogIntervalMs, 5000, 0, nullptr, 100, 3600000, "Poll interval (ms)", nullptr, false, nullptr, "sensorlog interval" },

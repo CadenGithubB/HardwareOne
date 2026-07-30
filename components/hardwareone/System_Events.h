@@ -164,6 +164,7 @@ uint8_t systemEventKindFamily(uint8_t kind);
   X(SYSEVT_RING_DISCONNECTED,   "ring_disconnected", SYSEVT_FAM_GLASSES)    /* R1 ring link lost  subject=name detail=mac */ \
   X(SYSEVT_RING_WORN,           "ring_worn", SYSEVT_FAM_GLASSES)            /* R1 wearStatus→wear (on finger)  subject=name */ \
   X(SYSEVT_RING_NOT_WORN,       "ring_not_worn", SYSEVT_FAM_GLASSES)        /* R1 wearStatus→notWear (off finger)  subject=name */ \
+  X(SYSEVT_RING_RECONNECT_FAILED, "ring_reconnect_failed", SYSEVT_FAM_GLASSES) /* R1 connect attempt failed  subject=name detail=reason fail# elapsed; throttled 10min/streak */ \
   /* --- Auth / users --- */ \
   X(SYSEVT_LOGIN_OK,            "login_ok", SYSEVT_FAM_AUTH)             /* subject=username detail=transport */ \
   X(SYSEVT_LOGIN_FAIL,          "login_fail", SYSEVT_FAM_AUTH)           /* subject=username detail=transport */ \

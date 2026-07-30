@@ -78,9 +78,9 @@ const char* cmd_imu(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   if (argWantsJson(argsInput)) {
-    if (!ensureDebugBuffer()) return "{\"valid\":false,\"error\":\"buffer\"}";
+    if (!ensureDebugBuffer()) return SENSOR_JSON_NOBUF;
     int n = imuBuildDataJSON(getDebugBuffer(), 1024);  // shared builder (also feeds sensors json / MQTT)
-    return (n > 0) ? getDebugBuffer() : "{\"valid\":false}";
+    return (n > 0) ? getDebugBuffer() : SENSOR_JSON_UNAVAILABLE;
   }
 
   if (!gImuConnected || !gImuRunning) {
@@ -597,21 +597,26 @@ int imuBuildDataJSON(char* buf, size_t bufSize) {
     return pos + n;
   }
 
-  // valid/connected/ts/age come from the shared envelope. Body carries ONLY the
+  // valid/connected/ts come from the shared envelope. Body carries ONLY the
   // measurement (accel/gyro/ori/temp). Dropped: seq (bookkeeping, redundant with
   // ts), enabled (duplicate of the discovery-layer enabled), init* flags
   // (device-state, unconsumed) — see docs/SENSOR_ENVELOPE_CLEANUP_PLAN.md.
   int pos = sensorEnvelopeBegin(buf, bufSize, gImuCache.imuDataValid, gImuConnected, gImuCache.imuLastUpdate);
   if (pos == 0) return 0;
+  // Precision is matched to the hardware, not habit: accel LSB is 0.01 m/s²
+  // (driver raw/100 — a third decimal is always '0'), gyro LSB is 0.0625 dps
+  // ≈ 0.0011 rad/s (third decimal is real), temp is an int8_t from getTemp().
+  // Keeping the frame small matters: the mesh path drops readings > 200 B
+  // (v4_send_sensor_envelope), and motion widens every float's integer part.
   int n = snprintf(buf + pos, bufSize - pos,
-                   ",\"accel\":{\"x\":%.3f,\"y\":%.3f,\"z\":%.3f},"
+                   ",\"accel\":{\"x\":%.2f,\"y\":%.2f,\"z\":%.2f},"
                    "\"gyro\":{\"x\":%.3f,\"y\":%.3f,\"z\":%.3f},"
                    "\"ori\":{\"yaw\":%.2f,\"pitch\":%.2f,\"roll\":%.2f},"
-                   "\"temp\":%.1f}",
+                   "\"temp\":%d}",
                    gImuCache.accelX, gImuCache.accelY, gImuCache.accelZ,
                    gImuCache.gyroX, gImuCache.gyroY, gImuCache.gyroZ,
                    gImuCache.oriYaw, gImuCache.oriPitch, gImuCache.oriRoll,
-                   gImuCache.imuTemp);
+                   (int)gImuCache.imuTemp);
   if (n < 0 || (size_t)n >= bufSize - pos) return 0;
   return pos + n;
 }

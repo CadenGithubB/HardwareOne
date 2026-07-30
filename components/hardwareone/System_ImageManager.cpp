@@ -1,4 +1,5 @@
 #include "System_ImageManager.h"
+#include "System_Clock.h"   // Clock::isValidEpoch — one epoch-validity vocabulary
 #include "System_Events.h"  // systemEventPost — event register producer
 #include "System_Settings.h"
 #include "System_Debug.h"
@@ -135,11 +136,12 @@ String ImageManager::generateFilename() {
   char filename[64];
   time_t now = time(nullptr);
   
-  if (now > 1704067200) {  // After 2024-01-01 (valid time)
-    struct tm* tm = localtime(&now);
+  if (Clock::isValidEpoch(now)) {  // was a hand-rolled year-2024 threshold
+    struct tm tmLocal;
+    localtime_r(&now, &tmLocal);
     snprintf(filename, sizeof(filename), "img_%04d%02d%02d_%02d%02d%02d.jpg",
-             tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday,
-             tm->tm_hour, tm->tm_min, tm->tm_sec);
+             tmLocal.tm_year + 1900, tmLocal.tm_mon + 1, tmLocal.tm_mday,
+             tmLocal.tm_hour, tmLocal.tm_min, tmLocal.tm_sec);
   } else {
     // No valid time, use counter
     snprintf(filename, sizeof(filename), "img_%06d.jpg", imageCounter++);

@@ -31,14 +31,15 @@
 // bond encrypted-send path, cmd_exec deferred handlers, RX-side responses) get
 // the benefit. Notable holdouts that still build and send frames on their OWN
 // stack:
-//   * sensor_bcast's mesh path — sensorBroadcasterTask → transmitSensorData →
-//     v4_broadcast_sensor_data → v4_broadcast_category → v4_send_frame, which
-//     owns uint8_t frame[250] and calls captureEspNowFrame (char line[700]).
-//     That's ~1 KB of stack against a real 4 KB SENSOR_BCAST budget.
+//   * (RETIRED HOLDOUT) sensor_bcast's mesh path was migrated by the D2 secure
+//     fetcher: sensorBroadcasterTask → transmitSensorData → v4_send_sensor_envelope,
+//     which stacks only a uint8_t buffer[256] and hands off via sendAead — the
+//     AEAD seal, frame build, and capture now run on the dispatcher task.
 //   * Mesh heartbeats — call v4_send_payload_smart / v4_broadcast_category
 //     directly.
 // So "every sender is a Job" is the design intent, not the current state; the
-// stack-sizing hazard this module was built to kill is still live on those paths.
+// stack-sizing hazard this module was built to kill is still live on the
+// heartbeat path.
 //
 // Knock-on benefits (CONDITIONAL — they arrive only once the holdouts above are
 // migrated; none of them are banked yet)

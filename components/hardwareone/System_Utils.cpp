@@ -34,8 +34,11 @@
 #include "System_User.h"
 #include "System_AuthIdentity.h"  // ExecIdentityGuard (executeCommand + submitAndExecuteSync)
 #include "System_BootState.h"     // bootStateGetBootCount / bootStateResetBootCount (NVS boot counter)
+#include "System_CrashRecord.h"   // crashRecord* — RTC post-mortem record for `crashlog`
 #include "System_SelfDevice.h"   // SelfDevice:: — local identity/heap/uptime/firmware (Stage 1 consolidation)
 #include "System_Clock.h"        // Clock:: — epoch/sync/tz/format helpers (Stage 2)
+#include <esp_sntp.h>            // sntp_set_time_sync_notification_cb — real-reply signal
+                                 // (never also include lwip/apps/sntp.h in this TU)
 #include "System_Command.h"
 #include "System_SensorStubs.h"  // Stubs for disabled sensors/modules
 #include "System_MemoryMonitor.h"
@@ -669,12 +672,6 @@ int serializeJsonArrayWithRepair(JsonArray& arr, char* buf, size_t bufSize, cons
 // Date/Time Formatting Utilities
 // ============================================================================
 
-String formatDateTime(time_t timestamp) {
-  struct tm* timeinfo = localtime(&timestamp);
-  char buffer[32];
-  strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", timeinfo);
-  return String(buffer);
-}
 
 // ============================================================================
 // Serial Input Helpers (moved from .ino)
@@ -743,33 +740,24 @@ String waitForSerialInputBlocking() {
 // Time Sync Functions (moved from .ino)
 // ============================================================================
 
-// Maintains an offset to convert monotonic microseconds to epoch microseconds.
-static int64_t gBootEpochUsOffset = 0;
-
-void timeSyncUpdateBootEpoch() {
-  time_t now = time(nullptr);
-  if (now > 0) {
-    gBootEpochUsOffset = (int64_t)now * 1000000LL - (int64_t)esp_timer_get_time();
-  }
-}
-
+// Reads the wall clock directly on every call. This used to project from a
+// cached boot-us→epoch-us offset, but the cache latched a garbage offset on
+// the first pre-sync log line (time() counts uptime, so `now > 0` passes at
+// ~1 s) and only NTP and the ring path ever refreshed it — a `timeset`, an
+// RTC sync, or the silent hourly SNTP correction left every subsequent
+// prefix stamping the pre-step clock. One gettimeofday per log line makes
+// every clock source self-heal on the very next line with zero per-source
+// wiring, and removes a tearable shared int64 written from five tasks.
 void getTimestampPrefixMsCached(char* out, size_t outSize) {
   if (!out || outSize == 0) return;
   out[0] = '\0';
-  if (gBootEpochUsOffset == 0) {
-    timeSyncUpdateBootEpoch();
-  }
-  int64_t epochUs = 0;
-  if (gBootEpochUsOffset != 0) {
-    epochUs = gBootEpochUsOffset + (int64_t)esp_timer_get_time();
-  }
-  if (epochUs <= 0) return;  // no valid time
-
-  time_t sec = (time_t)(epochUs / 1000000LL);
-  int ms = (int)((epochUs / 1000LL) % 1000LL);
-  // Sanity check: if RTC is unsynced, it may report 1970/1980 era time.
-  // Clock::isValidEpoch enforces the year >= 2020 threshold uniformly.
+  const int64_t nowMs = Clock::epochMillis();
+  if (nowMs <= 0) return;  // no valid time
+  const time_t sec = (time_t)(nowMs / 1000);
+  // Pre-sync (or unsynced-RTC 1970/1980-era) clock → "" so callers keep
+  // their existing [ms=...] / [BOOT ...] fallbacks. Contract unchanged.
   if (!Clock::isValidEpoch(sec)) return;
+  const int ms = (int)(nowMs % 1000);
   struct tm tminfo;
   if (!localtime_r(&sec, &tminfo)) return;
   // Build prefix directly into caller's buffer
@@ -1205,6 +1193,17 @@ String redactCmdForAudit(const String& argsInput) {
     }
   }
 
+  // No rule matched. If the VERB itself isn't a recognized command, mask
+  // everything after it: a typo'd credential command ("logni <user> <pass>")
+  // otherwise lands verbatim in the audit log — the rule table can never
+  // enumerate misspellings, but "unknown verb ⇒ args are opaque" catches
+  // them all. Recognized commands keep full args (that's the audit value);
+  // an unknown verb's args have none.
+  if (!findCommand(c)) {
+    int sp = c.indexOf(' ');
+    if (sp > 0) return c.substring(0, sp) + " ***";
+  }
+
   return c;
 }
 
@@ -1543,11 +1542,26 @@ bool argLeadingTokenIsJson(const String& args) {
   return a == "json" || a.startsWith("json ");
 }
 
-// Reset reason labels matching esp_reset_reason_t (shared by both output paths)
+// Reset reason labels matching esp_reset_reason_t (shared by both output paths).
+//
+// This table used to stop at "SDIO" (11 entries) while the enum runs to
+// ESP_RST_CPU_LOCKUP = 15, and both consumers guarded with `reason < 11`. So
+// USB (11), JTAG (12), EFUSE (13), PWR_GLITCH (14) and CPU_LOCKUP (15) all
+// rendered as "Unknown" over web / BLE / MQTT — and USB is the reason you get
+// from an ordinary reflash or replug, i.e. one of the most common of all.
+// Indices must stay aligned with esp_reset_reason_t.
 static const char* const kResetReasonLabels[] = {
   "Unknown", "Power-on", "External", "Software", "Panic",
-  "Int WDT", "Task WDT", "WDT", "Deepsleep", "Brownout", "SDIO"
+  "Int WDT", "Task WDT", "WDT", "Deepsleep", "Brownout", "SDIO",
+  "USB", "JTAG", "eFuse", "Power glitch", "CPU lockup"
 };
+static const size_t kResetReasonLabelCount = sizeof(kResetReasonLabels) / sizeof(kResetReasonLabels[0]);
+
+// Single accessor so a future enum extension can't leave one consumer behind
+// again (this is what let the two `reason < 11` sites drift out of sync).
+static const char* resetReasonLabel(uint32_t reason) {
+  return (reason < kResetReasonLabelCount) ? kResetReasonLabels[reason] : "Unknown";
+}
 
 // ---------------------------------------------------------------------------
 // buildSystemInfoJson — single source of truth for device-info JSON
@@ -1570,7 +1584,7 @@ void buildSystemInfoJson(JsonDocument& doc, bool includeDeviceList) {
   doc["board"] = BOARD_NAME;
   {
     uint32_t reason = gSettings.lastResetReason;
-    doc["reset_reason"]      = (reason < 11) ? kResetReasonLabels[reason] : "Unknown";
+    doc["reset_reason"]      = resetReasonLabel(reason);
     doc["reset_reason_code"] = (unsigned long)reason;
     doc["crash_count"]       = (unsigned long)gSettings.crashCount;
   }
@@ -1856,33 +1870,43 @@ const char* cmd_time(const String& argsInput) {
   // All values are digits / a fixed time format, so manual building is safe.
   if (argWantsJson(argsInput)) {
     char timeBuf[40] = "";
-    const char* src = "none";
-    bool synced = false;
+    bool haveTime = false;
     bool haveTemp = false;
     float temp = 0.0f;
+    // Displayed time: live RTC read when the hardware is present (deliberate
+    // — do not replace with the system clock), else the system clock.
 #if ENABLE_RTC_SENSOR
     if (gRtcRunning && gRtcConnected) {
       RTCDateTime dt;
       if (rtcReadDateTime(&dt)) {
+        // RTC stores UTC; every human-facing surface shows local (ds3231.h
+        // contract). This branch used to skip the conversion, so the same
+        // "time" field was UTC on RTC boards but local on NTP-only boards.
+        RTCDateTime local = rtcLocalTime(&dt);
         snprintf(timeBuf, sizeof(timeBuf), "%04d-%02d-%02dT%02d:%02d:%02d",
-                 dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second);
-        src = "rtc"; synced = true; haveTemp = true; temp = rtcReadTemperature();
+                 local.year, local.month, local.day, local.hour, local.minute, local.second);
+        haveTime = true; haveTemp = true; temp = rtcReadTemperature();
       }
     }
 #endif
-    if (!synced) {
+    if (!haveTime) {
       struct tm timeinfo;
       if (getLocalTime(&timeinfo, 0)) {
         strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%dT%H:%M:%S", &timeinfo);
-        src = "ntp"; synced = true;
+        haveTime = true;
       }
     }
+    // "source" is the ledger: which custody chain actually stepped the
+    // clock THIS boot (rtc/ntp/manual/ring). synced:true + source:"none"
+    // means the time was carried across a soft reboot in the RTC domain.
     static char* buf = nullptr;
     if (!buf) buf = (char*)ps_alloc(256, AllocPref::PreferPSRAM, "time.json");
     if (!buf) return "{\"error\":\"oom\"}";
     int p = snprintf(buf, 256,
       "{\"schema\":1,\"synced\":%s,\"source\":\"%s\",\"time\":\"%s\",\"uptime_ms\":%lu",
-      synced ? "true" : "false", src, timeBuf, (unsigned long)millis());
+      Clock::isSynced() ? "true" : "false",
+      Clock::syncSourceName(Clock::syncSource()), timeBuf,
+      (unsigned long)millis());
     if (haveTemp && p > 0 && p < 256) {
       p += snprintf(buf + p, 256 - p, ",\"rtc_temp_c\":%.1f", temp);
     }
@@ -1897,12 +1921,13 @@ const char* cmd_time(const String& argsInput) {
   // Priority: RTC (primary) -> NTP (fallback)
 #if ENABLE_RTC_SENSOR
   if (gRtcRunning && gRtcConnected) {
-    // RTC is primary time source
+    // RTC is primary display source (live register read — deliberate).
     RTCDateTime dt;
     if (rtcReadDateTime(&dt)) {
+      RTCDateTime local = rtcLocalTime(&dt);  // RTC stores UTC; show local
       char timeBuf[32];
       snprintf(timeBuf, sizeof(timeBuf), "%04d-%02d-%02dT%02d:%02d:%02d",
-               dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second);
+               local.year, local.month, local.day, local.hour, local.minute, local.second);
       BROADCAST_PRINTF("Time: %s (RTC)", timeBuf);
       BROADCAST_PRINTF("Temp: %.1f C", rtcReadTemperature());
       return "OK";
@@ -1910,16 +1935,21 @@ const char* cmd_time(const String& argsInput) {
   }
 #endif
 
-  // Fallback to NTP/system time if RTC not available
+  // Fallback to system time if RTC not available
   struct tm timeinfo;
   if (getLocalTime(&timeinfo, 0)) {
     char timeBuf[32];
     strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%dT%H:%M:%S", &timeinfo);
-    BROADCAST_PRINTF("Time: %s (NTP)", timeBuf);
+    const Clock::SyncSource src = Clock::syncSource();
+    // "none" while synced = time carried across a soft reboot in hardware.
+    BROADCAST_PRINTF("Time: %s (source: %s)", timeBuf,
+                     (src == Clock::SYNC_NONE && Clock::isSynced())
+                         ? "carried over soft reboot"
+                         : Clock::syncSourceName(src));
   } else {
-    broadcastOutput("Time: Not synced (no RTC or NTP)");
+    broadcastOutput("Time: Not synced (no time source yet)");
   }
-  
+
   return "OK";
 }
 
@@ -1946,16 +1976,22 @@ const char* cmd_timeset(const String& argsInput) {
   }
   
   if (isUnix) {
-    t = (time_t)arg.toInt();
-    localtime_r(&t, &timeinfo);
+    // strtoll, not String::toInt (32-bit — silently wraps past 2038), and
+    // range-checked before the time_t cast.
+    char* endp = nullptr;
+    const long long v = strtoll(arg.c_str(), &endp, 10);
+    if (!endp || *endp != '\0') {
+      return "Error: Invalid format. Use: YYYY-MM-DD HH:MM:SS or unix timestamp";
+    }
+    t = (time_t)v;
   } else {
     // Parse YYYY-MM-DD HH:MM:SS
     int year, month, day, hour, minute, second;
-    if (sscanf(arg.c_str(), "%d-%d-%d %d:%d:%d", 
+    if (sscanf(arg.c_str(), "%d-%d-%d %d:%d:%d",
                &year, &month, &day, &hour, &minute, &second) != 6) {
       return "Error: Invalid format. Use: YYYY-MM-DD HH:MM:SS or unix timestamp";
     }
-    
+
     timeinfo.tm_year = year - 1900;
     timeinfo.tm_mon = month - 1;
     timeinfo.tm_mday = day;
@@ -1965,32 +2001,30 @@ const char* cmd_timeset(const String& argsInput) {
     timeinfo.tm_isdst = -1;
     t = mktime(&timeinfo);
   }
-  
-  // Set system time
+
+  // Plausibility gate on BOTH branches: isValidEpoch alone has no upper
+  // bound, and `timeset 100` used to silently un-sync a good clock.
+  if (!Clock::isPlausibleEpoch(t)) {
+    return "Error: timestamp must be within 2020-2099";
+  }
+
+  // Set system time, then run the standard post-step duties (event, boot
+  // anchor, pending-user resolve, scheduler wake, RTC write-back) through
+  // the shared chokepoint — this command used to skip all of them. Flush
+  // synchronously so the side effects are visible before the prompt returns
+  // (cmd_exec task has the stack for it).
+  const time_t before = time(nullptr);
   struct timeval tv = { .tv_sec = t, .tv_usec = 0 };
   settimeofday(&tv, nullptr);
-  
-  // Also update RTC if available
-#if ENABLE_RTC_SENSOR
-  if (gRtcRunning && gRtcConnected) {
-    rtcSyncFromSystem();
-    broadcastOutput("System time and RTC updated");
-    // Mark RTC as calibrated so future boots trust RTC first
-    if (!gSettings.rtcTimeHasBeenSet) {
-      setSetting(gSettings.rtcTimeHasBeenSet, true);
-      broadcastOutput("RTC marked as calibrated for future boots");
-    }
-  } else {
-    broadcastOutput("System time updated (RTC not available)");
-  }
-#else
-  broadcastOutput("System time updated");
-#endif
-  
+  Clock::clockStepped(Clock::SYNC_MANUAL, before);
+  Clock::clockDutiesFlush();
+
   char timeBuf[32];
-  strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%dT%H:%M:%S", &timeinfo);
+  struct tm setTm;
+  localtime_r(&t, &setTm);
+  strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%dT%H:%M:%S", &setTm);
   BROADCAST_PRINTF("Time set to: %s", timeBuf);
-  
+
   return "OK";
 }
 
@@ -2273,8 +2307,53 @@ const char* cmd_wait(const String& argsInput) {
 #if ENABLE_WIFI
 
 extern void resolvePendingUserCreationTimes();
-extern void notifyAutomationScheduler();
-extern void logTimeSyncedMarkerIfReady();
+extern void writeBootAnchor();
+extern void logTimeSyncedMarkerIfReady(const char* source);
+
+// ---------------------------------------------------------------------------
+// SNTP sync notification — the only honest "an NTP server actually replied"
+// signal. lwIP's daemon steps the clock itself (first request after a short
+// startup delay, then hourly per CONFIG_LWIP_SNTP_UPDATE_DELAY), and before
+// this callback existed those steps were completely invisible: no event, no
+// log, and syncNTPAndResolve's old getLocalTime() "success" test couldn't
+// tell a reply from a clock that was already set.
+//
+// The callback runs on lwIP's tcpip task (~3 KB stack): STORE-ONLY — no
+// broadcast, no filesystem, no event post. ntpSyncDrainTick() (main loop,
+// the ONLY caller) hands the stored facts to Clock::clockStepped(), which
+// owns every post-step duty.
+// ---------------------------------------------------------------------------
+static volatile uint32_t gSntpSyncCount    = 0;
+static volatile bool     gSntpDrainPending = false;
+// 64-bit on a 32-bit core — written on lwIP's task, read on the main loop.
+// Guarded by its own mux so the drain can never see a torn half-write.
+static portMUX_TYPE      gSntpMux          = portMUX_INITIALIZER_UNLOCKED;
+static int64_t           gSntpPrevProjUs   = 0;
+
+static void onSntpTimeSync(struct timeval* tv) {
+  (void)tv;
+  // lwIP already stepped the real clock before invoking us; the projection
+  // reference is the only remaining evidence of the PRE-step clock.
+  const int64_t prev = Clock::projectedEpochUs();
+  portENTER_CRITICAL(&gSntpMux);
+  gSntpPrevProjUs = prev;
+  portEXIT_CRITICAL(&gSntpMux);
+  Clock::refreshProjection();
+  gSntpSyncCount = gSntpSyncCount + 1;
+  gSntpDrainPending = true;  // release: flag last
+}
+
+void ntpSyncDrainTick() {
+  if (!gSntpDrainPending) return;
+  gSntpDrainPending = false;
+  portENTER_CRITICAL(&gSntpMux);
+  const int64_t prevUs = gSntpPrevProjUs;
+  portEXIT_CRITICAL(&gSntpMux);
+  const time_t before = (time_t)(prevUs / 1000000LL);
+  Clock::clockStepped(Clock::SYNC_NTP, before);
+  // Duties (step log, edge event, marker, anchor, resolve, scheduler wake,
+  // RTC write-back) drain via Clock::clockDutiesTick() on this same lap.
+}
 
 void setupNTP() {
   long gmtOffset = (long)Clock::tzOffsetMinutes() * 60;  // seconds
@@ -2289,23 +2368,44 @@ void setupNTP() {
     DEBUG_NTP_SETUPF("[NTP Setup] WiFi subnet: %s", WiFi.subnetMask().toString().c_str());
   }
 
-  // Use standard configTime() with hostname-based NTP servers
-  DEBUG_NTP_SETUPF("[NTP Setup] Configuring NTP with hostname-based servers");
+  // Register the reply callback BEFORE (re)starting SNTP. Registration is a
+  // bare static-pointer store inside lwIP that survives sntp_stop/init
+  // cycles; re-registering the same function is harmless.
+  sntp_set_time_sync_notification_cb(&onSntpTimeSync);
 
-  // Try multiple reliable NTP servers for redundancy
+  // Seed the projection so the FIRST background reply on a warm boot (clock
+  // carried across a soft reboot) doesn't reconstruct a garbage "before".
+  Clock::refreshProjection();
+
+  // lwIP stores server-name POINTERS (sntp_setservername does not copy), so
+  // the primary must live in storage that never moves. gSettings.ntpServer
+  // is an Arduino String whose buffer reallocates on assignment — hand lwIP
+  // a stable copy instead. Refreshed on every setupNTP(), which every
+  // ntpserver-change path already calls.
+  static char sNtpServer[64];
+  strlcpy(sNtpServer, gSettings.ntpServer.c_str(), sizeof(sNtpServer));
+
+  // NOTE: only server slot 0 is real until CONFIG_LWIP_SNTP_MAX_SERVERS>1
+  // lands; the two extras below are silently ignored by lwIP when the slot
+  // count is 1. Kept in the call so raising the config makes them live.
   configTime(gmtOffset, 0,
-             gSettings.ntpServer.c_str(),  // Primary (usually pool.ntp.org)
-             "time.google.com",            // Google
-             "time.cloudflare.com");       // Cloudflare
+             sNtpServer,             // Primary (usually pool.ntp.org)
+             "time.google.com",      // Backup (needs MAX_SERVERS >= 2)
+             "time.cloudflare.com"); // Backup (needs MAX_SERVERS >= 3)
 
-  DEBUG_NTP_SETUPF("[NTP Setup] configTime() completed with servers:");
-  DEBUG_NTP_SETUPF("[NTP Setup]   Primary: %s", gSettings.ntpServer.c_str());
-  DEBUG_NTP_SETUPF("[NTP Setup]   Backup1: time.google.com");
-  DEBUG_NTP_SETUPF("[NTP Setup]   Backup2: time.cloudflare.com");
+  // configTime()'s trailing setTimeZone() rewrites TZ from its numeric
+  // offset (a rule-less "UTC<h>DST<h>" string). Re-assert the canonical
+  // settings-derived TZ so this call can never clobber it — this is also
+  // the hook that keeps a future DST rule alive across NTP restarts.
+  Clock::applyTimezone();
+
+  DEBUG_NTP_SETUPF("[NTP Setup] configTime() done; primary=%s (backups live once MAX_SERVERS>1)",
+                   sNtpServer);
 }
 
-bool syncNTPAndResolve() {
+bool syncNTPAndResolve(NtpSyncOutcome* outcomeOut) {
   DEBUG_NTP_SYNCF("[syncNTPAndResolve] Starting NTP sync process");
+  if (outcomeOut) *outcomeOut = NtpSyncOutcome::Failed;
 
   if (!WiFi.isConnected()) {
     DEBUG_NTP_SYNCF("[syncNTPAndResolve] FAILED - WiFi not connected");
@@ -2314,70 +2414,36 @@ bool syncNTPAndResolve() {
   }
 
   DEBUG_NTP_SYNCF("[syncNTPAndResolve] WiFi connected, proceeding with NTP sync");
+  // No DNS pre-flight: lwIP's SNTP client resolves names itself, and the
+  // wait loop below detects failure. (A synchronous hostByName probe here
+  // used to add 5-8 s of dead wait on healthy networks.)
 
-  // DNS is ready by the time WiFi reports an assigned IP — no separate
-  // initialization phase to wait on. (Previously: hardcoded delay(500).)
-
-  // Pre-flight DNS check — disabled.
-  //
-  // The synchronous WiFi.hostByName() call below was adding 5-8 s of dead
-  // wait to every boot on otherwise-healthy networks (lwIP's DNS retry
-  // strategy + IPv6/IPv4 dual-stack timeouts). It was originally there to
-  // fail fast when DNS was broken, but lwIP's SNTP client does its own
-  // resolution and the 15 s polling loop below already detects sync failure.
-  // With MAX_SERVERS=3 plus DHCP-provided NTP, SNTP can succeed even when
-  // one server's DNS is unhealthy — making this check actively misleading.
-  //
-  // To re-enable: change `#if 0` to `#if 1`.
-#if 0
-  // Test DNS resolution before attempting NTP
-  IPAddress testIP;
-  bool dnsWorking = WiFi.hostByName("time.google.com", testIP);
-  bool validIP = dnsWorking && testIP != IPAddress(0, 0, 0, 0);
-  DEBUG_NTP_SYNCF("[syncNTPAndResolve] DNS test: hostByName('time.google.com') = %s, IP=%s",
-                  validIP ? "SUCCESS" : "FAILED",
-                  testIP.toString().c_str());
-
-  if (!validIP) {
-    DEBUG_NTP_SYNCF("[syncNTPAndResolve] WARNING: DNS resolution failed (returned %s), NTP may not work",
-                    testIP.toString().c_str());
-    broadcastOutput("⚠ DNS resolution failed - NTP may not work");
-    broadcastOutput("  Waiting 2 more seconds for DNS to initialize...");
-    delay(2000);
-    dnsWorking = WiFi.hostByName("pool.ntp.org", testIP);
-    validIP = dnsWorking && testIP != IPAddress(0, 0, 0, 0);
-    DEBUG_NTP_SYNCF("[syncNTPAndResolve] DNS retry: hostByName('pool.ntp.org') = %s, IP=%s",
-                    validIP ? "SUCCESS" : "FAILED",
-                    testIP.toString().c_str());
-    if (!validIP) {
-      DEBUG_NTP_SYNCF("[syncNTPAndResolve] ERROR: DNS still not working after retry");
-      broadcastOutput("[ERROR] DNS not working - NTP will fail");
-      return false;
-    }
-  }
-#endif
+  // Capture the pre-attempt state BEFORE setupNTP restarts the daemon: the
+  // success test below is "did the reply counter advance", and a reply can
+  // land between sntp_init and our first poll.
+  const time_t preSyncTime = time(nullptr);
+  const bool preSet = Clock::isValidEpoch(preSyncTime);
+  const uint32_t startCount = gSntpSyncCount;
 
   broadcastOutput("Synchronizing time with NTP server...");
   setupNTP();
   broadcastOutput("  Contacting NTP server, please wait...");
 
+  // Success = an actual SNTP reply (the notification callback fired), NOT
+  // "the clock looks set" — getLocalTime() is a clock-is-set test, and with
+  // RTC/ring/warm-reboot sources able to pre-set the clock it reported
+  // "NTP synchronized" without a single packet coming back.
+  //
+  // Wait budget: a dark boot has nothing better to do than wait the full
+  // window; a boot whose clock is already valid shouldn't stall the caller —
+  // the background daemon keeps retrying either way.
   bool ntpSynced = false;
-  // Capture the pre-sync clock so we can detect a large NTP *step*. If the
-  // clock was already seeded to a plausible wall-clock value (RTC early-sync at
-  // boot) and NTP then moves it by a lot, that gap is RTC drift / a dead RTC
-  // battery — and it silently corrupts the meaning of every other timestamp.
-  const time_t preSyncTime = time(nullptr);
-  // SNTP startup delay is now CONFIG_LWIP_SNTP_MAXIMUM_STARTUP_DELAY=100 ms,
-  // and DHCP-provided NTP servers (router-local, RTT ~1 ms) win when present.
-  // 100 ms polling cadence catches the response within one iteration on a
-  // healthy network. 15 s window kept as a safety net for offline / blocked-NTP
-  // boots; typical sync exits in 1-3 iterations.
-  const int maxWaitSeconds = 15;
+  const int maxWaitSeconds = preSet ? 3 : 15;
   const int iterationsPerSecond = 10;  // 100ms per iteration
   const int maxIterations = maxWaitSeconds * iterationsPerSecond;
-  DEBUG_NTP_SYNCF("[syncNTPAndResolve] Starting %d-second wait loop for NTP response", maxWaitSeconds);
+  DEBUG_NTP_SYNCF("[syncNTPAndResolve] Starting %d-second wait loop for NTP reply", maxWaitSeconds);
 
-  for (int i = 0; i < maxIterations && !ntpSynced; i++) {
+  for (int i = 0; i < maxIterations; i++) {
     delay(100);
     oledUpdate();  // Keep boot animation running during NTP wait
 
@@ -2385,34 +2451,11 @@ bool syncNTPAndResolve() {
       char progressMsg[64];
       snprintf(progressMsg, sizeof(progressMsg), "  Looking for updates... %d/%d seconds", i / iterationsPerSecond, maxWaitSeconds);
       broadcastOutput(progressMsg);
-      DEBUG_NTP_SYNCF("[syncNTPAndResolve] Waiting... %d/%d seconds elapsed", i / iterationsPerSecond, maxWaitSeconds);
     }
 
-    time_t now = time(nullptr);
-    DEBUG_NTP_SYNCF("[syncNTPAndResolve] time(nullptr) returned: %lu", (unsigned long)now);
-
-    struct tm timeinfo;
-    bool gotLocalTime = getLocalTime(&timeinfo, 10);  // 10ms timeout
-    DEBUG_NTP_SYNCF("[syncNTPAndResolve] getLocalTime(10ms) returned: %s", gotLocalTime ? "true" : "false");
-
-    if (gotLocalTime) {
-      DEBUG_NTP_SYNCF("[syncNTPAndResolve] SUCCESS! Time synced: %04d-%02d-%02d %02d:%02d:%02d",
-                      timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday,
-                      timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
-      logTimeSyncedMarkerIfReady();
-      // Only meaningful if the RTC had already seeded a plausible time before
-      // NTP ran (year >= 2024). A cold boot with epoch-0 clock is an expected
-      // first-set, not a "step". Threshold at ~2 min so ordinary sub-second
-      // corrections stay silent.
-      {
-        const time_t postSyncTime = time(nullptr);
-        if (preSyncTime > 1704067200 /* 2024-01-01 */) {
-          long stepSec = (long)(postSyncTime - preSyncTime);
-          if (stepSec > 120 || stepSec < -120) {
-            logSystemEvent("TIME", "clock stepped %+lds by NTP while already set — check RTC battery/drift", stepSec);
-          }
-        }
-      }
+    if (gSntpSyncCount != startCount) {
+      DEBUG_NTP_SYNCF("[syncNTPAndResolve] SNTP reply received (count %lu)",
+                      (unsigned long)gSntpSyncCount);
       ntpSynced = true;
       break;
     }
@@ -2420,79 +2463,83 @@ bool syncNTPAndResolve() {
 
   if (ntpSynced) {
     DEBUG_NTP_SYNCF("[syncNTPAndResolve] NTP sync completed successfully");
-    broadcastOutput("[OK] NTP time synchronized successfully");
-    // Bus event on the invalid->valid transition only (preSyncTime predates
-    // 2024 = clock was not yet set). Routine re-syncs stay silent.
-    if (preSyncTime <= 1704067200) {
-      char ts[24];
-      time_t nowT = time(nullptr);
-      struct tm tmNow;
-      if (localtime_r(&nowT, &tmNow)) {
-        strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M", &tmNow);
-        systemEventPost(SYSEVT_TIME_SYNCED, "ntp", ts);
-      }
+    broadcastOutput("[OK] NTP time synchronized");
+    // Post-step duties (edge event, marker, anchor, resolve, scheduler wake,
+    // RTC write-back, step diagnostic) all arrive via ntpSyncDrainTick →
+    // Clock::clockStepped on the next main-loop lap — do NOT duplicate here.
+    //
+    // One deliberate exception, the warm-boot baseline: when the clock was
+    // ALREADY valid (carried across a soft reboot), the helper sees no
+    // invalid→valid edge and a small correction pends nothing — but THIS
+    // boot still needs its anchor (gNTPAnchorId bumps every boot, and
+    // same-boot users can only resolve against a same-boot anchor). The
+    // anchor write is an upsert, so this is idempotent with the drain.
+    if (preSet) {
+      writeBootAnchor();
+      resolvePendingUserCreationTimes();
+      logTimeSyncedMarkerIfReady("ntp");
     }
-    
-    // Sync RTC from NTP time to keep RTC accurate
-#if ENABLE_RTC_SENSOR
-    if (gRtcRunning && gRtcConnected) {
-      if (rtcSyncFromSystem()) {
-        broadcastOutput("[OK] RTC updated from NTP time");
-        // Mark RTC as calibrated so future boots trust RTC first
-        if (!gSettings.rtcTimeHasBeenSet) {
-          setSetting(gSettings.rtcTimeHasBeenSet, true);
-          broadcastOutput("[OK] RTC marked as calibrated for future boots");
-        }
-      }
-    }
-#endif
-    
-    DEBUG_NTP_SYNCF("About to call resolvePendingUserCreationTimes");
-    resolvePendingUserCreationTimes();
-    DEBUG_NTP_SYNCF("resolvePendingUserCreationTimes completed");
-    DEBUG_NTP_SYNCF("About to call notifyAutomationScheduler");
-    notifyAutomationScheduler();
-    DEBUG_NTP_SYNCF("notifyAutomationScheduler completed");
+    if (outcomeOut) *outcomeOut = NtpSyncOutcome::Reply;
     return true;
-  } else {
-    DEBUG_NTP_SYNCF("[syncNTPAndResolve] TIMEOUT - NTP sync failed after %d seconds", maxWaitSeconds);
-    DEBUG_NTP_SYNCF("[syncNTPAndResolve] Check: WiFi=%s, DNS=%s, Gateway=%s",
-                    WiFi.isConnected() ? "OK" : "FAIL",
-                    WiFi.dnsIP().toString().c_str(),
-                    WiFi.gatewayIP().toString().c_str());
-    
-    // Try RTC as fallback time source
-#if ENABLE_RTC_SENSOR
-    if (gRtcRunning && gRtcConnected) {
-      if (rtcSyncToSystem()) {
-        broadcastOutput("[OK] System time set from RTC (NTP unavailable)");
-        if (preSyncTime <= 1704067200) {
-          char ts[24];
-          time_t nowT = time(nullptr);
-          struct tm tmNow;
-          if (localtime_r(&nowT, &tmNow)) {
-            strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M", &tmNow);
-            systemEventPost(SYSEVT_TIME_SYNCED, "rtc", ts);
-          }
-        }
-        resolvePendingUserCreationTimes();
-        notifyAutomationScheduler();
-        return true;
-      }
-    }
-#endif
-    
-    broadcastOutput("[ERROR] NTP sync timeout - no RTC available");
-    broadcastOutput("  Note: Your router may be blocking NTP (UDP port 123)");
-    return false;
   }
+
+  DEBUG_NTP_SYNCF("[syncNTPAndResolve] no SNTP reply after %d seconds", maxWaitSeconds);
+  DEBUG_NTP_SYNCF("[syncNTPAndResolve] Check: WiFi=%s, DNS=%s, Gateway=%s",
+                  WiFi.isConnected() ? "OK" : "FAIL",
+                  WiFi.dnsIP().toString().c_str(),
+                  WiFi.gatewayIP().toString().c_str());
+
+  // A reply can land in the milliseconds between the loop's final check and
+  // here; without this re-check the dark path below would immediately
+  // overwrite the just-corrected clock with drifted RTC time.
+  if (gSntpSyncCount != startCount) {
+    broadcastOutput("[OK] NTP time synchronized");
+    if (preSet) {
+      writeBootAnchor();
+      resolvePendingUserCreationTimes();
+      logTimeSyncedMarkerIfReady("ntp");
+    }
+    if (outcomeOut) *outcomeOut = NtpSyncOutcome::Reply;
+    return true;
+  }
+
+  if (preSet) {
+    // Honest version of what used to print "[OK] NTP time synchronized
+    // successfully" on iteration 0: no reply yet, but the clock is valid
+    // from an earlier source, so nothing is wrong — the daemon keeps
+    // retrying in the background and the drain reports when it lands.
+    broadcastOutput("[OK] Clock keeps its current time; NTP still trying in background");
+    writeBootAnchor();
+    resolvePendingUserCreationTimes();
+    // Marker names WHO supplied this boot's clock: the ledger when a real
+    // source stepped it (rtc/ring/manual), "carryover" only for the true
+    // soft-reboot case where no settimeofday ever happened.
+    logTimeSyncedMarkerIfReady(Clock::syncSource() != Clock::SYNC_NONE
+                                   ? Clock::syncSourceName(Clock::syncSource())
+                                   : "carryover");
+    if (outcomeOut) *outcomeOut = NtpSyncOutcome::KeptPrior;
+    return true;
+  }
+
+  // Dark timeout — try the RTC as a fallback source. rtcSyncToSystem() runs
+  // its duties through Clock::clockStepped itself now.
+#if ENABLE_RTC_SENSOR
+  if (gRtcRunning && gRtcConnected) {
+    if (rtcSyncToSystem()) {
+      broadcastOutput("[OK] System time set from RTC (NTP unavailable)");
+      if (outcomeOut) *outcomeOut = NtpSyncOutcome::RtcFallback;
+      return true;
+    }
+  }
+#endif
+
+  broadcastOutput("[ERROR] NTP sync timeout - no other time source");
+  broadcastOutput("  Note: Your router may be blocking NTP (UDP port 123)");
+  return false;
 }
 
 #endif // ENABLE_WIFI
 
-time_t nowEpoch() {
-  return time(nullptr);
-}
 
 // =========================================================================
 // Command Registry System
@@ -2528,7 +2575,7 @@ const char* cmd_bootcount(const String& argsInput) {
 
   uint32_t bootCount = bootStateGetBootCount();
   uint32_t reason    = gSettings.lastResetReason;
-  const char* reasonLabel = (reason < 11) ? kResetReasonLabels[reason] : "Unknown";
+  const char* reasonLabel = resetReasonLabel(reason);
 
   if (argWantsJson(argsInput)) {
     PSRAM_JSON_DOC(doc);
@@ -2551,9 +2598,63 @@ const char* cmd_bootcount(const String& argsInput) {
   return "OK";
 }
 
+// Read surface for the RTC crash record. Without this the capture would be
+// write-only: a field crash is diagnosed by someone with no serial cable, and
+// registering here gets CLI + web + OLED + G2 + ESP-NOW for free through
+// executeCommand(), with authorizeCommand() gating already applied.
+const char* cmd_crashlog(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+
+  if (argWantsJson(argsInput)) {
+    PSRAM_JSON_DOC(doc);
+    doc["schema"]      = 1;
+    doc["have_record"] = crashRecordHavePrevious();
+    doc["consecutive"] = (unsigned long)crashRecordConsecutive();
+    doc["signature"]   = (unsigned long)crashRecordSignature();
+    doc["repeat"]      = (unsigned long)crashRecordRepeatCount();
+    doc["boot_phase"]  = crashPhaseName(crashRecordPrevPhase());
+    doc["detail"]      = crashRecordReasonText();
+    static char* buf = nullptr;
+    if (!buf) buf = (char*)ps_alloc(512, AllocPref::PreferPSRAM, "crashlog.json");
+    if (!buf) return "{\"error\":\"oom\"}";
+    serializeJson(doc, buf, 512);
+    return buf;
+  }
+
+  // Static + PSRAM rather than a stack buffer: command handlers run on
+  // cmd_exec_task and stack figures in this codebase are BYTES, so a 512 B frame
+  // is not free.
+  static char* text = nullptr;
+  if (!text) text = (char*)ps_alloc(640, AllocPref::PreferPSRAM, "crashlog.text");
+  if (!text) return "Error: out of memory";
+
+  BROADCAST_PRINTF("Last crash");
+  BROADCAST_PRINTF("  reset reason : %s (%lu)",
+                   resetReasonLabel(gSettings.lastResetReason),
+                   (unsigned long)gSettings.lastResetReason);
+  crashRecordDetail(text, 640);
+
+  // Emit line-by-line: broadcastOutput clamps at 255 B, so a multi-line blob
+  // would be silently cut.
+  char* line = text;
+  while (line && *line) {
+    char* nl = strchr(line, '\n');
+    if (nl) *nl = '\0';
+    BROADCAST_PRINTF("%s", line);
+    if (!nl) break;
+    line = nl + 1;
+  }
+  if (VFS::exists("/system/sys_logs/crash-history.log")) {
+    cliHint("full history (survives reboots): /system/sys_logs/crash-history.log");
+  }
+  return "OK";
+}
+
 const CommandEntry commands[] = {
   // ---- Core / General ----
   { "status", "Show system status (WiFi, FS, memory). (add 'json' for JSON output)", false, cmd_status, nullptr, "system", "status" },
+  { "crashlog", "Show the last recorded crash (panic text, core/PC, boot phase, repeat count). (add 'json')", false, cmd_crashlog,
+    "Usage: crashlog [json]" },
   { "bootcount", "Show boot count (NVS), crash count, last reset reason. 'bootcount reset' zeroes it (admin). (add 'json')", false, cmd_bootcount,
     "Usage: bootcount [reset|json]" },
   { "uptime", "Show device uptime. (add 'json' for JSON output)", false, cmd_uptime },
@@ -2853,7 +2954,7 @@ static const CommandModule gCommandModules[] = {
     "with backoff if the device is not yet initialized. A background task polls the "
     "gamepad at roughly 50 ms and caches the latest reading for the OLED UI and sensor "
     "JSON. This module is mutually exclusive at build time with anoencoder; only one "
-    "input device is compiled in per firmware (see input).", gamepadCommands,      gamepadCommandsCount, CMD_MODULE_SENSOR, []() { return isSensorConnected("gamepad"); } },
+    "input device is compiled in per firmware (see input).", gamepadCommands,      gamepadCommandsCount, CMD_MODULE_SENSOR, []() { return gInputConnected; } },
 #endif
 #if ENABLE_ANO_ENCODER
   { "anoencoder", "ANO rotary encoder — debug + driver-specific config", "Adafruit ANO directional navigation rotary encoder on Seesaw I2C: a click wheel "
@@ -3089,8 +3190,12 @@ static const CommandModule gCommandModules[] = {
     "status reports the active file, interval, format, rotation settings, selected "
     "sensors, and last-write age. Configure behavior with format <text|csv|track> "
     "(track is a compact GPS-only format with signal-loss dedup), maxsize and rotations "
-    "for log rotation, and sensors <thermal|tof|imu|gamepad|apds|gps|presence|all|none> "
-    "to choose which sensors are recorded. sensorlog autostart [on|off] makes logging "
+    "for log rotation, and sensors <thermal|tof|imu|gamepad|apds|gps|presence|r1|all|none> "
+    "to choose which sensors are recorded. sensorlog interval <ms> sets the poll period "
+    "(100-3600000, default 5000). NOTE: format track additionally REPLACES the sensor "
+    "mask with GPS-only and persists it, so a prior selection is lost — and rotations 0 "
+    "deletes the active file at the size cap rather than pruning older generations. "
+    "sensorlog autostart [on|off] makes logging "
     "resume on the next boot using the last-used parameters; the "
     "format/maxsize/rotations/sensors/autostart choices are persisted.", sensorLoggingCommands, sensorLoggingCommandsCount, 0, nullptr },
   { "users",      "User authentication and management", "The users subsystem provides admin-gated account management, authentication, "
@@ -4595,8 +4700,15 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
                                            msgId, (const uint8_t*)payload.c_str(), payload.length(), 1);
     
     if (sent) {
-      snprintf(out, outSize, "Remote command sent: %s", actualCommand.c_str());
-      broadcastOutput("[REMOTE] Sent to bonded device: " + actualCommand);
+      // SECURITY: echo the REDACTED form. actualCommand is the unwrapped inner
+      // command, so `@login bob hunter2` used to be printed verbatim here — and
+      // broadcastOutput fans out to every sink including the MSG_ROUTE_FILE tee,
+      // writing the password to unencrypted flash. This branch returns before
+      // executeCommand's logCommandExecution calls, so it never passed through
+      // any redaction at all; it has to redact for itself.
+      String safeCommand = redactCmdForAudit(actualCommand);
+      snprintf(out, outSize, "Remote command sent: %s", safeCommand.c_str());
+      broadcastOutput("[REMOTE] Sent to bonded device: " + safeCommand);
       return true;
     } else {
       strncpy(out, "Error: Failed to send remote command", outSize - 1);

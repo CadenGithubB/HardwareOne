@@ -216,9 +216,9 @@ const char* cmd_presenceread(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   if (argWantsJson(argsInput)) {
-    if (!ensureDebugBuffer()) return "{\"valid\":false,\"error\":\"buffer\"}";
+    if (!ensureDebugBuffer()) return SENSOR_JSON_NOBUF;
     int n = presenceBuildDataJSON(getDebugBuffer(), 1024);  // shared builder (also feeds sensors json)
-    return (n > 0) ? getDebugBuffer() : "{\"valid\":false}";
+    return (n > 0) ? getDebugBuffer() : SENSOR_JSON_UNAVAILABLE;
   }
 
   if (!gPresenceConnected || !gPresenceRunning) {
@@ -250,9 +250,9 @@ const char* cmd_presencestatus(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   if (argWantsJson(argsInput)) {
-    if (!ensureDebugBuffer()) return "{\"valid\":false,\"error\":\"buffer\"}";
+    if (!ensureDebugBuffer()) return SENSOR_JSON_NOBUF;
     int n = presenceBuildDataJSON(getDebugBuffer(), 1024);
-    return (n > 0) ? getDebugBuffer() : "{\"valid\":false}";
+    return (n > 0) ? getDebugBuffer() : SENSOR_JSON_UNAVAILABLE;
   }
 
   if (!ensureDebugBuffer()) return "Error: [PRESENCE] Debug buffer unavailable";
@@ -608,7 +608,14 @@ void presenceTask(void* parameter) {
             logSystemEvent("SENSOR", "Presence auto-disabled after %u consecutive I2C failures", errors);
             { char det[24]; snprintf(det, sizeof(det), "%u I2C errors", errors);
               systemEventPost(SYSEVT_SENSOR_FAULT, "Presence", det); }
-            break;
+            // 'continue' (not 'break') — see the same note on the stack-safety
+            // bailout above. `break` here left the while(true) loop and RETURNED
+            // from the task entry point, which FreeRTOS turns into a jump to
+            // address 0 (InstrFetchProhibited panic + reboot) rather than a task
+            // exit. It also skipped the cache-invalidate the shutdown path
+            // performs. gPresenceRunning is cleared above, so the top-of-loop
+            // check now runs the clean SENSOR_TASK_EXIT.
+            continue;
           }
         }
         lastPresenceRead = nowMs;

@@ -39,7 +39,9 @@ struct RemoteSensorStatus {
 
 // Remote sensor data cache entry
 // Uses fixed buffer to avoid heap churn from String allocations
-#define REMOTE_SENSOR_BUFFER_SIZE 256  // Enough for gamepad/IMU/GPS/ToF/FM (thermal handled separately)
+#define REMOTE_SENSOR_BUFFER_SIZE 256  // RX cap — never the binding limit: the 200 B TX gate
+                                       // (v4_send_sensor_envelope) rejects first, and the RX
+                                       // memcpy truncates safely. (Thermal handled separately.)
 
 struct RemoteSensorData {
   uint8_t deviceMac[6];

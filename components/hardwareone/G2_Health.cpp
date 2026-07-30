@@ -13,8 +13,11 @@
 #include "System_R1_Protocol.h"
 #include "System_SensorLogging.h"
 #include "System_Settings.h"
+#include "System_Clock.h"   // isValidEpoch — honest day labels on Trends
 
 #include <time.h>
+
+extern uint32_t gBootCounter;  // session id — bumps each boot (HardwareOne.cpp)
 
 // =============================================================================
 // Health history + graph renderer. Portable aside from reading live telemetry
@@ -185,6 +188,27 @@ void g2HealthNoteSample(G2HealthMetric metric, int16_t value, uint32_t ringTs) {
   seriesPush(seriesFor(metric), value, ringTs, millis());
 }
 
+// Synthesised .ms for a daily payload. The old flat 60 s ladder asserted a
+// span of (count-1) minutes for a payload that nominally covers a day, so a
+// 24 h backfill occupied ~52% of the plot instead of ~99%. Use the payload's
+// own window when it is sane and fall back to the nominal step otherwise.
+// No clamp against nowMs: .ms has exactly two consumers — seriesPush's
+// (long)(ms - lastMs) signed delta and drawSparkline's unsigned modular
+// delta — and both are correct across an underflow at early uptime. Clamping
+// would make the plotted scale a function of uptime.
+static constexpr uint32_t kBackfillNominalStepMs = 60000u;      // window unusable
+static constexpr uint32_t kBackfillMaxSpanSec    = 48u * 3600u; // reject garbage windows
+
+static uint32_t backfillSampleMs(size_t i, size_t count, uint32_t nowMs,
+                                 uint32_t startTs, uint32_t endTs) {
+  if (count < 2) return nowMs;
+  uint32_t spanMs = (uint32_t)((count - 1) * kBackfillNominalStepMs);
+  if (endTs > startTs && (endTs - startTs) <= kBackfillMaxSpanSec) {
+    spanMs = (endTs - startTs) * 1000u;
+  }
+  return nowMs - (uint32_t)((uint64_t)spanMs * (count - 1 - i) / (count - 1));
+}
+
 void g2HealthApplyDailyBackfill(G2HealthMetric metric,
                                 const uint8_t* values, size_t count,
                                 uint32_t startTs, uint32_t endTs) {
@@ -201,9 +225,9 @@ void g2HealthApplyDailyBackfill(G2HealthMetric metric,
   for (size_t i = 0; i < count && i < HEALTH_HIST_CAP; i++) {
     uint32_t rts = startTs;
     if (span > 0) rts = startTs + (uint32_t)((uint64_t)span * i / (count - 1));
-    // Synthesise millis timestamps spaced across the recent past so the
-    // sparkline X axis has monotonic order.
-    uint32_t ms = nowMs - (uint32_t)((count - 1 - i) * 60000u);
+    // .ms carries the payload's real duration; drawSparkline sorts by it, so
+    // these land before the live trail regardless of insertion order.
+    uint32_t ms = backfillSampleMs(i, count, nowMs, startTs, endTs);
     seriesPush(s, (int16_t)((int16_t)values[i] * scale), rts, ms);
   }
   DEBUG_G2F("[HEALTH] daily backfill metric=%u count=%u",
@@ -227,7 +251,7 @@ void g2HealthApplyTrendDaily(G2HealthMetric metric,
     const int16_t v = (int16_t)values[i];
     uint32_t rts = startTs;
     if (span > 0) rts = startTs + (uint32_t)((uint64_t)span * i / (count - 1));
-    uint32_t ms = nowMs - (uint32_t)((count - 1 - i) * 60000u);
+    uint32_t ms = backfillSampleMs(i, count, nowMs, startTs, endTs);
     seriesPushRaw(s, v, rts, ms);
     if (n == 0) { minV = maxV = v; }
     else {
@@ -257,18 +281,33 @@ size_t g2HealthHistoryCount(G2HealthMetric metric) {
   return s ? s->count : 0;
 }
 
+// Live-cache resample. The cache has no TTL, so a re-read of an unchanged
+// reading must not append: passing millis()-now refreshed seriesPush's lastMs
+// on every accepted push, so an unchanging value cleared the 5 s gate again
+// every 5 s — one fabricated sample per metric per 5 s, forever. That refilled
+// all 96 slots in eight minutes and evicted a whole day of real history.
+// Stamping each sample with its own RECEIVE time makes the value+time gate do
+// the right thing: an unchanged cache keeps producing the same stamp and is
+// dropped for good, while a genuinely new reading lands.
+static void syncPush(HealthSeries* s, int16_t value, uint32_t rxMs) {
+  if (rxMs == 0) return;   // no receive time known — don't invent one
+  seriesPush(s, value, 0, rxMs);
+}
+
 static void syncFromTelemetry(void) {
   G2RingTelemetry t;
   g2RingGetTelemetry(t);
   if (!t.connected) return;
-  const uint32_t ms = millis();
   // Ring timestamps live in the private cache; pass 0 and let value+time gate
   // dedupe — the notify path also calls g2HealthNoteSample with real ringTs.
-  if (t.hrValid)      seriesPush(&sHr,   (int16_t)t.hr,         0, ms);
-  if (t.hrvValid)     seriesPush(&sHrv,  t.hrv,                  0, ms);
-  if (t.spo2Valid)    seriesPush(&sSpo2, (int16_t)t.spo2,       0, ms);
-  if (t.tempValid)    seriesPush(&sTemp, t.tempTenths,           0, ms);
-  if (t.batteryValid) seriesPush(&sBat,  (int16_t)t.battery,    0, ms);
+  // *RxMs (not *AgeSec) is mandatory here: ringSampleAgeSec prefers the ring
+  // epoch, which custody steps both directions, and a ring running ahead pins
+  // its age at 0 — which would resurrect the phantom appends above.
+  if (t.hrValid)      syncPush(&sHr,   (int16_t)t.hr,      t.hrRxMs);
+  if (t.hrvValid)     syncPush(&sHrv,  t.hrv,              t.hrvRxMs);
+  if (t.spo2Valid)    syncPush(&sSpo2, (int16_t)t.spo2,    t.spo2RxMs);
+  if (t.tempValid)    syncPush(&sTemp, t.tempTenths,       t.tempRxMs);
+  if (t.batteryValid) syncPush(&sBat,  (int16_t)t.battery, t.batteryRxMs);
 }
 
 const char* const* g2HealthMenuRows(size_t* count) {
@@ -286,11 +325,13 @@ const char* const* g2HealthMenuRows(size_t* count) {
     "Poll Now",
     "Toggle Track",
   };
+  // Rows carry no day claim — the ring's daily window is only "today" when
+  // its clock is real; the text panel shows the honest label (date / boot N).
   static const char* const trendRows[] = {
     "<- Health",
-    "HR today",
-    "HRV today",
-    "SpO2 today",
+    "HR",
+    "HRV",
+    "SpO2",
     "Refresh",
   };
   if (sNav == HEALTH_NAV_TRENDS) {
@@ -393,7 +434,7 @@ void g2HealthClearGraphPush(void) {
 
 void g2HealthAction(uint32_t rowIdx) {
   if (sNav == HEALTH_NAV_TRENDS) {
-    // 0 <- Health · 1 HR today · 2 HRV today · 3 SpO2 today · 4 Refresh
+    // 0 <- Health · 1 HR · 2 HRV · 3 SpO2 · 4 Refresh
     switch (rowIdx) {
       case 0:
         leaveTrendsNav();
@@ -656,25 +697,61 @@ static void drawVLine(int x, int y0, int y1, int shade) {
   for (int y = y0; y <= y1; y++) px(x, y, shade);
 }
 
-static void seriesGetOrdered(const HealthSeries* s, int16_t* out, size_t* outCount) {
-  size_t n = s->count;
-  *outCount = n;
-  if (n == 0) return;
-  size_t start = (s->head + HEALTH_HIST_CAP - n) % HEALTH_HIST_CAP;
-  for (size_t i = 0; i < n; i++) {
-    out[i] = s->buf[(start + i) % HEALTH_HIST_CAP].value;
+// Oldest-first walk over the ring buffer, indexed in place. The old version
+// copied 96 int16_t values into a caller stack array and discarded .ms, which
+// is exactly what the renderer needs for a time axis; a 96-byte draw-order
+// index costs less frame than the 192-byte value copy it replaces.
+static size_t seriesOrderedStart(const HealthSeries* s, size_t* outCount) {
+  const size_t n = s->count;
+  if (outCount) *outCount = n;
+  if (n == 0) return 0;
+  return (s->head + HEALTH_HIST_CAP - n) % HEALTH_HIST_CAP;
+}
+
+static inline const HealthSample& seriesAt(const HealthSeries* s, size_t start, size_t i) {
+  return s->buf[(start + i) % HEALTH_HIST_CAP];
+}
+
+// Unsigned modular age, so a millis() rollover inside the window needs no
+// special case (96 slots can never span the 49.7-day modulus). A stamp in the
+// future — benign race with the notify task writing buf[] — reads as "now"
+// rather than as a ~49.7-day age that would stretch the domain to a month.
+static constexpr uint32_t kAgePlausibleMs = 30u * 24u * 3600u * 1000u;
+
+static inline uint32_t sampleAgeMs(const HealthSeries* s, size_t start, size_t i,
+                                  uint32_t nowMs) {
+  const uint32_t age = (uint32_t)(nowMs - seriesAt(s, start, i).ms);
+  return (age > kAgePlausibleMs) ? 0u : age;
+}
+
+// Plot span snaps UP to a rung, so appending a sample doesn't re-space what is
+// already drawn — the picture only rescales when the trail outgrows its rung.
+// Roughly doubling on purpose: a finer ladder rescales more often (which is the
+// motion this removes) and each step compresses the trace by at most 2x.
+static const uint32_t kSpanRungsMs[] = {
+     30u*1000u,    60u*1000u,   120u*1000u,   240u*1000u,   480u*1000u,
+    900u*1000u,  1800u*1000u,  3600u*1000u,  7200u*1000u, 14400u*1000u,
+  28800u*1000u, 43200u*1000u, 86400u*1000u,172800u*1000u,345600u*1000u,
+ 604800u*1000u,
+};
+
+static uint32_t seriesSpanWindowMs(uint32_t spanMs) {
+  for (size_t i = 0; i < sizeof(kSpanRungsMs) / sizeof(kSpanRungsMs[0]); i++) {
+    if (spanMs <= kSpanRungsMs[i]) return kSpanRungsMs[i];
   }
+  return spanMs;  // past the ladder — exact fit rather than clipping
 }
 
 // Auto-scale Y from samples so small variations aren't flat against a
 // huge fixed axis (e.g. HR 72→78 on a 40–180 scale).
-static void seriesAutoY(const int16_t* vals, size_t n,
+static void seriesAutoY(const HealthSeries* s, size_t start, size_t n,
                         int16_t softMin, int16_t softMax,
                         int16_t minSpan, int16_t* outMin, int16_t* outMax) {
-  int16_t lo = vals[0], hi = vals[0];
+  int16_t lo = seriesAt(s, start, 0).value, hi = lo;
   for (size_t i = 1; i < n; i++) {
-    if (vals[i] < lo) lo = vals[i];
-    if (vals[i] > hi) hi = vals[i];
+    const int16_t v = seriesAt(s, start, i).value;
+    if (v < lo) lo = v;
+    if (v > hi) hi = v;
   }
   int16_t span = (int16_t)(hi - lo);
   if (span < minSpan) {
@@ -694,18 +771,19 @@ static void seriesAutoY(const int16_t* vals, size_t n,
   *outMax = hi;
 }
 
+static_assert(HEALTH_HIST_CAP <= 255, "drawSparkline draw-order index is uint8_t");
+
 static void drawSparkline(const HealthSeries* s, int x, int y, int w, int h,
                           int16_t softMin, int16_t softMax, int16_t minSpan,
                           int shade, int16_t* usedMin, int16_t* usedMax) {
   if (!s || s->count < 2 || w < 4 || h < 4) return;
 
-  int16_t vals[HEALTH_HIST_CAP];
   size_t n = 0;
-  seriesGetOrdered(s, vals, &n);
+  const size_t start = seriesOrderedStart(s, &n);
   if (n < 2) return;
 
   int16_t yMin = softMin, yMax = softMax;
-  seriesAutoY(vals, n, softMin, softMax, minSpan, &yMin, &yMax);
+  seriesAutoY(s, start, n, softMin, softMax, minSpan, &yMin, &yMax);
   if (usedMin) *usedMin = yMin;
   if (usedMax) *usedMax = yMax;
   if (yMax <= yMin) yMax = (int16_t)(yMin + 1);
@@ -716,31 +794,81 @@ static void drawSparkline(const HealthSeries* s, int x, int y, int w, int h,
   drawVLine(x, y, y + h - 1, 3);
   drawVLine(x + w - 1, y, y + h - 1, 3);
 
+  const uint32_t nowMs = millis();
+
+  // Draw order is TIME order, not insertion order: daily backfill appends
+  // records OLDER than the live samples already in the buffer, so an
+  // index-ordered polyline jumped from the newest live point back to the start
+  // of history. Sorting here makes the renderer correct for any insertion
+  // order, which is a stronger guarantee than an ingest-side prepend.
+  uint8_t order[HEALTH_HIST_CAP];
+  for (size_t i = 0; i < n; i++) order[i] = (uint8_t)i;
+  for (size_t i = 1; i < n; i++) {          // insertion sort, oldest first
+    const uint8_t v = order[i];
+    const uint32_t va = sampleAgeMs(s, start, v, nowMs);
+    size_t j = i;
+    while (j > 0 && sampleAgeMs(s, start, order[j - 1], nowMs) < va) {
+      order[j] = order[j - 1];
+      j--;
+    }
+    order[j] = v;
+  }
+
+  // X is elapsed time from the oldest sample over a rung-snapped window, so
+  // the mapping is independent of the render instant: an unchanged buffer
+  // reproduces the picture exactly, and an append inside the current rung
+  // moves nothing.
+  const uint32_t ageMax = sampleAgeMs(s, start, order[0], nowMs);
+  const uint32_t ageMin = sampleAgeMs(s, start, order[n - 1], nowMs);
+  const uint32_t spanMs = ageMax - ageMin;
+  // A zero span (degenerate daily payload, or one tick's worth of samples) has
+  // no domain at all — space those evenly so the trail is still legible.
+  const bool uniform      = (spanMs == 0);
+  const uint32_t windowMs = uniform ? 1u : seriesSpanWindowMs(spanMs);  // 1 = unused
+  const int plotW = w - 3;
+  constexpr int kDotMinGapPx = 4;
+
   int prevX = -1, prevY = -1;
-  for (size_t i = 0; i < n; i++) {
-    int px_ = x + 1 + (int)((int64_t)(w - 3) * (int)i / (int)(n - 1));
-    int clamped = vals[i];
+  for (size_t k = 0; k < n; k++) {
+    const size_t i = order[k];
+    int px_;
+    if (uniform) {
+      px_ = x + 1 + (int)((int64_t)plotW * (int)k / (int)(n - 1));
+    } else {
+      const uint32_t off = ageMax - sampleAgeMs(s, start, i, nowMs);
+      px_ = x + 1 + (int)((uint64_t)(uint32_t)plotW * off / windowMs);
+    }
+    int clamped = seriesAt(s, start, i).value;
     if (clamped < yMin) clamped = yMin;
     if (clamped > yMax) clamped = yMax;
-    int py = y + h - 2 - (int)((int64_t)(h - 3) * (clamped - yMin) / (yMax - yMin));
+    const int py = y + h - 2 - (int)((int64_t)(h - 3) * (clamped - yMin) / (yMax - yMin));
     if (prevX >= 0) {
-      int dx = px_ - prevX, dy = py - prevY;
-      int adx = dx < 0 ? -dx : dx;
-      int ady = dy < 0 ? -dy : dy;
+      if (px_ == prevX && py == prevY) continue;   // same pixel — nothing to add
+      const int dx = px_ - prevX, dy = py - prevY;
+      const int adx = dx < 0 ? -dx : dx;
+      const int ady = dy < 0 ? -dy : dy;
       int steps = adx > ady ? adx : ady;
       if (steps < 1) steps = 1;
-      for (int sstep = 0; sstep <= steps; sstep++) {
-        int xx = prevX + dx * sstep / steps;
-        int yy = prevY + dy * sstep / steps;
+      // From step 1: step 0 is the previous sample's own pixel, and repainting
+      // it at stroke shade was erasing that sample's bright dot.
+      for (int sstep = 1; sstep <= steps; sstep++) {
+        const int xx = prevX + dx * sstep / steps;
+        const int yy = prevY + dy * sstep / steps;
         px(xx, yy, shade);
         px(xx, yy + 1, shade);
-        if (shade > 2) px(xx + 1, yy, shade - 2);  // thicker stroke
+        // Thicken only runs that travel sideways; on a dense trail the segments
+        // are near-vertical min/max bars and widening those bleeds into the
+        // next sample's column.
+        if (shade > 2 && adx > 1) px(xx + 1, yy, shade - 2);
       }
     }
-    // Sample dots so sparse trails still read as a line graph.
-    px(px_, py, 15);
-    px(px_ + 1, py, 12);
-    px(px_, py + 1, 12);
+    // Sample dots so sparse trails still read as a line graph; suppressed on a
+    // dense trail where every column would otherwise be a dot.
+    if (prevX < 0 || px_ - prevX >= kDotMinGapPx) {
+      px(px_, py, 15);
+      px(px_ + 1, py, 12);
+      px(px_, py + 1, 12);
+    }
     prevX = px_;
     prevY = py;
   }
@@ -999,7 +1127,7 @@ static void healthTwoCol(char* out, size_t cap,
 
 static void fmtHmUtc(char* out, size_t cap, uint32_t ts) {
   if (!out || !cap) return;
-  if (ts < 1600000000u) {
+  if (!Clock::isValidEpoch((time_t)ts)) {
     snprintf(out, cap, "--:--");
     return;
   }
@@ -1007,6 +1135,26 @@ static void fmtHmUtc(char* out, size_t cap, uint32_t ts) {
   struct tm tm;
   gmtime_r(&t, &tm);
   snprintf(out, cap, "%02d:%02d", tm.tm_hour, tm.tm_min);
+}
+
+// Day identity for the Trends views. A valid epoch renders as "Jul 29";
+// anything else (dark host + dark/never-synced ring) falls back to the boot
+// counter — "boot 123" — the only honest day identity a dark boot has.
+// Mirrors the sensor-capture naming scheme (boot-<N>/ folders, retro-dated
+// by System_TimeAnchors once real time arrives).
+static void fmtTrendDayLabel(char* out, size_t cap, uint32_t ts) {
+  if (!out || !cap) return;
+  if (Clock::isValidEpoch((time_t)ts)) {
+    static const char* const kMon[] = {"Jan", "Feb", "Mar", "Apr",
+                                       "May", "Jun", "Jul", "Aug",
+                                       "Sep", "Oct", "Nov", "Dec"};
+    time_t t = (time_t)ts;
+    struct tm tm;
+    gmtime_r(&t, &tm);
+    snprintf(out, cap, "%s %d", kMon[tm.tm_mon], tm.tm_mday);
+  } else {
+    snprintf(out, cap, "boot %lu", (unsigned long)gBootCounter);
+  }
 }
 
 static void fmtTrendLine(char* out, size_t cap, const char* tag, const TrendMeta* m) {
@@ -1035,14 +1183,24 @@ void g2HealthBuildTrendsOverviewText(char* out, size_t cap) {
   fmtTrendLine(hr, sizeof(hr), "HR", &sTrendMetaHr);
   fmtTrendLine(hrv, sizeof(hrv), "HRV", &sTrendMetaHrv);
   fmtTrendLine(spo2, sizeof(spo2), "O2", &sTrendMetaSpo2);
+  // Day identity: freshest valid ring day-window end across the metas; when
+  // none, local now — which itself degrades to "boot N" when the host is
+  // dark too (fmtTrendDayLabel).
+  uint32_t dayTs = 0;
+  if (sTrendMetaHr.have   && sTrendMetaHr.endTs   > dayTs) dayTs = sTrendMetaHr.endTs;
+  if (sTrendMetaHrv.have  && sTrendMetaHrv.endTs  > dayTs) dayTs = sTrendMetaHrv.endTs;
+  if (sTrendMetaSpo2.have && sTrendMetaSpo2.endTs > dayTs) dayTs = sTrendMetaSpo2.endTs;
+  if (!Clock::isValidEpoch((time_t)dayTs)) dayTs = (uint32_t)time(nullptr);
+  char day[16];
+  fmtTrendDayLabel(day, sizeof(day), dayTs);
   const bool fetching = (sDailyQueueIdx < sDailyQueueLen);
   snprintf(out, cap,
-           "Trends (today)\n"
+           "Trends (%s)\n"
            "%s\n"
            "%s\n"
            "%s\n"
            "%s",
-           hr, hrv, spo2,
+           day, hr, hrv, spo2,
            fetching ? "Fetching..." : "Tap metric / Refresh");
 }
 
@@ -1065,14 +1223,22 @@ void g2HealthBuildMetricText(char* out, size_t cap) {
   if (sNav == HEALTH_NAV_TRENDS) {
     const HealthSeries* s = trendSeriesFor(sSelected);
     const TrendMeta* meta = trendMetaFor(sSelected);
-    const char* title = "Today";
+    const char* tag = "";
     const char* unit = "";
     switch (sSelected) {
-      case HEALTH_METRIC_HR:   title = "HR today";  unit = " bpm"; break;
-      case HEALTH_METRIC_HRV:  title = "HRV today"; unit = " ms";  break;
-      case HEALTH_METRIC_SPO2: title = "SpO2 today"; unit = "%";   break;
+      case HEALTH_METRIC_HR:   tag = "HR";   unit = " bpm"; break;
+      case HEALTH_METRIC_HRV:  tag = "HRV";  unit = " ms";  break;
+      case HEALTH_METRIC_SPO2: tag = "SpO2"; unit = "%";    break;
       default: break;
     }
+    // Honest day label: the payload's own window end when it carries a real
+    // date, else local now / "boot N" (fmtTrendDayLabel).
+    uint32_t dayTs = (meta && meta->have) ? meta->endTs : 0;
+    if (!Clock::isValidEpoch((time_t)dayTs)) dayTs = (uint32_t)time(nullptr);
+    char day[16];
+    fmtTrendDayLabel(day, sizeof(day), dayTs);
+    char title[28];
+    snprintf(title, sizeof(title), "%s %s", tag, day);
     char nbuf[16];
     snprintf(nbuf, sizeof(nbuf), "n=%u", (unsigned)(meta && meta->have ? meta->count : 0));
     char val[28];
@@ -1090,7 +1256,9 @@ void g2HealthBuildMetricText(char* out, size_t cap) {
     } else {
       snprintf(win, sizeof(win), "no data");
     }
-    char line1[48], line2[48];
+    // Sized for healthTwoCol's compiler-visible worst case (kTotalW pad +
+    // both columns maxed); real lines stay ≤ ~44 chars.
+    char line1[76], line2[100];
     healthTwoCol(line1, sizeof(line1), title, nbuf);
     healthTwoCol(line2, sizeof(line2), val, win);
     if (s && meta && s->count >= 2) {
@@ -1114,7 +1282,7 @@ void g2HealthBuildMetricText(char* out, size_t cap) {
                &valid, &ageSec, &tenths);
   (void)softMin; (void)softMax; (void)minSpan;
 
-  char val[28];
+  char val[32];  // fmtValAge worst case: base[20] + " · " + age[8]
   if (tenths) fmtTempAge(val, sizeof(val), valid, cur, ageSec);
   else        fmtValAge(val, sizeof(val), valid, cur, unit, ageSec);
 
@@ -1130,7 +1298,8 @@ void g2HealthBuildMetricText(char* out, size_t cap) {
   char nbuf[16];
   snprintf(nbuf, sizeof(nbuf), "n=%u", (unsigned)(s ? s->count : 0));
 
-  char line1[48], line2[48];
+  // Sized for healthTwoCol's compiler-visible worst case, as above.
+  char line1[76], line2[104];
   //   Heart Rate              n=24
   //   72 bpm · 3m         TRACK on / Polling... / Updated
   healthTwoCol(line1, sizeof(line1), title, nbuf);

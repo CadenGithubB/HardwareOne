@@ -60,8 +60,9 @@ constexpr size_t LOG_EVENT_STREAM_CAP = 256 * 1024;  // 256KB ring-derived struc
 // Time sync marker flag
 extern bool gTimeSyncedMarkerWritten;
 
-// Time sync logging
-void logTimeSyncedMarkerIfReady();
+// Time sync logging. `source` names who supplied the clock ("ntp", "rtc",
+// "ring", "manual", "carryover") for the forensic marker line.
+void logTimeSyncedMarkerIfReady(const char* source);
 
 // Always-on per-boot orientation divider, written to the login/i2c/error logs
 // regardless of NTP. system-events.log is skipped (it gets [EVENT][BOOT]). Call

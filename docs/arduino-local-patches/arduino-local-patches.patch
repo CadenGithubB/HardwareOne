@@ -1,0 +1,549 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index ada008773..b1314b66d 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -89,7 +89,7 @@ set(ARDUINO_ALL_LIBRARIES
+   EEPROM
+   ESP_I2S
+   ESP_NOW
+-  ESP_SR
++  # ESP_SR - Disabled: using custom System_ESPSR.cpp implementation (Arduino library has API incompatibility)
+   ESP_HostedOTA
+   ESPmDNS
+   Ethernet
+@@ -381,8 +381,8 @@ endforeach()
+ set(includedirs variants/${CONFIG_ARDUINO_VARIANT}/ cores/esp32/ ${ARDUINO_LIBRARIES_INCLUDEDIRS})
+ set(srcs ${CORE_SRCS} ${ARDUINO_LIBRARIES_SRCS})
+ set(priv_includes cores/esp32/libb64)
+-set(requires spi_flash esp_partition mbedtls wpa_supplicant esp_adc esp_eth http_parser esp_ringbuf esp_driver_gptimer esp_driver_usb_serial_jtag driver esp_http_client esp_https_ota)
+-set(priv_requires fatfs nvs_flash app_update spiffs bootloader_support bt esp_hid usb esp_psram ${ARDUINO_LIBRARIES_REQUIRES})
++set(requires spi_flash esp_partition mbedtls wpa_supplicant esp_adc esp_eth http_parser esp_ringbuf esp_driver_gptimer esp_driver_usb_serial_jtag driver esp_http_client esp_https_ota bt esp_wifi)
++set(priv_requires fatfs nvs_flash app_update spiffs bootloader_support esp_hid usb esp_psram ${ARDUINO_LIBRARIES_REQUIRES})
+ 
+ if(NOT CONFIG_ARDUINO_SELECTIVE_COMPILATION OR CONFIG_ARDUINO_SELECTIVE_OpenThread)
+   #if(CONFIG_SOC_IEEE802154_SUPPORTED) # Does not work!
+@@ -406,12 +406,27 @@ endif()
+ 
+ string(TOUPPER ${CONFIG_ARDUINO_VARIANT} idf_target_caps)
+ string(REPLACE "-" "_" idf_target_for_macro "${idf_target_caps}")
++
++if(CONFIG_ARDUINO_USB_CDC_ON_BOOT)
++    set(arduino_usb_cdc_on_boot 1)
++else()
++    set(arduino_usb_cdc_on_boot 0)
++endif()
++
++if(DEFINED CONFIG_ARDUINO_USB_MODE)
++    set(arduino_usb_mode ${CONFIG_ARDUINO_USB_MODE})
++else()
++    set(arduino_usb_mode 0)
++endif()
++
+ target_compile_options(${COMPONENT_TARGET} PUBLIC
+     -DARDUINO=10812
+     -DARDUINO_${idf_target_for_macro}_DEV
+     -DARDUINO_ARCH_ESP32
+     -DARDUINO_BOARD="${idf_target_caps}_DEV"
+     -DARDUINO_VARIANT="${CONFIG_ARDUINO_VARIANT}"
++    -DARDUINO_USB_CDC_ON_BOOT=${arduino_usb_cdc_on_boot}
++    -DARDUINO_USB_MODE=${arduino_usb_mode}
+     -DESP32=ESP32)
+ 
+ if(CONFIG_AUTOSTART_ARDUINO)
+diff --git a/Kconfig.projbuild b/Kconfig.projbuild
+index a2761749e..5e9bdaafe 100644
+--- a/Kconfig.projbuild
++++ b/Kconfig.projbuild
+@@ -28,6 +28,16 @@ config AUTOSTART_ARDUINO
+         If disabled, you can call initArduino() to run any preparations
+         required by the framework
+ 
++config ARDUINO_USB_CDC_ON_BOOT
++    bool "USB CDC On Boot"
++    default y if SOC_USB_OTG_SUPPORTED
++    default n
++
++config ARDUINO_USB_MODE
++    int "USB Mode (0=USB-OTG (TinyUSB), 1=Hardware CDC and JTAG)"
++    default 1 if SOC_USB_SERIAL_JTAG_SUPPORTED
++    default 0
++
+ choice ARDUINO_RUNNING_CORE
+     bool "Core on which Arduino's setup() and loop() are running"
+     default ARDUINO_RUN_CORE0 if FREERTOS_UNICORE
+diff --git a/idf_component.yml b/idf_component.yml
+index fc83e00af..20cbc19e4 100644
+--- a/idf_component.yml
++++ b/idf_component.yml
+@@ -53,56 +53,56 @@ dependencies:
+   espressif/mdns:
+     version: "^1.2.3"
+     require: public
+-  espressif/esp_modem:
+-    version: "^2.0.0"
+-  espressif/esp-zboss-lib:
+-    version: "==1.6.4" # compatible with esp-zigbee-lib 1.6.8
+-    require: public
+-    rules:
+-      - if: "target not in [esp32c2, esp32c61, esp32p4]"
+-  espressif/esp-zigbee-lib:
+-    version: "==1.6.8"
+-    require: public
+-    rules:
+-      - if: "target not in [esp32c2, esp32c61, esp32p4]"
+-  espressif/esp-dsp:
+-    version: "^1.3.4"
+-    rules:
+-      - if: "target not in [esp32c2, esp32c61]"
++  # espressif/esp_modem:
++  #   version: "^2.0.0"
++  # espressif/esp-zboss-lib:
++  #   version: "==1.6.4" # compatible with esp-zigbee-lib 1.6.8
++  #   require: public
++  #   rules:
++  #     - if: "target not in [esp32c2, esp32c61, esp32p4]"
++  # espressif/esp-zigbee-lib:
++  #   version: "==1.6.8"
++  #   require: public
++  #   rules:
++  #     - if: "target not in [esp32c2, esp32c61, esp32p4]"
++  # espressif/esp-dsp:
++  #   version: "^1.3.4"
++  #   rules:
++  #     - if: "target not in [esp32c2, esp32c61]"
+   # RainMaker Start (Fixed versions, because Matter supports only Insights 1.0.1)
+-  espressif/network_provisioning:
+-    version: "1.0.2"
+-    rules:
+-      - if: "target != esp32c2"
+-  espressif/esp_rainmaker:
+-    version: "1.5.2"
+-    rules:
+-      - if: "target not in [esp32c2, esp32p4]"
+-  espressif/rmaker_common:
+-    version: "1.4.6"
+-    rules:
+-      - if: "target not in [esp32c2, esp32p4]"
+-  espressif/esp_insights:
+-    version: "1.2.2"
+-    rules:
+-      - if: "target not in [esp32c2, esp32p4]"
++  # espressif/network_provisioning:
++  #   version: "1.0.2"
++  #   rules:
++  #     - if: "target != esp32c2"
++  # espressif/esp_rainmaker:
++  #   version: "1.5.2"
++  #   rules:
++  #     - if: "target not in [esp32c2, esp32p4]"
++  # espressif/rmaker_common:
++  #   version: "1.4.6"
++  #   rules:
++  #     - if: "target not in [esp32c2, esp32p4]"
++  # espressif/esp_insights:
++  #   version: "1.2.2"
++  #   rules:
++  #     - if: "target not in [esp32c2, esp32p4]"
+   # New version breaks esp_insights 1.0.1
+-  espressif/esp_diag_data_store:
+-    version: "1.0.2"
+-    rules:
+-      - if: "target not in [esp32c2, esp32p4]"
+-  espressif/esp_diagnostics:
+-    version: "1.2.1"
+-    rules:
+-      - if: "target not in [esp32c2, esp32p4]"
+-  espressif/cbor:
+-    version: "0.6.1~4"
+-    rules:
+-      - if: "target not in [esp32c2, esp32p4]"
+-  espressif/qrcode:
+-    version: "0.1.0~2"
+-    rules:
+-      - if: "target not in [esp32c2, esp32p4]"
++  # espressif/esp_diag_data_store:
++  #   version: "1.0.2"
++  #   rules:
++  #     - if: "target not in [esp32c2, esp32p4]"
++  # espressif/esp_diagnostics:
++  #   version: "1.2.1"
++  #   rules:
++  #     - if: "target not in [esp32c2, esp32p4]"
++  # espressif/cbor:
++  #   version: "0.6.1~4"
++  #   rules:
++  #     - if: "target not in [esp32c2, esp32p4]"
++  # espressif/qrcode:
++  #   version: "0.1.0~2"
++  #   rules:
++  #     - if: "target not in [esp32c2, esp32p4]"
+   # RainMaker End
+   espressif/esp-sr:
+     version: "^2.1.5"
+@@ -119,18 +119,18 @@ dependencies:
+   espressif/libsodium:
+     version: "^1.0.20~1"
+     require: public
+-  espressif/esp-modbus:
+-    version: "^1.0.15"
+-    require: public
++  # espressif/esp-modbus:
++  #   version: "^1.0.15"
++  #   require: public
+   joltwallet/littlefs:
+     version: "^1.10.2"
+   chmorgan/esp-libhelix-mp3:
+     version: "1.0.3"
+     require: public
+-  espressif/lan867x:
+-    version: "^2.0.0"
+-    rules:
+-      - if: "target in [esp32, esp32p4]"
++  # espressif/lan867x:
++  #   version: "^2.0.0"
++  #   rules:
++  #     - if: "target in [esp32, esp32p4]"
+ examples:
+   - path: ./idf_component_examples/hello_world
+   - path: ./idf_component_examples/hw_cdc_hello_world
+diff --git a/libraries/BLE/src/BLEClient.cpp b/libraries/BLE/src/BLEClient.cpp
+index 808614ba5..8ce5f423e 100644
+--- a/libraries/BLE/src/BLEClient.cpp
++++ b/libraries/BLE/src/BLEClient.cpp
+@@ -352,13 +352,16 @@ bool BLEClient::setMTU(uint16_t mtu) {
+   log_v(">> setMTU: %d", mtu);
+   esp_err_t err = ESP_OK;
+ 
+-#ifdef CONFIG_BLUEDROID_ENABLED
+-  err = esp_ble_gatt_set_local_mtu(mtu);  //First must set local MTU value.
+-#endif
+-
+-#if defined(CONFIG_NIMBLE_ENABLED)
+-  err = ble_att_set_preferred_mtu(mtu);
+-#endif
++  // [hardwareone local patch 2026-07-28] Never lower the process-global local
++  // ATT MTU. esp_ble_gatt_set_local_mtu is not per-connection; ring's old
++  // setMTU(64) shrunk the ESP ceiling so later glasses discovery rejected
++  // ATT PDUs ("pkt size: 102, PDU size: 64"). Raise-only here; the peer can
++  // still cap *this* link via the exchange below. Also do not stamp m_mtu to
++  // the request — ESP_GATTC_CFG_MTU_EVT owns the negotiated value.
++  const uint16_t curLocal = BLEDevice::getMTU();
++  if (mtu > curLocal) {
++    err = BLEDevice::setMTU(mtu);  // esp_ble_gatt_set_local_mtu + m_localMTU
++  }
+ 
+   if (err == ESP_OK) {
+ #ifdef CONFIG_BLUEDROID_ENABLED
+@@ -379,8 +382,6 @@ bool BLEClient::setMTU(uint16_t mtu) {
+   }
+   log_v("<< setMTU");
+ 
+-  m_mtu = mtu;  //successfully changed
+-
+   return true;
+ }
+ 
+@@ -433,10 +434,24 @@ bool BLEClient::connect(BLEAddress address, uint8_t type, uint32_t timeoutMs) {
+   if (errRc != ESP_OK) {
+     log_e("esp_ble_gattc_app_register: rc=%d %s", errRc, GeneralUtils::errorToString(errRc));
+     BLEDevice::removePeerDevice(m_appId, true);
++    // [hardwareone local patch 2026-07-27] Release the semaphore taken above.
++    // Upstream leaks it here, so a single failed app_register wedged every
++    // later connect() on this client inside take(). See the same patch in
++    // BLERemoteCharacteristic::writeValue for the full rationale.
++    m_semaphoreRegEvt.give();
+     return false;
+   }
+ 
+-  uint32_t rc = m_semaphoreRegEvt.wait("connect");
++  // [hardwareone local patch 2026-07-28] Bounded wait. REG_EVT is host-local
++  // and normally arrives within ms; if Bluedroid ever fails to deliver it the
++  // old unbounded wait() wedged the caller — and the shared BLE-connect worker
++  // task with it — forever. 10s is orders of magnitude past normal.
++  if (!m_semaphoreRegEvt.timedWait("connect", 10000)) {
++    log_e("connect: REG_EVT never arrived (10s) — aborting");
++    BLEDevice::removePeerDevice(m_appId, true);
++    return false;
++  }
++  uint32_t rc = m_semaphoreRegEvt.value();
+ 
+   if (rc != ESP_GATT_OK) {
+     // fixes ESP_GATT_NO_RESOURCES error mostly
+@@ -461,6 +476,10 @@ bool BLEClient::connect(BLEAddress address, uint8_t type, uint32_t timeoutMs) {
+   if (errRc != ESP_OK) {
+     log_e("esp_ble_gattc_open: rc=%d %s", errRc, GeneralUtils::errorToString(errRc));
+     BLEDevice::removePeerDevice(m_appId, true);
++    // [hardwareone local patch 2026-07-27] Same leak as the app_register path
++    // above — release m_semaphoreOpenEvt or every later connect() on this
++    // client blocks forever at line 454.
++    m_semaphoreOpenEvt.give();
+     return false;
+   }
+ 
+@@ -472,8 +491,13 @@ bool BLEClient::connect(BLEAddress address, uint8_t type, uint32_t timeoutMs) {
+     esp_ble_gattc_app_unregister(m_gattc_if);
+     m_gattc_if = ESP_GATT_IF_NONE;
+   }
+-  log_v("<< connect(), rc=%d", rc == ESP_GATT_OK);
+-  return rc == ESP_GATT_OK;
++  log_v("<< connect(), rc=%d", got_sem && rc == ESP_GATT_OK);
++  // [hardwareone local patch 2026-07-28] On timeout (!got_sem) `rc` is stale —
++  // value() reports whatever the last give() stored (0 on a fresh client), so
++  // `rc == ESP_GATT_OK` alone could report success with no link. Unreachable
++  // upstream (default timeout is portMAX_DELAY) but live once callers pass a
++  // finite timeout.
++  return got_sem && rc == ESP_GATT_OK;
+ }  // connect
+ 
+ /**
+@@ -539,6 +563,13 @@ void BLEClient::gattClientEventHandler(esp_gattc_cb_event_t event, esp_gatt_if_t
+       BLEDevice::removePeerDevice(m_appId, true);
+       // Reset security state on disconnect
+       BLESecurity::resetSecurity();
++      // [hardwareone local patch 2026-07-28] Clear per-connection state.
++      // Upstream leaves m_conn_id/m_mtu holding the dead link's values; on a
++      // reused client the stale conn_id can match the NEXT link's id in
++      // CONNECT_EVT and auto-fire a duplicate Exchange MTU Request (a GATT
++      // once-per-connection violation), and getMTU() reports the old link.
++      m_conn_id = ESP_GATT_IF_NONE;
++      m_mtu = 23;
+       if (m_wasConnected && m_pClientCallbacks != nullptr) {
+         m_pClientCallbacks->onDisconnect(this);
+       }
+@@ -555,13 +586,20 @@ void BLEClient::gattClientEventHandler(esp_gattc_cb_event_t event, esp_gatt_if_t
+     //
+     case ESP_GATTC_OPEN_EVT:
+     {
+-      m_conn_id = evtParam->open.conn_id;
++      // [hardwareone local patch 2026-07-28] Only latch conn_id on success.
++      // Upstream stamped it unconditionally, so a failed open left a stale id
++      // that could match a later link in CONNECT_EVT (same duplicate-MTU-req
++      // hazard as the DISCONNECT_EVT reset above). Nothing reads
++      // m_conn_id after a failed open: connect() resets m_gattc_if, which
++      // gates this whole handler.
+       if (evtParam->open.status == ESP_GATT_OK) {
++        m_conn_id = evtParam->open.conn_id;
+         m_isConnected = true;  // Flag us as connected.
+         if (m_pClientCallbacks != nullptr) {
+           m_pClientCallbacks->onConnect(this);
+         }
+       } else {
++        m_conn_id = ESP_GATT_IF_NONE;
+         log_e("Failed to connect, status=%s", GeneralUtils::errorToString(evtParam->open.status));
+       }
+       m_semaphoreOpenEvt.give(evtParam->open.status);
+@@ -577,6 +615,15 @@ void BLEClient::gattClientEventHandler(esp_gattc_cb_event_t event, esp_gatt_if_t
+     //
+     case ESP_GATTC_REG_EVT:
+     {
++      // [hardwareone local patch 2026-07-28] Only latch OUR registration.
++      // BLEDevice's dispatcher routes REG_EVT to every client whose gattc_if
++      // is still ESP_GATT_IF_NONE, so a parked client (e.g. one waiting to
++      // retry after a failed open) could capture ANOTHER client's gattc_if
++      // here and then mirror that client's OPEN/DISCONNECT events — firing
++      // ghost callbacks for a link it was never part of.
++      if (evtParam->reg.app_id != m_appId) {
++        break;
++      }
+       m_gattc_if = gattc_if;
+       // pass on the registration status result, in case of failure
+       m_semaphoreRegEvt.give(evtParam->reg.status);
+@@ -626,6 +673,12 @@ void BLEClient::gattClientEventHandler(esp_gattc_cb_event_t event, esp_gatt_if_t
+       esp_ble_gattc_cb_param_t *p_data = (esp_ble_gattc_cb_param_t *)evtParam;
+       if (p_data->search_cmpl.status != ESP_GATT_OK) {
+         log_e("search service failed, error status = %x", p_data->search_cmpl.status);
++        // [hardwareone local patch 2026-07-28] Deliver the failure to the
++        // getServices() waiter. Upstream broke out without giving the
++        // semaphore, wedging getServices() — and the shared BLE-connect
++        // worker — until a conn-id-matching disconnect happened to arrive
++        // (which a half-torn link never produces).
++        m_semaphoreSearchCmplEvt.give(p_data->search_cmpl.status);
+         break;
+       }
+ #ifndef ARDUINO_ARCH_ESP32
+@@ -703,10 +756,19 @@ std::map<std::string, BLERemoteService *> *BLEClient::getServices() {
+   m_semaphoreSearchCmplEvt.take("getServices");
+   if (errRc != ESP_OK) {
+     log_e("esp_ble_gattc_search_service: rc=%d %s", errRc, GeneralUtils::errorToString(errRc));
++    // [hardwareone local patch 2026-07-27] Release the semaphore taken at line
++    // 703 — upstream leaks it, wedging every later getServices() on this client.
++    m_semaphoreSearchCmplEvt.give();
+     return &m_servicesMap;
+   }
+   // If successful, remember that we now have services.
+-  m_haveServices = (m_semaphoreSearchCmplEvt.wait("getServices") == 0);
++  // [hardwareone local patch 2026-07-28] Bounded wait: a SEARCH_CMPL_EVT lost
++  // to a link dropping mid-discovery wedged this forever (the disconnect
++  // rescue is conn-id-gated and misses half-torn links). Discovery on a live
++  // link completes in well under 30s.
++  bool gotCmpl = m_semaphoreSearchCmplEvt.timedWait("getServices", 30000);
++  if (!gotCmpl) log_e("getServices: SEARCH_CMPL_EVT never arrived (30s)");
++  m_haveServices = gotCmpl && (m_semaphoreSearchCmplEvt.value() == 0);
+   log_v("<< getServices");
+   return &m_servicesMap;
+ }  // getServices
+diff --git a/libraries/BLE/src/BLEDevice.cpp b/libraries/BLE/src/BLEDevice.cpp
+index c184fada2..17b729532 100644
+--- a/libraries/BLE/src/BLEDevice.cpp
++++ b/libraries/BLE/src/BLEDevice.cpp
+@@ -394,6 +394,15 @@ void BLEDevice::init(String deviceName) {
+       ble_npl_time_delay(1);
+     }
+ #endif                   // CONFIG_NIMBLE_ENABLED
++#if defined(CONFIG_BLUEDROID_ENABLED)
++    // [hardwareone local patch 2026-07-28] Sync the cached local-MTU value with
++    // Bluedroid's actual boot state. gatt_default.local_mtu initializes to
++    // GATT_MAX_MTU_SIZE (517) at stack init, but m_localMTU stayed at its
++    // static-init 23 — so the raise-only guard in BLEClient::setMTU compared
++    // against a lie, and a "raise" of 23->N could silently LOWER the real
++    // global from 517 to N. No esp call needed; 517 is already the stack's value.
++    m_localMTU = 517;
++#endif
+     initialized = true;  // Set the initialization flag to ensure we are only initialized once.
+   }
+   vTaskDelay(200 / portTICK_PERIOD_MS);  // Delay for 200 msecs as a workaround to an apparent Arduino environment issue.
+diff --git a/libraries/BLE/src/BLERemoteCharacteristic.cpp b/libraries/BLE/src/BLERemoteCharacteristic.cpp
+index 70a91288a..7084b3bf5 100644
+--- a/libraries/BLE/src/BLERemoteCharacteristic.cpp
++++ b/libraries/BLE/src/BLERemoteCharacteristic.cpp
+@@ -238,6 +238,11 @@ void BLERemoteCharacteristic::registerForNotify(notify_callback notifyCallback,
+ 
+     if (errRc != ESP_OK) {
+       log_e("esp_ble_gattc_register_for_notify: rc=%d %s", errRc, GeneralUtils::errorToString(errRc));
++      // [hardwareone local patch 2026-07-28] Deliver the failure to the wait
++      // below — no REG_FOR_NOTIFY_EVT ever follows a failed call, so upstream
++      // blocked forever on a semaphore nothing would give (wedging the shared
++      // BLE-connect worker, which subscribes during connect).
++      m_semaphoreRegForNotifyEvt.give(errRc);
+     }
+ 
+     uint8_t val[] = {0x01, 0x00};
+@@ -256,6 +261,8 @@ void BLERemoteCharacteristic::registerForNotify(notify_callback notifyCallback,
+ 
+     if (errRc != ESP_OK) {
+       log_e("esp_ble_gattc_unregister_for_notify: rc=%d %s", errRc, GeneralUtils::errorToString(errRc));
++      // [hardwareone local patch 2026-07-28] Same as the register branch above.
++      m_semaphoreRegForNotifyEvt.give(errRc);
+     }
+ 
+     uint8_t val[] = {0x00, 0x00};
+@@ -265,7 +272,12 @@ void BLERemoteCharacteristic::registerForNotify(notify_callback notifyCallback,
+     }
+   }  // End Unregister
+ 
+-  m_semaphoreRegForNotifyEvt.wait("registerForNotify");
++  // [hardwareone local patch 2026-07-28] Bounded: a link dropping between the
++  // register call and its event left this waiting forever — DISCONNECT_EVT is
++  // never forwarded to this semaphore.
++  if (!m_semaphoreRegForNotifyEvt.timedWait("registerForNotify", 10000)) {
++    log_e("registerForNotify: REG_FOR_NOTIFY_EVT never arrived (10s)");
++  }
+ 
+ #endif
+ 
+@@ -596,6 +608,12 @@ String BLERemoteCharacteristic::readValue() {
+ 
+   if (errRc != ESP_OK) {
+     log_e("esp_ble_gattc_read_char: rc=%d %s", errRc, GeneralUtils::errorToString(errRc));
++    // [hardwareone local patch 2026-07-27] Same leak as writeValue() below —
++    // upstream returns without releasing the semaphore it took at the top, so
++    // one failed read permanently wedges every later read on this
++    // characteristic. Fixed here for the same reason, though the G2 hot path
++    // does not read.
++    m_semaphoreReadCharEvt.give();
+     return "";
+   }
+ 
+@@ -637,6 +655,20 @@ bool BLERemoteCharacteristic::writeValue(uint8_t *data, size_t length, bool resp
+ 
+   if (errRc != ESP_OK) {
+     log_e("esp_ble_gattc_write_char: rc=%d %s", errRc, GeneralUtils::errorToString(errRc));
++    // [hardwareone local patch 2026-07-27] Release the semaphore we took above.
++    // Upstream returns here without giving it back. It is a binary semaphore
++    // taken with portMAX_DELAY, and the only other givers are
++    // ESP_GATTC_WRITE_CHAR_EVT (which never fires — nothing was queued) and
++    // ESP_GATTC_DISCONNECT_EVT. So ONE failed write left this characteristic's
++    // write semaphore permanently taken and the NEXT writeValue() blocked
++    // forever inside take(), before reaching the IDF at all.
++    //
++    // Symptom this caused upstack: an image-burst write failure wedged the G2
++    // link until reboot. Our mitigation (abort burst, drain, retry) could not
++    // work — a drain does not un-leak a semaphore — and the retry then blocked
++    // while holding bleCentralTx + writeMutex, which is the
++    // "Heartbeat skipped — central TX busy" symptom.
++    m_semaphoreWriteCharEvt.give();
+     return false;
+   }
+ 
+diff --git a/libraries/BLE/src/BLERemoteDescriptor.cpp b/libraries/BLE/src/BLERemoteDescriptor.cpp
+index e7cd3af38..26a7feaf4 100644
+--- a/libraries/BLE/src/BLERemoteDescriptor.cpp
++++ b/libraries/BLE/src/BLERemoteDescriptor.cpp
+@@ -197,12 +197,22 @@ String BLERemoteDescriptor::readValue() {
+ 
+   if (errRc != ESP_OK) {
+     log_e("esp_ble_gattc_read_char: rc=%d %s", errRc, GeneralUtils::errorToString(errRc));
++    // [hardwareone local patch 2026-07-27] Release the semaphore taken above —
++    // upstream leaks it, wedging every later descriptor read. Same defect as
++    // BLERemoteCharacteristic::writeValue; see there for the full rationale.
++    m_semaphoreReadDescrEvt.give();
+     return "";
+   }
+ 
+   // Block waiting for the event that indicates that the read has completed.  When it has, the String found
+   // in m_value will contain our data.
+-  m_semaphoreReadDescrEvt.wait("readValue");
++  // [hardwareone local patch 2026-07-28] Bounded for the same reason as
++  // writeValue below — descriptors never see DISCONNECT_EVT, so a drop
++  // mid-read wedged this forever.
++  if (!m_semaphoreReadDescrEvt.timedWait("readValue", 10000)) {
++    log_e("readValue(descr): READ_DESCR_EVT never arrived (10s)");
++    return "";
++  }
+ 
+   log_v("<< readValue(): length: %d", m_value.length());
+   return m_value;
+@@ -233,11 +243,21 @@ bool BLERemoteDescriptor::writeValue(uint8_t *data, size_t length, bool response
+   );
+   if (errRc != ESP_OK) {
+     log_e("esp_ble_gattc_write_char_descr: %d", errRc);
++    // [hardwareone local patch 2026-07-28] Same leak family as readValue above
++    // — upstream left the semaphore taken on a failed submit, wedging every
++    // later descriptor write (and the shared BLE-connect worker, which writes
++    // the CCCD during connect-time notify subscription).
++    m_semaphoreWriteDescrEvt.give();
++    return false;
+   }
+ 
+-  m_semaphoreWriteDescrEvt.wait("writeValue");
++  // [hardwareone local patch 2026-07-28] Bounded: DISCONNECT is never
++  // forwarded to descriptors, so a drop between issuing the write and its
++  // WRITE_DESCR_EVT wedged this forever.
++  bool gotEvt = m_semaphoreWriteDescrEvt.timedWait("writeValue", 10000);
++  if (!gotEvt) log_e("writeValue(descr): WRITE_DESCR_EVT never arrived (10s)");
+   log_v("<< writeValue");
+-  return (errRc == ESP_OK);
++  return gotEvt && (errRc == ESP_OK);
+ }  // writeValue
+ 
+ #endif
+diff --git a/libraries/Network/src/NetworkEvents.cpp b/libraries/Network/src/NetworkEvents.cpp
+index 195499c51..e302251f2 100644
+--- a/libraries/Network/src/NetworkEvents.cpp
++++ b/libraries/Network/src/NetworkEvents.cpp
+@@ -11,6 +11,15 @@
+ #include "esp_task.h"
+ #include "esp32-hal.h"
+ 
++// LOCAL MODIFICATION (hardwareone): stack depth is in BYTES on ESP-IDF
++// (StackType_t = uint8_t) — the upstream default is 4096 BYTES = 4 KB, not
++// "4096 words = 16 KB". An earlier cut to 2560 believed words (the 4x
++// footgun); the real result was a 2.5 KB stack that the
++// disconnect-while-connected handler chain (wifiEventLogger ->
++// logSystemEvent -> systemEventPost) overflowed on every wifi teardown.
++// The authoritative value is passed as -DARDUINO_NETWORK_EVENT_TASK_STACK_SIZE
++// from the tracked root CMakeLists.txt (this file is gitignored); this
++// default only matters if that define disappears. Keep both at 4096.
+ #ifndef ARDUINO_NETWORK_EVENT_TASK_STACK_SIZE
+ #define ARDUINO_NETWORK_EVENT_TASK_STACK_SIZE 4096
+ #endif

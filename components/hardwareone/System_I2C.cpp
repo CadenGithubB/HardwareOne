@@ -105,15 +105,13 @@ static bool isSensorCompiled(const I2CSensorEntry& sensor) {
   #if !ENABLE_OLED_INPUT
     if (strcmp(sensor.moduleName, "input") == 0) return false;
   #endif
-  // Legacy "gamepad" and "anoencoder" module names (pre-unification) — kept
-  // here so any external code path that still passes the old strings to
-  // isSensorConnected() / lookup helpers reports a sensible result.
-  #if !ENABLE_GAMEPAD_SENSOR
-    if (strcmp(sensor.moduleName, "gamepad") == 0) return false;
-  #endif
-  #if !ENABLE_ANO_ENCODER
-    if (strcmp(sensor.moduleName, "anoencoder") == 0) return false;
-  #endif
+  // (Removed: two branches matching sensor.moduleName against the pre-unification
+  //  "gamepad"/"anoencoder" names. This function filters TABLE ROWS, and no
+  //  i2cSensors[] row carries either name — every seesaw row is "input", handled
+  //  above. The removed comment claimed it kept callers passing the old strings
+  //  working, which was false twice over: those callers go through the unrelated
+  //  isSensorConnected(), and this helper is file-local. It is why the
+  //  isSensorConnected("gamepad") bug looked covered for so long.)
   #if !ENABLE_APDS_SENSOR
     if (strcmp(sensor.moduleName, "apds") == 0) return false;
   #endif
@@ -1718,19 +1716,10 @@ extern int thermalBuildSummaryJSON(char* buf, size_t bufSize);
 int sensorEnvelopeBegin(char* buf, size_t bufSize, bool valid, bool connected,
                         unsigned long lastUpdateMs) {
   if (!buf || bufSize == 0) return 0;
-  int n;
-  if (lastUpdateMs != 0) {
-    unsigned long now = millis();
-    unsigned long age = (now >= lastUpdateMs) ? (now - lastUpdateMs) : 0UL;
-    n = snprintf(buf, bufSize,
-                 "{\"valid\":%s,\"connected\":%s,\"ts\":%lu,\"age\":%lu",
-                 valid ? "true" : "false", connected ? "true" : "false",
-                 lastUpdateMs, age);
-  } else {
-    n = snprintf(buf, bufSize,
-                 "{\"valid\":%s,\"connected\":%s,\"ts\":0",
-                 valid ? "true" : "false", connected ? "true" : "false");
-  }
+  int n = snprintf(buf, bufSize,
+                   "{\"valid\":%s,\"connected\":%s,\"ts\":%lu",
+                   valid ? "true" : "false", connected ? "true" : "false",
+                   lastUpdateMs);
   // snprintf returns the would-be length; treat truncation or error as overflow
   // so the caller never writes past the end of the buffer.
   if (n < 0 || (size_t)n >= bufSize) { buf[0] = '\0'; return 0; }
@@ -1750,7 +1739,15 @@ static void addSensorEntry(JsonArray& arr, const char* id, const char* name,
   // provides a data builder. Parsed into the doc (copied) so the scratch buffer
   // is safe to reuse across sensors. Stream sensors (thermal) register a COMPACT
   // SUMMARY builder here — never their full frame — so the 1 KB scratch holds.
-  if (dataFn && enabled && connected) {
+  // Gate on `enabled` (LIVE running flag) only — deliberately NOT on `connected`.
+  // `connected` here is the boot-scan registry (isSensorConnected), refreshed only
+  // at boot and on manual `discover`. Gating on it meant a sensor hot-plugged and
+  // opened after boot had its reading SILENTLY DROPPED from `sensors json` — the
+  // entry reported connected:false with no `data` — until the next reboot/discover.
+  // If the sensor is running, its builder is authoritative: it emits its own LIVE
+  // `connected` and a valid:false envelope when the cache is stale, so a running-
+  // but-absent sensor degrades honestly instead of vanishing.
+  if (dataFn && enabled) {
     static char* dbuf = nullptr;
     if (!dbuf) dbuf = (char*)ps_alloc(1024, AllocPref::PreferPSRAM, "sensor.data.scratch");
     if (dbuf) {
@@ -1780,25 +1777,25 @@ static void buildSensorsJson(JsonDocument& doc, bool includeData = true) {
   doc["brief"] = !includeData;
   JsonArray arr = doc["sensors"].to<JsonArray>();
 #if ENABLE_PRESENCE_SENSOR
-  addSensorEntry(arr, "presence", "STHS34PF80 presence",    "scalar", gPresenceRunning, isSensorConnected("presence"), includeData ? presenceBuildDataJSON : nullptr);
+  addSensorEntry(arr, "presence", "STHS34PF80 presence",    SENSOR_KIND_SCALAR, gPresenceRunning, isSensorConnected("presence"), includeData ? presenceBuildDataJSON : nullptr);
 #endif
 #if ENABLE_TOF_SENSOR
-  addSensorEntry(arr, "tof",      "VL53L4CX distance",      "vector", gTofRunning, isSensorConnected("tof"), includeData ? tofBuildDataJSON : nullptr);
+  addSensorEntry(arr, "tof",      "VL53L4CX distance",      SENSOR_KIND_VECTOR, gTofRunning, isSensorConnected("tof"), includeData ? tofBuildDataJSON : nullptr);
 #endif
 #if ENABLE_IMU_SENSOR
-  addSensorEntry(arr, "imu",      "BNO055 orientation",     "vector", gImuRunning, isSensorConnected("imu"), includeData ? imuBuildDataJSON : nullptr);
+  addSensorEntry(arr, "imu",      "BNO055 orientation",     SENSOR_KIND_VECTOR, gImuRunning, isSensorConnected("imu"), includeData ? imuBuildDataJSON : nullptr);
 #endif
 #if ENABLE_GPS_SENSOR
-  addSensorEntry(arr, "gps",      "PA1010D GPS",            "vector", gGpsRunning, isSensorConnected("gps"), includeData ? gpsBuildDataJSON : nullptr);
+  addSensorEntry(arr, "gps",      "PA1010D GPS",            SENSOR_KIND_VECTOR, gGpsRunning, isSensorConnected("gps"), includeData ? gpsBuildDataJSON : nullptr);
 #endif
 #if ENABLE_FM_RADIO
-  addSensorEntry(arr, "fmradio",  "RDA5807 FM radio",       "scalar", gFmRadioRunning, isSensorConnected("fmradio"), includeData ? fmRadioBuildDataJSON : nullptr);
+  addSensorEntry(arr, "fmradio",  "RDA5807 FM radio",       SENSOR_KIND_SCALAR, gFmRadioRunning, isSensorConnected("fmradio"), includeData ? fmRadioBuildDataJSON : nullptr);
 #endif
 #if ENABLE_RTC_SENSOR
-  addSensorEntry(arr, "rtc",      "DS3231 RTC",             "scalar", gRtcRunning, isSensorConnected("rtc"), includeData ? rtcBuildDataJSON : nullptr);
+  addSensorEntry(arr, "rtc",      "DS3231 RTC",             SENSOR_KIND_SCALAR, gRtcRunning, isSensorConnected("rtc"), includeData ? rtcBuildDataJSON : nullptr);
 #endif
 #if ENABLE_APDS_SENSOR
-  addSensorEntry(arr, "apds",     "APDS9960 gesture/color", "scalar",
+  addSensorEntry(arr, "apds",     "APDS9960 gesture/color", SENSOR_KIND_SCALAR,
                  (gApdsColorRunning || gApdsProximityRunning || gApdsGestureRunning),
                  isSensorConnected("apds"), includeData ? apdsBuildDataJSON : nullptr);
 #endif
@@ -1806,10 +1803,10 @@ static void buildSensorsJson(JsonDocument& doc, bool includeData = true) {
   // id is "input" — the canonical, unified module name (Seesaw gamepad OR ANO
   // encoder). Matches controls json / open<id>/close<id> / sensorautostart /
   // the I2C DB moduleName, so the app correlates on one name with no overrides.
-  addSensorEntry(arr, "input",    "Seesaw gamepad",         "scalar", gInputRunning, gInputConnected, includeData ? gamepadBuildDataJSON : nullptr);
+  addSensorEntry(arr, "input",    "Seesaw gamepad",         SENSOR_KIND_SCALAR, gInputRunning, gInputConnected, includeData ? gamepadBuildDataJSON : nullptr);
 #endif
 #if ENABLE_THERMAL_SENSOR
-  addSensorEntry(arr, "thermal",  "MLX90640 thermal",       "stream", gThermalRunning, isSensorConnected("thermal"), includeData ? thermalBuildSummaryJSON : nullptr);
+  addSensorEntry(arr, "thermal",  "MLX90640 thermal",       SENSOR_KIND_STREAM, gThermalRunning, isSensorConnected("thermal"), includeData ? thermalBuildSummaryJSON : nullptr);
 #endif
 }
 
@@ -2431,7 +2428,28 @@ void sensorStatusBumpWith(const char* cause) {
 }
 
 const char* buildSensorStatusJson() {
-  // PSRAM buffer allocated once, reused forever (zero stack impact)
+  // PSRAM buffer allocated once, reused forever (zero stack impact).
+  //
+  // 2048 is deliberate and is NOT an oversight beside the 4096 used for the
+  // system-info JSON (WebServer_Events.cpp sysJsonBuf). The difference is that
+  // THIS document has no runtime-variable content: it is ~46 fixed top-level
+  // keys, at most 7 `<x>QueuePos` keys (the start queue is a mod-8 ring, so
+  // depth tops out at 7), and the `nonI2c` map over nonI2CSensors[], whose
+  // length is a compile-time array size. buildSystemInfoJson needs 4096 because
+  // it embeds connectivity.i2c.deviceList — an actually unbounded JsonArray of
+  // DISCOVERED devices (see System_Utils.cpp, "the only unbounded section").
+  //
+  // Measured serialized sizes: ~993 B on a gamepad+OLED build, ~1117 B during a
+  // boot storm with 7 sensors queued, ~1273 B in the worst configuration that
+  // can exist (full I2C set + camera + microphone registry entries) = 62% of
+  // this buffer. Growth is per-sensor-added-to-the-source (~60-80 B each for
+  // Running/Compiled/Queued/QueuePos), not per-device-plugged-in, so ~10 new
+  // sensors would have to land before this needs revisiting — and the guard
+  // below fails loudly with "status_too_large" rather than truncating.
+  //
+  // Callers must not assume a smaller ceiling: a consumer that copied this into
+  // a char[1200] silently truncated every send above 1170 B and, because the
+  // cut ate the SSE frame terminator, swallowed the NEXT event as well.
   static char* buf = nullptr;
   static const size_t kBufSize = 2048;
 
@@ -2588,7 +2606,15 @@ const char* buildSensorStatusJson() {
 #endif
 
   // Non-I2C sensors from registry (standardized format)
-  JsonObject sensors = doc["sensors"].to<JsonObject>();
+  // Key is "nonI2c", NOT "sensors" — `sensors json` (buildSensorsJson) already
+  // uses the key "sensors" for an ARRAY of {id,name,kind,enabled,connected,data},
+  // while this is a MAP keyed by id holding only {connected,enabled,task,mlModule}
+  // for the non-I2C registry (camera, microphone). Two endpoints publishing
+  // incompatible types under one key means no client can handle "sensors"
+  // generically. Renamed rather than reshaped because this map had zero readers —
+  // every consumer of /api/sensors/status reads the flat scalars (imuRunning,
+  // inputCompiled, ...), verified across Dashboard/Sensors/Maps/Games.
+  JsonObject sensors = doc["nonI2c"].to<JsonObject>();
   for (size_t i = 0; i < nonI2CSensorsCount; i++) {
     const NonI2CSensorEntry& s = nonI2CSensors[i];
     JsonObject sensorObj = sensors[s.id].to<JsonObject>();
@@ -3139,7 +3165,13 @@ void processAutoStartSensors() {
   
   #if ENABLE_GAMEPAD_SENSOR
   if (gSettings.inputEnabled && ramFlushResolve(RF_INPUT, gSettings.inputAutoStart)) {
-    if (isSensorAvailableForAutoStart("gamepad", I2C_DEVICE_INPUT)) {
+    // "input" (not the pre-unification "gamepad") — isSensorConnected matches
+    // against i2cSensors[].moduleName, and every seesaw row is named "input".
+    // Passing "gamepad" always missed the registry and fell through to the raw
+    // 0x50 ping, so a gamepad on the alt address 0x49 logged a false
+    // "not detected" + poisoned its ramflush bit. Keep in sync with
+    // ramFlushIdForModule() — it maps this exact string.
+    if (isSensorAvailableForAutoStart("input", I2C_DEVICE_INPUT)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing Gamepad sensor");
       enqueueDeviceStart(I2C_DEVICE_INPUT); autoStartQueued++;
     } else {

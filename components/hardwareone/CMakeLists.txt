@@ -184,6 +184,7 @@ set(hardwareone_srcs
         System_CLIConfirm.cpp
         System_SetupWizardMode.cpp
         System_Command.cpp
+        System_CrashRecord.cpp
         System_Debug.cpp
         System_ESPNow.cpp
         System_ESPNow_Crypto.cpp
@@ -217,6 +218,7 @@ set(hardwareone_srcs
         System_MemoryMonitor.cpp
         System_Hardware.cpp
         System_SensorLogging.cpp
+        System_CaptureCrypto.cpp
         System_SensorStubs.cpp
         System_RamFlush.cpp
         System_Settings.cpp
@@ -458,6 +460,20 @@ target_compile_options(${COMPONENT_LIB} PRIVATE
     -Wno-error=format-truncation
     -Wno-error=maybe-uninitialized
 )
+
+# ============================================================================
+# Crash-record panic interposition
+# ============================================================================
+# panic_handler.c calls esp_panic_handler() as a plain cross-TU call, so the
+# linker can interpose on it. System_CrashRecord.cpp defines
+# __wrap_esp_panic_handler(), stashes the crash detail in RTC memory, and then
+# tail-calls __real_esp_panic_handler() so the normal Guru Meditation output and
+# reboot are completely unchanged.
+#
+# This is what makes a field crash diagnosable at all: the panic banner goes to
+# UART and the device reboots in 0 s, so without this the most useful sentence
+# the firmware ever prints is lost unless someone happened to be on serial.
+target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=esp_panic_handler")
 
 # ============================================================================
 # Build-time guard: no raw LittleFS/SD file I/O outside System_VFS.cpp

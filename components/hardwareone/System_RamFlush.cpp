@@ -378,14 +378,17 @@ void ramFlushClearOverlay(void) {
 RamFlushFeatureId ramFlushIdForModule(const char* moduleName) {
   if (!moduleName) return RF_FEATURE_COUNT;
   // Names as passed to isSensorAvailableForAutoStart() (System_I2C.cpp:3002-3090).
-  // Note "gamepad" is the input device's module name.
+  // The input device's module name is "input" (post-unification) — it must match
+  // the string System_I2C.cpp passes to isSensorAvailableForAutoStart(), which is
+  // this function's only caller. A mismatch returns RF_FEATURE_COUNT and silently
+  // no-ops ramFlushMarkAutostartFailed().
   if (!strcmp(moduleName, "thermal"))  return RF_THERMAL;
   if (!strcmp(moduleName, "tof"))      return RF_TOF;
   if (!strcmp(moduleName, "imu"))      return RF_IMU;
   if (!strcmp(moduleName, "gps"))      return RF_GPS;
   if (!strcmp(moduleName, "fmradio"))  return RF_FMRADIO;
   if (!strcmp(moduleName, "apds"))     return RF_APDS;
-  if (!strcmp(moduleName, "gamepad"))  return RF_INPUT;
+  if (!strcmp(moduleName, "input"))    return RF_INPUT;
   if (!strcmp(moduleName, "rtc"))      return RF_RTC;
   if (!strcmp(moduleName, "presence")) return RF_PRESENCE;
   return RF_FEATURE_COUNT;
