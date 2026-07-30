@@ -191,6 +191,13 @@ if(_board_file)
                 continue()
             endif()
 
+            # A board-file "KEY=n" is satisfied by Kconfig's "# KEY is not set"
+            # form too - without this, an =n guard line would strip-and-rewrite
+            # sdkconfig on every configure.
+            if(_setting MATCHES "=n$" AND _sdk_contents MATCHES "(^|\n)# ${_key} is not set(\n|$)")
+                continue()
+            endif()
+
             # Strip existing value/notset forms of this key.
             string(REGEX REPLACE "(^|\n)${_key}=[^\n]*" "\\1" _sdk_contents "${_sdk_contents}")
             string(REGEX REPLACE "(^|\n)# ${_key} is not set" "\\1" _sdk_contents "${_sdk_contents}")
@@ -228,7 +235,7 @@ endif()
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
-set(PROJECT_VER "0.99.5")
+set(PROJECT_VER "0.99.6")
 project(hardwareone-idf)
 
 # Add board-specific defines based on target (must be AFTER project())

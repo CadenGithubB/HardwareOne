@@ -69,8 +69,14 @@ void WebMirrorBuf::append(const String& s, bool needNewline) {
     return;
   }
   
-  // Ensure space by trimming from front if required
-  while (len + need > cap) {
+  // Ensure space by trimming from front if required. The bound is `>= cap`,
+  // not `> cap`: buf holds exactly cap bytes, and the terminator below writes
+  // buf[len], so len must never reach cap. Exiting at len + need == cap wrote
+  // buf[cap] — one byte past the allocation, zeroing the low byte of the next
+  // TLSF block header. When that neighbour was an lwIP pcb (they are allocated
+  // right after this buffer in startHttpServer) its size field became 0 and the
+  // eventual free asserted !block_is_last, minutes or hours later.
+  while (len + need >= cap) {
     // remove up to and including first '\n' or at least 1 char
     int nl = -1;
     for (size_t i = 0; i < len; ++i) {
@@ -84,7 +90,7 @@ void WebMirrorBuf::append(const String& s, bool needNewline) {
     len -= drop;
     buf[len] = '\0';
   }
-  
+
   if (addNL) { buf[len++] = '\n'; }
   memcpy(buf + len, s.c_str(), slen);
   len += slen;
@@ -118,8 +124,10 @@ void WebMirrorBuf::appendDirect(const char* s, size_t slen, bool needNewline) {
     return;
   }
   
-  // Ensure space by trimming from front if required
-  while (len + need > cap) {
+  // Ensure space by trimming from front if required. `>= cap` for the same
+  // reason as the String overload above: len must stay below cap so the
+  // terminating buf[len] write lands inside the allocation.
+  while (len + need >= cap) {
     // remove up to and including first '\n' or at least 1 char
     int nl = -1;
     for (size_t i = 0; i < len; ++i) {
@@ -133,7 +141,7 @@ void WebMirrorBuf::appendDirect(const char* s, size_t slen, bool needNewline) {
     len -= drop;
     buf[len] = '\0';
   }
-  
+
   if (addNL) { buf[len++] = '\n'; }
   memcpy(buf + len, s, slen);
   len += slen;

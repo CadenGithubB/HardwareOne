@@ -1,0 +1,36 @@
+# Board overrides - Unexpected Maker FeatherS3, FLASH-ENCRYPTED variant.
+#
+# Identical hardware to boards/feathers3.defaults; the only difference is that
+# this build enables flash encryption (Development mode, XTS-AES-128,
+# device-generated key) plus NVS encryption. FIRST BOOT of this build on a
+# never-encrypted chip BURNS EFUSES AND ENCRYPTS THE FLASH IN PLACE - the unit
+# is then permanently a flash-encryption unit (SPI_BOOT_CRYPT_CNT allows ONE
+# disable and one final re-enable, ever). JTAG is also burned off on that boot.
+#
+# NEVER flash this build onto a board you do not intend to encrypt.
+#
+# After enablement, reflash with `idf.py encrypted-flash` (all images) or
+# `idf.py encrypted-app-flash` (app only). Plain `idf.py flash` produces a
+# harmless no-boot; recover with encrypted-flash.
+#
+# Activated by: HW_BOARD=feathers3_fe
+
+# HW_TARGET: esp32s3
+
+CONFIG_ARDUINO_VARIANT="um_feathers3"
+CONFIG_SPIRAM_MODE_QUAD=y
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+
+# --- Flash encryption (Development mode, device-generated key) ---
+CONFIG_SECURE_FLASH_ENC_ENABLED=y
+CONFIG_SECURE_FLASH_ENCRYPTION_AES128=y
+CONFIG_SECURE_FLASH_ENCRYPTION_MODE_DEVELOPMENT=y
+# NVS encryption defaults on with FE; explicit so the intent is visible.
+# Requires the nvs_key partition present in the partitions_*.csv layouts.
+CONFIG_NVS_ENCRYPTION=y
+
+# The FE bootloader is ~33K - over the 32K that fits below a 0x8000 partition
+# table. Move the table up 4K; the shared CSVs start nvs at 0xA000 so they
+# work with either table offset.
+CONFIG_PARTITION_TABLE_OFFSET=0x9000

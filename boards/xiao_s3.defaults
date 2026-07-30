@@ -22,3 +22,14 @@ CONFIG_SPIRAM_MODE_OCT=y
 # partition picker in CMakeLists.txt will pick partitions_*_16mb.csv.)
 CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
+
+# Guard: this board must NEVER build with flash encryption. Only the dedicated
+# feathers3_fe board enables it. The explicit =n makes the HW_BOARD
+# auto-recovery in CMakeLists.txt strip a stale =y left in sdkconfig by a
+# previous feathers3_fe build (a stale =y would silently produce a bootloader
+# that permanently encrypts whatever board it boots on).
+CONFIG_SECURE_FLASH_ENC_ENABLED=n
+
+# Keep the standard table offset (feathers3_fe moves it to 0x9000; the shared
+# CSVs start nvs at 0xA000 so both offsets work).
+CONFIG_PARTITION_TABLE_OFFSET=0x8000

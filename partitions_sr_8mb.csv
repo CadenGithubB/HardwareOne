@@ -10,9 +10,20 @@
 #          everything fit on the 8M chip.
 # LittleFS: 128K  (trimmed vs 172K so factory can grow for BLE 4.2 + app;
 #          logs/cache; bulk content on SD card.)
+# Flash-encryption prep (2026-07-30): nvs moved to 0xA000 and shrunk 24K->16K
+# to make room for BOTH a 4K nvs_key partition (XTS keys for NVS encryption,
+# mandatory in any CONFIG_SECURE_FLASH_ENC_ENABLED build) AND a partition
+# table at 0x9000 - the FE-enabled bootloader is ~33K, over the 32K ceiling a
+# 0x8000 table allows, so boards/feathers3_fe.defaults sets
+# CONFIG_PARTITION_TABLE_OFFSET=0x9000. Plain boards keep the table at 0x8000
+# and simply leave 0x8000-0xA000 slack; the same CSV serves both offsets.
+# littlefs (and model, where present) carry the `encrypted` flag - a
+# documented no-op without flash encryption. factory/littlefs offsets are
+# UNCHANGED; the nvs move reformats NVS once (saved WiFi creds re-enter).
 # Name,   Type, SubType, Offset,   Size,    Flags
-nvs,      data, nvs,     0x9000,   0x6000,
+nvs,      data, nvs,     0xA000,   0x4000,
+nvs_key,  data, nvs_keys, 0xE000,  0x1000,  encrypted
 phy_init, data, phy,     0xf000,   0x1000,
 factory,  app,  factory, 0x10000,  0x4E0000,
-model,    data, spiffs,  0x4F0000, 0x2F0000,
-littlefs, data, littlefs, 0x7E0000, 0x20000,
+model,    data, spiffs,  0x4F0000, 0x2F0000, encrypted
+littlefs, data, littlefs, 0x7E0000, 0x20000, encrypted

@@ -4953,11 +4953,31 @@ bool submitAndExecuteSync(const Command& cmd, String& out) {
   }
   
   DEBUG_CMD_FLOWF("[submitSync] queued '%.40s' waiting...", r->line);
+
+  // Publish "the httpd task is blocked on cmd_exec_task" for the duration of
+  // the wait. A command running on cmd_exec_task that tears down the HTTP
+  // server (closewifi, closehttp, radio power-off) must NOT call httpd_stop
+  // while this is non-zero: httpd_stop waits for the httpd task to exit, and
+  // that task is right here waiting for the command. See WebServer_Handle.h —
+  // httpServerStopSafe() defers the stop to the main loop instead.
+#if ENABLE_HTTP_SERVER
+  extern volatile int gWebCmdWaiters;
+  const char* selfTaskName = pcTaskGetName(nullptr);
+  const bool waiterIsHttpd = (selfTaskName && strcmp(selfTaskName, "httpd") == 0);
+  if (waiterIsHttpd) gWebCmdWaiters++;
+#endif
+
   // Timeout bumped from 10s → 60s to cover PBKDF2 (~12 s) and any other
   // long-running synchronous command. The bigger fix is the `abandoned`
   // flag below — even if a future command runs longer than 60 s, we no
   // longer free `r` from under cmd_exec_task. See ExecReq::abandoned.
-  if (xSemaphoreTake(r->done, pdMS_TO_TICKS(60000)) != pdTRUE) {
+  const BaseType_t syncTaken = xSemaphoreTake(r->done, pdMS_TO_TICKS(60000));
+
+#if ENABLE_HTTP_SERVER
+  if (waiterIsHttpd) gWebCmdWaiters--;
+#endif
+
+  if (syncTaken != pdTRUE) {
     Serial.printf("[DBG_CMD] [submitSync] TIMEOUT — abandoning r=%p line='%.60s'\n",
                   r, r->line);
     DEBUG_CMD_FLOWF("[submitSync] TIMEOUT for '%.40s' — handing ownership to cmd_exec_task",

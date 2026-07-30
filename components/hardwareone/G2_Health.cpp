@@ -607,9 +607,11 @@ static const char* healthGlyph(char c) {
     case 'a': return "..." "###" "#.#" "#.#" "###";
     case 'b': return "#.." "#.." "###" "#.#" "###";
     case 'c': return "..." "###" "#.." "#.." "###";
+    case 'd': return "..#" "..#" "###" "#.#" "###";
     case 'e': return "..." "###" "###" "#.." "###";
     case 'f': return ".##" ".#." "###" ".#." ".#.";
     case 'g': return "..." "###" "#.#" "###" "..#";
+    case 'h': return "#.." "#.." "###" "#.#" "#.#";
     case 'i': return ".#." "..." ".#." ".#." ".#.";
     case 'k': return "#.." "#.#" "##." "#.#" "#.#";
     case 'l': return "##." ".#." ".#." ".#." "###";
@@ -775,7 +777,12 @@ static_assert(HEALTH_HIST_CAP <= 255, "drawSparkline draw-order index is uint8_t
 
 static void drawSparkline(const HealthSeries* s, int x, int y, int w, int h,
                           int16_t softMin, int16_t softMax, int16_t minSpan,
-                          int shade, int16_t* usedMin, int16_t* usedMax) {
+                          int shade, int16_t* usedMin, int16_t* usedMax,
+                          uint32_t* outOldestAgeMs, uint32_t* outWindowMs) {
+  // Out-params default to "no time domain" so every early return leaves the
+  // caller's X axis suppressed rather than labelling stale values.
+  if (outOldestAgeMs) *outOldestAgeMs = 0;
+  if (outWindowMs)    *outWindowMs = 0;
   if (!s || s->count < 2 || w < 4 || h < 4) return;
 
   size_t n = 0;
@@ -825,6 +832,9 @@ static void drawSparkline(const HealthSeries* s, int x, int y, int w, int h,
   // no domain at all — space those evenly so the trail is still legible.
   const bool uniform      = (spanMs == 0);
   const uint32_t windowMs = uniform ? 1u : seriesSpanWindowMs(spanMs);  // 1 = unused
+  // For the X axis: window 0 = uniform spacing, nothing truthful to label.
+  if (outOldestAgeMs) *outOldestAgeMs = ageMax;
+  if (outWindowMs)    *outWindowMs = uniform ? 0u : windowMs;
   const int plotW = w - 3;
   constexpr int kDotMinGapPx = 4;
 
@@ -1014,12 +1024,123 @@ static void drawAxisLabel(int value, int rightX, int y, int shade, bool tenths) 
   drawTextScaled(buf, rightX - w, y, shade, kScale);
 }
 
+// ── X (time) axis ────────────────────────────────────────────────────────────
+
+// Elapsed-duration label: "15s" / "2m" / "7.5m" / "4h" / "3.5d". Not fmtAge:
+// that truncates (7.5m → "7m"), fine for a sample age, wrong for an axis mark
+// that claims a position. Rung values and their halves are exact in one
+// decimal everywhere the ladder can put a tick.
+static void fmtElapsedLabel(char* out, size_t cap, uint32_t ms) {
+  static const struct { uint32_t ms; char suffix; } kUnits[] = {
+    { 86400000u, 'd' }, { 3600000u, 'h' }, { 60000u, 'm' }, { 1000u, 's' },
+  };
+  for (size_t i = 0; i < sizeof(kUnits) / sizeof(kUnits[0]); i++) {
+    if (ms < kUnits[i].ms) continue;
+    const uint32_t whole = ms / kUnits[i].ms;
+    const uint32_t tenth = (ms % kUnits[i].ms) * 10u / kUnits[i].ms;
+    if (tenth == 0)
+      snprintf(out, cap, "%lu%c", (unsigned long)whole, kUnits[i].suffix);
+    else
+      snprintf(out, cap, "%lu.%lu%c", (unsigned long)whole,
+               (unsigned long)tenth, kUnits[i].suffix);
+    return;
+  }
+  snprintf(out, cap, "0");
+}
+
+// Hours:minutes into the ring's UTC day for Trends ("0:00" … "24:00"). 24:00
+// is deliberate: the right edge of a full ring day IS the next midnight, and
+// wrapping it to "0:00" would relabel the window's end as its start.
+static void fmtDayOffsetLabel(char* out, size_t cap, uint32_t secIntoDay) {
+  snprintf(out, cap, "%lu:%02lu",
+           (unsigned long)(secIntoDay / 3600u),
+           (unsigned long)((secIntoDay % 3600u) / 60u));
+}
+
+// Local wall-clock label for the live views. H:MM inside two days; the
+// multi-day rungs label M/D instead (an hour means nothing at 4 px per hour).
+static void fmtWallLabel(char* out, size_t cap, int64_t epochMs, uint32_t windowMs) {
+  time_t t = (time_t)(epochMs / 1000);
+  struct tm tm;
+  localtime_r(&t, &tm);
+  if (windowMs >= 48u * 3600u * 1000u)
+    snprintf(out, cap, "%d/%d", tm.tm_mon + 1, tm.tm_mday);
+  else
+    snprintf(out, cap, "%d:%02d", tm.tm_hour, tm.tm_min);
+}
+
+// Labels the plot WINDOW (left edge = oldest sample, right edge = oldest +
+// rung), never the trace tip: all three tick positions are constants, and the
+// text changes only when the data genuinely reframes (eviction, rung crossing,
+// backfill) — the same repaint-moves-nothing contract as the trace itself.
+// Every mode is a pure function of buffer + window, never of the render
+// instant:
+//
+//  - Trends (trendMeta != null): hours into the ring's UTC day, from the meta
+//    window. Trend .ms is FETCH-anchored (backfillSampleMs pins the newest
+//    record at the fetch instant), so wall time derived from .ms would print
+//    the fetch time; the meta is the only honest source. Skipped when the
+//    window fails backfill's own honoured-window gate — the trace was laid on
+//    the nominal 60 s ladder and day labels would misplace it.
+//  - Live, synced host, window ≥ 5 min: local wall clock. epochMillis() and
+//    millis() advance in lockstep, so epochNow − age is repaint-stable; it
+//    steps only when the clock itself steps (NTP / ring-clock custody), which
+//    is exactly when the frame SHOULD reframe.
+//  - Otherwise elapsed-from-start ("0 / 2h / 4h"): dark host, or a window too
+//    small for distinct H:MM marks. Anchored to the window start, not "now",
+//    so even a dark-host repaint stays pixel-identical.
+static void drawTimeAxis(int plotX, int plotW, int tickY, int labelY,
+                         uint32_t oldestAgeMs, uint32_t windowMs,
+                         const TrendMeta* trendMeta) {
+  if (windowMs == 0) return;  // uniform spacing — no time domain to label
+
+  // Real contents are ≤ 6 chars ("23:59", "59.9m", "12/31"); 24 covers the
+  // compiler's format-worst-case so -Wformat-truncation stays quiet.
+  char left[24], mid[24], right[24];
+  if (trendMeta) {
+    if (!trendMeta->have) return;
+    const uint32_t span = (trendMeta->endTs > trendMeta->startTs)
+                              ? (trendMeta->endTs - trendMeta->startTs) : 0;
+    if (span == 0 || span > kBackfillMaxSpanSec) return;  // .ms on 60 s ladder
+    if (!Clock::isValidEpoch((time_t)trendMeta->startTs)) return;
+    const uint32_t base = trendMeta->startTs % 86400u;
+    fmtDayOffsetLabel(left, sizeof(left), base);
+    fmtDayOffsetLabel(mid, sizeof(mid), base + windowMs / 2000u);
+    fmtDayOffsetLabel(right, sizeof(right), base + windowMs / 1000u);
+  } else if (Clock::isSynced() && windowMs >= 5u * 60u * 1000u) {
+    const int64_t leftEpochMs = Clock::epochMillis() - (int64_t)oldestAgeMs;
+    fmtWallLabel(left, sizeof(left), leftEpochMs, windowMs);
+    fmtWallLabel(mid, sizeof(mid), leftEpochMs + (int64_t)(windowMs / 2u), windowMs);
+    fmtWallLabel(right, sizeof(right), leftEpochMs + (int64_t)windowMs, windowMs);
+  } else {
+    snprintf(left, sizeof(left), "0");
+    fmtElapsedLabel(mid, sizeof(mid), windowMs / 2u);
+    fmtElapsedLabel(right, sizeof(right), windowMs);
+  }
+
+  // Tick stubs under the bottom border, mirroring the Y ticks' 6/5/6 shades.
+  const int midX = plotX + plotW / 2;
+  const int rightX = plotX + plotW - 1;
+  drawVLine(plotX, tickY, tickY + 2, 6);
+  drawVLine(midX, tickY, tickY + 2, 5);
+  drawVLine(rightX, tickY, tickY + 2, 6);
+
+  constexpr int kScale = 2;
+  constexpr int kAdvance = 3 * kScale + kScale;             // 8 px per glyph
+  const int wMid   = (int)strlen(mid) * kAdvance - kScale;  // drop last gap
+  const int wRight = (int)strlen(right) * kAdvance - kScale;
+  drawTextScaled(left, plotX, labelY, 14, kScale);
+  drawTextScaled(mid, midX - wMid / 2, labelY, 12, kScale);
+  drawTextScaled(right, rightX - wRight + 1, labelY, 14, kScale);
+}
+
 // Graph-only tile — title/value live in the native text pane above.
 // Y axis uses each metric's auto-scaled bounds (HR ≠ battery 0–100).
 static void composeMetricGraph(const HealthSeries* s,
                                int16_t softMin, int16_t softMax, int16_t minSpan,
                                bool tenthsAxis = false,
-                               const char* emptyHint = "Poll Now") {
+                               const char* emptyHint = "Poll Now",
+                               const TrendMeta* trendMeta = nullptr) {
   clearGrid(0);
   G2RingTelemetry t;
   g2RingGetTelemetry(t);
@@ -1041,17 +1162,20 @@ static void composeMetricGraph(const HealthSeries* s,
     return;
   }
 
-  // Left gutter for 2× Y labels (3 digits × 8 px ≈ 24); plot uses the rest.
+  // Left gutter for 2× Y labels (3 digits × 8 px ≈ 24); bottom strip for the
+  // 2× time axis (3 px tick stubs + 10 px labels); plot uses the rest.
   constexpr int kGutter = 34;
   constexpr int kPlotX  = kGutter;
   constexpr int kPlotY  = 4;
   constexpr int kPlotW  = HEALTH_TILE_W - kGutter - 4;
-  constexpr int kPlotH  = HEALTH_TILE_H - 8;
+  constexpr int kPlotH  = HEALTH_TILE_H - 22;  // was -8; 14 px ceded to X axis
   constexpr int kLabelH = 10;  // 5×2
 
   int16_t usedMin = softMin, usedMax = softMax;
+  uint32_t oldestAgeMs = 0, windowMs = 0;
   drawSparkline(s, kPlotX, kPlotY, kPlotW, kPlotH,
-                softMin, softMax, minSpan, 13, &usedMin, &usedMax);
+                softMin, softMax, minSpan, 13, &usedMin, &usedMax,
+                &oldestAgeMs, &windowMs);
 
   const int16_t mid = (int16_t)(usedMin + (usedMax - usedMin) / 2);
   const int labelRight = kGutter - 2;
@@ -1063,6 +1187,9 @@ static void composeMetricGraph(const HealthSeries* s,
   drawHLine(kPlotX, kPlotX + 3, kPlotY, 6);
   drawHLine(kPlotX, kPlotX + 3, kPlotY + kPlotH / 2, 5);
   drawHLine(kPlotX, kPlotX + 3, kPlotY + kPlotH - 1, 6);
+
+  drawTimeAxis(kPlotX, kPlotW, kPlotY + kPlotH, kPlotY + kPlotH + 5,
+               oldestAgeMs, windowMs, trendMeta);
 }
 
 static void metricParams(G2HealthMetric m,
@@ -1320,13 +1447,13 @@ static void composeGrid(void) {
   if (sNav == HEALTH_NAV_TRENDS) {
     switch (sSelected) {
       case HEALTH_METRIC_HR:
-        composeMetricGraph(&sTrendHr, 30, 200, 12, false, "Refresh");
+        composeMetricGraph(&sTrendHr, 30, 200, 12, false, "Refresh", &sTrendMetaHr);
         break;
       case HEALTH_METRIC_HRV:
-        composeMetricGraph(&sTrendHrv, 0, 250, 10, false, "Refresh");
+        composeMetricGraph(&sTrendHrv, 0, 250, 10, false, "Refresh", &sTrendMetaHrv);
         break;
       case HEALTH_METRIC_SPO2:
-        composeMetricGraph(&sTrendSpo2, 70, 100, 4, false, "Refresh");
+        composeMetricGraph(&sTrendSpo2, 70, 100, 4, false, "Refresh", &sTrendMetaSpo2);
         break;
       default:
         clearGrid(0);

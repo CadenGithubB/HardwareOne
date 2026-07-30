@@ -408,17 +408,13 @@ const char* cmd_wifidisconnect(const String& argsInput) {
     return "Error: WiFi is not initialized";
   }
 
-  // Stop HTTP server to free heap
+  // Stop HTTP server to free heap. httpServerStopSafe() also clears the
+  // runtime web lane (it tracks the server lifecycle) and posts the stopped
+  // event. It stops inline unless a web request is mid-flight waiting on this
+  // very task, in which case the main loop finishes the job a pass later —
+  // see WebServer_Handle.h for why blocking here would deadlock.
  #if ENABLE_HTTP_SERVER
-  if (server != NULL) {
-    httpd_stop(server);
-    server = NULL;
-    systemEventPost(SYSEVT_HTTP_SERVER_STOPPED, "http");
-  }
-  // Close the runtime web lane — it tracks the server lifecycle. (This used
-  // to also persist outWeb=false, silently rewriting a saved preference from
-  // a teardown command; the persisted web lane has been removed.)
-  gOutputFlags &= ~MSG_ROUTE_WEB;
+  httpServerStopSafe();
  #endif
   // Note: Web mirror buffer clearing removed - handled by debug_system.cpp
 
@@ -504,12 +500,7 @@ static void radioPowerOff() {
 
   // The radio is going away — tear down HTTP + web output exactly like closewifi.
  #if ENABLE_HTTP_SERVER
-  if (server != NULL) {
-    httpd_stop(server);
-    server = NULL;
-    systemEventPost(SYSEVT_HTTP_SERVER_STOPPED, "http");
-  }
-  gOutputFlags &= ~MSG_ROUTE_WEB;
+  httpServerStopSafe();
  #endif
 
 #if ENABLE_ESPNOW
@@ -1286,14 +1277,12 @@ const char* cmd_httpstop(const String& argsInput) {
   }
 
   bool wasHttps = gServerIsHttps;
-  httpd_stop(server);
-  server = NULL;
-  gServerIsHttps = false;  // Reset flag on stop
-  systemEventPost(SYSEVT_HTTP_SERVER_STOPPED, "http");
-  
-  // Disable web output when server stops
-  gOutputFlags &= ~MSG_ROUTE_WEB;
-  
+  // Clears the handle, the HTTPS flag, the web output lane and posts the
+  // stopped event. Defers rather than deadlocking if a request is in flight.
+  if (!httpServerStopSafe()) {
+    return "[HTTP] Server stopping — deferred past an in-flight request";
+  }
+
   return wasHttps ? "[HTTPS] Server stopped successfully" : "[HTTP] Server stopped successfully";
 }
 
