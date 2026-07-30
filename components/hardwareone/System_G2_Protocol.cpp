@@ -1365,15 +1365,31 @@ static constexpr size_t G2_SID_STAT_CAP = 16;
 static G2SidStat gSidStats[G2_SID_STAT_CAP];
 static size_t    gSidStatsCount = 0;
 
+static portMUX_TYPE gSidStatsMux = portMUX_INITIALIZER_UNLOCKED;
+
 static G2SidStat* sidStatFind(uint8_t sid) {
+  // Lookup-or-append runs under a spinlock. Recording is driven from several
+  // tasks (session worker, tap dispatcher, BLE notify path), and the bound
+  // check followed by `gSidStats[gSidStatsCount++]` is a TOCTOU: two tasks
+  // arriving with count == CAP-1 both pass the check, and the second writes
+  // gSidStats[CAP] — a whole struct past the array, into neighbouring .bss.
+  // The section is a scan of at most 16 entries, so it stays short.
+  //
+  // The per-counter updates the callers do through the returned pointer are
+  // deliberately left unlocked: those race benignly (a lost increment on a
+  // diagnostic counter), unlike the append, which corrupts memory.
+  G2SidStat* found = nullptr;
+  portENTER_CRITICAL(&gSidStatsMux);
   for (size_t i = 0; i < gSidStatsCount; i++) {
-    if (gSidStats[i].sid == sid) return &gSidStats[i];
+    if (gSidStats[i].sid == sid) { found = &gSidStats[i]; break; }
   }
-  if (gSidStatsCount >= G2_SID_STAT_CAP) return nullptr;
-  G2SidStat* s = &gSidStats[gSidStatsCount++];
-  memset(s, 0, sizeof(*s));
-  s->sid = sid;
-  return s;
+  if (!found && gSidStatsCount < G2_SID_STAT_CAP) {
+    found = &gSidStats[gSidStatsCount++];
+    memset(found, 0, sizeof(*found));
+    found->sid = sid;
+  }
+  portEXIT_CRITICAL(&gSidStatsMux);
+  return found;
 }
 
 void g2statsRecordTx(uint8_t sid, uint8_t flag, size_t pbLen) {

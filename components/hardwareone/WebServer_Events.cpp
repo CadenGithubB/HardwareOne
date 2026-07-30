@@ -125,8 +125,14 @@ bool sseDequeueEvent(SessionEntry& s, String& outEventName, String& outData) {
 }
 
 static bool sseSendFetch(httpd_req_t* req, const String& jsonPayload) {
-  // Build SSE frame with snprintf instead of String concat
-  size_t needed = 14 + jsonPayload.length() + 3; // "event: fetch\n" + "data: " + payload + "\n\n"
+  // Build SSE frame with snprintf instead of String concat.
+  // Fixed cost is 21 bytes: "event: fetch\n" (13) + "data: " (6) + "\n\n" (2).
+  // This used to be counted as 17, so for payloads that pushed `needed` past
+  // the stack buffer the heap allocation was 4 bytes short and snprintf
+  // truncated the frame — dropping the blank line that terminates an SSE
+  // event, which stalls the client's parse of everything after it.
+  const size_t kFetchFrameOverhead = 13 + 6 + 2;
+  size_t needed = kFetchFrameOverhead + jsonPayload.length();
   char stackBuf[512];
   char* buf = stackBuf;
   bool heapAlloc = false;

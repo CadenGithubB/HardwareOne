@@ -2385,6 +2385,14 @@ void hardwareone_loop() {
   // times over weeks of healthy uptime would read as if it were mid-crash-loop.
   if (millis() > 60000) crashRecordMarkBootHealthy();
 
+  // Finish an HTTP server teardown that a command had to defer because a web
+  // request was mid-flight (see WebServer_Handle.h). This task is neither the
+  // httpd task nor cmd_exec_task, so it can wait on httpd_stop safely; it is a
+  // flag test in the overwhelmingly common case where nothing is pending.
+#if ENABLE_HTTP_SERVER
+  httpServerStopPendingTick();
+#endif
+
   if (isDebugFlagSet(DEBUG_MEMORY)) {
     static unsigned long lastTaskReport = 0;
     unsigned long now = millis();

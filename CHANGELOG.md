@@ -8,6 +8,27 @@ Entries for 0.96.1 and earlier were backfilled from git history (this repo had
 no tags or releases before 0.96.2); they are terse, commit-grounded summaries,
 dated from each version's commit. Dates are YYYY-MM-DD.
 
+## [0.99.6] - 2026-07-30
+This release ends a heap mystery and lays the groundwork for flash encryption. The mystery: the web output mirror's trim loop had an off-by-one that let its string terminator land one byte past the buffer, zeroing the low byte of whatever heap block header sat next door - usually an lwIP connection block the web server allocates moments later - so the eventual free of that neighbour asserted deep inside the allocator, minutes or hours after the actual overwrite and nowhere near it. That is the crash the TLSF investigation had been chasing with the new crashlog. The glasses protocol's per-stream stats table had a smaller cousin: two tasks appending concurrently could both pass the bounds check, and the loser wrote a whole entry past the array.
+
+The flash-encryption groundwork is config-only and changes nothing about a normal build: a dedicated `feathers3_fe` board variant carries the encryption trial config (AES-128, development mode, encrypted NVS, partition table at 0x9000) while the regular boards now pin encryption explicitly off, guarding against a stale setting from an encrypted build silently producing a bootloader that permanently encrypts whatever board it boots on. Every partition layout moves NVS to 0xA000 and gains the small key partition the encrypted build requires - inert without encryption, though the NVS move reformats it once (saved WiFi credentials re-enter on next connect).
+
+### Added
+- G2 Health graphs grew a time axis. Trends label hours into the ring's day ("0:00 / 12:00 / 24:00"), live views label local wall-clock time when the clock is synced and elapsed-from-start when it is not, and a graph with no honest time domain shows no axis rather than a misleading one. Labels are anchored to the data window, not the render instant, so a repaint never moves them.
+- `feathers3_fe` board variant for the flash-encryption trial (config only - nothing burns fuses until it is deliberately flashed to the sacrificial board).
+- `tools/command_registry.py`: generates docs/COMMAND_REFERENCE.md from the command registry source, and audits for drift - duplicate names, command tables never registered, commands invoked in code that resolve to nothing.
+
+### Fixed
+- Web mirror buffer one-byte heap overflow (see above) - the trim bound now keeps the terminator inside the allocation, in both append paths.
+- Stopping the HTTP server from a command (`httpstop`, `closewifi`, radio power-off) while a web request was mid-flight deadlocked both sides for 60 seconds - the handler was waiting on the command pipeline and the command was waiting on the handler's task to exit - freezing every command surface (G2, OLED, MQTT, automations) with them. The stop now defers to the main loop when a request is in flight and completes a moment later.
+- SSE fetch frames undercounted their fixed framing by 4 bytes, so payloads large enough to spill to the heap were truncated - dropping the blank line that terminates an SSE event and stalling the client's parse of everything after it.
+- G2 protocol per-stream stats: lookup-or-append is now locked; concurrently recording streams could corrupt neighbouring memory (see above).
+- G2 WiFi menu: the Auto Start toggle submitted `wifiautoreconnect` instead of `wifiautostart` - it appeared to do nothing while silently clearing the unrelated reconnect preference.
+
+### Changed
+- Board-defaults `=n` guard lines are now satisfied by sdkconfig's "# not set" form, so a guard no longer strips and rewrites sdkconfig on every configure.
+- The in-tree sdkconfig now reflects the `feathers3_fe` trial build; plain-board builds recover automatically via the new board guards.
+
 ## [0.99.5] - 2026-07-30
 This release is mostly about time. The firmware only ever applied the configured timezone as a side effect of NTP setup, so any boot that never joined WiFi silently rendered every "local" timestamp as UTC while claiming otherwise - dated capture folders, sensor-log day rollover, log-line prefixes, the date shown on the glasses, and the hour a TIME automation fired were all shifted. The timezone is now applied on every boot path. Underneath that, the five ways the clock can be set - NTP, the DS3231 RTC, manual `timeset`, the R1 ring, and background SNTP corrections - each hand-rolled a different subset of the chores that should follow a clock change (sync event, boot anchor, RTC write-back, scheduler wake, pending-timestamp resolution); those now funnel through one chokepoint so every source gets all of them. The ring earns a promotion out of this: it has a battery-backed clock of its own, so a boot with no other time source now adopts the ring's time, the connect ritual echoes the ring's clock back instead of stomping it with a 1970 epoch (which had been corrupting the day boundaries of the ring's own stored history), and once real time arrives a corrective push repairs the ring - and the glasses - automatically.
 

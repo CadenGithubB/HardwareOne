@@ -1182,10 +1182,17 @@ static void handleWiFiTap(uint32_t idx) {
     }
 
     case 7: {  // Auto Start toggle — first hijack tap routed through cmd_exec.
-               // Submits the existing `wifiautoreconnect <0|1>` CLI command
+               // Submits the existing `wifiautostart <0|1>` CLI command
                // via g2SubmitHijackCommand. The completion callback enqueues
                // a Redraw job that the lens applier guards by menuGen and
                // dispatches into showWiFiMenu(). See proposal §5.4 + step 4.
+               //
+               // This row reads and displays gSettings.wifiAutoStart, so it
+               // must write that same setting. It used to submit
+               // `wifiautoreconnect`, which is the unrelated drop-recovery
+               // hunt: the command succeeded, the row re-read wifiAutoStart,
+               // and the toggle appeared to do nothing while silently
+               // clearing the user's reconnect preference.
                //
                // (HTTP toggle moved to its own Network -> HTTP(S) section;
                // see showHttpMenu / handleHttpTap below.)
@@ -1196,7 +1203,7 @@ static void handleWiFiTap(uint32_t idx) {
       // cookie.seq + cookie.menuGen are stamped by g2SubmitHijackCommand.
 
       char line[40];
-      snprintf(line, sizeof(line), "wifiautoreconnect %d", prev ? 0 : 1);
+      snprintf(line, sizeof(line), "wifiautostart %d", prev ? 0 : 1);
 
       if (g2SubmitHijackCommand(line, cookie, onWifiMenuRefreshDone, nullptr)) {
         BROADCAST_PRINTF("[G2] WiFi: Auto Start toggle %s→%s submitted via cmd_exec",

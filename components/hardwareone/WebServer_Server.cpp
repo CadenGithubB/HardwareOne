@@ -116,6 +116,55 @@ extern void streamDebugFlush();
 // Track whether the running server is HTTPS (true) or HTTP (false)
 bool gServerIsHttps = false;
 
+// --- Deadlock-safe teardown (contract documented in WebServer_Handle.h) ------
+//
+// httpd_stop() waits for the httpd task to exit, but the httpd task only
+// notices the shutdown between requests. Commands run on cmd_exec_task, and a
+// web handler mid-request is blocked in submitAndExecuteSync waiting on that
+// same task — so an inline httpd_stop from a command deadlocks both until
+// submitAndExecuteSync's 60 s timeout fires, freezing every command source.
+// Stop inline only when no handler is waiting; otherwise let the main loop do
+// it once the waiter drains.
+volatile int gWebCmdWaiters = 0;
+static volatile bool sHttpStopPending = false;
+
+// Common bookkeeping for a completed stop. Callers previously open-coded this
+// in three places (closewifi, closehttp, radio power-off) and drifted.
+static void httpServerStopFinish() {
+  server = nullptr;
+  gServerIsHttps = false;
+  systemEventPost(SYSEVT_HTTP_SERVER_STOPPED, "http");
+  gOutputFlags &= ~MSG_ROUTE_WEB;
+}
+
+bool httpServerStopSafe() {
+  if (server == nullptr) { sHttpStopPending = false; return true; }
+
+  if (gWebCmdWaiters > 0) {
+    // A web handler is blocked on cmd_exec_task right now. Stopping here would
+    // wait on the task that is waiting on us. Hand it to the main loop.
+    sHttpStopPending = true;
+    DEBUG_CMD_FLOWF("[http] stop deferred — %d web waiter(s) in flight", gWebCmdWaiters);
+    return false;
+  }
+
+  httpd_stop(server);
+  httpServerStopFinish();
+  sHttpStopPending = false;
+  return true;
+}
+
+void httpServerStopPendingTick() {
+  if (!sHttpStopPending) return;
+  if (server == nullptr) { sHttpStopPending = false; return; }
+  if (gWebCmdWaiters > 0) return;   // still draining — try again next pass
+
+  sHttpStopPending = false;
+  httpd_stop(server);
+  httpServerStopFinish();
+  BROADCAST_PRINTF("[HTTP] Server stopped (deferred past in-flight request)");
+}
+
 // Navigation generators moved to WebServer_Utils.cpp
 #include "WebServer_Utils.h"
 

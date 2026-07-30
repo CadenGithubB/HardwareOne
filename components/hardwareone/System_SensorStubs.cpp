@@ -214,6 +214,11 @@ String gBootId = "";
 // this even with HTTP=0. Migration-tool-only builds need the stub too because
 // startRestoreOnlyHttpServer() doesn't set it.
 bool gServerIsHttps = false;
+// Deferred-teardown symbols (WebServer_Handle.h). Nothing can be in flight with
+// no server, so the stub stop always "succeeds" and the tick is a no-op.
+volatile int gWebCmdWaiters = 0;
+bool httpServerStopSafe() { return true; }
+void httpServerStopPendingTick() {}
 #endif
 
 #if !ENABLE_ESPNOW
