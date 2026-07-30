@@ -181,7 +181,9 @@ enum class G2SendResult : uint8_t { Ok = 0, Busy, Fail };
 static constexpr const char* CONTAINER_NAME = "app";
 
 // Requested ATT MTU. The glasses typically negotiate down to 247/244.
-static constexpr uint16_t MTU_TARGET = 244;
+// Shared with ring via G2_BLE_LOCAL_MTU_PREF — local preferred must stay high
+// even when a peer (ring) negotiates a smaller per-link MTU.
+static constexpr uint16_t MTU_TARGET = G2_BLE_LOCAL_MTU_PREF;
 
 // Reassembly buffer size per temple. The largest envelope we expect is an
 // image raw-data fragment (~4 KB body + header). Round up.
@@ -1040,6 +1042,44 @@ static volatile unsigned gImgPushAcked     = 0;
 // Forward decls
 // =============================================================================
 
+// Raise-only local preferred ATT MTU, request per-connection exchange, wait
+// for CFG_MTU_EVT (Arduino BLEClient updates m_mtu there). See plan:
+// per-link BLE MTU / stop global local-MTU pollution.
+uint16_t bleNegotiateConnMtu(BLEClient* client, uint16_t preferred,
+                             uint32_t timeoutMs, const char* logTag) {
+  if (!client) return 23;
+  if (!logTag) logTag = "BLE";
+
+  if (BLEDevice::getMTU() < preferred) {
+    BLEDevice::setMTU(preferred);
+  }
+
+  // An exchange may already have completed before we run (library-internal
+  // auto-request). Capture that before we re-request; getMTU() is only ever
+  // written from CFG_MTU_EVT (patched lib), so >23 means a real negotiation.
+  const uint16_t before = client->getMTU();
+  client->setMTU(preferred);
+
+  uint16_t neg = before;
+  if (before <= 23) {
+    // Elapsed-time compare, not deadline compare: millis()+timeoutMs overflows
+    // near the 32-bit wrap (~49.7 days) and a deadline compare exits instantly.
+    const uint32_t start = millis();
+    while ((uint32_t)(millis() - start) < timeoutMs) {
+      neg = client->getMTU();
+      if (neg > 23) break;
+      vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    neg = client->getMTU();
+  }
+
+  DEBUG_G2F("[%s] MTU: local_pref=%u negotiated=%u",
+            logTag,
+            (unsigned)BLEDevice::getMTU(),
+            (unsigned)neg);
+  return neg ? neg : 23;
+}
+
 static bool connectTemple(G2Temple& t);
 static void disconnectTemple(G2Temple& t);
 static bool sendEnvelope(G2Temple& t, const uint8_t* data, size_t len);
@@ -1105,7 +1145,7 @@ static void templeReset(G2Temple& t);
 static void g2PushStatusEvent(const char* reason);
 static const char* osEventTypeName(uint32_t ev);
 static bool shouldDedupHijackTap(uint32_t idx);
-static void handleHijackMenuTap(uint32_t idx);
+static void handleHijackMenuTap(uint32_t idx, const char* wireName);
 // Shutdown+CREATE handshake helpers — defined alongside g2ShowText
 // (bottom of file) but referenced earlier by the Blocks-hijack worker.
 //
@@ -6505,7 +6545,63 @@ static void invokePageFromMain(const G2PageModule& p) {
   }
 }
 
-static void handleHijackMenuTap(uint32_t idx) {
+// =============================================================================
+// Tap-label cache — the row labels most recently ACKed onto the hijacked
+// "app" list container. The glasses rarely echo the tapped row's text back
+// in the ListEvent (iname is usually empty), so this snapshot is what lets
+// the "Hijack tap:" log name the row the user actually touched.
+//
+// Fed by every sender that puts rows on the "app" container, after the
+// firmware acks them: CREATE-list, REBUILD-list (including live-page ticks,
+// so live row values stay current), and the three mixed list+text compound
+// paths. Named non-"app" children (lstCam, lstPet, …) are excluded — their
+// taps never reach handleHijackMenuTap.
+//
+// Logging-only, deliberately unlocked: writers (page-swap worker, live-page
+// worker, relists on the tap worker itself) and the tap-worker reader are
+// different tasks, so a tap racing a page swap can read a mid-update label.
+// Worst case is a truncated/mismatched string in one log line — never OOB,
+// since every slot is NUL-terminated in place. The same tap/swap race
+// already exists for the dispatch itself (idx is positional against
+// whatever the lens currently shows), so the label is never MORE wrong
+// than the action taken.
+// =============================================================================
+static constexpr size_t kTapLabelRows  = 64;  // Settings PRETTY view runs ~60
+                                              // rows; taps past the cap peek
+                                              // as "?" (log-only, harmless)
+static constexpr size_t kTapLabelWidth = 32;  // log labels; truncation is fine
+EXT_RAM_BSS_ATTR static char gTapLabels[kTapLabelRows][kTapLabelWidth];
+static volatile uint32_t gTapLabelCount = 0;
+
+static void tapLabelCacheStore(const char* const* items, size_t n) {
+  if (!items) return;
+  const size_t take = (n < kTapLabelRows) ? n : kTapLabelRows;
+  for (size_t i = 0; i < take; i++) {
+    const char* s = items[i] ? items[i] : "";
+    strncpy(gTapLabels[i], s, kTapLabelWidth - 1);
+    gTapLabels[i][kTapLabelWidth - 1] = '\0';
+  }
+  // Publish the count after the labels so a concurrent peek never indexes
+  // a slot that has never been written.
+  gTapLabelCount = (uint32_t)take;
+}
+
+// Copy row `idx`'s cached label into `out`; "?" when the row is unknown
+// (idx beyond the last list sent / beyond the cap, or a blank row label).
+static void tapLabelCachePeek(uint32_t idx, char* out, size_t cap) {
+  if (!out || cap == 0) return;
+  out[0] = '\0';
+  if (idx < gTapLabelCount) {
+    strncpy(out, gTapLabels[idx], cap - 1);
+    out[cap - 1] = '\0';
+  }
+  if (!out[0]) {
+    strncpy(out, "?", cap - 1);
+    out[cap - 1] = '\0';
+  }
+}
+
+static void handleHijackMenuTap(uint32_t idx, const char* wireName) {
   // Every tap dispatched from the lens runs as the user who paired the
   // glasses (gBlePeerData[BLE_PEER_G2_GLASSES].pairedByUser). Pages can
   // call FileManager / VFS::*Guarded directly inside their handleTap and
@@ -6513,11 +6609,30 @@ static void handleHijackMenuTap(uint32_t idx) {
   // for the design rationale.
   G2HijackCtxGuard ctxGuard;
 
+  // Row label for the "Hijack tap:" lines below. The wire-reported item
+  // name wins when present (the firmware rarely populates it); otherwise
+  // fall back to the cache's snapshot of the rows we last sent.
+  char lbl[kTapLabelWidth];
+  if (wireName && wireName[0]) {
+    strncpy(lbl, wireName, sizeof(lbl) - 1);
+    lbl[sizeof(lbl) - 1] = '\0';
+  } else {
+    tapLabelCachePeek(idx, lbl, sizeof(lbl));
+  }
+
   // Text-entry overlay: when active, the live-page renders the keyboard
   // and taps belong to it — not the underlying page. Intercept BEFORE
   // the per-page dispatch so any caller (Network, Bluetooth, future
   // pages) gets text entry "for free" without wiring it page-by-page.
   if (g2TextEntryIsActive()) {
+    if (g2TextEntryIsSecret()) {
+      // Secret session (passwords/PSKs): even the row idx narrows which
+      // key group / character was hit, so suppress idx AND label.
+      BROADCAST_PRINTF("[G2] Hijack tap: keyboard (secret)");
+    } else {
+      BROADCAST_PRINTF("[G2] Hijack tap: item %u (%s) → keyboard",
+                       (unsigned)idx, lbl);
+    }
     g2TextEntryHandleTap(idx);
     return;
   }
@@ -6529,6 +6644,8 @@ static void handleHijackMenuTap(uint32_t idx) {
   if (current != G2_HIJACK_PAGE_MAIN) {
     const G2PageModule* p = g2FindPageByHijackPage(current);
     if (p && p->handleTap) {
+      BROADCAST_PRINTF("[G2] Hijack tap: item %u (%s) → %s page",
+                       (unsigned)idx, lbl, p->name);
       p->handleTap(idx);
       return;
     }
@@ -6536,9 +6653,13 @@ static void handleHijackMenuTap(uint32_t idx) {
     // registered any more) — fall back to the read-only TEXT_VIEW
     // default: idx 0 returns to the main menu, rest are no-ops.
     if (idx == 0) {
+      BROADCAST_PRINTF("[G2] Hijack tap: item 0 (%s) → back to main menu", lbl);
       g2SetHijackPage(G2_HIJACK_PAGE_MAIN);
       extern void g2RedrawHijackMainMenu();
       g2RedrawHijackMainMenu();
+    } else {
+      BROADCAST_PRINTF("[G2] Hijack tap: item %u (%s) → no action (text view)",
+                       (unsigned)idx, lbl);
     }
     return;
   }
@@ -6550,11 +6671,17 @@ static void handleHijackMenuTap(uint32_t idx) {
     const G2PageModule* p = gPageRegistry[i];
     if (!p || !p->hijackLabel) continue;
     if (visibleIdx == idx) {
+      // hijackLabel is authoritative here — this is the same registry walk
+      // populateHijackMenuItems used to build the menu — so skip the cache.
+      BROADCAST_PRINTF("[G2] Hijack tap: item %u → %s",
+                       (unsigned)idx, p->hijackLabel);
       invokePageFromMain(*p);
       return;
     }
     visibleIdx++;
   }
+  BROADCAST_PRINTF("[G2] Hijack tap: item %u → (out of menu range)",
+                   (unsigned)idx);
   DEBUG_G2F("[G2] Hijack: tap idx=%u out of menu range (%u items)",
             (unsigned)idx, (unsigned)visibleIdx);
 }
@@ -7474,9 +7601,25 @@ static bool sendEnvelopeNoMutex(G2Temple& t, const uint8_t* data, size_t len) {
     g2statsRecordTx(data[6], data[7], pbApprox);
   }
 
-  // mtu-3 for ATT header. If MTU didn't negotiate for any reason, fall back
-  // to the spec minimum (23 → 20 bytes payload).
-  const size_t mtu = (t.mtu > 23) ? t.mtu : 23;
+  // mtu-3 for ATT header. Read the live per-link value rather than trusting
+  // the one-shot snapshot from connect time: CFG_MTU_EVT can land after
+  // bleNegotiateConnMtu's bounded wait gave up, and a stale t.mtu=23 would
+  // lock this link into 20-byte chunks for the whole session. getMTU() is
+  // only ever written from CFG_MTU_EVT (patched lib), so >23 is a real
+  // negotiation; refresh t.mtu so getG2Status reports the truth too.
+  // connected-gate BEFORE the deref: connectTemple/templeReset free t.client
+  // under this same writeMutex (which our caller holds) after clearing
+  // connected, so a dead link is seen here as connected=false, never as a
+  // dangling pointer.
+  uint16_t liveMtu = t.mtu;
+  if (t.connected && t.client) {
+    const uint16_t m = t.client->getMTU();
+    if (m > 23) {
+      liveMtu = m;
+      if (t.mtu != m) t.mtu = m;
+    }
+  }
+  const size_t mtu = (liveMtu > 23) ? liveMtu : 23;
   const size_t chunk = mtu - 3;
 
   // The firmware uses a single per-link reassembly buffer: it sees the
@@ -7638,9 +7781,32 @@ static bool sendPbFragmented(G2Temple& arm, uint8_t seq, uint8_t sid, uint8_t fl
 
   const uint16_t crc = g2CrcCcittFalse(pb, pbLen);
   const size_t   chunkSize    = G2_FRAG_CHUNK_PB;
-  const size_t   totalWithCrc = pbLen + G2_ENVELOPE_CRC_LEN;
-  uint8_t totFrags = (uint8_t)((totalWithCrc + chunkSize - 1) / chunkSize);
-  if (totFrags == 0) totFrags = 1;
+
+  // Fragment count: one fragment per chunkSize bytes of PAYLOAD. The 2 CRC
+  // bytes ride on the last fragment and only force an EXTRA fragment when pbLen
+  // divides evenly by chunkSize — the last payload fragment is already full, so
+  // the CRC gets a payload-less fragment of its own. That matches the reference
+  // splitter exactly (docs/FlutterApp-main/lib/src/protocol/g2_transport.dart:
+  // "needsExtraForCrc = chunks.last.length == maxPacketPayloadLen"), and it is a
+  // shape we ALREADY put on the wire today for pbLen % 232 == 0 — our own RX
+  // parser handles it (System_G2_Protocol.cpp: payload=nullptr, payloadLen=0).
+  //
+  // Do NOT fold the CRC into the ceiling (the old (pbLen + 2 + 231) / 232 form).
+  // That over-counts by one whenever pbLen % 232 == 231: every non-last fragment
+  // consumes a full 232 PAYLOAD bytes, so the payload runs out one fragment
+  // early, the non-last fragment before it reads 1 byte PAST pb, and the final
+  // fragment computes pbLen - off with off > pbLen — a size_t underflow that
+  // became memcpy(frame+8, pb+off, 0xFFFFFFFF) over this 242 B stack frame.
+  // Trigger set was pbLen in {231, 463, 695, 927, ...}; 231 is a payload size
+  // this file has actually observed (see the CREATE-body note further down).
+  size_t fragCount = (pbLen + chunkSize - 1) / chunkSize;   // pbLen > 0 => >= 1
+  if (pbLen % chunkSize == 0) fragCount++;                  // CRC-only tail
+  if (fragCount > 255) {
+    DEBUG_G2F("[G2-%c] sendPbFragmented: pb=%u B needs %u fragments — over the "
+              "u8 totFrags ceiling", arm.side, (unsigned)pbLen, (unsigned)fragCount);
+    return false;
+  }
+  const uint8_t totFrags = (uint8_t)fragCount;
 
   // Per-frame stack buffer: header (8) + chunk (≤232) + CRC (2 on last).
   // Keep on stack — comfortably under the 4 KB worker stack and saves a
@@ -7654,13 +7820,14 @@ static bool sendPbFragmented(G2Temple& arm, uint8_t seq, uint8_t sid, uint8_t fl
     size_t chunkLen;       // bytes after the 8-byte header (pb chunk + maybe CRC)
     size_t pbChunk;        // pb bytes copied this fragment
 
-    if (isLast) {
-      pbChunk  = pbLen - off;
-      chunkLen = pbChunk + G2_ENVELOPE_CRC_LEN;
-    } else {
-      pbChunk  = chunkSize;
-      chunkLen = chunkSize;
-    }
+    // off <= pbLen is a loop invariant (pbChunk never exceeds the bytes actually
+    // remaining), so pbLen - off cannot underflow. The clamp also makes the
+    // memcpy bound structurally independent of how totFrags was derived: a
+    // miscounted totFrags can now only cost an empty trailing fragment, never a
+    // wild copy. Max write stays 8 + 231 + 2 = 241 <= sizeof(frame) (242).
+    const size_t remaining = pbLen - off;
+    pbChunk  = (remaining < chunkSize) ? remaining : chunkSize;
+    chunkLen = pbChunk + (isLast ? G2_ENVELOPE_CRC_LEN : 0);
 
     frame[0] = G2_PREAMBLE_0;
     frame[1] = G2_PREAMBLE_TX;
@@ -8223,17 +8390,24 @@ static bool runSessionPrelude(G2Temple& t) {
 // in one place with an explicit unit name. R1 wants raw minutes — use
 // Clock::tzOffsetMinutes() there. The unit-named accessors make the swap
 // impossible at the type-system level.
-static void g2AutoTimeSyncIfReady(G2Temple& t) {
-  if (t.side != 'R') return;          // builder targets right arm only
-  if (!t.connected || t.pluginDead) return;
+// What the glasses were last successfully told, so g2TimeSyncTick() below can
+// tell "already correct" from "never pushed / now wrong". 0 epoch = never.
+static uint32_t sG2PushedEpoch = 0;
+static uint32_t sG2PushedAtMs  = 0;
+static int32_t  sG2PushedTzQ   = INT32_MIN;
+
+static bool g2AutoTimeSyncIfReady(G2Temple& t) {
+  if (t.side != 'R') return false;          // builder targets right arm only
+  if (!t.connected || t.pluginDead) return false;
 
   const time_t now = Clock::epochSeconds();
   // Sanity-check ESP has a real (post-2020) time. If NTP hasn't run yet
-  // we'd push garbage — better to skip and let a later trigger retry.
+  // we'd push garbage — better to skip and let a later trigger retry
+  // (g2TimeSyncTick is that retry; before it existed this was a dead end).
   if (!Clock::isValidEpoch(now)) {
     DEBUG_G2F("[G2-R] Auto time-sync skipped: ESP RTC not yet NTP-synced (now=%ld)",
               (long)now);
-    return;
+    return false;
   }
   const int32_t tzQ = Clock::tzOffsetQuarterHours();
 
@@ -8243,14 +8417,62 @@ static void g2AutoTimeSyncIfReady(G2Temple& t) {
   if (n == 0) {
     DEBUG_G2F("[G2-R] Auto time-sync: builder rejected (tzQ=%ld out of ±56?)",
               (long)tzQ);
-    return;
+    return false;
   }
   if (!sendEnvelope(t, env, n)) {
     DEBUG_G2F("[G2-R] Auto time-sync: send failed");
-    return;
+    return false;
   }
+  sG2PushedEpoch = (uint32_t)now;
+  sG2PushedAtMs  = (uint32_t)millis();
+  sG2PushedTzQ   = tzQ;
   DEBUG_G2F("[G2-R] Auto time-sync sent: epoch=%lu tzQ=%ld (tzMin=%d)",
             (unsigned long)now, (long)tzQ, gSettings.tzOffsetMinutes);
+  return true;
+}
+
+// Clock custody for the glasses, mirroring the R1 ring's tick.
+//
+// The connect-time push above is fire-once and early-returns when our clock is
+// dark, and it used to be the ONLY caller — so a boot that had no time at
+// connect (no RTC, no WiFi) left the glasses on a wrong RTC and timezone for
+// the entire session, even though the ring hands us real time seconds later.
+// This re-pushes when the glasses' idea of the time can no longer be right:
+// never successfully pushed on this link, the timezone setting changed, or our
+// clock has moved more than 2 minutes from what they were last told (an NTP
+// arrival, a `timeset`, or a ring adoption). Self-quenching — drift is ~0
+// immediately after each push.
+static void g2TimeSyncTick() {
+  static uint32_t sLastMs = 0;
+  if (!everyMs(&sLastMs, 2000)) return;
+
+  static bool sWasUp = false;
+  const bool up = gR.connected && !gR.pluginDead;
+  if (!up) { sWasUp = false; return; }
+  if (!sWasUp) {          // fresh link: nothing has been told to THIS session
+    sWasUp = true;
+    sG2PushedEpoch = 0;
+    sG2PushedAtMs  = 0;
+    sG2PushedTzQ   = INT32_MIN;
+  }
+
+  const time_t now = Clock::epochSeconds();
+  if (!Clock::isValidEpoch(now)) return;   // still dark — nothing honest to send
+
+  const int32_t tzQ = Clock::tzOffsetQuarterHours();
+  const int64_t expected = (int64_t)sG2PushedEpoch +
+      (int64_t)(((uint32_t)millis() - sG2PushedAtMs) / 1000u);
+  int64_t drift = (int64_t)now - expected;
+  if (drift < 0) drift = -drift;
+
+  const bool never = (sG2PushedEpoch == 0);
+  if (!never && tzQ == sG2PushedTzQ && drift <= 120) return;
+
+  if (g2AutoTimeSyncIfReady(gR)) {
+    DEBUG_G2F("[G2-R] Time-sync re-pushed (%s)",
+              never ? "first valid clock this link"
+                    : (tzQ != sG2PushedTzQ ? "timezone changed" : "clock drifted"));
+  }
 }
 
 // Prime the native notification subsystem on the RIGHT temple: enable
@@ -8315,8 +8537,16 @@ static bool ensureTempleRuntime(G2Temple& t) {
 
 static void templeReset(G2Temple& t) {
   if (t.rxBuf) { free(t.rxBuf); t.rxBuf = nullptr; }
-  if (t.writeMutex) { vSemaphoreDelete(t.writeMutex); t.writeMutex = nullptr; }
-  if (t.advertisedDevice) { delete t.advertisedDevice; t.advertisedDevice = nullptr; }
+  // Drop link state FIRST so mutex-holding senders see connected=false at
+  // their gates, then exclude any sender still inside a write before freeing
+  // the client its writeChar lives in. Only after the client is gone is the
+  // mutex itself deleted (deleting it while a sender holds it is UB).
+  t.connected = false;
+  t.writeChar = nullptr;
+  t.notifyChar = nullptr;
+  t.audioNotifyChar = nullptr;
+  const bool lockedForTeardown = t.writeMutex &&
+      xSemaphoreTake(t.writeMutex, pdMS_TO_TICKS(2000)) == pdTRUE;
   if (t.client) {
     if (t.client->isConnected()) t.client->disconnect();
     // ESP32 Arduino BLE leaks every client we don't free ourselves —
@@ -8326,13 +8556,32 @@ static void templeReset(G2Temple& t) {
     // deletes each BLERemoteService, which chain-deletes their
     // characteristics and descriptors — so a plain `delete` reclaims the
     // full GATT cache. We own the pointer; the library doesn't.
-    delete t.client;
+    //
+    // But disconnect() above is ASYNC: the DISCONNECT_EVT that unregisters
+    // the gattc app and pulls this client out of BLEDevice's routing map
+    // lands 50-500 ms later, and deleting before then hands the dispatcher
+    // a freed pointer. Same reap gate as the stale-replacement paths:
+    // wait (bounded) for getGattcIf() to drop, settle one poll interval,
+    // and leak instead of delete if the event never comes.
+    BLEClient* dead = t.client;
     t.client = nullptr;
+    bool libReleased = false;
+    for (uint32_t waited = 0; ; waited += 50) {
+      if (dead->getGattcIf() == ESP_GATT_IF_NONE) { libReleased = true; break; }
+      if (waited >= 3000) break;
+      vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    if (libReleased) {
+      vTaskDelay(pdMS_TO_TICKS(50));
+      delete dead;
+    } else {
+      DEBUG_G2F("[G2-%c] templeReset: client NOT freed (lib still holds it) — "
+                "leaked by design", t.side);
+    }
   }
-  t.writeChar = nullptr;
-  t.notifyChar = nullptr;
-  t.audioNotifyChar = nullptr;
-  t.connected = false;
+  if (lockedForTeardown) xSemaphoreGive(t.writeMutex);
+  if (t.writeMutex) { vSemaphoreDelete(t.writeMutex); t.writeMutex = nullptr; }
+  if (t.advertisedDevice) { delete t.advertisedDevice; t.advertisedDevice = nullptr; }
   t.containerReady = false;
   templeForgetConnParams(t);
   // deinit wipes both temples, which invariably drops hijack state too.
@@ -8371,9 +8620,35 @@ static bool connectTemple(G2Temple& t) {
     // chain-deletes characteristics and descriptors. Earlier comment
     // claimed the leak was an "acceptable trade for reliability" —
     // measured at ~10-14 KB per cycle, OOMing the device in ~10
-    // reconnects. Just free it.
-    delete t.client;
+    // reconnects. Just free it — behind the same two reap gates as the
+    // ring path: (1) the library must have processed the DISCONNECT_EVT
+    // (unregister + routing-map removal; getGattcIf()==NONE marks it —
+    // for temples clientStale is set BY onDisconnect so this passes
+    // immediately today, but the gate keeps a future manual-stale setter
+    // from turning this delete into a UAF), and (2) in-flight senders
+    // hold t.writeMutex across their t.client/t.writeChar dereferences.
+    // If either gate fails, leak rather than free reachable memory.
+    BLEClient* dead = t.client;
     t.client = nullptr;
+    bool libReleased = false;
+    for (uint32_t waited = 0; ; waited += 50) {
+      if (dead->getGattcIf() == ESP_GATT_IF_NONE) { libReleased = true; break; }
+      if (waited >= 3000) break;
+      vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    const bool locked = t.writeMutex &&
+        xSemaphoreTake(t.writeMutex, pdMS_TO_TICKS(2000)) == pdTRUE;
+    if (libReleased && locked) {
+      // One extra poll interval: gattc_if drops mid-DISCONNECT-case on the
+      // BTC task, a hair before the routing-map removal and onDisconnect
+      // callback finish with the object (cross-core, so genuinely parallel).
+      vTaskDelay(pdMS_TO_TICKS(50));
+      delete dead;
+    } else {
+      DEBUG_G2F("[G2-%c] Stale client NOT freed (libReleased=%d locked=%d) — "
+                "leaked by design", t.side, (int)libReleased, (int)locked);
+    }
+    if (locked) xSemaphoreGive(t.writeMutex);
     t.clientStale = false;
   }
   if (!t.client) {
@@ -8383,7 +8658,14 @@ static bool connectTemple(G2Temple& t) {
       DEBUG_G2F("[G2-%c] BLEDevice::createClient() returned null", t.side);
       return false;
     }
-    t.client->setClientCallbacks(new TempleClientCallbacks(&t));
+    // One heap callbacks object per temple, reused across recreate cycles:
+    // ~BLEClient never frees the pointer, so a fresh `new` per cycle leaked.
+    // &t is stable (gL/gR are globals), so binding it once is safe.
+    static TempleClientCallbacks* cbL = nullptr;
+    static TempleClientCallbacks* cbR = nullptr;
+    TempleClientCallbacks*& cb = (t.side == 'L') ? cbL : cbR;
+    if (!cb) cb = new TempleClientCallbacks(&t);
+    t.client->setClientCallbacks(cb);
   }
   // Pause sensor polling for the whole connect + GATT-discovery window. This is
   // the heaviest BLE-coexistence moment: BLEClient::connect() followed by
@@ -8403,7 +8685,10 @@ static bool connectTemple(G2Temple& t) {
   PollPauseGuard pollGuard((uint8_t)gSettings.inputBus);
 
   uint32_t tConnStart = millis();
-  if (!t.client->connect(t.advertisedDevice)) {
+  // Bounded, same 35s as the ring path: the default overload waits forever on
+  // a lost OPEN event, wedging the single serialized BLE-connect worker — and
+  // with it every later ring AND temple reconnect.
+  if (!t.client->connectTimeout(t.advertisedDevice, 35000)) {
     DEBUG_G2F("[G2-%c] BLE connect failed after %u ms",
               t.side, (unsigned)(millis() - tConnStart));
     return false;
@@ -8411,10 +8696,9 @@ static bool connectTemple(G2Temple& t) {
   DEBUG_G2F("[G2-%c] BLE connect OK in %u ms",
             t.side, (unsigned)(millis() - tConnStart));
 
-  t.client->setMTU(MTU_TARGET);
-  t.mtu = t.client->getMTU();
-  DEBUG_G2F("[G2-%c] Requested MTU %u, got %u",
-            t.side, (unsigned)MTU_TARGET, (unsigned)t.mtu);
+  char mtuTag[8];
+  snprintf(mtuTag, sizeof(mtuTag), "G2-%c", t.side);
+  t.mtu = bleNegotiateConnMtu(t.client, MTU_TARGET, 1000, mtuTag);
 
   // Snapshot the peer MAC for the GAP callback to match on. Must be set BEFORE
   // the conn-params request below, or the resulting event arrives unattributed
@@ -8601,6 +8885,19 @@ bool initG2Client() {
     vTaskDelay(pdMS_TO_TICKS(200));
   }
   if (btStarted()) {
+    // Controller restart under a (possibly) live host: any ring link from a
+    // previous session dies the moment btStop lands. Clear its state and
+    // drop the pointer — the object stays heap-valid but unreachable, a
+    // deliberate one-off leak instead of a dangling reap. No-op when
+    // deinitBluetooth above already invalidated, or when no ring was up.
+    // SKIP while a ring connect is in flight on the worker: nulling
+    // gRing.client mid-connect is a null-deref for the worker, and an
+    // in-flight connect means the ring is NOT connected — there is no
+    // zombie state to clear; the attempt simply fails after btStop, same
+    // as it always did.
+    if (!g2RingConnectInFlight()) {
+      g2RingInvalidateLink();
+    }
     btStop();
     vTaskDelay(pdMS_TO_TICKS(100));
   }
@@ -8688,9 +8985,9 @@ bool initG2Client() {
   // owning module's init function — the registry is global).
   registerG2Pages();
 
-  // One permanent 8 KB INTERNAL stack for long-lived G2 UI sessions
-  // (Health/Map/viewers/…). Paid early while DRAM is still contiguous;
-  // entry points enqueue instead of xTaskCreate per Apps tap.
+  // One permanent INTERNAL stack (kG2SessionStackBytes) for long-lived G2 UI
+  // sessions (Health/Map/viewers/…). Paid early while DRAM is still
+  // contiguous; entry points enqueue instead of xTaskCreate per Apps tap.
   g2SessionEnsureWorker();
 
   DEBUG_G2F("[G2] Client initialized");
@@ -8700,10 +8997,15 @@ bool initG2Client() {
 void deinitG2Client() {
   if (!gG2State) return;
   g2Disconnect();
+  // The ring shares this client infra (worker, BLEDevice state). Close its
+  // link and mark it for reap while the stack is still up — otherwise gRing
+  // stays 'connected' against a link the coming teardown/controller cycling
+  // kills, and the next ringconnect is refused with 'already connected'.
+  g2RingDisconnect();
   stopHeartbeatTimer();
   templeReset(gL);
   templeReset(gR);
-  // Group B: tear down the unified BLE-connect worker. Frees the 6 KB
+  // Group B: tear down the unified BLE-connect worker. Frees the 5 KB
   // stack so subsequent BT-mode toggles don't pile up workers. A fresh
   // initG2Client respawns it.
   bleConnectShutdown();
@@ -8830,11 +9132,12 @@ static bool g2ConnectSync(G2Eye eye) {
 // Unified BLE-connect worker (Group B — see G2_Glasses.h for design notes)
 // =============================================================================
 // Replaces 5 transient *TaskBody patterns (g2 connect/saved + ring connect/
-// saved/mac) with one persistent task spawned in initG2Client(). The 6 KB
-// stack is allocated when DRAM headroom is largest, not during a connect
-// when it's already tight. Producers (g2Connect / g2RingConnect / etc.)
-// build a BleConnectJob, set their per-family in-flight flag, and submit;
-// the worker dispatches by kind and clears the flag when *Sync returns.
+// saved/mac) with one persistent task, started lazily by the first
+// g2SubmitBleConnect (via bleConnectInit) and kept alive after — the 5 KB
+// (5120-byte) stack is paid once, not per connect attempt. Producers
+// (g2Connect / g2RingConnect / etc.) build a BleConnectJob, set their
+// per-family in-flight flag, and submit; the worker dispatches by kind and
+// clears the flag when *Sync returns.
 
 // Forward decl — g2ConnectSavedSync is static and defined further down.
 static bool g2ConnectSavedSync();
@@ -8927,7 +9230,7 @@ static void bleConnectInit() {
     gBleConnectTaskH = nullptr;
   } else {
     DEBUG_G2F("[G2] ble-connect: persistent worker started "
-              "(queue depth=%u, stack=6 KB)", (unsigned)kBleConnectQueueDepth);
+              "(queue depth=%u, stack=5 KB)", (unsigned)kBleConnectQueueDepth);
   }
 }
 
@@ -9806,7 +10109,14 @@ static bool sendCreateListAndWait(G2Temple& arm,
     DEBUG_G2F("[G2] CREATE-list: send failed");
     return false;
   }
-  return waitCreateAck("CREATE-list", widgetId);
+  const bool acked = waitCreateAck("CREATE-list", widgetId);
+  // Snapshot the rows for tap-log labeling — only once the firmware has
+  // acked them onto the lens, and only for the hijacked "app" container
+  // (experimental non-default names don't feed the hijack tap path).
+  if (acked && strcmp(containerName, CONTAINER_NAME) == 0) {
+    tapLabelCacheStore(items, itemCount);
+  }
+  return acked;
 }
 
 // Experimental REBUILD-list path. Same envelope shape as the CREATE
@@ -9883,7 +10193,9 @@ static bool sendRebuildListAndWait(G2Temple& arm,
     DEBUG_G2F("[G2] REBUILD-list: send failed");
     return false;
   }
-  return waitRebuildAck("REBUILD-list");
+  const bool acked = waitRebuildAck("REBUILD-list");
+  if (acked) tapLabelCacheStore(items, itemCount);  // rows now live on "app"
+  return acked;
 }
 
 // REBUILD-list against an arbitrary container name (vs.
@@ -10274,7 +10586,9 @@ static bool sendRebuildMixedListMultiTextAndWait(
     DEBUG_G2F("[G2] REBUILD-list+multitext: send failed");
     return false;
   }
-  return waitRebuildAck("REBUILD-list+multitext");
+  const bool acked = waitRebuildAck("REBUILD-list+multitext");
+  if (acked) tapLabelCacheStore(listItems, listItemCount);  // list child is "app"
+  return acked;
 }
 
 // CREATE compound with 1 ListObject + N TextObject children.
@@ -10333,7 +10647,9 @@ extern "C++" bool sendCreateMixedListMultiTextAndWait(
     DEBUG_G2F("[G2] CREATE-list+multitext: send failed");
     return false;
   }
-  return waitCreateAck("CREATE-list+multitext", widgetId);
+  const bool acked = waitCreateAck("CREATE-list+multitext", widgetId);
+  if (acked) tapLabelCacheStore(listItems, listItemCount);  // list child is "app"
+  return acked;
 }
 
 // CREATE compound List + Text container — title + selectable list.
@@ -10375,7 +10691,9 @@ extern "C++" bool sendCreateMixedListTextAndWait(G2Temple& arm,
   }
   free(pb);
   if (!sentOk) return false;
-  return waitCreateAck("CREATE-list+text", widgetId);
+  const bool acked = waitCreateAck("CREATE-list+text", widgetId);
+  if (acked) tapLabelCacheStore(items, itemCount);  // list child is "app"
+  return acked;
 }
 
 // Internal: send Cmd=9 Shutdown, then wait a short fixed period to let
@@ -11112,6 +11430,77 @@ static bool g2SendNativeNotification(const char* appId, const char* displayName,
   return ok;
 }
 
+// Stack budget for the lens applier. The number is BYTES — ESP-IDF's
+// xTaskCreate() takes usStackDepth in bytes, an explicit deviation from vanilla
+// FreeRTOS, and uxTaskGetStackHighWaterMark() returns bytes on this port too.
+// System_TaskUtils.h carries the citation; kG2SessionStackBytes and
+// kG2TapDispatchStackBytes spell their budgets the same way.
+//
+// Sizing evidence — GCC -fcallgraph-info across the whole hardwareone
+// component (FeatherS3 config), so the frame sizes are exact, not estimates.
+// The deepest chain is a Redraw job, and it runs off the end of the old
+// 3584 B allocation:
+//
+//    336 B  pageSwapWorkerLoop        (pageSwapJobBody and
+//                                      g2SendNativeNotification both inline
+//                                      into this frame — all five LensJobKind
+//                                      branches are inside the 336 B)
+//    208 B  showDetailMenu            } G2_Page_Automations.cpp: detail falls
+//   1024 B  showListMenu              } back to the list when the automation
+//                                       no longer loads; the 1 KB is its
+//                                       char rows[1 + G2_AUTO_MAX][40] local
+//     80 B  g2ShowListPage
+//     80 B  hijackFsmDispatch
+//     32 B  postEvent
+//     96 B  applyEvent
+//     80 B  g2LensApplyContainer
+//    352 B  debugQueuePrintf          (its DEBUG_G2F)
+//     64 B  enqueueChunk
+//     64 B  growDebugPoolIfNeeded
+//   1280 B  Serial.printf             (the pool-growth report,
+//                                      System_Debug.cpp:461/482)
+//   ------
+//   3696 B  worst case
+//
+// The 1280 B tail is newlib's, measured the same way the frames above were —
+// xtensa-esp-elf-objdump on the toolchain's own libc.a/libarduino.a, reading
+// the `entry a1,N` prologues: Print::printf 80 + Print::vprintf 128 +
+// vsnprintf 64 + _vsnprintf_r 144 + _svfprintf_r 800 + __ssprint_r 64. That
+// 800 B is why any *printf on a chain dominates it, and this build does not
+// set CONFIG_NEWLIB_NANO_FORMAT, so it is the full formatter. Add ~250 B more
+// if a %f ever reaches this path (_dtoa_r + __d2b + _Balloc).
+//
+// Counting only frames in this component the chain stops at 2416 B, and
+// everything below our other leaves is still excluded (String heap ops,
+// LittleFS under fs::FS::open, BLE writeValue), so 3696 B remains a floor,
+// not a total.
+//
+// 3584 B therefore had -112 B of headroom on that chain — a latent overflow,
+// not merely a CRITICAL reading. 8192 B leaves 4496 B / 54.9% free, well clear
+// of the 25% the task-stack reporter itself calls CRITICAL
+// (System_TaskUtils.cpp), with room for the excluded leaves. 6144 B would also
+// have cleared it (39.8%); the extra 2 KB is deliberate breathing room, taken
+// on all three G2 workers at once on 2026-07-29 because every figure here is a
+// floor. Trim only against a measured HWM, never against the static figure —
+// the worker reports one every time it sets a new peak (see the end of the
+// loop below).
+//
+// The superseded comment is recorded here because its numbers were wrong in a
+// way worth not repeating. It read "Stack: 3584 BYTES (3.5 KB) ... Measured
+// HWM ~6.2 KB with glasses connected → ~7.8 KB headroom", and:
+//   * a 6.2 KB high-water mark cannot occur on a 3584 B stack, and 7.8 KB of
+//     headroom cannot exist inside one — the two figures sum to 14 KB, the
+//     old 4x-inflated allocation;
+//   * both came off the task-stack reporter while it still multiplied by 4
+//     (fixed 2026-07-16), so the real readings behind them were ~1.55 KB used
+//     and ~2.0 KB free. That observed 1.55 KB is not in conflict with the
+//     3696 B above: a HWM only records paths actually taken, and the chain
+//     here needs the Automations detail view, a cmd-completion redraw, and a
+//     debug pool growth all at once.
+// The headline unit had already been corrected to bytes; only the trailing
+// measurement stayed in the inflated frame.
+static constexpr uint32_t kG2PageSwapStackBytes = 8192;
+
 static void pageSwapWorkerLoop(void* /*arg*/) {
   for (;;) {
     LensUiJob* job = nullptr;
@@ -11212,6 +11601,36 @@ static void pageSwapWorkerLoop(void* /*arg*/) {
         break;
     }
     delete job;
+
+    // Stack peak after each job — the datum that decides whether
+    // kG2PageSwapStackBytes is right. Mirrors the tap dispatcher's block for
+    // the same reason: g2_page_swap_w isn't in reportAllTaskStacks' knownTasks
+    // table, so it lands in the "system tasks" section where the alloc/used
+    // columns are an assumed 4 KB margin rather than a measurement and
+    // everything prints in whole KB. Here the real allocation is known, so
+    // report exact bytes.
+    //
+    // uxTaskGetStackHighWaterMark returns FREE bytes on this port (see
+    // System_TaskUtils.h), so peak used is alloc minus the low-water free.
+    // Only prints when a job sets a NEW peak, which keeps it quiet while still
+    // catching the rare deep Redraw that the static analysis says is the
+    // worst case.
+    {
+      static volatile uint32_t sPageSwapStackUsedPeak = 0;
+      const uint32_t freeNow = (uint32_t)uxTaskGetStackHighWaterMark(nullptr);
+      const uint32_t used    = (freeNow < kG2PageSwapStackBytes)
+                                 ? (kG2PageSwapStackBytes - freeNow) : 0;
+      const uint32_t prevPeak = sPageSwapStackUsedPeak;
+      observeHwm(&sPageSwapStackUsedPeak, used);
+      if (sPageSwapStackUsedPeak != prevPeak) {
+        DEBUG_G2F("[lens.applier] stack peak %u/%u B used (%u%%), %u B free — %s",
+                  (unsigned)sPageSwapStackUsedPeak,
+                  (unsigned)kG2PageSwapStackBytes,
+                  (unsigned)((sPageSwapStackUsedPeak * 100U) / kG2PageSwapStackBytes),
+                  (unsigned)(kG2PageSwapStackBytes - sPageSwapStackUsedPeak),
+                  saturationLabel(sPageSwapStackUsedPeak, kG2PageSwapStackBytes));
+      }
+    }
   }
 }
 
@@ -11225,13 +11644,13 @@ static void pageSwapInit() {
               (unsigned)kPageSwapQueueDepth);
     return;
   }
-  // Stack: 3584 BYTES (3.5 KB), trimmed from 4096 (4 KB) 2026-06-07.
-  // (The old "~14 KB"/"~16 KB" annotations were the 4x myth — see System_TaskUtils.h.)
-  // Measured HWM ~6.2 KB with glasses connected → ~7.8 KB headroom. This is
-  // the ONLY xTaskCreate on the page-swap path now — all
-  // navigation re-uses this worker via the queue.
+  // Stack: kG2PageSwapStackBytes — BYTES, and the sizing evidence lives with
+  // the constant above pageSwapWorkerLoop. Raised from 3584 on 2026-07-29:
+  // static analysis put the deepest Redraw chain at 3696 B, i.e. 112 B past
+  // the end of the old allocation. This is the ONLY xTaskCreate on the
+  // page-swap path now — all navigation re-uses this worker via the queue.
   BaseType_t rc = xTaskCreatePinnedToCore(pageSwapWorkerLoop, "g2_page_swap_w",
-                              /*stack bytes*/ 3584, nullptr,
+                              /*stack bytes*/ kG2PageSwapStackBytes, nullptr,
                               /*prio*/  tskIDLE_PRIORITY + 2,
                               &gPageSwapTaskH, APP_CORE);
   if (rc != pdPASS) {
@@ -11334,12 +11753,13 @@ bool g2EnqueueLensJob(LensUiJob* job) {
 //     and the hijack UI is actually being used.
 //   * Persistent: never torn down. With G2 off / disconnected the queue
 //     is empty and the worker just sleeps on the receive — costs only
-//     its 4 KB stack + queue (8 × uint32_t = 32 B). Cheap insurance.
+//     kG2TapDispatchStackBytes of stack plus the queue (8 × sizeof
+//     TapDispatchEntry ≈ 352 B). Cheap insurance.
 //   * Survives BT/G2 enable/disable cycles without re-init churn.
 
-// Queue payload carries the tap idx plus the item name so the
-// "Hijack tap: …" BROADCAST_PRINTF runs on the worker (off the small
-// BTC stack), not on the BLE notify task.
+// Queue payload carries the tap idx plus the wire-reported item name;
+// handleHijackMenuTap emits the "Hijack tap: …" BROADCAST_PRINTF on the
+// worker (off the small BTC stack), not on the BLE notify task.
 //
 // The TAP_IDX variant is the original use — hijack list-tap dispatch.
 // The EXIT_FN variant carries a TEXT-view exit callback (function pointer
@@ -11363,6 +11783,81 @@ static TaskHandle_t  gTapTaskHandle  = nullptr;
 static const size_t  kTapQueueDepth  = 8;
 static volatile uint32_t gTapDropped = 0;
 
+// Stack budget for the tap worker. The number is BYTES: ESP-IDF's
+// xTaskCreate() takes usStackDepth in bytes, an explicit deviation from vanilla
+// FreeRTOS, and uxTaskGetStackHighWaterMark() returns bytes on this port too.
+// System_TaskUtils.h carries the citation; kG2SessionStackBytes spells its
+// budget the same way.
+//
+// Sizing evidence — GCC -fcallgraph-info across the whole hardwareone
+// component (FeatherS3 config), so the frame sizes are exact, not estimates.
+// Re-walked 2026-07-29 (see kG2PageSwapStackBytes for the method); the two
+// deep inline paths noted below turn out to be ONE chain, and it is the
+// worst case:
+//
+//    160 B  tapDispatcherWorkerLoop
+//    528 B  handleHijackMenuTap
+//   1008 B  invokePageFromMain
+//    176 B  g2StartLiveListPage       (calls buildFn synchronously, on THIS
+//                                      stack — the 2 KB seed buffer it hands
+//                                      over is in PSRAM, the call is not)
+//     64 B  g2BuildConfigInfo         } deepest page hook once its own
+//    128 B  g2ConfigBuildRows         } callees are counted
+//    112 B  g2HijackAuthContext
+//    224 B  bleStampPairedByIfBlank   (first-time owner stamp)
+//     32 B  writeSettingsJson
+//    400 B  writeSettingsJson$part$0
+//    496 B  buildSettingsJsonDoc
+//    192 B  espnowMeshesWriteJson
+//     80 B  putSecret
+//    112 B  putSecretPreserving
+//    320 B  encryptString
+//    128 B  getDeviceEncryptionKey
+//    352 B  debugQueuePrintf
+//     64 B  enqueueChunk
+//     64 B  growDebugPoolIfNeeded
+//   1280 B  Serial.printf             (newlib tail — see
+//                                      kG2PageSwapStackBytes for its breakdown)
+//   ------
+//   5920 B  worst case
+//
+// Counting only frames in this component that chain stops at 4640 B, and the
+// leaves below it are still excluded (LittleFS under VFS::openGuarded, mbedtls
+// under encryptString, String heap ops), so 5920 B is a floor, not a total.
+//
+// The two paths a tap runs INLINE on this stack rather than deferring to
+// cmd_exec_task are both ON that chain, which is why it dominates:
+//   * G2HijackCtxGuard → g2HijackAuthContext → bleStampPairedByIfBlank →
+//     setSetting → writeSettingsJson (JSON doc build + encryptString). Fires
+//     once, on the first-time owner stamp when pairedByUser is still blank.
+//   * invokePageFromMain → g2StartLive{Text,List}Page → the page's build fn.
+//
+// 8192 B left 2272 B / 27.7% free — above the 25% the task-stack reporter
+// itself calls CRITICAL (System_TaskUtils.cpp), but only just, against a
+// figure that is a floor. 10240 B leaves 4320 B / 42.2%. Trim only against a
+// measured HWM, never against the static figure — the worker reports one every
+// time it sets a new peak (see below).
+//
+// The 4944 B this comment used to claim was not wrong so much as
+// hand-composed: root frame + handleHijackMenuTap + the deepest hook's
+// direct-only depth (g2ESPNowAppHandleTap, 4272 B), summed by hand rather than
+// walked. A real walk finds a different, deeper hook chain, and pricing the
+// newlib tail adds the rest. Expanding the page-hook set at EVERY indirect
+// site instead of once per dispatch is the trap that makes this measurement
+// useless — it chains sibling hooks that never call each other.
+//
+// The superseded comment is recorded here because both of its numbers were
+// wrong in ways worth not repeating. It read "6400 words = 25 KB ... observed
+// peak usage is ~11.5 KB", and:
+//   * the unit was bytes, so the task had 6.25 KB and never 25 KB — an
+//     11.5 KB peak would have overflowed the stack it was justifying;
+//   * the 11.5 KB came from the task-stack reporter while it still multiplied
+//     by 4 (comment written 0b3c218, 2026-05-09; the 4x was fixed 2026-07-16),
+//     so the real peak behind that figure was ~2.9 KB.
+// 3a7f172e (2026-07-18) corrected the inline "/*stack bytes*/" annotation on
+// the xTaskCreate call but left the prose above it contradicting the code.
+static constexpr uint32_t kG2TapDispatchStackBytes = 10240;
+
 static void tapDispatcherWorkerLoop(void* /*arg*/) {
   TapDispatchEntry e;
   uint32_t lastDroppedSeen = 0;
@@ -11373,15 +11868,14 @@ static void tapDispatcherWorkerLoop(void* /*arg*/) {
     }
     switch (e.kind) {
       case TAP_DISPATCH_IDX: {
-        // Emit the user-facing log here, off the BLE notify task. Uses
-        // vsnprintf internally (~300-500 B stack). The worker stack is
-        // sized for writeSettingsJson() + sensor toggles (not 4 KB).
-        BROADCAST_PRINTF("[G2] Hijack tap: item %u (%s)",
-                         (unsigned)e.idx, e.iname);
         // Run the heavy handler from this safe task context. handleHijackMenuTap
         // may allocate, enqueue page swaps, send BLE frames, etc. — all legal
-        // here because we're not on the Bluedroid notify-task stack.
-        handleHijackMenuTap(e.idx);
+        // here because we're not on the Bluedroid notify-task stack. It also
+        // emits the resolved "Hijack tap: item N (label) → target" BROADCAST
+        // itself (still on this worker, same off-BTC guarantee); e.iname rides
+        // along so a wire-reported item name (rarely populated) beats the
+        // tap-label cache.
+        handleHijackMenuTap(e.idx, e.iname);
         break;
       }
       case TAP_DISPATCH_EXIT_FN: {
@@ -11392,6 +11886,34 @@ static void tapDispatcherWorkerLoop(void* /*arg*/) {
         // synchronously on BTC so further notify events skip the dead view.
         if (e.exitFn) e.exitFn();
         break;
+      }
+    }
+
+    // Stack peak after each dispatch — the datum that decides whether
+    // kG2TapDispatchStackBytes is right. The generic task-stack report can't
+    // answer it: g2_tap_disp isn't in reportAllTaskStacks' knownTasks table, so
+    // it lands in the "system tasks" section, where the alloc/used columns are
+    // an assumed 4 KB margin rather than a measurement and everything prints in
+    // whole KB. Here the real allocation is known, so report exact bytes.
+    //
+    // uxTaskGetStackHighWaterMark returns FREE bytes on this port (see
+    // System_TaskUtils.h), so peak used is alloc minus the low-water free.
+    // Only prints when a tap sets a NEW peak, which keeps it quiet while still
+    // catching the one rare deep path that matters.
+    {
+      static volatile uint32_t sTapStackUsedPeak = 0;
+      const uint32_t freeNow = (uint32_t)uxTaskGetStackHighWaterMark(nullptr);
+      const uint32_t used    = (freeNow < kG2TapDispatchStackBytes)
+                                 ? (kG2TapDispatchStackBytes - freeNow) : 0;
+      const uint32_t prevPeak = sTapStackUsedPeak;
+      observeHwm(&sTapStackUsedPeak, used);
+      if (sTapStackUsedPeak != prevPeak) {
+        DEBUG_G2F("[G2] tap-dispatch: stack peak %u/%u B used (%u%%), %u B free — %s",
+                  (unsigned)sTapStackUsedPeak,
+                  (unsigned)kG2TapDispatchStackBytes,
+                  (unsigned)((sTapStackUsedPeak * 100U) / kG2TapDispatchStackBytes),
+                  (unsigned)(kG2TapDispatchStackBytes - sTapStackUsedPeak),
+                  saturationLabel(sTapStackUsedPeak, kG2TapDispatchStackBytes));
       }
     }
 
@@ -11407,13 +11929,10 @@ static void tapDispatcherWorkerLoop(void* /*arg*/) {
 }
 
 // Idempotent. Creates the queue + spawns the persistent worker on first
-// call; subsequent calls are no-ops. Same priority + stack as the
-  // page-swap worker so taps and page swaps drain at parity (neither
-  // preempts the other; both sit above idle and below the BLE stack).
-  //
-  // Stack budget: hijack handlers call setSetting → writeSettingsJson
-  // (large JSON merge/serialize) and may start sensors — use ~20 KB.
-  static void tapDispatcherInit() {
+// call; subsequent calls are no-ops. Same priority as the page-swap worker so
+// taps and page swaps drain at parity (neither preempts the other; both sit
+// above idle and below the BLE stack).
+static void tapDispatcherInit() {
   if (gTapQueue) return;
   gTapQueue = xQueueCreate(kTapQueueDepth, sizeof(TapDispatchEntry));
   if (!gTapQueue) {
@@ -11421,16 +11940,8 @@ static void tapDispatcherWorkerLoop(void* /*arg*/) {
               (unsigned)kTapQueueDepth);
     return;
   }
-  // NOTE: xTaskCreate's third parameter is in WORDS (4 bytes), not bytes,
-  // despite what older comments throughout this file claim. Historical
-  // value here was 20480 — that was 80 KB, not 20 KB. The dispatcher
-  // used to run deep-stack inline calls (writeSettingsJson, BLE init,
-  // WiFi connect, etc.) so the oversize was defensible at the time.
-  // Now that all those paths are migrated to cmd_exec_task, observed
-  // peak usage is ~11.5 KB. 6400 words = 25 KB leaves ~13 KB headroom
-  // and reclaims 55 KB of DRAM.
   BaseType_t rc = xTaskCreatePinnedToCore(tapDispatcherWorkerLoop, "g2_tap_disp",
-                              /*stack bytes*/ 6400, nullptr,
+                              /*stack bytes*/ kG2TapDispatchStackBytes, nullptr,
                               /*prio*/  tskIDLE_PRIORITY + 2,
                               &gTapTaskHandle, APP_CORE);
   if (rc != pdPASS) {
@@ -11924,6 +12435,48 @@ bool g2ShowMixedListText(const char* const* items, size_t itemCount,
     return false;
   }
   return true;
+}
+
+// Resolve the temple that owns the live compound (same preference order as
+// g2ShowMixedListText). Returns null when no eligible temple has a ready
+// container — callers treat that as "fall back to the full swap".
+static G2Temple* mixedCompoundArm() {
+  G2Temple* arm = nullptr;
+  if (gR.connected && !gR.pluginDead)      arm = &gR;
+  else if (gL.connected && !gL.pluginDead) arm = &gL;
+  if (!arm || !arm->containerReady) return nullptr;
+  return arm;
+}
+
+bool g2RelistMixedListText(const char* const* items, size_t itemCount,
+                           const G2ContainerGeom& listGeom,
+                           const G2TextChildSpec& title) {
+  if (!items || itemCount == 0) return false;
+  if (pageSwapInFlight()) return false;   // mid-swap: caller retries via swap
+  G2Temple* arm = mixedCompoundArm();
+  if (!arm) return false;
+  // Multi-child REBUILD has "render exactly this child set" semantics — the
+  // FULL child set (list + text) must be re-sent or the unmentioned sibling
+  // blanks (verified 2026-04-30; renderStatusCompound is the production
+  // precedent). ~80 ms + ack vs the ~600 ms SHUTDOWN+CREATE swap. The
+  // firmware resets the native list highlight to row 0 — acceptable for
+  // rare list-content changes (text-entry group switch), wrong for
+  // per-keystroke use (that's what g2UpdateMixedTextChild is for).
+  G2TextChildSpec children[1] = { title };
+  return sendRebuildMixedListMultiTextAndWait(*arm, items, itemCount,
+                                              listGeom, children, 1);
+}
+
+bool g2UpdateMixedTextChild(const char* containerName, uint32_t containerId,
+                            const char* content) {
+  if (!containerName || !content) return false;
+  G2Temple* arm = mixedCompoundArm();
+  if (!arm) return false;
+  // Cmd=5 UPDATE_TEXT: fire-and-forget single-fragment patch of ONE text
+  // child. Explicitly does NOT touch sibling children — the list keeps its
+  // rows, focus and scroll (the mic-detail / Health production pattern).
+  // This is the per-keystroke path for the text-entry buffer panel.
+  return sendUpdateTextNamed(*arm, containerName, containerId, content);
 }
 
 // =============================================================================
@@ -12454,10 +13007,11 @@ static SemaphoreHandle_t   gLiveTextRefreshSem = nullptr;
 static AuthContext         gLiveTextOwnerCtx;
 
 // =============================================================================
-// G2 session worker — one long-lived 8 KB INTERNAL stack for hijack UI
-// sessions (Health/Map/LLM/Pet/viewers/live pages). Sibling to
-// g2_page_swap_w (lens applier stays ~3.5 KB and responsive). Single-flight:
-// a new enqueue aborts the current session, waits for idle, then runs.
+// G2 session worker — one long-lived INTERNAL stack (kG2SessionStackBytes) for
+// hijack UI sessions (Health/Map/LLM/Pet/viewers/live pages). Sibling to
+// g2_page_swap_w (the lens applier, kG2PageSwapStackBytes, which stays
+// responsive). Single-flight: a new enqueue aborts the current session, waits
+// for idle, then runs.
 // =============================================================================
 
 struct G2SessionJob {
@@ -12468,7 +13022,37 @@ struct G2SessionJob {
 };
 
 static constexpr UBaseType_t kG2SessionQueueDepth = 4;
-static constexpr uint32_t    kG2SessionStackBytes = 8192;  // covers map + full BMP/JPG
+
+// BYTES (System_TaskUtils.h carries the citation), sized the same way as
+// kG2PageSwapStackBytes and kG2TapDispatchStackBytes — see the first of those
+// for the method, the newlib-tail breakdown, and the indirect-call trap.
+// Measured 2026-07-29; the deepest chain is a Health session job, not the
+// image viewers this constant's old comment was sized for:
+//
+//    112 B  g2SessionWorkerLoop
+//    992 B  g2HealthPageWorker        (deepest of the 12 session workers)
+//     80 B  g2HealthAction
+//     32 B  healthTrackSet
+//     64 B  healthTrackSet$part$0
+//    400 B  healthTrackRestartWithCurrentMask
+//    544 B  cmd_sensorlog$part$0
+//   1328 B  resolveSessionTarget      (System_SensorLogging.cpp — String-heavy)
+//     80 B  VFS::openGuarded
+//     96 B  logFsAccessDeny
+//    560 B  resolveRole → isGuestUser → userAccountRank → getUserRole$part$0
+//                                    → VFS::existsGuarded → guardedNormalize
+//    480 B  debugQueuePrintf → enqueueChunk → growDebugPoolIfNeeded
+//   1280 B  Serial.printf             (newlib tail)
+//   ------
+//   6048 B  worst case (4768 B counting only frames in this component)
+//
+// Still a floor — LittleFS under openGuarded, mbedtls, and String heap ops all
+// contribute 0. 8192 B left 2144 B / 26.2% free, i.e. barely over the 25% the
+// task-stack reporter calls CRITICAL (System_TaskUtils.cpp); 10240 B leaves
+// 4192 B / 40.9%. Covers the map and full BMP/JPG viewers with room to spare —
+// g2MapPageWorker's 1200 B frame is the largest single session frame, but its
+// chain is shallower than Health's.
+static constexpr uint32_t    kG2SessionStackBytes = 10240;
 
 static QueueHandle_t     gSessionQueue   = nullptr;
 static TaskHandle_t      gSessionTaskH   = nullptr;
@@ -13556,6 +14140,9 @@ void g2Tick() {
   // expiry callback via g2LensSetOverlayExpiredCb to redraw their
   // underlying view when an overlay times out.
   g2LensTickOverlay();
+  // Keep the glasses' RTC/timezone honest after a late clock flip (ring
+  // adoption, NTP, timeset) or a tz change — self-throttled, cheap no-op.
+  g2TimeSyncTick();
 }
 
 void getG2Status(char* buffer, size_t bufferSize) {

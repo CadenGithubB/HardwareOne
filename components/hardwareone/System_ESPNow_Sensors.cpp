@@ -155,7 +155,7 @@ static const SensorBroadcastSpec gSensorSpecs[REMOTE_SENSOR_MAX] = {
   // ANO rotary encoder is the OTHER input device (mutually exclusive with the
   // gamepad — INPUT_DEVICE_TYPE picks exactly one). Same REMOTE_SENSOR_INPUT
   // slot, same 10 Hz cadence + 128 B budget; anoEncoderBuildDataJSON emits
-  // {"valid":..,"connected":..,"ts":..[,"age":..],"pos":N,"axis":0|1,"buttons":B}
+  // {"valid":..,"connected":..,"ts":..,"pos":N,"axis":0|1,"buttons":B}
   // (~90 B typical, still under the 128 B budget). Without this branch an
   // ANO build left the input builder nullptr, so the broadcaster's
   // `if (!spec.builder) continue;` silently dropped every input frame —
@@ -1210,7 +1210,7 @@ bool getRemoteGPSData(RemoteGPSData* outData) {
     return false;
   }
   
-  // Parse the JSON data: {"valid":true,"connected":true,"ts":..,"age":..,"fix":1,"quality":1,"sats":8,"lat":37.123,"lon":-122.456,"alt":100.5,"speed":0.5}
+  // Parse the JSON data: {"valid":true,"connected":true,"ts":..,"fix":1,"quality":1,"sats":8,"lat":37.123,"lon":-122.456,"alt":100.5,"speed":0.5}
   PSRAM_JSON_DOC(doc);
   DeserializationError err = deserializeJson(doc, bestEntry->jsonData, bestEntry->jsonLength);
   if (err) {

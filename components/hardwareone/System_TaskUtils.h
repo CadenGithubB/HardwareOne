@@ -131,15 +131,15 @@ constexpr UBaseType_t SR_TASK_PRIORITY_LEVEL = TASK_PRIORITY_HIGH;  // kept for 
 
 // Named cores for the placement policy documented below.
 //   PRO_CORE (0) — Wi-Fi / BLE / ESP-NOW radio + I/O paths live here.
-//   APP_CORE (1) — Arduino loop, compute/render, and all I2C work run here.
+//   APP_CORE (1) — compute/render and all I2C work run here.
 constexpr BaseType_t PRO_CORE = 0;
 constexpr BaseType_t APP_CORE = 1;
 
 // Core that every I2C-touching task pins to (APP core). Core 0 is saturated by
 // the Wi-Fi stack + ESP-NOW; a task that floats onto Core 0 and gets starved
 // mid-I2C-transaction lets the legacy driver's bus-recovery path storm the bus →
-// panic(4) / INT-WDT. Core 1 is near-idle so the transaction finishes before its
-// timeout. Full rationale (and the FeatherS3 out-and-about crash loop it fixed,
+// panic(4) / INT-WDT. Core 1 carries no OS-owned work in this build, so the
+// transaction finishes before its timeout. Full rationale (and the FeatherS3 out-and-about crash loop it fixed,
 // docs/NewCapture 2026-07-22) is at the sensor tasks in System_TaskUtils.cpp.
 // Shared here so the sensor-queue processor — created in HardwareOne.cpp /
 // System_I2C.cpp, and which runs the I2C device-init transactions — pins too.
@@ -149,8 +149,14 @@ constexpr BaseType_t I2C_SENSOR_CORE = APP_CORE;
 // TASK CORE-PLACEMENT POLICY  (ESP32-S3, dual core — read before creating tasks)
 // ============================================================================
 // Core 0 (PRO) is saturated by the Wi-Fi stack, the BLE controller, and the
-// ESP-NOW callback/heartbeat. Core 1 (APP) runs the Arduino loop and is
-// otherwise near-idle. Placement rule by task class:
+// ESP-NOW callback/heartbeat — AND, in this build, the main task too:
+// sdkconfig sets CONFIG_ESP_MAIN_TASK_AFFINITY_CPU0=y, and
+// CONFIG_AUTOSTART_ARDUINO is unset so Arduino's loopTask does not exist at
+// all (CONFIG_ARDUINO_RUNNING_CORE=1 is inert without it). Core 1 (APP)
+// therefore carries only what we pin there.
+// CONSEQUENCE for reasoning about races: the main-loop tick runs on Core 0
+// alongside the radio callbacks, so "the loop is on the other core" is NOT a
+// reason two paths can't interleave. Placement rule by task class:
 //
 //   Core 1 (APP) — pin here:
 //     * ANY task that touches the shared I2C/Wire bus (use I2C_SENSOR_CORE).

@@ -4,6 +4,7 @@
  */
 
 #include "System_BuildConfig.h"
+#include "System_Clock.h"  // Clock::isValidEpoch — one epoch-validity vocabulary
 #include <esp_attr.h>
 
 #if ENABLE_ESPNOW
@@ -3669,7 +3670,7 @@ static void doUserSyncWork(const DeferredUserSyncWork* w) {
     char createdAtBuf[24];
     time_t nowT = time(nullptr);
     struct tm tmUtc;
-    if (nowT > 1577836800 && gmtime_r(&nowT, &tmUtc) &&
+    if (Clock::isValidEpoch(nowT) && gmtime_r(&nowT, &tmUtc) &&
         strftime(createdAtBuf, sizeof(createdAtBuf), "%Y-%m-%dT%H:%M:%SZ", &tmUtc) > 0) {
       newUser["createdAt"]       = createdAtBuf;    // exact creation time
       newUser["createdAtSource"] = "clock";         // stamped live from the wall clock
@@ -9976,6 +9977,21 @@ static bool initEspNow() {
     broadcastOutput("[ESP-NOW] WARNING: Device name not set in settings");
   }
 
+  // Broadcast boot notification to all peers. This happens BEFORE the
+  // heartbeat-task start below: gEspNow->initialized is already true by this
+  // point, so a task-start failure returns with the mesh half-up and every
+  // retry short-circuits on the "Already initialized" early-return — if the
+  // notification only fired after the task start, that boot would never
+  // announce itself. The TX path (espnowtx::init) is already up here.
+  {
+    extern uint32_t gBootCounter;
+    time_t now = time(nullptr);
+    uint32_t timestamp = Clock::isValidEpoch(now) ? (uint32_t)now : 0;
+    String bootMsg = buildBootNotification(generateMessageId(), gEspNow->deviceName.c_str(), gBootCounter, timestamp);
+    meshSendBootToPeers(bootMsg);
+    BROADCAST_PRINTF("[ESP-NOW] Boot notification sent (counter=%lu)", (unsigned long)gBootCounter);
+  }
+
   // Start ESP-NOW heartbeat task (parallel processing)
   if (!startEspNowTask()) {
     broadcastOutput("[ESP-NOW] WARNING: Failed to start heartbeat task - mesh features may not work");
@@ -9993,15 +10009,6 @@ static bool initEspNow() {
   broadcastOutput("[ESP-NOW] System initialized successfully");
   BROADCAST_PRINTF("[ESP-NOW] Heap allocated: ~%u KB (includes task stack, buffers, peer storage)", (unsigned)(heapUsed / 1024));
   broadcastOutput("[ESP-NOW] NOTE: This heap remains allocated until device reboot. Disable and re-init will not free all memory.");
-
-  // Broadcast boot notification to all peers
-  extern uint32_t gBootCounter;
-  time_t now = time(nullptr);
-  uint32_t timestamp = (now > 1609459200) ? now : 0;  // Valid if after 2021-01-01
-  
-  String bootMsg = buildBootNotification(generateMessageId(), gEspNow->deviceName.c_str(), gBootCounter, timestamp);
-  meshSendBootToPeers(bootMsg);
-  BROADCAST_PRINTF("[ESP-NOW] Boot notification sent (counter=%lu)", (unsigned long)gBootCounter);
 
   systemEventPost(SYSEVT_ESPNOW_ON);
   logSystemEvent("ESPNOW", "init OK — mesh online on channel %d (mode=%s)",
@@ -13568,7 +13575,9 @@ bool sendBondedSensorData(uint8_t sensorType, const uint8_t* data, uint16_t data
   if (!parseMacAddress(gSettings.bondPeerMac, peerMac)) return false;
   
   // Build payload: header + data
-  // V4PayloadSensorData is 8 bytes header, max payload is 226, so max data is 218 bytes
+  // V4PayloadSensorData is 8 bytes header; ESPNOW_V4_MAX_PAYLOAD is 218 (V4 — the old
+  // "226/218" numbers were V3), so max data is 210 bytes. Note this is a SECOND cap,
+  // separate from the 200 B gate in v4_send_sensor_envelope on the mesh path.
   const uint16_t maxDataLen = ESPNOW_V4_MAX_PAYLOAD - sizeof(V4PayloadSensorData);
   if (dataLen > maxDataLen) {
     DEBUGF(DEBUG_ESPNOW_MESH, "[V4_SENSOR_TX] Data too large: %u > %u", dataLen, maxDataLen);

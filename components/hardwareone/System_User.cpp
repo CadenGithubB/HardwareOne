@@ -2800,10 +2800,6 @@ const char* BOOT_ANCHORS_FILE = "/system/boot_anchors.json";
 // External dependencies for timestamp resolution
 extern uint32_t gNTPAnchorId;
 extern uint32_t gBootCounter;
-extern bool gTimeSyncedMarkerWritten;
-extern void timeSyncUpdateBootEpoch();
-extern void getTimestampPrefixMsCached(char* buf, size_t bufSize);
-extern bool appendLineWithCap(const char* path, const String& line, size_t cap);
 
 // Boot anchor structure - represents an NTP sync point
 struct BootAnchor {
@@ -3095,7 +3091,7 @@ static bool resolveUserTimestamp(String& usersJson, const UserTimestampInfo& inf
     crossBoot = true;
   }
 
-  if (createdAtUtc < 1577836800) return false;  // sanity: before Jan 2020
+  if (!Clock::isValidEpoch(createdAtUtc)) return false;  // sanity: before 2020
   time_t now = time(nullptr);
   if (now > 0 && createdAtUtc > now + 60) return false;  // sanity: not in the future
 
@@ -3130,6 +3126,15 @@ static bool approximateUserTimestamp(String& usersJson, const UserTimestampInfo&
   char quotedValue[56];
   snprintf(approxLabel, sizeof(approxLabel), "%s Power Cycle", ordinal);
   snprintf(quotedValue, sizeof(quotedValue), "\"%s\"", approxLabel);
+
+  // Idempotence: the resolve pass now re-runs on every clock step (duty
+  // drain), and an already-approximated user would otherwise report
+  // "modified" every time — a pointless users.json flash rewrite per step.
+  const int existing = usersJson.indexOf(quotedValue, info.jsonStartPos);
+  if (existing >= 0) {
+    const int nextObj = usersJson.indexOf('}', info.jsonStartPos);
+    if (nextObj < 0 || existing < nextObj) return false;  // unchanged
+  }
 
   if (!replaceJsonField(usersJson, "createdAt", String(quotedValue), info.jsonStartPos)) {
     return false;
@@ -3196,11 +3201,19 @@ void cleanupOldBootAnchors(void* usersDocPtr) {
 // Resolve pending user creation timestamps
 void resolvePendingUserCreationTimes() {
   DEBUG_NTP_RESOLVEF("[resolve] Starting timestamp resolution");
-  
+
   if (!filesystemReady || !VFS::existsGuarded(USERS_JSON_FILE, VFS::systemAuth("user.resolveCreated"))) {
     DEBUG_NTP_RESOLVEF("[resolve] Skipping - FS not ready or file missing");
     return;
   }
+
+  // Hold the FS lock across the WHOLE read-modify-write. This now runs from
+  // the main loop (Clock::clockDutiesTick) concurrently with cmd_exec user
+  // CRUD, which guards its own RMW the same way — without this, a useradd
+  // landing between our read and our writeTextAtomic would be clobbered by
+  // our stale copy (last-writer-wins on the whole file). FsLockGuard is
+  // per-task reentrant, so the guarded open/write inside are fine.
+  FsLockGuard fsGuard("user.resolveCreated");
 
   static char* usersJsonBuf = nullptr;
   static const size_t USERS_JSON_BUF_SIZE = 8192;
@@ -3331,6 +3344,11 @@ void writeBootAnchor() {
 
   unsigned long currentMillis = millis();
 
+  // Whole-RMW lock, same reasoning as resolvePendingUserCreationTimes: this
+  // runs from the main-loop duty drain and must not interleave with another
+  // task's write of the same file.
+  FsLockGuard fsGuard("user.bootAnchor");
+
   // Load existing anchors (start empty if the file is absent or corrupt).
   PSRAM_JSON_DOC(doc);
   String existing;
@@ -3341,6 +3359,22 @@ void writeBootAnchor() {
 
   JsonArray bootAnchorsArray = doc["bootAnchors"];
   if (bootAnchorsArray.isNull()) bootAnchorsArray = doc["bootAnchors"].to<JsonArray>();
+
+  // UPSERT, not append: this boot can anchor more than once (ring adoption
+  // first, a real NTP sync minutes later), and findMatchingAnchor() returns
+  // the FIRST row with this id — an appended second row would lose to the
+  // stale ring-derived one forever. Overwriting in place keeps exactly one
+  // row per anchor id, always the freshest (= most accurate) fix.
+  for (JsonObject a : bootAnchorsArray) {
+    if (a["ntpAnchorId"].as<uint32_t>() == (uint32_t)gNTPAnchorId) {
+      a["epochAtSync"] = (uint32_t)now;
+      a["millisAtSync"] = (uint32_t)currentMillis;
+      String updated;
+      serializeJson(doc, updated);
+      writeTextAtomic(BOOT_ANCHORS_FILE, updated);
+      return;
+    }
+  }
 
   if ((int)bootAnchorsArray.size() >= 16) {
     bootAnchorsArray.remove(0);

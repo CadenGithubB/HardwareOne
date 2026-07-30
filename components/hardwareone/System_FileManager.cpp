@@ -179,7 +179,7 @@ bool FileManager::getItem(int index, FileEntry& entry) {
   }
   
   // Fallback: scan filesystem if index is beyond cache
-  // (This should rarely happen with FILE_MANAGER_MAX_CACHED_ITEMS=64)
+  // (This should rarely happen with FILE_MANAGER_MAX_CACHED_ITEMS=256)
 
   FsLockGuard guard("FileManager.getItem.scan");
   const AuthContext& ctx = currentAuthContext();
@@ -191,7 +191,7 @@ bool FileManager::getItem(int index, FileEntry& entry) {
   }
 
   // Same SD prefix-translation as loadDirectory — needed when the user
-  // is browsing /sd/* with >64 items per directory.
+  // is browsing /sd/* with more than FILE_MANAGER_MAX_CACHED_ITEMS (256) per directory.
   String effectivePath = VFS::stripSdPrefix(String(state.currentPath));
 
   int currentIdx = 0;
@@ -235,7 +235,7 @@ bool FileManager::getItem(int index, FileEntry& entry) {
       String fullPath = formatPath(state.currentPath, entry.name);
       entry.permissions = getPermissions(fullPath, ctx);
       // Cheap here (one subfolder open for the single found entry), so the
-      // uncached >64-item path still gets a correct badge.
+      // uncached >256-item path still gets a correct badge.
       entry.childCount = (countFolderChildren_ && entry.isFolder)
                              ? countFolderEntries(fullPath, ctx) : 0;
 

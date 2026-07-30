@@ -96,6 +96,7 @@ void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
   #include "System_MQTT.h"
 #endif
 #include "System_Command.h"
+#include "System_CrashRecord.h"
 #if ENABLE_HTTP_SERVER
   #include "WebServer_Server.h"
 #endif
@@ -1227,7 +1228,10 @@ const char* cmd_conditional(const String& argsInput) {
 }
 #endif
 
-// RTC fast memory: survives soft reset / WDT / panic but NOT power-off
+// RTC SLOW memory (.rtc_noinit -> rtc_slow_seg @ 0x50000000, 8 KB): survives
+// soft reset / WDT / panic / deep sleep, but NOT power-off and NOT an RTC-domain
+// reset. NOTE: the "7 KiB RTCRAM" line in the boot log is RTC *FAST* heap, a
+// different pool these never touch.
 RTC_NOINIT_ATTR static uint32_t rtcCrashCount;
 RTC_NOINIT_ATTR static uint32_t rtcLastResetReason;
 RTC_NOINIT_ATTR static uint32_t rtcMagic;
@@ -1290,14 +1294,37 @@ void hardwareone_setup() {
       rtcCrashCount = 0;
     } else if (reason == ESP_RST_TASK_WDT || reason == ESP_RST_INT_WDT ||
                reason == ESP_RST_PANIC   || reason == ESP_RST_BROWNOUT) {
+      // Keep ESP_RST_TASK_WDT: although CONFIG_ESP_TASK_WDT_PANIC is unset (so a
+      // TWDT trip only prints and keeps running), the TWDT hardware still arms
+      // STAGE1 = RESET_SYSTEM at 2x the timeout. That stage is dodged only
+      // because the ISR feeds the timer — if interrupts are starved for 10 s the
+      // reset is real, and it is the highest-signal reason in this list.
       rtcCrashCount++;
     }
     rtcLastResetReason = (uint32_t)reason;
+
+    // Decode anything __wrap_esp_panic_handler left in RTC, latch the previous
+    // boot's phase before this boot overwrites it, and maintain the CONSECUTIVE
+    // crash counter (rtcCrashCount above is cumulative-since-poweron, which is a
+    // different question). Pure RTC/RAM work — no I/O, safe this early.
+    crashRecordBootConsume((uint32_t)reason);
+
+    // Arm the panic-time capture as early as possible — a crash before this
+    // point leaves no detail, so every line of setup after it is covered.
+    crashRecordInstallPanicHook();
+
+    // Render over esp_rom_printf while we are still pre-Serial. This is the only
+    // path that survives a setup()-phase boot loop: if a crash happens before
+    // setup() returns, the device never reaches loop() and therefore never
+    // reaches any normal log sink, so every other render point would print
+    // nothing on every iteration, forever.
+    crashRecordEmitEarly();
   }
 
   // ========================================================================
   // 2. SERIAL + FILESYSTEM + SETTINGS
   // ========================================================================
+  crashRecordSetPhase(CRASH_PHASE_FS_SETTINGS);
   Serial.begin(115200);
   delay(500);  // Longer delay for serial connection
 
@@ -1420,9 +1447,28 @@ void hardwareone_setup() {
     if (rr == ESP_RST_PANIC || rr == ESP_RST_INT_WDT || rr == ESP_RST_TASK_WDT ||
         rr == ESP_RST_WDT   || rr == ESP_RST_BROWNOUT || rr == ESP_RST_CPU_LOCKUP ||
         rr == ESP_RST_PWR_GLITCH) {
-      char cd[40];
-      snprintf(cd, sizeof(cd), "boot #%lu crashCount=%lu", (unsigned long)gBootCounter, (unsigned long)rtcCrashCount);
+      // Carry the panic detail (abort/assert text, faulting core + PC, the boot
+      // phase it died in) into the event, not just the reset reason — "panic" on
+      // its own says a fault happened, not what faulted. Bounded well under the
+      // pre-init event path's ~165-char silent truncation limit.
+      char cd[150];
+      size_t w = (size_t)snprintf(cd, sizeof(cd), "boot #%lu crashCount=%lu",
+                                  (unsigned long)gBootCounter, (unsigned long)rtcCrashCount);
+      if (w < sizeof(cd)) {
+        char det[110];
+        if (crashRecordSummary(det, sizeof(det)) > 0) {
+          snprintf(cd + w, sizeof(cd) - w, " | %s", det);
+        }
+      }
       systemEventPost(SYSEVT_CRASH, resetReasonName(rtcLastResetReason), cd);
+      // Durable copy of the full record (assert text, core/PC, backtrace, build
+      // sha). The RTC copy was invalidated at consume and now exists only in
+      // this boot's RAM — one more reboot/reflash and the backtrace is gone.
+      // Written here, at boot with the FS up, because panic context can't
+      // safely touch flash.
+      crashRecordPersistToFile(resetReasonName(rtcLastResetReason),
+                               (uint32_t)rtcLastResetReason,
+                               (unsigned long)gBootCounter);
     }
   }
   rtcRebootReasonMagic = 0;   // consume — a later spontaneous SW reset won't reuse a stale reason
@@ -1447,8 +1493,13 @@ void hardwareone_setup() {
   // The "clock now accurate" line is still added later by logTimeSyncedMarkerIfReady().
   logBootAnchorToLogs(resetReasonName(rtcLastResetReason), rebootDetail[0] ? rebootDetail : nullptr);
 
-  // If time is already valid (warm boot, retained RTC), resolve user creation times early
-  if (time(nullptr) > 0) {
+  // If time is already valid (warm soft-reboot carried it in the RTC
+  // domain), resolve user creation times early. This is the one case the
+  // clockStepped chokepoint can't cover — no settimeofday happens on a
+  // carryover, so nothing pends the resolve. The old gate here was
+  // `time(nullptr) > 0`, which is an uptime test (true ~1 s after ANY
+  // boot), so this ran a pointless users.json read on every dark boot.
+  if (Clock::isSynced()) {
     resolvePendingUserCreationTimes();
   }
 
@@ -1461,6 +1512,7 @@ void hardwareone_setup() {
   // ========================================================================
   // 3. MUTEXES + DEBUG SYSTEM + BUFFERS
   // ========================================================================
+  crashRecordSetPhase(CRASH_PHASE_DEBUG_BUF);
 
   // Sensor cache mutexes are now created lazily in each *StartInternal() function
   // This saves memory for disabled sensors and allows better error handling
@@ -1524,6 +1576,7 @@ void hardwareone_setup() {
   // ========================================================================
   // 4. HARDWARE INIT — battery, LED, I2C buses
   // ========================================================================
+  crashRecordSetPhase(CRASH_PHASE_HARDWARE);
   initBattery();
   initNeoPixelLED();  // Must precede I2C — powers STEMMA QT connector on Feather V2
 
@@ -1540,6 +1593,7 @@ void hardwareone_setup() {
   // ========================================================================
   // 5. BUILD CONFIG BANNER + OLED EARLY INIT
   // ========================================================================
+  crashRecordSetPhase(CRASH_PHASE_BANNER_OLED);
   {
     char bannerLine[96];
     broadcastOutput("");
@@ -1647,6 +1701,7 @@ void hardwareone_setup() {
   // ========================================================================
   // 6. FIRST-TIME SETUP + CREDENTIALS
   // ========================================================================
+  crashRecordSetPhase(CRASH_PHASE_FIRST_TIME);
   broadcastOutput("");
   broadcastOutput("Booting ESP32 Minimal Auth");
   if (gFirstTimeSetupState == SETUP_NOT_NEEDED) {
@@ -1692,6 +1747,7 @@ void hardwareone_setup() {
   // ========================================================================
   // 7. NETWORK — WiFi + NTP
   // ========================================================================
+  crashRecordSetPhase(CRASH_PHASE_NETWORK);
 #if ENABLE_WIFI
   oledSetBootProgress(30, "Connecting WiFi");
 
@@ -1743,9 +1799,17 @@ void hardwareone_setup() {
     } else {
       oledSetBootProgress(45, "Syncing NTP");
       DEBUG_NTPF("[DEBUG] Starting NTP sync");
-      bool ntpOk = syncNTPAndResolve();
+      NtpSyncOutcome ntpOutcome = NtpSyncOutcome::Failed;
+      bool ntpOk = syncNTPAndResolve(&ntpOutcome);
       DEBUG_NTPF("%s", ntpOk ? "[DEBUG] NTP sync complete" : "[DEBUG] NTP sync failed");
-      oledSetBootProgress(50, ntpOk ? "Time synced" : "Time unavailable");
+      const char* ntpMsg = "Time unavailable";
+      switch (ntpOutcome) {
+        case NtpSyncOutcome::Reply:       ntpMsg = "Time synced"; break;
+        case NtpSyncOutcome::KeptPrior:   ntpMsg = "Time kept, NTP pending"; break;
+        case NtpSyncOutcome::RtcFallback: ntpMsg = "Time from RTC"; break;
+        default: break;
+      }
+      oledSetBootProgress(50, ntpMsg);
     }
   } else {
     oledSetBootProgress(50, "Continuing offline");
@@ -1760,6 +1824,7 @@ void hardwareone_setup() {
   // ========================================================================
   // 8. DEVICE DISCOVERY + SERVICE AUTO-START
   // ========================================================================
+  crashRecordSetPhase(CRASH_PHASE_AUTOSTART);
   oledSetBootProgress(60, "Scanning devices");
 
   DEBUG_SYSTEMF("Starting device discovery");
@@ -2095,24 +2160,17 @@ void hardwareone_setup() {
     }
   }
 
-  // Send boot notification if ESP-NOW is active
-  if (gEspNow && gEspNow->initialized) {
-    extern String buildBootNotification(uint32_t msgId, const char* src, uint32_t bootCounter, uint32_t timestamp);
-    extern void meshSendBootToPeers(const String& envelope);
-    extern uint32_t generateMessageId();
-
-    time_t now = time(nullptr);
-    uint32_t timestamp = (now > 1609459200) ? now : 0;
-
-    String bootMsg = buildBootNotification(generateMessageId(), gEspNow->deviceName.c_str(), gBootCounter, timestamp);
-    meshSendBootToPeers(bootMsg);
-    BROADCAST_PRINTF("[ESP-NOW] Boot notification sent (counter=%lu)", (unsigned long)gBootCounter);
-  }
+  // Boot notification is sent by initEspNow() itself (System_ESPNow.cpp),
+  // which covers every init path — boot autostart AND manual `openespnow`.
+  // A near-verbatim copy here used to send a SECOND notification with a
+  // fresh message id on every autostart boot (mesh dedup couldn't collapse
+  // them), so peers saw each boot twice.
 #endif
 
   // ========================================================================
   // 9. BOOT-COMPLETE DIAGNOSTICS
   // ========================================================================
+  crashRecordSetPhase(CRASH_PHASE_BOOT_DIAG);
   printCommandModuleSummary();
   printSettingsModuleSummary();
   printMemoryReport();
@@ -2122,6 +2180,10 @@ void hardwareone_setup() {
   if (gSettings.systemLogEnabled && ramFlushResolve(RF_SYSTEMLOG, gSettings.systemLogAutoStart)) systemLogAutoStart();
 
   broadcastOutput("[Boot] Setup complete");
+
+  // setup() survived — any crash from here on is a RUNTIME fault, not a boot
+  // fault, which is the single most useful bit for triaging one.
+  crashRecordSetPhase(CRASH_PHASE_RUNNING);
 
   // Last lines of boot: nudge to provision the BLE passphrase if encryption is wanted
   // but unset (so the operator can't miss that Bluetooth is currently plaintext).
@@ -2316,6 +2378,13 @@ void hardwareone_loop() {
   // it OOMs even with memory debugging off.
   periodicMemorySample();
 
+  // Declare this boot healthy once it has run for a while, which clears the
+  // CONSECUTIVE crash counter. Without this the counter would only ever clear on
+  // a power cycle, i.e. it would silently degrade into "crashes since poweron" —
+  // the exact conflation it exists to avoid — and a device that crashed a few
+  // times over weeks of healthy uptime would read as if it were mid-crash-loop.
+  if (millis() > 60000) crashRecordMarkBootHealthy();
+
   if (isDebugFlagSet(DEBUG_MEMORY)) {
     static unsigned long lastTaskReport = 0;
     unsigned long now = millis();
@@ -2332,6 +2401,9 @@ void hardwareone_loop() {
 
   sensorLogTick();
   timeAnchorsTick();   // retro-date boot-named captures once the clock syncs
+  g2RingTimeSyncTick(); // ring-clock custody: adopt when dark / correct ring after sync
+  ntpSyncDrainTick();   // hand real SNTP replies to the clock-step chokepoint
+  Clock::clockDutiesTick(); // drain filesystem-touching clock-step chores
 #if ENABLE_BLUETOOTH
   bleAutoReconnectTick();
 #endif

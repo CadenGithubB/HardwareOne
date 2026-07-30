@@ -1106,8 +1106,10 @@ function loadLogFile(filepath) {
   
   console.log('[LOGGING] Loading log file:', filepath);
   
-  // Use streaming fetch with mode=raw to get plain text
-  hw.fetchText('/api/files/view?name=' + encodeURIComponent(filepath) + '&mode=raw')
+  // Use streaming fetch with mode=raw to get plain text. dec=1 asks the
+  // server to reveal sealed (at-rest encrypted) captures for this parse —
+  // a no-op for plaintext files.
+  hw.fetchText('/api/files/view?name=' + encodeURIComponent(filepath) + '&mode=raw&dec=1')
     .then(text => {
       parseLogFile(text);
       document.getElementById('viewer-filters').style.display = 'block';

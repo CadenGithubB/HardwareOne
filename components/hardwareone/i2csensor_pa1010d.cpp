@@ -252,9 +252,9 @@ const char* cmd_gps(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   if (argWantsJson(argsInput)) {
-    if (!ensureDebugBuffer()) return "{\"valid\":false,\"error\":\"buffer\"}";
+    if (!ensureDebugBuffer()) return SENSOR_JSON_NOBUF;
     int n = gpsBuildDataJSON(getDebugBuffer(), 1024);  // shared builder (also feeds sensors json / MQTT)
-    return (n > 0) ? getDebugBuffer() : "{\"valid\":false}";
+    return (n > 0) ? getDebugBuffer() : SENSOR_JSON_UNAVAILABLE;
   }
 
   DEBUG_GPS_POLLINGF("[GPS_CMD] Reading GPS data (enabled=%d, task=%p)...",
@@ -427,6 +427,18 @@ void gpsTask(void* parameter) {
     // CRITICAL: Check enabled flag FIRST for graceful shutdown
     if (!gGpsRunning) {
       gGpsConnected = false;
+      // Invalidate the cache on the way out (matches tof/imu/seesaw/presence/apds/
+      // ano/fm task-exits). Without this, dataValid stayed true after `closegps`
+      // and the envelope reported valid:true,connected:false with stale values
+      // until the NEXT start's stale-cache wipe. Clear the consumer GATES, not the
+      // values behind them: hasFix/fixQuality/satellites are what automations
+      // (SPEED/GPS/WP_DIST gate on gps.hasFix, not dataValid) and the renderers
+      // test before reading lat/lon/alt/speed. Direct writes, no SensorCacheGuard —
+      // shutdown must not block on a held mutex, and each field is word-sized.
+      gGpsCache.dataValid  = false;
+      gGpsCache.hasFix     = false;
+      gGpsCache.fixQuality = 0;
+      gGpsCache.satellites = 0;
       gpsDestroyObject();
       SENSOR_TASK_EXIT(GPS);
     }

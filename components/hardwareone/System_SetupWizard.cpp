@@ -10,6 +10,7 @@
 #include "System_Settings.h"
 #include "System_BuildConfig.h"
 #include "System_Debug.h"
+#include "System_Clock.h"  // Clock::applyTimezone — keep libc TZ in step with the picker
 #include "System_Mutex.h"  // SensorCacheGuard
 
 #if ENABLE_WIFI
@@ -810,6 +811,12 @@ bool wizardNextPage(SetupWizardResult& result) {
     result.timezoneOffset = timezones[timezoneSelection].offsetMinutes;
     result.timezoneAbbrev = timezones[timezoneSelection].abbrev;
     gSettings.tzOffsetMinutes = result.timezoneOffset;
+    // Push it into libc immediately. This page-leave write lands well before
+    // wizardFinalize()'s applySettings(), and if the wizard is cancelled or
+    // times out that call never happens — leaving gSettings on the new offset
+    // while localtime_r() still used the old one, i.e. two different "local"
+    // times in one firmware for the rest of the boot.
+    Clock::applyTimezone();
     gSettings.logLevel = logLevelSelection;
     if (systemPageHasNTP()) {
       result.ntpServer = ntpPresets[ntpSelection];
@@ -1781,6 +1788,13 @@ SetupWizardResult runAndApplyFeatureWizard(unsigned long idleTimeoutMs) {
 
   writeSettingsJson();  // flush any other wizard changes made above
   applySettings();
+#if ENABLE_WIFI
+  // Re-register SNTP with the wizard's NTP choice — applySettings() does
+  // not reach setupNTP(), so without this the new server only took effect
+  // on the next reboot.
+  extern void setupNTP();
+  if (WiFi.isConnected()) setupNTP();
+#endif
 
   return result;
 }

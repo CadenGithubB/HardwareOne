@@ -9778,10 +9778,10 @@ function startGamepadPolling() {
   function tick() {
     var now = Date.now();
     if (now < gpBackoffUntil) return;
-    hw.fetchJSON('/api/sensors?sensor=gamepad&ts=' + now)
+    hw.fetchJSON('/api/sensors?sensor=input&ts=' + now)
       .then(function(j) {
         if (!running) return;
-        if (j && j.v) {
+        if (j && j.val) {
           var x = j.x | 0, y = j.y | 0;
           var nx = (x - 512) / 512, ny = (y - 512) / 512;
           if (nx < -1) nx = -1; if (nx > 1) nx = 1;

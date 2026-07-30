@@ -1,6 +1,7 @@
 #include "System_BuildConfig.h"
 #include "System_Filesystem.h"  // requireQuotedPath (uniform quoted-path rule)
 #include "System_Maps.h"
+#include "System_Clock.h"  // Clock::isValidEpoch — one epoch-validity vocabulary
 
 #if ENABLE_MAPS
 
@@ -2943,9 +2944,10 @@ bool GPSTrackManager::saveTrack(char* outPath, size_t outPathSize) {
 
   time_t now = time(nullptr);
   char timestamp[24];
-  if (now > 1609459200) {
-    struct tm* ti = localtime(&now);
-    strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H-%M-%S", ti);
+  if (Clock::isValidEpoch(now)) {
+    struct tm tmLocal;
+    localtime_r(&now, &tmLocal);
+    strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H-%M-%S", &tmLocal);
   } else {
     snprintf(timestamp, sizeof(timestamp), "%lu", millis());
   }
@@ -3285,7 +3287,11 @@ const char* cmd_gpstrackmerge(const String& argsInput) {
   // just READ|DELETE, per the System_Filesystem.cpp path rules) — this is the
   // same reason the sensor logger writes here as systemAuth.
   const AuthContext& ctx    = currentAuthContext();
-  const AuthContext  sysCtx = VFS::systemAuth("gps.stitch");
+  // SCOPED — same reasoning as healthlogmerge's sysCtx: an unscoped system
+  // identity bypasses pathWithinScope entirely and inherits PERM_ALL on rules
+  // where admins are read-only. This is the UI-reachable twin (the Maps page
+  // builds this command), so it matters more than the sensor-side clone.
+  const AuthContext  sysCtx = VFS::systemAuth(VFS::captureScopeFor(outPath), "gps.stitch");
   FsLockGuard fsGuard("gpstrackmerge");
 
   // Validate every input up front (quoted, exists, not the output) so a bad
@@ -3301,12 +3307,24 @@ const char* cmd_gpstrackmerge(const String& argsInput) {
     }
   }
 
+  // Refuse an out-of-tree output BEFORE the "w" open truncates it — same
+  // reasoning as healthlogmerge's check; sysCtx is scoped, so the open would
+  // fail anyway, but only after the damage and only as "cannot create".
+  if (!VFS::pathInCaptureTree(outPath)) {
+    snprintf(buf, 1024,
+             "Error: output must be inside %s (or its /sd mirror) — got %s",
+             VFS::Scopes::CAPTURES, outPath.c_str());
+    return buf;
+  }
+
   VFS::mkdirGuarded("/logging_captures", sysCtx);
   VFS::mkdirGuarded("/logging_captures/tracks", sysCtx);
 
   File out = VFS::openGuarded(outPath, "w", sysCtx, true);
   if (!out) {
-    snprintf(buf, 1024, "Error: cannot create output: %s", outPath.c_str());
+    snprintf(buf, 1024,
+             "Error: cannot create output: %s (parent missing, filesystem full, "
+             "or path not writable)", outPath.c_str());
     return buf;
   }
 

@@ -838,6 +838,12 @@ static void wizardMode_onExit(void* /*ud*/) {
     // without requiring a reboot. Matches the legacy flow.
     writeSettingsJson();
     applySettings();
+#if ENABLE_WIFI
+    // Re-register SNTP with the wizard's NTP choice — applySettings() does
+    // not reach setupNTP(), so without this the new server only took effect
+    // on the next reboot.
+    if (WiFi.isConnected()) setupNTP();
+#endif
   } else {
     broadcastOutput("Feature setup cancelled. No changes saved.");
   }

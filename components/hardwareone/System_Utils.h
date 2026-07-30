@@ -176,8 +176,28 @@ void setupNTP();
 void rebootStashReason(const char* reason, const char* who, uint8_t source);
 void recordRebootIntent(const char* reason, const char* auditDetail);
 void rebootDevice(const char* reason, const char* auditDetail, uint32_t flushDelayMs);
-bool syncNTPAndResolve();  // Synchronous - runs in calling task's stack
-time_t nowEpoch();
+// What actually happened during a foreground NTP attempt. Clock::isSynced()
+// cannot distinguish "a server replied" from "the clock was already set";
+// this can.
+enum class NtpSyncOutcome : uint8_t {
+  Reply,        // an SNTP server actually answered during the wait window
+  KeptPrior,    // no reply yet, but the clock was already valid — kept it
+  RtcFallback,  // dark timeout, adopted the DS3231's time instead
+  Failed,       // no reply and no other source — clock still dark
+};
+// Synchronous - runs in calling task's stack. Returns true when the clock is
+// valid on exit (any outcome but Failed).
+bool syncNTPAndResolve(NtpSyncOutcome* outcomeOut = nullptr);
+
+#if ENABLE_WIFI
+// Main-loop drain (HardwareOne loop is the ONLY caller — a second consumer
+// would race the pending flag): hands stored SNTP-reply facts to
+// Clock::clockStepped(). Covers both foreground syncs and the silent
+// background corrections the lwIP daemon makes hourly.
+void ntpSyncDrainTick();
+#else
+inline void ntpSyncDrainTick() {}
+#endif
 
 // Note: BROADCAST_PRINTF is defined as a macro in debug_system.h, not a function
 
@@ -332,7 +352,6 @@ int serializeJsonArrayWithRepair(JsonArray& arr, char* buf, size_t bufSize, cons
 // Date/Time Formatting Utilities
 // ============================================================================
 
-String formatDateTime(time_t timestamp);
 
 // ============================================================================
 // Serial Input Helpers
@@ -345,10 +364,8 @@ String waitForSerialInputBlocking();
 // Time Sync Functions
 // ============================================================================
 
-// Call when SNTP/RTC time becomes valid or changes significantly
-void timeSyncUpdateBootEpoch();
-
 // Returns a ms-precision prefix like "[YYYY-MM-DD HH:MM:SS.mmm] | "
+// Reads the wall clock per call (self-healing across any clock step).
 // Writes empty string if epoch time invalid
 void getTimestampPrefixMsCached(char* out, size_t outSize);
 

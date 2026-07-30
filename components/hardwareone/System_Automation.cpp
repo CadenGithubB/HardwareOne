@@ -196,6 +196,10 @@ bool updateAutomationNextAt(long automationId, time_t newNextAt);
 time_t computeNextRunTime(const char* automationJson, time_t fromTime);
 // Unified post-fire helper (Trigger model defined later in this file).
 static void rescheduleAfterFire(long id, const char* automationJson, time_t firedAt);
+// Force-recompute every CLOCK trigger of every enabled automation in one
+// read/modify/write. Defined below the Trigger type; declared here for
+// cmd_automation's "recompute" subcommand. Returns triggers rewritten.
+static int automationRecomputeAllClockTriggers(time_t now, int* outSkipped);
 const char* executeConditionalCommand(const char* command, const char* owner, const char* autoName = nullptr);
 const char* evaluateConditionalChain(const char* chainStr, char* outBuf, size_t outBufSize);
 bool evaluateCondition(const char* condition);
@@ -595,6 +599,61 @@ static void rebuildAutomationsCache() {
 }
 
 // Fast in-RAM check: is any enabled automation's nextAt at or before `now`?
+// ---------------------------------------------------------------------------
+// Condition-gate back-off
+// ---------------------------------------------------------------------------
+// A clock-due automation whose "Fire when" condition is FALSE deliberately
+// keeps its nextAt in the past: the UI promises it fires when the condition
+// becomes true, so the occurrence is deferred, not skipped. But a past nextAt
+// makes automationsAnyDue() return true on EVERY main-loop iteration, and the
+// full tick re-reads and re-parses automations.json each time — the same
+// forever-spin the event-trigger defense in rebuildAutomationsCache() guards
+// against. Re-checking a sensor condition a few times a second buys nothing,
+// so a blocked automation is muted for kCondBlockMs and re-evaluated after.
+// Ring buffer, same shape as the EVENT fire cooldown below.
+static constexpr int      kCondBlockSlots = 16;
+static constexpr uint32_t kCondBlockMs    = 5000;
+// How late a clock trigger may be and still fire. Beyond this the occurrence
+// is treated as missed: the schedule advances but the commands do not run.
+// 15 min comfortably covers a slow boot or a busy main loop while still
+// suppressing the "device was off for hours" / "clock just jumped from 1970"
+// burst. Interval triggers shorter than this simply lose the stale occurrence,
+// which is what an interval means anyway.
+static constexpr time_t kMissedFireGraceSec = 15 * 60;
+static long     sCondBlockId[kCondBlockSlots] = {};
+static uint32_t sCondBlockAtMs[kCondBlockSlots] = {};
+static int      sCondBlockNext = 0;
+
+// True while `id` is inside its condition back-off window.
+static bool automationCondBlocked(long id) {
+  if (id == 0) return false;  // 0 marks an empty slot — never a real id
+  const uint32_t nowMs = millis();
+  for (int i = 0; i < kCondBlockSlots; i++) {
+    if (sCondBlockId[i] == id) {
+      return (nowMs - sCondBlockAtMs[i]) < kCondBlockMs;
+    }
+  }
+  return false;
+}
+
+// Note that `id` just failed its condition gate while clock-due.
+static void automationNoteCondBlocked(long id) {
+  if (id == 0) return;
+  for (int i = 0; i < kCondBlockSlots; i++) {
+    if (sCondBlockId[i] == id) { sCondBlockAtMs[i] = millis(); return; }
+  }
+  sCondBlockId[sCondBlockNext]   = id;
+  sCondBlockAtMs[sCondBlockNext] = millis();
+  sCondBlockNext = (sCondBlockNext + 1) % kCondBlockSlots;
+}
+
+// Clear the back-off for `id` (it fired, or its record changed).
+static void automationClearCondBlock(long id) {
+  for (int i = 0; i < kCondBlockSlots; i++) {
+    if (sCondBlockId[i] == id) { sCondBlockId[i] = 0; sCondBlockAtMs[i] = 0; return; }
+  }
+}
+
 // Called from the main loop every iteration. Returns true if the full tick
 // must run (something is due, or the cache is stale).
 bool automationsAnyDue(time_t now) {
@@ -602,6 +661,9 @@ bool automationsAnyDue(time_t now) {
   if (!gAutomationsCacheValid) return true;  // force a full tick to rebuild
   for (int i = 0; i < gAutomationsCacheCount; i++) {
     if (gAutomationsCache[i].enabled && gAutomationsCache[i].nextAt > 0 && now >= gAutomationsCache[i].nextAt) {
+      // Deferred-by-condition automations stay due by design; don't let one
+      // spin the full tick (and its file read) on every loop pass.
+      if (automationCondBlocked(gAutomationsCache[i].id)) continue;
       return true;
     }
   }
@@ -1111,6 +1173,15 @@ const char* cmd_automation_add(const String& argsInput) {
   } else if (typeNorm == "interval") {
     if (!isNumeric(intervalMs)) {
       broadcastOutput("Error: interval requires numeric intervalms (milliseconds)");
+      return "ERROR";
+    }
+    // Reject sub-second (and 0) rather than clamping: the scheduler stores
+    // nextAt in whole seconds, so anything under 1000 ms would reschedule to
+    // the same second and rewrite automations.json on every main-loop pass —
+    // real flash wear. 0 is a permanently-inert trigger. The web UI's delay
+    // unit defaults to milliseconds, so this is easy to hit by accident.
+    if (intervalMs.toInt() < 1000) {
+      broadcastOutput("Error: intervalms must be at least 1000 (1 second)");
       return "ERROR";
     }
   } else if (typeNorm == "event") {
@@ -2037,72 +2108,19 @@ const char* cmd_automation(const String& argsInput) {
       return "Sanitize: no changes needed";
     }
   } else if (subCmd == "recompute") {
-    String json;
-    if (!readText(AUTOMATIONS_JSON_FILE, json)) return "Error: failed to read automations.json";
-    
     time_t now = time(nullptr);
     if (now <= 0) return "Error: no valid system time for recompute";
-    
-    int recomputed = 0, failed = 0;
-    bool modified = false;
-    
-    // Parse through all automations and recompute nextAt
-    int pos = 0;
-    while (true) {
-      int idPos = json.indexOf("\"id\"", pos);
-      if (idPos < 0) break;
-      int colon = json.indexOf(':', idPos);
-      if (colon < 0) break;
 
-      int objStart = json.lastIndexOf('{', idPos);
-      if (objStart < 0) {
-        pos = colon + 1;
-        continue;
-      }
-      int objEnd = findJsonObjectEnd(json, objStart);
-      if (objEnd < 0) break;
+    int skipped = 0;
+    const int rewritten = automationRecomputeAllClockTriggers(now, &skipped);
+    if (rewritten < 0) return "Error: failed to rewrite automations.json";
 
-      int comma = json.indexOf(',', colon + 1);
-      int idValEnd = (comma > 0 && comma < objEnd) ? comma : objEnd;
-      String idStr = json.substring(colon + 1, idValEnd);
-      idStr.trim();
-      long id = idStr.toInt();
-
-      String obj = json.substring(objStart, objEnd + 1);
-      
-      // Check if enabled
-      bool enabled = (obj.indexOf("\"enabled\": true") >= 0) || (obj.indexOf("\"enabled\":true") >= 0);
-      if (!enabled) {
-        DEBUGF(DEBUG_AUTOMATIONS, "[autos recompute] id=%ld skip: disabled", id);
-        pos = objEnd + 1;
-        continue;
-      }
-      
-      // Compute nextAt
-      time_t nextAt = computeNextRunTime(obj.c_str(), now);
-      if (nextAt > 0) {
-        if (updateAutomationNextAt(id, nextAt)) {
-          recomputed++;
-          modified = true;
-          DEBUGF(DEBUG_AUTOMATIONS, "[autos recompute] id=%ld nextAt=%lu", id, (unsigned long)nextAt);
-        } else {
-          failed++;
-          DEBUGF(DEBUG_AUTOMATIONS, "[autos recompute] id=%ld failed to update", id);
-        }
-      } else {
-        failed++;
-        DEBUGF(DEBUG_AUTOMATIONS, "[autos recompute] id=%ld could not compute nextAt", id);
-      }
-      
-      pos = objEnd + 1;
-    }
-    
-    if (modified) {
-      gAutomationsDirty = true;
-      DEBUGF(DEBUG_AUTOMATIONS, "[autos recompute] scheduler refresh queued");
-    }
-    
-    BROADCAST_PRINTF("Recomputed nextAt: %d succeeded, %d failed", recomputed, failed);
+    gAutomationsDirty = true;
+    DEBUGF(DEBUG_AUTOMATIONS, "[autos recompute] rewrote %d clock trigger(s), skipped %d",
+           rewritten, skipped);
+    BROADCAST_PRINTF("Recomputed %d clock trigger(s); %d automation(s) skipped "
+                     "(disabled or no schedulable trigger). Armed afterDelay timers left intact.",
+                     rewritten, skipped);
     return "OK";
   } else if (subCmd == "run") {
     return cmd_automation_run(subArgs);
@@ -2314,8 +2332,17 @@ static time_t nextFire(const Trigger& s, time_t from) {
     case Trigger::BOOT:
     case Trigger::EVENT:
       return 0;  // manually armed / dispatched by runAtBoot or the event matcher, not by the clock
-    case Trigger::INTERVAL:
-      return (s.intervalMs > 0) ? (from + (time_t)(s.intervalMs / 1000)) : 0;
+    case Trigger::INTERVAL: {
+      if (s.intervalMs == 0) return 0;  // unset/invalid — not schedulable
+      // Floor at one second: intervalMs/1000 integer-divides to 0 for any
+      // sub-second interval, which reschedules to `from` (still due), and
+      // every fire runs rescheduleAfterFire -> writeAutomationsJsonAtomic,
+      // i.e. a LittleFS write per main-loop pass. The add paths reject
+      // sub-second values; this is the belt for hand-edited JSON.
+      time_t step = (time_t)(s.intervalMs / 1000);
+      if (step < 1) step = 1;
+      return from + step;
+    }
     case Trigger::TIME: {
       struct tm tmNow;
       if (!localtime_r(&from, &tmNow)) return 0;
@@ -2471,6 +2498,76 @@ static void rescheduleAfterFire(long id, const char* automationJson, time_t fire
   json = "";
   serializeJsonPretty(doc, json);
   writeAutomationsJsonAtomic(json);
+}
+
+// Force-recompute every clock trigger of every enabled automation.
+//
+// Why this exists rather than reusing computeNextRunTime + updateAutomationNextAt:
+// computeNextRunTime returns the MINIMUM nextAt across an automation's triggers
+// (and returns the PERSISTED value when it is already > 0), while
+// updateAutomationNextAt(id, v) resolves its -1 trigger index to the FIRST
+// schedulable trigger. Together that made `automation recompute` (a) a no-op
+// for a single-trigger automation — it wrote the same stale value back — and
+// (b) actively corrupting for a multi-trigger one, stamping one trigger's
+// schedule onto a different trigger. This walks triggers explicitly instead.
+//
+// MANUAL / BOOT / EVENT triggers are left strictly alone: nextFire() returns 0
+// for them, and an ARMED afterDelay (stored as type "manual" with a real
+// nextAt, see cmd_automation_trigger) would be silently disarmed.
+static int automationRecomputeAllClockTriggers(time_t now, int* outSkipped) {
+  int rewritten = 0, skipped = 0;
+  if (outSkipped) *outSkipped = 0;
+
+  String json;
+  if (!readText(AUTOMATIONS_JSON_FILE, json)) return -1;
+  PSRAM_JSON_DOC(doc);
+  if (deserializeJson(doc, json)) return -1;
+  JsonArray autos = doc["automations"].as<JsonArray>();
+  if (autos.isNull()) return -1;
+
+  for (JsonObject automation : autos) {
+    if (!(automation["enabled"] | false)) { skipped++; continue; }
+    JsonArray arr = automation["triggers"].as<JsonArray>();
+    if (arr.isNull()) { skipped++; continue; }
+
+    // Parse through the scheduler's own path so trigger-field semantics can
+    // never drift between recompute and the tick.
+    String objStr;
+    serializeJson(automation, objStr);
+    Trigger triggers[MAX_TRIGGERS];
+    const int n = triggersFromJson(objStr.c_str(), triggers, MAX_TRIGGERS);
+    if (n == 0) { skipped++; continue; }
+
+    int idx = 0;
+    for (JsonVariant t : arr) {
+      if (idx >= n) break;
+      JsonObject tobj = t.as<JsonObject>();
+      switch (triggers[idx].type) {
+        case Trigger::TIME:
+        case Trigger::MONTHLY:
+        case Trigger::YEARLY:
+        case Trigger::INTERVAL: {
+          const time_t na = nextFire(triggers[idx], now);
+          tobj["nextAt"] = (unsigned long)na;
+          if (triggers[idx].type == Trigger::TIME && triggers[idx].weekInterval > 1 &&
+              triggers[idx].anchor > 0) {
+            tobj["anchor"] = (unsigned long)triggers[idx].anchor;
+          }
+          rewritten++;
+          break;
+        }
+        default:
+          break;  // manually armed / event-dispatched — not ours to touch
+      }
+      idx++;
+    }
+  }
+
+  json = "";
+  serializeJsonPretty(doc, json);
+  if (!writeAutomationsJsonAtomic(json)) return -1;  // ONE write for the lot
+  if (outSkipped) *outSkipped = skipped;
+  return rewritten;
 }
 
 // Thin wrapper preserving the existing public API. Returns the min nextAt
@@ -2855,10 +2952,15 @@ bool evaluateCondition(const char* condition) {
     return false;
  #endif
   } else if (strcmp(sensor, "SATS") == 0) {
-    // GPS satellites in view (valid even before a fix is achieved)
+    // GPS satellites in view. Deliberately does NOT require hasFix — the count is
+    // meaningful while still acquiring — but it DOES require live data, so a
+    // closed/never-started GPS is unevaluable rather than reading 0. Without the
+    // dataValid gate this fails OPEN: gpsTask zeroes satellites on `closegps`, so
+    // "IF SATS < n" would fire continuously while the sensor is deliberately off.
+    // Fail-closed matches SPEED / GPS / WP_DIST above.
  #if ENABLE_GPS_SENSOR
     GPSCache gps;
-    if (!gpsCacheSnapshot(gps)) return false;
+    if (!gpsCacheSnapshot(gps) || !gps.dataValid) return false;
     currentValue = (float)gps.satellites;
  #else
     return false;
@@ -3885,6 +3987,28 @@ void schedulerTickMinute() {
       continue;
     }
 
+    // Missed-fire suppression. clockDue is a bare `now >= nextAt`, so anything
+    // that leaves nextAt far in the past — the device was powered off, or the
+    // clock just jumped forward (a dark boot adopting the R1 ring's time moves
+    // it from 1970 to now) — would otherwise fire EVERY stale automation at
+    // once, at a semantically wrong wall-clock moment, each with its own
+    // automations.json rewrite. Past the grace window we advance the schedule
+    // WITHOUT running the commands: a 07:00 morning routine should not run at
+    // 14:00 because that is when the clock became known.
+    if (clockDue && (now - nextAt) > kMissedFireGraceSec) {
+      logSystemEvent("AUTO", "automation %ld missed its %ld s-late schedule — skipped, rescheduled",
+                     id, (long)(now - nextAt));
+      DEBUGF(DEBUG_AUTOMATIONS, "[autos] id=%ld MISSED by %lds (grace %ds) — advancing without firing",
+             id, (long)(now - nextAt), (int)kMissedFireGraceSec);
+      rescheduleAfterFire(id, obj.c_str(), now);
+      automationClearCondBlock(id);
+      if (!eventDue) {  // an event match still deserves its fire
+        pos = objEnd + 1;
+        continue;
+      }
+      clockDue = false;  // fire for the event only; the clock leg is settled
+    }
+
     // Check if it's time to run
     if (clockDue || eventDue) {
       const char* fireLabel = (eventDue && !clockDue) ? "Event" : "Scheduled";
@@ -4003,6 +4127,11 @@ void schedulerTickMinute() {
               appendAutoLogEntry("AUTO_SKIP", skipBuf);
             }
             DEBUGF(DEBUG_AUTOMATIONS, "[autos] id=%ld skipped - condition not met: %s", id, condition.c_str());
+            // Deferred, not skipped: nextAt stays in the past so the fire
+            // happens once the condition holds. Mute the re-check for a few
+            // seconds so automationsAnyDue() stops forcing a full
+            // automations.json read+parse on every main-loop pass.
+            if (clockDue) automationNoteCondBlocked(id);
             pos = objEnd + 1;
             continue;
           }
@@ -4058,9 +4187,16 @@ void schedulerTickMinute() {
 
         // Update next run time via the unified post-fire helper. Pure event
         // fires touch no clock trigger, so skip the (flash-writing) reschedule.
-        if (clockDue) rescheduleAfterFire(id, obj.c_str(), now);
+        if (clockDue) {
+          automationClearCondBlock(id);  // it ran; drop any condition back-off
+          rescheduleAfterFire(id, obj.c_str(), now);
+        }
       } else {
         DEBUGF(DEBUG_AUTOMATIONS, "[autos] id=%ld skip: no commands found", id);
+        // A command-less automation can never do anything, so deferring it is
+        // pointless — advance it like a fire, or its past nextAt spins the
+        // full tick (and its file read) on every main-loop pass forever.
+        if (clockDue) rescheduleAfterFire(id, obj.c_str(), now);
       }
     } else {
       DEBUGF(DEBUG_AUTOMATIONS, "[autos] id=%ld wait: nextAt=%lu now=%lu", id, (unsigned long)nextAt, (unsigned long)now);

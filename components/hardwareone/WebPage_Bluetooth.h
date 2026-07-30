@@ -1096,24 +1096,30 @@ inline void streamBluetoothInner(httpd_req_t* req) {
     // (and BLE/WiFi work queues) don't get hammered while nothing is
     // happening:
     //
-    //   FAST  (1500 ms) — when something is actively in motion: a
+    //   FAST  (6000 ms) — when something is actively in motion: a
     //                     temple is down, in 'dead' state, or a state
     //                     transition just happened. Surfaces tap /
-    //                     connect / disconnect feedback within 1-2 s.
-    //   SLOW (15000 ms) — when both temples are 'up' and we've seen
+    //                     connect / disconnect feedback within ~6 s.
+    //   SLOW (60000 ms) — when both temples are 'up' and we've seen
     //                     three consecutive stable ticks. Drops the
     //                     CLI load by 10× during the long boring
     //                     stretches (which is most of the time during
     //                     normal use). The next state change kicks
     //                     back into FAST instantly.
     //
+    // Both cadences were quartered from 1500/15000: each tick lands one
+    // audited `bleinfo json` in command-audit.log, and an overnight-run
+    // review found a setup session writing ~800 audit lines in 4 min.
+    // Action-triggered refresh bursts below cover the snappy-feedback
+    // cases, so the background cadence can afford to be lazy.
+    //
     // Why not pure SSE: the EventSource handle wedged in readyState=0
     // (CONNECTING) across WiFi-reconnect cycles. Polling has no long-
     // lived connection to break, so a transient network blip costs at
     // most one missed update — exactly the same robustness model as
     // Sensors page.
-    var FAST_MS = 1500;
-    var SLOW_MS = 15000;
+    var FAST_MS = 6000;
+    var SLOW_MS = 60000;
     var STABLE_TICKS_TO_SLOW = 3;
 
     var pollLastL = '?', pollLastR = '?';

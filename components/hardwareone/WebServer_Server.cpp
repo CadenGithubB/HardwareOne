@@ -30,6 +30,7 @@
 #include "System_SelfDevice.h"
 #include "System_Clock.h"
 #include "System_Filesystem.h"
+#include "System_CaptureCrypto.h"  // reveal sealed captures in the themed viewer
 #include "System_User.h"
 #include "System_AuthIdentity.h"  // ExecIdentityGuard — install web ctx into TLS before calling userChangePasswordCore
 #include "System_CLI.h"
@@ -4174,6 +4175,15 @@ esp_err_t handleFileView(httpd_req_t* req) {
   if (httpd_query_key_value(query, "mode", mode, sizeof(mode)) == ESP_OK) {
     if (strcmp(mode, "raw") == 0) raw = true;
   }
+  // dec=1: reveal a sealed capture even in raw mode (the logging page parses
+  // raw text client-side). The themed viewer reveals unconditionally — it is
+  // a presentation surface behind this handler's auth; plain mode=raw stays
+  // byte-true so downloads of sealed files ship ciphertext.
+  bool wantDec = false;
+  char decParam[8];
+  if (httpd_query_key_value(query, "dec", decParam, sizeof(decParam)) == ESP_OK) {
+    if (strcmp(decParam, "1") == 0) wantDec = true;
+  }
 
   // Prefer special handling for JSON: pretty or raw streaming
   String filename = String(name);
@@ -4522,6 +4532,26 @@ esp_err_t handleFileView(httpd_req_t* req) {
 
   size_t totalSent = 0;
   int chunkCount = 0;
+  // Sealed capture (magic first line) + a mode that reveals: stream line by
+  // line — the fixed-size chunk pump below would split sealed lines across
+  // reads. The '#HW1ENC' line passes through as the on-screen mark, and rows
+  // this device can't open render as the undecryptable marker.
+  const bool revealSealed = (!raw || wantDec) && captureCryptoLooksSealed(file);
+  if (revealSealed) {
+    while (file.available()) {
+      String lineStr = file.readStringUntil('\n');
+      captureCryptoRevealLine(lineStr);
+      lineStr += '\n';
+      chunkCount++;
+      totalSent += lineStr.length();
+      if (raw) {
+        httpd_resp_send_chunk(req, lineStr.c_str(), lineStr.length());
+      } else {
+        streamHtmlEscaped(req, lineStr.c_str(), lineStr.length());
+      }
+      if ((chunkCount % 32) == 0) delay(0);  // avoid WDT while streaming
+    }
+  } else
   while (true) {
     size_t n = file.readBytes(viewBuf, VIEW_BUF_SIZE);
     if (n == 0) break;

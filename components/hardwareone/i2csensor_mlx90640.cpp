@@ -337,14 +337,22 @@ const char* cmd_thermalread(const String& argsInput) {
   const bool wantJson = argWantsJson(argsInput);
 
   if (!gThermalRunning || !gThermalConnected) {
-    return wantJson ? "{\"valid\":false,\"enabled\":false,\"hint\":\"the sensor is not open - run 'openthermal' first\"}"
+    // Envelope-shaped (was `{"valid":false,"enabled":false,"hint":...}` — `enabled`
+    // is a discovery-layer key, not an envelope key, and this was the only reading
+    // reply in the tree carrying it). The hint is kept: it is the actionable half.
+    return wantJson ? "{\"valid\":false,\"connected\":false,\"ts\":0,\"hint\":\"the sensor is not open - run 'openthermal' first\"}"
                     : "Error: [Thermal] Not running. Use 'openthermal' to start.";
   }
 
   // JSON path: the shared summary envelope (frame stays on its own channel).
   if (wantJson) {
+    // ensureDebugBuffer() first — getDebugBuffer() returns gDebugBuffer, which is
+    // nullptr until something allocates it. The nine sibling handlers all guard;
+    // this one did not, so an alloc failure silently degraded to the generic
+    // "unavailable" reply instead of reporting the buffer failure.
+    if (!ensureDebugBuffer()) return SENSOR_JSON_NOBUF;
     int n = thermalBuildSummaryJSON(getDebugBuffer(), 1024);
-    return (n > 0) ? getDebugBuffer() : "{\"valid\":false}";
+    return (n > 0) ? getDebugBuffer() : SENSOR_JSON_UNAVAILABLE;
   }
 
   if (!gThermalCache.thermalDataValid || !gThermalCache.thermalFrame) {
@@ -1549,7 +1557,9 @@ void thermalTask(void* parameter) {
           DEBUG_THERMAL_LIFECYCLEF("Thermal first frame captured");
         }
         
-        // ESP-NOW broadcaster reads buildThermalDataJSONInteger() on demand from gThermalCache.
+        // Thermal mesh streaming is DISABLED (gSensorSpecs[REMOTE_SENSOR_THERMAL] = {nullptr,0,0});
+        // buildThermalDataJSONInteger() currently has no callers. Re-enable over mesh by pointing
+        // the spec at thermalBuildSummaryJSON (~90 B clears the 200 B gate); the full frame never will.
       }
       vTaskDelay(pdMS_TO_TICKS(10));
     } else {

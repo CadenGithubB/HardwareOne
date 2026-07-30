@@ -947,7 +947,7 @@ bool initBluetooth() {
 
   // Raise the GATT MTU ceiling so command responses aren't capped at the BLE
   // default of 23 (= 20 usable bytes). 517 is the BLE max; payload becomes
-  // MTU-3 = 514 bytes, which fully covers the 512-byte gBLEOutputBuffer flush
+  // MTU-3 = 514 bytes, which fully covers the BLE_OUTPUT_BUFFER_MAX (512) flush
   // (System_Debug.cpp) — so the existing line-batched output streams to a phone
   // untruncated without any per-notification chunking. The client must also
   // request a large MTU; the negotiated value is min(client, this). NOTE: this
@@ -2207,25 +2207,91 @@ bool blePushSystemStatus(const char* jsonData, size_t len) {
   return true;
 }
 
+// Escape `src` as JSON string CONTENT into a fixed buffer, never emitting a
+// partial escape sequence. Returns bytes written (excluding the NUL).
+//
+// Deliberately not System_Utils.cpp's jsonEscape(): that one takes and returns a
+// String (heap churn on a BLE notify path) and gives the caller no way to bound
+// the result. Here the whole point is a hard bound. If the next character's
+// escape would not fit we stop on a character boundary, so the output is always
+// valid JSON string content — the failure mode is a shortened message, never a
+// dangling backslash that corrupts the document.
+static size_t jsonEscapeInto(char* dst, size_t dstCap, const char* src) {
+  if (!dst || dstCap == 0) return 0;
+  size_t o = 0;
+  for (size_t i = 0; src && src[i]; i++) {
+    const unsigned char c = (unsigned char)src[i];
+    char        u[7];
+    const char* esc = nullptr;
+    switch (c) {
+      case '"':  esc = "\\\""; break;
+      case '\\': esc = "\\\\"; break;
+      case '\n': esc = "\\n";  break;
+      case '\r': esc = "\\r";  break;
+      case '\t': esc = "\\t";  break;
+      default:
+        // Other C0 controls are illegal raw in a JSON string; \u-escape them.
+        if (c < 0x20) { snprintf(u, sizeof(u), "\\u%04X", (unsigned)c); esc = u; }
+        break;
+    }
+    const size_t need = esc ? strlen(esc) : 1;
+    if (o + need >= dstCap) break;          // clean stop, never mid-sequence
+    if (esc) { memcpy(dst + o, esc, need); o += need; }
+    else     { dst[o++] = (char)c; }
+  }
+  dst[o] = '\0';
+  return o;
+}
+
 bool blePushEvent(BLEEventType eventType, const char* message, const char* details) {
   if (!isBLEConnected() || !pEventNotifyChar) {
     return false;
   }
   if (bleScRequired()) return false;  // not on the Secure Channel — don't leak plaintext
 
-  // Build event JSON
-  char eventJson[256];
+  // Build event JSON.
+  //
+  // `message` reaches here straight from an unbounded CLI argument (cmd_bleevent,
+  // registered requiresAdmin=false), so BOTH of the following are required and
+  // neither was present before:
+  //
+  //  1. Bounds. snprintf returns the WOULD-BE length, so a long message drove
+  //     `pos` past sizeof(eventJson); the next call then got a base pointer past
+  //     the array AND a size_t-underflowed size (sizeof - pos), writing off the
+  //     stack frame — and setValue() was handed that same oversize `pos` to read
+  //     back. Every append is now bounds-checked before it is trusted.
+  //  2. Escaping. The strings are interpolated with a bare %s INSIDE JSON string
+  //     literals. A message containing a quote didn't just corrupt the document —
+  //     since it lands mid-object, it could close the string and inject keys. Same
+  //     class as the FM RDS fix (i2csensor_rda5807.cpp rdsScrub); escaped rather
+  //     than scrubbed here because the message is operator-authored text a client
+  //     should receive intact.
+  //
+  // Escape-then-measure, never clamp-then-escape: clamping raw input first can
+  // still overflow (escaping expands), and clamping escaped output can cut a
+  // \" in half and emit invalid JSON. jsonEscapeInto stops on a clean boundary.
+  char msgEsc[192], detEsc[96];
+  jsonEscapeInto(msgEsc, sizeof(msgEsc), message ? message : "");
+  const bool haveDetails = (details && details[0] != '\0');
+  if (haveDetails) jsonEscapeInto(detEsc, sizeof(detEsc), details);
+
+  char eventJson[512];
   int pos = snprintf(eventJson, sizeof(eventJson),
-                     "{\"type\":%d,\"msg\":\"%s\"", eventType, message);
-  
-  if (details && details[0] != '\0') {
-    pos += snprintf(eventJson + pos, sizeof(eventJson) - pos,
-                    ",\"details\":\"%s\"", details);
+                     "{\"type\":%d,\"msg\":\"%s\"", eventType, msgEsc);
+  if (pos < 0 || (size_t)pos >= sizeof(eventJson)) return false;
+
+  if (haveDetails) {
+    int n = snprintf(eventJson + pos, sizeof(eventJson) - pos,
+                     ",\"details\":\"%s\"", detEsc);
+    if (n < 0 || (size_t)n >= sizeof(eventJson) - pos) return false;
+    pos += n;
   }
-  
-  pos += snprintf(eventJson + pos, sizeof(eventJson) - pos,
-                  ",\"ts\":%lu}", millis());
-  
+
+  int n = snprintf(eventJson + pos, sizeof(eventJson) - pos,
+                   ",\"ts\":%lu}", millis());
+  if (n < 0 || (size_t)n >= sizeof(eventJson) - pos) return false;
+  pos += n;
+
   pEventNotifyChar->setValue((uint8_t*)eventJson, pos);
   pEventNotifyChar->notify();
   

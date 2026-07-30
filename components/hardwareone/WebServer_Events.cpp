@@ -205,12 +205,35 @@ esp_err_t handleEvents(httpd_req_t* req) {
   // Immediately push a 'sensor-status' (if needed) and a 'system' snapshot, then keep streaming
   auto sendStatus = [&](const char* reason) {
     const char* statusJson = buildSensorStatusJson();
-    char eventData[1200];
-    snprintf(eventData, sizeof(eventData), "event: sensor-status\ndata: %s\n\n", statusJson);
     if (isDebugFlagSet(DEBUG_SSE)) {
-      DEBUG_SSEF("Sending 'sensor-status' (%zu bytes) reason=%s", strlen(eventData), reason);
+      // strlen of the JSON itself, not of a copy — the old form measured a
+      // char[1200] copy, so it capped at 1199 and hid the very truncation
+      // that was corrupting the stream.
+      DEBUG_SSEF("Sending 'sensor-status' (%zu bytes json) reason=%s", strlen(statusJson), reason);
     }
-    if (sseWrite(req, eventData)) {
+    // Chunked rather than snprintf'd into a stack buffer. The old form copied
+    // into char[1200] with NO length check, while the producer's own overflow
+    // guard sits at 2048 (System_I2C.cpp) — an 878-byte window in which the
+    // producer reports success and this consumer silently truncates. Worse than
+    // malformed JSON: truncation ate the terminating "\n\n", so the FOLLOWING
+    // event (sendSystem, below) was absorbed into the still-open `data:` line
+    // and never dispatched — the dashboard's system panel would stop updating
+    // too. sseWrite already chunks, so three calls remove the ceiling entirely
+    // and give 1200 B of httpd stack back. Matches the two other consumers of
+    // buildSensorStatusJson, which already avoid a fixed buffer.
+    //
+    // Holding `statusJson` across the three writes is safe: it points at a
+    // shared static PSRAM buffer, but every caller of buildSensorStatusJson is
+    // an httpd handler and ESP-IDF's httpd is single-task (see the note at
+    // WebServer_Server.cpp:274), so nothing can re-enter it mid-send. If the
+    // request model ever becomes multi-threaded, this needs a snapshot.
+    //
+    // && short-circuits: a failed first write skips the rest AND leaves
+    // needsStatusUpdate set, so the update is retried instead of being marked
+    // delivered — the old code cleared the flags even on a truncated send.
+    if (sseWrite(req, "event: sensor-status\ndata: ") &&
+        sseWrite(req, statusJson) &&
+        sseWrite(req, "\n\n")) {
       gSessions[sessIdx].needsStatusUpdate = false;
       gSessions[sessIdx].lastSensorSeqSent = gSensorStatusSeq;
     }

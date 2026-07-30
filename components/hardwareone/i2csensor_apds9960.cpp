@@ -125,9 +125,9 @@ const char* cmd_apdsread(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   if (argWantsJson(argsInput)) {
-    if (!ensureDebugBuffer()) return "{\"valid\":false,\"error\":\"buffer\"}";
+    if (!ensureDebugBuffer()) return SENSOR_JSON_NOBUF;
     int n = apdsBuildDataJSON(getDebugBuffer(), 1024);
-    return (n > 0) ? getDebugBuffer() : "{\"valid\":false}";
+    return (n > 0) ? getDebugBuffer() : SENSOR_JSON_UNAVAILABLE;
   }
 
   bool anyEnabled = gApdsColorRunning || gApdsProximityRunning || gApdsGestureRunning;
@@ -589,7 +589,14 @@ void apdsTask(void* parameter) {
             logSystemEvent("SENSOR", "APDS auto-disabled after %u consecutive I2C failures", errors);
             { char det[24]; snprintf(det, sizeof(det), "%u I2C errors", errors);
               systemEventPost(SYSEVT_SENSOR_FAULT, "APDS", det); }
-            break;
+            // 'continue' (not 'break') — see the same note on the stack-safety
+            // bailout above. `break` here left the while(true) loop and RETURNED
+            // from the task entry point, which FreeRTOS turns into a jump to
+            // address 0 (InstrFetchProhibited panic + reboot) rather than a task
+            // exit. It also skipped the `delete gAPDS9960` + cache-invalidate the
+            // shutdown path performs. All three running flags are cleared above,
+            // so the top-of-loop check now runs the clean SENSOR_TASK_EXIT.
+            continue;
           }
         }
         lastApdsRead = nowMs;

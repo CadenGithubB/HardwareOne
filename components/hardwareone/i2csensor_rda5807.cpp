@@ -91,17 +91,52 @@ static volatile bool fmRadioInitRequested = false;
 static volatile bool fmRadioInitDone = false;
 static bool fmRadioInitResult = false;
 
+// Scrub RDS text to printable ASCII before it enters the cache.
+//
+// RDS bytes are broadcaster-controlled AND unvalidated on the way in: the
+// library stores raw octets straight off the wire (RDSParser.cpp — RadioText
+// gets no stability vote at all, unlike the PS name), and the driver's
+// block-error check is commented out (RDA5807M.cpp checkRDS — RADIO_REG_RA_RDSBLOCK
+// is defined but never tested). So ANY octet 0x00-0xFF can land here on a weak or
+// multipath signal, without needing a hostile broadcaster.
+//
+// stationName/stationText are the ONLY remote-controlled string fields in any
+// sensor envelope builder, and fmRadioBuildDataJSON prints them with a bare %s
+// inside JSON string literals. An unescaped '"' does not merely corrupt the
+// payload — radioText is the last field before the closing brace, so 64 chars are
+// enough to close the string and append well-formed keys, overriding the
+// envelope's own `valid`. Downstream that silently drops the whole fmradio
+// reading from `sensors json` (addSensorEntry's deserialize fails), poisons the
+// spliced ESP-NOW remote-sensor API response, and freezes the FM web panel.
+//
+// Scrubbing on INGEST (rather than escaping at the builder) fixes every consumer
+// at one point: the JSON, the G2/OLED lens render which prints the cache with %s,
+// and the SYSEVT_FM_RDS_STATION event subject. Mirrors sanitizeField() in
+// System_Events.cpp. RDS is display text, so a space is a faithful substitute.
+static void rdsScrub(char* dst, const char* src, size_t maxChars) {
+  size_t i = 0;
+  for (; src[i] && i < maxChars; i++) {
+    unsigned char c = (unsigned char)src[i];
+    dst[i] = (c < 0x20 || c > 0x7E || c == '"' || c == '\\') ? ' ' : (char)c;
+  }
+  dst[i] = '\0';
+}
+
 // RDS callback to update station name (mutex-protected to prevent readers from
 // seeing torn strings mid-write).
 static void RDS_ServiceNameCallback(const char* name) {
   DEBUG_FMRADIO_VALUESF("[FM_RADIO] RDS Station Name callback: '%s'", name ? name : "null");
 
   if (name != nullptr && strlen(name) > 0) {
+    // Scrub BEFORE the change-gate compare, so the gate sees the same bytes that
+    // get stored — comparing raw against a scrubbed cache would re-fire on every
+    // callback whenever the raw name contains a scrubbed character.
+    char clean[sizeof(gFmRadioCache.stationName)];
+    rdsScrub(clean, name, sizeof(clean) - 1);
     SensorCacheGuard g(gFmRadioCache.mutex, pdMS_TO_TICKS(50), "fmRadio.rdsStationName");
-    if (g.held && strncmp(gFmRadioCache.stationName, name, 8) != 0) {
-      DEBUG_FMRADIO_VALUESF("[FM_RADIO] Station name changed from '%s' to '%s'", gFmRadioCache.stationName, name);
-      strncpy(gFmRadioCache.stationName, name, 8);
-      gFmRadioCache.stationName[8] = '\0';
+    if (g.held && strcmp(gFmRadioCache.stationName, clean) != 0) {
+      DEBUG_FMRADIO_VALUESF("[FM_RADIO] Station name changed from '%s' to '%s'", gFmRadioCache.stationName, clean);
+      memcpy(gFmRadioCache.stationName, clean, sizeof(clean));
       // Bus event rides the existing change gate (a few intermediate partial
       // PS-name assemblies can post right after a retune, then it's quiet).
       char freq[16];
@@ -116,11 +151,14 @@ static void RDS_TextCallback(const char* text) {
   DEBUG_FMRADIO_VALUESF("[FM_RADIO] RDS Text callback: '%s'", text ? text : "null");
 
   if (text != nullptr && strlen(text) > 0) {
+    // See rdsScrub() above — RadioText is the higher-risk of the two fields: it is
+    // 64 chars, gets no stability vote in the parser, and sits last in the JSON.
+    char clean[sizeof(gFmRadioCache.stationText)];
+    rdsScrub(clean, text, sizeof(clean) - 1);
     SensorCacheGuard g(gFmRadioCache.mutex, pdMS_TO_TICKS(50), "fmRadio.rdsStationText");
-    if (g.held && strncmp(gFmRadioCache.stationText, text, 64) != 0) {
-      DEBUG_FMRADIO_VALUESF("[FM_RADIO] Station text changed from '%s' to '%s'", gFmRadioCache.stationText, text);
-      strncpy(gFmRadioCache.stationText, text, 64);
-      gFmRadioCache.stationText[64] = '\0';
+    if (g.held && strcmp(gFmRadioCache.stationText, clean) != 0) {
+      DEBUG_FMRADIO_VALUESF("[FM_RADIO] Station text changed from '%s' to '%s'", gFmRadioCache.stationText, clean);
+      memcpy(gFmRadioCache.stationText, clean, sizeof(clean));
     }
   }
 }
@@ -474,7 +512,7 @@ void updateFMRadio() {
       // Update headphone detection based on RSSI
       gFmRadioCache.headphonesConnected = (gFmRadioCache.rssi >= 15);
 
-      // Freshness stamp for the shared sensor envelope (ts/age + valid).
+      // Freshness stamp for the shared sensor envelope (ts + valid).
       gFmRadioCache.lastUpdate = now;
       gFmRadioCache.dataValid = true;
     });
@@ -744,9 +782,9 @@ const char* cmd_fmradio_status(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   if (argWantsJson(argsInput)) {
-    if (!ensureDebugBuffer()) return "{\"valid\":false,\"error\":\"buffer\"}";
+    if (!ensureDebugBuffer()) return SENSOR_JSON_NOBUF;
     int n = fmRadioBuildDataJSON(getDebugBuffer(), 1024);  // shared builder (also feeds sensors json)
-    return (n > 0) ? getDebugBuffer() : "{\"valid\":false}";
+    return (n > 0) ? getDebugBuffer() : SENSOR_JSON_UNAVAILABLE;
   }
 
   // Output each line separately to avoid DEBUG_MSG_SIZE (256 byte) truncation
@@ -801,7 +839,7 @@ int fmRadioBuildDataJSON(char* buf, size_t bufSize) {
   }
 
   // valid = fresh poll data (set in updateFMRadio, cleared on deinit),
-  // connected = radio present on the bus, ts/age from the last poll. Dropped:
+  // connected = radio present on the bus, ts from the last poll. Dropped:
   // top-level "connected" (envelope carries it) AND "enabled" (duplicate of the
   // sensors-json discovery-layer enabled).
   int pos = sensorEnvelopeBegin(buf, bufSize, snap.dataValid, gFmRadioConnected, snap.lastUpdate);

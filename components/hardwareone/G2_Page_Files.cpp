@@ -38,6 +38,7 @@
 #include "G2_Page_TextEntry.h"   // on-lens keyboard for Rename
 #include "System_FileManager.h"
 #include "System_Filesystem.h"
+#include "System_CaptureCrypto.h"  // reveal sealed captures on the lens viewer
 #include "System_MemUtil.h"   // ps_alloc — gFilesFm lives in PSRAM (placement-new)
 #include <new>                // placement-new
 #include "System_Debug.h"
@@ -75,7 +76,11 @@ static constexpr size_t kFilesMinRenderRows = 8;
 // context, no DMA / ISR access.
 EXT_RAM_BSS_ATTR static char        gFilesRows[FILES_MAX_ROWS][FILES_ROW_LEN];
 EXT_RAM_BSS_ATTR static const char* gFilesRowPtrs[FILES_MAX_ROWS];
-EXT_RAM_BSS_ATTR static char        gFilesPathTitleBuf[FILES_ROW_LEN];
+// Path title is shown in its own TextObject (not a list row). Needs room for
+// multi-line wrap of deep VFS paths; FILES_ROW_LEN was only enough for one
+// truncated line and the old 40 px-tall box scrolled uselessly.
+#define FILES_PATH_TITLE_LEN  96
+EXT_RAM_BSS_ATTR static char        gFilesPathTitleBuf[FILES_PATH_TITLE_LEN];
 static size_t      gFilesRowCount = 0;
 
 // Current paginator page for the directory listing. Reset to 0 on any
@@ -88,9 +93,11 @@ static size_t      gFilesPage = 0;
 // pinning the list to the top-left quadrant/half (not vertically centered).
 // LEFT_HALF is {8,8,280,272}, so row 0 starts near the top edge.
 static constexpr G2ContainerGeom kFilesListGeom = G2_GEOM_LEFT_HALF;
-// Text is top-left within its box — anchor the box on the right for "top right"
-// path readout without consuming a list row.
-static constexpr G2ContainerGeom kFilesPathGeom = { 280,   8, 288,  40 };
+// Path readout on the right. Was {280,8,288,40} — one-line height with a
+// firmware scrollbar when the path wrapped; focus stays on the list so that
+// scrollbar was unusable. Align with RIGHT_HALF x/w and give ~2–3 lines of
+// height so wrapped paths stay fully visible.
+static constexpr G2ContainerGeom kFilesPathGeom = { 288,   8, 280, 100 };
 
 // Indices we keep so taps know what idx → which directory entry. -1 = not a
 // real entry (back / blank); -2 = parent row ".. (up)"; -3 = "<< Prev page";
@@ -187,7 +194,7 @@ static bool filesRenderTextPage();
 
 static FileManager* ensureFm() {
   if (!gFilesFm) {
-    // PSRAM placement-new: FileManager's ~5 KB is an inline cachedEntries[64] POD
+    // PSRAM placement-new: FileManager's ~19 KB is an inline cachedEntries[256] POD
     // array, so the whole object moves off internal DRAM. This lens FileManager is
     // create-once-keep (no delete site anywhere) → no ps_delete pair; it persists
     // for the session. The `if (gFilesFm)` guards below handle an alloc failure.
@@ -630,6 +637,11 @@ static bool showTextFileViaWidget(bool pretty) {
   }
   const bool hitReadCap = raw.length() >= kFilesTextReadCapBytes;
 
+  // Sealed capture? Reveal for the lens — this runs under the G2-paired
+  // user's identity (ctxGuard above) and behind the canRead gate; the
+  // '#HW1ENC' first line stays visible as the mark.
+  captureCryptoRevealText(raw);
+
   String display;
   if (pretty) {
     JsonDocument doc;
@@ -686,6 +698,20 @@ static void showFileInfo(const FileEntry& e) {
   // the file list, not the main hijack menu).
   const char* ext = strrchr(e.name, '.');
   if (!ext || !*ext) ext = "(no ext)";
+  // Sealed capture? One 7-byte guarded peek. The info overlay is where the
+  // encrypted-at-rest mark lives on the lens — the directory listing stays
+  // sniff-free (a per-entry open would drag on 256-file capture folders).
+  bool sealedFile = false;
+  if (!e.isFolder) {
+    G2HijackCtxGuard ctxGuard;
+    char p[FILE_MANAGER_MAX_PATH + 32];
+    buildChooserPath(p, sizeof(p));
+    String head;
+    if (p[0] && canRead(String(p), currentAuthContext()) &&
+        readTextLimited(p, head, sizeof(CAPCRYPT_MAGIC_PREFIX) - 1)) {
+      sealedFile = captureCryptoIsMagicLine(head.c_str());
+    }
+  }
   uint32_t sz = e.size;
   char sizeStr[24];
   if      (sz < 1024)             snprintf(sizeStr, sizeof(sizeStr), "%u bytes",  (unsigned)sz);
@@ -699,7 +725,8 @@ static void showFileInfo(const FileEntry& e) {
   rows[0] = "<- Files";   // back to the directory listing
   snprintf(nameRow, sizeof(nameRow), "Name: %s", e.name);
   snprintf(sizeRow, sizeof(sizeRow), "Size: %s", sizeStr);
-  snprintf(typeRow, sizeof(typeRow), "Type: %s", ext);
+  snprintf(typeRow, sizeof(typeRow), "Type: %s%s", ext,
+           sealedFile ? " (encrypted)" : "");
   rows[1] = nameRow;
   rows[2] = sizeRow;
   rows[3] = typeRow;
@@ -799,8 +826,10 @@ void g2ShowFilesMenu() {
   const char* path = "/";
   FileManager* fmMenu = ensureFm();
   if (fmMenu) path = fmMenu->getCurrentPath();
-  // Shorten for the ~288 px-wide title strip (monospace-ish lens font).
-  truncateInto(gFilesPathTitleBuf, sizeof(gFilesPathTitleBuf), path, 36);
+  // Fit ~2–3 wrapped lines in kFilesPathGeom (280×100); still bound the
+  // string so a pathological deep path cannot blow the CREATE pb.
+  truncateInto(gFilesPathTitleBuf, sizeof(gFilesPathTitleBuf), path,
+               FILES_PATH_TITLE_LEN - 1);
 
   const G2TextChildSpec pathTitle = {
       "filesPath", gFilesPathTitleBuf, 99, kFilesPathGeom, false };

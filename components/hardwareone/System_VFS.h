@@ -26,8 +26,14 @@
 // Overflow is OPT-IN, via `resolveOverflowPath` + a normal `VFS::open` on
 // the resolved path. When LittleFS free space drops below a threshold, that
 // function rewrites primary paths like "/logging_captures/foo.csv" to their SD mirror
-// "/sd/logging_captures/foo.csv". The rewrite is latched until reboot so a single log
-// stream doesn't split across tiers mid-session.
+// "/sd/logging_captures/foo.csv".
+//
+// What is latched until reboot is the DECISION to overflow, not the tier: once
+// the latch fires, every call still re-tests isSDAvailable() and falls back to
+// the primary path when SD is absent. So a card pulled (or re-inserted) mid-run
+// flips the active tier back and forth and one logical day CAN split across
+// tiers with nothing on disk marking the boundary. Callers that need a stable
+// tier must resolve once per session and store the result.
 //
 // Convention for callers:
 //   - State files (settings, users, automations, mesh config, etc.)
@@ -188,9 +194,37 @@ namespace Scopes {
   constexpr const char* VIDEOS          = "/sd/VIDEOS";        // recorded AVI clips
   constexpr const char* CERTS           = "/system/certs";    // TLS certs / keys
   constexpr const char* ESPNOW_RECEIVED = "/espnow/received"; // inbound files from peers
+  // Capture tree root, NOT the sensors/tracks leaves: the log-stitch commands
+  // mkdir "/logging_captures" itself before their subfolder, so a leaf scope
+  // would reject that first call. Root is still tight enough to keep an
+  // admin-invoked stitch out of /system/sys_logs, which grants systemPerms
+  // PERM_ALL where admins are deliberately PERM_READ.
+  constexpr const char* CAPTURES        = "/logging_captures"; // sensor/track/system captures
+  // The overflow mirror of the same tree. Auth does NOT fold /sd paths onto
+  // their primary — "/sd" is its own rule — so a caller that accepts either
+  // tier must pick the matching scope. captureScopeFor() below does that.
+  constexpr const char* CAPTURES_SD     = "/sd/logging_captures";
   // NOTE: domains with user-configurable folders (images → gSettings.cameraCaptureFolder)
   // or dual SD+LittleFS locations (LLM models) can't use a static constant — they need a
   // computed scope at the call site. Add those when those domains are scoped.
+}
+
+// Pick the capture-tree scope matching the tier `path` names. Callers that take
+// a user-supplied capture path (the log-stitch commands) need this so scoping
+// them doesn't silently reject captures that overflowed to SD.
+inline const char* captureScopeFor(const String& path) {
+  return path.startsWith("/sd/") ? Scopes::CAPTURES_SD : Scopes::CAPTURES;
+}
+
+/** True if `path` names a location inside the capture tree on either tier.
+ *  Boundary-aware the same way pathWithinScope is, so "/logging_capturesX"
+ *  does not pass. The log-stitch commands call this BEFORE their destructive
+ *  open: their scoped systemAuth would reject an out-of-tree output anyway,
+ *  but only after the "w" open had already truncated whatever was there, and
+ *  the failure surfaced as a generic "cannot create". */
+inline bool pathInCaptureTree(const String& path) {
+  const String base = captureScopeFor(path);
+  return path == base || path.startsWith(base + "/");
 }
 
 // ============================================================================
@@ -215,7 +249,9 @@ namespace Scopes {
 bool resolveOverflowPath(const char* primaryPath, size_t reserveBytes,
                          char* outPath, size_t outPathLen);
 
-/** True if the overflow latch has fired this session. */
+/** True if the overflow latch has fired this session. NOTE: this reports the
+ *  latched DECISION, not the tier actually in use — resolveOverflowPath still
+ *  falls back to the primary path whenever SD is unavailable. */
 bool isLogOverflowActive();
 
 /** Cached LittleFS free bytes (refreshed at most every 2s). */

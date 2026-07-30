@@ -6,7 +6,7 @@
   <img alt="Hardware One logo" src="assets/logo-black.svg" width="140">
 </picture>
 
-# Hardware One v0.99.4
+# Hardware One v0.99.5
 
 **Hardware One is a modular ESP32 firmware that works like a distributed operating system for cheap microcontrollers.**
 
@@ -164,6 +164,8 @@ idf.py -p PORT flash monitor
 ```
 
 All user-configurable options (which sensors, which web modules, which network features) live in one file: `components/hardwareone/System_BuildConfig.h`. Flip the flags, rebuild, done.
+
+If your build enables the G2 glasses / R1 ring Bluetooth support, first apply the small local patches to the managed Arduino BLE component: see [docs/arduino-local-patches/](docs/arduino-local-patches/) (patch file, verify script, and instructions). Building those features against a stock copy of the library fails to link.
 
 ---
 

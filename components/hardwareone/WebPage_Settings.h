@@ -1865,10 +1865,14 @@ function saveNotifPolicy() {
     debugimupolling:"Logs each IMU poll cycle (orientation + accel + gyro).",
     debugimuvalues:"Logs the raw quaternion and Euler-angle values read from the sensor. Verbose.",
     // gamepad
-    debuggamepad:"Master toggle for Seesaw gamepad debug.",
-    debuggamepadlifecycle:"Logs gamepad init, connect, and auto-disable.",
-    debuggamepadpolling:"Logs each gamepad read cycle (stick + button snapshot).",
-    debuggamepadvalues:"Logs the raw button mask and stick XY values. Verbose.",
+    debuginput:"Master toggle for input-device debug (Seesaw gamepad / ANO encoder).",
+    debuginputlifecycle:"Logs input-device init, connect, and auto-disable.",
+    debuginputpolling:"Logs each input read cycle (stick/encoder + button snapshot).",
+    debuginputvalues:"Logs the raw button mask and stick XY values. Verbose.",
+    debuganoencoder:"Master toggle for ANO rotary-encoder debug.",
+    debuganoencoderlifecycle:"Logs ANO encoder init, connect, and auto-disable.",
+    debuganoencoderpolling:"Logs each ANO encoder read cycle (detents + buttons).",
+    debuganoencodervalues:"Logs raw encoder position, axis, and button mask. Verbose.",
     // tof
     debugtof:"Master toggle for Time-of-Flight (VL53L4CX) debug.",
     debugtoflifecycle:"Logs ToF init, connect, and recovery.",

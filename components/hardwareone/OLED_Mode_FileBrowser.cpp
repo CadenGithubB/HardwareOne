@@ -15,6 +15,7 @@
 #include "System_FileManager.h"
 #include "System_Icons.h"
 #include "System_TextPager.h"       // textWrapInto — shared wrap/sanitize core
+#include "System_CaptureCrypto.h"   // reveal sealed captures in the OLED viewer
 #include "System_AuthIdentity.h"    // CommandIdentityScope — composed identity + notif install
 #include "System_User.h"            // AuthContext, SOURCE_LOCAL_DISPLAY
 #include "System_Settings.h"        // gSettings (for displayRequireAuth via globals)
@@ -831,6 +832,9 @@ void prepareFileBrowserData() {
           }
           String content;
           if (gOledFileManager->readFile(entry.name, content)) {
+            // Sealed capture? Reveal for display — readFile ran under the
+            // OLED browser's guarded identity; the magic line stays visible.
+            captureCryptoRevealText(content);
             bool trunc = false;
             const size_t len = textWrapInto(sFbViewBody, sizeof(sFbViewBody),
                                             content.c_str(), FB_VIEW_COLS,

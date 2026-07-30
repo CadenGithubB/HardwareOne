@@ -1,4 +1,4 @@
-# HardwareOne — App JSON Command Contract
+# HardwareOne - App JSON Command Contract
 
 Audience: the Android app AI. This documents the JSON command surface added across
 this work session, plus the conventions for consuming it. Everything below is on
@@ -11,31 +11,31 @@ the peer-metadata items shipped earlier in v0.95.10).
 
 - **Opt-in flag.** Append a standalone `json` token to a supported command to get a
   JSON reply. Without it, you get the unchanged human-readable text. Example:
-  `wifistatus` → text, `wifistatus json` → `{"schema":1,...}`.
+  `wifistatus` -> text, `wifistatus json` -> `{"schema":1,...}`.
 - **These are flags, not new commands.** No command names were added/renamed; each
   existing handler gained an `if (json) {...}` branch. You append ` json` to commands
   you already call.
 - **Shape.** Most replies are `{"schema":1, ...}`. Some sensor replies use `"valid"`
-  instead (see §6).
+  instead (see sec. 6).
 - **Failure detection (unchanged).** A command failed if its result string starts
   with `Error` / `ERROR` (the firmware sets `ok=false` on that prefix). On success,
   status/data commands return their object; action commands return `OK`.
-- **No console spam.** JSON replies are returned only to the caller — they are *not*
+- **No console spam.** JSON replies are returned only to the caller - they are *not*
   broadcast to other consoles. Plain (non-json) calls behave exactly as before.
 - **Transport.** BLE responses are already chunked by the BLE secure-channel layer
-  (frames ≤195 B payload); reassemble frames as you do today.
-- **⚠️ 2 KB result ceiling (important).** Every command that runs through the
-  cmd_exec path — **both BLE and the web `/api/cli`** — copies the handler's result
+  (frames <=195 B payload); reassemble frames as you do today.
+- **WARNING: 2 KB result ceiling (important).** Every command that runs through the
+  cmd_exec path - **both BLE and the web `/api/cli`** - copies the handler's result
   into a fixed **2048-byte** buffer (`ExecReq.out`; `strncpy` cap). A reply longer
-  than ~2047 bytes is **silently truncated → invalid JSON**. This is upstream of the
+  than ~2047 bytes is **silently truncated -> invalid JSON**. This is upstream of the
   BLE framing, so chunking does not save it. Almost every command's JSON is well
   under 2 KB; the one that can exceed it is the **aggregate `sensors json`** when
-  several sensors are active (ToF's data alone is ~1 KB). See §6 — fetch sensors
+  several sensors are active (ToF's data alone is ~1 KB). See sec. 6 - fetch sensors
   per-sensor, not via the aggregate, over BLE.
-- **Feature compiled out → never a crash.** A command whose feature is not in the
+- **Feature compiled out -> never a crash.** A command whose feature is not in the
   build resolves to ONE of:
-  - **Not registered** → `"Unknown command"` reply (most features), or
-  - **JSON stub** → `{"schema":1,"available":false,"reason":"..."}` (the web/HTTP-gated
+  - **Not registered** -> `"Unknown command"` reply (most features), or
+  - **JSON stub** -> `{"schema":1,"available":false,"reason":"..."}` (the web/HTTP-gated
     ones: `banlist`, `httpstatus`, `sessionlist`).
   Treat any unknown-command / non-JSON / `available:false` reply as "feature
   unavailable." A web server that is enabled-but-not-started still answers fine
@@ -45,19 +45,19 @@ the peer-metadata items shipped earlier in v0.95.10).
 
 ## 2. Change log (this session, by area)
 
-1. **Automation** — descriptive errors on `automation run`; `json` on `automation system`.
-2. **Network/system status** — `blestatus`, `wifistatus`, `mqttstatus`, `httpstatus`.
-3. **Status/list batch** — `fsusage`, `sdinfo`, `wifilist`, `blepeers`, `images`,
+1. **Automation** - descriptive errors on `automation run`; `json` on `automation system`.
+2. **Network/system status** - `blestatus`, `wifistatus`, `mqttstatus`, `httpstatus`.
+3. **Status/list batch** - `fsusage`, `sdinfo`, `wifilist`, `blepeers`, `images`,
    `maplist`, `oledstatus`, and ESP-NOW `espnowrooms`/`espnowsessions`/
    `espnowrouterstats`/`espnowsubs`.
-4. **Web-off stub hardening** — `banlist`/`httpstatus`/`sessionlist` stubs now emit
+4. **Web-off stub hardening** - `banlist`/`httpstatus`/`sessionlist` stubs now emit
    `available:false` JSON instead of text.
-5. **Deferred set** — `memreport`, `banlist`, `miclist`, `cameravideolist`, `ringstatus`.
-6. **Second-ring diagnostics** — `espnowidentity`, `espnowmeshmetrics`, `espnowworker`,
+5. **Deferred set** - `memreport`, `banlist`, `miclist`, `cameravideolist`, `ringstatus`.
+6. **Second-ring diagnostics** - `espnowidentity`, `espnowmeshmetrics`, `espnowworker`,
    `i2chealth`, `i2cmetrics`, `servolist`, `mqttExternalSensors`, `logtier`, `map`,
    `whereami`.
-7. **Sensors** — every live sensor read now has JSON, and `sensors json` is the
-   preferred aggregate (see §6).
+7. **Sensors** - every live sensor read now has JSON, and `sensors json` is the
+   preferred aggregate (see sec. 6).
 
 ---
 
@@ -66,7 +66,7 @@ the peer-metadata items shipped earlier in v0.95.10).
 | Command | Reply |
 |---|---|
 | `automation system status json` | `{"schema":1,"enabled":<bool>}` |
-| `automation system enable json` / `disable json` | sets, then returns `{"schema":1,"enabled":<bool>}` (the resulting state — toggle + read in one call) |
+| `automation system enable json` / `disable json` | sets, then returns `{"schema":1,"enabled":<bool>}` (the resulting state - toggle + read in one call) |
 | `automation run id=<id>` | success `OK`; failure is now a descriptive `Error: ...` string (e.g. `Error: automation id 6073722 not found (it may have been deleted)`), `ok=false` |
 | `automationlist json` | (pre-existing) raw `{"version":1,"automations":[...]}` document |
 
@@ -90,7 +90,7 @@ Note: read the global on/off via `automation system status json`, not from
 | `logtier` | `{"schema":1,"tier","overflow","littlefs":{"free","total","used"},"sd":{"available","total","used","free"}}` |
 | `oledstatus` | `{"schema":1,"connected","address","width","height","enabled","mode"}` |
 | `temperature` | `{"schema":1,"tempC","tempF"}` |
-| `voltage` | `{"schema":1,"measured":false,"estimatedCurrentMa","estimatedPowerW","note"}` — estimate only; use `batterystatus json` for measured power |
+| `voltage` | `{"schema":1,"measured":false,"estimatedCurrentMa","estimatedPowerW","note"}` - estimate only; use `batterystatus json` for measured power |
 | `i2chealth` | `{"schema":1,"deviceCount","devices":[{"address","name","consecutiveErrors","totalErrors","degraded","nack","timeout","busError","adaptiveTimeoutMs"}]}` |
 | `i2cmetrics` | `{"schema":1,"uptimeSec","totalTransactions","mutexTimeouts","busContentions","totalBytes"}` |
 | `blepeers` | `{"schema":1,"peers":[{"name","displayName","connectable","connected","autoReconnect","mac1","mac2"?,"pairedBy"}],"count"}` |
@@ -116,7 +116,7 @@ Note: read the global on/off via `automation system status json`, not from
 | `espnowrooms` | `{"schema":1,"rooms":[{"room","devices":[{"name","tags","online"}]}],"count"}` |
 | `espnowsessions` | `{"schema":1,"sessions":[{"slot","mac","meshId","sessionId","dir","state","ageMs","txSeq","rxHwm"}]}` |
 | `espnowrouterstats` | `{"schema":1,"messagesSent","messagesReceived","messagesFailed","v4FragTx","v4FragRx","reassembled","reassemblyGc","reassemblyTimeouts","nextMessageId"}` |
-| `espnowsubs` | `{"schema":1,"peers":[{"mac","meshId","subs"}]}` — `subs` is a 32-bit bitmask int |
+| `espnowsubs` | `{"schema":1,"peers":[{"mac","meshId","subs"}]}` - `subs` is a 32-bit bitmask int |
 | `espnowidentity` | `{"schema":1,"valid","mac","pub","createdAtSec","regenCount"}` |
 | `espnowmeshmetrics` | `{"schema":1,"mode","activePeers","ttl","adaptiveTtl"}` |
 | `espnowworker` (or `espnowworker show`) | `{"schema":1,"enabled","intervalMs","fields":{"heap","rssi","thermal","imu"}}` |
@@ -126,22 +126,22 @@ Note: read the global on/off via `automation system status json`, not from
 ### ESP-NOW peer metadata is pull-only
 - **Self** = `espnowdeviceinfo json`; **peers** = `espnowdevices json`.
 - The peer cache is refreshed on demand. To get a peer's *current* metadata: send
-  `espnowrequestmeta <mac>`, wait ~1–2 s (or poll `espnowdevices json` until the
+  `espnowrequestmeta <mac>`, wait ~1-2 s (or poll `espnowdevices json` until the
   fields populate), then read. This mirrors the web's "Sync Metadata" button.
-- Do **not** look up the gateway's own MAC in the peer list — it's never there.
+- Do **not** look up the gateway's own MAC in the peer list - it's never there.
 
 ---
 
-## 6. Sensors — fetch per-sensor over BLE (do NOT use the aggregate)
+## 6. Sensors - fetch per-sensor over BLE (do NOT use the aggregate)
 
 **Over BLE, fetch each sensor individually and load them one at a time.** The
 aggregate `sensors json` embeds every active sensor's `data` in one reply, which can
-exceed the 2 KB result ceiling (§1) and truncate to invalid JSON. Each per-sensor
-`<x>read json` returns a single sensor (≤ ~1 KB), always safely under the ceiling,
+exceed the 2 KB result ceiling (sec. 1) and truncate to invalid JSON. Each per-sensor
+`<x>read json` returns a single sensor (<= ~1 KB), always safely under the ceiling,
 and self-describes `valid` / `enabled` / `connected`.
 
 **Discovery / loading pattern:**
-1. Call **`sensors json brief`** once → a small, bounded enumeration (state only, **no
+1. Call **`sensors json brief`** once -> a small, bounded enumeration (state only, **no
    embedded `data`**), safe over BLE regardless of sensor count:
    ```json
    {"schema":1,"brief":true,"seq":<n>,
@@ -172,7 +172,7 @@ and self-describes `valid` / `enabled` / `connected`.
 
 **The aggregate `sensors json` still exists** (shape below) and is fine for the web
 sensors page (its own endpoint serializes directly, bypassing the 2 KB cmd ceiling)
-or for low-sensor-count devices — but treat it as unreliable over BLE with multiple
+or for low-sensor-count devices - but treat it as unreliable over BLE with multiple
 sensors active.
 
 ```json
@@ -182,30 +182,34 @@ sensors active.
 ]}
 ```
 
-`thermal` is a stream sensor, so even in the aggregate it has no embedded `data` —
+`thermal` is a stream sensor, so even in the aggregate it has no embedded `data` -
 always read it via `thermalread json`.
 
 ### Per-command sensor reads (1:1 parity)
 Each also has its own `json`. **Important shape note:** the per-sensor reads that
 delegate to the shared builder return the *same object* that appears in the `data`
-field of `sensors json` — that object uses a `valid` flag (and often
+field of `sensors json` - that object uses a `valid` flag (and often
 `enabled`/`connected`), and may **not** carry a top-level `schema`. Parse defensively
 (check `valid`). The directly-written ones use `{"schema":1,...}`.
 
 | Command (+`json`) | Returns |
 |---|---|
-| `imuread`, `tofread`, `gpsread`, `presenceread`, `presencestatus`, `fmradioread`, `rtcread`, `gamepadread`, `apdsread` | the shared builder's `data` object (has `valid`/`enabled`/`connected` + readings) |
-| `thermalread` | `{"valid","min","max","avg","seq"}` (or `{"valid":false}`) |
+| `imuread`, `tofread`, `gpsread`, `presenceread`, `presencestatus`, `fmradioread`, `rtcread`, `gamepadread`, `apdsread`, `anoencoderread` | the shared builder's `data` object: envelope `{"valid","connected","ts"}` + value keys |
+| `thermalread` | envelope + `{"min","avg","max"}` (summary; the 768-px frame is a separate shape) |
 | `micread` | `{"schema":1,"enabled","connected","recording","sampleRate","bitDepth","channels","level"}` |
 | `miclevel` | `{"schema":1,"enabled","level"}` |
-| `anoencoderread` | `{"schema":1,"connected","position","axis","buttons"}` |
 | `cameraread` | camera status JSON (already JSON; returns unconditionally) |
-| `temperature`, `voltage` | see §4 |
+| `temperature`, `voltage` | see sec. 4 |
 
-Example builder `data` shapes (for reference; fields vary per sensor):
-- imu: `{"valid","seq","enabled","connected","ageMs","yaw","pitch","roll","accel...","gyro...","temp"}`
-- gps: `{"val","fix","quality","sats","lat","lon","alt","speed"}`
-- apds: `{"valid","colorEnabled","proximityEnabled","gestureEnabled","r","g","b","c","proximity"}`
+**(Corrected 2026-07-28 - the examples below previously showed pre-envelope shapes.
+Same day, later: the optional `age` key was removed entirely; derive staleness from `ts`.)**
+Every builder object opens with the envelope: `{"valid":bool,"connected":bool,"ts":ms}` -
+`ts` is 0 when never sampled. `valid:false` variants keep the envelope. Then per-sensor value keys:
+- imu: `+ {"accel":{x,y,z},"gyro":{x,y,z},"ori":{yaw,pitch,roll},"temp"}`
+- gps: `+ {"fix","quality","sats","lat","lon","alt","speed"}`
+- apds: `+ {"r","g","b","c","proximity"}`
+- anoencoder: `+ {"pos","axis","buttons"}` *(was `{"schema":1,"connected","position",...}` - `schema` dropped, `position`->`pos`, envelope added)*
+- tof: `+ {"objects":[{"id","distance_mm","status","valid"}]}` (detected objects only; variable length)
 
 ---
 
@@ -225,13 +229,13 @@ feature is compiled out). Treat accordingly.
 
 ---
 
-## 8. Remote sensors, streaming state & automation cadence (NEW — breaking shape change)
+## 8. Remote sensors, streaming state & automation cadence (NEW - breaking shape change)
 
 This session reworked how a MASTER exposes its bonded/mesh **peers'** sensors. If the app
 consumes any of the remote-device endpoints below, it must update. (The LOCAL sensor
-contract in §6 is **unchanged**.)
+contract in sec. 6 is **unchanged**.)
 
-### 8.1 Remote-device list — `sensors` changed from strings to objects (breaking)
+### 8.1 Remote-device list - `sensors` changed from strings to objects (breaking)
 Returned by web `GET /api/sensors/remote` (no params) **and** nested verbatim under
 `devices` in the BLE/CLI `espnowsensorstatus json` (master role):
 - **Before:** `"sensors": ["thermal","input"]`
@@ -245,33 +249,33 @@ Full shape:
 Action: read `sensor.type` (was the bare string). You gain `enabled`/`fresh` for a per-sensor
 on/off indicator.
 
-### 8.2 Per-sensor remote read — now wrapped (breaking)
+### 8.2 Per-sensor remote read - now wrapped (breaking)
 Web `GET /api/sensors/remote?device=<MAC>&sensor=<type>` previously returned the raw sensor
 JSON (or `{"error":...}`). Now:
 ```json
 { "connected": true, "enabled": true, "fresh": true, "data": { ...sensor json... } }
 ```
-- `data` is the reading object, or **`null`** when not fresh (disabled / stale) — there is no
+- `data` is the reading object, or **`null`** when not fresh (disabled / stale) - there is no
   more `{"error":...}` for "no data".
 - Drive the status dot from `enabled`; render `data` for the live value.
 
 ### 8.3 What `enabled` MEANS for a remote sensor
-`enabled` = **"is it streaming its data to the mesh"** — the axis the Sensor Streaming UI
-toggles — NOT whether the sensor hardware is powered. (An always-on sensor like the gamepad
+`enabled` = **"is it streaming its data to the mesh"** - the axis the Sensor Streaming UI
+toggles - NOT whether the sensor hardware is powered. (An always-on sensor like the gamepad
 is "on" forever; what matters across the link is whether it's broadcasting.) So:
-streaming → `enabled:true, fresh:true`; stopped → `enabled:false, fresh:false`. A present-but-
+streaming -> `enabled:true, fresh:true`; stopped -> `enabled:false, fresh:false`. A present-but-
 not-streaming sensor still appears in the list (render it red/off) and ages out only after the
 device goes silent (~60 s).
 
-### 8.4 Automation cadence — already in the data (no firmware change)
+### 8.4 Automation cadence - already in the data (no firmware change)
 A peer's automations arrive as its `automations.json`. Each automation's schedule is in
 `triggers[]`; for a `time` trigger the cadence is `triggers[0].recurrence` =
 `daily` | `weekly` | `monthly` | `yearly` (the "Repeat" dropdown). **A time trigger with no
-`recurrence` means daily.** Render the cadence next to the time (e.g. `14:02 daily`) — showing
+`recurrence` means daily.** Render the cadence next to the time (e.g. `14:02 daily`) - showing
 bare `14:02` is ambiguous. The field was always present; just surface it.
 
 ## 9. Status
 
 All of the above builds clean and is pending on-device validation; on confirmation it
 will be committed with a version bump. If a shape here doesn't match what the device
-emits, the device is authoritative — report the mismatch.
+emits, the device is authoritative - report the mismatch.
