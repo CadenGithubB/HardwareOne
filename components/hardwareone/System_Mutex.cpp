@@ -80,7 +80,10 @@ bool isI2cLockedByCurrentTask() {
 // FsLockGuard Implementation
 // ============================================================================
 
-FsLockGuard::FsLockGuard(const char* owner) : held(false) {
+FsLockGuard::FsLockGuard(const char* owner)
+    : FsLockGuard(owner, portMAX_DELAY) {}
+
+FsLockGuard::FsLockGuard(const char* owner, TickType_t timeoutTicks) : held(false) {
   if (gFsMutex) {
     // Reentrant-safe: if already owned by this task, skip
     if (isHeldByCurrentTask(gFsMutex)) {
@@ -88,7 +91,7 @@ FsLockGuard::FsLockGuard(const char* owner) : held(false) {
       // Serial.printf("[MUTEX] FsLockGuard reentry (owner=%s)\n", owner ? owner : "");
       return;
     }
-    if (xSemaphoreTake(gFsMutex, portMAX_DELAY) == pdTRUE) {
+    if (xSemaphoreTake(gFsMutex, timeoutTicks) == pdTRUE) {
       held = true;
     }
   }
@@ -321,4 +324,3 @@ EspNowTxGuard::~EspNowTxGuard() {
     xSemaphoreGive(gEspNowSessionTxMutex);
   }
 }
-

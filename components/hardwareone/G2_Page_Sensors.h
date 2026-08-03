@@ -73,7 +73,8 @@ void g2BuildSensorReadout(char* out, size_t cap);
 size_t g2BuildSensorLiveList(const char** outRows, size_t maxRows);
 
 #if ENABLE_CAMERA_SENSOR
-// Register UI refresh after async camera power ops (call once from G2 init).
+// Install post-hook for Sensors detail redraw after async camera power ops
+// (call once from G2 init). Does not start cam_pwr — that is lazy on first use.
 void g2RegisterSensorsCameraPowerHook();
 #endif
 

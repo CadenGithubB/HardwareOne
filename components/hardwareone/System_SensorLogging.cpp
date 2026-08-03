@@ -1239,6 +1239,7 @@ const char* cmd_sensorlog(const String& argsInput) {
     // additionally header-on-creates empty files (post-rotation base, /sd
     // overflow mirror), so a file skipped here is still safe.
     if (!VFS::existsGuarded(filepath, VFS::systemAuth("senlog.setup_create"))) {
+      FsLockGuard fsGuard("sensorlog.setup_create");
       File f = VFS::openGuarded(filepath, "w", VFS::systemAuth("senlog.setup_create"), true);
       if (!f) {
         snprintf(getDebugBuffer(), 1024, "Error: Failed to create file: %s", filepath.c_str());
@@ -1549,6 +1550,7 @@ static uint8_t  sHtMineState = HT_MINE_IDLE;
 static uint8_t  sHtMineCursor = 0;
 static uint32_t sHtMineLastMs = 0;
 static uint32_t sHtMineLastBurstMs = 0;
+static uint32_t sHtMineLastReseekMs = 0;  // ring-down BLE nudge only — not the sample clock
 static bool     sHtPageRefreshPending = false;
 static uint32_t sHtPageRefreshDueMs = 0;
 
@@ -1734,14 +1736,22 @@ void healthTrackTick() {
   if (!g2RingIsConnected()) {
     sHtMineState = HT_MINE_IDLE;
     if (mineDue) {
-      // Advance the mine clock so we only nudge once per interval.
-      sHtMineLastBurstMs = now;
-      // Non-blocking: schedules connectSaved on the next bleAutoReconnectTick.
-      // Respects user ringdisconnect; works even if bleautoreconnect is off
-      // (one-shot). With autoReconnect on, drop recovery continues via backoff.
-      blePeerRequestReseek(BLE_PEER_R1_RING);
-      if (isDebugFlagSet(DEBUG_LOGGER)) {
-        DEBUG_LOGGERF("healthtrack: mine due but ring down — requested BLE reseek");
+      // Rate-limit the BLE nudge on its OWN clock. Do NOT advance
+      // sHtMineLastBurstMs here — logging always starts before the ring
+      // connects at boot, and burning the sample clock left a full poll
+      // interval of empty sealed stubs (14-byte #HW1ENC files) on every
+      // short reboot. When the ring comes up, mineDue must still be true
+      // so the first real sample lands within seconds, not +15 min.
+      if (sHtMineLastReseekMs == 0 ||
+          (long)(now - sHtMineLastReseekMs) >= (long)healthTrackIntervalMs()) {
+        sHtMineLastReseekMs = now;
+        // Non-blocking: schedules connectSaved on the next bleAutoReconnectTick.
+        // Respects user ringdisconnect; works even if bleautoreconnect is off
+        // (one-shot). With autoReconnect on, drop recovery continues via backoff.
+        blePeerRequestReseek(BLE_PEER_R1_RING);
+        if (isDebugFlagSet(DEBUG_LOGGER)) {
+          DEBUG_LOGGERF("healthtrack: mine due but ring down — requested BLE reseek");
+        }
       }
     }
     return;
@@ -1962,8 +1972,11 @@ const char* healthTrackSet(bool on) {
     gSensorLogMask = (uint8_t)(gSensorLogMask | LOG_R1);
     setSetting(gSettings.sensorLogMask, (int)gSensorLogMask);
 
-    // Track format is GPS-only — health needs TEXT/CSV columns.
-    if (gSensorLogFormat == SENSOR_LOG_TRACK) {
+    // Health Track owns the per-day CSV shape (midnight roll, sync-flip roll,
+    // one continuous file). TEXT is one-file-per-session; TRACK is GPS-only.
+    // Coerce both so Track can't leave a pile of sealed stubs.
+    const bool coercedFormat = (gSensorLogFormat != SENSOR_LOG_CSV);
+    if (coercedFormat) {
       gSensorLogFormat = SENSOR_LOG_CSV;
       setSetting(gSettings.sensorLogFormat, (int)SENSOR_LOG_CSV);
     }
@@ -1979,12 +1992,13 @@ const char* healthTrackSet(bool on) {
 
     // Kick an immediate mine burst (don't wait a full poll interval).
     sHtMineLastBurstMs = 0;
+    sHtMineLastReseekMs = 0;
     sHtMineState = HT_MINE_IDLE;
 
-    if (gSensorLoggingRunning && hadR1) {
-      // Already logging WITH R1 already in the mask — nothing more to do.
-      // (If R1 was just added, fall through to the restart so the CSV header
-      // matches the new column set.)
+    if (gSensorLoggingRunning && hadR1 && !coercedFormat) {
+      // Already logging WITH R1 already in the mask and already CSV — nothing
+      // more to do. (If R1 was just added, or format was coerced from TEXT/
+      // TRACK, fall through to the restart so the day-file header matches.)
       snprintf(getDebugBuffer(), 1024,
                "SUCCESS: Health Track ON (already logging → %s)",
                gSensorLogPath.c_str());
@@ -2346,8 +2360,8 @@ const CommandEntry sensorLoggingCommands[] = {
     "  autostart [on|off]: Auto-start logging on boot (bare = toggle)" },
   { "healthtrack", "Start/stop R1 Health Track (enables r1 sensorlog + starts capture)", false, cmd_healthtrack,
     "Usage: healthtrack <on|off|toggle|status|interval [sec]>\n"
-    "  on: enable LOG_R1, start sensorlog under /logging_captures/sensors/, persist for boot\n"
-    "      (dated per-day file when the clock is set, boot-<N>/ subfolder when dark)\n"
+    "  on: enable LOG_R1, force format=CSV, start under /logging_captures/sensors/, persist for boot\n"
+    "      (one dated per-day file when the clock is set, boot-<N>/ until sync then roll)\n"
     "  off: remove LOG_R1; stop logging if no other sensors remain\n"
     "  interval <sec>: how often to poll/mine the ring while Track is on (default 900 = 15 min)\n"
     "  R1-only Track sessions write ONLY on that mine (and Poll Now) — no 5s empty heartbeats\n"
@@ -2433,7 +2447,12 @@ void sensorLogAutoStart() {
 
   if (gSettings.healthTrackingEnabled) {
     gSensorLogMask = (uint8_t)(gSensorLogMask | LOG_R1);
-    if (gSensorLogFormat == SENSOR_LOG_TRACK) gSensorLogFormat = SENSOR_LOG_CSV;
+    // Match healthTrackSet: Track always resumes as CSV so dark-boot /
+    // sync-flip / midnight roll produce one day file instead of TEXT stubs.
+    if (gSensorLogFormat != SENSOR_LOG_CSV) {
+      gSensorLogFormat = SENSOR_LOG_CSV;
+      setSetting(gSettings.sensorLogFormat, (int)SENSOR_LOG_CSV);
+    }
     if (gSettings.sensorLogPath.length() == 0 || gSettings.sensorLogPath.indexOf("health") < 0) {
       // Keep a stable health path for resumed sessions (timestamp appended below).
       gSettings.sensorLogPath = CAPTURE_HEALTHLOG_DEFAULT;

@@ -1,4 +1,4 @@
-# Hardware One v0.99.6 - User Guide
+# Hardware One v0.99.7 - User Guide
 
 This is the full reference for Hardware One. It covers every subsystem, all CLI commands, configuration options, and how the major features work. For initial setup, see the [Quick Start Guide](QUICKSTART.md).
 
@@ -1318,7 +1318,7 @@ vitals also on OLED **R1 Health** and Web **`/r1-health`**.
 Ring/Health CLI: `ringconnect`, `ringstatus`, `ringquery hr|temp|wear`,
 `healthstatus [json|poll]`, `healthtrack status|interval`. A Bluetooth App can call the
 same commands over GATT (no dedicated phone UI yet).
-3-pane list+text+image experiments: Tests -> Image -> Streaming -> Compound -> Q30*.
+3-pane list+text+image experiments: Tests -> Image -> Com2 (LZ4 multi) -> Q30*.
 </details>
 
 <details>

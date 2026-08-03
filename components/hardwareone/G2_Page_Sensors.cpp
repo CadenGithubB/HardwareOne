@@ -1480,7 +1480,11 @@ void g2SensorsHandleTap(uint32_t idx) {
           skipImmediateRedraw = true;
           sG2SensorsCamAsyncStartPending = true;
         } else {
-          BROADCAST_PRINTF("[G2] Sensors: camera start queue full — abort persist");
+          // Lazy cam_pwr: first use may fail on worker create (low DRAM) as
+          // well as a full depth-6 queue after the worker already exists.
+          BROADCAST_PRINTF("[G2] Sensors: camera start failed "
+                           "(cam_pwr create failed or queue full — low DRAM?) "
+                           "— abort persist");
           runtimeApplyOk = false;
         }
       } else if (!next && gCameraRunning) {
@@ -1488,7 +1492,9 @@ void g2SensorsHandleTap(uint32_t idx) {
         if (cameraPowerRequestStopAsync()) {
           skipImmediateRedraw = true;
         } else {
-          BROADCAST_PRINTF("[G2] Sensors: camera stop queue full — abort persist");
+          BROADCAST_PRINTF("[G2] Sensors: camera stop failed "
+                           "(cam_pwr create failed or queue full — low DRAM?) "
+                           "— abort persist");
           runtimeApplyOk = false;
         }
       }
@@ -1656,7 +1662,8 @@ static void g2SensorsOnCameraPowerDone() {
 }
 
 void g2RegisterSensorsCameraPowerHook() {
-  cameraPowerWorkerEnsureStarted();
+  // Hook only — cam_pwr is created lazily on the first power request
+  // (cameraPowerRequestStart*/Stop* → cameraPwrSend → ensureStarted).
   cameraPowerSetPostHook(g2SensorsOnCameraPowerDone);
 }
 #endif

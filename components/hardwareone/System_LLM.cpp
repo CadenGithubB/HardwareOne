@@ -53,6 +53,7 @@
 #if ENABLE_ONDEVICE_LLM
 
 #include "System_LLM.h"
+#include "System_Mutex.h"
 #include "System_LLM_Internal.h"  // private engine types + gLLM runtime singleton
 #include "System_LLM_Kernels.h"   // rmsnorm/layernorm/softmax/wmatmul/scaleCount
 #include "System_LLM_Sampler.h"   // sample()
@@ -2446,6 +2447,7 @@ int llmTokenize(const char* text, int* outTokens, int maxTokens) {
 }
 
 String llmListModels() {
+  FsLockGuard fsGuard("llm.list_models");
   String json = "[";
   bool first = true;
 

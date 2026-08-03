@@ -36,6 +36,15 @@ CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
 # that permanently encrypts whatever board it boots on).
 CONFIG_SECURE_FLASH_ENC_ENABLED=n
 
+# Second half of the same guard, and NOT redundant: NVS_ENCRYPTION depends on
+# "SECURE_FLASH_ENC_ENABLED || SOC_HMAC_SUPPORTED", and the S3 has HMAC — so a
+# stale =y from a feathers3_fe build survives turning flash encryption off.
+# Its key-protection choice would then re-resolve from the flash-encryption
+# scheme (which does depend on FE) to the only remaining option, the HMAC
+# peripheral, and the first nvs_flash_init() would BURN an eFuse key block on
+# this board. Pin it off explicitly.
+CONFIG_NVS_ENCRYPTION=n
+
 # Keep the standard table offset (feathers3_fe moves it to 0x9000; the shared
 # CSVs start nvs at 0xA000 so both offsets work).
 CONFIG_PARTITION_TABLE_OFFSET=0x8000

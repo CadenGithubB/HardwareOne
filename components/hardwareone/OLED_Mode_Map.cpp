@@ -603,6 +603,7 @@ static bool isGPSDataLine(const String& line) {
 // it qualifies. Shared by the top-level scan and the subfolder descent.
 static void probeTrackFile(File& file) {
   if (gTrackFileCount >= 8) return;
+  FsLockGuard fsGuard("oled.map.probe_track");
   File check = VFS::openGuarded(file.path(), "r", VFS::systemAuth("oled.map.scan_tracks"));
   if (!check) return;
   bool hasGPS = false;
@@ -625,6 +626,7 @@ static void probeTrackFile(File& file) {
 // shapeSessionPath in System_SensorLogging.cpp), so the scan descends exactly
 // one directory level — a flat-only scan misses every shaped track.
 static void scanTrackFiles() {
+  FsLockGuard fsGuard("oled.map.scan_tracks");
   gTrackFileCount = 0;
 
   // Scan directories (sensors included: autostart-resumed TRACK sessions

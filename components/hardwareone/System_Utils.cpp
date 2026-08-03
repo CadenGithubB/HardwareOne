@@ -993,6 +993,7 @@ bool appendAutoLogEntry(const char* type, const String& message) {
     }
   }
 
+  FsLockGuard fsGuard("automation.log.append");
   File f = VFS::openGuarded(destStr, "a", gAutomationLogOwnerCtx);
   if (!f) return false;
 
@@ -2037,9 +2038,13 @@ const char* cmd_fsusage(const String& argsInput) {
     return "ERROR";
   }
 
-  size_t totalBytes = LittleFS.totalBytes();
-  size_t usedBytes = LittleFS.usedBytes();
-  size_t freeBytes = totalBytes - usedBytes;
+  uint64_t total = 0, used = 0, free = 0;
+  if (!VFS::getStats(VFS::INTERNAL, total, used, free)) {
+    return wantJson ? "{\"schema\":1,\"ready\":false}" : "Error: filesystem stats unavailable";
+  }
+  size_t totalBytes = (size_t)total;
+  size_t usedBytes = (size_t)used;
+  size_t freeBytes = (size_t)free;
   unsigned int usagePercent = (usedBytes * 100) / (totalBytes == 0 ? 1 : totalBytes);
 
   // JSON to the caller only (no broadcastOutput); text path below unchanged.

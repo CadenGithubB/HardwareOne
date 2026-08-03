@@ -1441,6 +1441,10 @@ bool ringPerformConnect(const String& savedMac /* = String() */) {
     // overload hardwires the portMAX_DELAY default).
     connOk = gRing.client->connectTimeout(gRingAdvertisedDevice, 35000);
   }
+  // Classify BOTH overloads above (the saved-MAC path takes a BLEAddress, so
+  // bleConnectWatched's advertised-device wrapper can't cover it — and saved
+  // MAC is exactly the unattended auto-reconnect path where a wedge builds).
+  bleNoteConnectOutcome(connOk, millis() - t0, "RING");
   if (!connOk) {
     const uint32_t dt = millis() - t0;
     BROADCAST_PRINTF("[RING] BLE connect FAILED after %u ms (%s)",

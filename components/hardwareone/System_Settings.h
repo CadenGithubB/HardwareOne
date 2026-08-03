@@ -339,7 +339,7 @@ struct Settings {
       cameraStreamFps(5),
       g2StreamWidth(96),
       g2StreamHeight(96),
-      g2StreamToneMap(true),
+      g2StreamToneMap(1),  // 1=Balanced (see g2StreamToneMap comment)
       g2PackRateMs(80),
       cameraStorageLocation(1),  // 1 = SD card (default — LittleFS is too small for photos)
       cameraCaptureFolder("/photos"),
@@ -964,12 +964,14 @@ struct Settings {
   // Defaults match the legacy hardcoded gG2StreamW/H values (96x96).
   int g2StreamWidth;
   int g2StreamHeight;
-  // G2 lens stream auto-levels tone mapping. When true, the BMP build path
-  // does a per-frame luma min/max scan and linearly remaps to full 0..255
-  // range before quantizing to 4-bpp nibbles — recovers dynamic range on
-  // washed-out OV3660 frames that would otherwise quantize to a narrow
-  // band of similar-looking shades on the green-tinted lens panel.
-  bool g2StreamToneMap;
+  // G2 lens stream 4-bpp tone algorithm (int, not bool — old JSON true/false
+  // still loads as 1/0 via ArduinoJson). Values:
+  //   0 = Linear   — contrast boost + round quantize (no auto-levels)
+  //   1 = Balanced — dark-only percentile stretch + stronger contrast (default)
+  //   2 = Shadows  — dark-only stretch + contrast + soft bottom lift
+  //   3 = Legacy   — old absolute min/max AutoLevels + truncate >> 4
+  // CLI: g2streamtonemap <0..3|linear|balanced|shadows|legacy|off|on>
+  int g2StreamToneMap;
   // Frame cadence (ms) for Q25 SD-pack BMP animations (gif→bmp packs).
   // Independent of g2liverate (which paces the live-tile test probes) so
   // tuning playback speed for animations doesn't interfere with the

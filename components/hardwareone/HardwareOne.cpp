@@ -1328,6 +1328,11 @@ void hardwareone_setup() {
   Serial.begin(115200);
   delay(500);  // Longer delay for serial connection
 
+  // Filesystem and settings code below already uses FsLockGuard. Create the
+  // global mutexes before the first such use so those guards never silently
+  // degrade to no-ops, even if boot sequencing gains another task later.
+  initMutexes();
+
   // Enable allocation tracking BEFORE any allocations
   gAllocTrackerEnabled = true;
   gAllocTrackerCount = 0;
@@ -1392,6 +1397,21 @@ void hardwareone_setup() {
       writeDebugJson();
     }
   }
+
+  // Push the configured offset into libc TZ the moment settings are readable,
+  // NOT at applySettings() below. Everything between here and there that
+  // formats a wall-clock time calls localtime_r, and until tzset() runs libc
+  // is in UTC — so those stamps silently came out UTC-shifted while every log
+  // written after applySettings() was correct. That split-brain is visible in
+  // the shipped logs: a v0.99.5 crash is recorded as 21:29:28 in
+  // crash-history.log and 16:29:29 in system-events.log — same event, same
+  // "+1262ms" marker, five hours apart, because crashRecordPersistToFile()
+  // runs ~60 lines below and applySettings() runs ~60 lines below THAT.
+  // (system-events escapes it only because its pre-init events are buffered
+  // and stamped at flush.) applyTimezone is just setenv+tzset off
+  // gSettings.tzOffsetMinutes — idempotent, no I/O — so the later call in
+  // applySettings() stays exactly as it is.
+  Clock::applyTimezone();
 
   // TEMP DEBUG (2026-04-03): force debug flags on AFTER file load to diagnose
   // Command system init — single call after settings are resolved
@@ -1516,9 +1536,6 @@ void hardwareone_setup() {
 
   // Sensor cache mutexes are now created lazily in each *StartInternal() function
   // This saves memory for disabled sensors and allows better error handling
-
-  // Global mutexes (gFsMutex, gJsonResponseMutex, gMeshRetryMutex, etc.)
-  initMutexes();
 
   if (gSettings.i2cEnabled) {
     initSensorQueue();
@@ -2413,6 +2430,12 @@ void hardwareone_loop() {
   ntpSyncDrainTick();   // hand real SNTP replies to the clock-step chokepoint
   Clock::clockDutiesTick(); // drain filesystem-touching clock-step chores
 #if ENABLE_BLUETOOTH
+  // Before scheduling another reseek: if the host stack is wedged, no number
+  // of retries can clear it — recycle instead. Self-gating (worker idle,
+  // nothing linked, rate-limited), so this is a cheap no-op the rest of the
+  // time. Runs HERE rather than inside the connect worker because the recycle
+  // vTaskDeletes that worker.
+  bleStackRecycleIfWedged();
   bleAutoReconnectTick();
 #endif
 
@@ -2692,4 +2715,4 @@ void hardwareone_loop() {
   // ========================================================================
 
   delay(2);
-} 
+}

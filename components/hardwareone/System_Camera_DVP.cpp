@@ -20,6 +20,7 @@
 #include "freertos/semphr.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include <esp_heap_caps.h>
 #include "esp_camera.h"
 #include "sdkconfig.h"
 #include "System_Debug.h"
@@ -664,6 +665,15 @@ void stopCamera(bool isRecovery) {
     return;
   }
 
+  // Finalize AVI before taking the camera mutex. stopVideoRecording waits
+  // for cam_record, which may itself be inside captureFrame (holding that
+  // mutex) — calling it under the camera lock would deadlock. Skip on
+  // recovery re-inits so a glitch mid-stream doesn't abort a recording.
+  if (!isRecovery && videoRecording) {
+    DEBUG_CAMERA_LIFECYCLEF("[CAM_STOP] Stopping active recording before deinit");
+    stopVideoRecording();
+  }
+
   if (!lockCameraMutex(15000)) {
     DEBUG_CAMERA_LIFECYCLEF("[CAM_STOP] ERROR: camera mutex timeout (camera busy)");
     return;
@@ -985,15 +995,15 @@ void cameraPowerWorkerEnsureStarted() {
     return;
   }
   constexpr UBaseType_t kDepth = 6;
-  // xTaskCreate stack arg is in WORDS (4 bytes), not bytes — 10240
-  // here is 40 KB. Observed HWM was very low (~2.5 KB used) but the
-  // camera had not been exercised heavily in that test, so the cut
-  // isn't safe to take without a real worst-case capture/stream load
-  // measurement. Leaving as-is until then.
+  // ESP-IDF xTaskCreate stack depth is in BYTES — 10240 here is 10 KB.
+  // Observed HWM under light load was ~2.5–7 KB; leave headroom until a
+  // worst-case capture/stream measurement justifies cutting.
   constexpr uint32_t  kStack = 10240;
   sCamPwrQueue = xQueueCreate(kDepth, sizeof(CameraPwrMsg));
   if (!sCamPwrQueue) {
-    ERROR_CAMERAF("[CAM_PWR] queue create failed");
+    ERROR_CAMERAF("[CAM_PWR] queue create failed (DRAM free=%u largest=%u)",
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
     return;
   }
   const BaseType_t ok =
@@ -1003,7 +1013,11 @@ void cameraPowerWorkerEnsureStarted() {
       xTaskCreatePinnedToCore(cameraPwrWorker, "cam_pwr", kStack, nullptr,
                   tskIDLE_PRIORITY + 2, &sCamPwrTask, I2C_SENSOR_CORE);
   if (ok != pdPASS) {
-    ERROR_CAMERAF("[CAM_PWR] worker task create failed");
+    ERROR_CAMERAF("[CAM_PWR] worker task create failed — need ~%u B internal stack "
+                  "(DRAM free=%u largest=%u)",
+                  (unsigned)kStack,
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
     vQueueDelete(sCamPwrQueue);
     sCamPwrQueue = nullptr;
     sCamPwrTask  = nullptr;
@@ -1024,6 +1038,10 @@ bool cameraPowerRequestStartAsync() {
 }
 
 bool cameraPowerRequestStopAsync() {
+  // Never started and already off — do not spawn cam_pwr just to no-op.
+  if (!sCamPwrQueue && !gCameraRunning) {
+    return true;
+  }
   const CameraPwrMsg m{CAM_PWR_CMD_STOP, nullptr};
   return cameraPwrSend(m, 0);
 }
@@ -1048,9 +1066,12 @@ bool cameraPowerRequestStartSync(uint32_t waitMs) {
 }
 
 void cameraPowerRequestStopSync(uint32_t waitMs) {
-  cameraPowerWorkerEnsureStarted();
+  // Lazy worker: idle stop must not create cam_pwr. If the camera is somehow
+  // running without a worker, tear it down inline on the caller stack.
   if (!sCamPwrQueue) {
-    stopCamera();
+    if (gCameraRunning) {
+      stopCamera();
+    }
     return;
   }
   TaskHandle_t self = xTaskGetCurrentTaskHandle();
@@ -2270,7 +2291,8 @@ static const SettingEntry cameraSettingEntries[] = {
   { "cameraVFlip", SETTING_BOOL, &gSettings.cameraVFlip, 0, 0, nullptr, 0, 1, "Vertical flip", nullptr, false, "image", "cameravflip" },
   { "cameraQuality", SETTING_INT, &gSettings.cameraQuality, 12, 0, nullptr, 0, 63, "JPEG quality (0-63, lower=better)", nullptr, false, "image", "cameraquality" },
   { "cameraStreamFps", SETTING_INT, &gSettings.cameraStreamFps, 5, 0, nullptr, 1, 20, "Camera FPS (higher=smoother)", nullptr, false, "image", "camerafps" },
-  { "g2StreamToneMap", SETTING_BOOL, &gSettings.g2StreamToneMap, 1, 0, nullptr, 0, 1, "G2 lens auto-levels (stretches washed-out frames to full range)", nullptr, false, "image", "g2streamtonemap" },
+  { "g2StreamToneMap", SETTING_INT, &gSettings.g2StreamToneMap, 1, 0, nullptr, 0, 3,
+    "G2 lens 4-bpp tone", "0:Linear,1:Balanced,2:Shadows,3:Legacy", false, "image", "g2streamtonemap" },
   { "g2PackRateMs", SETTING_INT, &gSettings.g2PackRateMs, 80, 0, nullptr, 20, 2000, "G2 SD-pack animation cadence (ms per frame)", nullptr, false, "image", "g2packrate" },
   { "cameraStorageLocation", SETTING_INT, &gSettings.cameraStorageLocation, 1, 0, nullptr, 0, 2, "Storage Location", "0:LittleFS (Internal),1:SD Card,2:Both", false, "storage", "camerastoragelocation" },
   { "cameraCaptureFolder", SETTING_STRING, &gSettings.cameraCaptureFolder, 0, 0, "/photos", 0, 0, "Photo folder path", nullptr, false, "storage", "cameracapturefolder" },

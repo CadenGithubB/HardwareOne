@@ -418,7 +418,10 @@ bool startRecording() {
     DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] *** TASK CREATION FAILED! ***");
     micRecording = false;
     sensorStatusBumpWith("micrecstop");
-    recordingFile.close();
+    {
+      FsLockGuard fsGuard("mic.record.task_create_cleanup");
+      recordingFile.close();
+    }
     return false;
   }
   

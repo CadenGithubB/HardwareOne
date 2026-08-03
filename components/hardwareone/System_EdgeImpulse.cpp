@@ -17,6 +17,7 @@
 #include <LittleFS.h>
 #include "System_VFS.h"
 #include "System_AuthIdentity.h"
+#include "System_Mutex.h"
 
 // TensorFlow Lite Micro includes
 #include "tensorflow/lite/micro/micro_interpreter.h"
@@ -83,6 +84,7 @@ static void freeLabels() {
 }
 
 static bool loadLabelsFromExplicitPath(const String& labelsPath) {
+  FsLockGuard fsGuard("edge.labels_load");
   if (!VFS::existsGuarded(labelsPath, VFS::systemAuth("edge.labels_load"))) {
     return false;
   }
@@ -499,48 +501,49 @@ bool loadModelFromFile(const char* path) {
   // Free any existing model
   freeModelResources();
   
-  // Open file
-  File modelFile = VFS::openGuarded(path, "r", VFS::systemAuth("edge.model_load"));
-  if (!modelFile) {
-    ERROR_SYSTEMF("[EdgeImpulse] Failed to open model file: %s", path);
-    return false;
-  }
-  
-  // Check file size
-  size_t fileSize = modelFile.size();
-  DEBUG_SYSTEMF("[EI_DEBUG] File size: %zu bytes (max allowed: %zu)", fileSize, kMaxModelSize);
-  
-  if (fileSize == 0) {
-    ERROR_SYSTEMF("[EdgeImpulse] Model file is empty");
+  size_t fileSize = 0;
+  size_t bytesRead = 0;
+  uint32_t readTime = 0;
+  {
+    FsLockGuard fsGuard("edge.model_load");
+    File modelFile = VFS::openGuarded(path, "r", VFS::systemAuth("edge.model_load"));
+    if (!modelFile) {
+      ERROR_SYSTEMF("[EdgeImpulse] Failed to open model file: %s", path);
+      return false;
+    }
+
+    fileSize = modelFile.size();
+    DEBUG_SYSTEMF("[EI_DEBUG] File size: %zu bytes (max allowed: %zu)", fileSize, kMaxModelSize);
+
+    if (fileSize == 0) {
+      ERROR_SYSTEMF("[EdgeImpulse] Model file is empty");
+      modelFile.close();
+      return false;
+    }
+    if (fileSize > kMaxModelSize) {
+      ERROR_SYSTEMF("[EdgeImpulse] Model too large: %zu bytes (max %zu)", fileSize, kMaxModelSize);
+      modelFile.close();
+      return false;
+    }
+
+    DEBUG_SYSTEMF("[EI_DEBUG] Allocating model buffer: %zu bytes", fileSize);
+    gModelBuffer = (uint8_t*)ps_alloc(fileSize, AllocPref::PreferPSRAM, "ei.model");
+    if (!gModelBuffer) {
+      ERROR_SYSTEMF("[EdgeImpulse] Failed to allocate model buffer (%zu bytes)", fileSize);
+      DEBUG_SYSTEMF("[EI_DEBUG] Allocation FAILED! Heap: %lu, PSRAM: %lu",
+                    (unsigned long)ESP.getFreeHeap(),
+                    (unsigned long)(psramFound() ? ESP.getFreePsram() : 0));
+      modelFile.close();
+      return false;
+    }
+    DEBUG_SYSTEMF("[EI_DEBUG] Model buffer allocated at %p", gModelBuffer);
+
+    DEBUG_SYSTEMF("[EI_DEBUG] Reading model data from file...");
+    uint32_t readStart = millis();
+    bytesRead = modelFile.read(gModelBuffer, fileSize);
+    readTime = millis() - readStart;
     modelFile.close();
-    return false;
   }
-  if (fileSize > kMaxModelSize) {
-    ERROR_SYSTEMF("[EdgeImpulse] Model too large: %zu bytes (max %zu)", fileSize, kMaxModelSize);
-    modelFile.close();
-    return false;
-  }
-  
-  // Allocate model buffer in PSRAM if available
-  DEBUG_SYSTEMF("[EI_DEBUG] Allocating model buffer: %zu bytes", fileSize);
-  gModelBuffer = (uint8_t*)ps_alloc(fileSize, AllocPref::PreferPSRAM, "ei.model");
-  
-  if (!gModelBuffer) {
-    ERROR_SYSTEMF("[EdgeImpulse] Failed to allocate model buffer (%zu bytes)", fileSize);
-    DEBUG_SYSTEMF("[EI_DEBUG] Allocation FAILED! Heap: %lu, PSRAM: %lu",
-                  (unsigned long)ESP.getFreeHeap(),
-                  (unsigned long)(psramFound() ? ESP.getFreePsram() : 0));
-    modelFile.close();
-    return false;
-  }
-  DEBUG_SYSTEMF("[EI_DEBUG] Model buffer allocated at %p", gModelBuffer);
-  
-  // Read model data
-  DEBUG_SYSTEMF("[EI_DEBUG] Reading model data from file...");
-  uint32_t readStart = millis();
-  size_t bytesRead = modelFile.read(gModelBuffer, fileSize);
-  uint32_t readTime = millis() - readStart;
-  modelFile.close();
   
   DEBUG_SYSTEMF("[EI_DEBUG] Read %zu bytes in %lu ms (%.1f KB/s)",
                 bytesRead, readTime, 
@@ -752,6 +755,7 @@ const char* getLoadedModelPath() {
 }
 
 static void listModelsRecursive(const String& absDir, const String& relPrefix, String& output, int& count) {
+  FsLockGuard fsGuard("edge.list_models");
   File dir = VFS::openGuarded(absDir, "r", VFS::systemAuth("edge.list_models"));
   if (!dir || !dir.isDirectory()) return;
 
@@ -789,6 +793,7 @@ static void listModelsRecursive(const String& absDir, const String& relPrefix, S
 
 // List available models in /littlefs/EI Models/
 void listAvailableModels(String& output) {
+  FsLockGuard fsGuard("edge.list_models");
   char hdrBuf[64];
   snprintf(hdrBuf, sizeof(hdrBuf), "Available models in %s:\n", MODEL_DIR);
   output = hdrBuf;
@@ -1492,34 +1497,37 @@ EIResults runInferenceFromFile(const char* imagePath) {
   DEBUG_SYSTEMF("[EI_DEBUG] Step 1: Loading image from file...");
   uint32_t loadStart = millis();
   
-  File imgFile = VFS::openGuarded(imagePath, "r", VFS::systemAuth("edge.image_classify"));
-  if (!imgFile) {
-    DEBUG_SYSTEMF("[EI_DEBUG] FAIL: Cannot open file: %s", imagePath);
-    results.errorMessage = "Failed to open image file";
-    return results;
-  }
-  
-  size_t fileSize = imgFile.size();
-  DEBUG_SYSTEMF("[EI_DEBUG]   File size: %zu bytes", fileSize);
-  
-  if (fileSize == 0) {
+  size_t fileSize = 0;
+  size_t bytesRead = 0;
+  uint8_t* imgBuffer = nullptr;
+  {
+    FsLockGuard fsGuard("edge.image_classify");
+    File imgFile = VFS::openGuarded(imagePath, "r", VFS::systemAuth("edge.image_classify"));
+    if (!imgFile) {
+      DEBUG_SYSTEMF("[EI_DEBUG] FAIL: Cannot open file: %s", imagePath);
+      results.errorMessage = "Failed to open image file";
+      return results;
+    }
+
+    fileSize = imgFile.size();
+    DEBUG_SYSTEMF("[EI_DEBUG]   File size: %zu bytes", fileSize);
+    if (fileSize == 0) {
+      imgFile.close();
+      results.errorMessage = "Image file is empty";
+      return results;
+    }
+
+    imgBuffer = (uint8_t*)ps_alloc(fileSize, AllocPref::PreferPSRAM, "ei.img");
+    if (!imgBuffer) {
+      imgFile.close();
+      DEBUG_SYSTEMF("[EI_DEBUG] FAIL: Cannot allocate %zu bytes for image", fileSize);
+      results.errorMessage = "Failed to allocate image buffer";
+      return results;
+    }
+
+    bytesRead = imgFile.read(imgBuffer, fileSize);
     imgFile.close();
-    results.errorMessage = "Image file is empty";
-    return results;
   }
-  
-  // Allocate buffer for image file (JPEG/etc)
-  uint8_t* imgBuffer = (uint8_t*)ps_alloc(fileSize, AllocPref::PreferPSRAM, "ei.img");
-  
-  if (!imgBuffer) {
-    imgFile.close();
-    DEBUG_SYSTEMF("[EI_DEBUG] FAIL: Cannot allocate %zu bytes for image", fileSize);
-    results.errorMessage = "Failed to allocate image buffer";
-    return results;
-  }
-  
-  size_t bytesRead = imgFile.read(imgBuffer, fileSize);
-  imgFile.close();
   
   uint32_t loadTime = millis() - loadStart;
   DEBUG_SYSTEMF("[EI_DEBUG]   Loaded %zu bytes in %lu ms", bytesRead, loadTime);

@@ -6061,6 +6061,10 @@ static void captureEspNowFrame(const char* direction, const uint8_t* peerMac,
     (unsigned)h->fragIndex, (unsigned)h->fragCount, b64);
   if (n <= 0) return;
 
+  // This runs on the Wi-Fi callback path. Never block radio processing behind
+  // an unrelated long FS operation; capture is diagnostic and may drop a line.
+  FsLockGuard fsGuard("espnow.capture_append", 0);
+  if (!fsGuard.held && !isFsLockedByCurrentTask()) return;
   File f = VFS::openGuarded(gEspNowCapturePath, "a", VFS::systemAuth("espnow.capture_append"), true);
   if (!f) return;
   f.write((const uint8_t*)line, (size_t)n);

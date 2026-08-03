@@ -1193,9 +1193,13 @@ static void srSnipWriterTask(void* param) {
         continue;
       }
       uint32_t dataSize = job.samples * sizeof(int16_t);
-      writeWavHeader(f, dataSize, job.sample_rate, job.bits, job.channels);
-      size_t written = f.write((const uint8_t*)job.pcm, dataSize);
-      f.close();
+      size_t written = 0;
+      {
+        FsLockGuard fsGuard("espsr.snip.write");
+        writeWavHeader(f, dataSize, job.sample_rate, job.bits, job.channels);
+        written = f.write((const uint8_t*)job.pcm, dataSize);
+        f.close();
+      }
       free(job.pcm);
       uint32_t durationMs = (job.samples * 1000) / job.sample_rate;
       uint32_t bitrate = (job.sample_rate * job.bits * job.channels) / 1000;
@@ -1601,6 +1605,8 @@ static bool loadCommandsFileLocked(size_t& outAdded, size_t& outErrors) {
 
 static bool saveCommandsFileLocked(size_t& outSaved) {
   outSaved = 0;
+
+  FsLockGuard fsGuard("espsr.commands.save");
 
   if (!VFS::isSDAvailable()) {
     return false;

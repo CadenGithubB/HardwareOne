@@ -457,6 +457,21 @@ size_t g2BuildCreateTextPagePb(uint32_t magic,
 // G2_FRAG_CHUNK_PB.
 #define G2_IMG_MAPRAW_CHUNK_BYTES 3800
 
+// CompressMode values for ImageRawDataUpdate field 5.
+//
+// RAW is what this firmware has always sent, and what the ~100-value
+// probe sweep in 2026-04 concluded was the only mode that did anything —
+// correctly, at the time: LZ4 arrived later, with even_hub_sdk 0.0.12
+// (see 2026-07-19-sdk-image-text-playbook.md). Glasses running firmware
+// older than that will not understand LZ4.
+//
+// LZ4 is the value the SDK stamps. Production byte framing is bare LZ4
+// block (Even App dart_lz4 / Q16d on-device 2026-07-31). FRAME_CSIZE paints
+// solo CREATE-image but blanks on mixed image children — do not use it
+// for production. Auto path: g2ImgPrepareWirePayload → lz4CompressBlock.
+#define G2_IMG_COMPRESS_RAW 0
+#define G2_IMG_COMPRESS_LZ4 2
+
 // REBUILD_PAGE with a fresh ListContainerProperty — swap the items in an
 // already-CREATEd list container. Used by stateful pages (Files, Settings)
 // where each tap navigates / mutates the list contents in place.
@@ -533,8 +548,8 @@ size_t g2BuildEvenAIConfig(uint8_t seq, uint32_t magic,
 //     uint32 ContainerID           = 1;  // matches CREATE'd container
 //     string ContainerName         = 2;  // matches CREATE'd container
 //     uint32 MapSessionId          = 3;  // bump per new image
-//     uint32 MapTotalSize          = 4;  // total bytes of full pixel buffer
-//     uint32 CompressMode          = 5;  // 0 = raw bytes
+//     uint32 MapTotalSize          = 4;  // total bytes of the MapRawData stream
+//     uint32 CompressMode          = 5;  // 0 = raw bytes, 2 = LZ4
 //     uint32 MapFragmentIndex      = 6;  // 0-based chunk in this session
 //     uint32 MapFragmentPacketSize = 7;  // bytes in this chunk
 //     bytes  MapRawData            = 8;  // pixel chunk
@@ -546,6 +561,17 @@ size_t g2BuildEvenAIConfig(uint8_t seq, uint32_t magic,
 // our envelope-level fragmentation (which kicks in when one of these
 // per-chunk bodies happens to exceed ~250 pb bytes).
 //
+// MapTotalSize counts the bytes actually carried in MapRawData, NOT the
+// decompressed size — there is no separate uncompressed-length field in
+// the schema, and the reference host sets it from the length of the
+// buffer it is about to chunk. So under CompressMode=2 it is the
+// COMPRESSED length. Getting this backwards makes the glasses wait
+// forever for fragments that will never come.
+//
+// `compressMode` is what gets stamped into field 5; the caller is
+// responsible for handing over bytes that already match it. This builder
+// does not compress anything.
+//
 // Returns the pb body length written into `out`. The returned body
 // needs `sendPbFragmented` to ship if it's larger than the single-frag
 // ceiling, otherwise `g2BuildEnvelope` is fine.
@@ -556,7 +582,8 @@ size_t g2BuildImageRawBody(uint32_t magic,
                            uint32_t mapTotalSize,
                            uint32_t mapFragmentIndex,
                            const uint8_t* data, size_t dataLen,
-                           uint8_t* out, size_t outCap);
+                           uint8_t* out, size_t outCap,
+                           uint32_t compressMode = G2_IMG_COMPRESS_RAW);
 
 // EvenCore CREATE_STARTUP_PAGE (Cmd=0) carrying an
 // ImageContainerProperty (wrapper field 4 of CreateStartUpPageContainer
@@ -624,8 +651,9 @@ struct G2ImageTile {
 // and no WidgetId (REBUILD targets the live page). Magic MUST be
 // G2_MAGIC_REBUILD — armRebuildSlot()/waitRebuildAck() hardcode it.
 //
-// Exercised only by g2ProbeImageQ31RebuildMove(). Do NOT wire into feature
-// code until the probe says which outcome is real.
+// Image REBUILD builder retained for experiments; the Q31 menu probe that
+// exercised it was retired (wedge risk). Do NOT wire into feature code
+// without a fresh on-device probe.
 size_t g2BuildRebuildImage(uint8_t seq, uint32_t magic,
                            const char* containerName, uint32_t containerId,
                            uint32_t x, uint32_t y, uint32_t w, uint32_t h,
@@ -646,7 +674,12 @@ size_t g2BuildCreateImageMulti(uint8_t seq, uint32_t magic,
 // test whether the firmware accepts multi-type widget composition. The
 // list and image can occupy any geometry (overlapping or not); render
 // order / z-order is empirical territory — that's what the probes are
-// for. Returns envelope length, or 0 on overflow.
+// for. `order` selects wire emission of the two children.
+// Returns envelope length, or 0 on overflow.
+enum G2ListImageOrder : uint8_t {
+  G2_LI_ORDER_LIST_IMAGE = 0,  // f2 list, then f4 image (default / Q16)
+  G2_LI_ORDER_IMAGE_LIST = 1,  // f4 image, then f2 list
+};
 size_t g2BuildCreateMixedListImagePb(uint32_t magic,
                                      const char* listName,
                                      const char* const* listItems,
@@ -654,7 +687,8 @@ size_t g2BuildCreateMixedListImagePb(uint32_t magic,
                                      const G2ContainerGeom& listGeom,
                                      const G2ImageTile& imageTile,
                                      uint32_t widgetId,
-                                     uint8_t* pbOut, size_t pbCap);
+                                     uint8_t* pbOut, size_t pbCap,
+                                     G2ListImageOrder order = G2_LI_ORDER_LIST_IMAGE);
 size_t g2BuildCreateMixedListImage(uint8_t seq, uint32_t magic,
                                    const char* listName,
                                    const char* const* listItems,
@@ -662,7 +696,8 @@ size_t g2BuildCreateMixedListImage(uint8_t seq, uint32_t magic,
                                    const G2ContainerGeom& listGeom,
                                    const G2ImageTile& imageTile,
                                    uint32_t widgetId,
-                                   uint8_t* out, size_t outCap);
+                                   uint8_t* out, size_t outCap,
+                                   G2ListImageOrder order = G2_LI_ORDER_LIST_IMAGE);
 // (g2BuildCreateMixedImageText* declared below, after G2TextChildSpec.)
 
 // CreateStartUpPageContainer carrying N TextObject children (wrapper
@@ -934,12 +969,127 @@ bool g2ParseSettingVersion(const uint8_t* payload, size_t payloadLen,
 // Use it to discover what unlabelled fields carry — varintVal is 0 for
 // non-varint fields, bytes/byteLen populated for len-delim fields.
 // Pass nullptr to no-op.
-typedef void (*G2SettingsFieldLog)(uint32_t field, uint8_t wire,
+// `outerField` is the wrapper field the value was found under (3 =
+// deviceReceiveInfoFromApp — i.e. OUR OWN echoed write coming back as an
+// ack; 4 = deviceReceiveRequestFromApp — the device's own state). Without
+// it the dump is ambiguous: the two carry unrelated meanings at identical
+// inner field numbers, which is exactly what made an early write-ack look
+// like a firmware-version string.
+typedef void (*G2SettingsFieldLog)(uint32_t outerField,
+                                   uint32_t field, uint8_t wire,
                                    uint64_t varintVal,
                                    const uint8_t* bytes, size_t byteLen);
 
 void g2DumpSettingFields(const uint8_t* payload, size_t payloadLen,
                          G2SettingsFieldLog logFn);
+
+// =============================================================================
+// Settings WRITE path — sid=0x09, commandId=1 (DeviceReceiveInfo)
+// =============================================================================
+// HW-VALIDATED 2026-07-30 against firmware 2.2.4.34. See
+// docs/DEVICE_SETTINGS_BACKLOG.md for the probe transcript.
+//
+// Shape:  G2SettingPackage{ f1=commandId=1, f2=magicRandom,
+//                           f3=DeviceReceiveInfoFromAPP{ <one sub-message> } }
+//
+// The device acks a write it accepted by mirroring the f3 body straight back
+// at flag=0x00 with our magicRandom — see g2ParseSettingWriteAck. A write
+// that changes nothing (setting a value it already holds) is NOT acked, so
+// "no ack" means "no-op OR rejected", never plainly "failed".
+//
+// Observed on hardware: the device preserves per-field presence — an f3 body
+// carrying only `brightnessLevel` came back carrying only `brightnessLevel`,
+// not a fully-populated sub-message. Sibling fields (notably the lens
+// calibration values that share DeviceReceive_Brightness) are therefore NOT
+// defaulted by a single-field write.
+#define G2_MAGIC_SETTINGS_WRITE  209   // 208 = G2_MAGIC_SETTINGS, 210+ = images
+
+#define G2_SET_CMD_RECEIVE_INFO  1     // g2_settingCommandId.DeviceReceiveInfo
+
+// Sub-message field numbers inside DeviceReceiveInfoFromAPP (wrapper f3).
+// Only the ones we allow are named. 7 (appPage), 8 (advancedSetting /
+// killAllFeature), 10 (gestureControlList) and 11 (dominantHand) are
+// deliberately absent — g2BuildSettingInfoWrite hard-rejects them.
+#define G2_SETW_F_BRIGHTNESS     1
+#define G2_SETW_F_Y_COORD        2
+#define G2_SETW_F_X_COORD        3
+#define G2_SETW_F_HEAD_UP        4
+#define G2_SETW_F_WEAR_DETECT    5
+#define G2_SETW_F_SILENT         6
+#define G2_SETW_F_UNIVERSE       9
+
+// Leaf fields inside each of those sub-messages.
+#define G2_SETW_BRIGHT_F_AUTO         1   // autoAdjust      (0/1)
+#define G2_SETW_BRIGHT_F_LEVEL        2   // brightnessLevel (0-100)
+#define G2_SETW_COORD_F_LEVEL         1   // x/yCoordinateLevel
+#define G2_SETW_HEADUP_F_SWITCH       1   // headUpSwitch    (0/1)
+#define G2_SETW_HEADUP_F_ANGLE        2   // headUpAngle
+#define G2_SETW_WEAR_F_SWITCH         1   // wearDetectionSwitch (0/1)
+#define G2_SETW_SILENT_F_SWITCH       1   // silentModeSwitch    (0/1)
+#define G2_SETW_UNIV_F_UNIT_FORMAT    1
+#define G2_SETW_UNIV_F_DISTANCE_UNIT  2
+#define G2_SETW_UNIV_F_TIME_FORMAT    3
+#define G2_SETW_UNIV_F_DATE_FORMAT    4
+#define G2_SETW_UNIV_F_TEMP_UNIT      5
+
+// Build a single-field settings write. `innerField` MUST be one of the
+// G2_SETW_F_* values above — anything else returns 0 rather than being
+// encoded. That allowlist is the guard: the excluded neighbours sit at
+// adjacent field numbers, so a range check would let one off-by-one through.
+//
+// Returns 0 on a disallowed field, a value that will not fit, or an
+// envelope-build failure.
+size_t g2BuildSettingInfoWrite(uint8_t seq, uint32_t magic,
+                               uint8_t innerField, uint8_t leafField,
+                               uint32_t value,
+                               uint8_t* out, size_t outCap);
+
+// Decoded snapshot of DeviceReceiveRequestFromAPP (wrapper f4) — the
+// device's own reported state. `have` is a presence bitmask keyed by field
+// NUMBER (bit 2 = brightness present, bit 10 = wearDetect present, …);
+// firmware 2.2.4.34 omits fields it has nothing to say about, so presence
+// is real information and must not be conflated with a zero value.
+//
+// Never observed on 2.2.4.34: f13 chargingStatus, f14 silentMode,
+// f15/f16 lens calibration, f17, f19. Those members stay 0 with their
+// presence bit clear.
+typedef struct {
+  uint32_t have;            // bit N set => field N was present in this frame
+  uint8_t  settingInfoType; // f1
+  uint8_t  brightness;      // f2  — drifts on its own while autoBrightness=1
+  uint8_t  yCoord;          // f3
+  uint8_t  xCoord;          // f4
+  uint8_t  headUpSwitch;    // f7
+  uint8_t  headUpAngle;     // f8
+  uint8_t  headUpCalib;     // f9
+  uint8_t  wearDetect;      // f10
+  uint8_t  runningStatus;   // f11
+  uint8_t  battery;         // f12
+  uint8_t  chargingStatus;  // f13
+  uint8_t  silentMode;      // f14
+  uint8_t  leftCalib;       // f15
+  uint8_t  rightCalib;      // f16
+  uint8_t  headUpRecalOk;   // f17
+  uint8_t  autoBrightness;  // f18
+  uint8_t  unreadCount;     // f19
+} G2SettingsEcho;
+
+#define G2_ECHO_HAS(e, fieldNo)  ((((e).have) >> (fieldNo)) & 1u)
+
+// Parse the device-state echo. Scoped to wrapper f4 ONLY — wrapper f3 on a
+// write-ack carries our own payload back at colliding inner field numbers.
+// Returns false if this frame carries no f4 body at all (write-acks don't).
+bool g2ParseSettingEcho(const uint8_t* payload, size_t payloadLen,
+                        G2SettingsEcho* out);
+
+// Recognise a write-ack: wrapper f1 == 1 and a wrapper f3 body present.
+// Writes back the echoed magic and the single (innerField, leafField, value)
+// triple the device mirrored, so a caller can match it against what it sent.
+// Returns false for anything that isn't a commandId=1 frame with an f3 body.
+bool g2ParseSettingWriteAck(const uint8_t* payload, size_t payloadLen,
+                            uint32_t* outMagic,
+                            uint8_t* outInnerField, uint8_t* outLeafField,
+                            uint32_t* outValue);
 
 // =============================================================================
 // DevConfig builders — sid=0x80 (UX_DEVICE_SETTINGS_APP_ID)

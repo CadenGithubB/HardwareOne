@@ -21,7 +21,8 @@
 
 // Runtime recording state — mirrors the micRecording pattern. Read by the
 // sensor status JSON and the web UI; set only by startVideoRecording /
-// stopVideoRecording.
+// stopVideoRecording. Start/stop are serialized (mutex) so G2 stream and
+// web CLI cannot double-open an AVI.
 extern bool videoRecording;
 
 // Start a new recording. Creates /sd/videos/ if missing, opens an AVI file,

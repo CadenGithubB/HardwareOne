@@ -123,18 +123,18 @@ static NotifRule notifDefaultRuleFor(uint8_t kind) {
 // builds, so the masks are rebuilt from names at boot and on every edit.
 #define NOTIF_POLICY_FILE "/system/notifications.json"
 
-static volatile uint32_t gNotifOffMask[4]   = {0, 0, 0, 0};  // level: off
-static volatile uint32_t gNotifAdminMask[4] = {0, 0, 0, 0};  // level: admin
+static volatile uint32_t gNotifOffMask[NOTIF_KIND_MASK_WORDS]   = {0};  // level: off
+static volatile uint32_t gNotifAdminMask[NOTIF_KIND_MASK_WORDS] = {0};  // level: admin
 static volatile uint32_t gNotifPrefsGen = 1;
 // Guards the per-user prefs cache below (resolvers run on the main loop AND
 // the OLED task). Created in notifPolicyLoad() before render tasks contend.
 static SemaphoreHandle_t gUserPrefsMutex = nullptr;
 
 static inline bool maskTest(const volatile uint32_t* m, uint8_t kind) {
-  return kind < 128 && (m[kind >> 5] & (1UL << (kind & 31)));
+  return kind < NOTIF_KIND_MASK_BITS && (m[kind >> 5] & (1UL << (kind & 31)));
 }
 static inline void maskSet(volatile uint32_t* m, uint8_t kind, bool on) {
-  if (kind >= 128) return;
+  if (kind >= NOTIF_KIND_MASK_BITS) return;
   if (on) m[kind >> 5] |= (1UL << (kind & 31));
   else    m[kind >> 5] &= ~(1UL << (kind & 31));
 }
@@ -159,7 +159,7 @@ uint32_t notifPrefsGeneration() { return gNotifPrefsGen; }
 
 void notifPolicyLoad() {
   if (!gUserPrefsMutex) gUserPrefsMutex = xSemaphoreCreateMutex();
-  uint32_t off[4] = {0, 0, 0, 0}, adm[4] = {0, 0, 0, 0};
+  uint32_t off[NOTIF_KIND_MASK_WORDS] = {0}, adm[NOTIF_KIND_MASK_WORDS] = {0};
   String json;
   if (readText(NOTIF_POLICY_FILE, json) && json.length() > 0) {
     PSRAM_JSON_DOC(doc);
@@ -167,7 +167,7 @@ void notifPolicyLoad() {
       JsonObjectConst kinds = doc["kinds"].as<JsonObjectConst>();
       for (JsonPairConst kv : kinds) {
         int k = systemEventKindFromName(kv.key().c_str());
-        if (k <= 0 || k >= 128) continue;  // unknown name (renamed kind) — skip
+        if (k <= 0 || k >= NOTIF_KIND_MASK_BITS) continue;  // unknown name (renamed kind) — skip
         const char* lvl = kv.value().as<const char*>();
         if (!lvl) continue;
         if (strcmp(lvl, "off") == 0)   off[k >> 5] |= (1UL << (k & 31));
@@ -175,7 +175,7 @@ void notifPolicyLoad() {
       }
     }
   }
-  for (int i = 0; i < 4; i++) { gNotifOffMask[i] = off[i]; gNotifAdminMask[i] = adm[i]; }
+  for (int i = 0; i < NOTIF_KIND_MASK_WORDS; i++) { gNotifOffMask[i] = off[i]; gNotifAdminMask[i] = adm[i]; }
   gNotifPrefsGen++;
 }
 
@@ -199,8 +199,8 @@ static bool notifPolicySave() {
 // ops). Guarded by a mutex: resolvers run on the main loop AND the OLED task.
 struct UserPrefsCacheEntry {
   String username;
-  uint32_t muteMask[4];
-  uint32_t forceMask[4];
+  uint32_t muteMask[NOTIF_KIND_MASK_WORDS];
+  uint32_t forceMask[NOTIF_KIND_MASK_WORDS];
   uint8_t  minTier;
   bool valid;
 };
@@ -215,15 +215,16 @@ void notifUserPrefsInvalidate() {
 }
 
 // Turn a kind-name array under `key` into a 4x32 mask (bit index = kind).
-static void loadKindMaskFromDoc(JsonDocument& doc, const char* key, uint32_t out[4]) {
-  memset(out, 0, 4 * sizeof(uint32_t));
+static void loadKindMaskFromDoc(JsonDocument& doc, const char* key,
+                                uint32_t out[NOTIF_KIND_MASK_WORDS]) {
+  memset(out, 0, NOTIF_KIND_MASK_WORDS * sizeof(uint32_t));
   JsonArrayConst arr = doc[key].as<JsonArrayConst>();
   if (arr.isNull()) return;
   for (JsonVariantConst v : arr) {
     const char* n = v.as<const char*>();
     if (!n) continue;
     int k = systemEventKindFromName(n);
-    if (k > 0 && k < 128) out[k >> 5] |= (1UL << (k & 31));
+    if (k > 0 && k < NOTIF_KIND_MASK_BITS) out[k >> 5] |= (1UL << (k & 31));
   }
 }
 
@@ -231,10 +232,12 @@ static void loadKindMaskFromDoc(JsonDocument& doc, const char* key, uint32_t out
 // (notificationForced) kind masks and the importance floor (notifyLevel).
 // Missing file / keys resolve to the defaults (nothing muted/forced, floor =
 // NTIER_DEFAULT). One flash read serves all three.
-static void loadUserNotifPrefs(const char* username, uint32_t mute[4],
-                               uint32_t force[4], uint8_t* minTier) {
-  memset(mute, 0, 4 * sizeof(uint32_t));
-  memset(force, 0, 4 * sizeof(uint32_t));
+static void loadUserNotifPrefs(const char* username,
+                               uint32_t mute[NOTIF_KIND_MASK_WORDS],
+                               uint32_t force[NOTIF_KIND_MASK_WORDS],
+                               uint8_t* minTier) {
+  memset(mute, 0, NOTIF_KIND_MASK_WORDS * sizeof(uint32_t));
+  memset(force, 0, NOTIF_KIND_MASK_WORDS * sizeof(uint32_t));
   *minTier = NTIER_DEFAULT;
   uint32_t uid = 0;
   if (!getUserIdByUsername(String(username), uid)) return;
@@ -271,7 +274,7 @@ void notifViewerResolve(const char* username, NotifViewer& out) {
   if (gUserPrefsMutex) xSemaphoreGive(gUserPrefsMutex);
 
   // Miss: load outside the lock (flash read), then publish.
-  uint32_t mute[4], force[4];
+  uint32_t mute[NOTIF_KIND_MASK_WORDS], force[NOTIF_KIND_MASK_WORDS];
   uint8_t minTier;
   loadUserNotifPrefs(username, mute, force, &minTier);
   if (gUserPrefsMutex) xSemaphoreTake(gUserPrefsMutex, portMAX_DELAY);

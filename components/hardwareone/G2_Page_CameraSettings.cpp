@@ -111,9 +111,9 @@ enum CamSettingsLevel : uint8_t {
   CAM_LEVEL_TOP               = 0,
   CAM_LEVEL_SUB_CAMERA        = 1,  // Resolution, Brightness, Contrast, Exposure, Sharpness
   CAM_LEVEL_SUB_TRANSFORM     = 2,  // H Mirror, V Flip
-  CAM_LEVEL_SUB_POSTPROC      = 3,  // Quality, Denoise
+  CAM_LEVEL_SUB_POSTPROC      = 3,  // Quality, Denoise, Tone Map
   CAM_LEVEL_RESOLUTION_PICKER = 4,  // entered from SUB_CAMERA
-  CAM_LEVEL_STREAM_PICKER     = 5,  // entered from TOP
+  CAM_LEVEL_STREAM_PICKER     = 5,  // entered from TOP (Stream size)
 };
 static CamSettingsLevel gLevel = CAM_LEVEL_TOP;
 
@@ -235,6 +235,36 @@ static int cycleBool(int v) {
   return (v != 0) ? 0 : 1;
 }
 
+static int cycleToneMap(int v) {
+  // 0=Linear, 1=Balanced, 2=Shadows, 3=Legacy — lens stream 4-bpp algorithm.
+  if (v < 0 || v > 3) v = 1;
+  return (v == 3) ? 0 : (v + 1);
+}
+
+static int cycleFps(int v) {
+  // Coarse stops only — lens taps don't need 1-fps granularity, and
+  // getting to 15/20 should be a couple of taps. Same 1..20 clamp as
+  // camerafps; off-grid values (e.g. set from web) advance to the next stop.
+  static const int kStops[] = { 5, 10, 15, 20 };
+  static const int kN = (int)(sizeof(kStops) / sizeof(kStops[0]));
+  for (int i = 0; i < kN; i++) {
+    if (kStops[i] == v) return kStops[(i + 1) % kN];
+  }
+  for (int i = 0; i < kN; i++) {
+    if (kStops[i] > v) return kStops[i];
+  }
+  return kStops[0];
+}
+
+static void fmtToneMap(char* out, size_t cap, int v) {
+  const char* name =
+      (v == 0) ? "Linear" :
+      (v == 2) ? "Shadows" :
+      (v == 3) ? "Legacy" :
+                 "Balanced";
+  snprintf(out, cap, "%s", name);
+}
+
 static int cycleQuality(int v) {
   // 0..63, step 4 → 16 stops. Short enough to be usable on the lens
   // but spans the full range.
@@ -291,6 +321,8 @@ static void applyDenoise(int v)    { applyByCmd("cameradenoise",    v); }
 static void applyHMirror(int v)    { applyByCmd("camerahmirror",    v); }
 static void applyVFlip(int v)      { applyByCmd("cameravflip",      v); }
 static void applyQuality(int v)    { applyByCmd("cameraquality",    v); }
+static void applyToneMap(int v)    { applyByCmd("g2streamtonemap",  v); }
+static void applyFps(int v)        { applyByCmd("camerafps",        v); }
 
 // Table -----------------------------------------------------------------------
 // Order within each category = display order in that category's sub-list.
@@ -309,9 +341,11 @@ static const CamSetting kSettings[] = {
   { "V Flip",     CV_BOOL, &gSettings.cameraVFlip,      cycleBool,       fmtBool,        applyVFlip,      CAM_CAT_TRANSFORM },
   // Post Processing sub-list — image-quality knobs (Denoise is sensor-side
   // technically, but UX-wise belongs with Quality not Brightness — see the
-  // CamCategory enum doc above).
+  // CamCategory enum doc above). Tone Map is the lens 4-bpp algorithm
+  // (Linear / Balanced / Shadows / Legacy), not a sensor register.
   { "Quality",    CV_INT,  &gSettings.cameraQuality,    cycleQuality,    fmtUnsignedInt, applyQuality,    CAM_CAT_POSTPROC  },
   { "Denoise",    CV_INT,  &gSettings.cameraDenoise,    cycleDenoise,    fmtUnsignedInt, applyDenoise,    CAM_CAT_POSTPROC  },
+  { "Tone Map",   CV_INT,  &gSettings.g2StreamToneMap,  cycleToneMap,    fmtToneMap,     applyToneMap,    CAM_CAT_POSTPROC  },
 };
 static const size_t kSettingsCount = sizeof(kSettings) / sizeof(kSettings[0]);
 
@@ -362,11 +396,20 @@ static size_t buildTopRows() {
   gRowPtrs[row] = gRows[row];
   row++;
 
-  // Stream lives at the top level (lens display size, not a camera setting).
-  // Show current value inline so the user sees what's set without opening.
+  // Stream + FPS live at the top level (lens cadence knobs, not sensor
+  // registers). Show current values inline; Stream opens a picker, FPS
+  // cycles on tap (same camerafps setting as the web UI).
   snprintf(gRows[row], CAM_SETTINGS_ROW_LEN, "Stream: %dx%d >",
            gSettings.g2StreamWidth, gSettings.g2StreamHeight);
   gRowPtrs[row] = gRows[row]; row++;
+
+  {
+    int fps = gSettings.cameraStreamFps;
+    if (fps < 1) fps = 1;
+    if (fps > 20) fps = 20;
+    snprintf(gRows[row], CAM_SETTINGS_ROW_LEN, "FPS: %d", fps);
+    gRowPtrs[row] = gRows[row]; row++;
+  }
 
   // Three category openers. Order is: most-touched first.
   strncpy(gRows[row], "Camera >", CAM_SETTINGS_ROW_LEN - 1);
@@ -529,11 +572,18 @@ void g2BuildCameraSettingsInfo(char* out, size_t cap) {
     if (w > 0) pos += (size_t)w;
   };
 
-  // Stream comes first — it's at the top level on the lens too.
+  // Stream + FPS come first — both live at the top level on the lens.
   char line[64];
   snprintf(line, sizeof(line), "Stream: %dx%d",
            gSettings.g2StreamWidth, gSettings.g2StreamHeight);
   append(line);
+  {
+    int fps = gSettings.cameraStreamFps;
+    if (fps < 1) fps = 1;
+    if (fps > 20) fps = 20;
+    snprintf(line, sizeof(line), "FPS: %d", fps);
+    append(line);
+  }
 
   // Then every camera setting, grouped by category. Iterate the table
   // three times (once per category) so the dump preserves the lens UI's
@@ -602,12 +652,23 @@ static void handleTopTap(uint32_t idx) {
     g2ReshowSensorsDetail();
     return;
   }
-  // Layout: 0 back / 1 Stream / 2 Camera / 3 Transform / 4 PostProc
+  // Layout: 0 back / 1 Stream / 2 FPS / 3 Camera / 4 Transform / 5 PostProc
   switch (idx) {
     case 1: showStreamPicker();          return;
-    case 2: showSubMenu(CAM_CAT_CAMERA); return;
-    case 3: showSubMenu(CAM_CAT_TRANSFORM); return;
-    case 4: showSubMenu(CAM_CAT_POSTPROC);  return;
+    case 2: {
+      const int prev = gSettings.cameraStreamFps;
+      const int next = cycleFps(prev);
+      // Optimistic RAM write so the re-render shows the new value
+      // immediately; camerafps persists via cmd_exec.
+      gSettings.cameraStreamFps = next;
+      applyFps(next);
+      DEBUG_G2F("[G2] Camera settings: FPS %d → %d", prev, next);
+      showTopMenu();
+      return;
+    }
+    case 3: showSubMenu(CAM_CAT_CAMERA); return;
+    case 4: showSubMenu(CAM_CAT_TRANSFORM); return;
+    case 5: showSubMenu(CAM_CAT_POSTPROC);  return;
     default:
       DEBUG_G2F("[G2] Camera settings: top-level tap idx=%u out of range",
                 (unsigned)idx);

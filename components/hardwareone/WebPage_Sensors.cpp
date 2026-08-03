@@ -955,15 +955,19 @@ esp_err_t handleMicRecordingFile(httpd_req_t* req) {
     return ESP_OK;
   }
 
-  File f = VFS::openGuarded(path, "r", ctx);
-  if (!f) {
-    httpd_resp_set_status(req, "500 Internal Server Error");
-    httpd_resp_set_type(req, "text/plain");
-    httpd_resp_send(req, "Failed to open file", HTTPD_RESP_USE_STRLEN);
-    return ESP_OK;
-  }
-  
-  size_t fileSize = f.size();
+  char* buf = nullptr;
+  size_t bytesRead = 0;
+  size_t fileSize = 0;
+  {
+    FsLockGuard fsGuard("web.sensors.recording_read");
+    File f = VFS::openGuarded(path, "r", ctx);
+    if (!f) {
+      httpd_resp_set_status(req, "500 Internal Server Error");
+      httpd_resp_set_type(req, "text/plain");
+      httpd_resp_send(req, "Failed to open file", HTTPD_RESP_USE_STRLEN);
+      return ESP_OK;
+    }
+    fileSize = f.size();
   
   // Set headers for audio playback - Content-Length is required for browser audio seeking
   httpd_resp_set_type(req, "audio/wav");
@@ -979,20 +983,21 @@ esp_err_t handleMicRecordingFile(httpd_req_t* req) {
   
   // Read file into PSRAM (we have 8MB) and send with Content-Length for proper playback
   // Max recording is 60 sec * 16kHz * 2 bytes = ~1.9MB which fits in PSRAM
-  char* buf = (char*)heap_caps_malloc(fileSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  if (!buf) {
-    // Fallback to regular malloc for smaller files
-    buf = (char*)malloc(fileSize);
-  }
-  if (!buf) {
+    buf = (char*)heap_caps_malloc(fileSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!buf) {
+      // Fallback to regular malloc for smaller files
+      buf = (char*)malloc(fileSize);
+    }
+    if (!buf) {
+      f.close();
+      httpd_resp_set_status(req, "500 Internal Server Error");
+      httpd_resp_send(req, "Memory allocation failed", HTTPD_RESP_USE_STRLEN);
+      return ESP_OK;
+    }
+
+    bytesRead = f.read((uint8_t*)buf, fileSize);
     f.close();
-    httpd_resp_set_status(req, "500 Internal Server Error");
-    httpd_resp_send(req, "Memory allocation failed", HTTPD_RESP_USE_STRLEN);
-    return ESP_OK;
   }
-  
-  size_t bytesRead = f.read((uint8_t*)buf, fileSize);
-  f.close();
   
   // Send entire file at once - this works with Content-Length header
   httpd_resp_send(req, buf, bytesRead);

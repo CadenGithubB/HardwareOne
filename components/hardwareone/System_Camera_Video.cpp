@@ -43,12 +43,40 @@ static const char* VIDEO_FOLDER_SD = "/sd/VIDEOS";
 #include "System_Settings.h"
 #include "System_Debug.h"
 #include "System_MemUtil.h"
+#include "System_Mutex.h"  // FsLockGuard — serialize SD with mic/sensorlog
 #include <SD.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <freertos/semphr.h>
 
 // ── Public state ────────────────────────────────────────────────────────────
 bool videoRecording = false;
+
+// Serializes start/stop so G2 stream + web CLI can't double-open an AVI
+// or spawn two cam_record tasks (TOCTOU on videoRecording alone).
+static SemaphoreHandle_t s_recCtrl = nullptr;
+static portMUX_TYPE s_recCtrlInitMux = portMUX_INITIALIZER_UNLOCKED;
+
+static SemaphoreHandle_t getRecCtrl() {
+  if (s_recCtrl) return s_recCtrl;
+
+  // Allocate outside the critical section, then publish exactly one handle.
+  // Two first-use callers may both allocate, but they always return the same
+  // mutex; the losing candidate is deleted after leaving the spinlock.
+  SemaphoreHandle_t candidate = xSemaphoreCreateMutex();
+  if (!candidate) return nullptr;
+
+  portENTER_CRITICAL(&s_recCtrlInitMux);
+  if (!s_recCtrl) {
+    s_recCtrl = candidate;
+    candidate = nullptr;
+  }
+  SemaphoreHandle_t result = s_recCtrl;
+  portEXIT_CRITICAL(&s_recCtrlInitMux);
+
+  if (candidate) vSemaphoreDelete(candidate);
+  return result;
+}
 
 // Offsets into the 224-byte header skeleton that get patched on finalize.
 static const uint32_t AVI_HEADER_SIZE        = 224;
@@ -218,7 +246,10 @@ static bool ensureVideosFolder() {
 // ── Recorder task ───────────────────────────────────────────────────────────
 // captureFrame is declared in System_Camera_DVP.h (included above).
 
-static void writeFrameChunk(const uint8_t* jpeg, size_t len) {
+// Returns false on SD write failure. Caller must stop recording — continuing
+// would leave frameCount ahead of bytes on disk (unplayable AVI, zeroed
+// movi size after a failed finalize seek/write under contention).
+static bool writeFrameChunk(const uint8_t* jpeg, size_t len) {
   // Chunk: '00dc' + size(LE) + data + optional pad byte to keep even alignment.
   uint8_t hdr[8];
   put32(hdr + 0, fourcc("00dc"));
@@ -226,13 +257,18 @@ static void writeFrameChunk(const uint8_t* jpeg, size_t len) {
 
   uint32_t offsetInMovi = s_moviPayloadBytes;  // before the chunk header itself
 
-  s_file.write(hdr, 8);
-  s_file.write(jpeg, len);
+  // Hold the FS mutex for the whole chunk — mic WAV + sensorlog also take
+  // FsLockGuard around SD writes. Unlocked concurrent SD access was truncating
+  // this AVI mid-frame and preventing header finalize patches from sticking.
+  FsLockGuard fsGuard("video.frame.write");
+
+  if (s_file.write(hdr, 8) != 8) return false;
+  if (s_file.write(jpeg, len) != len) return false;
   s_moviPayloadBytes += 8 + len;
 
   if (len & 1) {
     uint8_t pad = 0;
-    s_file.write(&pad, 1);
+    if (s_file.write(&pad, 1) != 1) return false;
     s_moviPayloadBytes += 1;
   }
 
@@ -246,10 +282,13 @@ static void writeFrameChunk(const uint8_t* jpeg, size_t len) {
 
   if (len > s_maxFrameBytes) s_maxFrameBytes = (uint32_t)len;
   s_frameCount++;
+  return true;
 }
 
 static void finalizeAndClose() {
   if (!s_file) return;
+
+  FsLockGuard fsGuard("video.finalize");
 
   // Write idx1 chunk at end of file.
   if (s_idx && s_frameCount > 0) {
@@ -261,33 +300,42 @@ static void finalizeAndClose() {
     s_file.write((const uint8_t*)s_idx, s_frameCount * 16);
   }
 
-  uint32_t fileSize = s_file.size();
+  // Prefer the bytes we know we appended over File::size(), which can drift
+  // if earlier writes failed under SD contention.
+  uint32_t fileSize = AVI_HEADER_SIZE + s_moviPayloadBytes;
+  if (s_idx && s_frameCount > 0) {
+    fileSize += 8 + s_frameCount * 16;  // idx1 header + entries
+  }
+  uint32_t reported = s_file.size();
+  if (reported > 0 && reported < fileSize) fileSize = reported;
 
   // Patch header fields.
   uint8_t buf[4];
+  bool patchOk = true;
 
-  s_file.seek(OFF_RIFF_SIZE);
-  put32(buf, fileSize - 8);
-  s_file.write(buf, 4);
+  auto patch32 = [&](uint32_t off, uint32_t val) {
+    if (!s_file.seek(off)) { patchOk = false; return; }
+    put32(buf, val);
+    if (s_file.write(buf, 4) != 4) patchOk = false;
+  };
 
-  s_file.seek(OFF_AVIH_TOTAL_FRAMES);
-  put32(buf, s_frameCount);
-  s_file.write(buf, 4);
-
-  s_file.seek(OFF_STRH_LENGTH);
-  put32(buf, s_frameCount);
-  s_file.write(buf, 4);
-
-  s_file.seek(OFF_MOVI_SIZE);
+  patch32(OFF_RIFF_SIZE, fileSize > 8 ? fileSize - 8 : 0);
+  patch32(OFF_AVIH_TOTAL_FRAMES, s_frameCount);
+  patch32(OFF_STRH_LENGTH, s_frameCount);
   // movi LIST size includes the 'movi' fourcc (4) + payload
-  put32(buf, 4 + s_moviPayloadBytes);
-  s_file.write(buf, 4);
+  patch32(OFF_MOVI_SIZE, 4 + s_moviPayloadBytes);
 
   s_file.flush();
   s_file.close();
 
-  INFO_CAMERA_VIDEOF("Recording finalized: %s (%u frames, %u bytes)",
-                s_path, (unsigned)s_frameCount, (unsigned)fileSize);
+  if (!patchOk) {
+    ERROR_CAMERAF("[Video] Recording header patch failed: %s (%u frames, %u bytes)",
+                  s_path, (unsigned)s_frameCount, (unsigned)fileSize);
+    VFS::noteSDWriteFailure("video recording finalize");
+  } else {
+    INFO_CAMERA_VIDEOF("Recording finalized: %s (%u frames, %u bytes)",
+                       s_path, (unsigned)s_frameCount, (unsigned)fileSize);
+  }
   {
     const char* slash = strrchr(s_path, '/');
     char det[24];
@@ -315,6 +363,7 @@ static void recordingTask(void* /*arg*/) {
         if (probeJpegDims(jpeg, len, &w, &h) && w > 0 && h > 0) {
           s_width = w;
           s_height = h;
+          FsLockGuard fsGuard("video.dims.patch");
           // Rewrite dims in-place (we still haven't written any frames).
           s_file.seek(64);  // avih.dwWidth
           uint8_t dims[8];
@@ -326,7 +375,14 @@ static void recordingTask(void* /*arg*/) {
           s_file.seek(AVI_HEADER_SIZE);
         }
       }
-      writeFrameChunk(jpeg, len);
+      if (!writeFrameChunk(jpeg, len)) {
+        ERROR_CAMERAF("[Video] SD write failed mid-recording at frame %u — stopping",
+                      (unsigned)s_frameCount);
+        VFS::noteSDWriteFailure("video recording frame write");
+        free(jpeg);
+        videoRecording = false;
+        break;
+      }
       free(jpeg);
     }
 
@@ -344,14 +400,31 @@ static void recordingTask(void* /*arg*/) {
 bool startVideoRecording() {
   STACK_TRACEF("startVideoRecording.enter");
   extern bool gCameraRunning;
+  SemaphoreHandle_t ctrl = getRecCtrl();
+  if (!ctrl) {
+    ERROR_CAMERAF("[Video] Cannot create recorder control mutex");
+    return false;
+  }
+  if (xSemaphoreTake(ctrl, pdMS_TO_TICKS(5000)) != pdTRUE) {
+    INFO_CAMERA_VIDEOF("Cannot record — recorder control busy");
+    return false;
+  }
+
+  auto unlock = [&]() {
+    xSemaphoreGive(ctrl);
+  };
+
   if (!gCameraRunning) {
     INFO_CAMERA_VIDEOF("Cannot record — camera not enabled");
     STACK_TRACEF("startVideoRecording.camera_disabled_exit");
+    unlock();
     return false;
   }
-  if (videoRecording) {
+  // videoRecording OR a still-finalizing task — reject a second start.
+  if (videoRecording || s_task) {
     INFO_CAMERA_VIDEOF("Already recording");
     STACK_TRACEF("startVideoRecording.already_recording_exit");
+    unlock();
     return false;
   }
   // Gate on WRITABLE not just mounted — a card can be mounted but have
@@ -363,10 +436,12 @@ bool startVideoRecording() {
                sdWritable ? 1 : 0, VFS::isSDAvailable() ? 1 : 0);
   if (!sdWritable) {
     INFO_CAMERA_VIDEOF("Cannot record — SD card not writable");
+    unlock();
     return false;
   }
   if (!ensureVideosFolder()) {
     STACK_TRACEF("startVideoRecording.ensure_folder_failed");
+    unlock();
     return false;
   }
   STACK_TRACEF("startVideoRecording.folder_ok");
@@ -390,6 +465,7 @@ bool startVideoRecording() {
     // Flag the card as not-writable — next isSDWritable() call will
     // re-probe, giving the UI accurate state without needing a remount.
     VFS::noteSDWriteFailure("video recording file create");
+    unlock();
     return false;
   }
 
@@ -407,8 +483,19 @@ bool startVideoRecording() {
 
   uint8_t header[AVI_HEADER_SIZE];
   buildHeaderSkeleton(header, 640, 480, fps);  // placeholder dims
-  s_file.write(header, AVI_HEADER_SIZE);
-  s_file.flush();
+  {
+    FsLockGuard fsGuard("video.header.write");
+    const size_t wrote = s_file.write(header, AVI_HEADER_SIZE);
+    s_file.flush();
+    if (wrote != AVI_HEADER_SIZE) {
+      ERROR_STORAGEF("[Video] Short AVI header write: %u/%u", (unsigned)wrote,
+                     (unsigned)AVI_HEADER_SIZE);
+      s_file.close();
+      VFS::noteSDWriteFailure("video header write");
+      unlock();
+      return false;
+    }
+  }
 
   s_frameCount = 0;
   s_width = 0;
@@ -425,6 +512,8 @@ bool startVideoRecording() {
     ERROR_CAMERAF("[Video] Failed to start recorder task");
     videoRecording = false;
     s_file.close();
+    s_task = nullptr;
+    unlock();
     return false;
   }
 
@@ -433,14 +522,36 @@ bool startVideoRecording() {
     const char* slash = strrchr(s_path, '/');
     systemEventPost(SYSEVT_VIDEO_RECORD_STARTED, slash ? slash + 1 : s_path);
   }
+  unlock();
   return true;
 }
 
 void stopVideoRecording() {
-  if (!videoRecording) return;
+  SemaphoreHandle_t ctrl = getRecCtrl();
+  if (!ctrl) {
+    // startVideoRecording also refuses to proceed without this mutex, so
+    // clearing the task's poll flag is the only safe fallback required here.
+    videoRecording = false;
+    return;
+  }
+  if (xSemaphoreTake(ctrl, pdMS_TO_TICKS(5000)) != pdTRUE) {
+    // Still clear the flag so a stuck ctrl can't leave recording orphaned;
+    // the task loop polls videoRecording.
+    videoRecording = false;
+    return;
+  }
+
+  if (!videoRecording && !s_task) {
+    xSemaphoreGive(ctrl);
+    return;
+  }
   videoRecording = false;
+  // Release ctrl before waiting so finalize isn't blocked on a nested
+  // start attempt that only needs to observe s_task != nullptr.
+  xSemaphoreGive(ctrl);
+
   // Wait for task to finalize; finalizeAndClose runs inside it.
-  int waits = 100;
+  int waits = 150;  // up to ~3 s for SD flush on large clips
   while (s_task && waits-- > 0) {
     vTaskDelay(pdMS_TO_TICKS(20));
   }

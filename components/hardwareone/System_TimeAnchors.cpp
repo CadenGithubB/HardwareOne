@@ -229,7 +229,8 @@ static int promoteFolderPass(const char* folderName, const Anchor& a,
     char base[32], ext[12];
     if (!parseBootFile(name, &fb, &fms, base, sizeof(base),
                        ext, sizeof(ext))) {
-      // Unrecognized name — leave it, don't block the folder forever.
+      // Unrecognized name — leave it. rmdir below fails while anything
+      // remains; do not clear-flag false or the 5 s sweep never latches done.
       f = dir.openNextFile();
       continue;
     }
@@ -269,12 +270,35 @@ static int promoteFolderPass(const char* folderName, const Anchor& a,
     snprintf(dayDir, sizeof(dayDir), "%s/%s", CAPTURE_DIR_SENSORS, day);
     if (!VFS::existsGuarded(dayDir, ctx)) VFS::mkdirGuarded(dayDir, ctx);
 
+    // Unique by construction: wall stamp + boot + file-ms. Same-second
+    // collisions across boots (and LittleFS rename-over-existing) can't
+    // clobber a prior promote or a synced session file that landed on the
+    // same second. dstPath[160] worst case ~125 B.
     char dstPath[160];
-    snprintf(dstPath, sizeof(dstPath), "%s/%s-%s%s", dayDir, base, stamp, ext);
-    if (VFS::existsGuarded(dstPath, ctx)) {
-      // Same-second collision — keep the ms stamp as a disambiguator.
-      snprintf(dstPath, sizeof(dstPath), "%s/%s-%s-%lu%s", dayDir, base,
-               stamp, (unsigned long)fms, ext);
+    snprintf(dstPath, sizeof(dstPath), "%s/%s-%s-boot%lu-%09lu%s", dayDir,
+             base, stamp, (unsigned long)fb, (unsigned long)fms, ext);
+
+    // Belt-and-suspenders: never rename onto an existing path. Counter
+    // suffixes if somehow taken; skip (leave in boot folder) if exhausted.
+    bool haveDest = false;
+    if (!VFS::existsGuarded(dstPath, ctx)) {
+      haveDest = true;
+    } else {
+      for (int n = 2; n <= 9; n++) {
+        snprintf(dstPath, sizeof(dstPath),
+                 "%s/%s-%s-boot%lu-%09lu-%d%s", dayDir, base, stamp,
+                 (unsigned long)fb, (unsigned long)fms, n, ext);
+        if (!VFS::existsGuarded(dstPath, ctx)) {
+          haveDest = true;
+          break;
+        }
+      }
+    }
+    if (!haveDest) {
+      DEBUG_SYSTEMF("[TimeAnchors] skip promote %s — no free dest name", srcPath);
+      *folderClear = false;
+      f = dir.openNextFile();
+      continue;
     }
 
     if (VFS::renameGuarded(srcPath, dstPath, ctx)) {
@@ -287,7 +311,8 @@ static int promoteFolderPass(const char* folderName, const Anchor& a,
       }
     } else {
       DEBUG_SYSTEMF("[TimeAnchors] rename FAILED %s -> %s", srcPath, dstPath);
-      // Don't spin on a failing rename; treat as unpromotable this pass.
+      // Leave the source in place; don't treat the folder as clear.
+      *folderClear = false;
     }
     f = dir.openNextFile();
   }

@@ -37,8 +37,9 @@ void stopCamera(bool isRecovery = false);
 // G2 tap path uses *_Async; CLI / web use *_Sync so callers block until done.
 typedef void (*CameraPowerPostHook)(void);
 void cameraPowerSetPostHook(CameraPowerPostHook hook);
-// Spawn cam_pwr task + queue early (e.g. G2 init) so the first tap does not
-// pay xTaskCreate on the tap worker stack.
+// Spawn cam_pwr task + queue on first power request (idempotent). Not called
+// from G2 init — idle Sense builds keep the ~10 KB stack until opencamera /
+// Sensors CAM ON / equivalent.
 void cameraPowerWorkerEnsureStarted();
 bool cameraPowerRequestStartAsync();
 bool cameraPowerRequestStopAsync();
