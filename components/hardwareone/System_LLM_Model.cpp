@@ -13,6 +13,7 @@
 #include "System_Debug.h"
 #include "System_Filesystem.h"
 #include "System_VFS.h"
+#include "System_Mutex.h"
 #include <Arduino.h>
 #include <LittleFS.h>
 #include <cstring>
@@ -1092,6 +1093,11 @@ static void loadInfoBlockFromFile(File& f, uint32_t infoLen) {
 }
 
 bool loadWeights(const char* path) {
+  // Keep the model handle valid and its sequential cursor stable for the full
+  // parse/load. This is intentionally a long critical section: model loading
+  // is a foreground lifecycle operation and cannot tolerate SD unmount or a
+  // concurrent replacement midway through the weights.
+  FsLockGuard fsGuard("llm.load_weights");
   File f = VFS::openGuarded(path, "r", VFS::systemAuth("llm.load_weights"));
   if (!f) {
     setLlmError("Cannot open model: %s", path);

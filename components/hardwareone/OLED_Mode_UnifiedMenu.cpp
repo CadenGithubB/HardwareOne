@@ -15,6 +15,7 @@
 #include <LittleFS.h>
 #include "System_VFS.h"
 #include "System_Filesystem.h"  // filesystemReady
+#include "System_Mutex.h"
 
 #if ENABLE_OLED_DISPLAY && ENABLE_ESPNOW && ENABLE_BONDED_MODE
 
@@ -219,6 +220,7 @@ static int buildRemoteMenuItems(UnifiedMenuItem* items, int maxItems, const uint
   }
   
   // Parse cached manifest for CLI modules - create submenu entries per module
+  FsLockGuard fsGuard("oled.unified_menu.manifest");
   File f = VFS::openGuarded(manifestPath, "r", VFS::systemAuth("oled.unified_menu.manifest"));
   if (!f) return count;
 
@@ -290,6 +292,7 @@ static void buildSubmenuForModule(const char* moduleName, bool isRemote) {
     char manifestPathBuf[64];
   snprintf(manifestPathBuf, sizeof(manifestPathBuf), "/system/manifests/%s.json", fwHashHex);
   String manifestPath = manifestPathBuf;
+    FsLockGuard fsGuard("oled.unified_menu.manifest");
     File f = VFS::openGuarded(manifestPath, "r", VFS::systemAuth("oled.unified_menu.manifest"));
     if (f) {
       PSRAM_JSON_DOC(doc);

@@ -35,6 +35,7 @@
 #include <esp_app_desc.h>
 
 #include "System_Debug.h"
+#include "System_Mutex.h"
 #include "System_FirstTimeSetup.h"
 #if ENABLE_HTTPS
 #include "esp_https_server.h"
@@ -224,6 +225,8 @@ static void addFileToBackup(JsonObject& files, JsonArray& warnings, const char* 
 
 static void addDirectoryToBackup(JsonObject& files, JsonArray& warnings, const char* dirPath, const AuthContext& ctx, int depth = 0) {
   if (!filesystemReady || depth > 3) return;
+
+  FsLockGuard fsGuard("migration.backup.scan");
 
   File dir = VFS::openGuarded(dirPath, "r", ctx);
   if (!dir || !dir.isDirectory()) {
@@ -897,6 +900,7 @@ void startRestoreOnlyHttpServer() {
     bool certsOk = false;
     if (VFS::existsGuarded(CERT_PATH, VFS::systemAuth("migration.restore_certs")) &&
         VFS::existsGuarded(KEY_PATH, VFS::systemAuth("migration.restore_certs"))) {
+      FsLockGuard fsGuard("migration.restore_certs");
       File cf = VFS::openGuarded(CERT_PATH, "r", VFS::systemAuth("migration.restore_certs"));
       File kf = VFS::openGuarded(KEY_PATH, "r", VFS::systemAuth("migration.restore_certs"));
       if (cf && kf) {

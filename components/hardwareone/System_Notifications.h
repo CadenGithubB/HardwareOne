@@ -71,12 +71,32 @@ struct NotifRule {
 //                           preference applies IDENTICALLY on every interface.
 // None of it touches the event ring or automations — display only.
 
+// Width of every per-kind bitmask in this module (per-user mute/force AND the
+// device-wide off/admin policy masks). Kinds at or past NOTIF_KIND_MASK_BITS
+// are silently unmaskable — they can be neither muted nor forced — so this
+// MUST stay ahead of SYSEVT_COUNT.
+//
+// It didn't. The masks were 4 words / 128 bits while the kind list grew past
+// 140, so the tail of SYSEVT_KIND_LIST (everything from SYSEVT_FILE_RX_FAILED
+// on: hijack enter/exit, thermal alert, ToF, FM, IMU walking, voice disarm,
+// automation CRUD, ...) quietly ignored every mute and force request. Nothing
+// failed loudly; those kinds just weren't tunable. 8 words matches the
+// automation subscription mask's 256 bits and leaves the same headroom.
+//
+// The static_assert below is the point: adding kinds past the width is now a
+// build error instead of a silent behavioural hole.
+#define NOTIF_KIND_MASK_WORDS 8
+#define NOTIF_KIND_MASK_BITS  (NOTIF_KIND_MASK_WORDS * 32)
+static_assert(SYSEVT_COUNT <= NOTIF_KIND_MASK_BITS,
+              "SYSEVT_KIND_LIST outgrew the notification per-kind masks — "
+              "raise NOTIF_KIND_MASK_WORDS");
+
 struct NotifViewer {
   bool known;            // false = anonymous surface (no login): non-admin view
   bool isAdmin;
   uint8_t minTier;       // personal importance floor (NTIER_*); default NTIER_DEFAULT
-  uint32_t muteMask[4];  // force-OFF: kinds this viewer never wants (any sink)
-  uint32_t forceMask[4]; // force-ON: interrupt even for kinds below minTier
+  uint32_t muteMask[NOTIF_KIND_MASK_WORDS];  // force-OFF: kinds this viewer never wants (any sink)
+  uint32_t forceMask[NOTIF_KIND_MASK_WORDS]; // force-ON: interrupt even for kinds below minTier
 };
 
 // Resolve a viewer once per render pass. Per-user prefs come from a small

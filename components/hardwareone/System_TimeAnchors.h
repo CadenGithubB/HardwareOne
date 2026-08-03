@@ -19,7 +19,11 @@
 //     fileEpoch = epochAtSync - (millisAtSync - fileMs) / 1000
 //
 // A low-duty sweep (timeAnchorsTick, called from the main loop) promotes
-// boot-<N>/ files into dated YYYY-MM-DD/ folders:
+// boot-<N>/ files into dated YYYY-MM-DD/ folders as
+//   <base>-<YYYY-MM-DDTHH-MM-SS>-boot<N>-<ms9><ext>
+// so same-second collisions cannot LittleFS-rename-overwrite a prior file.
+// Destinations that somehow still exist are counter-suffixed or skipped
+// (left in boot-<N>/) — never overwritten.
 //   - current boot: as soon as the anchor lands. The file an active
 //     sensorlog session holds open is skipped and promotes after the
 //     session stops (the tick watches the running→stopped edge) or on the

@@ -185,7 +185,8 @@ String ImageManager::saveImage(const uint8_t* data, size_t len, ImageStorageLoca
   size_t requiredSpace = len + MIN_FREE_SPACE_BYTES;
   if (location == IMAGE_STORAGE_SD || location == IMAGE_STORAGE_BOTH) {
     if (sdAvailable) {
-      size_t freeSD = SD.totalBytes() - SD.usedBytes();
+      uint64_t total = 0, used = 0, freeSD = 0;
+      VFS::getStats(VFS::SDCARD, total, used, freeSD);
       if (freeSD < requiredSpace) {
         ERROR_STORAGEF("[ImageManager] SD card low on space: %lu free, need %lu", (unsigned long)freeSD, (unsigned long)requiredSpace);
         if (location == IMAGE_STORAGE_SD) return "";
@@ -239,6 +240,7 @@ String ImageManager::saveImage(const uint8_t* data, size_t len, ImageStorageLoca
       ensureCaptureFolder(IMAGE_STORAGE_SD);
       String sdDisplayPath = getCaptureFolder(IMAGE_STORAGE_SD) + "/" + filename;
       // Route through VFS (shared lock + guard); pass the "/sd/..." form.
+      FsLockGuard guard("ImageManager.saveImage.sd_both");
       File f = VFS::openGuarded(sdDisplayPath, FILE_WRITE, VFS::systemAuth("imgmgr.save_sd"), /*create=*/true);
       if (f) {
         f.write(data, len);
@@ -260,6 +262,7 @@ String ImageManager::saveImage(const uint8_t* data, size_t len, ImageStorageLoca
       return "";
     }
     ensureCaptureFolder(IMAGE_STORAGE_SD);
+    FsLockGuard guard("ImageManager.saveImage.sd");
     File f = VFS::openGuarded(fullPath, FILE_WRITE, VFS::systemAuth("imgmgr.save_sd"), /*create=*/true);
     if (f) {
       f.write(data, len);
@@ -490,9 +493,11 @@ StorageStats ImageManager::getStorageStats(ImageStorageLocation location) {
   
   if (location == IMAGE_STORAGE_SD) {
     if (!sdAvailable) return stats;
-    stats.totalBytes = SD.totalBytes();
-    stats.usedBytes = SD.usedBytes();
-    stats.freeBytes = stats.totalBytes - stats.usedBytes;
+    uint64_t total = 0, used = 0, free = 0;
+    if (!VFS::getStats(VFS::SDCARD, total, used, free)) return stats;
+    stats.totalBytes = total;
+    stats.usedBytes = used;
+    stats.freeBytes = free;
     stats.imageCount = getImageCount(IMAGE_STORAGE_SD);
     stats.available = true;
   } else {

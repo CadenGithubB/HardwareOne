@@ -17,6 +17,7 @@
 #include <WiFi.h>
 #include <LittleFS.h>
 #include "System_VFS.h"   // VFS::*Guarded + systemAuth (Phase 2 perm refactor)
+#include "System_Mutex.h"
 #include "System_AuthIdentity.h"
 #include "System_CommandTypes.h"  // CMD_RESULT_MAX, executeCommand result cap
 #include <mqtt_client.h>
@@ -1015,6 +1016,7 @@ bool startMQTT() {
   if (gSettings.mqttTLSMode == 2) {
     // TLS + Certificate Verification
     if (gSettings.mqttCACertPath.length() > 0) {
+      FsLockGuard fsGuard("mqtt.cert.load");
       File certFile = VFS::openGuarded(gSettings.mqttCACertPath, "r", VFS::systemAuth("mqtt.cert.load"));
       if (certFile) {
         caCertData = certFile.readString();

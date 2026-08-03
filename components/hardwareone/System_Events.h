@@ -165,6 +165,8 @@ uint8_t systemEventKindFamily(uint8_t kind);
   X(SYSEVT_RING_WORN,           "ring_worn", SYSEVT_FAM_GLASSES)            /* R1 wearStatus→wear (on finger)  subject=name */ \
   X(SYSEVT_RING_NOT_WORN,       "ring_not_worn", SYSEVT_FAM_GLASSES)        /* R1 wearStatus→notWear (off finger)  subject=name */ \
   X(SYSEVT_RING_RECONNECT_FAILED, "ring_reconnect_failed", SYSEVT_FAM_GLASSES) /* R1 connect attempt failed  subject=name detail=reason fail# elapsed; throttled 10min/streak */ \
+  X(SYSEVT_G2_RECONNECT_FAILED, "g2_reconnect_failed", SYSEVT_FAM_GLASSES)  /* glasses connect attempt failed  subject=sides sought detail=reason fail#; throttled 10min/streak */ \
+  X(SYSEVT_BLE_STACK_RECYCLED,  "ble_stack_recycled", SYSEVT_FAM_NETWORK)   /* Bluedroid host torn down + re-inited to clear a wedge  subject=wedged|reinit-failed */ \
   /* --- Auth / users --- */ \
   X(SYSEVT_LOGIN_OK,            "login_ok", SYSEVT_FAM_AUTH)             /* subject=username detail=transport */ \
   X(SYSEVT_LOGIN_FAIL,          "login_fail", SYSEVT_FAM_AUTH)           /* subject=username detail=transport */ \

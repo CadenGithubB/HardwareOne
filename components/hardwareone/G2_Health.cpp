@@ -39,6 +39,15 @@ struct HealthSeries {
   uint32_t     lastRingTs;
   int16_t      lastValue;
   uint32_t     lastMs;
+  // Daily-backfill taint for the X axis. Backfill .ms is a fetch-anchored
+  // synthetic (newest record pinned at the fetch instant), not a receive
+  // stamp, so wall-clock labels derived from it would print the FETCH time —
+  // hours wrong when the payload was stale. While the time-oldest sample does
+  // not post-date backfillAnchorMs the axis stays on elapsed labels; once
+  // every pre-backfill slot has evicted the flag is moot and wall labels
+  // return on their own.
+  bool         hasBackfill;
+  uint32_t     backfillAnchorMs;
 };
 
 struct TrendMeta {
@@ -117,6 +126,8 @@ static void seriesClear(HealthSeries* s) {
   s->lastRingTs = 0;
   s->lastValue = 0;
   s->lastMs = 0;
+  s->hasBackfill = false;
+  s->backfillAnchorMs = 0;
 }
 
 static void seriesPush(HealthSeries* s, int16_t value, uint32_t ringTs, uint32_t ms) {
@@ -192,10 +203,12 @@ void g2HealthNoteSample(G2HealthMetric metric, int16_t value, uint32_t ringTs) {
 // span of (count-1) minutes for a payload that nominally covers a day, so a
 // 24 h backfill occupied ~52% of the plot instead of ~99%. Use the payload's
 // own window when it is sane and fall back to the nominal step otherwise.
-// No clamp against nowMs: .ms has exactly two consumers — seriesPush's
-// (long)(ms - lastMs) signed delta and drawSparkline's unsigned modular
-// delta — and both are correct across an underflow at early uptime. Clamping
-// would make the plotted scale a function of uptime.
+// No clamp against nowMs: .ms's modular consumers — seriesPush's
+// (long)(ms - lastMs) signed delta and drawSparkline's unsigned delta — are
+// correct across an underflow at early uptime, and the third consumer, the
+// X axis, never converts synthetic stamps to wall time (HealthSeries
+// .hasBackfill gates those buffers onto elapsed labels). Clamping would make
+// the plotted scale a function of uptime.
 static constexpr uint32_t kBackfillNominalStepMs = 60000u;      // window unusable
 static constexpr uint32_t kBackfillMaxSpanSec    = 48u * 3600u; // reject garbage windows
 
@@ -222,6 +235,7 @@ void g2HealthApplyDailyBackfill(G2HealthMetric metric,
 
   const uint32_t nowMs = millis();
   const uint32_t span = (endTs > startTs && count > 1) ? (endTs - startTs) : 0;
+  const size_t before = s->count;
   for (size_t i = 0; i < count && i < HEALTH_HIST_CAP; i++) {
     uint32_t rts = startTs;
     if (span > 0) rts = startTs + (uint32_t)((uint64_t)span * i / (count - 1));
@@ -229,6 +243,13 @@ void g2HealthApplyDailyBackfill(G2HealthMetric metric,
     // these land before the live trail regardless of insertion order.
     uint32_t ms = backfillSampleMs(i, count, nowMs, startTs, endTs);
     seriesPush(s, (int16_t)((int16_t)values[i] * scale), rts, ms);
+  }
+  if (s->count != before) {
+    // Taint for the X axis: these .ms are fetch-anchored synthetics, not
+    // receive stamps — wall labels must not trust this buffer until every
+    // pre-backfill slot has evicted. See HealthSeries.hasBackfill.
+    s->hasBackfill = true;
+    s->backfillAnchorMs = nowMs;
   }
   DEBUG_G2F("[HEALTH] daily backfill metric=%u count=%u",
             (unsigned)metric, (unsigned)count);
@@ -644,25 +665,6 @@ static void clearGrid(uint8_t v) {
   memset(sGrid, v, sizeof(sGrid));
 }
 
-static void drawChar(char c, int x, int y, int shade) {
-  const char* g = healthGlyph(c);
-  if (!g) return;
-  for (int row = 0; row < 5; row++) {
-    for (int col = 0; col < 3; col++) {
-      if (g[row * 3 + col] == '#') px(x + col, y + row, shade);
-    }
-  }
-}
-
-static void drawText(const char* s, int x, int y, int shade) {
-  if (!s) return;
-  int cx = x;
-  for (; *s; s++) {
-    drawChar(*s, cx, y, shade);
-    cx += 4;
-  }
-}
-
 // Integer-scale blit of the 3×5 glyph (axis labels use scale=2 → 6×10).
 static void drawCharScaled(char c, int x, int y, int shade, int scale) {
   const char* g = healthGlyph(c);
@@ -778,11 +780,11 @@ static_assert(HEALTH_HIST_CAP <= 255, "drawSparkline draw-order index is uint8_t
 static void drawSparkline(const HealthSeries* s, int x, int y, int w, int h,
                           int16_t softMin, int16_t softMax, int16_t minSpan,
                           int shade, int16_t* usedMin, int16_t* usedMax,
-                          uint32_t* outOldestAgeMs, uint32_t* outWindowMs) {
+                          uint32_t* outOldestMs, uint32_t* outWindowMs) {
   // Out-params default to "no time domain" so every early return leaves the
   // caller's X axis suppressed rather than labelling stale values.
-  if (outOldestAgeMs) *outOldestAgeMs = 0;
-  if (outWindowMs)    *outWindowMs = 0;
+  if (outOldestMs) *outOldestMs = 0;
+  if (outWindowMs) *outWindowMs = 0;
   if (!s || s->count < 2 || w < 4 || h < 4) return;
 
   size_t n = 0;
@@ -832,9 +834,10 @@ static void drawSparkline(const HealthSeries* s, int x, int y, int w, int h,
   // no domain at all — space those evenly so the trail is still legible.
   const bool uniform      = (spanMs == 0);
   const uint32_t windowMs = uniform ? 1u : seriesSpanWindowMs(spanMs);  // 1 = unused
-  // For the X axis: window 0 = uniform spacing, nothing truthful to label.
-  if (outOldestAgeMs) *outOldestAgeMs = ageMax;
-  if (outWindowMs)    *outWindowMs = uniform ? 0u : windowMs;
+  // For the X axis: the time-oldest sample's raw stamp (the window's left
+  // edge) and the rung. Window 0 = uniform spacing, nothing truthful to label.
+  if (outOldestMs) *outOldestMs = seriesAt(s, start, order[0]).ms;
+  if (outWindowMs) *outWindowMs = uniform ? 0u : windowMs;
   const int plotW = w - 3;
   constexpr int kDotMinGapPx = 4;
 
@@ -1052,9 +1055,32 @@ static void fmtElapsedLabel(char* out, size_t cap, uint32_t ms) {
 // is deliberate: the right edge of a full ring day IS the next midnight, and
 // wrapping it to "0:00" would relabel the window's end as its start.
 static void fmtDayOffsetLabel(char* out, size_t cap, uint32_t secIntoDay) {
+  // A mid-day window start plus a rung that crosses midnight can push a tick
+  // past 24 h ("26:00"); wrap to next-day time-of-day. `>` keeps the exact
+  // 24:00 endpoint. Unreachable for a UTC-midnight-bucketed ring day, but the
+  // ring's alignment is observed firmware behaviour, not a wire guarantee.
+  if (secIntoDay > 86400u) secIntoDay %= 86400u;
   snprintf(out, cap, "%lu:%02lu",
            (unsigned long)(secIntoDay / 3600u),
            (unsigned long)((secIntoDay % 3600u) / 60u));
+}
+
+// Latched epoch↔millis offset for wall labels. Even two adjacent clock reads
+// truncate to milliseconds at independent phases, so a raw offset jitters
+// ±1 ms per render — enough to flip a printed minute between two repaints of
+// an identical buffer when a tick sits on the boundary. Latch the offset and
+// re-adopt only when it moves by more than a step threshold (NTP step,
+// ring-clock custody, first sync, or slow epoch-vs-esp_timer drift once it
+// accumulates) — exactly the moments the frame SHOULD reframe. Renders run
+// only on the glasses worker, so the statics are single-task.
+static int64_t wallOffsetMs(void) {
+  static int64_t sOffsetMs = 0;
+  static bool sHave = false;
+  const int64_t fresh = Clock::epochMillis() - (int64_t)millis();
+  int64_t d = fresh - sOffsetMs;
+  if (d < 0) d = -d;
+  if (!sHave || d > 1000) { sOffsetMs = fresh; sHave = true; }
+  return sOffsetMs;
 }
 
 // Local wall-clock label for the live views. H:MM inside two days; the
@@ -1090,12 +1116,12 @@ static void fmtWallLabel(char* out, size_t cap, int64_t epochMs, uint32_t window
 //    small for distinct H:MM marks. Anchored to the window start, not "now",
 //    so even a dark-host repaint stays pixel-identical.
 static void drawTimeAxis(int plotX, int plotW, int tickY, int labelY,
-                         uint32_t oldestAgeMs, uint32_t windowMs,
-                         const TrendMeta* trendMeta) {
+                         uint32_t oldestMs, uint32_t windowMs,
+                         bool syntheticMs, const TrendMeta* trendMeta) {
   if (windowMs == 0) return;  // uniform spacing — no time domain to label
 
-  // Real contents are ≤ 6 chars ("23:59", "59.9m", "12/31"); 24 covers the
-  // compiler's format-worst-case so -Wformat-truncation stays quiet.
+  // Real contents are ≤ 11 chars ("12:41 12/31"); 24 covers the compiler's
+  // format-worst-case so -Wformat-truncation stays quiet.
   char left[24], mid[24], right[24];
   if (trendMeta) {
     if (!trendMeta->have) return;
@@ -1103,15 +1129,34 @@ static void drawTimeAxis(int plotX, int plotW, int tickY, int labelY,
                               ? (trendMeta->endTs - trendMeta->startTs) : 0;
     if (span == 0 || span > kBackfillMaxSpanSec) return;  // .ms on 60 s ladder
     if (!Clock::isValidEpoch((time_t)trendMeta->startTs)) return;
+    // A sub-2-minute "day" would truncate all three marks to the same H:MM —
+    // degenerate payload, say nothing (the text pane still shows the window).
+    if (windowMs < 120u * 1000u) return;
     const uint32_t base = trendMeta->startTs % 86400u;
     fmtDayOffsetLabel(left, sizeof(left), base);
     fmtDayOffsetLabel(mid, sizeof(mid), base + windowMs / 2000u);
     fmtDayOffsetLabel(right, sizeof(right), base + windowMs / 1000u);
-  } else if (Clock::isSynced() && windowMs >= 5u * 60u * 1000u) {
-    const int64_t leftEpochMs = Clock::epochMillis() - (int64_t)oldestAgeMs;
+  } else if (!syntheticMs && Clock::isSynced() && windowMs >= 5u * 60u * 1000u) {
+    // Latched-offset conversion keeps repaints byte-identical (wallOffsetMs).
+    // Millis-wrap caveat: a stamp from before a 49.7-day millis() wrap
+    // converts 2^32 ms early; exposure is bounded by kAgePlausibleMs and
+    // accepted, like the age clamp itself.
+    const int64_t leftEpochMs = wallOffsetMs() + (int64_t)oldestMs;
     fmtWallLabel(left, sizeof(left), leftEpochMs, windowMs);
     fmtWallLabel(mid, sizeof(mid), leftEpochMs + (int64_t)(windowMs / 2u), windowMs);
     fmtWallLabel(right, sizeof(right), leftEpochMs + (int64_t)windowMs, windowMs);
+    // The 24 h rung is the one H:MM window whose endpoints print identical
+    // text (exactly a day apart). Append the date to the right label so
+    // "7:41 … 7:41" reads as next-day, not as a broken axis. Still a pure
+    // function of leftEpochMs + windowMs — repaint-stable.
+    if (windowMs >= 24u * 3600u * 1000u && windowMs < 48u * 3600u * 1000u) {
+      const time_t rt = (time_t)((leftEpochMs + (int64_t)windowMs) / 1000);
+      struct tm rtm;
+      localtime_r(&rt, &rtm);
+      const size_t len = strlen(right);
+      snprintf(right + len, sizeof(right) - len, " %d/%d",
+               rtm.tm_mon + 1, rtm.tm_mday);
+    }
   } else {
     snprintf(left, sizeof(left), "0");
     fmtElapsedLabel(mid, sizeof(mid), windowMs / 2u);
@@ -1172,10 +1217,19 @@ static void composeMetricGraph(const HealthSeries* s,
   constexpr int kLabelH = 10;  // 5×2
 
   int16_t usedMin = softMin, usedMax = softMax;
-  uint32_t oldestAgeMs = 0, windowMs = 0;
+  uint32_t oldestMs = 0, windowMs = 0;
   drawSparkline(s, kPlotX, kPlotY, kPlotW, kPlotH,
                 softMin, softMax, minSpan, 13, &usedMin, &usedMax,
-                &oldestAgeMs, &windowMs);
+                &oldestMs, &windowMs);
+
+  // Wall labels are only honest when the window's left edge is a real receive
+  // stamp. While the time-oldest sample doesn't post-date the last backfill's
+  // fetch instant the buffer still holds synthetic (or pre-backfill) stamps;
+  // once those evict, the signed diff goes positive and wall labels return on
+  // their own. ±24.8 d modular horizon — same accepted class as
+  // kAgePlausibleMs.
+  const bool syntheticMs =
+      s->hasBackfill && (int32_t)(oldestMs - s->backfillAnchorMs) <= 0;
 
   const int16_t mid = (int16_t)(usedMin + (usedMax - usedMin) / 2);
   const int labelRight = kGutter - 2;
@@ -1189,7 +1243,7 @@ static void composeMetricGraph(const HealthSeries* s,
   drawHLine(kPlotX, kPlotX + 3, kPlotY + kPlotH - 1, 6);
 
   drawTimeAxis(kPlotX, kPlotW, kPlotY + kPlotH, kPlotY + kPlotH + 5,
-               oldestAgeMs, windowMs, trendMeta);
+               oldestMs, windowMs, syntheticMs, trendMeta);
 }
 
 static void metricParams(G2HealthMetric m,

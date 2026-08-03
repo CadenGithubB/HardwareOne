@@ -686,6 +686,7 @@ const char* cmd_filecreate(const String& argsInput) {
   const AuthContext& ctx = currentAuthContext();
   // openGuarded("w", create=true) on a non-existent path falls back to
   // canCreate(path, ctx) when canEdit denies (per the openGuarded logic).
+  FsLockGuard fsGuard("filecreate");
   File f = VFS::openGuarded(path, "w", ctx, /*create=*/true);
   if (!f) {
     snprintf(getDebugBuffer(), 1024, "Error: Failed to create file (denied or fs error): %s", path.c_str());
@@ -1206,6 +1207,9 @@ const char* cmd_filedelete(const String& argsInput) {
 static const char* cmd_logtier(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
+  uint64_t lt = 0, lu = 0, lf = 0;
+  (void)VFS::getStats(VFS::INTERNAL, lt, lu, lf);
+
   if (argWantsJson(argsInput)) {
     bool overflow = VFS::isLogOverflowActive();
     bool sdOk = VFS::isSDAvailable();
@@ -1217,16 +1221,16 @@ static const char* cmd_logtier(const String& argsInput) {
       "\"littlefs\":{\"free\":%lu,\"total\":%lu,\"used\":%lu},"
       "\"sd\":{\"available\":%s,\"total\":%llu,\"used\":%llu,\"free\":%llu}}",
       tier, overflow ? "true" : "false",
-      (unsigned long)VFS::getCachedLittleFsFree(), (unsigned long)LittleFS.totalBytes(),
-      (unsigned long)LittleFS.usedBytes(),
+      (unsigned long)VFS::getCachedLittleFsFree(), (unsigned long)lt,
+      (unsigned long)lu,
       sdOk ? "true" : "false",
       (unsigned long long)st, (unsigned long long)su, (unsigned long long)sf);
     return getDebugBuffer();
   }
 
   size_t flashFree = VFS::getCachedLittleFsFree();
-  size_t flashTotal = LittleFS.totalBytes();
-  size_t flashUsed = LittleFS.usedBytes();
+  size_t flashTotal = (size_t)lt;
+  size_t flashUsed = (size_t)lu;
   bool overflow = VFS::isLogOverflowActive();
   bool sdOk = VFS::isSDAvailable();
   uint64_t sdTotal = 0, sdUsed = 0, sdFree = 0;

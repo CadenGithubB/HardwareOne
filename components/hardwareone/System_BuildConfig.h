@@ -124,7 +124,7 @@
 // build (camera + mic only) — level 0 also zeroes ENABLE_OLED_DISPLAY and every
 // ENABLE_*_SENSOR below (see the level table further down), so the screen and the
 // sensor drivers fall out on their own.
-#define I2C_FEATURE_LEVEL       4
+#define I2C_FEATURE_LEVEL       0
 
 #if I2C_FEATURE_LEVEL == 4
   // Memory hints (rough — full breakdown in "MEMORY SAVINGS REFERENCE" below).
@@ -149,7 +149,7 @@
 // on-board display. HAL_Display.cpp compiles unconditionally and switches on
 // DISPLAY_TYPE, so a screenless build must set 0 here even though
 // I2C_FEATURE_LEVEL 0 already zeroes ENABLE_OLED_DISPLAY.
-#define DISPLAY_TYPE            1
+#define DISPLAY_TYPE            0
 
 // Input device: which physical input controller is wired to the I2C bus.
 // Exactly one driver compiles in (mutually exclusive — both share STEMMA QT
@@ -161,7 +161,7 @@
 //
 // CURRENT: SEESAW_GAMEPAD for the FeatherS3. Set to 0 (NONE) for the XIAO —
 // both options hang off the I2C bus a level-0 build doesn't have.
-#define INPUT_DEVICE_TYPE       1
+#define INPUT_DEVICE_TYPE       0
 
 // XIAO ESP32S3 Sense expansion: camera + PDM mic + microSD. The base XIAO and the
 // Sense share one Arduino variant (CONFIG_ARDUINO_VARIANT="XIAO_ESP32S3"), so this
@@ -317,7 +317,7 @@
 // Bonded mode: two-device bonded pair via ESP-NOW (master/worker).
 // Master shows remote UI for worker features, manifest cached in LittleFS.
 // Auto-disabled if ESP-NOW is off.
-#define ENABLE_BONDED_MODE      0
+#define ENABLE_BONDED_MODE      1
 
 
 // =============================================================================
@@ -334,7 +334,7 @@
 //   To ship A Dark Room instead: ENABLE_GAMES 1, ENABLE_WEB_GAME_MAZE 0,
 //   ENABLE_WEB_GAME_DARKROOM 1 (and CUSTOM_ENABLE_WEB_GAMES 1 at web level 4).
 #define ENABLE_GAMES            0
-#define ENABLE_WEB_GAME_MAZE        1   // Tilt Maze (IMU/gamepad prototype)
+#define ENABLE_WEB_GAME_MAZE        0   // Tilt Maze (IMU/gamepad prototype)
 #define ENABLE_WEB_GAME_DARKROOM    0   // A Dark Room (en/es/fr/zh_cn)
 
 // Maps: offline maps and waypoints web page.

@@ -84,6 +84,7 @@
 // dispatch case" — the same shape we use for Settings.
 
 #include "G2_Page_TestSuite.h"
+#include "System_Mutex.h"
 
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 
@@ -597,9 +598,9 @@ static constexpr size_t kGeomVariantCount =
 // ImageObject children at varying spatial positions — exactly the
 // "combo display at various positions" shape this submenu surfaces.
 //
-// Kept here (not moved out of Image Tests/Streaming) because the same
-// probe is interesting from two angles: spatial layout (this menu) and
-// streaming-lifecycle (the Image Tests menu). Two paths, one probe.
+// Kept here (also under Image/Com2) because the same probe is interesting
+// from two angles: spatial layout (Display Combo) and multi-container
+// CompressMode=2 chase (Com2). Two paths, one probe.
 struct ComboTest {
   const char* label;
   ImgProbeFn  probe;
@@ -649,7 +650,7 @@ enum TestLevel : uint8_t {
   TEST_LEVEL_IMAGE                 = 15, // Image Tests router (4 sub-levels below)
   TEST_LEVEL_IMAGE_CONFIRMED       = 16, // Doc + Q4 canary + Q6 + Q6b
   TEST_LEVEL_IMAGE_STATIC          = 17, // Q9 frame builder
-  TEST_LEVEL_IMAGE_STREAMING       = 18, // Q11 / Q10 / Q13 / Q14 / Q21 / mixed…
+  TEST_LEVEL_IMAGE_STREAMING       = 18, // Single image + Q14 (mixed → Com2)
   TEST_LEVEL_DISPLAY_SELECTION         = 19, // Selection Patterns parent (3 buckets)
   TEST_LEVEL_DISPLAY_SELECT_LISTS      = 20, // Bucket 1 — native list widgets
   TEST_LEVEL_DISPLAY_SELECT_MIXED      = 21, // Bucket 2 — compound TextObject layouts
@@ -657,8 +658,9 @@ enum TestLevel : uint8_t {
   TEST_LEVEL_IMAGE_ANIMATED_ICONS      = 23, // Q22–Q27 live bars + SD packs
   TEST_LEVEL_IMAGE_ANIMATED_CHOOSE     = 24, // SD G2_ICON_ANIMATIONS_VFS_PATH/* packs
   TEST_LEVEL_IMAGE_STREAM_SINGLE       = 25, // Streaming / Single image — Q10/Q11/Q13/Q15/Q21
-  TEST_LEVEL_IMAGE_STREAM_COMPOUND     = 26, // Streaming / Compound (list/text + image) — Q16/Q17/Q18/Q28
-  TEST_LEVEL_IMAGE_MOTION              = 27, // Q31/Q31b — can a container be MOVED?
+  TEST_LEVEL_IMAGE_COM2                = 26, // Mixed / multi — list+text+image canaries
+  TEST_LEVEL_IMAGE_MOTION              = 27, // Q31b — recreate-move (safe path)
+  TEST_LEVEL_IMAGE_COMPRESSION         = 28, // Q32 — LZ4 bare-block solo A/B
 };
 static TestLevel gTestLevel = TEST_LEVEL_ROOT;
 
@@ -754,23 +756,26 @@ static size_t buildImageRows() {
   snprintf(gRows[row], TEST_ROW_LEN, "Animated Icons >>");          gRowPtrs[row] = gRows[row]; row++;
   snprintf(gRows[row], TEST_ROW_LEN, "Streaming Tests >>");        gRowPtrs[row] = gRows[row]; row++;
   snprintf(gRows[row], TEST_ROW_LEN, "Motion Tests >>");           gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "Compression (LZ4) >>");      gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "Mixed / multi >>");          gRowPtrs[row] = gRows[row]; row++;
   return row;
 }
 
-// IMAGE / Motion — can an image CONTAINER be repositioned, rather than
-// repainting a bigger tile? Own bucket rather than bolted onto Animated
-// Icons: that list is already 7 rows and the doc records a 9-item REBUILD
-// measuring 258 B against a 240 B single-fragment cap.
-//
-// Q31 is the risky one — a failed image REBUILD may wedge the EvenCore
-// plugin task (docs/G2_PROTOCOL.md:1813), recoverable only by reconnecting
-// BLE. Q31b is the safe known-good path and is what produces the usable
-// ms/step number, so it is listed separately and can be run first.
+// IMAGE / Compression — solo LZ4 A/B under production framing (bare block).
+// Framing archaeology (Q32f + other wraps) retired after Q16d / Even App.
+static size_t buildImageCompressionRows() {
+  writeBackRow("<- Image");
+  size_t row = 1;
+  snprintf(gRows[row], TEST_ROW_LEN, "Q32: A/B (bare block)");     gRowPtrs[row] = gRows[row]; row++;
+  return row;
+}
+
+// IMAGE / Motion — reposition via SHUTDOWN+CREATE (Q31b). Image REBUILD
+// move (Q31) retired: wedge risk on failed REBUILD.
 static size_t buildImageMotionRows() {
   writeBackRow("<- Image");
   size_t row = 1;
   snprintf(gRows[row], TEST_ROW_LEN, "Q31b: move recreate"); gRowPtrs[row] = gRows[row]; row++;
-  snprintf(gRows[row], TEST_ROW_LEN, "Q31: move REBUILD");   gRowPtrs[row] = gRows[row]; row++;
   return row;
 }
 
@@ -789,9 +794,8 @@ static size_t buildImageConfirmedRows() {
 }
 
 // IMAGE / Static — single-frame composition tests. Q9 exercises the
-// rect-primitive draw API that'll back the future pushTile() public
-// surface for feature code. QGlizzy is a hardcoded-path SD-load canary.
-// Q12 is the full-display 4-tile probe (first multi-tile CREATE).
+// rect-primitive draw API. QGlizzy is an SD-load canary. Q12 is the
+// full-display 4-tile probe. Q19 is small-dim solo.
 static size_t buildImageStaticRows() {
   writeBackRow("<- Image");
   size_t row = 1;
@@ -799,21 +803,16 @@ static size_t buildImageStaticRows() {
   snprintf(gRows[row], TEST_ROW_LEN, "QGlizzy: SD /PICTURES/test.bmp");   gRowPtrs[row] = gRows[row]; row++;
   snprintf(gRows[row], TEST_ROW_LEN, "Q12: full-screen 576x288 (4 tiles)"); gRowPtrs[row] = gRows[row]; row++;
   snprintf(gRows[row], TEST_ROW_LEN, "Q19: solo 96x96 (small-dim test)"); gRowPtrs[row] = gRows[row]; row++;
-  snprintf(gRows[row], TEST_ROW_LEN, "Q29: 2-bpp 144x144 (bit-depth test)"); gRowPtrs[row] = gRows[row]; row++;
   return row;
 }
 
-// IMAGE / Streaming — parent router. Split into two sub-buckets by
-// widget composition (single image widget vs. compound list/text +
-// image), plus Q14 as a leaf because it's a text-rebuild rate test
-// that doesn't fit either bucket but historically lives here under
-// "live updates". Live bar icons 32–144 live under Animated Icons
-// (Q22/Q23/Q20/Q26/Q27), not Streaming.
+// IMAGE / Streaming — single-image swap/live probes + Q14 text rate.
+// Multi-container (list/text + image) probes live under Com2 now —
+// that's where CompressMode=2 + mixed CREATE is being chased.
 static size_t buildImageStreamingRows() {
   writeBackRow("<- Image");
   size_t row = 1;
   snprintf(gRows[row], TEST_ROW_LEN, "Single image >>");                 gRowPtrs[row] = gRows[row]; row++;
-  snprintf(gRows[row], TEST_ROW_LEN, "Compound (list/text + image) >>"); gRowPtrs[row] = gRows[row]; row++;
   snprintf(gRows[row], TEST_ROW_LEN, "Q14: live TEXT (rebuild) @ rate"); gRowPtrs[row] = gRows[row]; row++;
   return row;
 }
@@ -835,23 +834,19 @@ static size_t buildImageStreamingSingleRows() {
   return row;
 }
 
-// IMAGE / Streaming / Compound — multi-widget CREATEs (list+image or
-// text+image) testing whether the lens firmware composites two child
-// widgets simultaneously. Q16/Q17/Q18 are list+image variants (verified
-// rendering 2026-04 onward); Q28 is the text+image counterpart and is
-// the reference probe for the empirical finding that text+image
-// compounds ack but the image half doesn't paint on this firmware.
-// Q30* try unproven list+text+image (ContainerTotalNum=3).
-static size_t buildImageStreamingCompoundRows() {
-  writeBackRow("<- Streaming");
+// IMAGE / Mixed — multi-container canaries. Q16 force-raw control; Q16d
+// LZ4 bare-block (production). Failed FRAME chase probes (Q16a–c, Q30b)
+// retired after Q16d painted.
+static size_t buildImageCom2Rows() {
+  writeBackRow("<- Image");
   size_t row = 1;
-  snprintf(gRows[row], TEST_ROW_LEN, "Q16: mixed list+image side-by-side"); gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "Q16: mixed list+image (raw)");        gRowPtrs[row] = gRows[row]; row++;
+  snprintf(gRows[row], TEST_ROW_LEN, "Q16d: mixed LZ4 block");              gRowPtrs[row] = gRows[row]; row++;
   snprintf(gRows[row], TEST_ROW_LEN, "Q17: mixed list+image overlap");      gRowPtrs[row] = gRows[row]; row++;
   snprintf(gRows[row], TEST_ROW_LEN, "Q18: mixed list+icon (80x80)");       gRowPtrs[row] = gRows[row]; row++;
   snprintf(gRows[row], TEST_ROW_LEN, "Q28: img+text live (indep. rates)");  gRowPtrs[row] = gRows[row]; row++;
   snprintf(gRows[row], TEST_ROW_LEN, "Q28L: img+list live (Q28 ctrl)");     gRowPtrs[row] = gRows[row]; row++;
   snprintf(gRows[row], TEST_ROW_LEN, "Q30: list+text+img Health geom");     gRowPtrs[row] = gRows[row]; row++;
-  snprintf(gRows[row], TEST_ROW_LEN, "Q30b: list+img+text wire order");     gRowPtrs[row] = gRows[row]; row++;
   snprintf(gRows[row], TEST_ROW_LEN, "Q30c: list+text+img 96x96");          gRowPtrs[row] = gRows[row]; row++;
   return row;
 }
@@ -891,6 +886,7 @@ static size_t buildImageAnimatedChooseRows() {
     return row;
   }
   if (VFS::isLittleFSReady() && VFS::existsGuarded(String(kRoot), currentAuthContext())) {
+    FsLockGuard fsGuard("g2.testsuite.anim_scan");
     File dir = VFS::openGuarded(kRoot, FILE_READ, currentAuthContext());
     if (dir && dir.isDirectory()) {
       while (row < TEST_MAX_ROWS && gAnimIconPickCount < TS_ANIM_ICON_DIR_MAX) {
@@ -1029,10 +1025,11 @@ static void imgProbeWorkerImpl(ImgProbeFn fn) {
     case TEST_LEVEL_IMAGE_STATIC:        n = buildImageStaticRows();     break;
     case TEST_LEVEL_IMAGE_STREAMING:     n = buildImageStreamingRows();  break;
     case TEST_LEVEL_IMAGE_STREAM_SINGLE:   n = buildImageStreamingSingleRows();   break;
-    case TEST_LEVEL_IMAGE_STREAM_COMPOUND: n = buildImageStreamingCompoundRows(); break;
+    case TEST_LEVEL_IMAGE_COM2:            n = buildImageCom2Rows();              break;
     case TEST_LEVEL_IMAGE_ANIMATED_ICONS:  n = buildImageAnimatedIconsRows(); break;
     case TEST_LEVEL_IMAGE_ANIMATED_CHOOSE: n = buildImageAnimatedChooseRows(); break;
     case TEST_LEVEL_IMAGE_MOTION:        n = buildImageMotionRows();     break;
+    case TEST_LEVEL_IMAGE_COMPRESSION:   n = buildImageCompressionRows(); break;
     case TEST_LEVEL_DISPLAY_COMBO:       n = buildDisplayComboRows();    break;
     case TEST_LEVEL_DISPLAY_SELECT_EDGES: n = buildSelectionEdgesRows(); break;
     // NB: adding a TEST_LEVEL_* with a probe row REQUIRES a case here. The
@@ -2363,7 +2360,8 @@ void g2TestSuiteHandleTap(uint32_t idx) {
     }
 
     case TEST_LEVEL_IMAGE: {
-      // Parent router: Confirmed, Static, Animated Icons, Streaming, Motion.
+      // Parent router: Confirmed, Static, Animated Icons, Streaming, Motion,
+      // Compression (solo LZ4), Mixed / multi.
       if (idx == 0) {
         gTestLevel = TEST_LEVEL_ROOT;
         size_t n = buildRootRows();
@@ -2377,6 +2375,8 @@ void g2TestSuiteHandleTap(uint32_t idx) {
         case 3: gTestLevel = TEST_LEVEL_IMAGE_ANIMATED_ICONS; n = buildImageAnimatedIconsRows(); break;
         case 4: gTestLevel = TEST_LEVEL_IMAGE_STREAMING;      n = buildImageStreamingRows();     break;
         case 5: gTestLevel = TEST_LEVEL_IMAGE_MOTION;         n = buildImageMotionRows();        break;
+        case 6: gTestLevel = TEST_LEVEL_IMAGE_COMPRESSION;    n = buildImageCompressionRows();   break;
+        case 7: gTestLevel = TEST_LEVEL_IMAGE_COM2;           n = buildImageCom2Rows();          break;
         default:
           DEBUG_G2F("[G2] Test suite IMAGE: tap idx=%u out of range",
                     (unsigned)idx);
@@ -2414,7 +2414,7 @@ void g2TestSuiteHandleTap(uint32_t idx) {
     }
 
     case TEST_LEVEL_IMAGE_STATIC: {
-      // Static: Q9, QGlizzy, Q12 (full-display 4-tile).
+      // Static: Q9, QGlizzy, Q12, Q19.
       if (idx == 0) {
         gTestLevel = TEST_LEVEL_IMAGE;
         size_t n = buildImageRows();
@@ -2427,7 +2427,6 @@ void g2TestSuiteHandleTap(uint32_t idx) {
         case 2: fn = g2ProbeImageQGlizzy;        break;
         case 3: fn = g2ProbeImageQ12FullScreen;  break;
         case 4: fn = g2ProbeImageQ19SmallSolo;   break;
-        case 5: fn = g2ProbeImageQ29Bmp2bppSolo; break;
         default:
           DEBUG_G2F("[G2] Test suite IMAGE/Static: tap idx=%u out of range",
                     (unsigned)idx);
@@ -2442,9 +2441,8 @@ void g2TestSuiteHandleTap(uint32_t idx) {
     }
 
     case TEST_LEVEL_IMAGE_STREAMING: {
-      // Parent router: idx 1/2 push into the Single/Compound sub-buckets;
-      // idx 3 dispatches Q14 directly (it's a text-rebuild test that
-      // historically lives here without fitting either bucket).
+      // idx 1 → Single image; idx 2 → Q14 (text rebuild rate).
+      // Compound/multi-container probes moved to Com2.
       if (idx == 0) {
         gTestLevel = TEST_LEVEL_IMAGE;
         size_t n = buildImageRows();
@@ -2457,11 +2455,7 @@ void g2TestSuiteHandleTap(uint32_t idx) {
           gTestLevel = TEST_LEVEL_IMAGE_STREAM_SINGLE;
           n = buildImageStreamingSingleRows();
           break;
-        case 2:
-          gTestLevel = TEST_LEVEL_IMAGE_STREAM_COMPOUND;
-          n = buildImageStreamingCompoundRows();
-          break;
-        case 3: {
+        case 2: {
           DEBUG_G2F("[G2] Image probe (Streaming/Q14) → spawning worker");
           if (!spawnImgProbeWorker(g2ProbeImageQ14LiveText)) {
             n = buildImageStreamingRows();
@@ -2507,34 +2501,33 @@ void g2TestSuiteHandleTap(uint32_t idx) {
       return;
     }
 
-    case TEST_LEVEL_IMAGE_STREAM_COMPOUND: {
-      // Compound layouts — Q16/Q17/Q18 list+image (verified-rendering),
-      // Q28 text+image (image half currently fails to paint — diagnostic),
-      // Q30* unproven list+text+image 3-pane.
+    case TEST_LEVEL_IMAGE_COM2: {
+      // Mixed / multi canaries — Q16 raw, Q16d LZ4 block, Q17/Q18,
+      // Q28/Q28L live, Q30/Q30c Health-shaped.
       if (idx == 0) {
-        gTestLevel = TEST_LEVEL_IMAGE_STREAMING;
-        size_t n = buildImageStreamingRows();
+        gTestLevel = TEST_LEVEL_IMAGE;
+        size_t n = buildImageRows();
         g2ShowListPage(gRowPtrs, n);
         return;
       }
       ImgProbeFn fn = nullptr;
       switch (idx) {
         case 1: fn = g2ProbeImageQ16MixedSideBySide;          break;
-        case 2: fn = g2ProbeImageQ17MixedOverlap;             break;
-        case 3: fn = g2ProbeImageQ18MixedIcon;                break;
-        case 4: fn = g2ProbeImageQ28MixedImageTextLive;       break;
-        case 5: fn = g2ProbeImageQ28LMixedListImageLive;      break;
-        case 6: fn = g2ProbeImageQ30ListTextImageHealthGeom;  break;
-        case 7: fn = g2ProbeImageQ30bListImageTextOrder;      break;
+        case 2: fn = g2ProbeImageQ16dMixedLz4Block;           break;
+        case 3: fn = g2ProbeImageQ17MixedOverlap;             break;
+        case 4: fn = g2ProbeImageQ18MixedIcon;                break;
+        case 5: fn = g2ProbeImageQ28MixedImageTextLive;       break;
+        case 6: fn = g2ProbeImageQ28LMixedListImageLive;      break;
+        case 7: fn = g2ProbeImageQ30ListTextImageHealthGeom;  break;
         case 8: fn = g2ProbeImageQ30cListTextSmallImage;      break;
         default:
-          DEBUG_G2F("[G2] Test suite IMAGE/Stream/Compound: tap idx=%u out of range",
+          DEBUG_G2F("[G2] Test suite IMAGE/Mixed: tap idx=%u out of range",
                     (unsigned)idx);
           return;
       }
-      DEBUG_G2F("[G2] Image probe (Stream/Compound) idx=%u → spawning worker", (unsigned)idx);
+      DEBUG_G2F("[G2] Image probe (Mixed) idx=%u → spawning worker", (unsigned)idx);
       if (!spawnImgProbeWorker(fn)) {
-        size_t n = buildImageStreamingCompoundRows();
+        size_t n = buildImageCom2Rows();
         g2ShowListPage(gRowPtrs, n);
       }
       return;
@@ -2574,7 +2567,7 @@ void g2TestSuiteHandleTap(uint32_t idx) {
     }
 
     case TEST_LEVEL_IMAGE_MOTION: {
-      // Q31b (safe) listed first; Q31 (may wedge the plugin) second.
+      // Q31b only (SHUTDOWN+CREATE move). Q31 REBUILD retired.
       if (idx == 0) {
         gTestLevel = TEST_LEVEL_IMAGE;
         size_t n = buildImageRows();
@@ -2584,7 +2577,6 @@ void g2TestSuiteHandleTap(uint32_t idx) {
       ImgProbeFn fn = nullptr;
       switch (idx) {
         case 1: fn = g2ProbeImageQ31bRecreateMove; break;
-        case 2: fn = g2ProbeImageQ31RebuildMove;   break;
         default:
           DEBUG_G2F("[G2] Test suite IMAGE/Motion: tap idx=%u out of range",
                     (unsigned)idx);
@@ -2593,6 +2585,30 @@ void g2TestSuiteHandleTap(uint32_t idx) {
       DEBUG_G2F("[G2] Image probe (Motion) idx=%u → spawning worker", (unsigned)idx);
       if (!spawnImgProbeWorker(fn)) {
         size_t n = buildImageMotionRows();
+        g2ShowListPage(gRowPtrs, n);
+      }
+      return;
+    }
+
+    case TEST_LEVEL_IMAGE_COMPRESSION: {
+      // Solo LZ4 A/B under production bare-block wrap only.
+      if (idx == 0) {
+        gTestLevel = TEST_LEVEL_IMAGE;
+        size_t n = buildImageRows();
+        g2ShowListPage(gRowPtrs, n);
+        return;
+      }
+      ImgProbeFn fn = nullptr;
+      if (idx == 1) {
+        fn = g2ProbeImageQ32Lz4Benchmark;
+      } else {
+        DEBUG_G2F("[G2] Test suite IMAGE/Compression: tap idx=%u out of range",
+                  (unsigned)idx);
+        return;
+      }
+      DEBUG_G2F("[G2] Image probe (Compression) idx=%u → spawning worker", (unsigned)idx);
+      if (!spawnImgProbeWorker(fn)) {
+        size_t n = buildImageCompressionRows();
         g2ShowListPage(gRowPtrs, n);
       }
       return;

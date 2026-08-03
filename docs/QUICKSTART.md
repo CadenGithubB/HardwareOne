@@ -1,4 +1,4 @@
-# HardwareOne v0.99.6 - Quick Start Guide
+# HardwareOne v0.99.7 - Quick Start Guide
 
 This guide will help you get up and running with Hardware One.
 
@@ -204,4 +204,3 @@ Type `help` at any time in the serial console to see all available commands.
 > ## Back to the overview: [README](../README.md)
 
 > ## Full reference, commands, and configuration: [User Guide](USERGUIDE.md)
-

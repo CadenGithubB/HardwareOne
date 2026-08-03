@@ -22,6 +22,7 @@
 #include "System_Command.h"
 #include "System_Notifications.h"
 #include "System_Filesystem.h"  // filesystemReady
+#include "System_Mutex.h"       // FsLockGuard — certificate File operations
 #include "System_I2C_Manager.h"  // I2CDeviceManager — pause polling around WiFi mode changes
 #include <WiFi.h>
 #include <esp_wifi.h>
@@ -1531,6 +1532,7 @@ const char* cmd_certgen(const String& argsInput) {
 
   // Save to filesystem
   {
+    FsLockGuard fsGuard("wifi.cert.generate");
     // /system is created at boot (fs.init.mkdirs); only ensure the certs dir.
     if (!VFS::existsGuarded("/system/certs", VFS::systemAuth(VFS::Scopes::CERTS, "wifi.cert.gen"))) VFS::mkdirGuarded("/system/certs", VFS::systemAuth(VFS::Scopes::CERTS, "wifi.cert.gen"));
 

@@ -8,6 +8,37 @@ Entries for 0.96.1 and earlier were backfilled from git history (this repo had
 no tags or releases before 0.96.2); they are terse, commit-grounded summaries,
 dated from each version's commit. Dates are YYYY-MM-DD.
 
+## [0.99.7] - 2026-08-03
+This release turns the G2 lens into a more complete control surface and hardens the storage and Bluetooth paths underneath it. Maps now render as an interactive three-pane page with pan, zoom, recenter, GPS/fix status, and name search. The camera viewfinder can take snapshots, start or stop AVI recording, open settings, select FPS, and choose one of four tone maps. Image pushes automatically use bare-block LZ4 when it saves bytes, reducing BLE traffic for maps, camera frames, health graphs, and other lens visuals while retaining raw transfer for incompressible frames.
+
+BLE recovery now treats repeated instant connection refusals as evidence of a wedged host stack rather than retrying forever. When no peripheral is linked and the worker is idle, the firmware records the failure and safely recycles Bluedroid. The same release closes a broad set of filesystem races: the global lock exists before the first boot-time file access, SD lifecycle transitions and long-lived handles are serialized, and optional radio-callback diagnostics drop work instead of blocking the host task.
+
+### Added
+- `g2glasses` reads and writes supported glasses-device settings, including brightness, auto-brightness, wear detection, display position, silent mode, and unit preferences, and reports the glasses' own acknowledgement.
+- G2 Maps gains native move controls, live GPS/fix status, feature-name search, recentering, and highlighting alongside the rendered map.
+- The G2 camera viewfinder gains Snapshot, Record start/stop, and Settings controls. Lens camera settings now expose FPS plus Linear, Balanced, Shadows, and Legacy tone mapping.
+- G2 System Events is now a paged, wrapped snapshot of the recent event ring instead of an eight-row clipped live panel.
+- G2 image tests gain bare-block LZ4 mixed-container canaries and a raw-versus-compressed benchmark.
+
+### Changed
+- G2 image transfer selects LZ4 `CompressMode=2` only when the compressed BMP is smaller; current verified glasses firmware paints the bare-block format, and raw remains the fallback. External protocol decoders must understand mode 2 when inspecting these pushes.
+- Camera power work is allocated lazily, avoiding the permanent worker stack on builds that never turn the camera on.
+- Health Track always resumes in per-day CSV mode and keeps its first sample due while waiting for the ring to reconnect.
+- The checked-in build profile now targets the XIAO ESP32-S3 Sense: 8 MB flash, octal PSRAM, camera and microphone enabled, with I2C, OLED, and gamepad disabled. Bonded mode is enabled in that profile.
+
+### Fixed
+- Repeated G2/R1 connection failures now produce durable diagnostics, and a wedged BLE host can recover without rebooting the device.
+- AVI start/stop is serialized across lens and web callers; short SD writes stop cleanly, final header patches are checked, camera shutdown no longer waits while holding the camera lock, and the web player can recover complete frames from an unfinalized clip.
+- Filesystem locking now covers SD mount/unmount, camera and microphone captures, sensor logs, model loads, manifests, backups, and other long-lived file operations. Cross-core glasses settings snapshots and acknowledgements are read coherently.
+- Health graph axes no longer turn synthetic backfill times into false wall-clock labels, jitter at minute boundaries, or show indistinguishable endpoints for a 24-hour window.
+- Boot-folder promotion uses collision-proof names and never overwrites a prior capture; failed or unrecognized entries no longer make a folder look finished.
+- Notification mute/force policy now covers all event kinds above index 127 and fails the build if the event list ever outgrows its mask again.
+- The timezone is applied immediately after settings load, so early crash-history and boot-time file timestamps no longer appear in UTC while later logs use local time.
+- The LZ4 encoder handles short inputs without forming out-of-range pointers, and its production image path remains bounded to the supported input size.
+
+### Security
+- Normal S3 board defaults now pin NVS encryption off as well as flash encryption off, preventing stale flash-encryption trial state from selecting HMAC key protection and burning an eFuse on an ordinary board.
+
 ## [0.99.6] - 2026-07-30
 This release ends a heap mystery and lays the groundwork for flash encryption. The mystery: the web output mirror's trim loop had an off-by-one that let its string terminator land one byte past the buffer, zeroing the low byte of whatever heap block header sat next door - usually an lwIP connection block the web server allocates moments later - so the eventual free of that neighbour asserted deep inside the allocator, minutes or hours after the actual overwrite and nowhere near it. That is the crash the TLSF investigation had been chasing with the new crashlog. The glasses protocol's per-stream stats table had a smaller cousin: two tasks appending concurrently could both pass the bounds check, and the loser wrote a whole entry past the array.
 

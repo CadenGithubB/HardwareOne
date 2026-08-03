@@ -188,6 +188,34 @@ class BLEClient;
 uint16_t bleNegotiateConnMtu(BLEClient* client, uint16_t preferred,
                              uint32_t timeoutMs, const char* logTag);
 
+// BLEClient::connectTimeout wrapped in stack-wedge detection. Use this for
+// every central-role connect (temples AND ring) rather than calling
+// connectTimeout directly — a wedged Bluedroid host refuses SYNCHRONOUSLY
+// (~15 ms) and is otherwise indistinguishable from "peer out of range", so
+// the firmware would retry a condition no retry can clear. Semantics and
+// return value are identical to connectTimeout; the only addition is the
+// timing classification. See the implementation for the full mechanism.
+class BLEAdvertisedDevice;
+bool bleConnectWatched(BLEClient* client, BLEAdvertisedDevice* dev,
+                       uint32_t timeoutMs, const char* logTag);
+
+// The classifier behind bleConnectWatched, for connect paths that can't use
+// the wrapper — BLEClient::connect(BLEAddress,...) has a different signature,
+// and the ring's saved-MAC reconnect (the unattended path where a wedge
+// actually builds) goes through it. Time the connect call yourself and hand
+// the outcome here.
+void bleNoteConnectOutcome(bool ok, uint32_t elapsedMs, const char* logTag);
+
+// Count of consecutive synchronous connect refusals since the last successful
+// link. Non-zero means the host stack is suspect; >= 2 trips a recycle.
+uint8_t bleStackWedgeStreak(void);
+
+// Recycle the Bluedroid host if it looks wedged AND it is currently safe to do
+// so (connect worker idle, nothing linked, server mode off, not rate-limited).
+// No-op and returns false in every other case, so it is safe to call on a
+// timer. Returns true only when a recycle ran AND the stack came back up.
+bool bleStackRecycleIfWedged(void);
+
 // Connection management
 bool g2Connect(G2Eye eye = G2_EYE_LEFT);
 // Saved-MAC reconnect. Uses gSettings.bleGlasses{Left,Right}MAC and matches
@@ -1119,6 +1147,9 @@ const char* g2ProbeImageQ15LeftArm();
 // and ImageObject children (schema-allowed but never tested).
 const char* g2ProbeImageQ16MixedSideBySide();
 
+// Probe Q16d — Q16 geom + LZ4 bare block of BMP (Even App / production).
+const char* g2ProbeImageQ16dMixedLz4Block();
+
 // Probe Q17 — mixed CREATE with overlap. Full-screen list + 288x144
 // image positioned to overlap the middle. Determines z-order: does the
 // image paint on top of the list, under it, or get rejected.
@@ -1136,35 +1167,18 @@ const char* g2ProbeImageQ18MixedIcon();
 // mode (96×96 → ~1 fps vs 288×144 → 0.45 fps).
 const char* g2ProbeImageQ19SmallSolo();
 
-// Probe Q29 — 2-bpp solo BMP at 144×144. Same shape as Q19 but the
-// payload is 2-bpp grayscale (4-entry palette) instead of 4-bpp (16
-// palette). Tests whether the lens BMP parser honours biBitCount=2.
-// If yes, camera streamer can cut payload ~50% with no resolution
-// change. If lens stays blank but acks come back, parser is 4-bpp only.
-const char* g2ProbeImageQ29Bmp2bppSolo();
-
 // Probe Q20 — same live pipeline as Q13 but 96×96 solo tile (~2 Cmd=3
 // fragments per frame). Moving horizontal bar; cadence `g2liverate`.
 // Isolates small-dim sustained refresh vs full-tile BLE cost.
 const char* g2ProbeImageQ20LiveTile96();
 
-// Q31 / Q31b — can an image CONTAINER be repositioned? (Tests → Image →
-// Motion.) Both sweep a 64×64 container rightwards in 64 px steps with a
-// 32×32 block drawn inside it, so the operator can see whether the
-// CONTAINER moved or only its pixels changed.
-//
-// Q31 sends Cmd=7 REBUILD with a fresh ImageObject X/Y. Untested territory:
-// docs/G2_PROTOCOL.md:1665 calls REBUILD the geometry-change command, but the
-// note on g2BuildRebuildList says the firmware ignores geom changes on that
-// path, and REBUILD-text fails outright on this firmware. RISK: a bad image
-// REBUILD may wedge the EvenCore plugin task (docs/G2_PROTOCOL.md:1813) —
-// recovery is a BLE reconnect. Run Q31b first.
-//
-// Q31b re-CREATEs at the new X (SHUTDOWN+CREATE, known-good) and reports
-// ms/step — the number that decides whether position-animation is viable at
-// all, independent of how Q31 turns out.
-const char* g2ProbeImageQ31RebuildMove();
+// Q31b — reposition image container via SHUTDOWN+CREATE (safe path).
+// Reports ms/step for position-animation viability.
 const char* g2ProbeImageQ31bRecreateMove();
+
+// Q32 — solo LZ4 A/B at 288×144 under production bare-block wrap
+// (ART compressible vs NOISE). CompressMode=2 vs raw.
+const char* g2ProbeImageQ32Lz4Benchmark();
 
 // Probes Q22/Q23 — same live bar pattern as Q20 at 32×32 and 64×64
 // (Animated Icons test menu). Cadence `g2liverate`.
@@ -1201,12 +1215,10 @@ const char* g2ProbeImageQ28MixedImageTextLive();
 // a workaround for caption-style use cases.
 const char* g2ProbeImageQ28LMixedListImageLive();
 
-// Q30 family — unproven 3-pane list+text+image CREATE (ContainerTotalNum=3).
+// Q30 family — 3-pane list+text+image CREATE (ContainerTotalNum=3).
 // Q30: Health geometry, wire order list→text→image.
-// Q30b: same geom, wire order list→image→text.
 // Q30c: Health list/text + Q28L-sized 96×96 image (conservative paint path).
 const char* g2ProbeImageQ30ListTextImageHealthGeom();
-const char* g2ProbeImageQ30bListImageTextOrder();
 const char* g2ProbeImageQ30cListTextSmallImage();
 
 // Load a single-tile 4bpp uncompressed BMP from VFS (any size up to 288×144).
@@ -1231,6 +1243,10 @@ inline bool initG2Client() { return false; }
 inline void deinitG2Client() {}
 inline bool isG2ClientInitialized() { return false; }
 inline uint16_t bleNegotiateConnMtu(class BLEClient*, uint16_t, uint32_t, const char*) { return 23; }
+inline bool bleConnectWatched(class BLEClient*, class BLEAdvertisedDevice*, uint32_t, const char*) { return false; }
+inline void bleNoteConnectOutcome(bool, uint32_t, const char*) {}
+inline uint8_t bleStackWedgeStreak(void) { return 0; }
+inline bool bleStackRecycleIfWedged(void) { return false; }
 inline bool g2Connect(G2Eye eye = G2_EYE_LEFT) { return false; }
 inline bool g2ConnectSaved() { return false; }
 inline void g2Disconnect() {}
@@ -1314,23 +1330,22 @@ inline const char* g2ProbeImageQ13LiveTile()        { return "G2 disabled"; }
 inline const char* g2ProbeImageQ14LiveText()        { return "G2 disabled"; }
 inline const char* g2ProbeImageQ15LeftArm()         { return "G2 disabled"; }
 inline const char* g2ProbeImageQ16MixedSideBySide() { return "G2 disabled"; }
+inline const char* g2ProbeImageQ16dMixedLz4Block() { return "G2 disabled"; }
 inline const char* g2ProbeImageQ17MixedOverlap()    { return "G2 disabled"; }
 inline const char* g2ProbeImageQ18MixedIcon()       { return "G2 disabled"; }
 inline const char* g2ProbeImageQ19SmallSolo()       { return "G2 disabled"; }
-inline const char* g2ProbeImageQ29Bmp2bppSolo()     { return "G2 disabled"; }
 inline const char* g2ProbeImageQ20LiveTile96()     { return "G2 disabled"; }
 inline const char* g2ProbeImageQ22LiveTile32()    { return "G2 disabled"; }
 inline const char* g2ProbeImageQ23LiveTile64()    { return "G2 disabled"; }
 inline const char* g2ProbeImageQ26LiveTile124()  { return "G2 disabled"; }
 inline const char* g2ProbeImageQ27LiveTile144()  { return "G2 disabled"; }
-inline const char* g2ProbeImageQ31RebuildMove()  { return "G2 disabled"; }
 inline const char* g2ProbeImageQ31bRecreateMove() { return "G2 disabled"; }
+inline const char* g2ProbeImageQ32Lz4Benchmark()  { return "G2 disabled"; }
 inline void        g2ProbeImageQ25SetPackPath(const char*) {}
 inline const char* g2ProbeImageQ25SdFrameAnimation() { return "G2 disabled"; }
 inline const char* g2ProbeImageQ28MixedImageTextLive() { return "G2 disabled"; }
 inline const char* g2ProbeImageQ28LMixedListImageLive() { return "G2 disabled"; }
 inline const char* g2ProbeImageQ30ListTextImageHealthGeom() { return "G2 disabled"; }
-inline const char* g2ProbeImageQ30bListImageTextOrder() { return "G2 disabled"; }
 inline const char* g2ProbeImageQ30cListTextSmallImage() { return "G2 disabled"; }
 inline bool g2ReadBmp4bppFromVfs(const char*, uint8_t**, size_t*, int32_t*, int32_t*,
                                  const char**) {

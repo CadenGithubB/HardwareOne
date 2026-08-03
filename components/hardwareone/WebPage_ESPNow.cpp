@@ -7,6 +7,7 @@
 
 #include "System_User.h"
 #include "System_VFS.h"
+#include "System_Mutex.h"
 #include "WebPage_ESPNow.h"
 #include "WebServer_Server.h"
 #include "WebServer_Utils.h"
@@ -482,10 +483,16 @@ static esp_err_t handleEspNowRemoteManifest(httpd_req_t* req) {
     char pathBuf[80];
     snprintf(pathBuf, sizeof(pathBuf), "%s/%s.json", manifestDir, fwHashParam);
     String path = pathBuf;
-    File f = VFS::openGuarded(path, "r", ctx);
-    if (!f) {
-      httpd_resp_send(req, "{\"error\":\"Manifest not found\"}", HTTPD_RESP_USE_STRLEN);
-      return ESP_OK;
+    String manifest;
+    {
+      FsLockGuard fsGuard("web.espnow.manifest_read");
+      File f = VFS::openGuarded(path, "r", ctx);
+      if (!f) {
+        httpd_resp_send(req, "{\"error\":\"Manifest not found\"}", HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+      }
+      manifest = f.readString();
+      f.close();
     }
     
     // Stream the manifest file content
@@ -493,13 +500,7 @@ static esp_err_t handleEspNowRemoteManifest(httpd_req_t* req) {
     webEspnowSendChunk(req, fwHashParam);
     webEspnowSendChunk(req, "\",\"manifest\":");
     
-    char buf[256];
-    while (f.available()) {
-      int len = f.readBytes(buf, sizeof(buf) - 1);
-      buf[len] = '\0';
-      httpd_resp_send_chunk(req, buf, len);
-    }
-    f.close();
+    httpd_resp_send_chunk(req, manifest.c_str(), manifest.length());
     
     webEspnowSendChunk(req, "}");
     httpd_resp_send_chunk(req, NULL, 0);
@@ -512,32 +513,36 @@ static esp_err_t handleEspNowRemoteManifest(httpd_req_t* req) {
     return ESP_OK;
   }
 
-  File dir = VFS::openGuarded(manifestDir, "r", ctx);
-  if (!dir || !dir.isDirectory()) {
-    httpd_resp_send(req, "{\"manifests\":[]}", HTTPD_RESP_USE_STRLEN);
-    return ESP_OK;
-  }
-  
-  webEspnowSendChunk(req, "{\"manifests\":[");
-  bool first = true;
-  File entry;
-  while ((entry = dir.openNextFile())) {
-    if (!entry.isDirectory()) {
-      String name = entry.name();
-      if (name.endsWith(".json")) {
-        String fwHash = name.substring(0, name.length() - 5);
-        if (!first) webEspnowSendChunk(req, ",");
-        first = false;
-        webEspnowSendChunkf(req, "{\"fwHash\":\"%s\",\"size\":%d}", 
-                           fwHash.c_str(), (int)entry.size());
-      }
+  String response = "{\"manifests\":[";
+  {
+    FsLockGuard fsGuard("web.espnow.manifest_list");
+    File dir = VFS::openGuarded(manifestDir, "r", ctx);
+    if (!dir || !dir.isDirectory()) {
+      httpd_resp_send(req, "{\"manifests\":[]}", HTTPD_RESP_USE_STRLEN);
+      return ESP_OK;
     }
-    entry.close();
+
+    bool first = true;
+    File entry;
+    while ((entry = dir.openNextFile())) {
+      if (!entry.isDirectory()) {
+        String name = entry.name();
+        if (name.endsWith(".json")) {
+          String fwHash = name.substring(0, name.length() - 5);
+          if (!first) response += ',';
+          first = false;
+          char item[96];
+          snprintf(item, sizeof(item), "{\"fwHash\":\"%s\",\"size\":%d}",
+                   fwHash.c_str(), (int)entry.size());
+          response += item;
+        }
+      }
+      entry.close();
+    }
+    dir.close();
   }
-  dir.close();
-  
-  webEspnowSendChunk(req, "]}");
-  httpd_resp_send_chunk(req, NULL, 0);
+  response += "]}";
+  httpd_resp_send(req, response.c_str(), response.length());
   return ESP_OK;
 }
 

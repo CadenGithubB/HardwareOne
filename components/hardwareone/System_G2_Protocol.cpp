@@ -726,7 +726,8 @@ size_t g2BuildImageRawBody(uint32_t magic,
                            uint32_t mapTotalSize,
                            uint32_t mapFragmentIndex,
                            const uint8_t* data, size_t dataLen,
-                           uint8_t* out, size_t outCap) {
+                           uint8_t* out, size_t outCap,
+                           uint32_t compressMode) {
   if (!out || outCap == 0) return 0;
   if (!containerName)        return 0;
   if (dataLen > 0 && !data)  return 0;
@@ -743,7 +744,7 @@ size_t g2BuildImageRawBody(uint32_t magic,
   if (!g2PbWriteString(out, outCap, &pos, 2, containerName)) return 0;
   if (!g2PbWriteUint32(out, outCap, &pos, 3, mapSessionId)) return 0;
   if (!g2PbWriteUint32(out, outCap, &pos, 4, mapTotalSize)) return 0;
-  if (!g2PbWriteUint32(out, outCap, &pos, 5, /*CompressMode raw*/0)) return 0;
+  if (!g2PbWriteUint32(out, outCap, &pos, 5, compressMode)) return 0;
   if (!g2PbWriteUint32(out, outCap, &pos, 6, mapFragmentIndex)) return 0;
   if (!g2PbWriteUint32(out, outCap, &pos, 7, (uint32_t)dataLen)) return 0;
   if (dataLen > 0) {
@@ -891,7 +892,8 @@ size_t g2BuildCreateMixedListImagePb(uint32_t magic,
                                      const G2ContainerGeom& listGeom,
                                      const G2ImageTile& imageTile,
                                      uint32_t widgetId,
-                                     uint8_t* pbOut, size_t pbCap) {
+                                     uint8_t* pbOut, size_t pbCap,
+                                     G2ListImageOrder order) {
   if (!pbOut || pbCap == 0 || !listName || !listItems || listItemCount == 0
       || !imageTile.containerName) return 0;
 
@@ -902,22 +904,32 @@ size_t g2BuildCreateMixedListImagePb(uint32_t magic,
   if (!g2PbBeginNested(pbOut, pbCap, &pos, G2_WRAP_F_CREATE, &pageStart)) return 0;
   if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_PAGE_F_TOTAL, 2)) return 0;
 
-  // ListObject (wrapper field 2) — share writeListObjectWithItems with
-  // the existing list-only builders so the on-wire shape is identical.
-  if (!writeListObjectWithItems(pbOut, pbCap, &pos,
-                                listName, listItems, listItemCount,
-                                listGeom)) return 0;
+  auto writeImage = [&]() -> bool {
+    size_t imgStart;
+    if (!g2PbBeginNested(pbOut, pbCap, &pos, /*F_IMAGE_OBJ*/4, &imgStart)) return false;
+    if (!g2PbWriteUint32(pbOut, pbCap, &pos, 1, imageTile.x)) return false;
+    if (!g2PbWriteUint32(pbOut, pbCap, &pos, 2, imageTile.y)) return false;
+    if (!g2PbWriteUint32(pbOut, pbCap, &pos, 3, imageTile.w)) return false;
+    if (!g2PbWriteUint32(pbOut, pbCap, &pos, 4, imageTile.h)) return false;
+    if (!g2PbWriteUint32(pbOut, pbCap, &pos, 5, imageTile.containerId)) return false;
+    if (!g2PbWriteString(pbOut, pbCap, &pos, 6, imageTile.containerName)) return false;
+    return g2PbEndNested(pbOut, pbCap, &pos, imgStart);
+  };
+  auto writeList = [&]() -> bool {
+    return writeListObjectWithItems(pbOut, pbCap, &pos,
+                                    listName, listItems, listItemCount,
+                                    listGeom);
+  };
 
-  // ImageObject (wrapper field 4) — same shape as g2BuildCreateImagePb.
-  size_t imgStart;
-  if (!g2PbBeginNested(pbOut, pbCap, &pos, /*F_IMAGE_OBJ*/4, &imgStart)) return 0;
-  if (!g2PbWriteUint32(pbOut, pbCap, &pos, 1, imageTile.x)) return 0;
-  if (!g2PbWriteUint32(pbOut, pbCap, &pos, 2, imageTile.y)) return 0;
-  if (!g2PbWriteUint32(pbOut, pbCap, &pos, 3, imageTile.w)) return 0;
-  if (!g2PbWriteUint32(pbOut, pbCap, &pos, 4, imageTile.h)) return 0;
-  if (!g2PbWriteUint32(pbOut, pbCap, &pos, 5, imageTile.containerId)) return 0;
-  if (!g2PbWriteString(pbOut, pbCap, &pos, 6, imageTile.containerName)) return 0;
-  if (!g2PbEndNested(pbOut, pbCap, &pos, imgStart)) return 0;
+  // Default LIST_IMAGE matches Q16–Q18. IMAGE_LIST is Q16c (H4): does
+  // mode-2 paint only when the image child is declared first?
+  if (order == G2_LI_ORDER_IMAGE_LIST) {
+    if (!writeImage()) return 0;
+    if (!writeList()) return 0;
+  } else {
+    if (!writeList()) return 0;
+    if (!writeImage()) return 0;
+  }
 
   if (!g2PbWriteUint32(pbOut, pbCap, &pos, G2_PAGE_F_WIDGET_ID, widgetId)) return 0;
   if (!g2PbEndNested(pbOut, pbCap, &pos, pageStart)) return 0;
@@ -931,7 +943,8 @@ size_t g2BuildCreateMixedListImage(uint8_t seq, uint32_t magic,
                                    const G2ContainerGeom& listGeom,
                                    const G2ImageTile& imageTile,
                                    uint32_t widgetId,
-                                   uint8_t* out, size_t outCap) {
+                                   uint8_t* out, size_t outCap,
+                                   G2ListImageOrder order) {
   // Larger payload buffer than other CREATE builders because we're
   // packing two widgets plus list items into one nested frame. 1 KB
   // is plenty for ~6 short list rows + a single image declaration.
@@ -940,7 +953,8 @@ size_t g2BuildCreateMixedListImage(uint8_t seq, uint32_t magic,
                                                 listItems, listItemCount,
                                                 listGeom, imageTile,
                                                 widgetId,
-                                                payload, sizeof(payload));
+                                                payload, sizeof(payload),
+                                                order);
   if (pbLen == 0) return 0;
   return g2BuildEnvelope(seq, G2_SID_EVEN_CORE, G2_FLAG_REQUEST,
                          payload, pbLen, out, outCap);
@@ -1486,6 +1500,8 @@ size_t g2BuildAppLaunch(uint8_t* out, size_t outCap) {
 // so every battery reading silently dropped on the floor.
 #define G2_SET_F_CMD        1
 #define G2_SET_F_MAGIC      2
+#define G2_SET_F_INFO       3   // DeviceReceiveInfoFromAPP — the WRITE body,
+                                // and what the device mirrors back as an ack
 #define G2_SET_F_REQ        4   // DeviceReceiveRequestFromAPP echo
 #define G2_SET_CMD_REQUEST  2
 #define G2_SET_REQ_BASIC    1
@@ -1508,10 +1524,19 @@ size_t g2BuildSettingBasicRequest(uint8_t seq, uint32_t magic,
                          payload, pos, out, outCap);
 }
 
-// Shared inner-body scanner used by all the sid=0x09 settings parsers.
-// Walks every len-delim outer field (3..7) looking for `targetField` inside,
-// returning a pointer+length into the body where the target's value starts
-// (AFTER its tag). Caller picks the decode based on wire type.
+// Shared inner-body scanner used by the battery / version sid=0x09 parsers.
+// Both of those live in DeviceReceiveRequestFromAPP, so this is scoped to
+// wrapper field 4 ONLY, looking for `targetField` inside and returning a
+// pointer+length into the body where the target's value starts (AFTER its
+// tag). Caller picks the decode based on wire type.
+//
+// SCOPING IS LODE-BEARING — do not widen this back to fields 3..7. Wrapper
+// f3 (deviceReceiveInfoFromApp) comes back populated on every accepted
+// settings write as the device's ack, and its inner field numbers collide
+// with f4's: f3→f5 is the wearDetection sub-message while f4→f5 is the
+// firmware version string. Confirmed on hardware 2026-07-30 — the old
+// 3..7 walk decoded a wear-detect ack as a version string, wiped the cached
+// firmware version and fired a spurious status broadcast on every write.
 //
 // Returns true if the target was found and *outPos was written; false if
 // not found (caller should keep its default output).
@@ -1523,7 +1548,7 @@ static bool findInnerField(const uint8_t* payload, size_t payloadLen,
   while (pos < payloadLen) {
     uint32_t field; uint8_t wire;
     if (!g2PbReadTag(payload, payloadLen, &pos, &field, &wire)) return false;
-    if (wire == G2_PB_WIRE_LEN_DELIM && field >= 3 && field <= 7) {
+    if (wire == G2_PB_WIRE_LEN_DELIM && field == G2_SET_F_REQ) {
       uint64_t sublen;
       if (!g2PbReadVarint(payload, payloadLen, &pos, &sublen)) return false;
       if (pos + sublen > payloadLen) return false;
@@ -1631,7 +1656,8 @@ bool g2ParseSettingVersion(const uint8_t* payload, size_t payloadLen,
 //
 // `logFn` is a user-supplied callback so this file doesn't need to know
 // about the debug-macro plumbing upstream; pass nullptr to no-op.
-typedef void (*G2SettingsFieldLog)(uint32_t field, uint8_t wire,
+typedef void (*G2SettingsFieldLog)(uint32_t outerField,
+                                   uint32_t field, uint8_t wire,
                                    uint64_t varintVal,
                                    const uint8_t* bytes, size_t byteLen);
 
@@ -1642,10 +1668,14 @@ void g2DumpSettingFields(const uint8_t* payload, size_t payloadLen,
   while (pos < payloadLen) {
     uint32_t field; uint8_t wire;
     if (!g2PbReadTag(payload, payloadLen, &pos, &field, &wire)) return;
+    // The dump deliberately keeps the full 3..7 walk (unlike findInnerField,
+    // which is scoped to f4) — seeing our own echoed write under f3 is
+    // exactly what makes an ack legible. The outer field is handed to the
+    // callback so the two can never be confused in the log.
     if (wire == G2_PB_WIRE_LEN_DELIM && field >= 3 && field <= 7) {
       uint64_t sublen;
       if (!g2PbReadVarint(payload, payloadLen, &pos, &sublen)) return;
-      if (pos + sublen > payloadLen) return;
+      if (sublen > payloadLen || pos + (size_t)sublen > payloadLen) return;
       const uint8_t* sub = payload + pos;
       size_t subpos = 0;
       while (subpos < (size_t)sublen) {
@@ -1655,12 +1685,12 @@ void g2DumpSettingFields(const uint8_t* payload, size_t payloadLen,
           uint64_t v;
           size_t vstart = subpos;
           if (!g2PbReadVarint(sub, (size_t)sublen, &subpos, &v)) break;
-          logFn(sf, sw, v, sub + vstart, subpos - vstart);
+          logFn(field, sf, sw, v, sub + vstart, subpos - vstart);
         } else if (sw == G2_PB_WIRE_LEN_DELIM) {
           uint64_t sl;
           if (!g2PbReadVarint(sub, (size_t)sublen, &subpos, &sl)) break;
-          if (subpos + sl > (size_t)sublen) break;
-          logFn(sf, sw, 0, sub + subpos, (size_t)sl);
+          if (sl > (size_t)sublen || subpos + (size_t)sl > (size_t)sublen) break;
+          logFn(field, sf, sw, 0, sub + subpos, (size_t)sl);
           subpos += (size_t)sl;
         } else {
           if (!g2PbSkipField(sub, (size_t)sublen, &subpos, sw)) break;
@@ -1671,6 +1701,186 @@ void g2DumpSettingFields(const uint8_t* payload, size_t payloadLen,
     }
     if (!g2PbSkipField(payload, payloadLen, &pos, wire)) return;
   }
+}
+
+// ── Settings WRITE path (commandId=1 DeviceReceiveInfo) ─────────────────────
+// See the header for the shape, the ack contract and the allowlist rationale.
+
+size_t g2BuildSettingInfoWrite(uint8_t seq, uint32_t magic,
+                               uint8_t innerField, uint8_t leafField,
+                               uint32_t value,
+                               uint8_t* out, size_t outCap) {
+  // Hard allowlist. A range check would admit the excluded neighbours
+  // (7 appPage, 8 killAllFeature, 10 gestureControlList, 11 dominantHand)
+  // on a single off-by-one, so every permitted field is spelled out.
+  switch (innerField) {
+    case G2_SETW_F_BRIGHTNESS:
+    case G2_SETW_F_Y_COORD:
+    case G2_SETW_F_X_COORD:
+    case G2_SETW_F_HEAD_UP:
+    case G2_SETW_F_WEAR_DETECT:
+    case G2_SETW_F_SILENT:
+    case G2_SETW_F_UNIVERSE:
+      break;
+    default:
+      return 0;
+  }
+  if (leafField == 0 || leafField > 15) return 0;
+
+  uint8_t payload[32];
+  size_t pos = 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos,
+                       G2_SET_F_CMD, G2_SET_CMD_RECEIVE_INFO)) return 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos,
+                       G2_SET_F_MAGIC, magic)) return 0;
+  size_t outer;
+  if (!g2PbBeginNested(payload, sizeof(payload), &pos,
+                       G2_SET_F_INFO, &outer)) return 0;
+  size_t inner;
+  if (!g2PbBeginNested(payload, sizeof(payload), &pos,
+                       innerField, &inner)) return 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos,
+                       leafField, value)) return 0;
+  if (!g2PbEndNested(payload, sizeof(payload), &pos, inner)) return 0;
+  if (!g2PbEndNested(payload, sizeof(payload), &pos, outer)) return 0;
+
+  return g2BuildEnvelope(seq, G2_SID_SETTINGS, G2_FLAG_REQUEST,
+                         payload, pos, out, outCap);
+}
+
+bool g2ParseSettingEcho(const uint8_t* payload, size_t payloadLen,
+                        G2SettingsEcho* out) {
+  if (!payload || !out) return false;
+  memset(out, 0, sizeof(*out));
+
+  size_t pos = 0;
+  while (pos < payloadLen) {
+    uint32_t field; uint8_t wire;
+    if (!g2PbReadTag(payload, payloadLen, &pos, &field, &wire)) return false;
+    if (wire == G2_PB_WIRE_LEN_DELIM && field == G2_SET_F_REQ) {
+      uint64_t sublen;
+      if (!g2PbReadVarint(payload, payloadLen, &pos, &sublen)) return false;
+      if (sublen > payloadLen || pos + (size_t)sublen > payloadLen) return false;
+      const uint8_t* sub = payload + pos;
+      size_t subpos = 0;
+      bool any = false;
+      while (subpos < (size_t)sublen) {
+        uint32_t sf; uint8_t sw;
+        if (!g2PbReadTag(sub, (size_t)sublen, &subpos, &sf, &sw)) break;
+        if (sw != G2_PB_WIRE_VARINT) {
+          // f5/f6 are the version strings — g2ParseSettingVersion owns those.
+          if (!g2PbSkipField(sub, (size_t)sublen, &subpos, sw)) break;
+          continue;
+        }
+        uint64_t v;
+        if (!g2PbReadVarint(sub, (size_t)sublen, &subpos, &v)) break;
+        const uint8_t b = (v > 255) ? 255 : (uint8_t)v;
+        switch (sf) {
+          case 1:  out->settingInfoType = b; break;
+          case 2:  out->brightness      = b; break;
+          case 3:  out->yCoord          = b; break;
+          case 4:  out->xCoord          = b; break;
+          case 7:  out->headUpSwitch    = b; break;
+          case 8:  out->headUpAngle     = b; break;
+          case 9:  out->headUpCalib     = b; break;
+          case 10: out->wearDetect      = b; break;
+          case 11: out->runningStatus   = b; break;
+          case 12: out->battery         = b; break;
+          case 13: out->chargingStatus  = b; break;
+          case 14: out->silentMode      = b; break;
+          case 15: out->leftCalib       = b; break;
+          case 16: out->rightCalib      = b; break;
+          case 17: out->headUpRecalOk   = b; break;
+          case 18: out->autoBrightness  = b; break;
+          case 19: out->unreadCount     = b; break;
+          default: continue;   // unknown field: seen but not recorded
+        }
+        if (sf < 32) out->have |= (1u << sf);
+        any = true;
+      }
+      return any;
+    }
+    if (!g2PbSkipField(payload, payloadLen, &pos, wire)) return false;
+  }
+  return false;
+}
+
+bool g2ParseSettingWriteAck(const uint8_t* payload, size_t payloadLen,
+                            uint32_t* outMagic,
+                            uint8_t* outInnerField, uint8_t* outLeafField,
+                            uint32_t* outValue) {
+  if (!payload) return false;
+
+  uint32_t cmdId = 0, magic = 0;
+  bool sawCmd = false, sawInfo = false;
+  uint8_t innerField = 0, leafField = 0;
+  uint32_t value = 0;
+
+  size_t pos = 0;
+  while (pos < payloadLen) {
+    uint32_t field; uint8_t wire;
+    if (!g2PbReadTag(payload, payloadLen, &pos, &field, &wire)) break;
+
+    if (field == G2_SET_F_CMD && wire == G2_PB_WIRE_VARINT) {
+      uint64_t v;
+      if (!g2PbReadVarint(payload, payloadLen, &pos, &v)) break;
+      cmdId = (uint32_t)v; sawCmd = true;
+      continue;
+    }
+    if (field == G2_SET_F_MAGIC && wire == G2_PB_WIRE_VARINT) {
+      uint64_t v;
+      if (!g2PbReadVarint(payload, payloadLen, &pos, &v)) break;
+      magic = (uint32_t)v;
+      continue;
+    }
+    if (field == G2_SET_F_INFO && wire == G2_PB_WIRE_LEN_DELIM) {
+      uint64_t sublen;
+      if (!g2PbReadVarint(payload, payloadLen, &pos, &sublen)) break;
+      if (sublen > payloadLen || pos + (size_t)sublen > payloadLen) break;
+      const uint8_t* sub = payload + pos;
+      size_t subpos = 0;
+      // Exactly one sub-message, carrying exactly one leaf — that is what
+      // g2BuildSettingInfoWrite emits and what the device mirrors back. If a
+      // future firmware batches several, we report the first and the caller's
+      // match against what it sent still holds.
+      while (subpos < (size_t)sublen) {
+        uint32_t sf; uint8_t sw;
+        if (!g2PbReadTag(sub, (size_t)sublen, &subpos, &sf, &sw)) break;
+        if (sw != G2_PB_WIRE_LEN_DELIM) {
+          if (!g2PbSkipField(sub, (size_t)sublen, &subpos, sw)) break;
+          continue;
+        }
+        uint64_t leaflen;
+        if (!g2PbReadVarint(sub, (size_t)sublen, &subpos, &leaflen)) break;
+        if (leaflen > (size_t)sublen || subpos + (size_t)leaflen > (size_t)sublen) break;
+        const uint8_t* leaf = sub + subpos;
+        size_t leafpos = 0;
+        uint32_t lf; uint8_t lw;
+        if (g2PbReadTag(leaf, (size_t)leaflen, &leafpos, &lf, &lw) &&
+            lw == G2_PB_WIRE_VARINT) {
+          uint64_t lv;
+          if (g2PbReadVarint(leaf, (size_t)leaflen, &leafpos, &lv)) {
+            innerField = (uint8_t)sf;
+            leafField  = (uint8_t)lf;
+            value      = (uint32_t)lv;
+            sawInfo    = true;
+          }
+        }
+        subpos += (size_t)leaflen;
+        if (sawInfo) break;
+      }
+      pos += (size_t)sublen;
+      continue;
+    }
+    if (!g2PbSkipField(payload, payloadLen, &pos, wire)) break;
+  }
+
+  if (!sawCmd || cmdId != G2_SET_CMD_RECEIVE_INFO || !sawInfo) return false;
+  if (outMagic)      *outMagic      = magic;
+  if (outInnerField) *outInnerField = innerField;
+  if (outLeafField)  *outLeafField  = leafField;
+  if (outValue)      *outValue      = value;
+  return true;
 }
 
 // =============================================================================

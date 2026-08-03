@@ -135,6 +135,10 @@ static void sdPowerUpClocks() {
 }
 
 static bool tryMountSD() {
+  // Mount/probe/teardown changes the same SD driver state used by open files.
+  // Hold the global FS mutex for the complete transition so no task can enter
+  // VFS::open/read/write while SPI and the FAT volume are being rebuilt.
+  FsLockGuard guard("VFS.sdMount");
 #if defined(SD_CS_PIN)
   // Three full attempts, each with a complete SPI bus reset and both
   // frequencies (fast first, slow fallback).
@@ -274,6 +278,7 @@ static bool probeSDWriteInternal() {
 }
 
 bool isSDAvailable() {
+  FsLockGuard guard("VFS.sdAvailable");
   return gSdMounted;
 }
 
@@ -282,10 +287,10 @@ bool isSDAvailable() {
 // was yanked and re-inserted and a later probe succeeds, we flip back to
 // writable without needing an explicit remount.
 bool isSDWritable() {
+  FsLockGuard guard("VFS.sdWritable");
   if (!gSdMounted) return false;
   if (gSdWritable) return true;
   // Not currently writable — maybe it was, maybe it is again. Try once.
-  FsLockGuard guard("VFS.sdProbeLazy");
   if (probeSDWriteInternal()) {
     INFO_STORAGEF("[SD] Write probe now succeeding — card is writable again");
     gSdWritable = true;
@@ -301,6 +306,7 @@ bool isSDWritable() {
 // invalidate the cached writable flag. Next isSDWritable() query will
 // re-probe. Cheap — single bool write.
 void noteSDWriteFailure(const char* hint) {
+  FsLockGuard guard("VFS.sdWriteFailure");
   if (gSdWritable) {
     WARN_STORAGEF("[SD] Write failure reported (%s); marking card not writable",
                   hint ? hint : "unspecified");
@@ -645,6 +651,7 @@ bool resolveOverflowPath(const char* primaryPath, size_t reserveBytes,
 }
 
 bool unmountSD() {
+  FsLockGuard guard("VFS.sdUnmount");
 #if defined(SD_CS_PIN)
   if (gSdMounted) {
     SD.end();
@@ -658,6 +665,7 @@ bool unmountSD() {
 }
 
 bool remountSD() {
+  FsLockGuard guard("VFS.sdRemount");
 #if defined(SD_CS_PIN)
   // Full teardown regardless of current mount state — guarantees a clean bus.
   spiTeardown();
@@ -672,6 +680,7 @@ bool remountSD() {
 
 // Format SD card as FAT32 using ESP-IDF low-level API
 bool formatSD() {
+  FsLockGuard guard("VFS.sdFormat");
 #if defined(SD_CS_PIN)
   INFO_STORAGEF("[SD FORMAT] Starting format process...");
   

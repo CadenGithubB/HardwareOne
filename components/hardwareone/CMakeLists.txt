@@ -258,6 +258,9 @@ if(HW_CFG_BUILD_G2 GREATER 0)
     list(APPEND hardwareone_srcs
         System_G2_Protocol.cpp
         System_R1_Protocol.cpp
+        # Compress-only LZ4 for the CompressMode=2 image path. G2-gated
+        # because the image push is its only caller.
+        System_Lz4.cpp
     )
     message(STATUS "G2 protocol (R1 ring + glasses wire format) ENABLED")
 else()

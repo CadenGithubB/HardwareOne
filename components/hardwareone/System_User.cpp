@@ -1317,6 +1317,7 @@ bool approvePendingUserInternal(const String& username, String& errorOut) {
     fsUnlock();
   } else {
     // Write updated list
+    FsLockGuard fsGuard("pending_users.approve_rewrite");
     file = VFS::openGuarded(PENDING_USERS_FILE, "w", VFS::systemAuth("user.approve"));
     if (!file) {
       errorOut = "Could not update pending list";
@@ -1524,6 +1525,7 @@ bool denyPendingUserInternal(const String& username, String& errorOut) {
     VFS::removeGuarded(PENDING_USERS_FILE, VFS::systemAuth("user.deny"));
   } else {
     // Write updated list
+    FsLockGuard fsGuard("pending_users.deny_rewrite");
     file = VFS::openGuarded(PENDING_USERS_FILE, "w", VFS::systemAuth("user.deny"));
     if (!file) {
       errorOut = "Could not update pending list";

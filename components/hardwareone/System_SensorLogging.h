@@ -126,7 +126,8 @@ void sensorLogTick();
 void sensorLogAutoStart();
 
 // R1 Health Track — product-facing kickoff for durable vitals capture.
-// Turns LOG_R1 on, starts the sensor logger (CSV under /logging_captures/sensors/health.csv),
+// Turns LOG_R1 on, coerces format to CSV, starts the sensor logger under
+// /logging_captures/sensors/ (per-day file when synced, boot-<N>/ when dark),
 // and persists healthTrackingEnabled (+ sensorlog autostart) so boot resumes.
 // Off removes LOG_R1; stops logging when no other sensors remain.
 bool healthTrackIsActive();

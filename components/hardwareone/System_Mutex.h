@@ -66,6 +66,10 @@ void initMutexes();
  * 
  * Reentrant-safe: if the current task already holds the mutex,
  * it won't try to take it again (avoids deadlock on nested calls)
+ * The one-argument form waits indefinitely. The timeout overload is for
+ * callback paths that must drop optional work instead of blocking; because
+ * `held` is false on both timeout and same-task reentry, timeout callers that
+ * support nesting should also check isFsLockedByCurrentTask().
  * 
  * Usage:
  *   {
@@ -77,6 +81,8 @@ void initMutexes();
 struct FsLockGuard {
   bool held;
   explicit FsLockGuard(const char* owner = nullptr);
+  // timeoutTicks=0 performs a non-blocking try-lock.
+  FsLockGuard(const char* owner, TickType_t timeoutTicks);
   ~FsLockGuard();
   
   // Non-copyable
