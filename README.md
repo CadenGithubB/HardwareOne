@@ -39,18 +39,17 @@ Hardware One can be used in several different ways depending on the hardware you
 - Can be used from USB power or as a battery-powered handheld.
 - Best fit when you want both the local OLED/gamepad UI and the web UI.
 
-### 5) Wearable Companion
-- Board + Bluetooth, paired with Even Realities G2 smart glasses and/or an R1 smart ring.
-- The firmware drives the G2 lens directly as a full six-category UI - not a notification mirror - so the device in your pocket is operable without taking out a phone.
-- With an R1 ring, adds health vitals (heart rate, HRV, SpO2, temperature) with on-lens graphs and background Health Track logging.
-- Composes with any of the above: the glasses are another interface onto the same command system, not a separate build.
-
 ### 4) Bonded Microcontrollers
 - Control features unique to one device you flash while another device is flashed with other features - effectively removing the limit of software features that is faced due to iram constrictions on the ESP32.
 - This was intended to be used in a way where one unit is the device which deals with the Display/Input Devices and bluetooth connectivity, while the other device exposes other hardware / sensors, or other software features.
 - The devices create an auth token during the bond sync / handshake process. This is used to execute commands with implicit trust between the devices to reduce the need to enter in username + password for every remote command.
 - Command registries are shared between bonded peers, so when a command is queued for execution there is a check to see if the command trying to be executed is able to be found on the local command registry, or if its found on the bonded device's command registry. From there it will either execute the command locally, or reroute the command to the bonded device which will enqueue the command (so it is the same code path as a standard command), and then send the output back via ESP-NOW streaming.
 
+### 5) Wearable Companion
+- Board + Bluetooth, paired with Even Realities G2 smart glasses and/or an R1 smart ring.
+- The firmware drives the G2 lens directly as a full six-category UI - not a notification mirror - so the device in your pocket is operable without taking out a phone.
+- With an R1 ring, adds health vitals (heart rate, HRV, SpO2, temperature) with on-lens graphs and background Health Track logging.
+- Composes with any of the above: the glasses are another interface onto the same command system, not a separate build.
 
 ---
 
