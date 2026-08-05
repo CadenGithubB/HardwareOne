@@ -125,14 +125,15 @@ void sensorLogTick();
 // Auto-start logging with persisted parameters (called from boot)
 void sensorLogAutoStart();
 
-// R1 Health Track — product-facing kickoff for durable vitals capture.
+// R1 Health logging — HardwareOne's local durable-vitals capture. This is
+// independent from the ring's own health-collection privacy setting.
 // Turns LOG_R1 on, coerces format to CSV, starts the sensor logger under
 // /logging_captures/sensors/ (per-day file when synced, boot-<N>/ when dark),
-// and persists healthTrackingEnabled (+ sensorlog autostart) so boot resumes.
+// and persists healthLoggingEnabled (+ sensorlog autostart) so boot resumes.
 // Off removes LOG_R1; stops logging when no other sensors remain.
-bool healthTrackIsActive();
-const char* healthTrackSet(bool on);   // returns SUCCESS:/Error: message (static/debug buf)
-const char* cmd_healthtrack(const String& argsInput);
+bool healthLoggingIsActive();
+const char* healthLoggingSet(bool on);   // returns SUCCESS:/Error: message (static/debug buf)
+const char* cmd_healthlogging(const String& argsInput);
 const char* cmd_healthstatus(const String& argsInput);
 // Byte-concatenate sensor logs in the caller's order (same pattern as
 // gpstrackmerge — and the same defects; see that command's usage text).
@@ -146,18 +147,18 @@ const char* cmd_capturecrypt(const String& argsInput);
 const char* buildHealthStatusJson(char* buf, size_t cap);
 
 // Kick a one-shot 4-vital poll burst (HR/HRV/SpO2/battery). Advances in
-// healthTrackTick; returns false if ring not connected or Health off in build.
+// healthLoggingTick; returns false if ring not connected or Health off in build.
 bool healthStartPollBurst(void);
 
-// Main-loop tick: when Health Track is on, periodically mines the R1
-// (HR/HRV/SpO2/battery poll burst) at healthTrackPollIntervalSec and forces
+// Main-loop tick: when Health logging is on, periodically mines the R1
+// (HR/HRV/SpO2/battery poll burst) at healthLoggingPollIntervalSec and forces
 // a sensorlog sample after replies settle. Also advances on-demand poll bursts.
-void healthTrackTick();
+void healthLoggingTick();
 
 // Call after a Health-page vitals refresh (entry / Poll Now burst completes).
 // Schedules a log sample once notify replies have had time to land — so
 // on-demand checks are persisted, not only the timed mine.
-void healthTrackNotePageRefresh();
+void healthLoggingNotePageRefresh();
 
 // Request an immediate sensorlog write on the next sensorLogTick (bypasses
 // the normal interval). bypassR1Dedup=true writes even if R1 values are unchanged.

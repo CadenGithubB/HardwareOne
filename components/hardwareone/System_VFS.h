@@ -193,6 +193,7 @@ AuthContext systemAuth(const char* scope, const char* reason);
 namespace Scopes {
   constexpr const char* VIDEOS          = "/sd/VIDEOS";        // recorded AVI clips
   constexpr const char* CERTS           = "/system/certs";    // TLS certs / keys
+  constexpr const char* OTA             = "/system/ota";      // signed OTA staging only
   constexpr const char* ESPNOW_RECEIVED = "/espnow/received"; // inbound files from peers
   // Capture tree root, NOT the sensors/tracks leaves: the log-stitch commands
   // mkdir "/logging_captures" itself before their subfolder, so a leaf scope

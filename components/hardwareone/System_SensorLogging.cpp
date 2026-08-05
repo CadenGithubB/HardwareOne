@@ -51,7 +51,7 @@
 #endif
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
   #include "G2_Ring.h"
-  #include "BLE_Peers.h"   // blePeerRequestReseek — Health Track mine when ring down
+  #include "BLE_Peers.h"   // blePeerRequestReseek — Health logging mine when ring down
 #endif
 #if ENABLE_R1_HEALTH
   #include "G2_Health.h"   // g2HealthPageIsActive — don't race page poll bursts
@@ -105,7 +105,7 @@ void sensorLogRequestSample(bool bypassR1Dedup) {
 // across restarts.
 
 // Path-shape classification for the ACTIVE session, derived from the path
-// cmd_sensorlog start accepted — so every entry point (autostart, healthtrack,
+// cmd_sensorlog start accepted — so every entry point (autostart, healthlogging,
 // manual CLI) lands in the right mode without threading flags around:
 //   MANUAL      literal user path — never rolled, never re-pointed.
 //   BOOT_SHAPED shaped dark-boot session (…/sensors/boot-N/…) — rolls onto
@@ -339,9 +339,14 @@ static String resolveSessionTarget(const String& shaped) {
 }
 
 void sensorLogTick() {
-  // Health Track mine runs even between sensorlog intervals (and while Track
+#if ENABLE_R1_HEALTH
+  // Main-task half of typed history persistence. Ring notifications only
+  // update fixed-capacity RAM and mark a generation dirty.
+  g2HealthHistoryCommitTick();
+#endif
+  // Health logging mine runs even between sensorlog intervals (and while logging
   // is on). Must be called before the early-return below.
-  healthTrackTick();
+  healthLoggingTick();
 
   if (!gSensorLoggingRunning) return;
 
@@ -349,12 +354,12 @@ void sensorLogTick() {
   unsigned long nowMs = millis();
   const bool forced = sForceSample;
 
-  // Health Track owns R1-only sessions: samples come only from the mine
+  // Health logging owns R1-only sessions: samples come only from the mine
   // interval / Poll Now / page refresh (forced). Suppress the normal
   // sensorlog cadence and the 5 s "ring down" timestamp heartbeats that
   // were filling health-*.csv with empty lines.
   const bool healthOwnedR1Only =
-      gSettings.healthTrackingEnabled &&
+      gSettings.healthLoggingEnabled &&
       (gSensorLogMask & LOG_R1) != 0 &&
       (gSensorLogMask & (uint8_t)~LOG_R1) == 0;
 
@@ -830,13 +835,13 @@ void sensorLogTick() {
     if ((gSensorLogMask & LOG_PRESENCE) && snap.gPresenceRunning && snap.gPresenceConnected) hasSelectedData = true;
     if ((gSensorLogMask & LOG_R1) && snap.r1Connected) hasSelectedData = true;
 
-    // Health Track R1-only: never write empty timestamp rows (ring down /
+    // Health logging R1-only: never write empty timestamp rows (ring down /
     // no cache yet). Forced mine/Poll samples only land when connected.
     if (healthOwnedR1Only && !hasSelectedData) return;
 
     // R1-only change-dedup: ring points update on minute scale — skip identical
     // rows when LOG_R1 is the sole selected sensor (or the only one with data).
-    // Forced samples from Health Track mines / page refresh bypass this.
+    // Forced samples from Health logging mines / page refresh bypass this.
     static uint8_t  lastR1Hr = 0, lastR1Spo2 = 0, lastR1Bat = 0, lastR1Wear = 0;
     static int16_t  lastR1Hrv = 0, lastR1Temp = 0;
     static uint8_t  lastR1Flags = 0;
@@ -1303,7 +1308,7 @@ const char* cmd_sensorlog(const String& argsInput) {
 
     // Persist last-used parameters for auto-start. The path persists as the
     // UN-shaped base (strip the session subfolder/stamp/variant): autostart
-    // and healthtrack re-shape fresh each session, and persisting a shaped
+    // and healthlogging re-shape fresh each session, and persisting a shaped
     // path would compound variants / nest day folders. For manual literal
     // paths the strip is a no-op, so they persist exactly as typed.
     setSetting(gSettings.sensorLogPath, stripSessionShaping(filepath));
@@ -1441,7 +1446,7 @@ const char* cmd_sensorlog(const String& argsInput) {
     // the run flag and silently kill capture.) TEXT rows are self-describing
     // key=value, so live changes stay allowed there.
     if (gSensorLoggingRunning && gSensorLogFormat == SENSOR_LOG_CSV) {
-      cliHint("run 'sensorlog stop' first, then reselect sensors and restart — or use 'healthtrack' which restarts the session itself");
+      cliHint("run 'sensorlog stop' first, then reselect sensors and restart — or use 'healthlogging' which restarts the session itself");
       return "Error: can't change the sensor selection while a CSV session is running (rows would stop matching the file's header)";
     }
 
@@ -1531,20 +1536,20 @@ const char* cmd_sensorlog(const String& argsInput) {
 }
 
 // ============================================================================
-// R1 Health Track (kick off durable vitals capture from the Health feature)
+// R1 Health logging (HardwareOne-local durable vitals capture)
 // ============================================================================
 
 #ifndef CAPTURE_HEALTHLOG_DEFAULT
 #define CAPTURE_HEALTHLOG_DEFAULT CAPTURE_DIR_SENSORS "/health.csv"
 #endif
 
-bool healthTrackIsActive() {
-  return gSettings.healthTrackingEnabled &&
+bool healthLoggingIsActive() {
+  return gSettings.healthLoggingEnabled &&
          (gSensorLogMask & LOG_R1) != 0 &&
          gSensorLoggingRunning;
 }
 
-// Health Track mine state — polls all four vitals, waits for notifies, logs.
+// Health logging mine state — polls all four vitals, waits for notifies, logs.
 enum : uint8_t { HT_MINE_IDLE = 0, HT_MINE_POLLING, HT_MINE_SETTLE };
 static uint8_t  sHtMineState = HT_MINE_IDLE;
 static uint8_t  sHtMineCursor = 0;
@@ -1554,14 +1559,14 @@ static uint32_t sHtMineLastReseekMs = 0;  // ring-down BLE nudge only — not th
 static bool     sHtPageRefreshPending = false;
 static uint32_t sHtPageRefreshDueMs = 0;
 
-static uint32_t healthTrackIntervalMs() {
-  int sec = gSettings.healthTrackPollIntervalSec;
+static uint32_t healthLoggingIntervalMs() {
+  int sec = gSettings.healthLoggingPollIntervalSec;
   if (sec < 60) sec = 60;
   if (sec > 86400) sec = 86400;
   return (uint32_t)sec * 1000u;
 }
 
-void healthTrackNotePageRefresh() {
+void healthLoggingNotePageRefresh() {
   // Give notify replies ~1.5 s to land, then force a log line.
   sHtPageRefreshPending = true;
   sHtPageRefreshDueMs = millis() + 1500;
@@ -1590,11 +1595,32 @@ bool healthStartPollBurst(void) {
 const char* buildHealthStatusJson(char* buf, size_t cap) {
   if (!buf || cap < 3) return "{}";
 #if ENABLE_R1_HEALTH
-  G2RingTelemetry t;
+  G2RingTelemetry t = {};
   g2RingGetTelemetry(t);
+  G2RingControlStatus control = {};
+  g2RingGetControlStatus(control);
+  G2RingTransactionStatus healthTx = {};
+  G2RingTransactionStatus lowPowerTx = {};
+  const bool haveHealthTx = control.healthTransaction.id != 0 &&
+      g2RingGetTransactionStatus(control.healthTransaction, healthTx);
+  const bool haveLowPowerTx = control.lowPowerTransaction.id != 0 &&
+      g2RingGetTransactionStatus(control.lowPowerTransaction, lowPowerTx);
+  G2HealthHistorySummary history = {};
+  g2HealthHistoryGetSummary(history);
+  R1HealthHistoryStoreStatus store = {};
+  r1HealthHistoryStoreGetStatus(store);
+  const uint32_t nowMs = millis();
+  auto observedAgeSec = [nowMs](uint32_t observedAtMs) -> int {
+    return observedAtMs == 0 ? -1 : static_cast<int>((nowMs - observedAtMs) / 1000u);
+  };
+  const char* sleep = history.sleepState == R1_HISTORY_SLEEP_EMPTY ? "empty" :
+      (history.sleepState == R1_HISTORY_SLEEP_PRESENT ? "present" : "unknown");
   CompactJson j(buf, cap);
-  j.kv("schema", 2)
-   .kv("connected", (bool)t.connected)
+  j.kv("schema", 1)
+   .kv("ringConnected", (bool)t.connected)
+   .kv("protocolProfile", g2RingProtocolProfileName(control.protocolProfile))
+   .kv("setupState", g2RingSetupStateName(control.setupState))
+   .kv("setupError", g2RingTransactionErrorName(control.setupLastError))
    .kv("hrValid", (bool)t.hrValid)
    .kv("hr", (unsigned)t.hr)
    .kv("hrAgeSec", (int)t.hrAgeSec)
@@ -1613,18 +1639,56 @@ const char* buildHealthStatusJson(char* buf, size_t cap) {
    .kv("wearValid", (bool)t.wearValid)
    .kv("wear", (unsigned)t.wear)
    .kv("wearAgeSec", (int)t.wearAgeSec)
-   .kv("trackActive", healthTrackIsActive())
-   .kv("trackEnabled", (bool)gSettings.healthTrackingEnabled)
-   .kv("pollIntervalSec", (unsigned)gSettings.healthTrackPollIntervalSec)
-   .kv("r1Mask", (bool)((gSensorLogMask & LOG_R1) != 0))
-   .kv("logging", (bool)gSensorLoggingRunning)
-   // The product-facing "health data is encrypted at rest" mark — mode plus
-   // whether the ACTIVE session is actually writing sealed rows.
-   .kv("atRestEncryption", captureEncryptModeName(gSettings.captureEncryptMode))
-   .kv("sealedSession", (bool)(gSensorLoggingRunning && gSensorLogSealed));
+   .kv("healthCollectionDesired", g2RingDesiredStateName(control.healthDesired))
+   .kv("healthCollectionObserved", g2RingObservedStateName(control.healthObserved))
+   .kv("healthCollectionPending", (bool)control.healthPending)
+   .kv("healthCollectionError", g2RingTransactionErrorName(control.healthLastError))
+   .kv("healthCollectionObservedAgeSec", observedAgeSec(control.healthObservedAtMs))
+   .kv("healthCollectionTransaction", haveHealthTx
+       ? g2RingTransactionStateName(healthTx.state) : "invalid")
+   .kv("lowPowerDesired", g2RingDesiredStateName(control.lowPowerDesired))
+   .kv("lowPowerObserved", g2RingObservedStateName(control.lowPowerObserved))
+   .kv("lowPowerPending", (bool)control.lowPowerPending)
+   .kv("lowPowerError", g2RingTransactionErrorName(control.lowPowerLastError))
+   .kv("lowPowerObservedAgeSec", observedAgeSec(control.lowPowerObservedAtMs))
+   .kv("lowPowerTransaction", haveLowPowerTx
+       ? g2RingTransactionStateName(lowPowerTx.state) : "invalid")
+   .kv("healthLoggingEnabled", (bool)gSettings.healthLoggingEnabled)
+   .kv("healthLoggingActive", healthLoggingIsActive())
+   .kv("healthLoggingPollIntervalSec", (unsigned)gSettings.healthLoggingPollIntervalSec)
+   .kv("healthLoggingR1Selected", (bool)((gSensorLogMask & LOG_R1) != 0))
+   .kv("healthLoggingWorkerRunning", (bool)gSensorLoggingRunning)
+   .kv("healthLoggingAtRest", captureEncryptModeName(gSettings.captureEncryptMode))
+   .kv("healthLoggingSessionSealed", (bool)(gSensorLoggingRunning && gSensorLogSealed))
+   .kv("historyAvailable", (bool)history.available)
+   .kv("historyState", r1HealthHistoryFetchStateName(history.fetchState))
+   .kv("historyDayStart", (unsigned long)history.dayStart)
+   .kv("historyTimezoneMinutes", (int)history.timezoneMinutes)
+   .kv("historyLastSuccessEpoch", (unsigned long)history.lastSuccessEpoch)
+   .kv("historyLastPartialEpoch", (unsigned long)history.lastPartialEpoch)
+   .kv("historyError", (unsigned)history.fetchError)
+   .kv("sleepState", sleep)
+   .kv("activityAvailable", (bool)history.activity.available)
+   .kv("activityFullDayVerified", (bool)history.activity.fullDayVerified)
+   .kv("activityBucketCount", (unsigned)history.activity.bucketCount)
+   .kv("activitySteps", (unsigned long)history.activity.steps)
+   .kv("activityActiveKcal", (unsigned long)history.activity.activeKcal)
+   .kv("activityRestingKcal", (unsigned long)history.activity.restingKcal)
+   .kv("activityTotalKcal", (unsigned long)history.activity.totalKcal)
+   .kv("historyStoreAvailable", (bool)store.available)
+   .kv("historyStorePending", (bool)store.commitPending)
+   .kv("historyStoreEncryptionRequired", (bool)store.encryptionRequired)
+   .kv("historyStoreEncrypted", (bool)store.lastCommitEncrypted)
+   .kv("historyStoreStagedGeneration", (unsigned long)store.stagedGeneration)
+   .kv("historyStoreCommittedGeneration", (unsigned long)store.committedGeneration)
+   .kv("historyStoreError", r1HealthHistoryStoreErrorName(store.error));
+  if (!j.ok()) {
+    snprintf(buf, cap, "{\"schema\":1,\"error\":\"status_overflow\"}");
+    return buf;
+  }
   return j.c_str();
 #else
-  snprintf(buf, cap, "{\"schema\":1,\"enabled\":false}");
+  snprintf(buf, cap, "{\"schema\":1,\"featureEnabled\":false}");
   return buf;
 #endif
 }
@@ -1644,13 +1708,36 @@ const char* cmd_healthstatus(const String& argsInput) {
     if (!healthStartPollBurst()) return "Error: ring not connected — connect via Bluetooth → R1 Ring";
     return "SUCCESS: R1 Health poll burst started (HR/HRV/SpO2/temp/battery)";
   }
-
-  if (argWantsJson(argsInput) || sub == "json") {
-    return buildHealthStatusJson(getDebugBuffer(), 1024);
+  if (sub == "history") {
+    if (!g2RingRequestHistoryRefresh(false))
+      return "Error: history refresh not queued — ring/setup/profile may be unavailable";
+    return "SUCCESS: R1 typed history refresh queued";
+  }
+  if (sub == "force-history") {
+    if (!isAdminUser(currentAuthContext().user))
+      return "Error: admin required for forced history refresh";
+    if (!g2RingRequestHistoryRefresh(true))
+      return "Error: forced history refresh not queued — ring/setup/profile may be unavailable";
+    return "SUCCESS: R1 forced typed history refresh queued";
+  }
+  if (sub == "refresh-controls") {
+    if (!g2RingRefreshControlStatus())
+      return "Error: ring control refresh not queued";
+    return "SUCCESS: ring control refresh queued";
   }
 
-  G2RingTelemetry t;
+  if (argWantsJson(argsInput) || sub == "json") {
+    return buildHealthStatusJson(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE);
+  }
+
+  G2RingTelemetry t = {};
   g2RingGetTelemetry(t);
+  G2RingControlStatus control = {};
+  g2RingGetControlStatus(control);
+  G2HealthHistorySummary history = {};
+  g2HealthHistoryGetSummary(history);
+  R1HealthHistoryStoreStatus store = {};
+  r1HealthHistoryStoreGetStatus(store);
   char hr[8], hrv[8], spo2[8], temp[12], bat[8], wear[8];
   if (t.hrValid) snprintf(hr, sizeof(hr), "%u", (unsigned)t.hr); else snprintf(hr, sizeof(hr), "--");
   if (t.hrvValid) snprintf(hrv, sizeof(hrv), "%d", (int)t.hrv); else snprintf(hrv, sizeof(hrv), "--");
@@ -1667,24 +1754,44 @@ const char* cmd_healthstatus(const String& argsInput) {
   snprintf(getDebugBuffer(), 1024,
            "R1 Health: ring=%s  HR=%s  HRV=%s  SpO2=%s  T=%s  Bat=%s  Wear=%s\n"
            "  ages(s): hr=%d hrv=%d spo2=%d temp=%d bat=%d wear=%d\n"
-           "  Track=%s (setting=%s, r1_mask=%s, logging=%s, poll=%us)\n"
+           "  Ring setup=%s profile=%s\n"
+           "  Collection desired=%s observed=%s%s error=%s\n"
+           "  Low power desired=%s observed=%s%s error=%s\n"
+           "  Health logging=%s (enabled=%s, r1_mask=%s, worker=%s, poll=%us)\n"
+           "  History=%s day=%lu activity=%u/144 (%s) store=%s/%s\n"
            "  At-rest encryption: %s%s\n"
-           "Usage: healthstatus [json|poll]",
+           "Usage: healthstatus [json|poll|history|force-history|refresh-controls]",
            t.connected ? "up" : "down", hr, hrv, spo2, temp, bat, wear,
            (int)t.hrAgeSec, (int)t.hrvAgeSec, (int)t.spo2AgeSec,
            (int)t.tempAgeSec, (int)t.batteryAgeSec, (int)t.wearAgeSec,
-           healthTrackIsActive() ? "ACTIVE" : "inactive",
-           gSettings.healthTrackingEnabled ? "on" : "off",
+           g2RingSetupStateName(control.setupState),
+           g2RingProtocolProfileName(control.protocolProfile),
+           g2RingDesiredStateName(control.healthDesired),
+           g2RingObservedStateName(control.healthObserved),
+           control.healthPending ? " (pending)" : "",
+           g2RingTransactionErrorName(control.healthLastError),
+           g2RingDesiredStateName(control.lowPowerDesired),
+           g2RingObservedStateName(control.lowPowerObserved),
+           control.lowPowerPending ? " (pending)" : "",
+           g2RingTransactionErrorName(control.lowPowerLastError),
+           healthLoggingIsActive() ? "ACTIVE" : "inactive",
+           gSettings.healthLoggingEnabled ? "on" : "off",
            (gSensorLogMask & LOG_R1) ? "yes" : "no",
            gSensorLoggingRunning ? "running" : "stopped",
-           (unsigned)gSettings.healthTrackPollIntervalSec,
+           (unsigned)gSettings.healthLoggingPollIntervalSec,
+           r1HealthHistoryFetchStateName(history.fetchState),
+           (unsigned long)history.dayStart,
+           (unsigned)history.activity.bucketCount,
+           history.activity.fullDayVerified ? "full verified" : "partial/unverified",
+           store.available ? "available" : "unavailable",
+           r1HealthHistoryStoreErrorName(store.error),
            captureEncryptModeName(gSettings.captureEncryptMode),
            (gSensorLoggingRunning && gSensorLogSealed) ? " (active session sealed)" : "");
   return getDebugBuffer();
 #endif
 }
 
-void healthTrackTick() {
+void healthLoggingTick() {
 #if ENABLE_R1_HEALTH
   const uint32_t now = millis();
 
@@ -1695,7 +1802,7 @@ void healthTrackTick() {
     if (gSensorLoggingRunning && (gSensorLogMask & LOG_R1)) {
       sensorLogRequestSample(/*bypassR1Dedup*/ true);
       if (isDebugFlagSet(DEBUG_LOGGER)) {
-        DEBUG_LOGGERF("healthtrack: page refresh → sensorlog sample");
+        DEBUG_LOGGERF("healthlogging: page refresh → sensorlog sample");
       }
     }
   }
@@ -1719,11 +1826,11 @@ void healthTrackTick() {
   } else if (sHtOdState == HT_OD_SETTLE) {
     if ((long)(now - sHtOdLastMs) >= 1500) {
       sHtOdState = HT_OD_IDLE;
-      healthTrackNotePageRefresh();
+      healthLoggingNotePageRefresh();
     }
   }
 
-  if (!gSettings.healthTrackingEnabled) {
+  if (!gSettings.healthLoggingEnabled) {
     sHtMineState = HT_MINE_IDLE;
     return;
   }
@@ -1731,7 +1838,7 @@ void healthTrackTick() {
   // Mine cadence gate — used both when connected (poll vitals) and when
   // down (nudge BLE once per interval instead of spinning every loop).
   const bool mineDue = (sHtMineLastBurstMs == 0 ||
-      (long)(now - sHtMineLastBurstMs) >= (long)healthTrackIntervalMs());
+      (long)(now - sHtMineLastBurstMs) >= (long)healthLoggingIntervalMs());
 
   if (!g2RingIsConnected()) {
     sHtMineState = HT_MINE_IDLE;
@@ -1743,14 +1850,14 @@ void healthTrackTick() {
       // short reboot. When the ring comes up, mineDue must still be true
       // so the first real sample lands within seconds, not +15 min.
       if (sHtMineLastReseekMs == 0 ||
-          (long)(now - sHtMineLastReseekMs) >= (long)healthTrackIntervalMs()) {
+          (long)(now - sHtMineLastReseekMs) >= (long)healthLoggingIntervalMs()) {
         sHtMineLastReseekMs = now;
         // Non-blocking: schedules connectSaved on the next bleAutoReconnectTick.
         // Respects user ringdisconnect; works even if bleautoreconnect is off
         // (one-shot). With autoReconnect on, drop recovery continues via backoff.
         blePeerRequestReseek(BLE_PEER_R1_RING);
         if (isDebugFlagSet(DEBUG_LOGGER)) {
-          DEBUG_LOGGERF("healthtrack: mine due but ring down — requested BLE reseek");
+          DEBUG_LOGGERF("healthlogging: mine due but ring down — requested BLE reseek");
         }
       }
     }
@@ -1768,8 +1875,8 @@ void healthTrackTick() {
       sHtMineCursor = 0;
       sHtMineLastMs = 0;
       if (isDebugFlagSet(DEBUG_LOGGER)) {
-        DEBUG_LOGGERF("healthtrack: timed mine start (interval=%us)",
-                      (unsigned)gSettings.healthTrackPollIntervalSec);
+        DEBUG_LOGGERF("healthlogging: timed mine start (interval=%us)",
+                      (unsigned)gSettings.healthLoggingPollIntervalSec);
       }
     }
     return;
@@ -1795,7 +1902,7 @@ void healthTrackTick() {
       if (gSensorLoggingRunning && (gSensorLogMask & LOG_R1)) {
         sensorLogRequestSample(/*bypassR1Dedup*/ true);
         if (isDebugFlagSet(DEBUG_LOGGER)) {
-          DEBUG_LOGGERF("healthtrack: timed mine → sensorlog sample");
+          DEBUG_LOGGERF("healthlogging: timed mine → sensorlog sample");
         }
       }
     }
@@ -1934,7 +2041,7 @@ static String shapeSessionPath(String path) {
   return String(pathBuf);
 }
 
-static const char* healthTrackRestartWithCurrentMask() {
+static const char* healthLoggingRestartWithCurrentMask() {
   // Stop then start so CSV headers match the new mask.
   if (gSensorLoggingRunning) {
     gSensorLoggingRunning = false;
@@ -1952,7 +2059,7 @@ static const char* healthTrackRestartWithCurrentMask() {
   return cmd_sensorlog(String(cmd));
 }
 
-const char* healthTrackSet(bool on) {
+const char* healthLoggingSet(bool on) {
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
 
   if (on) {
@@ -1960,11 +2067,11 @@ const char* healthTrackSet(bool on) {
       return "Error: sensor logging is disabled — run 'sensorlogenabled 1' first";
     }
 #if !ENABLE_R1_HEALTH
-    return "Error: R1 Health Track requires ENABLE_R1_HEALTH in this build";
+    return "Error: R1 Health logging requires ENABLE_R1_HEALTH in this build";
 #else
-    setSetting(gSettings.healthTrackingEnabled, true);
+    setSetting(gSettings.healthLoggingEnabled, true);
     // Capture BEFORE the OR: the "already logging" shortcut below must only
-    // fire when R1 was ALREADY in the mask. Otherwise `healthtrack on` during
+    // fire when R1 was ALREADY in the mask. Otherwise `healthlogging on` during
     // a running non-R1 CSV session mutates the mask live and every later row
     // gains 7 R1 columns under the old header — permanent misalignment inside
     // a long-lived day file. Newly-added R1 → fall through to the restart.
@@ -1972,7 +2079,7 @@ const char* healthTrackSet(bool on) {
     gSensorLogMask = (uint8_t)(gSensorLogMask | LOG_R1);
     setSetting(gSettings.sensorLogMask, (int)gSensorLogMask);
 
-    // Health Track owns the per-day CSV shape (midnight roll, sync-flip roll,
+    // Health logging owns the per-day CSV shape (midnight roll, sync-flip roll,
     // one continuous file). TEXT is one-file-per-session; TRACK is GPS-only.
     // Coerce both so Track can't leave a pile of sealed stubs.
     const bool coercedFormat = (gSensorLogFormat != SENSOR_LOG_CSV);
@@ -2000,100 +2107,100 @@ const char* healthTrackSet(bool on) {
       // more to do. (If R1 was just added, or format was coerced from TEXT/
       // TRACK, fall through to the restart so the day-file header matches.)
       snprintf(getDebugBuffer(), 1024,
-               "SUCCESS: Health Track ON (already logging → %s)",
+               "SUCCESS: Health logging ON (already logging → %s)",
                gSensorLogPath.c_str());
       return getDebugBuffer();
     }
 
-    const char* result = healthTrackRestartWithCurrentMask();
+    const char* result = healthLoggingRestartWithCurrentMask();
     if (result && strncmp(result, "SUCCESS", 7) == 0) {
       snprintf(getDebugBuffer(), 1024,
-               "SUCCESS: Health Track ON — logging R1 vitals to %s",
+               "SUCCESS: Health logging ON — logging R1 vitals to %s",
                gSensorLogPath.c_str());
       return getDebugBuffer();
     }
-    return result ? result : "Error: Health Track failed to start sensorlog";
+    return result ? result : "Error: Health logging failed to start sensorlog";
 #endif
   }
 
   // Off
-  setSetting(gSettings.healthTrackingEnabled, false);
+  setSetting(gSettings.healthLoggingEnabled, false);
   gSensorLogMask = (uint8_t)(gSensorLogMask & (uint8_t)~LOG_R1);
   setSetting(gSettings.sensorLogMask, (int)gSensorLogMask);
   sHtMineState = HT_MINE_IDLE;
   sHtPageRefreshPending = false;
 
   if (!gSensorLoggingRunning) {
-    return "SUCCESS: Health Track OFF";
+    return "SUCCESS: Health logging OFF";
   }
 
   if (gSensorLogMask == 0) {
     gSensorLoggingRunning = false;
     setSetting(gSettings.sensorLogAutoStart, false);
     systemEventPost(SYSEVT_SENSOR_STOPPED, "Logging");
-    return "SUCCESS: Health Track OFF — sensor logging stopped";
+    return "SUCCESS: Health logging OFF — sensor logging stopped";
   }
 
   // Other sensors still selected — restart so CSV headers drop R1 columns.
-  const char* result = healthTrackRestartWithCurrentMask();
+  const char* result = healthLoggingRestartWithCurrentMask();
   if (result && strncmp(result, "SUCCESS", 7) == 0) {
-    return "SUCCESS: Health Track OFF — R1 removed; other sensors still logging";
+    return "SUCCESS: Health logging OFF — R1 removed; other sensors still logging";
   }
-  return result ? result : "SUCCESS: Health Track OFF";
+  return result ? result : "SUCCESS: Health logging OFF";
 }
 
-const char* cmd_healthtrack(const String& argsInput) {
+const char* cmd_healthlogging(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   CommandArgs a(argsInput);
   if (!a.has(0)) {
     snprintf(getDebugBuffer(), 1024,
-             "Health Track: %s\n"
+             "Health logging: %s\n"
              "  logging=%s  mask_r1=%s  setting=%s  poll=%us\n"
-             "Usage: healthtrack <on|off|toggle|status|interval [sec]>",
-             healthTrackIsActive() ? "ACTIVE" : "inactive",
+             "Usage: healthlogging <on|off|toggle|status|interval [sec]>",
+             healthLoggingIsActive() ? "ACTIVE" : "inactive",
              gSensorLoggingRunning ? "running" : "stopped",
              (gSensorLogMask & LOG_R1) ? "yes" : "no",
-             gSettings.healthTrackingEnabled ? "on" : "off",
-             (unsigned)gSettings.healthTrackPollIntervalSec);
+             gSettings.healthLoggingEnabled ? "on" : "off",
+             (unsigned)gSettings.healthLoggingPollIntervalSec);
     return getDebugBuffer();
   }
   String sub = a.arg(0); sub.toLowerCase();
   if (sub == "status") {
     snprintf(getDebugBuffer(), 1024,
-             "Health Track: %s (setting=%s, r1_mask=%s, logging=%s, poll=%us, path=%s)",
-             healthTrackIsActive() ? "ACTIVE" : "inactive",
-             gSettings.healthTrackingEnabled ? "on" : "off",
+             "Health logging: %s (setting=%s, r1_mask=%s, logging=%s, poll=%us, path=%s)",
+             healthLoggingIsActive() ? "ACTIVE" : "inactive",
+             gSettings.healthLoggingEnabled ? "on" : "off",
              (gSensorLogMask & LOG_R1) ? "yes" : "no",
              gSensorLoggingRunning ? "running" : "stopped",
-             (unsigned)gSettings.healthTrackPollIntervalSec,
+             (unsigned)gSettings.healthLoggingPollIntervalSec,
              gSensorLogPath.length() ? gSensorLogPath.c_str() : "(none)");
     return getDebugBuffer();
   }
   if (sub == "interval") {
     if (!a.has(1)) {
       snprintf(getDebugBuffer(), 1024,
-               "Health Track poll interval: %u sec (min 60, max 86400)\n"
-               "Usage: healthtrack interval <seconds>",
-               (unsigned)gSettings.healthTrackPollIntervalSec);
+               "Health logging poll interval: %u sec (min 60, max 86400)\n"
+               "Usage: healthlogging interval <seconds>",
+               (unsigned)gSettings.healthLoggingPollIntervalSec);
       return getDebugBuffer();
     }
     int sec = a.argInt(1, 0);
     if (sec < 60 || sec > 86400) {
-      return "Error: healthtrack interval must be 60..86400 seconds";
+      return "Error: healthlogging interval must be 60..86400 seconds";
     }
-    setSetting(gSettings.healthTrackPollIntervalSec, sec);
+    setSetting(gSettings.healthLoggingPollIntervalSec, sec);
     // Reschedule next mine from now so a shorter interval takes effect promptly.
     sHtMineLastBurstMs = millis();
     snprintf(getDebugBuffer(), 1024,
-             "SUCCESS: Health Track poll interval set to %d sec (%d min)",
+             "SUCCESS: Health logging poll interval set to %d sec (%d min)",
              sec, sec / 60);
     return getDebugBuffer();
   }
-  if (sub == "on" || sub == "1" || sub == "true")  return healthTrackSet(true);
-  if (sub == "off" || sub == "0" || sub == "false") return healthTrackSet(false);
-  if (sub == "toggle") return healthTrackSet(!gSettings.healthTrackingEnabled);
-  return "Error: Usage: healthtrack <on|off|toggle|status|interval [sec]>";
+  if (sub == "on" || sub == "1" || sub == "true")  return healthLoggingSet(true);
+  if (sub == "off" || sub == "0" || sub == "false") return healthLoggingSet(false);
+  if (sub == "toggle") return healthLoggingSet(!gSettings.healthLoggingEnabled);
+  return "Error: Usage: healthlogging <on|off|toggle|status|interval [sec]>";
 }
 
 // Stitch several health/sensor TEXT captures into one file (gpstrackmerge twin).
@@ -2358,18 +2465,20 @@ const CommandEntry sensorLoggingCommands[] = {
     "  sensors <thermal|tof|imu|gamepad|apds|gps|presence|r1|all|none>: Select sensors to log\n"
     "  interval <ms>: Set poll interval 100-3600000 (default 5000)\n"
     "  autostart [on|off]: Auto-start logging on boot (bare = toggle)" },
-  { "healthtrack", "Start/stop R1 Health Track (enables r1 sensorlog + starts capture)", false, cmd_healthtrack,
-    "Usage: healthtrack <on|off|toggle|status|interval [sec]>\n"
+  { "healthlogging", "Start/stop local R1 health logging (independent of ring collection)", false, cmd_healthlogging,
+    "Usage: healthlogging <on|off|toggle|status|interval [sec]>\n"
     "  on: enable LOG_R1, force format=CSV, start under /logging_captures/sensors/, persist for boot\n"
     "      (one dated per-day file when the clock is set, boot-<N>/ until sync then roll)\n"
     "  off: remove LOG_R1; stop logging if no other sensors remain\n"
-    "  interval <sec>: how often to poll/mine the ring while Track is on (default 900 = 15 min)\n"
-    "  R1-only Track sessions write ONLY on that mine (and Poll Now) — no 5s empty heartbeats\n"
-    "  Also: Apps → Health → Toggle Track on the G2 lens; OLED/Web R1 Health" },
-  { "healthstatus", "R1 Health vitals + Track snapshot (text or json); poll starts a 4-vital burst", false, cmd_healthstatus,
-    "Usage: healthstatus [json|poll]\n"
-    "  bare/json: connected, HR/HRV/SpO2/battery (+valid), Track state\n"
+    "  interval <sec>: how often local logging polls/mines the ring (default 900 = 15 min)\n"
+    "  R1-only sessions write ONLY on that mine (and Poll Now) — no 5s empty heartbeats\n"
+    "  This does not change the ring's health-collection privacy setting." },
+  { "healthstatus", "R1 live vitals, ring controls, local logging, and typed history status", false, cmd_healthstatus,
+    "Usage: healthstatus [json|poll|history|force-history|refresh-controls]\n"
+    "  bare/json: live values, desired/observed controls, local logging, history/store\n"
     "  poll: kick HR→HRV→SpO2→battery point queries (replies via notify)\n"
+    "  history: normal typed history refresh; force-history: admin freshness bypass\n"
+    "  refresh-controls: read low-power state; health collection has no proven GET and stays Unknown\n"
     "  BLE App / Web use healthstatus json; connect via ringconnect / Bluetooth page" },
   { "healthlogmerge", "Byte-concatenate sensor logs in the given order: \"<out>\" \"<in1>\" \"<in2>\" ...", true, cmd_healthlogmerge,
     "Usage: healthlogmerge \"<output>\" \"<in1>\" \"<in2>\" [...]\n"
@@ -2403,8 +2512,13 @@ static const SettingEntry sensorLogSettingEntries[] = {
   { "sensorLogEnabled", SETTING_BOOL, &gSettings.sensorLogEnabled, 1, 0, nullptr, 0, 1, "Enabled", nullptr, false, nullptr, "sensorlogenabled" },
   { "sensorLogAutoStart",    SETTING_BOOL,   &gSettings.sensorLogAutoStart,    0, 0, nullptr, 0, 1,       "Auto-start logging after boot", nullptr, false, nullptr, "sensorlog autostart" },
 #if ENABLE_R1_HEALTH
-  { "healthTrackingEnabled", SETTING_BOOL, &gSettings.healthTrackingEnabled, 0, 0, nullptr, 0, 1, "R1 Health Track", nullptr, false, nullptr, "healthtrack" },
-  { "healthTrackPollIntervalSec", SETTING_INT, &gSettings.healthTrackPollIntervalSec, 900, 0, nullptr, 60, 86400, "R1 Health poll interval (sec)", nullptr, false, nullptr, "healthtrack interval" },
+  { "healthLoggingEnabled", SETTING_BOOL, &gSettings.healthLoggingEnabled, 0, 0, nullptr, 0, 1, "Health logging", nullptr, false, nullptr, "healthlogging" },
+  { "healthLoggingPollIntervalSec", SETTING_INT, &gSettings.healthLoggingPollIntervalSec, 900, 0, nullptr, 60, 86400, "Health logging poll interval (sec)", nullptr, false, nullptr, "healthlogging interval" },
+  // These persisted desires are intentionally read-only in the generic
+  // settings UI. Mutations must use G2_Ring's dedicated async setters so a
+  // flash write is never mistaken for a ring ACK/readback.
+  { "ringHealthCollectionDesired", SETTING_INT, &gSettings.ringHealthCollectionDesired, 0, 0, nullptr, 0, 2, "Ring health collection desired", "0|Preserve,1|Off,2|On", false, nullptr, nullptr, true },
+  { "ringLowPowerDesired", SETTING_INT, &gSettings.ringLowPowerDesired, 0, 0, nullptr, 0, 2, "Ring low power desired", "0|Preserve,1|Off,2|On", false, nullptr, nullptr, true },
   { "captureEncryptMode", SETTING_INT, &gSettings.captureEncryptMode, 1, 0, nullptr, 0, 2, "Capture at-rest encryption", "0|Off,1|Health,2|All", false, nullptr, "capturecrypt" },
 #endif
   { "sensorLogPath", SETTING_STRING, &gSettings.sensorLogPath, 0, 0, CAPTURE_SENSORLOG_DEFAULT, 0, 0, "Log file path", nullptr, false, nullptr, "sensorlogpath" },
@@ -2431,9 +2545,9 @@ extern const SettingsModule sensorLogSettingsModule = {
 // ============================================================================
 
 void sensorLogAutoStart() {
-  // Health Track alone is enough to resume capture at boot (it also sets
+  // Health logging alone is enough to resume capture at boot (it also sets
   // sensorLogAutoStart when enabled, but honor the setting either way).
-  if (!gSettings.sensorLogAutoStart && !gSettings.healthTrackingEnabled) return;
+  if (!gSettings.sensorLogAutoStart && !gSettings.healthLoggingEnabled) return;
   if (gSensorLoggingRunning) return;  // Already running
 
   // Restore persisted parameters
@@ -2445,9 +2559,9 @@ void sensorLogAutoStart() {
   if (gSettings.sensorLogMaxRotations >= 0 && gSettings.sensorLogMaxRotations <= 9)
     gSensorLogMaxRotations = (uint8_t)gSettings.sensorLogMaxRotations;
 
-  if (gSettings.healthTrackingEnabled) {
+  if (gSettings.healthLoggingEnabled) {
     gSensorLogMask = (uint8_t)(gSensorLogMask | LOG_R1);
-    // Match healthTrackSet: Track always resumes as CSV so dark-boot /
+    // Match healthLoggingSet: health logging always resumes as CSV so dark-boot /
     // sync-flip / midnight roll produce one day file instead of TEXT stubs.
     if (gSensorLogFormat != SENSOR_LOG_CSV) {
       gSensorLogFormat = SENSOR_LOG_CSV;
@@ -2469,7 +2583,7 @@ void sensorLogAutoStart() {
     path = CAPTURE_SENSORLOG_DEFAULT;
   }
 
-  // Session subfolder + timestamp shaping (shared with healthtrack starts).
+  // Session subfolder + timestamp shaping (shared with healthlogging starts).
   path = shapeSessionPath(path);
 
   // No mkdir here: this used to hand-create /logs + /logs/sensors, which is

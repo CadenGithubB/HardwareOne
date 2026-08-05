@@ -1,4 +1,4 @@
-# Hardware One v0.99.7 - User Guide
+# Hardware One v0.99.8 - User Guide
 
 This is the full reference for Hardware One. It covers every subsystem, all CLI commands, configuration options, and how the major features work. For initial setup, see the [Quick Start Guide](QUICKSTART.md).
 
@@ -379,6 +379,32 @@ ESP-NOW V3 is Hardware One's inter-device wireless protocol. Devices pair with a
 3. One device initiates - the other accepts.
 4. Once paired, devices appear in each other's peer list.
 
+### Multi-hop (reaching devices out of radio range)
+Devices relay for each other, so the mesh reaches further than any single radio.
+If A can hear B and B can hear C, then A and C can talk even though they cannot
+hear each other — including the initial pairing handshake. Nothing to configure:
+each device learns the routes automatically from its neighbours (allow about a
+minute after boot), and traffic goes back to the direct link the moment two
+devices can hear each other again.
+
+```
+espnowmeshroutes                - Who this device can reach, and via whom
+espnowmeshttl [1-10]            - How many hops a message may travel (default 3)
+espnowmeshrelay [0|1]           - Carry other devices' traffic (default on)
+espnowmeshmetrics               - Forwarding counters, if you want to see it working
+```
+
+In `espnowmeshroutes`, a peer listed as `(direct)` is in radio range; anything
+else is being reached through the device named in the **VIA** column. Turn
+`espnowmeshrelay` off on a device you don't want carrying traffic for others
+(a battery-tight node, say) — it will still send and receive over multi-hop
+itself. Set `espnowmeshttl 1` to opt a device out of multi-hop entirely.
+
+Two things stay deliberately single-hop: **pairing**, so you can only pair with
+something you are physically near, and **file transfers**, which are too large
+to relay. Messages and remote commands relay fine, but a relayed message is
+capped at ~130 characters per piece.
+
 ### Bonding (Master/Worker)
 With `ENABLE_BONDED_MODE=1`, two devices can bond into a master/worker pair. The master gains a **Remote** tab in its web UI showing the worker's features, even if those features aren't compiled into the master.
 
@@ -756,8 +782,8 @@ espnowstats                     - Show message/error counters
 espnowlist                      - List all paired peers
 espnowpair <mac> <name>         - Pair with a device
 espnowunpair <name_or_mac>      - Remove a paired peer
-espnowsend <name_or_mac> <msg>  - Send a text message (auto-routes via mesh)
-espnowbroadcast <message>       - Broadcast to all peers
+espnowsend <name_or_mac> <msg>  - Send a text message (relayed if the peer is out of range)
+espnowbroadcast <message>       - Broadcast to the whole mesh (flooded, up to the TTL)
 espnowsendfile <name_or_mac> "<path>"      - Send a file to a peer
 espnowbrowse <name_or_mac> <user> <pass> ["path"]  - Browse remote filesystem
 espnowfetch <name_or_mac> <user> <pass> "<path>"   - Fetch a file from a peer
@@ -766,8 +792,10 @@ espnowremote <name_or_mac> <user> <pass> <cmd>   - Execute command on peer
 --- Mesh ---
 espnowmode [direct|mesh]        - Get/set routing mode
 espnowmeshstatus                - Show mesh peer health (heartbeats, ACKs)
-espnowmeshmetrics               - Show routing metrics (forwards, drops, path stats)
-espnowmeshttl [1-10|adaptive]   - Get/set mesh TTL
+espnowmeshmetrics               - Show routing metrics (forwards, drops, route churn)
+espnowmeshroutes                - Show the route table (who's reachable, and via whom)
+espnowmeshttl [1-10]            - Hops a message may travel (1 = direct only)
+espnowmeshrelay [0|1]           - Carry other nodes' traffic through this one
 espnowmeshtopo                  - Discover mesh topology (master only)
 espnowtimesync                  - Broadcast NTP time to mesh (master only)
 espnowtimestatus                - Show time sync status

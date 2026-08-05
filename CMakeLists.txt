@@ -31,6 +31,13 @@ if(NOT _inferred_target)
     set(_inferred_target "$ENV{IDF_TARGET}")
 endif()
 set(_sdkconfig "${CMAKE_CURRENT_SOURCE_DIR}/sdkconfig")
+if(DEFINED SDKCONFIG AND NOT "${SDKCONFIG}" STREQUAL "")
+    if(IS_ABSOLUTE "${SDKCONFIG}")
+        set(_sdkconfig "${SDKCONFIG}")
+    else()
+        set(_sdkconfig "${CMAKE_CURRENT_SOURCE_DIR}/${SDKCONFIG}")
+    endif()
+endif()
 if(NOT _inferred_target)
     if(EXISTS "${_sdkconfig}")
         file(STRINGS "${_sdkconfig}" _target_line REGEX "^CONFIG_IDF_TARGET=\"[^\"]+\"")
@@ -128,6 +135,65 @@ endif()
 #
 # When ENABLE_ESP_SR is enabled, we need a "model" SPIFFS partition for
 # WakeNet/MultiNet; when disabled, that space is reclaimed for LittleFS.
+set(_ota_layout FALSE)
+if(DEFINED ENV{HW_OTA_LAYOUT})
+    string(TOLOWER "$ENV{HW_OTA_LAYOUT}" _ota_layout_env)
+    if(_ota_layout_env STREQUAL "1" OR
+       _ota_layout_env STREQUAL "on" OR
+       _ota_layout_env STREQUAL "true" OR
+       _ota_layout_env STREQUAL "yes")
+        set(_ota_layout TRUE)
+    endif()
+endif()
+
+if(_ota_layout AND
+   (NOT _inferred_target STREQUAL "esp32s3" OR
+    NOT _flash_size STREQUAL "16mb" OR
+    NOT (_hw_board STREQUAL "feathers3" OR _hw_board STREQUAL "feathers3_fe")))
+    message(FATAL_ERROR
+        "HW_OTA_LAYOUT=1 currently supports only 16 MB FeatherS3 boards "
+        "(HW_BOARD=feathers3 or feathers3_fe, target esp32s3).")
+endif()
+
+# A CMake build directory must never change between the ordinary and recovery-
+# OTA layouts.  The two modes use different partition tables, application
+# destinations, rollback policy, and sdkconfig files; silently reusing cached
+# state across them is a deployment hazard even when the source still builds.
+set(_hw1_layout_mode "ordinary")
+if(_ota_layout)
+    set(_hw1_layout_mode "recovery-ota")
+endif()
+set(_hw1_layout_mode_file "${CMAKE_BINARY_DIR}/hw1-layout-mode.txt")
+if(EXISTS "${_hw1_layout_mode_file}")
+    file(READ "${_hw1_layout_mode_file}" _hw1_cached_layout_mode)
+    string(STRIP "${_hw1_cached_layout_mode}" _hw1_cached_layout_mode)
+    if(NOT _hw1_cached_layout_mode STREQUAL _hw1_layout_mode)
+        message(FATAL_ERROR
+            "This build directory was configured for '${_hw1_cached_layout_mode}' "
+            "and cannot be reused for '${_hw1_layout_mode}'. Use a fresh -B "
+            "directory; OTA and ordinary build caches are intentionally isolated.")
+    endif()
+else()
+    file(WRITE "${_hw1_layout_mode_file}" "${_hw1_layout_mode}\n")
+endif()
+
+if(_ota_layout)
+    # Keep OTA configuration isolated from the ordinary tracked sdkconfig. A
+    # cached default SDKCONFIG from an older ordinary configure must be replaced
+    # too; otherwise explicit `# ... is not set` lines defeat OTA defaults.
+    get_filename_component(_ordinary_sdkconfig
+        "${CMAKE_CURRENT_SOURCE_DIR}/sdkconfig" ABSOLUTE)
+    get_filename_component(_active_sdkconfig "${_sdkconfig}" ABSOLUTE)
+    if(NOT DEFINED SDKCONFIG OR "${SDKCONFIG}" STREQUAL "" OR
+       "${_active_sdkconfig}" STREQUAL "${_ordinary_sdkconfig}")
+        set(SDKCONFIG "${CMAKE_CURRENT_SOURCE_DIR}/sdkconfig.ota" CACHE FILEPATH
+            "HardwareOne OTA sdkconfig" FORCE)
+        set(_sdkconfig "${SDKCONFIG}")
+    else()
+        message(STATUS "Recovery OTA build uses isolated SDKCONFIG=${_active_sdkconfig}")
+    endif()
+endif()
+
 set(_buildconfig "${CMAKE_CURRENT_SOURCE_DIR}/components/hardwareone/System_BuildConfig.h")
 if(EXISTS "${_buildconfig}")
     file(READ "${_buildconfig}" _bc_contents)
@@ -138,8 +204,13 @@ if(EXISTS "${_buildconfig}")
     else()
         set(_sr_flag "no_sr")
     endif()
-    set(_partitions_src
-        "${CMAKE_CURRENT_SOURCE_DIR}/partitions_${_sr_flag}_${_flash_size}.csv")
+    if(_ota_layout)
+        set(_partitions_src
+            "${CMAKE_CURRENT_SOURCE_DIR}/partitions_ota_${_sr_flag}_${_flash_size}.csv")
+    else()
+        set(_partitions_src
+            "${CMAKE_CURRENT_SOURCE_DIR}/partitions_${_sr_flag}_${_flash_size}.csv")
+    endif()
     if(NOT EXISTS "${_partitions_src}")
         message(FATAL_ERROR
             "Expected partition file ${_partitions_src} does not exist. "
@@ -164,6 +235,91 @@ if(_board_file)
     set(SDKCONFIG_DEFAULTS
         "${CMAKE_CURRENT_SOURCE_DIR}/sdkconfig.defaults"
         "${_board_file}")
+    if(_ota_layout)
+        list(APPEND SDKCONFIG_DEFAULTS
+            "${CMAKE_CURRENT_SOURCE_DIR}/sdkconfig.ota.defaults")
+
+        # Keep workstation-specific key paths out of tracked configuration.
+        # A conventional ignored local filename is supported for convenience;
+        # HW1_OTA_SIGNING_KEY is preferable when the key lives in backed-up
+        # secret storage.  OTA builds fail at configure time if neither exists.
+        if(DEFINED ENV{HW1_OTA_SIGNING_KEY} AND
+           NOT "$ENV{HW1_OTA_SIGNING_KEY}" STREQUAL "")
+            get_filename_component(_ota_signing_key
+                "$ENV{HW1_OTA_SIGNING_KEY}" ABSOLUTE)
+        else()
+            set(_ota_signing_key
+                "${CMAKE_CURRENT_SOURCE_DIR}/ota_signing_key.pem")
+        endif()
+        if(NOT EXISTS "${_ota_signing_key}")
+            message(FATAL_ERROR
+                "Recovery OTA builds require an RSA-3072 signing key. Set "
+                "HW1_OTA_SIGNING_KEY or create the ignored local file "
+                "ota_signing_key.pem; never commit the private key. Missing: "
+                "${_ota_signing_key}")
+        endif()
+
+        find_program(_ota_openssl openssl)
+        if(NOT _ota_openssl)
+            message(FATAL_ERROR "openssl is required for recovery OTA builds")
+        endif()
+        execute_process(
+            COMMAND "${_ota_openssl}" pkey -in "${_ota_signing_key}" -text -noout
+            RESULT_VARIABLE _ota_key_check_result
+            OUTPUT_VARIABLE _ota_key_description
+            ERROR_VARIABLE _ota_key_check_error)
+        if(NOT _ota_key_check_result EQUAL 0 OR
+           NOT _ota_key_description MATCHES "3072 bit")
+            message(FATAL_ERROR
+                "HW1_OTA_SIGNING_KEY must be a readable RSA-3072 private key: "
+                "${_ota_key_check_error}")
+        endif()
+
+        # Generate the public half before project() discovers components. The
+        # protocol component embeds this file from its own directory scope;
+        # doing target_add_binary_data() here after project() makes modern
+        # CMake reject the cross-directory generated .S source.
+        set(HW1_OTA_PUBLIC_KEY_FILE
+            "${CMAKE_BINARY_DIR}/hw1_ota_public_key.pem")
+        execute_process(
+            COMMAND "${_ota_openssl}" pkey -in "${_ota_signing_key}" -pubout
+                    -out "${HW1_OTA_PUBLIC_KEY_FILE}"
+            RESULT_VARIABLE _ota_public_key_result
+            ERROR_VARIABLE _ota_public_key_error)
+        if(NOT _ota_public_key_result EQUAL 0)
+            message(FATAL_ERROR
+                "Could not derive the OTA public key: ${_ota_public_key_error}")
+        endif()
+
+        # Defaults do not override an existing sdkconfig value. Remove only a
+        # stale signing-key line so the current, explicitly supplied key cannot
+        # diverge from the public key embedded below.
+        if(EXISTS "${_sdkconfig}")
+            file(READ "${_sdkconfig}" _ota_sdk_contents)
+            file(STRINGS "${_sdkconfig}" _ota_configured_key_lines
+                REGEX "^CONFIG_SECURE_BOOT_SIGNING_KEY=")
+            set(_ota_expected_key_line
+                "CONFIG_SECURE_BOOT_SIGNING_KEY=\"${_ota_signing_key}\"")
+            list(FIND _ota_configured_key_lines "${_ota_expected_key_line}"
+                _ota_expected_key_index)
+            if(_ota_expected_key_index EQUAL -1)
+                string(REGEX REPLACE
+                    "(^|\n)CONFIG_SECURE_BOOT_SIGNING_KEY=\"[^\"]*\""
+                    "\\1" _ota_sdk_contents "${_ota_sdk_contents}")
+                string(REGEX REPLACE
+                    "(^|\n)# CONFIG_SECURE_BOOT_SIGNING_KEY is not set"
+                    "\\1" _ota_sdk_contents "${_ota_sdk_contents}")
+                file(WRITE "${_sdkconfig}" "${_ota_sdk_contents}")
+                message(STATUS
+                    "Cleared stale OTA signing-key setting so the explicit key reapplies")
+            endif()
+        endif()
+        set(_ota_key_defaults
+            "${CMAKE_BINARY_DIR}/hw1_ota_signing_key.defaults")
+        file(WRITE "${_ota_key_defaults}"
+            "CONFIG_SECURE_BOOT_SIGNING_KEY=\"${_ota_signing_key}\"\n")
+        list(APPEND SDKCONFIG_DEFAULTS "${_ota_key_defaults}")
+    endif()
 
     # Auto-recovery: if HW_BOARD is explicitly set, ensure sdkconfig honors
     # the board file's settings. IDF's defaults-files only apply to UNSET
@@ -235,8 +391,269 @@ endif()
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
-set(PROJECT_VER "0.99.7")
+if(_ota_layout)
+    if(_hw_board STREQUAL "feathers3_fe")
+        set(PROJECT_VER "0.99.8+f3feo1")
+    else()
+        set(PROJECT_VER "0.99.8+f3o1")
+    endif()
+else()
+    set(PROJECT_VER "0.99.8")
+endif()
 project(hardwareone-idf)
+
+# ESP-IDF creates component targets while project() runs. Directory-level
+# add_compile_definitions() calls made below therefore do not retroactively
+# reach first-party component sources. Bind load-bearing layout definitions to
+# the component target itself; otherwise System_OTA.cpp silently takes its
+# HW1_OTA_LAYOUT=0 fallback even though the OTA partition/build gates are active.
+idf_component_get_property(_hw1_app_component hardwareone COMPONENT_LIB)
+if(NOT TARGET ${_hw1_app_component})
+    message(FATAL_ERROR
+        "Could not resolve the hardwareone component target for OTA definitions")
+endif()
+
+if(_ota_layout)
+    # These are load-bearing OTA safety settings, not best-effort defaults.
+    # Assert them during configure so a custom sdkconfig cannot produce an
+    # unsafe OTA binary and rely on a later flash-time audit to notice.
+    foreach(_ota_required_option IN ITEMS
+            CONFIG_PARTITION_TABLE_CUSTOM
+            CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE
+            CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT
+            CONFIG_SECURE_SIGNED_APPS_RSA_SCHEME
+            CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT
+            CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES)
+        if(NOT ${_ota_required_option})
+            message(FATAL_ERROR
+                "Recovery OTA requires ${_ota_required_option}=y. Use an "
+                "isolated OTA sdkconfig/build directory and reconfigure.")
+        endif()
+    endforeach()
+    foreach(_ota_forbidden_option IN ITEMS
+            CONFIG_SECURE_BOOT
+            CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK
+            CONFIG_BOOTLOADER_SKIP_VALIDATE_IN_DEEP_SLEEP
+            CONFIG_BOOTLOADER_SKIP_VALIDATE_ON_POWER_ON
+            CONFIG_BOOTLOADER_SKIP_VALIDATE_ALWAYS)
+        if(${_ota_forbidden_option})
+            message(FATAL_ERROR
+                "Recovery OTA requires ${_ota_forbidden_option}=n.")
+        endif()
+    endforeach()
+    if(NOT CONFIG_IDF_TARGET STREQUAL "esp32s3" OR
+       NOT CONFIG_ESPTOOLPY_FLASHSIZE STREQUAL "16MB" OR
+       NOT CONFIG_PARTITION_TABLE_OFFSET STREQUAL "0x9000")
+        message(FATAL_ERROR
+            "Recovery OTA requires ESP32-S3, 16MB flash, and partition table "
+            "offset 0x9000; the active sdkconfig does not match.")
+    endif()
+    if(_hw_board STREQUAL "feathers3_fe")
+        if(NOT CONFIG_SECURE_FLASH_ENC_ENABLED OR
+           NOT CONFIG_SECURE_FLASH_ENCRYPTION_MODE_DEVELOPMENT OR
+           NOT CONFIG_SECURE_FLASH_ENCRYPTION_AES128 OR
+           NOT CONFIG_NVS_ENCRYPTION OR
+           NOT CONFIG_NVS_SEC_KEY_PROTECT_USING_FLASH_ENC)
+            message(FATAL_ERROR
+                "feathers3_fe recovery OTA requires Development-mode flash "
+                "encryption and flash-encryption-protected NVS keys.")
+        endif()
+    elseif(CONFIG_SECURE_FLASH_ENC_ENABLED OR CONFIG_NVS_ENCRYPTION)
+        message(FATAL_ERROR
+            "Plain feathers3 recovery OTA must not inherit flash/NVS encryption.")
+    endif()
+
+    if(_hw_board STREQUAL "feathers3_fe")
+        set(_ota_layout_id "hw1-f3fe-ota-v1")
+    else()
+        set(_ota_layout_id "hw1-f3-ota-v1")
+    endif()
+    add_compile_definitions(
+        HW1_OTA_LAYOUT=1
+        HW1_OTA_BOARD_ID="${_hw_board}"
+        HW1_OTA_LAYOUT_ID="${_ota_layout_id}"
+    )
+    target_compile_definitions(${_hw1_app_component} PRIVATE
+        HW1_OTA_LAYOUT=1
+        HW1_OTA_BOARD_ID="${_hw_board}"
+        HW1_OTA_LAYOUT_ID="${_ota_layout_id}"
+    )
+    get_target_property(_hw1_app_compile_definitions
+        ${_hw1_app_component} COMPILE_DEFINITIONS)
+    foreach(_hw1_required_definition IN ITEMS
+            "HW1_OTA_LAYOUT=1"
+            "HW1_OTA_BOARD_ID=\"${_hw_board}\""
+            "HW1_OTA_LAYOUT_ID=\"${_ota_layout_id}\"")
+        list(FIND _hw1_app_compile_definitions
+            "${_hw1_required_definition}" _hw1_definition_index)
+        if(_hw1_definition_index EQUAL -1)
+            message(FATAL_ERROR
+                "Recovery OTA definition did not reach hardwareone target: "
+                "${_hw1_required_definition}")
+        endif()
+    endforeach()
+    message(STATUS
+        "Recovery OTA layout ENABLED: board=${_hw_board}, layout=${_ota_layout_id}. "
+        "Stock ESP-IDF flash targets are disabled; use guarded HardwareOne targets.")
+
+    # The protocol component embedded HW1_OTA_PUBLIC_KEY_FILE during project()
+    # discovery. The private key remains outside the source tree/device image.
+
+    # Stock IDF app-flash chooses the factory partition when one exists. Here
+    # that would place a ~5 MiB main image in a 1.3 MiB recovery slot and write
+    # across otadata into ota_0. Refuse every stock mutation target before it
+    # opens a serial port; only the guarded targets below are valid.
+    idf_build_get_property(_ota_build_dir BUILD_DIR)
+    idf_component_get_property(_ota_flash_main_args esptool_py FLASH_ARGS)
+    idf_component_get_property(_ota_flash_sub_args esptool_py FLASH_SUB_ARGS)
+    add_custom_target(hw1-stock-flash-refused
+        COMMAND ${CMAKE_COMMAND} -E echo
+            "Refusing stock ESP-IDF flash/erase target for a recovery-OTA layout. Use migration-flash or ota0-flash. On feathers3_fe use the encrypted variants."
+        COMMAND ${CMAKE_COMMAND} -E false
+        USES_TERMINAL
+        VERBATIM)
+    foreach(_unsafe_ota_target IN ITEMS
+            flash encrypted-flash app-flash encrypted-app-flash
+            bootloader-flash encrypted-bootloader-flash
+            partition-table-flash encrypted-partition-table-flash
+            partition_table-flash otadata-flash encrypted-otadata-flash
+            erase_flash erase-otadata erase_otadata dfu-flash)
+        if(TARGET ${_unsafe_ota_target})
+            add_dependencies(${_unsafe_ota_target} hw1-stock-flash-refused)
+        endif()
+    endforeach()
+
+    # A direct ota_0 cable write is slot-safe but can still strand recovery if
+    # the main and factory updater use different signing keys or layouts. Make
+    # the same paired artifact audit mandatory for every safe flash target.
+    set(_ota_updater_bin "")
+    if(DEFINED ENV{HW1_UPDATER_BIN} AND
+       NOT "$ENV{HW1_UPDATER_BIN}" STREQUAL "")
+        get_filename_component(_ota_updater_bin
+            "$ENV{HW1_UPDATER_BIN}" ABSOLUTE)
+        if(NOT EXISTS "${_ota_updater_bin}")
+            message(FATAL_ERROR
+                "HW1_UPDATER_BIN does not exist: ${_ota_updater_bin}")
+        endif()
+        file(SIZE "${_ota_updater_bin}" _ota_updater_size)
+        if(_ota_updater_size GREATER 1205862)
+            message(FATAL_ERROR
+                "Updater exceeds the 1.15 MiB release gate: "
+                "${_ota_updater_size} bytes")
+        endif()
+        get_filename_component(_ota_updater_build
+            "${_ota_updater_bin}" DIRECTORY)
+        idf_build_get_property(_ota_python PYTHON)
+        add_custom_target(hw1-ota-pair-audit
+            COMMAND "${_ota_python}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tools/ota/check_ota_builds.py"
+                --board "${_hw_board}"
+                --main-build "${_ota_build_dir}"
+                --updater-build "${_ota_updater_build}"
+            DEPENDS gen_project_binary "${_ota_updater_bin}"
+            USES_TERMINAL
+            VERBATIM)
+        set(_ota_pair_gate hw1-ota-pair-audit)
+    else()
+        add_custom_target(hw1-ota-updater-required
+            COMMAND ${CMAKE_COMMAND} -E echo
+                "Refusing OTA cable write without HW1_UPDATER_BIN=/absolute/path/to/matched/updater-build/hw1-updater.bin"
+            COMMAND ${CMAKE_COMMAND} -E false
+            USES_TERMINAL)
+        set(_ota_pair_gate hw1-ota-updater-required)
+    endif()
+
+    # The HardwareOne application belongs in ota_0. This generated target also
+    # handles Development-mode flash encryption and is paired-audit gated.
+    esptool_py_flash_target(hw1-ota0-program
+        "${_ota_flash_main_args}" "${_ota_flash_sub_args}")
+    esptool_py_flash_to_partition(hw1-ota0-program "ota_0"
+        "${_ota_build_dir}/${PROJECT_BIN}")
+    add_dependencies(hw1-ota0-program gen_project_binary ${_ota_pair_gate})
+    if(CONFIG_SECURE_FLASH_ENCRYPTION_MODE_DEVELOPMENT)
+        add_dependencies(encrypted-hw1-ota0-program
+            gen_project_binary ${_ota_pair_gate})
+        add_custom_target(encrypted-ota0-flash
+            DEPENDS encrypted-hw1-ota0-program)
+        add_custom_target(hw1-plaintext-ota0-refused
+            COMMAND ${CMAKE_COMMAND} -E echo
+                "Refusing plaintext ota_0 programming on feathers3_fe"
+            COMMAND ${CMAKE_COMMAND} -E false
+            USES_TERMINAL)
+        add_dependencies(hw1-ota0-program hw1-plaintext-ota0-refused)
+        add_custom_target(ota0-flash
+            COMMAND ${CMAKE_COMMAND} -E echo
+                "Use encrypted-ota0-flash for feathers3_fe"
+            COMMAND ${CMAKE_COMMAND} -E false
+            USES_TERMINAL)
+    else()
+        add_custom_target(ota0-flash DEPENDS hw1-ota0-program)
+    endif()
+
+    # One-time layout installation is intentionally unavailable unless the
+    # separately-built recovery image is named explicitly. This target writes
+    # only bootloader/table/factory/otadata/ota_0: it preserves NVS and never
+    # formats the relocated LittleFS partition. Recovery's serial-only
+    # `formatfs confirm` is the explicit next migration step after backup.
+    if(NOT "${_ota_updater_bin}" STREQUAL "")
+        add_custom_target(hw1-ota-migration-preflight
+            COMMAND "${_ota_python}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tools/ota/confirm_migration.py"
+                --board "${_hw_board}"
+            DEPENDS
+                hw1-ota-pair-audit
+                bootloader
+                partition_table_bin
+                blank_ota_data
+            USES_TERMINAL
+            VERBATIM)
+
+        # Keep the low-level generated target private so the FE variant cannot
+        # accidentally invoke its plaintext sibling by muscle memory.
+        esptool_py_flash_target(hw1-layout-program
+            "${_ota_flash_main_args}" "${_ota_flash_sub_args}")
+        esptool_py_flash_target_image(hw1-layout-program bootloader
+            "${CONFIG_BOOTLOADER_OFFSET_IN_FLASH}"
+            "${_ota_build_dir}/bootloader/bootloader.bin")
+        esptool_py_flash_target_image(hw1-layout-program partition-table
+            "${CONFIG_PARTITION_TABLE_OFFSET}"
+            "${_ota_build_dir}/partition_table/partition-table.bin")
+        esptool_py_flash_to_partition(hw1-layout-program "factory"
+            "${_ota_updater_bin}")
+        esptool_py_flash_to_partition(hw1-layout-program "ota_0"
+            "${_ota_build_dir}/${PROJECT_BIN}")
+        esptool_py_flash_to_partition(hw1-layout-program "otadata"
+            "${_ota_build_dir}/ota_data_initial.bin")
+        add_dependencies(hw1-layout-program hw1-ota-migration-preflight)
+        if(CONFIG_SECURE_FLASH_ENCRYPTION_MODE_DEVELOPMENT)
+            add_dependencies(encrypted-hw1-layout-program
+                hw1-ota-migration-preflight)
+            add_custom_target(hw1-plaintext-migration-refused
+                COMMAND ${CMAKE_COMMAND} -E echo
+                    "Refusing plaintext layout programming on feathers3_fe"
+                COMMAND ${CMAKE_COMMAND} -E false
+                USES_TERMINAL)
+            add_dependencies(hw1-layout-program
+                hw1-plaintext-migration-refused)
+            add_custom_target(encrypted-migration-flash
+                DEPENDS encrypted-hw1-layout-program)
+            add_custom_target(migration-flash
+                COMMAND ${CMAKE_COMMAND} -E echo
+                    "Refusing plaintext migration for feathers3_fe; use encrypted-migration-flash"
+                COMMAND ${CMAKE_COMMAND} -E false
+                USES_TERMINAL)
+        else()
+            add_custom_target(migration-flash DEPENDS hw1-layout-program)
+        endif()
+        message(WARNING
+            "One-time migration target enabled. Back up LittleFS first. Use "
+            "'idf.py migration-flash' for feathers3 or "
+            "'idf.py encrypted-migration-flash' for feathers3_fe.")
+    endif()
+else()
+    add_compile_definitions(HW1_OTA_LAYOUT=0)
+    target_compile_definitions(${_hw1_app_component} PRIVATE HW1_OTA_LAYOUT=0)
+endif()
 
 # Add board-specific defines based on target (must be AFTER project())
 if(CONFIG_IDF_TARGET_ESP32S3)

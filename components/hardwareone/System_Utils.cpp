@@ -35,6 +35,7 @@
 #include "System_AuthIdentity.h"  // ExecIdentityGuard (executeCommand + submitAndExecuteSync)
 #include "System_BootState.h"     // bootStateGetBootCount / bootStateResetBootCount (NVS boot counter)
 #include "System_CrashRecord.h"   // crashRecord* — RTC post-mortem record for `crashlog`
+#include "System_OTASafety.h"     // pending trial images must finish probation before power-off
 #include "System_SelfDevice.h"   // SelfDevice:: — local identity/heap/uptime/firmware (Stage 1 consolidation)
 #include "System_Clock.h"        // Clock:: — epoch/sync/tz/format helpers (Stage 2)
 #include <esp_sntp.h>            // sntp_set_time_sync_notification_cb — real-reply signal
@@ -257,6 +258,8 @@ extern const CommandEntry mapsSettingCommands[];
 extern const size_t mapsSettingCommandsCount;
 extern const CommandEntry powerCommands[];
 extern const size_t powerCommandsCount;
+extern const CommandEntry otaCommands[];
+extern const size_t otaCommandsCount;
 #if ENABLE_OLED_DISPLAY
 extern const CommandEntry setPatternCommands[];
 extern const size_t setPatternCommandsCount;
@@ -1106,6 +1109,7 @@ namespace {
     { "login ",            MASK_TOKEN_AT_POS,    3, nullptr },  // login <user> <password>
     { "testencryption ",   MASK_TOKEN_AT_POS,    2, nullptr },  // testencryption <secret>
     { "testpassword ",     MASK_TOKEN_AT_POS,    2, nullptr },  // testpassword <secret>
+    { "otapin ",           MASK_AFTER_TOKEN_POS, 1, nullptr },  // otapin <recovery passphrase>
     { "userrequest ",      MASK_AFTER_TOKEN_POS, 2, nullptr },  // userrequest <name> <pass> ...
     { "espnowremote ",     CALL_HANDLER,         0, &redactPeerCredCmd },  // <target> <user> <pass> <cmd>
     { "espnowbrowse ",     CALL_HANDLER,         0, &redactPeerCredCmd },  // <target> <user> <pass> [path]
@@ -1399,6 +1403,9 @@ const char* cmd_cpufreq(const String& argsInput) {
 const char* cmd_lightsleep(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+  if (otaSafetyIsPendingVerification()) {
+    return "Error: Light sleep refused while the new firmware is in OTA health probation";
+  }
 
   // Anti-flap: refuse if a previous sleep entry was too recent. Without this,
   // a glitched trigger (stuck button, MQTT spam, a future "sleep on idle"
@@ -1471,6 +1478,9 @@ const char* cmd_lightsleep(const String& argsInput) {
 const char* cmd_deepsleep(const String& /*argsInput*/) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+  if (otaSafetyIsPendingVerification()) {
+    return "Error: Deep sleep refused while the new firmware is in OTA health probation";
+  }
 
   unsigned long cooldownRemain = 0;
   if (!powerSleepTransitionAllowed(&cooldownRemain)) {
@@ -3280,6 +3290,15 @@ static const CommandModule gCommandModules[] = {
     "while the radio stays up so the device remains reachable, and powercooldown "
     "<0..60000> sets an anti-flap cooldown (milliseconds) that prevents rapid "
     "back-to-back sleep transitions. All of these values persist.", powerCommands,        powerCommandsCount, 0, nullptr },
+  { "ota",        "Signed firmware recovery and update", "Native ESP-IDF signed OTA support. otastatus reports the journal, "
+    "partition identity, staged pair, and last result. A superadmin sets a persistent recovery credential with otapin, "
+    "uploads /system/ota/candidate.part and manifest.part, validates and journals them with otastage confirm, then uses "
+    "otaupdate confirm to reboot into the immutable factory recovery updater. otarecovery confirm enters the same "
+    "authenticated recovery image for a direct upload when the main filesystem cannot stage an image; its explicit "
+    "allow-downgrade option is required for older signed releases. otacancel replaces a staged request safely, and "
+    "otaack <result-sequence> confirm acknowledges exactly the durable result that was reviewed. Mutating OTA "
+    "commands are forbidden from automations and require the opt-in 16 MB OTA partition layout.",
+    otaCommands, otaCommandsCount, CMD_MODULE_ADMIN | CMD_MODULE_CORE, nullptr },
 #if ENABLE_OLED_DISPLAY
   { "setpattern", "OLED gamepad password entry", "Provides the single admin-only command setgamepadpassword, which opens the "
     "gamepad-pattern password setup flow on the OLED screen. A pattern is a sequence of "
@@ -3307,15 +3326,17 @@ static const CommandModule gCommandModules[] = {
     "the GATT cache for fast reconnect; closeg2 full also frees the cache to recover "
     "about 30 KB. The remaining g2* commands are low-level protocol probes and "
     "diagnostics (g2probe, g2protostats, g2devcfg, g2dumpframes).", g2Commands,           g2CommandsCount, 0, nullptr },
-  { "even_r1",    "Even R1 ring control (info-only)", "This subsystem talks to the Even R1 smart ring over BLE and is "
-    "read-only/info-only: it queries the ring health and status data but does not "
-    "control it. ringscan [seconds] discovers the ring and ringconnect [mac] connects "
+  { "even_r1",    "Even R1 ring link, health, and controls", "This subsystem talks to the Even R1 smart ring over BLE through a serialized, "
+    "profile-gated transaction owner. ringscan [seconds] discovers the ring and "
+    "ringconnect [mac] connects "
     "(auto-scanning when no MAC is given, or connecting directly when one is), with "
     "ringstatus and ringdisconnect for state and teardown. ringquery is the main data "
-    "command, requesting "
-    "wear/health/heart-rate/HRV/SpO2/temperature/activity/sleep/report readings (or a "
-    "raw module/cmd frame), and ringverbose toggles a full hex dump of the ring notify "
-    "frames for debugging. Note that bridging ring data onto the G2 glasses is "
+    "command, requesting wear/heart-rate/HRV/SpO2/temperature/activity/sleep readings. "
+    "Its raw diagnostic form is admin-only, requires confirmation for SETs, and "
+    "prohibits user-profile writes. Ring health collection and low-power desired state "
+    "are managed through the authenticated Health surfaces; health SETs remain "
+    "ACKed-unverified while low power has capture-proven readback. ringverbose toggles "
+    "a redacted byte dump for debugging. Bridging ring data onto the G2 glasses is "
     "deliberately unavailable -- the commands exist in the code but are intentionally "
     "left unregistered because both approaches proved to be dead ends.", g2RingCommands,    g2RingCommandsCount, 0, nullptr },
 #endif
@@ -5058,13 +5079,19 @@ bool submitCommandAsync(const Command& cmd, ExecAsyncCallback callback, void* us
 // bypassing the CLI execution pipeline. Used by espnow_task to push heavy
 // Ed25519 / X25519 work onto cmd_exec_task's deeper stack without bloating
 // espnow_task's budget. The callback owns its arg's lifetime (must free it).
+// Counts submissions lost because the command queue was full or memory was
+// unavailable. This path drops silently by design (the caller is a time-critical
+// radio callback that must not block), which made a dropped BLE OTA frame or
+// checkpoint indistinguishable from a dead link. Surfaced via `otawrite status`.
+extern "C" volatile uint32_t gCmdExecDropCount = 0;
+
 // Returns true if successfully queued.
 bool submitDeferredToCmdExec(ExecReq::DeferredFn fn, void* arg) {
   if (!fn) return false;
   if (gCmdExecQ == nullptr) return false;
 
   ExecReq* r = (ExecReq*)ps_alloc(sizeof(ExecReq), AllocPref::PreferPSRAM, "cmd.exec.deferred");
-  if (!r) return false;
+  if (!r) { gCmdExecDropCount++; return false; }
   new (r) ExecReq();
 
   r->deferredFn  = fn;
@@ -5073,6 +5100,7 @@ bool submitDeferredToCmdExec(ExecReq::DeferredFn fn, void* arg) {
   if (xQueueSend(gCmdExecQ, &r, 0) != pdTRUE) {
     r->~ExecReq();
     free(r);
+    gCmdExecDropCount++;
     return false;
   }
   return true;

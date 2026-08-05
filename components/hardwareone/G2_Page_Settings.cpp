@@ -1,30 +1,27 @@
 // =============================================================================
 // G2 glasses — "Settings" page implementation
 // =============================================================================
-// Two-level navigation, designed to fit every CREATE-list inside a single
+// Multi-level navigation, designed to fit every CREATE-list inside a single
 // envelope fragment (≤253 pb bytes):
 //
 //   Level 1 — module list:
-//     <- Back
-//     View: PRETTY (tap to switch)        ← persists the chosen view into Level 2
+//     <- Config
+//     View: INTERACTIVE (tap to switch)   ← persists the chosen view into Level 2
 //     [crash] (2)
 //     [debug] (89)
 //     [output] (6)
 //     ...
-//     ... +N more (web UI)                ← if module count exceeds the cap
+//     << Prev / Next >>                    ← paginator chrome as needed
 //
 //   Level 2 — entries of one module, rendered in the chosen view:
-//     PRETTY:  one "key=value" row per entry, paginated when the
+//     INTERACTIVE: one "key=value" row per entry, paginated when the
 //              module has more entries than fit on one page (same
 //              "<< Prev / Next >> (p/total)" chrome as Level 1).
 //     JSON:    serialized JSON for THIS module, split into ~180 B
 //              chunks at line boundaries and shown in a TEXT widget.
-//              First page goes via CREATE-text; tap advances to the
-//              next page via REBUILD_PAGE (Cmd=7) — flicker-free, no
-//              widget churn. Real exit gestures (sid=0xE0 SysEvent —
-//              ring tap, double-tap, swipe) leave the JSON view; lens
-//              taps cycle pages with wrap. See the JSON-view
-//              pagination block below for the state machine.
+//              Every page uses the normal SHUTDOWN+CREATE text swap because
+//              REBUILD-text is unreliable on the tested firmware. Tap/scroll
+//              cycles pages with wrap; double-tap exits the JSON view.
 //
 // Why pagination instead of multi-fragment CREATE: empirical testing
 // against firmware 2.1.1.10 + 2.2.0.242 showed the EvenCore reassembler
@@ -54,6 +51,7 @@
 #include "G2_HijackCmd.h"      // g2SubmitHijackCommand / G2CmdCookie
 #include "G2_Page_TextEntry.h" // g2BeginTextEntry (string / numeric editing)
 #include <ArduinoJson.h>
+#include <new>          // std::nothrow
 #include "esp_attr.h"   // EXT_RAM_BSS_ATTR
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"     // vTaskDelay (result banners)
@@ -100,9 +98,26 @@ static const SettingEntry* gEditEntry       = nullptr;    // entry being edited 
 // captures it at submit time (passed as the callback userData); if it differs
 // by completion, the settings display changed (the user navigated between the
 // four sub-levels, which all share the single SETTINGS hijack page, or another
-// render ran) and the stale redraw is dropped. Localised twin of the g2MenuGen
-// staleness pattern, which cannot see intra-Settings navigation.
+// render ran) and the stale redraw is dropped. It complements g2MenuGen: every
+// Settings render now bumps both, while this local value also keys the pending
+// result record consumed by the lens-applier worker.
 static uint32_t            gNavGen          = 0;
+
+// At most one setting mutation is allowed to own the current Settings view.
+// The command itself runs on cmd_exec_task; its completion only publishes a
+// gen-guarded Redraw job. The lens-applier worker consumes this small result
+// record and performs the actual refresh/banner work. Protect it because the
+// tap dispatcher, cmd_exec task, and lens applier can run on different cores.
+struct SettingsCommitUiState {
+  bool     pending;
+  bool     resultReady;
+  bool     success;
+  uint32_t navGen;
+  char     message[72];
+};
+
+static portMUX_TYPE         gCommitUiMux = portMUX_INITIALIZER_UNLOCKED;
+static SettingsCommitUiState gCommitUi{};
 
 // Group buckets for the active module (built on drill-in). Each is kGroupUngrouped
 // or a SettingEntry.group pointer.
@@ -135,6 +150,12 @@ static size_t      gBucketCount = 0;
 // String built on the heap. PSRAM-resident — no DMA / ISR access.
 EXT_RAM_BSS_ATTR static char        gRows[SET_TOTAL_MODULES_ROWS][SET_ROW_LEN];
 EXT_RAM_BSS_ATTR static const char* gRowPtrs[SET_TOTAL_MODULES_ROWS];
+
+// A command failure is surfaced on the next entries render by temporarily
+// replacing its back-row label (the row still performs the normal Back action).
+// This keeps the feedback on the lens-applier worker without blocking that
+// worker or queueing a TEXT page that would need a second delayed page swap.
+static char gCommitFailureBackRow[SET_ROW_LEN] = {0};
 
 // Action tables: map a rendered row index to the semantic item it represents,
 // so tap dispatch never re-derives layout (the fragile pattern the Files page
@@ -384,7 +405,12 @@ static size_t buildGroupRows(int moduleIdx) {
 // over the (possibly non-contiguous) filtered set so pagination is exact; the
 // row->entry map is recorded for tap dispatch.
 static size_t buildEntryRows(int moduleIdx, const char* group) {
-  writeBackRow(gModuleHasGroups ? "<- Groups" : "<- Settings");
+  if (gCommitFailureBackRow[0]) {
+    writeBackRow(gCommitFailureBackRow);
+    gCommitFailureBackRow[0] = '\0';
+  } else {
+    writeBackRow(gModuleHasGroups ? "<- Groups" : "<- Settings");
+  }
   for (size_t i = 0; i < SET_TOTAL_MODULES_ROWS; i++) gEntryRowItem[i] = -1;
 
   size_t modCount = 0;
@@ -479,73 +505,229 @@ static void settingsFormatValueForEdit(const SettingEntry* e, char* out, size_t 
   }
 }
 
-// --- Render helpers. Each (a) bumps gNavGen so any in-flight commit's redraw
-// becomes stale once the display changes, and (b) re-asserts the hijack page,
-// since a preceding keyboard session leaves it at TEXT_VIEW and g2ShowListPage
-// never sets it. ---
+static void settingsClearCommitLocked() {
+  gCommitUi.pending = false;
+  gCommitUi.resultReady = false;
+  gCommitUi.success = false;
+  gCommitUi.navGen = 0;
+  gCommitUi.message[0] = '\0';
+}
+
+// Start a new display generation. The local generation catches navigation
+// among Settings' four sub-levels (which all share one hijack-page enum); the
+// global generation lets the lens-applier drop a completion that was queued
+// just before that navigation. Any commit tied to the old view is now stale.
+static void settingsBeginRender() {
+  gNavGen++;
+  g2BumpMenuGen();
+  portENTER_CRITICAL(&gCommitUiMux);
+  if (gCommitUi.pending && gCommitUi.navGen != gNavGen) {
+    settingsClearCommitLocked();
+  }
+  portEXIT_CRITICAL(&gCommitUiMux);
+}
+
+// --- Render helpers. Each (a) bumps both Settings-local and lens-global
+// generations so any in-flight commit redraw becomes stale once the display
+// changes, and (b) re-asserts the hijack page, since a preceding keyboard
+// session leaves it at TEXT_VIEW and g2ShowListPage never sets it. ---
 
 static void settingsShowModules() {
-  gNavGen++;
+  settingsBeginRender();
   size_t n = buildModuleRows();
   g2SetHijackPage(G2_HIJACK_PAGE_SETTINGS);
   g2ShowListPage(gRowPtrs, n);
 }
 
 static void settingsRenderGroups() {
-  gNavGen++;
+  settingsBeginRender();
   size_t n = buildGroupRows(gActiveModule);
   g2SetHijackPage(G2_HIJACK_PAGE_SETTINGS);
   g2ShowListPage(gRowPtrs, n);
 }
 
 static void settingsRenderEntries() {
-  gNavGen++;
+  settingsBeginRender();
   size_t n = buildEntryRows(gActiveModule, gActiveGroup);
   g2SetHijackPage(G2_HIJACK_PAGE_SETTINGS);
   g2ShowListPage(gRowPtrs, n);
 }
 
 static void settingsRenderPick() {
-  gNavGen++;
+  settingsBeginRender();
   size_t n = buildPickRows(gEditEntry);
   g2SetHijackPage(G2_HIJACK_PAGE_SETTINGS);
   g2ShowListPage(gRowPtrs, n);
 }
 
-// Flash a short message, then return to the entry list. Runs on whatever task
-// called it (cmd_exec completion for errors, g2_tap_disp for pre-flight
-// refusals / busy) — both tolerate the vTaskDelay.
+// Flash a short message, then return to the entry list. This is only for
+// synchronous pre-flight refusals on g2_tap_disp; async command completions
+// marshal their UI work to the lens-applier worker below.
 static void settingsShowBannerThenEntries(const char* msg) {
   g2ShowText(msg);
   vTaskDelay(pdMS_TO_TICKS(1300));
   settingsRenderEntries();
 }
 
+// Match executeCommand's result contract. Successful human results are
+// stamped "OK:" unless they already begin with SUCCESS; structured JSON is
+// deliberately left byte-exact. `ok` alone is insufficient because command
+// lookup currently returns true with an "Unknown command" result.
+static bool settingsCommitSucceeded(bool ok, const char* result) {
+  if (!ok || !result) return false;
+  while (*result == ' ' || *result == '\t' || *result == '\r' || *result == '\n') result++;
+  if (!result[0]) return false;
+  if (strncmp(result, "Error", 5) == 0 ||
+      strncmp(result, "ERROR", 5) == 0 ||
+      strncmp(result, "Unknown command", 15) == 0) {
+    return false;
+  }
+  if (strncmp(result, "OK", 2) == 0 || strncmp(result, "SUCCESS", 7) == 0) {
+    return true;
+  }
+  // executeCommand preserves structured results instead of prefixing them.
+  // A registered setting command that completed with a JSON object/array is
+  // therefore a valid completion, not an error banner.
+  return result[0] == '{' || result[0] == '[';
+}
+
+static bool settingsTryBeginCommit(uint32_t navGen) {
+  bool accepted = false;
+  portENTER_CRITICAL(&gCommitUiMux);
+  // A pending result from an older view is already stale and can be replaced.
+  if (!gCommitUi.pending || gCommitUi.navGen != navGen) {
+    settingsClearCommitLocked();
+    gCommitUi.pending = true;
+    gCommitUi.navGen = navGen;
+    accepted = true;
+  }
+  portEXIT_CRITICAL(&gCommitUiMux);
+  return accepted;
+}
+
+static void settingsClearCommitForGeneration(uint32_t navGen) {
+  portENTER_CRITICAL(&gCommitUiMux);
+  if (gCommitUi.pending && gCommitUi.navGen == navGen) {
+    settingsClearCommitLocked();
+  }
+  portEXIT_CRITICAL(&gCommitUiMux);
+}
+
+static bool settingsPublishCommitResult(uint32_t navGen, bool success,
+                                        const char* message) {
+  char copy[sizeof(gCommitUi.message)] = {0};
+  snprintf(copy, sizeof(copy), "%s", message ? message : "Save failed");
+
+  bool published = false;
+  portENTER_CRITICAL(&gCommitUiMux);
+  if (gCommitUi.pending && gCommitUi.navGen == navGen) {
+    gCommitUi.success = success;
+    gCommitUi.resultReady = true;
+    memcpy(gCommitUi.message, copy, sizeof(gCommitUi.message));
+    published = true;
+  }
+  portEXIT_CRITICAL(&gCommitUiMux);
+  return published;
+}
+
+static bool settingsConsumeCommitResult(bool expectedSuccess,
+                                        char* message, size_t messageCap) {
+  bool consumed = false;
+  portENTER_CRITICAL(&gCommitUiMux);
+  if (gCommitUi.pending && gCommitUi.resultReady &&
+      gCommitUi.navGen == gNavGen &&
+      gCommitUi.success == expectedSuccess) {
+    if (message && messageCap > 0) {
+      const size_t take = messageCap < sizeof(gCommitUi.message)
+                            ? messageCap : sizeof(gCommitUi.message);
+      memcpy(message, gCommitUi.message, take);
+      message[take - 1] = '\0';
+    }
+    settingsClearCommitLocked();
+    consumed = true;
+  }
+  portEXIT_CRITICAL(&gCommitUiMux);
+  return consumed;
+}
+
+// These render functions run only on the lens-applier worker. They repeat the
+// Settings-local generation/page checks because all four Settings sub-levels
+// share one G2HijackPage value and a navigation can race queue dispatch.
+static void settingsRenderCommitSuccess() {
+  if (g2GetHijackPage() != G2_HIJACK_PAGE_SETTINGS) return;
+  if (!settingsConsumeCommitResult(true, nullptr, 0)) return;
+  gLevel = SET_LEVEL_ENTRIES;
+  settingsRenderEntries();  // value re-reads live from valuePtr
+}
+
+static void settingsRenderCommitFailure() {
+  if (g2GetHijackPage() != G2_HIJACK_PAGE_SETTINGS) return;
+  char message[sizeof(gCommitUi.message)];
+  if (!settingsConsumeCommitResult(false, message, sizeof(message))) return;
+  gLevel = SET_LEVEL_ENTRIES;
+  snprintf(gCommitFailureBackRow, sizeof(gCommitFailureBackRow),
+           "<- Failed: %.27s", message);
+  settingsRenderEntries();
+}
+
+// Marshal command-completion UI work to the single lens-applier worker. The
+// command has already executed on cmd_exec_task; this helper never executes or
+// re-dispatches it inline.
+static bool settingsEnqueueCommitResult(const G2CmdCookie& cookie, bool success) {
+  RedrawSpec* spec = new (std::nothrow) RedrawSpec{};
+  if (!spec) {
+    DEBUG_G2F("[G2] Settings: RedrawSpec alloc failed");
+    return false;
+  }
+  spec->render = success ? settingsRenderCommitSuccess : settingsRenderCommitFailure;
+
+  LensUiJob* job = new (std::nothrow) LensUiJob{};
+  if (!job) {
+    DEBUG_G2F("[G2] Settings: LensUiJob alloc failed");
+    delete spec;
+    return false;
+  }
+  job->kind           = LensJobKind::Redraw;
+  job->submitMenuGen  = cookie.menuGen;
+  job->cmdSeq         = cookie.seq;
+  job->targetPage     = cookie.targetPage;
+  job->targetNetSub   = cookie.targetNetSub;
+  job->payload.redraw = spec;
+  if (!g2EnqueueLensJob(job)) {
+    DEBUG_G2F("[G2] Settings: commit redraw enqueue failed");
+    delete spec;
+    delete job;
+    return false;
+  }
+  return true;
+}
+
 // cmd_exec completion callback for a setting mutation. userData carries the
-// gNavGen captured at submit time.
+// gNavGen captured at submit time. This callback publishes state and enqueues
+// a Redraw only; all lens access stays on the lens-applier worker.
 static void onSettingsCommitDone(bool ok, const char* result,
                                  const G2CmdCookie& cookie, void* userData) {
-  (void)ok; (void)cookie;
-  // Only touch the lens if the user is still on the settings page.
-  if (g2GetHijackPage() != G2_HIJACK_PAGE_SETTINGS) return;
+  const uint32_t submitNavGen = (uint32_t)(uintptr_t)userData;
+  // Drop the result if the user is no longer on the settings page.
+  if (g2GetHijackPage() != G2_HIJACK_PAGE_SETTINGS) {
+    settingsClearCommitForGeneration(submitNavGen);
+    return;
+  }
   // Drop the redraw if the display changed since submit — the user navigated
   // between sub-levels (all share the SETTINGS hijack page, so the page guard
   // above can't catch it) or a newer render ran. The write already happened;
   // only its stale UI refresh is discarded.
-  if ((uint32_t)(uintptr_t)userData != gNavGen) return;
-  // A pick-list commit is submitted while still at SET_LEVEL_PICK (so a tap in
-  // the in-flight window re-picks rather than falling through to the entries
-  // edit handler); land back on entries here once the write completes.
-  gLevel = SET_LEVEL_ENTRIES;
-  // The ok flag is unreliable (a handler "Error:" and even "Unknown command:"
-  // return ok=true); judge success by the positive "OK" stamp.
-  const bool success = (result && strncmp(result, "OK", 2) == 0);
-  if (success) {
-    settingsRenderEntries();  // value re-reads live from valuePtr
-  } else {
-    const char* msg = (result && result[0]) ? result : "Save failed";
-    if (strncmp(msg, "Error: ", 7) == 0) msg += 7;
-    settingsShowBannerThenEntries(msg);
+  if (submitNavGen != gNavGen) {
+    settingsClearCommitForGeneration(submitNavGen);
+    return;
+  }
+
+  const bool success = settingsCommitSucceeded(ok, result);
+  const char* msg = (result && result[0]) ? result : "Save failed";
+  if (!success && strncmp(msg, "Error: ", 7) == 0) msg += 7;
+  if (!settingsPublishCommitResult(submitNavGen, success, msg)) return;
+  if (!settingsEnqueueCommitResult(cookie, success)) {
+    settingsClearCommitForGeneration(submitNavGen);
   }
 }
 
@@ -559,11 +741,18 @@ static void settingsCommit(const SettingEntry* e, const char* value) {
   // stamps "OK" and would read as a successful save. Refuse it (covers an empty
   // enum value token; the keyboard path also refuses empty input up front).
   if (!value || !value[0]) { settingsShowBannerThenEntries("Empty - not saved"); return; }
+  const uint32_t submitNavGen = gNavGen;
+  if (!settingsTryBeginCommit(submitNavGen)) {
+    DEBUG_G2F("[G2] Settings: save already pending for navGen=%u",
+              (unsigned)submitNavGen);
+    return;
+  }
   char line[96];
   snprintf(line, sizeof(line), "%s %s", cmdName, value);
   G2CmdCookie cookie = { 0, 0, g2GetHijackPage(), 0 };
   if (!g2SubmitHijackCommand(line, cookie, onSettingsCommitDone,
-                             (void*)(uintptr_t)gNavGen)) {
+                             (void*)(uintptr_t)submitNavGen)) {
+    settingsClearCommitForGeneration(submitNavGen);
     settingsShowBannerThenEntries("Busy - try again");
   }
 }

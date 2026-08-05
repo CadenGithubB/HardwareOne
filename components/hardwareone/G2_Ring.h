@@ -3,6 +3,8 @@
 
 #include "System_BuildConfig.h"
 #include <Arduino.h>
+#include <stddef.h>
+#include <stdint.h>
 
 // =============================================================================
 // Even Realities R1 Ring — BLE central module
@@ -23,6 +25,179 @@
 // the G2 umbrella — no separate compile flag because nobody has a ring
 // without glasses).
 // =============================================================================
+
+// A request being accepted is deliberately distinct from the ring having
+// applied it. Callers keep the handle and inspect the transaction snapshot;
+// no setter below reports synchronous success.
+enum G2RingTransactionState : uint8_t {
+  G2_RING_TX_INVALID = 0,
+  G2_RING_TX_QUEUED,
+  G2_RING_TX_WRITTEN,
+  G2_RING_TX_ACKED,
+  G2_RING_TX_VERIFIED,
+  G2_RING_TX_REFUSED,
+  G2_RING_TX_TIMEOUT,
+  G2_RING_TX_DISCONNECTED,
+};
+
+enum G2RingTransactionError : uint8_t {
+  G2_RING_ERR_NONE = 0,
+  G2_RING_ERR_NOT_CONNECTED,
+  G2_RING_ERR_QUEUE_FULL,
+  G2_RING_ERR_ENCODE,
+  G2_RING_ERR_WRITE,
+  G2_RING_ERR_ACK_ERROR,
+  G2_RING_ERR_ACK_REFUSED,
+  G2_RING_ERR_ACK_NOT_SUPPORTED,
+  G2_RING_ERR_TIMEOUT,
+  G2_RING_ERR_DISCONNECTED,
+  G2_RING_ERR_VERIFY_MISMATCH,
+  G2_RING_ERR_PROFILE_UNKNOWN,
+  G2_RING_ERR_IDENTITY_UNKNOWN,
+  G2_RING_ERR_CLOCK_UNAVAILABLE,
+};
+
+enum G2RingDesiredState : uint8_t {
+  G2_RING_PRESERVE = 0,
+  G2_RING_OFF = 1,
+  G2_RING_ON = 2,
+};
+
+enum G2RingObservedState : uint8_t {
+  G2_RING_OBS_UNKNOWN = 0,
+  G2_RING_OBS_OFF = 1,
+  G2_RING_OBS_ON = 2,
+};
+
+enum G2RingSetupState : uint8_t {
+  G2_RING_SETUP_IDLE = 0,
+  G2_RING_SETUP_AUTH,
+  G2_RING_SETUP_DEVICE_INFO,
+  G2_RING_SETUP_PROFILE,
+  G2_RING_SETUP_TIME,
+  G2_RING_SETUP_ADV_START,
+  G2_RING_SETUP_READY,
+  G2_RING_SETUP_ERROR,
+};
+
+// Public, dependency-free view of the protocol profile selected from the
+// ring's exact deviceInfo firmware string. Values intentionally mirror the
+// private System_R1_Protocol profile identifiers, but callers do not need to
+// include the encoder/decoder header.
+enum G2RingProtocolProfile : uint8_t {
+  G2_RING_PROFILE_UNKNOWN = 0,
+  G2_RING_PROFILE_FW_2_2_7_0005 = 1,
+};
+
+struct G2RingTransactionHandle {
+  uint32_t id;
+  uint32_t generation;
+};
+
+struct G2RingTransactionStatus {
+  G2RingTransactionHandle handle;
+  G2RingTransactionState  state;
+  uint8_t                 module;
+  uint8_t                 cmd;
+  uint8_t                 subCmd;
+  uint8_t                 ackCode;       // R1 wire ACK code, 0 when absent
+  uint8_t                 errorCode;     // G2RingTransactionError
+  uint32_t                queuedAtMs;
+  uint32_t                writtenAtMs;
+  uint32_t                completedAtMs;
+};
+
+struct G2RingControlStatus {
+  uint32_t            generation;
+  G2RingSetupState    setupState;
+  uint8_t             setupLastError;    // G2RingTransactionError
+  G2RingProtocolProfile protocolProfile;
+  bool                protocolProfileKnown;
+  bool                advIdentityKnown;
+
+  G2RingDesiredState  healthDesired;
+  G2RingObservedState healthObserved;
+  bool                healthPending;
+  uint8_t             healthLastError;
+  uint32_t            healthObservedAtMs;
+  G2RingTransactionHandle healthTransaction;
+
+  G2RingDesiredState  lowPowerDesired;
+  G2RingObservedState lowPowerObserved;
+  bool                lowPowerPending;
+  uint8_t             lowPowerLastError;
+  uint32_t            lowPowerObservedAtMs;
+  G2RingTransactionHandle lowPowerTransaction;
+};
+
+inline const char* g2RingTransactionStateName(G2RingTransactionState state) {
+  switch (state) {
+    case G2_RING_TX_QUEUED:       return "queued";
+    case G2_RING_TX_WRITTEN:      return "written";
+    case G2_RING_TX_ACKED:        return "acked";
+    case G2_RING_TX_VERIFIED:     return "verified";
+    case G2_RING_TX_REFUSED:      return "refused";
+    case G2_RING_TX_TIMEOUT:      return "timeout";
+    case G2_RING_TX_DISCONNECTED: return "disconnected";
+    default:                      return "invalid";
+  }
+}
+
+inline const char* g2RingTransactionErrorName(uint8_t errorCode) {
+  switch ((G2RingTransactionError)errorCode) {
+    case G2_RING_ERR_NONE:              return "none";
+    case G2_RING_ERR_NOT_CONNECTED:     return "not-connected";
+    case G2_RING_ERR_QUEUE_FULL:        return "queue-full";
+    case G2_RING_ERR_ENCODE:            return "encode";
+    case G2_RING_ERR_WRITE:             return "write";
+    case G2_RING_ERR_ACK_ERROR:         return "ack-error";
+    case G2_RING_ERR_ACK_REFUSED:       return "ack-refused";
+    case G2_RING_ERR_ACK_NOT_SUPPORTED: return "ack-not-supported";
+    case G2_RING_ERR_TIMEOUT:           return "timeout";
+    case G2_RING_ERR_DISCONNECTED:      return "disconnected";
+    case G2_RING_ERR_VERIFY_MISMATCH:   return "verify-mismatch";
+    case G2_RING_ERR_PROFILE_UNKNOWN:   return "profile-unknown";
+    case G2_RING_ERR_IDENTITY_UNKNOWN:  return "identity-unknown";
+    case G2_RING_ERR_CLOCK_UNAVAILABLE: return "clock-unavailable";
+    default:                            return "unknown";
+  }
+}
+
+inline const char* g2RingDesiredStateName(G2RingDesiredState state) {
+  switch (state) {
+    case G2_RING_OFF: return "off";
+    case G2_RING_ON:  return "on";
+    default:          return "preserve";
+  }
+}
+
+inline const char* g2RingObservedStateName(G2RingObservedState state) {
+  switch (state) {
+    case G2_RING_OBS_OFF: return "off";
+    case G2_RING_OBS_ON:  return "on";
+    default:              return "unknown";
+  }
+}
+
+inline const char* g2RingSetupStateName(G2RingSetupState state) {
+  switch (state) {
+    case G2_RING_SETUP_AUTH:        return "auth";
+    case G2_RING_SETUP_DEVICE_INFO: return "device-info";
+    case G2_RING_SETUP_PROFILE:     return "profile";
+    case G2_RING_SETUP_TIME:        return "time";
+    case G2_RING_SETUP_ADV_START:   return "adv-start";
+    case G2_RING_SETUP_READY:       return "ready";
+    case G2_RING_SETUP_ERROR:       return "error";
+    default:                        return "idle";
+  }
+}
+
+inline const char* g2RingProtocolProfileName(G2RingProtocolProfile profile) {
+  switch (profile) {
+    case G2_RING_PROFILE_FW_2_2_7_0005: return "2.2.7.0005";
+    default:                            return "unknown";
+  }
+}
 
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 
@@ -131,13 +306,41 @@ void g2RingDisconnect();
 // mode) so Health polls cannot write through a freed characteristic.
 void g2RingInvalidateLink();
 
-// Non-blocking: if bleCentralTx is free, flush any ring frames that were
-// queued while an image burst (or other peer) held the controller gate.
-// Safe from G2 send paths between envelopes; no-op when empty or busy.
+// Non-blocking compatibility hook: wake the serialized ring owner so queued
+// semantic transactions can retry the shared controller gate.
 void g2RingTryDrainPendingTx();
 
 // True if we currently have a live BLE link to the ring.
 bool g2RingIsConnected();
+
+// Fixed-capacity transaction/control snapshots. `true` from a setter means
+// the desired policy was accepted for asynchronous reconciliation; inspect
+// the returned handle/status (or G2RingControlStatus) for the outcome.
+bool g2RingGetTransactionStatus(const G2RingTransactionHandle& handle,
+                                G2RingTransactionStatus& out);
+void g2RingGetControlStatus(G2RingControlStatus& out);
+bool g2RingSetHealthCollectionDesired(
+    G2RingDesiredState desired,
+    G2RingTransactionHandle* outHandle = nullptr);
+bool g2RingSetLowPowerDesired(
+    G2RingDesiredState desired,
+    G2RingTransactionHandle* outHandle = nullptr);
+bool g2RingRefreshControlStatus(
+    G2RingTransactionHandle* outHealth = nullptr,
+    G2RingTransactionHandle* outLowPower = nullptr);
+
+// Ask the transport-owned history coordinator to fetch the exact-profile
+// daily metrics in sequence. Repeated requests collapse into one sweep;
+// `force` is retained when any caller requests it.
+bool g2RingRequestHistoryRefresh(bool force = false);
+
+// Internal/diagnostic escape hatch. This only submits a transaction; policy
+// gates (admin + confirmation for SETs) live at the CLI boundary.
+bool g2RingSubmitRawTransaction(
+    uint8_t module, uint8_t cmd, uint8_t subCmd,
+    uint8_t statusType, uint8_t statusMethod, uint8_t statusAck,
+    const uint8_t* payload, size_t payloadLen,
+    G2RingTransactionHandle* outHandle = nullptr);
 
 // Fill `buf` with a short human-readable status line. Used by the
 // `ringstatus` CLI command and the web UI Ring panel.
@@ -180,15 +383,15 @@ struct G2RingTelemetry {
 void g2RingGetTelemetry(G2RingTelemetry& out);
 
 // Send ONE vitals point-query to the ring: 0=HR, 1=HRV, 2=SpO2, 3=Temp,
-// 4=deviceStatus (battery + wear). Fire-and-forget write-no-response; the
-// reply arrives via notify and lands in the telemetry cache above. Returns
-// false when not connected or `which` is out of range. Callers wanting a
+// 4=deviceStatus (battery + wear). The request is queued to the transaction
+// owner; the reply arrives via notify and lands in the telemetry cache above.
+// Returns false when not connected/queueable or `which` is out of range. Callers wanting a
 // full refresh send 0..G2_RING_POLL_VITAL_COUNT-1 spaced ≥700 ms apart.
 bool g2RingPollVital(uint8_t which);
 
 // Fire a health/{cmd}/daily query (empty payload). `cmd` is R1_CMD_HEARTRATE /
 // HRV / SPO2 / etc. Reply arrives via notify; parsers may call into Health
-// history backfill. Returns false when not connected.
+// history backfill. Returns false when not connected or not queueable.
 bool g2RingQueryDaily(uint8_t cmd);
 
 // Paced vital poll for background logging: advances an internal cursor
@@ -253,6 +456,22 @@ inline void g2RingInvalidateLink() {}
 inline bool g2RingConnectInFlight() { return false; }
 inline void g2RingTryDrainPendingTx() {}
 inline bool g2RingIsConnected()  { return false; }
+inline bool g2RingGetTransactionStatus(const G2RingTransactionHandle&,
+                                       G2RingTransactionStatus&) { return false; }
+inline void g2RingGetControlStatus(G2RingControlStatus& out) {
+  out = G2RingControlStatus{};
+}
+inline bool g2RingSetHealthCollectionDesired(
+    G2RingDesiredState, G2RingTransactionHandle* = nullptr) { return false; }
+inline bool g2RingSetLowPowerDesired(
+    G2RingDesiredState, G2RingTransactionHandle* = nullptr) { return false; }
+inline bool g2RingRefreshControlStatus(
+    G2RingTransactionHandle* = nullptr,
+    G2RingTransactionHandle* = nullptr) { return false; }
+inline bool g2RingRequestHistoryRefresh(bool = false) { return false; }
+inline bool g2RingSubmitRawTransaction(
+    uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t,
+    const uint8_t*, size_t, G2RingTransactionHandle* = nullptr) { return false; }
 inline void g2RingGetStatus(char* buf, size_t cap) {
   if (buf && cap > 0) buf[0] = '\0';
 }

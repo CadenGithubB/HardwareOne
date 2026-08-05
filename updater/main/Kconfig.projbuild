@@ -1,0 +1,46 @@
+menu "HardwareOne recovery updater"
+
+config HW1_UPDATER_AP_IP
+    string "Recovery SoftAP IPv4 address"
+    default "192.168.77.1"
+
+config HW1_UPDATER_AP_CHANNEL
+    int "Recovery SoftAP channel"
+    range 1 13
+    default 6
+
+config HW1_UPDATER_MIN_BATTERY_PERCENT
+    int "Minimum battery percentage when USB is absent"
+    range 1 100
+    default 30
+
+config HW1_UPDATER_IDLE_TIMEOUT_SEC
+    int "Authenticated recovery idle timeout"
+    range 60 86400
+    default 900
+
+config HW1_UPDATER_APPLY_TIMEOUT_SEC
+    int "Maximum image receive/apply duration"
+    range 60 3600
+    default 600
+
+config HW1_UPDATER_WDT_TIMEOUT_MS
+    int "Updater control-task watchdog timeout"
+    range 5000 60000
+    default 15000
+
+config HW1_UPDATER_HTTP_PORT
+    int "Recovery HTTP port"
+    range 1 65535
+    default 80
+
+config HW1_UPDATER_ENABLE_SERIAL_FORMATFS
+    bool "Enable migration-only serial 'formatfs confirm' command"
+    default n
+    help
+        This is a build-time migration gate for the only destructive storage
+        command. It is never automatic and is never exposed over HTTP. Enable
+        only for an explicitly backed-up first-layout migration, issue the
+        exact serial command 'formatfs confirm', then disable it again.
+
+endmenu

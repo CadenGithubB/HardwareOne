@@ -30,6 +30,7 @@
 #include "System_MemUtil.h"
 #include "System_MemoryMonitor.h"
 #include "System_Mutex.h"   // SensorCacheGuard — used by the G2 sensor-stream paths below
+#include "System_OTA.h"     // encrypted BLE OTA binary-frame sink
 
 // Sensor caches for the BLE sensor-stream path (buildSensorDataJSON). Pull in the
 // REAL headers — never hand-copy these structs. This file used to re-declare
@@ -165,6 +166,10 @@ static bool bleIsAuthed(uint16_t connId, String& outUser) {
   outUser = gBLEState->connections[slot].user;
   BLE_DEBUGF(DEBUG_BLE_CORE, "Session authed lookup conn=%u user='%s'", (unsigned)connId, outUser.c_str());
   return outUser.length() > 0;
+}
+
+bool bleGetAuthenticatedUser(uint16_t connId, String& outUser) {
+  return bleIsAuthed(connId, outUser);
 }
 
 // Peer MAC for audit `ip` (e.g. "ble:AA:BB:CC:DD:EE:FF"). Falls back to
@@ -658,7 +663,7 @@ void bleAddMessageToHistory(const char* msg);
 static bool bleIsFileBrowserCommand(const char* line) {
   static const char* const kVerbs[] = {
     "files", "fileread", "filewrite", "fileview", "filecreate",
-    "filedelete", "filerename", "mkdir", "rmdir"
+    "filedelete", "filerename", "mkdir", "rmdir", "otawrite"
   };
   for (const char* v : kVerbs) {
     size_t n = strlen(v);
@@ -848,6 +853,12 @@ static void bleScDeferredInbound(void* arg) {
   BleScResult r = bleScHandleInbound(d->connId, d->buf, d->len, plain, sizeof(plain), &pl);
   if (r == BLE_SC_PLAINTEXT_READY) {
     processBleCommandLine(d->connId, plain, pl);   // execute the decrypted command
+  } else if (r == BLE_SC_BINARY_READY) {
+    // The secure-channel decoder recognized an opaque application envelope.
+    // OTA performs its own live-session/superadmin check for every frame.
+    bleMarkActivity(d->connId);
+    (void)otaBleHandleEncryptedFrame(d->connId,
+                                     reinterpret_cast<const uint8_t*>(plain), pl);
   }
   free(d);
 }
@@ -892,7 +903,10 @@ bool initBluetooth() {
   if (isG2ClientInitialized()) {
     BLE_DEBUGF(DEBUG_BLE_CORE, "Stopping G2 client mode first");
     broadcastOutput("[BLE] Stopping G2 client mode first");
-    deinitG2Client();
+    if (!deinitG2Client()) {
+      broadcastOutput("[BLE] Cannot start server mode: G2 control owner did not stop");
+      return false;
+    }
     vTaskDelay(pdMS_TO_TICKS(200));
   }
 #endif
@@ -2026,7 +2040,9 @@ static const char* cmd_blemode(const String& argsInput) {
 #if ENABLE_G2_GLASSES
     if (isG2ClientInitialized()) {
       broadcastOutput("[BLE] Stopping G2 client mode");
-      deinitG2Client();
+      if (!deinitG2Client()) {
+        return "Error: [BLE] G2 client teardown deferred; mode unchanged";
+      }
     }
 #endif
     setSetting(gSettings.bleMode, (int)BLE_MODE_SERVER);
@@ -2404,6 +2420,10 @@ static void buildSystemStatusJSON(char* buf, size_t bufSize) {
 }
 
 void bleUpdateStreams() {
+  // This entry point is called every main-loop lap even when there is no BLE
+  // client. Keep OTA upload cleanup ahead of the connection early-return so a
+  // disconnect cannot retain an open partial file indefinitely.
+  otaBleUploadHousekeeping();
   if (!gBLEState || !isBLEConnected()) return;
   
   uint32_t now = millis();

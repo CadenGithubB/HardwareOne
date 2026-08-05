@@ -55,11 +55,11 @@
 //
 // Ranges:
 //   0        invalid — never assign
-//   1–9      Transport     (ACK live; NACK/FRAG_REQ/FRAG_REPLY reserved 2–4)
+//   1–9      Transport     (ACK live, RELAY_DATA=5 live; NACK/FRAG_REQ/FRAG_REPLY reserved 2–4)
 //   10–29    Crypto        (KEY_EX_* 10–12, SESSION_* 13–15;
 //                           16/17 earmarked SESSION_AUTH_REQ/GRANT)
-//   30–49    Discovery     (HEARTBEAT, BOOT, TOPO_*, TIME_SYNC, PAIR_BEACON;
-//                           37–39 earmarked CAP_REQ/CAP_RESP/PEER_LIST)
+//   30–49    Discovery     (HEARTBEAT, BOOT, TOPO_*, TIME_SYNC, PAIR_BEACON,
+//                           PEER_LIST=39 live; 37/38 earmarked CAP_REQ/CAP_RESP)
 //   50–69    App unicast   (CMD, CMD_RESP, TEXT, METADATA_*, USER_SYNC)
 //   70–89    Remote FS     (FS_* read side live 70–75; 76–81 earmarked write
 //                           side: DELETE_REQ/ACK, PUT_REQ/ACK, MKDIR, RENAME)
@@ -96,6 +96,10 @@ enum EspNowV4Type : uint8_t {
   // --- Transport (1–9) ---
   ESPNOW_V4_TYPE_ACK             = 1,
   // 2–4 reserved (NACK, FRAG_REQ, FRAG_REPLY for future negotiated retransmit)
+  ESPNOW_V4_TYPE_RELAY_DATA      = 5,  // Routed-unicast envelope: BROADCAST_AUTH outer frame carrying
+                                       //   {finalDst, hopsUsed} + a BYTE-IDENTICAL inner V4 frame.
+                                       //   Relays are cryptographically blind to the inner frame
+                                       //   (they hold the group key, not the endpoints' session keys).
 
   // --- Crypto / pairing (10–29) ---
   ESPNOW_V4_TYPE_KEY_EX_HELLO    = 10,
@@ -115,7 +119,10 @@ enum EspNowV4Type : uint8_t {
   ESPNOW_V4_TYPE_TOPO_PEER       = 34,
   ESPNOW_V4_TYPE_TIME_SYNC       = 35,
   ESPNOW_V4_TYPE_PAIR_BEACON     = 36,  // Discovery beacon — BROADCAST_AUTH FF broadcast sent while a discovery window is open
-  // 37–39 earmarked CAP_REQ / CAP_RESP / PEER_LIST (mesh capability discovery)
+  // 37/38 earmarked CAP_REQ / CAP_RESP (mesh capability discovery)
+  ESPNOW_V4_TYPE_PEER_LIST       = 39,  // Distance-vector route advertisement. BROADCAST_AUTH, ttl=1
+                                        //   ALWAYS (never relayed — it describes the sender's own view,
+                                        //   so forwarding it would attribute someone else's routes to us).
   // Discover-then-confirm pairing control (BROADCAST_AUTH FF broadcast + V4PayloadPairCtrl.targetMac).
   ESPNOW_V4_TYPE_PAIR_REQUEST    = 40,  // initiator → target: "I want to pair" (payload carries requester name)
   ESPNOW_V4_TYPE_PAIR_ACCEPT     = 41,  // target → initiator: user accepted; both sides now run pairsecure
@@ -214,8 +221,17 @@ struct __attribute__((packed)) EspNowV4Header {
   uint8_t  headerLen;        // 6   — ESPNOW_V4_HEADER_LEN (32)
   uint8_t  reserved1;        // 7   — alignment padding, must be 0
   uint32_t msgId;            // 8–11
-  uint8_t  origin[6];        // 12–17 — original sender MAC (for mesh forwarding)
-  uint8_t  ttl;              // 18  — time-to-live (hops remaining)
+  uint8_t  origin[6];        // 12–17 — original sender MAC. NOT the radio sender once a frame has
+                             //         been relayed: every forwarder preserves origin verbatim so
+                             //         dedup, attribution and loop suppression stay end-to-end.
+  uint8_t  ttl;              // 18  — hops remaining. Decremented (and the BROADCAST_AUTH tag
+                             //         recomputed) by each forwarder; a frame arriving with ttl<=1
+                             //         is delivered locally but never forwarded again. ttl=1 at TX
+                             //         therefore means "single hop, never relayed" — that is the
+                             //         correct value for anything link-local (HEARTBEAT, PEER_LIST,
+                             //         ACK, PAIR_*). Relay-eligible today: BROADCAST_AUTH TEXT and
+                             //         TIME_SYNC (flooded), and RELAY_DATA (routed). See
+                             //         docs/ESPNOW_MESH_SYSTEM.md.
   uint8_t  fragIndex;        // 19  — fragment index (0-based)
   uint8_t  fragCount;        // 20  — total fragment count (1 = not fragmented)
   uint8_t  reserved2;        // 21  — alignment padding, must be 0
@@ -229,6 +245,84 @@ struct __attribute__((packed)) EspNowV4Header {
 static_assert(sizeof(EspNowV4Header) == 32, "EspNowV4Header must be 32 bytes");
 
 // ---- Payload structs -------------------------------------------------------
+
+// ---- Multi-hop: routed unicast envelope (ESPNOW_V4_TYPE_RELAY_DATA) --------
+//
+// Wire layout of a routed frame, sent to the NEXT HOP (a direct ESP-NOW peer):
+//
+//   [ outer EspNowV4Header  32 B ]  type=RELAY_DATA, flags=BROADCAST_AUTH,
+//                                   origin = the forwarder that emitted THIS hop,
+//                                   ttl    = remaining hop budget,
+//                                   msgId  = the inner frame's msgId (so the outer
+//                                            frame dedups per end-to-end message)
+//   [ V4PayloadRelayData     8 B ]  finalDst + hopsUsed
+//   [ inner V4 frame     ≤ 178 B ]  BYTE-IDENTICAL — header and payload exactly as
+//                                   the originator built them, including its own
+//                                   origin, sessionId, frameSeq, crc16 and AEAD tag
+//   [ outer HMAC tag        32 B ]  BROADCAST_AUTH over (outer hdr[0..29] || the two
+//                                   blocks above), keyed by the mesh group key
+//
+// Why an envelope instead of new header fields: ttl and origin live INSIDE both
+// integrity envelopes (the BROADCAST_AUTH HMAC and the SESSION_FRAME AEAD both
+// cover header bytes 0..29). A relay holds the symmetric group key, so it may
+// legally rewrite and re-tag the OUTER header; it can never touch the inner one,
+// whose keys are pairwise. That is the whole security story of this design: the
+// relay is cryptographically blind to what it carries, and the two endpoints run
+// their normal KEY_EX / SESSION handshake straight through it.
+//
+// hopsUsed is advisory (diagnostics + a hard depth stop); ttl is the enforcement.
+struct __attribute__((packed)) V4PayloadRelayData {
+  uint8_t finalDst[6];   // ultimate destination MAC — the only node that unwraps
+  uint8_t hopsUsed;      // forwards taken so far; 0 as emitted by the originator
+  uint8_t reserved;      // pad, must be 0
+};
+static_assert(sizeof(V4PayloadRelayData) == 8, "V4PayloadRelayData must be 8 bytes");
+
+// Byte budget for what an envelope can carry. 250 (radio MTU) minus the outer
+// header, the envelope, and the outer HMAC tag.
+#define ESPNOW_V4_RELAY_MAX_INNER_FRAME \
+            (250 - ESPNOW_V4_HEADER_LEN - 8 - ESPNOW_V4_BROADCAST_AUTH_TAG_LEN)   // 178
+#define ESPNOW_V4_RELAY_MAX_INNER_PAYLOAD \
+            (ESPNOW_V4_RELAY_MAX_INNER_FRAME - ESPNOW_V4_HEADER_LEN)              // 146
+// …and what fits once the inner frame is itself AEAD-sealed end-to-end.
+#define ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT \
+            (ESPNOW_V4_RELAY_MAX_INNER_PAYLOAD - ESPNOW_V4_AEAD_TAG_LEN)          // 130
+static_assert(ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT == 130,
+              "routed-unicast plaintext budget changed — re-check the handshake "
+              "payloads below, which are sized to travel over a relay");
+
+// ---- Multi-hop: distance-vector advertisement (ESPNOW_V4_TYPE_PEER_LIST) ---
+//
+// Each node periodically broadcasts its route table (BROADCAST_AUTH, ttl=1) so
+// neighbours can learn paths beyond their own radio range. Classic split-horizon
+// distance-vector: a route is never advertised back toward its own next hop, and
+// `hops` is the ADVERTISER's cost, so a listener installs (hops + 1).
+//
+// `metric` is the worst measured link RSSI along the advertised path — the
+// bottleneck link. Listeners compare min(metric, their own link to the
+// advertiser) so a route is only as good as its weakest hop.
+struct __attribute__((packed)) V4PayloadPeerListHeader {
+  uint8_t entryCount;   // number of V4PayloadPeerListEntry records that follow
+  uint8_t role;         // sender MESH_ROLE_* (informational)
+  uint8_t seq;          // advertisement generation, wraps — diagnostics only
+  uint8_t reserved;     // pad, must be 0
+};
+static_assert(sizeof(V4PayloadPeerListHeader) == 4, "V4PayloadPeerListHeader must be 4 bytes");
+
+struct __attribute__((packed)) V4PayloadPeerListEntry {
+  uint8_t mac[6];       // a destination the advertiser can reach
+  uint8_t hops;         // advertiser's hop count to it (1 = advertiser's direct neighbour)
+  int8_t  metric;       // worst link RSSI (dBm) along the advertiser's path; -128 = unknown
+};
+static_assert(sizeof(V4PayloadPeerListEntry) == 8, "V4PayloadPeerListEntry must be 8 bytes");
+
+// How many entries fit one BROADCAST_AUTH frame (186 B of authed plaintext).
+#define ESPNOW_V4_PEER_LIST_MAX_ENTRIES \
+            ((ESPNOW_V4_MAX_BROADCAST_AUTHED_PLAINTEXT - 4) / 8)                  // 22
+static_assert(sizeof(V4PayloadPeerListHeader)
+                + ESPNOW_V4_PEER_LIST_MAX_ENTRIES * sizeof(V4PayloadPeerListEntry)
+              <= ESPNOW_V4_MAX_BROADCAST_AUTHED_PLAINTEXT,
+              "a full PEER_LIST must fit one broadcast-authed frame");
 
 struct __attribute__((packed)) V4PayloadHeartbeat {
   uint8_t  role;
@@ -778,6 +872,28 @@ struct __attribute__((packed)) V4PayloadFsGetAck {
 static_assert(sizeof(V4PayloadFsGetAck) == 140, "V4PayloadFsGetAck layout");
 static_assert(sizeof(V4PayloadFsGetAck) <= ESPNOW_V4_MAX_PLAINTEXT,
               "V4PayloadFsGetAck must fit single SESSION_FRAME");
+
+// ---- Multi-hop reachability invariants -------------------------------------
+//
+// Two out-of-range peers become reachable only if they can complete KEY_EX and
+// SESSION establishment THROUGH a relay — so every handshake frame must fit a
+// RELAY_DATA envelope. These asserts are the guard rail: grow one of these
+// payloads past the budget and far-peer pairing silently stops working (the
+// handshake would fall back to a direct send that never lands). Break the build
+// instead, and re-derive the budget rather than papering over it.
+static_assert(sizeof(V4PayloadKeyExHello)   <= ESPNOW_V4_RELAY_MAX_INNER_PAYLOAD,
+              "KEY_EX_HELLO must fit a RELAY_DATA envelope (far-peer pairing)");
+static_assert(sizeof(V4PayloadKeyExReply)   <= ESPNOW_V4_RELAY_MAX_INNER_PAYLOAD,
+              "KEY_EX_REPLY must fit a RELAY_DATA envelope (far-peer pairing)");
+static_assert(sizeof(V4PayloadKeyExConfirm) <= ESPNOW_V4_RELAY_MAX_INNER_PAYLOAD,
+              "KEY_EX_CONFIRM must fit a RELAY_DATA envelope (far-peer pairing)");
+static_assert(sizeof(V4PayloadSessionOpen)    <= ESPNOW_V4_RELAY_MAX_INNER_PAYLOAD,
+              "SESSION_OPEN must fit a RELAY_DATA envelope (far-peer sessions)");
+static_assert(sizeof(V4PayloadSessionConfirm) <= ESPNOW_V4_RELAY_MAX_INNER_PAYLOAD,
+              "SESSION_CONFIRM must fit a RELAY_DATA envelope (far-peer sessions)");
+// REKEY travels SEALED, so it spends the AEAD tag too — an exact 130+16 fit.
+static_assert(sizeof(V4PayloadSessionRekey) <= ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT,
+              "SESSION_REKEY must fit a SEALED frame inside a RELAY_DATA envelope");
 
 #endif // ENABLE_ESPNOW
 

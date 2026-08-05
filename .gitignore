@@ -1,6 +1,11 @@
 # Build artifacts
 build/
+build-feathers3/
 managed_components/
+
+# Local scratch: third-party APKs, slide drafts, and other working material
+# that must never be published from this repo.
+.scratch/
 
 # SDK config backups + per-target snapshots
 sdkconfig.old
@@ -28,6 +33,16 @@ docs/NewCapture/
 # (e.g. hardwareone-idf-gamepad-step2.bin). Build products, not source.
 *.elf
 *.bin
+
+# OTA signing material and isolated OTA sdkconfig.  The private key must never
+# enter version control; OTA builds use this conventional local filename unless
+# HW1_OTA_SIGNING_KEY points at a key kept elsewhere.
+ota_signing_key.pem
+ota_signing_key.pem.pub
+sdkconfig.ota
+sdkconfig.updater
+build-ota/
+updater/build/
 
 # macOS
 .DS_Store

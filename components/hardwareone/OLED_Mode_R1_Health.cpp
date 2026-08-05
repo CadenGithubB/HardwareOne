@@ -1,9 +1,10 @@
 // ============================================================================
-// OLED R1 Health — vitals, Poll Now, Health Track
+// OLED R1 Health — vitals, local logging, ring controls, typed history
 // ============================================================================
 // Hybrid surface: connect stays under Bluetooth → R1 Ring. This mode shows
 // live HR/HRV/SpO2/temp/battery/wear from g2RingGetTelemetry, entry/Poll
-// bursts via g2RingPollVital, and Track on/off via healthtrack.
+// bursts via g2RingPollVital. Ring collection/low-power controls use the
+// transport's async desired/observed contract; local logging is independent.
 
 #include "OLED_Display.h"
 #include "System_BuildConfig.h"
@@ -14,20 +15,52 @@
 #include <cstdio>
 
 #include "G2_Ring.h"
+#include "G2_Health.h"
 #include "HAL_Input.h"
 #include "OLED_Utils.h"
 #include "System_SensorLogging.h"
 #include "System_Settings.h"
+#include "System_User.h"
 #include "Bluetooth.h"   // bleSubsystemActive
 
-static int      sHealthSel        = 0;  // 0 Poll Now, 1 Track toggle
+enum HealthAction : uint8_t {
+  HEALTH_ACTION_POLL = 0,
+  HEALTH_ACTION_LOGGING,
+  HEALTH_ACTION_COLLECTION,
+  HEALTH_ACTION_HISTORY,
+  HEALTH_ACTION_HISTORY_FORCE,
+  HEALTH_ACTION_LOW_POWER,
+  HEALTH_ACTION_COUNT,
+};
+
+static uint8_t  sHealthSel        = 0;
+static uint8_t  sHealthActionTop  = 0;
 static uint8_t  sHealthPollCursor = G2_RING_POLL_VITAL_COUNT;  // idle when == COUNT
 static bool     sHealthWasConn    = false;
 static uint32_t sHealthLastPollMs = 0;
+static uint32_t sHealthAdminDeniedUntilMs = 0;
+
+static bool healthAdminAllowed() {
+  return gLocalDisplayAuthed && isAdminUser(gLocalDisplayUser);
+}
+
+static bool healthActionRequiresAdmin(uint8_t action) {
+  return action == HEALTH_ACTION_COLLECTION ||
+         action == HEALTH_ACTION_HISTORY_FORCE ||
+         action == HEALTH_ACTION_LOW_POWER;
+}
+
+static bool healthRequireAdmin() {
+  if (healthAdminAllowed()) return true;
+  sHealthAdminDeniedUntilMs = millis() + 1500;
+  oledMarkDirty();
+  return false;
+}
 
 static void healthOnEnter(bool isForward) {
   if (!isForward) return;
   sHealthSel        = 0;
+  sHealthActionTop  = 0;
   sHealthPollCursor = g2RingIsConnected() ? 0 : G2_RING_POLL_VITAL_COUNT;
   sHealthWasConn    = g2RingIsConnected();
   sHealthLastPollMs = 0;
@@ -78,14 +111,16 @@ static void displayR1Health() {
       g2RingPollVital(sHealthPollCursor++);
       sHealthLastPollMs = now;
       if (sHealthPollCursor >= G2_RING_POLL_VITAL_COUNT) {
-        healthTrackNotePageRefresh();
+        healthLoggingNotePageRefresh();
       }
     }
   }
 
   oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
   oledDisplay->print("R1 HEALTH ");
-  if (!bleSubsystemActive()) oledDisplay->println("[BLE]");
+  if ((int32_t)(sHealthAdminDeniedUntilMs - millis()) > 0)
+                               oledDisplay->println("[DENIED]");
+  else if (!bleSubsystemActive()) oledDisplay->println("[BLE]");
   else if (conn)             oledDisplay->println("[OK]");
   else                       oledDisplay->println("[--]");
 
@@ -153,17 +188,51 @@ static void displayR1Health() {
   }
   oledDisplay->print(v);
 
+  G2RingControlStatus control = {};
+  g2RingGetControlStatus(control);
+  G2HealthHistorySummary history = {};
+  g2HealthHistoryGetSummary(history);
+
   const int a0 = OLED_CONTENT_START_Y + 38;
-  for (int i = 0; i < 2; i++) {
-    oledDisplay->setCursor(0, a0 + i * 8);
-    oledDisplay->print(i == sHealthSel ? "> " : "  ");
-    if (i == 0) {
+  constexpr uint8_t kVisibleActions = 2;
+  if (sHealthSel < sHealthActionTop) sHealthActionTop = sHealthSel;
+  if (sHealthSel >= sHealthActionTop + kVisibleActions)
+    sHealthActionTop = sHealthSel - kVisibleActions + 1;
+  for (uint8_t row = 0; row < kVisibleActions; ++row) {
+    const uint8_t action = sHealthActionTop + row;
+    if (action >= HEALTH_ACTION_COUNT) break;
+    oledDisplay->setCursor(0, a0 + row * 8);
+    oledDisplay->print(action == sHealthSel ? "> " : "  ");
+    if (healthActionRequiresAdmin(action) && !healthAdminAllowed()) {
+      if (action == HEALTH_ACTION_COLLECTION) oledDisplay->print("Collect [admin]");
+      else if (action == HEALTH_ACTION_HISTORY_FORCE) oledDisplay->print("Force Hist [admin]");
+      else oledDisplay->print("LowP [admin]");
+    } else if (action == HEALTH_ACTION_POLL) {
       oledDisplay->print("Poll Now");
       if (sHealthPollCursor < G2_RING_POLL_VITAL_COUNT) oledDisplay->print("...");
-    } else {
-      oledDisplay->print("Track ");
-      oledDisplay->print(healthTrackIsActive() ? "ON" :
-                         (gSettings.healthTrackingEnabled ? "arm" : "off"));
+    } else if (action == HEALTH_ACTION_LOGGING) {
+      oledDisplay->print("Logging ");
+      oledDisplay->print(healthLoggingIsActive() ? "ON" :
+                         (gSettings.healthLoggingEnabled ? "armed" : "off"));
+    } else if (action == HEALTH_ACTION_COLLECTION) {
+      oledDisplay->print("Collect ");
+      oledDisplay->print(g2RingDesiredStateName(control.healthDesired));
+      oledDisplay->print("/");
+      oledDisplay->print(g2RingObservedStateName(control.healthObserved));
+      if (control.healthPending) oledDisplay->print("...");
+      else if (control.healthLastError != G2_RING_ERR_NONE) oledDisplay->print(" !");
+    } else if (action == HEALTH_ACTION_HISTORY) {
+      oledDisplay->print("History ");
+      oledDisplay->print(r1HealthHistoryFetchStateName(history.fetchState));
+    } else if (action == HEALTH_ACTION_HISTORY_FORCE) {
+      oledDisplay->print("Force History");
+    } else if (action == HEALTH_ACTION_LOW_POWER) {
+      oledDisplay->print("LowP ");
+      oledDisplay->print(g2RingDesiredStateName(control.lowPowerDesired));
+      oledDisplay->print("/");
+      oledDisplay->print(g2RingObservedStateName(control.lowPowerObserved));
+      if (control.lowPowerPending) oledDisplay->print("...");
+      else if (control.lowPowerLastError != G2_RING_ERR_NONE) oledDisplay->print(" !");
     }
   }
 
@@ -174,14 +243,46 @@ static void displayR1Health() {
 static bool healthInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed) {
   if (oledGuestBlocksMutate()) return true;
   if (gNavEvents.up   && sHealthSel > 0) { sHealthSel--; return true; }
-  if (gNavEvents.down && sHealthSel < 1) { sHealthSel++; return true; }
+  if (gNavEvents.down && sHealthSel + 1 < HEALTH_ACTION_COUNT) { sHealthSel++; return true; }
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A) || INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
-    if (sHealthSel == 0) {
-      healthKickPollBurst();
-    } else {
-      executeOLEDCommand(gSettings.healthTrackingEnabled
-                         ? "healthtrack off"
-                         : "healthtrack on");
+    switch (sHealthSel) {
+      case HEALTH_ACTION_POLL:
+        healthKickPollBurst();
+        break;
+      case HEALTH_ACTION_LOGGING:
+        executeOLEDCommand(gSettings.healthLoggingEnabled
+                           ? "healthlogging off"
+                           : "healthlogging on");
+        break;
+      case HEALTH_ACTION_COLLECTION: {
+        if (!healthRequireAdmin()) break;
+        G2RingControlStatus status = {};
+        g2RingGetControlStatus(status);
+        const G2RingDesiredState next = status.healthDesired == G2_RING_PRESERVE
+            ? G2_RING_ON : (status.healthDesired == G2_RING_ON
+                ? G2_RING_OFF : G2_RING_PRESERVE);
+        (void)g2RingSetHealthCollectionDesired(next);
+        break;
+      }
+      case HEALTH_ACTION_HISTORY:
+        (void)g2RingRequestHistoryRefresh(false);
+        break;
+      case HEALTH_ACTION_HISTORY_FORCE:
+        if (!healthRequireAdmin()) break;
+        (void)g2RingRequestHistoryRefresh(true);
+        break;
+      case HEALTH_ACTION_LOW_POWER: {
+        if (!healthRequireAdmin()) break;
+        G2RingControlStatus status = {};
+        g2RingGetControlStatus(status);
+        const G2RingDesiredState next = status.lowPowerDesired == G2_RING_PRESERVE
+            ? G2_RING_ON : (status.lowPowerDesired == G2_RING_ON
+                ? G2_RING_OFF : G2_RING_PRESERVE);
+        (void)g2RingSetLowPowerDesired(next);
+        break;
+      }
+      default:
+        break;
     }
     return true;
   }

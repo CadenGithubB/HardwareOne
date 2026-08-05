@@ -3045,20 +3045,52 @@ static void drawProgressBar(int percent);
 // ============================================================================
 // OLED Change Detection - Skip rendering when nothing has changed
 // ============================================================================
-// Uses existing sequence counters from sensor caches to detect changes
+// Uses existing sequence counters from sensor caches to detect changes.
+//
+// Everything below is a GENERATION COUNTER, never a "set a bool / clear the
+// bool" flag, and that distinction is the whole point. A render frame is long:
+// the displayUpdate() at its tail pushes the 1 KB framebuffer over I2C (~20 ms
+// at 400 kHz, plus however long it waits for the bus lock). The frame runs on
+// the main loop task, but oledMarkDirty() is called from OTHER tasks —
+// cmd_exec_task for every CLI/web/BLE/ESP-NOW command, sensor tasks, ESP-NOW
+// callbacks. With a bool, any mark that landed after the oledIsDirty() check
+// but before the oledClearDirty() at the tail was wiped by that clear, and the
+// change never reached the panel: the screen sat stale (or blank, if whatever
+// made the change had also cleared the framebuffer) until some *unrelated*
+// event marked it dirty again — usually the user nudging the joystick.
+//
+// So: mark = bump a counter; the frame snapshots the counters it is about to
+// paint (oledSnapshotFrameSeqs) and clearDirty consumes only THOSE values. A
+// mark that arrives mid-frame leaves seq != consumed and renders next frame.
 static uint32_t oledLastRenderedGamepadSeq = 0;
 static unsigned long oledLastRenderedSensorSeq = 0;
-static bool oledForceNextRender = true;  // Force first render
+// Bumped by oledMarkDirty() from any task. A raced read-modify-write can merge
+// two bumps into one, which is harmless: both writers store consumedSeq+n, so
+// the result can never land back ON consumedSeq and read as "clean".
+static volatile uint32_t oledDirtySeq = 1;
+static uint32_t oledConsumedDirtySeq = 0;    // != oledDirtySeq → forces the first render
 static unsigned long oledDirtyUntilMs = 0;  // Keep rendering dirty until this time (for timed popups)
+
+// Snapshot of the three counters taken when the in-flight frame committed to
+// rendering. oledClearDirty() records these rather than "whatever is current
+// now", which is what keeps mid-frame marks alive.
+static uint32_t oledFrameDirtySeq = 0;
+static uint32_t oledFrameGamepadSeq = 0;
+static unsigned long oledFrameSensorSeq = 0;
+
+// Pending display-rotation request (oledflip). setRotation() and the framebuffer
+// belong to the render task; applyOLEDRotation() can be called from any task, so
+// it records the request here and the next frame applies it at a safe boundary.
+static volatile bool oledRotationPending = false;
 
 // Manual dirty flag for non-sensor changes (menu state, settings, etc.)
 void oledMarkDirty() {
-  oledForceNextRender = true;
+  oledDirtySeq++;
 }
 
 void oledMarkDirtyMode(OLEDMode mode) {
   // For compatibility - any mode change triggers dirty
-  oledForceNextRender = true;
+  oledMarkDirty();
 }
 
 void oledMarkDirtyUntil(unsigned long untilMs) {
@@ -3068,8 +3100,8 @@ void oledMarkDirtyUntil(unsigned long untilMs) {
 bool oledIsDirty() {
   extern volatile unsigned long gSensorStatusSeq;
   extern InputCache gInputCache;
-  
-  if (oledForceNextRender) return true;
+
+  if (oledDirtySeq != oledConsumedDirtySeq) return true;
   if (gInputCache.seq != oledLastRenderedGamepadSeq) return true;
   if (gSensorStatusSeq != oledLastRenderedSensorSeq) return true;
   if (oledPairingRibbonActive()) return true;  // Continuous render during notification animations
@@ -3077,18 +3109,26 @@ bool oledIsDirty() {
   return false;
 }
 
-void oledClearDirty() {
+// Called once per frame, at the moment updateOLEDDisplay() commits to rendering.
+// Anything that changes after this point stays pending for the next frame.
+static void oledSnapshotFrameSeqs() {
   extern volatile unsigned long gSensorStatusSeq;
   extern InputCache gInputCache;
-  
-  oledForceNextRender = false;
-  oledLastRenderedGamepadSeq = gInputCache.seq;
-  oledLastRenderedSensorSeq = gSensorStatusSeq;
+
+  oledFrameDirtySeq   = oledDirtySeq;
+  oledFrameGamepadSeq = gInputCache.seq;
+  oledFrameSensorSeq  = gSensorStatusSeq;
+}
+
+void oledClearDirty() {
+  oledConsumedDirtySeq       = oledFrameDirtySeq;
+  oledLastRenderedGamepadSeq = oledFrameGamepadSeq;
+  oledLastRenderedSensorSeq  = oledFrameSensorSeq;
 }
 
 void oledSetAlwaysDirty(bool always) {
   // For animations - just keep forcing renders
-  if (always) oledForceNextRender = true;
+  if (always) oledMarkDirty();
 }
 
 #if ENABLE_WIFI || ENABLE_ESPNOW
@@ -3208,6 +3248,12 @@ void requestOLEDMode(OLEDMode newMode, const char* reason, bool pushStack, bool 
     if (entered && entered->onEnterFunc) {
       entered->onEnterFunc(!isBackNav);
     }
+    // The render loop's own modeChanged check (currentOLEDMode vs
+    // lastRenderedMode) covers the common case, but it can't see an A→B→A
+    // round trip that completes inside one update interval — B's onEnter ran
+    // and reset A's view state, yet modeChanged reads false. Mark dirty so the
+    // repaint doesn't wait on unrelated input.
+    oledMarkDirty();
   }
 }
 
@@ -3673,6 +3719,13 @@ void updateOLEDDisplay() {
   oledLastUpdate = now;
   lastRenderedMode = currentOLEDMode;
 
+  // Committed to painting a frame — capture what this frame is about to show.
+  // oledClearDirty() at the tail consumes these values, so a mark that lands
+  // while we're drawing/pushing survives into the next frame instead of being
+  // swallowed. Taken before the degraded-I2C bail below on purpose: that path
+  // returns without calling oledClearDirty(), so nothing gets consumed.
+  oledSnapshotFrameSeqs();
+
   // Skip if OLED is degraded (will auto-retry after recovery timeout)
   if (i2cDeviceIsDegraded(OLED_I2C_ADDRESS)) {
     static unsigned long lastDegradedLog = 0;
@@ -3682,6 +3735,16 @@ void updateOLEDDisplay() {
       DEBUG_DISPLAYF("[OLED] Skipping render - I2C device marked DEGRADED");
     }
     return;
+  }
+
+  // Apply a pending rotation (oledflip) here, at a frame boundary, rather than
+  // in the task that asked for it — swapping the GFX coordinate transform out
+  // from under a render already in progress would tear the frame. No clear is
+  // needed first: the full-screen fill below repaints every pixel, so nothing
+  // survives in the old orientation.
+  if (oledRotationPending) {
+    oledRotationPending = false;
+    gDisplay->setRotation(gSettings.oledFlipped ? 2 : 0);
   }
 
   // Pre-gather data OUTSIDE I2C transaction to avoid blocking gamepad
@@ -3994,6 +4057,8 @@ const char* cmd_oled_brightness(const String& argsInput) {
   int v = atoi(p);
   if (v < 0 || v > 255) return "Error: OLED brightness must be 0..255";
   setSetting(gSettings.oledBrightness, (int)v);
+  applyOLEDBrightness();   // same live-apply oledflip does; the setting alone
+                           // only reached the panel on the next reboot / wake
   snprintf(getDebugBuffer(), 1024, "OLED brightness set to %d", v);
   return getDebugBuffer();
 }
@@ -4171,6 +4236,10 @@ const char* cmd_oledtext(const String& argsInput) {
   extern String customOLEDText;
   customOLEDText = text;
   requestOLEDMode(OLED_CUSTOM_TEXT, "cli.customtext", false);
+  // customOLEDText isn't a registered setting, so nothing else announces the
+  // change. Without this, `oledtext` while ALREADY on the custom-text page is a
+  // no-op mode request → modeChanged false → the old message stays up.
+  oledMarkDirty();
 
   if (ensureDebugBuffer()) {
     snprintf(getDebugBuffer(), 1024, "Custom text set: %s", text.c_str());
@@ -4908,7 +4977,7 @@ const OLEDMenuItem oledMenuCategory4[] = {
   { "Automations","notify_automation", OLED_AUTOMATIONS },
 #endif
 #if ENABLE_R1_HEALTH
-  // R1 vitals + Poll Now + Health Track. The mode renders its own [BLE]/[--]
+  // R1 vitals + Poll Now + Health Logging. The mode renders its own [BLE]/[--]
   // state when the ring is down, so the row stays visible and useful whether
   // or not a ring is connected — same reasoning as LLM Chat above.
   { "Health",     "bt_idle",           OLED_R1_HEALTH },
@@ -6588,18 +6657,25 @@ void applyOLEDBrightness() {
 #endif
 }
 
-// Apply oledFlipped live by re-rotating the active display. setRotation only
-// changes the GFX coordinate transform — anything already in the frame buffer
-// stays in the old orientation until the next render tick draws over a cleared
-// buffer, so we clear + flush once to avoid showing a mirrored intermediate
-// frame. The next normal mode tick repaints in the new orientation.
+// Apply oledFlipped live by re-rotating the active display.
+//
+// This only REQUESTS the rotation: the render task applies it at the top of the
+// next frame (see oledRotationPending in updateOLEDDisplay). Callers are on
+// other tasks — cmd_exec_task for `oledflip` and the on-device settings editor,
+// the sleep-resume path — and both setRotation() and the framebuffer belong to
+// the render task.
+//
+// It used to rotate, clearDisplay() and flush right here. That blanked the
+// panel from the calling task and then marked nothing dirty, so the render loop
+// had no reason to repaint: the screen stayed BLACK until some unrelated event
+// (a joystick nudge bumping gInputCache.seq, a sensor status change, a live
+// page's timed dirty) happened to wake it. On a static page — menu, logo,
+// settings list — that meant "flip does nothing but turn the screen off".
 void applyOLEDRotation() {
 #if ENABLE_OLED_DISPLAY
   if (!oledConnected || !gOledRunning || !gDisplay) return;
-  uint8_t rot = gSettings.oledFlipped ? 2 : 0;
-  gDisplay->setRotation(rot);
-  gDisplay->clearDisplay();
-  displayUpdate();
+  oledRotationPending = true;
+  oledMarkDirty();   // without this the request would sit unapplied — see above
 #endif
 }
 

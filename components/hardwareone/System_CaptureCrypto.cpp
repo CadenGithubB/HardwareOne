@@ -147,6 +147,36 @@ bool captureCryptoEnsureKey() {
   return true;
 }
 
+bool captureCryptoPseudonym(const char* domain, const char* value,
+                            char* outHex, size_t outCap) {
+  if (!domain || !domain[0] || !value || !value[0] || !outHex || outCap < 33)
+    return false;
+  const size_t domainLen = strlen(domain);
+  const size_t valueLen = strlen(value);
+  if (domainLen > 64 || valueLen > 128 || !captureCryptoEnsureKey()) return false;
+
+  unsigned char digest[16];
+  crypto_generichash_state state;
+  if (crypto_generichash_init(&state, sKey, sizeof(sKey), sizeof(digest)) != 0)
+    return false;
+  // Length-delimit the domain so ("ab", "c") cannot collide structurally
+  // with ("a", "bc") before the keyed hash is applied.
+  const uint8_t domainSize = static_cast<uint8_t>(domainLen);
+  if (crypto_generichash_update(&state, &domainSize, sizeof(domainSize)) != 0 ||
+      crypto_generichash_update(
+          &state, reinterpret_cast<const unsigned char*>(domain), domainLen) != 0 ||
+      crypto_generichash_update(
+          &state, reinterpret_cast<const unsigned char*>(value), valueLen) != 0 ||
+      crypto_generichash_final(&state, digest, sizeof(digest)) != 0) {
+    sodium_memzero(digest, sizeof(digest));
+    return false;
+  }
+  sodium_bin2hex(outHex, outCap, digest, sizeof(digest));
+  sodium_memzero(digest, sizeof(digest));
+  sodium_memzero(&state, sizeof(state));
+  return true;
+}
+
 int captureCryptoSealLine(const char* in, size_t inLen, char* out, size_t outCap) {
   if (!in || !out) return -1;
   if (inLen > CAPCRYPT_MAX_ROW) return -1;
