@@ -39,12 +39,14 @@
 // CRC16 input = model[0..3] + model[5..9] + model[12..]
 // CRC16 algo  = CCITT-XMODEM-like, init 0xFFFF — see r1Crc16().
 //
-// Auth flow (verified empirically against R1 firmware 2.0.8.0011 via captured
-// frames in docs/FlutterApp-main/test/protocol/r1_messages_test.dart):
+// Setup primitives. The control owner is responsible for sequencing them and
+// waiting for acknowledgements; this codec only builds/decodes frames:
 //   1. Send pairAuth (subCmd=0x08 payload=[0x01], status=notify/get/ok)
-//   2. Send systemTime (subCmd=0x05 payload=tz_min(i16 LE)+epoch_s(u32 LE),
+//   2. Read deviceInfo and select an exact protocol profile
+//   3. Send systemTime (subCmd=0x05 payload=tz_min(i16 LE)+epoch_s(u32 LE),
 //      status=notify/SET/ok)
-//   3. Send advStart (subCmd=0x0A payload=G2_right_mac_reversed(6 B),
+//   4. On firmware 2.2.7.0005, send advStart (subCmd=0x0A payload=
+//      reversed G2 right MAC + reversed G2 left MAC, 12 B total,
 //      status=notify/get/ok)
 //
 // After step 1 the ring acks with status=ack/set/ok and begins emitting
@@ -123,6 +125,34 @@
 #define R1_MAX_PAYLOAD             256
 #define R1_MAX_FRAME              (1 + 4 + 12 + R1_MAX_PAYLOAD)
 
+// Firmware-specific payloads are never selected by shape. Only the exact
+// deviceInfo firmware string below enables the 2.2.7.0005 settings/history
+// layouts; every other string remains read/diagnostic-only.
+enum R1ProtocolProfile : uint8_t {
+  R1_PROFILE_UNKNOWN = 0,
+  R1_PROFILE_FW_2_2_7_0005 = 1,
+};
+
+const char* r1ProtocolProfileName(R1ProtocolProfile profile);
+R1ProtocolProfile r1ProfileForFirmware(const char* firmware);
+
+// Structured parser result used by every typed decoder. These values are
+// stable diagnostic/API identifiers; callers must not infer success from a
+// partially populated output object.
+enum R1ParseError : uint8_t {
+  R1_PARSE_OK = 0,
+  R1_PARSE_BAD_CRC = 1,
+  R1_PARSE_LENGTH = 2,
+  R1_PARSE_WRONG_PROFILE = 3,
+  R1_PARSE_UNSUPPORTED_LAYOUT = 4,
+  R1_PARSE_SLOT_RANGE = 5,
+  R1_PARSE_VALUE_RANGE = 6,
+  R1_PARSE_TOO_LARGE = 7,
+  R1_PARSE_DUPLICATE_SLOT = 8,
+};
+
+const char* r1ParseErrorName(R1ParseError error);
+
 // -----------------------------------------------------------------------------
 // Encoded outbound frame (ready for writeChar->writeValue)
 // -----------------------------------------------------------------------------
@@ -168,6 +198,23 @@ struct R1Decoded {
   uint8_t   payload[R1_MAX_PAYLOAD];
 };
 
+// A frame may reach typed ingestion only when both the outer CRC32 and the
+// declared model length are valid and the complete payload fit our bounded
+// decoder. Ring-originated CRC16 is intentionally not part of this gate; known
+// firmware emits a bad CRC16 while retaining a valid CRC32.
+R1ParseError r1ValidateDecoded(const R1Decoded& decoded);
+bool r1DecodedIsTrusted(const R1Decoded& decoded);
+
+struct R1DeviceInfo {
+  char firmware[17];
+  char hardware[17];
+  R1ProtocolProfile profile;
+};
+
+// Exact 32-byte deviceInfo response: two NUL-padded 16-byte printable strings.
+// Profile selection compares the decoded firmware string exactly.
+R1ParseError r1ParseDeviceInfo(const R1Decoded& decoded, R1DeviceInfo& out);
+
 // -----------------------------------------------------------------------------
 // CRC helpers — exposed for unit testing / diagnostics. Not normally needed
 // by callers (the encoder/decoder use them internally).
@@ -179,12 +226,11 @@ uint32_t r1Crc32(const uint8_t* data, size_t len);
 // requires. modelLen must be >= 12.
 uint16_t r1ModelCrc16(const uint8_t* model, size_t modelLen);
 
-// One-shot self-test against captured FlutterApp fixtures. Returns true if
-// pairAuth (serial=1) AND systemTime (serial=3, tz=-4h, epoch=1773881395)
-// reproduce their expected wire bytes verbatim. Cheap (~ a dozen XORs) and
-// safe to call early in init. Logs detailed pass/fail via DEBUG_G2F so a
-// silent regression in our CRC ports is caught the first time the ring
-// module spins up after a flash.
+// One-shot self-test against sanitized golden vectors. It anchors both CRC
+// algorithms, exact 2.2.7.0005 builders, typed settings/daily decoders, strict
+// profile/integrity gates, and representative malformed pages. It contains no
+// real device identifier or health value. Logs pass/fail via DEBUG_G2F; callers
+// decide whether a failure should disable ring writes for the session.
 bool r1ProtocolSelfTest();
 
 // -----------------------------------------------------------------------------
@@ -204,8 +250,9 @@ public:
   // the peer expects to see serial 1 first.
   void resetSerial() { serial_ = 0; }
 
-  // Build a generic frame. Returns a R1Frame with length=0 if payload exceeds
-  // R1_MAX_PAYLOAD. Caller passes raw enums; the helper packs the status byte.
+  // Build a generic frame. Returns length=0 without consuming a serial when
+  // payload exceeds R1_MAX_PAYLOAD or a non-empty payload pointer is null.
+  // Caller passes raw enums; the helper packs the status byte.
   R1Frame build(uint8_t module, uint8_t cmd, uint8_t subCmd,
                 uint8_t statusType, uint8_t statusMethod, uint8_t statusAck,
                 const uint8_t* payload, size_t payloadLen);
@@ -220,16 +267,12 @@ public:
   // Status notify/SET/ok (the only setup step that uses set, per FlutterApp).
   R1Frame buildSyncTime(int16_t tzOffsetMinutes, uint32_t epochSeconds);
 
-  // advStart: payload = 6-byte MAC of the G2 right temple **in BLE address
-  // order, NOT reversed** (i.e. for MAC c8:8d:65:00:97:69 send the bytes as
-  // C8 8D 65 00 97 69). Confirmed against FlutterApp r1_manager.dart:262
-  // which passes parseMacLikeBytes() output directly with no reversal, and
-  // against docs/g2_proto/Ring_Bridge_Sequence.h Step 2.3 which says
-  // "IN ORDER (NOT reversed)".
-  // Pass nullptr to send all zeros (the FlutterApp comment notes the MAC
-  // may not actually matter for some firmware — but reversing it definitely
-  // breaks the bridge).
-  R1Frame buildAdvStart(const uint8_t* mac6BleOrder);
+  // Firmware 2.2.7.0005 advStart. Inputs are the natural six-byte temple MACs;
+  // payload order is reversed-right followed by reversed-left. Unknown profile
+  // or a missing MAC fails closed with length=0 and does not consume a serial.
+  R1Frame buildAdvStart(R1ProtocolProfile profile,
+                        const uint8_t* rightMac6,
+                        const uint8_t* leftMac6);
 
   // Periodic keep-alive — used by the FlutterApp on a 30 s interval.
   // We don't call it ourselves yet but expose for future use.
@@ -239,8 +282,18 @@ public:
   // Status notify/get/ok, empty payload.
   R1Frame buildDeviceInfoQuery();
 
-  // Probe: request the active health-setting bitmap (which sensors are on).
-  R1Frame buildHealthSettingsQuery();
+  // Ring health-collection setting (system/system/0x0E). Only the timestamped
+  // 12-byte SET and its empty ACK are capture-proven. There is intentionally
+  // no GET/readback API. Unknown profiles fail closed without consuming a
+  // serial.
+  R1Frame buildHealthCollectionSet(R1ProtocolProfile profile,
+                                   uint32_t epochSeconds, bool enabled);
+
+  // Ring low-power setting (system/system/0x0F), switchType=0. As above, GET is
+  // safe while SET fails closed unless the exact firmware profile is active.
+  R1Frame buildLowPowerQuery();
+  R1Frame buildLowPowerSet(R1ProtocolProfile profile,
+                           uint32_t epochSeconds, bool enabled);
 
   // Probe: ask the ring whether it currently detects skin contact.
   // Response payload should be a 1-byte BleRing1SystemWearStatus value
@@ -262,11 +315,12 @@ public:
   // informative; we'll see the refusal in the decoded log.
   R1Frame buildHealthQuery(uint8_t cmd, uint8_t subCmd);
 
-  // Toggle the ring's continuous push behaviour. `enableMask` is sent as a
-  // single byte payload; the bit layout isn't fully RE'd. Common values
-  // worth trying: 0x00 (off), 0x01 (HR only?), 0xFF (everything). Status
-  // notify/SET/ok.
-  R1Frame buildHealthReportEnable(uint8_t enableMask);
+  // Acknowledge one trusted firmware-2.2.7.0005 health daily data notify. The
+  // payload echoes module/cmd/subCmd and received serial; byte 3 and bytes 6..9
+  // are capture-proven zero but their semantics remain unknown. Invalid CRC,
+  // length, status/opcode, or profile fails closed without consuming a serial.
+  R1Frame buildPacketAck(R1ProtocolProfile profile,
+                         const R1Decoded& received);
 
   // Generic escape hatch for testing arbitrary (module, cmd, subCmd) tuples
   // with a notify/get/ok status and empty payload. Useful for poking at
@@ -282,11 +336,10 @@ private:
 // -----------------------------------------------------------------------------
 
 // Decode a raw notify/read into out. Returns false if the frame is too short
-// to even contain the model header (in which case `out` is left in an
-// indeterminate state and callers should fall back to a hex dump). Returns
-// true even if CRCs fail — inspect out.crcValid for that. Truncates payload
-// at R1_MAX_PAYLOAD without flagging an error (such frames don't appear in
-// any captured fixture but we don't want to crash on a future surprise).
+// to contain the model header. Returns true for structurally decodable frames
+// even when an integrity flag fails; inspect crc32Valid/modelLengthValid or use
+// r1ValidateDecoded(). Oversized wire payloads are copied only up to the fixed
+// buffer and force modelLengthValid=false, so typed ingestion fails closed.
 bool r1Decode(const uint8_t* data, size_t len, R1Decoded& out);
 
 // Friendly name lookups — return literal strings (no allocation), or "?"
@@ -299,49 +352,151 @@ const char* r1StatusMethodName(uint8_t method);
 const char* r1StatusAckName(uint8_t ack);
 
 // -----------------------------------------------------------------------------
-// Speculative payload annotator
+// Diagnostic payload annotator
 // -----------------------------------------------------------------------------
-// Writes a short human-readable summary of `d.payload` into `out` based on
-// best-guess parsers for known opcodes. Returns the number of bytes written
+// Writes a short human-readable summary of `d.payload` into `out`. Daily
+// summaries are emitted only through the exact selected profile and typed
+// parsers. Returns the number of bytes written
 // (excluding null terminator). Returns 0 if the opcode has no parser, in
 // which case callers should just print the raw hex.
 //
-// The parsers here are reverse-engineered from a small handful of captured
-// payloads — none of them are protocol-confirmed. Each branch documents its
-// confidence inline. Wrong guesses are LIES, not errors: the annotation is
-// purely informational and never short-circuits the raw hex log.
-//
-// Confirmed via 2026-05-02 live captures + the python codec
-// (docs/evenrealities_rev_share-main/.../ring1_packet_codec.py):
+// Version-independent diagnostic annotations also cover these older confirmed
+// payloads without feeding them into typed daily ingestion:
 //   - system/system/wearStatus              → 1 B: 0=unknown 1=notWear 2=wear
 //   - system/system/deviceInfo              → 32 B: 16-B ASCII fw + 16-B hw ver
-//   - system/system/deviceSn                → ASCII serial (~15 B unprefixed)
-//   - system/system/getAlgoKeyStatus        → status + ASCII hex device key
-//   - system/system/healthSettingsStatus    → 12 B feature bitmap (byte 4)
-//   - system/system/systemSettingsStatus    → 12 B feature bitmap (byte 5)
-//   - system/system/nvRecover               → contains serial number ASCII
+//   - system/system/deviceSn                → redacted payload length only
+//   - system/system/get/setAlgoKey          → status/length only, key redacted
+//   - system/system/systemSettingsStatus    → 12 B low-power state
+//   - system/system/nvRecover               → redacted payload length only
 //   - system/system/deviceStatus            → 7 B: byte0=batt%?, wear, flag, zeros
 //   - system/system/heartbeatPack           → same shape as deviceStatus
 //   - health/heartRate/point                → value(i16) + ts + state + extra
 //   - health/{hrv,spo2,temperature}/point   → same shape (extra=actual reading)
-//   - health/heartRate/daily                → count + start/end ts + 4-B records
-//   - health/activity/daily                 → page + ts + 7-B records (steps,kcal)
+//   - health HR/SpO2/HRV/activity daily     → exact 2.2.7.0005 typed pages
 //
 // Anything else returns 0 and the caller falls back to raw hex.
-size_t r1AnnotatePayload(const R1Decoded& d, char* out, size_t cap);
+size_t r1AnnotatePayload(R1ProtocolProfile profile, const R1Decoded& d,
+                         char* out, size_t cap);
 
-// Structured parse of health/{hr,spo2,hrv,temp}/daily payloads (11-byte
-// header + count×4-byte records + 1 trailing). Returns false on size
-// mismatch or empty input. `values[]` receives record[0] (primary metric
-// byte — BPM for HR; speculative for siblings). Cap is the values array size.
-struct R1DailyResult {
-  bool     ok;
-  uint8_t  count;
-  uint32_t startTs;
-  uint32_t endTs;
-  uint8_t  values[64];
+// -----------------------------------------------------------------------------
+// Exact firmware-2.2.7.0005 settings/profile decoders
+// -----------------------------------------------------------------------------
+struct R1LowPowerStatus {
+  uint32_t epochSeconds;
+  uint8_t switchType;
+  bool enabled;
 };
-bool r1ParseHealthDaily(const uint8_t* p, size_t len, R1DailyResult& out);
+
+struct R1UserInfo {
+  uint8_t gender;
+  uint8_t age;
+  uint16_t heightCm;
+  uint16_t weightKg;
+  uint8_t reserved[6];
+};
+
+R1ParseError r1ParseLowPowerStatus(R1ProtocolProfile profile,
+                                   const R1Decoded& decoded,
+                                   R1LowPowerStatus& out);
+// Decode-only policy boundary. There is intentionally no production user-info
+// builder, UI, or CLI; changing that requires a separate explicit design
+// decision and must never be inferred from a future capture alone.
+R1ParseError r1ParseUserInfo(R1ProtocolProfile profile,
+                             const R1Decoded& decoded,
+                             R1UserInfo& out);
+
+// -----------------------------------------------------------------------------
+// Exact firmware-2.2.7.0005 daily page models
+// -----------------------------------------------------------------------------
+enum R1DailyMetric : uint8_t {
+  R1_DAILY_METRIC_HEART_RATE = R1_CMD_HEARTRATE,
+  R1_DAILY_METRIC_SPO2 = R1_CMD_SPO2,
+  R1_DAILY_METRIC_HRV = R1_CMD_HRV,
+  R1_DAILY_METRIC_ACTIVITY = R1_CMD_ACTIVITY,
+};
+
+#define R1_COMMON_DAILY_MAX_RECORDS    24
+#define R1_HRV_DAILY_MAX_RECORDS       24
+// A full day has 144 ten-minute slots, but the current bounded single-frame
+// decoder can carry at most 35. Pagination/fragmentation remains a separate
+// evidence gate; a page that exceeds this limit returns R1_PARSE_TOO_LARGE.
+#define R1_ACTIVITY_DAILY_MAX_RECORDS  ((R1_MAX_PAYLOAD - 11) / 7)
+#define R1_FW227_DAILY_TRAILER          0x0000000FUL
+
+struct R1CommonDailyRecord {
+  uint8_t hourSlot;
+  uint8_t average;
+  uint8_t maximum;
+  uint8_t minimum;
+  uint32_t bucketEpoch;
+};
+
+struct R1CommonDailyResult {
+  R1ProtocolProfile profile;
+  R1DailyMetric metric;
+  uint16_t sourceSerial;
+  uint32_t sourceCrc32;
+  int16_t timezoneMinutes;
+  uint32_t dayStart;
+  uint32_t latestTimestamp;
+  uint8_t latestValue;
+  uint8_t count;
+  uint32_t trailer;
+  R1CommonDailyRecord records[R1_COMMON_DAILY_MAX_RECORDS];
+};
+
+struct R1HrvDailyRecord {
+  uint8_t hourSlot;
+  uint16_t average;
+  uint16_t maximum;
+  uint16_t minimum;
+  uint32_t bucketEpoch;
+};
+
+struct R1HrvDailyResult {
+  R1ProtocolProfile profile;
+  R1DailyMetric metric;
+  uint16_t sourceSerial;
+  uint32_t sourceCrc32;
+  int16_t timezoneMinutes;
+  uint32_t dayStart;
+  uint32_t latestTimestamp;
+  uint16_t latestValue;
+  uint8_t count;
+  uint32_t trailer;
+  R1HrvDailyRecord records[R1_HRV_DAILY_MAX_RECORDS];
+};
+
+struct R1ActivityDailyRecord {
+  uint8_t tenMinuteSlot;
+  uint16_t steps;
+  uint16_t activeKcal;
+  uint16_t restingKcal;
+  uint16_t totalKcal;
+  uint32_t bucketEpoch;
+};
+
+struct R1ActivityDailyResult {
+  R1ProtocolProfile profile;
+  R1DailyMetric metric;
+  uint16_t sourceSerial;
+  uint32_t sourceCrc32;
+  int16_t timezoneMinutes;
+  uint32_t dayStart;
+  uint8_t count;
+  uint32_t trailer;
+  R1ActivityDailyRecord records[R1_ACTIVITY_DAILY_MAX_RECORDS];
+};
+
+R1ParseError r1ParseCommonDaily(R1ProtocolProfile profile,
+                                const R1Decoded& decoded,
+                                R1CommonDailyResult& out);
+R1ParseError r1ParseHrvDaily(R1ProtocolProfile profile,
+                             const R1Decoded& decoded,
+                             R1HrvDailyResult& out);
+R1ParseError r1ParseActivityDaily(R1ProtocolProfile profile,
+                                  const R1Decoded& decoded,
+                                  R1ActivityDailyResult& out);
 
 #endif  // ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 #endif  // SYSTEM_R1_PROTOCOL_H

@@ -323,7 +323,7 @@ inline void streamBluetoothInner(httpd_req_t* req) {
           <span>Auto-reconnect</span>
         </label>
         <div style='font-size:.78em;color:var(--muted);margin-top:8px;line-height:1.4'>
-          Connect / Auto-reconnect for the ring. Live vitals and Health Track
+          Connect / Auto-reconnect for the ring. Live vitals and Health Logging
           live on the <a href='/r1-health'>R1 Health</a> page (when compiled in).
           Run the Temples <b>Scan</b> first with the ring in range; its
           advert is stashed during the G2 scan.

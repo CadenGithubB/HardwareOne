@@ -1,0 +1,13 @@
+# HardwareOne recovery-OTA layout for 16 MB FeatherS3 boards with ESP-SR.
+# Migration to this layout is cable-only and relocates the model/LittleFS
+# partitions. Back up data before first flash.
+#
+# Name,     Type, SubType,  Offset,    Size,      Flags
+nvs,        data, nvs,      0xA000,    0x4000,
+nvs_key,    data, nvs_keys, 0xE000,    0x1000,    encrypted
+phy_init,   data, phy,      0xF000,    0x1000,
+factory,    app,  factory,  0x10000,   0x14E000,
+otadata,    data, ota,      0x15E000,  0x2000,    encrypted
+ota_0,      app,  ota_0,    0x160000,  0x5A0000,
+model,      data, spiffs,   0x700000,  0x2F0000,  encrypted
+littlefs,   data, littlefs, 0x9F0000,  0x610000,  encrypted

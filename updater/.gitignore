@@ -1,0 +1,7 @@
+/build*/
+/sdkconfig.feathers3
+/sdkconfig.feathers3.old
+/sdkconfig.feathers3_fe
+/sdkconfig.feathers3_fe.old
+/sdkconfig.signing
+/ota_signing_key.pem

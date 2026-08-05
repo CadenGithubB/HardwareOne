@@ -15,6 +15,8 @@
 // =============================================================================
 
 #include "System_BuildConfig.h"
+#include "R1_HealthHistoryStore.h"
+#include "System_R1_Protocol.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -34,6 +36,7 @@ enum G2HealthMetric : uint8_t {
   HEALTH_METRIC_SPO2,
   HEALTH_METRIC_TEMP,
   HEALTH_METRIC_BATTERY,
+  HEALTH_METRIC_ACTIVITY,
 };
 
 // MAIN = live Overview / metrics; TRENDS = daily-history submenu.
@@ -54,8 +57,8 @@ void g2HealthOpen(void);
 void g2HealthTick(void);
 void g2HealthAction(uint32_t rowIdx);
 
-// True while Health Track is actively logging R1 vitals (setting + mask + running).
-bool g2HealthTrackIsActive(void);
+// True while HardwareOne Health logging is actively writing R1 vitals.
+bool g2HealthLoggingIsActive(void);
 
 // Selected metric. In Trends nav: OVERVIEW = Trends landing; HR/HRV/SPO2 =
 // day graphs. Live Temp/Battery are MAIN-only.
@@ -82,9 +85,9 @@ void g2HealthArmGraphPush(uint32_t delayMs);
 bool g2HealthConsumeGraphPush(void);
 void g2HealthClearGraphPush(void);
 
-// True when the worker should fire one daily-history query (live thin backfill
-// or Trends queue). Cleared when consumed. `outCmd` is R1_CMD_*.
-bool g2HealthConsumeDailyRequest(uint8_t* outCmd /* R1_CMD_* */);
+// One request for the single transport-owned history coordinator. `force`
+// distinguishes explicit bypass of normal freshness gates from normal refresh.
+bool g2HealthConsumeHistoryRefreshRequest(bool* force);
 
 // Append a live sample. metric: HEALTH_METRIC_HR..BATTERY. ringTs is the
 // ring's epoch timestamp when known (0 = unknown → value+time gate dedupe).
@@ -115,6 +118,39 @@ void g2HealthBuildMetricText(char* out, size_t cap);
 // Trends landing (list+text) summary of last daily fetches.
 void g2HealthBuildTrendsOverviewText(char* out, size_t cap);
 
+// Text-only dispatcher for Overview, Trends landing, and Activity summary.
+void g2HealthBuildTextOnly(char* out, size_t cap);
+
+// Typed daily-history boundary. Ring-owner calls only validate and enqueue into
+// fixed-capacity PSRAM. The normal main-loop loads the exact persisted
+// peer/day/timezone key before merging or displaying a page, then stages only
+// a terminal COMPLETE/PARTIAL/ERROR generation for the secure store.
+void g2HealthSetHistoryPeerId(const char* canonicalMac);
+bool g2HealthApplyCommonDaily(const R1CommonDailyResult& result);
+bool g2HealthApplyHrvDaily(const R1HrvDailyResult& result);
+bool g2HealthApplyActivityDaily(const R1ActivityDailyResult& result);
+void g2HealthHistoryFetchStarted(void);
+void g2HealthHistoryFetchFinished(bool successfulSweep, uint8_t errorCode);
+void g2HealthHistorySetSleepState(R1HealthSleepState state);
+struct G2HealthHistorySummary {
+  bool available;
+  uint8_t protocolProfile;
+  uint32_t dayStart;
+  int16_t timezoneMinutes;
+  R1HealthHistoryFetchState fetchState;
+  uint32_t lastSuccessEpoch;
+  uint32_t lastPartialEpoch;
+  uint8_t fetchError;
+  R1HealthSleepState sleepState;
+  R1HealthActivitySummary activity;
+};
+bool g2HealthHistorySnapshot(R1HealthHistoryDay& out);
+void g2HealthHistoryGetSummary(G2HealthHistorySummary& out);
+void g2HealthActivitySummary(R1HealthActivitySummary& out);
+// Main-loop coordinator: snapshots a dirty generation, stages it to the
+// secure store, then advances store recovery/commit. Never call from notify.
+void g2HealthHistoryCommitTick(void);
+
 void g2HealthBuildInfo(char* out, size_t cap);
 
 #else  // stubs
@@ -128,6 +164,7 @@ enum G2HealthMetric : uint8_t {
   HEALTH_METRIC_SPO2,
   HEALTH_METRIC_TEMP,
   HEALTH_METRIC_BATTERY,
+  HEALTH_METRIC_ACTIVITY,
 };
 enum G2HealthNav : uint8_t {
   HEALTH_NAV_MAIN = 0,
@@ -141,7 +178,7 @@ inline bool g2HealthInTrendsNav(void) { return false; }
 inline void g2HealthOpen(void) {}
 inline void g2HealthTick(void) {}
 inline void g2HealthAction(uint32_t) {}
-inline bool g2HealthTrackIsActive(void) { return false; }
+inline bool g2HealthLoggingIsActive(void) { return false; }
 inline G2HealthMetric g2HealthSelectedMetric(void) { return HEALTH_METRIC_OVERVIEW; }
 inline bool g2HealthWantTextOnlyShape(void) { return true; }
 inline bool g2HealthConsumePollRequest(void) { return false; }
@@ -152,7 +189,7 @@ inline void g2HealthNotePollFinished(void) {}
 inline void g2HealthArmGraphPush(uint32_t) {}
 inline bool g2HealthConsumeGraphPush(void) { return false; }
 inline void g2HealthClearGraphPush(void) {}
-inline bool g2HealthConsumeDailyRequest(uint8_t*) { return false; }
+inline bool g2HealthConsumeHistoryRefreshRequest(bool*) { return false; }
 inline void g2HealthNoteSample(G2HealthMetric, int16_t, uint32_t) {}
 inline void g2HealthApplyDailyBackfill(G2HealthMetric, const uint8_t*, size_t, uint32_t, uint32_t) {}
 inline void g2HealthApplyTrendDaily(G2HealthMetric, const uint8_t*, size_t, uint32_t, uint32_t) {}
@@ -161,6 +198,32 @@ inline size_t g2RenderHealthBmp(uint8_t*, size_t) { return 0; }
 inline void g2HealthBuildOverviewText(char* out, size_t cap) { if (out && cap) out[0] = '\0'; }
 inline void g2HealthBuildMetricText(char* out, size_t cap) { if (out && cap) out[0] = '\0'; }
 inline void g2HealthBuildTrendsOverviewText(char* out, size_t cap) { if (out && cap) out[0] = '\0'; }
+inline void g2HealthBuildTextOnly(char* out, size_t cap) { if (out && cap) out[0] = '\0'; }
+inline void g2HealthSetHistoryPeerId(const char*) {}
+#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
+inline bool g2HealthApplyCommonDaily(const R1CommonDailyResult&) { return false; }
+inline bool g2HealthApplyHrvDaily(const R1HrvDailyResult&) { return false; }
+inline bool g2HealthApplyActivityDaily(const R1ActivityDailyResult&) { return false; }
+#endif
+inline void g2HealthHistoryFetchStarted(void) {}
+inline void g2HealthHistoryFetchFinished(bool, uint8_t) {}
+inline void g2HealthHistorySetSleepState(R1HealthSleepState) {}
+struct G2HealthHistorySummary {
+  bool available;
+  uint8_t protocolProfile;
+  uint32_t dayStart;
+  int16_t timezoneMinutes;
+  R1HealthHistoryFetchState fetchState;
+  uint32_t lastSuccessEpoch;
+  uint32_t lastPartialEpoch;
+  uint8_t fetchError;
+  R1HealthSleepState sleepState;
+  R1HealthActivitySummary activity;
+};
+inline bool g2HealthHistorySnapshot(R1HealthHistoryDay&) { return false; }
+inline void g2HealthHistoryGetSummary(G2HealthHistorySummary& out) { out = G2HealthHistorySummary{}; }
+inline void g2HealthActivitySummary(R1HealthActivitySummary& out) { out = R1HealthActivitySummary{}; }
+inline void g2HealthHistoryCommitTick(void) {}
 inline void g2HealthBuildInfo(char* out, size_t cap) { if (out && cap) out[0] = '\0'; }
 
 #endif  // ENABLE_R1_HEALTH

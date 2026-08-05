@@ -15,6 +15,8 @@
 
 #include "System_Debug.h"
 #include "System_Command.h"
+#include "System_CLIConfirm.h"
+#include "System_AuthIdentity.h"
 #include "System_TaskUtils.h"  // APP_CORE / PRO_CORE task-placement constants
 #include "System_Utils.h"
 #include "System_MemUtil.h"
@@ -34,6 +36,7 @@
 #include <time.h>
 #include <sys/time.h>
 #include <freertos/task.h>
+#include <freertos/queue.h>
 #include <freertos/semphr.h>
 #include <string.h>
 #include <ctype.h>
@@ -94,23 +97,354 @@ struct G2RingState {
 };
 static G2RingState gRing;
 
-// Short central take — if the glasses hold the gate for an envelope, we
-// enqueue rather than block for seconds (or drop into the ether).
 static constexpr uint32_t RING_CENTRAL_TX_MS = 50;
 static constexpr uint32_t RING_WRITE_MUTEX_MS = 1500;
+static constexpr uint32_t RING_TRANSACTION_TIMEOUT_MS = 5000;
+static constexpr uint32_t RING_SETUP_TIMEOUT_MS = 7000;
+static constexpr uint32_t RING_OWNER_STACK_BYTES = 6144;
+static constexpr uint8_t  RING_INTENT_QUEUE_DEPTH = 12;
+static constexpr uint8_t  RING_TRANSACTION_HISTORY_DEPTH = 24;
+static constexpr uint8_t  RING_RX_QUEUE_DEPTH = 8;
+static constexpr uint8_t  RING_PACKET_ACK_DEPTH = 4;
+static constexpr uint8_t  RING_RX_DUPLICATE_DEPTH = 16;
 
-// Pending TX while bleCentralTx is busy (image envelopes, heartbeats, …).
-// coalesceKey != 0 → replace any queued frame with the same key (polls).
-// coalesceKey == 0 → FIFO; if full, drop the oldest non-coalesced slot.
-static constexpr size_t RING_TXQ_DEPTH = 8;
-struct RingTxPending {
-  uint8_t  bytes[R1_MAX_FRAME];
-  uint16_t len;
-  uint8_t  coalesceKey;  // 0 = unique; 1.. = replace same key
+enum RingIntentKind : uint8_t {
+  RING_INTENT_RAW = 0,
+  RING_INTENT_PAIR_AUTH,
+  RING_INTENT_DEVICE_INFO,
+  RING_INTENT_SYNC_TIME,
+  RING_INTENT_ADV_START,
+  RING_INTENT_HEALTH_QUERY,
+  RING_INTENT_HEALTH_COLLECTION_SET,
+  RING_INTENT_LOW_POWER_QUERY,
+  RING_INTENT_LOW_POWER_SET,
 };
-static RingTxPending gRingTxQ[RING_TXQ_DEPTH];
-static uint8_t       gRingTxQCount = 0;
-static portMUX_TYPE  gRingTxQMux = portMUX_INITIALIZER_UNLOCKED;
+
+enum RingControlTarget : uint8_t {
+  RING_CONTROL_NONE = 0,
+  RING_CONTROL_HEALTH,
+  RING_CONTROL_LOW_POWER,
+};
+
+struct RingIntent {
+  G2RingTransactionHandle handle{};
+  RingIntentKind kind = RING_INTENT_RAW;
+  uint8_t module = 0;
+  uint8_t cmd = 0;
+  uint8_t subCmd = 0;
+  uint8_t statusType = R1_STATUS_TYPE_NOTIFY;
+  uint8_t statusMethod = R1_STATUS_METHOD_GET;
+  uint8_t statusAck = R1_STATUS_ACK_OK;
+  uint8_t coalesceKey = 0;
+  RingControlTarget control = RING_CONTROL_NONE;
+  G2RingDesiredState desired = G2_RING_PRESERVE;
+  bool expectsPayload = false;
+  bool verifyAfterAck = false;
+  uint8_t payloadSlot = 0xFF;
+  uint16_t payloadLen = 0;
+  uint32_t epoch = 0;
+  uint32_t timeoutMs = RING_TRANSACTION_TIMEOUT_MS;
+};
+
+static constexpr uint8_t RING_RAW_PAYLOAD_SLOTS = 4;
+struct RingRawPayloadSlot {
+  bool used;
+  uint8_t bytes[R1_MAX_PAYLOAD];
+};
+
+struct RingActiveTransaction {
+  bool valid = false;
+  bool frameReady = false;
+  bool written = false;
+  bool commandAcked = false;
+  bool unparsedDailyDataSeen = false;
+  bool readbackPhase = false;
+  RingIntent intent{};
+  R1Frame frame{};
+  uint32_t deadlineMs = 0;
+};
+
+struct RingSetupOwner {
+  bool active = false;
+  bool frameReady = false;
+  bool written = false;
+  uint32_t generation = 0;
+  G2RingSetupState stage = G2_RING_SETUP_IDLE;
+  R1Frame frame{};
+  uint32_t deadlineMs = 0;
+};
+
+struct RingRxFrame {
+  uint32_t generation;
+  uint16_t length;
+  uint8_t bytes[R1_MAX_FRAME];
+};
+
+struct RingPacketAckPending {
+  uint32_t generation;
+  R1Decoded received;
+};
+
+struct RingActivePacketAck {
+  bool valid = false;
+  bool frameReady = false;
+  RingPacketAckPending pending{};
+  R1Frame frame{};
+};
+
+struct RingRxFingerprint {
+  uint32_t generation;
+  uint32_t crc32;
+  uint16_t serial;
+  uint8_t module;
+  uint8_t cmd;
+  uint8_t subCmd;
+  uint8_t statusByte;
+};
+
+struct RingHistoryCoordinator {
+  bool active = false;
+  bool force = false;
+  uint8_t metricIndex = 0;
+  uint8_t firstError = G2_RING_ERR_NONE;
+  uint32_t generation = 0;
+  G2RingTransactionHandle transaction{};
+};
+
+static RingIntent sIntentQueue[RING_INTENT_QUEUE_DEPTH];
+static uint8_t sIntentQueueHead = 0;
+static uint8_t sIntentQueueCount = 0;
+static RingRawPayloadSlot sRawPayloadSlots[RING_RAW_PAYLOAD_SLOTS];
+static G2RingTransactionStatus sTransactionHistory[RING_TRANSACTION_HISTORY_DEPTH];
+static uint8_t sTransactionCursor = 0;
+static uint32_t sNextTransactionId = 1;
+static portMUX_TYPE sTransportMux = portMUX_INITIALIZER_UNLOCKED;
+
+static StaticQueue_t sRxQueueStorage;
+static uint8_t sRxQueueBytes[RING_RX_QUEUE_DEPTH * sizeof(RingRxFrame)];
+static QueueHandle_t sRxQueue = nullptr;
+static TaskHandle_t sRingOwnerTask = nullptr;
+static SemaphoreHandle_t sSetupDone = nullptr;
+static StaticSemaphore_t sSetupDoneStorage;
+
+static volatile uint32_t sLinkGeneration = 0;
+static volatile bool sLinkOnline = false;
+static volatile bool sSetupRequested = false;
+static R1ProtocolProfile sR1Profile = R1_PROFILE_UNKNOWN;
+static RingActiveTransaction sActiveTransaction;
+static RingSetupOwner sSetupOwner;
+static RingPacketAckPending sPacketAckQueue[RING_PACKET_ACK_DEPTH];
+static uint8_t sPacketAckCount = 0;
+static RingActivePacketAck sActivePacketAck;
+static RingRxFingerprint sRxFingerprints[RING_RX_DUPLICATE_DEPTH];
+static uint8_t sRxFingerprintCursor = 0;
+static volatile uint32_t sRxQueueDropped = 0;
+static G2RingControlStatus sControlStatus;
+static RingHistoryCoordinator sHistoryCoordinator;
+static bool sHistoryRefreshRequested = false;
+static bool sHistoryRefreshForce = false;
+// Protected by sTransportMux. Producers use this bit to coalesce refreshes
+// without reading the owner-only coordinator object across cores.
+static bool sHistorySweepActive = false;
+static uint32_t sLastHistoryAttemptMs = 0;
+
+// The encoder is deliberately private to ringOwnerTask. No producer builds a
+// frame or allocates a serial; producers enqueue fixed-size semantic intents.
+static R1Encoder gR1Encoder;
+
+static void ringOwnerTask(void* arg);
+static void ringClockCustodyReset();
+
+static void ringWakeOwner() {
+  TaskHandle_t owner = sRingOwnerTask;
+  if (owner) xTaskNotifyGive(owner);
+}
+
+static G2RingTransactionStatus* ringFindTransactionLocked(
+    const G2RingTransactionHandle& handle) {
+  if (handle.id == 0 || handle.generation == 0) return nullptr;
+  for (uint8_t i = 0; i < RING_TRANSACTION_HISTORY_DEPTH; ++i) {
+    G2RingTransactionStatus& status = sTransactionHistory[i];
+    if (status.handle.id == handle.id &&
+        status.handle.generation == handle.generation) {
+      return &status;
+    }
+  }
+  return nullptr;
+}
+
+static G2RingTransactionStatus* ringAllocateTransactionLocked(
+    const RingIntent& intent) {
+  for (uint8_t n = 0; n < RING_TRANSACTION_HISTORY_DEPTH; ++n) {
+    const uint8_t i = (uint8_t)((sTransactionCursor + n) %
+                                RING_TRANSACTION_HISTORY_DEPTH);
+    G2RingTransactionStatus& status = sTransactionHistory[i];
+    if (status.state != G2_RING_TX_INVALID && status.completedAtMs == 0) {
+      continue;
+    }
+    status = G2RingTransactionStatus{};
+    status.handle = intent.handle;
+    status.state = G2_RING_TX_QUEUED;
+    status.module = intent.module;
+    status.cmd = intent.cmd;
+    status.subCmd = intent.subCmd;
+    status.queuedAtMs = millis();
+    sTransactionCursor = (uint8_t)((i + 1) % RING_TRANSACTION_HISTORY_DEPTH);
+    return &status;
+  }
+  return nullptr;
+}
+
+static void ringUpdateTransaction(const G2RingTransactionHandle& handle,
+                                  G2RingTransactionState state,
+                                  uint8_t errorCode = G2_RING_ERR_NONE,
+                                  uint8_t ackCode = 0,
+                                  bool completed = false) {
+  const uint32_t now = millis();
+  portENTER_CRITICAL(&sTransportMux);
+  G2RingTransactionStatus* status = ringFindTransactionLocked(handle);
+  if (status) {
+    status->state = state;
+    status->errorCode = errorCode;
+    status->ackCode = ackCode;
+    if (state == G2_RING_TX_WRITTEN && status->writtenAtMs == 0) {
+      status->writtenAtMs = now;
+    }
+    if (completed) status->completedAtMs = now;
+  }
+  portEXIT_CRITICAL(&sTransportMux);
+}
+
+static int ringReserveRawPayload(const uint8_t* payload, size_t payloadLen) {
+  if (payloadLen == 0) return -1;
+  int slot = -1;
+  portENTER_CRITICAL(&sTransportMux);
+  for (uint8_t i = 0; i < RING_RAW_PAYLOAD_SLOTS; ++i) {
+    if (!sRawPayloadSlots[i].used) {
+      sRawPayloadSlots[i].used = true;
+      slot = i;
+      break;
+    }
+  }
+  portEXIT_CRITICAL(&sTransportMux);
+  if (slot >= 0) memcpy(sRawPayloadSlots[slot].bytes, payload, payloadLen);
+  return slot;
+}
+
+static void ringReleaseRawPayload(uint8_t slot) {
+  if (slot >= RING_RAW_PAYLOAD_SLOTS) return;
+  portENTER_CRITICAL(&sTransportMux);
+  sRawPayloadSlots[slot].used = false;
+  portEXIT_CRITICAL(&sTransportMux);
+}
+
+static bool ringEnqueueIntent(RingIntent intent,
+                              G2RingTransactionHandle* outHandle = nullptr,
+                              bool wakeOwner = true) {
+  if (outHandle) *outHandle = G2RingTransactionHandle{};
+  if (!sLinkOnline || !gRing.connected || !gRing.writeChar || gRing.clientStale) {
+    return false;
+  }
+
+  portENTER_CRITICAL(&sTransportMux);
+  const uint32_t generation = sLinkGeneration;
+  if (intent.coalesceKey != 0) {
+    for (uint8_t i = 0; i < sIntentQueueCount; ++i) {
+      const uint8_t index = (uint8_t)((sIntentQueueHead + i) %
+                                      RING_INTENT_QUEUE_DEPTH);
+      if (sIntentQueue[index].handle.generation == generation &&
+          sIntentQueue[index].coalesceKey == intent.coalesceKey) {
+        if (outHandle) *outHandle = sIntentQueue[index].handle;
+        portEXIT_CRITICAL(&sTransportMux);
+        return true;
+      }
+    }
+  }
+  if (sIntentQueueCount >= RING_INTENT_QUEUE_DEPTH) {
+    portEXIT_CRITICAL(&sTransportMux);
+    return false;
+  }
+  uint32_t id = sNextTransactionId++;
+  if (id == 0) id = sNextTransactionId++;
+  intent.handle = { id, generation };
+  if (!ringAllocateTransactionLocked(intent)) {
+    portEXIT_CRITICAL(&sTransportMux);
+    return false;
+  }
+  const uint8_t tail = (uint8_t)((sIntentQueueHead + sIntentQueueCount) %
+                                 RING_INTENT_QUEUE_DEPTH);
+  sIntentQueue[tail] = intent;
+  ++sIntentQueueCount;
+  if (outHandle) *outHandle = intent.handle;
+  portEXIT_CRITICAL(&sTransportMux);
+  if (wakeOwner) ringWakeOwner();
+  return true;
+}
+
+static bool ringPopIntent(RingIntent& out) {
+  portENTER_CRITICAL(&sTransportMux);
+  if (sIntentQueueCount == 0) {
+    portEXIT_CRITICAL(&sTransportMux);
+    return false;
+  }
+  out = sIntentQueue[sIntentQueueHead];
+  sIntentQueueHead = (uint8_t)((sIntentQueueHead + 1) %
+                               RING_INTENT_QUEUE_DEPTH);
+  --sIntentQueueCount;
+  portEXIT_CRITICAL(&sTransportMux);
+  return true;
+}
+
+static void ringMarkGenerationDisconnected(uint32_t generation) {
+  const uint32_t now = millis();
+  portENTER_CRITICAL(&sTransportMux);
+  for (uint8_t i = 0; i < RING_TRANSACTION_HISTORY_DEPTH; ++i) {
+    G2RingTransactionStatus& status = sTransactionHistory[i];
+    if (status.handle.generation == generation &&
+        status.state != G2_RING_TX_INVALID && status.completedAtMs == 0) {
+      status.state = G2_RING_TX_DISCONNECTED;
+      status.errorCode = G2_RING_ERR_DISCONNECTED;
+      status.completedAtMs = now;
+    }
+  }
+  // Compact only this generation out of the descriptor ring. A fast reconnect
+  // may already have accepted new-generation intents before the owner observes
+  // the old barrier; those must survive.
+  uint8_t kept = 0;
+  for (uint8_t i = 0; i < sIntentQueueCount; ++i) {
+    const uint8_t readIndex = (uint8_t)((sIntentQueueHead + i) %
+                                        RING_INTENT_QUEUE_DEPTH);
+    const RingIntent intent = sIntentQueue[readIndex];
+    if (intent.handle.generation == generation) {
+      if (intent.payloadSlot < RING_RAW_PAYLOAD_SLOTS) {
+        sRawPayloadSlots[intent.payloadSlot].used = false;
+      }
+      continue;
+    }
+    const uint8_t writeIndex = (uint8_t)((sIntentQueueHead + kept) %
+                                         RING_INTENT_QUEUE_DEPTH);
+    if (writeIndex != readIndex) sIntentQueue[writeIndex] = intent;
+    ++kept;
+  }
+  sIntentQueueCount = kept;
+  if (kept == 0) sIntentQueueHead = 0;
+  if (sControlStatus.generation == generation) {
+    sControlStatus.healthPending = false;
+    sControlStatus.lowPowerPending = false;
+    sControlStatus.healthLastError = G2_RING_ERR_DISCONNECTED;
+    sControlStatus.lowPowerLastError = G2_RING_ERR_DISCONNECTED;
+    if (sControlStatus.setupState != G2_RING_SETUP_READY) {
+      sControlStatus.setupState = G2_RING_SETUP_ERROR;
+      sControlStatus.setupLastError = G2_RING_ERR_DISCONNECTED;
+    }
+  }
+  portEXIT_CRITICAL(&sTransportMux);
+}
+
+static void ringTransportDisconnected() {
+  sLinkOnline = false;
+  ringWakeOwner();
+}
 
 // Lock order: bleCentralTx → gRing.writeMutex (never reverse). All ring
 // GATT writes go through here so image bursts on the glasses cannot race
@@ -125,6 +459,7 @@ static portMUX_TYPE  gRingTxQMux = portMUX_INITIALIZER_UNLOCKED;
 static void ringClockCustodyReset();  // ring-clock custody state (defined below)
 
 static void ringClearGattPointers(bool dropClientPtr) {
+  ringTransportDisconnected();
   gRing.connected  = false;
   gRing.writeChar  = nullptr;
   gRing.notifyChar = nullptr;
@@ -133,148 +468,291 @@ static void ringClearGattPointers(bool dropClientPtr) {
   ringClockCustodyReset();  // defined below — no cross-link state survives
 }
 
-static void ringTxQClear() {
-  portENTER_CRITICAL(&gRingTxQMux);
-  gRingTxQCount = 0;
-  portEXIT_CRITICAL(&gRingTxQMux);
-}
+enum RingWriteResult : uint8_t {
+  RING_WRITE_OK,
+  RING_WRITE_BUSY,
+  RING_WRITE_DISCONNECTED,
+  RING_WRITE_FAILED,
+};
 
-// Returns true if the frame was stored (or replaced a same-key entry).
-static bool ringTxQEnqueue(const uint8_t* data, size_t len, uint8_t coalesceKey) {
-  if (!data || len == 0 || len > R1_MAX_FRAME) return false;
-  portENTER_CRITICAL(&gRingTxQMux);
-  if (coalesceKey != 0) {
-    for (uint8_t i = 0; i < gRingTxQCount; i++) {
-      if (gRingTxQ[i].coalesceKey == coalesceKey) {
-        memcpy(gRingTxQ[i].bytes, data, len);
-        gRingTxQ[i].len = (uint16_t)len;
-        portEXIT_CRITICAL(&gRingTxQMux);
-        return true;
-      }
-    }
+// Lock order: bleCentralTx → gRing.writeMutex. Only ringOwnerTask calls
+// this function, so no producer can race an encoder serial or GATT write.
+static RingWriteResult ringOwnerWrite(const uint8_t* data, size_t len) {
+  if (!data || len == 0 || !sLinkOnline || !gRing.connected ||
+      !gRing.writeChar || !gRing.writeMutex || gRing.clientStale) {
+    return RING_WRITE_DISCONNECTED;
   }
-  bool droppedOldest = false;
-  if (gRingTxQCount >= RING_TXQ_DEPTH) {
-    // Drop oldest; shift left.
-    for (uint8_t i = 1; i < RING_TXQ_DEPTH; i++) gRingTxQ[i - 1] = gRingTxQ[i];
-    gRingTxQCount = RING_TXQ_DEPTH - 1;
-    droppedOldest = true;
-  }
-  RingTxPending& slot = gRingTxQ[gRingTxQCount++];
-  memcpy(slot.bytes, data, len);
-  slot.len = (uint16_t)len;
-  slot.coalesceKey = coalesceKey;
-  portEXIT_CRITICAL(&gRingTxQMux);
-  if (droppedOldest) {
-    DEBUG_G2F("[RING] TX queue full — dropped oldest pending");
-  }
-  return true;
-}
-
-// Pop front into out; returns false if empty. out must be R1_MAX_FRAME.
-static bool ringTxQPop(uint8_t* out, uint16_t* outLen) {
-  portENTER_CRITICAL(&gRingTxQMux);
-  if (gRingTxQCount == 0) {
-    portEXIT_CRITICAL(&gRingTxQMux);
-    return false;
-  }
-  memcpy(out, gRingTxQ[0].bytes, gRingTxQ[0].len);
-  *outLen = gRingTxQ[0].len;
-  for (uint8_t i = 1; i < gRingTxQCount; i++) gRingTxQ[i - 1] = gRingTxQ[i];
-  gRingTxQCount--;
-  portEXIT_CRITICAL(&gRingTxQMux);
-  return true;
-}
-
-static bool ringTxQPushFront(const uint8_t* data, size_t len, uint8_t coalesceKey) {
-  if (!data || len == 0 || len > R1_MAX_FRAME) return false;
-  portENTER_CRITICAL(&gRingTxQMux);
-  if (gRingTxQCount >= RING_TXQ_DEPTH) {
-    gRingTxQCount = RING_TXQ_DEPTH - 1;  // drop newest at end
-  }
-  for (uint8_t i = gRingTxQCount; i > 0; i--) gRingTxQ[i] = gRingTxQ[i - 1];
-  memcpy(gRingTxQ[0].bytes, data, len);
-  gRingTxQ[0].len = (uint16_t)len;
-  gRingTxQ[0].coalesceKey = coalesceKey;
-  gRingTxQCount++;
-  portEXIT_CRITICAL(&gRingTxQMux);
-  return true;
-}
-
-// Caller holds bleCentralTx. Sends one GATT write under writeMutex.
-static bool ringWriteLocked(const uint8_t* data, size_t len) {
-  if (!data || len == 0 || !gRing.connected || !gRing.writeChar) return false;
-  if (!gRing.writeMutex || gRing.clientStale) return false;
+  if (!bleCentralTxTake(RING_CENTRAL_TX_MS)) return RING_WRITE_BUSY;
   if (xSemaphoreTake(gRing.writeMutex, pdMS_TO_TICKS(RING_WRITE_MUTEX_MS)) !=
       pdTRUE) {
-    DEBUG_G2F("[RING] Write mutex timeout; write dropped (%u B)", (unsigned)len);
-    return false;
+    bleCentralTxGive();
+    return RING_WRITE_BUSY;
   }
-  if (!gRing.connected || !gRing.writeChar || gRing.clientStale) {
+  if (!sLinkOnline || !gRing.connected || !gRing.writeChar || gRing.clientStale) {
     xSemaphoreGive(gRing.writeMutex);
-    return false;
+    bleCentralTxGive();
+    return RING_WRITE_DISCONNECTED;
   }
   const bool ok =
       gRing.writeChar->writeValue(const_cast<uint8_t*>(data), len, false);
-  if (ok) gRing.packetsSent++;
+  if (ok) ++gRing.packetsSent;
   xSemaphoreGive(gRing.writeMutex);
-  return ok;
-}
-
-// Drain while holding bleCentralTx. Stops on first GATT failure and
-// restores that frame to the front of the queue.
-static void ringDrainPendingLocked() {
-  uint8_t  buf[R1_MAX_FRAME];
-  uint16_t len = 0;
-  while (ringTxQPop(buf, &len)) {
-    if (!ringWriteLocked(buf, len)) {
-      (void)ringTxQPushFront(buf, len, /*coalesceKey=*/0);
-      break;
-    }
-  }
-}
-
-void g2RingTryDrainPendingTx() {
-  if (!gRing.connected || !gRing.writeChar || gRing.clientStale) {
-    ringTxQClear();
-    return;
-  }
-  if (!bleCentralTxTake(0)) return;
-  ringDrainPendingLocked();
   bleCentralTxGive();
+  return ok ? RING_WRITE_OK : RING_WRITE_FAILED;
 }
 
-// coalesceKey: 0 = FIFO unique; non-zero = replace same key if already queued.
-static bool ringWrite(const uint8_t* data, size_t len, uint8_t coalesceKey = 0) {
-  // Do not call methods on writeChar to "probe" liveness — after
-  // BLEDevice::deinit the pointer is dangling. Callers must
-  // g2RingInvalidateLink() before tearing down the stack.
-  if (!data || len == 0 || !gRing.connected || !gRing.writeChar) return false;
-  if (!gRing.writeMutex || gRing.clientStale) return false;
-  if (!bleCentralTxTake(RING_CENTRAL_TX_MS)) {
-    if (ringTxQEnqueue(data, len, coalesceKey)) {
-      DEBUG_G2F("[RING] Central TX busy; write queued (%u B key=%u)",
-                (unsigned)len, (unsigned)coalesceKey);
-      return true;
-    }
-    DEBUG_G2F("[RING] Central TX busy; write dropped (%u B)", (unsigned)len);
+// Compatibility hook used by paced G2 send paths. Pre-encoded queues no
+// longer exist; wake the semantic transaction owner instead.
+void g2RingTryDrainPendingTx() { ringWakeOwner(); }
+
+bool g2RingGetTransactionStatus(const G2RingTransactionHandle& handle,
+                                G2RingTransactionStatus& out) {
+  bool found = false;
+  portENTER_CRITICAL(&sTransportMux);
+  G2RingTransactionStatus* status = ringFindTransactionLocked(handle);
+  if (status) {
+    out = *status;
+    found = true;
+  }
+  portEXIT_CRITICAL(&sTransportMux);
+  return found;
+}
+
+void g2RingGetControlStatus(G2RingControlStatus& out) {
+  portENTER_CRITICAL(&sTransportMux);
+  out = sControlStatus;
+  portEXIT_CRITICAL(&sTransportMux);
+}
+
+bool g2RingSubmitRawTransaction(
+    uint8_t module, uint8_t cmd, uint8_t subCmd,
+    uint8_t statusType, uint8_t statusMethod, uint8_t statusAck,
+    const uint8_t* payload, size_t payloadLen,
+    G2RingTransactionHandle* outHandle) {
+  if (payloadLen > R1_MAX_PAYLOAD || (payloadLen != 0 && !payload) ||
+      statusType > 1 || statusMethod > 1 || statusAck > 3) {
+    if (outHandle) *outHandle = G2RingTransactionHandle{};
     return false;
   }
-  ringDrainPendingLocked();
-  const bool ok = ringWriteLocked(data, len);
-  bleCentralTxGive();
-  return ok;
+  RingIntent intent{};
+  intent.kind = RING_INTENT_RAW;
+  intent.module = module;
+  intent.cmd = cmd;
+  intent.subCmd = subCmd;
+  intent.statusType = statusType;
+  intent.statusMethod = statusMethod;
+  intent.statusAck = statusAck;
+  intent.expectsPayload = (statusType == R1_STATUS_TYPE_NOTIFY &&
+                           statusMethod == R1_STATUS_METHOD_GET);
+  intent.payloadLen = (uint16_t)payloadLen;
+  if (payloadLen) {
+    const int slot = ringReserveRawPayload(payload, payloadLen);
+    if (slot < 0) return false;
+    intent.payloadSlot = (uint8_t)slot;
+  }
+  const bool queued = ringEnqueueIntent(intent, outHandle);
+  if (!queued && intent.payloadSlot < RING_RAW_PAYLOAD_SLOTS) {
+    ringReleaseRawPayload(intent.payloadSlot);
+  }
+  return queued;
+}
+
+static bool ringEnqueueHealthDataQuery(uint8_t cmd, uint8_t subCmd,
+                                       uint8_t coalesceKey,
+                                       G2RingTransactionHandle* outHandle = nullptr) {
+  RingIntent intent{};
+  intent.kind = RING_INTENT_HEALTH_QUERY;
+  intent.module = R1_MODULE_HEALTH;
+  intent.cmd = cmd;
+  intent.subCmd = subCmd;
+  intent.coalesceKey = coalesceKey;
+  intent.expectsPayload = true;
+  return ringEnqueueIntent(intent, outHandle);
+}
+
+static bool ringEnqueueSystemQuery(uint8_t subCmd, uint8_t coalesceKey,
+                                   G2RingTransactionHandle* outHandle = nullptr) {
+  RingIntent intent{};
+  intent.kind = RING_INTENT_RAW;
+  intent.module = R1_MODULE_SYSTEM;
+  intent.cmd = R1_CMD_SYSTEM;
+  intent.subCmd = subCmd;
+  intent.coalesceKey = coalesceKey;
+  intent.expectsPayload = true;
+  return ringEnqueueIntent(intent, outHandle);
+}
+
+static bool ringEnqueueTimeSync(uint32_t epoch,
+                                G2RingTransactionHandle* outHandle = nullptr) {
+  RingIntent intent{};
+  intent.kind = RING_INTENT_SYNC_TIME;
+  intent.module = R1_MODULE_SYSTEM;
+  intent.cmd = R1_CMD_SYSTEM;
+  intent.subCmd = R1_SUB_SYSTEM_TIME;
+  intent.statusMethod = R1_STATUS_METHOD_SET;
+  intent.epoch = epoch;
+  return ringEnqueueIntent(intent, outHandle);
+}
+
+static bool ringEnqueueAdvStart(
+    G2RingTransactionHandle* outHandle = nullptr) {
+  RingIntent intent{};
+  intent.kind = RING_INTENT_ADV_START;
+  intent.module = R1_MODULE_SYSTEM;
+  intent.cmd = R1_CMD_SYSTEM;
+  intent.subCmd = R1_SUB_ADV_START;
+  return ringEnqueueIntent(intent, outHandle);
+}
+
+static bool ringQueueControlIntent(RingControlTarget control,
+                                   G2RingDesiredState desired,
+                                   G2RingTransactionHandle* outHandle) {
+  if (outHandle) *outHandle = G2RingTransactionHandle{};
+  // 0x0E GET/readback has no capture evidence. Preserve is literally no
+  // write, and an explicit SET can become ACKED but not verified.
+  if (control == RING_CONTROL_HEALTH && desired == G2_RING_PRESERVE) {
+    portENTER_CRITICAL(&sTransportMux);
+    sControlStatus.healthPending = false;
+    sControlStatus.healthObserved = G2_RING_OBS_UNKNOWN;
+    sControlStatus.healthLastError = G2_RING_ERR_NONE;
+    sControlStatus.healthTransaction = G2RingTransactionHandle{};
+    portEXIT_CRITICAL(&sTransportMux);
+    return true;
+  }
+  RingIntent intent{};
+  intent.module = R1_MODULE_SYSTEM;
+  intent.cmd = R1_CMD_SYSTEM;
+  intent.control = control;
+  intent.desired = desired;
+  intent.expectsPayload = (desired == G2_RING_PRESERVE);
+  intent.verifyAfterAck = control == RING_CONTROL_LOW_POWER &&
+                          desired != G2_RING_PRESERVE;
+  if (control == RING_CONTROL_HEALTH) {
+    intent.kind = RING_INTENT_HEALTH_COLLECTION_SET;
+    intent.expectsPayload = false;
+    intent.subCmd = R1_SUB_HEALTH_SETTINGS;
+  } else {
+    intent.kind = desired == G2_RING_PRESERVE
+                      ? RING_INTENT_LOW_POWER_QUERY
+                      : RING_INTENT_LOW_POWER_SET;
+    intent.subCmd = R1_SUB_SYSTEM_SETTINGS;
+  }
+  intent.statusMethod = desired == G2_RING_PRESERVE
+                            ? R1_STATUS_METHOD_GET
+                            : R1_STATUS_METHOD_SET;
+  intent.epoch = (uint32_t)time(nullptr);
+
+  G2RingTransactionHandle handle{};
+  const bool queued = ringEnqueueIntent(intent, &handle,
+                                        /*wakeOwner=*/false);
+  portENTER_CRITICAL(&sTransportMux);
+  if (control == RING_CONTROL_HEALTH) {
+    sControlStatus.healthPending = true;
+    sControlStatus.healthLastError = queued ? G2_RING_ERR_NONE
+                                            : G2_RING_ERR_QUEUE_FULL;
+    sControlStatus.healthTransaction = handle;
+  } else {
+    sControlStatus.lowPowerPending = true;
+    sControlStatus.lowPowerLastError = queued ? G2_RING_ERR_NONE
+                                              : G2_RING_ERR_QUEUE_FULL;
+    sControlStatus.lowPowerTransaction = handle;
+  }
+  portEXIT_CRITICAL(&sTransportMux);
+  if (outHandle) *outHandle = handle;
+  ringWakeOwner();
+  return queued;
+}
+
+static bool ringControlCanQueueNow() {
+  G2RingSetupState setup;
+  portENTER_CRITICAL(&sTransportMux);
+  setup = sControlStatus.setupState;
+  portEXIT_CRITICAL(&sTransportMux);
+  return sLinkOnline && setup == G2_RING_SETUP_READY;
+}
+
+bool g2RingSetHealthCollectionDesired(G2RingDesiredState desired,
+                                      G2RingTransactionHandle* outHandle) {
+  if (outHandle) *outHandle = G2RingTransactionHandle{};
+  if (desired != G2_RING_PRESERVE && desired != G2_RING_OFF &&
+      desired != G2_RING_ON) return false;
+  setSetting(gSettings.ringHealthCollectionDesired, (int)desired);
+  G2RingTransactionHandle current{};
+  portENTER_CRITICAL(&sTransportMux);
+  if (sControlStatus.healthPending) current = sControlStatus.healthTransaction;
+  sControlStatus.healthDesired = desired;
+  sControlStatus.healthPending = true;
+  sControlStatus.healthLastError = G2_RING_ERR_NONE;
+  if (current.id == 0) {
+    sControlStatus.healthTransaction = G2RingTransactionHandle{};
+  }
+  portEXIT_CRITICAL(&sTransportMux);
+  if (outHandle) *outHandle = current;
+  ringWakeOwner();
+  return true;  // accepted; the owner collapses rapid changes to the latest
+}
+
+bool g2RingSetLowPowerDesired(G2RingDesiredState desired,
+                              G2RingTransactionHandle* outHandle) {
+  if (outHandle) *outHandle = G2RingTransactionHandle{};
+  if (desired != G2_RING_PRESERVE && desired != G2_RING_OFF &&
+      desired != G2_RING_ON) return false;
+  setSetting(gSettings.ringLowPowerDesired, (int)desired);
+  G2RingTransactionHandle current{};
+  portENTER_CRITICAL(&sTransportMux);
+  if (sControlStatus.lowPowerPending) current = sControlStatus.lowPowerTransaction;
+  sControlStatus.lowPowerDesired = desired;
+  sControlStatus.lowPowerPending = true;
+  sControlStatus.lowPowerLastError = G2_RING_ERR_NONE;
+  if (current.id == 0) {
+    sControlStatus.lowPowerTransaction = G2RingTransactionHandle{};
+  }
+  portEXIT_CRITICAL(&sTransportMux);
+  if (outHandle) *outHandle = current;
+  ringWakeOwner();
+  return true;
+}
+
+bool g2RingRefreshControlStatus(G2RingTransactionHandle* outHealth,
+                                G2RingTransactionHandle* outLowPower) {
+  if (outHealth) *outHealth = G2RingTransactionHandle{};
+  if (outLowPower) *outLowPower = G2RingTransactionHandle{};
+  if (!ringControlCanQueueNow()) return false;
+  // Health 0x0E has no proven GET; leave observed Unknown and do not probe.
+  portENTER_CRITICAL(&sTransportMux);
+  sControlStatus.healthObserved = G2_RING_OBS_UNKNOWN;
+  sControlStatus.healthObservedAtMs = 0;
+  portEXIT_CRITICAL(&sTransportMux);
+  const bool lowPower = ringQueueControlIntent(RING_CONTROL_LOW_POWER,
+                                                G2_RING_PRESERVE, outLowPower);
+  return lowPower;
+}
+
+bool g2RingRequestHistoryRefresh(bool force) {
+  if (!sLinkOnline || !gRing.connected) return false;
+  portENTER_CRITICAL(&sTransportMux);
+  if (!force && sControlStatus.healthDesired == G2_RING_OFF) {
+    portEXIT_CRITICAL(&sTransportMux);
+    return false;
+  }
+  if (sHistorySweepActive) {
+    // One sweep already owns the fetch session. Treat this request as
+    // satisfied by it; never leave a second force/normal request armed to
+    // erase the terminal pending session before main-loop persistence.
+    portEXIT_CRITICAL(&sTransportMux);
+    return true;
+  }
+  sHistoryRefreshRequested = true;
+  sHistoryRefreshForce = sHistoryRefreshForce || force;
+  portEXIT_CRITICAL(&sTransportMux);
+  ringWakeOwner();
+  return true;
 }
 
 // Runtime verbose flag — toggle with `ringverbose on/off` if we ever need
 // to silence the byte-dump once we've characterised the stream. Default is
 // on because we're still learning what the ring emits.
 static bool gRingDumpVerbose = true;
-
-// R1 protocol encoder — owns the per-session serial counter. Reset on every
-// fresh connect so the ring sees serial=1 first (matches FlutterApp behaviour
-// — they construct a new RingPacketEncoder per ring instance).
-static R1Encoder gR1Encoder;
 
 // =============================================================================
 // Telemetry cache — what we've decoded from ring notify frames so far
@@ -299,7 +777,7 @@ static R1TelemetryCache gR1Cache;
 // value gates below — an unworn ring answers an HR point query with hr=0
 // (which the range checks rightly discard) but the frame still carries the
 // ring's clock, and that is all ring-clock custody needs. Written from the
-// BLE notify task (two plain u32 stores), read from the main-loop tick;
+// serialized ring owner (two plain u32 stores), read from the main-loop tick;
 // a torn read only mis-ages the estimate by the gap between frames.
 static volatile uint32_t sRingTsSeen     = 0;
 static volatile uint32_t sRingTsSeenRxMs = 0;
@@ -423,7 +901,7 @@ static time_t ringBestKnownEpoch(void) {
 
 // Adopt the ring's clock when the host has no time source of its own.
 // MAIN-LOOP CONTEXT ONLY: the clock-step chores this triggers include
-// users.json I/O — too heavy for the BLE notify task or the connect
+// users.json I/O — too heavy for the ring owner or the connect
 // worker's small stack, which is why setup WAITS on this instead of
 // calling it directly. All post-step duties (TIME_SYNCED event, boot
 // anchor, pending-user resolve, scheduler wake, RTC write-back) flow
@@ -487,14 +965,20 @@ void g2RingTimeSyncTick(void) {
     int64_t drift = (int64_t)now - expected;
     if (drift < 0) drift = -drift;
     if (pushedEpoch == 0 || drift > 120) {
-      R1Frame f = gR1Encoder.buildSyncTime(0, (uint32_t)now);
-      if (f.length > 0 && ringWrite(f.bytes, f.length)) {
-        sLastPushedEpoch = (uint32_t)now;
-        sLastPushedAtMs  = (uint32_t)millis();
-        BROADCAST_PRINTF("[RING] TX systemTime (corrective) epoch=%lu — ring clock "
-                         "trued up (drift was %llds)",
-                         (unsigned long)now,
-                         (long long)(pushedEpoch == 0 ? 0 : drift));
+      static G2RingTransactionHandle pending{};
+      if (pending.id != 0) {
+        G2RingTransactionStatus status{};
+        if (g2RingGetTransactionStatus(pending, status) &&
+            status.completedAtMs == 0) {
+          return;
+        }
+        pending = G2RingTransactionHandle{};
+      }
+      if (ringEnqueueTimeSync((uint32_t)now, &pending)) {
+        DEBUG_G2F("[RING] queued corrective systemTime epoch=%lu drift=%llds tx=%lu",
+                  (unsigned long)now,
+                  (long long)(pushedEpoch == 0 ? 0 : drift),
+                  (unsigned long)pending.id);
       }
     }
   }
@@ -707,25 +1191,60 @@ static void ringExtractTelemetryCache(const R1Decoded& d) {
     return;
   }
 
-  // Daily history → Trends day series + thin live sparkline backfill.
+  // Exact 2.2.7.0005 daily history → Trends + thin live backfill. The
+  // protocol parser owns layout/range validation; Unknown profiles never
+  // reach this path successfully.
   if (d.module == R1_MODULE_HEALTH && d.subCmd == R1_SUB_DAILY &&
-      (d.cmd == R1_CMD_HEARTRATE || d.cmd == R1_CMD_HRV || d.cmd == R1_CMD_SPO2 ||
-       d.cmd == R1_CMD_TEMPERATURE)) {
-    R1DailyResult daily;
-    if (r1ParseHealthDaily(d.payload, d.payloadLength, daily) && daily.count > 0) {
-      if (daily.endTs != 0) {  // day-window end ≈ ring's clock at last sample
-        sRingTsSeenRxMs = millis();  // rxMs first — see the point-frame note
-        sRingTsSeen     = daily.endTs;
+      d.cmd == R1_CMD_ACTIVITY) {
+    R1ActivityDailyResult daily{};
+    if (r1ParseActivityDaily(sR1Profile, d, daily) == R1_PARSE_OK) {
+      (void)g2HealthApplyActivityDaily(daily);
+    }
+    return;
+  }
+  if (d.module == R1_MODULE_HEALTH && d.subCmd == R1_SUB_DAILY &&
+      (d.cmd == R1_CMD_HEARTRATE || d.cmd == R1_CMD_HRV ||
+       d.cmd == R1_CMD_SPO2)) {
+    uint8_t values[R1_COMMON_DAILY_MAX_RECORDS]{};
+    uint8_t count = 0;
+    uint32_t startTs = 0;
+    uint32_t endTs = 0;
+    G2HealthMetric metric = HEALTH_METRIC_HR;
+
+    if (d.cmd == R1_CMD_HRV) {
+      R1HrvDailyResult daily{};
+      if (r1ParseHrvDaily(sR1Profile, d, daily) == R1_PARSE_OK) {
+        (void)g2HealthApplyHrvDaily(daily);
+        count = daily.count;
+        startTs = count ? daily.records[0].bucketEpoch : daily.dayStart;
+        endTs = daily.latestTimestamp;
+        metric = HEALTH_METRIC_HRV;
+        for (uint8_t i = 0; i < count && i < R1_COMMON_DAILY_MAX_RECORDS; ++i) {
+          values[i] = daily.records[i].average > 255
+                          ? 255
+                          : (uint8_t)daily.records[i].average;
+        }
       }
-      G2HealthMetric m = HEALTH_METRIC_HR;
-      if (d.cmd == R1_CMD_HRV) m = HEALTH_METRIC_HRV;
-      else if (d.cmd == R1_CMD_SPO2) m = HEALTH_METRIC_SPO2;
-      else if (d.cmd == R1_CMD_TEMPERATURE) m = HEALTH_METRIC_TEMP;
-      // Trends owns HR/HRV/SpO2 daily as a replaceable day series.
-      if (m == HEALTH_METRIC_HR || m == HEALTH_METRIC_HRV || m == HEALTH_METRIC_SPO2) {
-        g2HealthApplyTrendDaily(m, daily.values, daily.count, daily.startTs, daily.endTs);
+    } else {
+      R1CommonDailyResult daily{};
+      if (r1ParseCommonDaily(sR1Profile, d, daily) == R1_PARSE_OK) {
+        (void)g2HealthApplyCommonDaily(daily);
+        count = daily.count;
+        startTs = count ? daily.records[0].bucketEpoch : daily.dayStart;
+        endTs = daily.latestTimestamp;
+        metric = d.cmd == R1_CMD_SPO2 ? HEALTH_METRIC_SPO2
+                                      : HEALTH_METRIC_HR;
+        for (uint8_t i = 0; i < count; ++i) values[i] = daily.records[i].average;
       }
-      g2HealthApplyDailyBackfill(m, daily.values, daily.count, daily.startTs, daily.endTs);
+    }
+
+    if (count > 0) {
+      if (endTs != 0) {
+        sRingTsSeenRxMs = millis();
+        sRingTsSeen = endTs;
+      }
+      g2HealthApplyTrendDaily(metric, values, count, startTs, endTs);
+      g2HealthApplyDailyBackfill(metric, values, count, startTs, endTs);
     }
     return;
   }
@@ -906,19 +1425,329 @@ void g2RingNoteForwardedTelemetry(const uint8_t* pb, size_t pbLen) {
 // =============================================================================
 // Ring envelope decoding (no-write; receive-only)
 // =============================================================================
-// We log each incoming packet with a one-line header (decoded fields), a
-// raw payload hex dump, and a speculative parsed annotation when we have
-// one for that opcode. See System_R1_Protocol.{h,cpp} for the wire spec
-// and per-opcode parsers (provenance documented in
-// docs/g2_proto/R1_RE_Reference.h).
+// The BLE callback only copies into a fixed queue. The owner validates CRC32
+// and the declared model length before correlation or typed ingestion, then
+// logs the trusted decode here in normal task context.
 
 // Decode and print a single ring notify frame using the real R1 wire format
 // (See System_R1_Protocol.h for the full envelope spec.) `data` is the raw
 // BLE characteristic value — the ring writes one logical frame per notify
 // in our usage so far.
 //
-static void ringDumpFrame(const uint8_t* data, size_t len) {
-  if (!data || len == 0) return;
+static uint8_t ringAckErrorCode(uint8_t ack) {
+  switch (ack) {
+    case R1_STATUS_ACK_ERROR:      return G2_RING_ERR_ACK_ERROR;
+    case R1_STATUS_ACK_REFUSE:     return G2_RING_ERR_ACK_REFUSED;
+    case R1_STATUS_ACK_NOTSUPPORT: return G2_RING_ERR_ACK_NOT_SUPPORTED;
+    default:                       return G2_RING_ERR_NONE;
+  }
+}
+
+static G2RingProtocolProfile ringPublicProfile(R1ProtocolProfile profile) {
+  return profile == R1_PROFILE_FW_2_2_7_0005
+             ? G2_RING_PROFILE_FW_2_2_7_0005
+             : G2_RING_PROFILE_UNKNOWN;
+}
+
+static void ringSetSetupState(G2RingSetupState state,
+                              uint8_t error = G2_RING_ERR_NONE) {
+  portENTER_CRITICAL(&sTransportMux);
+  sControlStatus.setupState = state;
+  sControlStatus.setupLastError = error;
+  sControlStatus.protocolProfile = ringPublicProfile(sR1Profile);
+  sControlStatus.protocolProfileKnown = sR1Profile != R1_PROFILE_UNKNOWN;
+  portEXIT_CRITICAL(&sTransportMux);
+}
+
+static void ringFinishSetup(bool success, uint8_t error) {
+  sSetupOwner.active = false;
+  sSetupOwner.frameReady = false;
+  sSetupRequested = false;
+  sRingSetupDone = success;
+  ringSetSetupState(success ? G2_RING_SETUP_READY : G2_RING_SETUP_ERROR,
+                    success ? (uint8_t)G2_RING_ERR_NONE : error);
+  if (sSetupDone) xSemaphoreGive(sSetupDone);
+  DEBUG_G2F("[RING] setup %s profile=%s error=%s",
+            success ? "ready" : "failed",
+            r1ProtocolProfileName(sR1Profile),
+            g2RingTransactionErrorName(error));
+}
+
+static void ringAdvanceSetup(G2RingSetupState next) {
+  sSetupOwner.stage = next;
+  sSetupOwner.frameReady = false;
+  sSetupOwner.written = false;
+  sSetupOwner.deadlineMs = millis() + RING_SETUP_TIMEOUT_MS;
+  ringSetSetupState(next);
+  ringWakeOwner();
+}
+
+static void ringCompleteActive(G2RingTransactionState state,
+                               uint8_t error = G2_RING_ERR_NONE,
+                               uint8_t ackCode = 0) {
+  if (!sActiveTransaction.valid) return;
+  const RingIntent intent = sActiveTransaction.intent;
+  ringUpdateTransaction(intent.handle, state, error, ackCode,
+                        /*completed=*/true);
+  portENTER_CRITICAL(&sTransportMux);
+  if (sControlStatus.generation == intent.handle.generation &&
+      intent.control == RING_CONTROL_HEALTH) {
+    const bool superseded = sControlStatus.healthDesired != intent.desired;
+    sControlStatus.healthPending = superseded;
+    sControlStatus.healthLastError =
+        superseded ? (uint8_t)G2_RING_ERR_NONE : error;
+    if (superseded) {
+      sControlStatus.healthTransaction = G2RingTransactionHandle{};
+    }
+  } else if (sControlStatus.generation == intent.handle.generation &&
+             intent.control == RING_CONTROL_LOW_POWER) {
+    const bool superseded = sControlStatus.lowPowerDesired != intent.desired;
+    sControlStatus.lowPowerPending = superseded;
+    sControlStatus.lowPowerLastError =
+        superseded ? (uint8_t)G2_RING_ERR_NONE : error;
+    if (superseded) {
+      sControlStatus.lowPowerTransaction = G2RingTransactionHandle{};
+    }
+  }
+  portEXIT_CRITICAL(&sTransportMux);
+  if (intent.payloadSlot < RING_RAW_PAYLOAD_SLOTS) {
+    ringReleaseRawPayload(intent.payloadSlot);
+  }
+  sActiveTransaction = RingActiveTransaction{};
+}
+
+static bool ringFingerprintEqual(const RingRxFingerprint& a,
+                                 const RingRxFingerprint& b) {
+  return a.generation == b.generation && a.crc32 == b.crc32 &&
+         a.serial == b.serial && a.module == b.module && a.cmd == b.cmd &&
+         a.subCmd == b.subCmd && a.statusByte == b.statusByte;
+}
+
+static bool ringRememberRx(const R1Decoded& d, uint32_t generation) {
+  const RingRxFingerprint fp = {
+    generation, d.crc32Received, d.serial, d.module, d.cmd, d.subCmd,
+    d.statusByte
+  };
+  for (uint8_t i = 0; i < RING_RX_DUPLICATE_DEPTH; ++i) {
+    if (ringFingerprintEqual(fp, sRxFingerprints[i])) return false;
+  }
+  sRxFingerprints[sRxFingerprintCursor] = fp;
+  sRxFingerprintCursor = (uint8_t)((sRxFingerprintCursor + 1) %
+                                   RING_RX_DUPLICATE_DEPTH);
+  return true;
+}
+
+static void ringQueuePacketAck(const R1Decoded& d, uint32_t generation) {
+  // The profile-aware encoder performs the final eligibility gate. Avoid
+  // duplicate pending entries while still ACKing a retransmit after its prior
+  // ACK has left this reserved lane.
+  for (uint8_t i = 0; i < sPacketAckCount; ++i) {
+    const RingPacketAckPending& pending = sPacketAckQueue[i];
+    if (pending.generation == generation &&
+        pending.received.serial == d.serial &&
+        pending.received.module == d.module && pending.received.cmd == d.cmd &&
+        pending.received.subCmd == d.subCmd) return;
+  }
+  if (sActivePacketAck.valid &&
+      sActivePacketAck.pending.generation == generation &&
+      sActivePacketAck.pending.received.serial == d.serial &&
+      sActivePacketAck.pending.received.module == d.module &&
+      sActivePacketAck.pending.received.cmd == d.cmd &&
+      sActivePacketAck.pending.received.subCmd == d.subCmd) return;
+  if (sPacketAckCount >= RING_PACKET_ACK_DEPTH) {
+    DEBUG_G2F("[RING] packetAck lane full; RX ser=%u left unacked",
+              (unsigned)d.serial);
+    return;
+  }
+  sPacketAckQueue[sPacketAckCount++] = RingPacketAckPending{generation, d};
+}
+
+static bool ringApplyControlObservation(const R1Decoded& d,
+                                        RingControlTarget& observedTarget,
+                                        G2RingObservedState& observed) {
+  observedTarget = RING_CONTROL_NONE;
+  observed = G2_RING_OBS_UNKNOWN;
+  if (sR1Profile == R1_PROFILE_UNKNOWN) return false;
+
+  if (d.subCmd == R1_SUB_SYSTEM_SETTINGS) {
+    R1LowPowerStatus status{};
+    if (r1ParseLowPowerStatus(sR1Profile, d, status) != R1_PARSE_OK) {
+      return false;
+    }
+    observedTarget = RING_CONTROL_LOW_POWER;
+    observed = status.enabled ? G2_RING_OBS_ON : G2_RING_OBS_OFF;
+    portENTER_CRITICAL(&sTransportMux);
+    sControlStatus.lowPowerObserved = observed;
+    sControlStatus.lowPowerObservedAtMs = millis();
+    portEXIT_CRITICAL(&sTransportMux);
+    return true;
+  }
+  return false;
+}
+
+static bool ringDecodedMatches(uint8_t module, uint8_t cmd, uint8_t subCmd,
+                               const R1Decoded& d) {
+  return d.module == module && d.cmd == cmd && d.subCmd == subCmd;
+}
+
+static void ringHandleSetupRx(const R1Decoded& d) {
+  if (!sSetupOwner.active || !sSetupOwner.written ||
+      sSetupOwner.generation != sLinkGeneration) return;
+  if (!ringDecodedMatches(R1_MODULE_SYSTEM, R1_CMD_SYSTEM,
+                          sSetupOwner.stage == G2_RING_SETUP_AUTH
+                              ? R1_SUB_PAIR_AUTH
+                              : sSetupOwner.stage == G2_RING_SETUP_DEVICE_INFO
+                                    ? R1_SUB_DEVICE_INFO
+                                    : sSetupOwner.stage == G2_RING_SETUP_TIME
+                                          ? R1_SUB_SYSTEM_TIME
+                                          : R1_SUB_ADV_START,
+                          d)) return;
+
+  const bool exactSerial = d.serial == sSetupOwner.frame.serial;
+  if (d.statusType == R1_STATUS_TYPE_ACK && exactSerial &&
+      d.statusAck != R1_STATUS_ACK_OK) {
+    ringFinishSetup(false, ringAckErrorCode(d.statusAck));
+    return;
+  }
+
+  if (sSetupOwner.stage == G2_RING_SETUP_DEVICE_INFO) {
+    R1DeviceInfo info{};
+    const R1ParseError parsed = r1ParseDeviceInfo(d, info);
+    if (parsed != R1_PARSE_OK || !exactSerial) return;
+    ringSetSetupState(G2_RING_SETUP_PROFILE);
+    sR1Profile = info.profile;
+    portENTER_CRITICAL(&sTransportMux);
+    sControlStatus.protocolProfile = ringPublicProfile(sR1Profile);
+    sControlStatus.protocolProfileKnown = sR1Profile != R1_PROFILE_UNKNOWN;
+    portEXIT_CRITICAL(&sTransportMux);
+    DEBUG_G2F("[RING] deviceInfo fw='%s' hw='%s' profile=%s",
+              info.firmware, info.hardware, r1ProtocolProfileName(sR1Profile));
+    if (sR1Profile == R1_PROFILE_UNKNOWN) {
+      ringFinishSetup(false, G2_RING_ERR_PROFILE_UNKNOWN);
+      return;
+    }
+    ringAdvanceSetup(G2_RING_SETUP_TIME);
+    return;
+  }
+
+  if (d.statusType != R1_STATUS_TYPE_ACK || !exactSerial ||
+      d.statusAck != R1_STATUS_ACK_OK) return;
+  switch (sSetupOwner.stage) {
+    case G2_RING_SETUP_AUTH:
+      ringAdvanceSetup(G2_RING_SETUP_DEVICE_INFO);
+      break;
+    case G2_RING_SETUP_TIME:
+      ringAdvanceSetup(G2_RING_SETUP_ADV_START);
+      break;
+    case G2_RING_SETUP_ADV_START:
+      ringFinishSetup(true, G2_RING_ERR_NONE);
+      break;
+    default:
+      break;
+  }
+}
+
+static bool ringDailyPayloadValid(const R1Decoded& d) {
+  if (d.module != R1_MODULE_HEALTH || d.subCmd != R1_SUB_DAILY) return true;
+  if (d.cmd == R1_CMD_HRV) {
+    R1HrvDailyResult result{};
+    return r1ParseHrvDaily(sR1Profile, d, result) == R1_PARSE_OK;
+  }
+  if (d.cmd == R1_CMD_ACTIVITY) {
+    R1ActivityDailyResult result{};
+    return r1ParseActivityDaily(sR1Profile, d, result) == R1_PARSE_OK;
+  }
+  if (d.cmd == R1_CMD_HEARTRATE || d.cmd == R1_CMD_SPO2) {
+    R1CommonDailyResult result{};
+    return r1ParseCommonDaily(sR1Profile, d, result) == R1_PARSE_OK;
+  }
+  return false;
+}
+
+static void ringHandleActiveRx(const R1Decoded& d,
+                               RingControlTarget observedTarget,
+                               G2RingObservedState observed) {
+  if (!sActiveTransaction.valid ||
+      !sActiveTransaction.written ||
+      sActiveTransaction.intent.handle.generation != sLinkGeneration) return;
+  RingIntent& intent = sActiveTransaction.intent;
+  if (!ringDecodedMatches(intent.module, intent.cmd, intent.subCmd, d)) return;
+
+  const bool exactSerial = d.serial == sActiveTransaction.frame.serial;
+  const bool unparsedSleepData =
+      intent.module == R1_MODULE_HEALTH && intent.cmd == R1_CMD_SLEEP &&
+      intent.subCmd == R1_SUB_DAILY &&
+      d.statusType == R1_STATUS_TYPE_NOTIFY &&
+      d.statusMethod == R1_STATUS_METHOD_SET &&
+      d.statusAck == R1_STATUS_ACK_OK && d.payloadLength > 0;
+  if (unparsedSleepData) {
+    // Presence is trustworthy from the envelope/opcode even if data races the
+    // command ACK. No payload layout is inferred.
+    sActiveTransaction.unparsedDailyDataSeen = true;
+    g2HealthHistorySetSleepState(R1_HISTORY_SLEEP_PRESENT);
+  }
+  const bool independentDailyData =
+      intent.module == R1_MODULE_HEALTH && intent.subCmd == R1_SUB_DAILY &&
+      d.statusType == R1_STATUS_TYPE_NOTIFY &&
+      d.statusMethod == R1_STATUS_METHOD_SET &&
+      d.statusAck == R1_STATUS_ACK_OK && d.payloadLength > 0 &&
+      sActiveTransaction.commandAcked;
+  if (!exactSerial && !independentDailyData) return;
+  if (d.statusType == R1_STATUS_TYPE_ACK && exactSerial &&
+      d.statusAck != R1_STATUS_ACK_OK) {
+    ringCompleteActive(G2_RING_TX_REFUSED, ringAckErrorCode(d.statusAck),
+                       d.statusAck);
+    return;
+  }
+
+  if (d.statusType == R1_STATUS_TYPE_ACK && exactSerial &&
+      d.statusAck == R1_STATUS_ACK_OK) {
+    sActiveTransaction.commandAcked = true;
+    if (intent.verifyAfterAck && !sActiveTransaction.readbackPhase) {
+      ringUpdateTransaction(intent.handle, G2_RING_TX_ACKED,
+                            G2_RING_ERR_NONE, d.statusAck);
+      sActiveTransaction.readbackPhase = true;
+      sActiveTransaction.frameReady = false;
+      sActiveTransaction.written = false;
+      sActiveTransaction.commandAcked = false;
+      // Only low-power has a capture-proven GET/readback contract.
+      intent.kind = RING_INTENT_LOW_POWER_QUERY;
+      intent.statusMethod = R1_STATUS_METHOD_GET;
+      intent.expectsPayload = true;
+      intent.verifyAfterAck = false;
+      sActiveTransaction.deadlineMs = millis() + intent.timeoutMs;
+      ringWakeOwner();
+      return;
+    }
+    if (!intent.expectsPayload) {
+      ringCompleteActive(G2_RING_TX_ACKED, G2_RING_ERR_NONE, d.statusAck);
+      return;
+    }
+    ringUpdateTransaction(intent.handle, G2_RING_TX_ACKED,
+                          G2_RING_ERR_NONE, d.statusAck);
+    if (d.payloadLength == 0) return;
+  }
+
+  if (!intent.expectsPayload || d.payloadLength == 0) return;
+  if (intent.control != RING_CONTROL_NONE) {
+    if (observedTarget != intent.control) return;
+    if (intent.desired != G2_RING_PRESERVE) {
+      const G2RingObservedState wanted = intent.desired == G2_RING_ON
+                                             ? G2_RING_OBS_ON
+                                             : G2_RING_OBS_OFF;
+      if (observed != wanted) {
+        ringCompleteActive(G2_RING_TX_REFUSED, G2_RING_ERR_VERIFY_MISMATCH);
+        return;
+      }
+    }
+  }
+  if (!ringDailyPayloadValid(d)) return;
+  ringCompleteActive(G2_RING_TX_VERIFIED);
+}
+
+static void ringProcessRxFrame(const uint8_t* data, size_t len,
+                               uint32_t generation) {
+  if (!data || len == 0 || generation != sLinkGeneration || !sLinkOnline) return;
   gRing.packetsReceived++;
 
   // Ring1Error short-frame fast-path. The ring emits this 6-byte form on
@@ -937,10 +1766,28 @@ static void ringDumpFrame(const uint8_t* data, size_t len) {
     const uint8_t errorCode = data[5];
     DEBUG_G2F("[RING] RX Ring1Error errorCode=0x%02X crc32=0x%08lX",
               (unsigned)errorCode, (unsigned long)crc32);
+    auto frameCrc32 = [](const R1Frame& frame) -> uint32_t {
+      if (frame.length < 5) return 0;
+      return (uint32_t)frame.bytes[1] |
+             ((uint32_t)frame.bytes[2] << 8) |
+             ((uint32_t)frame.bytes[3] << 16) |
+             ((uint32_t)frame.bytes[4] << 24);
+    };
+    if (sSetupOwner.active && sSetupOwner.written &&
+        sSetupOwner.generation == generation &&
+        frameCrc32(sSetupOwner.frame) == crc32) {
+      ringFinishSetup(false, G2_RING_ERR_ACK_ERROR);
+    } else if (sActiveTransaction.valid && sActiveTransaction.written &&
+               sActiveTransaction.intent.handle.generation == generation &&
+               frameCrc32(sActiveTransaction.frame) == crc32) {
+      ringCompleteActive(G2_RING_TX_REFUSED, G2_RING_ERR_ACK_ERROR,
+                         errorCode);
+    }
     return;
   }
 
   R1Decoded d;
+  bool sensitivePayload = false;
   if (r1Decode(data, len, d)) {
     const char* mod = r1ModuleName(d.module);
     const char* cmd = r1CmdName(d.module, d.cmd);
@@ -958,10 +1805,19 @@ static void ringDumpFrame(const uint8_t* data, size_t len) {
               d.crc32Valid ? "" : " CRC32?!",
               d.modelLengthValid ? "" : " LEN?!");
 
-    // Hex-dump non-trivial payloads inline so we can decode unknown
+    sensitivePayload = d.module == R1_MODULE_SYSTEM &&
+        d.cmd == R1_CMD_SYSTEM &&
+        (d.subCmd == R1_SUB_DEVICE_SN ||
+         d.subCmd == R1_SUB_GET_ALGO_KEY_STATUS ||
+         d.subCmd == R1_SUB_SET_ALGO_KEY ||
+         d.subCmd == R1_SUB_NV_RECOVER ||
+         d.subCmd == R1_SUB_USER_INFO);
+
+    // Hex-dump non-trivial, non-sensitive payloads inline. Identifiers,
+    // credentials/recovery material, and demographics are never emitted.
     // health responses by eye while we RE the layout. Cap at 64 bytes —
     // larger frames already get the full hex dump from the verbose path.
-    if (d.payloadLength > 0) {
+    if (d.payloadLength > 0 && !sensitivePayload) {
       const size_t showMax = 64;
       const size_t show = d.payloadLength > showMax ? showMax : d.payloadLength;
       char pbuf[3 * showMax + 4];
@@ -974,26 +1830,58 @@ static void ringDumpFrame(const uint8_t* data, size_t len) {
                 (unsigned)d.payloadLength, pbuf,
                 d.payloadLength > showMax ? " ..." : "");
 
-      // Speculative parser — see r1AnnotatePayload() in System_R1_Protocol.cpp
-      // for the per-opcode hypotheses and confidence notes. Returns 0 (skip
-      // the log line) for opcodes without a parser yet.
-      char abuf[256];
-      size_t alen = r1AnnotatePayload(d, abuf, sizeof(abuf));
-      if (alen > 0) {
-        DEBUG_G2F("[RING]   parsed: %s", abuf);
-      }
+    } else if (d.payloadLength > 0) {
+      DEBUG_G2F("[RING]   payload[%u]=<redacted>",
+                (unsigned)d.payloadLength);
     }
 
-    // Mirror decoded HR/HRV/SpO2/battery into the spoof-push cache. Cheap —
-    // just a few range-checked writes when the opcode matches. See
-    // ringExtractTelemetryCache() comments for confidence notes per metric.
-    ringExtractTelemetryCache(d);
+    const R1ParseError integrity = r1ValidateDecoded(d);
+    if (integrity != R1_PARSE_OK) {
+      DEBUG_G2F("[RING] RX rejected before ingestion: %s",
+                r1ParseErrorName(integrity));
+    } else {
+      const bool packetAckEligible =
+          d.module == R1_MODULE_HEALTH && d.subCmd == R1_SUB_DAILY &&
+          d.statusType == R1_STATUS_TYPE_NOTIFY &&
+          d.statusMethod == R1_STATUS_METHOD_SET &&
+          d.statusAck == R1_STATUS_ACK_OK &&
+          (d.cmd == R1_CMD_HEARTRATE || d.cmd == R1_CMD_HRV ||
+           d.cmd == R1_CMD_SPO2 || d.cmd == R1_CMD_SLEEP ||
+           d.cmd == R1_CMD_ACTIVITY);
+      if (packetAckEligible) ringQueuePacketAck(d, generation);
+
+      const bool firstCopy = ringRememberRx(d, generation);
+      if (!firstCopy) {
+        DEBUG_G2F("[RING] RX duplicate ser=%u crc32=0x%08lX (typed ingestion skipped)",
+                  (unsigned)d.serial, (unsigned long)d.crc32Received);
+      } else {
+        ringHandleSetupRx(d);
+        RingControlTarget observedTarget = RING_CONTROL_NONE;
+        G2RingObservedState observed = G2_RING_OBS_UNKNOWN;
+        (void)ringApplyControlObservation(d, observedTarget, observed);
+        ringHandleActiveRx(d, observedTarget, observed);
+
+        // Typed consumers run only after the integrity/profile gate above.
+        ringExtractTelemetryCache(d);
+        if (d.payloadLength > 0) {
+          char abuf[256];
+          const size_t alen = r1AnnotatePayload(sR1Profile, d, abuf,
+                                                sizeof(abuf));
+          if (alen > 0) DEBUG_G2F("[RING]   parsed: %s", abuf);
+        }
+      }
+    }
   } else {
     DEBUG_G2F("[RING] RX undecodeable len=%u (<17 B for envelope)",
               (unsigned)len);
   }
 
   if (!gRingDumpVerbose) return;
+  if (sensitivePayload) {
+    DEBUG_G2F("[RING] RX bytes=<redacted sensitive payload> len=%u",
+              (unsigned)len);
+    return;
+  }
   // Hex dump capped at 64 bytes — typical ring packets are <40 B; the
   // largest captured fixture (nvRecover) is ~80 B. Truncated lines get
   // a "…" suffix so the log doesn't grow unbounded on a future surprise.
@@ -1011,144 +1899,563 @@ static void ringDumpFrame(const uint8_t* data, size_t len) {
 // Notify callback shim — Arduino BLE hands us (char*, data, len, isNotify).
 static void ringNotifyThunk(BLERemoteCharacteristic* /*c*/, uint8_t* data,
                             size_t len, bool /*isNotify*/) {
-  ringDumpFrame(data, len);
+  QueueHandle_t queue = sRxQueue;
+  if (!queue || !data || len == 0 || len > R1_MAX_FRAME || !sLinkOnline) {
+    sRxQueueDropped = sRxQueueDropped + 1;
+    return;
+  }
+  RingRxFrame frame{};
+  frame.generation = sLinkGeneration;
+  frame.length = (uint16_t)len;
+  memcpy(frame.bytes, data, len);
+  if (xQueueSend(queue, &frame, 0) != pdTRUE) {
+    sRxQueueDropped = sRxQueueDropped + 1;
+    return;
+  }
+  ringWakeOwner();
 }
 
 // =============================================================================
-// R1 standard setup sequence
+// Serialized transaction owner + ACK-driven standard setup
 // =============================================================================
-// Port of buildStandardSetupSequence() in
-// docs/FlutterApp-main/lib/src/services/r1_manager.dart. Three messages,
-// fired ~200 ms apart (1 s after auth) over the ring writeChar:
-//
-//   1. pairAuth   — payload [0x01]. Unlocks the ring's notify stream. (No
-//                   server-issued pkey is required, despite earlier notes
-//                   in our docs to the contrary.)
-//   2. systemTime — sets the ring clock to the ESP's wall time + tz offset
-//                   in MINUTES (NOT quarter-hours like G2 TIME_SYNC). When
-//                   the ESP is dark (no NTP/RTC yet) we first wait a bounded
-//                   window for ring-clock adoption (see "Ring-clock custody"
-//                   above) so this frame echoes the ring's own time instead
-//                   of stomping it back to 1970. The frame itself is always
-//                   sent — the RE'd sequence is never thinned.
-//   3. advStart   — payload is the G2 right-temple MAC, byte-reversed. The
-//                   FlutterApp author notes the MAC may not actually
-//                   matter; we send it anyway for parity. Falls back to
-//                   six zero bytes if no glasses are connected.
-//
-// Sends are write-without-response over the writeChar. We do NOT wait for
-// acks here; the FlutterApp does, but for our use case the simple time-
-// gated sequence is enough — the ring acks asynchronously and our notify
-// handler will log them as they arrive.
-//
-// Returns true if all three writes were dispatched. False on missing
-// writeChar (shouldn't happen — caller has just verified service lookup).
-static bool ringRunStandardSetup() {
-  if (!gRing.writeChar) {
-    DEBUG_G2F("[RING] standard setup skipped: no writeChar");
-    return false;
-  }
 
-  gR1Encoder.resetSerial();
-  // Fresh link: drop any custody state a prior link left behind (step 2 below
-  // restamps the push projection). Teardown clears this too, but a connect
-  // that never saw a clean disconnect must not inherit stale facts.
+static bool ringDeadlinePassed(uint32_t deadlineMs) {
+  return deadlineMs != 0 && (int32_t)(millis() - deadlineMs) >= 0;
+}
+
+static void ringFinishHistorySweep(bool successful, uint8_t error) {
+  if (sHistoryCoordinator.active) {
+    g2HealthHistoryFetchFinished(successful, error);
+  }
+  sHistoryCoordinator = RingHistoryCoordinator{};
+  portENTER_CRITICAL(&sTransportMux);
+  // Defensive clear as well as the producer-side active coalesce: no request
+  // observed during this fetch may launch a second session immediately after
+  // its terminal pending snapshot was published.
+  sHistoryRefreshRequested = false;
+  sHistoryRefreshForce = false;
+  sHistorySweepActive = false;
+  portEXIT_CRITICAL(&sTransportMux);
+}
+
+static uint32_t ringStartGenerationAndSetup() {
+  if (!gRing.connected || !gRing.writeChar || !sSetupDone) return 0;
+  while (xSemaphoreTake(sSetupDone, 0) == pdTRUE) {}
   ringClockCustodyReset();
+  if (gRingDeviceAddress.length() > 0) {
+    // RAM-only identity seed; secure-store load/merge stays on the main loop.
+    g2HealthSetHistoryPeerId(gRingDeviceAddress.c_str());
+  }
 
-  // 1. pairAuth — single-byte payload [0x01]. Ring acks then begins
-  //    pushing telemetry on the notify char.
-  R1Frame auth = gR1Encoder.buildPairAuth();
-  if (auth.length == 0) {
-    DEBUG_G2F("[RING] standard setup: failed to encode pairAuth");
+  portENTER_CRITICAL(&sTransportMux);
+  uint32_t generation = sLinkGeneration + 1;
+  if (generation == 0) generation = 1;
+  const G2RingDesiredState healthDesired = sControlStatus.healthDesired;
+  const G2RingDesiredState lowPowerDesired = sControlStatus.lowPowerDesired;
+  sControlStatus = G2RingControlStatus{};
+  sControlStatus.generation = generation;
+  sControlStatus.setupState = G2_RING_SETUP_IDLE;
+  sControlStatus.protocolProfile = G2_RING_PROFILE_UNKNOWN;
+  sControlStatus.healthDesired = healthDesired;
+  sControlStatus.lowPowerDesired = lowPowerDesired;
+  // Health Preserve emits no 0x0E frame (GET is unproven). Low-power GET is
+  // capture-proven, so it is observed on every fresh link.
+  sControlStatus.healthPending = healthDesired != G2_RING_PRESERVE;
+  sControlStatus.lowPowerPending = true;
+  sLinkGeneration = generation;
+  sLinkOnline = true;
+  sSetupRequested = true;
+  portEXIT_CRITICAL(&sTransportMux);
+  ringWakeOwner();
+  return generation;
+}
+
+static bool ringRunStandardSetup() {
+  const uint32_t generation = ringStartGenerationAndSetup();
+  if (generation == 0) return false;
+  const TickType_t wait = pdMS_TO_TICKS(RING_SETUP_TIMEOUT_MS * 4U + 4000U);
+  if (xSemaphoreTake(sSetupDone, wait) != pdTRUE) {
+    DEBUG_G2F("[RING] setup coordinator wait timed out gen=%lu",
+              (unsigned long)generation);
     return false;
   }
-  if (!ringWrite(auth.bytes, auth.length)) {
-    DEBUG_G2F("[RING] standard setup: pairAuth write failed");
-    return false;
-  }
-  DEBUG_G2F("[RING] TX pairAuth ser=%u (%u B) — unlocking notify stream",
-            (unsigned)auth.serial, (unsigned)auth.length);
-  vTaskDelay(pdMS_TO_TICKS(1000));
+  G2RingControlStatus status{};
+  g2RingGetControlStatus(status);
+  return sLinkOnline && status.generation == generation &&
+         status.setupState == G2_RING_SETUP_READY;
+}
 
-  // Dark-clock window: our clock has no real time, but the ring's may — its
-  // battery-backed clock survives our reboots. This ring never volunteers
-  // telemetry unpolled (HW-verified 2026-07-29), so solicit the latest HR
-  // point — a standard query used constantly in normal operation; the
-  // response carries the ring's clock regardless of wear or vitals validity
-  // (sRingTsSeen). g2RingTimeSyncTick() (main loop) adopts the timestamp
-  // and flips Clock::isSynced(); the mandatory systemTime frame below then
-  // echoes the ring's own clock instead of stomping it with a 1970 epoch
-  // (which poisons the ring's daily-history bucketing — the Trends data
-  // source). Lapses silently after ~3 s total: we then send our dark epoch
-  // exactly as we always did, and the tick's corrective push repairs the
-  // ring once real time arrives. The ritual's own frames stay present and
-  // in order; the probe only shifts their serial numbers on dark boots.
-  if (!Clock::isSynced()) {
-    R1Frame probe = gR1Encoder.buildHealthQuery(R1_CMD_HEARTRATE, R1_SUB_POINT);
-    if (probe.length > 0 && ringWrite(probe.bytes, probe.length)) {
-      DEBUG_G2F("[RING] dark-clock window: TX hr/point probe ser=%u",
-                (unsigned)probe.serial);
+static void ringBeginOwnedGeneration(uint32_t generation) {
+  gR1Encoder.resetSerial();
+  sR1Profile = R1_PROFILE_UNKNOWN;
+  sSetupOwner = RingSetupOwner{};
+  sSetupOwner.active = true;
+  sSetupOwner.generation = generation;
+  sSetupOwner.stage = G2_RING_SETUP_AUTH;
+  sSetupOwner.deadlineMs = millis() + RING_SETUP_TIMEOUT_MS;
+  sActiveTransaction = RingActiveTransaction{};
+  sActivePacketAck = RingActivePacketAck{};
+  sPacketAckCount = 0;
+  memset(sRxFingerprints, 0, sizeof(sRxFingerprints));
+  sRxFingerprintCursor = 0;
+  ringSetSetupState(G2_RING_SETUP_AUTH);
+  DEBUG_G2F("[RING] setup begin gen=%lu", (unsigned long)generation);
+}
+
+static void ringDropOwnedGeneration(uint32_t generation) {
+  if (sActiveTransaction.valid &&
+      sActiveTransaction.intent.handle.generation == generation) {
+    ringCompleteActive(G2_RING_TX_DISCONNECTED, G2_RING_ERR_DISCONNECTED);
+  }
+  ringMarkGenerationDisconnected(generation);
+  if (sHistoryCoordinator.active &&
+      sHistoryCoordinator.generation == generation) {
+    ringFinishHistorySweep(false, G2_RING_ERR_DISCONNECTED);
+  }
+  sActivePacketAck = RingActivePacketAck{};
+  sPacketAckCount = 0;
+  if (sSetupOwner.active && sSetupOwner.generation == generation &&
+      generation == sLinkGeneration && !sLinkOnline) {
+    ringFinishSetup(false, G2_RING_ERR_DISCONNECTED);
+  }
+  sSetupOwner = RingSetupOwner{};
+  gR1Encoder.resetSerial();
+}
+
+static bool ringServicePacketAck() {
+  if (!sActivePacketAck.valid && sPacketAckCount > 0) {
+    sActivePacketAck.valid = true;
+    sActivePacketAck.pending = sPacketAckQueue[0];
+    if (sPacketAckCount > 1) {
+      memmove(&sPacketAckQueue[0], &sPacketAckQueue[1],
+              (sPacketAckCount - 1) * sizeof(sPacketAckQueue[0]));
     }
-    for (int i = 0; i < 20 && !Clock::isSynced(); i++) {
-      vTaskDelay(pdMS_TO_TICKS(100));
-      if (i == 9 && !Clock::isSynced()) {  // one mid-window retry
-        probe = gR1Encoder.buildHealthQuery(R1_CMD_HEARTRATE, R1_SUB_POINT);
-        if (probe.length > 0) ringWrite(probe.bytes, probe.length);
+    --sPacketAckCount;
+  }
+  if (!sActivePacketAck.valid) return false;
+  if (sActivePacketAck.pending.generation != sLinkGeneration) {
+    sActivePacketAck = RingActivePacketAck{};
+    return true;
+  }
+  if (!sActivePacketAck.frameReady) {
+    sActivePacketAck.frame = gR1Encoder.buildPacketAck(
+        sR1Profile, sActivePacketAck.pending.received);
+    if (sActivePacketAck.frame.length == 0) {
+      sActivePacketAck = RingActivePacketAck{};
+      return true;
+    }
+    sActivePacketAck.frameReady = true;
+  }
+  const RingWriteResult result = ringOwnerWrite(
+      sActivePacketAck.frame.bytes, sActivePacketAck.frame.length);
+  if (result == RING_WRITE_OK) {
+    DEBUG_G2F("[RING] TX packetAck ser=%u rxSer=%u",
+              (unsigned)sActivePacketAck.frame.serial,
+              (unsigned)sActivePacketAck.pending.received.serial);
+    sActivePacketAck = RingActivePacketAck{};
+  } else if (result == RING_WRITE_DISCONNECTED) {
+    sActivePacketAck = RingActivePacketAck{};
+  }
+  return true;
+}
+
+static void ringServiceSetup() {
+  if (!sSetupOwner.active) return;
+  if (ringDeadlinePassed(sSetupOwner.deadlineMs)) {
+    const uint8_t error = sSetupOwner.stage == G2_RING_SETUP_TIME &&
+                                  !Clock::isValidEpoch(time(nullptr))
+                              ? G2_RING_ERR_CLOCK_UNAVAILABLE
+                              : G2_RING_ERR_TIMEOUT;
+    ringFinishSetup(false, error);
+    return;
+  }
+
+  if (!sSetupOwner.frameReady) {
+    switch (sSetupOwner.stage) {
+      case G2_RING_SETUP_AUTH:
+        sSetupOwner.frame = gR1Encoder.buildPairAuth();
+        break;
+      case G2_RING_SETUP_DEVICE_INFO:
+        sSetupOwner.frame = gR1Encoder.buildDeviceInfoQuery();
+        break;
+      case G2_RING_SETUP_TIME: {
+        const time_t now = time(nullptr);
+        if (!Clock::isValidEpoch(now)) return;  // fail closed at stage deadline
+        sSetupOwner.frame = gR1Encoder.buildSyncTime(0, (uint32_t)now);
+        break;
+      }
+      case G2_RING_SETUP_ADV_START: {
+        uint8_t right[6]{};
+        uint8_t left[6]{};
+        const bool haveRight = g2GetRightTempleMac(right);
+        const bool haveLeft = g2GetLeftTempleMac(left);
+        portENTER_CRITICAL(&sTransportMux);
+        sControlStatus.advIdentityKnown = haveRight && haveLeft;
+        portEXIT_CRITICAL(&sTransportMux);
+        if (!haveRight || !haveLeft) {
+          ringFinishSetup(false, G2_RING_ERR_IDENTITY_UNKNOWN);
+          return;
+        }
+        sSetupOwner.frame = gR1Encoder.buildAdvStart(sR1Profile, right, left);
+        break;
+      }
+      default:
+        ringFinishSetup(false, G2_RING_ERR_ENCODE);
+        return;
+    }
+    if (sSetupOwner.frame.length == 0) {
+      ringFinishSetup(false, sR1Profile == R1_PROFILE_UNKNOWN &&
+                                     sSetupOwner.stage == G2_RING_SETUP_ADV_START
+                                 ? G2_RING_ERR_PROFILE_UNKNOWN
+                                 : G2_RING_ERR_ENCODE);
+      return;
+    }
+    sSetupOwner.frameReady = true;
+  }
+
+  if (!sSetupOwner.written) {
+    const RingWriteResult result = ringOwnerWrite(
+        sSetupOwner.frame.bytes, sSetupOwner.frame.length);
+    if (result == RING_WRITE_DISCONNECTED) {
+      ringFinishSetup(false, G2_RING_ERR_DISCONNECTED);
+      return;
+    }
+    if (result != RING_WRITE_OK) return;
+    sSetupOwner.written = true;
+    if (sSetupOwner.stage == G2_RING_SETUP_TIME) {
+      sLastPushedEpoch = (uint32_t)time(nullptr);
+      sLastPushedAtMs = millis();
+    }
+    DEBUG_G2F("[RING] setup TX stage=%s ser=%u len=%u",
+              g2RingSetupStateName(sSetupOwner.stage),
+              (unsigned)sSetupOwner.frame.serial,
+              (unsigned)sSetupOwner.frame.length);
+  }
+}
+
+static R1Frame ringBuildIntentFrame(const RingIntent& intent,
+                                    uint8_t& error) {
+  error = G2_RING_ERR_ENCODE;
+  switch (intent.kind) {
+    case RING_INTENT_RAW: {
+      const uint8_t* payload = nullptr;
+      if (intent.payloadLen > 0) {
+        if (intent.payloadSlot >= RING_RAW_PAYLOAD_SLOTS ||
+            !sRawPayloadSlots[intent.payloadSlot].used) return R1Frame{};
+        payload = sRawPayloadSlots[intent.payloadSlot].bytes;
+      }
+      return gR1Encoder.build(intent.module, intent.cmd, intent.subCmd,
+                              intent.statusType, intent.statusMethod,
+                              intent.statusAck, payload, intent.payloadLen);
+    }
+    case RING_INTENT_PAIR_AUTH:
+      return gR1Encoder.buildPairAuth();
+    case RING_INTENT_DEVICE_INFO:
+      return gR1Encoder.buildDeviceInfoQuery();
+    case RING_INTENT_SYNC_TIME:
+      if (!Clock::isValidEpoch((time_t)intent.epoch)) {
+        error = G2_RING_ERR_CLOCK_UNAVAILABLE;
+        return R1Frame{};
+      }
+      return gR1Encoder.buildSyncTime(0, intent.epoch);
+    case RING_INTENT_ADV_START: {
+      uint8_t right[6]{};
+      uint8_t left[6]{};
+      if (!g2GetRightTempleMac(right) || !g2GetLeftTempleMac(left)) {
+        error = G2_RING_ERR_IDENTITY_UNKNOWN;
+        return R1Frame{};
+      }
+      if (sR1Profile == R1_PROFILE_UNKNOWN) {
+        error = G2_RING_ERR_PROFILE_UNKNOWN;
+        return R1Frame{};
+      }
+      return gR1Encoder.buildAdvStart(sR1Profile, right, left);
+    }
+    case RING_INTENT_HEALTH_QUERY:
+      return gR1Encoder.buildHealthQuery(intent.cmd, intent.subCmd);
+    case RING_INTENT_HEALTH_COLLECTION_SET:
+      if (sR1Profile == R1_PROFILE_UNKNOWN) {
+        error = G2_RING_ERR_PROFILE_UNKNOWN;
+        return R1Frame{};
+      }
+      if (!Clock::isValidEpoch((time_t)intent.epoch)) {
+        error = G2_RING_ERR_CLOCK_UNAVAILABLE;
+        return R1Frame{};
+      }
+      return gR1Encoder.buildHealthCollectionSet(
+          sR1Profile, intent.epoch, intent.desired == G2_RING_ON);
+    case RING_INTENT_LOW_POWER_QUERY:
+      return gR1Encoder.buildLowPowerQuery();
+    case RING_INTENT_LOW_POWER_SET:
+      if (sR1Profile == R1_PROFILE_UNKNOWN) {
+        error = G2_RING_ERR_PROFILE_UNKNOWN;
+        return R1Frame{};
+      }
+      if (!Clock::isValidEpoch((time_t)intent.epoch)) {
+        error = G2_RING_ERR_CLOCK_UNAVAILABLE;
+        return R1Frame{};
+      }
+      return gR1Encoder.buildLowPowerSet(
+          sR1Profile, intent.epoch, intent.desired == G2_RING_ON);
+    default:
+      return R1Frame{};
+  }
+}
+
+static void ringServiceNormalTransaction() {
+  if (!sActiveTransaction.valid) {
+    RingIntent intent{};
+    if (!ringPopIntent(intent)) return;
+    if (intent.handle.generation != sLinkGeneration) {
+      ringUpdateTransaction(intent.handle, G2_RING_TX_DISCONNECTED,
+                            G2_RING_ERR_DISCONNECTED);
+      if (intent.payloadSlot < RING_RAW_PAYLOAD_SLOTS)
+        ringReleaseRawPayload(intent.payloadSlot);
+      return;
+    }
+    sActiveTransaction = RingActiveTransaction{};
+    sActiveTransaction.valid = true;
+    sActiveTransaction.intent = intent;
+    sActiveTransaction.deadlineMs = millis() + intent.timeoutMs;
+  }
+
+  if (!sActiveTransaction.frameReady) {
+    uint8_t error = G2_RING_ERR_ENCODE;
+    sActiveTransaction.frame = ringBuildIntentFrame(
+        sActiveTransaction.intent, error);
+    if (sActiveTransaction.frame.length == 0) {
+      ringCompleteActive(G2_RING_TX_REFUSED, error);
+      return;
+    }
+    sActiveTransaction.frameReady = true;
+  }
+
+  if (!sActiveTransaction.written) {
+    const RingWriteResult result = ringOwnerWrite(
+        sActiveTransaction.frame.bytes, sActiveTransaction.frame.length);
+    if (result == RING_WRITE_DISCONNECTED) {
+      ringCompleteActive(G2_RING_TX_DISCONNECTED, G2_RING_ERR_DISCONNECTED);
+      return;
+    }
+    if (result == RING_WRITE_OK) {
+      sActiveTransaction.written = true;
+      sActiveTransaction.deadlineMs = millis() +
+                                      sActiveTransaction.intent.timeoutMs;
+      if (!sActiveTransaction.readbackPhase) {
+        ringUpdateTransaction(sActiveTransaction.intent.handle,
+                              G2_RING_TX_WRITTEN);
+      }
+      if (sActiveTransaction.intent.kind == RING_INTENT_SYNC_TIME) {
+        sLastPushedEpoch = sActiveTransaction.intent.epoch;
+        sLastPushedAtMs = millis();
+      }
+      DEBUG_G2F("[RING] TX transaction id=%lu gen=%lu ser=%u %s/%s/%s%s",
+                (unsigned long)sActiveTransaction.intent.handle.id,
+                (unsigned long)sActiveTransaction.intent.handle.generation,
+                (unsigned)sActiveTransaction.frame.serial,
+                r1ModuleName(sActiveTransaction.intent.module),
+                r1CmdName(sActiveTransaction.intent.module,
+                          sActiveTransaction.intent.cmd),
+                r1SubCmdName(sActiveTransaction.intent.module,
+                             sActiveTransaction.intent.cmd,
+                             sActiveTransaction.intent.subCmd),
+                sActiveTransaction.readbackPhase ? " readback" : "");
+    }
+  }
+
+  if (sActiveTransaction.valid &&
+      ringDeadlinePassed(sActiveTransaction.deadlineMs)) {
+    const RingIntent& intent = sActiveTransaction.intent;
+    if (intent.module == R1_MODULE_HEALTH && intent.cmd == R1_CMD_SLEEP &&
+        intent.subCmd == R1_SUB_DAILY && sActiveTransaction.commandAcked &&
+        !sActiveTransaction.unparsedDailyDataSeen) {
+      // Capture-proven empty-command ACK plus a full response window with no
+      // data is the only supported evidence for an empty sleep metric.
+      g2HealthHistorySetSleepState(R1_HISTORY_SLEEP_EMPTY);
+      ringCompleteActive(G2_RING_TX_VERIFIED, G2_RING_ERR_NONE);
+      return;
+    }
+    ringCompleteActive(G2_RING_TX_TIMEOUT, G2_RING_ERR_TIMEOUT);
+  }
+}
+
+static void ringServiceControlReconciliation() {
+  bool healthPending = false;
+  bool lowPending = false;
+  G2RingDesiredState healthDesired = G2_RING_PRESERVE;
+  G2RingDesiredState lowDesired = G2_RING_PRESERVE;
+  portENTER_CRITICAL(&sTransportMux);
+  healthPending = sControlStatus.healthPending &&
+                  sControlStatus.healthTransaction.id == 0;
+  lowPending = sControlStatus.lowPowerPending &&
+               sControlStatus.lowPowerTransaction.id == 0;
+  healthDesired = sControlStatus.healthDesired;
+  lowDesired = sControlStatus.lowPowerDesired;
+  portEXIT_CRITICAL(&sTransportMux);
+  if (healthPending) {
+    (void)ringQueueControlIntent(RING_CONTROL_HEALTH, healthDesired, nullptr);
+  }
+  if (lowPending) {
+    (void)ringQueueControlIntent(RING_CONTROL_LOW_POWER, lowDesired, nullptr);
+  }
+}
+
+static void ringServiceHistoryCoordinator() {
+  static constexpr uint8_t kMetrics[] = {
+    R1_CMD_HEARTRATE, R1_CMD_HRV, R1_CMD_SPO2, R1_CMD_SLEEP,
+    R1_CMD_ACTIVITY,
+  };
+
+  G2RingDesiredState healthDesired;
+  portENTER_CRITICAL(&sTransportMux);
+  healthDesired = sControlStatus.healthDesired;
+  portEXIT_CRITICAL(&sTransportMux);
+  if (sHistoryCoordinator.active && !sHistoryCoordinator.force &&
+      healthDesired == G2_RING_OFF) {
+    DEBUG_G2F("[RING] normal history sweep cancelled: health collection desired Off");
+    ringFinishHistorySweep(false, G2_RING_ERR_NONE);
+    return;
+  }
+
+  if (!sHistoryCoordinator.active) {
+    bool requested = false;
+    bool force = false;
+    portENTER_CRITICAL(&sTransportMux);
+    requested = sHistoryRefreshRequested;
+    force = sHistoryRefreshForce;
+    if (requested) {
+      sHistoryRefreshRequested = false;
+      sHistoryRefreshForce = false;
+    }
+    portEXIT_CRITICAL(&sTransportMux);
+    if (!requested) return;
+    if (!force && healthDesired == G2_RING_OFF) {
+      DEBUG_G2F("[RING] normal history refresh skipped: health collection desired Off");
+      return;
+    }
+    if (!force) {
+      const uint32_t nowMs = millis();
+      if (sLastHistoryAttemptMs != 0 &&
+          (uint32_t)(nowMs - sLastHistoryAttemptMs) < 10U * 60U * 1000U) {
+        DEBUG_G2F("[RING] normal history refresh throttled (<10 min since attempt)");
+        return;
+      }
+      G2HealthHistorySummary summary{};
+      g2HealthHistoryGetSummary(summary);
+      const uint32_t newest = summary.lastSuccessEpoch > summary.lastPartialEpoch
+                                  ? summary.lastSuccessEpoch
+                                  : summary.lastPartialEpoch;
+      const time_t now = time(nullptr);
+      if (newest != 0 && Clock::isValidEpoch(now) &&
+          Clock::isValidEpoch((time_t)newest)) {
+        const uint32_t age = (uint32_t)now >= newest
+                                 ? (uint32_t)now - newest
+                                 : 0;
+        if (age < 10U * 60U) {
+          DEBUG_G2F("[RING] normal history refresh skipped: RAM history is %lus old",
+                    (unsigned long)age);
+          return;
+        }
       }
     }
-    DEBUG_G2F("[RING] dark-clock window: %s",
-              Clock::isSynced() ? "adopted ring clock — echoing it back"
-                                : "no dated sample seen — sending dark epoch");
+    sHistoryCoordinator = RingHistoryCoordinator{};
+    sHistoryCoordinator.active = true;
+    sHistoryCoordinator.force = force;
+    sHistoryCoordinator.generation = sLinkGeneration;
+    sLastHistoryAttemptMs = millis();
+    portENTER_CRITICAL(&sTransportMux);
+    sHistorySweepActive = true;
+    // Coalesce a request that raced the gate checks/start transition.
+    sHistoryRefreshRequested = false;
+    sHistoryRefreshForce = false;
+    portEXIT_CRITICAL(&sTransportMux);
+    g2HealthHistoryFetchStarted();
+    DEBUG_G2F("[RING] history sweep started%s", force ? " (force)" : "");
   }
 
-  // 2. systemTime — current epoch, tz=0 (UTC). The ring uses the timezone
-  //    field to label its history-mode timestamps; for the live telemetry
-  //    stream we care about (HR/HRV/temperature pushes) the timezone is
-  //    irrelevant. We deliberately keep sending 0 even though
-  //    Clock::tzOffsetMinutes() is now available everywhere: the daily
-  //    windows Trends reads (startTs/endTs) are bucketed by the ring using
-  //    this field, so changing it would silently shift every historical
-  //    day boundary. Epoch stays UTC; only the display layer localizes.
-  time_t now = time(nullptr);
-  R1Frame timeFrame = gR1Encoder.buildSyncTime(0, (uint32_t)now);
-  if (timeFrame.length > 0) {
-    if (ringWrite(timeFrame.bytes, timeFrame.length)) {
-      sLastPushedEpoch = (uint32_t)now;
-      sLastPushedAtMs  = (uint32_t)millis();
-      DEBUG_G2F("[RING] TX systemTime ser=%u tz=0min epoch=%lu%s",
-                (unsigned)timeFrame.serial, (unsigned long)now,
-                Clock::isSynced() ? "" : " (dark — corrective push pending)");
+  if (sHistoryCoordinator.generation != sLinkGeneration || !sLinkOnline) {
+    ringFinishHistorySweep(false, G2_RING_ERR_DISCONNECTED);
+    return;
+  }
+
+  if (sHistoryCoordinator.transaction.id != 0) {
+    G2RingTransactionStatus status{};
+    if (!g2RingGetTransactionStatus(sHistoryCoordinator.transaction, status) ||
+        status.completedAtMs == 0) return;
+    if (status.state != G2_RING_TX_VERIFIED &&
+        sHistoryCoordinator.firstError == G2_RING_ERR_NONE) {
+      sHistoryCoordinator.firstError =
+          status.errorCode != G2_RING_ERR_NONE
+              ? status.errorCode
+              : (uint8_t)G2_RING_ERR_TIMEOUT;
     }
+    ++sHistoryCoordinator.metricIndex;
+    sHistoryCoordinator.transaction = G2RingTransactionHandle{};
   }
-  vTaskDelay(pdMS_TO_TICKS(200));
 
-  // 3. advStart — G2 right-temple MAC in BLE address order (NOT reversed).
-  // Verified against FlutterApp r1_manager.dart:262 + Ring_Bridge_Sequence.h
-  // Step 2.3 — both confirm "IN ORDER (NOT reversed)". An earlier version of
-  // this firmware reversed the bytes, which made the ring directed-advertise
-  // toward a non-existent MAC and caused the temple's bond attempts to fail
-  // with connRet=8 (fail-terminal) every cycle.
-  uint8_t mac[6] = {0};
-  if (g2GetRightTempleMac(mac)) {
-    DEBUG_G2F("[RING] standard setup: advStart target=%02X:%02X:%02X:%02X:%02X:%02X",
-              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-  } else {
-    DEBUG_G2F("[RING] standard setup: no right-temple MAC available — "
-              "sending advStart with zero target (ring may ignore it)");
+  if (sHistoryCoordinator.metricIndex >= sizeof(kMetrics)) {
+    const bool success = sHistoryCoordinator.firstError == G2_RING_ERR_NONE;
+    const uint8_t error = sHistoryCoordinator.firstError;
+    DEBUG_G2F("[RING] history sweep %s error=%s",
+              success ? "complete" : "partial",
+              g2RingTransactionErrorName(error));
+    ringFinishHistorySweep(success, error);
+    return;
   }
-  R1Frame advFrame = gR1Encoder.buildAdvStart(mac);
-  if (advFrame.length > 0) {
-    if (ringWrite(advFrame.bytes, advFrame.length)) {
-      DEBUG_G2F("[RING] TX advStart ser=%u (%u B)",
-                (unsigned)advFrame.serial, (unsigned)advFrame.length);
+
+  G2RingTransactionHandle handle{};
+  const uint8_t cmd = kMetrics[sHistoryCoordinator.metricIndex];
+  if (ringEnqueueHealthDataQuery(cmd, R1_SUB_DAILY,
+                                 (uint8_t)(0x20 + cmd), &handle)) {
+    sHistoryCoordinator.transaction = handle;
+  }
+}
+
+static void ringOwnerTask(void* /*arg*/) {
+  uint32_t ownedGeneration = 0;
+  RingRxFrame rx{};
+  for (;;) {
+    const uint32_t currentGeneration = sLinkGeneration;
+    const bool online = sLinkOnline;
+    if (ownedGeneration != 0 &&
+        (!online || currentGeneration != ownedGeneration)) {
+      ringDropOwnedGeneration(ownedGeneration);
+      ownedGeneration = 0;
     }
-  }
-  vTaskDelay(pdMS_TO_TICKS(200));
+    if (online && currentGeneration != 0 &&
+        ownedGeneration != currentGeneration && sSetupRequested) {
+      ownedGeneration = currentGeneration;
+      ringBeginOwnedGeneration(ownedGeneration);
+    }
 
-  DEBUG_G2F("[RING] standard setup complete — ring should now emit telemetry "
-            "(HR / HRV / temperature / activity) on the notify char");
-  sRingSetupDone = true;  // opens the tick's corrective-push gate
-  return true;
+    while (sRxQueue && xQueueReceive(sRxQueue, &rx, 0) == pdTRUE) {
+      if (rx.generation == ownedGeneration && sLinkOnline) {
+        ringProcessRxFrame(rx.bytes, rx.length, rx.generation);
+      }
+    }
+
+    if (ownedGeneration != 0 && sLinkOnline &&
+        ownedGeneration == sLinkGeneration) {
+      if (ringServicePacketAck()) {
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10));
+        continue;
+      }
+      if (sSetupOwner.active) {
+        ringServiceSetup();
+      } else {
+        G2RingSetupState setupState;
+        portENTER_CRITICAL(&sTransportMux);
+        setupState = sControlStatus.setupState;
+        portEXIT_CRITICAL(&sTransportMux);
+        if (setupState == G2_RING_SETUP_READY) {
+          ringServiceControlReconciliation();
+          ringServiceHistoryCoordinator();
+          ringServiceNormalTransaction();
+        }
+      }
+    }
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20));
+  }
 }
 
 // =============================================================================
@@ -1168,7 +2475,7 @@ class RingClientCallbacks : public BLEClientCallbacks {
     gRing.writeChar   = nullptr;
     gRing.notifyChar  = nullptr;
     gRing.clientStale = true;
-    gR1Encoder.resetSerial();
+    ringTransportDisconnected();
     // No corrective time push into a dead link, and no ring timestamp from
     // THIS link surviving into the next one (this is the common teardown —
     // link lost — so it must clear as much as ringClearGattPointers does).
@@ -1363,7 +2670,7 @@ bool ringPerformConnect(const String& savedMac /* = String() */) {
     // interval makes 50-500 ms normal. That same handler drops getGattcIf()
     // to ESP_GATT_IF_NONE; poll for it, bounded.
     //
-    // Gate 2 — app tasks. ringWriteLocked holds writeMutex across its
+    // Gate 2 — app tasks. The serialized owner holds writeMutex across its
     // writeChar dereference (the char lives inside this client's GATT
     // cache); 2 s dwarfs a healthy sender's hold (one writeValue).
     //
@@ -1520,10 +2827,21 @@ bool ringPerformConnect(const String& savedMac /* = String() */) {
 
   // pairAuth → systemTime → advStart unlocks the notify/telemetry stream
   // (a bare subscribe without pairAuth stays muted).
-  ringRunStandardSetup();
+  if (!ringRunStandardSetup()) {
+    G2RingControlStatus setup{};
+    g2RingGetControlStatus(setup);
+    BROADCAST_PRINTF("[RING] Connect FAILED — setup %s (%s)",
+                     g2RingSetupStateName(setup.setupState),
+                     g2RingTransactionErrorName(setup.setupLastError));
+    ringNoteConnectFailure("setup", millis() - t0);
+    ringTransportDisconnected();
+    if (gRing.client) gRing.client->disconnect();
+    ringClearGattPointers(/*dropClientPtr=*/false);
+    return false;
+  }
 
-  BROADCAST_PRINTF("[RING] Connected to %s (auth + time sync sent)",
-                   gRingDeviceName.c_str());
+  BROADCAST_PRINTF("[RING] Connected to %s (setup verified, profile %s)",
+                   gRingDeviceName.c_str(), r1ProtocolProfileName(sR1Profile));
   ringPushStatusEvent("connect-ok");
   // Mirror G2_Glasses: SSE status push + typed bus event for automations /
   // `events` / system_events consumers. subject=name, detail=mac.
@@ -1562,7 +2880,30 @@ bool g2RingInit() {
   if (!gRing.writeMutex) {
     gRing.writeMutex = xSemaphoreCreateMutex();
   }
-  gRing.initialized = true;
+  if (!gRing.writeMutex) return false;
+  if (!sRxQueue) {
+    sRxQueue = xQueueCreateStatic(RING_RX_QUEUE_DEPTH, sizeof(RingRxFrame),
+                                  sRxQueueBytes, &sRxQueueStorage);
+  }
+  if (!sSetupDone) {
+    sSetupDone = xSemaphoreCreateBinaryStatic(&sSetupDoneStorage);
+  }
+  if (!sRxQueue || !sSetupDone) return false;
+
+  // Clamp erased/corrupt persisted values to the fail-safe Preserve policy.
+  if (gSettings.ringHealthCollectionDesired < (int)G2_RING_PRESERVE ||
+      gSettings.ringHealthCollectionDesired > (int)G2_RING_ON) {
+    setSetting(gSettings.ringHealthCollectionDesired,
+               (int)G2_RING_PRESERVE);
+  }
+  if (gSettings.ringLowPowerDesired < (int)G2_RING_PRESERVE ||
+      gSettings.ringLowPowerDesired > (int)G2_RING_ON) {
+    setSetting(gSettings.ringLowPowerDesired, (int)G2_RING_PRESERVE);
+  }
+  sControlStatus.healthDesired =
+      (G2RingDesiredState)gSettings.ringHealthCollectionDesired;
+  sControlStatus.lowPowerDesired =
+      (G2RingDesiredState)gSettings.ringLowPowerDesired;
 
   // Register with the peer registry. ringPeerSpec is a file-static (see
   // top of this file); registration just publishes a stable pointer.
@@ -1571,7 +2912,18 @@ bool g2RingInit() {
   // Cheap one-time validation that our CRC ports match the FlutterApp's
   // captured wire bytes. Logs PASS/FAIL inline; on FAIL the encoder is
   // unsafe to use against real hardware (we'd send malformed frames).
-  r1ProtocolSelfTest();
+  if (!r1ProtocolSelfTest()) {
+    DEBUG_G2F("[RING] Module disabled: protocol self-test failed");
+    return false;
+  }
+  if (!sRingOwnerTask &&
+      xTaskCreateLogged(ringOwnerTask, "r1_owner", RING_OWNER_STACK_BYTES,
+                        nullptr, 4,
+                        &sRingOwnerTask, "r1.owner", PRO_CORE) != pdPASS) {
+    DEBUG_G2F("[RING] Module disabled: owner task creation failed");
+    return false;
+  }
+  gRing.initialized = true;
 
   DEBUG_G2F("[RING] Module initialised (full R1 protocol — auth + telemetry)");
   return true;
@@ -1648,11 +3000,9 @@ bool g2RingConnectMac(const String& mac) {
 void g2RingInvalidateLink() {
   // No GATT calls — stack may already be dead.
   const bool wasConnected = gRing.connected;
-  ringTxQClear();
   // Drop the pointer: BLEDevice::deinit frees/invalidates the object, so
   // keeping it for reaping would leave a dangling pointer.
   ringClearGattPointers(/*dropClientPtr=*/true);
-  gR1Encoder.resetSerial();
   if (wasConnected) {
     DEBUG_G2F("[RING] Link invalidated (BLE stack teardown)");
     ringPushStatusEvent("disconnect");
@@ -1670,7 +3020,6 @@ void g2RingDisconnect() {
     DEBUG_G2F("[RING] Disconnecting");
     gRing.client->disconnect();  // onDisconnect clears chars when stack is live
   }
-  ringTxQClear();
   // Keep the client object for the next connect's stale-replacement reap:
   // deleting it here would race the async DISCONNECT_EVT still headed for it,
   // and the old null-without-delete leaked it (~10-14 KB) AND stranded
@@ -1678,7 +3027,6 @@ void g2RingDisconnect() {
   // manual ringdisconnect → ringconnect came up connected-but-mute (every TX
   // gate checks clientStale).
   ringClearGattPointers(/*dropClientPtr=*/false);
-  gR1Encoder.resetSerial();
 }
 
 bool g2RingIsConnected() {
@@ -1687,22 +3035,41 @@ bool g2RingIsConnected() {
 
 bool g2RingPollVital(uint8_t which) {
   if (!gRing.connected || !gRing.writeChar) return false;
-  R1Frame q = {};
   const char* tag = "?";
+  G2RingTransactionHandle handle{};
+  bool queued = false;
   switch (which) {
-    case 0: q = gR1Encoder.buildHealthQuery(R1_CMD_HEARTRATE, R1_SUB_POINT); tag = "hrPoint";   break;
-    case 1: q = gR1Encoder.buildHealthQuery(R1_CMD_HRV,       R1_SUB_POINT); tag = "hrvPoint";  break;
-    case 2: q = gR1Encoder.buildHealthQuery(R1_CMD_SPO2,      R1_SUB_POINT); tag = "spo2Point"; break;
-    case 3: q = gR1Encoder.buildHealthQuery(R1_CMD_TEMPERATURE, R1_SUB_POINT); tag = "tempPoint"; break;
-    case 4: q = gR1Encoder.buildGenericQuery(R1_MODULE_SYSTEM, R1_CMD_SYSTEM,
-                                             R1_SUB_DEVICE_STATUS);          tag = "devStatus"; break;
+    case 0:
+      tag = "hrPoint";
+      queued = ringEnqueueHealthDataQuery(R1_CMD_HEARTRATE, R1_SUB_POINT,
+                                          1, &handle);
+      break;
+    case 1:
+      tag = "hrvPoint";
+      queued = ringEnqueueHealthDataQuery(R1_CMD_HRV, R1_SUB_POINT,
+                                          2, &handle);
+      break;
+    case 2:
+      tag = "spo2Point";
+      queued = ringEnqueueHealthDataQuery(R1_CMD_SPO2, R1_SUB_POINT,
+                                          3, &handle);
+      break;
+    case 3:
+      tag = "tempPoint";
+      queued = ringEnqueueHealthDataQuery(R1_CMD_TEMPERATURE, R1_SUB_POINT,
+                                          4, &handle);
+      break;
+    case 4:
+      tag = "devStatus";
+      queued = ringEnqueueSystemQuery(R1_SUB_DEVICE_STATUS, 5, &handle);
+      break;
     default: return false;
   }
-  if (q.length == 0 || !gRing.writeChar) return false;
-  // Coalesce key 1..5: repeated Poll Now / Track mines replace in-queue.
-  if (!ringWrite(q.bytes, q.length, (uint8_t)(which + 1))) return false;
-  DEBUG_G2F("[RING] page poll: TX %s ser=%u", tag, (unsigned)q.serial);
-  return true;
+  if (queued) {
+    DEBUG_G2F("[RING] page poll queued %s tx=%lu gen=%lu", tag,
+              (unsigned long)handle.id, (unsigned long)handle.generation);
+  }
+  return queued;
 }
 
 bool g2RingQueryDaily(uint8_t cmd) {
@@ -1711,11 +3078,15 @@ bool g2RingQueryDaily(uint8_t cmd) {
       cmd != R1_CMD_TEMPERATURE && cmd != R1_CMD_ACTIVITY && cmd != R1_CMD_SLEEP) {
     return false;
   }
-  R1Frame q = gR1Encoder.buildHealthQuery(cmd, R1_SUB_DAILY);
-  if (q.length == 0) return false;
-  if (!ringWrite(q.bytes, q.length, (uint8_t)(0x20 + cmd))) return false;
-  DEBUG_G2F("[RING] daily query: TX cmd=0x%02X ser=%u", (unsigned)cmd, (unsigned)q.serial);
-  return true;
+  G2RingTransactionHandle handle{};
+  const bool queued = ringEnqueueHealthDataQuery(
+      cmd, R1_SUB_DAILY, (uint8_t)(0x20 + cmd), &handle);
+  if (queued) {
+    DEBUG_G2F("[RING] daily query queued cmd=0x%02X tx=%lu gen=%lu",
+              (unsigned)cmd, (unsigned long)handle.id,
+              (unsigned long)handle.generation);
+  }
+  return queued;
 }
 
 void g2RingPollVitalForLogging(void) {
@@ -1730,7 +3101,7 @@ void g2RingPollVitalForLogging(void) {
 }
 
 void g2RingGetTelemetry(G2RingTelemetry& out) {
-  // gR1Cache is written from the BLE notify task; telemetry updates are
+  // gR1Cache is written from the serialized ring owner; telemetry updates are
   // minute-scale, so a plain field copy is fine for a read-only dashboard
   // (no lock; worst case is one stale tick, corrected on the next).
   out.connected     = gRing.connected;
@@ -1760,14 +3131,23 @@ void g2RingGetStatus(char* buf, size_t cap) {
   const uint32_t nowMs = millis();
   const uint32_t upMs  = gRing.connected && gRing.connectedSince
                          ? (nowMs - gRing.connectedSince) : 0;
+  const uint32_t stackFree = sRingOwnerTask
+      ? (uint32_t)uxTaskGetStackHighWaterMark(sRingOwnerTask)
+      : RING_OWNER_STACK_BYTES;
+  const uint32_t stackUsed = stackFree < RING_OWNER_STACK_BYTES
+      ? RING_OWNER_STACK_BYTES - stackFree
+      : 0;
   snprintf(buf, cap,
-           "ring=%s name='%s' addr=%s mtu=%u rx=%lu up=%u.%03us (scan=%s)",
+           "ring=%s name='%s' addr=%s mtu=%u rx=%lu up=%u.%03us "
+           "stack=%lu/%luB (scan=%s)",
            gRing.connected ? "up" : "down",
            gRingDeviceName.length() ? gRingDeviceName.c_str() : "<unknown>",
            gRingDeviceAddress.length() ? gRingDeviceAddress.c_str() : "--",
            (unsigned)gRing.mtu,
            (unsigned long)gRing.packetsReceived,
            (unsigned)(upMs / 1000), (unsigned)(upMs % 1000),
+           (unsigned long)stackUsed,
+           (unsigned long)RING_OWNER_STACK_BYTES,
            gRingScanFound ? "found" : "not-found");
 }
 
@@ -1856,13 +3236,13 @@ static void ringSpoofTaskBody(void* /*arg*/) {
   uint32_t magicCounter = 0;
   while (gSpoofEnabled) {
     if (gRing.connected && gRing.writeChar) {
-      // Poll each metric. Ignore encode failures — cache simply won't
+      // Poll each metric. Ignore queue failures — cache simply won't
       // refresh for that metric this cycle.
       auto sendQ = [](uint8_t cmd, uint8_t sub, uint8_t ckey, const char* tag) {
-        R1Frame q = gR1Encoder.buildHealthQuery(cmd, sub);
-        if (q.length > 0 && gRing.writeChar &&
-            ringWrite(q.bytes, q.length, ckey)) {
-          DEBUG_G2F("[RING] spoof poll: TX %s ser=%u", tag, (unsigned)q.serial);
+        G2RingTransactionHandle handle{};
+        if (ringEnqueueHealthDataQuery(cmd, sub, ckey, &handle)) {
+          DEBUG_G2F("[RING] spoof poll queued %s tx=%lu", tag,
+                    (unsigned long)handle.id);
         }
       };
       sendQ(R1_CMD_HEARTRATE, R1_SUB_POINT, 1, "hrPoint");
@@ -1874,11 +3254,11 @@ static void ringSpoofTaskBody(void* /*arg*/) {
 
       // Battery comes from deviceStatus — generic system-module probe.
       {
-        R1Frame q = gR1Encoder.buildGenericQuery(R1_MODULE_SYSTEM, R1_CMD_SYSTEM,
-                                                 R1_SUB_DEVICE_STATUS);
-        if (q.length > 0 && gRing.writeChar &&
-            ringWrite(q.bytes, q.length, /*coalesceKey=*/5)) {
-          DEBUG_G2F("[RING] spoof poll: TX deviceStatus ser=%u", (unsigned)q.serial);
+        G2RingTransactionHandle handle{};
+        if (ringEnqueueSystemQuery(R1_SUB_DEVICE_STATUS,
+                                   /*coalesceKey=*/5, &handle)) {
+          DEBUG_G2F("[RING] spoof poll queued deviceStatus tx=%lu",
+                    (unsigned long)handle.id);
         }
       }
       vTaskDelay(pdMS_TO_TICKS(600));
@@ -1938,9 +3318,15 @@ static void ringSpoofStop() {
 
 static const char* cmd_ringstatus(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  EXT_RAM_BSS_ATTR static char buf[256];
+  EXT_RAM_BSS_ATTR static char buf[320];
   if (argWantsJson(args)) {
     const uint32_t upMs = (gRing.connected && gRing.connectedSince) ? (millis() - gRing.connectedSince) : 0;
+    const uint32_t stackFree = sRingOwnerTask
+        ? (uint32_t)uxTaskGetStackHighWaterMark(sRingOwnerTask)
+        : RING_OWNER_STACK_BYTES;
+    const uint32_t stackUsed = stackFree < RING_OWNER_STACK_BYTES
+        ? RING_OWNER_STACK_BYTES - stackFree
+        : 0;
     CompactJson j(buf, sizeof(buf));
     j.kv("schema", 1)
      .kv("connected", (bool)gRing.connected)
@@ -1949,6 +3335,9 @@ static const char* cmd_ringstatus(const String& args) {
      .kv("mtu", (unsigned)gRing.mtu)
      .kv("rx", (unsigned long)gRing.packetsReceived)
      .kv("upMs", (unsigned long)upMs)
+     .kv("stackBytes", (unsigned long)RING_OWNER_STACK_BYTES)
+     .kv("stackUsedMax", (unsigned long)stackUsed)
+     .kv("stackFreeMin", (unsigned long)stackFree)
      .kv("scanFound", (bool)gRingScanFound);
     return j.c_str();
   }
@@ -2056,18 +3445,55 @@ static const char* cmd_ringscan(const String& args) {
   return buf;
 }
 
+struct RingPendingRawSet {
+  bool active = false;
+  bool originalAdmin = false;
+  AuthContext auth{};
+  uint8_t module = 0;
+  uint8_t cmd = 0;
+  uint8_t subCmd = 0;
+  uint8_t statusType = 0;
+  uint8_t statusMethod = 0;
+  uint8_t statusAck = 0;
+  uint16_t payloadLen = 0;
+  uint8_t payload[R1_MAX_PAYLOAD]{};
+};
+static RingPendingRawSet sPendingRawSet;
+
+static const char* ringConfirmRawSet(void* /*userData*/) {
+  static char reply[180];
+  if (!sPendingRawSet.active || !sPendingRawSet.originalAdmin) {
+    sPendingRawSet.active = false;
+    return "Error: raw R1 SET authorization expired";
+  }
+  G2RingTransactionHandle handle{};
+  const bool queued = g2RingSubmitRawTransaction(
+      sPendingRawSet.module, sPendingRawSet.cmd, sPendingRawSet.subCmd,
+      sPendingRawSet.statusType, sPendingRawSet.statusMethod,
+      sPendingRawSet.statusAck,
+      sPendingRawSet.payloadLen ? sPendingRawSet.payload : nullptr,
+      sPendingRawSet.payloadLen, &handle);
+  sPendingRawSet.active = false;
+  if (!queued) return "Error: raw R1 SET was not queued";
+  snprintf(reply, sizeof(reply),
+           "RING: raw SET queued (tx=%lu gen=%lu); inspect transaction status for ACK",
+           (unsigned long)handle.id, (unsigned long)handle.generation);
+  return reply;
+}
+
+static const char* ringCancelRawSet(void* /*userData*/) {
+  sPendingRawSet.active = false;
+  return "RING: raw SET cancelled";
+}
+
 // ringquery <subject> [type]
 //
-// Send an R1 health/status request and watch the notify stream for the
-// response. Use this to RE the response payload format — the FlutterApp
-// has the encoder framework but never wired it to anything that actually
-// asks for HR/HRV/etc, so we don't know what the responses look like.
+// Submit an R1 health/status transaction to the serialized owner.
 //
 //   subject: wear         — wearStatus probe (response is 1 B: 0=unknown 1=notWear 2=wear)
-//            health       — healthSettingsStatus probe (response is the active sensor bitmap)
 //            hr | hrv | spo2 | temp | activity | sleep — health-data request
-//            report on|off — toggle continuous-push (mask 0xFF / 0x00)
-//            raw <mod> <cmd> <sub> — generic notify/get/ok escape hatch
+//            raw <mod> <cmd> <sub> — admin-only diagnostic escape hatch;
+//                                    every SET requires interactive confirm
 //
 //   type (for the 6 health subjects only):
 //            daily     (default) — aggregated daily history
@@ -2084,10 +3510,10 @@ static const char* cmd_ringquery(const String& args) {
 
   CommandArgs ca(args);
   if (ca.count() < 1) {
-    return "Error: invalid arguments — Usage: ringquery <wear|health|hr|hrv|spo2|temp|activity|sleep|report|raw> [type]\n"
+    return "Error: invalid arguments — Usage: ringquery <wear|hr|hrv|spo2|temp|activity|sleep|raw> [type]\n"
            "       ringquery hr [daily|point|measure]   (same shape for hrv/spo2/temp/activity/sleep)\n"
-           "       ringquery report on|off|<byte>       (e.g. 0x10 to set bit 4 only — bit-bash to find what triggers push)\n"
            "       ringquery raw <module> <cmd> <subCmd> [hex_payload] [status=NN]\n"
+           "         admin only; SET status requires yes/no confirmation.\n"
            "         decimal mod/cmd/sub; hex payload optional; status byte hex (default 00 = notify/get/ok).\n"
            "         Common status bytes: 00=notify/get/ok (queries), 02=notify/set/ok (writes/SET),\n"
            "         03=ack/set/ok (echoing an ack). Bit layout: bit0 type(0=notify,1=ack), bit1 method\n"
@@ -2095,7 +3521,8 @@ static const char* cmd_ringquery(const String& args) {
   }
   String subject = ca.arg(0); subject.toLowerCase();
 
-  R1Frame f = {};
+  G2RingTransactionHandle handle{};
+  bool queued = false;
   const char* tag = "?";
 
   auto resolveSubCmd = [&](const String& s) -> int {
@@ -2108,38 +3535,12 @@ static const char* cmd_ringquery(const String& args) {
   };
 
   if (subject == "wear") {
-    f = gR1Encoder.buildWearStatusQuery();
+    queued = ringEnqueueSystemQuery(R1_SUB_WEAR_STATUS, 6, &handle);
     tag = "wearStatus";
-  } else if (subject == "health") {
-    f = gR1Encoder.buildHealthSettingsQuery();
-    tag = "healthSettingsStatus";
-  } else if (subject == "report") {
-    // `ringquery report on|off|<hex>` — let the user bit-bash the
-    // reportEnable mask byte. The healthSettingsStatus response showed bit 4
-    // is normally on, so try `report 0x10`, `report 0x01`, etc. to discover
-    // which bit (or combination) actually triggers continuous push.
-    String mode = ca.arg(1); mode.toLowerCase();
-    int maskInt = -1;
-    if      (mode == "on")  maskInt = 0xFF;
-    else if (mode == "off") maskInt = 0x00;
-    else if (mode.startsWith("0x")) {
-      maskInt = (int)strtol(mode.c_str() + 2, nullptr, 16);
-    } else if (mode.length() > 0) {
-      maskInt = ca.argInt(1, -1);
-    }
-    if (maskInt < 0 || maskInt > 0xFF) {
-      return "ringquery report: expected 'on', 'off', or a byte 0..255 / 0xNN";
-    }
-    uint8_t mask = (uint8_t)maskInt;
-    f = gR1Encoder.buildHealthReportEnable(mask);
-    if (!ringWrite(f.bytes, f.length)) {
-      return "Error: RING: report enable write failed";
-    }
-    snprintf(ret, sizeof(ret), "RING: report enable=0x%02X sent (set/SET/ok). Watch for ack.", mask);
-    DEBUG_G2F("[RING] TX healthReportEnable ser=%u mask=0x%02X (%u B)",
-              (unsigned)f.serial, mask, (unsigned)f.length);
-    return ret;
   } else if (subject == "raw") {
+    if (!currentExecIsAdmin()) {
+      return "Error: ringquery raw requires admin authorization";
+    }
     if (ca.count() < 4) return "Error: ringquery raw: need <module> <cmd> <subCmd> [hex_payload]";
     long mod = ca.argInt(1, -1);
     long cmd = ca.argInt(2, -1);
@@ -2201,6 +3602,8 @@ static const char* cmd_ringquery(const String& args) {
           }
         }
         if (!isStatusToken) {
+          arg.replace("0x", "");
+          arg.replace("0X", "");
           raw += arg;
         }
       }
@@ -2240,14 +3643,20 @@ static const char* cmd_ringquery(const String& args) {
       }
     }
 
+    if ((statusByte & 0xF0) != 0) {
+      return "Error: ringquery raw: status upper bits must be zero (00..0F)";
+    }
     // Decompose the status byte into the three fields the encoder takes.
     const uint8_t statusType   = (statusByte >> 0) & 0x01;
     const uint8_t statusMethod = (statusByte >> 1) & 0x01;
     const uint8_t statusAck    = (statusByte >> 2) & 0x03;
 
-    f = gR1Encoder.build((uint8_t)mod, (uint8_t)cmd, (uint8_t)sub,
-                         statusType, statusMethod, statusAck,
-                         payloadLen ? payload : nullptr, payloadLen);
+    if (statusMethod == R1_STATUS_METHOD_SET &&
+        mod == R1_MODULE_SYSTEM && cmd == R1_CMD_SYSTEM &&
+        sub == R1_SUB_USER_INFO) {
+      return "Error: raw userInfo SET is intentionally unsupported";
+    }
+
     tag = "raw";
     DEBUG_G2F("[RING] raw: mod=%lu cmd=%lu sub=%lu status=0x%02X (%s/%s/%s) payloadLen=%u",
               (unsigned long)mod, (unsigned long)cmd, (unsigned long)sub,
@@ -2256,6 +3665,37 @@ static const char* cmd_ringquery(const String& args) {
               r1StatusMethodName(statusMethod),
               r1StatusAckName(statusAck),
               (unsigned)payloadLen);
+    if (statusMethod == R1_STATUS_METHOD_SET) {
+      sPendingRawSet = RingPendingRawSet{};
+      sPendingRawSet.active = true;
+      sPendingRawSet.originalAdmin = currentExecIsAdmin();
+      sPendingRawSet.auth = currentAuthContext();
+      sPendingRawSet.module = (uint8_t)mod;
+      sPendingRawSet.cmd = (uint8_t)cmd;
+      sPendingRawSet.subCmd = (uint8_t)sub;
+      sPendingRawSet.statusType = statusType;
+      sPendingRawSet.statusMethod = statusMethod;
+      sPendingRawSet.statusAck = statusAck;
+      sPendingRawSet.payloadLen = (uint16_t)payloadLen;
+      if (payloadLen) memcpy(sPendingRawSet.payload, payload, payloadLen);
+      String prompt = "Send raw R1 SET ";
+      prompt += String((unsigned)mod);
+      prompt += "/";
+      prompt += String((unsigned)cmd);
+      prompt += "/";
+      prompt += String((unsigned)sub);
+      prompt += "? This may change ring state.";
+      if (!cliRequestConfirm(prompt, String("ringquery ") + args,
+                             ringConfirmRawSet, ringCancelRawSet, nullptr)) {
+        sPendingRawSet.active = false;
+        return "Error: another interactive mode is active; raw SET not queued";
+      }
+      return "Type 'yes' to queue this raw SET, or anything else to cancel.";
+    }
+    queued = g2RingSubmitRawTransaction(
+        (uint8_t)mod, (uint8_t)cmd, (uint8_t)sub,
+        statusType, statusMethod, statusAck,
+        payloadLen ? payload : nullptr, payloadLen, &handle);
   } else {
     int cmdId = -1;
     if      (subject == "hr"       || subject == "heartrate")   cmdId = R1_CMD_HEARTRATE;
@@ -2270,22 +3710,20 @@ static const char* cmd_ringquery(const String& args) {
     }
     int subCmd = resolveSubCmd(ca.arg(1));
     if (subCmd < 0) return "ringquery: type must be daily|point|measure";
-    f = gR1Encoder.buildHealthQuery((uint8_t)cmdId, (uint8_t)subCmd);
+    const uint8_t coalesceKey = subCmd == R1_SUB_DAILY
+                                    ? (uint8_t)(0x20 + cmdId)
+                                    : 0;
+    queued = ringEnqueueHealthDataQuery((uint8_t)cmdId, (uint8_t)subCmd,
+                                        coalesceKey, &handle);
     tag = subject.c_str();
   }
 
-  if (f.length == 0) {
-    return "Error: RING: failed to encode query frame";
-  }
-
-  if (!ringWrite(f.bytes, f.length)) {
-    return "Error: RING: query write failed";
-  }
-  DEBUG_G2F("[RING] TX query '%s' ser=%u (%u B) — watch logs for response",
-            tag, (unsigned)f.serial, (unsigned)f.length);
+  if (!queued) return "Error: RING: transaction was not queued";
+  DEBUG_G2F("[RING] query queued '%s' tx=%lu gen=%lu",
+            tag, (unsigned long)handle.id, (unsigned long)handle.generation);
   snprintf(ret, sizeof(ret),
-           "RING: query '%s' sent (%u B, ser=%u). Watch [RING] RX log for response.",
-           tag, (unsigned)f.length, (unsigned)f.serial);
+           "RING: query '%s' queued (tx=%lu gen=%lu). Inspect status/log for the response.",
+           tag, (unsigned long)handle.id, (unsigned long)handle.generation);
   return ret;
 }
 
@@ -2566,9 +4004,9 @@ static const char* cmd_ringbridge(const String& args) {
     //      we keep our link. An earlier version of this firmware disconnected
     //      from the ring before triggering, which appears to have killed the
     //      pairing context the ring needed to accept the temple's bond.
-    //   2. The advStart payload is the temple's BLE MAC IN ORDER (NOT
-    //      reversed). Reversing it (which an earlier version of this firmware
-    //      did) makes the ring directed-advertise toward a non-existent MAC.
+    //   2. Firmware 2.2.7.0005 requires both temple identities. The profiled
+    //      encoder emits reversed-right followed by reversed-left; missing
+    //      either identity fails closed.
     if (!gRing.connected || !gRing.writeChar) {
       return "Error: ringbridge on: ring is not currently connected — run "
              "`ringconnect` first, then re-issue `ringbridge on`. The R1 must "
@@ -2577,27 +4015,19 @@ static const char* cmd_ringbridge(const String& args) {
     }
 
     {
-      uint8_t templeMac[6] = {0};
-      if (g2GetRightTempleMac(templeMac)) {
-        DEBUG_G2F("[RING] ringbridge: refreshing advStart on ring → temple "
-                  "%02X:%02X:%02X:%02X:%02X:%02X (BLE order, not reversed)",
-                  templeMac[0], templeMac[1], templeMac[2],
-                  templeMac[3], templeMac[4], templeMac[5]);
-        R1Frame advStart = gR1Encoder.buildAdvStart(templeMac);
-        if (advStart.length > 0) {
-          if (ringWrite(advStart.bytes, advStart.length)) {
-            vTaskDelay(pdMS_TO_TICKS(250));  // let the write land on the ring
-          } else {
-            DEBUG_G2F("[RING] ringbridge: WARN advStart write failed; "
-                      "trigger will go without advStart refresh");
-          }
-        } else {
-          DEBUG_G2F("[RING] ringbridge: WARN advStart frame build failed; "
-                    "trigger will go without advStart refresh");
-        }
+      G2RingTransactionHandle advHandle{};
+      if (!ringEnqueueAdvStart(&advHandle)) {
+        DEBUG_G2F("[RING] ringbridge: WARN dual-MAC advStart not queued; "
+                  "trigger will go without refresh");
       } else {
-        DEBUG_G2F("[RING] ringbridge: WARN no right-temple MAC available — "
-                  "trigger will go without advStart refresh; bridge may not bond");
+        // Dormant diagnostic path: wait only for the owner-correlated ACK;
+        // encoder serial allocation and the GATT write remain owner-exclusive.
+        for (uint8_t i = 0; i < 30; ++i) {
+          G2RingTransactionStatus status{};
+          if (g2RingGetTransactionStatus(advHandle, status) &&
+              status.completedAtMs != 0) break;
+          vTaskDelay(pdMS_TO_TICKS(100));
+        }
       }
     }
 
@@ -2677,7 +4107,7 @@ extern const CommandEntry g2RingCommands[] = {
   { "ringconnect",    "Connect to the R1 ring: ringconnect [mac|reconnect]", true, cmd_ringconnect, "Usage: ringconnect [mac|reconnect]  (no arg = scan-then-connect; mac = direct; reconnect = drop+settle+connect)" },
   { "ringdisconnect", "Disconnect from the R1 ring",               true, cmd_ringdisconnect },
   { "ringverbose",    "Toggle full hex dump of ring notify frames", false, cmd_ringverbose, "Usage: ringverbose [<on|off>]  (bare = toggle)" },
-  { "ringquery",      "Send an R1 health/status request: ringquery <wear|health|hr|hrv|spo2|temp|activity|sleep|report|raw> [type] [hex_payload]", false, cmd_ringquery, "Usage: ringquery <wear|health|hr|hrv|spo2|temp|activity|sleep|report|raw> [args] | <hr|hrv|spo2|temp|activity|sleep> [daily|point|measure] | report <on|off|0xNN> | raw <module> <cmd> <subCmd> [hex_payload] [status=NN]" },
+  { "ringquery",      "Queue an R1 query: ringquery <wear|hr|hrv|spo2|temp|activity|sleep|raw> [type]", false, cmd_ringquery, "Usage: ringquery <wear|hr|hrv|spo2|temp|activity|sleep> [daily|point|measure] | raw <module> <cmd> <subCmd> [hex_payload] [status=NN]  (raw is admin-only; SET requires confirmation)" },
   // NOTE: `ringtoglasses` and `ringbridge` are UNREGISTERED on purpose.
   // Both targeted getting ring data onto the G2's built-in health UI, and
   // both are dead ends. See R1_RING_PROTOCOL.md §13 for the full writeup:

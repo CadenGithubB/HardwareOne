@@ -133,7 +133,7 @@ struct G2ClientState {
 
 // Initialization (sets up BLE client mode, tears down server if running)
 bool initG2Client();
-void deinitG2Client();
+bool deinitG2Client();
 bool isG2ClientInitialized();
 
 // =============================================================================
@@ -223,7 +223,7 @@ bool g2Connect(G2Eye eye = G2_EYE_LEFT);
 // saved or a connect is already in flight. Used by the boot auto-reconnect
 // hook; safe to call from any context (spawns its own background task).
 bool g2ConnectSaved();
-void g2Disconnect();
+bool g2Disconnect();
 bool isG2Connected();
 G2State getG2State();
 const char* getG2StateString();
@@ -233,6 +233,53 @@ const char* getG2StateString();
 // for boot-time reconnect to finish before kicking off a competing BLE
 // activity).
 bool g2BothConnected();
+
+enum G2ControlDesired : uint8_t {
+  G2_CONTROL_PRESERVE = 0,
+  G2_CONTROL_OFF = 1,
+  G2_CONTROL_ON = 2,
+};
+
+enum G2ControlObserved : uint8_t {
+  G2_CONTROL_UNKNOWN = 0,
+  G2_CONTROL_OBS_OFF = 1,
+  G2_CONTROL_OBS_ON = 2,
+};
+
+enum G2ControlPhase : uint8_t {
+  G2_CONTROL_IDLE = 0,
+  G2_CONTROL_WAITING_LINK,
+  G2_CONTROL_WAITING_FIRMWARE,
+  G2_CONTROL_QUEUED,
+  G2_CONTROL_SENT,
+  G2_CONTROL_ACKED,
+  G2_CONTROL_VERIFIED,
+  G2_CONTROL_UNSUPPORTED,
+  G2_CONTROL_FAILED,
+};
+
+struct G2ControlFeatureStatus {
+  G2ControlDesired desired;
+  G2ControlObserved observed;
+  G2ControlPhase phase;
+  uint32_t changedAtMs;
+  uint32_t appliedGeneration;
+  char detail[48];
+};
+
+struct G2ControlStatus {
+  uint32_t revision;
+  uint32_t rightGeneration;
+  char firmwareLeft[32];
+  char firmwareRight[32];
+  G2ControlFeatureStatus headUp;
+  G2ControlFeatureStatus notifications;
+  uint32_t rxQueued;
+  uint32_t rxDrops;
+};
+
+// Coherent, allocation-free snapshot for web/OLED/status consumers.
+bool g2ControlStatusSnapshot(G2ControlStatus* out);
 
 // True iff the LEFT temple — the audio arm — has an active BLE link AND its
 // audio-notify char (6402) is subscribed. This is the microphone-availability
@@ -1240,7 +1287,7 @@ const char* g2ProbeImageQ21LiveFullScreenBurst();
 // -----------------------------------------------------------------------------
 
 inline bool initG2Client() { return false; }
-inline void deinitG2Client() {}
+inline bool deinitG2Client() { return true; }
 inline bool isG2ClientInitialized() { return false; }
 inline uint16_t bleNegotiateConnMtu(class BLEClient*, uint16_t, uint32_t, const char*) { return 23; }
 inline bool bleConnectWatched(class BLEClient*, class BLEAdvertisedDevice*, uint32_t, const char*) { return false; }
@@ -1249,7 +1296,7 @@ inline uint8_t bleStackWedgeStreak(void) { return 0; }
 inline bool bleStackRecycleIfWedged(void) { return false; }
 inline bool g2Connect(G2Eye eye = G2_EYE_LEFT) { return false; }
 inline bool g2ConnectSaved() { return false; }
-inline void g2Disconnect() {}
+inline bool g2Disconnect() { return true; }
 inline bool isG2Connected() { return false; }
 inline bool g2LeftConnected() { return false; }
 inline G2State getG2State() { return G2_STATE_IDLE; }

@@ -3,11 +3,20 @@
 #include "freertos/task.h"
 
 #include "../components/hardwareone/System_AuthIdentity.h"
+#include "../components/hardwareone/System_OTASafety.h"
 
 // Real HardwareOne Arduino-style entry points are implemented in
 // components/hardwareone/HardwareOne.cpp
 extern void hardwareone_setup();
 extern void hardwareone_loop();
+
+// Arduino's rollback helper is weak and defaults to false, which makes
+// initArduino() mark a PENDING_VERIFY image valid before HardwareOne setup has
+// run. Keep validation under HardwareOne's native ESP-IDF probation instead.
+extern "C" bool verifyRollbackLater(void)
+{
+    return true;
+}
 
 // Arduino-style hooks that ESP-IDF's Arduino core will call.
 void setup()
@@ -25,6 +34,10 @@ void loop()
 // ESP-IDF entry point that boots the Arduino core
 extern "C" void app_main(void)
 {
+    // Inspect OTA state and arm the pending-image supervisor before Arduino can
+    // auto-recover NVS or otherwise enter a setup path that might hang.
+    otaSafetyInitEarly();
+
     // Initialize Arduino core (Serial, peripherals, etc.)
     initArduino();
 

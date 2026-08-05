@@ -149,6 +149,10 @@ bool sendBLEResponseToConn(uint16_t connId, const char* data, size_t len);
 void bleClearConnectionByConnId(uint16_t connId);
 void bleSessionTick();
 bool bleHasAuthenticatedSession();
+// Resolve the live authenticated identity for one connection. Used by binary
+// application protocols that bypass the text-command authorization funnel but
+// must re-check authorization on every frame.
+bool bleGetAuthenticatedUser(uint16_t connId, String& outUser);
 bool bleGetAuthenticatedSessionInfo(int authedIndex, uint16_t& outConnId, String& outUser);
 int bleRevokeUserSessions(const String& username);
 int bleRevokeAllSessions();
@@ -219,6 +223,7 @@ inline bool sendBLEResponseToConn(uint16_t, const char*, size_t) { return false;
 inline void bleClearConnectionByConnId(uint16_t) {}
 inline void bleSessionTick() {}
 inline bool bleHasAuthenticatedSession() { return false; }
+inline bool bleGetAuthenticatedUser(uint16_t, String&) { return false; }
 inline bool bleGetAuthenticatedSessionInfo(int, uint16_t&, String&) { return false; }
 inline int bleRevokeUserSessions(const String&) { return 0; }
 inline int bleRevokeAllSessions() { return 0; }

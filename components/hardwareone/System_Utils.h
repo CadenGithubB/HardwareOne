@@ -264,12 +264,14 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
 String redactCmdForAudit(const String& argsInput);
 String redactOutputForLog(const String& output);
 
-// CLI validation macro - returns "VALID" early when gCLIValidateOnly is set
-// Use in command handlers to short-circuit during command validation pass
+// CLI validation macro - returns "VALID" early when gCLIValidateOnly is set.
+// Keep the declaration at global namespace and qualify the reference: a
+// block-scope `extern` expanded inside an anonymous-namespace command handler
+// otherwise declares a different internal-linkage symbol and fails at link.
+extern bool gCLIValidateOnly;
 #define RETURN_VALID_IF_VALIDATE_CSTR() \
   do { \
-    extern bool gCLIValidateOnly; \
-    if (gCLIValidateOnly) return "VALID"; \
+    if (::gCLIValidateOnly) return "VALID"; \
   } while(0)
 
 // Parse common boolean argument patterns used across CLI command handlers.

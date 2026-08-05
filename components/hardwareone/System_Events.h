@@ -260,6 +260,7 @@ uint8_t systemEventKindFamily(uint8_t kind);
   X(SYSEVT_FACTORY_RESET,       "factory_reset", SYSEVT_FAM_SYSTEM)        /* accounts wiped, device reset to setup  subject=actor */ \
   X(SYSEVT_FEATURE_TOGGLED,     "feature_toggled", SYSEVT_FAM_SYSTEM)      /* a subsystem/feature enabled or disabled  subject=feature detail=on|off */ \
   X(SYSEVT_FIRMWARE_CHANGED,    "firmware_changed", SYSEVT_FAM_SYSTEM)     /* running firmware differs from last boot (update applied)  subject=old->new */ \
+  X(SYSEVT_OTA_RESULT,          "ota_result", SYSEVT_FAM_SYSTEM)            /* signed OTA transaction state/result  subject=phase detail=result */ \
   X(SYSEVT_BACKUP_CREATED,      "backup_created", SYSEVT_FAM_SYSTEM)       /* a config backup was exported  subject=categories */ \
   X(SYSEVT_BACKUP_RESTORED,     "backup_restored", SYSEVT_FAM_SYSTEM)      /* a config backup was restored  subject=categories */ \
   X(SYSEVT_CONFIG_FILE_CORRUPT, "config_file_corrupt", SYSEVT_FAM_SYSTEM)  /* a critical config file failed its integrity check  subject=file */ \

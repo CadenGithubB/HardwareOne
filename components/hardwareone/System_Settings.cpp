@@ -2076,6 +2076,9 @@ extern const SettingsModule oledSettingsModule;
 #endif
 #if ENABLE_BLUETOOTH
 extern const SettingsModule bluetoothSettingsModule;
+#if ENABLE_G2_GLASSES
+extern const SettingsModule g2DeviceSettingsModule;
+#endif
 #endif
 #if ENABLE_THERMAL_SENSOR
 extern const SettingsModule thermalSettingsModule;
@@ -2159,6 +2162,9 @@ void registerAllSettingsModules() {
 #endif
 #if ENABLE_BLUETOOTH
   registerSettingsModule(&bluetoothSettingsModule);
+#if ENABLE_G2_GLASSES
+  registerSettingsModule(&g2DeviceSettingsModule);
+#endif
 #endif
 
   // Display modules
@@ -2540,6 +2546,18 @@ void notifySettingChanged(const void* fieldPtr) {
         default: val[0] = '\0'; break;
       }
       systemEventPost(SYSEVT_SETTING_CHANGED, e->label ? e->label : e->jsonKey, val);
+#if ENABLE_OLED_DISPLAY
+      // Repaint the OLED once for ANY setting change, from any transport. The
+      // render loop only wakes on physical input or a sensor-status bump, so a
+      // setting changed over CLI/web/BLE/ESP-NOW is invisible to it — the panel
+      // keeps showing the pre-change frame until the user happens to touch the
+      // joystick. Marking dirty here catches the whole class (thermal scale
+      // while the thermal page is up, a sensor toggle behind a sensor page, …)
+      // instead of relying on every command to remember. It costs one extra
+      // frame, and only on a real change: setSetting() already gates on
+      // field != value and writes flash, so this can't fire in a hot path.
+      { extern void oledMarkDirty(); oledMarkDirty(); }
+#endif
       return;  // valuePtr is unique across the registry — first match is the only one
     }
   }

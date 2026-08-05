@@ -19,7 +19,7 @@
 #include "System_ImageManager.h"
 #include "System_Maps.h"
 #include "System_VFS.h"
-#include "System_Events.h"        // systemEventPost — SYSEVT_STORAGE_FORMATTED producer
+#include "System_Events.h"
 #include "System_AuthIdentity.h"  // currentAuthContext — CLI handlers' per-task identity
 #include "System_CLIConfirm.h"    // cliRequestConfirm — yes/no gate for destructive filedelete
 #include "System_TextPager.h"     // sanitize + page-split core — paged fileview (CLI, not BT-gated)
@@ -56,23 +56,13 @@ bool initFilesystem() {
 
   // Configure LittleFS using ESP-IDF native API (bypasses Arduino wrapper issues)
   if (!LittleFS.begin(false, "/littlefs", 10, "littlefs")) {
-    ESP_LOGW("FS", "LittleFS mount failed; formatting and retrying");
-    logSystemEvent("FS", "LittleFS mount FAILED — formatting data partition (ALL files erased)");
-
-    if (!LittleFS.format()) {
-      ESP_LOGE("FS", "LittleFS format failed");
-      logSystemEvent("FS", "LittleFS format FAILED — filesystem unavailable this boot");
-      filesystemReady = false;
-      return false;
-    }
-    systemEventPost(SYSEVT_STORAGE_FORMATTED, "flash", "mount failed — data partition reformatted");
-
-    if (!LittleFS.begin(false, "/littlefs", 10, "littlefs")) {
-      ESP_LOGE("FS", "LittleFS mount failed after format");
-      logSystemEvent("FS", "LittleFS mount FAILED after format — filesystem unavailable this boot");
-      filesystemReady = false;
-      return false;
-    }
+    // Retained data and cryptographic material live here. Never turn a mount
+    // error into an automatic format; OTA layouts can enter factory recovery,
+    // while legacy layouts remain available for explicit cable-side repair.
+    ESP_LOGE("FS", "LittleFS mount failed; preserving data (automatic format is forbidden)");
+    logSystemEvent("FS", "LittleFS mount FAILED — data partition preserved");
+    filesystemReady = false;
+    return false;
   }
 
   ESP_LOGI("FS", "LittleFS mounted successfully");
@@ -118,6 +108,9 @@ bool initFilesystem() {
     VFS::mkdirGuarded("/system/users",                sys);  // users.json + per-user settings dir
     VFS::mkdirGuarded("/system/users/user_settings",  sys);  // per-user setting files
     VFS::mkdirGuarded("/system/certs",                sys);  // TLS certs (HTTPS, MQTT)
+#if HW1_OTA_LAYOUT
+    VFS::mkdirGuarded("/system/ota",                  VFS::systemAuth(VFS::Scopes::OTA, "fs.init.ota"));
+#endif
 #if ENABLE_ONDEVICE_LLM
     VFS::mkdirGuarded("/system/llm",                  sys);  // LLM1 model files
 #endif
@@ -1371,6 +1364,12 @@ static const PathRule sPathRules[] = {
   // (canEdit) or create a new one (canCreate). PERM_IMPORT covers the import flow.
   {"/system/llm/",                      0,         PERM_READ | PERM_WRITE | PERM_CREATE | PERM_DELETE | PERM_IMPORT, PERM_ALL, false, true},
 
+  // ---- Signed recovery OTA staging ----
+  // Only superadmins (unrestricted role) and tightly scoped system code may
+  // access firmware/manifest staging. Ordinary admins deliberately get zero:
+  // uploading a .bin is equivalent to replacing the operating system.
+  {"/system/ota/",                      0,         0,                                                  PERM_ALL, false, true},
+
   // ---- G2 animated icon packs (SD; test bench + web upload) ----
   {"/sd/g2_icon_animations/",           0,         PERM_READ | PERM_DELETE | PERM_IMPORT | PERM_CREATE, PERM_ALL, false, false},
 
@@ -1463,9 +1462,12 @@ static bool isImageFile(const String& path) {
 // Path normalization
 // ============================================================================
 // Used by the guarded VFS layer (Phase 1+) before any rule lookup. Rejects
-// path traversal, collapses double slashes, strips a trailing slash (except
-// for "/" itself), and rejects empty paths. Callers that fail this should
-// treat the request as denied — `out` is undefined on failure.
+// path traversal, rejects empty paths, and rebuilds the path from its segments
+// so the string the rule table sees is byte-identical to the one the I/O layer
+// opens: leading slash forced, "//" collapsed, trailing slash stripped (except
+// for "/" itself), no-op "." segments dropped, surrounding whitespace trimmed.
+// Callers that fail this should treat the request as denied — `out` is
+// undefined on failure.
 bool normalizeFsPath(const String& in, String& out) {
   if (in.length() == 0) return false;
 
@@ -1484,24 +1486,38 @@ bool normalizeFsPath(const String& in, String& out) {
     if (c == '"' || (unsigned char)c < 0x20) return false;
   }
 
-  out.reserve(in.length());
+  // Emit EXACTLY the string the I/O layer will act on. The rule table is
+  // consulted on this string, and lookupRule() is a bare startsWith over rows
+  // that all begin with '/', with a trailing catch-all granting PERM_ALL. Any
+  // spelling the table fails to recognise therefore lands on the catch-all
+  // while VFS::normalize + littlefs still resolve it to the real file — the
+  // check and the open disagree. Three spellings did that before this rebuild:
+  //   - no leading '/'       (VFS::normalize prepends one)
+  //   - a "." segment        (littlefs skips it: lfs_dir_find, "skip '.'")
+  //   - leading/trailing ' ' (VFS::normalize trims it)
+  // Rebuilding from segments makes all three impossible by construction.
+  // NOTE: only a segment that is exactly "." is dropped — dotFILES such as
+  // /logging_captures/sensors/.anchors.csv must survive untouched.
+  String trimmed = in;
+  trimmed.trim();
+  if (trimmed.length() == 0) return false;
+
   out = "";
-  bool prevSlash = false;
-  for (size_t i = 0; i < in.length(); i++) {
-    char c = in[i];
-    if (c == '/') {
-      if (prevSlash) continue;  // collapse //
-      prevSlash = true;
-    } else {
-      prevSlash = false;
-    }
-    out += c;
+  out.reserve(trimmed.length() + 1);
+  const size_t n = trimmed.length();
+  size_t i = 0;
+  while (i < n) {
+    while (i < n && trimmed[i] == '/') i++;           // skip a run of slashes
+    const size_t start = i;
+    while (i < n && trimmed[i] != '/') i++;           // segment is [start, i)
+    const size_t len = i - start;
+    if (len == 0) continue;                           // trailing slash(es)
+    if (len == 1 && trimmed[start] == '.') continue;  // drop no-op "." segment
+    out += '/';
+    for (size_t k = start; k < i; k++) out += trimmed[k];
   }
-  // Strip trailing slash unless the whole path is "/".
-  if (out.length() > 1 && out[out.length() - 1] == '/') {
-    out.remove(out.length() - 1);
-  }
-  return out.length() > 0;
+  if (out.length() == 0) out = "/";  // "/", "///", "/.", "/./" all mean root
+  return true;
 }
 
 // ----------------------------------------------------------------------------

@@ -7,7 +7,7 @@
 #include "BLE_Types.h"          // BLE_MAX_CONNECTIONS
 
 #include <sodium.h>
-#include <mbedtls/pkcs5.h>   // PBKDF2 on ESP32 HW-accelerated SHA-256 (CONFIG_MBEDTLS_HARDWARE_SHA)
+#include <mbedtls/md.h>      // yielding PBKDF2 over ESP32 HW-accelerated SHA-256
 #include <string.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>     // vTaskDelay — inter-fragment pacing
@@ -125,17 +125,48 @@ static void scHkdf(const uint8_t* ikm, size_t ikmLen,
 }
 
 // ----- PBKDF2-HMAC-SHA256, 32-byte output -----
-// Uses mbedTLS so the inner SHA-256 runs on the ESP32 hardware accelerator. A
-// software HMAC loop (libsodium) took ~17 s for 100k iterations on the S3 and
-// tripped the task watchdog; mbedTLS HW-SHA is ~10x faster. Output is identical
-// standard PBKDF2-HMAC-SHA256 (the app's test vectors are unaffected).
-static void scPbkdf2(const uint8_t* pw, size_t pwLen,
+// The stock mbedtls_pkcs5_pbkdf2_hmac_ext call is one monolithic CPU stretch;
+// on the S3, 100k rounds can starve IDLE0 long enough to trip Task WDT. This is
+// the same RFC 2898 single-block calculation, but yields every 4096 rounds.
+// The inner HMAC still uses ESP-IDF's mbedTLS SHA-256 implementation, so the
+// Android PBKDF2 test vector and wire keys remain byte-for-byte unchanged.
+static bool scPbkdf2(const uint8_t* pw, size_t pwLen,
                      const uint8_t* salt, size_t saltLen,
                      uint32_t iters, uint8_t out[32]) {
-  if (mbedtls_pkcs5_pbkdf2_hmac_ext(MBEDTLS_MD_SHA256, pw, pwLen,
-                                    salt, saltLen, iters, 32, out) != 0) {
-    memset(out, 0, 32);  // derivation failed → zero key; handshake will fail safely
+  if (!pw || !salt || !out || iters == 0) return false;
+  const mbedtls_md_info_t* mdInfo = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+  if (!mdInfo) return false;
+
+  mbedtls_md_context_t ctx;
+  mbedtls_md_init(&ctx);
+  if (mbedtls_md_setup(&ctx, mdInfo, 1) != 0) {
+    mbedtls_md_free(&ctx);
+    return false;
   }
+
+  uint8_t u[32];
+  const uint8_t blockIndex[4] = {0, 0, 0, 1};
+  bool ok = false;
+  if (mbedtls_md_hmac_starts(&ctx, pw, pwLen) != 0) goto done;
+  if (mbedtls_md_hmac_update(&ctx, salt, saltLen) != 0) goto done;
+  if (mbedtls_md_hmac_update(&ctx, blockIndex, sizeof(blockIndex)) != 0) goto done;
+  if (mbedtls_md_hmac_finish(&ctx, u) != 0) goto done;
+  memcpy(out, u, sizeof(u));
+
+  for (uint32_t i = 1; i < iters; ++i) {
+    if (mbedtls_md_hmac_reset(&ctx) != 0) goto done;
+    if (mbedtls_md_hmac_update(&ctx, u, sizeof(u)) != 0) goto done;
+    if (mbedtls_md_hmac_finish(&ctx, u) != 0) goto done;
+    for (size_t j = 0; j < sizeof(u); ++j) out[j] ^= u[j];
+    if ((i & 0xFFFU) == 0) vTaskDelay(1);
+  }
+  ok = true;
+
+done:
+  mbedtls_md_free(&ctx);
+  sodium_memzero(u, sizeof(u));
+  if (!ok) sodium_memzero(out, 32);
+  return ok;
 }
 
 static bool scDerivePsk() {
@@ -143,9 +174,11 @@ static bool scDerivePsk() {
   if (!scSodiumReady()) return false;
   const String& s = gSettings.bleSecureChannelSecret;
   if (s.length() == 0) return false;  // no secret -> channel can't establish
-  scPbkdf2((const uint8_t*)s.c_str(), s.length(),
-           (const uint8_t*)SC_PSK_SALT, strlen(SC_PSK_SALT),
-           SC_PBKDF2_ITERS, gPsk);
+  if (!scPbkdf2((const uint8_t*)s.c_str(), s.length(),
+                (const uint8_t*)SC_PSK_SALT, strlen(SC_PSK_SALT),
+                SC_PBKDF2_ITERS, gPsk)) {
+    return false;
+  }
   gPskValid = true;
   return true;
 }
@@ -379,6 +412,15 @@ BleScResult bleScHandleInbound(uint16_t connId, const uint8_t* data, size_t len,
   c->rxCtr = ctr;
   out[ctLen] = '\0';
   if (outLen) *outLen = ctLen;
+  // App->device binary application envelope. Text commands can never begin
+  // with NUL, so this marker is unambiguous and preserves opaque OTA bytes
+  // without teaching the generic command parser to accept binary input.
+  // Layout: 00 "HW1OTA" 01 offset_be32 payload...
+  static const uint8_t kOtaPrefix[] = {0x00, 'H', 'W', '1', 'O', 'T', 'A', 0x01};
+  if (ctLen >= sizeof(kOtaPrefix) &&
+      memcmp(out, kOtaPrefix, sizeof(kOtaPrefix)) == 0) {
+    return BLE_SC_BINARY_READY;
+  }
   return BLE_SC_PLAINTEXT_READY;
 }
 

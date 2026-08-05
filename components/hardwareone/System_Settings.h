@@ -216,7 +216,7 @@ struct Settings {
       meshTopoAutoRefresh(false),
       meshHeartbeatBroadcast(true),
       meshTTL(3),
-      meshAdaptiveTTL(false),
+      meshRelay(true),
       meshPeerMax(8),
       sensorBroadcastIntervalMs(1000),
       espnowAcceptSensorControl(false),
@@ -303,8 +303,10 @@ struct Settings {
       eiAutoStart(true),
       automationAutoStart(true),
       sensorLogAutoStart(false),
-      healthTrackingEnabled(false),
-      healthTrackPollIntervalSec(900),  // 15 min — R1 vitals mine cadence while Track is on
+      healthLoggingEnabled(false),
+      healthLoggingPollIntervalSec(900),  // 15 min — local R1 vitals logging cadence
+      ringHealthCollectionDesired(0),     // Preserve: do not change the ring at first boot
+      ringLowPowerDesired(0),             // Preserve: do not change the ring at first boot
       captureEncryptMode(1),            // seal LOG_R1 capture sessions at rest by default
       sensorLogPath(CAPTURE_SENSORLOG_DEFAULT),
       sensorLogIntervalMs(5000),
@@ -337,6 +339,8 @@ struct Settings {
       cameraQuality(12),
       cameraFramesize(10),  // 240x240 — see cameraFramesizeFromSetting in System_Camera_DVP.cpp for the index map
       cameraStreamFps(5),
+      g2HeadUpDesired(0),             // Preserve official-app/device state
+      g2NotificationsDesired(0),      // Preserve; Off is not capture-proven
       g2StreamWidth(96),
       g2StreamHeight(96),
       g2StreamToneMap(1),  // 1=Balanced (see g2StreamToneMap comment)
@@ -723,8 +727,14 @@ struct Settings {
   uint32_t meshTopoDiscoveryInterval;  // Topology discovery interval (ms, 0=disabled)
   bool meshTopoAutoRefresh;            // Enable automatic topology refresh
   bool meshHeartbeatBroadcast;         // Broadcast heartbeats to FF:FF:FF:FF:FF:FF (public mode)
-  uint8_t meshTTL;                     // Mesh TTL (1-10, default: 3)
-  bool meshAdaptiveTTL;                // Enable adaptive TTL based on peer count
+  uint8_t meshTTL;                     // Hop budget stamped on relay-eligible frames (1-10,
+                                       // default 3). 1 = single hop, i.e. relaying off for
+                                       // that frame. Applies to flooded broadcasts and to the
+                                       // RELAY_DATA envelope; link-local frames always use 1.
+  bool meshRelay;                      // Act as a relay for other nodes' traffic (default true).
+                                       // Off = this node still SENDS and RECEIVES over multi-hop
+                                       // paths, it just won't carry anyone else's frames — the
+                                       // knob for a battery-tight or deliberately edge node.
   uint8_t meshPeerMax;                 // Max mesh peer slots (1-16, default: 8, changes on reboot)
   uint16_t sensorBroadcastIntervalMs;  // Sensor broadcast interval in ms (100-10000, default: 1000)
   // Secure sensor fetcher (worker role) — docs/ESPNOW_SENSOR_FETCHER_DESIGN.md
@@ -916,8 +926,13 @@ struct Settings {
   bool automationAutoStart;     // Boot flag (pairs with automationEnabled)
   // Sensor Logging auto-start settings
   bool sensorLogAutoStart;      // Auto-start sensor logging after boot with last-used parameters
-  bool healthTrackingEnabled;   // R1 Health Track: keep LOG_R1 on and resume logging at boot
-  int  healthTrackPollIntervalSec; // How often to poll/mine R1 vitals while Track is on (default 900 = 15 min)
+  bool healthLoggingEnabled;      // HardwareOne local logger: keep LOG_R1 on and resume at boot
+  int  healthLoggingPollIntervalSec; // How often the local logger mines R1 vitals (default 900 = 15 min)
+  // Persisted policy, not observed ring state. Values are the G2_Ring.h
+  // G2RingDesiredState wire-control contract: 0=Preserve, 1=Off, 2=On.
+  // These remain plain int fields because SETTING_INT writes through int*.
+  int  ringHealthCollectionDesired;
+  int  ringLowPowerDesired;
   int  captureEncryptMode;      // At-rest sealing: 0=off, 1=sessions with LOG_R1, 2=all captures — docs/HEALTH_AT_REST_ENCRYPTION_PLAN.md
   String sensorLogPath;         // Last-used log file path (default: CAPTURE_SENSORLOG_DEFAULT)
   int sensorLogIntervalMs;      // Last-used polling interval in ms (default: 5000)
@@ -958,6 +973,11 @@ struct Settings {
   int cameraQuality;            // JPEG quality 0-63 (lower=better, default 12)
   int cameraFramesize;          // Setting-index (NOT esp_camera framesize_t). 10 = 240x240 default. See cameraFramesizeFromSetting().
   int cameraStreamFps;          // Camera stream + recording FPS target (1-20, default 5). Drivers convert to ms internally.
+  // G2 device-control policy: 0=Preserve, 1=Off, 2=On. Register with
+  // SETTING_U8. Menu/dashboard are intentionally not represented as booleans:
+  // captures prove replace-whole configurations, not an On/Off operation.
+  uint8_t g2HeadUpDesired;
+  uint8_t g2NotificationsDesired;
   // G2 lens stream resolution. Caps at 288x144 (lens panel native size) and
   // floors at 16. Wider/taller = more Cmd=3 fragments per frame = lower fps;
   // user picks from a small preset list in the lens Camera Settings page.

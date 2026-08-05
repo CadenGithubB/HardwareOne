@@ -1,0 +1,24 @@
+# HardwareOne recovery-OTA security contract (ESP32-S3, ESP-IDF 5.5.x).
+#
+# This file is layered only when HW_OTA_LAYOUT=1.  The signing key is deliberately
+# not tracked; create ota_signing_key.pem locally or pass HW1_OTA_SIGNING_KEY to
+# the OTA build wrapper.  Signed-app verification is software-only: it protects
+# the network update path without enabling Secure Boot or burning Secure Boot
+# eFuses.
+CONFIG_PARTITION_TABLE_OFFSET=0x9000
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK=n
+CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT=y
+CONFIG_SECURE_SIGNED_APPS_RSA_SCHEME=y
+CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT=y
+CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=y
+# CONFIG_SECURE_BOOT_SIGNING_KEY is intentionally supplied only by the
+# generated, build-directory-local defaults overlay from HW1_OTA_SIGNING_KEY.
+# Do not put a workstation path or a private-key filename in tracked defaults.
+
+# A pending image is supervised by HardwareOne and deliberately rebooted if it
+# cannot reach/maintain the application health checkpoint.  Keep the underlying
+# task watchdog active as a second line of defence.
+CONFIG_ESP_TASK_WDT_EN=y
+CONFIG_ESP_TASK_WDT_INIT=y
+CONFIG_ESP_TASK_WDT_PANIC=y

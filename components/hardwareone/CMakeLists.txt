@@ -11,7 +11,7 @@ set(HW_CFG_NETWORK_FEATURE_LEVEL 0)
 set(HW_CFG_WEB_FEATURE_LEVEL 0)
 set(HW_CFG_I2C_FEATURE_LEVEL 0)
 set(HW_CFG_DISPLAY_TYPE 0)
-set(HW_CFG_INPUT_DEVICE_TYPE 1)  # 1 = SEESAW_GAMEPAD (default); 2 = ANO_ENCODER
+set(HW_CFG_INPUT_DEVICE_TYPE 0)  # 0 = NONE; header values 1/2 select a driver
 set(HW_CFG_ENABLE_MQTT 0)
 set(HW_CFG_ENABLE_HTTPS 0)
 set(HW_CFG_ENABLE_LLM 0)
@@ -176,6 +176,7 @@ set(hardwareone_srcs
         G2_Page_LED.cpp
         G2_Pet.cpp
         G2_Health.cpp
+        R1_HealthHistoryStore.cpp
         G2_HijackFsm.cpp
         G2_HijackCmd.cpp
         System_Battery.cpp
@@ -185,6 +186,8 @@ set(hardwareone_srcs
         System_SetupWizardMode.cpp
         System_Command.cpp
         System_CrashRecord.cpp
+        System_OTA.cpp
+        System_OTASafety.cpp
         System_Debug.cpp
         System_ESPNow.cpp
         System_ESPNow_Crypto.cpp
@@ -193,6 +196,7 @@ set(hardwareone_srcs
         System_ESPNow_Handlers_Crypto.cpp
         System_ESPNow_Identity.cpp
         System_ESPNow_MeshKeys.cpp
+        System_ESPNow_Router.cpp
         System_ESPNow_Saturation.cpp
         System_ESPNow_Sensors.cpp
         System_ESPNow_Sessions.cpp
@@ -307,9 +311,11 @@ if(HW_CFG_I2C_FEATURE_LEVEL GREATER 0)
     if(HW_CFG_INPUT_DEVICE_TYPE EQUAL 2)
         list(APPEND hardwareone_srcs i2csensor_ano_encoder.cpp)
         message(STATUS "Input device: ANO rotary encoder")
-    else()
+    elseif(HW_CFG_INPUT_DEVICE_TYPE EQUAL 1)
         list(APPEND hardwareone_srcs i2csensor_seesaw.cpp)
         message(STATUS "Input device: Seesaw mini gamepad")
+    else()
+        message(STATUS "Input device: none")
     endif()
     message(STATUS "I2C sensors INCLUDED (per-sensor flags inside each .cpp)")
 else()
@@ -367,8 +373,14 @@ endif()
 set(hardwareone_requires
         arduino
         hardwareone_libs
+        hw1_ota_protocol
         bt
         nvs_flash
+        app_update
+        bootloader_support
+        esp_app_format
+        json
+        mbedtls
         esp_wifi
         esp32-camera
         fatfs
@@ -477,6 +489,15 @@ target_compile_options(${COMPONENT_LIB} PRIVATE
 # UART and the device reboots in 0 s, so without this the most useful sentence
 # the firmware ever prints is lost unless someone happened to be on serial.
 target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=esp_panic_handler")
+
+# Retained-data preservation. Some vendored init paths erase NVS through
+# esp_partition_erase_range(), while others call nvs_flash_erase().
+# System_OTASafety.cpp interposes on both on every main-firmware boot, blocks
+# only whole-NVS-partition erases, and leaves ordinary NVS page GC untouched.
+target_link_libraries(${COMPONENT_LIB} INTERFACE
+    "-Wl,--wrap=nvs_flash_erase"
+    "-Wl,--wrap=esp_partition_erase_range"
+)
 
 # ============================================================================
 # Build-time guard: no raw LittleFS/SD file I/O outside System_VFS.cpp

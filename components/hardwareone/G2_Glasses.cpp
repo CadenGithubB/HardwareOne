@@ -193,6 +193,10 @@ static constexpr uint16_t MTU_TARGET = G2_BLE_LOCAL_MTU_PREF;
 // Reassembly buffer size per temple. The largest envelope we expect is an
 // image raw-data fragment (~4 KB body + header). Round up.
 static constexpr size_t RX_ASSEMBLY_CAP = 8192;
+// Largest protocol envelope is 8-byte header + u8-sized body. Reserve this
+// much at the end of each temple's PSRAM RX buffer for ATT reassembly.
+static constexpr size_t RX_FRAME_CAP = G2_ENVELOPE_HDR_LEN + 255;
+static constexpr size_t RX_MESSAGE_CAP = RX_ASSEMBLY_CAP - RX_FRAME_CAP;
 
 // Scan window (milliseconds). The scan itself runs on the BLE task, not on
 // the command-handler task, so a longer window is fine. We also spawn the
@@ -215,6 +219,7 @@ struct G2Temple {
   BLEAdvertisedDevice*         advertisedDevice;
   String                       deviceName;
   String                       deviceAddress;
+  char                         firmwareVersion[32];
   uint16_t                     mtu;
   bool                         connected;
   // Set true when the peer disconnects unexpectedly — the next connect
@@ -226,10 +231,28 @@ struct G2Temple {
   // collecting on the first fragment; dispatch when totalLen bytes received.
   uint8_t*                     rxBuf;
   size_t                       rxCap;
+  // Two-stage RX state. BLE notifications may split one protocol envelope,
+  // and one protobuf message may itself span several protocol envelopes.
+  // `rxBuf` lives in PSRAM; its tail is reserved for the current envelope
+  // while the prefix accumulates the complete protobuf body.
+  size_t                       rxFrameHave;
+  size_t                       rxFrameExpected;
+  G2RxReassembly               rxReassembly;
+  // Kept only until the former inline parser below is retired after the
+  // owner-path hardware soak; it is no longer called by the notify thunks.
   size_t                       rxHave;
   size_t                       rxExpected;
   uint8_t                      rxSeq;
+  uint8_t                      rxTotalFrags;
+  uint8_t                      rxNextFrag;
+  uint8_t                      rxSid;
+  uint8_t                      rxFlag;
   bool                         rxActive;
+  uint32_t                     rxStartedMs;
+  uint32_t                     rxReassemblyGeneration;
+  // Incremented before every subscribe attempt and on disconnect. Queued
+  // notifications stamped by an older link are discarded by the owner.
+  uint32_t                     connectionGeneration;
 
   // Write serialisation — BLE writes must not interleave mid-envelope, and
   // heartbeat must not step on a text rebuild in progress.
@@ -539,6 +562,7 @@ static TimerHandle_t  gHeartbeatTimer = nullptr;
 // Seq allocator — incrementing u8 wraps naturally. Each new logical message
 // uses a fresh seq so the firmware can group its fragments.
 static uint8_t        gNextSeq = 1;
+static portMUX_TYPE   gSeqMux = portMUX_INITIALIZER_UNLOCKED;
 
 // Magic allocator — effectively u8. Wrap at 0xFF → 1 (avoid 0).
 static uint8_t        gNextMagic = 1;
@@ -586,6 +610,9 @@ static int8_t gBatteryR = -1;
 // Surfaced in the g2-status SSE so web clients can render a DND
 // indicator and route notifications accordingly.
 static int8_t gSilentMode = -1;
+// Explicit native-notification enable is scoped to one right-temple link.
+// Reconnect defaults to Preserve and therefore clears this proof.
+static uint32_t gNotifPrimedGenerationR = 0;
 
 // ─── Page-swap echo guard ────────────────────────────────────────────────
 // gOurShutdownAtMs: wall-clock timestamp of our most recent intentional
@@ -763,9 +790,8 @@ static char gFwVersion[32] = {0};
 // it is normally seconds old without us polling for it.
 //
 // Freshness (gSettingsEchoMs) is what a write consults before sending — see
-// g2SettingsPrimeIfNeeded. Deliberately keyed on age rather than a
-// reset-on-disconnect flag: after a reconnect the timestamp is simply stale,
-// so priming re-arms itself with no teardown hook to keep in sync.
+// g2SettingsPrimeIfNeeded. The cache is explicitly cleared when the right
+// temple generation changes so another pair can never inherit old state.
 static G2SettingsEcho gSettingsEcho;
 static bool           gSettingsEchoSeen = false;
 static uint32_t       gSettingsEchoMs   = 0;
@@ -781,6 +807,118 @@ static uint32_t gSettingsAckMs    = 0;
 // it on cmd_exec_task, often on the other core. Keep each snapshot coherent;
 // volatile alone would not make the multi-field struct or ack tuple atomic.
 static portMUX_TYPE gSettingsStateMux = portMUX_INITIALIZER_UNLOCKED;
+
+enum class G2PolicyFeature : uint8_t { None = 0, HeadUp, Notifications };
+struct G2PolicyTxn {
+  bool active;
+  bool acked;
+  G2PolicyFeature feature;
+  uint8_t inner;
+  uint8_t leaf;
+  uint32_t value;
+  uint32_t magic;
+  uint32_t generation;
+  uint32_t startedMs;
+};
+static G2ControlStatus gControlStatus{};
+static G2PolicyTxn gControlTxn{};
+static portMUX_TYPE gControlStateMux = portMUX_INITIALIZER_UNLOCKED;
+static portMUX_TYPE gRxPacketMux = portMUX_INITIALIZER_UNLOCKED;
+static bool gControlDirty = true;
+static uint8_t gHeadUpAppliedDesired = 0xFF;
+static uint32_t gHeadUpAppliedGeneration = 0;
+static uint8_t gHeadUpRetryCount = 0;
+static uint8_t gNotifAppliedDesired = 0xFF;
+static uint32_t gNotifAppliedGeneration = 0;
+static uint8_t gNotifRetryCount = 0;
+
+static void g2ControlWake();
+static void g2ControlMarkDirty() {
+  portENTER_CRITICAL(&gControlStateMux);
+  gControlDirty = true;
+  portEXIT_CRITICAL(&gControlStateMux);
+  g2ControlWake();
+}
+
+static bool g2ControlTakeDirty() {
+  portENTER_CRITICAL(&gControlStateMux);
+  const bool dirty = gControlDirty;
+  gControlDirty = false;
+  portEXIT_CRITICAL(&gControlStateMux);
+  return dirty;
+}
+
+static void g2ControlSetFeature(G2ControlFeatureStatus& feature,
+                                G2ControlDesired desired,
+                                G2ControlObserved observed,
+                                G2ControlPhase phase,
+                                uint32_t generation,
+                                const char* detail) {
+  feature.desired = desired;
+  feature.observed = observed;
+  feature.phase = phase;
+  feature.changedAtMs = millis();
+  feature.appliedGeneration = generation;
+  snprintf(feature.detail, sizeof(feature.detail), "%s", detail ? detail : "");
+}
+
+static void g2ControlNoteEcho(const G2SettingsEcho& echo,
+                              uint32_t expectedGeneration) {
+  if (!G2_ECHO_HAS(echo, 7)) return;
+  const uint32_t now = millis();
+  portENTER_CRITICAL(&gRxPacketMux);
+  if (expectedGeneration != gR.connectionGeneration) {
+    portEXIT_CRITICAL(&gRxPacketMux);
+    return;
+  }
+  portENTER_CRITICAL(&gControlStateMux);
+  G2ControlFeatureStatus& h = gControlStatus.headUp;
+  h.observed = echo.headUpSwitch ? G2_CONTROL_OBS_ON : G2_CONTROL_OBS_OFF;
+  const bool matchesDesired =
+      (h.desired == G2_CONTROL_ON && h.observed == G2_CONTROL_OBS_ON) ||
+      (h.desired == G2_CONTROL_OFF && h.observed == G2_CONTROL_OBS_OFF);
+  const bool conflictsWithDesired = h.desired != G2_CONTROL_PRESERVE &&
+                                    !matchesDesired;
+  if (matchesDesired) {
+    h.phase = G2_CONTROL_VERIFIED;
+    h.appliedGeneration = gR.connectionGeneration;
+    gHeadUpAppliedDesired = (uint8_t)h.desired;
+    gHeadUpAppliedGeneration = gR.connectionGeneration;
+    gHeadUpRetryCount = 0;
+    static const char kReported[] = "device-reported";
+    memcpy(h.detail, kReported, sizeof(kReported));
+  } else if (conflictsWithDesired) {
+    gHeadUpAppliedDesired = 0xFF;
+    gHeadUpAppliedGeneration = 0;
+    gHeadUpRetryCount = 0;
+    gControlDirty = true;
+  }
+  h.changedAtMs = now;
+  gControlStatus.revision++;
+  portEXIT_CRITICAL(&gControlStateMux);
+  portEXIT_CRITICAL(&gRxPacketMux);
+  if (conflictsWithDesired) g2ControlWake();
+}
+
+static void g2ControlNoteAck(uint32_t magic, uint8_t inner, uint8_t leaf,
+                             uint32_t value, uint32_t expectedGeneration) {
+  portENTER_CRITICAL(&gRxPacketMux);
+  if (expectedGeneration != gR.connectionGeneration) {
+    portEXIT_CRITICAL(&gRxPacketMux);
+    return;
+  }
+  portENTER_CRITICAL(&gControlStateMux);
+  if (gControlTxn.active && gControlTxn.magic == magic &&
+      gControlTxn.inner == inner && gControlTxn.leaf == leaf &&
+      gControlTxn.value == value &&
+      gControlTxn.generation == gR.connectionGeneration) {
+    gControlTxn.acked = true;
+    gControlStatus.revision++;
+  }
+  portEXIT_CRITICAL(&gControlStateMux);
+  portEXIT_CRITICAL(&gRxPacketMux);
+  g2ControlMarkDirty();
+}
 
 static void g2SettingsEchoPublish(const G2SettingsEcho& echo, uint32_t atMs) {
   portENTER_CRITICAL(&gSettingsStateMux);
@@ -801,6 +939,8 @@ static bool g2SettingsEchoSnapshot(G2SettingsEcho* out, uint32_t* atMs) {
 
 static void g2SettingsEchoInvalidateFreshness() {
   portENTER_CRITICAL(&gSettingsStateMux);
+  memset(&gSettingsEcho, 0, sizeof(gSettingsEcho));
+  gSettingsEchoSeen = false;
   gSettingsEchoMs = 0;
   portEXIT_CRITICAL(&gSettingsStateMux);
 }
@@ -1247,6 +1387,12 @@ static void disconnectTemple(G2Temple& t);
 static bool sendEnvelope(G2Temple& t, const uint8_t* data, size_t len);
 static bool sendToBoth(const uint8_t* data, size_t len);
 static void handleNotify(G2Temple& t, const uint8_t* data, size_t len);
+static void processNotify(G2Temple& t, const uint8_t* data, size_t len,
+                          uint32_t generation);
+static void g2ControlWake();
+static bool g2ControlWorkerEnsure();
+static bool g2ControlWorkerShutdown();
+static void g2AdvanceGeneration(G2Temple& t);
 static esp_err_t setTempleConnParams(G2Temple& t, uint16_t min_int, uint16_t max_int);
 static inline void templeForgetConnParams(G2Temple& t);
 static void g2GapEventHandler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t* param);
@@ -1298,12 +1444,13 @@ static bool g2LinkIsSlow(const G2Temple* target);
 // the status back.
 static volatile uint16_t gConnIntHighMin = G2_CONN_INT_HIGH_MIN;
 static volatile uint16_t gConnIntHighMax = G2_CONN_INT_HIGH_MAX;
-static void handleEnvelope(G2Temple& t, const G2EnvelopeView& env);
+static void handleEnvelope(G2Temple& t, const G2EnvelopeView& env,
+                           uint32_t rxGeneration = 0);
 static void heartbeatTimerCallback(TimerHandle_t xTimer);
 static void startHeartbeatTimer();
 static void stopHeartbeatTimer();
 static void templeInit(G2Temple& t, char side);
-static void templeReset(G2Temple& t);
+static bool templeReset(G2Temple& t);
 static void g2PushStatusEvent(const char* reason);
 static const char* osEventTypeName(uint32_t ev);
 static bool shouldDedupHijackTap(uint32_t idx);
@@ -1348,8 +1495,10 @@ static bool sendMenuFailedAndSettle(G2Temple& arm, uint32_t settleMs);
 // =============================================================================
 
 static uint8_t allocSeq() {
+  portENTER_CRITICAL(&gSeqMux);
   uint8_t s = gNextSeq++;
   if (s == 0) s = gNextSeq++;  // 0 is reserved for "no active reassembly"
+  portEXIT_CRITICAL(&gSeqMux);
   return s;
 }
 
@@ -1358,8 +1507,10 @@ static uint8_t allocSeq() {
 // fragment. All other message types now use the stable G2_MAGIC_* constants
 // in System_G2_Protocol.h.
 static uint8_t __attribute__((unused)) allocMagic() {
+  portENTER_CRITICAL(&gSeqMux);
   uint8_t m = gNextMagic++;
   if (m == 0) m = gNextMagic++;
+  portEXIT_CRITICAL(&gSeqMux);
   return m;
 }
 
@@ -1562,6 +1713,7 @@ public:
 
   void onDisconnect(BLEClient* /*pClient*/) override {
     const bool wasConnected = temple->connected;
+    g2AdvanceGeneration(*temple);
     DEBUG_G2F("[G2-%c] BLE disconnected", temple->side);
     // Dump the recent-frame ring so we can see what we and the glasses
     // were exchanging right before the drop. Particularly useful when the
@@ -2280,7 +2432,9 @@ static void enumerateDiagService(G2Temple& t, const char* svcUuid,
 // Fragment reassembly + dispatch
 // =============================================================================
 
-static void handleNotify(G2Temple& t, const uint8_t* data, size_t len) {
+static void __attribute__((unused)) handleNotifyLegacy(G2Temple& t,
+                                                       const uint8_t* data,
+                                                       size_t len) {
   // Latch the notify task handle on first ever call so the deadlock
   // guard in the sendCreate*AndWait helpers can compare against it.
   // Bluedroid binds this callback to a single task at init, so the
@@ -2390,6 +2544,197 @@ static void handleNotify(G2Temple& t, const uint8_t* data, size_t len) {
     }
     t.rxActive = false;
     t.rxHave   = 0;
+  }
+}
+
+// Notify callbacks must return quickly: Bluedroid owns their task and stack.
+// Keep the bounded packet slab in PSRAM so moving parsing off that callback
+// does not add another permanent internal-RAM allocation.
+struct G2RxPacket {
+  uint32_t generation;
+  uint16_t len;
+  char side;
+  uint8_t data[G2_BLE_LOCAL_MTU_PREF];
+};
+
+static constexpr uint8_t G2_RX_PACKET_DEPTH = 8;
+static G2RxPacket* gRxPackets = nullptr;
+static uint8_t gRxPacketHead = 0;
+static uint8_t gRxPacketTail = 0;
+static uint8_t gRxPacketCount = 0;
+static uint32_t gRxPacketDrops = 0;
+static void g2AdvanceGeneration(G2Temple& t) {
+  portENTER_CRITICAL(&gRxPacketMux);
+  t.connectionGeneration++;
+  if (t.connectionGeneration == 0) t.connectionGeneration = 1;
+  t.firmwareVersion[0] = '\0';
+  if (t.side == 'R') {
+    gFwVersion[0] = '\0';
+    portENTER_CRITICAL(&gControlStateMux);
+    gControlStatus.headUp.observed = G2_CONTROL_UNKNOWN;
+    gControlStatus.notifications.observed = G2_CONTROL_UNKNOWN;
+    gControlTxn.active = false;
+    gControlTxn.acked = false;
+    gHeadUpRetryCount = 0;
+    gNotifRetryCount = 0;
+    gControlStatus.revision++;
+    portEXIT_CRITICAL(&gControlStateMux);
+  }
+  portEXIT_CRITICAL(&gRxPacketMux);
+  if (t.side == 'R') g2SettingsEchoInvalidateFreshness();
+  g2ControlMarkDirty();
+}
+
+bool g2ControlStatusSnapshot(G2ControlStatus* out) {
+  if (!out) return false;
+  // Generation/FW and their interpreted control state form one externally
+  // visible epoch. Use the same lock order as generation advance (RX then
+  // control) so a web/OLED reader cannot splice two sessions together.
+  portENTER_CRITICAL(&gRxPacketMux);
+  portENTER_CRITICAL(&gControlStateMux);
+  *out = gControlStatus;
+  out->rightGeneration = gR.connectionGeneration;
+  out->rxQueued = gRxPacketCount;
+  out->rxDrops = gRxPacketDrops;
+  memcpy(out->firmwareLeft, gL.firmwareVersion, sizeof(out->firmwareLeft));
+  memcpy(out->firmwareRight, gR.firmwareVersion, sizeof(out->firmwareRight));
+  portEXIT_CRITICAL(&gControlStateMux);
+  portEXIT_CRITICAL(&gRxPacketMux);
+  return true;
+}
+
+static bool g2RxPacketEnqueue(const G2Temple& t, const uint8_t* data, size_t len) {
+  if (!gRxPackets || !data || len == 0 || len > G2_BLE_LOCAL_MTU_PREF) {
+    portENTER_CRITICAL(&gRxPacketMux);
+    gRxPacketDrops++;
+    portEXIT_CRITICAL(&gRxPacketMux);
+    return false;
+  }
+  bool queued = false;
+  portENTER_CRITICAL(&gRxPacketMux);
+  if (gRxPacketCount < G2_RX_PACKET_DEPTH) {
+    G2RxPacket& p = gRxPackets[gRxPacketTail];
+    p.generation = t.connectionGeneration;
+    p.len = (uint16_t)len;
+    p.side = t.side;
+    memcpy(p.data, data, len);
+    gRxPacketTail = (uint8_t)((gRxPacketTail + 1) % G2_RX_PACKET_DEPTH);
+    gRxPacketCount++;
+    queued = true;
+  } else {
+    gRxPacketDrops++;
+  }
+  portEXIT_CRITICAL(&gRxPacketMux);
+  if (queued) g2ControlWake();
+  return queued;
+}
+
+static bool g2RxPacketDequeue(G2RxPacket* out) {
+  if (!out || !gRxPackets) return false;
+  bool have = false;
+  portENTER_CRITICAL(&gRxPacketMux);
+  if (gRxPacketCount > 0) {
+    *out = gRxPackets[gRxPacketHead];
+    gRxPacketHead = (uint8_t)((gRxPacketHead + 1) % G2_RX_PACKET_DEPTH);
+    gRxPacketCount--;
+    have = true;
+  }
+  portEXIT_CRITICAL(&gRxPacketMux);
+  return have;
+}
+
+static void g2RxReset(G2Temple& t) {
+  t.rxFrameHave = 0;
+  t.rxFrameExpected = 0;
+  g2RxReassemblyReset(&t.rxReassembly);
+  t.rxStartedMs = 0;
+}
+
+static void g2DispatchCompleteEnvelope(G2Temple& t, const G2EnvelopeView& env,
+                                       uint32_t generation) {
+  DEBUG_G2F("[G2-%c] RX env seq=0x%02X %u/%u sid=0x%02X flag=0x%02X pbLen=%u",
+            t.side, env.seq, env.fragIdx, env.totalFrags,
+            env.sid, env.flag, (unsigned)env.payloadLen);
+  g2statsRecordRx(env.sid, env.flag, env.payload, env.payloadLen);
+  if (t.pluginDead || t.heartbeatMissed > 0) {
+    if (t.pluginDead) {
+      BROADCAST_PRINTF("[G2] %s temple plugin alive again "
+                       "(RX on sid=0x%02X cleared silent flag)",
+                       t.side == 'L' ? "LEFT" : "RIGHT", (unsigned)env.sid);
+      g2PushStatusEvent(t.side == 'L' ? "plugin-alive-L" : "plugin-alive-R");
+      systemEventPost(SYSEVT_G2_WORN, t.side == 'L' ? "LEFT" : "RIGHT");
+    }
+    t.pluginDead = false;
+    t.heartbeatMissed = 0;
+  }
+  handleEnvelope(t, env, generation);
+}
+
+// Runs on the reused heartbeat/control owner, never on Bluedroid's callback.
+static void processNotify(G2Temple& t, const uint8_t* data, size_t len,
+                          uint32_t generation) {
+  if (!t.rxBuf || !data || len == 0 || generation != t.connectionGeneration) return;
+  if (t.rxReassemblyGeneration != generation) {
+    g2RxReset(t);
+    t.rxReassemblyGeneration = generation;
+  }
+  t.packetsReceived++;
+  uint8_t* const frame = t.rxBuf + RX_MESSAGE_CAP;
+  const bool startsEnvelope = len >= G2_ENVELOPE_HDR_LEN &&
+      data[0] == G2_PREAMBLE_0 && data[1] == G2_PREAMBLE_RX;
+  if (startsEnvelope) {
+    if (t.rxFrameHave != 0) {
+      DEBUG_G2F("[G2-%c] RX envelope interrupted at %u/%u", t.side,
+                (unsigned)t.rxFrameHave, (unsigned)t.rxFrameExpected);
+      t.rxFrameHave = t.rxFrameExpected = 0;
+    }
+    const size_t expected = G2_ENVELOPE_HDR_LEN + data[3];
+    if (expected > RX_FRAME_CAP || data[4] == 0 || data[5] == 0 || data[5] > data[4]) {
+      DEBUG_G2F("[G2-%c] RX invalid envelope header", t.side);
+      return;
+    }
+    t.rxFrameExpected = expected;
+  } else if (t.rxFrameHave == 0) {
+    return;
+  }
+  if (t.rxFrameHave + len > t.rxFrameExpected) {
+    DEBUG_G2F("[G2-%c] RX ATT envelope overflow", t.side);
+    g2RxReset(t);
+    return;
+  }
+  memcpy(frame + t.rxFrameHave, data, len);
+  t.rxFrameHave += len;
+  if (t.rxFrameHave < t.rxFrameExpected) return;
+
+  g2RingRecord(t.side, 'R', frame, t.rxFrameExpected);
+  const uint8_t fragIdx = frame[5];
+  const uint8_t totalFrags = frame[4];
+  t.rxFrameHave = t.rxFrameExpected = 0;
+  const uint32_t now = millis();
+  if (t.rxReassembly.active && (uint32_t)(now - t.rxStartedMs) > 2000) {
+    DEBUG_G2F("[G2-%c] RX fragmented message timeout", t.side);
+    g2RxReset(t);
+  }
+  if (fragIdx == 1) t.rxStartedMs = now;
+  G2EnvelopeView env{};
+  const G2RxReassemblyStatus result =
+      g2RxReassemblyPush(&t.rxReassembly, frame,
+                         G2_ENVELOPE_HDR_LEN + frame[3], &env);
+  if (result == G2_RX_REASSEMBLY_REJECTED) {
+    DEBUG_G2F("[G2-%c] RX fragment rejected idx=%u/%u", t.side,
+              (unsigned)fragIdx, (unsigned)totalFrags);
+    t.rxStartedMs = 0;
+  } else if (result == G2_RX_REASSEMBLY_COMPLETE) {
+    g2DispatchCompleteEnvelope(t, env, generation);
+    t.rxStartedMs = 0;
+  }
+}
+
+static void handleNotify(G2Temple& t, const uint8_t* data, size_t len) {
+  if (!gBleNotifyTaskHandle) gBleNotifyTaskHandle = xTaskGetCurrentTaskHandle();
+  if (!g2RxPacketEnqueue(t, data, len)) {
+    DEBUG_G2F("[G2-%c] RX callback drop len=%u drops=%u", t.side,
+              (unsigned)len, (unsigned)gRxPacketDrops);
   }
 }
 
@@ -7426,7 +7771,9 @@ static void voiceLangLog(char side, const char* sysName,
   }
 }
 
-static void handleEnvelope(G2Temple& t, const G2EnvelopeView& env) {
+static void handleEnvelope(G2Temple& t, const G2EnvelopeView& env,
+                           uint32_t rxGeneration) {
+  if (rxGeneration != 0 && rxGeneration != t.connectionGeneration) return;
   switch (env.sid) {
     case G2_SID_EVEN_CORE: {
       // cmd=17 arrives as flag=0x01 async (the firmware does NOT expect
@@ -7662,6 +8009,12 @@ static void handleEnvelope(G2Temple& t, const G2EnvelopeView& env) {
       G2SettingsEcho echo;
       if (g2ParseSettingEcho(env.payload, env.payloadLen, &echo)) {
         g2SettingsEchoPublish(echo, millis());
+        // Policy writes target the right/display temple. Do not let a left-arm
+        // mirror satisfy right-generation verification accidentally.
+        if (t.side == 'R') {
+          g2ControlNoteEcho(echo, rxGeneration ? rxGeneration
+                                               : t.connectionGeneration);
+        }
       }
 
       // Write-ack: the device mirrors an accepted settings write straight
@@ -7677,6 +8030,11 @@ static void handleEnvelope(G2Temple& t, const G2EnvelopeView& env) {
                     t.side, (unsigned)ackMagic, (unsigned)ackInner,
                     (unsigned)ackLeaf, (unsigned)ackValue,
                     (ackMagic == G2_MAGIC_SETTINGS_WRITE) ? "" : " (not ours)");
+          if (t.side == 'R') {
+            g2ControlNoteAck(ackMagic, ackInner, ackLeaf, ackValue,
+                             rxGeneration ? rxGeneration
+                                          : t.connectionGeneration);
+          }
           if (ackMagic == G2_MAGIC_SETTINGS_WRITE) {
             g2SettingsAckPublish(ackInner, ackLeaf, ackValue, millis());
           }
@@ -7728,12 +8086,26 @@ static void handleEnvelope(G2Temple& t, const G2EnvelopeView& env) {
       // every battery tick that happens to include the version.
       char ver[32] = {0};
       if (g2ParseSettingVersion(env.payload, env.payloadLen, ver, sizeof(ver))) {
-        if (strcmp(ver, gFwVersion) != 0) {
+        if (strcmp(ver, t.firmwareVersion) != 0) {
           DEBUG_G2F("[G2-%c] Firmware version: '%s' (was '%s')",
-                    t.side, ver, gFwVersion);
+                    t.side, ver, t.firmwareVersion);
+          portENTER_CRITICAL(&gRxPacketMux);
+          const bool generationCurrent =
+              rxGeneration == 0 || rxGeneration == t.connectionGeneration;
+          if (generationCurrent) {
+            strncpy(t.firmwareVersion, ver, sizeof(t.firmwareVersion) - 1);
+            t.firmwareVersion[sizeof(t.firmwareVersion) - 1] = '\0';
+          }
+          portEXIT_CRITICAL(&gRxPacketMux);
+          if (!generationCurrent) break;
+          // Compatibility aggregate used by older status/UI code. Prefer R,
+          // otherwise keep the first side learned; decisions use per-side.
+          if (t.side == 'R' || gFwVersion[0] == '\0') {
           strncpy(gFwVersion, ver, sizeof(gFwVersion) - 1);
           gFwVersion[sizeof(gFwVersion) - 1] = '\0';
+          }
           g2PushStatusEvent("fw-ver");
+          g2ControlMarkDirty();
         }
       }
 
@@ -8088,24 +8460,27 @@ static bool sendEnvelopeNoMutex(G2Temple& t, const uint8_t* data, size_t len) {
 // Busy as a clean skip (not a TX wedge).
 static G2SendResult sendEnvelopeEx(G2Temple& t, const uint8_t* data, size_t len,
                                    uint32_t centralTimeoutMs) {
-  if (!t.connected || !t.writeChar) {
-    DEBUG_G2F("[G2-%c] sendEnvelope: not ready (connected=%d writeChar=%p)",
-              t.side, t.connected ? 1 : 0, t.writeChar);
-    return G2SendResult::Fail;
-  }
-  if (!t.writeMutex) return G2SendResult::Fail;
   if (!bleCentralTxTake(centralTimeoutMs)) {
     DEBUG_G2F("[G2-%c] Central TX busy; envelope deferred", t.side);
     return G2SendResult::Busy;
   }
-  if (xSemaphoreTake(t.writeMutex, pdMS_TO_TICKS(G2_SEND_ENVELOPE_MUTEX_MS)) !=
+  // Re-read all temple runtime only after the global gate. templeReset takes
+  // this same gate before deleting the mutex/client, so a sender cannot carry
+  // a stale mutex pointer across teardown.
+  SemaphoreHandle_t writeMutex = t.writeMutex;
+  if (!t.connected || !t.writeChar || !writeMutex) {
+    DEBUG_G2F("[G2-%c] sendEnvelope: not ready after TX gate", t.side);
+    bleCentralTxGive();
+    return G2SendResult::Fail;
+  }
+  if (xSemaphoreTake(writeMutex, pdMS_TO_TICKS(G2_SEND_ENVELOPE_MUTEX_MS)) !=
       pdTRUE) {
     DEBUG_G2F("[G2-%c] Write mutex timeout; envelope dropped", t.side);
     bleCentralTxGive();
     return G2SendResult::Busy;
   }
   bool ok = sendEnvelopeNoMutex(t, data, len);
-  xSemaphoreGive(t.writeMutex);
+  xSemaphoreGive(writeMutex);
   bleCentralTxGive();
   return ok ? G2SendResult::Ok : G2SendResult::Fail;
 }
@@ -8113,6 +8488,34 @@ static G2SendResult sendEnvelopeEx(G2Temple& t, const uint8_t* data, size_t len,
 static bool sendEnvelope(G2Temple& t, const uint8_t* data, size_t len) {
   return sendEnvelopeEx(t, data, len, G2_CENTRAL_TX_ENVELOPE_MS) ==
          G2SendResult::Ok;
+}
+
+// Policy/config writes are evidence-bound to one connection epoch and one
+// exact two-temple firmware profile. Revalidate only after both TX gates are
+// held so a disconnect/reconnect while waiting cannot retarget the frame.
+static bool sendEnvelopeExactGeneration(G2Temple& t, const uint8_t* data,
+                                        size_t len, uint32_t generation,
+                                        const char* exactFirmware) {
+  if (!data || !len || !exactFirmware) return false;
+  if (!bleCentralTxTake(G2_CENTRAL_TX_ENVELOPE_MS)) return false;
+  SemaphoreHandle_t writeMutex = t.writeMutex;
+  if (!writeMutex ||
+      xSemaphoreTake(writeMutex, pdMS_TO_TICKS(G2_SEND_ENVELOPE_MUTEX_MS)) !=
+      pdTRUE) {
+    bleCentralTxGive();
+    return false;
+  }
+  portENTER_CRITICAL(&gRxPacketMux);
+  const bool exact = t.side == 'R' && t.connected && t.writeChar &&
+      t.connectionGeneration == generation &&
+      gL.firmwareVersion[0] && gR.firmwareVersion[0] &&
+      strcmp(gL.firmwareVersion, exactFirmware) == 0 &&
+      strcmp(gR.firmwareVersion, exactFirmware) == 0;
+  portEXIT_CRITICAL(&gRxPacketMux);
+  const bool ok = exact && sendEnvelopeNoMutex(t, data, len);
+  xSemaphoreGive(writeMutex);
+  bleCentralTxGive();
+  return ok;
 }
 
 static bool sendToBoth(const uint8_t* data, size_t len) {
@@ -8243,7 +8646,13 @@ static bool sendPbFragmented(G2Temple& arm, uint8_t seq, uint8_t sid, uint8_t fl
       ok = false;
       break;
     }
-    if (xSemaphoreTake(arm.writeMutex,
+    SemaphoreHandle_t writeMutex = arm.writeMutex;
+    if (!arm.connected || !arm.writeChar || !writeMutex) {
+      bleCentralTxGive();
+      ok = false;
+      break;
+    }
+    if (xSemaphoreTake(writeMutex,
                        pdMS_TO_TICKS(G2_SEND_ENVELOPE_MUTEX_MS)) != pdTRUE) {
       DEBUG_G2F("[G2-%c] sendPbFragmented: mutex timeout at frag %u/%u",
                 arm.side, (unsigned)(i + 1), (unsigned)totFrags);
@@ -8252,7 +8661,7 @@ static bool sendPbFragmented(G2Temple& arm, uint8_t seq, uint8_t sid, uint8_t fl
       break;
     }
     if (!arm.connected || !arm.writeChar) {
-      xSemaphoreGive(arm.writeMutex);
+      xSemaphoreGive(writeMutex);
       bleCentralTxGive();
       ok = false;
       break;
@@ -8262,7 +8671,7 @@ static bool sendPbFragmented(G2Temple& arm, uint8_t seq, uint8_t sid, uint8_t fl
                 arm.side, (unsigned)(i + 1), (unsigned)totFrags);
       ok = false;
     }
-    xSemaphoreGive(arm.writeMutex);
+    xSemaphoreGive(writeMutex);
     bleCentralTxGive();
     // Opportunistic ring drain in the gap we just opened.
     g2RingTryDrainPendingTx();
@@ -8318,6 +8727,106 @@ static constexpr uint32_t HEARTBEAT_DEAD_THRESHOLD = 3;
 static SemaphoreHandle_t gBeatSem        = nullptr;
 static TaskHandle_t      gBeatTaskHandle = nullptr;
 static volatile bool     gBeatTaskStop   = false;
+static volatile bool     gBeatPending    = false;
+static constexpr uint32_t G2_CONTROL_STACK_BYTES = 6144;
+static portMUX_TYPE       gControlLifecycleMux = portMUX_INITIALIZER_UNLOCKED;
+static uint8_t            gControlStartBlocks = 0;
+static bool               gControlStarting = false;
+static uint8_t            gBleConnectSubmitters = 0;
+static uint8_t            gSessionSubmitters = 0;
+static uint8_t            gClientInitters = 0;
+
+static void g2ControlStartBlockAcquire() {
+  portENTER_CRITICAL(&gControlLifecycleMux);
+  if (gControlStartBlocks < 0xFF) gControlStartBlocks++;
+  portEXIT_CRITICAL(&gControlLifecycleMux);
+}
+
+static void g2ControlStartBlockRelease() {
+  portENTER_CRITICAL(&gControlLifecycleMux);
+  if (gControlStartBlocks > 0) gControlStartBlocks--;
+  portEXIT_CRITICAL(&gControlLifecycleMux);
+}
+
+static bool g2ClientInitBegin() {
+  portENTER_CRITICAL(&gControlLifecycleMux);
+  const bool allowed = gControlStartBlocks == 0 && gClientInitters == 0;
+  if (allowed) gClientInitters++;
+  portEXIT_CRITICAL(&gControlLifecycleMux);
+  return allowed;
+}
+
+static void g2ClientInitDone() {
+  portENTER_CRITICAL(&gControlLifecycleMux);
+  if (gClientInitters > 0) gClientInitters--;
+  portEXIT_CRITICAL(&gControlLifecycleMux);
+}
+
+static bool g2ClientInitIdle() {
+  portENTER_CRITICAL(&gControlLifecycleMux);
+  const bool idle = gClientInitters == 0;
+  portEXIT_CRITICAL(&gControlLifecycleMux);
+  return idle;
+}
+
+struct G2ClientInitClaim {
+  bool held;
+  explicit G2ClientInitClaim(bool acquired) : held(acquired) {}
+  ~G2ClientInitClaim() { if (held) g2ClientInitDone(); }
+};
+
+static bool g2BleConnectSubmitBegin() {
+  portENTER_CRITICAL(&gControlLifecycleMux);
+  const bool allowed = gControlStartBlocks == 0 &&
+      gBleConnectSubmitters < 0xFF;
+  if (allowed) gBleConnectSubmitters++;
+  portEXIT_CRITICAL(&gControlLifecycleMux);
+  return allowed;
+}
+
+static void g2BleConnectSubmitDone() {
+  portENTER_CRITICAL(&gControlLifecycleMux);
+  if (gBleConnectSubmitters > 0) gBleConnectSubmitters--;
+  portEXIT_CRITICAL(&gControlLifecycleMux);
+}
+
+static bool g2BleConnectSubmitIdle() {
+  portENTER_CRITICAL(&gControlLifecycleMux);
+  const bool idle = gBleConnectSubmitters == 0;
+  portEXIT_CRITICAL(&gControlLifecycleMux);
+  return idle;
+}
+
+static bool g2SessionSubmitBegin() {
+  portENTER_CRITICAL(&gControlLifecycleMux);
+  const bool allowed = gControlStartBlocks == 0 && gSessionSubmitters < 0xFF;
+  if (allowed) gSessionSubmitters++;
+  portEXIT_CRITICAL(&gControlLifecycleMux);
+  return allowed;
+}
+
+static void g2SessionSubmitDone() {
+  portENTER_CRITICAL(&gControlLifecycleMux);
+  if (gSessionSubmitters > 0) gSessionSubmitters--;
+  portEXIT_CRITICAL(&gControlLifecycleMux);
+}
+
+static bool g2SessionSubmitIdle() {
+  portENTER_CRITICAL(&gControlLifecycleMux);
+  const bool idle = gSessionSubmitters == 0;
+  portEXIT_CRITICAL(&gControlLifecycleMux);
+  return idle;
+}
+
+static void g2ControlStartingDone() {
+  portENTER_CRITICAL(&gControlLifecycleMux);
+  gControlStarting = false;
+  portEXIT_CRITICAL(&gControlLifecycleMux);
+}
+
+static void g2ControlWake() {
+  if (gBeatSem) xSemaphoreGive(gBeatSem);
+}
 
 // Helper — beat one temple, bump its miss counter, and flag the plugin
 // "silent" if the threshold is crossed. The miss counter is cleared on
@@ -8555,6 +9064,7 @@ static bool attemptMissingArmRecovery() {
   // as soon as the missing side is populated.
   const uint32_t deadline = millis() + (kScanSec * 1000) + 500;
   while (millis() < deadline) {
+    if (gBeatTaskStop) break;
     if ((needL && gScanFoundL) || (needR && gScanFoundR)) break;
     vTaskDelay(pdMS_TO_TICKS(100));
   }
@@ -8565,6 +9075,8 @@ static bool attemptMissingArmRecovery() {
   gG2FilterMacL = String();
   gG2FilterMacR = String();
   gConnectTarget = G2_EYE_AUTO;
+
+  if (gBeatTaskStop) return false;
 
   if (!missing->advertisedDevice) {
     DEBUG_G2F("[G2] recovery: %s temple not seen during scan", sideStr);
@@ -8629,14 +9141,278 @@ static void recoveryHeartbeatTick() {
   }
 }
 
+static const char* g2ControlDesiredName(G2ControlDesired v) {
+  switch (v) {
+    case G2_CONTROL_PRESERVE: return "preserve";
+    case G2_CONTROL_OFF: return "off";
+    case G2_CONTROL_ON: return "on";
+    default: return "invalid";
+  }
+}
+
+static void g2ControlReconcileTick() {
+  const G2ControlDesired headDesired =
+      gSettings.g2HeadUpDesired <= G2_CONTROL_ON
+        ? (G2ControlDesired)gSettings.g2HeadUpDesired : G2_CONTROL_PRESERVE;
+  const G2ControlDesired notifDesired =
+      gSettings.g2NotificationsDesired <= G2_CONTROL_ON
+        ? (G2ControlDesired)gSettings.g2NotificationsDesired : G2_CONTROL_PRESERVE;
+
+  G2ControlFeatureStatus head;
+  G2ControlFeatureStatus notif;
+  G2PolicyTxn txn;
+  portENTER_CRITICAL(&gControlStateMux);
+  head = gControlStatus.headUp;
+  notif = gControlStatus.notifications;
+  txn = gControlTxn;
+  portEXIT_CRITICAL(&gControlStateMux);
+
+  if (head.desired != headDesired) {
+    gHeadUpAppliedDesired = 0xFF;
+    gHeadUpAppliedGeneration = 0;
+    gHeadUpRetryCount = 0;
+    if (txn.feature == G2PolicyFeature::HeadUp) txn.active = false;
+  }
+  if (notif.desired != notifDesired) {
+    gNotifAppliedDesired = 0xFF;
+    gNotifAppliedGeneration = 0;
+    gNotifRetryCount = 0;
+  }
+  head.desired = headDesired;
+  notif.desired = notifDesired;
+  const uint32_t generation = gR.connectionGeneration;
+  const bool rightReady = gR.connected && !gR.pluginDead;
+  char fwL[32];
+  char fwR[32];
+  portENTER_CRITICAL(&gRxPacketMux);
+  memcpy(fwL, gL.firmwareVersion, sizeof(fwL));
+  memcpy(fwR, gR.firmwareVersion, sizeof(fwR));
+  portEXIT_CRITICAL(&gRxPacketMux);
+  const bool fwKnown = fwL[0] != '\0' && fwR[0] != '\0';
+  const bool fwJuly31 = fwKnown && strcmp(fwL, "2.2.6.10") == 0 &&
+                        strcmp(fwR, "2.2.6.10") == 0;
+  const bool fwMismatch = fwKnown && strcmp(fwL, fwR) != 0;
+  bool sendHead = false;
+  bool verifyHead = false;
+  uint32_t headValue = headDesired == G2_CONTROL_ON ? 1u : 0u;
+
+  if (headDesired == G2_CONTROL_PRESERVE) {
+    g2ControlSetFeature(head, headDesired, head.observed, G2_CONTROL_IDLE,
+                        0, "device/app owns setting");
+    if (txn.feature == G2PolicyFeature::HeadUp) txn.active = false;
+  } else if (!rightReady) {
+    g2ControlSetFeature(head, headDesired, G2_CONTROL_UNKNOWN,
+                        G2_CONTROL_WAITING_LINK, 0, "waiting for right temple");
+  } else if (!fwKnown) {
+    g2ControlSetFeature(head, headDesired, head.observed,
+                        G2_CONTROL_WAITING_FIRMWARE, 0, "waiting for exact firmware");
+  } else if (fwMismatch) {
+    g2ControlSetFeature(head, headDesired, head.observed,
+                        G2_CONTROL_UNSUPPORTED, 0, "left/right firmware mismatch");
+  } else if (!fwJuly31) {
+    g2ControlSetFeature(head, headDesired, head.observed,
+                        G2_CONTROL_UNSUPPORTED, 0, "HeadUp writes require 2.2.6.10");
+  } else if ((headDesired == G2_CONTROL_ON && head.observed == G2_CONTROL_OBS_ON) ||
+             (headDesired == G2_CONTROL_OFF && head.observed == G2_CONTROL_OBS_OFF)) {
+    g2ControlSetFeature(head, headDesired, head.observed,
+                        G2_CONTROL_VERIFIED, generation, "device-reported");
+    gHeadUpRetryCount = 0;
+    gHeadUpAppliedDesired = (uint8_t)headDesired;
+    gHeadUpAppliedGeneration = generation;
+    if (txn.feature == G2PolicyFeature::HeadUp) txn.active = false;
+  } else if (txn.active && txn.feature == G2PolicyFeature::HeadUp) {
+    if (txn.generation != generation || txn.value != headValue) {
+      txn.active = false;
+    } else if (txn.acked) {
+      txn.active = false;
+      gHeadUpRetryCount = 0;
+      gHeadUpAppliedDesired = (uint8_t)headDesired;
+      gHeadUpAppliedGeneration = generation;
+      g2ControlSetFeature(head, headDesired, head.observed,
+                          G2_CONTROL_ACKED, generation,
+                          "write ACKed; independent readback pending");
+      verifyHead = true;
+    } else if ((uint32_t)(millis() - txn.startedMs) >= 700) {
+      txn.active = false;
+      if (gHeadUpRetryCount < 3) gHeadUpRetryCount++;
+      if (gHeadUpRetryCount >= 3) {
+        gHeadUpAppliedDesired = (uint8_t)headDesired;
+        gHeadUpAppliedGeneration = generation;
+      }
+      g2ControlSetFeature(head, headDesired, head.observed,
+                          G2_CONTROL_FAILED, generation,
+                          gHeadUpRetryCount >= 3
+                            ? "no ACK after 3 attempts: no-op or rejected"
+                            : "no ACK: retry scheduled");
+    } else {
+      g2ControlSetFeature(head, headDesired, head.observed,
+                          G2_CONTROL_SENT, generation, "waiting for write ACK");
+    }
+  } else if (gHeadUpAppliedDesired == (uint8_t)headDesired &&
+             gHeadUpAppliedGeneration == generation) {
+    // Retain the terminal ACK/failed state until a new echo, generation, or
+    // desired policy changes it. This prevents wake-driven resend storms.
+  } else {
+    sendHead = true;
+    g2ControlSetFeature(head, headDesired, head.observed,
+                        G2_CONTROL_QUEUED, generation, "queued on control owner");
+  }
+
+  if (notifDesired == G2_CONTROL_PRESERVE) {
+    g2ControlSetFeature(notif, notifDesired, G2_CONTROL_UNKNOWN,
+                        G2_CONTROL_IDLE, 0, "device/app owns setting");
+  } else if (notifDesired == G2_CONTROL_OFF) {
+    g2ControlSetFeature(notif, notifDesired, G2_CONTROL_UNKNOWN,
+                        G2_CONTROL_UNSUPPORTED, 0, "Off vector not captured");
+  } else if (!rightReady) {
+    g2ControlSetFeature(notif, notifDesired, G2_CONTROL_UNKNOWN,
+                        G2_CONTROL_WAITING_LINK, 0, "waiting for right temple");
+  } else if (!fwKnown) {
+    g2ControlSetFeature(notif, notifDesired, G2_CONTROL_UNKNOWN,
+                        G2_CONTROL_WAITING_FIRMWARE, 0, "waiting for exact firmware");
+  } else if (fwMismatch) {
+    g2ControlSetFeature(notif, notifDesired, G2_CONTROL_UNKNOWN,
+                        G2_CONTROL_UNSUPPORTED, 0, "left/right firmware mismatch");
+  } else if (!fwJuly31) {
+    g2ControlSetFeature(notif, notifDesired, G2_CONTROL_UNKNOWN,
+                        G2_CONTROL_UNSUPPORTED, 0,
+                        "captured notification policy requires 2.2.6.10");
+  } else if (gNotifAppliedDesired != (uint8_t)notifDesired ||
+             gNotifAppliedGeneration != generation) {
+    uint8_t env[64];
+    const size_t n = g2BuildNotificationControlJuly31(
+        allocSeq(), G2_MAGIC_NOTIF_CTRL, env, sizeof(env));
+    if (n && sendEnvelopeExactGeneration(gR, env, n, generation,
+                                         "2.2.6.10")) {
+      gNotifRetryCount = 0;
+      gNotifAppliedDesired = (uint8_t)notifDesired;
+      gNotifAppliedGeneration = generation;
+      g2ControlSetFeature(notif, notifDesired, G2_CONTROL_UNKNOWN,
+                          G2_CONTROL_SENT, generation,
+                          "capture vector sent; no state readback");
+    } else {
+      if (gNotifRetryCount < 3) gNotifRetryCount++;
+      if (gNotifRetryCount >= 3) {
+        gNotifAppliedDesired = (uint8_t)notifDesired;
+        gNotifAppliedGeneration = generation;
+      }
+      g2ControlSetFeature(notif, notifDesired, G2_CONTROL_UNKNOWN,
+                          G2_CONTROL_FAILED, generation,
+                          gNotifRetryCount >= 3
+                            ? "send failed after 3 attempts"
+                            : "send failed; retry scheduled");
+    }
+  } else {
+    g2ControlSetFeature(notif, notifDesired, G2_CONTROL_UNKNOWN,
+                        G2_CONTROL_SENT, generation,
+                        gNotifPrimedGenerationR == generation
+                          ? "control + whitelist sent; no readback"
+                          : "capture vector sent; no state readback");
+  }
+
+  if (sendHead && rightReady && generation == gR.connectionGeneration) {
+    uint8_t env[64];
+    static constexpr uint32_t kHeadPolicyMagic = 242;
+    const size_t n = g2BuildHeadUpSwitch(allocSeq(), kHeadPolicyMagic,
+                                         headValue != 0, env, sizeof(env));
+    txn = {};
+    txn.active = true;
+    txn.feature = G2PolicyFeature::HeadUp;
+    txn.inner = G2_SETW_F_HEAD_UP;
+    txn.leaf = G2_SETW_HEADUP_F_SWITCH;
+    txn.value = headValue;
+    txn.magic = kHeadPolicyMagic;
+    txn.generation = generation;
+    txn.startedMs = millis();
+    if (n && sendEnvelopeExactGeneration(gR, env, n, generation,
+                                         "2.2.6.10")) {
+      g2ControlSetFeature(head, headDesired, head.observed,
+                          G2_CONTROL_SENT, generation, "waiting for write ACK");
+    } else {
+      txn.active = false;
+      if (gHeadUpRetryCount < 3) gHeadUpRetryCount++;
+      if (gHeadUpRetryCount >= 3) {
+        gHeadUpAppliedDesired = (uint8_t)headDesired;
+        gHeadUpAppliedGeneration = generation;
+      }
+      g2ControlSetFeature(head, headDesired, head.observed,
+                          G2_CONTROL_FAILED, generation,
+                          gHeadUpRetryCount >= 3
+                            ? "send failed after 3 attempts"
+                            : "send failed; retry scheduled");
+    }
+  }
+
+  if (verifyHead && rightReady && generation == gR.connectionGeneration) {
+    uint8_t env[64];
+    const size_t n = g2BuildSettingBasicRequest(allocSeq(), G2_MAGIC_SETTINGS,
+                                                env, sizeof(env));
+    if (n) (void)sendEnvelope(gR, env, n);
+  }
+
+  const bool desiredStillCurrent =
+      gSettings.g2HeadUpDesired == (uint8_t)headDesired &&
+      gSettings.g2NotificationsDesired == (uint8_t)notifDesired;
+  if (!desiredStillCurrent) {
+    g2ControlMarkDirty();
+    return;
+  }
+
+  portENTER_CRITICAL(&gRxPacketMux);
+  if (generation != gR.connectionGeneration) {
+    portEXIT_CRITICAL(&gRxPacketMux);
+    portENTER_CRITICAL(&gControlStateMux);
+    gHeadUpRetryCount = 0;
+    gNotifRetryCount = 0;
+    portEXIT_CRITICAL(&gControlStateMux);
+    g2ControlMarkDirty();
+    return;
+  }
+
+  portENTER_CRITICAL(&gControlStateMux);
+  gControlStatus.headUp = head;
+  gControlStatus.notifications = notif;
+  gControlStatus.rightGeneration = generation;
+  gControlTxn = txn;
+  gControlStatus.revision++;
+  gControlDirty = gControlDirty || txn.active ||
+      (gHeadUpRetryCount > 0 && gHeadUpRetryCount < 3 &&
+       gHeadUpAppliedGeneration != generation) ||
+      (gNotifRetryCount > 0 && gNotifRetryCount < 3 &&
+       gNotifAppliedGeneration != generation);
+  portEXIT_CRITICAL(&gControlStateMux);
+  portEXIT_CRITICAL(&gRxPacketMux);
+}
+
 static void heartbeatWorkerTask(void* /*arg*/) {
   while (!gBeatTaskStop) {
-    // Block until the 5 s timer kicks us (or stopHeartbeatTimer gives a
-    // final "wake and exit" signal). pdMS_TO_TICKS(6000) upper bound
-    // guards against a missed tick; the gBeatTaskStop check catches clean
-    // shutdown even if the sem never fires.
-    if (xSemaphoreTake(gBeatSem, pdMS_TO_TICKS(6000)) == pdTRUE) {
+    // This is now the G2 control owner as well as the heartbeat worker.
+    // Notify callbacks enqueue bounded copies in PSRAM and wake this task;
+    // generic commands remain on cmd_exec and are never run here.
+    bool policyTxnActive = false;
+    portENTER_CRITICAL(&gControlStateMux);
+    policyTxnActive = gControlTxn.active;
+    portEXIT_CRITICAL(&gControlStateMux);
+    const uint32_t ownerWaitMs = policyTxnActive ? 250u : 6000u;
+    const bool signalled =
+        xSemaphoreTake(gBeatSem, pdMS_TO_TICKS(ownerWaitMs)) == pdTRUE;
+    if (gBeatTaskStop) break;
+
+    G2RxPacket p;
+    while (g2RxPacketDequeue(&p)) {
+      G2Temple& temple = (p.side == 'L') ? gL : gR;
+      processNotify(temple, p.data, p.len, p.generation);
       if (gBeatTaskStop) break;
+    }
+    if (gBeatTaskStop) break;
+
+    if (g2ControlTakeDirty()) g2ControlReconcileTick();
+
+    // A timeout is also a fail-safe heartbeat in case a timer signal was
+    // lost. RX wakes do not cause extra heartbeats.
+    const bool runBeat = gBeatPending || (!signalled && ownerWaitMs >= 6000u);
+    gBeatPending = false;
+    if (runBeat) {
       beatOne(gL);
       beatOne(gR);
       // Hijack-safety watchdog: if the hijack has been active longer than
@@ -8667,61 +9443,113 @@ static void heartbeatWorkerTask(void* /*arg*/) {
       // sides are connected (steady state).
       recoveryHeartbeatTick();
     }
+    {
+      static volatile uint32_t sControlStackUsedPeak = 0;
+      const uint32_t freeNow = (uint32_t)uxTaskGetStackHighWaterMark(nullptr);
+      const uint32_t used = freeNow < G2_CONTROL_STACK_BYTES
+                              ? G2_CONTROL_STACK_BYTES - freeNow : 0;
+      const uint32_t prior = sControlStackUsedPeak;
+      observeHwm(&sControlStackUsedPeak, used);
+      if (sControlStackUsedPeak != prior) {
+        DEBUG_G2F("[G2] control owner stack peak %u/%u B (%u B free)",
+                  (unsigned)sControlStackUsedPeak,
+                  (unsigned)G2_CONTROL_STACK_BYTES,
+                  (unsigned)(G2_CONTROL_STACK_BYTES - sControlStackUsedPeak));
+      }
+    }
   }
+  portENTER_CRITICAL(&gControlLifecycleMux);
   gBeatTaskHandle = nullptr;
+  portEXIT_CRITICAL(&gControlLifecycleMux);
   vTaskDelete(nullptr);
 }
 
 static void heartbeatTimerCallback(TimerHandle_t /*xTimer*/) {
   // Trivial: just kick the worker. This runs on Tmr Svc so must stay
   // small — no BLE writes, no printfs, no mutex waits.
-  if (gBeatSem) xSemaphoreGive(gBeatSem);
+  gBeatPending = true;
+  g2ControlWake();
+}
+
+static bool g2ControlWorkerEnsure() {
+  portENTER_CRITICAL(&gControlLifecycleMux);
+  if (gControlStartBlocks != 0 || gControlStarting) {
+    portEXIT_CRITICAL(&gControlLifecycleMux);
+    return false;
+  }
+  if (gBeatTaskHandle) {
+    const bool usable = !gBeatTaskStop;
+    portEXIT_CRITICAL(&gControlLifecycleMux);
+    return usable;
+  }
+  gControlStarting = true;
+  portEXIT_CRITICAL(&gControlLifecycleMux);
+
+  if (!gBeatSem) gBeatSem = xSemaphoreCreateBinary();
+  if (!gBeatSem) {
+    DEBUG_G2F("[G2] control owner: semaphore allocation failed");
+    g2ControlStartingDone();
+    return false;
+  }
+  if (!gRxPackets) {
+    gRxPackets = (G2RxPacket*)ps_alloc(sizeof(G2RxPacket) * G2_RX_PACKET_DEPTH,
+                                      AllocPref::PreferPSRAM,
+                                      "g2.rx-packet-ring");
+    if (!gRxPackets) {
+      DEBUG_G2F("[G2] control owner: RX packet ring allocation failed");
+      g2ControlStartingDone();
+      return false;
+    }
+    portENTER_CRITICAL(&gRxPacketMux);
+    gRxPacketHead = gRxPacketTail = gRxPacketCount = 0;
+    portEXIT_CRITICAL(&gRxPacketMux);
+  }
+  gBeatTaskStop = false;
+
+  const uint32_t totalFree = (uint32_t)ESP.getFreeHeap();
+  const uint32_t internalFree =
+      heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  const uint32_t needApprox = G2_CONTROL_STACK_BYTES + 1200u;
+  if (internalFree < needApprox) {
+    DEBUG_G2F("[G2] control owner NOT started — internal=%u total=%u need~%u",
+              (unsigned)internalFree, (unsigned)totalFree,
+              (unsigned)needApprox);
+    g2ControlStartingDone();
+    return false;
+  }
+  // Allocation can take long enough for an explicit disconnect/deinit to
+  // start meanwhile.  Abort before task creation when that teardown has
+  // installed a start block; the teardown will then observe starting=false
+  // and can safely reclaim the runtime.
+  portENTER_CRITICAL(&gControlLifecycleMux);
+  const bool startBlocked = gControlStartBlocks != 0;
+  if (startBlocked) gControlStarting = false;
+  portEXIT_CRITICAL(&gControlLifecycleMux);
+  if (startBlocked) {
+    DEBUG_G2F("[G2] control owner start cancelled by teardown");
+    return false;
+  }
+  BaseType_t rc = xTaskCreatePinnedToCore(heartbeatWorkerTask, "g2_ctrl_owner",
+                              /*stack bytes*/ G2_CONTROL_STACK_BYTES, nullptr,
+                              /*prio*/ 5, &gBeatTaskHandle, APP_CORE);
+  if (rc != pdPASS) {
+    DEBUG_G2F("[G2] control owner task create failed (stack=%u internal=%u)",
+              (unsigned)G2_CONTROL_STACK_BYTES, (unsigned)internalFree);
+    gBeatTaskHandle = nullptr;
+    g2ControlStartingDone();
+    return false;
+  }
+  g2ControlStartingDone();
+  DEBUG_G2F("[G2] control owner started (stack=%u internal=%u total=%u rxRing=%u PSRAM)",
+            (unsigned)G2_CONTROL_STACK_BYTES, (unsigned)internalFree,
+            (unsigned)totalFree,
+            (unsigned)(sizeof(G2RxPacket) * G2_RX_PACKET_DEPTH));
+  return true;
 }
 
 static void startHeartbeatTimer() {
   if (gHeartbeatTimer) return;
-  if (!gBeatSem) gBeatSem = xSemaphoreCreateBinary();
-  if (!gBeatSem) {
-    DEBUG_G2F("[G2] heartbeat: sem alloc failed — timer NOT started");
-    return;
-  }
-  gBeatTaskStop = false;
-  if (!gBeatTaskHandle) {
-    // xTaskCreate stack lives in **internal** DRAM. NimBLE + dual GATT clients can
-    // leave only a few KB internal while PSRAM still shows megabytes free —
-    // ESP.getFreeHeap() is misleading here.
-    const uint32_t totalFree  = (uint32_t)ESP.getFreeHeap();
-    const uint32_t internalFree =
-        heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    // ESP-IDF xTaskCreate: stack size is bytes. TCB + alignment ≈ 512–1k extra.
-    uint32_t stackBytes = 3072;
-    if (internalFree < 9000) {
-      stackBytes = 2560;
-    }
-    if (internalFree < 7000) {
-      stackBytes = 2048;
-    }
-    const uint32_t needApprox = stackBytes + 1200u;
-    if (internalFree < needApprox) {
-      DEBUG_G2F("[G2] heartbeat: worker NOT started — internal DRAM %u B "
-                "(total heap %u B) < ~%u B needed for stack+TCB. "
-                "Dual BLE clients exhausted internal heap; heartbeats will not run.",
-                (unsigned)internalFree, (unsigned)totalFree, (unsigned)needApprox);
-      gBeatTaskHandle = nullptr;
-      return;
-    }
-    BaseType_t rc = xTaskCreatePinnedToCore(heartbeatWorkerTask, "g2_hb_worker",
-                                stackBytes, nullptr,
-                                /*prio*/ 5, &gBeatTaskHandle, APP_CORE);
-    if (rc != pdPASS) {
-      DEBUG_G2F("[G2] heartbeat: worker task create failed (stack=%u internal=%u)",
-                (unsigned)stackBytes, (unsigned)internalFree);
-      gBeatTaskHandle = nullptr;
-      return;
-    }
-    DEBUG_G2F("[G2] heartbeat: worker started (stack=%u internal=%u total=%u)",
-              (unsigned)stackBytes, (unsigned)internalFree, (unsigned)totalFree);
-  }
+  if (!g2ControlWorkerEnsure()) return;
   gHeartbeatTimer = xTimerCreate("g2_hb", pdMS_TO_TICKS(HEARTBEAT_PERIOD_MS),
                                  pdTRUE, nullptr, heartbeatTimerCallback);
   if (gHeartbeatTimer) xTimerStart(gHeartbeatTimer, 0);
@@ -8733,15 +9561,39 @@ static void stopHeartbeatTimer() {
     xTimerDelete(gHeartbeatTimer, 0);
     gHeartbeatTimer = nullptr;
   }
-  // Signal the worker to exit, then wake it so it observes the flag.
-  if (gBeatTaskHandle) {
-    gBeatTaskStop = true;
-    if (gBeatSem) xSemaphoreGive(gBeatSem);
-    // The task self-deletes; don't join here (calling task might be the
-    // BLE notify thread). Brief yield is enough.
-    vTaskDelay(pdMS_TO_TICKS(20));
+  gBeatPending = false;
+  // The owner deliberately survives an unexpected drop so auto-reconnect can
+  // subscribe safely without a task-destroy/create race. Explicit close and
+  // deinit call g2ControlWorkerShutdown() to reclaim its internal stack.
+}
+
+static bool g2ControlWorkerShutdown() {
+  const uint32_t startDeadline = millis() + 500;
+  while (true) {
+    portENTER_CRITICAL(&gControlLifecycleMux);
+    const bool starting = gControlStarting;
+    portEXIT_CRITICAL(&gControlLifecycleMux);
+    if (!starting) break;
+    if ((int32_t)(millis() - startDeadline) >= 0) return false;
+    vTaskDelay(pdMS_TO_TICKS(5));
   }
-  // Leave gBeatSem allocated — cheap to keep, safe to reuse on next start.
+  if (!gBeatTaskHandle) return true;
+  gBeatTaskStop = true;
+  g2ControlWake();
+  // A legacy half-connect recovery scan can occupy the owner for ~3.5 s.
+  // Wait beyond that bound before allowing callers to free temple RX memory.
+  const uint32_t deadline = millis() + 6000;
+  while (gBeatTaskHandle && (int32_t)(millis() - deadline) < 0) {
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+  if (gBeatTaskHandle) {
+    DEBUG_G2F("[G2] control owner did not exit within 6 s; retaining temple runtime resources");
+    return false;
+  }
+  portENTER_CRITICAL(&gRxPacketMux);
+  gRxPacketHead = gRxPacketTail = gRxPacketCount = 0;
+  portEXIT_CRITICAL(&gRxPacketMux);
+  return true;
 }
 
 // =============================================================================
@@ -8876,7 +9728,7 @@ static void g2TimeSyncTick() {
 // docs/G2_NATIVE_NOTIFICATION_PLAN.md §12. HW-verified 2026-07-21: this pair on
 // sid 0x04 is THE gate, and auth is NOT a prerequisite. Idempotent and harmless
 // (firmware acks both on sid 0x04). Sent once per connect, right arm only.
-static void g2AutoNotifPrimeIfReady(G2Temple& t) {
+static void __attribute__((unused)) g2AutoNotifPrimeIfReady(G2Temple& t) {
   if (t.side != 'R') return;          // notifications render off the right arm
   if (!t.connected || t.pluginDead) return;
 
@@ -8916,6 +9768,7 @@ static bool ensureTempleRuntime(G2Temple& t) {
                 t.side, (unsigned)t.rxCap);
       return false;
     }
+    g2RxReassemblyInit(&t.rxReassembly, t.rxBuf, RX_MESSAGE_CAP);
   }
   if (!t.writeMutex) {
     t.writeMutex = xSemaphoreCreateMutex();
@@ -8927,18 +9780,29 @@ static bool ensureTempleRuntime(G2Temple& t) {
   return true;
 }
 
-static void templeReset(G2Temple& t) {
-  if (t.rxBuf) { free(t.rxBuf); t.rxBuf = nullptr; }
+static bool templeReset(G2Temple& t) {
   // Drop link state FIRST so mutex-holding senders see connected=false at
-  // their gates, then exclude any sender still inside a write before freeing
-  // the client its writeChar lives in. Only after the client is gone is the
-  // mutex itself deleted (deleting it while a sender holds it is UB).
+  // their gates. Then take the global TX gate followed by the per-temple
+  // mutex, matching the normal send lock order. A sender that passed its
+  // connected check before this reset must cross one of those gates.
   t.connected = false;
   t.writeChar = nullptr;
   t.notifyChar = nullptr;
   t.audioNotifyChar = nullptr;
-  const bool lockedForTeardown = t.writeMutex &&
+  if (!bleCentralTxTake(2000)) {
+    DEBUG_G2F("[G2-%c] templeReset deferred: central TX gate busy; runtime retained",
+              t.side);
+    return false;
+  }
+  const bool lockedForTeardown = !t.writeMutex ||
       xSemaphoreTake(t.writeMutex, pdMS_TO_TICKS(2000)) == pdTRUE;
+  if (!lockedForTeardown) {
+    DEBUG_G2F("[G2-%c] templeReset deferred: write mutex busy; runtime retained",
+              t.side);
+    bleCentralTxGive();
+    return false;
+  }
+  if (t.rxBuf) { free(t.rxBuf); t.rxBuf = nullptr; }
   if (t.client) {
     if (t.client->isConnected()) t.client->disconnect();
     // ESP32 Arduino BLE leaks every client we don't free ourselves —
@@ -8971,8 +9835,9 @@ static void templeReset(G2Temple& t) {
                 "leaked by design", t.side);
     }
   }
-  if (lockedForTeardown) xSemaphoreGive(t.writeMutex);
+  if (t.writeMutex) xSemaphoreGive(t.writeMutex);
   if (t.writeMutex) { vSemaphoreDelete(t.writeMutex); t.writeMutex = nullptr; }
+  bleCentralTxGive();
   if (t.advertisedDevice) { delete t.advertisedDevice; t.advertisedDevice = nullptr; }
   t.containerReady = false;
   templeForgetConnParams(t);
@@ -8980,6 +9845,7 @@ static void templeReset(G2Temple& t) {
   // Fire HijackExit so the FSM ends in Idle; the apply path also clears
   // the lens-mirror container fields.
   g2LensSetHijackActive(false);
+  return true;
 }
 
 static bool connectTemple(G2Temple& t) {
@@ -8996,6 +9862,13 @@ static bool connectTemple(G2Temple& t) {
             t.side, t.deviceName.c_str(), t.deviceAddress.c_str(),
             (unsigned)ESP.getFreeHeap());
   if (!ensureTempleRuntime(t)) return false;
+  // The command-channel callback is intentionally copy-only. Its reused
+  // heartbeat/control owner and PSRAM packet slab must exist before notify
+  // subscription, otherwise connect-time settings pushes would be dropped.
+  if (!g2ControlWorkerEnsure()) {
+    DEBUG_G2F("[G2-%c] Control owner unavailable; refusing unsafe connect", t.side);
+    return false;
+  }
 
   // Fresh session — reset the TX-stuck counter so the watchdog doesn't
   // carry forward state from a previous wedged-then-disconnected
@@ -9159,6 +10032,8 @@ static bool connectTemple(G2Temple& t) {
             t.notifyChar->canIndicate() ? 1 : 0);
   if (t.notifyChar->canNotify()) {
     DEBUG_G2F("[G2-%c] Subscribing to notifications", t.side);
+    g2AdvanceGeneration(t);
+    g2RxReset(t);
     t.notifyChar->registerForNotify((t.side == 'L') ? notifyThunkL : notifyThunkR);
   } else {
     DEBUG_G2F("[G2-%c] WARN: notifyChar cannot notify — will not receive responses", t.side);
@@ -9215,10 +10090,9 @@ static bool connectTemple(G2Temple& t) {
   // arm goes through here (g2AutoTimeSyncIfReady is a no-op on left).
   g2AutoTimeSyncIfReady(t);
 
-  // Arm native EFS notifications: enable + whitelist-disable on sid 0x04.
-  // Right arm only; the gate that makes g2nativenotify / the notification
-  // pipeline actually render cards. See §12.10 of the plan doc.
-  g2AutoNotifPrimeIfReady(t);
+  // Preserve device notification policy on connect. `g2notifenable` is the
+  // explicit, authenticated action that enables native EFS cards; reconnect
+  // must not silently overwrite a setting established by the official app.
 
   DEBUG_G2F("[G2-%c] Ready (heap=%u internal=%u)", t.side,
             (unsigned)ESP.getFreeHeap(),
@@ -9255,9 +10129,15 @@ static void bleConnectInit();
 static void bleConnectShutdown();
 // Persistent G2 session worker (Health/Map/LLM/viewers/live pages).
 static void g2SessionEnsureWorker();
-static void g2SessionShutdown();
+static bool g2SessionShutdown();
 
 bool initG2Client() {
+  const bool initClaimed = g2ClientInitBegin();
+  if (!initClaimed) {
+    DEBUG_G2F("[G2] Client init rejected during teardown");
+    return false;
+  }
+  G2ClientInitClaim initClaim(initClaimed);
   if (gG2State && gG2State->initialized) return true;
   if (!gSettings.bleEnabled) {
     broadcastOutput("[G2] Bluetooth disabled - run 'bleenabled 1' first");
@@ -9389,26 +10269,59 @@ bool initG2Client() {
   return true;
 }
 
-void deinitG2Client() {
-  if (!gG2State) return;
-  g2Disconnect();
+bool deinitG2Client() {
+  g2ControlStartBlockAcquire();
+  const uint32_t initDeadline = millis() + 3000;
+  while (!g2ClientInitIdle()) {
+    if ((int32_t)(millis() - initDeadline) >= 0) {
+      DEBUG_G2F("[G2] deinit deferred: client initialization still active");
+      g2ControlStartBlockRelease();
+      return false;
+    }
+    vTaskDelay(pdMS_TO_TICKS(5));
+  }
+  if (!gG2State) {
+    g2ControlStartBlockRelease();
+    return true;
+  }
+  const bool disconnectSafe = g2Disconnect();
+  if (!disconnectSafe) {
+    DEBUG_G2F("[G2] deinit deferred: control/connect worker still owns temple runtime");
+    g2ControlStartBlockRelease();
+    return false;
+  }
   // The ring shares this client infra (worker, BLEDevice state). Close its
   // link and mark it for reap while the stack is still up — otherwise gRing
   // stays 'connected' against a link the coming teardown/controller cycling
   // kills, and the next ringconnect is refused with 'already connected'.
   g2RingDisconnect();
-  stopHeartbeatTimer();
-  templeReset(gL);
-  templeReset(gR);
-  // Group B: tear down the unified BLE-connect worker. Frees the 5 KB
-  // stack so subsequent BT-mode toggles don't pile up workers. A fresh
-  // initG2Client respawns it.
+  if (!bleConnectWorkerIdle()) {
+    DEBUG_G2F("[G2] deinit deferred: shared BLE-connect worker is active");
+    g2ControlStartBlockRelease();
+    return false;
+  }
+  if (!g2SessionShutdown()) {
+    DEBUG_G2F("[G2] deinit deferred: G2 session worker did not become idle");
+    g2ControlStartBlockRelease();
+    return false;
+  }
+  // No connect job may begin using the temple objects after this point.
   bleConnectShutdown();
-  g2SessionShutdown();
+  stopHeartbeatTimer();
+  const bool leftReset = templeReset(gL);
+  const bool rightReset = templeReset(gR);
+  if (!leftReset || !rightReset) {
+    DEBUG_G2F("[G2] deinit deferred: temple TX exclusion unavailable (L=%d R=%d)",
+              (int)leftReset, (int)rightReset);
+    g2ControlStartBlockRelease();
+    return false;
+  }
   free(gG2State);
   gG2State = nullptr;
   gScan = nullptr;
+  g2ControlStartBlockRelease();
   DEBUG_G2F("[G2] Client deinitialized");
+  return true;
 }
 
 bool isG2ClientInitialized() {
@@ -9468,7 +10381,10 @@ bool bleStackRecycleIfWedged(void) {
   snprintf(det, sizeof(det), "%u instant refusals", (unsigned)gBleWedgeStreak);
   systemEventPost(SYSEVT_BLE_STACK_RECYCLED, "wedged", det);
 
-  deinitG2Client();
+  if (!deinitG2Client()) {
+    BROADCAST_PRINTF("[BLE] Stack recycle aborted — G2 control owner did not stop");
+    return false;
+  }
   BLEDevice::deinit(false);
   vTaskDelay(pdMS_TO_TICKS(200));
   gBleWedgeStreak = 0;
@@ -9769,16 +10685,25 @@ static void bleConnectShutdown() {
 }
 
 bool g2SubmitBleConnect(const BleConnectJob& job) {
+  // Explicit G2 disconnect/deinit uses the same lifecycle block as the
+  // control owner. It also closes the fresh-submission race between an idle
+  // check and destruction of the shared connect worker/temple runtime.
+  if (!g2BleConnectSubmitBegin()) {
+    DEBUG_G2F("[G2] BLE-connect submission rejected during teardown");
+    return false;
+  }
   if (!gBleConnectQueue) {
     bleConnectInit();
   }
   if (!gBleConnectQueue) {
     DEBUG_G2F("[G2] g2SubmitBleConnect: worker unavailable");
+    g2BleConnectSubmitDone();
     return false;
   }
   BleConnectJob* heap = new (std::nothrow) BleConnectJob(job);
   if (!heap) {
     DEBUG_G2F("[G2] g2SubmitBleConnect: heap alloc failed");
+    g2BleConnectSubmitDone();
     return false;
   }
   // Short timeout so a wedged worker fails the producer fast rather than
@@ -9786,8 +10711,10 @@ bool g2SubmitBleConnect(const BleConnectJob& job) {
   if (xQueueSend(gBleConnectQueue, &heap, pdMS_TO_TICKS(50)) != pdTRUE) {
     DEBUG_G2F("[G2] g2SubmitBleConnect: queue full (kind=%d)", (int)job.kind);
     delete heap;
+    g2BleConnectSubmitDone();
     return false;
   }
+  g2BleConnectSubmitDone();
   return true;
 }
 
@@ -9875,7 +10802,8 @@ bool g2ConnectSaved() {
   return true;
 }
 
-void g2Disconnect() {
+bool g2Disconnect() {
+  g2ControlStartBlockAcquire();
   // If a connect is in flight, signal cancel + force-disconnect the BLE
   // links so the worker's blocking GATT calls unblock and the *Sync body
   // returns. The worker (shared across G2 + Ring) keeps running for
@@ -9900,10 +10828,17 @@ void g2Disconnect() {
     }
   }
 
+  stopHeartbeatTimer();
+  const bool controlStopped = g2ControlWorkerShutdown();
   disconnectTemple(gL);
   disconnectTemple(gR);
-  stopHeartbeatTimer();
   if (gG2State) gG2State->state = G2_STATE_IDLE;
+  g2ControlStartBlockRelease();
+  const bool connectIdle = !gConnectTaskActive && g2BleConnectSubmitIdle();
+  if (!connectIdle) {
+    DEBUG_G2F("[G2] disconnect incomplete: connect worker still owns temple runtime");
+  }
+  return controlStopped && connectIdle;
 }
 
 bool isG2Connected() {
@@ -13261,7 +14196,7 @@ static AuthContext         gLivePageOwnerCtx;
 // stop flags). Forward decls so live-list start can enqueue before the
 // full implementation appears in the file.
 static void g2SessionEnsureWorker();
-static void g2SessionShutdown();
+static bool g2SessionShutdown();
 static bool g2SessionSubmit(void (*run)(void*), void* payload,
                             void (*drop)(void*), const char* tag);
 static uint8_t* g2SessionScratchAcquire(size_t need);
@@ -13572,6 +14507,7 @@ static constexpr uint32_t    kG2SessionStackBytes = 10240;
 static QueueHandle_t     gSessionQueue   = nullptr;
 static TaskHandle_t      gSessionTaskH   = nullptr;
 static volatile bool     gSessionBusy    = false;
+static volatile bool     gSessionStop    = false;
 static uint8_t*          gSessionScratch = nullptr;
 static size_t            gSessionScratchCap = 0;
 
@@ -13639,6 +14575,13 @@ static void g2SessionWorkerLoop(void* /*arg*/) {
   for (;;) {
     G2SessionJob* job = nullptr;
     if (xQueueReceive(gSessionQueue, &job, portMAX_DELAY) != pdTRUE) continue;
+    if (gSessionStop) {
+      if (job) {
+        if (job->drop && job->payload) job->drop(job->payload);
+        delete job;
+      }
+      break;
+    }
     if (!job) continue;
     gSessionBusy = true;
     DEBUG_G2F("[G2] session: run '%s'", job->tag ? job->tag : "?");
@@ -13650,10 +14593,22 @@ static void g2SessionWorkerLoop(void* /*arg*/) {
     delete job;
     gSessionBusy = false;
   }
+  gSessionBusy = false;
+  portENTER_CRITICAL(&gControlLifecycleMux);
+  gSessionTaskH = nullptr;
+  portEXIT_CRITICAL(&gControlLifecycleMux);
+  DEBUG_G2F("[G2] session: worker exited cooperatively");
+  vTaskDelete(nullptr);
 }
 
 static void g2SessionEnsureWorker() {
-  if (gSessionQueue) return;
+  if (gSessionQueue && gSessionTaskH) return;
+  if (gSessionQueue && !gSessionTaskH) {
+    g2SessionDrainQueue();
+    vQueueDelete(gSessionQueue);
+    gSessionQueue = nullptr;
+  }
+  gSessionStop = false;
   gSessionQueue = xQueueCreate(kG2SessionQueueDepth, sizeof(G2SessionJob*));
   if (!gSessionQueue) {
     DEBUG_G2F("[G2] session: queue create FAILED");
@@ -13675,25 +14630,48 @@ static void g2SessionEnsureWorker() {
   }
 }
 
-static void g2SessionShutdown() {
-  if (!gSessionQueue && !gSessionTaskH) {
-    g2SessionScratchShutdown();
-    return;
+static bool g2SessionShutdown() {
+  const uint32_t submitDeadline = millis() + 500;
+  while (!g2SessionSubmitIdle()) {
+    if ((int32_t)(millis() - submitDeadline) >= 0) {
+      DEBUG_G2F("[G2] session: shutdown deferred; producer still submitting");
+      return false;
+    }
+    vTaskDelay(pdMS_TO_TICKS(5));
   }
+  if (!gSessionQueue && !gSessionTaskH) {
+    gSessionStop = false;
+    g2SessionScratchShutdown();
+    return true;
+  }
+  // Publish stop before touching the queue. A worker that has dequeued but
+  // not yet published busy will observe this and drop the claimed job rather
+  // than entering it. A worker already in a job follows the cooperative abort
+  // flags and then consumes the wake sentinel below.
+  gSessionStop = true;
   g2SessionRequestAbort();
-  g2SessionWaitIdle(3000);
   g2SessionDrainQueue();
+  if (gSessionQueue && gSessionTaskH) {
+    G2SessionJob* wake = nullptr;
+    (void)xQueueSend(gSessionQueue, &wake, 0);
+  }
+  const uint32_t exitDeadline = millis() + 3500;
+  while (gSessionTaskH && (int32_t)(millis() - exitDeadline) < 0) {
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
   if (gSessionTaskH) {
-    vTaskDelete(gSessionTaskH);
-    gSessionTaskH = nullptr;
+    DEBUG_G2F("[G2] session: shutdown deferred; worker did not acknowledge stop");
+    return false;
   }
   if (gSessionQueue) {
     vQueueDelete(gSessionQueue);
     gSessionQueue = nullptr;
   }
   gSessionBusy = false;
+  gSessionStop = false;
   g2SessionScratchShutdown();
   DEBUG_G2F("[G2] session: worker shut down");
+  return true;
 }
 
 // Enqueue a session job. Aborts any in-flight session first. On success the
@@ -13701,8 +14679,15 @@ static void g2SessionShutdown() {
 static bool g2SessionSubmit(void (*run)(void*), void* payload,
                             void (*drop)(void*), const char* tag) {
   if (!run) return false;
+  if (!g2SessionSubmitBegin()) {
+    DEBUG_G2F("[G2] session: submission rejected during teardown");
+    return false;
+  }
   g2SessionEnsureWorker();
-  if (!gSessionQueue) return false;
+  if (!gSessionQueue || !gSessionTaskH || gSessionStop) {
+    g2SessionSubmitDone();
+    return false;
+  }
 
   // Only abort when a session is actually running. Callers often arm
   // live-page active/stop flags before enqueue; RequestAbort must not
@@ -13713,6 +14698,7 @@ static bool g2SessionSubmit(void (*run)(void*), void* payload,
     if (gSessionBusy) {
       DEBUG_G2F("[G2] session: still busy after abort — refuse '%s'",
                 tag ? tag : "?");
+      g2SessionSubmitDone();
       return false;
     }
   }
@@ -13723,7 +14709,10 @@ static bool g2SessionSubmit(void (*run)(void*), void* payload,
   gLiveTextStopFlag = false;
 
   auto* job = new G2SessionJob;
-  if (!job) return false;
+  if (!job) {
+    g2SessionSubmitDone();
+    return false;
+  }
   job->run = run;
   job->drop = drop;
   job->payload = payload;
@@ -13732,9 +14721,11 @@ static bool g2SessionSubmit(void (*run)(void*), void* payload,
   if (xQueueSend(gSessionQueue, &job, 0) != pdTRUE) {
     DEBUG_G2F("[G2] session: queue full — drop '%s'", job->tag);
     delete job;
+    g2SessionSubmitDone();
     return false;
   }
   DEBUG_G2F("[G2] session: enqueued '%s'", job->tag);
+  g2SessionSubmitDone();
   return true;
 }
 
@@ -14816,11 +15807,20 @@ static const char* cmd_g2disconnect(const String& argsInput) {
   //                    pressure.
   String arg = argsInput; arg.trim(); arg.toLowerCase();
   const bool fullReset = (arg == "full");
+  if (fullReset) g2ControlStartBlockAcquire();
   blePeerNoteUserDisconnect(BLE_PEER_G2_GLASSES);
-  g2Disconnect();
+  const bool disconnectSafe = g2Disconnect();
   if (fullReset) {
-    templeReset(gL);
-    templeReset(gR);
+    if (!disconnectSafe) {
+      g2ControlStartBlockRelease();
+      return "Error: G2 disconnected, but a control/connect worker still owns temple runtime; cache retained";
+    }
+    const bool leftReset = templeReset(gL);
+    const bool rightReset = templeReset(gR);
+    g2ControlStartBlockRelease();
+    if (!leftReset || !rightReset) {
+      return "Error: G2 disconnected, but TX exclusion timed out; busy temple runtime retained";
+    }
     return "G2: disconnected (full reset — GATT cache freed, ~30 KB recovered)";
   }
   return "G2: disconnected (cache retained for fast reconnect; use 'closeg2 full' to free)";
@@ -14841,18 +15841,20 @@ static const char* cmd_g2info(const String& /*argsInput*/) {
   EXT_RAM_BSS_ATTR static char buf[512];
   snprintf(buf, sizeof(buf),
            "G2 device info:\n"
-           "  firmware: %s\n"
-           "  Left:  connected=%d mtu=%u batt=%d mac=%s name='%s'\n"
-           "  Right: connected=%d mtu=%u batt=%d mac=%s name='%s'\n"
-           "  hijack=%s settingsVerbose=%s\n"
+           "  Left:  connected=%d fw=%s mtu=%u batt=%d mac=%s name='%s'\n"
+           "  Right: connected=%d fw=%s mtu=%u batt=%d mac=%s name='%s'\n"
+           "  controlOwner=%s rxQueued=%u rxDrops=%u hijack=%s settingsVerbose=%s\n"
            "  (run `g2settings verbose on` to dump unidentified fields)",
-           gFwVersion[0] ? gFwVersion : "(unknown — waiting for firmware to push a settings frame)",
-           gL.connected ? 1 : 0, (unsigned)gL.mtu, (int)gBatteryL,
+           gL.connected ? 1 : 0, gL.firmwareVersion[0] ? gL.firmwareVersion : "?",
+           (unsigned)gL.mtu, (int)gBatteryL,
            gL.deviceAddress.length() ? gL.deviceAddress.c_str() : "--",
            gL.deviceName.length()    ? gL.deviceName.c_str()    : "--",
-           gR.connected ? 1 : 0, (unsigned)gR.mtu, (int)gBatteryR,
+           gR.connected ? 1 : 0, gR.firmwareVersion[0] ? gR.firmwareVersion : "?",
+           (unsigned)gR.mtu, (int)gBatteryR,
            gR.deviceAddress.length() ? gR.deviceAddress.c_str() : "--",
            gR.deviceName.length()    ? gR.deviceName.c_str()    : "--",
+           gBeatTaskHandle ? "up" : "down", (unsigned)gRxPacketCount,
+           (unsigned)gRxPacketDrops,
            g2FsmHijackActive() ? "active" : "off",
            gG2SettingsVerbose ? "on" : "off");
   return buf;
@@ -15230,8 +16232,9 @@ static const char* cmd_g2protostats(const String& argsInput) {
 // Builds a minimal `EvenHub`-style wrapper (`08 <cmd> 10 <magic>` plus
 // optional body), sends on the given sid with flag=0x20 (request). Use to
 // experimentally fire individual commands without writing C. Refuses
-// known-dangerous sids (0x80 dev_config; documented in the reference's
-// gotchas as having non-terminally bricked a pair during RE work).
+// mutation-capable sids that now have typed, firmware-gated senders, plus
+// 0x80 dev_config (documented in the reference's gotchas as having
+// non-terminally bricked a pair during RE work).
 static int parseHexNibble(char c) {
   if (c >= '0' && c <= '9') return c - '0';
   if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
@@ -15261,13 +16264,14 @@ static const char* cmd_g2probe(const String& argsInput) {
            "  Fires `08 <cmd> 10 <magic> [body]` on the given sid (flag=0x20).\n"
            "  Example: g2probe 07 9              -- EvenAI HEARTBEAT\n"
            "           g2probe 07 10 080110A001  -- EvenAI CONFIG voiceSwitch=0,streamSpeed=160\n"
-           "  sid=0x80 (dev_config) is blocked — known to brick.";
+           "  Mutation sids 01/03/04/09 and dev_config sid=80 are blocked; use typed commands.";
   }
   const uint8_t sid = (uint8_t)strtoul(ca.arg(0).c_str(), nullptr, 16);
   const uint32_t cmd = (uint32_t)ca.argInt(1, 0);
 
-  if (sid == 0x80) {
-    return "Error: G2: probe denied — sid=0x80 (dev_config) is in the brick blocklist.";
+  if (sid == 0x01 || sid == 0x03 || sid == 0x04 || sid == 0x09 ||
+      sid == 0x80) {
+    return "Error: G2: probe denied — mutation-capable sid; use the typed firmware/generation-gated command.";
   }
 
   uint8_t body[200];
@@ -15446,6 +16450,13 @@ static const G2GlassesKnob kG2GlassesKnobs[] = {
     "y <level>            display vertical position" },
   { "x",           G2_SETW_F_X_COORD,      G2_SETW_COORD_F_LEVEL,        0, 255, false, 4,
     "x <level>            display horizontal/depth position" },
+  { "headup",      G2_SETW_F_HEAD_UP,      G2_SETW_HEADUP_F_SWITCH,      0,   1, true,  7,
+    "headup <on|off>      head-up wake/display" },
+  // The wire value is u8 and the official app wrote 19 while the device
+  // restored 40. The app's full supported range is not established, so keep
+  // this explicitly labelled raw and never reconcile it automatically.
+  { "headangle",   G2_SETW_F_HEAD_UP,      G2_SETW_HEADUP_F_ANGLE,       0, 255, false, 8,
+    "headangle <0-255>    raw HeadUp angle (range unverified; no auto-apply)" },
   { "silent",      G2_SETW_F_SILENT,       G2_SETW_SILENT_F_SWITCH,      0,   1, true,  0,
     "silent <on|off>      silent / DND  (no read-back on 2.2.4.34)" },
   { "unitformat",  G2_SETW_F_UNIVERSE,     G2_SETW_UNIV_F_UNIT_FORMAT,   0, 255, false, 0,
@@ -15473,6 +16484,8 @@ static bool g2GlassesEchoValue(const G2SettingsEcho& echo,
     case 2:  *out = echo.brightness;     return true;
     case 3:  *out = echo.yCoord;         return true;
     case 4:  *out = echo.xCoord;         return true;
+    case 7:  *out = echo.headUpSwitch;   return true;
+    case 8:  *out = echo.headUpAngle;    return true;
     case 10: *out = echo.wearDetect;     return true;
     case 18: *out = echo.autoBrightness; return true;
     default: return false;
@@ -15513,6 +16526,13 @@ static void g2SettingsPrimeIfNeeded(G2Temple& arm) {
         (long)(cachedMs - now) >= 0) break;
   }
 }
+
+static bool g2SettingsFirmwareKnown(const char* version) {
+  return version &&
+      (strcmp(version, "2.2.4.34") == 0 || strcmp(version, "2.2.6.10") == 0);
+}
+
+static bool g2BothFirmwareExact(const char* expected);
 
 static const char* cmd_g2glasses(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
@@ -15627,6 +16647,27 @@ static const char* cmd_g2glasses(const String& argsInput) {
 
   g2SettingsPrimeIfNeeded(*arm);
 
+  if (!g2SettingsFirmwareKnown(arm->firmwareVersion)) {
+    snprintf(ret, sizeof(ret),
+             "Error: G2 glasses: firmware '%s' is not an enabled settings profile",
+             arm->firmwareVersion[0] ? arm->firmwareVersion : "unknown");
+    return ret;
+  }
+  const bool isHeadUpWrite = knob->innerField == G2_SETW_F_HEAD_UP;
+  uint32_t headUpGeneration = 0;
+  if (isHeadUpWrite && !g2BothFirmwareExact("2.2.6.10")) {
+    snprintf(ret, sizeof(ret),
+             "Error: G2 glasses: HeadUp writes require both temples on exact captured firmware 2.2.6.10 (L=%s R=%s)",
+             gL.firmwareVersion[0] ? gL.firmwareVersion : "unknown",
+             gR.firmwareVersion[0] ? gR.firmwareVersion : "unknown");
+    return ret;
+  }
+  if (isHeadUpWrite) {
+    portENTER_CRITICAL(&gRxPacketMux);
+    headUpGeneration = gR.connectionGeneration;
+    portEXIT_CRITICAL(&gRxPacketMux);
+  }
+
   uint8_t before = 0;
   G2SettingsEcho beforeEcho;
   const bool haveBeforeSnapshot =
@@ -15648,7 +16689,12 @@ static const char* cmd_g2glasses(const String& argsInput) {
              knob->name, (unsigned)knob->innerField, (unsigned)knob->leafField);
     return ret;
   }
-  if (!sendEnvelope(*arm, env, n)) return "Error: G2 glasses: send failed (mutex timeout?)";
+  const bool sent = isHeadUpWrite
+      ? sendEnvelopeExactGeneration(*arm, env, n, headUpGeneration,
+                                    "2.2.6.10")
+      : sendEnvelope(*arm, env, n);
+  if (!sent)
+    return "Error: G2 glasses: send failed or connection/firmware generation changed";
 
   // Wait for the mirror-back. 60 ms on hardware; 500 ms is generous slack.
   bool acked = false;
@@ -15694,28 +16740,182 @@ static const char* cmd_g2glasses(const String& argsInput) {
 // even parsed — matching our zero-RX/no-START_ERR symptom. Watch for an RX on
 // sid=0x04 (a NOTIFICATION_COMM_RSP ack there, where 0xC4/0xC5 was silent, would
 // confirm the gate). Then run `g2nativenotify <title>|<body>`.
+static bool g2BothFirmwareExact(const char* expected) {
+  if (!expected) return false;
+  portENTER_CRITICAL(&gRxPacketMux);
+  const bool match = gL.firmwareVersion[0] && gR.firmwareVersion[0] &&
+      strcmp(gL.firmwareVersion, expected) == 0 &&
+      strcmp(gR.firmwareVersion, expected) == 0;
+  portEXIT_CRITICAL(&gRxPacketMux);
+  return match;
+}
+
 static const char* cmd_g2notifenable(const String& /*argsInput*/) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   EXT_RAM_BSS_ATTR static char ret[160];
   if (!isG2Connected()) return "Error: G2: not connected";
   G2Temple* arm = (gR.connected && !gR.pluginDead) ? &gR : nullptr;
   if (!arm) return "Error: G2 notifenable: right arm not connected";
+  if (!g2BothFirmwareExact("2.2.4.342")) {
+    return "Error: G2 notifenable is hardware-verified only when both temples report exact firmware 2.2.4.342";
+  }
+  const uint32_t generation = gR.connectionGeneration;
 
   uint8_t env[64];
   size_t n = g2BuildNotifCtrlEnable(allocSeq(), G2_MAGIC_NOTIF_CTRL,
                                     env, sizeof(env));
-  if (n == 0 || !sendEnvelope(*arm, env, n))
+  if (n == 0 || !sendEnvelopeExactGeneration(*arm, env, n, generation,
+                                               "2.2.4.342"))
     return "Error: G2 notifenable: enable (NOTIF_CTRL) send failed";
   vTaskDelay(pdMS_TO_TICKS(60));
 
   n = g2BuildNotifWhitelistDisable(allocSeq(), G2_MAGIC_NOTIF_WHITELIST,
                                    env, sizeof(env));
-  if (n == 0 || !sendEnvelope(*arm, env, n))
+  if (n == 0 || !sendEnvelopeExactGeneration(*arm, env, n, generation,
+                                               "2.2.4.342"))
     return "Error: G2 notifenable: whitelist-disable send failed";
+  gNotifPrimedGenerationR = generation;
 
   snprintf(ret, sizeof(ret),
            "G2 notifenable: sid=0x04 NOTIF_CTRL(enable)+WHITELIST_CTRL(disable) sent to right — "
            "watch for sid=0x04 RX, then run g2nativenotify");
+  return ret;
+}
+
+static const char* g2ControlPhaseName(G2ControlPhase phase) {
+  switch (phase) {
+    case G2_CONTROL_IDLE: return "idle";
+    case G2_CONTROL_WAITING_LINK: return "waiting-link";
+    case G2_CONTROL_WAITING_FIRMWARE: return "waiting-firmware";
+    case G2_CONTROL_QUEUED: return "queued";
+    case G2_CONTROL_SENT: return "sent";
+    case G2_CONTROL_ACKED: return "acked";
+    case G2_CONTROL_VERIFIED: return "verified";
+    case G2_CONTROL_UNSUPPORTED: return "unsupported";
+    case G2_CONTROL_FAILED: return "failed";
+    default: return "?";
+  }
+}
+
+static const char* cmd_g2control(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  EXT_RAM_BSS_ATTR static char ret[420];
+  CommandArgs ca(argsInput);
+  if (ca.count() >= 1) {
+    String feature = ca.arg(0); feature.toLowerCase();
+    if (ca.count() < 2)
+      return "Error: Usage: g2control <headup|notifications> <preserve|off|on>";
+    String value = ca.arg(1); value.toLowerCase();
+    G2ControlDesired desired;
+    if (value == "preserve") desired = G2_CONTROL_PRESERVE;
+    else if (value == "off") desired = G2_CONTROL_OFF;
+    else if (value == "on") desired = G2_CONTROL_ON;
+    else return "Error: G2 control value must be preserve|off|on";
+
+    if (feature == "headup") {
+      setSetting(gSettings.g2HeadUpDesired, (uint8_t)desired);
+    } else if (feature == "notifications" || feature == "notification") {
+      setSetting(gSettings.g2NotificationsDesired, (uint8_t)desired);
+    } else {
+      return "Error: G2 control must be headup or notifications";
+    }
+    g2ControlMarkDirty();
+  }
+
+  G2ControlStatus status;
+  if (!g2ControlStatusSnapshot(&status)) return "Error: G2 control status unavailable";
+  snprintf(ret, sizeof(ret),
+           "G2 controls rev=%u fwL=%s fwR=%s gen=%u rx=%u/drop=%u\n"
+           "  HeadUp: desired=%s observed=%s phase=%s (%s)\n"
+           "  Notifications: desired=%s observed=unknown phase=%s (%s)",
+           (unsigned)status.revision,
+           status.firmwareLeft[0] ? status.firmwareLeft : "?",
+           status.firmwareRight[0] ? status.firmwareRight : "?",
+           (unsigned)status.rightGeneration,
+           (unsigned)status.rxQueued, (unsigned)status.rxDrops,
+           g2ControlDesiredName(status.headUp.desired),
+           status.headUp.observed == G2_CONTROL_OBS_ON ? "on" :
+             (status.headUp.observed == G2_CONTROL_OBS_OFF ? "off" : "unknown"),
+           g2ControlPhaseName(status.headUp.phase), status.headUp.detail,
+           g2ControlDesiredName(status.notifications.desired),
+           g2ControlPhaseName(status.notifications.phase),
+           status.notifications.detail);
+  return ret;
+}
+
+// Exact replay surface for the July 31 official-app capture. These are kept
+// separate from the generic protocol probe so only typed, bounded messages can
+// be sent. No command here is reconciled automatically; absence of readback is
+// reported honestly as written-but-unverified.
+static const char* cmd_g2nativeconfig(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  EXT_RAM_BSS_ATTR static char ret[224];
+  CommandArgs ca(argsInput);
+  String sub = ca.arg(0); sub.toLowerCase();
+  if (sub == "selftest") {
+    return g2ProtocolGoldenSelfTest()
+        ? "G2 native-config selftest: capture vectors and RX reassembly OK"
+        : "Error: G2 native-config selftest failed";
+  }
+  if (!gR.connected || gR.pluginDead)
+    return "Error: G2 native-config: right arm not connected";
+  if (!g2BothFirmwareExact("2.2.6.10")) {
+    snprintf(ret, sizeof(ret),
+             "Error: G2 native-config requires both temples on exact captured firmware 2.2.6.10 (L=%s R=%s)",
+             gL.firmwareVersion[0] ? gL.firmwareVersion : "unknown",
+             gR.firmwareVersion[0] ? gR.firmwareVersion : "unknown");
+    return ret;
+  }
+  const uint32_t nativeGeneration = gR.connectionGeneration;
+
+  uint8_t env[256];
+  size_t n = 0;
+  if (sub == "dashboard") {
+    String preset = ca.arg(1); preset.toLowerCase();
+    if (preset != "july31")
+      return "Error: Usage: g2nativeconfig dashboard july31";
+    n = g2BuildDashboardDisplayJuly31(allocSeq(), 240, env, sizeof(env));
+  } else if (sub == "notification") {
+    String preset = ca.arg(1); preset.toLowerCase();
+    if (preset != "july31")
+      return "Error: Usage: g2nativeconfig notification july31";
+    n = g2BuildNotificationControlJuly31(allocSeq(), G2_MAGIC_NOTIF_CTRL,
+                                         env, sizeof(env));
+  } else if (sub == "menu") {
+    if (ca.count() < 2)
+      return "Error: Usage: g2nativeconfig menu <id,id,...> (1..10 numeric IDs)";
+    String idsText = ca.arg(1);
+    uint32_t ids[10];
+    size_t count = 0;
+    int from = 0;
+    while (from < (int)idsText.length() && count < 10) {
+      int comma = idsText.indexOf(',', from);
+      String token = comma < 0 ? idsText.substring(from)
+                               : idsText.substring(from, comma);
+      token.trim();
+      bool numeric = token.length() > 0;
+      for (size_t i = 0; numeric && i < token.length(); i++) {
+        if (!isdigit((unsigned char)token[i])) numeric = false;
+      }
+      if (!numeric)
+        return "Error: G2 native-config menu IDs must be comma-separated unsigned integers";
+      ids[count++] = (uint32_t)strtoul(token.c_str(), nullptr, 10);
+      if (comma < 0) { from = (int)idsText.length(); break; }
+      from = comma + 1;
+    }
+    if (from < (int)idsText.length() || count == 0)
+      return "Error: G2 native-config menu supports 1..10 IDs";
+    n = g2BuildMenuMembership(allocSeq(), 241, ids, count, env, sizeof(env));
+  } else {
+    return "Error: Usage: g2nativeconfig <selftest|dashboard july31|notification july31|menu ids>";
+  }
+  if (n == 0) return "Error: G2 native-config builder rejected the request";
+  if (!sendEnvelopeExactGeneration(gR, env, n, nativeGeneration,
+                                   "2.2.6.10"))
+    return "Error: G2 native-config send failed";
+  snprintf(ret, sizeof(ret),
+           "G2 native-config %s written to right (fw=2.2.6.10, %u bytes); no readback available",
+           sub.c_str(), (unsigned)n);
   return ret;
 }
 
@@ -16290,6 +17490,10 @@ bool g2SendNativeNotificationAsync(const char* appId, const char* displayName,
                                    const char* title, const char* subtitle,
                                    const char* body) {
   if (!isG2Connected()) return false;
+  if (!gR.connected || gNotifPrimedGenerationR != gR.connectionGeneration) {
+    DEBUG_G2F("[G2] native-notify refused: notification policy is Preserve; run g2notifenable explicitly");
+    return false;
+  }
 
   NativeNotifSpec* spec = new (std::nothrow) NativeNotifSpec();
   if (!spec) return false;
@@ -16426,8 +17630,8 @@ static const char* cmd_g2init(const String& /*argsInput*/) {
 
 static const char* cmd_g2deinit(const String& /*argsInput*/) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  deinitG2Client();
-  return "G2: deinit ok";
+  return deinitG2Client() ? "G2: deinit ok"
+                          : "Error: G2 deinit deferred; control owner did not stop";
 }
 
 static const char* cmd_g2battery(const String& /*argsInput*/) {
@@ -16683,6 +17887,24 @@ static const char* cmd_g2map(const String& argsInput);
 // `extern` on both this table and its count below because System_Utils.cpp
 // refers to them as `extern const ...` — without it, C++ gives file-scope
 // const objects internal linkage and the link fails.
+static const SettingEntry g2DeviceSettingEntries[] = {
+  { "headUpDesired", SETTING_U8, &gSettings.g2HeadUpDesired,
+    0, 0, nullptr, 0, 2, "HeadUp desired", "0|Preserve,1|Off,2|On",
+    false, nullptr, nullptr, true },
+  { "notificationsDesired", SETTING_U8, &gSettings.g2NotificationsDesired,
+    0, 0, nullptr, 0, 2, "Native notifications desired",
+    "0|Preserve,1|Off (unsupported),2|On", false, nullptr, nullptr, true },
+};
+
+extern const SettingsModule g2DeviceSettingsModule = {
+  "g2Device",
+  "network.bluetooth.g2",
+  g2DeviceSettingEntries,
+  sizeof(g2DeviceSettingEntries) / sizeof(g2DeviceSettingEntries[0]),
+  nullptr,
+  "G2 device policies (Preserve by default; mutate through g2control)"
+};
+
 extern const CommandEntry g2Commands[] = {
   { "openg2",       "Connect to G2 glasses: openg2 [left|right|auto|saved]", true, cmd_g2connect, "Usage: openg2 [left|right|auto|saved]  (default auto; saved = peer MACs)" },
   { "closeg2",      "Disconnect G2 glasses [full=also free ~30KB GATT cache].", true, cmd_g2disconnect, "Usage: closeg2 [full]" },
@@ -16707,9 +17929,13 @@ extern const CommandEntry g2Commands[] = {
   { "g2micrec",     "G2 mic dump: g2micrec start [\"path\"] | stop | status — writes raw 205B LC3 packets to SD", false, cmd_g2micrec, "Usage: g2micrec start [\"path\"] | stop | status  (bare = status)" },
   { "g2micwav",     "G2 mic decode: g2micwav start [\"path\"] | stop | status — decodes LC3 → 16k mono WAV on SD", false, cmd_g2micwav, "Usage: g2micwav start [\"path\"] | stop | status  (bare = status)" },
   { "g2protostats", "Show G2 protocol stats per sid: g2protostats [verbose]",      false, cmd_g2protostats, "Usage: g2protostats [verbose]" },
-  { "g2probe",      "Fire arbitrary pb cmd: g2probe <sid_hex> <cmd_dec> [body_hex]", false, cmd_g2probe, "Usage: g2probe <sid_hex> <cmd_dec> [body_hex]  (sid=0x80 blocked)" },
+  { "g2probe",      "Fire arbitrary pb cmd on non-mutation sids: g2probe <sid_hex> <cmd_dec> [body_hex]", false, cmd_g2probe, "Usage: g2probe <sid_hex> <cmd_dec> [body_hex]  (sids 01/03/04/09/80 blocked)" },
   { "g2devcfg",     "Typed sid=0x80 sender: g2devcfg <heartbeat|auth|role|time|ring> [args]", false, cmd_g2devcfg, "Usage: g2devcfg <heartbeat|auth|role <both|right|left>|time [tzQuarterHours]|ring <mac> <name>>" },
   { "g2notifenable","Prime native notifications on sid 0x04 (enable + whitelist-disable) before g2nativenotify", true, cmd_g2notifenable, "Usage: g2notifenable  (sends NOTIF_CTRL enable + WHITELIST_CTRL disable to the right arm)" },
+  { "g2control",    "Persist/reconcile G2 device policy without overwriting official-app state by default", true, cmd_g2control,
+    "Usage: g2control [<headup|notifications> <preserve|off|on>]  (bare = status; work is queued to g2 control owner)" },
+  { "g2nativeconfig","Captured G2 config: selftest, HeadUp-adjacent dashboard/menu/notification replay", true, cmd_g2nativeconfig,
+    "Usage: g2nativeconfig <selftest|dashboard july31|notification july31|menu <id,id,...>>  (writes require exact fw 2.2.6.10)" },
   { "g2notify",     "Transient text (placeholder): g2notify [secs] <text>", false, cmd_g2notify, "Usage: g2notify [<seconds>] <text>  (seconds 1..599, default 5)" },
   { "g2nativenotify","Native EFS notification card (real overlay, admin): g2nativenotify selftest | <title>|<body>", true, cmd_g2nativenotify, "Usage: g2nativenotify selftest | <title>|<body> | <name>|<title>|<body>" },
   { "g2bmp",        "Display BMP: g2bmp </path.bmp> [brightness -100..100] [contrast -100..100] [holdSeconds 0..120]", false, cmd_g2bmp, "Usage: g2bmp </path/to/file.bmp> [brightness -100..100] [contrast -100..100] [holdSeconds 0..120]" },
@@ -16736,8 +17962,8 @@ extern const CommandEntry g2Commands[] = {
   { "g2envgap",     "Image inter-envelope gap override: g2envgap [<5..500>|auto] (bare = report)", true, cmd_g2envgap, "Usage: g2envgap [<5..500>|auto]  (runtime only; bare = report)" },
   { "g2connpri",    "Probe the BLE conn-interval admission boundary: g2connpri [<min> <max>|default] (bare = report)", true, cmd_g2connpri, "Usage: g2connpri [<min> <max>|default]  (ticks of 1.25 ms; runtime only; bare = report)" },
   { "g2battery",    "Query G2 battery % on connected temples",         false, cmd_g2battery },
-  { "g2glasses",    "Change glasses-device settings (brightness, wear detect, display position, DND, units)", true, cmd_g2glasses,
-    "Usage: g2glasses [show|refresh] | g2glasses <brightness|autobright|weardetect|x|y|silent|unitformat|distunit|timeformat|dateformat|tempunit> [value]" },
+  { "g2glasses",    "Change glasses-device settings (including capture-proven HeadUp on fw 2.2.6.10)", true, cmd_g2glasses,
+    "Usage: g2glasses [show|refresh] | g2glasses <brightness|autobright|weardetect|x|y|headup|headangle|silent|unitformat|distunit|timeformat|dateformat|tempunit> [value]" },
   { "g2verbose",    "Scan-verbose logging: g2verbose [on|off|toggle] (bare = report state)", false, cmd_g2verbose, "Usage: g2verbose [on|off|toggle]  (bare = report state)" },
   { "g2hijacktest", "Simulate a Blocks tap (status-page hijack)",      false, cmd_g2hijacktest },
   { "g2reopen",     "Re-open the hijacked Blocks app after an abnormal exit", false, cmd_g2reopen },
@@ -19969,13 +21195,11 @@ static void g2HealthPageWorker(void* arg) {
 
     uint8_t pollCursor = G2_RING_POLL_VITAL_COUNT;
     uint32_t lastPollMs = 0;
-    uint32_t lastDailyMs = 0;
     uint32_t menuGen = g2HealthMenuGeneration();
 
     auto buildHealthText = [&](char* buf, size_t cap) {
       if (g2HealthWantTextOnlyShape()) {
-        if (g2HealthInTrendsNav()) g2HealthBuildTrendsOverviewText(buf, cap);
-        else                      g2HealthBuildOverviewText(buf, cap);
+        g2HealthBuildTextOnly(buf, cap);
       } else {
         g2HealthBuildMetricText(buf, cap);
       }
@@ -20004,8 +21228,14 @@ static void g2HealthPageWorker(void* arg) {
           break;
         }
       }
-      // MAIN has 10 rows (0..9); Trends submenu has 5 (0..4).
-      for (uint32_t r = 1; r < 11; r++) if (taps & (1u << r)) g2HealthAction(r);
+      // The model owns both row sets. Keep tap dispatch aligned with the exact
+      // rows used for CREATE instead of baking MAIN/TRENDS counts here.
+      size_t activeRowCount = 0;
+      (void)g2HealthMenuRows(&activeRowCount);
+      if (activeRowCount > 32) activeRowCount = 32;  // tap bitmap width
+      for (uint32_t r = 1; r < activeRowCount; r++) {
+        if (taps & (1u << r)) g2HealthAction(r);
+      }
 
       if (g2HealthConsumePollRequest()) {
         if (g2RingIsConnected()) {
@@ -20023,12 +21253,11 @@ static void g2HealthPageWorker(void* arg) {
       g2HealthTick();
 
       const uint32_t now = millis();
-      // Pace daily queries (≥700 ms) — Trends Refresh queues HR→HRV→SpO2.
-      if (lastDailyMs == 0 || (long)(now - lastDailyMs) >= 700) {
-        uint8_t dailyCmd = 0;
-        if (g2HealthConsumeDailyRequest(&dailyCmd)) {
-          (void)g2RingQueryDaily(dailyCmd);
-          lastDailyMs = now;
+      bool forceHistory = false;
+      if (g2HealthConsumeHistoryRefreshRequest(&forceHistory)) {
+        if (!g2RingRequestHistoryRefresh(forceHistory)) {
+          DEBUG_G2F("[G2] health page: history %s refresh not queued",
+                    forceHistory ? "force" : "normal");
         }
       }
       if (pollCursor < G2_RING_POLL_VITAL_COUNT && g2RingIsConnected() &&
@@ -20037,7 +21266,7 @@ static void g2HealthPageWorker(void* arg) {
         pollCursor++;
         lastPollMs = now;
         if (pollCursor >= G2_RING_POLL_VITAL_COUNT) {
-          healthTrackNotePageRefresh();
+          healthLoggingNotePageRefresh();
           g2HealthNotePollFinished();
           lastReadout[0] = '\0';  // force UPDATE_TEXT → "Updated"
           DEBUG_G2F("[G2] health page: poll burst done");

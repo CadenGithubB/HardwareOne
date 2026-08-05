@@ -36,6 +36,7 @@
 #include "System_ESPNow_Wire.h"      // V3 wire schema (Phase 0 extraction)
 #include "System_ESPNow_Crypto.h"    // Phase 3.0: libsodium init / RNG / Ed25519 keygen
 #include "System_ESPNow_Files.h"    // Phase 4: concurrent file-transfer slot table
+#include "System_ESPNow_Router.h"   // multi-hop: route table, relay policy, relay metrics
 #include <sodium.h>                 // Phase 3.5 task #32: sodium_memcmp (constant-time)
 #include "System_ESPNow_Handlers_Crypto.h"  // Phase 3.3: KEY_EX handlers + initiator
 #include "System_ESPNow_Identity.h"  // Phase 3.0: long-term Ed25519 identity load/store
@@ -155,6 +156,18 @@ struct V4ReasmEntry {
   uint8_t  type;
   uint8_t  fragCount;
   uint8_t  received;
+  // Bytes per fragment, learned from the first NON-FINAL fragment to arrive
+  // rather than assumed to be V4_MAX_FRAGMENT_PAYLOAD. The stride is what turns
+  // fragIndex into a buffer offset, so hardcoding it silently corrupts any
+  // sender that chose a different chunk size — which is exactly what a routed
+  // sender must do (a RELAY_DATA envelope leaves only 146 payload bytes, not
+  // 200). 0 = not yet known.
+  uint16_t stride;
+  // Length of the FINAL fragment, captured when that fragment arrives. The
+  // reassembled size used to be computed from whichever fragment completed the
+  // set, which is only the last one when fragments arrive in order — out of
+  // order it reported a wrong length.
+  uint16_t lastFragLen;
   bool     have[V4_FRAG_MAX];
   uint8_t  buffer[V4_FRAG_MAX * V4_MAX_FRAGMENT_PAYLOAD];
   uint16_t bufferSize;
@@ -168,6 +181,8 @@ static void v4_reasm_reset(V4ReasmEntry& e) {
   e.msgId    = 0;
   e.received = 0;
   e.fragCount = 0;
+  e.stride   = 0;
+  e.lastFragLen = 0;
   memset(e.src,  0, 6);
   memset(e.have, 0, sizeof(e.have));
 }
@@ -261,6 +276,26 @@ static void resetBondSync();
 // bit zero. Fixing now since BROADCAST_AUTH would have the same fate.
 bool v4_send_frame(const uint8_t* dst, uint8_t type, uint16_t flags, uint32_t msgId,
                    const uint8_t* payload, uint16_t payloadLen, uint8_t ttl);
+// Multi-hop variant. `allowRoute=false` pins the frame to a single radio hop —
+// used when we are ALREADY building a relay envelope (the next hop is a direct
+// peer by construction, and routing again would recurse).
+static bool v4_send_frame_ex(const uint8_t* dst, uint8_t type, uint16_t flags, uint32_t msgId,
+                             const uint8_t* payload, uint16_t payloadLen, uint8_t ttl,
+                             bool allowRoute);
+
+// The single radio chokepoint. EVERY outbound frame passes through here, which
+// is what makes routing possible at all: before this existed, four call sites
+// hand-rolled frames straight into esp_now_send, so any "decide the path in one
+// place" scheme silently missed three quarters of the traffic.
+static bool v4_radio_emit(const uint8_t* dst, const uint8_t* frame, size_t len, bool allowRoute);
+// Wrap an already-built frame in a RELAY_DATA envelope and hand it to nextHop.
+static bool v4_relay_wrap_and_send(const uint8_t nextHop[6], const uint8_t finalDst[6],
+                                   const uint8_t* innerFrame, size_t innerLen,
+                                   uint8_t ttl, uint8_t hopsUsed, uint32_t msgId);
+// Positive list of opcodes that may travel inside an envelope (defined with the
+// forwarding engine, below). Consulted on BOTH sides: the sender will not wrap
+// an ineligible frame, and the receiver will not deliver one.
+static bool v4_routed_type_allowed(uint8_t type);
 
 // Forward declarations for V3 helper functions (non-static for external linkage)
 bool v4_broadcast(uint8_t type, uint16_t flags, uint32_t msgId, const uint8_t* payload, uint16_t payloadLen, uint8_t ttl);
@@ -683,6 +718,9 @@ static void loadMeshPeers() {
       peer->lastAckMs = 0;
       peer->heartbeatCount = 0;
       peer->ackCount = 0;
+      // Restored from persisted state, not heard from — a claim about direct
+      // audibility would be unfounded until a frame actually arrives.
+      peer->everHeardDirect = false;
       count++;
     }
 
@@ -1644,6 +1682,12 @@ static void broadcast_tracker_check_timeouts() {
 // ============================================================================
 bool v4_send_frame(const uint8_t* dst, uint8_t type, uint16_t flags, uint32_t msgId,
                    const uint8_t* payload, uint16_t payloadLen, uint8_t ttl) {
+  return v4_send_frame_ex(dst, type, flags, msgId, payload, payloadLen, ttl, /*allowRoute=*/true);
+}
+
+static bool v4_send_frame_ex(const uint8_t* dst, uint8_t type, uint16_t flags, uint32_t msgId,
+                             const uint8_t* payload, uint16_t payloadLen, uint8_t ttl,
+                             bool allowRoute) {
   if (!dst || (payloadLen > 0 && !payload)) return false;
   EspNowV4Header h = {};
   h.magic = (uint16_t)ESPNOW_V4_MAGIC; h.ver = ESPNOW_V4_VERSION; h.type = type; h.flags = flags;
@@ -1652,13 +1696,21 @@ bool v4_send_frame(const uint8_t* dst, uint8_t type, uint16_t flags, uint32_t ms
   h.ttl = ttl; h.fragIndex = 0; h.fragCount = 1;
   h.meshFingerprint = fingerprintForPeer(dst);  // Phase 2: scope frame to dst's mesh
 
+  // Assemble straight into the outgoing frame. This used to stage the payload
+  // (and its BROADCAST_AUTH tag) in a second 218-byte buffer before copying it
+  // into `frame` — 218 bytes of stack for one memcpy. It is worth removing
+  // rather than tolerating because multi-hop nests this function inside itself
+  // (a routed send wraps an already-built frame in an envelope and re-enters),
+  // so every byte here is spent twice on the deepest path.
+  uint8_t frame[250];
+  if (sizeof(h) + payloadLen > sizeof(frame)) return false;
+  if (payloadLen > 0) memcpy(frame + sizeof(h), payload, payloadLen);
+
   // Phase 3.5 task #32 — if the caller flagged BROADCAST_AUTH, append an
   // HMAC-SHA256 tag computed over (header[0..30] || payload) with the mesh
   // group key. Receivers verify and silently drop forgeries. Tag is part of
   // the on-wire payload (CRC covers it too, as a transport-level check).
-  uint8_t outBuf[ESPNOW_V4_MAX_PAYLOAD];
-  const uint8_t* finalPayload = payload;
-  uint16_t       finalPayloadLen = payloadLen;
+  uint16_t finalPayloadLen = payloadLen;
   if ((h.flags & ESPNOW_V4_FLAG_BROADCAST_AUTH) && h.meshFingerprint != 0) {
     const MeshDerivedKeys* mk = meshKeysFindByFingerprint(h.meshFingerprint);
     if (mk && mk->valid) {
@@ -1668,10 +1720,11 @@ bool v4_send_frame(const uint8_t* dst, uint8_t type, uint16_t flags, uint32_t ms
                payloadLen, ESPNOW_V4_BROADCAST_AUTH_TAG_LEN, ESPNOW_V4_MAX_PAYLOAD);
         return false;
       }
-      memcpy(outBuf, payload, payloadLen);
-      uint8_t hmac[32];
       // HMAC AAD = header bytes 0..29 (everything except crc16, mirroring
       // the SESSION_FRAME AAD convention). Pass header first, payload second.
+      // h.flags is already final here — the no-key branch below is the only
+      // thing that would change it, and it is mutually exclusive with this one.
+      uint8_t hmac[32];
       if (!espnowCryptoHmacSha256(hmac,
                                    mk->groupKey, 32,
                                    reinterpret_cast<const uint8_t*>(&h), 30,
@@ -1680,9 +1733,8 @@ bool v4_send_frame(const uint8_t* dst, uint8_t type, uint16_t flags, uint32_t ms
         ERROR_ESPNOWF("[V4_TX] BROADCAST_AUTH: HMAC compute failed");
         return false;
       }
-      memcpy(outBuf + payloadLen, hmac, ESPNOW_V4_BROADCAST_AUTH_TAG_LEN);
-      finalPayload    = outBuf;
-      finalPayloadLen = payloadLen + ESPNOW_V4_BROADCAST_AUTH_TAG_LEN;
+      memcpy(frame + sizeof(h) + payloadLen, hmac, ESPNOW_V4_BROADCAST_AUTH_TAG_LEN);
+      finalPayloadLen = (uint16_t)(payloadLen + ESPNOW_V4_BROADCAST_AUTH_TAG_LEN);
     } else {
       // No mesh group key available — strip the flag and send plaintext.
       // Happens during early-boot before mesh keys derive, or if the peer
@@ -1693,13 +1745,154 @@ bool v4_send_frame(const uint8_t* dst, uint8_t type, uint16_t flags, uint32_t ms
   }
 
   size_t totalLen = sizeof(EspNowV4Header) + finalPayloadLen;
-  if (totalLen > 250) return false;
-  uint8_t frame[250];
-  h.crc16 = finalPayloadLen > 0 ? v4_crc16_ccitt(finalPayload, finalPayloadLen) : 0;
+  if (totalLen > sizeof(frame)) return false;
+  // Body is already in place; stamp the CRC over it, then write the header last
+  // so the copy carries the final crc16.
+  h.crc16 = finalPayloadLen > 0 ? v4_crc16_ccitt(frame + sizeof(h), finalPayloadLen) : 0;
   memcpy(frame, &h, sizeof(h));
-  if (finalPayloadLen > 0) memcpy(frame + sizeof(h), finalPayload, finalPayloadLen);
   captureEspNowFrame("TX", dst, 0, frame, (int)totalLen);
-  return esp_now_send(dst, frame, totalLen) == ESP_OK;
+  return v4_radio_emit(dst, frame, totalLen, allowRoute);
+}
+
+// ============================================================================
+// THE RADIO CHOKEPOINT — direct send vs. routed send
+// ============================================================================
+//
+// Decision order, and why each step is where it is:
+//
+//   1. Broadcast address        → always direct. Flooding is the relay
+//                                 mechanism for broadcast traffic; wrapping it
+//                                 would defeat the point.
+//   2. Live direct radio peer   → direct. "Live" means recent RX activity, not
+//                                 merely "in the peer table" — a peer we paired
+//                                 with months ago and cannot currently hear is
+//                                 exactly the case routing exists to solve.
+//   3. Known route (>= 2 hops)  → wrap in RELAY_DATA, send to the next hop.
+//   4. Anything else            → direct, best effort. Covers the freshly
+//                                 paired peer we have no telemetry for yet; the
+//                                 radio will tell us soon enough.
+//
+// Step 2 before step 3 is deliberate and it is also the fail-BACK path: as soon
+// as a peer we had been relaying to becomes audible again, its hops == 1 route
+// reappears and traffic returns to the direct link on the very next send.
+static bool v4_radio_emit(const uint8_t* dst, const uint8_t* frame, size_t len, bool allowRoute) {
+  if (!dst || !frame || len == 0) return false;
+
+  static const uint8_t kBcast[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+  // A short buffer can't be a V4 frame, so it can't be wrapped either (the
+  // envelope reads the inner msgId out of its header). Send it as-is.
+  if (!allowRoute || len < sizeof(EspNowV4Header) || memcmp(dst, kBcast, 6) == 0) {
+    return esp_now_send(dst, frame, len) == ESP_OK;
+  }
+
+  // Only relay when we know we CANNOT reach the destination directly. Reading
+  // health here (rather than trusting esp_now_is_peer_exist alone) is what
+  // distinguishes "paired and audible" from "paired and out of range".
+  const MeshPeerHealth* ph = getMeshPeerHealth(dst, false);
+  const bool directAlive =
+      esp_now_is_peer_exist(dst) && ph && ph->isActive && ph->everHeardDirect &&
+      ((uint32_t)((uint32_t)millis() - ph->lastRxActivityMs) < MESH_PEER_TIMEOUT_MS);
+  if (directAlive) {
+    return esp_now_send(dst, frame, len) == ESP_OK;
+  }
+
+  // Refuse to wrap an opcode that the far end would refuse to unwrap. Deciding
+  // it here — one type check, on the frame we already have in hand — is what
+  // keeps every individual send site out of the routing business. Link-local
+  // opcodes (HEARTBEAT, PEER_LIST, PAIR_*, TOPO_*) land here and simply go out
+  // direct, which is the honest thing: "I am your neighbour" is a claim that
+  // must not survive a relay hop.
+  if (!v4_routed_type_allowed(((const EspNowV4Header*)frame)->type)) {
+    return esp_now_send(dst, frame, len) == ESP_OK;
+  }
+
+  // Note: NOT gated on gSettings.meshRelay. That setting governs carrying OTHER
+  // nodes' frames; a node that opts out of being a relay still uses the mesh for
+  // its own traffic. The "don't multi-hop my own sends either" knob is
+  // meshTTL = 1, which the envelope builder rejects.
+  uint8_t nextHop[6];
+  uint8_t hops = 0;
+  // hops <= meshTTL is the reachability test, not just a sanity check. An
+  // envelope is forwarded while its ttl is >= 2 and decremented each time, so a
+  // budget of T carries a frame exactly T radio hops. Launching a 4-hop frame
+  // with a budget of 3 would strand it at the third node — a silent black hole.
+  // Refusing here instead lets the send fail where the caller can see it.
+  if (meshRouterLookup(dst, nextHop, &hops) && hops >= 2 && !isSelfMac(nextHop) &&
+      hops <= gSettings.meshTTL) {
+    if (v4_relay_wrap_and_send(nextHop, dst, frame, len,
+                               gSettings.meshTTL, /*hopsUsed=*/0,
+                               ((const EspNowV4Header*)frame)->msgId)) {
+      meshRelayMetrics().routedTx++;
+      return true;
+    }
+    // Envelope refused the frame (too large, or no group key). Fall through to
+    // the direct attempt so the failure is the radio's honest one, not ours.
+  }
+
+  return esp_now_send(dst, frame, len) == ESP_OK;
+}
+
+// Build the RELAY_DATA envelope: {finalDst, hopsUsed} + the byte-identical
+// inner frame, sent to nextHop as a broadcast-authed unicast.
+//
+// The inner frame is copied VERBATIM — header included. That is the whole
+// trick: the destination re-dispatches those exact bytes with a synthetic
+// radio source, so every structure that keys on the sender MAC (session
+// lookup, reassembly, ACK matching) sees what it would have seen on a direct
+// link, with no per-handler awareness of relaying.
+static bool v4_relay_wrap_and_send(const uint8_t nextHop[6], const uint8_t finalDst[6],
+                                   const uint8_t* innerFrame, size_t innerLen,
+                                   uint8_t ttl, uint8_t hopsUsed, uint32_t msgId) {
+  if (!nextHop || !finalDst || !innerFrame) return false;
+  if (innerLen < sizeof(EspNowV4Header) || innerLen > ESPNOW_V4_RELAY_MAX_INNER_FRAME) {
+    meshRelayMetrics().routedDropTooBig++;
+    DEBUGF(DEBUG_ESPNOW_MESH,
+           "[MESH_RELAY] frame of %u B will not fit an envelope (max %u) — not routed",
+           (unsigned)innerLen, (unsigned)ESPNOW_V4_RELAY_MAX_INNER_FRAME);
+    return false;
+  }
+  // ttl >= 1, not >= 2. The budget here is what the EMITTED frame carries, and
+  // the last hop legitimately carries ttl=1: its receiver is the final
+  // destination, which delivers rather than forwards and so never consults ttl.
+  // Requiring 2 here silently killed every route whose length exactly equalled
+  // the hop budget — the boundary case, and the common one.
+  // The "may I forward this?" test (ttl >= 2) lives in the two callers, which
+  // is the correct place for it: they know whether they are originating or
+  // relaying.
+  if (ttl < 1) { meshRelayMetrics().routedDropTtl++; return false; }
+
+  // The envelope MUST carry a valid group-key HMAC: the receiving RELAY_DATA row
+  // is REQ_AUTHENTICATED, and v4_send_frame_ex silently strips BROADCAST_AUTH
+  // when it can't find a key rather than failing. Without this check that turns
+  // into a frame that goes out on the air and is dropped at the far end with no
+  // trace anywhere — check up front so the failure is visible in the counters.
+  const uint16_t fp = fingerprintForPeer(nextHop);
+  const MeshDerivedKeys* mk = fp ? meshKeysFindByFingerprint(fp) : nullptr;
+  if (!mk || !mk->valid) {
+    meshRelayMetrics().routedDropPolicy++;
+    DEBUGF(DEBUG_ESPNOW_MESH,
+           "[MESH_ROUTED] no group key for next hop's mesh (fp=0x%04X) — cannot route",
+           (unsigned)fp);
+    return false;
+  }
+
+  // 186 B of stack. Deliberately NOT a shared static: unlike the flood buffer
+  // below, this runs on whichever task originated the send as well as on
+  // espnow_task when forwarding, so a single buffer could be torn between them.
+  uint8_t buf[sizeof(V4PayloadRelayData) + ESPNOW_V4_RELAY_MAX_INNER_FRAME];
+  V4PayloadRelayData* env = reinterpret_cast<V4PayloadRelayData*>(buf);
+  memcpy(env->finalDst, finalDst, 6);
+  env->hopsUsed = hopsUsed;
+  env->reserved = 0;
+  memcpy(buf + sizeof(V4PayloadRelayData), innerFrame, innerLen);
+
+  // allowRoute=false: nextHop is a direct peer by construction (the route table
+  // only ever names live neighbours as next hops), and a second routing pass
+  // here would be unbounded recursion.
+  return v4_send_frame_ex(nextHop, ESPNOW_V4_TYPE_RELAY_DATA,
+                          ESPNOW_V4_FLAG_BROADCAST_AUTH, msgId,
+                          buf, (uint16_t)(sizeof(V4PayloadRelayData) + innerLen),
+                          ttl, /*allowRoute=*/false);
 }
 
 // Phase 3.5 step 1 — session-wrapped unicast send. Mirrors v4_send_frame's
@@ -1770,7 +1963,9 @@ bool v4_send_session_wrapped(const uint8_t dst[6], uint8_t type, uint16_t baseFl
   UBaseType_t hwmAEAD = uxTaskGetStackHighWaterMark(nullptr);
   size_t frameLen = sizeof(EspNowV4Header) + plaintextLen + 16;
   captureEspNowFrame("TX", dst, 0, frame, (int)frameLen);
-  esp_err_t rc = esp_now_send(dst, frame, frameLen);
+  // Routed when dst is only reachable via a relay — a sealed frame survives the
+  // trip unchanged, so a far peer's session works exactly like a near one's.
+  esp_err_t rc = v4_radio_emit(dst, frame, frameLen, /*allowRoute=*/true) ? ESP_OK : ESP_FAIL;
   UBaseType_t hwmSend = uxTaskGetStackHighWaterMark(nullptr);
   DEBUGF(DEBUG_ESPNOW_CORE,
          "[TXDEPTH] task=%s type=%u len=%u free_words: pre=%u postAEAD=%u postSend=%u",
@@ -1946,7 +2141,12 @@ bool v4_broadcast(uint8_t type, uint16_t flags, uint32_t msgId, const uint8_t* p
   // Send to all active mesh peers
   for (int i = 0; i < gMeshPeerSlots; i++) {
     if (gMeshPeers[i].isActive && !isSelfMac(gMeshPeers[i].mac)) {
-      bool sent = v4_send_frame(gMeshPeers[i].mac, type, flagsAuthed, msgId, payload, payloadLen, ttl);
+      // allowRoute=false: a broadcast reaches distant nodes by FLOODING, not by
+      // routing. Wrapping the same message in an envelope for every peer we
+      // can't currently hear would put a second copy on the air that the
+      // recipient's dedup then throws away.
+      bool sent = v4_send_frame_ex(gMeshPeers[i].mac, type, flagsAuthed, msgId,
+                                   payload, payloadLen, ttl, /*allowRoute=*/false);
       if (sent) {
         anySuccess = true;
         sentCount++;
@@ -2046,8 +2246,11 @@ bool v4_broadcast_category(uint8_t type, uint16_t flags, uint32_t msgId,
       }
     }
     attemptedCount++;
-    bool sent = v4_send_frame(gMeshPeers[i].mac, type, flagsAuthed, msgId,
-                              payload, payloadLen, ttl);
+    // allowRoute=false — same reasoning as v4_broadcast: broadcast reach is the
+    // flood's job. (This path also carries HEARTBEAT, which must never travel
+    // beyond one hop under any circumstances.)
+    bool sent = v4_send_frame_ex(gMeshPeers[i].mac, type, flagsAuthed, msgId,
+                                 payload, payloadLen, ttl, /*allowRoute=*/false);
     if (sent) {
       anySuccess = true;
       sentCount++;
@@ -2093,8 +2296,16 @@ bool v4_send_encrypted_chunked(const uint8_t dst[6], uint8_t type, uint16_t base
                                uint8_t ttl) {
   if (!dst || (payloadLen > 0 && !payload)) return false;
 
+  // Routed destinations pay for the envelope out of every fragment, so both the
+  // single-frame cutoff and the chunk size shrink. The RECEIVER needs no notion
+  // of this — it learns the stride from the fragments themselves (see
+  // V4ReasmEntry::stride).
+  const bool routed = meshRouterIsRouted(dst);
+  const uint16_t singleFrameCap = routed ? (uint16_t)ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT
+                                         : (uint16_t)ESPNOW_V4_MAX_PLAINTEXT;
+
   // Single-frame fast path — no need to fragment.
-  if (payloadLen <= ESPNOW_V4_MAX_PLAINTEXT) {
+  if (payloadLen <= singleFrameCap) {
     char err[64] = {0};
     return v4_send_session_wrapped(dst, type, baseFlags, msgId,
                                    payload, payloadLen, ttl, err, sizeof(err));
@@ -2108,11 +2319,17 @@ bool v4_send_encrypted_chunked(const uint8_t dst[6], uint8_t type, uint16_t base
   // silently failed to rebuild it. Guard the REAL cap and fail loudly instead —
   // same rule as the CMD_RESULT_MAX ceiling on the delivery side.
   //
-  // Important: fragSize must equal V4_MAX_FRAGMENT_PAYLOAD (200) — the
-  // existing reassembler uses that stride to compute buffer offsets.
-  // Plaintext+encrypted-chunked are interleaved through the same buffer pool,
-  // and the wire cipher is fragSize + 16 (AEAD tag) = 216 ≤ MAX_PAYLOAD (218).
-  uint16_t fragSize = V4_MAX_FRAGMENT_PAYLOAD;
+  // Chunk size. Direct: 200 B, so the wire cipher is 200 + 16 (AEAD tag) = 216
+  // ≤ MAX_PAYLOAD (218). Routed: 130 B, so the sealed 146-byte frame plus its
+  // 32-byte header fits the 178-byte envelope budget. The receiver derives the
+  // stride from the fragments, so the two can share a reassembly buffer pool.
+  //
+  // Consequence worth knowing: at 130 B a transfer tops out at
+  // V4_FRAG_MAX × 130 ≈ 2.7 KB instead of 4.2 KB. The fragCount guard below
+  // catches an over-budget routed send and fails loudly rather than putting a
+  // message on the wire the far end can never rebuild.
+  uint16_t fragSize = routed ? (uint16_t)ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT
+                             : (uint16_t)V4_MAX_FRAGMENT_PAYLOAD;
   uint32_t fragCountU = (payloadLen + fragSize - 1) / fragSize;
   if (fragCountU > V4_FRAG_MAX) {
     WARN_ESPNOWF("[V4_ENC_FRAG_TX] payload too large: %u bytes needs %u frags (receiver reassembles at most %u = %u B)",
@@ -2197,7 +2414,7 @@ bool v4_send_encrypted_chunked(const uint8_t dst[6], uint8_t type, uint16_t base
 
       size_t totalLen = sizeof(EspNowV4Header) + fragLen + ESPNOW_V4_AEAD_TAG_LEN;
       captureEspNowFrame("TX", dst, 0, frame, (int)totalLen);
-      esp_err_t rc = esp_now_send(dst, frame, totalLen);
+      esp_err_t rc = v4_radio_emit(dst, frame, totalLen, /*allowRoute=*/true) ? ESP_OK : ESP_FAIL;
       if (rc != ESP_OK) {
         WARN_ESPNOWF("[V4_ENC_FRAG_TX] esp_now_send rc=%d for frag %u/%u (retry %u)",
                      (int)rc, fragIdx + 1, fragCount, retry);
@@ -2279,7 +2496,16 @@ bool v4_send_payload_smart(const uint8_t* dst, uint8_t type, uint16_t flags,
                            uint8_t ttl) {
   if (!dst) return false;
 
-  if (payloadLen <= ESPNOW_V4_MAX_PLAINTEXT) {
+  // A routed destination has a smaller single-frame budget than a direct one:
+  // the sealed frame has to fit inside a RELAY_DATA envelope (130 B of
+  // plaintext, not 202). Choosing the threshold here rather than letting the
+  // single-frame path build an unroutable frame is what keeps a far peer's
+  // sends fragmenting correctly instead of silently exceeding the envelope.
+  const uint16_t singleFrameCap = meshRouterIsRouted(dst)
+                                      ? (uint16_t)ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT
+                                      : (uint16_t)ESPNOW_V4_MAX_PLAINTEXT;
+
+  if (payloadLen <= singleFrameCap) {
     char status[64] = {0};
     bool ok = v4_send_encrypted_or_queue(dst, type, flags, msgId, payload, payloadLen,
                                           ttl, status, sizeof(status));
@@ -2371,7 +2597,11 @@ static bool v4_send_frag_ack(const uint8_t* dst, uint32_t msgId, uint8_t fragInd
 
   DEBUGF(DEBUG_ESPNOW_CORE, "[V4_FRAG_ACK_TX] Calling esp_now_send: headerLen=%u", (unsigned)sizeof(h));
   captureEspNowFrame("TX", dst, 0, (const uint8_t*)&h, (int)sizeof(h));
-  esp_err_t result = esp_now_send(dst, (uint8_t*)&h, sizeof(h));
+  // ttl=1 above is the INNER frame's budget ("never flood an ACK"). When dst is
+  // a routed peer the envelope carries its own hop budget, so per-fragment ACKs
+  // still make it home over multiple hops.
+  esp_err_t result = v4_radio_emit(dst, (const uint8_t*)&h, sizeof(h), /*allowRoute=*/true)
+                         ? ESP_OK : ESP_FAIL;
   
   if (result == ESP_OK) {
     DEBUGF(DEBUG_ESPNOW_CORE, "[V4_FRAG_ACK_TX] ✓ Fragment ACK sent successfully");
@@ -2393,9 +2623,12 @@ static bool v4_broadcast_time_sync(uint32_t epochTime, int32_t timeOffset) {
   payload.epochTime = epochTime;
   payload.timeOffset = timeOffset;
   uint32_t msgId = generateMessageId();
-  DEBUGF(DEBUG_ESPNOW_MESH, "[V4_TX_TIME_SYNC] Broadcasting (BROADCAST_AUTH) msgId=%lu", (unsigned long)msgId);
+  DEBUGF(DEBUG_ESPNOW_MESH, "[V4_TX_TIME_SYNC] Broadcasting (BROADCAST_AUTH) msgId=%lu ttl=%u",
+         (unsigned long)msgId, (unsigned)gSettings.meshTTL);
+  // Live meshTTL, not a literal: this is one of the two flood-relayed opcodes,
+  // so the setting is what decides how far a clock update travels.
   return v4_broadcast(ESPNOW_V4_TYPE_TIME_SYNC, 0, msgId,
-                      (const uint8_t*)&payload, sizeof(payload), 2);
+                      (const uint8_t*)&payload, sizeof(payload), gSettings.meshTTL);
 }
 
 static bool v4_send_topo_request(const uint8_t* dst, uint32_t reqId) {
@@ -2713,9 +2946,13 @@ bool v4_broadcast_text(const char* text, uint16_t textLen) {
   if (!text || textLen == 0 || textLen > ESPNOW_V4_MAX_PAYLOAD) return false;
   
   uint32_t msgId = generateMessageId();
-  DEBUGF(DEBUG_ESPNOW_CORE, "[V4_BROADCAST_TEXT] Broadcasting msgId=%lu len=%u", (unsigned long)msgId, textLen);
-  
-  bool result = v4_broadcast(ESPNOW_V4_TYPE_TEXT, 0, msgId, (const uint8_t*)text, textLen, 2);
+  DEBUGF(DEBUG_ESPNOW_CORE, "[V4_BROADCAST_TEXT] Broadcasting msgId=%lu len=%u ttl=%u",
+         (unsigned long)msgId, textLen, (unsigned)gSettings.meshTTL);
+
+  // Live meshTTL — a broadcast text is the headline multi-hop case: it should
+  // reach every node in the mesh, not just those in earshot of the sender.
+  bool result = v4_broadcast(ESPNOW_V4_TYPE_TEXT, 0, msgId, (const uint8_t*)text, textLen,
+                             gSettings.meshTTL);
   DEBUGF(DEBUG_ESPNOW_CORE, "[V4_BROADCAST_TEXT] Result: %s", result ? "SUCCESS" : "FAILED");
   return result;
 }
@@ -2829,6 +3066,23 @@ static void v4h_time_sync(const V4RxCtx& ctx) {
            (unsigned long)ts->epochTime, (long)ts->timeOffset);
     DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_TIME_SYNC] Previous time state: synced=%s offset=%lld",
            gTimeIsSynced ? "YES" : "NO", (long long)gTimeOffset);
+    // Multi-hop widens the replay window for this opcode. A TIME_SYNC used to
+    // be heard once, from a neighbour, within one hop-time; flooding means the
+    // same authenticated frame legitimately arrives seconds later having crossed
+    // the mesh — and a captured one can be re-injected by any group-key holder.
+    // Once we already have a clock, refuse a correction large enough to matter
+    // (an hour): real drift between mesh members is seconds, so anything bigger
+    // is a stale or replayed frame, and applying it would silently corrupt
+    // timestamps on logs and health data. The first sync of a dark boot is
+    // exempt — that is the case with nothing to protect and everything to gain.
+    const int64_t delta = (int64_t)ts->timeOffset - gTimeOffset;
+    const int64_t kMaxCorrectionMs = 3600LL * 1000LL;
+    if (gTimeIsSynced && (delta > kMaxCorrectionMs || delta < -kMaxCorrectionMs)) {
+      WARN_ESPNOWF("[V4_RX_TIME_SYNC] rejected implausible correction of %lld ms from %s "
+                   "(already synced) — stale or replayed frame",
+                   (long long)delta, ctx.deviceName);
+      return;
+    }
     gTimeOffset = (int64_t)ts->timeOffset;
     gTimeIsSynced = true;
     DEBUGF(DEBUG_ESPNOW_MESH, "[V4_RX_TIME_SYNC] Time sync applied successfully");
@@ -2838,8 +3092,40 @@ static void v4h_time_sync(const V4RxCtx& ctx) {
   }
 }
 
+// Is this MAC a node we have some independent reason to know about — a peer we
+// paired with, or one the route table learned from a neighbour's advert?
+//
+// Used to bound what a relayed frame can create on our side. Holding the mesh
+// group key lets a member mint frames with ANY `origin` they like, and the
+// message-history table allocates a slot per distinct source MAC. Without this
+// gate, one misbehaving (or compromised) member could fill every history slot
+// with invented senders and push real conversations out. Requiring the origin to
+// already exist in devices[] or the route table caps the damage at the size of
+// those tables, both of which are themselves bounded and self-expiring.
+static bool espnowOriginIsKnown(const uint8_t* mac) {
+  if (!mac) return false;
+  if (gEspNow) {
+    for (int i = 0; i < gEspNow->deviceCount; i++) {
+      if (memcmp(gEspNow->devices[i].mac, mac, 6) == 0) return true;
+    }
+  }
+  return meshRouterLookup(mac, nullptr, nullptr);
+}
+
 // TEXT — deferred to task via ring buffer (gEspNow->textQueue).
 static void v4h_text(const V4RxCtx& ctx) {
+  // Relayed text (origin != the neighbour that handed it to us) is only accepted
+  // from a node we know of. Directly-received text is exempt: the radio itself
+  // vouches that the sender is present, and that is the path first contact
+  // legitimately arrives on.
+  if (memcmp(ctx.h->origin, ctx.recv_info->src_addr, 6) != 0 &&
+      !espnowOriginIsKnown(ctx.h->origin)) {
+    DEBUGF(DEBUG_ESPNOW_ROUTER,
+           "[V4_RX] relayed TEXT from unknown origin %02X:%02X:%02X:%02X:%02X:%02X — dropped",
+           ctx.h->origin[0], ctx.h->origin[1], ctx.h->origin[2],
+           ctx.h->origin[3], ctx.h->origin[4], ctx.h->origin[5]);
+    return;
+  }
   // Bound the printf by both 80 chars AND the actual payloadLen — the
   // SESSION_FRAME unwrap path delivers a non-null-terminated buffer, so a
   // plain `%.80s` would scan past the valid bytes into adjacent stack memory.
@@ -2861,8 +3147,23 @@ static void v4h_text(const V4RxCtx& ctx) {
       size_t copyLen = (ctx.payloadLen < sizeof(slot.content) - 1) ? ctx.payloadLen : sizeof(slot.content) - 1;
       memcpy(slot.content, ctx.payload, copyLen);
       slot.content[copyLen] = '\0';
-      memcpy(slot.srcMac, ctx.recv_info->src_addr, 6);
-      strncpy(slot.deviceName, ctx.deviceName, sizeof(slot.deviceName) - 1);
+      // Attribute to the ORIGIN, not the radio sender. On a direct link these
+      // are the same MAC; on a flooded multi-hop message the radio sender is
+      // whichever neighbour last forwarded it, and filing the message under
+      // that node would credit the relay with writing it.
+      memcpy(slot.srcMac, ctx.h->origin, 6);
+      // ctx.deviceName was resolved from the radio sender for the same reason,
+      // so re-resolve from the origin. Falls back to the MAC string when the
+      // originator is a node we have no name for (normal for a 2-hop peer we
+      // have never paired with).
+      {
+        String originName = getEspNowDeviceName(ctx.h->origin);
+        if (originName.length() > 0) {
+          strncpy(slot.deviceName, originName.c_str(), sizeof(slot.deviceName) - 1);
+        } else {
+          formatMacAddressBuf(ctx.h->origin, slot.deviceName, sizeof(slot.deviceName));
+        }
+      }
       slot.deviceName[sizeof(slot.deviceName) - 1] = '\0';
       // Reflect real transit confidentiality: a SESSION_FRAME-unwrapped TEXT
       // is encrypted; broadcast-auth / plaintext TEXT is not. (Was reading the
@@ -4581,6 +4882,376 @@ static void v4h_file_cancel(const V4RxCtx& ctx) {
   logFileTransferEvent((uint8_t*)ctx.recv_info->src_addr, macStr.c_str(), "(remote)", MSG_FILE_SEND_FAILED);
 }
 
+// ============================================================================
+// MULTI-HOP FORWARDING
+// ============================================================================
+//
+// Two engines, deliberately kept apart:
+//
+//   * FLOOD (v4_relay_maybe_forward) carries broadcast-class traffic. It needs
+//     no routing state — gV4Dedup keys on `origin`, so a message is acted on
+//     once per node however many copies arrive.
+//   * ROUTED (v4h_relay_data) carries unicast traffic hop-by-hop using the
+//     table in System_ESPNow_Router.
+//
+// Both re-tag with the mesh GROUP key, which is the security crux: ttl lives
+// inside the integrity envelope (header bytes 0..29 are HMAC'd), so a forwarder
+// must be able to re-sign after decrementing it. Every mesh member holds the
+// group key, so that is legal and costs no trust. What a forwarder can NEVER do
+// is touch a SESSION_FRAME's contents — those keys are pairwise. Routed frames
+// are therefore carried opaquely, and end-to-end confidentiality is unaffected
+// by how many nodes a frame passes through.
+
+// Forward declaration — v4h_relay_data re-enters the dispatcher for the frame
+// it just unwrapped (see the "synthetic source" note below).
+static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uint8_t* data, int len);
+
+// True while we are delivering a relayed frame to ourselves. Read by
+// noteMeshPeerRxActivity, which must NOT count such a frame as evidence that
+// the originator is directly audible — it isn't, that is why it came via a
+// relay. Without this, one relayed TEXT would mark the far peer "alive direct"
+// and every subsequent send to it would go straight into the void.
+// Single-flag (not a counter) because nested relay delivery is refused.
+bool gEspNowInRelayDelivery = false;
+
+// Flood-forward budget. A fixed 10-second window rather than a true sliding one:
+// the worst case is 2× the nominal rate across a window boundary, which at 16
+// forwards / 10 s is still under 3% airtime — not worth the bookkeeping to
+// tighten. Compile-time on purpose: a user-tunable flood rate is a foot-gun
+// (the failure mode is a mesh-wide storm, and it fires on someone else's node).
+#define ESPNOW_FLOOD_RATE_MAX_PER_WINDOW  16
+#define ESPNOW_FLOOD_RATE_WINDOW_MS       10000UL
+static uint32_t gFloodWindowStartMs = 0;
+static uint8_t  gFloodWindowCount   = 0;
+
+static bool v4_flood_rate_ok() {
+  const uint32_t now = (uint32_t)millis();
+  if ((uint32_t)(now - gFloodWindowStartMs) >= ESPNOW_FLOOD_RATE_WINDOW_MS) {
+    gFloodWindowStartMs = now;
+    gFloodWindowCount   = 0;
+  }
+  if (gFloodWindowCount >= ESPNOW_FLOOD_RATE_MAX_PER_WINDOW) return false;
+  gFloodWindowCount++;
+  return true;
+}
+
+// Which opcodes may be FLOODED. A positive list, so a new opcode is never
+// relay-eligible by accident — the failure mode of an allow-by-default list is
+// a mesh-wide amplification of something that assumed one hop.
+//
+// HEARTBEAT is absent by definition (it means "I am your direct neighbour").
+// PAIR_* is absent by doctrine: pairing is proximity-scoped consent, and a
+// relayed pairing request would let someone three rooms away join your mesh.
+// SENSOR_STATUS is absent because its handler attributes readings to the RADIO
+// sender — a relayed one would be filed as the relay's own data.
+static inline bool v4_flood_type_allowed(uint8_t type) {
+  return type == ESPNOW_V4_TYPE_TEXT || type == ESPNOW_V4_TYPE_TIME_SYNC;
+}
+
+// Which opcodes may travel inside a RELAY_DATA envelope. Also a positive list.
+// The handshake opcodes are the important ones: they are what let two nodes
+// that have never heard each other directly complete KEY_EX + SESSION through
+// an intermediary, after which their traffic is end-to-end sealed and the relay
+// is carrying ciphertext it cannot read.
+static bool v4_routed_type_allowed(uint8_t type) {
+  switch (type) {
+    case ESPNOW_V4_TYPE_ACK:
+    case ESPNOW_V4_TYPE_KEY_EX_HELLO:
+    case ESPNOW_V4_TYPE_KEY_EX_REPLY:
+    case ESPNOW_V4_TYPE_KEY_EX_CONFIRM:
+    case ESPNOW_V4_TYPE_SESSION_OPEN:
+    case ESPNOW_V4_TYPE_SESSION_CONFIRM:
+    case ESPNOW_V4_TYPE_SESSION_REKEY:
+    case ESPNOW_V4_TYPE_BOOT:
+    case ESPNOW_V4_TYPE_TIME_SYNC:
+    case ESPNOW_V4_TYPE_CMD:
+    case ESPNOW_V4_TYPE_CMD_RESP:
+    case ESPNOW_V4_TYPE_TEXT:
+    case ESPNOW_V4_TYPE_METADATA_REQ:
+    case ESPNOW_V4_TYPE_METADATA_RESP:
+    case ESPNOW_V4_TYPE_METADATA_PUSH:
+    case ESPNOW_V4_TYPE_USER_SYNC:
+    case ESPNOW_V4_TYPE_SUBSCRIBE_UPDATE:
+    case ESPNOW_V4_TYPE_SENSOR_REQ:
+    case ESPNOW_V4_TYPE_SENSOR_ENVELOPE:
+      return true;
+    default:
+      // Everything else is excluded for a reason worth stating once:
+      //   RELAY_DATA          nesting (depth attack + double-wrap overhead)
+      //   HEARTBEAT/PEER_LIST link-local by definition
+      //   PAIR_*              proximity-scoped consent
+      //   TOPO_*              describes direct neighbours only
+      //   FILE_*/FS_*/STREAM  multi-frame and pacing-sensitive; the reassembler
+      //                       stores fragments at a fixed 200-byte stride that a
+      //                       146-byte routed frame would corrupt
+      //   BOND_*              the remote-exec channel — stays proximity-scoped
+      return false;
+  }
+}
+
+// Fan a rebuilt frame out to every same-mesh neighbour except the ones that
+// would be pointless or harmful: ourselves, whoever just handed it to us, and
+// the node that originated it.
+static void v4_relay_fanout(const uint8_t* frame, size_t len,
+                            const uint8_t* arrivedFrom, const uint8_t* origin,
+                            uint16_t meshFingerprint) {
+  if (!gMeshPeers) return;   // reachable before init completes; slots would be 0 anyway
+  for (int i = 0; i < gMeshPeerSlots; i++) {
+    if (!gMeshPeers[i].isActive) continue;
+    const uint8_t* mac = gMeshPeers[i].mac;
+    if (isSelfMac(mac)) continue;
+    if (arrivedFrom && memcmp(mac, arrivedFrom, 6) == 0) continue;
+    if (origin && memcmp(mac, origin, 6) == 0) continue;
+    // Health slots are created for any MAC we hear from, including nodes we
+    // have never added to the radio's peer table. Sending to those just returns
+    // ESP_ERR_ESPNOW_NOT_FOUND and would inflate the failure counter with
+    // something that was never going to work.
+    if (!esp_now_is_peer_exist(mac)) continue;
+    // Never leak one mesh's traffic into another. The tag we just computed is
+    // only valid for meshFingerprint's group key anyway, so a cross-mesh peer
+    // would drop it — but sending it at all is wasted airtime and an
+    // information leak about who is talking.
+    if (fingerprintForPeer(mac) != meshFingerprint) continue;
+    if (esp_now_send(mac, frame, len) == ESP_OK) meshRelayMetrics().floodFanout++;
+    else                                         meshRelayMetrics().floodFanoutFails++;
+  }
+}
+
+// Flood one verified, non-duplicate broadcast frame onward.
+//
+// `payload` / `payloadLen` must be the CORE payload — the BROADCAST_AUTH tag
+// already stripped by the caller — because we recompute the tag over the
+// decremented header.
+//
+// Called from v4_try_handle_incoming AFTER the dedup insert, so we only ever
+// amplify a frame we are seeing for the first time, and only one that already
+// proved it holds our group key. Neither forgeries nor duplicates are relayed.
+static void v4_relay_maybe_forward(const esp_now_recv_info* recv_info,
+                                   const EspNowV4Header* h,
+                                   const uint8_t* payload, uint16_t payloadLen,
+                                   bool wasBroadcastAuthed) {
+  MeshRelayMetrics& m = meshRelayMetrics();
+
+  if (!gSettings.meshRelay)            return;
+  if (!wasBroadcastAuthed)             return;   // only group-key-authenticated traffic
+  if (!v4_flood_type_allowed(h->type)) return;
+  if (h->fragCount > 1)                return;   // a flooded fragment can never reassemble
+  if (h->msgId == 0)                   return;   // msgId 0 bypasses dedup → no loop suppression
+  if (isSelfMac(h->origin))            return;   // handled earlier, belt and braces
+
+  if (h->ttl < 2) { m.floodDropTtl++; return; }
+
+  const MeshDerivedKeys* mk = meshKeysFindByFingerprint(h->meshFingerprint);
+  if (!mk || !mk->valid) { m.floodDropNoKey++; return; }
+
+  if (payloadLen + ESPNOW_V4_BROADCAST_AUTH_TAG_LEN + sizeof(EspNowV4Header) > 250) return;
+  if (!v4_flood_rate_ok()) {
+    m.floodDropRate++;
+    DEBUGF(DEBUG_ESPNOW_MESH, "[MESH_FLOOD] rate limit hit — not forwarding type=%u msgId=%lu",
+           (unsigned)h->type, (unsigned long)h->msgId);
+    return;
+  }
+
+  // Rebuild: same frame, one less hop, freshly signed.
+  //
+  // PSRAM static, not stack. This runs inside v4_try_handle_incoming on
+  // espnow_task, whose stack the codebase has deliberately been trimming (the
+  // AEAD scratch above was moved off-stack for the same reason), and the call
+  // chain here is already deep. Safe as a shared buffer for exactly the same
+  // reason plainBuf is: the RX ring is drained sequentially on one task, so two
+  // invocations never overlap.
+  EXT_RAM_BSS_ATTR static uint8_t out[250];
+  EspNowV4Header* oh = reinterpret_cast<EspNowV4Header*>(out);
+  *oh = *h;                                    // origin, msgId, type, fingerprint all verbatim
+  oh->ttl = (uint8_t)(h->ttl - 1);
+  // We are not the endpoint, so we must not invite ACKs addressed to us for
+  // someone else's message.
+  oh->flags = (uint16_t)(oh->flags & ~ESPNOW_V4_FLAG_ACK_REQ);
+  memcpy(out + sizeof(EspNowV4Header), payload, payloadLen);
+
+  uint8_t tag[32];
+  // AAD is header bytes 0..29 — everything but crc16 — matching both the TX
+  // builder and the RX verifier. Compute BEFORE stamping crc16, which sits at
+  // offset 30 and is outside the MACed region.
+  if (!espnowCryptoHmacSha256(tag, mk->groupKey, 32,
+                              reinterpret_cast<const uint8_t*>(oh), 30,
+                              payload, payloadLen, nullptr, 0)) {
+    ERROR_ESPNOWF("[MESH_FLOOD] re-tag failed — dropping forward");
+    return;
+  }
+  memcpy(out + sizeof(EspNowV4Header) + payloadLen, tag, ESPNOW_V4_BROADCAST_AUTH_TAG_LEN);
+
+  const uint16_t outPayloadLen = (uint16_t)(payloadLen + ESPNOW_V4_BROADCAST_AUTH_TAG_LEN);
+  oh->crc16 = v4_crc16_ccitt(out + sizeof(EspNowV4Header), outPayloadLen);
+  const size_t outLen = sizeof(EspNowV4Header) + outPayloadLen;
+
+  m.floodForwards++;
+  DEBUGF(DEBUG_ESPNOW_MESH,
+         "[MESH_FLOOD] forwarding type=%u msgId=%lu origin=%02X:%02X:%02X:%02X:%02X:%02X ttl %u->%u",
+         (unsigned)h->type, (unsigned long)h->msgId,
+         h->origin[0], h->origin[1], h->origin[2], h->origin[3], h->origin[4], h->origin[5],
+         (unsigned)h->ttl, (unsigned)oh->ttl);
+  v4_relay_fanout(out, outLen, recv_info->src_addr, h->origin, h->meshFingerprint);
+}
+
+// RELAY_DATA — routed unicast. Either the envelope is for us (unwrap and
+// re-dispatch) or we are an intermediate hop (re-wrap toward the next one).
+static void v4h_relay_data(const V4RxCtx& ctx) {
+  MeshRelayMetrics& m = meshRelayMetrics();
+
+  // The dispatch row demands REQ_AUTHENTICATED, so reaching here means the
+  // outer BROADCAST_AUTH tag verified under our group key.
+  if (ctx.payloadLen < sizeof(V4PayloadRelayData) + sizeof(EspNowV4Header)) {
+    m.routedDropPolicy++;
+    return;
+  }
+  const V4PayloadRelayData* env = reinterpret_cast<const V4PayloadRelayData*>(ctx.payload);
+  const uint8_t* inner   = ctx.payload + sizeof(V4PayloadRelayData);
+  const uint16_t innerLen = (uint16_t)(ctx.payloadLen - sizeof(V4PayloadRelayData));
+  const EspNowV4Header* ih = reinterpret_cast<const EspNowV4Header*>(inner);
+
+  if (ih->magic != (uint16_t)ESPNOW_V4_MAGIC || ih->ver != ESPNOW_V4_VERSION ||
+      ih->headerLen != sizeof(EspNowV4Header) || !v4_routed_type_allowed(ih->type)) {
+    m.routedDropPolicy++;
+    DEBUGF(DEBUG_ESPNOW_MESH, "[MESH_ROUTED] refused inner type=%u (policy or malformed)",
+           (unsigned)ih->type);
+    return;
+  }
+
+  if (isSelfMac(env->finalDst)) {
+    // === Delivery: synthetic-source re-entry ===
+    //
+    // Hand the inner frame back to the top of the RX path with recv_info
+    // rewritten so the radio source reads as the frame's true ORIGIN. Session
+    // lookup, the isPaired gate, reassembly, ACK matching and every handler
+    // that captures a source MAC all key on recv_info->src_addr — rewriting it
+    // once here fixes all of them at a stroke, and no per-opcode handler needs
+    // to know that relaying exists.
+    //
+    // Refuse to nest: a relayed frame may not itself trigger another relay
+    // delivery. Bounds the recursion at one level and keeps the single static
+    // AEAD scratch buffer in v4_try_handle_incoming safe.
+    if (gEspNowInRelayDelivery) { m.routedDropPolicy++; return; }
+
+    uint8_t synthSrc[6];
+    memcpy(synthSrc, ih->origin, 6);
+    uint8_t selfMac[6];
+    esp_wifi_get_mac(WIFI_IF_STA, selfMac);
+
+    // RSSI is deliberately the "no sample" sentinel, not the last hop's signal:
+    // we have measured nothing about the originator's link, and reporting the
+    // relay's RSSI as theirs would corrupt the very metric routing runs on.
+    wifi_pkt_rx_ctrl_t rxCtrl = {};
+    rxCtrl.rssi = -128;
+    esp_now_recv_info_t ri = {};
+    ri.src_addr = synthSrc;
+    ri.des_addr = selfMac;
+    ri.rx_ctrl  = &rxCtrl;
+
+    m.routedDelivered++;
+    DEBUGF(DEBUG_ESPNOW_MESH,
+           "[MESH_ROUTED] delivering inner type=%u from %02X:%02X:%02X:%02X:%02X:%02X (%u hops)",
+           (unsigned)ih->type, synthSrc[0], synthSrc[1], synthSrc[2],
+           synthSrc[3], synthSrc[4], synthSrc[5], (unsigned)(env->hopsUsed + 1));
+
+    gEspNowInRelayDelivery = true;
+    v4_try_handle_incoming(&ri, inner, (int)innerLen);
+    gEspNowInRelayDelivery = false;
+    return;
+  }
+
+  // === Forwarding ===
+  if (!gSettings.meshRelay)                        { m.routedDropPolicy++; return; }
+  if (ctx.h->ttl < 2)                              { m.routedDropTtl++;    return; }
+  if (env->hopsUsed + 1 >= MESH_ROUTE_MAX_HOPS)    { m.routedDropTtl++;    return; }
+
+  uint8_t nextHop[6];
+  uint8_t hops = 0;
+  if (!meshRouterLookup(env->finalDst, nextHop, &hops)) {
+    m.routedDropNoRoute++;
+    DEBUGF(DEBUG_ESPNOW_MESH, "[MESH_ROUTED] no route to %02X:%02X:%02X:%02X:%02X:%02X — dropping",
+           env->finalDst[0], env->finalDst[1], env->finalDst[2],
+           env->finalDst[3], env->finalDst[4], env->finalDst[5]);
+    return;
+  }
+  // Never bounce a frame straight back where it came from. Split horizon makes
+  // this rare, but a table mid-reconvergence can briefly point backwards and
+  // that is exactly when a two-node ping-pong would start.
+  if (memcmp(nextHop, ctx.recv_info->src_addr, 6) == 0) {
+    m.routedDropNoRoute++;
+    return;
+  }
+
+  if (v4_relay_wrap_and_send(nextHop, env->finalDst, inner, innerLen,
+                             (uint8_t)(ctx.h->ttl - 1), (uint8_t)(env->hopsUsed + 1),
+                             ctx.h->msgId)) {
+    m.routedForwards++;
+  }
+}
+
+// PEER_LIST — a neighbour's route table. Pure input to the distance-vector
+// algorithm; it mutates no device state beyond routing, so a bad advert can
+// cost us reachability but nothing else.
+static void v4h_peer_list(const V4RxCtx& ctx) {
+  if (ctx.payloadLen < sizeof(V4PayloadPeerListHeader)) return;
+  // An advert describes the SENDER's own view, so it is only meaningful from a
+  // direct neighbour. It is sent ttl=1 and is on neither relay whitelist, so a
+  // relayed one should be impossible — reject it anyway rather than attribute
+  // someone else's topology to whoever handed it to us.
+  if (memcmp(ctx.h->origin, ctx.recv_info->src_addr, 6) != 0) return;
+
+  const V4PayloadPeerListHeader* hdr =
+      reinterpret_cast<const V4PayloadPeerListHeader*>(ctx.payload);
+  if (hdr->entryCount > ESPNOW_V4_PEER_LIST_MAX_ENTRIES) return;
+  const uint16_t need = (uint16_t)(sizeof(V4PayloadPeerListHeader) +
+                                   (uint16_t)hdr->entryCount * sizeof(V4PayloadPeerListEntry));
+  if (ctx.payloadLen < need) return;
+
+  const V4PayloadPeerListEntry* entries =
+      reinterpret_cast<const V4PayloadPeerListEntry*>(ctx.payload + sizeof(V4PayloadPeerListHeader));
+  const int8_t linkMetric = ctx.recv_info->rx_ctrl ? (int8_t)ctx.recv_info->rx_ctrl->rssi
+                                                   : (int8_t)MESH_ROUTE_METRIC_UNKNOWN;
+  meshRouterIngestAdvert(ctx.recv_info->src_addr, linkMetric, entries, hdr->entryCount);
+}
+
+// Broadcast our route table to every neighbour, one tailored frame each.
+// Per-neighbour rather than a single FF broadcast because that is what makes
+// split horizon possible — and it costs nothing extra, since v4_broadcast
+// already unicasts to each peer in turn.
+static void v4_send_route_adverts() {
+  if (!gEspNow || !gEspNow->initialized) return;
+
+  uint8_t buf[sizeof(V4PayloadPeerListHeader) +
+              ESPNOW_V4_PEER_LIST_MAX_ENTRIES * sizeof(V4PayloadPeerListEntry)];
+  V4PayloadPeerListHeader* hdr = reinterpret_cast<V4PayloadPeerListHeader*>(buf);
+  V4PayloadPeerListEntry*  ent =
+      reinterpret_cast<V4PayloadPeerListEntry*>(buf + sizeof(V4PayloadPeerListHeader));
+
+  static uint8_t advertSeq = 0;
+  advertSeq++;
+
+  for (int i = 0; i < gMeshPeerSlots; i++) {
+    if (!gMeshPeers[i].isActive || isSelfMac(gMeshPeers[i].mac)) continue;
+    const uint8_t* peer = gMeshPeers[i].mac;
+    if (!esp_now_is_peer_exist(peer)) continue;  // heard from, but not addressable
+
+    const uint8_t n = meshRouterBuildAdvert(peer, ent, ESPNOW_V4_PEER_LIST_MAX_ENTRIES);
+    hdr->entryCount = n;
+    hdr->role       = gSettings.meshRole;
+    hdr->seq        = advertSeq;
+    hdr->reserved   = 0;
+
+    const uint16_t len = (uint16_t)(sizeof(V4PayloadPeerListHeader) +
+                                    (uint16_t)n * sizeof(V4PayloadPeerListEntry));
+    // ttl=1 ALWAYS, and allowRoute=false: an advert that travelled would claim
+    // the forwarder can reach things it cannot.
+    if (v4_send_frame_ex(peer, ESPNOW_V4_TYPE_PEER_LIST, ESPNOW_V4_FLAG_BROADCAST_AUTH,
+                         generateMessageId(), buf, len, /*ttl=*/1, /*allowRoute=*/false)) {
+      meshRelayMetrics().advertsSent++;
+    }
+  }
+}
+
 // ----- Handler table ------
 // Stable static table; lookup is linear over a small N. Adding a new opcode
 // is one row here plus its v4h_<name> function. No edits to the dispatcher.
@@ -4958,6 +5629,13 @@ static const V4OpcodeEntry kV4HandlerTable[] = {
   { ESPNOW_V4_TYPE_TIME_SYNC,        V4_OPC_FLAG_REQ_AUTHENTICATED,                        v4h_time_sync         },
   { ESPNOW_V4_TYPE_TEXT,             0,                                                    v4h_text              },
   { ESPNOW_V4_TYPE_BOOT,             0,                                                    v4h_text              },  // boot/online notice; v4h_text tags it MSG_SYSTEM_EVENT
+  // Multi-hop transport. Both carry the mesh group-key HMAC and NOTHING else —
+  // REQ_AUTHENTICATED is the whole trust check, and it is the right one: holding
+  // the group key is exactly what "member of this mesh" means. NOT REQ_PAIRED,
+  // because a relay routinely forwards for two nodes it has never paired with
+  // (and a routed KEY_EX is how a far pair gets paired in the first place).
+  { ESPNOW_V4_TYPE_RELAY_DATA,       V4_OPC_FLAG_REQ_AUTHENTICATED,                        v4h_relay_data        },
+  { ESPNOW_V4_TYPE_PEER_LIST,        V4_OPC_FLAG_REQ_AUTHENTICATED,                        v4h_peer_list         },
   { ESPNOW_V4_TYPE_CMD,              V4_OPC_FLAG_REQ_PAIRED,                               v4h_cmd               },
   { ESPNOW_V4_TYPE_CMD_RESP,         0,                                                    v4h_cmd_resp          },
   { ESPNOW_V4_TYPE_HEARTBEAT,        0,                                                    v4h_heartbeat         },
@@ -5156,6 +5834,28 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
     return true;
   }
 
+  // === Own-origin guard (multi-hop) ===
+  // Every TX builder stamps origin with the local MAC, so a frame arriving with
+  // our own origin is either one of ours that a relay handed back, or a forgery.
+  // Dedup will not catch the first case — we never insert our own outbound
+  // msgIds — so without this a flooded broadcast would come home and be shown
+  // to the user as an incoming message from themselves.
+  if (isSelfMac(h->origin)) {
+    meshRelayMetrics().selfOriginDrops++;
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_RX] dropped frame with our own origin (type=%u msgId=%lu)",
+           (unsigned)h->type, (unsigned long)h->msgId);
+    return true;
+  }
+
+  // "Flooding is actually working" gauge: a flooded frame keeps its original
+  // origin while the radio sender becomes the last relay, so any divergence
+  // means at least one forward happened. (Routed arrivals do NOT show up here —
+  // the synthetic re-entry sets src_addr to the true origin precisely so that
+  // downstream code sees a normal direct frame. Their gauge is routedDelivered.)
+  if (memcmp(h->origin, recv_info->src_addr, 6) != 0) {
+    meshRelayMetrics().rxViaRelay++;
+  }
+
   // 2026-05-19: track whether the frame proves any cryptographic key
   // possession. Set true below when either BROADCAST_AUTH HMAC verifies OR
   // SESSION_FRAME AEAD unwrap succeeds. Plaintext frames leave it false.
@@ -5313,6 +6013,33 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
   // the device from ever materializing a multi-KB lump in RAM. So multi-frame
   // TEXT falls through to the normal per-frame dispatch below; v4h_text stashes
   // each fragment's tags and the drain stores them as separate pieces.
+  // Plaintext multi-frame RX is refused outright. The reassembler keys slots on
+  // (src, msgId) alone and stores no per-fragment auth verdict, so the flags handed
+  // to v4_dispatch_table_try when a slot completes are the COMPLETING fragment's.
+  // An attacker in radio range reads msgId off the wire (the header is AAD-bound,
+  // so it cannot be forged, but it is not secret) and injects plaintext fragments
+  // into an in-flight encrypted transfer; the genuine final SESSION_FRAME then
+  // stamps the whole spliced buffer as authenticated. Dropping here is safe because
+  // nothing emits plaintext multi-frame any more: v4_send_frame hardcodes
+  // fragCount = 1 (:1652) and refuses an over-long payload rather than splitting it
+  // (:1696), and the sole fragmenting sender v4_send_encrypted_chunked requires a
+  // PeerIdentity + ACTIVE session (:2124-2135) and seals every fragment. This
+  // retires the RX-side legacy tolerance noted at :273-275 — no un-reflashed peer
+  // exists, since flash is erased before every flash.
+  // Broadcasts are unaffected: they cannot fragment (v4_send_frame is the only
+  // broadcast sender and it cannot count past 1). NOTE that this is a property of
+  // the SEND path only — RX does not bind a session frame to its destination
+  // address (des_addr is never read in the V4 path), so do not read this guard as
+  // proof that a broadcast cannot arrive session-encrypted.
+  if (h->fragCount > 1 && h->type != ESPNOW_V4_TYPE_ACK &&
+      h->type != ESPNOW_V4_TYPE_TEXT && !wasSessionEncrypted) {
+    DEBUGF(DEBUG_ESPNOW_ROUTER,
+           "[V4_RX] plaintext multi-frame refused (type=%u msgId=%lu frag %u/%u) — "
+           "splice defence", (unsigned)h->type, (unsigned long)h->msgId,
+           (unsigned)h->fragIndex, (unsigned)h->fragCount);
+    return true;
+  }
+
   if (h->fragCount > 1 && h->type != ESPNOW_V4_TYPE_ACK && h->type != ESPNOW_V4_TYPE_TEXT) {
     // Multi-fragment message - reassemble
     if (gEspNow) { gEspNow->routerMetrics.v4FragRx++; }
@@ -5357,10 +6084,23 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
       return true;
     }
     
+    // Learn the sender's chunk size from any non-final fragment (every fragment
+    // but the last is full-size by construction). A direct sender uses 200 B; a
+    // sender routing through a relay must use less, because the envelope eats
+    // into the frame. Deriving the stride instead of assuming it is what lets
+    // both reassemble in the same buffer pool.
+    if (e->stride == 0 && h->fragIndex + 1 < h->fragCount && payloadLen > 0) {
+      e->stride = payloadLen;
+    }
+    if (h->fragIndex + 1 == h->fragCount) e->lastFragLen = payloadLen;
+    // Until a non-final fragment has been seen (e.g. the last one arrived
+    // first), fall back to the direct-path stride — the historical behaviour.
+    const uint16_t stride = e->stride ? e->stride : (uint16_t)V4_MAX_FRAGMENT_PAYLOAD;
+
     // Copy fragment data to buffer
-    uint16_t offset = h->fragIndex * V4_MAX_FRAGMENT_PAYLOAD;
-    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Storing at offset=%u len=%u (bufSize=%u)",
-           offset, payloadLen, e->bufferSize);
+    uint16_t offset = (uint16_t)(h->fragIndex * stride);
+    DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Storing at offset=%u len=%u stride=%u (bufSize=%u)",
+           offset, payloadLen, stride, e->bufferSize);
     if (offset + payloadLen > e->bufferSize) {
       WARN_ESPNOWF("[V4_FRAG_RX] Fragment overflow: offset=%u len=%u bufSize=%u", offset, payloadLen, e->bufferSize);
       DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] Resetting corrupted reassembly buffer");
@@ -5404,19 +6144,11 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
       return true;  // Not complete yet
     }
     
-    // Calculate actual reassembled size (last fragment may be partial)
-    uint16_t reassembledSize = 0;
-    for (uint8_t i = 0; i < e->fragCount; i++) {
-      if (i == e->fragCount - 1) {
-        // Last fragment - use actual payload length from that fragment
-        // We need to track this - for now estimate conservatively
-        reassembledSize += payloadLen;  // Last fragment's size
-      } else {
-        reassembledSize += V4_MAX_FRAGMENT_PAYLOAD;
-      }
-    }
+    // Calculate actual reassembled size (last fragment may be partial).
+    // Uses the learned stride so a routed transfer reports its real length
+    // rather than one computed from the direct-path chunk size.
+    uint16_t reassembledSize = (uint16_t)((e->fragCount - 1) * stride + e->lastFragLen);
     
-    unsigned long totalTime = millis() - (e->lastUpdateMs - (millis() - e->lastUpdateMs));
     DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] ✓✓✓ REASSEMBLY COMPLETE ✓✓✓");
     DEBUGF(DEBUG_ESPNOW_ROUTER, "[V4_FRAG_RX] All %u fragments received! Total size: %u bytes",
            e->fragCount, reassembledSize);
@@ -5523,19 +6255,44 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
   // output (e.g. a bonded `files /` listing) — is dropped as a "duplicate". That
   // silently empties the bonded-device file/CLI views on the master. FILE_* frames
   // are likewise multi-frame under one msgId.
+  // RELAY_DATA is bypassed for a different reason than the streaming family:
+  // an envelope carries the INNER message's msgId, while its origin is rewritten
+  // to the current forwarder. A legitimate retransmission of the same inner
+  // message therefore arrives with an identical (origin, msgId) pair and would
+  // be swallowed as a duplicate — breaking the ACK-and-retry loop that the
+  // chunked sender depends on. Loop protection for envelopes comes from ttl and
+  // the hopsUsed ceiling instead, and the endpoint still dedups the inner frame
+  // normally after unwrapping (keyed on its true origin).
   if (h->type != ESPNOW_V4_TYPE_STREAM &&
       h->type != ESPNOW_V4_TYPE_BOND_STREAM_CTRL &&
       h->type != ESPNOW_V4_TYPE_CMD_RESP &&
+      h->type != ESPNOW_V4_TYPE_RELAY_DATA &&
       h->type != ESPNOW_V4_TYPE_FILE_START &&
       h->type != ESPNOW_V4_TYPE_FILE_DATA &&
       h->type != ESPNOW_V4_TYPE_FILE_END) {
     if (h->msgId != 0 && v4_dedup_seen_and_insert(h->origin, h->msgId, h->fragIndex)) {
       DEBUG_ESPNOWF("[V4_DEDUP] Dropped duplicate: type=%u msgId=%lu frag=%u", h->type, (unsigned long)h->msgId, h->fragIndex);
+      meshRelayMetrics().floodDupSuppressed++;
       return true;
     }
   } else {
     DEBUG_ESPNOWF("[V4_DEDUP] Bypassed for type=%u msgId=%lu", h->type, (unsigned long)h->msgId);
   }
+
+  // === Flood relay ===
+  // Positioned here on purpose: after BROADCAST_AUTH verification (so we never
+  // amplify a forgery) and after the dedup insert (so we forward a given
+  // message exactly once, no matter how many copies of it reach us). Before
+  // dispatch, so a node relays even if its own handler later ignores the frame.
+  //
+  // !wasSessionEncrypted is load-bearing: by this point `payload` for an
+  // AEAD frame is DECRYPTED plaintext, and re-tagging that with the group key
+  // would forward a confidential payload in the clear to the whole mesh.
+  // (Nothing emits BROADCAST_AUTH and SESSION_FRAME together today — this
+  // keeps that from becoming a disclosure bug if something ever does.)
+  v4_relay_maybe_forward(recv_info, h, payload, payloadLen,
+                         (h->flags & ESPNOW_V4_FLAG_BROADCAST_AUTH) != 0 &&
+                             wasAuthenticated && !wasSessionEncrypted);
   
   if (!gEspNow || !gEspNow->initialized) return true;
   
@@ -8059,6 +8816,15 @@ int countMeshPeerMetaByRoom(const char* room) {
 
 void noteMeshPeerRxActivity(const uint8_t* mac, EspNowMeshRxKind kind, int8_t hbRssi, int8_t linkRssi) {
   if (!mac || !gMeshPeers) return;
+  // Everything this function records is LINK telemetry — "I can hear this node,
+  // this well, this recently". A frame that reached us through a relay proves
+  // none of that about its originator, so counting it here would be a lie with
+  // teeth: v4_radio_emit reads lastRxActivityMs to decide direct-vs-routed, and
+  // one relayed frame marking a far peer "directly audible" would send every
+  // subsequent message to it straight into the void until the entry aged out.
+  // (Heartbeats are ttl=1 and never relayed, so heartbeat-based aliveness and
+  // the online/offline events built on it are untouched by this.)
+  if (gEspNowInRelayDelivery) return;
   MeshPeerHealth* peer = getMeshPeerHealth(mac, true);
   if (!peer) return;
   const uint32_t t = millis();
@@ -8077,22 +8843,29 @@ void noteMeshPeerRxActivity(const uint8_t* mac, EspNowMeshRxKind kind, int8_t hb
       peer->linkRssiEwma = (int16_t)(peer->linkRssiEwma + step);
     }
   }
+  // Every kind below except BootstrapLiveness describes a frame that really
+  // arrived over the air; that is what everHeardDirect records.
   switch (kind) {
     case EspNowMeshRxKind::MeshHeartbeat:
       peer->lastMeshHeartbeatMs = t;
       peer->lastRxActivityMs = t;
       peer->heartbeatCount++;
+      peer->everHeardDirect = true;
       if (hbRssi != (int8_t)-128) peer->rssi = hbRssi;
       break;
     case EspNowMeshRxKind::Ack:
       peer->lastAckMs = t;
       peer->lastRxActivityMs = t;
       peer->ackCount++;
+      peer->everHeardDirect = true;
       break;
     case EspNowMeshRxKind::RxActivity:
       peer->lastRxActivityMs = t;
+      peer->everHeardDirect = true;
       break;
     case EspNowMeshRxKind::BootstrapLiveness:
+      // Deliberately does NOT set everHeardDirect — this kind is the pairing
+      // seed, a claim about the future rather than a report of the past.
       peer->lastMeshHeartbeatMs = t;
       peer->lastRxActivityMs = t;
       break;
@@ -8598,6 +9371,26 @@ void processMeshHeartbeats() {
                      (unsigned long)(nowMs2 - sc->establishedAtMs));
         espnowRekeyInitiate(sc->peerMac);
       }
+    }
+  }
+
+  // 1f. Multi-hop route maintenance. Order matters: refresh direct reachability
+  // FIRST (it is what defines a usable next hop), then age out learned routes.
+  // Running expiry first would let a route survive one extra pass on a next hop
+  // that had just gone away.
+  {
+    const uint32_t nowRt = (uint32_t)millis();
+    meshRouterSyncDirect(nowRt);
+    meshRouterExpire(nowRt);
+
+    // Advertise our table to each neighbour. Skipped entirely when relaying is
+    // off: a node that will not carry traffic has no business telling anyone it
+    // can reach things, and advertising anyway would black-hole their sends.
+    static uint32_t sLastAdvertMs = 0;
+    if (gSettings.meshRelay &&
+        (sLastAdvertMs == 0 || (uint32_t)(nowRt - sLastAdvertMs) >= MESH_ROUTE_ADVERT_INTERVAL_MS)) {
+      sLastAdvertMs = nowRt;
+      v4_send_route_adverts();
     }
   }
 
@@ -9565,6 +10358,11 @@ static bool initEspNow() {
       return false;
     }
   }
+  // Multi-hop route table. Static storage, so this only clears it — but it must
+  // happen before any RX can land, since a PEER_LIST advert may arrive within
+  // milliseconds of the radio coming up.
+  meshRouterInit();
+
   // Both arrays exist — NOW it's safe to advertise the slot count to readers.
   gMeshPeerSlots = slots;
 
@@ -10142,6 +10940,10 @@ static bool deinitEspNow() {
   }
 
   // 7. Reset state (keep gEspNow struct allocated for potential re-init)
+  // Routes describe radio reachability; with the radio down every one of them
+  // is a lie. Clearing here also means a re-init starts from a clean table
+  // rather than inheriting paths through peers that may have moved on.
+  meshRouterReset();
   gEspNow->initialized = false;
   gEspNow->channel = 0;
   gEspNow->encryptionEnabled = false;
@@ -10516,8 +11318,11 @@ const char* cmd_espnow_resetstats(const String& argsInput) {
   gEspNowRxDrops = 0;  // surfaced by espnowstats since Phase 0, so reset it too
 
   gEspNow->routerMetrics = RouterMetrics();
+  // Relay/routing counters live outside RouterMetrics (see System_ESPNow_Router.h);
+  // the route table itself is left alone — it is live state, not a statistic.
+  meshRelayMetricsReset();
 
-  return "ESP-NOW statistics reset (including router metrics)";
+  return "ESP-NOW statistics reset (including router + multi-hop relay metrics)";
 }
 
 // ============================================================================
@@ -11225,41 +12030,117 @@ const char* cmd_espnow_pair(const String& argsInput) {
   return getDebugBuffer();
 }
 
-// Mesh TTL command
+// Mesh TTL command — the hop budget stamped on relay-eligible frames.
+//
+// The old 'adaptive' sub-verb is gone. It toggled a setting that no algorithm
+// ever read: there was no adaptive TTL, only a knob that claimed there was.
 const char* cmd_espnow_meshttl(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   CommandArgs a(argsInput);
 
   if (a.count() == 0) {
     if (!ensureDebugBuffer()) return "Error";
-    int peerCount = (gEspNow ? (int)gEspNow->deviceCount : 0);
-    snprintf(getDebugBuffer(), 1024, "Mesh TTL: %d\nAdaptive mode: %s\nActive peers: %d",
-             gSettings.meshTTL, gSettings.meshAdaptiveTTL ? "enabled" : "disabled", peerCount);
+    snprintf(getDebugBuffer(), 1024,
+             "Mesh TTL: %d hop%s\n"
+             "Relay for others: %s\n"
+             "Known routes: %d (%s)\n"
+             "\nTTL 1 = single hop (no relaying). Applies to broadcast text/time sync\n"
+             "and to routed unicast; heartbeats and pairing are always single-hop.",
+             gSettings.meshTTL, gSettings.meshTTL == 1 ? "" : "s",
+             gSettings.meshRelay ? "enabled" : "disabled",
+             meshRouterCount(), "see espnowmeshroutes");
     return getDebugBuffer();
   }
 
-  // Check for 'adaptive' command
-  String ttlArg = a.arg(0);
-  ttlArg.toLowerCase();
-  if (ttlArg == "adaptive") {
-    setSetting(gSettings.meshAdaptiveTTL, !gSettings.meshAdaptiveTTL);
-    
-    snprintf(getDebugBuffer(), 1024, "Adaptive TTL %s (TTL now %d)", 
-             gSettings.meshAdaptiveTTL ? "enabled" : "disabled", gSettings.meshTTL);
-    return getDebugBuffer();
-  }
-  
   int ttl = a.argInt(0, 0);
   if (ttl < 1 || ttl > 10) {
-    return "Error: TTL must be between 1 and 10, or 'adaptive' to toggle";
+    return "Error: TTL must be between 1 and 10 (1 = single hop, no relaying)";
   }
-  
-  // Setting a manual TTL disables adaptive mode
+
   setSetting(gSettings.meshTTL, (uint8_t)ttl);
-  setSetting(gSettings.meshAdaptiveTTL, false);
-  
-  snprintf(getDebugBuffer(), 1024, "Mesh TTL set to %d (adaptive mode disabled)", gSettings.meshTTL);
+
+  if (!ensureDebugBuffer()) return "Error";
+  snprintf(getDebugBuffer(), 1024, "Mesh TTL set to %d%s", gSettings.meshTTL,
+           ttl == 1 ? " — multi-hop disabled for this node's own sends" : "");
   return getDebugBuffer();
+}
+
+// Mesh route table — what this node believes it can reach and how.
+const char* cmd_espnow_meshroutes(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  CommandArgs a(argsInput);
+
+  if (a.count() > 0 && a.arg(0).equalsIgnoreCase("clear")) {
+    meshRouterReset();
+    return "OK: route table cleared (direct routes reappear within one mesh tick)";
+  }
+
+  if (!ensureDebugBuffer()) return "Error: Buffer allocation failed";
+  char* buf = getDebugBuffer();
+  const size_t cap = GLOBAL_DEBUG_BUFFER_SIZE;
+  int pos = 0;
+
+  if (argWantsJson(argsInput)) {
+    pos += snprintf(buf + pos, cap - pos, "{\"schema\":1,\"ttl\":%d,\"relay\":%s,\"routes\":[",
+                    gSettings.meshTTL, gSettings.meshRelay ? "true" : "false");
+    bool first = true;
+    for (int i = 0; i < MESH_ROUTE_MAX && pos < (int)cap - 128; i++) {
+      const MeshRoute* r = meshRouterAt(i);
+      if (!r) continue;
+      char dstStr[18], viaStr[18];
+      formatMacAddressBuf(r->dst, dstStr, sizeof(dstStr));
+      formatMacAddressBuf(r->nextHop, viaStr, sizeof(viaStr));
+      // metric is null, not 0, when unmeasured — 0 dBm is a real (excellent)
+      // reading and must not be how "no sample yet" renders.
+      char metricJson[8];
+      if (r->metric == MESH_ROUTE_METRIC_UNKNOWN) snprintf(metricJson, sizeof(metricJson), "null");
+      else                                        snprintf(metricJson, sizeof(metricJson), "%d", (int)r->metric);
+      pos += snprintf(buf + pos, cap - pos,
+                      "%s{\"dst\":\"%s\",\"via\":\"%s\",\"hops\":%u,\"metric\":%s,\"ageMs\":%lu}",
+                      first ? "" : ",", dstStr, viaStr, (unsigned)r->hops, metricJson,
+                      (unsigned long)((uint32_t)millis() - r->lastUpdateMs));
+      first = false;
+    }
+    snprintf(buf + pos, cap - pos, "]}");
+    return buf;
+  }
+
+  pos += snprintf(buf + pos, cap - pos, "=== Mesh Routes ===\n");
+  pos += snprintf(buf + pos, cap - pos, "TTL %d | relay-for-others %s\n\n",
+                  gSettings.meshTTL, gSettings.meshRelay ? "ON" : "OFF");
+
+  int shown = 0;
+  for (int i = 0; i < MESH_ROUTE_MAX && pos < (int)cap - 128; i++) {
+    const MeshRoute* r = meshRouterAt(i);
+    if (!r) continue;
+    if (shown == 0) {
+      pos += snprintf(buf + pos, cap - pos,
+                      "%-18s %-18s %5s %7s %6s\n", "DESTINATION", "VIA", "HOPS", "METRIC", "AGE");
+    }
+    char dstStr[18], viaStr[18];
+    formatMacAddressBuf(r->dst, dstStr, sizeof(dstStr));
+    formatMacAddressBuf(r->nextHop, viaStr, sizeof(viaStr));
+    char metricStr[10];
+    if (r->metric == MESH_ROUTE_METRIC_UNKNOWN) snprintf(metricStr, sizeof(metricStr), "  --");
+    else                                        snprintf(metricStr, sizeof(metricStr), "%4ddBm", (int)r->metric);
+    pos += snprintf(buf + pos, cap - pos, "%-18s %-18s %5u %7s %5lus\n",
+                    dstStr, r->hops == 1 ? "(direct)" : viaStr, (unsigned)r->hops, metricStr,
+                    (unsigned long)(((uint32_t)millis() - r->lastUpdateMs) / 1000));
+    shown++;
+  }
+
+  if (shown == 0) {
+    pos += snprintf(buf + pos, cap - pos,
+                    "(no routes)\n\nDirect routes appear for peers we can currently hear.\n"
+                    "Multi-hop routes are learned from neighbours' advertisements\n"
+                    "(every %lus) — allow a minute after boot.\n",
+                    (unsigned long)(MESH_ROUTE_ADVERT_INTERVAL_MS / 1000));
+  } else {
+    snprintf(buf + pos, cap - pos,
+             "\n%d route%s. 'via (direct)' = in radio range; anything else is relayed.\n",
+             shown, shown == 1 ? "" : "s");
+  }
+  return buf;
 }
 
 // Get/set the preferred ESP-NOW radio channel. This is the field-reliability
@@ -11375,38 +12256,76 @@ const char* cmd_espnow_meshmetrics(const String& argsInput) {
   if (!gEspNow) return "Error: ESP-NOW not initialized (run 'openespnow' first)";
   if (!ensureDebugBuffer()) return "Error: Buffer allocation failed";
 
+  const MeshRelayMetrics& m = meshRelayMetrics();
+  char* buf = getDebugBuffer();
+  const size_t cap = GLOBAL_DEBUG_BUFFER_SIZE;
+
   if (argWantsJson(argsInput)) {
-    // Counters are uninstrumented (see note below); expose the live config only.
-    snprintf(getDebugBuffer(), 1024,
-      "{\"schema\":1,\"mode\":\"%s\",\"activePeers\":%d,\"ttl\":%d,\"adaptiveTtl\":%s}",
+    snprintf(buf, cap,
+      "{\"schema\":2,\"mode\":\"%s\",\"activePeers\":%d,\"ttl\":%d,\"relay\":%s,\"routes\":%d,"
+      "\"flood\":{\"forwards\":%lu,\"fanout\":%lu,\"fanoutFails\":%lu,\"dropTtl\":%lu,"
+      "\"dropRate\":%lu,\"dropNoKey\":%lu,\"dupSuppressed\":%lu,\"selfOrigin\":%lu,"
+      "\"rxViaRelay\":%lu},"
+      "\"routed\":{\"tx\":%lu,\"forwards\":%lu,\"delivered\":%lu,\"dropNoRoute\":%lu,"
+      "\"dropTtl\":%lu,\"dropTooBig\":%lu,\"dropPolicy\":%lu},"
+      "\"table\":{\"installed\":%lu,\"replaced\":%lu,\"expired\":%lu,"
+      "\"advertsSent\":%lu,\"advertsRecv\":%lu}}",
       (gEspNow->mode == ESPNOW_MODE_MESH) ? "mesh" : "direct",
       (int)gEspNow->deviceCount, gSettings.meshTTL,
-      gSettings.meshAdaptiveTTL ? "true" : "false");
-    return getDebugBuffer();
+      gSettings.meshRelay ? "true" : "false", meshRouterCount(),
+      (unsigned long)m.floodForwards, (unsigned long)m.floodFanout,
+      (unsigned long)m.floodFanoutFails, (unsigned long)m.floodDropTtl,
+      (unsigned long)m.floodDropRate, (unsigned long)m.floodDropNoKey,
+      (unsigned long)m.floodDupSuppressed, (unsigned long)m.selfOriginDrops,
+      (unsigned long)m.rxViaRelay,
+      (unsigned long)m.routedTx, (unsigned long)m.routedForwards,
+      (unsigned long)m.routedDelivered, (unsigned long)m.routedDropNoRoute,
+      (unsigned long)m.routedDropTtl, (unsigned long)m.routedDropTooBig,
+      (unsigned long)m.routedDropPolicy,
+      (unsigned long)m.routesInstalled, (unsigned long)m.routesReplaced,
+      (unsigned long)m.routesExpired, (unsigned long)m.advertsSent,
+      (unsigned long)m.advertsReceived);
+    return buf;
   }
 
-  // Audit (2026-06) — the mesh-routing counters this command used to print
-  // (meshRoutes / directRoutes / meshForwards / path-length / TTL / loop stats)
-  // had zero increment sites (multi-hop forwarding was never instrumented), so
-  // they were removed from RouterMetrics. Only the live mesh configuration is
-  // shown below. Re-add the fields + real instrumentation together if wanted.
-
-  int peerCount = (int)gEspNow->deviceCount;
   int pos = 0;
-  char* buf = getDebugBuffer();
-  pos += snprintf(buf + pos, 1024 - pos, "=== Mesh Routing Configuration ===\n\n");
-  pos += snprintf(buf + pos, 1024 - pos, "Mode:           %s\n",
+  pos += snprintf(buf + pos, cap - pos, "=== Mesh Routing ===\n\n");
+  pos += snprintf(buf + pos, cap - pos, "Mode:            %s\n",
                   (gEspNow->mode == ESPNOW_MODE_MESH) ? "mesh" : "direct");
-  pos += snprintf(buf + pos, 1024 - pos, "Active peers:   %d\n", peerCount);
-  pos += snprintf(buf + pos, 1024 - pos, "Current TTL:    %d\n", gSettings.meshTTL);
-  pos += snprintf(buf + pos, 1024 - pos, "Adaptive TTL:   %s\n",
-                  gSettings.meshAdaptiveTTL ? "enabled" : "disabled");
-  pos += snprintf(buf + pos, 1024 - pos,
-                  "\n(Note: per-forward / per-path / drop counters are not currently\n"
-                  " instrumented — multi-hop mesh forwarding has no live bump sites.\n"
-                  " See espnowsaturation / espnowstats for traffic-level metrics.)\n");
+  pos += snprintf(buf + pos, cap - pos, "Paired devices:  %d\n", (int)gEspNow->deviceCount);
+  pos += snprintf(buf + pos, cap - pos, "Known routes:    %d\n", meshRouterCount());
+  pos += snprintf(buf + pos, cap - pos, "Hop budget:      %d\n", gSettings.meshTTL);
+  pos += snprintf(buf + pos, cap - pos, "Relay for peers: %s\n\n",
+                  gSettings.meshRelay ? "ON" : "OFF");
 
-  return getDebugBuffer();
+  pos += snprintf(buf + pos, cap - pos, "-- Flood (broadcast text / time sync) --\n");
+  pos += snprintf(buf + pos, cap - pos, "  forwarded        %lu  (as %lu neighbour sends, %lu failed)\n",
+                  (unsigned long)m.floodForwards, (unsigned long)m.floodFanout,
+                  (unsigned long)m.floodFanoutFails);
+  pos += snprintf(buf + pos, cap - pos, "  received relayed %lu\n", (unsigned long)m.rxViaRelay);
+  pos += snprintf(buf + pos, cap - pos, "  dropped          ttl=%lu rate=%lu nokey=%lu\n",
+                  (unsigned long)m.floodDropTtl, (unsigned long)m.floodDropRate,
+                  (unsigned long)m.floodDropNoKey);
+  pos += snprintf(buf + pos, cap - pos, "  duplicates       %lu   own-origin %lu\n\n",
+                  (unsigned long)m.floodDupSuppressed, (unsigned long)m.selfOriginDrops);
+
+  pos += snprintf(buf + pos, cap - pos, "-- Routed unicast (RELAY_DATA) --\n");
+  pos += snprintf(buf + pos, cap - pos, "  sent via route   %lu\n", (unsigned long)m.routedTx);
+  pos += snprintf(buf + pos, cap - pos, "  forwarded        %lu\n", (unsigned long)m.routedForwards);
+  pos += snprintf(buf + pos, cap - pos, "  delivered to us  %lu\n", (unsigned long)m.routedDelivered);
+  pos += snprintf(buf + pos, cap - pos, "  dropped          noroute=%lu ttl=%lu toobig=%lu policy=%lu\n\n",
+                  (unsigned long)m.routedDropNoRoute, (unsigned long)m.routedDropTtl,
+                  (unsigned long)m.routedDropTooBig, (unsigned long)m.routedDropPolicy);
+
+  pos += snprintf(buf + pos, cap - pos, "-- Route table --\n");
+  pos += snprintf(buf + pos, cap - pos, "  installed %lu  replaced %lu  expired %lu\n",
+                  (unsigned long)m.routesInstalled, (unsigned long)m.routesReplaced,
+                  (unsigned long)m.routesExpired);
+  snprintf(buf + pos, cap - pos, "  adverts   sent %lu  received %lu\n"
+                                 "\nSee 'espnowmeshroutes' for the table itself.\n",
+                  (unsigned long)m.advertsSent, (unsigned long)m.advertsReceived);
+
+  return buf;
 }
 
 // ESP-NOW mode command
@@ -15573,7 +16492,7 @@ const char* cmd_espnow_workerstatusinterval(const String&);
 const char* cmd_espnow_topodiscoveryinterval(const String&);
 const char* cmd_espnow_topoautorefresh(const String&);
 const char* cmd_espnow_heartbeatbroadcast(const String&);
-const char* cmd_espnow_meshadaptivettl(const String&);
+const char* cmd_espnow_meshrelay(const String&);
 const char* cmd_espnow_meshpeermax(const String&);
 const char* cmd_espnow_sensorbroadcastinterval(const String&);
 // Secure sensor fetcher (docs/ESPNOW_SENSOR_FETCHER_DESIGN.md)
@@ -15903,10 +16822,11 @@ extern const CommandEntry espNowCommands[] = {
   
   // ---- ESP-NOW Mesh Configuration ----
   { "espnowmeshstatus", "Show mesh peer health (heartbeats & ACKs).", false, cmd_espnow_meshstatus },
-  { "espnowmeshmetrics", "Show mesh routing metrics (forwards, path stats, drops).", false, cmd_espnow_meshmetrics },
+  { "espnowmeshmetrics", "Show multi-hop routing metrics (flood forwards, routed hops, drops, route churn).", false, cmd_espnow_meshmetrics },
+  { "espnowmeshroutes", "Show the mesh route table: who this node can reach and via which neighbour.", false, cmd_espnow_meshroutes, "Usage: espnowmeshroutes [clear]\n       'via (direct)' = in radio range. Anything else is reached over one or more relay hops.\n       Multi-hop routes are learned from neighbours every 30s — allow a minute after boot." },
   { "espnowmeshes", "Manage multi-mesh slots: 'espnowmeshes [list|add|remove|enable|setdefault|rename|setpassphrase] ...'.", true, cmd_espnow_meshes, "Usage: espnowmeshes list\n       espnowmeshes add <label>          (then set passphrase via 'espnowsetpassphrase <label> <pw>')\n       espnowmeshes remove <label>       (alias: disable)\n       espnowmeshes enable <label>\n       espnowmeshes setdefault <label>\n       espnowmeshes setpassphrase <label> <passphrase>\n       espnowmeshes rename <oldLabel> <newLabel>" },
   { "espnowmode", "Get/set ESP-NOW mode: 'espnowmode [direct|mesh]'.", true, cmd_espnow_mode, "Usage: espnowmode [direct|mesh]" },
-  { "espnowmeshttl", "Get/set mesh TTL: 'espnowmeshttl [1-10|adaptive]'.", false, cmd_espnow_meshttl, "Usage: espnowmeshttl [<1..10>|adaptive]" },
+  { "espnowmeshttl", "Get/set the multi-hop budget: 'espnowmeshttl [1-10]'.", false, cmd_espnow_meshttl, "Usage: espnowmeshttl [<1..10>]\n       How many hops this node's relay-eligible frames may travel. 1 = single hop (no multi-hop).\n       Applies to broadcast text/time sync and to routed unicast; heartbeats and pairing are always single-hop." },
   { "espnowchannel", "Get/set preferred ESP-NOW channel: 'espnowchannel [1-13|auto|resync]'. No arg shows a checker (actual vs expected). Set the SAME value on both devices to pair off-grid.", true, cmd_espnow_channel, "Usage: espnowchannel [<1..13>|auto|resync]\n       (no arg) = show preference, actual radio channel, expected, and an OK/MISMATCH check.\n       auto (0) = follow WiFi, pin fallback when offline. 1-13 = force this channel when not joined to WiFi.\n       resync   = force the radio back onto the correct channel now (no setting change).\n       Two devices only hear each other on the same channel — set both the same for field use." },
   { "espnowsetname", "Get/set device name: 'espnowsetname [name]'.", true, cmd_espnow_setname, "Usage: espnowsetname [<name>]   (<=20 chars; letters, numbers, - and _ only)" },
   { "espnowhbmode", "Get/set heartbeat mode: 'espnowhbmode [public|private]'.", false, cmd_espnow_hbmode, "Usage: espnowhbmode [public|private]" },
@@ -15936,7 +16856,7 @@ extern const CommandEntry espNowCommands[] = {
   { "espnowtagcmd", "Run command on all devices with a tag; user/pass must be valid on EACH target device. (async - replies via espnowmessages json)", true, cmd_espnow_tagcmd, "Usage: espnowtagcmd <tag> <target-user> <target-pass> <command>\n       Credentials are checked ON EACH target device, not this one.\n       Returns OK on dispatch; each device's reply arrives later in 'espnowmessages json'." },
   
   // ---- ESP-NOW Communication ----
-  { "espnowsend", "Send message (auto-routes via mesh if enabled): 'espnowsend [json] <name_or_mac> <message>'. Requires ESP-NOW encryption enabled. (async send; delivery only, no reply)", false, cmd_espnow_send, "Usage: espnowsend [json] <name_or_mac> <message>\n       Requires ESP-NOW encryption (set a mesh passphrase first); plaintext send was removed.\n       Leading 'json' flag returns {schema,ok,msgId} for delivery-status polling.\n       Returns OK on delivery; one-way message, no result comes back." },
+  { "espnowsend", "Send message to one peer, relayed over multiple hops if it is out of radio range: 'espnowsend [json] <name_or_mac> <message>'. Requires ESP-NOW encryption enabled. (async send; delivery only, no reply)", false, cmd_espnow_send, "Usage: espnowsend [json] <name_or_mac> <message>\n       Requires ESP-NOW encryption (set a mesh passphrase first); plaintext send was removed.\n       Leading 'json' flag returns {schema,ok,msgId} for delivery-status polling.\n       Returns OK on delivery; one-way message, no result comes back.\n       Out-of-range peers are reached via relays when a route exists ('espnowmeshroutes');\n       a relayed message is split at ~130 chars per piece instead of ~200." },
   { "espnowbroadcast", "Broadcast message: 'espnowbroadcast <message>'. (async send; delivery only, no reply)", false, cmd_espnow_broadcast, "Usage: espnowbroadcast <message>   (single frame, <= 218 bytes; longer text is NOT fragmented and fails silently)\n       Returns whether the single broadcast frame was transmitted to all peers, NOT a per-device delivery count; no per-device reply." },
   { "espnowsendfile", "Send file: 'espnowsendfile <name_or_mac> \"<filepath>\"'. (synchronous send; fails if the receiver rejects/cancels mid-transfer)", true, cmd_espnow_sendfile, "Usage: espnowsendfile <name_or_mac> \"<filepath>\"\n       Blocks until the file is sent. 'success' means every chunk was transmitted and the receiver did not cancel; final storage is confirmed by the receiver's CRC check, which is not reported back here." },
   { "espnowbrowse", "Browse a peer's files; user/pass are an account ON THE TARGET: 'espnowbrowse <target> <target-user> <target-pass> [\"path\"]'. (async - result via espnowmessages json)", true, cmd_espnow_browse, "Usage: espnowbrowse <target> <target-user> <target-pass> [\"path\"]\n       Credentials are verified ON THE TARGET device, not this one.\n       Returns OK on delivery; the remote listing arrives later - read with 'espnowmessages json' (match the reqId)." },
@@ -16000,7 +16920,7 @@ extern const CommandEntry espNowCommands[] = {
   { "espnowtopodiscoveryinterval",   "Set topology discovery interval: <0-300000 ms>", true, cmd_espnow_topodiscoveryinterval, "Usage: espnowtopodiscoveryinterval <0..300000>" },
   { "espnowtopoautorefresh",         "Set auto refresh topology: <0|1>", true, cmd_espnow_topoautorefresh, "Usage: espnowtopoautorefresh <0|1>" },
   { "espnowheartbeatbroadcast",      "Set heartbeat broadcast: <0|1>", true, cmd_espnow_heartbeatbroadcast, "Usage: espnowheartbeatbroadcast <0|1>" },
-  { "espnowmeshadaptivettl",         "Set adaptive TTL: <0|1>", true, cmd_espnow_meshadaptivettl, "Usage: espnowmeshadaptivettl <0|1>" },
+  { "espnowmeshrelay",               "Carry other nodes' mesh traffic: <0|1>", true, cmd_espnow_meshrelay, "Usage: espnowmeshrelay <0|1>\n       1 (default) = act as a relay so out-of-range peers can reach each other through this node.\n       0 = stop forwarding for others. This node still uses multi-hop for its OWN traffic\n       (set espnowmeshttl 1 for that), and stops advertising routes so nobody sends via it." },
   { "espnowmeshpeermax",             "Set max peer slots: <1-16> (reboot required)", true, cmd_espnow_meshpeermax, "Usage: espnowmeshpeermax <1..16>" },
   { "espnowsensorbroadcastinterval", "Set sensor broadcast interval: <100-10000 ms>", true, cmd_espnow_sensorbroadcastinterval, "Usage: espnowsensorbroadcastinterval <100..10000>" },
 #if ENABLE_BONDED_MODE
@@ -16058,7 +16978,7 @@ static const SettingEntry espnowSettingEntries[] = {
   // Preferred radio channel (0=auto, 1-13). U8 range 0..13. cmdKey routes the
   // settings editor to the custom cmd_espnow_channel so a change applies live.
   { "channel", SETTING_U8, &gSettings.espnowChannel, 0, 0, nullptr, 0, 13, "Preferred Channel (0=auto)", nullptr, false, nullptr, "espnowchannel" },
-  { "meshAdaptiveTTL", SETTING_BOOL, &gSettings.meshAdaptiveTTL, false, 0, nullptr, 0, 1, "Adaptive TTL", nullptr, false, "mesh", "espnowmeshadaptivettl" },
+  { "meshRelay", SETTING_BOOL, &gSettings.meshRelay, true, 0, nullptr, 0, 1, "Relay for peers", nullptr, false, "mesh", "espnowmeshrelay" },
   { "meshPeerMax", SETTING_U8, &gSettings.meshPeerMax, 8, 0, nullptr, 1, 16, "Max Peer Slots (reboot)", nullptr, false, "mesh", "espnowmeshpeermax" },
   { "sensorBroadcastIntervalMs", SETTING_U16, &gSettings.sensorBroadcastIntervalMs, 1000, 0, nullptr, 100, 10000, "Sensor Broadcast Interval (ms)", nullptr, false, "mesh", "espnowsensorbroadcastinterval" },
   // Secure sensor fetcher (worker role) — fingerprints are PUBLIC identifiers (isSecret=false).
@@ -16102,7 +17022,7 @@ ESPNOW_SETTING_CMD(cmd_espnow_workerstatusinterval, "workerStatusInterval")
 ESPNOW_SETTING_CMD(cmd_espnow_topodiscoveryinterval, "topoDiscoveryInterval")
 ESPNOW_SETTING_CMD(cmd_espnow_topoautorefresh, "topoAutoRefresh")
 ESPNOW_SETTING_CMD(cmd_espnow_heartbeatbroadcast, "heartbeatBroadcast")
-ESPNOW_SETTING_CMD(cmd_espnow_meshadaptivettl, "meshAdaptiveTTL")
+ESPNOW_SETTING_CMD(cmd_espnow_meshrelay, "meshRelay")
 ESPNOW_SETTING_CMD(cmd_espnow_meshpeermax, "meshPeerMax")
 ESPNOW_SETTING_CMD(cmd_espnow_sensorbroadcastinterval, "sensorBroadcastIntervalMs")
 // Secure sensor fetcher (worker settings) — persist via real per-setting commands.

@@ -368,8 +368,16 @@ String setSession(httpd_req_t* req, const String& u) {
           gSessions[i].expiresAt = nowMs + SESSION_TTL_MS;
           gSessions[i].lastInteractionMs = sessionStampNow();  // login counts as a real interaction
           esp_err_t sc = writeSessionCookie(req, gSessions[i].sid);
-          DEBUG_AUTHF("Reusing existing session idx=%d user=%s sid=%s | refreshed", i, u.c_str(), gSessions[i].sid.c_str());
-          BROADCAST_PRINTF("[auth] reusedSession user=%s, sid=%s, exp(ms)=%lu", u.c_str(), gSessions[i].sid.c_str(), gSessions[i].expiresAt);
+          // The sid IS the bearer credential — isAuthed validates a cookie on the
+          // sid alone (no IP or User-Agent binding), so anything that prints it in
+          // full hands over the session. BROADCAST_PRINTF reaches the web CLI
+          // mirror, which GET /api/cli/logs serves to any authenticated non-guest
+          // and which is routing-gated only (deliberately — System_Debug.h:16-24),
+          // so it carries no part of the sid at all. The DEBUG_AUTH lane is behind
+          // an operator-controlled flag and keeps an 8-char prefix, which is enough
+          // to tell one session from another while debugging.
+          DEBUG_AUTHF("Reusing existing session idx=%d user=%s sid=%.8s... | refreshed", i, u.c_str(), gSessions[i].sid.c_str());
+          BROADCAST_PRINTF("[auth] reusedSession user=%s, exp(ms)=%lu", u.c_str(), gSessions[i].expiresAt);
           DEBUG_AUTHF("Set-Cookie (reuse) rc=%d", (int)sc);
           return gSessions[i].sid;
         }
@@ -415,15 +423,16 @@ String setSession(httpd_req_t* req, const String& u) {
   // New session should reconcile UI immediately on next SSE ping
   gSessions[idx].needsStatusUpdate = true;
   gSessions[idx].lastSensorSeqSent = 0;
-  DEBUG_AUTHF("New session created idx=%d user=%s sid=%s | needsStatusUpdate=1", idx, u.c_str(), s.sid.c_str());
+  DEBUG_AUTHF("New session created idx=%d user=%s sid=%.8s... | needsStatusUpdate=1", idx, u.c_str(), s.sid.c_str());
 
   // Set new session cookie via writeSessionCookie — HttpOnly + SameSite=Strict
   // (+ Secure on HTTPS) applied uniformly. See helper comment for rationale.
   esp_err_t sc = writeSessionCookie(req, s.sid);
-  DEBUG_AUTHF("Setting session cookie for sid=%s", s.sid.c_str());
+  DEBUG_AUTHF("Setting session cookie for sid=%.8s...", s.sid.c_str());
   DEBUG_AUTHF("Set-Cookie rc=%d", (int)sc);
 
-  BROADCAST_PRINTF("[auth] setSession user=%s, sid=%s, exp(ms)=%lu", u.c_str(), s.sid.c_str(), s.expiresAt);
+  // No sid on the web-mirror lane — see the note at the reusedSession site above.
+  BROADCAST_PRINTF("[auth] setSession user=%s, exp(ms)=%lu", u.c_str(), s.expiresAt);
   return s.sid;
 }
 
@@ -1391,12 +1400,21 @@ bool decodeBasicAuth(httpd_req_t* req, String& userOut, String& passOut, bool& h
   String b64 = header.substring(6);
   b64.trim();
   
-  // Decode base64
+  // Decode base64. mbedtls_base64_decode's bound test is `dlen < *olen`
+  // (mbedtls/library/base64.c), so it ACCEPTS a decode that exactly fills the
+  // buffer and reserves no room for a terminator. Passing sizeof(out_buf) let a
+  // 344-char base64 header decode to exactly 256 bytes and pushed the NUL onto
+  // out_buf[256] — which is where -fstack-protector places this frame's canary
+  // (out_buf at frame offset 92, canary at 348; 92 + 256 == 348). That aborted
+  // the device with "Stack smashing protect failure!" on a path that runs BEFORE
+  // isLoginLocked and BEFORE isValidUser, i.e. an unauthenticated, unthrottled
+  // remote reboot. Hand mbedtls one less than the array size so the terminator
+  // always has a home; the accepted credential ceiling stays exactly 256 bytes.
   size_t out_len = 0;
-  unsigned char out_buf[256];
-  int ret = mbedtls_base64_decode(out_buf, sizeof(out_buf), &out_len,
+  unsigned char out_buf[257];
+  int ret = mbedtls_base64_decode(out_buf, sizeof(out_buf) - 1, &out_len,
                                   (const unsigned char*)b64.c_str(), b64.length());
-  if (ret != 0 || out_len == 0) return false;
+  if (ret != 0 || out_len == 0 || out_len >= sizeof(out_buf)) return false;
   out_buf[out_len] = '\0';
   
   String decoded = String((const char*)out_buf);
@@ -1728,9 +1746,10 @@ esp_err_t handleFileRead(httpd_req_t* req) {
   }
   DEBUG_STORAGEF("[handleFileRead] Raw name parameter: %s", name);
 
-  String path = String(name);
-  path.replace("%2F", "/");
-  path.replace("%20", " ");
+  // Decode the complete URL-encoding alphabet.  The migration backup client
+  // must be able to round-trip names containing '+', '#', '%' and UTF-8, not
+  // just the two sequences the old hand-written decoder recognized.
+  String path = urlDecode(String(name));
   DEBUG_STORAGEF("[handleFileRead] Decoded path: %s", path.c_str());
 
   // Keep the 403 response for "admin-only path, non-admin caller" so users
@@ -3952,10 +3971,9 @@ esp_err_t handleFilesList(httpd_req_t* req) {
   if (httpd_req_get_url_query_str(req, pathParam, sizeof(pathParam)) == ESP_OK) {
     char pathValue[256];
     if (httpd_query_key_value(pathParam, "path", pathValue, sizeof(pathValue)) == ESP_OK) {
-      dirPath = String(pathValue);
-      // URL decode the path
-      dirPath.replace("%2F", "/");
-      dirPath.replace("%20", " ");
+      // Use the shared decoder so recursive backup can traverse every legal
+      // filename, including punctuation and UTF-8 percent sequences.
+      dirPath = urlDecode(String(pathValue));
       DEBUG_HTTPF("[files] Listing directory: %s", dirPath.c_str());
     }
   }
@@ -4024,16 +4042,14 @@ esp_err_t handleFilesCreate(httpd_req_t* req) {
     nameStart += 5;
     int nameEnd = body.indexOf("&", nameStart);
     if (nameEnd < 0) nameEnd = body.length();
-    name = body.substring(nameStart, nameEnd);
-    name.replace("%20", " ");
-    name.replace("%2F", "/");
+    name = urlDecode(body.substring(nameStart, nameEnd));
   }
 
   if (typeStart >= 0) {
     typeStart += 5;
     int typeEnd = body.indexOf("&", typeStart);
     if (typeEnd < 0) typeEnd = body.length();
-    type = body.substring(typeStart, typeEnd);
+    type = urlDecode(body.substring(typeStart, typeEnd));
   }
 
   if (name.length() == 0) {
@@ -5070,7 +5086,9 @@ void broadcastSensorStatusToAllSessions() {
   // Pre-pass: dump session table for diagnostics
   for (int i = 0; i < MAX_SESSIONS; i++) {
     if (gSessions[i].sid.length() > 0) {
-      DEBUG_SSEF("session[%d] sid=%s user=%s needsStatusUpdate=%d lastSeqSent=%lu",
+      // Dumps EVERY live session, not just one — full sids here leaked the whole
+      // table at once. DEBUG_SSE is on by boot default (kBootDefaultDebugFlags).
+      DEBUG_SSEF("session[%d] sid=%.8s... user=%s needsStatusUpdate=%d lastSeqSent=%lu",
                  i, gSessions[i].sid.c_str(), gSessions[i].user.c_str(),
                  gSessions[i].needsStatusUpdate ? 1 : 0,
                  (unsigned long)gSessions[i].lastSensorSeqSent);

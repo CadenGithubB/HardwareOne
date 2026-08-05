@@ -87,6 +87,7 @@ void crashRecordBootConsume(uint32_t resetReason);
 void crashRecordEmitEarly();
 
 bool        crashRecordHavePrevious();     // was a decodable panic record left behind?
+bool        crashRecordPreviousBuildMatches(); // did the immediately previous boot run this exact build?
 uint32_t    crashRecordConsecutive();      // consecutive fault resets (0 after a healthy run)
 uint32_t    crashRecordSignature();        // FNV-1a over reason+addr+exception+elfsha
 uint32_t    crashRecordRepeatCount();      // how many boots in a row produced this signature

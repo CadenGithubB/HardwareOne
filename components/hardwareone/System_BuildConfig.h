@@ -124,7 +124,7 @@
 // build (camera + mic only) — level 0 also zeroes ENABLE_OLED_DISPLAY and every
 // ENABLE_*_SENSOR below (see the level table further down), so the screen and the
 // sensor drivers fall out on their own.
-#define I2C_FEATURE_LEVEL       0
+#define I2C_FEATURE_LEVEL       4
 
 #if I2C_FEATURE_LEVEL == 4
   // Memory hints (rough — full breakdown in "MEMORY SAVINGS REFERENCE" below).
@@ -228,7 +228,7 @@
 #define ENABLE_G2_GLASSES       1
 
 // R1 Health: vitals UI (G2 Apps→Health, OLED R1 Health, Web /r1-health) +
-// Health Track logging. Requires Bluetooth + G2 (R1 rides the G2 BLE-client
+// Health Logging. Requires Bluetooth + G2 (R1 rides the G2 BLE-client
 // stack). Plain 0/1 for CMake grep; auto-forced off in DERIVED rules when
 // BT or G2 is off. Ring connect stays under ENABLE_G2_GLASSES.
 #define ENABLE_R1_HEALTH        1
@@ -475,7 +475,11 @@
   #undef  ENABLE_GAMEPAD_SENSOR
   #define ENABLE_GAMEPAD_SENSOR 0
   #define ENABLE_ANO_ENCODER    1
-#else
+#elif INPUT_DEVICE_TYPE == INPUT_DEVICE_TYPE_SEESAW_GAMEPAD
+  #define ENABLE_ANO_ENCODER    0
+#else  // INPUT_DEVICE_TYPE_NONE
+  #undef  ENABLE_GAMEPAD_SENSOR
+  #define ENABLE_GAMEPAD_SENSOR 0
   #define ENABLE_ANO_ENCODER    0
 #endif
 
@@ -1036,7 +1040,7 @@
   #error "Pick one battery backend per board — BATTERY_BACKEND_ADC and BATTERY_BACKEND_FUEL_GAUGE are mutually exclusive."
 #endif
 #if BATTERY_BACKEND_FUEL_GAUGE && !ENABLE_I2C_SYSTEM
-  #error "BATTERY_BACKEND_FUEL_GAUGE requires the I2C subsystem (I2C_FEATURE_LEVEL > 0). Lower the level or pick a different backend."
+  #error "BATTERY_BACKEND_FUEL_GAUGE requires the I2C subsystem (I2C_FEATURE_LEVEL > 0). Raise the level or pick a different backend."
 #endif
 // If the user force-enabled the monitor on a board with no backend hardware
 // claimed, the runtime will seed USB-only and report it — no compile error.

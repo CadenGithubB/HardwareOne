@@ -1,0 +1,17 @@
+# HardwareOne recovery-OTA layout for 16 MB FeatherS3 boards without ESP-SR.
+# Migration to this layout is cable-only and relocates LittleFS. Back up data
+# before first flash. Subsequent OTA writes touch ota_0 and otadata only.
+#
+# factory:  golden pure-IDF recovery updater (1336 KiB)
+# otadata:  two-sector ESP-IDF OTA selection journal
+# ota_0:    HardwareOne application (5760 KiB)
+# littlefs: user/system data (9216 KiB)
+#
+# Name,     Type, SubType,  Offset,    Size,      Flags
+nvs,        data, nvs,      0xA000,    0x4000,
+nvs_key,    data, nvs_keys, 0xE000,    0x1000,    encrypted
+phy_init,   data, phy,      0xF000,    0x1000,
+factory,    app,  factory,  0x10000,   0x14E000,
+otadata,    data, ota,      0x15E000,  0x2000,    encrypted
+ota_0,      app,  ota_0,    0x160000,  0x5A0000,
+littlefs,   data, littlefs, 0x700000,  0x900000,  encrypted

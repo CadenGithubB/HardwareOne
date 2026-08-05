@@ -7,6 +7,11 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <ctype.h>
+#include <atomic>
+
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 #include "G2_Ring.h"
 #include "System_Debug.h"
@@ -60,20 +65,18 @@ struct TrendMeta {
   int16_t  maxV;
 };
 
-static HealthSeries sHr, sHrv, sSpo2, sTemp, sBat;
-static HealthSeries sTrendHr, sTrendHrv, sTrendSpo2;
-static TrendMeta sTrendMetaHr, sTrendMetaHrv, sTrendMetaSpo2;
+EXT_RAM_BSS_ATTR static HealthSeries sHr, sHrv, sSpo2, sTemp, sBat;
+EXT_RAM_BSS_ATTR static HealthSeries sTrendHr, sTrendHrv, sTrendSpo2;
+EXT_RAM_BSS_ATTR static TrendMeta sTrendMetaHr, sTrendMetaHrv, sTrendMetaSpo2;
+static StaticSemaphore_t sSeriesMutexStorage;
+static SemaphoreHandle_t sSeriesMutex = xSemaphoreCreateMutexStatic(&sSeriesMutexStorage);
 
 static G2HealthNav sNav = HEALTH_NAV_MAIN;
 static uint32_t sMenuGen = 1;
 static G2HealthMetric sSelected = HEALTH_METRIC_OVERVIEW;
 static bool sPollRequest = false;
-static bool sDailyRequest = false;
-static uint8_t sDailyCmd = 0;
-// Trends Refresh (and enter) queues up to 3 daily cmds; drained one-at-a-time.
-static uint8_t sDailyQueue[4];
-static uint8_t sDailyQueueLen = 0;
-static uint8_t sDailyQueueIdx = 0;
+static bool sHistoryRefreshRequest = false;
+static bool sHistoryRefreshForce = false;
 static uint32_t sLastSyncMs = 0;
 static bool sLoggedHint = false;
 static bool sPageActive = false;
@@ -86,6 +89,106 @@ static uint32_t sPollUiMs = 0;
 // the glasses worker once. Live 1 Hz sync must NOT re-push (~20 KB BLE).
 static bool sGraphPushPending = false;
 static uint32_t sGraphPushAfterMs = 0;
+
+// Typed daily/history state. The transport defers raw notify decoding to its
+// owner task, so a normal static mutex can protect the several-KB day without
+// blocking the BLE callback or disabling interrupts. Filesystem/encryption
+// work stays outside this mutex and is deferred to the normal main-loop task.
+EXT_RAM_BSS_ATTR static R1HealthHistoryDay sHistoryDay;
+EXT_RAM_BSS_ATTR static R1HealthHistoryDay sHistoryWorkDay;
+static StaticSemaphore_t sHistoryMutexStorage;
+static SemaphoreHandle_t sHistoryMutex = xSemaphoreCreateMutexStatic(&sHistoryMutexStorage);
+static std::atomic<uint32_t> sHistoryGeneration{0};
+static std::atomic<bool> sHistoryInitialized{false};
+static std::atomic<bool> sHistoryDirty{false};
+static std::atomic<uint32_t> sHistoryDirtyGeneration{0};
+static std::atomic<uint8_t> sTypedTrendSuppressMask{0};
+static std::atomic<bool> sTypedHistoryFetchActive{false};
+static char sHistoryPeerId[18] = {};
+static char sDeferredHistoryPeerId[18] = {};
+static bool sHistoryPeerSwitchPending = false;
+static bool sHistoryLoadedExact = false;
+static bool sDropCurrentHistoryFetch = false;
+static R1HealthHistoryFetchState sHistoryUiFetchState = R1_HISTORY_FETCH_IDLE;
+static uint8_t sHistoryUiFetchError = 0;
+
+struct PendingHistorySession {
+  bool active;
+  bool terminalPending;
+  bool terminalSuccessful;
+  uint8_t terminalError;
+  bool keyKnown;
+  uint8_t profile;
+  uint32_t dayStart;
+  int16_t timezoneMinutes;
+  uint32_t loadRetryAtMs;
+  R1HealthHistoryStoreError loadError;
+  bool heartRatePending;
+  bool hrvPending;
+  bool spo2Pending;
+  bool activityPending;
+  bool sleepPending;
+  R1HealthSleepState sleepState;
+  R1CommonDailyResult heartRate;
+  R1HrvDailyResult hrv;
+  R1CommonDailyResult spo2;
+  R1ActivityDailyResult activity;
+};
+
+EXT_RAM_BSS_ATTR static PendingHistorySession sPendingHistory;
+
+static SemaphoreHandle_t historyMutex() {
+  return sHistoryMutex;
+}
+
+class HistoryLock {
+ public:
+  explicit HistoryLock(bool /*writer*/)
+      : locked_(xSemaphoreTake(historyMutex(), portMAX_DELAY) == pdTRUE) {}
+  ~HistoryLock() {
+    if (!locked_) return;
+    xSemaphoreGive(historyMutex());
+  }
+  bool locked() const { return locked_; }
+ private:
+  bool locked_;
+};
+
+class SeriesLock {
+ public:
+  SeriesLock() : locked_(xSemaphoreTake(sSeriesMutex, portMAX_DELAY) == pdTRUE) {}
+  ~SeriesLock() { if (locked_) xSemaphoreGive(sSeriesMutex); }
+  bool locked() const { return locked_; }
+ private:
+  bool locked_;
+};
+
+static uint32_t markHistoryChangedLocked() {
+  uint32_t generation = sHistoryGeneration.fetch_add(1, std::memory_order_release) + 1;
+  if (generation == 0) {
+    sHistoryGeneration.store(1, std::memory_order_release);
+    generation = 1;
+  }
+  return generation;
+}
+
+static void ensureHistoryInitializedLocked() {
+  if (sHistoryInitialized.load(std::memory_order_relaxed)) return;
+  r1HealthHistoryDayClear(sHistoryDay);
+  sHistoryInitialized.store(true, std::memory_order_release);
+}
+
+static bool historyPeerIdValid(const char* id) {
+  if (!id || strlen(id) != 17) return false;
+  for (size_t i = 0; i < 17; ++i) {
+    if ((i % 3) == 2) {
+      if (id[i] != ':') return false;
+    } else if (!isxdigit(static_cast<unsigned char>(id[i]))) {
+      return false;
+    }
+  }
+  return true;
+}
 
 // Pixel grid in PSRAM BSS (~41 KB).
 EXT_RAM_BSS_ATTR static uint8_t sGrid[HEALTH_TILE_H][HEALTH_TILE_W];
@@ -162,20 +265,9 @@ static void seriesPushRaw(HealthSeries* s, int16_t value, uint32_t ringTs, uint3
 
 static void bumpMenuGen(void) { sMenuGen++; }
 
-static void queueDailyCmd(uint8_t cmd) {
-  for (uint8_t i = sDailyQueueIdx; i < sDailyQueueLen; i++) {
-    if (sDailyQueue[i] == cmd) return;
-  }
-  if (sDailyQueueLen >= sizeof(sDailyQueue)) return;
-  sDailyQueue[sDailyQueueLen++] = cmd;
-}
-
-static void queueTrendsRefreshAll(void) {
-  sDailyQueueLen = 0;
-  sDailyQueueIdx = 0;
-  queueDailyCmd(R1_CMD_HEARTRATE);
-  queueDailyCmd(R1_CMD_HRV);
-  queueDailyCmd(R1_CMD_SPO2);
+static void requestHistoryRefresh(bool force) {
+  sHistoryRefreshRequest = true;
+  sHistoryRefreshForce = sHistoryRefreshForce || force;
 }
 
 static void enterTrendsNav(void) {
@@ -183,7 +275,7 @@ static void enterTrendsNav(void) {
   sSelected = HEALTH_METRIC_OVERVIEW;
   bumpMenuGen();
   g2HealthClearGraphPush();
-  if (g2RingIsConnected()) queueTrendsRefreshAll();
+  if (g2RingIsConnected()) requestHistoryRefresh(false);
 }
 
 static void leaveTrendsNav(void) {
@@ -191,11 +283,13 @@ static void leaveTrendsNav(void) {
   sSelected = HEALTH_METRIC_OVERVIEW;
   bumpMenuGen();
   g2HealthClearGraphPush();
-  sDailyQueueLen = 0;
-  sDailyQueueIdx = 0;
+  sHistoryRefreshRequest = false;
+  sHistoryRefreshForce = false;
 }
 
 void g2HealthNoteSample(G2HealthMetric metric, int16_t value, uint32_t ringTs) {
+  SeriesLock lock;
+  if (!lock.locked()) return;
   seriesPush(seriesFor(metric), value, ringTs, millis());
 }
 
@@ -225,6 +319,8 @@ static uint32_t backfillSampleMs(size_t i, size_t count, uint32_t nowMs,
 void g2HealthApplyDailyBackfill(G2HealthMetric metric,
                                 const uint8_t* values, size_t count,
                                 uint32_t startTs, uint32_t endTs) {
+  SeriesLock lock;
+  if (!lock.locked()) return;
   HealthSeries* s = seriesFor(metric);
   if (!s || !values || count == 0) return;
   // Only backfill when live series is thin — don't clobber a rich live trail.
@@ -258,6 +354,19 @@ void g2HealthApplyDailyBackfill(G2HealthMetric metric,
 void g2HealthApplyTrendDaily(G2HealthMetric metric,
                              const uint8_t* values, size_t count,
                              uint32_t startTs, uint32_t endTs) {
+  // The exact-profile coordinator queues typed pages and the main loop first
+  // loads the exact persisted peer/day key. Do not let the legacy flattened
+  // callback publish a history view ahead of that load/merge boundary.
+  if (sTypedHistoryFetchActive.load(std::memory_order_acquire)) return;
+  const uint8_t suppressBit = metric <= HEALTH_METRIC_SPO2
+      ? static_cast<uint8_t>(1u << static_cast<uint8_t>(metric)) : 0;
+  if (suppressBit != 0) {
+    const uint8_t prior = sTypedTrendSuppressMask.fetch_and(
+        static_cast<uint8_t>(~suppressBit), std::memory_order_acq_rel);
+    if ((prior & suppressBit) != 0) return;
+  }
+  SeriesLock lock;
+  if (!lock.locked()) return;
   HealthSeries* s = trendSeriesFor(metric);
   TrendMeta* meta = trendMetaFor(metric);
   if (!s || !meta || !values || count == 0) return;
@@ -297,7 +406,565 @@ void g2HealthApplyTrendDaily(G2HealthMetric metric,
             (unsigned)metric, (unsigned)n, (int)meta->avg);
 }
 
+static bool validateCommonDaily(const R1CommonDailyResult& result) {
+  if (result.profile != R1_PROFILE_FW_2_2_7_0005 ||
+      result.count > R1_COMMON_DAILY_MAX_RECORDS ||
+      result.trailer != R1_FW227_DAILY_TRAILER || result.dayStart == 0 ||
+      result.timezoneMinutes < -840 || result.timezoneMinutes > 840 ||
+      (result.metric != R1_DAILY_METRIC_HEART_RATE &&
+       result.metric != R1_DAILY_METRIC_SPO2)) return false;
+  bool seen[R1_HEALTH_HOURLY_SLOTS] = {};
+  for (uint8_t i = 0; i < result.count; ++i) {
+    const R1CommonDailyRecord& record = result.records[i];
+    if (record.hourSlot >= R1_HEALTH_HOURLY_SLOTS || seen[record.hourSlot] ||
+        record.bucketEpoch != result.dayStart + record.hourSlot * 3600u ||
+        record.minimum > record.average || record.average > record.maximum)
+      return false;
+    seen[record.hourSlot] = true;
+  }
+  return true;
+}
+
+static bool validateHrvDaily(const R1HrvDailyResult& result) {
+  if (result.profile != R1_PROFILE_FW_2_2_7_0005 ||
+      result.metric != R1_DAILY_METRIC_HRV ||
+      result.count > R1_HRV_DAILY_MAX_RECORDS ||
+      result.trailer != R1_FW227_DAILY_TRAILER || result.dayStart == 0 ||
+      result.timezoneMinutes < -840 || result.timezoneMinutes > 840) return false;
+  bool seen[R1_HEALTH_HOURLY_SLOTS] = {};
+  for (uint8_t i = 0; i < result.count; ++i) {
+    const R1HrvDailyRecord& record = result.records[i];
+    if (record.hourSlot >= R1_HEALTH_HOURLY_SLOTS || seen[record.hourSlot] ||
+        record.bucketEpoch != result.dayStart + record.hourSlot * 3600u ||
+        record.minimum > record.average || record.average > record.maximum)
+      return false;
+    seen[record.hourSlot] = true;
+  }
+  return true;
+}
+
+static bool validateActivityDaily(const R1ActivityDailyResult& result) {
+  if (result.profile != R1_PROFILE_FW_2_2_7_0005 ||
+      result.metric != R1_DAILY_METRIC_ACTIVITY ||
+      result.count > R1_ACTIVITY_DAILY_MAX_RECORDS ||
+      result.trailer != R1_FW227_DAILY_TRAILER || result.dayStart == 0 ||
+      result.timezoneMinutes < -840 || result.timezoneMinutes > 840) return false;
+  bool seen[R1_HEALTH_ACTIVITY_SLOTS] = {};
+  for (uint8_t i = 0; i < result.count; ++i) {
+    const R1ActivityDailyRecord& record = result.records[i];
+    if (record.tenMinuteSlot >= R1_HEALTH_ACTIVITY_SLOTS ||
+        seen[record.tenMinuteSlot] ||
+        record.bucketEpoch != result.dayStart + record.tenMinuteSlot * 600u ||
+        record.totalKcal < record.activeKcal ||
+        record.restingKcal !=
+            static_cast<uint16_t>(record.totalKcal - record.activeKcal))
+      return false;
+    seen[record.tenMinuteSlot] = true;
+  }
+  return true;
+}
+
+static bool pendingKeyAcceptLocked(uint8_t profile, uint32_t dayStart,
+                                   int16_t timezoneMinutes) {
+  if (!sPendingHistory.active || sHistoryPeerSwitchPending ||
+      !historyPeerIdValid(sHistoryPeerId) ||
+      profile != R1_PROFILE_FW_2_2_7_0005 || dayStart == 0) return false;
+  if (!sPendingHistory.keyKnown) {
+    sPendingHistory.keyKnown = true;
+    sPendingHistory.profile = profile;
+    sPendingHistory.dayStart = dayStart;
+    sPendingHistory.timezoneMinutes = timezoneMinutes;
+    sPendingHistory.loadRetryAtMs = 0;
+    sPendingHistory.loadError = R1_HISTORY_STORE_OK;
+    return true;
+  }
+  return sPendingHistory.profile == profile &&
+         sPendingHistory.dayStart == dayStart &&
+         sPendingHistory.timezoneMinutes == timezoneMinutes;
+}
+
+bool g2HealthApplyCommonDaily(const R1CommonDailyResult& result) {
+  if (!validateCommonDaily(result)) return false;
+  HistoryLock lock(false);
+  if (!lock.locked() ||
+      !pendingKeyAcceptLocked(static_cast<uint8_t>(result.profile),
+                              result.dayStart, result.timezoneMinutes)) return false;
+  const G2HealthMetric graphMetric = result.metric == R1_DAILY_METRIC_HEART_RATE
+      ? HEALTH_METRIC_HR : HEALTH_METRIC_SPO2;
+  if (result.metric == R1_DAILY_METRIC_HEART_RATE) {
+    sPendingHistory.heartRate = result;
+    sPendingHistory.heartRatePending = true;
+  } else {
+    sPendingHistory.spo2 = result;
+    sPendingHistory.spo2Pending = true;
+  }
+  sTypedTrendSuppressMask.fetch_or(
+      static_cast<uint8_t>(1u << static_cast<uint8_t>(graphMetric)),
+      std::memory_order_release);
+  return true;
+}
+
+bool g2HealthApplyHrvDaily(const R1HrvDailyResult& result) {
+  if (!validateHrvDaily(result)) return false;
+  HistoryLock lock(false);
+  if (!lock.locked() ||
+      !pendingKeyAcceptLocked(static_cast<uint8_t>(result.profile),
+                              result.dayStart, result.timezoneMinutes)) return false;
+  sPendingHistory.hrv = result;
+  sPendingHistory.hrvPending = true;
+  sTypedTrendSuppressMask.fetch_or(
+      static_cast<uint8_t>(1u << static_cast<uint8_t>(HEALTH_METRIC_HRV)),
+      std::memory_order_release);
+  return true;
+}
+
+bool g2HealthApplyActivityDaily(const R1ActivityDailyResult& result) {
+  if (!validateActivityDaily(result)) return false;
+  HistoryLock lock(false);
+  if (!lock.locked() ||
+      !pendingKeyAcceptLocked(static_cast<uint8_t>(result.profile),
+                              result.dayStart, result.timezoneMinutes)) return false;
+  sPendingHistory.activity = result;
+  sPendingHistory.activityPending = true;
+  return true;
+}
+
+static void applyCommonToDayLocked(const R1CommonDailyResult& result) {
+  R1HealthHourlyMetricDay* metric = result.metric == R1_DAILY_METRIC_HEART_RATE
+      ? &sHistoryDay.heartRate : &sHistoryDay.spo2;
+  memset(metric, 0, sizeof(*metric));
+  metric->sourceSerial = result.sourceSerial;
+  metric->sourceCrc32 = result.sourceCrc32;
+  metric->latestValid = result.latestTimestamp != 0;
+  metric->latestTimestamp = result.latestTimestamp;
+  metric->latestValue = result.latestValue;
+  for (uint8_t i = 0; i < result.count; ++i) {
+    const R1CommonDailyRecord& src = result.records[i];
+    R1HealthHourlyBucket& dst = metric->slots[src.hourSlot];
+    dst.valid = true;
+    dst.hourSlot = src.hourSlot;
+    dst.average = src.average;
+    dst.minimum = src.minimum;
+    dst.maximum = src.maximum;
+    dst.bucketEpoch = src.bucketEpoch;
+    ++metric->count;
+  }
+  metric->have = metric->count != 0;
+}
+
+static void applyHrvToDayLocked(const R1HrvDailyResult& result) {
+  R1HealthHourlyMetricDay& metric = sHistoryDay.hrv;
+  memset(&metric, 0, sizeof(metric));
+  metric.sourceSerial = result.sourceSerial;
+  metric.sourceCrc32 = result.sourceCrc32;
+  metric.latestValid = result.latestTimestamp != 0;
+  metric.latestTimestamp = result.latestTimestamp;
+  metric.latestValue = result.latestValue;
+  for (uint8_t i = 0; i < result.count; ++i) {
+    const R1HrvDailyRecord& src = result.records[i];
+    R1HealthHourlyBucket& dst = metric.slots[src.hourSlot];
+    dst.valid = true;
+    dst.hourSlot = src.hourSlot;
+    dst.average = src.average;
+    dst.minimum = src.minimum;
+    dst.maximum = src.maximum;
+    dst.bucketEpoch = src.bucketEpoch;
+    ++metric.count;
+  }
+  metric.have = metric.count != 0;
+}
+
+static void applyActivityToDayLocked(const R1ActivityDailyResult& result) {
+  R1HealthActivityDay& activity = sHistoryDay.activity;
+  activity.sourceSerial = result.sourceSerial;
+  activity.sourceCrc32 = result.sourceCrc32;
+  // The current parser proves only one bounded frame (<=35/144), not paging.
+  activity.fullDayVerified = false;
+  for (uint8_t i = 0; i < result.count; ++i) {
+    const R1ActivityDailyRecord& src = result.records[i];
+    R1HealthActivityBucket& dst = activity.slots[src.tenMinuteSlot];
+    dst.valid = true;
+    dst.tenMinuteSlot = src.tenMinuteSlot;
+    dst.steps = src.steps;
+    dst.activeKcal = src.activeKcal;
+    dst.restingKcal = src.restingKcal;
+    dst.totalKcal = src.totalKcal;
+    dst.bucketEpoch = src.bucketEpoch;
+  }
+  activity.count = 0;
+  for (size_t i = 0; i < R1_HEALTH_ACTIVITY_SLOTS; ++i) {
+    if (activity.slots[i].valid) ++activity.count;
+  }
+  activity.have = activity.count != 0;
+}
+
+static void rebuildOneTrendLocked(const R1HealthHourlyMetricDay& source,
+                                  HealthSeries& series, TrendMeta& meta,
+                                  uint32_t dayStart) {
+  seriesClear(&series);
+  memset(&meta, 0, sizeof(meta));
+  if (!source.have) return;
+  const uint32_t nowMs = millis();
+  const uint32_t dayEnd = dayStart + 86400u;
+  int32_t sum = 0;
+  bool first = true;
+  for (size_t i = 0; i < R1_HEALTH_HOURLY_SLOTS; ++i) {
+    const R1HealthHourlyBucket& record = source.slots[i];
+    if (!record.valid) continue;
+    const uint32_t ageSec = dayEnd >= record.bucketEpoch
+        ? dayEnd - record.bucketEpoch : 0;
+    seriesPushRaw(&series, static_cast<int16_t>(record.average),
+                  record.bucketEpoch, nowMs - ageSec * 1000u);
+    if (first) {
+      meta.startTs = record.bucketEpoch;
+      meta.minV = static_cast<int16_t>(record.minimum);
+      meta.maxV = static_cast<int16_t>(record.maximum);
+      first = false;
+    } else {
+      if (record.minimum < meta.minV) meta.minV = record.minimum;
+      if (record.maximum > meta.maxV) meta.maxV = record.maximum;
+    }
+    meta.endTs = record.bucketEpoch;
+    sum += record.average;
+    ++meta.count;
+  }
+  meta.have = meta.count != 0;
+  meta.avg = meta.count ? static_cast<int16_t>(sum / meta.count) : 0;
+  if (source.latestValid && source.latestTimestamp > meta.endTs)
+    meta.endTs = source.latestTimestamp;
+}
+
+static void rebuildTypedTrends(const R1HealthHistoryDay& day) {
+  SeriesLock lock;
+  if (!lock.locked()) return;
+  rebuildOneTrendLocked(day.heartRate, sTrendHr, sTrendMetaHr, day.dayStart);
+  rebuildOneTrendLocked(day.hrv, sTrendHrv, sTrendMetaHrv, day.dayStart);
+  rebuildOneTrendLocked(day.spo2, sTrendSpo2, sTrendMetaSpo2, day.dayStart);
+}
+
+static void clearTypedTrends() {
+  SeriesLock lock;
+  if (!lock.locked()) return;
+  seriesClear(&sTrendHr); seriesClear(&sTrendHrv); seriesClear(&sTrendSpo2);
+  memset(&sTrendMetaHr, 0, sizeof(sTrendMetaHr));
+  memset(&sTrendMetaHrv, 0, sizeof(sTrendMetaHrv));
+  memset(&sTrendMetaSpo2, 0, sizeof(sTrendMetaSpo2));
+}
+
+void g2HealthSetHistoryPeerId(const char* canonicalMac) {
+  if (!historyPeerIdValid(canonicalMac)) return;
+  char normalized[18];
+  for (size_t i = 0; i < 17; ++i) {
+    normalized[i] = static_cast<char>(tolower(static_cast<unsigned char>(canonicalMac[i])));
+  }
+  normalized[17] = '\0';
+  bool changed = false;
+  {
+    HistoryLock lock(false);
+    if (!lock.locked()) return;
+    ensureHistoryInitializedLocked();
+    if (strcmp(sHistoryPeerId, normalized) == 0) return;
+    if (sHistoryDirty.load(std::memory_order_acquire)) {
+      memcpy(sDeferredHistoryPeerId, normalized, sizeof(normalized));
+      sHistoryPeerSwitchPending = true;
+      return;
+    }
+    memcpy(sHistoryPeerId, normalized, sizeof(normalized));
+    memset(sDeferredHistoryPeerId, 0, sizeof(sDeferredHistoryPeerId));
+    sHistoryPeerSwitchPending = false;
+    r1HealthHistoryDayClear(sHistoryDay);
+    memset(&sPendingHistory, 0, sizeof(sPendingHistory));
+    sHistoryLoadedExact = false;
+    sHistoryUiFetchState = R1_HISTORY_FETCH_IDLE;
+    sHistoryUiFetchError = 0;
+    sHistoryDirty.store(false, std::memory_order_release);
+    sHistoryDirtyGeneration.store(0, std::memory_order_release);
+    markHistoryChangedLocked();
+    changed = true;
+  }
+  if (changed) clearTypedTrends();
+}
+
+void g2HealthHistoryFetchStarted(void) {
+  HistoryLock lock(false);
+  if (!lock.locked()) return;
+  ensureHistoryInitializedLocked();
+  sTypedHistoryFetchActive.store(true, std::memory_order_release);
+  const bool priorUncommitted = sHistoryDirty.load(std::memory_order_acquire) ||
+      sPendingHistory.terminalPending || sPendingHistory.heartRatePending ||
+      sPendingHistory.hrvPending || sPendingHistory.spo2Pending ||
+      sPendingHistory.activityPending || sPendingHistory.sleepPending;
+  if (priorUncommitted) {
+    // Preserve the older terminal/pending generation. This transport sweep is
+    // intentionally ignored; the user can refresh again after persistence.
+    sDropCurrentHistoryFetch = true;
+    return;
+  }
+  memset(&sPendingHistory, 0, sizeof(sPendingHistory));
+  sPendingHistory.active = true;
+  sDropCurrentHistoryFetch = false;
+  sHistoryUiFetchState = R1_HISTORY_FETCHING;
+  sHistoryUiFetchError = 0;
+}
+
+void g2HealthHistoryFetchFinished(bool successfulSweep, uint8_t errorCode) {
+  HistoryLock lock(false);
+  if (!lock.locked()) return;
+  if (sDropCurrentHistoryFetch) {
+    sDropCurrentHistoryFetch = false;
+    sTypedHistoryFetchActive.store(false, std::memory_order_release);
+    return;
+  }
+  sPendingHistory.active = false;
+  sTypedHistoryFetchActive.store(false, std::memory_order_release);
+  if (!sPendingHistory.keyKnown) {
+    sHistoryUiFetchState = successfulSweep ? R1_HISTORY_PARTIAL : R1_HISTORY_ERROR;
+    sHistoryUiFetchError = errorCode;
+    // No exact day key means there is nothing safe to merge or persist. Drop
+    // this unkeyed session so a later refresh can establish a real key.
+    memset(&sPendingHistory, 0, sizeof(sPendingHistory));
+    return;
+  }
+  sPendingHistory.terminalPending = true;
+  sPendingHistory.terminalSuccessful = successfulSweep;
+  sPendingHistory.terminalError = errorCode;
+}
+
+void g2HealthHistorySetSleepState(R1HealthSleepState state) {
+  if (state > R1_HISTORY_SLEEP_PRESENT) return;
+  HistoryLock lock(false);
+  // Sleep is queried before activity and may be the only proven empty result.
+  // Hold it for the active sweep even before a later metric supplies the exact
+  // peer/day/tz key. With no eventual key, terminal state remains unpersisted.
+  if (!lock.locked() || !sPendingHistory.active) return;
+  sPendingHistory.sleepPending = true;
+  sPendingHistory.sleepState = state;
+}
+
+static bool historyKeyMatchesLocked(uint8_t profile, uint32_t dayStart,
+                                    int16_t timezoneMinutes) {
+  return sHistoryLoadedExact &&
+      strcmp(sHistoryDay.peerId, sHistoryPeerId) == 0 &&
+      sHistoryDay.protocolProfile == profile &&
+      sHistoryDay.dayStart == dayStart &&
+      sHistoryDay.timezoneMinutes == timezoneMinutes;
+}
+
+static void processPendingHistoryMainTask() {
+  char peer[18] = {};
+  uint8_t profile = 0;
+  uint32_t dayStart = 0;
+  int16_t timezoneMinutes = 0;
+  bool needLoad = false;
+  {
+    HistoryLock lock(false);
+    if (!lock.locked() || !sPendingHistory.keyKnown) return;
+    const uint32_t now = millis();
+    if (sPendingHistory.loadRetryAtMs != 0 &&
+        (int32_t)(now - sPendingHistory.loadRetryAtMs) < 0) return;
+    memcpy(peer, sHistoryPeerId, sizeof(peer));
+    profile = sPendingHistory.profile;
+    dayStart = sPendingHistory.dayStart;
+    timezoneMinutes = sPendingHistory.timezoneMinutes;
+    needLoad = !historyKeyMatchesLocked(profile, dayStart, timezoneMinutes);
+  }
+
+  bool installed = false;
+  if (needLoad) {
+    const R1HealthHistoryStoreError loadError = r1HealthHistoryStoreLoadExact(
+        peer, dayStart, timezoneMinutes, sHistoryWorkDay);
+    if (loadError == R1_HISTORY_STORE_NOT_FOUND) {
+      r1HealthHistoryDayClear(sHistoryWorkDay);
+      memcpy(sHistoryWorkDay.peerId, peer, sizeof(sHistoryWorkDay.peerId));
+      sHistoryWorkDay.protocolProfile = profile;
+      sHistoryWorkDay.dayStart = dayStart;
+      sHistoryWorkDay.timezoneMinutes = timezoneMinutes;
+    } else if (loadError != R1_HISTORY_STORE_OK) {
+      HistoryLock lock(false);
+      if (lock.locked() && sPendingHistory.keyKnown &&
+          sPendingHistory.profile == profile &&
+          sPendingHistory.dayStart == dayStart &&
+          sPendingHistory.timezoneMinutes == timezoneMinutes) {
+        sPendingHistory.loadError = loadError;
+        sPendingHistory.loadRetryAtMs = millis() + 5000;
+        sHistoryUiFetchState = R1_HISTORY_ERROR;
+        sHistoryUiFetchError = static_cast<uint8_t>(loadError);
+      }
+      return;
+    }
+    // Once the new exact key has loaded, remove the previous day's trends
+    // before publishing the new model; viewers may briefly see no data, never
+    // a cross-day/cross-peer mix.
+    clearTypedTrends();
+    HistoryLock lock(false);
+    if (!lock.locked() || !sPendingHistory.keyKnown ||
+        sPendingHistory.profile != profile ||
+        sPendingHistory.dayStart != dayStart ||
+        sPendingHistory.timezoneMinutes != timezoneMinutes ||
+        strcmp(sHistoryPeerId, peer) != 0) return;
+    memcpy(&sHistoryDay, &sHistoryWorkDay, sizeof(sHistoryDay));
+    sHistoryLoadedExact = true;
+    sPendingHistory.loadError = R1_HISTORY_STORE_OK;
+    sPendingHistory.loadRetryAtMs = 0;
+    markHistoryChangedLocked();
+    installed = true;
+  }
+
+  bool modelChanged = installed;
+  bool terminalApplied = false;
+  {
+    HistoryLock lock(false);
+    if (!lock.locked() || !historyKeyMatchesLocked(profile, dayStart,
+                                                    timezoneMinutes)) return;
+    if (sPendingHistory.heartRatePending) {
+      applyCommonToDayLocked(sPendingHistory.heartRate);
+      sPendingHistory.heartRatePending = false;
+      modelChanged = true;
+    }
+    if (sPendingHistory.hrvPending) {
+      applyHrvToDayLocked(sPendingHistory.hrv);
+      sPendingHistory.hrvPending = false;
+      modelChanged = true;
+    }
+    if (sPendingHistory.spo2Pending) {
+      applyCommonToDayLocked(sPendingHistory.spo2);
+      sPendingHistory.spo2Pending = false;
+      modelChanged = true;
+    }
+    if (sPendingHistory.activityPending) {
+      applyActivityToDayLocked(sPendingHistory.activity);
+      sPendingHistory.activityPending = false;
+      modelChanged = true;
+    }
+    if (sPendingHistory.sleepPending) {
+      sHistoryDay.sleepState = sPendingHistory.sleepState;
+      sPendingHistory.sleepPending = false;
+      modelChanged = true;
+    }
+    if (sPendingHistory.active) sHistoryDay.fetchState = R1_HISTORY_FETCHING;
+    if (sPendingHistory.terminalPending) {
+      const bool haveAny = sHistoryDay.heartRate.have || sHistoryDay.hrv.have ||
+          sHistoryDay.spo2.have || sHistoryDay.activity.have ||
+          sHistoryDay.sleepState != R1_HISTORY_SLEEP_UNKNOWN;
+      const uint32_t now = static_cast<uint32_t>(time(nullptr));
+      // Activity paging is not proven. A sweep is complete only when activity
+      // itself is present and explicitly full-day verified; absent activity is
+      // partial, never complete.
+      if (sPendingHistory.terminalSuccessful && sHistoryDay.activity.have &&
+          sHistoryDay.activity.fullDayVerified) {
+        sHistoryDay.fetchState = R1_HISTORY_COMPLETE;
+        sHistoryDay.lastSuccessEpoch = now;
+      } else if (haveAny || sPendingHistory.terminalSuccessful) {
+        sHistoryDay.fetchState = R1_HISTORY_PARTIAL;
+        sHistoryDay.lastPartialEpoch = now;
+      } else {
+        sHistoryDay.fetchState = R1_HISTORY_ERROR;
+        sHistoryDay.lastPartialEpoch = now;
+      }
+      sHistoryDay.fetchError = sPendingHistory.terminalError;
+      sHistoryUiFetchState = sHistoryDay.fetchState;
+      sHistoryUiFetchError = sHistoryDay.fetchError;
+      sPendingHistory.terminalPending = false;
+      modelChanged = true;
+      terminalApplied = true;
+    }
+    if (modelChanged) {
+      const uint32_t generation = markHistoryChangedLocked();
+      if (terminalApplied) {
+        sHistoryDirtyGeneration.store(generation, std::memory_order_release);
+        sHistoryDirty.store(true, std::memory_order_release);
+      }
+      memcpy(&sHistoryWorkDay, &sHistoryDay, sizeof(sHistoryWorkDay));
+    }
+  }
+  if (modelChanged) {
+    rebuildTypedTrends(sHistoryWorkDay);
+    if (sNav == HEALTH_NAV_TRENDS) g2HealthArmGraphPush(200);
+  }
+}
+
+bool g2HealthHistorySnapshot(R1HealthHistoryDay& out) {
+  if (!sHistoryInitialized.load(std::memory_order_acquire)) return false;
+  HistoryLock lock(false);
+  if (!lock.locked()) return false;
+  memcpy(&out, &sHistoryDay, sizeof(out));
+  out.fetchState = sHistoryUiFetchState;
+  out.fetchError = sHistoryUiFetchError;
+  return true;
+}
+
+void g2HealthHistoryGetSummary(G2HealthHistorySummary& out) {
+  memset(&out, 0, sizeof(out));
+  if (!sHistoryInitialized.load(std::memory_order_acquire)) return;
+  HistoryLock lock(false);
+  if (!lock.locked()) return;
+  out.available = sHistoryLoadedExact && historyPeerIdValid(sHistoryDay.peerId) &&
+                  sHistoryDay.dayStart != 0;
+  out.protocolProfile = sHistoryDay.protocolProfile;
+  out.dayStart = sHistoryDay.dayStart;
+  out.timezoneMinutes = sHistoryDay.timezoneMinutes;
+  out.fetchState = sHistoryUiFetchState;
+  out.lastSuccessEpoch = sHistoryDay.lastSuccessEpoch;
+  out.lastPartialEpoch = sHistoryDay.lastPartialEpoch;
+  out.fetchError = sHistoryUiFetchError;
+  out.sleepState = sHistoryDay.sleepState;
+  r1HealthHistoryActivitySummary(sHistoryDay, out.activity);
+}
+
+void g2HealthActivitySummary(R1HealthActivitySummary& out) {
+  G2HealthHistorySummary summary;
+  g2HealthHistoryGetSummary(summary);
+  out = summary.activity;
+}
+
+void g2HealthHistoryCommitTick(void) {
+  const uint32_t dirtyGeneration =
+      sHistoryDirtyGeneration.load(std::memory_order_acquire);
+  if (sHistoryDirty.load(std::memory_order_acquire) && dirtyGeneration != 0) {
+    bool snapshotReady = false;
+    {
+      HistoryLock lock(false);
+      if (lock.locked() && sHistoryInitialized.load(std::memory_order_relaxed) &&
+          sHistoryGeneration.load(std::memory_order_relaxed) == dirtyGeneration &&
+          (sHistoryDay.fetchState == R1_HISTORY_COMPLETE ||
+           sHistoryDay.fetchState == R1_HISTORY_PARTIAL ||
+           sHistoryDay.fetchState == R1_HISTORY_ERROR ||
+           sHistoryDay.fetchState == R1_HISTORY_UNSUPPORTED)) {
+        memcpy(&sHistoryWorkDay, &sHistoryDay, sizeof(sHistoryWorkDay));
+        snapshotReady = true;
+      }
+    }
+    if (snapshotReady)
+      (void)r1HealthHistoryStoreStage(sHistoryWorkDay, dirtyGeneration);
+  }
+  r1HealthHistoryStoreTick();
+  R1HealthHistoryStoreStatus store{};
+  r1HealthHistoryStoreGetStatus(store);
+  if (store.committedGeneration != 0 &&
+      store.committedGeneration ==
+          sHistoryDirtyGeneration.load(std::memory_order_acquire)) {
+    sHistoryDirty.store(false, std::memory_order_release);
+  }
+  char deferredPeer[18] = {};
+  {
+    HistoryLock lock(false);
+    if (lock.locked() && sHistoryPeerSwitchPending &&
+        !sHistoryDirty.load(std::memory_order_acquire)) {
+      memcpy(deferredPeer, sDeferredHistoryPeerId, sizeof(deferredPeer));
+      sHistoryPeerSwitchPending = false;
+      memset(sDeferredHistoryPeerId, 0, sizeof(sDeferredHistoryPeerId));
+    }
+  }
+  if (historyPeerIdValid(deferredPeer)) g2HealthSetHistoryPeerId(deferredPeer);
+  // Merge/load incoming pages only after any older terminal generation has
+  // been staged and acknowledged, so a new sweep cannot erase retry state.
+  if (!sHistoryDirty.load(std::memory_order_acquire))
+    processPendingHistoryMainTask();
+}
+
 size_t g2HealthHistoryCount(G2HealthMetric metric) {
+  SeriesLock lock;
+  if (!lock.locked()) return 0;
   HealthSeries* s = seriesFor(metric);
   return s ? s->count : 0;
 }
@@ -319,6 +986,8 @@ static void syncFromTelemetry(void) {
   G2RingTelemetry t;
   g2RingGetTelemetry(t);
   if (!t.connected) return;
+  SeriesLock lock;
+  if (!lock.locked()) return;
   // Ring timestamps live in the private cache; pass 0 and let value+time gate
   // dedupe — the notify path also calls g2HealthNoteSample with real ringTs.
   // *RxMs (not *AgeSec) is mandatory here: ringSampleAgeSec prefers the ring
@@ -337,6 +1006,7 @@ const char* const* g2HealthMenuRows(size_t* count) {
   static const char* const mainRows[] = {
     "<- Apps",
     "Overview",
+    "Activity",
     "Trends",
     "Heart Rate",
     "HRV",
@@ -344,7 +1014,7 @@ const char* const* g2HealthMenuRows(size_t* count) {
     "Temperature",
     "Battery",
     "Poll Now",
-    "Toggle Track",
+    "Health Logging",
   };
   // Rows carry no day claim — the ring's daily window is only "today" when
   // its clock is real; the text panel shows the honest label (date / boot N).
@@ -368,11 +1038,12 @@ G2HealthNav g2HealthNav(void) { return sNav; }
 bool g2HealthInTrendsNav(void) { return sNav == HEALTH_NAV_TRENDS; }
 
 bool g2HealthWantTextOnlyShape(void) {
-  return sSelected == HEALTH_METRIC_OVERVIEW;
+  return sSelected == HEALTH_METRIC_OVERVIEW ||
+         sSelected == HEALTH_METRIC_ACTIVITY;
 }
 
-bool g2HealthTrackIsActive(void) {
-  return healthTrackIsActive();
+bool g2HealthLoggingIsActive(void) {
+  return healthLoggingIsActive();
 }
 
 void g2HealthOpen(void) {
@@ -380,15 +1051,13 @@ void g2HealthOpen(void) {
   sSelected = HEALTH_METRIC_OVERVIEW;
   bumpMenuGen();
   sPollRequest = true;
-  sDailyRequest = false;
-  sDailyCmd = 0;
-  sDailyQueueLen = 0;
-  sDailyQueueIdx = 0;
+  sHistoryRefreshRequest = false;
+  sHistoryRefreshForce = false;
   sLastSyncMs = 0;
   g2HealthClearGraphPush();
   syncFromTelemetry();
-  if (!sLoggedHint && !healthTrackIsActive()) {
-    DEBUG_G2F("[HEALTH] tip: tap Toggle Track (or 'healthtrack on') to persist vitals");
+  if (!sLoggedHint && !healthLoggingIsActive()) {
+    DEBUG_G2F("[HEALTH] tip: tap Health Logging (or 'healthlogging on') to persist vitals");
     sLoggedHint = true;
   }
 }
@@ -399,34 +1068,6 @@ void g2HealthTick(void) {
     syncFromTelemetry();
     sLastSyncMs = now;
   }
-}
-
-static void maybeRequestDaily(G2HealthMetric m) {
-  uint8_t cmd = 0;
-  HealthSeries* s = nullptr;
-  switch (m) {
-    case HEALTH_METRIC_HR:   cmd = R1_CMD_HEARTRATE;   s = &sHr;   break;
-    case HEALTH_METRIC_HRV:  cmd = R1_CMD_HRV;         s = &sHrv;  break;
-    case HEALTH_METRIC_SPO2: cmd = R1_CMD_SPO2;        s = &sSpo2; break;
-    case HEALTH_METRIC_TEMP: cmd = R1_CMD_TEMPERATURE; s = &sTemp; break;
-    default: return;
-  }
-  if (!s || s->count >= kThinHistory) return;
-  if (!g2RingIsConnected()) return;
-  sDailyCmd = cmd;
-  sDailyRequest = true;
-}
-
-static void requestTrendDaily(G2HealthMetric m) {
-  uint8_t cmd = 0;
-  switch (m) {
-    case HEALTH_METRIC_HR:   cmd = R1_CMD_HEARTRATE; break;
-    case HEALTH_METRIC_HRV:  cmd = R1_CMD_HRV;       break;
-    case HEALTH_METRIC_SPO2: cmd = R1_CMD_SPO2;      break;
-    default: return;
-  }
-  if (!g2RingIsConnected()) return;
-  queueDailyCmd(cmd);
 }
 
 void g2HealthArmGraphPush(uint32_t delayMs) {
@@ -455,6 +1096,8 @@ void g2HealthClearGraphPush(void) {
 
 void g2HealthAction(uint32_t rowIdx) {
   if (sNav == HEALTH_NAV_TRENDS) {
+    // The lens has no user/admin identity, so it exposes normal refresh only.
+    // Force refresh remains on authenticated admin surfaces (web/CLI/OLED).
     // 0 <- Health · 1 HR · 2 HRV · 3 SpO2 · 4 Refresh
     switch (rowIdx) {
       case 0:
@@ -463,72 +1106,75 @@ void g2HealthAction(uint32_t rowIdx) {
         break;
       case 1:
         sSelected = HEALTH_METRIC_HR;
-        requestTrendDaily(sSelected);
+        requestHistoryRefresh(false);
         g2HealthArmGraphPush(1200);
         break;
       case 2:
         sSelected = HEALTH_METRIC_HRV;
-        requestTrendDaily(sSelected);
+        requestHistoryRefresh(false);
         g2HealthArmGraphPush(1200);
         break;
       case 3:
         sSelected = HEALTH_METRIC_SPO2;
-        requestTrendDaily(sSelected);
+        requestHistoryRefresh(false);
         g2HealthArmGraphPush(1200);
         break;
       case 4:
         sSelected = HEALTH_METRIC_OVERVIEW;
         g2HealthClearGraphPush();
-        queueTrendsRefreshAll();
-        DEBUG_G2F("[HEALTH] Trends Refresh queued");
+        requestHistoryRefresh(false);
+        DEBUG_G2F("[HEALTH] Trends Refresh requested");
         break;
       default: break;
     }
     return;
   }
 
-  // MAIN: 0 Back (worker) · 1 Overview · 2 Trends · 3 HR · 4 HRV · 5 SpO2 ·
-  // 6 Temp · 7 Bat · 8 Poll · 9 Toggle Track
+  // MAIN: 0 Back (worker) · 1 Overview · 2 Activity · 3 Trends · 4 HR ·
+  // 5 HRV · 6 SpO2 · 7 Temp · 8 Bat · 9 Poll · 10 Health Logging
   switch (rowIdx) {
     case 1:
       sSelected = HEALTH_METRIC_OVERVIEW;
       g2HealthClearGraphPush();
       break;
     case 2:
+      sSelected = HEALTH_METRIC_ACTIVITY;
+      g2HealthClearGraphPush();
+      break;
+    case 3:
       enterTrendsNav();
       DEBUG_G2F("[HEALTH] → Trends");
       break;
-    case 3:
-      sSelected = HEALTH_METRIC_HR;
-      maybeRequestDaily(sSelected);
-      g2HealthArmGraphPush(1200);
-      break;
     case 4:
-      sSelected = HEALTH_METRIC_HRV;
-      maybeRequestDaily(sSelected);
+      sSelected = HEALTH_METRIC_HR;
+      requestHistoryRefresh(false);
       g2HealthArmGraphPush(1200);
       break;
     case 5:
-      sSelected = HEALTH_METRIC_SPO2;
-      maybeRequestDaily(sSelected);
+      sSelected = HEALTH_METRIC_HRV;
+      requestHistoryRefresh(false);
       g2HealthArmGraphPush(1200);
       break;
     case 6:
-      sSelected = HEALTH_METRIC_TEMP;
-      maybeRequestDaily(sSelected);
+      sSelected = HEALTH_METRIC_SPO2;
+      requestHistoryRefresh(false);
       g2HealthArmGraphPush(1200);
       break;
     case 7:
+      sSelected = HEALTH_METRIC_TEMP;
+      g2HealthArmGraphPush(1200);
+      break;
+    case 8:
       sSelected = HEALTH_METRIC_BATTERY;
       g2HealthArmGraphPush(400);  // no daily for battery
       break;
-    case 8:
+    case 9:
       sPollRequest = true;
       DEBUG_G2F("[HEALTH] Poll Now requested");
       break;
-    case 9: {
-      const char* r = healthTrackSet(!gSettings.healthTrackingEnabled);
-      DEBUG_G2F("[HEALTH] Toggle Track → %s", r ? r : "(null)");
+    case 10: {
+      const char* r = healthLoggingSet(!gSettings.healthLoggingEnabled);
+      DEBUG_G2F("[HEALTH] Health Logging → %s", r ? r : "(null)");
       break;
     }
     default: break;
@@ -578,19 +1224,11 @@ static const char* healthPollStatusLine(const char* fallback) {
   return fallback ? fallback : "";
 }
 
-bool g2HealthConsumeDailyRequest(uint8_t* outCmd) {
-  // Trends Refresh queue first (paced by the worker between consumes).
-  if (sDailyQueueIdx < sDailyQueueLen) {
-    if (outCmd) *outCmd = sDailyQueue[sDailyQueueIdx++];
-    if (sDailyQueueIdx >= sDailyQueueLen) {
-      sDailyQueueLen = 0;
-      sDailyQueueIdx = 0;
-    }
-    return true;
-  }
-  if (!sDailyRequest) return false;
-  sDailyRequest = false;
-  if (outCmd) *outCmd = sDailyCmd;
+bool g2HealthConsumeHistoryRefreshRequest(bool* force) {
+  if (!sHistoryRefreshRequest) return false;
+  sHistoryRefreshRequest = false;
+  if (force) *force = sHistoryRefreshForce;
+  sHistoryRefreshForce = false;
   return true;
 }
 
@@ -971,8 +1609,8 @@ void g2HealthBuildOverviewText(char* out, size_t cap) {
   }
 
   const char* track =
-      healthTrackIsActive() ? "TRACK on" :
-      (gSensorLoggingRunning && (gSensorLogMask & LOG_R1)) ? "LOG on" : "Track off";
+      healthLoggingIsActive() ? "Logging on" :
+      (gSensorLoggingRunning && (gSensorLogMask & LOG_R1)) ? "LOG on" : "Logging off";
   const char* poll = healthPollStatusLine(nullptr);
 
   // One shared recentness (freshest vital), not per-line ages — avoids
@@ -1360,21 +1998,32 @@ void g2HealthBuildTrendsOverviewText(char* out, size_t cap) {
              "Pair via BT / R1");
     return;
   }
+  TrendMeta hrMeta{}, hrvMeta{}, spo2Meta{};
+  {
+    SeriesLock lock;
+    if (lock.locked()) {
+      hrMeta = sTrendMetaHr;
+      hrvMeta = sTrendMetaHrv;
+      spo2Meta = sTrendMetaSpo2;
+    }
+  }
   char hr[48], hrv[48], spo2[48];
-  fmtTrendLine(hr, sizeof(hr), "HR", &sTrendMetaHr);
-  fmtTrendLine(hrv, sizeof(hrv), "HRV", &sTrendMetaHrv);
-  fmtTrendLine(spo2, sizeof(spo2), "O2", &sTrendMetaSpo2);
+  fmtTrendLine(hr, sizeof(hr), "HR", &hrMeta);
+  fmtTrendLine(hrv, sizeof(hrv), "HRV", &hrvMeta);
+  fmtTrendLine(spo2, sizeof(spo2), "O2", &spo2Meta);
   // Day identity: freshest valid ring day-window end across the metas; when
   // none, local now — which itself degrades to "boot N" when the host is
   // dark too (fmtTrendDayLabel).
   uint32_t dayTs = 0;
-  if (sTrendMetaHr.have   && sTrendMetaHr.endTs   > dayTs) dayTs = sTrendMetaHr.endTs;
-  if (sTrendMetaHrv.have  && sTrendMetaHrv.endTs  > dayTs) dayTs = sTrendMetaHrv.endTs;
-  if (sTrendMetaSpo2.have && sTrendMetaSpo2.endTs > dayTs) dayTs = sTrendMetaSpo2.endTs;
+  if (hrMeta.have   && hrMeta.endTs   > dayTs) dayTs = hrMeta.endTs;
+  if (hrvMeta.have  && hrvMeta.endTs  > dayTs) dayTs = hrvMeta.endTs;
+  if (spo2Meta.have && spo2Meta.endTs > dayTs) dayTs = spo2Meta.endTs;
   if (!Clock::isValidEpoch((time_t)dayTs)) dayTs = (uint32_t)time(nullptr);
   char day[16];
   fmtTrendDayLabel(day, sizeof(day), dayTs);
-  const bool fetching = (sDailyQueueIdx < sDailyQueueLen);
+  G2HealthHistorySummary history;
+  g2HealthHistoryGetSummary(history);
+  const bool fetching = history.fetchState == R1_HISTORY_FETCHING;
   snprintf(out, cap,
            "Trends (%s)\n"
            "%s\n"
@@ -1383,6 +2032,53 @@ void g2HealthBuildTrendsOverviewText(char* out, size_t cap) {
            "%s",
            day, hr, hrv, spo2,
            fetching ? "Fetching..." : "Tap metric / Refresh");
+}
+
+static void g2HealthBuildActivityText(char* out, size_t cap) {
+  if (!out || !cap) return;
+  G2HealthHistorySummary history{};
+  g2HealthHistoryGetSummary(history);
+  if (!history.available || history.dayStart == 0) {
+    snprintf(out, cap,
+             "Activity\n"
+             "No typed history yet\n"
+             "Refresh after ring setup");
+    return;
+  }
+  const R1HealthActivitySummary& summary = history.activity;
+  char dayLabel[16];
+  fmtTrendDayLabel(dayLabel, sizeof(dayLabel), history.dayStart);
+  if (!summary.available) {
+    snprintf(out, cap,
+             "Activity (%s)\n"
+             "No activity page\n"
+             "History: %s",
+             dayLabel, r1HealthHistoryFetchStateName(history.fetchState));
+    return;
+  }
+  snprintf(out, cap,
+           "Activity (%s)\n"
+           "Steps %lu\n"
+           "Kcal A%lu R%lu T%lu\n"
+           "%u/144 ten-min slots\n"
+           "%s",
+           dayLabel,
+           static_cast<unsigned long>(summary.steps),
+           static_cast<unsigned long>(summary.activeKcal),
+           static_cast<unsigned long>(summary.restingKcal),
+           static_cast<unsigned long>(summary.totalKcal),
+           static_cast<unsigned>(summary.bucketCount),
+           summary.fullDayVerified ? "Full day verified" : "Partial - paging unverified");
+}
+
+void g2HealthBuildTextOnly(char* out, size_t cap) {
+  if (sSelected == HEALTH_METRIC_ACTIVITY) {
+    g2HealthBuildActivityText(out, cap);
+  } else if (sNav == HEALTH_NAV_TRENDS) {
+    g2HealthBuildTrendsOverviewText(out, cap);
+  } else {
+    g2HealthBuildOverviewText(out, cap);
+  }
 }
 
 void g2HealthBuildMetricText(char* out, size_t cap) {
@@ -1402,8 +2098,18 @@ void g2HealthBuildMetricText(char* out, size_t cap) {
 
   // Trends day graph: title/avg/range from last daily payload.
   if (sNav == HEALTH_NAV_TRENDS) {
-    const HealthSeries* s = trendSeriesFor(sSelected);
-    const TrendMeta* meta = trendMetaFor(sSelected);
+    TrendMeta metaSnapshot{};
+    size_t seriesCount = 0;
+    {
+      SeriesLock lock;
+      if (lock.locked()) {
+        const HealthSeries* series = trendSeriesFor(sSelected);
+        const TrendMeta* meta = trendMetaFor(sSelected);
+        if (series) seriesCount = series->count;
+        if (meta) metaSnapshot = *meta;
+      }
+    }
+    const TrendMeta* meta = &metaSnapshot;
     const char* tag = "";
     const char* unit = "";
     switch (sSelected) {
@@ -1442,7 +2148,7 @@ void g2HealthBuildMetricText(char* out, size_t cap) {
     char line1[76], line2[100];
     healthTwoCol(line1, sizeof(line1), title, nbuf);
     healthTwoCol(line2, sizeof(line2), val, win);
-    if (s && meta && s->count >= 2) {
+    if (seriesCount >= 2 && meta->have) {
       snprintf(out, cap, "%s\n%s\nmin %d max %d",
                line1, line2, (int)meta->minV, (int)meta->maxV);
     } else {
@@ -1469,15 +2175,16 @@ void g2HealthBuildMetricText(char* out, size_t cap) {
 
   // Range lives on the graph Y-axis now — right column is n= / TRACK / wear.
   const char* track =
-      healthTrackIsActive() ? "TRACK on" :
-      (gSensorLoggingRunning && (gSensorLogMask & LOG_R1)) ? "LOG on" : "Track off";
+      healthLoggingIsActive() ? "Logging on" :
+      (gSensorLoggingRunning && (gSensorLogMask & LOG_R1)) ? "LOG on" : "Logging off";
   const char* poll = healthPollStatusLine(nullptr);
   char status[40];
   if (poll && poll[0]) snprintf(status, sizeof(status), "%s", poll);
   else                 snprintf(status, sizeof(status), "%s", track);
 
   char nbuf[16];
-  snprintf(nbuf, sizeof(nbuf), "n=%u", (unsigned)(s ? s->count : 0));
+  const size_t sampleCount = g2HealthHistoryCount(sSelected);
+  snprintf(nbuf, sizeof(nbuf), "n=%u", (unsigned)sampleCount);
 
   // Sized for healthTwoCol's compiler-visible worst case, as above.
   char line1[76], line2[104];
@@ -1485,7 +2192,7 @@ void g2HealthBuildMetricText(char* out, size_t cap) {
   //   72 bpm · 3m         TRACK on / Polling... / Updated
   healthTwoCol(line1, sizeof(line1), title, nbuf);
   healthTwoCol(line2, sizeof(line2), val, status);
-  if (s && s->count >= 2) {
+  if (sampleCount >= 2) {
     snprintf(out, cap, "%s\n%s", line1, line2);
   } else {
     snprintf(out, cap, "%s\n%s\nTap Poll Now", line1, line2);
@@ -1571,6 +2278,8 @@ static size_t healthPackBmp(uint8_t* out, size_t cap) {
 
 size_t g2RenderHealthBmp(uint8_t* out, size_t cap) {
   if (sSelected == HEALTH_METRIC_OVERVIEW) return 0;
+  SeriesLock lock;
+  if (!lock.locked()) return 0;
   composeGrid();
   return healthPackBmp(out, cap);
 }
@@ -1589,6 +2298,14 @@ void g2HealthBuildInfo(char* out, size_t cap) {
   else snprintf(temp, sizeof(temp), "%d.%d",
                 (int)(t.tempTenths / 10),
                 (int)(t.tempTenths < 0 ? -(t.tempTenths % 10) : (t.tempTenths % 10)));
+  size_t hrCount = 0, hrvCount = 0, spo2Count = 0, tempCount = 0, batCount = 0;
+  {
+    SeriesLock lock;
+    if (lock.locked()) {
+      hrCount = sHr.count; hrvCount = sHrv.count; spo2Count = sSpo2.count;
+      tempCount = sTemp.count; batCount = sBat.count;
+    }
+  }
   snprintf(out, cap,
            "Health — %s\nHR %s%u  HRV %s%d\nSpO2 %s%u  T %s\nBat %s%u  %s\nn=%u/%u/%u/%u/%u",
            t.connected ? "online" : "offline",
@@ -1598,8 +2315,8 @@ void g2HealthBuildInfo(char* out, size_t cap) {
            temp,
            t.batteryValid ? "" : "?", (unsigned)t.battery,
            wearLabel(t),
-           (unsigned)sHr.count, (unsigned)sHrv.count,
-           (unsigned)sSpo2.count, (unsigned)sTemp.count, (unsigned)sBat.count);
+           (unsigned)hrCount, (unsigned)hrvCount,
+           (unsigned)spo2Count, (unsigned)tempCount, (unsigned)batCount);
 }
 
 #endif  // ENABLE_R1_HEALTH

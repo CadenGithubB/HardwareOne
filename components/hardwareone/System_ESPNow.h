@@ -217,6 +217,17 @@ struct MeshPeerHealth {
                                  // Phase 0 relay groundwork: later route metrics key on
                                  // this (docs/ESPNOW_RELAY_RESTORE_PLAN.md).
   bool isActive;                 // true if this slot is in use
+  // True once a frame from this peer has actually been received over the radio.
+  // Distinct from lastRxActivityMs != 0, because BootstrapLiveness SEEDS that
+  // timestamp at pairing time to get the peer into broadcast fan-out — an
+  // optimistic guess, not an observation. Multi-hop routing asks "can I reach
+  // this peer directly?" and must not be fooled by the guess: a peer paired by
+  // MAC while out of range would look audible for a full timeout window, and
+  // every frame sent to it in that window (starting with the KEY_EX that
+  // completes the pairing) would go out on a link that isn't there.
+  // Never set for relayed frames — noteMeshPeerRxActivity returns early for
+  // those, since they prove nothing about the direct link.
+  bool everHeardDirect;
 };
 
 // hbRssi: pass RSSI from V4PayloadHeartbeat; use -128 to leave peer->rssi unchanged.

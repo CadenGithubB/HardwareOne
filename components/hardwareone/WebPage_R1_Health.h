@@ -11,6 +11,8 @@
 esp_err_t handleR1HealthPage(httpd_req_t* req);
 // GET /api/health/status   — same JSON as `healthstatus json`
 esp_err_t handleR1HealthStatus(httpd_req_t* req);
+// POST /api/health/action  — typed, authenticated actions (no raw ring writes)
+esp_err_t handleR1HealthAction(httpd_req_t* req);
 void registerR1HealthHandlers(httpd_handle_t server);
 
 #else

@@ -14,12 +14,12 @@ void bootStateInit() {
   if (sNvsReady) return;
   esp_err_t err = nvs_flash_init();
   if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-    // NVS partition is full or was written by a newer layout. Its only contents
-    // are WiFi calibration and this boot state — both recreatable — so erasing
-    // and re-initializing is safe.
-    ERROR_SYSTEMF("[BootState] NVS needs erase (0x%x) — erasing and re-init", err);
-    nvs_flash_erase();
-    err = nvs_flash_init();
+    // NVS is shared with WiFi credentials, BLE bonds, OTA state, and
+    // capture-sealing material. Automatic bulk erase would turn a
+    // recoverable version/capacity problem into permanent data loss, so fail
+    // closed on every build and leave repair to a narrow, explicit tool.
+    ERROR_SYSTEMF("[BootState] NVS needs recovery (0x%x) — preserving partition; automatic erase is forbidden", err);
+    return;
   }
   if (err != ESP_OK) {
     // Non-fatal: accessors degrade to returning 0 / no-op. The device still

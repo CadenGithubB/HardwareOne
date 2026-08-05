@@ -4,9 +4,180 @@
 
 ---
 
+## 0. Update — multi-hop is now implemented
+
+**The single largest finding in this report is out of date and the report has NOT
+been rewritten around it.** Multi-hop forwarding exists; `ttl` is read; the
+"TTL theater" section, §2.3's "there is no next-hop table, no forwarding", and
+the §7 gap rows about relaying are superseded. Everything else — the crypto
+stack, the async reply model, roles/failover, the battery-opcode gap — still
+stands. Sections that are superseded are marked **[SUPERSEDED]** inline.
+
+What replaced it, in one page:
+
+- **Two transports, not one.** Broadcast-class traffic (`TEXT`, `TIME_SYNC`)
+  reaches the whole mesh by **flooding**: a node re-emits a verified,
+  non-duplicate BROADCAST_AUTH frame to its other neighbours with `ttl-1` and a
+  fresh group-key HMAC. Unicast traffic reaches a distant peer by **routing**:
+  it is wrapped, unmodified, in a `RELAY_DATA` envelope and passed hop by hop.
+- **Routes are learned by split-horizon distance vector.** Every node sends each
+  neighbour a tailored `PEER_LIST` advertisement (opcode 39) every 30 s carrying
+  its route table minus anything whose next hop is that neighbour. Table lives in
+  `System_ESPNow_Router.{h,cpp}`: 24 routes, 90 s expiry, metric = worst link
+  RSSI on the path, 3 dB hysteresis before switching between equal-length paths.
+- **`ttl` never leaves the MACed region.** Header bytes 0..29 are covered by both
+  integrity schemes, so a forwarder re-signs after decrementing. That is legal
+  for the *group* key (every member holds it) and impossible for a *session*
+  key (pairwise) — which is exactly why routed frames are carried opaquely
+  rather than decrypted and re-sealed. **A relay cannot read what it carries.**
+- **The keystone: synthetic-source re-entry.** On final delivery the inner frame
+  is fed back into `v4_try_handle_incoming` with `recv_info->src_addr` rewritten
+  to the frame's true origin. Session lookup, the paired gate, reassembly and
+  ACK matching all key on that field, so all of them work over a relay with zero
+  per-handler changes — and end-to-end ACKs route home by themselves.
+- **Consequence worth internalising:** two nodes that cannot hear each other can
+  now complete KEY_EX and the X25519 session handshake *through* an
+  intermediary, then talk with full forward secrecy. `A–B–C` where A and C never
+  meet is a supported topology.
+
+Knobs and visibility: `espnowmeshttl <1-10>` is now live (1 = single hop);
+`espnowmeshrelay <0|1>` opts a node out of carrying others' traffic;
+`espnowmeshroutes` prints the table; `espnowmeshmetrics` counters are real.
+`meshAdaptiveTTL` was deleted rather than implemented — it named an algorithm
+that never existed.
+
+Known limits, stated plainly: a routed frame carries at most 146 payload bytes
+(130 sealed) against 218/202 direct, so routed transfers cap around 2.7 KB and
+`FILE_*`/`FS_*`/`STREAM`/bond opcodes are deliberately **not** relay-eligible.
+Pairing (`PAIR_*`), `HEARTBEAT` and `PEER_LIST` are single-hop by doctrine.
+Topology discovery (`espnowmeshtopo`) still reports direct neighbours only — the
+route table, not `toporesults`, is the routable graph.
+
+### 0.1 The case this exists to solve
+
+A and B can hear each other; B and C can hear each other; A and C cannot. B is
+the only node that can reach both — so making A and C talk means B carries
+traffic that is not its own, without being trusted to read it.
+
+```mermaid
+flowchart LR
+    A(["A"]) <-->|"in radio range"| B(["B"])
+    B <-->|"in radio range"| C(["C"])
+    A -.->|"cannot hear each other"| C
+```
+
+### 0.2 Flooding — how a broadcast crosses the mesh
+
+`origin` stays A the whole way; only the radio sender changes. That is what lets
+C attribute the message to whoever wrote it rather than to the node that passed
+it along. The forwarder re-signs because `ttl` sits inside the signed region
+(header bytes 0..29), and every mesh member holds the group key — so re-signing
+costs no trust. Loop suppression is `gV4Dedup`'s keying on `origin`, not `ttl`;
+`ttl` is the backstop.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A
+    participant B
+    participant C
+    Note over A: espnowbroadcast hello
+    A->>B: TEXT · origin=A · ttl=3 · group HMAC
+    Note over B: HMAC verified · not seen before<br/>shows "hello" from A
+    B->>C: TEXT · origin=A · ttl=2 · re-signed
+    Note over C: HMAC verified · not seen before<br/>shows "hello" from A
+    Note over C: ttl would reach 1 — stops here
+```
+
+### 0.3 Routed unicast — and the keystone
+
+Step 5 is the whole trick. On delivery the inner frame is fed back through the
+top of the RX path with `recv_info->src_addr` rewritten to the frame's true
+origin. Session lookup, the `isPaired` gate, reassembly and ACK matching all key
+on that one field, so rewriting it fixes every one of them at once, with no
+per-opcode handler aware that relaying exists — and end-to-end ACKs route home
+by themselves.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as A · sender
+    participant B as B · relay
+    participant C as C · destination
+    Note over A: espnowsend C hi<br/>C not audible → route via B
+    A->>B: RELAY_DATA · finalDst=C · ttl=3<br/>[ sealed A→C frame, verbatim ]
+    Note over B: verifies the OUTER group HMAC only<br/>inner frame is opaque — pairwise keys
+    B->>C: RELAY_DATA · finalDst=C · ttl=2<br/>[ the same bytes ]
+    Note over C: finalDst is me → unwrap<br/>re-enter RX, radio source rewritten to A
+    C-->>B: ACK addressed to A
+    B-->>A: ACK
+```
+
+Envelope layout on the wire (250 B total, no header change):
+
+```
+  ┌──────────────┬───────────────┬─────────────────────────────────┬──────────┐
+  │ outer header │ finalDst·hops │ inner frame — copied VERBATIM   │   HMAC   │
+  │     32 B     │      8 B      │  ≤178 B  (hdr 32 + payload ≤146)│   32 B   │
+  └──────────────┴───────────────┴─────────────────────────────────┴──────────┘
+   ←── rewritten and re-signed by every hop ──→  ←─ sealed end-to-end ─→
+        (group key — any member may do this)      (pairwise keys — no relay
+                                                   can read or re-seal this)
+```
+
+### 0.4 The send decision
+
+One chokepoint (`v4_radio_emit`), one test per frame, in this order. Checking
+direct reachability *before* the route table is also the fail-back path: the
+moment two devices can hear each other again, traffic returns to the direct link
+on the very next send. Note that "heard from" means an actual received frame
+(`MeshPeerHealth::everHeardDirect`), not merely a peer sitting in the address
+table — and a *relayed* frame deliberately does not count, since it proves
+nothing about the direct link.
+
+```mermaid
+flowchart TD
+    S["every outbound frame"] --> Q1{"broadcast<br/>address?"}
+    Q1 -->|yes| D1["send direct<br/>flooding carries it onward"]
+    Q1 -->|no| Q2{"opcode may<br/>be relayed?"}
+    Q2 -->|"no — heartbeat, pairing,<br/>files, bond"| D2["send direct<br/>single hop by design"]
+    Q2 -->|yes| Q3{"heard from dst<br/>in the last 30 s?"}
+    Q3 -->|yes| D3["send direct"]
+    Q3 -->|no| Q4{"route known, and<br/>hops within TTL?"}
+    Q4 -->|no| D4["send direct<br/>best effort"]
+    Q4 -->|yes| W["wrap in RELAY_DATA<br/>send to next hop"]
+```
+
+### 0.5 Route learning
+
+Nothing is configured. Each node sends every neighbour a tailored `PEER_LIST`
+every 30 s, omitting anything whose next hop is that same neighbour — split
+horizon, cheap here because the transport already unicasts to each peer in turn.
+The metric is the worst link on the path, so a route is only as good as its
+weakest hop; an equal-length alternative must beat the incumbent by 3 dB before
+anything switches, or two comparable paths flap on RSSI noise. Expiry is 90 s —
+three advertisement periods, so one lost frame never drops a good path.
+
+```mermaid
+flowchart LR
+    subgraph BT["B's table"]
+      direction TB
+      B1["A · 1 hop · direct"]
+      B2["C · 1 hop · direct"]
+    end
+    subgraph AT["A's table, one round later"]
+      direction TB
+      A1["B · 1 hop · direct"]
+      A2["C · 2 hops · via B"]
+    end
+    BT -->|"PEER_LIST<br/>A omitted — split horizon"| AT
+```
+
+---
+
 ## 1. Executive Summary
 
-ESP-NOW in this firmware is a **single-hop star network** with a sophisticated libsodium-based security stack layered on top. Each device holds a long-term Ed25519 identity; pairs of devices establish trust via a passphrase-authenticated KEY_EX handshake, then derive per-direction ChaCha20-Poly1305 AEAD keys through a signed X25519 session handshake. On that confidential channel ride two unrelated things: **encrypted chat delivery** (`espnowsessionsend`, delivery-only, never executed) and **remote command execution** (`espnowremote`, an authenticated request/reply RPC). The command surface is broad — roughly 80 registered commands across status, crypto/session, pairing, mesh/routing, metadata/discovery, remote-exec, files, and telemetry.
+ESP-NOW in this firmware was a **single-hop star network** when this report was written; it is now a **multi-hop mesh** (see §0) with a sophisticated libsodium-based security stack layered on top. Each device holds a long-term Ed25519 identity; pairs of devices establish trust via a passphrase-authenticated KEY_EX handshake, then derive per-direction ChaCha20-Poly1305 AEAD keys through a signed X25519 session handshake. On that confidential channel ride two unrelated things: **encrypted chat delivery** (`espnowsessionsend`, delivery-only, never executed) and **remote command execution** (`espnowremote`, an authenticated request/reply RPC). The command surface is broad — roughly 80 registered commands across status, crypto/session, pairing, mesh/routing, metadata/discovery, remote-exec, files, and telemetry.
 
 ### What works well
 
@@ -40,7 +211,7 @@ Every V4 frame carries a 32-byte `EspNowV4Header` (`System_ESPNow_Wire.h:200`): 
 
 Opcodes are enumerated in `EspNowV4Type` (`System_ESPNow_Wire.h:92`): `CMD=50`, `CMD_RESP=51`, `STREAM=90`, `HEARTBEAT=30`, `SENSOR_BROADCAST=150`, `BOND_SENSOR_DATA=179`, `SENSOR_STATUS=151`, `BOND_HEARTBEAT=170`, plus metadata, file, remote-FS, and KEY_EX/SESSION opcodes. **There is no battery/power/voltage/charge/fuel opcode anywhere** in the enum.
 
-"Mesh" sending is `v4_broadcast` (`System_ESPNow.cpp:1765/1796`): a loop over active `gMeshPeers` slots calling `v4_send_frame` to each directly. It is a **star fan-out, not a relay**. The `ttl` byte is *written* on TX (`:1604`, `:1985`) but **never read on RX** — a grep for `->ttl` returns only those two writes. No node ever forwards a frame.
+**[SUPERSEDED — see §0]** "Mesh" sending is `v4_broadcast`: a loop over active `gMeshPeers` slots calling the frame builder for each directly. That fan-out is still how a broadcast leaves its originator — but receivers now **re-emit** it (`v4_relay_maybe_forward`), so the fan-out is the first hop of a flood rather than the whole story. `ttl` is read on RX, decremented, and the frame re-signed with the group key.
 
 ### 2.2 Crypto / identity / sessions
 
@@ -63,7 +234,7 @@ All sessions are **RAM-only and vanish on reboot**; trust (peer pubkeys on disk)
 
 ### 2.3 Mesh roles, routing, TTL, topology, heartbeats, failover, multi-mesh
 
-`espnowmode mesh` flips one bit (`gSettings.espnowmesh`). Routing is always fan-out-to-direct-peers. Reaching a named peer like `gold` works **only** if `gold` is in this node's local paired table — `resolveDeviceNameOrMac` (`System_ESPNow.cpp:6813`) scans `gEspNow->devices[]` only. There is no next-hop table, no forwarding.
+**[PARTLY SUPERSEDED — see §0]** `espnowmode mesh` flips one bit (`gSettings.espnowmesh`). A next-hop table now exists (`System_ESPNow_Router.h`) and out-of-range peers are reached over it. The **naming** limitation in this paragraph still holds, and it is the sharp edge: `resolveDeviceNameOrMac` scans `gEspNow->devices[]` only, so reaching `gold` *by name* still requires `gold` in this node's paired table. A far peer that is routable but unpaired must be addressed by MAC until pairing completes (which it now can, over the relay).
 
 **Roles** `{WORKER=0, MASTER=1, BACKUP_MASTER=2}` (`System_ESPNow.h:9`) are broadcast in the heartbeat but gate only three behaviors:
 1. Master unicasts an HB to the backup MAC (`:7628`).
@@ -78,7 +249,7 @@ No command routing consults role for gateway selection — **a node self-reporti
 
 **Multi-mesh** (`:11226`): up to 4 independent meshes (`Settings::MeshIdentity meshes[4]`, `System_Settings.h:690`), per-mesh passphrase + 16-bit fingerprint scoping the group key and topo filtering.
 
-**TTL theater:** `gSettings.meshTTL` and `meshAdaptiveTTL` appear only in display/set code; every send passes a hardcoded literal. `espnowmeshttl 5` changes a displayed number and nothing else. `meshmetrics` self-documents this (`:9947`): the forward/path/drop counters "had zero increment sites."
+**[SUPERSEDED — see §0] TTL theater:** this is fixed. `gSettings.meshTTL` is read live at the two flood sites and is the hop budget for routed unicast; `espnowmeshttl 5` now changes reach. `meshAdaptiveTTL` was **deleted** — it toggled a boolean no algorithm consulted, and inventing one to justify the knob would have been the wrong repair. `espnowmeshmetrics` prints real forward/drop/route counters, and `espnowmeshroutes` shows the table they describe.
 
 **Health tables:** `MeshPeerHealth` (`System_ESPNow.h:187`) holds per-MAC RX telemetry (lastHeartbeat, rssi, counts) and drives `isMeshPeerAlive` (`MESH_PEER_TIMEOUT_MS=30000`). Written **lockless from the RX task** (`System_MeshPeers.h:30`) — treat single reads as eventually-consistent.
 
@@ -296,7 +467,7 @@ Effort: S/M/L. Risk: low/med. Each hooks into a verified seam.
 | **Shipping `#1` and `#2` as separate features** | `#2` is the JSON return-shape of the same bounded-wait wrapper; separately they'd be two passes over the same poll-loop and reassembly code. Merged into rank 1. |
 | **Three separate `espnowdeviceinfo` fixes** (`#6/#13/#25`) | Same bug (ignores arg, returns self). Merged into one quick win; reject-arg is minimal, honor-via-cache is the follow-up. |
 | **Trusting the broadcast mesh role to identify the gateway** | Role is cosmetic — a "worker" can aggregate, time-sync, and gateway. Any driver must infer the gateway from behavior, not the role field. |
-| **Tuning TTL to extend reach** | `meshTTL`/`adaptiveTTL` are inert config theater — never fed to any send. Multi-hop forwarding does not exist; robustness of multi-hop today is *zero* (absent, not fragile). |
+| ~~**Tuning TTL to extend reach**~~ **[SUPERSEDED — §0]** | ~~`meshTTL`/`adaptiveTTL` are inert config theater~~ — `meshTTL` is now live and extends reach exactly as its name promises; `meshAdaptiveTTL` was deleted. Multi-hop forwarding exists (flood + routed unicast). |
 
 ### 5.4 Themes
 
@@ -325,8 +496,8 @@ Effort: S/M/L. Risk: low/med. Each hooks into a verified seam.
 | Crypto/session | Bond auth is a different trust model and grants admin | `:4892-4901` ; `:766` ; `System_User.h:78` | Bond = admin RCE for the one configured peer while session ACTIVE; keep out of default-encrypt rollouts |
 | Crypto/session | All sessions RAM-only; vanish on reboot | `System_ESPNow_Sessions.h:11-13` ; `:9671` | After peer reboot, every SESSION_FRAME drops until SESSION_OPEN re-runs (heartbeat pre-warm covers known peers, with a gap) |
 | Crypto/session | `espnowsessions` shows dir/state but not bondToken validity / which peer is the bond peer | `Sessions.h:60/92` ; `:9716` | Can confirm ACTIVE session but not whether `@BOND` auth will work |
-| Mesh/routing | Multi-hop forwarding does not exist; `ttl` written on TX, never read on RX | `:1604` / `:1985` (only writes) ; `:9947` | Reachability = "is peer in MY devices[]"; an A–B–C line cannot pass A↔C; multi-hop robustness is zero |
-| Mesh/routing | Configured + adaptive TTL are inert | `:7621` / `:2222` (literals) ; `gSettings.meshTTL` only in display/set | `espnowmeshttl 5` changes a number and nothing else |
+| Mesh/routing | **[SUPERSEDED — §0]** Multi-hop forwarding now exists: flood for broadcast, `RELAY_DATA` + distance-vector routes for unicast | `System_ESPNow_Router.{h,cpp}` ; `v4_relay_maybe_forward` / `v4h_relay_data` | An A–B–C line passes A↔C, including the KEY_EX/session handshake. Residual limits: 146 B routed payload, no relayed `FILE_*`/`STREAM`/bond |
+| Mesh/routing | **[SUPERSEDED — §0]** `meshTTL` is live; `meshAdaptiveTTL` deleted | `v4_broadcast_text` / `v4_broadcast_time_sync` / `v4_radio_emit` | `espnowmeshttl 5` changes reach; `espnowmeshroutes` shows the resulting table |
 | Mesh/routing | Mesh role is cosmetic — a "worker" can act as gateway | role gates only `:7628` / `:7653` / `shouldStreamSensorToRemote` | Don't trust the broadcast role field; infer the gateway from behavior |
 | Mesh/routing | Topology discovery single-hop; chains are a manual human exercise | `:7371` ; `:3024-3050` ; `:10910` | `toporesults` gives star-adjacency lists, not a routable graph |
 | Mesh/routing | Failover strictly 1↔1, runtime-only; cold-start dead master never promotes | `:335-337` ; `:7655` ; `:2799-2807` ; `:7288` | No N-way/quorum; two backups → split brain |

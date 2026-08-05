@@ -53,6 +53,15 @@ bool captureCryptoKeyReady();
 // fall back to plaintext in a session that promised sealing).
 bool captureCryptoEnsureKey();
 
+// Derive a stable, device-local pseudonym without exposing the capture key or
+// the source identifier. `domain` separates independent uses (for example,
+// "r1-history-peer-v1"); `value` is never stored by this helper. The output is
+// 32 lowercase hex characters plus NUL. Returns false on invalid input or key
+// failure. Intended for encrypted-data filenames/indices that must not leak a
+// reversible raw MAC or an unkeyed hash of it.
+bool captureCryptoPseudonym(const char* domain, const char* value,
+                            char* outHex, size_t outCap);
+
 // Seal one row (no trailing newline in/out). Returns bytes written to out
 // (NUL-terminated), or -1 on key failure / oversize row / small buffer.
 int captureCryptoSealLine(const char* in, size_t inLen, char* out, size_t outCap);

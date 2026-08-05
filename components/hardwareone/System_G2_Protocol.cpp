@@ -25,6 +25,7 @@ size_t g2BuildEnvelope(uint8_t seq, uint8_t sid, uint8_t flag,
                        const uint8_t* payload, size_t payloadLen,
                        uint8_t* out, size_t outCap) {
   // Single-fragment only. pb bytes + 2 CRC bytes must fit in the u8 len field.
+  if (!out || (payloadLen > 0 && !payload)) return 0;
   if (payloadLen + G2_ENVELOPE_CRC_LEN > 0xFF) return 0;
   const size_t total = G2_ENVELOPE_HDR_LEN + payloadLen + G2_ENVELOPE_CRC_LEN;
   if (total > outCap) return 0;
@@ -57,22 +58,19 @@ bool g2ParseEnvelope(const uint8_t* in, size_t len, G2EnvelopeView* out) {
   const uint8_t declared = in[3];
   // declared = fragment data length (pb bytes on this frag + CRC if last).
   // For single-fragment messages declared = payload + 2.
-  if ((size_t)declared + G2_ENVELOPE_HDR_LEN > len) return false;
+  if ((size_t)declared + G2_ENVELOPE_HDR_LEN != len) return false;
   const uint8_t totFrags = in[4];
   const uint8_t fragIdx  = in[5];
-  if (totFrags == 0 || fragIdx == 0 || fragIdx > totFrags) return false;
+  // This API promises a complete single-fragment logical message. Checking
+  // the last fragment alone is wrong for fragmented traffic because its CRC
+  // covers the concatenated protobuf, not merely that last chunk.
+  if (totFrags != 1 || fragIdx != 1 || declared < G2_ENVELOPE_CRC_LEN) return false;
 
-  const bool isLast = (fragIdx == totFrags);
-  const size_t pbLen = isLast ? (size_t)declared - G2_ENVELOPE_CRC_LEN
-                              : (size_t)declared;
+  const size_t pbLen = (size_t)declared - G2_ENVELOPE_CRC_LEN;
   const uint8_t* pb = in + G2_ENVELOPE_HDR_LEN;
-
-  if (isLast) {
-    // CRC check — LE, over just the pb bytes.
-    const uint16_t rcv = (uint16_t)pb[pbLen] | ((uint16_t)pb[pbLen + 1] << 8);
-    const uint16_t calc = g2CrcCcittFalse(pb, pbLen);
-    if (rcv != calc) return false;
-  }
+  const uint16_t rcv = (uint16_t)pb[pbLen] | ((uint16_t)pb[pbLen + 1] << 8);
+  const uint16_t calc = g2CrcCcittFalse(pb, pbLen);
+  if (rcv != calc) return false;
 
   out->isTx       = (in[1] == G2_PREAMBLE_TX);
   out->seq        = in[2];
@@ -83,6 +81,129 @@ bool g2ParseEnvelope(const uint8_t* in, size_t len, G2EnvelopeView* out) {
   out->payload    = pbLen ? pb : nullptr;
   out->payloadLen = pbLen;
   return true;
+}
+
+struct G2FragmentView {
+  uint8_t seq;
+  uint8_t totalFrags;
+  uint8_t fragIdx;
+  uint8_t sid;
+  uint8_t flag;
+  const uint8_t* chunk;
+  size_t chunkLen;
+  uint16_t finalCrc;
+};
+
+static bool g2ParseRxFragment(const uint8_t* in, size_t len,
+                              G2FragmentView* out) {
+  if (!in || !out || len < G2_ENVELOPE_HDR_LEN) return false;
+  if (in[0] != G2_PREAMBLE_0 || in[1] != G2_PREAMBLE_RX) return false;
+
+  const uint8_t declared = in[3];
+  if ((size_t)declared + G2_ENVELOPE_HDR_LEN != len) return false;
+  const uint8_t totalFrags = in[4];
+  const uint8_t fragIdx = in[5];
+  if (totalFrags == 0 || fragIdx == 0 || fragIdx > totalFrags) return false;
+
+  const bool isLast = fragIdx == totalFrags;
+  if (isLast && declared < G2_ENVELOPE_CRC_LEN) return false;
+  const size_t chunkLen = isLast
+      ? (size_t)declared - G2_ENVELOPE_CRC_LEN
+      : (size_t)declared;
+  const uint8_t* chunk = in + G2_ENVELOPE_HDR_LEN;
+
+  out->seq = in[2];
+  out->totalFrags = totalFrags;
+  out->fragIdx = fragIdx;
+  out->sid = in[6];
+  out->flag = in[7];
+  out->chunk = chunkLen ? chunk : nullptr;
+  out->chunkLen = chunkLen;
+  out->finalCrc = isLast
+      ? (uint16_t)chunk[chunkLen] | ((uint16_t)chunk[chunkLen + 1] << 8)
+      : 0;
+  return true;
+}
+
+void g2RxReassemblyInit(G2RxReassembly* state,
+                        uint8_t* storage, size_t storageCap) {
+  if (!state) return;
+  memset(state, 0, sizeof(*state));
+  state->storage = storage;
+  state->capacity = storageCap;
+}
+
+void g2RxReassemblyReset(G2RxReassembly* state) {
+  if (!state) return;
+  state->length = 0;
+  state->seq = 0;
+  state->totalFrags = 0;
+  state->nextFragIdx = 0;
+  state->sid = 0;
+  state->flag = 0;
+  state->active = false;
+}
+
+static G2RxReassemblyStatus g2RxReject(G2RxReassembly* state) {
+  g2RxReassemblyReset(state);
+  return G2_RX_REASSEMBLY_REJECTED;
+}
+
+G2RxReassemblyStatus g2RxReassemblyPush(G2RxReassembly* state,
+                                        const uint8_t* frame, size_t frameLen,
+                                        G2EnvelopeView* completed) {
+  if (!state) return G2_RX_REASSEMBLY_REJECTED;
+  if (completed) memset(completed, 0, sizeof(*completed));
+
+  G2FragmentView frag;
+  if (!g2ParseRxFragment(frame, frameLen, &frag)) return g2RxReject(state);
+
+  if (frag.fragIdx == 1) {
+    // A new first fragment supersedes an abandoned/incomplete message.
+    g2RxReassemblyReset(state);
+    state->active = true;
+    state->seq = frag.seq;
+    state->totalFrags = frag.totalFrags;
+    state->nextFragIdx = 1;
+    state->sid = frag.sid;
+    state->flag = frag.flag;
+  }
+
+  if (!state->active || frag.fragIdx != state->nextFragIdx ||
+      frag.seq != state->seq || frag.totalFrags != state->totalFrags ||
+      frag.sid != state->sid || frag.flag != state->flag) {
+    return g2RxReject(state);
+  }
+  if (state->length > state->capacity ||
+      frag.chunkLen > state->capacity - state->length) {
+    return g2RxReject(state);
+  }
+  if (frag.chunkLen > 0 && !state->storage) return g2RxReject(state);
+  if (frag.chunkLen > 0) {
+    memcpy(state->storage + state->length, frag.chunk, frag.chunkLen);
+  }
+  state->length += frag.chunkLen;
+  state->nextFragIdx++;
+
+  if (frag.fragIdx != frag.totalFrags) {
+    return G2_RX_REASSEMBLY_NEED_MORE;
+  }
+  if (g2CrcCcittFalse(state->storage, state->length) != frag.finalCrc) {
+    return g2RxReject(state);
+  }
+
+  if (completed) {
+    completed->isTx = false;
+    completed->seq = state->seq;
+    completed->totalFrags = state->totalFrags;
+    completed->fragIdx = state->totalFrags;
+    completed->sid = state->sid;
+    completed->flag = state->flag;
+    completed->payload = state->length ? state->storage : nullptr;
+    completed->payloadLen = state->length;
+  }
+  state->active = false;
+  return G2_RX_REASSEMBLY_COMPLETE;
 }
 
 // ── Protobuf primitives ──────────────────────────────────────────────────────
@@ -1748,6 +1869,24 @@ size_t g2BuildSettingInfoWrite(uint8_t seq, uint32_t magic,
                          payload, pos, out, outCap);
 }
 
+size_t g2BuildHeadUpSwitch(uint8_t seq, uint32_t magic, bool enabled,
+                           uint8_t* out, size_t outCap) {
+  return g2BuildSettingInfoWrite(seq, magic,
+                                 G2_SETW_F_HEAD_UP,
+                                 G2_SETW_HEADUP_F_SWITCH,
+                                 enabled ? 1u : 0u,
+                                 out, outCap);
+}
+
+size_t g2BuildHeadUpAngle(uint8_t seq, uint32_t magic, uint32_t angle,
+                          uint8_t* out, size_t outCap) {
+  return g2BuildSettingInfoWrite(seq, magic,
+                                 G2_SETW_F_HEAD_UP,
+                                 G2_SETW_HEADUP_F_ANGLE,
+                                 angle,
+                                 out, outCap);
+}
+
 bool g2ParseSettingEcho(const uint8_t* payload, size_t payloadLen,
                         G2SettingsEcho* out) {
   if (!payload || !out) return false;
@@ -2052,9 +2191,94 @@ size_t g2BuildDevCfgRingConnect(uint8_t seq, uint32_t magic,
 }
 
 // =============================================================================
-// Notification-control builders — sid=0x04 (see header §12 note). Same shape
-// as the DevCfg builders: reuse G2_WRAP_F_CMD/G2_WRAP_F_MAGIC, one nested
-// sub-message, ship as a G2_FLAG_REQUEST envelope.
+// Capture-proven native Dashboard/Menu/Notification settings (2026-07-31)
+// =============================================================================
+
+size_t g2BuildDashboardDisplayJuly31(uint8_t seq, uint32_t magic,
+                                     uint8_t* out, size_t outCap) {
+  // DashboardDataPackage: commandId=f1, magic=f2, Dashboard_Receive=f4;
+  // DashboardDisplaySetting is f2 inside Dashboard_Receive.
+  static const uint8_t statusOrder[] = {1, 2, 3};
+  static const uint8_t widgetOrder[] = {1, 3, 2, 2};
+  uint8_t pb[48];
+  size_t pos = 0;
+  if (!g2PbWriteUint32(pb, sizeof(pb), &pos, 1, 2)) return 0;
+  if (!g2PbWriteUint32(pb, sizeof(pb), &pos, 2, magic)) return 0;
+  size_t receive;
+  if (!g2PbBeginNested(pb, sizeof(pb), &pos, 4, &receive)) return 0;
+  size_t setting;
+  if (!g2PbBeginNested(pb, sizeof(pb), &pos, 2, &setting)) return 0;
+  if (!g2PbWriteUint32(pb, sizeof(pb), &pos, 1, 4)) return 0;
+  if (!g2PbWriteUint32(pb, sizeof(pb), &pos, 2, 3)) return 0;
+  if (!g2PbWriteBytes(pb, sizeof(pb), &pos, 3,
+                      statusOrder, sizeof(statusOrder))) return 0;
+  if (!g2PbWriteUint32(pb, sizeof(pb), &pos, 4, 4)) return 0;
+  if (!g2PbWriteBytes(pb, sizeof(pb), &pos, 5,
+                      widgetOrder, sizeof(widgetOrder))) return 0;
+  if (!g2PbWriteUint32(pb, sizeof(pb), &pos, 6, 1)) return 0;
+  if (!g2PbWriteUint32(pb, sizeof(pb), &pos, 7, 2)) return 0;
+  if (!g2PbEndNested(pb, sizeof(pb), &pos, setting)) return 0;
+  if (!g2PbEndNested(pb, sizeof(pb), &pos, receive)) return 0;
+  return g2BuildEnvelope(seq, G2_SID_DASHBOARD, G2_FLAG_REQUEST,
+                         pb, pos, out, outCap);
+}
+
+size_t g2BuildMenuMembership(uint8_t seq, uint32_t magic,
+                             const uint32_t* appIds, size_t appCount,
+                             uint8_t* out, size_t outCap) {
+  if (!appIds || appCount == 0 || appCount > 0xFFFFFFFFu) return 0;
+
+  uint8_t pb[G2_MAX_FRAG_PB];
+  size_t pos = 0;
+  // MenuDataPackage: commandId=0 is explicitly serialized in every capture.
+  if (!g2PbWriteUint32(pb, sizeof(pb), &pos, 1, 0)) return 0;
+  if (!g2PbWriteUint32(pb, sizeof(pb), &pos, 2, magic)) return 0;
+  size_t list;
+  if (!g2PbBeginNested(pb, sizeof(pb), &pos, 3, &list)) return 0;
+  if (!g2PbWriteUint32(pb, sizeof(pb), &pos, 1,
+                       (uint32_t)appCount)) return 0;
+  for (size_t i = 0; i < appCount; i++) {
+    size_t item;
+    if (!g2PbBeginNested(pb, sizeof(pb), &pos, 2, &item)) return 0;
+    // f1=0 was explicitly present for every captured item; its semantic label
+    // remains unknown, so keep it as a wire fact instead of naming it.
+    if (!g2PbWriteUint32(pb, sizeof(pb), &pos, 1, 0)) return 0;
+    if (!g2PbWriteUint32(pb, sizeof(pb), &pos, 4, appIds[i])) return 0;
+    if (!g2PbEndNested(pb, sizeof(pb), &pos, item)) return 0;
+  }
+  if (!g2PbEndNested(pb, sizeof(pb), &pos, list)) return 0;
+  return g2BuildEnvelope(seq, G2_SID_MENU, G2_FLAG_REQUEST,
+                         pb, pos, out, outCap);
+}
+
+size_t g2BuildNotificationControlJuly31(uint8_t seq, uint32_t magic,
+                                        uint8_t* out, size_t outCap) {
+  uint8_t pb[24];
+  size_t pos = 0;
+  if (!g2PbWriteUint32(pb, sizeof(pb), &pos, G2_WRAP_F_CMD,
+                       G2_NOTIF_CMD_CTRL)) return 0;
+  if (!g2PbWriteUint32(pb, sizeof(pb), &pos,
+                       G2_WRAP_F_MAGIC, magic)) return 0;
+  size_t inner;
+  if (!g2PbBeginNested(pb, sizeof(pb), &pos,
+                       G2_NOTIF_WRAP_F_CTRL, &inner)) return 0;
+  if (!g2PbWriteUint32(pb, sizeof(pb), &pos,
+                       G2_NOTIF_CTRL_F_NOTIF_ENABLE, 1)) return 0;
+  if (!g2PbWriteUint32(pb, sizeof(pb), &pos,
+                       G2_NOTIF_CTRL_F_AUTODISP_EN, 1)) return 0;
+  if (!g2PbWriteUint32(pb, sizeof(pb), &pos,
+                       G2_NOTIF_CTRL_F_DISP_TIME, 5)) return 0;
+  // Unlike a canonical proto3 re-encode, the official app explicitly emitted
+  // this zero-valued field; preserve the captured bytes.
+  if (!g2PbWriteUint32(pb, sizeof(pb), &pos,
+                       G2_NOTIF_CTRL_F_AVOID_DISTURB, 0)) return 0;
+  if (!g2PbEndNested(pb, sizeof(pb), &pos, inner)) return 0;
+  return g2BuildEnvelope(seq, G2_SID_NOTIFICATION, G2_FLAG_REQUEST,
+                         pb, pos, out, outCap);
+}
+
+// Existing 2026-07-21 native-notification builders. Keep their established
+// compatibility surface separate from the fuller July 31 control vector.
 size_t g2BuildNotifCtrlEnable(uint8_t seq, uint32_t magic,
                               uint8_t* out, size_t outCap) {
   uint8_t pb[24];
@@ -2089,6 +2313,158 @@ size_t g2BuildNotifWhitelistDisable(uint8_t seq, uint32_t magic,
   if (!g2PbEndNested(pb, sizeof(pb), &pos, inner)) return 0;
   return g2BuildEnvelope(seq, G2_SID_NOTIFICATION, G2_FLAG_REQUEST,
                          pb, pos, out, outCap);
+}
+
+static bool g2GoldenEquals(const uint8_t* actual, size_t actualLen,
+                           const uint8_t* expected, size_t expectedLen) {
+  return actualLen == expectedLen &&
+         memcmp(actual, expected, expectedLen) == 0;
+}
+
+bool g2ProtocolGoldenSelfTest() {
+  // Sanitized settings-only vectors copied byte-for-byte from the 2026-07-31
+  // official-app capture. They contain no names, addresses, content, or other
+  // user data.
+  static const uint8_t kHeadOff[] = {
+    0xaa,0x21,0x68,0x0c,0x01,0x01,0x09,0x20,0x08,0x01,
+    0x10,0x6b,0x1a,0x04,0x22,0x02,0x08,0x00,0xbf,0xad
+  };
+  static const uint8_t kHeadOn[] = {
+    0xaa,0x21,0x6d,0x0c,0x01,0x01,0x09,0x20,0x08,0x01,
+    0x10,0x70,0x1a,0x04,0x22,0x02,0x08,0x01,0xca,0xc1
+  };
+  static const uint8_t kHeadAngle19[] = {
+    0xaa,0x21,0x6e,0x0c,0x01,0x01,0x09,0x20,0x08,0x01,
+    0x10,0x71,0x1a,0x04,0x22,0x02,0x10,0x13,0x02,0xc1
+  };
+  static const uint8_t kHeadAngle19Ack[] = {
+    0xaa,0x12,0x11,0x0c,0x01,0x01,0x09,0x00,0x08,0x01,
+    0x10,0x71,0x1a,0x04,0x22,0x02,0x10,0x13,0x02,0xc1
+  };
+  static const uint8_t kDashboard[] = {
+    0xaa,0x21,0x17,0x1f,0x01,0x01,0x01,0x20,0x08,0x02,
+    0x10,0x1a,0x22,0x17,0x12,0x15,0x08,0x04,0x10,0x03,
+    0x1a,0x03,0x01,0x02,0x03,0x20,0x04,0x2a,0x04,0x01,
+    0x03,0x02,0x02,0x30,0x01,0x38,0x02,0xae,0xfc
+  };
+  static const uint8_t kNotification[] = {
+    0xaa,0x21,0x27,0x10,0x01,0x01,0x04,0x20,0x08,0x01,
+    0x10,0x2a,0x1a,0x08,0x08,0x01,0x10,0x01,0x18,0x05,
+    0x28,0x00,0x68,0x5d
+  };
+  static const uint8_t kMenu7[] = {
+    0xaa,0x21,0x71,0x35,0x01,0x01,0x03,0x20,0x08,0x00,
+    0x10,0x74,0x1a,0x2d,0x08,0x07,0x12,0x04,0x08,0x00,
+    0x20,0x01,0x12,0x04,0x08,0x00,0x20,0x07,0x12,0x04,
+    0x08,0x00,0x20,0x0b,0x12,0x04,0x08,0x00,0x20,0x08,
+    0x12,0x04,0x08,0x00,0x20,0x05,0x12,0x04,0x08,0x00,
+    0x20,0x06,0x12,0x05,0x08,0x00,0x20,0x8a,0x02,0x93,
+    0x6e
+  };
+  static const uint8_t kMenu6[] = {
+    0xaa,0x21,0x79,0x2f,0x01,0x01,0x03,0x20,0x08,0x00,
+    0x10,0x7c,0x1a,0x27,0x08,0x06,0x12,0x04,0x08,0x00,
+    0x20,0x07,0x12,0x04,0x08,0x00,0x20,0x0b,0x12,0x04,
+    0x08,0x00,0x20,0x08,0x12,0x04,0x08,0x00,0x20,0x05,
+    0x12,0x04,0x08,0x00,0x20,0x06,0x12,0x05,0x08,0x00,
+    0x20,0x8a,0x02,0x60,0x15
+  };
+  static const uint8_t kMenu5[] = {
+    0xaa,0x21,0x7e,0x2a,0x01,0x01,0x03,0x20,0x08,0x00,
+    0x10,0x81,0x01,0x1a,0x21,0x08,0x05,0x12,0x04,0x08,
+    0x00,0x20,0x0b,0x12,0x04,0x08,0x00,0x20,0x08,0x12,
+    0x04,0x08,0x00,0x20,0x05,0x12,0x04,0x08,0x00,0x20,
+    0x06,0x12,0x05,0x08,0x00,0x20,0x8a,0x02,0xe1,0x40
+  };
+  static const uint8_t kRestoredHead19[] = {
+    0xaa,0x12,0xa4,0x2e,0x01,0x01,0x09,0x01,0x08,0x02,
+    0x10,0xae,0x05,0x22,0x25,0x10,0x0f,0x18,0x08,0x2a,
+    0x08,0x32,0x2e,0x32,0x2e,0x36,0x2e,0x31,0x30,0x32,
+    0x08,0x32,0x2e,0x32,0x2e,0x36,0x2e,0x31,0x30,0x38,
+    0x01,0x40,0x13,0x50,0x01,0x58,0x01,0x60,0x43,0x90,
+    0x01,0x01,0xba,0xaa
+  };
+  static const uint8_t kRxFrag1[] = {
+    0xaa,0x12,0x17,0x0a,0x02,0x01,0x01,0x00,
+    0x08,0x02,0x10,0x1a,0x22,0x17,0x12,0x15,0x08,0x04
+  };
+  static const uint8_t kRxFrag2[] = {
+    0xaa,0x12,0x17,0x15,0x02,0x02,0x01,0x00,
+    0x10,0x03,0x1a,0x03,0x01,0x02,0x03,0x20,0x04,0x2a,
+    0x04,0x01,0x03,0x02,0x02,0x30,0x01,0x38,0x02,0xae,
+    0xfc
+  };
+
+  uint8_t out[96];
+  size_t n = g2BuildHeadUpSwitch(0x68, 0x6b, false, out, sizeof(out));
+  if (!g2GoldenEquals(out, n, kHeadOff, sizeof(kHeadOff))) return false;
+  n = g2BuildHeadUpSwitch(0x6d, 0x70, true, out, sizeof(out));
+  if (!g2GoldenEquals(out, n, kHeadOn, sizeof(kHeadOn))) return false;
+  n = g2BuildHeadUpAngle(0x6e, 0x71, 19, out, sizeof(out));
+  if (!g2GoldenEquals(out, n, kHeadAngle19, sizeof(kHeadAngle19))) return false;
+
+  n = g2BuildDashboardDisplayJuly31(0x17, 0x1a, out, sizeof(out));
+  if (!g2GoldenEquals(out, n, kDashboard, sizeof(kDashboard))) return false;
+  n = g2BuildNotificationControlJuly31(0x27, 0x2a, out, sizeof(out));
+  if (!g2GoldenEquals(out, n, kNotification, sizeof(kNotification))) return false;
+
+  static const uint32_t menu7[] = {1, 7, 11, 8, 5, 6, 266};
+  static const uint32_t menu6[] = {7, 11, 8, 5, 6, 266};
+  static const uint32_t menu5[] = {11, 8, 5, 6, 266};
+  n = g2BuildMenuMembership(0x71, 0x74, menu7, 7, out, sizeof(out));
+  if (!g2GoldenEquals(out, n, kMenu7, sizeof(kMenu7))) return false;
+  n = g2BuildMenuMembership(0x79, 0x7c, menu6, 6, out, sizeof(out));
+  if (!g2GoldenEquals(out, n, kMenu6, sizeof(kMenu6))) return false;
+  n = g2BuildMenuMembership(0x7e, 0x81, menu5, 5, out, sizeof(out));
+  if (!g2GoldenEquals(out, n, kMenu5, sizeof(kMenu5))) return false;
+
+  G2EnvelopeView view;
+  if (!g2ParseEnvelope(kRestoredHead19, sizeof(kRestoredHead19), &view)) return false;
+  G2SettingsEcho echo;
+  if (!g2ParseSettingEcho(view.payload, view.payloadLen, &echo)) return false;
+  if ((echo.have & (1u << 7)) == 0 || echo.headUpSwitch != 1) return false;
+  if ((echo.have & (1u << 8)) == 0 || echo.headUpAngle != 19) return false;
+
+  uint32_t ackMagic = 0, ackValue = 0;
+  uint8_t ackInner = 0, ackLeaf = 0;
+  if (!g2ParseEnvelope(kHeadAngle19Ack, sizeof(kHeadAngle19Ack), &view)) return false;
+  if (!g2ParseSettingWriteAck(view.payload, view.payloadLen,
+                              &ackMagic, &ackInner, &ackLeaf, &ackValue)) return false;
+  if (ackMagic != 0x71 || ackInner != G2_SETW_F_HEAD_UP ||
+      ackLeaf != G2_SETW_HEADUP_F_ANGLE || ackValue != 19) return false;
+
+  uint8_t storage[40];
+  G2RxReassembly reassembly;
+  g2RxReassemblyInit(&reassembly, storage, sizeof(storage));
+  if (g2RxReassemblyPush(&reassembly, kRxFrag1, sizeof(kRxFrag1), &view) !=
+      G2_RX_REASSEMBLY_NEED_MORE) return false;
+  if (g2RxReassemblyPush(&reassembly, kRxFrag2, sizeof(kRxFrag2), &view) !=
+      G2_RX_REASSEMBLY_COMPLETE) return false;
+  if (view.isTx || view.seq != 0x17 || view.sid != G2_SID_DASHBOARD ||
+      view.payloadLen != sizeof(kDashboard) - G2_ENVELOPE_HDR_LEN -
+                         G2_ENVELOPE_CRC_LEN ||
+      memcmp(view.payload, kDashboard + G2_ENVELOPE_HDR_LEN,
+             view.payloadLen) != 0) return false;
+  // The single-frame parser must not pretend it can validate one fragment.
+  if (g2ParseEnvelope(kRxFrag2, sizeof(kRxFrag2), &view)) return false;
+
+  uint8_t tinyStorage[9];
+  g2RxReassemblyInit(&reassembly, tinyStorage, sizeof(tinyStorage));
+  if (g2RxReassemblyPush(&reassembly, kRxFrag1, sizeof(kRxFrag1), &view) !=
+      G2_RX_REASSEMBLY_REJECTED) return false;
+  g2RxReassemblyInit(&reassembly, storage, sizeof(storage));
+  if (g2RxReassemblyPush(&reassembly, kRxFrag2, sizeof(kRxFrag2), &view) !=
+      G2_RX_REASSEMBLY_REJECTED) return false;
+  uint8_t badFinal[sizeof(kRxFrag2)];
+  memcpy(badFinal, kRxFrag2, sizeof(badFinal));
+  badFinal[sizeof(badFinal) - 1] ^= 0x01;
+  g2RxReassemblyInit(&reassembly, storage, sizeof(storage));
+  if (g2RxReassemblyPush(&reassembly, kRxFrag1, sizeof(kRxFrag1), &view) !=
+      G2_RX_REASSEMBLY_NEED_MORE) return false;
+  if (g2RxReassemblyPush(&reassembly, badFinal, sizeof(badFinal), &view) !=
+      G2_RX_REASSEMBLY_REJECTED) return false;
+
+  return true;
 }
 
 // g2BuildRingRawDataPush — synthesise a sid=0x90 RingDataPackage frame

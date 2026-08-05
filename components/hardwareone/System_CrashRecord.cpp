@@ -30,7 +30,7 @@
 // these fields, while the device stays powered, would otherwise consume the old
 // bytes through a still-valid magic and emit a plausible, WRONG record. Folding
 // the field sizes into the magic makes any layout change self-invalidating.
-#define CRASH_LAYOUT_VERSION 1u
+#define CRASH_LAYOUT_VERSION 2u
 #define CRASH_REASON_MAX     128   // assert text runs long: "assert failed: xQueueGenericSend queue.c:832 (pxQueue)"
 #define CRASH_ELFSHA_MAX     16    // CONFIG_APP_RETRIEVE_LEN_ELF_SHA=9 -> 9 chars + NUL
 #define CRASH_BT_MAX         12    // Arduino walks up to 60 frames; 12 is plenty to place a fault and costs 48 B
@@ -62,6 +62,7 @@ static RTC_NOINIT_ATTR uint8_t           rtcBootPhase;         // advanced durin
 static RTC_NOINIT_ATTR uint32_t          rtcConsecutive;       // consecutive fault resets
 static RTC_NOINIT_ATTR uint32_t          rtcLastSignature;     // signature of the previous crash
 static RTC_NOINIT_ATTR uint32_t          rtcRepeatCount;       // boots in a row with that signature
+static RTC_NOINIT_ATTR char              rtcStateElfSha[CRASH_ELFSHA_MAX]; // build that last reached consume
 
 // --- decoded view of the PREVIOUS boot (plain RAM, valid after consume) ------
 static bool     sHavePrev       = false;
@@ -75,6 +76,7 @@ static char     sElfSha[CRASH_ELFSHA_MAX] = {0};
 static uint32_t sAddr           = 0;
 static uint8_t  sCore           = 0;
 static bool     sElfShaMatches  = false;
+static bool     sPreviousBuildMatches = false;
 static bool     sHealthyMarked  = false;
 static bool     sWasAbort       = false;
 static uint8_t  sBtLen          = 0;
@@ -206,6 +208,7 @@ static bool isFaultReset(uint32_t r) {
 
 void crashRecordBootConsume(uint32_t resetReason) {
   sResetReason = resetReason;
+  const char* nowSha = esp_app_get_elf_sha256_str();
 
   // --- state record ---------------------------------------------------------
   if (rtcStateMagic != CRASH_STATE_MAGIC) {
@@ -214,6 +217,7 @@ void crashRecordBootConsume(uint32_t resetReason) {
     rtcConsecutive   = 0;
     rtcLastSignature = 0;
     rtcRepeatCount   = 0;
+    rtcStateElfSha[0] = '\0';
     rtcStateMagic    = CRASH_STATE_MAGIC;
   }
 
@@ -221,6 +225,8 @@ void crashRecordBootConsume(uint32_t resetReason) {
   // point runs at roughly phase 3, so reading the RTC byte later in setup()
   // would return this boot's own progress, not the dead boot's.
   sPrevPhase = rtcBootPhase;
+  sPreviousBuildMatches = nowSha && rtcStateElfSha[0] &&
+                          strcmp(nowSha, rtcStateElfSha) == 0;
 
   const bool fault = isFaultReset(resetReason);
   if (fault) {
@@ -245,7 +251,6 @@ void crashRecordBootConsume(uint32_t resetReason) {
     sBtLen     = (rtcPanicBtLen > CRASH_BT_MAX) ? CRASH_BT_MAX : rtcPanicBtLen;
     for (uint8_t i = 0; i < sBtLen; i++) sBt[i] = rtcPanicBt[i];
 
-    const char* nowSha = esp_app_get_elf_sha256_str();
     sElfShaMatches = (nowSha && sElfSha[0] && strcmp(nowSha, sElfSha) == 0);
   } else {
     sReason[0] = '\0';
@@ -296,6 +301,10 @@ void crashRecordBootConsume(uint32_t resetReason) {
   rtcPanicMagic = 0;
 
   // This boot starts here.
+  // Record the build independently of the optional panic record. Stage-1 WDT
+  // and brownout resets may never reach the panic hook, but crash-loop recovery
+  // still needs to distinguish the same broken build from a newly flashed fix.
+  crashCopyStr(rtcStateElfSha, nowSha, sizeof(rtcStateElfSha));
   rtcBootPhase = CRASH_PHASE_PRE_SERIAL;
 }
 
@@ -327,6 +336,7 @@ void crashRecordEmitEarly() {
 }
 
 bool        crashRecordHavePrevious() { return sHavePrev; }
+bool        crashRecordPreviousBuildMatches() { return sPreviousBuildMatches; }
 uint32_t    crashRecordConsecutive()  { return sConsecutive; }
 uint32_t    crashRecordSignature()    { return sSignature; }
 uint32_t    crashRecordRepeatCount()  { return sRepeat; }

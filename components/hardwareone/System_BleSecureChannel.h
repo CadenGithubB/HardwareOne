@@ -44,6 +44,7 @@ enum BleScResult {
   BLE_SC_NOT_A_FRAME = 0,   // input isn't a channel frame (plaintext command)
   BLE_SC_CONSUMED,          // handshake frame handled; reply already sent
   BLE_SC_PLAINTEXT_READY,   // DATA frame decrypted; out[] holds the command line
+  BLE_SC_BINARY_READY,      // DATA frame decrypted; out[] holds an app binary envelope
   BLE_SC_ERROR,             // malformed / auth fail / replay — ignore the input
 };
 
@@ -70,7 +71,9 @@ void bleScWarmPsk();
 
 // Process one inbound GATT write. Handshake frames are handled internally
 // (responses sent via the raw notify path). A DATA frame is decrypted into
-// `out` (NUL-terminated command line) with length in *outLen.
+// `out` with length in *outLen. Ordinary command plaintext is NUL-terminated
+// and returns BLE_SC_PLAINTEXT_READY. A recognized binary application envelope
+// is byte-exact (not text-filtered) and returns BLE_SC_BINARY_READY.
 BleScResult bleScHandleInbound(uint16_t connId, const uint8_t* data, size_t len,
                                char* out, size_t outCap, size_t* outLen);
 

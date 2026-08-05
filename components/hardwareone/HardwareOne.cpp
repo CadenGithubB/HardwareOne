@@ -1,4 +1,5 @@
 #include "Arduino.h"
+#include <atomic>
 #include <esp_app_desc.h>
 #include <esp_attr.h>
 #include <esp_system.h>
@@ -97,6 +98,8 @@ void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
 #endif
 #include "System_Command.h"
 #include "System_CrashRecord.h"
+#include "System_OTASafety.h"
+#include "System_OTA.h"
 #if ENABLE_HTTP_SERVER
   #include "WebServer_Server.h"
 #endif
@@ -288,6 +291,7 @@ bool hasSuperAdminPrivilege(const AuthContext& ctx);
 struct ExecReq;
 QueueHandle_t gCmdExecQ = nullptr;
 TaskHandle_t gCmdExecTaskHandle = nullptr;
+static std::atomic<uint32_t> sCmdExecHeartbeatMs{0};
 static void commandExecTask(void* pv);
 bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize);
 bool submitAndExecuteSync(const Command& cmd, String& out);
@@ -687,6 +691,11 @@ static void commandExecTask(void* pv) {
   // returned in bytes on this port — no word->byte scaling. See System_TaskUtils.h.
   constexpr uint32_t stackBytes = CMD_EXEC_STACK_WORDS;
   for (;;) {
+    // The OTA probation gate uses this as proof that the command worker is
+    // scheduled and able to return to its receive loop. A bounded receive wait
+    // keeps the heartbeat fresh while the queue is idle; a wedged command leaves
+    // it stale and prevents the trial image from becoming permanent.
+    sCmdExecHeartbeatMs.store(millis(), std::memory_order_release);
     // Periodic stack watermark check (every 30 seconds)
     unsigned long now = millis();
     if (now - lastStackCheck > 30000) {
@@ -701,7 +710,7 @@ static void commandExecTask(void* pv) {
     }
 
     ExecReq* r = nullptr;
-    BaseType_t receiveResult = xQueueReceive(gCmdExecQ, &r, portMAX_DELAY);
+    BaseType_t receiveResult = xQueueReceive(gCmdExecQ, &r, pdMS_TO_TICKS(1000));
     
     if (receiveResult == pdTRUE) {
       if (!r) continue;
@@ -1021,6 +1030,12 @@ struct LoopPerfState {
 };
 static LoopPerfState gLoopPerf;   // zero-initialised (static storage)
 
+// Unlike millis()-since-power-on, this timestamp starts only after setup has
+// actually reached CRASH_PHASE_RUNNING. It owns the existing crash-counter
+// healthy marker; OTA validation has its stricter completed-loop gate below.
+static bool sHardwareOneRunning = false;
+static unsigned long sHardwareOneRunningSinceMs = 0;
+
 // Called after each loop section: record that section's wall-clock duration and
 // advance the mark. Cheap — one esp_timer read + a store.
 static inline void perfMarkSection(uint8_t idx) {
@@ -1309,6 +1324,11 @@ void hardwareone_setup() {
     // different question). Pure RTC/RAM work — no I/O, safe this early.
     crashRecordBootConsume((uint32_t)reason);
 
+    // If an accepted trial image repeatedly dies during setup, persist the
+    // rollback result before selecting the immutable factory recovery image.
+    // No-op for ordinary partition layouts and healthy boots.
+    otaSystemCrashLoopEscapeEarly();
+
     // Arm the panic-time capture as early as possible — a crash before this
     // point leaves no detail, so every line of setup after it is covered.
     crashRecordInstallPanicHook();
@@ -1341,6 +1361,10 @@ void hardwareone_setup() {
   // Filesystem FIRST to enable early allocation logging
   if (!initFilesystem()) {
     Serial.println("FATAL: Filesystem initialization failed");
+    // Never auto-format retained data. On the OTA layout, a committed main
+    // image that cannot mount LittleFS parks in the factory updater so the
+    // operator can recover over serial/authenticated SoftAP.
+    (void)otaSystemRecoverFromStorageFailure();
     while (1) delay(1000);
   }
 #if DEBUG_MEM_SUMMARY
@@ -1417,6 +1441,10 @@ void hardwareone_setup() {
   // Command system init — single call after settings are resolved
   // NOTE: applySettings() deferred until after initDebugSystem() so debug queue exists
   initializeCommandSystem();
+
+  // Reconcile the durable OTA transaction once NVS, LittleFS, events, and the
+  // command system are usable. This also reports any result left by recovery.
+  otaSystemInitAfterStorage();
 
   // Reflect the RTC-derived crash counters into the RAM mirror for status/UI
   // reads. Plain assignment — NOT setSetting — so this no longer triggers a
@@ -1568,7 +1596,15 @@ void hardwareone_setup() {
 
   // Command executor task (mutexes + debug system must be ready)
     if (!gCmdExecQ) {
-      gCmdExecQ = xQueueCreate(6, sizeof(ExecReq*));
+      // Depth 8, not 6: every inbound BLE secure-channel frame takes a slot via
+      // submitDeferredToCmdExec(), whose enqueue DROPS on full rather than
+      // blocking — so a burst of OTA staging chunks can starve the `otawrite
+      // status` checkpoint that rides the same queue, and a lost checkpoint
+      // fails the whole transfer. The queue holds pointers (4 B/slot), so the
+      // widening itself costs 8 bytes of internal DRAM; the real cost is up to
+      // two more in-flight ExecReq (~6.3 KB each) which ps_alloc takes from
+      // PSRAM, where there is multiple MB spare.
+      gCmdExecQ = xQueueCreate(8, sizeof(ExecReq*));
       if (!gCmdExecQ) {
         ERROR_SYSTEMF("FATAL: Failed to create command exec queue");
         while (1) delay(1000);
@@ -2201,6 +2237,9 @@ void hardwareone_setup() {
   // setup() survived — any crash from here on is a RUNTIME fault, not a boot
   // fault, which is the single most useful bit for triaging one.
   crashRecordSetPhase(CRASH_PHASE_RUNNING);
+  sHardwareOneRunningSinceMs = millis();
+  sHardwareOneRunning = true;
+  otaSafetySetupReachedRunning();
 
   // Last lines of boot: nudge to provision the BLE passphrase if encryption is wanted
   // but unset (so the operator can't miss that Bluetooth is currently plaintext).
@@ -2400,7 +2439,10 @@ void hardwareone_loop() {
   // a power cycle, i.e. it would silently degrade into "crashes since poweron" —
   // the exact conflation it exists to avoid — and a device that crashed a few
   // times over weeks of healthy uptime would read as if it were mid-crash-loop.
-  if (millis() > 60000) crashRecordMarkBootHealthy();
+  if (sHardwareOneRunning &&
+      (unsigned long)(millis() - sHardwareOneRunningSinceMs) >= 60000UL) {
+    crashRecordMarkBootHealthy();
+  }
 
   // Finish an HTTP server teardown that a command had to defer because a web
   // request was mid-flight (see WebServer_Handle.h). This task is neither the
@@ -2715,4 +2757,12 @@ void hardwareone_loop() {
   // ========================================================================
 
   delay(2);
+
+  // A heartbeat means every HardwareOne loop section completed. The OTA image
+  // is eligible for validation only while these arrive continuously and the
+  // two core boot services remain usable for the full probation interval.
+  const uint32_t cmdHeartbeatAge =
+      millis() - sCmdExecHeartbeatMs.load(std::memory_order_acquire);
+  otaSafetyLoopHeartbeat(filesystemReady && gCmdExecQ != nullptr &&
+                         gCmdExecTaskHandle != nullptr && cmdHeartbeatAge <= 5000U);
 }

@@ -101,6 +101,48 @@ static inline void r1DecodeStatus(uint8_t b, uint8_t& type, uint8_t& method, uin
   ack    = (uint8_t)((b >> 2) & 0x3);
 }
 
+static inline void writeU16LE(uint8_t* p, uint16_t value) {
+  p[0] = (uint8_t)(value & 0xFF);
+  p[1] = (uint8_t)((value >> 8) & 0xFF);
+}
+
+static inline void writeU32LE(uint8_t* p, uint32_t value) {
+  p[0] = (uint8_t)(value & 0xFF);
+  p[1] = (uint8_t)((value >> 8) & 0xFF);
+  p[2] = (uint8_t)((value >> 16) & 0xFF);
+  p[3] = (uint8_t)((value >> 24) & 0xFF);
+}
+
+const char* r1ProtocolProfileName(R1ProtocolProfile profile) {
+  switch (profile) {
+    case R1_PROFILE_FW_2_2_7_0005: return "2.2.7.0005";
+    case R1_PROFILE_UNKNOWN:
+    default:                       return "unknown";
+  }
+}
+
+R1ProtocolProfile r1ProfileForFirmware(const char* firmware) {
+  if (firmware && strcmp(firmware, "2.2.7.0005") == 0) {
+    return R1_PROFILE_FW_2_2_7_0005;
+  }
+  return R1_PROFILE_UNKNOWN;
+}
+
+const char* r1ParseErrorName(R1ParseError error) {
+  switch (error) {
+    case R1_PARSE_OK:                 return "ok";
+    case R1_PARSE_BAD_CRC:            return "badCrc";
+    case R1_PARSE_LENGTH:             return "length";
+    case R1_PARSE_WRONG_PROFILE:      return "wrongProfile";
+    case R1_PARSE_UNSUPPORTED_LAYOUT: return "unsupportedLayout";
+    case R1_PARSE_SLOT_RANGE:         return "slotRange";
+    case R1_PARSE_VALUE_RANGE:        return "valueRange";
+    case R1_PARSE_TOO_LARGE:          return "tooLarge";
+    case R1_PARSE_DUPLICATE_SLOT:     return "duplicateSlot";
+    default:                          return "unsupportedLayout";
+  }
+}
+
 // =============================================================================
 // R1Encoder
 // =============================================================================
@@ -114,7 +156,7 @@ R1Frame R1Encoder::build(uint8_t module, uint8_t cmd, uint8_t subCmd,
                          uint8_t statusType, uint8_t statusMethod, uint8_t statusAck,
                          const uint8_t* payload, size_t payloadLen) {
   R1Frame f = {};
-  if (payloadLen > R1_MAX_PAYLOAD) {
+  if (payloadLen > R1_MAX_PAYLOAD || (payloadLen != 0 && !payload)) {
     f.length = 0;
     return f;
   }
@@ -195,10 +237,16 @@ R1Frame R1Encoder::buildSyncTime(int16_t tzOffsetMinutes, uint32_t epochSeconds)
                payload, sizeof(payload));
 }
 
-R1Frame R1Encoder::buildAdvStart(const uint8_t* mac6BleOrder) {
-  uint8_t payload[6] = {0};
-  if (mac6BleOrder) {
-    memcpy(payload, mac6BleOrder, 6);
+R1Frame R1Encoder::buildAdvStart(R1ProtocolProfile profile,
+                                 const uint8_t* rightMac6,
+                                 const uint8_t* leftMac6) {
+  if (profile != R1_PROFILE_FW_2_2_7_0005 || !rightMac6 || !leftMac6) {
+    return R1Frame{};
+  }
+  uint8_t payload[12];
+  for (size_t i = 0; i < 6; ++i) {
+    payload[i] = rightMac6[5 - i];
+    payload[6 + i] = leftMac6[5 - i];
   }
   return build(R1_MODULE_SYSTEM, R1_CMD_SYSTEM, R1_SUB_ADV_START,
                R1_STATUS_TYPE_NOTIFY, R1_STATUS_METHOD_GET, R1_STATUS_ACK_OK,
@@ -217,10 +265,35 @@ R1Frame R1Encoder::buildDeviceInfoQuery() {
                nullptr, 0);
 }
 
-R1Frame R1Encoder::buildHealthSettingsQuery() {
+R1Frame R1Encoder::buildHealthCollectionSet(R1ProtocolProfile profile,
+                                            uint32_t epochSeconds,
+                                            bool enabled) {
+  if (profile != R1_PROFILE_FW_2_2_7_0005) return R1Frame{};
+  uint8_t payload[12] = {};
+  writeU32LE(payload, epochSeconds);
+  payload[4] = enabled ? 1 : 0;
   return build(R1_MODULE_SYSTEM, R1_CMD_SYSTEM, R1_SUB_HEALTH_SETTINGS,
+               R1_STATUS_TYPE_NOTIFY, R1_STATUS_METHOD_SET, R1_STATUS_ACK_OK,
+               payload, sizeof(payload));
+}
+
+R1Frame R1Encoder::buildLowPowerQuery() {
+  return build(R1_MODULE_SYSTEM, R1_CMD_SYSTEM, R1_SUB_SYSTEM_SETTINGS,
                R1_STATUS_TYPE_NOTIFY, R1_STATUS_METHOD_GET, R1_STATUS_ACK_OK,
                nullptr, 0);
+}
+
+R1Frame R1Encoder::buildLowPowerSet(R1ProtocolProfile profile,
+                                    uint32_t epochSeconds,
+                                    bool enabled) {
+  if (profile != R1_PROFILE_FW_2_2_7_0005) return R1Frame{};
+  uint8_t payload[12] = {};
+  writeU32LE(payload, epochSeconds);
+  payload[4] = 0;  // Captured switchType; no other value is supported.
+  payload[5] = enabled ? 1 : 0;
+  return build(R1_MODULE_SYSTEM, R1_CMD_SYSTEM, R1_SUB_SYSTEM_SETTINGS,
+               R1_STATUS_TYPE_NOTIFY, R1_STATUS_METHOD_SET, R1_STATUS_ACK_OK,
+               payload, sizeof(payload));
 }
 
 R1Frame R1Encoder::buildWearStatusQuery() {
@@ -235,20 +308,32 @@ R1Frame R1Encoder::buildHealthQuery(uint8_t cmd, uint8_t subCmd) {
                nullptr, 0);
 }
 
-R1Frame R1Encoder::buildHealthReportEnable(uint8_t enableMask) {
-  // module=health (0x02), cmd=healthSetting (0x07), subCmd=reportEnable (0x01).
-  //
-  // Originally tried with module=system; the ring went silent (no ack, no
-  // refusal — request just discarded). The Python codec
-  // (docs/evenrealities_rev_share-main/.../ring1_packet_codec.py) puts
-  // healthSetting as a CMD value alongside heartRate/spo2 etc., implying
-  // it lives under module=health. Switched 2026-05-02.
-  //
-  // The subCmd byte 0x01 means "reportEnable" only inside the healthSetting
-  // cmd namespace — the same byte means "daily" inside heartRate/spo2/etc.
-  uint8_t payload[1] = { enableMask };
-  return build(R1_MODULE_HEALTH, R1_CMD_HEALTHSET, /*reportEnable*/0x01,
-               R1_STATUS_TYPE_NOTIFY, R1_STATUS_METHOD_SET, R1_STATUS_ACK_OK,
+R1Frame R1Encoder::buildPacketAck(R1ProtocolProfile profile,
+                                  const R1Decoded& received) {
+  if (profile != R1_PROFILE_FW_2_2_7_0005 ||
+      !r1DecodedIsTrusted(received) ||
+      received.module != R1_MODULE_HEALTH ||
+      received.subCmd != R1_SUB_DAILY ||
+      received.statusType != R1_STATUS_TYPE_NOTIFY ||
+      received.statusMethod != R1_STATUS_METHOD_SET ||
+      received.statusAck != R1_STATUS_ACK_OK ||
+      (received.cmd != R1_CMD_HEARTRATE &&
+       received.cmd != R1_CMD_HRV &&
+       received.cmd != R1_CMD_SPO2 &&
+       received.cmd != R1_CMD_SLEEP &&
+       received.cmd != R1_CMD_ACTIVITY)) {
+    return R1Frame{};
+  }
+
+  uint8_t payload[10] = {};
+  payload[0] = received.module;
+  payload[1] = received.cmd;
+  payload[2] = received.subCmd;
+  // payload[3] and payload[6..9] are capture-proven zero. Their semantic
+  // names are not known, so keep them reserved rather than inventing fields.
+  writeU16LE(payload + 4, received.serial);
+  return build(R1_MODULE_SYSTEM, R1_CMD_SYSTEM, R1_SUB_PACKET_ACK,
+               R1_STATUS_TYPE_ACK, R1_STATUS_METHOD_GET, R1_STATUS_ACK_OK,
                payload, sizeof(payload));
 }
 
@@ -285,7 +370,6 @@ bool r1Decode(const uint8_t* data, size_t len, R1Decoded& out) {
   out.cmd           = model[6];
   out.subCmd        = model[7];
   out.modelLength   = (uint16_t)model[8] | ((uint16_t)model[9] << 8);
-  out.modelLengthValid = (out.modelLength == modelLenWire);
   out.crc16Received = (uint16_t)model[10] | ((uint16_t)model[11] << 8);
 
   // Use the wire-derived model length for CRC validation (the declared length
@@ -294,7 +378,11 @@ bool r1Decode(const uint8_t* data, size_t len, R1Decoded& out) {
   out.crc16Expected = r1ModelCrc16(model, modelLenWire);
   out.crc32Expected = r1Crc32(model, modelLenWire);
 
-  size_t payloadLen = (modelLenWire > 12) ? (modelLenWire - 12) : 0;
+  const size_t payloadLenWire = (modelLenWire > 12) ? (modelLenWire - 12) : 0;
+  out.modelLengthValid = (out.modelLength >= 12 &&
+                          out.modelLength == modelLenWire &&
+                          payloadLenWire <= R1_MAX_PAYLOAD);
+  size_t payloadLen = payloadLenWire;
   if (payloadLen > R1_MAX_PAYLOAD) payloadLen = R1_MAX_PAYLOAD;
   out.payloadLength = payloadLen;
   if (payloadLen > 0) {
@@ -304,6 +392,63 @@ bool r1Decode(const uint8_t* data, size_t len, R1Decoded& out) {
   out.crc16Valid = (out.crc16Received == out.crc16Expected);
   out.crc32Valid = (out.crc32Received == out.crc32Expected);
   return true;
+}
+
+R1ParseError r1ValidateDecoded(const R1Decoded& decoded) {
+  if (!decoded.crc32Valid) return R1_PARSE_BAD_CRC;
+  if (!decoded.modelLengthValid || decoded.modelLength < 12 ||
+      decoded.payloadLength != (size_t)(decoded.modelLength - 12) ||
+      decoded.payloadLength > R1_MAX_PAYLOAD) {
+    return R1_PARSE_LENGTH;
+  }
+  if (decoded.transferType != 0 || decoded.version != 0x64 ||
+      decoded.moduleVersion != 0x64) {
+    return R1_PARSE_UNSUPPORTED_LAYOUT;
+  }
+  return R1_PARSE_OK;
+}
+
+bool r1DecodedIsTrusted(const R1Decoded& decoded) {
+  return r1ValidateDecoded(decoded) == R1_PARSE_OK;
+}
+
+static bool decodePaddedString16(const uint8_t* wire, char out[17]) {
+  if (!wire || !out) return false;
+  bool terminated = false;
+  size_t outLen = 0;
+  for (size_t i = 0; i < 16; ++i) {
+    const uint8_t c = wire[i];
+    if (c == 0) {
+      terminated = true;
+      continue;
+    }
+    // Exact NUL padding: printable bytes may not resume after padding begins.
+    if (terminated || c < 0x20 || c > 0x7E) return false;
+    out[outLen++] = (char)c;
+  }
+  out[outLen] = '\0';
+  return outLen > 0;
+}
+
+R1ParseError r1ParseDeviceInfo(const R1Decoded& decoded, R1DeviceInfo& out) {
+  out = R1DeviceInfo{};
+  const R1ParseError integrity = r1ValidateDecoded(decoded);
+  if (integrity != R1_PARSE_OK) return integrity;
+  if (decoded.module != R1_MODULE_SYSTEM || decoded.cmd != R1_CMD_SYSTEM ||
+      decoded.subCmd != R1_SUB_DEVICE_INFO ||
+      decoded.statusType != R1_STATUS_TYPE_ACK ||
+      decoded.statusMethod != R1_STATUS_METHOD_SET ||
+      decoded.statusAck != R1_STATUS_ACK_OK) {
+    return R1_PARSE_UNSUPPORTED_LAYOUT;
+  }
+  if (decoded.payloadLength != 32) return R1_PARSE_LENGTH;
+  if (!decodePaddedString16(decoded.payload, out.firmware) ||
+      !decodePaddedString16(decoded.payload + 16, out.hardware)) {
+    out = R1DeviceInfo{};
+    return R1_PARSE_UNSUPPORTED_LAYOUT;
+  }
+  out.profile = r1ProfileForFirmware(out.firmware);
+  return R1_PARSE_OK;
 }
 
 // =============================================================================
@@ -352,7 +497,7 @@ const char* r1SubCmdName(uint8_t module, uint8_t cmd, uint8_t subCmd) {
       case R1_SUB_ADV_START:            return "advStart";
       case R1_SUB_GET_ALGO_KEY_STATUS:  return "getAlgoKeyStatus";
       case R1_SUB_SET_ALGO_KEY:         return "setAlgoKey";
-      case R1_SUB_HEALTH_SETTINGS:      return "healthSettingsStatus";
+      case R1_SUB_HEALTH_SETTINGS:      return "healthCollection";
       case R1_SUB_SYSTEM_SETTINGS:      return "systemSettingsStatus";
       case R1_SUB_DEVICE_SN:            return "deviceSn";
       case R1_SUB_NV_RECOVER:           return "nvRecover";
@@ -417,6 +562,76 @@ static inline uint16_t readU16LE(const uint8_t* p) {
   return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
 }
 
+static inline int16_t readI16LE(const uint8_t* p) {
+  return (int16_t)readU16LE(p);
+}
+
+static bool bytesAreZero(const uint8_t* p, size_t len) {
+  if (!p && len != 0) return false;
+  for (size_t i = 0; i < len; ++i) {
+    if (p[i] != 0) return false;
+  }
+  return true;
+}
+
+static R1ParseError validateKnownProfileAndFrame(R1ProtocolProfile profile,
+                                                  const R1Decoded& decoded) {
+  if (profile != R1_PROFILE_FW_2_2_7_0005) return R1_PARSE_WRONG_PROFILE;
+  return r1ValidateDecoded(decoded);
+}
+
+static bool isAckSetOk(const R1Decoded& decoded) {
+  return decoded.statusType == R1_STATUS_TYPE_ACK &&
+         decoded.statusMethod == R1_STATUS_METHOD_SET &&
+         decoded.statusAck == R1_STATUS_ACK_OK;
+}
+
+R1ParseError r1ParseLowPowerStatus(R1ProtocolProfile profile,
+                                   const R1Decoded& decoded,
+                                   R1LowPowerStatus& out) {
+  out = R1LowPowerStatus{};
+  const R1ParseError gate = validateKnownProfileAndFrame(profile, decoded);
+  if (gate != R1_PARSE_OK) return gate;
+  if (decoded.module != R1_MODULE_SYSTEM || decoded.cmd != R1_CMD_SYSTEM ||
+      decoded.subCmd != R1_SUB_SYSTEM_SETTINGS || !isAckSetOk(decoded)) {
+    return R1_PARSE_UNSUPPORTED_LAYOUT;
+  }
+  if (decoded.payloadLength != 12) return R1_PARSE_LENGTH;
+  if (decoded.payload[4] != 0 || decoded.payload[5] > 1 ||
+      !bytesAreZero(decoded.payload + 6, 6)) {
+    return R1_PARSE_UNSUPPORTED_LAYOUT;
+  }
+  out.epochSeconds = readU32LE(decoded.payload);
+  out.switchType = decoded.payload[4];
+  out.enabled = decoded.payload[5] == 1;
+  return R1_PARSE_OK;
+}
+
+R1ParseError r1ParseUserInfo(R1ProtocolProfile profile,
+                             const R1Decoded& decoded,
+                             R1UserInfo& out) {
+  out = R1UserInfo{};
+  const R1ParseError gate = validateKnownProfileAndFrame(profile, decoded);
+  if (gate != R1_PARSE_OK) return gate;
+  if (decoded.module != R1_MODULE_SYSTEM || decoded.cmd != R1_CMD_SYSTEM ||
+      decoded.subCmd != R1_SUB_USER_INFO ||
+      decoded.statusType != R1_STATUS_TYPE_NOTIFY ||
+      decoded.statusMethod != R1_STATUS_METHOD_GET ||
+      decoded.statusAck != R1_STATUS_ACK_OK) {
+    return R1_PARSE_UNSUPPORTED_LAYOUT;
+  }
+  if (decoded.payloadLength != 12) return R1_PARSE_LENGTH;
+  if (decoded.payload[0] > 2 || !bytesAreZero(decoded.payload + 6, 6)) {
+    return R1_PARSE_UNSUPPORTED_LAYOUT;
+  }
+  out.gender = decoded.payload[0];
+  out.age = decoded.payload[1];
+  out.heightCm = readU16LE(decoded.payload + 2);
+  out.weightKg = readU16LE(decoded.payload + 4);
+  memcpy(out.reserved, decoded.payload + 6, sizeof(out.reserved));
+  return R1_PARSE_OK;
+}
+
 // Format an epoch as ISO 8601 in UTC. Returns chars written. If the epoch is
 // 0 (sentinel "no data"), writes "n/a" instead.
 static size_t formatEpoch(uint32_t epochSec, char* out, size_t cap) {
@@ -453,54 +668,25 @@ static size_t annotateDeviceStatus(const uint8_t* p, size_t len, char* out, size
       p[0], wear, p[2], p[3], p[4], p[5], p[6]);
 }
 
-// system/system/deviceInfo — 32 B payload: two 16-byte ASCII strings,
-// null-padded. First is firmware version (e.g. "2.2.0.0011"), second is
-// hardware version (e.g. "603MV1.9.3"). Verified live 2026-05-02 12:26:30.
-static size_t annotateDeviceInfo(const uint8_t* p, size_t len, char* out, size_t cap) {
-  if (len < 32) return 0;
-  // Copy each 16-byte half into a NUL-terminated buffer for safe printing.
-  char fw[17], hw[17];
-  memcpy(fw, p, 16); fw[16] = '\0';
-  memcpy(hw, p + 16, 16); hw[16] = '\0';
-  // Trim trailing nulls/garbage by null-terminating at the first non-printable.
-  for (int i = 0; i < 16; i++) { if (fw[i] < 0x20 || fw[i] > 0x7E) { fw[i] = '\0'; break; } }
-  for (int i = 0; i < 16; i++) { if (hw[i] < 0x20 || hw[i] > 0x7E) { hw[i] = '\0'; break; } }
-  return (size_t)snprintf(out, cap, "deviceInfo fw='%s' hw='%s'", fw, hw);
-}
-
-// system/system/deviceSn — variable-length ASCII serial number, no length
-// prefix. The python codec reads up to 30 bytes; ours observed 15 chars
-// "B210DHACA200092". Verified 2026-05-02 12:26:55.
+// system/system/deviceSn — identifier material. Routine diagnostics expose
+// only the payload length; raw bytes remain available only to explicit capture
+// tooling with its own privacy controls.
 static size_t annotateDeviceSn(const uint8_t* p, size_t len, char* out, size_t cap) {
   if (len < 1) return 0;
-  char sn[33];
-  size_t copy = len < 32 ? len : 32;
-  memcpy(sn, p, copy); sn[copy] = '\0';
-  // Stop at first non-printable.
-  for (size_t i = 0; i < copy; i++) { if (sn[i] < 0x20 || sn[i] > 0x7E) { sn[i] = '\0'; break; } }
-  return (size_t)snprintf(out, cap, "deviceSn='%s'", sn);
+  (void)p;
+  return (size_t)snprintf(out, cap, "deviceSn redacted bytes=%u",
+                          (unsigned)len);
 }
 
 // system/system/getAlgoKeyStatus — byte[0] is a status flag (0=ok seen),
-// bytes[1..] are ASCII hex characters representing the device's algo key.
-// On our ring the key starts with the last 4 MAC bytes in hex (cabaac1c…),
-// followed by what appears to be a per-device unique tail. Verified
-// 2026-05-02 12:26:44.
+// bytes[1..] contain secret key material. Routine diagnostics expose only the
+// status and key length.
 static size_t annotateAlgoKey(const uint8_t* p, size_t len, char* out, size_t cap) {
-  if (len < 2) return 0;
-  uint8_t status = p[0];
-  char key[40];
-  size_t copy = (len - 1) < 39 ? (len - 1) : 39;
-  memcpy(key, p + 1, copy); key[copy] = '\0';
-  for (size_t i = 0; i < copy; i++) { if (key[i] < 0x20 || key[i] > 0x7E) { key[i] = '\0'; break; } }
-  return (size_t)snprintf(out, cap, "algoKeyStatus=%u key='%s'", status, key);
+  if (len < 1) return 0;
+  return (size_t)snprintf(out, cap,
+                          "algoKeyStatus=%u keyBytes=%u redacted",
+                          p[0], (unsigned)(len - 1));
 }
-
-// system/system/{healthSettingsStatus,systemSettingsStatus} share a 12-byte
-// shape but encode different bitmaps. healthSettingsStatus has byte[4]=0x01
-// on our ring; systemSettingsStatus has byte[5]=0x01.
-// Reused annotator: report which non-zero bytes are set so we can compare.
-// (annotateHealthSettings already does this and works for both.)
 
 // system/system/wearStatus — 1 byte: 0=unknown 1=notWear 2=wear (per
 // BleRing1SystemWearStatus in r1_ring_enums.proto).
@@ -513,51 +699,13 @@ static size_t annotateWearStatus(const uint8_t* p, size_t len, char* out, size_t
   return (size_t)snprintf(out, cap, "wearStatus=%u(%s)", p[0], state);
 }
 
-// system/system/healthSettingsStatus — 12-byte feature bitmap. We don't know
-// the bit-meanings yet; just print which byte offsets are non-zero so we can
-// correlate with `ringquery report` experiments.
-static size_t annotateHealthSettings(const uint8_t* p, size_t len, char* out, size_t cap) {
-  if (len < 12) return 0;
-  size_t off = 0;
-  off += snprintf(out + off, cap - off, "settings={");
-  bool first = true;
-  for (size_t i = 0; i < len && off + 12 < cap; i++) {
-    if (p[i] != 0) {
-      off += snprintf(out + off, cap - off, "%s[%u]=%02X",
-                      first ? "" : ",", (unsigned)i, p[i]);
-      first = false;
-    }
-  }
-  if (first) off += snprintf(out + off, cap - off, "all-zero");
-  off += snprintf(out + off, cap - off, "}");
-  return off;
-}
-
-// system/system/nvRecover — payload contains an ASCII serial number embedded
-// in binary metadata. From the empirical capture
-// `02 74 00 5D 5A 59 44 35 43 5A 31 39 37 34 00 00 ...` the chars at offset 4
-// onward (`ZYD5CZ1974` after the leading 0x5D delimiter) look like a serial
-// number. We extract the longest printable run from offset 4 as a best-effort
-// hint.
+// system/system/nvRecover may contain identifier material. Keep routine
+// diagnostics to a redacted payload length.
 static size_t annotateNvRecover(const uint8_t* p, size_t len, char* out, size_t cap) {
-  if (len < 16) return 0;
-  // Scan from offset 4 up to 32 bytes for printable ASCII run.
-  char serial[32];
-  size_t si = 0;
-  size_t startScan = 4;
-  // Skip a leading non-printable byte if present (the 0x5D in our capture).
-  if (startScan < len && (p[startScan] < 0x20 || p[startScan] > 0x7E)) startScan++;
-  for (size_t i = startScan; i < len && si + 1 < sizeof(serial); i++) {
-    uint8_t c = p[i];
-    if (c >= 0x20 && c <= 0x7E) {
-      serial[si++] = (char)c;
-    } else {
-      if (si > 0) break;  // first run found, stop
-    }
-  }
-  serial[si] = '\0';
-  if (si == 0) return 0;
-  return (size_t)snprintf(out, cap, "nvRecover serial='%s'", serial);
+  if (len < 1) return 0;
+  (void)p;
+  return (size_t)snprintf(out, cap, "nvRecover redacted bytes=%u",
+                          (unsigned)len);
 }
 
 // health/{heartRate,hrv,spo2,temperature}/point
@@ -614,240 +762,321 @@ static size_t annotateHealthPoint(uint8_t cmd, const uint8_t* p, size_t len,
       tsBuf, state, (int)value);
 }
 
-// health/heartRate/daily
-// Format does NOT match the layout in the python codec
-// (docs/evenrealities_rev_share-main/.../ring1_packet_codec.py
-// _parse_common_daily) — that codec was developed against firmware
-// v2.1.0_beta_v3 and falls through for our v2.2.0.24 payloads. So this
-// parser is hand-rolled from empirical captures only.
-//
-// Header (11 B):
-//   [0]    record count
-//   [1..2] reserved (00 00)
-//   [3..6] startTs   u32 LE — earliest sample (0 if no data window yet)
-//   [7..10] endTs    u32 LE — latest sample
-// Records (4 B each):
-//   [0]    HR     BPM. HIGH confidence. The HR in record 0 always matches
-//                 the corresponding `hr point` response, suggesting record 0
-//                 is a "latest sample" overlay rather than a fixed historical
-//                 record (we observed this byte change from 85 → 76 in the
-//                 same b1=8 record across queries 30 min apart).
-//   [1]    b1     UNKNOWN. Originally guessed "hour of day UTC" because the
-//                 values 8/9/14/15 looked like hour markers and the latest
-//                 record's b1 matched the current UTC hour. But: record 0's
-//                 b1=8 stays constant while its HR changes, which doesn't
-//                 fit a per-hour-bucket model. Could be a slot index, a
-//                 sample sequence, or hour-of-day with record 0 special-cased.
-//   [2..3] ?,?    UNKNOWN. Drift slightly between queries even when b0 (HR)
-//                 stays constant — they aren't simple min/max for the bucket.
-// Trailing: 1 byte, possibly a checksum or padding.
-//
-// Defensive: if the size doesn't match `count` records + 1 trailing, we
-// emit the count + timestamps anyway and bail on records — the firmware
-// has been observed to vary header layouts across versions, so don't
-// assume our hypothesis holds for unfamiliar shapes.
-// health/{heartRate,spo2,hrv,temperature}/daily — count-prefixed history
-// with a fixed-size record stream. Hand-rolled against firmware 2.2.0.0011
-// HR captures (3-record fixture verified live 2026-05-02); applied
-// speculatively to the sibling metrics (spo2/hrv/temperature) under the
-// hypothesis that they share the envelope and only differ in per-record
-// interpretation.
-//
-// The Python codec (ring1_packet_codec.py _parse_common_daily) was developed
-// against firmware v2.1.0_beta_v3 and has a multi-layout dispatcher we don't
-// match — the codec's header is 5-6 bytes vs our 11-byte hr header. So we
-// emit a "size mismatch" breadcrumb when the hypothesis fails, which is what
-// lets a first-capture-of-spo2-daily debug itself rather than show raw hex.
-//
-// CONFIDENCE per metric:
-//   * heartRate  ✓   verified live 2026-05-02 (3-record fixture, hr=69)
-//   * spo2       ◯   no capture yet on our firmware — record[0] guess is %
-//   * hrv        ◯   no capture yet — record[0] guess is RMSSD ms (low byte)
-//   * temperature ✗  ring rejects all temperature opcodes on our firmware
-bool r1ParseHealthDaily(const uint8_t* p, size_t len, R1DailyResult& out) {
-  out = R1DailyResult{};
-  if (!p || len < 11) return false;
-  uint8_t count = p[0];
-  uint32_t startTs = readU32LE(p + 3);
-  uint32_t endTs   = readU32LE(p + 7);
-  size_t recordsStart = 11;
-  size_t expectedLen  = recordsStart + (size_t)count * 4 + 1;
-  if (expectedLen != len) return false;
-  out.ok = true;
+// Firmware 2.2.7.0005 daily pages. These parsers intentionally accept a full
+// decoded frame, not a naked payload: CRC32/model-length/status/profile gates
+// cannot be accidentally bypassed by a telemetry caller.
+static R1ParseError validateDailyFrame(R1ProtocolProfile profile,
+                                       const R1Decoded& decoded,
+                                       uint8_t expectedCmd) {
+  const R1ParseError gate = validateKnownProfileAndFrame(profile, decoded);
+  if (gate != R1_PARSE_OK) return gate;
+  if (decoded.module != R1_MODULE_HEALTH || decoded.cmd != expectedCmd ||
+      decoded.subCmd != R1_SUB_DAILY ||
+      decoded.statusType != R1_STATUS_TYPE_NOTIFY ||
+      decoded.statusMethod != R1_STATUS_METHOD_SET ||
+      decoded.statusAck != R1_STATUS_ACK_OK) {
+    return R1_PARSE_UNSUPPORTED_LAYOUT;
+  }
+  return R1_PARSE_OK;
+}
+
+static R1ParseError parseDailyPrefix(const R1Decoded& decoded,
+                                     uint8_t& count,
+                                     int16_t& timezoneMinutes,
+                                     uint32_t& dayStart) {
+  if (decoded.payloadLength < 7) return R1_PARSE_LENGTH;
+  count = decoded.payload[0];
+  timezoneMinutes = readI16LE(decoded.payload + 1);
+  // HardwareOne's configured fixed-offset range is UTC-12 through UTC+14.
+  if (timezoneMinutes < -720 || timezoneMinutes > 840) {
+    return R1_PARSE_VALUE_RANGE;
+  }
+  dayStart = readU32LE(decoded.payload + 3);
+  return R1_PARSE_OK;
+}
+
+static R1ParseError checkedBucketEpoch(uint32_t dayStart, uint8_t slot,
+                                       uint32_t secondsPerSlot,
+                                       uint32_t& bucketEpoch) {
+  const uint64_t value = (uint64_t)dayStart +
+                         (uint64_t)slot * (uint64_t)secondsPerSlot;
+  if (value > UINT32_MAX) return R1_PARSE_VALUE_RANGE;
+  bucketEpoch = (uint32_t)value;
+  return R1_PARSE_OK;
+}
+
+R1ParseError r1ParseCommonDaily(R1ProtocolProfile profile,
+                                const R1Decoded& decoded,
+                                R1CommonDailyResult& out) {
+  out = R1CommonDailyResult{};
+  const R1ParseError integrity = validateKnownProfileAndFrame(profile, decoded);
+  if (integrity != R1_PARSE_OK) return integrity;
+  if (decoded.cmd != R1_CMD_HEARTRATE && decoded.cmd != R1_CMD_SPO2) {
+    return R1_PARSE_UNSUPPORTED_LAYOUT;
+  }
+  const R1ParseError gate = validateDailyFrame(profile, decoded, decoded.cmd);
+  if (gate != R1_PARSE_OK) return gate;
+
+  uint8_t count = 0;
+  int16_t timezoneMinutes = 0;
+  uint32_t dayStart = 0;
+  R1ParseError error = parseDailyPrefix(decoded, count, timezoneMinutes, dayStart);
+  if (error != R1_PARSE_OK) return error;
+  if (count > R1_COMMON_DAILY_MAX_RECORDS) return R1_PARSE_TOO_LARGE;
+  const size_t expectedLength = 16U + (size_t)count * 4U;
+  if (decoded.payloadLength != expectedLength) return R1_PARSE_LENGTH;
+
+  const uint8_t* payload = decoded.payload;
+  const uint32_t trailer = readU32LE(payload + expectedLength - 4);
+  if (trailer != R1_FW227_DAILY_TRAILER) return R1_PARSE_UNSUPPORTED_LAYOUT;
+
+  out.profile = profile;
+  out.metric = (decoded.cmd == R1_CMD_HEARTRATE)
+      ? R1_DAILY_METRIC_HEART_RATE : R1_DAILY_METRIC_SPO2;
+  out.sourceSerial = decoded.serial;
+  out.sourceCrc32 = decoded.crc32Received;
+  out.timezoneMinutes = timezoneMinutes;
+  out.dayStart = dayStart;
+  out.latestTimestamp = readU32LE(payload + 7);
+  out.latestValue = payload[11];
   out.count = count;
-  out.startTs = startTs;
-  out.endTs = endTs;
-  const size_t n = count < 64 ? count : 64;
-  for (size_t i = 0; i < n; i++) {
-    out.values[i] = p[recordsStart + i * 4];
+  out.trailer = trailer;
+
+  if (decoded.cmd == R1_CMD_SPO2 && out.latestValue > 100) {
+    out = R1CommonDailyResult{};
+    return R1_PARSE_VALUE_RANGE;
   }
-  out.count = (uint8_t)n;
-  return true;
-}
-
-static size_t annotateGenericDaily(uint8_t cmd, const uint8_t* p, size_t len,
-                                   char* out, size_t cap) {
-  if (len < 11) return 0;
-  uint8_t count = p[0];
-  uint32_t startTs = readU32LE(p + 3);
-  uint32_t endTs   = readU32LE(p + 7);
-  size_t recordsStart = 11;
-  size_t expectedLen  = recordsStart + (size_t)count * 4 + 1;
-
-  // Metric tag for log readability + per-metric record[0] label.
-  // For HR the label is verified (BPM). For the others we use a guess
-  // tag so the log makes clear we haven't confirmed.
-  const char* tag      = "?Daily";
-  const char* valLabel = "val";
-  switch (cmd) {
-    case R1_CMD_HEARTRATE:   tag = "hrDaily";   valLabel = "hr";        break;
-    case R1_CMD_SPO2:        tag = "spo2Daily"; valLabel = "spo2?";     break;
-    case R1_CMD_HRV:         tag = "hrvDaily";  valLabel = "hrv?";      break;
-    case R1_CMD_TEMPERATURE: tag = "tempDaily"; valLabel = "temp?";     break;
-    default: break;
-  }
-
-  char tsStartBuf[32], tsEndBuf[32];
-  formatEpoch(startTs, tsStartBuf, sizeof(tsStartBuf));
-  formatEpoch(endTs,   tsEndBuf,   sizeof(tsEndBuf));
-
-  if (expectedLen != len) {
-    // Header says count=N but body doesn't fit the hr template. Don't
-    // pretend we parsed records; emit the header fields and a length
-    // breadcrumb so we can spot a new firmware variant or a per-metric
-    // shape difference in the log.
-    return (size_t)snprintf(out, cap,
-        "%s count=%u start=%s end=%s (size mismatch: got %u B, expected %u for hr-template — metric=%s may have different shape)",
-        tag, count, tsStartBuf, tsEndBuf,
-        (unsigned)len, (unsigned)expectedLen, valLabel);
-  }
-
-  size_t off = (size_t)snprintf(out, cap,
-      "%s count=%u start=%s end=%s recs=[",
-      tag, count, tsStartBuf, tsEndBuf);
-  for (uint8_t i = 0; i < count && off + 32 < cap; i++) {
-    const uint8_t* r = p + recordsStart + (size_t)i * 4;
-    off += snprintf(out + off, cap - off,
-                    "%s{%s=%u b1=%u b2=%02X b3=%02X}",
-                    i ? "," : "", valLabel, r[0], r[1], r[2], r[3]);
-  }
-  off += snprintf(out + off, cap - off, "]");
-  return off;
-}
-
-// health/sleep/daily — sleep session with a trailing stage array.
-//
-// Speculative parser ported from ring1_packet_codec.py _parse_sleep
-// (firmware v2.1.0_beta_v3). NOT yet captured on our firmware
-// 2.2.0.0011 — the ring's test wearer hasn't logged a sleep session
-// yet, so all queries return ack-only. This parser is staged so the
-// first real response is readable instead of a hex blob; expect
-// adjustments after live capture.
-//
-// Wire layout (per python codec — bytes 1..29 are sparsely-named
-// fields whose semantics weren't reverse-engineered; we just label
-// the meaningful ones):
-//   [0]      sleep_type_code (BleRing1SleepType: 0=long, 1=short)
-//   [1..29]  unknown fields (sleep onset/wakeup times, totals, ...)
-//   [30..31] stage_count u16 LE
-//   [32..]   stage_count × { stage_type:u8, duration_minutes:u16 LE }
-//
-// Stage types per BleRing1SleepStageType:
-//   0 = awake, 1 = rem, 2 = light, 3 = deep
-static size_t annotateSleep(const uint8_t* p, size_t len, char* out, size_t cap) {
-  if (len < 1) return 0;
-  const char* sleepType =
-      (p[0] == 0) ? "long" :
-      (p[0] == 1) ? "short" : "?";
-  size_t off = (size_t)snprintf(out, cap,
-      "sleep type=%u(%s) totalLen=%u",
-      p[0], sleepType, (unsigned)len);
-  if (len < 32) {
-    off += snprintf(out + off, cap - off, " (no stage block — payload too short)");
-    return off;
-  }
-  uint16_t stageCount = readU16LE(p + 30);
-  off += snprintf(out + off, cap - off, " stages=%u recs=[", stageCount);
-  const size_t stageBase = 32;
-  for (uint16_t i = 0; i < stageCount && off + 32 < cap; i++) {
-    const size_t recOff = stageBase + (size_t)i * 3;
-    if (recOff + 3 > len) {
-      off += snprintf(out + off, cap - off, "%s(truncated)", i ? "," : "");
-      break;
+  const uint8_t* record = payload + 12;
+  uint32_t seenSlots = 0;
+  for (uint8_t i = 0; i < count; ++i, record += 4) {
+    R1CommonDailyRecord& dst = out.records[i];
+    dst.hourSlot = record[0];
+    dst.average = record[1];
+    dst.maximum = record[2];
+    dst.minimum = record[3];
+    if (dst.hourSlot > 23) {
+      out = R1CommonDailyResult{};
+      return R1_PARSE_SLOT_RANGE;
     }
-    const uint8_t stageType = p[recOff];
-    const uint16_t duration = readU16LE(p + recOff + 1);
-    const char* stageName =
-        (stageType == 0) ? "awake" :
-        (stageType == 1) ? "rem"   :
-        (stageType == 2) ? "light" :
-        (stageType == 3) ? "deep"  : "?";
-    off += snprintf(out + off, cap - off,
-                    "%s{%s=%um}",
-                    i ? "," : "", stageName, duration);
+    const uint32_t slotBit = 1UL << dst.hourSlot;
+    if ((seenSlots & slotBit) != 0) {
+      out = R1CommonDailyResult{};
+      return R1_PARSE_DUPLICATE_SLOT;
+    }
+    seenSlots |= slotBit;
+    if (dst.minimum > dst.average || dst.average > dst.maximum ||
+        (decoded.cmd == R1_CMD_SPO2 && dst.maximum > 100)) {
+      out = R1CommonDailyResult{};
+      return R1_PARSE_VALUE_RANGE;
+    }
+    error = checkedBucketEpoch(dayStart, dst.hourSlot, 3600, dst.bucketEpoch);
+    if (error != R1_PARSE_OK) {
+      out = R1CommonDailyResult{};
+      return error;
+    }
   }
-  off += snprintf(out + off, cap - off, "]");
-  return off;
+  return R1_PARSE_OK;
 }
 
-// health/activity/daily — paginated multi-frame response.
-//
-// Record layout cross-referenced against the python codec
-// (docs/evenrealities_rev_share-main/.../ring1_packet_codec.py
-// _parse_activity_item):
-//   [0]    slot_index — 10-minute bin since base_ts (slot 50 = +500 min)
-//   [1..2] steps      — i16 LE
-//   [3..4] ?,?        — unknown (always small in our captures, ~02-08)
-//   [5..6] kcal       — i16 LE
-//
-// Verified against your 2026-05-02 captures: slot 54 showed steps=97 kcal=23
-// during an active 10-minute window. Slots 50-53 (sedentary) showed steps=0-8
-// and kcal=2-20.
-//
-// Header layout (NOT matching python codec — their 14-byte header doesn't
-// fit our 7-byte-header firmware variant):
-//   [0]    pageMarker / chunk-id (varies across frames in same response —
-//          0x04 for the overview, 0x0B/0x10/etc. for data frames)
-//   [1..2] reserved (always 00 00 in captures)
-//   [3..6] base_ts u32 LE (zero for overview frame, today's midnight UTC
-//          for data frames)
-// Records start at offset 7, 7 bytes each. Final record may be truncated
-// by frame-size limits (we've seen 1-2 trailing bytes of a partial record);
-// the ring continues the data in subsequent notify frames.
-static size_t annotateActivityDaily(const uint8_t* p, size_t len, char* out, size_t cap) {
-  if (len < 7) return 0;
-  uint8_t pageMarker = p[0];
-  uint32_t ts        = readU32LE(p + 3);
-  size_t recordsStart = 7;
-  size_t recCount = (len - recordsStart) / 7;
-  size_t partial  = (len - recordsStart) % 7;
-  char tsBuf[32];
-  formatEpoch(ts, tsBuf, sizeof(tsBuf));
-  size_t off = (size_t)snprintf(out, cap,
-      "activityDaily page=0x%02X base=%s recs(%u)=[",
-      pageMarker, tsBuf, (unsigned)recCount);
-  for (size_t i = 0; i < recCount && off + 48 < cap; i++) {
-    const uint8_t* r = p + recordsStart + i * 7;
-    uint8_t  slot  = r[0];
-    int16_t  steps = (int16_t)((uint16_t)r[1] | ((uint16_t)r[2] << 8));
-    int16_t  kcal  = (int16_t)((uint16_t)r[5] | ((uint16_t)r[6] << 8));
-    // Slot is in 10-minute bins since base_ts. Compute minute-of-day for
-    // a quick visual cue (slot 54 → +540 min → 09:00 from base midnight).
-    unsigned minOfDay = (unsigned)slot * 10;
-    off += snprintf(out + off, cap - off,
-                    "%s{slot=%u(+%u min) steps=%d kcal=%d ?=%02X,%02X}",
-                    i ? "," : "", slot, minOfDay, (int)steps, (int)kcal,
-                    r[3], r[4]);
+R1ParseError r1ParseHrvDaily(R1ProtocolProfile profile,
+                             const R1Decoded& decoded,
+                             R1HrvDailyResult& out) {
+  out = R1HrvDailyResult{};
+  const R1ParseError gate = validateDailyFrame(profile, decoded, R1_CMD_HRV);
+  if (gate != R1_PARSE_OK) return gate;
+
+  uint8_t count = 0;
+  int16_t timezoneMinutes = 0;
+  uint32_t dayStart = 0;
+  R1ParseError error = parseDailyPrefix(decoded, count, timezoneMinutes, dayStart);
+  if (error != R1_PARSE_OK) return error;
+  if (count > R1_HRV_DAILY_MAX_RECORDS) return R1_PARSE_TOO_LARGE;
+  const size_t expectedLength = 17U + (size_t)count * 7U;
+  if (decoded.payloadLength != expectedLength) return R1_PARSE_LENGTH;
+
+  const uint8_t* payload = decoded.payload;
+  const uint32_t trailer = readU32LE(payload + expectedLength - 4);
+  if (trailer != R1_FW227_DAILY_TRAILER) return R1_PARSE_UNSUPPORTED_LAYOUT;
+
+  out.profile = profile;
+  out.metric = R1_DAILY_METRIC_HRV;
+  out.sourceSerial = decoded.serial;
+  out.sourceCrc32 = decoded.crc32Received;
+  out.timezoneMinutes = timezoneMinutes;
+  out.dayStart = dayStart;
+  out.latestTimestamp = readU32LE(payload + 7);
+  out.latestValue = readU16LE(payload + 11);
+  out.count = count;
+  out.trailer = trailer;
+
+  const uint8_t* record = payload + 13;
+  uint32_t seenSlots = 0;
+  for (uint8_t i = 0; i < count; ++i, record += 7) {
+    R1HrvDailyRecord& dst = out.records[i];
+    dst.hourSlot = record[0];
+    dst.average = readU16LE(record + 1);
+    dst.maximum = readU16LE(record + 3);
+    dst.minimum = readU16LE(record + 5);
+    if (dst.hourSlot > 23) {
+      out = R1HrvDailyResult{};
+      return R1_PARSE_SLOT_RANGE;
+    }
+    const uint32_t slotBit = 1UL << dst.hourSlot;
+    if ((seenSlots & slotBit) != 0) {
+      out = R1HrvDailyResult{};
+      return R1_PARSE_DUPLICATE_SLOT;
+    }
+    seenSlots |= slotBit;
+    if (dst.minimum > dst.average || dst.average > dst.maximum) {
+      out = R1HrvDailyResult{};
+      return R1_PARSE_VALUE_RANGE;
+    }
+    error = checkedBucketEpoch(dayStart, dst.hourSlot, 3600, dst.bucketEpoch);
+    if (error != R1_PARSE_OK) {
+      out = R1HrvDailyResult{};
+      return error;
+    }
   }
-  off += snprintf(out + off, cap - off, "]");
-  if (partial > 0) {
-    off += snprintf(out + off, cap - off, " +%u B partial(continuation?)", (unsigned)partial);
-  }
-  return off;
+  return R1_PARSE_OK;
 }
 
-size_t r1AnnotatePayload(const R1Decoded& d, char* out, size_t cap) {
+R1ParseError r1ParseActivityDaily(R1ProtocolProfile profile,
+                                  const R1Decoded& decoded,
+                                  R1ActivityDailyResult& out) {
+  out = R1ActivityDailyResult{};
+  const R1ParseError gate = validateDailyFrame(profile, decoded, R1_CMD_ACTIVITY);
+  if (gate != R1_PARSE_OK) return gate;
+
+  uint8_t count = 0;
+  int16_t timezoneMinutes = 0;
+  uint32_t dayStart = 0;
+  R1ParseError error = parseDailyPrefix(decoded, count, timezoneMinutes, dayStart);
+  if (error != R1_PARSE_OK) return error;
+  if ((size_t)count > (size_t)R1_ACTIVITY_DAILY_MAX_RECORDS) {
+    return R1_PARSE_TOO_LARGE;
+  }
+  const size_t expectedLength = 11U + (size_t)count * 7U;
+  if (decoded.payloadLength != expectedLength) return R1_PARSE_LENGTH;
+
+  const uint8_t* payload = decoded.payload;
+  const uint32_t trailer = readU32LE(payload + expectedLength - 4);
+  if (trailer != R1_FW227_DAILY_TRAILER) return R1_PARSE_UNSUPPORTED_LAYOUT;
+
+  out.profile = profile;
+  out.metric = R1_DAILY_METRIC_ACTIVITY;
+  out.sourceSerial = decoded.serial;
+  out.sourceCrc32 = decoded.crc32Received;
+  out.timezoneMinutes = timezoneMinutes;
+  out.dayStart = dayStart;
+  out.count = count;
+  out.trailer = trailer;
+
+  const uint8_t* record = payload + 7;
+  uint8_t seenSlots[18] = {};
+  for (uint8_t i = 0; i < count; ++i, record += 7) {
+    R1ActivityDailyRecord& dst = out.records[i];
+    dst.tenMinuteSlot = record[0];
+    dst.steps = readU16LE(record + 1);
+    dst.activeKcal = readU16LE(record + 3);
+    dst.totalKcal = readU16LE(record + 5);
+    if (dst.tenMinuteSlot > 143) {
+      out = R1ActivityDailyResult{};
+      return R1_PARSE_SLOT_RANGE;
+    }
+    const uint8_t seenByte = (uint8_t)(dst.tenMinuteSlot >> 3);
+    const uint8_t seenBit = (uint8_t)(1U << (dst.tenMinuteSlot & 0x07));
+    if ((seenSlots[seenByte] & seenBit) != 0) {
+      out = R1ActivityDailyResult{};
+      return R1_PARSE_DUPLICATE_SLOT;
+    }
+    seenSlots[seenByte] |= seenBit;
+    if (dst.totalKcal < dst.activeKcal) {
+      out = R1ActivityDailyResult{};
+      return R1_PARSE_VALUE_RANGE;
+    }
+    dst.restingKcal = (uint16_t)(dst.totalKcal - dst.activeKcal);
+    error = checkedBucketEpoch(dayStart, dst.tenMinuteSlot, 600,
+                               dst.bucketEpoch);
+    if (error != R1_PARSE_OK) {
+      out = R1ActivityDailyResult{};
+      return error;
+    }
+  }
+  return R1_PARSE_OK;
+}
+
+static size_t annotateCommonDaily(R1ProtocolProfile profile,
+                                  const R1Decoded& decoded,
+                                  char* out, size_t cap) {
+  R1CommonDailyResult parsed;
+  const R1ParseError error = r1ParseCommonDaily(profile, decoded, parsed);
+  if (error != R1_PARSE_OK) {
+    return (size_t)snprintf(out, cap, "daily rejected=%s",
+                            r1ParseErrorName(error));
+  }
+  const char* tag = parsed.metric == R1_DAILY_METRIC_HEART_RATE
+      ? "hrDaily" : "spo2Daily";
+  return (size_t)snprintf(
+      out, cap,
+      "%s count=%u tz=%d day=%lu latest={ts=%lu,value=%u} trailer=%08lX",
+      tag, parsed.count, (int)parsed.timezoneMinutes,
+      (unsigned long)parsed.dayStart,
+      (unsigned long)parsed.latestTimestamp, parsed.latestValue,
+      (unsigned long)parsed.trailer);
+}
+
+static size_t annotateHrvDaily(R1ProtocolProfile profile,
+                               const R1Decoded& decoded,
+                               char* out, size_t cap) {
+  R1HrvDailyResult parsed;
+  const R1ParseError error = r1ParseHrvDaily(profile, decoded, parsed);
+  if (error != R1_PARSE_OK) {
+    return (size_t)snprintf(out, cap, "daily rejected=%s",
+                            r1ParseErrorName(error));
+  }
+  return (size_t)snprintf(
+      out, cap,
+      "hrvDaily count=%u tz=%d day=%lu latest={ts=%lu,value=%u} trailer=%08lX",
+      parsed.count, (int)parsed.timezoneMinutes,
+      (unsigned long)parsed.dayStart,
+      (unsigned long)parsed.latestTimestamp, (unsigned)parsed.latestValue,
+      (unsigned long)parsed.trailer);
+}
+
+static size_t annotateActivityDaily(R1ProtocolProfile profile,
+                                    const R1Decoded& decoded,
+                                    char* out, size_t cap) {
+  R1ActivityDailyResult parsed;
+  const R1ParseError error = r1ParseActivityDaily(profile, decoded, parsed);
+  if (error != R1_PARSE_OK) {
+    return (size_t)snprintf(out, cap, "daily rejected=%s",
+                            r1ParseErrorName(error));
+  }
+  uint32_t steps = 0;
+  uint32_t active = 0;
+  uint32_t total = 0;
+  for (uint8_t i = 0; i < parsed.count; ++i) {
+    steps += parsed.records[i].steps;
+    active += parsed.records[i].activeKcal;
+    total += parsed.records[i].totalKcal;
+  }
+  return (size_t)snprintf(
+      out, cap,
+      "activityDaily count=%u tz=%d day=%lu steps=%lu activeKcal=%lu totalKcal=%lu trailer=%08lX",
+      parsed.count, (int)parsed.timezoneMinutes,
+      (unsigned long)parsed.dayStart, (unsigned long)steps,
+      (unsigned long)active, (unsigned long)total,
+      (unsigned long)parsed.trailer);
+}
+
+size_t r1AnnotatePayload(R1ProtocolProfile profile, const R1Decoded& d,
+                         char* out, size_t cap) {
   if (cap == 0 || d.payloadLength == 0) return 0;
+  const R1ParseError integrity = r1ValidateDecoded(d);
+  if (integrity != R1_PARSE_OK) {
+    return (size_t)snprintf(out, cap, "payload rejected=%s",
+                            r1ParseErrorName(integrity));
+  }
   // Dispatch by (module, cmd, subCmd). Health module uses the same daily/
   // point/measure subCmds across heartRate/spo2/temperature/hrv/sleep, but
   // only the heartRate parsers are hypothesised — the others would just
@@ -857,18 +1086,47 @@ size_t r1AnnotatePayload(const R1Decoded& d, char* out, size_t cap) {
       case R1_SUB_DEVICE_STATUS:
       case R1_SUB_HEARTBEAT:
         return annotateDeviceStatus(d.payload, d.payloadLength, out, cap);
-      case R1_SUB_DEVICE_INFO:
-        return annotateDeviceInfo(d.payload, d.payloadLength, out, cap);
+      case R1_SUB_DEVICE_INFO: {
+        R1DeviceInfo parsed;
+        const R1ParseError error = r1ParseDeviceInfo(d, parsed);
+        if (error != R1_PARSE_OK) {
+          return (size_t)snprintf(out, cap, "deviceInfo rejected=%s",
+                                  r1ParseErrorName(error));
+        }
+        return (size_t)snprintf(out, cap,
+                                "deviceInfo fw='%s' hw='%s' profile=%s",
+                                parsed.firmware, parsed.hardware,
+                                r1ProtocolProfileName(parsed.profile));
+      }
       case R1_SUB_DEVICE_SN:
         return annotateDeviceSn(d.payload, d.payloadLength, out, cap);
       case R1_SUB_GET_ALGO_KEY_STATUS:
         return annotateAlgoKey(d.payload, d.payloadLength, out, cap);
+      case R1_SUB_SET_ALGO_KEY:
+        return (size_t)snprintf(out, cap,
+                                "setAlgoKey redacted bytes=%u",
+                                (unsigned)d.payloadLength);
       case R1_SUB_WEAR_STATUS:
         return annotateWearStatus(d.payload, d.payloadLength, out, cap);
-      case R1_SUB_HEALTH_SETTINGS:
-      case R1_SUB_SYSTEM_SETTINGS:
-        // Same 12-byte feature-bitmap shape, reuse the same dumper.
-        return annotateHealthSettings(d.payload, d.payloadLength, out, cap);
+      case R1_SUB_SYSTEM_SETTINGS: {
+        R1LowPowerStatus parsed;
+        const R1ParseError error = r1ParseLowPowerStatus(profile, d, parsed);
+        if (error != R1_PARSE_OK) {
+          return (size_t)snprintf(out, cap, "lowPower rejected=%s",
+                                  r1ParseErrorName(error));
+        }
+        return (size_t)snprintf(out, cap,
+                                "lowPower=%s switchType=%u epoch=%lu",
+                                parsed.enabled ? "on" : "off",
+                                parsed.switchType,
+                                (unsigned long)parsed.epochSeconds);
+      }
+      case R1_SUB_USER_INFO: {
+        R1UserInfo parsed;
+        const R1ParseError error = r1ParseUserInfo(profile, d, parsed);
+        return (size_t)snprintf(out, cap, "userInfo=%s (redacted)",
+                                r1ParseErrorName(error));
+      }
       case R1_SUB_NV_RECOVER:
         return annotateNvRecover(d.payload, d.payloadLength, out, cap);
       default:
@@ -884,46 +1142,26 @@ size_t r1AnnotatePayload(const R1Decoded& d, char* out, size_t cap) {
          d.cmd == R1_CMD_SPO2      || d.cmd == R1_CMD_TEMPERATURE)) {
       return annotateHealthPoint(d.cmd, d.payload, d.payloadLength, out, cap);
     }
-    // Daily history — same hr-template envelope across all four metrics.
-    // Confidence is high only for HR; the others use the same dispatcher
-    // and emit a size-mismatch breadcrumb if the hypothesis fails on a
-    // first real capture. See annotateGenericDaily for confidence notes.
     if (d.subCmd == R1_SUB_DAILY &&
-        (d.cmd == R1_CMD_HEARTRATE || d.cmd == R1_CMD_SPO2 ||
-         d.cmd == R1_CMD_HRV       || d.cmd == R1_CMD_TEMPERATURE)) {
-      return annotateGenericDaily(d.cmd, d.payload, d.payloadLength, out, cap);
+        (d.cmd == R1_CMD_HEARTRATE || d.cmd == R1_CMD_SPO2)) {
+      return annotateCommonDaily(profile, d, out, cap);
+    }
+    if (d.subCmd == R1_SUB_DAILY && d.cmd == R1_CMD_HRV) {
+      return annotateHrvDaily(profile, d, out, cap);
     }
     if (d.cmd == R1_CMD_ACTIVITY && d.subCmd == R1_SUB_DAILY) {
-      return annotateActivityDaily(d.payload, d.payloadLength, out, cap);
-    }
-    // Sleep — speculative parser staged for the first real session capture.
-    if (d.cmd == R1_CMD_SLEEP && d.subCmd == R1_SUB_DAILY) {
-      return annotateSleep(d.payload, d.payloadLength, out, cap);
+      return annotateActivityDaily(profile, d, out, cap);
     }
   }
   return 0;
 }
 
 // =============================================================================
-// Self-test against captured FlutterApp fixtures
+// Sanitized boot self-test
 // =============================================================================
-//
-// docs/FlutterApp-main/test/protocol/r1_messages_test.dart, the syncTime test:
-//   encoder.auth();                     → serial=1, pairAuth   payload=[01]
-//   encoder.healthSettingsStatus();     → serial=2 (used to advance the
-//                                         counter; bytes are not asserted)
-//   encoder.syncTime(2026-03-19T00:49:55Z, tz=-4h)
-//                                       → serial=3, systemTime
-//                                         payload=10 FF 33 48 BB 69
-//
-// Expected wire bytes (verbatim from the dart test fixture):
-//   pairAuth:    00 97 19 53 F9 64 01 64 01 00 00 00 08 0D 00 3F 01 01
-//   syncTime:    00 D4 C9 BA 70 64 01 64 03 00 02 00 05 12 00 80 77
-//                10 FF 33 48 BB 69
-//
-// If our encoder reproduces these bytes exactly, the CRC16 + CRC32 + status
-// byte + LE pack helpers are all wired up correctly. If it doesn't, the
-// log line points at the first divergent byte so the bug is easy to find.
+// The wire vectors below preserve official-app schemas but contain only
+// synthetic locally-administered MACs, synthetic epochs, and synthetic health
+// values. No capture file, real device identifier, or user profile is embedded.
 
 static bool selfTestCompare(const char* label,
                             const uint8_t* actual, size_t actualLen,
@@ -944,102 +1182,531 @@ static bool selfTestCompare(const char* label,
   return true;
 }
 
-bool r1ProtocolSelfTest() {
+static bool selfTestExpect(const char* label, bool condition) {
+  if (!condition) {
+    DEBUG_G2F("[R1-selftest] FAIL %s", label);
+    return false;
+  }
+  DEBUG_G2F("[R1-selftest] PASS %s", label);
+  return true;
+}
+
+// Keep the temporary encoded frame out of the caller's boot-task stack frame.
+static bool __attribute__((noinline)) selfTestDecoded(
+    uint16_t serial, uint8_t module, uint8_t cmd, uint8_t subCmd,
+    uint8_t statusType, uint8_t statusMethod,
+    const uint8_t* payload, size_t payloadLength,
+    R1Decoded& decoded, R1Frame* wire = nullptr) {
   R1Encoder encoder;
+  for (uint16_t i = 1; i < serial; ++i) (void)encoder.nextSerial();
+  R1Frame frame = encoder.build(module, cmd, subCmd,
+                                statusType, statusMethod, R1_STATUS_ACK_OK,
+                                payload, payloadLength);
+  if (wire) *wire = frame;
+  return frame.length != 0 && r1Decode(frame.bytes, frame.length, decoded);
+}
 
-  // Vector 1 — pairAuth at serial=1.
-  static const uint8_t expectedAuth[] = {
-    0x00, 0x97, 0x19, 0x53, 0xF9,
-    0x64, 0x01, 0x64, 0x01, 0x00, 0x00, 0x00, 0x08, 0x0D, 0x00, 0x3F, 0x01,
-    0x01,
-  };
-  R1Frame auth = encoder.buildPairAuth();
-  bool ok1 = selfTestCompare("pairAuth(ser=1)", auth.bytes, auth.length,
-                             expectedAuth, sizeof(expectedAuth));
+bool r1ProtocolSelfTest() {
+  bool ok = true;
 
-  // Advance the encoder so the next build lands at serial=3, matching the
-  // dart test setup (which calls healthSettingsStatus() between auth and
-  // syncTime).
-  (void)encoder.buildHealthSettingsQuery();
+  {
+    // Existing public fixture: it independently anchors both CRC algorithms.
+    R1Encoder legacyEncoder;
+    static const uint8_t expectedAuth[] = {
+      0x00, 0x97, 0x19, 0x53, 0xF9,
+      0x64, 0x01, 0x64, 0x01, 0x00, 0x00, 0x00, 0x08, 0x0D, 0x00, 0x3F, 0x01,
+      0x01,
+    };
+    R1Frame rejectedNullPayload = legacyEncoder.build(
+        R1_MODULE_SYSTEM, R1_CMD_SYSTEM, R1_SUB_PAIR_AUTH,
+        R1_STATUS_TYPE_NOTIFY, R1_STATUS_METHOD_GET, R1_STATUS_ACK_OK,
+        nullptr, 1);
+    R1Frame auth = legacyEncoder.buildPairAuth();
+    ok &= selfTestExpect("null payload fails without serial",
+                         rejectedNullPayload.length == 0 && auth.serial == 1);
+    ok &= selfTestCompare("pairAuth golden", auth.bytes, auth.length,
+                          expectedAuth, sizeof(expectedAuth));
+    (void)legacyEncoder.nextSerial();
+    static const uint8_t expectedTime[] = {
+      0x00, 0xD4, 0xC9, 0xBA, 0x70,
+      0x64, 0x01, 0x64, 0x03, 0x00, 0x02, 0x00, 0x05, 0x12, 0x00, 0x80, 0x77,
+      0x10, 0xFF, 0x33, 0x48, 0xBB, 0x69,
+    };
+    R1Frame timeFrame = legacyEncoder.buildSyncTime((int16_t)-240,
+                                                     (uint32_t)1773881395);
+    ok &= selfTestCompare("syncTime golden", timeFrame.bytes, timeFrame.length,
+                          expectedTime, sizeof(expectedTime));
+  }
 
-  // Vector 2 — syncTime at serial=3, tz=-4h (-240 min), epoch=1773881395
-  // (= 2026-03-19T00:49:55Z, the exact moment the dart fixture parses).
-  static const uint8_t expectedTime[] = {
-    0x00, 0xD4, 0xC9, 0xBA, 0x70,
-    0x64, 0x01, 0x64, 0x03, 0x00, 0x02, 0x00, 0x05, 0x12, 0x00, 0x80, 0x77,
-    0x10, 0xFF, 0x33, 0x48, 0xBB, 0x69,
-  };
-  R1Frame timeFrame = encoder.buildSyncTime((int16_t)-240, (uint32_t)1773881395);
-  bool ok2 = selfTestCompare("syncTime(ser=3,tz=-240,epoch=1773881395)",
-                             timeFrame.bytes, timeFrame.length,
-                             expectedTime, sizeof(expectedTime));
+  {
+    // Synthetic locally-administered temple addresses. The golden payload
+    // proves right/left order and independent reversal without a real MAC.
+    static const uint8_t syntheticRight[6] = {0x02, 0, 0, 0, 0, 0xA1};
+    static const uint8_t syntheticLeft[6]  = {0x02, 0, 0, 0, 0, 0xB2};
+    static const uint8_t expectedAdvStart[] = {
+      0x00,0xC5,0xDB,0xF8,0xC7, 0x64,0x01,0x64,0x01,0x00,0x00,0x00,
+      0x0A,0x18,0x00,0xC5,0xDA,
+      0xA1,0,0,0,0,0x02, 0xB2,0,0,0,0,0x02,
+    };
+    R1Encoder advEncoder;
+    R1Frame rejectedAdv = advEncoder.buildAdvStart(
+        R1_PROFILE_UNKNOWN, syntheticRight, syntheticLeft);
+    R1Frame adv = advEncoder.buildAdvStart(
+        R1_PROFILE_FW_2_2_7_0005, syntheticRight, syntheticLeft);
+    ok &= selfTestExpect("advStart unknown fails without serial",
+                         rejectedAdv.length == 0 && adv.serial == 1);
+    ok &= selfTestCompare("advStart dual reversed golden",
+                          adv.bytes, adv.length,
+                          expectedAdvStart, sizeof(expectedAdvStart));
+  }
 
-  // Vector 3-5 — payload annotator dry-runs against captured 2026-05-02 logs.
-  // We just check the annotator produces *some* output (non-zero return) and
-  // the output is null-terminated within bounds. Wrong field interpretation
-  // would still return non-zero — the value here is catching a future
-  // refactor that breaks the dispatcher entirely.
+  {
+    static const uint8_t expectedHealthOn[] = {
+      0x00,0xCC,0xBE,0x21,0x6F, 0x64,0x01,0x64,0x01,0x00,0x02,0x00,
+      0x0E,0x18,0x00,0xC5,0x5C, 0x01,0x00,0x00,0x65,0x01,0,0,0,0,0,0,0,
+    };
+    static const uint8_t expectedHealthOff[] = {
+      0x00,0x2F,0x94,0xD3,0xBC, 0x64,0x01,0x64,0x01,0x00,0x02,0x00,
+      0x0E,0x18,0x00,0x16,0x1B, 0x01,0x00,0x00,0x65,0x00,0,0,0,0,0,0,0,
+    };
+    R1Encoder healthOnEncoder;
+    R1Encoder healthOffEncoder;
+    R1Frame healthOn = healthOnEncoder.buildHealthCollectionSet(
+        R1_PROFILE_FW_2_2_7_0005, 0x65000001UL, true);
+    R1Frame healthOff = healthOffEncoder.buildHealthCollectionSet(
+        R1_PROFILE_FW_2_2_7_0005, 0x65000001UL, false);
+    ok &= selfTestCompare("health collection on golden", healthOn.bytes,
+                          healthOn.length, expectedHealthOn,
+                          sizeof(expectedHealthOn));
+    ok &= selfTestCompare("health collection off golden", healthOff.bytes,
+                          healthOff.length, expectedHealthOff,
+                          sizeof(expectedHealthOff));
+  }
 
-  auto runAnnotate = [](const char* label, uint8_t module, uint8_t cmd,
-                        uint8_t subCmd, const uint8_t* payload, size_t len) -> bool {
-    R1Decoded d = {};
-    d.module = module;
-    d.cmd    = cmd;
-    d.subCmd = subCmd;
-    d.payloadLength = len;
-    if (len <= sizeof(d.payload)) memcpy(d.payload, payload, len);
-    char buf[256];
-    size_t n = r1AnnotatePayload(d, buf, sizeof(buf));
-    if (n == 0) {
-      DEBUG_G2F("[R1-selftest] FAIL %s: annotator returned 0", label);
-      return false;
+  {
+    static const uint8_t expectedLowPowerOn[] = {
+      0x00,0x46,0xB2,0xE0,0x22, 0x64,0x01,0x64,0x01,0x00,0x02,0x00,
+      0x0F,0x18,0x00,0x8B,0x0D, 0x01,0x00,0x00,0x65,0x00,0x01,0,0,0,0,0,0,
+    };
+    static const uint8_t expectedLowPowerOff[] = {
+      0x00,0xC1,0xCD,0x6B,0x2F, 0x64,0x01,0x64,0x01,0x00,0x02,0x00,
+      0x0F,0x18,0x00,0xEA,0xB5, 0x01,0x00,0x00,0x65,0x00,0x00,0,0,0,0,0,0,
+    };
+    R1Encoder lowOnEncoder;
+    R1Encoder lowOffEncoder;
+    R1Frame lowOn = lowOnEncoder.buildLowPowerSet(
+        R1_PROFILE_FW_2_2_7_0005, 0x65000001UL, true);
+    R1Frame lowOff = lowOffEncoder.buildLowPowerSet(
+        R1_PROFILE_FW_2_2_7_0005, 0x65000001UL, false);
+    ok &= selfTestCompare("low power on golden", lowOn.bytes, lowOn.length,
+                          expectedLowPowerOn, sizeof(expectedLowPowerOn));
+    ok &= selfTestCompare("low power off golden", lowOff.bytes,
+                          lowOff.length, expectedLowPowerOff,
+                          sizeof(expectedLowPowerOff));
+  }
+
+  {
+    // Exact identity/profile selection, with synthetic hardware text.
+    uint8_t deviceInfoPayload[32] = {};
+    memcpy(deviceInfoPayload, "2.2.7.0005", 12);
+    memcpy(deviceInfoPayload + 16, "SYNTH-HW", 8);
+    R1Decoded deviceInfoDecoded;
+    R1DeviceInfo deviceInfo;
+    ok &= selfTestExpect(
+        "deviceInfo fixture decode",
+        selfTestDecoded(1, R1_MODULE_SYSTEM, R1_CMD_SYSTEM,
+                        R1_SUB_DEVICE_INFO, R1_STATUS_TYPE_ACK,
+                        R1_STATUS_METHOD_SET, deviceInfoPayload,
+                        sizeof(deviceInfoPayload), deviceInfoDecoded) &&
+        r1ParseDeviceInfo(deviceInfoDecoded, deviceInfo) == R1_PARSE_OK &&
+        strcmp(deviceInfo.firmware, "2.2.7.0005") == 0 &&
+        strcmp(deviceInfo.hardware, "SYNTH-HW") == 0 &&
+        deviceInfo.profile == R1_PROFILE_FW_2_2_7_0005 &&
+        r1ProfileForFirmware("2.2.7.0006") == R1_PROFILE_UNKNOWN);
+  }
+
+  {
+    // Routine annotations must never echo identifier or key material.
+    static const uint8_t deviceSnPayload[] = "SYNTH-ID";
+    static const uint8_t algoKeyPayload[] = {0, 'A', 'B', 'C', 'D'};
+    static const uint8_t nvRecoverPayload[] = "PRIVATE-ID";
+    R1Decoded decoded{};
+    char annotation[96] = {};
+    bool redacted = selfTestDecoded(
+        1, R1_MODULE_SYSTEM, R1_CMD_SYSTEM, R1_SUB_DEVICE_SN,
+        R1_STATUS_TYPE_ACK, R1_STATUS_METHOD_SET,
+        deviceSnPayload, sizeof(deviceSnPayload) - 1, decoded);
+    if (redacted) {
+      redacted = r1AnnotatePayload(R1_PROFILE_FW_2_2_7_0005, decoded,
+                                   annotation, sizeof(annotation)) > 0 &&
+                 strstr(annotation, "SYNTH-ID") == nullptr;
     }
-    DEBUG_G2F("[R1-selftest] PASS %s → '%s'", label, buf);
-    return true;
-  };
+    if (redacted) {
+      redacted = selfTestDecoded(
+          1, R1_MODULE_SYSTEM, R1_CMD_SYSTEM,
+          R1_SUB_GET_ALGO_KEY_STATUS, R1_STATUS_TYPE_ACK,
+          R1_STATUS_METHOD_SET, algoKeyPayload, sizeof(algoKeyPayload),
+          decoded);
+    }
+    if (redacted) {
+      redacted = r1AnnotatePayload(R1_PROFILE_FW_2_2_7_0005, decoded,
+                                   annotation, sizeof(annotation)) > 0 &&
+                 strstr(annotation, "ABCD") == nullptr;
+    }
+    if (redacted) {
+      redacted = selfTestDecoded(
+          1, R1_MODULE_SYSTEM, R1_CMD_SYSTEM, R1_SUB_NV_RECOVER,
+          R1_STATUS_TYPE_ACK, R1_STATUS_METHOD_SET,
+          nvRecoverPayload, sizeof(nvRecoverPayload) - 1, decoded);
+    }
+    if (redacted) {
+      redacted = r1AnnotatePayload(R1_PROFILE_FW_2_2_7_0005, decoded,
+                                   annotation, sizeof(annotation)) > 0 &&
+                 strstr(annotation, "PRIVATE-ID") == nullptr;
+    }
+    ok &= selfTestExpect("sensitive diagnostics redacted", redacted);
+  }
 
-  // Captured 2026-05-02 10:22:14 — payload[1]=[02] (wear).
-  static const uint8_t pWear[]    = { 0x02 };
-  // Captured 10:25:17 — payload[12]=[00 00 00 00 01 00 00 00 00 00 00 00].
-  static const uint8_t pHealth[]  = { 0,0,0,0, 1, 0,0,0,0,0,0,0 };
-  // Captured 10:22:44 — payload[8]=[00 00 61 08 F6 69 01 45]. HR=69.
-  static const uint8_t pHrPoint[] = { 0x00,0x00, 0x61,0x08,0xF6,0x69, 0x01, 0x45 };
-  // Captured 10:22:52 — 24-byte hr/daily with 3 records.
-  static const uint8_t pHrDaily[] = {
-    0x03, 0x00, 0x00, 0x80,0x3E,0xF5,0x69, 0x61,0x08,0xF6,0x69,
-    0x45, 0x08, 0x4A, 0x4E, 0x48, 0x09, 0x57, 0x67, 0x45, 0x0E, 0x50, 0x64, 0x45,
+  // Low-power response and user-info decode-only fixtures. Health collection
+  // has no capture-proven readback payload, so only its SET vectors above are
+  // tested.
+  static const uint8_t lowStatePayload[12] = {0,0,0,0, 0,1,0,0,0,0,0,0};
+  static const uint8_t userInfoPayload[12] = {
+    2,0, 0x34,0x12, 0x78,0x56, 0,0,0,0,0,0,
   };
-  // Captured 11:19:22 — 44-byte activity/daily with 5 records (one partial).
-  // Slot 54 = `36 61 00 0B 00 17 00` → steps=97 kcal=23 — this is the
-  // canary that proves steps + kcal extraction is working.
-  static const uint8_t pActivity[] = {
-    0x10, 0x00, 0x00, 0x80,0x3E,0xF5,0x69,
-    0x32, 0x00,0x00, 0x00,0x00, 0x02,0x00,
-    0x33, 0x07,0x00, 0x07,0x00, 0x14,0x00,
-    0x34, 0x00,0x00, 0x02,0x00, 0x0E,0x00,
-    0x35, 0x08,0x00, 0x04,0x00, 0x10,0x00,
-    0x36, 0x61,0x00, 0x0B,0x00, 0x17,0x00,
-    0x37, 0x2A,
+  {
+    R1Decoded lowStateDecoded;
+    R1Decoded userInfoDecoded;
+    R1LowPowerStatus lowState;
+    R1UserInfo userInfo;
+    ok &= selfTestExpect(
+        "typed low-power/user-info decoders",
+        selfTestDecoded(1, R1_MODULE_SYSTEM, R1_CMD_SYSTEM,
+                        R1_SUB_SYSTEM_SETTINGS, R1_STATUS_TYPE_ACK,
+                        R1_STATUS_METHOD_SET, lowStatePayload,
+                        sizeof(lowStatePayload), lowStateDecoded) &&
+        selfTestDecoded(1, R1_MODULE_SYSTEM, R1_CMD_SYSTEM,
+                        R1_SUB_USER_INFO, R1_STATUS_TYPE_NOTIFY,
+                        R1_STATUS_METHOD_GET, userInfoPayload,
+                        sizeof(userInfoPayload), userInfoDecoded) &&
+        r1ParseLowPowerStatus(R1_PROFILE_FW_2_2_7_0005,
+                              lowStateDecoded, lowState) == R1_PARSE_OK &&
+        lowState.switchType == 0 && lowState.enabled &&
+        r1ParseUserInfo(R1_PROFILE_FW_2_2_7_0005,
+                        userInfoDecoded, userInfo) == R1_PARSE_OK &&
+        userInfo.gender == 2 && userInfo.age == 0 &&
+        userInfo.heightCm == 0x1234 && userInfo.weightKg == 0x5678);
+  }
+
+  // Sanitized daily pages: same field widths/order as the official app, with
+  // synthetic epochs and values.
+  static const uint8_t hrPayload[] = {
+    2, 0xC4,0xFF, 0x00,0x00,0x00,0x65,
+    0x34,0x12,0x00,0x65, 70,
+    0,60,70,50, 23,80,90,70, 0x0F,0,0,0,
   };
-  // Captured 11:57:44 — `ringquery raw 1 0 1` → deviceStatus 7-byte payload.
-  static const uint8_t pDevStatus[] = { 0x49, 0x02, 0x01, 0x00, 0x00, 0x00, 0x00 };
+  static const uint8_t spo2Payload[] = {
+    1, 0x4A,0x01, 0x00,0x00,0x00,0x65,
+    0x34,0x12,0x00,0x65, 98,
+    12,97,99,95, 0x0F,0,0,0,
+  };
+  static const uint8_t hrvPayload[] = {
+    1, 0xC4,0xFF, 0x00,0x00,0x00,0x65,
+    0x34,0x12,0x00,0x65, 0x2C,0x01,
+    5, 0xFA,0x00, 0x90,0x01, 0xC8,0x00, 0x0F,0,0,0,
+  };
+  static const uint8_t activityPayload[] = {
+    2, 0xC4,0xFF, 0x00,0x00,0x00,0x65,
+    0,   100,0, 5,0, 10,0,
+    143, 200,0, 20,0, 30,0,
+    0x0F,0,0,0,
+  };
+  {
+    R1Decoded decoded;
+    R1CommonDailyResult parsed;
+    ok &= selfTestExpect(
+        "typed HR daily",
+        selfTestDecoded(45, R1_MODULE_HEALTH, R1_CMD_HEARTRATE,
+                        R1_SUB_DAILY, R1_STATUS_TYPE_NOTIFY,
+                        R1_STATUS_METHOD_SET, hrPayload, sizeof(hrPayload),
+                        decoded) &&
+        r1ParseCommonDaily(R1_PROFILE_FW_2_2_7_0005,
+                           decoded, parsed) == R1_PARSE_OK &&
+        parsed.count == 2 && parsed.latestValue == 70 &&
+        parsed.records[0].bucketEpoch == 0x65000000UL &&
+        parsed.records[1].bucketEpoch == 0x65014370UL &&
+        parsed.records[1].average == 80 &&
+        parsed.records[1].maximum == 90 &&
+        parsed.records[1].minimum == 70);
+  }
+  {
+    R1Decoded decoded;
+    R1CommonDailyResult parsed;
+    ok &= selfTestExpect(
+        "typed SpO2 daily",
+        selfTestDecoded(46, R1_MODULE_HEALTH, R1_CMD_SPO2,
+                        R1_SUB_DAILY, R1_STATUS_TYPE_NOTIFY,
+                        R1_STATUS_METHOD_SET, spo2Payload, sizeof(spo2Payload),
+                        decoded) &&
+        r1ParseCommonDaily(R1_PROFILE_FW_2_2_7_0005,
+                           decoded, parsed) == R1_PARSE_OK &&
+        parsed.timezoneMinutes == 330 && parsed.latestValue == 98 &&
+        parsed.records[0].hourSlot == 12 &&
+        parsed.records[0].average == 97);
+  }
+  {
+    R1Decoded decoded;
+    R1HrvDailyResult parsed;
+    ok &= selfTestExpect(
+        "typed HRV daily",
+        selfTestDecoded(47, R1_MODULE_HEALTH, R1_CMD_HRV,
+                        R1_SUB_DAILY, R1_STATUS_TYPE_NOTIFY,
+                        R1_STATUS_METHOD_SET, hrvPayload, sizeof(hrvPayload),
+                        decoded) &&
+        r1ParseHrvDaily(R1_PROFILE_FW_2_2_7_0005,
+                        decoded, parsed) == R1_PARSE_OK &&
+        parsed.latestValue == 300 && parsed.records[0].average == 250 &&
+        parsed.records[0].maximum == 400 && parsed.records[0].minimum == 200);
+  }
+  {
+    R1Decoded decoded;
+    R1ActivityDailyResult parsed;
+    ok &= selfTestExpect(
+        "typed activity daily",
+        selfTestDecoded(48, R1_MODULE_HEALTH, R1_CMD_ACTIVITY,
+                        R1_SUB_DAILY, R1_STATUS_TYPE_NOTIFY,
+                        R1_STATUS_METHOD_SET, activityPayload,
+                        sizeof(activityPayload), decoded) &&
+        r1ParseActivityDaily(R1_PROFILE_FW_2_2_7_0005,
+                             decoded, parsed) == R1_PARSE_OK &&
+        parsed.count == 2 && parsed.records[0].steps == 100 &&
+        parsed.records[0].activeKcal == 5 &&
+        parsed.records[0].restingKcal == 5 &&
+        parsed.records[1].tenMinuteSlot == 143 &&
+        parsed.records[1].bucketEpoch == 0x65014F28UL);
+  }
 
-  bool ok3 = runAnnotate("annotate wearStatus(02)", R1_MODULE_SYSTEM, R1_CMD_SYSTEM,
-                         R1_SUB_WEAR_STATUS, pWear, sizeof(pWear));
-  bool ok4 = runAnnotate("annotate healthSettings(bit4)", R1_MODULE_SYSTEM, R1_CMD_SYSTEM,
-                         R1_SUB_HEALTH_SETTINGS, pHealth, sizeof(pHealth));
-  bool ok5 = runAnnotate("annotate hrPoint(hr=69)", R1_MODULE_HEALTH, R1_CMD_HEARTRATE,
-                         R1_SUB_POINT, pHrPoint, sizeof(pHrPoint));
-  bool ok6 = runAnnotate("annotate hrDaily(3 recs)", R1_MODULE_HEALTH, R1_CMD_HEARTRATE,
-                         R1_SUB_DAILY, pHrDaily, sizeof(pHrDaily));
-  bool ok7 = runAnnotate("annotate activityDaily(5 recs steps+kcal)",
-                         R1_MODULE_HEALTH, R1_CMD_ACTIVITY, R1_SUB_DAILY,
-                         pActivity, sizeof(pActivity));
-  bool ok8 = runAnnotate("annotate deviceStatus(byte0=73,wear)",
-                         R1_MODULE_SYSTEM, R1_CMD_SYSTEM, R1_SUB_DEVICE_STATUS,
-                         pDevStatus, sizeof(pDevStatus));
+  // packetAck uses a fresh outbound serial and echoes only the trusted received
+  // daily frame identifiers/serial. Reserved fields stay zero.
+  static const uint8_t expectedPacketAck[] = {
+    0x00,0xF1,0x18,0xDB,0xCB, 0x64,0x01,0x64,0x01,0x00,0x01,0x00,
+    0x7E,0x16,0x00,0xB5,0x7B, 0x02,0x01,0x01,0x00,0x2D,0x00,0,0,0,0,
+  };
+  {
+    R1Decoded source{};
+    const bool sourceOk = selfTestDecoded(
+        45, R1_MODULE_HEALTH, R1_CMD_HEARTRATE, R1_SUB_DAILY,
+        R1_STATUS_TYPE_NOTIFY, R1_STATUS_METHOD_SET,
+        hrPayload, sizeof(hrPayload), source);
+    R1Encoder packetAckEncoder;
+    R1Decoded badSource = source;
+    badSource.crc32Valid = false;
+    R1Frame rejectedAck = packetAckEncoder.buildPacketAck(
+        R1_PROFILE_FW_2_2_7_0005, badSource);
+    R1Frame packetAck = packetAckEncoder.buildPacketAck(
+        R1_PROFILE_FW_2_2_7_0005, source);
+    ok &= selfTestExpect("packetAck bad CRC fails without serial",
+                         sourceOk && rejectedAck.length == 0 &&
+                         packetAck.serial == 1);
+    ok &= selfTestCompare("packetAck golden", packetAck.bytes,
+                          packetAck.length, expectedPacketAck,
+                          sizeof(expectedPacketAck));
+  }
 
-  return ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8;
+  // Integrity and malformed-layout cases. Each output object starts clean and
+  // a rejected frame must never masquerade as a partial success.
+  {
+    R1Decoded source{};
+    R1Frame wire{};
+    const bool fixtureOk = selfTestDecoded(
+        45, R1_MODULE_HEALTH, R1_CMD_HEARTRATE, R1_SUB_DAILY,
+        R1_STATUS_TYPE_NOTIFY, R1_STATUS_METHOD_SET,
+        hrPayload, sizeof(hrPayload), source, &wire);
+    if (fixtureOk && wire.length > 17) wire.bytes[17] ^= 0x01;
+    R1Decoded damaged{};
+    R1CommonDailyResult rejected;
+    ok &= selfTestExpect(
+        "daily bad CRC rejected",
+        fixtureOk && r1Decode(wire.bytes, wire.length, damaged) &&
+        r1ParseCommonDaily(R1_PROFILE_FW_2_2_7_0005,
+                           damaged, rejected) == R1_PARSE_BAD_CRC &&
+        rejected.count == 0);
+  }
+
+  {
+    R1Decoded source{};
+    R1CommonDailyResult rejected;
+    const bool fixtureOk = selfTestDecoded(
+        45, R1_MODULE_HEALTH, R1_CMD_HEARTRATE, R1_SUB_DAILY,
+        R1_STATUS_TYPE_NOTIFY, R1_STATUS_METHOD_SET,
+        hrPayload, sizeof(hrPayload), source);
+    R1Decoded wrongLength = source;
+    wrongLength.modelLengthValid = false;
+    ok &= selfTestExpect(
+        "daily model length rejected",
+        fixtureOk &&
+        r1ParseCommonDaily(R1_PROFILE_FW_2_2_7_0005,
+                           wrongLength, rejected) == R1_PARSE_LENGTH);
+    ok &= selfTestExpect(
+        "daily unknown profile rejected",
+        fixtureOk &&
+        r1ParseCommonDaily(R1_PROFILE_UNKNOWN,
+                           source, rejected) == R1_PARSE_WRONG_PROFILE);
+    R1Decoded corruptWrongOpcode = source;
+    corruptWrongOpcode.cmd = R1_CMD_ACTIVITY;
+    corruptWrongOpcode.crc32Valid = false;
+    ok &= selfTestExpect(
+        "daily integrity precedes opcode",
+        fixtureOk &&
+        r1ParseCommonDaily(R1_PROFILE_FW_2_2_7_0005,
+                           corruptWrongOpcode, rejected) == R1_PARSE_BAD_CRC);
+  }
+
+  static const uint8_t zeroRecordPayload[] = {
+    0, 0,0, 0x00,0x00,0x00,0x65,
+    0,0,0,0, 0, 0x0F,0,0,0,
+  };
+  {
+    R1Decoded decoded;
+    R1CommonDailyResult parsed;
+    ok &= selfTestExpect(
+        "daily zero records",
+        selfTestDecoded(1, R1_MODULE_HEALTH, R1_CMD_HEARTRATE,
+                        R1_SUB_DAILY, R1_STATUS_TYPE_NOTIFY,
+                        R1_STATUS_METHOD_SET, zeroRecordPayload,
+                        sizeof(zeroRecordPayload), decoded) &&
+        r1ParseCommonDaily(R1_PROFILE_FW_2_2_7_0005,
+                           decoded, parsed) == R1_PARSE_OK &&
+        parsed.count == 0);
+  }
+
+  {
+    uint8_t malformed[sizeof(hrPayload)];
+    memcpy(malformed, hrPayload, sizeof(malformed));
+    malformed[0] = R1_COMMON_DAILY_MAX_RECORDS + 1;
+    R1Decoded decoded;
+    R1CommonDailyResult rejected;
+    ok &= selfTestExpect(
+        "daily count overflow",
+        selfTestDecoded(1, R1_MODULE_HEALTH, R1_CMD_HEARTRATE,
+                        R1_SUB_DAILY, R1_STATUS_TYPE_NOTIFY,
+                        R1_STATUS_METHOD_SET, malformed, sizeof(malformed),
+                        decoded) &&
+        r1ParseCommonDaily(R1_PROFILE_FW_2_2_7_0005,
+                           decoded, rejected) == R1_PARSE_TOO_LARGE);
+  }
+
+  {
+    uint8_t malformed[sizeof(hrPayload)];
+    memcpy(malformed, hrPayload, sizeof(malformed));
+    malformed[16] = malformed[12];  // Duplicate second hourly slot.
+    R1Decoded decoded;
+    R1CommonDailyResult rejected;
+    ok &= selfTestExpect(
+        "daily duplicate hour rejected",
+        selfTestDecoded(1, R1_MODULE_HEALTH, R1_CMD_HEARTRATE,
+                        R1_SUB_DAILY, R1_STATUS_TYPE_NOTIFY,
+                        R1_STATUS_METHOD_SET, malformed, sizeof(malformed),
+                        decoded) &&
+        r1ParseCommonDaily(R1_PROFILE_FW_2_2_7_0005,
+                           decoded, rejected) == R1_PARSE_DUPLICATE_SLOT);
+  }
+
+  {
+    uint8_t malformed[sizeof(hrPayload)];
+    memcpy(malformed, hrPayload, sizeof(malformed));
+    malformed[sizeof(malformed) - 4] = 0x0E;
+    R1Decoded decoded;
+    R1CommonDailyResult rejected;
+    ok &= selfTestExpect(
+        "daily trailer rejected",
+        selfTestDecoded(1, R1_MODULE_HEALTH, R1_CMD_HEARTRATE,
+                        R1_SUB_DAILY, R1_STATUS_TYPE_NOTIFY,
+                        R1_STATUS_METHOD_SET, malformed, sizeof(malformed),
+                        decoded) &&
+        r1ParseCommonDaily(R1_PROFILE_FW_2_2_7_0005,
+                           decoded, rejected) == R1_PARSE_UNSUPPORTED_LAYOUT);
+  }
+
+  {
+    uint8_t malformed[sizeof(hrPayload)];
+    memcpy(malformed, hrPayload, sizeof(malformed));
+    malformed[1] = 0x2F;  // -721 minutes.
+    malformed[2] = 0xFD;
+    R1Decoded decoded;
+    R1CommonDailyResult rejected;
+    ok &= selfTestExpect(
+        "daily timezone range",
+        selfTestDecoded(1, R1_MODULE_HEALTH, R1_CMD_HEARTRATE,
+                        R1_SUB_DAILY, R1_STATUS_TYPE_NOTIFY,
+                        R1_STATUS_METHOD_SET, malformed, sizeof(malformed),
+                        decoded) &&
+        r1ParseCommonDaily(R1_PROFILE_FW_2_2_7_0005,
+                           decoded, rejected) == R1_PARSE_VALUE_RANGE);
+  }
+
+  {
+    uint8_t malformed[sizeof(activityPayload)];
+    memcpy(malformed, activityPayload, sizeof(malformed));
+    malformed[7] = 144;
+    R1Decoded decoded;
+    R1ActivityDailyResult rejected;
+    ok &= selfTestExpect(
+        "activity slot range",
+        selfTestDecoded(1, R1_MODULE_HEALTH, R1_CMD_ACTIVITY,
+                        R1_SUB_DAILY, R1_STATUS_TYPE_NOTIFY,
+                        R1_STATUS_METHOD_SET, malformed, sizeof(malformed),
+                        decoded) &&
+        r1ParseActivityDaily(R1_PROFILE_FW_2_2_7_0005,
+                             decoded, rejected) == R1_PARSE_SLOT_RANGE);
+  }
+
+  {
+    uint8_t malformed[sizeof(activityPayload)];
+    memcpy(malformed, activityPayload, sizeof(malformed));
+    malformed[14] = malformed[7];  // Duplicate second ten-minute slot.
+    R1Decoded decoded;
+    R1ActivityDailyResult rejected;
+    ok &= selfTestExpect(
+        "activity duplicate slot rejected",
+        selfTestDecoded(1, R1_MODULE_HEALTH, R1_CMD_ACTIVITY,
+                        R1_SUB_DAILY, R1_STATUS_TYPE_NOTIFY,
+                        R1_STATUS_METHOD_SET, malformed, sizeof(malformed),
+                        decoded) &&
+        r1ParseActivityDaily(R1_PROFILE_FW_2_2_7_0005,
+                             decoded, rejected) == R1_PARSE_DUPLICATE_SLOT);
+  }
+
+  {
+    uint8_t malformed[sizeof(activityPayload)];
+    memcpy(malformed, activityPayload, sizeof(malformed));
+    malformed[10] = 11;  // active kcal 11, total kcal 10.
+    R1Decoded decoded;
+    R1ActivityDailyResult rejected;
+    ok &= selfTestExpect(
+        "activity kcal underflow",
+        selfTestDecoded(1, R1_MODULE_HEALTH, R1_CMD_ACTIVITY,
+                        R1_SUB_DAILY, R1_STATUS_TYPE_NOTIFY,
+                        R1_STATUS_METHOD_SET, malformed, sizeof(malformed),
+                        decoded) &&
+        r1ParseActivityDaily(R1_PROFILE_FW_2_2_7_0005,
+                             decoded, rejected) == R1_PARSE_VALUE_RANGE);
+  }
+
+  {
+    R1Decoded decoded;
+    R1CommonDailyResult rejected;
+    ok &= selfTestExpect(
+        "daily unknown status",
+        selfTestDecoded(1, R1_MODULE_HEALTH, R1_CMD_HEARTRATE,
+                        R1_SUB_DAILY, R1_STATUS_TYPE_NOTIFY,
+                        R1_STATUS_METHOD_GET, hrPayload, sizeof(hrPayload),
+                        decoded) &&
+        r1ParseCommonDaily(R1_PROFILE_FW_2_2_7_0005,
+                           decoded, rejected) == R1_PARSE_UNSUPPORTED_LAYOUT);
+  }
+
+  return ok;
 }
 
 #endif  // ENABLE_BLUETOOTH && ENABLE_G2_GLASSES

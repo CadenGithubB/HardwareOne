@@ -83,9 +83,10 @@
 // reference (file `service_id_def_pb.ts`); the firmware enum is the
 // authoritative list. Where our captures gave a different name, the
 // firmware enum wins.
-#define G2_SID_APP_LAUNCH   0x01  // UI_BACKGROUND_DASHBOARD_APP_ID — but used by us
-                                  // as "app launch prelude". Carries dashboard
-                                  // protobuf in normal flow.
+#define G2_SID_DASHBOARD    0x01  // UI_BACKGROUND_DASHBOARD_APP_ID. Carries
+                                  // DashboardDataPackage protobuf.
+#define G2_SID_APP_LAUNCH   G2_SID_DASHBOARD  // compatibility name
+#define G2_SID_MENU         0x03  // Native menu/collection membership service.
 #define G2_SID_NOTIFICATION 0x04  // UI_FOREGROUND_NOTIFICATION_ID — the native
                                   // phone-notification CONTROL service. Gates
                                   // whether EFS (0xC4/0xC5) notification files
@@ -235,6 +236,36 @@ struct G2EnvelopeView {
 // `out->payload` to point into `in` (after the 8-byte header) and sets
 // `payloadLen` to the pb byte count (excluding CRC).
 bool g2ParseEnvelope(const uint8_t* in, size_t len, G2EnvelopeView* out);
+
+// Bounded RX (AA 12) fragment reassembly. The caller owns `storage`; no
+// protocol-sized allocation is hidden here. A completed view points at that
+// storage and remains valid until the next push/reset or caller modification.
+// Fragments must arrive in order and agree on seq/total/sid/flag. The CRC on
+// the final fragment is checked over the fully reassembled protobuf body.
+enum G2RxReassemblyStatus : uint8_t {
+  G2_RX_REASSEMBLY_REJECTED = 0,
+  G2_RX_REASSEMBLY_NEED_MORE = 1,
+  G2_RX_REASSEMBLY_COMPLETE = 2,
+};
+
+struct G2RxReassembly {
+  uint8_t* storage;
+  size_t   capacity;
+  size_t   length;
+  uint8_t  seq;
+  uint8_t  totalFrags;
+  uint8_t  nextFragIdx;
+  uint8_t  sid;
+  uint8_t  flag;
+  bool     active;
+};
+
+void g2RxReassemblyInit(G2RxReassembly* state,
+                        uint8_t* storage, size_t storageCap);
+void g2RxReassemblyReset(G2RxReassembly* state);
+G2RxReassemblyStatus g2RxReassemblyPush(G2RxReassembly* state,
+                                        const uint8_t* frame, size_t frameLen,
+                                        G2EnvelopeView* completed);
 
 // ── Protobuf (proto3) primitives ─────────────────────────────────────────────
 enum G2PbWire {
@@ -1044,6 +1075,16 @@ size_t g2BuildSettingInfoWrite(uint8_t seq, uint32_t magic,
                                uint32_t value,
                                uint8_t* out, size_t outCap);
 
+// Capture-proven HeadUp writes from the official app 2.2.7 against G2
+// firmware 2.2.6.10 (2026-07-31). Angle 19 was observed, but no supported
+// numeric range was established, so this layer deliberately does not invent
+// one. Accepted writes are mirrored by g2ParseSettingWriteAck; restored state
+// exposes HeadUp as G2SettingsEcho f7/f8 via g2ParseSettingEcho.
+size_t g2BuildHeadUpSwitch(uint8_t seq, uint32_t magic, bool enabled,
+                           uint8_t* out, size_t outCap);
+size_t g2BuildHeadUpAngle(uint8_t seq, uint32_t magic, uint32_t angle,
+                          uint8_t* out, size_t outCap);
+
 // Decoded snapshot of DeviceReceiveRequestFromAPP (wrapper f4) — the
 // device's own reported state. `have` is a presence bitmask keyed by field
 // NUMBER (bit 2 = brightness present, bit 10 = wearDetect present, …);
@@ -1200,45 +1241,56 @@ size_t g2BuildDevCfgRingConnect(uint8_t seq, uint32_t magic,
                                 uint8_t* out, size_t outCap);
 
 // =============================================================================
-// Notification-control builders — sid=0x04 (UI_FOREGROUND_NOTIFICATION_ID)
+// Capture-proven native Dashboard/Menu/Notification settings (2026-07-31)
 // =============================================================================
-// EXPERIMENT (see docs/G2_NATIVE_NOTIFICATION_PLAN.md §12). The native
-// phone-notification subsystem is CONTROLLED on sid 0x04 — a different service
-// from the EFS file channel (0xC4/0xC5) that only ships the JSON bytes. Whether
-// a card is allowed to render is gated here: a global enable + a per-app
-// whitelist. Schema: notification.proto (Commute773/g2-r1-re-tools-and-guide;
-// mirrors FlutterApp-main's generated bindings). Neither the reference app nor
-// we have ever written this service — the hypothesis is that on a device never
-// configured by the official Even app the whitelist is empty AND enforced, so
-// every card is filtered before EFS is even parsed (matches our zero-RX /
-// no-START_ERR symptom). NotificationDataPackage reuses the EvenCore wrapper
-// tags: field 1 = commandId, field 2 = magicRandom.
 
-// eNotificationCommandId
-#define G2_NOTIF_CMD_CTRL              1   // NOTIFICATION_CTRL
-#define G2_NOTIF_CMD_WHITELIST_CTRL    3   // NOTIFICATION_WHITELIST_CTRL
-// NotificationDataPackage sub-message field tags
-#define G2_NOTIF_WRAP_F_CTRL           3   // ctrl (NotificationControl)
-#define G2_NOTIF_WRAP_F_WHITELIST      6   // whitelistCtrl (NotificationWhitelistCtrl)
-// NotificationControl fields
+// SID 0x01, commandId=2, wrapper f4/f2. This emits the one complete
+// DashboardDisplaySetting observed from official app 2.2.7 on firmware
+// 2.2.6.10: displayMode=4; status order {1,2,3}; widget order {1,3,2,2};
+// halfDayFormat=1; temperatureUnit=2. It is intentionally not parameterized:
+// one sample establishes the schema and this vector, not supported ranges.
+size_t g2BuildDashboardDisplayJuly31(uint8_t seq, uint32_t magic,
+                                     uint8_t* out, size_t outCap);
+
+// SID 0x03, commandId=0, wrapper f3. Each item is the capture-proven
+// `{f1=0, f4=<numeric id>}` shape and f1 of the list is derived from appCount.
+// IDs are intentionally kept numeric: in particular, captured ID 266 remains
+// unidentified. Empty membership was not captured and is rejected.
+size_t g2BuildMenuMembership(uint8_t seq, uint32_t magic,
+                             const uint32_t* appIds, size_t appCount,
+                             uint8_t* out, size_t outCap);
+
+// SID 0x04, commandId=1, wrapper f3. The only captured official-app control
+// vector was {notifEnable=1, autoDispEnable=1, dispTime=5,
+// avoidDisturbEnable=0}. Field 5's zero is explicitly present on TX.
+#define G2_NOTIF_CMD_CTRL              1
+#define G2_NOTIF_CMD_WHITELIST_CTRL    3
+#define G2_NOTIF_WRAP_F_CTRL           3
+#define G2_NOTIF_WRAP_F_WHITELIST      6
 #define G2_NOTIF_CTRL_F_NOTIF_ENABLE   1
 #define G2_NOTIF_CTRL_F_AUTODISP_EN    2
-// NotificationWhitelistCtrl fields (INVERTED: 1 = disable filtering = allow all)
+#define G2_NOTIF_CTRL_F_DISP_TIME      3
+#define G2_NOTIF_CTRL_F_AVOID_DISTURB  5
 #define G2_NOTIF_WHITELIST_F_DISABLE   1
-// Magic-correlation constants (distinct from the DevCfg/Ring set above)
 #define G2_MAGIC_NOTIF_CTRL            226
 #define G2_MAGIC_NOTIF_WHITELIST       227
 
-// NotificationDataPackage{ commandId=NOTIFICATION_CTRL, ctrl:{ notifEnable=1,
-// autoDispEnable=1 } } — ask the firmware to enable + auto-display notifications.
+size_t g2BuildNotificationControlJuly31(uint8_t seq, uint32_t magic,
+                                        uint8_t* out, size_t outCap);
+
+// Earlier 2026-07-21 hardware-verified two-field native-notification enable
+// vector. This is intentionally distinct from the four-field July 31 capture.
 size_t g2BuildNotifCtrlEnable(uint8_t seq, uint32_t magic,
                               uint8_t* out, size_t outCap);
 
-// NotificationDataPackage{ commandId=NOTIFICATION_WHITELIST_CTRL,
-// whitelistCtrl:{ whitelistDisable=1 } } — turn OFF per-app whitelist filtering
-// so ANY app's card renders (bypasses an empty/unconfigured whitelist).
+// Separate hardware-verified 2026-07-21 native-notification prerequisite:
+// disable whitelist filtering so the EFS-delivered card is not dropped.
 size_t g2BuildNotifWhitelistDisable(uint8_t seq, uint32_t magic,
                                     uint8_t* out, size_t outCap);
+
+// Deterministic offline check against sanitized, non-user-content wire vectors
+// from the July 31 capture, plus bounded multi-fragment RX reassembly.
+bool g2ProtocolGoldenSelfTest();
 
 // =============================================================================
 // Ring data push (sid=0x90 UX_RING_ROW_DATA_ID)

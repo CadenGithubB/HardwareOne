@@ -327,7 +327,7 @@ void bleBootReconnect(void) {
 
 static bool     sUserDisconnect[BLE_PEER_MAX] = {};
 static bool     sWantReconnect[BLE_PEER_MAX]  = {};
-static bool     sReseekEvenIfNoAuto[BLE_PEER_MAX] = {};  // Health Track / explicit nudge
+static bool     sReseekEvenIfNoAuto[BLE_PEER_MAX] = {};  // Health Logging / explicit nudge
 static uint8_t  sReconnectAttempts[BLE_PEER_MAX] = {};
 static uint32_t sReconnectDueMs[BLE_PEER_MAX] = {};
 
@@ -396,7 +396,7 @@ void blePeerRequestReseek(BlePeerKind kind) {
   if (p->ops->isConnected && p->ops->isConnected()) return;
 
   sWantReconnect[kind] = true;
-  sReseekEvenIfNoAuto[kind] = true;  // Health Track / explicit — not only autoReconnect
+  sReseekEvenIfNoAuto[kind] = true;  // Health Logging / explicit — not only autoReconnect
   sReconnectAttempts[kind] = 0;
   sReconnectDueMs[kind] = millis();  // due immediately on next tick
   DEBUG_G2F("[BLE-Peers] Reseek requested for '%s' (saved MAC)",
@@ -434,7 +434,7 @@ void bleAutoReconnectTick(void) {
     (void)p->ops->connectSaved();
     if (sReconnectAttempts[kind] < 250) sReconnectAttempts[kind]++;
 
-    // Explicit (non-autoReconnect) nudges are one-shot — Health Track will
+    // Explicit (non-autoReconnect) nudges are one-shot — Health Logging will
     // ask again on the next mine. autoReconnect keeps exponential backoff.
     if (!d.autoReconnect && sReseekEvenIfNoAuto[kind]) {
       sWantReconnect[kind] = false;
