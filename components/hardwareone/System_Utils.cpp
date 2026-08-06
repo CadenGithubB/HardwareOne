@@ -3291,7 +3291,8 @@ static const CommandModule gCommandModules[] = {
     "<0..60000> sets an anti-flap cooldown (milliseconds) that prevents rapid "
     "back-to-back sleep transitions. All of these values persist.", powerCommands,        powerCommandsCount, 0, nullptr },
   { "ota",        "Signed firmware recovery and update", "Native ESP-IDF signed OTA support. otastatus reports the journal, "
-    "partition identity, staged pair, and last result. A superadmin sets a persistent recovery credential with otapin, "
+    "partition identity, staged pair, and last result. A superadmin sets a persistent recovery credential with otapin - "
+    "on the physical serial console only, because it decides whether recovery can be reached at all - then "
     "uploads /system/ota/candidate.part and manifest.part, validates and journals them with otastage confirm, then uses "
     "otaupdate confirm to reboot into the immutable factory recovery updater. otarecovery confirm enters the same "
     "authenticated recovery image for a direct upload when the main filesystem cannot stage an image; its explicit "

@@ -221,6 +221,10 @@ static esp_err_t root_handler(httpd_req_t *request)
         "<p>Select the signed manifest first, then its matching ESP-IDF image. "
         "The manifest is authenticated and checked before flash is touched; "
         "the streamed image is independently signed and SHA-256 checked.</p>"
+        "<p><b>The image transfer takes 1-3 minutes and reports nothing until "
+        "it finishes.</b> That silence is normal. Do not close this tab, press "
+        "Cancel, or reset the board while it runs - the serial console prints "
+        "progress every 10% if you want to watch it.</p>"
         "<label>Signed manifest <input id=m type=file accept=.json></label><br>"
         "<label>Firmware image <input id=f type=file accept=.bin></label><br>"
         "<button onclick=upload()>Verify manifest and install image</button> "
@@ -232,17 +236,40 @@ static esp_err_t root_handler(httpd_req_t *request)
         "<button onclick=\"if(confirm('Explicitly allow an older signed version "
         "for this transaction?'))go('/allow-downgrade')\">Allow downgrade</button> "
         "<button onclick=go('/reboot')>Reboot recovery</button>"
-        "<pre id=s>loading...</pre>"
-        "<script>async function refresh(){let r=await fetch('/status');"
-        "s.textContent=await r.text()}async function go(p){let r=await fetch(p,{method:'POST'});"
-        "s.textContent=await r.text();setTimeout(refresh,800)}async function upload(){"
-        "if(!m.files[0]||!f.files[0]){s.textContent='Select both files';return}"
-        "s.textContent='Verifying manifest...';let r=await fetch('/manifest',{method:'POST',"
+        "<pre id=o>Ready.</pre><pre id=s>loading...</pre>"
+        /* Two panes on purpose. The 3-second poller owns #s and only #s; every
+         * terminal message an operator needs to read - manifest refused,
+         * install succeeded, transfer failed - goes to #o, which nothing
+         * overwrites. Previously the poll's raw status JSON replaced the
+         * install result a second or two after it appeared, so the one line
+         * that answered "did it work?" was the line guaranteed to vanish.
+         *
+         * busy still gates the poller: the server is single-tasked, so a poll
+         * issued during the multi-minute PUT just occupies a socket, and a
+         * response that resolves late must not paint stale status. */
+        "<script>let busy=false;"
+        "async function refresh(){if(busy)return;let r=await fetch('/status');"
+        "let x=await r.text();if(busy)return;s.textContent=x}"
+        "async function go(p){let r=await fetch(p,{method:'POST'});"
+        "o.textContent=await r.text();setTimeout(refresh,800)}"
+        "async function upload(){"
+        "if(!m.files[0]||!f.files[0]){o.textContent='Select both files';return}"
+        "busy=true;try{"
+        "o.textContent='Verifying manifest...';let r=await fetch('/manifest',{method:'POST',"
         "headers:{'Content-Type':'application/json'},body:await m.files[0].text()});"
-        "let t=await r.text();if(!r.ok){s.textContent=t;return}"
-        "s.textContent='Installing signed image... keep power connected';"
-        "r=await fetch('/firmware',{method:'PUT',headers:{'Content-Type':'application/octet-stream'},"
-        "body:f.files[0]});s.textContent=await r.text()}refresh();setInterval(refresh,3000)</script>";
+        "let t=await r.text();if(!r.ok){o.textContent=t;return}"
+        "let t0=Date.now();let tick=setInterval(()=>{o.textContent="
+        "'Installing signed image - '+Math.round((Date.now()-t0)/1000)+'s elapsed.\\n'"
+        "+'Normally 1-3 minutes. Keep power connected. Do not close this tab or "
+        "reset the board.\\nThe serial console prints progress every 10%.'},1000);"
+        "try{r=await fetch('/firmware',{method:'PUT',"
+        "headers:{'Content-Type':'application/octet-stream'},"
+        "body:f.files[0]});o.textContent=await r.text()}"
+        "catch(e){o.textContent='Transfer failed: '+e+'\\nRe-send the manifest "
+        "before retrying; ota_0 may be partially written.'}"
+        "finally{clearInterval(tick)}"
+        "}finally{busy=false;setTimeout(refresh,1500)}}"
+        "refresh();setInterval(refresh,3000)</script>";
     if (!require_authorization(request)) {
         return ESP_OK;
     }

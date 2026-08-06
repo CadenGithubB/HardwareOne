@@ -193,6 +193,79 @@ static void snapshot_progress(size_t written, size_t total)
     }
 }
 
+/* Console narration for the two multi-minute operations.
+ *
+ * Writing a ~5 MB image takes 60-120 seconds over the recovery SoftAP, and the
+ * updater used to print nothing at all for the whole of it. From the operator's
+ * seat that is a dead `hw1up>` prompt and an HTTP request that appears hung,
+ * and the natural responses - reset the board, unplug it, type `cancel` - are
+ * precisely the ones that abandon a half-written ota_0. Progress was only ever
+ * visible to someone who already knew to type `status`.
+ *
+ * So: say how long it will take BEFORE starting, then prove liveness while it
+ * runs. Ten decile lines is enough to look alive without flooding a 115200-baud
+ * console or stealing time from the transfer.
+ *
+ * Two different tasks reach these: the direct-upload path runs on the
+ * esp_http_server task, the staged-apply path on hw1up_control - which is the
+ * only TWDT-subscribed task, so its tick sits inside the fed window between
+ * esp_ota_write() and feed_control_watchdog(). The two are mutually exclusive
+ * under s_operation_mutex, so the unlocked statics below are not a race.
+ *
+ * Console writes cannot stall a transfer. stdout is the USB-Serial/JTAG driver,
+ * whose VFS tries a 0-tick write first and, on failure, blocks ONCE for at most
+ * TX_FLUSH_TIMEOUT_US (50 ms) before latching into drop-the-byte mode - so an
+ * unattended board with nobody draining the port costs ~50 ms, not a hang. The
+ * console reads with plain fgets() and holds only the driver's read lock, so
+ * interleaved output cannot corrupt any line-editor state or deadlock. */
+static uint8_t s_progress_decile;
+static bool s_progress_active;
+
+static void progress_console_begin(const char *what, size_t total)
+{
+    s_progress_decile = 0;
+    s_progress_active = true;
+    printf("\n[recovery] %s: %u bytes. This normally takes 1-3 minutes.\n"
+           "[recovery] Do NOT reset, unplug, or type 'cancel' until it reports done.\n",
+           what, (unsigned)total);
+    fflush(stdout);
+}
+
+static void progress_console_tick(size_t written, size_t total)
+{
+    uint8_t decile;
+    if (total == 0) {
+        return;
+    }
+    /* 64-bit intermediate: 5 MB * 10 overflows nothing here, but written is
+     * size_t and this keeps the arithmetic obviously safe if the slot grows. */
+    decile = (uint8_t)(((uint64_t)written * 10U) / total);
+    if (decile > 10U) {
+        decile = 10U;
+    }
+    if (decile <= s_progress_decile) {
+        return;
+    }
+    s_progress_decile = decile;
+    printf("[recovery] %3u%%  (%u / %u bytes)\n", (unsigned)decile * 10U,
+           (unsigned)written, (unsigned)total);
+    fflush(stdout);
+}
+
+static void progress_console_end(bool ok, const char *detail)
+{
+    /* Symmetric with begin(): a refusal that happens before the banner was
+     * printed must not emit a lone "done"/"FAILED" line out of nowhere. */
+    if (!s_progress_active) {
+        return;
+    }
+    s_progress_active = false;
+    printf("[recovery] %s%s%s\n", ok ? "done" : "FAILED",
+           (detail != NULL && detail[0] != '\0') ? ": " : "",
+           (detail != NULL) ? detail : "");
+    fflush(stdout);
+}
+
 static void snapshot_record(const hw1_ota_record_t *record, bool valid)
 {
     if (xSemaphoreTake(s_snapshot_mutex, portMAX_DELAY) == pdTRUE) {
@@ -746,6 +819,8 @@ static esp_err_t write_staged_candidate(updater_candidate_t *candidate,
         return err;
     }
     snapshot_set(UPDATER_STATE_WRITING, "writing staged signed image to ota_0");
+    progress_console_begin("Writing staged firmware to ota_0",
+                           candidate->image_size);
     snapshot_progress(0, candidate->image_size);
     /* Incremental erases bound each blocking flash operation so the control
      * task can keep servicing its watchdog between chunks. */
@@ -788,6 +863,7 @@ static esp_err_t write_staged_candidate(updater_candidate_t *candidate,
         }
         written += (uint32_t)wanted;
         snapshot_progress(written, candidate->image_size);
+        progress_console_tick(written, candidate->image_size);
         feed_control_watchdog();
     }
     memset(buffer, 0, OTA_WRITE_CHUNK);
@@ -882,6 +958,10 @@ static void apply_staged(void)
         err = finalize_verified_image(&record, &candidate.verified,
                                       reason, sizeof(reason));
     }
+    /* No-ops unless write_staged_candidate() actually opened the banner. */
+    progress_console_end(err == ESP_OK,
+                         err == ESP_OK ? "image verified and trial boot armed"
+                                       : reason);
     if (err != ESP_OK) {
         goto failed;
     }
@@ -1024,6 +1104,14 @@ static esp_err_t accept_manifest(const uint8_t *body, size_t body_size,
             s_upload_manifest_valid = true;
             snapshot_set(UPDATER_STATE_IDLE,
                          "manifest authenticated; awaiting exact firmware body");
+            /* The operator's next action is the multi-minute one. Warn before
+             * it starts, not once they are already staring at a dead prompt. */
+            printf("\n[recovery] Manifest authenticated for %s (%u bytes).\n"
+                   "[recovery] Send the matching image next; that transfer runs "
+                   "1-3 minutes with no HTTP reply until it finishes.\n",
+                   fresh.manifest.version,
+                   (unsigned)fresh.manifest.image_size);
+            fflush(stdout);
         }
     }
     if (err != ESP_OK && reason[0] == '\0') {
@@ -1128,6 +1216,8 @@ static esp_err_t accept_firmware(recovery_upload_t *upload,
     snapshot_set(UPDATER_STATE_WRITING,
                  "streaming signed image directly to ota_0");
     snapshot_progress(0, upload->content_length);
+    progress_console_begin("Receiving and writing firmware to ota_0",
+                           upload->content_length);
     /* Avoid one partition-sized blocking erase. This keeps the platform idle
      * watchdogs serviceable while each received chunk erases and writes. */
     err = esp_ota_begin(s_ota0, OTA_WITH_SEQUENTIAL_WRITES, &handle);
@@ -1182,6 +1272,7 @@ static esp_err_t accept_firmware(recovery_upload_t *upload,
         }
         written += wanted;
         snapshot_progress(written, upload->content_length);
+        progress_console_tick(written, upload->content_length);
     }
     if (err == ESP_OK && mbedtls_sha256_finish(&sha, digest) != 0) {
         err = ESP_FAIL;
@@ -1215,6 +1306,9 @@ static esp_err_t accept_firmware(recovery_upload_t *upload,
     }
 
 done:
+    progress_console_end(err == ESP_OK,
+                         err == ESP_OK ? "image verified and trial boot armed"
+                                       : reason);
     if (ota_started) {
         (void)esp_ota_abort(handle);
     }

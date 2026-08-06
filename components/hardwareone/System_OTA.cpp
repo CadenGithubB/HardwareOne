@@ -13,6 +13,7 @@
 #include "System_CommandTypes.h"
 #include "System_CrashRecord.h"
 #include "System_Events.h"
+#include "System_SelfDevice.h"
 #include "System_MemUtil.h"  // ps_alloc — image hashing must not use cmd_exec_task's stack
 #include "System_Mutex.h"
 #include "System_VFS.h"
@@ -944,6 +945,13 @@ const char* cmdOtaWrite(const String& argsInput) {
     gBleUploadResumedFrom = resumeFrom;
     gBleUpload.lastActivityMs = millis();
     memcpy(gBleUpload.expectedDigest, expectedDigest, sizeof(expectedDigest));
+    {
+      char detail[40];
+      snprintf(detail, sizeof(detail), "%lu bytes%s",
+               (unsigned long)gBleUpload.expected,
+               resumeFrom > 0 ? " (resumed)" : "");
+      systemEventPost(SYSEVT_OTA_UPLOAD_STARTED, gBleUpload.member, detail);
+    }
     const char* result = bleUploadJson(true, false);
     xSemaphoreGive(gBleUploadMutex);
     return result;
@@ -997,6 +1005,9 @@ const char* cmdOtaWrite(const String& argsInput) {
     if (digestResult != 0 ||
         memcmp(digest, gBleUpload.expectedDigest, sizeof(digest)) != 0) {
       memset(digest, 0, sizeof(digest));
+      systemEventPost(SYSEVT_OTA_UPLOAD_FINISHED,
+                      gBleUpload.member[0] ? gBleUpload.member : "member",
+                      "transport SHA-256 mismatch");
       const char* result = bleUploadJson(false, false, "transport SHA-256 mismatch");
       resetBleUploadLocked(true);
       xSemaphoreGive(gBleUploadMutex);
@@ -1012,6 +1023,12 @@ const char* cmdOtaWrite(const String& argsInput) {
       if (VFS::existsGuarded(meta, auth)) (void)VFS::removeGuarded(meta, auth);
     }
     gBleUpload.active = false;
+    {
+      char bytes[24];
+      snprintf(bytes, sizeof(bytes), "%lu bytes", (unsigned long)gBleUpload.expected);
+      systemEventPost(SYSEVT_OTA_UPLOAD_FINISHED,
+                      gBleUpload.member[0] ? gBleUpload.member : "member", bytes);
+    }
     const char* result = bleUploadJson(true, true);
     xSemaphoreGive(gBleUploadMutex);
     return result;
@@ -1285,13 +1302,38 @@ const char* cmdOtaStatus(const String& argsInput) {
 const char* cmdOtaPin(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (commandIsAutomation()) return "Error: otapin is forbidden from automations";
+  // Physical-presence gate, matching cmdOtaResetJournal below.
+  //
+  // This closes a backwards asymmetry: otaresetjournal - which only rewrites two
+  // recoverable journal keys - was serial-only, while otapin, which decides
+  // whether recovery can be reached at all, was reachable from WEB, BLUETOOTH,
+  // MQTT, ESPNOW, G2_HIJACK, LOCAL_DISPLAY and VOICE on nothing but
+  // requiresSuperAdmin. Since start_network() refuses to raise the SoftAP with
+  // no credential (updater/main/updater_main.c), one hijacked super-admin
+  // session anywhere could run `otapin clear confirm` and take recovery offline
+  // from the other side of the planet, leaving the physical console - which is
+  // deliberately UNGATED while no credential exists - as the only way back in.
+  // Setting a NEW value is equally sensitive: it hands the attacker the WPA2 PSK
+  // and HTTP token for the next recovery boot.
+  //
+  // Cable-only costs nothing operationally. The credential is provisioned once
+  // during cable bring-up, and every remote step that matters (otawrite,
+  // otastage, otaupdate) still works over Bluetooth afterwards - only CHANGING
+  // the credential now needs someone at the device. It also leaves the
+  // documented lockout escape intact: the recovery console's `cancel` boots the
+  // main app on the same USB connection the operator is already holding.
+  const auto* context = static_cast<CommandContext*>(currentCommandContext());
+  if (!context || context->origin != ORIGIN_SERIAL) {
+    return "Error: otapin is available only on the physical serial console";
+  }
   String passphrase = argsInput;
   passphrase.trim();
   static char error[160];
   if (passphrase.equalsIgnoreCase("clear confirm")) {
-    return clearCredential(error, sizeof(error))
-               ? "Recovery credential cleared. Recovery mode will remain offline until otapin is set again."
-               : error;
+    if (!clearCredential(error, sizeof(error))) return error;
+    systemEventPost(SYSEVT_OTA_CREDENTIAL_CHANGED, "cleared",
+                    currentAuthContext().user.c_str());
+    return "Recovery credential cleared. Recovery mode will remain offline until otapin is set again.";
   }
   if (passphrase.length() < kMinimumRecoveryPassphrase ||
       passphrase.length() > kMaximumRecoveryPassphrase) {
@@ -1307,9 +1349,13 @@ const char* cmdOtaPin(const String& argsInput) {
   }
   const bool stored = storeCredential(passphrase, error, sizeof(error));
   secureClearString(passphrase);
-  return stored
-             ? "Persistent recovery credential set for WPA2 and HTTP authentication. It is never shown by status."
-             : error;
+  if (!stored) return error;
+  // subject distinguishes set from cleared, which the command audit log cannot:
+  // the redaction rule renders `otapin <secret>` and `otapin clear confirm`
+  // identically as `otapin ***`.
+  systemEventPost(SYSEVT_OTA_CREDENTIAL_CHANGED, "set",
+                  currentAuthContext().user.c_str());
+  return "Persistent recovery credential set for WPA2 and HTTP authentication. It is never shown by status.";
 }
 
 const char* cmdOtaStage(const String& argsInput) {
@@ -1342,6 +1388,14 @@ const char* cmdOtaStage(const String& argsInput) {
   CandidateInfo candidate{};
   if (!validateCandidate(kCandidatePart, kManifestPart, allowDowngrade,
                          candidate, response, sizeof(response))) {
+    // The signature/contract refusal reason is the whole value here - a
+    // rejected candidate is either an operator mistake or someone feeding the
+    // device an image it should not take.
+    systemEventPost(SYSEVT_OTA_STAGE_REJECTED,
+                    candidate.verified.manifest.version[0]
+                        ? candidate.verified.manifest.version
+                        : "unknown",
+                    response);
     return response;
   }
 
@@ -1377,9 +1431,20 @@ const char* cmdOtaStage(const String& argsInput) {
   }
   if (!commitRecord(record, response, sizeof(response))) return response;
 
+  // Only mention the credential when it is actually missing. This line used to
+  // say "after setting otapin" unconditionally, which told operators of an
+  // already-provisioned device to do work they had done months earlier - and
+  // now that otapin is serial-only, it would send a remote operator to a
+  // command their transport refuses.
+  systemEventPost(SYSEVT_OTA_STAGED, promoted.verified.manifest.version,
+                  allowDowngrade ? "allow-downgrade" : "normal");
   snprintf(response, sizeof(response),
-           "Staged and journaled %s (%" PRIu32 " bytes). Run otaupdate confirm after setting otapin.",
-           promoted.verified.manifest.version, promoted.size);
+           "Staged and journaled %s (%" PRIu32 " bytes). %s",
+           promoted.verified.manifest.version, promoted.size,
+           credentialConfigured()
+               ? "Run otaupdate confirm."
+               : "Set the recovery credential with otapin on the serial console, "
+                 "then run otaupdate confirm.");
   return response;
 }
 
@@ -1391,7 +1456,7 @@ const char* cmdOtaUpdate(const String& argsInput) {
     return "Error: Usage: otaupdate confirm [force-power]";
   }
   if (!credentialConfigured()) {
-    return "Error: set a recovery credential first with otapin <12..63 characters>";
+    return "Error: set a recovery credential first - run otapin <12..63 characters> on the serial console";
   }
 
   static char response[240];
@@ -1431,6 +1496,8 @@ const char* cmdOtaUpdate(const String& argsInput) {
   if (!bootRecoveryForRecord(record, response, sizeof(response))) return response;
 
   systemEventPost(SYSEVT_OTA_RESULT, "recovery_armed", candidate.verified.manifest.version);
+  systemEventPost(SYSEVT_OTA_RECOVERY_ENTERED, "operator",
+                  candidate.verified.manifest.version);
   rebootDevice("ota", "signed OTA update armed; rebooting to factory recovery", 750);
   return "Rebooting to recovery updater";
 }
@@ -1443,7 +1510,7 @@ const char* cmdOtaRecovery(const String& argsInput) {
     return "Error: Usage: otarecovery confirm [allow-downgrade]";
   }
   if (!credentialConfigured()) {
-    return "Error: set a recovery credential first with otapin <12..63 characters>";
+    return "Error: set a recovery credential first - run otapin <12..63 characters> on the serial console";
   }
 
   static char response[220];
@@ -1468,6 +1535,7 @@ const char* cmdOtaRecovery(const String& argsInput) {
   }
 
   systemEventPost(SYSEVT_OTA_RESULT, "recovery_armed", "direct upload requested");
+  systemEventPost(SYSEVT_OTA_RECOVERY_ENTERED, "operator", "direct upload");
   rebootDevice("ota-recovery", "operator requested authenticated OTA recovery", 750);
   return "Rebooting to recovery updater";
 }
@@ -1761,14 +1829,27 @@ void otaSystemInitAfterStorage() {
     OtaProbationCause abortCause = OTA_PROBATION_NONE;
     uint32_t abortUptimeMs = 0;
     char abortDetail[64]{};
+    // consume=false: v0.99.81 shipped this as consume=true, which zeroed the RTC
+    // slot during boot init - so `otastatus`, which reads it non-destructively,
+    // always found it empty and the release note's claim that a rollback cause
+    // "appears in otastatus" was never true on this path. The breadcrumb is now
+    // left in place; the next abort overwrites it, and otaSafetyMarkProbation-
+    // AbortReported() keeps this from re-logging the same rollback every boot.
     if (otaSafetyTakeProbationAbort(&abortCause, &abortUptimeMs, abortDetail,
-                                    sizeof(abortDetail), true)) {
+                                    sizeof(abortDetail), false) &&
+        !otaSafetyProbationAbortReported()) {
       char event[SYSEVT_DETAIL_LEN];
       snprintf(event, sizeof(event), "rollback: %s after %lums (%.40s)",
                otaSafetyProbationCauseName(abortCause),
                (unsigned long)abortUptimeMs, abortDetail);
       ESP_LOGE(kTag, "Previous trial image was rolled back - %s", event);
       logSystemEvent("OTA", event);
+      char rolledDetail[SYSEVT_DETAIL_LEN];
+      snprintf(rolledDetail, sizeof(rolledDetail), "%lums: %.40s",
+               (unsigned long)abortUptimeMs, abortDetail);
+      systemEventPost(SYSEVT_OTA_ROLLED_BACK,
+                      otaSafetyProbationCauseName(abortCause), rolledDetail);
+      otaSafetyMarkProbationAbortReported();
     }
   }
 
@@ -1801,6 +1882,9 @@ void otaSystemInitAfterStorage() {
     if (!transitionAndCommit(record, HW1_OTA_EVENT_TRIAL_STARTED, nullptr,
                              reason, sizeof(reason))) {
       ESP_LOGE(kTag, "%s", reason);
+    } else {
+      systemEventPost(SYSEVT_OTA_TRIAL_STARTED, SelfDevice::firmwareVersion(),
+                      "unverified image on probation");
     }
   } else if (running && running->subtype == ESP_PARTITION_SUBTYPE_APP_OTA_0 &&
              imageState == ESP_OTA_IMG_VALID &&
@@ -1893,8 +1977,10 @@ bool otaSystemCanMarkImageValid() {
 #endif
 }
 
-void otaSystemOnImageMarkedValid() {
-#if HW1_OTA_LAYOUT
+void otaSystemOnImageMarkedValid(bool provisioningShortcut) {
+#if !HW1_OTA_LAYOUT
+  (void)provisioningShortcut;  // no OTA journal in this build
+#else
   hw1_ota_record_t record{};
   char reason[160]{};
   if (!loadRecord(record, nullptr, false, reason, sizeof(reason))) {
@@ -1926,6 +2012,8 @@ void otaSystemOnImageMarkedValid() {
   }
   removeStagedFiles();
   postResultEvent(record);
+  systemEventPost(SYSEVT_OTA_ACCEPTED, SelfDevice::firmwareVersion(),
+                  provisioningShortcut ? "provisioning" : "probation");
 #endif
 }
 
@@ -1933,7 +2021,7 @@ void otaSystemOnImageMarkedValid() {
 const CommandEntry otaCommands[] = {
     {"otastatus", "Show signed recovery OTA state. (add 'json')", false,
      cmdOtaStatus, "Usage: otastatus [json]"},
-    {"otapin", "Set the persistent recovery WPA2/HTTP credential.", true,
+    {"otapin", "Set the persistent recovery WPA2/HTTP credential (serial console only).", true,
      cmdOtaPin, "Usage: otapin <12..63 printable characters> | otapin clear confirm",
      nullptr, nullptr, true},
     {"otawrite", "Stage exact OTA members over encrypted Bluetooth.", true,

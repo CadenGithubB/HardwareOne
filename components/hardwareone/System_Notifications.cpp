@@ -107,6 +107,22 @@ static NotifRule notifDefaultRuleFor(uint8_t kind) {
     case SYSEVT_DISPLAY_INIT_FAILED:  return {(uint8_t)(NSINK_QUEUE | NSINK_TOAST), 2, 3000, 0};
     case SYSEVT_FILE_RX_FAILED:       return {(uint8_t)(NSINK_QUEUE | NSINK_TOAST), 2, 2500, 0};
     case SYSEVT_FIRMWARE_CHANGED:     return {(uint8_t)(NSINK_QUEUE | NSINK_TOAST), 1, 3000, 0};
+    // Signed OTA. Every one of these was previously invisible: the subsystem's
+    // single ota_result kind was absent from this switch, so it fell to the
+    // NSINK_NONE default and produced no banner, toast, or queue entry on any
+    // surface. Replacing the OS is not an event-only affair.
+    // Rolled back / stage rejected / credential changed interrupt (banner);
+    // the rest are queue+toast so a routine update is visible but not shouty.
+    case SYSEVT_OTA_ROLLED_BACK:      return {ALL, 3, 5000, 0};
+    case SYSEVT_OTA_STAGE_REJECTED:   return {ALL, 3, 4000, 0};
+    case SYSEVT_OTA_CREDENTIAL_CHANGED: return {ALL, 3, 3000, 0};
+    case SYSEVT_OTA_RECOVERY_ENTERED: return {ALL, 2, 4000, 0};
+    case SYSEVT_OTA_TRIAL_STARTED:    return {(uint8_t)(NSINK_QUEUE | NSINK_TOAST), 2, 3000, 0};
+    case SYSEVT_OTA_ACCEPTED:         return {(uint8_t)(NSINK_QUEUE | NSINK_TOAST), 1, 3000, 0};
+    case SYSEVT_OTA_STAGED:           return {(uint8_t)(NSINK_QUEUE | NSINK_TOAST), 1, 2500, 0};
+    case SYSEVT_OTA_UPLOAD_STARTED:   return {(uint8_t)(NSINK_QUEUE | NSINK_TOAST), 1, 2000, 0};
+    case SYSEVT_OTA_UPLOAD_FINISHED:  return {(uint8_t)(NSINK_QUEUE | NSINK_TOAST), 1, 2000, 0};
+    case SYSEVT_OTA_RESULT:           return {(uint8_t)(NSINK_QUEUE | NSINK_TOAST), 1, 2500, 0};
     case SYSEVT_SD_WRITE_RECOVERED:   return {(uint8_t)(NSINK_QUEUE | NSINK_TOAST), 1, 2500, 0};
     case SYSEVT_BATTERY_FULL:         return {(uint8_t)(NSINK_QUEUE | NSINK_TOAST), 1, 2500, 0};
     // Everything else: event-only (automations/`events`/queue-off).
@@ -312,6 +328,9 @@ static uint8_t notifKindTier(uint8_t kind) {
     case SYSEVT_CONFIG_FILE_CORRUPT:
     case SYSEVT_AUTH_DB_FAULT:
     case SYSEVT_SECRET_DECRYPT_FAILED:
+    case SYSEVT_OTA_ROLLED_BACK:
+    case SYSEVT_OTA_STAGE_REJECTED:
+    case SYSEVT_OTA_CREDENTIAL_CHANGED:
       return NTIER_ALERT;
     // VERBOSE — chatty/info; opt-in (stay in history unless you lower your floor
     // or force them on).

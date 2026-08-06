@@ -1,4 +1,4 @@
-# HardwareOne v0.99.81 - Quick Start Guide
+# HardwareOne v0.99.82 - Quick Start Guide
 
 This guide will help you get up and running with Hardware One.
 

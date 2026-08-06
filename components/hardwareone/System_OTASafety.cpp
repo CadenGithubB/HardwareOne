@@ -31,6 +31,9 @@ RTC_NOINIT_ATTR static uint32_t rtcProbationMagic;
 RTC_NOINIT_ATTR static uint8_t rtcProbationCause;
 RTC_NOINIT_ATTR static uint32_t rtcProbationUptimeMs;
 RTC_NOINIT_ATTR static char rtcProbationDetail[64];
+// Set once the boot path has logged/evented this abort, so the breadcrumb can
+// survive for `otastatus` without being re-reported on every later boot.
+RTC_NOINIT_ATTR static uint8_t rtcProbationReported;
 
 namespace {
 
@@ -94,6 +97,7 @@ bool runningImageIsUnverified() {
       static_cast<uint32_t>(esp_timer_get_time() / 1000);
   snprintf(rtcProbationDetail, sizeof(rtcProbationDetail), "%s",
            reason ? reason : "unknown");
+  rtcProbationReported = 0;
   rtcProbationMagic = kProbationMagic;
   ESP_EARLY_LOGE(kTag, "Pending image probation failed [%s]: %s; rebooting for rollback",
                  otaSafetyProbationCauseName(cause), reason ? reason : "unknown");
@@ -159,6 +163,14 @@ const char* otaSafetyProbationCauseName(OtaProbationCause cause) {
   return "none";
 }
 
+bool otaSafetyProbationAbortReported() {
+  return rtcProbationMagic == kProbationMagic && rtcProbationReported != 0;
+}
+
+void otaSafetyMarkProbationAbortReported() {
+  if (rtcProbationMagic == kProbationMagic) rtcProbationReported = 1;
+}
+
 bool otaSafetyTakeProbationAbort(OtaProbationCause* cause, uint32_t* uptimeMs,
                                  char* detail, size_t detailSize, bool consume) {
   if (rtcProbationMagic != kProbationMagic ||
@@ -216,7 +228,7 @@ bool otaSafetyAcceptProvisioningBoot() {
     return false;
   }
   sPhase.store(ProbationPhase::Validated, std::memory_order_release);
-  otaSystemOnImageMarkedValid();
+  otaSystemOnImageMarkedValid(/*provisioningShortcut=*/true);
   ESP_LOGW(kTag,
            "OTA image accepted on reaching first-time setup; probation ended "
            "early because an operator is provisioning over a cable");
@@ -328,7 +340,7 @@ void otaSafetyLoopHeartbeat(bool coreHealthy) {
   const esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
   if (err == ESP_OK) {
     sPhase.store(ProbationPhase::Validated, std::memory_order_release);
-    otaSystemOnImageMarkedValid();
+    otaSystemOnImageMarkedValid(/*provisioningShortcut=*/false);
     ESP_LOGI(kTag,
              "OTA image marked valid after a full healthy 60-second probation");
     return;
