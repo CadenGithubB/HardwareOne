@@ -463,8 +463,8 @@ static bool sNotificationsShowingDetail = false;
 //                  is replace-not-incremental — same path the web uses).
 //   Device kinds — admin only; A cycles all→admin→off per kind via
 //                  `notifydevicekind <kind> <level>`.
-// Kind pickers are family-first (11 families, largest family 21 kinds) —
-// 134 kinds never render as one flat wall. State lives at file scope so the
+// Kind pickers are family-first (12 families, largest family 21 kinds) —
+// 151 kinds never render as one flat wall. State lives at file scope so the
 // central hint fallback switch can read it.
 // ---------------------------------------------------------------------------
 enum NcLevel : uint8_t { NC_NONE = 0, NC_ROOT, NC_FAM, NC_KINDS };

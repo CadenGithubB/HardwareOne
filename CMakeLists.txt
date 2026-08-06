@@ -393,12 +393,12 @@ include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
 if(_ota_layout)
     if(_hw_board STREQUAL "feathers3_fe")
-        set(PROJECT_VER "0.99.81+f3feo1")
+        set(PROJECT_VER "0.99.82+f3feo1")
     else()
-        set(PROJECT_VER "0.99.81+f3o1")
+        set(PROJECT_VER "0.99.82+f3o1")
     endif()
 else()
-    set(PROJECT_VER "0.99.81")
+    set(PROJECT_VER "0.99.82")
 endif()
 project(hardwareone-idf)
 
@@ -506,6 +506,32 @@ if(_ota_layout)
     idf_build_get_property(_ota_build_dir BUILD_DIR)
     idf_component_get_property(_ota_flash_main_args esptool_py FLASH_ARGS)
     idf_component_get_property(_ota_flash_sub_args esptool_py FLASH_SUB_ARGS)
+
+    # Name the port before writing it.
+    #
+    # `idf.py -p <port> ota0-flash` accepts -p and then throws it away. The port
+    # is a global click option (serial_ext.py) that the BUILT-IN flash actions
+    # forward via run_target(..., {'ESPPORT': args.port}); every target below is
+    # a plain CMake custom target, so idf.py routes it through fallback_target()
+    # (core_ext.py), which calls run_target() with no environment. esptool then
+    # scans and takes whichever device answers first. One board, harmless. Two
+    # boards, it writes the wrong one and says nothing.
+    #
+    # The guard refuses only genuine ambiguity, so the single-board bench case
+    # is unchanged apart from a line stating the port. ESPPORT always wins.
+    function(hw1_require_flash_port _program_target)
+        set(_guard "hw1-flash-port-${_program_target}")
+        if(NOT TARGET ${_guard})
+            idf_build_get_property(_guard_python PYTHON)
+            add_custom_target(${_guard}
+                COMMAND "${_guard_python}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/tools/ota/require_flash_port.py"
+                    "${_program_target}"
+                USES_TERMINAL
+                VERBATIM)
+        endif()
+        add_dependencies(${_program_target} ${_guard})
+    endfunction()
     add_custom_target(hw1-stock-flash-refused
         COMMAND ${CMAKE_COMMAND} -E echo
             "Refusing stock ESP-IDF flash/erase target for a recovery-OTA layout. Use migration-flash or ota0-flash. On feathers3_fe use the encrypted variants."
@@ -570,9 +596,11 @@ if(_ota_layout)
     esptool_py_flash_to_partition(hw1-ota0-program "ota_0"
         "${_ota_build_dir}/${PROJECT_BIN}")
     add_dependencies(hw1-ota0-program gen_project_binary ${_ota_pair_gate})
+    hw1_require_flash_port(hw1-ota0-program)
     if(CONFIG_SECURE_FLASH_ENCRYPTION_MODE_DEVELOPMENT)
         add_dependencies(encrypted-hw1-ota0-program
             gen_project_binary ${_ota_pair_gate})
+        hw1_require_flash_port(encrypted-hw1-ota0-program)
         add_custom_target(encrypted-ota0-flash
             DEPENDS encrypted-hw1-ota0-program)
         add_custom_target(hw1-plaintext-ota0-refused
@@ -626,7 +654,9 @@ if(_ota_layout)
             COMMAND ${CMAKE_COMMAND} -E false
             USES_TERMINAL)
         add_dependencies(littlefs-flash hw1-plaintext-littlefs-refused)
+        hw1_require_flash_port(encrypted-littlefs-flash)
     endif()
+    hw1_require_flash_port(littlefs-flash)
 
     # One-time layout installation is intentionally unavailable unless the
     # separately-built recovery image is named explicitly. This target writes
@@ -667,9 +697,11 @@ if(_ota_layout)
             "${_ota_build_dir}/littlefs.bin")
         add_dependencies(hw1-layout-program hw1-ota-migration-preflight
             littlefs_littlefs_bin)
+        hw1_require_flash_port(hw1-layout-program)
         if(CONFIG_SECURE_FLASH_ENCRYPTION_MODE_DEVELOPMENT)
             add_dependencies(encrypted-hw1-layout-program
                 hw1-ota-migration-preflight)
+            hw1_require_flash_port(encrypted-hw1-layout-program)
             add_custom_target(hw1-plaintext-migration-refused
                 COMMAND ${CMAKE_COMMAND} -E echo
                     "Refusing plaintext layout programming on feathers3_fe"
@@ -699,8 +731,10 @@ if(_ota_layout)
         esptool_py_flash_to_partition(hw1-factory-program "factory"
             "${_ota_updater_bin}")
         add_dependencies(hw1-factory-program ${_ota_pair_gate})
+        hw1_require_flash_port(hw1-factory-program)
         if(CONFIG_SECURE_FLASH_ENCRYPTION_MODE_DEVELOPMENT)
             add_dependencies(encrypted-hw1-factory-program ${_ota_pair_gate})
+            hw1_require_flash_port(encrypted-hw1-factory-program)
             add_custom_target(encrypted-factory-flash
                 DEPENDS encrypted-hw1-factory-program)
             add_custom_target(hw1-plaintext-factory-refused

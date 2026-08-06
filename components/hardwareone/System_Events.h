@@ -110,6 +110,7 @@ struct NotificationContextGuard {
   F(SYSEVT_FAM_POWER,      "Power & Battery") \
   F(SYSEVT_FAM_STORAGE,    "Storage") \
   F(SYSEVT_FAM_AUTOMATION, "Automation") \
+  F(SYSEVT_FAM_OTA,        "Firmware & OTA") \
   F(SYSEVT_FAM_SYSTEM,     "System")
 
 enum SystemEventFamily : uint8_t {
@@ -259,8 +260,24 @@ uint8_t systemEventKindFamily(uint8_t kind);
   /* --- Config / device lifecycle (tier 2) --- */ \
   X(SYSEVT_FACTORY_RESET,       "factory_reset", SYSEVT_FAM_SYSTEM)        /* accounts wiped, device reset to setup  subject=actor */ \
   X(SYSEVT_FEATURE_TOGGLED,     "feature_toggled", SYSEVT_FAM_SYSTEM)      /* a subsystem/feature enabled or disabled  subject=feature detail=on|off */ \
-  X(SYSEVT_FIRMWARE_CHANGED,    "firmware_changed", SYSEVT_FAM_SYSTEM)     /* running firmware differs from last boot (update applied)  subject=old->new */ \
-  X(SYSEVT_OTA_RESULT,          "ota_result", SYSEVT_FAM_SYSTEM)            /* signed OTA transaction state/result  subject=phase detail=result */ \
+  /* --- Signed recovery OTA (tier 2) --- */ \
+  /* One kind per distinct ACTION, matching the auth/security families. The \
+   * subsystem previously had a single ota_result carrying an 11-value state \
+   * machine in `subject`, which no notification rule matched, so every OTA \
+   * event was invisible on every surface. ota_result is kept for the generic \
+   * journal phase transitions; the events below are the ones an operator or an \
+   * incident responder actually needs to see. */ \
+  X(SYSEVT_FIRMWARE_CHANGED,    "firmware_changed", SYSEVT_FAM_OTA)         /* running firmware differs from last boot (update applied)  subject=old->new */ \
+  X(SYSEVT_OTA_RESULT,          "ota_result", SYSEVT_FAM_OTA)               /* signed OTA transaction state/result  subject=phase detail=result */ \
+  X(SYSEVT_OTA_CREDENTIAL_CHANGED,"ota_credential_changed", SYSEVT_FAM_OTA) /* recovery WPA2/HTTP credential set or cleared  subject=set|cleared detail=actor */ \
+  X(SYSEVT_OTA_UPLOAD_STARTED,  "ota_upload_started", SYSEVT_FAM_OTA)       /* firmware upload opened  subject=candidate|manifest detail=bytes */ \
+  X(SYSEVT_OTA_UPLOAD_FINISHED, "ota_upload_finished", SYSEVT_FAM_OTA)      /* firmware upload closed  subject=candidate|manifest detail=ok|reason */ \
+  X(SYSEVT_OTA_STAGED,          "ota_staged", SYSEVT_FAM_OTA)               /* candidate validated and journaled  subject=version detail=allow-downgrade|normal */ \
+  X(SYSEVT_OTA_STAGE_REJECTED,  "ota_stage_rejected", SYSEVT_FAM_OTA)       /* signature/contract check refused a candidate  subject=version detail=reason */ \
+  X(SYSEVT_OTA_TRIAL_STARTED,   "ota_trial_started", SYSEVT_FAM_OTA)        /* an unverified image is running its probation  subject=version */ \
+  X(SYSEVT_OTA_ACCEPTED,        "ota_accepted", SYSEVT_FAM_OTA)             /* trial image marked valid  subject=version detail=probation|provisioning */ \
+  X(SYSEVT_OTA_ROLLED_BACK,     "ota_rolled_back", SYSEVT_FAM_OTA)          /* trial image rejected and rolled back  subject=cause detail=uptime/diagnostic */ \
+  X(SYSEVT_OTA_RECOVERY_ENTERED,"ota_recovery_entered", SYSEVT_FAM_OTA)     /* device left the OS for the recovery updater  subject=operator|crash_loop|storage_fault */ \
   X(SYSEVT_BACKUP_CREATED,      "backup_created", SYSEVT_FAM_SYSTEM)       /* a config backup was exported  subject=categories */ \
   X(SYSEVT_BACKUP_RESTORED,     "backup_restored", SYSEVT_FAM_SYSTEM)      /* a config backup was restored  subject=categories */ \
   X(SYSEVT_CONFIG_FILE_CORRUPT, "config_file_corrupt", SYSEVT_FAM_SYSTEM)  /* a critical config file failed its integrity check  subject=file */ \

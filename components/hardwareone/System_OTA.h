@@ -30,7 +30,10 @@ bool otaSystemCanMarkImageValid();
 
 // Called only after esp_ota_mark_app_valid_cancel_rollback() succeeds.  Commits
 // the terminal transaction result and removes the staged image/manifest.
-void otaSystemOnImageMarkedValid();
+// provisioningShortcut distinguishes the two ways an image earns validity:
+// a full healthy probation, or reaching interactive first-time setup. The
+// assurance is different, so the emitted event says which.
+void otaSystemOnImageMarkedValid(bool provisioningShortcut);
 
 // Encrypted BLE bulk-staging sink. The secure-channel layer recognizes the
 // binary envelope and calls this on cmd_exec_task. The implementation checks

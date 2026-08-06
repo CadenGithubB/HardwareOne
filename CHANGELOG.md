@@ -8,6 +8,33 @@ Entries for 0.96.1 and earlier were backfilled from git history (this repo had
 no tags or releases before 0.96.2); they are terse, commit-grounded summaries,
 dated from each version's commit. Dates are YYYY-MM-DD.
 
+## [0.99.82] - 2026-08-06
+Observability and safety work on top of the OTA release. Signed updates now have
+their own event group instead of a single catch-all, changing the recovery
+credential needs someone physically at the device, the recovery updater narrates
+the multi-minute parts of a transfer instead of going silent, and cable-flash
+targets say which board they are about to write.
+
+### Added
+- Firmware updates are now their own event group. `Firmware & OTA` joins the eleven existing groups and carries ten kinds: credential changed, upload started and finished, staged, staging rejected, trial started, accepted, rolled back, recovery entered, and the general transaction result. Each one shows up in notifications and can be muted or forced per user like any other event, and automations can trigger on them individually.
+- Setting or clearing the recovery credential now raises an alert naming which of the two happened and who did it. The command log could not tell them apart, because it redacts everything after the verb and renders both as `otapin ***`.
+- The recovery updater says how long the slow parts will take before starting them, then prints progress every ten percent and a completion line. Writing a five megabyte image takes one to three minutes, during which it previously printed nothing at all and looked hung.
+- Cable-flash targets print the port they are about to write, and refuse outright when more than one USB serial device is attached and none was named. `idf.py -p` never reached these targets - it was accepted and discarded - so with two boards connected they would silently write whichever one answered first.
+
+### Changed
+- `otapin` is restricted to the physical serial console. It decides whether the recovery updater will bring up its network at all, so a hijacked super-admin session could previously take recovery offline from anywhere. Everything else in the update lifecycle still works remotely; only changing the credential now needs physical presence.
+- The recovery web page keeps the result of an install where you can read it. The status poller used to overwrite it a second later, so the one line that said whether the update worked was the line guaranteed to disappear.
+- The recovery web page warns before the image transfer that it takes minutes and reports nothing until it finishes, and shows elapsed seconds while it runs.
+- A command context with no explicitly assigned origin is treated as a web request rather than a physical serial one, so the two commands that accept only serial fail closed if a future transport forgets to identify itself.
+
+### Fixed
+- A rolled-back image now really does appear in `otastatus`. The 0.99.81 release notes said it did; it did not, because the boot path consumed the breadcrumb before an operator could ever read it. The record is now kept until the next rollback replaces it, and is still logged only once.
+- `otastage` no longer tells operators of an already-provisioned device to go and set a credential they set months ago, and the two commands that genuinely need one now name the serial console in their error.
+- The recovery updater accepts a request while another operation is running by refusing it immediately rather than waiting a second first. It runs on a single task, so that wait stalled every other connection before failing anyway.
+
+### Security
+- Both setting and clearing the recovery credential are refused from the web UI, Bluetooth, MQTT, ESP-NOW, voice, the on-device screen and the glasses. This is a deterrent rather than a boundary: physical access still allows a full reflash, and only flash encryption with secure boot makes that a real barrier.
+
 ## [0.99.81] - 2026-08-05
 A follow-up to the OTA release that closes the gaps found by actually provisioning
 devices with it. The biggest one: first-time setup was being rolled back. A freshly

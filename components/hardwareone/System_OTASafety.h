@@ -37,6 +37,16 @@ const char* otaSafetyProbationCauseName(OtaProbationCause cause);
 bool otaSafetyTakeProbationAbort(OtaProbationCause* cause, uint32_t* uptimeMs,
                                  char* detail, size_t detailSize, bool consume);
 
+// Report-once bookkeeping, kept separate from the data itself.
+//
+// Boot used to CONSUME the breadcrumb so a rollback was not re-logged on every
+// subsequent boot. That also destroyed it before an operator could ever run
+// `otastatus`, which reads it non-destructively - so the status fields were
+// always empty. These let the boot path log exactly once while leaving the
+// breadcrumb readable until the next abort overwrites it.
+bool otaSafetyProbationAbortReported();
+void otaSafetyMarkProbationAbortReported();
+
 // Call at the very start of app_main(), before initArduino(). Detects whether
 // the running image is unverified and, only in that case, starts the independent
 // probation supervisor that can recover setup/loop hangs by rebooting.

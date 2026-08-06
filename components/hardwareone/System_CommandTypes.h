@@ -50,7 +50,20 @@ enum CommandOrigin {
 
 // Full execution context for a command
 struct CommandContext {
-  CommandOrigin origin;
+  // Defaulted deliberately, and deliberately NOT to ORIGIN_SERIAL.
+  //
+  // ORIGIN_SERIAL is the first enumerator, so its value is 0 - which means a
+  // context that was zero-filled or value-initialized and never assigned an
+  // origin would read as "typed at the physical console". Two commands treat
+  // that as proof of physical presence and allow otherwise-forbidden work
+  // (cmdOtaPin and cmdOtaResetJournal in System_OTA.cpp), so the zero value is
+  // the permissive one and the fail direction was open.
+  //
+  // Every transport assigns this explicitly today, so this changes no current
+  // behaviour; it only decides which way a future omission fails. ORIGIN_WEB is
+  // the least-privileged choice that is still a real transport: it carries no
+  // implicit trust and is subject to the ordinary auth checks.
+  CommandOrigin origin = ORIGIN_WEB;
   AuthContext auth;
   uint32_t id;
   uint32_t timestampMs;
