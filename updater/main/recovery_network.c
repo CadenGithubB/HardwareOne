@@ -1,5 +1,7 @@
 #include "recovery_network.h"
 
+#include "recovery_auth_throttle.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,17 +17,21 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lwip/ip4_addr.h"
+#include "lwip/sockets.h" /* getpeername() for the per-peer auth throttle */
 #include "mbedtls/base64.h"
 #include "sdkconfig.h"
 
 #define AUTH_HEADER_MAX 192u
 #define ORIGIN_HEADER_MAX 96u
-#define STATUS_JSON_MAX 1536u
+/* STATUS_JSON_MAX now lives in recovery_network.h - the serial console renders
+ * the same document and its buffer must not drift from this one. */
 #define MANIFEST_BODY_MAX 2048u
 #define MANIFEST_RECEIVE_TIMEOUT_US (45LL * 1000000LL)
-#define AUTH_WINDOW_US (60LL * 1000000LL)
-#define AUTH_BLOCK_US (30LL * 1000000LL)
-#define AUTH_FAILURE_LIMIT 5u
+
+/* Throttle policy, state machine and its host tests live in
+ * recovery_auth_throttle.{c,h} - kept free of ESP-IDF so the cases that take
+ * minutes on hardware (paced guessing, block escalation, eviction under
+ * contention) can be verified on the host in microseconds. */
 
 static const char *TAG = "hw1up_net";
 
@@ -36,9 +42,7 @@ typedef struct {
     char token[HW1_RECOVERY_CREDENTIAL_CAPACITY];
     bool event_loop_created;
     bool wifi_initialized;
-    uint32_t auth_failures;
-    int64_t auth_window_started_us;
-    int64_t auth_blocked_until_us;
+    auth_throttle_t auth;
 } recovery_network_context_t;
 
 static recovery_network_context_t s_network;
@@ -49,39 +53,40 @@ static void log_http_stack_margin(const char *operation)
              operation, (unsigned)uxTaskGetStackHighWaterMark(NULL));
 }
 
-static bool constant_time_equals(const char *left, const char *right)
+
+static uint32_t peer_address(httpd_req_t *request)
 {
-    size_t left_len = left == NULL ? 0 : strlen(left);
-    size_t right_len = right == NULL ? 0 : strlen(right);
-    size_t max_len = left_len > right_len ? left_len : right_len;
-    unsigned difference = (unsigned)(left_len ^ right_len);
-    size_t i;
-    for (i = 0; i < max_len; ++i) {
-        unsigned l = i < left_len ? (unsigned char)left[i] : 0;
-        unsigned r = i < right_len ? (unsigned char)right[i] : 0;
-        difference |= l ^ r;
+    struct sockaddr_in6 addr;
+    socklen_t len = sizeof(addr);
+    int sock = httpd_req_to_sockfd(request);
+    if (sock < 0 || getpeername(sock, (struct sockaddr *)&addr, &len) != 0) {
+        return 0;
     }
-    return difference == 0;
+    if (addr.sin6_family == AF_INET) {
+        return ((struct sockaddr_in *)&addr)->sin_addr.s_addr;
+    }
+    /* IPv4-mapped IPv6: the low word carries the v4 address. */
+    return addr.sin6_addr.un.u32_addr[3];
 }
 
-static void record_auth_failure(void)
+void recovery_network_auth_stats(uint32_t *blocked_peers,
+                                 uint32_t *failures_total)
 {
-    int64_t now = esp_timer_get_time();
-    if (s_network.auth_window_started_us == 0 ||
-        now - s_network.auth_window_started_us > AUTH_WINDOW_US) {
-        s_network.auth_window_started_us = now;
-        s_network.auth_failures = 0;
-    }
-    ++s_network.auth_failures;
-    if (s_network.auth_failures >= AUTH_FAILURE_LIMIT) {
-        s_network.auth_blocked_until_us = now + AUTH_BLOCK_US;
-        s_network.auth_failures = 0;
-        s_network.auth_window_started_us = now;
-        ESP_LOGW(TAG, "HTTP authentication rate limit engaged for 30 seconds");
-    }
+    auth_throttle_stats(&s_network.auth, esp_timer_get_time(), blocked_peers,
+                        failures_total);
 }
 
-static bool authorization_value_valid(httpd_req_t *request)
+/* ABSENT must be distinguished from WRONG.  Every browser's first request to
+ * every path carries no Authorization header by design, so counting the
+ * header-less case as a failure - which the old code did - locks the operator's
+ * own browser out under any strict per-peer counter. */
+typedef enum {
+    AUTH_VALUE_OK = 0,
+    AUTH_VALUE_ABSENT,
+    AUTH_VALUE_WRONG,
+} auth_value_t;
+
+static auth_value_t authorization_value_valid(httpd_req_t *request)
 {
     size_t header_len = httpd_req_get_hdr_value_len(request, "Authorization");
     char header[AUTH_HEADER_MAX];
@@ -89,51 +94,80 @@ static bool authorization_value_valid(httpd_req_t *request)
     char expected[HW1_RECOVERY_CREDENTIAL_CAPACITY + 16];
     size_t decoded_len = 0;
     int written;
-    if (header_len == 0 || header_len >= sizeof(header) ||
+    if (header_len == 0) {
+        return AUTH_VALUE_ABSENT;
+    }
+    if (header_len >= sizeof(header) ||
         httpd_req_get_hdr_value_str(request, "Authorization", header,
                                     sizeof(header)) != ESP_OK) {
-        return false;
+        return AUTH_VALUE_WRONG;
     }
     if (strncmp(header, "Bearer ", 7) == 0) {
-        return constant_time_equals(header + 7, s_network.token);
+        return auth_constant_time_equals(header + 7, s_network.token)
+                   ? AUTH_VALUE_OK
+                   : AUTH_VALUE_WRONG;
     }
     if (strncmp(header, "Basic ", 6) != 0 ||
         mbedtls_base64_decode(decoded, sizeof(decoded) - 1, &decoded_len,
             (const unsigned char *)header + 6, strlen(header + 6)) != 0) {
-        return false;
+        return AUTH_VALUE_WRONG;
     }
     decoded[decoded_len] = '\0';
     written = snprintf(expected, sizeof(expected), "admin:%s", s_network.token);
     if (written < 0 || (size_t)written >= sizeof(expected)) {
         memset(decoded, 0, sizeof(decoded));
-        return false;
+        return AUTH_VALUE_WRONG;
     }
-    bool valid = constant_time_equals((const char *)decoded, expected);
+    bool valid = auth_constant_time_equals((const char *)decoded, expected);
     memset(decoded, 0, sizeof(decoded));
     memset(expected, 0, sizeof(expected));
-    return valid;
+    return valid ? AUTH_VALUE_OK : AUTH_VALUE_WRONG;
+}
+
+static void deny_rate_limited(httpd_req_t *request, int64_t retry_after_us)
+{
+    char retry[16];
+    long long seconds = retry_after_us / 1000000LL;
+    if (seconds < 1) {
+        seconds = 1;
+    }
+    snprintf(retry, sizeof(retry), "%lld", seconds);
+    httpd_resp_set_status(request, "429 Too Many Requests");
+    httpd_resp_set_hdr(request, "Retry-After", retry);
+    /* Do not let a blocked peer keep one of only three sockets parked. */
+    httpd_resp_set_hdr(request, "Connection", "close");
+    (void)httpd_resp_sendstr(request,
+                             "authentication temporarily rate limited");
 }
 
 static bool require_authorization(httpd_req_t *request)
 {
     int64_t now = esp_timer_get_time();
-    if (now < s_network.auth_blocked_until_us) {
-        httpd_resp_set_status(request, "429 Too Many Requests");
-        httpd_resp_set_hdr(request, "Retry-After", "30");
-        (void)httpd_resp_sendstr(request,
-                                 "authentication temporarily rate limited");
+    uint32_t addr = peer_address(request);
+    int64_t retry_after_us = 0;
+    auth_value_t value;
+    if (auth_throttle_begin(&s_network.auth, addr, now, &retry_after_us) ==
+        AUTH_DECISION_BLOCKED) {
+        /* Credentials are not evaluated at all while blocked. */
+        deny_rate_limited(request, retry_after_us);
         return false;
     }
-    if (!authorization_value_valid(request)) {
-        record_auth_failure();
+    value = authorization_value_valid(request);
+    if (value != AUTH_VALUE_OK) {
+        /* Only a credential that was PRESENT and WRONG counts.  A header-less
+         * request is every browser's first request to every path. */
+        if (value == AUTH_VALUE_WRONG) {
+            auth_throttle_record_failure(&s_network.auth, addr, now);
+            ESP_LOGW(TAG, "rejected credential from peer 0x%08x",
+                     (unsigned)addr);
+        }
         httpd_resp_set_hdr(request, "WWW-Authenticate",
                            "Basic realm=\"HardwareOne Recovery\"");
         (void)httpd_resp_send_err(request, HTTPD_401_UNAUTHORIZED,
                                   "authentication required");
         return false;
     }
-    s_network.auth_failures = 0;
-    s_network.auth_window_started_us = now;
+    auth_throttle_record_success(&s_network.auth, addr, now);
     if (s_network.callbacks.activity != NULL) {
         s_network.callbacks.activity(s_network.callbacks.context);
     }
@@ -192,7 +226,11 @@ static esp_err_t root_handler(httpd_req_t *request)
         "<button onclick=upload()>Verify manifest and install image</button> "
         "<button onclick=go('/apply')>Apply read-only staged pair</button> "
         "<button onclick=go('/cancel')>Cancel / return</button> "
-        "<button onclick=confirm('Explicitly allow an older signed version for this transaction?')&&go('/allow-downgrade')>Allow downgrade</button> "
+        /* The attribute MUST stay quoted: an unquoted value ends at the first
+         * space, which truncated this to onclick=\"confirm('Explicitly\" and
+         * made the button a no-op in every browser. */
+        "<button onclick=\"if(confirm('Explicitly allow an older signed version "
+        "for this transaction?'))go('/allow-downgrade')\">Allow downgrade</button> "
         "<button onclick=go('/reboot')>Reboot recovery</button>"
         "<pre id=s>loading...</pre>"
         "<script>async function refresh(){let r=await fetch('/status');"
@@ -243,14 +281,22 @@ static esp_err_t action_handler(httpd_req_t *request)
     if (!require_safe_mutation_origin(request)) {
         return ESP_OK;
     }
-    if (strcmp(request->uri, "/apply") == 0) {
+    /* request->uri carries the raw target including any query string, so match on
+     * the path only.  The fall-through must never be an action: an unrecognized
+     * URI used to reboot the device, which turned "POST /cancel?ts=1739" into a
+     * reboot and would silently make any future handler wired here a reboot too. */
+    size_t path_len = strcspn(request->uri, "?#");
+    if (path_len == 6 && memcmp(request->uri, "/apply", 6) == 0) {
         action = RECOVERY_ACTION_APPLY_STAGED;
-    } else if (strcmp(request->uri, "/cancel") == 0) {
+    } else if (path_len == 7 && memcmp(request->uri, "/cancel", 7) == 0) {
         action = RECOVERY_ACTION_CANCEL;
-    } else if (strcmp(request->uri, "/allow-downgrade") == 0) {
+    } else if (path_len == 16 && memcmp(request->uri, "/allow-downgrade", 16) == 0) {
         action = RECOVERY_ACTION_ALLOW_DOWNGRADE;
-    } else {
+    } else if (path_len == 7 && memcmp(request->uri, "/reboot", 7) == 0) {
         action = RECOVERY_ACTION_REBOOT;
+    } else {
+        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST,
+                                   "unrecognized action");
     }
     err = s_network.callbacks.action != NULL
               ? s_network.callbacks.action(action, s_network.callbacks.context)
@@ -376,22 +422,35 @@ static esp_err_t firmware_handler(httpd_req_t *request)
                               "{\"installed\":true,\"rebooting\":true}");
 }
 
+/* File scope so http.max_uri_handlers can be DERIVED from it rather than
+ * hand-maintained.  If that count is ever short of this array,
+ * httpd_register_uri_handler returns ESP_ERR_HTTPD_HANDLERS_FULL,
+ * recovery_network_start takes its fail: path and tears the server down - the
+ * recovery SoftAP never comes up and the device is cable-only.  Deriving it
+ * makes that class of mistake unrepresentable as endpoints are added. */
+static const httpd_uri_t k_uri_handlers[] = {
+    {.uri = "/", .method = HTTP_GET, .handler = root_handler},
+    {.uri = "/status", .method = HTTP_GET, .handler = status_handler},
+    {.uri = "/manifest", .method = HTTP_POST, .handler = manifest_handler},
+    {.uri = "/firmware", .method = HTTP_PUT, .handler = firmware_handler},
+    {.uri = "/apply", .method = HTTP_POST, .handler = action_handler},
+    {.uri = "/cancel", .method = HTTP_POST, .handler = action_handler},
+    {.uri = "/allow-downgrade", .method = HTTP_POST,
+     .handler = action_handler},
+    {.uri = "/reboot", .method = HTTP_POST, .handler = action_handler},
+};
+
+#define HW1_RECOVERY_URI_COUNT \
+    (sizeof(k_uri_handlers) / sizeof(k_uri_handlers[0]))
+
+_Static_assert(HW1_RECOVERY_URI_COUNT >= 8,
+               "recovery HTTP endpoints unexpectedly removed");
+
 static esp_err_t register_handlers(httpd_handle_t server)
 {
-    const httpd_uri_t handlers[] = {
-        {.uri = "/", .method = HTTP_GET, .handler = root_handler},
-        {.uri = "/status", .method = HTTP_GET, .handler = status_handler},
-        {.uri = "/manifest", .method = HTTP_POST, .handler = manifest_handler},
-        {.uri = "/firmware", .method = HTTP_PUT, .handler = firmware_handler},
-        {.uri = "/apply", .method = HTTP_POST, .handler = action_handler},
-        {.uri = "/cancel", .method = HTTP_POST, .handler = action_handler},
-        {.uri = "/allow-downgrade", .method = HTTP_POST,
-         .handler = action_handler},
-        {.uri = "/reboot", .method = HTTP_POST, .handler = action_handler},
-    };
     size_t i;
-    for (i = 0; i < sizeof(handlers) / sizeof(handlers[0]); ++i) {
-        esp_err_t err = httpd_register_uri_handler(server, &handlers[i]);
+    for (i = 0; i < HW1_RECOVERY_URI_COUNT; ++i) {
+        esp_err_t err = httpd_register_uri_handler(server, &k_uri_handlers[i]);
         if (err != ESP_OK) {
             return err;
         }
@@ -437,7 +496,7 @@ esp_err_t recovery_network_start(
     pass_len = strlen(credentials->ap_password);
     if (pass_len < 12 || pass_len > 63 ||
         strlen(credentials->auth_token) != pass_len ||
-        !constant_time_equals(credentials->ap_password,
+        !auth_constant_time_equals(credentials->ap_password,
                               credentials->auth_token)) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -525,8 +584,14 @@ esp_err_t recovery_network_start(
     }
 
     http.stack_size = 12288;
+    /* CONFIG_HTTPD_MAX_REQ_HDR_LEN is the budget for the WHOLE header section, not
+     * per header.  At the 512-byte default a bare Firefox GET (~460-480 bytes) plus
+     * the Authorization header this server requires overflows it, and the operator
+     * gets a bare "431 Request Header Fields Too Large" from the last-resort recovery
+     * UI.  Set it here at runtime so it cannot drift with sdkconfig. */
+    http.max_req_hdr_len = 2048;
     http.server_port = CONFIG_HW1_UPDATER_HTTP_PORT;
-    http.max_uri_handlers = 9;
+    http.max_uri_handlers = HW1_RECOVERY_URI_COUNT;
     http.max_open_sockets = 3;
     http.lru_purge_enable = true;
     /* Keep blocking receives short enough for handler-level absolute

@@ -8,6 +8,46 @@ Entries for 0.96.1 and earlier were backfilled from git history (this repo had
 no tags or releases before 0.96.2); they are terse, commit-grounded summaries,
 dated from each version's commit. Dates are YYYY-MM-DD.
 
+## [0.99.81] - 2026-08-05
+A follow-up to the OTA release that closes the gaps found by actually provisioning
+devices with it. The biggest one: first-time setup was being rolled back. A freshly
+cable-flashed image serves a probation that it can only clear by finishing startup,
+but the setup wizard blocks waiting for a human, so an operator who read the menu
+slowly blew the five-minute deadline, the image was marked aborted, and the device
+came back to the recovery updater needing a full re-provision. Reaching the wizard
+now accepts the image outright, which proves more than the probation would.
+
+The recovery updater also stops being an open console. Once a recovery credential is
+set, the serial console requires an `unlock` before it will accept anything
+destructive, and both the console and the network interface share one per-peer
+throttle that turns repeated failures into escalating lockouts. Provisioning got
+simpler too: a blank filesystem image is now built on the host and flashed like any
+other partition, so the special `formatfs` build that existed only to wipe storage is
+gone entirely.
+
+### Added
+- The recovery serial console requires authentication once a recovery credential is set. `unlock <credential>` opens the session; `setpin`, `apply`, `allowdowngrade confirm` and `resetjournal confirm` are refused until it succeeds. `status`, `help`, `reboot` and `cancel` stay open so a locked-out operator can still see state and back out of a bad transfer.
+- Failed credential attempts feed a per-peer leaky bucket shared by the network interface and the serial console: five failures inside ten minutes lock that peer out for thirty seconds, doubling to thirty minutes, with a global backstop and a separate lockout per station so one attacker cannot deny service to everyone. Blocked-peer and failure counts are reported in the recovery status JSON.
+- `help` (or `?`) in the recovery console lists every command with its arguments, and an unrecognised command now says what was typed and points at `help` instead of failing silently.
+- A trial image that gets rolled back now leaves a breadcrumb naming which check rejected it - setup timeout, loop stall, health timeout, supervisor allocation failure, or a refused OTA journal - along with how long it had been running. All five previously arrived as one indistinguishable rollback, and the image itself is destroyed by the rollback, so there was nothing left to inspect. It appears in `otastatus` and is written to the durable event log.
+- A `factory-flash` build target programs just the recovery updater and touches nothing else, with the same refusal on flash-encrypted builds that the other partition targets already had.
+- Host-side unit tests for the authentication throttle compile the real device source and cover paced guessing, lockout escalation, slot eviction, attempts with no credential set, and the constant-time comparison boundaries.
+
+### Changed
+- Provisioning now flashes a blank LittleFS image built on the host, so the separate `formatfs` firmware variant that existed only to erase the data partition has been removed along with its command. The migration tool warns that the data partition is replaced rather than formatted on a later boot.
+- On flash-encrypted builds, `littlefs-flash` refuses to run rather than quietly writing a plaintext filesystem image to a partition the device will only read as ciphertext.
+- The recovery HTTP server accepts request headers up to 2 KB, so browsers that send large cookie or header sets no longer get a 431 on the upload page.
+- An upload or apply request that arrives while another OTA operation is already running is refused straight away instead of waiting a second first. The recovery server runs on a single task, so that wait stalled every other connection - including status and cancel - before failing anyway.
+
+### Fixed
+- First-time setup no longer trips the OTA probation deadline. Reaching the interactive setup wizard, with the filesystem confirmed mounted, accepts the running image immediately - the wizard can only be reached on a cable-provisioned device, because an OTA-delivered image arrives on a filesystem that still holds its user database.
+- Recovery URL matching stops at `?` or `#`, so a request with a query string reaches the handler it names instead of falling through to a 404.
+- A recovery peer whose address could not be read no longer shares a throttle slot with the peer at address zero.
+
+### Security
+- The recovery console's destructive commands are no longer reachable by anyone with a USB cable once a credential is provisioned. This is a deterrent, not a boundary: physical access still allows a full re-flash, and only flash encryption plus secure boot make that a real barrier.
+- A failed unlock attempt does not refresh the recovery updater's activity timer, so a guesser cannot hold the recovery session open indefinitely by typing wrong credentials.
+
 ## [0.99.8] - 2026-08-05
 This release adds signed over-the-air updates with a recovery path that cannot be bricked. An opt-in partition layout puts an immutable, pure-ESP-IDF recovery updater in the `factory` slot and moves the application into `ota_0`. The recovery updater is the only thing that ever writes the application slot, and the bootloader falls back to it automatically whenever the application fails validation, so a bad image, an interrupted write, or a power cut mid-flash always lands on a device that can still be talked to. Firmware is authenticated by an RSA-3072 signature over a manifest that commits to the image digest, size, board, layout and version; the signature is checked when the image is staged, again before it is applied, and a third time inside the recovery updater before a byte of flash is touched, after which the written slot is read back and re-hashed. A new image then serves a 60-second probation and is rolled back automatically if it cannot prove it is healthy.
 

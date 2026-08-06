@@ -1773,6 +1773,20 @@ void hardwareone_setup() {
     }
 #endif
   }
+  // firstTimeSetupIfNeeded() BLOCKS here waiting for a human to type. An
+  // unverified OTA image cannot survive that: the loop heartbeat lives in
+  // hardwareone_loop() and otaSafetySetupReachedRunning() is further down this
+  // function, so the probation supervisor's 5-minute setup deadline fires on an
+  // operator who merely reads the menu slowly, rolls the image back, and marks
+  // it ABORTED - which then needs a full re-provision to clear.
+  //
+  // Reaching this point is better evidence than the probation it replaces, and
+  // filesystemReady is the load-bearing part of the condition: a broken image
+  // that failed to mount storage ALSO reports "setup required", and that case
+  // must keep its probation rather than being waved through.
+  if (filesystemReady && isFirstTimeSetup()) {
+    (void)otaSafetyAcceptProvisioningBoot();
+  }
   firstTimeSetupIfNeeded();
   oledUpdate();  // Update OLED animation during boot
 

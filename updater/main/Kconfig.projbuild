@@ -34,13 +34,4 @@ config HW1_UPDATER_HTTP_PORT
     range 1 65535
     default 80
 
-config HW1_UPDATER_ENABLE_SERIAL_FORMATFS
-    bool "Enable migration-only serial 'formatfs confirm' command"
-    default n
-    help
-        This is a build-time migration gate for the only destructive storage
-        command. It is never automatic and is never exposed over HTTP. Enable
-        only for an explicitly backed-up first-layout migration, issue the
-        exact serial command 'formatfs confirm', then disable it again.
-
 endmenu
