@@ -17,8 +17,9 @@ def main() -> int:
     expected = f"MIGRATE {args.board}"
 
     print("\nONE-TIME OTA LAYOUT MIGRATION")
-    print("  - LittleFS moves and will not mount until recovery runs 'formatfs confirm'.")
+    print("  - LittleFS is REPLACED with an empty filesystem. Its contents are destroyed.")
     print("  - Back up and verify device files before continuing.")
+    print("  - To update only the recovery updater instead, use 'factory-flash'.")
     print("  - NVS is intentionally preserved; do not add erase-flash to this procedure.")
     if args.board == "feathers3_fe":
         print("  - This target must be invoked as encrypted-migration-flash.")

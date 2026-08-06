@@ -393,12 +393,12 @@ include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
 if(_ota_layout)
     if(_hw_board STREQUAL "feathers3_fe")
-        set(PROJECT_VER "0.99.8+f3feo1")
+        set(PROJECT_VER "0.99.81+f3feo1")
     else()
-        set(PROJECT_VER "0.99.8+f3o1")
+        set(PROJECT_VER "0.99.81+f3o1")
     endif()
 else()
-    set(PROJECT_VER "0.99.8")
+    set(PROJECT_VER "0.99.81")
 endif()
 project(hardwareone-idf)
 
@@ -590,11 +590,50 @@ if(_ota_layout)
         add_custom_target(ota0-flash DEPENDS hw1-ota0-program)
     endif()
 
+    # A blank LittleFS image, built on the host and flashed as part of the
+    # one-time migration.  This is what lets NO firmware carry the ability to
+    # erase its own storage: previously the relocated partition could only be
+    # made mountable by a migration-only updater build that shipped a
+    # destructive `formatfs confirm` console command, which then had to be
+    # replaced by a second build and a second migration flash.  Generating the
+    # empty filesystem here removes that build variant, that console command,
+    # and that second flash.
+    #
+    # The seed directory is created in the build tree rather than tracked, so
+    # no placeholder file ends up on the device's filesystem.
+    #
+    # Side effect worth knowing: this also defines a `littlefs-flash` target
+    # that writes the same blank image on its own.  That is the supported way
+    # to wipe a device's filesystem - the capability now lives in the host
+    # toolchain instead of inside firmware sitting on the device.
+    set(_ota_blank_fs_dir "${CMAKE_BINARY_DIR}/littlefs_blank")
+    file(MAKE_DIRECTORY "${_ota_blank_fs_dir}")
+    littlefs_create_partition_image(littlefs "${_ota_blank_fs_dir}")
+
+    # littlefs_create_partition_image() defines a plaintext `littlefs-flash`
+    # unconditionally. esptool_py_flash_target_image() decides encryption solely
+    # from CONFIG_SECURE_FLASH_ENCRYPTION_MODE_DEVELOPMENT - it never consults
+    # the partition CSV - so on feathers3_fe the plaintext target would write an
+    # unencrypted image into a partition the device reads through the flash
+    # encryption engine, i.e. silent corruption. Refuse it there, exactly as the
+    # ota0 and migration targets already do. The migration path itself is
+    # already safe: it reaches littlefs through esptool_py_flash_to_partition,
+    # whose plaintext parent target is refused on this board.
+    if(CONFIG_SECURE_FLASH_ENCRYPTION_MODE_DEVELOPMENT)
+        add_custom_target(hw1-plaintext-littlefs-refused
+            COMMAND ${CMAKE_COMMAND} -E echo
+                "Refusing plaintext littlefs programming on feathers3_fe; use encrypted-littlefs-flash"
+            COMMAND ${CMAKE_COMMAND} -E false
+            USES_TERMINAL)
+        add_dependencies(littlefs-flash hw1-plaintext-littlefs-refused)
+    endif()
+
     # One-time layout installation is intentionally unavailable unless the
     # separately-built recovery image is named explicitly. This target writes
-    # only bootloader/table/factory/otadata/ota_0: it preserves NVS and never
-    # formats the relocated LittleFS partition. Recovery's serial-only
-    # `formatfs confirm` is the explicit next migration step after backup.
+    # bootloader/table/factory/ota_0/otadata AND a blank littlefs: it is
+    # first-time provisioning and it DOES destroy the filesystem. It still
+    # preserves NVS. To replace only the recovery updater on a provisioned
+    # device, use `factory-flash`, which touches nothing else.
     if(NOT "${_ota_updater_bin}" STREQUAL "")
         add_custom_target(hw1-ota-migration-preflight
             COMMAND "${_ota_python}"
@@ -624,7 +663,10 @@ if(_ota_layout)
             "${_ota_build_dir}/${PROJECT_BIN}")
         esptool_py_flash_to_partition(hw1-layout-program "otadata"
             "${_ota_build_dir}/ota_data_initial.bin")
-        add_dependencies(hw1-layout-program hw1-ota-migration-preflight)
+        esptool_py_flash_to_partition(hw1-layout-program "littlefs"
+            "${_ota_build_dir}/littlefs.bin")
+        add_dependencies(hw1-layout-program hw1-ota-migration-preflight
+            littlefs_littlefs_bin)
         if(CONFIG_SECURE_FLASH_ENCRYPTION_MODE_DEVELOPMENT)
             add_dependencies(encrypted-hw1-layout-program
                 hw1-ota-migration-preflight)
@@ -645,10 +687,45 @@ if(_ota_layout)
         else()
             add_custom_target(migration-flash DEPENDS hw1-layout-program)
         endif()
+
+        # Replace ONLY the recovery updater. Before this existed, updating the
+        # factory slot meant re-running the whole migration, which is why the
+        # procedure used to end by destroying and rebuilding the filesystem it
+        # had just set up. Writes one partition; leaves ota_0, otadata, NVS and
+        # littlefs untouched. Still behind the paired-build audit, so a
+        # mismatched key or layout cannot reach the device.
+        esptool_py_flash_target(hw1-factory-program
+            "${_ota_flash_main_args}" "${_ota_flash_sub_args}")
+        esptool_py_flash_to_partition(hw1-factory-program "factory"
+            "${_ota_updater_bin}")
+        add_dependencies(hw1-factory-program ${_ota_pair_gate})
+        if(CONFIG_SECURE_FLASH_ENCRYPTION_MODE_DEVELOPMENT)
+            add_dependencies(encrypted-hw1-factory-program ${_ota_pair_gate})
+            add_custom_target(encrypted-factory-flash
+                DEPENDS encrypted-hw1-factory-program)
+            add_custom_target(hw1-plaintext-factory-refused
+                COMMAND ${CMAKE_COMMAND} -E echo
+                    "Refusing plaintext factory programming on feathers3_fe"
+                COMMAND ${CMAKE_COMMAND} -E false
+                USES_TERMINAL)
+            add_dependencies(hw1-factory-program
+                hw1-plaintext-factory-refused)
+            add_custom_target(factory-flash
+                COMMAND ${CMAKE_COMMAND} -E echo
+                    "Refusing plaintext factory flash for feathers3_fe; use encrypted-factory-flash"
+                COMMAND ${CMAKE_COMMAND} -E false
+                USES_TERMINAL)
+        else()
+            add_custom_target(factory-flash DEPENDS hw1-factory-program)
+        endif()
+
         message(WARNING
-            "One-time migration target enabled. Back up LittleFS first. Use "
-            "'idf.py migration-flash' for feathers3 or "
-            "'idf.py encrypted-migration-flash' for feathers3_fe.")
+            "One-time migration target enabled. It now writes a BLANK "
+            "littlefs and destroys filesystem contents; back up first. Use "
+            "'idf.py migration-flash' (feathers3) or "
+            "'idf.py encrypted-migration-flash' (feathers3_fe). To replace "
+            "only the recovery updater on a provisioned device use "
+            "'idf.py factory-flash'.")
     endif()
 else()
     add_compile_definitions(HW1_OTA_LAYOUT=0)

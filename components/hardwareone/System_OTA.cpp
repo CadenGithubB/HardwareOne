@@ -9,6 +9,7 @@
 #include "System_AuthIdentity.h"
 #include "System_Battery.h"
 #include "System_Command.h"
+#include "System_OTASafety.h"
 #include "System_CommandTypes.h"
 #include "System_CrashRecord.h"
 #include "System_Events.h"
@@ -1243,6 +1244,20 @@ const char* cmdOtaStatus(const String& argsInput) {
     doc["resultDetail"] = record.last_result.detail;
     doc["resultPending"] = hw1_ota_result_pending(&record);
     if (!journalOk) doc["journalError"] = journalReason;
+    {
+      // Why the LAST trial image was rolled back. Survives the rollback and the
+      // trip through recovery, so this is often the only surviving account of a
+      // failure whose image no longer exists to be inspected.
+      OtaProbationCause cause = OTA_PROBATION_NONE;
+      uint32_t abortUptimeMs = 0;
+      char abortDetail[64]{};
+      if (otaSafetyTakeProbationAbort(&cause, &abortUptimeMs, abortDetail,
+                                      sizeof(abortDetail), false)) {
+        doc["lastProbationAbort"] = otaSafetyProbationCauseName(cause);
+        doc["lastProbationAbortDetail"] = abortDetail;
+        doc["lastProbationAbortUptimeMs"] = abortUptimeMs;
+      }
+    }
     serializeJson(doc, output, sizeof(output));
     return output;
   }
@@ -1738,6 +1753,25 @@ bool otaSystemRecoverFromStorageFailure() {
 
 void otaSystemInitAfterStorage() {
 #if HW1_OTA_LAYOUT
+  // Report a previous probation abort now that the filesystem is up. This is
+  // the first point where the reason can reach a durable, operator-readable
+  // sink; before this it existed only on a UART nobody was attached to, and the
+  // rolled-back image it describes is already gone.
+  {
+    OtaProbationCause abortCause = OTA_PROBATION_NONE;
+    uint32_t abortUptimeMs = 0;
+    char abortDetail[64]{};
+    if (otaSafetyTakeProbationAbort(&abortCause, &abortUptimeMs, abortDetail,
+                                    sizeof(abortDetail), true)) {
+      char event[SYSEVT_DETAIL_LEN];
+      snprintf(event, sizeof(event), "rollback: %s after %lums (%.40s)",
+               otaSafetyProbationCauseName(abortCause),
+               (unsigned long)abortUptimeMs, abortDetail);
+      ESP_LOGE(kTag, "Previous trial image was rolled back - %s", event);
+      logSystemEvent("OTA", event);
+    }
+  }
+
   hw1_ota_record_t record{};
   char reason[160]{};
   if (!loadRecord(record, nullptr, true, reason, sizeof(reason))) {

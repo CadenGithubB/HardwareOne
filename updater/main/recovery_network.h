@@ -11,10 +11,20 @@ extern "C" {
 
 #define HW1_RECOVERY_CREDENTIAL_CAPACITY 64u
 
+/* Shared by the HTTP /status handler and the serial `status` console command so
+ * the two buffers can never drift apart.  Both render the SAME JSON document;
+ * when one grew past the other's buffer the console silently truncated. */
+#define STATUS_JSON_MAX 2048u
+
 typedef struct {
     char ap_password[HW1_RECOVERY_CREDENTIAL_CAPACITY];
     char auth_token[HW1_RECOVERY_CREDENTIAL_CAPACITY];
 } recovery_credentials_t;
+
+/* Live authentication-throttle counters for the /status document, so an
+ * operator can see that the AP is being attacked rather than merely slow. */
+void recovery_network_auth_stats(uint32_t *blocked_peers,
+                                 uint32_t *failures_total);
 
 typedef enum {
     RECOVERY_ACTION_APPLY_STAGED = 1,

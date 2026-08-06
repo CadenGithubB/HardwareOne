@@ -32,6 +32,7 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "recovery_network.h"
+#include "recovery_auth_throttle.h"
 #include "sdkconfig.h"
 #include "updater_power.h"
 #include "updater_preflight.h"
@@ -62,7 +63,6 @@ typedef enum {
     CONTROL_START_NETWORK,
     CONTROL_ALLOW_DOWNGRADE,
     CONTROL_RESET_JOURNAL,
-    CONTROL_FORMATFS,
 } control_command_type_t;
 
 typedef struct {
@@ -214,9 +214,17 @@ static void snapshot_record(const hw1_ota_record_t *record, bool valid)
 static updater_snapshot_t snapshot_copy(void)
 {
     updater_snapshot_t copy = {0};
-    if (xSemaphoreTake(s_snapshot_mutex, portMAX_DELAY) == pdTRUE) {
+    /* Bounded, never portMAX_DELAY: this runs on the single esp_http_server
+     * task that also serves /cancel, so an unbounded wait here would take the
+     * whole recovery UI down with it.  On timeout report an honest degraded
+     * payload (state stays UPDATER_STATE_BOOT, the neutral "unknown") rather
+     * than blocking or inventing a status. */
+    if (xSemaphoreTake(s_snapshot_mutex, pdMS_TO_TICKS(250)) == pdTRUE) {
         copy = s_snapshot;
         xSemaphoreGive(s_snapshot_mutex);
+    } else {
+        snprintf(copy.detail, sizeof(copy.detail),
+                 "status momentarily unavailable; retry");
     }
     return copy;
 }
@@ -264,6 +272,15 @@ static size_t status_json(char *buffer, size_t buffer_size, void *context)
     cJSON_AddNumberToObject(root, "bytesWritten", (double)status.bytes_written);
     cJSON_AddNumberToObject(root, "imageSize", (double)status.image_size);
     cJSON_AddStringToObject(root, "candidateVersion", status.candidate_version);
+    {
+        /* Visible so an operator can tell "the AP is being guessed at" apart
+         * from "the AP is misbehaving". */
+        uint32_t blocked_peers = 0;
+        uint32_t auth_failures = 0;
+        recovery_network_auth_stats(&blocked_peers, &auth_failures);
+        cJSON_AddNumberToObject(root, "authBlockedPeers", (double)blocked_peers);
+        cJSON_AddNumberToObject(root, "authFailuresTotal", (double)auth_failures);
+    }
     printed = cJSON_PrintPreallocated(root, buffer, (int)buffer_size, false);
     cJSON_Delete(root);
     if (!printed) {
@@ -810,7 +827,11 @@ static void apply_staged(void)
         return;
     }
     if (xSemaphoreTake(s_operation_mutex, 0) != pdTRUE) {
-        snapshot_set(UPDATER_STATE_ERROR, "another OTA operation is active");
+        /* Do NOT clobber the snapshot here.  The operation that owns the mutex
+         * is still running fine; overwriting state with ERROR made /status
+         * report a failure for the rest of an active flash write, and an
+         * operator watching the recovery page would pull power mid-write. */
+        ESP_LOGW(TAG, "apply refused: another OTA operation is active");
         return;
     }
     snapshot_set(UPDATER_STATE_PREFLIGHT,
@@ -921,7 +942,10 @@ static esp_err_t accept_manifest(const uint8_t *body, size_t body_size,
                  "control watchdog unavailable; update writes disabled");
         return ESP_ERR_INVALID_STATE;
     }
-    if (xSemaphoreTake(s_operation_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+    /* 0-timeout, not 1000 ms: this runs on the single esp_http_server
+    * task, so a blocking wait stalls every other socket - including
+    * /status and /cancel - before failing anyway. */
+    if (xSemaphoreTake(s_operation_mutex, 0) != pdTRUE) {
         snprintf(reason, reason_size, "another OTA operation is active");
         return ESP_ERR_TIMEOUT;
     }
@@ -1040,7 +1064,10 @@ static esp_err_t accept_firmware(recovery_upload_t *upload,
                  "control watchdog unavailable; update writes disabled");
         return ESP_ERR_INVALID_STATE;
     }
-    if (xSemaphoreTake(s_operation_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+    /* 0-timeout, not 1000 ms: this runs on the single esp_http_server
+    * task, so a blocking wait stalls every other socket - including
+    * /status and /cancel - before failing anyway. */
+    if (xSemaphoreTake(s_operation_mutex, 0) != pdTRUE) {
         snprintf(reason, reason_size, "another OTA operation is active");
         return ESP_ERR_TIMEOUT;
     }
@@ -1228,7 +1255,10 @@ static esp_err_t network_action(recovery_action_t action, void *context)
     case RECOVERY_ACTION_REBOOT:
         return enqueue_control(CONTROL_REBOOT, false);
     case RECOVERY_ACTION_ALLOW_DOWNGRADE:
-        if (xSemaphoreTake(s_operation_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        /* 0-timeout, not 1000 ms: this runs on the single esp_http_server
+        * task, so a blocking wait stalls every other socket - including
+        * /status and /cancel - before failing anyway. */
+        if (xSemaphoreTake(s_operation_mutex, 0) != pdTRUE) {
             return ESP_ERR_TIMEOUT;
         }
         {
@@ -1480,7 +1510,10 @@ static void cancel_recovery(void)
     bool main_eligible = false;
     esp_err_t err;
     if (xSemaphoreTake(s_operation_mutex, 0) != pdTRUE) {
-        snapshot_set(UPDATER_STATE_ERROR, "cannot cancel active flash write");
+        /* Same reasoning as apply_staged: the refusal is about THIS request,
+         * not about the health of the running write, so it must not latch
+         * ERROR into the status every viewer is polling. */
+        ESP_LOGW(TAG, "cancel refused: a flash write is currently active");
         return;
     }
     err = load_record(&record, false);
@@ -1587,76 +1620,11 @@ static esp_err_t allow_downgrade_for_transaction(void)
     return err;
 }
 
-static esp_err_t format_littlefs_migration_only(void)
-{
-#if !CONFIG_HW1_UPDATER_ENABLE_SERIAL_FORMATFS
-    return ESP_ERR_NOT_SUPPORTED;
-#else
-    const esp_partition_t *validated_ota0 = NULL;
-    const esp_partition_t *littlefs;
-    char layout_reason[STATUS_DETAIL_SIZE] = {0};
-    esp_err_t err;
-    esp_err_t watchdog_err;
-
-    /* Resolve the target through the same exact-layout gate used at boot before
-     * performing the migration command's one destructive operation. */
-    err = updater_validate_layout(&validated_ota0, layout_reason,
-                                  sizeof(layout_reason));
-    if (err != ESP_OK) {
-        return err;
-    }
-    littlefs = esp_partition_find_first(ESP_PARTITION_TYPE_DATA,
-                                        ESP_PARTITION_SUBTYPE_ANY,
-                                        "littlefs");
-    if (littlefs == NULL || validated_ota0 == NULL) {
-        return ESP_ERR_NOT_FOUND;
-    }
-    if (s_littlefs_mounted) {
-        err = esp_vfs_littlefs_unregister("littlefs");
-        if (err != ESP_OK) {
-            return err;
-        }
-        s_littlefs_mounted = false;
-        if (xSemaphoreTake(s_snapshot_mutex, portMAX_DELAY) == pdTRUE) {
-            s_snapshot.littlefs_mounted = false;
-            xSemaphoreGive(s_snapshot_mutex);
-        }
-    }
-
-    /* A full 9 MiB format can legitimately exceed the normal control-task
-     * deadline. The serial-only, confirmation-gated migration command is the
-     * sole exception; idle-task watchdog coverage remains enabled. */
-    feed_control_watchdog();
-    watchdog_err = esp_task_wdt_delete(NULL);
-    if (watchdog_err != ESP_OK) {
-        s_control_watchdog_active = false;
-        return watchdog_err;
-    }
-    s_control_watchdog_active = false;
-    /* The OTA layout starts in the middle of the legacy filesystem. Erase the
-     * validated relocated partition in full so formatting never interprets or
-     * retains legacy tail blocks, then bind the formatter to that exact
-     * partition rather than resolving a label a second time. NVS is disjoint
-     * from this range and is never erased here. */
-    err = esp_partition_erase_range(littlefs, 0, littlefs->size);
-    if (err == ESP_OK) {
-        err = esp_littlefs_format_partition(littlefs);
-    }
-
-    /* Fail closed if task-level watchdog coverage cannot be restored. Both
-     * staged and streamed update entry points check this flag. */
-    watchdog_err = subscribe_control_watchdog();
-    if (watchdog_err != ESP_OK) {
-        ESP_LOGE(TAG, "control watchdog re-subscribe failed after format: %s",
-                 esp_err_to_name(watchdog_err));
-        return watchdog_err;
-    }
-    if (err == ESP_OK) {
-        err = mount_littlefs_read_only();
-    }
-    return err;
-#endif
-}
+/* format_littlefs_migration_only() is deliberately gone.  The relocated
+ * filesystem is now made mountable by flashing a host-built blank littlefs
+ * image as part of `migration-flash`, so no firmware on the device carries
+ * the ability to erase its own storage.  To wipe a device's filesystem, use
+ * the host `littlefs-flash` cable target. */
 
 static void process_idle_timeout(void)
 {
@@ -1782,19 +1750,6 @@ static void control_task(void *argument)
                     ESP_LOGI(TAG, "resetjournal: %s", esp_err_to_name(err));
                     xSemaphoreGive(s_operation_mutex);
                 }
-            } else if (command.type == CONTROL_FORMATFS) {
-                if (!command.from_serial) {
-                    ESP_LOGE(TAG, "formatfs is serial-only");
-                } else if (xSemaphoreTake(s_operation_mutex, 0) == pdTRUE) {
-                    esp_err_t err = format_littlefs_migration_only();
-                    snapshot_set(err == ESP_OK ? UPDATER_STATE_IDLE
-                                               : UPDATER_STATE_ERROR,
-                                 err == ESP_OK
-                                     ? "LittleFS explicitly formatted and remounted read-only"
-                                     : "migration-gated formatfs refused/failed");
-                    ESP_LOGI(TAG, "formatfs: %s", esp_err_to_name(err));
-                    xSemaphoreGive(s_operation_mutex);
-                }
             }
         }
         feed_control_watchdog();
@@ -1806,10 +1761,109 @@ static void print_status_console(void)
 {
     /* Keep the console task's stack shallow. status_json() is also used by
      * HTTP, so this console-only buffer does not create cross-task sharing. */
-    static char json[1536];
+    /* Shares STATUS_JSON_MAX with the HTTP /status buffer: both render the same
+     * document, and a private constant here silently truncated the console copy
+     * once the JSON outgrew it. */
+    static char json[STATUS_JSON_MAX];
     size_t length = status_json(json, sizeof(json), NULL);
     fwrite(json, 1, length, stdout);
     fputc('\n', stdout);
+}
+
+/* There is nothing sensitive in this list, and an operator who reaches this
+ * prompt is usually here because something already went wrong.  Printing it on
+ * request - and naming it when a command is not recognised - costs nothing and
+ * saves guessing at a prompt that only accepts seven exact strings. */
+static void print_console_help(void)
+{
+    puts("commands:");
+    puts("  help                     show this list");
+    puts("  unlock <credential>      authorize the mutating commands below");
+    puts("  status                   print recovery state as JSON");
+    puts("  apply                    install the staged firmware pair [locked]");
+    puts("  cancel                   leave recovery and boot the main app");
+    puts("  reboot                   restart the recovery updater");
+    puts("  setpin <12..63 chars>    set the recovery WPA2 + HTTP credential [locked]");
+    puts("  allowdowngrade confirm   permit an older signed version this once [locked]");
+    puts("  resetjournal confirm     repair the two OTA journal slots [locked]");
+    puts("[locked] commands need 'unlock' once a credential is set.");
+}
+
+/* Serial console authorization.
+ *
+ * The hole this closes: `setpin` writes its argument to BOTH the WPA2 PSK and
+ * the HTTP Basic password, so five seconds of physical access converted into
+ * PERSISTENT REMOTE ownership of the recovery AP. The attacker walked away and
+ * still had the device over the air. No eFuse fixes that; this does.
+ *
+ * Deliberately NOT gated: status, help, reboot, and above all `cancel`. Cancel
+ * is escape hatch #1 - it boots the main app, where a superadmin can reset the
+ * credential with `otapin` (same NVS namespace and keys, verified). Gating it
+ * would strand a locked-out operator in recovery.
+ *
+ * Open while no credential is stored, because otherwise a fresh device could
+ * never be provisioned - you would need the pin to set the pin.
+ *
+ * Honest limits: the gate lives in the binary an attacker can replace, and the
+ * throttle is RAM-resident so a reset clears it. This raises the cost of casual
+ * physical access; it does not stop someone who keeps the board. Escape hatch
+ * #2 remains a cable erase and re-provision, which works as long as ROM
+ * download mode is enabled. */
+static auth_throttle_t s_console_throttle;
+static bool s_console_unlocked;
+/* The throttle is keyed by peer address for HTTP; the console is a single
+ * pseudo-peer with its own table instance, so console attempts can never evict
+ * or be evicted by a network peer. */
+#define CONSOLE_PSEUDO_PEER 1u
+
+static bool console_credential_required(void)
+{
+    recovery_credentials_t credentials;
+    const bool present = load_credentials(&credentials) == ESP_OK;
+    secure_zero(&credentials, sizeof(credentials));
+    return present;
+}
+
+static bool console_authorized(void)
+{
+    return s_console_unlocked || !console_credential_required();
+}
+
+/* Returns true when the caller should treat this line as consumed. */
+static bool console_handle_unlock(const char *argument)
+{
+    recovery_credentials_t credentials;
+    int64_t retry_us = 0;
+    bool ok;
+    if (!console_credential_required()) {
+        puts("OK: no recovery credential is set; console is already open");
+        return true;
+    }
+    if (auth_throttle_begin(&s_console_throttle, CONSOLE_PSEUDO_PEER,
+                            esp_timer_get_time(), &retry_us) ==
+        AUTH_DECISION_BLOCKED) {
+        printf("Error: too many failed attempts; retry in %lld seconds\n",
+               (long long)((retry_us + 999999) / 1000000));
+        return true;
+    }
+    if (load_credentials(&credentials) != ESP_OK) {
+        puts("Error: recovery credential unreadable");
+        return true;
+    }
+    ok = auth_constant_time_equals(argument, credentials.auth_token);
+    secure_zero(&credentials, sizeof(credentials));
+    if (!ok) {
+        auth_throttle_record_failure(&s_console_throttle, CONSOLE_PSEUDO_PEER,
+                                     esp_timer_get_time());
+        puts("Error: incorrect credential");
+        return true;
+    }
+    auth_throttle_record_success(&s_console_throttle, CONSOLE_PSEUDO_PEER,
+                                 esp_timer_get_time());
+    s_console_unlocked = true;
+    note_activity(NULL);
+    puts("OK: console unlocked for this session");
+    return true;
 }
 
 static void console_task(void *argument)
@@ -1817,11 +1871,7 @@ static void console_task(void *argument)
     char line[96];
     (void)argument;
     puts("HardwareOne native ESP-IDF signed recovery console");
-    puts("commands: status | apply | cancel | reboot | setpin <12..63 printable> | allowdowngrade confirm | resetjournal confirm"
-#if CONFIG_HW1_UPDATER_ENABLE_SERIAL_FORMATFS
-         " | formatfs confirm"
-#endif
-    );
+    print_console_help();
     for (;;) {
         esp_err_t err = ESP_OK;
         fputs("hw1up> ", stdout);
@@ -1841,7 +1891,28 @@ static void console_task(void *argument)
             continue;
         }
         line[strcspn(line, "\r\n")] = '\0';
-        note_activity(NULL);
+        /* A failed unlock must NOT refresh the idle timer, or an attacker holds
+         * the device in recovery indefinitely by spamming guesses. Every other
+         * line is real operator presence and should keep the session alive. */
+        if (strncmp(line, "unlock ", 7) != 0) {
+            note_activity(NULL);
+        }
+        if (strncmp(line, "unlock ", 7) == 0) {
+            (void)console_handle_unlock(line + 7);
+            secure_zero(line, sizeof(line));
+            continue;
+        }
+        /* Mutating commands only. status/help/reboot/cancel stay open. */
+        if ((strncmp(line, "setpin ", 7) == 0 ||
+             strcmp(line, "apply") == 0 ||
+             strcmp(line, "allowdowngrade confirm") == 0 ||
+             strcmp(line, "resetjournal confirm") == 0) &&
+            !console_authorized()) {
+            secure_zero(line, sizeof(line));
+            puts("Error: locked. Use 'unlock <credential>' first, or 'cancel' to "
+                 "boot the main app and reset it there with 'otapin'.");
+            continue;
+        }
         if (strcmp(line, "status") == 0) {
             print_status_console();
             continue;
@@ -1852,6 +1923,10 @@ static void console_task(void *argument)
                 secure_zero(line, sizeof(line));
                 xSemaphoreGive(s_operation_mutex);
                 if (err == ESP_OK) {
+                    /* Provisioning a fresh device would otherwise lock the
+                     * operator out with the credential they just created: the
+                     * console was open only because none existed. */
+                    s_console_unlocked = true;
                     if (network_was_started) {
                         puts("OK: persistent recovery credential stored; reboot required before WPA2/HTTP use the new value");
                     } else {
@@ -1883,14 +1958,17 @@ static void console_task(void *argument)
             err = enqueue_control(CONTROL_ALLOW_DOWNGRADE, true);
         } else if (strcmp(line, "resetjournal confirm") == 0) {
             err = enqueue_control(CONTROL_RESET_JOURNAL, true);
-#if CONFIG_HW1_UPDATER_ENABLE_SERIAL_FORMATFS
-        } else if (strcmp(line, "formatfs confirm") == 0) {
-            err = enqueue_control(CONTROL_FORMATFS, true);
-#endif
+        } else if (strcmp(line, "help") == 0 || strcmp(line, "?") == 0) {
+            print_console_help();
+            continue;
         } else if (line[0] == '\0') {
             continue;
         } else {
-            puts("Error: unknown command");
+            /* Name the escape hatch rather than leaving the operator to guess
+             * at a prompt that accepts only exact strings.  A bare "reboot" or
+             * "cancel" typed as "restart"/"exit" is the common case. */
+            printf("Error: unknown command '%s'. Type 'help' for the list.\n",
+                   line);
             continue;
         }
         printf("%s: %s\n", err == ESP_OK ? "OK" : "Error",

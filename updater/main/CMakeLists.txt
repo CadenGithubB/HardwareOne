@@ -3,6 +3,7 @@ idf_component_register(
         "updater_main.c"
         "updater_preflight.c"
         "recovery_network.c"
+        "recovery_auth_throttle.c"
         "updater_power.c"
     INCLUDE_DIRS "."
     REQUIRES
