@@ -31,6 +31,7 @@
 #include "System_Notifications.h"
 #include "System_Events.h"  // systemEventPost — mesh/bond semantic events for the bus
 #include "System_Debug.h"
+#include "System_User.h"  // logAuthAttempt — bond auth audit (was a local extern)
 #include "System_ESPNow.h"
 #include "System_CommandTypes.h"  // CMD_RESULT_MAX — the V4 fragment budget derives from it
 #include "System_ESPNow_Wire.h"      // V3 wire schema (Phase 0 extraction)
@@ -2767,7 +2768,6 @@ void bondNotifySessionEstablished(const uint8_t* peerMac) {
     // becomes usable. One line per session (guarded by wasOffline, not per
     // heartbeat) and already filtered to the configured bond peer above. Fires on
     // both master and worker. Runs on cmd_exec_task — safe for the log file write.
-    extern void logAuthAttempt(bool, const char*, const String&, const String&, const String&);
     String bondWho = getEspNowDeviceName(peerMac);
     if (bondWho.length() == 0) bondWho = formatMacAddress(peerMac);
     logAuthAttempt(true, "espnow/bond", bondWho, String("espnow"),
@@ -3792,10 +3792,7 @@ struct BondAuthFailLog { char who[40]; char ip[20]; char reason[72]; };
 
 static void runDeferredBondAuthFailLog(void* arg) {
   auto* w = static_cast<BondAuthFailLog*>(arg);
-#if ENABLE_HTTP_SERVER
-  extern void logAuthAttempt(bool, const char*, const String&, const String&, const String&);
   logAuthAttempt(false, "espnow/bond", String(w->who), String(w->ip), String(w->reason));
-#endif
   free(w);
 }
 
@@ -16786,7 +16783,7 @@ const char* cmd_espnow_pairmode(const String& argsInput) {
   return getDebugBuffer();
 }
 
-// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
+// Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 extern const CommandEntry espNowCommands[] = {
   // ---- ESP-NOW Status & Statistics ----
   { "espnowread", "Read ESP-NOW status and configuration.", false, cmd_espnow_status },
@@ -16801,7 +16798,7 @@ extern const CommandEntry espNowCommands[] = {
 
   // ---- ESP-NOW Cryptographic Identity (Phase 3.0/3.3) ----
   { "espnowidentity", "Show long-term Ed25519 identity (MAC, pub key, createdAtSec, regenCount).", false, cmd_espnow_identity },
-  { "espnowregenidentity", "Regenerate Ed25519 identity. Requires '--confirm-wipe-all-bonds'.", true, cmd_espnow_regenidentity, "Usage: espnowregenidentity --confirm-wipe-all-bonds", nullptr, nullptr, /*requiresSuperAdmin=*/true },
+  { "espnowregenidentity", "Regenerate Ed25519 identity. Requires '--confirm-wipe-all-bonds'.", true, cmd_espnow_regenidentity, "Usage: espnowregenidentity --confirm-wipe-all-bonds", /*requiresSuperAdmin=*/true },
   { "espnowkeyex", "Initiate KEY_EX handshake with a peer (runs alongside legacy pairing). (async - handshake completes later; check espnowsessions)", true, cmd_espnow_keyex, "Usage: espnowkeyex <name_or_mac> [<mesh>]\n       Returns OK when KEY_EX_HELLO is sent; the handshake completes asynchronously - inspect with 'espnowsessions' / 'espnowencstatus'." },
   { "espnowprobe", "Reachability probe via KEY_EX. Synchronous, bounded timeout. Reports alive+mesh+firmware in one shot (no plaintext on the wire).", true, cmd_espnow_probe, "Usage: espnowprobe <name_or_mac> [<timeoutMs (50-5000, default 500)>] [<mesh>]" },
   { "espnowsessionopen", "Initiate SESSION handshake (requires prior espnowkeyex). (async - session goes ACTIVE later; check espnowsessions)", true, cmd_espnow_sessionopen, "Usage: espnowsessionopen <name_or_mac> [<mesh>]\n       Returns OK when SESSION_OPEN is sent; the session becomes ACTIVE when CONFIRM arrives - run 'espnowsessions'." },
@@ -16873,7 +16870,7 @@ extern const CommandEntry espNowCommands[] = {
   { "espnowmasterfingerprint", "Worker: set the authorized PRIMARY-master Ed25519 fingerprint (64-hex; empty=deny).", true, cmd_espnow_masterfingerprint, "Usage: espnowmasterfingerprint <64-hex-pubkey>" },
   { "espnowbackupfingerprint", "Worker: set the authorized BACKUP-master Ed25519 fingerprint (64-hex; empty=deny).", true, cmd_espnow_backupfingerprint, "Usage: espnowbackupfingerprint <64-hex-pubkey>" },
   { "espnowsensorreq", "TEST (Phase 1b): hand-send a SENSOR_REQ to a paired worker.", true, cmd_espnow_sensorreq, "Usage: espnowsensorreq <MAC|name> <mask> <mode 0=sub|1=unsub|2=oneshot> <intervalMs> <leaseMs>" },
-  { "espnowusersync", "Enable/disable user credential sync: 'espnowusersync [on|off]'.", true, cmd_espnow_usersync, "Usage: espnowusersync [on|off]", nullptr, nullptr, /*requiresSuperAdmin=*/true },
+  { "espnowusersync", "Enable/disable user credential sync: 'espnowusersync [on|off]'.", true, cmd_espnow_usersync, "Usage: espnowusersync [on|off]", /*requiresSuperAdmin=*/true },
   { "espnowrequestmeta", "Request metadata from peer: 'espnowrequestmeta <name_or_mac>'. (async - updates cache; view with espnowdevices)", false, cmd_espnow_requestmeta, "Usage: espnowrequestmeta <name_or_mac>\n       Returns OK on delivery; the peer's name/room/zone/tags arrive later and update the local peer cache shown by 'espnowdevices' / 'espnowrooms' / 'espnowfind'." },
   
 #if ENABLE_BONDED_MODE
@@ -16895,7 +16892,7 @@ extern const CommandEntry espNowCommands[] = {
 #endif
   
   // ---- ESP-NOW Encryption ----
-  { "espnowsetpassphrase", "Set encryption passphrase on a mesh: 'espnowsetpassphrase <mesh> <phrase>'.", true, cmd_espnow_setpassphrase, "Usage: espnowsetpassphrase <mesh> <passphrase>\n       espnowsetpassphrase <mesh> clear", nullptr, nullptr, /*requiresSuperAdmin=*/true },
+  { "espnowsetpassphrase", "Set encryption passphrase on a mesh: 'espnowsetpassphrase <mesh> <phrase>'.", true, cmd_espnow_setpassphrase, "Usage: espnowsetpassphrase <mesh> <passphrase>\n       espnowsetpassphrase <mesh> clear", /*requiresSuperAdmin=*/true },
   { "espnowencstatus", "Show ESP-NOW encryption status and key fingerprint.", true, cmd_espnow_encstatus },
   { "espnowpairsecure", "Pair device with encryption: 'espnowpairsecure <mac> <name> [mesh]'. (local pair is synchronous; secure channel completes async - see espnowsessions)", true, cmd_espnow_pairsecure, "Usage: espnowpairsecure <mac_address> <device_name> [mesh]\n       Requires a mesh passphrase first - run 'espnowsetpassphrase <mesh> <passphrase>'.\n       The device is added synchronously; KEY_EX then runs asynchronously (~100ms) so the encrypted channel becomes usable shortly after - inspect with 'espnowsessions' / 'espnowencstatus'." },
   { "espnowpairmode", "Open the discovery window: 'espnowpairmode [seconds|off|status]'. Open on BOTH same-mesh devices, then 'espnowdiscovered' to see + pair. No auto-pair.", true, cmd_espnow_pairmode, "Usage: espnowpairmode [<seconds>|off|status]\n       Default 120s, max 600. Requires a mesh passphrase set on both devices (same mesh).\n       While open, the device broadcasts a discovery beacon and RECORDS other same-mesh\n       devices it hears (see 'espnowdiscovered') — it no longer auto-pairs. Pair from the\n       list with 'espnowpairsecure <mac> <name>'." },

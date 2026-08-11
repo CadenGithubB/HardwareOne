@@ -24,6 +24,7 @@ set(HW_CFG_ENABLE_WEB_GAME_DARKROOM 0)
 set(HW_CFG_ENABLE_BLUETOOTH 0)
 set(HW_CFG_ENABLE_G2_GLASSES 0)
 set(HW_CFG_ENABLE_R1_HEALTH 0)
+set(HW_CFG_ENABLE_RASPBERRY_PI_HOST_POWER 0)
 
 if(EXISTS "${hw_cfg_file}")
     file(READ "${hw_cfg_file}" HW_CFG_CONTENT)
@@ -115,6 +116,11 @@ if(EXISTS "${hw_cfg_file}")
     string(REGEX MATCH "#define[ \t]+ENABLE_R1_HEALTH[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
     if(CMAKE_MATCH_1)
         set(HW_CFG_ENABLE_R1_HEALTH "${CMAKE_MATCH_1}")
+    endif()
+
+    string(REGEX MATCH "#define[ \t]+ENABLE_RASPBERRY_PI_HOST_POWER[ \t]+([0-9]+)" _ "${HW_CFG_CONTENT}")
+    if(CMAKE_MATCH_1)
+        set(HW_CFG_ENABLE_RASPBERRY_PI_HOST_POWER "${CMAKE_MATCH_1}")
     endif()
 endif()
 
@@ -234,6 +240,8 @@ set(hardwareone_srcs
         System_Utils.cpp
         System_TaskUtils.cpp
         System_User.cpp
+        System_UartLink.cpp
+        System_LiveAudio.cpp
         System_WiFi.cpp
         System_Camera_DVP.cpp
         System_Camera_Video.cpp
@@ -251,6 +259,13 @@ set(hardwareone_srcs
         System_SelfDevice.cpp
         System_Clock.cpp
 )
+
+if(HW_CFG_ENABLE_RASPBERRY_PI_HOST_POWER GREATER 0)
+    list(APPEND hardwareone_srcs System_RaspberryPi.cpp)
+    message(STATUS "Raspberry Pi/CM5 host-power control ENABLED")
+else()
+    message(STATUS "Raspberry Pi/CM5 host-power control DISABLED (skipping System_RaspberryPi.cpp)")
+endif()
 
 # ── Per-feature source lists (added below based on HW_CFG_* flags) ──
 # Each block follows the existing MQTT/LLM pattern further down. These

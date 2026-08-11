@@ -330,6 +330,25 @@ bool g2PbSkipField(const uint8_t* buf, size_t len, size_t* pos, uint8_t wire) {
   }
 }
 
+bool g2ParseCommandMagic(const uint8_t* payload, size_t payloadLen,
+                         uint32_t* outCommand, uint32_t* outMagic) {
+  if (!payload || !outCommand || !outMagic) return false;
+  *outCommand = 0;
+  *outMagic = 0;
+  size_t pos = 0;
+  uint32_t field; uint8_t wire;
+  uint64_t value;
+  if (!g2PbReadTag(payload, payloadLen, &pos, &field, &wire) ||
+      field != 1 || wire != G2_PB_WIRE_VARINT ||
+      !g2PbReadVarint(payload, payloadLen, &pos, &value)) return false;
+  *outCommand = (uint32_t)value;
+  if (!g2PbReadTag(payload, payloadLen, &pos, &field, &wire) ||
+      field != 2 || wire != G2_PB_WIRE_VARINT ||
+      !g2PbReadVarint(payload, payloadLen, &pos, &value)) return false;
+  *outMagic = (uint32_t)value;
+  return true;
+}
+
 // ── EvenCore wrapper + nested-message field numbers ─────────────────────────
 // "EvenCore" is our name for the sid=0xE0 rendering subsystem; the firmware's
 // pb schema calls it `evenhub_main_msg_ctx` (see ble/gen/EvenHub_pb.ts in the
@@ -738,6 +757,22 @@ size_t g2BuildEvenAICtrl(uint8_t seq, uint32_t magic, uint32_t status,
                          payload, pos, out, outCap);
 }
 
+size_t g2BuildEvenAIHeartbeat(uint8_t seq, uint32_t magic, uint32_t hbCnt,
+                              uint8_t* out, size_t outCap) {
+  // EvenAIDataPackage{ cmd=HEARTBEAT, magicRandom, heartbeat{ hbCnt } }.
+  // Field numbers per even_ai.proto: wrapper heartbeat=11, hbCnt=1.
+  uint8_t payload[32];
+  size_t pos = 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_AI_F_CMD, G2_AI_CMD_HEARTBEAT)) return 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_AI_F_MAGIC, magic)) return 0;
+  size_t inner;
+  if (!g2PbBeginNested(payload, sizeof(payload), &pos, G2_AI_F_HEARTBEAT, &inner)) return 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_AI_HB_F_CNT, hbCnt)) return 0;
+  if (!g2PbEndNested(payload, sizeof(payload), &pos, inner)) return 0;
+  return g2BuildEnvelope(seq, G2_SID_EVEN_AI, G2_FLAG_REQUEST,
+                         payload, pos, out, outCap);
+}
+
 size_t g2BuildEvenAIAsk(uint8_t seq, uint32_t magic, uint32_t cmdCnt,
                         const char* text,
                         uint8_t* out, size_t outCap) {
@@ -810,29 +845,38 @@ size_t g2BuildEvenAIReply(uint8_t seq, uint32_t magic, uint32_t cmdCnt,
 
 size_t g2BuildEvenAIConfig(uint8_t seq, uint32_t magic,
                            uint64_t voiceSwitch, uint64_t streamSpeed,
+                           uint64_t duplexMode,
                            uint8_t* out, size_t outCap) {
-  // Wrapper: cmd=10 CONFIG + magic + (optional) inner config sub-msg.
-  // The reference enum names CONFIG=10 but doesn't ship a host->glasses
-  // example; field numbers below come from g2-kit-unofficial's inline
-  // example string `08 01 10 A0 01` = {f1=1, f2=160} = voiceSwitch=on,
-  // streamSpeed=160. Pass UINT64_MAX for either parameter to omit it
-  // from the body — useful for probing one field at a time.
+  // Stock G2 app request, accepted and echoed by firmware 2.2.7:
+  //   EvenAIDataPackage.config (wrapper f13) {
+  //     voiceSwitch=0, streamSpeed=80, duplexMode=0
+  //   }
+  // The vendored v2.1 schema has f1/f2; the newer stock request additionally
+  // carries f4. UINT64_MAX still means "omit" for diagnostic probes.
   uint8_t payload[64];
   size_t pos = 0;
-  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_AI_F_CMD, /*CONFIG*/10)) return 0;
+  if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_AI_F_CMD,
+                       G2_AI_CMD_CONFIG)) return 0;
   if (!g2PbWriteUint32(payload, sizeof(payload), &pos, G2_AI_F_MAGIC, magic)) return 0;
-  // Sub-message lives at field 10 (CONFIG slot in the reference).
-  // Inner schema is not in our docs — guess: f1 = voiceSwitch (bool),
-  // f2 = streamSpeed (uint). If the firmware rejects, the COMM_RSP
-  // errorCode field will tell us what to adjust.
-  if (voiceSwitch != UINT64_MAX || streamSpeed != UINT64_MAX) {
+  if (voiceSwitch != UINT64_MAX || streamSpeed != UINT64_MAX ||
+      duplexMode != UINT64_MAX) {
     size_t inner;
-    if (!g2PbBeginNested(payload, sizeof(payload), &pos, /*F_CONFIG*/10, &inner)) return 0;
+    if (!g2PbBeginNested(payload, sizeof(payload), &pos,
+                         G2_AI_F_CONFIG, &inner)) return 0;
     if (voiceSwitch != UINT64_MAX) {
-      if (!g2PbWriteUint32(payload, sizeof(payload), &pos, 1, (uint32_t)voiceSwitch)) return 0;
+      if (!g2PbWriteUint32(payload, sizeof(payload), &pos,
+                           G2_AI_CONFIG_F_VOICE_SWITCH,
+                           (uint32_t)voiceSwitch)) return 0;
     }
     if (streamSpeed != UINT64_MAX) {
-      if (!g2PbWriteUint32(payload, sizeof(payload), &pos, 2, (uint32_t)streamSpeed)) return 0;
+      if (!g2PbWriteUint32(payload, sizeof(payload), &pos,
+                           G2_AI_CONFIG_F_STREAM_SPEED,
+                           (uint32_t)streamSpeed)) return 0;
+    }
+    if (duplexMode != UINT64_MAX) {
+      if (!g2PbWriteUint32(payload, sizeof(payload), &pos,
+                           G2_AI_CONFIG_F_DUPLEX_MODE,
+                           (uint32_t)duplexMode)) return 0;
     }
     if (!g2PbEndNested(payload, sizeof(payload), &pos, inner)) return 0;
   }
@@ -2394,6 +2438,18 @@ bool g2ProtocolGoldenSelfTest() {
     0x04,0x01,0x03,0x02,0x02,0x30,0x01,0x38,0x02,0xae,
     0xfc
   };
+  // Payload from the accepted stock-shape CONFIG probe on G2 2.2.7. The
+  // response echoed CONFIG with f13=[10 50], confirming the wrapper slot and
+  // streamSpeed=80. Keep the explicit zero fields in the request.
+  static const uint8_t kEvenAIConfigPb[] = {
+    0x08,0x0a,0x10,0xfa,0x01,0x6a,0x06,0x08,0x00,0x10,
+    0x50,0x20,0x00
+  };
+  // Observed rejection response: COMM_RSP=161, magic=250, f12.errorCode=7.
+  // This locks the multi-byte command varint that the old logger misparsed.
+  static const uint8_t kEvenAICommRspPb[] = {
+    0x08,0xa1,0x01,0x10,0xfa,0x01,0x62,0x02,0x08,0x07
+  };
 
   uint8_t out[96];
   size_t n = g2BuildHeadUpSwitch(0x68, 0x6b, false, out, sizeof(out));
@@ -2417,6 +2473,41 @@ bool g2ProtocolGoldenSelfTest() {
   if (!g2GoldenEquals(out, n, kMenu6, sizeof(kMenu6))) return false;
   n = g2BuildMenuMembership(0x7e, 0x81, menu5, 5, out, sizeof(out));
   if (!g2GoldenEquals(out, n, kMenu5, sizeof(kMenu5))) return false;
+
+  n = g2BuildEvenAIConfig(0xeb, 250, 0, 80, 0, out, sizeof(out));
+  G2EnvelopeView configView;
+  if (!g2ParseEnvelope(out, n, &configView)) return false;
+  if (!configView.isTx || configView.seq != 0xeb ||
+      configView.sid != G2_SID_EVEN_AI ||
+      configView.flag != G2_FLAG_REQUEST ||
+      !g2GoldenEquals(configView.payload, configView.payloadLen,
+                      kEvenAIConfigPb, sizeof(kEvenAIConfigPb))) return false;
+
+  uint32_t evenAiCmd = 0, evenAiMagic = 0;
+  if (!g2ParseCommandMagic(kEvenAICommRspPb, sizeof(kEvenAICommRspPb),
+                           &evenAiCmd, &evenAiMagic) ||
+      evenAiCmd != G2_AI_CMD_COMM_RSP || evenAiMagic != 250) return false;
+  size_t rspPos = 0;
+  uint32_t rspField; uint8_t rspWire;
+  uint64_t rspValue;
+  // Walk f1 command and f2 magic, then validate f12={f1=errorCode 7}.
+  for (int i = 0; i < 2; i++) {
+    if (!g2PbReadTag(kEvenAICommRspPb, sizeof(kEvenAICommRspPb),
+                     &rspPos, &rspField, &rspWire) ||
+        rspWire != G2_PB_WIRE_VARINT ||
+        !g2PbReadVarint(kEvenAICommRspPb, sizeof(kEvenAICommRspPb),
+                        &rspPos, &rspValue)) return false;
+  }
+  if (!g2PbReadTag(kEvenAICommRspPb, sizeof(kEvenAICommRspPb),
+                   &rspPos, &rspField, &rspWire) ||
+      rspField != G2_AI_F_COMM_RSP || rspWire != G2_PB_WIRE_LEN_DELIM ||
+      !g2PbReadVarint(kEvenAICommRspPb, sizeof(kEvenAICommRspPb),
+                      &rspPos, &rspValue) || rspValue != 2 ||
+      !g2PbReadTag(kEvenAICommRspPb, sizeof(kEvenAICommRspPb),
+                   &rspPos, &rspField, &rspWire) ||
+      rspField != 1 || rspWire != G2_PB_WIRE_VARINT ||
+      !g2PbReadVarint(kEvenAICommRspPb, sizeof(kEvenAICommRspPb),
+                      &rspPos, &rspValue) || rspValue != 7) return false;
 
   G2EnvelopeView view;
   if (!g2ParseEnvelope(kRestoredHead19, sizeof(kRestoredHead19), &view)) return false;

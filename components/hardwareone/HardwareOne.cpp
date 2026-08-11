@@ -106,6 +106,10 @@ void getClientIP(httpd_req_t* req, char* ipBuf, size_t bufSize);
 #include "System_Battery.h"
 #include "System_FirstTimeSetup.h"
 #include "System_SetupWizard.h"  // gWizardOwnsSerial — main loop yields Serial while legacy wizard is running
+#include "System_UartLink.h"     // UART host link (CM5 command channel) — drain ticked from loop()
+#if ENABLE_RASPBERRY_PI_HOST_POWER
+  #include "System_RaspberryPi.h"  // finite CM5 host-power request/ACK state machine
+#endif
 #include "System_CLIMode.h"      // cliModeTick — periodic tick for active CLIMode (Phase 5 wizard)
 #include "System_TaskUtils.h"
 #include "System_Notifications.h"  // systemEventsNotifyTick — main-loop toast render for bus events
@@ -838,6 +842,7 @@ void broadcastOutput(const String& s, const CommandContext& ctx) {
     case ORIGIN_LOCAL_DISPLAY: source = "oled"; break;
     case ORIGIN_MQTT: source = "mqtt"; break;
     case ORIGIN_VOICE: source = "voice"; break;
+    case ORIGIN_UART: source = "uart"; break;
     case ORIGIN_SYSTEM:
     default: source = "system"; break;
   }
@@ -1400,6 +1405,12 @@ void hardwareone_setup() {
   if (filesystemReady && haveSettings) {
     if (readSettingsJson()) {
       Serial.println("[Settings] Loaded from file");
+      // Loading is complete, so the stale firmwareVersion can be corrected.
+      // This rewrites one key of the parsed file - it does NOT serialise RAM,
+      // which is why it is safe here and why writeSettingsJson() would not be.
+      // Without it the "settings carried over from prior firmware" event
+      // re-fires on every boot after an update rather than once.
+      (void)settingsRestampFirmwareVersion();
     } else {
       // Parse/open failure: the file is left on disk; RAM runs on defaults.
       logSystemEvent("SETTINGS", "settings.json load FAILED — running on defaults (file left on disk)");
@@ -1631,7 +1642,8 @@ void hardwareone_setup() {
   // ========================================================================
   crashRecordSetPhase(CRASH_PHASE_HARDWARE);
   initBattery();
-  initNeoPixelLED();  // Must precede I2C — powers STEMMA QT connector on Feather V2
+  boardPowerRailInit();  // Must precede I2C — powers STEMMA QT connector on Feather V2 (independent of ENABLE_NEOPIXEL)
+  initNeoPixelLED();     // no-op stub when ENABLE_NEOPIXEL=0
 
 #if ENABLE_I2C_SYSTEM
   initI2CBuses();
@@ -1789,6 +1801,14 @@ void hardwareone_setup() {
   }
   firstTimeSetupIfNeeded();
   oledUpdate();  // Update OLED animation during boot
+
+  // UART host link (CM5 command channel) — starts only if uartLinkEnabled.
+  // Deliberately after firstTimeSetupIfNeeded(): the link never runs on an
+  // unprovisioned device (no users.json → nothing to authenticate against).
+  uartLinkInitFromSettings();
+#if ENABLE_RASPBERRY_PI_HOST_POWER
+  raspberryPiHostPowerInit();
+#endif
 
   // (Removed: legacy Basic-Auth gAuthUser/gAuthPass priming via
   // loadUsersFromFile. The function read a passwordHash field that has
@@ -2095,8 +2115,10 @@ void hardwareone_setup() {
     systemEventPost(SYSEVT_BOOT, resetReasonName(rtcLastResetReason), bootDetail);
   }
 
-  // Run LED startup effect if enabled (only on boards with NeoPixel hardware)
-#if defined(NEOPIXEL_PIN_DEFAULT) && NEOPIXEL_PIN_DEFAULT >= 0
+  // Run LED startup effect if enabled (compiled only when the NeoPixel feature
+  // is — the pin test alone would break user-override ENABLE_NEOPIXEL=0 builds
+  // against the gated ledStartup* settings fields)
+#if ENABLE_NEOPIXEL
   if (gSettings.ledStartupEnabled && gSettings.ledStartupEffect.length() > 0 && gSettings.ledStartupEffect != "none") {
     RGB color1, color2;
     if (!getRGBFromName(gSettings.ledStartupColor, color1)) {
@@ -2284,9 +2306,8 @@ static bool powerSaveInhibited() {
   // activity — an @BOND/RCE command — flows through executeCommand and resets
   // the idle timer via the activity hook instead, so the device wakes on actual
   // use while an idle-but-bonded link is free to power-save.
-  extern bool micRecording;
   extern bool cameraStreaming;
-  return micRecording || cameraStreaming;
+  return micRecordingBusy() || cameraStreaming;
 }
 
 // Clock switch with an ACTIVE I2C drain. pausePolling() only stops NEW poll
@@ -2693,19 +2714,20 @@ void hardwareone_loop() {
               // internally for SOURCE_SERIAL; no need to duplicate that here.
               clearLoginAttempts(serialIp);
               authSuccessUnified(ctx, nullptr);
-              recordLoginAttempt(SOURCE_SERIAL, u, serialIp, true, "Login successful");
 #else
               // Stub build: minimal local state set since authSuccessUnified is a no-op stub.
               gSerialAuthed = true;
               gSerialUser = u;
 #endif
+              // Outside the guard: the audit trail must survive a headless build.
+              recordLoginAttempt(SOURCE_SERIAL, u, serialIp, true, "Login successful");
               bool isCurrentlyAdmin = isAdminUser(u);
               BROADCAST_PRINTF("[serial] Login successful. User: %s%s", u.c_str(), isCurrentlyAdmin ? " (admin)" : "");
             } else {
 #if ENABLE_HTTP_SERVER
               recordFailedLogin(serialIp);
-              recordLoginAttempt(SOURCE_SERIAL, u, serialIp, false, "Invalid credentials");
 #endif
+              recordLoginAttempt(SOURCE_SERIAL, u, serialIp, false, "Invalid credentials");
               broadcastOutput("[serial] Authentication failed.");
             }
           }
@@ -2763,6 +2785,15 @@ void hardwareone_loop() {
       gSerialCLI += c;
     }
   }
+
+  // UART host link drain — the CM5-facing machine channel. Same one-command-
+  // per-lap discipline as the serial drain above; no-op unless the link was
+  // started (uartLinkEnabled). Parked while the wizard owns the CLI so link
+  // commands don't queue behind a wizard-occupied cmd_exec and time out.
+  uartLinkTick();
+#if ENABLE_RASPBERRY_PI_HOST_POWER
+  raspberryPiHostPowerTick();
+#endif
 
   perfMarkSection(5);  // section 6: USER INPUT
 

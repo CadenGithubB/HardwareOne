@@ -31,7 +31,8 @@
 //     NETWORK_FEATURE_LEVEL, WEB_FEATURE_LEVEL, I2C_FEATURE_LEVEL,
 //     DISPLAY_TYPE,
 //     ENABLE_MQTT, ENABLE_HTTPS, ENABLE_ONDEVICE_LLM,
-//     ENABLE_MAPS, ENABLE_AUTOMATION, ENABLE_EDGE_IMPULSE, ENABLE_GAMES
+//     ENABLE_MAPS, ENABLE_AUTOMATION, ENABLE_EDGE_IMPULSE, ENABLE_GAMES,
+//     ENABLE_RASPBERRY_PI_HOST_POWER
 //
 // The regex expects EXACTLY this shape, on a single non-indented line:
 //     #define NAME <integer>
@@ -87,9 +88,9 @@
   #define CUSTOM_ENABLE_WEB_SPEECH     0
   #define CUSTOM_ENABLE_WEB_ESPNOW     1
   #define CUSTOM_ENABLE_WEB_BOND       0
-  #define CUSTOM_ENABLE_WEB_MQTT       1
+  #define CUSTOM_ENABLE_WEB_MQTT       0
   #define CUSTOM_ENABLE_WEB_GAMES      0
-  #define CUSTOM_ENABLE_WEB_MAPS       1
+  #define CUSTOM_ENABLE_WEB_MAPS       0
   #define CUSTOM_ENABLE_WEB_BATTERY    1
   #define CUSTOM_ENABLE_WEB_R1_HEALTH  1
 #endif
@@ -124,7 +125,7 @@
 // build (camera + mic only) — level 0 also zeroes ENABLE_OLED_DISPLAY and every
 // ENABLE_*_SENSOR below (see the level table further down), so the screen and the
 // sensor drivers fall out on their own.
-#define I2C_FEATURE_LEVEL       4
+#define I2C_FEATURE_LEVEL       0   // CARRIER BUILD: XIAO Sense setting (drops OLED + sensor/I2C layer for BT flash headroom); was 4 (FeatherS3 CUSTOM)
 
 #if I2C_FEATURE_LEVEL == 4
   // Memory hints (rough — full breakdown in "MEMORY SAVINGS REFERENCE" below).
@@ -220,6 +221,9 @@
 // ~14 KB IRAM + ~70 KB flash + ~80 KB DRAM that the ESP-IDF Bluedroid
 // stack consumes, you also need `CONFIG_BT_ENABLED=n` in sdkconfig.
 // (Both flags are kept in sync below — see sdkconfig.defaults.)
+// CARRIER BUILD (2026-08-07): BT enabled so the G2 glasses mic can reach the
+// CM5 over the UART link. Flash recovered by dropping maps + I2C sensors
+// (already off) below; camera kept.
 #define ENABLE_BLUETOOTH        1
 
 // Even G2 Smart Glasses: BLE client to connect to Even Realities G2 glasses.
@@ -314,6 +318,11 @@
 // Automation: scheduled tasks + conditional commands.
 #define ENABLE_AUTOMATION       1
 
+// Raspberry Pi 5 / CM5 host-power control over the authenticated UART host
+// link. This compiles the `hostpower` command module and its finite EVT/ACK
+// protocol; it does not enable the UART link at runtime by itself.
+#define ENABLE_RASPBERRY_PI_HOST_POWER 1
+
 // Bonded mode: two-device bonded pair via ESP-NOW (master/worker).
 // Master shows remote UI for worker features, manifest cached in LittleFS.
 // Auto-disabled if ESP-NOW is off.
@@ -338,7 +347,7 @@
 #define ENABLE_WEB_GAME_DARKROOM    0   // A Dark Room (en/es/fr/zh_cn)
 
 // Maps: offline maps and waypoints web page.
-#define ENABLE_MAPS             1
+#define ENABLE_MAPS             0   // CARRIER BUILD: dropped for BT flash headroom; was 1
 
 
 // ╔═══════════════════════════════════════════════════════════════════════════╗
@@ -790,6 +799,19 @@
   #define BATTERY_BACKEND_ADC        0
   #define BATTERY_BACKEND_FUEL_GAUGE 0
 
+  // UART host link (CM5/Linux command channel — System_UartLink.cpp).
+  // Classic ESP32: UART0 is the console (through the USB-bridge chip), so the
+  // link binds UART1 on this board's TX/RX header pins (GPIO32/7). Baud is
+  // capped at 230400: above that the classic chip's UART clocks off APB,
+  // which drifts under the power-save CPU scaling this firmware uses;
+  // <=250k selects the scaling-immune REF_TICK source automatically.
+  #define UART_LINK_PORT        Serial1
+  #define UART_LINK_UART_NUM    1
+  #define UART_LINK_TX_PIN      32
+  #define UART_LINK_RX_PIN      7
+  #define UART_LINK_BAUD_DEFAULT 230400
+  #define UART_LINK_BAUD_MAX    230400
+
 // --- Adafruit Feather ESP32 V2 ---
 #elif defined(ARDUINO_ADAFRUIT_FEATHER_ESP32_V2_DEV)
   #define BOARD_SUPPORTED       1
@@ -809,6 +831,16 @@
   #define BATTERY_MONITOR_AVAILABLE 1
   #define BATTERY_BACKEND_ADC        1
   #define BATTERY_BACKEND_FUEL_GAUGE 0
+
+  // UART host link — UART1 on the Feather V2's TX/RX header pins (GPIO8/7).
+  // Console stays on UART0 through the bridge chip. See QT Py block for the
+  // classic-ESP32 baud-cap rationale.
+  #define UART_LINK_PORT        Serial1
+  #define UART_LINK_UART_NUM    1
+  #define UART_LINK_TX_PIN      8
+  #define UART_LINK_RX_PIN      7
+  #define UART_LINK_BAUD_DEFAULT 230400
+  #define UART_LINK_BAUD_MAX    230400
 
 // --- Seeed Studio XIAO ESP32S3 Sense (with camera/mic expansion) ---
 // Note: Sense uses same variant as base XIAO ESP32S3, expansion board is add-on hardware
@@ -852,6 +884,25 @@
   #define MIC_CLK_PIN           42  // GPIO42 (PDM clock)
   #define MIC_DATA_PIN          41  // GPIO41 (PDM data)
 
+  // UART host link — UART0 on D6/D7 (GPIO43/44, the XIAO's TX/RX pads; this
+  // is what the CM5 carrier wires to the Pi's uart2). Requires the IDF
+  // console to live on USB-Serial-JTAG, enforced by an #error in
+  // System_UartLink.cpp. NOTE: the XIAO variant maps SPI SS=GPIO44 — inert
+  // today (nothing calls setHwCs; SD uses explicit pins), but default-pin
+  // hardware-CS SPI on this board would fight the link. Keep SPI explicit.
+  #define UART_LINK_PORT        Serial0
+  #define UART_LINK_UART_NUM    0
+  #define UART_LINK_TX_PIN      43
+  #define UART_LINK_RX_PIN      44
+  // 2,000,000: divider-exact on BOTH ends, which is why it is the safe step up.
+  // S3 = XTAL 40MHz / 2M = 20 (integer). Pi RP1 PL011 = 1 + 36/64 at a 50MHz
+  // clk_uart, or 1 + 32/64 at 48MHz — exact either way, so the unresolved
+  // 48-vs-50MHz question does not affect it (3M is only exact under one of
+  // them). Measured gain is ~29% off voicefetch transfer, not ~50%: only 54%
+  // of transfer time is on the wire, the rest is per-frame processing.
+  #define UART_LINK_BAUD_DEFAULT 2000000
+  #define UART_LINK_BAUD_MAX    3000000
+
 // --- Seeed Studio XIAO ESP32S3 (base board without expansion) ---
 // Set CONFIG_ARDUINO_VARIANT="XIAO_ESP32S3" in menuconfig
 // Note: To use with Sense expansion board, define XIAO_ESP32S3_SENSE_ENABLED
@@ -877,6 +928,17 @@
   #define BATTERY_MONITOR_AVAILABLE 0
   #define BATTERY_BACKEND_ADC        0
   #define BATTERY_BACKEND_FUEL_GAUGE 0
+
+  // UART host link — same wiring as the Sense block (UART0 on D6/D7).
+  // (This base-XIAO block is unreachable in practice: the build force-defines
+  // XIAO_ESP32S3_SENSE_ENABLED for every S3 target, so the Sense block above
+  // always matches first. Kept consistent anyway.)
+  #define UART_LINK_PORT        Serial0
+  #define UART_LINK_UART_NUM    0
+  #define UART_LINK_TX_PIN      43
+  #define UART_LINK_RX_PIN      44
+  #define UART_LINK_BAUD_DEFAULT 2000000
+  #define UART_LINK_BAUD_MAX    3000000
 
 // --- Unexpected Maker FeatherS3 / FeatherS3[D] ---
 // Set CONFIG_ARDUINO_VARIANT="um_feathers3" in menuconfig.
@@ -957,6 +1019,17 @@
   // Boards without a software-switchable I2C2 rail leave this at -1.
   #define I2C2_POWER_PIN        39
 
+  // UART host link — UART0 on the FeatherS3's TX/RX header pins (GPIO43/44).
+  // Same electrical link as the XIAO's D6/D7, so the CM5 protocol is
+  // bench-testable on this board with a 3.3V USB-UART dongle. Requires the
+  // IDF console on USB-Serial-JTAG (enforced in System_UartLink.cpp).
+  #define UART_LINK_PORT        Serial0
+  #define UART_LINK_UART_NUM    0
+  #define UART_LINK_TX_PIN      43
+  #define UART_LINK_RX_PIN      44
+  #define UART_LINK_BAUD_DEFAULT 921600
+  #define UART_LINK_BAUD_MAX    3000000
+
 // --- Generic ESP32 (fallback with warning) ---
 #elif defined(ARDUINO_ESP32_DEV)
   #define BOARD_SUPPORTED       1
@@ -977,6 +1050,20 @@
   #define BATTERY_MONITOR_AVAILABLE 0
   #define BATTERY_BACKEND_ADC        0
   #define BATTERY_BACKEND_FUEL_GAUGE 0
+
+  // UART host link — this board's TX/RX header pins (GPIO1/3) ARE the UART0
+  // console, so the link binds UART2 instead.
+  // NOT the classic UART2 defaults (GPIO17/16): sdkconfig.defaults.esp32 sets
+  // CONFIG_SPIRAM=y, so a generic-target build only runs on WROVER-class
+  // modules, where GPIO16/17 are the in-module PSRAM /CE and CLK lines —
+  // re-routing them through the GPIO matrix would fault the cache. GPIO32/33
+  // are free on WROVER and matrix-routable for any UART.
+  #define UART_LINK_PORT        Serial2
+  #define UART_LINK_UART_NUM    2
+  #define UART_LINK_TX_PIN      32
+  #define UART_LINK_RX_PIN      33
+  #define UART_LINK_BAUD_DEFAULT 230400
+  #define UART_LINK_BAUD_MAX    230400
 
 // --- Unsupported Board ---
 #else
@@ -1017,6 +1104,29 @@
     #undef ENABLE_WEB_BATTERY
   #endif
   #define ENABLE_WEB_BATTERY 0
+#endif
+
+// =============================================================================
+// NEOPIXEL — derived enable (same pattern as ENABLE_BATTERY_MONITOR)
+// =============================================================================
+// Defaults to "the active board has the hardware" (pin + count from the board
+// block above). A user-set `#define ENABLE_NEOPIXEL 0` at the top of this file
+// force-disables on a board that HAS the LED (slim build; the STEMMA-QT power
+// rail on boards where the NeoPixel power pin doubles as peripheral power is
+// driven independently by boardPowerRailInit(), so I2C survives the override).
+// Force-ENABLING on a board without a pin is refused below — there is no
+// legitimate pixel-on-pin -1 configuration.
+#ifndef NEOPIXEL_PIN_DEFAULT
+  #define NEOPIXEL_PIN_DEFAULT -1     // future board block that forgets the pin ⇒ feature off, not silently on
+#endif
+#ifndef NEOPIXEL_COUNT_DEFAULT
+  #define NEOPIXEL_COUNT_DEFAULT 0
+#endif
+#ifndef ENABLE_NEOPIXEL
+  #define ENABLE_NEOPIXEL (NEOPIXEL_PIN_DEFAULT >= 0 && NEOPIXEL_COUNT_DEFAULT > 0)
+#endif
+#if ENABLE_NEOPIXEL && (NEOPIXEL_PIN_DEFAULT < 0)
+  #error "ENABLE_NEOPIXEL=1 requires a board with NEOPIXEL_PIN_DEFAULT >= 0."
 #endif
 
 // Sanity: at most one backend selected. If the board didn't define either

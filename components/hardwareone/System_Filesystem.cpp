@@ -1263,7 +1263,7 @@ static const char* cmd_logtier(const String& argsInput) {
   return buf;
 }
 
-// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
+// Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 const CommandEntry filesystemCommands[] = {
   { "files", "List files [\"path\"] | files json [\"path\"] | files stats json [\"path\"]", true, cmd_files,
     "files [\"path\"]            - List files in LittleFS (default '/')\n"

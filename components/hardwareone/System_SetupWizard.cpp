@@ -449,7 +449,9 @@ void initSetupWizard() {
     }
   }
 
-  // Find current LED effect in list
+  // Find current LED effect in list (field exists only with the NeoPixel
+  // feature; the LED wizard page is runtime-hidden via systemPageHasLED then)
+#if ENABLE_NEOPIXEL
   if (gSettings.ledStartupEffect.length() > 0) {
     for (size_t i = 0; i < ledEffectCount; i++) {
       if (gSettings.ledStartupEffect == ledEffects[i]) {
@@ -458,6 +460,7 @@ void initSetupWizard() {
       }
     }
   }
+#endif
 }
 
 // ============================================================================
@@ -870,10 +873,12 @@ void wizardFinalize(SetupWizardResult& result) {
     result.ntpServer = ntpPresets[ntpSelection];
     gSettings.ntpServer = result.ntpServer;
   }
+#if ENABLE_NEOPIXEL
   if (systemPageHasLED()) {
     result.ledStartupEffect = ledEffects[ledEffectSelection];
     gSettings.ledStartupEffect = result.ledStartupEffect;
   }
+#endif
   if (systemPageHasDeviceName() && wizardDeviceName[0] != '\0') {
     gSettings.bleDeviceName = wizardDeviceName;
     gSettings.espnowDeviceName = wizardDeviceName;

@@ -881,11 +881,11 @@ const char* cmd_fmradioautostart(const String& argsInput) {
   return "Error: invalid arguments — Usage: fmradioautostart [on|off]";
 }
 
-// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
+// Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 const CommandEntry fmRadioCommands[] = {
   // 3-level voice: "sensor" -> "radio" -> "open/close"
-  { "openfmradio", "Start FM Radio sensor.", false, cmd_fmradio_start, nullptr, "sensor", "radio", "open" },
-  { "closefmradio", "Stop FM Radio sensor.", false, cmd_fmradio_stop, nullptr, "sensor", "radio", "close" },
+  { "openfmradio", "Start FM Radio sensor.", false, cmd_fmradio_start },
+  { "closefmradio", "Stop FM Radio sensor.", false, cmd_fmradio_stop },
   { "fmradioread", "Read FM Radio status. (add 'json' for JSON output)", false, cmd_fmradio_status },
   { "fmradiotune", "Tune to frequency: <freq>", false, cmd_fmradio_tune, "Usage: fmradiotune <frequency> (e.g., 103.9 or 10390)" },
   { "fmradioseek", "Start seeking the next station [up|down] (async; 'fmradioread' shows the result)", false, cmd_fmradio_seek, "Usage: fmradioseek [up|down]" },

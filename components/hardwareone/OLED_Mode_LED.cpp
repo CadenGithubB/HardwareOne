@@ -21,15 +21,15 @@
 // cmd_exec + this UI for the whole run) no longer applies; effects still run
 // the 3 s default here, and Off / a new pick cancels a running effect.
 //
-// The file compiles wherever the OLED does — including boards without a
-// NeoPixel — per the board-gated-code-hides-compile-breaks rule. Reachability
-// is gated instead: the Sensors submenu row and getMenuAvailability() both
-// key on NEOPIXEL_PIN_DEFAULT >= 0 (there is no ENABLE_NEOPIXEL macro).
+// Compiled only when BOTH the OLED and the NeoPixel feature are in the build
+// (ENABLE_NEOPIXEL, System_BuildConfig.h): the body reads gSettings.led*
+// fields that are gated with the feature. The registration anchor in
+// OLED_Utils.cpp (oledLEDModeInit call) is gated in lockstep.
 
 #include "OLED_Display.h"
 #include "System_BuildConfig.h"
 
-#if ENABLE_OLED_DISPLAY
+#if ENABLE_OLED_DISPLAY && ENABLE_NEOPIXEL
 
 #include <Adafruit_SSD1306.h>
 #include "OLED_Utils.h"       // executeOLEDCommand, OLEDScrollState, guest gate
@@ -239,4 +239,4 @@ REGISTER_OLED_MODE_MODULE(sLedModes, sizeof(sLedModes) / sizeof(sLedModes[0]), "
 // Force linker to include this file - called from OLED_Utils.cpp
 void oledLEDModeInit() {}
 
-#endif // ENABLE_OLED_DISPLAY
+#endif // ENABLE_OLED_DISPLAY && ENABLE_NEOPIXEL

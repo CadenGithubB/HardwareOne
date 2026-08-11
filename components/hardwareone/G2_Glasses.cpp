@@ -13,6 +13,7 @@
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 
 #include <stdarg.h>
+#include <atomic>
 #include <new>          // std::nothrow — for LensUiJob allocation in pageSwapEnqueue
 
 #include <BLEDevice.h>
@@ -22,6 +23,7 @@
 #include <esp_gap_ble_api.h>  // esp_ble_gap_update_conn_params (HIGH priority)
 #include <esp_attr.h>         // EXT_RAM_BSS_ATTR
 #include <esp_heap_caps.h>    // heap_caps_get_free_size — ESP.getFreeHeap() includes PSRAM
+#include <esp_system.h>       // esp_random — boot-unique EvenAI exchange IDs
 #include <esp_timer.h>        // esp_timer_create/start_once — replaces notifyClearTaskBody
 
 #include "System_G2_Protocol.h"
@@ -38,6 +40,8 @@
 #include "System_Battery.h"   // BatteryState + getBatteryPercentage etc — for ESP corner widget
 #include "System_Microphone.h"  // gMicRunning, micConnected, getAudioLevel, etc — for MIC detail page
 #include "HAL_Audio.h"          // audioGetSource/audioCaptureActive/audioCaptureStop — G2 as a mic source
+#include "System_UartLink.h"    // session-fenced EvenAI wake/cancel → CM5 host push
+#include "System_LiveAudio.h"   // exact recorder-shadow arm/abort fence
 #include "System_PollPause.h"   // PollPauseGuard — pause sensor polling during BLE connect/discovery
 #include "G2_HijackCmd.h"   // g2BumpMenuGen() — called from g2SetHijackPage
 #include "System_AuthIdentity.h"  // ExecIdentityGuard + currentAuthContext
@@ -69,9 +73,9 @@ extern "C" {
 #include "G2_Pet.h"            // Apps → Pet: virtual-creature sim + tile renderer
 #include "G2_Health.h"         // Apps → Health: R1 vitals + sparkline tile
 #include "G2_HijackFsm.h"      // shadow FSM tracking page-swap / hijack lifecycle
+#include "System_TaskUtils.h"  // APP_CORE / task priority helpers used by G2 workers (needed regardless of maps)
 #if ENABLE_MAPS
 #include "System_Maps.h"       // MapCore/OffscreenMapRenderer — g2map renders the offline map to the lens
-#include "System_TaskUtils.h"  // APP_CORE / task priority helpers used by G2 workers
 #if ENABLE_GPS_SENSOR
 #include "i2csensor_pa1010d.h" // GPS running/fix state for the map status pane
 #endif
@@ -428,26 +432,54 @@ EXT_RAM_BSS_ATTR static G2FrameEvent gFrameRing[G2_FRAME_RING_CAP];
 static size_t       gFrameRingHead  = 0;     // next write slot
 static size_t       gFrameRingCount = 0;     // saturates at CAP
 
-// Best-effort extraction of (cmd, magic) from an envelope body. Only
-// meaningful for sid=0xE0 frames that start with `08 <cmd> 10 <magic>`,
-// but safe to call on anything — returns (0,0) when the bytes don't match
-// that shape.
+// Best-effort extraction of (cmd, magic) from protobuf wrappers that start
+// with f1 command + f2 magic (EvenCore, EvenAI, DevCfg, etc.). Safe to call on
+// anything — returns (0,0) when the bytes don't match that shape.
 static void g2RingPeekCmdMagic(const uint8_t* pb, size_t pbLen,
                                uint32_t* outCmd, uint32_t* outMagic) {
   *outCmd = 0;
   *outMagic = 0;
-  if (!pb || pbLen < 4) return;
+  g2ParseCommandMagic(pb, pbLen, outCmd, outMagic);
+}
+
+// Read one varint from a nested protobuf field. Used for response bodies whose
+// command is in the common wrapper but whose useful result is one level down.
+static bool g2PeekNestedVarint(const uint8_t* pb, size_t pbLen,
+                               uint32_t outerField, uint32_t innerField,
+                               uint32_t* outValue) {
+  if (!pb || !outValue) return false;
   size_t pos = 0;
-  uint32_t field; uint8_t wire;
-  uint64_t v;
-  if (!g2PbReadTag(pb, pbLen, &pos, &field, &wire)) return;
-  if (field != 1 || wire != G2_PB_WIRE_VARINT) return;
-  if (!g2PbReadVarint(pb, pbLen, &pos, &v)) return;
-  *outCmd = (uint32_t)v;
-  if (!g2PbReadTag(pb, pbLen, &pos, &field, &wire)) return;
-  if (field != 2 || wire != G2_PB_WIRE_VARINT) return;
-  if (!g2PbReadVarint(pb, pbLen, &pos, &v)) return;
-  *outMagic = (uint32_t)v;
+  while (pos < pbLen) {
+    uint32_t field; uint8_t wire;
+    if (!g2PbReadTag(pb, pbLen, &pos, &field, &wire)) return false;
+    if (field != outerField || wire != G2_PB_WIRE_LEN_DELIM) {
+      if (!g2PbSkipField(pb, pbLen, &pos, wire)) return false;
+      continue;
+    }
+    uint64_t innerLen;
+    if (!g2PbReadVarint(pb, pbLen, &pos, &innerLen) ||
+        innerLen > pbLen - pos) return false;
+    const uint8_t* inner = pb + pos;
+    const size_t innerBytes = (size_t)innerLen;
+    // Proto3 omits scalar fields at their zero default. Presence of the
+    // nested response body with no requested varint therefore means value 0.
+    *outValue = 0;
+    size_t innerPos = 0;
+    while (innerPos < innerBytes) {
+      uint32_t nestedField; uint8_t nestedWire;
+      if (!g2PbReadTag(inner, innerBytes, &innerPos,
+                       &nestedField, &nestedWire)) return false;
+      if (nestedField == innerField && nestedWire == G2_PB_WIRE_VARINT) {
+        uint64_t value;
+        if (!g2PbReadVarint(inner, innerBytes, &innerPos, &value)) return false;
+        *outValue = (uint32_t)value;
+        return true;
+      }
+      if (!g2PbSkipField(inner, innerBytes, &innerPos, nestedWire)) return false;
+    }
+    return true;
+  }
+  return false;
 }
 
 // Record one TX or RX envelope in the ring. `env` points at the full
@@ -1385,6 +1417,15 @@ uint16_t bleNegotiateConnMtu(BLEClient* client, uint16_t preferred,
 static bool connectTemple(G2Temple& t);
 static void disconnectTemple(G2Temple& t);
 static bool sendEnvelope(G2Temple& t, const uint8_t* data, size_t len);
+// EvenAI ("Hey Even") session. Native CTRL transitions are decoded by the
+// control owner; disconnect can terminate from the BLE host callback.
+static void g2EvenAiOnWakeUp(G2Temple& temple, uint32_t rxGeneration);
+static void g2EvenAiOnExit(G2Temple& temple, uint32_t rxGeneration);
+static void g2EvenAiPushStreamCompleteEvt();
+static void g2EvenAiOnTempleDisconnect(char side,
+                                       uint32_t disconnectedGeneration);
+static bool g2EvenAiGuardMatches(uint64_t exchangeId,
+                                 const G2Temple& temple);
 static bool sendToBoth(const uint8_t* data, size_t len);
 static void handleNotify(G2Temple& t, const uint8_t* data, size_t len);
 static void processNotify(G2Temple& t, const uint8_t* data, size_t len,
@@ -1407,7 +1448,7 @@ static bool g2LinkIsSlow(const G2Temple* target);
 //   BALANCED ≈ 40-60 ms     → 3-4× more BLE radio idle time, used during
 //                             ring connect attempts (see GlassesPriorityGuard
 //                             in G2_Ring.cpp + g2SetAllTemplesConnPriority).
-// FAST = 12-12 (15.15 ms), MEASURED not guessed, 2026-07-27 with all three
+// FAST = 12-12 (15 ms), MEASURED not guessed, 2026-07-27 with all three
 // links up (both temples + R1 ring):
 //   min=9  REFUSED by our own controller (HCI 0x12 on opcode 0x2013)
 //   min=12 ACCEPTED, landed 12
@@ -1416,7 +1457,7 @@ static bool g2LinkIsSlow(const G2Temple* target);
 // on the FLOOR and nothing else, and the boundary sits in 9 < min <= 12.
 //
 // Min == max deliberately: this controller grants the range's CEILING, so
-// asking 12-24 lands at 24 (30.30 ms), not 12. Verified — `g2connpri 16 24`
+// asking 12-24 lands at 24 (30 ms), not 12. Verified — `g2connpri 16 24`
 // landed 24, `16 16` landed 16, `12 12` landed 12.
 #define G2_CONN_INT_HIGH_MIN     12
 #define G2_CONN_INT_HIGH_MAX     12
@@ -1713,7 +1754,11 @@ public:
 
   void onDisconnect(BLEClient* /*pClient*/) override {
     const bool wasConnected = temple->connected;
+    const uint32_t disconnectedGeneration = temple->connectionGeneration;
     g2AdvanceGeneration(*temple);
+    if (wasConnected) {
+      g2EvenAiOnTempleDisconnect(temple->side, disconnectedGeneration);
+    }
     DEBUG_G2F("[G2-%c] BLE disconnected", temple->side);
     // Dump the recent-frame ring so we can see what we and the glasses
     // were exchanging right before the drop. Particularly useful when the
@@ -1819,16 +1864,33 @@ static void notifyThunkR(BLERemoteCharacteristic* /*c*/, uint8_t* data,
 struct G2MicProbe {
   uint32_t frameCount;       // total notifications received
   uint32_t bytesTotal;       // sum of all notify lengths
-  uint32_t byte0CC;          // header 0xCC (normal frame)
-  uint32_t byte0CD;          // header 0xCD (session-start / resync)
-  uint32_t byte0Other;       // anything else (unexpected)
-  uint32_t seqGaps;          // count of non-(prev+1) seq transitions
-  uint8_t  lastSeq;
-  bool     hasLastSeq;
+  // Trailer sequence tracking. The 205 B notification is [200 B LC3][5 B
+  // trailer]; byte 204 is a mod-256 stride-1 per-packet counter (pinned
+  // empirically 2026-08-10 from two raw dumps: 219 packets each, every
+  // transition +1). The OLD parser read data[0]/data[1] as type/seq — those
+  // are compressed-audio bytes, which is why `gaps` ≈ frameCount in every
+  // healthy session. Do not resurrect that.
+  uint32_t seqGapEvents;     // trailer-seq discontinuities while streaming
+  uint32_t seqPacketsLost;   // sum of (delta-1) across gap events
+  uint32_t stallEvents;      // inter-arrival > kMicSeqStallMs → re-baseline,
+                             // NOT counted as loss (mod-256 delta across a
+                             // pause is meaningless; >12.8 s even wraps)
+  uint8_t  lastTrailerSeq;
+  bool     hasTrailerSeq;
   uint32_t firstFrameMs;     // millis() at first frame this session
   uint32_t lastFrameMs;
+  // Rolling delivered-rate estimate in ~2 s buckets. rateX10 is frames/s ×10
+  // from the last completed bucket; the heartbeat watchdog reads it (and
+  // treats a >1 s silent gap as rate 0, since a stopped stream never rolls
+  // the bucket over).
+  uint32_t winStartMs;
+  uint32_t winFrames;
+  uint32_t rateX10;
 };
 static G2MicProbe gMicL{}, gMicR{};
+static constexpr uint32_t kMicSeqStallMs   = 500;   // pause → re-baseline
+static constexpr uint32_t kMicRateWinMs    = 2000;  // rate bucket width
+static void g2MicSeqBaselineReset();   // defined with resetMicProbeStats below
 static volatile bool gMicProbeActive = false;
 // Set true by g2MicStreamEnable(true) once AudioCtrCmd{en=1} is sent on the LEFT
 // arm. Makes stream enable/disable idempotent (prevents a stray double-send when
@@ -1837,6 +1899,25 @@ static volatile bool gMicProbeActive = false;
 static volatile bool gMicStreamOn = false;
 static volatile bool gMicProbeVerbose = false;  // log every frame at INFO when true
 
+// Delivered-rate watchdog (2026-08-10). The G2 link silently delivered audio
+// at exactly half rate during a live-STT exchange (7,996 samples/s under the
+// 16 kHz label) and NOTHING in the pipeline noticed — VAD stretched, the WAV
+// header lied, and the STT transcribed garbage confidently. Counters live in
+// handleAudioNotify; EVALUATION runs in the heartbeat worker's ~1 Hz lap
+// (the notify path can't detect total silence — if delivery stops, the
+// callback never runs). Latched per capture: set once when the recent rate
+// stays below kMicRateDegradedX10 for >= kMicRateDwellMs after a
+// kMicRateGraceMs warm-up; cleared on the stream-enable rising edge and by
+// g2micreset. Nominal is 20.0/s (205 B = 5 x 10 ms LC3 frames); 17.0/s
+// cleanly separates that from the measured ~15/s BALANCED-interval floor.
+static volatile bool gMicRateDegraded      = false;
+static uint32_t      gMicRateBelowSinceMs  = 0;
+static uint32_t      gMicStreamOnSinceMs   = 0;
+static constexpr uint32_t kMicRateDegradedX10 = 170;   // 17.0 notifications/s
+static constexpr uint32_t kMicRateGraceMs     = 2000;  // post-enable warm-up
+static constexpr uint32_t kMicRateDwellMs     = 2000;  // sustained-below time
+bool g2MicCaptureDegraded() { return gMicRateDegraded; }
+
 // Mic-to-SD recorder state. When gMicRecFile is non-null, every audio
 // notify on the chosen arm is appended to that file as raw 205 B
 // packets — no LC3 decode, just bytes. The intent is to capture a
@@ -1844,34 +1925,170 @@ static volatile bool gMicProbeVerbose = false;  // log every frame at INFO when 
 // audio integration plan; once we know the bytes are valid LC3 we'll
 // add an on-device decoder).
 //
-// Mutex protects the file pointer + counters across the BLE notify
-// task (which writes) and the CLI task (which opens / closes). The
-// notify side uses a non-blocking take so a stop-in-progress drops at
-// most one packet rather than stalling the BLE pipe.
-static SemaphoreHandle_t gMicRecMutex   = nullptr;
+// Two-lock scheme (2026-08-10 rework — the old direct-write-in-callback
+// design dropped packets whenever the SD stalled; both trailer-seq raw dumps
+// showed exactly 2 packets lost at the identical ~41 KB file offset, i.e. a
+// deterministic FS latency spike hitting a zero-tolerance writer):
+//
+//   gMicRecMutex   — ring indices + overflow counter ONLY. Held for
+//                    microseconds (a 205 B memcpy into PSRAM). The BLE
+//                    notify producer take(0)s it; nothing FS-related ever
+//                    runs under it, so the take can no longer miss during
+//                    an SD stall.
+//   gMicRecDrainMutex — file lifetime, file writes, byte/packet counters,
+//                    path/start metadata. Held across FS ops, task contexts
+//                    only (heartbeat drain, CLI start/stop/status). The BLE
+//                    producer NEVER touches the File object.
+//
+// Disconnect (BLE host context) cannot take the drain mutex; it just flags
+// gMicRecPendingClose and the next heartbeat drain flushes what is queued
+// and closes the file — no tail loss, bounded by one heartbeat lap.
+static SemaphoreHandle_t gMicRecMutex      = nullptr;
+static SemaphoreHandle_t gMicRecDrainMutex = nullptr;
 static File*             gMicRecFile    = nullptr;
 static String            gMicRecPath;
 static uint32_t          gMicRecBytes   = 0;
 static uint32_t          gMicRecPackets = 0;
 static uint32_t          gMicRecStartMs = 0;
 static char              gMicRecArm     = 'L';   // L emits mic on 2.2.0.24
+static volatile bool     gMicRecPendingClose = false;
 static constexpr uint32_t kMicRecMaxBytes = 5u * 1024u * 1024u;  // ~20 min @ 4.1 KB/s
 
+// PSRAM staging ring between the BLE notify callback and the SD writer.
+// 256 slots ≈ 12.8 s at the nominal 20 packets/s — sized for the heartbeat
+// worker's 6 s idle lap (bench g2micrec runs without a HAL capture, where the
+// worker does NOT tick at 1 Hz) plus a worst-case SD stall on top.
+struct MicRecSlot {
+  uint16_t len;
+  uint8_t  data[206];
+};
+static constexpr size_t kMicRecRingSlots = 256;   // ~53 KB PSRAM
+EXT_RAM_BSS_ATTR static MicRecSlot gMicRecRing[kMicRecRingSlots];
+static volatile uint16_t gMicRecRingHead = 0;     // producer-owned
+static volatile uint16_t gMicRecRingTail = 0;     // consumer-owned
+static uint32_t          gMicRecRingOverflows = 0;
+// Producer's take(0) lost the ring-mutex race (drain snapshot window). Each
+// miss is one dropped packet — counted so the stop line's accounting can be
+// reconciled against the trailer-seq record instead of silently lying.
+static uint32_t          gMicRecMutexMisses  = 0;
+// Drain batch scratch — file-scope PSRAM, not task stack (task stacks here
+// are tight and byte-counted). Serialized by gMicRecDrainMutex.
+static constexpr int kMicRecDrainBatch = 8;
+EXT_RAM_BSS_ATTR static MicRecSlot gMicRecDrainBatchBuf[kMicRecDrainBatch];
+
 static void ensureMicRecMutex() {
-  if (!gMicRecMutex) gMicRecMutex = xSemaphoreCreateMutex();
+  if (!gMicRecMutex)      gMicRecMutex      = xSemaphoreCreateMutex();
+  if (!gMicRecDrainMutex) gMicRecDrainMutex = xSemaphoreCreateMutex();
 }
 
-// Closes the recorder file and clears state. Caller must hold the
-// mutex.
-static void micRecCloseLocked(const char* reason) {
-  if (!gMicRecFile) return;
-  FsLockGuard fsGuard("g2.mic_raw.close");
+// Closes the recorder file and clears state. Caller must hold the DRAIN
+// mutex (file-lifetime owner). fsWaitMs bounds the FS-lock wait — heartbeat
+// callers MUST pass a small bound (this worker also runs the EvenAI session
+// heartbeat and the mic keepalive; an unbounded wait here would stall them
+// behind any long FS hold). Returns false if the lock was busy; the caller
+// keeps its pending-close state and retries next lap.
+static bool micRecCloseLocked(const char* reason, uint32_t fsWaitMs) {
+  if (!gMicRecFile) return true;
+  FsLockGuard fsGuard("g2.mic_raw.close", fsWaitMs);
+  if (!fsGuard.held && !isFsLockedByCurrentTask()) return false;
   gMicRecFile->close();
   delete gMicRecFile;
   gMicRecFile = nullptr;
   DEBUG_G2F("[G2-MIC-REC] closed %s — %u packets, %u B (%s)",
             gMicRecPath.c_str(), (unsigned)gMicRecPackets,
             (unsigned)gMicRecBytes, reason ? reason : "ok");
+  return true;
+}
+
+// Flush queued packets to SD in small batches: copy a batch out of the ring
+// under the ring mutex (microseconds), release it, then do the FS write with
+// no ring lock held — an SD stall can no longer make the producer drop.
+// Caller must hold the DRAIN mutex. fsWaitMs bounds the FS-lock wait
+// (heartbeat passes a small bound so a stall skips the lap instead of
+// delaying the mic keepalive; the CLI stop path passes a generous one).
+static void micRecDrainLocked(uint32_t fsWaitMs, int maxBatches) {
+  for (int batches = 0; maxBatches <= 0 || batches < maxBatches; batches++) {
+    // PEEK a batch without advancing tail. Un-advanced slots cannot be
+    // overwritten (the producer's ring-full check stops at tail), so an FS
+    // timeout below loses nothing — the batch is simply retried next lap.
+    // Only the head/tail SNAPSHOT needs the ring mutex; the slot copy runs
+    // outside it (slots between tail and head are producer-immutable), so
+    // the producer's take(0) window stays at index-load size, not memcpy
+    // size.
+    MicRecSlot* batch = gMicRecDrainBatchBuf;
+    int nb = 0;
+    uint16_t peek = 0, head = 0;
+    bool snapped = false;
+    if (gMicRecMutex && xSemaphoreTake(gMicRecMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+      peek = gMicRecRingTail;
+      head = gMicRecRingHead;
+      snapped = true;
+      xSemaphoreGive(gMicRecMutex);
+    }
+    if (snapped) {
+      while (nb < kMicRecDrainBatch && peek != head) {
+        batch[nb++] = gMicRecRing[peek];
+        peek = (uint16_t)((peek + 1) % kMicRecRingSlots);
+      }
+    }
+    if (nb == 0) break;
+    bool wrote = false;
+    if (gMicRecFile) {
+      FsLockGuard fsGuard("g2.mic_raw.drain", fsWaitMs);
+      if (fsGuard.held || isFsLockedByCurrentTask()) {
+        for (int i = 0; i < nb; i++) {
+          size_t w = gMicRecFile->write(batch[i].data, batch[i].len);
+          gMicRecBytes   += (uint32_t)w;
+          gMicRecPackets += 1;
+        }
+        wrote = true;
+      }
+    }
+    // Advance tail for what we handled: written packets, or (file already
+    // closed) late packets discarded. On an FS timeout leave tail alone and
+    // stop — nothing lost, retry next lap.
+    if (wrote || !gMicRecFile) {
+      // The advance MUST land once packets are on disk, or the next lap
+      // re-peeks and duplicates them. The ring mutex is only ever held for
+      // microseconds (memcpy), never across FS — blocking here is safe.
+      xSemaphoreTake(gMicRecMutex, portMAX_DELAY);
+      gMicRecRingTail = (uint16_t)((gMicRecRingTail + nb) % kMicRecRingSlots);
+      xSemaphoreGive(gMicRecMutex);
+    } else {
+      break;     // FS busy this lap — nothing consumed, retry next lap
+    }
+    if (gMicRecFile && gMicRecBytes >= kMicRecMaxBytes) {
+      // Bounded close: on FS-busy, defer to the pending-close path below /
+      // next lap rather than blocking this task unboundedly.
+      if (!micRecCloseLocked("cap reached", fsWaitMs)) gMicRecPendingClose = true;
+      break;
+    }
+  }
+  if (gMicRecPendingClose) {
+    bool empty = false;   // conservative: a missed take must NOT close early
+    if (gMicRecMutex && xSemaphoreTake(gMicRecMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+      empty = (gMicRecRingTail == gMicRecRingHead);
+      xSemaphoreGive(gMicRecMutex);
+    }
+    if (empty && micRecCloseLocked("deferred close", fsWaitMs)) {
+      gMicRecPendingClose = false;
+    }
+  }
+}
+
+// Heartbeat-context entry: never blocks behind a concurrent CLI stop (the
+// try-take skips the lap), bounded FS wait so the mic keepalive that shares
+// this lap is not delayed by an SD stall.
+static void micRecDrainTick() {
+  if (!gMicRecDrainMutex) return;
+  if (!gMicRecFile && !gMicRecPendingClose) return;
+  if (xSemaphoreTake(gMicRecDrainMutex, 0) != pdTRUE) return;
+  // 4 batches ≈ 32 packets ≈ 1.6 s of stream per lap — drains faster than the
+  // 20/s inflow with margin, while bounding worst-case lap time (the EvenAI
+  // session heartbeat shares this task; a post-stall backlog must not starve
+  // it — the ring holds 12.8 s precisely so catch-up can span laps).
+  micRecDrainLocked(/*fsWaitMs=*/250, /*maxBatches=*/4);
+  xSemaphoreGive(gMicRecDrainMutex);
 }
 
 // ─── Phase 2A: on-device LC3 decode → WAV on SD ───────────────────────
@@ -2005,6 +2222,13 @@ static lc3_decoder_t      gMicAfeDecoder    = nullptr;
 static void*              gMicAfeDecMem     = nullptr;
 static volatile bool      gMicAfeFeedActive = false;
 static uint32_t           gMicAfeOverruns   = 0;
+static std::atomic<uint32_t> gMicAfeMutexDrops{0};
+static std::atomic<uint32_t> gMicAfeDecodeFails{0};
+// lc3_decode()==1: bitstream error detected, PLC synthesized plausible audio.
+// decode_fail (rc<0) only fires on parameter errors — effectively never — so
+// without this counter a corrupted stream decodes "cleanly". WAV path has
+// counted PLC since Phase 2A; this is the AFE-path twin.
+static std::atomic<uint32_t> gMicAfePlcFrames{0};
 static constexpr size_t   kMicAfeRingCapSamples = 32u * 1024u;  // 2 s @ 16 kHz
 
 static void micAfeRingPushLocked(const int16_t* src, size_t n) {
@@ -2072,6 +2296,8 @@ bool g2MicSetAfeFeedActive(bool on) {
     gMicAfeRingHead = 0;
     gMicAfeRingCount = 0;
     gMicAfeOverruns = 0;
+    gMicAfeMutexDrops.store(0, std::memory_order_relaxed);
+    gMicAfeDecodeFails.store(0, std::memory_order_relaxed);
     gMicRecArm = 'L';
     gMicAfeFeedActive = true;
     DEBUG_G2F("[G2-MIC-AFE] feed ON (ring %u samples / %u B)",
@@ -2081,8 +2307,10 @@ bool g2MicSetAfeFeedActive(bool on) {
     gMicAfeFeedActive = false;
     gMicAfeRingHead = 0;
     gMicAfeRingCount = 0;
-    DEBUG_G2F("[G2-MIC-AFE] feed OFF (cumulative overruns=%u)",
-              (unsigned)gMicAfeOverruns);
+    DEBUG_G2F("[G2-MIC-AFE] feed OFF (overruns=%u mutex_drops=%u "
+              "decode_fails=%u)", (unsigned)gMicAfeOverruns,
+              (unsigned)gMicAfeMutexDrops.load(std::memory_order_relaxed),
+              (unsigned)gMicAfeDecodeFails.load(std::memory_order_relaxed));
     // Keep ring + decoder allocated for fast re-arm.
   }
   xSemaphoreGive(gMicAfeMutex);
@@ -2128,6 +2356,31 @@ size_t g2MicReadPcmSamples(int16_t* out, size_t capSamples, uint32_t timeoutMs) 
   }
 }
 
+size_t g2MicTrimAfeRingToNewest(size_t keepNewestSamples) {
+  if (!gMicAfeMutex) return 0;
+  xSemaphoreTake(gMicAfeMutex, portMAX_DELAY);
+  if (!gMicAfeFeedActive || !gMicAfeRing || gMicAfeRingCap == 0) {
+    xSemaphoreGive(gMicAfeMutex);
+    return 0;
+  }
+  if (keepNewestSamples > gMicAfeRingCount) {
+    keepNewestSamples = gMicAfeRingCount;
+  }
+  const size_t discarded = gMicAfeRingCount - keepNewestSamples;
+  if (discarded > 0) {
+    gMicAfeRingHead = (gMicAfeRingHead + discarded) % gMicAfeRingCap;
+    gMicAfeRingCount = keepNewestSamples;
+  }
+  // Consume any wake token already posted for discarded data. A BLE writer
+  // that was finishing at this boundary can still post just after we release
+  // the mutex; that only causes one harmless empty-ring recheck.
+  if (gMicAfeRingCount == 0 && gMicAfeReadySem) {
+    while (xSemaphoreTake(gMicAfeReadySem, 0) == pdTRUE) {}
+  }
+  xSemaphoreGive(gMicAfeMutex);
+  return discarded;
+}
+
 size_t   g2MicAfeRingDepth()    { return gMicAfeRingCount; }
 uint32_t g2MicAfeOverrunCount() { return gMicAfeOverruns; }
 
@@ -2137,16 +2390,141 @@ uint32_t g2MicAfeOverrunCount() { return gMicAfeOverruns; }
 // manual g2micon and a HAL capture overlap. Returns false if the LEFT arm is
 // down or the envelope send fails (writeMutex timeout / link drop), so the HAL
 // treats "armed but not enabled" as a hard failure rather than a dead mic.
+static bool g2EvenAiSessionIsActive();   // defined with the EvenAI worker below
+
+// True when the mic enable auto-created the display container below; the
+// disable edge tears exactly that page down (and only that page).
+static bool gMicAutoContainer = false;
+
 bool g2MicStreamEnable(bool on) {
   if (!gL.connected) return false;
   if (on == gMicStreamOn) return true;   // already in the requested state
+  // NOTE deliberately NO container auto-create here: this function also runs
+  // at boot via mic autostart (openmic), and painting "Listening..." over
+  // the default screen on power-up was observed on hardware 2026-08-10.
+  // Idle-open mic needs no frames; the RECORDER calls
+  // g2MicEnsureCaptureContainer() when a capture genuinely starts.
   uint8_t buf[64];
   size_t n = g2BuildAudioCtrl(allocSeq(), G2_MAGIC_AUDIO_CTRL, on, buf, sizeof(buf));
   if (!n) return false;
   if (!sendEnvelope(gL, buf, n)) return false;
   gMicStreamOn    = on;
   gMicProbeActive = on;   // keep the g2micstats "stream ON/OFF" readout coherent
+  if (on) {
+    // Rising edge: fresh seq baseline (first packet is never a "gap") and a
+    // fresh watchdog window for this stream instance.
+    g2MicSeqBaselineReset();
+    gMicStreamOnSinceMs  = millis();
+    gMicRateDegraded     = false;
+    gMicRateBelowSinceMs = 0;
+  } else if (gMicAutoContainer) {
+    // Tear down only the page WE created for this capture. Task context
+    // (HAL stop / g2micoff); the ~200 ms Shutdown wait is fine here.
+    gMicAutoContainer = false;
+    g2ClearDisplay();
+  }
   return true;
+}
+
+// ── Mic-capture FAST link guard (2026-08-10) ────────────────────────────────
+// The glasses' own idle power state requests 72-84 ticks + slave latency 4;
+// at that state the mic stream was measured delivering EXACTLY half its
+// nominal 20 notifications/s during a live-STT exchange, silently. A capture
+// is a bounded, seconds-long, throughput-critical window — precisely what the
+// FAST arbiter tier exists for (the image push uses it the same way). Latched
+// (not depth-per-call) so the disconnect teardown and the HAL stop path can
+// BOTH call release without a double-decrement stealing a concurrent image
+// push's FAST hold. Acquire/release run on task context (HAL start/stop) or
+// BLE host context (disconnect) — release with the latch already clear is a
+// pure no-op, and a depth-0 release sends nothing on air by arbiter policy.
+static std::atomic<bool> gMicFastHeld{false};
+void g2MicLinkFastAcquire() {
+  if (!gMicFastHeld.exchange(true)) g2ConnPriRequestFast("g2-mic");
+}
+void g2MicLinkFastRelease() {
+  if (gMicFastHeld.exchange(false)) g2ConnPriReleaseFast("g2-mic");
+}
+
+// ── Recording-scoped capture helpers (2026-08-10, rescoped after the boot
+// "Listening..." regression) ────────────────────────────────────────────────
+// The container page and the FAST-interval hold belong to a RECORDING, not to
+// an idle-open mic: mic autostart at boot claims the HAL capture permanently,
+// and scoping these to the HAL level painted a page on power-up and pinned
+// the glasses' radio at 15 ms around the clock. The recorder calls ensure/
+// release around each capture instead.
+
+// Create a text container iff the lens is truly blank (no page, no native
+// EvenAI session — the glasses' own voice UI sustains the mic there, and a
+// surprise page could fight it; a hijack page IS a container). Best-effort:
+// on CREATE failure the delivered-rate watchdog reports the resulting
+// silence rather than this path guessing.
+void g2MicEnsureCaptureContainer() {
+  if (!gL.connected) return;
+  if (g2LensGetState().containerReady || g2EvenAiSessionIsActive() ||
+      g2LensGetState().hijackActive) {
+    return;
+  }
+  if (g2ShowText("Listening...")) {
+    gMicAutoContainer = true;
+    DEBUG_G2F("[G2-MIC] auto-created text container for capture");
+  } else {
+    DEBUG_G2F("[G2-MIC] capture container auto-create FAILED — stream will "
+              "stay silent (watchdog will flag)");
+  }
+}
+
+// Tear down only the page WE created (task context — blocks ~200 ms).
+void g2MicReleaseCaptureContainer() {
+  if (!gMicAutoContainer) return;
+  gMicAutoContainer = false;
+  g2ClearDisplay();
+}
+
+// Force-re-send AudioCtrCmd{en=1} on the LEFT arm, bypassing g2MicStreamEnable's
+// gMicStreamOn idempotency guard. The glasses silently drop the LC3 stream on
+// ANY lens-container teardown (display sleep, page change, hijack redraw) and
+// nothing on the wire tells us — gMicStreamOn stays stale-true, so
+// g2MicStreamEnable(true) refuses to re-arm. The MIC-detail lens hides this by
+// tearing its own container down every render tick (which clears the flag), so
+// the mic only survives while that page is open. For a HEADLESS capture
+// (CM5/UART micrecord, no lens ticking) the heartbeat worker calls this ~1 Hz
+// while G2 capture is active, replicating that keepalive so the mic stays live
+// regardless of the display state. One BLE write; idempotent on the glasses.
+static bool g2MicStreamReassert() {
+  if (!gL.connected) return false;
+#if ENABLE_MICROPHONE
+  // Self-guard: only re-arm for a LIVE G2 capture. The caller's snapshot can
+  // go stale across its wait; re-arming after a stop streams LC3 into the
+  // void AND poisons the next capture's rising-edge reset (the stale
+  // gMicStreamOn=true makes g2MicStreamEnable(true) early-return).
+  if (!(audioCaptureActive() && audioGetSource() == AUDIO_SRC_G2_LEFT))
+    return false;
+#endif
+  uint8_t buf[64];
+  size_t n = g2BuildAudioCtrl(allocSeq(), G2_MAGIC_AUDIO_CTRL, /*on=*/true, buf, sizeof(buf));
+  if (!n) return false;
+  if (!sendEnvelope(gL, buf, n)) return false;
+  gMicStreamOn    = true;
+  gMicProbeActive = true;
+  return true;
+}
+
+// Recorder-facing kick: re-arm the stream immediately after the capture
+// container goes up, instead of waiting up to a full keepalive lap for the
+// first frames (which would eat the start of the utterance on bench
+// recordings). Carries the reassert's capture-active self-guard.
+bool g2MicKickStream() {
+  // Re-anchor the delivered-rate watchdog at the RECORDING kick, not just the
+  // stream-enable edge. With the idle-open mic, that edge can be minutes old
+  // when a recording starts — the 2 s grace is long expired, and container
+  // CREATE + stream ramp + the first 2 s rate bucket then latch a spurious
+  // degraded=1 at capture start (observed 2026-08-11: smoke T2 ran at
+  // 19.9/s yet reported degraded=1). The kick is the true per-capture
+  // stream-start for watchdog purposes.
+  gMicStreamOnSinceMs  = millis();
+  gMicRateDegraded     = false;
+  gMicRateBelowSinceMs = 0;
+  return g2MicStreamReassert();
 }
 
 // The glasses auto-stop the LC3 mic stream whenever the lens container is torn
@@ -2169,6 +2547,9 @@ static void g2MicNoteStreamStoppedByTeardown() {
   if (!gMicStreamOn) return;
   gMicStreamOn    = false;
   gMicProbeActive = false;
+  gMicAutoContainer = false;  // our auto page died WITH this teardown; a later
+                              // disable edge must not clear someone else's page
+  g2MicSeqBaselineReset();   // packets across the pause are not a "gap"
   DEBUG_G2F("[G2-MIC] container teardown stopped the stream — will re-assert");
 }
 
@@ -2180,10 +2561,14 @@ static void g2MicNoteStreamStoppedByTeardown() {
 static void g2MicOnLeftDisconnect() {
   gMicProbeActive = false;
   gMicStreamOn    = false;              // reset so a reconnect re-arms the stream
+  g2MicSeqBaselineReset();
+  g2MicLinkFastRelease();               // latched: no-op if not held; no BLE TX
+  gMicAutoContainer = false;            // page died with the link; flag only
   g2MicSetAfeFeedActive(false);         // disarm ring + decoder (local, safe)
-  if (gMicRecMutex && xSemaphoreTake(gMicRecMutex, 0) == pdTRUE) {
-    micRecCloseLocked("left temple disconnect");
-    xSemaphoreGive(gMicRecMutex);
+  if (gMicRecFile) {
+    // BLE host context cannot take the drain mutex (FS may be mid-write).
+    // Flag it; the next heartbeat drain flushes the staged tail and closes.
+    gMicRecPendingClose = true;
   }
   if (gMicWavMutex && xSemaphoreTake(gMicWavMutex, 0) == pdTRUE) {
     micWavCloseLocked("left temple disconnect");
@@ -2192,8 +2577,13 @@ static void g2MicOnLeftDisconnect() {
 #if ENABLE_MICROPHONE
   // Release the capture lease iff the mic was actually using G2 — don't tear
   // down a live PDM capture on a XIAO just because the glasses dropped.
-  if (audioGetSource() == AUDIO_SRC_G2_LEFT && audioCaptureActive()) {
-    audioCaptureStop(nullptr);
+  if (audioGetSource() == AUDIO_SRC_G2_LEFT) {
+    // BLE callback context: only request STOPPING here. The recorder task owns
+    // WAV close/event/IDLE and must not be bypassed by HAL teardown.
+    // Notify even when no WAV is active: otherwise an open, idle mic keeps
+    // advertising gMicRunning/micConnected after its HAL lease is revoked.
+    if (gMicRunning || micRecordingBusy()) microphoneNotifySourceLost();
+    if (audioCaptureActive()) audioCaptureStop(nullptr);
   }
 #endif
 }
@@ -2229,55 +2619,99 @@ static bool micWavWritePacketLocked(const uint8_t* pkt) {
 static void resetMicProbeStats(G2MicProbe& m) {
   m.frameCount = 0;
   m.bytesTotal = 0;
-  m.byte0CC = m.byte0CD = m.byte0Other = 0;
-  m.seqGaps = 0;
-  m.hasLastSeq = false;
-  m.lastSeq = 0;
+  m.seqGapEvents = 0;
+  m.seqPacketsLost = 0;
+  m.stallEvents = 0;
+  m.hasTrailerSeq = false;
+  m.lastTrailerSeq = 0;
   m.firstFrameMs = 0;
   m.lastFrameMs = 0;
+  m.winStartMs = 0;
+  m.winFrames = 0;
+  m.rateX10 = 0;
+}
+
+// Drop the trailer-seq baseline on both arms without touching the counters.
+// Called at every point where the stream (re)starts or provably paused —
+// stream-enable rising edge, container teardown, disconnect — so the first
+// packet after a restart is never booked as a gap. Deliberately NOT called
+// from the 1 Hz g2MicStreamReassert: that fires unconditionally during
+// capture and does not imply a restart; resetting there would blind gap
+// detection at every second boundary.
+static void g2MicSeqBaselineReset() {
+  gMicL.hasTrailerSeq = false;
+  gMicR.hasTrailerSeq = false;
 }
 
 static void handleAudioNotify(G2Temple& t, const uint8_t* data, size_t len) {
   G2MicProbe& m = (t.side == 'L') ? gMicL : gMicR;
   uint32_t now = millis();
+  const uint32_t prevArrivalMs = m.lastFrameMs;
+  const bool hadFrames = m.frameCount > 0;
   m.frameCount++;
   m.bytesTotal += (uint32_t)len;
   if (m.frameCount == 1) m.firstFrameMs = now;
   m.lastFrameMs = now;
 
-  if (len >= 1) {
-    if      (data[0] == 0xCC) m.byte0CC++;
-    else if (data[0] == 0xCD) m.byte0CD++;
-    else                      m.byte0Other++;
+  // Rolling delivered-rate bucket (read by the heartbeat watchdog).
+  if (m.winStartMs == 0) m.winStartMs = now;
+  if (now - m.winStartMs >= kMicRateWinMs) {
+    m.rateX10   = (m.winFrames * 10000u) / (now - m.winStartMs);
+    m.winStartMs = now;
+    m.winFrames  = 0;
   }
-  if (len >= 2) {
-    uint8_t seq = data[1];
-    if (m.hasLastSeq) {
-      uint8_t expected = (uint8_t)(m.lastSeq + 1);
-      if (seq != expected) m.seqGaps++;
+  m.winFrames++;
+
+  // Trailer sequence continuity (byte 204; only defined for the 205 B shape).
+  if (len == 205) {
+    const uint8_t seq = data[204];
+    if (m.hasTrailerSeq && hadFrames && now - prevArrivalMs > kMicSeqStallMs) {
+      // A pause this long means the stream stopped (container teardown,
+      // interval renegotiation, ...). The counter kept running on the
+      // glasses, so the mod-256 delta is meaningless — count a stall and
+      // re-baseline instead of booking phantom loss. Also restart the rate
+      // bucket: rolling it across the pause span would report a near-zero
+      // rate for a full bucket after recovery and latch `degraded` on an
+      // outage shorter than the dwell criterion.
+      m.stallEvents++;
+      m.hasTrailerSeq = false;
+      m.winStartMs = now;
+      m.winFrames  = 0;
     }
-    m.lastSeq = seq;
-    m.hasLastSeq = true;
+    if (m.hasTrailerSeq) {
+      const uint8_t delta = (uint8_t)(seq - m.lastTrailerSeq);
+      if (delta == 0) {
+        m.seqGapEvents++;               // duplicate — anomalous, but 0 lost
+      } else if (delta != 1) {
+        m.seqGapEvents++;
+        m.seqPacketsLost += (uint32_t)(delta - 1);
+      }
+    }
+    m.lastTrailerSeq = seq;
+    m.hasTrailerSeq  = true;
   }
 
-  // SD recording — append the raw 205 B packet to the open file when
-  // the recorder is active for this arm. Non-blocking mutex take so a
-  // CLI-side close can't stall the BLE notify task; if we miss a
-  // packet during a close window, that's fine.
-  if (gMicRecFile && t.side == gMicRecArm && gMicRecMutex) {
+  // SD recording — stage the raw packet into the PSRAM ring; the heartbeat
+  // worker (or the CLI stop path) drains it to SD. No FS work in this
+  // callback, ever: the ring mutex is only held for a memcpy, so the
+  // non-blocking take below effectively never misses. Cap enforcement and
+  // the File object live entirely on the drain side.
+  if (gMicRecFile && !gMicRecPendingClose && t.side == gMicRecArm &&
+      gMicRecMutex && len <= sizeof(gMicRecRing[0].data)) {
     if (xSemaphoreTake(gMicRecMutex, 0) == pdTRUE) {
-      if (gMicRecFile && gMicRecBytes < kMicRecMaxBytes) {
-        FsLockGuard fsGuard("g2.mic_raw.write", 0);
-        if (fsGuard.held || isFsLockedByCurrentTask()) {
-          size_t w = gMicRecFile->write(data, len);
-          gMicRecBytes   += (uint32_t)w;
-          gMicRecPackets += 1;
-          if (gMicRecBytes >= kMicRecMaxBytes) {
-            micRecCloseLocked("cap reached");
-          }
-        }
+      const uint16_t next =
+          (uint16_t)((gMicRecRingHead + 1) % kMicRecRingSlots);
+      if (next == gMicRecRingTail) {
+        gMicRecRingOverflows++;          // ring full (SD wedged >12 s) — drop
+      } else {
+        MicRecSlot& s = gMicRecRing[gMicRecRingHead];
+        s.len = (uint16_t)len;
+        memcpy(s.data, data, len);
+        gMicRecRingHead = next;
       }
       xSemaphoreGive(gMicRecMutex);
+    } else {
+      gMicRecMutexMisses++;   // lost the race against a drain snapshot
     }
   }
 
@@ -2319,7 +2753,10 @@ static void handleAudioNotify(G2Temple& t, const uint8_t* data, size_t len) {
             // Decode error — zero this frame and keep going so the AFE
             // sees continuous time rather than a missing chunk.
             memset(out, 0, kMicLc3SamplesPerFrame * sizeof(int16_t));
+            gMicAfeDecodeFails.fetch_add(1, std::memory_order_relaxed);
             decOk = false;
+          } else if (rc == 1) {
+            gMicAfePlcFrames.fetch_add(1, std::memory_order_relaxed);
           }
         }
         (void)decOk;
@@ -2330,6 +2767,8 @@ static void handleAudioNotify(G2Temple& t, const uint8_t* data, size_t len) {
       // Wake any reader blocked on the ready semaphore. Outside the
       // mutex so the reader can immediately retake it.
       if (gMicAfeReadySem) xSemaphoreGive(gMicAfeReadySem);
+    } else {
+      gMicAfeMutexDrops.fetch_add(1, std::memory_order_relaxed);
     }
   }
 
@@ -2339,22 +2778,23 @@ static void handleAudioNotify(G2Temple& t, const uint8_t* data, size_t len) {
   bool detail = m.frameCount <= 5 || gMicProbeVerbose;
   bool stats  = (m.frameCount % 50) == 0;
   if (detail) {
-    DEBUG_G2F("[G2-MIC-%c] frame #%u len=%u byte0=0x%02X seq=%u "
-              "(CC=%u CD=%u other=%u gaps=%u)",
+    DEBUG_G2F("[G2-MIC-%c] frame #%u len=%u trailer_seq=%u "
+              "(gap_events=%u lost=%u stalls=%u)",
               t.side, (unsigned)m.frameCount, (unsigned)len,
-              (unsigned)(len ? data[0] : 0), (unsigned)(len > 1 ? data[1] : 0),
-              (unsigned)m.byte0CC, (unsigned)m.byte0CD,
-              (unsigned)m.byte0Other, (unsigned)m.seqGaps);
+              (unsigned)(len == 205 ? data[204] : 0),
+              (unsigned)m.seqGapEvents, (unsigned)m.seqPacketsLost,
+              (unsigned)m.stallEvents);
   } else if (stats) {
     uint32_t elapsedMs = m.lastFrameMs - m.firstFrameMs;
     uint32_t fps = elapsedMs ? (m.frameCount * 1000u) / elapsedMs : 0;
-    DEBUG_G2F("[G2-MIC-%c] %u frames %u B avgLen=%u ~%u fps "
-              "(CC=%u CD=%u other=%u gaps=%u)",
+    DEBUG_G2F("[G2-MIC-%c] %u frames %u B avgLen=%u ~%u fps rate=%u.%u/s "
+              "(gap_events=%u lost=%u stalls=%u)",
               t.side, (unsigned)m.frameCount, (unsigned)m.bytesTotal,
               (unsigned)(m.frameCount ? m.bytesTotal / m.frameCount : 0),
               (unsigned)fps,
-              (unsigned)m.byte0CC, (unsigned)m.byte0CD,
-              (unsigned)m.byte0Other, (unsigned)m.seqGaps);
+              (unsigned)(m.rateX10 / 10), (unsigned)(m.rateX10 % 10),
+              (unsigned)m.seqGapEvents, (unsigned)m.seqPacketsLost,
+              (unsigned)m.stallEvents);
   }
 }
 
@@ -2562,7 +3002,41 @@ static G2RxPacket* gRxPackets = nullptr;
 static uint8_t gRxPacketHead = 0;
 static uint8_t gRxPacketTail = 0;
 static uint8_t gRxPacketCount = 0;
+// Native EvenAI WAKE/EXIT controls are session boundaries. Keep them out of
+// the generic eight-packet FIFO so a settings/heartbeat burst cannot drop a
+// dismissal and leave the host free to reopen the card. Classification is a
+// bounded, allocation-free parse of a complete single-fragment envelope; all
+// other notify work remains copy-only on the Bluedroid callback.
+static constexpr uint8_t G2_RX_EVENAI_CTRL_DEPTH = 4;
+static G2RxPacket* gRxEvenAiCtrlPackets = nullptr;
+static uint8_t gRxEvenAiCtrlHead = 0;
+static uint8_t gRxEvenAiCtrlTail = 0;
+static uint8_t gRxEvenAiCtrlCount = 0;
 static uint32_t gRxPacketDrops = 0;
+
+static bool g2RxEvenAiCtrlStatus(const uint8_t* data, size_t len,
+                                 uint32_t* outStatus) {
+  if (!data || !outStatus || len < G2_ENVELOPE_HDR_LEN + G2_ENVELOPE_CRC_LEN ||
+      data[6] != G2_SID_EVEN_AI) return false;
+  G2EnvelopeView env{};
+  if (!g2ParseEnvelope(data, len, &env) || env.sid != G2_SID_EVEN_AI) {
+    return false;
+  }
+  uint32_t cmd = 0, magic = 0;
+  g2RingPeekCmdMagic(env.payload, env.payloadLen, &cmd, &magic);
+  (void)magic;
+  if (cmd != G2_AI_CMD_CTRL) return false;
+  uint32_t status = 0;
+  if (!g2PeekNestedVarint(env.payload, env.payloadLen,
+                          /*CTRL wrapper*/ 3, /*status*/ 1, &status)) {
+    return false;
+  }
+  if (status != G2_AI_STATUS_WAKE_UP && status != G2_AI_STATUS_EXIT) {
+    return false;
+  }
+  *outStatus = status;
+  return true;
+}
 static void g2AdvanceGeneration(G2Temple& t) {
   portENTER_CRITICAL(&gRxPacketMux);
   t.connectionGeneration++;
@@ -2594,7 +3068,7 @@ bool g2ControlStatusSnapshot(G2ControlStatus* out) {
   portENTER_CRITICAL(&gControlStateMux);
   *out = gControlStatus;
   out->rightGeneration = gR.connectionGeneration;
-  out->rxQueued = gRxPacketCount;
+  out->rxQueued = (uint8_t)(gRxPacketCount + gRxEvenAiCtrlCount);
   out->rxDrops = gRxPacketDrops;
   memcpy(out->firmwareLeft, gL.firmwareVersion, sizeof(out->firmwareLeft));
   memcpy(out->firmwareRight, gR.firmwareVersion, sizeof(out->firmwareRight));
@@ -2610,9 +3084,37 @@ static bool g2RxPacketEnqueue(const G2Temple& t, const uint8_t* data, size_t len
     portEXIT_CRITICAL(&gRxPacketMux);
     return false;
   }
+  uint32_t evenAiCtrlStatus = 0;
+  const bool priority = gRxEvenAiCtrlPackets &&
+      g2RxEvenAiCtrlStatus(data, len, &evenAiCtrlStatus);
   bool queued = false;
   portENTER_CRITICAL(&gRxPacketMux);
-  if (gRxPacketCount < G2_RX_PACKET_DEPTH) {
+  if (priority) {
+    // EXIT is fail-closed: if four unconsumed native transitions somehow fill
+    // this tiny queue, retain the newest dismissal by evicting the oldest
+    // transition. A new WAKE may be dropped instead; missing an invocation is
+    // safer than resurrecting one the wearer dismissed.
+    if (gRxEvenAiCtrlCount == G2_RX_EVENAI_CTRL_DEPTH &&
+        evenAiCtrlStatus == G2_AI_STATUS_EXIT) {
+      gRxEvenAiCtrlHead =
+          (uint8_t)((gRxEvenAiCtrlHead + 1) % G2_RX_EVENAI_CTRL_DEPTH);
+      gRxEvenAiCtrlCount--;
+      gRxPacketDrops++;
+    }
+    if (gRxEvenAiCtrlCount < G2_RX_EVENAI_CTRL_DEPTH) {
+      G2RxPacket& p = gRxEvenAiCtrlPackets[gRxEvenAiCtrlTail];
+      p.generation = t.connectionGeneration;
+      p.len = (uint16_t)len;
+      p.side = t.side;
+      memcpy(p.data, data, len);
+      gRxEvenAiCtrlTail =
+          (uint8_t)((gRxEvenAiCtrlTail + 1) % G2_RX_EVENAI_CTRL_DEPTH);
+      gRxEvenAiCtrlCount++;
+      queued = true;
+    } else {
+      gRxPacketDrops++;
+    }
+  } else if (gRxPacketCount < G2_RX_PACKET_DEPTH) {
     G2RxPacket& p = gRxPackets[gRxPacketTail];
     p.generation = t.connectionGeneration;
     p.len = (uint16_t)len;
@@ -2627,6 +3129,21 @@ static bool g2RxPacketEnqueue(const G2Temple& t, const uint8_t* data, size_t len
   portEXIT_CRITICAL(&gRxPacketMux);
   if (queued) g2ControlWake();
   return queued;
+}
+
+static bool g2RxEvenAiCtrlDequeue(G2RxPacket* out) {
+  if (!out || !gRxEvenAiCtrlPackets) return false;
+  bool have = false;
+  portENTER_CRITICAL(&gRxPacketMux);
+  if (gRxEvenAiCtrlCount > 0) {
+    *out = gRxEvenAiCtrlPackets[gRxEvenAiCtrlHead];
+    gRxEvenAiCtrlHead =
+        (uint8_t)((gRxEvenAiCtrlHead + 1) % G2_RX_EVENAI_CTRL_DEPTH);
+    gRxEvenAiCtrlCount--;
+    have = true;
+  }
+  portEXIT_CRITICAL(&gRxPacketMux);
+  return have;
 }
 
 static bool g2RxPacketDequeue(G2RxPacket* out) {
@@ -4628,6 +5145,7 @@ static const G2PageModule kEspNowAppPage = {
 
 // LED control sub-page — hidden (reached via Sensors → LED, the same drill-in
 // pattern as Camera Settings). showMenu / handleTap live in G2_Page_LED.cpp.
+#if ENABLE_NEOPIXEL
 static const G2PageModule kLedG2Page = {
   "ledpage", nullptr,   // hidden from the main menu — reached via Sensors
   "Show the LED control page (color / effect / brightness) on the lens",
@@ -4640,6 +5158,7 @@ static const G2PageModule kLedG2Page = {
   /*prefersTextWidget=*/ false,   // own showMenu — flag is irrelevant
   /*liveRender=*/    nullptr,
 };
+#endif  // ENABLE_NEOPIXEL
 
 // Automations App page — hidden (reached via the Apps launcher). showMenu /
 // handleTap live in G2_Page_Automations.cpp; the launcher forwards to
@@ -5169,7 +5688,7 @@ static void buildMicReadoutText(char* out, size_t cap) {
   snprintf(out, cap,
            "Lvl: %d%%\n%dHz 16b %dch\n%s",
            level, hz, micChannels,
-           micRecording ? "rec" : "idle");
+           micRecordingBusy() ? "rec" : "idle");
 #else
   snprintf(out, cap, "MIC unavailable");
 #endif
@@ -5235,11 +5754,12 @@ static bool renderMicDetailLive() {
              en ? "On" : "Off");
     // Record row (idx 2) — recording needs the mic on, so it reads "mic off"
     // and no-ops until then; otherwise it is a start/stop toggle keyed on
-    // micRecording (auto-names rec_<ms>.wav, 60 s cap). List rows can't
+    // the synchronized recording lifecycle (auto-names rec_<ms>.wav, 60 s
+    // cap). List rows can't
     // UPDATE_TEXT, so the tap forces a re-CREATE to flip the label.
     char recRow[40];
     if (!en)                 snprintf(recRow, sizeof(recRow), "Rec: mic off");
-    else if (micRecording)   snprintf(recRow, sizeof(recRow), "Stop recording");
+    else if (micRecordingBusy()) snprintf(recRow, sizeof(recRow), "Stop recording");
     else                     snprintf(recRow, sizeof(recRow), "Record 60s");
     // Source selector row (idx 3) — tap cycles the preference among "auto" plus
     // whatever sources are actually connected (see g2MicDetailHandleTap). Shows
@@ -5474,7 +5994,7 @@ void g2MicDetailHandleTap(uint32_t idx) {
     G2CmdCookie cookie{};
     cookie.targetPage   = g2GetHijackPage();
     cookie.targetNetSub = 0;
-    const char* line = micRecording ? "micrecord stop" : "micrecord start";
+    const char* line = micRecordingBusy() ? "micrecord stop" : "micrecord start";
     BROADCAST_PRINTF("[G2] MIC detail: %s", line);
     if (!g2SubmitHijackCommand(line, cookie, onMicDetailRecordDone, nullptr)) {
       DEBUG_G2F("[G2] MIC detail: '%s' submit FAILED — no inline mutate", line);
@@ -6977,7 +7497,9 @@ static void registerG2Pages(void) {
   // reached via Apps → Health → g2ShowHealthPage (same pattern as Pet/Maps).
   g2RegisterPage(kSysEventsPage);        // hidden — reached via System
   g2RegisterPage(kLoggingPage);          // hidden — reached via System
+#if ENABLE_NEOPIXEL
   g2RegisterPage(kLedG2Page);            // hidden — reached via Hardware → LED
+#endif
 #if ENABLE_FM_RADIO
   g2RegisterPage(kFmTunerPage);          // hidden — reached via Hardware → FM
 #endif
@@ -8196,21 +8718,16 @@ static void handleEnvelope(G2Temple& t, const G2EnvelopeView& env,
 
     case G2_SID_EVEN_AI: {
       // Front-pane Even-AI subsystem (`UI_FOREGROUND_EVEN_AI_ID`). Carries
-      // `EvenAIDataPackage` from `even_ai_pb.ts`. Decode the cmd byte and
+      // `EvenAIDataPackage` from `even_ai_pb.ts`. Decode command + magic and
       // surface frames by symbolic name; unknown shapes drop into
       // logPbFlat so labelled captures continue to feed RE work.
       const uint8_t* pb = env.payload;
       const size_t   pbLen = env.payloadLen;
-      uint32_t cmd = 0;
-      if (pbLen >= 2 && pb[0] == 0x08) {
-        cmd = (uint32_t)pb[1];  // single-byte varint covers all known cmd ids
-      }
-      // Pull magic from `10 <varint>` if present so logs are correlatable
-      // with what we sent (matches the format used for sid=0xE0).
-      uint32_t magic = 0;
-      if (pbLen >= 4 && pb[2] == 0x10) {
-        magic = peekVarint(pb, pbLen, 3);
-      }
+      // COMM_RSP=161 is a two-byte protobuf varint. The former byte-index
+      // shortcut happened to print 161 but then read magic from the wrong
+      // offset, yielding the misleading `? magic=0` seen in hardware logs.
+      uint32_t cmd = 0, magic = 0;
+      g2RingPeekCmdMagic(pb, pbLen, &cmd, &magic);
 
       auto cmdName = [](uint32_t c) -> const char* {
         switch (c) {
@@ -8223,8 +8740,8 @@ static void handleEnvelope(G2Temple& t, const G2EnvelopeView& env,
           case 7:                   return "PROMPT";
           case 8:                   return "EVENT";
           case G2_AI_CMD_HEARTBEAT: return "HEARTBEAT";
-          case 10:                  return "CONFIG";
-          case 12:                  return "COMM_RSP";
+          case G2_AI_CMD_CONFIG:    return "CONFIG";
+          case G2_AI_CMD_COMM_RSP:  return "COMM_RSP";
           default:                  return "?";
         }
       };
@@ -8272,6 +8789,15 @@ static void handleEnvelope(G2Temple& t, const G2EnvelopeView& env,
         DEBUG_G2F("[G2-%c] EvenAI CTRL status=%s(%u) magic=%u (%u B)",
                   t.side, statusName(status), (unsigned)status,
                   (unsigned)magic, (unsigned)pbLen);
+        // Play the phone's role in the native "Hey Even" session so the
+        // glasses don't time out to the "trouble understanding" prompt: on
+        // WAKE_UP the worker sends ENTER + a ~3 s heartbeat and the CM5 pushes
+        // ASK(prompt)/REPLY(answer) into the live popup + response windows.
+        if (status == G2_AI_STATUS_WAKE_UP) {
+          g2EvenAiOnWakeUp(t, rxGeneration);
+        } else if (status == G2_AI_STATUS_EXIT) {
+          g2EvenAiOnExit(t, rxGeneration);
+        }
         break;
       }
       // EVENT: walk for `52 02 08 <type>` (field 10 nested with field 1 varint).
@@ -8286,6 +8812,12 @@ static void handleEnvelope(G2Temple& t, const G2EnvelopeView& env,
         DEBUG_G2F("[G2-%c] EvenAI EVENT type=%s(%u) magic=%u (%u B)",
                   t.side, eventName(evtype), (unsigned)evtype,
                   (unsigned)magic, (unsigned)pbLen);
+        // STREAM_COMPLETE = the glasses finished painting the streamed reply.
+        // Was debug-log-only; the exec plan requires a capture-ID-correlated
+        // host event before this is usable as a production metric. Worker
+        // context (processNotify runs on the control owner, not the BLE
+        // callback), so the bounded TX-mutex wait inside the push is safe.
+        if (evtype == 2) g2EvenAiPushStreamCompleteEvt();
         break;
       }
       // PROMPT: walk for `4A 02 08 <code>` (field 9 nested with field 1 varint).
@@ -8304,8 +8836,17 @@ static void handleEnvelope(G2Temple& t, const G2EnvelopeView& env,
       }
       // ASK / ANALYSE / REPLY / HEARTBEAT / CONFIG / COMM_RSP / others —
       // log by name with magic, then dump fields for any non-trivial body.
-      DEBUG_G2F("[G2-%c] EvenAI %s magic=%u (%u B)",
-                t.side, cmdName(cmd), (unsigned)magic, (unsigned)pbLen);
+      uint32_t commRspError = 0;
+      if (cmd == G2_AI_CMD_COMM_RSP &&
+          g2PeekNestedVarint(pb, pbLen, G2_AI_F_COMM_RSP,
+                             /*errorCode*/ 1, &commRspError)) {
+        DEBUG_G2F("[G2-%c] EvenAI COMM_RSP magic=%u errorCode=%u (%u B)",
+                  t.side, (unsigned)magic, (unsigned)commRspError,
+                  (unsigned)pbLen);
+      } else {
+        DEBUG_G2F("[G2-%c] EvenAI %s magic=%u (%u B)",
+                  t.side, cmdName(cmd), (unsigned)magic, (unsigned)pbLen);
+      }
       // Body fields (skip the cmd+magic prefix we already named).
       logPbFlat(t.side, "  body", env.payload, env.payloadLen);
       break;
@@ -8350,7 +8891,8 @@ static void handleEnvelope(G2Temple& t, const G2EnvelopeView& env,
 // so heartbeats / ring TX can use the paced inter-fragment gaps.
 //
 // Returns true if every MTU-chunk was accepted by the GATT client.
-static bool sendEnvelopeNoMutex(G2Temple& t, const uint8_t* data, size_t len) {
+static bool sendEnvelopeNoMutex(G2Temple& t, const uint8_t* data, size_t len,
+                                uint64_t evenAiExchangeId = 0) {
   // Decode the 8-byte envelope header for logging:
   //   [AA 21][seq][len][totFrags][fragIdx][sid][flag]
   if (len >= G2_ENVELOPE_HDR_LEN) {
@@ -8400,6 +8942,19 @@ static bool sendEnvelopeNoMutex(G2Temple& t, const uint8_t* data, size_t len) {
     // (line ~1178) nullifies writeChar; without this guard, an iteration
     // that started while connected can dereference a freed BLE
     // characteristic mid-burst when the link drops between fragments.
+    // Session-tagged EvenAI messages are revocable between ATT fragments.
+    // This check is intentionally adjacent to each physical writeValue call:
+    // once the terminal state commits under gEvenAiSessionMux, no later
+    // fragment can be newly admitted. A fragment whose check completed just
+    // before that commit is already in flight and cannot be recalled without
+    // holding a session lock across the blocking BLE stack call.
+    if (evenAiExchangeId &&
+        !g2EvenAiGuardMatches(evenAiExchangeId, t)) {
+      DEBUG_G2F("[G2-%c] EvenAI TX cancelled at offset %u/%u",
+                t.side, (unsigned)off, (unsigned)len);
+      ok = false;
+      break;
+    }
     if (!t.connected || !t.writeChar) {
       DEBUG_G2F("[G2-%c] sendEnvelope aborted at offset %u/%u — "
                 "link dropped (connected=%d, writeChar=%p)",
@@ -8459,7 +9014,12 @@ static bool sendEnvelopeNoMutex(G2Temple& t, const uint8_t* data, size_t len) {
 // sendPbFragmented. Heartbeats pass a short centralTimeoutMs and treat
 // Busy as a clean skip (not a TX wedge).
 static G2SendResult sendEnvelopeEx(G2Temple& t, const uint8_t* data, size_t len,
-                                   uint32_t centralTimeoutMs) {
+                                   uint32_t centralTimeoutMs,
+                                   uint64_t evenAiExchangeId = 0) {
+  if (evenAiExchangeId &&
+      !g2EvenAiGuardMatches(evenAiExchangeId, t)) {
+    return G2SendResult::Fail;
+  }
   if (!bleCentralTxTake(centralTimeoutMs)) {
     DEBUG_G2F("[G2-%c] Central TX busy; envelope deferred", t.side);
     return G2SendResult::Busy;
@@ -8479,7 +9039,10 @@ static G2SendResult sendEnvelopeEx(G2Temple& t, const uint8_t* data, size_t len,
     bleCentralTxGive();
     return G2SendResult::Busy;
   }
-  bool ok = sendEnvelopeNoMutex(t, data, len);
+  const bool guardOk = !evenAiExchangeId ||
+      g2EvenAiGuardMatches(evenAiExchangeId, t);
+  bool ok = guardOk &&
+      sendEnvelopeNoMutex(t, data, len, evenAiExchangeId);
   xSemaphoreGive(writeMutex);
   bleCentralTxGive();
   return ok ? G2SendResult::Ok : G2SendResult::Fail;
@@ -9384,6 +9947,812 @@ static void g2ControlReconcileTick() {
   portEXIT_CRITICAL(&gRxPacketMux);
 }
 
+// ── EvenAI ("Hey Even") native session — phone-role emulation ────────────────
+// The glasses open a front-pane voice session on the wake word and wait for the
+// phone to answer: CTRL{ENTER}, a ~3 s HEARTBEAT to hold it, ASK{text} to fill
+// the listening popup with the recognized prompt, and REPLY{text} to paint the
+// answer window (sequence reversed from FlutterApp even_ai_service.dart). With
+// no responder the session times out and shows the native "trouble
+// understanding" prompt. We emulate the phone so a wake in the dashboard drives
+// the native windows — no lens hijack. Native-session state is one synchronized
+// object because the control owner decodes WAKE/EXIT while cmd_exec submits
+// ASK/REPLY and the BLE host callback can invalidate a connection generation.
+//
+// exchangeId is LOCAL protocol state only. It is deliberately never copied
+// into G2 magicRandom: the glasses require that protobuf field to stay one byte.
+struct G2EvenAiSessionState {
+  bool active;
+  bool enterPending;
+  bool replyStreaming;
+  uint64_t exchangeId;
+  char armSide;
+  uint32_t armGeneration;
+  uint32_t uartSessionEpoch;
+  uint32_t lastActMs;
+  uint32_t lastHbMs;
+  uint32_t hbCnt;
+};
+
+static G2EvenAiSessionState gEvenAiSession{};
+static portMUX_TYPE gEvenAiSessionMux = portMUX_INITIALIZER_UNLOCKED;
+// Device millis at the most recent native WAKE_UP decode — the anchor stamp
+// for the `evenai_timing` EVT emitted by the recorder task at auto-stop.
+static volatile uint32_t gEvenAiLastWakeMs = 0;
+uint32_t g2EvenAiLastWakeMs() { return gEvenAiLastWakeMs; }
+static uint32_t gEvenAiBootNonce = 0;
+static uint32_t gEvenAiExchangeCounter = 0;
+static uint32_t gEvenAiMagicCtr = 200;  // magicRandom base — MUST stay byte-sized
+static const uint32_t    kEvenAiHbIntervalMs = 3000;
+static const uint32_t    kEvenAiSessionMaxMs = 60000;  // safety EXIT if nothing finishes
+
+// A terminal state is authoritative locally, but the CM5 cancellation EVT is
+// still important for latency: it lets the host abandon STT/LLM work before a
+// later tagged display command reaches the firmware fence. `voicefetch` can
+// briefly own the UART TX mutex, so retain a few boot-unique tombstones and
+// retry without ever blocking the G2 control owner. IDs make retry delivery
+// idempotent at the application boundary.
+struct G2EvenAiPendingCancel {
+  uint64_t exchangeId;
+  uint32_t sessionEpoch;
+  uint32_t firstQueuedMs;
+  uint32_t nextTryMs;
+  uint8_t attempts;
+  uint8_t deliveredCopies;
+  char reason[24];
+};
+
+static constexpr uint8_t G2_EVENAI_CANCEL_DEPTH = 4;
+static constexpr uint8_t G2_EVENAI_CANCEL_MAX_ATTEMPTS = 80;
+static constexpr uint8_t G2_EVENAI_CANCEL_COPIES = 3;
+static constexpr uint32_t G2_EVENAI_CANCEL_RETRY_MS = 100;
+static constexpr uint32_t G2_EVENAI_CANCEL_TTL_MS = 8000;
+static G2EvenAiPendingCancel
+    gEvenAiPendingCancels[G2_EVENAI_CANCEL_DEPTH]{};
+static portMUX_TYPE gEvenAiCancelMux = portMUX_INITIALIZER_UNLOCKED;
+
+static G2EvenAiSessionState g2EvenAiSessionSnapshot() {
+  G2EvenAiSessionState out{};
+  portENTER_CRITICAL(&gEvenAiSessionMux);
+  out = gEvenAiSession;
+  portEXIT_CRITICAL(&gEvenAiSessionMux);
+  return out;
+}
+
+static void g2EvenAiFormatExchangeId(uint64_t id, char out[17]) {
+  snprintf(out, 17, "%08lx%08lx",
+           (unsigned long)(id >> 32), (unsigned long)(id & 0xFFFFFFFFu));
+}
+
+// Push `evenai_stream_complete <id>` to the host when the glasses report the
+// streamed reply fully painted. Epoch-fenced like every other session EVT; a
+// no-session EVENT (stale/foreign) is dropped silently.
+static void g2EvenAiPushStreamCompleteEvt() {
+  const G2EvenAiSessionState s = g2EvenAiSessionSnapshot();
+  if (!s.active) return;
+  char id[17];
+  char evt[48];
+  g2EvenAiFormatExchangeId(s.exchangeId, id);
+  snprintf(evt, sizeof(evt), "evenai_stream_complete %s", id);
+  if (!uartLinkPushEventForSession(s.uartSessionEpoch, evt)) {
+    DEBUG_G2F("[G2-EVENAI] stream_complete push skipped (link down / not authed)");
+  }
+}
+
+static uint64_t g2EvenAiCurrentExchangeId() {
+  portENTER_CRITICAL(&gEvenAiSessionMux);
+  const uint64_t id = gEvenAiSession.active ? gEvenAiSession.exchangeId : 0;
+  portEXIT_CRITICAL(&gEvenAiSessionMux);
+  return id;
+}
+
+// Exported for the recorder's since-wake preroll gate: 0 unless a native
+// EvenAI session is LIVE right now. Comparing the recording owner against
+// this makes every stale-wake case (superseded, EXIT'd, declined, fabricated
+// startid) fail closed to the plain trim-to-zero boundary.
+uint64_t g2EvenAiActiveExchangeId() { return g2EvenAiCurrentExchangeId(); }
+
+static bool g2EvenAiSessionIsActive() {
+  return g2EvenAiCurrentExchangeId() != 0;
+}
+
+bool g2EvenAiExchangeBoundToUartSession(uint64_t exchangeId,
+                                        uint32_t sessionEpoch) {
+  if (!exchangeId || !sessionEpoch ||
+      uartLinkSessionEpoch() != sessionEpoch) return false;
+  const G2EvenAiSessionState s = g2EvenAiSessionSnapshot();
+  return s.active && s.exchangeId == exchangeId &&
+         s.uartSessionEpoch == sessionEpoch;
+}
+
+static bool g2EvenAiGuardMatches(uint64_t exchangeId,
+                                 const G2Temple& temple) {
+  if (!exchangeId) return false;
+  const G2EvenAiSessionState s = g2EvenAiSessionSnapshot();
+  return s.active && s.exchangeId == exchangeId &&
+      s.uartSessionEpoch != 0 &&
+      uartLinkSessionEpoch() == s.uartSessionEpoch &&
+      s.armSide == temple.side &&
+      s.armGeneration == temple.connectionGeneration &&
+      temple.connected && !temple.pluginDead && temple.writeChar;
+}
+
+static bool g2EvenAiSetEnterPending(uint64_t exchangeId, bool pending) {
+  bool matched = false;
+  portENTER_CRITICAL(&gEvenAiSessionMux);
+  if (gEvenAiSession.active && gEvenAiSession.exchangeId == exchangeId) {
+    gEvenAiSession.enterPending = pending;
+    matched = true;
+  }
+  portEXIT_CRITICAL(&gEvenAiSessionMux);
+  return matched;
+}
+
+static bool g2EvenAiTakeEnterPending(uint64_t exchangeId) {
+  bool take = false;
+  portENTER_CRITICAL(&gEvenAiSessionMux);
+  if (gEvenAiSession.active && gEvenAiSession.exchangeId == exchangeId &&
+      gEvenAiSession.enterPending) {
+    gEvenAiSession.enterPending = false;
+    take = true;
+  }
+  portEXIT_CRITICAL(&gEvenAiSessionMux);
+  return take;
+}
+
+static bool g2EvenAiReplyStreaming(uint64_t exchangeId) {
+  bool streaming = false;
+  portENTER_CRITICAL(&gEvenAiSessionMux);
+  if (gEvenAiSession.active && gEvenAiSession.exchangeId == exchangeId) {
+    streaming = gEvenAiSession.replyStreaming;
+  }
+  portEXIT_CRITICAL(&gEvenAiSessionMux);
+  return streaming;
+}
+
+static bool g2EvenAiSetReplyStreaming(uint64_t exchangeId, bool streaming) {
+  bool matched = false;
+  portENTER_CRITICAL(&gEvenAiSessionMux);
+  if (gEvenAiSession.active && gEvenAiSession.exchangeId == exchangeId) {
+    gEvenAiSession.replyStreaming = streaming;
+    matched = true;
+  }
+  portEXIT_CRITICAL(&gEvenAiSessionMux);
+  return matched;
+}
+
+static void g2EvenAiMarkActivity(uint64_t exchangeId) {
+  portENTER_CRITICAL(&gEvenAiSessionMux);
+  if (gEvenAiSession.active && gEvenAiSession.exchangeId == exchangeId) {
+    gEvenAiSession.lastActMs = millis();
+  }
+  portEXIT_CRITICAL(&gEvenAiSessionMux);
+}
+
+static bool g2EvenAiTryCancelEvent(uint64_t exchangeId,
+                                   uint32_t sessionEpoch,
+                                   const char* reason) {
+  char id[17];
+  char evt[96];
+  g2EvenAiFormatExchangeId(exchangeId, id);
+  snprintf(evt, sizeof(evt), "evenai_cancel %s %s", id,
+           (reason && reason[0]) ? reason : "ended");
+  return uartLinkTryPushEventForSession(sessionEpoch, evt);
+}
+
+static void g2EvenAiQueueCancelRetry(uint64_t exchangeId,
+                                     uint32_t sessionEpoch,
+                                     const char* reason,
+                                     uint8_t deliveredCopies) {
+  if (!exchangeId || !sessionEpoch) return;
+  const uint32_t nowMs = millis();
+  G2EvenAiPendingCancel pending{};
+  pending.exchangeId = exchangeId;
+  pending.sessionEpoch = sessionEpoch;
+  pending.firstQueuedMs = nowMs;
+  pending.nextTryMs = nowMs + G2_EVENAI_CANCEL_RETRY_MS;
+  pending.deliveredCopies = deliveredCopies;
+  snprintf(pending.reason, sizeof(pending.reason), "%s",
+           (reason && reason[0]) ? reason : "ended");
+
+  int slot = -1;
+  int oldest = 0;
+  uint32_t oldestAge = 0;
+  uint64_t evictedId = 0;
+  portENTER_CRITICAL(&gEvenAiCancelMux);
+  for (uint8_t i = 0; i < G2_EVENAI_CANCEL_DEPTH; ++i) {
+    if (gEvenAiPendingCancels[i].exchangeId == exchangeId) {
+      slot = i;
+      break;
+    }
+    if (!gEvenAiPendingCancels[i].exchangeId && slot < 0) slot = i;
+    const uint32_t age =
+        nowMs - gEvenAiPendingCancels[i].firstQueuedMs;
+    if (gEvenAiPendingCancels[i].exchangeId && age >= oldestAge) {
+      oldestAge = age;
+      oldest = i;
+    }
+  }
+  if (slot < 0) {
+    slot = oldest;
+    evictedId = gEvenAiPendingCancels[slot].exchangeId;
+  }
+  // A duplicate terminal call cannot normally occur because the local state
+  // was already cleared. Preserve an existing tombstone if it nevertheless
+  // races in, rather than resetting its retry budget indefinitely.
+  if (gEvenAiPendingCancels[slot].exchangeId != exchangeId) {
+    gEvenAiPendingCancels[slot] = pending;
+  }
+  portEXIT_CRITICAL(&gEvenAiCancelMux);
+
+  if (evictedId) {
+    char evicted[17];
+    g2EvenAiFormatExchangeId(evictedId, evicted);
+    DEBUG_G2F("[G2-EVENAI] cancel retry queue full — evicted oldest id=%s",
+              evicted);
+  }
+}
+
+static bool g2EvenAiCancelRetryPending() {
+  bool pending = false;
+  portENTER_CRITICAL(&gEvenAiCancelMux);
+  for (uint8_t i = 0; i < G2_EVENAI_CANCEL_DEPTH; ++i) {
+    if (gEvenAiPendingCancels[i].exchangeId) {
+      pending = true;
+      break;
+    }
+  }
+  portEXIT_CRITICAL(&gEvenAiCancelMux);
+  return pending;
+}
+
+// Worker-only retry driver. At most one nonblocking UART attempt is admitted
+// per owner lap, keeping BLE control work bounded even if the host is gone.
+static void g2EvenAiCancelRetryTick() {
+  const uint32_t nowMs = millis();
+  G2EvenAiPendingCancel attempt{};
+  int attemptSlot = -1;
+  uint8_t expired = 0;
+
+  portENTER_CRITICAL(&gEvenAiCancelMux);
+  for (uint8_t i = 0; i < G2_EVENAI_CANCEL_DEPTH; ++i) {
+    G2EvenAiPendingCancel& pending = gEvenAiPendingCancels[i];
+    if (!pending.exchangeId) continue;
+    const uint32_t age = nowMs - pending.firstQueuedMs;
+    if (age >= G2_EVENAI_CANCEL_TTL_MS ||
+        pending.attempts >= G2_EVENAI_CANCEL_MAX_ATTEMPTS) {
+      pending = {};
+      expired++;
+      continue;
+    }
+    if (attemptSlot < 0 &&
+        (int32_t)(nowMs - pending.nextTryMs) >= 0) {
+      attemptSlot = i;
+      attempt = pending;
+      pending.attempts++;
+      pending.nextTryMs = nowMs + G2_EVENAI_CANCEL_RETRY_MS;
+    }
+  }
+  portEXIT_CRITICAL(&gEvenAiCancelMux);
+
+  if (expired) {
+    DEBUG_G2F("[G2-EVENAI] expired %u advisory cancel tombstone(s)",
+              (unsigned)expired);
+  }
+  if (attemptSlot < 0) return;
+  if (!g2EvenAiTryCancelEvent(attempt.exchangeId, attempt.sessionEpoch,
+                              attempt.reason)) return;
+
+  bool complete = false;
+  uint8_t deliveredCopies = 0;
+  portENTER_CRITICAL(&gEvenAiCancelMux);
+  if (gEvenAiPendingCancels[attemptSlot].exchangeId == attempt.exchangeId) {
+    G2EvenAiPendingCancel& pending = gEvenAiPendingCancels[attemptSlot];
+    if (pending.deliveredCopies < UINT8_MAX) pending.deliveredCopies++;
+    deliveredCopies = pending.deliveredCopies;
+    complete = deliveredCopies >= G2_EVENAI_CANCEL_COPIES;
+    if (complete) pending = {};
+  }
+  portEXIT_CRITICAL(&gEvenAiCancelMux);
+  char id[17];
+  g2EvenAiFormatExchangeId(attempt.exchangeId, id);
+  DEBUG_G2F("[G2-EVENAI] cancel copy delivered id=%s copy=%u/%u%s",
+            id, (unsigned)deliveredCopies,
+            (unsigned)G2_EVENAI_CANCEL_COPIES,
+            complete ? " complete" : "");
+}
+
+// Fail-closed terminal authority. The EVT is a best-effort latency hint to the
+// CM5, never the safety fence: a full UART ring/auth loss can drop it, while
+// tagged display commands still reject against the terminal local state.
+static bool g2EvenAiTerminate(uint64_t expectedId, const char* reason) {
+  uint64_t endedId = 0;
+  uint32_t endedSessionEpoch = 0;
+  portENTER_CRITICAL(&gEvenAiSessionMux);
+  if (gEvenAiSession.active &&
+      (expectedId == 0 || gEvenAiSession.exchangeId == expectedId)) {
+    endedId = gEvenAiSession.exchangeId;
+    endedSessionEpoch = gEvenAiSession.uartSessionEpoch;
+    gEvenAiSession.active = false;
+    gEvenAiSession.enterPending = false;
+    gEvenAiSession.replyStreaming = false;
+    gEvenAiSession.armSide = 0;
+    gEvenAiSession.armGeneration = 0;
+    gEvenAiSession.uartSessionEpoch = 0;
+  }
+  portEXIT_CRITICAL(&gEvenAiSessionMux);
+  if (!endedId) return false;
+
+  // Local terminal commit is the safety fence. Stop the exact live shadow
+  // immediately and nonblockingly before any advisory UART cancellation.
+  liveAudioRecorderAbort(endedId);
+
+  char id[17];
+  g2EvenAiFormatExchangeId(endedId, id);
+  const bool pushed = g2EvenAiTryCancelEvent(
+      endedId, endedSessionEpoch, reason);
+  // EVT transport is CRC-protected but unacknowledged. Keep the tombstone
+  // even after a locally accepted write and send three total copies; the host
+  // keys cancellation by exchange ID, so duplicates are harmless while a
+  // reset/corrupt UART frame no longer silently wastes a full inference.
+  g2EvenAiQueueCancelRetry(endedId, endedSessionEpoch, reason,
+                           pushed ? 1 : 0);
+  DEBUG_G2F("[G2-EVENAI] terminal id=%s reason=%s cancelEvt=%s",
+            id, (reason && reason[0]) ? reason : "ended",
+            pushed ? "queued+repeat" : "retry-pending");
+  if (gBeatSem) xSemaphoreGive(gBeatSem);
+  return true;
+}
+
+// magicRandom must fit the glasses' byte-sized field: every value they use is
+// < 256 (g2ai's constants are 212-215, wake/exit are 12-15). A larger value
+// encodes as a 3-byte varint and the firmware SILENTLY DROPS the whole message
+// — the bug that made the first cut render nothing and let the wake session
+// time out despite heartbeats. Vary within a byte like the phone's nextMagic().
+static inline uint32_t g2EvenAiNextMagic() {
+  portENTER_CRITICAL(&gEvenAiSessionMux);
+  if (++gEvenAiMagicCtr > 250) gEvenAiMagicCtr = 200;
+  const uint32_t magic = gEvenAiMagicCtr;
+  portEXIT_CRITICAL(&gEvenAiSessionMux);
+  return magic;
+}
+
+static G2Temple* g2EvenAiBoundArm(uint64_t exchangeId) {
+  const G2EvenAiSessionState s = g2EvenAiSessionSnapshot();
+  if (!s.active || s.exchangeId != exchangeId) return nullptr;
+  G2Temple* arm = s.armSide == 'R' ? &gR : (s.armSide == 'L' ? &gL : nullptr);
+  if (!arm || !arm->connected || arm->pluginDead ||
+      arm->connectionGeneration != s.armGeneration) return nullptr;
+  return arm;
+}
+
+static bool g2EvenAiSendGuardedEnvelope(uint64_t exchangeId,
+                                        const uint8_t* data, size_t len) {
+  G2Temple* arm = g2EvenAiBoundArm(exchangeId);
+  if (!arm) return false;
+  return sendEnvelopeEx(*arm, data, len, G2_CENTRAL_TX_ENVELOPE_MS,
+                        exchangeId) == G2SendResult::Ok;
+}
+
+static bool g2EvenAiSendCtrl(uint64_t exchangeId, uint32_t status) {
+  uint8_t buf[64];
+  size_t n = g2BuildEvenAICtrl(allocSeq(), g2EvenAiNextMagic(), status, buf, sizeof(buf));
+  return n && g2EvenAiSendGuardedEnvelope(exchangeId, buf, n);
+}
+
+static bool g2EvenAiSendHeartbeat(uint64_t exchangeId) {
+  uint32_t hbCnt = 0;
+  portENTER_CRITICAL(&gEvenAiSessionMux);
+  if (gEvenAiSession.active && gEvenAiSession.exchangeId == exchangeId) {
+    hbCnt = ++gEvenAiSession.hbCnt;
+  }
+  portEXIT_CRITICAL(&gEvenAiSessionMux);
+  if (!hbCnt) return false;
+  uint8_t buf[48];
+  size_t n = g2BuildEvenAIHeartbeat(allocSeq(), g2EvenAiNextMagic(),
+                                    hbCnt, buf, sizeof(buf));
+  return n && g2EvenAiSendGuardedEnvelope(exchangeId, buf, n);
+}
+
+// ASK fills the listening popup with the (host-recognized) prompt.
+static bool g2EvenAiSendAsk(uint64_t exchangeId, const char* text) {
+  uint8_t buf[320];
+  size_t n = g2BuildEvenAIAsk(allocSeq(), g2EvenAiNextMagic(), /*cmdCnt*/ 0,
+                              text, buf, sizeof(buf));
+  const bool ok = n && g2EvenAiSendGuardedEnvelope(exchangeId, buf, n);
+  if (ok) g2EvenAiMarkActivity(exchangeId);
+  return ok;
+}
+
+// ANALYSE ("thinking") then REPLY paints the answer window. Mirrors the
+// host-reply pipeline that was HW-verified 2026-04-26 (ANALYSE transitions the
+// FSM out of LISTEN so REPLY renders); ENTER is ensured above (wake or manual).
+// Per-message text is capped ~250 B by g2BuildEvenAIReply (single-fragment pb
+// limit) — long answers stream as multiple fTextEnd=0 parts + an END marker,
+// the shape the stock app uses (REPLY chunks then fTextEnd=1).
+static bool g2EvenAiSendReplyRaw(uint64_t exchangeId, const char* text, bool isLast,
+                                 bool withAnalyse) {
+  uint8_t buf[320];
+  if (withAnalyse) {
+    size_t n = g2BuildEvenAIAnalyse(allocSeq(), g2EvenAiNextMagic(),
+                                    buf, sizeof(buf));
+    if (!n || !g2EvenAiSendGuardedEnvelope(exchangeId, buf, n)) return false;
+    vTaskDelay(pdMS_TO_TICKS(150));
+    // The wearer can dismiss during the deliberate LISTEN→answer delay.
+    // Re-resolve the bound arm before building/sending any REPLY bytes.
+    if (!g2EvenAiBoundArm(exchangeId)) return false;
+  }
+  size_t n = g2BuildEvenAIReply(allocSeq(), g2EvenAiNextMagic(), /*cmdCnt*/ 0,
+                                text, isLast, buf, sizeof(buf));
+  const bool ok = n && g2EvenAiSendGuardedEnvelope(exchangeId, buf, n);
+  if (ok) g2EvenAiMarkActivity(exchangeId);
+  return ok;
+}
+
+static bool g2EvenAiSendReply(uint64_t exchangeId,
+                              const char* text) {  // one-shot (≤250 B text)
+  g2EvenAiSetReplyStreaming(exchangeId, false);
+  return g2EvenAiSendReplyRaw(exchangeId, text, /*isLast*/ true,
+                              /*withAnalyse*/ true);
+}
+
+// Runs on the control owner after a CRC-verified native WAKE. A new WAKE is a
+// hard boundary: supersede any old exchange first, then bind this one to the
+// exact temple connection epoch that delivered it.
+static void g2EvenAiOnWakeUp(G2Temple& temple, uint32_t rxGeneration) {
+  gEvenAiLastWakeMs = millis();   // timing anchor for evenai_timing
+  const uint64_t priorId = g2EvenAiCurrentExchangeId();
+  if (priorId) g2EvenAiTerminate(priorId, "superseded");
+
+  uint32_t nonceCandidate = esp_random();
+  if (!nonceCandidate) nonceCandidate = 1;
+  uint64_t exchangeId = 0;
+  portENTER_CRITICAL(&gEvenAiSessionMux);
+  if (!gEvenAiBootNonce) gEvenAiBootNonce = nonceCandidate;
+  if (++gEvenAiExchangeCounter == 0) ++gEvenAiExchangeCounter;
+  exchangeId = ((uint64_t)gEvenAiBootNonce << 32) |
+      (uint64_t)gEvenAiExchangeCounter;
+  gEvenAiSession.active = true;
+  gEvenAiSession.enterPending = true;
+  gEvenAiSession.replyStreaming = false;
+  gEvenAiSession.exchangeId = exchangeId;
+  gEvenAiSession.armSide = temple.side;
+  gEvenAiSession.armGeneration =
+      rxGeneration ? rxGeneration : temple.connectionGeneration;
+  gEvenAiSession.uartSessionEpoch = 0;
+  gEvenAiSession.lastActMs = millis();
+  gEvenAiSession.lastHbMs = 0;
+  gEvenAiSession.hbCnt = 0;
+  portEXIT_CRITICAL(&gEvenAiSessionMux);
+
+  char id[17];
+  g2EvenAiFormatExchangeId(exchangeId, id);
+  DEBUG_G2F("[G2-EVENAI] wake id=%s arm=%c gen=%lu — arming session",
+            id, temple.side,
+            (unsigned long)(rxGeneration ? rxGeneration
+                                         : temple.connectionGeneration));
+  if (gBeatSem) xSemaphoreGive(gBeatSem);
+}
+
+static void g2EvenAiOnExit(G2Temple& temple, uint32_t rxGeneration) {
+  const G2EvenAiSessionState s = g2EvenAiSessionSnapshot();
+  if (!s.active) return;
+  // Native controls can be mirrored or arrive late from a prior BLE epoch.
+  // Only the exact temple connection that initiated this exchange is allowed
+  // to dismiss it; an unrelated arm/epoch must not cancel the wearer's newer
+  // invocation.
+  if (s.armSide != temple.side || !rxGeneration ||
+      s.armGeneration != rxGeneration) {
+    char id[17];
+    g2EvenAiFormatExchangeId(s.exchangeId, id);
+    DEBUG_G2F("[G2-EVENAI] ignored EXIT id=%s from arm=%c gen=%lu "
+              "(bound=%c/%lu)",
+              id, temple.side, (unsigned long)rxGeneration,
+              s.armSide, (unsigned long)s.armGeneration);
+    return;
+  }
+  g2EvenAiTerminate(s.exchangeId, "dismiss");
+}
+
+static void g2EvenAiOnTempleDisconnect(char side,
+                                       uint32_t disconnectedGeneration) {
+  const G2EvenAiSessionState s = g2EvenAiSessionSnapshot();
+  if (s.active && s.armSide == side &&
+      s.armGeneration == disconnectedGeneration) {
+    g2EvenAiTerminate(s.exchangeId, "disconnect");
+  }
+}
+
+// ── Phase 2: wake → auto-capture + CM5 host push ────────────────────────────
+// When a wake session opens AND a logged-in CM5 host session exists on the
+// UART link, the tick auto-starts a VAD-endpointed recording from the live G2
+// mic stream (the LC3 subscription is on-connect, so audio is already flowing
+// — zero start latency vs. asking the host to react) and pushes ONE EVT frame
+// ("evenai_wake") to the host. The push happens only after the recorder FSM is
+// CAPTURING, so the host can never race task/buffer setup or a stale
+// currentRecordingPath from an earlier capture. From there the host owns the
+// flow: poll micrecord until the VAD auto-stop → micrecord stop (path) →
+// voicefetch → STT → `g2evenai askid <id>` → LLM → tagged reply parts.
+#if ENABLE_MICROPHONE
+extern bool submitCommandAsync(const Command& cmd, ExecAsyncCallback callback,
+                               void* userData);
+
+enum : uint8_t {
+  EVENAI_CAP_IDLE     = 0,  // no auto-capture in flight
+  EVENAI_CAP_STARTING = 1,  // openmic/micrecord submitted, awaiting CAPTURING
+  EVENAI_CAP_LIVE     = 2,  // recording confirmed; evenai_wake pushed
+};
+static uint8_t        gEvenAiCapState  = EVENAI_CAP_IDLE;  // worker-task only
+static uint32_t       gEvenAiCapKickMs = 0;
+static bool           gEvenAiCapStopSubmitted = false;
+static uint64_t       gEvenAiCapExchangeId = 0;
+// Trailing-silence stop for wake captures. 1200 ms was too tight in use:
+// cut sits at 2x the ambient floor (~330 on the G2 temple mic), and ordinary
+// speech valleys between words land at 160-300, so every inter-word dip spent
+// budget and a short thinking pause ended the utterance mid-sentence. 1800 ms
+// buys ~5 more chunks of dip. The cost is a flat +600 ms on every exchange,
+// which is noise next to the multi-second voicefetch.
+static const uint32_t kEvenAiVadSilenceMs      = 1800;  // trailing-silence stop
+static const uint32_t kEvenAiCapStartTimeoutMs = 5000;
+
+// Fire-and-forget internal command on cmd_exec, attributed to the bound UART
+// host role. Do not read the mutable gUartUser String from this worker task;
+// the exact non-transferable authority is the separately latched login epoch.
+// Mirrors queueAutomationSubCommand in System_Automation.cpp;
+// MSG_ROUTE_FILE keeps results off every live surface (audit log only).
+static bool g2EvenAiSubmitCmd(const char* line) {
+  Command uc;
+  uc.line = line;
+  uc.ctx.origin         = ORIGIN_SYSTEM;
+  uc.ctx.auth.transport = SOURCE_INTERNAL;
+  uc.ctx.auth.user      = "uart-session";
+  uc.ctx.auth.ip        = "";
+  uc.ctx.auth.path      = "/g2evenai";
+  uc.ctx.auth.sid       = "";
+  uc.ctx.auth.opaque    = nullptr;
+  uc.ctx.id             = (uint32_t)millis();
+  uc.ctx.timestampMs    = (uint32_t)millis();
+  uc.ctx.outputMask     = MSG_ROUTE_FILE;
+  uc.ctx.validateOnly   = false;
+  uc.ctx.replyHandle    = nullptr;
+  uc.ctx.httpReq        = nullptr;
+  if (!submitCommandAsync(uc, nullptr, nullptr)) {
+    DEBUG_G2F("[G2-EVENAI] cmd submit failed (queue full?): %s", line);
+    return false;
+  }
+  return true;
+}
+
+// Runs every worker lap BEFORE the session-active early-return, so cleanup
+// still happens after an EXIT. All transitions occur on the worker task.
+static void g2EvenAiCaptureTick() {
+  if (gEvenAiCapState == EVENAI_CAP_IDLE) return;
+  const MicRecordingState recState = getMicRecordingState();
+  const G2EvenAiSessionState nativeSession = g2EvenAiSessionSnapshot();
+  const uint64_t activeId = nativeSession.active
+                                ? nativeSession.exchangeId : 0;
+  if (!activeId || activeId != gEvenAiCapExchangeId) {
+    // Session ended (glasses EXIT or safety timeout) with a capture pending
+    // or live. Stop/finalize the exact owned generation and discard it: a
+    // partial post-dismissal WAV must never produce a usable host question.
+    if (!gEvenAiCapStopSubmitted && gEvenAiCapExchangeId) {
+      char id[17];
+      char cmd[64];
+      g2EvenAiFormatExchangeId(gEvenAiCapExchangeId, id);
+      snprintf(cmd, sizeof(cmd), "micrecord stopid %s discard", id);
+      if (g2EvenAiSubmitCmd(cmd)) {
+        gEvenAiCapStopSubmitted = true;
+        DEBUG_G2F("[G2-EVENAI] terminal capture id=%s — stop+discard submitted",
+                  id);
+      }
+    }
+    // A STARTING command may still be queued on cmd_exec. Keep ownership until
+    // it either becomes busy (and is stopped above) or times out; LIVE remains
+    // occupied through STOPPING/FINALIZING and releases only at recorder IDLE.
+    if (gEvenAiCapState == EVENAI_CAP_LIVE &&
+        recState == MicRecordingState::IDLE) {
+      gEvenAiCapState = EVENAI_CAP_IDLE;
+      gEvenAiCapStopSubmitted = false;
+      gEvenAiCapExchangeId = 0;
+    } else if (gEvenAiCapState == EVENAI_CAP_STARTING &&
+               recState == MicRecordingState::IDLE &&
+               millis() - gEvenAiCapKickMs >= kEvenAiCapStartTimeoutMs) {
+      gEvenAiCapState = EVENAI_CAP_IDLE;
+      gEvenAiCapStopSubmitted = false;
+      gEvenAiCapExchangeId = 0;
+    }
+    return;
+  }
+  if (gEvenAiCapState == EVENAI_CAP_STARTING) {
+    if (recState == MicRecordingState::CAPTURING) {
+      // The start runs asynchronously on cmd_exec. A manual/foreign start can
+      // win after canCapture observed IDLE but before our queued startid runs;
+      // global CAPTURING alone would then publish a false wake for S1. Require
+      // the recorder's synchronized owner token to match this exact exchange.
+      // NOT_READY is the owned API's active/in-progress result; any other
+      // outcome is fail-closed and exact stopid cleanup cannot touch the
+      // foreign capture.
+      const MicRecordingOwnedOp ownerOp = getRecordingResultOwned(
+          (MicRecordingOwner)gEvenAiCapExchangeId, nullptr);
+      if (ownerOp != MicRecordingOwnedOp::NOT_READY) {
+        char id[17];
+        g2EvenAiFormatExchangeId(gEvenAiCapExchangeId, id);
+        DEBUG_G2F("[G2-EVENAI] capture owner mismatch id=%s op=%u — "
+                  "wake not published",
+                  id, (unsigned)ownerOp);
+        (void)g2EvenAiSendCtrl(gEvenAiCapExchangeId, G2_AI_STATUS_EXIT);
+        g2EvenAiTerminate(gEvenAiCapExchangeId, "capture_owner_mismatch");
+        return;
+      }
+      gEvenAiCapState = EVENAI_CAP_LIVE;
+      char id[17];
+      char evt[48];
+      g2EvenAiFormatExchangeId(gEvenAiCapExchangeId, id);
+      snprintf(evt, sizeof(evt), "evenai_wake %s", id);
+      if (g2EvenAiExchangeBoundToUartSession(
+              gEvenAiCapExchangeId, nativeSession.uartSessionEpoch) &&
+          uartLinkPushEventForSession(
+              nativeSession.uartSessionEpoch, evt)) {
+        DEBUG_G2F("[G2-EVENAI] capture live id=%s — pushed wake to host", id);
+      } else {
+        // Link/session died between kick and start. Do not hold the native
+        // card open for a consumer that never learned this ID; termination
+        // makes the next capture tick stop+discard the owned recording.
+        DEBUG_G2F("[G2-EVENAI] capture live but host wake push failed");
+        (void)g2EvenAiSendCtrl(gEvenAiCapExchangeId, G2_AI_STATUS_EXIT);
+        g2EvenAiTerminate(gEvenAiCapExchangeId, "wake_event_failed");
+      }
+    } else if (millis() - gEvenAiCapKickMs >= kEvenAiCapStartTimeoutMs) {
+      DEBUG_G2F("[G2-EVENAI] capture never started within %lums — giving up",
+                (unsigned long)kEvenAiCapStartTimeoutMs);
+      // Keep the capture owner until the terminal cleanup submits a tagged
+      // stop behind any delayed start command on cmd_exec. Clearing it here
+      // would let a late STARTING command create an unowned recording.
+      (void)g2EvenAiSendCtrl(gEvenAiCapExchangeId, G2_AI_STATUS_EXIT);
+      g2EvenAiTerminate(gEvenAiCapExchangeId, "capture_start_timeout");
+    }
+    return;
+  }
+  // EVENAI_CAP_LIVE: nothing to drive — the VAD auto-stop ends the recording
+  // and the host owns stop/fetch/delete. Re-arm for a later session once the
+  // recording has ended.
+  if (recState == MicRecordingState::IDLE) {
+    gEvenAiCapState = EVENAI_CAP_IDLE;
+    gEvenAiCapStopSubmitted = false;
+    gEvenAiCapExchangeId = 0;
+  }
+}
+#endif  // ENABLE_MICROPHONE
+
+// Worker-context session tick: send the owed ENTER, heartbeat ~3 s, and safety
+// EXIT after kEvenAiSessionMaxMs of no ask/reply activity. Runs inside
+// heartbeatWorkerTask (never the BLE notify task).
+static void g2EvenAiSessionTick() {
+#if ENABLE_MICROPHONE
+  g2EvenAiCaptureTick();  // before the active check — must run post-EXIT too
+#endif
+  G2EvenAiSessionState s = g2EvenAiSessionSnapshot();
+  if (!s.active) return;
+  const uint64_t exchangeId = s.exchangeId;
+#if ENABLE_MICROPHONE
+  // A deliberate UART-link stop or authentication revocation means the CM5
+  // can no longer finish this exchange.  Commit the local display fence now;
+  // the advisory cancel may be undeliverable, but captureTick will still
+  // finalize+discard the exact owned WAV.  (A crashed host process cannot be
+  // detected on a permanently-open UART without a future host lease/heartbeat;
+  // the 60 s session cap remains that last-resort bound.)
+  if (!uartLinkIsRunning() || uartLinkSessionEpoch() == 0 ||
+      (s.uartSessionEpoch != 0 &&
+       uartLinkSessionEpoch() != s.uartSessionEpoch)) {
+    (void)g2EvenAiSendCtrl(exchangeId, G2_AI_STATUS_EXIT);
+    g2EvenAiTerminate(exchangeId, "host_link_lost");
+    return;
+  }
+#endif
+  if (!g2EvenAiBoundArm(exchangeId)) {
+    g2EvenAiTerminate(exchangeId, "link_lost");
+    return;
+  }
+  const uint32_t nowMs = millis();
+  if (g2EvenAiTakeEnterPending(exchangeId)) {
+    uint32_t admittedSessionEpoch = uartLinkSessionEpoch();
+#if ENABLE_MICROPHONE
+    // No-consumer guard: with no logged-in CM5 host session (or a foreign
+    // recording hogging the mic) nobody can transcribe or answer this wake.
+    // Playing the phone role anyway held the native "listening" card open on
+    // our heartbeats until the glasses gave up (~41 s observed on the bench,
+    // daemon down). Decline instead — no ENTER, no heartbeat — and the
+    // glasses fall back to their stock no-phone timeout (~7 s "trouble
+    // understanding"), which is honest feedback that the assistant is off.
+    // If a rapid new wake superseded an exchange whose recorder is still
+    // finalizing, defer this ENTER until the exact old owner reaches IDLE.
+    // Reusing that capture for the new exchange would cross-contaminate IDs.
+    if (gEvenAiCapState != EVENAI_CAP_IDLE &&
+        gEvenAiCapExchangeId != exchangeId) {
+      g2EvenAiSetEnterPending(exchangeId, true);
+      return;
+    }
+    const bool canCapture =
+        uartLinkIsRunning() && admittedSessionEpoch != 0 &&
+        getMicRecordingState() == MicRecordingState::IDLE &&
+        gEvenAiCapState == EVENAI_CAP_IDLE;
+    if (!canCapture) {
+      DEBUG_G2F("[G2-EVENAI] wake declined — no host to answer "
+                "(link=%d auth=%d foreignRec=%d)",
+                (int)uartLinkIsRunning(),
+                (int)(uartLinkSessionEpoch() != 0),
+                (int)micRecordingBusy());
+      g2EvenAiTerminate(exchangeId, "no_consumer");
+      return;
+    }
+#endif
+    // Bind the native exchange before ENTER or any later tagged mutation.
+    // A logout/re-login, even by the same user/controller, cannot inherit it.
+    portENTER_CRITICAL(&gEvenAiSessionMux);
+    if (gEvenAiSession.active &&
+        gEvenAiSession.exchangeId == exchangeId &&
+        uartLinkSessionEpoch() == admittedSessionEpoch &&
+        admittedSessionEpoch != 0) {
+      gEvenAiSession.uartSessionEpoch = admittedSessionEpoch;
+    }
+    portEXIT_CRITICAL(&gEvenAiSessionMux);
+    if (!g2EvenAiSendCtrl(exchangeId, G2_AI_STATUS_ENTER)) {
+      g2EvenAiTerminate(exchangeId, "enter_failed");
+      return;
+    }
+    portENTER_CRITICAL(&gEvenAiSessionMux);
+    if (gEvenAiSession.active &&
+        gEvenAiSession.exchangeId == exchangeId) {
+      gEvenAiSession.lastHbMs = nowMs;
+    }
+    portEXIT_CRITICAL(&gEvenAiSessionMux);
+#if ENABLE_MICROPHONE
+    // Phase 2 kick: capture the utterance for the CM5. canCapture held above
+    // (or a prior capture is still in flight and owns the mic).
+    if (gEvenAiCapState == EVENAI_CAP_IDLE && canCapture) {
+      if (!gMicRunning) g2EvenAiSubmitCmd("openmic");
+      // `trim` drops old leading room tone (keeping pre-roll) and most trailing
+      // silence without shortening the detection window — this capture is only
+      // consumed by STT, which has no use for either tail.
+      char id[17];
+      char cmd[80];
+      g2EvenAiFormatExchangeId(exchangeId, id);
+      snprintf(cmd, sizeof(cmd), "micrecord startid %s vad %lu trim", id,
+               (unsigned long)kEvenAiVadSilenceMs);
+      // If native recorder shadow is enabled, convert it to a one-shot exact
+      // {controller, exchange, login-epoch} arm before queueing startid.
+      (void)liveAudioRecorderArmNative(exchangeId, admittedSessionEpoch);
+      if (g2EvenAiSubmitCmd(cmd)) {
+        gEvenAiCapState  = EVENAI_CAP_STARTING;
+        gEvenAiCapKickMs = nowMs;
+        gEvenAiCapStopSubmitted = false;
+        gEvenAiCapExchangeId = exchangeId;
+      } else {
+        (void)g2EvenAiSendCtrl(exchangeId, G2_AI_STATUS_EXIT);
+        g2EvenAiTerminate(exchangeId, "capture_start_failed");
+        return;
+      }
+    }
+#endif
+  }
+  s = g2EvenAiSessionSnapshot();
+  if (!s.active || s.exchangeId != exchangeId) return;
+  if (nowMs - s.lastHbMs >= kEvenAiHbIntervalMs) {
+    portENTER_CRITICAL(&gEvenAiSessionMux);
+    if (gEvenAiSession.active &&
+        gEvenAiSession.exchangeId == exchangeId) {
+      gEvenAiSession.lastHbMs = nowMs;
+    }
+    portEXIT_CRITICAL(&gEvenAiSessionMux);
+    g2EvenAiSendHeartbeat(exchangeId);
+  }
+  if (nowMs - s.lastActMs >= kEvenAiSessionMaxMs) {
+    g2EvenAiSendCtrl(exchangeId, G2_AI_STATUS_EXIT);
+    g2EvenAiTerminate(exchangeId, "timeout");
+    DEBUG_G2F("[G2-EVENAI] session timed out (%lums idle) — sent EXIT",
+              (unsigned long)(nowMs - s.lastActMs));
+  }
+}
+
 static void heartbeatWorkerTask(void* /*arg*/) {
   while (!gBeatTaskStop) {
     // This is now the G2 control owner as well as the heartbeat worker.
@@ -9393,12 +10762,122 @@ static void heartbeatWorkerTask(void* /*arg*/) {
     portENTER_CRITICAL(&gControlStateMux);
     policyTxnActive = gControlTxn.active;
     portEXIT_CRITICAL(&gControlStateMux);
-    const uint32_t ownerWaitMs = policyTxnActive ? 250u : 6000u;
+    // While a headless G2-mic capture is active, wake ~1 Hz so the keepalive
+    // re-assert below runs on time (the mic dies ~2 s after the last arm).
+    bool g2MicCaptureActive = false;
+#if ENABLE_MICROPHONE
+    g2MicCaptureActive =
+        (audioCaptureActive() && audioGetSource() == AUDIO_SRC_G2_LEFT);
+#endif
+    const bool cancelRetryPending = g2EvenAiCancelRetryPending();
+    // gMicRecFile/pending-close: a bench g2micrec dump has no HAL capture,
+    // but its PSRAM staging ring still needs ~1 Hz drain laps (6 s laps would
+    // eat half the 256-slot ring before the first flush).
+    const bool micRecDrainPending =
+        (gMicRecFile != nullptr) || gMicRecPendingClose;
+    const uint32_t ownerWaitMs = cancelRetryPending ? G2_EVENAI_CANCEL_RETRY_MS
+                               : policyTxnActive ? 250u
+                               : (g2MicCaptureActive || g2EvenAiSessionIsActive()
+                                  || micRecDrainPending)
+                                   ? 1000u : 6000u;
     const bool signalled =
         xSemaphoreTake(gBeatSem, pdMS_TO_TICKS(ownerWaitMs)) == pdTRUE;
     if (gBeatTaskStop) break;
 
+#if ENABLE_MICROPHONE
+    // Recompute AFTER the (up to 6 s) sleep: a capture stop during the wait
+    // would otherwise leave a stale true here, and the keepalive below would
+    // re-enable the stream with no capture running — which both streams LC3
+    // into the void and (worse) skips the next capture's rising-edge reset,
+    // making a previous capture's `degraded` latch immortal. The pre-sleep
+    // value above is only ever used for ownerWaitMs.
+    g2MicCaptureActive =
+        (audioCaptureActive() && audioGetSource() == AUDIO_SRC_G2_LEFT);
+#endif
+
+#if ENABLE_MICROPHONE
+    // Headless G2-mic keepalive. The glasses drop the LC3 stream on any lens
+    // teardown and never tell us; without a MIC-detail lens ticking to re-arm
+    // (the CM5/UART path has none), the mic goes silent after ~2 s. Re-assert
+    // ~1 Hz while capture is active and a lens container is up (the glasses
+    // only emit audio while a page is up, so arming into a torn-down lens is
+    // pointless). Mirrors renderMicDetailLive's re-arm, minus the page.
+    if (g2MicCaptureActive && gL.connected && g2LensGetState().containerReady) {
+      static uint32_t sLastMicReassertMs = 0;
+      const uint32_t nowMs = millis();
+      if (nowMs - sLastMicReassertMs >= 1000u) {
+        sLastMicReassertMs = nowMs;
+        g2MicStreamReassert();
+      }
+    }
+
+    // Mid-capture conn-param re-assert. The peer can L2CAP-renegotiate the
+    // interval at any time (observed: glasses idle state lands 72-84 ticks,
+    // latency 4 — measured halving mic delivery); the GAP handler clears the
+    // de-dup cache on peer renegotiation, so this reapply genuinely goes on
+    // air. Only while capture holds FAST and the link is measurably slow.
+    if (g2MicCaptureActive && gL.connected &&
+        g2ConnPriFastDepth() > 0 && g2LinkIsSlow(&gL)) {
+      g2ConnPriReapply();
+    }
+
+    // Delivered-rate watchdog evaluation (counters live in the notify path,
+    // which cannot detect total silence — if delivery stops, the callback
+    // stops running, so the judgment has to live here). A >1 s silent gap
+    // reads as rate 0 regardless of the last bucket value. Deliberately NOT
+    // gated on gMicStreamOn: a mid-capture container teardown clears that
+    // flag while the capture starves — the exact case that must latch.
+    // Gated on an actual RECORDING: the idle-open mic (autostart) delivers
+    // zero frames by design (no container) and must not latch degraded.
+    if (g2MicCaptureActive && micRecordingCapturing()) {
+      const uint32_t nowW = millis();
+      if (nowW - gMicStreamOnSinceMs >= kMicRateGraceMs) {
+        const uint32_t r10 =
+            (nowW - gMicL.lastFrameMs > 1000u) ? 0u : gMicL.rateX10;
+        if (r10 < kMicRateDegradedX10) {
+          if (gMicRateBelowSinceMs == 0) {
+            gMicRateBelowSinceMs = nowW;
+          } else if (nowW - gMicRateBelowSinceMs >= kMicRateDwellMs &&
+                     !gMicRateDegraded) {
+            gMicRateDegraded = true;
+            DEBUG_G2F("[G2-MIC] delivered-rate DEGRADED: %u.%u/s vs 20.0/s "
+                      "nominal — capture is suspect, host should prefer the "
+                      "WAV path (g2micstats degraded=1)",
+                      (unsigned)(r10 / 10), (unsigned)(r10 % 10));
+          }
+        } else {
+          gMicRateBelowSinceMs = 0;
+        }
+      }
+    }
+
+#endif
+
+    // Drain the g2micrec staging ring (no-op when idle; try-take skips the
+    // lap if a CLI stop is mid-drain). Outside ENABLE_MICROPHONE — the raw
+    // dump has no mic-sensor dependency — and AFTER the keepalive above so
+    // an SD stall inside the bounded drain can never delay the mic re-assert.
+    micRecDrainTick();
+
+    // Native WAKE/EXIT boundaries have their own admitted queue. Decode all
+    // of them before any ENTER/heartbeat/capture work so a dismissal already
+    // received from the glasses always wins this owner lap.
     G2RxPacket p;
+    while (g2RxEvenAiCtrlDequeue(&p)) {
+      G2Temple& temple = (p.side == 'L') ? gL : gR;
+      processNotify(temple, p.data, p.len, p.generation);
+      if (gBeatTaskStop) break;
+    }
+    if (gBeatTaskStop) break;
+
+    // A terminal fence is already committed before a cancel is queued. Retry
+    // only the advisory host notification here, after native boundaries and
+    // before admitting any work for a possibly newer exchange.
+    g2EvenAiCancelRetryTick();
+
+    // Native "Hey Even" session phone-role (ENTER + heartbeat + safety EXIT).
+    g2EvenAiSessionTick();
+
     while (g2RxPacketDequeue(&p)) {
       G2Temple& temple = (p.side == 'L') ? gL : gR;
       processNotify(temple, p.data, p.len, p.generation);
@@ -9504,6 +10983,19 @@ static bool g2ControlWorkerEnsure() {
     gRxPacketHead = gRxPacketTail = gRxPacketCount = 0;
     portEXIT_CRITICAL(&gRxPacketMux);
   }
+  if (!gRxEvenAiCtrlPackets) {
+    gRxEvenAiCtrlPackets = (G2RxPacket*)ps_alloc(
+        sizeof(G2RxPacket) * G2_RX_EVENAI_CTRL_DEPTH,
+        AllocPref::PreferPSRAM, "g2.rx-evenai-control");
+    if (!gRxEvenAiCtrlPackets) {
+      DEBUG_G2F("[G2] control owner: EvenAI control RX ring allocation failed");
+      g2ControlStartingDone();
+      return false;
+    }
+    portENTER_CRITICAL(&gRxPacketMux);
+    gRxEvenAiCtrlHead = gRxEvenAiCtrlTail = gRxEvenAiCtrlCount = 0;
+    portEXIT_CRITICAL(&gRxPacketMux);
+  }
   gBeatTaskStop = false;
 
   const uint32_t totalFree = (uint32_t)ESP.getFreeHeap();
@@ -9543,7 +11035,8 @@ static bool g2ControlWorkerEnsure() {
   DEBUG_G2F("[G2] control owner started (stack=%u internal=%u total=%u rxRing=%u PSRAM)",
             (unsigned)G2_CONTROL_STACK_BYTES, (unsigned)internalFree,
             (unsigned)totalFree,
-            (unsigned)(sizeof(G2RxPacket) * G2_RX_PACKET_DEPTH));
+            (unsigned)(sizeof(G2RxPacket) *
+                       (G2_RX_PACKET_DEPTH + G2_RX_EVENAI_CTRL_DEPTH)));
   return true;
 }
 
@@ -9568,6 +11061,18 @@ static void stopHeartbeatTimer() {
 }
 
 static bool g2ControlWorkerShutdown() {
+  // The heartbeat worker is the g2micrec staging ring's drainer; stopping it
+  // with a file open (or a pending deferred close) would orphan staged tail
+  // packets until a manual `g2micrec stop`. Flush + close best-effort first —
+  // task context, bounded waits.
+  if (gMicRecFile || gMicRecPendingClose) {
+    gMicRecPendingClose = true;
+    micRecDrainTick();
+    if (gMicRecFile || gMicRecPendingClose) {
+      DEBUG_G2F("[G2-MIC-REC] worker shutdown with recorder close still "
+                "pending — run g2micrec stop to finish");
+    }
+  }
   const uint32_t startDeadline = millis() + 500;
   while (true) {
     portENTER_CRITICAL(&gControlLifecycleMux);
@@ -9592,6 +11097,7 @@ static bool g2ControlWorkerShutdown() {
   }
   portENTER_CRITICAL(&gRxPacketMux);
   gRxPacketHead = gRxPacketTail = gRxPacketCount = 0;
+  gRxEvenAiCtrlHead = gRxEvenAiCtrlTail = gRxEvenAiCtrlCount = 0;
   portEXIT_CRITICAL(&gRxPacketMux);
   return true;
 }
@@ -10804,6 +12310,15 @@ bool g2ConnectSaved() {
 
 bool g2Disconnect() {
   g2ControlStartBlockAcquire();
+  // Explicit teardown stops the control owner before disconnecting temples.
+  // Do not rely on a later BLE callback to fence the exchange: some client
+  // implementations deliver onDisconnect after disconnectTemple has already
+  // cleared `connected`, and the stopped owner cannot repair that ordering.
+  // Commit the local terminal state and advisory host cancel first.
+  const uint64_t activeEvenAiId = g2EvenAiCurrentExchangeId();
+  if (activeEvenAiId) {
+    g2EvenAiTerminate(activeEvenAiId, "disconnect");
+  }
   // If a connect is in flight, signal cancel + force-disconnect the BLE
   // links so the worker's blocking GATT calls unblock and the *Sync body
   // returns. The worker (shared across G2 + Ring) keeps running for
@@ -10943,7 +12458,7 @@ static void g2GapEventHandler(esp_gap_ble_cb_event_t event,
   DEBUG_G2F("[G2-%c] Conn params APPLIED: int=%u (%u.%02u ms) latency=%u "
             "timeout=%u status=%u %s | by=%s evt-range=%u-%u",
             side, (unsigned)p.conn_int,
-            (unsigned)(p.conn_int * 5 / 4), (unsigned)((p.conn_int * 125 / 100) % 100),
+            (unsigned)(p.conn_int * 5 / 4), (unsigned)((p.conn_int * 125) % 100),
             (unsigned)p.latency, (unsigned)p.timeout,
             (unsigned)p.status, connStatusName((uint16_t)p.status),
             connEvtWhoName(who),
@@ -11120,8 +12635,8 @@ static volatile int sFastDepth     = 0;
 //
 // Measured 2026-07-27: the temples run their own two-state power machine and
 // tell us both states outright —
-//     active   request 12-24, latency 0   (we saw them land 24 = 30.30 ms)
-//     idle     request 72-84, latency 4   (landed 84 = 105.05 ms)
+//     active   request 12-24, latency 0   (we saw them land 24 = 30 ms)
+//     idle     request 72-84, latency 4   (landed 84 = 105 ms)
 // Slave latency 4 lets them skip four of every five connection events. EVERY
 // request we send carries latency 0, so pinning them fast costs ~7x the event
 // rate AND removes that 5x skip — on the order of 35x more mandatory radio
@@ -15756,6 +17271,12 @@ static const char* cmd_g2connect(const String& argsInput) {
   String arg = ca.arg(0);
   arg.toLowerCase();
 
+  // `openg2` means "be a G2 central." Record client as the desired BLE role so
+  // the loop's reconnect tick keeps the radio in client mode (and never yanks it
+  // to server) — this is the settings arbiter the tick reads. Eager like the
+  // pair-intent stamp below: intent is captured even if the connect later fails.
+  setSetting(gSettings.bleMode, (int)BLE_MODE_G2_CLIENT);
+
   // Pair-intent stamp from the CALLING task's identity. `openg2` from a
   // logged-in CLI session IS the natural pairing gesture — the user is
   // saying "these are my glasses." Stamp pairedByUser NOW, before the
@@ -16162,6 +17683,179 @@ static const char* cmd_g2ai_direct(const String& argsInput) {
          : "Error: G2: AI reply failed";
 }
 
+// Push text into the LIVE native "Hey Even" session — the one the glasses open
+// on the wake word and hold via g2EvenAiSessionTick's ENTER+heartbeat. Unlike
+// g2ai (which fabricates a host card and skips the prompt panel), ASK lands in
+// the native listening popup and REPLY in the native response window. The CM5
+// Production verbs carry the strict 16-hex exchange ID emitted with the wake.
+// Untagged legacy verbs deliberately fail closed; deliberate bench-created
+// cards remain available through `g2ai*`, whose semantics explicitly include
+// CTRL{ENTER}.
+static bool g2EvenAiParseExchangeId(const String& token, uint64_t* out) {
+  if (!out || token.length() != 16) return false;
+  uint64_t value = 0;
+  for (size_t i = 0; i < 16; ++i) {
+    const char c = token.charAt(i);
+    uint8_t nibble = 0;
+    if (c >= '0' && c <= '9') nibble = (uint8_t)(c - '0');
+    else if (c >= 'a' && c <= 'f') nibble = (uint8_t)(c - 'a' + 10);
+    else if (c >= 'A' && c <= 'F') nibble = (uint8_t)(c - 'A' + 10);
+    else return false;
+    value = (value << 4) | nibble;
+  }
+  // Keep the UART grammar identical to the recorder owner and CM5 parser:
+  // exchange IDs are boot-nonce:exchange-counter, and both uint32 halves are
+  // required to be non-zero.  A merely non-zero uint64_t would admit a
+  // partially initialized identity that no native wake can ever create.
+  if ((uint32_t)(value >> 32) == 0 ||
+      (uint32_t)(value & 0xFFFFFFFFu) == 0) {
+    return false;
+  }
+  *out = value;
+  return true;
+}
+
+static bool g2EvenAiParseTaggedTail(const String& input, uint64_t* outId,
+                                    String* outTailRaw) {
+  const int sp = input.indexOf(' ');
+  const String idToken = sp < 0 ? input : input.substring(0, sp);
+  if (!g2EvenAiParseExchangeId(idToken, outId)) return false;
+  if (outTailRaw) *outTailRaw = sp < 0 ? String("") : input.substring(sp + 1);
+  return true;
+}
+
+static const char* cmd_g2evenai(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String arg = argsInput; arg.trim();
+  const int sp = arg.indexOf(' ');
+  String sub  = (sp < 0) ? arg : arg.substring(0, sp);
+  // restRaw keeps leading whitespace: streamed replypart deltas carry their
+  // inter-chunk space at the FRONT (the window appends parts verbatim, and a
+  // trimmed chunk would weld words across the boundary). rest is the trimmed
+  // view every non-streaming subcommand uses.
+  String restRaw = (sp < 0) ? String("") : arg.substring(sp + 1);
+  String rest = restRaw;
+  rest.trim();
+  sub.toLowerCase();
+
+  if (sub == "ask" || sub == "reply" || sub == "replypart" ||
+      sub == "replyend" || sub == "exit") {
+    // Coordinated CM5/XIAO deployment is the normal path, but fail safe if a
+    // stale daemon reaches a newer firmware.  Merely rejecting an untagged
+    // mutation would leave the native card alive on our heartbeats until the
+    // 60 s safety timeout.  Close the one active exchange instead; the old
+    // command still never mutates its ASK/REPLY content, and deliberate bench
+    // cards remain available through the separate `g2ai` command family.
+    const uint64_t activeId = g2EvenAiCurrentExchangeId();
+    if (activeId) {
+      (void)g2EvenAiSendCtrl(activeId, G2_AI_STATUS_EXIT);
+      (void)g2EvenAiTerminate(activeId, "legacy_command");
+    }
+    return activeId
+        ? "Error: G2: tagged EvenAI exchange ID required; active exchange terminated"
+        : "Error: G2: tagged EvenAI exchange ID required; use askid/replyid/replypartid/replyendid/exitid";
+  }
+
+  uint64_t exchangeId = 0;
+  String taggedRaw;
+  String tagged;
+  if (sub == "askid" || sub == "replyid" || sub == "replypartid" ||
+      sub == "replyendid" || sub == "exitid") {
+    if (!g2EvenAiParseTaggedTail(restRaw, &exchangeId, &taggedRaw)) {
+      return "Error: G2: expected a strict 16-hex EvenAI exchange ID";
+    }
+    tagged = taggedRaw;
+    tagged.trim();
+    const G2EvenAiSessionState taggedSession = g2EvenAiSessionSnapshot();
+    if (!g2EvenAiBoundArm(exchangeId) ||
+        !g2EvenAiExchangeBoundToUartSession(
+            exchangeId, taggedSession.uartSessionEpoch)) {
+      return "Error: G2: EvenAI exchange inactive, dismissed, or mismatched";
+    }
+  }
+
+  if (sub == "askid") {
+    if (tagged.length() == 0)
+      return "Error: usage: g2evenai askid <16hex-id> <text>";
+    if (g2EvenAiSendAsk(exchangeId, tagged.c_str())) {
+      return "G2: EvenAI ASK sent (prompt -> listening popup)";
+    }
+    // A non-replayed production mutation cannot safely resume after a BLE
+    // busy/write failure: an ASK or append delta may already be partially on
+    // the lens.  End the local exchange immediately instead of heartbeating a
+    // stuck listening/partial card until the 60 s safety timeout.  If EXIT was
+    // the reason this send failed, both guarded calls simply reject the stale
+    // ID and the already-committed terminal state remains authoritative.
+    (void)g2EvenAiSendCtrl(exchangeId, G2_AI_STATUS_EXIT);
+    (void)g2EvenAiTerminate(exchangeId, "send_failed");
+    return "Error: G2: EvenAI ASK cancelled or send failed; exchange terminal";
+  }
+  if (sub == "replyid") {
+    if (tagged.length() == 0)
+      return "Error: usage: g2evenai replyid <16hex-id> <text>";
+    if (g2EvenAiSendReply(exchangeId, tagged.c_str())) {
+      return "G2: EvenAI REPLY sent (answer -> response window)";
+    }
+    (void)g2EvenAiSendCtrl(exchangeId, G2_AI_STATUS_EXIT);
+    (void)g2EvenAiTerminate(exchangeId, "send_failed");
+    return "Error: G2: EvenAI REPLY cancelled or send failed; exchange terminal";
+  }
+  if (sub == "replypartid") {
+    // Streaming: DELTA text per part (the window appends; per-message cap
+    // ~250 B — the caller chunks). taggedRaw deliberately preserves any
+    // second space after the ID as inter-chunk glue.
+    if (tagged.length() == 0)
+      return "Error: usage: g2evenai replypartid <16hex-id> <text>";
+    const bool first = !g2EvenAiReplyStreaming(exchangeId);
+    if (g2EvenAiSendReplyRaw(exchangeId, taggedRaw.c_str(), /*isLast*/ false,
+                             /*withAnalyse*/ first)) {
+      g2EvenAiSetReplyStreaming(exchangeId, true);
+      return first ? "G2: EvenAI REPLY stream opened (part sent)"
+                   : "G2: EvenAI REPLY part sent";
+    }
+    (void)g2EvenAiSendCtrl(exchangeId, G2_AI_STATUS_EXIT);
+    (void)g2EvenAiTerminate(exchangeId, "send_failed");
+    return "Error: G2: EvenAI REPLY part cancelled or send failed; exchange terminal";
+  }
+  if (sub == "replyendid") {
+    // Finalizer: REPLY{fTextEnd=1}; optional trailing text rides it, bare =
+    // empty END marker (mirrors the stock app's _sendReplyEnd).
+    const bool streaming = g2EvenAiReplyStreaming(exchangeId);
+    const bool ok = g2EvenAiSendReplyRaw(
+        exchangeId, tagged.length() ? taggedRaw.c_str() : "",
+        /*isLast*/ true, /*withAnalyse*/ !streaming);
+    g2EvenAiSetReplyStreaming(exchangeId, false);
+    if (ok) return "G2: EvenAI REPLY stream finalized";
+    (void)g2EvenAiSendCtrl(exchangeId, G2_AI_STATUS_EXIT);
+    (void)g2EvenAiTerminate(exchangeId, "send_failed");
+    return "Error: G2: EvenAI REPLY end cancelled or send failed; exchange terminal";
+  }
+  if (sub == "exitid") {
+    const bool sent = g2EvenAiSendCtrl(exchangeId, G2_AI_STATUS_EXIT);
+    g2EvenAiTerminate(exchangeId, "host_exit");
+    return sent ? "G2: EvenAI EXIT sent; exchange terminal"
+                : "Error: G2: exchange terminal; EXIT send failed";
+  }
+  if (sub == "capabilities") {
+    return "OK: EvenAI exchange-id-v1 verbs=askid,replyid,replypartid,replyendid,exitid legacy=fail-closed";
+  }
+  // bare / "status"
+  EXT_RAM_BSS_ATTR static char buf[192];
+  const G2EvenAiSessionState s = g2EvenAiSessionSnapshot();
+  char id[17] = "-";
+  if (s.active) g2EvenAiFormatExchangeId(s.exchangeId, id);
+  const uint32_t idle = s.active ? (millis() - s.lastActMs) : 0;
+  snprintf(buf, sizeof(buf),
+           "EvenAI session: %s id=%s arm=%c gen=%lu uart_epoch=%lu "
+           "(hb=%lu, idle=%lums)",
+           s.active ? "active" : "idle", id,
+           s.active ? s.armSide : '-',
+           (unsigned long)(s.active ? s.armGeneration : 0),
+           (unsigned long)s.uartSessionEpoch,
+           (unsigned long)s.hbCnt, (unsigned long)idle);
+  return buf;
+}
+
 // =============================================================================
 // Protocol exploration helpers — g2protostats + g2probe
 // =============================================================================
@@ -16211,7 +17905,7 @@ static const char* cmd_g2protostats(const String& argsInput) {
     BROADCAST_PRINTF(" ");
     BROADCAST_PRINTF("EvenAI (sid=0x07) commandIds (even_ai_pb.ts):");
     BROADCAST_PRINTF("  0 NONE  1 CTRL  2 VAD_INFO  3 ASK  4 ANALYSE  5 REPLY");
-    BROADCAST_PRINTF("  6 SKILL  7 PROMPT  8 EVENT  9 HEARTBEAT  10 CONFIG  12 COMM_RSP");
+    BROADCAST_PRINTF("  6 SKILL  7 PROMPT  8 EVENT  9 HEARTBEAT  10 CONFIG  161 COMM_RSP");
     BROADCAST_PRINTF(" ");
     BROADCAST_PRINTF("EvenHub (sid=0xE0) cmds (EvenHub_pb.ts EvenHub_Cmd_List):");
     BROADCAST_PRINTF("  0 CREATE  1 CreateResp  2 DevEvent  3 ImageRaw  5 UpdateText");
@@ -16263,7 +17957,7 @@ static const char* cmd_g2probe(const String& argsInput) {
     return "Error: invalid arguments — Usage: g2probe <sid_hex> <cmd_dec> [body_hex]\n"
            "  Fires `08 <cmd> 10 <magic> [body]` on the given sid (flag=0x20).\n"
            "  Example: g2probe 07 9              -- EvenAI HEARTBEAT\n"
-           "           g2probe 07 10 080110A001  -- EvenAI CONFIG voiceSwitch=0,streamSpeed=160\n"
+           "           g2probe 07 10 6A07080010A0012000 -- EvenAI CONFIG voice=0,speed=160,duplex=0\n"
            "  Mutation sids 01/03/04/09 and dev_config sid=80 are blocked; use typed commands.";
   }
   const uint8_t sid = (uint8_t)strtoul(ca.arg(0).c_str(), nullptr, 16);
@@ -17067,21 +18761,39 @@ static const char* cmd_g2micoff(const String& /*argsInput*/) {
 
 static const char* cmd_g2micstats(const String& /*argsInput*/) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  EXT_RAM_BSS_ATTR static char ret[320];
+  EXT_RAM_BSS_ATTR static char ret[448];
   auto fmtArm = [](char side, const G2MicProbe& m, char* out, size_t cap) {
     uint32_t span = (m.frameCount > 1) ? (m.lastFrameMs - m.firstFrameMs) : 0;
     uint32_t fps = span ? (m.frameCount * 1000u) / span : 0;
+    // fps = whole-session average since g2micreset; rate = last ~2 s bucket,
+    // forced to 0 after >1 s of silence (the bucket only rolls on arrivals,
+    // so the raw value would otherwise read stale-nonzero forever after the
+    // stream dies — the exact lie this command exists to catch).
+    // gap_events/lost come from the trailer counter (byte 204) — real on-wire
+    // loss, unlike the old audio-entropy `gaps` field they replace.
+    const uint32_t r10 =
+        (m.frameCount == 0 || millis() - m.lastFrameMs > 1000u) ? 0u
+                                                                : m.rateX10;
     snprintf(out, cap,
-             "%c=%u frames %u B (CC=%u CD=%u other=%u gaps=%u ~%u fps)",
+             "%c=%u frames %u B (gap_events=%u lost=%u stalls=%u ~%u fps "
+             "rate=%u.%u/s)",
              side, (unsigned)m.frameCount, (unsigned)m.bytesTotal,
-             (unsigned)m.byte0CC, (unsigned)m.byte0CD,
-             (unsigned)m.byte0Other, (unsigned)m.seqGaps, (unsigned)fps);
+             (unsigned)m.seqGapEvents, (unsigned)m.seqPacketsLost,
+             (unsigned)m.stallEvents, (unsigned)fps,
+             (unsigned)(r10 / 10), (unsigned)(r10 % 10));
   };
-  char l[160], r[160];
+  char l[176], r[176];
   fmtArm('L', gMicL, l, sizeof(l));
   fmtArm('R', gMicR, r, sizeof(r));
-  snprintf(ret, sizeof(ret), "G2 mic: %s | %s%s", l, r,
-           gMicProbeActive ? " (stream ON)" : " (stream OFF)");
+  snprintf(ret, sizeof(ret),
+           "G2 mic: %s | %s%s | afe mutex_drop=%u decode_fail=%u plc=%u "
+           "overrun=%u depth=%u degraded=%u",
+           l, r, gMicProbeActive ? " (stream ON)" : " (stream OFF)",
+           (unsigned)gMicAfeMutexDrops.load(std::memory_order_relaxed),
+           (unsigned)gMicAfeDecodeFails.load(std::memory_order_relaxed),
+           (unsigned)gMicAfePlcFrames.load(std::memory_order_relaxed),
+           (unsigned)gMicAfeOverruns, (unsigned)gMicAfeRingCount,
+           (unsigned)(gMicRateDegraded ? 1 : 0));
   return ret;
 }
 
@@ -17089,6 +18801,11 @@ static const char* cmd_g2micreset(const String& /*argsInput*/) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   resetMicProbeStats(gMicL);
   resetMicProbeStats(gMicR);
+  gMicAfeMutexDrops.store(0, std::memory_order_relaxed);
+  gMicAfeDecodeFails.store(0, std::memory_order_relaxed);
+  gMicAfePlcFrames.store(0, std::memory_order_relaxed);
+  gMicRateDegraded     = false;
+  gMicRateBelowSinceMs = 0;
   return "G2 mic: counters reset";
 }
 
@@ -17132,19 +18849,19 @@ static const char* cmd_g2micrec(const String& argsInput) {
   sub.toLowerCase();
 
   ensureMicRecMutex();
-  if (!gMicRecMutex) return "Error: G2 mic rec: mutex alloc failed";
+  if (!gMicRecMutex || !gMicRecDrainMutex)
+    return "Error: G2 mic rec: mutex alloc failed";
 
+  // File lifetime, counters, and metadata belong to the DRAIN mutex domain
+  // (the BLE producer only stages packets into the PSRAM ring). cmd_exec may
+  // block here briefly behind a heartbeat drain lap — bounded by its 250 ms
+  // FS wait.
   if (sub == "start") {
     if (!VFS::isSDAvailable()) return "Error: G2 mic rec: SD card not available";
-    xSemaphoreTake(gMicRecMutex, portMAX_DELAY);
-    if (gMicRecFile) {
-      xSemaphoreGive(gMicRecMutex);
-      return "Error: G2 mic rec: already recording — run g2micrec stop first";
-    }
     String path;
     if (ca.count() > 1) {
       const char* qerr = requireQuotedToken(ca, 1, path);
-      if (qerr) { xSemaphoreGive(gMicRecMutex); return qerr; }
+      if (qerr) return qerr;
     }
     if (path.length() == 0) {
       uint32_t ts = (uint32_t)time(nullptr);
@@ -17155,21 +18872,34 @@ static const char* cmd_g2micrec(const String& argsInput) {
     } else if (!path.startsWith("/")) {
       path = String("/sd/") + path;
     }
+    xSemaphoreTake(gMicRecDrainMutex, portMAX_DELAY);
+    if (gMicRecFile) {
+      xSemaphoreGive(gMicRecDrainMutex);
+      return "Error: G2 mic rec: already recording — run g2micrec stop first";
+    }
     FsLockGuard fsGuard("g2.mic_raw.open");
     File* f = new File(VFS::openGuarded(path, "w", currentAuthContext(), true));
     if (!f || !*f) {
       delete f;
-      xSemaphoreGive(gMicRecMutex);
+      xSemaphoreGive(gMicRecDrainMutex);
       snprintf(ret, sizeof(ret), "G2 mic rec: failed to open %s", path.c_str());
       return ret;
     }
-    gMicRecFile    = f;
+    // Reset the staging ring so a previous run's residue can't leak into
+    // this file, then publish the open file for the producer's gate check.
+    xSemaphoreTake(gMicRecMutex, portMAX_DELAY);
+    gMicRecRingHead = gMicRecRingTail = 0;
+    gMicRecRingOverflows = 0;
+    gMicRecMutexMisses   = 0;
+    xSemaphoreGive(gMicRecMutex);
+    gMicRecPendingClose = false;
     gMicRecPath    = path;
     gMicRecBytes   = 0;
     gMicRecPackets = 0;
     gMicRecStartMs = millis();
     gMicRecArm     = 'L';
-    xSemaphoreGive(gMicRecMutex);
+    gMicRecFile    = f;
+    xSemaphoreGive(gMicRecDrainMutex);
     snprintf(ret, sizeof(ret),
              "G2 mic rec: writing to %s (cap %u B). Run g2micon if stream "
              "isn't active; g2micrec stop to close.",
@@ -17178,38 +18908,64 @@ static const char* cmd_g2micrec(const String& argsInput) {
   }
 
   if (sub == "stop") {
-    xSemaphoreTake(gMicRecMutex, portMAX_DELAY);
+    xSemaphoreTake(gMicRecDrainMutex, portMAX_DELAY);
     if (!gMicRecFile) {
-      xSemaphoreGive(gMicRecMutex);
+      xSemaphoreGive(gMicRecDrainMutex);
       return "Error: G2 mic rec: not recording";
     }
+    // Flush everything still staged before closing — this is the lossless
+    // half of the 2026-08-10 rework. cmd_exec context: a generous FS wait is
+    // fine, but the batch count is bounded to one ring's worth (+ slack) so a
+    // pathologically slow SD with the stream still enabled cannot wedge
+    // cmd_exec until the 5 MB cap.
+    micRecDrainLocked(/*fsWaitMs=*/2000,
+                      /*maxBatches=*/(int)(kMicRecRingSlots / kMicRecDrainBatch) + 2);
     String path     = gMicRecPath;
     uint32_t bytes  = gMicRecBytes;
     uint32_t pkts   = gMicRecPackets;
+    uint32_t drops  = gMicRecRingOverflows;
+    uint32_t misses = gMicRecMutexMisses;
     uint32_t durMs  = millis() - gMicRecStartMs;
-    micRecCloseLocked("user stop");
-    xSemaphoreGive(gMicRecMutex);
+    if (!micRecCloseLocked("user stop", /*fsWaitMs=*/10000)) {
+      gMicRecPendingClose = true;   // heartbeat finishes the close
+      xSemaphoreGive(gMicRecDrainMutex);
+      return "Error: G2 mic rec: FS busy — close deferred to background";
+    }
+    xSemaphoreGive(gMicRecDrainMutex);
     snprintf(ret, sizeof(ret),
-             "G2 mic rec: closed %s (%u packets, %u B, %u ms)",
-             path.c_str(), (unsigned)pkts, (unsigned)bytes, (unsigned)durMs);
+             "G2 mic rec: closed %s (%u packets, %u B, %u ms, ring_drops=%u "
+             "mutex_miss=%u)",
+             path.c_str(), (unsigned)pkts, (unsigned)bytes, (unsigned)durMs,
+             (unsigned)drops, (unsigned)misses);
     return ret;
   }
 
   // status (default)
-  xSemaphoreTake(gMicRecMutex, portMAX_DELAY);
+  if (xSemaphoreTake(gMicRecDrainMutex, pdMS_TO_TICKS(500)) != pdTRUE)
+    return "G2 mic rec: busy (drain in progress) — retry";
   if (!gMicRecFile) {
-    xSemaphoreGive(gMicRecMutex);
+    xSemaphoreGive(gMicRecDrainMutex);
     return "G2 mic rec: idle (use g2micrec start [\"path\"])";
   }
   String path    = gMicRecPath;
   uint32_t bytes = gMicRecBytes;
   uint32_t pkts  = gMicRecPackets;
+  uint32_t drops = gMicRecRingOverflows;
+  uint32_t misses = gMicRecMutexMisses;
   uint32_t durMs = millis() - gMicRecStartMs;
-  xSemaphoreGive(gMicRecMutex);
+  uint16_t queued = 0;
+  if (gMicRecMutex && xSemaphoreTake(gMicRecMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+    queued = (uint16_t)((gMicRecRingHead + kMicRecRingSlots - gMicRecRingTail) %
+                        kMicRecRingSlots);
+    xSemaphoreGive(gMicRecMutex);
+  }
+  xSemaphoreGive(gMicRecDrainMutex);
   snprintf(ret, sizeof(ret),
-           "G2 mic rec: %s — %u packets, %u B, %u ms (%u%% of cap)",
+           "G2 mic rec: %s — %u packets, %u B, %u ms (%u%% of cap, "
+           "queued=%u ring_drops=%u mutex_miss=%u)",
            path.c_str(), (unsigned)pkts, (unsigned)bytes, (unsigned)durMs,
-           (unsigned)((bytes * 100u) / kMicRecMaxBytes));
+           (unsigned)((bytes * 100u) / kMicRecMaxBytes),
+           (unsigned)queued, (unsigned)drops, (unsigned)misses);
   return ret;
 }
 
@@ -17358,44 +19114,45 @@ static const char* cmd_g2micwav(const String& argsInput) {
   return ret;
 }
 
-// EvenAI CONFIG probe (Cmd=10). Fires a single CONFIG message with
-// caller-specified voiceSwitch / streamSpeed values. Use to characterise
-// what the firmware accepts vs. rejects on this sub-command — the
-// reference docs name CONFIG=10 but never ship a worked example, so we
-// learn its schema by trying and watching COMM_RSP.
+// EvenAI CONFIG (Cmd=10). Sends the stock schema verified against a G2 2.2.7
+// request/response: wrapper f13 with voiceSwitch=f1, streamSpeed=f2, and the
+// newer duplexMode=f4. Bare invocation sends the captured stock shape; whether
+// any setting persists or changes rendering is a separate hardware question.
 //
 // Usage:
-//   g2aiconfig                 -> empty body (just cmd+magic) — does the
-//                                 firmware ack a no-payload CONFIG?
-//   g2aiconfig 0               -> voiceSwitch=0 only
-//   g2aiconfig 1 160           -> voiceSwitch=1, streamSpeed=160 (the
-//                                 example string from g2-kit-unofficial)
-//   g2aiconfig - 200           -> streamSpeed only (use - to skip
-//                                 voiceSwitch)
+//   g2aiconfig                 -> stock voiceSwitch=0, speed=80, duplex=0
+//   g2aiconfig 0 40            -> speed=40, other stock values retained
+//   g2aiconfig 0 160 0         -> speed=160 explicitly
+//   g2aiconfig - 200 -         -> streamSpeed only (use - to omit a field)
 //
-// Watch the next inbound sid=0x07 frame for COMM_RSP errorCode — 0
-// means the firmware liked the body, anything else tells us we
-// guessed a field number wrong.
+// Success is normally echoed as CONFIG; rejection is COMM_RSP with a nonzero
+// errorCode. Both carry the request magic for correlation.
 static const char* cmd_g2aiconfig(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  EXT_RAM_BSS_ATTR static char ret[160];
+  EXT_RAM_BSS_ATTR static char ret[192];
   CommandArgs ca(argsInput);
 
-  uint64_t voiceSwitch = UINT64_MAX;  // sentinel = omit
-  uint64_t streamSpeed = UINT64_MAX;
+  uint64_t voiceSwitch = 0;
+  uint64_t streamSpeed = 80;
+  uint64_t duplexMode  = 0;
 
   if (ca.count() >= 1) {
     String a = ca.arg(0);
-    if (a != "-" && a.length() > 0) voiceSwitch = (uint64_t)a.toInt();
+    voiceSwitch = (a == "-") ? UINT64_MAX : (uint64_t)a.toInt();
   }
   if (ca.count() >= 2) {
     String a = ca.arg(1);
-    if (a != "-" && a.length() > 0) streamSpeed = (uint64_t)a.toInt();
+    streamSpeed = (a == "-") ? UINT64_MAX : (uint64_t)a.toInt();
+  }
+  if (ca.count() >= 3) {
+    String a = ca.arg(2);
+    duplexMode = (a == "-") ? UINT64_MAX : (uint64_t)a.toInt();
   }
 
+  const uint32_t magic = g2EvenAiNextMagic();
   uint8_t env[128];
-  size_t n = g2BuildEvenAIConfig(allocSeq(), G2_MAGIC_EVEN_AI_CTRL,
-                                 voiceSwitch, streamSpeed,
+  size_t n = g2BuildEvenAIConfig(allocSeq(), magic,
+                                 voiceSwitch, streamSpeed, duplexMode,
                                  env, sizeof(env));
   if (n == 0) return "Error: G2: aiconfig — envelope build failed";
 
@@ -17404,16 +19161,19 @@ static const char* cmd_g2aiconfig(const String& argsInput) {
   if (!sendEnvelope(*arm, env, n)) return "Error: G2: aiconfig — send failed (mutex timeout?)";
 
   // Format what we sent so the user can correlate with the next RX log.
-  char vsBuf[16] = "(omit)";
-  char ssBuf[16] = "(omit)";
+  char vsBuf[24] = "(omit)";
+  char ssBuf[24] = "(omit)";
+  char dmBuf[24] = "(omit)";
   if (voiceSwitch != UINT64_MAX) snprintf(vsBuf, sizeof(vsBuf), "%llu",
                                           (unsigned long long)voiceSwitch);
   if (streamSpeed != UINT64_MAX) snprintf(ssBuf, sizeof(ssBuf), "%llu",
                                           (unsigned long long)streamSpeed);
+  if (duplexMode != UINT64_MAX) snprintf(dmBuf, sizeof(dmBuf), "%llu",
+                                         (unsigned long long)duplexMode);
   snprintf(ret, sizeof(ret),
-           "G2: aiconfig sent — voiceSwitch=%s streamSpeed=%s — "
-           "watch logs for sid=0x07 COMM_RSP errorCode",
-           vsBuf, ssBuf);
+           "G2: aiconfig sent — magic=%u voiceSwitch=%s streamSpeed=%s duplexMode=%s — "
+           "watch logs for CONFIG echo or COMM_RSP errorCode",
+           (unsigned)magic, vsBuf, ssBuf, dmBuf);
   return ret;
 }
 
@@ -17918,8 +19678,9 @@ extern const CommandEntry g2Commands[] = {
   { "g2ai",         "Front-pane AI card (full pipeline): g2ai <text>", false, cmd_g2ai, "Usage: g2ai <text>" },
   { "g2ai-noask",   "Variant: skip ASK step: g2ai-noask <text>",       false, cmd_g2ai_noask, "Usage: g2ai-noask <text>" },
   { "g2ai-direct",  "Variant: CTRL+REPLY only: g2ai-direct <text>",    false, cmd_g2ai_direct, "Usage: g2ai-direct <text>" },
+  { "g2evenai",     "Push into the matching live Hey-Even exchange (strict 16-hex ID required)", false, cmd_g2evenai, "Usage: g2evenai <askid|replyid|replypartid|replyendid|exitid> <16hex-id> [text]\n  status:       show active exchange ID/arm/generation\n  capabilities: show guarded command contract\n  replypartid:  stream one delta (leading glue preserved)\n  legacy ask/reply/replypart/replyend/exit fail closed; use g2ai for deliberate bench cards" },
   { "g2aih",        "Front-pane card with custom heading: g2aih <heading>|<body>", false, cmd_g2aih, "Usage: g2aih <heading>|<body>  (no | = whole text as body)" },
-  { "g2aiconfig",   "Probe EvenAI CONFIG (cmd=10): g2aiconfig [voiceSwitch] [streamSpeed], use - to omit",  false, cmd_g2aiconfig, "Usage: g2aiconfig [voiceSwitch] [streamSpeed]  (use - to omit a field; bare = empty body)" },
+  { "g2aiconfig",   "Send EvenAI CONFIG (cmd=10): g2aiconfig [voiceSwitch] [streamSpeed] [duplexMode]",  false, cmd_g2aiconfig, "Usage: g2aiconfig [voiceSwitch] [streamSpeed] [duplexMode]  (defaults: 0 80 0; use - to omit a field)" },
   { "g2imgprobe",   "Probe Cmd=3 multi-frag wire path: g2imgprobe [size_bytes]",                            false, cmd_g2imgprobe, "Usage: g2imgprobe [size_bytes]  (1..4096, default 1024)" },
   { "g2micon",      "G2 mic probe: AudioCtrCmd{en=1} on LEFT (or 'r' for RIGHT)",                           false, cmd_g2micon, "Usage: g2micon [r]  (default LEFT; arg starting r = RIGHT)" },
   { "g2micoff",     "G2 mic probe: AudioCtrCmd{en=0} (stop stream)",                                        false, cmd_g2micoff },
@@ -18197,9 +19958,9 @@ static constexpr uint32_t kImgEnvGapMs_LargeSlow  = 60;
 // Fast/slow link boundary, in 1.25 ms connection-interval ticks.
 //
 // Measured 2026-07-26 on firmware 2.2.4.34:
-//   12 ticks (15.15 ms) — Q27/Q30 sustain the 25 ms large-fragment gap
+//   12 ticks (15 ms)    — Q27/Q30 sustain the 25 ms large-fragment gap
 //                         indefinitely (24/24 and repeated 6/6 frames).
-//   24 ticks (30.30 ms) — the 25 ms gap hits rc=-1 at frag 2 of Q30 and
+//   24 ticks (30 ms)    — the 25 ms gap hits rc=-1 at frag 2 of Q30 and
 //                         strands the write mutex; the 60 ms gap completes
 //                         6/6 in 5369 ms, three runs identical.
 // 16 ticks (20 ms) sits between the two observations.
@@ -18317,7 +20078,7 @@ static const char* cmd_g2envgap(const String& argsInput) {
     } else {
       snprintf(link, sizeof(link), "link int=%u (%u.%02u ms) -> %s",
                (unsigned)ticks, (unsigned)(ticks * 5 / 4),
-               (unsigned)((ticks * 125 / 100) % 100),
+               (unsigned)((ticks * 125) % 100),
                (ticks > kConnIntFastMaxTicks) ? "SLOW" : "FAST");
     }
     const uint32_t ovr = gImgEnvGapOverrideMs;
@@ -18358,7 +20119,7 @@ static void connPriFormatTemple(const G2Temple& t, char* buf, size_t cap) {
   // admits or refuses, and they drive the no-op predicate.
   snprintf(buf, cap, "%c=%u(%u.%02ums) lat=%u tmo=%u st=%u %s by=%s",
            t.side, (unsigned)iv,
-           (unsigned)(iv * 5 / 4), (unsigned)((iv * 125 / 100) % 100),
+           (unsigned)(iv * 5 / 4), (unsigned)((iv * 125) % 100),
            (unsigned)t.connAppliedLatency, (unsigned)t.connAppliedTimeout,
            (unsigned)t.connLastStatus, connStatusName(t.connLastStatus),
            connEvtWhoName(t.connEvtWho));
@@ -18382,7 +20143,7 @@ static void connPriFormatTemple(const G2Temple& t, char* buf, size_t cap) {
 //   9-24   3 links  refused   ← ceiling alone is NOT enough; admission is
 //                               gated on the floor, so only raising min helps
 //   32-48  3 links  ACCEPTED, landed int=48
-//   16-24  2 links  ACCEPTED, landed int=24 (30.30 ms)
+//   16-24  2 links  ACCEPTED, landed int=24 (30 ms)
 //
 // So at 2 links the floor boundary is somewhere in 9 < min <= 16, and the
 // controller hands back the CEILING of the range, not the floor. Getting the
@@ -18410,9 +20171,9 @@ static const char* cmd_g2connpri(const String& argsInput) {
              "BALANCED=%u-%u, arbiter depth=%d (%s); links %s %s",
              (unsigned)gConnIntHighMin, (unsigned)gConnIntHighMax,
              (unsigned)(gConnIntHighMin * 5 / 4),
-             (unsigned)((gConnIntHighMin * 125 / 100) % 100),
+             (unsigned)((gConnIntHighMin * 125) % 100),
              (unsigned)(gConnIntHighMax * 5 / 4),
-             (unsigned)((gConnIntHighMax * 125 / 100) % 100),
+             (unsigned)((gConnIntHighMax * 125) % 100),
              (unsigned)G2_CONN_INT_BALANCED_MIN, (unsigned)G2_CONN_INT_BALANCED_MAX,
              depth, depth > 0 ? "holding BALANCED" : "HIGH",
              lbuf, rbuf);
@@ -18511,8 +20272,8 @@ static const char* cmd_g2connpri(const String& argsInput) {
            "OK: g2connpri HIGH=%u-%u ticks (%u.%02u-%u.%02u ms) on %d link(s), "
            "settled in %u ms%s%s; %s %s",
            (unsigned)wantMin, (unsigned)wantMax,
-           (unsigned)(wantMin * 5 / 4), (unsigned)((wantMin * 125 / 100) % 100),
-           (unsigned)(wantMax * 5 / 4), (unsigned)((wantMax * 125 / 100) % 100),
+           (unsigned)(wantMin * 5 / 4), (unsigned)((wantMin * 125) % 100),
+           (unsigned)(wantMax * 5 / 4), (unsigned)((wantMax * 125) % 100),
            changed, (unsigned)waitedMs,
            timedOut ? " (TIMED OUT - no self-attributed event; values stale)" : "",
            noopWarn, lbuf, rbuf);

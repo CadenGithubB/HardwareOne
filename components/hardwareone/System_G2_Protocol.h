@@ -176,21 +176,26 @@
 #define G2_MAGIC_EVEN_AI_ANALYSE  215
 
 // ── Even-AI subsystem (sid=0x07, EvenAIDataPackage) ─────────────────────────
-// Schema from `ble/gen/even_ai_pb.ts` in g2-kit-unofficial. Field numbers
-// here match the .proto definitions verbatim. Defined-but-unexercised in
-// the reference — host→glasses behaviour is unverified on hardware.
+// Schema from the vendored even_ai.proto plus current stock-phone captures.
+// Field numbers below match those wire sources; individual builders document
+// their hardware verification status.
 #define G2_AI_F_CMD          1   // commandId (eEvenAICommandId)
 #define G2_AI_F_MAGIC        2   // magicRandom
 #define G2_AI_F_CTRL         3   // EvenAIControl
 #define G2_AI_F_ASK          5   // EvenAIAskInfo
 #define G2_AI_F_ANALYSE      6   // EvenAIAnalyseInfo
 #define G2_AI_F_REPLY        7   // EvenAIReplyInfo
+#define G2_AI_F_HEARTBEAT    11  // EvenAIHeartbeat (wrapper field, per even_ai.proto)
+#define G2_AI_F_COMM_RSP     12  // EvenAICommRsp
+#define G2_AI_F_CONFIG       13  // EvenAIConfig
 
 #define G2_AI_CMD_CTRL       1
 #define G2_AI_CMD_ASK        3
 #define G2_AI_CMD_ANALYSE    4
 #define G2_AI_CMD_REPLY      5
 #define G2_AI_CMD_HEARTBEAT  9
+#define G2_AI_CMD_CONFIG     10
+#define G2_AI_CMD_COMM_RSP   161
 
 // eEvenAIStatus
 #define G2_AI_STATUS_WAKE_UP 1   // wake-word listening UI (firmware-initiated normally)
@@ -206,6 +211,15 @@
 #define G2_AI_REPLY_F_MODE    3   // textMode — meaning unverified
 #define G2_AI_REPLY_F_TEXT    4   // text (bytes, UTF-8)
 #define G2_AI_REPLY_F_END     6   // fTextEnd — 1 = last chunk, render-and-hold
+
+// EvenAIHeartbeat fields
+#define G2_AI_HB_F_CNT        1   // hbCnt — monotonic per-session heartbeat counter
+
+// EvenAIConfig fields. voiceSwitch/streamSpeed are in the vendored v2.1
+// schema; duplexMode=field 4 is present in the stock G2 2.2.7 CONFIG request.
+#define G2_AI_CONFIG_F_VOICE_SWITCH  1
+#define G2_AI_CONFIG_F_STREAM_SPEED  2
+#define G2_AI_CONFIG_F_DUPLEX_MODE   4
 
 // ── CRC-16/CCITT-FALSE ───────────────────────────────────────────────────────
 // Polynomial 0x1021, init 0xFFFF, no input reflect, no output reflect, no
@@ -290,6 +304,11 @@ bool g2PbReadVarint(const uint8_t* buf, size_t len, size_t* pos, uint64_t* v);
 bool g2PbReadTag(const uint8_t* buf, size_t len, size_t* pos,
                  uint32_t* field, uint8_t* wire);
 bool g2PbSkipField(const uint8_t* buf, size_t len, size_t* pos, uint8_t wire);
+
+// Parse the common protobuf wrapper prefix `f1=commandId, f2=magicRandom`.
+// Handles multi-byte varints such as EvenAI COMM_RSP=161.
+bool g2ParseCommandMagic(const uint8_t* payload, size_t payloadLen,
+                         uint32_t* outCommand, uint32_t* outMagic);
 
 // ── Container geometry presets ───────────────────────────────────────────────
 // The list/text container's on-lens rectangle is a free parameter in the
@@ -562,14 +581,19 @@ size_t g2BuildEvenAIAnalyse(uint8_t seq, uint32_t magic,
 size_t g2BuildEvenAIReply(uint8_t seq, uint32_t magic, uint32_t cmdCnt,
                           const char* text, bool isLast,
                           uint8_t* out, size_t outCap);
+// EvenAIHeartbeat (Cmd=9). Sent ~every 3 s by the phone role while an EvenAI
+// session is entered; without it the glasses time the session out and show
+// the native "trouble understanding" prompt. hbCnt is a monotonic counter.
+size_t g2BuildEvenAIHeartbeat(uint8_t seq, uint32_t magic, uint32_t hbCnt,
+                              uint8_t* out, size_t outCap);
 
-// Even-AI CONFIG (Cmd=10). Schema fields not in the reference docs;
-// empirically observed in g2-kit-unofficial as `voiceSwitch=field 1`,
-// `streamSpeed=field 2`. Pass uint64_t max for "don't include this
-// field" so the caller can probe individual fields. Returns 0 on
-// overflow.
+// Even-AI CONFIG (Cmd=10). The wrapper field and body were verified against
+// the stock-phone wire shape accepted by G2 firmware 2.2.7. Pass uint64_t max
+// for "don't include this field" so diagnostic callers can still isolate a
+// field. Returns 0 on overflow.
 size_t g2BuildEvenAIConfig(uint8_t seq, uint32_t magic,
                            uint64_t voiceSwitch, uint64_t streamSpeed,
+                           uint64_t duplexMode,
                            uint8_t* out, size_t outCap);
 
 // EvenCore Cmd=3 (APP_UPDATE_IMAGE_RAW_DATA_PACKET) body. Carries one

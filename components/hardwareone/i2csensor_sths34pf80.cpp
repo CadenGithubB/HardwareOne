@@ -494,11 +494,11 @@ const char* cmd_presenceautostart(const String& argsInput) {
   return "Error: invalid arguments — Usage: presenceautostart [on|off]";
 }
 
-// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
+// Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 const CommandEntry presenceCommands[] = {
   // 3-level voice: "sensor" -> "presence" -> "open/close"
-  { "openpresence", "Start STHS34PF80 IR presence/motion sensor.", false, cmd_presencestart, nullptr, "sensor", "presence", "open" },
-  { "closepresence", "Stop STHS34PF80 sensor.", false, cmd_presencestop, nullptr, "sensor", "presence", "close" },
+  { "openpresence", "Start STHS34PF80 IR presence/motion sensor.", false, cmd_presencestart },
+  { "closepresence", "Stop STHS34PF80 sensor.", false, cmd_presencestop },
   { "presenceread", "Read STHS34PF80 presence/motion/temperature data. (add 'json' for JSON output)", false, cmd_presenceread },
   { "presencestatus", "Show STHS34PF80 sensor status. (add 'json' for JSON output)", false, cmd_presencestatus },
   

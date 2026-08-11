@@ -140,9 +140,37 @@ static bool tryMountSD() {
   // VFS::open/read/write while SPI and the FAT volume are being rebuilt.
   FsLockGuard guard("VFS.sdMount");
 #if defined(SD_CS_PIN)
-  // Three full attempts, each with a complete SPI bus reset and both
-  // frequencies (fast first, slow fallback).
-  uint32_t frequencies[] = {4000000, 400000};
+  // Three full attempts, each with a complete SPI bus reset, walking a
+  // fastest-first frequency ladder.
+  //
+  // 10 MHz was ADDED above the previous 4 MHz rung rather than replacing it.
+  // That matters: 4 MHz is the known-good rate this hardware ran on for a long
+  // time, so a card or wiring that cannot sustain 10 MHz lands back on it
+  // instead of dropping to the 400 kHz limp rung — which would be 10x SLOWER
+  // than before the change. Every rung gets its own SD.end() + settle below, so
+  // a failed fast attempt cannot leave stale SPI state behind.
+  //
+  // Why this is worth doing: cmd_voicefetch reads the whole WAV into PSRAM
+  // before it emits a single byte (System_UartLink.cpp), and at 4 MHz SPI
+  // (~410 kB/s through FatFs, MEASURED) that read was 2.47 ms per UART frame —
+  // 31% of total transfer time, and the largest term after the wire itself.
+  //
+  // 10 MHz is divisor-exact: the ESP32-S3 SPI clock derives from the 80 MHz
+  // APB, so only 80/N is achievable. 80/8 = 10 MHz lands exactly; asking for
+  // 12 would quietly give 80/7 = 11.43 MHz.
+  //
+  // 16 MHz rung added 2026-08-10 (requested "15" — not achievable; 80/5 = 16
+  // is the nearest exact divisor, 80/6 = 13.33 the conservative one). Same
+  // ladder logic as the 10 MHz addition: a card/wiring that cannot mount at
+  // 16 falls to the proven 10 and 4 MHz rungs, never to the 400 kHz limp rung.
+  //
+  // CAUTION: a successful mount is necessary but NOT sufficient evidence. The
+  // mount handshake is short and low-rate; marginal signal integrity can pass
+  // it and still corrupt data under sustained reads — and the ladder only
+  // falls back at MOUNT time, so a card that mounts at 16 MHz and corrupts
+  // under load stays at 16 MHz. The real test is sustained voicefetch traffic
+  // with hash comparison — see the note in tryMountSD's caller docs.
+  uint32_t frequencies[] = {16000000, 10000000, 4000000, 400000};
   const int FULL_ATTEMPTS = 3;
 
   for (int attempt = 0; attempt < FULL_ATTEMPTS; attempt++) {
@@ -1204,7 +1232,7 @@ static const char* cmd_sddiag(const String& argsInput) {
 }
 
 // Command registry for SD card commands
-// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
+// Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 const CommandEntry sdCommands[] = {
   { "sdmount", "Mount SD card", false, cmd_sdmount,
     "sdmount - Attempt to mount SD card at /sd" },
@@ -1212,7 +1240,7 @@ const CommandEntry sdCommands[] = {
     "sdunmount - Safely unmount SD card" },
   { "sdformat", "Format SD card as FAT32", true, cmd_sdformat,
     "sdformat confirm - Format SD card (WARNING: erases all data)",
-    nullptr, nullptr, /*requiresSuperAdmin=*/true },
+    /*requiresSuperAdmin=*/true },
   { "sdinfo", "Show SD card information", false, cmd_sdinfo,
     "sdinfo - Display SD card type, size, and usage [json]" },
   { "sddiag", "SD card hardware diagnostics", false, cmd_sddiag,

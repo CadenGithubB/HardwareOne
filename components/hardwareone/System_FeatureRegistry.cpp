@@ -70,8 +70,9 @@ static bool isOledCompiled() {
 }
 
 static bool isNeoPixelCompiled() {
-  // Only show NeoPixel if hardware is configured (pin and count set)
-#if defined(NEOPIXEL_PIN_DEFAULT) && NEOPIXEL_PIN_DEFAULT >= 0 && NEOPIXEL_COUNT_DEFAULT > 0
+  // The feature flag (defaults to pin+count presence; user-overridable) is the
+  // single source of truth now — see ENABLE_NEOPIXEL in System_BuildConfig.h.
+#if ENABLE_NEOPIXEL
   return true;
 #else
   return false;
@@ -673,7 +674,7 @@ static const char* cmd_featuresetup(const String& argsInput) {
 // Command Registry
 // ============================================================================
 
-// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
+// Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 extern const CommandEntry featureCommands[] = {
   { "features", "Show/toggle system features with heap estimates.", true, cmd_features,
     "features              - List all features\n"

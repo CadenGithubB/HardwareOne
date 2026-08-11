@@ -415,14 +415,32 @@ enum R1DailyMetric : uint8_t {
   R1_DAILY_METRIC_ACTIVITY = R1_CMD_ACTIVITY,
 };
 
+// Daily pages expose two independent time fields. Captures prove that the
+// ring can send a zero day base while the latest field is either an absolute
+// epoch or seconds within a day. Keep the wire representation explicit so a
+// caller cannot accidentally turn an unanchored slot into a 1970 timestamp.
+enum R1DailyDayMode : uint8_t {
+  R1_DAILY_DAY_ZERO_BASE = 0,
+  R1_DAILY_DAY_EPOCH,
+  R1_DAILY_DAY_UNKNOWN,
+};
+
+enum R1DailyTimestampMode : uint8_t {
+  R1_DAILY_TIMESTAMP_NONE = 0,
+  R1_DAILY_TIMESTAMP_EPOCH,
+  R1_DAILY_TIMESTAMP_SECONDS_WITHIN_DAY,
+  R1_DAILY_TIMESTAMP_UNKNOWN,
+};
+
+const char* r1DailyDayModeName(R1DailyDayMode mode);
+const char* r1DailyTimestampModeName(R1DailyTimestampMode mode);
+
 #define R1_COMMON_DAILY_MAX_RECORDS    24
 #define R1_HRV_DAILY_MAX_RECORDS       24
 // A full day has 144 ten-minute slots, but the current bounded single-frame
 // decoder can carry at most 35. Pagination/fragmentation remains a separate
 // evidence gate; a page that exceeds this limit returns R1_PARSE_TOO_LARGE.
 #define R1_ACTIVITY_DAILY_MAX_RECORDS  ((R1_MAX_PAYLOAD - 11) / 7)
-#define R1_FW227_DAILY_TRAILER          0x0000000FUL
-
 struct R1CommonDailyRecord {
   uint8_t hourSlot;
   uint8_t average;
@@ -437,7 +455,11 @@ struct R1CommonDailyResult {
   uint16_t sourceSerial;
   uint32_t sourceCrc32;
   int16_t timezoneMinutes;
+  R1DailyDayMode dayMode;
   uint32_t dayStart;
+  R1DailyTimestampMode latestTimestampMode;
+  uint32_t latestTimestampRaw;
+  // Absolute epoch only. Zero means the raw value could not be anchored.
   uint32_t latestTimestamp;
   uint8_t latestValue;
   uint8_t count;
@@ -459,7 +481,11 @@ struct R1HrvDailyResult {
   uint16_t sourceSerial;
   uint32_t sourceCrc32;
   int16_t timezoneMinutes;
+  R1DailyDayMode dayMode;
   uint32_t dayStart;
+  R1DailyTimestampMode latestTimestampMode;
+  uint32_t latestTimestampRaw;
+  // Absolute epoch only. Zero means the raw value could not be anchored.
   uint32_t latestTimestamp;
   uint16_t latestValue;
   uint8_t count;
@@ -482,6 +508,7 @@ struct R1ActivityDailyResult {
   uint16_t sourceSerial;
   uint32_t sourceCrc32;
   int16_t timezoneMinutes;
+  R1DailyDayMode dayMode;
   uint32_t dayStart;
   uint8_t count;
   uint32_t trailer;

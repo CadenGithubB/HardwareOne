@@ -743,11 +743,11 @@ const char* cmd_gpslog(const String& argsInput) {
   return result;
 }
 
-// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
+// Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 const CommandEntry gpsCommands[] = {
   // 3-level voice: "sensor" -> "GPS" -> "open/close"
-  { "opengps", "Start PA1010D GPS module.", false, cmd_gpsstart, nullptr, "sensor", "GPS", "open" },
-  { "closegps", "Stop PA1010D GPS module.", false, cmd_gpsstop, nullptr, "sensor", "GPS", "close" },
+  { "opengps", "Start PA1010D GPS module.", false, cmd_gpsstart },
+  { "closegps", "Stop PA1010D GPS module.", false, cmd_gpsstop },
   { "gpsread", "Read GPS location and time data. (add 'json' for JSON output)", false, cmd_gps },
   
   // Auto-start

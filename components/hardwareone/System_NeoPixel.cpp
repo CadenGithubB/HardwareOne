@@ -9,22 +9,26 @@
 #include "System_Debug.h"    // For debug macros (merged from System_LED.cpp)
 #include "System_BuildConfig.h"  // For NEOPIXEL_PIN_DEFAULT
 
-// Use NEOPIXEL_PIN_DEFAULT from System_BuildConfig.h (board-specific)
-// Boards without NeoPixel set this to -1
-#if !defined(NEOPIXEL_PIN_DEFAULT)
-  #define NEOPIXEL_PIN_DEFAULT -1
+// Board power rail — asserted independently of ENABLE_NEOPIXEL because the
+// NeoPixel power pin doubles as peripheral power on some boards (Feather V2
+// GPIO2 also powers the STEMMA QT connector: compiling the LED out must not
+// kill I2C). On boards where the pin only feeds the pixel (QT Py GPIO8) this
+// harmlessly powers an unused rail. No-op when no power pin is defined.
+// (FeatherS3's GPIO39/LDO2 is additionally driven by the I2C2 bus init and
+// the OLED power path — multiple asserts of the same rail are fine.)
+void boardPowerRailInit() {
+#if defined(NEOPIXEL_POWER_PIN) && NEOPIXEL_POWER_PIN >= 0
+  pinMode(NEOPIXEL_POWER_PIN, OUTPUT);
+  digitalWrite(NEOPIXEL_POWER_PIN, HIGH);
+  delay(10);  // Allow power to stabilize
 #endif
+}
 
-// Determine if NeoPixel hardware is available at compile time
-#define NEOPIXEL_AVAILABLE (NEOPIXEL_PIN_DEFAULT >= 0)
-
-// Global NeoPixel instance - only instantiate if hardware is available
+#if ENABLE_NEOPIXEL
+// Global NeoPixel instance (ENABLE_NEOPIXEL guarantees a real pin — the
+// BuildConfig #error refuses pin -1, so no dummy branch exists anymore).
 #define NUMPIXELS 1
-#if NEOPIXEL_AVAILABLE
-  Adafruit_NeoPixel pixels(NUMPIXELS, NEOPIXEL_PIN_DEFAULT, NEO_GRB + NEO_KHZ800);
-#else
-  // Dummy instance that won't touch any GPIO pins
-  Adafruit_NeoPixel pixels(0, -1, NEO_GRB + NEO_KHZ800);
+Adafruit_NeoPixel pixels(NUMPIXELS, NEOPIXEL_PIN_DEFAULT, NEO_GRB + NEO_KHZ800);
 #endif
 
 // ============================================================================
@@ -132,40 +136,23 @@ const int numColors = sizeof(colorTable) / sizeof(colorTable[0]);
 // LED Control Functions
 // ============================================================================
 
+#if ENABLE_NEOPIXEL
 void initNeoPixelLED() {
-#if NEOPIXEL_AVAILABLE
-  // Enable NeoPixel power pin (required on QT Py ESP32 GPIO 8, Feather V2 GPIO 2)
-  // Guard against boards that define NEOPIXEL_POWER_PIN as -1 (no power pin)
-  #if defined(NEOPIXEL_POWER_PIN) && NEOPIXEL_POWER_PIN >= 0
-    pinMode(NEOPIXEL_POWER_PIN, OUTPUT);
-    digitalWrite(NEOPIXEL_POWER_PIN, HIGH);
-    delay(10);  // Allow power to stabilize
-  #endif
-  
-  // Legacy: some boards use NEOPIXEL_I2C_POWER instead
-  #if defined(NEOPIXEL_I2C_POWER) && !defined(NEOPIXEL_POWER_PIN)
-    pinMode(NEOPIXEL_I2C_POWER, OUTPUT);
-    digitalWrite(NEOPIXEL_I2C_POWER, HIGH);
-    delay(10);
-  #endif
-  
+  // Power rail is asserted by boardPowerRailInit() (called first at boot,
+  // independent of this feature — see the rail comment above).
   pixels.begin();
   // Apply saved brightness (0-100% -> 0-255); fall back to 50% if settings not yet loaded
   int bPct = (gSettings.ledBrightness > 0) ? gSettings.ledBrightness : 50;
   if (bPct > 100) bPct = 100;
   pixels.setBrightness((uint8_t)(bPct * 255 / 100));
   pixels.show();  // Initialize all pixels to 'off'
-#endif
-  // No-op on boards without NeoPixel hardware
 }
 
 void setLEDColor(RGB color) {
-#if NEOPIXEL_AVAILABLE
   pixels.setPixelColor(0, pixels.Color(color.r, color.g, color.b));
   pixels.show();
-#endif
-  // No-op on boards without NeoPixel hardware
 }
+#endif  // ENABLE_NEOPIXEL
 
 bool getRGBFromName(const String& colorName, RGB& color) {
   String name = colorName;
@@ -288,6 +275,8 @@ int ledBrightnessNextPreset(int cur) {
 // cmd_ledeffect now starts an effect and returns immediately; `ledeffect off`,
 // ledcolor, and ledclear genuinely cancel a running effect (previously
 // impossible — cmd_exec was busy running it).
+
+#if ENABLE_NEOPIXEL
 
 static struct {
   bool          active;
@@ -501,10 +490,10 @@ const char* cmd_ledeffect(const String& argsInput) {
 // NeoPixel Command Registry
 // ============================================================================
 
-// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
+// Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 const CommandEntry neopixelCommands[] = {
-  { "ledcolor", "Set LED color: <color>", false, cmd_ledcolor, "Usage: ledcolor <red|green|blue|yellow|magenta|cyan|white|orange|purple|pink>", "led", "change color" },
-  { "ledclear", "Turn off LED.", false, cmd_ledclear, nullptr, "led", "turn off" },
+  { "ledcolor", "Set LED color: <color>", false, cmd_ledcolor, "Usage: ledcolor <red|green|blue|yellow|magenta|cyan|white|orange|purple|pink>" },
+  { "ledclear", "Turn off LED.", false, cmd_ledclear },
   { "ledeffect", "Run LED effect: <effect>", false, cmd_ledeffect, "Usage: ledeffect <fade|pulse|blink|rainbow|strobe|off> [color] [color2] [duration 100..60000]" },
 };
 
@@ -515,6 +504,7 @@ const size_t neopixelCommandsCount = sizeof(neopixelCommands) / sizeof(neopixelC
 // ============================================================================
 // LED Settings Module (merged from System_LED.cpp)
 // ============================================================================
+// (Still inside #if ENABLE_NEOPIXEL — the schema goes with the hardware.)
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry ledSettingEntries[] = {
@@ -535,3 +525,5 @@ extern const SettingsModule ledSettingsModule = {
 };
 
 // Module registered explicitly by registerAllSettingsModules() in System_Settings.cpp
+
+#endif  // ENABLE_NEOPIXEL (effect engine + commands + settings module)

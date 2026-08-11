@@ -382,7 +382,7 @@ void gamepadPoll() {
 // state (debug). Open/close/autostart/poll moved to HAL_Input.cpp.
 // ============================================================================
 
-// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
+// Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 const CommandEntry gamepadCommands[] = {
   { "gamepadread", "Read Seesaw gamepad state (x/y/buttons). (add 'json' for JSON output)", false, cmd_gamepad },
 };

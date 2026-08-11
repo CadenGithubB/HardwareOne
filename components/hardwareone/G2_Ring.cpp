@@ -26,6 +26,9 @@
 #include "BLE_Peers.h"         // peer registry
 #include "BLE_CentralTx.h"     // controller-level TX gate (shared with G2)
 #include "G2_Glasses.h"        // g2SetAllTemplesConnPriority, g2WaitForBothConnected
+#if ENABLE_MICROPHONE
+#include "HAL_Audio.h"         // audioCaptureActive/audioGetSource — connect deferral gate
+#endif
 #include "System_R1_Protocol.h"  // R1Encoder + decoder (real wire format)
 #include "System_G2_Protocol.h"  // g2BuildRingRawDataPush + G2RingPushFields
 #include "G2_Health.h"           // history append + daily backfill
@@ -105,7 +108,7 @@ static constexpr uint32_t RING_OWNER_STACK_BYTES = 6144;
 static constexpr uint8_t  RING_INTENT_QUEUE_DEPTH = 12;
 static constexpr uint8_t  RING_TRANSACTION_HISTORY_DEPTH = 24;
 static constexpr uint8_t  RING_RX_QUEUE_DEPTH = 8;
-static constexpr uint8_t  RING_PACKET_ACK_DEPTH = 4;
+static constexpr uint8_t  RING_PACKET_ACK_DEPTH = 8;
 static constexpr uint8_t  RING_RX_DUPLICATE_DEPTH = 16;
 
 enum RingIntentKind : uint8_t {
@@ -592,6 +595,13 @@ static bool ringEnqueueTimeSync(uint32_t epoch,
   intent.statusMethod = R1_STATUS_METHOD_SET;
   intent.epoch = epoch;
   return ringEnqueueIntent(intent, outHandle);
+}
+
+static bool ringConfiguredTimezoneMinutes(int16_t& out) {
+  const int timezoneMinutes = Clock::tzOffsetMinutes();
+  if (timezoneMinutes < -720 || timezoneMinutes > 840) return false;
+  out = static_cast<int16_t>(timezoneMinutes);
+  return true;
 }
 
 static bool ringEnqueueAdvStart(
@@ -1215,26 +1225,32 @@ static void ringExtractTelemetryCache(const R1Decoded& d) {
       R1HrvDailyResult daily{};
       if (r1ParseHrvDaily(sR1Profile, d, daily) == R1_PARSE_OK) {
         (void)g2HealthApplyHrvDaily(daily);
-        count = daily.count;
-        startTs = count ? daily.records[0].bucketEpoch : daily.dayStart;
-        endTs = daily.latestTimestamp;
-        metric = HEALTH_METRIC_HRV;
-        for (uint8_t i = 0; i < count && i < R1_COMMON_DAILY_MAX_RECORDS; ++i) {
-          values[i] = daily.records[i].average > 255
-                          ? 255
-                          : (uint8_t)daily.records[i].average;
+        if (daily.dayMode == R1_DAILY_DAY_EPOCH) {
+          count = daily.count;
+          startTs = count ? daily.records[0].bucketEpoch : daily.dayStart;
+          endTs = daily.latestTimestamp;
+          metric = HEALTH_METRIC_HRV;
+          for (uint8_t i = 0;
+               i < count && i < R1_COMMON_DAILY_MAX_RECORDS; ++i) {
+            values[i] = daily.records[i].average > 255
+                            ? 255
+                            : (uint8_t)daily.records[i].average;
+          }
         }
       }
     } else {
       R1CommonDailyResult daily{};
       if (r1ParseCommonDaily(sR1Profile, d, daily) == R1_PARSE_OK) {
         (void)g2HealthApplyCommonDaily(daily);
-        count = daily.count;
-        startTs = count ? daily.records[0].bucketEpoch : daily.dayStart;
-        endTs = daily.latestTimestamp;
-        metric = d.cmd == R1_CMD_SPO2 ? HEALTH_METRIC_SPO2
-                                      : HEALTH_METRIC_HR;
-        for (uint8_t i = 0; i < count; ++i) values[i] = daily.records[i].average;
+        if (daily.dayMode == R1_DAILY_DAY_EPOCH) {
+          count = daily.count;
+          startTs = count ? daily.records[0].bucketEpoch : daily.dayStart;
+          endTs = daily.latestTimestamp;
+          metric = d.cmd == R1_CMD_SPO2 ? HEALTH_METRIC_SPO2
+                                        : HEALTH_METRIC_HR;
+          for (uint8_t i = 0; i < count; ++i)
+            values[i] = daily.records[i].average;
+        }
       }
     }
 
@@ -2081,7 +2097,13 @@ static void ringServiceSetup() {
       case G2_RING_SETUP_TIME: {
         const time_t now = time(nullptr);
         if (!Clock::isValidEpoch(now)) return;  // fail closed at stage deadline
-        sSetupOwner.frame = gR1Encoder.buildSyncTime(0, (uint32_t)now);
+        int16_t timezoneMinutes = 0;
+        if (!ringConfiguredTimezoneMinutes(timezoneMinutes)) {
+          ringFinishSetup(false, G2_RING_ERR_ENCODE);
+          return;
+        }
+        sSetupOwner.frame = gR1Encoder.buildSyncTime(timezoneMinutes,
+                                                     (uint32_t)now);
         break;
       }
       case G2_RING_SETUP_ADV_START: {
@@ -2152,12 +2174,18 @@ static R1Frame ringBuildIntentFrame(const RingIntent& intent,
       return gR1Encoder.buildPairAuth();
     case RING_INTENT_DEVICE_INFO:
       return gR1Encoder.buildDeviceInfoQuery();
-    case RING_INTENT_SYNC_TIME:
+    case RING_INTENT_SYNC_TIME: {
       if (!Clock::isValidEpoch((time_t)intent.epoch)) {
         error = G2_RING_ERR_CLOCK_UNAVAILABLE;
         return R1Frame{};
       }
-      return gR1Encoder.buildSyncTime(0, intent.epoch);
+      // Official-app captures send the configured signed minute offset here;
+      // the ring then keys local daily pages to local midnight expressed in
+      // UTC. Sending zero forced HardwareOne fetches onto UTC day boundaries.
+      int16_t timezoneMinutes = 0;
+      if (!ringConfiguredTimezoneMinutes(timezoneMinutes)) return R1Frame{};
+      return gR1Encoder.buildSyncTime(timezoneMinutes, intent.epoch);
+    }
     case RING_INTENT_ADV_START: {
       uint8_t right[6]{};
       uint8_t left[6]{};
@@ -2621,6 +2649,23 @@ struct GlassesPriorityGuard {
 // jobs to it. Internal callers (the now-deleted ring*TaskBody functions)
 // are gone; only the worker calls this.
 bool ringPerformConnect(const String& savedMac /* = String() */) {
+#if ENABLE_MICROPHONE
+  // Defer while a G2 mic capture is running: this guard's BALANCED window
+  // (40-60 ms intervals, up to ~30 s) was measured delivering only ~15
+  // notifications/s vs the 20/s a capture needs — it would degrade a live
+  // STT exchange to protect a telemetry connect. Captures are VAD-bounded
+  // (seconds); the caller's retry/backoff simply lands after it. The
+  // inverse race (a connect already holding BALANCED when a capture
+  // starts) is accepted and surfaced by the delivered-rate watchdog.
+  if (audioCaptureActive() && audioGetSource() == AUDIO_SRC_G2_LEFT) {
+    // User-visible (not debug-gated): a manual `ringconnect` has no per-job
+    // retry — without this line it would silently no-op. The auto-reseek
+    // path retries on its own backoff and just lands after the capture.
+    BROADCAST_PRINTF("[RING] connect deferred: G2 mic capture active — "
+                     "retry after the capture ends");
+    return false;
+  }
+#endif
   // Drop glasses to BALANCED for the entire connect attempt. Auto-restored
   // on any return path. Cheap no-op if no glasses are connected.
   GlassesPriorityGuard prio_guard;

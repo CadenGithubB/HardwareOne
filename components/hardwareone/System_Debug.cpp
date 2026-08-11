@@ -19,6 +19,7 @@
 #include "System_Mutex.h"
 #include "System_Settings.h"
 #include "System_TaskUtils.h"
+#include "System_User.h"  // CommandSource — recordLoginAttempt maps it to an audit path
 #include "System_Utils.h"
 #include "System_AuthIdentity.h"  // currentCommandContext / currentCaptureState
 #include "WebServer_Utils.h"
@@ -2024,7 +2025,7 @@ const char* cmd_debugstack(const String& argsInput) {
 // Implemented in System_Notifications.cpp (owns the pipeline counters).
 extern const char* cmd_notifstats(const String& argsInput);
 
-// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
+// Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 const CommandEntry debugCommands[] = {
   { "debughttp", "Debug HTTP requests.", true, cmd_debughttp, "Usage: debughttp <0|1> [temp|runtime]" },
   { "debughttps", "Debug HTTPS/TLS handshake + connection errors (ESP-IDF logs).", true, cmd_debughttps, "Usage: debughttps <0|1> [temp|runtime]" },
@@ -2317,6 +2318,85 @@ const char* LOG_EVENT_STREAM_FILE = "/system/sys_logs/events.log";              
 
 void logToFile(const char* path, const String& line, size_t capBytes) {
   appendLineWithCap(path, line, capBytes);
+}
+
+// ============================================================================
+// Auth Logging
+// ============================================================================
+// Lives here, not in WebServer_Server.cpp, because the security audit trail
+// must not depend on the web server being compiled in: that whole file is
+// wrapped in `#if ENABLE_HTTP_SERVER`, so a headless build used to lose login
+// auditing on EVERY transport (serial and UART included), silently.
+
+// Only logs to file for actual login events, not all auth attempts.
+void logAuthAttempt(bool success, const char* path, const String& userTried, const String& ip, const String& reason) {
+  // Normalize path for checking
+  String cleanPath = String(path ? path : "");
+  cleanPath.replace("%2F", "/");
+  cleanPath.replace("%20", " ");
+
+  // Only log to file if this is an actual security event (login or credential
+  // rotation). Path checks use exact equality to avoid spurious matches like
+  // "/configure-login-page" or "/login-help" triggering on the substring
+  // "/login". The reason-based matches catch events whose path varies by
+  // transport (e.g. password change is "/account/password-change" from web
+  // but "/oled/command" from OLED).
+  // Any "<transport>/login" path (web "/login", serial/login, bluetooth/login,
+  // display/login) plus the G2 pair event and credential-rotation reasons.
+  // endsWith avoids spurious matches like "/login-help" / "/configure-login-page".
+  bool isSecurityAuditEvent =
+      cleanPath.endsWith("/login") ||
+      (cleanPath == "g2/pair") ||
+      (cleanPath == "espnow/bond") ||
+      (reason.indexOf("Login successful") >= 0) ||
+      (reason.indexOf("Password changed") >= 0) ||
+      (reason.indexOf("Current password incorrect") >= 0) ||
+      (reason.indexOf("Password storage failed") >= 0);
+
+  if (!isSecurityAuditEvent) {
+    // Not a security event - skip file logging (command audit handles command tracking)
+    return;
+  }
+
+  char tsPrefix[40];
+  getTimestampPrefixMsCached(tsPrefix, sizeof(tsPrefix));
+  String status = success ? "SUCCESS" : "FAILED";
+
+  String cleanIP = ip;
+  cleanIP.replace("::FFFF:", "");
+
+  // Format: [ts] | STATUS | user=.. | ip=.. | /path [| reason=..]
+  String line;
+  line.reserve(160);
+  if (tsPrefix[0]) line += tsPrefix;  // already includes trailing " | "
+  line += status;
+  line += " | user="; line += userTried;
+  line += " | ip=";   line += cleanIP;
+  line += " | ";      line += cleanPath;
+  if (reason.length()) { line += " | reason="; line += reason; }
+
+  const char* logFile = success ? LOG_OK_FILE : LOG_FAIL_FILE;
+  appendLineWithCap(logFile, line, LOG_CAP_BYTES);
+}
+
+// Single audit front-door for all credential logins (web, serial, UART, BLE,
+// OLED). G2 is excluded — it has no credential login (its pair-time identity
+// is logged separately with path "g2/pair"). Maps the transport to a canonical
+// "<x>/login" path and fills a synthetic IP when the caller has none, so every
+// login path records consistently through one place.
+void recordLoginAttempt(CommandSource transport, const String& user,
+                        const String& ip, bool success, const char* reason) {
+  const char* path;
+  const char* defIp;
+  switch (transport) {
+    case SOURCE_WEB:           path = "web/login";       defIp = "web";   break;
+    case SOURCE_SERIAL:        path = "serial/login";    defIp = "local"; break;
+    case SOURCE_UART:          path = "uart/login";      defIp = "uart";  break;
+    case SOURCE_BLUETOOTH:     path = "bluetooth/login"; defIp = "ble";   break;
+    case SOURCE_LOCAL_DISPLAY: path = "display/login";   defIp = "local"; break;
+    default:                   path = "login";           defIp = "local"; break;
+  }
+  logAuthAttempt(success, path, user, ip.length() ? ip : String(defIp), reason ? reason : "");
 }
 
 // Log a one-time marker when the clock first becomes valid; safe to call

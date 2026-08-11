@@ -3742,7 +3742,7 @@ const char* cmd_maporganize(const String& argsInput) {
 }
 
 // Command registry
-// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
+// Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 const CommandEntry mapCommands[] = {
   {"map", "Show current map info (add 'json' for JSON output)", false, cmd_map, nullptr},
   {"mapload", "Load map file: \"<path>\"", false, cmd_mapload, "Usage: mapload \"<path>\""},

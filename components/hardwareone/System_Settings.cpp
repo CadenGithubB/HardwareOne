@@ -1,4 +1,6 @@
 #include "System_Settings.h"        // Settings struct definition and function declarations
+#include <cmath>             // floorf — whole-number check in settingsTypeAccepted
+#include <climits>           // INT_MIN/INT_MAX — same
 #include "System_Events.h"  // systemEventPost — event register producer
 #include "System_BuildConfig.h"   // ENABLE_WIFI, ENABLE_ESPNOW flags
 #include "System_PollPause.h"     // pollPause/pollResume — global sensor-poll pause
@@ -19,6 +21,7 @@
 #include "System_ESPSR.h"  // srSyncDebugLevel() — derive legacy gSrDebugLevel from flags
 #include "System_SelfDevice.h"  // SelfDevice::firmwareVersion() — Stage 1 consolidation
 #include "System_SensorLogging.h"  // gSensorLogMask / gSensorLogFormat sync from settings editors
+#include "System_UartLink.h"       // uartLinkStart/Stop/StatusLine — cmd_uartlink live apply
 #include <LittleFS.h>
 #include "System_VFS.h"      // VFS::*Guarded + systemAuth (Phase 2 perm refactor)
 #include <esp_system.h>
@@ -193,6 +196,11 @@ const char* cmd_beginwrite(const String& argsInput);
 const char* cmd_savesettings(const String& argsInput);
 const char* cmd_serialrequireauth(const String&);
 const char* cmd_displayrequireauth(const String&);
+#ifdef UART_LINK_PORT
+const char* cmd_uartlink(const String&);
+const char* cmd_uartlinkbaud(const String&);
+const char* cmd_uartrequireauth(const String&);
+#endif
 #if ENABLE_HTTP_SERVER
 const char* cmd_httpAutoStart(const String& argsInput);
 #endif
@@ -202,7 +210,7 @@ const char* cmd_httpsEnabled(const String& argsInput);
 
 const char* cmd_controls(const String& argsInput);  // defined below; machine-readable control descriptor
 
-// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
+// Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 const CommandEntry settingsCommands[] = {
   { "controls", "Per-module control descriptor (JSON): controls json [module]", false, cmd_controls, "Usage: controls json <module>  (e.g. 'controls json imu'); 'controls json' lists modules" },
 #if ENABLE_WIFI
@@ -239,8 +247,13 @@ const CommandEntry settingsCommands[] = {
 
   // ---- Output Settings ----
   { "outserial",          "Set serial output: <0|1> [persist|temp]", true, cmd_outserial, "Usage: outserial <0|1> [persist|temp]" },
-  { "serialrequireauth",  "Require auth for serial: <0|1>", true, cmd_serialrequireauth, "Usage: serialrequireauth <0|1>", nullptr, nullptr, /*requiresSuperAdmin=*/true },
-  { "displayrequireauth", "Require auth for display: <0|1>", true, cmd_displayrequireauth, "Usage: displayrequireauth <0|1>", nullptr, nullptr, /*requiresSuperAdmin=*/true },
+  { "serialrequireauth",  "Require auth for serial: <0|1>", true, cmd_serialrequireauth, "Usage: serialrequireauth <0|1>", /*requiresSuperAdmin=*/true },
+  { "displayrequireauth", "Require auth for display: <0|1>", true, cmd_displayrequireauth, "Usage: displayrequireauth <0|1>", /*requiresSuperAdmin=*/true },
+#ifdef UART_LINK_PORT
+  { "uartlink",           "UART host link: status | on | off", true, cmd_uartlink, "Usage: uartlink [status|on|off]" },
+  { "uartlinkbaud",       "Set UART link baud (0=board default)", true, cmd_uartlinkbaud, "Usage: uartlinkbaud <0|9600-max>" },
+  { "uartrequireauth",    "Require auth for UART link: <0|1>", true, cmd_uartrequireauth, "Usage: uartrequireauth <0|1>", /*requiresSuperAdmin=*/true },
+#endif
 
   // ---- Batch write ----
   { "beginwrite",   "Start a batch settings update — defers flash write until savesettings.", true, cmd_beginwrite },
@@ -1010,6 +1023,40 @@ void buildSettingsJsonDoc(JsonDocument& doc, bool excludePasswords, bool mainFil
 bool writeSettingsJson() {
   if (!filesystemReady) return false;
 
+  // Refuse to rebuild the file from RAM when this boot never successfully read
+  // it. gSettingsLoadedOk means exactly "RAM is a trustworthy source for a full
+  // rewrite": set at the end of a successful load, and set explicitly by the
+  // no-file boot path where RAM legitimately IS the truth.
+  //
+  // Without this, a single unreadable settings.json becomes permanent loss. RAM
+  // holds nothing but compiled defaults, and buildSettingsJsonDoc() destroys
+  // and rebuilds three sections from it - blePeersWriteJson() and
+  // espnowMeshesWriteJson() both .to<>() their objects, and every registered
+  // scalar is stamped from gSettings - so the merge-read cannot recover any of
+  // it. On a WiFi device the trigger fires ~2 s into boot without anyone asking
+  // for it: a successful association calls saveWiFiNetworks(), which lands
+  // here. Bluetooth pairings and the whole ESP-NOW mesh/bond config are gone
+  // before an operator could notice the file was damaged.
+  //
+  // The guard belongs here rather than on each section: this is the single
+  // choke point every destructive rebuild passes through, and covering the
+  // registered scalars is only possible from here.
+  //
+  // Consequence worth knowing: after a failed load the device is read-only for
+  // settings until it reboots with a readable file. That is the intended trade
+  // - the damaged file is preserved for recovery instead of being flattened -
+  // and the refusal is logged every time rather than being silent.
+  if (!gSettingsLoadedOk) {
+    ERROR_STORAGEF("save REFUSED: this boot never loaded settings.json; "
+                   "writing defaults would destroy peers/meshes on disk");
+    logSystemEvent("SETTINGS",
+                   "save REFUSED - this boot never loaded settings.json; "
+                   "writing defaults would destroy peers/meshes on disk");
+    systemEventPost(SYSEVT_SETTINGS_SAVE_FAILED, "load_failed",
+                    "refused to overwrite an unread settings.json");
+    return false;
+  }
+
   // Pause sensor polling during settings I/O. Kept as explicit pause/resume
   // (not the RAII guard) — this function has many exit paths that resume at
   // different points; mechanically swapping them would risk altering behavior.
@@ -1029,10 +1076,34 @@ bool writeSettingsJson() {
       DeserializationError err = deserializeJson(doc, existingFile);
       existingFile.close();
       if (err) {
-        WARN_STORAGEF("Failed to read existing settings for merge: %s", err.c_str());
-        logSystemEvent("SETTINGS", "merge-read of existing file failed (%s) — unregistered sections dropped from this save",
-                       err.c_str());
-        doc.clear();  // Start fresh if parse failed
+        // ABORT. This used to be `doc.clear(); // Start fresh if parse failed`
+        // and then fall through to buildSettingsJsonDoc(), which is how an
+        // unreadable settings.json got silently replaced by whatever RAM
+        // happened to hold. The old log line said "unregistered sections
+        // dropped", which badly understated it: with the document cleared,
+        // EVERY section is dropped and only live RAM is written back. On a
+        // boot whose load failed, live RAM is compiled defaults - so the file
+        // came back valid, well-formed, and empty of the user's BLE peers,
+        // ESP-NOW meshes and every registered setting.
+        //
+        // Observed 2026-08-07: an intentionally truncated settings.json
+        // survived three reboots untouched, then one `wifiadd` triggered
+        // saveWiFiNetworks() -> here, and the file was gutted.
+        //
+        // Refusing is strictly better. A file we cannot parse is a file whose
+        // contents we cannot preserve, so replacing it can only lose data.
+        // ERROR_ rather than WARN_ so this reaches errors.log, which is fed by
+        // the "[ERROR]" prefix in the debug_out task.
+        ERROR_STORAGEF("save REFUSED: on-disk settings.json is unparseable (%s) "
+                       "- refusing to replace it from RAM", err.c_str());
+        logSystemEvent("SETTINGS",
+                       "save REFUSED - on-disk settings.json unparseable (%s); "
+                       "file left intact for recovery", err.c_str());
+        systemEventPost(SYSEVT_SETTINGS_SAVE_FAILED, "merge_read_failed",
+                        "on-disk file unparseable; save refused");
+        fsUnlock();
+        pollResume();
+        return false;
       } else {
         INFO_STORAGEF("Loaded existing settings for merge (preserving orphaned sections)");
       }
@@ -1316,6 +1387,70 @@ static void selectDeviceKeyEpoch(const JsonDocument& doc) {
 // Read Settings from JSON File
 // ============================================================================
 
+// Set when the on-disk firmwareVersion differs from the running build, so the
+// caller can re-stamp it after the load finishes. Consumed by
+// settingsRestampFirmwareVersion().
+static bool gSettingsVersionRestampPending = false;
+
+bool settingsFirmwareVersionRestampPending() {
+  return gSettingsVersionRestampPending;
+}
+
+// Update ONLY firmwareVersion in the on-disk document.
+//
+// writeSettingsJson() rebuilds the file from live RAM via buildSettingsJsonDoc(),
+// which is unsafe to call at boot for two independent reasons: state that has
+// not been populated yet would be persisted as defaults, and
+// putSecretPreserving() writes an empty string for a secret whose plaintext is
+// empty on a healthy load, which would blank a stored credential. This path
+// re-serialises the PARSED FILE with one key changed, so every other byte -
+// including keys this build does not know - survives untouched, and no RAM
+// state is consulted at all.
+//
+// Nuance worth knowing: if this image is an OTA trial that later fails
+// probation, the file briefly claims a version that is no longer running. The
+// restored firmware detects the mismatch on its next boot and re-stamps
+// itself, so this self-corrects; it is not worth deferring to
+// otaSystemOnImageMarkedValid(), which does not exist on non-OTA builds.
+bool settingsRestampFirmwareVersion() {
+  if (!gSettingsVersionRestampPending) return true;
+  gSettingsVersionRestampPending = false;
+
+  String json;
+  if (!readText(SETTINGS_JSON_FILE, json) || json.length() == 0) return false;
+
+  PSRAM_JSON_DOC(doc);
+  if (deserializeJson(doc, json) != DeserializationError::Ok) return false;
+  doc["firmwareVersion"] = SelfDevice::firmwareVersion();
+
+  const char* tmp = "/settings.tmp";
+  fsLock("settings.restamp");
+  File file = VFS::openGuarded(tmp, "w", VFS::systemAuth("settings.restamp"));
+  if (!file) {
+    fsUnlock();
+    logSystemEvent("SETTINGS", "firmwareVersion re-stamp FAILED (cannot open %s)", tmp);
+    return false;
+  }
+  const size_t bytesWritten = serializeJson(doc, file);
+  file.flush();
+  file.close();
+  fsUnlock();
+
+  if (bytesWritten == 0) {
+    VFS::removeGuarded(tmp, VFS::systemAuth("settings.restamp"));
+    logSystemEvent("SETTINGS", "firmwareVersion re-stamp FAILED (wrote 0 bytes)");
+    return false;
+  }
+  if (!VFS::renameGuarded(tmp, SETTINGS_JSON_FILE, VFS::systemAuth("settings.restamp"))) {
+    VFS::removeGuarded(tmp, VFS::systemAuth("settings.restamp"));
+    logSystemEvent("SETTINGS", "firmwareVersion re-stamp FAILED (rename)");
+    return false;
+  }
+  logSystemEvent("SETTINGS", "firmwareVersion re-stamped to %s",
+                 SelfDevice::firmwareVersion());
+  return true;
+}
+
 bool readSettingsJson() {
   DEBUG_STORAGEF("[Settings] Loading from file using ArduinoJson");
 
@@ -1371,10 +1506,20 @@ bool readSettingsJson() {
   const char* runningVersion = SelfDevice::firmwareVersion();
   if (savedVersion[0] == '\0') {
     INFO_STORAGEF("[Settings] No firmwareVersion in settings file (pre-versioning build)");
+    // Same repeated-noise problem as the mismatch branch below: with no stamp
+    // this line prints on every boot forever. Stamping it once ends that and
+    // gives any future migration a floor to compare against.
+    gSettingsVersionRestampPending = true;
   } else if (strcmp(savedVersion, runningVersion) != 0) {
     INFO_STORAGEF("[Settings] Settings written by v%s, running v%s", savedVersion, runningVersion);
     logSystemEvent("BOOT", "settings last saved by fw v%s (now running v%s)", savedVersion, runningVersion);
     { char verBuf[48]; snprintf(verBuf, sizeof(verBuf), "%s->%s", savedVersion, runningVersion); systemEventPost(SYSEVT_FIRMWARE_CHANGED, verBuf, "settings carried over from prior firmware"); }
+    // Do NOT write here. At this point the file has been parsed but
+    // readRegisteredSettings() has not run yet (~30 lines below), so RAM still
+    // holds nothing but applyRegisteredDefaults() values - serialising it
+    // would factory-reset the device on the first boot after any OTA. The
+    // caller re-stamps the single key instead, once loading is complete.
+    gSettingsVersionRestampPending = true;
   }
 
   registerAllSettingsModules();
@@ -1969,6 +2114,13 @@ static const SettingEntry outputSettingEntries[] = {
   // never persisted, so the toggles were decorative. The surviving runtime
   // lanes are session/lifecycle-managed — see the System_Debug.h charter.
   { "serial",     SETTING_BOOL, &gSettings.outSerial,           1, 0, nullptr, 0, 1, "Serial Output",     nullptr, false, "channels", "outserial" },
+#ifdef UART_LINK_PORT
+  // UART host link (System_UartLink.cpp). Enabled is opt-in; baud 0 means
+  // the board default (UART_LINK_BAUD_DEFAULT), max is per-chip
+  // (classic ESP32 caps at 230400 for power-save-immune clocking).
+  { "uartLinkEnabled", SETTING_BOOL, &gSettings.uartLinkEnabled, 0, 0, nullptr, 0, 1, "UART Link Enabled", nullptr, false, "channels", "uartlink" },
+  { "uartLinkBaud",    SETTING_INT,  &gSettings.uartLinkBaud,    0, 0, nullptr, 0, UART_LINK_BAUD_MAX, "UART Link Baud (0=board default)", nullptr, false, "channels", "uartlinkbaud" },
+#endif
   // --- auth: per-channel access gates ---
   { "serialRequireAuth",  SETTING_BOOL, &gSettings.serialRequireAuth,       1, 0, nullptr, 0, 1, "Serial Require Auth",  nullptr, false, "auth", "serialrequireauth" },
   { "displayRequireAuth", SETTING_BOOL, &gSettings.localDisplayRequireAuth, 1, 0, nullptr, 0, 1, "Display Require Auth", nullptr, false, "auth", "displayrequireauth" },
@@ -1976,6 +2128,10 @@ static const SettingEntry outputSettingEntries[] = {
   { "sessionIdleSerial",  SETTING_INT,  &gSettings.sessionIdleSerial,       60, 0, nullptr, 0, 1440, "Serial Idle Logout (min, 0=off)", nullptr, false, "auth", "sessionidleserial" },
   { "sessionIdleBle",     SETTING_INT,  &gSettings.sessionIdleBle,          15, 0, nullptr, 0, 1440, "BLE Idle Logout (min, 0=off)",    nullptr, false, "auth", "sessionidleble" },
   { "sessionIdleDisplay", SETTING_INT,  &gSettings.sessionIdleDisplay,      60, 0, nullptr, 0, 1440, "Display Idle Logout (min, 0=off)", nullptr, false, "auth", "sessionidledisplay" },
+#ifdef UART_LINK_PORT
+  { "uartRequireAuth",    SETTING_BOOL, &gSettings.uartRequireAuth,         1, 0, nullptr, 0, 1, "UART Require Auth",  nullptr, false, "auth", "uartrequireauth" },
+  { "sessionIdleUart",    SETTING_INT,  &gSettings.sessionIdleUart,         0, 0, nullptr, 0, 1440, "UART Idle Logout (min, 0=off)",   nullptr, false, "auth", "sessionidleuart" },
+#endif
 };
 
 // Helper: find an output setting entry by jsonKey
@@ -1995,6 +2151,52 @@ const char* cmd_displayrequireauth(const String& a) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   return handleSettingCommand(findOutputEntry("displayRequireAuth"), a);
 }
+
+#ifdef UART_LINK_PORT
+const char* cmd_uartrequireauth(const String& a) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  return handleSettingCommand(findOutputEntry("uartRequireAuth"), a);
+}
+
+// UART host link control: status (no args) / on / off. Persists via the
+// registered setting, then applies live — no reboot needed either direction.
+const char* cmd_uartlink(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  CommandArgs ca(argsInput);
+  String t = ca.arg(0);
+  t.toLowerCase();
+  if (!t.length() || t == "status") return uartLinkStatusLine();
+  // Port lifecycle is REQUESTED, not performed here: this handler runs on
+  // cmd_exec_task while the drain runs on the loop task, and tearing the port
+  // (and its line accumulator) down from another task while bytes are in
+  // flight is heap corruption. uartLinkTick applies the request.
+  if (t == "on" || t == "1") {
+    (void)handleSettingCommand(findOutputEntry("uartLinkEnabled"), "1");
+    uartLinkRequestStart();
+    return "OK: UART link starting";
+  }
+  if (t == "off" || t == "0") {
+    (void)handleSettingCommand(findOutputEntry("uartLinkEnabled"), "0");
+    uartLinkRequestStop();
+    // Note: a host that issued this over the link itself gets this reply only
+    // if it drains before the next tick applies the stop — by design, the
+    // command is a deliberate self-disconnect.
+    return "OK: UART link stopping";
+  }
+  return "Error: invalid arguments — Usage: uartlink [status|on|off]";
+}
+
+const char* cmd_uartlinkbaud(const String& a) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  const char* r = handleSettingCommand(findOutputEntry("uartLinkBaud"), a);
+  // Live-apply a successful set by requesting a restart on the loop task. A
+  // bare get (no args) or a rejected value must not bounce the link.
+  if (a.length() && r && strncmp(r, "Error", 5) != 0 && uartLinkIsRunning()) {
+    uartLinkRequestRestart();
+  }
+  return r;
+}
+#endif  // UART_LINK_PORT
 
 // Columns: name, jsonSection, entries, count, isConnected, description
 static const SettingsModule outputSettingsModule = {
@@ -2070,7 +2272,9 @@ extern const SettingsModule mqttSettingsModule;
 extern const SettingsModule automationSettingsModule;
 #endif
 extern const SettingsModule powerSettingsModule;
+#if ENABLE_NEOPIXEL
 extern const SettingsModule ledSettingsModule;
+#endif
 #if ENABLE_OLED_DISPLAY
 extern const SettingsModule oledSettingsModule;
 #endif
@@ -2145,7 +2349,9 @@ void registerAllSettingsModules() {
   registerSettingsModule(&automationSettingsModule);
 #endif
   registerSettingsModule(&powerSettingsModule);
+#if ENABLE_NEOPIXEL
   registerSettingsModule(&ledSettingsModule);
+#endif
   
   // Network modules
 #if ENABLE_WIFI
@@ -2293,31 +2499,102 @@ void applyRegisteredDefaults() {
 // orphan the field to default, throwing away user intent for a single
 // corrupt byte) and log loudly so the corruption is visible. A field
 // with min=0/max=0 means "no bounds declared" and is left alone.
+// These run from readRegisteredSettings(), which executes ~170 lines before
+// initDebugSystem(). WARN_STORAGEF reaches debugQueuePrintf(), which returns
+// immediately while the debug queue is null - so every clamp warning this
+// helper has ever produced was discarded before reaching any sink. Use
+// logSystemEvent(), which has the pre-init Serial + ring fallback.
 static int settingsLoadClampInt(int raw, const SettingEntry* e) {
   if (e->minVal == 0 && e->maxVal == 0) return raw;  // no bounds declared
   if (raw < e->minVal) {
-    WARN_STORAGEF("[Settings] %s on-disk value %d below min %d — clamping",
-                  e->jsonKey, raw, e->minVal);
+    logSystemEvent("SETTINGS", "%s on-disk value %d below min %d - clamping",
+                   e->jsonKey, raw, e->minVal);
     return e->minVal;
   }
   if (raw > e->maxVal) {
-    WARN_STORAGEF("[Settings] %s on-disk value %d above max %d — clamping",
-                  e->jsonKey, raw, e->maxVal);
+    logSystemEvent("SETTINGS", "%s on-disk value %d above max %d - clamping",
+                   e->jsonKey, raw, e->maxVal);
     return e->maxVal;
   }
   return raw;
 }
 
+// Type-mismatch gate for the on-disk -> RAM load.
+//
+// ArduinoJson's `val | fallback` idiom is literally `is<T>() ? as<T>() :
+// fallback`, so a value of the WRONG type is indistinguishable from an absent
+// one: both silently install the compiled default. On a cable-flashed device
+// that was harmless. Under OTA, a setting whose SettingType changed between
+// builds is a real upgrade path - it has already happened once here, when
+// g2StreamToneMap went BOOL -> INT - and discarding a user's value without
+// saying so is the kind of thing nobody finds for months.
+//
+// The accept rules are the library's own predicates, and two of them are the
+// opposite of the obvious guess:
+//   - is<float>() is a NumberBit mask, so INTEGERS SATISFY IT. That is not a
+//     bug to warn about: the serializer strips trailing zeros, so this
+//     firmware's own 2.0f is re-read as the integer 2. Warning on it would
+//     fire for nearly every float setting on every boot.
+//   - isBoolean() is an exact tag test, so a stored 0/1 does NOT satisfy
+//     is<bool>(). That one IS real silent data loss.
+// A numeric value that fails is<int>() but passes is<float>() is fractional or
+// out of int range - a range fault, not a type fault. Saying so keeps the
+// reader from hunting the wrong bug.
+static uint32_t gSettingsTypeMismatches = 0;
+
+enum SettingLoadVerdict : uint8_t {
+  SETTING_LOAD_OK,       // tag matches; use `val` as-is
+  SETTING_LOAD_REPAIR,   // wrong tag, losslessly recoverable; use `repaired`
+  SETTING_LOAD_REJECT,   // wrong tag, not recoverable; keep compiled default
+};
+
+static SettingLoadVerdict settingsTypeCheck(JsonVariantConst val,
+                                            const SettingEntry* e,
+                                            int* repaired, const char** why) {
+  switch (e->type) {
+    case SETTING_INT: case SETTING_U8: case SETTING_U16: case SETTING_U32:
+      if (val.is<int>()) return SETTING_LOAD_OK;
+      if (val.is<float>()) {
+        const float f = val.as<float>();
+        if (f == floorf(f) && f >= (float)INT_MIN && f <= (float)INT_MAX) {
+          *repaired = (int)f;             // 5.0 written for an int field
+          return SETTING_LOAD_REPAIR;
+        }
+        *why = "number is fractional or out of int range";
+        return SETTING_LOAD_REJECT;
+      }
+      *why = "value is not a number";
+      return SETTING_LOAD_REJECT;
+    case SETTING_FLOAT:
+      if (val.is<float>()) return SETTING_LOAD_OK;  // integers included, by design
+      *why = "value is not a number";
+      return SETTING_LOAD_REJECT;
+    case SETTING_BOOL:
+      if (val.is<bool>()) return SETTING_LOAD_OK;
+      if (val.is<int>()) {
+        const int i = val.as<int>();
+        if (i == 0 || i == 1) { *repaired = i; return SETTING_LOAD_REPAIR; }
+      }
+      *why = "value is not true/false";
+      return SETTING_LOAD_REJECT;
+    case SETTING_STRING:
+      if (val.is<const char*>()) return SETTING_LOAD_OK;
+      *why = "value is not a string";
+      return SETTING_LOAD_REJECT;
+  }
+  return SETTING_LOAD_OK;
+}
+
 static float settingsLoadClampFloat(float raw, const SettingEntry* e) {
   if (e->minVal == 0 && e->maxVal == 0) return raw;
   if (raw < (float)e->minVal) {
-    WARN_STORAGEF("[Settings] %s on-disk value %.3f below min %d — clamping",
-                  e->jsonKey, raw, e->minVal);
+    logSystemEvent("SETTINGS", "%s on-disk value %.3f below min %d - clamping",
+                   e->jsonKey, raw, e->minVal);
     return (float)e->minVal;
   }
   if (raw > (float)e->maxVal) {
-    WARN_STORAGEF("[Settings] %s on-disk value %.3f above max %d — clamping",
-                  e->jsonKey, raw, e->maxVal);
+    logSystemEvent("SETTINGS", "%s on-disk value %.3f above max %d - clamping",
+                   e->jsonKey, raw, e->maxVal);
     return (float)e->maxVal;
   }
   return raw;
@@ -2348,9 +2625,31 @@ size_t readRegisteredSettings(JsonDocument& doc, const char* onlyPersistFile, bo
       }
       JsonVariantConst val = current[e->jsonKey];
       if (val.isNull()) continue;
+
+      // Type gate, before the typed switch. The `continue` on REJECT is
+      // load-bearing: falling through would hand the compiled default to
+      // settingsLoadClamp*(), which can emit a bogus "below min" line when an
+      // entry's own default sits outside its declared range, and would inflate
+      // the applied-settings count returned to the caller.
+      int repairedInt = 0;
+      const char* why = "";
+      const SettingLoadVerdict verdict =
+          settingsTypeCheck(val, e, &repairedInt, &why);
+      if (verdict == SETTING_LOAD_REJECT) {
+        gSettingsTypeMismatches++;
+        // Cap the named lines: the pre-init event ring keeps the FIRST 12
+        // entries, so an unbounded flood would evict the boot record itself.
+        if (gSettingsTypeMismatches <= 4) {
+          logSystemEvent("SETTINGS", "%s: %s - keeping compiled default",
+                         e->jsonKey, why);
+        }
+        continue;
+      }
+      const bool repaired = (verdict == SETTING_LOAD_REPAIR);
+
       switch (e->type) {
         case SETTING_INT: {
-          int raw = val | e->intDefault;
+          int raw = repaired ? repairedInt : (val | e->intDefault);
           *((int*)e->valuePtr) = settingsLoadClampInt(raw, e);
           count++;
           break;
@@ -2361,13 +2660,15 @@ size_t readRegisteredSettings(JsonDocument& doc, const char* onlyPersistFile, bo
           // via the shared helper (task #71). Both protections matter:
           //  - width-clamp recovers from struct corruption
           //  - range-clamp catches manual tampering / bit flips within range
-          int raw = (int)((uint32_t)(val | e->intDefault) & 0xFFu);
+          int raw = (int)((uint32_t)(repaired ? repairedInt
+                                             : (val | e->intDefault)) & 0xFFu);
           *((uint8_t*)e->valuePtr) = (uint8_t)settingsLoadClampInt(raw, e);
           count++;
           break;
         }
         case SETTING_U16: {
-          int raw = (int)((uint32_t)(val | e->intDefault) & 0xFFFFu);
+          int raw = (int)((uint32_t)(repaired ? repairedInt
+                                             : (val | e->intDefault)) & 0xFFFFu);
           *((uint16_t*)e->valuePtr) = (uint16_t)settingsLoadClampInt(raw, e);
           count++;
           break;
@@ -2375,7 +2676,8 @@ size_t readRegisteredSettings(JsonDocument& doc, const char* onlyPersistFile, bo
         case SETTING_U32: {
           // SETTING_U32 values can exceed INT_MAX, so clamp via uint32 math.
           // Most U32 settings have maxVal that fits in int range anyway.
-          uint32_t raw = (uint32_t)(val | e->intDefault);
+          uint32_t raw = repaired ? (uint32_t)repairedInt
+                                  : (val | (uint32_t)e->intDefault);
           if (e->minVal != 0 || e->maxVal != 0) {
             // Use the signed-int helper when bounds fit; otherwise let raw
             // pass through (uint32 fields with bounds > INT_MAX are rare).
@@ -2393,7 +2695,8 @@ size_t readRegisteredSettings(JsonDocument& doc, const char* onlyPersistFile, bo
           break;
         }
         case SETTING_BOOL:
-          *((bool*)e->valuePtr) = val | (e->intDefault != 0);
+          *((bool*)e->valuePtr) = repaired ? (repairedInt != 0)
+                                           : (val | (e->intDefault != 0));
           count++;
           break;
         case SETTING_STRING:
@@ -2414,6 +2717,12 @@ size_t readRegisteredSettings(JsonDocument& doc, const char* onlyPersistFile, bo
           break;
       }
     }
+  }
+  if (gSettingsTypeMismatches > 4) {
+    logSystemEvent("SETTINGS",
+                   "%lu settings had wrong on-disk types; %lu not named above",
+                   (unsigned long)gSettingsTypeMismatches,
+                   (unsigned long)(gSettingsTypeMismatches - 4));
   }
   return count;
 }
@@ -2751,6 +3060,9 @@ SETTING_EDITOR_CMD(cmd_set_sessionidleweb,      "sessionidleweb")
 SETTING_EDITOR_CMD(cmd_set_sessionidleserial,   "sessionidleserial")
 SETTING_EDITOR_CMD(cmd_set_sessionidleble,      "sessionidleble")
 SETTING_EDITOR_CMD(cmd_set_sessionidledisplay,  "sessionidledisplay")
+#ifdef UART_LINK_PORT
+SETTING_EDITOR_CMD(cmd_set_sessionidleuart,     "sessionidleuart")
+#endif
 SETTING_EDITOR_CMD(cmd_set_powerdim,            "powerdim")
 SETTING_EDITOR_CMD(cmd_set_logcategorytags,     "logcategorytags")
 SETTING_EDITOR_CMD(cmd_set_tofi2cclockhz,       "tofi2cclockhz")
@@ -2834,6 +3146,9 @@ const CommandEntry settingEditorCommands[] = {
   { "sessionidleserial",   "Set serial session idle-logout (min)",       true, cmd_set_sessionidleserial,   "Usage: sessionidleserial <0-1440>" },
   { "sessionidleble",      "Set BLE session idle-logout (min)",          true, cmd_set_sessionidleble,      "Usage: sessionidleble <0-1440>" },
   { "sessionidledisplay",  "Set OLED session idle-logout (min)",         true, cmd_set_sessionidledisplay,  "Usage: sessionidledisplay <0-1440>" },
+#ifdef UART_LINK_PORT
+  { "sessionidleuart",     "Set UART link session idle-logout (min)",    true, cmd_set_sessionidleuart,     "Usage: sessionidleuart <0-1440>" },
+#endif
   { "powerdim",            "Set display dim level (%)",                  true, cmd_set_powerdim,            "Usage: powerdim <0-100>" },
   { "logcategorytags",     "Set log category-tags flag (persist only)",  true, cmd_set_logcategorytags,     "Usage: logcategorytags <0|1>" },
   { "tofi2cclockhz",       "Set ToF I2C clock (Hz)",                     true, cmd_set_tofi2cclockhz,       "Usage: tofi2cclockhz <50000-400000>" },

@@ -1592,11 +1592,11 @@ const char* cmd_httpstatus(const String& argsInput) { RETURN_VALID_IF_VALIDATE_C
 // WiFi Command Registry
 // ============================================================================
 
-// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
+// Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 const CommandEntry wifiCommands[] = {
   // Network Management
   { "wifiread", "Read current WiFi connection info. (add 'json' for JSON output)", false, cmd_wifiinfo },
-  { "wifistatus", "Show current WiFi connection info. (add 'json' for JSON output)", false, cmd_wifiinfo, nullptr, "wifi", "status" },
+  { "wifistatus", "Show current WiFi connection info. (add 'json' for JSON output)", false, cmd_wifiinfo },
   { "wifilist", "List saved WiFi networks. (add 'json' for JSON output)", false, cmd_wifilist },
   { "wifiadd", "Add WiFi network: <ssid> <pass> [priority] [hidden]", true, cmd_wifiadd, "Usage: wifiadd <ssid> <pass> [priority] [hidden0|1]" },
   { "wifirm", "Remove WiFi network: <ssid>", true, cmd_wifirm, "Usage: wifirm <ssid>" },
@@ -1606,8 +1606,8 @@ const CommandEntry wifiCommands[] = {
   { "openwifi", "Connect to WiFi: [--best | --index <N>] (default: best)", true, cmd_wificonnect, "Usage: openwifi [--best | --index <1..N>]" },
   { "closewifi", "Disconnect from WiFi (also stops HTTP server + web output to free heap).", true, cmd_wifidisconnect },
   { "wifidisconnect", "Disconnect from the current network but keep the radio on (HTTP/web stay up).", true, cmd_wifidrop },
-  { "radiopower", "Power the whole 2.4GHz radio on/off (airplane mode; also stops/restores ESP-NOW; runtime only, not persisted): [on|off|toggle]", true, cmd_radiopower, "Usage: radiopower [on|off|toggle]", "wifi", "radio" },
-  { "wifiscan", "Scan for available WiFi networks. (add 'json' for JSON output)", false, cmd_wifiscan, nullptr, "wifi", "scan" },
+  { "radiopower", "Power the whole 2.4GHz radio on/off (airplane mode; also stops/restores ESP-NOW; runtime only, not persisted): [on|off|toggle]", true, cmd_radiopower, "Usage: radiopower [on|off|toggle]" },
+  { "wifiscan", "Scan for available WiFi networks. (add 'json' for JSON output)", false, cmd_wifiscan },
   { "wifigettxpower", "Set WiFi TX power: <dBm> (alias of wifitxpower; admin)", true, cmd_wifitxpower, "Usage: wifigettxpower <dBm>  (sets TX power; clamps to ~2..21 dBm)" },
   
   // Network Services
@@ -1620,7 +1620,7 @@ const CommandEntry wifiCommands[] = {
   { "httpstatus", "Show HTTP server status. (add 'json' for JSON output)", false, cmd_httpstatus },
 #endif
   { "certinfo", "Show HTTPS certificate details.", false, cmd_certinfo },
-  { "certgen", "Generate self-signed HTTPS certificate: [rsa] (default: ECDSA P-256)", true, cmd_certgen, "Usage: certgen [rsa]  Default: ECDSA P-256 (~1s). Use 'certgen rsa' for RSA-2048 (~30-60s).", nullptr, nullptr, /*requiresSuperAdmin=*/true },
+  { "certgen", "Generate self-signed HTTPS certificate: [rsa] (default: ECDSA P-256)", true, cmd_certgen, "Usage: certgen [rsa]  Default: ECDSA P-256 (~1s). Use 'certgen rsa' for RSA-2048 (~30-60s).", /*requiresSuperAdmin=*/true },
 };
 
 const size_t wifiCommandsCount = sizeof(wifiCommands) / sizeof(wifiCommands[0]);

@@ -17,6 +17,7 @@
 #if ENABLE_BLUETOOTH
 
 #include "System_Settings.h"   // gSettings, setSetting, BlePeer settings rows
+#include "Bluetooth.h"         // BLE_MODE_SERVER / BLE_MODE_G2_CLIENT (role arbiter)
 #include "System_Debug.h"
 #include "System_Utils.h"      // RETURN_VALID_IF_VALIDATE_CSTR, parseBoolArg
 #include "System_Command.h"    // CommandEntry, ensureDebugBuffer, getDebugBuffer
@@ -155,6 +156,12 @@ static String bleResolveStampUsername(BlePeerKind kind) {
     return true;
   };
 
+  // The UART host link is a machine channel: its account must never become
+  // the lens's persistent pair-time owner (the stamp outlives the session and
+  // grants the lens that identity until re-pair). Fall through to the live
+  // human sessions / device owner below instead.
+  if (currentAuthContext().transport == SOURCE_UART) who = String();
+
   if (usable(who)) return who;
 
   if (gLocalDisplayAuthed && usable(gLocalDisplayUser)) {
@@ -210,7 +217,6 @@ void bleStampPairedByIfBlank(BlePeerKind kind) {
   // login-equivalent for that transport). Other BLE peers (ring/phone) aren't
   // audited here: pairing them isn't a login and doesn't grant command rights.
   if (kind == BLE_PEER_G2_GLASSES) {
-    extern void logAuthAttempt(bool, const char*, const String&, const String&, const String&);
     logAuthAttempt(true, "g2/pair", who, String("ble"),
                    fromTls ? "G2 glasses paired" : "G2 glasses owner healed");
   }
@@ -409,6 +415,16 @@ void bleAutoReconnectTick(void) {
     const BlePeerSpec* p = gPeerInOrder[i];
     if (!p || !p->connectable || !p->ops || !p->ops->connectSaved) continue;
     const BlePeerKind kind = p->kind;
+    // Honor the desired BLE role (gSettings.bleMode). Every connectable peer
+    // (G2 temples, R1 ring) needs the central/client role; while the user has
+    // chosen server mode we must NEVER re-attack the radio to reconnect them —
+    // that implicit server->client mode-flip is what double-freed the BLE stack
+    // (the openble crash). Clear the intent so we don't re-check it every lap.
+    if (gSettings.bleMode != BLE_MODE_G2_CLIENT) {
+      sWantReconnect[kind] = false;
+      sReseekEvenIfNoAuto[kind] = false;
+      continue;
+    }
     if (!sWantReconnect[kind]) continue;
     if (sUserDisconnect[kind]) {
       sWantReconnect[kind] = false;

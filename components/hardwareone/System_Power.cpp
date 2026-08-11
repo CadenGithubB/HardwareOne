@@ -377,7 +377,7 @@ static const char* cmd_powersave(const String& argsInput) {
 }
 
 // Command table
-// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
+// Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 const CommandEntry powerCommands[] = {
   {"power",         "Power management [mode] [auto] [threshold]", true, cmd_power,         "Usage:\n  power - show current power status\n  power mode <perf|balanced|saver|ultra|locked|0-4>\n  power auto <on|off>\n  power threshold <0-100>"},
   {"powercooldown", "Sleep transition cooldown (ms; 0 disables)", true, cmd_powercooldown, "Usage: powercooldown <0..60000>"},

@@ -36,6 +36,12 @@ enum CommandSource {
   SOURCE_MQTT = 6,
   SOURCE_VOICE = 7,
   SOURCE_G2_GLASSES = 8,
+  SOURCE_UART = 9,   // UART host link (System_UartLink.cpp) — a Linux host
+                     // (CM5 carrier) driving the firmware over a board-to-board
+                     // UART. Own synchronized session state, own
+                     // brute-force key ("uart"), own idle window
+                     // (sessionIdleUart). Deliberately NOT counted as power-save
+                     // activity and NEVER treated as physical presence.
 };
 
 struct AuthContext {
@@ -57,6 +63,11 @@ struct AuthContext {
 extern bool gLocalDisplayAuthed;
 extern String gLocalDisplayUser;
 extern unsigned long gLocalDisplayLastInteractionMs;  // OLED session idle clock; see HardwareOne.cpp
+
+// UART host-link session (defined in System_UartLink.cpp). One session per
+// port, deliberately separate so the CM5 link and USB console can never fuse
+// into one login. The username is private to System_UartLink; callers use its
+// synchronized snapshot API rather than sharing an Arduino String cross-task.
 
 // ============================================================================
 // User Management Helper Functions (implemented in user_system.cpp)
@@ -118,6 +129,17 @@ void logoutTransport(CommandSource transport);
 bool isTransportAuthenticated(CommandSource transport);
 String getTransportUser(CommandSource transport);
 bool isTransportAdmin(CommandSource transport);
+
+// Security audit trail for credential logins. Defined in System_Debug.cpp
+// (beside the log-file constants) rather than WebServer_Server.cpp, so the
+// audit survives a headless build — that file compiles away entirely with
+// ENABLE_HTTP_SERVER=0 and used to take login auditing with it on every
+// transport. Call recordLoginAttempt(); it maps the transport to the
+// canonical "<x>/login" path and delegates here.
+void logAuthAttempt(bool success, const char* path, const String& userTried,
+                    const String& ip, const String& reason);
+void recordLoginAttempt(CommandSource transport, const String& user,
+                        const String& ip, bool success, const char* reason);
 
 // Force-logout every session belonging to `username` across all transports.
 // Returns count of sessions revoked. Called by user-mutation paths (delete,

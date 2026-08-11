@@ -2,6 +2,64 @@
 
 This document explains how to switch between different ESP32 board configurations.
 
+## Preferred: per-board isolated builds (no fullclean, ever)
+
+```bash
+tools/build_board.sh feathers3               # → build-feathers3/  (own sdkconfig)
+tools/build_board.sh qtpy_esp32              # → build-qtpy_esp32/ (own toolchain cache, classic ESP32)
+tools/build_board.sh xiao_s3 flash monitor   # actions pass through to idf.py
+```
+
+Every board builds in its own `build-<board>/` directory with its own
+`sdkconfig`, generated fresh from `sdkconfig.defaults` + the chip-family
+defaults + `boards/<board>.defaults`. Consequences:
+
+- **Switching boards never needs `idf.py fullclean`** — the PSRAM-mode/
+  bootloader mismatch that forced it cannot happen, since each board keeps its
+  own bootloader in its own cache. Rebuilding a board you built before is
+  incremental.
+- The tracked `./sdkconfig` and the default `./build/` directory (your daily-
+  driver board's state) are never touched by another board's build.
+- The wrapper derives the chip target from the board file's `# HW_TARGET:`
+  marker and always sets `HW_BOARD` — closing the footgun where a bare
+  `idf.py build` reconfigure on esp32s3 defaults to `flash=16mb` and
+  regenerates `partitions.csv` with a layout an 8 MB sdkconfig can't fit.
+- **Caveat — do not run two different boards' builds concurrently.** The root
+  `partitions.csv` is generated at configure time and read during the build;
+  it is the one file the per-board dirs still share. Serialize builds; the
+  file is gitignored/generated, so the next configure simply rewrites it.
+- Local sdkconfig experiments (`menuconfig`) apply per board dir, since each
+  dir owns its sdkconfig.
+- Each successful build writes **`build-<board>/BUILD_INFO.md`** — a manifest
+  of what that image actually contains (every feature flag resolved by the
+  compiler, chip/PSRAM/flash settings, image size and partition headroom, and
+  the git commit it came from). Ship or archive an image with that file and it
+  explains itself.
+
+### Known gap — feature flags are still one shared file
+
+Per-board dirs isolate **sdkconfig** (chip, PSRAM mode, flash size, BT stack),
+but **`components/hardwareone/System_BuildConfig.h` is global**: one set of
+feature flags for every board. Boards genuinely disagree about them, so
+switching boards can still require editing the header:
+
+| Board | Requires | Why |
+|---|---|---|
+| XIAO Sense (carrier) | `I2C_FEATURE_LEVEL 0`, `ENABLE_BLUETOOTH 1` | no breakout sensors/OLED; BT for G2 |
+| FeatherS3[D] | `I2C_FEATURE_LEVEL > 0` | MAX17048 fuel gauge is on I2C — a `#error` fires otherwise |
+| QT Py ESP32 | `ENABLE_BLUETOOTH 0` | `boards/qtpy_esp32.defaults` sets `CONFIG_BT_ENABLED=n`, so the Bluedroid headers do not exist |
+
+Building a board with the wrong header state fails loudly (a `#error`, or a
+missing `esp_gap_ble_api.h`-style include) rather than producing a bad image —
+but it is still a manual step the build dirs do not solve. A future
+`boards/<board>.features.h` overlay layered by `System_BuildConfig.h` would
+close this; until then, treat the header's user-config block as part of the
+board profile and expect to set it before switching.
+
+The classic single-`build/` flow below still works and remains what
+`./build/` + bare `idf.py` uses; the sections are kept for reference and for
+one-off menuconfig work.
+
 ## Supported Boards
 
 | Board | Chip | Arduino Variant | Notes |

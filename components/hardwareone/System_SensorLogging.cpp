@@ -2449,7 +2449,7 @@ const char* cmd_capturecrypt(const String& argsInput) {
 // Command Registry
 // ============================================================================
 
-// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
+// Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 const CommandEntry sensorLoggingCommands[] = {
   { "sensorlog", "Sensor data logging: start, stop, status, format, maxsize, rotations, sensors", false, cmd_sensorlog,
     "Usage: sensorlog <start|stop|status|format|maxsize|rotations|sensors|interval|autostart> [args...]\n"

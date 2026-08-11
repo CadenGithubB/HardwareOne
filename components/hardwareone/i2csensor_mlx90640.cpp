@@ -1401,11 +1401,11 @@ const char* cmd_thermalautostart(const String& argsInput) {
   return "Error: invalid arguments — Usage: thermalautostart [on|off]";
 }
 
-// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
+// Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 const CommandEntry thermalCommands[] = {
   // Start/Stop (3-level voice: "sensor" -> "thermal camera" -> "open/close")
-  { "openthermal", "Start MLX90640 thermal sensor.", false, cmd_thermalstart, nullptr, "sensor", "thermal camera", "open" },
-  { "closethermal", "Stop MLX90640 thermal sensor.", false, cmd_thermalstop, nullptr, "sensor", "thermal camera", "close" },
+  { "openthermal", "Start MLX90640 thermal sensor.", false, cmd_thermalstart },
+  { "closethermal", "Stop MLX90640 thermal sensor.", false, cmd_thermalstop },
   { "thermalread", "Read thermal frame; min/max/avg broadcast to output. (add 'json' for JSON output)", false, cmd_thermalread },
   
   // UI Settings (client-side visualization)

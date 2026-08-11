@@ -26,7 +26,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
+#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES && ENABLE_NEOPIXEL
 
 // CLI direct-invocation snapshot (page registry's buildText slot).
 void g2BuildLedInfo(char* out, size_t cap);
@@ -37,7 +37,7 @@ void g2ShowLedMenu();
 // Tap dispatch from handleHijackMenuTap when gHijackPage == LED.
 void g2LedHandleTap(uint32_t idx);
 
-#else  // stubs when BLE / G2 disabled
+#else  // stubs when BLE / G2 / NeoPixel disabled
 
 inline void g2BuildLedInfo(char* out, size_t cap) {
   if (out && cap > 0) out[0] = '\0';
@@ -45,6 +45,6 @@ inline void g2BuildLedInfo(char* out, size_t cap) {
 inline void g2ShowLedMenu() {}
 inline void g2LedHandleTap(uint32_t /*idx*/) {}
 
-#endif  // ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
+#endif  // ENABLE_BLUETOOTH && ENABLE_G2_GLASSES && ENABLE_NEOPIXEL
 
 #endif  // G2_PAGE_LED_H

@@ -65,7 +65,7 @@ AudioSource audioGetSource();
 bool        audioSetSource(AudioSource src);
 
 // Exclusive capture lifecycle. `owner` is a short diagnostic tag
-// ("mic.record", "sr"). audioCaptureStart returns false if capture is already
+// ("mic", "sr"). audioCaptureStart returns false if capture is already
 // held by a *different* owner, if no source is available, or if the source's
 // hardware/stream fails to start. Re-starting with the same owner is an
 // idempotent success. If the current source is NONE or has become unavailable,
@@ -74,13 +74,21 @@ bool        audioSetSource(AudioSource src);
 // 16 kHz default); the G2 source is always 16 kHz.
 bool        audioCaptureStart(const char* owner, uint32_t sampleRate = 0);
 void        audioCaptureStop(const char* owner);
-bool        audioCaptureActive();
+bool        audioCaptureActive();   // STARTING or ACTIVE (false once stop wins)
+bool        audioCaptureBusy();     // STARTING, ACTIVE, or STOPPING
+bool        audioCaptureOwnedBy(const char* owner); // owner holds any busy phase
 const char* audioCaptureOwner();   // "" when idle
 
 // Pull PCM from the active source into `out` (int16 mono). Returns the number
 // of samples read; 0 on timeout, stall, or when not capturing. Blocks up to
 // timeoutMs. Safe to call with a short read — consumers already tolerate it.
 size_t      audioReadPcm(int16_t* out, size_t maxSamples, uint32_t timeoutMs);
+
+// Establish a fresh consumer boundary without restarting the physical source.
+// Only the exact active owner may trim. PDM currently has no software ring and
+// returns 0; G2 discards decoded samples older than `keepNewestSamples`.
+// The HAL state mutex is never held while the source-specific ring is locked.
+size_t      audioTrimBufferedPcm(const char* owner, size_t keepNewestSamples);
 
 #endif // ENABLE_MICROPHONE
 #endif // HAL_AUDIO_H

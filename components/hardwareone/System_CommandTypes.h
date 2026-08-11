@@ -39,8 +39,18 @@ enum CommandOrigin {
                        // authenticated MQTT user. Routed through cmd_exec_task via
                        // submitAndExecuteSync so it serializes with all other commands
                        // instead of racing them on the esp-mqtt event task.
-  ORIGIN_VOICE         // command issued by on-device voice recognition (SOURCE_VOICE),
+  ORIGIN_VOICE,        // command issued by on-device voice recognition (SOURCE_VOICE),
                        // armed-user identity. Also routed through cmd_exec_task.
+  ORIGIN_UART          // command received on the UART host link (SOURCE_UART) —
+                       // the board-to-board channel a Linux host (CM5 carrier)
+                       // drives. Appended at the END of this enum deliberately:
+                       // the zero value stays ORIGIN_SERIAL (see the
+                       // CommandContext note below), and ORIGIN_UART must NEVER
+                       // be treated as physical presence — the OTA pin/journal
+                       // commands key on ORIGIN_SERIAL exactly so a machine on
+                       // the UART link cannot reach them. Results are written
+                       // by the UART drain itself (System_UartLink.cpp), not
+                       // by deliverCommandResult.
 };
 
 // Per-command output routing uses the MSG_ROUTE_* sink bits directly

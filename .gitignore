@@ -1,6 +1,8 @@
 # Build artifacts
 build/
-build-feathers3/
+# Per-board isolated build dirs (tools/build_board.sh): build-<board>/,
+# each with its own sdkconfig — see docs/BOARD_SWITCHING.md.
+build-*/
 managed_components/
 
 # Local scratch: third-party APKs, slide drafts, and other working material

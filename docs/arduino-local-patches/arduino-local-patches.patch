@@ -207,10 +207,26 @@ index fc83e00af..20cbc19e4 100644
    - path: ./idf_component_examples/hello_world
    - path: ./idf_component_examples/hw_cdc_hello_world
 diff --git a/libraries/BLE/src/BLEClient.cpp b/libraries/BLE/src/BLEClient.cpp
-index 808614ba5..8ce5f423e 100644
+index 808614ba5..2f246845d 100644
 --- a/libraries/BLE/src/BLEClient.cpp
 +++ b/libraries/BLE/src/BLEClient.cpp
-@@ -352,13 +352,16 @@ bool BLEClient::setMTU(uint16_t mtu) {
+@@ -118,6 +118,15 @@ BLEClient::BLEClient() {
+  * @brief Destructor.
+  */
+ BLEClient::~BLEClient() {
++  // [hardwareone local patch 2026-08-08] this library keeps ONE static
++  // BLEDevice::m_pClient alias, set by createClient() but never cleared when a
++  // client is destroyed.
++  // We create/destroy multiple clients (G2 temples + R1 ring), so a manual
++  // `delete` here — or BLEDevice::deinit()'s own `delete m_pClient` — can leave
++  // m_pClient dangling, and the NEXT deinit double-frees it (tlsf "block already
++  // marked as free" -> reboot; the openble<->G2-client role flip). Clear the
++  // alias if it points at us. BLEClient is a friend of BLEDevice (BLEDevice.h).
++  if (BLEDevice::m_pClient == this) BLEDevice::m_pClient = nullptr;
+   // We may have allocated service references associated with this client.  Before we are finished
+   // with the client, we must release resources.
+   for (auto &myPair : m_servicesMap) {
+@@ -352,13 +361,16 @@ bool BLEClient::setMTU(uint16_t mtu) {
    log_v(">> setMTU: %d", mtu);
    esp_err_t err = ESP_OK;
  
@@ -234,7 +250,7 @@ index 808614ba5..8ce5f423e 100644
  
    if (err == ESP_OK) {
  #ifdef CONFIG_BLUEDROID_ENABLED
-@@ -379,8 +382,6 @@ bool BLEClient::setMTU(uint16_t mtu) {
+@@ -379,8 +391,6 @@ bool BLEClient::setMTU(uint16_t mtu) {
    }
    log_v("<< setMTU");
  
@@ -243,7 +259,7 @@ index 808614ba5..8ce5f423e 100644
    return true;
  }
  
-@@ -433,10 +434,24 @@ bool BLEClient::connect(BLEAddress address, uint8_t type, uint32_t timeoutMs) {
+@@ -433,10 +443,24 @@ bool BLEClient::connect(BLEAddress address, uint8_t type, uint32_t timeoutMs) {
    if (errRc != ESP_OK) {
      log_e("esp_ble_gattc_app_register: rc=%d %s", errRc, GeneralUtils::errorToString(errRc));
      BLEDevice::removePeerDevice(m_appId, true);
@@ -269,7 +285,7 @@ index 808614ba5..8ce5f423e 100644
  
    if (rc != ESP_GATT_OK) {
      // fixes ESP_GATT_NO_RESOURCES error mostly
-@@ -461,6 +476,10 @@ bool BLEClient::connect(BLEAddress address, uint8_t type, uint32_t timeoutMs) {
+@@ -461,6 +485,10 @@ bool BLEClient::connect(BLEAddress address, uint8_t type, uint32_t timeoutMs) {
    if (errRc != ESP_OK) {
      log_e("esp_ble_gattc_open: rc=%d %s", errRc, GeneralUtils::errorToString(errRc));
      BLEDevice::removePeerDevice(m_appId, true);
@@ -280,7 +296,7 @@ index 808614ba5..8ce5f423e 100644
      return false;
    }
  
-@@ -472,8 +491,13 @@ bool BLEClient::connect(BLEAddress address, uint8_t type, uint32_t timeoutMs) {
+@@ -472,8 +500,13 @@ bool BLEClient::connect(BLEAddress address, uint8_t type, uint32_t timeoutMs) {
      esp_ble_gattc_app_unregister(m_gattc_if);
      m_gattc_if = ESP_GATT_IF_NONE;
    }
@@ -296,7 +312,7 @@ index 808614ba5..8ce5f423e 100644
  }  // connect
  
  /**
-@@ -539,6 +563,13 @@ void BLEClient::gattClientEventHandler(esp_gattc_cb_event_t event, esp_gatt_if_t
+@@ -539,6 +572,13 @@ void BLEClient::gattClientEventHandler(esp_gattc_cb_event_t event, esp_gatt_if_t
        BLEDevice::removePeerDevice(m_appId, true);
        // Reset security state on disconnect
        BLESecurity::resetSecurity();
@@ -310,7 +326,7 @@ index 808614ba5..8ce5f423e 100644
        if (m_wasConnected && m_pClientCallbacks != nullptr) {
          m_pClientCallbacks->onDisconnect(this);
        }
-@@ -555,13 +586,20 @@ void BLEClient::gattClientEventHandler(esp_gattc_cb_event_t event, esp_gatt_if_t
+@@ -555,13 +595,20 @@ void BLEClient::gattClientEventHandler(esp_gattc_cb_event_t event, esp_gatt_if_t
      //
      case ESP_GATTC_OPEN_EVT:
      {
@@ -332,7 +348,7 @@ index 808614ba5..8ce5f423e 100644
          log_e("Failed to connect, status=%s", GeneralUtils::errorToString(evtParam->open.status));
        }
        m_semaphoreOpenEvt.give(evtParam->open.status);
-@@ -577,6 +615,15 @@ void BLEClient::gattClientEventHandler(esp_gattc_cb_event_t event, esp_gatt_if_t
+@@ -577,6 +624,15 @@ void BLEClient::gattClientEventHandler(esp_gattc_cb_event_t event, esp_gatt_if_t
      //
      case ESP_GATTC_REG_EVT:
      {
@@ -348,7 +364,7 @@ index 808614ba5..8ce5f423e 100644
        m_gattc_if = gattc_if;
        // pass on the registration status result, in case of failure
        m_semaphoreRegEvt.give(evtParam->reg.status);
-@@ -626,6 +673,12 @@ void BLEClient::gattClientEventHandler(esp_gattc_cb_event_t event, esp_gatt_if_t
+@@ -626,6 +682,12 @@ void BLEClient::gattClientEventHandler(esp_gattc_cb_event_t event, esp_gatt_if_t
        esp_ble_gattc_cb_param_t *p_data = (esp_ble_gattc_cb_param_t *)evtParam;
        if (p_data->search_cmpl.status != ESP_GATT_OK) {
          log_e("search service failed, error status = %x", p_data->search_cmpl.status);
@@ -361,7 +377,7 @@ index 808614ba5..8ce5f423e 100644
          break;
        }
  #ifndef ARDUINO_ARCH_ESP32
-@@ -703,10 +756,19 @@ std::map<std::string, BLERemoteService *> *BLEClient::getServices() {
+@@ -703,10 +765,19 @@ std::map<std::string, BLERemoteService *> *BLEClient::getServices() {
    m_semaphoreSearchCmplEvt.take("getServices");
    if (errRc != ESP_OK) {
      log_e("esp_ble_gattc_search_service: rc=%d %s", errRc, GeneralUtils::errorToString(errRc));

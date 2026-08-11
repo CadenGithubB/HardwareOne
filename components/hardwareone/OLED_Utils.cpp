@@ -3386,7 +3386,9 @@ extern void oledLoggingModeInit();
 extern void oledSetPatternModeInit();
 extern void oledChangePasswordModeInit();
 extern void oledPowerModeInit();
+#if ENABLE_NEOPIXEL
 extern void oledLEDModeInit();    // OLED_Mode_LED.cpp (NeoPixel control)
+#endif
 extern void oledCLIInputModeInit();
 extern void oledMenuModeInit();   // Menu / Logo / Sensor-menu registrars (OLED_Mode_Menu.cpp)
 #if ENABLE_BLUETOOTH
@@ -3412,7 +3414,9 @@ void printRegisteredOLEDModes() {
   oledSetPatternModeInit();
   oledChangePasswordModeInit();
   oledPowerModeInit();
+#if ENABLE_NEOPIXEL
   oledLEDModeInit();   // keep OLED_Mode_LED.cpp from being GC'd
+#endif
   oledCLIInputModeInit();
   oledMenuModeInit();   // keep OLED_Mode_Menu.cpp (Menu/Logo/Sensor-menu) from being GC'd
 #if ENABLE_BLUETOOTH
@@ -5033,11 +5037,9 @@ extern const OLEDMenuItem oledSensorMenuItems[] = {
 #if ENABLE_ESP_SR
   { "Speech",     "notify_sensor",     OLED_SPEECH },
 #endif
-// NeoPixel LED control. No ENABLE_NEOPIXEL macro exists — compiled-in means
-// the board defines a real pin (NEOPIXEL_PIN_DEFAULT is -1 on boards without
-// one). The mode itself compiles everywhere the OLED does; only this row and
-// the getMenuAvailability verdict are gated.
-#if defined(NEOPIXEL_PIN_DEFAULT) && (NEOPIXEL_PIN_DEFAULT >= 0)
+// NeoPixel LED control — keyed on the feature flag (ENABLE_NEOPIXEL,
+// System_BuildConfig.h; defaults to board-pin presence, user-overridable).
+#if ENABLE_NEOPIXEL
   { "LED",        "notify_sensor",     OLED_LED },
 #endif
 };
@@ -5354,10 +5356,10 @@ MenuAvailability getMenuAvailability(OLEDMode mode, String* outReason) {
       if (gLocalDisplayAuthed && isAdminUser(gLocalDisplayUser)) return MenuAvailability::AVAILABLE;
       if (outReason) *outReason = "Admin only";
       return MenuAvailability::FEATURE_DISABLED;
-// NeoPixel LED control: presence is the board pin (no ENABLE_NEOPIXEL macro).
-// The submenu row is #if'd out on pinless boards already; this is the
-// belt-and-braces gate for the other entry paths (oledmode CLI, boot default).
-#if defined(NEOPIXEL_PIN_DEFAULT) && (NEOPIXEL_PIN_DEFAULT >= 0)
+// NeoPixel LED control: keyed on the feature flag (ENABLE_NEOPIXEL). The
+// submenu row is #if'd out already; this is the belt-and-braces gate for the
+// other entry paths (oledmode CLI, boot default).
+#if ENABLE_NEOPIXEL
     case OLED_LED:
       return MenuAvailability::AVAILABLE;
 #else
@@ -6575,7 +6577,7 @@ bool oledFileBrowserNeedsInit = true;
 // OLED Command Registry
 // ============================================================================
 
-// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
+// Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 const CommandEntry oledCommands[] = {
   { "openoled", "Start OLED display.", false, cmd_oledstart },
   { "closeoled", "Stop OLED display.", false, cmd_oledstop },

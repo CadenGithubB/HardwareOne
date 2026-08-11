@@ -339,13 +339,8 @@ esp_err_t handleMicRecordingsList(httpd_req_t* req);
 esp_err_t handleMicRecordingFile(httpd_req_t* req);
 esp_err_t handleMicRecordingDelete(httpd_req_t* req);
 
-// Auth logging helper (implemented in main .ino)
-void logAuthAttempt(bool success, const char* path, const String& userTried, const String& ip, const String& reason);
-
-// Single audit front-door for all credential logins (web/serial/BLE/OLED).
-// Maps transport -> canonical "<x>/login" path; G2 logs separately (g2/pair).
-void recordLoginAttempt(CommandSource transport, const String& user,
-                        const String& ip, bool success, const char* reason);
+// logAuthAttempt / recordLoginAttempt now live in System_User.h — they are
+// transport-neutral and must stay available when ENABLE_HTTP_SERVER=0.
 
 // SSE helpers moved from .ino
 bool sseSessionAliveAndRefresh(int sessIdx, const String& sid);

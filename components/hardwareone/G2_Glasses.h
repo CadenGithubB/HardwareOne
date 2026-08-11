@@ -413,6 +413,11 @@ bool g2ShowEvenAIReplyDirect(const char* body);
 // the underlying op completes.
 bool g2HideEvenAICard();
 
+// Exact native EvenAI identity fence used by recorder-shadow provenance.
+// True only while this exchange is active and bound to this UART login epoch.
+bool g2EvenAiExchangeBoundToUartSession(uint64_t exchangeId,
+                                        uint32_t sessionEpoch);
+
 // Send a fresh list to the lens via SHUTDOWN+CREATE (the path that survives
 // the firmware-plugin REBUILD-list crash — see G2_PROTOCOL.md "Hijack
 // page-swap lifecycle"). Used by stateful pages like the Files browser
@@ -735,10 +740,48 @@ bool g2MicAfeFeedIsActive();
 // send fails, so a caller can treat "armed but no enable" as a hard failure
 // instead of a silent dead mic. HAL_Audio drives this from capture start/stop.
 bool g2MicStreamEnable(bool on);
+// Latched FAST-conn-interval hold for the duration of a G2 mic capture.
+// The glasses' idle power state (72-84 ticks, slave latency 4) was measured
+// halving mic notification delivery; a capture is a bounded seconds-long
+// window that genuinely needs the throughput, same as an image push.
+// Acquire from HAL capture-start success; release from HAL capture-stop —
+// release is an idempotent no-op when not held (the disconnect teardown also
+// calls it). Never sends anything on air at release (arbiter policy).
+void g2MicLinkFastAcquire();
+void g2MicLinkFastRelease();
+// Recording-scoped container helpers (called by the recorder, NOT the HAL
+// claim — boot's idle-open mic must not paint a page): ensure a container
+// exists for a starting G2 capture (auto-creates a text page only on a
+// truly blank lens, never over a native session or hijack page); release
+// tears down only a page the ensure call created. Kick re-arms the stream
+// immediately (capture-active self-guarded) so frames start without waiting
+// a keepalive lap.
+void g2MicEnsureCaptureContainer();
+void g2MicReleaseCaptureContainer();
+bool g2MicKickStream();
+// True once the delivered-rate watchdog latched this capture's stream as
+// degraded (sustained below ~17 notifications/s vs 20 nominal). Cleared on
+// the next stream-enable rising edge and by g2micreset. Surfaced as a
+// `degraded=` token in g2micstats / recorder status lines so host-side
+// parsers can fall back to the WAV path instead of transcribing a silently
+// half-rate stream.
+bool g2MicCaptureDegraded();
+// Device millis at the most recent native "Hey Even" WAKE_UP decode. Timing
+// anchor for the recorder's `evenai_timing` EVT; 0 until the first wake.
+uint32_t g2EvenAiLastWakeMs();
+// The LIVE native EvenAI exchange id, 0 when no session is active. The
+// recorder's since-wake preroll gate compares the recording owner to this.
+uint64_t g2EvenAiActiveExchangeId();
 // Drains up to `capSamples` samples into `out`. Returns number of
 // samples actually read (0 on timeout). Blocks up to `timeoutMs` if
 // the ring is empty.
 size_t g2MicReadPcmSamples(int16_t* out, size_t capSamples, uint32_t timeoutMs);
+// Drop all but the newest `keepNewestSamples` already-decoded samples. This is
+// the recorder's post-CAPTURING boundary primitive: the ring exists to absorb
+// BLE scheduling jitter, not to prepend seconds of audio captured before the
+// recorder claimed the stream. The ring-mutex acquisition is the exact trim
+// linearization point. Returns the number of samples discarded.
+size_t g2MicTrimAfeRingToNewest(size_t keepNewestSamples);
 // Telemetry: number of samples currently buffered + cumulative
 // overrun count (samples dropped because writer outpaced reader).
 size_t g2MicAfeRingDepth();
@@ -1311,6 +1354,9 @@ inline bool g2ShowEvenAIReplyDirect(const char*, const char*) { return false; }
 inline bool g2ShowEvenAIReplyNoAsk(const char*) { return false; }
 inline bool g2ShowEvenAIReplyDirect(const char*) { return false; }
 inline bool g2HideEvenAICard() { return false; }
+inline bool g2EvenAiExchangeBoundToUartSession(uint64_t, uint32_t) {
+  return false;
+}
 inline bool g2ShowTextAsList(const char*, const char* = nullptr) { return false; }
 typedef void (*G2LivePageBuildFn)(char* out, size_t cap);
 inline bool g2StartLiveListPage(G2LivePageBuildFn, uint32_t,
@@ -1323,7 +1369,16 @@ inline void g2StopLiveTextPage() {}
 inline bool g2MicSetAfeFeedActive(bool) { return false; }
 inline bool g2MicAfeFeedIsActive() { return false; }
 inline bool g2MicStreamEnable(bool) { return false; }
+inline void g2MicLinkFastAcquire() {}
+inline void g2MicLinkFastRelease() {}
+inline void g2MicEnsureCaptureContainer() {}
+inline void g2MicReleaseCaptureContainer() {}
+inline bool g2MicKickStream() { return false; }
+inline bool g2MicCaptureDegraded() { return false; }
+inline uint32_t g2EvenAiLastWakeMs() { return 0; }
+inline uint64_t g2EvenAiActiveExchangeId() { return 0; }
 inline size_t g2MicReadPcmSamples(int16_t*, size_t, uint32_t) { return 0; }
+inline size_t g2MicTrimAfeRingToNewest(size_t) { return 0; }
 inline size_t g2MicAfeRingDepth() { return 0; }
 inline uint32_t g2MicAfeOverrunCount() { return 0; }
 // NB: when G2 is disabled, these stubs intentionally drop the

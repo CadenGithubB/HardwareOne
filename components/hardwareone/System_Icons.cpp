@@ -6341,6 +6341,7 @@ static const uint8_t PROGMEM icon_notify_display_bitmap[] = {
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 };
 
+#if ENABLE_NEOPIXEL
 // neopixel PNG data (843 bytes)
 static const uint8_t PROGMEM icon_neopixel_png[] = {
   0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
@@ -6417,6 +6418,8 @@ static const uint8_t PROGMEM icon_neopixel_bitmap[] = {
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 };
+
+#endif  // ENABLE_NEOPIXEL
 
 // servo PNG data (841 bytes)
 static const uint8_t PROGMEM icon_servo_png[] = {
@@ -7605,7 +7608,9 @@ const EmbeddedIcon EMBEDDED_ICONS[] PROGMEM = {
   {"debug", icon_debug_png, 622, icon_debug_bitmap, 32, 32},
   {"power", icon_power_png, 921, icon_power_bitmap, 32, 32},
   {"notify_display", icon_notify_display_png, 747, icon_notify_display_bitmap, 32, 32},
+#if ENABLE_NEOPIXEL
   {"neopixel", icon_neopixel_png, 843, icon_neopixel_bitmap, 32, 32},
+#endif
   {"servo", icon_servo_png, 841, icon_servo_bitmap, 32, 32},
   {"camera", icon_camera_png, 938, icon_camera_bitmap, 32, 32},
   {"microphone", icon_microphone_png, 762, icon_microphone_bitmap, 32, 32},
