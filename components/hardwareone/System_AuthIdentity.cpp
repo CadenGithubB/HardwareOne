@@ -143,6 +143,7 @@ uint8_t transportToNotifSource(CommandSource t) {
   switch (t) {
     case SOURCE_WEB:            return NOTIF_SOURCE_WEB;
     case SOURCE_SERIAL:         return NOTIF_SOURCE_CLI;
+    case SOURCE_UART:           return NOTIF_SOURCE_CLI;  // machine CLI channel; same notif family as serial
     case SOURCE_LOCAL_DISPLAY:  return NOTIF_SOURCE_OLED;
     case SOURCE_G2_GLASSES:     return NOTIF_SOURCE_G2;
     case SOURCE_VOICE:          return NOTIF_SOURCE_VOICE;

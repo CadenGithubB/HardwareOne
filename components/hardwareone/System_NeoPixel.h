@@ -7,8 +7,14 @@
 #ifndef SYSTEM_NEOPIXEL_H
 #define SYSTEM_NEOPIXEL_H
 
+// BuildConfig FIRST: this header branches on ENABLE_NEOPIXEL below, and the
+// .cpp includes this header before anything else — without this include the
+// stub branch would be chosen there and collide with the real definitions.
+#include "System_BuildConfig.h"
 #include <Arduino.h>
+#if ENABLE_NEOPIXEL
 #include <Adafruit_NeoPixel.h>
+#endif
 
 // RGB color structure
 struct RGB {
@@ -52,6 +58,14 @@ int ledEffectCodeForName(const String& name);
 // step up.
 int ledBrightnessNextPreset(int cur);
 
+// Board power rail: some boards route peripheral power through the NeoPixel
+// power pin (Feather V2 GPIO2 also powers the STEMMA QT connector), so the
+// rail is asserted INDEPENDENTLY of ENABLE_NEOPIXEL — a slim build with the
+// LED compiled out must not lose I2C. No-op on boards without a power pin.
+void boardPowerRailInit();
+
+#if ENABLE_NEOPIXEL
+
 // Global NeoPixel instance
 extern Adafruit_NeoPixel pixels;
 
@@ -68,6 +82,19 @@ void ledEffectStart(int effectType, RGB startColor, RGB endColor, unsigned long 
 void ledEffectStop(bool clearLed);
 bool ledEffectActive();
 void ledEffectTick();
+
+#else  // !ENABLE_NEOPIXEL — inline no-op stubs so shared callers need no guards
+
+inline void initNeoPixelLED() {}
+inline void setLEDColor(RGB) {}
+inline void runLEDEffect(int, RGB, RGB, unsigned long) {}
+inline void ledEffectStart(int, RGB, RGB, unsigned long) {}
+inline void ledEffectStop(bool) {}
+inline bool ledEffectActive() { return false; }
+inline void ledEffectTick() {}
+
+#endif  // ENABLE_NEOPIXEL
+
 bool getRGBFromName(const String& colorName, RGB& color);
 
 // Color utility functions
@@ -76,9 +103,11 @@ RGB adjustBrightness(RGB color, float brightness);
 RGB rainbowColor(int step, int maxSteps);
 String getClosestColorName(uint16_t r, uint16_t g, uint16_t b, RGB& closestRGB);
 
+#if ENABLE_NEOPIXEL
 // NeoPixel command registry (for system_utils.cpp)
 struct CommandEntry;
 extern const CommandEntry neopixelCommands[];
 extern const size_t neopixelCommandsCount;
+#endif
 
 #endif // SYSTEM_NEOPIXEL_H

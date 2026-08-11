@@ -393,12 +393,12 @@ include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
 if(_ota_layout)
     if(_hw_board STREQUAL "feathers3_fe")
-        set(PROJECT_VER "0.99.82+f3feo1")
+        set(PROJECT_VER "0.99.89+f3feo1")
     else()
-        set(PROJECT_VER "0.99.82+f3o1")
+        set(PROJECT_VER "0.99.89+f3o1")
     endif()
 else()
-    set(PROJECT_VER "0.99.82")
+    set(PROJECT_VER "0.99.89")
 endif()
 project(hardwareone-idf)
 
@@ -412,6 +412,68 @@ if(NOT TARGET ${_hw1_app_component})
     message(FATAL_ERROR
         "Could not resolve the hardwareone component target for OTA definitions")
 endif()
+
+# ---------------------------------------------------------------------------
+# Blank LittleFS image + `littlefs-flash` — EVERY board, not just OTA layouts
+# ---------------------------------------------------------------------------
+# initFilesystem() calls LittleFS.begin(formatOnFail=false) deliberately:
+# retained data and cryptographic material live on this partition, so a mount
+# error must never become an automatic wipe (System_Filesystem.cpp). The
+# consequence is that a freshly erased chip has no mountable filesystem and the
+# firmware halts at "LittleFS mount FAILED — data partition preserved". Since no
+# firmware carries the ability to format its own storage, the repair has to come
+# from the host toolchain — and it is needed after every `erase-flash` on every
+# board, not only during an OTA migration. This block used to live inside the
+# `if(_ota_layout)` branch, which left plain (non-OTA) boards such as the XIAO
+# with no supported way to make their filesystem mountable at all.
+#
+# The seed directory is created in the build tree rather than tracked, so no
+# placeholder file ends up on the device's filesystem.
+set(_hw1_blank_fs_dir "${CMAKE_BINARY_DIR}/littlefs_blank")
+file(MAKE_DIRECTORY "${_hw1_blank_fs_dir}")
+littlefs_create_partition_image(littlefs "${_hw1_blank_fs_dir}")
+
+# Name the port before writing it.
+#
+# `idf.py -p <port> <custom-target>` accepts -p and then throws it away: a plain
+# CMake custom target is routed through fallback_target() (core_ext.py), which
+# calls run_target() with no environment, so esptool scans and takes whichever
+# device answers first. One board, harmless. Two boards, it writes the wrong one
+# and says nothing. The guard refuses only genuine ambiguity; ESPPORT always
+# wins. Defined here (rather than inside the OTA branch, where it used to live)
+# so the filesystem targets above can use it on every board.
+function(hw1_require_flash_port _program_target)
+    set(_guard "hw1-flash-port-${_program_target}")
+    if(NOT TARGET ${_guard})
+        idf_build_get_property(_guard_python PYTHON)
+        add_custom_target(${_guard}
+            COMMAND "${_guard_python}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tools/ota/require_flash_port.py"
+                "${_program_target}"
+            USES_TERMINAL
+            VERBATIM)
+    endif()
+    add_dependencies(${_program_target} ${_guard})
+endfunction()
+
+# littlefs_create_partition_image() defines a plaintext `littlefs-flash`
+# unconditionally. esptool_py_flash_target_image() decides encryption solely from
+# CONFIG_SECURE_FLASH_ENCRYPTION_MODE_DEVELOPMENT — it never consults the
+# partition CSV — so on feathers3_fe the plaintext target would write an
+# unencrypted image into a partition the device reads through the flash
+# encryption engine, i.e. silent corruption. Refuse it there. This gate is
+# board-driven (flash encryption), not layout-driven, which is the other reason
+# it belongs at this scope.
+if(CONFIG_SECURE_FLASH_ENCRYPTION_MODE_DEVELOPMENT)
+    add_custom_target(hw1-plaintext-littlefs-refused
+        COMMAND ${CMAKE_COMMAND} -E echo
+            "Refusing plaintext littlefs programming on feathers3_fe; use encrypted-littlefs-flash"
+        COMMAND ${CMAKE_COMMAND} -E false
+        USES_TERMINAL)
+    add_dependencies(littlefs-flash hw1-plaintext-littlefs-refused)
+    hw1_require_flash_port(encrypted-littlefs-flash)
+endif()
+hw1_require_flash_port(littlefs-flash)
 
 if(_ota_layout)
     # These are load-bearing OTA safety settings, not best-effort defaults.
@@ -507,7 +569,8 @@ if(_ota_layout)
     idf_component_get_property(_ota_flash_main_args esptool_py FLASH_ARGS)
     idf_component_get_property(_ota_flash_sub_args esptool_py FLASH_SUB_ARGS)
 
-    # Name the port before writing it.
+    # Port-guard note (hw1_require_flash_port is defined at file scope above,
+    # so the filesystem targets can use it on non-OTA boards too):
     #
     # `idf.py -p <port> ota0-flash` accepts -p and then throws it away. The port
     # is a global click option (serial_ext.py) that the BUILT-IN flash actions
@@ -519,19 +582,7 @@ if(_ota_layout)
     #
     # The guard refuses only genuine ambiguity, so the single-board bench case
     # is unchanged apart from a line stating the port. ESPPORT always wins.
-    function(hw1_require_flash_port _program_target)
-        set(_guard "hw1-flash-port-${_program_target}")
-        if(NOT TARGET ${_guard})
-            idf_build_get_property(_guard_python PYTHON)
-            add_custom_target(${_guard}
-                COMMAND "${_guard_python}"
-                    "${CMAKE_CURRENT_SOURCE_DIR}/tools/ota/require_flash_port.py"
-                    "${_program_target}"
-                USES_TERMINAL
-                VERBATIM)
-        endif()
-        add_dependencies(${_program_target} ${_guard})
-    endfunction()
+    # (The function itself now lives at file scope — see above.)
     add_custom_target(hw1-stock-flash-refused
         COMMAND ${CMAKE_COMMAND} -E echo
             "Refusing stock ESP-IDF flash/erase target for a recovery-OTA layout. Use migration-flash or ota0-flash. On feathers3_fe use the encrypted variants."
@@ -618,45 +669,16 @@ if(_ota_layout)
         add_custom_target(ota0-flash DEPENDS hw1-ota0-program)
     endif()
 
-    # A blank LittleFS image, built on the host and flashed as part of the
-    # one-time migration.  This is what lets NO firmware carry the ability to
-    # erase its own storage: previously the relocated partition could only be
-    # made mountable by a migration-only updater build that shipped a
-    # destructive `formatfs confirm` console command, which then had to be
-    # replaced by a second build and a second migration flash.  Generating the
-    # empty filesystem here removes that build variant, that console command,
-    # and that second flash.
+    # The blank LittleFS image and its `littlefs-flash` / `encrypted-littlefs-flash`
+    # targets are defined at file scope (see the top of this file) because every
+    # board needs them after an erase, not only OTA migrations. The migration
+    # target below consumes the same generated image via _ota_build_dir.
     #
-    # The seed directory is created in the build tree rather than tracked, so
-    # no placeholder file ends up on the device's filesystem.
-    #
-    # Side effect worth knowing: this also defines a `littlefs-flash` target
-    # that writes the same blank image on its own.  That is the supported way
-    # to wipe a device's filesystem - the capability now lives in the host
-    # toolchain instead of inside firmware sitting on the device.
-    set(_ota_blank_fs_dir "${CMAKE_BINARY_DIR}/littlefs_blank")
-    file(MAKE_DIRECTORY "${_ota_blank_fs_dir}")
-    littlefs_create_partition_image(littlefs "${_ota_blank_fs_dir}")
-
-    # littlefs_create_partition_image() defines a plaintext `littlefs-flash`
-    # unconditionally. esptool_py_flash_target_image() decides encryption solely
-    # from CONFIG_SECURE_FLASH_ENCRYPTION_MODE_DEVELOPMENT - it never consults
-    # the partition CSV - so on feathers3_fe the plaintext target would write an
-    # unencrypted image into a partition the device reads through the flash
-    # encryption engine, i.e. silent corruption. Refuse it there, exactly as the
-    # ota0 and migration targets already do. The migration path itself is
-    # already safe: it reaches littlefs through esptool_py_flash_to_partition,
-    # whose plaintext parent target is refused on this board.
-    if(CONFIG_SECURE_FLASH_ENCRYPTION_MODE_DEVELOPMENT)
-        add_custom_target(hw1-plaintext-littlefs-refused
-            COMMAND ${CMAKE_COMMAND} -E echo
-                "Refusing plaintext littlefs programming on feathers3_fe; use encrypted-littlefs-flash"
-            COMMAND ${CMAKE_COMMAND} -E false
-            USES_TERMINAL)
-        add_dependencies(littlefs-flash hw1-plaintext-littlefs-refused)
-        hw1_require_flash_port(encrypted-littlefs-flash)
-    endif()
-    hw1_require_flash_port(littlefs-flash)
+    # That generated image is what lets NO firmware carry the ability to erase
+    # its own storage: previously the relocated partition could only be made
+    # mountable by a migration-only updater build shipping a destructive
+    # `formatfs confirm` console command, replaced afterwards by a second build
+    # and a second migration flash.
 
     # One-time layout installation is intentionally unavailable unless the
     # separately-built recovery image is named explicitly. This target writes

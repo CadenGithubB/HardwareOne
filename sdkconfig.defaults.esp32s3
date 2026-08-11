@@ -53,3 +53,9 @@ CONFIG_BT_BLE_42_FEATURES_SUPPORTED=y
 # XIAO Sense expansion board features (camera, mic, SD)
 # Add to compiler defines
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
+# UART host link (docs/UART_HOST_LINK_PLAN.md): the IDF console moves to
+# USB-Serial-JTAG so UART0 (GPIO43/44) is app-owned for the CM5 link.
+# Panic/log output was ALREADY mirrored to USB (secondary console) before
+# this change; the only observable delta is UART0 going quiet.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y

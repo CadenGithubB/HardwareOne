@@ -313,8 +313,8 @@ static const char* cmd_inputdevicepollms(const String& argsInput) {
 // Command registry — registered unconditionally as the "input" module since
 // it works under either driver.
 const CommandEntry inputCommands[] = {
-  { "openinput",         "Start the input device (gamepad or ANO encoder).", false, cmd_openinput,         nullptr, "sensor", "input", "open" },
-  { "closeinput",        "Stop the input device.",                            false, cmd_closeinput,        nullptr, "sensor", "input", "close" },
+  { "openinput",         "Start the input device (gamepad or ANO encoder).", false, cmd_openinput },
+  { "closeinput",        "Stop the input device.",                            false, cmd_closeinput },
   { "inputautostart",    "Enable/disable input device auto-start [on|off]",   false, cmd_inputautostart,    "Usage: inputautostart [on|off]" },
   { "inputdevicepollms", "Set input device poll interval ms [10-1000]",       true,  cmd_inputdevicepollms, "Usage: inputdevicepollms <10-1000>" },
 };

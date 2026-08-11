@@ -9,7 +9,7 @@
 
 #include "G2_Page_LED.h"
 
-#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
+#if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES && ENABLE_NEOPIXEL
 
 #include <Arduino.h>
 #include "G2_Glasses.h"        // g2ShowListPage / g2Set/GetHijackPage
@@ -226,4 +226,4 @@ void g2BuildLedInfo(char* out, size_t cap) {
            gSettings.ledBrightness);
 }
 
-#endif  // ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
+#endif  // ENABLE_BLUETOOTH && ENABLE_G2_GLASSES && ENABLE_NEOPIXEL

@@ -38,9 +38,9 @@ static const char* cameraValidTasks[] = { SENSOR_TASK_STREAMING, nullptr };
 
 #if ENABLE_MICROPHONE
 #include "HAL_Audio.h"   // audioAnySourceAvailable — "connected" = a mic source is reachable
+#include "System_Microphone.h"
 extern bool gMicRunning;
 extern bool micConnected;
-extern bool micRecording;
 
 static bool getMicConnected() {
   // "Connected" = a source is actually available right now (PDM present OR G2
@@ -53,7 +53,7 @@ static bool getMicEnabled() {
 }
 
 static const char* getMicTask() {
-  if (micRecording) return SENSOR_TASK_RECORDING;
+  if (micRecordingBusy()) return SENSOR_TASK_RECORDING;
   return SENSOR_TASK_NONE;
 }
 

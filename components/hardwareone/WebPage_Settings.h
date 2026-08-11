@@ -74,6 +74,9 @@ window.postSettingsCli = function(cmd) {
   return hw.postFormText('/api/cli', { cmd: cmd });
 };
 
+)EARLYJS", HTTPD_RESP_USE_STRLEN);
+#if ENABLE_NEOPIXEL
+  httpd_resp_send_chunk(req, R"LEDLIVEJS(
 // LED live control — fire-and-forget commands (no settings save flow)
 window.ledLiveSetBrightness = function() {
   var val = parseInt(document.getElementById('led-live-brightness').value);
@@ -108,7 +111,9 @@ window.ledLiveClear = function() {
   postSettingsCli('ledclear')
     .catch(function(e) { alert('LED clear failed: ' + e.message); });
 };
-
+)LEDLIVEJS", HTTPD_RESP_USE_STRLEN);
+#endif  // ENABLE_NEOPIXEL
+  httpd_resp_send_chunk(req, R"EARLYJS(
 window.sendSequential = function(cmds, onDone, onFail) {
   var all = ['beginwrite'].concat(cmds).concat(['savesettings']);
   // Target-aware dispatch — bonded view sends the batch through the bond
@@ -1081,6 +1086,9 @@ window.SchemaPanel.render({
     return result;
   }
   
+)SETPART4", HTTPD_RESP_USE_STRLEN);
+#if ENABLE_NEOPIXEL
+  httpd_resp_send_chunk(req, R"LEDRENDERJS(
   function renderLedLiveControls() {
     var colors = [
       'red','green','blue','yellow','cyan','magenta','white','black',
@@ -1140,7 +1148,9 @@ window.SchemaPanel.render({
     h += '</div>';
     return h;
   }
-
+)LEDRENDERJS", HTTPD_RESP_USE_STRLEN);
+#endif  // ENABLE_NEOPIXEL
+  httpd_resp_send_chunk(req, R"SETPART4(
   // Walk a dotted module section path (e.g. "hardware.sensors.camera") into
   // the settings tree, falling back to the module name for legacy/orphan
   // sections that haven't been migrated.

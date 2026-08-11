@@ -161,7 +161,6 @@ const size_t servoCommandsCount = 0;
 // the linker sees duplicate definitions of all 9 globals + micCommands[].
 bool gMicRunning = false;
 bool micConnected = false;
-bool micRecording = false;
 int micSampleRate = 0;
 int micBitDepth = 0;
 int micChannels = 0;

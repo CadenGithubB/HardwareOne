@@ -361,7 +361,7 @@ static const OLEDModeEntry setPatternModeEntry = {
 
 REGISTER_OLED_MODE_MODULE(&setPatternModeEntry, 1, "GamepadPassword");
 
-// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
+// Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 extern const CommandEntry setPatternCommands[] = {
   { "setgamepadpassword", "Set gamepad joystick password (requires an active OLED-display login).", true, cmd_setpattern }
 };

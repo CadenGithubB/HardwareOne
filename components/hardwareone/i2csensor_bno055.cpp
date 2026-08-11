@@ -1060,11 +1060,11 @@ const char* cmd_imuautostart(const String& argsInput) {
 
 // IMU Command Registry (Sensor-Specific)
 // ============================================================================
-// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
+// Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 const CommandEntry imuCommands[] = {
   // Start/Stop (3-level voice: "sensor" -> "motion sensor" -> "open/close")
-  { "openimu", "Start BNO055 IMU sensor.", false, cmd_imustart, nullptr, "sensor", "motion sensor", "open" },
-  { "closeimu", "Stop BNO055 IMU sensor.", false, cmd_imustop, nullptr, "sensor", "motion sensor", "close" },
+  { "openimu", "Start BNO055 IMU sensor.", false, cmd_imustart },
+  { "closeimu", "Stop BNO055 IMU sensor.", false, cmd_imustop },
   
   // Information
   { "imuread", "Read IMU sensor data. (add 'json' for JSON output)", false, cmd_imu },

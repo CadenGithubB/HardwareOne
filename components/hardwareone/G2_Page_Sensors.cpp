@@ -282,7 +282,7 @@ typedef void (*G2SensorFormatter)(char* out, size_t cap);
 // readable current-color state — see the LED-as-device audit), so brightness
 // is the one live number the row can honestly show. Plain int read from
 // gSettings — no cache mutex involved.
-#if defined(NEOPIXEL_PIN_DEFAULT) && (NEOPIXEL_PIN_DEFAULT >= 0)
+#if ENABLE_NEOPIXEL
 static void ledG2FormatValue(char* out, size_t cap) {
   snprintf(out, cap, "%d%%", gSettings.ledBrightness);
 }
@@ -412,7 +412,7 @@ static void buildRows(G2SensorRow* rows, size_t maxRows, size_t* outCount,
   // means present. The value column shows brightness (the driver is
   // write-only — no readable color state); tapping drills into the LED
   // control sub-page (G2_Page_LED.cpp) instead of the generic sensor detail.
-#if defined(NEOPIXEL_PIN_DEFAULT) && (NEOPIXEL_PIN_DEFAULT >= 0)
+#if ENABLE_NEOPIXEL
   add("LED",   "NeoPixel", "led",      true,  true,             true,              ledG2FormatValue);
 #else
   add("LED",   "NeoPixel", "led",      false, false, false,                         nullptr);

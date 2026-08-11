@@ -6,6 +6,11 @@
 #include "System_Settings.h"
 #include "System_Utils.h"
 
+// Entire file is the persistent-LED settings command family; it goes with the
+// NeoPixel hardware (compiles empty when ENABLE_NEOPIXEL=0 — the `led`
+// gCommandModules row in System_Utils.cpp is gated in lockstep).
+#if ENABLE_NEOPIXEL
+
 // Hardware LED settings (migrated from .ino)
 const char* cmd_hardwareled_brightness(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
@@ -85,7 +90,7 @@ const char* cmd_hardwareled_startupduration(const String& argsInput) {
 // Command Registration
 // ============================================================================
 
-// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
+// Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 extern const CommandEntry ledCommands[] = {
   { "ledbrightness",        "Set LED brightness 0-100.",                      false, cmd_hardwareled_brightness,    "Usage: ledbrightness <0..100>" },
   { "ledstartupenabled",    "Enable/disable LED startup effect [0|1].",        false, cmd_hardwareled_startupenabled,"Usage: ledstartupenabled <0|1>" },
@@ -96,3 +101,5 @@ extern const CommandEntry ledCommands[] = {
 };
 
 extern const size_t ledCommandsCount = sizeof(ledCommands) / sizeof(ledCommands[0]);
+
+#endif  // ENABLE_NEOPIXEL

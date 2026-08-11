@@ -4,6 +4,7 @@
 #include <Arduino.h>
 #include <IPAddress.h>
 #include "System_BuildConfig.h"
+#include "System_Microphone.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/semphr.h>
@@ -216,7 +217,6 @@
   // real prototypes/definitions → ODR + duplicate-symbol link errors.
   extern bool gMicRunning;
   extern bool micConnected;
-  extern bool micRecording;
   extern int micSampleRate;
   extern int micBitDepth;
   extern int micChannels;
@@ -225,7 +225,7 @@
   extern const size_t micCommandsCount;
   // Microphone stub functions
   inline bool initMicrophone() { return false; }
-  inline void stopMicrophone() {}
+  inline bool stopMicrophone() { return true; }
   inline int16_t* captureAudioSamples(size_t sampleCount, size_t* outLen) { if (outLen) *outLen = 0; return nullptr; }
   inline int getAudioLevel() { return 0; }
   inline void applyMicAudioProcessing(int16_t* buf, size_t sampleCount, float gainMultiplier = 0.0f, bool filtersEnabled = true) {}
@@ -233,8 +233,40 @@
   inline float getMicSoftwareGainMultiplier() { return 0.0f; }
   inline int32_t getMicDcOffset() { return 0; }
   inline const char* buildMicrophoneStatusJson() { return "{}"; }
-  inline bool startRecording() { return false; }
-  inline void stopRecording() {}
+  inline MicRecordingState getMicRecordingState() { return MicRecordingState::IDLE; }
+  inline const char* micRecordingStateName(MicRecordingState) { return "idle"; }
+  inline bool micRecordingBusy() { return false; }
+  inline bool micRecordingCapturing() { return false; }
+  inline bool startRecording(uint32_t silenceStopMs = 0, bool trim = false) { return false; }
+  inline bool stopRecording(uint32_t timeoutMs = 3000) { (void)timeoutMs; return true; }
+  inline bool startRecordingOwned(MicRecordingOwner owner,
+                                  uint32_t silenceStopMs = 0,
+                                  bool trim = false) {
+    (void)owner; (void)silenceStopMs; (void)trim; return false;
+  }
+  inline MicRecordingOwnedOp stopRecordingOwned(MicRecordingOwner owner,
+                                                bool discard = false,
+                                                uint32_t timeoutMs = 3000) {
+    (void)owner; (void)discard; (void)timeoutMs;
+    return ((uint32_t)(owner >> 32) && (uint32_t)owner)
+               ? MicRecordingOwnedOp::NOT_FOUND
+               : MicRecordingOwnedOp::INVALID_OWNER;
+  }
+  inline MicRecordingOwnedOp getRecordingResultOwned(MicRecordingOwner owner,
+                                                     MicRecordingResult* out) {
+    if (out) *out = MicRecordingResult{};
+    return ((uint32_t)(owner >> 32) && (uint32_t)owner)
+               ? MicRecordingOwnedOp::NOT_FOUND
+               : MicRecordingOwnedOp::INVALID_OWNER;
+  }
+  inline MicRecordingOwnedOp deleteRecordingOwned(
+      MicRecordingOwner owner, const char* expectedFilename) {
+    (void)expectedFilename;
+    return ((uint32_t)(owner >> 32) && (uint32_t)owner)
+               ? MicRecordingOwnedOp::NOT_FOUND
+               : MicRecordingOwnedOp::INVALID_OWNER;
+  }
+  inline void microphoneNotifySourceLost() {}
   inline int getRecordingCount() { return 0; }
   inline String getRecordingsList() { return "[]"; }
   inline bool deleteRecording(const char* filename) { return false; }
@@ -334,7 +366,10 @@
   inline void broadcastEventToSessionsIf(const char* eventName, const char* jsonData,
                                          bool (*allow)(const char* username, void* arg), void* arg) {}
   inline uint32_t sseEventDropsTotal() { return 0; }
-  inline void logAuthAttempt(bool success, const char* transport, const String& ip, const String& user, const String& reason) {}
+  // No logAuthAttempt stub: it is real in every build now (System_Debug.cpp,
+  // declared in System_User.h). The stub that used to live here also had `ip`
+  // and `user` transposed relative to the real signature — same types, so it
+  // compiled either way and would have silently produced reversed audit lines.
   inline bool authSuccessUnified(struct AuthContext& ctx, httpd_req_t* req) { return false; }
 #endif
 

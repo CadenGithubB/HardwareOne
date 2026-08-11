@@ -42,3 +42,12 @@ CONFIG_NVS_ENCRYPTION=n
 # Keep the standard table offset (feathers3_fe moves it to 0x9000; the shared
 # CSVs start nvs at 0xA000 so both offsets work).
 CONFIG_PARTITION_TABLE_OFFSET=0x8000
+
+# CARRIER BUILD (2026-08-07): Bluetooth ENABLED so the G2 glasses mic can
+# reach the CM5 over the UART link. Flash for the Bluedroid stack + controller
+# + LC3 audio codec is recovered by dropping maps + the I2C/OLED layer
+# (I2C_FEATURE_LEVEL=0, ENABLE_MAPS=0 in System_BuildConfig.h); camera kept.
+# Was CONFIG_BT_ENABLED=n (binary overflowed the 5332K factory with BT + the
+# fuller feature set). Revert this + the two BuildConfig flags to rebuild the
+# camera+PDM-only variant.
+CONFIG_BT_ENABLED=y

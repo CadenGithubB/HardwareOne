@@ -409,7 +409,7 @@ void g2HealthApplyTrendDaily(G2HealthMetric metric,
 static bool validateCommonDaily(const R1CommonDailyResult& result) {
   if (result.profile != R1_PROFILE_FW_2_2_7_0005 ||
       result.count > R1_COMMON_DAILY_MAX_RECORDS ||
-      result.trailer != R1_FW227_DAILY_TRAILER || result.dayStart == 0 ||
+      result.dayMode != R1_DAILY_DAY_EPOCH || result.dayStart == 0 ||
       result.timezoneMinutes < -840 || result.timezoneMinutes > 840 ||
       (result.metric != R1_DAILY_METRIC_HEART_RATE &&
        result.metric != R1_DAILY_METRIC_SPO2)) return false;
@@ -429,7 +429,7 @@ static bool validateHrvDaily(const R1HrvDailyResult& result) {
   if (result.profile != R1_PROFILE_FW_2_2_7_0005 ||
       result.metric != R1_DAILY_METRIC_HRV ||
       result.count > R1_HRV_DAILY_MAX_RECORDS ||
-      result.trailer != R1_FW227_DAILY_TRAILER || result.dayStart == 0 ||
+      result.dayMode != R1_DAILY_DAY_EPOCH || result.dayStart == 0 ||
       result.timezoneMinutes < -840 || result.timezoneMinutes > 840) return false;
   bool seen[R1_HEALTH_HOURLY_SLOTS] = {};
   for (uint8_t i = 0; i < result.count; ++i) {
@@ -447,7 +447,7 @@ static bool validateActivityDaily(const R1ActivityDailyResult& result) {
   if (result.profile != R1_PROFILE_FW_2_2_7_0005 ||
       result.metric != R1_DAILY_METRIC_ACTIVITY ||
       result.count > R1_ACTIVITY_DAILY_MAX_RECORDS ||
-      result.trailer != R1_FW227_DAILY_TRAILER || result.dayStart == 0 ||
+      result.dayMode != R1_DAILY_DAY_EPOCH || result.dayStart == 0 ||
       result.timezoneMinutes < -840 || result.timezoneMinutes > 840) return false;
   bool seen[R1_HEALTH_ACTIVITY_SLOTS] = {};
   for (uint8_t i = 0; i < result.count; ++i) {

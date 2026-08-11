@@ -1469,6 +1469,15 @@ static const char* cmd_blestart(const String& argsInput) {
   if (!gSettings.bleEnabled) {
     return "ERROR: Bluetooth is disabled - run 'bleenabled 1' first";
   }
+  // `openble` means "be the phone-facing server." Record server as the desired
+  // BLE role and cancel any pending G2/R1 client reconnect intent BEFORE
+  // initBluetooth(): its G2 teardown fires the temples' onDisconnect
+  // synchronously, which would otherwise re-arm auto-reconnect and let the loop
+  // tick flip the radio back to client mode — the mode-thrash that double-freed
+  // the BLE stack. setSetting persists so the tick honors the role across boots.
+  setSetting(gSettings.bleMode, (int)BLE_MODE_SERVER);
+  blePeerNoteUserDisconnect(BLE_PEER_G2_GLASSES);
+  blePeerNoteUserDisconnect(BLE_PEER_R1_RING);
   // Pause sensor polling during BLE init to avoid interrupt contention (RAII —
   // resumes on every return path; the trailing string checks do no I2C work).
   PollPauseGuard pollGuard;
@@ -1489,6 +1498,10 @@ static const char* cmd_blestart(const String& argsInput) {
 
 static const char* cmd_blestop(const String& argsInput) {
   deinitBluetooth();
+  // Stopping the server returns the device to its default (G2 client) role so
+  // the glasses can auto-reconnect again — closeble means "stop the server,"
+  // not "stay off BLE" (use `bleenabled 0` for that). Re-opens the tick guard.
+  setSetting(gSettings.bleMode, (int)BLE_MODE_G2_CLIENT);
   BLE_DEBUGF(DEBUG_BLE_CORE, "BLE stopped");
   return "Bluetooth stopped";
 }
@@ -2069,11 +2082,11 @@ static const char* cmd_blemode(const String& argsInput) {
 // COMMAND REGISTRY
 // =============================================================================
 
-// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
+// Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 const CommandEntry bluetoothCommands[] = {
-  // Start/Stop (3-level voice: "connection" -> "bluetooth" -> "open/close")
-  { "openble",      "Start Bluetooth LE and begin advertising.", true, cmd_blestart, nullptr, "connection", "bluetooth", "open" },
-  { "closeble",     "Stop Bluetooth LE and deinitialize.",       true, cmd_blestop,  nullptr, "connection", "bluetooth", "close" },
+  // Start/Stop (voice phrases live in kVoiceRoutes, System_ESPSR.cpp)
+  { "openble",      "Start Bluetooth LE and begin advertising.", true, cmd_blestart },
+  { "closeble",     "Stop Bluetooth LE and deinitialize.",       true, cmd_blestop },
   { "bleread",      "Read Bluetooth connection status. (add 'json' for JSON output)",         false, cmd_blestatus },
   { "blestatus",    "Show Bluetooth connection status. (add 'json' for JSON output)",         false, cmd_blestatus },
   { "bleinfo",      "Show BLE configuration and settings. (add 'json' for JSON output)",      false, cmd_bleinfo },
@@ -2087,13 +2100,13 @@ const CommandEntry bluetoothCommands[] = {
   
   // Auto-start
   { "bleautostart",    "Enable/disable BLE auto-start after boot [on|off].",   true, cmd_bleautostart,    "Usage: bleautostart [on|off]" },
-  { "blerequireauth", "Enable/disable BLE authentication requirement [on|off].", true, cmd_blerequireauth, "Usage: blerequireauth [on|off]", nullptr, nullptr, /*requiresSuperAdmin=*/true },
+  { "blerequireauth", "Enable/disable BLE authentication requirement [on|off].", true, cmd_blerequireauth, "Usage: blerequireauth [on|off]", /*requiresSuperAdmin=*/true },
 
   // Mode (server vs. G2 client) - mutually exclusive at runtime
   { "blemode",        "Get/set BLE mode [server|client].",                     true, cmd_blemode,         "Usage: blemode [server|client]" },
 
   // App-layer Secure Channel v1 (X25519+PSK+ChaCha20-Poly1305; no BLE bonding)
-  { "blesecret", "Set/clear the BLE Secure Channel passphrase: blesecret <phrase|clear>.", true, cmd_blesecret, "Usage: blesecret <passphrase|clear>", nullptr, nullptr, /*requiresSuperAdmin=*/true },
+  { "blesecret", "Set/clear the BLE Secure Channel passphrase: blesecret <phrase|clear>.", true, cmd_blesecret, "Usage: blesecret <passphrase|clear>", /*requiresSuperAdmin=*/true },
   { "blesecure", "Require app-layer BLE encryption [on|off].",                            true, cmd_blesecure, "Usage: blesecure [on|off]" },
 
   // Auto-reconnect (boot + mid-session drop) to saved-MAC peers. Pairing is
@@ -2122,7 +2135,7 @@ const SettingEntry bluetoothSettingsEntries[] = {
   { "bluetoothRequireAuth",  SETTING_BOOL,   &gSettings.bleRequireAuth,  true, 0, nullptr, 0, 1, "Require Authentication", nullptr, false, nullptr, "blerequireauth" },
   { "bluetoothDeviceName", SETTING_STRING, &gSettings.bleDeviceName, 0, 0, "HardwareOne", 0, 0, "Device Name", nullptr, false, nullptr, "blename" },
   { "bluetoothTxPower",      SETTING_INT,    &gSettings.bleTxPower,            3, 0, nullptr, 0, 7, "TX Power (0-7)", nullptr, false, nullptr, "bletxpower" },
-  { "bluetoothMode",         SETTING_INT,    &gSettings.bleMode,               0,    0, nullptr, 0, 1, "Mode (0=server, 1=g2)", "0|Server,1|Client (G2)", false, nullptr, "blemode" },
+  { "bluetoothMode",         SETTING_INT,    &gSettings.bleMode,               1,    0, nullptr, 0, 1, "Mode (0=server, 1=g2)", "0|Server,1|Client (G2)", false, nullptr, "blemode" },
   { "bleRequireSecureChannel", SETTING_BOOL, &gSettings.bleRequireSecureChannel, true, 0, nullptr, 0, 1, "Require Secure Channel", nullptr, false, nullptr, "blesecure" },
   { "bleSecureChannelSecret",  SETTING_STRING, &gSettings.bleSecureChannelSecret, 0, 0, "", 0, 0, "Secure Channel Secret", nullptr, true, nullptr, "blesecret" },
 };

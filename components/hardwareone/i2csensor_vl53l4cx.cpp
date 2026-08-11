@@ -659,11 +659,11 @@ const char* cmd_tofautostart(const String& argsInput) {
   return "Error: invalid arguments — Usage: tofautostart [on|off]";
 }
 
-// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
+// Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 const CommandEntry tofCommands[] = {
   // Start/Stop/Read (3-level voice: "sensor" -> "time of flight" -> "open/close")
-  { "opentof", "Start VL53L4CX ToF sensor.", false, cmd_tofstart, nullptr, "sensor", "time of flight", "open" },
-  { "closetof", "Stop VL53L4CX ToF sensor.", false, cmd_tofstop, nullptr, "sensor", "time of flight", "close" },
+  { "opentof", "Start VL53L4CX ToF sensor.", false, cmd_tofstart },
+  { "closetof", "Stop VL53L4CX ToF sensor.", false, cmd_tofstop },
   { "tofread", "Read ToF distance sensor. (add 'json' for JSON output)", false, cmd_tof },
   
   // UI Settings (client-side visualization)

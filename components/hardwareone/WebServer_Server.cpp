@@ -39,6 +39,7 @@
 #include "System_Utils.h"
 #include "System_Notifications.h"  // notifyLoginSuccess/Failed — web login parity with CLI/OLED
 #include "System_Events.h"         // systemEventPost — server up/down + logout events
+#include "System_UartLink.h"       // exact UART login-generation publication
 #include "WebServer_Utils.h"
 #include "WebServer_Server.h"
 #include "WebPage_Automations.h"
@@ -490,6 +491,12 @@ esp_err_t authSuccessUnified(AuthContext& ctx, const char* redirectTo) {
     // Admin decision left to existing logic; do not forcibly elevate here
     sidShort = "serial";
     if (ctx.ip.length() == 0) ctx.ip = "local";
+  } else if (ctx.transport == SOURCE_UART) {
+    // Establish UART host-link session state (mirrors serial; separate pair)
+    uartLinkSessionAuthenticated(
+        ctx.user.length() ? ctx.user : String("uart"));
+    sidShort = "uart";
+    if (ctx.ip.length() == 0) ctx.ip = "uart";
   } else if (ctx.transport == SOURCE_LOCAL_DISPLAY) {
     // Establish local display session state
     gLocalDisplayAuthed = true;
@@ -508,6 +515,7 @@ esp_err_t authSuccessUnified(AuthContext& ctx, const char* redirectTo) {
   switch (ctx.transport) {
     case SOURCE_WEB: transportStr = "http"; break;
     case SOURCE_SERIAL: transportStr = "serial"; break;
+    case SOURCE_UART: transportStr = "uart"; break;
     case SOURCE_LOCAL_DISPLAY: transportStr = "display"; break;
     case SOURCE_G2_GLASSES: transportStr = "g2"; break;
     case SOURCE_ESPNOW: transportStr = "espnow"; break;
@@ -1526,80 +1534,9 @@ String getLogoutReasonForAuthPage(httpd_req_t* req) {
 // web server being compiled in. /api/system, SSE, and the migration tool still
 // call it via the declaration in WebServer_Server.h. See System_Utils.cpp.
 
-// ============================================================================
-// Auth Logging
-// ============================================================================
-
-// Centralized auth attempt logging (moved from .ino)
-// Only logs to file for actual login events, not all auth attempts
-void logAuthAttempt(bool success, const char* path, const String& userTried, const String& ip, const String& reason) {
-  // Normalize path for checking
-  String cleanPath = String(path ? path : "");
-  cleanPath.replace("%2F", "/");
-  cleanPath.replace("%20", " ");
-  
-  // Only log to file if this is an actual security event (login or credential
-  // rotation). Path checks use exact equality to avoid spurious matches like
-  // "/configure-login-page" or "/login-help" triggering on the substring
-  // "/login". The reason-based matches catch events whose path varies by
-  // transport (e.g. password change is "/account/password-change" from web
-  // but "/oled/command" from OLED).
-  // Any "<transport>/login" path (web "/login", serial/login, bluetooth/login,
-  // display/login) plus the G2 pair event and credential-rotation reasons.
-  // endsWith avoids spurious matches like "/login-help" / "/configure-login-page".
-  bool isSecurityAuditEvent =
-      cleanPath.endsWith("/login") ||
-      (cleanPath == "g2/pair") ||
-      (cleanPath == "espnow/bond") ||
-      (reason.indexOf("Login successful") >= 0) ||
-      (reason.indexOf("Password changed") >= 0) ||
-      (reason.indexOf("Current password incorrect") >= 0) ||
-      (reason.indexOf("Password storage failed") >= 0);
-
-  if (!isSecurityAuditEvent) {
-    // Not a security event - skip file logging (command audit handles command tracking)
-    return;
-  }
-
-  char tsPrefix[40];
-  getTimestampPrefixMsCached(tsPrefix, sizeof(tsPrefix));
-  String status = success ? "SUCCESS" : "FAILED";
-
-  String cleanIP = ip;
-  cleanIP.replace("::FFFF:", "");
-
-  // Format: [ts] | STATUS | user=.. | ip=.. | /path [| reason=..]
-  String line;
-  line.reserve(160);
-  if (tsPrefix[0]) line += tsPrefix;  // already includes trailing " | "
-  line += status;
-  line += " | user="; line += userTried;
-  line += " | ip=";   line += cleanIP;
-  line += " | ";      line += cleanPath;
-  if (reason.length()) { line += " | reason="; line += reason; }
-
-  const char* logFile = success ? LOG_OK_FILE : LOG_FAIL_FILE;
-  appendLineWithCap(logFile, line, LOG_CAP_BYTES);
-}
-
-// Single audit front-door for all credential logins (web, serial, BLE, OLED).
-// G2 is excluded — it has no credential login (its pair-time identity is logged
-// separately with path "g2/pair"). Maps the transport to a canonical
-// "<x>/login" path and fills a synthetic IP when the caller has none, so every
-// login path records consistently through one place.
-void recordLoginAttempt(CommandSource transport, const String& user,
-                        const String& ip, bool success, const char* reason) {
-  const char* path;
-  const char* defIp;
-  switch (transport) {
-    case SOURCE_WEB:           path = "web/login";       defIp = "web";   break;
-    case SOURCE_SERIAL:        path = "serial/login";    defIp = "local"; break;
-    case SOURCE_BLUETOOTH:     path = "bluetooth/login"; defIp = "ble";   break;
-    case SOURCE_LOCAL_DISPLAY: path = "display/login";   defIp = "local"; break;
-    default:                   path = "login";           defIp = "local"; break;
-  }
-  logAuthAttempt(success, path, user, ip.length() ? ip : String(defIp), reason ? reason : "");
-}
+// NOTE: logAuthAttempt() and recordLoginAttempt() moved to System_Debug.cpp
+// (declared in System_User.h). They have no httpd dependency, and keeping them
+// here meant the whole security audit trail compiled away with the web server.
 
 // Streaming content for Dashboard page (moved from .ino)
 void streamDashboardContent(httpd_req_t* req, const String& username) {

@@ -110,6 +110,7 @@ constexpr uint32_t ESPNOW_TX_STACK_WORDS = 5120;     // 5 KB (was annotated ~20K
                                                      // [ESPNOW_TX] HWM still logs every 10s.
 constexpr uint32_t MIC_RECORD_STACK_WORDS = 4096;     // 4 KB (was ~16KB) — microphone recording
 constexpr uint32_t MIC_VIZ_STACK_WORDS = 4096;     // 4 KB (was ~16KB) — microphone visualizer
+constexpr uint32_t LIVE_AUDIO_TX_STACK_WORDS = 4096;  // 4 KB — dormant synthetic live-PCM UART producer
 constexpr uint32_t SR_STACK_WORDS = 8192;     // 8 KB (was ~32KB) — speech recognition inference
 constexpr uint32_t SR_SNIP_STACK_WORDS = 4096;     // 4 KB (was ~16KB) — speech recognition snippet writer
 constexpr uint32_t EI_CONTINUOUS_STACK_WORDS = 8192;     // 8 KB (was ~32KB) — EdgeImpulse continuous inference

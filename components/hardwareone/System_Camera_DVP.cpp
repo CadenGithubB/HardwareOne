@@ -2219,12 +2219,12 @@ const char* cmd_cameravideodelete(const String& argsInput) {
 }
 
 // Command registry
-// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
+// Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 const CommandEntry cameraCommands[] = {
   {"cameraread",       "Read camera status",              false, cmd_camera},
-  {"opencamera",       "Start camera sensor.",            false, cmd_camerastart, nullptr, "sensor", "camera", "open"},
-  {"closecamera",      "Stop camera sensor.",             false, cmd_camerastop, nullptr, "sensor", "camera", "close"},
-  {"cameracapture",    "Capture a single frame",          false, cmd_cameracapture, nullptr, "sensor", "camera", "take picture"},
+  {"opencamera",       "Start camera sensor.",            false, cmd_camerastart},
+  {"closecamera",      "Stop camera sensor.",             false, cmd_camerastop},
+  {"cameracapture",    "Capture a single frame",          false, cmd_cameracapture},
   {"camerasave",       "Save current frame to storage",   false, cmd_camerasave},
   {"camerares",        "Set camera resolution: <res>",    false, cmd_camerares, "Usage: camerares <96x96|qqvga|qcif|hqvga|240x240|qvga|cif|vga|svga|xga|sxga|uxga>"},
   {"cameraframesize",  "Set resolution by index: <0-10>", true,  cmd_cameraframesize, "Usage: cameraframesize <0..10> (0-5: QVGA..UXGA, 6-10: 96x96/QQVGA/QCIF/HQVGA/240x240)"},
@@ -2268,7 +2268,7 @@ const CommandEntry cameraCommands[] = {
   {"cameraautocaptureinterval", "Auto-capture: <sec>",    true, cmd_cameraautocaptureinterval, "Usage: cameraautocaptureinterval <10..3600>"},
   {"camerasendaftercapture", "Send after capture: <on|off>", true, cmd_camerasendaftercapture, "Usage: camerasendaftercapture <on|off|1|0|true>"},
   {"cameratargetdevice",    "Target device: <name>",      true,  cmd_cameratargetdevice, "Usage: cameratargetdevice <name>"},
-  {"camerarecord",          "Start/stop MJPEG-AVI recording (SD only): <start|stop>", false, cmd_camerarecord, "Usage: camerarecord <start|stop|1|0>", "sensor", "camera", "record"},
+  {"camerarecord",          "Start/stop MJPEG-AVI recording (SD only): <start|stop>", false, cmd_camerarecord, "Usage: camerarecord <start|stop|1|0>"},
   {"cameravideolist",       "List AVI recordings on SD (add 'json' for JSON output)",  false, cmd_cameravideolist},
   {"cameravideodelete",     "Delete recording: \"<filename>\"", true, cmd_cameravideodelete, "Usage: cameravideodelete \"<filename>\""},
 };

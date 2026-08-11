@@ -24,6 +24,7 @@
 #include "System_AuthIdentity.h"   // currentAuthContext (createdBy stamp, admin sync)
 #include "System_CLIConfirm.h"     // cliRequestConfirm — yes/no gate for destructive userdelete
 #include "System_Settings.h"
+#include "System_UartLink.h"
 #include "Bluetooth.h"
 #include "BLE_Peers.h"            // gBlePeerData[BLE_PEER_G2_GLASSES].pairedByUser
                                   // — G2 identity source for SOURCE_G2_GLASSES branches
@@ -65,6 +66,12 @@ static inline bool g2PairedUserMatches(const String& username) {
 #include "mbedtls/md.h"
 #include "mbedtls/pkcs5.h"
 
+static String uartSessionUserSnapshot() {
+  char user[kPublicUsernameMaxLen + 1] = {};
+  if (!uartLinkSessionSnapshot(user, sizeof(user))) return String();
+  return String(user);
+}
+
 // ============================================================================
 // External Dependencies from .ino
 // ============================================================================
@@ -89,6 +96,7 @@ unsigned long sessionIdleWindowMs(CommandSource transport) {
     case SOURCE_SERIAL:    mins = gSettings.sessionIdleSerial; break;
     case SOURCE_BLUETOOTH: mins = gSettings.sessionIdleBle;     break;
     case SOURCE_LOCAL_DISPLAY: mins = gSettings.sessionIdleDisplay; break;
+    case SOURCE_UART:      mins = gSettings.sessionIdleUart;   break;  // default 0: a machine session doesn't wander off; client re-logins on rejection
     // SOURCE_ESPNOW (bond) is intentionally excluded: it's a device-to-device
     // trust channel, not a human session, so idle-logout doesn't apply. Any
     // other transport reads as disabled.
@@ -182,6 +190,19 @@ bool tgRequireAuth(AuthContext& ctx) {
     ctx.user = gSerialUser;
     if (ctx.ip.length() == 0) ctx.ip = "local";
     return true;
+  } else if (ctx.transport == SOURCE_UART) {
+    // UART host-link auth state — mirrors the serial branch against the
+    // link's own session pair. Must NOT fall into the trusting else-branch
+    // below (that branch assumes upstream validation the UART drain doesn't
+    // claim to do).
+    const String uartUser = uartSessionUserSnapshot();
+    if (gSettings.uartRequireAuth && uartUser.length() == 0) {
+      broadcastOutput("ERROR: auth required (uart)");
+      return false;
+    }
+    ctx.user = uartUser;
+    if (ctx.ip.length() == 0) ctx.ip = "uart";
+    return true;
   } else if (ctx.transport == SOURCE_LOCAL_DISPLAY) {
     // Local display auth state - check if auth is required via settings
     // Allow commands during boot phase (before auth is enforced)
@@ -233,6 +254,18 @@ bool tgRequireAuth(AuthContext& ctx) {
     }
     ctx.user = gSerialUser;
     if (ctx.ip.length() == 0) ctx.ip = "local";
+    return true;
+  } else if (ctx.transport == SOURCE_UART) {
+    // UART host link. This stub's fall-through returns true, so a missing
+    // case here would be an auth BYPASS, not a dead feature — keep this
+    // branch in lockstep with the full-build one above.
+    const String uartUser = uartSessionUserSnapshot();
+    if (gSettings.uartRequireAuth && uartUser.length() == 0) {
+      broadcastOutput("ERROR: auth required (uart)");
+      return false;
+    }
+    ctx.user = uartUser;
+    if (ctx.ip.length() == 0) ctx.ip = "uart";
     return true;
   } else if (ctx.transport == SOURCE_LOCAL_DISPLAY) {
     if (shouldBlockForDisplayAuth()) {
@@ -442,27 +475,36 @@ bool loginTransport(CommandSource transport, const String& username, const Strin
   // each attempt once via the shared recordLoginAttempt() front-door.
   const bool credentialTransport = (transport == SOURCE_SERIAL ||
                                     transport == SOURCE_LOCAL_DISPLAY ||
-                                    transport == SOURCE_BLUETOOTH);
+                                    transport == SOURCE_BLUETOOTH ||
+                                    transport == SOURCE_UART);
 
   // Validate credentials first
   if (!isValidUser(username, password)) {
-#if ENABLE_HTTP_SERVER
     if (credentialTransport)
       recordLoginAttempt(transport, username, String(), false, "Invalid credentials");
-#endif
     return false;
   }
 
-#if ENABLE_HTTP_SERVER
   if (credentialTransport)
     recordLoginAttempt(transport, username, String(), true, "Login successful");
-#endif
 
   // Set auth state based on transport
   switch (transport) {
     case SOURCE_SERIAL:
       gSerialAuthed = true;
       gSerialUser = username;
+      updateUserLastSeen(username);
+      return true;
+
+    case SOURCE_UART:
+      // UART host link. No caller reaches this today: the link's in-band
+      // login goes through authSuccessUnified (or sets the globals directly
+      // in stub builds), and cmd_login has no "uart" transport keyword and
+      // refuses SOURCE_UART callers outright. Kept so the transport is
+      // complete here — if a future path does route through loginTransport,
+      // it establishes the right session instead of silently failing.
+      if (!uartLinkIsRunning()) return false;
+      uartLinkSessionAuthenticated(username);
       updateUserLastSeen(username);
       return true;
 
@@ -504,6 +546,10 @@ void logoutTransport(CommandSource transport) {
     case SOURCE_SERIAL:
       gSerialAuthed = false;
       gSerialUser = String();
+      break;
+
+    case SOURCE_UART:
+      uartLinkSessionCleared();
       break;
       
     case SOURCE_LOCAL_DISPLAY:
@@ -593,6 +639,12 @@ int revokeUserSessions(const String& username,
     revoked++;
   }
 
+  // UART host link: single per-port session, same shape as serial.
+  if (exceptTransport != SOURCE_UART &&
+      uartLinkSessionClearIfUser(username)) {
+    revoked++;
+  }
+
   // Local display (OLED).
   if (exceptTransport != SOURCE_LOCAL_DISPLAY
       && gLocalDisplayAuthed
@@ -631,7 +683,10 @@ bool isTransportAuthenticated(CommandSource transport) {
   switch (transport) {
     case SOURCE_SERIAL:
       return gSerialAuthed;
-      
+
+    case SOURCE_UART:
+      return uartLinkSessionEpoch() != 0;
+
     case SOURCE_LOCAL_DISPLAY:
       return gLocalDisplayAuthed;
 
@@ -657,7 +712,11 @@ String getTransportUser(CommandSource transport) {
   switch (transport) {
     case SOURCE_SERIAL:
       return gSerialUser;
-      
+
+    case SOURCE_UART:
+      return uartSessionUserSnapshot();
+
+
     case SOURCE_LOCAL_DISPLAY:
       return gLocalDisplayUser;
 
@@ -1060,6 +1119,8 @@ static const char* setUserBanInternal(const String& username, bool ban, const St
       gSerialAuthed = false;
       gSerialUser   = String();
     }
+    // Revoke UART host-link session if active for this user
+    (void)uartLinkSessionClearIfUser(username);
     // Revoke OLED/local display session if active for this user
     if (gLocalDisplayAuthed && gLocalDisplayUser.equalsIgnoreCase(username)) {
       gLocalDisplayAuthed = false;
@@ -2456,6 +2517,12 @@ const char* cmd_session_list(const String& argsInput) {
       t["user"]      = gSerialUser;
       t["transport"] = "serial";
     }
+    const String uartUser = uartSessionUserSnapshot();
+    if (uartUser.length()) {
+      JsonObject t = sessions.add<JsonObject>();
+      t["user"]      = uartUser;
+      t["transport"] = "uart";
+    }
     if (gLocalDisplayAuthed && gLocalDisplayUser.length()) {
       JsonObject t = sessions.add<JsonObject>();
       t["user"]      = gLocalDisplayUser;
@@ -3413,12 +3480,12 @@ static const char* cmd_serialrequireauth(const String& argsInput) {
   return "Error: invalid arguments — Usage: serialrequireauth [on|off]";
 }
 
-// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
+// Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 const CommandEntry userSystemCommands[] = {
   // Authentication commands
   { "login", "Login: <user> <pass> [transport]", false, cmd_login, "Usage: login <username> <password> [transport]\nTransport: serial (default), display, bluetooth" },
   { "logout", "Logout [transport]", false, cmd_logout, "Usage: logout [transport]\nTransport: serial (default), display, bluetooth, g2" },
-  { "serialrequireauth", "Enable/disable serial auth requirement [on|off].", true, cmd_serialrequireauth, "Usage: serialrequireauth [on|off]", nullptr, nullptr, /*requiresSuperAdmin=*/true },
+  { "serialrequireauth", "Enable/disable serial auth requirement [on|off].", true, cmd_serialrequireauth, "Usage: serialrequireauth [on|off]", /*requiresSuperAdmin=*/true },
   
   // User management commands
   { "userapprove", "Approve pending request: <username>", true, cmd_user_approve, "Usage: userapprove <username>" },

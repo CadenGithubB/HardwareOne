@@ -889,10 +889,10 @@ const char* cmd_rtcautostart(const String& argsInput) {
   return "Error: invalid arguments — Usage: rtcautostart [on|off]";
 }
 
-// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
+// Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 const CommandEntry rtcCommands[] = {
-  { "openrtc",  "Start DS3231 RTC sensor.",                    false, cmd_rtcstart, nullptr, "sensor", "clock", "open" },
-  { "closertc", "Stop DS3231 RTC sensor.",                     false, cmd_rtcstop,  nullptr, "sensor", "clock", "close" },
+  { "openrtc",  "Start DS3231 RTC sensor.",                    false, cmd_rtcstart },
+  { "closertc", "Stop DS3231 RTC sensor.",                     false, cmd_rtcstop },
   { "rtcread",   "Read RTC status [status|temp]",               false, cmd_rtc,      "Usage: rtcread [status|temp] [json]" },
   { "rtcset",   "Set RTC time: <datetime|timestamp>",          true,  cmd_rtcset,   "Usage: rtcset YYYY-MM-DD HH:MM:SS  or  rtcset <unix_timestamp>" },
   { "rtcsync",  "Sync time: [to|from]",                        true,  cmd_rtcsync,  "Usage: rtcsync [to|from] (to=RTC->system, from=system->RTC)" },

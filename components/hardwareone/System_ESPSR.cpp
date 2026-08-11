@@ -134,6 +134,7 @@ static const char* transportToStableString(CommandSource t) {
     case SOURCE_INTERNAL: return "internal";
     case SOURCE_VOICE: return "voice";
     case SOURCE_G2_GLASSES: return "g2";
+    case SOURCE_UART: return "uart";
     default: return "unknown";
   }
 }
@@ -259,7 +260,7 @@ static uint64_t gSrLastTelemetryBytesOk = 0;
 static float gSrMinCategoryConfidence = 0.15f;
 static float gSrMinCommandConfidence = 0.12f;
 
-// Reserved ID range for global voice commands (voiceCategory="*")
+// Reserved ID range for global voice commands (route cat "*")
 // These IDs are assigned dynamically starting from this value
 static const int GLOBAL_VOICE_CMD_ID_START = 990;
 static uint32_t gSrLowConfidenceRejects = 0;
@@ -417,27 +418,121 @@ static void unlockMN();
 static esp_mn_error_t* mnUpdateLocked();
 static String normalizePhrase(const char* phrase);
 
-// Add global voice commands (voiceCategory="*") to current MultiNet command set
+// ============================================================================
+// Voice route table — the ONLY place voice phrases live.
+// ============================================================================
+// Each route joins a spoken phrase hierarchy (cat [-> sub] -> target) to a
+// canonical CLI command name. The command registry is the source of truth for
+// what exists in THIS build: routeAlive() drops any route whose command never
+// registered (its feature is compiled out), so the grammar is correct in every
+// flag combination with no #ifs here. cat "*" = global phrase, available at
+// every menu stage (see addSpecialPhrases). Two routes may share one cli
+// (phrase aliases, e.g. cancel/nevermind).
+//
+// This table replaced the voiceCategory/voiceSubCategory/voiceTarget columns
+// that every CommandEntry used to carry (~12 B x ~940 rows of .rodata in
+// SR-less builds). Adding a voice alias = one row here, nothing else.
+struct VoiceRoute {
+  const char* cli;     // canonical command name (join key into the registry)
+  const char* cat;     // level-1 phrase; "*" = global
+  const char* sub;     // level-2 phrase (nullptr for 2-level routes)
+  const char* target;  // final phrase
+};
+
+static const VoiceRoute kVoiceRoutes[] = {
+  // Global phrases (available at every stage)
+  { "voicecancel",    "*",          nullptr,          "cancel" },
+  { "voicecancel",    "*",          nullptr,          "nevermind" },
+  { "voicehelp",      "*",          nullptr,          "help" },
+  // System / battery
+  { "status",         "system",     nullptr,          "status" },
+  { "reboot",         "system",     nullptr,          "reboot" },
+  { "ramflush",       "system",     nullptr,          "ramflush" },
+  { "batterystatus",  "battery",    nullptr,          "status" },
+  // WiFi
+  { "wifistatus",     "wifi",       nullptr,          "status" },
+  { "radiopower",     "wifi",       nullptr,          "radio" },
+  { "wifiscan",       "wifi",       nullptr,          "scan" },
+  // LED
+  { "ledcolor",       "led",        nullptr,          "change color" },
+  { "ledclear",       "led",        nullptr,          "turn off" },
+  // Voice pipeline itself
+  { "closesr",        "voice",      nullptr,          "close" },
+  // Connection
+  { "openble",        "connection", "bluetooth",      "open" },
+  { "closeble",       "connection", "bluetooth",      "close" },
+  // Sensors (3-level: "sensor" -> device -> action)
+  { "openimu",        "sensor",     "motion sensor",  "open" },
+  { "closeimu",       "sensor",     "motion sensor",  "close" },
+  { "opentof",        "sensor",     "time of flight", "open" },
+  { "closetof",       "sensor",     "time of flight", "close" },
+  { "openinput",      "sensor",     "input",          "open" },
+  { "closeinput",     "sensor",     "input",          "close" },
+  { "openrtc",        "sensor",     "clock",          "open" },
+  { "closertc",       "sensor",     "clock",          "close" },
+  { "openapds",       "sensor",     "gesture",        "open" },
+  { "closeapds",      "sensor",     "gesture",        "close" },
+  { "openmic",        "sensor",     "microphone",     "open" },
+  { "closemic",       "sensor",     "microphone",     "close" },
+  { "opengps",        "sensor",     "GPS",            "open" },
+  { "closegps",       "sensor",     "GPS",            "close" },
+  { "openfmradio",    "sensor",     "radio",          "open" },
+  { "closefmradio",   "sensor",     "radio",          "close" },
+  { "openpresence",   "sensor",     "presence",       "open" },
+  { "closepresence",  "sensor",     "presence",       "close" },
+  { "openthermal",    "sensor",     "thermal camera", "open" },
+  { "closethermal",   "sensor",     "thermal camera", "close" },
+  { "opencamera",     "sensor",     "camera",         "open" },
+  { "closecamera",    "sensor",     "camera",         "close" },
+  { "cameracapture",  "sensor",     "camera",         "take picture" },
+  { "camerarecord",   "sensor",     "camera",         "record" },
+};
+static constexpr size_t kVoiceRouteCount = sizeof(kVoiceRoutes) / sizeof(kVoiceRoutes[0]);
+
+// Liveness filter: a route only exists if its command is registered in THIS
+// build's registry (registration is already feature-gated at the module level).
+static bool routeAlive(const VoiceRoute& r) {
+  return findCommand(String(r.cli)) != nullptr;
+}
+
+// One-time report of routes whose command didn't resolve. Compiled-out
+// features are expected on slim builds; a rename in a command table without a
+// matching route edit is a bug this makes loud instead of silent.
+static void srReportDeadVoiceRoutes() {
+  static bool reported = false;
+  if (reported) return;
+  reported = true;
+  for (size_t i = 0; i < kVoiceRouteCount; i++) {
+    if (!routeAlive(kVoiceRoutes[i])) {
+      WARN_SYSTEMF("[VOICE] route '%s' (phrase '%s') has no registered command — renamed or compiled out",
+                   kVoiceRoutes[i].cli,
+                   kVoiceRoutes[i].target ? kVoiceRoutes[i].target : "");
+    }
+  }
+}
+
+// Add global voice routes (cat "*") to current MultiNet command set
 // These are available at all stages (category, subcategory, target)
 // Call after clearing commands, before adding stage-specific phrases
 static void addSpecialPhrases() {
   int globalId = GLOBAL_VOICE_CMD_ID_START;  // Start from reserved ID range
-  
-  for (size_t i = 0; i < gCommandsCount; i++) {
-    const CommandEntry* entry = gCommands[i];
-    if (!entry || !entry->voiceCategory || !entry->voiceTarget) continue;
-    
+
+  for (size_t i = 0; i < kVoiceRouteCount; i++) {
+    const VoiceRoute& r = kVoiceRoutes[i];
+    if (!r.cat || !r.target) continue;
+
     // Check for global marker
-    if (strcmp(entry->voiceCategory, "*") != 0) continue;
-    
-    esp_err_t err = esp_mn_commands_add(globalId, entry->voiceTarget);
+    if (strcmp(r.cat, "*") != 0) continue;
+    if (!routeAlive(r)) continue;
+
+    esp_err_t err = esp_mn_commands_add(globalId, r.target);
     if (err == ESP_OK) {
-      addVoiceCliMapping(globalId, entry->name);  // Map to CLI command name, not voice phrase
-      INFO_SRF("[HIER-DEBUG] Added global phrase: id=%d phrase='%s' -> cli='%s'", 
-               globalId, entry->voiceTarget, entry->name);
+      addVoiceCliMapping(globalId, r.cli);  // Map to CLI command name, not voice phrase
+      INFO_SRF("[HIER-DEBUG] Added global phrase: id=%d phrase='%s' -> cli='%s'",
+               globalId, r.target, r.cli);
     } else {
-      WARN_SYSTEMF("[HIER-DEBUG] Failed to add global phrase '%s': err=0x%x", 
-                   entry->voiceTarget, err);
+      WARN_SYSTEMF("[HIER-DEBUG] Failed to add global phrase '%s': err=0x%x",
+                   r.target, err);
     }
     globalId++;
   }
@@ -447,7 +542,7 @@ static void addSpecialPhrases() {
 // Returns true if any targets were loaded, false if category has no targets (single-stage)
 static bool loadTargetsForCategory(const char* category) {
   INFO_SRF("[HIER-DEBUG] loadTargetsForCategory('%s') called", category);
-  INFO_SRF("[HIER-DEBUG]   Total commands in registry: %u", (unsigned)gCommandsCount);
+  INFO_SRF("[HIER-DEBUG]   Total voice routes: %u", (unsigned)kVoiceRouteCount);
   
   if (!mnCommandsReady()) {
     WARN_SYSTEMF("[HIER-DEBUG] loadTargetsForCategory: MultiNet not ready!");
@@ -471,30 +566,30 @@ static bool loadTargetsForCategory(const char* category) {
   int scanned = 0;
   int categoryMatches = 0;
   
-  // Find all commands with this category and load their targets
-  INFO_SRF("[HIER-DEBUG] Scanning registry for category '%s' (normalized='%s') targets...", category, normCategory.c_str());
-  for (size_t i = 0; i < gCommandsCount && nextId < MAX_VOICE_CLI_MAPPINGS; i++) {
-    const CommandEntry* entry = gCommands[i];
+  // Find all routes with this category and load their targets
+  INFO_SRF("[HIER-DEBUG] Scanning routes for category '%s' (normalized='%s') targets...", category, normCategory.c_str());
+  for (size_t i = 0; i < kVoiceRouteCount && nextId < MAX_VOICE_CLI_MAPPINGS; i++) {
+    const VoiceRoute& r = kVoiceRoutes[i];
     scanned++;
-    
-    if (!entry) continue;
-    if (!entry->voiceCategory) continue;
-    
-    if (normalizePhrase(entry->voiceCategory) == normCategory) {
+
+    if (!r.cat) continue;
+    if (!routeAlive(r)) continue;
+
+    if (normalizePhrase(r.cat) == normCategory) {
       categoryMatches++;
-      INFO_SRF("[HIER-DEBUG]   Found category match: cmd='%s' target='%s'", 
-               entry->name, entry->voiceTarget ? entry->voiceTarget : "(null)");
-      
-      if (entry->voiceTarget && entry->voiceTarget[0] != '\0') {
-        esp_err_t err = esp_mn_commands_add(nextId, entry->voiceTarget);
+      INFO_SRF("[HIER-DEBUG]   Found category match: cmd='%s' target='%s'",
+               r.cli, r.target ? r.target : "(null)");
+
+      if (r.target && r.target[0] != '\0') {
+        esp_err_t err = esp_mn_commands_add(nextId, r.target);
         if (err == ESP_OK) {
-          addVoiceCliMapping(nextId, entry->name);  // Map target ID to CLI command
-          INFO_SRF("[HIER-DEBUG]   OK Added to MultiNet: id=%d phrase='%s' -> cli='%s'", 
-                   nextId, entry->voiceTarget, entry->name);
+          addVoiceCliMapping(nextId, r.cli);  // Map target ID to CLI command
+          INFO_SRF("[HIER-DEBUG]   OK Added to MultiNet: id=%d phrase='%s' -> cli='%s'",
+                   nextId, r.target, r.cli);
           nextId++;
           loaded++;
         } else {
-          WARN_SYSTEMF("[HIER-DEBUG]   FAIL Failed to add '%s': err=0x%x", entry->voiceTarget, err);
+          WARN_SYSTEMF("[HIER-DEBUG]   FAIL Failed to add '%s': err=0x%x", r.target, err);
         }
       } else {
         INFO_SRF("[HIER-DEBUG]   (no target - single-stage command)");
@@ -523,8 +618,9 @@ static bool loadTargetsForCategory(const char* category) {
 // Load categories (first-stage commands) into MultiNet
 static void loadCategories() {
   INFO_SRF("[HIER-DEBUG] ========== loadCategories() BEGIN ==========");
-  INFO_SRF("[HIER-DEBUG] Total commands in registry: %u", (unsigned)gCommandsCount);
-  
+  INFO_SRF("[HIER-DEBUG] Total voice routes: %u", (unsigned)kVoiceRouteCount);
+  srReportDeadVoiceRoutes();
+
   if (!mnCommandsReady()) {
     WARN_SYSTEMF("[HIER-DEBUG] loadCategories: MultiNet not ready!");
     return;
@@ -548,44 +644,44 @@ static void loadCategories() {
   int duplicates = 0;
   
   // Add unique categories
-  INFO_SRF("[HIER-DEBUG] Scanning registry for unique categories...");
-  for (size_t i = 0; i < gCommandsCount && nextId < MAX_VOICE_CLI_MAPPINGS; i++) {
-    const CommandEntry* entry = gCommands[i];
+  INFO_SRF("[HIER-DEBUG] Scanning routes for unique categories...");
+  for (size_t i = 0; i < kVoiceRouteCount && nextId < MAX_VOICE_CLI_MAPPINGS; i++) {
+    const VoiceRoute& r = kVoiceRoutes[i];
     scanned++;
-    
-    if (!entry) continue;
-    if (!entry->voiceCategory || entry->voiceCategory[0] == '\0') continue;
-    // Skip global commands (voiceCategory="*") - already handled by addSpecialPhrases()
-    if (strcmp(entry->voiceCategory, "*") == 0) continue;
-    
+
+    if (!r.cat || r.cat[0] == '\0') continue;
+    // Skip global routes (cat "*") - already handled by addSpecialPhrases()
+    if (strcmp(r.cat, "*") == 0) continue;
+    if (!routeAlive(r)) continue;
+
     withVoice++;
-    INFO_SRF("[HIER-DEBUG]   [%u] cmd='%s' category='%s' target='%s'", 
-             (unsigned)i, entry->name, entry->voiceCategory, 
-             entry->voiceTarget ? entry->voiceTarget : "(null)");
-    
+    INFO_SRF("[HIER-DEBUG]   [%u] cmd='%s' category='%s' target='%s'",
+             (unsigned)i, r.cli, r.cat,
+             r.target ? r.target : "(null)");
+
     // Check for duplicates
     bool exists = false;
     for (int j = 0; j < nextId - 1; j++) {
       esp_mn_phrase_t* existing = esp_mn_commands_get_from_index(j);
-      if (existing && existing->string && strcmp(existing->string, entry->voiceCategory) == 0) {
+      if (existing && existing->string && strcmp(existing->string, r.cat) == 0) {
         exists = true;
         break;
       }
     }
     if (exists) {
-      INFO_SRF("[HIER-DEBUG]     ^ Category '%s' already added (duplicate)", entry->voiceCategory);
+      INFO_SRF("[HIER-DEBUG]     ^ Category '%s' already added (duplicate)", r.cat);
       duplicates++;
       continue;
     }
-    
-    esp_err_t err = esp_mn_commands_add(nextId, entry->voiceCategory);
+
+    esp_err_t err = esp_mn_commands_add(nextId, r.cat);
     if (err == ESP_OK) {
-      addVoiceCliMapping(nextId, entry->voiceCategory);  // Map to category name
-      INFO_SRF("[HIER-DEBUG]     OK Added category to MultiNet: id=%d phrase='%s'", nextId, entry->voiceCategory);
+      addVoiceCliMapping(nextId, r.cat);  // Map to category name
+      INFO_SRF("[HIER-DEBUG]     OK Added category to MultiNet: id=%d phrase='%s'", nextId, r.cat);
       nextId++;
       loaded++;
     } else {
-      WARN_SYSTEMF("[HIER-DEBUG]     FAIL Failed to add category '%s': err=0x%x", entry->voiceCategory, err);
+      WARN_SYSTEMF("[HIER-DEBUG]     FAIL Failed to add category '%s': err=0x%x", r.cat, err);
     }
   }
   
@@ -628,12 +724,12 @@ static bool phraseMatches(const char* registryPhrase, const char* recognizedPhra
 static const char* findCommandForCategoryTarget(const char* category, const char* target) {
   String normCategory = normalizePhrase(category);
   String normTarget = normalizePhrase(target);
-  for (size_t i = 0; i < gCommandsCount; i++) {
-    const CommandEntry* entry = gCommands[i];
-    if (entry && entry->voiceCategory && entry->voiceTarget &&
-        normalizePhrase(entry->voiceCategory) == normCategory &&
-        normalizePhrase(entry->voiceTarget) == normTarget) {
-      return entry->name;
+  for (size_t i = 0; i < kVoiceRouteCount; i++) {
+    const VoiceRoute& r = kVoiceRoutes[i];
+    if (r.cat && r.target && routeAlive(r) &&
+        normalizePhrase(r.cat) == normCategory &&
+        normalizePhrase(r.target) == normTarget) {
+      return r.cli;
     }
   }
   return nullptr;
@@ -643,12 +739,12 @@ static const char* findCommandForCategoryTarget(const char* category, const char
 static bool categoryHasSubCategories(const char* category) {
   String normCategory = normalizePhrase(category);
   INFO_SRF("[HIER-DEBUG] categoryHasSubCategories('%s')", category);
-  for (size_t i = 0; i < gCommandsCount; i++) {
-    const CommandEntry* entry = gCommands[i];
-    if (entry && entry->voiceCategory && entry->voiceSubCategory &&
-        normalizePhrase(entry->voiceCategory) == normCategory &&
-        entry->voiceSubCategory[0] != '\0') {
-      INFO_SRF("[HIER-DEBUG]   Found subcategory: '%s' -> cmd='%s'", entry->voiceSubCategory, entry->name);
+  for (size_t i = 0; i < kVoiceRouteCount; i++) {
+    const VoiceRoute& r = kVoiceRoutes[i];
+    if (r.cat && r.sub && routeAlive(r) &&
+        normalizePhrase(r.cat) == normCategory &&
+        r.sub[0] != '\0') {
+      INFO_SRF("[HIER-DEBUG]   Found subcategory: '%s' -> cmd='%s'", r.sub, r.cli);
       return true;
     }
   }
@@ -659,13 +755,13 @@ static bool categoryHasSubCategories(const char* category) {
 static bool categoryHasDirectTargets(const char* category) {
   String normCategory = normalizePhrase(category);
   INFO_SRF("[HIER-DEBUG] categoryHasDirectTargets('%s')", category);
-  for (size_t i = 0; i < gCommandsCount; i++) {
-    const CommandEntry* entry = gCommands[i];
-    if (entry && entry->voiceCategory && entry->voiceTarget &&
-        normalizePhrase(entry->voiceCategory) == normCategory &&
-        entry->voiceTarget[0] != '\0' &&
-        (!entry->voiceSubCategory || entry->voiceSubCategory[0] == '\0')) {
-      INFO_SRF("[HIER-DEBUG]   Found direct target: '%s' -> cmd='%s'", entry->voiceTarget, entry->name);
+  for (size_t i = 0; i < kVoiceRouteCount; i++) {
+    const VoiceRoute& r = kVoiceRoutes[i];
+    if (r.cat && r.target && routeAlive(r) &&
+        normalizePhrase(r.cat) == normCategory &&
+        r.target[0] != '\0' &&
+        (!r.sub || r.sub[0] == '\0')) {
+      INFO_SRF("[HIER-DEBUG]   Found direct target: '%s' -> cmd='%s'", r.target, r.cli);
       return true;
     }
   }
@@ -677,12 +773,12 @@ static bool categoryHasTargets(const char* category) {
   String normCategory = normalizePhrase(category);
   INFO_SRF("[HIER-DEBUG] categoryHasTargets('%s') -> normalized='%s'", category, normCategory.c_str());
   int targetCount = 0;
-  for (size_t i = 0; i < gCommandsCount; i++) {
-    const CommandEntry* entry = gCommands[i];
-    if (entry && entry->voiceCategory && entry->voiceTarget &&
-        normalizePhrase(entry->voiceCategory) == normCategory && entry->voiceTarget[0] != '\0') {
+  for (size_t i = 0; i < kVoiceRouteCount; i++) {
+    const VoiceRoute& r = kVoiceRoutes[i];
+    if (r.cat && r.target && routeAlive(r) &&
+        normalizePhrase(r.cat) == normCategory && r.target[0] != '\0') {
       targetCount++;
-      INFO_SRF("[HIER-DEBUG]   Found target: '%s' -> cmd='%s'", entry->voiceTarget, entry->name);
+      INFO_SRF("[HIER-DEBUG]   Found target: '%s' -> cmd='%s'", r.target, r.cli);
     }
   }
   INFO_SRF("[HIER-DEBUG] categoryHasTargets('%s') = %s (found %d targets)", 
@@ -714,27 +810,28 @@ static bool loadSubCategoriesForCategory(const char* category) {
   int loaded = 0;
   
   // Find all unique sub-categories for this category
-  for (size_t i = 0; i < gCommandsCount && nextId < MAX_VOICE_CLI_MAPPINGS; i++) {
-    const CommandEntry* entry = gCommands[i];
-    if (!entry || !entry->voiceCategory || !entry->voiceSubCategory) continue;
-    if (normalizePhrase(entry->voiceCategory) != normCategory) continue;
-    if (entry->voiceSubCategory[0] == '\0') continue;
-    
+  for (size_t i = 0; i < kVoiceRouteCount && nextId < MAX_VOICE_CLI_MAPPINGS; i++) {
+    const VoiceRoute& r = kVoiceRoutes[i];
+    if (!r.cat || !r.sub) continue;
+    if (normalizePhrase(r.cat) != normCategory) continue;
+    if (r.sub[0] == '\0') continue;
+    if (!routeAlive(r)) continue;
+
     // Check for duplicates
     bool exists = false;
     for (int j = 0; j < nextId - 1; j++) {
       esp_mn_phrase_t* existing = esp_mn_commands_get_from_index(j);
-      if (existing && existing->string && strcmp(existing->string, entry->voiceSubCategory) == 0) {
+      if (existing && existing->string && strcmp(existing->string, r.sub) == 0) {
         exists = true;
         break;
       }
     }
     if (exists) continue;
-    
-    esp_err_t err = esp_mn_commands_add(nextId, entry->voiceSubCategory);
+
+    esp_err_t err = esp_mn_commands_add(nextId, r.sub);
     if (err == ESP_OK) {
-      addVoiceCliMapping(nextId, entry->voiceSubCategory);
-      INFO_SRF("[HIER-DEBUG]   Added subcategory: id=%d phrase='%s'", nextId, entry->voiceSubCategory);
+      addVoiceCliMapping(nextId, r.sub);
+      INFO_SRF("[HIER-DEBUG]   Added subcategory: id=%d phrase='%s'", nextId, r.sub);
       nextId++;
       loaded++;
     }
@@ -776,18 +873,19 @@ static bool loadTargetsForCategorySubCategory(const char* category, const char* 
   int nextId = 1;
   int loaded = 0;
   
-  for (size_t i = 0; i < gCommandsCount && nextId < MAX_VOICE_CLI_MAPPINGS; i++) {
-    const CommandEntry* entry = gCommands[i];
-    if (!entry || !entry->voiceCategory || !entry->voiceSubCategory || !entry->voiceTarget) continue;
-    if (normalizePhrase(entry->voiceCategory) != normCategory) continue;
-    if (normalizePhrase(entry->voiceSubCategory) != normSubCategory) continue;
-    if (entry->voiceTarget[0] == '\0') continue;
-    
-    esp_err_t err = esp_mn_commands_add(nextId, entry->voiceTarget);
+  for (size_t i = 0; i < kVoiceRouteCount && nextId < MAX_VOICE_CLI_MAPPINGS; i++) {
+    const VoiceRoute& r = kVoiceRoutes[i];
+    if (!r.cat || !r.sub || !r.target) continue;
+    if (normalizePhrase(r.cat) != normCategory) continue;
+    if (normalizePhrase(r.sub) != normSubCategory) continue;
+    if (r.target[0] == '\0') continue;
+    if (!routeAlive(r)) continue;
+
+    esp_err_t err = esp_mn_commands_add(nextId, r.target);
     if (err == ESP_OK) {
-      addVoiceCliMapping(nextId, entry->name);
-      INFO_SRF("[HIER-DEBUG]   Added target: id=%d phrase='%s' -> cli='%s'", 
-               nextId, entry->voiceTarget, entry->name);
+      addVoiceCliMapping(nextId, r.cli);
+      INFO_SRF("[HIER-DEBUG]   Added target: id=%d phrase='%s' -> cli='%s'",
+               nextId, r.target, r.cli);
       nextId++;
       loaded++;
     }
@@ -810,13 +908,13 @@ static const char* findCommandForCategorySubCategoryTarget(const char* category,
   String normCategory = normalizePhrase(category);
   String normSubCategory = normalizePhrase(subCategory);
   String normTarget = normalizePhrase(target);
-  for (size_t i = 0; i < gCommandsCount; i++) {
-    const CommandEntry* entry = gCommands[i];
-    if (entry && entry->voiceCategory && entry->voiceSubCategory && entry->voiceTarget &&
-        normalizePhrase(entry->voiceCategory) == normCategory &&
-        normalizePhrase(entry->voiceSubCategory) == normSubCategory &&
-        normalizePhrase(entry->voiceTarget) == normTarget) {
-      return entry->name;
+  for (size_t i = 0; i < kVoiceRouteCount; i++) {
+    const VoiceRoute& r = kVoiceRoutes[i];
+    if (r.cat && r.sub && r.target && routeAlive(r) &&
+        normalizePhrase(r.cat) == normCategory &&
+        normalizePhrase(r.sub) == normSubCategory &&
+        normalizePhrase(r.target) == normTarget) {
+      return r.cli;
     }
   }
   return nullptr;
@@ -826,13 +924,13 @@ static const char* findCommandForCategorySubCategoryTarget(const char* category,
 static const char* findCommandForSingleStageCategory(const char* category) {
   String normCategory = normalizePhrase(category);
   INFO_SRF("[HIER-DEBUG] findCommandForSingleStageCategory('%s') -> normalized='%s'", category, normCategory.c_str());
-  for (size_t i = 0; i < gCommandsCount; i++) {
-    const CommandEntry* entry = gCommands[i];
-    if (entry && entry->voiceCategory && normalizePhrase(entry->voiceCategory) == normCategory) {
-      // Return the first command with this category (assumes single-stage has one command)
-      if (!entry->voiceTarget || entry->voiceTarget[0] == '\0') {
-        INFO_SRF("[HIER-DEBUG]   Found single-stage: cmd='%s'", entry->name);
-        return entry->name;
+  for (size_t i = 0; i < kVoiceRouteCount; i++) {
+    const VoiceRoute& r = kVoiceRoutes[i];
+    if (r.cat && routeAlive(r) && normalizePhrase(r.cat) == normCategory) {
+      // Return the first route with this category (assumes single-stage has one command)
+      if (!r.target || r.target[0] == '\0') {
+        INFO_SRF("[HIER-DEBUG]   Found single-stage: cmd='%s'", r.cli);
+        return r.cli;
       }
     }
   }
@@ -881,30 +979,30 @@ static void onVoiceCommandDetected(int commandId, const char* phrase) {
     
     if (gVoiceState == VoiceState::AWAIT_CATEGORY) {
       broadcastOutput("[Voice Help] Say a category:");
-      for (size_t i = 0; i < gCommandsCount; i++) {
-        const CommandEntry* e = gCommands[i];
-        if (e && e->voiceCategory && e->voiceCategory[0] != '\0' && strcmp(e->voiceCategory, "*") != 0) {
+      for (size_t i = 0; i < kVoiceRouteCount; i++) {
+        const VoiceRoute& r = kVoiceRoutes[i];
+        if (r.cat && r.cat[0] != '\0' && strcmp(r.cat, "*") != 0 && routeAlive(r)) {
           bool dup = false;
           for (size_t j = 0; j < i && !dup; j++) {
-            if (gCommands[j] && gCommands[j]->voiceCategory &&
-                normalizePhrase(gCommands[j]->voiceCategory) == normalizePhrase(e->voiceCategory)) dup = true;
+            if (kVoiceRoutes[j].cat &&
+                normalizePhrase(kVoiceRoutes[j].cat) == normalizePhrase(r.cat)) dup = true;
           }
-          if (!dup) broadcastOutput(String("  - ") + e->voiceCategory);
+          if (!dup) broadcastOutput(String("  - ") + r.cat);
         }
       }
     } else if (gVoiceState == VoiceState::AWAIT_SUBCATEGORY) {
       broadcastOutput(String("[Voice Help] ") + gCurrentCategory + " - which one?");
       String normCat = normalizePhrase(gCurrentCategory.c_str());
-      for (size_t i = 0; i < gCommandsCount; i++) {
-        const CommandEntry* e = gCommands[i];
-        if (e && e->voiceCategory && e->voiceSubCategory &&
-            normalizePhrase(e->voiceCategory) == normCat && e->voiceSubCategory[0] != '\0') {
+      for (size_t i = 0; i < kVoiceRouteCount; i++) {
+        const VoiceRoute& r = kVoiceRoutes[i];
+        if (r.cat && r.sub && routeAlive(r) &&
+            normalizePhrase(r.cat) == normCat && r.sub[0] != '\0') {
           bool dup = false;
           for (size_t j = 0; j < i && !dup; j++) {
-            if (gCommands[j] && gCommands[j]->voiceSubCategory &&
-                normalizePhrase(gCommands[j]->voiceSubCategory) == normalizePhrase(e->voiceSubCategory)) dup = true;
+            if (kVoiceRoutes[j].sub &&
+                normalizePhrase(kVoiceRoutes[j].sub) == normalizePhrase(r.sub)) dup = true;
           }
-          if (!dup) broadcastOutput(String("  - ") + e->voiceSubCategory);
+          if (!dup) broadcastOutput(String("  - ") + r.sub);
         }
       }
     } else if (gVoiceState == VoiceState::AWAIT_TARGET) {
@@ -912,22 +1010,22 @@ static void onVoiceCommandDetected(int commandId, const char* phrase) {
       if (gCurrentSubCategory.length() > 0) {
         broadcastOutput(String("[Voice Help] ") + gCurrentCategory + " " + gCurrentSubCategory + " - what action?");
         String normSub = normalizePhrase(gCurrentSubCategory.c_str());
-        for (size_t i = 0; i < gCommandsCount; i++) {
-          const CommandEntry* e = gCommands[i];
-          if (e && e->voiceCategory && e->voiceSubCategory && e->voiceTarget &&
-              normalizePhrase(e->voiceCategory) == normCat &&
-              normalizePhrase(e->voiceSubCategory) == normSub && e->voiceTarget[0] != '\0') {
-            broadcastOutput(String("  - ") + e->voiceTarget);
+        for (size_t i = 0; i < kVoiceRouteCount; i++) {
+          const VoiceRoute& r = kVoiceRoutes[i];
+          if (r.cat && r.sub && r.target && routeAlive(r) &&
+              normalizePhrase(r.cat) == normCat &&
+              normalizePhrase(r.sub) == normSub && r.target[0] != '\0') {
+            broadcastOutput(String("  - ") + r.target);
           }
         }
       } else {
         broadcastOutput(String("[Voice Help] ") + gCurrentCategory + " - what action?");
-        for (size_t i = 0; i < gCommandsCount; i++) {
-          const CommandEntry* e = gCommands[i];
-          if (e && e->voiceCategory && e->voiceTarget &&
-              normalizePhrase(e->voiceCategory) == normCat &&
-              (!e->voiceSubCategory || e->voiceSubCategory[0] == '\0') && e->voiceTarget[0] != '\0') {
-            broadcastOutput(String("  - ") + e->voiceTarget);
+        for (size_t i = 0; i < kVoiceRouteCount; i++) {
+          const VoiceRoute& r = kVoiceRoutes[i];
+          if (r.cat && r.target && routeAlive(r) &&
+              normalizePhrase(r.cat) == normCat &&
+              (!r.sub || r.sub[0] == '\0') && r.target[0] != '\0') {
+            broadcastOutput(String("  - ") + r.target);
           }
         }
       }
@@ -2595,14 +2693,21 @@ bool startESPSR() {
   INFO_SRF("Starting ESP-SR pipeline...");
 
 #if ENABLE_MICROPHONE
-  WARN_SYSTEMF("[SR_START] Checking microphone sensor: gMicRunning=%d", gMicRunning ? 1 : 0);
-  if (gMicRunning) {
-    gRestoreMicAfterSR = true;
-    INFO_SRF("Microphone sensor is running; stopping it to start SR");
-    if (micRecording) {
-      stopRecording();
+  WARN_SYSTEMF("[SR_START] Checking microphone sensor: gMicRunning=%d recState=%s",
+               gMicRunning ? 1 : 0,
+               micRecordingStateName(getMicRecordingState()));
+  if (gMicRunning || micRecordingBusy()) {
+    // Restore only a source that was actually enabled. A source-loss callback
+    // can leave gMicRunning=false while its WAV is still FINALIZING; that case
+    // must still be joined before SR claims HAL_Audio, but should not be
+    // resurrected after SR exits.
+    gRestoreMicAfterSR = gMicRunning;
+    INFO_SRF("Microphone sensor/recorder is busy; draining it to start SR");
+    if (!stopMicrophone()) {
+      ERROR_SRF("Microphone recorder did not reach IDLE; refusing SR start");
+      gRestoreMicAfterSR = false;
+      return false;
     }
-    stopMicrophone();
     vTaskDelay(pdMS_TO_TICKS(20));
   }
 #endif
@@ -3860,12 +3965,12 @@ static const char* cmd_sr_snip_config(const String& argsInput) {
   return "Error: Unknown config key. Use: pre_ms, max_ms, dest";
 }
 
-// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
+// Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 const CommandEntry espsrCommands[] = {
   { "sr", "ESP-SR speech recognition commands.", false, cmd_sr, "Usage: sr <enable|start|stop|status|stack|cmds|debug|confidence|timeout|tuning|accept|dyngain|raw|autotune|snip>" },
   { "srenable", "ESP-SR enable is a compile-time flag (cannot be toggled at runtime).", true, cmd_sr_enable, "Usage: srenable   (informational; ESP-SR is set at compile time, any 0|1 argument is ignored)" },
   { "opensr", "Start ESP-SR pipeline and arm voice as the current user.", false, cmd_sr_start, "Usage: opensr" },
-  { "closesr", "Stop ESP-SR pipeline.", false, cmd_sr_stop, "Usage: closesr", "voice", "close" },
+  { "closesr", "Stop ESP-SR pipeline.", false, cmd_sr_stop, "Usage: closesr" },
   { "srstatus", "Show ESP-SR status.", false, cmd_sr_status, "Usage: srstatus" },
   { "srstack", "Show sr_task stack high-water mark (run after voice stress test).", false, cmd_sr_stack, "Usage: srstack" },
   { "srstart", "Start ESP-SR pipeline and arm voice as the current user.", false, cmd_sr_start, "Usage: srstart" },
@@ -3905,10 +4010,9 @@ const CommandEntry espsrCommands[] = {
   { "srsnipstop", "Stop manual snippet capture and save.", false, cmd_sr_snip_stop, "Usage: srsnipstop" },
   { "srsnipstatus", "Show snippet capture status.", false, cmd_sr_snip_status, "Usage: srsnipstatus" },
   { "srsnipconfig", "Configure snippet capture params.", false, cmd_sr_snip_config, "Usage: srsnipconfig [pre_ms|max_ms|dest] [value]" },
-  // Global voice commands - voiceCategory="*" means available at all stages
-  { "voicecancel", "Cancel current voice command sequence.", false, cmd_voice_cancel, nullptr, "*", "cancel" },
-  { "voicecancel", "Cancel current voice command sequence.", false, cmd_voice_cancel, nullptr, "*", "nevermind" },
-  { "voicehelp", "Show available voice options for current state.", false, cmd_voice_help, nullptr, "*", "help" },
+  // Voice-only helper commands; their "*" (all-stages) phrases live in kVoiceRoutes
+  { "voicecancel", "Cancel current voice command sequence.", false, cmd_voice_cancel },
+  { "voicehelp", "Show available voice options for current state.", false, cmd_voice_help },
 };
 
 const size_t espsrCommandsCount = sizeof(espsrCommands) / sizeof(espsrCommands[0]);

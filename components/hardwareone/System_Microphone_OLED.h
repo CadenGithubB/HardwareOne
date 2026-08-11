@@ -33,7 +33,7 @@ static void displayMicrophone() {
   int level = getAudioLevel();
   
   // Recording indicator (blinking if recording)
-  if (micRecording) {
+  if (micRecordingBusy()) {
     static bool blinkState = false;
     static unsigned long lastBlink = 0;
     if (millis() - lastBlink > 500) {
@@ -47,7 +47,7 @@ static void displayMicrophone() {
   
   // Status line
   oledDisplay->setCursor(0, y);
-  oledDisplay->printf("%s %dHz", micRecording ? "REC" : "Active", micSampleRate);
+  oledDisplay->printf("%s %dHz", micRecordingBusy() ? "REC" : "Active", micSampleRate);
   y += 10;
   
   // VU Meter visualization (horizontal bar)
@@ -104,10 +104,11 @@ static bool microphoneInputHandler(int deltaX, int deltaY, uint32_t newlyPressed
       initMicrophone();
     }
     // Use the real record path (opens the WAV + spawns the record task) — a bare
-    // `micRecording = !micRecording` toggled the flag without any of that.
-    if (micRecording) stopRecording();
+    // A bare flag toggle used to bypass the file/task lifecycle entirely.
+    if (micRecordingBusy()) stopRecording();
     else              startRecording();
-    DEBUG_MICF("[MICROPHONE] Y button: Recording %s", micRecording ? "started" : "stopped");
+    DEBUG_MICF("[MICROPHONE] Y button: Recording %s",
+               micRecordingBusy() ? "started" : "stopped");
     return true;
   }
   

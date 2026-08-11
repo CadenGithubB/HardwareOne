@@ -48,11 +48,11 @@ void secureClearString(String& s);
 // Command Registry System
 // ============================================================================
 
-// Command entry structure - used by all modules to define their commands
-// Voice hierarchy: voiceCategory -> voiceSubCategory (optional) -> voiceTarget
-// Examples:
-//   2-level: { ..., "camera", nullptr, "open" }      -> "camera" -> "open"
-//   3-level: { ..., "sensor", "thermal", "open" }    -> "sensor" -> "thermal" -> "open"
+// Command entry structure - used by all modules to define their commands.
+// Voice phrases for ESP-SR do NOT live here: they live in the SR-owned route
+// table (kVoiceRoutes in System_ESPSR.cpp), keyed by command name and filtered
+// against the live registry at grammar-build time. Adding a voice alias for a
+// command is one row there; this struct stays feature-neutral.
 
 struct CommandEntry {
   const char* name;                           // canonical command name
@@ -60,52 +60,31 @@ struct CommandEntry {
   bool requiresAdmin;                         // whether admin is required
   const char* (*handler)(const String& argsInput);  // function pointer to command handler
   const char* usage;                          // optional longer usage string (may be nullptr)
-  const char* voiceCategory;                  // 1st level: category phrase (may be nullptr)
-  const char* voiceSubCategory;               // 2nd level: sub-category phrase (may be nullptr for 2-level)
-  const char* voiceTarget;                    // final level: action phrase (may be nullptr)
   bool requiresSuperAdmin;                     // top tier: ordinary admin is not enough (see authorizeCommand)
 
   // Trailing + defaulted so the ~hundreds of existing entries are untouched;
   // only the handful of super-admin commands pass the final `true`. It must be
-  // LAST: inserting it mid-list would let an existing voice-arg string bind to
-  // this bool (pointer→bool) and silently mark commands super.
+  // LAST: a stray string in this position would bind pointer→bool and silently
+  // mark the command super — the deleted overload below makes that a compile
+  // error instead.
   constexpr CommandEntry(const char* name_,
                          const char* help_,
                          bool requiresAdmin_,
                          const char* (*handler_)(const String& cmd_),
                          const char* usage_ = nullptr,
-                         const char* voiceCategory_ = nullptr,
-                         const char* voiceTarget_ = nullptr,
                          bool requiresSuperAdmin_ = false)
       : name(name_),
         help(help_),
         requiresAdmin(requiresAdmin_),
         handler(handler_),
         usage(usage_),
-        voiceCategory(voiceCategory_),
-        voiceSubCategory(nullptr),
-        voiceTarget(voiceTarget_),
         requiresSuperAdmin(requiresSuperAdmin_) {}
 
-  // 3-level constructor with sub-category
-  constexpr CommandEntry(const char* name_,
-                         const char* help_,
-                         bool requiresAdmin_,
-                         const char* (*handler_)(const String& cmd_),
-                         const char* usage_,
-                         const char* voiceCategory_,
-                         const char* voiceSubCategory_,
-                         const char* voiceTarget_,
-                         bool requiresSuperAdmin_ = false)
-      : name(name_),
-        help(help_),
-        requiresAdmin(requiresAdmin_),
-        handler(handler_),
-        usage(usage_),
-        voiceCategory(voiceCategory_),
-        voiceSubCategory(voiceSubCategory_),
-        voiceTarget(voiceTarget_),
-        requiresSuperAdmin(requiresSuperAdmin_) {}
+  // Guard: a const char* in the super-admin slot (e.g. a voice phrase left
+  // over from the pre-route-table era) must fail loudly, not convert to bool.
+  constexpr CommandEntry(const char*, const char*, bool,
+                         const char* (*)(const String&),
+                         const char*, const char*) = delete;
 };
 
 // Command module flags

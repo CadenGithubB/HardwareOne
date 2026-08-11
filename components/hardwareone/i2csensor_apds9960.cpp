@@ -426,11 +426,11 @@ const char* cmd_apdsautostart(const String& argsInput) {
   return "Error: invalid arguments — Usage: apdsautostart [on|off]";
 }
 
-// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
+// Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 const CommandEntry apdsCommands[] = {
   // Primary commands (3-level voice: "sensor" -> "gesture" -> "open/close")
-  { "openapds", "Start APDS9960 sensor.", false, cmd_apdsstart, nullptr, "sensor", "gesture", "open" },
-  { "closeapds", "Stop APDS9960 sensor.", false, cmd_apdsstop, nullptr, "sensor", "gesture", "close" },
+  { "openapds", "Start APDS9960 sensor.", false, cmd_apdsstart },
+  { "closeapds", "Stop APDS9960 sensor.", false, cmd_apdsstop },
   { "apdsread", "Read APDS9960 sensor status and data. (add 'json' for JSON output)", false, cmd_apdsread },
   { "apdsmode", "Control APDS modes: apdsmode <color|proximity|gesture> [on|off].", false, cmd_apdsmode, "Usage: apdsmode <color|proximity|gesture> [<on|off>]" },
   

@@ -224,6 +224,7 @@ R1Frame R1Encoder::buildSyncTime(int16_t tzOffsetMinutes, uint32_t epochSeconds)
   // Verified wire frame from FlutterApp test fixture (serialId=3, tz=-4h, 2026-03-19):
   //   00 70BAC9D4 64 01 64 03 00 02 00 05 12 00 8077 10FF3348BB69
   // i.e. status=notify/SET/ok, payload = i16(tz) + u32(epoch) LE.
+  if (tzOffsetMinutes < -720 || tzOffsetMinutes > 840) return R1Frame{};
   uint8_t payload[6];
   uint16_t tz = (uint16_t)tzOffsetMinutes;     // sign-extended via 2's complement cast
   payload[0] = (uint8_t)(tz & 0xFF);
@@ -795,9 +796,81 @@ static R1ParseError parseDailyPrefix(const R1Decoded& decoded,
   return R1_PARSE_OK;
 }
 
-static R1ParseError checkedBucketEpoch(uint32_t dayStart, uint8_t slot,
+static constexpr uint32_t R1_DAILY_EPOCH_FLOOR = 1577836800UL;  // 2020-01-01
+static constexpr uint32_t R1_DAILY_EPOCH_CEILING = 4102444800UL; // 2100-01-01
+
+static bool dailyEpochPlausible(uint32_t value) {
+  return value >= R1_DAILY_EPOCH_FLOOR && value < R1_DAILY_EPOCH_CEILING;
+}
+
+static R1DailyDayMode classifyDailyDay(uint32_t dayStart,
+                                      int16_t timezoneMinutes) {
+  if (dayStart == 0) return R1_DAILY_DAY_ZERO_BASE;
+  if (!dailyEpochPlausible(dayStart)) return R1_DAILY_DAY_UNKNOWN;
+  // The captured day key is UTC for tz=0 and local midnight expressed as UTC
+  // for nonzero offsets. Do not promote a merely plausible random u32.
+  const int64_t localStart = static_cast<int64_t>(dayStart) +
+      static_cast<int64_t>(timezoneMinutes) * 60LL;
+  if ((localStart % 86400LL) != 0) return R1_DAILY_DAY_UNKNOWN;
+  return R1_DAILY_DAY_EPOCH;
+}
+
+const char* r1DailyDayModeName(R1DailyDayMode mode) {
+  switch (mode) {
+    case R1_DAILY_DAY_ZERO_BASE: return "zero-base";
+    case R1_DAILY_DAY_EPOCH: return "epoch";
+    case R1_DAILY_DAY_UNKNOWN: return "unknown";
+    default: return "invalid";
+  }
+}
+
+const char* r1DailyTimestampModeName(R1DailyTimestampMode mode) {
+  switch (mode) {
+    case R1_DAILY_TIMESTAMP_NONE: return "none";
+    case R1_DAILY_TIMESTAMP_EPOCH: return "epoch";
+    case R1_DAILY_TIMESTAMP_SECONDS_WITHIN_DAY: return "seconds-within-day";
+    case R1_DAILY_TIMESTAMP_UNKNOWN: return "unknown";
+    default: return "invalid";
+  }
+}
+
+static R1ParseError classifyDailyTimestamp(uint32_t raw,
+                                           R1DailyDayMode dayMode,
+                                           uint32_t dayStart,
+                                           R1DailyTimestampMode& mode,
+                                           uint32_t& absoluteTimestamp) {
+  absoluteTimestamp = 0;
+  if (raw == 0) {
+    mode = R1_DAILY_TIMESTAMP_NONE;
+    return R1_PARSE_OK;
+  }
+  if (dailyEpochPlausible(raw)) {
+    mode = R1_DAILY_TIMESTAMP_EPOCH;
+    absoluteTimestamp = raw;
+    return R1_PARSE_OK;
+  }
+  if (raw < 86400UL) {
+    mode = R1_DAILY_TIMESTAMP_SECONDS_WITHIN_DAY;
+    if (dayMode != R1_DAILY_DAY_EPOCH) return R1_PARSE_OK;
+    const uint64_t normalized = static_cast<uint64_t>(dayStart) + raw;
+    if (normalized >= R1_DAILY_EPOCH_CEILING || normalized > UINT32_MAX) {
+      return R1_PARSE_VALUE_RANGE;
+    }
+    absoluteTimestamp = static_cast<uint32_t>(normalized);
+    return R1_PARSE_OK;
+  }
+  mode = R1_DAILY_TIMESTAMP_UNKNOWN;
+  return R1_PARSE_OK;
+}
+
+static R1ParseError checkedBucketEpoch(R1DailyDayMode dayMode,
+                                       uint32_t dayStart, uint8_t slot,
                                        uint32_t secondsPerSlot,
                                        uint32_t& bucketEpoch) {
+  if (dayMode != R1_DAILY_DAY_EPOCH) {
+    bucketEpoch = 0;
+    return R1_PARSE_OK;
+  }
   const uint64_t value = (uint64_t)dayStart +
                          (uint64_t)slot * (uint64_t)secondsPerSlot;
   if (value > UINT32_MAX) return R1_PARSE_VALUE_RANGE;
@@ -828,7 +901,6 @@ R1ParseError r1ParseCommonDaily(R1ProtocolProfile profile,
 
   const uint8_t* payload = decoded.payload;
   const uint32_t trailer = readU32LE(payload + expectedLength - 4);
-  if (trailer != R1_FW227_DAILY_TRAILER) return R1_PARSE_UNSUPPORTED_LAYOUT;
 
   out.profile = profile;
   out.metric = (decoded.cmd == R1_CMD_HEARTRATE)
@@ -836,8 +908,16 @@ R1ParseError r1ParseCommonDaily(R1ProtocolProfile profile,
   out.sourceSerial = decoded.serial;
   out.sourceCrc32 = decoded.crc32Received;
   out.timezoneMinutes = timezoneMinutes;
+  out.dayMode = classifyDailyDay(dayStart, timezoneMinutes);
   out.dayStart = dayStart;
-  out.latestTimestamp = readU32LE(payload + 7);
+  out.latestTimestampRaw = readU32LE(payload + 7);
+  error = classifyDailyTimestamp(out.latestTimestampRaw, out.dayMode,
+                                 out.dayStart, out.latestTimestampMode,
+                                 out.latestTimestamp);
+  if (error != R1_PARSE_OK) {
+    out = R1CommonDailyResult{};
+    return error;
+  }
   out.latestValue = payload[11];
   out.count = count;
   out.trailer = trailer;
@@ -869,7 +949,8 @@ R1ParseError r1ParseCommonDaily(R1ProtocolProfile profile,
       out = R1CommonDailyResult{};
       return R1_PARSE_VALUE_RANGE;
     }
-    error = checkedBucketEpoch(dayStart, dst.hourSlot, 3600, dst.bucketEpoch);
+    error = checkedBucketEpoch(out.dayMode, dayStart, dst.hourSlot, 3600,
+                               dst.bucketEpoch);
     if (error != R1_PARSE_OK) {
       out = R1CommonDailyResult{};
       return error;
@@ -896,15 +977,22 @@ R1ParseError r1ParseHrvDaily(R1ProtocolProfile profile,
 
   const uint8_t* payload = decoded.payload;
   const uint32_t trailer = readU32LE(payload + expectedLength - 4);
-  if (trailer != R1_FW227_DAILY_TRAILER) return R1_PARSE_UNSUPPORTED_LAYOUT;
 
   out.profile = profile;
   out.metric = R1_DAILY_METRIC_HRV;
   out.sourceSerial = decoded.serial;
   out.sourceCrc32 = decoded.crc32Received;
   out.timezoneMinutes = timezoneMinutes;
+  out.dayMode = classifyDailyDay(dayStart, timezoneMinutes);
   out.dayStart = dayStart;
-  out.latestTimestamp = readU32LE(payload + 7);
+  out.latestTimestampRaw = readU32LE(payload + 7);
+  error = classifyDailyTimestamp(out.latestTimestampRaw, out.dayMode,
+                                 out.dayStart, out.latestTimestampMode,
+                                 out.latestTimestamp);
+  if (error != R1_PARSE_OK) {
+    out = R1HrvDailyResult{};
+    return error;
+  }
   out.latestValue = readU16LE(payload + 11);
   out.count = count;
   out.trailer = trailer;
@@ -931,7 +1019,8 @@ R1ParseError r1ParseHrvDaily(R1ProtocolProfile profile,
       out = R1HrvDailyResult{};
       return R1_PARSE_VALUE_RANGE;
     }
-    error = checkedBucketEpoch(dayStart, dst.hourSlot, 3600, dst.bucketEpoch);
+    error = checkedBucketEpoch(out.dayMode, dayStart, dst.hourSlot, 3600,
+                               dst.bucketEpoch);
     if (error != R1_PARSE_OK) {
       out = R1HrvDailyResult{};
       return error;
@@ -960,13 +1049,13 @@ R1ParseError r1ParseActivityDaily(R1ProtocolProfile profile,
 
   const uint8_t* payload = decoded.payload;
   const uint32_t trailer = readU32LE(payload + expectedLength - 4);
-  if (trailer != R1_FW227_DAILY_TRAILER) return R1_PARSE_UNSUPPORTED_LAYOUT;
 
   out.profile = profile;
   out.metric = R1_DAILY_METRIC_ACTIVITY;
   out.sourceSerial = decoded.serial;
   out.sourceCrc32 = decoded.crc32Received;
   out.timezoneMinutes = timezoneMinutes;
+  out.dayMode = classifyDailyDay(dayStart, timezoneMinutes);
   out.dayStart = dayStart;
   out.count = count;
   out.trailer = trailer;
@@ -995,7 +1084,7 @@ R1ParseError r1ParseActivityDaily(R1ProtocolProfile profile,
       return R1_PARSE_VALUE_RANGE;
     }
     dst.restingKcal = (uint16_t)(dst.totalKcal - dst.activeKcal);
-    error = checkedBucketEpoch(dayStart, dst.tenMinuteSlot, 600,
+    error = checkedBucketEpoch(out.dayMode, dayStart, dst.tenMinuteSlot, 600,
                                dst.bucketEpoch);
     if (error != R1_PARSE_OK) {
       out = R1ActivityDailyResult{};
@@ -1018,9 +1107,12 @@ static size_t annotateCommonDaily(R1ProtocolProfile profile,
       ? "hrDaily" : "spo2Daily";
   return (size_t)snprintf(
       out, cap,
-      "%s count=%u tz=%d day=%lu latest={ts=%lu,value=%u} trailer=%08lX",
+      "%s count=%u tz=%d day={raw=%lu,mode=%s} latest={raw=%lu,mode=%s,epoch=%lu,value=%u} trailer=%08lX",
       tag, parsed.count, (int)parsed.timezoneMinutes,
       (unsigned long)parsed.dayStart,
+      r1DailyDayModeName(parsed.dayMode),
+      (unsigned long)parsed.latestTimestampRaw,
+      r1DailyTimestampModeName(parsed.latestTimestampMode),
       (unsigned long)parsed.latestTimestamp, parsed.latestValue,
       (unsigned long)parsed.trailer);
 }
@@ -1036,9 +1128,12 @@ static size_t annotateHrvDaily(R1ProtocolProfile profile,
   }
   return (size_t)snprintf(
       out, cap,
-      "hrvDaily count=%u tz=%d day=%lu latest={ts=%lu,value=%u} trailer=%08lX",
+      "hrvDaily count=%u tz=%d day={raw=%lu,mode=%s} latest={raw=%lu,mode=%s,epoch=%lu,value=%u} trailer=%08lX",
       parsed.count, (int)parsed.timezoneMinutes,
       (unsigned long)parsed.dayStart,
+      r1DailyDayModeName(parsed.dayMode),
+      (unsigned long)parsed.latestTimestampRaw,
+      r1DailyTimestampModeName(parsed.latestTimestampMode),
       (unsigned long)parsed.latestTimestamp, (unsigned)parsed.latestValue,
       (unsigned long)parsed.trailer);
 }
@@ -1062,9 +1157,10 @@ static size_t annotateActivityDaily(R1ProtocolProfile profile,
   }
   return (size_t)snprintf(
       out, cap,
-      "activityDaily count=%u tz=%d day=%lu steps=%lu activeKcal=%lu totalKcal=%lu trailer=%08lX",
+      "activityDaily count=%u tz=%d day={raw=%lu,mode=%s} steps=%lu activeKcal=%lu totalKcal=%lu trailer=%08lX",
       parsed.count, (int)parsed.timezoneMinutes,
-      (unsigned long)parsed.dayStart, (unsigned long)steps,
+      (unsigned long)parsed.dayStart, r1DailyDayModeName(parsed.dayMode),
+      (unsigned long)steps,
       (unsigned long)active, (unsigned long)total,
       (unsigned long)parsed.trailer);
 }
@@ -1232,8 +1328,12 @@ bool r1ProtocolSelfTest() {
       0x64, 0x01, 0x64, 0x03, 0x00, 0x02, 0x00, 0x05, 0x12, 0x00, 0x80, 0x77,
       0x10, 0xFF, 0x33, 0x48, 0xBB, 0x69,
     };
+    R1Frame rejectedTimezone = legacyEncoder.buildSyncTime(
+        static_cast<int16_t>(-721), static_cast<uint32_t>(1773881395));
     R1Frame timeFrame = legacyEncoder.buildSyncTime((int16_t)-240,
                                                      (uint32_t)1773881395);
+    ok &= selfTestExpect("syncTime timezone range fails without serial",
+                         rejectedTimezone.length == 0 && timeFrame.serial == 3);
     ok &= selfTestCompare("syncTime golden", timeFrame.bytes, timeFrame.length,
                           expectedTime, sizeof(expectedTime));
   }
@@ -1399,27 +1499,28 @@ bool r1ProtocolSelfTest() {
   }
 
   // Sanitized daily pages: same field widths/order as the official app, with
-  // synthetic epochs and values.
+  // synthetic epochs and values. The final u32 is ring-owned opaque metadata,
+  // not a sentinel: captures have shown it changing between sessions.
   static const uint8_t hrPayload[] = {
-    2, 0xC4,0xFF, 0x00,0x00,0x00,0x65,
-    0x34,0x12,0x00,0x65, 70,
-    0,60,70,50, 23,80,90,70, 0x0F,0,0,0,
+    2, 0xC4,0xFF, 0x10,0xC7,0x55,0x69,
+    0x34,0x12,0x00,0x00, 70,
+    0,60,70,50, 23,80,90,70, 0xD4,0x9A,0,0,
   };
   static const uint8_t spo2Payload[] = {
-    1, 0x4A,0x01, 0x00,0x00,0x00,0x65,
-    0x34,0x12,0x00,0x65, 98,
-    12,97,99,95, 0x0F,0,0,0,
+    1, 0x4A,0x01, 0xA8,0x6B,0x55,0x69,
+    0x68,0x14,0x56,0x69, 98,
+    12,97,99,95, 0x1F,0x28,0,0,
   };
   static const uint8_t hrvPayload[] = {
-    1, 0xC4,0xFF, 0x00,0x00,0x00,0x65,
-    0x34,0x12,0x00,0x65, 0x2C,0x01,
-    5, 0xFA,0x00, 0x90,0x01, 0xC8,0x00, 0x0F,0,0,0,
+    1, 0xC4,0xFF, 0x10,0xC7,0x55,0x69,
+    0x34,0x12,0x00,0x00, 0x2C,0x01,
+    5, 0xFA,0x00, 0x90,0x01, 0xC8,0x00, 0xD4,0x9A,0,0,
   };
   static const uint8_t activityPayload[] = {
-    2, 0xC4,0xFF, 0x00,0x00,0x00,0x65,
+    2, 0xC4,0xFF, 0x10,0xC7,0x55,0x69,
     0,   100,0, 5,0, 10,0,
     143, 200,0, 20,0, 30,0,
-    0x0F,0,0,0,
+    0x1F,0x28,0,0,
   };
   {
     R1Decoded decoded;
@@ -1433,11 +1534,16 @@ bool r1ProtocolSelfTest() {
         r1ParseCommonDaily(R1_PROFILE_FW_2_2_7_0005,
                            decoded, parsed) == R1_PARSE_OK &&
         parsed.count == 2 && parsed.latestValue == 70 &&
-        parsed.records[0].bucketEpoch == 0x65000000UL &&
-        parsed.records[1].bucketEpoch == 0x65014370UL &&
+        parsed.dayMode == R1_DAILY_DAY_EPOCH &&
+        parsed.latestTimestampMode == R1_DAILY_TIMESTAMP_SECONDS_WITHIN_DAY &&
+        parsed.latestTimestampRaw == 0x1234UL &&
+        parsed.latestTimestamp == 0x6955D944UL &&
+        parsed.records[0].bucketEpoch == 0x6955C710UL &&
+        parsed.records[1].bucketEpoch == 0x69570A80UL &&
         parsed.records[1].average == 80 &&
         parsed.records[1].maximum == 90 &&
-        parsed.records[1].minimum == 70);
+        parsed.records[1].minimum == 70 &&
+        parsed.trailer == 0x00009AD4UL);
   }
   {
     R1Decoded decoded;
@@ -1451,8 +1557,13 @@ bool r1ProtocolSelfTest() {
         r1ParseCommonDaily(R1_PROFILE_FW_2_2_7_0005,
                            decoded, parsed) == R1_PARSE_OK &&
         parsed.timezoneMinutes == 330 && parsed.latestValue == 98 &&
+        parsed.dayMode == R1_DAILY_DAY_EPOCH &&
+        parsed.latestTimestampMode == R1_DAILY_TIMESTAMP_EPOCH &&
+        parsed.latestTimestampRaw == 0x69561468UL &&
+        parsed.latestTimestamp == parsed.latestTimestampRaw &&
         parsed.records[0].hourSlot == 12 &&
-        parsed.records[0].average == 97);
+        parsed.records[0].average == 97 &&
+        parsed.trailer == 0x0000281FUL);
   }
   {
     R1Decoded decoded;
@@ -1465,7 +1576,10 @@ bool r1ProtocolSelfTest() {
                         decoded) &&
         r1ParseHrvDaily(R1_PROFILE_FW_2_2_7_0005,
                         decoded, parsed) == R1_PARSE_OK &&
-        parsed.latestValue == 300 && parsed.records[0].average == 250 &&
+        parsed.latestTimestampMode == R1_DAILY_TIMESTAMP_SECONDS_WITHIN_DAY &&
+        parsed.latestTimestampRaw == 0x1234UL &&
+        parsed.latestTimestamp == 0x6955D944UL && parsed.latestValue == 300 &&
+        parsed.records[0].average == 250 &&
         parsed.records[0].maximum == 400 && parsed.records[0].minimum == 200);
   }
   {
@@ -1483,7 +1597,133 @@ bool r1ProtocolSelfTest() {
         parsed.records[0].activeKcal == 5 &&
         parsed.records[0].restingKcal == 5 &&
         parsed.records[1].tenMinuteSlot == 143 &&
-        parsed.records[1].bucketEpoch == 0x65014F28UL);
+        parsed.dayMode == R1_DAILY_DAY_EPOCH &&
+        parsed.records[1].bucketEpoch == 0x69571638UL);
+  }
+
+  // Sanitized capture regressions for the mixed timestamp modes observed in
+  // one 2.2.7.0005 fetch. Zero-base pages remain structurally valid and retain
+  // their slots/raw latest value, but no 1970 bucket or invented epoch escapes.
+  static const uint8_t zeroBaseSecondsPayload[] = {
+    2, 0,0, 0,0,0,0, 0x66,0x99,0,0, 70,
+    7,60,70,50, 10,65,75,55, 0xD4,0x9A,0,0,
+  };
+  static const uint8_t anchoredSecondsPayload[] = {
+    1, 0,0, 0x00,0xB9,0x55,0x69, 0x66,0x99,0,0, 70,
+    10,65,75,55, 0xD4,0x9A,0,0,
+  };
+  static const uint8_t zeroBaseEpochPayload[] = {
+    1, 0,0, 0,0,0,0, 0xC0,0x61,0x56,0x69, 98,
+    12,97,99,95, 0xD4,0x9A,0,0,
+  };
+  static const uint8_t zeroBaseActivityPayload[] = {
+    1, 0,0, 0,0,0,0,
+    48, 3,0, 4,0, 9,0, 0xD4,0x9A,0,0,
+  };
+  static const uint8_t unknownDayPayload[] = {
+    1, 0,0, 0x01,0xB9,0x55,0x69, 0x66,0x99,0,0, 70,
+    10,65,75,55, 0xD4,0x9A,0,0,
+  };
+  static const uint8_t unknownLatestPayload[] = {
+    1, 0,0, 0x00,0xB9,0x55,0x69, 0x90,0x5F,0x01,0x00, 70,
+    10,65,75,55, 0xD4,0x9A,0,0,
+  };
+  {
+    R1Decoded decoded;
+    R1CommonDailyResult parsed;
+    ok &= selfTestExpect(
+        "daily zero-base seconds preserved unanchored",
+        selfTestDecoded(49, R1_MODULE_HEALTH, R1_CMD_HEARTRATE,
+                        R1_SUB_DAILY, R1_STATUS_TYPE_NOTIFY,
+                        R1_STATUS_METHOD_SET, zeroBaseSecondsPayload,
+                        sizeof(zeroBaseSecondsPayload), decoded) &&
+        r1ParseCommonDaily(R1_PROFILE_FW_2_2_7_0005,
+                           decoded, parsed) == R1_PARSE_OK &&
+        parsed.dayMode == R1_DAILY_DAY_ZERO_BASE &&
+        parsed.latestTimestampMode == R1_DAILY_TIMESTAMP_SECONDS_WITHIN_DAY &&
+        parsed.latestTimestampRaw == 39270UL &&
+        parsed.latestTimestamp == 0 && parsed.records[0].bucketEpoch == 0 &&
+        parsed.records[1].bucketEpoch == 0);
+  }
+  {
+    R1Decoded decoded;
+    R1CommonDailyResult parsed;
+    ok &= selfTestExpect(
+        "daily anchored seconds normalized",
+        selfTestDecoded(50, R1_MODULE_HEALTH, R1_CMD_HEARTRATE,
+                        R1_SUB_DAILY, R1_STATUS_TYPE_NOTIFY,
+                        R1_STATUS_METHOD_SET, anchoredSecondsPayload,
+                        sizeof(anchoredSecondsPayload), decoded) &&
+        r1ParseCommonDaily(R1_PROFILE_FW_2_2_7_0005,
+                           decoded, parsed) == R1_PARSE_OK &&
+        parsed.dayMode == R1_DAILY_DAY_EPOCH &&
+        parsed.latestTimestampMode == R1_DAILY_TIMESTAMP_SECONDS_WITHIN_DAY &&
+        parsed.latestTimestampRaw == 39270UL &&
+        parsed.latestTimestamp == 0x69565266UL &&
+        parsed.records[0].bucketEpoch == 0x695645A0UL);
+  }
+  {
+    R1Decoded decoded;
+    R1CommonDailyResult parsed;
+    ok &= selfTestExpect(
+        "daily zero-base absolute latest preserved",
+        selfTestDecoded(51, R1_MODULE_HEALTH, R1_CMD_SPO2,
+                        R1_SUB_DAILY, R1_STATUS_TYPE_NOTIFY,
+                        R1_STATUS_METHOD_SET, zeroBaseEpochPayload,
+                        sizeof(zeroBaseEpochPayload), decoded) &&
+        r1ParseCommonDaily(R1_PROFILE_FW_2_2_7_0005,
+                           decoded, parsed) == R1_PARSE_OK &&
+        parsed.dayMode == R1_DAILY_DAY_ZERO_BASE &&
+        parsed.latestTimestampMode == R1_DAILY_TIMESTAMP_EPOCH &&
+        parsed.latestTimestampRaw == 0x695661C0UL &&
+        parsed.latestTimestamp == parsed.latestTimestampRaw &&
+        parsed.records[0].bucketEpoch == 0);
+  }
+  {
+    R1Decoded decoded;
+    R1ActivityDailyResult parsed;
+    ok &= selfTestExpect(
+        "daily zero-base activity remains unanchored",
+        selfTestDecoded(52, R1_MODULE_HEALTH, R1_CMD_ACTIVITY,
+                        R1_SUB_DAILY, R1_STATUS_TYPE_NOTIFY,
+                        R1_STATUS_METHOD_SET, zeroBaseActivityPayload,
+                        sizeof(zeroBaseActivityPayload), decoded) &&
+        r1ParseActivityDaily(R1_PROFILE_FW_2_2_7_0005,
+                             decoded, parsed) == R1_PARSE_OK &&
+        parsed.dayMode == R1_DAILY_DAY_ZERO_BASE &&
+        parsed.records[0].tenMinuteSlot == 48 &&
+        parsed.records[0].bucketEpoch == 0);
+  }
+  {
+    R1Decoded decoded;
+    R1CommonDailyResult parsed;
+    ok &= selfTestExpect(
+        "daily non-boundary day remains unknown",
+        selfTestDecoded(53, R1_MODULE_HEALTH, R1_CMD_HEARTRATE,
+                        R1_SUB_DAILY, R1_STATUS_TYPE_NOTIFY,
+                        R1_STATUS_METHOD_SET, unknownDayPayload,
+                        sizeof(unknownDayPayload), decoded) &&
+        r1ParseCommonDaily(R1_PROFILE_FW_2_2_7_0005,
+                           decoded, parsed) == R1_PARSE_OK &&
+        parsed.dayMode == R1_DAILY_DAY_UNKNOWN &&
+        parsed.latestTimestampMode == R1_DAILY_TIMESTAMP_SECONDS_WITHIN_DAY &&
+        parsed.latestTimestamp == 0 && parsed.records[0].bucketEpoch == 0);
+  }
+  {
+    R1Decoded decoded;
+    R1CommonDailyResult parsed;
+    ok &= selfTestExpect(
+        "daily unknown latest remains raw only",
+        selfTestDecoded(54, R1_MODULE_HEALTH, R1_CMD_HEARTRATE,
+                        R1_SUB_DAILY, R1_STATUS_TYPE_NOTIFY,
+                        R1_STATUS_METHOD_SET, unknownLatestPayload,
+                        sizeof(unknownLatestPayload), decoded) &&
+        r1ParseCommonDaily(R1_PROFILE_FW_2_2_7_0005,
+                           decoded, parsed) == R1_PARSE_OK &&
+        parsed.dayMode == R1_DAILY_DAY_EPOCH &&
+        parsed.latestTimestampMode == R1_DAILY_TIMESTAMP_UNKNOWN &&
+        parsed.latestTimestampRaw == 90000UL &&
+        parsed.latestTimestamp == 0);
   }
 
   // packetAck uses a fresh outbound serial and echoes only the trusted received
@@ -1564,7 +1804,7 @@ bool r1ProtocolSelfTest() {
 
   static const uint8_t zeroRecordPayload[] = {
     0, 0,0, 0x00,0x00,0x00,0x65,
-    0,0,0,0, 0, 0x0F,0,0,0,
+    0,0,0,0, 0, 0xD4,0x9A,0,0,
   };
   {
     R1Decoded decoded;
@@ -1615,17 +1855,21 @@ bool r1ProtocolSelfTest() {
   {
     uint8_t malformed[sizeof(hrPayload)];
     memcpy(malformed, hrPayload, sizeof(malformed));
-    malformed[sizeof(malformed) - 4] = 0x0E;
+    malformed[sizeof(malformed) - 4] = 0x78;
+    malformed[sizeof(malformed) - 3] = 0x56;
+    malformed[sizeof(malformed) - 2] = 0x34;
+    malformed[sizeof(malformed) - 1] = 0x12;
     R1Decoded decoded;
-    R1CommonDailyResult rejected;
+    R1CommonDailyResult parsed;
     ok &= selfTestExpect(
-        "daily trailer rejected",
+        "daily opaque trailer preserved",
         selfTestDecoded(1, R1_MODULE_HEALTH, R1_CMD_HEARTRATE,
                         R1_SUB_DAILY, R1_STATUS_TYPE_NOTIFY,
                         R1_STATUS_METHOD_SET, malformed, sizeof(malformed),
                         decoded) &&
         r1ParseCommonDaily(R1_PROFILE_FW_2_2_7_0005,
-                           decoded, rejected) == R1_PARSE_UNSUPPORTED_LAYOUT);
+                           decoded, parsed) == R1_PARSE_OK &&
+        parsed.trailer == 0x12345678UL);
   }
 
   {

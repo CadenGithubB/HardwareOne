@@ -2257,7 +2257,7 @@ extern const char* cmd_apdsstart_queued(const String& argsInput);
 // I2C Command Registry
 // ============================================================================
 
-// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
+// Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 const CommandEntry i2cCommands[] = {
   // Bus Configuration
   { "i2cbusenabled", "Enable/disable I2C1 bus: <0|1> (reboot required)", true, cmd_i2cbusenabled, "Usage: i2cBusEnabled <0|1>" },
@@ -2584,13 +2584,15 @@ const char* buildSensorStatusJson() {
 
 #if ENABLE_MICROPHONE
   extern bool gMicRunning;
-  extern bool micRecording;
+  const MicRecordingState micRecState = getMicRecordingState();
   doc["micRunning"] = gMicRunning;
-  doc["micRecording"] = micRecording;
+  doc["micRecording"] = micRecState != MicRecordingState::IDLE;
+  doc["micRecordingState"] = micRecordingStateName(micRecState);
   doc["micCompiled"] = true;
 #else
   doc["micRunning"] = false;
   doc["micRecording"] = false;
+  doc["micRecordingState"] = "idle";
   doc["micCompiled"] = false;
 #endif
 

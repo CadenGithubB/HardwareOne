@@ -4275,7 +4275,7 @@ static const char* cmd_print(const String& argsInput) {
 
 // CommandEntry struct is defined in system_utils.h (included via automation_system.h)
 
-// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
+// Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 const CommandEntry automationCommands[] = {
   // Primary dispatcher: "automation <subcommand> [args]"
   // Subcommands: system enable|disable|status, list, add, enable, disable, delete, run, sanitize, recompute

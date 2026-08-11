@@ -244,8 +244,10 @@ extern const CommandEntry userSystemCommands[];
 extern const size_t userSystemCommandsCount;
 extern const CommandEntry sensorLoggingCommands[];
 extern const size_t sensorLoggingCommandsCount;
+#if ENABLE_NEOPIXEL
 extern const CommandEntry ledCommands[];
 extern const size_t ledCommandsCount;
+#endif
 extern const CommandEntry featureCommands[];
 extern const size_t featureCommandsCount;
 #if ENABLE_CAMERA_SENSOR
@@ -258,6 +260,12 @@ extern const CommandEntry mapsSettingCommands[];
 extern const size_t mapsSettingCommandsCount;
 extern const CommandEntry powerCommands[];
 extern const size_t powerCommandsCount;
+#if ENABLE_RASPBERRY_PI_HOST_POWER
+extern const CommandEntry raspberryPiHostPowerCommands[];
+extern const size_t raspberryPiHostPowerCommandsCount;
+#endif
+extern const CommandEntry liveAudioCommands[];
+extern const size_t liveAudioCommandsCount;
 extern const CommandEntry otaCommands[];
 extern const size_t otaCommandsCount;
 #if ENABLE_OLED_DISPLAY
@@ -907,6 +915,7 @@ void logCommandExecution(const AuthContext& ctx, const char* cmd, bool success, 
     case SOURCE_MQTT: source = "mqtt"; break;
     case SOURCE_VOICE: source = "voice"; break;
     case SOURCE_G2_GLASSES: source = "g2"; break;
+    case SOURCE_UART: source = "uart"; break;
     default: source = "unknown"; break;
   }
   
@@ -2148,7 +2157,22 @@ void recordRebootIntent(const char* reason, const char* auditDetail) {
   systemEventLogFlush();
 }
 
+static bool finalizeMicRecordingForRestart(const char* reason) {
+  if (!micRecordingBusy()) return true;
+  WARN_SYSTEMF("[REBOOT] stopping %s microphone recording before %s",
+               micRecordingStateName(getMicRecordingState()),
+               reason ? reason : "restart");
+  if (stopRecording(3000)) return true;
+  WARN_SYSTEMF("[REBOOT] recorder still %s after bounded finalization wait",
+               micRecordingStateName(getMicRecordingState()));
+  return false;
+}
+
 void rebootDevice(const char* reason, const char* auditDetail, uint32_t flushDelayMs) {
+  // Normal reboot/OTA/ramflush paths must not cut power while a WAV still owns
+  // its placeholder header or is in FINALIZING. This is deliberately bounded:
+  // a broken recorder must not make an intentional recovery reboot impossible.
+  finalizeMicRecordingForRestart(reason);
   recordRebootIntent(reason, auditDetail);
   delay(flushDelayMs);  // let the queued output + REBOOT audit line flush to disk
   ESP.restart();
@@ -2214,6 +2238,12 @@ static void factoryreset_doRestart(void* /*arg*/) {
 
 static const char* factoryreset_confirmed(void* /*userData*/) {
   EXT_RAM_BSS_ATTR static char respBuf[200];
+
+  // Factory reset uses a deferred timer rather than rebootDevice(), so drain
+  // the recorder before committing the destructive delete/scheduled restart.
+  if (!finalizeMicRecordingForRestart("factory reset")) {
+    return "Error: factory reset aborted — microphone recording did not finalize";
+  }
 
   // Use the internal SYSTEM auth to delete users.json. The VFS path-rule
   // table grants admin only PERM_READ over /system/* -- only system auth
@@ -2570,7 +2600,7 @@ extern const char* cmd_pending_list(const String& argsInput);
 
 // Main/Core command registry (commands that remain in main .ino file)
 // Most commands have been modularized - this contains only core system commands
-// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
+// Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 // Boot/reset counters. Boot count is persisted in NVS (its own flash
 // partition), separate from settings.json / users.json so its every-boot bump
 // can never corrupt those files. Crash count + last reset reason are RTC-backed
@@ -2667,7 +2697,7 @@ const char* cmd_crashlog(const String& argsInput) {
 
 const CommandEntry commands[] = {
   // ---- Core / General ----
-  { "status", "Show system status (WiFi, FS, memory). (add 'json' for JSON output)", false, cmd_status, nullptr, "system", "status" },
+  { "status", "Show system status (WiFi, FS, memory). (add 'json' for JSON output)", false, cmd_status },
   { "crashlog", "Show the last recorded crash (panic text, core/PC, boot phase, repeat count). (add 'json')", false, cmd_crashlog,
     "Usage: crashlog [json]" },
   { "bootcount", "Show boot count (NVS), crash count, last reset reason. 'bootcount reset' zeroes it (admin). (add 'json')", false, cmd_bootcount,
@@ -2696,21 +2726,20 @@ const CommandEntry commands[] = {
     "Usage: events [kinds [json]]\n  (bare): show the recent-event ring\n  kinds: list every valid event-kind name (json = machine form)" },
 
   // ---- Misc ----
-  { "reboot", "Reboot the system.", true, cmd_reboot, nullptr, "system", "reboot" },
+  { "reboot", "Reboot the system.", true, cmd_reboot },
   { "ramflush", "Reboot to reclaim RAM, restoring the features running right now.", true, cmd_ramflush,
     "Usage: ramflush [status]\n"
     "  (bare):  capture which features are running, reboot, and restore them\n"
     "  status:  show what the last boot restored (no reboot)\n"
     "\n"
     "Restores for that one boot only — a normal reboot returns to configured\n"
-    "autostart. Never changes your autostart settings.",
-    "system", "ramflush" },
+    "autostart. Never changes your autostart settings." },
   { "factoryreset", "Wipe user accounts and reboot to re-run setup wizard.", true,
     cmd_factoryreset,
     "Usage: factoryreset (no args, confirmation required)\n"
     "Deletes /system/users/users.json so the first-time setup wizard runs\n"
     "on next boot. WiFi credentials and other settings are preserved.",
-    nullptr, nullptr, /*requiresSuperAdmin=*/true },
+    /*requiresSuperAdmin=*/true },
   { "broadcast", "Send a message to all connected output interfaces.", true, cmd_broadcast,
     "Usage: broadcast <message>" },
   { "pendinglist", "List pending user requests.", true, cmd_pending_list },
@@ -2734,9 +2763,9 @@ extern const char* cmd_battery_status(const String& argsInput);
 extern const char* cmd_battery_calibrate(const String& argsInput);
 extern const char* cmd_batterylog(const String& argsInput);
 
-// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
+// Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 const CommandEntry batteryCommands[] = {
-  {"batterystatus", "Show battery voltage, charge level, and status", false, cmd_battery_status, nullptr, "battery", "status"},
+  {"batterystatus", "Show battery voltage, charge level, and status", false, cmd_battery_status},
   {"batterycalibrate", "Recalibrate/re-probe the battery sensor (ADC characterize or fuel-gauge re-probe)", true, cmd_battery_calibrate},
   {"batterylog", "Battery time-series CSV log (on/off/interval/tail/clear)", false, cmd_batterylog, "Usage: batterylog [on|off|interval <s>|tail|clear]"}
 };
@@ -2880,6 +2909,7 @@ static const CommandModule gCommandModules[] = {
     "oledthermalcolormode, and oledenabled tune appearance and timing. oledrequireauth "
     "<0|1> (admin-only) controls whether a user must log in at the display before "
     "interacting with it.", oledCommands,         oledCommandsCount, 0, nullptr },
+#if ENABLE_NEOPIXEL
   { "neopixel",   "RGB LED strip and effects", "Controls the addressable RGB status LED (WS2812/NeoPixel). ledcolor <name> lights "
     "it a solid color from a fixed palette (red, green, blue, yellow, magenta, cyan, "
     "white, orange, purple, pink), and ledclear turns it off. ledeffect "
@@ -2896,6 +2926,7 @@ static const CommandModule gCommandModules[] = {
     "ledstartupduration <100-10000ms> define what plays on power-up. (The live, "
     "immediate RGB controls are the separate ledcolor/ledeffect commands in the "
     "neopixel module.)", ledCommands,           ledCommandsCount, 0, nullptr },
+#endif  // ENABLE_NEOPIXEL (neopixel + led modules)
 #if ENABLE_SERVO
   { "servo",      "PCA9685 servo motor control", "The PCA9685 is a 16-channel I2C PWM driver used to control hobby servos (and "
     "generic PWM outputs) without tying up the ESP32 own timers. servo <channel> "
@@ -3067,9 +3098,11 @@ static const CommandModule gCommandModules[] = {
     "openmic before reads or recording (closemic stops it); commands that need the "
     "running mic return a use-openmic-first error otherwise. miclevel returns the "
     "current audio level (percent; add json for structured output) and micviz shows a "
-    "live level meter until a key is pressed. micrecord start|stop records audio to a "
-    "WAV file, miclist lists saved recordings, and micdelete removes one or all of "
-    "them. Audio format is configured with micsamplerate (8000-48000), micgain (0-100), "
+    "live level meter until a key is pressed. micrecord start [vad <ms>] [trim]|stop "
+    "records audio to a WAV file; owner-correlated capture uses micrecord "
+    "startid|statusid|stopid with a strict 16-hex ID and optional discard. miclist "
+    "lists saved recordings, while micdelete and micdeleteid remove manual or exact "
+    "owner-scoped results. Audio format is configured with micsamplerate (8000-48000), micgain (0-100), "
     "and micbitdepth (16 or 32), each usable as a getter with no argument; micautostart "
     "on|off persists whether the mic powers up automatically at boot.", micCommands,          micCommandsCount, CMD_MODULE_SENSOR, []() { return audioAnySourceAvailable(); } },
 #endif
@@ -3290,6 +3323,29 @@ static const CommandModule gCommandModules[] = {
     "while the radio stays up so the device remains reachable, and powercooldown "
     "<0..60000> sets an anti-flap cooldown (milliseconds) that prevents rapid "
     "back-to-back sleep transitions. All of these values persist.", powerCommands,        powerCommandsCount, 0, nullptr },
+#if ENABLE_RASPBERRY_PI_HOST_POWER
+  { "hostpower",  "Raspberry Pi/CM5 host power control", "Controls the Linux host over the authenticated UART link using a finite, asynchronous "
+    "request/ACK protocol. hostpower status requests fresh CM5 state; hostpower profile "
+    "<eco|balanced|performance|auto> requests a power profile; bare hostpower or hostpower "
+    "show displays the current request and last CM5 report. These operations require an "
+    "admin. reboot, halt, suspend, and sleep_for <1..1440 minutes> additionally require "
+    "superadmin plus a literal same-command confirm token; recover confirm clears only an "
+    "inspected fail-closed transition. ACK/report callbacks are accepted "
+    "from a real authenticated UART session only, allowing the CM5 service account to remain "
+    "user-tier. Request IDs combine a random per-boot nonce with a monotonic counter; one "
+    "request may be pending at a time and delivery retries are finite. Destructive execution "
+    "requires confirmed accepted and committed ACK phases, while a normalized Linux boot ID "
+    "distinguishes a daemon restart from a completed host boot.",
+    raspberryPiHostPowerCommands, raspberryPiHostPowerCommandsCount,
+    CMD_MODULE_NETWORK, nullptr },
+#endif
+  { "liveaudio",  "Opt-in live PCM transport and recorder shadow", "Exercises the live-pcm-v1 UART framing and bounded receiver path. "
+    "A real authenticated UART host first acquires a renewable 3-second controller lease with liveaudio ready. liveaudio synth schedules "
+    "deterministic 16 kHz signed-16-bit mono PCM; an explicit, exact-ID liveaudio shadow arm can instead tee an owned 16 kHz PDM or G2 "
+    "recording through a fixed 16 KiB PSRAM queue. Shadow transport is disabled by default, never delays or replaces the WAV writer, and a "
+    "transport fault aborts only the live copy while the finalized WAV remains authoritative. This diagnostic transport does not enable "
+    "production streaming STT, LLM, or lens delivery.", liveAudioCommands, liveAudioCommandsCount,
+    CMD_MODULE_NETWORK, nullptr },
   { "ota",        "Signed firmware recovery and update", "Native ESP-IDF signed OTA support. otastatus reports the journal, "
     "partition identity, staged pair, and last result. A superadmin sets a persistent recovery credential with otapin - "
     "on the physical serial console only, because it decides whether recovery can be reached at all - then "
@@ -4394,7 +4450,6 @@ extern String redactCmdForAudit(const String& argsInput);
 extern bool hasAdminPrivilege(const AuthContext& ctx);
 extern bool hasSuperAdminPrivilege(const AuthContext& ctx);
 extern bool isAdminUser(const String& user);
-extern void logAuthAttempt(bool success, const char* path, const String& user, const String& ip, const String& extra);
 
 // Note: resolveRegistryCommandKey() is now defined in command_system.cpp
 
@@ -4581,7 +4636,10 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
   // helpers) is excluded so background command execution can't pin the device
   // awake. This is what lets a headless box with no input device still power-
   // save yet wake on a serial / web / G2 / ESP-NOW command.
-  if (ctx.transport != SOURCE_INTERNAL) {
+  // SOURCE_UART is excluded for the same reason: the UART host link is a
+  // machine daemon that may poll sensors continuously — a human isn't there,
+  // and its traffic must not hold the device out of power-save forever.
+  if (ctx.transport != SOURCE_INTERNAL && ctx.transport != SOURCE_UART) {
     powerSaveNoteActivity();
   }
 
@@ -5368,6 +5426,17 @@ bool drawIconScaled(Adafruit_SSD1306* display, const char* name, int x, int y, u
 const char* cmd_login(const String& originalCmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
+  // Cross-transport session-minting guard: this command's transport argument
+  // DEFAULTS to serial, so without this check an authenticated (or
+  // AuthBypass) UART host-link caller could run `login u p` and mint a live
+  // USB-console session with no one at the physical console. The UART link
+  // has its own in-band login (System_UartLink.cpp drain intrinsic) — that is
+  // the only way its session is established, and it must also be the only
+  // login a UART caller can reach.
+  if (currentAuthContext().transport == SOURCE_UART) {
+    return "Error: use the UART link's in-band login (send: login <user> <pass> as the first line)";
+  }
+
   // Parse: <username> <password> [transport]
   // transport can be: serial, display, bluetooth
   CommandArgs a(originalCmd);
@@ -5408,6 +5477,14 @@ const char* cmd_login(const String& originalCmd) {
 
 const char* cmd_logout(const String& originalCmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+
+  // Mirror of the cmd_login guard: a UART caller running `logout serial`
+  // (any arg form reaches the registry; the drain only intercepts the bare
+  // word) would kill the physical console's session cross-transport. The
+  // link's own session ends via its in-band bare `logout`.
+  if (currentAuthContext().transport == SOURCE_UART) {
+    return "Error: use the UART link's in-band logout (send: logout)";
+  }
 
   String cmd = originalCmd;
   cmd.trim();

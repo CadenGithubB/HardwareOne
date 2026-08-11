@@ -247,12 +247,14 @@ struct Settings {
       inputBus(0), gpsBus(0), rtcBus(0), fmRadioBus(0),
       presenceBus(0), imuBus(0), thermalBus(0), tofBus(0), apdsBus(0), servoBus(0),
       fuelGaugeBus(0),
-      ledBrightness(100),
       ledStartupEnabled(true),
+#if ENABLE_NEOPIXEL
+      ledBrightness(100),
       ledStartupEffect("rainbow"),
       ledStartupColor("cyan"),
       ledStartupColor2("magenta"),
       ledStartupDuration(1000),
+#endif
       oledEnabled(false),
       localDisplayRequireAuth(true),
       oledBootMode("logo"),
@@ -362,15 +364,19 @@ struct Settings {
       httpAutoStart(true),
       httpsEnabled(false),
       serialRequireAuth(true),
+      uartLinkEnabled(false),
+      uartLinkBaud(0),
+      uartRequireAuth(true),
       sessionIdleWeb(60),
       sessionIdleSerial(60),
       sessionIdleBle(15),
       sessionIdleDisplay(60),
+      sessionIdleUart(0),
       bleAutoStart(false),  // BLE server is opt-in; the "G2 Companion" archetype (or Advanced setup) enables it
       bleRequireAuth(true),
       bleDeviceName("HardwareOne"),
       bleTxPower(3),
-      bleMode(0),
+      bleMode(1),  // 1 = BLE_MODE_G2_CLIENT — default BLE role is G2 client (central)
       bleRequireSecureChannel(true),
       bleSecureChannelSecret(""),
       // BLE peer fields moved to gBlePeerData[] (see BLE_Peers.h)
@@ -836,13 +842,17 @@ struct Settings {
   int apdsBus;              // APDS9960 gesture/proximity (compiled out)
   int servoBus;             // PCA9685 16-channel servo (compiled out)
   int fuelGaugeBus;         // MAX17048G LiPo fuel gauge (FeatherS3[D] on-board)
-  // Hardware settings (LED)
-  int ledBrightness;        // 0-100%
+  // Hardware settings (LED). ledStartupEnabled stays unconditional: the
+  // deliberately-unconditional FeatureRegistry `led` row points at it
+  // (System_FeatureRegistry.cpp) so `features json` works in every build.
   bool ledStartupEnabled;   // Enable startup effect
+#if ENABLE_NEOPIXEL
+  int ledBrightness;        // 0-100%
   String ledStartupEffect;  // Effect type: none, rainbow, pulse, fade, blink, strobe
   String ledStartupColor;   // Primary color name
   String ledStartupColor2;  // Secondary color (for fade)
   int ledStartupDuration;   // Duration in ms
+#endif
   // OLED Display settings
   bool oledEnabled;             // Enable/disable OLED at boot
   bool localDisplayRequireAuth; // Require login before accessing display modes
@@ -1020,6 +1030,11 @@ struct Settings {
   bool httpAutoStart;           // Auto-start HTTP server at boot if WiFi connected
   bool httpsEnabled;            // Use HTTPS instead of HTTP when certs are present (requires reboot)
   bool serialRequireAuth;       // Require login before accepting serial CLI commands (default: true)
+  // UART host link (System_UartLink.cpp) — the CM5/Linux machine channel on
+  // the board's UART_LINK_* pins (System_BuildConfig.h, per-board).
+  bool uartLinkEnabled;         // Start the UART host link at boot (default: false — opt-in)
+  int  uartLinkBaud;            // Link baud; 0 = board default (UART_LINK_BAUD_DEFAULT), clamped to UART_LINK_BAUD_MAX
+  bool uartRequireAuth;         // Require login on the UART link (default: true)
   // Per-transport idle-logout windows (minutes). Auto-logout an authenticated
   // session after N min with no REAL interaction; 0 = disabled. Same policy
   // everywhere (sessionIdleExpired in System_User.cpp), independent knobs.
@@ -1027,6 +1042,7 @@ struct Settings {
   uint32_t sessionIdleSerial;   // Serial session idle window (default 60)
   uint32_t sessionIdleBle;      // BLE per-connection idle window (default 15)
   uint32_t sessionIdleDisplay;  // OLED/local-display session idle window (default 60)
+  uint32_t sessionIdleUart;     // UART host-link idle window (default 0=off — machine sessions re-login on rejection, they don't wander off)
   // Bluetooth settings
   bool bleAutoStart;      // Auto-start Bluetooth at boot (enables BLE server)
   bool bleRequireAuth;    // Require login before accepting BLE commands (always required, per-connection)
@@ -1137,6 +1153,15 @@ void settingsDefaults();
 void buildSettingsJsonDoc(JsonDocument& doc, bool excludePasswords = false, bool mainFileOnly = false);
 bool readSettingsJson();
 bool writeSettingsJson();
+
+// True when readSettingsJson() found an on-disk firmwareVersion different from
+// the running build. Cleared by settingsRestampFirmwareVersion().
+bool settingsFirmwareVersionRestampPending();
+
+// Re-stamp ONLY firmwareVersion in the on-disk settings document, by rewriting
+// the parsed file rather than rebuilding it from RAM. Safe to call at boot;
+// writeSettingsJson() is not. No-op unless a re-stamp is pending.
+bool settingsRestampFirmwareVersion();
 // Mark this boot's settings state trustworthy for full-array rewrites when
 // there is no settings.json to load (first boot / post-erase). readSettingsJson
 // sets the same flag itself on a successful load; while unset, the save path
@@ -1341,8 +1366,21 @@ struct SettingsModule {
                                      // Set only for modules split into their own file (debug → DEBUG_JSON_FILE).
 };
 
-// Maximum number of settings modules that can be registered
-#define MAX_SETTINGS_MODULES 32
+// Maximum number of settings modules that can be registered.
+//
+// Must stay ahead of the registerSettingsModule() call count in
+// registerAllSettingsModules(), which is 35 - most behind #if guards, so no
+// shipping board reaches the cap today. Overflow is not loud: the registration
+// simply logs and returns (System_Settings.cpp), and a dropped module then
+// neither loads nor persists ANY of its settings - it silently runs on
+// compiled defaults forever. Headroom here is cheap insurance against that.
+//
+// Cost of raising it is two arrays of pointers: gSettingsModules[] in PSRAM
+// BSS, and the modulePointers[] snapshot in OLED_RemoteSettings.cpp, which is
+// also the destination bound for the bonded-peer module list (that source
+// array is heap-allocated from the peer's own count, so the two must be raised
+// together - they already are, both keying off this macro).
+#define MAX_SETTINGS_MODULES 36
 
 // Register a settings module (call during setup or static init)
 void registerSettingsModule(const SettingsModule* module);

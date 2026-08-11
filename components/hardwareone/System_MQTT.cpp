@@ -1730,7 +1730,7 @@ MQTT_PUBLISH_CMD(input, mqttPublishInput, "Gamepad")
 #endif
 
 // Command table - names must match setting keys for web UI compatibility
-// Columns: name, help, requiresAdmin, handler, usage, voiceCategory, [voiceSubCategory,] voiceTarget
+// Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 const CommandEntry mqttCommands[] = {
   // debugmqtt is registered by the debug module (System_Debug.cpp) — see ODR note above.
   { "mqttclientenabled", "Enable/disable MQTT [0|1]", true, cmd_mqttclientenabled, "Usage: mqttclientenabled [0|1]" },
