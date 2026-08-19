@@ -3493,7 +3493,7 @@ static const CommandModule gCommandModules[] = {
     "Its raw diagnostic form is admin-only, requires confirmation for SETs, and "
     "prohibits user-profile writes. Ring health collection and low-power desired state "
     "are managed through the authenticated Health surfaces; health SETs remain "
-    "ACKed-unverified while low power has capture-proven readback. ringverbose toggles "
+    "ACKed-unverified while low power has capture-proven readback. debugringdump toggles "
     "a redacted byte dump for debugging. Bridging ring data onto the G2 glasses is "
     "deliberately unavailable -- the commands exist in the code but are intentionally "
     "left unregistered because both approaches proved to be dead ends.", g2RingCommands,    g2RingCommandsCount, 0, nullptr },
