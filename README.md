@@ -6,7 +6,7 @@
   <img alt="Hardware One logo" src="assets/logo-black.svg" width="140">
 </picture>
 
-# Hardware One v0.99.82
+# Hardware One v0.99.9
 
 **Hardware One is a modular ESP32 firmware that works like a distributed operating system for cheap microcontrollers.**
 
@@ -51,6 +51,12 @@ Hardware One can be used in several different ways depending on the hardware you
 - With an R1 ring, adds health vitals (heart rate, HRV, SpO2, temperature) with on-lens graphs and background Health Track logging.
 - Composes with any of the above: the glasses are another interface onto the same command system, not a separate build.
 
+### 6) Pi Co-Processor Pair
+- Board + a Raspberry Pi (Compute Module 5 or Pi 5) wired over a dedicated UART. The ESP32 stays the device - same CLI, same auth, same mesh - and the Pi is a co-processor it can hand work to.
+- The Pi runs one Linux daemon that speaks the link, does speech-to-text and LLM generation, and bridges power/fan control. The firmware treats it as a selectable LLM source (`cm5:<model>`), a dictation engine for the OLED keyboard, the answering side of a native "Hey Even" voice session on the G2 glasses, and a time source.
+- The Pi logs into the device like any other user, sends a heartbeat so the firmware knows when it is actually ready, and its power state is driven by confirmed `cm5 power` / `cm5 fan` requests.
+- The Pi-side software lives in its own repository: **[HardwareOne_RaspPi_CoProcessor](https://github.com/CadenGithubB/HardwareOne_RaspPi_CoProcessor)**. Wiring, setup and commands are in the [User Guide](docs/USERGUIDE.md#raspberry-pi-co-processor-cm5).
+
 ---
 
 ## Software Features
@@ -94,7 +100,8 @@ Hardware One can be used in several different ways depending on the hardware you
 | R1 smart ring - health vitals, graphs, Health Track logging | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
 | Offline maps + waypoints | ⚙️ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
 | Browser games (Tilt Maze or A Dark Room - one per build) | ⚙️ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
-| On-device LLM inference (ESP32-S3 + PSRAM only) | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
+| LLM assistant (tiny on-device model on ESP32-S3 + PSRAM, and/or answered by the Pi co-processor) | ⚙️ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
+| Raspberry Pi co-processor over UART (LLM, speech-to-text, dictation, power/fan control, clock) | ⚙️ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
 | Edge Impulse ML inference | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
 | Battery monitoring (LiPo voltage via ADC) | ⚙️ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
 | PCA9685 servo controller | ❌ | ⚙️ | ⚙️ | ⚙️&nbsp;+&nbsp;⚙️ |
@@ -146,6 +153,17 @@ These connect via Stemma QT (or standard I2C) and work the same on any supported
 | DVP camera (OV2640 / OV5640) | XIAO ESP32-S3, QT PY ESP32-S3 |
 | PDM microphone (I2S) | XIAO ESP32-S3, QT PY ESP32-S3 |
 | LiPo battery + BMS | Any board with a JST connector |
+| Raspberry Pi CM5 / Pi 5 co-processor (UART) | Any board - each board block defines a link UART; live audio streaming needs the ESP32-S3 boards (≥ 921,600 baud) |
+
+---
+
+## Raspberry Pi Co-Processor
+
+A Raspberry Pi (CM5 or Pi 5) can sit beside the ESP32 on a dedicated UART and take the work the microcontroller cannot do well: speech-to-text, a real LLM, and its own power and thermal management. The firmware half is in this repository; the Pi half - a single daemon (`hw1-ai-service`) that speaks the link, runs the STT/LLM engines and bridges power/fan control - is here:
+
+> **https://github.com/CadenGithubB/HardwareOne_RaspPi_CoProcessor**
+
+What you get with the pair: ask the Pi questions from the web LLM page, the OLED, or the glasses; dictate into any OLED text field; answer "Hey Even" on the G2 glasses with no phone involved; `cm5 power` / `cm5 fan` control with confirmed request/ACK; and a clock source for dark boots. Wiring, setup steps and the command list are in the [User Guide](docs/USERGUIDE.md#raspberry-pi-co-processor-cm5).
 
 ---
 

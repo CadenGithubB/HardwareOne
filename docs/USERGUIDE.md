@@ -1,4 +1,4 @@
-# Hardware One v0.99.82 - User Guide
+# Hardware One v0.99.9 - User Guide
 
 This is the full reference for Hardware One. It covers every subsystem, all CLI commands, configuration options, and how the major features work. For initial setup, see the [Quick Start Guide](QUICKSTART.md).
 
@@ -15,7 +15,8 @@ This is the full reference for Hardware One. It covers every subsystem, all CLI 
 - [ESP-NOW Mesh](#esp-now-mesh)
 - [Automations](#automations)
 - [MQTT](#mqtt)
-- [On-Device LLM](#on-device-llm)
+- [Raspberry Pi Co-Processor (CM5)](#raspberry-pi-co-processor-cm5)
+- [LLM](#llm)
 - [Debug Flags](#debug-flags)
 - [Command Reference](#command-reference) - common commands; full generated list in [COMMAND_REFERENCE.md](COMMAND_REFERENCE.md)
 - [Per-Module Notes](#per-module-notes)
@@ -48,7 +49,11 @@ All feature flags live in one file: `components/hardwareone/System_BuildConfig.h
 | `ENABLE_BATTERY_MONITOR` | `0` | LiPo voltage monitoring via ADC |
 | `ENABLE_EDGE_IMPULSE` | `0` | Edge Impulse ML inference |
 | `ENABLE_BONDED_MODE` | `0` | Bonded Microcontrollers - two devices share command registries and the controller shows a Remote tab with the paired device's features |
-| `ENABLE_ONDEVICE_LLM` | `1` | On-device LLM inference - tiny transformer runs locally on ESP32-S3 with PSRAM. Requires a model file on LittleFS or SD card. |
+| `ENABLE_LLM_BACKEND` | `1` | The LLM feature (web LLM page, OLED LLM mode, `llm*` commands, lens viewer). Needs at least one source below; a build error tells you if not. |
+| `ENABLE_LLM_SOURCE_ONBOARD` | `0` | Tiny transformer running on this chip (ESP32-S3 + PSRAM only). Requires a model file on LittleFS or SD card. |
+| `ENABLE_LLM_SOURCE_CM5` | `1` | Answers come from the Raspberry Pi co-processor over the UART link. Requires a board with a `UART_LINK_PORT` (all supported boards). |
+| `ENABLE_RASPBERRY_PI_HOST_POWER` | `1` | `cm5 power` - profile, reboot, halt, suspend, timed sleep of the Pi with confirmed request/ACK |
+| `ENABLE_RASPBERRY_PI_HOST_FAN` | `1` | `cm5 fan` - quiet/auto/max with temperature, PWM, RPM and health readback |
 
 When `I2C_FEATURE_LEVEL = 4`, individual sensors are controlled by `CUSTOM_ENABLE_*` flags:
 
@@ -638,43 +643,113 @@ mqtt status                  - Show connection status
 
 ---
 
-## On-Device LLM
+## Raspberry Pi Co-Processor (CM5)
 
-Requires `ENABLE_ONDEVICE_LLM=1` and an ESP32-S3 board with PSRAM. Runs a tiny transformer model entirely on-device - no internet connection required.
+A Raspberry Pi (Compute Module 5 or Pi 5) can be wired to the ESP32 over a dedicated UART and act as a co-processor. The ESP32 remains the device - same command system, same users and roles, same mesh - and hands the Pi the jobs a microcontroller does badly: speech-to-text, a real LLM, and its own power and thermal management.
 
-### Model files
+The firmware half is this repository. The Pi half is a single Linux daemon, `hw1-ai-service`, that speaks the link, runs the STT and LLM engines, and bridges power/fan control. It lives in its own repository, with its own install guide, architecture notes and deployment paths:
+
+> **https://github.com/CadenGithubB/HardwareOne_RaspPi_CoProcessor**
+
+### What the pair can do
+
+- **Ask the Pi** - the Pi's models appear as an LLM source with a `cm5:` prefix (`llmmodels`, `llmload cm5:<name>`) on the web LLM page, the OLED LLM mode and the lens; answers stream back to whichever surface asked. See [LLM](#llm).
+- **"Hey Even" without a phone** - with G2 glasses paired, the wake word opens a native voice session: the device records, streams the audio to the Pi, the Pi transcribes and answers, and the reply lands on the lens. The firmware only accepts a wake while the Pi is logged in over the link *and* its heartbeat says `ready`; otherwise the glasses are told to fall back to their own timeout instead of showing a listening card nobody will answer. `g2evenai status` shows the current exchange and why a wake was declined.
+- **Dictation** - the OLED keyboard gains a MIC page (cycle modes with SELECT until `MIC`; A records, Y deletes, X accepts). Speak, the Pi transcribes, and the text lands in the field you were typing in. Only offered while the microphone, the link and a logged-in Pi are all present.
+- **Power and fan** - `cm5 power` (profile, reboot, halt, suspend, timed sleep) and `cm5 fan` (quiet / auto / max with temperature, PWM, RPM and health readback). Every request is a confirmed request/ACK exchange reconciled against the Pi's boot-id, so a lost ACK is completed, never re-executed; an ambiguous outcome fails closed until `cm5 power recover confirm`. Destructive verbs are super-admin and need `confirm` on the same line.
+- **Presence** - the daemon sends `cm5 heartbeat` every 5 s (`starting` / `ready` / `busy` / `degraded`); the firmware holds a 15 s lease (75 s while the Pi is busy). `cm5 status` shows the lease, `cm5 capabilities` the protocol version. A stale lease means voice sessions and remote LLM calls are declined rather than left hanging.
+- **Clock** - a Pi that knows the time can set the device clock over the link (source `cm5` in clock status). A dark boot adopts it; an already-synced clock is only corrected when the Pi is NTP-synced, the current source is neither manual nor NTP, and the drift is over two minutes.
+- **Bulk audio** - `voicefetch "<path>"` streams a finished recording to the Pi as framed binary with a whole-file CRC; `liveaudio` is an opt-in real-time PCM transport for the S3 boards.
+
+### Wiring
+
+The link is a plain 3.3 V UART, separate from the USB console. Pi side: GPIO4 (TXD2) → ESP32 RX, GPIO5 (RXD2) ← ESP32 TX, common ground. Enable the port with `dtoverlay=uart2-pi5` in `/boot/firmware/config.txt` (that is the Pi 5-family overlay name; plain `uart2` is the Pi 4 overlay and does nothing on a CM5); it appears as `/dev/ttyAMA2` and never carries the Linux console or Bluetooth.
+
+| Board | Port | ESP32 TX | ESP32 RX | Default baud | Max baud |
+| ----- | ---- | :------: | :------: | -----------: | -------: |
+| Seeed XIAO ESP32-S3 (Sense or plain) | `Serial0` | GPIO43 (D6) | GPIO44 (D7) | 2,000,000 | 3,000,000 |
+| Unexpected Maker FeatherS3 | `Serial0` | GPIO43 | GPIO44 | 921,600 | 3,000,000 |
+| Adafruit Feather ESP32 V2 | `Serial1` | GPIO8 | GPIO7 | 230,400 | 460,800 |
+| Adafruit QT Py ESP32 | `Serial1` | GPIO32 | GPIO7 | 230,400 | 230,400 |
+| Generic ESP32 | `Serial2` | GPIO32 | GPIO33 | 230,400 | 230,400 |
+
+The pins and ceilings live in each board's block in `System_BuildConfig.h` (`UART_LINK_PORT`, `UART_LINK_TX_PIN`, `UART_LINK_RX_PIN`, `UART_LINK_BAUD_DEFAULT`, `UART_LINK_BAUD_MAX`). Live PCM streaming needs at least 921,600 baud, so it is an ESP32-S3 feature; everything else (commands, LLM answers, dictation text, power/fan) works at 230,400. On the classic ESP32 the UltraSaver power profile keeps the CPU clock up while the link runs above 250 kbaud so the UART does not lose bytes.
+
+### Setting it up
+
+On the device:
+
+1. Create an account for the daemon - it logs in over the link like any other user. The co-processor README currently documents `useradd cm5svc <password> 0 admin`; use the role its release asks for (it is the account the Pi will hold, so keep the password in the daemon's credentials file only).
+2. Turn the link on: `uartlink on` (persisted as `uartLinkEnabled`; it is off by default). Optionally `uartlinkbaud <n>` (0 = the board default above). `uartrequireauth` is on by default - leave it on.
+3. Check it: `uartlink` prints the link state, the session epoch, the last session event and the CM5 lease (`cm5=… cm5_fresh=… cm5_age_ms=…`).
+
+On the Pi: follow the install steps in the co-processor repository (overlay, Python venv, `~/.config/hw1-ai-service/credentials`, `config.yaml`, llama.cpp), then run its `probe` command - it connects, logs in, and prints status. Once the daemon is up, `cm5 status` on the device should show a fresh `ready` lease.
+
+Notes:
+
+- The Pi's session is an ordinary named session with its own login epoch; a re-login, `uartrequireauth` flip, or idle timeout fences any in-flight transfer at the next frame boundary. Sign in with the bare `login <user> <password>` (quote a password that contains spaces - unquoted spaces are refused); the targeted `login … serial|display` forms only work once the link session itself is signed in.
+- Heartbeats, time pushes, `liveaudio ready` renewals and the power/fan ACK callbacks are handled on the link's control plane - they never enter the command queue, never appear in command history, and never extend a CLI session.
+- The daemon cannot open or answer interactive prompts (help, confirm, the setup wizard); those belong to a human session.
+
+### Commands
+
+```
+uartlink [status|on|off]            - UART host link on/off; status shows session + CM5 lease
+uartlinkbaud <0|9600-max>           - baud (0 = board default); persisted
+uartrequireauth <0|1>               - require login on the link (super admin; default 1)
+cm5 [status|capabilities]           - presence lease / protocol (cm5-presence-v1)
+cm5 power [show|status|profile <eco|balanced|performance|auto>]
+cm5 power reboot|halt|suspend confirm
+cm5 power sleep_for <1..1440> confirm
+cm5 power recover confirm           - clear a fail-closed uncertain transition
+cm5 fan [show|status|quiet|auto|max]
+llmmodels / llmload cm5:<name>      - the Pi's models carry a cm5: prefix (see LLM)
+dictate status                      - pending dictation (result/fail are sent by the Pi)
+voicefetch "<path>"                 - stream a recording to the Pi (paths under /recordings)
+liveaudio status|capabilities       - live PCM transport (S3 boards, >= 921600 baud)
+g2evenai status|capabilities        - native "Hey Even" exchange and host-gate state
+```
+
+---
+
+## LLM
+
+Requires `ENABLE_LLM_BACKEND=1` plus at least one answer source: `ENABLE_LLM_SOURCE_ONBOARD` (a tiny transformer running on this chip - ESP32-S3 with PSRAM only) and/or `ENABLE_LLM_SOURCE_CM5` (answers from the [Raspberry Pi co-processor](#raspberry-pi-co-processor-cm5) over the UART link). The default build ships the CM5 source on and the on-board engine off. Every surface - web page, OLED mode, lens viewer, `llm*` commands - talks to whichever source holds the current model; models are addressed by `<source>:<name>` ids such as `onboard:model.bin` or `cm5:Qwen3-1.7B-Q4_0.gguf` (a bare filename still resolves).
+
+### Model files (on-board source)
 
 Place LLM1-format model files (produced by `esp32-llm-converter`) in one of two locations:
 
 - **LittleFS (internal flash):** `/system/llm/model.bin` - default path, loaded automatically
 - **SD card:** `/sd/llm/<filename>.bin` - useful for swapping models without reflashing
 
-The default path (`/system/llm/model.bin`) is loaded when you call `llmload` with no arguments. Use `llmmodels` to list all available files across both storage locations.
+`llmload` with no arguments loads the configured default model (`llmDefaultModel`, initially `/system/llm/model.bin`). Use `llmmodels` to list every available model across LittleFS, SD and the Pi; `llmmodels json` returns them as objects with `id`, `backend`, `storage` and `available`.
 
-### Memory
+### Memory (on-board source)
 
 Models and KV cache are allocated in PSRAM. The firmware automatically reduces the context window to fit available PSRAM (auto-fit). A 400 KB reserve is kept free for the rest of the system. Run `llmstatus` to see current PSRAM usage after loading.
 
 ### Web UI
 
-The **LLM** tab provides a chat interface. Select a model from the dropdown, click **Load**, then type a prompt and click **Ask**. Adjustable settings: temperature, sentence limit, and repetition penalty.
+The **LLM** tab provides a chat interface. Select a model from the dropdown (Pi models are tagged `[cm5]`, SD-card models `[SD]`; unavailable ones are listed but disabled), click **Load**, then type a prompt and click **Ask**. A **Do:** button appears only when the loaded model declares command-mode support. Adjustable settings: temperature, sentence limit, and repetition penalty. The page shows a measured load bar while a Pi model loads and reports `[connection lost]` if the device stops answering.
 
 ### Generation modes
 
 The model supports two generation modes triggered by how the prompt ends:
 
 - **Normal mode** - generates a natural-language response, stopping after the configured sentence limit.
-- **Do: mode** - when the prompt ends with the `Do:` token, the model outputs a CLI command instead of prose. Used internally by the automation and web UI to translate natural-language requests into executable commands.
+- **Do: mode** - when the prompt ends with the `Do:` token, the model outputs a CLI command instead of prose. Used internally by the automation and web UI to translate natural-language requests into executable commands. Only an on-board model whose header declares command-mode capability gets this mode; other models (and the Pi source) refuse `Do:` rather than guess.
 
 ### CLI commands
 
 ```
-llmstatus               - Show LLM engine state, model config, and PSRAM usage
-llmload [model.bin]     - Load model (default: /system/llm/model.bin)
-llmunload               - Unload model and free all PSRAM buffers
-llmmodels               - List available model files (LittleFS + SD)
-llmgenerate <prompt>    - Generate text from a prompt (synchronous)
-llmstop                 - Stop in-progress generation
+llmstatus                 - Show LLM state, active source/model, and (on-board) PSRAM usage
+llmload [id|name|path]    - Load a model: onboard:model.bin, cm5:<name>, a bare filename, or a path
+llmunload                 - Unload the model (frees PSRAM for the on-board source)
+llmmodels [json]          - List models across LittleFS, SD and the Pi
+llmgenerate <prompt>      - Generate text (synchronous; on a CM5-only build use the json form)
+llmresult json            - Poll a streaming answer; returns a `next` cursor
+llmstop                   - Stop in-progress generation
 ```
 
 ---
