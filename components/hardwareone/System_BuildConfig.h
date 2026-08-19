@@ -69,7 +69,7 @@
 #if NETWORK_FEATURE_LEVEL == 4
   #define CUSTOM_ENABLE_NET_WIFI     1   // WiFi connectivity
   #define CUSTOM_ENABLE_NET_HTTP     1   // HTTP server (web UI)
-  #define CUSTOM_ENABLE_NET_ESPNOW   0   // ESP-NOW mesh networking  [TEST BUILD: off for LLM/CM5 flash headroom]
+  #define CUSTOM_ENABLE_NET_ESPNOW   1   // ESP-NOW mesh networking
 #endif
 
 // Web level: which feature pages compile in.
@@ -87,7 +87,7 @@
   #define CUSTOM_ENABLE_WEB_SENSORS    1
   #define CUSTOM_ENABLE_WEB_BLUETOOTH  1
   #define CUSTOM_ENABLE_WEB_SPEECH     0
-  #define CUSTOM_ENABLE_WEB_ESPNOW     0   // [TEST BUILD: off with ESP-NOW]
+  #define CUSTOM_ENABLE_WEB_ESPNOW     1
   #define CUSTOM_ENABLE_WEB_BOND       0
   #define CUSTOM_ENABLE_WEB_MQTT       0
   #define CUSTOM_ENABLE_WEB_GAMES      0
@@ -311,12 +311,12 @@
 #define ENABLE_AUTOMATION       1
 
 // Raspberry Pi 5 / CM5 host-power control over the authenticated UART host
-// link. This compiles the `hostpower` command module and its finite EVT/ACK
+// link. This compiles the `cm5 power` command family and its finite EVT/ACK
 // protocol; it does not enable the UART link at runtime by itself.
 #define ENABLE_RASPBERRY_PI_HOST_POWER 1
 
 // CM5 fan mode/readback control over the authenticated UART host link. This
-// compiles the independent `hostfan` EVT/ACK/report state machine; it does not
+// compiles the independent `cm5 fan` EVT/ACK/report state machine; it does not
 // enable the UART link at runtime or implement the Linux fan curve itself.
 #define ENABLE_RASPBERRY_PI_HOST_FAN 1
 

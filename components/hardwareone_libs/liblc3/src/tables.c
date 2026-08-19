@@ -152,7 +152,7 @@ static const struct lc3_fft_bf3_twiddles fft_twiddles_45 = {
     }
 };
 
-const struct lc3_fft_bf3_twiddles *lc3_fft_twiddles_bf3[] =
+const struct lc3_fft_bf3_twiddles * const lc3_fft_twiddles_bf3[] =
     { &fft_twiddles_15, &fft_twiddles_45 };
 
 
@@ -606,7 +606,7 @@ static const struct lc3_fft_bf2_twiddles fft_twiddles_480 = {
 
 #endif /* LC3_PLUS_HR */
 
-const struct lc3_fft_bf2_twiddles *lc3_fft_twiddles_bf2[][3] = {
+const struct lc3_fft_bf2_twiddles * const lc3_fft_twiddles_bf2[][3] = {
     { &fft_twiddles_10 , &fft_twiddles_30 , &fft_twiddles_90  },
     { &fft_twiddles_20 , &fft_twiddles_60 , &fft_twiddles_180 },
     { &fft_twiddles_40 , &fft_twiddles_120 },
@@ -1445,7 +1445,7 @@ static const struct lc3_mdct_rot_def mdct_rot_1920 = {
 
 #endif /* LC3_PLUS_HR */
 
-const struct lc3_mdct_rot_def * lc3_mdct_rot[LC3_NUM_DT][LC3_NUM_SRATE] = {
+const struct lc3_mdct_rot_def * const lc3_mdct_rot[LC3_NUM_DT][LC3_NUM_SRATE] = {
 
     [LC3_DT_2M5] = {
         LC3_IF_PLUS(&mdct_rot_40, NULL),
@@ -4037,7 +4037,7 @@ static const float mdct_win_10m_96k_hr[__LC3_MDCT_WIN_LEN(10000, 96000)] = {
 
 #undef __LC3_MDCT_WIN_LEN
 
-const float *lc3_mdct_win[LC3_NUM_DT][LC3_NUM_SRATE] = {
+const float * const lc3_mdct_win[LC3_NUM_DT][LC3_NUM_SRATE] = {
 
     [LC3_DT_2M5] = {
         LC3_IF_PLUS( mdct_win_2m5_8k , NULL ),
@@ -4322,7 +4322,7 @@ static const int band_lim_10m_96k_hr[] = {
 
 #endif /* LC3_PLUS_HR */
 
-const int *lc3_band_lim[LC3_NUM_DT][LC3_NUM_SRATE] = {
+const int * const lc3_band_lim[LC3_NUM_DT][LC3_NUM_SRATE] = {
 
     [LC3_DT_2M5] = {
         LC3_IF_PLUS( band_lim_2m5_8k , NULL ),
@@ -4752,7 +4752,7 @@ const uint16_t lc3_tns_coeffs_bits[][17] = {
  *      - remove of first 0 den coefficients
  */
 
-const float *lc3_ltpf_cnum[LC3_NUM_SRATE][4] = {
+const float * const lc3_ltpf_cnum[LC3_NUM_SRATE][4] = {
 
     [LC3_SRATE_8K] = {
         (const float []){
@@ -4826,7 +4826,7 @@ const float *lc3_ltpf_cnum[LC3_NUM_SRATE][4] = {
     }
 };
 
-const float *lc3_ltpf_cden[LC3_NUM_SRATE][4] = {
+const float * const lc3_ltpf_cden[LC3_NUM_SRATE][4] = {
 
     [LC3_SRATE_8K] = {
         (const float []){

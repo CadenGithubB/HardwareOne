@@ -2352,12 +2352,12 @@ extern void getTimestampPrefixMsCached(char* buf, size_t bufSize);
 bool gTimeSyncedMarkerWritten = false;
 
 // Log File Path Definitions
-const char* LOG_OK_FILE = "/system/sys_logs/successful_login.log";              // ~680KB cap
-const char* LOG_FAIL_FILE = "/system/sys_logs/failed_login.log";                // ~680KB cap
-const char* LOG_I2C_FILE = "/system/sys_logs/i2c_errors.log";                   // 64KB cap
-const char* LOG_ERROR_FILE = "/system/sys_logs/errors.log";                      // LOG_ERROR_CAP
-const char* LOG_EVENTS_FILE = "/system/sys_logs/system-events.log";              // LOG_EVENTS_CAP
-const char* LOG_EVENT_STREAM_FILE = "/system/sys_logs/events.log";               // LOG_EVENT_STREAM_CAP
+extern const char* const LOG_OK_FILE = "/system/sys_logs/successful_login.log";              // ~680KB cap
+extern const char* const LOG_FAIL_FILE = "/system/sys_logs/failed_login.log";                // ~680KB cap
+extern const char* const LOG_I2C_FILE = "/system/sys_logs/i2c_errors.log";                   // 64KB cap
+extern const char* const LOG_ERROR_FILE = "/system/sys_logs/errors.log";                      // LOG_ERROR_CAP
+extern const char* const LOG_EVENTS_FILE = "/system/sys_logs/system-events.log";              // LOG_EVENTS_CAP
+extern const char* const LOG_EVENT_STREAM_FILE = "/system/sys_logs/events.log";               // LOG_EVENT_STREAM_CAP
 
 void logToFile(const char* path, const String& line, size_t capBytes) {
   appendLineWithCap(path, line, capBytes);

@@ -3,6 +3,7 @@
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 
 #include "System_Debug.h"
+#include <esp_heap_caps.h>  // transient scratch allocs (annotateActivityDaily, self-test)
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -1247,31 +1248,40 @@ static size_t annotateHrvDaily(R1ProtocolProfile profile,
 static size_t annotateActivityDaily(R1ProtocolProfile profile,
                                     const R1Decoded& decoded,
                                     char* out, size_t cap) {
-  // R1ActivityDailyResult is now sized for a full 144-slot day (~2.3 KB); this
-  // diagnostic path runs serialized on the ring owner task, so a single static
-  // instance keeps it off that task's modest stack.
-  static R1ActivityDailyResult parsed;
-  const R1ParseError error = r1ParseActivityDaily(profile, decoded, parsed);
+  // R1ActivityDailyResult is full-day sized (~2.3 KB). This diagnostic path
+  // only runs when the ring-protocol debug gate at the caller is open, so
+  // borrow the buffer transiently instead of keeping a resident static.
+  // INTERNAL, not PSRAM: on a live frame this holds decoded health records,
+  // which project policy bars from PSRAM.
+  R1ActivityDailyResult* parsed = (R1ActivityDailyResult*)heap_caps_malloc(
+      sizeof(R1ActivityDailyResult), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  if (!parsed) {
+    return (size_t)snprintf(out, cap, "activityDaily skipped=alloc");
+  }
+  const R1ParseError error = r1ParseActivityDaily(profile, decoded, *parsed);
   if (error != R1_PARSE_OK) {
+    heap_caps_free(parsed);
     return (size_t)snprintf(out, cap, "daily rejected=%s",
                             r1ParseErrorName(error));
   }
   uint32_t steps = 0;
   uint32_t active = 0;
   uint32_t total = 0;
-  for (uint8_t i = 0; i < parsed.count; ++i) {
-    steps += parsed.records[i].steps;
-    active += parsed.records[i].activeKcal;
-    total += parsed.records[i].totalKcal;
+  for (uint8_t i = 0; i < parsed->count; ++i) {
+    steps += parsed->records[i].steps;
+    active += parsed->records[i].activeKcal;
+    total += parsed->records[i].totalKcal;
   }
-  return (size_t)snprintf(
+  const size_t n = (size_t)snprintf(
       out, cap,
       "activityDaily count=%u tz=%d day={raw=%lu,mode=%s} steps=%lu activeKcal=%lu totalKcal=%lu trailer=%08lX",
-      parsed.count, (int)parsed.timezoneMinutes,
-      (unsigned long)parsed.dayStart, r1DailyDayModeName(parsed.dayMode),
+      parsed->count, (int)parsed->timezoneMinutes,
+      (unsigned long)parsed->dayStart, r1DailyDayModeName(parsed->dayMode),
       (unsigned long)steps,
       (unsigned long)active, (unsigned long)total,
-      (unsigned long)parsed.trailer);
+      (unsigned long)parsed->trailer);
+  heap_caps_free(parsed);
+  return n;
 }
 
 size_t r1AnnotatePayload(R1ProtocolProfile profile, const R1Decoded& d,
@@ -1413,10 +1423,26 @@ static bool __attribute__((noinline)) selfTestDecoded(
 
 bool r1ProtocolSelfTest() {
   bool ok = true;
-  // R1ActivityDailyResult is now full-day sized (~2.3 KB). This one-shot boot
-  // self-test runs single-threaded, so its activity sub-tests share one static
-  // instance (aliased below) rather than putting ~2.3 KB on the init stack.
-  static R1ActivityDailyResult activityScratch;
+  // R1ActivityDailyResult is full-day sized (~2.3 KB). This one-shot boot
+  // self-test runs single-threaded, so its activity sub-tests share one
+  // TRANSIENT scratch (aliased below) — heap, not static, so the 2.3 KB is
+  // returned after boot instead of staying resident forever. Synthetic
+  // fixtures only (no real health data), so PSRAM is fine; fall back to
+  // internal on a PSRAM-less config.
+  R1ActivityDailyResult* activityScratchP =
+      (R1ActivityDailyResult*)heap_caps_malloc(
+          sizeof(R1ActivityDailyResult),
+          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!activityScratchP) {
+    activityScratchP = (R1ActivityDailyResult*)heap_caps_malloc(
+        sizeof(R1ActivityDailyResult), MALLOC_CAP_8BIT);
+  }
+  if (!activityScratchP) {
+    DEBUG_RING_SETUPF("[R1-selftest] FAIL activity scratch alloc (%u B)",
+                      (unsigned)sizeof(R1ActivityDailyResult));
+    return false;
+  }
+  R1ActivityDailyResult& activityScratch = *activityScratchP;
 
   {
     // Existing public fixture: it independently anchors both CRC algorithms.
@@ -2140,6 +2166,7 @@ bool r1ProtocolSelfTest() {
                            decoded, rejected) == R1_PARSE_UNSUPPORTED_LAYOUT);
   }
 
+  heap_caps_free(activityScratchP);
   return ok;
 }
 

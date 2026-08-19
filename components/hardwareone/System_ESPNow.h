@@ -2,6 +2,7 @@
 #define SYSTEM_ESPNOW_H
 
 #include <Arduino.h>
+#include <esp_attr.h>   // EXT_RAM_BSS_ATTR (MAC_STR static)
 
 #include "System_BuildConfig.h"
 
@@ -150,16 +151,6 @@ struct TopoDeviceEntry {
   bool active;
 };
 
-// Buffered peer message (for out-of-order delivery)
-#define MAX_BUFFERED_PEERS 10
-struct BufferedPeerMessage {
-  String message;              // Full JSON message to forward/process later
-  uint32_t reqId;              // Request ID to match with stream
-  uint8_t masterMac[6];        // Master MAC (destination of PEER)
-  unsigned long receivedMs;    // When this was buffered (for timeout)
-  bool active;                 // Slot in use
-};
-
 // Mesh topology peer structure
 struct MeshTopoPeer {
   uint8_t mac[6];
@@ -288,22 +279,6 @@ extern MeshPeerMeta* gMeshPeerMeta;  // Dynamically allocated [gMeshPeerSlots] a
 // Peer metadata helpers
 MeshPeerMeta* getMeshPeerMeta(const uint8_t mac[6], bool createIfMissing = false);
 int countMeshPeerMetaByRoom(const char* room);
-
-// ==========================
-// Mesh Retry Queue (from main .ino)
-// ==========================
-#define MESH_RETRY_QUEUE_SIZE 8
-#define MESH_ACK_TIMEOUT_MS 3000
-#define MESH_MAX_RETRIES 2
-
-struct MeshRetryEntry {
-  uint32_t msgId;
-  uint8_t dstMac[6];
-  String envelope;
-  uint32_t sentMs;
-  uint8_t retryCount;
-  bool active;
-};
 
 // ==========================
 // Mesh Deduplication
@@ -1185,10 +1160,24 @@ inline bool isSelfMac(const uint8_t* mac) {
 void macFromHexString(const String& s, uint8_t out[6]);
 String macToHexString(const uint8_t mac[6]);
 // Zero-allocation MAC formatter for debug log call sites.
-// Uses a GCC statement expression + stack char[18] — no heap, no String.
-// Usage: DEBUGF(..., "%s", MAC_STR(mac))  instead of  macToHexString(mac).c_str()
+// Uses a GCC statement expression + a function-static char[18] — no heap, no
+// String. Usage: DEBUGF(..., "%s", MAC_STR(mac))  instead of  macToHexString(mac).c_str()
+//
+// The static lives in PSRAM (EXT_RAM_BSS_ATTR). Each expansion site mints its
+// own 18-byte static, so the ~37 sites in this build cost ~666 B of internal
+// DRAM before this. Verified 2026-08-19: every expansion runs in task context
+// (espnow_task ring drain, cmd_exec, httpd) — neither onEspNowDataReceived nor
+// onEspNowDataSent uses it, no IRAM_ATTR caller, no critical section.
+//
+// BECAUSE this is a header macro, every FUTURE expansion moves to PSRAM too.
+// Do NOT use MAC_STR from an ISR, an IRAM_ATTR function, or inside
+// portENTER_CRITICAL/taskENTER_CRITICAL: PSRAM is unreachable with the flash
+// cache off and slow under a spinlock. From the WiFi-task ESP-NOW callbacks it
+// is technically reachable (cache on), but prefer a stack buffer there.
+// (Pre-existing and PSRAM-independent: the static is shared per site, so two
+// tasks expanding the same site concurrently can tear the string.)
 #define MAC_STR(mac) \
-  ({ static char _macbuf[18]; \
+  ({ EXT_RAM_BSS_ATTR static char _macbuf[18]; \
      snprintf(_macbuf, sizeof(_macbuf), "%02X:%02X:%02X:%02X:%02X:%02X", \
        (mac)[0],(mac)[1],(mac)[2],(mac)[3],(mac)[4],(mac)[5]); \
      (const char*)_macbuf; })

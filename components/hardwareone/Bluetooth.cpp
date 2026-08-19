@@ -1007,11 +1007,16 @@ static void processBleCommandLine(uint16_t connId, TransportSessionEpoch ingress
       return;
     }
     // Defer to cmd_exec_task — isValidUser() uses too much stack for BTC_TASK.
-    // BTC_TASK is a regular FreeRTOS task (not an ISR), so PSRAM-backed
-    // allocations are safe. ps_alloc falls back to internal heap if PSRAM
-    // is exhausted.
+    // This job carries the PLAINTEXT password until bleLoginDeferred runs, so
+    // it must live in internal DRAM, never PSRAM: flash encryption is off on
+    // most boards and external PSRAM is a probeable chip. PreferInternal goes
+    // through malloc(), which for a ~140 B block is served from internal DRAM
+    // (CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384); it could only spill to
+    // PSRAM if internal DRAM had no 140 B block left, at which point the BT
+    // host itself is already failing. bleLoginJobFree wipes the password
+    // before free.
     BleLoginAsyncJob* job = (BleLoginAsyncJob*)ps_alloc(sizeof(BleLoginAsyncJob),
-                                                       AllocPref::PreferPSRAM,
+                                                       AllocPref::PreferInternal,
                                                        "ble.loginAsyncJob");
     if (!job) {
       const char* msg = "Error: out of memory";

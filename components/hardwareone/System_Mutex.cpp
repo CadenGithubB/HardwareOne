@@ -14,7 +14,6 @@
 
 SemaphoreHandle_t gFsMutex = nullptr;
 SemaphoreHandle_t gJsonResponseMutex = nullptr;
-SemaphoreHandle_t gMeshRetryMutex = nullptr;
 SemaphoreHandle_t gFileTransferMutex = nullptr;
 SemaphoreHandle_t gTopoStreamsMutex = nullptr;
 SemaphoreHandle_t gEspNowSessionTxMutex = nullptr;
@@ -29,7 +28,6 @@ void initMutexes() {
   // Create standard mutexes
   gFsMutex = xSemaphoreCreateMutex();
   gJsonResponseMutex = xSemaphoreCreateMutex();
-  gMeshRetryMutex = xSemaphoreCreateMutex();
   gFileTransferMutex = xSemaphoreCreateMutex();
   gTopoStreamsMutex = xSemaphoreCreateMutex();
   gEspNowSessionTxMutex = xSemaphoreCreateMutex();
@@ -40,7 +38,7 @@ void initMutexes() {
 
   // Log creation status
   bool allCreated = (gFsMutex != nullptr) && (gJsonResponseMutex != nullptr) &&
-                    (gMeshRetryMutex != nullptr) && (gFileTransferMutex != nullptr) &&
+                    (gFileTransferMutex != nullptr) &&
                     (gTopoStreamsMutex != nullptr) && (gEspNowSessionTxMutex != nullptr) &&
                     (gMapCacheMutex != nullptr) && (i2sMicMutex != nullptr);
   
@@ -234,27 +232,6 @@ JsonBufferGuard::JsonBufferGuard(const char* owner) : held(false) {
 JsonBufferGuard::~JsonBufferGuard() {
   if (held && gJsonResponseMutex) {
     xSemaphoreGive(gJsonResponseMutex);
-  }
-}
-
-// ============================================================================
-// MeshRetryGuard Implementation
-// ============================================================================
-
-MeshRetryGuard::MeshRetryGuard(const char* owner) : held(false) {
-  if (gMeshRetryMutex) {
-    if (isHeldByCurrentTask(gMeshRetryMutex)) {
-      return;
-    }
-    if (xSemaphoreTake(gMeshRetryMutex, portMAX_DELAY) == pdTRUE) {
-      held = true;
-    }
-  }
-}
-
-MeshRetryGuard::~MeshRetryGuard() {
-  if (held && gMeshRetryMutex) {
-    xSemaphoreGive(gMeshRetryMutex);
   }
 }
 

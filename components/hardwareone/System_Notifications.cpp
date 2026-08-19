@@ -218,6 +218,17 @@ static bool notifPolicySave() {
 // don't re-read flash per event. Flushed by notifUserPrefsInvalidate() from
 // the saveUserSettings() chokepoint (covers web POST, notifyusermute, password
 // ops). Guarded by a mutex: resolvers run on the main loop AND the OLED task.
+//
+// Lives in PSRAM (EXT_RAM_BSS_ATTR): task-only, no DMA/ISR, no spinlock (the
+// guard is a FreeRTOS mutex), no secrets — username + per-kind mute/force
+// masks. NOTE: this is the first EXT_RAM_BSS_ATTR object in the tree with a
+// non-trivial ctor (the String member). That is safe because ESP-IDF 5.5
+// zeroes .ext_ram.bss in esp_psram_bss_init() BEFORE do_global_ctors() runs
+// String(), and String("") takes the SSO path with no malloc — verified
+// against cpu_start.c / startup.c 2026-08-19. Long (>14 char) usernames
+// realloc onto the internal heap via SPIRAM_MALLOC_ALWAYSINTERNAL, so only the
+// 16 B String header and the masks are external. Worth one HW boot + login +
+// notification-mute round-trip as the first of its kind.
 struct UserPrefsCacheEntry {
   String username;
   uint32_t muteMask[NOTIF_KIND_MASK_WORDS];
@@ -225,7 +236,7 @@ struct UserPrefsCacheEntry {
   uint8_t  minTier;
   bool valid;
 };
-static UserPrefsCacheEntry gUserPrefsCache[4];
+EXT_RAM_BSS_ATTR static UserPrefsCacheEntry gUserPrefsCache[4];
 static uint8_t gUserPrefsCacheNext = 0;
 
 void notifUserPrefsInvalidate() {
@@ -847,7 +858,10 @@ void systemEventsNotifyTick() {
     TransportSessionEpoch epoch;
     NotifViewer           viewer;
   };
-  static AppSinkSession sAppSinks[BLE_MAX_CONNECTIONS];
+  // PSRAM: function-static in the main-loop notify tick — single task by
+  // construction, no lock, no ISR; feeds blePushNotification() on the same
+  // task, nothing BLE-ISR touches it. (Verified 2026-08-19.)
+  EXT_RAM_BSS_ATTR static AppSinkSession sAppSinks[BLE_MAX_CONNECTIONS];
   int  appSinkCount    = 0;
   bool appSinksResolved = false;
   const bool appLinkUp = isBLEConnected() && bleHasAuthenticatedSession();

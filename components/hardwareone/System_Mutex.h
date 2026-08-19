@@ -36,9 +36,6 @@ extern SemaphoreHandle_t gFsMutex;
 // JSON response buffer mutex - protects shared gJsonResponseBuffer
 extern SemaphoreHandle_t gJsonResponseMutex;
 
-// ESP-NOW mesh retry queue mutex
-extern SemaphoreHandle_t gMeshRetryMutex;
-
 // ESP-NOW file transfer mutex - protects gActiveFileTransfer state
 extern SemaphoreHandle_t gFileTransferMutex;
 
@@ -224,18 +221,6 @@ struct JsonBufferGuard {
 };
 
 /**
- * MeshRetryGuard - RAII guard for ESP-NOW retry queue mutex
- */
-struct MeshRetryGuard {
-  bool held;
-  explicit MeshRetryGuard(const char* owner = nullptr);
-  ~MeshRetryGuard();
-  
-  MeshRetryGuard(const MeshRetryGuard&) = delete;
-  MeshRetryGuard& operator=(const MeshRetryGuard&) = delete;
-};
-
-/**
  * FileTransferGuard - RAII guard for ESP-NOW file transfer state mutex
  */
 struct FileTransferGuard {
@@ -247,7 +232,7 @@ struct FileTransferGuard {
   FileTransferGuard& operator=(const FileTransferGuard&) = delete;
 };
 
-// ESP-NOW topology streams mutex - protects gTopoStreams, gTopoDeviceCache, gPeerBuffer
+// ESP-NOW topology streams mutex - protects gTopoStreams, gTopoDeviceCache
 extern SemaphoreHandle_t gTopoStreamsMutex;
 
 /**

@@ -11,6 +11,7 @@
  */
 
 #include "System_Events.h"
+#include <esp_attr.h>   // EXT_RAM_BSS_ATTR (gEventRing)
 
 #include <string.h>
 
@@ -120,7 +121,17 @@ NotificationContextGuard::~NotificationContextGuard() {
 // Ring storage
 // ============================================================================
 
-static SystemEvent gEventRing[SYSEVT_RING_SIZE];
+// PSRAM. Safe because no access ever holds a long PSRAM copy under the
+// spinlock: systemEventPost and systemEventGetBySeq copy ONE 164 B slot per
+// hold, and systemEventFetchSince (below) is chunked at 4 slots per hold —
+// before that chunking, the automation drain bulk-copied up to the full 7.9 KB
+// ring inside one taskENTER_CRITICAL, which would have been a real interrupt-
+// latency regression with the ring in PSRAM. Posters are all task context
+// (header contract: "from any task (not ISR)"; verified — no IRAM_ATTR poster,
+// both esp_timer users are task-dispatch). Content is post-redaction (the
+// REMOTE_CMD_RX posters run detail through redactCmdForAudit) and no SYSEVT
+// kind carries decoded health values, so the secrets/health policy is clear.
+EXT_RAM_BSS_ATTR static SystemEvent gEventRing[SYSEVT_RING_SIZE];
 static uint32_t gEventNextSeq = 1;  // seq of the NEXT event to be posted
 static portMUX_TYPE gEventMux = portMUX_INITIALIZER_UNLOCKED;
 
@@ -293,25 +304,42 @@ int systemEventFetchSince(uint32_t* cursor, SystemEvent* out, int maxOut,
     taskEXIT_CRITICAL(&gEventMux);
     return 0;
   }
+  taskEXIT_CRITICAL(&gEventMux);
+
   uint32_t from = *cursor + 1;
-  // Oldest still-live seq: the ring holds the last SYSEVT_RING_SIZE posts.
-  uint32_t oldest = (latest >= SYSEVT_RING_SIZE) ? latest - SYSEVT_RING_SIZE + 1 : 1;
-  if (from < oldest) {
-    // Consumer fell behind; the overwritten gap is SILENT LOSS — count it so
-    // the diagnostics (`notifstats`, DEBUG_NOTIFICATIONS/[AUTO] warnings) can
-    // surface what used to vanish without a trace.
-    uint32_t skipped = oldest - from;
-    gEventRingSkipped += skipped;
-    if (skippedOut) *skippedOut += skipped;
-    from = oldest;
-  }
   int n = 0;
-  for (uint32_t s = from; s <= latest && n < maxOut; s++) {
-    out[n++] = gEventRing[s % SYSEVT_RING_SIZE];
+  // The ring lives in PSRAM: bound each spinlock hold to kFetchChunk slots so
+  // a full-ring drain (automation passes maxOut=48) never parks a ~7.9 KB
+  // cache-missing copy inside a critical section with interrupts masked.
+  // latest/oldest are re-derived at every re-acquire, so slots the writer
+  // overwrote between holds surface as from < oldest and land in the existing
+  // silent-loss ledger exactly once — same accounting as the single-hold form.
+  constexpr int kFetchChunk = 4;  // 4 x sizeof(SystemEvent) = 656 B per hold
+  for (;;) {
+    taskENTER_CRITICAL(&gEventMux);
+    latest = gEventNextSeq - 1;
+    // Oldest still-live seq: the ring holds the last SYSEVT_RING_SIZE posts.
+    uint32_t oldest = (latest >= SYSEVT_RING_SIZE) ? latest - SYSEVT_RING_SIZE + 1 : 1;
+    if (from < oldest) {
+      // Consumer fell behind; the overwritten gap is SILENT LOSS — count it so
+      // the diagnostics (`notifstats`, DEBUG_NOTIFICATIONS/[AUTO] warnings) can
+      // surface what used to vanish without a trace.
+      uint32_t skipped = oldest - from;
+      gEventRingSkipped += skipped;
+      if (skippedOut) *skippedOut += skipped;
+      from = oldest;
+    }
+    int copied = 0;
+    while (from <= latest && n < maxOut && copied < kFetchChunk) {
+      out[n++] = gEventRing[from % SYSEVT_RING_SIZE];
+      from++;
+      copied++;
+    }
+    taskEXIT_CRITICAL(&gEventMux);
+    if (copied == 0 || n >= maxOut) break;
   }
   if (n > 0) *cursor = out[n - 1].seq;
   else if (latest > *cursor) *cursor = latest;  // nothing live to copy
-  taskEXIT_CRITICAL(&gEventMux);
   return n;
 }
 

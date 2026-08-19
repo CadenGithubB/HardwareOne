@@ -43,12 +43,12 @@
 // ────────────────────────────────────────────────────────────────────────────
 
 // Log file paths
-extern const char* LOG_OK_FILE;      // Successful login events
-extern const char* LOG_FAIL_FILE;    // Failed login attempts
-extern const char* LOG_I2C_FILE;     // I2C device errors
-extern const char* LOG_ERROR_FILE;   // ERROR_* macro lines from debug queue ([ERROR]...)
-extern const char* LOG_EVENTS_FILE;  // System lifecycle events ([EVENT]...) — see logSystemEvent()
-extern const char* LOG_EVENT_STREAM_FILE;  // Structured event-ring history ([EVLOG]...) — see systemEventLogTick()
+extern const char* const LOG_OK_FILE;      // Successful login events
+extern const char* const LOG_FAIL_FILE;    // Failed login attempts
+extern const char* const LOG_I2C_FILE;     // I2C device errors
+extern const char* const LOG_ERROR_FILE;   // ERROR_* macro lines from debug queue ([ERROR]...)
+extern const char* const LOG_EVENTS_FILE;  // System lifecycle events ([EVENT]...) — see logSystemEvent()
+extern const char* const LOG_EVENT_STREAM_FILE;  // Structured event-ring history ([EVLOG]...) — see systemEventLogTick()
 
 // Log file caps (bytes)
 constexpr size_t LOG_CAP_BYTES = 696969;  // ~680 KB (for login logs)

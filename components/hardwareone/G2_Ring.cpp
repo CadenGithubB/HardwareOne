@@ -280,7 +280,7 @@ static uint8_t sIntentQueueCount = 0;
 static bool sRawPayloadUsed[RING_RAW_PAYLOAD_SLOTS];
 EXT_RAM_BSS_ATTR static uint8_t
     sRawPayloadBytes[RING_RAW_PAYLOAD_SLOTS][R1_MAX_PAYLOAD];
-static G2RingTransactionStatus sTransactionHistory[RING_TRANSACTION_HISTORY_DEPTH];
+EXT_RAM_BSS_ATTR static G2RingTransactionStatus sTransactionHistory[RING_TRANSACTION_HISTORY_DEPTH];  // PSRAM: task-context diagnostics ring
 static uint8_t sTransactionCursor = 0;
 static uint32_t sNextTransactionId = 1;
 static portMUX_TYPE sTransportMux = portMUX_INITIALIZER_UNLOCKED;
@@ -4601,7 +4601,7 @@ struct RingPendingRawSet {
   uint16_t payloadLen = 0;
   uint8_t payload[R1_MAX_PAYLOAD]{};
 };
-static RingPendingRawSet sPendingRawSet;
+EXT_RAM_BSS_ATTR static RingPendingRawSet sPendingRawSet;  // PSRAM: ring command state, task-context only
 
 static void ringRawSetConfirmAccepted(void* opaque) {
   const RingPendingRawSet* candidate =

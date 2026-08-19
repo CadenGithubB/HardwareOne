@@ -522,7 +522,7 @@ static bool gBackupPromoted = false;
 // --------------------------
 // Minimal mesh envelope support (fallback, unicast-only)
 // --------------------------
-// Note: MeshSeenEntry, MESH_DEDUP_SIZE, MeshPeerHealth, MESH_PEER_MAX, MESH_MAX_RETRIES are now in espnow_system.h
+// Note: MeshSeenEntry, MESH_DEDUP_SIZE, MeshPeerHealth, MESH_PEER_MAX live in System_ESPNow.h
 
 // Lightweight RX ring to defer heavy processing to espnowHeartbeatTask (no new task)
 struct InboundRxItem {
@@ -576,8 +576,12 @@ MeshPeerHealth* gMeshPeers = nullptr;
 MeshPeerMeta* gMeshPeerMeta = nullptr;
 uint32_t gLastHeartbeatSentMs = 0;
 
-static MeshRetryEntry gMeshRetryQueue[MESH_RETRY_QUEUE_SIZE];
-// Note: gMeshRetryMutex is now defined in mutex_system.cpp
+// (gMeshRetryQueue — a planned mesh ACK/retry queue — was removed 2026-08-19.
+// Nothing ever enqueued into it: the only writes were two memsets and the only
+// read was a JSON dump that could therefore never emit an entry. 288 B of DRAM
+// plus a dedicated mutex, for nothing. The espnowmeshstatus JSON keeps its
+// retryQueue/activeRetries keys as constant empty/0 so external readers of that
+// payload see an unchanged shape.)
 // Phase 4: per-transfer state lives in System_ESPNow_Files.{h,cpp}'s slot
 // table. The old single-flight FileTransfer struct + gActiveFileTransfer
 // pointer + gFileTransferLocked flag are gone.
@@ -593,10 +597,21 @@ static MeshRetryEntry gMeshRetryQueue[MESH_RETRY_QUEUE_SIZE];
 // ============================================================================
 
 // ESP-NOW topology streaming support (NEW PATTERN - Multiple Concurrent Streams)
-// Note: TopologyStream, TopoDeviceEntry, BufferedPeerMessage structs and constants are now in espnow_system.h
-static TopologyStream gTopoStreams[MAX_CONCURRENT_TOPO_STREAMS];  // Array of concurrent streams
+// Note: TopologyStream and TopoDeviceEntry structs and constants are in System_ESPNow.h
+// (gPeerBuffer / BufferedPeerMessage — a planned out-of-order PEER holding pen
+// for the topology streams — was removed 2026-08-19: it never gained a
+// producer or consumer and only survived linker GC because its String member
+// gave it a static constructor. 360 B of DRAM for nothing.)
+// PSRAM: touched only on espnow_task (RX-ring-drain handlers v4h_topo_start /
+// v4h_topo_peer, checkTopologyCollectionWindow) and cmd_exec (cmd_test_*).
+// Never from the WiFi-task recv callback, an ISR, a timer, or a critical
+// section. Non-POD (String members) is fine: .ext_ram.bss is zeroed in
+// esp_psram_bss_init() before do_global_ctors() runs the String ctors, and
+// String backing buffers are separate heap allocations either way. Same
+// mutex and same access pattern as gTopoDeviceCache on the next line, which
+// has lived in PSRAM for some time. (Verified 2026-08-19.)
+EXT_RAM_BSS_ATTR static TopologyStream gTopoStreams[MAX_CONCURRENT_TOPO_STREAMS];  // Array of concurrent streams
 EXT_RAM_BSS_ATTR static TopoDeviceEntry gTopoDeviceCache[MAX_TOPO_DEVICE_CACHE];
-static BufferedPeerMessage gPeerBuffer[MAX_BUFFERED_PEERS];
 
 // Phase 4: per-transfer state moved to System_ESPNow_Files (multi-slot).
 // gFileTransferLocked / gFileTransferOwnerMac / gFileTransferLockTime
@@ -11098,18 +11113,6 @@ static bool initEspNow() {
   // Apply persisted mesh/direct mode from settings (applySettings runs before gEspNow exists at boot)
   gEspNow->mode = gSettings.espnowmesh ? ESPNOW_MODE_MESH : ESPNOW_MODE_DIRECT;
 
-  // Initialize retry queue mutex
-  if (!gMeshRetryMutex) {
-    gMeshRetryMutex = xSemaphoreCreateMutex();
-    if (gMeshRetryMutex) {
-      // Clear retry queue
-      memset(gMeshRetryQueue, 0, sizeof(gMeshRetryQueue));
-      broadcastOutput("[ESP-NOW] Retry queue initialized (8 slots, 3s timeout, 2 retries)");
-    } else {
-      broadcastOutput("[ESP-NOW] WARNING: Failed to create retry queue mutex - retries disabled");
-    }
-  }
-
   // Initialize broadcast tracker. Internal DRAM — this is read and written from
   // RX ACK processing. Non-fatal on failure: broadcasts still go out, they just
   // lose their ACK accounting (every reader treats a null table as "no slots").
@@ -11433,14 +11436,6 @@ static bool deinitEspNow(bool publishOffEvent) {
       snprintf(msg, sizeof(msg), "[ESP-NOW] %u active file transfer%s cleaned up",
                (unsigned)active, active == 1 ? "" : "s");
       broadcastOutput(msg);
-    }
-  }
-
-  // Clear retry queue entries.
-  {
-    MeshRetryGuard guard("stopESPNow");
-    if (guard.held) {
-      memset(gMeshRetryQueue, 0, sizeof(gMeshRetryQueue));
     }
   }
 
@@ -14120,34 +14115,11 @@ const char* cmd_espnow_meshstatus(const String& argsInput) {
   
   doc["totalUnpaired"] = unpairedCount;
 
-  JsonArray retryQueue = doc["retryQueue"].to<JsonArray>();
-  int activeRetries = 0;
-  
-  {
-    MeshRetryGuard retryGuard("espnowDebugJson");
-    if (retryGuard.held) {
-      for (int i = 0; i < MESH_RETRY_QUEUE_SIZE; i++) {
-        if (!gMeshRetryQueue[i].active) continue;
-        
-        JsonObject retry = retryQueue.add<JsonObject>();
-        uint32_t elapsed = now - gMeshRetryQueue[i].sentMs;
-        
-        retry["msgId"] = gMeshRetryQueue[i].msgId;
-        char retryMacBuf[18];
-        snprintf(retryMacBuf, sizeof(retryMacBuf), "%02X:%02X:%02X:%02X:%02X:%02X",
-                 gMeshRetryQueue[i].dstMac[0], gMeshRetryQueue[i].dstMac[1],
-                 gMeshRetryQueue[i].dstMac[2], gMeshRetryQueue[i].dstMac[3],
-                 gMeshRetryQueue[i].dstMac[4], gMeshRetryQueue[i].dstMac[5]);
-        retry["dst"] = String(retryMacBuf);
-        retry["retryCount"] = gMeshRetryQueue[i].retryCount;
-        retry["secondsWaiting"] = elapsed / 1000;
-        
-        activeRetries++;
-      }
-    }
-  }
-  
-  doc["activeRetries"] = activeRetries;
+  // retryQueue / activeRetries: kept as a constant empty array / 0 for payload
+  // shape stability. The mesh retry queue they reported was never populated
+  // and was removed 2026-08-19 (see the note near the top of this file).
+  doc["retryQueue"].to<JsonArray>();
+  doc["activeRetries"] = 0;
 
   // Serialize to gDebugBuffer
   if (!ensureDebugBuffer()) return "{\"error\":\"Buffer unavailable\"}";
