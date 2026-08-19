@@ -279,7 +279,7 @@ static bool bluetoothInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newly
 
 #if ENABLE_G2_GLASSES
 // ---- OLED_BLUETOOTH_G2: G2 glasses submenu --------------------------------
-static char g2TextInputBuffer[64] = "Hello from ESP32!";  // fixed "Show Text" payload
+static const char g2TextInputBuffer[] = "Hello from ESP32!";  // fixed "Show Text" payload (const: .rodata, was 64 B of .data)
 
 EXT_RAM_BSS_ATTR static OLEDScrollState sG2MenuScroll;  // PSRAM, matching sBtMenuScroll
 static bool sG2MenuInit = false;

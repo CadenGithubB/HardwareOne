@@ -1013,8 +1013,16 @@ void deliverCommandResult(const String& result, const CommandContext& ctx) {
 
 char* gFileReadBuf = nullptr;
 char* gFileOutBuf = nullptr;
-size_t kFileReadBufSize = 2048;
-size_t kFileOutBufSize = 2048;
+// `extern const`: WebServer_Server.cpp declares these `extern const size_t`,
+// and until 2026-08-19 they were DEFINED here as plain `size_t` — two
+// declarations of one variable with different types, which is an ODR/type
+// violation the compiler cannot diagnose across TUs. They are written exactly
+// once (here) and only read, so const is the truth. The explicit `extern` is
+// REQUIRED: a namespace-scope const has internal linkage by default, and
+// without it WebServer_Server.cpp would fail to link. Side benefit: both move
+// from .data (DRAM) to .rodata (flash).
+extern const size_t kFileReadBufSize = 2048;
+extern const size_t kFileOutBufSize = 2048;
 
 bool ensureFileViewBuffers() {
   if (!gFileReadBuf) {

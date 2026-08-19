@@ -5,6 +5,7 @@
 // notes.
 
 #include "System_CLIConfirm.h"
+#include <esp_attr.h>            // EXT_RAM_BSS_ATTR
 #include "System_CLIMode.h"
 #include "System_CommandTypes.h"
 #include "System_Debug.h"
@@ -15,7 +16,19 @@
 // Single-slot state for the pending confirm. Publication is committed under
 // the CLIMode mutex only after the exact owner and empty slot are validated.
 // A losing foreign request therefore cannot overwrite the winning payload.
-static struct {
+// PSRAM-resident. Touched only by confirm_onEnter/confirm_onInput on the
+// cmd_exec/loop tasks under the CLIMode mutex: no ISR, no DMA, no spinlock
+// (this file has zero portENTER_CRITICAL), not reached during a flash op.
+// Credential audit 2026-08-19: wifiadd/useradd/login never route through
+// cliRequestConfirm, so no password/PSK/token lands here. The one residue is
+// `ringquery raw` SET text in originatingCmd — the same bytes already go to
+// the plaintext on-flash audit log, so PSRAM adds no exposure that did not
+// already exist. Keep that true: do not start confirming credential commands.
+//
+// EXT_RAM_BSS_ATTR forces .bss, so the initializer below must be all-zero —
+// a non-zero default would be SILENTLY dropped with no linker diagnostic.
+// The static_assert after the definition guards the one non-literal member.
+EXT_RAM_BSS_ATTR static struct {
   enum Resolution : uint8_t {
     None,
     Confirmed,
@@ -39,6 +52,9 @@ static struct {
   int requiredRoleRank;
 } sConfirm = { decltype(sConfirm)::None, nullptr, nullptr, nullptr, nullptr, 0,
                "", "", "", kRoleRankGuest };
+static_assert(kRoleRankGuest == 0,
+              "sConfirm is EXT_RAM_BSS (zero-initialised); a non-zero "
+              "kRoleRankGuest default would be silently lost");
 
 static void confirm_onEnter(void* /*userData*/) {
   // The initiating handler returns responseText through the normal addressed

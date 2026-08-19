@@ -419,7 +419,12 @@ static bool sDiscardingLine = false;         // true = swallow bytes until the n
 // lap, so one fixed callback buffer is safe. It is deliberately separate from
 // System_Cm5HostControl's cmd_exec reply buffer: direct machine callbacks may
 // arrive while cmd_exec is serving another transport.
-static char sUartControlReply[256];
+// Lives in PSRAM: filled by the control-plane intrinsics (snprintf, all
+// outside their spinlocks) and read by strlcpy/strncmp on the loop task.
+// Never handed to the UART driver — uartWriteLineForTransportSession copies
+// it into its own internal line buffer first. Carries usernames, never
+// passwords or tokens (verified 2026-08-19).
+EXT_RAM_BSS_ATTR static char sUartControlReply[256];
 
 // Deferred lifecycle request. Command handlers run on cmd_exec_task, which
 // ticks concurrently with the loop task that owns the drain — calling
@@ -514,6 +519,12 @@ static bool uartWriteLineForTransportSession(const char* s,
   // This helper is loop-task-only (all call sites are in uartProcessLine), so
   // fixed storage avoids putting a worst-case fan-report/usage reply on the
   // loop stack while preserving the one-write, non-interleaving guarantee.
+  //
+  // Stays in internal DRAM on purpose: this buffer IS the uart_write_bytes()
+  // source, which esp_ringbuf memcpys into the driver ring inside its spinlock
+  // (interrupts masked on the writing core). Same decision as sFrameWire below
+  // — PSRAM there is correct but adds interrupt latency per reply line, for
+  // 258 B. Not worth it. (Reviewed 2026-08-19.)
   static char buf[sizeof(sUartControlReply) + 2];
   size_t n = strlcpy(buf, s, sizeof(buf) - 1);
   if (n > sizeof(buf) - 2) n = sizeof(buf) - 2;
@@ -649,7 +660,7 @@ void uartLinkInitFromSettings() {
 }
 
 const char* uartLinkStatusLine() {
-  static char buf[384];
+  EXT_RAM_BSS_ATTR static char buf[384];  // PSRAM: cmd_exec-only, copied into the executor's result String
   char sessionUser[kUartSessionUserMax + 1];
   const bool sessionAuthed = uartLinkSessionSnapshot(
       sessionUser, sizeof(sessionUser));
@@ -1207,7 +1218,16 @@ static size_t uartCobsEncode(const uint8_t* src, size_t len, uint8_t* dst) {
 // Frame assembly buffers. Static (not stack): body+encoded is ~2.2KB, too
 // heavy for cmd_exec/producer stacks. Guarded by the TX mutex — the frame is
 // built AND written under one hold so two producers can't corrupt the scratch.
-static uint8_t sFrameBody[5 + UARTLINK_FRAME_MAX_PAYLOAD + 2];
+// sFrameBody lives in PSRAM: it is read/written only by flash-resident CPU code
+// under the TX mutex, never inside a spinlock, never handed to the UART driver
+// (it is CRC'd and COBS-encoded into sFrameWire first). Verified 2026-08-19.
+//
+// sFrameWire deliberately STAYS internal. uart_write_bytes() memcpys it into
+// the driver ring inside the esp_ringbuf spinlock — interrupts masked on the
+// writing core — in <=1 KB chunks. A PSRAM source there is correct but
+// lengthens worst-case interrupt latency on core 0 during voicefetch, and this
+// link is already marginal. ~1 KB is not worth that.
+EXT_RAM_BSS_ATTR static uint8_t sFrameBody[5 + UARTLINK_FRAME_MAX_PAYLOAD + 2];
 static uint8_t sFrameWire[2 + sizeof(sFrameBody) + sizeof(sFrameBody) / 254 + 2];
 
 static bool uartLinkWriteFrameWithWait(uint8_t type, uint16_t seq,

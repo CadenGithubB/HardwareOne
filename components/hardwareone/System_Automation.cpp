@@ -3925,14 +3925,19 @@ static bool automationEventTriggersMatch(const char* automationJson, const Syste
 // gSettings.automationEnabled, so a disabled device never runs a tick and
 // never pays for this.
 //
-// INTERNAL, not PSRAM, for two independent reasons. systemEventFetchSince fills
-// this buffer from inside taskENTER_CRITICAL(&gEventMux): a PSRAM destination
-// would put ~7.9 KB of cache-missing writes under a global spinlock with
-// interrupts off, stalling every systemEventPost on both cores. And the events
-// themselves are not safe to externalise — SYSEVT_REMOTE_CMD_RX carries the raw
-// remote command text in detail[], so a `login <user> <pass>` arriving over
-// ESP-NOW/MQTT would land in plaintext on a probeable chip (flash encryption is
-// off).
+// INTERNAL, not PSRAM — but for a weaker reason than this comment used to
+// claim, so the history matters (updated 2026-08-19):
+//  * The old reason 1 ("fetch fills this under taskENTER_CRITICAL") is GONE:
+//    systemEventFetchSince is now chunked at 4 slots per lock hold and the
+//    ring itself lives in PSRAM (see System_Events.cpp).
+//  * The old reason 2 ("login <user> <pass> lands here in plaintext") has been
+//    FALSE since 7e347401: both SYSEVT_REMOTE_CMD_RX posters run detail through
+//    redactCmdForAudit before posting, so credentials are masked at the source.
+// What remains: this is a 7.9 KB drain buffer written 48 slots at a time on the
+// loop task; keeping it INTERNAL keeps the automation minute-tick off the PSRAM
+// bus for no structural reason other than cheap latency margin. Moving it to
+// ps_alloc(PreferPSRAM) is now a legitimate future option if internal DRAM gets
+// tight again — nothing blocks it anymore.
 //
 // Deliberately never freed. cmd_automation flips automationEnabled from the
 // command tasks (cmd_exec/web, core 0) while a tick may be mid-scan on the loop

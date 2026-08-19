@@ -88,6 +88,18 @@ const char* oledEspNowHeaderTitle() {
   return nullptr;
 }
 
+// Scrub the remote-command form. `= ""` on Arduino String only zeroes the
+// length — the typed bytes stay in the SSO buffer (and remotePassword is a
+// real account password for a peer device). secureClearString overwrites the
+// buffer through a volatile pointer before releasing it, so residue cannot
+// survive in RAM to be exposed by a later memory-disclosure bug. Used on
+// every path that retires the form: send, cancel, open, and (re)init.
+static void oledEspNowScrubRemoteForm() {
+  secureClearString(gOledEspNowState.remoteUsername);
+  secureClearString(gOledEspNowState.remotePassword);
+  secureClearString(gOledEspNowState.remoteCommand);
+}
+
 void oledEspNowInit() {
   gOledEspNowState.currentView = ESPNOW_VIEW_MAIN_MENU;
   gOledEspNowState.interactionMode = ESPNOW_MODE_TEXT;
@@ -104,9 +116,7 @@ void oledEspNowInit() {
   
   // Remote mode state
   gOledEspNowState.remoteFormField = 0;
-  gOledEspNowState.remoteUsername = "";
-  gOledEspNowState.remotePassword = "";
-  gOledEspNowState.remoteCommand = "";
+  oledEspNowScrubRemoteForm();
   
   // Initialize scrolling lists
   oledScrollInit(&gOledEspNowState.deviceList, "ESP-NOW Devices", 3);
@@ -1220,9 +1230,7 @@ bool oledEspNowHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
         if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
           gOledEspNowState.currentView = ESPNOW_VIEW_REMOTE_FORM;
           gOledEspNowState.remoteFormField = 0;
-          gOledEspNowState.remoteUsername = "";
-          gOledEspNowState.remotePassword = "";
-          gOledEspNowState.remoteCommand = "";
+          oledEspNowScrubRemoteForm();
           return true;
         }
         
@@ -1829,8 +1837,10 @@ bool oledEspNowHandleRemoteFormInput(int deltaX, int deltaY, uint32_t newlyPress
     return true;
   }
   
-  // B button: Cancel form
+  // B button: Cancel form. Scrub, don't just leave: before this fix a
+  // cancelled form kept the typed password in the struct until the next open.
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_B)) {
+    oledEspNowScrubRemoteForm();
     gOledEspNowState.currentView = ESPNOW_VIEW_DEVICE_DETAIL;
     return true;
   }
@@ -1904,11 +1914,15 @@ void oledEspNowSendRemoteCommand() {
            gOledEspNowState.remotePassword.c_str(),
            gOledEspNowState.remoteCommand.c_str());
   executeOLEDCommand(cmdBuf);
-  
-  // Clear form
-  gOledEspNowState.remoteUsername = "";
-  gOledEspNowState.remotePassword = "";
-  gOledEspNowState.remoteCommand = "";
+
+  // Scrub the stack copy too — cmdBuf holds the full "espnowremote ... <pass>"
+  // line in plaintext. Volatile so the optimizer can't elide a memset on a
+  // buffer it thinks is dead.
+  volatile char* vcmd = cmdBuf;
+  for (size_t i = 0; i < sizeof(cmdBuf); i++) vcmd[i] = 0;
+
+  // Clear form (scrubbing, not just truncating)
+  oledEspNowScrubRemoteForm();
   
   // Refresh message list
   gOledEspNowState.needsRefresh = true;

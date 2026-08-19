@@ -198,9 +198,13 @@ static int fbBuildActionRows(const char* labels[4]) {
   return n;
 }
 
-// Pre-rendered file browser data to avoid filesystem I/O inside I2C transaction
-// (struct defined in System_FileManager.h)
-FileBrowserRenderData fileBrowserRenderData = {0};  // Non-static so footer can access it
+// Pre-rendered file browser snapshot (struct defined in System_FileManager.h).
+// Filled by prepareFileBrowserData() — the only place FS I/O runs — and read by
+// displayFileBrowserRendered() + the OLED_Utils.cpp footer, all on the OLED
+// owner task doing CPU-side framebuffer drawing (the I2C push is displayUpdate(),
+// after the footer). Display metadata only: path + 4 FileEntry name/size/flags —
+// never a write-path buffer, never secrets — so it lives in PSRAM (452 B).
+EXT_RAM_BSS_ATTR FileBrowserRenderData fileBrowserRenderData = {0};  // Non-static so footer can access it
 
 // Button/navigation state
 static unsigned long oledFileBrowserLastInput = 0;

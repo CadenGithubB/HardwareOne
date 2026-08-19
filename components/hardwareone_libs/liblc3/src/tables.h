@@ -97,11 +97,11 @@ struct lc3_fft_bf3_twiddles { int n3; const struct lc3_complex (*t)[2]; };
 struct lc3_fft_bf2_twiddles { int n2; const struct lc3_complex *t; };
 struct lc3_mdct_rot_def { int n4; const struct lc3_complex *w; };
 
-extern const struct lc3_fft_bf3_twiddles *lc3_fft_twiddles_bf3[];
-extern const struct lc3_fft_bf2_twiddles *lc3_fft_twiddles_bf2[][3];
-extern const struct lc3_mdct_rot_def *lc3_mdct_rot[LC3_NUM_DT][LC3_NUM_SRATE];
+extern const struct lc3_fft_bf3_twiddles * const lc3_fft_twiddles_bf3[];
+extern const struct lc3_fft_bf2_twiddles * const lc3_fft_twiddles_bf2[][3];
+extern const struct lc3_mdct_rot_def * const lc3_mdct_rot[LC3_NUM_DT][LC3_NUM_SRATE];
 
-extern const float *lc3_mdct_win[LC3_NUM_DT][LC3_NUM_SRATE];
+extern const float * const lc3_mdct_win[LC3_NUM_DT][LC3_NUM_SRATE];
 
 
 /**
@@ -111,7 +111,7 @@ extern const float *lc3_mdct_win[LC3_NUM_DT][LC3_NUM_SRATE];
 #define LC3_MAX_BANDS  64
 
 extern const int lc3_num_bands[LC3_NUM_DT][LC3_NUM_SRATE];
-extern const int *lc3_band_lim[LC3_NUM_DT][LC3_NUM_SRATE];
+extern const int * const lc3_band_lim[LC3_NUM_DT][LC3_NUM_SRATE];
 
 
 /**
@@ -145,8 +145,8 @@ extern const uint16_t lc3_tns_coeffs_bits[][17];
  * Long Term Postfilter
  */
 
-extern const float *lc3_ltpf_cnum[LC3_NUM_SRATE][4];
-extern const float *lc3_ltpf_cden[LC3_NUM_SRATE][4];
+extern const float * const lc3_ltpf_cnum[LC3_NUM_SRATE][4];
+extern const float * const lc3_ltpf_cden[LC3_NUM_SRATE][4];
 
 
 /**
